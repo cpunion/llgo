@@ -64,14 +64,20 @@ jobs:
       
       - name: LLGO tests
         run: |
-          export LLGOROOT=$PWD
-          bash _test/run.sh
+          echo "Test result on ${{ matrix.os }} with LLVM ${{ matrix.llvm }}" > result.md
+          bash .github/workflows/test_llgo.sh
       
       - name: Test _demo and _pydemo
         run: |
           set +e
           bash .github/workflows/test_demo.sh
           exit 0
+
+      - name: PR comment with test result
+        uses: thollander/actions-comment-pull-request@v2
+        with:
+          filePath: result.md
+          comment_tag: test-result-on-${{ matrix.os }}-with-llvm-${{ matrix.llvm }}
 
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v4
