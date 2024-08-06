@@ -28,10 +28,6 @@ import (
 )
 
 const (
-	LLGoPackage = "decl"
-)
-
-const (
 	PATH_MAX = C.PATH_MAX
 )
 
@@ -149,9 +145,6 @@ func Putenv(env *c.Char) c.Int
 
 //go:linkname Unsetenv C.unsetenv
 func Unsetenv(name *c.Char) c.Int
-
-//go:linkname Clearenv C.clearenv
-func Clearenv()
 
 // -----------------------------------------------------------------------------
 
