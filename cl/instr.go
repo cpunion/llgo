@@ -244,6 +244,7 @@ var llgoInstrs = map[string]int{
 	"coDone":    int(llgoCoDone),
 	"coReturn":  int(llgoCoReturn),
 	"coYield":   int(llgoCoYield),
+	"coAsync":   int(llgoCoAsync),
 	"coRun":     int(llgoCoRun),
 }
 
@@ -411,6 +412,8 @@ func (p *context) call(b llssa.Builder, act llssa.DoAction, call *ssa.CallCommon
 			p.coReturn(b, cv, args)
 		case llgoCoYield:
 			p.coYield(b, cv, args)
+		case llgoCoAsync:
+			ret = p.coAsync(b, cv, args)
 		case llgoCoRun:
 			p.coRun(b, args)
 		default:

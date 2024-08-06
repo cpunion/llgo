@@ -419,7 +419,8 @@ const (
 	llgoCoResume  = llgoCoBase + 3
 	llgoCoReturn  = llgoCoBase + 4
 	llgoCoYield   = llgoCoBase + 5
-	llgoCoRun     = llgoCoBase + 6
+	llgoCoAsync   = llgoCoBase + 6
+	llgoCoRun     = llgoCoBase + 7
 
 	llgoAtomicOpLast = llgoCoRun
 )

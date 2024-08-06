@@ -651,6 +651,13 @@ func (b Builder) CoYield(setValueFn Function, value Expr, final Expr) {
 	b.CoSuspend(b.AsyncToken(), final, nil)
 }
 
+func (b Builder) CoAsync(asyncRunFn Function, fnArg Expr) Expr {
+	if !b.async {
+		panic(fmt.Errorf("async %v not in async block", b.Func.Name()))
+	}
+	return b.Call(asyncRunFn.Expr, fnArg)
+}
+
 /*
 // declare token @llvm.coro.save(ptr <handle>)
 func (b Builder) CoSave(hdl Expr) Expr {

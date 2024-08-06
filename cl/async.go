@@ -85,33 +85,39 @@ func (p *context) coResume(b llssa.Builder, args []ssa.Value) {
 	}
 }
 
-func (p *context) getSetValueFunc(fn *ssa.Function) llssa.Function {
+func (p *context) getShadowFunc(fn *ssa.Function, name string) llssa.Function {
 	typ := fn.Signature.Recv().Type()
 	mthds := p.goProg.MethodSets.MethodSet(typ)
 	for i := 0; i < mthds.Len(); i++ {
 		m := mthds.At(i)
 		if ssaMthd := p.goProg.MethodValue(m); ssaMthd != nil {
-			if ssaMthd.Name() == "setValue" || strings.HasPrefix(ssaMthd.Name(), "setValue[") {
+			if ssaMthd.Name() == name || strings.HasPrefix(ssaMthd.Name(), name+"[") {
 				setValueFn, _, _ := p.compileFunction(ssaMthd)
 				return setValueFn
 			}
 		}
 	}
-	panic("method setValue not found on type " + typ.String())
+	panic("method " + name + " not found on type " + typ.String())
 }
 
 func (p *context) coReturn(b llssa.Builder, fn *ssa.Function, args []ssa.Value) {
-	setValueFn := p.getSetValueFunc(fn)
+	setValueFn := p.getShadowFunc(fn, "setValue")
 	value := p.compileValue(b, args[1])
 	b.CoReturn(setValueFn, value)
 }
 
 func (p *context) coYield(b llssa.Builder, fn *ssa.Function, args []ssa.Value) {
-	setValueFn := p.getSetValueFunc(fn)
+	setValueFn := p.getShadowFunc(fn, "setValue")
 	value := p.compileValue(b, args[1])
 	// TODO(lijie): find whether the co.Yield/co.Return is the last instruction
 	final := b.Const(constant.MakeBool(false), b.Prog.Bool())
 	b.CoYield(setValueFn, value, final)
+}
+
+func (p *context) coAsync(b llssa.Builder, fn *ssa.Function, args []ssa.Value) llssa.Expr {
+	asyncRunFn := p.getShadowFunc(fn, "asyncRun")
+	fnArg := p.compileValue(b, args[1])
+	return b.CoAsync(asyncRunFn, fnArg)
 }
 
 func (p *context) coRun(b llssa.Builder, args []ssa.Value) {

@@ -31,7 +31,30 @@ type Void = [0]byte
 
 type Promise[TOut any] struct {
 	hdl   unsafe.Pointer
+	e     *executor
 	value TOut
+}
+
+// coAsync instruction injects a valid Promise object and then calls promise.asyncRun(...).
+// llgo:link (*Promise).Async llgo.coAsync
+func (p *Promise[TOut]) Async(fn func(resolve func(TOut))) *Promise[TOut] {
+	panic("should not executed")
+}
+
+// call by llgo.coAsync
+func (p *Promise[TOut]) asyncRun(fn func(resolve func(TOut))) *Promise[TOut] {
+	a := p.e.loop.NewAsync(func() {
+		p.Resume()
+	})
+	fn(func(v TOut) {
+		p.setValue(v)
+		err := a.Send()
+		if err != nil {
+			panic(err)
+		}
+	})
+	p.Suspend()
+	return p
 }
 
 // // llgo:link (*Promise).Await llgo.coAwait
@@ -47,6 +70,11 @@ func (p *Promise[TOut]) Return(v TOut) {
 // llgo:link (*Promise).Yield llgo.coYield
 func (p *Promise[TOut]) Yield(v TOut) {}
 
+// call by llgo.coYield
+func (p *Promise[TOut]) setValue(v TOut) {
+	p.value = v
+}
+
 // llgo:link (*Promise).Suspend llgo.coSuspend
 func (p *Promise[TOut]) Suspend() {}
 
@@ -58,12 +86,6 @@ func (p *Promise[TOut]) Next() {
 	coResume(p.hdl)
 }
 
-// TODO(lijie): should merge to Yield()
-// call by llgo.coYield
-func (p *Promise[TOut]) setValue(v TOut) {
-	p.value = v
-}
-
 func (p *Promise[TOut]) Value() TOut {
 	return p.value
 }
@@ -72,6 +94,7 @@ func (p *Promise[TOut]) Done() bool {
 	return coDone(p.hdl) != 0
 }
 
-func Run[TOut any](f func() TOut) TOut {
-	panic("should not executed")
+func Run(fn func()) {
+	e := NewExecutor()
+	e.Run(fn)
 }
