@@ -33,6 +33,24 @@ void wrap_clang_getCursorType(CXCursor *cur, CXType *typ) { *typ = clang_getCurs
 
 void wrap_clang_getCursorResultType(CXCursor *cur, CXType *typ) { *typ = clang_getCursorResultType(*cur); }
 
+void wrap_clang_getResultType(CXType *typ, CXType *resultTyp) { *resultTyp = clang_getResultType(*typ); }
+
+int wrap_clang_getNumArgTypes(CXType *typ) { return clang_getNumArgTypes(*typ); }
+
+void wrap_clang_getArgType(CXType *typ, unsigned i, CXType *argTyp) { *argTyp = clang_getArgType(*typ, i); }
+
+long long wrap_clang_getEnumConstantDeclValue(CXCursor *cur) { return clang_getEnumConstantDeclValue(*cur); }
+
+void wrap_clang_getPointeeType(CXType *pointerTyp, CXType *pointeeTyp) {
+    *pointeeTyp = clang_getPointeeType(*pointerTyp);
+}
+
+void wrap_clang_getArrayElementType(CXType *arrayTyp, CXType *elemTyp) {
+    *elemTyp = clang_getArrayElementType(*arrayTyp);
+}
+
+void wrap_clang_getCanonicalType(CXType *typ, CXType *canonicalType) { *canonicalType = clang_getCanonicalType(*typ); }
+
 CXString wrap_clang_getTypeSpelling(CXType *typ) { return clang_getTypeSpelling(*typ); }
 
 CXString wrap_clang_getTokenSpelling(CXTranslationUnit unit, CXToken *token) {

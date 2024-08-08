@@ -1322,6 +1322,14 @@ type Cursor struct {
 type TypeKind c.Int
 
 /**
+ * Retrieve the spelling of a given CXTypeKind.
+ */
+// llgo:link TypeKind.String C.clang_getTypeKindSpelling
+func (TypeKind) String() (ret String) {
+	return
+}
+
+/**
  * Describes the kind of type
  */
 const (
@@ -1601,6 +1609,22 @@ func (c Cursor) ResultType() (ret Type) {
 }
 
 /**
+ * Retrieve the integer value of an enum constant declaration as a signed
+ *  long long.
+ *
+ * If the cursor does not reference an enum constant declaration, LLONG_MIN is
+ * returned. Since this is also potentially a valid constant value, the kind of
+ * the cursor must be verified before calling this function.
+ */
+// llgo:link (*Cursor).wrapEnumConstantDeclValue C.wrap_clang_getEnumConstantDeclValue
+func (*Cursor) wrapEnumConstantDeclValue() (ret c.LongLong) {
+	return 0
+}
+func (c Cursor) EnumConstantDeclValue() (ret c.LongLong) {
+	return c.wrapEnumConstantDeclValue()
+}
+
+/**
  * Retrieve the number of non-variadic arguments associated with a given
  * cursor.
  *
@@ -1778,6 +1802,87 @@ func (t *Type) wrapString() (ret String) {
 
 func (t Type) String() (ret String) {
 	return t.wrapString()
+}
+
+/**
+ * Retrieve the return type associated with a function type.
+ *
+ * If a non-function type is passed in, an invalid type is returned.
+ */
+// llgo:link (*Type).wrapResultType C.wrap_clang_getResultType
+func (t *Type) wrapResultType(ret *Type) { return }
+
+func (t Type) ResultType() (ret Type) {
+	t.wrapResultType(&ret)
+	return
+}
+
+/**
+ * Retrieve the number of non-variadic parameters associated with a
+ * function type.
+ *
+ * If a non-function type is passed in, -1 is returned.
+ */
+// llgo:link (*Type).wrapNumArgTypes C.wrap_clang_getNumArgTypes
+func (t *Type) wrapNumArgTypes() (num c.Int) { return 0 }
+
+func (t Type) NumArgTypes() (num c.Int) {
+	return t.wrapNumArgTypes()
+}
+
+// void wrap_clang_getArgType(CXType *typ, unsigned i, CXType *argTyp) { *argTyp = clang_getArgType(*typ, i); }
+/**
+ * Retrieve the type of a parameter of a function type.
+ *
+ * If a non-function type is passed in or the function does not have enough
+ * parameters, an invalid type is returned.
+ */
+// llgo:link (*Type).wrapArgType C.wrap_clang_getArgType
+func (t *Type) wrapArgType(index c.Uint, argTyp *Type) { return }
+
+func (t Type) ArgType(index c.Uint) (ret Type) {
+	t.wrapArgType(index, &ret)
+	return
+}
+
+/**
+ * For pointer types, returns the type of the pointee.
+ */
+// llgo:link (*Type).wrapPointeeType C.wrap_clang_getPointeeType
+func (t *Type) wrapPointeeType(ret *Type) { return }
+
+func (t Type) PointeeType() (ret Type) {
+	t.wrapPointeeType(&ret)
+	return
+}
+
+/**
+ * Return the element type of an array type.
+ *
+ * If a non-array type is passed in, an invalid type is returned.
+ */
+// llgo:link (*Type).wrapArrayElementType C.wrap_clang_getArrayElementType
+func (t *Type) wrapArrayElementType(ret *Type) { return }
+
+func (t Type) ArrayElementType() (ret Type) {
+	t.wrapArrayElementType(&ret)
+	return
+}
+
+/**
+ * Return the canonical type for a CXType.
+ *
+ * Clang's type system explicitly models typedefs and all the ways
+ * a specific type can be represented.  The canonical type is the underlying
+ * type with all the "sugar" removed.  For example, if 'T' is a typedef
+ * for 'int', the canonical type for 'T' would be 'int'.
+ */
+// llgo:link (*Type).wrapCanonicalType C.wrap_clang_getCanonicalType
+func (t *Type) wrapCanonicalType(ret *Type) { return }
+
+func (t Type) CanonicalType() (ret Type) {
+	t.wrapCanonicalType(&ret)
+	return
 }
 
 //llgo:link File.FileName C.clang_getFileName

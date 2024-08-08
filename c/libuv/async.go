@@ -17,45 +17,34 @@
 package libuv
 
 import (
-	"fmt"
 	_ "unsafe"
 
 	"github.com/goplus/llgo/c"
 )
 
+// struct uv_async_t
 type Async struct {
-	// TODO(lijie): replace with precise size.
-	Unused [512]byte
-}
-
-func (l *Loop) NewAsync(cb func()) *Async {
-	a := &Async{}
-	r := asyncInit(l, a, func(*Async) {
-		cb()
-	})
-	if r != 0 {
-		panic("uv_async_init failed")
-	}
-	return a
-}
-
-func (a *Async) Send() error {
-	if asyncSend(a) != 0 {
-		return fmt.Errorf("uv_async_send failed")
-	}
-	return nil
+	Handle
+	// On macOS arm64, sizeof uv_async_t is 128 bytes.
+	// Handle is 92 bytes, so we need 36 bytes to fill the gap.
+	// Maybe reserve more for future use.
+	Unused [36]byte
 }
 
 // typedef void (*uv_async_cb)(uv_async_t* handle);
 // llgo:type C
-type asyncCallback func(*Async)
+type AsyncCb func(*Async)
 
 // int uv_async_init(uv_loop_t*, uv_async_t* async, uv_async_cb async_cb);
 //
-//go:linkname asyncInit C.uv_async_init
-func asyncInit(loop *Loop, a *Async, cb asyncCallback) c.Int
+// llgo:link (*Loop).Async C.uv_async_init
+func (loop *Loop) Async(a *Async, cb AsyncCb) c.Int {
+	return 0
+}
 
 // int uv_async_send(uv_async_t* async);
 //
-//go:linkname asyncSend C.uv_async_send
-func asyncSend(a *Async) c.Int
+// llgo:link (*Async).Send C.uv_async_send
+func (a *Async) Send() c.Int {
+	return 0
+}
