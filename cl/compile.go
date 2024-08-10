@@ -98,8 +98,9 @@ type context struct {
 	patches  Patches
 	blkInfos []blocks.Info
 
-	inits []func()
-	phis  []func()
+	inits     []func()
+	phis      []func()
+	initAfter func()
 
 	state   pkgState
 	inCFunc bool
@@ -308,9 +309,9 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 			instrs = instrs[:last]
 		} else if p.state != pkgHasPatch {
 			// TODO(xsw): confirm pyMod don't need to call AfterInit
-			p.inits = append(p.inits, func() {
+			p.initAfter = func() {
 				pkg.AfterInit(b, ret)
-			})
+			}
 		}
 	} else if doMainInit {
 		argc := pkg.NewVar("__llgo_argc", types.NewPointer(types.Typ[types.Int32]), llssa.InC)
@@ -620,6 +621,10 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			}
 		}
 		ret = b.Select(states, v.Blocking)
+	case *ssa.SliceToArrayPointer:
+		t := b.Prog.Type(v.Type(), llssa.InGo)
+		x := p.compileValue(b, v.X)
+		ret = b.SliceToArrayPointer(x, t)
 	default:
 		panic(fmt.Sprintf("compileInstrAndValue: unknown instr - %T\n", iv))
 	}
@@ -856,6 +861,10 @@ func NewPackageEx(prog llssa.Program, patches Patches, pkg *ssa.Package, files [
 		for _, ini := range inits {
 			ini()
 		}
+	}
+	if fn := ctx.initAfter; fn != nil {
+		ctx.initAfter = nil
+		fn()
 	}
 	return
 }
