@@ -17,6 +17,7 @@
 package async
 
 import (
+	"fmt"
 	"unsafe"
 
 	"github.com/goplus/llgo/c/libuv"
@@ -46,16 +47,27 @@ func NewExecutor() *executor {
 }
 
 func (e *executor) Async(fn func()) func() {
-	a := e.loop.NewAsync(fn)
+	a := &async{cb: fn}
+	r := e.loop.Async(&a.Async, func(pa *libuv.Async) {
+		a := (*async)(unsafe.Pointer(pa))
+		a.Close(nil)
+		a.cb()
+	})
+	if r != 0 {
+		panic("Async failed")
+	}
 	return func() {
-		a.Send()
+		if r := a.Send(); r != 0 {
+			panic("Send failed")
+		}
 	}
 }
 
-func (e *executor) Run(fn func()) {
+func (e *executor) Run(fn func() promise) {
 	setExecutor(e)
 	fn()
-	if libuv.Run(e.loop, libuv.RUN_DEFAULT) != 0 {
+	if e.loop.Run(libuv.RUN_DEFAULT) != 0 {
 		panic("libuv.Run failed")
 	}
+	fmt.Println("====== after libuv.Run")
 }

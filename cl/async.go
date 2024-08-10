@@ -19,6 +19,7 @@ package cl
 import (
 	"go/constant"
 	"go/types"
+	"log"
 	"strings"
 
 	llssa "github.com/goplus/llgo/ssa"
@@ -54,16 +55,13 @@ func isAsyncFunc(sig *types.Signature) bool {
 	return ok
 }
 
-func (p *context) coAwait(b llssa.Builder, args []ssa.Value) llssa.Expr {
+func (p *context) coAwait(b llssa.Builder, fn *ssa.Function, args []ssa.Value) llssa.Expr {
 	if !isAsyncFunc(b.Func.RawType().(*types.Signature)) {
-		panic("coAwait(promise *T) T: invalid context")
+		log.Fatalf("coAwait(promise *T) T: invalid context %v, %v", b.Func.Name(), b.Func.RawType())
 	}
-	if len(args) == 1 {
-		// promise := p.compileValue(b, args[0])
-		b.Unreachable()
-		// return b.CoroutineAwait(promise)
-	}
-	panic("coAwait(promise *T) T: invalid arguments")
+	afterAwaitFn := p.getShadowFunc(fn, "afterAwait")
+	awaitPromise := p.compileValue(b, args[0])
+	return b.CoAwait(afterAwaitFn, awaitPromise)
 }
 
 func (p *context) coSuspend(b llssa.Builder, final llssa.Expr) {
@@ -92,8 +90,8 @@ func (p *context) getShadowFunc(fn *ssa.Function, name string) llssa.Function {
 		m := mthds.At(i)
 		if ssaMthd := p.goProg.MethodValue(m); ssaMthd != nil {
 			if ssaMthd.Name() == name || strings.HasPrefix(ssaMthd.Name(), name+"[") {
-				setValueFn, _, _ := p.compileFunction(ssaMthd)
-				return setValueFn
+				fn, _, _ := p.compileFunction(ssaMthd)
+				return fn
 			}
 		}
 	}
@@ -115,9 +113,9 @@ func (p *context) coYield(b llssa.Builder, fn *ssa.Function, args []ssa.Value) {
 }
 
 func (p *context) coAsync(b llssa.Builder, fn *ssa.Function, args []ssa.Value) llssa.Expr {
-	asyncRunFn := p.getShadowFunc(fn, "asyncRun")
+	asyncFn := p.getShadowFunc(fn, "async")
 	fnArg := p.compileValue(b, args[1])
-	return b.CoAsync(asyncRunFn, fnArg)
+	return b.CoAsync(asyncFn, fnArg)
 }
 
 func (p *context) coRun(b llssa.Builder, args []ssa.Value) {

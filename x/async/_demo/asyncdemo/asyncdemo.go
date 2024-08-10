@@ -36,7 +36,7 @@ type Response struct {
 	Body string
 }
 
-func (r *Response) Text() (co async.Promise[tuple.Tuple2[string, error]]) {
+func (r *Response) Text() (co *async.Promise[tuple.Tuple2[string, error]]) {
 	co.Return(tuple.Tuple2[string, error]{V1: r.Body, V2: nil})
 	return
 }
@@ -46,7 +46,7 @@ func (r *Response) Text() (co async.Promise[tuple.Tuple2[string, error]]) {
 //	    return resp, err
 //	  })
 //	}
-func AsyncHttpGet(url string) (co async.Promise[tuple.Tuple2[*Response, error]]) {
+func AsyncHttpGet(url string) (co *async.Promise[tuple.Tuple2[*Response, error]]) {
 	return co.Async(func(resolve func(tuple.Tuple2[*Response, error])) {
 		http("GET", url, func(resp *Response, err error) {
 			resolve(tuple.Tuple2[*Response, error]{V1: resp, V2: nil})
@@ -54,7 +54,7 @@ func AsyncHttpGet(url string) (co async.Promise[tuple.Tuple2[*Response, error]])
 	})
 }
 
-func AsyncHttpPost(url string) (co async.Promise[tuple.Tuple2[*Response, error]]) {
+func AsyncHttpPost(url string) (co *async.Promise[tuple.Tuple2[*Response, error]]) {
 	http("POST", url, func(resp *Response, err error) {
 		// co.Return(tuple.Tuple2[*Response, error]{V1: resp, V2: nil})
 	})
@@ -68,7 +68,7 @@ type User struct {
 	Name string
 }
 
-func GetUser(name string) (co async.Promise[tuple.Tuple2[User, error]]) {
+func GetUser(name string) (co *async.Promise[tuple.Tuple2[User, error]]) {
 	resp, err := AsyncHttpGet("http://example.com/user/" + name).Await().Values()
 	if err != nil {
 		// return User{}, err

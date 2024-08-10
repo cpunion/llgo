@@ -401,7 +401,7 @@ func (p *context) call(b llssa.Builder, act llssa.DoAction, call *ssa.CallCommon
 		case llgoUnreachable: // func unreachable()
 			b.Unreachable()
 		case llgoCoAwait:
-			ret = p.coAwait(b, args)
+			ret = p.coAwait(b, cv, args)
 		case llgoCoSuspend:
 			p.coSuspend(b, p.prog.BoolVal(false))
 		case llgoCoDone:

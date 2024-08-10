@@ -651,11 +651,20 @@ func (b Builder) CoYield(setValueFn Function, value Expr, final Expr) {
 	b.CoSuspend(b.AsyncToken(), final, nil)
 }
 
-func (b Builder) CoAsync(asyncRunFn Function, fnArg Expr) Expr {
+func (b Builder) CoAsync(asyncFn Function, fnArg Expr) Expr {
 	if !b.async {
 		panic(fmt.Errorf("async %v not in async block", b.Func.Name()))
 	}
-	return b.Call(asyncRunFn.Expr, fnArg)
+	b.Call(asyncFn.Expr, b.promise, fnArg)
+	return b.promise
+}
+
+func (b Builder) CoAwait(afterAwaitFn Function, awaitPromise Expr) Expr {
+	if !b.async {
+		panic(fmt.Errorf("await in function %v not in async block", b.Func.Name()))
+	}
+	// b.CoSuspend(b.asyncToken, b.Prog.BoolVal(false), nil)
+	return b.Call(afterAwaitFn.Expr, awaitPromise)
 }
 
 /*
