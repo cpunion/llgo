@@ -19,12 +19,14 @@ package os
 // llgo:skipall
 import (
 	"errors"
+	"io/fs"
 	"runtime"
 	"syscall"
 	_ "unsafe"
 
 	"github.com/goplus/llgo/c"
 	"github.com/goplus/llgo/c/os"
+	sys "github.com/goplus/llgo/c/syscall"
 )
 
 const (
@@ -49,7 +51,8 @@ func (e *LinkError) Unwrap() error {
 }
 
 func toMode(mode FileMode) os.ModeT {
-	panic("todo: toMode")
+	unixMode := fileModeToUnixMode(mode) << 16
+	return os.ModeT(unixMode)
 }
 
 func toPathErr(op, path string, errno c.Int) error {
@@ -271,8 +274,6 @@ func Mkdir(name string, perm FileMode) error {
 */
 
 // TODO(xsw):
-// func MkdirAll(path string, perm FileMode) error
-// func MkdirTemp(dir, pattern string) (string, error)
 // func NewSyscallError(syscall string, err error) error
 
 // func ReadFile(name string) ([]byte, error)
@@ -326,9 +327,6 @@ func Symlink(oldname, newname string) error {
 	}
 	return &LinkError{"symlink", oldname, newname, syscall.Errno(ret)}
 }
-
-// TODO(xsw):
-// func TempDir() string
 
 func Truncate(name string, size int64) error {
 	ret := os.Truncate(c.AllocaCStr(name), os.OffT(size))
@@ -471,3 +469,33 @@ func UserHomeDir() (string, error) {
 
 // TODO(xsw):
 // func WriteFile(name string, data []byte, perm FileMode) error
+
+func fileModeToUnixMode(mode fs.FileMode) uint32 {
+	var m uint32
+	switch mode & fs.ModeType {
+	default:
+		m = sys.S_IFREG
+	case fs.ModeDir:
+		m = sys.S_IFDIR
+	case fs.ModeSymlink:
+		m = sys.S_IFLNK
+	case fs.ModeNamedPipe:
+		m = sys.S_IFIFO
+	case fs.ModeSocket:
+		m = sys.S_IFSOCK
+	case fs.ModeDevice:
+		m = sys.S_IFBLK
+	case fs.ModeDevice | fs.ModeCharDevice:
+		m = sys.S_IFCHR
+	}
+	if mode&fs.ModeSetuid != 0 {
+		m |= sys.S_ISUID
+	}
+	if mode&fs.ModeSetgid != 0 {
+		m |= sys.S_ISGID
+	}
+	if mode&fs.ModeSticky != 0 {
+		m |= sys.S_ISVTX
+	}
+	return m | uint32(mode&0777)
+}

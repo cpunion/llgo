@@ -37,8 +37,8 @@ var Cmd = &base.Command{
 
 // llgo cmptest
 var CmpTestCmd = &base.Command{
-	UsageLine: "llgo cmptest [build flags] package [arguments...]",
-	Short:     "Compile programs by llgo and go, run them and do comparative tests (stdout/stderr/exitcode)",
+	UsageLine: "llgo cmptest [-gen] [build flags] package [arguments...]",
+	Short:     "Compile and run with llgo, compare result (stdout/stderr/exitcode) with go or llgo.expect; generate llgo.expect file if -gen is specified",
 }
 
 func init() {
@@ -54,10 +54,14 @@ func runCmpTest(cmd *base.Command, args []string) {
 	runCmdEx(cmd, args, build.ModeCmpTest)
 }
 
-func runCmdEx(cmd *base.Command, args []string, mode build.Mode) {
+func runCmdEx(_ *base.Command, args []string, mode build.Mode) {
+	conf := build.NewDefaultConf(mode)
+	if mode == build.ModeCmpTest && len(args) > 0 && args[0] == "-gen" {
+		conf.GenExpect = true
+		args = args[1:]
+	}
 	args, runArgs, err := parseRunArgs(args)
 	check(err)
-	conf := build.NewDefaultConf(mode)
 	conf.RunArgs = runArgs
 	build.Do(args, conf)
 }

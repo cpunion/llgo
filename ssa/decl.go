@@ -180,11 +180,11 @@ type Function = *aFunction
 
 // NewFunc creates a new function.
 func (p Package) NewFunc(name string, sig *types.Signature, bg Background) Function {
-	return p.NewFuncEx(name, sig, bg, false, false)
+	return p.NewFuncEx(name, sig, bg, false, false, false)
 }
 
 // NewFuncEx creates a new function.
-func (p Package) NewFuncEx(name string, sig *types.Signature, bg Background, hasFreeVars, async bool) Function {
+func (p Package) NewFuncEx(name string, sig *types.Signature, bg Background, hasFreeVars, instantiated, async bool) Function {
 	if v, ok := p.fns[name]; ok {
 		return v
 	}
@@ -195,6 +195,9 @@ func (p Package) NewFuncEx(name string, sig *types.Signature, bg Background, has
 	fn := llvm.AddFunction(p.mod, name, t.ll)
 	if async {
 		fn.AddFunctionAttr(p.Prog.ctx.CreateStringAttribute("presplitcoroutine", ""))
+	}
+	if instantiated {
+		fn.SetLinkage(llvm.LinkOnceAnyLinkage)
 	}
 	ret := newFunction(fn, t, p, p.Prog, hasFreeVars)
 	p.fns[name] = ret

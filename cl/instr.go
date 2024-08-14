@@ -275,7 +275,7 @@ func (p *context) funcOf(fn *ssa.Function) (aFn llssa.Function, pyFn llssa.PyObj
 			}
 			sig := fn.Signature
 			async := isAsyncFunc(sig)
-			aFn = pkg.NewFuncEx(name, sig, llssa.Background(ftype), false, async)
+			aFn = pkg.NewFuncEx(name, sig, llssa.Background(ftype), false, fn.Origin() != nil, async)
 		}
 	}
 	return
