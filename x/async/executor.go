@@ -40,10 +40,11 @@ func Executor() *executor {
 
 type executor struct {
 	loop *libuv.Loop
+	root promise
 }
 
 func NewExecutor() *executor {
-	return &executor{libuv.LoopNew()}
+	return &executor{loop: libuv.LoopNew(), root: nil}
 }
 
 func (e *executor) Async(fn func()) func() {
@@ -63,11 +64,16 @@ func (e *executor) Async(fn func()) func() {
 	}
 }
 
+func (e *executor) Resume() {
+	println("executor: before Resume", e.root)
+	println("root done:", e.root.Done())
+	e.root.Resume()
+}
+
 func (e *executor) Run(fn func() promise) {
 	setExecutor(e)
-	fn()
-	if e.loop.Run(libuv.RUN_DEFAULT) != 0 {
-		panic("libuv.Run failed")
-	}
+	e.root = fn()
+	println("executor: before libuv.Run")
+	e.loop.Run(libuv.RUN_DEFAULT)
 	fmt.Println("====== after libuv.Run")
 }

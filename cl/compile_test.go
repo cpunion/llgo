@@ -131,8 +131,8 @@ func TestAsyncFunc(t *testing.T) {
 import "github.com/goplus/llgo/x/async"
 
 func GenInts() (co *async.Promise[int]) {
-  co.Yield(1)
-  co.Yield(2)
+  async.Yield(co, 1)
+  async.Yield(co, 2)
   return
 }
 `, `; ModuleID = 'foo'
@@ -141,50 +141,50 @@ source_filename = "foo"
 @"foo.init$guard" = global i1 false, align 1
 
 define ptr @foo.GenInts() presplitcoroutine {
-entry:
+_llgo_0:
   %id = call token @llvm.coro.id(i32 0, ptr null, ptr null, ptr null)
   %frame.size = call i64 @llvm.coro.size.i64()
-  %alloc.size = add i64 16, %frame.size
+  %alloc.size = add i64 24, %frame.size
   %promise = call ptr @"github.com/goplus/llgo/internal/runtime.AllocZ"(i64 %alloc.size)
   %need.dyn.alloc = call i1 @llvm.coro.alloc(token %id)
-  br i1 %need.dyn.alloc, label %alloc, label %_llgo_5
+  br i1 %need.dyn.alloc, label %alloc, label %begin
 
-alloc:                                            ; preds = %entry
-  %0 = getelementptr ptr, ptr %promise, i64 16
-  br label %_llgo_5
+alloc:                                            ; preds = %_llgo_0
+  %0 = getelementptr ptr, ptr %promise, i64 24
+  br label %begin
 
-clean:                                            ; preds = %_llgo_7, %_llgo_6, %_llgo_5
-  %1 = call ptr @llvm.coro.free(token %id, ptr %hdl)
+begin:                                            ; preds = %alloc, %_llgo_0
+  %frame = phi ptr [ null, %_llgo_0 ], [ %0, %alloc ]
+  %hdl = call ptr @llvm.coro.begin(token %id, ptr %frame)
+  store ptr %hdl, ptr %promise, align 8
+  call void @"github.com/goplus/llgo/x/async.(*Promise[int]).setValue"(ptr %promise, i64 1)
+  %1 = call i8 @llvm.coro.suspend(token %id, i1 false)
+  switch i8 %1, label %suspend [
+    i8 0, label %resume
+    i8 1, label %clean
+  ]
+
+clean:                                            ; preds = %resume1, %resume, %begin
+  %2 = call ptr @llvm.coro.free(token %id, ptr %hdl)
   br label %suspend
 
-suspend:                                          ; preds = %_llgo_7, %_llgo_6, %_llgo_5, %clean
-  %2 = call i1 @llvm.coro.end(ptr %hdl, i1 false, token none)
+suspend:                                          ; preds = %resume1, %resume, %begin, %clean
+  %3 = call i1 @llvm.coro.end(ptr %hdl, i1 false, token none)
   ret ptr %promise
 
-trap:                                             ; preds = %_llgo_7
+trap:                                             ; preds = %resume1
   call void @llvm.trap()
   unreachable
 
-_llgo_5:                                          ; preds = %alloc, %entry
-  %frame = phi ptr [ null, %entry ], [ %0, %alloc ]
-  %hdl = call ptr @llvm.coro.begin(token %id, ptr %frame)
-  store ptr %hdl, ptr %promise, align 8
-  call void @"github.com/goplus/llgo/x/async.(*Promise).setValue[int]"(ptr %promise, i64 1)
-  %3 = call i8 @llvm.coro.suspend(token %id, i1 false)
-  switch i8 %3, label %suspend [
-    i8 0, label %_llgo_6
-    i8 1, label %clean
-  ]
-
-_llgo_6:                                          ; preds = %_llgo_5
-  call void @"github.com/goplus/llgo/x/async.(*Promise).setValue[int]"(ptr %promise, i64 2)
+resume:                                           ; preds = %begin
+  call void @"github.com/goplus/llgo/x/async.(*Promise[int]).setValue"(ptr %promise, i64 2)
   %4 = call i8 @llvm.coro.suspend(token %id, i1 false)
   switch i8 %4, label %suspend [
-    i8 0, label %_llgo_7
+    i8 0, label %resume1
     i8 1, label %clean
   ]
 
-_llgo_7:                                          ; preds = %_llgo_6
+resume1:                                          ; preds = %resume
   %5 = call i8 @llvm.coro.suspend(token %id, i1 true)
   switch i8 %5, label %suspend [
     i8 0, label %trap
@@ -199,6 +199,7 @@ _llgo_0:
 
 _llgo_1:                                          ; preds = %_llgo_0
   store i1 true, ptr @"foo.init$guard", align 1
+  call void @"github.com/goplus/llgo/x/async.init"()
   br label %_llgo_2
 
 _llgo_2:                                          ; preds = %_llgo_1, %_llgo_0
@@ -228,10 +229,12 @@ declare i1 @llvm.coro.end(ptr, i1, token)
 ; Function Attrs: cold noreturn nounwind memory(inaccessiblemem: write)
 declare void @llvm.trap()
 
-declare void @"github.com/goplus/llgo/x/async.(*Promise).setValue[int]"(ptr, i64)
+declare linkonce void @"github.com/goplus/llgo/x/async.(*Promise[int]).setValue"(ptr, i64)
 
 ; Function Attrs: nounwind
 declare i8 @llvm.coro.suspend(token, i1)
+
+declare void @"github.com/goplus/llgo/x/async.init"()
 
 `)
 }

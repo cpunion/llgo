@@ -21,6 +21,7 @@ import (
 	"unsafe"
 	_ "unsafe"
 
+	"github.com/goplus/llgo/c"
 	"github.com/goplus/llgo/c/libuv"
 )
 
@@ -39,26 +40,33 @@ type Promise[TOut any] struct {
 }
 
 // coAsync instruction injects a valid Promise object and then calls promise.async(...).
-// llgo:link (*Promise).Async llgo.coAsync
-func (p *Promise[TOut]) Async(fn func(resolve func(TOut))) *Promise[TOut] {
+// llgo:link Async llgo.coAsync
+func Async[TOut any](p *Promise[TOut], fn func(resolve func(TOut))) *Promise[TOut] {
 	panic("should not executed")
 }
 
 // call by llgo.coAsync
-func (p *Promise[TOut]) async(fn func(resolve func(TOut))) {
+func (p_ *Promise[TOut]) async(fn func(resolve func(TOut))) *Promise[TOut] {
+	println("=== async")
+	p := &Promise[TOut]{}
 	p.e = Executor()
-	fmt.Printf("%T\n", fn)
+	fmt.Printf("fn: %T\n", fn)
 	a := &async{cb: func() {
-		println("async cb")
-		p.Resume()
-		println("after Resume")
+		println("before resume in callback")
+		p.e.Resume()
+		println("after Resume in callback")
 	}}
+	println("before register Async")
 	r := p.e.loop.Async(&a.Async, func(pa *libuv.Async) {
 		a := (*async)(unsafe.Pointer(pa))
 		a.Close(nil)
 		a.cb()
 	})
+	println("after register Async")
+	println("r:", r)
+	println("r != 0", r != 0)
 	if r != 0 {
+		println("Async failed")
 		panic("Async failed")
 	}
 	println("before fn")
@@ -68,12 +76,17 @@ func (p *Promise[TOut]) async(fn func(resolve func(TOut))) {
 			panic("Send failed")
 		}
 	})
+	println("after fn")
+	return p
 }
 
-// llgo:link (*Promise).Await llgo.coAwait
-func (p *Promise[TOut]) Await() TOut {
+// llgo:link Await llgo.coAwait
+func Await[TOut any](p *Promise[TOut]) TOut {
 	panic("should not executed")
 }
+
+// llgo:link Suspend llgo.coSuspend
+func Suspend[TOut any](p *Promise[TOut]) {}
 
 // call by llgo.coAwait
 // p.Await() in f() will be translated to:
@@ -82,46 +95,57 @@ func (p *Promise[TOut]) Await() TOut {
 //		p.afterAwait()
 func (p *Promise[TOut]) afterAwait() TOut {
 	println("afterAwait", p)
+	if p.Done() {
+		return p.value
+	}
+	coResume(p.hdl)
+	println("afterAwait done", p)
 	return p.value
 }
 
-// llgo:link (*Promise).Return llgo.coReturn
 func (p *Promise[TOut]) Return(v TOut) {
-	panic("should not executed")
+	p.value = v
 }
 
-// llgo:link (*Promise).Yield llgo.coYield
-func (p *Promise[TOut]) Yield(v TOut) {}
+// llgo:link Yield llgo.coYield
+func Yield[TOut any](p *Promise[TOut], v TOut) {}
 
 // call by llgo.coYield
 func (p *Promise[TOut]) setValue(v TOut) {
 	p.value = v
 }
 
-// llgo:link (*Promise).Suspend llgo.coSuspend
-func (p *Promise[TOut]) Suspend() {}
-
-// llgo:link (*Promise).Resume llgo.coResume
-func (p *Promise[TOut]) Resume() {
+// llgo:link coResume llgo.coResume
+func coResume(hdl unsafe.Pointer) {
 	panic("should not executed")
 }
 
-// llgo:link (*Promise).Next llgo.coResume
+func (p *Promise[TOut]) Resume() {
+	println("before coResume", p.hdl)
+	coResume(p.hdl)
+	println("after coResume")
+}
+
 func (p *Promise[TOut]) Next() {
-	panic("should not executed")
+	coResume(p.hdl)
 }
 
 func (p *Promise[TOut]) Value() TOut {
 	return p.value
 }
 
-// llgo:link (*Promise).Done llgo.coDone
-func (p *Promise[TOut]) Done() bool {
+// llgo:link coDone llgo.coDone
+func coDone(hdl unsafe.Pointer) c.Char {
 	panic("should not executed")
+}
+
+func (p *Promise[TOut]) Done() bool {
+	return coDone(p.hdl) != 0
 }
 
 type promise interface {
 	Done() bool
+	Resume()
 }
 
 func Run[TOut any](fn func() *Promise[TOut]) TOut {

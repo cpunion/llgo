@@ -69,7 +69,6 @@ type aBuilder struct {
 	promise    Expr
 	onSuspBlk  func(blk BasicBlock) (susp BasicBlock, next BasicBlock, clean BasicBlock)
 	onReturn   func()
-	blkOffset  int
 }
 
 // Builder represents a builder for creating instructions in a function.

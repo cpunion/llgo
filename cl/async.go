@@ -55,17 +55,31 @@ func isAsyncFunc(sig *types.Signature) bool {
 	return ok
 }
 
-func (p *context) coAwait(b llssa.Builder, fn *ssa.Function, args []ssa.Value) llssa.Expr {
+func (p *context) lookupMethod(typ types.Type, name string) llssa.Function {
+	mthds := p.goProg.MethodSets.MethodSet(typ)
+	for i := 0; i < mthds.Len(); i++ {
+		m := mthds.At(i)
+		if ssaMthd := p.goProg.MethodValue(m); ssaMthd != nil {
+			if ssaMthd.Name() == name || strings.HasPrefix(ssaMthd.Name(), name+"[") {
+				fn, _, _ := p.compileFunction(ssaMthd)
+				return fn
+			}
+		}
+	}
+	return nil
+}
+
+func (p *context) coAwait(b llssa.Builder, args []ssa.Value) llssa.Expr {
 	if !isAsyncFunc(b.Func.RawType().(*types.Signature)) {
 		log.Fatalf("coAwait(promise *T) T: invalid context %v, %v", b.Func.Name(), b.Func.RawType())
 	}
-	afterAwaitFn := p.getShadowFunc(fn, "afterAwait")
+
 	awaitPromise := p.compileValue(b, args[0])
-	return b.CoAwait(afterAwaitFn, awaitPromise)
+	return b.CoAwait(awaitPromise, p.lookupMethod)
 }
 
 func (p *context) coSuspend(b llssa.Builder, final llssa.Expr) {
-	b.CoSuspend(b.AsyncToken(), final, nil)
+	b.CoSuspend(final, nil)
 }
 
 func (p *context) coDone(b llssa.Builder, args []ssa.Value) llssa.Expr {
@@ -77,45 +91,29 @@ func (p *context) coDone(b llssa.Builder, args []ssa.Value) llssa.Expr {
 }
 
 func (p *context) coResume(b llssa.Builder, args []ssa.Value) {
-	if len(args) == 1 {
-		hdl := p.compileValue(b, args[0])
-		b.CoResume(hdl)
+	if len(args) != 1 {
+		panic("coResume(promise *T): invalid arguments")
 	}
+	hdl := p.compileValue(b, args[0])
+	b.CoResume(hdl)
 }
 
-func (p *context) getShadowFunc(fn *ssa.Function, name string) llssa.Function {
-	typ := fn.Signature.Recv().Type()
-	mthds := p.goProg.MethodSets.MethodSet(typ)
-	for i := 0; i < mthds.Len(); i++ {
-		m := mthds.At(i)
-		if ssaMthd := p.goProg.MethodValue(m); ssaMthd != nil {
-			if ssaMthd.Name() == name || strings.HasPrefix(ssaMthd.Name(), name+"[") {
-				fn, _, _ := p.compileFunction(ssaMthd)
-				return fn
-			}
-		}
-	}
-	panic("method " + name + " not found on type " + typ.String())
-}
-
-func (p *context) coReturn(b llssa.Builder, fn *ssa.Function, args []ssa.Value) {
-	setValueFn := p.getShadowFunc(fn, "setValue")
+func (p *context) coReturn(b llssa.Builder, args []ssa.Value) {
 	value := p.compileValue(b, args[1])
-	b.CoReturn(setValueFn, value)
+	b.CoReturn(value, p.lookupMethod)
 }
 
-func (p *context) coYield(b llssa.Builder, fn *ssa.Function, args []ssa.Value) {
-	setValueFn := p.getShadowFunc(fn, "setValue")
+func (p *context) coYield(b llssa.Builder, args []ssa.Value) {
 	value := p.compileValue(b, args[1])
 	// TODO(lijie): find whether the co.Yield/co.Return is the last instruction
 	final := b.Const(constant.MakeBool(false), b.Prog.Bool())
-	b.CoYield(setValueFn, value, final)
+	b.CoYield(value, final, p.lookupMethod)
 }
 
-func (p *context) coAsync(b llssa.Builder, fn *ssa.Function, args []ssa.Value) llssa.Expr {
-	asyncFn := p.getShadowFunc(fn, "async")
+func (p *context) coAsync(b llssa.Builder, args []ssa.Value) llssa.Expr {
+	promise := p.compileValue(b, args[0])
 	fnArg := p.compileValue(b, args[1])
-	return b.CoAsync(asyncFn, fnArg)
+	return b.CoAsync(promise, fnArg, p.lookupMethod)
 }
 
 func (p *context) coRun(b llssa.Builder, args []ssa.Value) {

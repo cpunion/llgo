@@ -47,7 +47,7 @@ func (r *Response) Text() (co *async.Promise[tuple.Tuple2[string, error]]) {
 //	  })
 //	}
 func AsyncHttpGet(url string) (co *async.Promise[tuple.Tuple2[*Response, error]]) {
-	return co.Async(func(resolve func(tuple.Tuple2[*Response, error])) {
+	return async.Async(co, func(resolve func(tuple.Tuple2[*Response, error])) {
 		http("GET", url, func(resp *Response, err error) {
 			resolve(tuple.Tuple2[*Response, error]{V1: resp, V2: nil})
 		})
@@ -55,11 +55,11 @@ func AsyncHttpGet(url string) (co *async.Promise[tuple.Tuple2[*Response, error]]
 }
 
 func AsyncHttpPost(url string) (co *async.Promise[tuple.Tuple2[*Response, error]]) {
-	http("POST", url, func(resp *Response, err error) {
-		// co.Return(tuple.Tuple2[*Response, error]{V1: resp, V2: nil})
+	return async.Async(co, func(resolve func(tuple.Tuple2[*Response, error])) {
+		http("POST", url, func(resp *Response, err error) {
+			resolve(tuple.Tuple2[*Response, error]{V1: resp, V2: nil})
+		})
 	})
-	co.Suspend()
-	return
 }
 
 // -----------------------------------------------------------------------------
@@ -69,7 +69,7 @@ type User struct {
 }
 
 func GetUser(name string) (co *async.Promise[tuple.Tuple2[User, error]]) {
-	resp, err := AsyncHttpGet("http://example.com/user/" + name).Await().Values()
+	resp, err := async.Await(AsyncHttpGet("http://example.com/user/" + name)).Values()
 	if err != nil {
 		// return User{}, err
 		co.Return(tuple.Tuple2[User, error]{V1: User{}, V2: err})
@@ -82,7 +82,7 @@ func GetUser(name string) (co *async.Promise[tuple.Tuple2[User, error]]) {
 		return
 	}
 
-	body, err := resp.Text().Await().Values()
+	body, err := async.Await(resp.Text()).Values()
 	if err != nil {
 		// return User{}, err
 		co.Return(tuple.Tuple2[User, error]{V1: User{}, V2: err})
@@ -101,7 +101,7 @@ func GetUser(name string) (co *async.Promise[tuple.Tuple2[User, error]]) {
 }
 
 func GetScore() (co *async.Promise[tuple.Tuple2[float64, error]]) {
-	resp, err := AsyncHttpGet("http://example.com/score/").Await().Values()
+	resp, err := async.Await(AsyncHttpGet("http://example.com/score/")).Values()
 	if err != nil {
 		co.Return(tuple.Tuple2[float64, error]{V1: 0, V2: err})
 		return
@@ -113,7 +113,7 @@ func GetScore() (co *async.Promise[tuple.Tuple2[float64, error]]) {
 		return
 	}
 
-	body, err := resp.Text().Await().Values()
+	body, err := async.Await(resp.Text()).Values()
 	if err != nil {
 		// return 0, err
 		co.Return(tuple.Tuple2[float64, error]{V1: 0, V2: err})
@@ -133,7 +133,7 @@ func GetScore() (co *async.Promise[tuple.Tuple2[float64, error]]) {
 }
 
 func DoUpdate(op string) (co *async.Promise[error]) {
-	resp, err := AsyncHttpPost("http://example.com/update/" + op).Await().Values()
+	resp, err := async.Await(AsyncHttpPost("http://example.com/update/" + op)).Values()
 	if err != nil {
 		co.Return(err)
 		return
@@ -148,35 +148,35 @@ func DoUpdate(op string) (co *async.Promise[error]) {
 }
 
 func GenInts() (co *async.Promise[int]) {
-	co.Yield(3)
-	co.Yield(2)
-	co.Yield(5)
+	async.Yield(co, 3)
+	async.Yield(co, 2)
+	async.Yield(co, 5)
 	return
 }
 
 // Generator with async calls and panic
 func GenUsers() (co *async.Promise[User]) {
-	u, err := GetUser("Alice").Await().Values()
+	u, err := async.Await(GetUser("Alice")).Values()
 	if err != nil {
 		panic(err)
 	}
-	co.Yield(u)
-	u, err = GetUser("Bob").Await().Values()
+	async.Yield(co, u)
+	u, err = async.Await(GetUser("Bob")).Values()
 	if err != nil {
 		panic(err)
 	}
-	co.Yield(u)
-	u, err = GetUser("Cindy").Await().Values()
+	async.Yield(co, u)
+	u, err = async.Await(GetUser("Cindy")).Values()
 	if err != nil {
 		panic(err)
 	}
-	co.Yield(u)
+	async.Yield(co, u)
 	log.Printf("genUsers done\n")
 	return
 }
 
 func Demo() (co *async.Promise[async.Void]) {
-	user, err := GetUser("1").Await().Values()
+	user, err := async.Await(GetUser("1")).Values()
 	log.Println(user, err)
 
 	// user, err = naive.Race[tuple.Tuple2[User, error]](GetUser("2"), GetUser("3"), GetUser("4")).Value().Values()

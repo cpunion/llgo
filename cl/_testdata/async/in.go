@@ -5,9 +5,9 @@ import (
 )
 
 func GenInts() (co *async.Promise[int]) {
-	co.Yield(1)
-	co.Yield(2)
-	co.Yield(3)
+	async.Yield(co, 1)
+	async.Yield(co, 2)
+	async.Yield(co, 3)
 	return
 }
 

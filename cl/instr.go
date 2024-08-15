@@ -401,7 +401,7 @@ func (p *context) call(b llssa.Builder, act llssa.DoAction, call *ssa.CallCommon
 		case llgoUnreachable: // func unreachable()
 			b.Unreachable()
 		case llgoCoAwait:
-			ret = p.coAwait(b, cv, args)
+			ret = p.coAwait(b, args)
 		case llgoCoSuspend:
 			p.coSuspend(b, p.prog.BoolVal(false))
 		case llgoCoDone:
@@ -409,11 +409,11 @@ func (p *context) call(b llssa.Builder, act llssa.DoAction, call *ssa.CallCommon
 		case llgoCoResume:
 			p.coResume(b, args)
 		case llgoCoReturn:
-			p.coReturn(b, cv, args)
+			p.coReturn(b, args)
 		case llgoCoYield:
-			p.coYield(b, cv, args)
+			p.coYield(b, args)
 		case llgoCoAsync:
-			ret = p.coAsync(b, cv, args)
+			ret = p.coAsync(b, args)
 		case llgoCoRun:
 			p.coRun(b, args)
 		default:

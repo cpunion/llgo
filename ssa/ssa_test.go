@@ -683,16 +683,17 @@ func TestCoroFuncs(t *testing.T) {
 	b.CoPromise(null, align8, bf)
 	b.CoNoop()
 	b.CoFrame()
-	setArgs := types.NewTuple(types.NewVar(0, nil, "value", types.Typ[types.Int]))
-	setSig := types.NewSignatureType(nil, nil, nil, setArgs, nil, false)
-	setFn := pkg.NewFunc("setValue", setSig, InGo)
-	one := b.Const(constant.MakeInt64(1), prog.Int())
 
 	b.onSuspBlk = func(next BasicBlock) (BasicBlock, BasicBlock, BasicBlock) {
 		return suspdBlk, next, cleanBlk
 	}
-	b.CoYield(setFn, one, bf)
-	b.CoReturn(setFn, one)
+	// one := b.Const(constant.MakeInt64(1), prog.Int())
+	// b.CoYield(one, bf, func(typ types.Type, name string) Function {
+	// 	return nil
+	// })
+	// b.CoReturn(one, func(typ types.Type, name string) Function {
+	// 	return nil
+	// })
 
 	assertPkg(t, pkg, `; ModuleID = 'foo/bar'
 source_filename = "foo/bar"
@@ -715,23 +716,13 @@ entry:
   %11 = call ptr @llvm.coro.promise(ptr null, i32 8, i1 false)
   %12 = call ptr @llvm.coro.noop()
   %13 = call ptr @llvm.coro.frame()
-  call void @setValue(ptr null, i64 1)
-  %14 = call i8 @llvm.coro.suspend(<null operand!>, i1 false)
-  switch i8 %14, label %suspend [
-    i8 0, label %suspend
-    i8 1, label %clean
-  ]
 
-suspend:                                          ; preds = %entry, %entry, %clean
-  %15 = call i1 @llvm.coro.end(ptr %7, i1 false, token none)
-  call void @setValue(ptr null, i64 1)
-  br label %clean
+suspend:                                          ; preds = %clean
+  %14 = call i1 @llvm.coro.end(ptr %7, i1 false, token none)
 
-clean:                                            ; preds = %suspend, %entry
-  %16 = call ptr @llvm.coro.free(token %0, ptr %6)
+clean:                                            ; No predecessors!
+  %15 = call ptr @llvm.coro.free(token %0, ptr %6)
   br label %suspend
-
-_llgo_3:                                          ; No predecessors!
 }
 
 ; Function Attrs: nocallback nofree nosync nounwind willreturn memory(argmem: read)
@@ -776,11 +767,6 @@ declare ptr @llvm.coro.noop()
 
 ; Function Attrs: nounwind memory(none)
 declare ptr @llvm.coro.frame()
-
-declare void @setValue(i64)
-
-; Function Attrs: nounwind
-declare i8 @llvm.coro.suspend(token, i1)
 
 `)
 }

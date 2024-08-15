@@ -2,6 +2,7 @@ package main
 
 import (
 	"time"
+	"unsafe"
 	_ "unsafe"
 
 	"github.com/goplus/llgo/c"
@@ -11,10 +12,11 @@ import (
 //go:linkname Gettid C.__gettid
 func Gettid() c.Int
 
-func Sleep(d time.Duration) (co *async.Promise[int]) {
+func Sleep(d time.Duration) (co_ unsafe.Pointer) {
+	co := (*async.Promise[int])(co_)
 	us := c.Uint(d.Microseconds())
 	println("us: ", us)
-	return co.Async(func(resolve func(int)) {
+	return unsafe.Pointer(async.Async(co, func(resolve func(int)) {
 		println("before sleep")
 		go func() {
 			println("sleeping")
@@ -22,15 +24,15 @@ func Sleep(d time.Duration) (co *async.Promise[int]) {
 			println("after sleep")
 			resolve(1)
 		}()
-	})
+	}))
 }
 
 func main() {
 	async.Run(func() (co *async.Promise[async.Void]) {
 		println("before call sleep")
-		s := Sleep(time.Second * 1)
+		s := (*async.Promise[int])(Sleep(time.Second * 1))
 		println("sleep promise:")
-		r := s.Await()
+		r := async.Await(s)
 		println("after await", r)
 		return
 	})

@@ -233,22 +233,11 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 		}
 		fn = pkg.NewFuncEx(name, sig, llssa.Background(ftype), hasCtx, f.Origin() != nil, async)
 	}
-	nBlkOff := 0
 	if nblk := len(f.Blocks); nblk > 0 {
-		var entryBlk, allocBlk, cleanBlk, suspdBlk, trapBlk, beginBlk llssa.BasicBlock
-		if async {
-			nBlkOff = 5
-			entryBlk = fn.MakeBlock("entry")
-			allocBlk = fn.MakeBlock("alloc")
-			cleanBlk = fn.MakeBlock("clean")
-			suspdBlk = fn.MakeBlock("suspend")
-			trapBlk = fn.MakeBlock("trap")
-		}
-		fn.MakeBlocks(nblk) // to set fn.HasBody() = true
-		beginBlk = fn.Block(nBlkOff)
+		fn.MakeBlocks(nblk)   // to set fn.HasBody() = true
 		if f.Recover != nil { // set recover block
 			// TODO(lijie): fix this for async function because of the block offset increase
-			fn.SetRecover(fn.Block(f.Recover.Index + nBlkOff))
+			fn.SetRecover(fn.Block(f.Recover.Index))
 		}
 		p.inits = append(p.inits, func() {
 			p.fn = fn
@@ -264,9 +253,9 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 				log.Println("==> FuncBody", name)
 			}
 			b := fn.NewBuilder()
-			b.SetBlockOffset(nBlkOff)
+			b.SetBlock(fn.Block(0))
 			if async {
-				b.BeginAsync(fn, entryBlk, allocBlk, cleanBlk, suspdBlk, trapBlk, beginBlk)
+				b.BeginAsync(fn)
 			}
 			p.bvals = make(map[ssa.Value]llssa.Expr)
 			off := make([]int, len(f.Blocks))
@@ -303,7 +292,7 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 	var pkg = p.pkg
 	var fn = p.fn
 	var instrs = block.Instrs[n:]
-	var ret = fn.Block(block.Index + b.BlockOffset())
+	var ret = fn.Block(block.Index)
 	b.SetBlock(ret)
 	if doModInit {
 		if pyModInit = p.pyMod != ""; pyModInit {

@@ -8,11 +8,11 @@ import (
 
 func GenInts() (co *async.Promise[int]) {
 	println("gen: 1")
-	co.Yield(1)
+	async.Yield(co, 1)
 	println("gen: 2")
-	co.Yield(2)
+	async.Yield(co, 2)
 	println("gen: 3")
-	co.Yield(3)
+	async.Yield(co, 3)
 	return
 }
 

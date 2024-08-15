@@ -362,20 +362,8 @@ func (p Program) tyCoAwaitSuspendHandle() *types.Signature {
 
 // -----------------------------------------------------------------------------
 
-func (b Builder) SetBlockOffset(offset int) {
-	b.blkOffset = offset
-}
-
-func (b Builder) BlockOffset() int {
-	return b.blkOffset
-}
-
 func (b Builder) Async() bool {
 	return b.async
-}
-
-func (b Builder) AsyncToken() Expr {
-	return b.asyncToken
 }
 
 func (b Builder) EndAsync() {
@@ -402,7 +390,7 @@ frame := null
 hdl := @llvm.coro.begin(id, frame)
 *retPtr = hdl
 */
-func (b Builder) BeginAsync(fn Function, entryBlk, allocBlk, cleanBlk, suspdBlk, trapBlk, beginBlk BasicBlock) {
+func (b Builder) BeginAsync(fn Function) {
 	ty := fn.Type.RawType().(*types.Signature).Results().At(0).Type()
 	ptrTy, ok := ty.(*types.Pointer)
 	if !ok {
@@ -411,6 +399,13 @@ func (b Builder) BeginAsync(fn Function, entryBlk, allocBlk, cleanBlk, suspdBlk,
 	promiseTy := b.Prog.Type(ptrTy.Elem(), InGo)
 
 	b.async = true
+
+	entryBlk := b.blk
+	allocBlk := b.Func.MakeBlock("alloc")
+	beginBlk := b.Func.MakeBlock("begin")
+	cleanBlk := b.Func.MakeBlock("clean")
+	suspdBlk := b.Func.MakeBlock("suspend")
+	trapBlk := b.Func.MakeBlock("trap")
 
 	b.SetBlock(entryBlk)
 	align := b.Const(constant.MakeInt64(0), b.Prog.CInt()).SetName("align")
@@ -421,8 +416,8 @@ func (b Builder) BeginAsync(fn Function, entryBlk, allocBlk, cleanBlk, suspdBlk,
 	frameSize := b.CoSizeI64().SetName("frame.size")
 	allocSize := b.BinOp(token.ADD, promiseSize, frameSize).SetName("alloc.size")
 	promise := b.AllocZ(allocSize).SetName("promise")
-	b.promise = promise
 	promise.Type = b.Prog.Pointer(promiseTy)
+	b.promise = promise
 	needAlloc := b.CoAlloc(id).SetName("need.dyn.alloc")
 	b.If(needAlloc, allocBlk, beginBlk)
 
@@ -455,6 +450,9 @@ func (b Builder) BeginAsync(fn Function, entryBlk, allocBlk, cleanBlk, suspdBlk,
 	b.LLVMTrap()
 	b.Unreachable()
 
+	entryBlk.last = beginBlk.first
+	b.SetBlock(entryBlk)
+
 	b.onSuspBlk = func(nextBlk BasicBlock) (BasicBlock, BasicBlock, BasicBlock) {
 		if nextBlk == nil {
 			nextBlk = trapBlk
@@ -462,7 +460,7 @@ func (b Builder) BeginAsync(fn Function, entryBlk, allocBlk, cleanBlk, suspdBlk,
 		return suspdBlk, nextBlk, cleanBlk
 	}
 	b.onReturn = func() {
-		b.CoSuspend(b.asyncToken, b.Prog.BoolVal(true), trapBlk)
+		b.CoSuspend(b.Prog.BoolVal(true), trapBlk)
 	}
 }
 
@@ -617,15 +615,15 @@ func (b Builder) coSuspend(save, final Expr) Expr {
 	return b.Call(fn, save, final)
 }
 
-func (b Builder) CoSuspend(save, final Expr, nextBlk BasicBlock) {
+func (b Builder) CoSuspend(final Expr, nextBlk BasicBlock) {
 	if !b.async {
 		panic(fmt.Errorf("suspend %v not in async block", b.Func.Name()))
 	}
 	if nextBlk == nil {
-		b.Func.MakeBlock("")
-		nextBlk = b.Func.Block(b.blk.idx + 1)
+		nextBlk = b.Func.MakeBlock("resume")
+		b.blk.last = nextBlk.first
 	}
-	ret := b.coSuspend(save, final)
+	ret := b.coSuspend(b.asyncToken, final)
 	susp, next, clean := b.onSuspBlk(nextBlk)
 	swt := b.Switch(ret, susp)
 	swt.Case(b.Const(constant.MakeInt64(0), b.Prog.Byte()), next)
@@ -634,36 +632,52 @@ func (b Builder) CoSuspend(save, final Expr, nextBlk BasicBlock) {
 	b.SetBlock(nextBlk)
 }
 
-func (b Builder) CoReturn(setValueFn Function, value Expr) {
+type FindMethodFunc = func(recv types.Type, name string) Function
+
+func (b Builder) CoReturn(value Expr, findMethod FindMethodFunc) {
 	if !b.async {
 		panic(fmt.Errorf("return %v not in async block", b.Func.Name()))
+	}
+	setValueFn := findMethod(b.promise.Type.RawType(), "setValue")
+	if setValueFn == nil {
+		panic(fmt.Errorf("function setValue not found in promise %v", b.promise.Type.RawType()))
 	}
 	b.Call(setValueFn.Expr, b.promise, value)
 	_, _, cleanBlk := b.onSuspBlk(nil)
 	b.Jump(cleanBlk)
 }
 
-func (b Builder) CoYield(setValueFn Function, value Expr, final Expr) {
+func (b Builder) CoYield(value Expr, final Expr, findMethod FindMethodFunc) {
 	if !b.async {
 		panic(fmt.Errorf("yield %v not in async block", b.Func.Name()))
 	}
-	b.Call(setValueFn.Expr, b.promise, value)
-	b.CoSuspend(b.AsyncToken(), final, nil)
-}
-
-func (b Builder) CoAsync(asyncFn Function, fnArg Expr) Expr {
-	if !b.async {
-		panic(fmt.Errorf("async %v not in async block", b.Func.Name()))
+	fmt.Printf("CoYield: %v, %v\n", b.Func.Name(), b.promise.Type.RawType())
+	setValueFn := findMethod(b.promise.Type.RawType(), "setValue")
+	if setValueFn == nil {
+		panic(fmt.Errorf("function setValue not found in promise %v", b.promise.Type.RawType()))
 	}
-	b.Call(asyncFn.Expr, b.promise, fnArg)
-	return b.promise
+	b.Call(setValueFn.Expr, b.promise, value)
+	b.CoSuspend(final, nil)
 }
 
-func (b Builder) CoAwait(afterAwaitFn Function, awaitPromise Expr) Expr {
+func (b Builder) CoAsync(promise Expr, fnArg Expr, findMethod FindMethodFunc) Expr {
+	t := promise.Type.RawType().Underlying()
+	asyncFn := findMethod(promise.Type.RawType(), "async")
+	if asyncFn == nil {
+		panic(fmt.Errorf("function async not found in promise %v, %v", t, b.Func.Name()))
+	}
+	return b.Call(asyncFn.Expr, promise, fnArg)
+}
+
+func (b Builder) CoAwait(awaitPromise Expr, fn FindMethodFunc) Expr {
 	if !b.async {
 		panic(fmt.Errorf("await in function %v not in async block", b.Func.Name()))
 	}
-	// b.CoSuspend(b.asyncToken, b.Prog.BoolVal(false), nil)
+	afterAwaitFn := fn(awaitPromise.Type.RawType(), "afterAwait")
+	if afterAwaitFn == nil {
+		panic(fmt.Errorf("function afterAwait not found in promise %v", b.promise.Type.RawType()))
+	}
+	b.CoSuspend(b.Prog.BoolVal(false), nil)
 	return b.Call(afterAwaitFn.Expr, awaitPromise)
 }
 
