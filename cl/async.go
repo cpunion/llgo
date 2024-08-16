@@ -110,10 +110,10 @@ func (p *context) coYield(b llssa.Builder, args []ssa.Value) {
 	b.CoYield(value, final, p.lookupMethod)
 }
 
-func (p *context) coAsync(b llssa.Builder, args []ssa.Value) llssa.Expr {
+func (p *context) coAsync(b llssa.Builder, args []ssa.Value) {
 	promise := p.compileValue(b, args[0])
 	fnArg := p.compileValue(b, args[1])
-	return b.CoAsync(promise, fnArg, p.lookupMethod)
+	b.CoAsync(promise, fnArg, p.lookupMethod)
 }
 
 func (p *context) coRun(b llssa.Builder, args []ssa.Value) {

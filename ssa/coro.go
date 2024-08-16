@@ -660,13 +660,17 @@ func (b Builder) CoYield(value Expr, final Expr, findMethod FindMethodFunc) {
 	b.CoSuspend(final, nil)
 }
 
-func (b Builder) CoAsync(promise Expr, fnArg Expr, findMethod FindMethodFunc) Expr {
-	t := promise.Type.RawType().Underlying()
-	asyncFn := findMethod(promise.Type.RawType(), "async")
+func (b Builder) CoAsync(promise Expr, fnArg Expr, findMethod FindMethodFunc) {
+	if !b.async {
+		panic(fmt.Errorf("async %v not in async block", b.Func.Name()))
+	}
+	t := b.promise.Type.RawType().Underlying()
+	asyncFn := findMethod(b.promise.Type.RawType(), "async")
 	if asyncFn == nil {
 		panic(fmt.Errorf("function async not found in promise %v, %v", t, b.Func.Name()))
 	}
-	return b.Call(asyncFn.Expr, promise, fnArg)
+	b.Call(asyncFn.Expr, b.promise, fnArg)
+	b.CoSuspend(b.Prog.BoolVal(false), nil)
 }
 
 func (b Builder) CoAwait(awaitPromise Expr, fn FindMethodFunc) Expr {
@@ -677,7 +681,9 @@ func (b Builder) CoAwait(awaitPromise Expr, fn FindMethodFunc) Expr {
 	if afterAwaitFn == nil {
 		panic(fmt.Errorf("function afterAwait not found in promise %v", b.promise.Type.RawType()))
 	}
+	b.Println(b.Str("CoAwait: "), awaitPromise)
 	b.CoSuspend(b.Prog.BoolVal(false), nil)
+	b.Println(b.Str("CoAwait: after suspend"))
 	return b.Call(afterAwaitFn.Expr, awaitPromise)
 }
 

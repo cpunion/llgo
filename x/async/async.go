@@ -46,9 +46,8 @@ func Async[TOut any](p *Promise[TOut], fn func(resolve func(TOut))) *Promise[TOu
 }
 
 // call by llgo.coAsync
-func (p_ *Promise[TOut]) async(fn func(resolve func(TOut))) *Promise[TOut] {
+func (p *Promise[TOut]) async(fn func(resolve func(TOut))) *Promise[TOut] {
 	println("=== async")
-	p := &Promise[TOut]{}
 	p.e = Executor()
 	fmt.Printf("fn: %T\n", fn)
 	a := &async{cb: func() {
@@ -70,6 +69,7 @@ func (p_ *Promise[TOut]) async(fn func(resolve func(TOut))) *Promise[TOut] {
 		panic("Async failed")
 	}
 	println("before fn")
+	println("before fn p", p.Done())
 	fn(func(v TOut) {
 		p.setValue(v)
 		if r := a.Send(); r != 0 {
@@ -77,6 +77,7 @@ func (p_ *Promise[TOut]) async(fn func(resolve func(TOut))) *Promise[TOut] {
 		}
 	})
 	println("after fn")
+	println("before return p", p.Done())
 	return p
 }
 
@@ -121,7 +122,7 @@ func coResume(hdl unsafe.Pointer) {
 }
 
 func (p *Promise[TOut]) Resume() {
-	println("before coResume", p.hdl)
+	println("before coResume", p, "hdl:", p.hdl)
 	coResume(p.hdl)
 	println("after coResume")
 }
@@ -144,15 +145,22 @@ func (p *Promise[TOut]) Done() bool {
 }
 
 type promise interface {
-	Done() bool
 	Resume()
+	Done() bool
 }
 
 func Run[TOut any](fn func() *Promise[TOut]) TOut {
 	var value TOut
 	e := NewExecutor()
 	e.Run(func() promise {
-		return fn()
+		p := fn()
+		fmt.Printf("run promise: %T\n", p)
+		println("ptr:", p)
+		println("done:", p.Done())
+		p.Resume()
+		var r promise = p
+		println("run promise done")
+		return r
 	})
 	return value
 }

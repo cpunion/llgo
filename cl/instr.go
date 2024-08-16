@@ -413,7 +413,7 @@ func (p *context) call(b llssa.Builder, act llssa.DoAction, call *ssa.CallCommon
 		case llgoCoYield:
 			p.coYield(b, args)
 		case llgoCoAsync:
-			ret = p.coAsync(b, args)
+			p.coAsync(b, args)
 		case llgoCoRun:
 			p.coRun(b, args)
 		default:
