@@ -144,23 +144,15 @@ func (p *Promise[TOut]) Done() bool {
 	return coDone(p.hdl) != 0
 }
 
-type promise interface {
-	Resume()
-	Done() bool
-}
-
 func Run[TOut any](fn func() *Promise[TOut]) TOut {
 	var value TOut
 	e := NewExecutor()
-	e.Run(func() promise {
+	e.Run(func() {
 		p := fn()
 		fmt.Printf("run promise: %T\n", p)
 		println("ptr:", p)
 		println("done:", p.Done())
-		p.Resume()
-		var r promise = p
-		println("run promise done")
-		return r
+		e.resume = p.Resume
 	})
 	return value
 }

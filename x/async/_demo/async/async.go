@@ -27,7 +27,7 @@ func Sleep(d time.Duration) (co *async.Promise[int]) {
 }
 
 func main() {
-	async.Run(func() (co *async.Promise[async.Void]) {
+	async.Run(func() (co *async.Promise[int]) {
 		println("before call sleep")
 		s := Sleep(time.Second * 1)
 		println("sleep promise:", s)

@@ -39,12 +39,12 @@ func Executor() *executor {
 }
 
 type executor struct {
-	loop *libuv.Loop
-	root promise
+	loop   *libuv.Loop
+	resume func()
 }
 
 func NewExecutor() *executor {
-	return &executor{loop: libuv.LoopNew(), root: nil}
+	return &executor{loop: libuv.LoopNew()}
 }
 
 func (e *executor) Async(fn func()) func() {
@@ -65,14 +65,13 @@ func (e *executor) Async(fn func()) func() {
 }
 
 func (e *executor) Resume() {
-	println("executor: before Resume", e.root)
-	println("root done:", e.root.Done())
-	e.root.Resume()
+	println("executor: before Resume")
+	e.resume()
 }
 
-func (e *executor) Run(fn func() promise) {
+func (e *executor) Run(fn func()) {
 	setExecutor(e)
-	e.root = fn()
+	fn()
 	println("executor: before libuv.Run")
 	e.loop.Run(libuv.RUN_DEFAULT)
 	fmt.Println("====== after libuv.Run")
