@@ -22,7 +22,17 @@ import (
 
 type Void = [0]byte
 
-type Future[T any] func(func(T))
+type Future[T any] interface {
+	Then(func(T))
+}
+
+type future[T any] struct {
+	fn func(func(T))
+}
+
+func (f *future[T]) Then(callback func(T)) {
+	f.fn(callback)
+}
 
 // Just for pure LLGo/Go, transpile to callback in Go+
 func Await[T1 any](future Future[T1]) T1 {

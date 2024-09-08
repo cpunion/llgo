@@ -22,9 +22,9 @@ package async
 import "sync"
 
 func Async[T any](fn func(func(T))) Future[T] {
-	return func(chain func(T)) {
+	return &future[T]{fn: func(chain func(T)) {
 		go fn(chain)
-	}
+	}}
 }
 
 // -----------------------------------------------------------------------------
@@ -34,7 +34,7 @@ func Race[T1 any](futures ...Future[T1]) Future[T1] {
 		ch := make(chan T1)
 		for _, future := range futures {
 			future := future
-			future(func(v T1) {
+			future.Then(func(v T1) {
 				defer func() {
 					// Avoid panic when the channel is closed.
 					_ = recover()
@@ -56,7 +56,7 @@ func All[T1 any](futures ...Future[T1]) Future[[]T1] {
 		wg.Add(n)
 		for i, future := range futures {
 			i := i
-			future(func(v T1) {
+			future.Then(func(v T1) {
 				results[i] = v
 				wg.Done()
 			})
