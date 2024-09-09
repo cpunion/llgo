@@ -22,23 +22,11 @@ package timeout
 import (
 	"time"
 
-	"github.com/goplus/llgo/c/libuv"
 	"github.com/goplus/llgo/x/async"
-	"github.com/goplus/llgo/x/cbind"
 )
 
 func Timeout(d time.Duration) async.Future[async.Void] {
 	return async.Async(func(resolve func(async.Void)) {
-		t, cb := cbind.BindF[libuv.Timer, libuv.TimerCb](func(t *libuv.Timer) {
-			resolve(async.Void{})
-		})
-		r := libuv.InitTimer(async.Exec().L, t)
-		if r != 0 {
-			panic("InitTimer failed")
-		}
-		r = t.Start(cb, uint64(d/time.Millisecond), 0)
-		if r != 0 {
-			panic("Start failed")
-		}
+		resolve(async.Void{})
 	})
 }

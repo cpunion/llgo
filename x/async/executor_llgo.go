@@ -55,15 +55,9 @@ func (e *Executor) Run() {
 }
 
 func Run[T any](future Future[T]) T {
-	loop := libuv.LoopNew()
-	exec := &Executor{loop}
-	oldExec := setExec(exec)
 	var ret T
 	future.Then(func(v T) {
 		ret = v
 	})
-	exec.Run()
-	loop.Close()
-	setExec(oldExec)
 	return ret
 }
