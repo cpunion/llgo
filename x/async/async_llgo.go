@@ -56,7 +56,7 @@ func Async[T any](fn func(func(T))) Future[T] {
 	var callbacks []func(T)
 	var mutex sync.Mutex
 
-	return func(chain func(T)) {
+	return &future[T]{func(chain func(T)) {
 		mutex.Lock()
 		if resultReady.Load() {
 			mutex.Unlock()
@@ -90,7 +90,7 @@ func Async[T any](fn func(func(T))) Future[T] {
 		} else {
 			mutex.Unlock()
 		}
-	}
+	}}
 }
 
 // -----------------------------------------------------------------------------

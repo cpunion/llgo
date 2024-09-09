@@ -27,7 +27,7 @@ func Async[T any](fn func(func(T))) Future[T] {
 	var wg sync.WaitGroup
 	wg.Add(1)
 
-	return func(chain func(T)) {
+	return &future[T]{func(chain func(T)) {
 		once.Do(func() {
 			go func() {
 				fn(func(v T) {
@@ -41,7 +41,7 @@ func Async[T any](fn func(func(T))) Future[T] {
 			wg.Wait()
 			chain(result)
 		}()
-	}
+	}}
 }
 
 // -----------------------------------------------------------------------------
