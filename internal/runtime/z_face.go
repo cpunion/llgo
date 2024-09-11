@@ -21,6 +21,7 @@ import (
 
 	"github.com/goplus/llgo/c"
 	"github.com/goplus/llgo/internal/abi"
+	"github.com/goplus/llgo/internal/runtime/types"
 )
 
 type eface struct {
@@ -107,9 +108,13 @@ func hdrSizeOf(kind abi.Kind) uintptr {
 }
 
 // NewNamed returns an uninitialized named type.
-func NewNamed(kind abi.Kind, size uintptr, methods, ptrMethods int) *Type {
+func NewNamed(name string, kind abi.Kind, size uintptr, methods, ptrMethods int) *Type {
+	if t, ok := types.Map[name]; ok {
+		return (*Type)(t)
+	}
 	ret := newUninitedNamed(kind, size, methods)
 	ret.PtrToThis_ = newUninitedNamed(abi.Pointer, pointerSize, ptrMethods)
+	types.Map[name] = unsafe.Pointer(ret)
 	return ret
 }
 
@@ -128,6 +133,10 @@ func pkgName(path string) string {
 
 // InitNamed initializes an uninitialized named type.
 func InitNamed(ret *Type, pkgPath, name string, underlying *Type, methods, ptrMethods []Method) {
+	// skip initialized
+	if ret.TFlag != abi.TFlagUninited {
+		return
+	}
 	ptr := ret.PtrToThis_
 	if pkgPath != "" {
 		name = pkgName(pkgPath) + "." + name
