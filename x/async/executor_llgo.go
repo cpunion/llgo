@@ -54,12 +54,12 @@ func (e *Executor) Run() {
 	e.L.Run(libuv.RUN_DEFAULT)
 }
 
-func Run[T any](future Future[T]) T {
+func Run[T any](fn func(func(T))) T {
 	loop := libuv.LoopNew()
 	exec := &Executor{loop}
 	oldExec := setExec(exec)
 	var ret T
-	future.Then(func(v T) {
+	fn(func(v T) {
 		ret = v
 	})
 	exec.Run()

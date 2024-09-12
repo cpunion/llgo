@@ -19,10 +19,10 @@
 
 package async
 
-func Run[T any](future Future[T]) T {
+func Run[T any](fn func(func(T))) T {
 	ch := make(chan T)
 	go func() {
-		future.Then(func(v T) {
+		fn(func(v T) {
 			ch <- v
 		})
 	}()

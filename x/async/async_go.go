@@ -36,12 +36,12 @@ func Async[T any](fn func(func(T))) Future[T] {
 		}()
 	})
 
-	return func(chain func(T)) {
+	return &future[T]{func(chain func(T)) {
 		go func() {
 			wg.Wait()
 			chain(result)
 		}()
-	}
+	}}
 }
 
 // -----------------------------------------------------------------------------
