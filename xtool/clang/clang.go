@@ -17,6 +17,7 @@
 package clang
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -42,6 +43,7 @@ func New(app string) *Cmd {
 
 // Exec executes a clang command.
 func (p *Cmd) Exec(args ...string) error {
+	fmt.Printf("exec: %s %v\n", p.app, args)
 	cmd := exec.Command(p.app, args...)
 	cmd.Stdout = p.Stdout
 	cmd.Stderr = p.Stderr

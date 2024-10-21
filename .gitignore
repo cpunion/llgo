@@ -22,6 +22,7 @@ _tinygo/
 _output/
 build.dir/
 .vscode/
+.golang/
 
 # Test binary, built with `go test -c`
 *.test

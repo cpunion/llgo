@@ -14,42 +14,13 @@
  * limitations under the License.
  */
 
-package llgen
+package ssa
 
-import (
-	"os"
+import "io"
 
-	"github.com/goplus/llgo/cl"
-	"github.com/goplus/llgo/internal/mod"
-
-	llssa "github.com/goplus/llgo/ssa"
-)
-
-func Init(enableDbg bool) {
-	llssa.Initialize(llssa.InitAll)
-	llssa.SetDebug(llssa.DbgFlagAll)
-	cl.SetDebug(cl.DbgFlagAll)
-	cl.EnableDebugSymbols(enableDbg)
+type AsmHdr struct {
 }
 
-func PkgPath(dir string) string {
-	_, pkgPath, err := mod.Load(dir)
-	check(err)
-	return pkgPath
+func (hdr *AsmHdr) WriteTo(w io.Writer) error {
+	return nil
 }
-
-func Do(outFile, pkgPath string, inFiles ...string) {
-	ret := GenFrom("", pkgPath, inFiles...)
-	err := os.WriteFile(outFile, []byte(ret), 0644)
-	check(err)
-}
-
-func check(err error) {
-	if err != nil {
-		panic(err)
-	}
-}
-
-var (
-	Verbose = true
-)
