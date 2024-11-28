@@ -140,9 +140,9 @@ populate_linux_sysroot() {
 		/populate_linux_sysroot.sh
 }
 populate_linux_sysroot amd64 "${LINUX_AMD64_PREFIX}"
-set -x
-ls -l "${LINUX_AMD64_PREFIX}"
-ls -l "${LINUX_AMD64_PREFIX}"/usr/
-ls -l "${LINUX_AMD64_PREFIX}"/usr/include
-grep -R LLVMDIBuilderInsertDbgValueAtEnd "${LINUX_AMD64_PREFIX}"/usr
+# set -x
+# ls -l "${LINUX_AMD64_PREFIX}"
+# ls -l "${LINUX_AMD64_PREFIX}"/usr/
+# ls -l "${LINUX_AMD64_PREFIX}"/usr/include
+# grep -R LLVMDIBuilderInsertDbgValueAtEnd "${LINUX_AMD64_PREFIX}"/usr
 # populate_linux_sysroot arm64 "${LINUX_ARM64_PREFIX}"
