@@ -58,8 +58,8 @@ builds:
     env:
       - CC=x86_64-linux-gnu-gcc
       - CXX=x86_64-linux-gnu-g++
-      - CGO_CPPFLAGS=--sysroot={{.Env.SYSROOT_LINUX_AMD64}} -I{{.Env.SYSROOT_LINUX_AMD64}}/usr/include/llvm-18 -I{{.Env.SYSROOT_LINUX_AMD64}}/usr/include/llvm-c-18 -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS
-      - CGO_LDFLAGS=--sysroot={{.Env.SYSROOT_LINUX_AMD64}} -L{{.Env.SYSROOT_LINUX_AMD64}}/usr/lib/llvm-18/lib -lLLVM-18
+      - CGO_CPPFLAGS=--sysroot={{.Env.SYSROOT_LINUX_AMD64}} -I{{.Env.SYSROOT_LINUX_AMD64}}/usr/include -I{{.Env.SYSROOT_LINUX_AMD64}}/usr/include/llvm-18 -I{{.Env.SYSROOT_LINUX_AMD64}}/usr/include/llvm-c-18 -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS
+      - CGO_LDFLAGS=--sysroot={{.Env.SYSROOT_LINUX_AMD64}} -L{{.Env.SYSROOT_LINUX_AMD64}}/usr/lib -L{{.Env.SYSROOT_LINUX_AMD64}}/usr/lib/llvm-18/lib -lLLVM-18
     targets:
       - linux_amd64
     mod_timestamp: "{{.CommitTimestamp}}"
@@ -74,8 +74,8 @@ builds:
     env:
       - CC=aarch64-linux-gnu-gcc
       - CXX=aarch64-linux-gnu-g++
-      - CGO_CPPFLAGS=--sysroot={{.Env.SYSROOT_LINUX_ARM64}} -I{{.Env.SYSROOT_LINUX_ARM64}}/usr/include/llvm-18 -I{{.Env.SYSROOT_LINUX_ARM64}}/usr/include/llvm-c-18 -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS
-      - CGO_LDFLAGS=--sysroot={{.Env.SYSROOT_LINUX_ARM64}} -L{{.Env.SYSROOT_LINUX_ARM64}}/usr/lib/llvm-18/lib -lLLVM-18
+      - CGO_CPPFLAGS=--sysroot={{.Env.SYSROOT_LINUX_ARM64}} -I{{.Env.SYSROOT_LINUX_ARM64}}/usr/include -I{{.Env.SYSROOT_LINUX_ARM64}}/usr/include/llvm-18 -I{{.Env.SYSROOT_LINUX_ARM64}}/usr/include/llvm-c-18 -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS
+      - CGO_LDFLAGS=--sysroot={{.Env.SYSROOT_LINUX_ARM64}} -L{{.Env.SYSROOT_LINUX_ARM64}}/usr/lib -L{{.Env.SYSROOT_LINUX_ARM64}}/usr/lib/llvm-18/lib -lLLVM-18
     targets:
       - linux_arm64
     mod_timestamp: "{{.CommitTimestamp}}"
