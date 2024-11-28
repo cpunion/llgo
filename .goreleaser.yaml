@@ -16,9 +16,11 @@ before:
 
 builds:
   - id: llgo-darwin-amd64
+    no_unique_dist_dir: true
     main: ./cmd/llgo
     flags:
       - -tags=darwin,amd64,byollvm
+      - -mod=readonly
     ldflags:
       - -X github.com/goplus/llgo/x/env.buildVersion=v{{.Version}}
       - -X github.com/goplus/llgo/x/env.buildTime={{.Date}}
@@ -32,9 +34,11 @@ builds:
       - darwin_amd64
     mod_timestamp: "{{.CommitTimestamp}}"
   - id: llgo-darwin-arm64
+    no_unique_dist_dir: true
     main: ./cmd/llgo
     flags:
       - -tags=darwin,arm64,byollvm
+      - -mod=readonly
     ldflags:
       - -X github.com/goplus/llgo/x/env.buildVersion=v{{.Version}}
       - -X github.com/goplus/llgo/x/env.buildTime={{.Date}}
@@ -48,9 +52,11 @@ builds:
       - darwin_arm64
     mod_timestamp: "{{.CommitTimestamp}}"
   - id: llgo-linux-amd64
+    no_unique_dist_dir: true
     main: ./cmd/llgo
     flags:
       - -tags=linux,amd64,byollvm
+      - -mod=readonly
     ldflags:
       - -X github.com/goplus/llgo/x/env.buildVersion=v{{.Version}}
       - -X github.com/goplus/llgo/x/env.buildTime={{.Date}}
@@ -64,9 +70,11 @@ builds:
       - linux_amd64
     mod_timestamp: "{{.CommitTimestamp}}"
   - id: llgo-linux-arm64
+    no_unique_dist_dir: true
     main: ./cmd/llgo
     flags:
       - -tags=linux,arm64,byollvm
+      - -mod=readonly
     ldflags:
       - -X github.com/goplus/llgo/x/env.buildVersion=v{{.Version}}
       - -X github.com/goplus/llgo/x/env.buildTime={{.Date}}
