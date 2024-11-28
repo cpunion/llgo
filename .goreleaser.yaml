@@ -16,6 +16,7 @@ before:
 
 builds:
   - id: llgo-darwin-amd64
+    skip: true
     main: ./cmd/llgo
     flags:
       - -tags=darwin,amd64,byollvm
@@ -32,6 +33,7 @@ builds:
       - darwin_amd64
     mod_timestamp: "{{.CommitTimestamp}}"
   - id: llgo-darwin-arm64
+    skip: true
     main: ./cmd/llgo
     flags:
       - -tags=darwin,arm64,byollvm
@@ -64,6 +66,7 @@ builds:
       - linux_amd64
     mod_timestamp: "{{.CommitTimestamp}}"
   - id: llgo-linux-arm64
+    skip: true
     main: ./cmd/llgo
     flags:
       - -tags=linux,arm64,byollvm
