@@ -19,6 +19,7 @@ builds:
     main: ./cmd/llgo
     flags:
       - -tags=darwin,amd64,byollvm
+      - -mod=readonly
     ldflags:
       - -X github.com/goplus/llgo/x/env.buildVersion=v{{.Version}}
       - -X github.com/goplus/llgo/x/env.buildTime={{.Date}}
@@ -35,6 +36,7 @@ builds:
     main: ./cmd/llgo
     flags:
       - -tags=darwin,arm64,byollvm
+      - -mod=readonly
     ldflags:
       - -X github.com/goplus/llgo/x/env.buildVersion=v{{.Version}}
       - -X github.com/goplus/llgo/x/env.buildTime={{.Date}}
@@ -51,6 +53,7 @@ builds:
     main: ./cmd/llgo
     flags:
       - -tags=linux,amd64,byollvm
+      - -mod=readonly
     ldflags:
       - -X github.com/goplus/llgo/x/env.buildVersion=v{{.Version}}
       - -X github.com/goplus/llgo/x/env.buildTime={{.Date}}
@@ -67,6 +70,7 @@ builds:
     main: ./cmd/llgo
     flags:
       - -tags=linux,arm64,byollvm
+      - -mod=readonly
     ldflags:
       - -X github.com/goplus/llgo/x/env.buildVersion=v{{.Version}}
       - -X github.com/goplus/llgo/x/env.buildTime={{.Date}}
