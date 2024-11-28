@@ -26,6 +26,8 @@ builds:
     env:
       - CC=o64-clang
       - CXX=o64-clang++
+      - GOPATH={{.Env.SYSROOT_DARWIN_AMD64}}/go
+      - GOCACHE={{.Env.SYSROOT_DARWIN_AMD64}}/go-build
       - CGO_CPPFLAGS=-I{{.Env.SYSROOT_DARWIN_AMD64}}/usr/local/opt/llvm@18/include -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS
       - CGO_LDFLAGS=-L{{.Env.SYSROOT_DARWIN_AMD64}}/usr/local/opt/llvm@18/lib -Wl,-search_paths_first -Wl,-headerpad_max_install_names -lLLVM-18 -lz -lm
     targets:
@@ -42,6 +44,8 @@ builds:
     env:
       - CC=oa64-clang
       - CXX=oa64-clang++
+      - GOPATH={{.Env.SYSROOT_DARWIN_ARM64}}/go
+      - GOCACHE={{.Env.SYSROOT_DARWIN_ARM64}}/go-build
       - CGO_CPPFLAGS=-I{{.Env.SYSROOT_DARWIN_ARM64}}/opt/homebrew/opt/llvm@18/include -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS
       - CGO_LDFLAGS=-L{{.Env.SYSROOT_DARWIN_ARM64}}/opt/homebrew/opt/llvm@18/lib -Wl,-search_paths_first -Wl,-headerpad_max_install_names -lLLVM-18 -lz -lm
     targets:
@@ -58,6 +62,8 @@ builds:
     env:
       - CC=x86_64-linux-gnu-gcc
       - CXX=x86_64-linux-gnu-g++
+      - GOPATH={{.Env.SYSROOT_LINUX_AMD64}}/go
+      - GOCACHE={{.Env.SYSROOT_LINUX_AMD64}}/go-build
       - CGO_CPPFLAGS=--sysroot={{.Env.SYSROOT_LINUX_AMD64}} -I{{.Env.SYSROOT_LINUX_AMD64}}/usr/include/llvm-18 -I{{.Env.SYSROOT_LINUX_AMD64}}/usr/include/llvm-c-18 -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS
       - CGO_LDFLAGS=--sysroot={{.Env.SYSROOT_LINUX_AMD64}} -L{{.Env.SYSROOT_LINUX_AMD64}}/usr/lib/llvm-18/lib -lLLVM-18
     targets:
@@ -74,6 +80,8 @@ builds:
     env:
       - CC=aarch64-linux-gnu-gcc
       - CXX=aarch64-linux-gnu-g++
+      - GOPATH={{.Env.SYSROOT_LINUX_ARM64}}/go
+      - GOCACHE={{.Env.SYSROOT_LINUX_ARM64}}/go-build
       - CGO_CPPFLAGS=--sysroot={{.Env.SYSROOT_LINUX_ARM64}} -I{{.Env.SYSROOT_LINUX_ARM64}}/usr/include/llvm-18 -I{{.Env.SYSROOT_LINUX_ARM64}}/usr/include/llvm-c-18 -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS
       - CGO_LDFLAGS=--sysroot={{.Env.SYSROOT_LINUX_ARM64}} -L{{.Env.SYSROOT_LINUX_ARM64}}/usr/lib/llvm-18/lib -lLLVM-18
     targets:
