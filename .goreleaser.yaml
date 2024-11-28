@@ -22,7 +22,7 @@ builds:
     ldflags:
       - -X github.com/goplus/llgo/x/env.buildVersion=v{{.Version}}
       - -X github.com/goplus/llgo/x/env.buildTime={{.Date}}
-      - -X github.com/goplus/llgo/xtool/env/llvm.ldLLVMConfigBin=/usr/local/opt/llvm@18/bin/llvm-config
+      - -X github.com/goplus/llgo/xtool/env/llvm.ldLLVMConfigBin={{.Env.SYSROOT_DARWIN_AMD64}}/usr/local/opt/llvm@18/bin/llvm-config
     env:
       - CC=o64-clang
       - CXX=o64-clang++
@@ -40,7 +40,7 @@ builds:
     ldflags:
       - -X github.com/goplus/llgo/x/env.buildVersion=v{{.Version}}
       - -X github.com/goplus/llgo/x/env.buildTime={{.Date}}
-      - -X github.com/goplus/llgo/xtool/env/llvm.ldLLVMConfigBin=/opt/homebrew/opt/llvm@18/bin/llvm-config
+      - -X github.com/goplus/llgo/xtool/env/llvm.ldLLVMConfigBin={{.Env.SYSROOT_DARWIN_ARM64}}/opt/homebrew/opt/llvm@18/bin/llvm-config
     env:
       - CC=oa64-clang
       - CXX=oa64-clang++
@@ -58,7 +58,7 @@ builds:
     ldflags:
       - -X github.com/goplus/llgo/x/env.buildVersion=v{{.Version}}
       - -X github.com/goplus/llgo/x/env.buildTime={{.Date}}
-      - -X github.com/goplus/llgo/xtool/env/llvm.ldLLVMConfigBin=/usr/lib/llvm-18/bin/llvm-config
+      - -X github.com/goplus/llgo/xtool/env/llvm.ldLLVMConfigBin={{.Env.SYSROOT_LINUX_AMD64}}/usr/lib/llvm-18/bin/llvm-config
     env:
       - CC=x86_64-linux-gnu-gcc
       - CXX=x86_64-linux-gnu-g++
@@ -76,7 +76,7 @@ builds:
     ldflags:
       - -X github.com/goplus/llgo/x/env.buildVersion=v{{.Version}}
       - -X github.com/goplus/llgo/x/env.buildTime={{.Date}}
-      - -X github.com/goplus/llgo/xtool/env/llvm.ldLLVMConfigBin=/usr/lib/llvm-18/bin/llvm-config
+      - -X github.com/goplus/llgo/xtool/env/llvm.ldLLVMConfigBin={{.Env.SYSROOT_LINUX_ARM64}}/usr/lib/llvm-18/bin/llvm-config
     env:
       - CC=aarch64-linux-gnu-gcc
       - CXX=aarch64-linux-gnu-g++
