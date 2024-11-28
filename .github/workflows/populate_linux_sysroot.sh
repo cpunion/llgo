@@ -105,6 +105,7 @@ do-sync() {
 	args+=(-m)
 	args+=(-d)
 	args+=(-h)
+	args+=(-v)
 	args+=(--keep-dirlinks)
 	args+=("--info=progress2")
 	args+=(--delete)
@@ -140,4 +141,8 @@ populate_linux_sysroot() {
 		/populate_linux_sysroot.sh
 }
 populate_linux_sysroot amd64 "${LINUX_AMD64_PREFIX}"
+set -x
+ls -l "${LINUX_AMD64_PREFIX}"
+ls -l "${LINUX_ARM64_PREFIX}"/usr/
+ls -l "${LINUX_ARM64_PREFIX}"/usr/include
 populate_linux_sysroot arm64 "${LINUX_ARM64_PREFIX}"
