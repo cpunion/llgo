@@ -22,16 +22,16 @@ patch_homebrew_lib_dir() {
 	local HOMEBREW_PREFIX="$2"
 	for DYLIB_FILE in "${LIB_DIR}"/*.dylib; do
 		if [[ -f "${DYLIB_FILE}" ]]; then
-			ID=$(otool -D "${DYLIB_FILE}" | grep '@@HOMEBREW_PREFIX@@' | awk '{print $1}')
+			ID=$(llvm-otool-18 -D "${DYLIB_FILE}" | grep '@@HOMEBREW_PREFIX@@' | awk '{print $1}')
 			if [[ -n "${ID}" ]]; then
 				NEW_ID=${ID/'@@HOMEBREW_PREFIX@@'/${HOMEBREW_PREFIX}}
-				install_name_tool -id "${NEW_ID}" "${DYLIB_FILE}"
+				llvm-install-name-tool -id "${NEW_ID}" "${DYLIB_FILE}"
 			fi
 
 			DEPS=$(otool -L "${DYLIB_FILE}" | grep '@@HOMEBREW_PREFIX@@' | awk '{print $1}')
 			for DEP in ${DEPS}; do
 				NEW_DEP=${DEP/'@@HOMEBREW_PREFIX@@'/${HOMEBREW_PREFIX}}
-				install_name_tool -change "${DEP}" "${NEW_DEP}" "${DYLIB_FILE}"
+				llvm-install-name-tool -change "${DEP}" "${NEW_DEP}" "${DYLIB_FILE}"
 			done
 		fi
 	done
