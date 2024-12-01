@@ -28,7 +28,7 @@ patch_homebrew_lib_dir() {
 				llvm-install-name-tool -id "${NEW_ID}" "${DYLIB_FILE}"
 			fi
 
-			DEPS=$(otool -L "${DYLIB_FILE}" | grep '@@HOMEBREW_PREFIX@@' | awk '{print $1}')
+			DEPS=$(llvm-otool-18 -L "${DYLIB_FILE}" | grep '@@HOMEBREW_PREFIX@@' | awk '{print $1}')
 			for DEP in ${DEPS}; do
 				NEW_DEP=${DEP/'@@HOMEBREW_PREFIX@@'/${HOMEBREW_PREFIX}}
 				llvm-install-name-tool -change "${DEP}" "${NEW_DEP}" "${DYLIB_FILE}"
