@@ -54,6 +54,7 @@ const (
 	ModeBuild Mode = iota
 	ModeInstall
 	ModeRun
+	ModeTest
 	ModeCmpTest
 	ModeGen
 )
@@ -129,6 +130,10 @@ func Do(args []string, conf *Config) ([]Package, error) {
 		Mode:       loadSyntax | packages.NeedDeps | packages.NeedModule | packages.NeedExportFile,
 		BuildFlags: flags,
 		Fset:       token.NewFileSet(),
+		Tests:      conf.Mode == ModeTest,
+	}
+	if conf.Mode == ModeTest {
+		cfg.Mode |= packages.NeedForTest
 	}
 
 	if len(overlayFiles) > 0 {
@@ -160,18 +165,39 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	if patterns == nil {
 		patterns = []string{"."}
 	}
+	fmt.Printf("patterns: %v\n", patterns)
 	initial, err := packages.LoadEx(dedup, sizes, cfg, patterns...)
 	check(err)
 	mode := conf.Mode
-	if len(initial) == 1 && len(initial[0].CompiledGoFiles) > 0 {
-		if mode == ModeBuild {
+	if mode == ModeTest {
+		for _, pkg := range initial {
+			fmt.Printf("init pkg: %v\n", pkg.PkgPath)
+			// TODO:(lijie): need better way to detect test packages
+			if strings.HasSuffix(pkg.PkgPath, ".test") {
+				fmt.Printf("main test pkg: %v, module: %v\n", pkg.PkgPath, pkg.Module.Dir)
+			}
+		}
+	}
+	switch mode {
+	case ModeBuild:
+		if len(initial) == 1 && len(initial[0].CompiledGoFiles) > 0 {
 			mode = ModeInstall
 		}
-	} else if mode == ModeRun {
+	case ModeRun:
 		if len(initial) > 1 {
 			return nil, fmt.Errorf("cannot run multiple packages")
-		} else {
-			return nil, fmt.Errorf("no Go files in matched packages")
+		}
+	}
+
+	for _, pkg := range initial {
+		fmt.Printf("init pkg info: %v, for test: %v\n", pkg.PkgPath, pkg.ForTest)
+		for _, file := range pkg.Syntax {
+			for _, decl := range file.Decls {
+				// fmt.Printf("decl: %T\n", decl)
+				if decl, ok := decl.(*ast.FuncDecl); ok {
+					fmt.Printf("func: %v\n", decl.Name.Name)
+				}
+			}
 		}
 	}
 
@@ -204,7 +230,8 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	os.Setenv("PATH", env.BinDir()+":"+os.Getenv("PATH")) // TODO(xsw): check windows
 
 	ctx := &context{env, cfg, progSSA, prog, dedup, patches, make(map[string]none), initial, mode, 0}
-	pkgs := buildAllPkgs(ctx, initial, verbose)
+	pkgs, err := buildAllPkgs(ctx, initial, verbose)
+	check(err)
 	if mode == ModeGen {
 		for _, pkg := range pkgs {
 			if pkg.Package == initial[0] {
@@ -214,7 +241,8 @@ func Do(args []string, conf *Config) ([]Package, error) {
 		return nil, fmt.Errorf("initial package not found")
 	}
 
-	dpkg := buildAllPkgs(ctx, altPkgs[noRt:], verbose)
+	dpkg, err := buildAllPkgs(ctx, altPkgs[noRt:], verbose)
+	check(err)
 	var linkArgs []string
 	for _, pkg := range dpkg {
 		linkArgs = append(linkArgs, pkg.LinkArgs...)
@@ -269,7 +297,7 @@ type context struct {
 	nLibdir int
 }
 
-func buildAllPkgs(ctx *context, initial []*packages.Package, verbose bool) (pkgs []*aPackage) {
+func buildAllPkgs(ctx *context, initial []*packages.Package, verbose bool) (pkgs []*aPackage, err error) {
 	prog := ctx.prog
 	pkgs, errPkgs := allPkgs(ctx, initial, verbose)
 	for _, errPkg := range errPkgs {
@@ -279,7 +307,7 @@ func buildAllPkgs(ctx *context, initial []*packages.Package, verbose bool) (pkgs
 		fmt.Fprintln(os.Stderr, "cannot build SSA for package", errPkg)
 	}
 	if len(errPkgs) > 0 {
-		os.Exit(1)
+		return nil, fmt.Errorf("cannot build SSA for packages")
 	}
 	built := ctx.built
 	for _, aPkg := range pkgs {
@@ -295,6 +323,7 @@ func buildAllPkgs(ctx *context, initial []*packages.Package, verbose bool) (pkgs
 			// and set no export file
 			pkg.ExportFile = ""
 		case cl.PkgLinkIR, cl.PkgLinkExtern, cl.PkgPyModule:
+			fmt.Printf("buildPkg 1: %v\n", pkg.PkgPath)
 			if len(pkg.GoFiles) > 0 {
 				cgoLdflags, err := buildPkg(ctx, aPkg, verbose)
 				if err != nil {
@@ -350,6 +379,7 @@ func buildAllPkgs(ctx *context, initial []*packages.Package, verbose bool) (pkgs
 				aPkg.LinkArgs = append(aPkg.LinkArgs, pkgLinkArgs...)
 			}
 		default:
+			fmt.Printf("buildPkg 2: %v\n", pkg.PkgPath)
 			cgoLdflags, err := buildPkg(ctx, aPkg, verbose)
 			if err != nil {
 				panic(err)
@@ -677,6 +707,7 @@ func allPkgs(ctx *context, initial []*packages.Package, verbose bool) (all []*aP
 }
 
 func createSSAPkg(prog *ssa.Program, p *packages.Package, verbose bool) *ssa.Package {
+	fmt.Printf("createSSAPkg: %v\n", p.ID)
 	pkgSSA := prog.ImportedPackage(p.PkgPath)
 	if pkgSSA == nil {
 		if debugBuild || verbose {
@@ -871,6 +902,7 @@ var hasAltPkg = map[string]none{
 	"crypto/sha512":            {},
 	"crypto/subtle":            {},
 	"fmt":                      {},
+	"go/parser":                {},
 	"hash/crc32":               {},
 	"internal/abi":             {},
 	"internal/bytealg":         {},
