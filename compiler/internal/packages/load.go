@@ -129,18 +129,18 @@ func (p Deduper) SetPkgPath(fn func(path, name string) string) {
 	p.setpath = fn
 }
 
-func (p Deduper) Check(pkgPath string) *Cached {
-	if v, ok := p.cache.Load(pkgPath); ok {
+func (p Deduper) Check(id string) *Cached {
+	if v, ok := p.cache.Load(id); ok {
 		return v.(*Cached)
 	}
 	return nil
 }
 
-func (p Deduper) set(pkgPath string, cp *Cached) {
+func (p Deduper) set(id string, cp *Cached) {
 	if DebugPackagesLoad {
-		log.Println("==> Import", pkgPath)
+		log.Println("==> Import", id)
 	}
-	p.cache.Store(pkgPath, cp)
+	p.cache.Store(id, cp)
 }
 
 //go:linkname defaultDriver golang.org/x/tools/go/packages.defaultDriver
@@ -176,7 +176,7 @@ func loadPackageEx(dedup Deduper, ld *loader, lpkg *loaderPackage) {
 	}
 
 	if dedup != nil {
-		if cp := dedup.Check(lpkg.PkgPath); cp != nil {
+		if cp := dedup.Check(lpkg.ID); cp != nil {
 			lpkg.Types = cp.Types
 			lpkg.Fset = ld.Fset
 			lpkg.TypesInfo = cp.TypesInfo
@@ -514,6 +514,7 @@ func refineEx(dedup Deduper, ld *loader, response *packages.DriverResponse) ([]*
 			needsrc:   needsrc,
 			goVersion: response.GoVersion,
 		}
+		log.Printf("lpkg: %#v\n", lpkg.Package)
 		ld.pkgs[lpkg.ID] = lpkg
 		if rootIndex >= 0 {
 			initial[rootIndex] = lpkg
@@ -636,6 +637,7 @@ func refineEx(dedup Deduper, ld *loader, response *packages.DriverResponse) ([]*
 
 	result := make([]*Package, len(initial))
 	for i, lpkg := range initial {
+		fmt.Printf("initial lpkg: %s\n", lpkg.Package.PkgPath)
 		result[i] = lpkg.Package
 	}
 	for i := range ld.pkgs {
@@ -703,6 +705,7 @@ func refineEx(dedup Deduper, ld *loader, response *packages.DriverResponse) ([]*
 // provided for convenient display of all errors.
 func LoadEx(dedup Deduper, sizes func(types.Sizes) types.Sizes, cfg *Config, patterns ...string) ([]*Package, error) {
 	ld := newLoader(cfg)
+	fmt.Printf("ld.Config.Tests: %v\n", ld.Config.Tests)
 	response, external, err := defaultDriver(&ld.Config, patterns...)
 	if err != nil {
 		return nil, err
