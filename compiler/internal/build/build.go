@@ -132,6 +132,9 @@ func Do(args []string, conf *Config) ([]Package, error) {
 		Fset:       token.NewFileSet(),
 		Tests:      conf.Mode == ModeTest,
 	}
+	if conf.Mode == ModeTest {
+		cfg.Mode |= packages.NeedForTest
+	}
 
 	if len(overlayFiles) > 0 {
 		cfg.Overlay = make(map[string][]byte)
@@ -227,7 +230,8 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	os.Setenv("PATH", env.BinDir()+":"+os.Getenv("PATH")) // TODO(xsw): check windows
 
 	ctx := &context{env, cfg, progSSA, prog, dedup, patches, make(map[string]none), initial, mode, 0}
-	pkgs := buildAllPkgs(ctx, initial, verbose)
+	pkgs, err := buildAllPkgs(ctx, initial, verbose)
+	check(err)
 	if mode == ModeGen {
 		for _, pkg := range pkgs {
 			if pkg.Package == initial[0] {
@@ -237,7 +241,8 @@ func Do(args []string, conf *Config) ([]Package, error) {
 		return nil, fmt.Errorf("initial package not found")
 	}
 
-	dpkg := buildAllPkgs(ctx, altPkgs[noRt:], verbose)
+	dpkg, err := buildAllPkgs(ctx, altPkgs[noRt:], verbose)
+	check(err)
 	var linkArgs []string
 	for _, pkg := range dpkg {
 		linkArgs = append(linkArgs, pkg.LinkArgs...)
@@ -303,7 +308,7 @@ type context struct {
 	nLibdir int
 }
 
-func buildAllPkgs(ctx *context, initial []*packages.Package, verbose bool) (pkgs []*aPackage) {
+func buildAllPkgs(ctx *context, initial []*packages.Package, verbose bool) (pkgs []*aPackage, err error) {
 	prog := ctx.prog
 	pkgs, errPkgs := allPkgs(ctx, initial, verbose)
 	for _, errPkg := range errPkgs {
@@ -313,7 +318,7 @@ func buildAllPkgs(ctx *context, initial []*packages.Package, verbose bool) (pkgs
 		fmt.Fprintln(os.Stderr, "cannot build SSA for package", errPkg)
 	}
 	if len(errPkgs) > 0 {
-		os.Exit(1)
+		return nil, fmt.Errorf("cannot build SSA for packages")
 	}
 	built := ctx.built
 	for _, aPkg := range pkgs {
@@ -663,7 +668,7 @@ func allPkgs(ctx *context, initial []*packages.Package, verbose bool) (all []*aP
 }
 
 func createSSAPkg(prog *ssa.Program, p *packages.Package, verbose bool) *ssa.Package {
-	fmt.Printf("createSSAPkg: %v\n", p.PkgPath)
+	fmt.Printf("createSSAPkg: %v\n", p.ID)
 	pkgSSA := prog.ImportedPackage(p.PkgPath)
 	if pkgSSA == nil {
 		if debugBuild || verbose {

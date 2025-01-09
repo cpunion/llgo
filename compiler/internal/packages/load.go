@@ -58,6 +58,8 @@ const (
 	NeedTypesSizes = packages.NeedTypesSizes
 	NeedTypesInfo  = packages.NeedTypesInfo
 
+	NeedForTest = packages.NeedForTest
+
 	typecheckCgo = NeedModule - 1 // TODO(xsw): how to check
 )
 
@@ -514,7 +516,7 @@ func refineEx(dedup Deduper, ld *loader, response *packages.DriverResponse) ([]*
 			needsrc:   needsrc,
 			goVersion: response.GoVersion,
 		}
-		log.Printf("lpkg: %#v\n", lpkg.Package)
+		// log.Printf("lpkg: %#v\n", lpkg.Package)
 		ld.pkgs[lpkg.ID] = lpkg
 		if rootIndex >= 0 {
 			initial[rootIndex] = lpkg
