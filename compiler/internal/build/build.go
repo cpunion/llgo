@@ -863,6 +863,7 @@ var hasAltPkg = map[string]none{
 	"crypto/sha512":            {},
 	"crypto/subtle":            {},
 	"fmt":                      {},
+	"go/parser":                {},
 	"hash/crc32":               {},
 	"internal/abi":             {},
 	"internal/bytealg":         {},
