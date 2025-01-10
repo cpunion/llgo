@@ -323,18 +323,17 @@ func buildAllPkgs(ctx *context, initial []*packages.Package, verbose bool) (pkgs
 	built := ctx.built
 	for _, aPkg := range pkgs {
 		pkg := aPkg.Package
-		if _, ok := built[pkg.PkgPath]; ok {
+		if _, ok := built[pkg.ID]; ok {
 			pkg.ExportFile = ""
 			continue
 		}
-		built[pkg.PkgPath] = none{}
+		built[pkg.ID] = none{}
 		switch kind, param := cl.PkgKindOf(pkg.Types); kind {
 		case cl.PkgDeclOnly:
 			// skip packages that only contain declarations
 			// and set no export file
 			pkg.ExportFile = ""
 		case cl.PkgLinkIR, cl.PkgLinkExtern, cl.PkgPyModule:
-			fmt.Printf("buildPkg 1: %v\n", pkg.PkgPath)
 			if len(pkg.GoFiles) > 0 {
 				cgoLdflags, err := buildPkg(ctx, aPkg, verbose)
 				if err != nil {
@@ -605,8 +604,8 @@ const (
 func altPkgs(initial []*packages.Package, alts ...string) []string {
 	packages.Visit(initial, nil, func(p *packages.Package) {
 		if p.Types != nil && !p.IllTyped {
-			if _, ok := hasAltPkg[p.PkgPath]; ok {
-				alts = append(alts, altPkgPathPrefix+p.PkgPath)
+			if _, ok := hasAltPkg[p.ID]; ok {
+				alts = append(alts, altPkgPathPrefix+p.ID)
 			}
 		}
 	})
@@ -617,11 +616,11 @@ func altSSAPkgs(prog *ssa.Program, patches cl.Patches, alts []*packages.Package,
 	packages.Visit(alts, nil, func(p *packages.Package) {
 		if typs := p.Types; typs != nil && !p.IllTyped {
 			if debugBuild || verbose {
-				log.Println("==> BuildSSA", p.PkgPath)
+				log.Println("==> BuildSSA", p.ID)
 			}
 			pkgSSA := prog.CreatePackage(typs, p.Syntax, p.TypesInfo, true)
-			if strings.HasPrefix(p.PkgPath, altPkgPathPrefix) {
-				path := p.PkgPath[len(altPkgPathPrefix):]
+			if strings.HasPrefix(p.ID, altPkgPathPrefix) {
+				path := p.ID[len(altPkgPathPrefix):]
 				patches[path] = cl.Patch{Alt: pkgSSA, Types: typepatch.Clone(typs)}
 				if debugBuild || verbose {
 					log.Println("==> Patching", path)
@@ -669,10 +668,10 @@ func allPkgs(ctx *context, initial []*packages.Package, verbose bool) (all []*aP
 
 func createSSAPkg(prog *ssa.Program, p *packages.Package, verbose bool) *ssa.Package {
 	fmt.Printf("createSSAPkg: %v\n", p.ID)
-	pkgSSA := prog.ImportedPackage(p.PkgPath)
+	pkgSSA := prog.ImportedPackage(p.ID)
 	if pkgSSA == nil {
 		if debugBuild || verbose {
-			log.Println("==> BuildSSA", p.PkgPath)
+			log.Println("==> BuildSSA", p.ID)
 		}
 		pkgSSA = prog.CreatePackage(p.Types, p.Syntax, p.TypesInfo, true)
 		pkgSSA.Build() // TODO(xsw): build concurrently
