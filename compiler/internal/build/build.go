@@ -571,6 +571,13 @@ func buildPkg(ctx *context, aPkg *aPackage, verbose bool) (cgoLdflags []string, 
 	check(err)
 	aPkg.LPkg = ret
 	cgoLdflags, err = buildCgo(ctx, aPkg, aPkg.Package.Syntax, externs, verbose)
+	if aPkg.AltPkg != nil {
+		altLdflags, e := buildCgo(ctx, aPkg, aPkg.AltPkg.Syntax, externs, verbose)
+		if e != nil {
+			return nil, e
+		}
+		cgoLdflags = append(cgoLdflags, altLdflags...)
+	}
 	if needLLFile(ctx.mode) {
 		pkg.ExportFile += ".ll"
 		os.WriteFile(pkg.ExportFile, []byte(ret.String()), 0644)
