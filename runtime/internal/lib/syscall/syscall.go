@@ -41,7 +41,7 @@ static int llgo_open(const char *path, int mode, mode_t perm) {
 	return open(path, mode, perm);
 }
 
-static int llgo_fcntl(int fd, int cmd, int arg) {
+static int llgo_fcntl(int fd, int cmd, uintptr_t arg) {
 	return fcntl(fd, cmd, arg);
 }
 
@@ -273,8 +273,8 @@ func Dup(fd int) (int, error) {
 }
 
 func fcntl(fd int, cmd int, arg int) (val int, err error) {
-	if ret := C.llgo_fcntl(C.int(fd), C.int(cmd), C.int(arg)); ret != 0 {
-		err = syscall.Errno(ret)
+	if ret := C.llgo_fcntl(C.int(fd), C.int(cmd), C.uintptr_t(arg)); ret == -1 {
+		err = syscall.Errno(C.llgo_errno())
 		return
 	}
 	return

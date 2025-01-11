@@ -31,8 +31,3 @@ func (x *Pointer[T]) Store(val *T) { StorePointer(&x.v, unsafe.Pointer(val)) }
 
 // Swap atomically stores new into x and returns the previous value.
 func (x *Pointer[T]) Swap(new *T) (old *T) { return (*T)(SwapPointer(&x.v, unsafe.Pointer(new))) }
-
-// CompareAndSwap executes the compare-and-swap operation for x.
-func (x *Pointer[T]) CompareAndSwap(old, new *T) (swapped bool) {
-	return CompareAndSwapPointer(&x.v, unsafe.Pointer(old), unsafe.Pointer(new))
-}

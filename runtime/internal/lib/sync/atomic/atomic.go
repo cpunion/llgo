@@ -74,11 +74,6 @@ func CompareAndSwapUintptr(addr *uintptr, old, new uintptr) (swapped bool) {
 	return
 }
 
-func CompareAndSwapPointer(addr *unsafe.Pointer, old, new unsafe.Pointer) (swapped bool) {
-	_, swapped = atomicCmpXchg(addr, old, new)
-	return
-}
-
 // llgo:link atomicAdd llgo.atomicAdd
 func atomicAdd[T valtype](ptr *T, v T) T { return v }
 
@@ -168,12 +163,4 @@ func AndUint64(addr *uint64, val uint64) (new uint64) {
 
 func OrUint64(addr *uint64, val uint64) (new uint64) {
 	panic("todo: OrUint64")
-}
-
-func runtime_procPin() int {
-	panic("todo: runtime_procPin")
-}
-
-func runtime_procUnpin() {
-	panic("todo: runtime_procUnpin")
 }
