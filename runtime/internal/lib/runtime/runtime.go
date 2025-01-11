@@ -16,12 +16,77 @@
 
 package runtime
 
-// llgo:skip GC Goexit LockOSThread UnlockOSThread
+/*
+#cgo darwin CFLAGS: -DDARWIN
+#cgo linux CFLAGS: -DLINUX
+#cgo windows CFLAGS: -DWINDOWS
+
+#include <unistd.h>
+#include <stdlib.h>
+#include <pthread.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <time.h>
+#include <signal.h>
+#include <sys/time.h>
+#include <sys/event.h>
+#include <sys/mman.h>
+
+static int llgo_errno(void) {
+	return errno;
+}
+
+static void llgo_reset_errno() {
+	errno = 0;
+}
+
+static int llgo_fcntl(int fd, int cmd, uintptr_t arg) {
+	return fcntl(fd, cmd, arg);
+}
+
+#ifdef DARWIN
+#include <mach/mach_time.h>
+
+uint64_t nanotime() {
+    static mach_timebase_info_data_t timebase;
+    static int timebase_initialized = 0;
+
+    if (!timebase_initialized) {
+        mach_timebase_info(&timebase);
+        timebase_initialized = 1;
+    }
+
+    uint64_t time = mach_absolute_time();
+    return time * timebase.numer / timebase.denom;
+}
+
+#elif defined(LINUX)
+#include <time.h>
+
+uint64_t nanotime() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000 + (uint64_t)ts.tv_nsec;
+}
+
+#elif defined(WINDOWS)
+#include <windows.h>
+
+uint64_t nanotime() {
+    LARGE_INTEGER counter, frequency;
+    QueryPerformanceCounter(&counter);
+    QueryPerformanceFrequency(&frequency);
+    return counter.QuadPart * 1000000000ULL / frequency.QuadPart;
+}
+#endif
+*/
+import "C"
+
+// llgo:skip Goexit
 import (
 	"unsafe"
 
 	"github.com/goplus/llgo/runtime/abi"
-	"github.com/goplus/llgo/runtime/internal/clite/pthread"
 )
 
 // GOROOT returns the root of the Go tree. It uses the
@@ -43,13 +108,29 @@ func GC() {
 }
 
 func Goexit() {
-	pthread.Exit(nil)
+	C.pthread_exit(nil)
 }
 
 func LockOSThread() {
 }
 
 func UnlockOSThread() {
+}
+
+func exit(code int32) {
+	C.exit(C.int(code))
+}
+
+func usleep(usec uint32) {
+	C.usleep(C.uint(usec))
+}
+
+func usleep_no_g(usec uint32) {
+	C.usleep(C.uint(usec))
+}
+
+func write(fd uintptr, p unsafe.Pointer, n int32) int32 {
+	return int32(C.write(C.int(fd), p, C.size_t(n)))
 }
 
 //go:linkname memmove C.memmove
@@ -106,47 +187,6 @@ func asyncPreempt() {
 	panic("todo: asyncPreempt")
 }
 
-// System calls
-func exit_trampoline() {
-	panic("todo: exit_trampoline")
-}
-
-func fcntl_trampoline() {
-	panic("todo: fcntl_trampoline")
-}
-
-func kevent_trampoline() {
-	panic("todo: kevent_trampoline")
-}
-
-func kqueue_trampoline() {
-	panic("todo: kqueue_trampoline")
-}
-
-func mach_vm_region_trampoline() {
-	panic("todo: mach_vm_region_trampoline")
-}
-
-func madvise_trampoline() {
-	panic("todo: madvise_trampoline")
-}
-
-func mlock_trampoline() {
-	panic("todo: mlock_trampoline")
-}
-
-func mmap_trampoline() {
-	panic("todo: mmap_trampoline")
-}
-
-func munmap_trampoline(addr unsafe.Pointer, n uintptr) int32 {
-	panic("todo: munmap_trampoline")
-}
-
-func nanotime_trampoline() int64 {
-	panic("todo: nanotime_trampoline")
-}
-
 //go:nosplit
 func mstart() {
 	panic("todo: mstart")
@@ -157,78 +197,6 @@ func mstart_stub() {
 	panic("todo: mstart_stub")
 }
 
-func pipe_trampoline(fd *[2]int32) int32 {
-	panic("todo: pipe_trampoline")
-}
-
-func proc_regionfilename_trampoline(pid int32, address uint64, buffer *byte, buffersize int32) int32 {
-	panic("todo: proc_regionfilename_trampoline")
-}
-
-func pthread_attr_getstacksize_trampoline(attr unsafe.Pointer, size *uintptr) int32 {
-	panic("todo: pthread_attr_getstacksize_trampoline")
-}
-
-func pthread_attr_init_trampoline(attr unsafe.Pointer) int32 {
-	panic("todo: pthread_attr_init_trampoline")
-}
-
-func pthread_attr_setdetachstate_trampoline(attr unsafe.Pointer, state int32) int32 {
-	panic("todo: pthread_attr_setdetachstate_trampoline")
-}
-
-func pthread_cond_init_trampoline(cond unsafe.Pointer, attr unsafe.Pointer) int32 {
-	panic("todo: pthread_cond_init_trampoline")
-}
-
-func pthread_cond_signal_trampoline(cond unsafe.Pointer) int32 {
-	panic("todo: pthread_cond_signal_trampoline")
-}
-
-func pthread_cond_timedwait_relative_np_trampoline(cond unsafe.Pointer, mutex unsafe.Pointer, timeout unsafe.Pointer) int32 {
-	panic("todo: pthread_cond_timedwait_relative_np_trampoline")
-}
-
-func pthread_cond_wait_trampoline(cond unsafe.Pointer, mutex unsafe.Pointer) int32 {
-	panic("todo: pthread_cond_wait_trampoline")
-}
-
-func pthread_create_trampoline(thread *pthread.Thread, attr unsafe.Pointer, start_routine unsafe.Pointer, arg unsafe.Pointer) int32 {
-	panic("todo: pthread_create_trampoline")
-}
-
-func pthread_kill_trampoline(thread pthread.Thread, sig int32) int32 {
-	panic("todo: pthread_kill_trampoline")
-}
-
-func pthread_mutex_init_trampoline(mutex unsafe.Pointer, attr unsafe.Pointer) int32 {
-	panic("todo: pthread_mutex_init_trampoline")
-}
-
-func pthread_mutex_lock_trampoline(mutex unsafe.Pointer) int32 {
-	panic("todo: pthread_mutex_lock_trampoline")
-}
-
-func pthread_mutex_unlock_trampoline(mutex unsafe.Pointer) int32 {
-	panic("todo: pthread_mutex_unlock_trampoline")
-}
-
-func raise_trampoline(sig int32) int32 {
-	panic("todo: raise_trampoline")
-}
-
-func raiseproc_trampoline(sig int32) {
-	panic("todo: raiseproc_trampoline")
-}
-
-func read_trampoline(fd int32, p unsafe.Pointer, n int32) int32 {
-	panic("todo: read_trampoline")
-}
-
-func setitimer_trampoline(mode int32, new, old unsafe.Pointer) int32 {
-	panic("todo: setitimer_trampoline")
-}
-
 //go:nosplit
 func sigtramp() {
 	panic("todo: sigtramp")
@@ -237,26 +205,6 @@ func sigtramp() {
 //go:nosplit
 func cgoSigtramp() {
 	panic("todo: cgoSigtramp")
-}
-
-func sigaction_trampoline(sig uint32, new, old unsafe.Pointer) int32 {
-	panic("todo: sigaction_trampoline")
-}
-
-func sigprocmask_trampoline(how int32, new, old unsafe.Pointer) int32 {
-	panic("todo: sigprocmask_trampoline")
-}
-
-func usleep_trampoline(usec uint32) int32 {
-	panic("todo: usleep_trampoline")
-}
-
-func walltime_trampoline(sec *int64, nsec *int32) {
-	panic("todo: walltime_trampoline")
-}
-
-func write_trampoline(fd uintptr, p unsafe.Pointer, n int32) int32 {
-	panic("todo: write_trampoline")
 }
 
 func FuncPCABIInternal(f interface{}) uintptr {
@@ -340,4 +288,174 @@ type _panic struct {
 	recovered   bool // whether this panic has been recovered
 	goexit      bool
 	deferreturn bool
+}
+
+type timeval struct {
+	tv_sec  int64
+	tv_usec int64
+}
+
+type itimerval struct {
+	it_interval timeval
+	it_value    timeval
+}
+
+type timespec struct {
+	tv_sec  int64
+	tv_nsec int64
+}
+
+func setitimer(mode int32, new, old *itimerval) {
+	C.setitimer(C.int(mode), (*C.struct_itimerval)(unsafe.Pointer(new)), (*C.struct_itimerval)(unsafe.Pointer(old)))
+}
+
+func walltime() (int64, int32) {
+	var ts timespec
+	C.clock_gettime(C.CLOCK_REALTIME, (*C.struct_timespec)(unsafe.Pointer(&ts)))
+	return ts.tv_sec, int32(ts.tv_nsec)
+}
+
+type pthread uintptr
+type pthreadattr struct {
+	X__sig    int64
+	X__opaque [56]int8
+}
+type pthreadmutex struct {
+	X__sig    int64
+	X__opaque [56]int8
+}
+type pthreadmutexattr struct {
+	X__sig    int64
+	X__opaque [8]int8
+}
+type pthreadcond struct {
+	X__sig    int64
+	X__opaque [40]int8
+}
+type pthreadcondattr struct {
+	X__sig    int64
+	X__opaque [8]int8
+}
+
+func pthread_attr_init(attr *pthreadattr) int32 {
+	return int32(C.pthread_attr_init((*C.pthread_attr_t)(unsafe.Pointer(attr))))
+}
+
+func pthread_attr_getstacksize(attr *pthreadattr, size *uintptr) int32 {
+	var sz C.size_t
+	ret := int32(C.pthread_attr_getstacksize((*C.pthread_attr_t)(unsafe.Pointer(attr)), (*C.size_t)(unsafe.Pointer(&sz))))
+	if ret != 0 {
+		*size = uintptr(sz)
+	}
+	return ret
+}
+
+func pthread_attr_setdetachstate(attr *pthreadattr, state int) int32 {
+	return int32(C.pthread_attr_setdetachstate((*C.pthread_attr_t)(unsafe.Pointer(attr)), C.int(state)))
+}
+
+func pthread_cond_init(c *pthreadcond, attr *pthreadcondattr) int32 {
+	return int32(C.pthread_cond_init((*C.pthread_cond_t)(unsafe.Pointer(c)), (*C.pthread_condattr_t)(unsafe.Pointer(attr))))
+}
+
+func pthread_cond_signal(c *pthreadcond) int32 {
+	return int32(C.pthread_cond_signal((*C.pthread_cond_t)(unsafe.Pointer(c))))
+}
+
+func pthread_cond_timedwait_relative_np(c *pthreadcond, m *pthreadmutex, t *timespec) int32 {
+	return int32(C.pthread_cond_timedwait((*C.pthread_cond_t)(unsafe.Pointer(c)), (*C.pthread_mutex_t)(unsafe.Pointer(m)), (*C.struct_timespec)(unsafe.Pointer(t))))
+}
+
+func pthread_cond_wait(c *pthreadcond, m *pthreadmutex) int32 {
+	return int32(C.pthread_cond_wait((*C.pthread_cond_t)(unsafe.Pointer(c)), (*C.pthread_mutex_t)(unsafe.Pointer(m))))
+}
+
+func pthread_create(attr *pthreadattr, start uintptr, arg unsafe.Pointer) int32 {
+	var thread pthread
+	return int32(C.pthread_create((*C.pthread_t)(unsafe.Pointer(&thread)), (*C.pthread_attr_t)(unsafe.Pointer(attr)), (*[0]byte)(unsafe.Pointer(start)), arg))
+}
+
+func pthread_kill(t pthread, sig int32) int32 {
+	return int32(C.pthread_kill((C.pthread_t)(unsafe.Pointer(t)), C.int(sig)))
+}
+
+func pthread_mutex_init(m *pthreadmutex, attr *pthreadmutexattr) int32 {
+	return int32(C.pthread_mutex_init((*C.pthread_mutex_t)(unsafe.Pointer(m)), (*C.pthread_mutexattr_t)(unsafe.Pointer(attr))))
+}
+
+func pthread_mutex_lock(m *pthreadmutex) int32 {
+	return int32(C.pthread_mutex_lock((*C.pthread_mutex_t)(unsafe.Pointer(m))))
+}
+
+func pthread_mutex_unlock(m *pthreadmutex) int32 {
+	return int32(C.pthread_mutex_unlock((*C.pthread_mutex_t)(unsafe.Pointer(m))))
+}
+
+func fcntl(fd int, cmd int, arg int) (val int32, errno int32) {
+	ret := C.llgo_fcntl(C.int(fd), C.int(cmd), C.uintptr_t(arg))
+	val = int32(ret)
+	errno = int32(C.llgo_errno())
+	return
+}
+
+type keventt struct {
+	ident  uint64
+	filter int16
+	flags  uint16
+	fflags uint32
+	data   int64
+	udata  *byte
+}
+
+func kevent(kq int32, ch *keventt, nch int32, ev *keventt, nev int32, ts *timespec) int32 {
+	return int32(C.kevent(C.int(kq), (*C.struct_kevent)(unsafe.Pointer(ch)), C.int(nch), (*C.struct_kevent)(unsafe.Pointer(ev)), C.int(nev), (*C.struct_timespec)(unsafe.Pointer(ts))))
+}
+
+func kqueue() int32 {
+	return int32(C.kqueue())
+}
+
+func madvise(addr unsafe.Pointer, n uintptr, flags int32) {
+	C.madvise(addr, C.size_t(n), C.int(flags))
+}
+
+func mlock(addr unsafe.Pointer, n uintptr) {
+	C.mlock(addr, C.size_t(n))
+}
+
+func mmap(addr unsafe.Pointer, n uintptr, prot, flags, fd int32, off uint32) (unsafe.Pointer, int) {
+	return C.mmap(addr, C.size_t(n), C.int(prot), C.int(flags), C.int(fd), C.off_t(off)), 0
+}
+
+func munmap(addr unsafe.Pointer, n uintptr) {
+	C.munmap(addr, C.size_t(n))
+}
+
+func nanotime1() int64 {
+	return int64(C.nanotime())
+}
+
+func raise(sig uint32) {
+	C.raise(C.int(sig))
+}
+
+func raiseproc(sig uint32) {
+	pid := C.getpid()
+	C.kill(pid, C.int(sig))
+}
+
+type usigactiont struct {
+	__sigaction_u [8]byte
+	sa_mask       uint32
+	sa_flags      int32
+}
+
+func sigaction(sig uint32, new *usigactiont, old *usigactiont) {
+	C.sigaction(C.int(sig), (*C.struct_sigaction)(unsafe.Pointer(new)), (*C.struct_sigaction)(unsafe.Pointer(old)))
+}
+
+type sigset uint32
+
+func sigprocmask(how uint32, new *sigset, old *sigset) {
+	C.sigprocmask(C.int(how), (*C.sigset_t)(unsafe.Pointer(new)), (*C.sigset_t)(unsafe.Pointer(old)))
 }

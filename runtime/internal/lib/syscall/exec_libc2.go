@@ -13,9 +13,15 @@ package syscall
 #include <sys/wait.h>
 #include <errno.h>        // errno
 
-static int llgo_errno(void) { return errno; }
-static int llgo_fcntl(int fd, int cmd, int arg) { return fcntl(fd, cmd, arg); }
-static int llgo_ioctl(int fd, unsigned long request, uintptr_t arg) { return ioctl(fd, request, arg); }
+static int llgo_errno(void) {
+	return errno;
+}
+static int llgo_fcntl(int fd, int cmd, uintptr_t arg) {
+	return fcntl(fd, cmd, arg);
+}
+static int llgo_ioctl(int fd, unsigned long request, uintptr_t arg) {
+	return ioctl(fd, request, arg);
+}
 
 #if defined(openbsd)
 static int llgo_dup3(int oldfd, int newfd, int flags) { return dup3(oldfd, newfd, flags); }
@@ -31,17 +37,9 @@ import (
 	"unsafe"
 )
 
-func runtime_BeforeFork() {
-	panic("todo: runtime_BeforeFork")
-}
-
-func runtime_AfterFork() {
-	panic("todo: runtime_AfterFork")
-}
-
-func runtime_AfterForkInChild() {
-	panic("todo: runtime_AfterForkInChild")
-}
+func runtime_BeforeFork()
+func runtime_AfterFork()
+func runtime_AfterForkInChild()
 
 func forkAndExecInChild(argv0 *byte, argv, envv []*byte, chroot, dir *byte, attr *syscall.ProcAttr, sys *syscall.SysProcAttr, pipe int) (pid int, err syscall.Errno) {
 	// Declare all variables at top in case any

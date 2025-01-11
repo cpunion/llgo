@@ -15,19 +15,3 @@
  */
 
 package sync
-
-func runtime_doSpin() {
-	panic("todo: runtime_doSpin")
-}
-
-func runtime_canSpin() bool {
-	panic("todo: runtime_canSpin")
-}
-
-func runtime_procPin() int {
-	panic("todo: runtime_procPin")
-}
-
-func runtime_procUnpin() {
-	panic("todo: runtime_procUnpin")
-}
