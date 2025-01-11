@@ -963,6 +963,7 @@ func NewPackageEx(prog llssa.Program, patches Patches, pkg *ssa.Package, files [
 		pkg.Pkg = pkgTypes
 		patch.Alt.Pkg = pkgTypes
 	}
+	log.Printf("==> NewPackage %s %s\n", pkgName, pkgPath)
 	if pkgPath == llssa.PkgRuntime {
 		prog.SetRuntime(pkgTypes)
 	}
@@ -1034,6 +1035,7 @@ func initFnNameOfHasPatch(name string) string {
 }
 
 func processPkg(ctx *context, ret llssa.Package, pkg *ssa.Package) {
+	log.Printf("==> processPkg %s\n", pkg.Pkg.Path())
 	type namedMember struct {
 		name string
 		val  ssa.Member
