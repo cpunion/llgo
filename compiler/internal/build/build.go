@@ -169,12 +169,14 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	initial, err := packages.LoadEx(dedup, sizes, cfg, patterns...)
 	check(err)
 	mode := conf.Mode
+	var testPkg *packages.Package
 	if mode == ModeTest {
 		for _, pkg := range initial {
 			fmt.Printf("init pkg: %v\n", pkg.PkgPath)
 			// TODO:(lijie): need better way to detect test packages
 			if strings.HasSuffix(pkg.PkgPath, ".test") {
 				fmt.Printf("main test pkg: %v, module: %v\n", pkg.PkgPath, pkg.Module.Dir)
+				testPkg = pkg
 			}
 		}
 	}
@@ -255,7 +257,14 @@ func Do(args []string, conf *Config) ([]Package, error) {
 		nErr := 0
 		for _, pkg := range initial {
 			if pkg.Name == "main" {
-				nErr += linkMainPkg(ctx, pkg, pkgs, linkArgs, conf, mode, verbose)
+				// TODO(lijie): need better way to detect test packages (by imports)
+				linkPkgs := pkgs
+				if testPkg != nil {
+					linkPkgs = filter(pkgs, func(aPkg *aPackage) bool {
+						return aPkg.Package.PkgPath != testPkg.PkgPath
+					})
+				}
+				nErr += linkMainPkg(ctx, pkg, linkPkgs, linkArgs, conf, mode, verbose)
 			}
 		}
 		if nErr > 0 {
@@ -263,6 +272,16 @@ func Do(args []string, conf *Config) ([]Package, error) {
 		}
 	}
 	return dpkg, nil
+}
+
+func filter[T any](arr []T, keep func(T) bool) []T {
+	result := make([]T, 0, len(arr))
+	for _, x := range arr {
+		if keep(x) {
+			result = append(result, x)
+		}
+	}
+	return result
 }
 
 func llgoRuntimeImported(pkgs []*packages.Package) bool {
