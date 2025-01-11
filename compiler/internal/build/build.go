@@ -205,6 +205,9 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	cfg.Dir = env.LLGoRuntimeDir()
 	altPkgs, err := packages.LoadEx(dedup, sizes, cfg, altPkgPaths...)
 	check(err)
+	for _, pkg := range altPkgs {
+		fmt.Printf("alt pkg: %v\n", pkg.PkgPath)
+	}
 
 	noRt := 1
 	prog.SetRuntime(func() *types.Package {
@@ -621,6 +624,7 @@ func altPkgs(initial []*packages.Package, alts ...string) []string {
 
 func altSSAPkgs(prog *ssa.Program, patches cl.Patches, alts []*packages.Package, verbose bool) {
 	packages.Visit(alts, nil, func(p *packages.Package) {
+		log.Printf("altSSAPkgs: %v\n", p.ID)
 		if typs := p.Types; typs != nil && !p.IllTyped {
 			if debugBuild || verbose {
 				log.Println("==> BuildSSA", p.ID)
@@ -630,7 +634,7 @@ func altSSAPkgs(prog *ssa.Program, patches cl.Patches, alts []*packages.Package,
 				path := p.ID[len(altPkgPathPrefix):]
 				patches[path] = cl.Patch{Alt: pkgSSA, Types: typepatch.Clone(typs)}
 				if debugBuild || verbose {
-					log.Println("==> Patching", path)
+					log.Printf("==> Patching %s with %s", path, p.PkgPath)
 				}
 			}
 		}
@@ -837,8 +841,9 @@ func canSkipToBuild(pkgPath string) bool {
 	case "unsafe":
 		return true
 	default:
-		return strings.HasPrefix(pkgPath, "internal/") ||
-			strings.HasPrefix(pkgPath, "runtime/internal/")
+		return false
+		// return strings.HasPrefix(pkgPath, "internal/") ||
+		// 	strings.HasPrefix(pkgPath, "runtime/internal/")
 	}
 }
 
@@ -861,39 +866,42 @@ func findDylibDep(exe, lib string) string {
 type none struct{}
 
 var hasAltPkg = map[string]none{
-	"crypto/hmac":              {},
-	"crypto/md5":               {},
-	"crypto/rand":              {},
-	"crypto/sha1":              {},
-	"crypto/sha256":            {},
-	"crypto/sha512":            {},
-	"crypto/subtle":            {},
-	"fmt":                      {},
-	"go/parser":                {},
-	"hash/crc32":               {},
-	"internal/abi":             {},
-	"internal/bytealg":         {},
-	"internal/itoa":            {},
-	"internal/filepathlite":    {},
-	"internal/oserror":         {},
-	"internal/race":            {},
-	"internal/reflectlite":     {},
-	"internal/stringslite":     {},
-	"internal/syscall/execenv": {},
-	"internal/syscall/unix":    {},
-	"math":                     {},
-	"math/big":                 {},
-	"math/cmplx":               {},
-	"math/rand":                {},
-	"reflect":                  {},
-	"sync":                     {},
-	"sync/atomic":              {},
-	"syscall":                  {},
-	"time":                     {},
-	"os":                       {},
-	"os/exec":                  {},
-	"runtime":                  {},
-	"io":                       {},
+	// "crypto/hmac":              {},
+	// "crypto/md5":               {},
+	// "crypto/rand":              {},
+	// "crypto/sha1":              {},
+	// "crypto/sha256":            {},
+	// "crypto/sha512":            {},
+	// "crypto/subtle":            {},
+	// "fmt":                      {},
+	// "go/parser":                {},
+	// "hash/crc32":               {},
+	"internal/abi":         {},
+	"internal/bytealg":     {},
+	"internal/chacha8rand": {},
+	// "internal/itoa":            {},
+	// "internal/filepathlite":    {},
+	// "internal/oserror":         {},
+	// "internal/race":            {},
+	// "internal/reflectlite":     {},
+	"internal/atomic":         {}, // under go 1.22
+	"internal/runtime/atomic": {}, // go 1.23+
+	// "internal/stringslite":     {},
+	// "internal/syscall/execenv": {},
+	"internal/syscall/unix": {},
+	"math":                  {},
+	// "math/big":                 {},
+	// "math/cmplx":               {},
+	// "math/rand":                {},
+	"reflect":     {},
+	"sync":        {},
+	"sync/atomic": {},
+	"syscall":     {},
+	// "time":    {},
+	// "os":                       {},
+	// "os/exec": {},
+	"runtime": {},
+	// "io": {},
 }
 
 func check(err error) {

@@ -642,17 +642,19 @@ func ignoreName(name string) bool {
 		return true
 	}
 	*/
-	const internal = "internal/"
-	return (strings.HasPrefix(name, internal) && !supportedInternal(name[len(internal):])) ||
-		strings.HasPrefix(name, "runtime/") || strings.HasPrefix(name, "arena.") ||
-		strings.HasPrefix(name, "maps.") || strings.HasPrefix(name, "plugin.")
+	// const internal = "internal/"
+	// return (strings.HasPrefix(name, internal) && !supportedInternal(name[len(internal):])) ||
+	// 	strings.HasPrefix(name, "runtime/") || strings.HasPrefix(name, "arena.") ||
+	// 	strings.HasPrefix(name, "maps.") || strings.HasPrefix(name, "plugin.")
+	return false
 }
 
 func supportedInternal(name string) bool {
-	return strings.HasPrefix(name, "abi.") || strings.HasPrefix(name, "bytealg.") ||
-		strings.HasPrefix(name, "itoa.") || strings.HasPrefix(name, "oserror.") || strings.HasPrefix(name, "race.") ||
-		strings.HasPrefix(name, "reflectlite.") || strings.HasPrefix(name, "stringslite.") || strings.HasPrefix(name, "filepathlite.") ||
-		strings.HasPrefix(name, "syscall/unix.") || strings.HasPrefix(name, "syscall/execenv.")
+	return true
+	// return strings.HasPrefix(name, "abi.") || strings.HasPrefix(name, "bytealg.") ||
+	// 	strings.HasPrefix(name, "itoa.") || strings.HasPrefix(name, "oserror.") || strings.HasPrefix(name, "race.") ||
+	// 	strings.HasPrefix(name, "reflectlite.") || strings.HasPrefix(name, "stringslite.") || strings.HasPrefix(name, "filepathlite.") ||
+	// 	strings.HasPrefix(name, "syscall/unix.") || strings.HasPrefix(name, "syscall/execenv.")
 }
 
 // -----------------------------------------------------------------------------

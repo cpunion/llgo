@@ -137,3 +137,43 @@ func StoreUintptr(addr *uintptr, val uintptr)
 
 //go:linkname StorePointer llgo.atomicStore
 func StorePointer(addr *unsafe.Pointer, val unsafe.Pointer)
+
+func AndInt32(addr *int32, val int32) (new int32) {
+	panic("todo: AndInt32")
+}
+
+func OrInt32(addr *int32, val int32) (new int32) {
+	panic("todo: OrInt32")
+}
+
+func AndInt64(addr *int64, val int64) (new int64) {
+	panic("todo: AndInt64")
+}
+
+func OrInt64(addr *int64, val int64) (new int64) {
+	panic("todo: OrInt64")
+}
+
+func AndUint32(addr *uint32, val uint32) (new uint32) {
+	panic("todo: AndUint32")
+}
+
+func OrUint32(addr *uint32, val uint32) (new uint32) {
+	panic("todo: OrUint32")
+}
+
+func AndUint64(addr *uint64, val uint64) (new uint64) {
+	panic("todo: AndUint64")
+}
+
+func OrUint64(addr *uint64, val uint64) (new uint64) {
+	panic("todo: OrUint64")
+}
+
+func runtime_procPin() int {
+	panic("todo: runtime_procPin")
+}
+
+func runtime_procUnpin() {
+	panic("todo: runtime_procUnpin")
+}

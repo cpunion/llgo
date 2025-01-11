@@ -288,8 +288,31 @@ func Remove(name string) error {
 	return toPathErr("remove", name, ret)
 }
 
-// TODO(xsw):
-// func RemoveAll(path string) error
+func RemoveAll(path string) error {
+	cpath := c.AllocaCStr(path)
+	var st os.StatT
+	ret := os.Stat(cpath, &st)
+	if ret != 0 {
+		return toPathErr("removeAll", path, ret)
+	}
+
+	// If it's a directory, try to remove it
+	if st.Mode&syscall.S_IFDIR != 0 {
+		ret = os.Rmdir(cpath)
+		if ret == 0 {
+			return nil
+		}
+		// If directory is not empty, return error
+		return toPathErr("removeAll", path, ret)
+	}
+
+	// If it's a file, remove it
+	ret = os.Remove(cpath)
+	if ret == 0 {
+		return nil
+	}
+	return toPathErr("removeAll", path, ret)
+}
 
 func Rename(oldpath, newpath string) error {
 	ret := os.Rename(c.AllocaCStr(oldpath), c.AllocaCStr(newpath))
