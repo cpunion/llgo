@@ -169,15 +169,6 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	initial, err := packages.LoadEx(dedup, sizes, cfg, patterns...)
 	check(err)
 	mode := conf.Mode
-	if mode == ModeTest {
-		for _, pkg := range initial {
-			fmt.Printf("init pkg: %v\n", pkg.PkgPath)
-			// TODO:(lijie): need better way to detect test packages
-			if strings.HasSuffix(pkg.PkgPath, ".test") {
-				fmt.Printf("main test pkg: %v, module: %v\n", pkg.PkgPath, pkg.Module.Dir)
-			}
-		}
-	}
 	switch mode {
 	case ModeBuild:
 		if len(initial) == 1 && len(initial[0].CompiledGoFiles) > 0 {
@@ -188,26 +179,10 @@ func Do(args []string, conf *Config) ([]Package, error) {
 			return nil, fmt.Errorf("cannot run multiple packages")
 		}
 	}
-
-	for _, pkg := range initial {
-		fmt.Printf("init pkg info: %v, for test: %v\n", pkg.PkgPath, pkg.ForTest)
-		for _, file := range pkg.Syntax {
-			for _, decl := range file.Decls {
-				// fmt.Printf("decl: %T\n", decl)
-				if decl, ok := decl.(*ast.FuncDecl); ok {
-					fmt.Printf("func: %v\n", decl.Name.Name)
-				}
-			}
-		}
-	}
-
 	altPkgPaths := altPkgs(initial, llssa.PkgRuntime)
 	cfg.Dir = env.LLGoRuntimeDir()
 	altPkgs, err := packages.LoadEx(dedup, sizes, cfg, altPkgPaths...)
 	check(err)
-	for _, pkg := range altPkgs {
-		fmt.Printf("alt pkg: %v\n", pkg.PkgPath)
-	}
 
 	noRt := 1
 	prog.SetRuntime(func() *types.Package {
@@ -232,7 +207,7 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	env := llvm.New("")
 	os.Setenv("PATH", env.BinDir()+":"+os.Getenv("PATH")) // TODO(xsw): check windows
 
-	ctx := &context{env, cfg, progSSA, prog, dedup, patches, make(map[string]none), initial, mode, 0}
+	ctx := &context{env, cfg, progSSA, prog, dedup, patches, make(map[string]none), initial, mode, 0, make(map[*packages.Package]bool), make(map[*packages.Package]bool)}
 	pkgs, err := buildAllPkgs(ctx, initial, verbose)
 	check(err)
 	if mode == ModeGen {
@@ -265,21 +240,14 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	return dpkg, nil
 }
 
-func setNeedRuntimeOrPyInit(pkg *packages.Package, needRuntime, needPyInit bool) {
-	v := []byte{'0', '0'}
-	if needRuntime {
-		v[0] = '1'
-	}
-	if needPyInit {
-		v[1] = '1'
-	}
-	pkg.ID = string(v) // just use pkg.ID to mark it needs runtime
+func setNeedRuntimeOrPyInit(ctx *context, pkg *packages.Package, needRuntime, needPyInit bool) {
+	ctx.needRt[pkg] = needRuntime
+	ctx.neddPyInit[pkg] = needPyInit
 }
 
-func isNeedRuntimeOrPyInit(pkg *packages.Package) (needRuntime, needPyInit bool) {
-	if len(pkg.ID) == 2 {
-		return pkg.ID[0] == '1', pkg.ID[1] == '1'
-	}
+func isNeedRuntimeOrPyInit(ctx *context, pkg *packages.Package) (needRuntime, needPyInit bool) {
+	needRuntime = ctx.needRt[pkg]
+	needPyInit = ctx.neddPyInit[pkg]
 	return
 }
 
@@ -298,6 +266,9 @@ type context struct {
 	initial []*packages.Package
 	mode    Mode
 	nLibdir int
+
+	needRt     map[*packages.Package]bool
+	neddPyInit map[*packages.Package]bool
 }
 
 func buildAllPkgs(ctx *context, initial []*packages.Package, verbose bool) (pkgs []*aPackage, err error) {
@@ -387,7 +358,7 @@ func buildAllPkgs(ctx *context, initial []*packages.Package, verbose bool) (pkgs
 				panic(err)
 			}
 			aPkg.LinkArgs = append(cgoLdflags, pkg.ExportFile)
-			setNeedRuntimeOrPyInit(pkg, prog.NeedRuntime, prog.NeedPyInit)
+			setNeedRuntimeOrPyInit(ctx, pkg, prog.NeedRuntime, prog.NeedPyInit)
 		}
 	}
 	return
@@ -442,7 +413,7 @@ func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, linkArgs
 		if p.ExportFile != "" { // skip packages that only contain declarations
 			aPkg := pkgsMap[p]
 			args = append(args, aPkg.LinkArgs...)
-			need1, need2 := isNeedRuntimeOrPyInit(p)
+			need1, need2 := isNeedRuntimeOrPyInit(ctx, p)
 			if !needRuntime {
 				needRuntime = need1
 			}
@@ -451,12 +422,11 @@ func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, linkArgs
 			}
 		}
 	})
-	entryLLFile, err := genMainModuleFile(llssa.PkgRuntime, pkg.PkgPath, needRuntime, needPyInit)
+	main, err := genMainModuleFile(llssa.PkgRuntime, pkg.PkgPath, needRuntime, needPyInit)
 	if err != nil {
 		panic(err)
 	}
-	defer os.Remove(entryLLFile)
-	args = append(args, entryLLFile)
+	args = append(args, main)
 
 	var aPkg *aPackage
 	for _, v := range pkgs {
@@ -625,11 +595,11 @@ func buildPkg(ctx *context, aPkg *aPackage, verbose bool) (cgoLdflags []string, 
 		pkg.ExportFile += ".ll"
 		os.WriteFile(pkg.ExportFile, []byte(ret.String()), 0644)
 		if debugBuild || verbose {
-			fmt.Fprintf(os.Stderr, "==> Export %s: %s\n", aPkg.PkgPath, pkg.ExportFile)
+			fmt.Fprintf(os.Stderr, "==> Export %s: %s\n", aPkg.ID, pkg.ExportFile)
 		}
 		if IsCheckEnable() {
 			if err, msg := llcCheck(ctx.env, pkg.ExportFile); err != nil {
-				fmt.Fprintf(os.Stderr, "==> lcc %v: %v\n%v\n", pkg.PkgPath, pkg.ExportFile, msg)
+				fmt.Fprintf(os.Stderr, "==> lcc %v: %v\n%v\n", pkg.ID, pkg.ExportFile, msg)
 			}
 		}
 	}
@@ -718,7 +688,6 @@ func allPkgs(ctx *context, initial []*packages.Package, verbose bool) (all []*aP
 }
 
 func createSSAPkg(prog *ssa.Program, p *packages.Package, verbose bool) *ssa.Package {
-	fmt.Printf("createSSAPkg: %v\n", p.ID)
 	pkgSSA := prog.ImportedPackage(p.ID)
 	if pkgSSA == nil {
 		if debugBuild || verbose {
