@@ -60,7 +60,7 @@ uint8_t atomic_Load8(uint8_t *ptr)
     return __atomic_load_n(ptr, __ATOMIC_SEQ_CST);
 }
 
-uint32_t atomic_Loaduint(uint32_t *ptr)
+uintptr_t atomic_Loaduint(uintptr_t *ptr)
 {
     return __atomic_load_n(ptr, __ATOMIC_SEQ_CST);
 }
