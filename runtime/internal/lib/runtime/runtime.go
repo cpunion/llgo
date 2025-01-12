@@ -31,6 +31,8 @@ package runtime
 #include <sys/time.h>
 #include <sys/event.h>
 #include <sys/mman.h>
+#include <sys/types.h>
+#include <sys/sysctl.h>
 
 static int llgo_errno(void) {
 	return errno;
@@ -458,4 +460,8 @@ type sigset uint32
 
 func sigprocmask(how uint32, new *sigset, old *sigset) {
 	C.sigprocmask(C.int(how), (*C.sigset_t)(unsafe.Pointer(new)), (*C.sigset_t)(unsafe.Pointer(old)))
+}
+
+func sysctl(mib *uint32, miblen uint32, oldp *byte, oldlenp *uintptr, newp *byte, newlen uintptr) int32 {
+	return int32(C.sysctl((*C.int)(unsafe.Pointer(mib)), C.uint(miblen), unsafe.Pointer(oldp), (*C.size_t)(unsafe.Pointer(oldlenp)), unsafe.Pointer(newp), C.size_t(newlen)))
 }

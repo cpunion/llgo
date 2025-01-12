@@ -28,6 +28,8 @@ package syscall
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
+#include <sys/types.h>
+#include <sys/sysctl.h>
 
 static int llgo_errno(void) {
 	return errno;
@@ -541,4 +543,18 @@ func wait4(pid int, wstatus *C.int, options int, rusage *syscall.Rusage) (wpid i
 		return 0, syscall.Errno(C.llgo_errno())
 	}
 	return int(ret), nil
+}
+
+func sysctl(mib []C.int, old *byte, oldlen *uintptr, new *byte, newlen uintptr) (err error) {
+	var _p0 *C.int
+	if len(mib) > 0 {
+		_p0 = &mib[0]
+	} else {
+		_p0 = (*C.int)(unsafe.Pointer(&_zero))
+	}
+	if ret := C.sysctl(_p0, C.uint(len(mib)), unsafe.Pointer(old), (*C.size_t)(unsafe.Pointer(oldlen)), unsafe.Pointer(new), C.size_t(newlen)); ret != 0 {
+		err = syscall.Errno(ret)
+		return
+	}
+	return
 }
