@@ -46,7 +46,7 @@ const (
 )
 
 var (
-	debugInstr bool = true
+	debugInstr bool
 )
 
 // SetDebug sets debug flags.
