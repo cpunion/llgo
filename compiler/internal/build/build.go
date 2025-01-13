@@ -875,17 +875,22 @@ func findDylibDep(exe, lib string) string {
 type none struct{}
 
 var hasAltPkg = map[string]none{
-	"internal/bytealg":        {},
-	"internal/chacha8rand":    {},
-	"internal/atomic":         {}, // under go 1.22
-	"internal/runtime/atomic": {}, // go 1.23+
-	"internal/syscall/unix":   {},
-	"math":                    {},
-	"reflect":                 {},
-	"sync":                    {},
-	"sync/atomic":             {},
-	"syscall":                 {},
-	"runtime":                 {},
+	"crypto/internal/boring/sig": {},
+	"crypto/sha256":              {},
+	"crypto/subtle":              {},
+	"hash/crc32":                 {},
+	"internal/abi":               {},
+	"internal/bytealg":           {},
+	"internal/chacha8rand":       {},
+	"internal/atomic":            {}, // under go 1.22
+	"internal/runtime/atomic":    {}, // go 1.23+
+	"internal/syscall/unix":      {},
+	"math":                       {},
+	"reflect":                    {},
+	"sync":                       {},
+	"sync/atomic":                {},
+	"syscall":                    {},
+	"runtime":                    {},
 }
 
 func check(err error) {
