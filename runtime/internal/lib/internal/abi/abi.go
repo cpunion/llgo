@@ -1,31 +1,33 @@
-/*
- * Copyright (c) 2024 The GoPlus Authors (goplus.org). All rights reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package abi
 
-// llgo:skipall
-import (
-	"unsafe"
+// FuncPC* intrinsics.
+//
+// CAREFUL: In programs with plugins, FuncPC* can return different values
+// for the same function (because there are actually multiple copies of
+// the same function in the address space). To be safe, don't use the
+// results of this function in any == expression. It is only safe to
+// use the result as an address at which to start executing code.
 
-	"github.com/goplus/llgo/runtime/abi"
-)
+// FuncPCABI0 returns the entry PC of the function f, which must be a
+// direct reference of a function defined as ABI0. Otherwise it is a
+// compile-time error.
+//
+// Implemented as a compile intrinsic.
+func FuncPCABI0(f interface{}) uintptr {
+	// This implementation is never called directly.
+	// The compiler replaces calls to this function with machine code.
+	panic("FuncPCABI0 is a compiler intrinsic and should not be called directly")
+}
 
-type InterfaceType = abi.InterfaceType
-
-func NoEscape(p unsafe.Pointer) unsafe.Pointer {
-	x := uintptr(p)
-	return unsafe.Pointer(x ^ 0)
+// FuncPCABIInternal returns the entry PC of the function f. If f is a
+// direct reference of a function, it must be defined as ABIInternal.
+// Otherwise it is a compile-time error. If f is not a direct reference
+// of a defined function, it assumes that f is a func value. Otherwise
+// the behavior is undefined.
+//
+// Implemented as a compile intrinsic.
+func FuncPCABIInternal(f interface{}) uintptr {
+	// This implementation is never called directly.
+	// The compiler replaces calls to this function with machine code.
+	panic("FuncPCABIInternal is a compiler intrinsic and should not be called directly")
 }
