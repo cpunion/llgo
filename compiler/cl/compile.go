@@ -196,7 +196,7 @@ func isCgoCmacro(name string) bool {
 }
 
 func isCgoVar(name string) bool {
-	return strings.HasPrefix(name, "__cgo_")
+	return strings.HasPrefix(name, "__cgo_") || strings.HasPrefix(name, "_cgo_")
 }
 
 func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Function, llssa.PyObjRef, int) {
@@ -774,6 +774,9 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 	}
 	switch v := instr.(type) {
 	case *ssa.Store:
+		if isCgoVar(v.Val.Name()) {
+			return
+		}
 		va := v.Addr
 		if va, ok := va.(*ssa.IndexAddr); ok {
 			if args, ok := p.isVArgs(va.X); ok { // varargs: this is a varargs store
