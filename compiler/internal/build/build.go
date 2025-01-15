@@ -570,9 +570,9 @@ func buildPkg(ctx *context, aPkg *aPackage, verbose bool) (cgoLdflags []string, 
 	if altPkg := aPkg.AltPkg; altPkg != nil {
 		syntax = append(syntax, altPkg.Syntax...)
 	}
-	showDetail := verbose && pkgExists(ctx.initial, pkg)
+	showDetail := verbose //&& pkgExists(ctx.initial, pkg)
 	if showDetail {
-		llssa.SetDebug(llssa.DbgFlagAll)
+		// llssa.SetDebug(llssa.DbgFlagAll)
 		cl.SetDebug(cl.DbgFlagAll)
 	}
 

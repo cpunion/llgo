@@ -46,8 +46,8 @@ const (
 )
 
 var (
-	debugInstr   bool
-	debugGoSSA   bool
+	debugInstr   bool = true
+	debugGoSSA   bool = true
 	debugSymbols bool
 )
 
