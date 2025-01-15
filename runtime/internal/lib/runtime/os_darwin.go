@@ -17,223 +17,39 @@
 package runtime
 
 /*
- #cgo darwin CFLAGS: -DDARWIN
- #cgo linux CFLAGS: -DLINUX
- #cgo windows CFLAGS: -DWINDOWS
+#include <unistd.h>
+#include <stdlib.h>
+#include <pthread.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <time.h>
+#include <signal.h>
+#include <sys/time.h>
+#include <sys/event.h>
+#include <sys/mman.h>
+#include <sys/types.h>
+#include <sys/sysctl.h>
 
- #include <unistd.h>
- #include <stdlib.h>
- #include <pthread.h>
- #include <errno.h>
- #include <fcntl.h>
- #include <time.h>
- #include <signal.h>
- #include <sys/time.h>
- #include <sys/event.h>
- #include <sys/mman.h>
- #include <sys/types.h>
- #include <sys/sysctl.h>
+static int llgo_errno(void) {
+	return errno;
+}
 
- static int llgo_errno(void) {
-	 return errno;
- }
+static void llgo_reset_errno() {
+	errno = 0;
+}
 
- static void llgo_reset_errno() {
-	 errno = 0;
- }
-
- static int llgo_fcntl(int fd, int cmd, uintptr_t arg) {
-	 return fcntl(fd, cmd, arg);
- }
-
- #ifdef DARWIN
- #include <mach/mach_time.h>
-
- uint64_t nanotime() {
-	 static mach_timebase_info_data_t timebase;
-	 static int timebase_initialized = 0;
-
-	 if (!timebase_initialized) {
-		 mach_timebase_info(&timebase);
-		 timebase_initialized = 1;
-	 }
-
-	 uint64_t time = mach_absolute_time();
-	 return time * timebase.numer / timebase.denom;
- }
-
- #elif defined(LINUX)
- #include <time.h>
-
- uint64_t nanotime() {
-	 struct timespec ts;
-	 clock_gettime(CLOCK_MONOTONIC, &ts);
-	 return (uint64_t)ts.tv_sec * 1000000000 + (uint64_t)ts.tv_nsec;
- }
-
- #elif defined(WINDOWS)
- #include <windows.h>
-
- uint64_t nanotime() {
-	 LARGE_INTEGER counter, frequency;
-	 QueryPerformanceCounter(&counter);
-	 QueryPerformanceFrequency(&frequency);
-	 return counter.QuadPart * 1000000000ULL / frequency.QuadPart;
- }
- #endif
+static int llgo_fcntl(int fd, int cmd, uintptr_t arg) {
+	return fcntl(fd, cmd, arg);
+}
 */
 import "C"
 
-// llgo:skip Goexit
 import (
 	"unsafe"
-
-	"github.com/goplus/llgo/runtime/abi"
 )
 
-// GOROOT returns the root of the Go tree. It uses the
-// GOROOT environment variable, if set at process start,
-// or else the root used during the Go build.
-func GOROOT() string {
-	/*
-		 s := gogetenv("GOROOT")
-		 if s != "" {
-			 return s
-		 }
-		 return defaultGOROOT
-	*/
-	panic("todo: GOROOT")
-}
-
-func GC() {
-	panic("todo: GC")
-}
-
-func Goexit() {
-	C.pthread_exit(nil)
-}
-
-func LockOSThread() {
-}
-
-func UnlockOSThread() {
-}
-
-func exit(code int32) {
-	C.exit(C.int(code))
-}
-
-func usleep(usec uint32) {
-	C.usleep(C.uint(usec))
-}
-
-func usleep_no_g(usec uint32) {
-	C.usleep(C.uint(usec))
-}
-
-func write(fd uintptr, p unsafe.Pointer, n int32) int32 {
-	return int32(C.write(C.int(fd), p, C.size_t(n)))
-}
-
-//go:linkname memmove C.memmove
-func memmove(dst, src unsafe.Pointer, size uintptr)
-
-func getcallerpc() uintptr {
-	panic("todo: getcallerpc")
-}
-
-func getcallersp() uintptr {
-	panic("todo: getcallersp")
-}
-
-func systemstack(fn func()) {
-	fn()
-}
-
-func mcall(fn func(*unsafe.Pointer)) {
-	fn(nil)
-	panic("todo: mcall")
-}
-
-func entersyscall() {
-	panic("todo: entersyscall")
-}
-
-func exitsyscall() {
-	panic("todo: exitsyscall")
-}
-
-type RegArgs struct{}
-
-func reflectcall(stackArgsType *abi.Type, fn, stackArgs unsafe.Pointer, stackArgsSize, stackRetOffset, frameSize uint32, regArgs *RegArgs) {
-	panic("todo: reflectcall")
-}
-
-func memhash(p unsafe.Pointer, h, s uintptr) uintptr {
-	panic("todo: memhash")
-}
-
-func memequal(x, y *any, size uintptr) bool {
-	panic("todo: memequal")
-}
-
-func memclrNoHeapPointers(ptr unsafe.Pointer, n uintptr) {
-	panic("todo: memclrNoHeapPointers")
-}
-
-func procyield(cycles uint32) {
-	panic("todo: procyield")
-}
-
-func asyncPreempt() {
-	panic("todo: asyncPreempt")
-}
-
-//go:nosplit
-func mstart() {
-	panic("todo: mstart")
-}
-
-//go:nosplit
-func mstart_stub() {
-	panic("todo: mstart_stub")
-}
-
-//go:nosplit
-func sigtramp() {
-	panic("todo: sigtramp")
-}
-
-//go:nosplit
-func cgoSigtramp() {
-	panic("todo: cgoSigtramp")
-}
-
-func FuncPCABIInternal(f interface{}) uintptr {
-	panic("todo: FuncPCABIInternal")
-}
-
-func FuncPCABI0(f interface{}) uintptr {
-	panic("todo: FuncPCABI0")
-}
-
-func asmcgocall_no_g(fn, arg unsafe.Pointer) {
-	panic("todo: asmcgocall_no_g")
-}
-
-func asmcgocall(fn, arg unsafe.Pointer) int32 {
-	panic("todo: asmcgocall")
-}
-
-func getfp() uintptr {
-	panic("todo: getfp")
-}
-
-func publicationBarrier() {
-	panic("todo: publicationBarrier")
-}
-
 type guintptr uintptr
+type sigset uint32
 
 type gobuf struct {
 	// The offsets of sp, pc, and g are known to (hard-coded in) libmach.
@@ -417,33 +233,8 @@ func kqueue() int32 {
 	return int32(C.kqueue())
 }
 
-func madvise(addr unsafe.Pointer, n uintptr, flags int32) {
-	C.madvise(addr, C.size_t(n), C.int(flags))
-}
-
-func mlock(addr unsafe.Pointer, n uintptr) {
-	C.mlock(addr, C.size_t(n))
-}
-
-func mmap(addr unsafe.Pointer, n uintptr, prot, flags, fd int32, off uint32) (unsafe.Pointer, int) {
-	return C.mmap(addr, C.size_t(n), C.int(prot), C.int(flags), C.int(fd), C.off_t(off)), 0
-}
-
-func munmap(addr unsafe.Pointer, n uintptr) {
-	C.munmap(addr, C.size_t(n))
-}
-
-func nanotime1() int64 {
-	return int64(C.nanotime())
-}
-
-func raise(sig uint32) {
-	C.raise(C.int(sig))
-}
-
-func raiseproc(sig uint32) {
-	pid := C.getpid()
-	C.kill(pid, C.int(sig))
+func sysctl(mib *uint32, miblen uint32, oldp *byte, oldlenp *uintptr, newp *byte, newlen uintptr) int32 {
+	return int32(C.sysctl((*C.int)(unsafe.Pointer(mib)), C.uint(miblen), unsafe.Pointer(oldp), (*C.size_t)(unsafe.Pointer(oldlenp)), unsafe.Pointer(newp), C.size_t(newlen)))
 }
 
 type usigactiont struct {
@@ -456,12 +247,6 @@ func sigaction(sig uint32, new *usigactiont, old *usigactiont) {
 	C.sigaction(C.int(sig), (*C.struct_sigaction)(unsafe.Pointer(new)), (*C.struct_sigaction)(unsafe.Pointer(old)))
 }
 
-type sigset uint32
-
 func sigprocmask(how uint32, new *sigset, old *sigset) {
 	C.sigprocmask(C.int(how), (*C.sigset_t)(unsafe.Pointer(new)), (*C.sigset_t)(unsafe.Pointer(old)))
-}
-
-func sysctl(mib *uint32, miblen uint32, oldp *byte, oldlenp *uintptr, newp *byte, newlen uintptr) int32 {
-	return int32(C.sysctl((*C.int)(unsafe.Pointer(mib)), C.uint(miblen), unsafe.Pointer(oldp), (*C.size_t)(unsafe.Pointer(oldlenp)), unsafe.Pointer(newp), C.size_t(newlen)))
 }
