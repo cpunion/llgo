@@ -63,10 +63,6 @@ const (
 	debugBuild = packages.DebugPackagesLoad
 )
 
-func needLLFile(mode Mode) bool {
-	return mode != ModeBuild
-}
-
 type Config struct {
 	BinPath   string
 	AppExt    string   // ".exe" on Windows, empty on Unix
@@ -168,13 +164,13 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	initial, err := packages.LoadEx(dedup, sizes, cfg, patterns...)
 	check(err)
 	mode := conf.Mode
-	switch mode {
-	case ModeBuild:
-		if len(initial) == 1 && len(initial[0].CompiledGoFiles) > 0 {
-			mode = ModeInstall
-		}
-	case ModeRun:
-		if len(initial) > 1 {
+	if len(initial) > 1 {
+		switch mode {
+		case ModeBuild:
+			if conf.OutFile != "" {
+				return nil, fmt.Errorf("cannot build multiple packages with -o")
+			}
+		case ModeRun:
 			return nil, fmt.Errorf("cannot run multiple packages")
 		}
 	}
@@ -207,7 +203,8 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	env := llvm.New("")
 	os.Setenv("PATH", env.BinDir()+":"+os.Getenv("PATH")) // TODO(xsw): check windows
 
-	ctx := &context{env, cfg, progSSA, prog, dedup, patches, make(map[string]none), initial, mode, 0}
+	output := mode != ModeBuild || conf.OutFile != ""
+	ctx := &context{env, cfg, progSSA, prog, dedup, patches, make(map[string]none), initial, mode, 0, output}
 	pkgs, err := buildAllPkgs(ctx, initial, verbose)
 	check(err)
 	if mode == ModeGen {
@@ -226,7 +223,7 @@ func Do(args []string, conf *Config) ([]Package, error) {
 		linkArgs = append(linkArgs, pkg.LinkArgs...)
 	}
 
-	if mode != ModeBuild {
+	if ctx.output {
 		nErr := 0
 		for _, pkg := range initial {
 			if pkg.Name == "main" {
@@ -273,6 +270,7 @@ type context struct {
 	initial []*packages.Package
 	mode    Mode
 	nLibdir int
+	output  bool
 }
 
 func buildAllPkgs(ctx *context, initial []*packages.Package, verbose bool) (pkgs []*aPackage, err error) {
@@ -441,7 +439,7 @@ func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, linkArgs
 
 	args = append(args, linkArgs...)
 
-	if needLLFile(mode) {
+	if ctx.output {
 		lpkg := aPkg.LPkg
 		os.WriteFile(pkg.ExportFile, []byte(lpkg.String()), 0644)
 	}
@@ -587,7 +585,7 @@ func buildPkg(ctx *context, aPkg *aPackage, verbose bool) (cgoLdflags []string, 
 	check(err)
 	aPkg.LPkg = ret
 	cgoLdflags, err = buildCgo(ctx, aPkg, aPkg.Package.Syntax, externs, verbose)
-	if needLLFile(ctx.mode) {
+	if ctx.output {
 		pkg.ExportFile += ".ll"
 		os.WriteFile(pkg.ExportFile, []byte(ret.String()), 0644)
 		if debugBuild || verbose {
