@@ -14,4 +14,26 @@
  * limitations under the License.
  */
 
-package sync
+package unix
+
+/*
+#include <unistd.h>
+*/
+import "C"
+import (
+	"syscall"
+	_ "unsafe"
+
+	psyscall "github.com/goplus/llgo/runtime/internal/lib/syscall"
+)
+
+func faccessat(dirfd int, path string, mode uint32, flags int) error {
+	p, err := psyscall.CharPtrFromString(path)
+	if err != nil {
+		return err
+	}
+	if ret := C.faccessat(C.int(dirfd), (*C.char)(p), C.int(mode), C.int(flags)); ret != 0 {
+		return syscall.Errno(ret)
+	}
+	return nil
+}
