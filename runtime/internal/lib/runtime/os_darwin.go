@@ -48,65 +48,45 @@ import (
 	"unsafe"
 )
 
-type guintptr uintptr
 type sigset uint32
 
-type gobuf struct {
-	// The offsets of sp, pc, and g are known to (hard-coded in) libmach.
-	//
-	// ctxt is unusual with respect to GC: it may be a
-	// heap-allocated funcval, so GC needs to track it, but it
-	// needs to be set and cleared from assembly, where it's
-	// difficult to have write barriers. However, ctxt is really a
-	// saved, live register, and we only ever exchange it between
-	// the real register and the gobuf. Hence, we treat it as a
-	// root during stack scanning, which means assembly that saves
-	// and restores it doesn't need write barriers. It's still
-	// typed as a pointer so that any other writes from Go get
-	// write barriers.
-	sp   uintptr
-	pc   uintptr
-	g    guintptr
-	ctxt unsafe.Pointer
-	ret  uintptr
-	lr   uintptr
-	bp   uintptr // for framepointer-enabled architectures
+type mOS struct {
+	initialized bool
+	mutex       pthreadmutex
+	cond        pthreadcond
+	count       int
 }
 
 func gogo(buf *gobuf) {
 	panic("todo: gogo")
 }
 
-func Stack() []byte {
-	panic("todo: Stack")
-}
+// type _panic struct {
+// 	argp unsafe.Pointer // pointer to arguments of deferred call run during panic; cannot move - known to liblink
+// 	arg  any            // argument to panic
+// 	link *_panic        // link to earlier panic
 
-type _panic struct {
-	argp unsafe.Pointer // pointer to arguments of deferred call run during panic; cannot move - known to liblink
-	arg  any            // argument to panic
-	link *_panic        // link to earlier panic
+// 	// startPC and startSP track where _panic.start was called.
+// 	startPC uintptr
+// 	startSP unsafe.Pointer
 
-	// startPC and startSP track where _panic.start was called.
-	startPC uintptr
-	startSP unsafe.Pointer
+// 	// The current stack frame that we're running deferred calls for.
+// 	sp unsafe.Pointer
+// 	lr uintptr
+// 	fp unsafe.Pointer
 
-	// The current stack frame that we're running deferred calls for.
-	sp unsafe.Pointer
-	lr uintptr
-	fp unsafe.Pointer
+// 	// retpc stores the PC where the panic should jump back to, if the
+// 	// function last returned by _panic.next() recovers the panic.
+// 	retpc uintptr
 
-	// retpc stores the PC where the panic should jump back to, if the
-	// function last returned by _panic.next() recovers the panic.
-	retpc uintptr
+// 	// Extra state for handling open-coded defers.
+// 	deferBitsPtr *uint8
+// 	slotsPtr     unsafe.Pointer
 
-	// Extra state for handling open-coded defers.
-	deferBitsPtr *uint8
-	slotsPtr     unsafe.Pointer
-
-	recovered   bool // whether this panic has been recovered
-	goexit      bool
-	deferreturn bool
-}
+// 	recovered   bool // whether this panic has been recovered
+// 	goexit      bool
+// 	deferreturn bool
+// }
 
 type timeval struct {
 	tv_sec  int64

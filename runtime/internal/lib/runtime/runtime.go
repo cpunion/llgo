@@ -58,6 +58,7 @@ import (
 	"github.com/goplus/llgo/runtime/abi"
 )
 
+// llgo:skip main preprintpanics fatalpanic printpanics acquirem allocm atomicwb acquireSudog chansend chanrecv addfinalizer adjustpointers asyncPreempt2 badPointer bulkBarrierPreWrite bulkBarrierBitmap bulkBarrierPreWriteSrcOnly makeslicecopy growslice callCgoSymbolizer expandCgoFrames traceback2 printCgoTraceback printOneCgoTraceback canpanic cgoBindM needAndBindM cgoCheckPtrWrite cgoContextPCs cgoNoCallback SetCgoTraceback cgocall cgocallbackg cgocallbackg1 cheaprand checkptrBase
 type RegArgs struct{}
 
 // GOROOT returns the root of the Go tree. It uses the
@@ -86,6 +87,14 @@ func LockOSThread() {
 }
 
 func UnlockOSThread() {
+}
+
+func deferreturn() {
+	panic("deferreturn")
+}
+
+func gopanic(e any) {
+	panic("gopanic")
 }
 
 func exit(code int32) {

@@ -164,3 +164,11 @@ func AndUint64(addr *uint64, val uint64) (new uint64) {
 func OrUint64(addr *uint64, val uint64) (new uint64) {
 	panic("todo: OrUint64")
 }
+
+func AndUintptr(addr *uintptr, mask uintptr) (old uintptr) {
+	panic("todo: AndUintptr")
+}
+
+func OrUintptr(addr *uintptr, mask uintptr) (old uintptr) {
+	panic("todo: OrUintptr")
+}

@@ -44,12 +44,20 @@ static long sys_futex(uint32_t *uaddr, int futex_op, uint32_t val,
                     uint32_t *uaddr2, uint32_t val3) {
 	return syscall(SYS_futex, uaddr, futex_op, val, timeout, uaddr2, val3);
 }
+
+static void sys_sched_yield() {
+	syscall(SYS_sched_yield);
+}
+
+static void sys_setitimer(int mode, struct itimerval *new, struct itimerval *old) {
+	syscall(SYS_setitimer, mode, new, old);
+}
 */
 import "C"
 import (
 	"unsafe"
 
-	"github.com/goplus/llgo/runtime/internal/lib/internal/abi"
+	"github.com/goplus/llgo/runtime/internal/lib/internal/runtime/atomic"
 )
 
 var iscgo bool
@@ -63,26 +71,24 @@ type sigactiont struct {
 	sa_mask     uint64
 }
 
+type mOS struct {
+	// profileTimer holds the ID of the POSIX interval timer for profiling CPU
+	// usage on this thread.
+	//
+	// It is valid when the profileTimerValid field is true. A thread
+	// creates and manages its own timer, and these fields are read and written
+	// only by this thread. But because some of the reads on profileTimerValid
+	// are in signal handling code, this field should be atomic type.
+	profileTimer      int32
+	profileTimerValid atomic.Bool
+
+	// needPerThreadSyscall indicates that a per-thread syscall is required
+	// for doAllThreadsSyscall.
+	needPerThreadSyscall atomic.Uint8
+}
+
 //go:linkname sigfillset runtime.sigfillset
 func sigfillset(mask *uint64)
-
-// //go:linkname sighandler runtime.sighandler
-func sighandler(sig uint32, info *uintptr, ctxt unsafe.Pointer, gp *uintptr)
-
-func setsig(i uint32, fn uintptr) {
-	var sa sigactiont
-	sa.sa_flags = C.SA_SIGINFO | C.SA_ONSTACK | C.SA_RESTART
-	sigfillset(&sa.sa_mask)
-	if fn == abi.FuncPCABIInternal(sighandler) { // abi.FuncPCABIInternal(sighandler) matches the callers in signal_unix.go
-		if iscgo {
-			fn = abi.FuncPCABI0(cgoSigtramp)
-		} else {
-			fn = abi.FuncPCABI0(sigtramp)
-		}
-	}
-	sa.sa_handler = fn
-	sigaction(i, &sa, nil)
-}
 
 // just avoid LLGo binop untyped bug: https://github.com/goplus/llgo/issues/961
 func setsigstack(i uint32) {
@@ -144,6 +150,10 @@ func timer_delete(timerid int32) int32 {
 	return int32(C.timer_delete(*(*C.timer_t)(unsafe.Pointer(&timerid))))
 }
 
+func setitimer(mode int32, new, old *itimerval) {
+	C.sys_setitimer(C.int(mode), (*C.struct_itimerval)(unsafe.Pointer(new)), (*C.struct_itimerval)(unsafe.Pointer(old)))
+}
+
 //go:linkname time_now time.now
 func time_now() (sec int64, nsec int32, mono int64) {
 	sec, nsec = walltime()
@@ -174,4 +184,12 @@ func mprotect(addr unsafe.Pointer, n uintptr, prot int32) (ret int32, errno int3
 	ret = int32(C.mprotect(addr, C.size_t(n), C.int(prot)))
 	errno = int32(C.llgo_errno())
 	return
+}
+
+func osyield() {
+
+}
+
+func sigreturn__sigaction() {
+	C.sigreturn__sigaction()
 }

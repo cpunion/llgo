@@ -19,7 +19,31 @@ package atomic
 */
 import "C"
 
-import "unsafe"
+import (
+	"sync/atomic"
+	"unsafe"
+)
+
+type Bool = atomic.Bool
+type Uintptr = atomic.Uintptr
+type Uint32 = atomic.Uint32
+type Int32 = atomic.Int32
+type Uint64 = atomic.Uint64
+type Int64 = atomic.Int64
+type Pointer[T any] struct {
+	atomic.Pointer[T]
+}
+
+type noCopy struct{}
+
+// Lock is a no-op used by -copylocks checker from `go vet`.
+func (*noCopy) Lock()   {}
+func (*noCopy) Unlock() {}
+
+type Uint8 struct {
+	noCopy noCopy
+	value  uint8
+}
 
 //go:linkname Load C.atomic_Load
 func Load(addr *uint32) uint32
