@@ -9,6 +9,7 @@ package runtime
 #include <signal.h>
 #include <unistd.h>
 #include <time.h>
+#include <sys/time.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <linux/futex.h>
