@@ -14,6 +14,11 @@ import (
 
 type guintptr uintptr
 
+type funcval struct {
+	fn uintptr
+	// variable-size, fn-specific data here
+}
+
 type gobuf struct {
 	// The offsets of sp, pc, and g are known to (hard-coded in) libmach.
 	//
@@ -464,16 +469,7 @@ const (
 	stwForTestResetDebugLog                         // "ResetDebugLog (test)"
 )
 
-type worldStop struct {
-	reason           stwReason
-	startedStopping  int64
-	finishedStopping int64
-	stoppingCPUTime  int64
-}
-
 func stopTheWorld(reason stwReason) worldStop
-
-func startTheWorld(stw worldStop)
 
 func Stack(buf []byte, all bool) int {
 	var stw worldStop

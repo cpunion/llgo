@@ -578,9 +578,9 @@ func buildPkg(ctx *context, aPkg *aPackage, verbose bool) (cgoLdflags []string, 
 	if altPkg := aPkg.AltPkg; altPkg != nil {
 		syntax = append(syntax, altPkg.Syntax...)
 	}
-	showDetail := verbose && pkgExists(ctx.initial, pkg)
+	showDetail := verbose //&& pkgExists(ctx.initial, pkg)
 	if showDetail {
-		llssa.SetDebug(llssa.DbgFlagAll)
+		// llssa.SetDebug(llssa.DbgFlagAll)
 		cl.SetDebug(cl.DbgFlagAll)
 	}
 
@@ -643,9 +643,9 @@ func altPkgs(initial []*packages.Package, alts ...string) []string {
 func altSSAPkgs(prog *ssa.Program, patches cl.Patches, alts []*packages.Package, verbose bool) {
 	packages.Visit(alts, nil, func(p *packages.Package) {
 		if typs := p.Types; typs != nil && !p.IllTyped {
-			if debugBuild || verbose {
-				log.Println("==> BuildSSA", p.ID)
-			}
+			// if debugBuild || verbose {
+			log.Println("==> BuildSSA", p.ID)
+			// }
 			pkgSSA := prog.CreatePackage(typs, p.Syntax, p.TypesInfo, true)
 			if strings.HasPrefix(p.ID, altPkgPathPrefix) {
 				path := p.ID[len(altPkgPathPrefix):]
@@ -697,9 +697,9 @@ func allPkgs(ctx *context, initial []*packages.Package, verbose bool) (all []*aP
 func createSSAPkg(prog *ssa.Program, p *packages.Package, verbose bool) *ssa.Package {
 	pkgSSA := prog.ImportedPackage(p.ID)
 	if pkgSSA == nil {
-		if debugBuild || verbose {
-			log.Println("==> BuildSSA", p.ID)
-		}
+		// if debugBuild || verbose {
+		log.Println("==> BuildSSA", p.ID)
+		// }
 		pkgSSA = prog.CreatePackage(p.Types, p.Syntax, p.TypesInfo, true)
 		pkgSSA.Build() // TODO(xsw): build concurrently
 	}

@@ -63,6 +63,7 @@ import (
 
 var iscgo bool
 
+// llgo:skip newosproc
 type sigset [2]uint32
 
 type sigactiont struct {
