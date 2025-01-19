@@ -195,3 +195,7 @@ func osyield() {
 func sigreturn__sigaction() {
 	C.sigreturn__sigaction()
 }
+
+func clone(flags int32, stk, mp, gp, fn unsafe.Pointer) int32 {
+	panic("todo: clone")
+}

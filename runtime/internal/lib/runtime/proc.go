@@ -14,6 +14,10 @@ var inForkedChild bool
 
 var mainStarted bool
 
+type gList struct {
+	head guintptr
+}
+
 // worldStop provides context from the stop-the-world required by the
 // start-the-world.
 type worldStop struct {
@@ -21,6 +25,13 @@ type worldStop struct {
 	startedStopping  int64
 	finishedStopping int64
 	stoppingCPUTime  int64
+}
+
+type sysmontick struct {
+	schedtick   uint32
+	syscalltick uint32
+	schedwhen   int64
+	syscallwhen int64
 }
 
 func newproc(fn *funcval) {
@@ -35,8 +46,6 @@ func newproc(fn *funcval) {
 func startTheWorld(w worldStop) {
 	panic("startTheWorld")
 }
-
-type p struct{}
 
 // pMask is an atomic bitstring with one bit per P.
 type pMask []uint32

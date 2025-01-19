@@ -57,10 +57,6 @@ type mOS struct {
 	count       int
 }
 
-func gogo(buf *gobuf) {
-	panic("todo: gogo")
-}
-
 // type _panic struct {
 // 	argp unsafe.Pointer // pointer to arguments of deferred call run during panic; cannot move - known to liblink
 // 	arg  any            // argument to panic

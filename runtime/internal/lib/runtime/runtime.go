@@ -89,6 +89,10 @@ func LockOSThread() {
 func UnlockOSThread() {
 }
 
+func gogo(buf *gobuf) {
+	panic("todo: gogo")
+}
+
 func deferreturn() {
 	panic("deferreturn")
 }

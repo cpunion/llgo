@@ -7,6 +7,26 @@ type gTraceState struct {
 	traceSchedResourceState
 }
 
+// pTraceState is per-P state for the tracer.
+type pTraceState struct {
+	traceSchedResourceState
+
+	// mSyscallID is the ID of the M this was bound to before entering a syscall.
+	mSyscallID int64
+
+	// maySweep indicates the sweep events should be traced.
+	// This is used to defer the sweep start event until a span
+	// has actually been swept.
+	maySweep bool
+
+	// inSweep indicates that at least one sweep event has been traced.
+	inSweep bool
+
+	// swept and reclaimed track the number of bytes swept and reclaimed
+	// by sweeping in the current sweep loop (while maySweep was true).
+	swept, reclaimed uintptr
+}
+
 // traceBlockReason is an enumeration of reasons a goroutine might block.
 // This is the interface the rest of the runtime uses to tell the
 // tracer why a goroutine blocked. The tracer then propagates this information
