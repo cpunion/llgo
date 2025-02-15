@@ -57,6 +57,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{github.token}}
         run: |
+          find .sysroot -iname Analysis.h
           docker run \
             --rm \
             -e GITHUB_TOKEN=${GITHUB_TOKEN} \
