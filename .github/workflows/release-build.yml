@@ -57,6 +57,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{github.token}}
         run: |
+          ls .sysroot/linux/amd64/usr/include/
           find .sysroot -iname Analysis.h
           docker run \
             --rm \
