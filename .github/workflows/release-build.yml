@@ -49,6 +49,8 @@ jobs:
           GITHUB_TOKEN: ${{github.token}}
         run: |
           set -x
+          ls .sysroot/linux/
+          ls .sysroot/linux/arm64/
           ls .sysroot/linux/arm64/usr/include/
           ls .sysroot/linux/arm64/usr/include/llvm-c-18
           ls .sysroot/linux/arm64/usr/include/llvm-c-18/llvm-c
