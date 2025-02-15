@@ -58,9 +58,9 @@ jobs:
           GITHUB_TOKEN: ${{github.token}}
         run: |
           set -x
-          ls .sysroot/linux/amd64/usr/include/
-          ls .sysroot/linux/amd64/usr/include/llvm-c-18
-          ls .sysroot/linux/amd64/usr/include/llvm-c-18/llvm-c
+          ls .sysroot/linux/arm64/usr/include/
+          ls .sysroot/linux/arm64/usr/include/llvm-c-18
+          ls .sysroot/linux/arm64/usr/include/llvm-c-18/llvm-c
           find .sysroot -iname Analysis.h
           docker run \
             --rm \
