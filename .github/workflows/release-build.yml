@@ -35,6 +35,8 @@ jobs:
           go-version: 1.23.x
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
+        with:
+          image: tonistiigi/binfmt:qemu-v9.2.0-46
       - name: Download Darwin sysroot tarball
         uses: actions/download-artifact@v4
         with:
