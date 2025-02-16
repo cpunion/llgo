@@ -41,8 +41,11 @@ type Defer struct {
 func Recover() (ret any) {
 	ptr := excepKey.Get()
 	if ptr != nil {
-		excepKey.Set(nil)
 		ret = *(*any)(ptr)
+		if ret == goexit {
+			return nil
+		}
+		excepKey.Set(nil)
 		c.Free(ptr)
 	}
 	return
