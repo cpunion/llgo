@@ -1,4 +1,4 @@
-//go:build !byollvm && linux && llvm19
+//go:build !byollvm && darwin && amd64 && !llvm14 && !llvm15 && !llvm16 && !llvm17 && !llvm18 && !llvm19
 
 /*
  * Copyright (c) 2024 The GoPlus Authors (goplus.org). All rights reserved.
@@ -18,4 +18,4 @@
 
 package llvm
 
-const ldLLVMConfigBin = "/usr/lib/llvm-19/bin/llvm-config"
+const ldLLVMConfigBin = "/usr/local/opt/llvm/bin/llvm-config"
