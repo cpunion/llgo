@@ -359,9 +359,9 @@ Follow these steps to generate the `llgo` command (its usage is the same as the 
 
 ```sh
 brew update
-brew install llvm@19 lld@19 bdw-gc openssl cjson libffi libuv pkg-config
+brew install llvm@20 lld@20 bdw-gc openssl cjson libffi libuv pkg-config
 brew install python@3.12 # optional
-brew link --overwrite llvm@19 lld@19 libffi
+brew link --overwrite llvm@20 lld@20 libffi
 # curl https://raw.githubusercontent.com/goplus/llgo/refs/heads/main/install.sh | bash
 ./install.sh
 ```
@@ -373,10 +373,10 @@ brew link --overwrite llvm@19 lld@19 libffi
 <!-- embedme doc/_readme/scripts/install_ubuntu.sh#L2-L1000 -->
 
 ```sh
-echo "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-19 main" | sudo tee /etc/apt/sources.list.d/llvm.list
+echo "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-20 main" | sudo tee /etc/apt/sources.list.d/llvm.list
 wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
 sudo apt-get update
-sudo apt-get install -y llvm-19-dev clang-19 libclang-19-dev lld-19 pkg-config libgc-dev libssl-dev zlib1g-dev libcjson-dev libsqlite3-dev libunwind-dev libuv1-dev
+sudo apt-get install -y llvm-20-dev clang-20 libclang-20-dev lld-20 pkg-config libgc-dev libssl-dev zlib1g-dev libcjson-dev libsqlite3-dev libunwind-dev libuv1-dev
 sudo apt-get install -y python3.12-dev # optional
 #curl https://raw.githubusercontent.com/goplus/llgo/refs/heads/main/install.sh | bash
 ./install.sh
