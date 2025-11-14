@@ -97,17 +97,17 @@ func TestRewriteValueNoDot(t *testing.T) {
 
 func TestIsStringTypeDefault(t *testing.T) {
 	ctx := &context{}
-	if ctx.isStringType(types.NewPointer(types.Typ[types.Int])) {
+	if ctx.isStringPtrType(types.NewPointer(types.Typ[types.Int])) {
 		t.Fatalf("expected non-string pointer to return false")
 	}
 }
 
 func TestIsStringTypeBranches(t *testing.T) {
 	ctx := &context{}
-	if ctx.isStringType(types.NewSlice(types.Typ[types.String])) {
+	if ctx.isStringPtrType(types.NewSlice(types.Typ[types.String])) {
 		t.Fatalf("slice should trigger default branch and return false")
 	}
-	if ctx.isStringType(nil) {
+	if ctx.isStringPtrType(nil) {
 		t.Fatalf("nil type should return false")
 	}
 }
@@ -148,5 +148,19 @@ var VarStruct = wrapper{v: 1}
 	ir := compileWithRewrites(t, src, map[string]string{"VarStruct": "rewrite_struct"})
 	if strings.Contains(ir, `c"rewrite_struct"`) {
 		t.Fatalf("non-string variables must not be rewritten:\n%s", ir)
+	}
+}
+
+func TestRewriteIgnoresAliasString(t *testing.T) {
+	const src = `package rewritepkg
+type alias string
+var VarAlias alias = "alias-default"
+`
+	ir := compileWithRewrites(t, src, map[string]string{"VarAlias": "rewrite_alias"})
+	if strings.Contains(ir, `c"rewrite_alias"`) {
+		t.Fatalf("named string types should not be rewritten:\n%s", ir)
+	}
+	if !strings.Contains(ir, `c"alias-default"`) {
+		t.Fatalf("alias-default literal should remain:\n%s", ir)
 	}
 }

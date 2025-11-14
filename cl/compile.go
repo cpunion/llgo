@@ -130,8 +130,6 @@ type context struct {
 	rewrites   map[string]string
 }
 
-const maxStringTypeDepth = 64
-
 func (p *context) rewriteValue(name string) (string, bool) {
 	if p.rewrites == nil {
 		return "", false
@@ -145,19 +143,11 @@ func (p *context) rewriteValue(name string) (string, bool) {
 	return val, ok
 }
 
-func (p *context) isStringType(typ types.Type) bool {
-	depth := 0
-	for typ != nil && depth < maxStringTypeDepth {
-		depth++
-		switch t := typ.Underlying().(type) {
-		case *types.Basic:
-			return t.Kind() == types.String
-		case *types.Pointer:
-			typ = t.Elem()
-			continue
-		default:
-			return false
-		}
+func (p *context) isStringPtrType(typ types.Type) bool {
+	if ptr, ok := typ.(*types.Pointer); ok {
+		typ = ptr.Elem()
+		basic, ok := typ.(*types.Basic)
+		return ok && basic.Kind() == types.String
 	}
 	return false
 }
@@ -178,7 +168,7 @@ func (p *context) rewriteInitStore(store *ssa.Store, g *ssa.Global) (string, boo
 	if _, ok := store.Val.(*ssa.Const); !ok {
 		return "", false
 	}
-	if !p.isStringType(g.Type()) {
+	if !p.isStringPtrType(g.Type()) {
 		return "", false
 	}
 	value, ok := p.rewriteValue(p.globalFullName(g))
@@ -236,7 +226,7 @@ func (p *context) compileGlobal(pkg llssa.Package, gbl *ssa.Global) {
 	}
 	g := pkg.NewVar(name, typ, llssa.Background(vtype))
 	if value, ok := p.rewriteValue(name); ok {
-		if p.isStringType(typ) {
+		if p.isStringPtrType(typ) {
 			g.Init(pkg.ConstString(value))
 		} else {
 			log.Printf("warning: ignoring rewrite for non-string variable %s (type: %v)", name, typ)
