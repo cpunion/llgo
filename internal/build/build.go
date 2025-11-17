@@ -132,6 +132,8 @@ type Config struct {
 	CheckLinkArgs bool // check linkargs valid
 	ForceEspClang bool // force to use esp-clang
 	Tags          string
+	SizeReport    bool   // print size report after successful build
+	SizeFormat    string // size report format: text,json
 	// GlobalRewrites specifies compile-time overrides for global string variables.
 	// Keys are fully qualified package paths (e.g. "main" or "github.com/user/pkg").
 	// Each Rewrites entry maps variable names to replacement string values. Only
@@ -204,6 +206,12 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	}
 	if conf.BuildMode == "" {
 		conf.BuildMode = BuildModeExe
+	}
+	if conf.SizeReport && conf.SizeFormat == "" {
+		conf.SizeFormat = "text"
+	}
+	if err := ensureSizeReporting(conf); err != nil {
+		return nil, err
 	}
 	// Handle crosscompile configuration first to set correct GOOS/GOARCH
 	forceEspClang := conf.ForceEspClang || conf.Target != ""
@@ -374,6 +382,11 @@ func Do(args []string, conf *Config) ([]Package, error) {
 			err = linkMainPkg(ctx, pkg, allPkgs, outFmts.Out, verbose)
 			if err != nil {
 				return nil, err
+			}
+			if conf.Mode == ModeBuild && conf.SizeReport {
+				if err := reportBinarySize(outFmts.Out, conf.SizeFormat); err != nil {
+					return nil, err
+				}
 			}
 
 			// Generate C headers for c-archive and c-shared modes before linking
