@@ -113,22 +113,6 @@ func (p *Pinner) Unpin() {
 	// TODO: implement object unpinning
 }
 
-// Cleanup is a handle to a cleanup call for a specific object.
-type Cleanup struct {
-	fn uintptr
-}
-
-// Stop cancels the cleanup call.
-func (c Cleanup) Stop() {
-	// TODO: implement cleanup stop
-}
-
-// AddCleanup sets a cleanup call for ptr.
-func AddCleanup[T, S any](ptr *T, cleanup func(S), arg S) Cleanup {
-	// TODO: implement cleanup registration
-	return Cleanup{}
-}
-
 // BlockProfileRecord describes blocking events.
 type BlockProfileRecord struct {
 	Count  int64
