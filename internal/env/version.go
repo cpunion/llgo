@@ -17,6 +17,7 @@
 package env
 
 import (
+	"fmt"
 	"runtime/debug"
 	"strings"
 )
@@ -35,6 +36,7 @@ func Version() string {
 		return buildVersion
 	}
 	info, ok := readBuildInfo()
+	fmt.Printf("version: %v\n", info.Main.Version)
 	if ok && info.Main.Version != "" && !strings.HasSuffix(info.Main.Version, "+dirty") {
 		return info.Main.Version
 	}
