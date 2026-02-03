@@ -26,9 +26,14 @@ func ReserveFlags(goarch string) []string {
 		return nil
 	}
 	switch goarch {
-	case "amd64", "386":
-		// Ensure floating point uses XMM so MMX regs remain free for ctx.
-		return []string{"-msse2"}
+	case "amd64":
+		// Disallow x87 usage so MMX regs remain free for ctx.
+		// Note: -mno-80387 disables long double support.
+		return []string{"-mno-80387"}
+	case "386":
+		// Force SSE for float/double and disallow x87 so MMX regs remain free for ctx.
+		// Note: -mno-80387 disables long double support.
+		return []string{"-mfpmath=sse", "-msse2", "-mno-80387"}
 	default:
 		// Use target-feature to reserve the register across backends.
 		// Suppress warning about clobbering reserved registers in inline asm.

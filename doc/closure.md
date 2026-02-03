@@ -113,7 +113,10 @@ Semantics:
 
 - Native builds reserve the ctx register using target features
   (`+reserve-<reg>`) on platforms that support it (arm64/riscv64). For x86/x86_64,
-  `-msse2` is used to keep MMX regs free for the ctx register.
+  MMX is used as the ctx register and x87 is disabled to avoid MMX/x87 aliasing:
+  - amd64: `-mno-80387`
+  - 386: `-mfpmath=sse -msse2 -mno-80387`
+  Note: `-mno-80387` disables long double support.
 - `FuncPCABI0` and `FuncPCABIInternal` return the real symbol address.
 - Interface method closures pass receiver as first argument; ctx register
   is still written for uniform semantics.
