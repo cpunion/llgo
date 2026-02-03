@@ -97,17 +97,12 @@ Semantics:
 
 ## Register Access Semantics
 
-- `llvm.read_register`/`llvm.write_register` are used on targets that support
-  reserving a general register via target-feature (arm64/riscv64). This lets
-  the backend use the reserved register directly without extra moves.
-- The read is intentionally performed once at function entry and cached.
-  LLVM may legally move the read across calls because it has no side effects.
-  This is safe on callee-saved targets (arm64/riscv64) since the ABI requires
-  callees to preserve the register value.
-- On x86/x86_64, MMX regs are caller-saved and LLVM intrinsic support is
-  limited. The x86 path is treated as a separate special case and keeps
-  inline asm with side effects (and memory clobber) to prevent reordering
-  across calls, since caller-saved regs may be clobbered by C calls.
+- Context register reads/writes use per-arch inline asm templates
+  (amd64/386/arm64/riscv64). The emitted asm keeps minimal constraints and
+  does not add side effects or memory clobbers.
+- The read is performed once at function entry and cached.
+  On callee-saved targets (arm64/riscv64), the ABI preserves the register
+  value across calls.
 
 ## Notes
 

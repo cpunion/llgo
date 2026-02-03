@@ -246,7 +246,7 @@ define i64 @caller(ptr %0, i64 %1) {
 _llgo_0:
   %2 = load ptr, ptr %0, align 8
   %3 = getelementptr i8, ptr %0, i64 16
-  call void asm sideeffect "movq $0, %mm0", "r,~{mm0},~{memory}"(ptr %3)
+  call void asm "movq $0, %mm0", "r,~{mm0}"(ptr %3)
   %4 = call i64 %2(i64 %1)
   ret i64 %4
 }
@@ -391,7 +391,7 @@ _llgo_0:
   %10 = getelementptr i8, ptr %5, i64 16
   %11 = load ptr, ptr %10, align 8
   %12 = getelementptr i8, ptr %5, i64 16
-  call void asm sideeffect "movq $0, %mm0", "r,~{mm0},~{memory}"(ptr %12)
+  call void asm "movq $0, %mm0", "r,~{mm0}"(ptr %12)
   %13 = call i64 (ptr, ...) %9(ptr %11, i64 100, i64 200)
   ret i64 %13
 }
@@ -573,8 +573,8 @@ source_filename = "test"
 
 define void @test_ctx_reg() {
 _llgo_0:
-  call void asm sideeffect "movq $0, %mm0", "r,~{mm0},~{memory}"(ptr null)
-  %0 = call ptr asm sideeffect "movq %mm0, $0", "=r,~{memory}"()
+  call void asm "movq $0, %mm0", "r,~{mm0}"(ptr null)
+  %0 = call ptr asm "movq %mm0, $0", "=r"()
   ret void
 }
 `)
@@ -603,7 +603,7 @@ func TestCallClosureViaRegister(t *testing.T) {
 	// Verify the IR:
 	// 1. Uses inline asm to write to ctx register before call
 	// 2. The function call does NOT have ctx as first parameter
-	if !strings.Contains(ir, `asm sideeffect "movq $0, %mm0", "r,~{mm0},~{memory}"`) {
+	if !strings.Contains(ir, `asm "movq $0, %mm0", "r,~{mm0}"`) {
 		t.Errorf("Expected ctx register write before closure call:\n%s", ir)
 	}
 	// The call should use the function directly, no ctx param
@@ -642,7 +642,7 @@ func TestClosureFunctionReadsCtxFromReg(t *testing.T) {
 
 	ir := pkg.String()
 	// Verify that the function reads ctx from register via inline asm
-	if !strings.Contains(ir, `asm sideeffect "movq %mm0, $0", "=r,~{memory}"`) {
+	if !strings.Contains(ir, `asm "movq %mm0, $0", "=r"`) {
 		t.Errorf("Expected ctx register read in closure function:\n%s", ir)
 	}
 	// Verify no ctx parameter in function signature
@@ -736,7 +736,7 @@ func TestCallClosureConditional(t *testing.T) {
 	ir := pkg.String()
 
 	// Verify: should NOT have inline asm (no ctx register)
-	if strings.Contains(ir, "asm sideeffect") {
+	if strings.Contains(ir, "asm") {
 		t.Errorf("Expected no inline asm for fallback calling:\n%s", ir)
 	}
 	// Expect conditional call paths with and without env param.
@@ -1338,7 +1338,7 @@ source_filename = "test"
 
 define i64 @iife_inner(i64 %0) {
 _llgo_0:
-  %1 = call ptr asm sideeffect "movq %mm0, $0", "=r,~{memory}"()
+  %1 = call ptr asm "movq %mm0, $0", "=r"()
   %2 = load { i64 }, ptr %1, align 4
   %3 = extractvalue { i64 } %2, 0
   %4 = add i64 %3, %0
@@ -1356,7 +1356,7 @@ _llgo_0:
   store i64 %0, ptr %4, align 4
   %5 = load ptr, ptr %1, align 8
   %6 = getelementptr i8, ptr %1, i64 16
-  call void asm sideeffect "movq $0, %mm0", "r,~{mm0},~{memory}"(ptr %6)
+  call void asm "movq $0, %mm0", "r,~{mm0}"(ptr %6)
   %7 = call i64 %5(i64 5)
   ret i64 %7
 }
@@ -1394,11 +1394,11 @@ define i64 @applyTwice(ptr %0, i64 %1) {
 _llgo_0:
   %2 = load ptr, ptr %0, align 8
   %3 = getelementptr i8, ptr %0, i64 16
-  call void asm sideeffect "movq $0, %mm0", "r,~{mm0},~{memory}"(ptr %3)
+  call void asm "movq $0, %mm0", "r,~{mm0}"(ptr %3)
   %4 = call i64 %2(i64 %1)
   %5 = load ptr, ptr %0, align 8
   %6 = getelementptr i8, ptr %0, i64 16
-  call void asm sideeffect "movq $0, %mm0", "r,~{mm0},~{memory}"(ptr %6)
+  call void asm "movq $0, %mm0", "r,~{mm0}"(ptr %6)
   %7 = call i64 %5(i64 %4)
   ret i64 %7
 }
@@ -1433,7 +1433,7 @@ source_filename = "test"
 
 define void @defer_body() {
 _llgo_0:
-  %0 = call ptr asm sideeffect "movq %mm0, $0", "=r,~{memory}"()
+  %0 = call ptr asm "movq %mm0, $0", "=r"()
   %1 = load { i64 }, ptr %0, align 4
   %2 = extractvalue { i64 } %1, 0
   ret void
@@ -1469,7 +1469,7 @@ source_filename = "test"
 
 define void @goroutine_body() {
 _llgo_0:
-  %0 = call ptr asm sideeffect "movq %mm0, $0", "=r,~{memory}"()
+  %0 = call ptr asm "movq %mm0, $0", "=r"()
   %1 = load { i64 }, ptr %0, align 4
   %2 = extractvalue { i64 } %1, 0
   ret void
@@ -1523,7 +1523,7 @@ func TestGoRoutineWrapperCtxIR(t *testing.T) {
 		t.Fatalf("missing ctx asm template for %s", target.GOARCH)
 	}
 	// WriteCtxReg uses the per-arch inline asm template with ctx register clobber.
-	expected := fmt.Sprintf(`asm sideeffect %q, "r,~%s,~{memory}"`, writeAsm, reg.Constraint)
+	expected := fmt.Sprintf(`asm %q, "r,~%s"`, writeAsm, reg.Constraint)
 	if !strings.Contains(block, expected) {
 		t.Fatalf("expected ctx register write in goroutine wrapper:\n%s\ngot %q", block, expected)
 	}
@@ -1562,7 +1562,7 @@ source_filename = "test"
 
 define i64 @nested_inner() {
 _llgo_0:
-  %0 = call ptr asm sideeffect "movq %mm0, $0", "=r,~{memory}"()
+  %0 = call ptr asm "movq %mm0, $0", "=r"()
   %1 = load { i64, i64 }, ptr %0, align 4
   %2 = extractvalue { i64, i64 } %1, 0
   %3 = extractvalue { i64, i64 } %1, 1

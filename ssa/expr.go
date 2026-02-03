@@ -23,8 +23,8 @@ import (
 	"go/token"
 	"go/types"
 	"log"
+	"runtime"
 	"strconv"
-	"strings"
 
 	"github.com/goplus/llvm"
 )
@@ -300,91 +300,105 @@ func (b Builder) InlineAsmFull(instruction, constraints string, retType Type, ex
 	return Expr{b.impl.CreateCall(ftype, asm, vals, ""), retType}
 }
 
-type ctxAsmTemplate struct {
-	write   string
-	read    string
-	dialect llvm.InlineAsmDialect
+func (b Builder) ctxRegMetadataValue(reg string) (llvm.Value, llvm.Type) {
+	md := b.Prog.ctx.MDString(reg)
+	node := b.Prog.ctx.MDNode([]llvm.Metadata{md})
+	val := b.Prog.ctx.MDAsValue(node)
+	return val, val.Type()
 }
 
-var ctxAsmTemplates = map[string]ctxAsmTemplate{
-	"amd64": {
-		write:   "movq $0, %%%s",
-		read:    "movq %%%s, $0",
-		dialect: llvm.InlineAsmDialectATT,
-	},
-	"386": {
-		write:   "movd $0, %%%s",
-		read:    "movd %%%s, $0",
-		dialect: llvm.InlineAsmDialectATT,
-	},
-	"arm64": {
-		write:   "mov %s, $0",
-		read:    "mov $0, %s",
-		dialect: llvm.InlineAsmDialectATT,
-	},
-	"riscv64": {
-		write:   "mv %s, $0",
-		read:    "mv $0, %s",
-		dialect: llvm.InlineAsmDialectATT,
-	},
-}
-
-func ctxAsmStrings(goarch, reg string) (write string, read string, dialect llvm.InlineAsmDialect, ok bool) {
-	tmpl, ok := ctxAsmTemplates[goarch]
-	if !ok {
-		return "", "", llvm.InlineAsmDialectATT, false
+func (b Builder) registerIntrinsic(name string, ret llvm.Type, params []llvm.Type) (llvm.Value, llvm.Type) {
+	mod := b.Pkg.mod
+	fn := mod.NamedFunction(name)
+	ftype := llvm.FunctionType(ret, params, false)
+	if fn.IsNil() {
+		fn = llvm.AddFunction(mod, name, ftype)
 	}
-	write = fmt.Sprintf(tmpl.write, reg)
-	read = fmt.Sprintf(tmpl.read, reg)
-	return write, read, tmpl.dialect, true
+	return fn, ftype
 }
 
-func ctxRegCallerSaved(goarch string) bool {
+func (b Builder) registerIntrinsicName(kind string, bits int) string {
+	return fmt.Sprintf("llvm.%s_register.i%d", kind, bits)
+}
+
+func ctxRegisterAsm(goarch, regName string) (writeAsm, readAsm string, ok bool) {
 	switch goarch {
-	case "amd64", "386":
-		return true
+	case "amd64":
+		return "movq $0, %" + regName, "movq %" + regName + ", $0", true
+	case "386":
+		return "movd $0, %" + regName, "movd %" + regName + ", $0", true
+	case "arm64":
+		return "mov " + regName + ", $0", "mov $0, " + regName, true
+	case "riscv64":
+		return "mv " + regName + ", $0", "mv $0, " + regName, true
 	default:
-		return false
+		return "", "", false
 	}
+}
+
+func ctxAsmStrings(goarch, regName string) (write string, read string, dialect llvm.InlineAsmDialect, ok bool) {
+	write, read, ok = ctxRegisterAsm(goarch, regName)
+	return write, read, llvm.InlineAsmDialectATT, ok
+}
+
+// WriteRegister writes a pointer value into the named register via LLVM intrinsics.
+func (b Builder) WriteRegister(reg string, val Expr) {
+	ptrType := b.Prog.VoidPtr()
+	casted := b.Convert(ptrType, val)
+	if debugInstr {
+		log.Printf("WriteRegister %v to %s\n", casted.impl, reg)
+	}
+	if reg == "" {
+		panic("ssa: WriteRegister called without register name")
+	}
+	mdVal, mdType := b.ctxRegMetadataValue(reg)
+	intTy := b.Prog.Uintptr().ll
+	regVal := b.impl.CreatePtrToInt(casted.impl, intTy, "")
+	name := b.registerIntrinsicName("write", intTy.IntTypeWidth())
+	fn, ftype := b.registerIntrinsic(name, b.Prog.tyVoid(), []llvm.Type{mdType, intTy})
+	b.impl.CreateCall(ftype, fn, []llvm.Value{mdVal, regVal}, "")
+}
+
+// ReadRegister reads a pointer value from the named register via LLVM intrinsics.
+func (b Builder) ReadRegister(reg string) Expr {
+	if debugInstr {
+		log.Printf("ReadRegister from %s\n", reg)
+	}
+	if reg == "" {
+		panic("ssa: ReadRegister called without register name")
+	}
+	mdVal, mdType := b.ctxRegMetadataValue(reg)
+	intTy := b.Prog.Uintptr().ll
+	name := b.registerIntrinsicName("read", intTy.IntTypeWidth())
+	fn, ftype := b.registerIntrinsic(name, intTy, []llvm.Type{mdType})
+	ret := b.impl.CreateCall(ftype, fn, []llvm.Value{mdVal}, "")
+	ptrType := b.Prog.VoidPtr()
+	ptr := b.impl.CreateIntToPtr(ret, ptrType.ll, "")
+	return Expr{ptr, ptrType}
 }
 
 // WriteCtxReg writes a pointer value to the closure context register.
 func (b Builder) WriteCtxReg(val Expr) {
-	ptrType := b.Prog.VoidPtr()
-	casted := b.Convert(ptrType, val)
 	reg := b.Prog.target.CtxRegister()
 	if debugInstr {
-		log.Printf("WriteCtxReg %v to %s\n", casted.impl, reg.Name)
+		log.Printf("WriteCtxReg to %s\n", reg.Name)
 	}
 	if reg.Name == "" {
 		panic("ssa: WriteCtxReg called without ctx register support")
 	}
-	writeAsm, _, dialect, ok := ctxAsmStrings(b.Prog.target.GOARCH, reg.Name)
+	goarch := b.Prog.target.GOARCH
+	if goarch == "" {
+		goarch = runtime.GOARCH
+	}
+	writeAsm, _, ok := ctxRegisterAsm(goarch, reg.Name)
 	if !ok {
-		panic("ssa: WriteCtxReg called without ctx register asm template")
+		panic("ssa: WriteCtxReg missing asm template")
 	}
+	ptrType := b.Prog.VoidPtr()
+	casted := b.Convert(ptrType, val)
+	constraints := fmt.Sprintf("r,~%s", reg.Constraint)
 	ftype := llvm.FunctionType(b.Prog.tyVoid(), []llvm.Type{ptrType.ll}, false)
-	parts := []string{"r"}
-	if reg.Constraint != "" {
-		parts = append(parts, "~"+reg.Constraint)
-	}
-	if ctxRegCallerSaved(b.Prog.target.GOARCH) {
-		parts = append(parts, "~{memory}")
-	}
-	if len(parts) > 1 {
-		seen := make(map[string]bool, len(parts))
-		uniq := parts[:0]
-		for _, p := range parts {
-			if seen[p] {
-				continue
-			}
-			seen[p] = true
-			uniq = append(uniq, p)
-		}
-		parts = uniq
-	}
-	constraints := strings.Join(parts, ",")
-	asm := llvm.InlineAsm(ftype, writeAsm, constraints, true, false, dialect, false)
+	asm := llvm.InlineAsm(ftype, writeAsm, constraints, false, false, llvm.InlineAsmDialectATT, false)
 	b.impl.CreateCall(ftype, asm, []llvm.Value{casted.impl}, "")
 }
 
@@ -397,19 +411,19 @@ func (b Builder) ReadCtxReg() Expr {
 	if reg.Name == "" {
 		panic("ssa: ReadCtxReg called without ctx register support")
 	}
-	ptrType := b.Prog.VoidPtr()
-	_, readAsm, dialect, ok := ctxAsmStrings(b.Prog.target.GOARCH, reg.Name)
+	goarch := b.Prog.target.GOARCH
+	if goarch == "" {
+		goarch = runtime.GOARCH
+	}
+	_, readAsm, ok := ctxRegisterAsm(goarch, reg.Name)
 	if !ok {
-		panic("ssa: ReadCtxReg called without ctx register asm template")
+		panic("ssa: ReadCtxReg missing asm template")
 	}
+	ptrType := b.Prog.VoidPtr()
 	ftype := llvm.FunctionType(ptrType.ll, nil, false)
-	constraints := "=r"
-	if ctxRegCallerSaved(b.Prog.target.GOARCH) {
-		constraints += ",~{memory}"
-	}
-	asm := llvm.InlineAsm(ftype, readAsm, constraints, true, false, dialect, false)
-	ret := b.impl.CreateCall(ftype, asm, nil, "")
-	return Expr{ret, ptrType}
+	asm := llvm.InlineAsm(ftype, readAsm, "=r", false, false, llvm.InlineAsmDialectATT, false)
+	val := b.impl.CreateCall(ftype, asm, nil, "")
+	return Expr{val, ptrType}
 }
 
 // GoString returns a Go string
