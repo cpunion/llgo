@@ -31,6 +31,7 @@ import (
 	"go/types"
 
 	"github.com/goplus/llgo/internal/packages"
+	llabi "github.com/goplus/llgo/ssa/abi"
 	llvm "github.com/xgo-dev/llvm"
 
 	llssa "github.com/goplus/llgo/ssa"
@@ -157,6 +158,9 @@ func filterAbiSymbol(abiInit int, sym *llssa.AbiSymbol) bool {
 			return true
 		}
 	case *types.Struct:
+		if abiInit&llssa.ReflectMethodMask != 0 && llabi.IsClosure(sym.Raw.(*types.Struct)) {
+			return true
+		}
 		if abiInit&llssa.ReflectStructOf != 0 {
 			return true
 		}
