@@ -551,7 +551,7 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 	noInlineDirective := hasNoInlineDirective(f)
 	runtimeStackNoInline := needsRuntimeStackNoInline(pkgTypes, f)
 	pcLineNoInline := p.needsPCLineNoInline(f)
-	if disableInline || noInlineDirective || runtimeStackNoInline || pcLineNoInline {
+	if disableInline || noInlineDirective || runtimeStackNoInline || pcLineNoInline || functionUsesRecover(f) {
 		fn.Inline(llssa.NoInline)
 	}
 	if noInlineDirective || runtimeStackNoInline || pcLineNoInline {
@@ -1603,6 +1603,25 @@ func (p *context) getLocalVariable(b llssa.Builder, fn *ssa.Function, v *types.V
 	t := p.type_(v.Type(), llssa.InGo)
 	scope := b.DIScope(p.fn, v.Parent())
 	return b.DIVarAuto(scope, pos, v.Name(), t)
+}
+
+func functionUsesRecover(fn *ssa.Function) bool {
+	if fn == nil {
+		return false
+	}
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			call, ok := instr.(ssa.CallInstruction)
+			if !ok {
+				continue
+			}
+			builtin, ok := call.Common().Value.(*ssa.Builtin)
+			if ok && builtin.Name() == "recover" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (p *context) compileFunction(v *ssa.Function) (goFn llssa.Function, pyFn llssa.PyObjRef, kind int) {

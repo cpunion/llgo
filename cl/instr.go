@@ -1632,9 +1632,16 @@ func (p *context) deferStackOwner(fn *ssa.Function) llssa.Function {
 }
 
 func (p *context) emitDo(b llssa.Builder, act llssa.DoAction, ds *explicitDeferStack, fn llssa.Expr, buildCall func(llssa.Builder, llssa.Expr, ...llssa.Expr) llssa.Expr, args ...llssa.Expr) llssa.Expr {
+	return p.emitDoEx(b, act, ds, false, fn, buildCall, args...)
+}
+
+func (p *context) emitDoEx(b llssa.Builder, act llssa.DoAction, ds *explicitDeferStack, maskRecover bool, fn llssa.Expr, buildCall func(llssa.Builder, llssa.Expr, ...llssa.Expr) llssa.Expr, args ...llssa.Expr) llssa.Expr {
 	if ds != nil {
 		b.DeferTo(ds.owner, ds.stack, fn, buildCall, args...)
 		return llssa.Nil
+	}
+	if maskRecover && act == llssa.Call {
+		return b.MaskRecoverCall(fn, buildCall, args...)
 	}
 	return b.Do(act, fn, buildCall, args...)
 }
@@ -1791,6 +1798,7 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 	p.recordCallerLocationForCall(b, call)
 	p.emitPCLineLabel(b, call.Pos())
 	cv := call.Value
+	maskRecover := act == llssa.Call && functionUsesRecover(call.StaticCallee())
 	if mthd := call.Method; mthd != nil {
 		reflectCheck := p.reflectTypeMethodCheck(call, mthd)
 		o := p.compileValue(b, cv)
@@ -1800,7 +1808,7 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 			hasVArg = fnHasVArg
 		}
 		args := p.compileValues(b, call.Args, hasVArg)
-		ret = p.emitDo(b, act, ds, fn, llssa.Builder.Call, args...)
+		ret = p.emitDoEx(b, act, ds, maskRecover, fn, llssa.Builder.Call, args...)
 		b.EmitReflectTypeMethodCheckedLoad(ret, reflectCheck)
 		return
 	}
@@ -1831,7 +1839,7 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 			}
 		}
 		args := p.compileValues(b, args, kind)
-		ret = p.emitDo(b, act, ds, llssa.Builtin(fn), llssa.Builder.Call, args...)
+		ret = p.emitDoEx(b, act, ds, maskRecover, llssa.Builtin(fn), llssa.Builder.Call, args...)
 	case *ssa.Function:
 		aFn, pyFn, ftype := p.compileFunction(cv)
 		// TODO(xsw): check ca != llssa.Call
@@ -1840,13 +1848,13 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 			p.inCFunc = true
 			args := p.compileValues(b, args, kind)
 			p.inCFunc = false
-			ret = p.emitDo(b, act, ds, aFn.Expr, llssa.Builder.Call, args...)
+			ret = p.emitDoEx(b, act, ds, maskRecover, aFn.Expr, llssa.Builder.Call, args...)
 		case goFunc:
 			args := p.compileValues(b, args, kind)
-			ret = p.emitDo(b, act, ds, aFn.Expr, llssa.Builder.Call, args...)
+			ret = p.emitDoEx(b, act, ds, maskRecover, aFn.Expr, llssa.Builder.Call, args...)
 		case pyFunc:
 			args := p.compileValues(b, args, kind)
-			ret = p.emitDo(b, act, ds, pyFn.Expr, llssa.Builder.Call, args...)
+			ret = p.emitDoEx(b, act, ds, maskRecover, pyFn.Expr, llssa.Builder.Call, args...)
 		case llgoPyList:
 			args := p.compileValues(b, args, fnHasVArg)
 			ret = b.PyList(args...)
@@ -1956,7 +1964,7 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 	default:
 		fn := p.compileValue(b, cv)
 		args := p.compileValues(b, args, kind)
-		ret = p.emitDo(b, act, ds, fn, llssa.Builder.Call, args...)
+		ret = p.emitDoEx(b, act, ds, maskRecover, fn, llssa.Builder.Call, args...)
 	}
 	return
 }
