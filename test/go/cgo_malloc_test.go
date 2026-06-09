@@ -25,6 +25,22 @@ import (
 	"testing"
 )
 
+const cgoDeferredFreeProbe = `package main
+
+/*
+#include <stdlib.h>
+*/
+import "C"
+
+func main() {
+	p := C.malloc(8)
+	if p == nil {
+		panic("C.malloc returned nil")
+	}
+	defer C.free(p)
+}
+`
+
 func TestCgoMallocWrapperSymbols(t *testing.T) {
 	if strings.TrimSpace(runGoCmd(t, "", "env", "CGO_ENABLED")) != "1" {
 		t.Skip("cgo is disabled")
@@ -59,6 +75,64 @@ func main() {
 
 	root := findLLGoRoot(t)
 	runGoCmd(t, root, "run", "./cmd/llgo", "run", mainFile)
+}
+
+func TestCgoDeferredFree(t *testing.T) {
+	if strings.TrimSpace(runGoCmd(t, "", "env", "CGO_ENABLED")) != "1" {
+		t.Skip("cgo is disabled")
+	}
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang is unavailable")
+	}
+
+	dir := t.TempDir()
+	mainFile := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(mainFile, []byte(cgoDeferredFreeProbe), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	runGoCmd(t, dir, "run", mainFile)
+
+	root := findLLGoRoot(t)
+	runGoCmd(t, root, "run", "./cmd/llgo", "run", mainFile)
+}
+
+func TestCgoDeferredFreeReleasesNodeBeforeCall(t *testing.T) {
+	if strings.TrimSpace(runGoCmd(t, "", "env", "CGO_ENABLED")) != "1" {
+		t.Skip("cgo is disabled")
+	}
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang is unavailable")
+	}
+
+	ir := llgoIRFromProbe(t, "cgo-deferred-free", cgoDeferredFreeProbe)
+	freeDefer := indexLineContaining(ir, "call void @", "FreeDeferNode")
+	deferredCall := indexLineContaining(ir, "call void %")
+	if freeDefer < 0 {
+		t.Fatalf("missing FreeDeferNode call in IR:\n%s", ir)
+	}
+	if deferredCall < 0 {
+		t.Fatalf("missing deferred indirect call in IR:\n%s", ir)
+	}
+	if freeDefer > deferredCall {
+		t.Fatalf("FreeDeferNode must run before deferred call, got FreeDeferNode line %d after call line %d", freeDefer, deferredCall)
+	}
+}
+
+func indexLineContaining(s string, parts ...string) int {
+	for i, line := range strings.Split(s, "\n") {
+		ok := true
+		for _, part := range parts {
+			if !strings.Contains(line, part) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return i + 1
+		}
+	}
+	return -1
 }
 
 func runGoCmd(t *testing.T, dir string, args ...string) string {
