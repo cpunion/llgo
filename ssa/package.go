@@ -234,6 +234,8 @@ type aProgram struct {
 
 	enableGoGlobalDCE bool
 	pthreadStackSize  uint64
+
+	enableFuncInfoMetadata bool
 }
 
 type AbiSymbol struct {
