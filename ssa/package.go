@@ -235,6 +235,7 @@ type aProgram struct {
 	enableGoGlobalDCE bool
 
 	enableFuncInfoMetadata bool
+	enableFuncInfoSites    bool
 }
 
 type AbiSymbol struct {
