@@ -236,6 +236,7 @@ type aProgram struct {
 	pthreadStackSize  uint64
 
 	enableFuncInfoMetadata bool
+	enableFuncInfoSites    bool
 }
 
 type AbiSymbol struct {
