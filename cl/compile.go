@@ -1434,6 +1434,13 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			return
 		}
 		elem := p.type_(t.Elem(), llssa.InGo)
+		if v.Heap {
+			// Heap allocations are memory-profile sample sites; give each
+			// one a statement anchor in tracked functions so sampled
+			// records attribute to the allocating line (heapsampling.go
+			// keys buckets by the leaf frame's exact line).
+			p.emitPCLineLabel(b, v.Pos())
+		}
 		ret = b.Alloc(elem, v.Heap)
 		p.debugAlloc(b, v, ret)
 		p.markRecoverSlot(v)
