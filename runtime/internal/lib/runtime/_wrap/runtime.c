@@ -9,11 +9,3 @@ int llgo_maxprocs()
 #endif
 }
 
-__attribute__((noinline)) void *llgo_framepointer(void)
-{
-#if defined(__GNUC__) || defined(__clang__)
-    return __builtin_frame_address(0);
-#else
-    return 0;
-#endif
-}
