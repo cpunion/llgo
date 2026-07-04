@@ -83,6 +83,22 @@ func TracePanic(v any) {
 	println("\n")
 }
 
+// PanicTraceback, when set by the public runtime package, prints a
+// Go-style stack trace for an unrecovered panic and reports whether it
+// printed anything; the clite frame dump remains the fallback.
+var PanicTraceback func(skip int) bool
+
+// PanicSignal converts a hardware signal into the same Go panic the
+// legacy signal handler raised.
+func PanicSignal(sig int) {
+	switch sig {
+	case 8: // SIGFPE
+		panic(errorString("integer divide by zero"))
+	default: // SIGSEGV, SIGBUS
+		panic(errorString("invalid memory address or nil pointer dereference"))
+	}
+}
+
 /*
 func stringTracef(fp c.FilePtr, format *c.Char, s String) {
 	cs := c.Alloca(uintptr(s.len) + 1)
