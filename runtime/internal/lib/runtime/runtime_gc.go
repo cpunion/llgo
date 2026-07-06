@@ -47,6 +47,7 @@ func GC() {
 }
 
 func collectAndRunFinalizers() {
+	bdwgc.ClearStack(nil)
 	bdwgc.Gcollect()
 	// GC_gcollect only discovers unreachable finalizable objects. Explicitly
 	// drain BDWGC's ready queue so runtime.GC does not depend on a later
