@@ -213,6 +213,7 @@ type aProgram struct {
 	memsetInlineTy *types.Signature
 	stackSaveTy    *types.Signature
 	stackRestoreTy *types.Signature
+	frameAddressTy *types.Signature
 
 	routineTy *types.Signature
 	setjmpTy  *types.Signature
