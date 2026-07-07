@@ -2062,7 +2062,7 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 		if p.isRuntimeSetFinalizerCall(call) && len(args) == 2 && act == llssa.Call && ds == nil {
 			finalizer := p.compileLateValue(b, args[1])
 			obj := p.compileLateValue(b, args[0])
-			ret = p.emitDo(b, act, nil, aFn.Expr, llssa.Builder.Call, obj, finalizer)
+			ret = p.emitDo(b, act, nil, false, aFn.Expr, llssa.Builder.Call, obj, finalizer)
 			return
 		}
 		// TODO(xsw): check ca != llssa.Call
