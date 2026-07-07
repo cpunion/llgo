@@ -1,0 +1,62 @@
+# Disposable-VM sweep: runs the host-skip and xfail case lists on a GitHub
+# macos runner (an ephemeral VM — destabilizing it is safe) with an empty
+# xfail file, to find stale entries on the darwin axis. Triggered only by
+# pushes to this branch; not part of regular CI.
+name: Darwin Sweep
+
+on:
+  push:
+    branches:
+      - codex/darwin-sweep
+
+jobs:
+  sweep:
+    timeout-minutes: 320
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: ["1.24.11", "1.26.0"]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install dependencies
+        uses: ./.github/actions/setup-deps
+        with:
+          llvm-version: 19
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
+        with:
+          go-version: ${{ matrix.go-version }}
+      - name: Download Go modules
+        timeout-minutes: 10
+        run: go mod download
+      - name: Build case lists and empty xfail
+        run: |
+          python3 - <<'PY'
+          import re
+          s = open("test/goroot/xfail.yaml").read()
+          host = s[:s.index("xfails:")]
+          xf = s[s.index("xfails:"):]
+          def pat(sec):
+              cs = sorted(set(re.findall(r"case: (\S+)", sec)))
+              return "^(" + "|".join(re.escape(c) for c in cs) + ")$"
+          open("/tmp/xf.pat","w").write(pat(xf))
+          open("/tmp/hs.pat","w").write(pat(host))
+          PY
+          printf 'host_skips: []\nxfails: []\n' > /tmp/empty.yaml
+      - name: Sweep xfail cases
+        continue-on-error: true
+        run: |
+          bash dev/test_goroot.sh -- \
+            -directive-mode ci \
+            -progress 60s \
+            -xfail /tmp/empty.yaml \
+            -case "$(cat /tmp/xf.pat)" 2>&1 | grep -E '^\s+--- (PASS|FAIL)|SWEEP' || true
+      - name: Sweep host-skip cases
+        continue-on-error: true
+        run: |
+          bash dev/test_goroot.sh -- \
+            -directive-mode ci \
+            -progress 60s \
+            -xfail /tmp/empty.yaml \
+            -case "$(cat /tmp/hs.pat)" 2>&1 | grep -E '^\s+--- (PASS|FAIL)' || true
