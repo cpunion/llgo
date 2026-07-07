@@ -15,6 +15,15 @@ func c_framepointer() unsafe.Pointer
 //go:linkname c_installFaultHandler C.llgo_install_fault_handler
 func c_installFaultHandler(cb func(uintptr, uintptr, int32))
 
+//go:linkname c_dynunwindPCBuf C.llgo_dynunwind_pcbuf
+func c_dynunwindPCBuf() unsafe.Pointer
+
+//go:linkname c_dynunwindPCCount C.llgo_dynunwind_pccount
+func c_dynunwindPCCount() int32
+
+//go:linkname c_dynunwindEndFP C.llgo_dynunwind_endfp
+func c_dynunwindEndFP() uintptr
+
 //go:linkname c_memReadable C.llgo_mem_readable
 func c_memReadable(p unsafe.Pointer) int32
 
@@ -70,14 +79,35 @@ func onFault(pc, fp uintptr, sig int32) {
 	if fpUnwindAvailable() {
 		var pcs [64]uintptr
 		n := 0
-		if pc != 0 {
-			// Store pc+1 so the pc-1 return-address convention lands on
-			// the faulting instruction itself (gc's sigpanic does the
-			// same).
-			pcs[0] = pc + 1
-			n = 1
+		if dn := int(c_dynunwindPCCount()); dn > 0 {
+			// libunwind walked the fault context (survives C frames built
+			// without frame pointers); resume along the FP chain where its
+			// unwind info ran out.
+			buf := (*[64]uintptr)(c_dynunwindPCBuf())
+			if dn > len(pcs) {
+				dn = len(pcs)
+			}
+			copy(pcs[:dn], buf[:dn])
+			// Frame 0 is the fault pc itself; +1 keeps the pc-1
+			// return-address convention landing on the faulting
+			// instruction (gc's sigpanic does the same).
+			pcs[0]++
+			n = dn
+			if efp := c_dynunwindEndFP(); efp != 0 && n < len(pcs) {
+				m := fpWalkFrom(efp, pcs[n:])
+				if m > 0 && pcs[n] == pcs[n-1] {
+					copy(pcs[n:], pcs[n+1:n+m])
+					m--
+				}
+				n += m
+			}
+		} else {
+			if pc != 0 {
+				pcs[0] = pc + 1
+				n = 1
+			}
+			n += fpWalkFrom(fp, pcs[n:])
 		}
-		n += fpWalkFrom(fp, pcs[n:])
 		rtdebug.StoreFaultPCs(pcs[:n])
 	}
 	// Capture done: re-arm the recursion guard for future faults before
