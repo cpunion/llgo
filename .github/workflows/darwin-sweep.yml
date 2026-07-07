@@ -51,7 +51,7 @@ jobs:
             -directive-mode ci \
             -progress 60s \
             -xfail /tmp/empty.yaml \
-            -case "$(cat /tmp/xf.pat)" 2>&1 | grep -E '^\s+--- (PASS|FAIL)|SWEEP' || true
+            -case "$(cat /tmp/xf.pat)" 2>&1 | tee /tmp/sweep-xf.log | grep -E '^\s+--- (PASS|FAIL)' || tail -40 /tmp/sweep-xf.log
       - name: Sweep host-skip cases
         continue-on-error: true
         run: |
@@ -59,4 +59,4 @@ jobs:
             -directive-mode ci \
             -progress 60s \
             -xfail /tmp/empty.yaml \
-            -case "$(cat /tmp/hs.pat)" 2>&1 | grep -E '^\s+--- (PASS|FAIL)' || true
+            -case "$(cat /tmp/hs.pat)" 2>&1 | tee /tmp/sweep-hs.log | grep -E '^\s+--- (PASS|FAIL)' || tail -40 /tmp/sweep-hs.log
