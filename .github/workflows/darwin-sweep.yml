@@ -12,6 +12,9 @@ on:
 jobs:
   sweep:
     timeout-minutes: 320
+    env:
+      LLGO_GOROOT_VERBOSE: "1"
+      LLGO_GOROOT_HEARTBEAT_SECONDS: "60"
     strategy:
       fail-fast: false
       matrix:
