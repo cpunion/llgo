@@ -18,14 +18,22 @@ concurrency:
 
 jobs:
   test:
+    name: test (${{matrix.os}}, ${{matrix.llvm}}, ${{matrix.suite}})
     continue-on-error: true
     timeout-minutes: 60
     strategy:
+      fail-fast: false
       matrix:
         os:
           - macos-latest
           - ubuntu-latest
         llvm: [19]
+        # One heavy test package per runner VM: their compile phases no
+        # longer stack on a single 16GB machine (concurrent clang/lld
+        # bursts were killing ubuntu runners and starving mac runners
+        # into go-list WaitDelay expirations), and wall time drops to the
+        # slowest single suite.
+        suite: [cl, ssa, testgo, rest]
     runs-on: ${{matrix.os}}
     steps:
       - uses: actions/checkout@v7
@@ -69,20 +77,31 @@ jobs:
       - name: Build
         run: go build -v ./...
 
+      - name: Select suite packages
+        id: suite
+        run: |
+          case "${{matrix.suite}}" in
+            cl)     pkgs="./cl" ;;
+            ssa)    pkgs="./ssa ./internal/cabi" ;;
+            testgo) pkgs="./test/..." ;;
+            rest)   pkgs=$(go list ./... | grep -v -E '^github.com/goplus/llgo/(cl$|ssa$|internal/cabi$|test/)' | tr '\n' ' ') ;;
+          esac
+          echo "pkgs=$pkgs" >> "$GITHUB_OUTPUT"
+
       # Both platforms upload coverage: OS-specific paths (ELF vs Mach-O
       # emission, per-OS runtime shims) are otherwise invisible to
       # codecov/patch and fail it on lines only the other OS executes.
       - name: Test with coverage
-        # 45m: the caller-info acceptance suite (test/go) legitimately grew
-        # the covered run past the old 30m budget on macOS runners.
-        run: go test -timeout 45m -coverprofile="coverage.txt" -covermode=atomic ./...
+        run: go test -timeout 45m -coverprofile="coverage.txt" -covermode=atomic ${{steps.suite.outputs.pkgs}}
 
       - name: Test with embedded emulator env
+        if: matrix.suite == 'cl'
         env:
           LLGO_EMBED_TESTS: "1"
         run: go test -v -timeout 60m ./cl -run '^TestRunEmbedEmulator$'
 
       - name: Check std symbol coverage
+        if: matrix.suite == 'rest'
         run: bash doc/_readme/scripts/check_std_cover.sh
 
       - name: Upload coverage reports to Codecov
