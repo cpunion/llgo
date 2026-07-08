@@ -23,17 +23,20 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
+      # Cap how many heavy, llgo-building test packages share one VM:
+      # their concurrent clang/lld bursts were killing 16GB ubuntu
+      # runners and starving mac runners into go-list WaitDelay
+      # expirations. ubuntu (plentiful runners) gets one suite per VM;
+      # macos (scarce runners) gets two balanced groups of at most two
+      # heavy packages each — the pre-backbone peak, which mac handled.
       matrix:
-        os:
-          - macos-latest
-          - ubuntu-latest
-        llvm: [19]
-        # One heavy test package per runner VM: their compile phases no
-        # longer stack on a single 16GB machine (concurrent clang/lld
-        # bursts were killing ubuntu runners and starving mac runners
-        # into go-list WaitDelay expirations), and wall time drops to the
-        # slowest single suite.
-        suite: [cl, ssa, testgo, rest]
+        include:
+          - { os: ubuntu-latest, llvm: 19, suite: cl }
+          - { os: ubuntu-latest, llvm: 19, suite: ssa }
+          - { os: ubuntu-latest, llvm: 19, suite: testgo }
+          - { os: ubuntu-latest, llvm: 19, suite: rest }
+          - { os: macos-latest, llvm: 19, suite: cl+cabi }
+          - { os: macos-latest, llvm: 19, suite: ssa+testgo+rest }
     runs-on: ${{matrix.os}}
     steps:
       - uses: actions/checkout@v7
@@ -81,10 +84,12 @@ jobs:
         id: suite
         run: |
           case "${{matrix.suite}}" in
-            cl)     pkgs="./cl" ;;
-            ssa)    pkgs="./ssa ./internal/cabi" ;;
-            testgo) pkgs="./test/..." ;;
-            rest)   pkgs=$(go list ./... | grep -v -E '^github.com/goplus/llgo/(cl$|ssa$|internal/cabi$|test/)' | tr '\n' ' ') ;;
+            cl)      pkgs="./cl" ;;
+            ssa)     pkgs="./ssa ./internal/cabi" ;;
+            testgo)  pkgs="./test/..." ;;
+            rest)    pkgs=$(go list ./... | grep -v -E '^github.com/goplus/llgo/(cl$|ssa$|internal/cabi$|test/)' | tr '\n' ' ') ;;
+            cl+cabi) pkgs="./cl ./internal/cabi" ;;
+            ssa+testgo+rest) pkgs="./ssa ./test/... $(go list ./... | grep -v -E '^github.com/goplus/llgo/(cl$|ssa$|internal/cabi$|test/)' | tr '\n' ' ')" ;;
           esac
           echo "pkgs=$pkgs" >> "$GITHUB_OUTPUT"
 
@@ -95,13 +100,13 @@ jobs:
         run: go test -timeout 45m -coverprofile="coverage.txt" -covermode=atomic ${{steps.suite.outputs.pkgs}}
 
       - name: Test with embedded emulator env
-        if: matrix.suite == 'cl'
+        if: contains(matrix.suite, 'cl')
         env:
           LLGO_EMBED_TESTS: "1"
         run: go test -v -timeout 60m ./cl -run '^TestRunEmbedEmulator$'
 
       - name: Check std symbol coverage
-        if: matrix.suite == 'rest'
+        if: contains(matrix.suite, 'rest')
         run: bash doc/_readme/scripts/check_std_cover.sh
 
       - name: Upload coverage reports to Codecov
