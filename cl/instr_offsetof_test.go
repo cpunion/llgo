@@ -180,6 +180,24 @@ func explicit[T any](v *outer[T]) uintptr {
 	stubStruct := types.NewStruct([]*types.Var{
 		types.NewVar(token.NoPos, nil, "F", types.Typ[types.Int]),
 	}, nil)
+	if _, ok := ctx.offsetOfBuiltinArg(&gossa.Field{
+		X:     fakeSSAValue{typ: types.Typ[types.Int]},
+		Field: 0,
+	}); ok {
+		t.Fatal("offsetOfBuiltinArg returned true for Field of a non-struct value")
+	}
+	if _, ok := ctx.offsetOfBuiltinArg(&gossa.Field{
+		X:     fakeSSAValue{typ: stubStruct},
+		Field: stubStruct.NumFields(),
+	}); ok {
+		t.Fatal("offsetOfBuiltinArg returned true for an out-of-range Field")
+	}
+	if got, ok := ctx.offsetOfBuiltinArg(&gossa.Field{
+		X:     fakeSSAValue{typ: stubStruct},
+		Field: 0,
+	}); !ok || got.IsNil() {
+		t.Fatalf("offsetOfBuiltinArg(Field) = (%v, %v), want zero offset", got, ok)
+	}
 	validSynthetic := &gossa.FieldAddr{
 		X:     fakeSSAValue{typ: types.NewPointer(stubStruct)},
 		Field: 0,

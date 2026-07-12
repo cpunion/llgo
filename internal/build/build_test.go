@@ -507,7 +507,12 @@ func TestDevLTOGlobalDCEDefaultsToFullLTO(t *testing.T) {
 }
 
 func TestApplyFrontendGCFlags(t *testing.T) {
-	conf := &Config{GoBuildFlags: []string{"-gcflags=all=-lang=go1.17 -N -l=4"}}
+	conf := &Config{GoBuildFlags: []string{
+		"-tags=integration",
+		"-gcflags=",
+		"-gcflags=-l",
+		"-gcflags=all=-lang=go1.17 -N -l=4",
+	}}
 	applyFrontendGCFlags(conf)
 	if conf.GoVersion != "go1.17" {
 		t.Fatalf("GoVersion=%q, want go1.17", conf.GoVersion)
@@ -526,7 +531,7 @@ func TestAllowMissingFunctionBodies(t *testing.T) {
 		IllTyped: true,
 	}
 	allowMissingFunctionBodies([]*packages.Package{pkg})
-	if pkg.IllTyped || len(pkg.Errors) != 0 {
+	if pkg.IllTyped || len(pkg.Errors) != 0 || len(pkg.TypeErrors) != 0 {
 		t.Fatalf("package remains ill-typed: %+v", pkg.Errors)
 	}
 
@@ -540,5 +545,36 @@ func TestAllowMissingFunctionBodies(t *testing.T) {
 	allowMissingFunctionBodies([]*packages.Package{pkg})
 	if !pkg.IllTyped || len(pkg.Errors) != 2 {
 		t.Fatalf("mixed errors were incorrectly suppressed: %+v", pkg.Errors)
+	}
+
+	unchanged := &packages.Package{Errors: []packages.Error{{Msg: "# command-line-arguments"}}, IllTyped: true}
+	allowMissingFunctionBodies([]*packages.Package{unchanged})
+	if !unchanged.IllTyped || len(unchanged.Errors) != 1 {
+		t.Fatalf("package without a missing-body diagnostic was changed: %+v", unchanged)
+	}
+}
+
+func TestFormatPackageError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      packages.Error
+		noColumn bool
+		want     string
+	}{
+		{name: "keep columns", err: packages.Error{Pos: "case.go:2:3", Msg: "bad"}, want: "case.go:2:3: bad"},
+		{name: "remove column", err: packages.Error{Pos: "case.go:2:3", Msg: "bad"}, noColumn: true, want: "case.go:2: bad"},
+		{name: "empty position", err: packages.Error{Msg: "bad"}, noColumn: true, want: "-: bad"},
+		{name: "dash position", err: packages.Error{Pos: "-", Msg: "bad"}, noColumn: true, want: "-: bad"},
+		{name: "missing separators", err: packages.Error{Pos: "case.go", Msg: "bad"}, noColumn: true, want: "case.go: bad"},
+		{name: "invalid column", err: packages.Error{Pos: "case.go:2:x", Msg: "bad"}, noColumn: true, want: "case.go:2:x: bad"},
+		{name: "missing line separator", err: packages.Error{Pos: "2:3", Msg: "bad"}, noColumn: true, want: "2:3: bad"},
+		{name: "invalid line", err: packages.Error{Pos: "case.go:x:3", Msg: "bad"}, noColumn: true, want: "case.go:x:3: bad"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatPackageError(tt.err, tt.noColumn); got != tt.want {
+				t.Fatalf("formatPackageError() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
