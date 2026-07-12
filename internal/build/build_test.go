@@ -554,6 +554,28 @@ func TestAllowMissingFunctionBodies(t *testing.T) {
 	}
 }
 
+func TestDoAllowsMissingFunctionBodies(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "nobody.go")
+	if err := os.WriteFile(file, []byte(`package nobody
+
+func External()
+
+func F() {}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	conf := NewDefaultConf(ModeGen)
+	conf.AllowNoBody = true
+	pkgs, err := Do([]string{file}, conf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pkgs) != 1 || pkgs[0].LPkg == nil {
+		t.Fatalf("Do returned packages = %+v, want one compiled package", pkgs)
+	}
+	pkgs[0].LPkg.Prog.Dispose()
+}
+
 func TestFormatPackageError(t *testing.T) {
 	tests := []struct {
 		name     string
