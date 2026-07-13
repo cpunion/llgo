@@ -28,6 +28,9 @@ type LocalContext struct {
 	// Keeping the aligned payload at the head makes the common lookup return it
 	// directly; the block header is stored immediately before the payload.
 	blocks unsafe.Pointer
+	// Core runtime state is universal and hot, so keep it inline instead of
+	// paying a package-block lookup and first-use allocation.
+	g g
 }
 
 type localBlock struct {

@@ -188,6 +188,9 @@ func (p Program) PackageLocalities(pkgPath string) map[string]VariableLocality {
 }
 
 func (p Program) NeedsLocalContext() bool {
+	if p.runtimeNeedsLocalContext() {
+		return true
+	}
 	p.localities.mu.RLock()
 	defer p.localities.mu.RUnlock()
 	for _, info := range p.localities.entries {

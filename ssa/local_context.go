@@ -16,7 +16,24 @@
 
 package ssa
 
-import "go/types"
+import (
+	"go/constant"
+	"go/types"
+)
+
+const runtimeLocalContextMarker = "LLGoNeedsLocalContext"
+
+func (p Program) runtimeNeedsLocalContext() bool {
+	if p.rt == nil && p.rtget == nil {
+		return false
+	}
+	runtime := p.runtime()
+	if runtime == nil {
+		return false
+	}
+	marker, ok := runtime.Scope().Lookup(runtimeLocalContextMarker).(*types.Const)
+	return ok && marker.Val().Kind() == constant.Bool && constant.BoolVal(marker.Val())
+}
 
 // EnterLocalContext creates the stack root used by TLS/GLS locality blocks and
 // installs it for the current outermost Go entry. previous is nonzero only for
