@@ -17,6 +17,8 @@
 package ssa
 
 import (
+	"go/constant"
+	"go/token"
 	"go/types"
 	"strings"
 	"testing"
@@ -63,6 +65,42 @@ func TestLocalityInfos(t *testing.T) {
 
 func TestNeedsLocalContext(t *testing.T) {
 	prog := NewProgram(nil)
+	staticRuntime := NewProgram(nil)
+	staticRuntime.SetRuntime(types.NewPackage(PkgRuntime, "runtime"))
+	if staticRuntime.NeedsLocalContext() {
+		t.Fatal("runtime without a marker needs a local context")
+	}
+	nilRuntime := NewProgram(nil)
+	nilRuntime.SetRuntime(func() *types.Package { return nil })
+	if nilRuntime.NeedsLocalContext() {
+		t.Fatal("nil runtime provider needs a local context")
+	}
+	markedRuntime := func(value constant.Value, lazy bool) Program {
+		pkg := types.NewPackage(PkgRuntime, "runtime")
+		pkg.Scope().Insert(types.NewConst(token.NoPos, pkg, runtimeLocalContextMarker, types.Typ[types.UntypedBool], value))
+		prog := NewProgram(nil)
+		if lazy {
+			prog.SetRuntime(func() *types.Package { return pkg })
+		} else {
+			prog.SetRuntime(pkg)
+		}
+		return prog
+	}
+	for _, lazy := range []bool{false, true} {
+		if !markedRuntime(constant.MakeBool(true), lazy).NeedsLocalContext() {
+			t.Fatalf("runtime local-context marker was ignored (lazy=%v)", lazy)
+		}
+		if markedRuntime(constant.MakeBool(false), lazy).NeedsLocalContext() {
+			t.Fatalf("false runtime local-context marker was enabled (lazy=%v)", lazy)
+		}
+	}
+	invalidMarker := NewProgram(nil)
+	invalidRuntime := types.NewPackage(PkgRuntime, "runtime")
+	invalidRuntime.Scope().Insert(types.NewConst(token.NoPos, invalidRuntime, runtimeLocalContextMarker, types.Typ[types.UntypedInt], constant.MakeInt64(1)))
+	invalidMarker.SetRuntime(invalidRuntime)
+	if invalidMarker.NeedsLocalContext() {
+		t.Fatal("non-boolean runtime local-context marker was enabled")
+	}
 	if prog.NeedsLocalContext() {
 		t.Fatal("empty program needs a local context")
 	}

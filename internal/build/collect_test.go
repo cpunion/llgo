@@ -19,6 +19,9 @@
 package build
 
 import (
+	"go/constant"
+	"go/token"
+	"go/types"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -185,6 +188,11 @@ func TestCollectFingerprintLocalContextMode(t *testing.T) {
 	})
 	initializedProg.SetLocalStorage("example.com/state.value", llssa.LocalStorageNativeTLS)
 	initialized, initializedManifest := fingerprint(initializedProg)
+	runtimeProg := llssa.NewProgram(nil)
+	runtimePkg := types.NewPackage(llssa.PkgRuntime, "runtime")
+	runtimePkg.Scope().Insert(types.NewConst(token.NoPos, runtimePkg, "LLGoNeedsLocalContext", types.Typ[types.UntypedBool], constant.MakeBool(true)))
+	runtimeProg.SetRuntime(runtimePkg)
+	withRuntimeContext, runtimeContextManifest := fingerprint(runtimeProg)
 
 	if plain.Fingerprint != native.Fingerprint {
 		t.Fatal("native TLS changed the package cache fingerprint")
@@ -195,6 +203,9 @@ func TestCollectFingerprintLocalContextMode(t *testing.T) {
 	if initialized.Fingerprint == plain.Fingerprint {
 		t.Fatal("initialized native TLS and plain builds shared a package cache fingerprint")
 	}
+	if withRuntimeContext.Fingerprint != withContext.Fingerprint {
+		t.Fatal("runtime and declaration contexts used different package cache modes")
+	}
 	if plainManifest.Common.LocalContext || nativeManifest.Common.LocalContext {
 		t.Fatal("plain or native-TLS manifest enabled the local context")
 	}
@@ -203,6 +214,9 @@ func TestCollectFingerprintLocalContextMode(t *testing.T) {
 	}
 	if !initializedManifest.Common.LocalContext {
 		t.Fatal("native TLS initializer failure storage was not recorded in the manifest")
+	}
+	if !runtimeContextManifest.Common.LocalContext {
+		t.Fatal("runtime-required local context was not recorded in the manifest")
 	}
 }
 
