@@ -106,6 +106,7 @@ func (c *context) collectCommonInputs(m *manifestBuilder) {
 	m.common.Target = c.buildConf.Target
 	m.common.TargetABI = c.crossCompile.TargetABI
 	m.common.GoGlobalDCE = c.buildConf.goGlobalDCEEnabled()
+	m.common.LocalContext = c.prog != nil && c.prog.NeedsLocalContext()
 
 	// Compiler configuration
 	if c.crossCompile.CC != "" {
