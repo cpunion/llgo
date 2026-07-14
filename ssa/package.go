@@ -23,6 +23,7 @@ import (
 	"log"
 	"runtime"
 	"strconv"
+	"sync"
 	"unsafe"
 
 	"github.com/goplus/llgo/internal/env"
@@ -223,7 +224,9 @@ type aProgram struct {
 	printfTy *types.Signature
 
 	paramObjPtr_ *types.Var
-	linkname     map[string]string     // pkgPath.nameInPkg => linkname
+	linknameMu   sync.RWMutex
+	linkname     map[string]string // pkgPath.nameInPkg => linkname
+	localities   *localityInfos
 	abiSymbol    map[string]*AbiSymbol // abi symbol name => AbiSymbol
 
 	ptrSize int
@@ -310,7 +313,7 @@ func NewProgram(target *Target) Program {
 		ctx: ctx, gocvt: newGoTypes(),
 		target: target, td: td, tm: tm, is32Bits: is32Bits,
 		ptrSize: td.PointerSize(), named: make(map[string]Type), fnnamed: make(map[string]int),
-		linkname: make(map[string]string), abiSymbol: make(map[string]*AbiSymbol),
+		linkname: make(map[string]string), localities: newLocalityInfos(), abiSymbol: make(map[string]*AbiSymbol),
 	}
 	prog.abi.Init(uintptr(prog.ptrSize), (*goProgram)(unsafe.Pointer(prog)))
 	return prog
@@ -375,11 +378,15 @@ func (p Program) SetTypeBackground(fullName string, bg Background) {
 }
 
 func (p Program) SetLinkname(name, link string) {
+	p.linknameMu.Lock()
 	p.linkname[name] = link
+	p.linknameMu.Unlock()
 }
 
 func (p Program) Linkname(name string) (link string, ok bool) {
+	p.linknameMu.RLock()
 	link, ok = p.linkname[name]
+	p.linknameMu.RUnlock()
 	return
 }
 
@@ -834,6 +841,11 @@ func (p Package) rtFunc(fnName string) Expr {
 	}
 	sig := fn.Type().(*types.Signature)
 	return p.NewFunc(name, sig, InGo).Expr
+}
+
+// RuntimeFunc returns a declaration for a function in LLGo's internal runtime.
+func (p Package) RuntimeFunc(fnName string) Expr {
+	return p.rtFunc(fnName)
 }
 
 func (p Package) cFunc(fullName string, sig *types.Signature) Expr {
