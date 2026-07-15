@@ -178,6 +178,8 @@ type context struct {
 	anonDefers           map[*ssa.Function]bool
 	paramDIVars          map[*types.Var]llssa.DIVar
 	runtimeCallerFuncs   map[*ssa.Function]bool
+	compilation          *Compilation // report-only; nil for cache registration
+	cacheRegistration    bool         // cached archive: types only, no lowering
 	pcLineSeq            uint64
 
 	patches          Patches
@@ -1891,7 +1893,8 @@ func NewPackage(prog llssa.Program, pkg *ssa.Package, files []*ast.File) (ret ll
 
 // NewPackageEx and NewPackage compile as a one-shot compilation: each
 // call gets fresh caller-tracking memoization. Multi-package drivers
-// use NewPackageExWithEmbed with a shared CallerTracking instead.
+// use NewPackageExWithEmbedOptions with shared CallerTracking and Compilation
+// inputs instead.
 
 // NewPackageEx compiles a Go package to LLVM IR package.
 //
@@ -1905,7 +1908,7 @@ func NewPackage(prog llssa.Program, pkg *ssa.Package, files []*ast.File) (ret ll
 // The rewrites map uses short variable names (without package qualifier) and
 // only affects string-typed globals defined in the current package.
 func NewPackageEx(prog llssa.Program, patches Patches, rewrites map[string]string, pkg *ssa.Package, files []*ast.File) (ret llssa.Package, externs []string, err error) {
-	return newPackageEx(prog, nil, patches, rewrites, pkg, files, nil)
+	return newPackageEx(prog, nil, patches, rewrites, pkg, files, nil, PackageOptions{})
 }
 
 // NewPackageExWithEmbed compiles a package using pre-loaded go:embed metadata.
@@ -1916,10 +1919,16 @@ func NewPackageEx(prog llssa.Program, patches Patches, rewrites map[string]strin
 // of one compilation (like patches). nil means one-shot: a fresh
 // instance is created for this call.
 func NewPackageExWithEmbed(prog llssa.Program, ct *CallerTracking, patches Patches, rewrites map[string]string, pkg *ssa.Package, files []*ast.File, embedMap goembed.VarMap) (ret llssa.Package, externs []string, err error) {
-	return newPackageEx(prog, ct, patches, rewrites, pkg, files, &embedMap)
+	return newPackageEx(prog, ct, patches, rewrites, pkg, files, &embedMap, PackageOptions{})
 }
 
-func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewrites map[string]string, pkg *ssa.Package, files []*ast.File, embedMap *goembed.VarMap) (ret llssa.Package, externs []string, err error) {
+// NewPackageExWithEmbedOptions compiles a package with compilation-scoped and
+// per-package inputs. Existing one-shot entry points use zero PackageOptions.
+func NewPackageExWithEmbedOptions(prog llssa.Program, ct *CallerTracking, patches Patches, rewrites map[string]string, pkg *ssa.Package, files []*ast.File, embedMap goembed.VarMap, opts PackageOptions) (ret llssa.Package, externs []string, err error) {
+	return newPackageEx(prog, ct, patches, rewrites, pkg, files, &embedMap, opts)
+}
+
+func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewrites map[string]string, pkg *ssa.Package, files []*ast.File, embedMap *goembed.VarMap, opts PackageOptions) (ret llssa.Package, externs []string, err error) {
 	pkgProg := pkg.Prog
 	pkgTypes := pkg.Pkg
 	oldTypes := pkgTypes
@@ -1941,6 +1950,12 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 	if ct == nil {
 		ct = NewCallerTracking()
 	}
+	compilation := opts.Compilation
+	if opts.CacheHit {
+		// A cache hit has no source lowering phase. Keep the plan out of the cl
+		// context so future lowering cannot accidentally consume it here.
+		compilation = nil
+	}
 	ctx := &context{
 		prog:             prog,
 		pkg:              ret,
@@ -1960,9 +1975,13 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 		cgoSymbols: make([]string, 0, 128),
 		rewrites:   rewrites,
 
+		compilation:       compilation,
+		cacheRegistration: opts.CacheHit,
+
 		trackCallerFrames:  filesUseRuntimeCaller(files) || packageUsesRuntimeCaller(ct, pkg),
 		runtimeCallerFuncs: runtimeCallerFuncSet(ct, pkg),
 	}
+	ctx.observeCoroPlan()
 	if embedMap != nil {
 		ctx.embedMap = *embedMap
 	} else {
@@ -2006,6 +2025,15 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 	ret.MaterializePreserveSyms()
 	externs = ctx.cgoSymbols
 	return
+}
+
+func (p *context) observeCoroPlan() {
+	if p.cacheRegistration || p.compilation == nil || p.compilation.CoroPlan == nil {
+		return
+	}
+	if observer := p.compilation.CoroPlanObserver; observer != nil {
+		observer(p.goPkg, p.compilation.CoroPlan)
+	}
 }
 
 func initFnNameOfHasPatch(name string) string {
