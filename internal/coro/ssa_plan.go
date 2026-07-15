@@ -245,13 +245,24 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	}
 	closeStaticFunctions(functionSet, prog)
 
-	allFunctions := make([]*ssa.Function, 0, len(functionSet))
-	for fn := range functionSet {
-		allFunctions = append(allFunctions, fn)
+	type keyedFunction struct {
+		function *ssa.Function
+		key      string
 	}
-	sort.Slice(allFunctions, func(i, j int) bool {
-		return rawSSAFunctionKey(allFunctions[i]) < rawSSAFunctionKey(allFunctions[j])
+	keyedFunctions := make([]keyedFunction, 0, len(functionSet))
+	for fn := range functionSet {
+		keyedFunctions = append(keyedFunctions, keyedFunction{
+			function: fn,
+			key:      rawSSAFunctionKey(fn),
+		})
+	}
+	sort.Slice(keyedFunctions, func(i, j int) bool {
+		return keyedFunctions[i].key < keyedFunctions[j].key
 	})
+	allFunctions := make([]*ssa.Function, len(keyedFunctions))
+	for i, keyed := range keyedFunctions {
+		allFunctions[i] = keyed.function
+	}
 
 	included := make([]*ssa.Function, 0, len(allFunctions))
 	includedSet := make(map[*ssa.Function]bool, len(allFunctions))
