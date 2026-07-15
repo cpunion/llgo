@@ -179,7 +179,8 @@ type context struct {
 	paramDIVars          map[*types.Var]llssa.DIVar
 	runtimeCallerFuncs   map[*ssa.Function]bool
 	compilation          *Compilation // nil for report-only cache registration
-	cacheRegistration    bool         // cached archive: types only, no lowering
+	emissionUniverse     *EmissionUniverse
+	cacheRegistration    bool // cached archive: types only, no lowering
 	pcLineSeq            uint64
 
 	patches          Patches
@@ -520,6 +521,7 @@ func hasInstantiatedRecv(recv *types.Var) bool {
 
 func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Function, llssa.PyObjRef, int) {
 	entry := p.mustFunctionSymbol(f)
+	f = entry.function
 	pkgTypes, name, ftype := entry.pkgTypes, entry.name, entry.ftype
 	if ftype != goFunc {
 		return nil, nil, ignoredFunc
@@ -1683,8 +1685,23 @@ func (p *context) compileValue(b llssa.Builder, v ssa.Value) llssa.Expr {
 			}
 		}
 	case *ssa.Function:
+		if p.compilation != nil && p.compilation.EnableCoroEntryResolution && p.compilation.EmissionUniverse != nil {
+			canonical, ok := p.compilation.EmissionUniverse.Resolve(v)
+			if !ok {
+				panic(fmt.Errorf("coroutine entry resolution: function value %q is absent from the prepared emission universe", v.Name()))
+			}
+			v = canonical
+		}
 		if _, _, ftype := p.funcName(v); ftype == llgoInstr {
-			v = ssawrap.MakeCallWrapper(p.goProg, v)
+			if p.compilation != nil && p.compilation.EnableCoroEntryResolution && p.compilation.EmissionUniverse != nil {
+				wrapper, ok := p.compilation.EmissionUniverse.intrinsicWrapper(p.goPkg, v)
+				if !ok {
+					panic(fmt.Errorf("coroutine entry resolution: intrinsic function value %q was not materialized before codegen", v.Name()))
+				}
+				v = wrapper
+			} else {
+				v = ssawrap.MakeCallWrapper(p.goProg, v)
+			}
 		}
 		aFn, pyFn, _ := p.compileFunction(v)
 		if aFn != nil {
@@ -1930,6 +1947,7 @@ func NewPackageExWithEmbedOptions(prog llssa.Program, ct *CallerTracking, patche
 }
 
 func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewrites map[string]string, pkg *ssa.Package, files []*ast.File, embedMap *goembed.VarMap, opts PackageOptions) (ret llssa.Package, externs []string, err error) {
+	var prepared *preparedEmissionPackage
 	if opts.Compilation != nil && opts.Compilation.EnableCoroEntryResolution {
 		if err := opts.Compilation.preflightCoroPlan(); err != nil {
 			return nil, nil, err
@@ -1937,12 +1955,24 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 		if opts.CacheHit {
 			return nil, nil, fmt.Errorf("coroutine entry resolution cannot reuse cached archives before CoroPlanDigest is fingerprinted")
 		}
+		if opts.Compilation.EmissionUniverse != nil {
+			prepared, err = opts.Compilation.EmissionUniverse.checkPackage(pkg, files, patches)
+			if err != nil {
+				return nil, nil, fmt.Errorf("coroutine entry resolution: %w", err)
+			}
+		}
 	}
 	pkgProg := pkg.Prog
 	pkgTypes := pkg.Pkg
 	oldTypes := pkgTypes
 	pkgName, pkgPath := pkgTypes.Name(), llssa.PathOf(pkgTypes)
 	patch, hasPatch := patches[pkgPath]
+	if prepared != nil {
+		pkgTypes = prepared.pkgTypes
+		oldTypes = prepared.oldTypes
+		patch = prepared.patch
+		hasPatch = prepared.hasPatch
+	}
 	if hasPatch {
 		pkgTypes = patch.Types
 		pkg.Pkg = pkgTypes
@@ -1990,6 +2020,9 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 		trackCallerFrames:  filesUseRuntimeCaller(files) || packageUsesRuntimeCaller(ct, pkg),
 		runtimeCallerFuncs: runtimeCallerFuncSet(ct, pkg),
 	}
+	if compilation != nil && compilation.EnableCoroEntryResolution {
+		ctx.emissionUniverse = compilation.EmissionUniverse
+	}
 	ctx.observeCoroPlan()
 	if embedMap != nil {
 		ctx.embedMap = *embedMap
@@ -2004,6 +2037,9 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 	ctx.prog.SetPatch(ctx.patchType)
 	ctx.prog.SetCompileMethods(ctx.checkCompileMethods)
 	ret.SetResolveLinkname(ctx.resolveLinkname)
+	if compilation != nil && compilation.EnableCoroEntryResolution {
+		ret.SetResolveMethodLinkname(ctx.resolveMethodLinkname)
+	}
 
 	if hasPatch {
 		skips := ctx.skips
@@ -2101,7 +2137,16 @@ func (p *context) patchType(typ types.Type) (r types.Type) {
 }
 
 func (p *context) _patchType(typ types.Type) (types.Type, bool) {
+	original := typ
+	if universe := p.emissionUniverseForPatch(); universe != nil {
+		typ, _ = universe.patchEmissionTypeGraph(p, typ)
+	}
 	switch typ := typ.(type) {
+	case *types.Alias:
+		actual := types.Unalias(typ)
+		if patched, ok := p._patchType(actual); ok {
+			return patched, true
+		}
 	case *types.Pointer:
 		if t, ok := p._patchType(typ.Elem()); ok {
 			return types.NewPointer(t), true
@@ -2150,6 +2195,37 @@ func (p *context) _patchType(typ types.Type) (types.Type, bool) {
 		if patched {
 			return types.NewStruct(vars, tags), true
 		}
+	case *types.Interface:
+		typ.Complete()
+		methods := make([]*types.Func, typ.NumExplicitMethods())
+		embeddeds := make([]types.Type, typ.NumEmbeddeds())
+		patched := false
+		for index := range methods {
+			method := typ.ExplicitMethod(index)
+			methodType, ok := p._patchType(method.Type())
+			if ok {
+				methods[index] = types.NewFunc(method.Pos(), method.Pkg(), method.Name(), methodType.(*types.Signature))
+				patched = true
+			} else {
+				methods[index] = method
+			}
+		}
+		for index := range embeddeds {
+			embedded := typ.EmbeddedType(index)
+			if replacement, ok := p._patchType(embedded); ok {
+				embeddeds[index] = replacement
+				patched = true
+			} else {
+				embeddeds[index] = embedded
+			}
+		}
+		if patched {
+			iface := types.NewInterfaceType(methods, embeddeds)
+			if typ.IsImplicit() {
+				iface.MarkImplicit()
+			}
+			return iface.Complete(), true
+		}
 	case *types.Named:
 		if t, ok := p.patchLocalGenericNamed(typ); ok {
 			return t, true
@@ -2185,18 +2261,68 @@ func (p *context) _patchType(typ types.Type) (types.Type, bool) {
 			return types.NewSignature(typ.Recv(), params.(*types.Tuple), results.(*types.Tuple), typ.Variadic()), true
 		}
 	}
-	return typ, false
+	return typ, typ != original
+}
+
+func (p *context) emissionUniverseForPatch() *EmissionUniverse {
+	if p == nil {
+		return nil
+	}
+	if p.emissionUniverse != nil {
+		return p.emissionUniverse
+	}
+	if p.compilation != nil && p.compilation.EnableCoroEntryResolution {
+		return p.compilation.EmissionUniverse
+	}
+	return nil
 }
 
 func (p *context) patchLocalGenericNamed(t *types.Named) (*types.Named, bool) {
-	if p.goFn == nil || len(p.goFn.TypeArgs()) == 0 || !p.isGenericLocalType(t.Obj()) {
+	if p.goFn == nil || isPatchedLocalGenericName(t.Obj().Name()) {
 		return nil, false
 	}
-	if isPatchedLocalGenericName(t.Obj().Name()) {
+	universe := p.emissionUniverseForPatch()
+	if universe != nil {
+		if canonical := universe.cachedLocalGenericNamed(t); canonical != nil {
+			return canonical, true
+		}
+	}
+	localCtx := p.localGenericTypeContext(t)
+	if localCtx == nil && universe != nil {
+		localCtx = universe.registeredLocalGenericContext(p, t)
+	}
+	if localCtx == nil {
 		return nil, false
 	}
-	obj := types.NewTypeName(t.Obj().Pos(), t.Obj().Pkg(), p.localNamedName(t, false), nil)
+	if universe != nil {
+		if canonical := universe.canonicalLocalGenericNamed(localCtx, t); canonical != nil {
+			return canonical, true
+		}
+	}
+	name := localCtx.localNamedName(t, false)
+	obj := types.NewTypeName(t.Obj().Pos(), t.Obj().Pkg(), name, nil)
 	return types.NewNamed(obj, t.Underlying(), nil), true
+}
+
+// localGenericTypeContext finds the instantiated lexical owner of a local
+// named type. Anonymous functions share their parent's substitutions, but an
+// x/tools local TypeName may have no scope parent; walking Function.Parent is
+// therefore required to give outer-body and closure uses one canonical type.
+func (p *context) localGenericTypeContext(t *types.Named) *context {
+	if p == nil || p.goFn == nil || t == nil || t.Obj() == nil {
+		return nil
+	}
+	ctx := *p
+	for fn := p.goFn; fn != nil; fn = fn.Parent() {
+		if len(fn.TypeArgs()) == 0 {
+			continue
+		}
+		ctx.goFn = fn
+		if ctx.isGenericLocalType(t.Obj()) {
+			return &ctx
+		}
+	}
+	return nil
 }
 
 func isPatchedLocalGenericName(name string) bool {
@@ -2257,6 +2383,9 @@ func typeListArgs(list *types.TypeList, nameOf func(types.Type) string) []string
 func (p *context) typeArgName(t types.Type) string {
 	// Keep this formatter aligned with ssa/abi.typeArgString; this variant must
 	// additionally encode local generic type names while patching frontend types.
+	if universe := p.emissionUniverseForPatch(); universe != nil {
+		return universe.emissionTypeArgName(p, t)
+	}
 	switch t := t.(type) {
 	case *types.Alias:
 		return p.typeArgName(types.Unalias(t))
@@ -2429,6 +2558,26 @@ func (p *context) resolveLinkname(name string) string {
 		return ltarget
 	}
 	return name
+}
+
+// resolveMethodLinkname maps the signature reconstructed by the ABI type
+// builder back to the exact x/tools method or wrapper selected for that
+// receiver. Active coroutine codegen must use the same frozen physical symbol
+// for method-table references and compileFuncDecl definitions. The ordinary
+// SetResolveLinkname path remains unchanged for report-only codegen.
+func (p *context) resolveMethodLinkname(_ string, method *types.Func, sig *types.Signature) string {
+	if method == nil || sig == nil || sig.Recv() == nil {
+		panic("coroutine method-link resolution requires a method and receiver signature")
+	}
+	selection := p.goProg.MethodSets.MethodSet(sig.Recv().Type()).Lookup(method.Pkg(), method.Name())
+	if selection == nil {
+		panic(fmt.Errorf("coroutine method-link resolution: method %q is absent from receiver %s", method.Name(), sig.Recv().Type()))
+	}
+	fn := p.methodValue(selection)
+	if fn == nil {
+		panic(fmt.Errorf("coroutine method-link resolution: method %q has no SSA implementation", method.Name()))
+	}
+	return p.mustFunctionSymbol(fn).name
 }
 
 // checkCompileMethods ensures that methods referenced from ABI method tables

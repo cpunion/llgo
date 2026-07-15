@@ -644,12 +644,19 @@ func lexicalTypeDeclaration(obj *types.TypeName) (*types.TypeName, error) {
 	if obj.Pos() == token.NoPos {
 		return nil, fmt.Errorf("coro: instantiated local type %q has no source declaration", obj.Name())
 	}
+	declarationName := obj.Name()
+	if bracket := strings.IndexByte(declarationName, '['); bracket >= 0 {
+		// Active emission canonicalizes a generic-local name as Local[args].
+		// '[' cannot occur in a Go identifier, so the prefix is the exact
+		// lexical TypeName while position still distinguishes shadowed names.
+		declarationName = declarationName[:bracket]
+	}
 	var matches []*types.TypeName
 	var visit func(*types.Scope)
 	visit = func(scope *types.Scope) {
 		for _, name := range scope.Names() {
 			candidate, ok := scope.Lookup(name).(*types.TypeName)
-			if ok && candidate.Name() == obj.Name() && candidate.Pos() == obj.Pos() && candidate.Parent() != nil {
+			if ok && candidate.Name() == declarationName && candidate.Pos() == obj.Pos() && candidate.Parent() != nil {
 				matches = append(matches, candidate)
 			}
 		}

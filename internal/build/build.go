@@ -126,16 +126,67 @@ type OutFmtDetails struct {
 // hook).
 type ModuleHook func(pkg Package)
 
+// CoroPlanInput is the immutable whole-build input supplied to a
+// CoroPlanBuilder. EmissionUniverse contains the exact SSA function objects
+// selected after patch/skip resolution and lazy frontend materialization.
+type CoroPlanInput struct {
+	Program          *ssa.Program
+	EmissionUniverse *coro.SSAEmissionUniverse
+
+	resolveFunction    func(*ssa.Function) (*ssa.Function, bool)
+	augmentFunctionIDs func(coro.FunctionIDConfig) coro.FunctionIDConfig
+	recordAnalysis     func(*coro.SSAPlan)
+}
+
+// ResolveFunction maps a function that may be reached through an original
+// patched declaration to the exact canonical pointer in EmissionUniverse.
+// Builders may use it while selecting roots or attaching frontend policy.
+func (in CoroPlanInput) ResolveFunction(fn *ssa.Function) (*ssa.Function, bool) {
+	if fn == nil {
+		return nil, false
+	}
+	if in.resolveFunction != nil {
+		return in.resolveFunction(fn)
+	}
+	if in.EmissionUniverse == nil {
+		return fn, true
+	}
+	return fn, in.EmissionUniverse.Contains(fn)
+}
+
+// Analyze applies the frozen emission universe to config before running the
+// coroutine analysis. The frozen frontend patch-alias resolver is
+// authoritative, so roots, body callees, function values, and later code
+// generation all use the same exact *ssa.Function objects. The frontend's
+// structural identity resolver is composed with builder identity policy.
+// Builders use this helper instead of calling AnalyzeSSA directly.
+func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.SSAPlan, error) {
+	if in.augmentFunctionIDs != nil {
+		config.FunctionIDs = in.augmentFunctionIDs(config.FunctionIDs)
+	}
+	config.ResolveFunction = func(fn *ssa.Function) (*ssa.Function, bool, error) {
+		canonical, ok := in.ResolveFunction(fn)
+		return canonical, ok, nil
+	}
+	config.EmissionUniverse = in.EmissionUniverse
+	plan, err := coro.AnalyzeSSA(in.Program, roots, config)
+	if err == nil && in.recordAnalysis != nil {
+		in.recordAnalysis(plan)
+	}
+	return plan, err
+}
+
 // CoroPlanBuilder builds one compilation-scoped coroutine plan after every SSA
-// package is available and before fingerprinting, cache lookup, or LLVM
-// codegen. The builder owns root and policy selection because patch, directive,
-// and ABI classification are not build defaults yet. By default the build
-// pipeline only stores the returned report-only plan;
-// EnableCoroEntryResolution must be set explicitly before cl may consume its
-// primary-symbol decisions. Builders must treat prog as analysis input. Active
-// entry resolution bypasses package archive caching until CoroPlanDigest is
-// part of the cache fingerprint.
-type CoroPlanBuilder func(prog *ssa.Program) (*coro.SSAPlan, error)
+// package is available and the effective emission universe is frozen, but
+// before fingerprinting, cache lookup, or LLVM codegen. The builder owns root
+// and policy selection because directive and ABI classification are not build
+// defaults yet. By default the build pipeline only stores the returned
+// report-only plan; EnableCoroEntryResolution must be set explicitly before cl
+// may consume its primary-symbol decisions. An active builder must return a
+// plan created by input.Analyze so patch aliases and frontend structural
+// identities cannot be bypassed. Active entry resolution bypasses package
+// archive caching until CoroPlanDigest is part of the cache fingerprint.
+type CoroPlanBuilder func(input CoroPlanInput) (*coro.SSAPlan, error)
 
 // CoroPlanObserver observes the same compilation-scoped plan from each cl
 // package that is actually processed from source. Cached package registration
@@ -497,7 +548,7 @@ func Do(args []string, conf *Config) ([]Package, error) {
 
 	allPkgs := append([]*aPackage{}, pkgs...)
 	allPkgs = append(allPkgs, depPkgs...)
-	if err := buildCoroPlan(ctx); err != nil {
+	if err := buildCoroPlan(ctx, allPkgs...); err != nil {
 		return nil, err
 	}
 	allPkgs, err = buildAllPkgs(ctx, allPkgs, verbose)
@@ -618,7 +669,7 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	return allPkgs, nil
 }
 
-func buildCoroPlan(ctx *context) error {
+func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	if ctx == nil || ctx.buildConf == nil {
 		return nil
 	}
@@ -629,19 +680,90 @@ func buildCoroPlan(ctx *context) error {
 		}
 		return nil
 	}
-	plan, err := builder(ctx.progSSA)
+	if len(packages) != 0 {
+		if err := prepareCoroEmissionUniverse(ctx, packages); err != nil {
+			return fmt.Errorf("prepare coroutine emission universe: %w", err)
+		}
+	}
+	if ctx.buildConf.EnableCoroEntryResolution && ctx.coroEmission == nil {
+		return fmt.Errorf("enable coroutine entry resolution: prepared emission universe is required")
+	}
+	analyzedPlans := make(map[*coro.SSAPlan]struct{})
+	var analyzedPlansMu sync.Mutex
+	input := CoroPlanInput{
+		Program: ctx.progSSA,
+		recordAnalysis: func(plan *coro.SSAPlan) {
+			if plan != nil {
+				analyzedPlansMu.Lock()
+				analyzedPlans[plan] = struct{}{}
+				analyzedPlansMu.Unlock()
+			}
+		},
+	}
+	if ctx.coroEmission != nil {
+		input.EmissionUniverse = ctx.coroSSAEmission
+		input.resolveFunction = ctx.coroEmission.Resolve
+		input.augmentFunctionIDs = ctx.coroEmission.AugmentFunctionIDConfig
+	}
+	plan, err := builder(input)
 	if err != nil {
 		return fmt.Errorf("build coroutine plan: %w", err)
 	}
 	if plan == nil {
 		return fmt.Errorf("build coroutine plan: builder returned nil plan")
 	}
+	if ctx.buildConf.EnableCoroEntryResolution {
+		analyzedPlansMu.Lock()
+		if _, ok := analyzedPlans[plan]; !ok {
+			analyzedPlansMu.Unlock()
+			return fmt.Errorf("validate coroutine plan: active entry resolution requires the builder to return a plan created by CoroPlanInput.Analyze")
+		}
+		analyzedPlansMu.Unlock()
+		if err := ctx.coroEmission.ValidateCoroPlan(plan); err != nil {
+			return fmt.Errorf("validate coroutine plan coverage: %w", err)
+		}
+	}
 	ctx.coroPlan = plan
 	ctx.clCompilation = &cl.Compilation{
 		CoroPlan:                  plan,
 		CoroPlanObserver:          ctx.buildConf.CoroPlanObserver,
 		EnableCoroEntryResolution: ctx.buildConf.EnableCoroEntryResolution,
+		EmissionUniverse:          ctx.coroEmission,
 	}
+	return nil
+}
+
+func prepareCoroEmissionUniverse(ctx *context, packages []*aPackage) error {
+	inputs := make([]cl.EmissionPackage, 0, len(packages))
+	for _, aPkg := range packages {
+		if aPkg == nil || aPkg.Package == nil || aPkg.SSA == nil || llruntime.SkipToBuild(aPkg.PkgPath) {
+			continue
+		}
+		kind, _ := cl.PkgKindOf(aPkg.Types)
+		switch kind {
+		case cl.PkgDeclOnly:
+			continue
+		case cl.PkgLinkIR, cl.PkgLinkExtern, cl.PkgPyModule:
+			if len(aPkg.GoFiles) == 0 {
+				continue
+			}
+		}
+		files := append([]*ast.File(nil), aPkg.Syntax...)
+		if aPkg.AltPkg != nil {
+			files = append(files, aPkg.AltPkg.Syntax...)
+		}
+		inputs = append(inputs, cl.EmissionPackage{SSA: aPkg.SSA, Files: files, Identity: aPkg.ID})
+	}
+	emission, err := cl.PrepareEmissionUniverse(ctx.prog, ctx.patches, inputs)
+	if err != nil {
+		return err
+	}
+	ssaEmission, err := coro.NewSSAEmissionUniverse(ctx.progSSA, emission.Functions())
+	if err != nil {
+		return err
+	}
+	ctx.coroEmission = emission
+	ctx.coroSSAEmission = ssaEmission
 	return nil
 }
 
@@ -782,7 +904,9 @@ type context struct {
 
 	// coroPlan is compilation-scoped. It remains report-only unless
 	// EnableCoroEntryResolution is set explicitly.
-	coroPlan *coro.SSAPlan
+	coroPlan        *coro.SSAPlan
+	coroEmission    *cl.EmissionUniverse
+	coroSSAEmission *coro.SSAEmissionUniverse
 
 	// clCompilation is shared by all source packages in this build. Active
 	// entry resolution disables package-cache reads and writes until
@@ -959,8 +1083,12 @@ func buildAllPkgs(ctx *context, pkgs []*aPackage, verbose bool) ([]*aPackage, er
 		}
 	}
 
-	// Only build runtime packages when required (or host build with empty Target).
-	if needRuntime || needPyInit || ctx.buildConf.Target == "" {
+	// Active coroutine planning freezes and validates one exact compilation-wide
+	// universe before LLVM codegen. Its prepared universe includes the runtime
+	// tree, so emit that tree as well even when target lowering would otherwise
+	// discover no runtime dependency. Report-only planning preserves the legacy
+	// lazy-runtime behavior and package-cache/IR output.
+	if shouldBuildRuntimePackages(ctx.buildConf, needRuntime, needPyInit) {
 		for _, p := range runtimePkgs {
 			if err := buildOne(p); err != nil {
 				return nil, err
@@ -969,6 +1097,10 @@ func buildAllPkgs(ctx *context, pkgs []*aPackage, verbose bool) ([]*aPackage, er
 	}
 
 	return pkgs, nil
+}
+
+func shouldBuildRuntimePackages(conf *Config, needRuntime, needPyInit bool) bool {
+	return needRuntime || needPyInit || conf.Target == "" || conf.EnableCoroEntryResolution
 }
 
 func appendExternalLinkArgs(ctx *context, aPkg *aPackage, spec string) {
@@ -1538,7 +1670,9 @@ func buildPkg(ctx *context, aPkg *aPackage, verbose bool) error {
 		Compilation: ctx.clCompilation,
 		CacheHit:    aPkg.CacheHit,
 	})
-	check(err)
+	if err != nil {
+		return fmt.Errorf("compile package %s: %w", pkgPath, err)
+	}
 
 	aPkg.LPkg = ret
 	if hook := ctx.buildConf.ModuleHook; hook != nil {

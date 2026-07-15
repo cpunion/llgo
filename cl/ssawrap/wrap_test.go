@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/goplus/llgo/internal/coro"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
 )
@@ -31,6 +32,10 @@ func Greet(name string) string {
 
 func NoReturn(a int) {
 	_ = a
+}
+
+func Pair(value int) (int, string) {
+	return value, "value"
 }
 `
 
@@ -114,6 +119,18 @@ func TestMakeCallWrapper_Basic(t *testing.T) {
 			t.Errorf("arg[%d] mismatch: got %v, want %v", i, arg, wrapper.Params[i])
 		}
 	}
+	for i, param := range wrapper.Params {
+		if param == origFn.Params[i] {
+			t.Fatalf("wrapper parameter %d reuses the original SSA node", i)
+		}
+		if param.Parent() != wrapper {
+			t.Fatalf("wrapper parameter %d parent = %v, want wrapper", i, param.Parent())
+		}
+		refs := param.Referrers()
+		if refs == nil || len(*refs) != 1 || (*refs)[0] != call {
+			t.Fatalf("wrapper parameter %d referrers = %v, want call", i, refs)
+		}
+	}
 
 	// Verify second instruction is Return with Call result
 	ret, ok := entry.Instrs[1].(*ssa.Return)
@@ -139,6 +156,63 @@ func TestMakeCallWrapper_Basic(t *testing.T) {
 	}
 	if !strings.Contains(ssastr, "return") {
 		t.Error("SSA output missing return statement")
+	}
+}
+
+func TestMakeCallWrapper_MultipleReturns(t *testing.T) {
+	prog, ssapkg := buildTestProgram(t)
+	origFn := ssapkg.Func("Pair")
+	wrapper := MakeCallWrapper(prog, origFn)
+	if !types.Identical(wrapper.Signature, origFn.Signature) {
+		t.Fatalf("signature mismatch: got %v, want %v", wrapper.Signature, origFn.Signature)
+	}
+	entry := wrapper.Blocks[0]
+	if len(entry.Instrs) != 4 {
+		t.Fatalf("instructions = %d, want call + two extracts + return: %v", len(entry.Instrs), entry.Instrs)
+	}
+	call, ok := entry.Instrs[0].(*ssa.Call)
+	if !ok {
+		t.Fatalf("instruction 0 = %T, want *ssa.Call", entry.Instrs[0])
+	}
+	if !types.Identical(call.Type(), origFn.Signature.Results()) {
+		t.Fatalf("call type = %v, want result tuple %v", call.Type(), origFn.Signature.Results())
+	}
+	results := make([]ssa.Value, 2)
+	for i := range results {
+		extract, ok := entry.Instrs[i+1].(*ssa.Extract)
+		if !ok {
+			t.Fatalf("instruction %d = %T, want *ssa.Extract", i+1, entry.Instrs[i+1])
+		}
+		if extract.Tuple != call || extract.Index != i || !types.Identical(extract.Type(), origFn.Signature.Results().At(i).Type()) {
+			t.Fatalf("extract %d = tuple %v index %d type %v", i, extract.Tuple, extract.Index, extract.Type())
+		}
+		results[i] = extract
+	}
+	ret, ok := entry.Instrs[3].(*ssa.Return)
+	if !ok {
+		t.Fatalf("instruction 3 = %T, want *ssa.Return", entry.Instrs[3])
+	}
+	if len(ret.Results) != len(results) || ret.Results[0] != results[0] || ret.Results[1] != results[1] {
+		t.Fatalf("return results = %v, want %v", ret.Results, results)
+	}
+	universe, err := coro.NewSSAEmissionUniverse(prog, []*ssa.Function{origFn, wrapper})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := coro.AnalyzeSSA(prog, coro.Roots{{Function: wrapper, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+		EmissionUniverse: universe,
+		FunctionIDs: coro.FunctionIDConfig{ResolveSynthetic: func(fn *ssa.Function) (string, bool, error) {
+			if fn == wrapper {
+				return "ssawrap-test-pair", true, nil
+			}
+			return "", false, nil
+		}},
+	})
+	if err != nil {
+		t.Fatalf("AnalyzeSSA wrapper: %v", err)
+	}
+	if _, ok := plan.FunctionPlan(wrapper); !ok {
+		t.Fatal("wrapper is absent from analyzed plan")
 	}
 }
 
@@ -229,6 +303,14 @@ func TestMakeCallWrapper_NilFunction(t *testing.T) {
 	}()
 
 	MakeCallWrapper(prog, nil)
+}
+
+func TestMakeCallWrapperNamed(t *testing.T) {
+	prog, ssapkg := buildTestProgram(t)
+	wrapper := MakeCallWrapperNamed(prog, ssapkg.Func("Add"), "Add$wrapper$owner$key")
+	if got, want := wrapper.Name(), "Add$wrapper$owner$key"; got != want {
+		t.Fatalf("wrapper name = %q, want %q", got, want)
+	}
 }
 
 // TestMakeCallWrapper_Referrers verifies Value reference relationships are correct

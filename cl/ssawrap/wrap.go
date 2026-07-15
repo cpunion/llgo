@@ -49,17 +49,45 @@ type _Call struct {
 	Call ssa.CallCommon
 }
 
+type _Extract struct {
+	register
+	Tuple ssa.Value
+	Index int
+}
+
+type _Parameter struct {
+	name      string
+	object    *types.Var
+	typ       types.Type
+	parent    *ssa.Function
+	referrers []ssa.Instruction
+}
+
 func MakeCallWrapper(prog *ssa.Program, f *ssa.Function) *ssa.Function {
-	fn := prog.NewFunction(f.Name()+"$wrapper", f.Signature, "wrapper")
+	return MakeCallWrapperNamed(prog, f, f.Name()+"$wrapper")
+}
+
+// MakeCallWrapperNamed creates the same forwarding wrapper as MakeCallWrapper
+// with an explicit SSA/linker name. Frontends use it when multiple distinct
+// callees with the same short Go name need owner-scoped wrappers.
+func MakeCallWrapperNamed(prog *ssa.Program, f *ssa.Function, name string) *ssa.Function {
+	fn := prog.NewFunction(name, f.Signature, "wrapper")
 	entry := &ssa.BasicBlock{
 		Index:   0,
 		Comment: "entry",
 	}
 	(*_BasicBlock)(unsafe.Pointer(entry)).parent = fn
 	fn.Blocks = append(fn.Blocks, entry)
-	var args []ssa.Value
-	fn.Params = f.Params
-	for _, param := range fn.Params {
+	args := make([]ssa.Value, 0, len(f.Params))
+	fn.Params = make([]*ssa.Parameter, len(f.Params))
+	for i, original := range f.Params {
+		param := &ssa.Parameter{}
+		parameter := (*_Parameter)(unsafe.Pointer(param))
+		parameter.name = original.Name()
+		parameter.object, _ = original.Object().(*types.Var)
+		parameter.typ = original.Type()
+		parameter.parent = fn
+		fn.Params[i] = param
 		args = append(args, param)
 	}
 	call := &ssa.Call{
@@ -68,17 +96,52 @@ func MakeCallWrapper(prog *ssa.Program, f *ssa.Function) *ssa.Function {
 			Args:  args,
 		},
 	}
-	(*_Call)(unsafe.Pointer(call)).block = entry
-	entry.Instrs = append(entry.Instrs, call)
-	var ret *ssa.Return
-	if f.Signature.Results() != nil {
-		ret = &ssa.Return{
-			Results: []ssa.Value{call},
-		}
-		call := (*_Call)(unsafe.Pointer(call))
-		call.referrers = append(call.referrers, ret)
+	callImpl := (*_Call)(unsafe.Pointer(call))
+	callImpl.block = entry
+	results := f.Signature.Results()
+	resultCount := 0
+	if results != nil {
+		resultCount = results.Len()
 	} else {
-		ret = &ssa.Return{}
+		results = types.NewTuple()
+	}
+	if resultCount == 1 {
+		callImpl.typ = results.At(0).Type()
+	} else {
+		callImpl.typ = results
+	}
+	for _, param := range fn.Params {
+		parameter := (*_Parameter)(unsafe.Pointer(param))
+		parameter.referrers = append(parameter.referrers, call)
+	}
+	entry.Instrs = append(entry.Instrs, call)
+	returnValues := make([]ssa.Value, 0, resultCount)
+	switch resultCount {
+	case 0:
+	case 1:
+		returnValues = append(returnValues, call)
+	default:
+		for i := 0; i < resultCount; i++ {
+			extract := &ssa.Extract{Tuple: call, Index: i}
+			extractImpl := (*_Extract)(unsafe.Pointer(extract))
+			extractImpl.block = entry
+			extractImpl.num = i + 1
+			extractImpl.typ = results.At(i).Type()
+			callImpl.referrers = append(callImpl.referrers, extract)
+			entry.Instrs = append(entry.Instrs, extract)
+			returnValues = append(returnValues, extract)
+		}
+	}
+	ret := &ssa.Return{Results: returnValues}
+	for _, result := range returnValues {
+		switch result := result.(type) {
+		case *ssa.Call:
+			impl := (*_Call)(unsafe.Pointer(result))
+			impl.referrers = append(impl.referrers, ret)
+		case *ssa.Extract:
+			impl := (*_Extract)(unsafe.Pointer(result))
+			impl.referrers = append(impl.referrers, ret)
+		}
 	}
 	(*_Return)(unsafe.Pointer(ret)).block = entry
 	entry.Instrs = append(entry.Instrs, ret)

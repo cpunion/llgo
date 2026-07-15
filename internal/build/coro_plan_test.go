@@ -49,14 +49,14 @@ func TestCoroPlanBuilderRunsBeforeCodegenWithoutChangingIR(t *testing.T) {
 		sourceCompilations int
 	)
 	observed := make(map[*ssa.Package]int)
-	builder := func(prog *ssa.Program) (*coro.SSAPlan, error) {
+	builder := func(input CoroPlanInput) (*coro.SSAPlan, error) {
 		builderCalls++
 		var err error
-		mainFn, err = findSingleSSAMain(prog)
+		mainFn, err = findSingleSSAMain(input.Program)
 		if err != nil {
 			return nil, err
 		}
-		planned, err = coro.AnalyzeSSA(prog, coro.Roots{{Function: mainFn, Demand: coro.AsyncDemand}}, coro.SSAConfig{})
+		planned, err = input.Analyze(coro.Roots{{Function: mainFn, Demand: coro.AsyncDemand}}, coro.SSAConfig{})
 		if err == nil {
 			builderDone = true
 		}
@@ -115,11 +115,60 @@ func TestCoroPlanBuilderRunsBeforeCodegenWithoutChangingIR(t *testing.T) {
 	}
 }
 
+func TestCoroPlanInputCanonicalizesPatchedRoot(t *testing.T) {
+	original := buildSSAOrderTestPackage(t, `package p
+func f() {}
+func g() {}
+`)
+	canonical := original.Pkg.Func("g")
+	universe, err := coro.NewSSAEmissionUniverse(original.Prog, []*ssa.Function{canonical})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := CoroPlanInput{
+		Program:          original.Prog,
+		EmissionUniverse: universe,
+		resolveFunction: func(fn *ssa.Function) (*ssa.Function, bool) {
+			if fn == original {
+				return canonical, true
+			}
+			return fn, universe.Contains(fn)
+		},
+	}
+	roots := coro.Roots{{Function: original, Demand: coro.SyncDemand}}
+	builderResolverCalls := 0
+	plan, err := input.Analyze(roots, coro.SSAConfig{
+		ResolveFunction: func(*ssa.Function) (*ssa.Function, bool, error) {
+			builderResolverCalls++
+			return nil, false, fmt.Errorf("builder resolver must not override frozen frontend aliases")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if builderResolverCalls != 0 {
+		t.Fatalf("builder ResolveFunction calls = %d, want 0", builderResolverCalls)
+	}
+	if roots[0].Function != original {
+		t.Fatal("Analyze mutated the builder-owned root slice")
+	}
+	if resolved, ok := input.ResolveFunction(original); !ok || resolved != canonical {
+		t.Fatalf("ResolveFunction(original) = %v, %v; want exact canonical function", resolved, ok)
+	}
+	if _, ok := plan.FunctionPlan(original); ok {
+		t.Fatal("original patched declaration entered the exact-pointer plan")
+	}
+	got, ok := plan.FunctionPlan(canonical)
+	if !ok || got.Demand != coro.SyncDemand {
+		t.Fatalf("canonical plan = %+v, %v; want SyncDemand", got, ok)
+	}
+}
+
 func TestBuildCoroPlanErrors(t *testing.T) {
 	t.Run("builder error", func(t *testing.T) {
 		sentinel := errors.New("sentinel")
 		ctx := &context{
-			buildConf: &Config{CoroPlanBuilder: func(*ssa.Program) (*coro.SSAPlan, error) {
+			buildConf: &Config{CoroPlanBuilder: func(CoroPlanInput) (*coro.SSAPlan, error) {
 				return nil, sentinel
 			}},
 		}
@@ -134,7 +183,7 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 
 	t.Run("nil plan", func(t *testing.T) {
 		ctx := &context{
-			buildConf: &Config{CoroPlanBuilder: func(*ssa.Program) (*coro.SSAPlan, error) {
+			buildConf: &Config{CoroPlanBuilder: func(CoroPlanInput) (*coro.SSAPlan, error) {
 				return nil, nil
 			}},
 		}
@@ -174,20 +223,38 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 		}
 	})
 
+	t.Run("entry resolution requires prepared emission universe", func(t *testing.T) {
+		builderCalls := 0
+		ctx := &context{buildConf: &Config{
+			EnableCoroEntryResolution: true,
+			CoroPlanBuilder: func(CoroPlanInput) (*coro.SSAPlan, error) {
+				builderCalls++
+				return &coro.SSAPlan{}, nil
+			},
+		}}
+		err := buildCoroPlan(ctx)
+		if err == nil || !strings.Contains(err.Error(), "prepared emission universe is required") {
+			t.Fatalf("buildCoroPlan error = %v, want missing-universe rejection", err)
+		}
+		if builderCalls != 0 {
+			t.Fatalf("CoroPlanBuilder calls = %d, want 0", builderCalls)
+		}
+		if ctx.coroPlan != nil || ctx.clCompilation != nil {
+			t.Fatal("missing universe installed coroutine compilation state")
+		}
+	})
+
 	for _, tt := range []struct {
-		name            string
-		entryResolution bool
+		name string
 	}{
 		{name: "report only"},
-		{name: "entry resolution enabled", entryResolution: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			plan := &coro.SSAPlan{}
 			builderCalls := 0
 			observerCalls := 0
 			ctx := &context{buildConf: &Config{
-				EnableCoroEntryResolution: tt.entryResolution,
-				CoroPlanBuilder: func(*ssa.Program) (*coro.SSAPlan, error) {
+				CoroPlanBuilder: func(CoroPlanInput) (*coro.SSAPlan, error) {
 					builderCalls++
 					return plan, nil
 				},
@@ -208,8 +275,8 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 			if ctx.coroPlan != plan || ctx.clCompilation == nil || ctx.clCompilation.CoroPlan != plan {
 				t.Fatalf("installed plan = %p, compilation = %+v, want %p", ctx.coroPlan, ctx.clCompilation, plan)
 			}
-			if ctx.clCompilation.EnableCoroEntryResolution != tt.entryResolution {
-				t.Fatalf("Compilation.EnableCoroEntryResolution = %v, want %v", ctx.clCompilation.EnableCoroEntryResolution, tt.entryResolution)
+			if ctx.clCompilation.EnableCoroEntryResolution {
+				t.Fatal("report-only compilation unexpectedly enabled entry resolution")
 			}
 			ctx.clCompilation.CoroPlanObserver(nil, plan)
 			if observerCalls != 1 {
@@ -221,7 +288,7 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 	t.Run("Do stops before codegen", func(t *testing.T) {
 		sentinel := errors.New("sentinel")
 		conf := NewDefaultConf(ModeGen)
-		conf.CoroPlanBuilder = func(*ssa.Program) (*coro.SSAPlan, error) {
+		conf.CoroPlanBuilder = func(CoroPlanInput) (*coro.SSAPlan, error) {
 			return nil, sentinel
 		}
 		moduleCalls := 0
@@ -258,6 +325,33 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 		}
 		if moduleCalls != 0 {
 			t.Fatalf("ModuleHook calls = %d, want 0", moduleCalls)
+		}
+	})
+
+	t.Run("Do rejects active builder that bypasses input Analyze", func(t *testing.T) {
+		conf := NewDefaultConf(ModeGen)
+		conf.EnableCoroEntryResolution = true
+		conf.CoroPlanBuilder = func(CoroPlanInput) (*coro.SSAPlan, error) {
+			return &coro.SSAPlan{}, nil
+		}
+		observerCalls := 0
+		moduleCalls := 0
+		conf.CoroPlanObserver = func(*ssa.Package, *coro.SSAPlan) {
+			observerCalls++
+		}
+		conf.ModuleHook = func(Package) {
+			moduleCalls++
+		}
+
+		pkgs, err := Do([]string{"../../cl/_testgo/print"}, conf)
+		if err == nil || !strings.Contains(err.Error(), "plan created by CoroPlanInput.Analyze") {
+			t.Fatalf("Do error = %v, want Analyze bypass rejection", err)
+		}
+		if len(pkgs) != 0 {
+			t.Fatalf("Do packages = %+v, want none", pkgs)
+		}
+		if observerCalls != 0 || moduleCalls != 0 {
+			t.Fatalf("observer/module calls = %d/%d, want 0/0", observerCalls, moduleCalls)
 		}
 	})
 }
@@ -297,7 +391,7 @@ func TestCoroEntryResolutionDisablesPackageCacheReadWrite(t *testing.T) {
 			Goos:                      "linux",
 			Goarch:                    "amd64",
 			EnableCoroEntryResolution: entryResolution,
-			CoroPlanBuilder: func(*ssa.Program) (*coro.SSAPlan, error) {
+			CoroPlanBuilder: func(CoroPlanInput) (*coro.SSAPlan, error) {
 				return &coro.SSAPlan{}, nil
 			},
 		}}
@@ -358,6 +452,163 @@ func TestCoroEntryResolutionDisablesPackageCacheReadWrite(t *testing.T) {
 	if entryCtx.cacheManager != nil {
 		t.Fatal("active coroutine entry resolution initialized a cache manager")
 	}
+}
+
+func TestCoroEntryResolutionBuildsPreparedRuntimePackages(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		conf        Config
+		needRuntime bool
+		needPyInit  bool
+		want        bool
+	}{
+		{name: "host report only", conf: Config{}, want: true},
+		{name: "target report only stays lazy", conf: Config{Target: "embedded"}},
+		{name: "target active emits frozen universe", conf: Config{Target: "embedded", EnableCoroEntryResolution: true}, want: true},
+		{name: "target runtime lowering", conf: Config{Target: "embedded"}, needRuntime: true, want: true},
+		{name: "target python lowering", conf: Config{Target: "embedded"}, needPyInit: true, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := shouldBuildRuntimePackages(&test.conf, test.needRuntime, test.needPyInit); got != test.want {
+				t.Fatalf("shouldBuildRuntimePackages = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestCoroEmissionCoverageStopsBeforeAnyPackageCodegen(t *testing.T) {
+	conf := NewDefaultConf(ModeGen)
+	conf.EnableCoroEntryResolution = true
+
+	var (
+		builderCalls  int
+		observerCalls int
+		moduleCalls   int
+	)
+	conf.CoroPlanBuilder = func(input CoroPlanInput) (*coro.SSAPlan, error) {
+		builderCalls++
+		if input.EmissionUniverse == nil {
+			return nil, fmt.Errorf("missing prepared emission universe")
+		}
+		mainFn, err := findSingleSSAMain(input.Program)
+		if err != nil {
+			return nil, err
+		}
+		return input.Analyze(coro.Roots{{Function: mainFn, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+			Include: func(fn *ssa.Function) (bool, error) {
+				return fn.Pkg == nil || fn.Pkg.Pkg == nil ||
+					fn.Pkg.Pkg.Path() != "github.com/goplus/llgo/internal/build/_testgo/coro_emission/zmiss" ||
+					fn.Name() != "Missing", nil
+			},
+		})
+	}
+	conf.CoroPlanObserver = func(*ssa.Package, *coro.SSAPlan) {
+		observerCalls++
+	}
+	conf.ModuleHook = func(Package) {
+		moduleCalls++
+	}
+
+	pkgs, err := Do([]string{"./_testgo/coro_emission"}, conf)
+	if err == nil || !strings.Contains(err.Error(), "zmiss") || !strings.Contains(err.Error(), "Missing") {
+		t.Fatalf("Do error = %v, want missing zmiss.Missing coverage", err)
+	}
+	if len(pkgs) != 0 {
+		t.Fatalf("Do packages = %+v, want none", pkgs)
+	}
+	if builderCalls != 1 {
+		t.Fatalf("CoroPlanBuilder calls = %d, want 1", builderCalls)
+	}
+	if observerCalls != 0 {
+		t.Fatalf("CoroPlanObserver calls = %d, want 0", observerCalls)
+	}
+	if moduleCalls != 0 {
+		t.Fatalf("ModuleHook calls = %d, want 0", moduleCalls)
+	}
+}
+
+func TestCoroUnsupportedEntryResolutionReturnsErrorBeforeCodegen(t *testing.T) {
+	conf := NewDefaultConf(ModeGen)
+	conf.EnableCoroEntryResolution = true
+	var (
+		observerCalls int
+		moduleCalls   int
+		builderBuilt  bool
+	)
+	conf.CoroPlanBuilder = func(input CoroPlanInput) (*coro.SSAPlan, error) {
+		mainFn, err := findSingleSSAMain(input.Program)
+		if err != nil {
+			return nil, err
+		}
+		plan, err := input.Analyze(coro.Roots{{Function: mainFn, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+			ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+				if fn == mainFn {
+					return coro.SSAFunctionPolicy{Effect: coro.MayPark}, nil
+				}
+				return coro.SSAFunctionPolicy{}, nil
+			},
+		})
+		if err == nil {
+			builderBuilt = true
+		}
+		return plan, err
+	}
+	conf.CoroPlanObserver = func(*ssa.Package, *coro.SSAPlan) {
+		observerCalls++
+	}
+	conf.ModuleHook = func(Package) {
+		moduleCalls++
+	}
+
+	pkgs, err := Do([]string{"../../cl/_testgo/print"}, conf)
+	if !builderBuilt {
+		t.Fatalf("CoroPlanBuilder did not successfully return a plan: %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "compile package") ||
+		(!strings.Contains(err.Error(), "requires coroutine physical ABI lowering") &&
+			!strings.Contains(err.Error(), "requires an unimplemented dispatch descriptor")) {
+		t.Fatalf("Do error = %v, want cl coroutine preflight error returned from buildPkg", err)
+	}
+	if len(pkgs) != 0 {
+		t.Fatalf("Do packages = %+v, want none", pkgs)
+	}
+	if observerCalls != 0 || moduleCalls != 0 {
+		t.Fatalf("observer/module calls = %d/%d, want 0/0", observerCalls, moduleCalls)
+	}
+}
+
+func TestCoroEmissionUniverseAcceptsModeTestVariants(t *testing.T) {
+	conf := NewDefaultConf(ModeTest)
+	sentinel := errors.New("mode-test emission universe prepared")
+	var (
+		builderCalls int
+		moduleCalls  int
+	)
+	conf.CoroPlanBuilder = func(input CoroPlanInput) (*coro.SSAPlan, error) {
+		builderCalls++
+		if input.EmissionUniverse == nil {
+			return nil, fmt.Errorf("missing prepared emission universe")
+		}
+		if _, err := input.Analyze(nil, coro.SSAConfig{}); err != nil {
+			return nil, fmt.Errorf("analyze ModeTest emission universe: %w", err)
+		}
+		return nil, sentinel
+	}
+	conf.ModuleHook = func(Package) { moduleCalls++ }
+
+	pkgs, err := Do([]string{"../../cl/_testgo/runtest"}, conf)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("Do error = %v, want builder sentinel after ModeTest universe preparation", err)
+	}
+	if len(pkgs) != 0 {
+		t.Fatalf("Do packages = %+v, want none", pkgs)
+	}
+	if builderCalls != 1 || moduleCalls != 0 {
+		t.Fatalf("builder/module calls = %d/%d, want 1/0", builderCalls, moduleCalls)
+	}
+	// ABI-identical functions copied into a test variant intentionally resolve
+	// to one physical symbol. Distinct same-path bodies remain exact and are
+	// covered by cl.TestEmissionUniverseKeepsSamePathTestVariantsExact.
 }
 
 func buildModeGenIR(t *testing.T, pattern string, builder CoroPlanBuilder, observer CoroPlanObserver, moduleHooks ...ModuleHook) (string, map[string][sha256.Size]byte) {

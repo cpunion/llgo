@@ -1,0 +1,3 @@
+package zmiss
+
+func Missing() {}

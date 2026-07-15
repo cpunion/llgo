@@ -50,21 +50,35 @@ const (
 // C type = raw type
 // Go type: convert to raw type (because of closure)
 func (p Program) Type(typ types.Type, bg Background) Type {
+	return p.rawType(p.PhysicalType(typ, bg))
+}
+
+// PhysicalType converts a source Go/C type to the raw go/types shape used by
+// LLVM lowering without constructing its LLVM type. This is useful to freeze
+// compilation-wide metadata before the runtime LLVM package is initialized.
+func (p Program) PhysicalType(typ types.Type, bg Background) types.Type {
 	if bg == InGo {
 		typ, _ = p.gocvt.cvtType(typ)
 	}
-	return p.rawType(typ)
+	return typ
 }
 
 // FuncDecl converts a Go/C function declaration into raw type.
 func (p Program) FuncDecl(sig *types.Signature, bg Background) Type {
+	raw := p.PhysicalFuncDecl(sig, bg)
+	return &aType{p.toLLVMFunc(raw), rawType{raw}, vkFuncDecl}
+}
+
+// PhysicalFuncDecl converts a source function signature to the raw declaration
+// signature used by LLVM lowering without constructing an LLVM function type.
+func (p Program) PhysicalFuncDecl(sig *types.Signature, bg Background) *types.Signature {
 	recv := sig.Recv()
 	if bg == InGo {
 		sig = p.gocvt.cvtFunc(sig, recv)
 	} else if recv != nil { // even in C, we need to add ctx for method
 		sig = FuncAddCtx(recv, sig)
 	}
-	return &aType{p.toLLVMFunc(sig), rawType{sig}, vkFuncDecl}
+	return sig
 }
 
 // Closure creates a closture type for a function.

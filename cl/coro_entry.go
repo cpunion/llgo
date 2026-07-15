@@ -30,6 +30,7 @@ const coroPrimarySuffix = "$coro"
 // Primary selects the source body; FuncRep only describes escaped function
 // values and never authorizes a second body.
 type plannedFunctionSymbol struct {
+	function *ssa.Function
 	pkgTypes *types.Package
 	name     string
 	ftype    int
@@ -43,8 +44,24 @@ type plannedFunctionSymbol struct {
 // descriptor. The zero-value compilation and report-only plans deliberately
 // preserve the legacy symbol.
 func (p *context) resolveFunctionSymbol(fn *ssa.Function) (plannedFunctionSymbol, error) {
+	if p.compilation != nil && p.compilation.EnableCoroEntryResolution && p.compilation.EmissionUniverse != nil {
+		canonical, ok := p.compilation.EmissionUniverse.Resolve(fn)
+		if !ok {
+			_, unresolvedName, _ := p.funcName(fn)
+			return plannedFunctionSymbol{}, fmt.Errorf("coroutine entry resolution: function %q is absent from the prepared emission universe", unresolvedName)
+		}
+		fn = canonical
+	}
 	pkgTypes, name, ftype := p.funcName(fn)
+	if p.compilation != nil && p.compilation.EnableCoroEntryResolution && p.compilation.EmissionUniverse != nil {
+		var err error
+		name, err = p.compilation.EmissionUniverse.physicalName(p.goPkg, fn, name)
+		if err != nil {
+			return plannedFunctionSymbol{}, err
+		}
+	}
 	entry := plannedFunctionSymbol{
+		function: fn,
 		pkgTypes: pkgTypes,
 		name:     name,
 		ftype:    ftype,
@@ -123,6 +140,14 @@ func (c *Compilation) preflightCoroPlan() error {
 	c.coroPreflight.Do(func() {
 		if c.CoroPlan == nil {
 			c.coroPreflightErr = fmt.Errorf("coroutine entry resolution requires a compilation CoroPlan")
+			return
+		}
+		if c.EmissionUniverse == nil {
+			c.coroPreflightErr = fmt.Errorf("coroutine entry resolution requires a prepared emission universe")
+			return
+		}
+		if err := c.EmissionUniverse.ValidateCoroPlan(c.CoroPlan); err != nil {
+			c.coroPreflightErr = err
 			return
 		}
 		for _, function := range c.CoroPlan.Functions() {

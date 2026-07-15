@@ -643,6 +643,7 @@ var llgoInstrs = map[string]int{
 // or returns nil and set ftype = llgoCstr, llgoAlloca, llgoUnreachable, etc.
 func (p *context) funcOf(fn *ssa.Function) (aFn llssa.Function, pyFn llssa.PyObjRef, ftype int) {
 	entry := p.mustFunctionSymbol(fn)
+	fn = entry.function
 	pkgTypes, name, ftype := entry.pkgTypes, entry.name, entry.ftype
 	switch ftype {
 	case pyFunc:

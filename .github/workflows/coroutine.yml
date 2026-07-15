@@ -16,7 +16,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        llvm: [14, 18, 19, 21]
+        include:
+          - { llvm: 14, go: "1.24.2" }
+          - { llvm: 18, go: "1.24.2" }
+          - { llvm: 19, go: "1.24.2" }
+          - { llvm: 21, go: "1.24.2" }
+          - { llvm: 19, go: "1.26.5" }
     steps:
       - uses: actions/checkout@v7
 
@@ -31,7 +36,7 @@ jobs:
       - name: Set up Go
         uses: ./.github/actions/setup-go
         with:
-          go-version: "1.24.2"
+          go-version: ${{ matrix.go }}
 
       # Temporary while the stackless-coroutine slices are integrated. Restore
       # the full Go workflow, including macOS, before the upstream merge.
@@ -41,11 +46,13 @@ jobs:
 
       - name: Test coroutine build integration
         if: matrix.llvm == 19
-        run: go test ./internal/build -run 'Test(CoroPlanBuilderRunsBeforeCodegenWithoutChangingIR|BuildCoroPlanErrors|CoroEntryResolutionDisablesPackageCacheReadWrite)$' -count=1
+        run: go test ./internal/build -run 'Test(CoroPlanBuilderRunsBeforeCodegenWithoutChangingIR|CoroPlanInputCanonicalizesPatchedRoot|BuildCoroPlanErrors|CoroEntryResolutionDisablesPackageCacheReadWrite|CoroEntryResolutionBuildsPreparedRuntimePackages|CoroEmissionCoverageStopsBeforeAnyPackageCodegen|CoroUnsupportedEntryResolutionReturnsErrorBeforeCodegen|CoroEmissionUniverseAcceptsModeTestVariants)$' -count=1
 
       - name: Test coroutine compiler integration
         if: matrix.llvm == 19
-        run: go test ./cl -run '^Test(CompilationCoroPlanObservationAndCacheRegistration|CoroEntryResolutionPlainPrimaryPreservesIR|ResolveFunctionSymbolUsesPrimaryAndExactPlan|CoroEntryRejectsUnsupportedBeforeCreatingSymbol|CoroEntryResolutionPreflightRejectsWholePlanBeforeCodegen|CoroEntryResolutionPreflightRejectsMissingPlanAndCache)$' -count=1
+        run: |
+          go test -race ./cl/ssawrap -count=1
+          go test -race ./cl -run '^Test(CompilationCoroPlanObservationAndCacheRegistration|CoroEntryResolutionPlainPrimaryPreservesIR|ResolveFunctionSymbolUsesPrimaryAndExactPlan|CoroEntryRejectsUnsupportedBeforeCreatingSymbol|CoroEntryResolutionPreflightRejectsWholePlanBeforeCodegen|CoroEntryResolutionPreflightRejectsMissingPlanAndCache|Emission.*)$' -count=1
 
       - name: Test structured LLVM coroutine builder
         run: go test -tags=llvm${{ matrix.llvm }} -v ./ssa -run '^TestCoroBuilder' -count=1
@@ -66,7 +73,10 @@ jobs:
       - name: Vet coroutine analysis
         if: matrix.llvm == 19
         run: |
-          go vet ./internal/coro ./internal/build ./internal/xtool/llvm ./internal/crosscompile ./internal/cabi
+          go vet ./internal/coro ./internal/build ./cl/ssawrap ./internal/xtool/llvm ./internal/crosscompile ./internal/cabi
+          # The compiler package has a pre-existing unsafe.Pointer finding.
+          # Disable only that analyzer and keep all other checks enabled.
+          go vet -unsafeptr=false ./cl
           # The SSA package has pre-existing sync.Map copylocks findings. Keep
           # every other analyzer active while coroutine slices are integrated.
           go vet -copylocks=false ./ssa

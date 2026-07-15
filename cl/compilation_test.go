@@ -81,17 +81,35 @@ package foo
 
 func F(value int) int { return value + 1 }
 `)
-	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{
-		{Function: ssaPkg.Func("F"), Demand: coro.SyncDemand},
-	}, coro.SSAConfig{})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	compile := func(compilation *Compilation) string {
+	compile := func(active bool) string {
 		t.Helper()
 		prog := newLLSSAProg(t)
 		defer prog.Dispose()
+		var compilation *Compilation
+		if active {
+			universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{
+				{Function: ssaPkg.Func("F"), Demand: coro.SyncDemand},
+			}, coro.SSAConfig{
+				EmissionUniverse: ssaUniverse,
+				FunctionIDs:      universe.FunctionIDConfig(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			compilation = &Compilation{
+				CoroPlan:                  plan,
+				EmissionUniverse:          universe,
+				EnableCoroEntryResolution: true,
+			}
+		}
 		pkg, _, err := NewPackageExWithEmbedOptions(prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{}, PackageOptions{
 			Compilation: compilation,
 		})
@@ -101,11 +119,8 @@ func F(value int) int { return value + 1 }
 		return pkg.String()
 	}
 
-	baseline := compile(nil)
-	resolved := compile(&Compilation{
-		CoroPlan:                  plan,
-		EnableCoroEntryResolution: true,
-	})
+	baseline := compile(false)
+	resolved := compile(true)
 	if resolved != baseline {
 		t.Fatal("plain-primary entry resolution changed emitted LLVM IR")
 	}

@@ -41,6 +41,12 @@ type Compilation struct {
 	CoroPlanObserver          CoroPlanObserver
 	EnableCoroEntryResolution bool
 
+	// EmissionUniverse is the immutable, compilation-scoped set of exact SSA
+	// functions that cl may resolve while emitting this compilation. Active
+	// coroutine entry resolution requires the universe to have been prepared
+	// before any package enters LLVM codegen.
+	EmissionUniverse *EmissionUniverse
+
 	coroPreflight    sync.Once
 	coroPreflightErr error
 }

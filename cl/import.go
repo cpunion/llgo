@@ -185,7 +185,9 @@ func (p *context) initFiles(pkgPath string, files []*ast.File, cPkg bool) {
 					if decl.Recv == nil && token.IsExported(inPkgName) {
 						exportName := strings.TrimPrefix(inPkgName, "X")
 						p.prog.SetLinkname(fullName, exportName)
-						p.pkg.SetExport(fullName, exportName)
+						if p.pkg != nil {
+							p.pkg.SetExport(fullName, exportName)
+						}
 					}
 				}
 			case *ast.GenDecl:
@@ -355,7 +357,7 @@ func (p *context) initLink(line string, prefix int, export bool, f func(inPkgNam
 		if fullName, _, ok := f(inPkgName, export); ok {
 			link := strings.TrimLeft(text[idx+1:], " ")
 			p.prog.SetLinkname(fullName, link)
-			if export {
+			if export && p.pkg != nil {
 				p.pkg.SetExport(fullName, link)
 			}
 		} else {
