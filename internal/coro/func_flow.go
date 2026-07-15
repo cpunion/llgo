@@ -723,7 +723,6 @@ func collectFuncLeafPaths(typ types.Type, path []FuncPathStep, visiting map[type
 		return
 	}
 	visiting[typ] = true
-	defer delete(visiting, typ)
 
 	switch underlying := typ.Underlying().(type) {
 	case *types.Tuple:
@@ -744,6 +743,7 @@ func collectFuncLeafPaths(typ types.Type, path []FuncPathStep, visiting map[type
 	case *types.Chan:
 		collectFuncLeafPaths(underlying.Elem(), appendFuncPath(path, FuncPathChanElement, -1), visiting, paths)
 	}
+	delete(visiting, typ)
 }
 
 func appendFuncPath(path []FuncPathStep, kind FuncPathKind, index int) []FuncPathStep {
