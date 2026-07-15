@@ -32,12 +32,21 @@ import (
 )
 
 func TestCoroPlanBuilderRunsBeforeCodegenWithoutChangingIR(t *testing.T) {
+	t.Setenv(llgoBuildCache, "on")
+	cacheRoot := t.TempDir()
+	oldCacheRootFunc := cacheRootFunc
+	cacheRootFunc = func() string { return cacheRoot }
+	t.Cleanup(func() { cacheRootFunc = oldCacheRootFunc })
+
 	var (
-		builderCalls int
-		builderDone  bool
-		planned      *coro.SSAPlan
-		mainFn       *ssa.Function
+		builderCalls       int
+		builderDone        bool
+		planned            *coro.SSAPlan
+		mainFn             *ssa.Function
+		cacheRegistrations int
+		sourceCompilations int
 	)
+	observed := make(map[*ssa.Package]int)
 	builder := func(prog *ssa.Program) (*coro.SSAPlan, error) {
 		builderCalls++
 		var err error
@@ -52,10 +61,27 @@ func TestCoroPlanBuilderRunsBeforeCodegenWithoutChangingIR(t *testing.T) {
 		return planned, err
 	}
 
-	baselineIR, baselineModules := buildModeGenIR(t, "../../cl/_testgo/chan", nil, nil)
-	plannedIR, plannedModules := buildModeGenIR(t, "../../cl/_testgo/chan", builder, func(Package) {
+	baselineIR, baselineModules := buildModeGenIR(t, "../../cl/_testgo/chan", nil, nil, nil)
+	plannedIR, plannedModules := buildModeGenIR(t, "../../cl/_testgo/chan", builder, func(pkg *ssa.Package, plan *coro.SSAPlan) {
+		if plan != planned {
+			t.Errorf("package %s observed plan %p, want compilation plan %p", pkg, plan, planned)
+		}
+		observed[pkg]++
+	}, func(Package) {
 		if !builderDone {
 			t.Error("ModuleHook ran before CoroPlanBuilder completed")
+		}
+	}, func(pkg Package) {
+		if pkg.CacheHit {
+			cacheRegistrations++
+			if observed[pkg.SSA] != 0 {
+				t.Errorf("cached package %s reported coroutine source compilation", pkg.PkgPath)
+			}
+			return
+		}
+		sourceCompilations++
+		if observed[pkg.SSA] != 1 {
+			t.Errorf("source package %s observed coroutine plan %d times, want 1", pkg.PkgPath, observed[pkg.SSA])
 		}
 	})
 	if builderCalls != 1 {
@@ -63,6 +89,12 @@ func TestCoroPlanBuilderRunsBeforeCodegenWithoutChangingIR(t *testing.T) {
 	}
 	if planned == nil || mainFn == nil {
 		t.Fatal("CoroPlanBuilder did not publish a plan for main")
+	}
+	if sourceCompilations == 0 || len(observed) != sourceCompilations {
+		t.Fatalf("source compilation observations = %d for %d packages, want one per package", len(observed), sourceCompilations)
+	}
+	if cacheRegistrations == 0 {
+		t.Fatal("planned build had no cache registration to verify")
 	}
 	id, ok := planned.FunctionID(mainFn)
 	if !ok {
@@ -140,10 +172,11 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 	})
 }
 
-func buildModeGenIR(t *testing.T, pattern string, builder CoroPlanBuilder, moduleHook ModuleHook) (string, map[string][sha256.Size]byte) {
+func buildModeGenIR(t *testing.T, pattern string, builder CoroPlanBuilder, observer CoroPlanObserver, moduleHooks ...ModuleHook) (string, map[string][sha256.Size]byte) {
 	t.Helper()
 	conf := NewDefaultConf(ModeGen)
 	conf.CoroPlanBuilder = builder
+	conf.CoroPlanObserver = observer
 	modules := make(map[string][sha256.Size]byte)
 	conf.ModuleHook = func(pkg Package) {
 		key := pkg.ID
@@ -151,8 +184,10 @@ func buildModeGenIR(t *testing.T, pattern string, builder CoroPlanBuilder, modul
 			t.Errorf("ModuleHook ran more than once for %s", key)
 		}
 		modules[key] = sha256.Sum256([]byte(pkg.LPkg.String()))
-		if moduleHook != nil {
-			moduleHook(pkg)
+		for _, hook := range moduleHooks {
+			if hook != nil {
+				hook(pkg)
+			}
 		}
 	}
 	pkgs, err := Do([]string{pattern}, conf)

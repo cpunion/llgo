@@ -134,6 +134,11 @@ type ModuleHook func(pkg Package)
 // archives, or cache keys. Builders must treat prog as analysis input.
 type CoroPlanBuilder func(prog *ssa.Program) (*coro.SSAPlan, error)
 
+// CoroPlanObserver observes the same compilation-scoped plan from each cl
+// package that is actually processed from source. Cached package registration
+// does not invoke it.
+type CoroPlanObserver = cl.CoroPlanObserver
+
 type Config struct {
 	Goos          string
 	Goarch        string
@@ -184,9 +189,10 @@ type Config struct {
 	// Each Rewrites entry maps variable names to replacement string values. Only
 	// string-typed globals are supported and "main" applies to all root main
 	// packages in the current build.
-	GlobalRewrites  map[string]Rewrites
-	ModuleHook      ModuleHook
-	CoroPlanBuilder CoroPlanBuilder
+	GlobalRewrites   map[string]Rewrites
+	ModuleHook       ModuleHook
+	CoroPlanBuilder  CoroPlanBuilder
+	CoroPlanObserver CoroPlanObserver
 }
 
 type Rewrites map[string]string
@@ -620,6 +626,10 @@ func buildCoroPlan(ctx *context) error {
 		return fmt.Errorf("build coroutine plan: builder returned nil plan")
 	}
 	ctx.coroPlan = plan
+	ctx.clCompilation = &cl.Compilation{
+		CoroPlan:         plan,
+		CoroPlanObserver: ctx.buildConf.CoroPlanObserver,
+	}
 	return nil
 }
 
@@ -743,6 +753,10 @@ type context struct {
 	// coroPlan remains report-only until build policy, archive identity, and
 	// lowering are wired in later slices.
 	coroPlan *coro.SSAPlan
+
+	// clCompilation is shared by all source packages in this build. cl strips it
+	// from cache-registration contexts so they cannot report or lower the plan.
+	clCompilation *cl.Compilation
 }
 
 func (c *context) compiler() *clang.Cmd {
@@ -1476,7 +1490,10 @@ func buildPkg(ctx *context, aPkg *aPackage, verbose bool) error {
 		return fmt.Errorf("load go:embed directives for %s failed: %w", pkgPath, err)
 	}
 
-	ret, externs, err := cl.NewPackageExWithEmbed(ctx.prog, ctx.callerTracking, ctx.patches, aPkg.rewriteVars, aPkg.SSA, syntax, embedMap)
+	ret, externs, err := cl.NewPackageExWithEmbedOptions(ctx.prog, ctx.callerTracking, ctx.patches, aPkg.rewriteVars, aPkg.SSA, syntax, embedMap, cl.PackageOptions{
+		Compilation: ctx.clCompilation,
+		CacheHit:    aPkg.CacheHit,
+	})
 	check(err)
 
 	aPkg.LPkg = ret
