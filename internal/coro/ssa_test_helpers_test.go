@@ -32,6 +32,7 @@ import (
 )
 
 func buildCoroTestSSA(t *testing.T, filename, source string) (*ssa.Program, *ssa.Package) {
+	t.Helper()
 	return buildCoroTestSSAWithMode(t, filename, source, ssa.SanityCheckFunctions|ssa.InstantiateGenerics)
 }
 

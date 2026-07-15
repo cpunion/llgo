@@ -316,6 +316,17 @@ func target(value int) int {
 	if nonDebugInstructions == 0 {
 		t.Fatal("target has no real SSA instructions")
 	}
+	debugRefs := 0
+	for _, block := range debugTarget.Blocks {
+		for _, instruction := range block.Instrs {
+			if _, debug := instruction.(*ssa.DebugRef); debug {
+				debugRefs++
+			}
+		}
+	}
+	if debugRefs == 0 {
+		t.Fatal("GlobalDebug target has no DebugRef instructions")
+	}
 
 	plainPlan, err := AnalyzeSSA(plainProg, Roots{{Function: plainTarget, Demand: AsyncDemand}}, SSAConfig{MaxPlainInstructions: nonDebugInstructions})
 	if err != nil {
