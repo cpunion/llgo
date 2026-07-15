@@ -26,8 +26,11 @@ jobs:
       - name: Test coroutine analysis
         run: go test -race -shuffle=on ./internal/coro
 
+      - name: Test coroutine build integration
+        run: go test ./internal/build -run 'Test(CoroPlanBuilderRunsBeforeCodegenWithoutChangingIR|BuildCoroPlanErrors)$' -count=1
+
       - name: Check llgo-tag build
         run: go test -tags=llgo ./internal/coro
 
       - name: Vet coroutine analysis
-        run: go vet ./internal/coro
+        run: go vet ./internal/coro ./internal/build
