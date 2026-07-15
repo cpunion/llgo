@@ -975,7 +975,7 @@ func identityKeyDigest(key string) string {
 func appendIdentityField(text *strings.Builder, name, value string) {
 	text.WriteString(name)
 	text.WriteByte('=')
-	text.WriteString(strconv.Itoa(len([]byte(value))))
+	text.WriteString(strconv.Itoa(len(value)))
 	text.WriteByte(':')
 	text.WriteString(value)
 	text.WriteByte(';')

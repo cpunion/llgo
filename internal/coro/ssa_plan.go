@@ -558,21 +558,15 @@ func cfgHasCycle(blocks []*ssa.BasicBlock) bool {
 	if len(blocks) == 0 {
 		return false
 	}
-	present := make(map[*ssa.BasicBlock]bool, len(blocks))
-	indegree := make(map[*ssa.BasicBlock]int, len(blocks))
-	for _, block := range blocks {
-		present[block] = true
-	}
+	indegree := make([]int, len(blocks))
 	for _, block := range blocks {
 		for _, successor := range block.Succs {
-			if present[successor] {
-				indegree[successor]++
-			}
+			indegree[successor.Index]++
 		}
 	}
 	queue := make([]*ssa.BasicBlock, 0, len(blocks))
 	for _, block := range blocks {
-		if indegree[block] == 0 {
+		if indegree[block.Index] == 0 {
 			queue = append(queue, block)
 		}
 	}
@@ -581,11 +575,8 @@ func cfgHasCycle(blocks []*ssa.BasicBlock) bool {
 		block := queue[head]
 		visited++
 		for _, successor := range block.Succs {
-			if !present[successor] {
-				continue
-			}
-			indegree[successor]--
-			if indegree[successor] == 0 {
+			indegree[successor.Index]--
+			if indegree[successor.Index] == 0 {
 				queue = append(queue, successor)
 			}
 		}
