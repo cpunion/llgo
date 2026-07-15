@@ -11,15 +11,22 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        llvm: [14, 18, 19, 21]
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install dependencies
-        uses: ./.github/actions/setup-deps
-        with:
-          llvm-version: 19
+      - name: Install LLVM
+        run: |
+          echo 'deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-${{ matrix.llvm }} main' | sudo tee /etc/apt/sources.list.d/llvm.list
+          wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends llvm-${{ matrix.llvm }}-dev clang-${{ matrix.llvm }}
+          echo '/usr/lib/llvm-${{ matrix.llvm }}/bin' >> "$GITHUB_PATH"
 
       - name: Set up Go
         uses: ./.github/actions/setup-go
@@ -29,15 +36,22 @@ jobs:
       # Temporary while the stackless-coroutine slices are integrated. Restore
       # the full Go workflow, including macOS, before the upstream merge.
       - name: Test coroutine analysis
+        if: matrix.llvm == 19
         run: go test -race -shuffle=on ./internal/coro
 
       - name: Test coroutine build integration
+        if: matrix.llvm == 19
         run: go test ./internal/build -run 'Test(CoroPlanBuilderRunsBeforeCodegenWithoutChangingIR|BuildCoroPlanErrors)$' -count=1
 
       - name: Test coroutine compiler integration
+        if: matrix.llvm == 19
         run: go test ./cl -run '^TestCompilationCoroPlanObservationAndCacheRegistration$' -count=1
 
+      - name: Test structured LLVM coroutine builder
+        run: go test -tags=llvm${{ matrix.llvm }} -v ./ssa -run '^TestCoroBuilder' -count=1
+
       - name: Test resolved LLVM target configuration
+        if: matrix.llvm == 19
         run: |
           go test ./internal/xtool/llvm -run '^TestGetTarget(Spec|Triple)$' -count=1
           go test ./internal/crosscompile -run '^Test(UseTarget|UseExportsResolvedLLVMConfig|ResolvedLLVMTargetSpecWASIThreads)$' -count=1
@@ -46,9 +60,11 @@ jobs:
           go test ./internal/build -run '^Test(NewLLSSATargetUsesResolvedLLVMConfig|LLVMCPUAndFeaturesAffectBuildFingerprint|DefaultTargetKeepsLegacyCacheIdentity|NonDefaultLLVMFeaturesEnterCacheIdentity|ResolvedTargetCompatibilityAudit)$' -count=1
 
       - name: Check llgo-tag build
+        if: matrix.llvm == 19
         run: go test -tags=llgo ./internal/coro
 
       - name: Vet coroutine analysis
+        if: matrix.llvm == 19
         run: |
           go vet ./internal/coro ./internal/build ./internal/xtool/llvm ./internal/crosscompile ./internal/cabi
           # The SSA package has pre-existing sync.Map copylocks findings. Keep
