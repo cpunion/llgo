@@ -619,6 +619,9 @@ func Do(args []string, conf *Config) ([]Package, error) {
 }
 
 func buildCoroPlan(ctx *context) error {
+	if ctx == nil || ctx.buildConf == nil {
+		return nil
+	}
 	builder := ctx.buildConf.CoroPlanBuilder
 	if builder == nil {
 		if ctx.buildConf.EnableCoroEntryResolution {

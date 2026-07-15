@@ -153,6 +153,16 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 		}
 	})
 
+	t.Run("nil context or config", func(t *testing.T) {
+		if err := buildCoroPlan(nil); err != nil {
+			t.Fatalf("nil-context buildCoroPlan = %v", err)
+		}
+		ctx := &context{}
+		if err := buildCoroPlan(ctx); err != nil || ctx.coroPlan != nil || ctx.clCompilation != nil {
+			t.Fatalf("nil-config buildCoroPlan = %v, plan %v, compilation %v", err, ctx.coroPlan, ctx.clCompilation)
+		}
+	})
+
 	t.Run("entry resolution requires builder", func(t *testing.T) {
 		ctx := &context{buildConf: &Config{EnableCoroEntryResolution: true}}
 		err := buildCoroPlan(ctx)
