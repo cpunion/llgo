@@ -181,6 +181,9 @@ func TestAnalyzeExternalAndUnknownPolicies(t *testing.T) {
 		t.Fatalf("unknown managed call execution flags = %s, want opaque", managed.Exec)
 	}
 	assertEffect(t, plan, "foreign", WaitForeign)
+	if got := mustLookup(t, plan, "foreign").Exec; !got.Contains(IRQUnsafe) {
+		t.Fatalf("unknown foreign execution flags = %s, want irq-unsafe", got)
+	}
 }
 
 func TestAnalyzeUnknownCallMatrix(t *testing.T) {
@@ -197,11 +200,11 @@ func TestAnalyzeUnknownCallMatrix(t *testing.T) {
 				caller := mustLookup(t, plan, "caller")
 				switch {
 				case kind == CallSpawn:
-					if caller.Effect != NoSuspend {
+					if caller.Effect != NoSuspend || caller.Exec.Contains(IRQUnsafe) {
 						t.Fatalf("unknown spawn polluted caller: %+v", caller)
 					}
 				case kind == CallForeign || target == UnknownForeign:
-					if caller.Effect != WaitForeign {
+					if caller.Effect != WaitForeign || !caller.Exec.Contains(IRQUnsafe) {
 						t.Fatalf("unknown foreign call plan = %+v", caller)
 					}
 				default:

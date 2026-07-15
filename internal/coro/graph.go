@@ -238,6 +238,12 @@ func (g *Graph) Analyze() (*Plan, error) {
 		var effect Effect
 		if call.Kind == CallForeign || call.Target == UnknownForeign {
 			effect = WaitForeign
+			// The managed caller is stack-cut before the opaque operation, so
+			// it is not itself BlockForeign. It is nevertheless unsafe in an
+			// interrupt-reachable graph unless a trusted foreign summary proves
+			// otherwise.
+			localExec[call.Caller] = localExec[call.Caller].Join(IRQUnsafe)
+			execFlags[call.Caller] = execFlags[call.Caller].Join(IRQUnsafe)
 		} else {
 			effect = OpaqueSuspend
 			localExec[call.Caller] = localExec[call.Caller].Join(OpaqueExec)
