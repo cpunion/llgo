@@ -328,8 +328,9 @@ func (u *EmissionUniverse) Resolve(fn *ssa.Function) (*ssa.Function, bool) {
 	if u == nil || fn == nil {
 		return nil, false
 	}
-	if canonical := u.aliases[fn]; canonical != nil {
-		fn = canonical
+	fn = u.canonicalAlias(fn)
+	if fn == nil {
+		return nil, false
 	}
 	_, ok := u.required[fn]
 	return fn, ok
@@ -695,19 +696,23 @@ func (u *EmissionUniverse) structuralWrapperABIKey(owner *preparedEmissionPackag
 }
 
 func (u *EmissionUniverse) canonicalAlias(fn *ssa.Function) *ssa.Function {
-	seen := make(map[*ssa.Function]none)
-	for fn != nil {
-		if _, duplicate := seen[fn]; duplicate {
+	if fn == nil {
+		return nil
+	}
+	next := u.aliases[fn]
+	if next == nil {
+		return fn
+	}
+	seen := map[*ssa.Function]none{fn: {}}
+	for next != nil {
+		if _, duplicate := seen[next]; duplicate {
 			return nil
 		}
-		seen[fn] = none{}
-		canonical := u.aliases[fn]
-		if canonical == nil {
-			return fn
-		}
-		fn = canonical
+		seen[next] = none{}
+		fn = next
+		next = u.aliases[fn]
 	}
-	return nil
+	return fn
 }
 
 // deterministicSSABody describes the complete frozen SSA body without using
@@ -2420,8 +2425,9 @@ func (u *EmissionUniverse) finalIdentity(fn *ssa.Function) string {
 	if fn == nil {
 		return "<nil>"
 	}
-	if canonical := u.aliases[fn]; canonical != nil {
-		fn = canonical
+	fn = u.canonicalAlias(fn)
+	if fn == nil {
+		return "<cyclic-alias>"
 	}
 	type ownerFinalKey struct {
 		owner string

@@ -157,12 +157,14 @@ func C() {}
 	}
 	a, b, c := pkg.ssa.Func("A"), pkg.ssa.Func("B"), pkg.ssa.Func("C")
 	universe := &EmissionUniverse{
+		goProg:      testProg.ssa,
 		packages:    map[*ssa.Package]*preparedEmissionPackage{pkg.ssa: owner},
 		aliases:     map[*ssa.Function]*ssa.Function{a: b, b: c},
 		excluded:    make(map[*ssa.Function]none),
 		required:    make(map[*ssa.Function]none),
 		fnOwners:    make(map[*ssa.Function]*preparedEmissionPackage),
 		fnStates:    make(map[*ssa.Function]emissionFunctionState),
+		finalKeys:   map[emissionFunctionOwnerKey]string{{function: c, owner: owner}: "canonical-c"},
 		useOwners:   make(map[*ssa.Function]map[*preparedEmissionPackage]none),
 		ownerStates: make(map[*ssa.Function]map[*preparedEmissionPackage]emissionFunctionState),
 	}
@@ -179,10 +181,22 @@ func C() {}
 	if _, ok := universe.required[b]; ok {
 		t.Fatalf("intermediate alias %v was incorrectly required", b)
 	}
+	if resolved, ok := universe.Resolve(a); !ok || resolved != c {
+		t.Fatalf("Resolve(alias chain) = %v, %v; want exact %v, true", resolved, ok, c)
+	}
+	if got := universe.finalIdentity(a); got != universe.finalIdentity(c) {
+		t.Fatalf("alias-chain final identity = %q; want canonical %q", got, universe.finalIdentity(c))
+	}
 
 	universe.aliases[c] = a
 	if _, err := universe.addResolvedRequired(a, owner, c, emissionFunctionState{state: pkgNormal}); err == nil || !strings.Contains(err.Error(), "cyclic canonical aliases") {
 		t.Fatalf("cyclic alias error = %v; want explicit cycle diagnostic", err)
+	}
+	if resolved, ok := universe.Resolve(a); ok || resolved != nil {
+		t.Fatalf("Resolve(alias cycle) = %v, %v; want nil, false", resolved, ok)
+	}
+	if got := universe.finalIdentity(a); got != "<cyclic-alias>" {
+		t.Fatalf("cyclic alias final identity = %q; want cycle diagnostic", got)
 	}
 }
 
