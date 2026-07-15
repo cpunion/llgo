@@ -1,5 +1,5 @@
-github.com/cpunion/llvm v0.9.4-0.20260715161341-b20c3fb9f902 h1:MYGfF7OojuCifhuypcg58qvMfcQvzYk7R/fPtqU7rUE=
-github.com/cpunion/llvm v0.9.4-0.20260715161341-b20c3fb9f902/go.mod h1:42vav2/cI5BAIcL543DZSMO9do8/aCK2z7JERH+AE+M=
+github.com/cpunion/llvm v0.9.4-0.20260715231903-426515db6e7d h1:pzBHogKjOuftDsC+H+pPDU7cykyZUEs9/4W/Cx4Q450=
+github.com/cpunion/llvm v0.9.4-0.20260715231903-426515db6e7d/go.mod h1:42vav2/cI5BAIcL543DZSMO9do8/aCK2z7JERH+AE+M=
 github.com/creack/goselect v0.1.2 h1:2DNy14+JPjRBgPzAd1thbQp4BSIihxcBf0IXhQXDRa0=
 github.com/creack/goselect v0.1.2/go.mod h1:a/NhLweNvqIYMuxcMOuWY516Cimucms3DglDzQP3hKY=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
