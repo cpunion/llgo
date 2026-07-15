@@ -42,6 +42,7 @@ import (
 	"github.com/goplus/llgo/internal/buildenv"
 	"github.com/goplus/llgo/internal/cabi"
 	"github.com/goplus/llgo/internal/clang"
+	"github.com/goplus/llgo/internal/coro"
 	"github.com/goplus/llgo/internal/crosscompile"
 	"github.com/goplus/llgo/internal/env"
 	"github.com/goplus/llgo/internal/firmware"
@@ -125,6 +126,14 @@ type OutFmtDetails struct {
 // hook).
 type ModuleHook func(pkg Package)
 
+// CoroPlanBuilder builds one compilation-scoped coroutine plan after every SSA
+// package is available and before fingerprinting, cache lookup, or LLVM
+// codegen. The builder owns root and policy selection because patch, directive,
+// and ABI classification are not build defaults yet. The build pipeline only
+// stores the returned report-only plan; it does not consume it for lowering,
+// archives, or cache keys. Builders must treat prog as analysis input.
+type CoroPlanBuilder func(prog *ssa.Program) (*coro.SSAPlan, error)
+
 type Config struct {
 	Goos          string
 	Goarch        string
@@ -175,8 +184,9 @@ type Config struct {
 	// Each Rewrites entry maps variable names to replacement string values. Only
 	// string-typed globals are supported and "main" applies to all root main
 	// packages in the current build.
-	GlobalRewrites map[string]Rewrites
-	ModuleHook     ModuleHook
+	GlobalRewrites  map[string]Rewrites
+	ModuleHook      ModuleHook
+	CoroPlanBuilder CoroPlanBuilder
 }
 
 type Rewrites map[string]string
@@ -330,15 +340,12 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	}
 
 	prog := llssa.NewProgram(target)
-	if conf.Mode != ModeGen {
-		// ModeGen callers (llgen and the golden suites) read LPkg.String()
-		// after Do returns and dispose the program themselves; every other
-		// mode's outputs are files or a spawned process, so the compile's
-		// LLVM context can be released when Do finishes. In-process
-		// drivers that build many packages per process (the cltest run
-		// harness) otherwise accumulate every compile's C++-side memory.
-		defer prog.Dispose()
-	}
+	programOwnershipTransferred := false
+	defer func() {
+		if !programOwnershipTransferred {
+			prog.Dispose()
+		}
+	}()
 	prog.EnableGoGlobalDCE(conf.goGlobalDCEEnabled())
 	if conf.PthreadStackSize > 0 {
 		prog.SetPthreadStackSize(uint64(conf.PthreadStackSize))
@@ -479,6 +486,9 @@ func Do(args []string, conf *Config) ([]Package, error) {
 
 	allPkgs := append([]*aPackage{}, pkgs...)
 	allPkgs = append(allPkgs, depPkgs...)
+	if err := buildCoroPlan(ctx); err != nil {
+		return nil, err
+	}
 	allPkgs, err = buildAllPkgs(ctx, allPkgs, verbose)
 	if err != nil {
 		return nil, err
@@ -487,6 +497,14 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	if mode == ModeGen {
 		for _, pkg := range allPkgs {
 			if pkg.Package == initial[0] {
+				if pkg.LPkg == nil || pkg.LPkg.Prog != prog {
+					return nil, fmt.Errorf("generated package has no owned LLVM program")
+				}
+				// ModeGen callers (llgen and the golden suites) read LPkg.String()
+				// after Do returns and dispose the shared program themselves. Error
+				// paths retain ownership here so early analysis failures do not leak
+				// the LLVM context, target machine, or target data.
+				programOwnershipTransferred = true
 				return []*aPackage{pkg}, nil
 			}
 		}
@@ -587,6 +605,22 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	}
 
 	return allPkgs, nil
+}
+
+func buildCoroPlan(ctx *context) error {
+	builder := ctx.buildConf.CoroPlanBuilder
+	if builder == nil {
+		return nil
+	}
+	plan, err := builder(ctx.progSSA)
+	if err != nil {
+		return fmt.Errorf("build coroutine plan: %w", err)
+	}
+	if plan == nil {
+		return fmt.Errorf("build coroutine plan: builder returned nil plan")
+	}
+	ctx.coroPlan = plan
+	return nil
 }
 
 func applyFrontendGCFlags(conf *Config) {
@@ -705,6 +739,10 @@ type context struct {
 	plan9asmOnce sync.Once
 	plan9asmMode plan9asmPkgsEnvMode
 	plan9asmPkgs map[string]bool
+
+	// coroPlan remains report-only until build policy, archive identity, and
+	// lowering are wired in later slices.
+	coroPlan *coro.SSAPlan
 }
 
 func (c *context) compiler() *clang.Cmd {
