@@ -130,11 +130,13 @@ type aProgram struct {
 	py    *types.Package
 	pyget func() *types.Package
 
-	target  *Target
-	td      llvm.TargetData
-	tm      llvm.TargetMachine
-	named   map[string]Type
-	fnnamed map[string]int
+	target        *Target
+	requestedSpec TargetSpec
+	spec          TargetSpec
+	td            llvm.TargetData
+	tm            llvm.TargetMachine
+	named         map[string]Type
+	fnnamed       map[string]int
 
 	intType   llvm.Type
 	int1Type  llvm.Type
@@ -294,7 +296,22 @@ func NewProgram(target *Target) Program {
 		}
 	}
 	ctx := llvm.NewContext()
-	td, tm := target.targetInfo()
+	var td llvm.TargetData
+	var tm llvm.TargetMachine
+	programCreated := false
+	defer func() {
+		if !programCreated {
+			if tm.C != nil {
+				tm.Dispose()
+			}
+			if td.C != nil {
+				td.Dispose()
+			}
+			ctx.Dispose()
+		}
+	}()
+	requestedSpec := target.Spec()
+	spec, td, tm := target.targetInfo(ctx, requestedSpec)
 	/*
 		arch := target.GOARCH
 		if arch == "" {
@@ -308,16 +325,33 @@ func NewProgram(target *Target) Program {
 	is32Bits := (td.PointerSize() == 4 || is32Bits(target.GOARCH))
 	prog := &aProgram{
 		ctx: ctx, gocvt: newGoTypes(),
-		target: target, td: td, tm: tm, is32Bits: is32Bits,
+		target: target, requestedSpec: requestedSpec, spec: spec, td: td, tm: tm, is32Bits: is32Bits,
 		ptrSize: td.PointerSize(), named: make(map[string]Type), fnnamed: make(map[string]int),
 		linkname: make(map[string]string), abiSymbol: make(map[string]*AbiSymbol),
 	}
 	prog.abi.Init(uintptr(prog.ptrSize), (*goProgram)(unsafe.Pointer(prog)))
+	programCreated = true
 	return prog
 }
 
 func (p Program) Target() *Target {
 	return p.target
+}
+
+// RequestedTargetSpec returns the immutable LLVM configuration requested when
+// NewProgram was called. It can differ from TargetSpec when a target relies on
+// an external LLVM backend that is unavailable to the in-process binding, or
+// when its data layout is incompatible with the legacy GOOS/GOARCH surrogate
+// DataLayout.
+func (p Program) RequestedTargetSpec() TargetSpec {
+	return p.requestedSpec
+}
+
+// TargetSpec returns the immutable, effective in-process LLVM configuration
+// used to create this program's TargetMachine and DataLayout. It does not
+// change if the input Target is modified after NewProgram returns.
+func (p Program) TargetSpec() TargetSpec {
+	return p.spec
 }
 
 func (p Program) TargetData() llvm.TargetData {
@@ -478,7 +512,7 @@ func (p Program) tyComplex128() llvm.Type {
 func (p Program) NewPackage(name, pkgPath string) Package {
 	mod := p.ctx.NewModule(pkgPath)
 	mod.SetDataLayout(p.DataLayout())
-	mod.SetTarget(p.Target().Spec().Triple)
+	mod.SetTarget(p.TargetSpec().Triple)
 	// TODO(lijie): enable target output will check module override, but can't
 	// pass the snapshot test, so disable it for now
 	// if p.target.GOARCH != runtime.GOARCH && p.target.GOOS != runtime.GOOS {

@@ -17,7 +17,20 @@ const (
 
 func targetArch(llvmTarget string) string {
 	if pos := strings.Index(llvmTarget, "-"); pos != -1 {
-		return llvmTarget[:pos]
+		llvmTarget = llvmTarget[:pos]
+	}
+	switch llvmTarget {
+	case "i386", "i486", "i586", "i686":
+		return "386"
+	case "x86_64":
+		return "amd64"
+	case "aarch64":
+		return "arm64"
+	case "wasm32", "wasm64":
+		return "wasm"
+	}
+	if strings.HasPrefix(llvmTarget, "armv") || strings.HasPrefix(llvmTarget, "thumb") {
+		return "arm"
 	}
 	return llvmTarget
 }

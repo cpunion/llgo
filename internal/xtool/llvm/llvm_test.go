@@ -148,3 +148,36 @@ func TestGetTargetTriple(t *testing.T) {
 	checkTriple(t, "windows/386", "windows", "386", "i386-unknown-windows-gnu")
 	checkTriple(t, "js/wasm", "js", "wasm", "wasm32-unknown-js")
 }
+
+func TestGetTargetSpec(t *testing.T) {
+	tests := []struct {
+		name       string
+		goos       string
+		goarch     string
+		goarm      string
+		wantTriple string
+		wantCPU    string
+		feature    string
+	}{
+		{"native-style amd64", "linux", "amd64", "", "x86_64-unknown-linux", "x86-64", "+sse2"},
+		{"wasm32", "wasip1", "wasm", "", "wasm32-unknown-wasip1", "generic", "+bulk-memory"},
+		{"armv5", "linux", "arm", "5", "armv5-unknown-linux-gnueabihf", "generic", "+armv5t"},
+		{"armv6", "linux", "arm", "6", "armv6-unknown-linux-gnueabihf", "generic", "+armv6"},
+		{"armv7 default", "linux", "arm", "", "armv7-unknown-linux-gnueabihf", "generic", "+armv7-a"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := GetTargetSpec(tt.goos, tt.goarch, tt.goarm)
+			if got.Triple != tt.wantTriple {
+				t.Fatalf("Triple = %q, want %q", got.Triple, tt.wantTriple)
+			}
+			if got.CPU != tt.wantCPU {
+				t.Fatalf("CPU = %q, want %q", got.CPU, tt.wantCPU)
+			}
+			if !strings.Contains(got.Features, tt.feature) {
+				t.Fatalf("Features = %q, want it to contain %q", got.Features, tt.feature)
+			}
+		})
+	}
+}

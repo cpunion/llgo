@@ -28,6 +28,7 @@ import (
 
 	"github.com/goplus/llgo/internal/env"
 	"github.com/goplus/llgo/internal/packages"
+	intllvm "github.com/goplus/llgo/internal/xtool/llvm"
 	gopackages "golang.org/x/tools/go/packages"
 )
 
@@ -72,7 +73,9 @@ func (c *context) collectFingerprint(pkg *aPackage) error {
 func (c *context) collectEnvInputs(m *manifestBuilder) {
 	m.env.Goos = c.buildConf.Goos
 	m.env.Goarch = c.buildConf.Goarch
-	m.env.LlvmTriple = c.crossCompile.LLVMTarget
+	if c.hasNonDefaultLLVMConfig() {
+		m.env.LlvmTriple = c.crossCompile.LLVMTarget
+	}
 	m.env.LlgoVersion = env.Version()
 	m.env.LlgoCompilerHash = c.buildConf.CompilerHash
 	m.env.GoVersion = runtime.Version()
@@ -104,6 +107,10 @@ func (c *context) collectCommonInputs(m *manifestBuilder) {
 		m.common.BuildTags = strings.Split(c.buildConf.Tags, ",")
 	}
 	m.common.Target = c.buildConf.Target
+	if c.hasNonDefaultLLVMConfig() {
+		m.common.LLVMCPU = c.crossCompile.CPU
+		m.common.LLVMFeatures = c.crossCompile.Features
+	}
 	m.common.TargetABI = c.crossCompile.TargetABI
 	m.common.GoGlobalDCE = c.buildConf.goGlobalDCEEnabled()
 
@@ -284,12 +291,32 @@ func detectLLVMVersion(ctx *context) string {
 
 // targetTriple returns the target triple for cache directory.
 func (c *context) targetTriple() string {
+	llvmTarget := c.crossCompile.LLVMTarget
+	if !c.hasNonDefaultLLVMConfig() {
+		// Preserve the legacy cache namespace for ordinary GOOS/GOARCH builds.
+		// Their resolved LLVM defaults are deterministic inputs of the compiler
+		// version, while named targets need their explicit triple and ABI here.
+		llvmTarget = ""
+	}
 	return targetTriple(
 		c.buildConf.Goos,
 		c.buildConf.Goarch,
-		c.crossCompile.LLVMTarget,
+		llvmTarget,
 		c.crossCompile.TargetABI,
 	)
+}
+
+func (c *context) hasNonDefaultLLVMConfig() bool {
+	if c.buildConf.Target != "" {
+		return true
+	}
+	requested := c.crossCompile
+	if requested.LLVMTarget == "" && requested.CPU == "" && requested.Features == "" && requested.TargetABI == "" {
+		return false
+	}
+	defaults := intllvm.GetTargetSpec(c.buildConf.Goos, c.buildConf.Goarch, "")
+	return requested.LLVMTarget != defaults.Triple || requested.CPU != defaults.CPU ||
+		requested.Features != defaults.Features || requested.TargetABI != ""
 }
 
 // targetTriple returns the target triple string for cache directory

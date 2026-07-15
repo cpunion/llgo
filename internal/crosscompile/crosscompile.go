@@ -36,8 +36,10 @@ type Export struct {
 	ClangRoot    string   // Root directory of custom clang installation
 	ClangBinPath string   // Path to clang binary directory
 
-	LLVMTarget   string // LLVM Target
-	TargetABI    string // RISC-V Target ABI (e.g., "lp64", "lp64d")
+	LLVMTarget   string // Resolved LLVM target triple
+	CPU          string // Resolved LLVM target CPU
+	Features     string // Resolved LLVM target feature string
+	TargetABI    string // Resolved target ABI (e.g., "ilp32", "lp64d")
 	BinaryFormat string // Binary format (e.g., "elf", "esp", "uf2")
 	FormatDetail string // For uf2, it's uf2FamilyID
 	Emulator     string // Emulator command template (e.g., "qemu-system-arm -M {} -kernel {}")
@@ -200,7 +202,13 @@ func compileWithConfig(
 }
 
 func use(goos, goarch string, wasiThreads, forceEspClang bool, level optlevel.Level, ltoMode lto.Mode, goGlobalDCE bool) (export Export, err error) {
-	targetTriple := llvm.GetTargetTriple(goos, goarch)
+	targetSpec := resolvedLLVMTargetSpec(goos, goarch, wasiThreads)
+	targetTriple := targetSpec.Triple
+	export.GOOS = goos
+	export.GOARCH = goarch
+	export.LLVMTarget = targetSpec.Triple
+	export.CPU = targetSpec.CPU
+	export.Features = targetSpec.Features
 	llgoRoot := env.LLGoROOT()
 
 	// Check for ESP Clang support for target-based builds
@@ -392,7 +400,8 @@ func use(goos, goarch string, wasiThreads, forceEspClang bool, level optlevel.Le
 		}
 
 	case "js":
-		targetTriple := "wasm32-unknown-emscripten"
+		targetTriple = "wasm32-unknown-emscripten"
+		export.LLVMTarget = targetTriple
 		// Emscripten configuration using system installation
 		// Specify emcc as the compiler
 		export.CC = "emcc"
@@ -440,6 +449,17 @@ func use(goos, goarch string, wasiThreads, forceEspClang bool, level optlevel.Le
 	return
 }
 
+func resolvedLLVMTargetSpec(goos, goarch string, wasiThreads bool) llvm.TargetSpec {
+	spec := llvm.GetTargetSpec(goos, goarch, "")
+	if goos == "wasip1" && goarch == "wasm" && wasiThreads && !strings.Contains(spec.Features, "+atomics") {
+		if spec.Features != "" {
+			spec.Features += ","
+		}
+		spec.Features += "+atomics"
+	}
+	return spec
+}
+
 // UseTarget loads configuration from a target name (e.g., "rp2040", "wasi")
 func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (export Export, err error) {
 	resolver := targets.NewDefaultResolver()
@@ -475,6 +495,8 @@ func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (expor
 	export.GOARCH = config.GOARCH
 	export.ExtraFiles = config.ExtraFiles
 	export.LLVMTarget = config.LLVMTarget
+	export.CPU = config.CPU
+	export.Features = config.Features
 	export.TargetABI = config.TargetABI
 	export.BinaryFormat = config.BinaryFormat
 	export.FormatDetail = config.FormatDetail()

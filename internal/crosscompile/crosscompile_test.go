@@ -180,6 +180,8 @@ func TestUseTarget(t *testing.T) {
 		expectError bool
 		expectLLVM  string
 		expectCPU   string
+		expectABI   string
+		hasFeatures bool
 		expectMarch string
 	}{
 		// FIXME(MeteorsLiu): wasi in useTarget
@@ -196,6 +198,7 @@ func TestUseTarget(t *testing.T) {
 			expectError: false,
 			expectLLVM:  "thumbv6m-unknown-unknown-eabi",
 			expectCPU:   "cortex-m0plus",
+			hasFeatures: true,
 		},
 		{
 			name:        "Cortex-M Target",
@@ -217,6 +220,7 @@ func TestUseTarget(t *testing.T) {
 			expectError: false,
 			expectLLVM:  "riscv32-unknown-none",
 			expectCPU:   "generic-rv32",
+			expectABI:   "ilp32",
 			expectMarch: "-march=rv32imac", // Generic RISC-V32 uses rv32imac (with A extension)
 		},
 		{
@@ -225,6 +229,8 @@ func TestUseTarget(t *testing.T) {
 			expectError: false,
 			expectLLVM:  "riscv32-esp-elf",
 			expectCPU:   "generic-rv32",
+			expectABI:   "ilp32",
+			hasFeatures: true,
 			expectMarch: "-march=rv32imc", // ESP32-C3 uses rv32imc (no A extension)
 		},
 		{
@@ -247,6 +253,18 @@ func TestUseTarget(t *testing.T) {
 
 			if err != nil {
 				t.Fatalf("Unexpected error for target %s: %v", tc.targetName, err)
+			}
+			if export.LLVMTarget != tc.expectLLVM {
+				t.Errorf("LLVMTarget = %q, want %q", export.LLVMTarget, tc.expectLLVM)
+			}
+			if export.CPU != tc.expectCPU {
+				t.Errorf("CPU = %q, want %q", export.CPU, tc.expectCPU)
+			}
+			if export.TargetABI != tc.expectABI {
+				t.Errorf("TargetABI = %q, want %q", export.TargetABI, tc.expectABI)
+			}
+			if tc.hasFeatures && export.Features == "" {
+				t.Error("Features is empty, want resolved target features")
 			}
 
 			// Check if LLVM target is in CCFLAGS
@@ -360,6 +378,70 @@ func TestOptimizationFlagPlacement(t *testing.T) {
 	}
 	if !hasFlagValue(export.LDFLAGS, "-target", llvm.GetTargetTriple(runtime.GOOS, runtime.GOARCH)) {
 		t.Fatalf("host LDFLAGS = %v, want native -target", export.LDFLAGS)
+	}
+}
+
+func TestUseExportsResolvedLLVMConfig(t *testing.T) {
+	tests := []struct {
+		name     string
+		goos     string
+		goarch   string
+		triple   string
+		cpu      string
+		features string
+	}{
+		{
+			name:     "native-style",
+			goos:     "linux",
+			goarch:   "amd64",
+			triple:   "x86_64-unknown-linux",
+			cpu:      "x86-64",
+			features: "+cx8,+fxsr,+mmx,+sse,+sse2,+x87",
+		},
+		{
+			name:     "wasm32",
+			goos:     "js",
+			goarch:   "wasm",
+			triple:   "wasm32-unknown-emscripten",
+			cpu:      "generic",
+			features: "+bulk-memory,+mutable-globals,+nontrapping-fptoint,+sign-ext",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			export, err := use(tt.goos, tt.goarch, false, false, optlevel.O2, lto.Off, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if export.GOOS != tt.goos || export.GOARCH != tt.goarch {
+				t.Fatalf("GO target = %s/%s, want %s/%s", export.GOOS, export.GOARCH, tt.goos, tt.goarch)
+			}
+			if export.LLVMTarget != tt.triple || export.CPU != tt.cpu || export.Features != tt.features {
+				t.Fatalf("LLVM config = {%q, %q, %q}, want {%q, %q, %q}",
+					export.LLVMTarget, export.CPU, export.Features, tt.triple, tt.cpu, tt.features)
+			}
+		})
+	}
+}
+
+func TestResolvedLLVMTargetSpecWASIThreads(t *testing.T) {
+	plain := resolvedLLVMTargetSpec("wasip1", "wasm", false)
+	threaded := resolvedLLVMTargetSpec("wasip1", "wasm", true)
+	if plain.Triple != threaded.Triple || plain.CPU != threaded.CPU {
+		t.Fatalf("WASI threads changed base target: plain=%#v threaded=%#v", plain, threaded)
+	}
+	if strings.Contains(plain.Features, "+atomics") {
+		t.Fatalf("plain WASI unexpectedly enables atomics: %q", plain.Features)
+	}
+	if !strings.Contains(threaded.Features, "+atomics") {
+		t.Fatalf("WASI threads features are missing atomics: %q", threaded.Features)
+	}
+	if !strings.Contains(threaded.Features, "+bulk-memory") {
+		t.Fatalf("WASI threads features are missing bulk memory: %q", threaded.Features)
+	}
+	if plain.Features == threaded.Features {
+		t.Fatalf("plain and threaded WASI resolved to the same features: %q", plain.Features)
 	}
 }
 
