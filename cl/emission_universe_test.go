@@ -98,6 +98,94 @@ func (p *emissionTestProgram) addPackage(t *testing.T, path, src string) emissio
 	return emissionTestPackage{ssa: ssaPkg, file: file, types: pkg}
 }
 
+func TestEmissionFunctionSortKeyIgnoresFileSetBaseAndCheckoutRoot(t *testing.T) {
+	build := func(filename string, leadingBytes int) *ssa.Function {
+		t.Helper()
+		fset := token.NewFileSet()
+		if leadingBytes != 0 {
+			fset.AddFile("unrelated.go", -1, leadingBytes)
+		}
+		file, err := parser.ParseFile(fset, filename, `package sortstable
+func Target(value int) int { return value + 1 }
+`, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info := &types.Info{
+			Types:      make(map[ast.Expr]types.TypeAndValue),
+			Defs:       make(map[*ast.Ident]types.Object),
+			Uses:       make(map[*ast.Ident]types.Object),
+			Implicits:  make(map[ast.Node]types.Object),
+			Scopes:     make(map[ast.Node]*types.Scope),
+			Selections: make(map[*ast.SelectorExpr]*types.Selection),
+			Instances:  make(map[*ast.Ident]types.Instance),
+		}
+		pkg := types.NewPackage("example.com/emission/sortstable", "sortstable")
+		if err := types.NewChecker(&types.Config{Importer: importer.Default()}, fset, pkg, info).Files([]*ast.File{file}); err != nil {
+			t.Fatal(err)
+		}
+		prog := ssa.NewProgram(fset, ssa.SanityCheckFunctions|ssa.InstantiateGenerics)
+		ssaPkg := prog.CreatePackage(pkg, []*ast.File{file}, info, true)
+		ssaPkg.Build()
+		return ssaPkg.Func("Target")
+	}
+
+	left := build("/checkout/one/p.go", 0)
+	right := build("/different/root/p.go", 8192)
+	if left.Pos() == right.Pos() {
+		t.Fatalf("test setup produced equal raw token positions %d", left.Pos())
+	}
+	if got, want := emissionFunctionSortKey(left), emissionFunctionSortKey(right); got != want {
+		t.Fatalf("stable function sort keys differ across FileSet/root: %q != %q", got, want)
+	}
+}
+
+func TestEmissionAddResolvedRequiredCanonicalizesAliasChains(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/aliaschain", `package aliaschain
+func A() {}
+func B() {}
+func C() {}
+`)
+	testProg.ssa.Build()
+	owner := &preparedEmissionPackage{
+		identity: pkg.types.Path(),
+		ssa:      pkg.ssa,
+		pkgPath:  pkg.types.Path(),
+		oldTypes: pkg.types,
+		pkgTypes: pkg.types,
+	}
+	a, b, c := pkg.ssa.Func("A"), pkg.ssa.Func("B"), pkg.ssa.Func("C")
+	universe := &EmissionUniverse{
+		packages:    map[*ssa.Package]*preparedEmissionPackage{pkg.ssa: owner},
+		aliases:     map[*ssa.Function]*ssa.Function{a: b, b: c},
+		excluded:    make(map[*ssa.Function]none),
+		required:    make(map[*ssa.Function]none),
+		fnOwners:    make(map[*ssa.Function]*preparedEmissionPackage),
+		fnStates:    make(map[*ssa.Function]emissionFunctionState),
+		useOwners:   make(map[*ssa.Function]map[*preparedEmissionPackage]none),
+		ownerStates: make(map[*ssa.Function]map[*preparedEmissionPackage]emissionFunctionState),
+	}
+	got, err := universe.addResolvedRequired(a, owner, c, emissionFunctionState{state: pkgNormal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != c {
+		t.Fatalf("resolved alias chain = %v; want exact %v", got, c)
+	}
+	if _, ok := universe.required[c]; !ok {
+		t.Fatalf("canonical alias target %v was not required", c)
+	}
+	if _, ok := universe.required[b]; ok {
+		t.Fatalf("intermediate alias %v was incorrectly required", b)
+	}
+
+	universe.aliases[c] = a
+	if _, err := universe.addResolvedRequired(a, owner, c, emissionFunctionState{state: pkgNormal}); err == nil || !strings.Contains(err.Error(), "cyclic canonical aliases") {
+		t.Fatalf("cyclic alias error = %v; want explicit cycle diagnostic", err)
+	}
+}
+
 func preparePatchedEmissionTest(t *testing.T, originalSource, altSource string) (*EmissionUniverse, emissionTestPackage, emissionTestPackage, func()) {
 	t.Helper()
 	testProg := newEmissionTestProgram()

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/types"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -1382,9 +1383,11 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 }
 
 func (u *EmissionUniverse) addResolvedRequired(fn *ssa.Function, owner *preparedEmissionPackage, caller *ssa.Function, state emissionFunctionState) (*ssa.Function, error) {
-	if canonical := u.aliases[fn]; canonical != nil {
-		fn = canonical
-	} else if _, excluded := u.excluded[fn]; excluded {
+	fn = u.canonicalAlias(fn)
+	if fn == nil {
+		return nil, fmt.Errorf("prepare emission universe: reached function has cyclic canonical aliases")
+	}
+	if _, excluded := u.excluded[fn]; excluded {
 		return nil, fmt.Errorf(
 			"prepare emission universe: effective function %q reaches excluded original %q without an exact patch replacement",
 			u.finalIdentity(caller), u.finalIdentity(fn),
@@ -2424,10 +2427,11 @@ func (u *EmissionUniverse) finalIdentity(fn *ssa.Function) string {
 		owner string
 		key   string
 	}
-	managed := make([]ownerFinalKey, 0, len(u.useOwners[fn]))
-	for ownerKey, key := range u.finalKeys {
-		if ownerKey.function == fn {
-			managed = append(managed, ownerFinalKey{owner: ownerKey.owner.identity, key: key})
+	owners := u.sortedUseOwners(fn)
+	managed := make([]ownerFinalKey, 0, len(owners))
+	for _, owner := range owners {
+		if key := u.finalKeys[emissionFunctionOwnerKey{function: fn, owner: owner}]; key != "" {
+			managed = append(managed, ownerFinalKey{owner: owner.identity, key: key})
 		}
 	}
 	if len(managed) != 0 {
@@ -2524,7 +2528,30 @@ func emissionFunctionSortKey(fn *ssa.Function) string {
 	if fn.Signature != nil {
 		sig = types.TypeString(fn.Signature, func(pkg *types.Package) string { return llssa.PathOf(pkg) })
 	}
-	return fmt.Sprintf("%s\x00%s\x00%020d\x00%s\x00%s", functionPackagePath(fn), fn.Name(), fn.Pos(), fn.Synthetic, sig)
+	filename := ""
+	line, column := 0, 0
+	if fn.Prog != nil && fn.Prog.Fset != nil && fn.Pos().IsValid() {
+		// Raw token.Pos includes the FileSet allocation base and therefore
+		// changes when otherwise unrelated files are parsed first. Ignore line
+		// directives, strip checkout-dependent directories, and retain the
+		// package-local basename plus lexical coordinates as the stable
+		// diagnostic/sort tie-breaker.
+		position := fn.Prog.Fset.PositionFor(fn.Pos(), false)
+		filename = strings.ReplaceAll(position.Filename, "\\", "/")
+		if filename != "" {
+			filename = path.Base(filename)
+		}
+		line, column = position.Line, position.Column
+	}
+	return framedEmissionKey(
+		functionPackagePath(fn),
+		fn.Name(),
+		filename,
+		strconv.Itoa(line),
+		strconv.Itoa(column),
+		fn.Synthetic,
+		sig,
+	)
 }
 
 func emissionFunctionDiagnostic(fn *ssa.Function) string {
