@@ -88,13 +88,9 @@ func matchingFunctions(prog *ssa.Program, match func(*ssa.Function) bool) []*ssa
 
 func functionPlanFor(t *testing.T, plan *SSAPlan, fn *ssa.Function) FunctionPlan {
 	t.Helper()
-	id, ok := plan.FunctionID(fn)
+	got, ok := plan.FunctionPlan(fn)
 	if !ok {
-		t.Fatalf("SSA function %q has no FunctionID", fn.Name())
-	}
-	got, ok := plan.BasePlan().Lookup(id)
-	if !ok {
-		t.Fatalf("FunctionID for %q is absent from base plan", fn.Name())
+		t.Fatalf("SSA function %q has no function plan", fn.Name())
 	}
 	return got
 }

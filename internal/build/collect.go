@@ -339,10 +339,18 @@ func (c *context) ensureCacheManager() *cacheManager {
 	return c.cacheManager
 }
 
+// canUsePackageCache reports whether the current compilation's emitted IR is
+// fully represented by the package fingerprint. Coroutine entry resolution
+// must remain isolated from archive cache reads and writes until CoroPlanDigest
+// is included in that fingerprint.
+func (c *context) canUsePackageCache() bool {
+	return c.buildConf == nil || !c.buildConf.EnableCoroEntryResolution
+}
+
 // tryLoadFromCache attempts to load a package from cache.
 // Returns true if cache hit, false otherwise.
 func (c *context) tryLoadFromCache(pkg *aPackage) bool {
-	if !cacheEnabled() {
+	if !c.canUsePackageCache() || !cacheEnabled() {
 		return false
 	}
 
@@ -459,7 +467,7 @@ type cacheArchiveMetadata struct {
 
 // saveToCache saves a built package to cache.
 func (c *context) saveToCache(pkg *aPackage) error {
-	if !cacheEnabled() {
+	if !c.canUsePackageCache() || !cacheEnabled() {
 		return nil
 	}
 

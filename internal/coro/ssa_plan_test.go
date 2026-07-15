@@ -116,6 +116,83 @@ func send(ch chan int) { ch <- 1 }
 	}
 }
 
+func TestSSAPlanFunctionPlanUsesExactSSAFunction(t *testing.T) {
+	const source = `package coroid
+func generic[T any](value T) T { return value }
+func root() func() {
+	_ = generic(1)
+	return func() { _ = generic("value") }
+}
+`
+	prog, pkg := buildCoroTestSSA(t, "source.go", source)
+	root := packageFunction(t, pkg, "root")
+	plan, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: SyncDemand}}, SSAConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantID, ok := plan.FunctionID(root)
+	if !ok {
+		t.Fatal("root has no FunctionID")
+	}
+	want, ok := plan.BasePlan().Lookup(wantID)
+	if !ok {
+		t.Fatal("root FunctionID is absent from base plan")
+	}
+	if got, ok := plan.FunctionPlan(root); !ok || got != want {
+		t.Fatalf("FunctionPlan(root) = %+v, %v; want %+v, true", got, ok, want)
+	}
+
+	if len(root.AnonFuncs) != 1 {
+		t.Fatalf("root has %d closures, want 1", len(root.AnonFuncs))
+	}
+	if _, ok := plan.FunctionPlan(root.AnonFuncs[0]); !ok {
+		t.Fatal("closure has no function plan")
+	}
+
+	instances := matchingFunctions(prog, func(fn *ssa.Function) bool {
+		origin := fn.Origin()
+		return origin != nil && origin.Name() == "generic"
+	})
+	if len(instances) != 2 {
+		t.Fatalf("got %d generic instances, want 2: %v", len(instances), instances)
+	}
+	for _, instance := range instances {
+		if _, ok := plan.FunctionPlan(instance); !ok {
+			t.Fatalf("generic instance %s has no function plan", instance)
+		}
+	}
+
+	genericOrigin := packageFunction(t, pkg, "generic")
+	if _, ok := plan.FunctionPlan(genericOrigin); ok {
+		t.Fatal("uninstantiated generic origin unexpectedly has a function plan")
+	}
+	if _, ok := plan.FunctionPlan(nil); ok {
+		t.Fatal("nil SSA function unexpectedly has a function plan")
+	}
+	var nilPlan *SSAPlan
+	if _, ok := nilPlan.FunctionPlan(root); ok {
+		t.Fatal("nil SSA plan unexpectedly resolved a function")
+	}
+
+	_, otherPkg := buildCoroTestSSA(t, "source.go", source)
+	otherRoot := packageFunction(t, otherPkg, "root")
+	rootID, err := StableFunctionID(root, FunctionIDConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherRootID, err := StableFunctionID(otherRoot, FunctionIDConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rootID != otherRootID {
+		t.Fatalf("logically identical roots have different stable IDs: %s != %s", rootID, otherRootID)
+	}
+	if _, ok := plan.FunctionPlan(otherRoot); ok {
+		t.Fatal("function from another SSA program unexpectedly matched by stable ID")
+	}
+}
+
 func TestAnalyzeSSADynamicOpenAndClosedWorld(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "source.go", `package coroid
 

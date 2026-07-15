@@ -17,6 +17,8 @@
 package cl
 
 import (
+	"sync"
+
 	"github.com/goplus/llgo/internal/coro"
 	"golang.org/x/tools/go/ssa"
 )
@@ -28,12 +30,19 @@ import (
 // the build cache. Observers must treat both arguments as read-only.
 type CoroPlanObserver func(pkg *ssa.Package, plan *coro.SSAPlan)
 
-// Compilation contains inputs shared by every package compiled as part of one
-// frontend compilation. CoroPlan remains report-only until coroutine lowering
-// is implemented.
+// Compilation contains immutable inputs shared by every package compiled as
+// part of one frontend compilation. Pass it by pointer and do not copy it after
+// first use. A CoroPlan remains report-only unless EnableCoroEntryResolution is
+// explicitly set. Functions materialized after analysis still fail closed at
+// their first symbol resolution; a later slice will establish the complete
+// effective emission universe before codegen.
 type Compilation struct {
-	CoroPlan         *coro.SSAPlan
-	CoroPlanObserver CoroPlanObserver
+	CoroPlan                  *coro.SSAPlan
+	CoroPlanObserver          CoroPlanObserver
+	EnableCoroEntryResolution bool
+
+	coroPreflight    sync.Once
+	coroPreflightErr error
 }
 
 // PackageOptions contains inputs that vary for each package invocation.
@@ -41,7 +50,8 @@ type PackageOptions struct {
 	Compilation *Compilation
 
 	// CacheHit means cl is rebuilding frontend type registrations for an
-	// already-compiled archive. Such an invocation must not report or perform
-	// coroutine lowering; Compilation is not installed in its cl context.
+	// already-compiled archive. Report-only plans are not installed in that cl
+	// context. Active coroutine entry resolution rejects cache registration
+	// until its plan digest is part of the archive fingerprint.
 	CacheHit bool
 }
