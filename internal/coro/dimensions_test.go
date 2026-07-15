@@ -71,6 +71,37 @@ func TestDemandAndFuncRepText(t *testing.T) {
 	}
 }
 
+func TestDemandAndFuncRepTextWhitespace(t *testing.T) {
+	for text, want := range map[string]Demand{
+		"  none\n":   NoDemand,
+		"\tsync ":    SyncDemand,
+		" async\r\n": AsyncDemand,
+		"\nboth\t":   BothDemand,
+	} {
+		var got Demand
+		if err := got.UnmarshalText([]byte(text)); err != nil {
+			t.Fatalf("Demand.UnmarshalText(%q): %v", text, err)
+		}
+		if got != want {
+			t.Fatalf("Demand.UnmarshalText(%q) = %s, want %s", text, got, want)
+		}
+	}
+
+	for text, want := range map[string]FuncRep{
+		"  direct-plain\n": DirectPlain,
+		"\tdirect-coro ":   DirectCoro,
+		" dispatch\r\n":    Dispatch,
+	} {
+		var got FuncRep
+		if err := got.UnmarshalText([]byte(text)); err != nil {
+			t.Fatalf("FuncRep.UnmarshalText(%q): %v", text, err)
+		}
+		if got != want {
+			t.Fatalf("FuncRep.UnmarshalText(%q) = %s, want %s", text, got, want)
+		}
+	}
+}
+
 func TestDemandAndExecLatticesExhaustive(t *testing.T) {
 	demands := []Demand{NoDemand, SyncDemand, AsyncDemand, BothDemand}
 	for _, a := range demands {

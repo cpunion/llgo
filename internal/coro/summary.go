@@ -393,7 +393,10 @@ func (s Summary) canonical() (Summary, error) {
 			return Summary{}, fmt.Errorf("coro: summary %s is not valid UTF-8", field.name)
 		}
 	}
-	ret.Functions = append(make([]FunctionSummary, 0, len(s.Functions)), s.Functions...)
+	ret.Functions = append([]FunctionSummary(nil), s.Functions...)
+	if ret.Functions == nil {
+		ret.Functions = []FunctionSummary{}
+	}
 	sort.Slice(ret.Functions, func(i, j int) bool {
 		return ret.Functions[i].ID < ret.Functions[j].ID
 	})

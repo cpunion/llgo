@@ -185,7 +185,7 @@ func (d *Demand) UnmarshalText(text []byte) error {
 	if d == nil {
 		return fmt.Errorf("coro: cannot unmarshal demand into nil receiver")
 	}
-	switch string(text) {
+	switch strings.TrimSpace(string(text)) {
 	case "none":
 		*d = NoDemand
 	case "sync":
@@ -242,7 +242,7 @@ func (r *FuncRep) UnmarshalText(text []byte) error {
 	if r == nil {
 		return fmt.Errorf("coro: cannot unmarshal function representation into nil receiver")
 	}
-	switch string(text) {
+	switch strings.TrimSpace(string(text)) {
 	case "direct-plain":
 		*r = DirectPlain
 	case "direct-coro":
