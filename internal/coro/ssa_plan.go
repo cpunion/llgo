@@ -28,7 +28,7 @@ import (
 	"golang.org/x/tools/go/ssa/ssautil"
 )
 
-// DefaultMaxPlainInstructions is the report-only static cost bound used when
+// DefaultMaxPlainInstructions is the initial static cost bound used when
 // SSAConfig.MaxPlainInstructions is zero. A negative value disables this seed.
 const DefaultMaxPlainInstructions = 128
 
@@ -78,8 +78,8 @@ type SSAFunctionPolicy struct {
 	NeedsDispatch    bool
 }
 
-// SSAConfig controls the report-only SSA-to-Graph bridge. It deliberately has
-// no lowering or runtime switches.
+// SSAConfig controls the SSA-to-Graph analysis bridge. It deliberately has no
+// lowering or runtime switches.
 type SSAConfig struct {
 	FunctionIDs FunctionIDConfig
 
@@ -117,8 +117,8 @@ type SSAFunctionPlan struct {
 	Plan     FunctionPlan
 }
 
-// SSAPlan is the report-only whole-program result. Its maps remain private so
-// lowering cannot accidentally reconstruct identities from display strings.
+// SSAPlan is the compilation-scoped whole-program result. Its maps remain
+// private so consumers cannot reconstruct identities from display strings.
 type SSAPlan struct {
 	plan       *Plan
 	functions  []SSAFunctionPlan
@@ -151,6 +151,20 @@ func (p *SSAPlan) FunctionID(fn *ssa.Function) (FunctionID, bool) {
 	}
 	id, ok := p.byFunction[fn]
 	return id, ok
+}
+
+// FunctionPlan returns the immutable plan assigned to the exact SSA function
+// object fn. It does not derive or match an identity for a function from a
+// different SSA program.
+func (p *SSAPlan) FunctionPlan(fn *ssa.Function) (FunctionPlan, bool) {
+	if p == nil {
+		return FunctionPlan{}, false
+	}
+	id, ok := p.byFunction[fn]
+	if !ok {
+		return FunctionPlan{}, false
+	}
+	return p.plan.Lookup(id)
 }
 
 // Function returns the SSA function assigned to id.

@@ -178,7 +178,7 @@ type context struct {
 	anonDefers           map[*ssa.Function]bool
 	paramDIVars          map[*types.Var]llssa.DIVar
 	runtimeCallerFuncs   map[*ssa.Function]bool
-	compilation          *Compilation // report-only; nil for cache registration
+	compilation          *Compilation // nil for report-only cache registration
 	cacheRegistration    bool         // cached archive: types only, no lowering
 	pcLineSeq            uint64
 
@@ -519,7 +519,8 @@ func hasInstantiatedRecv(recv *types.Var) bool {
 }
 
 func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Function, llssa.PyObjRef, int) {
-	pkgTypes, name, ftype := p.funcName(f)
+	entry := p.mustFunctionSymbol(f)
+	pkgTypes, name, ftype := entry.pkgTypes, entry.name, entry.ftype
 	if ftype != goFunc {
 		return nil, nil, ignoredFunc
 	}
@@ -1929,6 +1930,14 @@ func NewPackageExWithEmbedOptions(prog llssa.Program, ct *CallerTracking, patche
 }
 
 func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewrites map[string]string, pkg *ssa.Package, files []*ast.File, embedMap *goembed.VarMap, opts PackageOptions) (ret llssa.Package, externs []string, err error) {
+	if opts.Compilation != nil && opts.Compilation.EnableCoroEntryResolution {
+		if err := opts.Compilation.preflightCoroPlan(); err != nil {
+			return nil, nil, err
+		}
+		if opts.CacheHit {
+			return nil, nil, fmt.Errorf("coroutine entry resolution cannot reuse cached archives before CoroPlanDigest is fingerprinted")
+		}
+	}
 	pkgProg := pkg.Prog
 	pkgTypes := pkg.Pkg
 	oldTypes := pkgTypes

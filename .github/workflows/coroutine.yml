@@ -41,11 +41,11 @@ jobs:
 
       - name: Test coroutine build integration
         if: matrix.llvm == 19
-        run: go test ./internal/build -run 'Test(CoroPlanBuilderRunsBeforeCodegenWithoutChangingIR|BuildCoroPlanErrors)$' -count=1
+        run: go test ./internal/build -run 'Test(CoroPlanBuilderRunsBeforeCodegenWithoutChangingIR|BuildCoroPlanErrors|CoroEntryResolutionDisablesPackageCacheReadWrite)$' -count=1
 
       - name: Test coroutine compiler integration
         if: matrix.llvm == 19
-        run: go test ./cl -run '^TestCompilationCoroPlanObservationAndCacheRegistration$' -count=1
+        run: go test ./cl -run '^Test(CompilationCoroPlanObservationAndCacheRegistration|CoroEntryResolutionPlainPrimaryPreservesIR|ResolveFunctionSymbolUsesPrimaryAndExactPlan|CoroEntryRejectsUnsupportedBeforeCreatingSymbol|CoroEntryResolutionPreflightRejectsWholePlanBeforeCodegen|CoroEntryResolutionPreflightRejectsMissingPlanAndCache)$' -count=1
 
       - name: Test structured LLVM coroutine builder
         run: go test -tags=llvm${{ matrix.llvm }} -v ./ssa -run '^TestCoroBuilder' -count=1

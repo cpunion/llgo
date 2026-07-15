@@ -43,11 +43,12 @@ const (
 
 // FunctionIDConfig supplies compilation-wide identity inputs.
 //
-// ArchiveReady must remain false for report-only analysis. When it is true,
-// both ResolveLinkIdentity and CanonicalPackageKey are required so the caller
-// can account for linkname, patches, test variants, and command-line packages.
-// A report-only identity is deterministic for an unpatched SSA program but is
-// deliberately not an archive ABI or final CoroPlanDigest key.
+// ArchiveReady must remain false unless the plan will cross an archive or
+// compilation boundary. When it is true, both ResolveLinkIdentity and
+// CanonicalPackageKey are required so the caller can account for linkname,
+// patches, test variants, and command-line packages. The default identity is
+// deterministic for one unpatched in-memory SSA program but is deliberately
+// not an archive ABI or final CoroPlanDigest key.
 type FunctionIDConfig struct {
 	CoroABI      string
 	SchedulerABI string

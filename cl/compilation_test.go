@@ -74,3 +74,39 @@ func F() int { return 42 }
 		t.Fatal("cache registration option changed frontend LLVM IR")
 	}
 }
+
+func TestCoroEntryResolutionPlainPrimaryPreservesIR(t *testing.T) {
+	ssaPkg, _, files := buildGoSSAPkg(t, `
+package foo
+
+func F(value int) int { return value + 1 }
+`)
+	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{
+		{Function: ssaPkg.Func("F"), Demand: coro.SyncDemand},
+	}, coro.SSAConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	compile := func(compilation *Compilation) string {
+		t.Helper()
+		prog := newLLSSAProg(t)
+		defer prog.Dispose()
+		pkg, _, err := NewPackageExWithEmbedOptions(prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{}, PackageOptions{
+			Compilation: compilation,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pkg.String()
+	}
+
+	baseline := compile(nil)
+	resolved := compile(&Compilation{
+		CoroPlan:                  plan,
+		EnableCoroEntryResolution: true,
+	})
+	if resolved != baseline {
+		t.Fatal("plain-primary entry resolution changed emitted LLVM IR")
+	}
+}

@@ -129,9 +129,12 @@ type ModuleHook func(pkg Package)
 // CoroPlanBuilder builds one compilation-scoped coroutine plan after every SSA
 // package is available and before fingerprinting, cache lookup, or LLVM
 // codegen. The builder owns root and policy selection because patch, directive,
-// and ABI classification are not build defaults yet. The build pipeline only
-// stores the returned report-only plan; it does not consume it for lowering,
-// archives, or cache keys. Builders must treat prog as analysis input.
+// and ABI classification are not build defaults yet. By default the build
+// pipeline only stores the returned report-only plan;
+// EnableCoroEntryResolution must be set explicitly before cl may consume its
+// primary-symbol decisions. Builders must treat prog as analysis input. Active
+// entry resolution bypasses package archive caching until CoroPlanDigest is
+// part of the cache fingerprint.
 type CoroPlanBuilder func(prog *ssa.Program) (*coro.SSAPlan, error)
 
 // CoroPlanObserver observes the same compilation-scoped plan from each cl
@@ -189,10 +192,17 @@ type Config struct {
 	// Each Rewrites entry maps variable names to replacement string values. Only
 	// string-typed globals are supported and "main" applies to all root main
 	// packages in the current build.
-	GlobalRewrites   map[string]Rewrites
-	ModuleHook       ModuleHook
-	CoroPlanBuilder  CoroPlanBuilder
-	CoroPlanObserver CoroPlanObserver
+	GlobalRewrites map[string]Rewrites
+	ModuleHook     ModuleHook
+
+	// EnableCoroEntryResolution explicitly allows cl to consume the
+	// compilation-scoped plan for primary-symbol validation. It does not enable
+	// physical coroutine ABI or scheduler lowering. It requires CoroPlanBuilder;
+	// leaving it false preserves report-only behavior. Package archive caching
+	// is disabled until the plan digest participates in fingerprints.
+	EnableCoroEntryResolution bool
+	CoroPlanBuilder           CoroPlanBuilder
+	CoroPlanObserver          CoroPlanObserver
 }
 
 type Rewrites map[string]string
@@ -609,8 +619,14 @@ func Do(args []string, conf *Config) ([]Package, error) {
 }
 
 func buildCoroPlan(ctx *context) error {
+	if ctx == nil || ctx.buildConf == nil {
+		return nil
+	}
 	builder := ctx.buildConf.CoroPlanBuilder
 	if builder == nil {
+		if ctx.buildConf.EnableCoroEntryResolution {
+			return fmt.Errorf("enable coroutine entry resolution: CoroPlanBuilder is required")
+		}
 		return nil
 	}
 	plan, err := builder(ctx.progSSA)
@@ -622,8 +638,9 @@ func buildCoroPlan(ctx *context) error {
 	}
 	ctx.coroPlan = plan
 	ctx.clCompilation = &cl.Compilation{
-		CoroPlan:         plan,
-		CoroPlanObserver: ctx.buildConf.CoroPlanObserver,
+		CoroPlan:                  plan,
+		CoroPlanObserver:          ctx.buildConf.CoroPlanObserver,
+		EnableCoroEntryResolution: ctx.buildConf.EnableCoroEntryResolution,
 	}
 	return nil
 }
@@ -763,12 +780,13 @@ type context struct {
 	plan9asmMode plan9asmPkgsEnvMode
 	plan9asmPkgs map[string]bool
 
-	// coroPlan remains report-only until build policy, archive identity, and
-	// lowering are wired in later slices.
+	// coroPlan is compilation-scoped. It remains report-only unless
+	// EnableCoroEntryResolution is set explicitly.
 	coroPlan *coro.SSAPlan
 
-	// clCompilation is shared by all source packages in this build. cl strips it
-	// from cache-registration contexts so they cannot report or lower the plan.
+	// clCompilation is shared by all source packages in this build. Active
+	// entry resolution disables package-cache reads and writes until
+	// CoroPlanDigest is represented in archive fingerprints.
 	clCompilation *cl.Compilation
 }
 
@@ -833,6 +851,7 @@ func normalizeToArchive(ctx *context, aPkg *aPackage, verbose bool) error {
 
 func buildAllPkgs(ctx *context, pkgs []*aPackage, verbose bool) ([]*aPackage, error) {
 	built := ctx.built
+	usePackageCache := ctx.canUsePackageCache()
 
 	// Split packages into runtime tree vs others so we can defer runtime build.
 	var runtimePkgs []*aPackage
@@ -863,9 +882,13 @@ func buildAllPkgs(ctx *context, pkgs []*aPackage, verbose bool) ([]*aPackage, er
 				if err := ctx.collectFingerprint(aPkg); err != nil {
 					return err
 				}
-				ctx.tryLoadFromCache(aPkg)
+				if usePackageCache {
+					ctx.tryLoadFromCache(aPkg)
+				}
 				if verbose {
-					if aPkg.CacheHit {
+					if !usePackageCache {
+						fmt.Fprintf(os.Stderr, "CACHE DISABLED (coroutine entry resolution): %s\n", pkg.PkgPath)
+					} else if aPkg.CacheHit {
 						fmt.Fprintf(os.Stderr, "CACHE HIT: %s\n", pkg.PkgPath)
 					} else {
 						fmt.Fprintf(os.Stderr, "CACHE MISS: %s\n", pkg.PkgPath)
@@ -881,8 +904,10 @@ func buildAllPkgs(ctx *context, pkgs []*aPackage, verbose bool) ([]*aPackage, er
 					if kind == cl.PkgLinkExtern {
 						appendExternalLinkArgs(ctx, aPkg, param)
 					}
-					if err := ctx.saveToCache(aPkg); err != nil && verbose {
-						fmt.Fprintf(os.Stderr, "warning: failed to save cache for %s: %v\n", pkg.PkgPath, err)
+					if usePackageCache {
+						if err := ctx.saveToCache(aPkg); err != nil && verbose {
+							fmt.Fprintf(os.Stderr, "warning: failed to save cache for %s: %v\n", pkg.PkgPath, err)
+						}
 					}
 				}
 			} else {
@@ -895,9 +920,13 @@ func buildAllPkgs(ctx *context, pkgs []*aPackage, verbose bool) ([]*aPackage, er
 			if err := ctx.collectFingerprint(aPkg); err != nil {
 				return err
 			}
-			ctx.tryLoadFromCache(aPkg)
+			if usePackageCache {
+				ctx.tryLoadFromCache(aPkg)
+			}
 			if verbose {
-				if aPkg.CacheHit {
+				if !usePackageCache {
+					fmt.Fprintf(os.Stderr, "CACHE DISABLED (coroutine entry resolution): %s\n", pkg.PkgPath)
+				} else if aPkg.CacheHit {
 					fmt.Fprintf(os.Stderr, "CACHE HIT: %s\n", pkg.PkgPath)
 				} else {
 					fmt.Fprintf(os.Stderr, "CACHE MISS: %s\n", pkg.PkgPath)
@@ -913,8 +942,10 @@ func buildAllPkgs(ctx *context, pkgs []*aPackage, verbose bool) ([]*aPackage, er
 				if err := normalizeToArchive(ctx, aPkg, verbose); err != nil {
 					return err
 				}
-				if err := ctx.saveToCache(aPkg); err != nil && verbose {
-					fmt.Fprintf(os.Stderr, "warning: failed to save cache for %s: %v\n", pkg.PkgPath, err)
+				if usePackageCache {
+					if err := ctx.saveToCache(aPkg); err != nil && verbose {
+						fmt.Fprintf(os.Stderr, "warning: failed to save cache for %s: %v\n", pkg.PkgPath, err)
+					}
 				}
 			}
 		}
