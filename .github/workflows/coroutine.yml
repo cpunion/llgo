@@ -37,8 +37,16 @@ jobs:
       - name: Test coroutine compiler integration
         run: go test ./cl -run '^TestCompilationCoroPlanObservationAndCacheRegistration$' -count=1
 
+      - name: Test resolved LLVM target configuration
+        run: |
+          go test ./internal/xtool/llvm -run '^TestGetTarget(Spec|Triple)$' -count=1
+          go test ./internal/crosscompile -run '^Test(UseTarget|UseExportsResolvedLLVMConfig|ResolvedLLVMTargetSpecWASIThreads)$' -count=1
+          go test ./internal/cabi -run '^TestDevLTOGlobalDCETargetArchAndNewTransformerArchSelection$' -count=1
+          go test ./ssa -run '^Test(ResolvedTargetConfig(|IsAuthoritativeAndFrozen)|TargetDataFrontendCompatibility|ResolvedPointerWidthMismatchFallsBack|NewProgramDefaultTargetCompatibility|ResolvedExternalBackendCompatibilityFallback|TargetABIBindingConstraint)$' -count=1
+          go test ./internal/build -run '^Test(NewLLSSATargetUsesResolvedLLVMConfig|LLVMCPUAndFeaturesAffectBuildFingerprint|DefaultTargetKeepsLegacyCacheIdentity|NonDefaultLLVMFeaturesEnterCacheIdentity|ResolvedTargetCompatibilityAudit)$' -count=1
+
       - name: Check llgo-tag build
         run: go test -tags=llgo ./internal/coro
 
       - name: Vet coroutine analysis
-        run: go vet ./internal/coro ./internal/build
+        run: go vet ./internal/coro ./internal/build ./internal/xtool/llvm ./internal/crosscompile ./internal/cabi ./ssa
