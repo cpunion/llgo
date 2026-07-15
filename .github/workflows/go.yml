@@ -13,7 +13,10 @@ on:
       - "!llvm-coro"
       - "!coro/**"
   pull_request:
-    branches: ["**"]
+    branches:
+      - "**"
+      # Temporary: llvm-coro PRs use the focused Coroutine workflow below.
+      - "!llvm-coro"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}

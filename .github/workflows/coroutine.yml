@@ -1,0 +1,33 @@
+name: Coroutine
+
+on:
+  pull_request:
+    branches:
+      - llvm-coro
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
+        with:
+          go-version: "1.24.2"
+
+      # Temporary while the stackless-coroutine slices are integrated. Restore
+      # the full Go workflow, including macOS, before the upstream merge.
+      - name: Test coroutine analysis
+        run: go test -race -shuffle=on ./internal/coro
+
+      - name: Check llgo-tag build
+        run: go test -tags=llgo ./internal/coro
+
+      - name: Vet coroutine analysis
+        run: go vet ./internal/coro
