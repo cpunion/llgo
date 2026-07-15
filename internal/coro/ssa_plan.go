@@ -103,8 +103,11 @@ type SSAConfig struct {
 	// ExternalUnknownManaged; the scanner never guesses C/assembly by name.
 	ClassifyFunction func(*ssa.Function) (SSAFunctionPolicy, error)
 
-	// ClassifyUnknownCall distinguishes explicitly known dynamic foreign calls.
-	// The default is UnknownManaged.
+	// ClassifyUnknownCall distinguishes explicitly known foreign execution
+	// domains when static or structural function-value flow cannot completely
+	// resolve the managed targets. It does not change the operand ABI or value
+	// representation. Exact Go targets use ClassifyFunction instead. The default
+	// is UnknownManaged.
 	ClassifyUnknownCall func(caller *ssa.Function, call ssa.CallInstruction) (UnknownTarget, error)
 }
 
@@ -121,6 +124,8 @@ type SSAPlan struct {
 	functions  []SSAFunctionPlan
 	byFunction map[*ssa.Function]FunctionID
 	byID       map[FunctionID]*ssa.Function
+	valuePlans map[ssa.Value]SSAValuePlan
+	callPlans  map[ssa.CallInstruction]SSACallPlan
 }
 
 // BasePlan returns the target-independent immutable fixed-point plan.
@@ -303,15 +308,13 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	}
 	sort.Slice(included, func(i, j int) bool { return ids[included[i]] < ids[included[j]] })
 
-	policies := make(map[*ssa.Function]SSAFunctionPolicy, len(included))
-	needsDispatch := make(map[*ssa.Function]bool)
-	for _, candidates := range dynamicCandidates {
-		for candidate := range candidates {
-			if includedSet[candidate] {
-				needsDispatch[candidate] = true
-			}
-		}
+	flow := analyzeSSAFunctionFlow(included, includedSet, ids, dynamicCandidates, config.DynamicResolution)
+	unknownTargets, err := classifySSAUnknownCalls(included, includedSet, flow, config)
+	if err != nil {
+		return nil, err
 	}
+	policies := make(map[*ssa.Function]SSAFunctionPolicy, len(included))
+	needsDispatch := flow.descriptorTargets(unknownTargets)
 	for _, fn := range included {
 		policy := SSAFunctionPolicy{}
 		if fn.Blocks == nil {
@@ -359,6 +362,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		}
 	}
 
+	callKinds := make(map[ssa.CallInstruction]CallKind)
 	for _, caller := range included {
 		for _, block := range caller.Blocks {
 			for _, instruction := range block.Instrs {
@@ -374,14 +378,13 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 				if callee := common.StaticCallee(); callee != nil {
 					if includedSet[callee] {
 						edgeKind := staticCallKind(kind, policies[callee])
+						callKinds[call] = edgeKind
 						if err := graph.AddCall(CallEdge{Caller: ids[caller], Callee: ids[callee], Kind: edgeKind}); err != nil {
 							return nil, err
 						}
 					} else {
-						target, err := classifyUnknownCall(config, caller, call)
-						if err != nil {
-							return nil, err
-						}
+						target := unknownTargets[call]
+						callKinds[call] = unknownCallKind(kind, target)
 						if err := addSSAUnknownCall(graph, ids[caller], kind, target); err != nil {
 							return nil, err
 						}
@@ -389,19 +392,48 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 					continue
 				}
 
-				target, err := classifyUnknownCall(config, caller, call)
-				if err != nil {
-					return nil, err
+				flowTargets, flowComplete := flow.scalarCallTargets(call)
+				if flowComplete {
+					candidates := sortedSSACandidates(flowTargets, ids, includedSet)
+					callKinds[call] = kind
+					for _, callee := range candidates {
+						edgeKind := staticCallKind(kind, policies[callee])
+						if len(candidates) == 1 {
+							callKinds[call] = edgeKind
+						}
+						if err := graph.AddCall(CallEdge{Caller: ids[caller], Callee: ids[callee], Kind: edgeKind}); err != nil {
+							return nil, err
+						}
+					}
+					continue
 				}
+				// Structural flow may know a strict subset even when another source
+				// remains unresolved. Preserve those real Go edges regardless of the
+				// fallback execution domain selected below.
+				for _, callee := range sortedSSACandidates(flowTargets, ids, includedSet) {
+					edgeKind := staticCallKind(kind, policies[callee])
+					if err := graph.AddCall(CallEdge{Caller: ids[caller], Callee: ids[callee], Kind: edgeKind}); err != nil {
+						return nil, err
+					}
+				}
+
+				target := unknownTargets[call]
 				// An explicitly classified foreign function value has a different
 				// invocation domain from CHA's managed Go candidates. Preserve the
 				// foreign boundary in every resolution mode.
 				if target == UnknownForeign {
+					callKinds[call] = kind
+					// A mixed dispatch keeps the syntax kind for known managed
+					// descriptors; Unresolved selects the foreign fallback only.
+					if len(flowTargets) == 0 {
+						callKinds[call] = unknownCallKind(kind, target)
+					}
 					if err := addSSAUnknownCall(graph, ids[caller], kind, target); err != nil {
 						return nil, err
 					}
 					continue
 				}
+				callKinds[call] = kind
 
 				rawCandidates := dynamicCandidates[call]
 				candidates := sortedSSACandidates(rawCandidates, ids, includedSet)
@@ -433,17 +465,55 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if err != nil {
 		return nil, err
 	}
+	valuePlans, callPlans := flow.finalize(base, callKinds, unknownTargets)
 	result := &SSAPlan{
 		plan:       base,
 		functions:  make([]SSAFunctionPlan, 0, len(included)),
 		byFunction: ids,
 		byID:       byID,
+		valuePlans: valuePlans,
+		callPlans:  callPlans,
 	}
 	for _, functionPlan := range base.Functions() {
 		result.functions = append(result.functions, SSAFunctionPlan{
 			Function: byID[functionPlan.ID],
 			Plan:     functionPlan,
 		})
+	}
+	return result, nil
+}
+
+func classifySSAUnknownCalls(
+	functions []*ssa.Function,
+	included map[*ssa.Function]bool,
+	flow *ssaFuncFlow,
+	config SSAConfig,
+) (map[ssa.CallInstruction]UnknownTarget, error) {
+	result := make(map[ssa.CallInstruction]UnknownTarget)
+	for _, caller := range functions {
+		for _, block := range caller.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(ssa.CallInstruction)
+				if !ok {
+					continue
+				}
+				common := call.Common()
+				if _, builtin := common.Value.(*ssa.Builtin); builtin {
+					continue
+				}
+				if callee := common.StaticCallee(); callee != nil && included[callee] {
+					continue
+				}
+				if _, complete := flow.scalarCallTargets(call); complete {
+					continue
+				}
+				target, err := classifyUnknownCall(config, caller, call)
+				if err != nil {
+					return nil, err
+				}
+				result[call] = target
+			}
+		}
 	}
 	return result, nil
 }
@@ -632,11 +702,15 @@ func classifyUnknownCall(config SSAConfig, caller *ssa.Function, call ssa.CallIn
 }
 
 func addSSAUnknownCall(graph *Graph, caller FunctionID, syntax CallKind, target UnknownTarget) error {
-	kind := syntax
-	if kind == CallDirect && target == UnknownForeign {
-		kind = CallForeign
-	}
+	kind := unknownCallKind(syntax, target)
 	return graph.AddUnknownCall(UnknownCall{Caller: caller, Kind: kind, Target: target})
+}
+
+func unknownCallKind(syntax CallKind, target UnknownTarget) CallKind {
+	if syntax == CallDirect && target == UnknownForeign {
+		return CallForeign
+	}
+	return syntax
 }
 
 func sortedSSACandidates(candidates map[*ssa.Function]struct{}, ids map[*ssa.Function]FunctionID, included map[*ssa.Function]bool) []*ssa.Function {
