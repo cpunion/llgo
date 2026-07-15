@@ -34,6 +34,9 @@ jobs:
       - name: Test coroutine build integration
         run: go test ./internal/build -run 'Test(CoroPlanBuilderRunsBeforeCodegenWithoutChangingIR|BuildCoroPlanErrors)$' -count=1
 
+      - name: Test coroutine compiler integration
+        run: go test ./cl -run '^TestCompilationCoroPlanObservationAndCacheRegistration$' -count=1
+
       - name: Check llgo-tag build
         run: go test -tags=llgo ./internal/coro
 
