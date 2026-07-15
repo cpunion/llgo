@@ -1,0 +1,303 @@
+/*
+ * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package cl
+
+import (
+	"go/ast"
+	"go/types"
+	"strings"
+	"testing"
+
+	"github.com/goplus/llgo/internal/coro"
+	"golang.org/x/tools/go/ssa"
+)
+
+func TestEmissionUniverseActiveABIMethodTablesUseFrozenWrapperSymbols(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/methodlink", `package methodlink
+type Base struct{}
+func (Base) M() {}
+func Value() any { return struct{ Base }{} }
+`)
+	testProg.ssa.Build()
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{
+		SSA: pkg.ssa, Files: []*ast.File{pkg.file},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(testProg.ssa, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := coro.AnalyzeSSA(testProg.ssa, nil, coro.SSAConfig{
+		EmissionUniverse: ssaUniverse,
+		FunctionIDs:      universe.FunctionIDConfig(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, pkg.ssa, []*ast.File{pkg.file}, nil,
+		PackageOptions{Compilation: &Compilation{
+			CoroPlan:                  plan,
+			EmissionUniverse:          universe,
+			EnableCoroEntryResolution: true,
+		}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	owner := universe.packages[pkg.ssa]
+	found := 0
+	ir := compiled.String()
+	for key, physical := range universe.physicalNames {
+		fn := key.function
+		if key.owner != owner || wrapperKind(fn) != "promoted" || fn.Name() != "M" || fn.Signature.Recv() == nil {
+			continue
+		}
+		receiver := types.Unalias(fn.Signature.Recv().Type())
+		if pointer, ok := receiver.(*types.Pointer); ok {
+			receiver = types.Unalias(pointer.Elem())
+		}
+		if _, ok := receiver.(*types.Struct); !ok {
+			continue
+		}
+		state := universe.ownerStates[fn][owner]
+		legacy, _, _, managed, classifyErr := universe.classifiedManagedSymbol(owner, fn, state.state)
+		if classifyErr != nil || !managed {
+			t.Fatalf("classify wrapper %s: managed=%v, err=%v", fn, managed, classifyErr)
+		}
+		if physical == legacy {
+			t.Fatalf("wrapper %s retained colliding legacy symbol %q", fn, legacy)
+		}
+		definition := compiled.FuncOf(physical)
+		if definition == nil || !definition.HasBody() {
+			t.Fatalf("frozen wrapper %q has no emitted body", physical)
+		}
+		if old := compiled.FuncOf(legacy); old != nil {
+			t.Fatalf("ABI method table retained legacy wrapper declaration %q", legacy)
+		}
+		if count := strings.Count(ir, physical); count < 2 {
+			t.Fatalf("frozen wrapper %q occurs %d time(s) in IR; want definition and ABI method-table reference", physical, count)
+		}
+		found++
+	}
+	if found == 0 {
+		t.Fatal("test did not materialize an anonymous promoted wrapper")
+	}
+}
+
+func TestEmissionUniverseActiveGenericLocalMethodFormsUseFrozenSymbols(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/genericmethodlink", `package genericmethodlink
+type Box[X any] struct{ Value X }
+func (Box[X]) M() int { return 1 }
+func Generic[T any]() int {
+	type Local struct{ Value T }
+	var value Box[Local]
+	direct := value.M()
+	expression := Box[Local].M
+	bound := value.M
+	return direct + expression(value) + bound()
+}
+func UseInt() int { return Generic[int]() }
+func UseString() int { return Generic[string]() }
+`)
+	testProg.ssa.Build()
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{
+		SSA: pkg.ssa, Files: []*ast.File{pkg.file},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(testProg.ssa, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := coro.AnalyzeSSA(testProg.ssa, coro.Roots{
+		{Function: pkg.ssa.Func("UseInt"), Demand: coro.SyncDemand},
+		{Function: pkg.ssa.Func("UseString"), Demand: coro.SyncDemand},
+	}, coro.SSAConfig{
+		EmissionUniverse: ssaUniverse,
+		FunctionIDs:      universe.FunctionIDConfig(),
+		ResolveFunction: func(fn *ssa.Function) (*ssa.Function, bool, error) {
+			canonical, ok := universe.Resolve(fn)
+			return canonical, ok, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, pkg.ssa, []*ast.File{pkg.file}, nil,
+		PackageOptions{Compilation: &Compilation{
+			CoroPlan:                  plan,
+			EmissionUniverse:          universe,
+			EnableCoroEntryResolution: true,
+		}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	variantOf := func(fnType types.Type) string {
+		seen := make(map[types.Type]bool)
+		var visit func(types.Type) string
+		visit = func(typ types.Type) string {
+			if typ == nil {
+				return ""
+			}
+			typ = types.Unalias(typ)
+			if seen[typ] {
+				return ""
+			}
+			seen[typ] = true
+			switch typ := typ.(type) {
+			case *types.Named:
+				if object := typ.Obj(); object != nil && strings.HasPrefix(object.Name(), "Local") {
+					if structure, ok := typ.Underlying().(*types.Struct); ok {
+						for index := 0; index < structure.NumFields(); index++ {
+							field := structure.Field(index)
+							if field.Name() != "Value" {
+								continue
+							}
+							switch {
+							case types.Identical(field.Type(), types.Typ[types.Int]):
+								return "int"
+							case types.Identical(field.Type(), types.Typ[types.String]):
+								return "string"
+							}
+						}
+					}
+				}
+				for index := 0; index < typ.TypeArgs().Len(); index++ {
+					if variant := visit(typ.TypeArgs().At(index)); variant != "" {
+						return variant
+					}
+				}
+				return visit(typ.Underlying())
+			case *types.Pointer:
+				return visit(typ.Elem())
+			case *types.Signature:
+				if recv := typ.Recv(); recv != nil {
+					if variant := visit(recv.Type()); variant != "" {
+						return variant
+					}
+				}
+				for _, tuple := range []*types.Tuple{typ.Params(), typ.Results()} {
+					for index := 0; index < tuple.Len(); index++ {
+						if variant := visit(tuple.At(index).Type()); variant != "" {
+							return variant
+						}
+					}
+				}
+			case *types.Struct:
+				for index := 0; index < typ.NumFields(); index++ {
+					if variant := visit(typ.Field(index).Type()); variant != "" {
+						return variant
+					}
+				}
+			}
+			return ""
+		}
+		return visit(fnType)
+	}
+
+	owner := universe.packages[pkg.ssa]
+	found := make(map[string]map[string]string)
+	legacies := make(map[string]map[string]string)
+	ir := compiled.String()
+	for _, fn := range universe.Functions() {
+		kind := wrapperKind(fn)
+		if kind == "" && fn.Origin() != nil && fn.Origin().Name() == "M" {
+			kind = "direct"
+		}
+		if kind != "direct" && fn.Name() != "M" && !strings.HasPrefix(fn.Name(), "M$") ||
+			(kind != "direct" && kind != "thunk" && kind != "bound") {
+			continue
+		}
+		owned := false
+		for _, candidate := range universe.sortedUseOwners(fn) {
+			owned = owned || candidate == owner
+		}
+		if !owned {
+			continue
+		}
+		variant := variantOf(universe.effectiveType(owner, fn, fn.Signature))
+		if variant == "" {
+			for _, free := range fn.FreeVars {
+				variant = variantOf(universe.effectiveType(owner, fn, free.Type()))
+				if variant != "" {
+					break
+				}
+			}
+		}
+		if variant == "" {
+			continue
+		}
+		state := universe.ownerStates[fn][owner]
+		legacy, _, _, managed, classifyErr := universe.classifiedManagedSymbol(owner, fn, state.state)
+		if classifyErr != nil || !managed {
+			t.Fatalf("classify %s/%s %s: managed=%v, err=%v", kind, variant, fn, managed, classifyErr)
+		}
+		physical, err := universe.physicalName(owner.ssa, fn, legacy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if found[kind] == nil {
+			found[kind] = make(map[string]string)
+			legacies[kind] = make(map[string]string)
+		}
+		if previous := found[kind][variant]; previous != "" && previous != physical {
+			t.Fatalf("%s/%s has multiple physical symbols %q and %q", kind, variant, previous, physical)
+		}
+		found[kind][variant] = physical
+		legacies[kind][variant] = legacy
+		definition := compiled.FuncOf(physical)
+		if definition == nil || !definition.HasBody() {
+			t.Fatalf("%s/%s frozen symbol %q has no emitted body", kind, variant, physical)
+		}
+		if physical != legacy {
+			if old := compiled.FuncOf(legacy); old != nil {
+				t.Fatalf("%s/%s retained legacy declaration %q", kind, variant, legacy)
+			}
+		}
+		if count := strings.Count(ir, physical); count < 2 {
+			t.Fatalf("%s/%s frozen symbol %q occurs %d time(s); want definition and reference", kind, variant, physical, count)
+		}
+	}
+	for _, kind := range []string{"direct", "thunk", "bound"} {
+		if found[kind]["int"] == "" || found[kind]["string"] == "" {
+			t.Fatalf("generic local %s symbols = %v; want int and string", kind, found[kind])
+		}
+		if found[kind]["int"] == found[kind]["string"] {
+			t.Fatalf("generic local %s int/string symbols collide at %q", kind, found[kind]["int"])
+		}
+		if legacies[kind]["int"] == legacies[kind]["string"] &&
+			(found[kind]["int"] == legacies[kind]["int"] || found[kind]["string"] == legacies[kind]["string"]) {
+			t.Fatalf("generic local %s legacy collision %q was not fully frozen: %v", kind, legacies[kind]["int"], found[kind])
+		}
+	}
+}

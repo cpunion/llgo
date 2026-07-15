@@ -79,6 +79,23 @@ func newCoroEntryTestContext(t *testing.T, pkg *ssa.Package, compilation *Compil
 	return ctx, prog.Dispose
 }
 
+// coroEntryPreflightUniverse is a minimal exact universe for tests that are
+// expected to stop in whole-plan preflight before package/codegen validation.
+func coroEntryPreflightUniverse(plan *coro.SSAPlan) *EmissionUniverse {
+	u := &EmissionUniverse{
+		required: make(map[*ssa.Function]none),
+		aliases:  make(map[*ssa.Function]*ssa.Function),
+	}
+	if plan == nil {
+		return u
+	}
+	for _, planned := range plan.Functions() {
+		u.functions = append(u.functions, planned.Function)
+		u.required[planned.Function] = none{}
+	}
+	return u
+}
+
 func TestResolveFunctionSymbolUsesPrimaryAndExactPlan(t *testing.T) {
 	pkg, plan := buildCoroEntryTestPlan(t)
 	ctx, dispose := newCoroEntryTestContext(t, pkg, &Compilation{
@@ -277,7 +294,8 @@ func Box() any { return Target }
 			defer prog.Dispose()
 			got, _, err := NewPackageExWithEmbedOptions(prog, nil, nil, nil, pkg, files, goembed.VarMap{}, PackageOptions{
 				Compilation: &Compilation{
-					CoroPlan: plan,
+					CoroPlan:         plan,
+					EmissionUniverse: coroEntryPreflightUniverse(plan),
 					CoroPlanObserver: func(*ssa.Package, *coro.SSAPlan) {
 						observerCalls++
 					},
@@ -311,9 +329,18 @@ func TestCoroEntryResolutionPreflightRejectsMissingPlanAndCache(t *testing.T) {
 			want:        "requires a compilation CoroPlan",
 		},
 		{
+			name: "missing universe",
+			compilation: &Compilation{
+				CoroPlan:                  &coro.SSAPlan{},
+				EnableCoroEntryResolution: true,
+			},
+			want: "prepared emission universe",
+		},
+		{
 			name: "cache hit",
 			compilation: &Compilation{
 				CoroPlan:                  &coro.SSAPlan{},
+				EmissionUniverse:          coroEntryPreflightUniverse(&coro.SSAPlan{}),
 				EnableCoroEntryResolution: true,
 			},
 			cacheHit: true,

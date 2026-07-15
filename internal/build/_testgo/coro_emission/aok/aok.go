@@ -1,0 +1,3 @@
+package aok
+
+func Call() {}

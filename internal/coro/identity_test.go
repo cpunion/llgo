@@ -374,6 +374,55 @@ func instantiate() {
 		t.Fatalf("AnalyzeSSA with instantiated local named types: %v", err)
 	}
 
+	// Distinct generic instances over fresh local named types may have the same
+	// raw presentation key even though their structural FunctionIDs differ. The
+	// emission universe must preserve both exact pointers, and AnalyzeSSA must
+	// produce the same stable plan regardless of frontend input order.
+	rawOwners := make(map[string]*ssa.Function)
+	hasRawTie := false
+	for _, instance := range instances {
+		key := rawSSAFunctionKey(instance)
+		if previous := rawOwners[key]; previous != nil && previous != instance {
+			hasRawTie = true
+		}
+		rawOwners[key] = instance
+	}
+	if !hasRawTie {
+		t.Fatal("generic instances over fresh local named types did not exercise an equal raw sort key")
+	}
+
+	allFunctions := matchingFunctions(prog, func(*ssa.Function) bool { return true })
+	reversedFunctions := append([]*ssa.Function(nil), allFunctions...)
+	for left, right := 0, len(reversedFunctions)-1; left < right; left, right = left+1, right-1 {
+		reversedFunctions[left], reversedFunctions[right] = reversedFunctions[right], reversedFunctions[left]
+	}
+	universeA, err := NewSSAEmissionUniverse(prog, allFunctions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	universeB, err := NewSSAEmissionUniverse(prog, reversedFunctions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := packageFunction(t, pkg, "instantiate")
+	planA, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: AsyncDemand}}, SSAConfig{EmissionUniverse: universeA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	planB, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: AsyncDemand}}, SSAConfig{EmissionUniverse: universeB})
+	if err != nil {
+		t.Fatal(err)
+	}
+	functionsA, functionsB := planA.Functions(), planB.Functions()
+	if len(functionsA) != len(functionsB) {
+		t.Fatalf("plan function counts differ by universe input order: %d and %d", len(functionsA), len(functionsB))
+	}
+	for i := range functionsA {
+		if functionsA[i] != functionsB[i] {
+			t.Fatalf("plan function %d differs by universe input order:\nA: %+v\nB: %+v", i, functionsA[i], functionsB[i])
+		}
+	}
+
 	otherProg, _ := buildCoroTestSSA(t, "/other/checkout/source.go", source)
 	firstIDs := stableIDSet(t, prog, FunctionIDConfig{})
 	otherIDs := stableIDSet(t, otherProg, FunctionIDConfig{})
@@ -415,6 +464,11 @@ func instantiate() { Outer[int]() }
 	outer := findCallee(packageFunction(t, pkg, "instantiate"), "Outer")
 	generic := findCallee(outer, "Generic")
 	local := types.Unalias(generic.TypeArgs()[0]).(*types.Named)
+	canonicalObject := types.NewTypeName(local.Obj().Pos(), local.Obj().Pkg(), "Local[int]", nil)
+	canonicalLocal := types.NewNamed(canonicalObject, local.Underlying(), nil)
+	if declaration, err := lexicalTypeDeclaration(canonicalLocal.Obj()); err != nil || declaration.Name() != "Local" || declaration.Pos() != local.Obj().Pos() {
+		t.Fatalf("canonical local lexical declaration = %v, %v; want source Local at %v", declaration, err, local.Obj().Pos())
+	}
 
 	// Model a tool that retains an isolated instance after removing the source
 	// roots that carried its reverse provenance. x/tools exposes no owner link

@@ -78,10 +78,34 @@ type SSAFunctionPolicy struct {
 	NeedsDispatch    bool
 }
 
+// SSAFunctionResolver maps an SSA function referenced by an effective body to
+// the exact canonical function analyzed and emitted by the frontend. ok=false
+// means that the reference has no managed target in the effective compilation.
+// A successful result must be non-nil, belong to the analyzed Program, and,
+// when EmissionUniverse is set, be an exact member of that universe.
+//
+// AnalyzeSSA memoizes results by input pointer, so the resolver must be pure.
+// Frontends use this hook for patch aliases whose unchanged caller bodies still
+// refer to the replaced SSA declaration.
+type SSAFunctionResolver func(fn *ssa.Function) (canonical *ssa.Function, ok bool, err error)
+
 // SSAConfig controls the SSA-to-Graph analysis bridge. It deliberately has no
 // lowering or runtime switches.
 type SSAConfig struct {
 	FunctionIDs FunctionIDConfig
+
+	// EmissionUniverse restricts analysis to the exact SSA function objects
+	// materialized for this frontend compilation. When non-nil, AnalyzeSSA does
+	// not add package members, static callees, or CHA nodes outside the universe,
+	// and every root must be a universe member. A nil universe preserves the
+	// legacy whole-Program enumeration.
+	EmissionUniverse *SSAEmissionUniverse
+
+	// ResolveFunction canonicalizes patched or otherwise aliased function
+	// pointers before every graph, function-value-flow, CHA, and CallPlan use.
+	// Nil is the identity resolver. With EmissionUniverse, successful results
+	// must be exact universe members.
+	ResolveFunction SSAFunctionResolver
 
 	// MaxPlainInstructions seeds NeedsPreempt on a longer body. Zero selects
 	// DefaultMaxPlainInstructions; a negative value disables the cost seed.
@@ -89,9 +113,9 @@ type SSAConfig struct {
 	MaxPlainInstructions int
 
 	// DynamicResolution defaults to DynamicUnknownOnly. AnalyzeSSA's function
-	// enumeration may lazily materialize method wrappers in every mode, and CHA
-	// may materialize more; callers must not assume the supplied in-memory SSA
-	// object graph remains byte-for-byte untouched.
+	// enumeration may lazily materialize method wrappers in legacy whole-Program
+	// mode. With EmissionUniverse, CHA candidate discovery examines only the
+	// frozen functions and does not enumerate the Program.
 	DynamicResolution DynamicResolution
 
 	// Include filters the effective program (for example, after patch/skip
@@ -126,6 +150,85 @@ type SSAPlan struct {
 	byID       map[FunctionID]*ssa.Function
 	valuePlans map[ssa.Value]SSAValuePlan
 	callPlans  map[ssa.CallInstruction]SSACallPlan
+}
+
+type ssaFunctionResolution struct {
+	canonical *ssa.Function
+	ok        bool
+	err       error
+}
+
+type ssaFunctionCanonicalizer struct {
+	prog     *ssa.Program
+	universe *SSAEmissionUniverse
+	callback SSAFunctionResolver
+	memo     map[*ssa.Function]ssaFunctionResolution
+	active   map[*ssa.Function]bool
+}
+
+func newSSAFunctionCanonicalizer(prog *ssa.Program, config SSAConfig) *ssaFunctionCanonicalizer {
+	return &ssaFunctionCanonicalizer{
+		prog:     prog,
+		universe: config.EmissionUniverse,
+		callback: config.ResolveFunction,
+		memo:     make(map[*ssa.Function]ssaFunctionResolution),
+		active:   make(map[*ssa.Function]bool),
+	}
+}
+
+func (r *ssaFunctionCanonicalizer) resolve(fn *ssa.Function) (*ssa.Function, bool, error) {
+	if fn == nil {
+		return nil, false, nil
+	}
+	if result, ok := r.memo[fn]; ok {
+		return result.canonical, result.ok, result.err
+	}
+	if r.active[fn] {
+		return nil, false, fmt.Errorf("resolver cycle at function %q", fn.Name())
+	}
+	r.active[fn] = true
+	defer delete(r.active, fn)
+
+	canonical, ok, err := fn, true, error(nil)
+	if r.callback != nil {
+		canonical, ok, err = r.callback(fn)
+	} else if r.universe != nil && !r.universe.Contains(fn) {
+		ok = false
+	}
+	if err == nil && ok && canonical == nil {
+		err = fmt.Errorf("resolver returned a nil canonical function")
+	}
+	if err == nil && ok && canonical.Prog != r.prog {
+		err = fmt.Errorf("resolver returned function %q from another SSA program", canonical.Name())
+	}
+	if err == nil && r.universe != nil {
+		switch {
+		case r.universe.Contains(fn) && !ok:
+			err = fmt.Errorf("resolver rejected exact emission-universe member %q", fn.Name())
+		case r.universe.Contains(fn) && canonical != fn:
+			err = fmt.Errorf("resolver remapped exact emission-universe member %q", fn.Name())
+		case ok && !r.universe.Contains(canonical):
+			err = fmt.Errorf("resolver returned function %q outside the SSA emission universe", canonical.Name())
+		}
+	}
+	if err == nil && ok && r.callback != nil && canonical != fn {
+		// The callback contract requires a final canonical pointer. Verify that
+		// successful aliases do not form chains or depend on the call site.
+		final, finalOK, finalErr := r.resolve(canonical)
+		switch {
+		case finalErr != nil:
+			err = fmt.Errorf("verify canonical function %q: %w", canonical.Name(), finalErr)
+		case !finalOK || final == nil:
+			err = fmt.Errorf("canonical function %q does not resolve to itself", canonical.Name())
+		case final != canonical:
+			err = fmt.Errorf("canonical function %q resolves to a different function", canonical.Name())
+		default:
+			r.memo[canonical] = ssaFunctionResolution{canonical: canonical, ok: true}
+		}
+	}
+	result := ssaFunctionResolution{canonical: canonical, ok: ok, err: err}
+	r.memo[fn] = result
+	return result.canonical, result.ok, result.err
 }
 
 // BasePlan returns the target-independent immutable fixed-point plan.
@@ -179,11 +282,17 @@ func (p *SSAPlan) Function(id FunctionID) (*ssa.Function, bool) {
 // AnalyzeSSA scans a built x/tools SSA program, constructs a conservative
 // target-independent Graph, and computes its least fixed point. It emits and
 // updates no build, LLVM, cache, archive, or runtime artifacts. x/tools function
-// enumeration and opt-in CHA may materialize lazy wrapper objects in prog.
+// enumeration and opt-in CHA may materialize lazy wrapper objects in prog when
+// EmissionUniverse is nil.
 func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, error) {
 	if prog == nil {
 		return nil, fmt.Errorf("coro: analyze nil SSA program")
 	}
+	universe := config.EmissionUniverse
+	if universe != nil && universe.Program() != prog {
+		return nil, fmt.Errorf("coro: SSA emission universe belongs to another program")
+	}
+	canonicalizer := newSSAFunctionCanonicalizer(prog, config)
 	identityConfig, err := config.FunctionIDs.normalized()
 	if err != nil {
 		return nil, err
@@ -205,18 +314,38 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		if root.Function.Prog != prog {
 			return nil, fmt.Errorf("coro: root %d function %q belongs to another SSA program", i, root.Function.Name())
 		}
+		canonical, ok, err := canonicalizer.resolve(root.Function)
+		if err != nil {
+			return nil, fmt.Errorf("coro: resolve root %d function %q: %w", i, root.Function.Name(), err)
+		}
+		if !ok {
+			if universe != nil {
+				return nil, fmt.Errorf("coro: root %d function %q is absent from the SSA emission universe", i, root.Function.Name())
+			}
+			return nil, fmt.Errorf("coro: root %d function %q has no canonical managed target", i, root.Function.Name())
+		}
 		if err := root.Demand.Validate(); err != nil {
 			return nil, fmt.Errorf("coro: root %d function %q: %w", i, root.Function.Name(), err)
 		}
 		if root.Demand == NoDemand {
 			return nil, fmt.Errorf("coro: root %d function %q has no demand", i, root.Function.Name())
 		}
-		rootDemand[root.Function] = rootDemand[root.Function].Join(root.Demand)
+		rootDemand[canonical] = rootDemand[canonical].Join(root.Demand)
 	}
 
 	dynamicCandidates := make(map[ssa.CallInstruction]map[*ssa.Function]struct{})
 	functionSet := make(map[*ssa.Function]struct{})
-	if config.DynamicResolution == DynamicUnknownOnly {
+	var allFunctions []*ssa.Function
+	if universe != nil {
+		// Preserve the frozen frontend order. Round-tripping through a map
+		// makes equal raw presentation keys nondeterministic (notably distinct
+		// generic instances over local named types) before structural IDs are
+		// available to order the included functions.
+		allFunctions = append([]*ssa.Function(nil), universe.functions...)
+		if config.DynamicResolution != DynamicUnknownOnly {
+			dynamicCandidates = restrictedSSACHACandidates(universe.functions)
+		}
+	} else if config.DynamicResolution == DynamicUnknownOnly {
 		for fn := range ssautil.AllFunctions(prog) {
 			if fn != nil && fn.Prog == prog {
 				functionSet[fn] = struct{}{}
@@ -224,15 +353,11 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		}
 	} else {
 		callGraph := cha.CallGraph(prog)
-		for fn := range callGraph.Nodes {
-			if fn != nil && fn.Prog == prog {
-				functionSet[fn] = struct{}{}
-			}
-		}
-		for _, node := range callGraph.Nodes {
-			if node == nil {
+		for fn, node := range callGraph.Nodes {
+			if fn == nil || fn.Prog != prog || node == nil {
 				continue
 			}
+			functionSet[fn] = struct{}{}
 			for _, edge := range node.Out {
 				if edge.Site == nil || edge.Callee == nil || edge.Callee.Func == nil {
 					continue
@@ -252,35 +377,67 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 			}
 		}
 	}
-	for _, pkg := range prog.AllPackages() {
-		for _, member := range pkg.Members {
-			if fn, ok := member.(*ssa.Function); ok {
-				functionSet[fn] = struct{}{}
+	if universe == nil {
+		for _, pkg := range prog.AllPackages() {
+			for _, member := range pkg.Members {
+				if fn, ok := member.(*ssa.Function); ok {
+					functionSet[fn] = struct{}{}
+				}
 			}
 		}
+		for fn := range rootDemand {
+			functionSet[fn] = struct{}{}
+		}
+		closeStaticFunctions(functionSet, prog)
 	}
-	for fn := range rootDemand {
-		functionSet[fn] = struct{}{}
-	}
-	closeStaticFunctions(functionSet, prog)
 
-	type keyedFunction struct {
-		function *ssa.Function
-		key      string
-	}
-	keyedFunctions := make([]keyedFunction, 0, len(functionSet))
-	for fn := range functionSet {
-		keyedFunctions = append(keyedFunctions, keyedFunction{
-			function: fn,
-			key:      rawSSAFunctionKey(fn),
+	if universe == nil {
+		type keyedFunction struct {
+			function *ssa.Function
+			key      string
+		}
+		keyedFunctions := make([]keyedFunction, 0, len(functionSet))
+		for fn := range functionSet {
+			keyedFunctions = append(keyedFunctions, keyedFunction{
+				function: fn,
+				key:      rawSSAFunctionKey(fn),
+			})
+		}
+		sort.Slice(keyedFunctions, func(i, j int) bool {
+			return keyedFunctions[i].key < keyedFunctions[j].key
 		})
+		allFunctions = make([]*ssa.Function, len(keyedFunctions))
+		for i, keyed := range keyedFunctions {
+			allFunctions[i] = keyed.function
+		}
 	}
-	sort.Slice(keyedFunctions, func(i, j int) bool {
-		return keyedFunctions[i].key < keyedFunctions[j].key
-	})
-	allFunctions := make([]*ssa.Function, len(keyedFunctions))
-	for i, keyed := range keyedFunctions {
-		allFunctions[i] = keyed.function
+
+	canonicalFunctions := make([]*ssa.Function, 0, len(allFunctions))
+	seenCanonical := make(map[*ssa.Function]struct{}, len(allFunctions))
+	for _, fn := range allFunctions {
+		canonical, ok, resolveErr := canonicalizer.resolve(fn)
+		if resolveErr != nil {
+			return nil, fmt.Errorf("coro: resolve enumerated SSA function %q: %w", fn.Name(), resolveErr)
+		}
+		if !ok {
+			continue
+		}
+		if _, seen := seenCanonical[canonical]; seen {
+			continue
+		}
+		seenCanonical[canonical] = struct{}{}
+		canonicalFunctions = append(canonicalFunctions, canonical)
+	}
+	if universe == nil {
+		canonicalFunctions, err = closeCanonicalStaticFunctions(canonicalFunctions, prog, canonicalizer)
+		if err != nil {
+			return nil, err
+		}
+	}
+	allFunctions = canonicalFunctions
+	dynamicCandidates, err = canonicalizeSSADynamicCandidates(dynamicCandidates, canonicalizer)
+	if err != nil {
+		return nil, err
 	}
 
 	included := make([]*ssa.Function, 0, len(allFunctions))
@@ -322,7 +479,10 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	}
 	sort.Slice(included, func(i, j int) bool { return ids[included[i]] < ids[included[j]] })
 
-	flow := analyzeSSAFunctionFlow(included, includedSet, ids, dynamicCandidates, config.DynamicResolution)
+	flow, err := analyzeSSAFunctionFlow(included, includedSet, ids, dynamicCandidates, config.DynamicResolution, canonicalizer)
+	if err != nil {
+		return nil, fmt.Errorf("coro: analyze SSA function-value flow: %w", err)
+	}
 	unknownTargets, err := classifySSAUnknownCalls(included, includedSet, flow, config)
 	if err != nil {
 		return nil, err
@@ -389,8 +549,12 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 					continue
 				}
 				kind := ssaCallKind(call)
-				if callee := common.StaticCallee(); callee != nil {
-					if includedSet[callee] {
+				if rawCallee := common.StaticCallee(); rawCallee != nil {
+					callee, resolved, resolveErr := flow.resolveTarget(rawCallee)
+					if resolveErr != nil {
+						return nil, fmt.Errorf("coro: resolve static callee %q in %q while building graph: %w", rawCallee.Name(), caller.Name(), resolveErr)
+					}
+					if resolved && includedSet[callee] {
 						edgeKind := staticCallKind(kind, policies[callee])
 						callKinds[call] = edgeKind
 						if err := graph.AddCall(CallEdge{Caller: ids[caller], Callee: ids[callee], Kind: edgeKind}); err != nil {
@@ -479,7 +643,10 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if err != nil {
 		return nil, err
 	}
-	valuePlans, callPlans := flow.finalize(base, callKinds, unknownTargets)
+	valuePlans, callPlans, err := flow.finalize(base, callKinds, unknownTargets)
+	if err != nil {
+		return nil, fmt.Errorf("coro: finalize SSA value and call plans: %w", err)
+	}
 	result := &SSAPlan{
 		plan:       base,
 		functions:  make([]SSAFunctionPlan, 0, len(included)),
@@ -515,8 +682,14 @@ func classifySSAUnknownCalls(
 				if _, builtin := common.Value.(*ssa.Builtin); builtin {
 					continue
 				}
-				if callee := common.StaticCallee(); callee != nil && included[callee] {
-					continue
+				if callee := common.StaticCallee(); callee != nil {
+					canonical, ok, err := flow.resolveTarget(callee)
+					if err != nil {
+						return nil, fmt.Errorf("coro: resolve static callee %q in %q while classifying unknown calls: %w", callee.Name(), caller.Name(), err)
+					}
+					if ok && included[canonical] {
+						continue
+					}
 				}
 				if _, complete := flow.scalarCallTargets(call); complete {
 					continue
@@ -526,6 +699,98 @@ func classifySSAUnknownCalls(
 					return nil, err
 				}
 				result[call] = target
+			}
+		}
+	}
+	return result, nil
+}
+
+func canonicalizeSSADynamicCandidates(
+	candidates map[ssa.CallInstruction]map[*ssa.Function]struct{},
+	canonicalizer *ssaFunctionCanonicalizer,
+) (map[ssa.CallInstruction]map[*ssa.Function]struct{}, error) {
+	result := make(map[ssa.CallInstruction]map[*ssa.Function]struct{}, len(candidates))
+	for call, rawTargets := range candidates {
+		canonicalTargets := make(map[*ssa.Function]struct{}, len(rawTargets))
+		for raw := range rawTargets {
+			canonical, ok, err := canonicalizer.resolve(raw)
+			if err != nil {
+				caller := "<unknown>"
+				if call != nil && call.Parent() != nil {
+					caller = call.Parent().Name()
+				}
+				return nil, fmt.Errorf("coro: resolve dynamic candidate %q for call in %q: %w", raw.Name(), caller, err)
+			}
+			if ok {
+				canonicalTargets[canonical] = struct{}{}
+			} else {
+				// Retain an excluded sentinel. Dropping it would let CHAClosed
+				// incorrectly treat a partially unresolved candidate set as closed.
+				canonicalTargets[raw] = struct{}{}
+			}
+		}
+		if len(canonicalTargets) != 0 {
+			result[call] = canonicalTargets
+		}
+	}
+	return result, nil
+}
+
+func closeCanonicalStaticFunctions(
+	functions []*ssa.Function,
+	prog *ssa.Program,
+	canonicalizer *ssaFunctionCanonicalizer,
+) ([]*ssa.Function, error) {
+	result := append([]*ssa.Function(nil), functions...)
+	seen := make(map[*ssa.Function]struct{}, len(result))
+	for _, fn := range result {
+		seen[fn] = struct{}{}
+	}
+	add := func(raw, caller *ssa.Function) error {
+		if raw == nil || raw.Prog != prog {
+			return nil
+		}
+		canonical, ok, err := canonicalizer.resolve(raw)
+		if err != nil {
+			return fmt.Errorf("coro: resolve static function %q reached from %q: %w", raw.Name(), caller.Name(), err)
+		}
+		if !ok {
+			return nil
+		}
+		if _, exists := seen[canonical]; !exists {
+			seen[canonical] = struct{}{}
+			result = append(result, canonical)
+		}
+		return nil
+	}
+	for head := 0; head < len(result); head++ {
+		fn := result[head]
+		for _, child := range fn.AnonFuncs {
+			if err := add(child, fn); err != nil {
+				return nil, err
+			}
+		}
+		operands := make([]*ssa.Value, 0, 8)
+		for _, block := range fn.Blocks {
+			for _, instruction := range block.Instrs {
+				operands = instruction.Operands(operands[:0])
+				for _, operand := range operands {
+					if operand == nil {
+						continue
+					}
+					if target, ok := (*operand).(*ssa.Function); ok {
+						if err := add(target, fn); err != nil {
+							return nil, err
+						}
+					}
+				}
+				call, ok := instruction.(ssa.CallInstruction)
+				if !ok {
+					continue
+				}
+				if err := add(call.Common().StaticCallee(), fn); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}

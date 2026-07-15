@@ -797,13 +797,14 @@ type aPackage struct {
 	cu         CompilationUnit
 	glbDbgVars map[Expr]bool
 
-	vars   map[string]Global
-	fns    map[string]Function
-	pyobjs map[string]PyObjRef
-	pymods map[string]Global
-	strs   map[string]llvm.Value
-	goStrs map[string]llvm.Value
-	fnlink func(string) string
+	vars       map[string]Global
+	fns        map[string]Function
+	pyobjs     map[string]PyObjRef
+	pymods     map[string]Global
+	strs       map[string]llvm.Value
+	goStrs     map[string]llvm.Value
+	fnlink     func(string) string
+	methodlink func(string, *types.Func, *types.Signature) string
 
 	iRoutine int
 
@@ -913,6 +914,18 @@ func (p Package) String() string {
 // SetResolveLinkname sets a function to resolve linkname.
 func (p Package) SetResolveLinkname(fn func(string) string) {
 	p.fnlink = fn
+}
+
+// SetResolveMethodLinkname installs the resolver used when an ABI method
+// table declares a concrete method entry. Unlike SetResolveLinkname, this
+// resolver receives both the declared method object and the exact emitted
+// signature, including its receiver. Those inputs let a frontend recover the
+// exact SSA method or wrapper even when distinct local or structural receiver
+// types have colliding legacy textual names.
+//
+// A nil resolver preserves the legacy SetResolveLinkname behavior.
+func (p Package) SetResolveMethodLinkname(fn func(string, *types.Func, *types.Signature) string) {
+	p.methodlink = fn
 }
 
 // -----------------------------------------------------------------------------

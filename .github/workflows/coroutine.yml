@@ -16,7 +16,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        llvm: [14, 18, 19, 21]
+        include:
+          - { llvm: 19, go: "1.24.2", tags: "llvm19" }
+          - { llvm: 21, go: "1.24.2", tags: "llvm21" }
+          - { llvm: 22, go: "1.24.2", tags: "byollvm,llvm22" }
+          - { llvm: 19, go: "1.26.5", tags: "llvm19" }
     steps:
       - uses: actions/checkout@v7
 
@@ -31,7 +35,7 @@ jobs:
       - name: Set up Go
         uses: ./.github/actions/setup-go
         with:
-          go-version: "1.24.2"
+          go-version: ${{ matrix.go }}
 
       # Temporary while the stackless-coroutine slices are integrated. Restore
       # the full Go workflow, including macOS, before the upstream merge.
@@ -41,14 +45,28 @@ jobs:
 
       - name: Test coroutine build integration
         if: matrix.llvm == 19
-        run: go test ./internal/build -run 'Test(CoroPlanBuilderRunsBeforeCodegenWithoutChangingIR|BuildCoroPlanErrors|CoroEntryResolutionDisablesPackageCacheReadWrite)$' -count=1
+        run: go test ./internal/build -run 'Test(CoroPlanBuilderRunsBeforeCodegenWithoutChangingIR|CoroPlanInputCanonicalizesPatchedRoot|BuildCoroPlanErrors|CoroEntryResolutionDisablesPackageCacheReadWrite|CoroEntryResolutionBuildsPreparedRuntimePackages|CoroEmissionCoverageStopsBeforeAnyPackageCodegen|CoroUnsupportedEntryResolutionReturnsErrorBeforeCodegen|CoroEmissionUniverseAcceptsModeTestVariants)$' -count=1
 
       - name: Test coroutine compiler integration
         if: matrix.llvm == 19
-        run: go test ./cl -run '^Test(CompilationCoroPlanObservationAndCacheRegistration|CoroEntryResolutionPlainPrimaryPreservesIR|ResolveFunctionSymbolUsesPrimaryAndExactPlan|CoroEntryRejectsUnsupportedBeforeCreatingSymbol|CoroEntryResolutionPreflightRejectsWholePlanBeforeCodegen|CoroEntryResolutionPreflightRejectsMissingPlanAndCache)$' -count=1
+        run: |
+          go test -race ./cl/ssawrap -count=1
+          go test -race ./cl -run '^Test(CompilationCoroPlanObservationAndCacheRegistration|CoroEntryResolutionPlainPrimaryPreservesIR|ResolveFunctionSymbolUsesPrimaryAndExactPlan|CoroEntryRejectsUnsupportedBeforeCreatingSymbol|CoroEntryResolutionPreflightRejectsWholePlanBeforeCodegen|CoroEntryResolutionPreflightRejectsMissingPlanAndCache|Emission.*)$' -count=1
+
+      # The Go LLVM binding has no llvm22-specific cgo file yet. Its supported
+      # byollvm mode consumes the exact flags from the installed LLVM instead
+      # of silently falling back to the default LLVM 19 configuration.
+      - name: Configure LLVM 22 bindings
+        if: matrix.llvm == 22
+        run: |
+          echo "CC=clang" >> "$GITHUB_ENV"
+          echo "CXX=clang++" >> "$GITHUB_ENV"
+          echo "CGO_CPPFLAGS=$(llvm-config --cppflags | tr '\n' ' ')" >> "$GITHUB_ENV"
+          echo "CGO_CXXFLAGS=$(llvm-config --cxxflags | tr '\n' ' ')" >> "$GITHUB_ENV"
+          echo "CGO_LDFLAGS=$(llvm-config --ldflags --libs --system-libs | tr '\n' ' ')" >> "$GITHUB_ENV"
 
       - name: Test structured LLVM coroutine builder
-        run: go test -tags=llvm${{ matrix.llvm }} -v ./ssa -run '^TestCoroBuilder' -count=1
+        run: go test -tags='${{ matrix.tags }}' -v ./ssa -run '^TestCoroBuilder' -count=1
 
       - name: Test resolved LLVM target configuration
         if: matrix.llvm == 19
@@ -66,7 +84,10 @@ jobs:
       - name: Vet coroutine analysis
         if: matrix.llvm == 19
         run: |
-          go vet ./internal/coro ./internal/build ./internal/xtool/llvm ./internal/crosscompile ./internal/cabi
+          go vet ./internal/coro ./internal/build ./cl/ssawrap ./internal/xtool/llvm ./internal/crosscompile ./internal/cabi
+          # The compiler package has a pre-existing unsafe.Pointer finding.
+          # Disable only that analyzer and keep all other checks enabled.
+          go vet -unsafeptr=false ./cl
           # The SSA package has pre-existing sync.Map copylocks findings. Keep
           # every other analyzer active while coroutine slices are integrated.
           go vet -copylocks=false ./ssa

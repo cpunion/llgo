@@ -17,6 +17,7 @@
 package coro
 
 import (
+	"fmt"
 	"go/types"
 	"sort"
 
@@ -144,6 +145,7 @@ type ssaFuncFlow struct {
 	ids               map[*ssa.Function]FunctionID
 	dynamicCandidates map[ssa.CallInstruction]map[*ssa.Function]struct{}
 	dynamicResolution DynamicResolution
+	canonicalizer     *ssaFunctionCanonicalizer
 }
 
 func analyzeSSAFunctionFlow(
@@ -152,7 +154,8 @@ func analyzeSSAFunctionFlow(
 	ids map[*ssa.Function]FunctionID,
 	dynamicCandidates map[ssa.CallInstruction]map[*ssa.Function]struct{},
 	dynamicResolution DynamicResolution,
-) *ssaFuncFlow {
+	canonicalizer *ssaFunctionCanonicalizer,
+) (*ssaFuncFlow, error) {
 	flow := &ssaFuncFlow{
 		allValues:         make(map[ssa.Value]struct{}),
 		index:             make(map[ssa.Value]int),
@@ -161,6 +164,7 @@ func analyzeSSAFunctionFlow(
 		ids:               ids,
 		dynamicCandidates: dynamicCandidates,
 		dynamicResolution: dynamicResolution,
+		canonicalizer:     canonicalizer,
 	}
 
 	for _, fn := range functions {
@@ -223,10 +227,14 @@ func analyzeSSAFunctionFlow(
 		}
 		switch value := value.(type) {
 		case *ssa.Function:
-			flow.addTarget(value, value)
+			if err := flow.addTarget(value, value); err != nil {
+				return nil, fmt.Errorf("resolve function-value target %q: %w", value.Name(), err)
+			}
 		case *ssa.MakeClosure:
 			if target, ok := value.Fn.(*ssa.Function); ok {
-				flow.addTarget(value, target)
+				if err := flow.addTarget(value, target); err != nil {
+					return nil, fmt.Errorf("resolve closure target %q: %w", target.Name(), err)
+				}
 			} else {
 				flow.markUnknown(value)
 			}
@@ -259,7 +267,7 @@ func analyzeSSAFunctionFlow(
 			}
 		}
 	}
-	return flow
+	return flow, nil
 }
 
 func (f *ssaFuncFlow) recordValue(value ssa.Value) {
@@ -348,20 +356,32 @@ func (f *ssaFuncFlow) unionValues(left, right ssa.Value) {
 	}
 }
 
-func (f *ssaFuncFlow) addTarget(value ssa.Value, target *ssa.Function) {
+func (f *ssaFuncFlow) addTarget(value ssa.Value, target *ssa.Function) error {
 	index, ok := f.ensureScalar(value)
 	if !ok {
-		return
+		return nil
 	}
 	root := f.root(index)
-	if target == nil || !f.included[target] {
+	canonical, resolved, err := f.resolveTarget(target)
+	if err != nil {
+		return err
+	}
+	if !resolved || !f.included[canonical] {
 		f.unknown[root] = true
-		return
+		return nil
 	}
 	if f.targets[root] == nil {
 		f.targets[root] = make(map[*ssa.Function]struct{})
 	}
-	f.targets[root][target] = struct{}{}
+	f.targets[root][canonical] = struct{}{}
+	return nil
+}
+
+func (f *ssaFuncFlow) resolveTarget(target *ssa.Function) (*ssa.Function, bool, error) {
+	if f.canonicalizer == nil {
+		return target, target != nil, nil
+	}
+	return f.canonicalizer.resolve(target)
 }
 
 func (f *ssaFuncFlow) markBoundary(value ssa.Value) {
@@ -518,7 +538,7 @@ func (f *ssaFuncFlow) finalize(
 	base *Plan,
 	callKinds map[ssa.CallInstruction]CallKind,
 	unknownTargets map[ssa.CallInstruction]UnknownTarget,
-) (map[ssa.Value]SSAValuePlan, map[ssa.CallInstruction]SSACallPlan) {
+) (map[ssa.Value]SSAValuePlan, map[ssa.CallInstruction]SSACallPlan, error) {
 	valuePlans := make(map[ssa.Value]SSAValuePlan, len(f.allValues))
 	for value := range f.allValues {
 		paths := f.pathsForType(value.Type())
@@ -554,8 +574,16 @@ func (f *ssaFuncFlow) finalize(
 			continue
 		}
 		plan := SSACallPlan{Call: call, Kind: kind, Rep: Dispatch}
-		if callee := common.StaticCallee(); callee != nil {
-			if id, ok := f.ids[callee]; ok {
+		if rawCallee := common.StaticCallee(); rawCallee != nil {
+			callee, resolved, err := f.resolveTarget(rawCallee)
+			if err != nil {
+				caller := "<unknown>"
+				if call.Parent() != nil {
+					caller = call.Parent().Name()
+				}
+				return nil, nil, fmt.Errorf("resolve static callee %q in %q while finalizing CallPlan: %w", rawCallee.Name(), caller, err)
+			}
+			if id, ok := f.ids[callee]; resolved && ok {
 				plan.Targets = []FunctionID{id}
 				plan.Rep = directRepForTargets(base, plan.Targets)
 			} else {
@@ -636,7 +664,7 @@ func (f *ssaFuncFlow) finalize(
 		}
 		callPlans[call] = plan
 	}
-	return valuePlans, callPlans
+	return valuePlans, callPlans, nil
 }
 
 func (f *ssaFuncFlow) dynamicCallClosed(call ssa.CallInstruction) bool {
