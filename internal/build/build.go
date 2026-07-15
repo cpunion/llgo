@@ -338,12 +338,7 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	cl.EnableTrace(IsTraceEnabled())
 	llssa.Initialize(llssa.InitAll)
 
-	target := &llssa.Target{
-		GOOS:     conf.Goos,
-		GOARCH:   conf.Goarch,
-		Target:   conf.Target,
-		OptLevel: conf.OptLevel,
-	}
+	target := newLLSSATarget(conf, export)
 
 	prog := llssa.NewProgram(target)
 	programOwnershipTransferred := false
@@ -631,6 +626,24 @@ func buildCoroPlan(ctx *context) error {
 		CoroPlanObserver: ctx.buildConf.CoroPlanObserver,
 	}
 	return nil
+}
+
+func newLLSSATarget(conf *Config, export crosscompile.Export) *llssa.Target {
+	target := &llssa.Target{
+		GOOS:     conf.Goos,
+		GOARCH:   conf.Goarch,
+		Target:   conf.Target,
+		OptLevel: conf.OptLevel,
+	}
+	if export.LLVMTarget != "" {
+		target.Resolved = &llssa.TargetSpec{
+			Triple:    export.LLVMTarget,
+			CPU:       export.CPU,
+			Features:  export.Features,
+			TargetABI: export.TargetABI,
+		}
+	}
+	return target
 }
 
 func applyFrontendGCFlags(conf *Config) {
@@ -1514,7 +1527,7 @@ func buildPkg(ctx *context, aPkg *aPackage, verbose bool) error {
 	if ctx.passOpt {
 		mod := ret.Module()
 		mod.SetDataLayout(ctx.prog.DataLayout())
-		mod.SetTarget(ctx.prog.Target().Spec().Triple)
+		mod.SetTarget(ctx.prog.TargetSpec().Triple)
 		pbo := gllvm.NewPassBuilderOptions()
 		defer pbo.Dispose()
 		if err = gllvm.VerifyModule(mod, gllvm.ReturnStatusAction); err != nil {

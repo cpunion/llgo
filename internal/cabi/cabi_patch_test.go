@@ -20,6 +20,21 @@ func TestDevLTOGlobalDCETargetArchAndNewTransformerArchSelection(t *testing.T) {
 	if got := targetArch("wasm"); got != "wasm" {
 		t.Fatalf("targetArch(single arch) = %q, want wasm", got)
 	}
+	canonical := map[string]string{
+		"x86_64-unknown-linux":          "amd64",
+		"i386-unknown-linux":            "386",
+		"aarch64-unknown-linux":         "arm64",
+		"thumbv6m-unknown-unknown-eabi": "arm",
+		"armv7-unknown-linux-gnueabihf": "arm",
+		"wasm32-unknown-wasi":           "wasm",
+		"riscv32-unknown-none":          "riscv32",
+		"xtensa-unknown-unknown-elf":    "xtensa",
+	}
+	for triple, want := range canonical {
+		if got := targetArch(triple); got != want {
+			t.Errorf("targetArch(%q) = %q, want %q", triple, got, want)
+		}
+	}
 
 	llvm.InitializeAllTargets()
 	llvm.InitializeAllTargetMCs()
@@ -47,6 +62,10 @@ func TestDevLTOGlobalDCETargetArchAndNewTransformerArchSelection(t *testing.T) {
 			return ok && rv.mabi == "lp64d"
 		}},
 		{"386-unknown-linux-gnu", "", "386", func(sys TypeInfoSys) bool { _, ok := sys.(*TypeInfo386); return ok }},
+		{"x86_64-unknown-linux-gnu", "", "amd64", func(sys TypeInfoSys) bool { _, ok := sys.(*TypeInfoAmd64); return ok }},
+		{"aarch64-unknown-linux-gnu", "", "arm64", func(sys TypeInfoSys) bool { _, ok := sys.(*TypeInfoArm64); return ok }},
+		{"thumbv6m-unknown-unknown-eabi", "", "arm", func(sys TypeInfoSys) bool { _, ok := sys.(*TypeInfoArm); return ok }},
+		{"wasm32-unknown-wasi", "", "wasm", func(sys TypeInfoSys) bool { _, ok := sys.(*TypeInfoWasm); return ok }},
 	}
 	for _, tc := range tests {
 		tr := NewTransformer(prog, tc.target, tc.abi, ModeCFunc, true)
