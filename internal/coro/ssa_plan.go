@@ -535,8 +535,11 @@ func scanSSAFunctionBody(fn *ssa.Function, maxPlain int) (Effect, ExecFlags) {
 	exec := MayUnwind
 	instructions := 0
 	for _, block := range fn.Blocks {
-		instructions += len(block.Instrs)
 		for _, instruction := range block.Instrs {
+			if _, debug := instruction.(*ssa.DebugRef); debug {
+				continue
+			}
+			instructions++
 			switch instruction := instruction.(type) {
 			case *ssa.Send:
 				effect = effect.Join(MayPark)

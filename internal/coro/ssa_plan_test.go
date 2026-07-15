@@ -291,6 +291,50 @@ func straight(a int) int { a++; a++; a++; return a }
 	}
 }
 
+func TestAnalyzeSSAStaticCostIgnoresDebugRefs(t *testing.T) {
+	const source = `package coroid
+
+func target(value int) int {
+	value++
+	return value * 2
+}
+`
+	baseMode := ssa.SanityCheckFunctions | ssa.InstantiateGenerics
+	plainProg, plainPkg := buildCoroTestSSAWithMode(t, "plain.go", source, baseMode)
+	debugProg, debugPkg := buildCoroTestSSAWithMode(t, "debug.go", source, baseMode|ssa.GlobalDebug)
+	plainTarget := packageFunction(t, plainPkg, "target")
+	debugTarget := packageFunction(t, debugPkg, "target")
+
+	nonDebugInstructions := 0
+	for _, block := range plainTarget.Blocks {
+		for _, instruction := range block.Instrs {
+			if _, debug := instruction.(*ssa.DebugRef); !debug {
+				nonDebugInstructions++
+			}
+		}
+	}
+	if nonDebugInstructions == 0 {
+		t.Fatal("target has no real SSA instructions")
+	}
+
+	plainPlan, err := AnalyzeSSA(plainProg, Roots{{Function: plainTarget, Demand: AsyncDemand}}, SSAConfig{MaxPlainInstructions: nonDebugInstructions})
+	if err != nil {
+		t.Fatal(err)
+	}
+	debugPlan, err := AnalyzeSSA(debugProg, Roots{{Function: debugTarget, Demand: AsyncDemand}}, SSAConfig{MaxPlainInstructions: nonDebugInstructions})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainFunction := functionPlanFor(t, plainPlan, plainTarget)
+	debugFunction := functionPlanFor(t, debugPlan, debugTarget)
+	if plainFunction.Exec.Contains(NeedsPreempt) || debugFunction.Exec.Contains(NeedsPreempt) {
+		t.Fatalf("debug refs changed static cost: plain=%s debug=%s", plainFunction.Exec, debugFunction.Exec)
+	}
+	if plainFunction.Primary != debugFunction.Primary || plainFunction.Effect != debugFunction.Effect {
+		t.Fatalf("debug refs changed plan: plain=%+v debug=%+v", plainFunction, debugFunction)
+	}
+}
+
 func TestAnalyzeSSADefinedBodiesConservativelyMayUnwind(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "source.go", `package coroid
 func plain() {}

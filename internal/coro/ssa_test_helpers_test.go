@@ -32,6 +32,10 @@ import (
 )
 
 func buildCoroTestSSA(t *testing.T, filename, source string) (*ssa.Program, *ssa.Package) {
+	return buildCoroTestSSAWithMode(t, filename, source, ssa.SanityCheckFunctions|ssa.InstantiateGenerics)
+}
+
+func buildCoroTestSSAWithMode(t *testing.T, filename, source string, mode ssa.BuilderMode) (*ssa.Program, *ssa.Package) {
 	t.Helper()
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, filename, source, parser.ParseComments)
@@ -44,7 +48,7 @@ func buildCoroTestSSA(t *testing.T, filename, source string) (*ssa.Program, *ssa
 		fset,
 		pkg,
 		[]*ast.File{file},
-		ssa.SanityCheckFunctions|ssa.InstantiateGenerics,
+		mode,
 	)
 	if err != nil {
 		t.Fatalf("BuildPackage: %v", err)
