@@ -4,13 +4,19 @@
 name: LLGo
 
 on:
+  # Temporary: coroutine PRs use Go/format only; revert before upstream merge.
+  workflow_dispatch:
   push:
     branches:
       - "**"
       - "!dependabot/**"
       - "!xgopilot/**"
+      - "!llvm-coro"
+      - "!coro/**"
   pull_request:
-    branches: ["**"]
+    branches:
+      - "**"
+      - "!llvm-coro"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
