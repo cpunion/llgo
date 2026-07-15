@@ -19,7 +19,7 @@ jobs:
         include:
           - { llvm: 19, go: "1.24.2", tags: "llvm19" }
           - { llvm: 21, go: "1.24.2", tags: "llvm21" }
-          - { llvm: 22, go: "1.24.2", tags: "byollvm,llvm22" }
+          - { llvm: 22, go: "1.24.2", tags: "llvm22" }
           - { llvm: 19, go: "1.26.5", tags: "llvm19" }
     steps:
       - uses: actions/checkout@v7
@@ -53,20 +53,12 @@ jobs:
           go test -race ./cl/ssawrap -count=1
           go test -race ./cl -run '^Test(CompilationCoroPlanObservationAndCacheRegistration|CoroEntryResolutionPlainPrimaryPreservesIR|ResolveFunctionSymbolUsesPrimaryAndExactPlan|CoroEntryRejectsUnsupportedBeforeCreatingSymbol|CoroEntryResolutionPreflightRejectsWholePlanBeforeCodegen|CoroEntryResolutionPreflightRejectsMissingPlanAndCache|Emission.*)$' -count=1
 
-      # The Go LLVM binding has no llvm22-specific cgo file yet. Its supported
-      # byollvm mode consumes the exact flags from the installed LLVM instead
-      # of silently falling back to the default LLVM 19 configuration.
-      - name: Configure LLVM 22 bindings
-        if: matrix.llvm == 22
-        run: |
-          echo "CC=clang" >> "$GITHUB_ENV"
-          echo "CXX=clang++" >> "$GITHUB_ENV"
-          echo "CGO_CPPFLAGS=$(llvm-config --cppflags | tr '\n' ' ')" >> "$GITHUB_ENV"
-          echo "CGO_CXXFLAGS=$(llvm-config --cxxflags | tr '\n' ' ')" >> "$GITHUB_ENV"
-          echo "CGO_LDFLAGS=$(llvm-config --ldflags --libs --system-libs | tr '\n' ' ')" >> "$GITHUB_ENV"
-
       - name: Test structured LLVM coroutine builder
         run: go test -tags='${{ matrix.tags }}' -v ./ssa -run '^TestCoroBuilder' -count=1
+
+      - name: Test LLVM 22 tool configuration
+        if: matrix.llvm == 22
+        run: go test -tags=llvm22 ./xtool/env/llvm ./internal/xtool/llvm
 
       - name: Test resolved LLVM target configuration
         if: matrix.llvm == 19
