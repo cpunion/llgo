@@ -106,7 +106,8 @@ jobs:
         if: matrix.llvm == 19
         # Keep the focused workflow exhaustive for the build-side coroutine
         # contract. This includes park effect seeding, frozen foreign noblock
-        # certificates, IRQUnsafe handling, and the exact legacy PanicABI stop.
+        # certificates, IRQUnsafe handling, the exact legacy PanicABI stop, and
+        # the native linked static-spawn scheduler-island execution smoke.
         run: go test ./internal/build -run 'Coro|Coroutine' -timeout=10m -count=1
 
       - name: Test coroutine compiler integration
