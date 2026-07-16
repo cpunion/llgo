@@ -60,7 +60,7 @@ jobs:
 
       - name: Test coroutine build integration
         if: matrix.llvm == 19
-        run: go test ./internal/build -run 'Test(CoroPlanBuilderRunsBeforeCodegenWithoutChangingIR|CoroPlanInputCanonicalizesPatchedRoot|ActiveCoroABIVersions|BuildCoroPlanErrors|CoroEntryResolutionUsesPlanMatchedPackageCache|CoroEntryResolutionBuildsPreparedRuntimePackages|CoroRuntimeLinkRequirements|CoroEmissionCoverageStopsBeforeAnyPackageCodegen|CoroUnsupportedEntryResolutionReturnsErrorBeforeCodegen|CoroEmissionUniverseAcceptsModeTestVariants)$' -count=1
+        run: go test ./internal/build -run 'Test(CoroPlanBuilderRunsBeforeCodegenWithoutChangingIR|CoroPlanInputCanonicalizesPatchedRoot|ActiveCoroABIVersions|BuildCoroPlanErrors|CoroEntryResolutionUsesPlanMatchedPackageCache|CoroEntryResolutionBuildsPreparedRuntimePackages|CoroRuntimeLinkRequirements|CoroEmissionCoverageStopsBeforeAnyPackageCodegen|CoroUnsupportedEntryResolutionReturnsErrorBeforeCodegen|CoroEmissionUniverseAcceptsModeTestVariants|CoroProgramBootstrapRejectsInvalidRootsBeforePackageCodegen)$' -count=1
 
       - name: Test coroutine compiler integration
         if: matrix.llvm == 19
@@ -81,10 +81,10 @@ jobs:
           go test -tags='${{ matrix.tags }}' ./cl -run '^Test(CompilationCoroABIIdentityValidation|CoroEntryResolutionCacheRegistrationWithDigest|CoroPhysicalABICacheRegistrationPreservesPhysicalMetadata)$' -count=1
 
       - name: Test coroutine physical ABI lowering
-        run: go test -tags='${{ matrix.tags }}' -v ./cl -run '^TestCoro(LeafPhysicalABI|PhysicalABI|ChildAwaitPhysicalABIV1|ExplicitAsyncRootFactoryV1|ExplicitRootFactoryV1|RootPackageAnchorV1)' -count=1
+        run: go test -tags='${{ matrix.tags }}' -v ./cl -run '^TestCoro(LeafPhysicalABI|PhysicalABI|ChildAwaitPhysicalABIV1|ExplicitAsyncRootFactoryV1|ExplicitRootFactoryV1|ExplicitPlain|RootPackageAnchorV1)' -count=1
 
       - name: Test coroutine registry and control integration
-        run: go test -tags='${{ matrix.tags }}' -v ./internal/build -run '^Test(CollectLinkedCoroRootAnchors|CoroProgramManifest.*|GenMainModule.*Coro.*)$' -count=1
+        run: go test -tags='${{ matrix.tags }}' -v ./internal/build -run '^Test(CollectLinkedCoroRootAnchors|CoroProgramManifest.*|CoroProgramBootstrap.*|SelectCoroProgramBootstrap.*|GenMainModule.*Coro.*)$' -count=1
 
       - name: Test LLVM 22 tool configuration
         if: matrix.llvm == 22

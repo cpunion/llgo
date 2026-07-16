@@ -1005,6 +1005,418 @@ func TestCoroProgramManifestRejectsMisuse(t *testing.T) {
 	})
 }
 
+func TestCoroProgramBootstrapTargetLayout(t *testing.T) {
+	Initialize(InitAll)
+	tests := []struct {
+		name          string
+		target        *Target
+		factory       bool
+		pointerSize   int
+		stepSize      uint64
+		targetOffset  uint64
+		auxOffset     uint64
+		bootstrapSize uint64
+		stepsOffset   uint64
+		factoryOffset uint64
+	}{
+		{
+			name:          "native64_steps",
+			pointerSize:   8,
+			stepSize:      24,
+			targetOffset:  8,
+			auxOffset:     16,
+			bootstrapSize: 48,
+			stepsOffset:   32,
+			factoryOffset: 40,
+		},
+		{
+			name:          "wasm32_steps_and_factory",
+			target:        &Target{GOOS: "wasip1", GOARCH: "wasm"},
+			factory:       true,
+			pointerSize:   4,
+			stepSize:      16,
+			targetOffset:  8,
+			auxOffset:     12,
+			bootstrapSize: 40,
+			stepsOffset:   28,
+			factoryOffset: 32,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			prog := NewProgram(test.target)
+			pkg := prog.NewPackage("corobootstrap", "coro/bootstrap/"+test.name)
+			t.Cleanup(func() {
+				pkg.Module().Dispose()
+				prog.Dispose()
+			})
+
+			if got := pkg.CoroProgramBootstrap(); got != "" {
+				t.Fatalf("bootstrap before emission = %q, want empty", got)
+			}
+			plain := pkg.NewFunc("bootstrap_init", functionSignature(nil, nil), InC)
+			anchor := newCoroProgramPackageAnchor(pkg, "bootstrap_root_anchor", false)
+			steps := []CoroProgramStep{
+				{Kind: CoroProgramStepDirectPlain, Flags: CoroProgramStepInit, Target: plain.Expr},
+				{Kind: CoroProgramStepCoroRoot, Flags: CoroProgramStepMain, Target: anchor, Aux: 3},
+			}
+			var factory Expr
+			if test.factory {
+				factory = pkg.NewFunc("bootstrap_factory", coroRootFactoryTestSignature(), InC).Expr
+			}
+			hash := [16]byte{
+				0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57,
+				0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67,
+			}
+			const bootstrapName = "__llgo_coro_program_bootstrap_test"
+			bootstrap := pkg.NewCoroProgramBootstrap(
+				bootstrapName,
+				CoroProgramBootstrapOptions{
+					Version: 13,
+					ABIHash: hash,
+					Steps:   steps,
+					Factory: factory,
+				},
+			)
+			if got := pkg.CoroProgramBootstrap(); got != bootstrapName {
+				t.Fatalf("bootstrap symbol = %q, want %q", got, bootstrapName)
+			}
+			if got := prog.PointerSize(); got != test.pointerSize {
+				t.Fatalf("pointer size = %d, want %d", got, test.pointerSize)
+			}
+			if !bootstrap.impl.IsGlobalConstant() {
+				t.Fatal("program bootstrap is not a constant global")
+			}
+			if got := bootstrap.impl.Linkage(); got != llvm.ExternalLinkage {
+				t.Fatalf("bootstrap linkage = %v, want external", got)
+			}
+			if got := bootstrap.impl.Visibility(); got != llvm.HiddenVisibility {
+				t.Fatalf("bootstrap visibility = %v, want hidden", got)
+			}
+
+			bootstrapType := prog.Elem(bootstrap.Type)
+			if got := prog.SizeOf(bootstrapType); got != test.bootstrapSize {
+				t.Fatalf("bootstrap size = %d, want %d", got, test.bootstrapSize)
+			}
+			if got := prog.OffsetOf(bootstrapType, 5); got != test.stepsOffset {
+				t.Fatalf("steps offset = %d, want %d", got, test.stepsOffset)
+			}
+			if got := prog.OffsetOf(bootstrapType, 6); got != test.factoryOffset {
+				t.Fatalf("factory offset = %d, want %d", got, test.factoryOffset)
+			}
+			stepType := prog.Struct(prog.Uint32(), prog.Uint32(), prog.VoidPtr(), prog.Uintptr())
+			if got := prog.SizeOf(stepType); got != test.stepSize {
+				t.Fatalf("step size = %d, want %d", got, test.stepSize)
+			}
+			if got := prog.OffsetOf(stepType, 2); got != test.targetOffset {
+				t.Fatalf("step target offset = %d, want %d", got, test.targetOffset)
+			}
+			if got := prog.OffsetOf(stepType, 3); got != test.auxOffset {
+				t.Fatalf("step aux offset = %d, want %d", got, test.auxOffset)
+			}
+
+			initializer := bootstrap.impl.Initializer()
+			if initializer.IsAConstantStruct().IsNil() || initializer.OperandsCount() != 7 {
+				t.Fatalf("bootstrap initializer is not a seven-field constant struct: %v", initializer)
+			}
+			wantFixed := []uint64{
+				13,
+				0,
+				0x5051525354555657,
+				0x6061626364656667,
+				uint64(len(steps)),
+			}
+			for i, want := range wantFixed {
+				if got := initializer.Operand(i).ZExtValue(); got != want {
+					t.Fatalf("bootstrap field %d = %#x, want %#x", i, got, want)
+				}
+			}
+			if got := initializer.Operand(4).Type().IntTypeWidth(); got != test.pointerSize*8 {
+				t.Fatalf("bootstrap step count width = %d, want %d", got, test.pointerSize*8)
+			}
+
+			stepsGlobal := pkg.Module().NamedGlobal(bootstrapName + ".steps")
+			if stepsGlobal.IsNil() {
+				t.Fatal("bootstrap lacks its steps array")
+			}
+			if !stepsGlobal.IsGlobalConstant() || stepsGlobal.Linkage() != llvm.InternalLinkage {
+				t.Fatalf("steps array is not an internal constant: %v", stepsGlobal)
+			}
+			if got := stripCoroAnchorConstantPointer(initializer.Operand(5)); got.C != stepsGlobal.C {
+				t.Fatalf("bootstrap steps pointer = %v, want %v", got, stepsGlobal)
+			}
+			array := stepsGlobal.Initializer()
+			if array.IsAConstantArray().IsNil() || array.OperandsCount() != 2 {
+				t.Fatalf("steps initializer has %d entries, want 2: %v", array.OperandsCount(), array)
+			}
+			wantTargets := []llvm.Value{plain.impl, anchor.impl}
+			wantKinds := []uint64{uint64(CoroProgramStepDirectPlain), uint64(CoroProgramStepCoroRoot)}
+			wantRoles := []uint64{uint64(CoroProgramStepInit), uint64(CoroProgramStepMain)}
+			wantAux := []uint64{0, 3}
+			for i := 0; i < 2; i++ {
+				step := array.Operand(i)
+				if step.IsAConstantStruct().IsNil() || step.OperandsCount() != 4 {
+					t.Fatalf("step %d is not a four-field constant struct: %v", i, step)
+				}
+				if got := step.Operand(0).ZExtValue(); got != wantKinds[i] {
+					t.Fatalf("step %d kind = %d, want %d", i, got, wantKinds[i])
+				}
+				if got := step.Operand(1).ZExtValue(); got != wantRoles[i] {
+					t.Fatalf("step %d flags = %d, want role %d", i, got, wantRoles[i])
+				}
+				if got := stripCoroAnchorConstantPointer(step.Operand(2)); got.C != wantTargets[i].C {
+					t.Fatalf("step %d target = %v, want %v", i, got, wantTargets[i])
+				}
+				if got := step.Operand(3).Type().IntTypeWidth(); got != test.pointerSize*8 {
+					t.Fatalf("step %d aux width = %d, want %d", i, got, test.pointerSize*8)
+				}
+				if got := step.Operand(3).ZExtValue(); got != wantAux[i] {
+					t.Fatalf("step %d aux = %d, want %d", i, got, wantAux[i])
+				}
+			}
+			if !anchor.impl.IsGlobalConstant() {
+				t.Fatal("coro-root anchor declaration was not normalized to constant")
+			}
+			if factory.IsNil() {
+				if initializer.Operand(6).IsAConstantPointerNull().IsNil() {
+					t.Fatalf("nil factory was not encoded as null: %v", initializer.Operand(6))
+				}
+			} else if got := stripCoroAnchorConstantPointer(initializer.Operand(6)); got.C != factory.impl.C {
+				t.Fatalf("bootstrap factory = %v, want %v", got, factory.impl)
+			}
+
+			pkg.MaterializePreserveSyms()
+			used := pkg.Module().NamedGlobal("llvm.used")
+			if used.IsNil() {
+				t.Fatal("program bootstrap was not retained in llvm.used")
+			}
+			retained := false
+			for i := 0; i < used.Initializer().OperandsCount(); i++ {
+				if stripCoroAnchorConstantPointer(used.Initializer().Operand(i)).C == bootstrap.impl.C {
+					retained = true
+					break
+				}
+			}
+			if !retained {
+				t.Fatalf("llvm.used does not retain program bootstrap:\n%s", pkg.String())
+			}
+			if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("verify coroutine program bootstrap: %v\n%s", err, pkg.String())
+			}
+		})
+	}
+}
+
+func TestCoroProgramBootstrapRejectsMisuse(t *testing.T) {
+	Initialize(InitAll)
+	prog := NewProgram(nil)
+	defer prog.Dispose()
+	pkg := prog.NewPackage("badcorobootstrap", "bad/coro/bootstrap")
+	defer pkg.Module().Dispose()
+	plain := pkg.NewFunc("valid_plain", functionSignature(nil, nil), InC)
+	anchor := newCoroProgramPackageAnchor(pkg, "valid_root_anchor", false)
+	valid := CoroProgramBootstrapOptions{
+		Steps: []CoroProgramStep{
+			{Kind: CoroProgramStepDirectPlain, Flags: CoroProgramStepInit, Target: plain.Expr},
+			{Kind: CoroProgramStepCoroRoot, Flags: CoroProgramStepMain, Target: anchor},
+		},
+	}
+	withStep := func(index int, step CoroProgramStep) CoroProgramBootstrapOptions {
+		bad := valid
+		bad.Steps = append([]CoroProgramStep(nil), valid.Steps...)
+		bad.Steps[index] = step
+		return bad
+	}
+
+	mustPanicContains(t, "requires a name", func() {
+		pkg.NewCoroProgramBootstrap("", valid)
+	})
+	mustPanicContains(t, "flags must be zero", func() {
+		bad := valid
+		bad.Flags = 1
+		pkg.NewCoroProgramBootstrap("bootstrap_flags", bad)
+	})
+	for name, steps := range map[string][]CoroProgramStep{
+		"zero":  nil,
+		"one":   valid.Steps[:1],
+		"three": append(append([]CoroProgramStep(nil), valid.Steps...), valid.Steps[1]),
+	} {
+		t.Run(name+"_step_count", func(t *testing.T) {
+			bad := valid
+			bad.Steps = steps
+			mustPanicContains(t, "requires exactly two steps", func() {
+				pkg.NewCoroProgramBootstrap(name+"_step_count", bad)
+			})
+		})
+	}
+	for name, flags := range map[string]uint32{
+		"zero":    0,
+		"both":    CoroProgramStepInit | CoroProgramStepMain,
+		"unknown": 1 << 8,
+		"main":    CoroProgramStepMain,
+	} {
+		t.Run(name+"_init_role", func(t *testing.T) {
+			bad := withStep(0, CoroProgramStep{
+				Kind: CoroProgramStepDirectPlain, Flags: flags, Target: plain.Expr,
+			})
+			mustPanicContains(t, "step 0 flags", func() {
+				pkg.NewCoroProgramBootstrap(name+"_init_role", bad)
+			})
+		})
+	}
+	mustPanicContains(t, "step 1 flags", func() {
+		bad := valid
+		bad.Steps = append([]CoroProgramStep(nil), valid.Steps...)
+		bad.Steps[1].Flags = CoroProgramStepInit
+		pkg.NewCoroProgramBootstrap("wrong_main_role", bad)
+	})
+	for name, target := range map[string]Expr{
+		"nil":     Nil,
+		"integer": prog.IntVal(1, prog.Uintptr()),
+		"null":    prog.Nil(prog.VoidPtr()),
+	} {
+		t.Run(name+"_target", func(t *testing.T) {
+			bad := withStep(0, CoroProgramStep{
+				Kind: CoroProgramStepDirectPlain, Flags: CoroProgramStepInit, Target: target,
+			})
+			mustPanicContains(t, "not a non-null constant pointer", func() {
+				pkg.NewCoroProgramBootstrap(name+"_target", bad)
+			})
+		})
+	}
+	mustPanicContains(t, "invalid kind 0", func() {
+		bad := withStep(0, CoroProgramStep{Flags: CoroProgramStepInit, Target: plain.Expr})
+		pkg.NewCoroProgramBootstrap("invalid_zero_kind", bad)
+	})
+	mustPanicContains(t, "invalid kind 3", func() {
+		bad := withStep(0, CoroProgramStep{Kind: 3, Flags: CoroProgramStepInit, Target: plain.Expr})
+		pkg.NewCoroProgramBootstrap("invalid_high_kind", bad)
+	})
+	mustPanicContains(t, "aux must be zero", func() {
+		bad := withStep(0, CoroProgramStep{
+			Kind: CoroProgramStepDirectPlain, Flags: CoroProgramStepInit, Target: plain.Expr, Aux: 1,
+		})
+		pkg.NewCoroProgramBootstrap("plain_aux", bad)
+	})
+	mustPanicContains(t, "not a constant function", func() {
+		bad := withStep(0, CoroProgramStep{
+			Kind: CoroProgramStepDirectPlain, Flags: CoroProgramStepInit, Target: anchor,
+		})
+		pkg.NewCoroProgramBootstrap("plain_global", bad)
+	})
+	wrongPlain := pkg.NewFunc("wrong_plain", functionSignature(
+		[]types.Type{types.Typ[types.UnsafePointer]}, nil,
+	), InC)
+	mustPanicContains(t, "requires target signature ()", func() {
+		bad := withStep(0, CoroProgramStep{
+			Kind: CoroProgramStepDirectPlain, Flags: CoroProgramStepInit, Target: wrongPlain.Expr,
+		})
+		pkg.NewCoroProgramBootstrap("wrong_plain_signature", bad)
+	})
+
+	mutable := pkg.NewVarEx("mutable_root_anchor", prog.Pointer(prog.Uint32()))
+	mutable.Init(prog.IntVal(0, prog.Uint32()))
+	mustPanicContains(t, "not a constant global", func() {
+		bad := withStep(1, CoroProgramStep{
+			Kind: CoroProgramStepCoroRoot, Flags: CoroProgramStepMain, Target: mutable.Expr,
+		})
+		pkg.NewCoroProgramBootstrap("mutable_root", bad)
+	})
+	mustPanicContains(t, "not a constant global", func() {
+		bad := withStep(1, CoroProgramStep{
+			Kind: CoroProgramStepCoroRoot, Flags: CoroProgramStepMain, Target: plain.Expr,
+		})
+		pkg.NewCoroProgramBootstrap("root_function", bad)
+	})
+
+	foreignPkg := prog.NewPackage("foreigncorobootstrap", "foreign/coro/bootstrap")
+	defer foreignPkg.Module().Dispose()
+	foreignPlain := foreignPkg.NewFunc("foreign_plain", functionSignature(nil, nil), InC)
+	mustPanicContains(t, "another entry module", func() {
+		bad := withStep(0, CoroProgramStep{
+			Kind: CoroProgramStepDirectPlain, Flags: CoroProgramStepInit, Target: foreignPlain.Expr,
+		})
+		pkg.NewCoroProgramBootstrap("foreign_plain", bad)
+	})
+	foreignAnchor := newCoroProgramPackageAnchor(foreignPkg, "foreign_root_anchor", true)
+	mustPanicContains(t, "another entry module", func() {
+		bad := withStep(1, CoroProgramStep{
+			Kind: CoroProgramStepCoroRoot, Flags: CoroProgramStepMain, Target: foreignAnchor,
+		})
+		pkg.NewCoroProgramBootstrap("foreign_root", bad)
+	})
+
+	lateInvalidAnchor := newCoroProgramPackageAnchor(pkg, "late_invalid_anchor", false)
+	mustPanicContains(t, "invalid kind", func() {
+		bad := valid
+		bad.Steps = []CoroProgramStep{
+			{Kind: CoroProgramStepCoroRoot, Flags: CoroProgramStepInit, Target: lateInvalidAnchor},
+			{Kind: 99, Flags: CoroProgramStepMain, Target: plain.Expr},
+		}
+		pkg.NewCoroProgramBootstrap("atomic_validation", bad)
+	})
+	if lateInvalidAnchor.impl.IsGlobalConstant() {
+		t.Fatal("failed bootstrap emission mutated an earlier anchor declaration")
+	}
+
+	mustPanicContains(t, "factory is not a non-null constant function", func() {
+		bad := valid
+		bad.Factory = prog.IntVal(1, prog.Uintptr())
+		pkg.NewCoroProgramBootstrap("integer_factory", bad)
+	})
+	mustPanicContains(t, "factory is not a non-null constant function", func() {
+		bad := valid
+		bad.Factory = prog.Nil(prog.rawType(coroRootFactoryTestSignature()))
+		pkg.NewCoroProgramBootstrap("null_factory", bad)
+	})
+	mustPanicContains(t, "requires factory signature", func() {
+		bad := valid
+		bad.Factory = plain.Expr
+		pkg.NewCoroProgramBootstrap("wrong_factory_signature", bad)
+	})
+	foreignFactory := foreignPkg.NewFunc("foreign_factory", coroRootFactoryTestSignature(), InC)
+	mustPanicContains(t, "another entry module", func() {
+		bad := valid
+		bad.Factory = foreignFactory.Expr
+		pkg.NewCoroProgramBootstrap("foreign_factory", bad)
+	})
+
+	wasmProg := NewProgram(&Target{GOOS: "wasip1", GOARCH: "wasm"})
+	defer wasmProg.Dispose()
+	wasmPkg := wasmProg.NewPackage("wasmcorobootstrap", "wasm/coro/bootstrap")
+	defer wasmPkg.Module().Dispose()
+	wasmPlain := wasmPkg.NewFunc("wasm_plain", functionSignature(nil, nil), InC)
+	wasmAnchor := newCoroProgramPackageAnchor(wasmPkg, "wasm_root_anchor", false)
+	mustPanicContains(t, "aux overflows target uintptr", func() {
+		wasmPkg.NewCoroProgramBootstrap("wasm_aux_overflow", CoroProgramBootstrapOptions{
+			Steps: []CoroProgramStep{
+				{Kind: CoroProgramStepDirectPlain, Flags: CoroProgramStepInit, Target: wasmPlain.Expr},
+				{
+					Kind: CoroProgramStepCoroRoot, Flags: CoroProgramStepMain,
+					Target: wasmAnchor, Aux: uint64(1) << 32,
+				},
+			},
+		})
+	})
+
+	pkg.NewVarEx("occupied_bootstrap", prog.Pointer(prog.Uint32()))
+	mustPanicContains(t, "symbol \"occupied_bootstrap\" already exists", func() {
+		pkg.NewCoroProgramBootstrap("occupied_bootstrap", valid)
+	})
+	pkg.NewVarEx("occupied_steps.steps", prog.Pointer(prog.Uint32()))
+	mustPanicContains(t, "symbol \"occupied_steps.steps\" already exists", func() {
+		pkg.NewCoroProgramBootstrap("occupied_steps", valid)
+	})
+	if got := pkg.CoroProgramBootstrap(); got != "" {
+		t.Fatalf("rejected bootstrap attempts recorded symbol %q", got)
+	}
+
+	pkg.NewCoroProgramBootstrap("valid_bootstrap", valid)
+	mustPanicContains(t, "already defined as \"valid_bootstrap\"", func() {
+		pkg.NewCoroProgramBootstrap("second_bootstrap", CoroProgramBootstrapOptions{})
+	})
+}
+
 func TestCoroBuilderRejectsMisuse(t *testing.T) {
 	fixture := newCoroTestFixture(t, nil, 0)
 	mustPanicContains(t, "finished coroutine", func() { fixture.coro.Suspend() })

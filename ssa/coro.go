@@ -119,6 +119,51 @@ type CoroProgramManifestOptions struct {
 	Bootstrap      Expr
 }
 
+// CoroProgramStepKind identifies one statically ordered program startup step.
+// The numeric values are part of the version-one runtime ABI; zero is reserved
+// so a zero-initialized or missing step always fails validation.
+type CoroProgramStepKind uint32
+
+const (
+	// CoroProgramStepDirectPlain calls Target through the fixed void() C ABI.
+	// Aux must be zero.
+	CoroProgramStepDirectPlain CoroProgramStepKind = 1 + iota
+	// CoroProgramStepCoroRoot resolves descriptor index Aux through the package
+	// root anchor in Target.
+	CoroProgramStepCoroRoot
+)
+
+// Version-one startup step role flags. Exactly one role is required on every
+// step, and the canonical table order is Init followed by Main.
+const (
+	CoroProgramStepInit uint32 = 1 << iota
+	CoroProgramStepMain
+)
+
+// CoroProgramStep describes one entry in a version-one program startup table.
+// Flags is exactly one CoroProgramStepInit or CoroProgramStepMain role. Target
+// must be a same-module constant function for DirectPlain or a same-module
+// constant global for CoroRoot. Aux is encoded as target uintptr and is the
+// root descriptor index for CoroRoot.
+type CoroProgramStep struct {
+	Kind   CoroProgramStepKind
+	Flags  uint32
+	Target Expr
+	Aux    uint64
+}
+
+// CoroProgramBootstrapOptions describes the entry module's immutable startup
+// table. Flags is reserved and must be zero. ABIHash covers the ordered steps
+// and their referenced catalog. Factory may be Nil in the data-only phase; a
+// non-Nil factory must use the root factory ABI and belong to this module.
+type CoroProgramBootstrapOptions struct {
+	Version uint32
+	Flags   uint32
+	ABIHash [16]byte
+	Steps   []CoroProgramStep
+	Factory Expr
+}
+
 // NewCoroFrameDescriptor defines a link-once constant descriptor with layout:
 //
 //	{ version i32, flags i32, hashLo i64, hashHi i64,
@@ -484,6 +529,214 @@ func (p Package) NewCoroProgramManifest(
 // emitted by this entry module, or an empty string when none was emitted.
 func (p Package) CoroProgramManifest() string {
 	return p.coroProgramManifest
+}
+
+// NewCoroProgramBootstrap defines the entry module's one externally named,
+// hidden program startup descriptor. Its layout is:
+//
+//	{ version i32, flags i32, hashLo i64, hashHi i64,
+//	  stepCount uintptr, steps ptr, factory ptr }
+//
+// The canonical Init/Main step list is materialized as an internal constant
+// array named name + ".steps", whose element layout is:
+//
+//	{ kind i32, flags i32, target ptr, aux uintptr }
+//
+// Exactly two steps in Init, Main order are required, so a successfully emitted
+// descriptor always has count two and a non-null steps pointer. Factory is null
+// when omitted. Both the table and each step use target uintptr width and
+// alignment. Each entry module may define at most one program bootstrap
+// descriptor.
+func (p Package) NewCoroProgramBootstrap(
+	name string, opts CoroProgramBootstrapOptions,
+) Expr {
+	if name == "" {
+		panic("ssa: coroutine program bootstrap requires a name")
+	}
+	if p.coroProgramBootstrap != "" {
+		panic(fmt.Sprintf("ssa: coroutine program bootstrap already defined as %q", p.coroProgramBootstrap))
+	}
+	if opts.Flags != 0 {
+		panic("ssa: coroutine program bootstrap flags must be zero")
+	}
+	if len(opts.Steps) != 2 {
+		panic(fmt.Sprintf("ssa: coroutine program bootstrap requires exactly two steps, got %d", len(opts.Steps)))
+	}
+	if !coroProgramFitsUintptr(p.Prog, uint64(len(opts.Steps))) {
+		panic("ssa: coroutine program bootstrap step count overflows target uintptr")
+	}
+
+	stepsName := name + ".steps"
+	symbols := []string{name, stepsName}
+	for _, symbol := range symbols {
+		_, knownGlobal := p.vars[symbol]
+		_, knownFunction := p.fns[symbol]
+		if knownGlobal || knownFunction ||
+			!p.mod.NamedGlobal(symbol).IsNil() || !p.mod.NamedFunction(symbol).IsNil() {
+			panic(fmt.Sprintf("ssa: coroutine program bootstrap symbol %q already exists", symbol))
+		}
+	}
+
+	prog := p.Prog
+	voidPtrType := prog.VoidPtr().ll
+	stepType := prog.Struct(
+		prog.Uint32(),
+		prog.Uint32(),
+		prog.VoidPtr(),
+		prog.Uintptr(),
+	)
+	stepValues := make([]llvm.Value, len(opts.Steps))
+	constantDeclarations := make([]llvm.Value, 0, len(opts.Steps))
+	for i, step := range opts.Steps {
+		wantRole := CoroProgramStepInit
+		if i == 1 {
+			wantRole = CoroProgramStepMain
+		}
+		if step.Flags != wantRole {
+			panic(fmt.Sprintf(
+				"ssa: coroutine program bootstrap step %d flags %#x must be %#x",
+				i, step.Flags, wantRole,
+			))
+		}
+		if step.Target.IsNil() || step.Target.impl.IsNil() ||
+			step.Target.impl.IsAConstant().IsNil() ||
+			step.Target.impl.Type().TypeKind() != llvm.PointerTypeKind ||
+			!step.Target.impl.IsAConstantPointerNull().IsNil() {
+			panic(fmt.Sprintf("ssa: coroutine program bootstrap step %d target is not a non-null constant pointer", i))
+		}
+		if !coroProgramFitsUintptr(prog, step.Aux) {
+			panic(fmt.Sprintf("ssa: coroutine program bootstrap step %d aux overflows target uintptr", i))
+		}
+
+		target := step.Target.impl
+		switch step.Kind {
+		case CoroProgramStepDirectPlain:
+			if step.Aux != 0 {
+				panic(fmt.Sprintf("ssa: coroutine program bootstrap direct-plain step %d aux must be zero", i))
+			}
+			function := coroRootFactoryFunction(target)
+			if function.IsNil() {
+				panic(fmt.Sprintf("ssa: coroutine program bootstrap direct-plain step %d target is not a constant function", i))
+			}
+			if function.GlobalParent().C != p.mod.C {
+				panic(fmt.Sprintf("ssa: coroutine program bootstrap direct-plain step %d target belongs to another entry module", i))
+			}
+			if !isCoroProgramDirectPlainSignature(step.Target.RawType()) {
+				panic(fmt.Sprintf("ssa: coroutine program bootstrap direct-plain step %d requires target signature ()", i))
+			}
+
+		case CoroProgramStepCoroRoot:
+			global := coroManifestGlobal(target)
+			if global.IsNil() {
+				panic(fmt.Sprintf("ssa: coroutine program bootstrap coro-root step %d target is not a constant global", i))
+			}
+			if global.GlobalParent().C != p.mod.C {
+				panic(fmt.Sprintf("ssa: coroutine program bootstrap coro-root step %d target belongs to another entry module", i))
+			}
+			if global.Initializer().IsNil() {
+				constantDeclarations = append(constantDeclarations, global)
+			} else if !global.IsGlobalConstant() || global.Initializer().IsAConstant().IsNil() {
+				panic(fmt.Sprintf("ssa: coroutine program bootstrap coro-root step %d target is not a constant global", i))
+			}
+
+		default:
+			panic(fmt.Sprintf("ssa: coroutine program bootstrap step %d has invalid kind %d", i, step.Kind))
+		}
+
+		if target.Type().C != voidPtrType.C {
+			target = llvm.ConstBitCast(target, voidPtrType)
+		}
+		stepValues[i] = prog.ctx.ConstStruct([]llvm.Value{
+			prog.IntVal(uint64(step.Kind), prog.Uint32()).impl,
+			prog.IntVal(uint64(step.Flags), prog.Uint32()).impl,
+			target,
+			prog.IntVal(step.Aux, prog.Uintptr()).impl,
+		}, false)
+	}
+
+	factory := llvm.ConstNull(voidPtrType)
+	if !opts.Factory.IsNil() {
+		if opts.Factory.impl.IsNil() || opts.Factory.impl.IsAConstant().IsNil() ||
+			!opts.Factory.impl.IsAConstantPointerNull().IsNil() {
+			panic("ssa: coroutine program bootstrap factory is not a non-null constant function")
+		}
+		function := coroRootFactoryFunction(opts.Factory.impl)
+		if function.IsNil() {
+			panic("ssa: coroutine program bootstrap factory is not a non-null constant function")
+		}
+		if function.GlobalParent().C != p.mod.C {
+			panic("ssa: coroutine program bootstrap factory belongs to another entry module")
+		}
+		if !isCoroRootFactorySignature(opts.Factory.RawType()) {
+			panic("ssa: coroutine program bootstrap requires factory signature (unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) -> unsafe.Pointer")
+		}
+		factory = opts.Factory.impl
+		if factory.Type().C != voidPtrType.C {
+			factory = llvm.ConstBitCast(factory, voidPtrType)
+		}
+	}
+
+	// Commit declaration normalization only after every input has validated.
+	for _, declaration := range constantDeclarations {
+		declaration.SetGlobalConstant(true)
+	}
+
+	steps := llvm.ConstNull(voidPtrType)
+	if len(stepValues) != 0 {
+		stepsArrayType := prog.rawType(types.NewArray(stepType.RawType(), int64(len(stepValues))))
+		array := p.NewVarEx(stepsName, prog.Pointer(stepsArrayType))
+		array.impl.SetInitializer(llvm.ConstArray(stepType.ll, stepValues))
+		array.impl.SetGlobalConstant(true)
+		array.impl.SetLinkage(llvm.InternalLinkage)
+		array.impl.SetUnnamedAddr(true)
+		steps = array.impl
+		if steps.Type().C != voidPtrType.C {
+			steps = llvm.ConstBitCast(steps, voidPtrType)
+		}
+	}
+
+	bootstrapType := prog.Struct(
+		prog.Uint32(),
+		prog.Uint32(),
+		prog.Uint64(),
+		prog.Uint64(),
+		prog.Uintptr(),
+		prog.VoidPtr(),
+		prog.VoidPtr(),
+	)
+	bootstrap := p.NewVarEx(name, prog.Pointer(bootstrapType))
+	bootstrap.impl.SetInitializer(prog.ctx.ConstStruct([]llvm.Value{
+		prog.IntVal(uint64(opts.Version), prog.Uint32()).impl,
+		prog.IntVal(0, prog.Uint32()).impl,
+		prog.IntVal(binary.BigEndian.Uint64(opts.ABIHash[:8]), prog.Uint64()).impl,
+		prog.IntVal(binary.BigEndian.Uint64(opts.ABIHash[8:]), prog.Uint64()).impl,
+		prog.IntVal(uint64(len(stepValues)), prog.Uintptr()).impl,
+		steps,
+		factory,
+	}, false))
+	bootstrap.impl.SetGlobalConstant(true)
+	bootstrap.impl.SetLinkage(llvm.ExternalLinkage)
+	bootstrap.impl.SetVisibility(llvm.HiddenVisibility)
+	p.markLLVMRetained(bootstrap.impl)
+	p.coroProgramBootstrap = name
+	return bootstrap.Expr
+}
+
+// CoroProgramBootstrap returns the linker-visible program bootstrap symbol
+// emitted by this entry module, or an empty string when none was emitted.
+func (p Package) CoroProgramBootstrap() string {
+	return p.coroProgramBootstrap
+}
+
+func coroProgramFitsUintptr(prog Program, value uint64) bool {
+	bits := prog.PointerSize() * 8
+	return bits >= 64 || value < uint64(1)<<bits
+}
+
+func isCoroProgramDirectPlainSignature(typ types.Type) bool {
+	sig, ok := typ.(*types.Signature)
+	return ok && sig.Recv() == nil && !sig.Variadic() &&
+		sig.Params().Len() == 0 && sig.Results().Len() == 0
 }
 
 func coroManifestGlobal(value llvm.Value) llvm.Value {

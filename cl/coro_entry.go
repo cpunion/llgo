@@ -193,7 +193,7 @@ func (c *Compilation) preflightCoroPlan() error {
 			return
 		}
 		if c.EnableCoroChildAwait {
-			if err := validateCoroRootFactories(c.CoroPlan); err != nil {
+			if err := validateCoroRootEntries(c.CoroPlan); err != nil {
 				c.coroPreflightErr = err
 				return
 			}

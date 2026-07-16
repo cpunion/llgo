@@ -815,12 +815,13 @@ type aPackage struct {
 	MethodByIndex map[int]none
 	MethodByName  map[string]none
 
-	export              map[string]string   // pkgPath.nameInPkg => exportname
-	preserveSyms        map[string]struct{} // set of exported symbol names
-	llvmUsedValues      []llvm.Value
-	llvmRetainedValues  []llvm.Value
-	coroRootAnchor      string
-	coroProgramManifest string
+	export               map[string]string   // pkgPath.nameInPkg => exportname
+	preserveSyms         map[string]struct{} // set of exported symbol names
+	llvmUsedValues       []llvm.Value
+	llvmRetainedValues   []llvm.Value
+	coroRootAnchor       string
+	coroProgramManifest  string
+	coroProgramBootstrap string
 
 	abiTypeFakeUseCache map[llvm.Value][]llvm.Value
 }
