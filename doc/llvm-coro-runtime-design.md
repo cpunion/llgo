@@ -1780,11 +1780,12 @@ Pure sync library/archive不需要链接scheduler。Executable一旦选择 `-sch
 
 当前落地状态（2026-07，实验 ABI v0）：
 
-- 已完成全程序 SSA 的 Effect、Demand、FuncRep、稳定 FunctionID、精确 emission universe 和单 primary symbol 选择；激活 lowering 时仍关闭 package archive cache，直到 `CoroPlanDigest` 进入 fingerprint。
+- 已完成全程序 SSA 的 Effect、Demand、FuncRep、稳定 FunctionID、精确 emission universe 和单 primary symbol 选择。激活 lowering 使用 archive-ready FunctionID，并以独立 canonical schema 对全部 function/call/value plan、Coro/Scheduler/Panic/FuncRep ABI 及 effective LLVM target/data layout 生成 `CoroPlanDigest`；相同完整计划可安全复用 package build cache，缺失或不匹配的 manifest 继续 fail closed。
 - `cpunion/llvm` 已覆盖 LLVM 19、21、22 的 switched-resume builder/CoroSplit；LLGo 已能为严格受限的 top-level `YieldOnly` 单块 leaf 只生成 `F$coro(Task, ResultSlot, args...) -> CoroHandle`，并生成目标相关 result descriptor 与版本化 frame alloc/free hook。
 - Promise/header 在 `coro.begin` 后、initial suspend 前发布；结果写入 frame 外的 caller-owned slot。pre-/post-CoroSplit 与 wasm32 pointer-width 测试覆盖该时序，且禁止 malloc、pthread、stack-copy fallback。
 - 该 v0 切片故意拒绝 call/await、spawn consumer、循环与抢占、channel/select、defer/panic、closure/method/generic、aggregate/pointer result、Dispatch 和 root/bootstrap；这些路径在 module 创建前 fail closed。因此它只计入 Phase 0 的 ABI/codegen 骨架，尚不表示 scheduler 或标准库兼容已经完成。
-- 下一依赖顺序为：冻结 target-wide descriptor/plan digest，加入 ordinary child await 与 root factory，落地单 P scheduler 和 frame registry，再插入并验证 loop/recursion/long-block 抢占 poll。不得用扩大 leaf allowlist 绕过这些生命周期协议。
+- 当前 cache digest 只解决同一完整程序计划下的内部 package cache；未知未来 caller 可复用的预编译 archive/标准库仍需 producer summary、canonical boundary Dispatch 和 linker ABI 校验，不能把 cache digest 当作 producer ABI summary。
+- 下一依赖顺序为：加入 ordinary child await 与 root factory，落地单 P scheduler 和 frame registry，再插入并验证 loop/recursion/long-block 抢占 poll。不得用扩大 leaf allowlist 绕过这些生命周期协议。
 
 ### Phase 1：单 P deterministic scheduler
 

@@ -71,11 +71,35 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		return llssa.PathOf(pkg)
 	}
 	target := p.prog.TargetSpec()
+	coroABI := coro.PhysicalABIV0
+	schedulerABI := coro.SchedulerNoneABIV0
+	panicABI := coro.PanicLegacyABIV0
+	funcRepABI := coro.FuncRepABIV0
+	if p.compilation != nil {
+		if p.compilation.CoroABI != "" {
+			coroABI = p.compilation.CoroABI
+		}
+		if p.compilation.SchedulerABI != "" {
+			schedulerABI = p.compilation.SchedulerABI
+		}
+		if p.compilation.PanicABI != "" {
+			panicABI = p.compilation.PanicABI
+		}
+		if p.compilation.FuncRepABI != "" {
+			funcRepABI = p.compilation.FuncRepABI
+		}
+	}
 	key := fmt.Sprintf(
-		"llgo-coro-physical-v%d\x00%s\x00triple=%s\x00target-abi=%s\x00data-layout=%s\x00ptr=%d\x00sig=%s\x00result=%s\x00panic=legacy",
+		"llgo-coro-physical-v%d\x00%s\x00coro=%s\x00scheduler=%s\x00panic=%s\x00func-rep=%s\x00triple=%s\x00cpu=%s\x00features=%s\x00target-abi=%s\x00data-layout=%s\x00ptr=%d\x00sig=%s\x00result=%s",
 		coroPhysicalABIVersion,
 		entry.plan.ID,
+		coroABI,
+		schedulerABI,
+		panicABI,
+		funcRepABI,
 		target.Triple,
+		target.CPU,
+		target.Features,
 		target.TargetABI,
 		p.prog.DataLayout(),
 		p.prog.PointerSize(),

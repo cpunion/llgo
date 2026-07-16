@@ -45,7 +45,7 @@ jobs:
 
       - name: Test coroutine build integration
         if: matrix.llvm == 19
-        run: go test ./internal/build -run 'Test(CoroPlanBuilderRunsBeforeCodegenWithoutChangingIR|CoroPlanInputCanonicalizesPatchedRoot|BuildCoroPlanErrors|CoroEntryResolutionDisablesPackageCacheReadWrite|CoroEntryResolutionBuildsPreparedRuntimePackages|CoroEmissionCoverageStopsBeforeAnyPackageCodegen|CoroUnsupportedEntryResolutionReturnsErrorBeforeCodegen|CoroEmissionUniverseAcceptsModeTestVariants)$' -count=1
+        run: go test ./internal/build -run 'Test(CoroPlanBuilderRunsBeforeCodegenWithoutChangingIR|CoroPlanInputCanonicalizesPatchedRoot|BuildCoroPlanErrors|CoroEntryResolutionUsesPlanMatchedPackageCache|CoroEntryResolutionBuildsPreparedRuntimePackages|CoroEmissionCoverageStopsBeforeAnyPackageCodegen|CoroUnsupportedEntryResolutionReturnsErrorBeforeCodegen|CoroEmissionUniverseAcceptsModeTestVariants)$' -count=1
 
       - name: Test coroutine compiler integration
         if: matrix.llvm == 19
@@ -55,6 +55,12 @@ jobs:
 
       - name: Test structured LLVM coroutine builder
         run: go test -tags='${{ matrix.tags }}' -v ./ssa -run '^TestCoroBuilder' -count=1
+
+      - name: Test canonical coroutine plan digest and cache identity
+        run: |
+          go test -tags='${{ matrix.tags }}' ./internal/coro -run '^TestCoroPlanDigest' -count=1
+          go test -tags='${{ matrix.tags }}' ./internal/build -run '^Test(BuildCoroPlanInstallsArchiveDigest|CoroutinePlanInputsAffectFingerprint|CoroEntryResolutionUsesPlanMatchedPackageCache|CoroPlanDigestMetadataUsesEffectiveLLVMTarget|CoroPhysicalABICacheRegistrationPreservesCollectedFuncInfo)$' -count=1
+          go test -tags='${{ matrix.tags }}' ./cl -run '^Test(CompilationCoroABIIdentityValidation|CoroEntryResolutionCacheRegistrationWithDigest|CoroPhysicalABICacheRegistrationPreservesPhysicalMetadata)$' -count=1
 
       - name: Test coroutine physical ABI lowering
         run: go test -tags='${{ matrix.tags }}' -v ./cl -run '^TestCoro(LeafPhysicalABI|PhysicalABI)' -count=1

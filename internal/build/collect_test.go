@@ -27,11 +27,68 @@ import (
 	"testing"
 
 	"github.com/goplus/llgo/internal/buildenv"
+	"github.com/goplus/llgo/internal/coro"
 	"github.com/goplus/llgo/internal/crosscompile"
 	"github.com/goplus/llgo/internal/lto"
 	"github.com/goplus/llgo/internal/packages"
 	gopackages "golang.org/x/tools/go/packages"
 )
+
+func TestCoroutinePlanInputsAffectFingerprint(t *testing.T) {
+	base := coro.PlanDigestMetadata{
+		CoroABI:        coro.PhysicalABIV0,
+		SchedulerABI:   coro.SchedulerNoneABIV0,
+		PanicABI:       coro.PanicLegacyABIV0,
+		FuncRepABI:     coro.FuncRepABIV0,
+		TargetTriple:   "x86_64-unknown-linux-gnu",
+		TargetCPU:      "x86-64",
+		TargetFeatures: "+sse2",
+		TargetABI:      "gnu",
+		PointerBits:    64,
+		Endianness:     "little",
+		DataLayout:     "e-p:64:64",
+	}
+	fingerprint := func(digest string, metadata coro.PlanDigestMetadata) string {
+		t.Helper()
+		ctx := &context{
+			buildConf:        &Config{Goos: "linux", Goarch: "amd64", EnableCoroEntryResolution: true, EnableCoroPhysicalABI: true},
+			coroPlanDigest:   digest,
+			coroPlanMetadata: metadata,
+		}
+		manifest := newManifestBuilder()
+		ctx.collectCommonInputs(manifest)
+		return manifest.Fingerprint()
+	}
+	baseline := fingerprint(strings.Repeat("1", 64), base)
+	if got := fingerprint(strings.Repeat("2", 64), base); got == baseline {
+		t.Fatal("CoroPlanDigest did not affect the package fingerprint")
+	}
+	mutations := []struct {
+		name string
+		edit func(*coro.PlanDigestMetadata)
+	}{
+		{"coro ABI", func(m *coro.PlanDigestMetadata) { m.CoroABI += ".next" }},
+		{"scheduler ABI", func(m *coro.PlanDigestMetadata) { m.SchedulerABI += ".next" }},
+		{"panic ABI", func(m *coro.PlanDigestMetadata) { m.PanicABI += ".next" }},
+		{"func rep ABI", func(m *coro.PlanDigestMetadata) { m.FuncRepABI += ".next" }},
+		{"triple", func(m *coro.PlanDigestMetadata) { m.TargetTriple = "wasm32-unknown-unknown" }},
+		{"CPU", func(m *coro.PlanDigestMetadata) { m.TargetCPU = "generic" }},
+		{"features", func(m *coro.PlanDigestMetadata) { m.TargetFeatures = "" }},
+		{"target ABI", func(m *coro.PlanDigestMetadata) { m.TargetABI = "musl" }},
+		{"pointer bits", func(m *coro.PlanDigestMetadata) { m.PointerBits = 32 }},
+		{"endianness", func(m *coro.PlanDigestMetadata) { m.Endianness = "big" }},
+		{"data layout", func(m *coro.PlanDigestMetadata) { m.DataLayout = "E-p:64:64" }},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			changed := base
+			mutation.edit(&changed)
+			if got := fingerprint(strings.Repeat("1", 64), changed); got == baseline {
+				t.Fatalf("%s did not affect the package fingerprint", mutation.name)
+			}
+		})
+	}
+}
 
 func TestCollectFingerprint(t *testing.T) {
 	td := t.TempDir()

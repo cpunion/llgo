@@ -740,6 +740,9 @@ func parentlessNamedTypesInFunction(fn *ssa.Function) map[*types.Named]struct{} 
 	}
 	for _, block := range fn.Blocks {
 		for _, instruction := range block.Instrs {
+			if _, debug := instruction.(*ssa.DebugRef); debug {
+				continue
+			}
 			if value, ok := instruction.(ssa.Value); ok {
 				collector.value(value)
 			}

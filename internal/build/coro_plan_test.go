@@ -23,15 +23,207 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/importer"
+	"go/parser"
+	"go/token"
+	"go/types"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/goplus/llgo/cl"
 	"github.com/goplus/llgo/internal/coro"
+	"github.com/goplus/llgo/internal/goembed"
 	"github.com/goplus/llgo/internal/packages"
+	llssa "github.com/goplus/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
+	"golang.org/x/tools/go/ssa/ssautil"
 )
+
+func TestBuildCoroPlanInstallsArchiveDigest(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "p.go", `package p; func F(value int) int { return value + 1 }`, parser.ParseComments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := []*ast.File{file}
+	ssaPkg, _, err := ssautil.BuildPackage(
+		&types.Config{Importer: importer.Default()},
+		fset,
+		types.NewPackage("example.com/p", "p"),
+		files,
+		ssa.SanityCheckFunctions|ssa.InstantiateGenerics,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aPkg := &aPackage{
+		Package: &packages.Package{
+			ID:      "example.com/p",
+			PkgPath: "example.com/p",
+			Name:    "p",
+			Types:   ssaPkg.Pkg,
+			Syntax:  files,
+		},
+		SSA: ssaPkg,
+	}
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	ctx := &context{
+		progSSA: ssaPkg.Prog,
+		prog:    prog,
+		buildConf: &Config{
+			EnableCoroEntryResolution: true,
+			CoroPlanBuilder: func(input CoroPlanInput) (*coro.SSAPlan, error) {
+				return input.Analyze(coro.Roots{{Function: ssaPkg.Func("F"), Demand: coro.SyncDemand}}, coro.SSAConfig{
+					MaxPlainInstructions: -1,
+				})
+			},
+		},
+	}
+	if err := buildCoroPlan(ctx, aPkg); err != nil {
+		t.Fatal(err)
+	}
+	if len(ctx.coroPlanDigest) != sha256.Size*2 {
+		t.Fatalf("CoroPlanDigest length = %d, want %d", len(ctx.coroPlanDigest), sha256.Size*2)
+	}
+	if ctx.clCompilation == nil || ctx.clCompilation.CoroPlanDigest != ctx.coroPlanDigest {
+		t.Fatalf("compilation digest = %+v, want %q", ctx.clCompilation, ctx.coroPlanDigest)
+	}
+	if ctx.coroPlanMetadata.CoroABI != coro.EntryResolutionABIV0 ||
+		ctx.coroPlanMetadata.SchedulerABI != coro.SchedulerNoneABIV0 ||
+		ctx.coroPlanMetadata.TargetTriple != prog.TargetSpec().Triple {
+		t.Fatalf("installed digest metadata = %+v", ctx.coroPlanMetadata)
+	}
+	if !ctx.canUsePackageCache() {
+		t.Fatal("complete active coroutine plan did not enable package cache")
+	}
+	manifest := newManifestBuilder()
+	ctx.collectCommonInputs(manifest)
+	if manifest.common.CoroPlanDigest != ctx.coroPlanDigest || manifest.common.CoroDataLayout != prog.DataLayout() {
+		t.Fatalf("manifest coroutine inputs = %+v", manifest.common)
+	}
+
+	badProg := llssa.NewProgram(nil)
+	defer badProg.Dispose()
+	badCtx := &context{
+		progSSA: ssaPkg.Prog,
+		prog:    badProg,
+		buildConf: &Config{
+			EnableCoroEntryResolution: true,
+			CoroPlanBuilder: func(input CoroPlanInput) (*coro.SSAPlan, error) {
+				return input.Analyze(coro.Roots{{Function: ssaPkg.Func("F"), Demand: coro.SyncDemand}}, coro.SSAConfig{
+					FunctionIDs:          coro.FunctionIDConfig{CoroABI: "conflicting-coro-abi"},
+					MaxPlainInstructions: -1,
+				})
+			},
+		},
+	}
+	if err := buildCoroPlan(badCtx, aPkg); err == nil || !strings.Contains(err.Error(), "does not match FunctionID ABI") {
+		t.Fatalf("conflicting builder ABI error = %v", err)
+	}
+	if badCtx.coroPlan != nil || badCtx.clCompilation != nil || badCtx.coroPlanDigest != "" {
+		t.Fatal("conflicting builder ABI installed partial coroutine state")
+	}
+}
+
+func TestCoroPhysicalABICacheRegistrationPreservesCollectedFuncInfo(t *testing.T) {
+	const source = `package p
+func Leaf(value uint32) uint32 { return value + 1 }
+`
+	compile := func(cacheHit bool) []funcInfoRecord {
+		t.Helper()
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, "p.go", source, parser.ParseComments)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files := []*ast.File{file}
+		ssaPkg, _, err := ssautil.BuildPackage(
+			&types.Config{Importer: importer.Default()},
+			fset,
+			types.NewPackage("example.com/p", "p"),
+			files,
+			ssa.SanityCheckFunctions|ssa.InstantiateGenerics,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		prog := llssa.NewProgram(nil)
+		defer prog.Dispose()
+		prog.EnableFuncInfoMetadata(true)
+		universe, err := cl.PrepareEmissionUniverse(prog, nil, []cl.EmissionPackage{{SSA: ssaPkg, Files: files}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+		if err != nil {
+			t.Fatal(err)
+		}
+		functionIDs := universe.FunctionIDConfig()
+		functionIDs.CoroABI = coro.PhysicalABIV0
+		functionIDs.SchedulerABI = coro.SchedulerNoneABIV0
+		functionIDs.ArchiveReady = true
+		leaf := ssaPkg.Func("Leaf")
+		plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: leaf, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+			EmissionUniverse:     ssaUniverse,
+			FunctionIDs:          functionIDs,
+			MaxPlainInstructions: -1,
+			ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+				if fn == leaf {
+					return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+				}
+				return coro.SSAFunctionPolicy{}, nil
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		lpkg, _, err := cl.NewPackageExWithEmbedOptions(prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{}, cl.PackageOptions{
+			Compilation: &cl.Compilation{
+				CoroPlan:                  plan,
+				EnableCoroEntryResolution: true,
+				EnableCoroPhysicalABI:     true,
+				CoroPlanDigest:            strings.Repeat("0", 64),
+				CoroABI:                   coro.PhysicalABIV0,
+				SchedulerABI:              coro.SchedulerNoneABIV0,
+				PanicABI:                  coro.PanicLegacyABIV0,
+				FuncRepABI:                coro.FuncRepABIV0,
+				EmissionUniverse:          universe,
+			},
+			CacheHit: cacheHit,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return collectFuncInfo([]Package{{LPkg: lpkg}})
+	}
+
+	sourceRecords := compile(false)
+	cachedRecords := compile(true)
+	if !reflect.DeepEqual(cachedRecords, sourceRecords) {
+		t.Fatalf("cache registration funcinfo differs from source compilation:\nsource: %+v\ncached: %+v", sourceRecords, cachedRecords)
+	}
+	wantSymbol := "example.com/p.Leaf$coro"
+	wantDisplay := "example.com/p.Leaf"
+	found := false
+	for _, record := range cachedRecords {
+		if record.symbol == "example.com/p.Leaf" {
+			t.Fatalf("cache registration exposed legacy plain symbol: %+v", record)
+		}
+		if record.symbol == wantSymbol {
+			found = true
+			if record.name != wantDisplay {
+				t.Fatalf("coroutine funcinfo display name = %q, want %q", record.name, wantDisplay)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("cache registration funcinfo is missing %q: %+v", wantSymbol, cachedRecords)
+	}
+}
 
 func TestCoroPlanBuilderRunsBeforeCodegenWithoutChangingIR(t *testing.T) {
 	t.Setenv(llgoBuildCache, "on")
@@ -367,7 +559,7 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 	})
 }
 
-func TestCoroEntryResolutionDisablesPackageCacheReadWrite(t *testing.T) {
+func TestCoroEntryResolutionUsesPlanMatchedPackageCache(t *testing.T) {
 	t.Setenv(llgoBuildCache, "on")
 	cacheRoot := t.TempDir()
 	oldCacheRootFunc := cacheRootFunc
@@ -386,82 +578,137 @@ func TestCoroEntryResolutionDisablesPackageCacheReadWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	const (
-		pkgPath     = "example.com/coro-cache"
-		fingerprint = "plain-fingerprint"
-	)
-	manifest := func(path string) string {
-		m := newManifestBuilder()
-		m.env.Goos = "linux"
-		m.env.Goarch = "amd64"
-		m.pkg.PkgPath = path
-		return m.Build()
+	const pkgPath = "example.com/coro-cache"
+	metadata := coro.PlanDigestMetadata{
+		CoroABI:        coro.EntryResolutionABIV0,
+		SchedulerABI:   coro.SchedulerNoneABIV0,
+		PanicABI:       coro.PanicLegacyABIV0,
+		FuncRepABI:     coro.FuncRepABIV0,
+		TargetTriple:   "x86_64-unknown-linux-gnu",
+		TargetCPU:      "x86-64",
+		TargetFeatures: "+sse2",
+		TargetABI:      "gnu",
+		PointerBits:    64,
+		Endianness:     "little",
+		DataLayout:     "e-p:64:64",
 	}
-	newContext := func(entryResolution bool) *context {
-		return &context{buildConf: &Config{
-			Goos:                      "linux",
-			Goarch:                    "amd64",
-			EnableCoroEntryResolution: entryResolution,
-			CoroPlanBuilder: func(CoroPlanInput) (*coro.SSAPlan, error) {
-				return &coro.SSAPlan{}, nil
+	newContext := func(digest string) *context {
+		plan := &coro.SSAPlan{}
+		emission := &cl.EmissionUniverse{}
+		compilation := &cl.Compilation{
+			CoroPlan:                  plan,
+			EnableCoroEntryResolution: true,
+			CoroPlanDigest:            digest,
+			CoroABI:                   metadata.CoroABI,
+			SchedulerABI:              metadata.SchedulerABI,
+			PanicABI:                  metadata.PanicABI,
+			FuncRepABI:                metadata.FuncRepABI,
+			EmissionUniverse:          emission,
+		}
+		return &context{
+			buildConf: &Config{
+				Goos:                      "linux",
+				Goarch:                    "amd64",
+				EnableCoroEntryResolution: true,
 			},
-		}}
+			coroPlan:         plan,
+			coroEmission:     emission,
+			coroPlanDigest:   digest,
+			coroPlanMetadata: metadata,
+			clCompilation:    compilation,
+		}
 	}
-	newPackage := func(fp string) *aPackage {
+	manifest := func(ctx *context, path string) (string, string) {
+		m := newManifestBuilder()
+		ctx.collectCommonInputs(m)
+		m.pkg.PkgPath = path
+		return m.Build(), m.Fingerprint()
+	}
+	newPackage := func(ctx *context) *aPackage {
+		manifestText, fingerprint := manifest(ctx, pkgPath)
 		return &aPackage{
 			Package: &packages.Package{
 				PkgPath: pkgPath,
 				Name:    "corocache",
 			},
-			Fingerprint: fp,
-			Manifest:    manifest(pkgPath),
+			Fingerprint: fingerprint,
+			Manifest:    manifestText,
 		}
 	}
 
-	seedCtx := newContext(false)
-	seedPkg := newPackage(fingerprint)
+	digestA := strings.Repeat("a", 64)
+	seedCtx := newContext(digestA)
+	seedPkg := newPackage(seedCtx)
 	seedPkg.ArchiveFile = archive.Name()
+	seedPkg.NeedRt = true
+	seedPkg.NeedPyInit = true
 	if err := seedCtx.saveToCache(seedPkg); err != nil {
 		t.Fatalf("seed cache: %v", err)
 	}
-	seedPaths := seedCtx.ensureCacheManager().PackagePaths(seedCtx.targetTriple(), pkgPath, fingerprint)
+	seedPaths := seedCtx.ensureCacheManager().PackagePaths(seedCtx.targetTriple(), pkgPath, seedPkg.Fingerprint)
 	if _, err := os.Stat(seedPaths.Archive); err != nil {
 		t.Fatalf("seed archive: %v", err)
 	}
 
-	reportOnlyCtx := newContext(false)
-	reportOnlyPkg := newPackage(fingerprint)
-	if !reportOnlyCtx.tryLoadFromCache(reportOnlyPkg) || !reportOnlyPkg.CacheHit {
-		t.Fatal("report-only coroutine plan did not preserve package-cache reads")
+	matchingPkg := newPackage(seedCtx)
+	if !seedCtx.tryLoadFromCache(matchingPkg) || !matchingPkg.CacheHit {
+		t.Fatal("matching coroutine plan did not reuse the package archive")
+	}
+	if !matchingPkg.NeedRt || !matchingPkg.NeedPyInit {
+		t.Fatalf("cache metadata runtime flags = %v/%v, want true/true", matchingPkg.NeedRt, matchingPkg.NeedPyInit)
 	}
 
-	entryCtx := newContext(true)
-	if entryCtx.canUsePackageCache() {
-		t.Fatal("active coroutine entry resolution unexpectedly permits package cache")
+	digestB := strings.Repeat("b", 64)
+	mismatchCtx := newContext(digestB)
+	mismatchPkg := newPackage(mismatchCtx)
+	mismatchPaths := mismatchCtx.ensureCacheManager().PackagePaths(mismatchCtx.targetTriple(), pkgPath, mismatchPkg.Fingerprint)
+	if err := mismatchCtx.cacheManager.EnsureDir(mismatchPaths); err != nil {
+		t.Fatal(err)
 	}
-	entryReadPkg := newPackage(fingerprint)
-	if entryCtx.tryLoadFromCache(entryReadPkg) {
-		t.Fatal("active coroutine entry resolution read a plain cache archive")
+	if err := copyFileAtomic(seedPaths.Archive, mismatchPaths.Archive); err != nil {
+		t.Fatal(err)
 	}
-	if entryReadPkg.CacheHit || entryReadPkg.ArchiveFile != "" {
-		t.Fatalf("entry-resolution cache read mutated package: hit=%v archive=%q", entryReadPkg.CacheHit, entryReadPkg.ArchiveFile)
+	if err := copyFileAtomic(seedPaths.Manifest, mismatchPaths.Manifest); err != nil {
+		t.Fatal(err)
+	}
+	if mismatchCtx.tryLoadFromCache(mismatchPkg) {
+		t.Fatal("mismatched coroutine manifest was accepted from a forced cache path")
+	}
+	if mismatchPkg.CacheHit || mismatchPkg.ArchiveFile != "" {
+		t.Fatalf("mismatched cache read mutated package: hit=%v archive=%q", mismatchPkg.CacheHit, mismatchPkg.ArchiveFile)
+	}
+	forgedPkg := newPackage(seedCtx)
+	forgedPkg.Fingerprint = strings.Repeat("c", 64)
+	forgedPaths := seedCtx.ensureCacheManager().PackagePaths(seedCtx.targetTriple(), pkgPath, forgedPkg.Fingerprint)
+	if err := seedCtx.cacheManager.EnsureDir(forgedPaths); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyFileAtomic(seedPaths.Archive, forgedPaths.Archive); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyFileAtomic(seedPaths.Manifest, forgedPaths.Manifest); err != nil {
+		t.Fatal(err)
+	}
+	if seedCtx.tryLoadFromCache(forgedPkg) {
+		t.Fatal("manifest stored under a forged fingerprint path was accepted")
 	}
 
-	const entryFingerprint = "entry-resolution-fingerprint"
-	entryWritePkg := newPackage(entryFingerprint)
-	entryWritePkg.ArchiveFile = archive.Name()
-	if err := entryCtx.saveToCache(entryWritePkg); err != nil {
-		t.Fatalf("disabled entry-resolution cache write: %v", err)
+	incomplete := newContext("")
+	if incomplete.canUsePackageCache() {
+		t.Fatal("active context without CoroPlanDigest unexpectedly permits package cache")
 	}
-	entryPaths := seedCtx.ensureCacheManager().PackagePaths(seedCtx.targetTriple(), pkgPath, entryFingerprint)
-	if _, err := os.Stat(entryPaths.Archive); !os.IsNotExist(err) {
-		t.Fatalf("entry-resolution cache archive stat error = %v, want not-exist", err)
+	incompletePkg := newPackage(incomplete)
+	if incomplete.tryLoadFromCache(incompletePkg) {
+		t.Fatal("active context without CoroPlanDigest read a cache archive")
 	}
-	if _, err := os.Stat(entryPaths.Manifest); !os.IsNotExist(err) {
-		t.Fatalf("entry-resolution cache manifest stat error = %v, want not-exist", err)
+	if incomplete.cacheManager != nil {
+		t.Fatal("incomplete coroutine context initialized a cache manager")
 	}
-	if entryCtx.cacheManager != nil {
-		t.Fatal("active coroutine entry resolution initialized a cache manager")
+
+	mismatchedUniverse := newContext(digestA)
+	mismatchedUniverse.clCompilation.EmissionUniverse = &cl.EmissionUniverse{}
+	if mismatchedUniverse.canUsePackageCache() {
+		t.Fatal("active context with mismatched emission universe unexpectedly permits package cache")
 	}
 }
 
