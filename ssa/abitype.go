@@ -62,6 +62,21 @@ var (
 		types.NewTuple(types.NewVar(token.NoPos, nil, "", types.Typ[types.Uintptr])), false)
 )
 
+// ABITypeRuntimeFunctions returns the logical runtime functions whose
+// addresses abiType embeds while materializing the descriptor for t. These are
+// references, not calls: consumers must demand the selected entries without
+// inheriting their suspend effects.
+func (p Program) ABITypeRuntimeFunctions(t types.Type) []string {
+	ret := make([]string, 0, 2)
+	if name := p.abi.EqualName(t); name != "" {
+		ret = append(ret, name)
+	}
+	if _, ok := types.Unalias(t).(*types.Map); ok {
+		ret = append(ret, "typehash")
+	}
+	return ret
+}
+
 func directIfaceType(t types.Type) bool {
 	switch t := types.Unalias(t).(type) {
 	case *types.Named:

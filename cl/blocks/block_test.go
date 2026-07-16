@@ -57,7 +57,7 @@ func TestFirstLoop(t *testing.T) {
 	blk.Preds = []*ssa.BasicBlock{blk}
 	blk.Succs = []*ssa.BasicBlock{blk}
 	infos := Infos([]*ssa.BasicBlock{blk})
-	if infos[0].Kind != llssa.DeferInLoop {
+	if infos[0].Kind != llssa.DeferInLoop || !infos[0].InLoop {
 		t.Fatal("TestFirstLoop")
 	}
 }

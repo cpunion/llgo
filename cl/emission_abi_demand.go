@@ -218,16 +218,18 @@ func (u *EmissionUniverse) functionABIContext(fn *ssa.Function, owner *preparedE
 		return nil, fmt.Errorf("ABI type demand requires an emission universe, function, and exact owner")
 	}
 	return &context{
-		prog:             u.prog,
-		goFn:             fn,
-		fset:             u.goProg.Fset,
-		goProg:           u.goProg,
-		goTyps:           owner.pkgTypes,
-		goPkg:            owner.ssa,
-		patches:          u.patches,
-		loaded:           u.loadedPackages(),
-		linkOnceFns:      make(map[*ssa.Function]none),
-		emissionUniverse: u,
+		prog:                 u.prog,
+		goFn:                 fn,
+		fset:                 u.goProg.Fset,
+		goProg:               u.goProg,
+		goTyps:               owner.pkgTypes,
+		goPkg:                owner.ssa,
+		patches:              u.patches,
+		loaded:               u.loadedPackages(),
+		linkOnceFns:          make(map[*ssa.Function]none),
+		methodNilDerefChecks: collectMethodNilDerefChecks(fn),
+		addrOfFieldAddrs:     collectAddrOfFieldSelectors(owner.files),
+		emissionUniverse:     u,
 	}, nil
 }
 
@@ -246,18 +248,30 @@ func (u *EmissionUniverse) materializeABITypeDemand(fn *ssa.Function, owner *pre
 		return llabi.PublicType(u.prog.PhysicalType(typ, llssa.InGo))
 	}
 	return walkEmissionABITypeDemandEx(root, ctx.patchType, physicalMethodSignature, func(typ types.Type) error {
-		if !emissionABITypeMayHaveMethods(typ) {
-			return nil
+		var references []*ssa.Function
+		if u.prog != nil {
+			for _, helper := range u.prog.ABITypeRuntimeFunctions(typ) {
+				target, available, err := u.materializeRuntimeHelperReference(fn, owner, state, helper)
+				if err != nil {
+					return fmt.Errorf("ABI type runtime reference %q: %w", helper, err)
+				}
+				if available {
+					references = append(references, target)
+				}
+			}
 		}
-		methodState, methodFromPatch := state.state, state.fromPatch
-		if exactState, exactFromPatch, known := u.typeProvenance(owner, typ); known {
-			methodState, methodFromPatch = exactState, exactFromPatch
+		if emissionABITypeMayHaveMethods(typ) {
+			methodState, methodFromPatch := state.state, state.fromPatch
+			if exactState, exactFromPatch, known := u.typeProvenance(owner, typ); known {
+				methodState, methodFromPatch = exactState, exactFromPatch
+			}
+			methods, err := u.selectABITypeMethods(owner, typ, methodState, methodFromPatch)
+			if err != nil {
+				return err
+			}
+			references = append(references, methods...)
 		}
-		methods, err := u.selectABITypeMethods(owner, typ, methodState, methodFromPatch)
-		if err != nil {
-			return err
-		}
-		return u.recordABIMethodReferences(fn, methods)
+		return u.recordABIMethodReferences(fn, references)
 	})
 }
 

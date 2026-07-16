@@ -73,6 +73,13 @@ type Roots []Root
 type SSAFunctionPolicy struct {
 	Effect Effect
 	Exec   ExecFlags
+	// ForeignNoBlockCertificate is a frozen frontend proof that one exact
+	// external declaration has a bounded, nonblocking physical ABI. The
+	// opaque certificate identity is retained in SSAPlan and its archive digest;
+	// it must never be synthesized from a display name. Certified declarations
+	// remain IRQUnsafe unless a separate proof exists; this certificate removes
+	// only BlockForeign/WaitForeign.
+	ForeignNoBlockCertificate string
 	// IgnoreBody states that the frontend does not emit this SSA body's Go
 	// instructions because the function is an external declaration in the
 	// frozen physical ABI. AnalyzeSSA excludes that body from value flow, calls,
@@ -121,12 +128,18 @@ type SSAClosedDynamicCallCertificate struct {
 // LogicalName is a frontend-owned stable identity used to resolve the exact
 // helper again during code generation; it is not a symbol-name heuristic.
 //
-// The first lowering slice projects every record as an ordinary direct call.
-// AnalyzeSSA may refine that edge to a foreign boundary from the target's
-// frozen function policy, exactly as it does for an explicit static call.
+// AnalyzeSSA projects an ordinary record as a direct call and may refine that
+// edge to a foreign boundary from the target's frozen function policy, exactly
+// as it does for an explicit static call. UnwindOnly records remain exact
+// demand edges, but do not propagate target effects into the owner's
+// normal-return plan.
 type SSALoweredCall struct {
 	LogicalName string
 	Target      *ssa.Function
+	// UnwindOnly is true only when every physical use of LogicalName in this
+	// owner is in a CFG block that cannot reach a normal Return. It is a frozen
+	// frontend proof, not a target-name or runtime-policy heuristic.
+	UnwindOnly bool
 }
 
 // SSAConfig controls the SSA-to-Graph analysis bridge. It deliberately has no
@@ -175,12 +188,15 @@ type SSAConfig struct {
 	ClassifyUnknownCall func(caller *ssa.Function, call ssa.CallInstruction) (UnknownTarget, error)
 
 	// ClassifyElidedCall identifies a direct static call for which the frontend
-	// emits no callable function edge: either the call is omitted entirely or a
-	// proven no-suspend compiler intrinsic is lowered inline in the caller. Such
-	// a site contributes no graph edge and has no CallPlan, but remains in the
-	// plan/digest. The callback is trusted frontend policy, not an effect
-	// summary: AnalyzeSSA rejects attempts to elide go, defer, or dynamic calls.
-	// Argument-producing SSA instructions remain analyzed independently.
+	// emits no callable edge to that exact SSA declaration: either the call is
+	// omitted entirely, a proven no-suspend compiler intrinsic is lowered inline
+	// in the caller, or the declaration is replaced by exact calls supplied
+	// through ClassifyLoweredCalls. Such a site has no CallPlan but remains in the
+	// plan/digest. Eliding the declaration does not elide separately classified
+	// lowered calls or their effects. The callback is trusted frontend policy,
+	// not an effect summary: AnalyzeSSA rejects attempts to elide go, defer, or
+	// dynamic calls. Argument-producing SSA instructions remain analyzed
+	// independently.
 	ClassifyElidedCall func(caller *ssa.Function, call ssa.CallInstruction) (bool, error)
 
 	// ClassifyDirectPlainCallArgument identifies one exact static-call argument
@@ -193,6 +209,15 @@ type SSAConfig struct {
 	// arguments. Frontends should reserve it for source-level ABI facts such as
 	// a named //llgo:type C callback parameter.
 	ClassifyDirectPlainCallArgument func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error)
+
+	// ClassifyRawFunctionAddressCallArgument identifies an exact direct static
+	// call argument whose frontend lowering consumes a transient
+	// MakeInterface{X:*ssa.Function} structurally and emits only X's raw entry
+	// address. The interface value is never materialized, so this one use must
+	// not force X into Dispatch representation. AnalyzeSSA validates the exact
+	// SSA shape and sole-consumer relationship; all ordinary interface uses keep
+	// their canonical descriptor boundary.
+	ClassifyRawFunctionAddressCallArgument func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error)
 
 	// ClassifyClosedDynamicCall supplies a frozen whole-program proof for one
 	// exact ordinary dynamic *ssa.Call whose callee value crosses descriptor
@@ -249,17 +274,19 @@ type SSARootPlan struct {
 // SSAPlan is the compilation-scoped whole-program result. Its maps remain
 // private so consumers cannot reconstruct identities from display strings.
 type SSAPlan struct {
-	plan          *Plan
-	roots         []SSARootPlan
-	functions     []SSAFunctionPlan
-	byFunction    map[*ssa.Function]FunctionID
-	byID          map[FunctionID]*ssa.Function
-	ignoredBodies map[*ssa.Function]struct{}
-	valuePlans    map[ssa.Value]SSAValuePlan
-	callPlans     map[ssa.CallInstruction]SSACallPlan
-	elidedCalls   map[ssa.CallInstruction]struct{}
-	loweredCalls  map[*ssa.Function][]SSALoweredCall
-	functionIDs   FunctionIDConfig
+	plan           *Plan
+	roots          []SSARootPlan
+	functions      []SSAFunctionPlan
+	byFunction     map[*ssa.Function]FunctionID
+	byID           map[FunctionID]*ssa.Function
+	ignoredBodies  map[*ssa.Function]struct{}
+	valuePlans     map[ssa.Value]SSAValuePlan
+	callPlans      map[ssa.CallInstruction]SSACallPlan
+	elidedCalls    map[ssa.CallInstruction]struct{}
+	rawAddressArgs map[ssaCallArgumentUse]struct{}
+	loweredCalls   map[*ssa.Function][]SSALoweredCall
+	foreignNoBlock map[*ssa.Function]string
+	functionIDs    FunctionIDConfig
 }
 
 type ssaFunctionResolution struct {
@@ -398,6 +425,18 @@ func (p *SSAPlan) IgnoresBody(fn *ssa.Function) bool {
 	}
 	_, ok := p.ignoredBodies[fn]
 	return ok
+}
+
+// ForeignNoBlockCertificate returns the opaque frozen frontend certificate
+// attached to one exact external declaration. The certificate is part of the
+// immutable SSA plan and CoroPlanDigest; callers must not infer it from a
+// function name or external symbol spelling.
+func (p *SSAPlan) ForeignNoBlockCertificate(fn *ssa.Function) (string, bool) {
+	if p == nil || fn == nil {
+		return "", false
+	}
+	certificate, ok := p.foreignNoBlock[fn]
+	return certificate, ok
 }
 
 // LoweredCalls returns the exact compiler-inserted calls frozen for owner in
@@ -640,6 +679,15 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 			bodyFunctions = append(bodyFunctions, fn)
 			bodyFunctionSet[fn] = true
 		}
+		if certificate := trusted.ForeignNoBlockCertificate; certificate != "" {
+			if !utf8.ValidString(certificate) {
+				return nil, fmt.Errorf("coro: classify SSA function %q: foreign noblock certificate is not a valid UTF-8 identity", fn.Name())
+			}
+			if !trusted.IgnoreBody || !trusted.OverrideExternal || trusted.External != ExternalKnown ||
+				trusted.Effect != NoSuspend || trusted.Exec != IRQUnsafe || trusted.NeedsDispatch {
+				return nil, fmt.Errorf("coro: classify SSA function %q: foreign noblock certificate requires an ignored external-known declaration with no suspend effect, exactly irq-unsafe execution, and no dispatch", fn.Name())
+			}
+		}
 		trustedPolicies[fn] = trusted
 	}
 	dynamicCandidates, err = filterSSADynamicCandidateSites(dynamicCandidates, bodyFunctionSet, canonicalizer)
@@ -684,16 +732,23 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if err != nil {
 		return nil, err
 	}
+	rawFunctionAddressCallArguments, err := classifySSARawFunctionAddressCallArguments(bodyFunctions, config)
+	if err != nil {
+		return nil, err
+	}
 	closedDynamicCalls, err := classifySSAClosedDynamicCalls(bodyFunctions, includedSet, bodyFunctionSet, trustedPolicies, canonicalizer, config)
 	if err != nil {
 		return nil, err
 	}
-	flow, err := analyzeSSAFunctionFlow(bodyFunctions, includedSet, ids, dynamicCandidates, config.DynamicResolution, canonicalizer, directPlainCallArguments, closedDynamicCalls)
+	flow, err := analyzeSSAFunctionFlow(bodyFunctions, includedSet, ids, dynamicCandidates, config.DynamicResolution, canonicalizer, directPlainCallArguments, rawFunctionAddressCallArguments, closedDynamicCalls)
 	if err != nil {
 		return nil, fmt.Errorf("coro: analyze SSA function-value flow: %w", err)
 	}
 	if err := flow.validateDirectPlainCallArguments(); err != nil {
 		return nil, fmt.Errorf("coro: validate trusted direct-plain call arguments: %w", err)
+	}
+	if err := flow.validateRawFunctionAddressCallArguments(); err != nil {
+		return nil, fmt.Errorf("coro: validate trusted raw function-address call arguments: %w", err)
 	}
 	elidedCalls, err := classifySSAElidedCalls(bodyFunctions, config)
 	if err != nil {
@@ -726,6 +781,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		// authoritative and is joined only after that suppression.
 		policy.Exec = policy.Exec.Join(trusted.Exec)
 		policy.NeedsDispatch = policy.NeedsDispatch || trusted.NeedsDispatch
+		policy.ForeignNoBlockCertificate = trusted.ForeignNoBlockCertificate
 		if trusted.OverrideExternal {
 			policy.External = trusted.External
 			policy.OverrideExternal = true
@@ -886,17 +942,27 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		}
 	}
 	result := &SSAPlan{
-		plan:          base,
-		roots:         canonicalRoots,
-		functions:     make([]SSAFunctionPlan, 0, len(included)),
-		byFunction:    ids,
-		byID:          byID,
-		ignoredBodies: ignoredBodies,
-		valuePlans:    valuePlans,
-		callPlans:     callPlans,
-		elidedCalls:   elidedCallSet,
-		loweredCalls:  loweredCalls,
-		functionIDs:   config.FunctionIDs,
+		plan:           base,
+		roots:          canonicalRoots,
+		functions:      make([]SSAFunctionPlan, 0, len(included)),
+		byFunction:     ids,
+		byID:           byID,
+		ignoredBodies:  ignoredBodies,
+		valuePlans:     valuePlans,
+		callPlans:      callPlans,
+		elidedCalls:    elidedCallSet,
+		rawAddressArgs: make(map[ssaCallArgumentUse]struct{}, len(rawFunctionAddressCallArguments)),
+		loweredCalls:   loweredCalls,
+		foreignNoBlock: make(map[*ssa.Function]string),
+		functionIDs:    config.FunctionIDs,
+	}
+	for fn, policy := range policies {
+		if policy.ForeignNoBlockCertificate != "" {
+			result.foreignNoBlock[fn] = policy.ForeignNoBlockCertificate
+		}
+	}
+	for _, use := range rawFunctionAddressCallArguments {
+		result.rawAddressArgs[use] = struct{}{}
 	}
 	for _, functionPlan := range base.Functions() {
 		result.functions = append(result.functions, SSAFunctionPlan{
@@ -966,7 +1032,10 @@ func addSSAClassifiedLoweredCalls(
 			result[owner] = calls
 		}
 		for _, call := range calls {
-			kind := staticCallKind(CallDirect, policies[call.Target])
+			kind := CallUnwind
+			if !call.UnwindOnly {
+				kind = staticCallKind(CallDirect, policies[call.Target])
+			}
 			if err := graph.AddCall(CallEdge{Caller: ids[owner], Callee: ids[call.Target], Kind: kind}); err != nil {
 				return nil, fmt.Errorf("coro: add lowered call %q from %q to %q: %w", call.LogicalName, owner.Name(), call.Target.Name(), err)
 			}
@@ -1087,6 +1156,53 @@ func classifySSADirectPlainCallArguments(functions []*ssa.Function, config SSACo
 					}
 					if value == nil || !isScalarFuncType(value.Type()) {
 						return nil, fmt.Errorf("coro: trusted direct-plain call argument %d in %q must be a scalar function value", argument, caller.Name())
+					}
+					result = append(result, ssaCallArgumentUse{call: call, argument: argument})
+				}
+			}
+		}
+	}
+	return result, nil
+}
+
+func classifySSARawFunctionAddressCallArguments(functions []*ssa.Function, config SSAConfig) ([]ssaCallArgumentUse, error) {
+	var result []ssaCallArgumentUse
+	if config.ClassifyRawFunctionAddressCallArgument == nil {
+		return nil, nil
+	}
+	for _, caller := range functions {
+		for _, block := range caller.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(ssa.CallInstruction)
+				if !ok || call.Common() == nil {
+					continue
+				}
+				for argument, value := range call.Common().Args {
+					rawAddress, err := config.ClassifyRawFunctionAddressCallArgument(caller, call, argument)
+					if err != nil {
+						return nil, fmt.Errorf("coro: classify trusted raw function-address call argument %d in %q: %w", argument, caller.Name(), err)
+					}
+					if !rawAddress {
+						continue
+					}
+					direct, directCall := call.(*ssa.Call)
+					if !directCall || call.Common().StaticCallee() == nil || call.Common().IsInvoke() {
+						return nil, fmt.Errorf("coro: trusted raw function-address argument %d in %q must belong to a direct static call", argument, caller.Name())
+					}
+					if _, builtin := call.Common().Value.(*ssa.Builtin); builtin {
+						return nil, fmt.Errorf("coro: trusted raw function-address argument %d in %q cannot belong to a builtin call", argument, caller.Name())
+					}
+					boxed, ok := value.(*ssa.MakeInterface)
+					if !ok {
+						return nil, fmt.Errorf("coro: trusted raw function-address argument %d in %q must be a MakeInterface", argument, caller.Name())
+					}
+					target, ok := boxed.X.(*ssa.Function)
+					if !ok || len(target.FreeVars) != 0 {
+						return nil, fmt.Errorf("coro: trusted raw function-address argument %d in %q must contain a static function without captured state", argument, caller.Name())
+					}
+					refs := boxed.Referrers()
+					if refs == nil || len(*refs) != 1 || (*refs)[0] != direct {
+						return nil, fmt.Errorf("coro: trusted raw function-address argument %d in %q must be the MakeInterface value's exact sole consumer", argument, caller.Name())
 					}
 					result = append(result, ssaCallArgumentUse{call: call, argument: argument})
 				}

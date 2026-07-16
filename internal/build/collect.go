@@ -109,6 +109,7 @@ func (c *context) collectCommonInputs(m *manifestBuilder) {
 		m.common.BuildTags = strings.Split(c.buildConf.Tags, ",")
 	}
 	m.common.Target = c.buildConf.Target
+	m.common.RuntimeGC = c.crossCompile.GC
 	if c.hasNonDefaultLLVMConfig() {
 		m.common.LLVMCPU = c.crossCompile.CPU
 		m.common.LLVMFeatures = c.crossCompile.Features

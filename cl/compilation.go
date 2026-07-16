@@ -112,7 +112,7 @@ func (c *Compilation) validateCoroABIIdentity(required bool) error {
 		if !c.EnableCoroChildAwait {
 			return fmt.Errorf("coroutine program bootstrap runtime requires child-await lowering")
 		}
-		wantSchedulerABI = coro.SchedulerProgramBootstrapABIV1
+		wantSchedulerABI = coro.SchedulerProgramBootstrapABIV2
 	}
 	if c.EnableCoroPlainDispatch && !c.EnableCoroEntryResolution {
 		return fmt.Errorf("coroutine plain dispatch requires coroutine entry resolution")

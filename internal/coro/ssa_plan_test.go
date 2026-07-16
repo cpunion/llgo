@@ -533,6 +533,64 @@ func outsideFrozenUniverse() {}
 	}
 }
 
+func TestAnalyzeSSAUnwindOnlyLoweredCallDoesNotPolluteNormalReturnPlan(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "lowered_unwind_only.go", `package coroid
+func owner() {}
+func helper() {}
+`)
+	owner := packageFunction(t, pkg, "owner")
+	helper := packageFunction(t, pkg, "helper")
+	universe, err := NewSSAEmissionUniverse(prog, []*ssa.Function{owner, helper})
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := func(unwindOnly bool) *SSAPlan {
+		t.Helper()
+		plan, err := AnalyzeSSA(prog, Roots{{Function: owner, Demand: SyncDemand}}, SSAConfig{
+			EmissionUniverse: universe,
+			ClassifyFunction: func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+				if fn == helper {
+					return SSAFunctionPolicy{Effect: OpaqueSuspend, Exec: IRQUnsafe | OpaqueExec}, nil
+				}
+				return SSAFunctionPolicy{}, nil
+			},
+			ClassifyLoweredCalls: func(fn *ssa.Function) ([]SSALoweredCall, error) {
+				if fn == owner {
+					return []SSALoweredCall{{LogicalName: "runtime.helper", Target: helper, UnwindOnly: unwindOnly}}, nil
+				}
+				return nil, nil
+			},
+			MaxPlainInstructions: -1,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return plan
+	}
+
+	unwind := build(true)
+	unwindOwner := functionPlanFor(t, unwind, owner)
+	if unwindOwner.Effect != NoSuspend || unwindOwner.Exec.Contains(IRQUnsafe|OpaqueExec) || unwindOwner.Emission != EmitPlain {
+		t.Fatalf("unwind-only owner plan = %+v, want an unpolluted normal-return plain body", unwindOwner)
+	}
+	unwindTarget := functionPlanFor(t, unwind, helper)
+	if unwindTarget.Demand != SyncDemand || unwindTarget.Emission != EmitCoroutine || !unwindTarget.Effect.IsOpaque() {
+		t.Fatalf("unwind-only target plan = %+v, want retained synchronous demand and coroutine emission", unwindTarget)
+	}
+	if got := unwind.LoweredCalls(owner); len(got) != 1 || !got[0].UnwindOnly || got[0].Target != helper {
+		t.Fatalf("unwind-only frozen calls = %+v", got)
+	}
+
+	ordinary := build(false)
+	ordinaryOwner := functionPlanFor(t, ordinary, owner)
+	if !ordinaryOwner.Effect.IsOpaque() || !ordinaryOwner.Exec.Contains(IRQUnsafe|OpaqueExec) || ordinaryOwner.Emission != EmitCoroutine {
+		t.Fatalf("normal-return-reachable owner plan = %+v, want exact target effects propagated", ordinaryOwner)
+	}
+	if got := functionPlanFor(t, ordinary, helper); got.Demand != AsyncDemand {
+		t.Fatalf("normal-return-reachable target demand = %s, want async", got.Demand)
+	}
+}
+
 func TestAnalyzeSSAClassifiedLoweredCallsFailClosed(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "lowered_calls_invalid.go", `package coroid
 func owner() {}

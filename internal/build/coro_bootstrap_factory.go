@@ -32,9 +32,11 @@ const (
 	coroProgramFrameFreeHookV1        = "__llgo_coro_frame_free_v1"
 	coroProgramPhysicalABIVersionV1   = 1
 	coroProgramSuspendNoneV1          = 0
+	coroProgramSuspendCallV1          = 1
 	coroProgramSuspendFrameCompleteV1 = 2
 	coroProgramLifecycleInitialV1     = 1
 	coroProgramLifecycleActiveV1      = 2
+	coroProgramLifecycleSuspendedV1   = 3
 	coroProgramLifecycleFinalV1       = 4
 )
 
@@ -49,6 +51,11 @@ const (
 	coroProgramHeaderStateIDV1
 	coroProgramHeaderFlagsV1
 )
+
+type coroProgramBootstrapFactoryTargetV2 struct {
+	Plain  llssa.Function
+	Anchor llssa.Expr
+}
 
 // emitCoroProgramBootstrapFactoryV1 defines the compiler-owned program-root
 // coroutine. The caller supplies the exact two target declarations used by the
@@ -157,6 +164,194 @@ func emitCoroProgramBootstrapFactoryV1(
 	coro.Finish()
 	b.Dispose()
 	return factory
+}
+
+// emitCoroProgramBootstrapFactoryV2 defines the compiler-owned heterogeneous
+// startup coroutine. DirectPlain steps are statically called. CoroRoot steps
+// load the exact validated descriptor factory from their bound package
+// anchor/index, create an initial-suspended child, and reuse the ordinary v1
+// parent/await scheduler handoff. The runtime never chooses or invokes a user
+// function pointer; the compiler emits this fixed five-stage program.
+func emitCoroProgramBootstrapFactoryV2(
+	pkg llssa.Package,
+	bootstrap *coroProgramBootstrapV1,
+	targets []coroProgramBootstrapFactoryTargetV2,
+	finalHash [16]byte,
+) llssa.Function {
+	validateCoroProgramBootstrapFactoryV2(pkg, bootstrap, targets)
+
+	prog := pkg.Prog
+	pointer := types.Typ[types.UnsafePointer]
+	factory := pkg.NewFunc(coroProgramBootstrapFactorySymbolV2, newSignature(
+		[]types.Type{pointer, pointer, pointer},
+		[]types.Type{pointer},
+	), llssa.InC)
+	if factory.HasBody() {
+		panic(fmt.Sprintf("coroutine program bootstrap factory symbol %q already has a body", coroProgramBootstrapFactorySymbolV2))
+	}
+	factoryValue := pkg.Module().NamedFunction(coroProgramBootstrapFactorySymbolV2)
+	factoryValue.SetVisibility(llvm.HiddenVisibility)
+
+	emptyPayload := prog.Struct()
+	descriptor := pkg.NewCoroFrameDescriptor(
+		coroProgramBootstrapFrameDescriptorPrefixV2+hex.EncodeToString(finalHash[:]),
+		llssa.CoroFrameDescriptorOptions{
+			Version: coroProgramPhysicalABIVersionV1,
+			ABIHash: finalHash,
+			Result:  emptyPayload,
+		},
+	)
+
+	b := factory.MakeBody(1)
+	g := factory.Param(0)
+	out := factory.Param(1)
+	null := prog.Nil(prog.VoidPtr())
+	descriptorPointer := b.Convert(prog.VoidPtr(), descriptor)
+	headerType := coroProgramBootstrapHeaderTypeV1(prog)
+	header := b.AllocaT(headerType)
+
+	alloc := pkg.NewFunc(coroProgramFrameAllocHookV1, newSignature(
+		[]types.Type{pointer, types.Typ[types.Uintptr], types.Typ[types.Uintptr], pointer},
+		[]types.Type{pointer},
+	), llssa.InC)
+	publish := pkg.NewFunc(coroProgramFramePublishHookV1, newSignature(
+		[]types.Type{pointer, pointer, pointer, pointer}, nil,
+	), llssa.InC)
+	await := pkg.NewFunc("__llgo_coro_await_prepare_v1", newSignature(
+		[]types.Type{pointer, pointer, pointer}, nil,
+	), llssa.InC)
+	complete := pkg.NewFunc(coroProgramCompletePrepareHookV1, newSignature(
+		[]types.Type{pointer, pointer, pointer}, nil,
+	), llssa.InC)
+	free := pkg.NewFunc(coroProgramFrameFreeHookV1, newSignature(
+		[]types.Type{pointer, pointer, types.Typ[types.Uintptr], types.Typ[types.Uintptr], pointer}, nil,
+	), llssa.InC)
+
+	frame := llssa.CoroFrameOps{
+		Alloc: func(b llssa.Builder, size, align llssa.Expr) llssa.Expr {
+			return b.Call(alloc.Expr, g, size, align, descriptorPointer)
+		},
+		Free: func(b llssa.Builder, storage, size, align llssa.Expr) {
+			b.Call(free.Expr, g, storage, size, align, descriptorPointer)
+		},
+	}
+	coroBuilder := b.BeginCoro(llssa.CoroOptions{
+		Promise: header,
+		Frame:   frame,
+		BeforeInitialSuspend: func(b llssa.Builder, handle, storage llssa.Expr) {
+			values := []llssa.Expr{
+				g,
+				null,
+				descriptorPointer,
+				null,
+				out,
+				prog.IntVal(coroProgramSuspendNoneV1, prog.Uint16()),
+				prog.IntVal(coroProgramLifecycleInitialV1, prog.Uint16()),
+				prog.IntVal(0, prog.Uint32()),
+				prog.IntVal(0, prog.Uint32()),
+			}
+			for index, value := range values {
+				b.Store(b.FieldAddr(header, index), value)
+			}
+			b.Call(publish.Expr, g, handle, b.Convert(prog.VoidPtr(), header), storage)
+		},
+	})
+
+	b.SetBlock(coroBuilder.InitialResumeBlock())
+	b.Store(b.FieldAddr(header, coroProgramHeaderSuspendReasonV1), prog.IntVal(coroProgramSuspendNoneV1, prog.Uint16()))
+	b.Store(b.FieldAddr(header, coroProgramHeaderLifecycleV1), prog.IntVal(coroProgramLifecycleActiveV1, prog.Uint16()))
+
+	rootFactorySig := newSignature(
+		[]types.Type{pointer, pointer, pointer},
+		[]types.Type{pointer},
+	)
+	// A signature used as a value is llssa's callable vkFuncPtr shape. FuncDecl
+	// is the declaration/function type used by statically named functions and
+	// cannot represent the loaded opaque pointer here.
+	rootFactoryType := prog.Type(rootFactorySig, llssa.InC)
+	rootDescriptorType := prog.Struct(
+		prog.Uint32(), prog.Uint32(), prog.Uint64(), prog.Uint64(),
+		prog.VoidPtr(),
+		prog.Uintptr(), prog.Uintptr(), prog.Uintptr(), prog.Uintptr(),
+	)
+	for index, step := range bootstrap.Steps {
+		target := targets[index]
+		switch step.Kind {
+		case coroProgramStepDirectPlainV1:
+			b.Call(target.Plain.Expr)
+		case coroProgramStepCoroRootV1:
+			entries := b.Load(b.FieldAddr(target.Anchor, 5))
+			entryPointer := b.Convert(prog.Pointer(prog.VoidPtr()), entries)
+			descriptorRaw := b.Load(b.Advance(entryPointer, prog.IntVal(step.Aux, prog.Uintptr())))
+			rootDescriptor := b.Convert(prog.Pointer(rootDescriptorType), descriptorRaw)
+			rootFactoryRaw := b.Load(b.FieldAddr(rootDescriptor, 4))
+			// LLVM uses opaque pointers, but llssa still needs the callable
+			// declaration kind/signature on the expression. This is a pure type
+			// retag, not a pointer-to-function Go conversion (which would leave
+			// Builder.Call with a non-callable vkPtr expression).
+			rootFactory := b.ChangeType(rootFactoryType, rootFactoryRaw)
+			child := b.Call(rootFactory, g, null, null)
+			childHeader := b.CoroPromise(child, headerType)
+			b.Store(b.FieldAddr(childHeader, coroProgramHeaderParentV1), coroBuilder.Handle())
+			stateID := uint64(index + 1)
+			b.Store(b.FieldAddr(header, coroProgramHeaderSuspendReasonV1), prog.IntVal(coroProgramSuspendCallV1, prog.Uint16()))
+			b.Store(b.FieldAddr(header, coroProgramHeaderLifecycleV1), prog.IntVal(coroProgramLifecycleSuspendedV1, prog.Uint16()))
+			b.Store(b.FieldAddr(header, coroProgramHeaderStateIDV1), prog.IntVal(stateID, prog.Uint32()))
+			b.Call(await.Expr, g, coroBuilder.Handle(), child)
+			coroBuilder.SuspendCurrentBlock()
+			b.Store(b.FieldAddr(header, coroProgramHeaderSuspendReasonV1), prog.IntVal(coroProgramSuspendNoneV1, prog.Uint16()))
+			b.Store(b.FieldAddr(header, coroProgramHeaderLifecycleV1), prog.IntVal(coroProgramLifecycleActiveV1, prog.Uint16()))
+		}
+	}
+
+	b.Store(b.FieldAddr(header, coroProgramHeaderSuspendReasonV1), prog.IntVal(coroProgramSuspendFrameCompleteV1, prog.Uint16()))
+	b.Store(b.FieldAddr(header, coroProgramHeaderLifecycleV1), prog.IntVal(coroProgramLifecycleFinalV1, prog.Uint16()))
+	b.Store(b.FieldAddr(header, coroProgramHeaderStateIDV1), prog.IntVal(uint64(len(bootstrap.Steps)+1), prog.Uint32()))
+	b.Call(complete.Expr, g, coroBuilder.Handle(), b.Convert(prog.VoidPtr(), header))
+	coroBuilder.Finish()
+	b.Dispose()
+	return factory
+}
+
+func validateCoroProgramBootstrapFactoryV2(
+	pkg llssa.Package, bootstrap *coroProgramBootstrapV1, targets []coroProgramBootstrapFactoryTargetV2,
+) {
+	if pkg == nil || pkg.Prog == nil {
+		panic("coroutine program bootstrap v2 factory requires an LLVM package")
+	}
+	if bootstrap == nil || bootstrap.abiVersion() != coroProgramBootstrapVersionV2 || len(bootstrap.Steps) != 5 || len(targets) != 5 {
+		panic("coroutine program bootstrap v2 factory requires exactly five validated steps")
+	}
+	roles := [...]uint32{
+		coroProgramStepRoleRuntimeInitV2,
+		coroProgramStepRoleABIInitV2,
+		coroProgramStepRolePublicRuntimeInitV2,
+		coroProgramStepRolePackageInitV2,
+		coroProgramStepRoleMainV2,
+	}
+	for index, step := range bootstrap.Steps {
+		target := targets[index]
+		if step.Role != roles[index] || step.FunctionID == "" || step.Target == "" {
+			panic(fmt.Sprintf("coroutine program bootstrap v2 factory step %d has noncanonical identity or role", index))
+		}
+		switch step.Kind {
+		case coroProgramStepDirectPlainV1:
+			if step.Owner != "" || step.CatalogTarget != "" || step.Aux != 0 || target.Plain == nil || !target.Anchor.IsNil() ||
+				target.Plain.Pkg != pkg || target.Plain.Name() != step.Target {
+				panic(fmt.Sprintf("coroutine program bootstrap v2 direct step %d target does not match %q", index, step.Target))
+			}
+			sig, ok := target.Plain.RawType().(*types.Signature)
+			if !ok || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 0 || sig.Results().Len() != 0 {
+				panic(fmt.Sprintf("coroutine program bootstrap v2 direct step %d target %q does not have void() C ABI", index, step.Target))
+			}
+		case coroProgramStepCoroRootV1:
+			if step.Owner == "" || step.CatalogTarget == "" || target.Plain != nil || target.Anchor.IsNil() || target.Anchor.Name() != step.CatalogTarget {
+				panic(fmt.Sprintf("coroutine program bootstrap v2 coroutine step %d anchor does not match %q", index, step.CatalogTarget))
+			}
+		default:
+			panic(fmt.Sprintf("coroutine program bootstrap v2 factory step %d has invalid kind %d", index, step.Kind))
+		}
+	}
 }
 
 // coroProgramBootstrapHeaderTypeV1 must remain field-for-field identical to

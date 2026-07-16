@@ -110,15 +110,26 @@ func (p *SSAPlan) CallPlan(call ssa.CallInstruction) (SSACallPlan, bool) {
 }
 
 // ElidesCall reports whether trusted frontend policy proved that the exact SSA
-// call emits no callable function edge. The source operation may be omitted or
-// lowered inline as a no-suspend compiler intrinsic. Elided calls deliberately
-// have no CallPlan and must not be treated as DirectPlain or another callable
-// ABI edge.
+// declaration call emits no callable edge. The source operation may be omitted,
+// lowered inline, or replaced by separately frozen lowered calls. Elided calls
+// deliberately have no CallPlan and must not be treated as DirectPlain or
+// another callable ABI edge; replacement edges retain their own effects.
 func (p *SSAPlan) ElidesCall(call ssa.CallInstruction) bool {
 	if p == nil || call == nil {
 		return false
 	}
 	_, ok := p.elidedCalls[call]
+	return ok
+}
+
+// RawFunctionAddressArgument reports whether the exact call argument is
+// lowered as a raw static function entry rather than as a Go interface or
+// descriptor value.
+func (p *SSAPlan) RawFunctionAddressArgument(call ssa.CallInstruction, argument int) bool {
+	if p == nil || call == nil || argument < 0 {
+		return false
+	}
+	_, ok := p.rawAddressArgs[ssaCallArgumentUse{call: call, argument: argument}]
 	return ok
 }
 
@@ -161,6 +172,9 @@ type ssaFuncFlow struct {
 	canonicalizer     *ssaFunctionCanonicalizer
 	directPlainArgs   map[ssaCallArgumentUse]struct{}
 	directPlainOrder  []ssaCallArgumentUse
+	rawAddressArgs    map[ssaCallArgumentUse]struct{}
+	rawAddressOrder   []ssaCallArgumentUse
+	rawAddressBoxes   map[*ssa.MakeInterface]ssaCallArgumentUse
 	closedValues      map[ssa.Value]SSAClosedDynamicCallCertificate
 }
 
@@ -177,11 +191,22 @@ func analyzeSSAFunctionFlow(
 	dynamicResolution DynamicResolution,
 	canonicalizer *ssaFunctionCanonicalizer,
 	directPlainArgs []ssaCallArgumentUse,
+	rawAddressArgs []ssaCallArgumentUse,
 	closedDynamicCalls map[ssa.CallInstruction]SSAClosedDynamicCallCertificate,
 ) (*ssaFuncFlow, error) {
 	directPlainSet := make(map[ssaCallArgumentUse]struct{}, len(directPlainArgs))
 	for _, use := range directPlainArgs {
 		directPlainSet[use] = struct{}{}
+	}
+	rawAddressSet := make(map[ssaCallArgumentUse]struct{}, len(rawAddressArgs))
+	rawAddressBoxes := make(map[*ssa.MakeInterface]ssaCallArgumentUse, len(rawAddressArgs))
+	for _, use := range rawAddressArgs {
+		rawAddressSet[use] = struct{}{}
+		if use.call != nil && use.call.Common() != nil && use.argument >= 0 && use.argument < len(use.call.Common().Args) {
+			if boxed, ok := use.call.Common().Args[use.argument].(*ssa.MakeInterface); ok {
+				rawAddressBoxes[boxed] = use
+			}
+		}
 	}
 	flow := &ssaFuncFlow{
 		allValues:         make(map[ssa.Value]struct{}),
@@ -194,6 +219,9 @@ func analyzeSSAFunctionFlow(
 		canonicalizer:     canonicalizer,
 		directPlainArgs:   directPlainSet,
 		directPlainOrder:  append([]ssaCallArgumentUse(nil), directPlainArgs...),
+		rawAddressArgs:    rawAddressSet,
+		rawAddressOrder:   append([]ssaCallArgumentUse(nil), rawAddressArgs...),
+		rawAddressBoxes:   rawAddressBoxes,
 		closedValues:      make(map[ssa.Value]SSAClosedDynamicCallCertificate, len(closedDynamicCalls)),
 	}
 	for call, certificate := range closedDynamicCalls {
@@ -502,7 +530,9 @@ func (f *ssaFuncFlow) seedInstruction(instruction ssa.Instruction) {
 			}
 		}
 	case *ssa.MakeInterface:
-		f.markBoundary(instruction.X)
+		if _, rawAddress := f.rawAddressBoxes[instruction]; !rawAddress {
+			f.markBoundary(instruction.X)
+		}
 	case *ssa.MakeClosure:
 		for _, binding := range instruction.Bindings {
 			f.markBoundary(binding)
@@ -536,6 +566,9 @@ func (f *ssaFuncFlow) seedInstruction(instruction ssa.Instruction) {
 			if _, directPlain := f.directPlainArgs[ssaCallArgumentUse{call: instruction, argument: argument}]; directPlain {
 				continue
 			}
+			if _, rawAddress := f.rawAddressArgs[ssaCallArgumentUse{call: instruction, argument: argument}]; rawAddress {
+				continue
+			}
 			f.markBoundary(value)
 		}
 	}
@@ -555,6 +588,38 @@ func (f *ssaFuncFlow) validateDirectPlainCallArguments() error {
 		if f.unknown[root] || f.mayBeNil[root] || len(f.targets[root]) != 1 || f.requiresDispatch(root) {
 			return fmt.Errorf("call argument %d in %q is not a closed non-nil singleton without another canonical boundary (unknown=%t nil=%t targets=%d canonical=%t)",
 				use.argument, use.call.Parent().Name(), f.unknown[root], f.mayBeNil[root], len(f.targets[root]), f.canonical[root])
+		}
+	}
+	return nil
+}
+
+func (f *ssaFuncFlow) validateRawFunctionAddressCallArguments() error {
+	for _, use := range f.rawAddressOrder {
+		if use.call == nil || use.call.Common() == nil || use.argument < 0 || use.argument >= len(use.call.Common().Args) {
+			return fmt.Errorf("invalid raw function-address call argument index %d", use.argument)
+		}
+		boxed, ok := use.call.Common().Args[use.argument].(*ssa.MakeInterface)
+		if !ok {
+			return fmt.Errorf("raw function-address call argument %d in %q is not a MakeInterface", use.argument, use.call.Parent().Name())
+		}
+		target, ok := boxed.X.(*ssa.Function)
+		if !ok {
+			return fmt.Errorf("raw function-address call argument %d in %q does not contain a static function", use.argument, use.call.Parent().Name())
+		}
+		index, ok := f.index[target]
+		if !ok {
+			return fmt.Errorf("raw function-address target %q in %q has no function-value flow component", target.Name(), use.call.Parent().Name())
+		}
+		root := f.root(index)
+		canonical, resolved, err := f.resolveTarget(target)
+		if err != nil {
+			return fmt.Errorf("resolve raw function-address target %q in %q: %w", target.Name(), use.call.Parent().Name(), err)
+		}
+		if !resolved || canonical == nil || !f.included[canonical] || f.unknown[root] || f.mayBeNil[root] || len(f.targets[root]) != 1 {
+			return fmt.Errorf("raw function-address target %q in %q is not a closed non-nil singleton in the emission universe", target.Name(), use.call.Parent().Name())
+		}
+		if _, present := f.targets[root][canonical]; !present {
+			return fmt.Errorf("raw function-address target %q in %q disagrees with canonical function-value flow", target.Name(), use.call.Parent().Name())
 		}
 	}
 	return nil

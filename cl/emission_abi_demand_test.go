@@ -39,6 +39,7 @@ func newEmissionABIDemandTestUniverse(testProg *emissionTestProgram, pkg emissio
 	owner := &preparedEmissionPackage{
 		identity: pkg.types.Path(),
 		ssa:      pkg.ssa,
+		files:    []*ast.File{pkg.file},
 		pkgPath:  pkg.types.Path(),
 		oldTypes: pkg.types,
 		pkgTypes: pkg.types,
@@ -1304,7 +1305,7 @@ func TestEmissionIntrinsicOperandPolicyCoversRegistry(t *testing.T) {
 	add(emissionIntrinsicRawAllValues, "syscall")
 	add(emissionIntrinsicCompileValues,
 		"boolToUint8", "atomicLoad", "atomicStore", "atomicCmpXchg",
-		"atomicCmpXchgOK", "atomicAddReturnNew", "atomicXchg", "atomicAdd",
+		"atomicCmpXchgOK", "atomicAddReturnNew", "coroPark", "atomicXchg", "atomicAdd",
 		"atomicSub", "atomicAnd", "atomicNand", "atomicOr", "atomicXor",
 		"atomicMax", "atomicMin", "atomicUMax", "atomicUMin")
 	add(emissionIntrinsicFirstValue,

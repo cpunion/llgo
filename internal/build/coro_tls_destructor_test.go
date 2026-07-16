@@ -453,9 +453,13 @@ func buildCoroTLSRuntimePlanError(t *testing.T, body string) error {
 	source += `
 func __llgo_coro_program_begin_v1() { install() }
 func __llgo_coro_program_run_v1() {}
+func __llgo_coro_frame_allocator_bootstrap_v1() {}
 func __llgo_coro_frame_alloc_v1() {}
 func __llgo_coro_frame_publish_v1() {}
 func __llgo_coro_await_prepare_v1() {}
+func __llgo_coro_preempt_poll_v1() bool { return false }
+func __llgo_coro_yield_prepare_v1() {}
+func __llgo_coro_park_prepare_v1() {}
 func __llgo_coro_complete_prepare_v1() {}
 func __llgo_coro_frame_free_v1() {}
 ` + body
@@ -475,7 +479,7 @@ func __llgo_coro_frame_free_v1() {}
 	}
 	ctx := &context{
 		prog:                        prog,
-		buildConf:                   &Config{EnableCoroProgramBootstrapRun: true},
+		buildConf:                   &Config{EnableCoroChildAwait: true, EnableCoroProgramBootstrapRun: true},
 		coroEmission:                emission,
 		coroSSAEmission:             ssaEmission,
 		coroTLSDestructorFixturePkg: llssa.PkgRuntime,

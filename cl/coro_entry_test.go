@@ -360,8 +360,8 @@ func Complex(ch chan int) int {
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		PackageOptions{Compilation: compilation},
 	)
-	if err == nil || !strings.Contains(err.Error(), "requires exactly one basic block") {
-		t.Fatalf("demanded complex preflight = %v, %v; want fail-closed CFG diagnostic", got, err)
+	if err == nil || !strings.Contains(err.Error(), "unsupported unary operation") {
+		t.Fatalf("demanded complex preflight = %v, %v; want fail-closed unsupported channel-receive instruction diagnostic", got, err)
 	}
 	if got != nil {
 		t.Fatal("demanded complex preflight returned a partial package")

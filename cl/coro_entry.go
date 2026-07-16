@@ -40,8 +40,10 @@ type plannedFunctionSymbol struct {
 	planned       bool
 	physical      bool
 	childAwait    bool
+	programRun    bool
 	plainDispatch bool
 	coroPlan      *coro.SSAPlan
+	emission      *EmissionUniverse
 }
 
 // resolveFunctionSymbol is shared by function definitions and declarations so
@@ -85,8 +87,10 @@ func (p *context) resolveFunctionSymbol(fn *ssa.Function) (plannedFunctionSymbol
 	entry.planned = true
 	entry.physical = p.compilation.EnableCoroPhysicalABI
 	entry.childAwait = p.compilation.EnableCoroChildAwait
+	entry.programRun = p.compilation.EnableCoroProgramBootstrapRun
 	entry.plainDispatch = p.compilation.EnableCoroPlainDispatch
 	entry.coroPlan = p.compilation.CoroPlan
+	entry.emission = p.compilation.EmissionUniverse
 	if p.compilation.CoroPlan.IgnoresBody(fn) {
 		return entry, fmt.Errorf("coroutine entry resolution: Go-emitted function %q has an ignored SSA body", plan.ID)
 	}
@@ -174,7 +178,10 @@ func (e plannedFunctionSymbol) checkSupported() error {
 		if !e.physical {
 			return fmt.Errorf("coroutine emission %q requires coroutine physical ABI lowering", e.plan.ID)
 		}
-		return validateCoroPhysicalABI(e.function, e.plan, e.coroPlan, e.childAwait)
+		if err := validateCoroPhysicalFunctionValueABI(e.plan, e.function.Signature, e.plainDispatch); err != nil {
+			return err
+		}
+		return validateCoroPhysicalABIWithUniverse(e.function, e.plan, e.coroPlan, e.emission, e.childAwait, e.programRun)
 	}
 	if e.plan.Emission == coro.EmitExternal && e.plan.FuncRep == coro.DirectCoro {
 		return fmt.Errorf("external coroutine emission %q requires coroutine physical ABI lowering", e.plan.ID)
@@ -244,8 +251,10 @@ func (c *Compilation) preflightCoroPlan() error {
 				planned:       true,
 				physical:      c.EnableCoroPhysicalABI,
 				childAwait:    c.EnableCoroChildAwait,
+				programRun:    c.EnableCoroProgramBootstrapRun,
 				plainDispatch: c.EnableCoroPlainDispatch,
 				coroPlan:      c.CoroPlan,
+				emission:      c.EmissionUniverse,
 			}
 			if err := entry.checkSupported(); err != nil {
 				c.coroPreflightErr = err
@@ -255,6 +264,9 @@ func (c *Compilation) preflightCoroPlan() error {
 				sig, err := c.EmissionUniverse.coroPhysicalSourceSignature(function.Function)
 				if err == nil {
 					err = validateCoroLeafPhysicalSignature(function.Plan, sig)
+				}
+				if err == nil {
+					err = validateCoroPhysicalFunctionValueABI(function.Plan, sig, c.EnableCoroPlainDispatch)
 				}
 				if err != nil {
 					c.coroPreflightErr = err

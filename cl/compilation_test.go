@@ -138,7 +138,7 @@ func TestCompilationCoroABIIdentityValidation(t *testing.T) {
 	}
 	programBootstrap := newChildAwait()
 	programBootstrap.EnableCoroProgramBootstrapRun = true
-	programBootstrap.SchedulerABI = coro.SchedulerProgramBootstrapABIV1
+	programBootstrap.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
 	if err := programBootstrap.validateCoroABIIdentity(false); err != nil {
 		t.Fatalf("complete program-bootstrap ABI identity: %v", err)
 	}

@@ -575,6 +575,9 @@ const (
 	llgoAtomicCmpXchgOK    = llgoInstrBase + 0x45
 	llgoAtomicAddReturnNew = llgoInstrBase + 0x46
 	llgoBoolToUint8        = llgoInstrBase + 0x47
+	// llgoCoroPark is a compiler-owned stack-cut operation. It is lowered only
+	// in the current physical coroutine frame and has no callable sync body.
+	llgoCoroPark = llgoInstrBase + 0x48
 
 	llgoAtomicOpLast = llgoAtomicOpBase + int(llssa.OpUMin)
 )

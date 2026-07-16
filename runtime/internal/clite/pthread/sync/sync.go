@@ -90,6 +90,10 @@ func (a *MutexAttr) SetType(typ MutexType) c.Int { return 0 }
 
 // -----------------------------------------------------------------------------
 
+// pthread_mutex_init initializes caller-owned fixed-size state; it does not
+// acquire the mutex or invoke a callback. IRQUnsafe is retained.
+//
+//llgo:coro noblock
 //go:linkname c_pthread_mutex_init C.pthread_mutex_init
 func c_pthread_mutex_init(m *Mutex, attr *MutexAttr) c.Int
 
@@ -99,6 +103,10 @@ func c_pthread_mutex_destroy(m *Mutex) c.Int
 //go:linkname c_pthread_mutex_lock C.pthread_mutex_lock
 func c_pthread_mutex_lock(m *Mutex) c.Int
 
+// pthread_mutex_unlock releases rather than acquires the mutex; it does not
+// wait for ownership or invoke a callback. IRQUnsafe is retained.
+//
+//llgo:coro noblock
 //go:linkname c_pthread_mutex_unlock C.pthread_mutex_unlock
 func c_pthread_mutex_unlock(m *Mutex) c.Int
 

@@ -101,6 +101,34 @@ func TestNewLLSSATargetUsesResolvedLLVMConfig(t *testing.T) {
 			},
 		},
 		{
+			name: "wasip2-freestanding-frontend",
+			conf: &Config{Goos: "linux", Goarch: "arm", Target: "wasip2"},
+			export: crosscompile.Export{
+				LLVMTarget: "wasm32-unknown-wasi",
+				CPU:        "generic",
+				Features:   "+bulk-memory,+mutable-globals,+nontrapping-fptoint,+sign-ext,-multivalue,-reference-types",
+			},
+			want: llssa.TargetSpec{
+				Triple:   "wasm32-unknown-wasi",
+				CPU:      "generic",
+				Features: "+bulk-memory,+mutable-globals,+nontrapping-fptoint,+sign-ext,-multivalue,-reference-types",
+			},
+		},
+		{
+			name: "wasm-unknown-freestanding-frontend",
+			conf: &Config{Goos: "linux", Goarch: "arm", Target: "wasm-unknown"},
+			export: crosscompile.Export{
+				LLVMTarget: "wasm32-unknown-unknown",
+				CPU:        "generic",
+				Features:   "+mutable-globals,+nontrapping-fptoint,+sign-ext,-multivalue,-reference-types",
+			},
+			want: llssa.TargetSpec{
+				Triple:   "wasm32-unknown-unknown",
+				CPU:      "generic",
+				Features: "+mutable-globals,+nontrapping-fptoint,+sign-ext,-multivalue,-reference-types",
+			},
+		},
+		{
 			name: "thumb",
 			conf: &Config{Goos: "linux", Goarch: "arm", Target: "rp2040", OptLevel: optlevel.Oz},
 			export: crosscompile.Export{
@@ -249,6 +277,8 @@ func TestResolvedTargetCompatibilityAudit(t *testing.T) {
 		{name: "rp2040", applied: true},         // thumb/arm are layout-compatible
 		{name: "riscv32", applied: true},        // riscv32/arm are layout-compatible
 		{name: "wasip1", applied: true},         // llgo's wasm32 frontend override is compatible
+		{name: "wasip2", applied: true},         // 32-bit arm frontend, wasm32 WASI Preview 2 backend
+		{name: "wasm-unknown", applied: true},   // 32-bit arm frontend, freestanding wasm32 backend
 		{name: "nintendoswitch", applied: true}, // aarch64/arm64 are layout-compatible
 	}
 	for _, tt := range tests {

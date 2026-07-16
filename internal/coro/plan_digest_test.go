@@ -667,6 +667,10 @@ func second() {}
 		{LogicalName: "runtime.first", Target: second},
 		{LogicalName: "runtime.second", Target: first},
 	})
+	unwindOnly := build([]SSALoweredCall{
+		{LogicalName: "runtime.first", Target: first, UnwindOnly: true},
+		{LogicalName: "runtime.second", Target: second},
+	})
 	metadata := validPlanDigestMetadata()
 	baselineDigest, err := baseline.CoroPlanDigest(metadata)
 	if err != nil {
@@ -686,12 +690,26 @@ func second() {}
 	if baselineDigest == swappedDigest {
 		t.Fatal("retargeting logical lowered-call identities did not change digest")
 	}
+	unwindDigest, err := unwindOnly.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baselineDigest == unwindDigest {
+		t.Fatal("changing a lowered call to unwind-only did not change digest")
+	}
 	document, err := baseline.canonicalPlanDigest(metadata)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(document.LoweredCalls) != 2 || document.LoweredCalls[0].LogicalName != "runtime.first" || document.LoweredCalls[1].LogicalName != "runtime.second" {
 		t.Fatalf("canonical lowered calls = %+v", document.LoweredCalls)
+	}
+	unwindDocument, err := unwindOnly.canonicalPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unwindDocument.LoweredCalls) != 2 || !unwindDocument.LoweredCalls[0].UnwindOnly || unwindDocument.LoweredCalls[1].UnwindOnly {
+		t.Fatalf("canonical unwind-only lowered calls = %+v", unwindDocument.LoweredCalls)
 	}
 }
 

@@ -60,6 +60,10 @@ func Cancel(thread Thread) c.Int
 // This is the same value that is returned in *thread in the
 // pthread_create(3) call that created this thread.
 //
+// pthread_self only reads the calling thread's fixed-size identity. It neither
+// waits on an external resource nor invokes a callback; IRQUnsafe is retained.
+//
+//llgo:coro noblock
 //go:linkname Self C.pthread_self
 func Self() Thread
 
