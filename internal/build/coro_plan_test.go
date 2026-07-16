@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/constant"
 	"go/importer"
 	"go/parser"
 	"go/token"
@@ -41,6 +42,841 @@ import (
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
 )
+
+func TestCoroPlanInputElidesOnlyFrontendNoInitCalls(t *testing.T) {
+	newImport := func(path, kind string) *types.Package {
+		pkg := types.NewPackage(path, path[strings.LastIndex(path, "/")+1:])
+		if kind != "" {
+			pkg.Scope().Insert(types.NewConst(
+				token.NoPos, pkg, "LLGoPackage", types.Typ[types.String], constant.MakeString(kind),
+			))
+		}
+		pkg.MarkComplete()
+		return pkg
+	}
+	imports := coroPlanTestImporter{
+		"example.com/noinit":   newImport("example.com/noinit", "noinit"),
+		"example.com/decl":     newImport("example.com/decl", "decl"),
+		"example.com/ordinary": newImport("example.com/ordinary", ""),
+	}
+	ssaPkg, _ := buildCoroPlanTestPackage(t, "example.com/elided", `package elided
+import (
+	_ "example.com/noinit"
+	_ "example.com/decl"
+	_ "example.com/ordinary"
+)
+func target() {}
+func calls(fn func()) {
+	target()
+	go target()
+	defer target()
+	fn()
+}
+`, imports)
+
+	initCalls := coroPlanTestCalls(ssaPkg.Func("init"))
+	wantElided := map[string]bool{
+		"example.com/noinit":   true,
+		"example.com/decl":     true,
+		"example.com/ordinary": false,
+	}
+	seenImports := make(map[string]bool)
+	for _, call := range initCalls {
+		callee := call.Common().StaticCallee()
+		if callee == nil || callee.Pkg == nil || callee.Pkg.Pkg == nil {
+			continue
+		}
+		path := callee.Pkg.Pkg.Path()
+		want, relevant := wantElided[path]
+		if !relevant {
+			continue
+		}
+		seenImports[path] = true
+		if got := frontendElidesNoInitCall(call); got != want {
+			t.Fatalf("frontendElidesNoInitCall(%s.init) = %t, want %t", path, got, want)
+		}
+	}
+	if len(seenImports) != len(wantElided) {
+		t.Fatalf("synthetic init import calls = %v, want all of %v", seenImports, wantElided)
+	}
+
+	ordinaryCalls := coroPlanTestCalls(ssaPkg.Func("calls"))
+	if len(ordinaryCalls) != 4 {
+		t.Fatalf("calls body has %d call instructions, want direct/go/defer/dynamic", len(ordinaryCalls))
+	}
+	for _, call := range ordinaryCalls {
+		if frontendElidesNoInitCall(call) {
+			t.Fatalf("ordinary %T call was classified as frontend-elided: %s", call, call)
+		}
+	}
+
+	input := CoroPlanInput{Program: ssaPkg.Prog}
+	plan, err := input.Analyze(coro.Roots{
+		{Function: ssaPkg.Func("init"), Demand: coro.SyncDemand},
+		{Function: ssaPkg.Func("calls"), Demand: coro.SyncDemand},
+	}, coro.SSAConfig{MaxPlainInstructions: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range initCalls {
+		callee := call.Common().StaticCallee()
+		if callee == nil || callee.Pkg == nil || callee.Pkg.Pkg == nil {
+			continue
+		}
+		want, relevant := wantElided[callee.Pkg.Pkg.Path()]
+		if !relevant {
+			continue
+		}
+		_, planned := plan.CallPlan(call)
+		if planned == want {
+			t.Fatalf("CallPlan(%s.init) present=%t, want present=%t", callee.Pkg.Pkg.Path(), planned, !want)
+		}
+	}
+	for _, call := range ordinaryCalls {
+		if _, planned := plan.CallPlan(call); !planned {
+			t.Fatalf("ordinary %T call has no CallPlan: %s", call, call)
+		}
+	}
+	var directOrdinary ssa.CallInstruction
+	for _, call := range ordinaryCalls {
+		if _, direct := call.(*ssa.Call); direct && call.Common().StaticCallee() == ssaPkg.Func("target") {
+			directOrdinary = call
+			break
+		}
+	}
+	if directOrdinary == nil {
+		t.Fatal("calls body has no ordinary direct target call")
+	}
+	_, err = input.Analyze(coro.Roots{{Function: ssaPkg.Func("calls"), Demand: coro.SyncDemand}}, coro.SSAConfig{
+		MaxPlainInstructions: -1,
+		ClassifyElidedCall: func(_ *ssa.Function, call ssa.CallInstruction) (bool, error) {
+			return call == directOrdinary, nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "builder cannot elide ordinary call") {
+		t.Fatalf("ordinary builder elision error = %v, want fail-closed rejection", err)
+	}
+}
+
+func TestCoroPlanInputValidatesFrozenIntrinsicCallSites(t *testing.T) {
+	tests := []struct {
+		name    string
+		source  string
+		wantErr string
+	}{
+		{
+			name: "constant string through canonical alias",
+			source: `package intrinsiccalls
+//llgo:link CStr llgo.cstr
+func CStr(string) *byte
+//llgo:link CStrAlias llgo.cstr
+func CStrAlias(string) *byte
+func root() { _ = CStrAlias("frozen") }
+`,
+		},
+		{
+			name: "variable string",
+			source: `package intrinsiccalls
+//llgo:link CStr llgo.cstr
+func CStr(string) *byte
+func root(value string) { _ = CStr(value) }
+`,
+			wantErr: "requires exactly one compile-time string constant argument",
+		},
+		{
+			name: "non-string constant",
+			source: `package intrinsiccalls
+//llgo:link CStr llgo.cstr
+func CStr(int) *byte
+func root() { _ = CStr(1) }
+`,
+			wantErr: "requires exactly one compile-time string constant argument",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ssaPkg, files := buildCoroPlanTestPackage(t, "example.com/intrinsiccalls", test.source, nil)
+			prog := llssa.NewProgram(nil)
+			defer prog.Dispose()
+			emission, err := cl.PrepareEmissionUniverse(prog, nil, []cl.EmissionPackage{{
+				SSA: ssaPkg, Files: files, Identity: "example.com/intrinsiccalls",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ssaEmission, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, emission.Functions())
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := CoroPlanInput{
+				Program:                ssaPkg.Prog,
+				EmissionUniverse:       ssaEmission,
+				resolveFunction:        emission.Resolve,
+				functionBackground:     emission.FunctionBackground,
+				intrinsicCallSemantics: emission.CoroIntrinsicCallSiteSemantics,
+			}
+			functionIDs := emission.FunctionIDConfig()
+			functionIDs.CoroABI = coro.EntryResolutionABIV0
+			functionIDs.SchedulerABI = coro.SchedulerNoneABIV0
+			functionIDs.ArchiveReady = true
+			analyze := func() (*coro.SSAPlan, error) {
+				return input.Analyze(coro.Roots{{Function: ssaPkg.Func("root"), Demand: coro.SyncDemand}}, coro.SSAConfig{
+					MaxPlainInstructions: -1,
+					FunctionIDs:          functionIDs,
+				})
+			}
+			plan, err := analyze()
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("invalid intrinsic call error = %v; want %q", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := coroPlanTestCalls(ssaPkg.Func("root"))
+			if len(calls) != 1 {
+				t.Fatalf("root intrinsic calls = %d, want one", len(calls))
+			}
+			call := calls[0]
+			if semantics, intrinsic, err := emission.CoroIntrinsicCallSiteSemantics(call); err != nil || !intrinsic || semantics != cl.CoroIntrinsicCallInlineNoSuspend {
+				t.Fatalf("alias intrinsic site semantics = %v, %v, %v; want inline-no-suspend, true, nil", semantics, intrinsic, err)
+			}
+			if !plan.ElidesCall(call) {
+				t.Fatal("valid aliased cstr site was not retained as exact elided call")
+			}
+			if _, ok := plan.CallPlan(call); ok {
+				t.Fatal("valid aliased cstr site unexpectedly has a managed CallPlan")
+			}
+			metadata := coro.PlanDigestMetadata{
+				CoroABI: coro.EntryResolutionABIV0, SchedulerABI: coro.SchedulerNoneABIV0,
+				PanicABI: coro.PanicLegacyABIV0, FuncRepABI: coro.FuncRepABIV0,
+				TargetTriple: "x86_64-unknown-linux-gnu", PointerBits: 64,
+				Endianness: "little", DataLayout: "e-p:64:64",
+			}
+			digest, err := plan.CoroPlanDigest(metadata)
+			if err != nil {
+				t.Fatal(err)
+			}
+			again, err := analyze()
+			if err != nil {
+				t.Fatal(err)
+			}
+			secondDigest, err := again.CoroPlanDigest(metadata)
+			if err != nil || secondDigest != digest || !again.ElidesCall(call) {
+				t.Fatalf("exact intrinsic site digest = %q, %v (elided=%t); want stable %q", secondDigest, err, again.ElidesCall(call), digest)
+			}
+		})
+	}
+}
+
+func TestRequiredCoroProgramRuntimePlanPlainClosureAndConflicts(t *testing.T) {
+	ssaPkg, files := buildCoroPlanTestPackage(t, llssa.PkgRuntime, `package runtime
+func __llgo_coro_program_begin_v1() { bootstrapHelper() }
+func __llgo_coro_program_run_v1() {}
+func __llgo_coro_frame_alloc_v1() {}
+func __llgo_coro_frame_publish_v1() {}
+func __llgo_coro_await_prepare_v1() {}
+func __llgo_coro_complete_prepare_v1() {}
+func __llgo_coro_frame_free_v1() {}
+func bootstrapHelper() { closureLoop(); externalABI(); inlineIntrinsic("bootstrap") }
+func closureLoop() { for i := 0; i < 2; i++ {} }
+func unrelatedLoop() { for {} }
+//llgo:link externalABI C.externalABI
+func externalABI()
+//llgo:link inlineIntrinsic llgo.cstr
+func inlineIntrinsic(string) *byte
+`, nil)
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	emission, err := cl.PrepareEmissionUniverse(prog, nil, []cl.EmissionPackage{{
+		SSA: ssaPkg, Files: files, Identity: llssa.PkgRuntime,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaEmission, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, emission.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &context{
+		buildConf:       &Config{EnableCoroProgramBootstrapRun: true},
+		coroEmission:    emission,
+		coroSSAEmission: ssaEmission,
+	}
+	roots, requiredPlain, directPlain, err := requiredCoroProgramRuntimePlan(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootsAgain, plainAgain, directAgain, err := requiredCoroProgramRuntimePlan(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(rootsAgain, roots) || !reflect.DeepEqual(plainAgain, requiredPlain) || !reflect.DeepEqual(directAgain, directPlain) {
+		t.Fatal("required runtime roots/plain closure is not deterministic")
+	}
+	if len(directPlain) != 0 {
+		t.Fatalf("required direct-plain C callbacks = %d, want none", len(directPlain))
+	}
+	wantRoots := []string{
+		"init",
+		coroProgramBeginSymbolV1,
+		coroProgramRunSymbolV1,
+		"__llgo_coro_frame_alloc_v1",
+		"__llgo_coro_frame_publish_v1",
+		"__llgo_coro_await_prepare_v1",
+		"__llgo_coro_complete_prepare_v1",
+		"__llgo_coro_frame_free_v1",
+	}
+	if len(roots) != len(wantRoots) {
+		t.Fatalf("required runtime roots = %d, want %d", len(roots), len(wantRoots))
+	}
+	for index, root := range roots {
+		if root.Function == nil || root.Function.Name() != wantRoots[index] || root.Demand != coro.SyncDemand {
+			t.Fatalf("required root %d = %+v, want %s/sync", index, root, wantRoots[index])
+		}
+	}
+	closureLoop := ssaPkg.Func("closureLoop")
+	unrelatedLoop := ssaPkg.Func("unrelatedLoop")
+	externalABI := ssaPkg.Func("externalABI")
+	inlineIntrinsic := ssaPkg.Func("inlineIntrinsic")
+	for _, fn := range []*ssa.Function{ssaPkg.Func("bootstrapHelper"), closureLoop, externalABI} {
+		if _, ok := requiredPlain[fn]; !ok {
+			t.Fatalf("required plain closure omitted %s", fn.Name())
+		}
+	}
+	if _, ok := requiredPlain[unrelatedLoop]; ok {
+		t.Fatal("required plain closure captured an unrelated function")
+	}
+	if _, ok := requiredPlain[inlineIntrinsic]; ok {
+		t.Fatal("compiler-inline no-suspend intrinsic entered the runtime plain-function island")
+	}
+	if semantics, intrinsic, err := emission.CoroIntrinsicSemantics(inlineIntrinsic); err != nil || !intrinsic || semantics != cl.CoroIntrinsicCallInlineNoSuspend {
+		t.Fatalf("inline intrinsic semantics = %v, %v, %v; want inline-no-suspend, true, nil", semantics, intrinsic, err)
+	}
+
+	input := CoroPlanInput{
+		Program:                ssaPkg.Prog,
+		EmissionUniverse:       ssaEmission,
+		resolveFunction:        emission.Resolve,
+		functionBackground:     emission.FunctionBackground,
+		intrinsicCallSemantics: emission.CoroIntrinsicCallSiteSemantics,
+		requiredRoots:          roots,
+		requiredPlain:          requiredPlain,
+		requiredDirectPlain:    directPlain,
+	}
+	functionIDs := emission.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV1
+	functionIDs.ArchiveReady = true
+	analyze := func(classify func(*ssa.Function) (coro.SSAFunctionPolicy, error)) (*coro.SSAPlan, error) {
+		return input.Analyze(coro.Roots{{Function: unrelatedLoop, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+			MaxPlainInstructions: -1,
+			ClassifyFunction:     classify,
+			FunctionIDs:          functionIDs,
+		})
+	}
+	plan, err := analyze(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closurePlan, ok := plan.FunctionPlan(closureLoop)
+	if !ok || closurePlan.Exec.Contains(coro.NeedsPreempt) || closurePlan.Effect.MaySuspend() || closurePlan.Emission != coro.EmitPlain {
+		t.Fatalf("required closure loop plan = %+v, want one trusted plain body", closurePlan)
+	}
+	unrelatedPlan, ok := plan.FunctionPlan(unrelatedLoop)
+	if !ok || !unrelatedPlan.Exec.Contains(coro.NeedsPreempt) || !unrelatedPlan.Effect.Contains(coro.YieldOnly) || unrelatedPlan.Emission != coro.EmitCoroutine {
+		t.Fatalf("unrelated loop plan = %+v, want coroutine preemption", unrelatedPlan)
+	}
+	externalPlan, ok := plan.FunctionPlan(externalABI)
+	if !ok || externalPlan.External != coro.ExternalKnown || externalPlan.Emission != coro.EmitExternal || externalPlan.Demand != coro.SyncDemand {
+		t.Fatalf("required bodyless ABI plan = %+v, want sync external-known", externalPlan)
+	}
+	var intrinsicCall ssa.CallInstruction
+	for _, call := range coroPlanTestCalls(ssaPkg.Func("bootstrapHelper")) {
+		if call.Common().StaticCallee() == inlineIntrinsic {
+			intrinsicCall = call
+			break
+		}
+	}
+	if intrinsicCall == nil || !plan.ElidesCall(intrinsicCall) {
+		t.Fatalf("inline intrinsic call = %v; want exact frontend-lowered call site", intrinsicCall)
+	}
+	if _, ok := plan.CallPlan(intrinsicCall); ok {
+		t.Fatal("compiler-inline no-suspend intrinsic unexpectedly has a managed CallPlan")
+	}
+
+	metadata := coro.PlanDigestMetadata{
+		CoroABI: coro.PhysicalABIV1, SchedulerABI: coro.SchedulerProgramBootstrapABIV1,
+		PanicABI: coro.PanicLegacyABIV0, FuncRepABI: coro.FuncRepABIV0,
+		TargetTriple: "x86_64-unknown-linux-gnu", PointerBits: 64,
+		Endianness: "little", DataLayout: "e-p:64:64",
+	}
+	digest, err := plan.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := analyze(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondDigest, err := second.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondDigest != digest {
+		t.Fatalf("required runtime plan digest changed: %s != %s", secondDigest, digest)
+	}
+
+	conflicts := []struct {
+		name   string
+		target *ssa.Function
+		policy coro.SSAFunctionPolicy
+		want   string
+	}{
+		{name: "effect", target: closureLoop, policy: coro.SSAFunctionPolicy{Effect: coro.MayPark}, want: "required no-suspend policy"},
+		{name: "exec", target: closureLoop, policy: coro.SSAFunctionPolicy{Exec: coro.ThreadAffine}, want: "required plain execution policy"},
+		{name: "dispatch", target: closureLoop, policy: coro.SSAFunctionPolicy{NeedsDispatch: true}, want: "required direct representation"},
+		{name: "defined external", target: closureLoop, policy: coro.SSAFunctionPolicy{External: coro.ExternalKnown, OverrideExternal: true}, want: "required defined classification"},
+		{name: "bodyless external", target: externalABI, policy: coro.SSAFunctionPolicy{External: coro.ExternalUnknownManaged, OverrideExternal: true}, want: "frontend C declaration"},
+	}
+	for _, test := range conflicts {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := analyze(func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+				if fn == test.target {
+					return test.policy, nil
+				}
+				return coro.SSAFunctionPolicy{}, nil
+			})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("conflict error = %v, want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestRequiredCoroProgramRuntimePlanRejectsInvalidIntrinsicSite(t *testing.T) {
+	ssaPkg, files := buildCoroPlanTestPackage(t, llssa.PkgRuntime, `package runtime
+func __llgo_coro_program_begin_v1() { bootstrapHelper() }
+func __llgo_coro_program_run_v1() {}
+func __llgo_coro_frame_alloc_v1() {}
+func __llgo_coro_frame_publish_v1() {}
+func __llgo_coro_await_prepare_v1() {}
+func __llgo_coro_complete_prepare_v1() {}
+func __llgo_coro_frame_free_v1() {}
+func intrinsicInput() string { return "not constant at the call site" }
+func bootstrapHelper() { inlineIntrinsic(intrinsicInput()) }
+//llgo:link inlineIntrinsic llgo.cstr
+func inlineIntrinsic(string) *byte
+`, nil)
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	emission, err := cl.PrepareEmissionUniverse(prog, nil, []cl.EmissionPackage{{
+		SSA: ssaPkg, Files: files, Identity: llssa.PkgRuntime,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaEmission, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, emission.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &context{
+		buildConf:       &Config{EnableCoroProgramBootstrapRun: true},
+		coroEmission:    emission,
+		coroSSAEmission: ssaEmission,
+	}
+	_, _, _, err = requiredCoroProgramRuntimePlan(ctx)
+	if err == nil || !strings.Contains(err.Error(), "requires exactly one compile-time string constant argument") {
+		t.Fatalf("invalid runtime-closure intrinsic error = %v; want exact call-site rejection", err)
+	}
+}
+
+func TestRequiredCoroProgramRuntimePlanDirectPlainCFunctionArgument(t *testing.T) {
+	fixture := buildRequiredCoroRuntimeFixture(t, `
+//llgo:type C
+type CCallback func()
+
+var dynamic func()
+
+func installC(CCallback) {}
+func syncCallback() { for i := 0; i < 2; i++ {} }
+func dynamicCallback() { dynamic() }
+func install() {
+	installC(CCallback(syncCallback))
+	installC(CCallback(dynamicCallback))
+}
+`)
+	if len(fixture.directPlain) != 1 {
+		t.Fatalf("required direct-plain callbacks = %d, want 1", len(fixture.directPlain))
+	}
+	use := fixture.directPlain[0]
+	syncCallback := fixture.pkg.Func("syncCallback")
+	dynamicCallback := fixture.pkg.Func("dynamicCallback")
+	if use.target != syncCallback || use.call.Parent() != fixture.pkg.Func("install") || use.argument != 0 {
+		t.Fatalf("required direct-plain callback = %+v, want install arg0 -> syncCallback", use)
+	}
+	if _, ok := fixture.requiredPlain[syncCallback]; !ok {
+		t.Fatal("sync C callback was not added to the required plain island")
+	}
+	if _, ok := fixture.requiredPlain[dynamicCallback]; ok {
+		t.Fatal("dynamic C callback incorrectly entered the required plain island")
+	}
+
+	plan, err := fixture.analyze(coro.SSAConfig{MaxPlainInstructions: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	callbackPlan, ok := plan.FunctionPlan(syncCallback)
+	if !ok || callbackPlan.Effect != coro.NoSuspend || callbackPlan.Exec.Contains(coro.NeedsPreempt) ||
+		callbackPlan.FuncRep != coro.DirectPlain || callbackPlan.Primary != coro.PrimaryPlain || callbackPlan.Emission != coro.EmitPlain {
+		t.Fatalf("sync C callback plan = %+v, want one non-suspending direct plain body", callbackPlan)
+	}
+	valuePlan, ok := plan.ValuePlan(use.call.Common().Args[use.argument])
+	if !ok || len(valuePlan.Funcs) != 1 || valuePlan.Funcs[0].Rep != coro.DirectPlain || valuePlan.Funcs[0].MayBeNil || len(valuePlan.Funcs[0].Targets) != 1 {
+		t.Fatalf("sync C callback value plan = %+v, present=%t", valuePlan, ok)
+	}
+	dynamicPlan, ok := plan.FunctionPlan(dynamicCallback)
+	if !ok || !dynamicPlan.Effect.IsOpaque() || dynamicPlan.FuncRep != coro.Dispatch {
+		t.Fatalf("dynamic C callback plan = %+v, want real Dispatch blocker", dynamicPlan)
+	}
+
+	var dynamicUse ssa.CallInstruction
+	for _, block := range fixture.pkg.Func("install").Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(ssa.CallInstruction)
+			if !ok || call == use.call {
+				continue
+			}
+			if target, ok := exactCoroStaticFunctionValue(fixture.ctx, call.Common().Args[0]); ok && target == dynamicCallback {
+				dynamicUse = call
+			}
+		}
+	}
+	if dynamicUse == nil {
+		t.Fatal("dynamic C callback use not found")
+	}
+	_, err = fixture.analyze(coro.SSAConfig{
+		MaxPlainInstructions: -1,
+		ClassifyDirectPlainCallArgument: func(_ *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+			return call == dynamicUse && argument == 0, nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "builder cannot authorize direct-plain ABI") {
+		t.Fatalf("unauthorized builder direct-plain error = %v", err)
+	}
+}
+
+func TestRequiredCoroProgramRuntimePlanDoesNotTraverseFrozenCStubBodies(t *testing.T) {
+	fixture := buildRequiredCoroRuntimeFixture(t, `
+//llgo:type C
+type CCallback func()
+
+func installC(CCallback) {}
+func hidden() {}
+
+//llgo:link cLeaf C.c_leaf
+func cLeaf() { hidden() }
+
+//llgo:link cCallback C.c_callback
+func cCallback() { hidden() }
+
+func install() {
+	cLeaf()
+	installC(CCallback(cCallback))
+}
+`)
+	cLeaf := fixture.pkg.Func("cLeaf")
+	hidden := fixture.pkg.Func("hidden")
+	cCallback := fixture.pkg.Func("cCallback")
+	if _, ok := fixture.requiredPlain[cLeaf]; !ok {
+		t.Fatal("exact frozen C static callee was not retained as a required plain leaf")
+	}
+	if _, ok := fixture.requiredPlain[hidden]; ok {
+		t.Fatal("callee reachable only through a frozen C fallback body entered requiredPlain")
+	}
+	if _, ok := fixture.requiredPlain[cCallback]; ok {
+		t.Fatal("bodyful frozen C callback was proved from its non-emitted fallback body")
+	}
+	if len(fixture.directPlain) != 0 {
+		t.Fatalf("frozen C stub produced %d direct-plain callback uses", len(fixture.directPlain))
+	}
+}
+
+func TestRequiredCoroProgramRuntimePlanDirectPlainCFunctionArgumentFailsClosed(t *testing.T) {
+	t.Run("other boundary", func(t *testing.T) {
+		fixture := buildRequiredCoroRuntimeFixture(t, `
+//llgo:type C
+type CCallback func()
+
+var escaped CCallback
+
+func installC(CCallback) {}
+func callback() {}
+func install() {
+	value := CCallback(callback)
+	installC(value)
+	escaped = value
+}
+`)
+		if len(fixture.directPlain) != 1 {
+			t.Fatalf("required direct-plain callbacks = %d, want 1", len(fixture.directPlain))
+		}
+		if _, err := fixture.analyze(coro.SSAConfig{MaxPlainInstructions: -1}); err == nil || !strings.Contains(err.Error(), "another canonical boundary") {
+			t.Fatalf("other-boundary error = %v", err)
+		}
+	})
+
+	t.Run("suspending body", func(t *testing.T) {
+		fixture := buildRequiredCoroRuntimeFixture(t, `
+//llgo:type C
+type CCallback func()
+
+var channel chan int
+
+func installC(CCallback) {}
+func callback() { <-channel }
+func install() { installC(CCallback(callback)) }
+`)
+		if len(fixture.directPlain) != 1 {
+			t.Fatalf("required direct-plain callbacks = %d, want 1", len(fixture.directPlain))
+		}
+		if _, err := fixture.analyze(coro.SSAConfig{MaxPlainInstructions: -1}); err == nil || !strings.Contains(err.Error(), "not a defined closed singleton with one non-suspending plain body") {
+			t.Fatalf("suspending callback error = %v", err)
+		}
+	})
+}
+
+func TestCoroPlanInputClassifiesFrozenBodylessCDeclarations(t *testing.T) {
+	fixture := buildRequiredCoroRuntimeFixture(t, `
+//llgo:link requiredC C.required_c
+func requiredC()
+
+//llgo:link foreignC C.foreign_c
+func foreignC()
+
+func goDeclaration()
+
+func install() { requiredC() }
+func callC() { foreignC() }
+func callGo() { goDeclaration() }
+`)
+	callC := fixture.pkg.Func("callC")
+	callGo := fixture.pkg.Func("callGo")
+	config := coro.SSAConfig{MaxPlainInstructions: -1, FunctionIDs: fixture.functionIDs}
+	plan, err := fixture.input.Analyze(coro.Roots{
+		{Function: callC, Demand: coro.AsyncDemand},
+		{Function: callGo, Demand: coro.AsyncDemand},
+	}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	required := functionPlanForBuildTest(t, plan, fixture.pkg.Func("requiredC"))
+	if required.External != coro.ExternalKnown || required.Effect != coro.NoSuspend || required.Exec.Contains(coro.BlockForeign) ||
+		required.FuncRep != coro.DirectPlain || required.Emission != coro.EmitExternal {
+		t.Fatalf("required scheduler-stack C declaration = %+v, want trusted external-known direct plain", required)
+	}
+	foreign := functionPlanForBuildTest(t, plan, fixture.pkg.Func("foreignC"))
+	if foreign.External != coro.ExternalUnknownForeign || foreign.Effect != coro.NoSuspend || !foreign.Exec.Contains(coro.BlockForeign|coro.IRQUnsafe) ||
+		foreign.FuncRep != coro.DirectPlain || foreign.Emission != coro.EmitExternal {
+		t.Fatalf("ordinary frozen C declaration = %+v, want external-unknown-foreign direct plain", foreign)
+	}
+	goDeclaration := functionPlanForBuildTest(t, plan, fixture.pkg.Func("goDeclaration"))
+	if goDeclaration.External != coro.ExternalUnknownManaged || !goDeclaration.Effect.IsOpaque() || !goDeclaration.Exec.IsOpaque() ||
+		goDeclaration.FuncRep != coro.Dispatch || goDeclaration.Emission != coro.EmitExternal {
+		t.Fatalf("ordinary bodyless Go declaration = %+v, want unknown-managed Dispatch", goDeclaration)
+	}
+
+	callCPlan := functionPlanForBuildTest(t, plan, callC)
+	if !callCPlan.Effect.Contains(coro.WaitForeign) || callCPlan.Effect.IsOpaque() {
+		t.Fatalf("C caller plan = %+v, want precise WaitForeign", callCPlan)
+	}
+	cCall := onlyBuildTestCall(t, callC)
+	if got, ok := plan.CallPlan(cCall); !ok || got.Kind != coro.CallForeign || got.Rep != coro.DirectPlain || got.Open {
+		t.Fatalf("C static CallPlan = %+v, present=%t", got, ok)
+	}
+	goCall := onlyBuildTestCall(t, callGo)
+	if got, ok := plan.CallPlan(goCall); !ok || got.Kind != coro.CallDirect || got.Rep != coro.Dispatch || got.Open {
+		t.Fatalf("Go declaration CallPlan = %+v, present=%t", got, ok)
+	}
+
+	known, err := fixture.input.Analyze(coro.Roots{{Function: callC, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+		MaxPlainInstructions: -1,
+		FunctionIDs:          fixture.functionIDs,
+		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+			if fn == fixture.pkg.Func("foreignC") {
+				return coro.SSAFunctionPolicy{
+					Effect:           coro.WaitHost,
+					Exec:             coro.ThreadAffine,
+					External:         coro.ExternalKnown,
+					OverrideExternal: true,
+				}, nil
+			}
+			return coro.SSAFunctionPolicy{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	knownForeign := functionPlanForBuildTest(t, known, fixture.pkg.Func("foreignC"))
+	if !known.IgnoresBody(fixture.pkg.Func("foreignC")) || knownForeign.External != coro.ExternalKnown ||
+		!knownForeign.Effect.Contains(coro.WaitHost) || !knownForeign.Exec.Contains(coro.ThreadAffine) ||
+		knownForeign.FuncRep != coro.DirectCoro || knownForeign.Emission != coro.EmitExternal {
+		t.Fatalf("explicit frozen C summary = %+v, ignored=%t; want preserved known async/host policy", knownForeign, known.IgnoresBody(fixture.pkg.Func("foreignC")))
+	}
+}
+
+func TestCoroPlanInputRejectsUnprovenBodylessRequiredDeclarations(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		directive string
+	}{
+		{name: "Go"},
+		{name: "Python", directive: "//llgo:link bad py.bad\n"},
+		{name: "intrinsic", directive: "//llgo:link bad llgo.unreachable\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := buildRequiredCoroRuntimeFixture(t, test.directive+`func bad()
+func install() { bad() }
+`)
+			if _, ok := fixture.requiredPlain[fixture.pkg.Func("bad")]; !ok {
+				t.Fatalf("bodyless %s declaration did not enter the static required closure", test.name)
+			}
+			if _, err := fixture.analyze(coro.SSAConfig{MaxPlainInstructions: -1}); err == nil || !strings.Contains(err.Error(), "has no frozen frontend C ABI proof") {
+				t.Fatalf("bodyless %s required declaration error = %v", test.name, err)
+			}
+		})
+	}
+}
+
+func TestCoroPlanInputRejectsBodyfulNonGoRequiredDeclarations(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		directive string
+	}{
+		{name: "Python", directive: "//llgo:link bad py.bad\n"},
+		{name: "intrinsic", directive: "//llgo:link bad llgo.unreachable\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := buildRequiredCoroRuntimeFixture(t, test.directive+`func bad() {}
+func install() { bad() }
+`)
+			if _, ok := fixture.requiredPlain[fixture.pkg.Func("bad")]; !ok {
+				t.Fatalf("bodyful %s declaration did not enter the exact static required closure", test.name)
+			}
+			if _, err := fixture.analyze(coro.SSAConfig{MaxPlainInstructions: -1}); err == nil || !strings.Contains(err.Error(), "has no frozen frontend C ABI proof") {
+				t.Fatalf("bodyful %s required declaration error = %v", test.name, err)
+			}
+		})
+	}
+}
+
+func functionPlanForBuildTest(t *testing.T, plan *coro.SSAPlan, fn *ssa.Function) coro.FunctionPlan {
+	t.Helper()
+	function, ok := plan.FunctionPlan(fn)
+	if !ok {
+		t.Fatalf("missing FunctionPlan for %s", fn)
+	}
+	return function
+}
+
+func onlyBuildTestCall(t *testing.T, fn *ssa.Function) ssa.CallInstruction {
+	t.Helper()
+	var result ssa.CallInstruction
+	for _, block := range fn.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(ssa.CallInstruction)
+			if !ok {
+				continue
+			}
+			if _, builtin := call.Common().Value.(*ssa.Builtin); builtin {
+				continue
+			}
+			if result != nil {
+				t.Fatalf("%s has multiple non-builtin calls", fn)
+			}
+			result = call
+		}
+	}
+	if result == nil {
+		t.Fatalf("%s has no non-builtin call", fn)
+	}
+	return result
+}
+
+type requiredCoroRuntimeFixture struct {
+	pkg           *ssa.Package
+	ctx           *context
+	input         CoroPlanInput
+	requiredPlain map[*ssa.Function]struct{}
+	directPlain   []requiredCoroDirectPlainCallArgument
+	functionIDs   coro.FunctionIDConfig
+}
+
+func (f requiredCoroRuntimeFixture) analyze(config coro.SSAConfig) (*coro.SSAPlan, error) {
+	config.FunctionIDs = f.functionIDs
+	return f.input.Analyze(nil, config)
+}
+
+func buildRequiredCoroRuntimeFixture(t *testing.T, body string) requiredCoroRuntimeFixture {
+	t.Helper()
+	source := `package runtime
+func __llgo_coro_program_begin_v1() { install() }
+func __llgo_coro_program_run_v1() {}
+func __llgo_coro_frame_alloc_v1() {}
+func __llgo_coro_frame_publish_v1() {}
+func __llgo_coro_await_prepare_v1() {}
+func __llgo_coro_complete_prepare_v1() {}
+func __llgo_coro_frame_free_v1() {}
+` + body
+	ssaPkg, files := buildCoroPlanTestPackage(t, llssa.PkgRuntime, source, nil)
+	prog := llssa.NewProgram(nil)
+	t.Cleanup(prog.Dispose)
+	cl.ParsePkgSyntax(prog, ssaPkg.Pkg, files)
+	emission, err := cl.PrepareEmissionUniverse(prog, nil, []cl.EmissionPackage{{
+		SSA: ssaPkg, Files: files, Identity: llssa.PkgRuntime,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaEmission, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, emission.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &context{
+		prog:            prog,
+		buildConf:       &Config{EnableCoroProgramBootstrapRun: true},
+		coroEmission:    emission,
+		coroSSAEmission: ssaEmission,
+	}
+	roots, requiredPlain, directPlain, err := requiredCoroProgramRuntimePlan(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	functionIDs := emission.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV1
+	functionIDs.ArchiveReady = true
+	return requiredCoroRuntimeFixture{
+		pkg: ssaPkg,
+		ctx: ctx,
+		input: CoroPlanInput{
+			Program:             ssaPkg.Prog,
+			EmissionUniverse:    ssaEmission,
+			resolveFunction:     emission.Resolve,
+			functionBackground:  emission.FunctionBackground,
+			requiredRoots:       roots,
+			requiredPlain:       requiredPlain,
+			requiredDirectPlain: directPlain,
+		},
+		requiredPlain: requiredPlain,
+		directPlain:   directPlain,
+		functionIDs:   functionIDs,
+	}
+}
 
 func TestBuildCoroPlanInstallsArchiveDigest(t *testing.T) {
 	fset := token.NewFileSet()
@@ -366,6 +1202,7 @@ func TestActiveCoroABIVersions(t *testing.T) {
 		{"entry resolution", &Config{}, coro.EntryResolutionABIV0, coro.SchedulerNoneABIV0},
 		{"physical leaf", &Config{EnableCoroPhysicalABI: true}, coro.PhysicalABIV0, coro.SchedulerNoneABIV0},
 		{"child await", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true}, coro.PhysicalABIV1, coro.SchedulerChildAwaitABIV0},
+		{"program bootstrap runtime", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true, EnableCoroProgramBootstrapRun: true}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapABIV1},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -484,6 +1321,11 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 		conf Config
 		want string
 	}{
+		{
+			name: "program bootstrap runtime requires descriptor ABI",
+			conf: Config{BuildMode: BuildModeExe, EnableCoroEntryResolution: true, EnableCoroPhysicalABI: true, EnableCoroChildAwait: true, EnableCoroProgramBootstrapRun: true},
+			want: "program bootstrap ABI is required",
+		},
 		{
 			name: "program bootstrap requires entry resolution",
 			conf: Config{BuildMode: BuildModeExe, EnableCoroProgramBootstrapABI: true},
@@ -1049,4 +1891,54 @@ func findSingleSSAMain(prog *ssa.Program) (*ssa.Function, error) {
 		return nil, fmt.Errorf("SSA main function not found")
 	}
 	return found, nil
+}
+
+type coroPlanTestImporter map[string]*types.Package
+
+func (p coroPlanTestImporter) Import(path string) (*types.Package, error) {
+	if pkg := p[path]; pkg != nil {
+		return pkg, nil
+	}
+	return nil, fmt.Errorf("test import %q is unavailable", path)
+}
+
+func buildCoroPlanTestPackage(
+	t *testing.T, pkgPath, source string, sourceImporter types.Importer,
+) (*ssa.Package, []*ast.File) {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "coro_plan_test.go", source, parser.ParseComments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sourceImporter == nil {
+		sourceImporter = importer.Default()
+	}
+	files := []*ast.File{file}
+	ssaPkg, _, err := ssautil.BuildPackage(
+		&types.Config{Importer: sourceImporter},
+		fset,
+		types.NewPackage(pkgPath, file.Name.Name),
+		files,
+		ssa.SanityCheckFunctions|ssa.InstantiateGenerics,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ssaPkg, files
+}
+
+func coroPlanTestCalls(fn *ssa.Function) []ssa.CallInstruction {
+	if fn == nil {
+		return nil
+	}
+	var calls []ssa.CallInstruction
+	for _, block := range fn.Blocks {
+		for _, instruction := range block.Instrs {
+			if call, ok := instruction.(ssa.CallInstruction); ok {
+				calls = append(calls, call)
+			}
+		}
+	}
+	return calls
 }

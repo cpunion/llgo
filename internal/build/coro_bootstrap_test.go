@@ -136,6 +136,25 @@ func TestSelectCoroProgramBootstrapV1AcceptsBothDemandPlainBody(t *testing.T) {
 	}
 }
 
+func TestSelectCoroProgramBootstrapRuntimeAcceptsLocalUnwindAndRejectsThreadAffinity(t *testing.T) {
+	ctx, pkg := newCoroBootstrapTestContext(t, nil, coroBootstrapTestPlan{
+		rootDemand: map[string]coro.Demand{"init": coro.AsyncDemand, "main": coro.AsyncDemand},
+	})
+	ctx.buildConf.EnableCoroProgramBootstrapRun = true
+	if _, err := selectCoroProgramBootstrapV1(ctx, pkg); err != nil {
+		t.Fatalf("production bootstrap rejected conservative local MayUnwind: %v", err)
+	}
+	// Rebuild through the real analyzer with an unsupported trusted bit.
+	ctx, pkg = newCoroBootstrapTestContext(t, nil, coroBootstrapTestPlan{
+		rootDemand: map[string]coro.Demand{"init": coro.AsyncDemand, "main": coro.AsyncDemand},
+		policy:     map[string]coro.SSAFunctionPolicy{"main": {Exec: coro.ThreadAffine}},
+	})
+	ctx.buildConf.EnableCoroProgramBootstrapRun = true
+	if _, err := selectCoroProgramBootstrapV1(ctx, pkg); err == nil || !strings.Contains(err.Error(), "unsupported execution constraints") {
+		t.Fatalf("production bootstrap error = %v, want thread-affinity rejection", err)
+	}
+}
+
 func TestSelectCoroProgramBootstrapV1RejectsMissingExactPackage(t *testing.T) {
 	ctx, pkg := newCoroBootstrapTestContext(t, nil, coroBootstrapTestPlan{
 		rootDemand: map[string]coro.Demand{"init": coro.AsyncDemand, "main": coro.AsyncDemand},
@@ -234,6 +253,15 @@ func TestCoroProgramBootstrapHashV1StableAndStepComplete(t *testing.T) {
 	}
 	if changedPlan == bootstrap.StepHash {
 		t.Fatal("bootstrap hash ignored the canonical plan digest")
+	}
+	ctx.coroPlanDigest = originalDigest
+	ctx.buildConf.EnableCoroProgramBootstrapRun = true
+	changedDriver, err := coroProgramBootstrapHashV1(ctx, bootstrap.Steps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changedDriver == bootstrap.StepHash {
+		t.Fatal("bootstrap hash ignored factory/driver activation")
 	}
 }
 

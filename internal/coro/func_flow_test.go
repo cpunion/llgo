@@ -22,6 +22,7 @@ import (
 	"go/types"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"golang.org/x/tools/go/ssa"
@@ -242,6 +243,92 @@ func storeNil() { functionSink = nil }
 	nilPlan, ok := plan.ValuePlan(store.Val)
 	if !ok || len(nilPlan.Funcs) != 1 || !nilPlan.Funcs[0].MayBeNil || nilPlan.Funcs[0].Rep != Dispatch {
 		t.Fatalf("stored nil plan = %+v, %v", nilPlan, ok)
+	}
+}
+
+func TestAnalyzeSSATrustedDirectPlainCallArgumentIsExactAndFailClosed(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "direct_plain_argument.go", `package coroid
+
+type CCallback func()
+
+var stored CCallback
+
+func sink(CCallback) {}
+func ordinary(CCallback) {}
+
+func exactTarget() {}
+func exact() { sink(CCallback(exactTarget)) }
+
+func storedTarget() {}
+func storedUse() {
+	callback := CCallback(storedTarget)
+	sink(callback)
+	stored = callback
+}
+
+func boxedTarget() {}
+func boxedUse() {
+	callback := CCallback(boxedTarget)
+	sink(callback)
+	_ = any(callback)
+}
+
+func ordinaryTarget() {}
+func ordinaryUse() {
+	callback := CCallback(ordinaryTarget)
+	sink(callback)
+	ordinary(callback)
+}
+
+func firstTarget() {}
+func secondTarget() {}
+func multiUse(flag bool) {
+	callback := CCallback(firstTarget)
+	if flag { callback = CCallback(secondTarget) }
+	sink(callback)
+}
+
+func openUse(callback CCallback) { sink(callback) }
+`)
+	sink := packageFunction(t, pkg, "sink")
+	analyze := func(owner string) (*SSAPlan, error) {
+		root := packageFunction(t, pkg, owner)
+		return AnalyzeSSA(prog, Roots{{Function: root, Demand: AsyncDemand}}, SSAConfig{
+			ClassifyDirectPlainCallArgument: func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+				return caller == root && call.Common().StaticCallee() == sink && argument == 0, nil
+			},
+		})
+	}
+
+	plan, err := analyze("exact")
+	if err != nil {
+		t.Fatal(err)
+	}
+	exactTarget := packageFunction(t, pkg, "exactTarget")
+	if got := functionPlanFor(t, plan, exactTarget); got.FuncRep != DirectPlain || got.Effect != NoSuspend || got.Emission != EmitPlain {
+		t.Fatalf("exact target plan = %+v, want one direct plain body", got)
+	}
+	exactCall := onlyNonBuiltinCall(t, packageFunction(t, pkg, "exact"))
+	valuePlan, ok := plan.ValuePlan(exactCall.Common().Args[0])
+	if !ok || len(valuePlan.Funcs) != 1 || valuePlan.Funcs[0].Rep != DirectPlain || len(valuePlan.Funcs[0].Targets) != 1 {
+		t.Fatalf("exact trusted argument plan = %+v, present=%t", valuePlan, ok)
+	}
+
+	for _, test := range []struct {
+		owner string
+		want  string
+	}{
+		{owner: "storedUse", want: "another canonical boundary"},
+		{owner: "boxedUse", want: "another canonical boundary"},
+		{owner: "ordinaryUse", want: "another canonical boundary"},
+		{owner: "multiUse", want: "targets=2"},
+		{owner: "openUse", want: "unknown=true"},
+	} {
+		t.Run(test.owner, func(t *testing.T) {
+			if _, err := analyze(test.owner); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("AnalyzeSSA error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 

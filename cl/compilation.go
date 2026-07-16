@@ -62,6 +62,10 @@ type Compilation struct {
 	// suspends itself; a matching scheduler owns every resume and destroy
 	// operation.
 	EnableCoroChildAwait bool
+	// EnableCoroProgramBootstrapRun selects the program-root scheduler ABI for
+	// package identities. The factory itself lives in the uncached entry module,
+	// but every linked archive must agree with the runtime driver contract.
+	EnableCoroProgramBootstrapRun bool
 
 	// EmissionUniverse is the immutable, compilation-scoped set of exact SSA
 	// functions that cl may resolve while emitting this compilation. Active
@@ -98,6 +102,12 @@ func (c *Compilation) validateCoroABIIdentity(required bool) error {
 	wantSchedulerABI := coro.SchedulerNoneABIV0
 	if c.EnableCoroChildAwait {
 		wantSchedulerABI = coro.SchedulerChildAwaitABIV0
+	}
+	if c.EnableCoroProgramBootstrapRun {
+		if !c.EnableCoroChildAwait {
+			return fmt.Errorf("coroutine program bootstrap runtime requires child-await lowering")
+		}
+		wantSchedulerABI = coro.SchedulerProgramBootstrapABIV1
 	}
 	checks := []struct {
 		name string

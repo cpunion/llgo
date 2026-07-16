@@ -157,13 +157,16 @@ func C() {}
 	}
 	a, b, c := pkg.ssa.Func("A"), pkg.ssa.Func("B"), pkg.ssa.Func("C")
 	universe := &EmissionUniverse{
-		goProg:      testProg.ssa,
-		packages:    map[*ssa.Package]*preparedEmissionPackage{pkg.ssa: owner},
-		aliases:     map[*ssa.Function]*ssa.Function{a: b, b: c},
-		excluded:    make(map[*ssa.Function]none),
-		required:    make(map[*ssa.Function]none),
-		fnOwners:    make(map[*ssa.Function]*preparedEmissionPackage),
-		fnStates:    make(map[*ssa.Function]emissionFunctionState),
+		goProg:   testProg.ssa,
+		packages: map[*ssa.Package]*preparedEmissionPackage{pkg.ssa: owner},
+		aliases:  map[*ssa.Function]*ssa.Function{a: b, b: c},
+		excluded: make(map[*ssa.Function]none),
+		required: make(map[*ssa.Function]none),
+		fnOwners: make(map[*ssa.Function]*preparedEmissionPackage),
+		fnStates: make(map[*ssa.Function]emissionFunctionState),
+		functionKinds: map[emissionFunctionOwnerKey]int{
+			{function: c, owner: owner}: goFunc,
+		},
 		finalKeys:   map[emissionFunctionOwnerKey]string{{function: c, owner: owner}: "canonical-c"},
 		useOwners:   make(map[*ssa.Function]map[*preparedEmissionPackage]none),
 		ownerStates: make(map[*ssa.Function]map[*preparedEmissionPackage]emissionFunctionState),
@@ -187,6 +190,12 @@ func C() {}
 	if got := universe.finalIdentity(a); got != universe.finalIdentity(c) {
 		t.Fatalf("alias-chain final identity = %q; want canonical %q", got, universe.finalIdentity(c))
 	}
+	cOwnerKey := emissionFunctionOwnerKey{function: c, owner: owner}
+	delete(universe.functionKinds, cOwnerKey)
+	if _, err := universe.addResolvedRequired(a, owner, c, emissionFunctionState{state: pkgNormal}); err == nil || !strings.Contains(err.Error(), "partially frozen frontend metadata") {
+		t.Fatalf("half-frozen alias metadata error = %v; want construction-time rejection", err)
+	}
+	universe.functionKinds[cOwnerKey] = goFunc
 
 	universe.aliases[c] = a
 	if _, err := universe.addResolvedRequired(a, owner, c, emissionFunctionState{state: pkgNormal}); err == nil || !strings.Contains(err.Error(), "cyclic canonical aliases") {
@@ -198,6 +207,209 @@ func C() {}
 	if got := universe.finalIdentity(a); got != "<cyclic-alias>" {
 		t.Fatalf("cyclic alias final identity = %q; want cycle diagnostic", got)
 	}
+}
+
+func TestEmissionUniverseReplaceManagedWinnerTransfersAllOwnerMetadata(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/replacemultiowner", `package replacemultiowner
+func Old() {}
+func Replacement() {}
+`)
+	testProg.ssa.Build()
+	old := pkg.ssa.Func("Old")
+	replacement := pkg.ssa.Func("Replacement")
+	ownerA := &preparedEmissionPackage{
+		order:     0,
+		identity:  "owner-a",
+		pkgPath:   "example.com/emission/owner-a",
+		winners:   make(map[string]*ssa.Function),
+		fromPatch: make(map[*ssa.Function]bool),
+	}
+	ownerB := &preparedEmissionPackage{
+		order:    1,
+		identity: "owner-b",
+		pkgPath:  "example.com/emission/owner-b",
+	}
+	ownerAKey := managedSymbolKey(goFunc, "same", "signature")
+	ownerBKey := managedSymbolKey(goFunc, "owner-b-same", "signature")
+	newUniverse := func() *EmissionUniverse {
+		ownerA.winners = map[string]*ssa.Function{ownerAKey: old}
+		ownerA.fromPatch = map[*ssa.Function]bool{old: false}
+		return &EmissionUniverse{
+			aliases:  make(map[*ssa.Function]*ssa.Function),
+			required: map[*ssa.Function]none{old: {}},
+			useOwners: map[*ssa.Function]map[*preparedEmissionPackage]none{
+				old: {ownerA: {}, ownerB: {}},
+			},
+			ownerStates: map[*ssa.Function]map[*preparedEmissionPackage]emissionFunctionState{
+				old: {
+					ownerA: {state: pkgHasPatch},
+					ownerB: {state: pkgNormal},
+				},
+			},
+			functionKinds: map[emissionFunctionOwnerKey]int{
+				{function: old, owner: ownerA}: goFunc,
+				{function: old, owner: ownerB}: goFunc,
+			},
+			finalKeys: map[emissionFunctionOwnerKey]string{
+				{function: old, owner: ownerA}: ownerAKey,
+				{function: old, owner: ownerB}: ownerBKey,
+			},
+		}
+	}
+
+	t.Run("transfer", func(t *testing.T) {
+		universe := newUniverse()
+		if err := universe.replaceManagedWinner(ownerA, ownerAKey, old, replacement); err != nil {
+			t.Fatal(err)
+		}
+		if got := ownerA.winners[ownerAKey]; got != replacement {
+			t.Fatalf("managed winner = %v; want replacement %v", got, replacement)
+		}
+		if got := universe.aliases[old]; got != replacement {
+			t.Fatalf("old canonical alias = %v; want replacement %v", got, replacement)
+		}
+		if len(universe.useOwners[replacement]) != 2 {
+			t.Fatalf("replacement use owners = %v; want both frozen owners", universe.useOwners[replacement])
+		}
+		for owner, wantKey := range map[*preparedEmissionPackage]string{ownerA: ownerAKey, ownerB: ownerBKey} {
+			oldKey := emissionFunctionOwnerKey{function: old, owner: owner}
+			if _, ok := universe.functionKinds[oldKey]; ok {
+				t.Fatalf("old function kind remains for owner %q", owner.identity)
+			}
+			if _, ok := universe.finalKeys[oldKey]; ok {
+				t.Fatalf("old managed key remains for owner %q", owner.identity)
+			}
+			replacementKey := emissionFunctionOwnerKey{function: replacement, owner: owner}
+			if got := universe.functionKinds[replacementKey]; got != goFunc {
+				t.Fatalf("replacement function kind for owner %q = %d; want goFunc", owner.identity, got)
+			}
+			if got := universe.finalKeys[replacementKey]; got != wantKey {
+				t.Fatalf("replacement managed key for owner %q = %q; want %q", owner.identity, got, wantKey)
+			}
+		}
+	})
+
+	t.Run("conflict", func(t *testing.T) {
+		universe := newUniverse()
+		universe.functionKinds[emissionFunctionOwnerKey{function: replacement, owner: ownerB}] = cFunc
+		err := universe.replaceManagedWinner(ownerA, ownerAKey, old, replacement)
+		if err == nil || !strings.Contains(err.Error(), "conflicting frozen frontend kinds") {
+			t.Fatalf("replaceManagedWinner conflict error = %v; want frozen-kind conflict", err)
+		}
+		if got := ownerA.winners[ownerAKey]; got != old {
+			t.Fatalf("managed winner mutated after conflict = %v; want old %v", got, old)
+		}
+		if _, aliased := universe.aliases[old]; aliased {
+			t.Fatal("old function was aliased after rejected metadata conflict")
+		}
+	})
+
+	t.Run("provenance conflict is atomic", func(t *testing.T) {
+		universe := newUniverse()
+		universe.ownerStates[old][ownerB] = emissionFunctionState{state: pkgHasPatch}
+		universe.useOwners[replacement] = map[*preparedEmissionPackage]none{ownerB: {}}
+		universe.ownerStates[replacement] = map[*preparedEmissionPackage]emissionFunctionState{
+			ownerB: {state: pkgInPatch},
+		}
+		err := universe.replaceManagedWinner(ownerA, ownerAKey, old, replacement)
+		if err == nil || !strings.Contains(err.Error(), "conflicting emission provenance") {
+			t.Fatalf("replaceManagedWinner provenance error = %v; want conflict", err)
+		}
+		if got := ownerA.winners[ownerAKey]; got != old {
+			t.Fatalf("managed winner mutated after provenance conflict = %v; want old %v", got, old)
+		}
+		if ownerA.fromPatch[replacement] {
+			t.Fatal("replacement patch provenance mutated after rejected merge")
+		}
+		if _, aliased := universe.aliases[old]; aliased {
+			t.Fatal("old function was aliased after rejected provenance conflict")
+		}
+		if _, required := universe.required[old]; !required {
+			t.Fatal("old function requirement was deleted after rejected provenance conflict")
+		}
+		if len(universe.useOwners[old]) != 2 || len(universe.ownerStates[old]) != 2 {
+			t.Fatal("old owner metadata was mutated after rejected provenance conflict")
+		}
+		if got := universe.ownerStates[replacement][ownerB]; got.state != pkgInPatch || got.fromPatch {
+			t.Fatalf("replacement provenance mutated after conflict: %+v", got)
+		}
+		if universe.ownerStateErr != nil {
+			t.Fatalf("atomic preflight leaked global ownerStateErr: %v", universe.ownerStateErr)
+		}
+	})
+
+	newIntrinsicUniverse := func() (*EmissionUniverse, string, string) {
+		ownerAKey := managedSymbolKey(llgoInstr, "cstr", "signature")
+		ownerBKey := managedSymbolKey(llgoInstr, "cstr", "owner-b-signature")
+		ownerA.winners = map[string]*ssa.Function{ownerAKey: old}
+		ownerA.fromPatch = map[*ssa.Function]bool{old: false}
+		universe := &EmissionUniverse{
+			aliases:  make(map[*ssa.Function]*ssa.Function),
+			required: map[*ssa.Function]none{old: {}},
+			useOwners: map[*ssa.Function]map[*preparedEmissionPackage]none{
+				old: {ownerA: {}, ownerB: {}},
+			},
+			ownerStates: map[*ssa.Function]map[*preparedEmissionPackage]emissionFunctionState{
+				old: {
+					ownerA: {state: pkgHasPatch},
+					ownerB: {state: pkgNormal},
+				},
+			},
+			functionKinds: map[emissionFunctionOwnerKey]int{
+				{function: old, owner: ownerA}: llgoInstr,
+				{function: old, owner: ownerB}: llgoInstr,
+			},
+			intrinsicOps: map[emissionFunctionOwnerKey]int{
+				{function: old, owner: ownerA}: llgoCstr,
+				{function: old, owner: ownerB}: llgoCstr,
+			},
+			finalKeys: map[emissionFunctionOwnerKey]string{
+				{function: old, owner: ownerA}: ownerAKey,
+				{function: old, owner: ownerB}: ownerBKey,
+			},
+		}
+		return universe, ownerAKey, ownerBKey
+	}
+
+	t.Run("intrinsic opcode transfer", func(t *testing.T) {
+		universe, ownerAKey, _ := newIntrinsicUniverse()
+		if err := universe.replaceManagedWinner(ownerA, ownerAKey, old, replacement); err != nil {
+			t.Fatal(err)
+		}
+		for _, owner := range []*preparedEmissionPackage{ownerA, ownerB} {
+			oldKey := emissionFunctionOwnerKey{function: old, owner: owner}
+			if _, exists := universe.intrinsicOps[oldKey]; exists {
+				t.Fatalf("old intrinsic opcode remains for owner %q", owner.identity)
+			}
+			replacementKey := emissionFunctionOwnerKey{function: replacement, owner: owner}
+			if opcode, exists := universe.intrinsicOps[replacementKey]; !exists || opcode != llgoCstr {
+				t.Fatalf("replacement intrinsic opcode for owner %q = %d, %v; want llgoCstr, true", owner.identity, opcode, exists)
+			}
+		}
+	})
+
+	t.Run("intrinsic opcode conflict is atomic", func(t *testing.T) {
+		universe, ownerAKey, _ := newIntrinsicUniverse()
+		replacementKey := emissionFunctionOwnerKey{function: replacement, owner: ownerB}
+		universe.intrinsicOps[replacementKey] = llgoUnreachable
+		err := universe.replaceManagedWinner(ownerA, ownerAKey, old, replacement)
+		if err == nil || !strings.Contains(err.Error(), "conflicting frozen llgo intrinsic opcode") {
+			t.Fatalf("replaceManagedWinner intrinsic conflict error = %v; want opcode conflict", err)
+		}
+		if got := ownerA.winners[ownerAKey]; got != old {
+			t.Fatalf("managed winner mutated after intrinsic conflict = %v; want old %v", got, old)
+		}
+		if _, aliased := universe.aliases[old]; aliased {
+			t.Fatal("old intrinsic was aliased after rejected opcode conflict")
+		}
+		for _, owner := range []*preparedEmissionPackage{ownerA, ownerB} {
+			oldKey := emissionFunctionOwnerKey{function: old, owner: owner}
+			if opcode, exists := universe.intrinsicOps[oldKey]; !exists || opcode != llgoCstr {
+				t.Fatalf("old intrinsic opcode mutated for owner %q: %d, %v", owner.identity, opcode, exists)
+			}
+		}
+	})
 }
 
 func preparePatchedEmissionTest(t *testing.T, originalSource, altSource string) (*EmissionUniverse, emissionTestPackage, emissionTestPackage, func()) {
@@ -258,6 +470,179 @@ func F() int { return 2 }
 	copyOfFunctions[0] = nil
 	if universe.Functions()[0] == nil {
 		t.Fatal("Functions exposed mutable storage")
+	}
+}
+
+func TestEmissionUniversePatchIntrinsicWinnerTransfersFrozenOpcode(t *testing.T) {
+	universe, original, alt, dispose := preparePatchedEmissionTest(t, `package p
+//llgo:link Intrinsic llgo.cstr
+func Intrinsic(string) *byte
+`, `package p
+//llgo:link Intrinsic llgo.cstr
+func Intrinsic(string) *byte
+`)
+	defer dispose()
+
+	originalIntrinsic, replacement := original.ssa.Func("Intrinsic"), alt.ssa.Func("Intrinsic")
+	if got, ok := universe.Resolve(originalIntrinsic); !ok || got != replacement {
+		t.Fatalf("Resolve(original intrinsic) = %v, %v; want exact patch winner", got, ok)
+	}
+	for _, fn := range []*ssa.Function{originalIntrinsic, replacement} {
+		semantics, intrinsic, err := universe.CoroIntrinsicSemantics(fn)
+		if err != nil || !intrinsic || semantics != CoroIntrinsicCallInlineNoSuspend {
+			t.Fatalf("CoroIntrinsicSemantics(%s) = %v, %v, %v; want inline-no-suspend, true, nil", fn.Name(), semantics, intrinsic, err)
+		}
+	}
+	owner := universe.packages[original.ssa]
+	if opcode, ok := universe.intrinsicOps[emissionFunctionOwnerKey{function: replacement, owner: owner}]; !ok || opcode != llgoCstr {
+		t.Fatalf("patch intrinsic opcode = %d, %v; want llgoCstr, true", opcode, ok)
+	}
+	if opcode, ok := universe.intrinsicOps[emissionFunctionOwnerKey{function: originalIntrinsic, owner: owner}]; !ok || opcode != llgoCstr {
+		t.Fatalf("patch intrinsic alias opcode = %d, %v; want llgoCstr, true", opcode, ok)
+	}
+}
+
+func TestEmissionUniversePatchInitFreezesOmittedDependencyInitMetadata(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	dependency := testProg.addPackage(t, "example.com/emission/patchinitdep", `package patchinitdep
+var Ready = initialize()
+func initialize() int { return 1 }
+`)
+	original := testProg.addPackage(t, "example.com/emission/patchinitowner", `package patchinitowner
+var Original = 1
+`)
+	alt := testProg.addPackage(t, abi.PatchPathPrefix+"example.com/emission/patchinitowner", `package patchinitowner
+import _ "example.com/emission/patchinitdep"
+var Alternate = 2
+`)
+	testProg.ssa.Build()
+
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, Patches{
+		"example.com/emission/patchinitowner": {
+			Alt:   alt.ssa,
+			Types: typepatch.Clone(alt.types),
+		},
+	}, []EmissionPackage{{
+		SSA:   original.ssa,
+		Files: []*ast.File{original.file, alt.file},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if universe.packages[dependency.ssa] != nil {
+		t.Fatal("test dependency unexpectedly has an explicit emission package owner")
+	}
+	dependencyInit := dependency.ssa.Func("init")
+	if dependencyInit == nil || !universe.Contains(dependencyInit) {
+		t.Fatalf("patch dependency init = %v; want materialized canonical function", dependencyInit)
+	}
+	if got, classified, err := universe.FunctionBackground(dependencyInit); err != nil || got != llssa.InGo || !classified {
+		t.Fatalf("FunctionBackground(patch dependency init) = %v, %v, %v; want InGo, true, nil", got, classified, err)
+	}
+	owner := universe.packages[original.ssa]
+	ownerKey := emissionFunctionOwnerKey{function: dependencyInit, owner: owner}
+	if kind, ok := universe.functionKinds[ownerKey]; !ok || kind != goFunc {
+		t.Fatalf("patch dependency init frozen kind = %d, %v; want goFunc, true", kind, ok)
+	}
+	if key := universe.finalKeys[ownerKey]; key == "" || managedKeyFunctionType(key) != goFunc {
+		t.Fatalf("patch dependency init frozen managed key = %q; want Go managed provenance", key)
+	}
+}
+
+func TestEmissionUniverseMetadataOnlyDeclarationFreezesReachedCFunction(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	declaration := testProg.addPackage(t, "example.com/emission/decldep", `package decldep
+const LLGoPackage = "decl"
+//go:linkname Exit C.exit
+func Exit(int)
+//go:linkname Unused C.unused
+func Unused()
+`)
+	owner := testProg.addPackage(t, "example.com/emission/declowner", `package declowner
+import "example.com/emission/decldep"
+func Call() { decldep.Exit(0) }
+`)
+	testProg.ssa.Build()
+
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{
+		{SSA: owner.ssa, Files: []*ast.File{owner.file}},
+		{SSA: declaration.ssa, Files: []*ast.File{declaration.file}, MetadataOnly: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared := universe.packages[declaration.ssa]
+	if prepared == nil || !prepared.metadataOnly {
+		t.Fatal("declaration package has no exact metadata-only frontend owner")
+	}
+	exit := declaration.ssa.Func("Exit")
+	if resolved, ok := universe.Resolve(exit); !ok || resolved != exit || !universe.Contains(exit) {
+		t.Fatalf("Resolve(Exit) = %v, %v (contained=%v); want exact reached canonical declaration", resolved, ok, universe.Contains(exit))
+	}
+	if universe.Contains(declaration.ssa.Func("Unused")) {
+		t.Fatal("metadata-only package eagerly selected an unused declaration")
+	}
+	declarationInit := declaration.ssa.Func("init")
+	if !universe.Contains(declarationInit) {
+		t.Fatal("decl package synthetic init is absent from the exact retained universe")
+	}
+	if got, classified, err := universe.FunctionBackground(exit); err != nil || got != llssa.InC || !classified {
+		t.Fatalf("FunctionBackground(Exit) = %v, %v, %v; want InC, true, nil", got, classified, err)
+	}
+
+	// The public query is frozen construction metadata, not a late lookup in
+	// the mutable llssa linkname table.
+	prog.SetLinkname("example.com/emission/decldep.Exit", "example.com/other.GoExit")
+	if got, classified, err := universe.FunctionBackground(exit); err != nil || got != llssa.InC || !classified {
+		t.Fatalf("FunctionBackground(Exit) after linkname mutation = %v, %v, %v; want frozen InC", got, classified, err)
+	}
+
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(testProg.ssa, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := coro.AnalyzeSSA(testProg.ssa, nil, coro.SSAConfig{
+		EmissionUniverse: ssaUniverse,
+		FunctionIDs:      universe.FunctionIDConfig(),
+		ClassifyElidedCall: func(_ *ssa.Function, call ssa.CallInstruction) (bool, error) {
+			return FrontendElidesNoInitCall(call), nil
+		},
+		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+			background, classified, err := universe.FunctionBackground(fn)
+			if err != nil || !classified || background != llssa.InC {
+				return coro.SSAFunctionPolicy{}, err
+			}
+			return coro.SSAFunctionPolicy{
+				External:         coro.ExternalUnknownForeign,
+				OverrideExternal: true,
+				IgnoreBody:       true,
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.IgnoresBody(exit) {
+		t.Fatal("reached frozen C declaration did not receive physical IgnoreBody policy")
+	}
+	var declarationInitCall ssa.CallInstruction
+	for _, block := range owner.ssa.Func("init").Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(ssa.CallInstruction)
+			if ok && call.Common().StaticCallee() == declarationInit {
+				declarationInitCall = call
+			}
+		}
+	}
+	if declarationInitCall == nil || !plan.ElidesCall(declarationInitCall) {
+		t.Fatalf("decl init call = %v; want exact retained frontend-elided call", declarationInitCall)
+	}
+	if _, ok := plan.CallPlan(declarationInitCall); ok {
+		t.Fatal("frontend-elided decl init call unexpectedly has a CallPlan")
 	}
 }
 
@@ -958,11 +1343,18 @@ func TestEmissionUniverseManagedKeysIncludeFrontendFunctionKind(t *testing.T) {
 func Go()
 //llgo:link C C.same
 func C()
+//llgo:link CAlias C.same
+func CAlias()
 //llgo:link Py py.same
 func Py()
 //llgo:link Instr llgo.unreachable
 func Instr()
+//llgo:link CStr llgo.cstr
+func CStr(string) *byte
+//llgo:link CStrAlias llgo.cstr
+func CStrAlias(string) *byte
 func _cgoexp_Ignored()
+func Closure() func() { return func() {} }
 `)
 	testProg.ssa.Build()
 	prog := llssa.NewProgram(nil)
@@ -972,7 +1364,7 @@ func _cgoexp_Ignored()
 		t.Fatal(err)
 	}
 	owner := universe.packages[pkg.ssa]
-	for name, want := range map[string]int{"Go": goFunc, "C": cFunc, "Py": pyFunc, "Instr": llgoInstr} {
+	for name, want := range map[string]int{"Go": goFunc, "C": cFunc, "CAlias": cFunc, "Py": pyFunc, "Instr": llgoInstr, "CStr": llgoInstr, "CStrAlias": llgoInstr} {
 		key, managed, err := universe.managedSymbolKey(owner, pkg.ssa.Func(name), pkgNormal)
 		if err != nil || !managed || managedKeyFunctionType(key) != want {
 			t.Fatalf("managedSymbolKey(%s) = %q, %v, %v; want ftype %d", name, key, managed, err, want)
@@ -980,6 +1372,120 @@ func _cgoexp_Ignored()
 	}
 	if key, managed, err := universe.managedSymbolKey(owner, pkg.ssa.Func("_cgoexp_Ignored"), pkgNormal); err != nil || managed || key != "" {
 		t.Fatalf("ignored managedSymbolKey = %q, %v, %v", key, managed, err)
+	}
+
+	for _, test := range []struct {
+		name       string
+		background llssa.Background
+		classified bool
+	}{
+		{name: "Go", background: llssa.InGo, classified: true},
+		{name: "C", background: llssa.InC, classified: true},
+		{name: "CAlias", background: llssa.InC, classified: true},
+		{name: "Py", background: llssa.InPython, classified: true},
+		{name: "Instr"},
+		{name: "CStr"},
+		{name: "CStrAlias"},
+		{name: "_cgoexp_Ignored"},
+	} {
+		got, classified, err := universe.FunctionBackground(pkg.ssa.Func(test.name))
+		if err != nil || got != test.background || classified != test.classified {
+			t.Errorf("FunctionBackground(%s) = %v, %v, %v; want %v, %v, nil", test.name, got, classified, err, test.background, test.classified)
+		}
+	}
+	if semantics, intrinsic, err := universe.CoroIntrinsicSemantics(pkg.ssa.Func("Instr")); err != nil || !intrinsic || semantics != CoroIntrinsicCallUnsupported {
+		t.Fatalf("unreachable intrinsic semantics = %v, %v, %v; want unsupported, true, nil", semantics, intrinsic, err)
+	}
+	cstr, cstrOK := universe.Resolve(pkg.ssa.Func("CStr"))
+	cstrAlias, cstrAliasOK := universe.Resolve(pkg.ssa.Func("CStrAlias"))
+	if !cstrOK || !cstrAliasOK || cstr == nil || cstrAlias != cstr {
+		t.Fatalf("canonical cstr aliases = %v/%v and %v/%v; want one exact canonical intrinsic", cstr, cstrOK, cstrAlias, cstrAliasOK)
+	}
+	for _, fn := range []*ssa.Function{pkg.ssa.Func("CStr"), pkg.ssa.Func("CStrAlias")} {
+		semantics, intrinsic, err := universe.CoroIntrinsicSemantics(fn)
+		if err != nil || !intrinsic || semantics != CoroIntrinsicCallInlineNoSuspend {
+			t.Fatalf("cstr alias semantics = %v, %v, %v; want inline-no-suspend, true, nil", semantics, intrinsic, err)
+		}
+	}
+	cstrOwner := universe.packages[pkg.ssa]
+	cstrOwnerKey := emissionFunctionOwnerKey{function: cstr, owner: cstrOwner}
+	if opcode, ok := universe.intrinsicOps[cstrOwnerKey]; !ok || opcode != llgoCstr {
+		t.Fatalf("canonical cstr opcode = %d, %v; want llgoCstr, true", opcode, ok)
+	}
+	conflictingOwner := &preparedEmissionPackage{order: cstrOwner.order + 1, identity: "conflicting-intrinsic-owner", pkgPath: cstrOwner.pkgPath}
+	conflictingKey := emissionFunctionOwnerKey{function: cstr, owner: conflictingOwner}
+	universe.useOwners[cstr][conflictingOwner] = none{}
+	universe.ownerStates[cstr][conflictingOwner] = emissionFunctionState{state: pkgNormal}
+	universe.functionKinds[conflictingKey] = llgoInstr
+	universe.finalKeys[conflictingKey] = universe.finalKeys[cstrOwnerKey]
+	universe.intrinsicOps[conflictingKey] = llgoUnreachable
+	if _, intrinsic, err := universe.CoroIntrinsicSemantics(cstr); err == nil || intrinsic || !strings.Contains(err.Error(), "inconsistent compiler opcodes") {
+		t.Fatalf("conflicting cstr owner semantics = _, %v, %v; want deterministic opcode conflict", intrinsic, err)
+	}
+	delete(universe.useOwners[cstr], conflictingOwner)
+	delete(universe.ownerStates[cstr], conflictingOwner)
+	delete(universe.functionKinds, conflictingKey)
+	delete(universe.finalKeys, conflictingKey)
+	delete(universe.intrinsicOps, conflictingKey)
+	closureParent := pkg.ssa.Func("Closure")
+	if closureParent == nil || len(closureParent.AnonFuncs) != 1 {
+		t.Fatalf("Closure anonymous functions = %v; want exactly one", closureParent)
+	}
+	closure := closureParent.AnonFuncs[0]
+	if got, classified, err := universe.FunctionBackground(closure); err != nil || got != llssa.InGo || !classified {
+		t.Fatalf("FunctionBackground(Closure$1) = %v, %v, %v; want InGo, true, nil", got, classified, err)
+	}
+	closureOwnerKey := emissionFunctionOwnerKey{function: closure, owner: owner}
+	if kind, ok := universe.functionKinds[closureOwnerKey]; !ok || kind != goFunc {
+		t.Fatalf("Closure$1 frozen function kind = %d, %v; want goFunc, true", kind, ok)
+	}
+	if key := universe.finalKeys[closureOwnerKey]; key == "" || managedKeyFunctionType(key) != goFunc {
+		t.Fatalf("Closure$1 frozen managed key = %q; want Go managed provenance", key)
+	}
+	c, cOK := universe.Resolve(pkg.ssa.Func("C"))
+	cAlias, cAliasOK := universe.Resolve(pkg.ssa.Func("CAlias"))
+	if !cOK || !cAliasOK || c == nil || cAlias != c {
+		t.Fatalf("canonical C aliases = %v/%v and %v/%v; want one exact canonical function", c, cOK, cAlias, cAliasOK)
+	}
+	cOwner := universe.packages[pkg.ssa]
+	cOwnerKey := emissionFunctionOwnerKey{function: c, owner: cOwner}
+	cKind := universe.functionKinds[cOwnerKey]
+	delete(universe.functionKinds, cOwnerKey)
+	if _, classified, err := universe.FunctionBackground(pkg.ssa.Func("CAlias")); err == nil || classified || !strings.Contains(err.Error(), "no frozen frontend function kind") {
+		t.Fatalf("FunctionBackground(alias with missing kind) = _, %v, %v; want fail-closed metadata error", classified, err)
+	}
+	universe.functionKinds[cOwnerKey] = goFunc
+	if _, classified, err := universe.FunctionBackground(pkg.ssa.Func("C")); err == nil || classified || !strings.Contains(err.Error(), "inconsistent frozen frontend kinds") {
+		t.Fatalf("FunctionBackground(inconsistent kind) = _, %v, %v; want fail-closed metadata error", classified, err)
+	}
+	universe.functionKinds[cOwnerKey] = cKind
+	cState := universe.ownerStates[c][cOwner]
+	delete(universe.ownerStates[c], cOwner)
+	if _, classified, err := universe.FunctionBackground(pkg.ssa.Func("C")); err == nil || classified || !strings.Contains(err.Error(), "no frozen provenance") {
+		t.Fatalf("FunctionBackground(missing provenance) = _, %v, %v; want fail-closed metadata error", classified, err)
+	}
+	universe.ownerStates[c][cOwner] = cState
+
+	corruptFirst := &preparedEmissionPackage{order: -1, identity: "corrupt", pkgPath: "a"}
+	corruptSecond := &preparedEmissionPackage{order: -1, identity: "corrupt", pkgPath: "z"}
+	universe.useOwners[c][corruptFirst] = none{}
+	universe.useOwners[c][corruptSecond] = none{}
+	universe.ownerStates[c][corruptFirst] = emissionFunctionState{state: pkgNormal}
+	var firstError string
+	for attempt := 0; attempt < 64; attempt++ {
+		_, classified, err := universe.FunctionBackground(pkg.ssa.Func("CAlias"))
+		if err == nil || classified || !strings.Contains(err.Error(), "no frozen frontend function kind") {
+			t.Fatalf("FunctionBackground(multi-owner corruption) attempt %d = _, %v, %v; want deterministic first-owner kind error", attempt, classified, err)
+		}
+		if attempt == 0 {
+			firstError = err.Error()
+		} else if err.Error() != firstError {
+			t.Fatalf("FunctionBackground(multi-owner corruption) attempt %d error = %q; want %q", attempt, err, firstError)
+		}
+	}
+	universe.useOwners[c][nil] = none{}
+	if _, classified, err := universe.FunctionBackground(pkg.ssa.Func("C")); err == nil || classified || !strings.Contains(err.Error(), "nil frozen use owner") {
+		t.Fatalf("FunctionBackground(nil owner) = _, %v, %v; want independently detected nil-owner error", classified, err)
 	}
 }
 

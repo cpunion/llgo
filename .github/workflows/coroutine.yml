@@ -47,7 +47,24 @@ jobs:
         run: |
           cd runtime
           go test -race -shuffle=on ./internal/coro -count=1
-          go test ./internal/runtime -run '^$' -count=1
+          # The complete LLGo runtime package intentionally owns symbols that
+          # collide with the host Go runtime. Use the real production adapter
+          # sources plus test-only definitions of the compiler-owned C wrappers
+          # to exercise begin/run/destroy without adding production callbacks.
+          # Compiler tests separately cover the LLVM/LLGo side; this is not a
+          # cross-language linked smoke test.
+          go test -race -shuffle=on -tags=coro_runtime_adapter_test \
+            ./internal/runtime/coro_program.go \
+            ./internal/runtime/coro_sched.go \
+            ./internal/runtime/coro_program_test.go \
+            -run '^TestCoroProgramV1' -count=1
+          GOOS=js GOARCH=wasm CGO_ENABLED=0 go test \
+            -tags=coro_runtime_adapter_test \
+            -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" \
+            ./internal/runtime/coro_program.go \
+            ./internal/runtime/coro_sched.go \
+            ./internal/runtime/coro_program_test.go \
+            -run '^TestCoroProgramV1' -count=1
 
       - name: Compile coroutine runtime adapter across targets
         if: matrix.llvm == 19
@@ -60,7 +77,7 @@ jobs:
 
       - name: Test coroutine build integration
         if: matrix.llvm == 19
-        run: go test ./internal/build -run 'Test(CoroPlanBuilderRunsBeforeCodegenWithoutChangingIR|CoroPlanInputCanonicalizesPatchedRoot|ActiveCoroABIVersions|BuildCoroPlanErrors|CoroEntryResolutionUsesPlanMatchedPackageCache|CoroEntryResolutionBuildsPreparedRuntimePackages|CoroRuntimeLinkRequirements|CoroEmissionCoverageStopsBeforeAnyPackageCodegen|CoroUnsupportedEntryResolutionReturnsErrorBeforeCodegen|CoroEmissionUniverseAcceptsModeTestVariants|CoroProgramBootstrapRejectsInvalidRootsBeforePackageCodegen)$' -count=1
+        run: go test ./internal/build -run 'Test(CoroPlanBuilderRunsBeforeCodegenWithoutChangingIR|CoroPlanInputCanonicalizesPatchedRoot|CoroPlanInputElidesOnlyFrontendNoInitCalls|RequiredCoroProgramRuntimePlanPlainClosureAndConflicts|ActiveCoroABIVersions|BuildCoroPlanErrors|CoroEntryResolutionUsesPlanMatchedPackageCache|CoroEntryResolutionBuildsPreparedRuntimePackages|CoroRuntimeLinkRequirements|CoroEmissionCoverageStopsBeforeAnyPackageCodegen|CoroUnsupportedEntryResolutionReturnsErrorBeforeCodegen|CoroEmissionUniverseAcceptsModeTestVariants|CoroProgramBootstrapRejectsInvalidRootsBeforePackageCodegen)$' -count=1
 
       - name: Test coroutine compiler integration
         if: matrix.llvm == 19
@@ -84,7 +101,7 @@ jobs:
         run: go test -tags='${{ matrix.tags }}' -v ./cl -run '^TestCoro(LeafPhysicalABI|PhysicalABI|ChildAwaitPhysicalABIV1|ExplicitAsyncRootFactoryV1|ExplicitRootFactoryV1|ExplicitPlain|RootPackageAnchorV1)' -count=1
 
       - name: Test coroutine registry and control integration
-        run: go test -tags='${{ matrix.tags }}' -v ./internal/build -run '^Test(CollectLinkedCoroRootAnchors|CoroProgramManifest.*|CoroProgramBootstrap.*|SelectCoroProgramBootstrap.*|GenMainModule.*Coro.*)$' -count=1
+        run: go test -tags='${{ matrix.tags }}' -v ./internal/build -run '^Test(CollectLinkedCoroRootAnchors|ActiveCoroABIVersions|BuildCoroPlanErrors|CoroProgramManifest.*|CoroProgramBootstrap.*|SelectCoroProgramBootstrap.*|GenMainModule.*Coro.*)$' -count=1
 
       - name: Test LLVM 22 tool configuration
         if: matrix.llvm == 22

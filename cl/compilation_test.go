@@ -109,6 +109,16 @@ func TestCompilationCoroABIIdentityValidation(t *testing.T) {
 	if err := childAwait.validateCoroABIIdentity(false); err != nil {
 		t.Fatalf("complete child-await ABI identity: %v", err)
 	}
+	programBootstrap := newChildAwait()
+	programBootstrap.EnableCoroProgramBootstrapRun = true
+	programBootstrap.SchedulerABI = coro.SchedulerProgramBootstrapABIV1
+	if err := programBootstrap.validateCoroABIIdentity(false); err != nil {
+		t.Fatalf("complete program-bootstrap ABI identity: %v", err)
+	}
+	programBootstrap.EnableCoroChildAwait = false
+	if err := programBootstrap.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "requires child-await") {
+		t.Fatalf("program-bootstrap dependency error = %v", err)
+	}
 	wrongChildAwait := newChildAwait()
 	wrongChildAwait.CoroABI = coro.PhysicalABIV0
 	if err := wrongChildAwait.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "coroutine ABI") {

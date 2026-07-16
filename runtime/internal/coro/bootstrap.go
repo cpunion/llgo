@@ -153,6 +153,8 @@ const (
 	ProgramValidationStepPayloadV1
 	ProgramValidationInvalidViewV1
 	ProgramValidationStepIndexV1
+	ProgramValidationBootstrapFactoryIdentityV1
+	ProgramValidationRunnableStepKindV1
 )
 
 // ResolvedProgramStepV1 is a data-only action. Exactly one representation is
@@ -486,6 +488,30 @@ func ValidateProgramV1(manifest *ProgramManifestV1) (ProgramViewV1, ProgramValid
 // ValidateRunnableProgramV1 is the explicit spelling used by runtime startup.
 func ValidateRunnableProgramV1(manifest *ProgramManifestV1) (ProgramViewV1, ProgramValidationCodeV1) {
 	return validateProgramV1(manifest, true)
+}
+
+// ValidateRunnableDirectProgramV1 validates the first production bootstrap
+// boundary. In addition to the complete manifest checks performed by
+// ValidateRunnableProgramV1, it binds the descriptor to the exact factory the
+// compiler will call directly and accepts only the fixed DirectPlain
+// Init -> Main program supported by that factory.
+//
+// This function compares factory pointers as data. It never invokes the
+// bootstrap factory or either program step.
+func ValidateRunnableDirectProgramV1(
+	manifest *ProgramManifestV1, expectedFactory unsafe.Pointer,
+) (ProgramViewV1, ProgramValidationCodeV1) {
+	program, code := validateProgramV1(manifest, true)
+	if code != ProgramValidationOKV1 {
+		return ProgramViewV1{}, code
+	}
+	if expectedFactory == nil || program.factory != expectedFactory {
+		return ProgramViewV1{}, ProgramValidationBootstrapFactoryIdentityV1
+	}
+	if program.init.Kind != ProgramStepDirectPlainV1 || program.main.Kind != ProgramStepDirectPlainV1 {
+		return ProgramViewV1{}, ProgramValidationRunnableStepKindV1
+	}
+	return program, ProgramValidationOKV1
 }
 
 // ResolveProgramStepV1 returns one action from an opaque validated view. It

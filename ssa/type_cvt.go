@@ -46,6 +46,25 @@ const (
 	InPython
 )
 
+// TypeBackground reports the explicitly recorded background of typ. Go type
+// aliases are resolved before the lookup, but metadata belongs only to the
+// resulting named type. Unnamed, nil, and unregistered types have an unknown
+// background.
+func (p Program) TypeBackground(typ types.Type) Background {
+	if p == nil || typ == nil {
+		return inUnknown
+	}
+	typ = types.Unalias(typ)
+	named, ok := typ.(*types.Named)
+	if !ok {
+		return inUnknown
+	}
+	if bg, ok := p.gocvt.typbg.Load(namedLinkname(named)); ok {
+		return bg.(Background)
+	}
+	return inUnknown
+}
+
 // Type convert a Go/C type into raw type.
 // C type = raw type
 // Go type: convert to raw type (because of closure)

@@ -25,6 +25,7 @@ import (
 
 	"github.com/goplus/llgo/internal/coro"
 	"github.com/goplus/llgo/internal/goembed"
+	llssa "github.com/goplus/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -83,15 +84,35 @@ func newCoroEntryTestContext(t *testing.T, pkg *ssa.Package, compilation *Compil
 // expected to stop in whole-plan preflight before package/codegen validation.
 func coroEntryPreflightUniverse(plan *coro.SSAPlan) *EmissionUniverse {
 	u := &EmissionUniverse{
-		required: make(map[*ssa.Function]none),
-		aliases:  make(map[*ssa.Function]*ssa.Function),
+		required:      make(map[*ssa.Function]none),
+		aliases:       make(map[*ssa.Function]*ssa.Function),
+		functionKinds: make(map[emissionFunctionOwnerKey]int),
+		finalKeys:     make(map[emissionFunctionOwnerKey]string),
+		useOwners:     make(map[*ssa.Function]map[*preparedEmissionPackage]none),
+		ownerStates:   make(map[*ssa.Function]map[*preparedEmissionPackage]emissionFunctionState),
 	}
 	if plan == nil {
 		return u
 	}
+	owners := make(map[*ssa.Package]*preparedEmissionPackage)
 	for _, planned := range plan.Functions() {
-		u.functions = append(u.functions, planned.Function)
-		u.required[planned.Function] = none{}
+		fn := planned.Function
+		u.functions = append(u.functions, fn)
+		u.required[fn] = none{}
+		owner := owners[fn.Pkg]
+		if owner == nil {
+			identity := "test"
+			if fn.Pkg != nil && fn.Pkg.Pkg != nil {
+				identity = fn.Pkg.Pkg.Path()
+			}
+			owner = &preparedEmissionPackage{identity: identity, pkgPath: identity, ssa: fn.Pkg, order: len(owners)}
+			owners[fn.Pkg] = owner
+		}
+		u.useOwners[fn] = map[*preparedEmissionPackage]none{owner: {}}
+		u.ownerStates[fn] = map[*preparedEmissionPackage]emissionFunctionState{owner: {state: pkgNormal}}
+		key := emissionFunctionOwnerKey{function: fn, owner: owner}
+		u.functionKinds[key] = goFunc
+		u.finalKeys[key] = managedSymbolKey(goFunc, fn.Name(), "preflight-test")
 	}
 	return u
 }
@@ -589,6 +610,78 @@ func Box() any { return Target }
 				t.Fatalf("observer calls = %d, want pre-codegen rejection", observerCalls)
 			}
 		})
+	}
+}
+
+func TestCoroEntryPreflightUsesFrozenCEmissionInsteadOfStubBlocks(t *testing.T) {
+	pkg, _, files := buildGoSSAPkg(t, `package foo
+var channel chan int
+//llgo:link External C.external
+func External() { <-channel }
+`)
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: pkg, Files: files}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(pkg.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	external, ok := universe.Resolve(pkg.Func("External"))
+	if !ok || external == nil || len(external.Blocks) == 0 {
+		t.Fatal("fixture has no canonical bodyful C stub")
+	}
+	if background, classified, err := universe.FunctionBackground(external); err != nil || !classified || background != llssa.InC {
+		t.Fatalf("External frozen background = %v, %v, %v; want InC, true, nil", background, classified, err)
+	}
+
+	buildPlan := func(ignore bool) *coro.SSAPlan {
+		t.Helper()
+		plan, err := coro.AnalyzeSSA(pkg.Prog, coro.Roots{{Function: external, Demand: coro.SyncDemand}}, coro.SSAConfig{
+			EmissionUniverse: ssaUniverse,
+			FunctionIDs:      universe.FunctionIDConfig(),
+			ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+				if fn == external {
+					if !ignore {
+						return coro.SSAFunctionPolicy{}, nil
+					}
+					return coro.SSAFunctionPolicy{
+						IgnoreBody:       true,
+						External:         coro.ExternalUnknownForeign,
+						OverrideExternal: true,
+					}, nil
+				}
+				return coro.SSAFunctionPolicy{}, nil
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return plan
+	}
+
+	ignored := buildPlan(true)
+	if !ignored.IgnoresBody(external) {
+		t.Fatal("bodyful C stub was not excluded from the physical plan")
+	}
+	if err := (&Compilation{
+		CoroPlan:                  ignored,
+		EmissionUniverse:          universe,
+		EnableCoroEntryResolution: true,
+	}).preflightCoroPlan(); err != nil {
+		t.Fatalf("bodyful frozen C declaration failed preflight: %v", err)
+	}
+
+	notIgnored := buildPlan(false)
+	err = (&Compilation{
+		CoroPlan:                  notIgnored,
+		EmissionUniverse:          universe,
+		EnableCoroEntryResolution: true,
+	}).preflightCoroPlan()
+	if err == nil || !strings.Contains(err.Error(), "ignored-body=false conflicts with frozen frontend background") {
+		t.Fatalf("non-ignored C stub preflight error = %v", err)
 	}
 }
 

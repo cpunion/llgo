@@ -30,7 +30,11 @@ import (
 )
 
 const (
-	coroProgramBootstrapVersionV1 uint32 = 1
+	coroProgramBootstrapVersionV1               uint32 = 1
+	coroProgramBootstrapFactorySymbolV1                = "__llgo_coro_program_bootstrap_factory_v1"
+	coroProgramBootstrapFrameDescriptorPrefixV1        = "__llgo_coro_program_bootstrap_frame_descriptor_v1."
+	coroProgramBeginSymbolV1                           = "__llgo_coro_program_begin_v1"
+	coroProgramRunSymbolV1                             = "__llgo_coro_program_run_v1"
 
 	// Step kinds and semantic roles are part of the cross-target bootstrap ABI.
 	// Keep these numeric values synchronized with ssa and runtime/internal/coro.
@@ -54,7 +58,13 @@ type coroProgramBootstrapV1 struct {
 }
 
 func validateCoroProgramBootstrapConfig(conf *Config) error {
-	if conf == nil || !conf.EnableCoroProgramBootstrapABI {
+	if conf == nil {
+		return nil
+	}
+	if conf.EnableCoroProgramBootstrapRun && !conf.EnableCoroProgramBootstrapABI {
+		return fmt.Errorf("enable coroutine program bootstrap runtime: program bootstrap ABI is required")
+	}
+	if !conf.EnableCoroProgramBootstrapABI {
 		return nil
 	}
 	switch {
@@ -177,7 +187,11 @@ func selectCoroProgramPlainStepV1(ctx *context, aPkg *aPackage, name string, rol
 	if sig == nil || sig.Recv() != nil || sig.Params().Len() != 0 || sig.Results().Len() != 0 || sig.Variadic() || typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
 		return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: target must have the exact func() signature", name)
 	}
-	if len(fn.Blocks) == 0 {
+	goBody, err := frozenGoEmittedBody(ctx.coroEmission, fn)
+	if err != nil {
+		return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: classify frozen target: %w", name, err)
+	}
+	if !goBody {
 		return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: target has no owned body", name)
 	}
 
@@ -204,6 +218,17 @@ func selectCoroProgramPlainStepV1(ctx *context, aPkg *aPackage, name string, rol
 	if !plan.Demand.Contains(coro.AsyncDemand) || plan.External != coro.Defined || plan.Emission != coro.EmitPlain || plan.FuncRep != coro.DirectPlain || plan.Primary != coro.PrimaryPlain || plan.Effect != coro.NoSuspend || plan.Exec.Contains(coro.NeedsPreempt) {
 		return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: target %q is not a defined async-demand plain direct non-suspending root without preemption (demand=%s external=%s emission=%s rep=%s primary=%s effect=%s exec=%s)",
 			name, plan.ID, plan.Demand, plan.External, plan.Emission, plan.FuncRep, plan.Primary, plan.Effect, plan.Exec)
+	}
+	// init/main execute as one bounded plain activation inside the bootstrap
+	// resume episode. Legacy defer/recover therefore remains local to that
+	// activation, and an unrecovered panic terminates through the existing panic
+	// path without requiring a suspended-parent transport. Every other execution
+	// constraint remains fail-closed until its scheduler protocol exists.
+	if ctx.buildConf.EnableCoroProgramBootstrapRun {
+		const supported = coro.MayUnwind | coro.NeedsCleanupFrame
+		if unsupported := plan.Exec &^ supported; unsupported != 0 {
+			return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap runtime %s: target %q has unsupported execution constraints %s (complete=%s)", name, plan.ID, unsupported, plan.Exec)
+		}
 	}
 	return coroProgramBootstrapStepV1{
 		Kind:       coroProgramStepDirectPlainV1,
@@ -248,6 +273,14 @@ func coroProgramBootstrapHashV1(ctx *context, steps []coroProgramBootstrapStepV1
 	write("bootstrap={version:u32,flags:u32,hash-lo:u64,hash-hi:u64,step-count:uintptr,steps:ptr,factory:ptr}")
 	write("direct-plain=" + strconv.FormatUint(uint64(coroProgramStepDirectPlainV1), 10))
 	write("coro-root=" + strconv.FormatUint(uint64(coroProgramStepCoroRootV1), 10))
+	if ctx.buildConf.EnableCoroProgramBootstrapRun {
+		write("factory=compiler-direct-plain-v1:" + coroProgramBootstrapFactorySymbolV1)
+		write("driver=runtime-static-single-p-v1:" + coroProgramBeginSymbolV1 + ":" + coroProgramRunSymbolV1)
+		write("header=physical-abi-v1")
+	} else {
+		write("factory=null")
+		write("driver=descriptor-only")
+	}
 	write(ctx.coroPlanDigest)
 	write(metadata.CoroABI)
 	write(metadata.SchedulerABI)

@@ -167,6 +167,11 @@ type functionIDBuilder struct {
 	localTypeOwnerSpans  map[*types.Named]int64
 	localTypeAmbiguous   map[*types.Named]bool
 	localTypeCandidates  []*ssa.Function
+	// localTypeIgnoredBodies marks frontend external declarations whose SSA
+	// fallback bodies are not physically emitted. Their signatures and type
+	// arguments remain identity inputs, but locals/instructions must not
+	// participate in local-type owner recovery.
+	localTypeIgnoredBodies map[*ssa.Function]struct{}
 }
 
 func (b *functionIDBuilder) functionKey(fn *ssa.Function) (string, error) {
@@ -693,7 +698,8 @@ func (b *functionIDBuilder) prepareLocalTypeOwners() {
 		if fn == nil || fn.Prog != b.prog || fn.Syntax() == nil {
 			continue
 		}
-		found := parentlessNamedTypesInFunction(fn)
+		_, ignoreBody := b.localTypeIgnoredBodies[fn]
+		found := parentlessNamedTypesInFunction(fn, ignoreBody)
 		for named := range found {
 			obj := named.Obj()
 			if obj == nil || obj.Pkg() == nil || obj.Pos() == token.NoPos {
@@ -723,12 +729,16 @@ func (b *functionIDBuilder) prepareLocalTypeOwners() {
 	}
 }
 
-func parentlessNamedTypesInFunction(fn *ssa.Function) map[*types.Named]struct{} {
+func parentlessNamedTypesInFunction(fn *ssa.Function, ignoreBody bool) map[*types.Named]struct{} {
 	collector := localNamedTypeCollector{
 		found: make(map[*types.Named]struct{}),
 		seen:  make(map[types.Type]bool),
 	}
 	collector.typ(fn.Signature)
+	collector.function(fn)
+	if ignoreBody {
+		return collector.found
+	}
 	for _, parameter := range fn.Params {
 		collector.value(parameter)
 	}

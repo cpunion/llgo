@@ -533,6 +533,207 @@ func straight(a int) int { a++; a++; a++; return a }
 	}
 }
 
+func TestAnalyzeSSATrustedNoPreemptClearsOnlyScannerSeed(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "trusted_no_preempt.go", `package coroid
+func trustedLoop() { for {} }
+func ordinaryLoop() { for {} }
+func recursive() { recursive() }
+func explicitPreempt() { for {} }
+`)
+	trustedLoop := packageFunction(t, pkg, "trustedLoop")
+	ordinaryLoop := packageFunction(t, pkg, "ordinaryLoop")
+	recursive := packageFunction(t, pkg, "recursive")
+	explicitPreempt := packageFunction(t, pkg, "explicitPreempt")
+	plan, err := AnalyzeSSA(prog, Roots{
+		{Function: trustedLoop, Demand: AsyncDemand},
+		{Function: ordinaryLoop, Demand: AsyncDemand},
+		{Function: recursive, Demand: AsyncDemand},
+		{Function: explicitPreempt, Demand: AsyncDemand},
+	}, SSAConfig{
+		ClassifyFunction: func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+			switch fn {
+			case trustedLoop, recursive:
+				return SSAFunctionPolicy{TrustedNoPreempt: true}, nil
+			case explicitPreempt:
+				return SSAFunctionPolicy{TrustedNoPreempt: true, Exec: NeedsPreempt}, nil
+			default:
+				return SSAFunctionPolicy{}, nil
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	trusted := functionPlanFor(t, plan, trustedLoop)
+	if trusted.Exec.Contains(NeedsPreempt) || trusted.Effect.MaySuspend() || trusted.Emission != EmitPlain {
+		t.Fatalf("trusted loop plan = %+v, want scanner preemption suppressed and one plain body", trusted)
+	}
+	ordinary := functionPlanFor(t, plan, ordinaryLoop)
+	if !ordinary.Exec.Contains(NeedsPreempt) || !ordinary.Effect.Contains(YieldOnly) || ordinary.Emission != EmitCoroutine {
+		t.Fatalf("ordinary loop plan = %+v, want scanner preemption and coroutine body", ordinary)
+	}
+	recursivePlan := functionPlanFor(t, plan, recursive)
+	if !recursivePlan.Recursive || !recursivePlan.Exec.Contains(NeedsPreempt) ||
+		!recursivePlan.Effect.Contains(YieldOnly) || recursivePlan.Emission != EmitCoroutine {
+		t.Fatalf("recursive trusted plan = %+v, want recursion preemption preserved", recursivePlan)
+	}
+	explicit := functionPlanFor(t, plan, explicitPreempt)
+	if !explicit.Exec.Contains(NeedsPreempt) || !explicit.Effect.Contains(YieldOnly) || explicit.Emission != EmitCoroutine {
+		t.Fatalf("explicit trusted preemption plan = %+v, want declared preemption preserved", explicit)
+	}
+}
+
+func TestAnalyzeSSAIgnoreBodyRequiresAndUsesExternalFrontendPolicy(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "ignored_external_body.go", `package coroid
+var channel chan int
+var sink func()
+func hiddenManaged() { <-channel }
+func externalFallback(fn func()) {
+	sink = hiddenManaged
+	fn()
+	externalFallback(fn)
+	for { <-channel }
+}
+func caller() { externalFallback(nil) }
+`)
+	external := packageFunction(t, pkg, "externalFallback")
+	hiddenManaged := packageFunction(t, pkg, "hiddenManaged")
+	caller := packageFunction(t, pkg, "caller")
+	plan, err := AnalyzeSSA(prog, Roots{{Function: caller, Demand: AsyncDemand}}, SSAConfig{
+		ClassifyFunction: func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+			if fn == external {
+				return SSAFunctionPolicy{
+					IgnoreBody:       true,
+					External:         ExternalUnknownForeign,
+					OverrideExternal: true,
+				}, nil
+			}
+			return SSAFunctionPolicy{}, nil
+		},
+		ClassifyUnknownCall: func(owner *ssa.Function, _ ssa.CallInstruction) (UnknownTarget, error) {
+			if owner == external {
+				return UnknownManaged, fmt.Errorf("visited ignored body during unknown-call classification")
+			}
+			return UnknownManaged, nil
+		},
+		ClassifyElidedCall: func(owner *ssa.Function, _ ssa.CallInstruction) (bool, error) {
+			if owner == external {
+				return false, fmt.Errorf("visited ignored body during elided-call classification")
+			}
+			return false, nil
+		},
+		ClassifyDirectPlainCallArgument: func(owner *ssa.Function, _ ssa.CallInstruction, _ int) (bool, error) {
+			if owner == external {
+				return false, fmt.Errorf("visited ignored body during direct-plain argument classification")
+			}
+			return false, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	externalPlan := functionPlanFor(t, plan, external)
+	if externalPlan.External != ExternalUnknownForeign || externalPlan.Effect != NoSuspend ||
+		externalPlan.Exec.Contains(NeedsPreempt) || !externalPlan.Exec.Contains(BlockForeign|IRQUnsafe) ||
+		externalPlan.Emission != EmitExternal || externalPlan.FuncRep != DirectPlain || externalPlan.Recursive {
+		t.Fatalf("ignored external fallback plan = %+v", externalPlan)
+	}
+	if !plan.IgnoresBody(external) || plan.IgnoresBody(caller) || plan.IgnoresBody(nil) {
+		t.Fatal("ignored-body identity was not retained exactly")
+	}
+	callerPlan := functionPlanFor(t, plan, caller)
+	if !callerPlan.Effect.Contains(WaitForeign) || callerPlan.Effect.IsOpaque() {
+		t.Fatalf("caller plan = %+v, want precise foreign wait", callerPlan)
+	}
+	if hidden := functionPlanFor(t, plan, hiddenManaged); hidden.Demand != NoDemand || hidden.Emission != EmitNone || hidden.FuncRep == Dispatch {
+		t.Fatalf("ignored body leaked a reference/demand to hidden managed target: %+v", hidden)
+	}
+	if _, ok := plan.ValuePlan(external.Params[0]); ok {
+		t.Fatal("ignored external parameter unexpectedly has an SSAValuePlan")
+	}
+	if _, ok := plan.ValuePlan(hiddenManaged); ok {
+		t.Fatal("function value used only by ignored body unexpectedly has an SSAValuePlan")
+	}
+	for _, block := range external.Blocks {
+		for _, instruction := range block.Instrs {
+			if call, ok := instruction.(ssa.CallInstruction); ok {
+				if _, planned := plan.CallPlan(call); planned {
+					t.Fatalf("ignored body call %q unexpectedly has a CallPlan", call)
+				}
+				if plan.ElidesCall(call) {
+					t.Fatalf("ignored body call %q unexpectedly entered elided-call identity", call)
+				}
+			}
+			if value, ok := instruction.(ssa.Value); ok {
+				if _, planned := plan.ValuePlan(value); planned {
+					t.Fatalf("ignored body value %q unexpectedly has an SSAValuePlan", value)
+				}
+			}
+		}
+	}
+
+	for _, test := range []struct {
+		name   string
+		policy SSAFunctionPolicy
+	}{
+		{name: "no override", policy: SSAFunctionPolicy{IgnoreBody: true}},
+		{name: "defined", policy: SSAFunctionPolicy{IgnoreBody: true, External: Defined, OverrideExternal: true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := AnalyzeSSA(prog, Roots{{Function: caller, Demand: AsyncDemand}}, SSAConfig{
+				ClassifyFunction: func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+					if fn == external {
+						return test.policy, nil
+					}
+					return SSAFunctionPolicy{}, nil
+				},
+			})
+			if err == nil || !strings.Contains(err.Error(), "IgnoreBody requires an explicit non-defined external classification") {
+				t.Fatalf("AnalyzeSSA error = %v", err)
+			}
+		})
+	}
+}
+
+func TestIgnoredBodyFiltersDynamicCandidatesBeforeTargetResolution(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "ignored_candidate_resolver.go", `package coroid
+func poison() {}
+func externalFallback(fn func()) { fn() }
+func live() {}
+`)
+	external := packageFunction(t, pkg, "externalFallback")
+	poison := packageFunction(t, pkg, "poison")
+	call := onlyNonBuiltinCall(t, external)
+	poisonResolved := false
+	canonicalizer := newSSAFunctionCanonicalizer(prog, SSAConfig{
+		ResolveFunction: func(fn *ssa.Function) (*ssa.Function, bool, error) {
+			if fn == poison {
+				poisonResolved = true
+				return nil, false, fmt.Errorf("poison candidate resolver")
+			}
+			return fn, true, nil
+		},
+	})
+	filtered, err := filterSSADynamicCandidateSites(
+		map[ssa.CallInstruction]map[*ssa.Function]struct{}{call: {poison: {}}},
+		map[*ssa.Function]bool{packageFunction(t, pkg, "live"): true},
+		canonicalizer,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered) != 0 {
+		t.Fatalf("ignored-body dynamic candidates survived site filter: %v", filtered)
+	}
+	if _, err := canonicalizeSSADynamicCandidates(filtered, canonicalizer); err != nil {
+		t.Fatal(err)
+	}
+	if poisonResolved {
+		t.Fatal("candidate reachable only from an ignored body reached resolver canonicalization")
+	}
+}
+
 func TestAnalyzeSSAStaticCostIgnoresDebugRefs(t *testing.T) {
 	const source = `package coroid
 
@@ -714,6 +915,63 @@ func spawned(fn func()) { go fn() }
 	}
 	if got := functionPlanFor(t, foreign, spawned); got.Effect != NoSuspend || got.Exec.Contains(IRQUnsafe) {
 		t.Fatalf("spawned dynamic foreign call = %+v", got)
+	}
+}
+
+func TestAnalyzeSSAFrontendElidedStaticCall(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "elided.go", `package coroid
+func target() {}
+func root() { target() }
+func dynamic(fn func()) { fn() }
+func spawned() { go target() }
+`)
+	target := packageFunction(t, pkg, "target")
+	root := packageFunction(t, pkg, "root")
+	rootCall := onlyNonBuiltinCall(t, root)
+	includeWithoutTarget := func(fn *ssa.Function) (bool, error) { return fn != target, nil }
+
+	conservative, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: SyncDemand}}, SSAConfig{
+		Include: includeWithoutTarget,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := functionPlanFor(t, conservative, root); !got.Effect.IsOpaque() {
+		t.Fatalf("unresolved static call was not conservative: %+v", got)
+	}
+
+	elided, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: SyncDemand}}, SSAConfig{
+		Include: includeWithoutTarget,
+		ClassifyElidedCall: func(_ *ssa.Function, call ssa.CallInstruction) (bool, error) {
+			return call == rootCall, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := functionPlanFor(t, elided, root); got.Effect != NoSuspend || got.Primary != PrimaryPlain || got.Emission != EmitPlain {
+		t.Fatalf("frontend-elided root plan = %+v, want plain no-suspend", got)
+	}
+	if _, ok := elided.CallPlan(rootCall); ok {
+		t.Fatal("frontend-elided call unexpectedly has a CallPlan")
+	}
+	if !elided.ElidesCall(rootCall) {
+		t.Fatal("frontend-elided call identity was not retained")
+	}
+	if conservative.ElidesCall(rootCall) || elided.ElidesCall(nil) {
+		t.Fatal("elided-call query accepted an ordinary or nil call")
+	}
+
+	for _, name := range []string{"dynamic", "spawned"} {
+		fn := packageFunction(t, pkg, name)
+		_, err := AnalyzeSSA(prog, Roots{{Function: fn, Demand: SyncDemand}}, SSAConfig{
+			ClassifyElidedCall: func(_ *ssa.Function, call ssa.CallInstruction) (bool, error) {
+				return call == onlyNonBuiltinCall(t, fn), nil
+			},
+		})
+		if err == nil || !strings.Contains(err.Error(), "must be a direct static call") {
+			t.Fatalf("elide %s error = %v", name, err)
+		}
 	}
 }
 

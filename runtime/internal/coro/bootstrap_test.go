@@ -235,6 +235,63 @@ func TestValidateAndResolveDirectProgramV1(t *testing.T) {
 	}
 }
 
+func TestValidateRunnableDirectProgramV1BindsFactoryAndSteps(t *testing.T) {
+	f := makeDirectProgramBootstrapTestFixtureV1()
+	expectedFactory := unsafe.Pointer(&f.bootstrapFactory)
+	view, code := ValidateRunnableDirectProgramV1(&f.manifest, expectedFactory)
+	if code != ProgramValidationOKV1 {
+		t.Fatalf("direct runnable validation code = %d, want success", code)
+	}
+	for index := uintptr(0); index < 2; index++ {
+		step, stepCode := ResolveProgramStepV1(view, index)
+		if stepCode != ProgramValidationOKV1 || step.Kind != ProgramStepDirectPlainV1 || step.Plain == nil {
+			t.Fatalf("step %d = (%+v, %d), want direct plain", index, step, stepCode)
+		}
+	}
+
+	if _, code = ValidateRunnableDirectProgramV1(&f.manifest, nil); code != ProgramValidationBootstrapFactoryIdentityV1 {
+		t.Fatalf("nil expected factory code = %d, want factory identity", code)
+	}
+	otherFactory := byte(0x42)
+	if _, code = ValidateRunnableDirectProgramV1(&f.manifest, unsafe.Pointer(&otherFactory)); code != ProgramValidationBootstrapFactoryIdentityV1 {
+		t.Fatalf("different expected factory code = %d, want factory identity", code)
+	}
+	f.bootstrap.Factory = nil
+	if _, code = ValidateRunnableDirectProgramV1(&f.manifest, expectedFactory); code != ProgramValidationBootstrapFactoryV1 {
+		t.Fatalf("nil descriptor factory code = %d, want missing factory", code)
+	}
+}
+
+func TestValidateRunnableDirectProgramV1RejectsCoroutineSteps(t *testing.T) {
+	tests := []struct {
+		name string
+		step int
+	}{
+		{"init", 0},
+		{"main", 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f := newProgramBootstrapTestFixtureV1()
+			if test.step == 0 {
+				f.steps[0] = ProgramStepV1{
+					Kind: uint32(ProgramStepCoroRootV1), Flags: ProgramStepFlagInitV1,
+					Target: unsafe.Pointer(&f.anchors[0]), Aux: 1,
+				}
+				f.steps[1] = ProgramStepV1{
+					Kind: uint32(ProgramStepDirectPlainV1), Flags: ProgramStepFlagMainV1,
+					Target: unsafe.Pointer(&f.plainTargets[1]),
+				}
+			}
+			if _, code := ValidateRunnableDirectProgramV1(
+				&f.manifest, unsafe.Pointer(&f.bootstrapFactory),
+			); code != ProgramValidationRunnableStepKindV1 {
+				t.Fatalf("validation code = %d, want runnable step kind", code)
+			}
+		})
+	}
+}
+
 func TestValidateAndResolveCoroRootProgramV1(t *testing.T) {
 	f := makeCoroProgramBootstrapTestFixtureV1()
 	view := requireProgramViewV1(t, &f.manifest)
@@ -433,6 +490,20 @@ func TestValidateAndResolveProgramV1AllocateNothing(t *testing.T) {
 	}
 	if programCodeSinkV1 != ProgramValidationOKV1 || programStepSinkV1.Descriptor != &f.descriptors[2] {
 		t.Fatal("allocation run did not preserve the resolved main step")
+	}
+}
+
+func TestValidateRunnableDirectProgramV1AllocateNothing(t *testing.T) {
+	f := makeDirectProgramBootstrapTestFixtureV1()
+	expectedFactory := unsafe.Pointer(&f.bootstrapFactory)
+	allocations := testing.AllocsPerRun(1000, func() {
+		programViewSinkV1, programCodeSinkV1 = ValidateRunnableDirectProgramV1(&f.manifest, expectedFactory)
+	})
+	if allocations != 0 {
+		t.Fatalf("direct runnable validation allocations = %v, want 0", allocations)
+	}
+	if programCodeSinkV1 != ProgramValidationOKV1 {
+		t.Fatalf("direct runnable validation code = %d, want success", programCodeSinkV1)
 	}
 }
 
