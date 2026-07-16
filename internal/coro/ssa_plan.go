@@ -141,10 +141,19 @@ type SSAFunctionPlan struct {
 	Plan     FunctionPlan
 }
 
+// SSARootPlan records one canonical externally established entry demand.
+// Duplicate and aliased input roots are joined before this record is created.
+type SSARootPlan struct {
+	Function *ssa.Function
+	ID       FunctionID
+	Demand   Demand
+}
+
 // SSAPlan is the compilation-scoped whole-program result. Its maps remain
 // private so consumers cannot reconstruct identities from display strings.
 type SSAPlan struct {
 	plan        *Plan
+	roots       []SSARootPlan
 	functions   []SSAFunctionPlan
 	byFunction  map[*ssa.Function]FunctionID
 	byID        map[FunctionID]*ssa.Function
@@ -246,6 +255,15 @@ func (p *SSAPlan) Functions() []SSAFunctionPlan {
 		return nil
 	}
 	return append([]SSAFunctionPlan(nil), p.functions...)
+}
+
+// Roots returns canonical joined explicit roots in strict FunctionID order.
+// The returned slice is a defensive copy.
+func (p *SSAPlan) Roots() []SSARootPlan {
+	if p == nil {
+		return nil
+	}
+	return append([]SSARootPlan(nil), p.roots...)
 }
 
 // FunctionID returns the stable identity assigned to fn.
@@ -479,6 +497,15 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		byID[id] = fn
 	}
 	sort.Slice(included, func(i, j int) bool { return ids[included[i]] < ids[included[j]] })
+	canonicalRoots := make([]SSARootPlan, 0, len(rootDemand))
+	for fn, demand := range rootDemand {
+		id, ok := ids[fn]
+		if !ok {
+			return nil, fmt.Errorf("coro: canonical root function %q has no FunctionID", fn.Name())
+		}
+		canonicalRoots = append(canonicalRoots, SSARootPlan{Function: fn, ID: id, Demand: demand})
+	}
+	sort.Slice(canonicalRoots, func(i, j int) bool { return canonicalRoots[i].ID < canonicalRoots[j].ID })
 
 	flow, err := analyzeSSAFunctionFlow(included, includedSet, ids, dynamicCandidates, config.DynamicResolution, canonicalizer)
 	if err != nil {
@@ -650,6 +677,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	}
 	result := &SSAPlan{
 		plan:        base,
+		roots:       canonicalRoots,
 		functions:   make([]SSAFunctionPlan, 0, len(included)),
 		byFunction:  ids,
 		byID:        byID,

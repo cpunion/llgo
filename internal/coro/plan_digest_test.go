@@ -97,6 +97,9 @@ func TestCoroPlanDigestDeterministicCompleteAndDomainSeparated(t *testing.T) {
 	if len(document.Functions) != len(plainPlan.functions) {
 		t.Fatalf("function records = %d, want %d", len(document.Functions), len(plainPlan.functions))
 	}
+	if len(document.Roots) != len(plainPlan.roots) || len(document.Roots) == 0 {
+		t.Fatalf("root records = %d, plan roots = %d", len(document.Roots), len(plainPlan.roots))
+	}
 	if len(document.Calls) != len(plainPlan.callPlans) || len(document.Calls) == 0 {
 		t.Fatalf("call records = %d, map plans = %d", len(document.Calls), len(plainPlan.callPlans))
 	}
@@ -179,6 +182,43 @@ func TestCoroPlanDigestCanonicalTargetsAndPlanMutations(t *testing.T) {
 		t.Fatal("CallPlan mutation did not change digest")
 	}
 	plan.callPlans[multiTargetCall] = originalCall
+
+	originalRoots := append([]SSARootPlan(nil), plan.roots...)
+	var addedRoot SSARootPlan
+	for _, function := range plan.functions {
+		isRoot := false
+		for _, root := range originalRoots {
+			isRoot = isRoot || root.ID == function.Plan.ID
+		}
+		if !isRoot && function.Plan.Demand != NoDemand {
+			addedRoot = SSARootPlan{Function: function.Function, ID: function.Plan.ID, Demand: function.Plan.Demand}
+			break
+		}
+	}
+	if addedRoot.Function == nil {
+		t.Fatal("test plan has no propagated non-root demand")
+	}
+	changedRoots := make([]SSARootPlan, 0, len(originalRoots)+1)
+	inserted := false
+	for _, root := range originalRoots {
+		if !inserted && addedRoot.ID < root.ID {
+			changedRoots = append(changedRoots, addedRoot)
+			inserted = true
+		}
+		changedRoots = append(changedRoots, root)
+	}
+	if !inserted {
+		changedRoots = append(changedRoots, addedRoot)
+	}
+	plan.roots = changedRoots
+	mutated, err = plan.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mutated == baseline {
+		t.Fatal("explicit root mutation did not change digest")
+	}
+	plan.roots = originalRoots
 
 	var value ssa.Value
 	var originalValue SSAValuePlan
@@ -274,6 +314,29 @@ func TestCoroPlanDigestFailsClosedOnCallAndValueCoverage(t *testing.T) {
 		t.Fatalf("unreachable SSAValuePlan error = %v", err)
 	}
 	delete(plan.valuePlans, foreignValue)
+
+	originalRoots := append([]SSARootPlan(nil), plan.roots...)
+	rootMutations := []struct {
+		name   string
+		want   string
+		mutate func()
+	}{
+		{"nil function", "nil function", func() { plan.roots[0].Function = nil }},
+		{"no demand", "has no demand", func() { plan.roots[0].Demand = NoDemand }},
+		{"invalid demand", "unknown demand bits", func() { plan.roots[0].Demand = Demand(1 << 7) }},
+		{"duplicate", "not in strict FunctionID order", func() { plan.roots = append(plan.roots, plan.roots[0]) }},
+		{"foreign function", "missing forward root mapping", func() { plan.roots[0].Function = other.roots[0].Function }},
+	}
+	for _, test := range rootMutations {
+		t.Run("root/"+test.name, func(t *testing.T) {
+			plan.roots = append([]SSARootPlan(nil), originalRoots...)
+			test.mutate()
+			if _, err := plan.CoroPlanDigest(metadata); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("root mutation error = %v, want %q", err, test.want)
+			}
+		})
+	}
+	plan.roots = originalRoots
 }
 
 func TestCoroPlanDigestMetadataValidation(t *testing.T) {
@@ -363,9 +426,8 @@ func TestCoroPlanDigestMetadataMutationsChangeDigest(t *testing.T) {
 }
 
 func TestCoroPlanDigestCanonicalEmptyArrays(t *testing.T) {
-	prog, pkg := buildCoroTestSSA(t, "empty.go", `package coroid; func root() {}`)
-	root := packageFunction(t, pkg, "root")
-	plan, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: AsyncDemand}}, planDigestSSAConfig())
+	prog, _ := buildCoroTestSSA(t, "empty.go", `package coroid; func root() {}`)
+	plan, err := AnalyzeSSA(prog, nil, planDigestSSAConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -378,10 +440,112 @@ func TestCoroPlanDigestCanonicalEmptyArrays(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(payload)
-	for _, field := range []string{`"calls":[]`, `"values":[]`} {
+	for _, field := range []string{`"roots":[]`, `"calls":[]`, `"values":[]`} {
 		if !strings.Contains(text, field) {
 			t.Fatalf("canonical document %s does not contain %s", text, field)
 		}
+	}
+}
+
+func TestCoroPlanDigestDistinguishesExplicitAndPropagatedRoots(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "roots.go", `package coroid
+func leaf(ch chan int) { <-ch }
+func root(ch chan int) { leaf(ch) }
+`)
+	root := packageFunction(t, pkg, "root")
+	leaf := packageFunction(t, pkg, "leaf")
+	config := planDigestSSAConfig()
+	propagated, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: AsyncDemand}}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	explicit, err := AnalyzeSSA(prog, Roots{
+		{Function: root, Demand: AsyncDemand},
+		{Function: leaf, Demand: AsyncDemand},
+	}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	permuted, err := AnalyzeSSA(prog, Roots{
+		{Function: leaf, Demand: AsyncDemand},
+		{Function: root, Demand: AsyncDemand},
+	}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicated, err := AnalyzeSSA(prog, Roots{
+		{Function: leaf, Demand: AsyncDemand},
+		{Function: root, Demand: AsyncDemand},
+		{Function: leaf, Demand: AsyncDemand},
+		{Function: root, Demand: AsyncDemand},
+	}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := functionPlanFor(t, propagated, leaf).Demand; got != AsyncDemand {
+		t.Fatalf("propagated leaf demand = %s, want async", got)
+	}
+	if got, want := len(propagated.Roots()), 1; got != want {
+		t.Fatalf("propagated roots = %d, want %d", got, want)
+	}
+	if got, want := len(explicit.Roots()), 2; got != want {
+		t.Fatalf("explicit roots = %d, want %d", got, want)
+	}
+	for _, fn := range []*ssa.Function{root, leaf} {
+		left, leftOK := propagated.FunctionPlan(fn)
+		right, rightOK := explicit.FunctionPlan(fn)
+		if !leftOK || !rightOK || left != right {
+			t.Fatalf("function plan for %s differs: propagated=%+v,%v explicit=%+v,%v", fn.Name(), left, leftOK, right, rightOK)
+		}
+	}
+
+	metadata := validPlanDigestMetadata()
+	propagatedDocument, err := propagated.canonicalPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	explicitDocument, err := explicit.canonicalPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	propagatedDocument.Roots = nil
+	explicitDocument.Roots = nil
+	propagatedPayload, err := json.Marshal(propagatedDocument)
+	if err != nil {
+		t.Fatal(err)
+	}
+	explicitPayload, err := json.Marshal(explicitDocument)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(propagatedPayload) != string(explicitPayload) {
+		t.Fatalf("non-root digest plan changed:\npropagated %s\nexplicit %s", propagatedPayload, explicitPayload)
+	}
+	propagatedDigest, err := propagated.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	explicitDigest, err := explicit.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if explicitDigest == propagatedDigest {
+		t.Fatal("explicit Async root and propagated AsyncDemand produced the same digest")
+	}
+	permutedDigest, err := permuted.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if permutedDigest != explicitDigest {
+		t.Fatalf("root input order changed digest: %s != %s", permutedDigest, explicitDigest)
+	}
+	duplicatedDigest, err := duplicated.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duplicatedDigest != explicitDigest {
+		t.Fatalf("duplicate roots changed digest: %s != %s", duplicatedDigest, explicitDigest)
 	}
 }
 

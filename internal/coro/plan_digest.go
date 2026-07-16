@@ -31,16 +31,22 @@ import (
 // PlanDigestSchema is the independent canonical schema used for archive cache
 // identity. It is deliberately separate from SummarySchema: summaries remain
 // diagnostic snapshots, while this document covers every lowering plan site.
-const PlanDigestSchema = "llgo.coro.plan-digest.v0"
+const PlanDigestSchema = "llgo.coro.plan-digest.v1"
 
 // Current experimental ABI identities. Keeping these in the analysis package
 // gives build, cache, and lowering code one version source of truth.
 const (
 	EntryResolutionABIV0 = "llgo.coro.entry-resolution.v0"
 	PhysicalABIV0        = "llgo.coro.physical.v0"
+	PhysicalABIV1        = "llgo.coro.physical.v1"
 	SchedulerNoneABIV0   = "llgo.coro.scheduler.none.v0"
-	PanicLegacyABIV0     = "llgo.coro.panic.legacy.v0"
-	FuncRepABIV0         = "llgo.coro.func-rep.v0"
+	// SchedulerChildAwaitABIV0 identifies the first scheduler handoff contract:
+	// a coroutine parent may publish one initial-suspended static child and cut
+	// its stack, but only the scheduler may subsequently resume or destroy either
+	// frame. It deliberately does not claim spawn, park, preemption, or roots.
+	SchedulerChildAwaitABIV0 = "llgo.coro.scheduler.child-await.v0"
+	PanicLegacyABIV0         = "llgo.coro.panic.legacy.v0"
+	FuncRepABIV0             = "llgo.coro.func-rep.v0"
 )
 
 // PlanDigestMetadata contains every effective ABI and target input that may
@@ -64,9 +70,15 @@ type planDigestDocument struct {
 	Schema           string               `json:"schema"`
 	FunctionIDSchema string               `json:"function_id_schema"`
 	Metadata         PlanDigestMetadata   `json:"metadata"`
+	Roots            []planDigestRoot     `json:"roots"`
 	Functions        []planDigestFunction `json:"functions"`
 	Calls            []planDigestCall     `json:"calls"`
 	Values           []planDigestValue    `json:"values"`
+}
+
+type planDigestRoot struct {
+	Function FunctionID `json:"function"`
+	Demand   uint8      `json:"demand"`
 }
 
 type planDigestFunction struct {
@@ -162,6 +174,10 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 		return planDigestDocument{}, fmt.Errorf("coro: plan digest scheduler ABI %q does not match FunctionID ABI %q", metadata.SchedulerABI, identity.SchedulerABI)
 	}
 
+	roots, err := p.canonicalDigestRoots()
+	if err != nil {
+		return planDigestDocument{}, err
+	}
 	functions, err := p.canonicalDigestFunctions()
 	if err != nil {
 		return planDigestDocument{}, err
@@ -175,6 +191,7 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 		Schema:           PlanDigestSchema,
 		FunctionIDSchema: FunctionIDSchema,
 		Metadata:         metadata,
+		Roots:            roots,
 		Functions:        functions,
 		Calls:            make([]planDigestCall, 0, len(p.callPlans)),
 		Values:           make([]planDigestValue, 0, len(p.valuePlans)),
@@ -310,6 +327,47 @@ func validatePlanDigestText(name, value string, allowEmpty bool) error {
 		return fmt.Errorf("coro: plan digest %s contains NUL", name)
 	}
 	return nil
+}
+
+func (p *SSAPlan) canonicalDigestRoots() ([]planDigestRoot, error) {
+	if p.plan == nil {
+		return nil, fmt.Errorf("coro: CoroPlanDigest requires a base plan")
+	}
+	ret := make([]planDigestRoot, 0, len(p.roots))
+	var previous FunctionID
+	for index, root := range p.roots {
+		if root.Function == nil {
+			return nil, fmt.Errorf("coro: SSA root plan %d has nil function", index)
+		}
+		if err := validateDigestFunctionID(root.ID); err != nil {
+			return nil, fmt.Errorf("coro: validate SSA root plan %d: %w", index, err)
+		}
+		if err := root.Demand.Validate(); err != nil {
+			return nil, fmt.Errorf("coro: validate SSA root plan %d demand: %w", index, err)
+		}
+		if root.Demand == NoDemand {
+			return nil, fmt.Errorf("coro: SSA root plan %d has no demand", index)
+		}
+		if index != 0 && previous >= root.ID {
+			return nil, fmt.Errorf("coro: SSA root plans are not in strict FunctionID order")
+		}
+		previous = root.ID
+		if got, ok := p.byFunction[root.Function]; !ok || got != root.ID {
+			return nil, fmt.Errorf("coro: missing forward root mapping for %q", root.ID)
+		}
+		if got, ok := p.byID[root.ID]; !ok || got != root.Function {
+			return nil, fmt.Errorf("coro: missing reverse root mapping for %q", root.ID)
+		}
+		plan, ok := p.plan.Lookup(root.ID)
+		if !ok {
+			return nil, fmt.Errorf("coro: root %q is absent from the base plan", root.ID)
+		}
+		if !plan.Demand.Contains(root.Demand) {
+			return nil, fmt.Errorf("coro: root %q demand %s is not contained in function demand %s", root.ID, root.Demand, plan.Demand)
+		}
+		ret = append(ret, planDigestRoot{Function: root.ID, Demand: uint8(root.Demand)})
+	}
+	return ret, nil
 }
 
 func (p *SSAPlan) canonicalDigestFunctions() ([]planDigestFunction, error) {
