@@ -1364,6 +1364,7 @@ func targetGCBuildTags(gc string) ([]string, error) {
 
 const (
 	coroNativePipeBuildTag        = "llgo_coro_native_pipe"
+	coroNativeTimerBuildTag       = "llgo_coro_native_timer"
 	coroNativeIngressTestBuildTag = "llgo_coro_native_ingress_test"
 )
 
@@ -1409,6 +1410,13 @@ func effectiveBuildTags(conf *Config, export crosscompile.Export) (string, error
 			// process pipe/poll environment.
 			tags = append(tags, coroNativePipeBuildTag)
 		}
+		if nativeCoroTimerRuntimeABI(conf) {
+			// The first clock ABI is intentionally restricted to native
+			// 64-bit POSIX targets. A separate compiler-owned tag keeps a
+			// 32-bit pipe backend from silently selecting an unverified libc
+			// timespec/time64 layout.
+			tags = append(tags, coroNativeTimerBuildTag)
+		}
 	}
 	tags = append(tags, conf.compilerBuildTags...)
 	gcTags, err := targetGCBuildTags(export.GC)
@@ -1425,7 +1433,7 @@ func effectiveBuildTags(conf *Config, export crosscompile.Export) (string, error
 func rejectCompilerReservedBuildTags(source string, tags []string) error {
 	for _, tag := range tags {
 		switch tag {
-		case coroNativePipeBuildTag, coroNativeIngressTestBuildTag:
+		case coroNativePipeBuildTag, coroNativeTimerBuildTag, coroNativeIngressTestBuildTag:
 			return fmt.Errorf("build tag %q from %s is a compiler-reserved capability and cannot be supplied externally", tag, source)
 		}
 	}
@@ -1928,6 +1936,23 @@ func nativeCoroDoorbellRuntimeABI(conf *Config) bool {
 		}
 	}
 	return true
+}
+
+// nativeCoroTimerRuntimeABI is narrower than the retained pipe capability.
+// The current Linux clock_gettime declaration and Darwin uptime clock have a
+// verified 64-bit timespec domain; 32-bit libc time32/time64 variants require
+// a target-specific declaration or C wrapper before this capability can be
+// widened. Named and embedded targets remain excluded by the doorbell gate.
+func nativeCoroTimerRuntimeABI(conf *Config) bool {
+	if !nativeCoroDoorbellRuntimeABI(conf) {
+		return false
+	}
+	switch conf.Goarch {
+	case "amd64", "arm64", "loong64", "ppc64", "ppc64le", "riscv64", "s390x":
+		return true
+	default:
+		return false
+	}
 }
 
 func configHasBuildTag(conf *Config, want string) bool {
