@@ -112,7 +112,7 @@ func TestCoroProgramBootstrapFactoryV2MixedNativeAndWasm(t *testing.T) {
 			defer pkg.Module().Dispose()
 
 			bootstrap, targets, tableSteps, finalHash := newCoroProgramBootstrapFactoryFixtureV2(pkg)
-			factory := emitCoroProgramBootstrapFactoryV2(pkg, bootstrap, targets, finalHash)
+			factory := emitCoroProgramBootstrapFactoryV2(pkg, bootstrap, targets, finalHash, false)
 			pkg.NewCoroProgramBootstrap("__llgo_test_program_bootstrap_v2", llssa.CoroProgramBootstrapOptions{
 				Version: coroProgramBootstrapVersionV2,
 				ABIHash: finalHash,
@@ -156,6 +156,64 @@ func TestCoroProgramBootstrapFactoryV2MixedNativeAndWasm(t *testing.T) {
 			}
 			object.Dispose()
 		})
+	}
+}
+
+func TestCoroProgramBootstrapFactoryV2MainReturnIsOnlyOnCoroMainContinuation(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	pkg := prog.NewPackage("entry", "entry")
+	defer pkg.Module().Dispose()
+
+	bootstrap, targets, _, finalHash := newCoroProgramBootstrapFactoryFixtureV2(pkg)
+	const anchor = "__llgo_coro_root_package_v1.0123456789abcdef0123456789abcdef"
+	bootstrap.Steps[4] = coroProgramBootstrapStepV1{
+		Kind: coroProgramStepCoroRootV1, Role: coroProgramStepRoleMainV2,
+		FunctionID: "main-coro-id", Target: "example.com/program.main$coro",
+		Owner: "example.com/program", CatalogTarget: anchor, Aux: 1,
+	}
+	targets[4] = coroProgramBootstrapFactoryTargetV2{Anchor: targets[3].Anchor}
+	factory := emitCoroProgramBootstrapFactoryV2(pkg, bootstrap, targets, finalHash, true)
+	body := pkg.Module().NamedFunction(factory.Name()).String()
+	if got := strings.Count(body, "call void @__llgo_coro_await_prepare_v1"); got != 3 {
+		t.Fatalf("coroutine-main await calls = %d, want 3:\n%s", got, body)
+	}
+	if got := strings.Count(body, "call void @"+coroProgramMainReturnSymbolV1); got != 1 {
+		t.Fatalf("coroutine-main return calls = %d, want 1:\n%s", got, body)
+	}
+	lastAwait := strings.LastIndex(body, "call void @__llgo_coro_await_prepare_v1")
+	mainReturn := strings.Index(body, "call void @"+coroProgramMainReturnSymbolV1)
+	complete := strings.Index(body, "call void @"+coroProgramCompletePrepareHookV1)
+	if lastAwait < 0 || mainReturn < 0 || complete < 0 || !(lastAwait < mainReturn && mainReturn < complete) {
+		t.Fatalf("main-return cancellation is not on the normal post-await continuation:\n%s", body)
+	}
+	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify coroutine-main return factory: %v\n%s", err, pkg.Module().String())
+	}
+}
+
+func TestCoroProgramBootstrapFactoryV2MainReturnFollowsPlainMain(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	pkg := prog.NewPackage("entry", "entry")
+	defer pkg.Module().Dispose()
+
+	bootstrap, targets, _, finalHash := newCoroProgramBootstrapFactoryFixtureV2(pkg)
+	factory := emitCoroProgramBootstrapFactoryV2(pkg, bootstrap, targets, finalHash, true)
+	body := pkg.Module().NamedFunction(factory.Name()).String()
+	if got := strings.Count(body, "call void @"+coroProgramMainReturnSymbolV1); got != 1 {
+		t.Fatalf("plain-main return calls = %d, want 1:\n%s", got, body)
+	}
+	plainMain := strings.Index(body, "call void @\"example.com/program.main\"()")
+	mainReturn := strings.Index(body, "call void @"+coroProgramMainReturnSymbolV1)
+	complete := strings.Index(body, "call void @"+coroProgramCompletePrepareHookV1)
+	if plainMain < 0 || mainReturn < 0 || complete < 0 || !(plainMain < mainReturn && mainReturn < complete) {
+		t.Fatalf("main-return cancellation is not on the normal post-plain-main continuation:\n%s", body)
+	}
+	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify plain-main return factory: %v\n%s", err, pkg.Module().String())
 	}
 }
 
@@ -406,6 +464,9 @@ func assertCoroProgramBootstrapFactoryPresplitV2(t *testing.T, ir, uintptrIR str
 	}
 	if got := strings.Count(body, "call ptr %"); got != 2 {
 		t.Fatalf("mixed v2 bootstrap indirect child factory calls = %d, want 2:\n%s", got, body)
+	}
+	if strings.Contains(body, coroProgramMainReturnSymbolV1) {
+		t.Fatalf("V2 factory without closed-static spawn emitted main-return cancellation:\n%s", body)
 	}
 	assertInOrder(t, body,
 		"call void @"+coroProgramFramePublishHookV1,

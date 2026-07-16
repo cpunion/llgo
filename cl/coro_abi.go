@@ -46,6 +46,8 @@ const (
 	coroPreemptPollHookV1            = "__llgo_coro_preempt_poll_v1"
 	coroYieldPrepareHookV1           = "__llgo_coro_yield_prepare_v1"
 	coroParkPrepareHookV1            = "__llgo_coro_park_prepare_v1"
+	coroSpawnBeginHookV1             = "__llgo_coro_spawn_begin_v1"
+	coroSpawnCommitHookV1            = "__llgo_coro_spawn_commit_v1"
 	coroCompletePrepareHookV1        = "__llgo_coro_complete_prepare_v1"
 	coroFrameFreeHookV1              = "__llgo_coro_frame_free_v1"
 	coroDescriptorPrefixV1           = "__llgo_coro_frame_descriptor_v1."
@@ -586,7 +588,7 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 }
 
 func validateCoroPhysicalABI(fn *ssa.Function, plan coro.FunctionPlan, whole *coro.SSAPlan, childAwait, programRun bool) error {
-	return validateCoroPhysicalABIWithUniverse(fn, plan, whole, nil, childAwait, programRun)
+	return validateCoroPhysicalABIWithUniverseCapabilities(fn, plan, whole, nil, childAwait, programRun, false)
 }
 
 // validateCoroPhysicalABIWithUniverse is the production preflight. The
@@ -595,6 +597,10 @@ func validateCoroPhysicalABI(fn *ssa.Function, plan coro.FunctionPlan, whole *co
 // The wrapper above is retained for narrow structural unit tests; active
 // Compilation paths always call this form with their frozen universe.
 func validateCoroPhysicalABIWithUniverse(fn *ssa.Function, plan coro.FunctionPlan, whole *coro.SSAPlan, universe *EmissionUniverse, childAwait, programRun bool) error {
+	return validateCoroPhysicalABIWithUniverseCapabilities(fn, plan, whole, universe, childAwait, programRun, false)
+}
+
+func validateCoroPhysicalABIWithUniverseCapabilities(fn *ssa.Function, plan coro.FunctionPlan, whole *coro.SSAPlan, universe *EmissionUniverse, childAwait, programRun, staticSpawn bool) error {
 	if !childAwait {
 		return validateCoroLeafPhysicalABI(fn, plan)
 	}
@@ -672,6 +678,7 @@ func validateCoroPhysicalABIWithUniverse(fn *ssa.Function, plan coro.FunctionPla
 	returns := 0
 	awaits := 0
 	parks := 0
+	spawns := 0
 	infos := blocks.Infos(fn.Blocks)
 	hasCyclicBlock := false
 	for _, info := range infos {
@@ -739,6 +746,21 @@ func validateCoroPhysicalABIWithUniverse(fn *ssa.Function, plan coro.FunctionPla
 				if _, _, plainErr := resolveCoroStaticPlainCall(whole, instr); plainErr != nil {
 					return coroLeafInstructionError(fn, plan, instr, "unsupported call: child await: "+err.Error()+"; direct plain: "+plainErr.Error())
 				}
+			case *ssa.Go:
+				if !staticSpawn {
+					return coroLeafInstructionError(fn, plan, instr, "goroutine spawn requires the closed-static scheduler capability")
+				}
+				target, targetPlan, err := whole.ResolveClosedStaticSpawn(instr)
+				if err != nil {
+					return coroLeafInstructionError(fn, plan, instr, "unsupported closed static spawn: "+err.Error())
+				}
+				if err := validateCoroLeafPhysicalSignature(targetPlan, target.Signature); err != nil {
+					return coroLeafInstructionError(fn, plan, instr, "spawn target signature: "+err.Error())
+				}
+				if coroPhysicalSignatureContainsFunctionValue(target.Signature) {
+					return coroLeafInstructionError(fn, plan, instr, "spawn target function-valued parameters require a later canonical transport capability")
+				}
+				spawns++
 			default:
 				return coroLeafInstructionError(fn, plan, instr, "instruction is outside the CFG physical ABI allowlist")
 			}
@@ -755,6 +777,9 @@ func validateCoroPhysicalABIWithUniverse(fn *ssa.Function, plan coro.FunctionPla
 	}
 	if parks != 0 && !plan.Effect.Contains(coro.MayPark) {
 		return fail("structured-park body lacks may-park final effect: %s", plan.Effect)
+	}
+	if spawns != 0 && (!plan.DeclaredEffect.Contains(coro.YieldOnly) || !plan.LocalEffect.Contains(coro.YieldOnly) || !plan.Effect.Contains(coro.YieldOnly)) {
+		return fail("closed static spawn body lacks its exact yield-only owner seed: declared=%s local=%s final=%s", plan.DeclaredEffect, plan.LocalEffect, plan.Effect)
 	}
 	if plan.DeclaredEffect.Contains(coro.MayPark) && parks == 0 {
 		return fail("declared may-park effect has no exact structured park intrinsic")
@@ -1115,6 +1140,10 @@ func coroLeafABIDirective(fn *ssa.Function) string {
 }
 
 func validateCoroPhysicalConsumers(plan *coro.SSAPlan, childAwait bool) error {
+	return validateCoroPhysicalConsumersCapabilities(plan, childAwait, false)
+}
+
+func validateCoroPhysicalConsumersCapabilities(plan *coro.SSAPlan, childAwait, staticSpawn bool) error {
 	coroutineIDs := make(map[coro.FunctionID]struct{})
 	for _, function := range plan.Functions() {
 		if function.Plan.Emission == coro.EmitCoroutine {
@@ -1128,8 +1157,14 @@ func validateCoroPhysicalConsumers(plan *coro.SSAPlan, childAwait bool) error {
 		fn := function.Function
 		for _, block := range fn.Blocks {
 			for _, instr := range block.Instrs {
-				if _, spawn := instr.(*ssa.Go); spawn {
-					return coroLeafInstructionError(fn, function.Plan, instr, "goroutine spawn requires scheduler root lowering")
+				if spawn, ok := instr.(*ssa.Go); ok {
+					if !staticSpawn {
+						return coroLeafInstructionError(fn, function.Plan, instr, "goroutine spawn requires scheduler root lowering")
+					}
+					if _, _, err := plan.ResolveClosedStaticSpawn(spawn); err != nil {
+						return coroLeafInstructionError(fn, function.Plan, instr, "unsupported closed static spawn: "+err.Error())
+					}
+					continue
 				}
 				if call, ok := instr.(ssa.CallInstruction); ok {
 					if plan.ElidesCall(call) {

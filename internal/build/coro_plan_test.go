@@ -417,6 +417,9 @@ func __llgo_coro_yield_prepare_v1() {}
 func __llgo_coro_park_prepare_v1() {}
 func __llgo_coro_complete_prepare_v1() {}
 func __llgo_coro_frame_free_v1() {}
+func __llgo_coro_spawn_begin_v1() {}
+func __llgo_coro_spawn_commit_v1() {}
+func __llgo_coro_program_main_return_v1() {}
 func bootstrapHelper() { closureLoop(); externalABI(); inlineIntrinsic("bootstrap") }
 func closureLoop() { for i := 0; i < 2; i++ {} }
 func unrelatedLoop() { for {} }
@@ -483,6 +486,38 @@ func atomicExchange(*uint32, uint32) uint32
 		}
 		if root.Function == nil || root.Function.Name() != wantRoots[index] || root.Demand != wantDemand {
 			t.Fatalf("required root %d = %+v, want %s/%s", index, root, wantRoots[index], wantDemand)
+		}
+	}
+	spawnCtx := *ctx
+	spawnCtx.buildConf = &Config{
+		EnableCoroChildAwait:          true,
+		EnableCoroProgramBootstrapRun: true,
+		EnableCoroClosedStaticSpawn:   true,
+	}
+	spawnRoots, spawnPlain, _, _, err := requiredCoroProgramRuntimePlan(&spawnCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spawnRoots) != len(wantRoots)+3 {
+		t.Fatalf("closed-static-spawn runtime roots = %d, want %d", len(spawnRoots), len(wantRoots)+3)
+	}
+	for _, name := range []string{"__llgo_coro_spawn_begin_v1", "__llgo_coro_spawn_commit_v1", coroProgramMainReturnSymbolV1} {
+		fn := ssaPkg.Func(name)
+		if fn == nil {
+			t.Fatalf("closed-static-spawn runtime hook %q is absent", name)
+		}
+		if _, ok := spawnPlain[fn]; !ok {
+			t.Fatalf("closed-static-spawn runtime hook %q is not a required plain root", name)
+		}
+		found := false
+		for _, root := range spawnRoots {
+			if root.Function == fn && root.Demand == coro.SyncDemand {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("closed-static-spawn runtime hook %q has no sync root", name)
 		}
 	}
 	if _, ok := requiredPlain[ssaPkg.Func("init")]; ok {
@@ -1759,6 +1794,7 @@ func TestActiveCoroABIVersions(t *testing.T) {
 		{"physical leaf", &Config{EnableCoroPhysicalABI: true}, coro.PhysicalABIV0, coro.SchedulerNoneABIV0, coro.FuncRepABIV0},
 		{"plain dispatch", &Config{EnableCoroPlainDispatch: true}, coro.EntryResolutionABIV0, coro.SchedulerNoneABIV0, coro.FuncRepABIV1},
 		{"child await", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true}, coro.PhysicalABIV1, coro.SchedulerChildAwaitABIV0, coro.FuncRepABIV0},
+		{"closed static spawn", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true, EnableCoroClosedStaticSpawn: true, EnableCoroProgramBootstrapRun: true}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0, coro.FuncRepABIV0},
 		{"program bootstrap runtime with plain dispatch", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true, EnableCoroPlainDispatch: true, EnableCoroProgramBootstrapRun: true}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapABIV2, coro.FuncRepABIV1},
 	}
 	for _, test := range tests {
@@ -2172,6 +2208,11 @@ func TestCoroEntryResolutionUsesPlanMatchedPackageCache(t *testing.T) {
 	dispatchCtx.clCompilation.EnableCoroPlainDispatch = false
 	if dispatchCtx.canUsePackageCache() {
 		t.Fatal("plain-dispatch capability mismatch unexpectedly permits package cache")
+	}
+	bootstrapMismatch := newContext(digestA)
+	bootstrapMismatch.clCompilation.EnableCoroProgramBootstrapRun = true
+	if bootstrapMismatch.canUsePackageCache() {
+		t.Fatal("program-bootstrap-run capability mismatch unexpectedly permits package cache")
 	}
 	if !matchingPkg.NeedRt || !matchingPkg.NeedPyInit {
 		t.Fatalf("cache metadata runtime flags = %v/%v, want true/true", matchingPkg.NeedRt, matchingPkg.NeedPyInit)

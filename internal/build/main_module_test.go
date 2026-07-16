@@ -397,6 +397,7 @@ func TestGenMainModuleCoroProgramBootstrapV2MixedNativeAndWasm(t *testing.T) {
 					EnableCoroChildAwait:          true,
 					EnableCoroProgramBootstrapABI: true,
 					EnableCoroProgramBootstrapRun: true,
+					EnableCoroClosedStaticSpawn:   true,
 				},
 			}
 			const anchor = "__llgo_coro_root_package_v1.0123456789abcdef0123456789abcdef"
@@ -485,6 +486,9 @@ func TestGenMainModuleCoroProgramBootstrapV2MixedNativeAndWasm(t *testing.T) {
 			if got := strings.Count(factoryBody, "call void @__llgo_coro_await_prepare_v1"); got != 2 {
 				t.Fatalf("mixed v2 main-module factory await calls = %d, want 2:\n%s", got, factoryBody)
 			}
+			if got := strings.Count(factoryBody, "call void @"+coroProgramMainReturnSymbolV1); got != 1 {
+				t.Fatalf("mixed v2 main-module main-return calls = %d, want 1:\n%s", got, factoryBody)
+			}
 			assertInOrder(t, factoryBody,
 				"call ptr %",
 				"call void @__llgo_coro_await_prepare_v1",
@@ -493,6 +497,7 @@ func TestGenMainModuleCoroProgramBootstrapV2MixedNativeAndWasm(t *testing.T) {
 				"call ptr %",
 				"call void @__llgo_coro_await_prepare_v1",
 				"call void @\"example.com/foo.main\"()",
+				"call void @"+coroProgramMainReturnSymbolV1,
 				"call void @"+coroProgramCompletePrepareHookV1,
 			)
 
@@ -583,6 +588,9 @@ func TestGenMainModuleCoroProgramBootstrapV2DefinesOnlyOwnedPublicRuntimeNoop(t 
 	}
 	if function := module.NamedFunction("syscall.init"); !function.IsNil() {
 		t.Fatalf("managed V2 entry retained a weak syscall.init interception body:\n%s", module.String())
+	}
+	if function := module.NamedFunction(coroProgramMainReturnSymbolV1); !function.IsNil() {
+		t.Fatalf("V2 bootstrap without closed-static spawn declared main-return cancellation:\n%s", module.String())
 	}
 	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("verify absent-public-runtime v2 module: %v\n%s", err, module.String())

@@ -37,6 +37,7 @@ import (
 	"sync/atomic"
 
 	"golang.org/x/tools/go/ssa"
+	"golang.org/x/tools/go/ssa/ssautil"
 
 	"github.com/goplus/llgo/cl"
 	"github.com/goplus/llgo/internal/buildenv"
@@ -145,6 +146,7 @@ type CoroPlanInput struct {
 	requiredPlain                  map[*ssa.Function]struct{}
 	requiredDirectPlain            []requiredCoroDirectPlainCallArgument
 	requiredClosedDynamic          map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate
+	enableClosedStaticSpawn        bool
 	recordAnalysis                 func(*coro.SSAPlan)
 }
 
@@ -301,6 +303,83 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 						policy.Effect = policy.Effect.Join(coro.MayPark)
 					}
 				}
+			}
+			return policy, nil
+		}
+	}
+	// A source `go f(args)` is a scheduler boundary even though CallSpawn
+	// deliberately does not taint its owner in the generic effect graph. The
+	// no-TLS lowering must retain the owner's exact G explicitly. The spawned
+	// target is also a coroutine primary even when its source body is currently
+	// bounded: otherwise a future CPU-heavy/looping version could run forever in
+	// a synchronous plain adapter with no preemption cut. Static sync callers are
+	// then tainted through the ordinary effect graph and await this same unique
+	// target body.
+	if in.enableClosedStaticSpawn {
+		seeded := make(map[*ssa.Function]struct{})
+		var functions []*ssa.Function
+		if in.EmissionUniverse != nil {
+			functions = in.EmissionUniverse.Functions()
+		} else {
+			for fn := range ssautil.AllFunctions(in.Program) {
+				functions = append(functions, fn)
+			}
+			slices.SortFunc(functions, func(left, right *ssa.Function) int {
+				if left == nil {
+					if right == nil {
+						return 0
+					}
+					return -1
+				}
+				if right == nil {
+					return 1
+				}
+				return strings.Compare(left.String(), right.String())
+			})
+		}
+		for _, fn := range functions {
+			if fn == nil {
+				continue
+			}
+			if in.functionBackground != nil {
+				background, classified, err := in.functionBackground(fn)
+				if err != nil {
+					return nil, fmt.Errorf("classify closed static spawn owner %q frontend ABI: %w", fn.Name(), err)
+				}
+				if classified && background != llssa.InGo {
+					continue
+				}
+			}
+			for _, block := range fn.Blocks {
+				for _, instruction := range block.Instrs {
+					spawn, ok := instruction.(*ssa.Go)
+					if !ok {
+						continue
+					}
+					target, err := in.closedStaticSpawnTarget(fn, spawn)
+					if err != nil {
+						return nil, fmt.Errorf("closed static spawn in %q: %w", fn.Name(), err)
+					}
+					seeded[fn] = struct{}{}
+					seeded[target] = struct{}{}
+				}
+			}
+		}
+		classify := config.ClassifyFunction
+		config.ClassifyFunction = func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+			var policy coro.SSAFunctionPolicy
+			var err error
+			if classify != nil {
+				policy, err = classify(fn)
+				if err != nil {
+					return coro.SSAFunctionPolicy{}, err
+				}
+			}
+			if _, required := seeded[fn]; required {
+				if policy.IgnoreBody {
+					return coro.SSAFunctionPolicy{}, fmt.Errorf("closed static spawn function %q is not a Go-emitted body", fn.Name())
+				}
+				policy.Effect = policy.Effect.Join(coro.YieldOnly)
 			}
 			return policy, nil
 		}
@@ -513,10 +592,136 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 	if err == nil {
 		err = validateRequiredCoroClosedDynamicCalls(plan, in.requiredClosedDynamic)
 	}
+	if err == nil && in.enableClosedStaticSpawn {
+		err = validateClosedStaticSpawnPlan(plan)
+	}
 	if err == nil && in.recordAnalysis != nil {
 		in.recordAnalysis(plan)
 	}
 	return plan, err
+}
+
+func (in CoroPlanInput) closedStaticSpawnTarget(owner *ssa.Function, spawn *ssa.Go) (*ssa.Function, error) {
+	if owner == nil || spawn == nil || spawn.Common() == nil || spawn.Parent() != owner {
+		return nil, fmt.Errorf("requires an exact owner and call site")
+	}
+	common := spawn.Common()
+	raw, direct := common.Value.(*ssa.Function)
+	if !direct || raw == nil || common.IsInvoke() || common.Method != nil || common.StaticCallee() != raw {
+		return nil, fmt.Errorf("requires a direct static function operand; closures, methods, interfaces, and function values are unsupported")
+	}
+	target, ok := in.ResolveFunction(raw)
+	if !ok || target == nil {
+		return nil, fmt.Errorf("target %q is outside the frozen emission universe", raw.Name())
+	}
+	if target.Parent() != nil || len(target.FreeVars) != 0 || target.Synthetic != "" || target.Origin() != nil || len(target.TypeArgs()) != 0 {
+		return nil, fmt.Errorf("target %q is not an exact non-capturing top-level function", target.Name())
+	}
+	if params := target.TypeParams(); params != nil && params.Len() != 0 {
+		return nil, fmt.Errorf("target %q is a generic declaration", target.Name())
+	}
+	sig := target.Signature
+	if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Results().Len() != 0 ||
+		typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 {
+		return nil, fmt.Errorf("target %q must have a non-method, non-variadic, zero-result signature", target.Name())
+	}
+	if len(target.Blocks) == 0 {
+		return nil, fmt.Errorf("target %q has no defined Go body", target.Name())
+	}
+	if in.functionBackground != nil {
+		background, classified, err := in.functionBackground(target)
+		if err != nil {
+			return nil, fmt.Errorf("classify target %q frontend ABI: %w", target.Name(), err)
+		}
+		if !classified || background != llssa.InGo {
+			return nil, fmt.Errorf("target %q is not one frozen Go-emitted body", target.Name())
+		}
+	}
+	return target, nil
+}
+
+func validateClosedStaticSpawnPlan(plan *coro.SSAPlan) error {
+	if plan == nil {
+		return fmt.Errorf("closed static spawn validation requires a coroutine plan")
+	}
+	for _, owner := range plan.Functions() {
+		if owner.Function == nil || owner.Plan.Emission == coro.EmitNone || plan.IgnoresBody(owner.Function) {
+			continue
+		}
+		for _, block := range owner.Function.Blocks {
+			for _, instruction := range block.Instrs {
+				spawn, ok := instruction.(*ssa.Go)
+				if !ok {
+					continue
+				}
+				if _, _, err := plan.ResolveClosedStaticSpawn(spawn); err != nil {
+					return fmt.Errorf("closed static spawn in %q: %w", owner.Plan.ID, err)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func coroPlanContainsSpawn(plan *coro.SSAPlan) bool {
+	if plan == nil {
+		return false
+	}
+	for _, owner := range plan.Functions() {
+		if owner.Function == nil || owner.Plan.Emission == coro.EmitNone || plan.IgnoresBody(owner.Function) {
+			continue
+		}
+		for _, block := range owner.Function.Blocks {
+			for _, instruction := range block.Instrs {
+				if _, spawn := instruction.(*ssa.Go); spawn {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func validateCoroClosedStaticSpawnRunGate(conf *Config, plan *coro.SSAPlan) error {
+	if conf == nil || !conf.EnableCoroClosedStaticSpawn {
+		return nil
+	}
+	if !conf.EnableCoroProgramBootstrapRun {
+		return fmt.Errorf("validate coroutine closed static spawn: runnable program bootstrap v2 is required")
+	}
+	if plan == nil {
+		return fmt.Errorf("validate coroutine closed static spawn: runnable capability requires a coroutine plan")
+	}
+	// Main-return cancellation can safely retire ready/yielded children and a
+	// structured await tree. Platform, host, foreign, channel/select and opaque
+	// waits need separate producer quiescence/cancellation protocols, so keep
+	// those targets outside this first production slice.
+	allowed := coro.YieldOnly | coro.AwaitStructured
+	for _, owner := range plan.Functions() {
+		if owner.Function == nil || owner.Plan.Emission == coro.EmitNone || plan.IgnoresBody(owner.Function) {
+			continue
+		}
+		for _, block := range owner.Function.Blocks {
+			for _, instruction := range block.Instrs {
+				spawn, ok := instruction.(*ssa.Go)
+				if !ok {
+					continue
+				}
+				_, target, err := plan.ResolveClosedStaticSpawn(spawn)
+				if err != nil {
+					return fmt.Errorf("validate coroutine closed static spawn in %q: %w", owner.Plan.ID, err)
+				}
+				effect := target.Effect.Normalize()
+				if !effect.Contains(coro.YieldOnly) || effect&^allowed != 0 {
+					return fmt.Errorf(
+						"validate coroutine closed static spawn in %q: target %q effect %s is outside the production main-return cancellation subset %s",
+						owner.Plan.ID, target.ID, effect, allowed,
+					)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func sameExactCoroFunctionReferences(left, right []*ssa.Function) bool {
@@ -700,6 +905,13 @@ type Config struct {
 	// coroutine, interface, reflect, method, go/defer, aggregate, or captured
 	// closure dispatch.
 	EnableCoroPlainDispatch bool
+	// EnableCoroClosedStaticSpawn enables only an exact source `go f(args)`
+	// whose operand is one closed, top-level static function. This first
+	// capability accepts only zero-result targets; that is a lowering gate, not
+	// a Go language restriction. It requires the runnable program-bootstrap v2
+	// scheduler (including the v1 physical/child-await ABI) and never gives the
+	// runtime a user callback.
+	EnableCoroClosedStaticSpawn bool
 	// EnableCoroProgramBootstrapABI emits the target-neutral v1 startup table
 	// for an executable after the exact init/main entries have been validated
 	// against the frozen whole-program plan. It does not replace the legacy
@@ -1163,6 +1375,14 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	if ctx == nil || ctx.buildConf == nil {
 		return nil
 	}
+	if ctx.buildConf.EnableCoroClosedStaticSpawn {
+		if !ctx.buildConf.EnableCoroProgramBootstrapRun {
+			return fmt.Errorf("enable coroutine closed static spawn: runnable program bootstrap v2 is required")
+		}
+		if !ctx.buildConf.EnableCoroChildAwait {
+			return fmt.Errorf("enable coroutine closed static spawn: coroutine child await is required")
+		}
+	}
 	if err := validateCoroProgramBootstrapConfig(ctx.buildConf); err != nil {
 		return err
 	}
@@ -1219,11 +1439,12 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	}
 	requiredRoots = append(requiredRoots, managedEntryRoots...)
 	input := CoroPlanInput{
-		Program:               ctx.progSSA,
-		requiredRoots:         requiredRoots,
-		requiredPlain:         requiredPlain,
-		requiredDirectPlain:   requiredDirectPlain,
-		requiredClosedDynamic: requiredClosedDynamic,
+		Program:                 ctx.progSSA,
+		requiredRoots:           requiredRoots,
+		requiredPlain:           requiredPlain,
+		requiredDirectPlain:     requiredDirectPlain,
+		requiredClosedDynamic:   requiredClosedDynamic,
+		enableClosedStaticSpawn: ctx.buildConf.EnableCoroClosedStaticSpawn,
 		recordAnalysis: func(plan *coro.SSAPlan) {
 			if plan != nil {
 				analyzedPlansMu.Lock()
@@ -1272,6 +1493,9 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 			return fmt.Errorf("validate coroutine plan coverage: %w", err)
 		}
 	}
+	if err := validateCoroClosedStaticSpawnRunGate(ctx.buildConf, plan); err != nil {
+		return err
+	}
 	var metadata coro.PlanDigestMetadata
 	var digest string
 	if ctx.buildConf.EnableCoroEntryResolution {
@@ -1294,6 +1518,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		EnableCoroPhysicalABI:         ctx.buildConf.EnableCoroPhysicalABI,
 		EnableCoroChildAwait:          ctx.buildConf.EnableCoroChildAwait,
 		EnableCoroPlainDispatch:       ctx.buildConf.EnableCoroPlainDispatch,
+		EnableCoroClosedStaticSpawn:   ctx.buildConf.EnableCoroClosedStaticSpawn,
 		EnableCoroProgramBootstrapRun: ctx.buildConf.EnableCoroProgramBootstrapRun,
 		CoroPlanDigest:                digest,
 		CoroABI:                       metadata.CoroABI,
@@ -1590,6 +1815,9 @@ func requiredCoroProgramManagedEntryRoots(ctx *context) (coro.Roots, error) {
 }
 
 func activeCoroSchedulerABIVersion(conf *Config) string {
+	if conf != nil && conf.EnableCoroClosedStaticSpawn {
+		return coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0
+	}
 	if conf != nil && conf.EnableCoroProgramBootstrapRun {
 		return coro.SchedulerProgramBootstrapABIV2
 	}
@@ -1614,7 +1842,13 @@ func activeCoroFuncRepABIVersion(conf *Config) string {
 // summary. Their fallback SSA stubs remain ignored; ordinary C declarations
 // outside this compiler-owned closure stay unknown foreign.
 func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function]struct{}, []requiredCoroDirectPlainCallArgument, map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate, error) {
-	if ctx == nil || ctx.buildConf == nil || !ctx.buildConf.EnableCoroChildAwait {
+	if ctx == nil || ctx.buildConf == nil {
+		return nil, nil, nil, nil, nil
+	}
+	if ctx.buildConf.EnableCoroClosedStaticSpawn && !ctx.buildConf.EnableCoroProgramBootstrapRun {
+		return nil, nil, nil, nil, fmt.Errorf("coroutine closed static spawn runtime roots require runnable program bootstrap v2")
+	}
+	if !ctx.buildConf.EnableCoroChildAwait {
 		return nil, nil, nil, nil, nil
 	}
 	if ctx.coroSSAEmission == nil || ctx.coroEmission == nil {
@@ -1645,6 +1879,10 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			coroFrameAllocatorBootstrapSymbolV1,
 			coroProgramBeginSymbolV1,
 			coroProgramRunSymbolV1,
+		)
+	}
+	if ctx.buildConf.EnableCoroProgramBootstrapRun {
+		names = append(names,
 			"__llgo_coro_frame_alloc_v1",
 			"__llgo_coro_frame_publish_v1",
 			"__llgo_coro_await_prepare_v1",
@@ -1654,10 +1892,17 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			"__llgo_coro_complete_prepare_v1",
 			"__llgo_coro_frame_free_v1",
 		)
-		for _, name := range names[1:] {
-			demandByName[name] = coro.SyncDemand
-			plainRootByName[name] = true
-		}
+	}
+	if ctx.buildConf.EnableCoroClosedStaticSpawn {
+		names = append(names,
+			"__llgo_coro_spawn_begin_v1",
+			"__llgo_coro_spawn_commit_v1",
+			coroProgramMainReturnSymbolV1,
+		)
+	}
+	for _, name := range names[1:] {
+		demandByName[name] = coro.SyncDemand
+		plainRootByName[name] = true
 	}
 	byName := make(map[string]*ssa.Function, len(names))
 	wanted := make(map[string]struct{}, len(names))

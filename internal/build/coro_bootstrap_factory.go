@@ -177,6 +177,7 @@ func emitCoroProgramBootstrapFactoryV2(
 	bootstrap *coroProgramBootstrapV1,
 	targets []coroProgramBootstrapFactoryTargetV2,
 	finalHash [16]byte,
+	notifyMainReturn bool,
 ) llssa.Function {
 	validateCoroProgramBootstrapFactoryV2(pkg, bootstrap, targets)
 
@@ -226,6 +227,12 @@ func emitCoroProgramBootstrapFactoryV2(
 	free := pkg.NewFunc(coroProgramFrameFreeHookV1, newSignature(
 		[]types.Type{pointer, pointer, types.Typ[types.Uintptr], types.Typ[types.Uintptr], pointer}, nil,
 	), llssa.InC)
+	var mainReturn llssa.Function
+	if notifyMainReturn {
+		mainReturn = pkg.NewFunc(coroProgramMainReturnSymbolV1, newSignature(
+			[]types.Type{pointer}, nil,
+		), llssa.InC)
+	}
 
 	frame := llssa.CoroFrameOps{
 		Alloc: func(b llssa.Builder, size, align llssa.Expr) llssa.Expr {
@@ -301,6 +308,13 @@ func emitCoroProgramBootstrapFactoryV2(
 			coroBuilder.SuspendCurrentBlock()
 			b.Store(b.FieldAddr(header, coroProgramHeaderSuspendReasonV1), prog.IntVal(coroProgramSuspendNoneV1, prog.Uint16()))
 			b.Store(b.FieldAddr(header, coroProgramHeaderLifecycleV1), prog.IntVal(coroProgramLifecycleActiveV1, prog.Uint16()))
+		}
+		// This is deliberately the normal continuation of the exact V2 main
+		// step, not an entry-module call after program_run. A panic or Goexit
+		// terminal path never returns through this point, so it cannot be
+		// mistaken for command-main return and cannot cancel background Gs.
+		if mainReturn != nil && step.Role == coroProgramStepRoleMainV2 {
+			b.Call(mainReturn.Expr, g)
 		}
 	}
 

@@ -42,6 +42,7 @@ type plannedFunctionSymbol struct {
 	childAwait    bool
 	programRun    bool
 	plainDispatch bool
+	staticSpawn   bool
 	coroPlan      *coro.SSAPlan
 	emission      *EmissionUniverse
 }
@@ -89,6 +90,7 @@ func (p *context) resolveFunctionSymbol(fn *ssa.Function) (plannedFunctionSymbol
 	entry.childAwait = p.compilation.EnableCoroChildAwait
 	entry.programRun = p.compilation.EnableCoroProgramBootstrapRun
 	entry.plainDispatch = p.compilation.EnableCoroPlainDispatch
+	entry.staticSpawn = p.compilation.EnableCoroClosedStaticSpawn
 	entry.coroPlan = p.compilation.CoroPlan
 	entry.emission = p.compilation.EmissionUniverse
 	if p.compilation.CoroPlan.IgnoresBody(fn) {
@@ -181,7 +183,7 @@ func (e plannedFunctionSymbol) checkSupported() error {
 		if err := validateCoroPhysicalFunctionValueABI(e.plan, e.function.Signature, e.plainDispatch); err != nil {
 			return err
 		}
-		return validateCoroPhysicalABIWithUniverse(e.function, e.plan, e.coroPlan, e.emission, e.childAwait, e.programRun)
+		return validateCoroPhysicalABIWithUniverseCapabilities(e.function, e.plan, e.coroPlan, e.emission, e.childAwait, e.programRun, e.staticSpawn)
 	}
 	if e.plan.Emission == coro.EmitExternal && e.plan.FuncRep == coro.DirectCoro {
 		return fmt.Errorf("external coroutine emission %q requires coroutine physical ABI lowering", e.plan.ID)
@@ -205,6 +207,14 @@ func (c *Compilation) preflightCoroPlan() error {
 	}
 	if c.EnableCoroPlainDispatch && !c.EnableCoroEntryResolution {
 		return fmt.Errorf("coroutine plain dispatch requires coroutine entry resolution")
+	}
+	if c.EnableCoroClosedStaticSpawn {
+		if !c.EnableCoroChildAwait {
+			return fmt.Errorf("coroutine closed static spawn requires coroutine child await")
+		}
+		if !c.EnableCoroProgramBootstrapRun {
+			return fmt.Errorf("coroutine closed static spawn requires runnable program bootstrap v2")
+		}
 	}
 	if !c.EnableCoroEntryResolution {
 		return nil
@@ -253,6 +263,7 @@ func (c *Compilation) preflightCoroPlan() error {
 				childAwait:    c.EnableCoroChildAwait,
 				programRun:    c.EnableCoroProgramBootstrapRun,
 				plainDispatch: c.EnableCoroPlainDispatch,
+				staticSpawn:   c.EnableCoroClosedStaticSpawn,
 				coroPlan:      c.CoroPlan,
 				emission:      c.EmissionUniverse,
 			}
@@ -275,7 +286,7 @@ func (c *Compilation) preflightCoroPlan() error {
 			}
 		}
 		if c.EnableCoroPhysicalABI {
-			c.coroPreflightErr = validateCoroPhysicalConsumers(c.CoroPlan, c.EnableCoroChildAwait)
+			c.coroPreflightErr = validateCoroPhysicalConsumersCapabilities(c.CoroPlan, c.EnableCoroChildAwait, c.EnableCoroClosedStaticSpawn)
 			if c.coroPreflightErr != nil {
 				return
 			}

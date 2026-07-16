@@ -116,6 +116,97 @@ func send(ch chan int) { ch <- 1 }
 	}
 }
 
+func TestSSAPlanResolvesOnlyClosedStaticSpawnAndKeepsOnePreemptibleTargetPrimary(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "spawn.go", `package coroid
+var ch chan int
+func plain(value int) { _ = value }
+func suspending() { <-ch }
+func launchPlain(value int) { plain(value); go plain(value) }
+func launchSuspending() { go suspending() }
+`)
+	plain := packageFunction(t, pkg, "plain")
+	suspending := packageFunction(t, pkg, "suspending")
+	launchPlain := packageFunction(t, pkg, "launchPlain")
+	launchSuspending := packageFunction(t, pkg, "launchSuspending")
+	plan, err := AnalyzeSSA(prog, Roots{
+		{Function: launchPlain, Demand: AsyncDemand},
+		{Function: launchSuspending, Demand: AsyncDemand},
+	}, SSAConfig{
+		MaxPlainInstructions: -1,
+		ClassifyFunction: func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+			if fn == launchPlain || fn == launchSuspending || fn == plain || fn == suspending {
+				return SSAFunctionPolicy{Effect: YieldOnly}, nil
+			}
+			return SSAFunctionPolicy{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := functionPlanFor(t, plan, plain); got.Emission != EmitCoroutine || got.Primary != PrimaryCoroutine || got.FuncRep != DirectCoro ||
+		got.Demand != AsyncDemand || !got.Effect.Contains(YieldOnly) {
+		t.Fatalf("bounded target plan = %+v, want one sync+spawn preemptible coroutine primary", got)
+	}
+	if got := functionPlanFor(t, plan, suspending); got.Emission != EmitCoroutine || got.Primary != PrimaryCoroutine ||
+		got.FuncRep != DirectCoro || got.Demand != AsyncDemand {
+		t.Fatalf("suspending target plan = %+v, want one async coroutine primary", got)
+	}
+	for _, owner := range []*ssa.Function{launchPlain, launchSuspending} {
+		ownerPlan := functionPlanFor(t, plan, owner)
+		if ownerPlan.DeclaredEffect != YieldOnly || !ownerPlan.LocalEffect.Contains(YieldOnly) || !ownerPlan.Effect.Contains(YieldOnly) ||
+			ownerPlan.Emission != EmitCoroutine || ownerPlan.FuncRep != DirectCoro || ownerPlan.Demand != AsyncDemand {
+			t.Fatalf("spawn owner %s plan = %+v", owner.Name(), ownerPlan)
+		}
+		var spawn *ssa.Go
+		for _, block := range owner.Blocks {
+			for _, instruction := range block.Instrs {
+				if candidate, ok := instruction.(*ssa.Go); ok {
+					spawn = candidate
+				}
+			}
+		}
+		if spawn == nil {
+			t.Fatalf("spawn owner %s has no ssa.Go", owner.Name())
+		}
+		target, targetPlan, err := plan.ResolveClosedStaticSpawn(spawn)
+		if err != nil {
+			t.Fatalf("resolve spawn in %s: %v", owner.Name(), err)
+		}
+		callPlan, ok := plan.CallPlan(spawn)
+		if !ok || callPlan.Kind != CallSpawn || callPlan.Open || callPlan.MayBeNil || len(callPlan.Targets) != 1 ||
+			targetPlan.Demand != AsyncDemand {
+			t.Fatalf("spawn in %s call/target plan = %+v / %+v", owner.Name(), callPlan, targetPlan)
+		}
+		if owner == launchPlain && target != plain || owner == launchSuspending && target != suspending {
+			t.Fatalf("spawn in %s target = %v", owner.Name(), target)
+		}
+	}
+
+	bothPlan, err := AnalyzeSSA(prog, Roots{{Function: launchPlain, Demand: BothDemand}}, SSAConfig{
+		MaxPlainInstructions: -1,
+		ClassifyFunction: func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+			if fn == launchPlain || fn == plain {
+				return SSAFunctionPolicy{Effect: YieldOnly}, nil
+			}
+			return SSAFunctionPolicy{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bothSpawn *ssa.Go
+	for _, block := range launchPlain.Blocks {
+		for _, instruction := range block.Instrs {
+			if spawn, ok := instruction.(*ssa.Go); ok {
+				bothSpawn = spawn
+			}
+		}
+	}
+	if _, _, err := bothPlan.ResolveClosedStaticSpawn(bothSpawn); err == nil || !strings.Contains(err.Error(), "async-only") {
+		t.Fatalf("BothDemand spawn owner error = %v, want async-only fail-closed", err)
+	}
+}
+
 func TestSSAPlanRootsCanonicalJoinedSortedAndDefensive(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "roots.go", `package coroid
 func original() {}

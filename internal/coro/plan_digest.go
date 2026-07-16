@@ -54,8 +54,14 @@ const (
 	// contract. It still does not claim spawn, park, timers, or a production
 	// source of concurrent runnable Gs.
 	SchedulerProgramBootstrapABIV2 = "llgo.coro.scheduler.program-bootstrap.v2"
-	PanicLegacyABIV0               = "llgo.coro.panic.legacy.v0"
-	FuncRepABIV0                   = "llgo.coro.func-rep.v0"
+	// SchedulerProgramBootstrapClosedStaticSpawnABIV0 is the explicit superset
+	// of SchedulerProgramBootstrapABIV2 that adds compiler-owned begin/commit
+	// for one exact closed static `go f(args)` target and normal-main-return
+	// cancellation. The runtime never receives a user callback; the compiler
+	// creates the child only to its initial suspend before commit.
+	SchedulerProgramBootstrapClosedStaticSpawnABIV0 = "llgo.coro.scheduler.program-bootstrap.v2.closed-static-spawn.v0"
+	PanicLegacyABIV0                                = "llgo.coro.panic.legacy.v0"
+	FuncRepABIV0                                    = "llgo.coro.func-rep.v0"
 	// FuncRepABIV1 introduces an explicit descriptor/context representation for
 	// dynamically consumed Go function values. The first producer/consumer slice
 	// supports only one no-capture, non-suspending plain body; unsupported value

@@ -67,6 +67,10 @@ type Compilation struct {
 	// call is accepted by this capability; every wider dynamic form remains an
 	// unsupported preflight error.
 	EnableCoroPlainDispatch bool
+	// EnableCoroClosedStaticSpawn permits only the compilation-plan-certified
+	// closed static spawn transaction. The physical parent G is passed to both
+	// runtime hooks; no TLS lookup or indirect user callback is permitted.
+	EnableCoroClosedStaticSpawn bool
 	// EnableCoroProgramBootstrapRun selects the program-root scheduler ABI for
 	// package identities. The factory itself lives in the uncached entry module,
 	// but every linked archive must agree with the runtime driver contract.
@@ -108,7 +112,15 @@ func (c *Compilation) validateCoroABIIdentity(required bool) error {
 	if c.EnableCoroChildAwait {
 		wantSchedulerABI = coro.SchedulerChildAwaitABIV0
 	}
-	if c.EnableCoroProgramBootstrapRun {
+	if c.EnableCoroClosedStaticSpawn {
+		if !c.EnableCoroChildAwait {
+			return fmt.Errorf("coroutine closed static spawn requires child-await lowering")
+		}
+		if !c.EnableCoroProgramBootstrapRun {
+			return fmt.Errorf("coroutine closed static spawn requires the runnable program-bootstrap v2 scheduler")
+		}
+		wantSchedulerABI = coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0
+	} else if c.EnableCoroProgramBootstrapRun {
 		if !c.EnableCoroChildAwait {
 			return fmt.Errorf("coroutine program bootstrap runtime requires child-await lowering")
 		}

@@ -109,6 +109,76 @@ func (p *SSAPlan) CallPlan(call ssa.CallInstruction) (SSACallPlan, bool) {
 	return plan, true
 }
 
+// ResolveClosedStaticSpawn proves the exact source and whole-plan shape used
+// by the first stackless goroutine-spawn lowering. The target is selected by
+// the immutable CallPlan, never by a display name or a runtime callback. The
+// target must have one coroutine primary even when its source body is bounded:
+// this preserves preemption if that goroutine becomes CPU-heavy and lets sync
+// callers reuse the same body through ordinary async-effect propagation.
+func (p *SSAPlan) ResolveClosedStaticSpawn(call *ssa.Go) (*ssa.Function, FunctionPlan, error) {
+	if p == nil || call == nil || call.Common() == nil {
+		return nil, FunctionPlan{}, fmt.Errorf("requires a compilation CallPlan")
+	}
+	common := call.Common()
+	raw, direct := common.Value.(*ssa.Function)
+	if !direct || raw == nil || common.IsInvoke() || common.Method != nil || common.StaticCallee() != raw {
+		return nil, FunctionPlan{}, fmt.Errorf("requires an exact static top-level function operand")
+	}
+	callPlan, ok := p.CallPlan(call)
+	if !ok {
+		return nil, FunctionPlan{}, fmt.Errorf("spawn has no compilation CallPlan")
+	}
+	if callPlan.Kind != CallSpawn || callPlan.Open || callPlan.MayBeNil || len(callPlan.Targets) != 1 {
+		return nil, FunctionPlan{}, fmt.Errorf(
+			"requires one closed non-nil spawn target, got kind=%v open=%t may-be-nil=%t targets=%d",
+			callPlan.Kind, callPlan.Open, callPlan.MayBeNil, len(callPlan.Targets),
+		)
+	}
+	target, ok := p.Function(callPlan.Targets[0])
+	if !ok || target == nil {
+		return nil, FunctionPlan{}, fmt.Errorf("spawn target %q is absent from the compilation plan", callPlan.Targets[0])
+	}
+	targetPlan, ok := p.FunctionPlan(target)
+	if !ok || targetPlan.ID != callPlan.Targets[0] {
+		return nil, FunctionPlan{}, fmt.Errorf("spawn target %q has no canonical function plan", callPlan.Targets[0])
+	}
+	if target.Parent() != nil || len(target.FreeVars) != 0 || target.Synthetic != "" || target.Origin() != nil || len(target.TypeArgs()) != 0 {
+		return nil, FunctionPlan{}, fmt.Errorf("target %q is not an exact non-capturing top-level function", targetPlan.ID)
+	}
+	if params := target.TypeParams(); params != nil && params.Len() != 0 {
+		return nil, FunctionPlan{}, fmt.Errorf("target %q is a generic declaration", targetPlan.ID)
+	}
+	sig := target.Signature
+	if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Results().Len() != 0 ||
+		(sig.TypeParams() != nil && sig.TypeParams().Len() != 0) ||
+		(sig.RecvTypeParams() != nil && sig.RecvTypeParams().Len() != 0) {
+		return nil, FunctionPlan{}, fmt.Errorf("target %q must have one non-method, non-variadic, zero-result signature", targetPlan.ID)
+	}
+	if targetPlan.External != Defined || targetPlan.Demand != AsyncDemand {
+		return nil, FunctionPlan{}, fmt.Errorf(
+			"target %q is not one demanded defined async root (external=%s demand=%s)",
+			targetPlan.ID, targetPlan.External, targetPlan.Demand,
+		)
+	}
+	if targetPlan.Emission != EmitCoroutine || targetPlan.Primary != PrimaryCoroutine || targetPlan.FuncRep != DirectCoro ||
+		!targetPlan.Effect.Contains(YieldOnly) || callPlan.Rep != DirectCoro {
+		return nil, FunctionPlan{}, fmt.Errorf(
+			"target %q is not one preemptible direct coroutine primary (emission=%s primary=%s representation=%s effect=%s call-representation=%s)",
+			targetPlan.ID, targetPlan.Emission, targetPlan.Primary, targetPlan.FuncRep, targetPlan.Effect, callPlan.Rep,
+		)
+	}
+	caller := call.Parent()
+	callerPlan, ok := p.FunctionPlan(caller)
+	if !ok || callerPlan.Emission != EmitCoroutine || callerPlan.Primary != PrimaryCoroutine || callerPlan.FuncRep != DirectCoro ||
+		callerPlan.Demand != AsyncDemand || !callerPlan.Effect.Contains(YieldOnly) {
+		return nil, FunctionPlan{}, fmt.Errorf(
+			"spawn owner is not one async-only contextful coroutine primary (emission=%s primary=%s representation=%s demand=%s effect=%s)",
+			callerPlan.Emission, callerPlan.Primary, callerPlan.FuncRep, callerPlan.Demand, callerPlan.Effect,
+		)
+	}
+	return target, targetPlan, nil
+}
+
 // ElidesCall reports whether trusted frontend policy proved that the exact SSA
 // declaration call emits no callable edge. The source operation may be omitted,
 // lowered inline, or replaced by separately frozen lowered calls. Elided calls

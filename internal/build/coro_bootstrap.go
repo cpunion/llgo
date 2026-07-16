@@ -42,6 +42,7 @@ const (
 	coroProgramPublicRuntimeNoopIDV2            coro.FunctionID = "llgo.bootstrap.v2.public-runtime-init.noop"
 	coroProgramBeginSymbolV1                                    = "__llgo_coro_program_begin_v1"
 	coroProgramRunSymbolV1                                      = "__llgo_coro_program_run_v1"
+	coroProgramMainReturnSymbolV1                               = "__llgo_coro_program_main_return_v1"
 
 	// Step kinds and semantic roles are part of the cross-target bootstrap ABI.
 	// Keep these numeric values synchronized with ssa and runtime/internal/coro.
@@ -87,6 +88,9 @@ func (b *coroProgramBootstrapV1) abiVersion() uint32 {
 func validateCoroProgramBootstrapConfig(conf *Config) error {
 	if conf == nil {
 		return nil
+	}
+	if conf.EnableCoroClosedStaticSpawn && !conf.EnableCoroProgramBootstrapRun {
+		return fmt.Errorf("enable coroutine closed static spawn: runnable program bootstrap v2 is required")
 	}
 	if conf.EnableCoroProgramBootstrapRun && !conf.EnableCoroProgramBootstrapABI {
 		return fmt.Errorf("enable coroutine program bootstrap runtime: program bootstrap ABI is required")

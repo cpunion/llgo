@@ -289,7 +289,10 @@ func emitCoroProgramManifest(ctx *context, pkg llssa.Package, cfg *genConfig) co
 				}
 			}
 			if ctx.buildConf.EnableCoroProgramBootstrapRun {
-				factory = emitCoroProgramBootstrapFactoryV2(pkg, cfg.coroBootstrap, targets, cfg.coroManifestHash)
+				factory = emitCoroProgramBootstrapFactoryV2(
+					pkg, cfg.coroBootstrap, targets, cfg.coroManifestHash,
+					ctx.buildConf.EnableCoroClosedStaticSpawn,
+				)
 			}
 		} else {
 			targets := make([]llssa.Function, len(cfg.coroBootstrap.Steps))

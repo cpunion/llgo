@@ -146,6 +146,74 @@ func TestCoroPlanDigestDeterministicCompleteAndDomainSeparated(t *testing.T) {
 	}
 }
 
+func TestCoroPlanDigestRecordsClosedStaticSpawnConsumerAndOwnerSeed(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "spawn_digest.go", `package coroid
+func worker(value int) { _ = value }
+func launch(value int) { go worker(value) }
+`)
+	launch := packageFunction(t, pkg, "launch")
+	worker := packageFunction(t, pkg, "worker")
+	build := func(seed bool) *SSAPlan {
+		config := planDigestSSAConfig()
+		config.FunctionIDs.CoroABI = PhysicalABIV1
+		config.FunctionIDs.SchedulerABI = SchedulerProgramBootstrapClosedStaticSpawnABIV0
+		config.MaxPlainInstructions = -1
+		if seed {
+			config.ClassifyFunction = func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+				if fn == launch || fn == worker {
+					return SSAFunctionPolicy{Effect: YieldOnly}, nil
+				}
+				return SSAFunctionPolicy{}, nil
+			}
+		}
+		plan, err := AnalyzeSSA(prog, Roots{{Function: launch, Demand: AsyncDemand}}, config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return plan
+	}
+	seeded := build(true)
+	again := build(true)
+	unseeded := build(false)
+	metadata := validPlanDigestMetadata()
+	metadata.CoroABI = PhysicalABIV1
+	metadata.SchedulerABI = SchedulerProgramBootstrapClosedStaticSpawnABIV0
+	digest, err := seeded.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	againDigest, err := again.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest != againDigest {
+		t.Fatalf("closed static spawn digest is unstable: %s != %s", digest, againDigest)
+	}
+	unseededDigest, err := unseeded.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest == unseededDigest {
+		t.Fatal("spawn owner YieldOnly/contextful-primary seed is absent from the digest")
+	}
+	document, err := seeded.canonicalPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, call := range document.Calls {
+		if CallKind(call.Kind) == CallSpawn {
+			found = true
+			if call.Open || call.MayBeNil || len(call.Targets) != 1 {
+				t.Fatalf("spawn digest call = %+v", call)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("canonical plan digest has no exact CallSpawn consumer")
+	}
+}
+
 func TestCoroPlanDigestRecordsIgnoredPhysicalBodySemantics(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "ignored_digest.go", `package coroid
 func external() {}

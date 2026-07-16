@@ -1701,6 +1701,9 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		}
 		p.call(b, p.blkInfos[v.Block().Index].Kind, &v.Call)
 	case *ssa.Go:
+		if p.tryCompileCoroClosedStaticSpawn(b, v) {
+			return
+		}
 		p.call(b, llssa.Go, &v.Call)
 	case *ssa.RunDefers:
 		p.recordPanicLocation(b, v.Pos())

@@ -142,6 +142,17 @@ func TestCompilationCoroABIIdentityValidation(t *testing.T) {
 	if err := programBootstrap.validateCoroABIIdentity(false); err != nil {
 		t.Fatalf("complete program-bootstrap ABI identity: %v", err)
 	}
+	closedStaticSpawn := newChildAwait()
+	closedStaticSpawn.EnableCoroProgramBootstrapRun = true
+	closedStaticSpawn.EnableCoroClosedStaticSpawn = true
+	closedStaticSpawn.SchedulerABI = coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0
+	if err := closedStaticSpawn.validateCoroABIIdentity(false); err != nil {
+		t.Fatalf("complete closed-static-spawn ABI identity: %v", err)
+	}
+	closedStaticSpawn.EnableCoroProgramBootstrapRun = false
+	if err := closedStaticSpawn.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "runnable program-bootstrap v2") {
+		t.Fatalf("closed-static-spawn bootstrap dependency error = %v", err)
+	}
 	programBootstrap.EnableCoroChildAwait = false
 	if err := programBootstrap.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "requires child-await") {
 		t.Fatalf("program-bootstrap dependency error = %v", err)
