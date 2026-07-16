@@ -934,6 +934,13 @@ type Config struct {
 	EnableCoroProgramBootstrapRun bool
 	CoroPlanBuilder               CoroPlanBuilder
 	CoroPlanObserver              CoroPlanObserver
+
+	// compilerBuildTags is a compiler-owned channel for isolated runtime-island
+	// builds that deliberately do not enable the complete program-bootstrap
+	// configuration. It is not a target capability declaration and production
+	// target selection must never derive from it. Keeping it unexported prevents
+	// users and named-target BuildTags from forging compiler/runtime ABI choices.
+	compilerBuildTags []string
 }
 
 type Rewrites map[string]string
@@ -1051,34 +1058,13 @@ func Do(args []string, conf *Config) ([]Package, error) {
 
 	verbose := conf.Verbose
 	patterns := args
-	tags := "llgo,math_big_pure_go,purego"
-	if conf.AbiMode == cabi.ModeAllFunc {
-		tags += ",llgo_abi_2"
-	}
-	if conf.EnableCoroProgramBootstrapRun {
-		// The stackless runtime does not yet have a RawCritical bridge that can
-		// turn a synchronous hardware fault into a G-owned panic completion.
-		// Exclude the legacy pthread-TLS/SJLJ SIGSEGV recovery hook instead of
-		// admitting a signal callback that can allocate, block, or retain the
-		// native signal stack. Language-level nil/bounds/divide checks remain
-		// explicit compiler operations.
-		tags += ",llgo_coro"
-	}
-	gcTags, err := targetGCBuildTags(export.GC)
+	tags, err := effectiveBuildTags(conf, export)
 	if err != nil {
 		return nil, err
 	}
-	if len(gcTags) != 0 {
-		tags += "," + strings.Join(gcTags, ",")
-	}
-	if conf.Tags != "" {
-		tags += "," + conf.Tags
-	}
-	if len(export.BuildTags) > 0 {
-		tags += "," + strings.Join(export.BuildTags, ",")
-	}
 	goBuildFlags := []string{"-tags=" + tags}
-	goBuildFlags = append(goBuildFlags, conf.GoBuildFlags...)
+	_, otherGoBuildFlags := partitionGoBuildFlags(conf.GoBuildFlags)
+	goBuildFlags = append(goBuildFlags, otherGoBuildFlags...)
 	cfg := &packages.Config{
 		Mode:       loadSyntax | packages.NeedDeps | packages.NeedModule | packages.NeedExportFile,
 		BuildFlags: goBuildFlags,
@@ -1374,6 +1360,72 @@ func targetGCBuildTags(gc string) ([]string, error) {
 	default:
 		return nil, fmt.Errorf("unsupported target GC capability %q", gc)
 	}
+}
+
+const coroNativePipeBuildTag = "llgo_coro_native_pipe"
+
+// effectiveBuildTags is the single build-tag assembly boundary used by Do.
+// The native-pipe tag is a compiler/runtime ABI capability, not a user or
+// target customization: accepting it from an external tag source could select
+// a runtime body that disagrees with the planner roots, bootstrap hash, and
+// entry relocation anchor.
+func effectiveBuildTags(conf *Config, export crosscompile.Export) (string, error) {
+	if conf == nil {
+		return "", fmt.Errorf("assemble build tags: missing build configuration")
+	}
+	if err := rejectCompilerReservedBuildTags("Config.Tags", splitSourcePatchBuildTags(conf.Tags)); err != nil {
+		return "", err
+	}
+	goFlagTags := parseSourcePatchBuildTags(conf.GoBuildFlags)
+	if err := rejectCompilerReservedBuildTags("Config.GoBuildFlags", goFlagTags); err != nil {
+		return "", err
+	}
+	var targetTags []string
+	for _, value := range export.BuildTags {
+		targetTags = append(targetTags, splitSourcePatchBuildTags(value)...)
+	}
+	if err := rejectCompilerReservedBuildTags("named-target BuildTags", targetTags); err != nil {
+		return "", err
+	}
+
+	tags := []string{"llgo", "math_big_pure_go", "purego"}
+	if conf.AbiMode == cabi.ModeAllFunc {
+		tags = append(tags, "llgo_abi_2")
+	}
+	if conf.EnableCoroProgramBootstrapRun {
+		// The stackless runtime does not yet have a RawCritical bridge that can
+		// turn a synchronous hardware fault into a G-owned panic completion.
+		// Exclude the legacy pthread-TLS/SJLJ SIGSEGV recovery hook instead of
+		// admitting a signal callback that can allocate, block, or retain the
+		// native signal stack. Language-level nil/bounds/divide checks remain
+		// explicit compiler operations.
+		tags = append(tags, "llgo_coro")
+		if nativeCoroDoorbellRuntimeABI(conf) {
+			// Do not infer POSIX capability from GOOS alone. Several embedded
+			// named targets reuse linux source selection without providing a
+			// process pipe/poll environment.
+			tags = append(tags, coroNativePipeBuildTag)
+		}
+	}
+	tags = append(tags, conf.compilerBuildTags...)
+	gcTags, err := targetGCBuildTags(export.GC)
+	if err != nil {
+		return "", err
+	}
+	tags = append(tags, gcTags...)
+	tags = append(tags, splitSourcePatchBuildTags(conf.Tags)...)
+	tags = append(tags, goFlagTags...)
+	tags = append(tags, targetTags...)
+	return strings.Join(tags, ","), nil
+}
+
+func rejectCompilerReservedBuildTags(source string, tags []string) error {
+	for _, tag := range tags {
+		if tag == coroNativePipeBuildTag {
+			return fmt.Errorf("build tag %q from %s is a compiler-reserved capability and cannot be supplied externally", tag, source)
+		}
+	}
+	return nil
 }
 
 func buildCoroPlan(ctx *context, packages ...*aPackage) error {
@@ -1857,6 +1909,40 @@ func activeCoroFuncRepABIVersion(conf *Config) string {
 	return coro.FuncRepABIV0
 }
 
+// nativeCoroDoorbellRuntimeABI mirrors the production target file selection
+// for the compiler-owned callback root, bootstrap hash, and entry relocation.
+// Named targets remain excluded until their OS/runtime contract explicitly
+// opts into the POSIX pipe backend.
+func nativeCoroDoorbellRuntimeABI(conf *Config) bool {
+	if conf == nil || !conf.EnableCoroProgramBootstrapRun || conf.Target != "" ||
+		(conf.Goos != "darwin" && conf.Goos != "linux") {
+		return false
+	}
+	for _, tag := range []string{"baremetal", "tinygo.wasm", "wasip2", "wasm_unknown", "coro_runtime_adapter_test"} {
+		if configHasBuildTag(conf, tag) {
+			return false
+		}
+	}
+	return true
+}
+
+func configHasBuildTag(conf *Config, want string) bool {
+	if conf == nil || want == "" {
+		return false
+	}
+	for _, tag := range splitSourcePatchBuildTags(conf.Tags) {
+		if tag == want {
+			return true
+		}
+	}
+	for _, tag := range parseSourcePatchBuildTags(conf.GoBuildFlags) {
+		if tag == want {
+			return true
+		}
+	}
+	return false
+}
+
 // requiredCoroProgramRuntimePlan returns the Go bodies referenced only by
 // compiler-generated entry/coroutine IR and their exact static call closure.
 // They are not visible from the application's source roots. The closure is a
@@ -1904,6 +1990,9 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			coroProgramRunSymbolV1,
 			coroProgramContinueSymbolV1,
 		)
+	}
+	if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
+		names = append(names, coroNativePostWaitSymbolV1)
 	}
 	if ctx.buildConf.EnableCoroProgramBootstrapRun {
 		names = append(names,
@@ -1964,6 +2053,19 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.Uint32]) || sig.Results().Len() != 0 ||
 				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
 				return nil, nil, nil, nil, fmt.Errorf("coroutine program bootstrap runtime ABI %q must have exact func(uint32) signature", name)
+			}
+		}
+		if name == coroNativePostWaitSymbolV1 {
+			sig := fn.Signature
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 4 || sig.Results().Len() != 1 ||
+				!types.Identical(sig.Results().At(0).Type(), types.Typ[types.Uint32]) ||
+				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf("coroutine native post-wait ABI %q must have exact func(uint32, uint32, uint32, uint32) uint32 signature", name)
+			}
+			for parameter := 0; parameter < sig.Params().Len(); parameter++ {
+				if !types.Identical(sig.Params().At(parameter).Type(), types.Typ[types.Uint32]) {
+					return nil, nil, nil, nil, fmt.Errorf("coroutine native post-wait ABI %q must have exact func(uint32, uint32, uint32, uint32) uint32 signature", name)
+				}
 			}
 		}
 		goBody, err := frozenGoEmittedBody(ctx.coroEmission, fn)

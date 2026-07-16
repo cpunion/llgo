@@ -44,6 +44,7 @@ const (
 	coroProgramRunSymbolV1                                      = "__llgo_coro_program_run_v1"
 	coroProgramContinueSymbolV1                                 = "__llgo_coro_program_continue_v1"
 	coroProgramMainReturnSymbolV1                               = "__llgo_coro_program_main_return_v1"
+	coroNativePostWaitSymbolV1                                  = "__llgo_coro_native_post_wait_v1"
 
 	// Step kinds and semantic roles are part of the cross-target bootstrap ABI.
 	// Keep these numeric values synchronized with ssa and runtime/internal/coro.
@@ -615,6 +616,9 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 		}
 		write("factory=compiler-static-mixed-v" + strconv.FormatUint(uint64(version), 10) + ":" + factory)
 		write("driver=runtime-static-single-p-v1:" + coroProgramBeginSymbolV1 + ":" + coroProgramRunSymbolV1 + ":" + coroProgramContinueSymbolV1 + ":continue(epoch:u32)->void")
+		if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
+			write("native-doorbell=pipe-poll-v1:" + coroNativePostWaitSymbolV1 + ":post(wait-slot:u32,wait-generation:u32,executor-slot:u32,executor-generation:u32)->u32")
+		}
 		write("header=physical-abi-v1")
 	} else {
 		write("factory=null")

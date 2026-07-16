@@ -481,6 +481,11 @@ func TestGenMainModuleCoroProgramBootstrapV2MixedNativeAndWasm(t *testing.T) {
 
 			mod := entry.LPkg.Module()
 			assertCoroProgramContinueRetention(t, mod, test.entryName)
+			if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
+				assertCoroNativePostWaitRetention(t, mod, test.entryName)
+			} else if callback := mod.NamedFunction(coroNativePostWaitSymbolV1); !callback.IsNil() {
+				t.Fatalf("non-native entry declared native post-wait callback:\n%s", ir)
+			}
 			publicRuntimeInit := mod.NamedFunction("runtime.init")
 			if publicRuntimeInit.IsNil() || !publicRuntimeInit.IsDeclaration() {
 				t.Fatalf("managed public runtime init must remain an unresolved archive reference, not an entry-module weak body:\n%s", ir)
@@ -653,6 +658,7 @@ func TestGenMainModuleCoroProgramBootstrapRuntimeSwitch(t *testing.T) {
 	)
 	entryBody := entry.LPkg.Module().NamedFunction("main").String()
 	assertCoroProgramContinueRetention(t, entry.LPkg.Module(), "main")
+	assertCoroNativePostWaitRetention(t, entry.LPkg.Module(), "main")
 	if strings.Contains(entryBody, "call void @\"example.com/foo.init\"()") || strings.Contains(entryBody, "call void @\"example.com/foo.main\"()") {
 		t.Fatalf("platform entry retained legacy direct init/main calls:\n%s", entryBody)
 	}
@@ -720,6 +726,11 @@ func TestGenMainModuleCoroProgramBootstrapRuntimeAfterCoroPasses(t *testing.T) {
 				}
 				return "main"
 			}())
+			if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
+				assertCoroNativePostWaitRetention(t, mod, "main")
+			} else if callback := mod.NamedFunction(coroNativePostWaitSymbolV1); !callback.IsNil() {
+				t.Fatalf("non-native lowered entry declared native post-wait callback:\n%s", post)
+			}
 			for _, suffix := range []string{".resume", ".destroy"} {
 				if mod.NamedFunction(coroProgramBootstrapFactorySymbolV1 + suffix).IsNil() {
 					t.Fatalf("entry CoroSplit did not create factory%s:\n%s", suffix, post)
@@ -760,6 +771,30 @@ func assertCoroProgramContinueRetention(t *testing.T, module llvm.Module, entryN
 	}
 	if strings.Contains(body, "call void @"+coroProgramContinueSymbolV1) {
 		t.Fatalf("program entry invoked the asynchronous continuation during startup:\n%s", body)
+	}
+}
+
+func assertCoroNativePostWaitRetention(t *testing.T, module llvm.Module, entryName string) {
+	t.Helper()
+	callback := module.NamedFunction(coroNativePostWaitSymbolV1)
+	if callback.IsNil() || !callback.IsDeclaration() || callback.GlobalValueType().String() != "i32 (i32, i32, i32, i32)" {
+		t.Fatalf("native post-wait declaration is not i32(i32,i32,i32,i32): %v\n%s", callback, module.String())
+	}
+	anchor := module.NamedGlobal(coroNativePostWaitReferenceSymbolV1)
+	if anchor.IsNil() || !anchor.IsGlobalConstant() || anchor.Linkage() != llvm.InternalLinkage ||
+		anchor.Initializer().IsNil() || anchor.Initializer().C != callback.C {
+		t.Fatalf("native post-wait reference does not retain the exact callback: %v\n%s", anchor, module.String())
+	}
+	entry := module.NamedFunction(entryName)
+	if entry.IsNil() || entry.IsDeclaration() {
+		t.Fatalf("native post-wait retention entry %q is missing: %s", entryName, module.String())
+	}
+	body := entry.String()
+	if got := strings.Count(body, "load volatile ptr, ptr @"+coroNativePostWaitReferenceSymbolV1); got != 1 {
+		t.Fatalf("program entry native-post-wait-reference volatile loads = %d, want 1:\n%s", got, body)
+	}
+	if strings.Contains(body, "call i32 @"+coroNativePostWaitSymbolV1) {
+		t.Fatalf("program entry invoked native post-wait callback during startup:\n%s", body)
 	}
 }
 

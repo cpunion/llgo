@@ -150,6 +150,7 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 	var coroBegin llssa.Function
 	var coroRun llssa.Function
 	var coroContinue llssa.Function
+	var coroNativePostWait llssa.Function
 	var coroAllocatorBootstrap llssa.Function
 	if ctx.buildConf.EnableCoroProgramBootstrapRun {
 		if coroEntry.manifest.IsNil() || coroEntry.factory == nil {
@@ -159,6 +160,9 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 		coroBegin = declareCoroProgramBeginV1(mainPkg)
 		coroRun = declareCoroProgramRunV1(mainPkg)
 		coroContinue = declareCoroProgramContinueV1(mainPkg)
+		if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
+			coroNativePostWait = declareCoroNativePostWaitV1(mainPkg)
+		}
 	}
 
 	entryFn := defineEntryFunction(ctx, mainPkg, argcVar, argvVar, argvValueType, entryFunctions{
@@ -178,6 +182,9 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 	})
 	if coroContinue != nil {
 		retainCoroProgramContinueV1(mainPkg, entryFn, coroContinue)
+	}
+	if coroNativePostWait != nil {
+		retainCoroNativePostWaitV1(mainPkg, entryFn, coroNativePostWait)
 	}
 
 	if needStart(ctx) {
@@ -512,7 +519,18 @@ func declareCoroProgramContinueV1(pkg llssa.Package) llssa.Function {
 	), llssa.InC)
 }
 
-const coroProgramContinueReferenceSymbolV1 = "__llgo_coro_program_continue_reference_v1"
+func declareCoroNativePostWaitV1(pkg llssa.Package) llssa.Function {
+	word := types.Typ[types.Uint32]
+	return pkg.NewFunc(coroNativePostWaitSymbolV1, newSignature(
+		[]types.Type{word, word, word, word},
+		[]types.Type{word},
+	), llssa.InC)
+}
+
+const (
+	coroProgramContinueReferenceSymbolV1 = "__llgo_coro_program_continue_reference_v1"
+	coroNativePostWaitReferenceSymbolV1  = "__llgo_coro_native_post_wait_reference_v1"
+)
 
 // retainCoroProgramContinueV1 gives the target callback ABI a live relocation
 // from the always-selected entry object. The continuation is entered by a
@@ -523,19 +541,34 @@ const coroProgramContinueReferenceSymbolV1 = "__llgo_coro_program_continue_refer
 // it keeps the internal pointer anchor live, whose initializer in turn retains
 // the exact external continuation body without invoking it during startup.
 func retainCoroProgramContinueV1(pkg llssa.Package, entry, continuation llssa.Function) {
-	if pkg == nil || entry == nil || continuation == nil {
-		panic("coroutine program continuation retention requires entry and callback functions")
+	retainCoroCallbackV1(pkg, entry, continuation, coroProgramContinueSymbolV1,
+		coroProgramContinueReferenceSymbolV1, "coroutine program continuation")
+}
+
+// retainCoroNativePostWaitV1 keeps the producer completion ingress in the
+// final image. The callback is invoked by native operation sources rather than
+// by entry control flow, so it needs the same archive-extraction edge as the
+// asynchronous program continuation even though this first native executor
+// completes BeginWait synchronously.
+func retainCoroNativePostWaitV1(pkg llssa.Package, entry, callback llssa.Function) {
+	retainCoroCallbackV1(pkg, entry, callback, coroNativePostWaitSymbolV1,
+		coroNativePostWaitReferenceSymbolV1, "native coroutine post-wait callback")
+}
+
+func retainCoroCallbackV1(pkg llssa.Package, entry, callbackDeclaration llssa.Function, callbackSymbol, referenceSymbol, description string) {
+	if pkg == nil || entry == nil || callbackDeclaration == nil {
+		panic(description + " retention requires entry and callback functions")
 	}
 	module := pkg.Module()
-	callback := module.NamedFunction(coroProgramContinueSymbolV1)
+	callback := module.NamedFunction(callbackSymbol)
 	entryValue := module.NamedFunction(entry.Name())
 	if callback.IsNil() || !callback.IsDeclaration() || entryValue.IsNil() || entryValue.IsDeclaration() {
-		panic("coroutine program continuation retention requires one external callback declaration and defined entry")
+		panic(description + " retention requires one external callback declaration and defined entry")
 	}
-	if !module.NamedGlobal(coroProgramContinueReferenceSymbolV1).IsNil() {
-		panic("coroutine program continuation reference is already defined")
+	if !module.NamedGlobal(referenceSymbol).IsNil() {
+		panic(description + " reference is already defined")
 	}
-	anchor := llvm.AddGlobal(module, callback.Type(), coroProgramContinueReferenceSymbolV1)
+	anchor := llvm.AddGlobal(module, callback.Type(), referenceSymbol)
 	anchor.SetInitializer(callback)
 	anchor.SetGlobalConstant(true)
 	anchor.SetLinkage(llvm.InternalLinkage)
@@ -543,7 +576,7 @@ func retainCoroProgramContinueV1(pkg llssa.Package, entry, continuation llssa.Fu
 
 	first := entryValue.EntryBasicBlock().FirstInstruction()
 	if first.IsNil() {
-		panic("coroutine program continuation retention requires a non-empty entry block")
+		panic(description + " retention requires a non-empty entry block")
 	}
 	builder := module.Context().NewBuilder()
 	defer builder.Dispose()

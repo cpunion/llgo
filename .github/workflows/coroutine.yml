@@ -49,6 +49,8 @@ jobs:
           cd runtime
           go test -race -shuffle=on ./internal/coroalloc -count=1
           go test -race -shuffle=on ./internal/coro -count=1
+          go test -race -shuffle=on ./internal/corodoorbell -count=1
+          go test . -run '^TestCoroNativeTargetBuildSelection$' -count=1
           # The complete LLGo runtime package intentionally owns symbols that
           # collide with the host Go runtime. Use the real production adapter
           # sources plus test-only definitions of the compiler-owned C wrappers
@@ -105,6 +107,8 @@ jobs:
           GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0 go test -c -o /tmp/coro-wasip1-wasm.test ./internal/runtime
           GOOS=linux GOARCH=arm CGO_ENABLED=0 go test -c -o /tmp/coro-linux-arm.test ./internal/runtime
           GOOS=linux GOARCH=riscv64 CGO_ENABLED=0 go test -c -o /tmp/coro-linux-riscv64.test ./internal/runtime
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go test -c -o /tmp/coro-doorbell-linux-arm64.test ./internal/corodoorbell
+          GOOS=linux GOARCH=riscv64 CGO_ENABLED=0 go test -c -o /tmp/coro-doorbell-linux-riscv64.test ./internal/corodoorbell
           GOOS=linux GOARCH=arm CGO_ENABLED=0 go test -c -tags='baremetal cortexm' -o /tmp/coro-cortexm-baremetal.test ./internal/runtime
 
       - name: Test coroutine build integration

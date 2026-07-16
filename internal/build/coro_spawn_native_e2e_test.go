@@ -349,15 +349,21 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_sched.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_spawn.go"),
-		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_none.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_native_llgo.go"),
 	}
 	conf := NewDefaultConf(ModeGen)
 	conf.ForceRebuild = true
 	conf.Tags = "nogc"
+	// This source-island compile intentionally does not enable the complete
+	// program bootstrap and its whole-program planner. Select its production
+	// runtime files through the private compiler channel; the public Config.Tags
+	// path must reject this capability as forged.
+	conf.compilerBuildTags = []string{"llgo_coro", coroNativePipeBuildTag}
 	allowed := map[string]bool{
-		"command-line-arguments":                            true,
-		"github.com/goplus/llgo/runtime/internal/coro":      true,
-		"github.com/goplus/llgo/runtime/internal/coroalloc": true,
+		"command-line-arguments":                               true,
+		"github.com/goplus/llgo/runtime/internal/coro":         true,
+		"github.com/goplus/llgo/runtime/internal/coroalloc":    true,
+		"github.com/goplus/llgo/runtime/internal/corodoorbell": true,
 	}
 	seen := make(map[string]bool, len(allowed))
 	var objects []string
@@ -417,6 +423,7 @@ func assertCoroSpawnNativeE2ELinkedSymbols(t *testing.T, executable string) {
 	symbols := string(output)
 	for _, required := range []string{
 		coroProgramContinueSymbolV1,
+		coroNativePostWaitSymbolV1,
 		"__llgo_coro_spawn_begin_v1",
 		"__llgo_coro_spawn_commit_v1",
 		"github.com/goplus/llgo/runtime/internal/coro.CommitSpawn",

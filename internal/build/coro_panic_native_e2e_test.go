@@ -507,6 +507,7 @@ func assertCoroPanicNativeE2ELinkedSymbols(t *testing.T, executable string) {
 	for _, required := range []string{
 		"__llgo_coro_panic_prepare_v1",
 		coroProgramContinueSymbolV1,
+		coroNativePostWaitSymbolV1,
 		coroPanicNativeE2ERunReport,
 		coroPanicNativeE2EDestroyObserve,
 		"github.com/goplus/llgo/runtime/internal/coro.PreparePanic",
