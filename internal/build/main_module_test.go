@@ -251,6 +251,113 @@ func TestGenMainModuleEmptyCoroProgramManifest(t *testing.T) {
 	if manifestLine == "" || !strings.Contains(manifestLine, "i32 0, ptr null, ptr null") {
 		t.Fatalf("empty wasm coroutine manifest does not contain count=0/packages=null/bootstrap=null: %s\n%s", manifestLine, ir)
 	}
+	if strings.Contains(ir, coroProgramBootstrapSymbolV1) {
+		t.Fatalf("bootstrap gate disabled but bootstrap symbol was emitted:\n%s", ir)
+	}
+}
+
+func TestGenMainModuleCoroProgramBootstrapNativeAndWasm(t *testing.T) {
+	llvm.InitializeAllTargets()
+	t.Setenv(llgoStdioNobuf, "")
+	tests := []struct {
+		name      string
+		target    *llssa.Target
+		goos      string
+		goarch    string
+		uintptrIR string
+		entryIR   string
+	}{
+		{
+			name:      "native",
+			goos:      "linux",
+			goarch:    "amd64",
+			uintptrIR: "i64",
+			entryIR:   "define i32 @main(",
+		},
+		{
+			name:      "wasm",
+			target:    &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"},
+			goos:      "wasip1",
+			goarch:    "wasm",
+			uintptrIR: "i32",
+			entryIR:   "define hidden i32 @__main_argc_argv(",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			prog := llssa.NewProgram(test.target)
+			defer prog.Dispose()
+			ctx := &context{
+				prog: prog,
+				buildConf: &Config{
+					BuildMode:                     BuildModeExe,
+					Goos:                          test.goos,
+					Goarch:                        test.goarch,
+					EnableCoroEntryResolution:     true,
+					EnableCoroPhysicalABI:         true,
+					EnableCoroChildAwait:          true,
+					EnableCoroProgramBootstrapABI: true,
+				},
+			}
+			var programHash [16]byte
+			for i := range programHash {
+				programHash[i] = byte(i + 1)
+			}
+			entry := genMainModule(ctx, llssa.PkgRuntime,
+				&packages.Package{ID: "example.com/foo", PkgPath: "example.com/foo", ExportFile: "foo.a"},
+				&genConfig{
+					coroManifestHash: programHash,
+					coroBootstrap: &coroProgramBootstrapV1{Steps: []coroProgramBootstrapStepV1{
+						{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleInitV1, FunctionID: "init-id", Target: "example.com/foo.init"},
+						{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleMainV1, FunctionID: "main-id", Target: "example.com/foo.main"},
+					}},
+				})
+			ir := entry.LPkg.String()
+			if !strings.Contains(ir, test.entryIR) {
+				t.Fatalf("bootstrap entry module missing %q:\n%s", test.entryIR, ir)
+			}
+			stepsLine := irLineWithPrefix(ir, "@"+coroProgramBootstrapSymbolV1+".steps =")
+			bootstrapLine := irLineWithPrefix(ir, "@"+coroProgramBootstrapSymbolV1+" =")
+			manifestLine := irLineWithPrefix(ir, "@"+coroProgramManifestSymbolV1+" =")
+			if stepsLine == "" || bootstrapLine == "" || manifestLine == "" {
+				t.Fatalf("missing bootstrap/manifest globals:\n%s", ir)
+			}
+			for _, want := range []string{
+				"i32 1, i32 1, ptr @\"example.com/foo.init\", " + test.uintptrIR + " 0",
+				"i32 1, i32 2, ptr @\"example.com/foo.main\", " + test.uintptrIR + " 0",
+			} {
+				if !strings.Contains(stepsLine, want) {
+					t.Fatalf("startup table missing %q: %s", want, stepsLine)
+				}
+			}
+			hashWords := "i64 72623859790382856, i64 651345242494996240"
+			if !strings.Contains(bootstrapLine, hashWords) || !strings.Contains(manifestLine, hashWords) {
+				t.Fatalf("manifest/bootstrap ABI hashes differ:\nbootstrap: %s\nmanifest: %s", bootstrapLine, manifestLine)
+			}
+			if !strings.Contains(bootstrapLine, test.uintptrIR+" 2, ptr @"+coroProgramBootstrapSymbolV1+".steps, ptr null") {
+				t.Fatalf("bootstrap count/steps/factory are not 2/non-null/null: %s", bootstrapLine)
+			}
+			if !strings.Contains(manifestLine, "ptr @"+coroProgramBootstrapSymbolV1) {
+				t.Fatalf("manifest bootstrap pointer is null: %s", manifestLine)
+			}
+			if got := entry.LPkg.CoroProgramBootstrap(); got != coroProgramBootstrapSymbolV1 {
+				t.Fatalf("program bootstrap symbol = %q, want %q", got, coroProgramBootstrapSymbolV1)
+			}
+			assertInOrder(t, ir,
+				"call void @\"example.com/foo.init\"()",
+				"call void @\"example.com/foo.main\"()",
+			)
+		})
+	}
+}
+
+func irLineWithPrefix(ir, prefix string) string {
+	for _, line := range strings.Split(ir, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return line
+		}
+	}
+	return ""
 }
 
 func TestGenMainModuleCoroControlWrappersAfterCoroPasses(t *testing.T) {

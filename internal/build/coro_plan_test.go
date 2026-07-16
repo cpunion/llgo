@@ -479,6 +479,52 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 		}
 	})
 
+	for _, test := range []struct {
+		name string
+		conf Config
+		want string
+	}{
+		{
+			name: "program bootstrap requires entry resolution",
+			conf: Config{BuildMode: BuildModeExe, EnableCoroProgramBootstrapABI: true},
+			want: "entry resolution is required",
+		},
+		{
+			name: "program bootstrap requires physical ABI",
+			conf: Config{BuildMode: BuildModeExe, EnableCoroEntryResolution: true, EnableCoroProgramBootstrapABI: true},
+			want: "physical ABI is required",
+		},
+		{
+			name: "program bootstrap requires child await",
+			conf: Config{BuildMode: BuildModeExe, EnableCoroEntryResolution: true, EnableCoroPhysicalABI: true, EnableCoroProgramBootstrapABI: true},
+			want: "child await is required",
+		},
+		{
+			name: "program bootstrap requires executable",
+			conf: Config{BuildMode: BuildModeCShared, EnableCoroEntryResolution: true, EnableCoroPhysicalABI: true, EnableCoroChildAwait: true, EnableCoroProgramBootstrapABI: true},
+			want: "executable build mode is required",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			builderCalls := 0
+			test.conf.CoroPlanBuilder = func(CoroPlanInput) (*coro.SSAPlan, error) {
+				builderCalls++
+				return nil, errors.New("builder must not run")
+			}
+			ctx := &context{buildConf: &test.conf}
+			err := buildCoroPlan(ctx)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("buildCoroPlan error = %v, want %q", err, test.want)
+			}
+			if builderCalls != 0 {
+				t.Fatalf("CoroPlanBuilder calls = %d, want 0", builderCalls)
+			}
+			if ctx.coroPlan != nil || ctx.clCompilation != nil {
+				t.Fatal("invalid program-bootstrap configuration installed coroutine compilation state")
+			}
+		})
+	}
+
 	t.Run("entry resolution requires prepared emission universe", func(t *testing.T) {
 		builderCalls := 0
 		ctx := &context{buildConf: &Config{

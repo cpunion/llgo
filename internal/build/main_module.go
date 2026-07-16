@@ -43,6 +43,7 @@ type genConfig struct {
 	abiInit          int
 	coroRootAnchors  []string
 	coroManifestHash [16]byte
+	coroBootstrap    *coroProgramBootstrapV1
 	methodByIndex    map[int]none
 	methodByName     map[string]none
 	abiSymbols       map[string]none
@@ -163,7 +164,10 @@ func emitCoroControlWrappers(ctx *context, pkg llssa.Package) {
 	destroyBody.Return()
 }
 
-const coroProgramManifestSymbolV1 = "__llgo_coro_program_manifest_v1"
+const (
+	coroProgramManifestSymbolV1  = "__llgo_coro_program_manifest_v1"
+	coroProgramBootstrapSymbolV1 = "__llgo_coro_program_bootstrap_v1"
+)
 
 func emitCoroProgramManifest(ctx *context, pkg llssa.Package, cfg *genConfig) {
 	if ctx == nil || ctx.buildConf == nil || !ctx.buildConf.EnableCoroChildAwait {
@@ -186,10 +190,35 @@ func emitCoroProgramManifest(ctx *context, pkg llssa.Package, cfg *genConfig) {
 		global.SetVisibility(llvm.HiddenVisibility)
 		anchors[i] = anchor.Expr
 	}
+	var bootstrap llssa.Expr
+	if ctx.buildConf.EnableCoroProgramBootstrapABI {
+		if cfg.coroBootstrap == nil {
+			panic("coroutine program bootstrap ABI enabled without a validated startup table")
+		}
+		steps := make([]llssa.CoroProgramStep, len(cfg.coroBootstrap.Steps))
+		for i, step := range cfg.coroBootstrap.Steps {
+			target := declareNoArgFunc(pkg, step.Target)
+			steps[i] = llssa.CoroProgramStep{
+				Kind:   llssa.CoroProgramStepKind(step.Kind),
+				Flags:  step.Role,
+				Target: target.Expr,
+				Aux:    uint64(step.Aux),
+			}
+		}
+		bootstrap = pkg.NewCoroProgramBootstrap(coroProgramBootstrapSymbolV1, llssa.CoroProgramBootstrapOptions{
+			Version: coroProgramBootstrapVersionV1,
+			// The runtime validates one program ABI identity across the manifest
+			// and startup table. StepHash is an input to this final manifest hash,
+			// not a second externally visible ABI identity.
+			ABIHash: cfg.coroManifestHash,
+			Steps:   steps,
+		})
+	}
 	pkg.NewCoroProgramManifest(coroProgramManifestSymbolV1, llssa.CoroProgramManifestOptions{
 		Version:        1,
 		ABIHash:        cfg.coroManifestHash,
 		PackageAnchors: anchors,
+		Bootstrap:      bootstrap,
 	})
 }
 

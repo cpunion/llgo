@@ -59,7 +59,7 @@ func validCoroRootPackageAnchorV1(name string) bool {
 	return err == nil && len(decoded) == 16 && hex.EncodeToString(decoded) == hash
 }
 
-func coroProgramManifestHashV1(ctx *context, anchors []string) ([16]byte, error) {
+func coroProgramManifestHashV1(ctx *context, anchors []string, bootstrap ...*coroProgramBootstrapV1) ([16]byte, error) {
 	if ctx == nil || ctx.prog == nil || ctx.buildConf == nil {
 		return [16]byte{}, fmt.Errorf("coroutine program manifest requires a build context")
 	}
@@ -86,6 +86,13 @@ func coroProgramManifestHashV1(ctx *context, anchors []string) ([16]byte, error)
 	write(ctx.prog.DataLayout())
 	for _, anchor := range anchors {
 		write(anchor)
+	}
+	if len(bootstrap) > 1 {
+		return [16]byte{}, fmt.Errorf("coroutine program manifest accepts at most one bootstrap table")
+	}
+	if len(bootstrap) == 1 && bootstrap[0] != nil {
+		write("llgo.coro.program-bootstrap.v1")
+		write(hex.EncodeToString(bootstrap[0].StepHash[:]))
 	}
 	sum := h.Sum(nil)
 	var hash [16]byte

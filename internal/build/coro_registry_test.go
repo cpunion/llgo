@@ -83,4 +83,32 @@ func TestCoroProgramManifestHashV1StableAndComplete(t *testing.T) {
 	if changed == first {
 		t.Fatal("manifest hash ignored the ordered anchor catalog")
 	}
+	withNilBootstrap, err := coroProgramManifestHashV1(ctx, []string{a, b}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withNilBootstrap != first {
+		t.Fatal("nil bootstrap changed the legacy manifest hash")
+	}
+	bootstrapA := &coroProgramBootstrapV1{}
+	bootstrapA.StepHash[0] = 1
+	withBootstrap, err := coroProgramManifestHashV1(ctx, []string{a, b}, bootstrapA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withBootstrap == first {
+		t.Fatal("manifest hash ignored bootstrap presence")
+	}
+	bootstrapB := &coroProgramBootstrapV1{StepHash: bootstrapA.StepHash}
+	bootstrapB.StepHash[15] = 1
+	changedBootstrap, err := coroProgramManifestHashV1(ctx, []string{a, b}, bootstrapB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changedBootstrap == withBootstrap {
+		t.Fatal("manifest hash ignored bootstrap StepHash")
+	}
+	if _, err := coroProgramManifestHashV1(ctx, []string{a, b}, bootstrapA, bootstrapB); err == nil {
+		t.Fatal("manifest hash accepted multiple bootstrap tables")
+	}
 }

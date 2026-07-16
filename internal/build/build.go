@@ -261,8 +261,15 @@ type Config struct {
 	// async root receives a typed factory descriptor. It requires the physical
 	// ABI and does not enable a runtime scheduler, spawn, park, or preemption.
 	EnableCoroChildAwait bool
-	CoroPlanBuilder      CoroPlanBuilder
-	CoroPlanObserver     CoroPlanObserver
+	// EnableCoroProgramBootstrapABI emits the target-neutral v1 startup table
+	// for an executable after the exact init/main entries have been validated
+	// against the frozen whole-program plan. It does not replace the legacy
+	// direct calls from the platform entry yet. This capability is deliberately
+	// gated separately and requires entry resolution, the physical ABI, and
+	// child-await lowering.
+	EnableCoroProgramBootstrapABI bool
+	CoroPlanBuilder               CoroPlanBuilder
+	CoroPlanObserver              CoroPlanObserver
 }
 
 type Rewrites map[string]string
@@ -682,6 +689,10 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	if ctx == nil || ctx.buildConf == nil {
 		return nil
 	}
+	if err := validateCoroProgramBootstrapConfig(ctx.buildConf); err != nil {
+		return err
+	}
+	ctx.coroProgramBootstraps = nil
 	if ctx.buildConf.EnableCoroPhysicalABI && !ctx.buildConf.EnableCoroEntryResolution {
 		return fmt.Errorf("enable coroutine physical ABI: coroutine entry resolution is required")
 	}
@@ -779,6 +790,18 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		PanicABI:                  metadata.PanicABI,
 		FuncRepABI:                metadata.FuncRepABI,
 		EmissionUniverse:          ctx.coroEmission,
+	}
+	if ctx.buildConf.EnableCoroProgramBootstrapABI {
+		bootstraps, err := prepareCoroProgramBootstrapsV1(ctx)
+		if err != nil {
+			ctx.coroPlan = nil
+			ctx.coroPlanDigest = ""
+			ctx.coroPlanMetadata = coro.PlanDigestMetadata{}
+			ctx.clCompilation = nil
+			ctx.coroProgramBootstraps = nil
+			return fmt.Errorf("prepare coroutine program bootstrap before codegen: %w", err)
+		}
+		ctx.coroProgramBootstraps = bootstraps
 	}
 	return nil
 }
@@ -1005,6 +1028,9 @@ type context struct {
 	coroSSAEmission  *coro.SSAEmissionUniverse
 	coroPlanDigest   string
 	coroPlanMetadata coro.PlanDigestMetadata
+	// Frozen immediately after whole-program analysis, before package codegen.
+	// linkMainPkg only consumes these exact per-entry-package tables.
+	coroProgramBootstraps map[string]*coroProgramBootstrapV1
 
 	// clCompilation is shared by all source packages in this build. Active
 	// cache registration is enabled only after coroPlanDigest and its complete
@@ -1513,13 +1539,20 @@ func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, outputPa
 	funcInfoStubs := collectFuncInfoStubRecords(linkedOrder, funcInfo)
 	var coroRootAnchors []string
 	var coroManifestHash [16]byte
+	var coroBootstrap *coroProgramBootstrapV1
 	if ctx.buildConf.EnableCoroChildAwait {
 		var err error
 		coroRootAnchors, err = collectLinkedCoroRootAnchors(linkedOrder)
 		if err != nil {
 			return err
 		}
-		coroManifestHash, err = coroProgramManifestHashV1(ctx, coroRootAnchors)
+		if ctx.buildConf.EnableCoroProgramBootstrapABI {
+			coroBootstrap = ctx.coroProgramBootstraps[pkg.ID]
+			if coroBootstrap == nil {
+				return fmt.Errorf("coroutine program bootstrap: no pre-codegen table was frozen for linked package %q", pkg.ID)
+			}
+		}
+		coroManifestHash, err = coroProgramManifestHashV1(ctx, coroRootAnchors, coroBootstrap)
 		if err != nil {
 			return err
 		}
@@ -1530,6 +1563,7 @@ func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, outputPa
 		abiInit:          needAbiInit,
 		coroRootAnchors:  coroRootAnchors,
 		coroManifestHash: coroManifestHash,
+		coroBootstrap:    coroBootstrap,
 		methodByIndex:    methodByIndex,
 		methodByName:     methodByName,
 		abiSymbols:       linkedModuleGlobals(linkedOrder),
