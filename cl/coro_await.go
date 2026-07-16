@@ -70,7 +70,7 @@ func resolveCoroStaticAwait(plan *coro.SSAPlan, caller coro.FunctionPlan, call s
 // this function never resumes or destroys a handle. Those operations belong to
 // the scheduler after the parent's resume episode has returned.
 func (p *context) tryCompileCoroStaticAwait(b llssa.Builder, call *ssa.Call) (llssa.Expr, bool) {
-	if p.currentCoro == nil || p.compilation == nil || !p.compilation.EnableCoroChildAwait || call == nil {
+	if p.currentCoro == nil || p.compilation == nil || p.compilation.CoroPlan == nil || !p.compilation.EnableCoroChildAwait || call == nil {
 		return llssa.Nil, false
 	}
 	callPlan, ok := p.compilation.CoroPlan.CallPlan(call)

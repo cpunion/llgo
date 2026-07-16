@@ -84,6 +84,9 @@ func validateCoroRootFactories(plan *coro.SSAPlan) error {
 // runtime and outlive this native wrapper invocation; the factory merely loads
 // scalar arguments and calls the root's unique coroutine ramp.
 func (p *context) emitCoroRootFactory(pkg llssa.Package, entry plannedFunctionSymbol, abi coroPhysicalABI, sourceSig *types.Signature, ramp llssa.Function) {
+	if p.compilation == nil || p.compilation.CoroPlan == nil {
+		panic("coroutine root factory requires a compilation CoroPlan")
+	}
 	root, ok := explicitCoroRoot(p.compilation.CoroPlan, entry.function)
 	if !ok {
 		return
