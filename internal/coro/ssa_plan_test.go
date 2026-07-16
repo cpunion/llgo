@@ -116,6 +116,92 @@ func send(ch chan int) { ch <- 1 }
 	}
 }
 
+func TestSSAPlanRootsCanonicalJoinedSortedAndDefensive(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "roots.go", `package coroid
+func original() {}
+func replacement() {}
+func other() {}
+`)
+	original := packageFunction(t, pkg, "original")
+	replacement := packageFunction(t, pkg, "replacement")
+	other := packageFunction(t, pkg, "other")
+	universe, err := NewSSAEmissionUniverse(prog, []*ssa.Function{other, replacement})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := SSAConfig{
+		EmissionUniverse: universe,
+		ResolveFunction: func(fn *ssa.Function) (*ssa.Function, bool, error) {
+			if fn == original {
+				return replacement, true, nil
+			}
+			return fn, universe.Contains(fn), nil
+		},
+	}
+	inputs := Roots{
+		{Function: original, Demand: SyncDemand},
+		{Function: other, Demand: AsyncDemand},
+		{Function: replacement, Demand: AsyncDemand},
+		{Function: other, Demand: AsyncDemand},
+	}
+	plan, err := AnalyzeSSA(prog, inputs, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputs[0] = Root{}
+	permuted, err := AnalyzeSSA(prog, Roots{
+		{Function: replacement, Demand: BothDemand},
+		{Function: other, Demand: AsyncDemand},
+	}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantDemand := map[*ssa.Function]Demand{
+		replacement: BothDemand,
+		other:       AsyncDemand,
+	}
+	got := plan.Roots()
+	if len(got) != len(wantDemand) {
+		t.Fatalf("roots = %+v, want %d canonical roots", got, len(wantDemand))
+	}
+	for index, root := range got {
+		if index != 0 && got[index-1].ID >= root.ID {
+			t.Fatalf("roots are not in strict FunctionID order: %+v", got)
+		}
+		if want, ok := wantDemand[root.Function]; !ok || root.Demand != want {
+			t.Fatalf("root %d = %+v, want one of %+v", index, root, wantDemand)
+		}
+		if id, ok := plan.FunctionID(root.Function); !ok || id != root.ID {
+			t.Fatalf("root %d ID = %q, FunctionID = %q, %v", index, root.ID, id, ok)
+		}
+	}
+	permutedRoots := permuted.Roots()
+	if len(permutedRoots) != len(got) {
+		t.Fatalf("permuted roots = %+v, want %+v", permutedRoots, got)
+	}
+	for index := range got {
+		if permutedRoots[index] != got[index] {
+			t.Fatalf("permuted root %d = %+v, want %+v", index, permutedRoots[index], got[index])
+		}
+	}
+	if got := functionPlanFor(t, plan, replacement).Demand; got != BothDemand {
+		t.Fatalf("canonical replacement demand = %s, want both", got)
+	}
+	if _, ok := plan.FunctionPlan(original); ok {
+		t.Fatal("aliased root loser entered the plan")
+	}
+
+	got[0] = SSARootPlan{}
+	if fresh := plan.Roots(); len(fresh) == 0 || fresh[0].Function == nil || fresh[0].ID == "" || fresh[0].Demand == NoDemand {
+		t.Fatalf("Roots did not return a defensive slice: %+v", fresh)
+	}
+	var nilPlan *SSAPlan
+	if roots := nilPlan.Roots(); roots != nil {
+		t.Fatalf("nil plan roots = %+v, want nil", roots)
+	}
+}
+
 func TestSSAPlanFunctionPlanUsesExactSSAFunction(t *testing.T) {
 	const source = `package coroid
 func generic[T any](value T) T { return value }

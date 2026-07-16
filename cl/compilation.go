@@ -53,8 +53,15 @@ type Compilation struct {
 	FuncRepABI     string
 	// EnableCoroPhysicalABI permits the conservative leaf-only coroutine ABI
 	// lowering implemented by the current experimental slice. It requires entry
-	// resolution and does not enable await, dispatch, roots, or a scheduler.
+	// resolution and does not by itself enable await, dispatch, roots, or a
+	// scheduler.
 	EnableCoroPhysicalABI bool
+	// EnableCoroChildAwait permits the narrowly-scoped static child handoff ABI.
+	// It requires the physical ABI and emits typed factories for explicit async
+	// roots. A generated parent only publishes an initial-suspended child and
+	// suspends itself; a matching scheduler owns every resume and destroy
+	// operation.
+	EnableCoroChildAwait bool
 
 	// EmissionUniverse is the immutable, compilation-scoped set of exact SSA
 	// functions that cl may resolve while emitting this compilation. Active
@@ -85,13 +92,20 @@ func (c *Compilation) validateCoroABIIdentity(required bool) error {
 	if c.EnableCoroPhysicalABI {
 		wantCoroABI = coro.PhysicalABIV0
 	}
+	if c.EnableCoroChildAwait {
+		wantCoroABI = coro.PhysicalABIV1
+	}
+	wantSchedulerABI := coro.SchedulerNoneABIV0
+	if c.EnableCoroChildAwait {
+		wantSchedulerABI = coro.SchedulerChildAwaitABIV0
+	}
 	checks := []struct {
 		name string
 		got  string
 		want string
 	}{
 		{"coroutine", c.CoroABI, wantCoroABI},
-		{"scheduler", c.SchedulerABI, coro.SchedulerNoneABIV0},
+		{"scheduler", c.SchedulerABI, wantSchedulerABI},
 		{"panic", c.PanicABI, coro.PanicLegacyABIV0},
 		{"function representation", c.FuncRepABI, coro.FuncRepABIV0},
 	}

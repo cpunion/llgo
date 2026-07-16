@@ -537,9 +537,10 @@ func (p Program) NewPackage(name, pkgPath string) Package {
 		framePointerAttr:       framePointerAttr,
 		pyobjs:                 pyobjs, pymods: pymods, strs: strs,
 		di: nil, cu: nil, glbDbgVars: glbDbgVars,
-		export:         make(map[string]string),
-		preserveSyms:   make(map[string]struct{}),
-		llvmUsedValues: make([]llvm.Value, 0, 4),
+		export:             make(map[string]string),
+		preserveSyms:       make(map[string]struct{}),
+		llvmUsedValues:     make([]llvm.Value, 0, 4),
+		llvmRetainedValues: make([]llvm.Value, 0, 1),
 
 		abiTypeFakeUseCache: make(map[llvm.Value][]llvm.Value),
 	}
@@ -814,9 +815,10 @@ type aPackage struct {
 	MethodByIndex map[int]none
 	MethodByName  map[string]none
 
-	export         map[string]string   // pkgPath.nameInPkg => exportname
-	preserveSyms   map[string]struct{} // set of exported symbol names
-	llvmUsedValues []llvm.Value
+	export             map[string]string   // pkgPath.nameInPkg => exportname
+	preserveSyms       map[string]struct{} // set of exported symbol names
+	llvmUsedValues     []llvm.Value
+	llvmRetainedValues []llvm.Value
 
 	abiTypeFakeUseCache map[llvm.Value][]llvm.Value
 }
@@ -848,13 +850,27 @@ func (p Package) markLLVMUsed(v llvm.Value) {
 	p.llvmUsedValues = append(p.llvmUsedValues, llvm.ConstBitCast(v, elemTyp))
 }
 
+// markLLVMRetained preserves a linker-discoverable value through compiler
+// optimization, object emission, and final-link section garbage collection.
+// Unlike llvm.compiler.used, llvm.used is part of the linker retention
+// contract and must be reserved for values that are discovered out of band.
+func (p Package) markLLVMRetained(v llvm.Value) {
+	elemTyp := p.Prog.VoidPtr().ll
+	p.llvmRetainedValues = append(p.llvmRetainedValues, llvm.ConstBitCast(v, elemTyp))
+}
+
 func (p Package) MaterializePreserveSyms() {
-	if len(p.llvmUsedValues) == 0 {
+	p.materializeLLVMUsed("llvm.compiler.used", p.llvmUsedValues)
+	p.materializeLLVMUsed("llvm.used", p.llvmRetainedValues)
+}
+
+func (p Package) materializeLLVMUsed(name string, values []llvm.Value) {
+	if len(values) == 0 {
 		return
 	}
 	elemTyp := p.Prog.VoidPtr().ll
-	init := llvm.ConstArray(elemTyp, p.llvmUsedValues)
-	global := llvm.AddGlobal(p.mod, init.Type(), "llvm.compiler.used")
+	init := llvm.ConstArray(elemTyp, values)
+	global := llvm.AddGlobal(p.mod, init.Type(), name)
 	global.SetInitializer(init)
 	global.SetLinkage(llvm.AppendingLinkage)
 	global.SetSection("llvm.metadata")

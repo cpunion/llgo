@@ -127,6 +127,71 @@ func TestCoroBuilderCoroSplit(t *testing.T) {
 	}
 }
 
+func TestCoroHandleIntrinsicsBeforeAndAfterCoroSplit(t *testing.T) {
+	fixture := newCoroTestFixture(t, nil, 32)
+	prog := fixture.prog
+	promiseType := prog.Struct(prog.Byte(), prog.Uint64())
+	control := fixture.pkg.NewFunc("coro_control", functionSignature(
+		[]types.Type{types.Typ[types.UnsafePointer]},
+		[]types.Type{types.Typ[types.Bool]},
+	), InC)
+	b := control.MakeBody(1)
+	handle := control.Param(0)
+	promise := b.CoroPromise(handle, promiseType)
+	if promise.kind != vkPtr ||
+		!types.Identical(promise.RawType(), types.NewPointer(promiseType.RawType())) {
+		t.Fatalf("CoroPromise type = %v, want pointer to %v", promise.RawType(), promiseType.RawType())
+	}
+	done := b.CoroDone(handle)
+	if done.kind != vkBool || !types.Identical(done.RawType(), types.Typ[types.Bool]) {
+		t.Fatalf("CoroDone type = %v, want bool", done.RawType())
+	}
+	b.CoroResume(handle)
+	b.CoroDestroy(handle)
+	b.Return(done)
+	b.EndBuild()
+	b.Dispose()
+
+	mod := fixture.pkg.Module()
+	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify coroutine handle intrinsics: %v\n%s", err, mod.String())
+	}
+	pre := mod.String()
+	for _, intrinsic := range []string{
+		"llvm.coro.promise", "llvm.coro.done", "llvm.coro.resume", "llvm.coro.destroy",
+	} {
+		if !hasCoroIntrinsicCall(pre, intrinsic) {
+			t.Fatalf("presplit module lacks %s call:\n%s", intrinsic, pre)
+		}
+	}
+	wantAlign := prog.td.ABITypeAlignment(promiseType.ll)
+	promiseCall := regexp.MustCompile(fmt.Sprintf(
+		`(?m)call ptr @llvm\.coro\.promise\(ptr [^,]+, i32 %d, i1 false\)`, wantAlign,
+	))
+	if !promiseCall.MatchString(pre) {
+		t.Fatalf("llvm.coro.promise does not use payload ABI alignment %d and from=false:\n%s", wantAlign, pre)
+	}
+
+	pipeline := "coro-early,cgscc(coro-split),coro-cleanup"
+	if llvmMajorVersion() == 14 {
+		pipeline = "function(coro-early),cgscc(coro-split),function(coro-cleanup)"
+	}
+	runCoroPasses(t, fixture, pipeline)
+	post := mod.String()
+	for _, intrinsic := range []string{
+		"llvm.coro.promise", "llvm.coro.done", "llvm.coro.resume", "llvm.coro.destroy",
+	} {
+		if hasCoroIntrinsicCall(post, intrinsic) {
+			t.Fatalf("post-split module still calls %s:\n%s", intrinsic, post)
+		}
+	}
+	for _, suffix := range []string{".resume", ".destroy"} {
+		if mod.NamedFunction("coro_test" + suffix).IsNil() {
+			t.Fatalf("CoroSplit did not create coro_test%s:\n%s", suffix, post)
+		}
+	}
+}
+
 func TestCoroBuilderDefaultPipelineLLVM19(t *testing.T) {
 	if llvmMajorVersion() != 19 {
 		t.Skipf("production default<O0> smoke is specific to LLVM 19, using %s", llvm.Version)
@@ -159,6 +224,288 @@ func TestCoroBuilderTargetUintptrIntrinsics(t *testing.T) {
 	}
 }
 
+func TestCoroPromiseUsesWasm32ABIAlignment(t *testing.T) {
+	Initialize(InitAll)
+	prog := NewProgram(&Target{GOOS: "wasip1", GOARCH: "wasm"})
+	pkg := prog.NewPackage("coropromise", "coro/promise")
+	t.Cleanup(func() {
+		pkg.Module().Dispose()
+		prog.Dispose()
+	})
+
+	fn := pkg.NewFunc("coro_promise", functionSignature(
+		[]types.Type{types.Typ[types.UnsafePointer]},
+		[]types.Type{types.Typ[types.Bool]},
+	), InC)
+	b := fn.MakeBody(1)
+	promiseType := prog.Uint64()
+	promise := b.CoroPromise(fn.Param(0), promiseType)
+	if promise.kind != vkPtr ||
+		!types.Identical(promise.RawType(), types.NewPointer(promiseType.RawType())) {
+		t.Fatalf("CoroPromise type = %v, want *uint64", promise.RawType())
+	}
+	b.Return(b.CoroDone(fn.Param(0)))
+	b.EndBuild()
+	b.Dispose()
+
+	if got := prog.PointerSize(); got != 4 {
+		t.Fatalf("wasm pointer size = %d, want 4", got)
+	}
+	align := prog.td.ABITypeAlignment(promiseType.ll)
+	if align != 8 {
+		t.Fatalf("wasm uint64 ABI alignment = %d, want 8", align)
+	}
+	ir := pkg.String()
+	want := regexp.MustCompile(
+		`call ptr @llvm\.coro\.promise\(ptr [^,]+, i32 8, i1 false\)`,
+	)
+	if !want.MatchString(ir) {
+		t.Fatalf("wasm llvm.coro.promise lacks i32 ABI alignment and from=false:\n%s", ir)
+	}
+	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify wasm coroutine promise accessor: %v\n%s", err, ir)
+	}
+}
+
+func TestCoroRootFactoryDescriptorTargetLayout(t *testing.T) {
+	Initialize(InitAll)
+	tests := []struct {
+		name              string
+		target            *Target
+		pointerSize       int
+		startupSize       uint64
+		startupAlign      uint64
+		resultSize        uint64
+		resultAlign       uint64
+		descriptorSize    uint64
+		startupSizeOffset uint64
+		resultAlignOffset uint64
+	}{
+		{
+			name:              "native",
+			pointerSize:       8,
+			startupSize:       16,
+			startupAlign:      8,
+			resultSize:        8,
+			resultAlign:       8,
+			descriptorSize:    64,
+			startupSizeOffset: 32,
+			resultAlignOffset: 56,
+		},
+		{
+			name:              "wasm32",
+			target:            &Target{GOOS: "wasip1", GOARCH: "wasm"},
+			pointerSize:       4,
+			startupSize:       8,
+			startupAlign:      4,
+			resultSize:        4,
+			resultAlign:       4,
+			descriptorSize:    48,
+			startupSizeOffset: 28,
+			resultAlignOffset: 40,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			prog := NewProgram(test.target)
+			pkg := prog.NewPackage("cororoot", "coro/root")
+			t.Cleanup(func() {
+				pkg.Module().Dispose()
+				prog.Dispose()
+			})
+
+			factory := pkg.NewFunc("coro_root_factory", coroRootFactoryTestSignature(), InC)
+			startup := prog.Struct(prog.VoidPtr(), prog.VoidPtr())
+			result := prog.VoidPtr()
+			hash := [16]byte{
+				0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+				0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+			}
+			descriptor := pkg.NewCoroRootFactoryDescriptor(
+				"coro_root_descriptor",
+				CoroRootFactoryDescriptorOptions{
+					Version: 7,
+					ABIHash: hash,
+					Flags:   0xa5,
+					Factory: factory.Expr,
+					Startup: startup,
+					Result:  result,
+				},
+			)
+
+			if got := prog.PointerSize(); got != test.pointerSize {
+				t.Fatalf("pointer size = %d, want %d", got, test.pointerSize)
+			}
+			if descriptor.kind != vkPtr {
+				t.Fatalf("descriptor kind = %d, want pointer", descriptor.kind)
+			}
+			if !descriptor.impl.IsGlobalConstant() {
+				t.Fatal("root factory descriptor is not a constant global")
+			}
+			if got := descriptor.impl.Linkage(); got != llvm.LinkOnceODRLinkage {
+				t.Fatalf("descriptor linkage = %v, want linkonce_odr", got)
+			}
+
+			descriptorType := prog.Elem(descriptor.Type)
+			if got := prog.SizeOf(descriptorType); got != test.descriptorSize {
+				t.Fatalf("descriptor size = %d, want %d", got, test.descriptorSize)
+			}
+			if got := prog.OffsetOf(descriptorType, 5); got != test.startupSizeOffset {
+				t.Fatalf("startupSize offset = %d, want %d", got, test.startupSizeOffset)
+			}
+			if got := prog.OffsetOf(descriptorType, 8); got != test.resultAlignOffset {
+				t.Fatalf("resultAlign offset = %d, want %d", got, test.resultAlignOffset)
+			}
+			if got, want := descriptor.impl.Alignment(),
+				prog.td.ABITypeAlignment(descriptorType.ll); got != want {
+				t.Fatalf("descriptor alignment = %d, want target ABI alignment %d", got, want)
+			}
+
+			initializer := descriptor.impl.Initializer()
+			if initializer.IsAConstantStruct().IsNil() {
+				t.Fatalf("descriptor initializer is not a constant struct: %v", initializer)
+			}
+			if got := initializer.OperandsCount(); got != 9 {
+				t.Fatalf("descriptor fields = %d, want 9", got)
+			}
+			wantFixed := []uint64{
+				7,
+				0xa5,
+				0x0102030405060708,
+				0x090a0b0c0d0e0f10,
+			}
+			for i, want := range wantFixed {
+				if got := initializer.Operand(i).ZExtValue(); got != want {
+					t.Fatalf("descriptor field %d = %#x, want %#x", i, got, want)
+				}
+			}
+			factoryField := initializer.Operand(4)
+			if factoryField.Type().TypeKind() != llvm.PointerTypeKind ||
+				!factoryField.IsAConstantPointerNull().IsNil() {
+				t.Fatalf("factory field is not a non-null constant pointer: %v", factoryField)
+			}
+			wantPayload := []uint64{
+				test.startupSize,
+				test.startupAlign,
+				test.resultSize,
+				test.resultAlign,
+			}
+			for i, want := range wantPayload {
+				field := initializer.Operand(i + 5)
+				if got := field.Type().IntTypeWidth(); got != test.pointerSize*8 {
+					t.Fatalf("descriptor uintptr field %d width = %d, want %d", i+5, got, test.pointerSize*8)
+				}
+				if got := field.ZExtValue(); got != want {
+					t.Fatalf("descriptor field %d = %d, want %d", i+5, got, want)
+				}
+			}
+
+			ir := pkg.String()
+			if !strings.Contains(ir,
+				"@coro_root_descriptor = linkonce_odr unnamed_addr constant") {
+				t.Fatalf("descriptor is not unnamed_addr linkonce_odr constant:\n%s", ir)
+			}
+			if !strings.Contains(ir, "@coro_root_factory") {
+				t.Fatalf("descriptor does not reference the root factory:\n%s", ir)
+			}
+			if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("verify root factory descriptor: %v\n%s", err, ir)
+			}
+		})
+	}
+}
+
+func TestCoroRootFactoryDescriptorRejectsMisuse(t *testing.T) {
+	Initialize(InitAll)
+	prog := NewProgram(nil)
+	defer prog.Dispose()
+	pkg := prog.NewPackage("badcororoot", "bad/coro/root")
+	defer pkg.Module().Dispose()
+	factory := pkg.NewFunc("coro_root_factory", coroRootFactoryTestSignature(), InC)
+	startup := prog.Struct(prog.VoidPtr(), prog.VoidPtr())
+	result := prog.VoidPtr()
+	valid := CoroRootFactoryDescriptorOptions{
+		Factory: factory.Expr,
+		Startup: startup,
+		Result:  result,
+	}
+
+	mustPanicContains(t, "requires a name", func() {
+		pkg.NewCoroRootFactoryDescriptor("", valid)
+	})
+	mustPanicContains(t, "constant function factory", func() {
+		bad := valid
+		bad.Factory = Nil
+		pkg.NewCoroRootFactoryDescriptor("missing_factory", bad)
+	})
+	mustPanicContains(t, "constant function factory", func() {
+		bad := valid
+		bad.Factory = prog.IntVal(1, prog.Uintptr())
+		pkg.NewCoroRootFactoryDescriptor("integer_factory", bad)
+	})
+	mustPanicContains(t, "constant function factory", func() {
+		bad := valid
+		bad.Factory = prog.Nil(prog.rawType(coroHandleSignature()))
+		pkg.NewCoroRootFactoryDescriptor("null_factory", bad)
+	})
+	mustPanicContains(t, "factory signature", func() {
+		bad := valid
+		bad.Factory = pkg.NewFunc("wrong_arity_factory", coroHandleSignature(), InC).Expr
+		pkg.NewCoroRootFactoryDescriptor("wrong_arity_descriptor", bad)
+	})
+	mustPanicContains(t, "factory signature", func() {
+		bad := valid
+		bad.Factory = pkg.NewFunc("wrong_return_factory", functionSignature(
+			[]types.Type{
+				types.Typ[types.UnsafePointer],
+				types.Typ[types.UnsafePointer],
+				types.Typ[types.UnsafePointer],
+			},
+			[]types.Type{types.Typ[types.Bool]},
+		), InC).Expr
+		pkg.NewCoroRootFactoryDescriptor("wrong_return_descriptor", bad)
+	})
+	foreignPkg := prog.NewPackage("foreigncororoot", "foreign/coro/root")
+	defer foreignPkg.Module().Dispose()
+	mustPanicContains(t, "same package module", func() {
+		bad := valid
+		bad.Factory = foreignPkg.NewFunc("foreign_factory", coroRootFactoryTestSignature(), InC).Expr
+		pkg.NewCoroRootFactoryDescriptor("foreign_factory_descriptor", bad)
+	})
+	mustPanicContains(t, "concrete startup type", func() {
+		bad := valid
+		bad.Startup = nil
+		pkg.NewCoroRootFactoryDescriptor("missing_startup", bad)
+	})
+	mustPanicContains(t, "concrete startup type", func() {
+		bad := valid
+		bad.Startup = prog.Void()
+		pkg.NewCoroRootFactoryDescriptor("void_startup", bad)
+	})
+	mustPanicContains(t, "concrete result type", func() {
+		bad := valid
+		bad.Result = nil
+		pkg.NewCoroRootFactoryDescriptor("missing_result", bad)
+	})
+	mustPanicContains(t, "concrete result type", func() {
+		bad := valid
+		bad.Result = prog.Void()
+		pkg.NewCoroRootFactoryDescriptor("void_result", bad)
+	})
+	foreignProg := NewProgram(nil)
+	defer foreignProg.Dispose()
+	mustPanicContains(t, "startup type belongs to another program", func() {
+		bad := valid
+		bad.Startup = foreignProg.Struct(foreignProg.VoidPtr())
+		pkg.NewCoroRootFactoryDescriptor("foreign_startup_descriptor", bad)
+	})
+	mustPanicContains(t, "result type belongs to another program", func() {
+		bad := valid
+		bad.Result = foreignProg.VoidPtr()
+		pkg.NewCoroRootFactoryDescriptor("foreign_result_descriptor", bad)
+	})
+}
+
 func TestCoroBuilderRejectsMisuse(t *testing.T) {
 	fixture := newCoroTestFixture(t, nil, 0)
 	mustPanicContains(t, "finished coroutine", func() { fixture.coro.Suspend() })
@@ -184,6 +531,43 @@ func TestCoroBuilderRejectsMisuse(t *testing.T) {
 	})
 	b := fn.MakeBody(1)
 	defer b.Dispose()
+	invalidHandles := []struct {
+		name   string
+		handle Expr
+	}{
+		{"nil expression", Nil},
+		{"integer", prog.IntVal(1, prog.Uintptr())},
+		{"function", fn.Expr},
+	}
+	for _, test := range invalidHandles {
+		t.Run("reject handle "+test.name, func(t *testing.T) {
+			operations := []struct {
+				name string
+				call func()
+			}{
+				{"promise", func() { b.CoroPromise(test.handle, prog.Byte()) }},
+				{"done", func() { b.CoroDone(test.handle) }},
+				{"resume", func() { b.CoroResume(test.handle) }},
+				{"destroy", func() { b.CoroDestroy(test.handle) }},
+			}
+			for _, operation := range operations {
+				t.Run(operation.name, func(t *testing.T) {
+					mustPanicContains(t, "handle must be a pointer", operation.call)
+				})
+			}
+		})
+	}
+	validHandle := prog.Nil(prog.VoidPtr())
+	mustPanicContains(t, "concrete payload type", func() {
+		b.CoroPromise(validHandle, nil)
+	})
+	mustPanicContains(t, "concrete payload type", func() {
+		b.CoroPromise(validHandle, prog.Void())
+	})
+	var nilBuilder Builder
+	mustPanicContains(t, "without an active function block", func() {
+		nilBuilder.CoroDone(validHandle)
+	})
 	mustPanicContains(t, "alignment", func() {
 		b.BeginCoro(CoroOptions{
 			AllocationAlign: 3,
@@ -246,7 +630,7 @@ func TestCoroBuilderRejectsCallbackControlFlow(t *testing.T) {
 					},
 					Free: func(Builder, Expr, Expr, Expr) {},
 				},
-				BeforeInitialSuspend: func(b Builder, _ Expr) {
+				BeforeInitialSuspend: func(b Builder, _, _ Expr) {
 					b.Unreachable()
 				},
 			})
@@ -270,6 +654,7 @@ func newCoroCallbackTestBuilder(t *testing.T) (Program, Builder) {
 
 func newCoroTestFixture(t *testing.T, target *Target, allocationAlign uint32) *coroTestFixture {
 	t.Helper()
+	Initialize(InitAll)
 	prog := NewProgram(target)
 	pkg := prog.NewPackage("corotest", "coro/test")
 	t.Cleanup(func() {
@@ -304,7 +689,7 @@ func newCoroTestFixture(t *testing.T, target *Target, allocationAlign uint32) *c
 				b.Call(free.Expr, frame, size, align)
 			},
 		},
-		BeforeInitialSuspend: func(b Builder, handle Expr) {
+		BeforeInitialSuspend: func(b Builder, handle, _ Expr) {
 			if handle.IsNil() {
 				t.Fatal("before-initial-suspend callback received a nil handle")
 			}
@@ -337,6 +722,17 @@ func functionSignature(params, results []types.Type) *types.Signature {
 
 func coroHandleSignature() *types.Signature {
 	return functionSignature(nil, []types.Type{types.Typ[types.UnsafePointer]})
+}
+
+func coroRootFactoryTestSignature() *types.Signature {
+	return functionSignature(
+		[]types.Type{
+			types.Typ[types.UnsafePointer],
+			types.Typ[types.UnsafePointer],
+			types.Typ[types.UnsafePointer],
+		},
+		[]types.Type{types.Typ[types.UnsafePointer]},
+	)
 }
 
 func runCoroPasses(t *testing.T, fixture *coroTestFixture, pipeline string) {
@@ -386,6 +782,10 @@ func assertCoroSuspendDefaults(t *testing.T, fixture *coroTestFixture) {
 
 func countCoroEndCalls(ir string) int {
 	return strings.Count(ir, "call i1 @llvm.coro.end") + strings.Count(ir, "call void @llvm.coro.end")
+}
+
+func hasCoroIntrinsicCall(ir, intrinsic string) bool {
+	return regexp.MustCompile(`call [^\n]*@` + regexp.QuoteMeta(intrinsic) + `\b`).MatchString(ir)
 }
 
 func frameAllocCallLine(ir string) string {

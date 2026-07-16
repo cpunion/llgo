@@ -184,6 +184,7 @@ type context struct {
 	cacheRegistration    bool // cached archive: skip observers; emitted IR is transient
 	pcLineSeq            uint64
 	sourceParamBase      int // hidden physical parameters before source params
+	currentCoro          *coroBodyContext
 
 	patches          Patches
 	blkInfos         []blocks.Info
@@ -536,6 +537,7 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 		}()
 		return p.patchType(f.Signature).(*types.Signature)
 	}()
+	sourceSig := sig
 	state := p.state
 	isInit := (f.Name() == "init" && sig.Recv() == nil)
 	if isInit && state == pkgHasPatch {
@@ -578,6 +580,9 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 		fn.DisableTailCalls()
 	}
 	p.funcs[f] = fn
+	if physicalABI != nil && entry.childAwait {
+		p.emitCoroRootFactory(pkg, entry, *physicalABI, sourceSig, fn)
+	}
 	isCgo := isCgoExternSymbol(f)
 	if nblk := len(f.Blocks); nblk > 0 {
 		if p.prog.FuncInfoMetadataEnabled() {
@@ -639,7 +644,7 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 			p.bvals = make(map[ssa.Value]llssa.Expr)
 			p.methodNilDerefChecks = collectMethodNilDerefChecks(f)
 			if physicalABI != nil {
-				p.compileCoroLeafBody(b, f, *physicalABI)
+				p.compileCoroPhysicalBody(b, f, *physicalABI)
 				b.EndBuild()
 				return
 			}
@@ -1205,6 +1210,10 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 	}
 	switch v := iv.(type) {
 	case *ssa.Call:
+		if value, handled := p.tryCompileCoroStaticAwait(b, v); handled {
+			ret = value
+			break
+		}
 		ret = p.call(b, llssa.Call, &v.Call)
 		if p.rangeFuncCallNeedsDeferDrain(&v.Call) {
 			b.DeferStackDrain()

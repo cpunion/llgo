@@ -57,10 +57,12 @@ type CoroOptions struct {
 	Promise Expr
 	Frame   CoroFrameOps
 	// BeforeInitialSuspend runs after llvm.coro.begin has produced the handle
-	// and before the initial suspend is published. It may initialize the
-	// promise/header and register the handle, but must leave the builder in the
-	// same unterminated insertion block.
-	BeforeInitialSuspend func(b Builder, handle Expr)
+	// and before the initial suspend is published. storage is the allocation
+	// pointer passed to coro.begin (and may be null when allocation was elided).
+	// The callback may initialize the promise/header and register the
+	// handle/storage pair, but must leave the builder in the same unterminated
+	// insertion block.
+	BeforeInitialSuspend func(b Builder, handle, storage Expr)
 	AllocationAlign      uint32
 }
 
@@ -72,6 +74,22 @@ type CoroFrameDescriptorOptions struct {
 	Version uint32
 	ABIHash [16]byte
 	Flags   uint32
+	Result  Type
+}
+
+// CoroRootFactoryDescriptorOptions describes the target-specific constant
+// used to create a root coroutine. ABIHash is computed by the frontend from
+// the complete logical/physical root ABI. Factory must be a constant function
+// declaration or function pointer in the same package module with the fixed
+// (unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) -> unsafe.Pointer ABI.
+// Startup and Result are payload types from the package Program, not pointer
+// types, and must be non-nil concrete types.
+type CoroRootFactoryDescriptorOptions struct {
+	Version uint32
+	ABIHash [16]byte
+	Flags   uint32
+	Factory Expr
+	Startup Type
 	Result  Type
 }
 
@@ -112,6 +130,108 @@ func (p Package) NewCoroFrameDescriptor(name string, opts CoroFrameDescriptorOpt
 	descriptor.impl.SetLinkage(llvm.LinkOnceODRLinkage)
 	descriptor.impl.SetUnnamedAddr(true)
 	return descriptor.Expr
+}
+
+// NewCoroRootFactoryDescriptor defines a link-once constant descriptor with
+// layout:
+//
+//	{ version i32, flags i32, hashLo i64, hashHi i64, factory ptr,
+//	  startupSize uintptr, startupAlign uintptr,
+//	  resultSize uintptr, resultAlign uintptr }
+//
+// The returned expression points at the descriptor. Size, alignment, and
+// uintptr fields follow the package target data layout. The hash words use big
+// endian byte order so their textual IR form is deterministic across hosts.
+func (p Package) NewCoroRootFactoryDescriptor(
+	name string, opts CoroRootFactoryDescriptorOptions,
+) Expr {
+	if name == "" {
+		panic("ssa: coroutine root factory descriptor requires a name")
+	}
+	if opts.Factory.IsNil() ||
+		(opts.Factory.kind != vkFuncDecl && opts.Factory.kind != vkFuncPtr) ||
+		opts.Factory.impl.IsAConstant().IsNil() ||
+		!opts.Factory.impl.IsAConstantPointerNull().IsNil() {
+		panic("ssa: coroutine root factory descriptor requires a non-null constant function factory")
+	}
+	factoryFunction := coroRootFactoryFunction(opts.Factory.impl)
+	if factoryFunction.IsNil() || factoryFunction.GlobalParent().C != p.mod.C {
+		panic("ssa: coroutine root factory descriptor requires a factory from the same package module")
+	}
+	if !isCoroRootFactorySignature(opts.Factory.RawType()) {
+		panic("ssa: coroutine root factory descriptor requires factory signature (unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) -> unsafe.Pointer")
+	}
+	if opts.Startup == nil || opts.Startup.kind == vkInvalid {
+		panic("ssa: coroutine root factory descriptor requires a concrete startup type")
+	}
+	if opts.Result == nil || opts.Result.kind == vkInvalid {
+		panic("ssa: coroutine root factory descriptor requires a concrete result type")
+	}
+
+	prog := p.Prog
+	if opts.Startup.ll.Context().C != prog.ctx.C {
+		panic("ssa: coroutine root factory descriptor startup type belongs to another program")
+	}
+	if opts.Result.ll.Context().C != prog.ctx.C {
+		panic("ssa: coroutine root factory descriptor result type belongs to another program")
+	}
+	descriptorType := prog.Struct(
+		prog.Uint32(),
+		prog.Uint32(),
+		prog.Uint64(),
+		prog.Uint64(),
+		prog.VoidPtr(),
+		prog.Uintptr(),
+		prog.Uintptr(),
+		prog.Uintptr(),
+		prog.Uintptr(),
+	)
+	descriptor := p.NewVarEx(name, prog.Pointer(descriptorType))
+	factory := opts.Factory.impl
+	if factory.Type().C != prog.VoidPtr().ll.C {
+		factory = llvm.ConstBitCast(factory, prog.VoidPtr().ll)
+	}
+	fields := []llvm.Value{
+		prog.IntVal(uint64(opts.Version), prog.Uint32()).impl,
+		prog.IntVal(uint64(opts.Flags), prog.Uint32()).impl,
+		prog.IntVal(binary.BigEndian.Uint64(opts.ABIHash[:8]), prog.Uint64()).impl,
+		prog.IntVal(binary.BigEndian.Uint64(opts.ABIHash[8:]), prog.Uint64()).impl,
+		factory,
+		prog.IntVal(prog.SizeOf(opts.Startup), prog.Uintptr()).impl,
+		prog.IntVal(uint64(prog.td.ABITypeAlignment(opts.Startup.ll)), prog.Uintptr()).impl,
+		prog.IntVal(prog.SizeOf(opts.Result), prog.Uintptr()).impl,
+		prog.IntVal(uint64(prog.td.ABITypeAlignment(opts.Result.ll)), prog.Uintptr()).impl,
+	}
+	descriptor.impl.SetInitializer(prog.ctx.ConstStruct(fields, false))
+	descriptor.impl.SetGlobalConstant(true)
+	descriptor.impl.SetLinkage(llvm.LinkOnceODRLinkage)
+	descriptor.impl.SetUnnamedAddr(true)
+	// Root descriptors are runtime/linker discovery points and otherwise have
+	// no ordinary IR user. llvm.used preserves the descriptor through final-link
+	// dead stripping; its initializer keeps the typed wrapper reachable.
+	p.markLLVMRetained(descriptor.impl)
+	return descriptor.Expr
+}
+
+func coroRootFactoryFunction(value llvm.Value) llvm.Value {
+	for !value.IsAConstantExpr().IsNil() && value.OperandsCount() == 1 {
+		value = value.Operand(0)
+	}
+	return value.IsAFunction()
+}
+
+func isCoroRootFactorySignature(typ types.Type) bool {
+	sig, ok := typ.(*types.Signature)
+	if !ok || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 3 || sig.Results().Len() != 1 {
+		return false
+	}
+	pointer := types.Typ[types.UnsafePointer]
+	for i := 0; i < sig.Params().Len(); i++ {
+		if !types.Identical(sig.Params().At(i).Type(), pointer) {
+			return false
+		}
+	}
+	return types.Identical(sig.Results().At(0).Type(), pointer)
 }
 
 // CoroBuilder owns the structured presplit control flow for one coroutine.
@@ -204,7 +324,7 @@ func (b Builder) BeginCoro(opts CoroOptions) *CoroBuilder {
 	}
 	if callback := opts.BeforeInitialSuspend; callback != nil {
 		callbackPoint := captureCoroFrameCallbackPoint(b)
-		callback(b, coro.handle)
+		callback(b, coro.handle, storage.Expr)
 		callbackPoint.ensureContinuation(b, "before-initial-suspend")
 	}
 	coro.initialResumeBlk = coro.emitSuspend(false)
@@ -316,6 +436,81 @@ func (c *CoroBuilder) requireActive(operation string) {
 	}
 	if c.finished {
 		panic("ssa: cannot " + operation + " finished coroutine")
+	}
+}
+
+// CoroPromise returns a typed pointer to the promise associated with handle.
+//
+// promise is the promise payload type, not a pointer type. The generated
+// llvm.coro.promise call uses the target ABI alignment of that payload and the
+// handle-to-promise direction (from=false). The handle must be a pointer-valued
+// expression produced by llvm.coro.begin or otherwise supplied by the
+// coroutine runtime.
+func (b Builder) CoroPromise(handle Expr, promise Type) Expr {
+	b.requireCoroHandle("get promise for", handle)
+	if promise == nil || promise.kind == vkInvalid {
+		panic("ssa: coroutine promise requires a concrete payload type")
+	}
+
+	prog := b.Prog
+	promisePtr := prog.Pointer(promise)
+	value := b.coroIntrinsic(
+		"llvm.coro.promise",
+		promisePtr.ll,
+		[]llvm.Value{
+			b.Convert(prog.VoidPtr(), handle).impl,
+			prog.IntVal(uint64(prog.td.ABITypeAlignment(promise.ll)), prog.Int32()).impl,
+			prog.BoolVal(false).impl,
+		},
+		"coro.promise",
+	)
+	return Expr{value, promisePtr}
+}
+
+// CoroDone reports whether a suspended coroutine is at its final suspend.
+// Calling it for a running coroutine or a coroutine without a final suspend is
+// invalid according to LLVM's coroutine contract.
+func (b Builder) CoroDone(handle Expr) Expr {
+	b.requireCoroHandle("query done for", handle)
+	prog := b.Prog
+	value := b.coroIntrinsic(
+		"llvm.coro.done",
+		prog.Bool().ll,
+		[]llvm.Value{b.Convert(prog.VoidPtr(), handle).impl},
+		"coro.done",
+	)
+	return Expr{value, prog.Bool()}
+}
+
+// CoroResume resumes a suspended coroutine. A final-suspended coroutine must
+// be destroyed instead and must never be resumed.
+func (b Builder) CoroResume(handle Expr) {
+	b.requireCoroHandle("resume", handle)
+	b.coroIntrinsic(
+		"llvm.coro.resume",
+		b.Prog.Void().ll,
+		[]llvm.Value{b.Convert(b.Prog.VoidPtr(), handle).impl},
+		"",
+	)
+}
+
+// CoroDestroy destroys a suspended coroutine exactly once.
+func (b Builder) CoroDestroy(handle Expr) {
+	b.requireCoroHandle("destroy", handle)
+	b.coroIntrinsic(
+		"llvm.coro.destroy",
+		b.Prog.Void().ll,
+		[]llvm.Value{b.Convert(b.Prog.VoidPtr(), handle).impl},
+		"",
+	)
+}
+
+func (b Builder) requireCoroHandle(operation string, handle Expr) {
+	if b == nil || b.Func == nil || b.blk == nil {
+		panic("ssa: cannot " + operation + " coroutine without an active function block")
+	}
+	if handle.IsNil() || handle.kind != vkPtr {
+		panic("ssa: coroutine handle must be a pointer")
 	}
 }
 

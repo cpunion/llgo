@@ -375,12 +375,13 @@ func (c *context) canUsePackageCache() bool {
 	metadata := c.coroPlanMetadata
 	return c.clCompilation.EnableCoroEntryResolution &&
 		c.clCompilation.EnableCoroPhysicalABI == c.buildConf.EnableCoroPhysicalABI &&
+		c.clCompilation.EnableCoroChildAwait == c.buildConf.EnableCoroChildAwait &&
 		c.clCompilation.CoroABI == metadata.CoroABI &&
 		c.clCompilation.SchedulerABI == metadata.SchedulerABI &&
 		c.clCompilation.PanicABI == metadata.PanicABI &&
 		c.clCompilation.FuncRepABI == metadata.FuncRepABI &&
 		metadata.CoroABI == activeCoroABIVersion(c.buildConf) &&
-		metadata.SchedulerABI == coro.SchedulerNoneABIV0 &&
+		metadata.SchedulerABI == activeCoroSchedulerABIVersion(c.buildConf) &&
 		metadata.PanicABI == coro.PanicLegacyABIV0 &&
 		metadata.FuncRepABI == coro.FuncRepABIV0 &&
 		metadata.TargetTriple != "" && metadata.PointerBits > 0 &&
