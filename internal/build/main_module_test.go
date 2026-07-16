@@ -77,6 +77,236 @@ func TestGenMainModuleLibrary(t *testing.T) {
 	}
 }
 
+func TestGenMainModuleCoroControlWrappersBuildModes(t *testing.T) {
+	llvm.InitializeAllTargets()
+	t.Setenv(llgoStdioNobuf, "")
+
+	tests := []struct {
+		name      string
+		buildMode BuildMode
+		goos      string
+		goarch    string
+		target    *llssa.Target
+		entry     string
+	}{
+		{
+			name:      "native executable",
+			buildMode: BuildModeExe,
+			goos:      "linux",
+			goarch:    "amd64",
+			entry:     "define i32 @main(",
+		},
+		{
+			name:      "wasm executable",
+			buildMode: BuildModeExe,
+			goos:      "wasip1",
+			goarch:    "wasm",
+			target:    &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"},
+			entry:     "define hidden i32 @__main_argc_argv(",
+		},
+		{
+			name:      "C archive",
+			buildMode: BuildModeCArchive,
+			goos:      "linux",
+			goarch:    "amd64",
+		},
+		{
+			name:      "C shared library",
+			buildMode: BuildModeCShared,
+			goos:      "linux",
+			goarch:    "amd64",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			prog := llssa.NewProgram(test.target)
+			defer prog.Dispose()
+			ctx := &context{
+				prog: prog,
+				buildConf: &Config{
+					BuildMode:            test.buildMode,
+					Goos:                 test.goos,
+					Goarch:               test.goarch,
+					EnableCoroChildAwait: true,
+				},
+			}
+			mod := genMainModule(ctx, llssa.PkgRuntime,
+				&packages.Package{PkgPath: "example.com/foo", ExportFile: "foo.a"},
+				&genConfig{})
+			ir := mod.LPkg.String()
+			for _, want := range []string{
+				"define void @__llgo_coro_resume_v1(ptr",
+				"call void @llvm.coro.resume(ptr",
+				"define i1 @__llgo_coro_done_v1(ptr",
+				"call i1 @llvm.coro.done(ptr",
+				"define void @__llgo_coro_destroy_v1(ptr",
+				"call void @llvm.coro.destroy(ptr",
+			} {
+				if !strings.Contains(ir, want) {
+					t.Fatalf("entry module IR missing %q:\n%s", want, ir)
+				}
+			}
+			if test.entry != "" && !strings.Contains(ir, test.entry) {
+				t.Fatalf("entry module IR missing %q:\n%s", test.entry, ir)
+			}
+			if test.buildMode != BuildModeExe && strings.Contains(ir, "define i32 @main(") {
+				t.Fatalf("library mode should not emit main function:\n%s", ir)
+			}
+		})
+	}
+}
+
+func TestGenMainModuleCoroControlWrappersDisabled(t *testing.T) {
+	llvm.InitializeAllTargets()
+	t.Setenv(llgoStdioNobuf, "")
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	ctx := &context{
+		prog: prog,
+		buildConf: &Config{
+			BuildMode: BuildModeExe,
+			Goos:      "linux",
+			Goarch:    "amd64",
+		},
+	}
+	mod := genMainModule(ctx, llssa.PkgRuntime,
+		&packages.Package{PkgPath: "example.com/foo", ExportFile: "foo.a"},
+		&genConfig{})
+	if strings.Contains(mod.LPkg.String(), "__llgo_coro_") {
+		t.Fatalf("disabled child-await mode emitted coroutine control ABI:\n%s", mod.LPkg.String())
+	}
+}
+
+func TestGenMainModuleCoroProgramManifest(t *testing.T) {
+	llvm.InitializeAllTargets()
+	t.Setenv(llgoStdioNobuf, "")
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	ctx := &context{
+		prog: prog,
+		buildConf: &Config{
+			BuildMode:            BuildModeCArchive,
+			Goos:                 "linux",
+			Goarch:               "amd64",
+			EnableCoroChildAwait: true,
+		},
+	}
+	a := coroRootPackageAnchorPrefixV1 + "11111111111111111111111111111111"
+	b := coroRootPackageAnchorPrefixV1 + "22222222222222222222222222222222"
+	var hash [16]byte
+	for i := range hash {
+		hash[i] = byte(i + 1)
+	}
+	entry := genMainModule(ctx, llssa.PkgRuntime,
+		&packages.Package{PkgPath: "example.com/foo", ExportFile: "foo.a"},
+		&genConfig{coroRootAnchors: []string{a, b}, coroManifestHash: hash})
+	ir := entry.LPkg.String()
+	for _, want := range []string{
+		"@" + a + " = external hidden constant",
+		"@" + b + " = external hidden constant",
+		"@" + coroProgramManifestSymbolV1 + ".packages = internal unnamed_addr constant [2 x ptr] [ptr @" + a + ", ptr @" + b + "]",
+		"@" + coroProgramManifestSymbolV1 + " = hidden constant",
+		"i32 1, i32 0, i64 72623859790382856, i64 651345242494996240, i64 2",
+		"ptr @" + coroProgramManifestSymbolV1 + ".packages, ptr null",
+		"@llvm.used = appending global [1 x ptr] [ptr @" + coroProgramManifestSymbolV1 + "]",
+	} {
+		if !strings.Contains(ir, want) {
+			t.Fatalf("coroutine program manifest missing %q:\n%s", want, ir)
+		}
+	}
+	if got := entry.LPkg.CoroProgramManifest(); got != coroProgramManifestSymbolV1 {
+		t.Fatalf("program manifest symbol = %q, want %q", got, coroProgramManifestSymbolV1)
+	}
+}
+
+func TestGenMainModuleEmptyCoroProgramManifest(t *testing.T) {
+	llvm.InitializeAllTargets()
+	t.Setenv(llgoStdioNobuf, "")
+	prog := llssa.NewProgram(&llssa.Target{GOOS: "wasip1", GOARCH: "wasm"})
+	defer prog.Dispose()
+	ctx := &context{
+		prog: prog,
+		buildConf: &Config{
+			BuildMode:            BuildModeExe,
+			Goos:                 "wasip1",
+			Goarch:               "wasm",
+			EnableCoroChildAwait: true,
+		},
+	}
+	entry := genMainModule(ctx, llssa.PkgRuntime,
+		&packages.Package{PkgPath: "example.com/empty", ExportFile: "empty.a"},
+		&genConfig{})
+	ir := entry.LPkg.String()
+	if strings.Contains(ir, coroProgramManifestSymbolV1+".packages") {
+		t.Fatalf("empty coroutine catalog emitted a zero-length package array:\n%s", ir)
+	}
+	manifestLine := ""
+	for _, line := range strings.Split(ir, "\n") {
+		if strings.HasPrefix(line, "@"+coroProgramManifestSymbolV1+" =") {
+			manifestLine = line
+			break
+		}
+	}
+	if manifestLine == "" || !strings.Contains(manifestLine, "i32 0, ptr null, ptr null") {
+		t.Fatalf("empty wasm coroutine manifest does not contain count=0/packages=null/bootstrap=null: %s\n%s", manifestLine, ir)
+	}
+}
+
+func TestGenMainModuleCoroControlWrappersAfterCoroPasses(t *testing.T) {
+	llvm.InitializeAllTargets()
+	t.Setenv(llgoStdioNobuf, "")
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	ctx := &context{
+		prog: prog,
+		buildConf: &Config{
+			BuildMode:            BuildModeCArchive,
+			Goos:                 "linux",
+			Goarch:               "amd64",
+			EnableCoroChildAwait: true,
+		},
+	}
+	entry := genMainModule(ctx, llssa.PkgRuntime,
+		&packages.Package{PkgPath: "example.com/foo", ExportFile: "foo.a"},
+		&genConfig{})
+	mod := entry.LPkg.Module()
+	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify coroutine control wrappers before passes: %v\n%s", err, mod.String())
+	}
+	if err := lowerCoroControlWrappers(ctx, entry.LPkg); err != nil {
+		t.Fatalf("lower coroutine control wrappers: %v\n%s", err, mod.String())
+	}
+	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify coroutine control wrappers after passes: %v\n%s", err, mod.String())
+	}
+	post := mod.String()
+	for _, name := range []string{
+		"__llgo_coro_resume_v1",
+		"__llgo_coro_done_v1",
+		"__llgo_coro_destroy_v1",
+	} {
+		fn := mod.NamedFunction(name)
+		if fn.IsNil() || fn.IsDeclaration() {
+			t.Fatalf("coroutine control wrapper %s missing after passes:\n%s", name, post)
+		}
+	}
+	for _, intrinsic := range []string{
+		"call void @llvm.coro.resume",
+		"call i1 @llvm.coro.done",
+		"call void @llvm.coro.destroy",
+	} {
+		if strings.Contains(post, intrinsic) {
+			t.Fatalf("post-pass wrapper still calls %s:\n%s", intrinsic, post)
+		}
+	}
+	object, err := prog.TargetMachine().EmitToMemoryBuffer(mod, llvm.ObjectFile)
+	if err != nil {
+		t.Fatalf("emit lowered coroutine control wrapper object: %v\n%s", err, post)
+	}
+	object.Dispose()
+}
+
 func assertInOrder(t *testing.T, s string, wants ...string) {
 	t.Helper()
 	offset := 0

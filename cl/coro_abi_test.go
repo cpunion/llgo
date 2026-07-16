@@ -20,6 +20,8 @@ package cl
 
 import (
 	"bytes"
+	"encoding/binary"
+	"encoding/hex"
 	"go/ast"
 	"regexp"
 	"strconv"
@@ -484,6 +486,175 @@ func TestCoroExplicitAsyncRootFactoryV1Presplit(t *testing.T) {
 	}
 	if got := len(regexp.MustCompile(`@`+regexp.QuoteMeta(coroRootFactoryDescriptorPrefix)+`[0-9a-f]{32} =`).FindAllString(ir, -1)); got != 1 {
 		t.Fatalf("root factory descriptors = %d, want only explicit Parent:\n%s", got, ir)
+	}
+}
+
+func TestCoroRootPackageAnchorV1CanonicalRegistry(t *testing.T) {
+	const source = `package foo
+func AlphaChild(value uint32) uint32 { return value + 1 }
+func Alpha(value uint32) uint32 { return AlphaChild(value) + 1 }
+func ZebraChild(value uint32) uint32 { return value + 2 }
+func Zebra(value uint32) uint32 { return ZebraChild(value) + 1 }
+`
+	prog, ssaPkg, files, universe, plan := prepareCoroRootFactoryTestPlan(
+		t, source,
+		[]coroRootFactoryTestRoot{
+			{name: "Zebra", demand: coro.AsyncDemand},
+			{name: "Alpha", demand: coro.AsyncDemand},
+		},
+		[]string{"AlphaChild", "ZebraChild"},
+	)
+	defer prog.Dispose()
+	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+	enableCoroChildAwaitCompilation(compilation)
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify root package anchor: %v\n%s", err, module.String())
+	}
+
+	anchor := requireSingleCoroRootPackageAnchorV1(t, module)
+	if got := pkg.CoroRootPackageAnchor(); got != anchor.Name() {
+		t.Fatalf("package anchor = %q, want %q", got, anchor.Name())
+	}
+	initializer := anchor.Initializer()
+	if initializer.IsAConstantStruct().IsNil() || initializer.OperandsCount() != 6 {
+		t.Fatalf("anchor initializer is not a six-field constant struct: %v", initializer)
+	}
+	if got := initializer.Operand(0).ZExtValue(); got != uint64(coroRootPackageAnchorVersionV1) {
+		t.Fatalf("anchor version = %d, want %d", got, coroRootPackageAnchorVersionV1)
+	}
+	if got := initializer.Operand(4).ZExtValue(); got != 2 {
+		t.Fatalf("anchor descriptor count = %d, want 2", got)
+	}
+	suffix := strings.TrimPrefix(anchor.Name(), coroRootPackageAnchorPrefix)
+	decoded, err := hex.DecodeString(suffix)
+	if err != nil || len(decoded) != 16 {
+		t.Fatalf("anchor suffix %q is not a 128-bit hex ABI hash: %v", suffix, err)
+	}
+	if got, want := initializer.Operand(2).ZExtValue(), binary.BigEndian.Uint64(decoded[:8]); got != want {
+		t.Fatalf("anchor hashLo = %#x, want symbol hash %#x", got, want)
+	}
+	if got, want := initializer.Operand(3).ZExtValue(), binary.BigEndian.Uint64(decoded[8:]); got != want {
+		t.Fatalf("anchor hashHi = %#x, want symbol hash %#x", got, want)
+	}
+
+	entries := module.NamedGlobal(anchor.Name() + ".entries")
+	if entries.IsNil() || entries.Initializer().IsAConstantArray().IsNil() {
+		t.Fatalf("anchor entries array is absent or non-constant:\n%s", module.String())
+	}
+	entryValues := entries.Initializer()
+	rootPlans := plan.Roots()
+	if len(rootPlans) != 2 || entryValues.OperandsCount() != len(rootPlans) {
+		t.Fatalf("root plans/entries = %d/%d, want 2/2", len(rootPlans), entryValues.OperandsCount())
+	}
+	for i, root := range rootPlans {
+		function := module.NamedFunction("foo." + root.Function.Name() + coroPrimarySuffix)
+		if function.IsNil() {
+			t.Fatalf("root coroutine %q is absent:\n%s", root.ID, module.String())
+		}
+		hash := requireCoroFrameDescriptorHash(t, root.Function.Name(), function.String())
+		want := coroRootFactoryDescriptorPrefix + hash
+		if got := stripCoroRootPackageConstantPointer(entryValues.Operand(i)).Name(); got != want {
+			t.Fatalf("anchor entries[%d] = %q, want FunctionID-ordered root %q descriptor %q", i, got, root.ID, want)
+		}
+	}
+	for _, name := range []string{"AlphaChild", "ZebraChild"} {
+		child := module.NamedFunction("foo." + name + coroPrimarySuffix)
+		if child.IsNil() {
+			t.Fatalf("propagated coroutine %q is absent", name)
+		}
+		hash := requireCoroFrameDescriptorHash(t, name, child.String())
+		if !module.NamedGlobal(coroRootFactoryDescriptorPrefix+hash).IsNil() ||
+			!module.NamedFunction(coroRootFactoryPrefix+hash).IsNil() {
+			t.Fatalf("propagated async function %q received a root factory/descriptor:\n%s", name, module.String())
+		}
+	}
+	assertCoroRootPackageAnchorLLVMUsed(t, module, anchor)
+}
+
+func TestCoroRootPackageAnchorV1AbsentWithoutExplicitRoots(t *testing.T) {
+	prog, ssaPkg, files, universe, plan := prepareCoroRootFactoryTestPlan(
+		t, `package foo; func Plain(value uint32) uint32 { return value + 1 }`, nil, nil,
+	)
+	defer prog.Dispose()
+	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+	enableCoroChildAwaitCompilation(compilation)
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	if got := pkg.CoroRootPackageAnchor(); got != "" {
+		t.Fatalf("rootless package anchor = %q, want none", got)
+	}
+	if anchors := coroRootPackageAnchorsV1(module); len(anchors) != 0 {
+		t.Fatalf("rootless package emitted %d anchor(s):\n%s", len(anchors), module.String())
+	}
+	if strings.Contains(module.String(), coroRootPackageAnchorPrefix) {
+		t.Fatalf("rootless package IR contains a root anchor marker:\n%s", module.String())
+	}
+}
+
+func TestCoroRootPackageAnchorV1StableAcrossCacheRegistration(t *testing.T) {
+	compile := func(cacheHit bool, planDigest, source string) string {
+		t.Helper()
+		prog, ssaPkg, files, universe, plan := prepareCoroRootFactoryTestPlan(
+			t, source,
+			[]coroRootFactoryTestRoot{{name: "Root", demand: coro.AsyncDemand}},
+			[]string{"Root"},
+		)
+		compilation := &Compilation{
+			CoroPlan:         plan,
+			CoroPlanDigest:   planDigest,
+			EmissionUniverse: universe,
+		}
+		enableCoroChildAwaitCompilation(compilation)
+		pkg, _, err := NewPackageExWithEmbedOptions(
+			prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+			PackageOptions{Compilation: compilation, CacheHit: cacheHit},
+		)
+		if err != nil {
+			prog.Dispose()
+			t.Fatal(err)
+		}
+		module := pkg.Module()
+		name := requireSingleCoroRootPackageAnchorV1(t, module).Name()
+		module.Dispose()
+		prog.Dispose()
+		return name
+	}
+
+	const rootUint32 = `package foo; func Root(value uint32) uint32 { return value + 1 }`
+	const digest = "0000000000000000000000000000000000000000000000000000000000000000"
+	sourceAnchor := compile(false, digest, rootUint32)
+	cached := compile(true, digest, rootUint32)
+	if cached != sourceAnchor {
+		t.Fatalf("cache registration anchor = %q, source anchor = %q", cached, sourceAnchor)
+	}
+	fallbackA := compile(false, "", rootUint32)
+	fallbackB := compile(false, "", rootUint32)
+	if fallbackA != fallbackB {
+		t.Fatalf("digest-free direct compilation anchors are unstable: %q != %q", fallbackA, fallbackB)
+	}
+	const otherDigest = "1111111111111111111111111111111111111111111111111111111111111111"
+	if other := compile(false, otherDigest, rootUint32); other == sourceAnchor {
+		t.Fatalf("anchor %q did not include the canonical plan digest", other)
+	}
+	const rootUint64 = `package foo; func Root(value uint64) uint64 { return value + 1 }`
+	if changedABI := compile(false, digest, rootUint64); changedABI == sourceAnchor {
+		t.Fatalf("anchor %q did not include the root factory descriptor ABI hash", changedABI)
 	}
 }
 
@@ -1235,6 +1406,52 @@ func requireSingleCoroRootFactoryV1(t *testing.T, module llvm.Module) (string, l
 		t.Fatalf("root factory %q is absent despite its definition:\n%s", coroRootFactoryPrefix+hash, ir)
 	}
 	return hash, factory
+}
+
+func coroRootPackageAnchorsV1(module llvm.Module) []llvm.Value {
+	var anchors []llvm.Value
+	for global := module.FirstGlobal(); !global.IsNil(); global = llvm.NextGlobal(global) {
+		if strings.HasPrefix(global.Name(), coroRootPackageAnchorPrefix) &&
+			!strings.HasSuffix(global.Name(), ".entries") {
+			anchors = append(anchors, global)
+		}
+	}
+	return anchors
+}
+
+func requireSingleCoroRootPackageAnchorV1(t *testing.T, module llvm.Module) llvm.Value {
+	t.Helper()
+	anchors := coroRootPackageAnchorsV1(module)
+	if len(anchors) != 1 {
+		t.Fatalf("root package anchors = %d, want exactly one:\n%s", len(anchors), module.String())
+	}
+	anchor := anchors[0]
+	if !anchor.IsGlobalConstant() || anchor.Linkage() != llvm.ExternalLinkage ||
+		anchor.Visibility() != llvm.HiddenVisibility {
+		t.Fatalf("root package anchor is not an external hidden constant: %v", anchor)
+	}
+	return anchor
+}
+
+func stripCoroRootPackageConstantPointer(value llvm.Value) llvm.Value {
+	for !value.IsAConstantExpr().IsNil() && value.OperandsCount() == 1 {
+		value = value.Operand(0)
+	}
+	return value
+}
+
+func assertCoroRootPackageAnchorLLVMUsed(t *testing.T, module llvm.Module, anchor llvm.Value) {
+	t.Helper()
+	used := module.NamedGlobal("llvm.used")
+	if used.IsNil() || used.Initializer().IsNil() {
+		t.Fatalf("root package anchor is not protected by llvm.used:\n%s", module.String())
+	}
+	for i := 0; i < used.Initializer().OperandsCount(); i++ {
+		if stripCoroRootPackageConstantPointer(used.Initializer().Operand(i)).C == anchor.C {
+			return
+		}
+	}
+	t.Fatalf("llvm.used does not retain root package anchor %q:\n%s", anchor.Name(), module.String())
 }
 
 func requireCoroFrameDescriptorHash(t *testing.T, name, body string) string {

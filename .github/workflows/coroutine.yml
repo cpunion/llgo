@@ -29,7 +29,7 @@ jobs:
           echo 'deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-${{ matrix.llvm }} main' | sudo tee /etc/apt/sources.list.d/llvm.list
           wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
           sudo apt-get update
-          sudo apt-get install --no-install-recommends llvm-${{ matrix.llvm }}-dev clang-${{ matrix.llvm }}
+          sudo apt-get install --no-install-recommends llvm-${{ matrix.llvm }}-dev clang-${{ matrix.llvm }} lld-${{ matrix.llvm }} libgc-dev
           echo '/usr/lib/llvm-${{ matrix.llvm }}/bin' >> "$GITHUB_PATH"
 
       - name: Set up Go
@@ -43,18 +43,36 @@ jobs:
         if: matrix.llvm == 19
         run: go test -race -shuffle=on ./internal/coro
 
+      - name: Test target-neutral coroutine runtime core
+        run: |
+          cd runtime
+          go test -race -shuffle=on ./internal/coro -count=1
+          go test ./internal/runtime -run '^$' -count=1
+
+      - name: Compile coroutine runtime adapter across targets
+        if: matrix.llvm == 19
+        run: |
+          cd runtime
+          GOOS=js GOARCH=wasm CGO_ENABLED=0 go test -c -o /tmp/coro-js-wasm.test ./internal/runtime
+          GOOS=wasip1 GOARCH=wasm CGO_ENABLED=0 go test -c -o /tmp/coro-wasip1-wasm.test ./internal/runtime
+          GOOS=linux GOARCH=arm CGO_ENABLED=0 go test -c -o /tmp/coro-linux-arm.test ./internal/runtime
+          GOOS=linux GOARCH=arm CGO_ENABLED=0 go test -c -tags='baremetal cortexm' -o /tmp/coro-cortexm-baremetal.test ./internal/runtime
+
       - name: Test coroutine build integration
         if: matrix.llvm == 19
-        run: go test ./internal/build -run 'Test(CoroPlanBuilderRunsBeforeCodegenWithoutChangingIR|CoroPlanInputCanonicalizesPatchedRoot|ActiveCoroABIVersions|BuildCoroPlanErrors|CoroEntryResolutionUsesPlanMatchedPackageCache|CoroEntryResolutionBuildsPreparedRuntimePackages|CoroEmissionCoverageStopsBeforeAnyPackageCodegen|CoroUnsupportedEntryResolutionReturnsErrorBeforeCodegen|CoroEmissionUniverseAcceptsModeTestVariants)$' -count=1
+        run: go test ./internal/build -run 'Test(CoroPlanBuilderRunsBeforeCodegenWithoutChangingIR|CoroPlanInputCanonicalizesPatchedRoot|ActiveCoroABIVersions|BuildCoroPlanErrors|CoroEntryResolutionUsesPlanMatchedPackageCache|CoroEntryResolutionBuildsPreparedRuntimePackages|CoroRuntimeLinkRequirements|CoroEmissionCoverageStopsBeforeAnyPackageCodegen|CoroUnsupportedEntryResolutionReturnsErrorBeforeCodegen|CoroEmissionUniverseAcceptsModeTestVariants)$' -count=1
 
       - name: Test coroutine compiler integration
         if: matrix.llvm == 19
         run: |
           go test -race ./cl/ssawrap -count=1
           go test -race ./cl -run '^Test(CompilationCoroPlanObservationAndCacheRegistration|CoroEntryResolutionPlainPrimaryPreservesIR|ResolveFunctionSymbolUsesPrimaryAndExactPlan|CoroEntryRejectsUnsupportedBeforeCreatingSymbol|CoroEntryResolutionPreflightRejectsWholePlanBeforeCodegen|CoroEntryResolutionPreflightRejectsMissingPlanAndCache|Emission.*)$' -count=1
+          # Compile and execute one ordinary program through LLGo so the new
+          # runtime glue is checked by LLGo itself, not only by the host Go compiler.
+          go test ./cl -run '^TestRunAndTestFromTestgo/print$' -count=1
 
       - name: Test structured LLVM coroutine builder
-        run: go test -tags='${{ matrix.tags }}' -v ./ssa -run '^TestCoro(Builder|Handle|Promise|RootFactory)' -count=1
+        run: go test -tags='${{ matrix.tags }}' -v ./ssa -run '^TestCoro' -count=1
 
       - name: Test canonical coroutine plan digest and cache identity
         run: |
@@ -63,7 +81,10 @@ jobs:
           go test -tags='${{ matrix.tags }}' ./cl -run '^Test(CompilationCoroABIIdentityValidation|CoroEntryResolutionCacheRegistrationWithDigest|CoroPhysicalABICacheRegistrationPreservesPhysicalMetadata)$' -count=1
 
       - name: Test coroutine physical ABI lowering
-        run: go test -tags='${{ matrix.tags }}' -v ./cl -run '^TestCoro(LeafPhysicalABI|PhysicalABI|ChildAwaitPhysicalABIV1|ExplicitAsyncRootFactoryV1|ExplicitRootFactoryV1)' -count=1
+        run: go test -tags='${{ matrix.tags }}' -v ./cl -run '^TestCoro(LeafPhysicalABI|PhysicalABI|ChildAwaitPhysicalABIV1|ExplicitAsyncRootFactoryV1|ExplicitRootFactoryV1|RootPackageAnchorV1)' -count=1
+
+      - name: Test coroutine registry and control integration
+        run: go test -tags='${{ matrix.tags }}' -v ./internal/build -run '^Test(CollectLinkedCoroRootAnchors|CoroProgramManifest.*|GenMainModule.*Coro.*)$' -count=1
 
       - name: Test LLVM 22 tool configuration
         if: matrix.llvm == 22
@@ -86,6 +107,8 @@ jobs:
         if: matrix.llvm == 19
         run: |
           go vet ./internal/coro ./internal/build ./cl/ssawrap ./internal/xtool/llvm ./internal/crosscompile ./internal/cabi
+          # The runtime package has pre-existing unsafe.Pointer findings.
+          (cd runtime && go vet ./internal/coro && go vet -unsafeptr=false ./internal/runtime)
           # The compiler package has a pre-existing unsafe.Pointer finding.
           # Disable only that analyzer and keep all other checks enabled.
           go vet -unsafeptr=false ./cl
