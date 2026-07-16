@@ -97,6 +97,11 @@ func TestCoroPlanDigestDeterministicCompleteAndDomainSeparated(t *testing.T) {
 	if len(document.Functions) != len(plainPlan.functions) {
 		t.Fatalf("function records = %d, want %d", len(document.Functions), len(plainPlan.functions))
 	}
+	for index, function := range document.Functions {
+		if function.Emission != uint8(plainPlan.functions[index].Plan.Emission) {
+			t.Fatalf("function %q digest emission = %d, want %s", function.ID, function.Emission, plainPlan.functions[index].Plan.Emission)
+		}
+	}
 	if len(document.Roots) != len(plainPlan.roots) || len(document.Roots) == 0 {
 		t.Fatalf("root records = %d, plan roots = %d", len(document.Roots), len(plainPlan.roots))
 	}
@@ -337,6 +342,23 @@ func TestCoroPlanDigestFailsClosedOnCallAndValueCoverage(t *testing.T) {
 		})
 	}
 	plan.roots = originalRoots
+
+	originalFunction := plan.functions[0].Plan
+	invalidFunction := originalFunction
+	invalidFunction.Emission = BodyEmission(255)
+	plan.functions[0].Plan = invalidFunction
+	if _, err := plan.CoroPlanDigest(metadata); err == nil || !strings.Contains(err.Error(), "invalid body emission") {
+		t.Fatalf("invalid emission error = %v", err)
+	}
+	invalidFunction.Emission = EmitNone
+	if originalFunction.Emission == EmitNone {
+		invalidFunction.Emission = EmitPlain
+	}
+	plan.functions[0].Plan = invalidFunction
+	if _, err := plan.CoroPlanDigest(metadata); err == nil || !strings.Contains(err.Error(), "emission") || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("mismatched emission error = %v", err)
+	}
+	plan.functions[0].Plan = originalFunction
 }
 
 func TestCoroPlanDigestMetadataValidation(t *testing.T) {

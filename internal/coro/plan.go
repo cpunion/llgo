@@ -168,7 +168,7 @@ func (k *PrimaryKind) UnmarshalText(text []byte) error {
 	return nil
 }
 
-// FunctionPlan is the immutable effect result for one function.
+// FunctionPlan is the immutable analysis and emission result for one function.
 type FunctionPlan struct {
 	ID FunctionID
 
@@ -191,11 +191,32 @@ type FunctionPlan struct {
 	// Demand is the entry-capability fixed point from hard-sync, managed, and
 	// spawn roots.
 	Demand Demand
+	// Emission is the one physical body required by this closed-world plan.
+	// NoDemand functions use EmitNone without changing their logical Primary,
+	// External, or FuncRep selection.
+	Emission BodyEmission
 	// FuncRep is direct unless value-flow requested an open dispatch boundary.
 	FuncRep   FuncRep
 	External  ExternalKind
 	Recursive bool
 	Primary   PrimaryKind
+}
+
+// bodyEmissionFor derives the physical body independently from logical
+// PrimaryKind and function-value representation. No-demand nodes materialize
+// no symbol; a demanded external node retains a declaration, while a demanded
+// owned body selects plain or coroutine lowering from its effect.
+func bodyEmissionFor(demand Demand, effect Effect, external ExternalKind) BodyEmission {
+	if demand == NoDemand {
+		return EmitNone
+	}
+	if external != Defined {
+		return EmitExternal
+	}
+	if effect.MaySuspend() {
+		return EmitCoroutine
+	}
+	return EmitPlain
 }
 
 // Plan is an immutable, deterministically ordered collection of function

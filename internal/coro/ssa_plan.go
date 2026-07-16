@@ -666,6 +666,9 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 			}
 		}
 	}
+	if err := addSSAReferenceEdges(graph, included, includedSet, ids, flow); err != nil {
+		return nil, err
+	}
 
 	base, err := graph.Analyze()
 	if err != nil {
@@ -692,6 +695,46 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		})
 	}
 	return result, nil
+}
+
+// addSSAReferenceEdges projects known function values used by demanded bodies
+// into demand-only graph edges. Every CallInstruction callee operand is skipped:
+// static and dynamic invocation are already represented by CallEdge and must
+// not be mistaken for first-class publication. All other operands remain
+// eligible, covering arguments, boxing, stores, returns, and closure bindings.
+func addSSAReferenceEdges(
+	graph *Graph,
+	functions []*ssa.Function,
+	included map[*ssa.Function]bool,
+	ids map[*ssa.Function]FunctionID,
+	flow *ssaFuncFlow,
+) error {
+	operands := make([]*ssa.Value, 0, 8)
+	for _, owner := range functions {
+		for _, block := range owner.Blocks {
+			for _, instruction := range block.Instrs {
+				if _, debug := instruction.(*ssa.DebugRef); debug {
+					continue
+				}
+				operands = instruction.Operands(operands[:0])
+				var calleeOperand *ssa.Value
+				if call, ok := instruction.(ssa.CallInstruction); ok {
+					calleeOperand = &call.Common().Value
+				}
+				for _, operand := range operands {
+					if operand == nil || *operand == nil || operand == calleeOperand {
+						continue
+					}
+					for _, target := range sortedSSACandidates(flow.materializedTargets(*operand), ids, included) {
+						if err := graph.AddReference(ReferenceEdge{Owner: ids[owner], Target: ids[target]}); err != nil {
+							return fmt.Errorf("coro: add SSA function reference from %q to %q: %w", owner.Name(), target.Name(), err)
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func classifySSAUnknownCalls(

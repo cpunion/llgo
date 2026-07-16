@@ -28,14 +28,14 @@ import (
 )
 
 // SummarySchema is the experimental wire schema for deterministic plan
-// snapshots. Version v0 is intentionally not an archive ABI: producer ABI
+// snapshots. Version v1 is intentionally not an archive ABI: producer ABI
 // summaries remain future work, and cache identity uses the separate
 // PlanDigestSchema.
-const SummarySchema = "llgo.coro.plan.v0"
+const SummarySchema = "llgo.coro.plan.v1"
 
 // SummaryMetadata identifies ABI and target properties that affect an
 // experimental plan snapshot. Empty fields are permitted during early
-// analysis. This v0 type must not be used as an archive compatibility record.
+// analysis. This v1 type must not be used as an archive compatibility record.
 type SummaryMetadata struct {
 	CoroABI      string `json:"coro_abi"`
 	SchedulerABI string `json:"scheduler_abi"`
@@ -53,13 +53,14 @@ type FunctionSummary struct {
 	LocalExec      ExecFlags    `json:"local_exec"`
 	Exec           ExecFlags    `json:"exec"`
 	Demand         Demand       `json:"demand"`
+	Emission       BodyEmission `json:"emission"`
 	FuncRep        FuncRep      `json:"func_rep"`
 	External       ExternalKind `json:"external"`
 	Recursive      bool         `json:"recursive"`
 	Primary        PrimaryKind  `json:"primary"`
 }
 
-// Summary is a stable v0 snapshot used to test plan determinism. It
+// Summary is a stable v1 snapshot used to test plan determinism. It
 // intentionally contains no maps or pointer identities and is neither the
 // producer ABI summary nor the separate CoroPlanDigest wire format.
 type Summary struct {
@@ -92,6 +93,7 @@ type functionSummaryWire struct {
 	LocalExec      *ExecFlags    `json:"local_exec"`
 	Exec           *ExecFlags    `json:"exec"`
 	Demand         *Demand       `json:"demand"`
+	Emission       *BodyEmission `json:"emission"`
 	FuncRep        *FuncRep      `json:"func_rep"`
 	External       *ExternalKind `json:"external"`
 	Recursive      *bool         `json:"recursive"`
@@ -119,6 +121,7 @@ func (p *Plan) Summary(metadata SummaryMetadata) Summary {
 			LocalExec:      fn.LocalExec,
 			Exec:           fn.Exec,
 			Demand:         fn.Demand,
+			Emission:       fn.Emission,
 			FuncRep:        fn.FuncRep,
 			External:       fn.External,
 			Recursive:      fn.Recursive,
@@ -259,6 +262,9 @@ func (w functionSummaryWire) summary(index int) (FunctionSummary, error) {
 	if w.Demand == nil {
 		return missing("demand")
 	}
+	if w.Emission == nil {
+		return missing("emission")
+	}
 	if w.FuncRep == nil {
 		return missing("func_rep")
 	}
@@ -280,6 +286,7 @@ func (w functionSummaryWire) summary(index int) (FunctionSummary, error) {
 		LocalExec:      *w.LocalExec,
 		Exec:           *w.Exec,
 		Demand:         *w.Demand,
+		Emission:       *w.Emission,
 		FuncRep:        *w.FuncRep,
 		External:       *w.External,
 		Recursive:      *w.Recursive,
@@ -456,6 +463,9 @@ func (s Summary) canonical() (Summary, error) {
 		if err := fn.Demand.Validate(); err != nil {
 			return Summary{}, fmt.Errorf("coro: function %q: %w", fn.ID, err)
 		}
+		if err := fn.Emission.Validate(); err != nil {
+			return Summary{}, fmt.Errorf("coro: function %q: %w", fn.ID, err)
+		}
 		if err := fn.FuncRep.Validate(); err != nil {
 			return Summary{}, fmt.Errorf("coro: function %q: %w", fn.ID, err)
 		}
@@ -467,6 +477,10 @@ func (s Summary) canonical() (Summary, error) {
 		}
 		if err := fn.External.validate(); err != nil {
 			return Summary{}, fmt.Errorf("coro: function %q: %w", fn.ID, err)
+		}
+		expectedEmission := bodyEmissionFor(fn.Demand, fn.Effect, fn.External)
+		if fn.Emission != expectedEmission {
+			return Summary{}, fmt.Errorf("coro: function %q emission %s does not match demand %s, effect %s, and external kind %s (want %s)", fn.ID, fn.Emission, fn.Demand, fn.Effect, fn.External, expectedEmission)
 		}
 		if err := fn.Primary.validate(); err != nil {
 			return Summary{}, fmt.Errorf("coro: function %q: %w", fn.ID, err)

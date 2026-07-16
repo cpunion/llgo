@@ -279,6 +279,85 @@ func root() func() {
 	}
 }
 
+func TestAnalyzeSSAFunctionReferencesPropagateDemandWithoutEffect(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "references.go", `package coroid
+
+var channel chan int
+var boxed any
+var stored func()
+
+func argumentTarget() {}
+func directValueTarget() {}
+func boxedTarget() { <-channel }
+func returnedTarget() {}
+func bindingTarget() { <-channel }
+func spawnedTarget() {}
+func deadPlainTarget() {}
+func deadCoroTarget() { <-channel }
+func consume(func()) {}
+
+func owner() func() {
+	if directValueTarget == nil {
+		panic("unreachable")
+	}
+	consume(argumentTarget)
+	boxed = boxedTarget
+	bound := bindingTarget
+	stored = func() { bound() }
+	go spawnedTarget()
+	return returnedTarget
+}
+
+func deadOwner() {
+	consume(deadPlainTarget)
+	boxed = deadCoroTarget
+}
+`)
+	owner := packageFunction(t, pkg, "owner")
+	plan, err := AnalyzeSSA(prog, Roots{{Function: owner, Demand: SyncDemand}}, SSAConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ownerPlan := functionPlanFor(t, plan, owner)
+	if ownerPlan.Effect != NoSuspend || ownerPlan.Demand != SyncDemand || ownerPlan.Emission != EmitPlain {
+		t.Fatalf("owner plan = %+v, function references must not propagate effect", ownerPlan)
+	}
+	checks := []struct {
+		name     string
+		demand   Demand
+		emission BodyEmission
+	}{
+		{"directValueTarget", SyncDemand, EmitPlain},
+		{"argumentTarget", SyncDemand, EmitPlain},
+		{"boxedTarget", AsyncDemand, EmitCoroutine},
+		{"returnedTarget", SyncDemand, EmitPlain},
+		{"bindingTarget", AsyncDemand, EmitCoroutine},
+		// A CallInstruction callee is represented only by its CallEdge. If the
+		// go callee operand also became a ReferenceEdge, SyncDemand would join
+		// this spawn demand and incorrectly produce BothDemand.
+		{"spawnedTarget", AsyncDemand, EmitPlain},
+		{"deadPlainTarget", NoDemand, EmitNone},
+		{"deadCoroTarget", NoDemand, EmitNone},
+		{"deadOwner", NoDemand, EmitNone},
+	}
+	for _, check := range checks {
+		function := packageFunction(t, pkg, check.name)
+		got := functionPlanFor(t, plan, function)
+		if got.Demand != check.demand || got.Emission != check.emission {
+			t.Fatalf("%s plan = %+v, want demand=%s emission=%s", check.name, got, check.demand, check.emission)
+		}
+	}
+
+	if len(owner.AnonFuncs) != 1 {
+		t.Fatalf("owner closures = %d, want 1", len(owner.AnonFuncs))
+	}
+	closure := functionPlanFor(t, plan, owner.AnonFuncs[0])
+	if closure.Demand != AsyncDemand || closure.Emission != EmitCoroutine {
+		t.Fatalf("materialized closure plan = %+v", closure)
+	}
+}
+
 func TestAnalyzeSSADynamicOpenAndClosedWorld(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "source.go", `package coroid
 

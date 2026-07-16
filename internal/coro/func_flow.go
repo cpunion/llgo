@@ -540,6 +540,23 @@ func (f *ssaFuncFlow) scalarCallTargets(call ssa.CallInstruction) (targets map[*
 	return f.targets[root], !f.unknown[root]
 }
 
+// materializedTargets returns the statically known function targets carried by
+// value. Callers use it only for non-callee SSA operands: a call edge already
+// accounts for invoking its callee, while arguments, stores, boxing, returns,
+// closure bindings, and direct function-value operations materialize function
+// references independently. Body demand is deliberately independent from
+// whether the value representation requires Dispatch.
+func (f *ssaFuncFlow) materializedTargets(value ssa.Value) map[*ssa.Function]struct{} {
+	if f == nil || value == nil {
+		return nil
+	}
+	index, ok := f.index[value]
+	if !ok {
+		return nil
+	}
+	return f.targets[f.root(index)]
+}
+
 func (f *ssaFuncFlow) finalize(
 	base *Plan,
 	callKinds map[ssa.CallInstruction]CallKind,
