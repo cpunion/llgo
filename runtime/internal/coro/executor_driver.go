@@ -105,6 +105,8 @@ func drainExecutorSources(driver *ExecutorDriver) (drained, promoted int, ok boo
 	}
 	drained, ok = driver.waits.drainFor(driver.p)
 	if !ok {
+		// A prior slot delivery is irreversible. Preserve partial progress just
+		// like an I/O count returned with an error; callers must still fail closed.
 		return drained, 0, false
 	}
 	promoted, ok = pollReady(driver.p)
@@ -184,7 +186,11 @@ func PrepareExecutorSleep(driver *ExecutorDriver) (sleep bool, ok bool) {
 	// producer paused between Posted and its advisory pending store.
 	drained, promoted, scanOK := drainExecutorSources(driver)
 	if !scanOK {
-		driver.registry.LeaveIdle(driver.handle)
+		// ArmIdle succeeded from exact zero, so the only legal gates here are
+		// IdleArmed with or without Requested and LeaveIdle must disarm either.
+		// The source-scan failure is already fatal even if corruption also makes
+		// this best-effort cleanup fail.
+		_, _ = driver.registry.LeaveIdle(driver.handle)
 		return false, false
 	}
 	hasWork := drained != 0 || promoted != 0 || driver.p.readyHead != nil || driver.waits.Pending() ||

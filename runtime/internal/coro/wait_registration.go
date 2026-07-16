@@ -291,17 +291,17 @@ func (table *WaitRegistrationTable) Drain() (int, bool) {
 	if table == nil || table.owner != nil {
 		return 0, false
 	}
-	return table.drain(nil, false)
+	return table.drain(nil)
 }
 
 func (table *WaitRegistrationTable) drainFor(p *P) (int, bool) {
 	if table == nil || p == nil || table.owner != p {
 		return 0, false
 	}
-	return table.drain(p, true)
+	return table.drain(p)
 }
 
-func (table *WaitRegistrationTable) drain(owner *P, enforceOwner bool) (int, bool) {
+func (table *WaitRegistrationTable) drain(owner *P) (int, bool) {
 	preemptStore(&table.pending, 0)
 	drained := 0
 	for index := range table.slots {
@@ -313,7 +313,7 @@ func (table *WaitRegistrationTable) drain(owner *P, enforceOwner bool) (int, boo
 			continue
 		}
 		p, token, ticket := slot.p, slot.token, slot.ticket
-		if p == nil || (enforceOwner && p != owner) || token == nil || !validWaitTicket(ticket) || !CompleteWait(token, ticket) {
+		if p == nil || (owner != nil && p != owner) || token == nil || !validWaitTicket(ticket) || !CompleteWait(token, ticket) {
 			// Keep Draining permanently fail-closed: owner storage cannot be
 			// retired after a corrupt or competing raw token transition.
 			return drained, false
