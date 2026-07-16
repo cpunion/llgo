@@ -18,16 +18,17 @@ package coro
 
 import "unsafe"
 
-// The v1 bootstrap ABI is deliberately pointer-size neutral. These structures
-// mirror compiler-emitted LLVM constants; keep uintptr and pointer fields in
-// the same order so the layouts also match wasm32, embedded, and bare-metal
-// targets. Non-null pointers come from the linked program image and therefore
-// must denote readable constants; structural validation can reject alignment,
-// count, and address overflow, but cannot safely probe an arbitrary unmapped
-// address supplied by untrusted native memory.
+// The bootstrap ABI layouts are deliberately pointer-size neutral. These
+// structures mirror compiler-emitted LLVM constants; keep uintptr and pointer
+// fields in the same order so the layouts also match wasm32, embedded, and
+// bare-metal targets. Non-null pointers come from the linked program image and
+// therefore must denote readable constants; structural validation can reject
+// alignment, count, and address overflow, but cannot safely probe an arbitrary
+// unmapped address supplied by untrusted native memory.
 const (
 	ProgramManifestVersionV1   uint32 = 1
 	ProgramBootstrapVersionV1  uint32 = 1
+	ProgramBootstrapVersionV2  uint32 = 2
 	RootPackageAnchorVersionV1 uint32 = 1
 	RootFactoryVersionV1       uint32 = 1
 )
@@ -41,9 +42,31 @@ const (
 	ProgramStepCoroRootV1    ProgramStepKindV1 = 2
 )
 
+// Version two deliberately reuses the version-one step representation and
+// kind numbers. These aliases let startup-driver code remain version-explicit
+// without defining a second physical layout.
+type ProgramStepKindV2 = ProgramStepKindV1
+
+const (
+	ProgramStepDirectPlainV2 ProgramStepKindV2 = ProgramStepDirectPlainV1
+	ProgramStepCoroRootV2    ProgramStepKindV2 = ProgramStepCoroRootV1
+)
+
 const (
 	ProgramStepFlagInitV1 uint32 = 1 << iota
 	ProgramStepFlagMainV1
+)
+
+// Version-two roles describe the complete heterogeneous startup sequence.
+// Their bit values are scoped by ProgramBootstrapVersionV2 and therefore may
+// overlap the version-one roles. Every table entry must contain exactly the
+// role at its canonical position.
+const (
+	ProgramStepFlagInternalRuntimeInitV2 uint32 = 1 << iota
+	ProgramStepFlagCompilerABIInitV2
+	ProgramStepFlagPublicRuntimeInitV2
+	ProgramStepFlagMainPackageInitV2
+	ProgramStepFlagMainV2
 )
 
 // ProgramManifestV1 is the runtime view of
@@ -81,6 +104,12 @@ type ProgramStepV1 struct {
 	Target unsafe.Pointer
 	Aux    uintptr
 }
+
+// ProgramBootstrapV2 and ProgramStepV2 reuse the pointer-size-neutral v1
+// physical layouts. ProgramBootstrapV2 is distinguished by Version == 2 and
+// by its exact five-role step program.
+type ProgramBootstrapV2 = ProgramBootstrapV1
+type ProgramStepV2 = ProgramStepV1
 
 // RootPackageAnchorV1 mirrors the package registry emitted by cl.
 type RootPackageAnchorV1 struct {
@@ -188,6 +217,31 @@ const (
 	programArrayAddressV1
 )
 
+// checkedProgramSpanV1 performs a full-width uintptr multiplication without
+// division. Division-by-zero guards in compiler-owned runtime validation would
+// otherwise introduce an async panic helper into the synchronous process-entry
+// ABI, even though checkedProgramArrayV1 rejects a zero element size first.
+func checkedProgramSpanV1(count, size uintptr) (uintptr, bool) {
+	const mask32 uint64 = 1<<32 - 1
+	x := uint64(count)
+	y := uint64(size)
+	x0 := x & mask32
+	x1 := x >> 32
+	y0 := y & mask32
+	y1 := y >> 32
+	w0 := x0 * y0
+	t := x1*y0 + w0>>32
+	w1 := t & mask32
+	w2 := t >> 32
+	w1 += x0 * y1
+	hi := x1*y1 + w2 + w1>>32
+	lo := x * y
+	if hi != 0 || lo > uint64(^uintptr(0)) {
+		return 0, false
+	}
+	return uintptr(lo), true
+}
+
 func checkedProgramArrayV1(base unsafe.Pointer, count, size, align uintptr) programArrayStateV1 {
 	if count == 0 {
 		if base != nil {
@@ -200,10 +254,13 @@ func checkedProgramArrayV1(base unsafe.Pointer, count, size, align uintptr) prog
 	}
 	address := uintptr(base)
 	if align == 0 || align&(align-1) != 0 || address&(align-1) != 0 ||
-		size == 0 || count > ^uintptr(0)/size {
+		size == 0 {
 		return programArrayAddressV1
 	}
-	span := count * size
+	span, ok := checkedProgramSpanV1(count, size)
+	if !ok {
+		return programArrayAddressV1
+	}
 	if address > ^uintptr(0)-(span-1) {
 		return programArrayAddressV1
 	}
@@ -527,5 +584,305 @@ func ResolveProgramStepV1(program ProgramViewV1, index uintptr) (ResolvedProgram
 		return program.main, ProgramValidationOKV1
 	default:
 		return ResolvedProgramStepV1{}, ProgramValidationStepIndexV1
+	}
+}
+
+// ProgramValidationCodeV2 is the allocation-free result of validating the
+// version-two heterogeneous startup table. It is deliberately independent of
+// ProgramValidationCodeV1 even where both ABIs reject the same physical field.
+type ProgramValidationCodeV2 uint32
+
+const (
+	ProgramValidationOKV2 ProgramValidationCodeV2 = iota
+	ProgramValidationNilManifestV2
+	ProgramValidationManifestAddressV2
+	ProgramValidationManifestVersionV2
+	ProgramValidationManifestFlagsV2
+	ProgramValidationPackageCountPointerV2
+	ProgramValidationPackageTableAddressV2
+	ProgramValidationNilBootstrapV2
+	ProgramValidationBootstrapAddressV2
+	ProgramValidationBootstrapVersionV2
+	ProgramValidationBootstrapFlagsV2
+	ProgramValidationBootstrapHashV2
+	ProgramValidationStepCountV2
+	ProgramValidationStepCountPointerV2
+	ProgramValidationStepTableAddressV2
+	ProgramValidationBootstrapFactoryV2
+	ProgramValidationNilPackageAnchorV2
+	ProgramValidationPackageAnchorAddressV2
+	ProgramValidationDuplicatePackageAnchorV2
+	ProgramValidationPackageAnchorVersionV2
+	ProgramValidationPackageAnchorFlagsV2
+	ProgramValidationEmptyPackageAnchorV2
+	ProgramValidationDescriptorCountPointerV2
+	ProgramValidationDescriptorTableAddressV2
+	ProgramValidationNilRootDescriptorV2
+	ProgramValidationRootDescriptorAddressV2
+	ProgramValidationDuplicateRootDescriptorV2
+	ProgramValidationRootDescriptorVersionV2
+	ProgramValidationRootDescriptorFlagsV2
+	ProgramValidationRootDescriptorFactoryV2
+	ProgramValidationRootStartupLayoutV2
+	ProgramValidationRootResultLayoutV2
+	ProgramValidationStepRoleV2
+	ProgramValidationStepKindV2
+	ProgramValidationStepTargetV2
+	ProgramValidationStepAuxV2
+	ProgramValidationStepAnchorV2
+	ProgramValidationStepDescriptorIndexV2
+	ProgramValidationStepPayloadV2
+	ProgramValidationInvalidViewV2
+	ProgramValidationStepIndexV2
+	ProgramValidationBootstrapFactoryIdentityV2
+)
+
+// ResolvedProgramStepV2 is one validated heterogeneous startup action. Exactly
+// one representation is populated: Plain for DirectPlain, or Descriptor and
+// Factory for CoroRoot. Resolving a step never invokes either target.
+type ResolvedProgramStepV2 struct {
+	Kind       ProgramStepKindV2
+	Flags      uint32
+	Plain      unsafe.Pointer
+	Descriptor *RootFactoryDescriptorV1
+	Factory    unsafe.Pointer
+}
+
+const validatedProgramMagicV2 uint32 = 0x42535432 // "BST2"
+
+// ProgramViewV2 is an immutable, allocation-free snapshot of the five startup
+// actions. Its contents are private so only successful validation can produce
+// a resolvable value.
+type ProgramViewV2 struct {
+	magic               uint32
+	factory             unsafe.Pointer
+	internalRuntimeInit ResolvedProgramStepV2
+	compilerABIInit     ResolvedProgramStepV2
+	publicRuntimeInit   ResolvedProgramStepV2
+	mainPackageInit     ResolvedProgramStepV2
+	main                ResolvedProgramStepV2
+}
+
+const programStepCountV2 uintptr = 5
+
+// programCatalogValidationV2 translates validation of the shared v1 physical
+// package/descriptor catalog into the independent v2 result namespace.
+func programCatalogValidationV2(code ProgramValidationCodeV1) ProgramValidationCodeV2 {
+	switch code {
+	case ProgramValidationOKV1:
+		return ProgramValidationOKV2
+	case ProgramValidationNilPackageAnchorV1:
+		return ProgramValidationNilPackageAnchorV2
+	case ProgramValidationPackageAnchorAddressV1:
+		return ProgramValidationPackageAnchorAddressV2
+	case ProgramValidationDuplicatePackageAnchorV1:
+		return ProgramValidationDuplicatePackageAnchorV2
+	case ProgramValidationPackageAnchorVersionV1:
+		return ProgramValidationPackageAnchorVersionV2
+	case ProgramValidationPackageAnchorFlagsV1:
+		return ProgramValidationPackageAnchorFlagsV2
+	case ProgramValidationEmptyPackageAnchorV1:
+		return ProgramValidationEmptyPackageAnchorV2
+	case ProgramValidationDescriptorCountPointerV1:
+		return ProgramValidationDescriptorCountPointerV2
+	case ProgramValidationDescriptorTableAddressV1:
+		return ProgramValidationDescriptorTableAddressV2
+	case ProgramValidationNilRootDescriptorV1:
+		return ProgramValidationNilRootDescriptorV2
+	case ProgramValidationRootDescriptorAddressV1:
+		return ProgramValidationRootDescriptorAddressV2
+	case ProgramValidationDuplicateRootDescriptorV1:
+		return ProgramValidationDuplicateRootDescriptorV2
+	case ProgramValidationRootDescriptorVersionV1:
+		return ProgramValidationRootDescriptorVersionV2
+	case ProgramValidationRootDescriptorFlagsV1:
+		return ProgramValidationRootDescriptorFlagsV2
+	case ProgramValidationRootDescriptorFactoryV1:
+		return ProgramValidationRootDescriptorFactoryV2
+	case ProgramValidationRootStartupLayoutV1:
+		return ProgramValidationRootStartupLayoutV2
+	case ProgramValidationRootResultLayoutV1:
+		return ProgramValidationRootResultLayoutV2
+	default:
+		// validateProgramCatalogV1 can only return the cases above. Keep this
+		// fail closed if that implementation gains a new result.
+		return ProgramValidationPackageTableAddressV2
+	}
+}
+
+func resolveValidatedProgramStepV2(
+	manifest *ProgramManifestV1, step *ProgramStepV1, expectedRole uint32,
+) (ResolvedProgramStepV2, ProgramValidationCodeV2) {
+	if step.Flags != expectedRole {
+		return ResolvedProgramStepV2{}, ProgramValidationStepRoleV2
+	}
+	if step.Target == nil {
+		return ResolvedProgramStepV2{}, ProgramValidationStepTargetV2
+	}
+	switch ProgramStepKindV2(step.Kind) {
+	case ProgramStepDirectPlainV2:
+		if step.Aux != 0 {
+			return ResolvedProgramStepV2{}, ProgramValidationStepAuxV2
+		}
+		return ResolvedProgramStepV2{
+			Kind:  ProgramStepDirectPlainV2,
+			Flags: step.Flags,
+			Plain: step.Target,
+		}, ProgramValidationOKV2
+	case ProgramStepCoroRootV2:
+		anchor := findProgramPackageV1(manifest, step.Target)
+		if anchor == nil {
+			return ResolvedProgramStepV2{}, ProgramValidationStepAnchorV2
+		}
+		if step.Aux >= anchor.Count {
+			return ResolvedProgramStepV2{}, ProgramValidationStepDescriptorIndexV2
+		}
+		descriptor := rootDescriptorAtV1(anchor, step.Aux)
+		if descriptor.StartupSize != 0 || descriptor.StartupAlign != 1 ||
+			descriptor.ResultSize != 0 || descriptor.ResultAlign != 1 {
+			return ResolvedProgramStepV2{}, ProgramValidationStepPayloadV2
+		}
+		return ResolvedProgramStepV2{
+			Kind:       ProgramStepCoroRootV2,
+			Flags:      step.Flags,
+			Descriptor: descriptor,
+			Factory:    descriptor.Factory,
+		}, ProgramValidationOKV2
+	default:
+		return ResolvedProgramStepV2{}, ProgramValidationStepKindV2
+	}
+}
+
+// ValidateRunnableProgramV2 validates the shared manifest and package catalog,
+// then the exact five-role heterogeneous startup program. It binds the table to
+// expectedFactory by pointer identity and snapshots every resolved action.
+// Validation performs no allocation and never invokes a target or factory.
+func ValidateRunnableProgramV2(
+	manifest *ProgramManifestV1, expectedFactory unsafe.Pointer,
+) (ProgramViewV2, ProgramValidationCodeV2) {
+	if manifest == nil {
+		return ProgramViewV2{}, ProgramValidationNilManifestV2
+	}
+	if !checkedProgramObjectV1(
+		unsafe.Pointer(manifest), unsafe.Sizeof(ProgramManifestV1{}), unsafe.Alignof(ProgramManifestV1{}),
+	) {
+		return ProgramViewV2{}, ProgramValidationManifestAddressV2
+	}
+	if manifest.Version != ProgramManifestVersionV1 {
+		return ProgramViewV2{}, ProgramValidationManifestVersionV2
+	}
+	if manifest.Flags != 0 {
+		return ProgramViewV2{}, ProgramValidationManifestFlagsV2
+	}
+	switch checkedProgramArrayV1(
+		manifest.Packages,
+		manifest.PackageCount,
+		unsafe.Sizeof(unsafe.Pointer(nil)),
+		unsafe.Alignof(unsafe.Pointer(nil)),
+	) {
+	case programArrayCountPointerV1:
+		return ProgramViewV2{}, ProgramValidationPackageCountPointerV2
+	case programArrayAddressV1:
+		return ProgramViewV2{}, ProgramValidationPackageTableAddressV2
+	}
+	if manifest.Bootstrap == nil {
+		return ProgramViewV2{}, ProgramValidationNilBootstrapV2
+	}
+	if !checkedProgramObjectV1(
+		manifest.Bootstrap, unsafe.Sizeof(ProgramBootstrapV1{}), unsafe.Alignof(ProgramBootstrapV1{}),
+	) {
+		return ProgramViewV2{}, ProgramValidationBootstrapAddressV2
+	}
+	bootstrap := (*ProgramBootstrapV1)(manifest.Bootstrap)
+	if bootstrap.Version != ProgramBootstrapVersionV2 {
+		return ProgramViewV2{}, ProgramValidationBootstrapVersionV2
+	}
+	if bootstrap.Flags != 0 {
+		return ProgramViewV2{}, ProgramValidationBootstrapFlagsV2
+	}
+	if bootstrap.HashLo != manifest.HashLo || bootstrap.HashHi != manifest.HashHi {
+		return ProgramViewV2{}, ProgramValidationBootstrapHashV2
+	}
+	if bootstrap.StepCount != programStepCountV2 {
+		return ProgramViewV2{}, ProgramValidationStepCountV2
+	}
+	switch checkedProgramArrayV1(
+		bootstrap.Steps,
+		bootstrap.StepCount,
+		unsafe.Sizeof(ProgramStepV1{}),
+		unsafe.Alignof(ProgramStepV1{}),
+	) {
+	case programArrayCountPointerV1:
+		return ProgramViewV2{}, ProgramValidationStepCountPointerV2
+	case programArrayAddressV1:
+		return ProgramViewV2{}, ProgramValidationStepTableAddressV2
+	}
+	if catalogCode := programCatalogValidationV2(validateProgramCatalogV1(manifest)); catalogCode != ProgramValidationOKV2 {
+		return ProgramViewV2{}, catalogCode
+	}
+	if bootstrap.Factory == nil {
+		return ProgramViewV2{}, ProgramValidationBootstrapFactoryV2
+	}
+	if expectedFactory == nil || bootstrap.Factory != expectedFactory {
+		return ProgramViewV2{}, ProgramValidationBootstrapFactoryIdentityV2
+	}
+
+	program := ProgramViewV2{
+		magic:   validatedProgramMagicV2,
+		factory: bootstrap.Factory,
+	}
+	var code ProgramValidationCodeV2
+	program.internalRuntimeInit, code = resolveValidatedProgramStepV2(
+		manifest, programStepAtV1(bootstrap.Steps, 0), ProgramStepFlagInternalRuntimeInitV2,
+	)
+	if code != ProgramValidationOKV2 {
+		return ProgramViewV2{}, code
+	}
+	program.compilerABIInit, code = resolveValidatedProgramStepV2(
+		manifest, programStepAtV1(bootstrap.Steps, 1), ProgramStepFlagCompilerABIInitV2,
+	)
+	if code != ProgramValidationOKV2 {
+		return ProgramViewV2{}, code
+	}
+	program.publicRuntimeInit, code = resolveValidatedProgramStepV2(
+		manifest, programStepAtV1(bootstrap.Steps, 2), ProgramStepFlagPublicRuntimeInitV2,
+	)
+	if code != ProgramValidationOKV2 {
+		return ProgramViewV2{}, code
+	}
+	program.mainPackageInit, code = resolveValidatedProgramStepV2(
+		manifest, programStepAtV1(bootstrap.Steps, 3), ProgramStepFlagMainPackageInitV2,
+	)
+	if code != ProgramValidationOKV2 {
+		return ProgramViewV2{}, code
+	}
+	program.main, code = resolveValidatedProgramStepV2(
+		manifest, programStepAtV1(bootstrap.Steps, 4), ProgramStepFlagMainV2,
+	)
+	if code != ProgramValidationOKV2 {
+		return ProgramViewV2{}, code
+	}
+	return program, ProgramValidationOKV2
+}
+
+// ResolveProgramStepV2 returns one action from an opaque validated view. It
+// never calls the plain target or coroutine factory.
+func ResolveProgramStepV2(program ProgramViewV2, index uintptr) (ResolvedProgramStepV2, ProgramValidationCodeV2) {
+	if program.magic != validatedProgramMagicV2 {
+		return ResolvedProgramStepV2{}, ProgramValidationInvalidViewV2
+	}
+	switch index {
+	case 0:
+		return program.internalRuntimeInit, ProgramValidationOKV2
+	case 1:
+		return program.compilerABIInit, ProgramValidationOKV2
+	case 2:
+		return program.publicRuntimeInit, ProgramValidationOKV2
+	case 3:
+		return program.mainPackageInit, ProgramValidationOKV2
+	case 4:
+		return program.main, ProgramValidationOKV2
+	default:
+		return ResolvedProgramStepV2{}, ProgramValidationStepIndexV2
 	}
 }

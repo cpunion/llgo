@@ -43,6 +43,14 @@ const (
 	SuspendNone SuspendReason = iota
 	SuspendCall
 	SuspendFrameComplete
+	// SuspendYield returns the active stackless frame to the ready queue. It is
+	// shared by explicit yields and compiler-inserted preemption polls: neither
+	// path changes the frame chain or transfers ownership of the LLVM handle.
+	SuspendYield
+	// SuspendPark returns the active frame to the scheduler until an exact
+	// versioned WaitTicket is completed. The platform event source owns only
+	// the ticket; it never resumes an LLVM handle or mutates scheduler queues.
+	SuspendPark
 )
 
 // FrameState values deliberately match the lifecycle field emitted by cl.
@@ -66,12 +74,16 @@ const (
 	pendingNone pendingKind = iota
 	pendingAwait
 	pendingComplete
+	pendingYield
+	pendingPark
 )
 
 type pendingTransition struct {
 	kind   pendingKind
 	from   *Frame
 	target *Frame
+	wait   *WaitToken
+	ticket WaitTicket
 }
 
 // Frame is scheduler-owned metadata. It lives at the beginning of the same
@@ -261,18 +273,65 @@ func PrepareComplete(g *G, handle unsafe.Pointer, header *HeaderV1) bool {
 	return true
 }
 
+// PrepareYield records that the active frame reached a cooperative or
+// compiler-inserted preemption suspend point. The frame and its opaque LLVM
+// handle remain owned by g; Resumed commits the transition only after the
+// direct llvm.coro.resume wrapper has returned to the scheduler.
+func PrepareYield(g *G, handle unsafe.Pointer, header *HeaderV1) bool {
+	if !ValidG(g) || handle == nil || header == nil || g.pending.kind != pendingNone {
+		return false
+	}
+	frame := findFrame(g, handle)
+	if frame == nil || frame != g.active || frame.header != header || frame.state != FrameActive ||
+		header.SuspendReason != uint16(SuspendYield) ||
+		header.Lifecycle != uint16(FrameSuspended) {
+		return false
+	}
+	g.pending = pendingTransition{kind: pendingYield, from: frame}
+	return true
+}
+
+// PreparePark records an exact external/platform completion wait. The token
+// must be armed before the operation is submitted, so completion may safely
+// race before, during, or after this call without losing a wakeup. As with all
+// coroutine hooks, the transition is committed only after llvm.coro.resume
+// returns to Resumed on the scheduler stack.
+func PreparePark(g *G, handle unsafe.Pointer, header *HeaderV1, token *WaitToken, ticket WaitTicket) bool {
+	if !ValidG(g) || handle == nil || header == nil || g.pending.kind != pendingNone ||
+		g.waitToken != nil || g.waitTicket != 0 || g.waiting || g.nextWait != nil {
+		return false
+	}
+	frame := findFrame(g, handle)
+	if frame == nil || frame != g.active || frame.header != header || frame.state != FrameActive ||
+		header.SuspendReason != uint16(SuspendPark) ||
+		header.Lifecycle != uint16(FrameSuspended) {
+		return false
+	}
+	// Claim only after every scheduler-owned field has been validated. Once the
+	// CAS succeeds, assigning the pending transition cannot fail, so a rejected
+	// PreparePark never strands a claimed token.
+	if !claimWait(token, ticket) {
+		return false
+	}
+	g.pending = pendingTransition{kind: pendingPark, from: frame, wait: token, ticket: ticket}
+	return true
+}
+
 func unlinkFrame(g *G, target *Frame) bool {
 	if g == nil || target == nil {
 		return false
 	}
-	link := &g.frames
-	for *link != nil {
-		if *link == target {
-			*link = target.next
+	if g.frames == target {
+		g.frames = target.next
+		target.next = nil
+		return true
+	}
+	for previous := g.frames; previous != nil; previous = previous.next {
+		if previous.next == target {
+			previous.next = target.next
 			target.next = nil
 			return true
 		}
-		link = &(*link).next
 	}
 	return false
 }

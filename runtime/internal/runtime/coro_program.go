@@ -20,6 +20,7 @@ import (
 	"unsafe"
 
 	"github.com/goplus/llgo/runtime/internal/coro"
+	"github.com/goplus/llgo/runtime/internal/coroalloc"
 )
 
 type coroProgramLifecycleV1 uint8
@@ -32,70 +33,74 @@ const (
 	coroProgramFailedV1
 )
 
-// coroProgramV1 is the allocation-free, single-start scheduler state used by
+// The coroutine program globals form the allocation-free, single-start state used by
 // the process entry coroutine. Keeping G and P in static storage avoids a
-// pthread, TLS, or event-library dependency for scheduler state. The LLVM
-// coroutine frame is still allocated through the target's AllocRoot backend;
-// native currently uses BDWGC or C malloc, while allocator-independent
-// wasm/embedded/bare-metal profiles require their planned linear-memory or
-// static/slab backend.
+// pthread, TLS, or event-library dependency for scheduler state. LLVM frames
+// use the explicitly bootstrapped, statically selected coroalloc backend:
+// native GC builds use BDWGC uncollectable ranges, nogc/wasm profiles use C
+// malloc/free, and bare-metal builds use tinygogc.
 //
 // The entry path is intentionally single-use. No failure path resets this
 // object: exported ABI failures terminate the process, and successful startup
 // transitions from unused to complete or permanently failed.
-type coroProgramStateV1 struct {
-	lifecycle coroProgramLifecycleV1
-	manifest  *coro.ProgramManifestV1
-	factory   unsafe.Pointer
-	g         coroG
-	p         coroP
-}
-
-var coroProgramV1 coroProgramStateV1
+// Keep phase-0 fields as separate globals. Besides making ownership explicit,
+// this avoids a synthetic nil-dereference helper on field access through the
+// address of one aggregate global; the process-entry ABI must remain a plain,
+// non-suspending call island.
+var (
+	coroProgramLifecycleV1State coroProgramLifecycleV1
+	coroProgramManifestV1State  *coro.ProgramManifestV1
+	coroProgramFactoryV1State   unsafe.Pointer
+	coroProgramGV1State         coroG
+	coroProgramPV1State         coroP
+)
 
 func coroProgramBeginV1(manifest, expectedFactory unsafe.Pointer) (unsafe.Pointer, bool) {
-	state := &coroProgramV1
-	if state.lifecycle != coroProgramUnusedV1 {
-		state.lifecycle = coroProgramFailedV1
+	if coroProgramLifecycleV1State != coroProgramUnusedV1 {
+		coroProgramLifecycleV1State = coroProgramFailedV1
+		return nil, false
+	}
+	if !coroalloc.Ready() {
+		coroProgramLifecycleV1State = coroProgramFailedV1
 		return nil, false
 	}
 	if manifest == nil {
-		state.lifecycle = coroProgramFailedV1
+		coroProgramLifecycleV1State = coroProgramFailedV1
 		return nil, false
 	}
-	if _, code := coro.ValidateRunnableDirectProgramV1(
-		(*coro.ProgramManifestV1)(manifest), expectedFactory,
-	); code != coro.ProgramValidationOKV1 {
-		state.lifecycle = coroProgramFailedV1
+	programManifest := (*coro.ProgramManifestV1)(manifest)
+	_, v2Code := coro.ValidateRunnableProgramV2(programManifest, expectedFactory)
+	_, v1Code := coro.ValidateRunnableDirectProgramV1(programManifest, expectedFactory)
+	if v2Code != coro.ProgramValidationOKV2 && v1Code != coro.ProgramValidationOKV1 {
+		coroProgramLifecycleV1State = coroProgramFailedV1
 		return nil, false
 	}
-	if !coroInitG(&state.g) {
-		state.lifecycle = coroProgramFailedV1
+	if !coroInitG(&coroProgramGV1State) {
+		coroProgramLifecycleV1State = coroProgramFailedV1
 		return nil, false
 	}
-	state.manifest = (*coro.ProgramManifestV1)(manifest)
-	state.factory = expectedFactory
-	state.lifecycle = coroProgramBegunV1
-	return unsafe.Pointer(&state.g), true
+	coroProgramManifestV1State = (*coro.ProgramManifestV1)(manifest)
+	coroProgramFactoryV1State = expectedFactory
+	coroProgramLifecycleV1State = coroProgramBegunV1
+	return unsafe.Pointer(&coroProgramGV1State), true
 }
 
 func coroProgramRunV1(gPointer, handle unsafe.Pointer) bool {
-	state := &coroProgramV1
-	if state.lifecycle != coroProgramBegunV1 || state.manifest == nil || state.factory == nil ||
-		gPointer != unsafe.Pointer(&state.g) || handle == nil {
-		state.lifecycle = coroProgramFailedV1
+	if coroProgramLifecycleV1State != coroProgramBegunV1 || coroProgramManifestV1State == nil || coroProgramFactoryV1State == nil ||
+		gPointer != unsafe.Pointer(&coroProgramGV1State) || handle == nil {
+		coroProgramLifecycleV1State = coroProgramFailedV1
 		return false
 	}
-	if !coroAdoptRoot(&state.g, handle) || !coroEnqueue(&state.p, &state.g) {
-		state.lifecycle = coroProgramFailedV1
+	if !coroAdoptRoot(&coroProgramGV1State, handle) || !coroEnqueue(&coroProgramPV1State, &coroProgramGV1State) {
+		coroProgramLifecycleV1State = coroProgramFailedV1
 		return false
 	}
-	state.lifecycle = coroProgramRunningV1
-	if !coroRun(&state.p) || !coro.TerminalG(&state.p, &state.g) {
-		state.lifecycle = coroProgramFailedV1
+	coroProgramLifecycleV1State = coroProgramRunningV1
+	if !coroRun(&coroProgramPV1State) || !coro.TerminalG(&coroProgramPV1State, &coroProgramGV1State) {
+		coroProgramLifecycleV1State = coroProgramFailedV1
 		return false
 	}
-	state.lifecycle = coroProgramCompleteV1
+	coroProgramLifecycleV1State = coroProgramCompleteV1
 	return true
 }
 

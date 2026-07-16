@@ -21,10 +21,16 @@ import (
 
 	c "github.com/goplus/llgo/runtime/internal/clite"
 	"github.com/goplus/llgo/runtime/internal/coro"
+	"github.com/goplus/llgo/runtime/internal/coroalloc"
 )
 
 func coroRuntimeAbort(message string) {
-	fatal(message)
+	// Scheduler/runtime ABI failures happen on the executor stack and cannot
+	// enter the general formatting or panic machinery: either path may require a
+	// managed coroutine continuation. Keep this terminal path bounded and
+	// allocation-free; detailed diagnostics belong in the caller-side verifier.
+	_ = message
+	c.Fputs(c.Str("fatal error: invalid coroutine runtime state\n"), c.Stderr)
 	c.Exit(2)
 }
 
@@ -34,13 +40,15 @@ func __llgo_coro_frame_alloc_v1(g unsafe.Pointer, size, align uintptr, descripto
 	if !ok {
 		coroRuntimeAbort("invalid coroutine frame allocation size")
 	}
-	raw := AllocRoot(total)
+	raw := coroalloc.AllocFrame(total)
 	if raw == nil {
 		coroRuntimeAbort("coroutine frame allocation failed")
 	}
 	storage, ok := coro.RegisterFrame((*coro.G)(g), raw, total, size, align, descriptor)
 	if !ok {
-		FreeRoot(raw)
+		if !coroalloc.FreeFrame(raw) {
+			coroRuntimeAbort("coroutine frame allocation rollback failed")
+		}
 		coroRuntimeAbort("invalid coroutine frame allocation")
 	}
 	return storage
@@ -60,6 +68,31 @@ func __llgo_coro_await_prepare_v1(g, parent, child unsafe.Pointer) {
 	}
 }
 
+//export __llgo_coro_preempt_poll_v1
+func __llgo_coro_preempt_poll_v1(g unsafe.Pointer) bool {
+	return coro.PollPreempt((*coro.G)(g))
+}
+
+//export __llgo_coro_yield_prepare_v1
+func __llgo_coro_yield_prepare_v1(g, handle, header unsafe.Pointer) {
+	if !coro.PrepareYield((*coro.G)(g), handle, (*coro.HeaderV1)(header)) {
+		coroRuntimeAbort("invalid coroutine yield handoff")
+	}
+}
+
+//export __llgo_coro_park_prepare_v1
+func __llgo_coro_park_prepare_v1(g, handle, header, token unsafe.Pointer, ticket uint32) {
+	if !coro.PreparePark(
+		(*coro.G)(g),
+		handle,
+		(*coro.HeaderV1)(header),
+		(*coro.WaitToken)(token),
+		coro.WaitTicket(ticket),
+	) {
+		coroRuntimeAbort("invalid coroutine park handoff")
+	}
+}
+
 //export __llgo_coro_complete_prepare_v1
 func __llgo_coro_complete_prepare_v1(g, handle, header unsafe.Pointer) {
 	if !coro.PrepareComplete((*coro.G)(g), handle, (*coro.HeaderV1)(header)) {
@@ -74,5 +107,7 @@ func __llgo_coro_frame_free_v1(g, storage unsafe.Pointer, size, align uintptr, d
 		coroRuntimeAbort("invalid coroutine frame destruction")
 	}
 	coro.Zero(raw, total)
-	FreeRoot(raw)
+	if !coroalloc.FreeFrame(raw) {
+		coroRuntimeAbort("coroutine frame release failed")
+	}
 }

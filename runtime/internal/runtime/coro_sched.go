@@ -66,7 +66,9 @@ func coroRun(p *coroP) bool {
 			return false
 		}
 		if g == nil {
-			return true
+			// Platform event-loop integration is the next adapter layer. Never
+			// confuse an empty ready queue with completion while parked Gs remain.
+			return !coro.HasWaiting(p)
 		}
 		if !coroRunG(p, g) {
 			return false
@@ -78,9 +80,11 @@ func coroRun(p *coroP) bool {
 // wrappers stay direct calls so scheduler internals do not introduce function
 // values, interface dispatch, or unnecessary dual sync/async versions.
 func coroRunActions(p *coroP, g *coroG, action coro.Action) bool {
-	for action.Kind != coro.ActionComplete {
+	for {
 		var ok bool
 		switch action.Kind {
+		case coro.ActionComplete, coro.ActionYield, coro.ActionPark:
+			return true
 		case coro.ActionCheckResume, coro.ActionCheckDestroy:
 			action, ok = coro.Checked(p, g, action, coroHandleDone(action.Handle))
 		case coro.ActionResume:
@@ -96,5 +100,4 @@ func coroRunActions(p *coroP, g *coroG, action coro.Action) bool {
 			return false
 		}
 	}
-	return true
 }
