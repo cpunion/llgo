@@ -180,6 +180,13 @@ func coroRunActions(p *coroP, g *coroG, action coro.Action) bool {
 				return false
 			}
 			return false
+		case coro.ActionTerminalExecutorClose:
+			// The core has already sealed the bound executor and hidden the
+			// destroyed LLVM handle. A target adapter must now strong-unregister
+			// and join its complete ingress shim, then resume from stable driver
+			// state through ConfirmTerminalExecutorClose. No production target
+			// owns that retained-doorbell backend yet, so fail closed here.
+			return false
 		default:
 			return false
 		}

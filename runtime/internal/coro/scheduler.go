@@ -157,11 +157,18 @@ const (
 	// ActionPanicComplete exposes a stable task-local PanicRecord to the runtime
 	// adapter after every frame has been destroyed deepest-to-root.
 	ActionPanicComplete
+	// ActionTerminalExecutorClose transfers control to the target adapter after
+	// the last LLVM handle has already been destroyed and the bound executor gate
+	// has been sealed. It carries no handle: the adapter must strong-join the
+	// target ingress shim and call ConfirmTerminalExecutorClose, which performs
+	// the final source scan, unbinds the executor, and commits terminal state
+	// without exposing the destroyed handle again.
+	ActionTerminalExecutorClose
 )
 
 // Action is one deterministic scheduler operation or control event. Handle is
 // opaque to the core and is non-nil only for a handle operation; terminal
-// ActionComplete and ActionYield events carry no handle.
+// control events carry no handle.
 type Action struct {
 	Kind   ActionKind
 	Handle unsafe.Pointer
@@ -169,7 +176,7 @@ type Action struct {
 
 func setAction(p *P, kind ActionKind, handle unsafe.Pointer) (Action, bool) {
 	if p == nil || kind == ActionInvalid || kind == ActionComplete || kind == ActionYield || kind == ActionPark ||
-		kind == ActionCancelComplete || kind == ActionPanicComplete || handle == nil {
+		kind == ActionCancelComplete || kind == ActionPanicComplete || kind == ActionTerminalExecutorClose || handle == nil {
 		return Action{}, false
 	}
 	action := Action{Kind: kind, Handle: handle}
@@ -736,7 +743,7 @@ func Destroyed(p *P, g *G, action Action) (Action, bool) {
 		// a late asynchronous producer request one exact total order.
 		if p.readyHead == nil && p.waitHead == nil &&
 			(preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil) {
-			return Action{}, false
+			return beginTerminalExecutorClose(p, g, action)
 		}
 		if p.readyHead == nil && p.waitHead == nil &&
 			!preemptCompareAndSwap(&p.schedule, scheduleIdle, scheduleDisabled) {
