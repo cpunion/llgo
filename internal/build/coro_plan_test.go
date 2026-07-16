@@ -306,15 +306,16 @@ func inlineIntrinsic(string) *byte
 		coroEmission:    emission,
 		coroSSAEmission: ssaEmission,
 	}
-	roots, requiredPlain, directPlain, err := requiredCoroProgramRuntimePlan(ctx)
+	roots, requiredPlain, directPlain, closedDynamic, err := requiredCoroProgramRuntimePlan(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rootsAgain, plainAgain, directAgain, err := requiredCoroProgramRuntimePlan(ctx)
+	rootsAgain, plainAgain, directAgain, closedAgain, err := requiredCoroProgramRuntimePlan(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(rootsAgain, roots) || !reflect.DeepEqual(plainAgain, requiredPlain) || !reflect.DeepEqual(directAgain, directPlain) {
+	if !reflect.DeepEqual(rootsAgain, roots) || !reflect.DeepEqual(plainAgain, requiredPlain) ||
+		!reflect.DeepEqual(directAgain, directPlain) || !reflect.DeepEqual(closedAgain, closedDynamic) {
 		t.Fatal("required runtime roots/plain closure is not deterministic")
 	}
 	if len(directPlain) != 0 {
@@ -366,6 +367,7 @@ func inlineIntrinsic(string) *byte
 		requiredRoots:          roots,
 		requiredPlain:          requiredPlain,
 		requiredDirectPlain:    directPlain,
+		requiredClosedDynamic:  closedDynamic,
 	}
 	functionIDs := emission.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
@@ -488,7 +490,7 @@ func inlineIntrinsic(string) *byte
 		coroEmission:    emission,
 		coroSSAEmission: ssaEmission,
 	}
-	_, _, _, err = requiredCoroProgramRuntimePlan(ctx)
+	_, _, _, _, err = requiredCoroProgramRuntimePlan(ctx)
 	if err == nil || !strings.Contains(err.Error(), "requires exactly one compile-time string constant argument") {
 		t.Fatalf("invalid runtime-closure intrinsic error = %v; want exact call-site rejection", err)
 	}
@@ -813,6 +815,7 @@ type requiredCoroRuntimeFixture struct {
 	input         CoroPlanInput
 	requiredPlain map[*ssa.Function]struct{}
 	directPlain   []requiredCoroDirectPlainCallArgument
+	closedDynamic map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate
 	functionIDs   coro.FunctionIDConfig
 }
 
@@ -847,12 +850,13 @@ func __llgo_coro_frame_free_v1() {}
 		t.Fatal(err)
 	}
 	ctx := &context{
-		prog:            prog,
-		buildConf:       &Config{EnableCoroProgramBootstrapRun: true},
-		coroEmission:    emission,
-		coroSSAEmission: ssaEmission,
+		prog:                        prog,
+		buildConf:                   &Config{EnableCoroProgramBootstrapRun: true},
+		coroEmission:                emission,
+		coroSSAEmission:             ssaEmission,
+		coroTLSDestructorFixturePkg: llssa.PkgRuntime,
 	}
-	roots, requiredPlain, directPlain, err := requiredCoroProgramRuntimePlan(ctx)
+	roots, requiredPlain, directPlain, closedDynamic, err := requiredCoroProgramRuntimePlan(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -864,16 +868,18 @@ func __llgo_coro_frame_free_v1() {}
 		pkg: ssaPkg,
 		ctx: ctx,
 		input: CoroPlanInput{
-			Program:             ssaPkg.Prog,
-			EmissionUniverse:    ssaEmission,
-			resolveFunction:     emission.Resolve,
-			functionBackground:  emission.FunctionBackground,
-			requiredRoots:       roots,
-			requiredPlain:       requiredPlain,
-			requiredDirectPlain: directPlain,
+			Program:               ssaPkg.Prog,
+			EmissionUniverse:      ssaEmission,
+			resolveFunction:       emission.Resolve,
+			functionBackground:    emission.FunctionBackground,
+			requiredRoots:         roots,
+			requiredPlain:         requiredPlain,
+			requiredDirectPlain:   directPlain,
+			requiredClosedDynamic: closedDynamic,
 		},
 		requiredPlain: requiredPlain,
 		directPlain:   directPlain,
+		closedDynamic: closedDynamic,
 		functionIDs:   functionIDs,
 	}
 }
