@@ -655,7 +655,7 @@ func assertCoroResultSlotFields(t *testing.T, name, body, uintptrIR string) {
 	resultType := regexp.QuoteMeta("{ ptr, " + uintptrIR + " }")
 	for index, storeType := range []string{"ptr", uintptrIR} {
 		field := regexp.MustCompile(
-			`(?m)^\s*(%[-a-zA-Z$._0-9]+) = getelementptr inbounds ` + resultType +
+			`(?m)^\s*(%[-a-zA-Z$._0-9]+) = getelementptr inbounds(?: (?:nuw|nusw))* ` + resultType +
 				`, ptr [^,]+, i32 0, i32 ` + strconv.Itoa(index) + `\s*$`,
 		).FindStringSubmatch(body)
 		if len(field) != 2 || !regexp.MustCompile(`(?m)^\s*store `+storeType+` [^,]+, ptr `+regexp.QuoteMeta(field[1])+`(?:,|\s*$)`).MatchString(body) {

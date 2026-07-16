@@ -114,7 +114,6 @@ func TestCoroPureSSAPhysicalABIV1NativeAndWasm(t *testing.T) {
 			aggregateIR := requireCoroPhysicalFunction(t, module, "foo.Aggregate").String()
 			for _, required := range []string{
 				"alloca %foo.Pair",
-				"getelementptr inbounds %foo.Pair",
 				"foo.Child$coro",
 				"call void @" + coroAwaitPrepareHookV1,
 				"call i1 @" + coroPreemptPollHookV1,
@@ -122,6 +121,9 @@ func TestCoroPureSSAPhysicalABIV1NativeAndWasm(t *testing.T) {
 				if !strings.Contains(rootIR, required) {
 					t.Fatalf("Root pure SSA coroutine lacks %q:\n%s", required, rootIR)
 				}
+			}
+			if !regexp.MustCompile(`getelementptr inbounds(?: (?:nuw|nusw))* %foo\.Pair`).MatchString(rootIR) {
+				t.Fatalf("Root pure SSA coroutine lacks typed Pair field addressing:\n%s", rootIR)
 			}
 			for _, forbidden := range []string{
 				"CheckIndexRange", "AssertNilDeref", "AllocU", "AllocZ", "NewSlice2", "NewSlice3Bounds", "NewItab",
