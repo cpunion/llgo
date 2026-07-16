@@ -128,6 +128,8 @@ type coroBodyContext struct {
 	terminalState   uint32
 	needsPreempt    bool
 	instructions    int
+	frameRetention  *coroFrameRetentionProof
+	frameRetaining  bool
 }
 
 func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *types.Signature) coroPhysicalABI {
@@ -584,8 +586,15 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 		p.coroSourceBlocks = oldSourceBlocks
 	}()
 
+	audit, err := newCoroPhysicalPureSSAAudit(p.emissionUniverse, fn, p.compilation.CoroFrameRetentionABI)
+	if err != nil {
+		panic(fmt.Errorf("rebuild coroutine frame-retention proof: %w", err))
+	}
+	frameRetention := audit.currentFrameRetentionProof()
+
 	b.SetBlock(p.fn.Block(0))
 	physical := p.beginCoroBody(b, abi)
+	physical.frameRetention = frameRetention
 	p.currentCoro = physical
 
 	// Create source blocks after BeginCoro's canonical ramp/suspend blocks so
@@ -635,6 +644,9 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	for _, phi := range p.phis {
 		phi()
 	}
+	if physical.frameRetaining {
+		panic("coroutine frame-retention critical span escaped its certified source block")
+	}
 
 	b.SetBlock(physical.completion)
 	physical.complete(b)
@@ -656,6 +668,12 @@ func validateCoroPhysicalABIWithUniverse(fn *ssa.Function, plan coro.FunctionPla
 }
 
 func validateCoroPhysicalABIWithUniverseCapabilities(fn *ssa.Function, plan coro.FunctionPlan, whole *coro.SSAPlan, universe *EmissionUniverse, childAwait, programRun, staticSpawn, explicitPanic bool) error {
+	return validateCoroPhysicalABIWithUniverseCapabilitiesAndFrameRetention(
+		fn, plan, whole, universe, childAwait, programRun, staticSpawn, explicitPanic, "",
+	)
+}
+
+func validateCoroPhysicalABIWithUniverseCapabilitiesAndFrameRetention(fn *ssa.Function, plan coro.FunctionPlan, whole *coro.SSAPlan, universe *EmissionUniverse, childAwait, programRun, staticSpawn, explicitPanic bool, frameRetentionABI string) error {
 	if !childAwait {
 		if explicitPanic {
 			return fmt.Errorf("coroutine physical ABI: function %q: explicit-status panic requires PhysicalABIV1 child-await lowering", plan.ID)
@@ -728,7 +746,7 @@ func validateCoroPhysicalABIWithUniverseCapabilities(fn *ssa.Function, plan coro
 	if err := validateCoroLeafPhysicalSignature(plan, fn.Signature); err != nil {
 		return err
 	}
-	pureSSA, err := newCoroPhysicalPureSSAAudit(universe, fn)
+	pureSSA, err := newCoroPhysicalPureSSAAudit(universe, fn, frameRetentionABI)
 	if err != nil {
 		return fail("cannot audit pure SSA lowering: %v", err)
 	}

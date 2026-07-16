@@ -54,3 +54,54 @@ func Present() {}
 		t.Fatal("active internal/build runtime input did not enable the complete runtime ABI contract")
 	}
 }
+
+func TestValidatedCoroFrameRetentionABIRejectsIncompleteOrUnvalidatedRuntime(t *testing.T) {
+	ssaPkg, files := buildCoroPlanTestPackage(t, "example.com/incomplete-runtime", `package incomplete
+func Present() {}
+`, nil)
+	prog := llssa.NewProgram(nil)
+	t.Cleanup(prog.Dispose)
+	incomplete, err := cl.PrepareEmissionUniverse(prog, nil, []cl.EmissionPackage{{
+		SSA: ssaPkg, Files: files, Identity: "example.com/incomplete-runtime",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if incomplete.CompleteRuntimeABI() {
+		t.Fatal("report universe unexpectedly claims a complete runtime ABI")
+	}
+	conf := &Config{
+		Goos: "linux", Goarch: "amd64",
+		EnableCoroEntryResolution:     true,
+		EnableCoroProgramBootstrapRun: true,
+	}
+	if !nativeCoroTimerRuntimeABI(conf) {
+		t.Fatal("test configuration does not select the native timer target ABI")
+	}
+	if got := validatedCoroFrameRetentionABI(&context{buildConf: conf, coroEmission: incomplete}, true); got != "" {
+		t.Fatalf("incomplete runtime selected frame-retention ABI %q", got)
+	}
+
+	completePkg, completeFiles := buildCoroPlanTestPackage(t, llssa.PkgRuntime, `package runtime
+func Present() {}
+`, nil)
+	completeProg := llssa.NewProgram(nil)
+	t.Cleanup(completeProg.Dispose)
+	cl.ParsePkgSyntax(completeProg, completePkg.Pkg, completeFiles)
+	completeCtx := &context{
+		prog: completeProg, progSSA: completePkg.Prog, buildConf: conf,
+	}
+	completeAPkg := &aPackage{
+		Package: &packages.Package{ID: llssa.PkgRuntime, PkgPath: llssa.PkgRuntime, Types: completePkg.Pkg, Syntax: completeFiles},
+		SSA:     completePkg,
+	}
+	if err := prepareCoroEmissionUniverse(completeCtx, []*aPackage{completeAPkg}); err != nil {
+		t.Fatal(err)
+	}
+	if !completeCtx.coroEmission.CompleteRuntimeABI() {
+		t.Fatal("active runtime universe is incomplete")
+	}
+	if got := validatedCoroFrameRetentionABI(completeCtx, false); got != "" {
+		t.Fatalf("unvalidated runtime roots selected frame-retention ABI %q", got)
+	}
+}

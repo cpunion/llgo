@@ -415,6 +415,12 @@ func __llgo_coro_wait_retire_completed_v1(unsafe.Pointer, uint32, uint32, uint32
 func __llgo_coro_native_post_wait_v1(uint32, uint32, uint32, uint32) uint32 { return 0 }
 func __llgo_coro_timer_prepare_after_v1(unsafe.Pointer, int64, *uint32, *uint32, *uint32) bool { return false }
 func __llgo_coro_timer_retire_completed_v1(unsafe.Pointer, uint32, uint32, uint32) bool { return false }
+func __llgo_coro_timer_prepare_after_or_abort_v1(token unsafe.Pointer, delay int64, ticket, slot, generation *uint32) {
+	__llgo_coro_timer_prepare_after_v1(token, delay, ticket, slot, generation)
+}
+func __llgo_coro_timer_retire_completed_or_abort_v1(token unsafe.Pointer, ticket, slot, generation uint32) {
+	__llgo_coro_timer_retire_completed_v1(token, ticket, slot, generation)
+}
 func __llgo_coro_frame_allocator_bootstrap_v1() {}
 func __llgo_coro_frame_alloc_v1() {}
 func __llgo_coro_frame_publish_v1() {}
@@ -531,7 +537,7 @@ func atomicExchange(*uint32, uint32) uint32
 			t.Fatalf("required root %d = %+v, want %s/%s", index, root, wantRoots[index], wantDemand)
 		}
 	}
-	for _, name := range []string{coroNativePostWaitSymbolV1, coroTimerPrepareAfterSymbolV1, coroTimerRetireCompletedSymbolV1} {
+	for _, name := range []string{coroNativePostWaitSymbolV1, coroTimerPrepareAfterOrAbortSymbolV1, coroTimerRetireCompletedOrAbortSymbolV1} {
 		if _, ok := requiredPlain[ssaPkg.Func(name)]; ok {
 			t.Fatalf("inactive native timer hook %q entered the required plain island", name)
 		}
@@ -560,8 +566,8 @@ func atomicExchange(*uint32, uint32) uint32
 		coroWaitRollbackSymbolV1,
 		coroWaitRetireCompletedSymbolV1,
 		coroNativePostWaitSymbolV1,
-		coroTimerPrepareAfterSymbolV1,
-		coroTimerRetireCompletedSymbolV1,
+		coroTimerPrepareAfterOrAbortSymbolV1,
+		coroTimerRetireCompletedOrAbortSymbolV1,
 		"__llgo_coro_frame_alloc_v1",
 		"__llgo_coro_frame_publish_v1",
 		"__llgo_coro_await_prepare_v1",
@@ -583,7 +589,13 @@ func atomicExchange(*uint32, uint32) uint32
 			t.Fatalf("native timer root %d = %+v, want %s/%s", index, root, wantTimerRoots[index], wantDemand)
 		}
 	}
-	for _, name := range []string{coroNativePostWaitSymbolV1, coroTimerPrepareAfterSymbolV1, coroTimerRetireCompletedSymbolV1} {
+	for _, name := range []string{
+		coroNativePostWaitSymbolV1,
+		coroTimerPrepareAfterOrAbortSymbolV1,
+		coroTimerRetireCompletedOrAbortSymbolV1,
+		coroTimerPrepareAfterSymbolV1,
+		coroTimerRetireCompletedSymbolV1,
+	} {
 		if _, ok := timerPlain[ssaPkg.Func(name)]; !ok {
 			t.Fatalf("native timer hook %q is absent from the required plain island", name)
 		}
@@ -591,7 +603,7 @@ func atomicExchange(*uint32, uint32) uint32
 	if len(timerDirect) != 0 || len(timerClosed) != 0 {
 		t.Fatalf("native timer roots produced callback proofs: direct=%d dynamic=%d", len(timerDirect), len(timerClosed))
 	}
-	timerPrepareFn := ssaPkg.Func(coroTimerPrepareAfterSymbolV1)
+	timerPrepareFn := ssaPkg.Func(coroTimerPrepareAfterOrAbortSymbolV1)
 	originalTimerPrepareSignature := timerPrepareFn.Signature
 	timerPrepareFn.Signature = types.NewSignatureType(nil, nil, nil,
 		types.NewTuple(
@@ -601,13 +613,13 @@ func atomicExchange(*uint32, uint32) uint32
 			types.NewParam(token.NoPos, nil, "slot", types.NewPointer(types.Typ[types.Uint32])),
 			types.NewParam(token.NoPos, nil, "generation", types.NewPointer(types.Typ[types.Uint32])),
 		),
-		types.NewTuple(types.NewParam(token.NoPos, nil, "ok", types.Typ[types.Bool])), false)
+		types.NewTuple(), false)
 	_, _, _, _, invalidTimerPrepareErr := requiredCoroProgramRuntimePlan(timerCtx)
 	timerPrepareFn.Signature = originalTimerPrepareSignature
-	if invalidTimerPrepareErr == nil || !strings.Contains(invalidTimerPrepareErr.Error(), "timer prepare ABI") {
+	if invalidTimerPrepareErr == nil || !strings.Contains(invalidTimerPrepareErr.Error(), "timer prepare-or-abort ABI") {
 		t.Fatalf("invalid timer prepare ABI error = %v", invalidTimerPrepareErr)
 	}
-	timerRetireFn := ssaPkg.Func(coroTimerRetireCompletedSymbolV1)
+	timerRetireFn := ssaPkg.Func(coroTimerRetireCompletedOrAbortSymbolV1)
 	originalTimerRetireSignature := timerRetireFn.Signature
 	timerRetireFn.Signature = types.NewSignatureType(nil, nil, nil,
 		types.NewTuple(
@@ -616,10 +628,10 @@ func atomicExchange(*uint32, uint32) uint32
 			types.NewParam(token.NoPos, nil, "slot", types.Typ[types.Uint32]),
 			types.NewParam(token.NoPos, nil, "generation", types.Typ[types.Uint32]),
 		),
-		types.NewTuple(types.NewParam(token.NoPos, nil, "ok", types.Typ[types.Bool])), false)
+		types.NewTuple(), false)
 	_, _, _, _, invalidTimerRetireErr := requiredCoroProgramRuntimePlan(timerCtx)
 	timerRetireFn.Signature = originalTimerRetireSignature
-	if invalidTimerRetireErr == nil || !strings.Contains(invalidTimerRetireErr.Error(), "timer owner ABI") {
+	if invalidTimerRetireErr == nil || !strings.Contains(invalidTimerRetireErr.Error(), "timer retire-or-abort ABI") {
 		t.Fatalf("invalid timer retire ABI error = %v", invalidTimerRetireErr)
 	}
 	panicHook := ssaPkg.Func("__llgo_coro_panic_prepare_v1")
@@ -2467,6 +2479,25 @@ func TestCoroEntryResolutionUsesPlanMatchedPackageCache(t *testing.T) {
 	explicitStatusCtx.clCompilation.EnableCoroExplicitStatusPanicABI = false
 	if explicitStatusCtx.canUsePackageCache() {
 		t.Fatal("explicit-status panic capability mismatch unexpectedly permits package cache")
+	}
+	frameRetentionMismatch := newContext(digestA)
+	frameRetentionMismatch.buildConf.EnableCoroPhysicalABI = true
+	frameRetentionMismatch.buildConf.EnableCoroChildAwait = true
+	frameRetentionMismatch.buildConf.EnableCoroProgramBootstrapRun = true
+	frameRetentionMismatch.clCompilation.EnableCoroPhysicalABI = true
+	frameRetentionMismatch.clCompilation.EnableCoroChildAwait = true
+	frameRetentionMismatch.clCompilation.EnableCoroProgramBootstrapRun = true
+	frameRetentionMismatch.coroPlanMetadata.CoroABI = coro.PhysicalABIV1
+	frameRetentionMismatch.coroPlanMetadata.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+	frameRetentionMismatch.coroPlanMetadata.FrameRetentionABI = coro.FrameRetentionTimerABIV1
+	frameRetentionMismatch.clCompilation.CoroABI = coro.PhysicalABIV1
+	frameRetentionMismatch.clCompilation.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+	if frameRetentionMismatch.canUsePackageCache() {
+		t.Fatal("frame-retention ABI identity mismatch unexpectedly permits package cache")
+	}
+	frameRetentionMismatch.clCompilation.CoroFrameRetentionABI = coro.FrameRetentionTimerABIV1
+	if !frameRetentionMismatch.canUsePackageCache() {
+		t.Fatal("matching frame-retention ABI identity unexpectedly disables package cache")
 	}
 	bootstrapMismatch := newContext(digestA)
 	bootstrapMismatch.clCompilation.EnableCoroProgramBootstrapRun = true

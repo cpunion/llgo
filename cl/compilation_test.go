@@ -171,6 +171,23 @@ func TestCompilationCoroABIIdentityValidation(t *testing.T) {
 	if err := programBootstrap.validateCoroABIIdentity(false); err != nil {
 		t.Fatalf("complete program-bootstrap ABI identity: %v", err)
 	}
+	frameRetention := newChildAwait()
+	frameRetention.EnableCoroProgramBootstrapRun = true
+	frameRetention.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+	frameRetention.CoroFrameRetentionABI = CoroFrameRetentionTimerABIV1
+	if err := frameRetention.validateCoroABIIdentity(false); err != nil {
+		t.Fatalf("complete frame-retention ABI identity: %v", err)
+	}
+	withoutFrameBootstrap := *frameRetention
+	withoutFrameBootstrap.EnableCoroProgramBootstrapRun = false
+	if err := withoutFrameBootstrap.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "requires runnable PhysicalABIV1 program-bootstrap lowering") {
+		t.Fatalf("frame-retention bootstrap dependency error = %v", err)
+	}
+	unknownFrameRetention := *frameRetention
+	unknownFrameRetention.CoroFrameRetentionABI += ".unknown"
+	if err := unknownFrameRetention.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "unknown coroutine frame-retention ABI") {
+		t.Fatalf("unknown frame-retention ABI error = %v", err)
+	}
 	closedStaticSpawn := newChildAwait()
 	closedStaticSpawn.EnableCoroProgramBootstrapRun = true
 	closedStaticSpawn.EnableCoroClosedStaticSpawn = true

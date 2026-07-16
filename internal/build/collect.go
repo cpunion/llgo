@@ -122,6 +122,7 @@ func (c *context) collectCommonInputs(m *manifestBuilder) {
 		m.common.CoroSchedulerABI = metadata.SchedulerABI
 		m.common.CoroPanicABI = metadata.PanicABI
 		m.common.CoroFuncRepABI = metadata.FuncRepABI
+		m.common.CoroFrameRetentionABI = metadata.FrameRetentionABI
 		m.common.CoroTargetTriple = metadata.TargetTriple
 		m.common.CoroTargetCPU = metadata.TargetCPU
 		m.common.CoroTargetFeatures = metadata.TargetFeatures
@@ -384,6 +385,7 @@ func (c *context) canUsePackageCache() bool {
 		c.clCompilation.SchedulerABI == metadata.SchedulerABI &&
 		c.clCompilation.PanicABI == metadata.PanicABI &&
 		c.clCompilation.FuncRepABI == metadata.FuncRepABI &&
+		c.clCompilation.CoroFrameRetentionABI == metadata.FrameRetentionABI &&
 		metadata.CoroABI == activeCoroABIVersion(c.buildConf) &&
 		metadata.SchedulerABI == activeCoroSchedulerABIVersion(c.buildConf) &&
 		metadata.PanicABI == activeCoroPanicABIVersion(c.buildConf) &&

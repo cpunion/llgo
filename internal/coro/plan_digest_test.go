@@ -146,6 +146,60 @@ func TestCoroPlanDigestDeterministicCompleteAndDomainSeparated(t *testing.T) {
 	}
 }
 
+func TestCoroPlanDigestFrameRetentionIdentityIsExactAndDomainSeparated(t *testing.T) {
+	prog, pkg := buildCoroTestSSAWithMode(
+		t, "frame_retention_digest.go", planDigestTestSource,
+		ssa.SanityCheckFunctions|ssa.InstantiateGenerics,
+	)
+	root := packageFunction(t, pkg, "root")
+	config := planDigestSSAConfig()
+	config.FunctionIDs.CoroABI = PhysicalABIV1
+	config.FunctionIDs.SchedulerABI = SchedulerProgramBootstrapABIV2
+	plan, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: AsyncDemand}}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := validPlanDigestMetadata()
+	metadata.CoroABI = PhysicalABIV1
+	metadata.SchedulerABI = SchedulerProgramBootstrapABIV2
+
+	withoutRetention, err := plan.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata.FrameRetentionABI = FrameRetentionTimerABIV1
+	withRetention, err := plan.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withRetention == withoutRetention {
+		t.Fatal("frame-retention ABI identity is absent from CoroPlanDigest")
+	}
+	document, err := plan.canonicalPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if document.Metadata.FrameRetentionABI != FrameRetentionTimerABIV1 {
+		t.Fatalf("canonical frame-retention ABI = %q, want %q", document.Metadata.FrameRetentionABI, FrameRetentionTimerABIV1)
+	}
+
+	unknown := metadata
+	unknown.FrameRetentionABI += ".unknown"
+	if _, err := plan.CoroPlanDigest(unknown); err == nil || !strings.Contains(err.Error(), "unknown frame-retention ABI") {
+		t.Fatalf("unknown frame-retention ABI error = %v", err)
+	}
+	wrongPhysical := metadata
+	wrongPhysical.CoroABI = PhysicalABIV0
+	if _, err := plan.CoroPlanDigest(wrongPhysical); err == nil || !strings.Contains(err.Error(), "requires PhysicalABIV1 runnable program-bootstrap metadata") {
+		t.Fatalf("frame retention with wrong physical ABI error = %v", err)
+	}
+	wrongScheduler := metadata
+	wrongScheduler.SchedulerABI = SchedulerChildAwaitABIV0
+	if _, err := plan.CoroPlanDigest(wrongScheduler); err == nil || !strings.Contains(err.Error(), "requires PhysicalABIV1 runnable program-bootstrap metadata") {
+		t.Fatalf("frame retention with wrong scheduler ABI error = %v", err)
+	}
+}
+
 func TestCoroPlanDigestRecordsClosedStaticSpawnConsumerAndOwnerSeed(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "spawn_digest.go", `package coroid
 func worker(value int) { _ = value }
