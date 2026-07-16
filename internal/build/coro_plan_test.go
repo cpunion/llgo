@@ -417,6 +417,7 @@ func __llgo_coro_yield_prepare_v1() {}
 func __llgo_coro_park_prepare_v1() {}
 func __llgo_coro_complete_prepare_v1() {}
 func __llgo_coro_frame_free_v1() {}
+func __llgo_coro_panic_prepare_v1() {}
 func __llgo_coro_spawn_begin_v1() {}
 func __llgo_coro_spawn_commit_v1() {}
 func __llgo_coro_program_main_return_v1() {}
@@ -487,6 +488,37 @@ func atomicExchange(*uint32, uint32) uint32
 		if root.Function == nil || root.Function.Name() != wantRoots[index] || root.Demand != wantDemand {
 			t.Fatalf("required root %d = %+v, want %s/%s", index, root, wantRoots[index], wantDemand)
 		}
+	}
+	panicHook := ssaPkg.Func("__llgo_coro_panic_prepare_v1")
+	if panicHook == nil {
+		t.Fatal("explicit-status panic prepare hook is absent from the runtime fixture")
+	}
+	if _, ok := requiredPlain[panicHook]; ok {
+		t.Fatal("inactive explicit-status panic prepare hook entered the required plain island")
+	}
+	panicCtx := &context{
+		buildConf: &Config{
+			EnableCoroChildAwait:             true,
+			EnableCoroProgramBootstrapRun:    true,
+			EnableCoroExplicitStatusPanicABI: true,
+		},
+		coroEmission:    ctx.coroEmission,
+		coroSSAEmission: ctx.coroSSAEmission,
+	}
+	panicRoots, panicPlain, panicDirect, panicClosed, err := requiredCoroProgramRuntimePlan(panicCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(panicRoots) != len(wantRoots)+1 ||
+		panicRoots[len(panicRoots)-1].Function != panicHook ||
+		panicRoots[len(panicRoots)-1].Demand != coro.SyncDemand {
+		t.Fatalf("explicit-status runtime roots = %+v, want legacy roots plus exact panic prepare/sync", panicRoots)
+	}
+	if _, ok := panicPlain[panicHook]; !ok {
+		t.Fatal("active explicit-status panic prepare hook is absent from the required plain island")
+	}
+	if len(panicDirect) != 0 || len(panicClosed) != 0 {
+		t.Fatalf("explicit-status panic hook produced callback proofs: direct=%d dynamic=%d", len(panicDirect), len(panicClosed))
 	}
 	spawnCtx := &context{
 		buildConf: &Config{
@@ -576,6 +608,24 @@ func atomicExchange(*uint32, uint32) uint32
 	plan, err := analyze(nil)
 	if err != nil {
 		t.Fatal(err)
+	}
+	panicInput := input
+	panicInput.requiredRoots = panicRoots
+	panicInput.requiredPlain = panicPlain
+	panicInput.requiredDirectPlain = panicDirect
+	panicInput.requiredClosedDynamic = panicClosed
+	panicPlan, err := panicInput.Analyze(coro.Roots{{Function: unrelatedLoop, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+		MaxPlainInstructions: -1,
+		FunctionIDs:          functionIDs,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	panicHookPlan, ok := panicPlan.FunctionPlan(panicHook)
+	if !ok || panicHookPlan.Emission != coro.EmitPlain || panicHookPlan.Demand != coro.SyncDemand ||
+		panicHookPlan.FuncRep != coro.DirectPlain || panicHookPlan.Effect.MaySuspend() ||
+		panicHookPlan.Exec.Contains(coro.NeedsPreempt) {
+		t.Fatalf("explicit-status panic prepare hook plan = %+v, want required sync direct-plain", panicHookPlan)
 	}
 	closurePlan, ok := plan.FunctionPlan(closureLoop)
 	if !ok || closurePlan.Exec.Contains(coro.NeedsPreempt) || closurePlan.Effect.MaySuspend() || closurePlan.Emission != coro.EmitPlain {

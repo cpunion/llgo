@@ -1916,6 +1916,13 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			"__llgo_coro_frame_free_v1",
 		)
 	}
+	if ctx.buildConf.EnableCoroExplicitStatusPanicABI {
+		// Physical coroutine bodies reference this hook from compiler-generated
+		// IR, so the source SSA graph has no edge that could retain it. Keep the
+		// exact runtime body as a synchronous direct-plain root only while the
+		// target-wide ExplicitStatus panic identity is selected.
+		names = append(names, "__llgo_coro_panic_prepare_v1")
+	}
 	if ctx.buildConf.EnableCoroClosedStaticSpawn {
 		names = append(names,
 			"__llgo_coro_spawn_begin_v1",
