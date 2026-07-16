@@ -1,5 +1,3 @@
-//go:build !llgo
-
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
  *
@@ -16,11 +14,11 @@
  * limitations under the License.
  */
 
-package runtime
+package corotimer
 
 import "testing"
 
-func TestCoroTimerDeadlineAfterV1(t *testing.T) {
+func TestDeadlineAfter(t *testing.T) {
 	tests := []struct {
 		name  string
 		now   int64
@@ -32,13 +30,13 @@ func TestCoroTimerDeadlineAfterV1(t *testing.T) {
 		{name: "negative-delay-is-due", now: 7, delay: -1, want: 7, ok: true},
 		{name: "zero-delay-is-due", now: 7, want: 7, ok: true},
 		{name: "positive", now: 7, delay: 11, want: 18, ok: true},
-		{name: "exact-maximum", now: coroTimerMaxDeadlineV1 - 1, delay: 1, want: coroTimerMaxDeadlineV1, ok: true},
-		{name: "overflow-saturates", now: coroTimerMaxDeadlineV1 - 1, delay: 2, want: coroTimerMaxDeadlineV1, ok: true},
-		{name: "maximum-now-saturates", now: coroTimerMaxDeadlineV1, delay: coroTimerMaxDeadlineV1, want: coroTimerMaxDeadlineV1, ok: true},
+		{name: "exact-maximum", now: maxDeadline - 1, delay: 1, want: maxDeadline, ok: true},
+		{name: "overflow-saturates", now: maxDeadline - 1, delay: 2, want: maxDeadline, ok: true},
+		{name: "maximum-now-saturates", now: maxDeadline, delay: maxDeadline, want: maxDeadline, ok: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got, ok := coroTimerDeadlineAfterV1(test.now, test.delay)
+			got, ok := DeadlineAfter(test.now, test.delay)
 			if ok != test.ok || got != test.want {
 				t.Fatalf("deadline after (%d, %d) = (%d, %t), want (%d, %t)", test.now, test.delay, got, ok, test.want, test.ok)
 			}

@@ -23,6 +23,7 @@ import (
 
 	"github.com/goplus/llgo/runtime/internal/coro"
 	"github.com/goplus/llgo/runtime/internal/coroclock"
+	"github.com/goplus/llgo/runtime/internal/corotimer"
 )
 
 func validCoroTimerOutputWordsV1(token unsafe.Pointer, ticket, timerSlot, timerGeneration *uint32) bool {
@@ -40,7 +41,7 @@ func coroProgramPrepareTimerAfterV1(token *coro.WaitToken, delay int64) (coro.Wa
 	if !ok {
 		return 0, coro.TimerRegistrationHandle{}, coro.TimerRegistrationPrepareInvalid
 	}
-	deadline, ok := coroTimerDeadlineAfterV1(now, delay)
+	deadline, ok := corotimer.DeadlineAfter(now, delay)
 	if !ok {
 		return 0, coro.TimerRegistrationHandle{}, coro.TimerRegistrationPrepareInvalid
 	}

@@ -14,19 +14,24 @@
  * limitations under the License.
  */
 
-package runtime
+// Package corotimer contains allocation-free timer arithmetic shared by the
+// stackless coroutine runtime adapters. It owns no clock or platform state.
+package corotimer
 
-const coroTimerMaxDeadlineV1 = int64(^uint64(0) >> 1)
+const maxDeadline = int64(^uint64(0) >> 1)
 
-func coroTimerDeadlineAfterV1(now, delay int64) (int64, bool) {
+// DeadlineAfter converts one monotonic sample and a relative delay to an
+// absolute deadline. Non-positive delays are immediately due; positive
+// overflow saturates instead of wrapping into the past.
+func DeadlineAfter(now, delay int64) (int64, bool) {
 	if now < 0 {
 		return 0, false
 	}
 	if delay <= 0 {
 		return now, true
 	}
-	if delay > coroTimerMaxDeadlineV1-now {
-		return coroTimerMaxDeadlineV1, true
+	if delay > maxDeadline-now {
+		return maxDeadline, true
 	}
 	return now + delay, true
 }
