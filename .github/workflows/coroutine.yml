@@ -61,6 +61,7 @@ jobs:
             ./internal/runtime/coro_program.go \
             ./internal/runtime/coro_sched.go \
             ./internal/runtime/coro_executor.go \
+            ./internal/runtime/coro_executor_driver_legacy.go \
             ./internal/runtime/coro_target_test_adapter.go \
             ./internal/runtime/coro_program_test.go \
             -run '^TestCoroProgram' -count=1
@@ -70,9 +71,14 @@ jobs:
             ./internal/runtime/coro_program.go \
             ./internal/runtime/coro_sched.go \
             ./internal/runtime/coro_executor.go \
+            ./internal/runtime/coro_executor_driver_legacy.go \
             ./internal/runtime/coro_target_test_adapter.go \
             ./internal/runtime/coro_program_test.go \
             -run '^TestCoroProgram' -count=1
+          go test \
+            ./internal/runtime/coro_timer_deadline.go \
+            ./internal/runtime/coro_timer_deadline_test.go \
+            -run '^TestCoroTimerDeadlineAfterV1$' -count=1
 
       - name: Link named freestanding WebAssembly targets
         if: matrix.llvm == 19 && matrix.go == '1.24.2'

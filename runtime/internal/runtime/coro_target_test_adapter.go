@@ -94,9 +94,9 @@ func coroTargetPollExecutorCloseV1(handle coro.ExecutorHandle, epoch uint32) cor
 	return coroTargetDispatchCompleteV1
 }
 
-func coroTargetBeginExecutorWaitV1(handle coro.ExecutorHandle, epoch uint32) coroTargetDispatchResultV1 {
+func coroTargetBeginExecutorWaitV1(handle coro.ExecutorHandle, epoch uint32, deadline int64, hasDeadline bool) coroTargetDispatchResultV1 {
 	state := &coroProgramTestTargetV1State
-	if !state.started || state.handle != handle || state.waitEpoch != 0 || epoch == 0 {
+	if !state.started || state.handle != handle || state.waitEpoch != 0 || epoch == 0 || deadline != 0 || hasDeadline {
 		return coroTargetDispatchInvalidV1
 	}
 	state.waitBeginDepth++

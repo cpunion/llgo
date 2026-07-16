@@ -50,9 +50,11 @@ const (
 )
 
 type coroRunResultV1 struct {
-	stop   coroRunStopV1
-	g      *coroG
-	action coro.Action
+	stop        coroRunStopV1
+	g           *coroG
+	action      coro.Action
+	deadline    int64
+	hasDeadline bool
 }
 
 type coroActionStopV1 uint8
@@ -86,7 +88,7 @@ func coroRunG(p *coroP, g *coroG) (coroActionStopV1, coro.Action) {
 
 func coroRun(p *coroP, main *coroG, driver *coro.ExecutorDriver) coroRunResultV1 {
 	for {
-		g, ok := coro.NextRunnable(p)
+		g, ok := coroProgramNextRunnableV1(p, driver)
 		if !ok {
 			return coroRunResultV1{}
 		}
@@ -94,12 +96,16 @@ func coroRun(p *coroP, main *coroG, driver *coro.ExecutorDriver) coroRunResultV1
 			if !coro.HasWaiting(p) {
 				return coroRunResultV1{}
 			}
-			sleep, prepared := coro.PrepareExecutorSleep(driver)
+			sleep, deadline, hasDeadline, prepared := coroProgramPrepareExecutorSleepV1(driver)
 			if !prepared {
 				return coroRunResultV1{}
 			}
 			if sleep {
-				return coroRunResultV1{stop: coroRunExecutorSleepV1}
+				return coroRunResultV1{
+					stop:        coroRunExecutorSleepV1,
+					deadline:    deadline,
+					hasDeadline: hasDeadline,
+				}
 			}
 			continue
 		}

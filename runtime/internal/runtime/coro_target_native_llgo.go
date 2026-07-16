@@ -50,13 +50,13 @@ func coroTargetExecutorStartV1(handle coro.ExecutorHandle) bool {
 	return true
 }
 
-func coroTargetBeginExecutorWaitV1(handle coro.ExecutorHandle, epoch uint32) coroTargetDispatchResultV1 {
+func coroTargetBeginExecutorWaitV1(handle coro.ExecutorHandle, epoch uint32, deadline int64, hasDeadline bool) coroTargetDispatchResultV1 {
 	state := &coroNativeTargetV1State
 	if !state.started || state.handle != handle || epoch == 0 || state.waitEpoch != 0 {
 		return coroTargetDispatchInvalidV1
 	}
 	state.waitEpoch = epoch
-	if !state.doorbell.Wait() {
+	if !coroTargetWaitExecutorV1(&state.doorbell, deadline, hasDeadline) {
 		return coroTargetDispatchInvalidV1
 	}
 	state.waitEpoch = 0

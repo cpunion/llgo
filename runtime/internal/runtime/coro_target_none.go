@@ -39,7 +39,7 @@ func coroTargetPollExecutorCloseV1(coro.ExecutorHandle, uint32) coroTargetDispat
 	return coroTargetDispatchInvalidV1
 }
 
-func coroTargetBeginExecutorWaitV1(coro.ExecutorHandle, uint32) coroTargetDispatchResultV1 {
+func coroTargetBeginExecutorWaitV1(coro.ExecutorHandle, uint32, int64, bool) coroTargetDispatchResultV1 {
 	return coroTargetDispatchInvalidV1
 }
 

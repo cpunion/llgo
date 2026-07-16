@@ -217,7 +217,7 @@ func coroProgramConfirmCommandJoinV1() coroProgramDriveStatusV1 {
 
 func coroProgramBeginCommandCloseV1() bool {
 	for {
-		if _, _, ok := coro.PollExecutor(&coroProgramExecutorDriverV1State); !ok {
+		if !coroProgramPollExecutorV1(&coroProgramExecutorDriverV1State) {
 			return false
 		}
 		if coro.BeginExecutorClose(&coroProgramExecutorDriverV1State) {
@@ -278,7 +278,7 @@ func coroProgramFinishMainV1() coroProgramDriveStatusV1 {
 	}
 }
 
-func coroProgramBeginExecutorWaitV1() coroProgramDriveStatusV1 {
+func coroProgramBeginExecutorWaitV1(deadline int64, hasDeadline bool) coroProgramDriveStatusV1 {
 	if !coroProgramExecutorBoundV1State {
 		return coroProgramFailV1()
 	}
@@ -286,11 +286,11 @@ func coroProgramBeginExecutorWaitV1() coroProgramDriveStatusV1 {
 	if !ok {
 		return coroProgramFailV1()
 	}
-	switch coroTargetBeginExecutorWaitV1(coroProgramExecutorHandleV1State, epoch) {
+	switch coroTargetBeginExecutorWaitV1(coroProgramExecutorHandleV1State, epoch, deadline, hasDeadline) {
 	case coroTargetDispatchPendingV1:
 		return coroProgramDriveSuspendedV1
 	case coroTargetDispatchCompleteV1:
-		if _, _, ok := coro.WakeExecutor(&coroProgramExecutorDriverV1State); !ok ||
+		if !coroProgramWakeExecutorV1(&coroProgramExecutorDriverV1State) ||
 			!coroProgramClearContinuationV1(coroProgramContinuationExecutorWakeV1) {
 			return coroProgramFailV1()
 		}
@@ -319,7 +319,7 @@ func coroProgramDriveStepV1() coroProgramDriveStatusV1 {
 		if result.g != nil || result.action != (coro.Action{}) {
 			return coroProgramFailV1()
 		}
-		return coroProgramBeginExecutorWaitV1()
+		return coroProgramBeginExecutorWaitV1(result.deadline, result.hasDeadline)
 	case coroRunTerminalExecutorCloseV1:
 		driver, valid := coro.TerminalExecutorCloseDriver(
 			&coroProgramPV1State,
@@ -388,7 +388,7 @@ func coroProgramContinueOwnedV1(epoch uint32) coroProgramDriveStatusV1 {
 	}
 	switch kind {
 	case coroProgramContinuationExecutorWakeV1:
-		if _, _, ok := coro.WakeExecutor(&coroProgramExecutorDriverV1State); !ok ||
+		if !coroProgramWakeExecutorV1(&coroProgramExecutorDriverV1State) ||
 			!coroProgramClearContinuationV1(kind) {
 			return coroProgramFailV1()
 		}
