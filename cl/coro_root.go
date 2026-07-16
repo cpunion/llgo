@@ -17,10 +17,13 @@
 package cl
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"go/token"
 	"go/types"
+	"sort"
+	"strings"
 
 	"github.com/goplus/llgo/internal/coro"
 	llssa "github.com/goplus/llgo/ssa"
@@ -30,7 +33,15 @@ import (
 const (
 	coroRootFactoryPrefix           = "__llgo_coro_root_factory_v1."
 	coroRootFactoryDescriptorPrefix = "__llgo_coro_root_factory_descriptor_v1."
+	coroRootPackageAnchorPrefix     = "__llgo_coro_root_package_v1."
+	coroRootPackageAnchorVersionV1  = uint32(1)
 )
+
+type coroRootFactoryRegistration struct {
+	functionID coro.FunctionID
+	abiHash    [16]byte
+	descriptor llssa.Expr
+}
 
 func coroRootFactorySignature() *types.Signature {
 	params := types.NewTuple(
@@ -123,11 +134,113 @@ func (p *context) emitCoroRootFactory(pkg llssa.Package, entry plannedFunctionSy
 		b.EndBuild()
 		b.Dispose()
 	}
-	pkg.NewCoroRootFactoryDescriptor(coroRootFactoryDescriptorPrefix+hash, llssa.CoroRootFactoryDescriptorOptions{
+	descriptor := pkg.NewCoroRootFactoryDescriptor(coroRootFactoryDescriptorPrefix+hash, llssa.CoroRootFactoryDescriptorOptions{
 		Version: coroPhysicalABIVersionV1,
 		ABIHash: abi.hash,
 		Factory: factory.Expr,
 		Startup: startupType,
 		Result:  resultType,
 	})
+	p.coroRootFactories = append(p.coroRootFactories, coroRootFactoryRegistration{
+		functionID: root.ID,
+		abiHash:    abi.hash,
+		descriptor: descriptor,
+	})
+}
+
+// emitCoroRootPackageAnchor emits the package's one linker-visible root
+// registry after all source and deferred init compilation has finished. Root
+// factories may be discovered in frontend emission order; the registry ABI is
+// always canonical FunctionID order.
+func (p *context) emitCoroRootPackageAnchor(pkg llssa.Package) {
+	if len(p.coroRootFactories) == 0 {
+		return
+	}
+	roots := append([]coroRootFactoryRegistration(nil), p.coroRootFactories...)
+	sort.Slice(roots, func(i, j int) bool {
+		return roots[i].functionID < roots[j].functionID
+	})
+	descriptors := make([]llssa.Expr, len(roots))
+	for i, root := range roots {
+		if i != 0 && roots[i-1].functionID == root.functionID {
+			panic(fmt.Sprintf("coroutine root package anchor: duplicate canonical root %q", root.functionID))
+		}
+		descriptors[i] = root.descriptor
+	}
+	hash := p.coroRootPackageAnchorHash(pkg, roots)
+	pkg.NewCoroRootPackageAnchor(
+		coroRootPackageAnchorPrefix+hex.EncodeToString(hash[:]),
+		llssa.CoroRootPackageAnchorOptions{
+			Version:     coroRootPackageAnchorVersionV1,
+			ABIHash:     hash,
+			Descriptors: descriptors,
+		},
+	)
+}
+
+// coroRootPackageAnchorHash is the single source for both the anchor symbol
+// suffix and its embedded ABI hash. Normal builds use the canonical whole-plan
+// digest supplied by the driver. Direct cl tests intentionally may omit that
+// digest, so a domain-separated fallback covers the ordered roots and complete
+// effective target layout without introducing pointer or emission-order state.
+func (p *context) coroRootPackageAnchorHash(pkg llssa.Package, roots []coroRootFactoryRegistration) [16]byte {
+	coroABI := coro.PhysicalABIV1
+	schedulerABI := coro.SchedulerChildAwaitABIV0
+	panicABI := coro.PanicLegacyABIV0
+	funcRepABI := coro.FuncRepABIV0
+	planDigest := ""
+	if p.compilation != nil {
+		planDigest = p.compilation.CoroPlanDigest
+		if p.compilation.CoroABI != "" {
+			coroABI = p.compilation.CoroABI
+		}
+		if p.compilation.SchedulerABI != "" {
+			schedulerABI = p.compilation.SchedulerABI
+		}
+		if p.compilation.PanicABI != "" {
+			panicABI = p.compilation.PanicABI
+		}
+		if p.compilation.FuncRepABI != "" {
+			funcRepABI = p.compilation.FuncRepABI
+		}
+	}
+	target := p.prog.TargetSpec()
+	rootIdentities := make([]string, len(roots))
+	for i, root := range roots {
+		rootIdentities[i] = string(root.functionID) + "\x00" + hex.EncodeToString(root.abiHash[:])
+	}
+	if planDigest == "" {
+		fallback := strings.Join(rootIdentities, "\x00")
+		sum := sha256.Sum256([]byte(fmt.Sprintf(
+			"llgo-coro-root-package-plan-fallback-v1\x00roots=%s\x00triple=%s\x00cpu=%s\x00features=%s\x00target-abi=%s\x00data-layout=%s\x00ptr=%d",
+			fallback,
+			target.Triple,
+			target.CPU,
+			target.Features,
+			target.TargetABI,
+			p.prog.DataLayout(),
+			p.prog.PointerSize(),
+		)))
+		planDigest = hex.EncodeToString(sum[:])
+	}
+	key := fmt.Sprintf(
+		"llgo-coro-root-package-v1\x00package=%s\x00plan=%s\x00coro=%s\x00scheduler=%s\x00panic=%s\x00func-rep=%s\x00triple=%s\x00cpu=%s\x00features=%s\x00target-abi=%s\x00data-layout=%s\x00ptr=%d\x00roots=%s",
+		pkg.Path(),
+		planDigest,
+		coroABI,
+		schedulerABI,
+		panicABI,
+		funcRepABI,
+		target.Triple,
+		target.CPU,
+		target.Features,
+		target.TargetABI,
+		p.prog.DataLayout(),
+		p.prog.PointerSize(),
+		strings.Join(rootIdentities, "\x00"),
+	)
+	sum := sha256.Sum256([]byte(key))
+	var hash [16]byte
+	copy(hash[:], sum[:len(hash)])
+	return hash
 }

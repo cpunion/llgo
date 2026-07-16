@@ -185,6 +185,7 @@ type context struct {
 	pcLineSeq            uint64
 	sourceParamBase      int // hidden physical parameters before source params
 	currentCoro          *coroBodyContext
+	coroRootFactories    []coroRootFactoryRegistration
 
 	patches          Patches
 	blkInfos         []blocks.Info
@@ -2088,6 +2089,7 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 		ctx.initAfter = nil
 		fn()
 	}
+	ctx.emitCoroRootPackageAnchor(ret)
 	ret.MaterializePreserveSyms()
 	externs = ctx.cgoSymbols
 	return
