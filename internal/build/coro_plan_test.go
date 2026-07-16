@@ -488,13 +488,16 @@ func atomicExchange(*uint32, uint32) uint32
 			t.Fatalf("required root %d = %+v, want %s/%s", index, root, wantRoots[index], wantDemand)
 		}
 	}
-	spawnCtx := *ctx
-	spawnCtx.buildConf = &Config{
-		EnableCoroChildAwait:          true,
-		EnableCoroProgramBootstrapRun: true,
-		EnableCoroClosedStaticSpawn:   true,
+	spawnCtx := &context{
+		buildConf: &Config{
+			EnableCoroChildAwait:          true,
+			EnableCoroProgramBootstrapRun: true,
+			EnableCoroClosedStaticSpawn:   true,
+		},
+		coroEmission:    ctx.coroEmission,
+		coroSSAEmission: ctx.coroSSAEmission,
 	}
-	spawnRoots, spawnPlain, _, _, err := requiredCoroProgramRuntimePlan(&spawnCtx)
+	spawnRoots, spawnPlain, _, _, err := requiredCoroProgramRuntimePlan(spawnCtx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1788,14 +1791,17 @@ func TestActiveCoroABIVersions(t *testing.T) {
 		config    *Config
 		coroABI   string
 		scheduler string
+		panicABI  string
 		funcRep   string
 	}{
-		{"entry resolution", &Config{}, coro.EntryResolutionABIV0, coro.SchedulerNoneABIV0, coro.FuncRepABIV0},
-		{"physical leaf", &Config{EnableCoroPhysicalABI: true}, coro.PhysicalABIV0, coro.SchedulerNoneABIV0, coro.FuncRepABIV0},
-		{"plain dispatch", &Config{EnableCoroPlainDispatch: true}, coro.EntryResolutionABIV0, coro.SchedulerNoneABIV0, coro.FuncRepABIV1},
-		{"child await", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true}, coro.PhysicalABIV1, coro.SchedulerChildAwaitABIV0, coro.FuncRepABIV0},
-		{"closed static spawn", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true, EnableCoroClosedStaticSpawn: true, EnableCoroProgramBootstrapRun: true}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0, coro.FuncRepABIV0},
-		{"program bootstrap runtime with plain dispatch", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true, EnableCoroPlainDispatch: true, EnableCoroProgramBootstrapRun: true}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapABIV2, coro.FuncRepABIV1},
+		{"nil defaults", nil, coro.EntryResolutionABIV0, coro.SchedulerNoneABIV0, coro.PanicLegacyABIV0, coro.FuncRepABIV0},
+		{"entry resolution", &Config{}, coro.EntryResolutionABIV0, coro.SchedulerNoneABIV0, coro.PanicLegacyABIV0, coro.FuncRepABIV0},
+		{"physical leaf", &Config{EnableCoroPhysicalABI: true}, coro.PhysicalABIV0, coro.SchedulerNoneABIV0, coro.PanicLegacyABIV0, coro.FuncRepABIV0},
+		{"explicit status panic", &Config{EnableCoroExplicitStatusPanicABI: true}, coro.EntryResolutionABIV0, coro.SchedulerNoneABIV0, coro.PanicExplicitStatusABIV0, coro.FuncRepABIV0},
+		{"plain dispatch", &Config{EnableCoroPlainDispatch: true}, coro.EntryResolutionABIV0, coro.SchedulerNoneABIV0, coro.PanicLegacyABIV0, coro.FuncRepABIV1},
+		{"child await", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true}, coro.PhysicalABIV1, coro.SchedulerChildAwaitABIV0, coro.PanicLegacyABIV0, coro.FuncRepABIV0},
+		{"closed static spawn", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true, EnableCoroClosedStaticSpawn: true, EnableCoroProgramBootstrapRun: true}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0, coro.PanicLegacyABIV0, coro.FuncRepABIV0},
+		{"program bootstrap runtime with plain dispatch", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true, EnableCoroPlainDispatch: true, EnableCoroProgramBootstrapRun: true}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapABIV2, coro.PanicLegacyABIV0, coro.FuncRepABIV1},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -1804,6 +1810,9 @@ func TestActiveCoroABIVersions(t *testing.T) {
 			}
 			if got := activeCoroSchedulerABIVersion(test.config); got != test.scheduler {
 				t.Fatalf("scheduler ABI = %q, want %q", got, test.scheduler)
+			}
+			if got := activeCoroPanicABIVersion(test.config); got != test.panicABI {
+				t.Fatalf("panic ABI = %q, want %q", got, test.panicABI)
 			}
 			if got := activeCoroFuncRepABIVersion(test.config); got != test.funcRep {
 				t.Fatalf("function representation ABI = %q, want %q", got, test.funcRep)
