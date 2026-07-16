@@ -62,6 +62,17 @@ func nativePipeWrite(fd int32, buffer *byte, size uintptr) (int, int32) {
 	return written, 0
 }
 
+// nativePipePollForWait is a host-test seam. Coroutine runtime targets take
+// the direct implementation in pipe_llgo.go and carry no mutable hook.
+var nativePipePollForWaitTestHook func(fd int32, timeoutMS int32) (int, int16, int32)
+
+func nativePipePollForWait(fd int32, timeoutMS int32) (int, int16, int32) {
+	if hook := nativePipePollForWaitTestHook; hook != nil {
+		return hook(fd, timeoutMS)
+	}
+	return nativePipePoll(fd, timeoutMS)
+}
+
 func nativePipeReadSet(fd int32) (syscall.FdSet, bool) {
 	var readSet syscall.FdSet
 	bits := reflect.ValueOf(&readSet).Elem().FieldByName("Bits")

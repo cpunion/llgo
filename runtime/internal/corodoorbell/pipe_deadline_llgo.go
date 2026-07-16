@@ -34,19 +34,12 @@ func (pipe *Pipe) WaitDeadline(deadline int64) (woke, reached, ok bool) {
 		if !clockOK {
 			return false, false, false
 		}
-		timeoutMS, due, timeoutOK := deadlinePollTimeout(now, deadline)
-		if !timeoutOK {
-			return false, false, false
-		}
-		if due {
-			return false, true, true
-		}
-		woke, waitOK := pipe.WaitBounded(timeoutMS)
+		woke, reached, waitOK := pipe.waitDeadlinePass(now, deadline)
 		if !waitOK {
 			return false, false, false
 		}
-		if woke {
-			return true, false, true
+		if woke || reached {
+			return woke, reached, true
 		}
 	}
 }

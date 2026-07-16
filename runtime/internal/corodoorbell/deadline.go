@@ -41,3 +41,21 @@ func deadlinePollTimeout(now, deadline int64) (timeoutMS int32, reached, ok bool
 	}
 	return int32(milliseconds), false, true
 }
+
+// waitDeadlinePass performs one retained deadline-wait pass for a clock sample
+// supplied by the owner. A timeout and EINTR both return a successful non-wake;
+// the caller must take a fresh monotonic sample before the next pass.
+func (pipe *Pipe) waitDeadlinePass(now, deadline int64) (woke, reached, ok bool) {
+	timeoutMS, due, timeoutOK := deadlinePollTimeout(now, deadline)
+	if !timeoutOK {
+		return false, false, false
+	}
+	if due {
+		return false, true, true
+	}
+	woke, waitOK := pipe.waitBoundedInterruptible(timeoutMS)
+	if !waitOK {
+		return false, false, false
+	}
+	return woke, false, true
+}

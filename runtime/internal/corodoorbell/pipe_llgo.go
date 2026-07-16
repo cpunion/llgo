@@ -92,6 +92,10 @@ func nativePipeWrite(fd int32, buffer *byte, size uintptr) (int, int32) {
 	return result, 0
 }
 
+func nativePipePollForWait(fd int32, timeoutMS int32) (int, int16, int32) {
+	return nativePipePoll(fd, timeoutMS)
+}
+
 func nativePipeClose(fd int32) bool {
 	return cliteos.Close(c.Int(fd)) == 0
 }
