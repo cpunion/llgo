@@ -152,16 +152,29 @@ func TestCoroProgramManifestExtractsRootArchiveMember(t *testing.T) {
 	callback.MakeBody(1).Return()
 	callbackPkg.MaterializePreserveSyms()
 	callbackObject := emit("callback", callbackPkg)
+	nativeCallbackPkg := prog.NewPackage("native-callback", "example.com/native-callback")
+	nativeCallback := nativeCallbackPkg.NewFunc(coroNativePostWaitSymbolV1, newSignature(
+		[]types.Type{
+			types.Typ[types.Uint32], types.Typ[types.Uint32],
+			types.Typ[types.Uint32], types.Typ[types.Uint32],
+		},
+		[]types.Type{types.Typ[types.Uint32]},
+	), llssa.InC)
+	nativeCallback.MakeBody(1).Return(prog.IntVal(0, prog.Uint32()))
+	nativeCallbackPkg.MaterializePreserveSyms()
+	nativeCallbackObject := emit("native-callback", nativeCallbackPkg)
 	callbackArchive := filepath.Join(temp, "libcallback.a")
-	if output, err := exec.Command(ar, "rcs", callbackArchive, callbackObject).CombinedOutput(); err != nil {
-		t.Fatalf("archive continuation object: %v\n%s", err, output)
+	if output, err := exec.Command(ar, "rcs", callbackArchive, callbackObject, nativeCallbackObject).CombinedOutput(); err != nil {
+		t.Fatalf("archive callback objects: %v\n%s", err, output)
 	}
 
 	callbackEntryPkg := prog.NewPackage("callback-entry", "callback-entry")
 	callbackDeclaration := declareCoroProgramContinueV1(callbackEntryPkg)
+	nativeCallbackDeclaration := declareCoroNativePostWaitV1(callbackEntryPkg)
 	callbackMain := callbackEntryPkg.NewFunc("main", newSignature(nil, []types.Type{types.Typ[types.Int32]}), llssa.InC)
 	callbackMain.MakeBody(1).Return(prog.IntVal(0, prog.Int32()))
 	retainCoroProgramContinueV1(callbackEntryPkg, callbackMain, callbackDeclaration)
+	retainCoroNativePostWaitV1(callbackEntryPkg, callbackMain, nativeCallbackDeclaration)
 	callbackEntryPkg.MaterializePreserveSyms()
 	callbackEntryObject := emit("callback-entry", callbackEntryPkg)
 
@@ -179,8 +192,10 @@ func TestCoroProgramManifestExtractsRootArchiveMember(t *testing.T) {
 	if err != nil {
 		t.Fatalf("inspect linked continuation symbol: %v\n%s", err, output)
 	}
-	if !strings.Contains(string(output), coroProgramContinueSymbolV1) {
-		t.Fatalf("final link lost retained continuation %q after archive extraction/dead strip:\n%s",
-			coroProgramContinueSymbolV1, output)
+	for _, symbol := range []string{coroProgramContinueSymbolV1, coroNativePostWaitSymbolV1} {
+		if !strings.Contains(string(output), symbol) {
+			t.Fatalf("final link lost retained callback %q after archive extraction/dead strip:\n%s",
+				symbol, output)
+		}
 	}
 }
