@@ -491,7 +491,7 @@ func TestExecutorDriverTerminalCloseRequestRace(t *testing.T) {
 			t.Fatalf("iteration %d: terminal close/request race = (%+v, %d)", iteration, closed, request)
 		}
 		completed, terminal, ok := ConfirmTerminalExecutorClose(driver)
-		if !ok || completed != task.g || terminal.Kind != ActionComplete || !TerminalG(p, task.g) ||
+		if !ok || completed != task.g || terminal.Kind != ActionComplete || terminal.Handle != nil || !TerminalG(p, task.g) ||
 			*driver != (ExecutorDriver{}) || !waits.CanRelease() || !registry.CanRelease() {
 			t.Fatalf("iteration %d: confirm terminal request race = (%p, %+v, %t)", iteration, completed, terminal, ok)
 		}
