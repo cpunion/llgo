@@ -130,8 +130,9 @@ func validCancelableReadyG(g *G) bool {
 // BeginCommandShutdown atomically seals a command P against new scheduling
 // requests after main has returned normally. Version one supports only ready
 // YieldOnly/AwaitStructured children. Any wait/current/action state is rejected
-// before the schedule gate changes, because raw WaitToken producers cannot yet
-// be unregistered and quiesced safely.
+// before the schedule gate changes. Stable wait registration now provides a
+// safe close/quiesce primitive, but P does not yet own a registry enumeration
+// or platform-specific unregister callback for command-wide cancellation.
 func BeginCommandShutdown(p *P, main *G) bool {
 	if p == nil || !ReclaimableG(main) || main.taskState != taskStorageStatic ||
 		p.current != nil || p.inResume || p.action.Kind != ActionInvalid || p.action.Handle != nil ||

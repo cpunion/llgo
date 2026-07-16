@@ -55,9 +55,9 @@ func coroSpawnCommitV1(parentPointer, childPointer, handle unsafe.Pointer) bool 
 }
 
 // coroReleaseCompletedTask performs the physical half of spawned-G
-// retirement. A platform producer may retain only P/WaitToken state, never a
-// child G pointer, so disabling the G gate and unlinking it from P is the
-// quiescence boundary for this allocation.
+// retirement. A platform producer may retain only a POD wait registration
+// handle, never a child G pointer. The stable registration table owns any
+// P/WaitToken references until it is quiesced and retired.
 func coroReleaseCompletedTask(g *coroG) bool {
 	owned, ok := coro.TaskStorageOwned(g)
 	if !ok {

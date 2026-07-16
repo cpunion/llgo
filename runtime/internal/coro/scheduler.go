@@ -199,9 +199,10 @@ func InitG(g *G) bool {
 //
 // A dynamically allocated G is not a stable asynchronous handle. Compiler
 // safepoints and the scheduler may call RequestPreempt while they synchronously
-// own that G; platform/event producers must retain the stable P instead and use
-// RequestSchedule. This lifetime rule is what makes per-G task reclamation safe
-// without a per-request heap reference or epoch protocol.
+// own that G. Platform wait callbacks retain only WaitRegistrationHandle;
+// scheduler-side Drain resolves the stable owning P and calls RequestSchedule.
+// This lifetime rule makes per-G task reclamation safe without a per-request
+// heap reference or epoch protocol.
 func RequestPreempt(g *G) bool {
 	if g == nil {
 		return false
@@ -245,14 +246,16 @@ func PollPreempt(g *G) bool {
 }
 
 // RequestSchedule coalesces one asynchronous request for the G currently
-// executing on p, without reading any scheduler-owned P or G field. A wait
-// completion producer calls CompleteWait first, then RequestSchedule, then the
-// platform-specific executor/event-loop wake primitive. A running coroutine
+// executing on p, without reading any scheduler-owned P or G field. A stable
+// wait registration's scheduler-side Drain publishes the token outcome and
+// calls RequestSchedule; the platform ingress only posts its POD handle and
+// triggers the platform executor/event-loop doorbell. A running coroutine
 // observes the request at PollPreempt; an idle scheduler consumes it while
 // polling completed waits.
 //
 // p must remain alive and no logical G using it may enter its final Destroyed
-// transition until every producer that can call RequestSchedule is quiescent.
+// transition until every runtime source that can call RequestSchedule is
+// quiescent.
 // The last terminal transition atomically disables this gate: a request that
 // wins that race prevents terminal success, while a request linearized after
 // terminal disable fails without touching scheduler state.
@@ -405,9 +408,10 @@ func validWaitQueue(p *P) bool {
 	return tail == p.waitTail
 }
 
-// pollReady is scheduler-thread-only. It consumes completed tickets in wait
-// insertion order and appends their Gs to the ready queue. A merely armed
-// ticket is a normal not-ready state; every stale/corrupt state fails closed.
+// pollReady is scheduler-thread-only. It consumes completed or canceled
+// tickets in wait insertion order and appends their Gs to the ready queue. A
+// merely parked ticket is a normal not-ready state; every stale/corrupt state
+// fails closed.
 func pollReady(p *P) (int, bool) {
 	if p == nil || p.current != nil || p.inResume || p.action.Kind != ActionInvalid ||
 		!validReadyQueue(p) || !validWaitQueue(p) {
@@ -437,9 +441,9 @@ func pollReady(p *P) (int, bool) {
 			previous = g
 			g = next
 			continue
-		case waitParkedReady:
-			if !consumeWait(g.waitToken, g.waitTicket) {
-				// A platform completion only transitions Armed->Ready, so failure
+		case waitParkedReady, waitParkedCanceled:
+			if _, consumed := consumeWait(g.waitToken, g.waitTicket); !consumed {
+				// Outcome producers only publish terminal token states. Failure
 				// here means another scheduler consumer or corrupted ownership.
 				return promoted, false
 			}
@@ -468,9 +472,9 @@ func pollReady(p *P) (int, bool) {
 	return promoted, true
 }
 
-// PollReady promotes every completed platform wait while the scheduler is
-// idle. It never polls or calls platform code; completion producers publish by
-// CompleteWait and separately wake the owning executor/event loop.
+// PollReady promotes every completed or safely canceled platform wait while
+// the scheduler is idle. It never polls or calls platform code; registration
+// Drain and in-runtime wait owners publish token outcomes before this call.
 func PollReady(p *P) (int, bool) {
 	return pollReady(p)
 }

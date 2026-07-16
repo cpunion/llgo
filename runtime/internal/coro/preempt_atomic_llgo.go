@@ -25,10 +25,10 @@ import "github.com/goplus/llgo/runtime/internal/clite/sync/atomic"
 // the A extension) must provide its platform atomic/IRQ-critical-section
 // adapter, typically the __atomic_load_4/__atomic_store_4/
 // __atomic_compare_exchange_4 compiler-runtime surface selected by LLVM.
-// Deliberately do not fall back to ordinary Go loads/stores: CompleteWait may
-// run in an ISR or another worker, where that fallback would silently lose
-// result publication and wakeups. Until such an adapter is linked, failure at
-// link time is the safe capability boundary.
+// Deliberately do not fall back to ordinary Go loads/stores: registration Post
+// may run in an ISR or another worker, where that fallback would silently lose
+// admission, result publication, or wakeups. Until such an adapter is linked,
+// failure at link time is the safe capability boundary.
 
 func preemptLoad(ptr *uint32) uint32 {
 	return atomic.Load(ptr)
