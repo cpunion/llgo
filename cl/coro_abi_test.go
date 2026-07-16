@@ -169,8 +169,20 @@ func Leaf(value uint32) uint32 {
 	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("verify debug coroutine before CoroSplit: %v\n%s", err, module.String())
 	}
-	if !strings.Contains(module.String(), "!dbg") {
-		t.Fatalf("debug coroutine omitted function/parameter metadata:\n%s", module.String())
+	ir := module.String()
+	if !strings.Contains(ir, "!dbg") {
+		t.Fatalf("debug coroutine omitted function/parameter metadata:\n%s", ir)
+	}
+	parameter := regexp.MustCompile(`(?m)^(!\d+) = !DILocalVariable\(name: "value", arg: 1,`).FindStringSubmatch(ir)
+	if len(parameter) != 2 {
+		t.Fatalf("debug coroutine omitted source parameter metadata:\n%s", ir)
+	}
+	location := regexp.MustCompile(
+		`(?m)(?:#dbg_(?:value|declare)|@llvm\.dbg\.(?:value|declare))\([^\n]*` +
+			regexp.QuoteMeta(parameter[1]) + `(?:,|\))`,
+	)
+	if !location.MatchString(ir) {
+		t.Fatalf("debug coroutine parameter metadata has no location record:\n%s", ir)
 	}
 	options := llvm.NewPassBuilderOptions()
 	defer options.Dispose()
