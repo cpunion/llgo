@@ -29,6 +29,9 @@ const (
 	GCanceling
 	GWaiting
 	GDead
+	// GPanicking destroys suspended-await ancestors deepest-to-root after the
+	// active final-suspended panic frame has passed its normal done check.
+	GPanicking
 )
 
 // G owns the stackless frame chain for one logical Go task.
@@ -65,6 +68,12 @@ type G struct {
 	taskStorage unsafe.Pointer
 	taskSize    uintptr
 	taskState   taskStorageState
+
+	// panicRecord is task-local. It must never be discovered through TLS or a
+	// process-global current-G slot. panicUnwind is scheduler-thread-only and is
+	// set only after the published active frame returns from llvm.coro.resume.
+	panicRecord PanicRecord
+	panicUnwind bool
 }
 
 const (
@@ -131,6 +140,13 @@ const (
 	// ActionCancelComplete transfers one fully destroyed spawned G to the task
 	// storage reclaimer.
 	ActionCancelComplete
+	// ActionPanicDestroy directly destroys one suspended-await ancestor after
+	// the active panic frame has already gone through CheckDestroy/Destroy.
+	// It must never be preceded by coro.done or followed by coro.resume.
+	ActionPanicDestroy
+	// ActionPanicComplete exposes a stable task-local PanicRecord to the runtime
+	// adapter after every frame has been destroyed deepest-to-root.
+	ActionPanicComplete
 )
 
 // Action is one deterministic scheduler operation or control event. Handle is
@@ -142,7 +158,8 @@ type Action struct {
 }
 
 func setAction(p *P, kind ActionKind, handle unsafe.Pointer) (Action, bool) {
-	if p == nil || kind == ActionInvalid || kind == ActionComplete || kind == ActionYield || kind == ActionPark || kind == ActionCancelComplete || handle == nil {
+	if p == nil || kind == ActionInvalid || kind == ActionComplete || kind == ActionYield || kind == ActionPark ||
+		kind == ActionCancelComplete || kind == ActionPanicComplete || handle == nil {
 		return Action{}, false
 	}
 	action := Action{Kind: kind, Handle: handle}
@@ -162,7 +179,8 @@ func InitG(g *G) bool {
 		g.destroyTarget != nil || g.destroyRoot || g.nextReady != nil || g.queued ||
 		g.waitToken != nil || g.waitTicket != 0 || g.nextWait != nil || g.waiting || g.runP != nil ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
-		g.taskStorage != nil || g.taskSize != 0 || g.taskState != taskStorageStatic {
+		g.taskStorage != nil || g.taskSize != 0 || g.taskState != taskStorageStatic ||
+		!emptyPanicRecord(&g.panicRecord) || g.panicUnwind {
 		return false
 	}
 	g.magic = gMagic
@@ -529,6 +547,19 @@ func dispatchPending(g *G, resumed *Frame) (destroy *Frame, yielded bool, ok boo
 		g.waitToken = pending.wait
 		g.waitTicket = pending.ticket
 		return nil, false, true
+	case pendingPanic:
+		if pending.target != nil || pending.wait != nil || pending.ticket != 0 || resumed.header == nil ||
+			resumed.header.SuspendReason != uint16(SuspendPanic) ||
+			resumed.header.Lifecycle != uint16(FrameFinalSuspended) ||
+			g.panicUnwind || !publishedPanicRecord(&g.panicRecord) {
+			return nil, false, false
+		}
+		g.active = resumed.parent
+		resumed.state = FrameDestroyPending
+		resumed.header.Lifecycle = uint16(FrameDestroyPending)
+		g.destroyTarget = resumed
+		g.panicUnwind = true
+		return resumed, false, true
 	default:
 		return nil, false, false
 	}
@@ -656,6 +687,9 @@ func Destroyed(p *P, g *G, action Action) (Action, bool) {
 		return Action{}, false
 	}
 	isRoot := g.destroyRoot
+	if g.panicUnwind {
+		return commitInitialPanicDestroyed(p, g, isRoot)
+	}
 	if isRoot {
 		if g.active != nil || g.frames != nil || !validReadyQueue(p) || !validWaitQueue(p) {
 			return Action{}, false
@@ -716,5 +750,6 @@ func TerminalG(p *P, g *G) bool {
 		g.pending.kind == pendingNone && g.pending.from == nil && g.pending.target == nil && g.pending.wait == nil && g.pending.ticket == 0 &&
 		g.destroyTarget == nil && !g.destroyRoot && g.nextReady == nil && !g.queued &&
 		g.waitToken == nil && g.waitTicket == 0 && g.nextWait == nil && !g.waiting && g.runP == nil &&
-		g.spawnChild == nil && g.spawnParent == nil && g.spawnP == nil && validTerminalTaskStorage(g)
+		g.spawnChild == nil && g.spawnParent == nil && g.spawnP == nil && validTerminalTaskStorage(g) &&
+		emptyPanicRecord(&g.panicRecord) && !g.panicUnwind
 }

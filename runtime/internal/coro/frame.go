@@ -64,6 +64,11 @@ const (
 	// versioned WaitTicket is completed. The platform event source owns only
 	// the ticket; it never resumes an LLVM handle or mutates scheduler queues.
 	SuspendPark
+	// SuspendPanic is the terminal-only ExplicitStatus prototype. The active
+	// frame has published its two-word panic value into its owning G and reached
+	// final suspend. It is never used for cleanup, recover, Goexit, or an
+	// implicit hardware fault in this first fail-closed slice.
+	SuspendPanic
 )
 
 // FrameState values deliberately match the lifecycle field emitted by cl.
@@ -89,6 +94,7 @@ const (
 	pendingComplete
 	pendingYield
 	pendingPark
+	pendingPanic
 )
 
 type pendingTransition struct {

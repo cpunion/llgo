@@ -156,6 +156,30 @@ func coroRunActions(p *coroP, g *coroG, action coro.Action) bool {
 				// Retry only the scheduler commit. The LLVM handle was already
 				// destroyed exactly once before entering this loop.
 			}
+		case coro.ActionPanicDestroy:
+			coroHandleDestroy(action.Handle)
+			for {
+				next, committed := coro.PanicDestroyed(p, g, action)
+				if committed {
+					action, ok = next, true
+					break
+				}
+				if !coro.AcknowledgePanicTerminalSchedule(p, g, action) {
+					ok = false
+					break
+				}
+				// Retry only the state commit. The suspended ancestor handle was
+				// already destroyed exactly once.
+			}
+		case coro.ActionPanicComplete:
+			// The core has retained a stable task-local two-word record and has
+			// destroyed every frame. Printing/fatal ownership and compiler-side
+			// cleanup/recover semantics are not part of this prototype, so stop
+			// here instead of misclassifying panic as ordinary G completion.
+			if _, published := coro.LoadPanicRecord(g); !published {
+				return false
+			}
+			return false
 		default:
 			return false
 		}

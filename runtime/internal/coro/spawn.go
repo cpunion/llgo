@@ -233,7 +233,8 @@ func ReclaimableG(g *G) bool {
 		g.pending.wait == nil && g.pending.ticket == 0 &&
 		g.destroyTarget == nil && !g.destroyRoot && g.nextReady == nil && !g.queued &&
 		g.waitToken == nil && g.waitTicket == 0 && g.nextWait == nil && !g.waiting && g.runP == nil &&
-		g.spawnChild == nil && g.spawnParent == nil && g.spawnP == nil && validLiveTaskStorage(g)
+		g.spawnChild == nil && g.spawnParent == nil && g.spawnP == nil && validLiveTaskStorage(g) &&
+		emptyPanicRecord(&g.panicRecord) && !g.panicUnwind
 }
 
 // TaskStorageOwned reports the only two legal storage states at ActionComplete.
