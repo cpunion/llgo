@@ -43,6 +43,10 @@ const (
 	coroProgramDriveSuspendedV1
 	coroProgramDrivePanicV1
 	coroProgramDriveIgnoredV1
+	// coroProgramDriveAgainV1 is internal to the scheduler-owner pump. It is
+	// never returned through a public ABI. A synchronous native retained wait
+	// uses it to resume without recursively stacking one Drive frame per wake.
+	coroProgramDriveAgainV1
 )
 
 type coroProgramContinuationV1 uint8
@@ -290,13 +294,13 @@ func coroProgramBeginExecutorWaitV1() coroProgramDriveStatusV1 {
 			!coroProgramClearContinuationV1(coroProgramContinuationExecutorWakeV1) {
 			return coroProgramFailV1()
 		}
-		return coroProgramDriveV1()
+		return coroProgramDriveAgainV1
 	default:
 		return coroProgramFailV1()
 	}
 }
 
-func coroProgramDriveV1() coroProgramDriveStatusV1 {
+func coroProgramDriveStepV1() coroProgramDriveStatusV1 {
 	if coroProgramContinuationV1State != coroProgramContinuationNoneV1 {
 		return coroProgramFailV1()
 	}
@@ -330,6 +334,15 @@ func coroProgramDriveV1() coroProgramDriveStatusV1 {
 		return coroProgramFinishPanicV1(result.g, result.action)
 	default:
 		return coroProgramFailV1()
+	}
+}
+
+func coroProgramDriveV1() coroProgramDriveStatusV1 {
+	for {
+		status := coroProgramDriveStepV1()
+		if status != coroProgramDriveAgainV1 {
+			return status
+		}
 	}
 }
 

@@ -205,10 +205,12 @@ type coroProgramTestDriverV1 struct {
 	cancelDestroyCalls       int
 	taskReleaseCalls         int
 	parkOnFirstResume        bool
+	parkResumeCount          int
 	waitToken                coro.WaitToken
 	waitTicket               coro.WaitTicket
 	waitRegistration         coro.WaitRegistrationHandle
 	waitRetired              bool
+	waitRetireCalls          int
 }
 
 var activeCoroProgramDriver *coroProgramTestDriverV1
@@ -272,17 +274,34 @@ func (driver *coroProgramTestDriverV1) done(handle unsafe.Pointer) bool {
 func (driver *coroProgramTestDriverV1) resume(handle unsafe.Pointer) {
 	driver.requireHandle(handle)
 	driver.resumeCalls++
-	maxResumeCalls := 1
+	parkCount := driver.parkResumeCount
 	if driver.parkOnFirstResume {
-		maxResumeCalls = 2
+		parkCount = 1
 	}
+	maxResumeCalls := parkCount + 1
 	if driver.resumeCalls > maxResumeCalls {
 		driver.t.Fatalf("coroutine resume calls = %d, max %d", driver.resumeCalls, maxResumeCalls)
 	}
 	frame := driver.frame
 	frame.header.SuspendReason = uint16(coro.SuspendNone)
 	frame.header.Lifecycle = uint16(coro.FrameActive)
-	if driver.parkOnFirstResume && driver.resumeCalls == 1 {
+	if parkCount != 0 && driver.resumeCalls > 1 {
+		if outcome, ok := coro.WaitOutcomeOf(&driver.waitToken, driver.waitTicket); !ok || outcome != coro.WaitOutcomeCompleted {
+			driver.t.Fatalf("resumed executor wait outcome = (%d, %t), want completed", outcome, ok)
+		}
+		if result := coroProgramWaitTableV1State.BeginClose(driver.waitRegistration); result != coro.WaitRegistrationCloseStarted {
+			driver.t.Fatalf("close delivered executor wait = %d", result)
+		}
+		if result, ok := coroProgramWaitTableV1State.ConfirmQuiesced(driver.waitRegistration); !ok || result != coro.WaitCancelCompletionWon {
+			driver.t.Fatalf("confirm delivered executor wait = (%d, %t)", result, ok)
+		}
+		if !coroProgramWaitTableV1State.Retire(driver.waitRegistration) {
+			driver.t.Fatal("retire delivered executor wait")
+		}
+		driver.waitRetireCalls++
+		driver.waitRetired = true
+	}
+	if parkCount != 0 && driver.resumeCalls <= parkCount {
 		var ok bool
 		driver.waitTicket, ok = coro.ArmWait(&driver.waitToken)
 		if !ok {
@@ -301,22 +320,8 @@ func (driver *coroProgramTestDriverV1) resume(handle unsafe.Pointer) {
 		if !coro.PreparePark(frame.g, handle, frame.header, &driver.waitToken, driver.waitTicket) {
 			driver.t.Fatal("prepare named-adapter executor park")
 		}
+		driver.waitRetired = false
 		return
-	}
-	if driver.parkOnFirstResume {
-		if outcome, ok := coro.WaitOutcomeOf(&driver.waitToken, driver.waitTicket); !ok || outcome != coro.WaitOutcomeCompleted {
-			driver.t.Fatalf("resumed executor wait outcome = (%d, %t), want completed", outcome, ok)
-		}
-		if result := coroProgramWaitTableV1State.BeginClose(driver.waitRegistration); result != coro.WaitRegistrationCloseStarted {
-			driver.t.Fatalf("close delivered executor wait = %d", result)
-		}
-		if result, ok := coroProgramWaitTableV1State.ConfirmQuiesced(driver.waitRegistration); !ok || result != coro.WaitCancelCompletionWon {
-			driver.t.Fatalf("confirm delivered executor wait = (%d, %t)", result, ok)
-		}
-		if !coroProgramWaitTableV1State.Retire(driver.waitRegistration) {
-			driver.t.Fatal("retire delivered executor wait")
-		}
-		driver.waitRetired = true
 	}
 	if driver.panicOnResume {
 		frame.header.SuspendReason = uint16(coro.SuspendPanic)
@@ -704,6 +709,39 @@ func TestCoroProgramExecutorWakeContinuesParkedRoot(t *testing.T) {
 	if status := coroProgramContinueV1(epoch); status != coroProgramDriveIgnoredV1 ||
 		coroProgramLifecycleV1State != coroProgramCompleteV1 {
 		t.Fatalf("late executor wake = %d lifecycle:%d", status, coroProgramLifecycleV1State)
+	}
+	runtime.KeepAlive(frame.memory)
+	runtime.KeepAlive(&driver.waitToken)
+	runtime.KeepAlive(manifest)
+}
+
+func TestCoroProgramSynchronousWaitUsesIterativeDrivePump(t *testing.T) {
+	resetCoroProgramTestStateV1(t)
+	manifest := newCoroProgramTestManifestV1()
+	factory := unsafe.Pointer(&manifest.factoryMarker)
+	gPointer, ok := coroProgramBeginV1(unsafe.Pointer(&manifest.manifest), factory)
+	if !ok {
+		t.Fatal("begin synchronous-wait program")
+	}
+	frame := newCoroProgramTestFrameV1(t, &coroProgramGV1State)
+	const waits = 2048
+	driver := &coroProgramTestDriverV1{t: t, frame: frame, parkResumeCount: waits}
+	activeCoroProgramDriver = driver
+	coroProgramTestTargetV1State.completeWaitBeforeBeginReturn = true
+	if status := coroProgramRunV1(gPointer, frame.handle); status != coroProgramDriveCompleteV1 {
+		t.Fatalf("synchronous-wait drive = %d", status)
+	}
+	if driver.resumeCalls != waits+1 || driver.waitRetireCalls != waits || !driver.waitRetired ||
+		coroProgramTestTargetV1State.waitCalls != waits || coroProgramTestTargetV1State.waitBeginDepth != 0 ||
+		coroProgramTestTargetV1State.maxWaitBeginDepth != 1 ||
+		coroProgramLifecycleV1State != coroProgramCompleteV1 || coroProgramExecutorBoundV1State ||
+		!coroProgramDriveAdmissionV1State.CanRelease() || !coroProgramExecutorRegistryV1State.CanRelease() ||
+		!coroProgramWaitTableV1State.CanRelease() {
+		t.Fatalf("iterative synchronous waits = resumes:%d retired:%d finalRetired:%t waits:%d depth:%d maxDepth:%d lifecycle:%d bound:%t admission:%t",
+			driver.resumeCalls, driver.waitRetireCalls, driver.waitRetired,
+			coroProgramTestTargetV1State.waitCalls, coroProgramTestTargetV1State.waitBeginDepth,
+			coroProgramTestTargetV1State.maxWaitBeginDepth, coroProgramLifecycleV1State,
+			coroProgramExecutorBoundV1State, coroProgramDriveAdmissionV1State.CanRelease())
 	}
 	runtime.KeepAlive(frame.memory)
 	runtime.KeepAlive(&driver.waitToken)

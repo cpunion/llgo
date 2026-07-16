@@ -39,6 +39,9 @@ type coroProgramTestTargetStateV1 struct {
 	waitEpoch                      uint32
 	wakePollCalls                  uint32
 	wakeReady                      bool
+	completeWaitBeforeBeginReturn  bool
+	waitBeginDepth                 uint32
+	maxWaitBeginDepth              uint32
 	completeCloseBeforeBeginReturn bool
 	reentrantCloseStatus           coroProgramDriveStatusV1
 	closePollEntered               chan struct{}
@@ -96,8 +99,29 @@ func coroTargetBeginExecutorWaitV1(handle coro.ExecutorHandle, epoch uint32) cor
 	if !state.started || state.handle != handle || state.waitEpoch != 0 || epoch == 0 {
 		return coroTargetDispatchInvalidV1
 	}
+	state.waitBeginDepth++
+	if state.waitBeginDepth > state.maxWaitBeginDepth {
+		state.maxWaitBeginDepth = state.waitBeginDepth
+	}
+	defer func() { state.waitBeginDepth-- }()
 	state.waitCalls++
 	state.waitEpoch = epoch
+	if state.completeWaitBeforeBeginReturn {
+		if activeCoroProgramDriver == nil {
+			return coroTargetDispatchInvalidV1
+		}
+		posted := coro.PostWaitAndRequest(
+			&coroProgramWaitTableV1State,
+			activeCoroProgramDriver.waitRegistration,
+			&coroProgramExecutorRegistryV1State,
+			handle,
+		)
+		if posted.Wait != coro.WaitRegistrationPosted || posted.Executor != coro.ExecutorRequestIdleWake {
+			return coroTargetDispatchInvalidV1
+		}
+		state.waitEpoch = 0
+		return coroTargetDispatchCompleteV1
+	}
 	return coroTargetDispatchPendingV1
 }
 
