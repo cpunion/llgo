@@ -56,6 +56,9 @@ jobs:
       - name: Test structured LLVM coroutine builder
         run: go test -tags='${{ matrix.tags }}' -v ./ssa -run '^TestCoroBuilder' -count=1
 
+      - name: Test coroutine physical ABI lowering
+        run: go test -tags='${{ matrix.tags }}' -v ./cl -run '^TestCoro(LeafPhysicalABI|PhysicalABI)' -count=1
+
       - name: Test LLVM 22 tool configuration
         if: matrix.llvm == 22
         run: go test -tags=llvm22 ./xtool/env/llvm ./internal/xtool/llvm

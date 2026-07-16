@@ -32,6 +32,7 @@ import (
 
 	"github.com/goplus/llgo/cl/blocks"
 	"github.com/goplus/llgo/cl/ssawrap"
+	"github.com/goplus/llgo/internal/coro"
 	"github.com/goplus/llgo/internal/goembed"
 	"github.com/goplus/llgo/internal/typepatch"
 	"golang.org/x/tools/go/ssa"
@@ -182,6 +183,7 @@ type context struct {
 	emissionUniverse     *EmissionUniverse
 	cacheRegistration    bool // cached archive: types only, no lowering
 	pcLineSeq            uint64
+	sourceParamBase      int // hidden physical parameters before source params
 
 	patches          Patches
 	blkInfos         []blocks.Info
@@ -556,6 +558,13 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 	} else {
 		dbgInstrln("==> NewFunc", name, "type:", sig.Recv(), sig, "ftype:", ftype)
 	}
+	var physicalABI *coroPhysicalABI
+	if entry.physical && entry.plan.Primary == coro.PrimaryCoroutine {
+		abi := newCoroPhysicalABI(p, entry, sig)
+		physicalABI = &abi
+		sig = abi.physicalSig
+		hasCtx = false
+	}
 	if fn == nil {
 		fn = pkg.NewFuncEx(name, sig, llssa.Background(ftype), hasCtx, p.needsLinkOnce(f))
 	}
@@ -592,7 +601,9 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 		p.cgoCalled = false
 		p.cgoArgs = nil
 		p.cgoErrno = llssa.Nil
-		if isCgo {
+		if physicalABI != nil {
+			fn.MakeBlocks(1) // dedicated coroutine ramp entry
+		} else if isCgo {
 			fn.MakeBlocks(1)
 		} else {
 			fn.MakeBlocks(nblk) // to set fn.HasBody() = true
@@ -627,6 +638,11 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 			}
 			p.bvals = make(map[ssa.Value]llssa.Expr)
 			p.methodNilDerefChecks = collectMethodNilDerefChecks(f)
+			if physicalABI != nil {
+				p.compileCoroLeafBody(b, f, *physicalABI)
+				b.EndBuild()
+				return
+			}
 			off := make([]int, len(f.Blocks))
 			if isCgo {
 				p.cgoArgs = make([]llssa.Expr, len(f.Params))
@@ -1681,7 +1697,7 @@ func (p *context) compileValue(b llssa.Builder, v ssa.Value) llssa.Expr {
 		fn := v.Parent()
 		for idx, param := range fn.Params {
 			if param == v {
-				return b.Param(idx)
+				return b.Param(idx + p.sourceParamBase)
 			}
 		}
 	case *ssa.Function:
@@ -1948,7 +1964,7 @@ func NewPackageExWithEmbedOptions(prog llssa.Program, ct *CallerTracking, patche
 
 func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewrites map[string]string, pkg *ssa.Package, files []*ast.File, embedMap *goembed.VarMap, opts PackageOptions) (ret llssa.Package, externs []string, err error) {
 	var prepared *preparedEmissionPackage
-	if opts.Compilation != nil && opts.Compilation.EnableCoroEntryResolution {
+	if opts.Compilation != nil && (opts.Compilation.EnableCoroEntryResolution || opts.Compilation.EnableCoroPhysicalABI) {
 		if err := opts.Compilation.preflightCoroPlan(); err != nil {
 			return nil, nil, err
 		}

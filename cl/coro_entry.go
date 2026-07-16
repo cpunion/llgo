@@ -36,13 +36,13 @@ type plannedFunctionSymbol struct {
 	ftype    int
 	plan     coro.FunctionPlan
 	planned  bool
+	physical bool
 }
 
 // resolveFunctionSymbol is shared by function definitions and declarations so
-// they cannot independently choose different primary symbols. Physical
-// signatures remain unchanged in this slice and will be added to a later ABI
-// descriptor. The zero-value compilation and report-only plans deliberately
-// preserve the legacy symbol.
+// they cannot independently choose different primary symbols. The physical
+// descriptor derives the signature from this exact entry. The zero-value
+// compilation and report-only plans deliberately preserve the legacy symbol.
 func (p *context) resolveFunctionSymbol(fn *ssa.Function) (plannedFunctionSymbol, error) {
 	if p.compilation != nil && p.compilation.EnableCoroEntryResolution && p.compilation.EmissionUniverse != nil {
 		canonical, ok := p.compilation.EmissionUniverse.Resolve(fn)
@@ -78,6 +78,7 @@ func (p *context) resolveFunctionSymbol(fn *ssa.Function) (plannedFunctionSymbol
 	}
 	entry.plan = plan
 	entry.planned = true
+	entry.physical = p.compilation.EnableCoroPhysicalABI
 	if err := validatePlannedFunction(fn, plan); err != nil {
 		return entry, err
 	}
@@ -121,7 +122,10 @@ func (e plannedFunctionSymbol) checkSupported() error {
 		return fmt.Errorf("coroutine entry resolution: function %q requires an unimplemented dispatch descriptor", e.plan.ID)
 	}
 	if e.plan.Primary == coro.PrimaryCoroutine {
-		return fmt.Errorf("coroutine primary %q requires coroutine physical ABI lowering", e.plan.ID)
+		if !e.physical {
+			return fmt.Errorf("coroutine primary %q requires coroutine physical ABI lowering", e.plan.ID)
+		}
+		return validateCoroLeafPhysicalABI(e.function, e.plan)
 	}
 	if e.plan.Primary == coro.PrimaryExternal && e.plan.FuncRep == coro.DirectCoro {
 		return fmt.Errorf("external coroutine primary %q requires coroutine physical ABI lowering", e.plan.ID)
@@ -134,7 +138,13 @@ func (e plannedFunctionSymbol) checkSupported() error {
 // the plan: active entry resolution may not silently route an unsupported plan
 // through a legacy ABI merely because funcName classifies it specially.
 func (c *Compilation) preflightCoroPlan() error {
-	if c == nil || !c.EnableCoroEntryResolution {
+	if c == nil {
+		return nil
+	}
+	if c.EnableCoroPhysicalABI && !c.EnableCoroEntryResolution {
+		return fmt.Errorf("coroutine physical ABI requires coroutine entry resolution")
+	}
+	if !c.EnableCoroEntryResolution {
 		return nil
 	}
 	c.coroPreflight.Do(func() {
@@ -155,11 +165,29 @@ func (c *Compilation) preflightCoroPlan() error {
 				c.coroPreflightErr = err
 				return
 			}
-			entry := plannedFunctionSymbol{plan: function.Plan, planned: true}
+			entry := plannedFunctionSymbol{
+				function: function.Function,
+				plan:     function.Plan,
+				planned:  true,
+				physical: c.EnableCoroPhysicalABI,
+			}
 			if err := entry.checkSupported(); err != nil {
 				c.coroPreflightErr = err
 				return
 			}
+			if c.EnableCoroPhysicalABI && function.Plan.Primary == coro.PrimaryCoroutine {
+				sig, err := c.EmissionUniverse.coroPhysicalSourceSignature(function.Function)
+				if err == nil {
+					err = validateCoroLeafPhysicalSignature(function.Plan, sig)
+				}
+				if err != nil {
+					c.coroPreflightErr = err
+					return
+				}
+			}
+		}
+		if c.EnableCoroPhysicalABI {
+			c.coroPreflightErr = validateCoroPhysicalConsumers(c.CoroPlan)
 		}
 	})
 	return c.coroPreflightErr

@@ -17,6 +17,7 @@
 package ssa
 
 import (
+	"fmt"
 	"go/types"
 	"strconv"
 	"strings"
@@ -324,6 +325,16 @@ func (p Function) Name() string {
 // Params returns the function's ith parameter.
 func (p Function) Param(i int) Expr {
 	i += p.base // skip if hasFreeVars
+	return p.PhysicalParam(i)
+}
+
+// PhysicalParam returns the ith parameter of the lowered LLVM declaration,
+// including compiler-defined hidden parameters. Frontends should normally use
+// Param; explicit physical ABIs use this accessor for their hidden prefix.
+func (p Function) PhysicalParam(i int) Expr {
+	if i < 0 || i >= len(p.params) {
+		panic(fmt.Sprintf("ssa: physical parameter index %d out of range [0, %d)", i, len(p.params)))
+	}
 	return Expr{p.impl.Param(i), p.params[i]}
 }
 
