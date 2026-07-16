@@ -319,6 +319,49 @@ func TestExplicitStatusUnsupportedShapesFailClosed(t *testing.T) {
 	}
 }
 
+func TestExplicitPanicRejectsUnsupportedAncestorBeforeDestroy(t *testing.T) {
+	fixture := newExplicitPanicFixture(t, 2)
+	root, leaf := fixture.frames[0], fixture.frames[1]
+	rootMetadata, leafMetadata := FrameFromStorage(root.storage), FrameFromStorage(leaf.storage)
+	root.header.Flags = 1 // cleanup/recover metadata is not representable in v0.
+	leaf.header.SuspendReason = uint16(SuspendPanic)
+	leaf.header.Lifecycle = uint16(FrameFinalSuspended)
+	if PreparePanic(fixture.g, leaf.handle, leaf.header, unsafe.Pointer(new(byte)), unsafe.Pointer(new(byte))) {
+		t.Fatal("panic with unsupported suspended ancestor was published")
+	}
+	if fixture.g.pending.kind != pendingNone || fixture.g.panicUnwind || fixture.g.destroyTarget != nil ||
+		leafMetadata.state != FrameActive || rootMetadata.state != FrameSuspended ||
+		leaf.header.Lifecycle != uint16(FrameFinalSuspended) || root.header.Lifecycle != uint16(FrameSuspended) {
+		t.Fatal("rejected ancestor cleanup mutated frame destruction state")
+	}
+	if record, ok := LoadPanicRecord(fixture.g); ok || record != (PanicRecordSnapshot{}) {
+		t.Fatalf("rejected ancestor cleanup published record (%+v, %t)", record, ok)
+	}
+	runtime.KeepAlive(root.memory)
+	runtime.KeepAlive(leaf.memory)
+}
+
+func TestExplicitPanicRechecksAncestorBeforeDirectDestroy(t *testing.T) {
+	fixture := newExplicitPanicFixture(t, 2)
+	root := fixture.frames[0]
+	rootMetadata := FrameFromStorage(root.storage)
+	fixture.publish(t, unsafe.Pointer(new(byte)), unsafe.Pointer(new(byte)))
+	action := fixture.beginPanicDestroy(t)
+	fixture.release(t, action)
+
+	// Model corrupted or version-skewed metadata after publication. The active
+	// panic frame may already be gone, but the unsupported ancestor must never
+	// be directly destroyed or resumed.
+	root.header.Flags = 1
+	next, ok := Destroyed(fixture.p, fixture.g, action)
+	if ok || next != (Action{}) || fixture.g.destroyTarget != nil ||
+		rootMetadata.state != FrameSuspended || root.header.Lifecycle != uint16(FrameSuspended) {
+		t.Fatalf("unsupported ancestor entered direct destroy: action=(%+v, %t), state=%d lifecycle=%d",
+			next, ok, rootMetadata.state, root.header.Lifecycle)
+	}
+	runtime.KeepAlive(root.memory)
+}
+
 func TestExplicitPanicTerminalScheduleRaceDoesNotRedestroy(t *testing.T) {
 	tests := []struct {
 		name  string

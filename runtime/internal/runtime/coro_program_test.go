@@ -196,6 +196,9 @@ type coroProgramTestDriverV1 struct {
 	completeReady            bool
 	released                 bool
 	requestScheduleOnDestroy bool
+	panicOnResume            bool
+	panicTypeWord            unsafe.Pointer
+	panicDataWord            unsafe.Pointer
 	spawnOnMainReturn        bool
 	child                    *coro.G
 	childFrame               *coroProgramTestFrameV1
@@ -270,6 +273,19 @@ func (driver *coroProgramTestDriverV1) resume(handle unsafe.Pointer) {
 	frame := driver.frame
 	frame.header.SuspendReason = uint16(coro.SuspendNone)
 	frame.header.Lifecycle = uint16(coro.FrameActive)
+	if driver.panicOnResume {
+		frame.header.SuspendReason = uint16(coro.SuspendPanic)
+		frame.header.Lifecycle = uint16(coro.FrameFinalSuspended)
+		__llgo_coro_panic_prepare_v1(
+			unsafe.Pointer(frame.g),
+			handle,
+			unsafe.Pointer(frame.header),
+			driver.panicTypeWord,
+			driver.panicDataWord,
+		)
+		driver.completeReady = true
+		return
+	}
 	if driver.spawnOnMainReturn {
 		driver.child = new(coro.G)
 		if !coro.BeginSpawn(frame.g, driver.child, unsafe.Pointer(driver.child), coro.TaskStorageSize()) {
@@ -432,6 +448,75 @@ func TestCoroProgramTerminalScheduleRetryDoesNotRedestroy(t *testing.T) {
 	}
 	runtime.KeepAlive(frame.memory)
 	runtime.KeepAlive(manifest)
+}
+
+func requireCoroProgramRuntimeAbort(t *testing.T, want string, call func()) {
+	t.Helper()
+	defer func() {
+		recovered := recover()
+		if recovered != want {
+			t.Fatalf("coroutine runtime abort = %#v, want %q", recovered, want)
+		}
+	}()
+	call()
+	t.Fatal("coroutine runtime ABI violation returned after abort")
+}
+
+func TestCoroProgramExplicitPanicHookAndTerminalDispatcherFailClosed(t *testing.T) {
+	resetCoroProgramTestStateV1(t)
+	manifest := newCoroProgramTestManifestV1()
+	factory := unsafe.Pointer(&manifest.factoryMarker)
+
+	gPointer, ok := coroProgramBeginV1(unsafe.Pointer(&manifest.manifest), factory)
+	if !ok {
+		t.Fatal("begin explicit-panic coroutine program")
+	}
+	frame := newCoroProgramTestFrameV1(t, &coroProgramGV1State)
+	typeWord, dataWord := new(byte), new(byte)
+	driver := &coroProgramTestDriverV1{
+		t:             t,
+		frame:         frame,
+		panicOnResume: true,
+		panicTypeWord: unsafe.Pointer(typeWord),
+		panicDataWord: unsafe.Pointer(dataWord),
+	}
+	activeCoroProgramDriver = driver
+	if coroProgramRunV1(gPointer, frame.handle) {
+		t.Fatal("ActionPanicComplete was misclassified as normal program completion")
+	}
+	record, published := coro.LoadPanicRecord(&coroProgramGV1State)
+	if !published || record.Status != coro.ExplicitStatusPanic ||
+		record.TypeWord != unsafe.Pointer(typeWord) || record.DataWord != unsafe.Pointer(dataWord) {
+		t.Fatalf("terminal adapter panic record = (%+v, %t)", record, published)
+	}
+	if coroProgramLifecycleV1State != coroProgramFailedV1 ||
+		driver.doneCalls != 2 || driver.resumeCalls != 1 || driver.destroyCalls != 1 || !driver.released ||
+		coro.TerminalG(&coroProgramPV1State, &coroProgramGV1State) || coro.ReclaimableG(&coroProgramGV1State) {
+		t.Fatalf("explicit panic adapter = lifecycle:%d done:%d resume:%d destroy:%d released:%t",
+			coroProgramLifecycleV1State, driver.doneCalls, driver.resumeCalls, driver.destroyCalls, driver.released)
+	}
+
+	// Publication is once-only at the exported boundary as well: a duplicate
+	// compiler hook is a non-returning ABI violation, never a normal result.
+	requireCoroProgramRuntimeAbort(t, "invalid coroutine panic handoff", func() {
+		__llgo_coro_panic_prepare_v1(
+			gPointer,
+			frame.handle,
+			unsafe.Pointer(frame.header),
+			unsafe.Pointer(typeWord),
+			unsafe.Pointer(dataWord),
+		)
+	})
+	runtime.KeepAlive(typeWord)
+	runtime.KeepAlive(dataWord)
+	runtime.KeepAlive(frame.memory)
+	runtime.KeepAlive(manifest)
+}
+
+func TestCoroProgramExplicitPanicHookRejectsInvalidPhysicalG(t *testing.T) {
+	requireCoroProgramRuntimeAbort(t, "invalid coroutine panic handoff", func() {
+		__llgo_coro_panic_prepare_v1(nil, nil, nil, nil, nil)
+	})
 }
 
 func TestCoroProgramNormalMainReturnCancelsReadyChild(t *testing.T) {

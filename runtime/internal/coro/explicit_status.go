@@ -78,6 +78,31 @@ func LoadPanicRecord(g *G) (PanicRecordSnapshot, bool) {
 	}, true
 }
 
+func validPanicAncestor(g *G, frame *Frame) bool {
+	return frame != nil && frame.owner == g && frame.handle != nil && frame.header != nil &&
+		frame.state == FrameSuspended && frame.header.G == unsafe.Pointer(g) && frame.header.Flags == 0 &&
+		frame.header.SuspendReason == uint16(SuspendCall) &&
+		frame.header.Lifecycle == uint16(FrameSuspended)
+}
+
+// validPanicAncestry proves before publication that every continuation which
+// terminal panic unwinding would bypass is a plain suspended await. Version
+// zero has no cleanup/recover transport, so any non-zero flags reject the
+// entire operation before the active frame or an ancestor can be destroyed.
+func validPanicAncestry(g *G, active *Frame) bool {
+	if g == nil || active == nil || active.header == nil {
+		return false
+	}
+	child := active
+	for ancestor := active.parent; ancestor != nil; ancestor = ancestor.parent {
+		if !validPanicAncestor(g, ancestor) || child.header.Parent != ancestor.handle {
+			return false
+		}
+		child = ancestor
+	}
+	return child == g.root && child.header.Parent == nil
+}
+
 // PrepareExplicitStatus is the independently testable core of the future
 // compiler hook. Only ExplicitStatusPanic is accepted. The first caller owns
 // the publication attempt; any malformed winner permanently poisons the record
@@ -119,7 +144,7 @@ func PrepareExplicitStatus(
 	if frame == nil || frame != g.active || frame.owner != g || frame.header != header ||
 		frame.state != FrameActive || header.G != unsafe.Pointer(g) ||
 		header.SuspendReason != uint16(SuspendPanic) ||
-		header.Lifecycle != uint16(FrameFinalSuspended) {
+		header.Lifecycle != uint16(FrameFinalSuspended) || !validPanicAncestry(g, frame) {
 		return reject()
 	}
 
@@ -142,10 +167,7 @@ func PreparePanic(g *G, handle unsafe.Pointer, header *HeaderV1, typeWord, dataW
 func preparePanicAncestor(p *P, g *G, frame *Frame) (Action, bool) {
 	if p == nil || g == nil || frame == nil || p.current != g || g.state != GPanicking ||
 		!g.panicUnwind || !publishedPanicRecord(&g.panicRecord) || g.destroyTarget != nil ||
-		frame != g.active || frame.owner != g || frame.handle == nil || frame.header == nil ||
-		frame.state != FrameSuspended || frame.header.G != unsafe.Pointer(g) ||
-		frame.header.SuspendReason != uint16(SuspendCall) ||
-		frame.header.Lifecycle != uint16(FrameSuspended) {
+		frame != g.active || !validPanicAncestor(g, frame) {
 		return Action{}, false
 	}
 	handle := frame.handle

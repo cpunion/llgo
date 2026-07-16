@@ -188,3 +188,23 @@ func coroRunActions(p *coroP, g *coroG, action coro.Action) bool {
 		}
 	}
 }
+
+// __llgo_coro_panic_prepare_v1 is the compiler-to-runtime terminal panic
+// handoff. The physical G is an explicit ABI argument: this boundary must
+// never discover scheduler ownership through TLS or a process-global current
+// G. A rejected once-only publication is a terminal ABI violation and aborts
+// immediately, so malformed cleanup/recover/Goexit/implicit-fault lowering
+// cannot resume ordinary execution on a poisoned G.
+//
+//export __llgo_coro_panic_prepare_v1
+func __llgo_coro_panic_prepare_v1(g, handle, header, typeWord, dataWord unsafe.Pointer) {
+	if !coro.PreparePanic(
+		(*coro.G)(g),
+		handle,
+		(*coro.HeaderV1)(header),
+		typeWord,
+		dataWord,
+	) {
+		coroRuntimeAbort("invalid coroutine panic handoff")
+	}
+}
