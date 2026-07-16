@@ -94,23 +94,26 @@ func TestCompilationCoroABIIdentityValidation(t *testing.T) {
 	if err := (&Compilation{EnableCoroEntryResolution: true, EnableCoroPhysicalABI: true}).validateCoroABIIdentity(false); err != nil {
 		t.Fatalf("omitted source ABI identity should use current defaults: %v", err)
 	}
-	plainDispatch := &Compilation{
-		EnableCoroEntryResolution: true,
-		EnableCoroPlainDispatch:   true,
-		CoroABI:                   coro.EntryResolutionABIV0,
-		SchedulerABI:              coro.SchedulerNoneABIV0,
-		PanicABI:                  coro.PanicLegacyABIV0,
-		FuncRepABI:                coro.FuncRepABIV1,
+	newPlainDispatch := func() *Compilation {
+		return &Compilation{
+			EnableCoroEntryResolution: true,
+			EnableCoroPlainDispatch:   true,
+			CoroABI:                   coro.EntryResolutionABIV0,
+			SchedulerABI:              coro.SchedulerNoneABIV0,
+			PanicABI:                  coro.PanicLegacyABIV0,
+			FuncRepABI:                coro.FuncRepABIV1,
+		}
 	}
+	plainDispatch := newPlainDispatch()
 	if err := plainDispatch.validateCoroABIIdentity(false); err != nil {
 		t.Fatalf("complete plain-dispatch ABI identity: %v", err)
 	}
-	wrongPlainDispatch := *plainDispatch
+	wrongPlainDispatch := newPlainDispatch()
 	wrongPlainDispatch.FuncRepABI = coro.FuncRepABIV0
 	if err := wrongPlainDispatch.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "function representation ABI") {
 		t.Fatalf("plain-dispatch function representation mismatch = %v", err)
 	}
-	withoutEntry := *plainDispatch
+	withoutEntry := newPlainDispatch()
 	withoutEntry.EnableCoroEntryResolution = false
 	if err := withoutEntry.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "requires coroutine entry resolution") {
 		t.Fatalf("plain-dispatch dependency error = %v", err)

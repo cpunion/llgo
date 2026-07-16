@@ -32,15 +32,16 @@ const coroPrimarySuffix = "$coro"
 // FuncRep only describes escaped function values and never authorizes a
 // second body.
 type plannedFunctionSymbol struct {
-	function   *ssa.Function
-	pkgTypes   *types.Package
-	name       string
-	ftype      int
-	plan       coro.FunctionPlan
-	planned    bool
-	physical   bool
-	childAwait bool
-	coroPlan   *coro.SSAPlan
+	function      *ssa.Function
+	pkgTypes      *types.Package
+	name          string
+	ftype         int
+	plan          coro.FunctionPlan
+	planned       bool
+	physical      bool
+	childAwait    bool
+	plainDispatch bool
+	coroPlan      *coro.SSAPlan
 }
 
 // resolveFunctionSymbol is shared by function definitions and declarations so
@@ -84,6 +85,7 @@ func (p *context) resolveFunctionSymbol(fn *ssa.Function) (plannedFunctionSymbol
 	entry.planned = true
 	entry.physical = p.compilation.EnableCoroPhysicalABI
 	entry.childAwait = p.compilation.EnableCoroChildAwait
+	entry.plainDispatch = p.compilation.EnableCoroPlainDispatch
 	entry.coroPlan = p.compilation.CoroPlan
 	if p.compilation.CoroPlan.IgnoresBody(fn) {
 		return entry, fmt.Errorf("coroutine entry resolution: Go-emitted function %q has an ignored SSA body", plan.ID)
@@ -163,7 +165,10 @@ func (e plannedFunctionSymbol) checkSupported() error {
 		return fmt.Errorf("coroutine entry resolution: function %q has no emitted entry", e.plan.ID)
 	}
 	if e.plan.FuncRep == coro.Dispatch {
-		return fmt.Errorf("coroutine entry resolution: function %q requires an unimplemented dispatch descriptor", e.plan.ID)
+		if !e.plainDispatch {
+			return fmt.Errorf("coroutine entry resolution: function %q requires an unimplemented dispatch descriptor", e.plan.ID)
+		}
+		return validateCoroPlainDispatchTarget(e.function, e.plan)
 	}
 	if e.plan.Emission == coro.EmitCoroutine {
 		if !e.physical {
@@ -234,12 +239,13 @@ func (c *Compilation) preflightCoroPlan() error {
 				continue
 			}
 			entry := plannedFunctionSymbol{
-				function:   function.Function,
-				plan:       function.Plan,
-				planned:    true,
-				physical:   c.EnableCoroPhysicalABI,
-				childAwait: c.EnableCoroChildAwait,
-				coroPlan:   c.CoroPlan,
+				function:      function.Function,
+				plan:          function.Plan,
+				planned:       true,
+				physical:      c.EnableCoroPhysicalABI,
+				childAwait:    c.EnableCoroChildAwait,
+				plainDispatch: c.EnableCoroPlainDispatch,
+				coroPlan:      c.CoroPlan,
 			}
 			if err := entry.checkSupported(); err != nil {
 				c.coroPreflightErr = err
@@ -258,6 +264,12 @@ func (c *Compilation) preflightCoroPlan() error {
 		}
 		if c.EnableCoroPhysicalABI {
 			c.coroPreflightErr = validateCoroPhysicalConsumers(c.CoroPlan, c.EnableCoroChildAwait)
+			if c.coroPreflightErr != nil {
+				return
+			}
+		}
+		if c.EnableCoroPlainDispatch {
+			c.coroPreflightErr = validateCoroPlainDispatchConsumers(c.CoroPlan)
 		}
 	})
 	return c.coroPreflightErr

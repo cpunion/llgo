@@ -186,6 +186,7 @@ type context struct {
 	sourceParamBase      int // hidden physical parameters before source params
 	currentCoro          *coroBodyContext
 	coroRootFactories    []coroRootFactoryRegistration
+	coroPlainDescriptors map[string]llssa.Expr
 
 	patches          Patches
 	blkInfos         []blocks.Info
@@ -1217,11 +1218,13 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 	}
 	switch v := iv.(type) {
 	case *ssa.Call:
-		if value, handled := p.tryCompileCoroStaticAwait(b, v); handled {
+		if value, handled := p.tryCompileCoroPlainDispatchCall(b, v); handled {
 			ret = value
-			break
+		} else if value, handled := p.tryCompileCoroStaticAwait(b, v); handled {
+			ret = value
+		} else {
+			ret = p.call(b, llssa.Call, &v.Call)
 		}
-		ret = p.call(b, llssa.Call, &v.Call)
 		if p.rangeFuncCallNeedsDeferDrain(&v.Call) {
 			b.DeferStackDrain()
 		}
@@ -1446,7 +1449,20 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		}
 		ret = b.MakeMap(t, nReserve)
 	case *ssa.MakeClosure:
-		fn := p.compileValue(b, v.Fn)
+		if value, handled := p.tryCompileCoroPlainDispatchClosure(b, v); handled {
+			ret = value
+			break
+		}
+		var fn llssa.Expr
+		if target, ok := v.Fn.(*ssa.Function); ok && p.compilation != nil && p.compilation.EnableCoroEntryResolution {
+			// The target's own ValuePlan may require a descriptor at another
+			// producer. MakeClosure still needs the raw body entry; feeding a
+			// descriptor-backed closure to Builder.MakeClosure would reinterpret
+			// the descriptor pointer as executable code.
+			fn = p.compileRawFunctionValue(target)
+		} else {
+			fn = p.compileValue(b, v.Fn)
+		}
 		bindings := p.compileValues(b, v.Bindings, 0)
 		ret = b.MakeClosure(fn, bindings)
 	case *ssa.TypeAssert:
@@ -1717,29 +1733,10 @@ func (p *context) compileValue(b llssa.Builder, v ssa.Value) llssa.Expr {
 			}
 		}
 	case *ssa.Function:
-		if p.compilation != nil && p.compilation.EnableCoroEntryResolution && p.compilation.EmissionUniverse != nil {
-			canonical, ok := p.compilation.EmissionUniverse.Resolve(v)
-			if !ok {
-				panic(fmt.Errorf("coroutine entry resolution: function value %q is absent from the prepared emission universe", v.Name()))
-			}
-			v = canonical
+		if value, handled := p.tryCompileCoroPlainDispatchFunctionValue(b, v); handled {
+			return value
 		}
-		if _, _, ftype := p.funcName(v); ftype == llgoInstr {
-			if p.compilation != nil && p.compilation.EnableCoroEntryResolution && p.compilation.EmissionUniverse != nil {
-				wrapper, ok := p.compilation.EmissionUniverse.intrinsicWrapper(p.goPkg, v)
-				if !ok {
-					panic(fmt.Errorf("coroutine entry resolution: intrinsic function value %q was not materialized before codegen", v.Name()))
-				}
-				v = wrapper
-			} else {
-				v = ssawrap.MakeCallWrapper(p.goProg, v)
-			}
-		}
-		aFn, pyFn, _ := p.compileFunction(v)
-		if aFn != nil {
-			return aFn.Expr
-		}
-		return pyFn.Expr
+		return p.compileRawFunctionValue(v)
 	case *ssa.Global:
 		varName := v.Name()
 		val := p.varOf(b, v)
@@ -2108,6 +2105,36 @@ func (p *context) observeCoroPlan() {
 	if observer := p.compilation.CoroPlanObserver; observer != nil {
 		observer(p.goPkg, p.compilation.CoroPlan)
 	}
+}
+
+// compileRawFunctionValue returns the selected body entry without applying a
+// function-value representation conversion. Static calls and MakeClosure use
+// this path even when a different exact producer for the same SSA target is
+// descriptor-backed.
+func (p *context) compileRawFunctionValue(v *ssa.Function) llssa.Expr {
+	if p.compilation != nil && p.compilation.EnableCoroEntryResolution && p.compilation.EmissionUniverse != nil {
+		canonical, ok := p.compilation.EmissionUniverse.Resolve(v)
+		if !ok {
+			panic(fmt.Errorf("coroutine entry resolution: function value %q is absent from the prepared emission universe", v.Name()))
+		}
+		v = canonical
+	}
+	if _, _, ftype := p.funcName(v); ftype == llgoInstr {
+		if p.compilation != nil && p.compilation.EnableCoroEntryResolution && p.compilation.EmissionUniverse != nil {
+			wrapper, ok := p.compilation.EmissionUniverse.intrinsicWrapper(p.goPkg, v)
+			if !ok {
+				panic(fmt.Errorf("coroutine entry resolution: intrinsic function value %q was not materialized before codegen", v.Name()))
+			}
+			v = wrapper
+		} else {
+			v = ssawrap.MakeCallWrapper(p.goProg, v)
+		}
+	}
+	aFn, pyFn, _ := p.compileFunction(v)
+	if aFn != nil {
+		return aFn.Expr
+	}
+	return pyFn.Expr
 }
 
 func initFnNameOfHasPatch(name string) string {
