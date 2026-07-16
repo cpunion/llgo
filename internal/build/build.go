@@ -1947,12 +1947,16 @@ func nativeCoroTimerRuntimeABI(conf *Config) bool {
 	if !nativeCoroDoorbellRuntimeABI(conf) {
 		return false
 	}
-	switch conf.Goarch {
-	case "amd64", "arm64", "loong64", "ppc64", "ppc64le", "riscv64", "s390x":
-		return true
-	default:
-		return false
+	switch conf.Goos {
+	case "darwin":
+		return conf.Goarch == "amd64" || conf.Goarch == "arm64"
+	case "linux":
+		switch conf.Goarch {
+		case "amd64", "arm64", "loong64", "ppc64", "ppc64le", "riscv64", "s390x":
+			return true
+		}
 	}
+	return false
 }
 
 func configHasBuildTag(conf *Config, want string) bool {
@@ -2025,6 +2029,12 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 	}
 	if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
 		names = append(names, coroNativePostWaitSymbolV1)
+	}
+	if nativeCoroTimerRuntimeABI(ctx.buildConf) {
+		names = append(names,
+			coroTimerPrepareAfterSymbolV1,
+			coroTimerRetireCompletedSymbolV1,
+		)
 	}
 	if ctx.buildConf.EnableCoroProgramBootstrapRun {
 		names = append(names,
@@ -2126,6 +2136,36 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			for parameter := 1; parameter < sig.Params().Len(); parameter++ {
 				if !types.Identical(sig.Params().At(parameter).Type(), types.Typ[types.Uint32]) {
 					return nil, nil, nil, nil, fmt.Errorf("coroutine wait owner ABI %q must have exact func(unsafe.Pointer, uint32, uint32, uint32) bool signature", name)
+				}
+			}
+		}
+		if name == coroTimerPrepareAfterSymbolV1 {
+			sig := fn.Signature
+			uint32Pointer := types.NewPointer(types.Typ[types.Uint32])
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 5 || sig.Results().Len() != 1 ||
+				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Params().At(1).Type(), types.Typ[types.Int64]) ||
+				!types.Identical(sig.Results().At(0).Type(), types.Typ[types.Bool]) ||
+				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf("coroutine timer prepare ABI %q must have exact func(unsafe.Pointer, int64, *uint32, *uint32, *uint32) bool signature", name)
+			}
+			for parameter := 2; parameter < sig.Params().Len(); parameter++ {
+				if !types.Identical(sig.Params().At(parameter).Type(), uint32Pointer) {
+					return nil, nil, nil, nil, fmt.Errorf("coroutine timer prepare ABI %q must have exact func(unsafe.Pointer, int64, *uint32, *uint32, *uint32) bool signature", name)
+				}
+			}
+		}
+		if name == coroTimerRetireCompletedSymbolV1 {
+			sig := fn.Signature
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 4 || sig.Results().Len() != 1 ||
+				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Results().At(0).Type(), types.Typ[types.Bool]) ||
+				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf("coroutine timer owner ABI %q must have exact func(unsafe.Pointer, uint32, uint32, uint32) bool signature", name)
+			}
+			for parameter := 1; parameter < sig.Params().Len(); parameter++ {
+				if !types.Identical(sig.Params().At(parameter).Type(), types.Typ[types.Uint32]) {
+					return nil, nil, nil, nil, fmt.Errorf("coroutine timer owner ABI %q must have exact func(unsafe.Pointer, uint32, uint32, uint32) bool signature", name)
 				}
 			}
 		}

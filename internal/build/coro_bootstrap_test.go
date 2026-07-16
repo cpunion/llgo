@@ -512,6 +512,28 @@ func TestCoroProgramBootstrapHashV1StableAndStepComplete(t *testing.T) {
 	if changedDriver == bootstrap.StepHash {
 		t.Fatal("bootstrap hash ignored factory/driver activation")
 	}
+	ctx.buildConf.Goos = "linux"
+	ctx.buildConf.Goarch = "386"
+	withoutNativeTimer, err := coroProgramBootstrapHashV1(ctx, bootstrap.Steps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx.buildConf.Goarch = "amd64"
+	withNativeTimer, err := coroProgramBootstrapHashV1(ctx, bootstrap.Steps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withNativeTimer == withoutNativeTimer {
+		t.Fatal("bootstrap hash ignored native monotonic timer owner ABI")
+	}
+	ctx.buildConf.Goarch = "386"
+	afterCapabilityMismatch, err := coroProgramBootstrapHashV1(ctx, bootstrap.Steps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterCapabilityMismatch != withoutNativeTimer || afterCapabilityMismatch == withNativeTimer {
+		t.Fatalf("native timer capability mismatch did not select a distinct stable hash: timer=%x no-timer=%x after=%x", withNativeTimer, withoutNativeTimer, afterCapabilityMismatch)
+	}
 }
 
 type coroBootstrapV2TestFixture struct {

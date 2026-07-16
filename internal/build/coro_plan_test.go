@@ -412,6 +412,9 @@ func __llgo_coro_program_continue_v1(uint32) {}
 func __llgo_coro_wait_prepare_v1(unsafe.Pointer, *uint32, *uint32, *uint32, *uint32, *uint32) bool { return false }
 func __llgo_coro_wait_rollback_v1(unsafe.Pointer, uint32, uint32, uint32) bool { return false }
 func __llgo_coro_wait_retire_completed_v1(unsafe.Pointer, uint32, uint32, uint32) bool { return false }
+func __llgo_coro_native_post_wait_v1(uint32, uint32, uint32, uint32) uint32 { return 0 }
+func __llgo_coro_timer_prepare_after_v1(unsafe.Pointer, int64, *uint32, *uint32, *uint32) bool { return false }
+func __llgo_coro_timer_retire_completed_v1(unsafe.Pointer, uint32, uint32, uint32) bool { return false }
 func __llgo_coro_frame_allocator_bootstrap_v1() {}
 func __llgo_coro_frame_alloc_v1() {}
 func __llgo_coro_frame_publish_v1() {}
@@ -527,6 +530,97 @@ func atomicExchange(*uint32, uint32) uint32
 		if root.Function == nil || root.Function.Name() != wantRoots[index] || root.Demand != wantDemand {
 			t.Fatalf("required root %d = %+v, want %s/%s", index, root, wantRoots[index], wantDemand)
 		}
+	}
+	for _, name := range []string{coroNativePostWaitSymbolV1, coroTimerPrepareAfterSymbolV1, coroTimerRetireCompletedSymbolV1} {
+		if _, ok := requiredPlain[ssaPkg.Func(name)]; ok {
+			t.Fatalf("inactive native timer hook %q entered the required plain island", name)
+		}
+	}
+	timerCtx := &context{
+		buildConf: &Config{
+			Goos:                          "linux",
+			Goarch:                        "amd64",
+			EnableCoroChildAwait:          true,
+			EnableCoroProgramBootstrapRun: true,
+		},
+		coroEmission:    ctx.coroEmission,
+		coroSSAEmission: ctx.coroSSAEmission,
+	}
+	timerRoots, timerPlain, timerDirect, timerClosed, err := requiredCoroProgramRuntimePlan(timerCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantTimerRoots := []string{
+		"init",
+		coroFrameAllocatorBootstrapSymbolV1,
+		coroProgramBeginSymbolV1,
+		coroProgramRunSymbolV1,
+		coroProgramContinueSymbolV1,
+		coroWaitPrepareSymbolV1,
+		coroWaitRollbackSymbolV1,
+		coroWaitRetireCompletedSymbolV1,
+		coroNativePostWaitSymbolV1,
+		coroTimerPrepareAfterSymbolV1,
+		coroTimerRetireCompletedSymbolV1,
+		"__llgo_coro_frame_alloc_v1",
+		"__llgo_coro_frame_publish_v1",
+		"__llgo_coro_await_prepare_v1",
+		"__llgo_coro_preempt_poll_v1",
+		"__llgo_coro_yield_prepare_v1",
+		"__llgo_coro_park_prepare_v1",
+		"__llgo_coro_complete_prepare_v1",
+		"__llgo_coro_frame_free_v1",
+	}
+	if len(timerRoots) != len(wantTimerRoots) {
+		t.Fatalf("native timer runtime roots = %d, want %d", len(timerRoots), len(wantTimerRoots))
+	}
+	for index, root := range timerRoots {
+		wantDemand := coro.SyncDemand
+		if index == 0 {
+			wantDemand = coro.AsyncDemand
+		}
+		if root.Function == nil || root.Function.Name() != wantTimerRoots[index] || root.Demand != wantDemand {
+			t.Fatalf("native timer root %d = %+v, want %s/%s", index, root, wantTimerRoots[index], wantDemand)
+		}
+	}
+	for _, name := range []string{coroNativePostWaitSymbolV1, coroTimerPrepareAfterSymbolV1, coroTimerRetireCompletedSymbolV1} {
+		if _, ok := timerPlain[ssaPkg.Func(name)]; !ok {
+			t.Fatalf("native timer hook %q is absent from the required plain island", name)
+		}
+	}
+	if len(timerDirect) != 0 || len(timerClosed) != 0 {
+		t.Fatalf("native timer roots produced callback proofs: direct=%d dynamic=%d", len(timerDirect), len(timerClosed))
+	}
+	timerPrepareFn := ssaPkg.Func(coroTimerPrepareAfterSymbolV1)
+	originalTimerPrepareSignature := timerPrepareFn.Signature
+	timerPrepareFn.Signature = types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(
+			types.NewParam(token.NoPos, nil, "token", types.Typ[types.UnsafePointer]),
+			types.NewParam(token.NoPos, nil, "delay", types.Typ[types.Uint64]),
+			types.NewParam(token.NoPos, nil, "ticket", types.NewPointer(types.Typ[types.Uint32])),
+			types.NewParam(token.NoPos, nil, "slot", types.NewPointer(types.Typ[types.Uint32])),
+			types.NewParam(token.NoPos, nil, "generation", types.NewPointer(types.Typ[types.Uint32])),
+		),
+		types.NewTuple(types.NewParam(token.NoPos, nil, "ok", types.Typ[types.Bool])), false)
+	_, _, _, _, invalidTimerPrepareErr := requiredCoroProgramRuntimePlan(timerCtx)
+	timerPrepareFn.Signature = originalTimerPrepareSignature
+	if invalidTimerPrepareErr == nil || !strings.Contains(invalidTimerPrepareErr.Error(), "timer prepare ABI") {
+		t.Fatalf("invalid timer prepare ABI error = %v", invalidTimerPrepareErr)
+	}
+	timerRetireFn := ssaPkg.Func(coroTimerRetireCompletedSymbolV1)
+	originalTimerRetireSignature := timerRetireFn.Signature
+	timerRetireFn.Signature = types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(
+			types.NewParam(token.NoPos, nil, "token", types.Typ[types.UnsafePointer]),
+			types.NewParam(token.NoPos, nil, "ticket", types.Typ[types.Uint64]),
+			types.NewParam(token.NoPos, nil, "slot", types.Typ[types.Uint32]),
+			types.NewParam(token.NoPos, nil, "generation", types.Typ[types.Uint32]),
+		),
+		types.NewTuple(types.NewParam(token.NoPos, nil, "ok", types.Typ[types.Bool])), false)
+	_, _, _, _, invalidTimerRetireErr := requiredCoroProgramRuntimePlan(timerCtx)
+	timerRetireFn.Signature = originalTimerRetireSignature
+	if invalidTimerRetireErr == nil || !strings.Contains(invalidTimerRetireErr.Error(), "timer owner ABI") {
+		t.Fatalf("invalid timer retire ABI error = %v", invalidTimerRetireErr)
 	}
 	panicHook := ssaPkg.Func("__llgo_coro_panic_prepare_v1")
 	if panicHook == nil {
