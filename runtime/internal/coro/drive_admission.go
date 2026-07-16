@@ -50,16 +50,10 @@ const (
 )
 
 // Acquire grants initial begin/run ownership. Continuation callbacks use Enter.
+// Only the acquired owner may call PublishEpoch, ClearEpoch, or RevokeEpoch.
 func (admission *DriveAdmission) Acquire() bool {
-	if admission == nil || preemptLoad(&admission.epoch) != 0 ||
-		!preemptCompareAndSwap(&admission.gate, 0, driveAdmissionOwned) {
-		return false
-	}
-	if preemptLoad(&admission.epoch) != 0 {
-		_ = preemptCompareAndSwap(&admission.gate, driveAdmissionOwned, 0)
-		return false
-	}
-	return true
+	return admission != nil && preemptLoad(&admission.epoch) == 0 &&
+		preemptCompareAndSwap(&admission.gate, 0, driveAdmissionOwned)
 }
 
 // PublishEpoch exposes one POD callback token while the scheduler owner is
