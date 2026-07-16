@@ -676,6 +676,24 @@ func TestCoroPlanDigestMetadataMutationsChangeDigest(t *testing.T) {
 	}
 }
 
+func TestCoroPlanDigestExplicitStatusPanicABIDomainSeparation(t *testing.T) {
+	plan, _ := buildPlanDigestTestPlan(t, ssa.SanityCheckFunctions|ssa.InstantiateGenerics)
+	legacy := validPlanDigestMetadata()
+	legacyDigest, err := plan.CoroPlanDigest(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	explicitStatus := legacy
+	explicitStatus.PanicABI = PanicExplicitStatusABIV0
+	explicitStatusDigest, err := plan.CoroPlanDigest(explicitStatus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if explicitStatusDigest == legacyDigest {
+		t.Fatalf("panic ABI identities share a plan digest: %s", legacyDigest)
+	}
+}
+
 func TestCoroPlanDigestCanonicalEmptyArrays(t *testing.T) {
 	prog, _ := buildCoroTestSSA(t, "empty.go", `package coroid; func root() {}`)
 	plan, err := AnalyzeSSA(prog, nil, planDigestSSAConfig())

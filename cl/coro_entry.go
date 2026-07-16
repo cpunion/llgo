@@ -208,6 +208,9 @@ func (c *Compilation) preflightCoroPlan() error {
 	if c.EnableCoroPlainDispatch && !c.EnableCoroEntryResolution {
 		return fmt.Errorf("coroutine plain dispatch requires coroutine entry resolution")
 	}
+	if c.EnableCoroExplicitStatusPanicABI && !c.EnableCoroEntryResolution {
+		return fmt.Errorf("coroutine explicit-status panic ABI requires coroutine entry resolution")
+	}
 	if c.EnableCoroClosedStaticSpawn {
 		if !c.EnableCoroChildAwait {
 			return fmt.Errorf("coroutine closed static spawn requires coroutine child await")
@@ -222,6 +225,10 @@ func (c *Compilation) preflightCoroPlan() error {
 	c.coroPreflight.Do(func() {
 		if err := c.validateCoroABIIdentity(false); err != nil {
 			c.coroPreflightErr = err
+			return
+		}
+		if c.EnableCoroExplicitStatusPanicABI {
+			c.coroPreflightErr = fmt.Errorf("coroutine explicit-status panic ABI %q is identity-only: lowering and runtime semantics are not implemented", coro.PanicExplicitStatusABIV0)
 			return
 		}
 		if c.CoroPlan == nil {

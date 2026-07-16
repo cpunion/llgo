@@ -60,6 +60,20 @@ func TestCoroutinePlanInputsAffectFingerprint(t *testing.T) {
 		return manifest.Fingerprint()
 	}
 	baseline := fingerprint(strings.Repeat("1", 64), base)
+	explicitStatus := base
+	explicitStatus.PanicABI = coro.PanicExplicitStatusABIV0
+	if got := fingerprint(strings.Repeat("1", 64), explicitStatus); got == baseline {
+		t.Fatal("explicit-status panic ABI did not domain-separate the package fingerprint")
+	}
+	explicitManifest := newManifestBuilder()
+	(&context{
+		buildConf:        &Config{Goos: "linux", Goarch: "amd64", EnableCoroEntryResolution: true, EnableCoroExplicitStatusPanicABI: true},
+		coroPlanDigest:   strings.Repeat("1", 64),
+		coroPlanMetadata: explicitStatus,
+	}).collectCommonInputs(explicitManifest)
+	if got := explicitManifest.common.CoroPanicABI; got != coro.PanicExplicitStatusABIV0 {
+		t.Fatalf("manifest panic ABI = %q, want %q", got, coro.PanicExplicitStatusABIV0)
+	}
 	if got := fingerprint(strings.Repeat("2", 64), base); got == baseline {
 		t.Fatal("CoroPlanDigest did not affect the package fingerprint")
 	}

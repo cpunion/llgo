@@ -1237,6 +1237,31 @@ func TestBuildCoroPlanInstallsArchiveDigest(t *testing.T) {
 		t.Fatalf("manifest coroutine inputs = %+v", manifest.common)
 	}
 
+	explicitProg := llssa.NewProgram(nil)
+	defer explicitProg.Dispose()
+	explicitCtx := &context{
+		progSSA: ssaPkg.Prog,
+		prog:    explicitProg,
+		buildConf: &Config{
+			EnableCoroEntryResolution:        true,
+			EnableCoroExplicitStatusPanicABI: true,
+			CoroPlanBuilder: func(input CoroPlanInput) (*coro.SSAPlan, error) {
+				return input.Analyze(coro.Roots{{Function: ssaPkg.Func("F"), Demand: coro.SyncDemand}}, coro.SSAConfig{
+					MaxPlainInstructions: -1,
+				})
+			},
+		},
+	}
+	if err := buildCoroPlan(explicitCtx, aPkg); err == nil ||
+		!strings.Contains(err.Error(), coro.PanicExplicitStatusABIV0) ||
+		!strings.Contains(err.Error(), "lowering and runtime semantics are not implemented") {
+		t.Fatalf("explicit-status panic ABI build error = %v", err)
+	}
+	if explicitCtx.coroPlan != nil || explicitCtx.clCompilation != nil || explicitCtx.coroPlanDigest != "" || explicitCtx.coroPlanMetadata.PanicABI != "" {
+		t.Fatalf("identity-only explicit-status panic build retained active state: plan=%v compilation=%v digest=%q metadata=%+v",
+			explicitCtx.coroPlan, explicitCtx.clCompilation, explicitCtx.coroPlanDigest, explicitCtx.coroPlanMetadata)
+	}
+
 	badProg := llssa.NewProgram(nil)
 	defer badProg.Dispose()
 	badCtx := &context{
@@ -1732,6 +1757,13 @@ func external()
 	if err := validateCoroUnwindOnlyLoweredCalls(plainPlan, coro.PanicLegacyABIV0); err != nil {
 		t.Fatalf("bounded plain unwind helper rejected: %v", err)
 	}
+	if err := validateCoroUnwindOnlyLoweredCalls(plainPlan, coro.PanicExplicitStatusABIV0); err == nil ||
+		!strings.Contains(err.Error(), "has no certified unwind-helper call contract") {
+		t.Fatalf("identity-only explicit-status unwind helper error = %v", err)
+	}
+	if err := validateCoroUnwindOnlyLoweredCalls(plainPlan, coro.PanicLegacyABIV0); err != nil {
+		t.Fatalf("explicit-status rejection changed the legacy bounded-plain certificate: %v", err)
+	}
 	forged := coroLegacyPanicPlainCertificate{owner: owner, logicalName: "runtime.Helper", target: suspending}
 	if err := forged.validate(plainPlan); err == nil || !strings.Contains(err.Error(), "not bound to an exact frozen unwind-only target") {
 		t.Fatalf("name-only retargeted certificate error = %v", err)
@@ -1888,6 +1920,17 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 		}
 		if ctx.coroPlan != nil || ctx.clCompilation != nil {
 			t.Fatal("invalid physical ABI configuration installed coroutine compilation state")
+		}
+	})
+
+	t.Run("explicit-status panic ABI requires entry resolution", func(t *testing.T) {
+		ctx := &context{buildConf: &Config{EnableCoroExplicitStatusPanicABI: true}}
+		err := buildCoroPlan(ctx)
+		if err == nil || !strings.Contains(err.Error(), "entry resolution is required") {
+			t.Fatalf("buildCoroPlan error = %v, want explicit-status entry-resolution requirement", err)
+		}
+		if ctx.coroPlan != nil || ctx.clCompilation != nil {
+			t.Fatal("invalid explicit-status panic ABI configuration installed coroutine compilation state")
 		}
 	})
 
@@ -2217,6 +2260,18 @@ func TestCoroEntryResolutionUsesPlanMatchedPackageCache(t *testing.T) {
 	dispatchCtx.clCompilation.EnableCoroPlainDispatch = false
 	if dispatchCtx.canUsePackageCache() {
 		t.Fatal("plain-dispatch capability mismatch unexpectedly permits package cache")
+	}
+	explicitStatusCtx := newContext(digestA)
+	explicitStatusCtx.buildConf.EnableCoroExplicitStatusPanicABI = true
+	explicitStatusCtx.clCompilation.EnableCoroExplicitStatusPanicABI = true
+	explicitStatusCtx.clCompilation.PanicABI = coro.PanicExplicitStatusABIV0
+	explicitStatusCtx.coroPlanMetadata.PanicABI = coro.PanicExplicitStatusABIV0
+	if !explicitStatusCtx.canUsePackageCache() {
+		t.Fatal("matching explicit-status panic ABI identity unexpectedly disabled package cache")
+	}
+	explicitStatusCtx.clCompilation.EnableCoroExplicitStatusPanicABI = false
+	if explicitStatusCtx.canUsePackageCache() {
+		t.Fatal("explicit-status panic capability mismatch unexpectedly permits package cache")
 	}
 	bootstrapMismatch := newContext(digestA)
 	bootstrapMismatch.clCompilation.EnableCoroProgramBootstrapRun = true

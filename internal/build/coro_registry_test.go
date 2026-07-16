@@ -76,6 +76,15 @@ func TestCoroProgramManifestHashV1StableAndComplete(t *testing.T) {
 	if first != again {
 		t.Fatalf("manifest hash is unstable: %x != %x", first, again)
 	}
+	ctx.buildConf.EnableCoroExplicitStatusPanicABI = true
+	explicitStatus, err := coroProgramManifestHashV1(ctx, []string{a, b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx.buildConf.EnableCoroExplicitStatusPanicABI = false
+	if explicitStatus == first {
+		t.Fatal("manifest hash ignored the active panic ABI")
+	}
 	changed, err := coroProgramManifestHashV1(ctx, []string{a})
 	if err != nil {
 		t.Fatal(err)

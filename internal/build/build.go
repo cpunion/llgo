@@ -890,6 +890,11 @@ type Config struct {
 	// leaving it false preserves report-only behavior. Package archives are
 	// reused only when their complete plan/ABI/target fingerprint matches.
 	EnableCoroEntryResolution bool
+	// EnableCoroExplicitStatusPanicABI selects the reserved target-wide
+	// explicit-status panic identity. Hidden outcomes, cleanup edges, and the
+	// runtime protocol are not implemented by this slice; active builds select
+	// the identity for validation and then fail closed before code generation.
+	EnableCoroExplicitStatusPanicABI bool
 	// EnableCoroPhysicalABI enables the experimental LLVM coroutine physical ABI.
 	// It requires EnableCoroEntryResolution and remains leaf-only unless a more
 	// specific lowering capability is enabled.
@@ -1396,6 +1401,9 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	if ctx.buildConf.EnableCoroPlainDispatch && !ctx.buildConf.EnableCoroEntryResolution {
 		return fmt.Errorf("enable coroutine plain dispatch: coroutine entry resolution is required")
 	}
+	if ctx.buildConf.EnableCoroExplicitStatusPanicABI && !ctx.buildConf.EnableCoroEntryResolution {
+		return fmt.Errorf("enable coroutine explicit-status panic ABI: coroutine entry resolution is required")
+	}
 	if ctx.buildConf.EnableCoroChildAwait && ctx.buildConf.BuildMode == BuildModeCArchive {
 		return fmt.Errorf("enable coroutine child await: c-archive requires flattened package members and an explicit host bootstrap extraction contract")
 	}
@@ -1512,20 +1520,28 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	ctx.coroPlanDigest = digest
 	ctx.coroPlanMetadata = metadata
 	ctx.clCompilation = &cl.Compilation{
-		CoroPlan:                      plan,
-		CoroPlanObserver:              ctx.buildConf.CoroPlanObserver,
-		EnableCoroEntryResolution:     ctx.buildConf.EnableCoroEntryResolution,
-		EnableCoroPhysicalABI:         ctx.buildConf.EnableCoroPhysicalABI,
-		EnableCoroChildAwait:          ctx.buildConf.EnableCoroChildAwait,
-		EnableCoroPlainDispatch:       ctx.buildConf.EnableCoroPlainDispatch,
-		EnableCoroClosedStaticSpawn:   ctx.buildConf.EnableCoroClosedStaticSpawn,
-		EnableCoroProgramBootstrapRun: ctx.buildConf.EnableCoroProgramBootstrapRun,
-		CoroPlanDigest:                digest,
-		CoroABI:                       metadata.CoroABI,
-		SchedulerABI:                  metadata.SchedulerABI,
-		PanicABI:                      metadata.PanicABI,
-		FuncRepABI:                    metadata.FuncRepABI,
-		EmissionUniverse:              ctx.coroEmission,
+		CoroPlan:                         plan,
+		CoroPlanObserver:                 ctx.buildConf.CoroPlanObserver,
+		EnableCoroEntryResolution:        ctx.buildConf.EnableCoroEntryResolution,
+		EnableCoroExplicitStatusPanicABI: ctx.buildConf.EnableCoroExplicitStatusPanicABI,
+		EnableCoroPhysicalABI:            ctx.buildConf.EnableCoroPhysicalABI,
+		EnableCoroChildAwait:             ctx.buildConf.EnableCoroChildAwait,
+		EnableCoroPlainDispatch:          ctx.buildConf.EnableCoroPlainDispatch,
+		EnableCoroClosedStaticSpawn:      ctx.buildConf.EnableCoroClosedStaticSpawn,
+		EnableCoroProgramBootstrapRun:    ctx.buildConf.EnableCoroProgramBootstrapRun,
+		CoroPlanDigest:                   digest,
+		CoroABI:                          metadata.CoroABI,
+		SchedulerABI:                     metadata.SchedulerABI,
+		PanicABI:                         metadata.PanicABI,
+		FuncRepABI:                       metadata.FuncRepABI,
+		EmissionUniverse:                 ctx.coroEmission,
+	}
+	if ctx.buildConf.EnableCoroExplicitStatusPanicABI {
+		ctx.coroPlan = nil
+		ctx.coroPlanDigest = ""
+		ctx.coroPlanMetadata = coro.PlanDigestMetadata{}
+		ctx.clCompilation = nil
+		return fmt.Errorf("enable coroutine explicit-status panic ABI %q: identity-only capability; lowering and runtime semantics are not implemented", metadata.PanicABI)
 	}
 	if ctx.buildConf.EnableCoroProgramBootstrapABI {
 		bootstraps, err := prepareCoroProgramBootstrapsV1(ctx)
@@ -1825,6 +1841,13 @@ func activeCoroSchedulerABIVersion(conf *Config) string {
 		return coro.SchedulerChildAwaitABIV0
 	}
 	return coro.SchedulerNoneABIV0
+}
+
+func activeCoroPanicABIVersion(conf *Config) string {
+	if conf != nil && conf.EnableCoroExplicitStatusPanicABI {
+		return coro.PanicExplicitStatusABIV0
+	}
+	return coro.PanicLegacyABIV0
 }
 
 func activeCoroFuncRepABIVersion(conf *Config) string {
@@ -2243,7 +2266,7 @@ func buildCoroPlanDigestMetadata(ctx *context) (coro.PlanDigestMetadata, error) 
 	return coro.PlanDigestMetadata{
 		CoroABI:        activeCoroABIVersion(ctx.buildConf),
 		SchedulerABI:   activeCoroSchedulerABIVersion(ctx.buildConf),
-		PanicABI:       coro.PanicLegacyABIV0,
+		PanicABI:       activeCoroPanicABIVersion(ctx.buildConf),
 		FuncRepABI:     activeCoroFuncRepABIVersion(ctx.buildConf),
 		TargetTriple:   target.Triple,
 		TargetCPU:      target.CPU,

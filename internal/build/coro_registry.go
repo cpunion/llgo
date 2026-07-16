@@ -79,6 +79,7 @@ func coroProgramManifestHashV1(ctx *context, anchors []string, bootstrap ...*cor
 	write(ctx.coroPlanDigest)
 	write(activeCoroABIVersion(ctx.buildConf))
 	write(activeCoroSchedulerABIVersion(ctx.buildConf))
+	write(activeCoroPanicABIVersion(ctx.buildConf))
 	write(target.Triple)
 	write(target.CPU)
 	write(target.Features)

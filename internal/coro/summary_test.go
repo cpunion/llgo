@@ -52,7 +52,7 @@ func TestSummaryStableAcrossInsertionOrder(t *testing.T) {
 		return plan.Summary(SummaryMetadata{
 			CoroABI:      "v1",
 			SchedulerABI: "v1",
-			PanicABI:     "explicit-status-v1",
+			PanicABI:     PanicExplicitStatusABIV0,
 			TargetTriple: "wasm32-unknown-unknown",
 		})
 	}
@@ -83,6 +83,9 @@ func TestSummaryStableAcrossInsertionOrder(t *testing.T) {
 	}
 	if !strings.Contains(string(aData), `"effect":"await-structured,wait-platform"`) {
 		t.Fatalf("summary does not use stable effect spelling: %s", aData)
+	}
+	if !strings.Contains(string(aData), `"panic_abi":"`+PanicExplicitStatusABIV0+`"`) {
+		t.Fatalf("summary does not preserve the explicit-status panic ABI identity: %s", aData)
 	}
 	if !strings.Contains(string(aData), `"emission":"none"`) || !strings.Contains(string(aData), `"emission":"external"`) {
 		t.Fatalf("summary does not encode body emission: %s", aData)

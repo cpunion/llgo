@@ -61,7 +61,12 @@ const (
 	// creates the child only to its initial suspend before commit.
 	SchedulerProgramBootstrapClosedStaticSpawnABIV0 = "llgo.coro.scheduler.program-bootstrap.v2.closed-static-spawn.v0"
 	PanicLegacyABIV0                                = "llgo.coro.panic.legacy.v0"
-	FuncRepABIV0                                    = "llgo.coro.func-rep.v0"
+	// PanicExplicitStatusABIV0 reserves the target-wide identity for the first
+	// compiler-carried panic outcome ABI. The identity is intentionally wired
+	// before its lowering and runtime protocol: selecting it must remain
+	// fail-closed until those semantics are implemented.
+	PanicExplicitStatusABIV0 = "llgo.coro.panic.explicit-status.v0"
+	FuncRepABIV0             = "llgo.coro.func-rep.v0"
 	// FuncRepABIV1 introduces an explicit descriptor/context representation for
 	// dynamically consumed Go function values. The first producer/consumer slice
 	// supports only one no-capture, non-suspending plain body; unsupported value

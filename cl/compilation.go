@@ -51,6 +51,11 @@ type Compilation struct {
 	SchedulerABI   string
 	PanicABI       string
 	FuncRepABI     string
+	// EnableCoroExplicitStatusPanicABI selects the reserved target-wide
+	// explicit-status panic identity. This slice does not implement its hidden
+	// outcome, cleanup, or runtime protocol, so active code generation remains
+	// fail-closed when the capability is selected.
+	EnableCoroExplicitStatusPanicABI bool
 	// EnableCoroPhysicalABI permits the conservative leaf-only coroutine ABI
 	// lowering implemented by the current experimental slice. It requires entry
 	// resolution and does not by itself enable await, dispatch, roots, or a
@@ -129,6 +134,13 @@ func (c *Compilation) validateCoroABIIdentity(required bool) error {
 	if c.EnableCoroPlainDispatch && !c.EnableCoroEntryResolution {
 		return fmt.Errorf("coroutine plain dispatch requires coroutine entry resolution")
 	}
+	if c.EnableCoroExplicitStatusPanicABI && !c.EnableCoroEntryResolution {
+		return fmt.Errorf("coroutine explicit-status panic ABI requires coroutine entry resolution")
+	}
+	wantPanicABI := coro.PanicLegacyABIV0
+	if c.EnableCoroExplicitStatusPanicABI {
+		wantPanicABI = coro.PanicExplicitStatusABIV0
+	}
 	wantFuncRepABI := coro.FuncRepABIV0
 	if c.EnableCoroPlainDispatch {
 		wantFuncRepABI = coro.FuncRepABIV1
@@ -140,7 +152,7 @@ func (c *Compilation) validateCoroABIIdentity(required bool) error {
 	}{
 		{"coroutine", c.CoroABI, wantCoroABI},
 		{"scheduler", c.SchedulerABI, wantSchedulerABI},
-		{"panic", c.PanicABI, coro.PanicLegacyABIV0},
+		{"panic", c.PanicABI, wantPanicABI},
 		{"function representation", c.FuncRepABI, wantFuncRepABI},
 	}
 	if !required {

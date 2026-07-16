@@ -121,6 +121,33 @@ func TestCompilationCoroABIIdentityValidation(t *testing.T) {
 	if err := withoutEntry.preflightCoroPlan(); err == nil || !strings.Contains(err.Error(), "requires coroutine entry resolution") {
 		t.Fatalf("plain-dispatch preflight dependency error = %v", err)
 	}
+	newExplicitStatus := func() *Compilation {
+		compilation := newPhysical()
+		compilation.EnableCoroExplicitStatusPanicABI = true
+		compilation.PanicABI = coro.PanicExplicitStatusABIV0
+		return compilation
+	}
+	explicitStatus := newExplicitStatus()
+	if err := explicitStatus.validateCoroABIIdentity(false); err != nil {
+		t.Fatalf("complete explicit-status panic ABI identity: %v", err)
+	}
+	legacyIdentity := newExplicitStatus()
+	legacyIdentity.PanicABI = coro.PanicLegacyABIV0
+	if err := legacyIdentity.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "panic ABI") {
+		t.Fatalf("explicit-status panic ABI mismatch = %v", err)
+	}
+	withoutExplicitStatusEntry := newExplicitStatus()
+	withoutExplicitStatusEntry.EnableCoroEntryResolution = false
+	if err := withoutExplicitStatusEntry.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "requires coroutine entry resolution") {
+		t.Fatalf("explicit-status panic ABI dependency error = %v", err)
+	}
+	if err := withoutExplicitStatusEntry.preflightCoroPlan(); err == nil || !strings.Contains(err.Error(), "requires coroutine entry resolution") {
+		t.Fatalf("explicit-status panic ABI preflight dependency error = %v", err)
+	}
+	if err := explicitStatus.preflightCoroPlan(); err == nil ||
+		!strings.Contains(err.Error(), "identity-only") || !strings.Contains(err.Error(), "runtime semantics are not implemented") {
+		t.Fatalf("explicit-status panic ABI active preflight error = %v", err)
+	}
 	newChildAwait := func() *Compilation {
 		return &Compilation{
 			EnableCoroEntryResolution: true,
