@@ -163,6 +163,12 @@ func executorProducersQuiesced(slot *executorRequestSlot) bool {
 	return slot != nil && preemptLoad(&slot.inflight) == executorProducerClosed
 }
 
+func executorFreeSlotReusable(generation, inflight, gate uint32) bool {
+	pristine := generation == 0 && inflight == 0 && gate == 0
+	retired := generation != 0 && inflight == executorProducerClosed && gate == executorGateClosed
+	return pristine || retired
+}
+
 // Register publishes one new stable executor generation. It is
 // scheduler-owner-only and allocation-free.
 func (registry *ExecutorRegistry) Register() (ExecutorHandle, bool) {
@@ -180,8 +186,7 @@ func (registry *ExecutorRegistry) Register() (ExecutorHandle, bool) {
 		}
 		inflight := preemptLoad(&slot.inflight)
 		gate := preemptLoad(&slot.gate)
-		if (generation == 0 && (inflight != 0 || gate != 0)) ||
-			(generation != 0 && (inflight != executorProducerClosed || gate != executorGateClosed)) ||
+		if !executorFreeSlotReusable(generation, inflight, gate) ||
 			!preemptCompareAndSwap(&slot.state, uint32(executorFree), uint32(executorInitializing)) {
 			continue
 		}
@@ -389,8 +394,7 @@ func (registry *ExecutorRegistry) CanRelease() bool {
 		inflight := preemptLoad(&slot.inflight)
 		gate := preemptLoad(&slot.gate)
 		if preemptLoad(&slot.state) != uint32(executorFree) ||
-			(generation == 0 && (inflight != 0 || gate != 0)) ||
-			(generation != 0 && (inflight != executorProducerClosed || gate != executorGateClosed)) {
+			!executorFreeSlotReusable(generation, inflight, gate) {
 			return false
 		}
 	}
