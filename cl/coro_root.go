@@ -80,10 +80,10 @@ func validateCoroRootFactories(plan *coro.SSAPlan) error {
 		if !ok || function.ID != root.ID {
 			return fmt.Errorf("coroutine root factory %q has no canonical function plan", root.ID)
 		}
-		if function.External != coro.Defined || function.Primary != coro.PrimaryCoroutine || function.FuncRep != coro.DirectCoro || function.Demand != coro.AsyncDemand {
+		if function.External != coro.Defined || function.Emission != coro.EmitCoroutine || function.FuncRep != coro.DirectCoro || function.Demand != coro.AsyncDemand {
 			return fmt.Errorf(
-				"coroutine root factory %q requires an async-only defined direct coroutine (external=%s primary=%s representation=%s demand=%s)",
-				root.ID, function.External, function.Primary, function.FuncRep, function.Demand,
+				"coroutine root factory %q requires an async-only defined direct coroutine (external=%s emission=%s representation=%s demand=%s)",
+				root.ID, function.External, function.Emission, function.FuncRep, function.Demand,
 			)
 		}
 	}

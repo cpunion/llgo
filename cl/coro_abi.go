@@ -449,8 +449,8 @@ func validateCoroPhysicalABI(fn *ssa.Function, plan coro.FunctionPlan, whole *co
 	if fn == nil || plan.External != coro.Defined || len(fn.Blocks) == 0 {
 		return fail("requires one defined SSA body")
 	}
-	if plan.Primary != coro.PrimaryCoroutine || plan.FuncRep != coro.DirectCoro {
-		return fail("requires a direct coroutine primary, got primary=%s representation=%s", plan.Primary, plan.FuncRep)
+	if plan.Emission != coro.EmitCoroutine || plan.FuncRep != coro.DirectCoro {
+		return fail("requires a direct coroutine emission, got emission=%s representation=%s", plan.Emission, plan.FuncRep)
 	}
 	if plan.Demand != coro.AsyncDemand {
 		return fail("requires async-only demand until root and hard-sync adapters exist, got %s", plan.Demand)
@@ -567,8 +567,8 @@ func validateCoroLeafPhysicalABI(fn *ssa.Function, plan coro.FunctionPlan) error
 	if fn == nil || plan.External != coro.Defined || len(fn.Blocks) == 0 {
 		return fail("requires one defined SSA body")
 	}
-	if plan.Primary != coro.PrimaryCoroutine || plan.FuncRep != coro.DirectCoro {
-		return fail("requires a direct coroutine primary, got primary=%s representation=%s", plan.Primary, plan.FuncRep)
+	if plan.Emission != coro.EmitCoroutine || plan.FuncRep != coro.DirectCoro {
+		return fail("requires a direct coroutine emission, got emission=%s representation=%s", plan.Emission, plan.FuncRep)
 	}
 	if plan.Demand != coro.AsyncDemand {
 		return fail("requires async-only demand until root and hard-sync adapters exist, got %s", plan.Demand)
@@ -714,11 +714,14 @@ func coroLeafABIDirective(fn *ssa.Function) string {
 func validateCoroPhysicalConsumers(plan *coro.SSAPlan, childAwait bool) error {
 	coroutineIDs := make(map[coro.FunctionID]struct{})
 	for _, function := range plan.Functions() {
-		if function.Plan.Primary == coro.PrimaryCoroutine {
+		if function.Plan.Emission == coro.EmitCoroutine {
 			coroutineIDs[function.Plan.ID] = struct{}{}
 		}
 	}
 	for _, function := range plan.Functions() {
+		if function.Plan.Emission != coro.EmitPlain && function.Plan.Emission != coro.EmitCoroutine {
+			continue
+		}
 		fn := function.Function
 		for _, block := range fn.Blocks {
 			for _, instr := range block.Instrs {
@@ -732,6 +735,17 @@ func validateCoroPhysicalConsumers(plan *coro.SSAPlan, childAwait bool) error {
 					}
 					hasCoroutineTarget := false
 					for _, target := range callPlan.Targets {
+						targetFn, found := plan.Function(target)
+						if !found || targetFn == nil {
+							return coroLeafInstructionError(fn, function.Plan, instr, fmt.Sprintf("call target %q is absent from the compilation plan", target))
+						}
+						targetPlan, found := plan.FunctionPlan(targetFn)
+						if !found || targetPlan.ID != target {
+							return coroLeafInstructionError(fn, function.Plan, instr, fmt.Sprintf("call target %q has no canonical function plan", target))
+						}
+						if targetPlan.Emission == coro.EmitNone {
+							return coroLeafInstructionError(fn, function.Plan, instr, fmt.Sprintf("emitted body references non-emitted call target %q", target))
+						}
 						if _, isCoroutine := coroutineIDs[target]; isCoroutine {
 							hasCoroutineTarget = true
 							break
@@ -739,7 +753,7 @@ func validateCoroPhysicalConsumers(plan *coro.SSAPlan, childAwait bool) error {
 					}
 					if hasCoroutineTarget {
 						direct, ordinary := call.(*ssa.Call)
-						if childAwait && ordinary && function.Plan.Primary == coro.PrimaryCoroutine {
+						if childAwait && ordinary && function.Plan.Emission == coro.EmitCoroutine {
 							if _, _, err := resolveCoroStaticAwait(plan, function.Plan, direct); err == nil {
 								// The static callee operand is represented by this exact
 								// CallPlan and is not an escaped function value.
@@ -758,7 +772,10 @@ func validateCoroPhysicalConsumers(plan *coro.SSAPlan, childAwait bool) error {
 						continue
 					}
 					targetPlan, planned := plan.FunctionPlan(target)
-					if planned && targetPlan.Primary == coro.PrimaryCoroutine {
+					if planned && targetPlan.Emission == coro.EmitNone {
+						return coroLeafInstructionError(fn, function.Plan, instr, fmt.Sprintf("emitted body references non-emitted function value %q", targetPlan.ID))
+					}
+					if planned && targetPlan.Emission == coro.EmitCoroutine {
 						return coroLeafInstructionError(fn, function.Plan, instr, "coroutine function value requires physical representation conversion")
 					}
 				}

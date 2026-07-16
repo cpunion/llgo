@@ -668,7 +668,7 @@ func (p *context) funcOf(fn *ssa.Function) (aFn llssa.Function, pyFn llssa.PyObj
 				return nil, nil, ignoredFunc
 			}
 			sig := p.patchType(fn.Signature).(*types.Signature)
-			if entry.physical && entry.plan.Primary == coro.PrimaryCoroutine {
+			if entry.physical && entry.plan.Emission == coro.EmitCoroutine {
 				abi := newCoroPhysicalABI(p, entry, sig)
 				sig = abi.physicalSig
 			}

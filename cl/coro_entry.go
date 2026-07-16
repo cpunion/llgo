@@ -27,8 +27,9 @@ import (
 const coroPrimarySuffix = "$coro"
 
 // plannedFunctionSymbol is the single symbol selected for an SSA function.
-// Primary selects the source body; FuncRep only describes escaped function
-// values and never authorizes a second body.
+// Emission selects whether this compilation materializes a body/declaration;
+// FuncRep only describes escaped function values and never authorizes a
+// second body.
 type plannedFunctionSymbol struct {
 	function   *ssa.Function
 	pkgTypes   *types.Package
@@ -86,7 +87,7 @@ func (p *context) resolveFunctionSymbol(fn *ssa.Function) (plannedFunctionSymbol
 	if err := validatePlannedFunction(fn, plan); err != nil {
 		return entry, err
 	}
-	if plan.Primary == coro.PrimaryCoroutine {
+	if plan.Emission == coro.EmitCoroutine {
 		entry.name += coroPrimarySuffix
 	}
 	return entry, nil
@@ -97,23 +98,40 @@ func validatePlannedFunction(fn *ssa.Function, plan coro.FunctionPlan) error {
 		return fmt.Errorf("coroutine entry resolution: function plan %q has no SSA function", plan.ID)
 	}
 	hasBody := len(fn.Blocks) != 0
-	switch plan.Primary {
-	case coro.PrimaryPlain:
-		if plan.External != coro.Defined || !hasBody {
-			return fmt.Errorf("coroutine entry resolution: plain primary %q has external kind %s and body=%t", plan.ID, plan.External, hasBody)
+	switch plan.Emission {
+	case coro.EmitNone:
+		if plan.Demand != coro.NoDemand {
+			return fmt.Errorf("coroutine entry resolution: non-emitted function %q has demand %s", plan.ID, plan.Demand)
 		}
-	case coro.PrimaryCoroutine:
+		return nil
+	case coro.EmitPlain:
 		if plan.External != coro.Defined || !hasBody {
-			return fmt.Errorf("coroutine entry resolution: coroutine primary %q has external kind %s and body=%t", plan.ID, plan.External, hasBody)
+			return fmt.Errorf("coroutine entry resolution: plain emission %q has external kind %s and body=%t", plan.ID, plan.External, hasBody)
 		}
-	case coro.PrimaryExternal:
+	case coro.EmitCoroutine:
+		if plan.External != coro.Defined || !hasBody {
+			return fmt.Errorf("coroutine entry resolution: coroutine emission %q has external kind %s and body=%t", plan.ID, plan.External, hasBody)
+		}
+	case coro.EmitExternal:
 		if plan.External == coro.Defined || hasBody {
-			return fmt.Errorf("coroutine entry resolution: external primary %q has external kind %s and body=%t", plan.ID, plan.External, hasBody)
+			return fmt.Errorf("coroutine entry resolution: external emission %q has external kind %s and body=%t", plan.ID, plan.External, hasBody)
 		}
 	default:
-		return fmt.Errorf("coroutine entry resolution: function %q has invalid primary kind %d", plan.ID, uint8(plan.Primary))
+		return fmt.Errorf("coroutine entry resolution: function %q has invalid emission kind %d", plan.ID, uint8(plan.Emission))
 	}
 	return nil
+}
+
+// omitUnemittedFunction is used only by eager package/type/closure
+// enumeration. A real body reference must go through mustFunctionSymbol and
+// fail closed instead of silently turning an EmitNone decision into an LLVM
+// declaration.
+func (p *context) omitUnemittedFunction(fn *ssa.Function) bool {
+	entry, err := p.resolveFunctionSymbol(fn)
+	if err != nil {
+		panic(err)
+	}
+	return entry.planned && entry.plan.Emission == coro.EmitNone
 }
 
 // checkSupported rejects plan decisions whose physical ABI is not implemented
@@ -122,17 +140,20 @@ func (e plannedFunctionSymbol) checkSupported() error {
 	if !e.planned {
 		return nil
 	}
+	if e.plan.Emission == coro.EmitNone {
+		return fmt.Errorf("coroutine entry resolution: function %q has no emitted entry", e.plan.ID)
+	}
 	if e.plan.FuncRep == coro.Dispatch {
 		return fmt.Errorf("coroutine entry resolution: function %q requires an unimplemented dispatch descriptor", e.plan.ID)
 	}
-	if e.plan.Primary == coro.PrimaryCoroutine {
+	if e.plan.Emission == coro.EmitCoroutine {
 		if !e.physical {
-			return fmt.Errorf("coroutine primary %q requires coroutine physical ABI lowering", e.plan.ID)
+			return fmt.Errorf("coroutine emission %q requires coroutine physical ABI lowering", e.plan.ID)
 		}
 		return validateCoroPhysicalABI(e.function, e.plan, e.coroPlan, e.childAwait)
 	}
-	if e.plan.Primary == coro.PrimaryExternal && e.plan.FuncRep == coro.DirectCoro {
-		return fmt.Errorf("external coroutine primary %q requires coroutine physical ABI lowering", e.plan.ID)
+	if e.plan.Emission == coro.EmitExternal && e.plan.FuncRep == coro.DirectCoro {
+		return fmt.Errorf("external coroutine emission %q requires coroutine physical ABI lowering", e.plan.ID)
 	}
 	return nil
 }
@@ -178,6 +199,9 @@ func (c *Compilation) preflightCoroPlan() error {
 			}
 		}
 		for _, function := range c.CoroPlan.Functions() {
+			if function.Plan.Emission == coro.EmitNone {
+				continue
+			}
 			if err := validatePlannedFunction(function.Function, function.Plan); err != nil {
 				c.coroPreflightErr = err
 				return
@@ -194,7 +218,7 @@ func (c *Compilation) preflightCoroPlan() error {
 				c.coroPreflightErr = err
 				return
 			}
-			if c.EnableCoroPhysicalABI && function.Plan.Primary == coro.PrimaryCoroutine {
+			if c.EnableCoroPhysicalABI && function.Plan.Emission == coro.EmitCoroutine {
 				sig, err := c.EmissionUniverse.coroPhysicalSourceSignature(function.Function)
 				if err == nil {
 					err = validateCoroLeafPhysicalSignature(function.Plan, sig)

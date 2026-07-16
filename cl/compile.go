@@ -383,6 +383,9 @@ func (p *context) compileMethodsIf(pkg llssa.Package, typ types.Type, keep func(
 			if keep != nil && !keep(ssaMthd) {
 				continue
 			}
+			if p.omitUnemittedFunction(ssaMthd) {
+				continue
+			}
 			p.compileFuncDecl(pkg, ssaMthd)
 		}
 	}
@@ -562,7 +565,7 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 		dbgInstrln("==> NewFunc", name, "type:", sig.Recv(), sig, "ftype:", ftype)
 	}
 	var physicalABI *coroPhysicalABI
-	if entry.physical && entry.plan.Primary == coro.PrimaryCoroutine {
+	if entry.physical && entry.plan.Emission == coro.EmitCoroutine {
 		abi := newCoroPhysicalABI(p, entry, sig)
 		physicalABI = &abi
 		sig = abi.physicalSig
@@ -599,6 +602,9 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 			parentInits := p.inits
 			p.inits = nil
 			for _, af := range f.AnonFuncs {
+				if p.omitUnemittedFunction(af) {
+					continue
+				}
 				p.compileFuncDecl(pkg, af)
 			}
 			childInits = append(childInits, p.inits...)
@@ -2137,6 +2143,9 @@ func processPkg(ctx *context, ret llssa.Package, pkg *ssa.Package) {
 			if member.TypeParams() != nil || member.TypeArgs() != nil {
 				// TODO(xsw): don't compile generic functions
 				// Do not try to build generic (non-instantiated) functions.
+				continue
+			}
+			if ctx.omitUnemittedFunction(member) {
 				continue
 			}
 			ctx.compileFuncDecl(ret, member)
