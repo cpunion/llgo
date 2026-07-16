@@ -64,7 +64,8 @@ type aBuilder struct {
 	Pkg  Package
 	Prog Program
 
-	diScopeCache map[*types.Scope]DIScope // avoid duplicated DILexicalBlock(s)
+	diScopeCache          map[*types.Scope]DIScope // avoid duplicated DILexicalBlock(s)
+	resolvingRuntimeCalls map[Type]bool
 }
 
 // Builder represents a builder for creating instructions in a function.

@@ -3,6 +3,7 @@ package targets
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 
 	"github.com/goplus/llgo/internal/env"
 )
@@ -56,6 +57,9 @@ func (r *Resolver) ListAvailableTargets() ([]string, error) {
 func (r *Resolver) validateConfig(config *Config) error {
 	if config.Name == "" {
 		return fmt.Errorf("target name is required")
+	}
+	if config.GC != "" && !slices.Contains([]string{"precise", "conservative", "leaking", "none"}, config.GC) {
+		return fmt.Errorf("unsupported gc capability %q", config.GC)
 	}
 
 	// For now, we don't require any specific fields since different targets

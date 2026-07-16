@@ -87,7 +87,8 @@ func emissionIntrinsicPolicy(instruction int) (emissionIntrinsicOperandPolicy, e
 		return emissionIntrinsicRawAllValues, nil
 	case llgoBoolToUint8,
 		llgoAtomicLoad, llgoAtomicStore, llgoAtomicCmpXchg,
-		llgoAtomicCmpXchgOK, llgoAtomicAddReturnNew:
+		llgoAtomicCmpXchgOK, llgoAtomicAddReturnNew,
+		llgoCoroPark:
 		return emissionIntrinsicCompileValues, nil
 	default:
 		if instruction >= llgoAtomicOpBase && instruction <= llgoAtomicOpLast {

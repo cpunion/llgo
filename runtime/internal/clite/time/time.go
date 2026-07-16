@@ -32,6 +32,10 @@ const (
 	ClockTSize = 8
 )
 
+// time reads one fixed-size wall-clock value. It neither waits on an external
+// resource nor invokes a caller-provided callback; IRQUnsafe is retained.
+//
+//llgo:coro noblock
 //go:linkname Time C.time
 func Time(timer *TimeT) TimeT
 

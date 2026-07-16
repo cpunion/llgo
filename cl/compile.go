@@ -185,7 +185,9 @@ type context struct {
 	pcLineSeq            uint64
 	sourceParamBase      int // hidden physical parameters before source params
 	currentCoro          *coroBodyContext
+	coroSourceBlocks     []llssa.BasicBlock // source SSA block index -> logical LLVM block
 	coroRootFactories    []coroRootFactoryRegistration
+	coroPlainDescriptors map[string]llssa.Expr
 
 	patches          Patches
 	blkInfos         []blocks.Info
@@ -620,7 +622,7 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 		} else {
 			fn.MakeBlocks(nblk) // to set fn.HasBody() = true
 		}
-		if f.Recover != nil { // set recover block
+		if f.Recover != nil && physicalABI == nil { // set recover block
 			fn.SetRecover(fn.Block(f.Recover.Index))
 		}
 		dbgEnabled := enableDbg && (f == nil || f.Origin() == nil)
@@ -651,7 +653,7 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 			p.bvals = make(map[ssa.Value]llssa.Expr)
 			p.methodNilDerefChecks = collectMethodNilDerefChecks(f)
 			if physicalABI != nil {
-				p.compileCoroPhysicalBody(b, f, *physicalABI)
+				p.compileCoroPhysicalBody(b, f, *physicalABI, isInit)
 				b.EndBuild()
 				return
 			}
@@ -826,9 +828,9 @@ func (p *context) debugRef(b llssa.Builder, v *ssa.DebugRef) {
 	diScope := b.DIScope(p.fn, scope)
 	if v.IsAddr {
 		// *ssa.Alloc
-		b.DIDeclare(variable, value, dbgVar, diScope, pos, b.Func.Block(v.Block().Index))
+		b.DIDeclare(variable, value, dbgVar, diScope, pos, p.sourceBlock(v.Block().Index))
 	} else {
-		b.DIValue(variable, value, dbgVar, diScope, pos, b.Func.Block(v.Block().Index))
+		b.DIValue(variable, value, dbgVar, diScope, pos, p.sourceBlock(v.Block().Index))
 	}
 }
 
@@ -843,8 +845,22 @@ func (p *context) debugParams(b llssa.Builder, f *ssa.Function) {
 		if p.paramDIVars != nil {
 			p.paramDIVars[variable] = div
 		}
-		b.DIParam(variable, v, div, p.fn, pos, p.fn.Block(0))
+		b.DIParam(variable, v, div, p.fn, pos, p.sourceBlock(0))
 	}
+}
+
+// sourceBlock maps a Go SSA basic-block index to the logical LLVM block used
+// by the current lowering. Plain functions retain the historical one-to-one
+// Function.Block mapping. A physical coroutine has a dedicated ramp and
+// internal suspend blocks, so its source CFG uses an explicit stable map.
+func (p *context) sourceBlock(index int) llssa.BasicBlock {
+	if len(p.coroSourceBlocks) != 0 {
+		if index < 0 || index >= len(p.coroSourceBlocks) {
+			panic(fmt.Sprintf("source basic block index %d is outside coroutine map of length %d", index, len(p.coroSourceBlocks)))
+		}
+		return p.coroSourceBlocks[index]
+	}
+	return p.fn.Block(index)
 }
 
 func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, doModInit bool) llssa.BasicBlock {
@@ -854,7 +870,7 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 	var pkg = p.pkg
 	var fn = p.fn
 	var instrs = block.Instrs[n:]
-	var ret = fn.Block(block.Index)
+	var ret = p.sourceBlock(block.Index)
 	b.SetBlock(ret)
 	if block.Index == 0 && p.shouldTrackCallerFrames() {
 		p.pushCallerLocationFrame(b, block.Parent())
@@ -888,6 +904,13 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 	isCgoC2 := isCgoC2func(fnName)
 	isCgoCmacro := isCgoCmacro(fnName)
 	for i, instr := range instrs {
+		if p.currentCoro != nil {
+			if _, debug := instr.(*ssa.DebugRef); debug {
+				p.compileInstr(b, instr)
+				continue
+			}
+			p.currentCoro.countInstructionAndMaybeYield(b)
+		}
 		if i == 1 && doModInit && p.state == pkgInPatch { // in patch package but no pkgFNoOldInit
 			initFnNameOld := initFnNameOfHasPatch(p.fn.Name())
 			fnOld := pkg.NewFunc(initFnNameOld, llssa.NoArgsNoRet, llssa.InC)
@@ -1166,8 +1189,7 @@ func isPhi(i ssa.Instruction) bool {
 }
 
 func (p *context) compilePhis(b llssa.Builder, block *ssa.BasicBlock) int {
-	fn := p.fn
-	ret := fn.Block(block.Index)
+	ret := p.sourceBlock(block.Index)
 	b.SetBlockEx(ret, llssa.AtEnd, false)
 	if ninstr := len(block.Instrs); ninstr > 0 {
 		if isPhi(block.Instrs[0]) {
@@ -1197,7 +1219,7 @@ func (p *context) compilePhi(b llssa.Builder, v *ssa.Phi) (ret llssa.Expr) {
 		preds := v.Block().Preds
 		bblks := make([]llssa.BasicBlock, len(preds))
 		for i, pred := range preds {
-			bblks[i] = p.fn.Block(pred.Index)
+			bblks[i] = p.sourceBlock(pred.Index)
 		}
 		edges := v.Edges
 		phi.AddIncoming(b, bblks, func(i int, blk llssa.BasicBlock) llssa.Expr {
@@ -1217,11 +1239,13 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 	}
 	switch v := iv.(type) {
 	case *ssa.Call:
-		if value, handled := p.tryCompileCoroStaticAwait(b, v); handled {
+		if value, handled := p.tryCompileCoroPlainDispatchCall(b, v); handled {
 			ret = value
-			break
+		} else if value, handled := p.tryCompileCoroStaticAwait(b, v); handled {
+			ret = value
+		} else {
+			ret = p.call(b, llssa.Call, &v.Call)
 		}
-		ret = p.call(b, llssa.Call, &v.Call)
 		if p.rangeFuncCallNeedsDeferDrain(&v.Call) {
 			b.DeferStackDrain()
 		}
@@ -1446,7 +1470,20 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		}
 		ret = b.MakeMap(t, nReserve)
 	case *ssa.MakeClosure:
-		fn := p.compileValue(b, v.Fn)
+		if value, handled := p.tryCompileCoroPlainDispatchClosure(b, v); handled {
+			ret = value
+			break
+		}
+		var fn llssa.Expr
+		if target, ok := v.Fn.(*ssa.Function); ok && p.compilation != nil && p.compilation.EnableCoroEntryResolution {
+			// The target's own ValuePlan may require a descriptor at another
+			// producer. MakeClosure still needs the raw body entry; feeding a
+			// descriptor-backed closure to Builder.MakeClosure would reinterpret
+			// the descriptor pointer as executable code.
+			fn = p.compileRawFunctionValue(target)
+		} else {
+			fn = p.compileValue(b, v.Fn)
+		}
 		bindings := p.compileValues(b, v.Bindings, 0)
 		ret = b.MakeClosure(fn, bindings)
 	case *ssa.TypeAssert:
@@ -1559,9 +1596,8 @@ func (p *context) assertNilDerefBase(b llssa.Builder, addr ssa.Value) {
 }
 
 func (p *context) jumpTo(v *ssa.Jump) llssa.BasicBlock {
-	fn := p.fn
 	succs := v.Block().Succs
-	return fn.Block(succs[0].Index)
+	return p.sourceBlock(succs[0].Index)
 }
 
 func (p *context) getDebugLocScope(v *ssa.Function, pos token.Pos) *types.Scope {
@@ -1637,13 +1673,20 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		if p.shouldTrackCallerFrames() {
 			p.popCallerLocationFrame(b)
 		}
+		if p.currentCoro != nil {
+			if p.currentCoro.completion == nil {
+				panic("coroutine return has no completion block")
+			}
+			p.storeCoroLeafResult(b, p.currentCoro.abi, p.currentCoro.resultSlot, results)
+			b.Jump(p.currentCoro.completion)
+			return
+		}
 		b.Return(results...)
 	case *ssa.If:
-		fn := p.fn
 		cond := p.compileValue(b, v.Cond)
 		succs := v.Block().Succs
-		thenb := fn.Block(succs[0].Index)
-		elseb := fn.Block(succs[1].Index)
+		thenb := p.sourceBlock(succs[0].Index)
+		elseb := p.sourceBlock(succs[1].Index)
 		b.If(cond, thenb, elseb)
 	case *ssa.MapUpdate:
 		m := p.compileValue(b, v.Map)
@@ -1658,11 +1701,17 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		}
 		p.call(b, p.blkInfos[v.Block().Index].Kind, &v.Call)
 	case *ssa.Go:
+		if p.tryCompileCoroClosedStaticSpawn(b, v) {
+			return
+		}
 		p.call(b, llssa.Go, &v.Call)
 	case *ssa.RunDefers:
 		p.recordPanicLocation(b, v.Pos())
 		b.RunDefers()
 	case *ssa.Panic:
+		if p.tryCompileCoroExplicitStatusPanic(b, v) {
+			return
+		}
 		arg := p.compileValue(b, v.X)
 		p.recordPanicLocation(b, v.Pos())
 		b.Panic(arg)
@@ -1717,29 +1766,10 @@ func (p *context) compileValue(b llssa.Builder, v ssa.Value) llssa.Expr {
 			}
 		}
 	case *ssa.Function:
-		if p.compilation != nil && p.compilation.EnableCoroEntryResolution && p.compilation.EmissionUniverse != nil {
-			canonical, ok := p.compilation.EmissionUniverse.Resolve(v)
-			if !ok {
-				panic(fmt.Errorf("coroutine entry resolution: function value %q is absent from the prepared emission universe", v.Name()))
-			}
-			v = canonical
+		if value, handled := p.tryCompileCoroPlainDispatchFunctionValue(b, v); handled {
+			return value
 		}
-		if _, _, ftype := p.funcName(v); ftype == llgoInstr {
-			if p.compilation != nil && p.compilation.EnableCoroEntryResolution && p.compilation.EmissionUniverse != nil {
-				wrapper, ok := p.compilation.EmissionUniverse.intrinsicWrapper(p.goPkg, v)
-				if !ok {
-					panic(fmt.Errorf("coroutine entry resolution: intrinsic function value %q was not materialized before codegen", v.Name()))
-				}
-				v = wrapper
-			} else {
-				v = ssawrap.MakeCallWrapper(p.goProg, v)
-			}
-		}
-		aFn, pyFn, _ := p.compileFunction(v)
-		if aFn != nil {
-			return aFn.Expr
-		}
-		return pyFn.Expr
+		return p.compileRawFunctionValue(v)
 	case *ssa.Global:
 		varName := v.Name()
 		val := p.varOf(b, v)
@@ -2067,6 +2097,7 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 	ret.SetResolveLinkname(ctx.resolveLinkname)
 	if opts.Compilation != nil && opts.Compilation.EnableCoroEntryResolution {
 		ret.SetResolveMethodLinkname(ctx.resolveMethodLinkname)
+		ret.SetResolveRuntimeCall(ctx.resolveCoroLoweredRuntimeCall)
 	}
 
 	if hasPatch {
@@ -2108,6 +2139,36 @@ func (p *context) observeCoroPlan() {
 	if observer := p.compilation.CoroPlanObserver; observer != nil {
 		observer(p.goPkg, p.compilation.CoroPlan)
 	}
+}
+
+// compileRawFunctionValue returns the selected body entry without applying a
+// function-value representation conversion. Static calls and MakeClosure use
+// this path even when a different exact producer for the same SSA target is
+// descriptor-backed.
+func (p *context) compileRawFunctionValue(v *ssa.Function) llssa.Expr {
+	if p.compilation != nil && p.compilation.EnableCoroEntryResolution && p.compilation.EmissionUniverse != nil {
+		canonical, ok := p.compilation.EmissionUniverse.Resolve(v)
+		if !ok {
+			panic(fmt.Errorf("coroutine entry resolution: function value %q is absent from the prepared emission universe", v.Name()))
+		}
+		v = canonical
+	}
+	if _, _, ftype := p.funcName(v); ftype == llgoInstr {
+		if p.compilation != nil && p.compilation.EnableCoroEntryResolution && p.compilation.EmissionUniverse != nil {
+			wrapper, ok := p.compilation.EmissionUniverse.intrinsicWrapper(p.goPkg, v)
+			if !ok {
+				panic(fmt.Errorf("coroutine entry resolution: intrinsic function value %q was not materialized before codegen", v.Name()))
+			}
+			v = wrapper
+		} else {
+			v = ssawrap.MakeCallWrapper(p.goProg, v)
+		}
+	}
+	aFn, pyFn, _ := p.compileFunction(v)
+	if aFn != nil {
+		return aFn.Expr
+	}
+	return pyFn.Expr
 }
 
 func initFnNameOfHasPatch(name string) string {

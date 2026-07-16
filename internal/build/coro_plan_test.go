@@ -192,6 +192,50 @@ func root() { _ = CStr(1) }
 `,
 			wantErr: "requires exactly one compile-time string constant argument",
 		},
+		{
+			name: "advance pointer by integer",
+			source: `package intrinsiccalls
+//llgo:link Advance llgo.advance
+func Advance(*int, int) *int
+func root(value *int) { _ = Advance(value, 1) }
+`,
+		},
+		{
+			name: "advance wrong arity",
+			source: `package intrinsiccalls
+//llgo:link Advance llgo.advance
+func Advance(*int, int, int) *int
+func root(value *int) { _ = Advance(value, 1, 2) }
+`,
+			wantErr: "requires exactly two arguments",
+		},
+		{
+			name: "advance non-pointer",
+			source: `package intrinsiccalls
+//llgo:link Advance llgo.advance
+func Advance(int, int) int
+func root(value int) { _ = Advance(value, 1) }
+`,
+			wantErr: "requires a pointer first argument",
+		},
+		{
+			name: "advance non-integer offset",
+			source: `package intrinsiccalls
+//llgo:link Advance llgo.advance
+func Advance(*int, string) *int
+func root(value *int) { _ = Advance(value, "1") }
+`,
+			wantErr: "requires an integer offset argument",
+		},
+		{
+			name: "advance mismatched result",
+			source: `package intrinsiccalls
+//llgo:link Advance llgo.advance
+func Advance(*int, int) *byte
+func root(value *int) { _ = Advance(value, 1) }
+`,
+			wantErr: "requires one result matching its pointer argument",
+		},
 	}
 
 	for _, test := range tests {
@@ -245,10 +289,10 @@ func root() { _ = CStr(1) }
 				t.Fatalf("alias intrinsic site semantics = %v, %v, %v; want inline-no-suspend, true, nil", semantics, intrinsic, err)
 			}
 			if !plan.ElidesCall(call) {
-				t.Fatal("valid aliased cstr site was not retained as exact elided call")
+				t.Fatal("valid intrinsic site was not retained as exact elided call")
 			}
 			if _, ok := plan.CallPlan(call); ok {
-				t.Fatal("valid aliased cstr site unexpectedly has a managed CallPlan")
+				t.Fatal("valid intrinsic site unexpectedly has a managed CallPlan")
 			}
 			metadata := coro.PlanDigestMetadata{
 				CoroABI: coro.EntryResolutionABIV0, SchedulerABI: coro.SchedulerNoneABIV0,
@@ -272,15 +316,111 @@ func root() { _ = CStr(1) }
 	}
 }
 
+func TestCoroParkIntrinsicSeedsCallerEffectAndStableDigest(t *testing.T) {
+	ssaPkg, files := buildCoroPlanTestPackage(t, "example.com/coropark", `package coropark
+type WaitToken struct { word uint32 }
+type WaitTicket uint32
+//llgo:link Park llgo.coroPark
+func Park(*WaitToken, WaitTicket)
+func root(token *WaitToken, ticket WaitTicket) uint32 {
+	before := uint32(ticket) + 1
+	Park(token, ticket)
+	return before + uint32(ticket)
+}
+`, nil)
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	emission, err := cl.PrepareEmissionUniverse(prog, nil, []cl.EmissionPackage{{
+		SSA: ssaPkg, Files: files, Identity: "example.com/coropark",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaEmission, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, emission.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := ssaPkg.Func("root")
+	calls := coroPlanTestCalls(root)
+	if len(calls) != 1 {
+		t.Fatalf("root calls = %d, want one exact park site", len(calls))
+	}
+	parkCall := calls[0]
+	semantics, intrinsic, err := emission.CoroIntrinsicCallSiteSemantics(parkCall)
+	if err != nil || !intrinsic || semantics != cl.CoroIntrinsicCallInlineSuspend || !semantics.SuspendsCurrentFrame() {
+		t.Fatalf("park semantics = %v, %v, %v; want inline-suspend, true, nil", semantics, intrinsic, err)
+	}
+	input := CoroPlanInput{
+		Program:                ssaPkg.Prog,
+		EmissionUniverse:       ssaEmission,
+		resolveFunction:        emission.Resolve,
+		functionBackground:     emission.FunctionBackground,
+		intrinsicCallSemantics: emission.CoroIntrinsicCallSiteSemantics,
+	}
+	functionIDs := emission.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerChildAwaitABIV0
+	functionIDs.ArchiveReady = true
+	analyze := func() (*coro.SSAPlan, error) {
+		return input.Analyze(coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+			MaxPlainInstructions: -1,
+			FunctionIDs:          functionIDs,
+		})
+	}
+	plan, err := analyze()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootPlan, ok := plan.FunctionPlan(root)
+	if !ok || rootPlan.Emission != coro.EmitCoroutine || rootPlan.Primary != coro.PrimaryCoroutine ||
+		rootPlan.FuncRep != coro.DirectCoro || !rootPlan.DeclaredEffect.Contains(coro.MayPark) ||
+		!rootPlan.LocalEffect.Contains(coro.MayPark) || !rootPlan.Effect.Contains(coro.MayPark) {
+		t.Fatalf("park root plan = %+v, present=%t; want one tainted coroutine primary", rootPlan, ok)
+	}
+	if !plan.ElidesCall(parkCall) {
+		t.Fatal("park declaration call is not retained as an exact elided site")
+	}
+	if _, ok := plan.CallPlan(parkCall); ok {
+		t.Fatal("park declaration unexpectedly retained a managed CallPlan")
+	}
+	metadata := coro.PlanDigestMetadata{
+		CoroABI: coro.PhysicalABIV1, SchedulerABI: coro.SchedulerChildAwaitABIV0,
+		PanicABI: coro.PanicLegacyABIV0, FuncRepABI: coro.FuncRepABIV0,
+		TargetTriple: "x86_64-unknown-linux-gnu", PointerBits: 64,
+		Endianness: "little", DataLayout: "e-p:64:64",
+	}
+	digest, err := plan.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := analyze()
+	if err != nil {
+		t.Fatal(err)
+	}
+	againDigest, err := again.CoroPlanDigest(metadata)
+	if err != nil || againDigest != digest || !again.ElidesCall(parkCall) {
+		t.Fatalf("park plan digest = %q, %v (elided=%t); want stable %q", againDigest, err, again.ElidesCall(parkCall), digest)
+	}
+}
+
 func TestRequiredCoroProgramRuntimePlanPlainClosureAndConflicts(t *testing.T) {
 	ssaPkg, files := buildCoroPlanTestPackage(t, llssa.PkgRuntime, `package runtime
 func __llgo_coro_program_begin_v1() { bootstrapHelper() }
 func __llgo_coro_program_run_v1() {}
+func __llgo_coro_frame_allocator_bootstrap_v1() {}
 func __llgo_coro_frame_alloc_v1() {}
 func __llgo_coro_frame_publish_v1() {}
 func __llgo_coro_await_prepare_v1() {}
+var preemptRequest uint32
+func __llgo_coro_preempt_poll_v1() bool { return atomicExchange(&preemptRequest, 0) == 1 }
+func __llgo_coro_yield_prepare_v1() {}
+func __llgo_coro_park_prepare_v1() {}
 func __llgo_coro_complete_prepare_v1() {}
 func __llgo_coro_frame_free_v1() {}
+func __llgo_coro_panic_prepare_v1() {}
+func __llgo_coro_spawn_begin_v1() {}
+func __llgo_coro_spawn_commit_v1() {}
+func __llgo_coro_program_main_return_v1() {}
 func bootstrapHelper() { closureLoop(); externalABI(); inlineIntrinsic("bootstrap") }
 func closureLoop() { for i := 0; i < 2; i++ {} }
 func unrelatedLoop() { for {} }
@@ -288,6 +428,8 @@ func unrelatedLoop() { for {} }
 func externalABI()
 //llgo:link inlineIntrinsic llgo.cstr
 func inlineIntrinsic(string) *byte
+//llgo:link atomicExchange llgo.atomicXchg
+func atomicExchange(*uint32, uint32) uint32
 `, nil)
 	prog := llssa.NewProgram(nil)
 	defer prog.Dispose()
@@ -302,19 +444,20 @@ func inlineIntrinsic(string) *byte
 		t.Fatal(err)
 	}
 	ctx := &context{
-		buildConf:       &Config{EnableCoroProgramBootstrapRun: true},
+		buildConf:       &Config{EnableCoroChildAwait: true, EnableCoroProgramBootstrapRun: true},
 		coroEmission:    emission,
 		coroSSAEmission: ssaEmission,
 	}
-	roots, requiredPlain, directPlain, err := requiredCoroProgramRuntimePlan(ctx)
+	roots, requiredPlain, directPlain, closedDynamic, err := requiredCoroProgramRuntimePlan(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rootsAgain, plainAgain, directAgain, err := requiredCoroProgramRuntimePlan(ctx)
+	rootsAgain, plainAgain, directAgain, closedAgain, err := requiredCoroProgramRuntimePlan(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(rootsAgain, roots) || !reflect.DeepEqual(plainAgain, requiredPlain) || !reflect.DeepEqual(directAgain, directPlain) {
+	if !reflect.DeepEqual(rootsAgain, roots) || !reflect.DeepEqual(plainAgain, requiredPlain) ||
+		!reflect.DeepEqual(directAgain, directPlain) || !reflect.DeepEqual(closedAgain, closedDynamic) {
 		t.Fatal("required runtime roots/plain closure is not deterministic")
 	}
 	if len(directPlain) != 0 {
@@ -322,11 +465,15 @@ func inlineIntrinsic(string) *byte
 	}
 	wantRoots := []string{
 		"init",
+		coroFrameAllocatorBootstrapSymbolV1,
 		coroProgramBeginSymbolV1,
 		coroProgramRunSymbolV1,
 		"__llgo_coro_frame_alloc_v1",
 		"__llgo_coro_frame_publish_v1",
 		"__llgo_coro_await_prepare_v1",
+		"__llgo_coro_preempt_poll_v1",
+		"__llgo_coro_yield_prepare_v1",
+		"__llgo_coro_park_prepare_v1",
 		"__llgo_coro_complete_prepare_v1",
 		"__llgo_coro_frame_free_v1",
 	}
@@ -334,14 +481,88 @@ func inlineIntrinsic(string) *byte
 		t.Fatalf("required runtime roots = %d, want %d", len(roots), len(wantRoots))
 	}
 	for index, root := range roots {
-		if root.Function == nil || root.Function.Name() != wantRoots[index] || root.Demand != coro.SyncDemand {
-			t.Fatalf("required root %d = %+v, want %s/sync", index, root, wantRoots[index])
+		wantDemand := coro.SyncDemand
+		if index == 0 {
+			wantDemand = coro.AsyncDemand
 		}
+		if root.Function == nil || root.Function.Name() != wantRoots[index] || root.Demand != wantDemand {
+			t.Fatalf("required root %d = %+v, want %s/%s", index, root, wantRoots[index], wantDemand)
+		}
+	}
+	panicHook := ssaPkg.Func("__llgo_coro_panic_prepare_v1")
+	if panicHook == nil {
+		t.Fatal("explicit-status panic prepare hook is absent from the runtime fixture")
+	}
+	if _, ok := requiredPlain[panicHook]; ok {
+		t.Fatal("inactive explicit-status panic prepare hook entered the required plain island")
+	}
+	panicCtx := &context{
+		buildConf: &Config{
+			EnableCoroChildAwait:             true,
+			EnableCoroProgramBootstrapRun:    true,
+			EnableCoroExplicitStatusPanicABI: true,
+		},
+		coroEmission:    ctx.coroEmission,
+		coroSSAEmission: ctx.coroSSAEmission,
+	}
+	panicRoots, panicPlain, panicDirect, panicClosed, err := requiredCoroProgramRuntimePlan(panicCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(panicRoots) != len(wantRoots)+1 ||
+		panicRoots[len(panicRoots)-1].Function != panicHook ||
+		panicRoots[len(panicRoots)-1].Demand != coro.SyncDemand {
+		t.Fatalf("explicit-status runtime roots = %+v, want legacy roots plus exact panic prepare/sync", panicRoots)
+	}
+	if _, ok := panicPlain[panicHook]; !ok {
+		t.Fatal("active explicit-status panic prepare hook is absent from the required plain island")
+	}
+	if len(panicDirect) != 0 || len(panicClosed) != 0 {
+		t.Fatalf("explicit-status panic hook produced callback proofs: direct=%d dynamic=%d", len(panicDirect), len(panicClosed))
+	}
+	spawnCtx := &context{
+		buildConf: &Config{
+			EnableCoroChildAwait:          true,
+			EnableCoroProgramBootstrapRun: true,
+			EnableCoroClosedStaticSpawn:   true,
+		},
+		coroEmission:    ctx.coroEmission,
+		coroSSAEmission: ctx.coroSSAEmission,
+	}
+	spawnRoots, spawnPlain, _, _, err := requiredCoroProgramRuntimePlan(spawnCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spawnRoots) != len(wantRoots)+3 {
+		t.Fatalf("closed-static-spawn runtime roots = %d, want %d", len(spawnRoots), len(wantRoots)+3)
+	}
+	for _, name := range []string{"__llgo_coro_spawn_begin_v1", "__llgo_coro_spawn_commit_v1", coroProgramMainReturnSymbolV1} {
+		fn := ssaPkg.Func(name)
+		if fn == nil {
+			t.Fatalf("closed-static-spawn runtime hook %q is absent", name)
+		}
+		if _, ok := spawnPlain[fn]; !ok {
+			t.Fatalf("closed-static-spawn runtime hook %q is not a required plain root", name)
+		}
+		found := false
+		for _, root := range spawnRoots {
+			if root.Function == fn && root.Demand == coro.SyncDemand {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("closed-static-spawn runtime hook %q has no sync root", name)
+		}
+	}
+	if _, ok := requiredPlain[ssaPkg.Func("init")]; ok {
+		t.Fatal("managed runtime.init leaked into the native required-plain island")
 	}
 	closureLoop := ssaPkg.Func("closureLoop")
 	unrelatedLoop := ssaPkg.Func("unrelatedLoop")
 	externalABI := ssaPkg.Func("externalABI")
 	inlineIntrinsic := ssaPkg.Func("inlineIntrinsic")
+	atomicExchange := ssaPkg.Func("atomicExchange")
 	for _, fn := range []*ssa.Function{ssaPkg.Func("bootstrapHelper"), closureLoop, externalABI} {
 		if _, ok := requiredPlain[fn]; !ok {
 			t.Fatalf("required plain closure omitted %s", fn.Name())
@@ -350,11 +571,16 @@ func inlineIntrinsic(string) *byte
 	if _, ok := requiredPlain[unrelatedLoop]; ok {
 		t.Fatal("required plain closure captured an unrelated function")
 	}
-	if _, ok := requiredPlain[inlineIntrinsic]; ok {
-		t.Fatal("compiler-inline no-suspend intrinsic entered the runtime plain-function island")
+	for _, intrinsic := range []*ssa.Function{inlineIntrinsic, atomicExchange} {
+		if _, ok := requiredPlain[intrinsic]; ok {
+			t.Fatalf("compiler-inline no-suspend intrinsic %q entered the runtime plain-function island", intrinsic.Name())
+		}
 	}
 	if semantics, intrinsic, err := emission.CoroIntrinsicSemantics(inlineIntrinsic); err != nil || !intrinsic || semantics != cl.CoroIntrinsicCallInlineNoSuspend {
 		t.Fatalf("inline intrinsic semantics = %v, %v, %v; want inline-no-suspend, true, nil", semantics, intrinsic, err)
+	}
+	if semantics, intrinsic, err := emission.CoroIntrinsicSemantics(atomicExchange); err != nil || !intrinsic || semantics != cl.CoroIntrinsicCallInlineNoSuspend {
+		t.Fatalf("atomic exchange semantics = %v, %v, %v; want inline-no-suspend, true, nil", semantics, intrinsic, err)
 	}
 
 	input := CoroPlanInput{
@@ -366,10 +592,11 @@ func inlineIntrinsic(string) *byte
 		requiredRoots:          roots,
 		requiredPlain:          requiredPlain,
 		requiredDirectPlain:    directPlain,
+		requiredClosedDynamic:  closedDynamic,
 	}
 	functionIDs := emission.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
 	functionIDs.ArchiveReady = true
 	analyze := func(classify func(*ssa.Function) (coro.SSAFunctionPolicy, error)) (*coro.SSAPlan, error) {
 		return input.Analyze(coro.Roots{{Function: unrelatedLoop, Demand: coro.AsyncDemand}}, coro.SSAConfig{
@@ -382,9 +609,37 @@ func inlineIntrinsic(string) *byte
 	if err != nil {
 		t.Fatal(err)
 	}
+	panicInput := input
+	panicInput.requiredRoots = panicRoots
+	panicInput.requiredPlain = panicPlain
+	panicInput.requiredDirectPlain = panicDirect
+	panicInput.requiredClosedDynamic = panicClosed
+	panicPlan, err := panicInput.Analyze(coro.Roots{{Function: unrelatedLoop, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+		MaxPlainInstructions: -1,
+		FunctionIDs:          functionIDs,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	panicHookPlan, ok := panicPlan.FunctionPlan(panicHook)
+	if !ok || panicHookPlan.Emission != coro.EmitPlain || panicHookPlan.Demand != coro.SyncDemand ||
+		panicHookPlan.FuncRep != coro.DirectPlain || panicHookPlan.Effect.MaySuspend() ||
+		panicHookPlan.Exec.Contains(coro.NeedsPreempt) {
+		t.Fatalf("explicit-status panic prepare hook plan = %+v, want required sync direct-plain", panicHookPlan)
+	}
 	closurePlan, ok := plan.FunctionPlan(closureLoop)
 	if !ok || closurePlan.Exec.Contains(coro.NeedsPreempt) || closurePlan.Effect.MaySuspend() || closurePlan.Emission != coro.EmitPlain {
 		t.Fatalf("required closure loop plan = %+v, want one trusted plain body", closurePlan)
+	}
+	pollPlan, ok := plan.FunctionPlan(ssaPkg.Func("__llgo_coro_preempt_poll_v1"))
+	if !ok || pollPlan.Effect.MaySuspend() || pollPlan.Exec.Contains(coro.NeedsPreempt) || pollPlan.Emission != coro.EmitPlain {
+		t.Fatalf("preempt poll plan = %+v, want one trusted plain atomic poll", pollPlan)
+	}
+	parkHookPlan, ok := plan.FunctionPlan(ssaPkg.Func("__llgo_coro_park_prepare_v1"))
+	if !ok || parkHookPlan.Effect.MaySuspend() || parkHookPlan.Exec.Contains(coro.NeedsPreempt) ||
+		parkHookPlan.Emission != coro.EmitPlain || parkHookPlan.Demand != coro.SyncDemand ||
+		parkHookPlan.FuncRep != coro.DirectPlain {
+		t.Fatalf("park prepare hook plan = %+v, want one required sync direct-plain body", parkHookPlan)
 	}
 	unrelatedPlan, ok := plan.FunctionPlan(unrelatedLoop)
 	if !ok || !unrelatedPlan.Exec.Contains(coro.NeedsPreempt) || !unrelatedPlan.Effect.Contains(coro.YieldOnly) || unrelatedPlan.Emission != coro.EmitCoroutine {
@@ -409,7 +664,7 @@ func inlineIntrinsic(string) *byte
 	}
 
 	metadata := coro.PlanDigestMetadata{
-		CoroABI: coro.PhysicalABIV1, SchedulerABI: coro.SchedulerProgramBootstrapABIV1,
+		CoroABI: coro.PhysicalABIV1, SchedulerABI: coro.SchedulerProgramBootstrapABIV2,
 		PanicABI: coro.PanicLegacyABIV0, FuncRepABI: coro.FuncRepABIV0,
 		TargetTriple: "x86_64-unknown-linux-gnu", PointerBits: 64,
 		Endianness: "little", DataLayout: "e-p:64:64",
@@ -428,6 +683,21 @@ func inlineIntrinsic(string) *byte
 	}
 	if secondDigest != digest {
 		t.Fatalf("required runtime plan digest changed: %s != %s", secondDigest, digest)
+	}
+
+	irqPlan, err := analyze(func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+		if fn == closureLoop {
+			return coro.SSAFunctionPolicy{Exec: coro.IRQUnsafe}, nil
+		}
+		return coro.SSAFunctionPolicy{}, nil
+	})
+	if err != nil {
+		t.Fatalf("required plain ordinary-G IRQ-unsafe plan: %v", err)
+	}
+	irqClosure, ok := irqPlan.FunctionPlan(closureLoop)
+	if !ok || irqClosure.Emission != coro.EmitPlain || !irqClosure.Exec.Contains(coro.IRQUnsafe) ||
+		irqClosure.Exec.Contains(coro.ThreadAffine|coro.BlockForeign|coro.OpaqueExec) {
+		t.Fatalf("required plain IRQ-unsafe closure plan = %+v, want exact ordinary-G plain implementation", irqClosure)
 	}
 
 	conflicts := []struct {
@@ -457,13 +727,80 @@ func inlineIntrinsic(string) *byte
 	}
 }
 
+func TestRequiredCoroProgramRuntimePlanKeepsEntryInitWithoutRunnableBootstrap(t *testing.T) {
+	ssaPkg, files := buildCoroPlanTestPackage(t, llssa.PkgRuntime, `package runtime
+func __llgo_coro_program_begin_v1() {}
+func __llgo_coro_program_run_v1() {}
+func __llgo_coro_frame_allocator_bootstrap_v1() {}
+func __llgo_coro_frame_alloc_v1() {}
+func __llgo_coro_frame_publish_v1() {}
+func __llgo_coro_await_prepare_v1() {}
+func __llgo_coro_preempt_poll_v1() bool { return false }
+func __llgo_coro_yield_prepare_v1() {}
+func __llgo_coro_park_prepare_v1() {}
+func __llgo_coro_complete_prepare_v1() {}
+func __llgo_coro_frame_free_v1() {}
+`, nil)
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	emission, err := cl.PrepareEmissionUniverse(prog, nil, []cl.EmissionPackage{{
+		SSA: ssaPkg, Files: files, Identity: llssa.PkgRuntime,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaEmission, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, emission.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &context{
+		buildConf:       &Config{EnableCoroChildAwait: true},
+		coroEmission:    emission,
+		coroSSAEmission: ssaEmission,
+	}
+	roots, requiredPlain, directPlain, closedDynamic, err := requiredCoroProgramRuntimePlan(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(roots) != 1 || roots[0].Function != ssaPkg.Func("init") || roots[0].Demand != coro.SyncDemand {
+		t.Fatalf("entry-only runtime roots = %+v, want exact runtime package init/sync", roots)
+	}
+	if _, ok := requiredPlain[ssaPkg.Func("init")]; !ok {
+		t.Fatal("entry-only runtime init is absent from required plain closure")
+	}
+	for _, name := range []string{
+		coroFrameAllocatorBootstrapSymbolV1,
+		coroProgramBeginSymbolV1,
+		coroProgramRunSymbolV1,
+		"__llgo_coro_frame_alloc_v1",
+		"__llgo_coro_frame_publish_v1",
+		"__llgo_coro_await_prepare_v1",
+		"__llgo_coro_preempt_poll_v1",
+		"__llgo_coro_yield_prepare_v1",
+		"__llgo_coro_park_prepare_v1",
+		"__llgo_coro_complete_prepare_v1",
+		"__llgo_coro_frame_free_v1",
+	} {
+		if _, ok := requiredPlain[ssaPkg.Func(name)]; ok {
+			t.Fatalf("descriptor-only child-await plan trusted runnable hook %q", name)
+		}
+	}
+	if len(directPlain) != 0 || len(closedDynamic) != 0 {
+		t.Fatalf("entry-only runtime plan produced callback proofs: direct=%d dynamic=%d", len(directPlain), len(closedDynamic))
+	}
+}
+
 func TestRequiredCoroProgramRuntimePlanRejectsInvalidIntrinsicSite(t *testing.T) {
 	ssaPkg, files := buildCoroPlanTestPackage(t, llssa.PkgRuntime, `package runtime
 func __llgo_coro_program_begin_v1() { bootstrapHelper() }
 func __llgo_coro_program_run_v1() {}
+func __llgo_coro_frame_allocator_bootstrap_v1() {}
 func __llgo_coro_frame_alloc_v1() {}
 func __llgo_coro_frame_publish_v1() {}
 func __llgo_coro_await_prepare_v1() {}
+func __llgo_coro_preempt_poll_v1() bool { return false }
+func __llgo_coro_yield_prepare_v1() {}
+func __llgo_coro_park_prepare_v1() {}
 func __llgo_coro_complete_prepare_v1() {}
 func __llgo_coro_frame_free_v1() {}
 func intrinsicInput() string { return "not constant at the call site" }
@@ -484,11 +821,11 @@ func inlineIntrinsic(string) *byte
 		t.Fatal(err)
 	}
 	ctx := &context{
-		buildConf:       &Config{EnableCoroProgramBootstrapRun: true},
+		buildConf:       &Config{EnableCoroChildAwait: true, EnableCoroProgramBootstrapRun: true},
 		coroEmission:    emission,
 		coroSSAEmission: ssaEmission,
 	}
-	_, _, _, err = requiredCoroProgramRuntimePlan(ctx)
+	_, _, _, _, err = requiredCoroProgramRuntimePlan(ctx)
 	if err == nil || !strings.Contains(err.Error(), "requires exactly one compile-time string constant argument") {
 		t.Fatalf("invalid runtime-closure intrinsic error = %v; want exact call-site rejection", err)
 	}
@@ -813,6 +1150,7 @@ type requiredCoroRuntimeFixture struct {
 	input         CoroPlanInput
 	requiredPlain map[*ssa.Function]struct{}
 	directPlain   []requiredCoroDirectPlainCallArgument
+	closedDynamic map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate
 	functionIDs   coro.FunctionIDConfig
 }
 
@@ -826,9 +1164,13 @@ func buildRequiredCoroRuntimeFixture(t *testing.T, body string) requiredCoroRunt
 	source := `package runtime
 func __llgo_coro_program_begin_v1() { install() }
 func __llgo_coro_program_run_v1() {}
+func __llgo_coro_frame_allocator_bootstrap_v1() {}
 func __llgo_coro_frame_alloc_v1() {}
 func __llgo_coro_frame_publish_v1() {}
 func __llgo_coro_await_prepare_v1() {}
+func __llgo_coro_preempt_poll_v1() bool { return false }
+func __llgo_coro_yield_prepare_v1() {}
+func __llgo_coro_park_prepare_v1() {}
 func __llgo_coro_complete_prepare_v1() {}
 func __llgo_coro_frame_free_v1() {}
 ` + body
@@ -847,33 +1189,36 @@ func __llgo_coro_frame_free_v1() {}
 		t.Fatal(err)
 	}
 	ctx := &context{
-		prog:            prog,
-		buildConf:       &Config{EnableCoroProgramBootstrapRun: true},
-		coroEmission:    emission,
-		coroSSAEmission: ssaEmission,
+		prog:                        prog,
+		buildConf:                   &Config{EnableCoroChildAwait: true, EnableCoroProgramBootstrapRun: true},
+		coroEmission:                emission,
+		coroSSAEmission:             ssaEmission,
+		coroTLSDestructorFixturePkg: llssa.PkgRuntime,
 	}
-	roots, requiredPlain, directPlain, err := requiredCoroProgramRuntimePlan(ctx)
+	roots, requiredPlain, directPlain, closedDynamic, err := requiredCoroProgramRuntimePlan(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	functionIDs := emission.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
 	functionIDs.ArchiveReady = true
 	return requiredCoroRuntimeFixture{
 		pkg: ssaPkg,
 		ctx: ctx,
 		input: CoroPlanInput{
-			Program:             ssaPkg.Prog,
-			EmissionUniverse:    ssaEmission,
-			resolveFunction:     emission.Resolve,
-			functionBackground:  emission.FunctionBackground,
-			requiredRoots:       roots,
-			requiredPlain:       requiredPlain,
-			requiredDirectPlain: directPlain,
+			Program:               ssaPkg.Prog,
+			EmissionUniverse:      ssaEmission,
+			resolveFunction:       emission.Resolve,
+			functionBackground:    emission.FunctionBackground,
+			requiredRoots:         roots,
+			requiredPlain:         requiredPlain,
+			requiredDirectPlain:   directPlain,
+			requiredClosedDynamic: closedDynamic,
 		},
 		requiredPlain: requiredPlain,
 		directPlain:   directPlain,
+		closedDynamic: closedDynamic,
 		functionIDs:   functionIDs,
 	}
 }
@@ -940,6 +1285,31 @@ func TestBuildCoroPlanInstallsArchiveDigest(t *testing.T) {
 	ctx.collectCommonInputs(manifest)
 	if manifest.common.CoroPlanDigest != ctx.coroPlanDigest || manifest.common.CoroDataLayout != prog.DataLayout() {
 		t.Fatalf("manifest coroutine inputs = %+v", manifest.common)
+	}
+
+	explicitProg := llssa.NewProgram(nil)
+	defer explicitProg.Dispose()
+	explicitCtx := &context{
+		progSSA: ssaPkg.Prog,
+		prog:    explicitProg,
+		buildConf: &Config{
+			EnableCoroEntryResolution:        true,
+			EnableCoroExplicitStatusPanicABI: true,
+			CoroPlanBuilder: func(input CoroPlanInput) (*coro.SSAPlan, error) {
+				return input.Analyze(coro.Roots{{Function: ssaPkg.Func("F"), Demand: coro.SyncDemand}}, coro.SSAConfig{
+					MaxPlainInstructions: -1,
+				})
+			},
+		},
+	}
+	if err := buildCoroPlan(explicitCtx, aPkg); err == nil ||
+		!strings.Contains(err.Error(), coro.PanicExplicitStatusABIV0) ||
+		!strings.Contains(err.Error(), "lowering and runtime semantics are not implemented") {
+		t.Fatalf("explicit-status panic ABI build error = %v", err)
+	}
+	if explicitCtx.coroPlan != nil || explicitCtx.clCompilation != nil || explicitCtx.coroPlanDigest != "" || explicitCtx.coroPlanMetadata.PanicABI != "" {
+		t.Fatalf("identity-only explicit-status panic build retained active state: plan=%v compilation=%v digest=%q metadata=%+v",
+			explicitCtx.coroPlan, explicitCtx.clCompilation, explicitCtx.coroPlanDigest, explicitCtx.coroPlanMetadata)
 	}
 
 	badProg := llssa.NewProgram(nil)
@@ -1192,17 +1562,328 @@ func g() {}
 	}
 }
 
+func TestCoroPlanInputOwnsFrozenDemandReferences(t *testing.T) {
+	ssaPkg, _ := buildCoroPlanTestPackage(t, "example.com/demandrefs", `package demandrefs
+func owner() {}
+func method() {}
+func method2() {}
+func extra() {}
+func alias() {}
+`, nil)
+	owner := ssaPkg.Func("owner")
+	method := ssaPkg.Func("method")
+	method2 := ssaPkg.Func("method2")
+	extra := ssaPkg.Func("extra")
+	alias := ssaPkg.Func("alias")
+	universe, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, []*ssa.Function{owner, method, method2, extra})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozen := []*ssa.Function{method, method2}
+	input := CoroPlanInput{
+		Program:          ssaPkg.Prog,
+		EmissionUniverse: universe,
+		resolveFunction: func(fn *ssa.Function) (*ssa.Function, bool) {
+			if fn == alias {
+				return method, true
+			}
+			return fn, universe.Contains(fn)
+		},
+		demandReferences: func(fn *ssa.Function) ([]*ssa.Function, error) {
+			if fn == owner {
+				return frozen, nil
+			}
+			return nil, nil
+		},
+	}
+	roots := coro.Roots{{Function: owner, Demand: coro.SyncDemand}}
+	plan, err := input.Analyze(roots, coro.SSAConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []*ssa.Function{method, method2} {
+		methodPlan, ok := plan.FunctionPlan(target)
+		if !ok || methodPlan.Demand != coro.SyncDemand || methodPlan.Emission != coro.EmitPlain {
+			t.Fatalf("frozen method %s plan = %+v, present=%v", target.Name(), methodPlan, ok)
+		}
+	}
+	// A completed exact-pointer plan does not retain the frontend callback's
+	// backing slice.
+	frozen[0] = extra
+	methodPlan, ok := plan.FunctionPlan(method)
+	if !ok || methodPlan.Demand != coro.SyncDemand {
+		t.Fatalf("callback slice mutation changed completed method plan = %+v, present=%v", methodPlan, ok)
+	}
+	frozen[0] = method
+
+	tests := []struct {
+		name      string
+		requested []*ssa.Function
+	}{
+		{name: "missing", requested: []*ssa.Function{method}},
+		{name: "extra", requested: []*ssa.Function{method, method2, extra}},
+		{name: "alias", requested: []*ssa.Function{method, alias}},
+		{name: "duplicate", requested: []*ssa.Function{method, method}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := input.Analyze(roots, coro.SSAConfig{
+				ClassifyDemandReferences: func(fn *ssa.Function) ([]*ssa.Function, error) {
+					if fn == owner {
+						return test.requested, nil
+					}
+					return nil, nil
+				},
+			})
+			if err == nil || !strings.Contains(err.Error(), "conflict with the frozen frontend method-table references") {
+				t.Fatalf("builder %s demand-reference error = %v", test.name, err)
+			}
+		})
+	}
+
+	accepted, err := input.Analyze(roots, coro.SSAConfig{
+		ClassifyDemandReferences: func(fn *ssa.Function) ([]*ssa.Function, error) {
+			if fn == owner {
+				return []*ssa.Function{method2, method}, nil
+			}
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("builder exact frozen reference was rejected: %v", err)
+	}
+	if got, ok := accepted.FunctionPlan(method); !ok || got.Demand != coro.SyncDemand {
+		t.Fatalf("accepted exact reference plan = %+v, present=%v", got, ok)
+	}
+}
+
+func TestCoroPlanInputOwnsFrozenLoweredCalls(t *testing.T) {
+	ssaPkg, _ := buildCoroPlanTestPackage(t, "example.com/loweredcalls", `package loweredcalls
+var channel chan int
+func owner() {}
+func helper() { <-channel }
+func helper2() {}
+func extra() {}
+func alias() {}
+`, nil)
+	owner := ssaPkg.Func("owner")
+	helper := ssaPkg.Func("helper")
+	helper2 := ssaPkg.Func("helper2")
+	extra := ssaPkg.Func("extra")
+	alias := ssaPkg.Func("alias")
+	universe, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, []*ssa.Function{owner, helper, helper2, extra})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozen := []coro.SSALoweredCall{
+		{LogicalName: "runtime.helper", Target: helper},
+		{LogicalName: "runtime.helper2", Target: helper2},
+	}
+	input := CoroPlanInput{
+		Program:          ssaPkg.Prog,
+		EmissionUniverse: universe,
+		resolveFunction: func(fn *ssa.Function) (*ssa.Function, bool) {
+			if fn == alias {
+				return helper, true
+			}
+			return fn, universe.Contains(fn)
+		},
+		loweredCalls: func(fn *ssa.Function) ([]coro.SSALoweredCall, error) {
+			if fn == owner {
+				return frozen, nil
+			}
+			return nil, nil
+		},
+	}
+	roots := coro.Roots{{Function: owner, Demand: coro.SyncDemand}}
+	plan, err := input.Analyze(roots, coro.SSAConfig{MaxPlainInstructions: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerPlan, ok := plan.FunctionPlan(owner)
+	if !ok || !ownerPlan.Effect.Contains(coro.MayPark) || ownerPlan.Emission != coro.EmitCoroutine {
+		t.Fatalf("owner plan = %+v, present=%v; frozen lowered call did not propagate effect", ownerPlan, ok)
+	}
+	if got, ok := plan.FunctionPlan(helper); !ok || got.Demand != coro.AsyncDemand || got.Emission != coro.EmitCoroutine {
+		t.Fatalf("suspending helper plan = %+v, present=%v", got, ok)
+	}
+	// The completed plan owns both the record slice and its exact mapping.
+	frozen[0].Target = extra
+	if target, ok := plan.ResolveLoweredCall(owner, "runtime.helper"); !ok || target != helper {
+		t.Fatalf("callback slice mutation changed completed lowered call: %v, %v", target, ok)
+	}
+	frozen[0].Target = helper
+
+	tests := []struct {
+		name      string
+		requested []coro.SSALoweredCall
+	}{
+		{name: "missing", requested: []coro.SSALoweredCall{{LogicalName: "runtime.helper", Target: helper}}},
+		{name: "extra", requested: []coro.SSALoweredCall{{LogicalName: "runtime.helper", Target: helper}, {LogicalName: "runtime.helper2", Target: helper2}, {LogicalName: "runtime.extra", Target: extra}}},
+		{name: "renamed", requested: []coro.SSALoweredCall{{LogicalName: "runtime.renamed", Target: helper}, {LogicalName: "runtime.helper2", Target: helper2}}},
+		{name: "retargeted", requested: []coro.SSALoweredCall{{LogicalName: "runtime.helper", Target: helper2}, {LogicalName: "runtime.helper2", Target: helper}}},
+		{name: "unwind class", requested: []coro.SSALoweredCall{{LogicalName: "runtime.helper", Target: helper, UnwindOnly: true}, {LogicalName: "runtime.helper2", Target: helper2}}},
+		{name: "alias", requested: []coro.SSALoweredCall{{LogicalName: "runtime.helper", Target: alias}, {LogicalName: "runtime.helper2", Target: helper2}}},
+		{name: "duplicate", requested: []coro.SSALoweredCall{{LogicalName: "runtime.helper", Target: helper}, {LogicalName: "runtime.helper", Target: helper}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := input.Analyze(roots, coro.SSAConfig{
+				ClassifyLoweredCalls: func(fn *ssa.Function) ([]coro.SSALoweredCall, error) {
+					if fn == owner {
+						return test.requested, nil
+					}
+					return nil, nil
+				},
+			})
+			if err == nil || !strings.Contains(err.Error(), "conflict with the frozen frontend helper calls") {
+				t.Fatalf("builder %s lowered-call error = %v", test.name, err)
+			}
+		})
+	}
+
+	accepted, err := input.Analyze(roots, coro.SSAConfig{
+		MaxPlainInstructions: -1,
+		ClassifyLoweredCalls: func(fn *ssa.Function) ([]coro.SSALoweredCall, error) {
+			if fn == owner {
+				return []coro.SSALoweredCall{
+					{LogicalName: "runtime.helper2", Target: helper2},
+					{LogicalName: "runtime.helper", Target: helper},
+				}, nil
+			}
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("builder exact frozen lowered calls were rejected: %v", err)
+	}
+	if got := accepted.LoweredCalls(owner); len(got) != 2 || got[0].LogicalName != "runtime.helper" || got[1].LogicalName != "runtime.helper2" {
+		t.Fatalf("accepted lowered calls = %+v", got)
+	}
+}
+
+func TestValidateCoroUnwindOnlyLoweredCallsRequiresLegacyPlainTarget(t *testing.T) {
+	ssaPkg, _ := buildCoroPlanTestPackage(t, "example.com/unwindlowered", `package unwindlowered
+var channel chan int
+func owner() {}
+func plain() {}
+func suspending() { <-channel }
+func external()
+`, nil)
+	owner := ssaPkg.Func("owner")
+	plain := ssaPkg.Func("plain")
+	suspending := ssaPkg.Func("suspending")
+	external := ssaPkg.Func("external")
+	universe, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, []*ssa.Function{owner, plain, suspending, external})
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := func(target *ssa.Function) *coro.SSAPlan {
+		t.Helper()
+		plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: owner, Demand: coro.SyncDemand}}, coro.SSAConfig{
+			EmissionUniverse: universe,
+			ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+				if fn == suspending {
+					// These flags describe a control-flow role; they are not a
+					// certificate that a physically suspending body is plain.
+					return coro.SSAFunctionPolicy{Exec: coro.NoReturn | coro.PanicOnly}, nil
+				}
+				return coro.SSAFunctionPolicy{}, nil
+			},
+			ClassifyLoweredCalls: func(fn *ssa.Function) ([]coro.SSALoweredCall, error) {
+				if fn == owner {
+					return []coro.SSALoweredCall{{LogicalName: "runtime.Helper", Target: target, UnwindOnly: true}}, nil
+				}
+				return nil, nil
+			},
+			MaxPlainInstructions: -1,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return plan
+	}
+	plainPlan := build(plain)
+	if err := validateCoroUnwindOnlyLoweredCalls(plainPlan, coro.PanicLegacyABIV0); err != nil {
+		t.Fatalf("bounded plain unwind helper rejected: %v", err)
+	}
+	if err := validateCoroUnwindOnlyLoweredCalls(plainPlan, coro.PanicExplicitStatusABIV0); err == nil ||
+		!strings.Contains(err.Error(), "has no certified unwind-helper call contract") {
+		t.Fatalf("identity-only explicit-status unwind helper error = %v", err)
+	}
+	if err := validateCoroUnwindOnlyLoweredCalls(plainPlan, coro.PanicLegacyABIV0); err != nil {
+		t.Fatalf("explicit-status rejection changed the legacy bounded-plain certificate: %v", err)
+	}
+	forged := coroLegacyPanicPlainCertificate{owner: owner, logicalName: "runtime.Helper", target: suspending}
+	if err := forged.validate(plainPlan); err == nil || !strings.Contains(err.Error(), "not bound to an exact frozen unwind-only target") {
+		t.Fatalf("name-only retargeted certificate error = %v", err)
+	}
+	suspendingPlan := build(suspending)
+	if got, ok := suspendingPlan.FunctionPlan(owner); !ok || got.Effect != coro.NoSuspend || got.Emission != coro.EmitPlain {
+		t.Fatalf("unwind-only edge polluted owner before preflight: %+v, present=%v", got, ok)
+	}
+	err = validateCoroUnwindOnlyLoweredCalls(suspendingPlan, coro.PanicLegacyABIV0)
+	if err == nil || !strings.Contains(err.Error(), "exact "+coro.PanicLegacyABIV0+" plain certificate") ||
+		!strings.Contains(err.Error(), "effect=may-park") || !strings.Contains(err.Error(), "panic-only") {
+		t.Fatalf("suspending unwind helper error = %v", err)
+	}
+	if err := validateCoroUnwindOnlyLoweredCalls(build(external), coro.PanicLegacyABIV0); err == nil ||
+		!strings.Contains(err.Error(), "is not a defined Go body") {
+		t.Fatalf("external unwind helper error = %v", err)
+	}
+}
+
+func TestValidateCoroUnwindOnlyLoweredCallsRejectsDynamicErrorMethod(t *testing.T) {
+	ssaPkg, _ := buildCoroPlanTestPackage(t, "example.com/unwinderror", `package unwinderror
+func owner() {}
+func failure(err error) { _ = err.Error() }
+`, nil)
+	owner := ssaPkg.Func("owner")
+	failure := ssaPkg.Func("failure")
+	universe, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, []*ssa.Function{owner, failure})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: owner, Demand: coro.SyncDemand}}, coro.SSAConfig{
+		EmissionUniverse: universe,
+		ClassifyLoweredCalls: func(fn *ssa.Function) ([]coro.SSALoweredCall, error) {
+			if fn == owner {
+				return []coro.SSALoweredCall{{LogicalName: "runtime.Panic", Target: failure, UnwindOnly: true}}, nil
+			}
+			return nil, nil
+		},
+		MaxPlainInstructions: -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = validateCoroUnwindOnlyLoweredCalls(plan, coro.PanicLegacyABIV0)
+	if err == nil || !strings.Contains(err.Error(), "dynamic invoke Error") ||
+		!strings.Contains(err.Error(), "not a bounded DirectPlain edge") {
+		t.Fatalf("dynamic error method unwind helper error = %v", err)
+	}
+	if got, ok := plan.FunctionPlan(failure); !ok || got.FuncRep != coro.DirectCoro || !got.Exec.Contains(coro.OpaqueExec) {
+		t.Fatalf("dynamic Error target was unexpectedly forced plain: %+v, present=%v", got, ok)
+	}
+}
+
 func TestActiveCoroABIVersions(t *testing.T) {
 	tests := []struct {
 		name      string
 		config    *Config
 		coroABI   string
 		scheduler string
+		panicABI  string
+		funcRep   string
 	}{
-		{"entry resolution", &Config{}, coro.EntryResolutionABIV0, coro.SchedulerNoneABIV0},
-		{"physical leaf", &Config{EnableCoroPhysicalABI: true}, coro.PhysicalABIV0, coro.SchedulerNoneABIV0},
-		{"child await", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true}, coro.PhysicalABIV1, coro.SchedulerChildAwaitABIV0},
-		{"program bootstrap runtime", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true, EnableCoroProgramBootstrapRun: true}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapABIV1},
+		{"nil defaults", nil, coro.EntryResolutionABIV0, coro.SchedulerNoneABIV0, coro.PanicLegacyABIV0, coro.FuncRepABIV0},
+		{"entry resolution", &Config{}, coro.EntryResolutionABIV0, coro.SchedulerNoneABIV0, coro.PanicLegacyABIV0, coro.FuncRepABIV0},
+		{"physical leaf", &Config{EnableCoroPhysicalABI: true}, coro.PhysicalABIV0, coro.SchedulerNoneABIV0, coro.PanicLegacyABIV0, coro.FuncRepABIV0},
+		{"explicit status panic", &Config{EnableCoroExplicitStatusPanicABI: true}, coro.EntryResolutionABIV0, coro.SchedulerNoneABIV0, coro.PanicExplicitStatusABIV0, coro.FuncRepABIV0},
+		{"plain dispatch", &Config{EnableCoroPlainDispatch: true}, coro.EntryResolutionABIV0, coro.SchedulerNoneABIV0, coro.PanicLegacyABIV0, coro.FuncRepABIV1},
+		{"child await", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true}, coro.PhysicalABIV1, coro.SchedulerChildAwaitABIV0, coro.PanicLegacyABIV0, coro.FuncRepABIV0},
+		{"closed static spawn", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true, EnableCoroClosedStaticSpawn: true, EnableCoroProgramBootstrapRun: true}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0, coro.PanicLegacyABIV0, coro.FuncRepABIV0},
+		{"program bootstrap runtime with plain dispatch", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true, EnableCoroPlainDispatch: true, EnableCoroProgramBootstrapRun: true}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapABIV2, coro.PanicLegacyABIV0, coro.FuncRepABIV1},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -1211,6 +1892,12 @@ func TestActiveCoroABIVersions(t *testing.T) {
 			}
 			if got := activeCoroSchedulerABIVersion(test.config); got != test.scheduler {
 				t.Fatalf("scheduler ABI = %q, want %q", got, test.scheduler)
+			}
+			if got := activeCoroPanicABIVersion(test.config); got != test.panicABI {
+				t.Fatalf("panic ABI = %q, want %q", got, test.panicABI)
+			}
+			if got := activeCoroFuncRepABIVersion(test.config); got != test.funcRep {
+				t.Fatalf("function representation ABI = %q, want %q", got, test.funcRep)
 			}
 		})
 	}
@@ -1286,6 +1973,17 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 		}
 	})
 
+	t.Run("explicit-status panic ABI requires entry resolution", func(t *testing.T) {
+		ctx := &context{buildConf: &Config{EnableCoroExplicitStatusPanicABI: true}}
+		err := buildCoroPlan(ctx)
+		if err == nil || !strings.Contains(err.Error(), "entry resolution is required") {
+			t.Fatalf("buildCoroPlan error = %v, want explicit-status entry-resolution requirement", err)
+		}
+		if ctx.coroPlan != nil || ctx.clCompilation != nil {
+			t.Fatal("invalid explicit-status panic ABI configuration installed coroutine compilation state")
+		}
+	})
+
 	t.Run("child await requires physical ABI", func(t *testing.T) {
 		ctx := &context{buildConf: &Config{
 			EnableCoroEntryResolution: true,
@@ -1321,6 +2019,11 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 		conf Config
 		want string
 	}{
+		{
+			name: "plain dispatch requires entry resolution",
+			conf: Config{EnableCoroPlainDispatch: true},
+			want: "plain dispatch: coroutine entry resolution is required",
+		},
 		{
 			name: "program bootstrap runtime requires descriptor ABI",
 			conf: Config{BuildMode: BuildModeExe, EnableCoroEntryResolution: true, EnableCoroPhysicalABI: true, EnableCoroChildAwait: true, EnableCoroProgramBootstrapRun: true},
@@ -1595,6 +2298,35 @@ func TestCoroEntryResolutionUsesPlanMatchedPackageCache(t *testing.T) {
 	matchingPkg := newPackage(seedCtx)
 	if !seedCtx.tryLoadFromCache(matchingPkg) || !matchingPkg.CacheHit {
 		t.Fatal("matching coroutine plan did not reuse the package archive")
+	}
+	dispatchCtx := newContext(digestA)
+	dispatchCtx.buildConf.EnableCoroPlainDispatch = true
+	dispatchCtx.clCompilation.EnableCoroPlainDispatch = true
+	dispatchCtx.clCompilation.FuncRepABI = coro.FuncRepABIV1
+	dispatchCtx.coroPlanMetadata.FuncRepABI = coro.FuncRepABIV1
+	if !dispatchCtx.canUsePackageCache() {
+		t.Fatal("matching plain-dispatch ABI unexpectedly disabled package cache")
+	}
+	dispatchCtx.clCompilation.EnableCoroPlainDispatch = false
+	if dispatchCtx.canUsePackageCache() {
+		t.Fatal("plain-dispatch capability mismatch unexpectedly permits package cache")
+	}
+	explicitStatusCtx := newContext(digestA)
+	explicitStatusCtx.buildConf.EnableCoroExplicitStatusPanicABI = true
+	explicitStatusCtx.clCompilation.EnableCoroExplicitStatusPanicABI = true
+	explicitStatusCtx.clCompilation.PanicABI = coro.PanicExplicitStatusABIV0
+	explicitStatusCtx.coroPlanMetadata.PanicABI = coro.PanicExplicitStatusABIV0
+	if !explicitStatusCtx.canUsePackageCache() {
+		t.Fatal("matching explicit-status panic ABI identity unexpectedly disabled package cache")
+	}
+	explicitStatusCtx.clCompilation.EnableCoroExplicitStatusPanicABI = false
+	if explicitStatusCtx.canUsePackageCache() {
+		t.Fatal("explicit-status panic capability mismatch unexpectedly permits package cache")
+	}
+	bootstrapMismatch := newContext(digestA)
+	bootstrapMismatch.clCompilation.EnableCoroProgramBootstrapRun = true
+	if bootstrapMismatch.canUsePackageCache() {
+		t.Fatal("program-bootstrap-run capability mismatch unexpectedly permits package cache")
 	}
 	if !matchingPkg.NeedRt || !matchingPkg.NeedPyInit {
 		t.Fatalf("cache metadata runtime flags = %v/%v, want true/true", matchingPkg.NeedRt, matchingPkg.NeedPyInit)

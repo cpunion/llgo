@@ -65,10 +65,9 @@ func deregisterSlot[T any](s *slot[T]) {
 func (s *slot[T]) rootRange() (start, end c.Pointer) {
 	begin := unsafe.Pointer(s)
 	size := unsafe.Sizeof(*s)
-	beginAddr := uintptr(begin)
-	if beginAddr > ^uintptr(0)-size {
-		panic("tls: pointer arithmetic overflow in rootRange")
-	}
-	endPtr := unsafe.Pointer(beginAddr + size)
+	// A slot always points at one complete calloc allocation. unsafe.Add keeps
+	// this callback cleanup path allocation-free and non-panicking; a generic Go
+	// panic cannot cross the pthread TLS destructor's synchronous C ABI.
+	endPtr := unsafe.Add(begin, size)
 	return c.Pointer(begin), c.Pointer(endPtr)
 }

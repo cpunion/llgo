@@ -33,10 +33,15 @@ const (
 	CallSpawn
 	// CallForeign stack-cuts the caller and contributes WaitForeign directly.
 	CallForeign
+	// CallUnwind is an exact compiler-lowered call reachable only on a path
+	// that cannot return normally from the caller. It keeps the callee demanded
+	// for emission and panic-ABI verification, but its suspend effect and
+	// execution constraints do not describe the caller's normal-return body.
+	CallUnwind
 )
 
 func (k CallKind) validate() error {
-	if k > CallForeign {
+	if k > CallUnwind {
 		return fmt.Errorf("coro: invalid call kind %d", uint8(k))
 	}
 	return nil
@@ -209,6 +214,9 @@ func (g *Graph) AddUnknownCall(call UnknownCall) error {
 	if err := call.Kind.validate(); err != nil {
 		return err
 	}
+	if call.Kind == CallUnwind {
+		return fmt.Errorf("coro: unwind-only call requires an exact target")
+	}
 	if err := call.Target.validate(); err != nil {
 		return err
 	}
@@ -326,6 +334,11 @@ func (g *Graph) Analyze() (*Plan, error) {
 			case CallForeign:
 				effectContribution = WaitForeign
 				execContribution = execFlags[callee] & propagatedExecFlags
+			case CallUnwind:
+				// The exact target remains in the graph and is demanded below.
+				// Its behavior is confined to a path that cannot return normally,
+				// so it does not constrain the caller's normal-return body.
+				continue
 			}
 			nextEffect := effects[edge.Caller].Join(effectContribution)
 			nextExec := execFlags[edge.Caller].Join(execContribution)
@@ -388,6 +401,11 @@ func (g *Graph) Analyze() (*Plan, error) {
 			case CallSpawn:
 				contribution = AsyncDemand
 			case CallForeign:
+				contribution = SyncDemand
+			case CallUnwind:
+				// Legacy panic lowering is a synchronous boundary. A suspendable
+				// target is still emitted as a coroutine and must be rejected by
+				// the panic-ABI/lowering verifier until such an adapter exists.
 				contribution = SyncDemand
 			case CallDirect, CallDefer:
 				contribution = SyncDemand

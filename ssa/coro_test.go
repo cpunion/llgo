@@ -85,6 +85,125 @@ func TestCoroBuilderPresplitShape(t *testing.T) {
 	}
 }
 
+func TestCoroBuilderSuspendCurrentBlockPreservesLogicalCFG(t *testing.T) {
+	Initialize(InitAll)
+	prog := NewProgram(nil)
+	defer prog.Dispose()
+	pkg := prog.NewPackage("corologicalblock", "coro/logical/block")
+	defer pkg.Module().Dispose()
+
+	fn := pkg.NewFunc("coro_logical_block", coroHandleSignature(), InGo)
+	b := fn.MakeBody(1)
+	defer b.Dispose()
+	coro := b.BeginCoro(CoroOptions{Frame: CoroFrameOps{
+		Alloc: func(Builder, Expr, Expr) Expr { return prog.Nil(prog.VoidPtr()) },
+		Free:  func(Builder, Expr, Expr, Expr) {},
+	}})
+
+	logical := fn.MakeBlock()
+	join := fn.MakeBlock()
+	b.Jump(logical)
+	b.SetBlock(logical)
+	first := logical.first
+	originalLast := logical.last
+
+	if got := coro.SuspendCurrentBlock(); got != logical {
+		t.Fatalf("first suspend returned block %p, want logical block %p", got, logical)
+	}
+	firstResume := logical.last
+	if firstResume.C == originalLast.C {
+		t.Fatal("first suspend did not advance the logical block's physical tail")
+	}
+	if logical.first.C != first.C || b.blk != logical {
+		t.Fatal("first suspend did not preserve the current logical block")
+	}
+
+	if got := coro.SuspendCurrentBlock(); got != logical {
+		t.Fatalf("second suspend returned block %p, want logical block %p", got, logical)
+	}
+	secondResume := logical.last
+	if secondResume.C == firstResume.C {
+		t.Fatal("second suspend did not advance the logical block's physical tail")
+	}
+	if logical.first.C != first.C || b.blk != logical {
+		t.Fatal("second suspend did not preserve the current logical block")
+	}
+	savedLogical := b.blk
+	b.blk = nil
+	mustPanicContains(t, "active logical block", func() { coro.SuspendCurrentBlock() })
+	b.blk = savedLogical
+
+	b.Jump(join)
+	b.SetBlock(join)
+	phi := b.Phi(prog.Byte())
+	phi.AddIncoming(b, []BasicBlock{logical}, func(int, BasicBlock) Expr {
+		return prog.IntVal(1, prog.Byte())
+	})
+	coro.Finish()
+	b.EndBuild()
+
+	if got := phi.impl.IncomingBlock(0); got.C != secondResume.C {
+		t.Fatal("phi predecessor does not use the logical block's post-suspend physical tail")
+	}
+	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify coroutine with logical-block suspends: %v\n%s", err, pkg.Module().String())
+	}
+}
+
+func TestCoroBuilderConditionalSuspendPreservesLogicalCFG(t *testing.T) {
+	Initialize(InitAll)
+	prog := NewProgram(nil)
+	defer prog.Dispose()
+	pkg := prog.NewPackage("coroconditionalblock", "coro/conditional/block")
+	defer pkg.Module().Dispose()
+
+	fn := pkg.NewFunc("coro_conditional_block", coroHandleSignature(), InGo)
+	b := fn.MakeBody(1)
+	defer b.Dispose()
+	coro := b.BeginCoro(CoroOptions{Frame: CoroFrameOps{
+		Alloc: func(Builder, Expr, Expr) Expr { return prog.Nil(prog.VoidPtr()) },
+		Free:  func(Builder, Expr, Expr, Expr) {},
+	}})
+	logical := fn.MakeBlock()
+	join := fn.MakeBlock()
+	b.Jump(logical)
+	b.SetBlock(logical)
+	first := logical.first
+	mustPanicContains(t, "boolean condition", func() {
+		coro.SuspendCurrentBlockIf(prog.IntVal(1, prog.Byte()), nil)
+	})
+	callbackCalls := 0
+	if got := coro.SuspendCurrentBlockIf(prog.BoolVal(true), func(b Builder) {
+		callbackCalls++
+		b.Call(pkg.NewFunc("publish_yield", functionSignature(nil, nil), InC).Expr)
+	}); got != logical {
+		t.Fatalf("conditional suspend returned block %p, want %p", got, logical)
+	}
+	if callbackCalls != 1 || logical.first.C != first.C || b.blk != logical {
+		t.Fatal("conditional suspend did not preserve its logical block or publication callback")
+	}
+	continuation := logical.last
+	b.Jump(join)
+	b.SetBlock(join)
+	phi := b.Phi(prog.Byte())
+	phi.AddIncoming(b, []BasicBlock{logical}, func(int, BasicBlock) Expr {
+		return prog.IntVal(1, prog.Byte())
+	})
+	coro.Finish()
+	b.EndBuild()
+
+	if got := phi.impl.IncomingBlock(0); got.C != continuation.C {
+		t.Fatal("conditional suspend phi predecessor does not use the joined physical continuation")
+	}
+	ir := pkg.Module().String()
+	if !strings.Contains(ir, "br i1 true") || !strings.Contains(ir, "call void @publish_yield") {
+		t.Fatalf("conditional suspend lacks poll branch/publication path:\n%s", ir)
+	}
+	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify conditional coroutine suspend: %v\n%s", err, ir)
+	}
+}
+
 func TestCoroBuilderCoroSplit(t *testing.T) {
 	fixture := newCoroTestFixture(t, nil, 32)
 	mod := fixture.pkg.Module()
@@ -1072,7 +1191,7 @@ func TestCoroProgramBootstrapTargetLayout(t *testing.T) {
 			bootstrap := pkg.NewCoroProgramBootstrap(
 				bootstrapName,
 				CoroProgramBootstrapOptions{
-					Version: 13,
+					Version: 1,
 					ABIHash: hash,
 					Steps:   steps,
 					Factory: factory,
@@ -1120,7 +1239,7 @@ func TestCoroProgramBootstrapTargetLayout(t *testing.T) {
 				t.Fatalf("bootstrap initializer is not a seven-field constant struct: %v", initializer)
 			}
 			wantFixed := []uint64{
-				13,
+				1,
 				0,
 				0x5051525354555657,
 				0x6061626364656667,
@@ -1216,6 +1335,7 @@ func TestCoroProgramBootstrapRejectsMisuse(t *testing.T) {
 	plain := pkg.NewFunc("valid_plain", functionSignature(nil, nil), InC)
 	anchor := newCoroProgramPackageAnchor(pkg, "valid_root_anchor", false)
 	valid := CoroProgramBootstrapOptions{
+		Version: 1,
 		Steps: []CoroProgramStep{
 			{Kind: CoroProgramStepDirectPlain, Flags: CoroProgramStepInit, Target: plain.Expr},
 			{Kind: CoroProgramStepCoroRoot, Flags: CoroProgramStepMain, Target: anchor},
@@ -1235,6 +1355,16 @@ func TestCoroProgramBootstrapRejectsMisuse(t *testing.T) {
 		bad := valid
 		bad.Flags = 1
 		pkg.NewCoroProgramBootstrap("bootstrap_flags", bad)
+	})
+	mustPanicContains(t, "unsupported version 0", func() {
+		bad := valid
+		bad.Version = 0
+		pkg.NewCoroProgramBootstrap("bootstrap_version_zero", bad)
+	})
+	mustPanicContains(t, "unsupported version 3", func() {
+		bad := valid
+		bad.Version = 3
+		pkg.NewCoroProgramBootstrap("bootstrap_version_unknown", bad)
 	})
 	for name, steps := range map[string][]CoroProgramStep{
 		"zero":  nil,
@@ -1389,6 +1519,7 @@ func TestCoroProgramBootstrapRejectsMisuse(t *testing.T) {
 	wasmAnchor := newCoroProgramPackageAnchor(wasmPkg, "wasm_root_anchor", false)
 	mustPanicContains(t, "aux overflows target uintptr", func() {
 		wasmPkg.NewCoroProgramBootstrap("wasm_aux_overflow", CoroProgramBootstrapOptions{
+			Version: 1,
 			Steps: []CoroProgramStep{
 				{Kind: CoroProgramStepDirectPlain, Flags: CoroProgramStepInit, Target: wasmPlain.Expr},
 				{
@@ -1417,10 +1548,153 @@ func TestCoroProgramBootstrapRejectsMisuse(t *testing.T) {
 	})
 }
 
+func TestCoroProgramBootstrapV2MixedStartupTable(t *testing.T) {
+	Initialize(InitAll)
+	prog := NewProgram(nil)
+	defer prog.Dispose()
+	pkg := prog.NewPackage("corobootstrapv2", "coro/bootstrap/v2")
+	defer pkg.Module().Dispose()
+
+	plains := [3]Function{
+		pkg.NewFunc("internal_runtime_init", functionSignature(nil, nil), InC),
+		pkg.NewFunc("public_runtime_init", functionSignature(nil, nil), InC),
+		pkg.NewFunc("main", functionSignature(nil, nil), InC),
+	}
+	anchors := [2]Expr{
+		newCoroProgramPackageAnchor(pkg, "compiler_abi_init_anchor", false),
+		newCoroProgramPackageAnchor(pkg, "main_package_init_anchor", false),
+	}
+	factory := pkg.NewFunc("bootstrap_factory_v2", coroRootFactoryTestSignature(), InC)
+	roles := [5]uint32{
+		CoroProgramStepInternalRuntimeInitV2,
+		CoroProgramStepCompilerABIInitV2,
+		CoroProgramStepPublicRuntimeInitV2,
+		CoroProgramStepMainPackageInitV2,
+		CoroProgramStepMainV2,
+	}
+	steps := []CoroProgramStep{
+		{Kind: CoroProgramStepDirectPlain, Flags: roles[0], Target: plains[0].Expr},
+		{Kind: CoroProgramStepCoroRoot, Flags: roles[1], Target: anchors[0], Aux: 2},
+		{Kind: CoroProgramStepDirectPlain, Flags: roles[2], Target: plains[1].Expr},
+		{Kind: CoroProgramStepCoroRoot, Flags: roles[3], Target: anchors[1], Aux: 7},
+		{Kind: CoroProgramStepDirectPlain, Flags: roles[4], Target: plains[2].Expr},
+	}
+	bootstrap := pkg.NewCoroProgramBootstrap("__llgo_coro_program_bootstrap_v2", CoroProgramBootstrapOptions{
+		Version: 2,
+		ABIHash: [16]byte{
+			0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+			0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+		},
+		Steps:   steps,
+		Factory: factory.Expr,
+	})
+
+	initializer := bootstrap.impl.Initializer()
+	if got := initializer.Operand(0).ZExtValue(); got != 2 {
+		t.Fatalf("bootstrap version = %d, want 2", got)
+	}
+	if got := initializer.Operand(4).ZExtValue(); got != 5 {
+		t.Fatalf("bootstrap step count = %d, want 5", got)
+	}
+	stepsGlobal := pkg.Module().NamedGlobal("__llgo_coro_program_bootstrap_v2.steps")
+	if stepsGlobal.IsNil() || !stepsGlobal.IsGlobalConstant() {
+		t.Fatal("v2 bootstrap lacks its constant steps table")
+	}
+	array := stepsGlobal.Initializer()
+	if got := array.OperandsCount(); got != 5 {
+		t.Fatalf("v2 steps count = %d, want 5", got)
+	}
+	wantKinds := [5]CoroProgramStepKind{
+		CoroProgramStepDirectPlain,
+		CoroProgramStepCoroRoot,
+		CoroProgramStepDirectPlain,
+		CoroProgramStepCoroRoot,
+		CoroProgramStepDirectPlain,
+	}
+	wantAux := [5]uint64{0, 2, 0, 7, 0}
+	for index := 0; index < 5; index++ {
+		step := array.Operand(index)
+		if got := step.Operand(0).ZExtValue(); got != uint64(wantKinds[index]) {
+			t.Errorf("step %d kind = %d, want %d", index, got, wantKinds[index])
+		}
+		if got := step.Operand(1).ZExtValue(); got != uint64(roles[index]) {
+			t.Errorf("step %d role = %#x, want %#x", index, got, roles[index])
+		}
+		if got := step.Operand(3).ZExtValue(); got != wantAux[index] {
+			t.Errorf("step %d aux = %d, want %d", index, got, wantAux[index])
+		}
+	}
+	if !anchors[0].impl.IsGlobalConstant() || !anchors[1].impl.IsGlobalConstant() {
+		t.Fatal("v2 coro-root anchor declarations were not normalized to constants")
+	}
+	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify v2 mixed bootstrap: %v\n%s", err, pkg.String())
+	}
+}
+
+func TestCoroProgramBootstrapV2RejectsShapeAndRoles(t *testing.T) {
+	Initialize(InitAll)
+	prog := NewProgram(nil)
+	defer prog.Dispose()
+	pkg := prog.NewPackage("badcorobootstrapv2", "bad/coro/bootstrap/v2")
+	defer pkg.Module().Dispose()
+	plains := [5]Function{
+		pkg.NewFunc("v2_step_0", functionSignature(nil, nil), InC),
+		pkg.NewFunc("v2_step_1", functionSignature(nil, nil), InC),
+		pkg.NewFunc("v2_step_2", functionSignature(nil, nil), InC),
+		pkg.NewFunc("v2_step_3", functionSignature(nil, nil), InC),
+		pkg.NewFunc("v2_step_4", functionSignature(nil, nil), InC),
+	}
+	roles := [5]uint32{
+		CoroProgramStepInternalRuntimeInitV2,
+		CoroProgramStepCompilerABIInitV2,
+		CoroProgramStepPublicRuntimeInitV2,
+		CoroProgramStepMainPackageInitV2,
+		CoroProgramStepMainV2,
+	}
+	valid := CoroProgramBootstrapOptions{Version: 2, Steps: make([]CoroProgramStep, 5)}
+	for index := range valid.Steps {
+		valid.Steps[index] = CoroProgramStep{
+			Kind: CoroProgramStepDirectPlain, Flags: roles[index], Target: plains[index].Expr,
+		}
+	}
+	for _, count := range []int{0, 1, 2, 4, 6} {
+		bad := valid
+		bad.Steps = append([]CoroProgramStep(nil), valid.Steps...)
+		if count <= len(bad.Steps) {
+			bad.Steps = bad.Steps[:count]
+		} else {
+			bad.Steps = append(bad.Steps, valid.Steps[0])
+		}
+		mustPanicContains(t, "version 2 requires exactly 5 steps", func() {
+			pkg.NewCoroProgramBootstrap(fmt.Sprintf("v2_bad_count_%d", count), bad)
+		})
+	}
+	for index := range roles {
+		for name, role := range map[string]uint32{
+			"zero":     0,
+			"next":     roles[(index+1)%len(roles)],
+			"multiple": roles[index] | roles[(index+1)%len(roles)],
+			"unknown":  1 << 12,
+		} {
+			bad := valid
+			bad.Steps = append([]CoroProgramStep(nil), valid.Steps...)
+			bad.Steps[index].Flags = role
+			mustPanicContains(t, fmt.Sprintf("step %d flags", index), func() {
+				pkg.NewCoroProgramBootstrap(fmt.Sprintf("v2_bad_role_%d_%s", index, name), bad)
+			})
+		}
+	}
+}
+
 func TestCoroBuilderRejectsMisuse(t *testing.T) {
 	fixture := newCoroTestFixture(t, nil, 0)
 	mustPanicContains(t, "finished coroutine", func() { fixture.coro.Suspend() })
+	mustPanicContains(t, "finished coroutine", func() { fixture.coro.SuspendCurrentBlock() })
+	mustPanicContains(t, "finished coroutine", func() { fixture.coro.SuspendCurrentBlockIf(fixture.prog.BoolVal(true), nil) })
 	mustPanicContains(t, "finished coroutine", func() { fixture.coro.Finish() })
+	mustPanicContains(t, "nil coroutine builder", func() { (*CoroBuilder)(nil).SuspendCurrentBlock() })
+	mustPanicContains(t, "nil coroutine builder", func() { (*CoroBuilder)(nil).SuspendCurrentBlockIf(Nil, nil) })
 	if (*CoroBuilder)(nil).Handle() != Nil {
 		t.Fatal("nil coroutine builder returned a non-nil handle")
 	}

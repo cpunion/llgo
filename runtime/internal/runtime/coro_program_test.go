@@ -89,6 +89,49 @@ func newCoroProgramTestManifestV1() *coroProgramTestManifestV1 {
 	return fixture
 }
 
+type coroProgramTestManifestV2 struct {
+	factoryMarker byte
+	plainTargets  [5]byte
+	steps         [5]coro.ProgramStepV2
+	bootstrap     coro.ProgramBootstrapV2
+	manifest      coro.ProgramManifestV1
+}
+
+func newCoroProgramTestManifestV2() *coroProgramTestManifestV2 {
+	fixture := new(coroProgramTestManifestV2)
+	fixture.factoryMarker = 0x42
+	fixture.plainTargets = [5]byte{0x31, 0x32, 0x33, 0x34, 0x35}
+	roles := [...]uint32{
+		coro.ProgramStepFlagInternalRuntimeInitV2,
+		coro.ProgramStepFlagCompilerABIInitV2,
+		coro.ProgramStepFlagPublicRuntimeInitV2,
+		coro.ProgramStepFlagMainPackageInitV2,
+		coro.ProgramStepFlagMainV2,
+	}
+	for index, role := range roles {
+		fixture.steps[index] = coro.ProgramStepV2{
+			Kind:   uint32(coro.ProgramStepDirectPlainV2),
+			Flags:  role,
+			Target: unsafe.Pointer(&fixture.plainTargets[index]),
+		}
+	}
+	fixture.bootstrap = coro.ProgramBootstrapV2{
+		Version:   coro.ProgramBootstrapVersionV2,
+		HashLo:    0x2122232425262728,
+		HashHi:    0x3132333435363738,
+		StepCount: uintptr(len(fixture.steps)),
+		Steps:     unsafe.Pointer(&fixture.steps[0]),
+		Factory:   unsafe.Pointer(&fixture.factoryMarker),
+	}
+	fixture.manifest = coro.ProgramManifestV1{
+		Version:   coro.ProgramManifestVersionV1,
+		HashLo:    fixture.bootstrap.HashLo,
+		HashHi:    fixture.bootstrap.HashHi,
+		Bootstrap: unsafe.Pointer(&fixture.bootstrap),
+	}
+	return fixture
+}
+
 type coroProgramTestFrameV1 struct {
 	g          *coro.G
 	handle     unsafe.Pointer
@@ -115,7 +158,7 @@ func newCoroProgramTestFrameV1(t *testing.T, g *coro.G) *coroProgramTestFrameV1 
 	wordSize := unsafe.Sizeof(uintptr(0))
 	memory := make([]uintptr, (total+wordSize-1)/wordSize)
 	raw := unsafe.Pointer(&memory[0])
-	descriptor := unsafe.Pointer(new(byte))
+	descriptor := unsafe.Pointer(&coro.FrameDescriptorV1{Version: 1, ResultAlign: 1})
 	storage, ok := coro.RegisterFrame(g, raw, total, size, align, descriptor)
 	if !ok {
 		t.Fatal("register coroutine program test frame")
@@ -145,16 +188,33 @@ func newCoroProgramTestFrameV1(t *testing.T, g *coro.G) *coroProgramTestFrameV1 
 }
 
 type coroProgramTestDriverV1 struct {
-	t             *testing.T
-	frame         *coroProgramTestFrameV1
-	doneCalls     int
-	resumeCalls   int
-	destroyCalls  int
-	completeReady bool
-	released      bool
+	t                        *testing.T
+	frame                    *coroProgramTestFrameV1
+	doneCalls                int
+	resumeCalls              int
+	destroyCalls             int
+	completeReady            bool
+	released                 bool
+	requestScheduleOnDestroy bool
+	panicOnResume            bool
+	panicTypeWord            unsafe.Pointer
+	panicDataWord            unsafe.Pointer
+	spawnOnMainReturn        bool
+	child                    *coro.G
+	childFrame               *coroProgramTestFrameV1
+	cancelDestroyCalls       int
+	taskReleaseCalls         int
 }
 
 var activeCoroProgramDriver *coroProgramTestDriverV1
+
+// The named-source host test deliberately does not link BDWGC or libc. Set the
+// allocator's private readiness byte to the bootstrapReady value so this test
+// can exercise the program adapter independently; coroalloc's own tests and
+// compiler IR tests cover the real bootstrap boundary.
+//
+//go:linkname testCoroAllocatorBootstrapState github.com/goplus/llgo/runtime/internal/coroalloc.state
+var testCoroAllocatorBootstrapState uint8
 
 // coro_program.go aborts through the full LLGo runtime. The named-source host
 // test intentionally excludes that unrelated runtime implementation (which
@@ -162,6 +222,27 @@ var activeCoroProgramDriver *coroProgramTestDriverV1
 // non-returning stand-in. Valid test paths never call it.
 func coroRuntimeAbort(message string) {
 	panic(message)
+}
+
+// The named-source adapter test exercises only the static bootstrap G and does
+// not link the target allocator backend. Keep the ActionComplete ownership
+// check real while avoiding a reference to the production physical free hook.
+// Spawn/task-storage tests live in runtime/internal/coro.
+func coroReleaseCompletedTask(g *coroG) bool {
+	owned, ok := coro.TaskStorageOwned(g)
+	if !ok {
+		return false
+	}
+	if !owned {
+		return true
+	}
+	raw, size, ok := coro.ReleaseTaskStorage(g)
+	if !ok || raw != unsafe.Pointer(g) || size != coro.TaskStorageSize() ||
+		activeCoroProgramDriver == nil || activeCoroProgramDriver.child != g {
+		return false
+	}
+	activeCoroProgramDriver.taskReleaseCalls++
+	return activeCoroProgramDriver.taskReleaseCalls == 1
 }
 
 func (driver *coroProgramTestDriverV1) requireHandle(handle unsafe.Pointer) {
@@ -190,6 +271,39 @@ func (driver *coroProgramTestDriverV1) resume(handle unsafe.Pointer) {
 		driver.t.Fatalf("coroutine resume calls = %d, want 1", driver.resumeCalls)
 	}
 	frame := driver.frame
+	frame.header.SuspendReason = uint16(coro.SuspendNone)
+	frame.header.Lifecycle = uint16(coro.FrameActive)
+	if driver.panicOnResume {
+		frame.header.SuspendReason = uint16(coro.SuspendPanic)
+		frame.header.Lifecycle = uint16(coro.FrameFinalSuspended)
+		__llgo_coro_panic_prepare_v1(
+			unsafe.Pointer(frame.g),
+			handle,
+			unsafe.Pointer(frame.header),
+			driver.panicTypeWord,
+			driver.panicDataWord,
+		)
+		driver.completeReady = true
+		return
+	}
+	if driver.spawnOnMainReturn {
+		driver.child = new(coro.G)
+		if !coro.BeginSpawn(frame.g, driver.child, unsafe.Pointer(driver.child), coro.TaskStorageSize()) {
+			driver.t.Fatal("begin named-adapter command child")
+		}
+		driver.childFrame = newCoroProgramTestFrameV1(driver.t, driver.child)
+		if !coro.CommitSpawn(frame.g, driver.child, driver.childFrame.handle) {
+			driver.t.Fatal("commit named-adapter command child")
+		}
+		if !coroProgramMainReturnV1(unsafe.Pointer(frame.g)) {
+			driver.t.Fatal("publish named-adapter normal main return")
+		}
+		if coroProgramLifecycleV1State != coroProgramMainReturnRequestedV1 ||
+			!coro.CommandMainReturnPoint(&coroProgramPV1State, frame.g) ||
+			driver.cancelDestroyCalls != 0 || driver.taskReleaseCalls != 0 {
+			driver.t.Fatal("main-return hook mutated scheduler ownership inside resume")
+		}
+	}
 	frame.header.SuspendReason = uint16(coro.SuspendFrameComplete)
 	frame.header.Lifecycle = uint16(coro.FrameFinalSuspended)
 	if !coro.PrepareComplete(frame.g, handle, frame.header) {
@@ -199,6 +313,18 @@ func (driver *coroProgramTestDriverV1) resume(handle unsafe.Pointer) {
 }
 
 func (driver *coroProgramTestDriverV1) destroy(handle unsafe.Pointer) {
+	if driver.childFrame != nil && handle == driver.childFrame.handle {
+		driver.cancelDestroyCalls++
+		if driver.cancelDestroyCalls != 1 {
+			driver.t.Fatalf("child coroutine destroy calls = %d, want 1", driver.cancelDestroyCalls)
+		}
+		frame := driver.childFrame
+		raw, total, ok := coro.ReleaseFrame(frame.g, frame.storage, frame.size, frame.align, frame.descriptor)
+		if !ok || raw != frame.raw || total != frame.total {
+			driver.t.Fatalf("release canceled child frame = (%p, %d, %t)", raw, total, ok)
+		}
+		return
+	}
 	driver.requireHandle(handle)
 	driver.destroyCalls++
 	if driver.destroyCalls != 1 {
@@ -212,14 +338,27 @@ func (driver *coroProgramTestDriverV1) destroy(handle unsafe.Pointer) {
 		driver.t.Fatalf("release simulated coroutine frame = (%p, %d, %t), want (%p, %d, true)", raw, total, ok, frame.raw, frame.total)
 	}
 	driver.released = true
+	if driver.requestScheduleOnDestroy && !coro.RequestSchedule(&coroProgramPV1State) {
+		driver.t.Fatal("request terminal schedule retry")
+	}
 }
 
 func resetCoroProgramTestStateV1(t *testing.T) {
 	t.Helper()
-	coroProgramV1 = coroProgramStateV1{}
+	testCoroAllocatorBootstrapState = 2
+	coroProgramLifecycleV1State = coroProgramUnusedV1
+	coroProgramManifestV1State = nil
+	coroProgramFactoryV1State = nil
+	coroProgramGV1State = coroG{}
+	coroProgramPV1State = coroP{}
 	activeCoroProgramDriver = nil
 	t.Cleanup(func() {
-		coroProgramV1 = coroProgramStateV1{}
+		testCoroAllocatorBootstrapState = 0
+		coroProgramLifecycleV1State = coroProgramUnusedV1
+		coroProgramManifestV1State = nil
+		coroProgramFactoryV1State = nil
+		coroProgramGV1State = coroG{}
+		coroProgramPV1State = coroP{}
 		activeCoroProgramDriver = nil
 	})
 }
@@ -230,30 +369,182 @@ func TestCoroProgramV1BeginRunAndDestroy(t *testing.T) {
 	factory := unsafe.Pointer(&manifest.factoryMarker)
 
 	gPointer, ok := coroProgramBeginV1(unsafe.Pointer(&manifest.manifest), factory)
-	if !ok || gPointer != unsafe.Pointer(&coroProgramV1.g) || !coro.ValidG(&coroProgramV1.g) {
-		t.Fatalf("begin coroutine program = (%p, %t), want initialized static G %p", gPointer, ok, &coroProgramV1.g)
+	if !ok || gPointer != unsafe.Pointer(&coroProgramGV1State) || !coro.ValidG(&coroProgramGV1State) {
+		t.Fatalf("begin coroutine program = (%p, %t), want initialized static G %p", gPointer, ok, &coroProgramGV1State)
 	}
-	if coroProgramV1.lifecycle != coroProgramBegunV1 || coroProgramV1.manifest != &manifest.manifest || coroProgramV1.factory != factory {
-		t.Fatalf("begun coroutine program state = {lifecycle:%d manifest:%p factory:%p}", coroProgramV1.lifecycle, coroProgramV1.manifest, coroProgramV1.factory)
+	if coroProgramLifecycleV1State != coroProgramBegunV1 || coroProgramManifestV1State != &manifest.manifest || coroProgramFactoryV1State != factory {
+		t.Fatalf("begun coroutine program state = {lifecycle:%d manifest:%p factory:%p}", coroProgramLifecycleV1State, coroProgramManifestV1State, coroProgramFactoryV1State)
 	}
 
-	frame := newCoroProgramTestFrameV1(t, &coroProgramV1.g)
+	frame := newCoroProgramTestFrameV1(t, &coroProgramGV1State)
 	driver := &coroProgramTestDriverV1{t: t, frame: frame}
 	activeCoroProgramDriver = driver
 	if !coroProgramRunV1(gPointer, frame.handle) {
 		t.Fatal("run valid coroutine program")
 	}
-	if coroProgramV1.lifecycle != coroProgramCompleteV1 || !coro.TerminalG(&coroProgramV1.p, &coroProgramV1.g) {
-		t.Fatalf("completed coroutine program retained scheduler state: lifecycle=%d", coroProgramV1.lifecycle)
+	if coroProgramLifecycleV1State != coroProgramCompleteV1 || !coro.TerminalG(&coroProgramPV1State, &coroProgramGV1State) {
+		t.Fatalf("completed coroutine program retained scheduler state: lifecycle=%d", coroProgramLifecycleV1State)
 	}
 	if driver.doneCalls != 2 || driver.resumeCalls != 1 || driver.destroyCalls != 1 || !driver.released {
 		t.Fatalf("coroutine wrapper calls = done:%d resume:%d destroy:%d released:%t", driver.doneCalls, driver.resumeCalls, driver.destroyCalls, driver.released)
 	}
 
-	if _, ok := coroProgramBeginV1(unsafe.Pointer(&manifest.manifest), factory); ok || coroProgramV1.lifecycle != coroProgramFailedV1 {
-		t.Fatalf("completed coroutine program was reusable: ok=%t lifecycle=%d", ok, coroProgramV1.lifecycle)
+	if _, ok := coroProgramBeginV1(unsafe.Pointer(&manifest.manifest), factory); ok || coroProgramLifecycleV1State != coroProgramFailedV1 {
+		t.Fatalf("completed coroutine program was reusable: ok=%t lifecycle=%d", ok, coroProgramLifecycleV1State)
 	}
 	runtime.KeepAlive(frame.memory)
+	runtime.KeepAlive(manifest)
+}
+
+func TestCoroProgramV2BeginRunAndDestroy(t *testing.T) {
+	resetCoroProgramTestStateV1(t)
+	manifest := newCoroProgramTestManifestV2()
+	factory := unsafe.Pointer(&manifest.factoryMarker)
+
+	gPointer, ok := coroProgramBeginV1(unsafe.Pointer(&manifest.manifest), factory)
+	if !ok || gPointer != unsafe.Pointer(&coroProgramGV1State) || !coro.ValidG(&coroProgramGV1State) {
+		t.Fatalf("begin coroutine program v2 = (%p, %t), want initialized static G %p", gPointer, ok, &coroProgramGV1State)
+	}
+
+	frame := newCoroProgramTestFrameV1(t, &coroProgramGV1State)
+	driver := &coroProgramTestDriverV1{t: t, frame: frame}
+	activeCoroProgramDriver = driver
+	if !coroProgramRunV1(gPointer, frame.handle) {
+		t.Fatal("run valid coroutine program v2")
+	}
+	if coroProgramLifecycleV1State != coroProgramCompleteV1 || !coro.TerminalG(&coroProgramPV1State, &coroProgramGV1State) {
+		t.Fatalf("completed coroutine program v2 retained scheduler state: lifecycle=%d", coroProgramLifecycleV1State)
+	}
+	if driver.doneCalls != 2 || driver.resumeCalls != 1 || driver.destroyCalls != 1 || !driver.released {
+		t.Fatalf("coroutine v2 wrapper calls = done:%d resume:%d destroy:%d released:%t", driver.doneCalls, driver.resumeCalls, driver.destroyCalls, driver.released)
+	}
+	runtime.KeepAlive(frame.memory)
+	runtime.KeepAlive(manifest)
+}
+
+func TestCoroProgramTerminalScheduleRetryDoesNotRedestroy(t *testing.T) {
+	resetCoroProgramTestStateV1(t)
+	manifest := newCoroProgramTestManifestV1()
+	factory := unsafe.Pointer(&manifest.factoryMarker)
+
+	gPointer, ok := coroProgramBeginV1(unsafe.Pointer(&manifest.manifest), factory)
+	if !ok {
+		t.Fatal("begin terminal-retry coroutine program")
+	}
+	frame := newCoroProgramTestFrameV1(t, &coroProgramGV1State)
+	driver := &coroProgramTestDriverV1{
+		t:                        t,
+		frame:                    frame,
+		requestScheduleOnDestroy: true,
+	}
+	activeCoroProgramDriver = driver
+	if !coroProgramRunV1(gPointer, frame.handle) {
+		t.Fatal("terminal schedule request was treated as corruption")
+	}
+	if driver.destroyCalls != 1 || !driver.released ||
+		coroProgramLifecycleV1State != coroProgramCompleteV1 ||
+		!coro.TerminalG(&coroProgramPV1State, &coroProgramGV1State) {
+		t.Fatalf("terminal retry = destroys:%d released:%t lifecycle:%d", driver.destroyCalls, driver.released, coroProgramLifecycleV1State)
+	}
+	runtime.KeepAlive(frame.memory)
+	runtime.KeepAlive(manifest)
+}
+
+func requireCoroProgramRuntimeAbort(t *testing.T, want string, call func()) {
+	t.Helper()
+	defer func() {
+		recovered := recover()
+		if recovered != want {
+			t.Fatalf("coroutine runtime abort = %#v, want %q", recovered, want)
+		}
+	}()
+	call()
+	t.Fatal("coroutine runtime ABI violation returned after abort")
+}
+
+func TestCoroProgramExplicitPanicHookAndTerminalDispatcherFailClosed(t *testing.T) {
+	resetCoroProgramTestStateV1(t)
+	manifest := newCoroProgramTestManifestV1()
+	factory := unsafe.Pointer(&manifest.factoryMarker)
+
+	gPointer, ok := coroProgramBeginV1(unsafe.Pointer(&manifest.manifest), factory)
+	if !ok {
+		t.Fatal("begin explicit-panic coroutine program")
+	}
+	frame := newCoroProgramTestFrameV1(t, &coroProgramGV1State)
+	typeWord, dataWord := new(byte), new(byte)
+	driver := &coroProgramTestDriverV1{
+		t:             t,
+		frame:         frame,
+		panicOnResume: true,
+		panicTypeWord: unsafe.Pointer(typeWord),
+		panicDataWord: unsafe.Pointer(dataWord),
+	}
+	activeCoroProgramDriver = driver
+	if coroProgramRunV1(gPointer, frame.handle) {
+		t.Fatal("ActionPanicComplete was misclassified as normal program completion")
+	}
+	record, published := coro.LoadPanicRecord(&coroProgramGV1State)
+	if !published || record.Status != coro.ExplicitStatusPanic ||
+		record.TypeWord != unsafe.Pointer(typeWord) || record.DataWord != unsafe.Pointer(dataWord) {
+		t.Fatalf("terminal adapter panic record = (%+v, %t)", record, published)
+	}
+	if coroProgramLifecycleV1State != coroProgramFailedV1 ||
+		driver.doneCalls != 2 || driver.resumeCalls != 1 || driver.destroyCalls != 1 || !driver.released ||
+		coro.TerminalG(&coroProgramPV1State, &coroProgramGV1State) || coro.ReclaimableG(&coroProgramGV1State) {
+		t.Fatalf("explicit panic adapter = lifecycle:%d done:%d resume:%d destroy:%d released:%t",
+			coroProgramLifecycleV1State, driver.doneCalls, driver.resumeCalls, driver.destroyCalls, driver.released)
+	}
+
+	// Publication is once-only at the exported boundary as well: a duplicate
+	// compiler hook is a non-returning ABI violation, never a normal result.
+	requireCoroProgramRuntimeAbort(t, "invalid coroutine panic handoff", func() {
+		__llgo_coro_panic_prepare_v1(
+			gPointer,
+			frame.handle,
+			unsafe.Pointer(frame.header),
+			unsafe.Pointer(typeWord),
+			unsafe.Pointer(dataWord),
+		)
+	})
+	runtime.KeepAlive(typeWord)
+	runtime.KeepAlive(dataWord)
+	runtime.KeepAlive(frame.memory)
+	runtime.KeepAlive(manifest)
+}
+
+func TestCoroProgramExplicitPanicHookRejectsInvalidPhysicalG(t *testing.T) {
+	requireCoroProgramRuntimeAbort(t, "invalid coroutine panic handoff", func() {
+		__llgo_coro_panic_prepare_v1(nil, nil, nil, nil, nil)
+	})
+}
+
+func TestCoroProgramNormalMainReturnCancelsReadyChild(t *testing.T) {
+	resetCoroProgramTestStateV1(t)
+	manifest := newCoroProgramTestManifestV1()
+	factory := unsafe.Pointer(&manifest.factoryMarker)
+	gPointer, ok := coroProgramBeginV1(unsafe.Pointer(&manifest.manifest), factory)
+	if !ok {
+		t.Fatal("begin command-shutdown program")
+	}
+	frame := newCoroProgramTestFrameV1(t, &coroProgramGV1State)
+	driver := &coroProgramTestDriverV1{t: t, frame: frame, spawnOnMainReturn: true}
+	activeCoroProgramDriver = driver
+	if !coroProgramRunV1(gPointer, frame.handle) {
+		t.Fatal("run command-shutdown program")
+	}
+	if coroProgramLifecycleV1State != coroProgramCompleteV1 || driver.doneCalls != 2 ||
+		driver.resumeCalls != 1 || driver.destroyCalls != 1 || driver.cancelDestroyCalls != 1 ||
+		driver.taskReleaseCalls != 1 || driver.child == nil || driver.childFrame == nil ||
+		!coro.TerminalG(&coroProgramPV1State, &coroProgramGV1State) ||
+		!coro.TerminalG(&coroProgramPV1State, driver.child) {
+		t.Fatalf("command shutdown = lifecycle:%d done:%d resume:%d mainDestroy:%d childDestroy:%d taskRelease:%d",
+			coroProgramLifecycleV1State, driver.doneCalls, driver.resumeCalls, driver.destroyCalls,
+			driver.cancelDestroyCalls, driver.taskReleaseCalls)
+	}
+	runtime.KeepAlive(frame.memory)
+	runtime.KeepAlive(driver.childFrame.memory)
+	runtime.KeepAlive(driver.child)
 	runtime.KeepAlive(manifest)
 }
 
@@ -263,8 +554,8 @@ func TestCoroProgramV1BeginFailsClosedOnFactoryIdentity(t *testing.T) {
 	otherFactory := new(byte)
 	if g, ok := coroProgramBeginV1(
 		unsafe.Pointer(&manifest.manifest), unsafe.Pointer(otherFactory),
-	); ok || g != nil || coroProgramV1.lifecycle != coroProgramFailedV1 || coro.ValidG(&coroProgramV1.g) {
-		t.Fatalf("factory mismatch = (%p, %t), lifecycle=%d validG=%t", g, ok, coroProgramV1.lifecycle, coro.ValidG(&coroProgramV1.g))
+	); ok || g != nil || coroProgramLifecycleV1State != coroProgramFailedV1 || coro.ValidG(&coroProgramGV1State) {
+		t.Fatalf("factory mismatch = (%p, %t), lifecycle=%d validG=%t", g, ok, coroProgramLifecycleV1State, coro.ValidG(&coroProgramGV1State))
 	}
 	runtime.KeepAlive(manifest)
 }
@@ -272,8 +563,8 @@ func TestCoroProgramV1BeginFailsClosedOnFactoryIdentity(t *testing.T) {
 func TestCoroProgramV1BeginFailsClosedOnNilManifest(t *testing.T) {
 	resetCoroProgramTestStateV1(t)
 	if g, ok := coroProgramBeginV1(nil, unsafe.Pointer(new(byte))); ok || g != nil ||
-		coroProgramV1.lifecycle != coroProgramFailedV1 || coro.ValidG(&coroProgramV1.g) {
-		t.Fatalf("nil manifest = (%p, %t), lifecycle=%d validG=%t", g, ok, coroProgramV1.lifecycle, coro.ValidG(&coroProgramV1.g))
+		coroProgramLifecycleV1State != coroProgramFailedV1 || coro.ValidG(&coroProgramGV1State) {
+		t.Fatalf("nil manifest = (%p, %t), lifecycle=%d validG=%t", g, ok, coroProgramLifecycleV1State, coro.ValidG(&coroProgramGV1State))
 	}
 }
 
@@ -285,8 +576,8 @@ func TestCoroProgramV1RunFailsClosedOnInvalidHandle(t *testing.T) {
 	if !ok {
 		t.Fatal("begin coroutine program before invalid run")
 	}
-	if coroProgramRunV1(g, nil) || coroProgramV1.lifecycle != coroProgramFailedV1 {
-		t.Fatalf("nil-handle run did not fail closed: lifecycle=%d", coroProgramV1.lifecycle)
+	if coroProgramRunV1(g, nil) || coroProgramLifecycleV1State != coroProgramFailedV1 {
+		t.Fatalf("nil-handle run did not fail closed: lifecycle=%d", coroProgramLifecycleV1State)
 	}
 	runtime.KeepAlive(manifest)
 }

@@ -51,6 +51,11 @@ type Compilation struct {
 	SchedulerABI   string
 	PanicABI       string
 	FuncRepABI     string
+	// EnableCoroExplicitStatusPanicABI selects the target-wide explicit-status
+	// panic identity. The first lowering slice accepts only exact cleanup-free
+	// physical coroutine bodies whose explicit panic payload can outlive frame
+	// destruction; every wider hidden-outcome or unwind shape remains fail-closed.
+	EnableCoroExplicitStatusPanicABI bool
 	// EnableCoroPhysicalABI permits the conservative leaf-only coroutine ABI
 	// lowering implemented by the current experimental slice. It requires entry
 	// resolution and does not by itself enable await, dispatch, roots, or a
@@ -62,6 +67,15 @@ type Compilation struct {
 	// suspends itself; a matching scheduler owns every resume and destroy
 	// operation.
 	EnableCoroChildAwait bool
+	// EnableCoroPlainDispatch permits the first descriptor/context function-value
+	// ABI. Only a no-capture, non-suspending plain target at an ordinary scalar
+	// call is accepted by this capability; every wider dynamic form remains an
+	// unsupported preflight error.
+	EnableCoroPlainDispatch bool
+	// EnableCoroClosedStaticSpawn permits only the compilation-plan-certified
+	// closed static spawn transaction. The physical parent G is passed to both
+	// runtime hooks; no TLS lookup or indirect user callback is permitted.
+	EnableCoroClosedStaticSpawn bool
 	// EnableCoroProgramBootstrapRun selects the program-root scheduler ABI for
 	// package identities. The factory itself lives in the uncached entry module,
 	// but every linked archive must agree with the runtime driver contract.
@@ -103,11 +117,33 @@ func (c *Compilation) validateCoroABIIdentity(required bool) error {
 	if c.EnableCoroChildAwait {
 		wantSchedulerABI = coro.SchedulerChildAwaitABIV0
 	}
-	if c.EnableCoroProgramBootstrapRun {
+	if c.EnableCoroClosedStaticSpawn {
+		if !c.EnableCoroChildAwait {
+			return fmt.Errorf("coroutine closed static spawn requires child-await lowering")
+		}
+		if !c.EnableCoroProgramBootstrapRun {
+			return fmt.Errorf("coroutine closed static spawn requires the runnable program-bootstrap v2 scheduler")
+		}
+		wantSchedulerABI = coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0
+	} else if c.EnableCoroProgramBootstrapRun {
 		if !c.EnableCoroChildAwait {
 			return fmt.Errorf("coroutine program bootstrap runtime requires child-await lowering")
 		}
-		wantSchedulerABI = coro.SchedulerProgramBootstrapABIV1
+		wantSchedulerABI = coro.SchedulerProgramBootstrapABIV2
+	}
+	if c.EnableCoroPlainDispatch && !c.EnableCoroEntryResolution {
+		return fmt.Errorf("coroutine plain dispatch requires coroutine entry resolution")
+	}
+	if c.EnableCoroExplicitStatusPanicABI && !c.EnableCoroEntryResolution {
+		return fmt.Errorf("coroutine explicit-status panic ABI requires coroutine entry resolution")
+	}
+	wantPanicABI := coro.PanicLegacyABIV0
+	if c.EnableCoroExplicitStatusPanicABI {
+		wantPanicABI = coro.PanicExplicitStatusABIV0
+	}
+	wantFuncRepABI := coro.FuncRepABIV0
+	if c.EnableCoroPlainDispatch {
+		wantFuncRepABI = coro.FuncRepABIV1
 	}
 	checks := []struct {
 		name string
@@ -116,8 +152,8 @@ func (c *Compilation) validateCoroABIIdentity(required bool) error {
 	}{
 		{"coroutine", c.CoroABI, wantCoroABI},
 		{"scheduler", c.SchedulerABI, wantSchedulerABI},
-		{"panic", c.PanicABI, coro.PanicLegacyABIV0},
-		{"function representation", c.FuncRepABI, coro.FuncRepABIV0},
+		{"panic", c.PanicABI, wantPanicABI},
+		{"function representation", c.FuncRepABI, wantFuncRepABI},
 	}
 	if !required {
 		populated := false

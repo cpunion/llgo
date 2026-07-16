@@ -146,6 +146,74 @@ func TestCoroPlanDigestDeterministicCompleteAndDomainSeparated(t *testing.T) {
 	}
 }
 
+func TestCoroPlanDigestRecordsClosedStaticSpawnConsumerAndOwnerSeed(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "spawn_digest.go", `package coroid
+func worker(value int) { _ = value }
+func launch(value int) { go worker(value) }
+`)
+	launch := packageFunction(t, pkg, "launch")
+	worker := packageFunction(t, pkg, "worker")
+	build := func(seed bool) *SSAPlan {
+		config := planDigestSSAConfig()
+		config.FunctionIDs.CoroABI = PhysicalABIV1
+		config.FunctionIDs.SchedulerABI = SchedulerProgramBootstrapClosedStaticSpawnABIV0
+		config.MaxPlainInstructions = -1
+		if seed {
+			config.ClassifyFunction = func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+				if fn == launch || fn == worker {
+					return SSAFunctionPolicy{Effect: YieldOnly}, nil
+				}
+				return SSAFunctionPolicy{}, nil
+			}
+		}
+		plan, err := AnalyzeSSA(prog, Roots{{Function: launch, Demand: AsyncDemand}}, config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return plan
+	}
+	seeded := build(true)
+	again := build(true)
+	unseeded := build(false)
+	metadata := validPlanDigestMetadata()
+	metadata.CoroABI = PhysicalABIV1
+	metadata.SchedulerABI = SchedulerProgramBootstrapClosedStaticSpawnABIV0
+	digest, err := seeded.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	againDigest, err := again.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest != againDigest {
+		t.Fatalf("closed static spawn digest is unstable: %s != %s", digest, againDigest)
+	}
+	unseededDigest, err := unseeded.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest == unseededDigest {
+		t.Fatal("spawn owner YieldOnly/contextful-primary seed is absent from the digest")
+	}
+	document, err := seeded.canonicalPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, call := range document.Calls {
+		if CallKind(call.Kind) == CallSpawn {
+			found = true
+			if call.Open || call.MayBeNil || len(call.Targets) != 1 {
+				t.Fatalf("spawn digest call = %+v", call)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("canonical plan digest has no exact CallSpawn consumer")
+	}
+}
+
 func TestCoroPlanDigestRecordsIgnoredPhysicalBodySemantics(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "ignored_digest.go", `package coroid
 func external() {}
@@ -608,6 +676,24 @@ func TestCoroPlanDigestMetadataMutationsChangeDigest(t *testing.T) {
 	}
 }
 
+func TestCoroPlanDigestExplicitStatusPanicABIDomainSeparation(t *testing.T) {
+	plan, _ := buildPlanDigestTestPlan(t, ssa.SanityCheckFunctions|ssa.InstantiateGenerics)
+	legacy := validPlanDigestMetadata()
+	legacyDigest, err := plan.CoroPlanDigest(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	explicitStatus := legacy
+	explicitStatus.PanicABI = PanicExplicitStatusABIV0
+	explicitStatusDigest, err := plan.CoroPlanDigest(explicitStatus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if explicitStatusDigest == legacyDigest {
+		t.Fatalf("panic ABI identities share a plan digest: %s", legacyDigest)
+	}
+}
+
 func TestCoroPlanDigestCanonicalEmptyArrays(t *testing.T) {
 	prog, _ := buildCoroTestSSA(t, "empty.go", `package coroid; func root() {}`)
 	plan, err := AnalyzeSSA(prog, nil, planDigestSSAConfig())
@@ -623,10 +709,93 @@ func TestCoroPlanDigestCanonicalEmptyArrays(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(payload)
-	for _, field := range []string{`"roots":[]`, `"calls":[]`, `"values":[]`} {
+	for _, field := range []string{`"roots":[]`, `"calls":[]`, `"lowered_calls":[]`, `"values":[]`} {
 		if !strings.Contains(text, field) {
 			t.Fatalf("canonical document %s does not contain %s", text, field)
 		}
+	}
+}
+
+func TestCoroPlanDigestIncludesExactLoweredCallMapping(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "lowered_digest.go", `package coroid
+func root() {}
+func first() {}
+func second() {}
+`)
+	root := packageFunction(t, pkg, "root")
+	first := packageFunction(t, pkg, "first")
+	second := packageFunction(t, pkg, "second")
+	build := func(calls []SSALoweredCall) *SSAPlan {
+		t.Helper()
+		config := planDigestSSAConfig()
+		config.MaxPlainInstructions = -1
+		config.ClassifyLoweredCalls = func(fn *ssa.Function) ([]SSALoweredCall, error) {
+			if fn == root {
+				return calls, nil
+			}
+			return nil, nil
+		}
+		plan, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: SyncDemand}}, config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return plan
+	}
+	baseline := build([]SSALoweredCall{
+		{LogicalName: "runtime.first", Target: first},
+		{LogicalName: "runtime.second", Target: second},
+	})
+	permuted := build([]SSALoweredCall{
+		{LogicalName: "runtime.second", Target: second},
+		{LogicalName: "runtime.first", Target: first},
+	})
+	swapped := build([]SSALoweredCall{
+		{LogicalName: "runtime.first", Target: second},
+		{LogicalName: "runtime.second", Target: first},
+	})
+	unwindOnly := build([]SSALoweredCall{
+		{LogicalName: "runtime.first", Target: first, UnwindOnly: true},
+		{LogicalName: "runtime.second", Target: second},
+	})
+	metadata := validPlanDigestMetadata()
+	baselineDigest, err := baseline.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	permutedDigest, err := permuted.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baselineDigest != permutedDigest {
+		t.Fatalf("classifier order changed lowered-call digest:\n%s\n%s", baselineDigest, permutedDigest)
+	}
+	swappedDigest, err := swapped.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baselineDigest == swappedDigest {
+		t.Fatal("retargeting logical lowered-call identities did not change digest")
+	}
+	unwindDigest, err := unwindOnly.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baselineDigest == unwindDigest {
+		t.Fatal("changing a lowered call to unwind-only did not change digest")
+	}
+	document, err := baseline.canonicalPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(document.LoweredCalls) != 2 || document.LoweredCalls[0].LogicalName != "runtime.first" || document.LoweredCalls[1].LogicalName != "runtime.second" {
+		t.Fatalf("canonical lowered calls = %+v", document.LoweredCalls)
+	}
+	unwindDocument, err := unwindOnly.canonicalPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unwindDocument.LoweredCalls) != 2 || !unwindDocument.LoweredCalls[0].UnwindOnly || unwindDocument.LoweredCalls[1].UnwindOnly {
+		t.Fatalf("canonical unwind-only lowered calls = %+v", unwindDocument.LoweredCalls)
 	}
 }
 

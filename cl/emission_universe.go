@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/goplus/llgo/cl/ssawrap"
 	"github.com/goplus/llgo/internal/coro"
@@ -44,6 +45,16 @@ type EmissionPackage struct {
 	Files        []*ast.File
 	Identity     string // stable build package identity; required for same-path variants
 	MetadataOnly bool   // freeze frontend directives/ownership without selecting definitions
+}
+
+// EmissionUniverseOptions selects construction contracts that are available
+// only to a complete whole-program frontend. Report-only and single-package
+// callers should use the zero value.
+type EmissionUniverseOptions struct {
+	// CompleteRuntimeABI requires the exact LLGo runtime package and freezes
+	// every compiler-inserted runtime helper edge. Missing runtime helpers fail
+	// construction instead of being left to the legacy LLVM symbol resolver.
+	CompleteRuntimeABI bool
 }
 
 type preparedEmissionPackage struct {
@@ -69,40 +80,62 @@ type preparedEmissionPackage struct {
 // the aliases that codegen may use to reach them. Its public accessors return
 // copies; construction completes all permitted lazy SSA materialization.
 type EmissionUniverse struct {
-	prog     llssa.Program
-	goProg   *ssa.Program
-	patches  Patches
-	packages map[*ssa.Package]*preparedEmissionPackage
-	byTypes  map[*types.Package]*preparedEmissionPackage
-	typesDup map[*types.Package]bool
-	byPath   map[string]*preparedEmissionPackage
-	pathDup  map[string]bool
+	prog               llssa.Program
+	goProg             *ssa.Program
+	patches            Patches
+	completeRuntimeABI bool
+	packages           map[*ssa.Package]*preparedEmissionPackage
+	byTypes            map[*types.Package]*preparedEmissionPackage
+	typesDup           map[*types.Package]bool
+	byPath             map[string]*preparedEmissionPackage
+	pathDup            map[string]bool
 
-	functions          []*ssa.Function
-	required           map[*ssa.Function]none
-	aliases            map[*ssa.Function]*ssa.Function
-	fnOwners           map[*ssa.Function]*preparedEmissionPackage
-	fnStates           map[*ssa.Function]emissionFunctionState
-	functionKinds      map[emissionFunctionOwnerKey]int
-	intrinsicOps       map[emissionFunctionOwnerKey]int
-	finalKeys          map[emissionFunctionOwnerKey]string
-	physicalNames      map[emissionFunctionOwnerKey]string
-	linkOnceNames      map[*ssa.Function]string
-	callWraps          map[intrinsicWrapperKey]*ssa.Function
-	callWrapInfo       map[*ssa.Function]intrinsicWrapperKey
-	syntheticKeys      map[*ssa.Function]string
-	linkIdentities     map[*ssa.Function]string
-	excluded           map[*ssa.Function]none
-	materialized       map[*ssa.Function]none
-	useOwners          map[*ssa.Function]map[*preparedEmissionPackage]none
-	ownerStates        map[*ssa.Function]map[*preparedEmissionPackage]emissionFunctionState
-	materializedOwners map[*ssa.Function]map[*preparedEmissionPackage]none
-	ownerStateErr      error
+	functions           []*ssa.Function
+	required            map[*ssa.Function]none
+	aliases             map[*ssa.Function]*ssa.Function
+	fnOwners            map[*ssa.Function]*preparedEmissionPackage
+	fnStates            map[*ssa.Function]emissionFunctionState
+	functionKinds       map[emissionFunctionOwnerKey]int
+	intrinsicOps        map[emissionFunctionOwnerKey]int
+	finalKeys           map[emissionFunctionOwnerKey]string
+	physicalNames       map[emissionFunctionOwnerKey]string
+	linkOnceNames       map[*ssa.Function]string
+	callWraps           map[intrinsicWrapperKey]*ssa.Function
+	callWrapInfo        map[*ssa.Function]intrinsicWrapperKey
+	syntheticKeys       map[*ssa.Function]string
+	linkIdentities      map[*ssa.Function]string
+	excluded            map[*ssa.Function]none
+	materialized        map[*ssa.Function]none
+	useOwners           map[*ssa.Function]map[*preparedEmissionPackage]none
+	ownerStates         map[*ssa.Function]map[*preparedEmissionPackage]emissionFunctionState
+	materializedOwners  map[*ssa.Function]map[*preparedEmissionPackage]none
+	ownerStateErr       error
+	abiMethodReferences map[*ssa.Function]map[*ssa.Function]none
+	loweredCalls        map[*ssa.Function]map[string]coroLoweredCallTarget
+	normalReturnBlocks  map[*ssa.Function]map[*ssa.BasicBlock]none
+	foreignNoBlock      map[*ssa.Function]CoroForeignNoBlockCertificate
 
 	localGenericMu     sync.Mutex
 	localGenericTypes  map[*types.Named]emissionLocalGenericType
 	localGenericOwners map[*types.Named]*ssa.Function
 	genericNamedTypes  map[*types.Named]*types.Named
+}
+
+// CoroForeignNoBlockCertificate is the immutable frontend proof attached to
+// one exact C declaration by //llgo:coro noblock. ID is domain-separated and
+// includes the frozen owner, physical symbol, and structural ABI signature.
+// PhysicalSymbol and ABISignature are exposed only for diagnostics and audit;
+// consumers must compare/use ID rather than reclassifying a declaration from
+// either display field.
+type CoroForeignNoBlockCertificate struct {
+	ID             string
+	PhysicalSymbol string
+	ABISignature   string
+}
+
+type coroLoweredCallTarget struct {
+	target     *ssa.Function
+	unwindOnly bool
 }
 
 // CoroIntrinsicCallSemantics is the frozen physical call-edge behavior of an
@@ -119,7 +152,34 @@ const (
 	// coroutine edge, although the exact SSA call site remains in the plan
 	// digest and the intrinsic operation is still emitted by cl.
 	CoroIntrinsicCallInlineNoSuspend
+	// CoroIntrinsicCallInlineWithLoweredCalls means cl erases the intrinsic
+	// declaration call, but the operation emits one or more ordinary runtime
+	// helper calls. Those calls are frozen separately in CoroLoweredCalls and
+	// therefore retain their own suspension and unwind effects. Consumers may
+	// elide only the intrinsic declaration edge, never the lowered helper edges.
+	CoroIntrinsicCallInlineWithLoweredCalls
+	// CoroIntrinsicCallInlineSuspend means cl erases the declaration call and
+	// emits a structured suspension in the current physical coroutine frame.
+	// The build analyzer seeds the owner with MayPark; there is no callable sync
+	// helper and no managed callee edge.
+	CoroIntrinsicCallInlineSuspend
 )
+
+// ElidesManagedCall reports whether cl removes the original SSA call to the
+// intrinsic declaration. It does not imply that the complete lowered
+// operation is no-suspend: InlineWithLoweredCalls carries its physical effects
+// through the owner's exact frozen lowered-call set.
+func (s CoroIntrinsicCallSemantics) ElidesManagedCall() bool {
+	return s == CoroIntrinsicCallInlineNoSuspend || s == CoroIntrinsicCallInlineWithLoweredCalls ||
+		s == CoroIntrinsicCallInlineSuspend
+}
+
+// SuspendsCurrentFrame reports the one intrinsic semantic that requires its
+// owner to have a coroutine primary even though the declaration call itself is
+// erased by frontend lowering.
+func (s CoroIntrinsicCallSemantics) SuspendsCurrentFrame() bool {
+	return s == CoroIntrinsicCallInlineSuspend
+}
 
 type intrinsicWrapperKey struct {
 	owner     *ssa.Package
@@ -143,8 +203,17 @@ type emissionLocalGenericType struct {
 
 // PrepareEmissionUniverse freezes package patch/skip selection and
 // materializes the exact SSA functions that cl can later request. It creates
-// no LLVM package or function.
+// no LLVM package or function. This compatibility entry point prepares an
+// incomplete/report universe and therefore does not claim that the complete
+// compiler-to-runtime ABI is available.
 func PrepareEmissionUniverse(prog llssa.Program, patches Patches, inputs []EmissionPackage) (*EmissionUniverse, error) {
+	return PrepareEmissionUniverseWithOptions(prog, patches, inputs, EmissionUniverseOptions{})
+}
+
+// PrepareEmissionUniverseWithOptions is PrepareEmissionUniverse with explicit
+// whole-program construction contracts. Production active coroutine builds
+// set CompleteRuntimeABI; unit/report universes deliberately leave it false.
+func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inputs []EmissionPackage, options EmissionUniverseOptions) (*EmissionUniverse, error) {
 	pathCounts := make(map[string]int, len(inputs))
 	for _, input := range inputs {
 		if input.SSA != nil && input.SSA.Pkg != nil {
@@ -153,34 +222,39 @@ func PrepareEmissionUniverse(prog llssa.Program, patches Patches, inputs []Emiss
 	}
 	identities := make(map[string]*ssa.Package, len(inputs))
 	u := &EmissionUniverse{
-		prog:               prog,
-		patches:            patches,
-		packages:           make(map[*ssa.Package]*preparedEmissionPackage, len(inputs)),
-		byTypes:            make(map[*types.Package]*preparedEmissionPackage, len(inputs)*3),
-		typesDup:           make(map[*types.Package]bool),
-		byPath:             make(map[string]*preparedEmissionPackage, len(inputs)),
-		pathDup:            make(map[string]bool),
-		required:           make(map[*ssa.Function]none),
-		aliases:            make(map[*ssa.Function]*ssa.Function),
-		fnOwners:           make(map[*ssa.Function]*preparedEmissionPackage),
-		fnStates:           make(map[*ssa.Function]emissionFunctionState),
-		functionKinds:      make(map[emissionFunctionOwnerKey]int),
-		intrinsicOps:       make(map[emissionFunctionOwnerKey]int),
-		finalKeys:          make(map[emissionFunctionOwnerKey]string),
-		physicalNames:      make(map[emissionFunctionOwnerKey]string),
-		linkOnceNames:      make(map[*ssa.Function]string),
-		callWraps:          make(map[intrinsicWrapperKey]*ssa.Function),
-		callWrapInfo:       make(map[*ssa.Function]intrinsicWrapperKey),
-		syntheticKeys:      make(map[*ssa.Function]string),
-		linkIdentities:     make(map[*ssa.Function]string),
-		excluded:           make(map[*ssa.Function]none),
-		materialized:       make(map[*ssa.Function]none),
-		useOwners:          make(map[*ssa.Function]map[*preparedEmissionPackage]none),
-		ownerStates:        make(map[*ssa.Function]map[*preparedEmissionPackage]emissionFunctionState),
-		materializedOwners: make(map[*ssa.Function]map[*preparedEmissionPackage]none),
-		localGenericTypes:  make(map[*types.Named]emissionLocalGenericType),
-		localGenericOwners: make(map[*types.Named]*ssa.Function),
-		genericNamedTypes:  make(map[*types.Named]*types.Named),
+		prog:                prog,
+		patches:             patches,
+		completeRuntimeABI:  options.CompleteRuntimeABI,
+		packages:            make(map[*ssa.Package]*preparedEmissionPackage, len(inputs)),
+		byTypes:             make(map[*types.Package]*preparedEmissionPackage, len(inputs)*3),
+		typesDup:            make(map[*types.Package]bool),
+		byPath:              make(map[string]*preparedEmissionPackage, len(inputs)),
+		pathDup:             make(map[string]bool),
+		required:            make(map[*ssa.Function]none),
+		aliases:             make(map[*ssa.Function]*ssa.Function),
+		fnOwners:            make(map[*ssa.Function]*preparedEmissionPackage),
+		fnStates:            make(map[*ssa.Function]emissionFunctionState),
+		functionKinds:       make(map[emissionFunctionOwnerKey]int),
+		intrinsicOps:        make(map[emissionFunctionOwnerKey]int),
+		finalKeys:           make(map[emissionFunctionOwnerKey]string),
+		physicalNames:       make(map[emissionFunctionOwnerKey]string),
+		linkOnceNames:       make(map[*ssa.Function]string),
+		callWraps:           make(map[intrinsicWrapperKey]*ssa.Function),
+		callWrapInfo:        make(map[*ssa.Function]intrinsicWrapperKey),
+		syntheticKeys:       make(map[*ssa.Function]string),
+		abiMethodReferences: make(map[*ssa.Function]map[*ssa.Function]none),
+		loweredCalls:        make(map[*ssa.Function]map[string]coroLoweredCallTarget),
+		normalReturnBlocks:  make(map[*ssa.Function]map[*ssa.BasicBlock]none),
+		foreignNoBlock:      make(map[*ssa.Function]CoroForeignNoBlockCertificate),
+		linkIdentities:      make(map[*ssa.Function]string),
+		excluded:            make(map[*ssa.Function]none),
+		materialized:        make(map[*ssa.Function]none),
+		useOwners:           make(map[*ssa.Function]map[*preparedEmissionPackage]none),
+		ownerStates:         make(map[*ssa.Function]map[*preparedEmissionPackage]emissionFunctionState),
+		materializedOwners:  make(map[*ssa.Function]map[*preparedEmissionPackage]none),
+		localGenericTypes:   make(map[*types.Named]emissionLocalGenericType),
+		localGenericOwners:  make(map[*types.Named]*ssa.Function),
+		genericNamedTypes:   make(map[*types.Named]*types.Named),
 	}
 	for i, input := range inputs {
 		if input.SSA == nil || input.SSA.Prog == nil || input.SSA.Pkg == nil {
@@ -262,6 +336,21 @@ func PrepareEmissionUniverse(prog llssa.Program, patches Patches, inputs []Emiss
 			u.byPath[pkgPath] = prepared
 		}
 	}
+	if options.CompleteRuntimeABI {
+		if prog == nil {
+			return nil, fmt.Errorf("prepare emission universe: complete runtime ABI requires an LLVM SSA program")
+		}
+		if u.pathDup[llssa.PkgRuntime] {
+			return nil, fmt.Errorf("prepare emission universe: complete runtime ABI has ambiguous package path %q", llssa.PkgRuntime)
+		}
+		runtimePkg := u.byPath[llssa.PkgRuntime]
+		if runtimePkg == nil {
+			return nil, fmt.Errorf("prepare emission universe: complete runtime ABI requires package %q", llssa.PkgRuntime)
+		}
+		if runtimePkg.metadataOnly {
+			return nil, fmt.Errorf("prepare emission universe: complete runtime ABI package %q cannot be metadata-only", llssa.PkgRuntime)
+		}
+	}
 
 	// Link directives of every frontend package are now registered. Select
 	// definitions in exactly the same alt-first order as
@@ -336,7 +425,17 @@ func PrepareEmissionUniverse(prog llssa.Program, patches Patches, inputs []Emiss
 	if err := u.freezeFunctionIdentities(); err != nil {
 		return nil, err
 	}
+	if err := u.freezeCoroForeignNoBlockCertificates(); err != nil {
+		return nil, err
+	}
 	return u, nil
+}
+
+// CompleteRuntimeABI reports whether construction froze the complete set of
+// compiler-inserted runtime ABI edges. A false result is valid only for
+// report-only or isolated frontend compilation.
+func (u *EmissionUniverse) CompleteRuntimeABI() bool {
+	return u != nil && u.completeRuntimeABI
 }
 
 // Functions returns canonical required functions in deterministic order.
@@ -345,6 +444,207 @@ func (u *EmissionUniverse) Functions() []*ssa.Function {
 		return nil
 	}
 	return append([]*ssa.Function(nil), u.functions...)
+}
+
+// CoroDemandReferences returns the exact functions whose addresses are
+// embedded in runtime ABI method tables emitted while lowering owner. These
+// are demand-only references: a demanded owner must materialize the selected
+// tfn/ifn bodies, but taking their addresses does not inherit their effects.
+//
+// The map is completed together with the emission universe, before coroutine
+// analysis or LLVM codegen. Results are sorted by the frozen frontend identity
+// and defensively copied so callers cannot change the universe after freezing.
+func (u *EmissionUniverse) CoroDemandReferences(owner *ssa.Function) ([]*ssa.Function, error) {
+	if u == nil {
+		return nil, fmt.Errorf("coroutine ABI method references require a prepared emission universe")
+	}
+	if owner == nil {
+		return nil, fmt.Errorf("coroutine ABI method references require an exact owner function")
+	}
+	canonical := u.canonicalAlias(owner)
+	if canonical == nil {
+		return nil, fmt.Errorf("coroutine ABI method reference owner %q has cyclic canonical aliases", owner.Name())
+	}
+	if canonical != owner {
+		return nil, fmt.Errorf("coroutine ABI method reference owner %q is not the exact canonical function", owner.Name())
+	}
+	if _, frozen := u.required[owner]; !frozen {
+		return nil, fmt.Errorf("coroutine ABI method reference owner %q is outside the frozen emission universe", owner.Name())
+	}
+	targets := make([]*ssa.Function, 0, len(u.abiMethodReferences[owner]))
+	for target := range u.abiMethodReferences[owner] {
+		if target == nil {
+			return nil, fmt.Errorf("coroutine ABI method reference owner %q has a nil target", owner.Name())
+		}
+		if canonicalTarget := u.canonicalAlias(target); canonicalTarget == nil || canonicalTarget != target {
+			return nil, fmt.Errorf("coroutine ABI method reference owner %q has a non-canonical target %q", owner.Name(), target.Name())
+		}
+		if _, frozen := u.required[target]; !frozen {
+			return nil, fmt.Errorf("coroutine ABI method reference owner %q targets method %q outside the frozen emission universe", owner.Name(), target.Name())
+		}
+		targets = append(targets, target)
+	}
+	sort.SliceStable(targets, func(i, j int) bool {
+		return u.functionSortKey(targets[i]) < u.functionSortKey(targets[j])
+	})
+	return targets, nil
+}
+
+func (u *EmissionUniverse) recordABIMethodReferences(owner *ssa.Function, targets []*ssa.Function) error {
+	if owner == nil {
+		return fmt.Errorf("prepare emission universe: ABI method references have no owner")
+	}
+	owner = u.canonicalAlias(owner)
+	if owner == nil {
+		return fmt.Errorf("prepare emission universe: ABI method reference owner has cyclic canonical aliases")
+	}
+	if _, frozen := u.required[owner]; !frozen {
+		return fmt.Errorf("prepare emission universe: ABI method reference owner %q is outside the emission universe", owner.Name())
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+	references := u.abiMethodReferences[owner]
+	if references == nil {
+		references = make(map[*ssa.Function]none)
+		u.abiMethodReferences[owner] = references
+	}
+	for _, target := range targets {
+		if target == nil {
+			return fmt.Errorf("prepare emission universe: ABI method reference owner %q has a nil target", owner.Name())
+		}
+		target = u.canonicalAlias(target)
+		if target == nil {
+			return fmt.Errorf("prepare emission universe: ABI method reference owner %q reached a cyclic target alias", owner.Name())
+		}
+		if _, frozen := u.required[target]; !frozen {
+			return fmt.Errorf("prepare emission universe: ABI method reference owner %q targets method %q outside the emission universe", owner.Name(), target.Name())
+		}
+		references[target] = none{}
+	}
+	return nil
+}
+
+// CoroLoweredCalls returns the exact managed helper calls that frontend
+// lowering inserts into owner without a corresponding source SSA call. Records
+// are sorted by logical helper identity and defensively copied. The mapping is
+// frozen together with the emission universe, before coroutine analysis and
+// LLVM codegen.
+func (u *EmissionUniverse) CoroLoweredCalls(owner *ssa.Function) ([]coro.SSALoweredCall, error) {
+	if u == nil {
+		return nil, fmt.Errorf("coroutine lowered calls require a prepared emission universe")
+	}
+	if owner == nil {
+		return nil, fmt.Errorf("coroutine lowered calls require an exact owner function")
+	}
+	canonical := u.canonicalAlias(owner)
+	if canonical == nil {
+		return nil, fmt.Errorf("coroutine lowered-call owner %q has cyclic canonical aliases", owner.Name())
+	}
+	if canonical != owner {
+		return nil, fmt.Errorf("coroutine lowered-call owner %q is not the exact canonical function", owner.Name())
+	}
+	if _, frozen := u.required[owner]; !frozen {
+		return nil, fmt.Errorf("coroutine lowered-call owner %q is outside the frozen emission universe", owner.Name())
+	}
+	byName := u.loweredCalls[owner]
+	calls := make([]coro.SSALoweredCall, 0, len(byName))
+	for logicalName, frozen := range byName {
+		target := frozen.target
+		if logicalName == "" || !utf8.ValidString(logicalName) || strings.IndexByte(logicalName, 0) >= 0 {
+			return nil, fmt.Errorf("coroutine lowered-call owner %q has invalid logical name %q", owner.Name(), logicalName)
+		}
+		if target == nil {
+			return nil, fmt.Errorf("coroutine lowered call %q in %q has a nil target", logicalName, owner.Name())
+		}
+		if canonicalTarget := u.canonicalAlias(target); canonicalTarget == nil || canonicalTarget != target {
+			return nil, fmt.Errorf("coroutine lowered call %q in %q has a non-canonical target %q", logicalName, owner.Name(), target.Name())
+		}
+		if _, frozen := u.required[target]; !frozen {
+			return nil, fmt.Errorf("coroutine lowered call %q in %q targets helper %q outside the frozen emission universe", logicalName, owner.Name(), target.Name())
+		}
+		calls = append(calls, coro.SSALoweredCall{
+			LogicalName: logicalName,
+			Target:      target,
+			UnwindOnly:  frozen.unwindOnly,
+		})
+	}
+	sort.Slice(calls, func(i, j int) bool {
+		return calls[i].LogicalName < calls[j].LogicalName
+	})
+	return calls, nil
+}
+
+// ResolveCoroLoweredCall resolves one exact frozen helper mapping. It is used
+// by codegen to recover the same canonical target that analysis projected as a
+// real call edge, without rediscovering it from an LLVM symbol name.
+func (u *EmissionUniverse) ResolveCoroLoweredCall(owner *ssa.Function, logicalName string) (*ssa.Function, bool, error) {
+	calls, err := u.CoroLoweredCalls(owner)
+	if err != nil {
+		return nil, false, err
+	}
+	index := sort.Search(len(calls), func(index int) bool {
+		return calls[index].LogicalName >= logicalName
+	})
+	if index == len(calls) || calls[index].LogicalName != logicalName {
+		return nil, false, nil
+	}
+	return calls[index].Target, true, nil
+}
+
+// recordCoroLoweredCall freezes one compiler-inserted helper mapping while the
+// emission universe is being materialized. Repeated uses of the same logical
+// helper in one owner are idempotent; resolving that identity to two exact
+// targets fails closed.
+func (u *EmissionUniverse) recordCoroLoweredCall(owner *ssa.Function, logicalName string, target *ssa.Function) error {
+	return u.recordCoroLoweredCallSite(owner, logicalName, target, false)
+}
+
+// recordCoroLoweredCallSite freezes one physical helper-use class. A logical
+// helper is unwind-only only when every occurrence in the owner is proven to
+// be unwind-only; one normal-return-reachable occurrence conservatively wins.
+func (u *EmissionUniverse) recordCoroLoweredCallSite(owner *ssa.Function, logicalName string, target *ssa.Function, unwindOnly bool) error {
+	if owner == nil {
+		return fmt.Errorf("prepare emission universe: lowered call has no owner")
+	}
+	if logicalName == "" || !utf8.ValidString(logicalName) || strings.IndexByte(logicalName, 0) >= 0 {
+		return fmt.Errorf("prepare emission universe: lowered call in %q has invalid logical name %q", owner.Name(), logicalName)
+	}
+	owner = u.canonicalAlias(owner)
+	if owner == nil {
+		return fmt.Errorf("prepare emission universe: lowered-call owner has cyclic canonical aliases")
+	}
+	if _, frozen := u.required[owner]; !frozen {
+		return fmt.Errorf("prepare emission universe: lowered-call owner %q is outside the emission universe", owner.Name())
+	}
+	if target == nil {
+		return fmt.Errorf("prepare emission universe: lowered call %q in %q has a nil target", logicalName, owner.Name())
+	}
+	target = u.canonicalAlias(target)
+	if target == nil {
+		return fmt.Errorf("prepare emission universe: lowered call %q in %q reached a cyclic target alias", logicalName, owner.Name())
+	}
+	if _, frozen := u.required[target]; !frozen {
+		return fmt.Errorf("prepare emission universe: lowered call %q in %q targets helper %q outside the emission universe", logicalName, owner.Name(), target.Name())
+	}
+	if u.loweredCalls == nil {
+		u.loweredCalls = make(map[*ssa.Function]map[string]coroLoweredCallTarget)
+	}
+	byName := u.loweredCalls[owner]
+	if byName == nil {
+		byName = make(map[string]coroLoweredCallTarget)
+		u.loweredCalls[owner] = byName
+	}
+	if previous, ok := byName[logicalName]; ok {
+		if previous.target != target {
+			return fmt.Errorf("prepare emission universe: lowered call %q in %q resolves to both %q and %q", logicalName, owner.Name(), previous.target.Name(), target.Name())
+		}
+		previous.unwindOnly = previous.unwindOnly && unwindOnly
+		byName[logicalName] = previous
+		return nil
+	}
+	byName[logicalName] = coroLoweredCallTarget{target: target, unwindOnly: unwindOnly}
+	return nil
 }
 
 // Contains reports whether fn is an exact canonical required function.
@@ -466,6 +766,28 @@ func (u *EmissionUniverse) FunctionBackground(fn *ssa.Function) (background llss
 	}
 }
 
+// CoroForeignNoBlockCertificate returns the frozen declaration certificate for
+// fn. The proof exists only for an exact emitted C declaration carrying the
+// //llgo:coro noblock directive. Ordinary C declarations remain unclassified
+// and therefore retain the conservative BlockForeign/WaitForeign boundary.
+func (u *EmissionUniverse) CoroForeignNoBlockCertificate(fn *ssa.Function) (certificate CoroForeignNoBlockCertificate, certified bool, err error) {
+	if u == nil {
+		return CoroForeignNoBlockCertificate{}, false, fmt.Errorf("coroutine foreign noblock certificate: nil emission universe")
+	}
+	if fn == nil {
+		return CoroForeignNoBlockCertificate{}, false, fmt.Errorf("coroutine foreign noblock certificate: nil function")
+	}
+	canonical := u.canonicalAlias(fn)
+	if canonical == nil {
+		return CoroForeignNoBlockCertificate{}, false, fmt.Errorf("coroutine foreign noblock certificate: function has cyclic canonical aliases")
+	}
+	if _, required := u.required[canonical]; !required {
+		return CoroForeignNoBlockCertificate{}, false, fmt.Errorf("coroutine foreign noblock certificate: function %q is absent from the frozen emission universe", canonical.Name())
+	}
+	certificate, certified = u.foreignNoBlock[canonical]
+	return certificate, certified, nil
+}
+
 // CoroIntrinsicSemantics reports whether fn is an exact frozen llgo compiler
 // intrinsic and, if so, its narrow coroutine call-edge semantics. The result
 // is recorded during universe construction and never inferred from the Go
@@ -499,7 +821,7 @@ func (u *EmissionUniverse) CoroIntrinsicCallSiteSemantics(call ssa.CallInstructi
 		return CoroIntrinsicCallUnsupported, intrinsic, err
 	}
 	semantics = coroIntrinsicCallSemantics(opcode)
-	if semantics != CoroIntrinsicCallInlineNoSuspend {
+	if !semantics.ElidesManagedCall() {
 		return semantics, true, nil
 	}
 	direct, ok := call.(*ssa.Call)
@@ -507,6 +829,12 @@ func (u *EmissionUniverse) CoroIntrinsicCallSiteSemantics(call ssa.CallInstructi
 		return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
 			"emission universe intrinsic call semantics: inline intrinsic %q must be an exact direct call", callee.Name(),
 		)
+	}
+	if isCoroAtomicIntrinsic(opcode) {
+		if err := validateCoroAtomicIntrinsicCallSite(opcode, direct); err != nil {
+			return CoroIntrinsicCallUnsupported, true, err
+		}
+		return CoroIntrinsicCallInlineNoSuspend, true, nil
 	}
 	switch opcode {
 	case llgoCstr:
@@ -523,11 +851,303 @@ func (u *EmissionUniverse) CoroIntrinsicCallSiteSemantics(call ssa.CallInstructi
 			)
 		}
 		return CoroIntrinsicCallInlineNoSuspend, true, nil
+	case llgoAdvance:
+		args := direct.Common().Args
+		if len(args) != 2 {
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: llgo.advance call %q requires exactly two arguments", direct.String(),
+			)
+		}
+		// context.advance passes these operands directly to Builder.Advance.
+		// Builder.Advance accepts an actual Go pointer or unsafe.Pointer and an
+		// LLVM integer GEP index; accepting a merely pointer-shaped named value
+		// here would disagree with that lowering's raw-type switch.
+		pointerType := types.Unalias(args[0].Type())
+		switch pointerType := pointerType.(type) {
+		case *types.Pointer:
+		case *types.Basic:
+			if pointerType.Kind() != types.UnsafePointer {
+				return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+					"emission universe intrinsic call semantics: llgo.advance call %q requires a pointer first argument", direct.String(),
+				)
+			}
+		default:
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: llgo.advance call %q requires a pointer first argument", direct.String(),
+			)
+		}
+		offsetType, ok := types.Unalias(args[1].Type()).Underlying().(*types.Basic)
+		if !ok || offsetType.Info()&types.IsInteger == 0 {
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: llgo.advance call %q requires an integer offset argument", direct.String(),
+			)
+		}
+		results := direct.Common().Signature().Results()
+		if results == nil || results.Len() != 1 || !types.Identical(results.At(0).Type(), args[0].Type()) {
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: llgo.advance call %q requires one result matching its pointer argument", direct.String(),
+			)
+		}
+		return CoroIntrinsicCallInlineNoSuspend, true, nil
+	case llgoAllocaCStr:
+		args := direct.Common().Args
+		if len(args) != 1 {
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: llgo.allocaCStr call %q requires exactly one string argument", direct.String(),
+			)
+		}
+		argType, ok := types.Unalias(args[0].Type()).Underlying().(*types.Basic)
+		if !ok || argType.Kind() != types.String {
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: llgo.allocaCStr call %q requires exactly one string argument", direct.String(),
+			)
+		}
+		signature := direct.Common().Signature()
+		results := signature.Results()
+		if signature.Recv() != nil || signature.Variadic() || results == nil || results.Len() != 1 {
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: llgo.allocaCStr call %q requires one *int8 result", direct.String(),
+			)
+		}
+		resultPointer, ok := types.Unalias(results.At(0).Type()).Underlying().(*types.Pointer)
+		if !ok {
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: llgo.allocaCStr call %q requires one *int8 result", direct.String(),
+			)
+		}
+		resultElem, ok := types.Unalias(resultPointer.Elem()).Underlying().(*types.Basic)
+		if !ok || resultElem.Kind() != types.Int8 {
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: llgo.allocaCStr call %q requires one *int8 result", direct.String(),
+			)
+		}
+		if !u.CompleteRuntimeABI() {
+			// Isolated/report compilation retains the legacy rtFunc call and has
+			// no complete owner-scoped runtime-helper map. Do not elide the
+			// intrinsic declaration in that mode.
+			return CoroIntrinsicCallUnsupported, true, nil
+		}
+		helper, frozen, helperErr := u.ResolveCoroLoweredCall(direct.Parent(), "CStrCopy")
+		if helperErr != nil {
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: llgo.allocaCStr call %q resolve frozen CStrCopy helper: %w", direct.String(), helperErr,
+			)
+		}
+		if !frozen || helper == nil {
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: llgo.allocaCStr call %q has no exact frozen CStrCopy lowered call", direct.String(),
+			)
+		}
+		return CoroIntrinsicCallInlineWithLoweredCalls, true, nil
+	case llgoDeferData:
+		if len(direct.Common().Args) != 0 {
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: llgo.deferData call %q requires no arguments", direct.String(),
+			)
+		}
+		signature := direct.Common().Signature()
+		if signature == nil || signature.Recv() != nil || signature.Variadic() || (signature.Params() != nil && signature.Params().Len() != 0) {
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: llgo.deferData call %q requires the exact func() unsafe.Pointer shape", direct.String(),
+			)
+		}
+		results := signature.Results()
+		if results == nil || results.Len() != 1 {
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: llgo.deferData call %q requires the exact func() unsafe.Pointer shape", direct.String(),
+			)
+		}
+		result, ok := types.Unalias(results.At(0).Type()).Underlying().(*types.Basic)
+		if !ok || result.Kind() != types.UnsafePointer {
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: llgo.deferData call %q requires the exact func() unsafe.Pointer shape", direct.String(),
+			)
+		}
+		if !u.CompleteRuntimeABI() {
+			return CoroIntrinsicCallUnsupported, true, nil
+		}
+		helper, frozen, helperErr := u.ResolveCoroLoweredCall(direct.Parent(), "GetThreadDefer")
+		if helperErr != nil {
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: llgo.deferData call %q resolve frozen GetThreadDefer helper: %w", direct.String(), helperErr,
+			)
+		}
+		if !frozen || helper == nil {
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: llgo.deferData call %q has no exact frozen GetThreadDefer lowered call", direct.String(),
+			)
+		}
+		return CoroIntrinsicCallInlineWithLoweredCalls, true, nil
+	case llgoString:
+		owner := u.ownerOf(direct.Parent())
+		if owner == nil {
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: llgo.string call %q has no exact frozen owner", direct.String(),
+			)
+		}
+		ctx, ctxErr := u.functionABIContext(direct.Parent(), owner)
+		if ctxErr != nil {
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: llgo.string call %q build exact lowering context: %w", direct.String(), ctxErr,
+			)
+		}
+		helperName, helperShapeErr := emissionStringIntrinsicHelper(ctx, direct)
+		if helperShapeErr != nil {
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: %w", helperShapeErr,
+			)
+		}
+		if !u.CompleteRuntimeABI() {
+			return CoroIntrinsicCallUnsupported, true, nil
+		}
+		helper, frozen, helperErr := u.ResolveCoroLoweredCall(direct.Parent(), helperName)
+		if helperErr != nil {
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: llgo.string call %q resolve frozen %s helper: %w", direct.String(), helperName, helperErr,
+			)
+		}
+		if !frozen || helper == nil {
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: llgo.string call %q has no exact frozen %s lowered call", direct.String(), helperName,
+			)
+		}
+		return CoroIntrinsicCallInlineWithLoweredCalls, true, nil
+	case llgoSigjmpbuf:
+		if err := validateCoroSigjmpIntrinsicCallSite(opcode, direct); err != nil {
+			return CoroIntrinsicCallUnsupported, true, err
+		}
+		return CoroIntrinsicCallInlineNoSuspend, true, nil
+	case llgoSigsetjmp, llgoSiglongjmp:
+		if err := validateCoroSigjmpIntrinsicCallSite(opcode, direct); err != nil {
+			return CoroIntrinsicCallUnsupported, true, err
+		}
+		if !u.coroUsesRuntimeSigjmpHelpers() {
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: legacy llgo setjmp/longjmp call %q lowers directly to a target C leaf and requires a non-legacy coroutine PanicABI", direct.String(),
+			)
+		}
+		if !u.CompleteRuntimeABI() {
+			return CoroIntrinsicCallUnsupported, true, nil
+		}
+		helperName := "Sigsetjmp"
+		if opcode == llgoSiglongjmp {
+			helperName = "Siglongjmp"
+		}
+		helper, frozen, helperErr := u.ResolveCoroLoweredCall(direct.Parent(), helperName)
+		if helperErr != nil {
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: legacy %s call %q resolve frozen runtime helper: %w", helperName, direct.String(), helperErr,
+			)
+		}
+		if !frozen || helper == nil {
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: legacy %s call %q has no exact frozen lowered call", helperName, direct.String(),
+			)
+		}
+		return CoroIntrinsicCallInlineWithLoweredCalls, true, nil
+	case llgoFuncAddr:
+		if _, _, err := u.validateCoroFuncAddrCallSite(direct); err != nil {
+			return CoroIntrinsicCallUnsupported, true, err
+		}
+		return CoroIntrinsicCallInlineNoSuspend, true, nil
+	case llgoCoroPark:
+		if err := validateCoroParkIntrinsicCallSite(direct); err != nil {
+			return CoroIntrinsicCallUnsupported, true, err
+		}
+		return CoroIntrinsicCallInlineSuspend, true, nil
 	default:
 		return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
 			"emission universe intrinsic call semantics: inline intrinsic %q has no exact call-site verifier", callee.Name(),
 		)
 	}
+}
+
+// CoroRawFunctionAddressCallArgument reports the one exact call argument that
+// funcAddr consumes as a raw static entry address. Unlike an ordinary
+// MakeInterface, this operand is inspected structurally and no interface value
+// is emitted. Consumers use this frozen fact to avoid forcing the target into
+// Dispatch representation solely because x/tools SSA inserted the transient
+// MakeInterface node.
+func (u *EmissionUniverse) CoroRawFunctionAddressCallArgument(call ssa.CallInstruction, argument int) (bool, error) {
+	if call == nil || call.Common() == nil || argument < 0 || argument >= len(call.Common().Args) {
+		return false, nil
+	}
+	callee := call.Common().StaticCallee()
+	if callee == nil {
+		return false, nil
+	}
+	opcode, intrinsic, err := u.coroIntrinsicOpcode(callee)
+	if err != nil || !intrinsic || opcode != llgoFuncAddr {
+		return false, err
+	}
+	direct, ok := call.(*ssa.Call)
+	if !ok || direct.Common() == nil || direct.Common().IsInvoke() {
+		return false, fmt.Errorf("emission universe raw function address: llgo.funcAddr must be an exact direct call")
+	}
+	if _, _, err := u.validateCoroFuncAddrCallSite(direct); err != nil {
+		return false, err
+	}
+	return argument == 0, nil
+}
+
+func (u *EmissionUniverse) validateCoroFuncAddrCallSite(direct *ssa.Call) (*ssa.MakeInterface, *ssa.Function, error) {
+	if direct == nil || direct.Common() == nil || direct.Common().IsInvoke() {
+		return nil, nil, fmt.Errorf("emission universe intrinsic call semantics: llgo.funcAddr must be an exact direct call")
+	}
+	args := direct.Common().Args
+	if len(args) != 1 {
+		return nil, nil, fmt.Errorf(
+			"emission universe intrinsic call semantics: llgo.funcAddr call %q requires exactly one argument", direct.String(),
+		)
+	}
+	signature := direct.Common().Signature()
+	if signature == nil || signature.Recv() != nil || signature.Variadic() || signature.Params() == nil || signature.Params().Len() != 1 {
+		return nil, nil, fmt.Errorf(
+			"emission universe intrinsic call semantics: llgo.funcAddr call %q requires the exact func(any) unsafe.Pointer shape", direct.String(),
+		)
+	}
+	parameterInterface, ok := types.Unalias(signature.Params().At(0).Type()).Underlying().(*types.Interface)
+	if !ok || !parameterInterface.Empty() {
+		return nil, nil, fmt.Errorf(
+			"emission universe intrinsic call semantics: llgo.funcAddr call %q requires the exact func(any) unsafe.Pointer shape", direct.String(),
+		)
+	}
+	results := signature.Results()
+	if results == nil || results.Len() != 1 {
+		return nil, nil, fmt.Errorf(
+			"emission universe intrinsic call semantics: llgo.funcAddr call %q requires the exact func(any) unsafe.Pointer shape", direct.String(),
+		)
+	}
+	result, ok := types.Unalias(results.At(0).Type()).Underlying().(*types.Basic)
+	if !ok || result.Kind() != types.UnsafePointer {
+		return nil, nil, fmt.Errorf(
+			"emission universe intrinsic call semantics: llgo.funcAddr call %q requires the exact func(any) unsafe.Pointer shape", direct.String(),
+		)
+	}
+	boxed, ok := args[0].(*ssa.MakeInterface)
+	if !ok {
+		return nil, nil, fmt.Errorf(
+			"emission universe intrinsic call semantics: llgo.funcAddr call %q requires a direct MakeInterface function operand", direct.String(),
+		)
+	}
+	target, ok := boxed.X.(*ssa.Function)
+	if !ok || len(target.FreeVars) != 0 {
+		return nil, nil, fmt.Errorf(
+			"emission universe intrinsic call semantics: llgo.funcAddr call %q requires MakeInterface{X:*ssa.Function} without captured state", direct.String(),
+		)
+	}
+	refs := boxed.Referrers()
+	if refs == nil || len(*refs) != 1 || (*refs)[0] != direct {
+		return nil, nil, fmt.Errorf(
+			"emission universe intrinsic call semantics: llgo.funcAddr call %q requires its MakeInterface operand to have this exact sole consumer", direct.String(),
+		)
+	}
+	if canonical, resolved := u.Resolve(target); !resolved || canonical == nil {
+		return nil, nil, fmt.Errorf(
+			"emission universe intrinsic call semantics: llgo.funcAddr call %q targets function %q outside the frozen emission universe", direct.String(), target.Name(),
+		)
+	}
+	return boxed, target, nil
 }
 
 func (u *EmissionUniverse) coroIntrinsicOpcode(fn *ssa.Function) (opcode int, intrinsic bool, err error) {
@@ -568,14 +1188,192 @@ func (u *EmissionUniverse) coroIntrinsicOpcode(fn *ssa.Function) (opcode int, in
 }
 
 func coroIntrinsicCallSemantics(opcode int) CoroIntrinsicCallSemantics {
+	if isCoroAtomicIntrinsic(opcode) {
+		return CoroIntrinsicCallInlineNoSuspend
+	}
 	switch opcode {
 	case llgoCstr:
 		// cstr accepts only a compile-time string literal and lowers directly
 		// to an LLVM constant C string pointer.
 		return CoroIntrinsicCallInlineNoSuspend
+	case llgoAdvance:
+		// advance lowers directly to one LLVM GEP after its exact operand and
+		// result shape has been verified at the physical call site.
+		return CoroIntrinsicCallInlineNoSuspend
+	case llgoAllocaCStr:
+		// allocaCStr lowers its string length arithmetic and storage directly,
+		// then calls runtime.CStrCopy. The intrinsic declaration disappears, but
+		// the exact CStrCopy edge is retained in the owner's lowered-call set.
+		return CoroIntrinsicCallInlineWithLoweredCalls
+	case llgoDeferData:
+		// deferData removes the intrinsic declaration but emits the exact
+		// runtime.GetThreadDefer call owned by the surrounding function.
+		return CoroIntrinsicCallInlineWithLoweredCalls
+	case llgoString:
+		// string replaces the intrinsic declaration with exactly one of
+		// runtime.StringFromCStr or runtime.StringFrom based on the frozen
+		// frontend variadic shape.
+		return CoroIntrinsicCallInlineWithLoweredCalls
+	case llgoSigjmpbuf:
+		// sigjmpbuf is a target-sized LLVM alloca and has no callable edge.
+		return CoroIntrinsicCallInlineNoSuspend
+	case llgoSigsetjmp, llgoSiglongjmp:
+		// Native legacy PanicABI replaces these declarations with the exact
+		// runtime C-linkname leaves. WASM and explicit embedded targets fail
+		// closed until their non-legacy PanicABI is selected.
+		return CoroIntrinsicCallInlineWithLoweredCalls
+	case llgoFuncAddr:
+		// funcAddr structurally unwraps one exact MakeInterface{X:*ssa.Function}
+		// and emits the selected raw function entry address directly.
+		return CoroIntrinsicCallInlineNoSuspend
+	case llgoCoroPark:
+		return CoroIntrinsicCallInlineSuspend
 	default:
 		return CoroIntrinsicCallUnsupported
 	}
+}
+
+func validateCoroParkIntrinsicCallSite(call *ssa.Call) error {
+	if call == nil || call.Common() == nil {
+		return fmt.Errorf("llgo.coroPark requires an exact direct call")
+	}
+	common := call.Common()
+	if common.IsInvoke() || len(common.Args) != 2 {
+		return fmt.Errorf("llgo.coroPark call %q requires exactly (pointer, uint32) arguments", call.String())
+	}
+	signature := common.Signature()
+	if signature == nil || signature.Recv() != nil || signature.Variadic() ||
+		(signature.Results() != nil && signature.Results().Len() != 0) ||
+		signature.Params() == nil || signature.Params().Len() != 2 {
+		return fmt.Errorf("llgo.coroPark call %q requires the exact func(pointer, uint32) shape", call.String())
+	}
+	pointerLike := func(typ types.Type) bool {
+		typ = types.Unalias(typ)
+		if _, ok := typ.Underlying().(*types.Pointer); ok {
+			return true
+		}
+		basic, ok := typ.Underlying().(*types.Basic)
+		return ok && basic.Kind() == types.UnsafePointer
+	}
+	uint32Like := func(typ types.Type) bool {
+		basic, ok := types.Unalias(typ).Underlying().(*types.Basic)
+		return ok && basic.Kind() == types.Uint32
+	}
+	if !pointerLike(common.Args[0].Type()) || !pointerLike(signature.Params().At(0).Type()) ||
+		!uint32Like(common.Args[1].Type()) || !uint32Like(signature.Params().At(1).Type()) {
+		return fmt.Errorf("llgo.coroPark call %q requires the exact func(pointer, uint32) shape", call.String())
+	}
+	return nil
+}
+
+func isCoroAtomicIntrinsic(opcode int) bool {
+	return opcode == llgoAtomicLoad || opcode == llgoAtomicStore || opcode == llgoAtomicCmpXchg ||
+		opcode == llgoAtomicCmpXchgOK || opcode == llgoAtomicAddReturnNew ||
+		opcode >= llgoAtomicOpBase && opcode <= llgoAtomicOpLast
+}
+
+func validateCoroAtomicIntrinsicCallSite(opcode int, direct *ssa.Call) error {
+	if direct == nil || direct.Common() == nil || direct.Common().IsInvoke() {
+		return fmt.Errorf("emission universe intrinsic call semantics: llgo atomic intrinsic must be an exact direct call")
+	}
+	common := direct.Common()
+	signature := common.Signature()
+	if signature == nil || signature.Recv() != nil || signature.Variadic() || signature.Params() == nil {
+		return fmt.Errorf("emission universe intrinsic call semantics: llgo atomic call %q has an invalid declaration shape", direct.String())
+	}
+	params := signature.Params()
+	results := signature.Results()
+	if params.Len() == 0 {
+		return fmt.Errorf("emission universe intrinsic call semantics: llgo atomic call %q has no pointer operand", direct.String())
+	}
+	pointer, ok := types.Unalias(params.At(0).Type()).Underlying().(*types.Pointer)
+	if !ok || !emissionIsAtomicScalarType(pointer.Elem()) {
+		return fmt.Errorf("emission universe intrinsic call semantics: llgo atomic call %q requires a pointer to an integer or unsafe.Pointer value", direct.String())
+	}
+	elem := pointer.Elem()
+	matchingParam := func(index int) bool {
+		return index >= 0 && index < params.Len() && types.Identical(params.At(index).Type(), elem)
+	}
+	matchingResult := func(index int) bool {
+		return results != nil && index >= 0 && index < results.Len() && types.Identical(results.At(index).Type(), elem)
+	}
+	boolResult := func(index int) bool {
+		return results != nil && index >= 0 && index < results.Len() && emissionIsBasicKind(results.At(index).Type(), types.Bool)
+	}
+	noResults := results == nil || results.Len() == 0
+
+	valid := false
+	switch {
+	case opcode == llgoAtomicLoad:
+		valid = len(common.Args) == 1 && params.Len() == 1 && results != nil && results.Len() == 1 && matchingResult(0)
+	case opcode == llgoAtomicStore:
+		valid = len(common.Args) == 2 && params.Len() == 2 && matchingParam(1) && noResults
+	case opcode == llgoAtomicCmpXchg:
+		valid = len(common.Args) == 3 && params.Len() == 3 && matchingParam(1) && matchingParam(2) && results != nil && results.Len() == 2 && matchingResult(0) && boolResult(1)
+	case opcode == llgoAtomicCmpXchgOK:
+		valid = len(common.Args) == 3 && params.Len() == 3 && matchingParam(1) && matchingParam(2) && results != nil && results.Len() == 1 && boolResult(0)
+	case opcode == llgoAtomicAddReturnNew || opcode >= llgoAtomicOpBase && opcode <= llgoAtomicOpLast:
+		valid = len(common.Args) == 2 && params.Len() == 2 && matchingParam(1) && results != nil && results.Len() == 1 && matchingResult(0)
+	}
+	if !valid {
+		return fmt.Errorf("emission universe intrinsic call semantics: llgo atomic call %q does not match opcode %d's exact pointer/value/result shape", direct.String(), opcode)
+	}
+	return nil
+}
+
+func emissionIsAtomicScalarType(typ types.Type) bool {
+	basic, ok := types.Unalias(typ).Underlying().(*types.Basic)
+	return ok && (basic.Info()&types.IsInteger != 0 || basic.Kind() == types.UnsafePointer)
+}
+
+func (u *EmissionUniverse) coroUsesRuntimeSigjmpHelpers() bool {
+	if u == nil || u.prog == nil || u.prog.Target() == nil {
+		return false
+	}
+	target := u.prog.Target()
+	return target.GOARCH != "wasm" && target.Target == ""
+}
+
+func validateCoroSigjmpIntrinsicCallSite(opcode int, direct *ssa.Call) error {
+	if direct == nil || direct.Common() == nil || direct.Common().IsInvoke() {
+		return fmt.Errorf("emission universe intrinsic call semantics: llgo setjmp/longjmp intrinsic must be an exact direct call")
+	}
+	common := direct.Common()
+	signature := common.Signature()
+	if signature == nil || signature.Recv() != nil || signature.Variadic() {
+		return fmt.Errorf("emission universe intrinsic call semantics: llgo setjmp/longjmp call %q has an invalid declaration shape", direct.String())
+	}
+	params := signature.Params()
+	results := signature.Results()
+	switch opcode {
+	case llgoSigjmpbuf:
+		if len(common.Args) != 0 || params != nil && params.Len() != 0 || results == nil || results.Len() != 1 || !emissionIsUnsafePointerType(results.At(0).Type()) {
+			return fmt.Errorf("emission universe intrinsic call semantics: llgo.sigjmpbuf call %q requires the exact func() unsafe.Pointer shape", direct.String())
+		}
+	case llgoSigsetjmp:
+		if len(common.Args) != 2 || params == nil || params.Len() != 2 || results == nil || results.Len() != 1 ||
+			!emissionIsUnsafePointerType(params.At(0).Type()) || !emissionIsBasicKind(params.At(1).Type(), types.Int32) || !emissionIsBasicKind(results.At(0).Type(), types.Int32) {
+			return fmt.Errorf("emission universe intrinsic call semantics: llgo.sigsetjmp call %q requires the exact func(unsafe.Pointer, int32) int32 shape", direct.String())
+		}
+	case llgoSiglongjmp:
+		if len(common.Args) != 2 || params == nil || params.Len() != 2 || results != nil && results.Len() != 0 ||
+			!emissionIsUnsafePointerType(params.At(0).Type()) || !emissionIsBasicKind(params.At(1).Type(), types.Int32) {
+			return fmt.Errorf("emission universe intrinsic call semantics: llgo.siglongjmp call %q requires the exact func(unsafe.Pointer, int32) shape", direct.String())
+		}
+	default:
+		return fmt.Errorf("emission universe intrinsic call semantics: unknown llgo setjmp/longjmp opcode %d", opcode)
+	}
+	return nil
+}
+
+func emissionIsUnsafePointerType(typ types.Type) bool {
+	basic, ok := types.Unalias(typ).Underlying().(*types.Basic)
+	return ok && basic.Kind() == types.UnsafePointer
+}
+
+func emissionIsBasicKind(typ types.Type, kind types.BasicKind) bool {
+	basic, ok := types.Unalias(typ).Underlying().(*types.Basic)
+	return ok && basic.Kind() == kind
 }
 
 func (u *EmissionUniverse) physicalName(ownerSSA *ssa.Package, fn *ssa.Function, legacy string) (string, error) {
@@ -770,7 +1568,7 @@ func (u *EmissionUniverse) selectTypeMethods(prepared *preparedEmissionPackage, 
 	return nil
 }
 
-func (u *EmissionUniverse) selectABITypeMethods(prepared *preparedEmissionPackage, typ types.Type, state pkgState, fromPatch bool) error {
+func (u *EmissionUniverse) selectABITypeMethods(prepared *preparedEmissionPackage, typ types.Type, state pkgState, fromPatch bool) ([]*ssa.Function, error) {
 	base := types.Unalias(typ)
 	for {
 		pointer, ok := base.(*types.Pointer)
@@ -785,16 +1583,54 @@ func (u *EmissionUniverse) selectABITypeMethods(prepared *preparedEmissionPackag
 		packageNamed = obj != nil && obj.Pkg() != nil && obj.Parent() == obj.Pkg().Scope()
 	}
 	mset := u.goProg.MethodSets.MethodSet(typ)
+	methods := make([]*ssa.Function, 0, mset.Len()*2)
+	selectMethod := func(selection *types.Selection) error {
+		fn := u.goProg.MethodValue(selection)
+		if fn == nil {
+			return fmt.Errorf("prepare emission universe: ABI method table for %v has no SSA implementation for method %q", typ, selection.Obj().Name())
+		}
+		if !packageNamed || functionNeedsLinkOnce(fn) {
+			if err := u.selectFunction(prepared, fn, state, fromPatch); err != nil {
+				return err
+			}
+		}
+		fn = u.canonicalAlias(fn)
+		if fn == nil {
+			return fmt.Errorf("prepare emission universe: ABI method table for %v reached a cyclic method alias", typ)
+		}
+		if _, frozen := u.required[fn]; !frozen {
+			return fmt.Errorf("prepare emission universe: ABI method table for %v references method %q outside the frozen emission universe", typ, fn.Name())
+		}
+		methods = append(methods, fn)
+		return nil
+	}
 	for index := 0; index < mset.Len(); index++ {
-		fn := u.goProg.MethodValue(mset.At(index))
-		if fn == nil || packageNamed && !functionNeedsLinkOnce(fn) {
+		selection := mset.At(index)
+		if err := selectMethod(selection); err != nil {
+			return nil, err
+		}
+
+		// abiUncommonMethods uses the pointer-receiver method value as ifn for
+		// every value-receiver selection. Freeze that exact wrapper alongside
+		// tfn instead of assuming a later pointer descriptor happens to request
+		// it as an unrelated side effect.
+		sig, ok := selection.Type().(*types.Signature)
+		if !ok || sig.Recv() == nil {
+			return nil, fmt.Errorf("prepare emission universe: ABI method table for %v has a non-method selection %q", typ, selection.Obj().Name())
+		}
+		if _, pointerReceiver := selection.Recv().Underlying().(*types.Pointer); pointerReceiver {
 			continue
 		}
-		if err := u.selectFunction(prepared, fn, state, fromPatch); err != nil {
-			return err
+		pointerReceiver := types.NewPointer(sig.Recv().Type())
+		pointerSelection := u.goProg.MethodSets.MethodSet(pointerReceiver).Lookup(selection.Obj().Pkg(), selection.Obj().Name())
+		if pointerSelection == nil {
+			return nil, fmt.Errorf("prepare emission universe: ABI method table for %v cannot resolve pointer ifn for method %q", typ, selection.Obj().Name())
+		}
+		if err := selectMethod(pointerSelection); err != nil {
+			return nil, err
 		}
 	}
-	return nil
+	return stableUniqueFunctions(methods), nil
 }
 
 func (u *EmissionUniverse) functionProvenance(prepared *preparedEmissionPackage, fn *ssa.Function) (pkgState, bool) {
@@ -1759,6 +2595,9 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 	}
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
+			if err := u.materializeLoweredRuntimeHelpers(ctx, fn, owner, emissionState, instr); err != nil {
+				return err
+			}
 			if call, ok := instr.(ssa.CallInstruction); ok {
 				roots, err := u.callValueRoots(ctx, call.Common())
 				if err != nil {
@@ -2782,6 +3621,109 @@ func (u *EmissionUniverse) freezeFunctionIdentities() error {
 		u.linkIdentities[fn] = framedEmissionKey(append([]string{"cl-emission-multi-owner-link-v1"}, ownerSymbols...)...)
 	}
 	return nil
+}
+
+type coroForeignPhysicalABI struct {
+	symbol    string
+	signature string
+}
+
+// freezeCoroForeignNoBlockCertificates binds source directives to the same
+// exact physical identities already frozen for codegen. It deliberately scans
+// every required C declaration before accepting a certificate: if another
+// required declaration names the same physical symbol with a different ABI
+// signature, the proof fails closed instead of blessing one guessed spelling.
+func (u *EmissionUniverse) freezeCoroForeignNoBlockCertificates() error {
+	abiByFunction := make(map[*ssa.Function]coroForeignPhysicalABI)
+	signaturesBySymbol := make(map[string]map[string]none)
+	for _, fn := range u.functions {
+		owners := u.sortedUseOwners(fn)
+		var abi coroForeignPhysicalABI
+		haveABI := false
+		for _, owner := range owners {
+			key := u.finalKeys[emissionFunctionOwnerKey{function: fn, owner: owner}]
+			ftype, symbol, signature, ok := splitManagedSymbolKey(key)
+			if !ok || ftype != cFunc {
+				continue
+			}
+			candidate := coroForeignPhysicalABI{symbol: symbol, signature: signature}
+			if haveABI && candidate != abi {
+				return fmt.Errorf("prepare emission universe: C declaration %q has owner-dependent physical ABI while freezing coroutine noblock metadata", fn.Name())
+			}
+			abi, haveABI = candidate, true
+		}
+		if !haveABI {
+			continue
+		}
+		abiByFunction[fn] = abi
+		signatures := signaturesBySymbol[abi.symbol]
+		if signatures == nil {
+			signatures = make(map[string]none)
+			signaturesBySymbol[abi.symbol] = signatures
+		}
+		signatures[abi.signature] = none{}
+	}
+
+	for _, fn := range u.functions {
+		annotated, err := coroForeignNoBlockDirective(fn)
+		if err != nil {
+			return fmt.Errorf("prepare emission universe: coroutine noblock directive on %q: %w", fn.Name(), err)
+		}
+		if !annotated {
+			continue
+		}
+		abi, ok := abiByFunction[fn]
+		if !ok {
+			return fmt.Errorf("prepare emission universe: //llgo:coro noblock on %q requires an exact frozen C declaration", fn.Name())
+		}
+		if signatures := signaturesBySymbol[abi.symbol]; len(signatures) != 1 {
+			return fmt.Errorf("prepare emission universe: //llgo:coro noblock physical symbol %q has conflicting frozen ABI signatures", abi.symbol)
+		}
+		linkIdentity, ok := u.linkIdentities[fn]
+		if !ok || linkIdentity == "" {
+			return fmt.Errorf("prepare emission universe: //llgo:coro noblock on %q has no frozen link identity", fn.Name())
+		}
+		u.foreignNoBlock[fn] = CoroForeignNoBlockCertificate{
+			ID: framedEmissionKey(
+				"llgo-coro-foreign-noblock-v0",
+				linkIdentity,
+				abi.symbol,
+				abi.signature,
+			),
+			PhysicalSymbol: abi.symbol,
+			ABISignature:   abi.signature,
+		}
+	}
+	return nil
+}
+
+func coroForeignNoBlockDirective(fn *ssa.Function) (bool, error) {
+	if fn == nil {
+		return false, nil
+	}
+	decl, _ := fn.Syntax().(*ast.FuncDecl)
+	if decl == nil || decl.Doc == nil {
+		return false, nil
+	}
+	found := false
+	for _, comment := range decl.Doc.List {
+		if comment == nil {
+			continue
+		}
+		line := strings.TrimSpace(comment.Text)
+		switch line {
+		case "//llgo:coro noblock", "// llgo:coro noblock":
+			if found {
+				return false, fmt.Errorf("duplicate //llgo:coro noblock directive")
+			}
+			found = true
+		default:
+			if strings.HasPrefix(line, "//llgo:coro") || strings.HasPrefix(line, "// llgo:coro") {
+				return false, fmt.Errorf("unsupported directive %q", line)
+			}
+		}
+	}
+	return found, nil
 }
 
 func (u *EmissionUniverse) freezeManagedPhysicalNameCollisions() {

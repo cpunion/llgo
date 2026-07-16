@@ -10,10 +10,129 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/goplus/llgo/internal/crosscompile/compile"
 	"github.com/goplus/llgo/internal/lto"
 	"github.com/goplus/llgo/internal/optlevel"
+	"github.com/goplus/llgo/internal/targets"
 	"github.com/goplus/llgo/internal/xtool/llvm"
 )
+
+func TestCompileWithConfigUsesLinkerSpecificNoStdlib(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		linker       string
+		wantNoStdlib bool
+	}{
+		{name: "elf-lld", linker: "/toolchain/bin/ld.lld", wantNoStdlib: true},
+		{name: "wasm-ld", linker: "/toolchain/bin/wasm-ld", wantNoStdlib: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			flags, err := compileWithConfig(compile.CompileConfig{}, "/cache/lib", compile.CompileOptions{Linker: tt.linker})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := slices.Contains(flags, "-nostdlib"); got != tt.wantNoStdlib {
+				t.Fatalf("compileWithConfig linker %q flags = %v, -nostdlib=%v, want %v",
+					tt.linker, flags, got, tt.wantNoStdlib)
+			}
+			if !slices.Contains(flags, "-L/cache/lib") {
+				t.Fatalf("compileWithConfig flags = %v, want library search path", flags)
+			}
+		})
+	}
+}
+
+func TestLinkerHelpSupportsICF(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		help string
+		want bool
+	}{
+		{name: "esp-llvm19-no-icf", help: "--import-memory\n--no-entry\n--export=<value>\n", want: false},
+		{name: "lld-equals-form", help: "--icf={none,safe,all}  Perform identical code folding\n", want: true},
+		{name: "lld-separated-form", help: "--icf <mode>  Perform identical code folding\n", want: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := linkerHelpSupportsICF(tt.help); got != tt.want {
+				t.Fatalf("linkerHelpSupportsICF(%q) = %v, want %v", tt.help, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateWasmBuiltinsTargetCompatibility(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		config  targets.Config
+		wantErr string
+	}{
+		{
+			name: "wasip2-core-module",
+			config: targets.Config{
+				LLVMTarget: "wasm32-unknown-wasi",
+				Linker:     "wasm-ld",
+				Libc:       "wasmbuiltins",
+			},
+		},
+		{
+			name: "unknown-unknown",
+			config: targets.Config{
+				LLVMTarget: "wasm32-unknown-unknown",
+				Linker:     "wasm-ld",
+				Libc:       "wasmbuiltins",
+			},
+		},
+		{
+			name: "native-target",
+			config: targets.Config{
+				LLVMTarget: "aarch64-unknown-linux-gnu",
+				Linker:     "wasm-ld",
+				Libc:       "wasmbuiltins",
+			},
+			wantErr: "requires a wasm32 LLVM target",
+		},
+		{
+			name: "wrong-linker",
+			config: targets.Config{
+				LLVMTarget: "wasm32-unknown-unknown",
+				Linker:     "ld.lld",
+				Libc:       "wasmbuiltins",
+			},
+			wantErr: "requires linker wasm-ld",
+		},
+		{
+			name: "unsupported-threads",
+			config: targets.Config{
+				LLVMTarget: "wasm32-unknown-wasi",
+				Linker:     "wasm-ld",
+				Libc:       "wasmbuiltins",
+				Features:   "+bulk-memory,+atomics",
+			},
+			wantErr: "does not provide a threaded malloc/errno ABI",
+		},
+		{
+			name: "unrelated-libc",
+			config: targets.Config{
+				LLVMTarget: "aarch64-unknown-linux-gnu",
+				Linker:     "ld.lld",
+				Libc:       "picolibc",
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateLibcTargetCompatibility(&tt.config)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validate error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
 
 const (
 	sysrootPrefix     = "--sysroot="
@@ -354,6 +473,25 @@ func TestUseWithTarget(t *testing.T) {
 	// Should use native configuration (only check for macOS since that's where tests run)
 	if runtime.GOOS == "darwin" && len(export.LDFLAGS) == 0 {
 		t.Error("Expected LDFLAGS to be set for native build")
+	}
+}
+
+func TestUseNamedWasmTargetResolvesTargetAndGC(t *testing.T) {
+	export, err := Use(runtime.GOOS, runtime.GOARCH, "wasm", false, false, optlevel.Oz, lto.Off, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if export.GOOS != "js" || export.GOARCH != "wasm" {
+		t.Fatalf("named wasm Go target = %s/%s, want js/wasm", export.GOOS, export.GOARCH)
+	}
+	if !strings.HasPrefix(export.LLVMTarget, "wasm32-") {
+		t.Fatalf("named wasm LLVM target = %q, want wasm32 triple", export.LLVMTarget)
+	}
+	if export.GC != "leaking" {
+		t.Fatalf("named wasm GC = %q, want leaking", export.GC)
+	}
+	if !slices.Contains(export.BuildTags, "tinygo.wasm") {
+		t.Fatalf("named wasm build tags = %v, want tinygo.wasm", export.BuildTags)
 	}
 }
 

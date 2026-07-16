@@ -18,6 +18,7 @@ package cl
 
 import (
 	"fmt"
+	"go/types"
 
 	"github.com/goplus/llgo/internal/coro"
 	llssa "github.com/goplus/llgo/ssa"
@@ -53,16 +54,23 @@ func resolveCoroStaticAwait(plan *coro.SSAPlan, caller coro.FunctionPlan, call s
 	if !ok || targetPlan.ID != callPlan.Targets[0] {
 		return nil, coro.FunctionPlan{}, fmt.Errorf("direct coroutine target %q has no canonical function plan", callPlan.Targets[0])
 	}
-	if caller.Emission != coro.EmitCoroutine {
-		return nil, coro.FunctionPlan{}, fmt.Errorf("caller emission is %s, want coroutine", caller.Emission)
-	}
-	if targetPlan.External != coro.Defined || targetPlan.Emission != coro.EmitCoroutine || targetPlan.FuncRep != coro.DirectCoro || targetPlan.Demand != coro.AsyncDemand {
-		return nil, coro.FunctionPlan{}, fmt.Errorf(
-			"target %q is not an async-only defined direct coroutine (external=%s emission=%s representation=%s demand=%s)",
-			targetPlan.ID, targetPlan.External, targetPlan.Emission, targetPlan.FuncRep, targetPlan.Demand,
-		)
+	if err := validateCoroAwaitTarget(caller, targetPlan); err != nil {
+		return nil, coro.FunctionPlan{}, err
 	}
 	return target, targetPlan, nil
+}
+
+func validateCoroAwaitTarget(caller, target coro.FunctionPlan) error {
+	if caller.Emission != coro.EmitCoroutine {
+		return fmt.Errorf("caller emission is %s, want coroutine", caller.Emission)
+	}
+	if target.External != coro.Defined || target.Emission != coro.EmitCoroutine || target.FuncRep != coro.DirectCoro || target.Demand != coro.AsyncDemand {
+		return fmt.Errorf(
+			"target %q is not an async-only defined direct coroutine (external=%s emission=%s representation=%s demand=%s)",
+			target.ID, target.External, target.Emission, target.FuncRep, target.Demand,
+		)
+	}
+	return nil
 }
 
 // tryCompileCoroStaticAwait lowers a source-style synchronous call into one
@@ -92,6 +100,31 @@ func (p *context) tryCompileCoroStaticAwait(b llssa.Builder, call *ssa.Call) (ll
 	// Preserve Go's left-to-right argument evaluation before publishing any
 	// child or parent scheduler state.
 	args := p.compileValues(b, call.Call.Args, p.funcKind(call.Call.Value))
+	return p.compileCoroTargetAwait(b, callee, args), true
+}
+
+// compileCoroTargetAwait lowers one already-resolved exact managed target.
+// args must have been evaluated in source order before this function is called.
+// It is shared by source SSA calls and compiler-inserted runtime helper calls.
+func (p *context) compileCoroTargetAwait(b llssa.Builder, callee *ssa.Function, args []llssa.Expr) llssa.Expr {
+	if p.currentCoro == nil || p.compilation == nil || p.compilation.CoroPlan == nil || !p.compilation.EnableCoroChildAwait {
+		panic("coroutine child await requires an active physical coroutine body")
+	}
+	if b.Func != p.fn {
+		panic("coroutine child await builder does not belong to the active physical coroutine function")
+	}
+	callerPlan, ok := p.compilation.CoroPlan.FunctionPlan(p.goFn)
+	if !ok {
+		panic("coroutine child await: current function has no compilation plan")
+	}
+	targetPlan, ok := p.compilation.CoroPlan.FunctionPlan(callee)
+	if !ok {
+		panic("coroutine child await: target has no compilation plan")
+	}
+	if err := validateCoroAwaitTarget(callerPlan, targetPlan); err != nil {
+		panic(fmt.Sprintf("coroutine child await: function %q: %v", callerPlan.ID, err))
+	}
+
 	entry := p.mustFunctionSymbol(callee)
 	if p.emissionUniverse == nil {
 		panic("coroutine child await requires a prepared emission universe")
@@ -124,11 +157,31 @@ func (p *context) tryCompileCoroStaticAwait(b llssa.Builder, call *ssa.Call) (ll
 	}
 	publish := p.pkg.NewFunc(p.currentCoro.abi.awaitPrepareHook, coroAwaitPrepareSignature(), llssa.InC)
 	b.Call(publish.Expr, p.currentCoro.task, p.currentCoro.coro.Handle(), child)
-	p.currentCoro.coro.Suspend()
+	p.currentCoro.coro.SuspendCurrentBlock()
 	p.currentCoro.activate(b)
 
-	if abi.resultCount == 0 {
-		return llssa.Nil, true
+	return p.loadCoroAwaitResult(b, resultSlot, sourceSig.Results())
+}
+
+// loadCoroAwaitResult reconstructs the exact source call value after the
+// scheduler has resumed the parent. Multi-result calls are one SSA tuple value,
+// not a result-slot struct: preserving that distinction keeps the ordinary
+// Extract lowering and ValuePlan paths identical to a synchronous Go call.
+func (p *context) loadCoroAwaitResult(b llssa.Builder, resultSlot llssa.Expr, results *types.Tuple) llssa.Expr {
+	count := 0
+	if results != nil {
+		count = results.Len()
 	}
-	return b.Load(b.FieldAddr(resultSlot, 0)), true
+	switch count {
+	case 0:
+		return llssa.Nil
+	case 1:
+		return b.Load(b.FieldAddr(resultSlot, 0))
+	default:
+		fields := make([]llssa.Expr, results.Len())
+		for i := range fields {
+			fields[i] = b.Load(b.FieldAddr(resultSlot, i))
+		}
+		return b.Aggregate(p.prog.Type(results, llssa.InGo), fields...)
+	}
 }

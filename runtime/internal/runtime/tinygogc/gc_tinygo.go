@@ -116,6 +116,15 @@ func lazyInit() {
 	}
 }
 
+// Init performs the bounded phase-0 heap metadata initialization before the
+// first stackless coroutine frame is allocated. It is safe to call again from
+// the ordinary runtime initialization path.
+func Init() {
+	lock(&gcMutex)
+	lazyInit()
+	unlock(&gcMutex)
+}
+
 func gcPanic(s *c.Char) {
 	c.Printf(c.Str("%s"), s)
 	c.Exit(2)

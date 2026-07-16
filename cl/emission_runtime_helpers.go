@@ -1,0 +1,734 @@
+/*
+ * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package cl
+
+import (
+	"fmt"
+	"go/constant"
+	"go/token"
+	"go/types"
+	"sort"
+
+	llssa "github.com/goplus/llgo/ssa"
+	"golang.org/x/tools/go/ssa"
+)
+
+// materializeLoweredRuntimeHelpers freezes the runtime calls that LLGo's
+// instruction lowering inserts without an x/tools SSA CallInstruction. An
+// explicitly complete runtime ABI is required. Report-only/unit-test
+// universes retain legacy symbol resolution and intentionally freeze no such
+// edges; whole-program active builds enable the contract and fail closed.
+func (u *EmissionUniverse) materializeLoweredRuntimeHelpers(ctx *context, ownerFn *ssa.Function, ownerPkg *preparedEmissionPackage, state emissionFunctionState, instr ssa.Instruction) error {
+	if u == nil || !u.completeRuntimeABI {
+		return nil
+	}
+	if u.prog == nil {
+		return fmt.Errorf("prepare emission universe: complete runtime ABI requires an LLVM SSA program")
+	}
+	runtimePkg := u.byPath[llssa.PkgRuntime]
+	if runtimePkg == nil {
+		return fmt.Errorf("prepare emission universe: complete runtime ABI requires package %q", llssa.PkgRuntime)
+	}
+	if u.pathDup[llssa.PkgRuntime] {
+		return fmt.Errorf("prepare emission universe: runtime helper resolution has ambiguous package path %q", llssa.PkgRuntime)
+	}
+	for _, helper := range u.loweredRuntimeHelpers(ctx, instr) {
+		target := runtimePkg.ssa.Func(helper)
+		if target == nil {
+			return fmt.Errorf("prepare emission universe: function %q lowers to missing runtime helper %q", ownerFn.Name(), helper)
+		}
+		canonical, err := u.addResolvedRequired(target, ownerPkg, ownerFn, state)
+		if err != nil {
+			return fmt.Errorf("prepare emission universe: function %q runtime helper %q: %w", ownerFn.Name(), helper, err)
+		}
+		if err := u.recordCoroLoweredCallSite(ownerFn, helper, canonical, u.loweredCallUnwindOnly(ownerFn, instr)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// loweredCallUnwindOnly reports a structural CFG proof: the instruction's
+// block cannot reach any normal Return in owner. It deliberately does not use
+// helper names, runtime package policy, dominance guesses, or panic text.
+//
+// The result is cached per immutable SSA body. recordCoroLoweredCallSite merges
+// all occurrences of one logical helper with AND, so any normal-return-reachable
+// physical use makes the frozen edge ordinary.
+func (u *EmissionUniverse) loweredCallUnwindOnly(owner *ssa.Function, instr ssa.Instruction) bool {
+	if u == nil || owner == nil || instr == nil || instr.Parent() != owner || instr.Block() == nil {
+		return false
+	}
+	if u.normalReturnBlocks == nil {
+		u.normalReturnBlocks = make(map[*ssa.Function]map[*ssa.BasicBlock]none)
+	}
+	reachable, ok := u.normalReturnBlocks[owner]
+	if !ok {
+		reachable = make(map[*ssa.BasicBlock]none)
+		queue := make([]*ssa.BasicBlock, 0, len(owner.Blocks))
+		for _, block := range owner.Blocks {
+			for _, blockInstr := range block.Instrs {
+				if _, normalReturn := blockInstr.(*ssa.Return); normalReturn {
+					reachable[block] = none{}
+					queue = append(queue, block)
+					break
+				}
+			}
+		}
+		for head := 0; head < len(queue); head++ {
+			for _, predecessor := range queue[head].Preds {
+				if _, seen := reachable[predecessor]; seen {
+					continue
+				}
+				reachable[predecessor] = none{}
+				queue = append(queue, predecessor)
+			}
+		}
+		u.normalReturnBlocks[owner] = reachable
+	}
+	_, reachesReturn := reachable[instr.Block()]
+	return !reachesReturn
+}
+
+func (u *EmissionUniverse) materializeRuntimeHelperReference(ownerFn *ssa.Function, ownerPkg *preparedEmissionPackage, state emissionFunctionState, helper string) (*ssa.Function, bool, error) {
+	if u == nil || !u.completeRuntimeABI {
+		return nil, false, nil
+	}
+	if u.prog == nil {
+		return nil, false, fmt.Errorf("complete runtime ABI requires an LLVM SSA program")
+	}
+	if u.byPath[llssa.PkgRuntime] == nil {
+		return nil, false, fmt.Errorf("complete runtime ABI requires package %q", llssa.PkgRuntime)
+	}
+	if u.pathDup[llssa.PkgRuntime] {
+		return nil, false, fmt.Errorf("runtime helper resolution has ambiguous package path %q", llssa.PkgRuntime)
+	}
+	target := u.byPath[llssa.PkgRuntime].ssa.Func(helper)
+	if target == nil {
+		return nil, false, fmt.Errorf("missing runtime helper %q", helper)
+	}
+	canonical, err := u.addResolvedRequired(target, ownerPkg, ownerFn, state)
+	if err != nil {
+		return nil, false, err
+	}
+	return canonical, true, nil
+}
+
+func (u *EmissionUniverse) loweredRuntimeHelpers(ctx *context, instr ssa.Instruction) []string {
+	set := make(map[string]struct{})
+	add := func(names ...string) {
+		for _, name := range names {
+			if name != "" {
+				set[name] = struct{}{}
+			}
+		}
+	}
+
+	switch v := instr.(type) {
+	case *ssa.BinOp:
+		u.binOpRuntimeHelpers(ctx, v, add)
+	case *ssa.UnOp:
+		switch v.Op {
+		case token.ARROW:
+			add("ChanRecv")
+		case token.MUL:
+			if _, checkedReceiver := ctx.methodNilDerefChecks[v]; checkedReceiver {
+				// compileCheckedDeref preserves the checked pointer through the
+				// value-receiver call and therefore uses the pointer-returning ABI.
+				add("AssertNilDerefPtr")
+			} else if shouldAssertDirectNilDeref(v) {
+				add("AssertNilDeref")
+			}
+		}
+	case *ssa.Convert:
+		u.convertRuntimeHelpers(ctx, v, add)
+	case *ssa.Alloc:
+		if v.Heap && !ctx.skipSyntheticMakeSliceAlloc(v) && !isEmissionVargsAlloc(ctx, v) {
+			elem := types.Unalias(v.Type()).(*types.Pointer).Elem()
+			physical := ctx.type_(elem, llssa.InGo)
+			if u.prog.SizeOf(physical) != 0 {
+				add("AllocZ")
+			}
+		}
+	case *ssa.FieldAddr:
+		if ctx.isAddressOfFieldAddr(v) {
+			add("AssertNilDeref")
+		}
+	case *ssa.Index:
+		if emissionIndexNeedsRangeCheck(ctx, v.X, v.Index) {
+			add("CheckIndexRange")
+		}
+	case *ssa.IndexAddr:
+		// compileValue consumes varargs IndexAddr nodes in the enclosing varargs
+		// lowering and emits neither an address nor bounds/nil helpers here.
+		if emissionIsVargsAlloc(ctx, v.X) {
+			break
+		}
+		if emissionIndexNeedsRangeCheck(ctx, v.X, v.Index) {
+			add("CheckIndexRange")
+		}
+		if _, pointer := types.Unalias(ctx.patchType(v.X.Type())).Underlying().(*types.Pointer); pointer && !emissionKnownNonNilArrayBase(v.X) {
+			add("AssertNilDeref")
+		}
+	case *ssa.Slice:
+		if _, synthetic := ctx.syntheticMakeSliceCap(v); synthetic {
+			add("MakeSlice")
+			break
+		}
+		if emissionIsVargsAlloc(ctx, v.X) {
+			break
+		}
+		switch types.Unalias(ctx.patchType(v.X.Type())).Underlying().(type) {
+		case *types.Basic:
+			add("StringSlice2")
+		case *types.Slice:
+			if v.Max == nil {
+				add("NewSlice2")
+			} else {
+				add("NewSlice3Bounds")
+			}
+		case *types.Pointer:
+			// Builder.Slice returns unsafeSlice directly for the complete p[:]
+			// view of a pointer-to-array. No bounds helper is emitted.
+			if v.Low == nil && v.High == nil && v.Max == nil {
+				break
+			}
+			if v.Max == nil {
+				add("NewSlice2")
+			} else {
+				add("NewSlice3Bounds")
+			}
+		}
+	case *ssa.MakeInterface:
+		u.makeInterfaceRuntimeHelpers(ctx, v, add)
+	case *ssa.MakeSlice:
+		add("MakeSlice")
+	case *ssa.MakeMap:
+		add("MakeMap")
+	case *ssa.MakeClosure:
+		if len(v.Bindings) != 0 {
+			add("AllocU")
+		}
+	case *ssa.Lookup:
+		// Builder.Lookup always materializes the map key through mapKeyPtr
+		// before calling MapAccess1/MapAccess2. mapKeyPtr owns an AllocU call;
+		// it is not represented by an x/tools SSA instruction.
+		add("AllocU")
+		if v.CommaOk {
+			add("MapAccess2")
+		} else {
+			add("MapAccess1")
+		}
+	case *ssa.TypeAssert:
+		u.typeAssertRuntimeHelpers(ctx, v, add)
+	case *ssa.Range:
+		switch types.Unalias(ctx.patchType(v.X.Type())).Underlying().(type) {
+		case *types.Basic:
+			add("NewStringIter")
+		case *types.Map:
+			add("NewMapIter")
+		}
+	case *ssa.Next:
+		if v.IsString {
+			add("StringIterNext")
+		} else {
+			add("MapIterNext")
+		}
+	case *ssa.ChangeInterface:
+		if interfaceIsNonEmpty(ctx.patchType(v.X.Type())) {
+			add("IfaceType")
+		}
+		if interfaceIsNonEmpty(ctx.patchType(v.Type())) {
+			add("NewItab")
+		}
+	case *ssa.MakeChan:
+		add("NewChan")
+	case *ssa.Select:
+		if v.Blocking {
+			add("Select")
+		} else {
+			add("TrySelect")
+		}
+	case *ssa.SliceToArrayPointer:
+		add("PanicSliceConvert")
+	case *ssa.MapUpdate:
+		// Builder.MapUpdate uses the same mapKeyPtr lowering as Lookup.
+		add("AllocU", "MapAssign")
+	case *ssa.Panic:
+		add("Panic")
+	case *ssa.Send:
+		add("ChanSend")
+	case *ssa.Call:
+		if v.Call.IsInvoke() {
+			// Builder.Imethod extracts the receiver through this runtime helper
+			// before issuing the physical closure call.
+			add("IfacePtrData")
+		}
+		// Exact intrinsic opcodes are frozen by the LLSSA link table. Pure
+		// frontend/report universes intentionally have no such table and do not
+		// materialize physical runtime-helper edges.
+		if u.prog != nil {
+			opcode, intrinsic := emissionCallIntrinsicInstruction(ctx, &v.Call)
+			switch {
+			case intrinsic && opcode == llgoAllocaCStr:
+				// Builder.AllocaCStr emits StringLen, +1, and LLVM alloca
+				// directly, then inserts this one managed runtime call. The
+				// intrinsic declaration edge is elided, so CStrCopy must remain
+				// an exact owner-scoped lowered edge for effect propagation and
+				// coroutine-aware codegen resolution.
+				add("CStrCopy")
+			case intrinsic && opcode == llgoDeferData:
+				// Builder.DeferData replaces the compiler declaration with an
+				// ordinary runtime.GetThreadDefer call.
+				add("GetThreadDefer")
+			case intrinsic && opcode == llgoString:
+				// Builder.MakeString selects exactly one runtime helper from the
+				// already-lowered varargs shape. Invalid shapes are rejected later
+				// by CoroIntrinsicCallSiteSemantics.
+				if helper, err := emissionStringIntrinsicHelper(ctx, v); err == nil {
+					add(helper)
+				}
+			case intrinsic && opcode == llgoSigsetjmp && u.coroUsesRuntimeSigjmpHelpers():
+				add("Sigsetjmp")
+			case intrinsic && opcode == llgoSiglongjmp && u.coroUsesRuntimeSigjmpHelpers():
+				add("Siglongjmp")
+			}
+		}
+		u.builtinRuntimeHelpers(ctx, &v.Call, add)
+	}
+
+	ret := make([]string, 0, len(set))
+	for name := range set {
+		ret = append(ret, name)
+	}
+	sort.Strings(ret)
+	return ret
+}
+
+// emissionStringIntrinsicHelper mirrors context.string, compileVArg, and
+// Builder.MakeString closely enough to select the one physical runtime call.
+// The trailing x/tools SSA argument is always the materialized variadic slice:
+// nil/empty means StringFromCStr, while one or more values selects StringFrom.
+func emissionStringIntrinsicHelper(ctx *context, call *ssa.Call) (string, error) {
+	if ctx == nil || call == nil || call.Common() == nil || call.Common().IsInvoke() {
+		return "", fmt.Errorf("llgo.string must be an exact direct call")
+	}
+	common := call.Common()
+	if len(common.Args) != 2 {
+		return "", fmt.Errorf("llgo.string call %q requires a C string pointer and one variadic slice operand", call.String())
+	}
+	signature := common.Signature()
+	if signature == nil || signature.Recv() != nil || !signature.Variadic() || signature.Params() == nil || signature.Params().Len() != 2 {
+		return "", fmt.Errorf("llgo.string call %q requires the exact func(*int8, ...any) string shape", call.String())
+	}
+	first, ok := types.Unalias(signature.Params().At(0).Type()).Underlying().(*types.Pointer)
+	if !ok {
+		return "", fmt.Errorf("llgo.string call %q requires the exact func(*int8, ...any) string shape", call.String())
+	}
+	firstElem, ok := types.Unalias(first.Elem()).Underlying().(*types.Basic)
+	if !ok || firstElem.Kind() != types.Int8 {
+		return "", fmt.Errorf("llgo.string call %q requires the exact func(*int8, ...any) string shape", call.String())
+	}
+	variadic, ok := types.Unalias(signature.Params().At(1).Type()).Underlying().(*types.Slice)
+	if !ok || !isAny(variadic.Elem()) {
+		return "", fmt.Errorf("llgo.string call %q requires the exact func(*int8, ...any) string shape", call.String())
+	}
+	results := signature.Results()
+	if results == nil || results.Len() != 1 {
+		return "", fmt.Errorf("llgo.string call %q requires the exact func(*int8, ...any) string shape", call.String())
+	}
+	result, ok := types.Unalias(results.At(0).Type()).Underlying().(*types.Basic)
+	if !ok || result.Kind() != types.String {
+		return "", fmt.Errorf("llgo.string call %q requires the exact func(*int8, ...any) string shape", call.String())
+	}
+	actualPointer, ok := types.Unalias(common.Args[0].Type()).Underlying().(*types.Pointer)
+	if !ok {
+		return "", fmt.Errorf("llgo.string call %q has a non-pointer C string operand", call.String())
+	}
+	actualElem, ok := types.Unalias(actualPointer.Elem()).Underlying().(*types.Basic)
+	if !ok || actualElem.Kind() != types.Int8 {
+		return "", fmt.Errorf("llgo.string call %q has a non-*int8 C string operand", call.String())
+	}
+
+	switch varargs := common.Args[1].(type) {
+	case *ssa.Const:
+		if varargs.Value == nil {
+			return "StringFromCStr", nil
+		}
+	case *ssa.Parameter:
+		if varargs.Parent() != nil && llssa.HasNameValist(varargs.Parent().Signature) {
+			// compileVArg intentionally treats a named va-list parameter as an
+			// empty frontend-owned list.
+			return "StringFromCStr", nil
+		}
+	case *ssa.Slice:
+		if !emissionIsVargsAlloc(ctx, varargs.X) {
+			break
+		}
+		alloc := varargs.X.(*ssa.Alloc)
+		pointer := types.Unalias(alloc.Type()).(*types.Pointer)
+		array := types.Unalias(pointer.Elem()).(*types.Array)
+		if array.Len() == 0 {
+			return "StringFromCStr", nil
+		}
+		return "StringFrom", nil
+	}
+	return "", fmt.Errorf("llgo.string call %q has an unsupported variadic lowering shape %T", call.String(), common.Args[1])
+}
+
+// emissionIndexNeedsRangeCheck mirrors ssa.Builder.checkRange for the source
+// operands available before LLVM construction. Slice and string lengths are
+// dynamic, while arrays and pointers to arrays have a frozen constant bound.
+func emissionIndexNeedsRangeCheck(ctx *context, collection, index ssa.Value) bool {
+	if ctx == nil || collection == nil || index == nil {
+		return true
+	}
+	var bound int64 = -1
+	switch typ := types.Unalias(ctx.patchType(collection.Type())).Underlying().(type) {
+	case *types.Array:
+		bound = typ.Len()
+	case *types.Pointer:
+		if array, ok := types.Unalias(typ.Elem()).Underlying().(*types.Array); ok {
+			bound = array.Len()
+		}
+	}
+	constantIndex, ok := index.(*ssa.Const)
+	if !ok || constantIndex.Value == nil {
+		return true
+	}
+	basic, ok := types.Unalias(index.Type()).Underlying().(*types.Basic)
+	if !ok || basic.Info()&types.IsInteger == 0 {
+		return true
+	}
+	if basic.Info()&types.IsUnsigned == 0 && constant.Sign(constantIndex.Value) < 0 {
+		return true
+	}
+	if bound < 0 {
+		return true
+	}
+	value, exact := constant.Uint64Val(constantIndex.Value)
+	return !exact || value >= uint64(bound)
+}
+
+// emissionKnownNonNilArrayBase deliberately matches the narrow LLVM-side
+// isKnownNonNilArrayBase predicate: direct globals, stack allocas, and the
+// AllocU/AllocZ calls produced for an SSA Alloc. Recursive field/index address
+// reasoning would incorrectly suppress a physical AssertNilDeref call.
+func emissionKnownNonNilArrayBase(value ssa.Value) bool {
+	switch value.(type) {
+	case *ssa.Global, *ssa.Alloc:
+		return true
+	default:
+		return false
+	}
+}
+
+func isEmissionVargsAlloc(ctx *context, alloc *ssa.Alloc) bool {
+	if alloc == nil || alloc.Comment != "varargs" {
+		return false
+	}
+	ptr, ok := types.Unalias(alloc.Type()).(*types.Pointer)
+	if !ok {
+		return false
+	}
+	arr, ok := types.Unalias(ptr.Elem()).(*types.Array)
+	return ok && isAny(arr.Elem()) && isAllocVargs(ctx, alloc)
+}
+
+func (u *EmissionUniverse) binOpRuntimeHelpers(ctx *context, op *ssa.BinOp, add func(...string)) {
+	typ := types.Unalias(ctx.patchType(op.X.Type())).Underlying()
+	switch typ := typ.(type) {
+	case *types.Basic:
+		switch {
+		case typ.Kind() == types.String:
+			switch op.Op {
+			case token.ADD:
+				add("StringCat")
+			case token.EQL, token.NEQ:
+				add("StringEqual")
+			case token.LSS, token.LEQ, token.GTR, token.GEQ:
+				add("StringLess")
+			}
+		case typ.Info()&types.IsComplex != 0 && op.Op == token.QUO:
+			add("Complex128Div")
+		case typ.Info()&types.IsInteger != 0 && (op.Op == token.QUO || op.Op == token.REM):
+			if !constantIntegerKnownNonZero(op.Y) {
+				add("AssertDivideByZero")
+			}
+		}
+		if (op.Op == token.SHL || op.Op == token.SHR) && signedIntegerMayBeNegative(op.Y) {
+			add("AssertNegativeShift")
+		}
+	case *types.Interface:
+		if op.Op == token.EQL || op.Op == token.NEQ {
+			add("EfaceEqual")
+			if !typ.Empty() {
+				add("IfaceType")
+			}
+			if interfaceIsNonEmpty(ctx.patchType(op.Y.Type())) {
+				add("IfaceType")
+			}
+		}
+	case *types.Array:
+		if op.Op == token.EQL || op.Op == token.NEQ {
+			u.compositeCompareRuntimeHelpers(ctx, typ.Elem(), add)
+		}
+	case *types.Struct:
+		if op.Op == token.EQL || op.Op == token.NEQ {
+			for i := 0; i < typ.NumFields(); i++ {
+				if typ.Field(i).Name() != "_" {
+					u.compositeCompareRuntimeHelpers(ctx, typ.Field(i).Type(), add)
+				}
+			}
+		}
+	}
+}
+
+func (u *EmissionUniverse) compositeCompareRuntimeHelpers(ctx *context, typ types.Type, add func(...string)) {
+	typ = types.Unalias(ctx.patchType(typ)).Underlying()
+	switch typ := typ.(type) {
+	case *types.Basic:
+		if typ.Kind() == types.String {
+			add("StringEqual")
+		}
+	case *types.Interface:
+		add("EfaceEqual")
+		if !typ.Empty() {
+			add("IfaceType")
+		}
+	case *types.Array:
+		u.compositeCompareRuntimeHelpers(ctx, typ.Elem(), add)
+	case *types.Struct:
+		for i := 0; i < typ.NumFields(); i++ {
+			if typ.Field(i).Name() != "_" {
+				u.compositeCompareRuntimeHelpers(ctx, typ.Field(i).Type(), add)
+			}
+		}
+	}
+}
+
+func constantIntegerKnownNonZero(value ssa.Value) bool {
+	c, ok := value.(*ssa.Const)
+	return ok && c.Value != nil && constant.Sign(c.Value) != 0
+}
+
+func signedIntegerMayBeNegative(value ssa.Value) bool {
+	basic, ok := types.Unalias(value.Type()).Underlying().(*types.Basic)
+	if !ok || basic.Info()&types.IsInteger == 0 || basic.Info()&types.IsUnsigned != 0 {
+		return false
+	}
+	if c, ok := value.(*ssa.Const); ok && c.Value != nil {
+		return constant.Sign(c.Value) < 0
+	}
+	return true
+}
+
+func (u *EmissionUniverse) convertRuntimeHelpers(ctx *context, convert *ssa.Convert, add func(...string)) {
+	dst := types.Unalias(ctx.patchType(convert.Type())).Underlying()
+	src := types.Unalias(ctx.patchType(convert.X.Type())).Underlying()
+	if basic, ok := dst.(*types.Basic); ok && basic.Kind() == types.String {
+		switch src := src.(type) {
+		case *types.Slice:
+			if elem, ok := types.Unalias(src.Elem()).Underlying().(*types.Basic); ok {
+				switch elem.Kind() {
+				case types.Byte:
+					add("StringFromBytes")
+				case types.Rune:
+					add("StringFromRunes")
+				}
+			}
+		case *types.Basic:
+			if src.Info()&types.IsInteger != 0 {
+				if src.Info()&types.IsUnsigned != 0 {
+					add("StringFromUint64")
+				} else {
+					add("StringFromInt64")
+				}
+			}
+		}
+	}
+	if slice, ok := dst.(*types.Slice); ok {
+		if basic, ok := src.(*types.Basic); ok && basic.Kind() == types.String {
+			if elem, ok := types.Unalias(slice.Elem()).Underlying().(*types.Basic); ok {
+				switch elem.Kind() {
+				case types.Byte:
+					add("StringToBytes")
+				case types.Rune:
+					add("StringToRunes")
+				}
+			}
+		}
+	}
+}
+
+func (u *EmissionUniverse) makeInterfaceRuntimeHelpers(ctx *context, makeInterface *ssa.MakeInterface, add func(...string)) {
+	// compileValue deliberately consumes these nodes without calling
+	// Builder.MakeInterface: untyped nil becomes a constant, varargs stores
+	// are lowered by their consumer, and funcAddr/funcPCABI0 inspect the SSA
+	// operand directly.
+	if !u.makeInterfaceEmitsABIType(makeInterface, ctx) {
+		return
+	}
+	if interfaceIsNonEmpty(ctx.patchType(makeInterface.Type())) {
+		add("NewItab")
+	}
+	physical := ctx.type_(makeInterface.X.Type(), llssa.InGo)
+	if !emissionDirectIfaceType(physical.RawType()) {
+		add("AllocU")
+	}
+	if unop, ok := makeInterface.X.(*ssa.UnOp); ok && unop.Op == token.MUL && (ctx.isLargeNonPointerValue(physical) || ctx.isZeroSizedValue(physical)) {
+		add("AssertNilDeref")
+		// MakeInterfaceFromPtr uses the indirect representation for both large
+		// and zero-sized values and therefore always copies through AllocU.
+		add("AllocU", "Typedmemmove")
+	}
+}
+
+func emissionDirectIfaceType(typ types.Type) bool {
+	switch typ := types.Unalias(typ).(type) {
+	case *types.Named:
+		return emissionDirectIfaceType(typ.Underlying())
+	case *types.Pointer, *types.Chan, *types.Map, *types.Signature:
+		return true
+	case *types.Basic:
+		return typ.Kind() == types.UnsafePointer
+	case *types.Array:
+		return typ.Len() == 1 && emissionDirectIfaceType(typ.Elem())
+	case *types.Struct:
+		return typ.NumFields() == 1 && emissionDirectIfaceType(typ.Field(0).Type())
+	}
+	return false
+}
+
+func (u *EmissionUniverse) typeAssertRuntimeHelpers(ctx *context, assertion *ssa.TypeAssert, add func(...string)) {
+	asserted := ctx.patchType(assertion.AssertedType)
+	if !types.Identical(ctx.patchType(assertion.X.Type()), asserted) {
+		if _, ok := types.Unalias(asserted).Underlying().(*types.Interface); ok {
+			add("Implements")
+			if interfaceIsNonEmpty(asserted) {
+				add("NewItab")
+			}
+		} else if _, ok := types.Unalias(asserted).Underlying().(*types.Signature); ok {
+			add("MatchesClosure")
+		}
+	}
+	if interfaceIsNonEmpty(ctx.patchType(assertion.X.Type())) {
+		add("IfaceType")
+	}
+	if !assertion.CommaOk {
+		add("PanicTypeAssert")
+	}
+}
+
+func interfaceIsNonEmpty(typ types.Type) bool {
+	iface, ok := types.Unalias(typ).Underlying().(*types.Interface)
+	if !ok {
+		return false
+	}
+	iface.Complete()
+	return !iface.Empty()
+}
+
+func (u *EmissionUniverse) builtinRuntimeHelpers(ctx *context, call *ssa.CallCommon, add func(...string)) {
+	builtin, ok := call.Value.(*ssa.Builtin)
+	if !ok {
+		return
+	}
+	args := call.Args
+	switch builtin.Name() {
+	case "ssa:wrapnilchk":
+		add("PanicWrapNilPointer")
+	case "len":
+		if len(args) == 1 {
+			switch types.Unalias(ctx.patchType(args[0].Type())).Underlying().(type) {
+			case *types.Chan:
+				add("ChanLen")
+			case *types.Map:
+				add("MapLen")
+			}
+		}
+	case "cap":
+		if len(args) == 1 {
+			if _, ok := types.Unalias(ctx.patchType(args[0].Type())).Underlying().(*types.Chan); ok {
+				add("ChanCap")
+			}
+		}
+	case "append":
+		add("SliceAppend")
+	case "copy":
+		add("SliceCopy")
+	case "close":
+		add("ChanClose")
+	case "recover":
+		add("Recover")
+	case "panic":
+		add("Panic")
+	case "delete":
+		// The delete builtin also lowers its key through Builder.mapKeyPtr.
+		add("AllocU", "MapDelete")
+	case "clear":
+		if len(args) == 1 {
+			switch types.Unalias(ctx.patchType(args[0].Type())).Underlying().(type) {
+			case *types.Map:
+				add("MapClear")
+			case *types.Slice:
+				add("SliceClear")
+			}
+		}
+	case "print", "println":
+		for _, arg := range args {
+			add(runtimePrintHelper(ctx.patchType(arg.Type())))
+		}
+		if builtin.Name() == "println" {
+			add("PrintByte")
+		}
+	case "String", "Slice":
+		add("AssertRuntimeError")
+	}
+}
+
+func runtimePrintHelper(typ types.Type) string {
+	switch typ := types.Unalias(typ).Underlying().(type) {
+	case *types.Basic:
+		switch {
+		case typ.Kind() == types.Bool:
+			return "PrintBool"
+		case typ.Info()&types.IsInteger != 0 && typ.Info()&types.IsUnsigned == 0:
+			return "PrintInt"
+		case typ.Info()&types.IsInteger != 0:
+			return "PrintUint"
+		case typ.Info()&types.IsFloat != 0:
+			return "PrintFloat"
+		case typ.Kind() == types.String:
+			return "PrintString"
+		case typ.Info()&types.IsComplex != 0:
+			return "PrintComplex"
+		case typ.Kind() == types.UnsafePointer:
+			return "PrintPointer"
+		}
+	case *types.Pointer, *types.Signature, *types.Chan, *types.Map:
+		return "PrintPointer"
+	case *types.Slice:
+		return "PrintSlice"
+	case *types.Interface:
+		if typ.Empty() {
+			return "PrintEface"
+		}
+		return "PrintIface"
+	}
+	return ""
+}

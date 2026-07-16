@@ -37,6 +37,7 @@ import (
 	"sync/atomic"
 
 	"golang.org/x/tools/go/ssa"
+	"golang.org/x/tools/go/ssa/ssautil"
 
 	"github.com/goplus/llgo/cl"
 	"github.com/goplus/llgo/internal/buildenv"
@@ -133,14 +134,20 @@ type CoroPlanInput struct {
 	Program          *ssa.Program
 	EmissionUniverse *coro.SSAEmissionUniverse
 
-	resolveFunction        func(*ssa.Function) (*ssa.Function, bool)
-	augmentFunctionIDs     func(coro.FunctionIDConfig) coro.FunctionIDConfig
-	functionBackground     func(*ssa.Function) (llssa.Background, bool, error)
-	intrinsicCallSemantics func(ssa.CallInstruction) (cl.CoroIntrinsicCallSemantics, bool, error)
-	requiredRoots          coro.Roots
-	requiredPlain          map[*ssa.Function]struct{}
-	requiredDirectPlain    []requiredCoroDirectPlainCallArgument
-	recordAnalysis         func(*coro.SSAPlan)
+	resolveFunction                func(*ssa.Function) (*ssa.Function, bool)
+	augmentFunctionIDs             func(coro.FunctionIDConfig) coro.FunctionIDConfig
+	functionBackground             func(*ssa.Function) (llssa.Background, bool, error)
+	foreignNoBlock                 func(*ssa.Function) (cl.CoroForeignNoBlockCertificate, bool, error)
+	intrinsicCallSemantics         func(ssa.CallInstruction) (cl.CoroIntrinsicCallSemantics, bool, error)
+	rawFunctionAddressCallArgument func(ssa.CallInstruction, int) (bool, error)
+	demandReferences               func(*ssa.Function) ([]*ssa.Function, error)
+	loweredCalls                   func(*ssa.Function) ([]coro.SSALoweredCall, error)
+	requiredRoots                  coro.Roots
+	requiredPlain                  map[*ssa.Function]struct{}
+	requiredDirectPlain            []requiredCoroDirectPlainCallArgument
+	requiredClosedDynamic          map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate
+	enableClosedStaticSpawn        bool
+	recordAnalysis                 func(*coro.SSAPlan)
 }
 
 type coroCallArgumentKey struct {
@@ -187,7 +194,7 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 	// SSA body. It does not by itself prove that the foreign operation is
 	// nonblocking. Preserve an explicit known/unknown-foreign effect summary;
 	// otherwise use the conservative unknown-foreign boundary.
-	if in.functionBackground != nil || config.ClassifyFunction != nil {
+	if in.functionBackground != nil || in.foreignNoBlock != nil || config.ClassifyFunction != nil {
 		classify := config.ClassifyFunction
 		config.ClassifyFunction = func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
 			var policy coro.SSAFunctionPolicy
@@ -206,6 +213,39 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 				}
 				frontendC = classified && background == llssa.InC
 			}
+			var certificate cl.CoroForeignNoBlockCertificate
+			certified := false
+			if in.foreignNoBlock != nil {
+				certificate, certified, err = in.foreignNoBlock(fn)
+				if err != nil {
+					return coro.SSAFunctionPolicy{}, fmt.Errorf("classify frozen frontend foreign noblock certificate for %q: %w", fn.Name(), err)
+				}
+			}
+			if requested := policy.ForeignNoBlockCertificate; requested != "" {
+				if !certified {
+					return coro.SSAFunctionPolicy{}, fmt.Errorf("builder cannot certify foreign function %q without exact frozen frontend noblock metadata", fn.Name())
+				}
+				if requested != certificate.ID {
+					return coro.SSAFunctionPolicy{}, fmt.Errorf("builder foreign noblock certificate for %q conflicts with the frozen frontend proof", fn.Name())
+				}
+			}
+			if certified {
+				if !frontendC {
+					return coro.SSAFunctionPolicy{}, fmt.Errorf("frozen foreign noblock certificate for %q does not name a frontend C declaration", fn.Name())
+				}
+				if policy.Effect != coro.NoSuspend || policy.Exec != 0 || policy.NeedsDispatch ||
+					policy.OverrideExternal && policy.External != coro.ExternalKnown {
+					return coro.SSAFunctionPolicy{}, fmt.Errorf("frontend C declaration %q conflicts with its frozen foreign noblock certificate", fn.Name())
+				}
+				policy.IgnoreBody = true
+				policy.External = coro.ExternalKnown
+				policy.OverrideExternal = true
+				// A noblock proof is not an async-signal-safety proof. Preserve
+				// IRQUnsafe in the plan/digest while removing only the opaque
+				// BlockForeign/WaitForeign boundary.
+				policy.Exec = coro.IRQUnsafe
+				policy.ForeignNoBlockCertificate = certificate.ID
+			}
 			if policy.IgnoreBody && !frontendC {
 				return coro.SSAFunctionPolicy{}, fmt.Errorf("builder cannot ignore the SSA body of non-C function %q", fn.Name())
 			}
@@ -219,6 +259,127 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 			if !policy.OverrideExternal {
 				policy.External = coro.ExternalUnknownForeign
 				policy.OverrideExternal = true
+			}
+			return policy, nil
+		}
+	}
+	// A structured coroutine intrinsic has no managed callee edge: cl replaces
+	// its declaration call with a suspend in the owner's exact frame. Seed that
+	// physical effect from the same frozen call-site semantics used to elide the
+	// declaration, so synchronous source callers are transparently coroutine
+	// primary bodies and the plan digest records both the owner effect and site.
+	if in.intrinsicCallSemantics != nil {
+		classify := config.ClassifyFunction
+		config.ClassifyFunction = func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+			var policy coro.SSAFunctionPolicy
+			var err error
+			if classify != nil {
+				policy, err = classify(fn)
+				if err != nil {
+					return coro.SSAFunctionPolicy{}, err
+				}
+			}
+			for _, block := range fn.Blocks {
+				for _, instruction := range block.Instrs {
+					call, ok := instruction.(*ssa.Call)
+					if !ok {
+						continue
+					}
+					rawCallee := call.Common().StaticCallee()
+					if rawCallee == nil {
+						continue
+					}
+					if _, frozen := in.ResolveFunction(rawCallee); !frozen {
+						// Frontend-elided noinit declarations (notably unsafe.init)
+						// are intentionally outside the frozen emission universe and
+						// carry no structured intrinsic effect.
+						continue
+					}
+					semantics, intrinsic, err := in.intrinsicCallSemantics(call)
+					if err != nil {
+						return coro.SSAFunctionPolicy{}, fmt.Errorf("classify frozen intrinsic effect in %q: %w", fn.Name(), err)
+					}
+					if intrinsic && semantics.SuspendsCurrentFrame() {
+						policy.Effect = policy.Effect.Join(coro.MayPark)
+					}
+				}
+			}
+			return policy, nil
+		}
+	}
+	// A source `go f(args)` is a scheduler boundary even though CallSpawn
+	// deliberately does not taint its owner in the generic effect graph. The
+	// no-TLS lowering must retain the owner's exact G explicitly. The spawned
+	// target is also a coroutine primary even when its source body is currently
+	// bounded: otherwise a future CPU-heavy/looping version could run forever in
+	// a synchronous plain adapter with no preemption cut. Static sync callers are
+	// then tainted through the ordinary effect graph and await this same unique
+	// target body.
+	if in.enableClosedStaticSpawn {
+		seeded := make(map[*ssa.Function]struct{})
+		var functions []*ssa.Function
+		if in.EmissionUniverse != nil {
+			functions = in.EmissionUniverse.Functions()
+		} else {
+			for fn := range ssautil.AllFunctions(in.Program) {
+				functions = append(functions, fn)
+			}
+			slices.SortFunc(functions, func(left, right *ssa.Function) int {
+				if left == nil {
+					if right == nil {
+						return 0
+					}
+					return -1
+				}
+				if right == nil {
+					return 1
+				}
+				return strings.Compare(left.String(), right.String())
+			})
+		}
+		for _, fn := range functions {
+			if fn == nil {
+				continue
+			}
+			if in.functionBackground != nil {
+				background, classified, err := in.functionBackground(fn)
+				if err != nil {
+					return nil, fmt.Errorf("classify closed static spawn owner %q frontend ABI: %w", fn.Name(), err)
+				}
+				if classified && background != llssa.InGo {
+					continue
+				}
+			}
+			for _, block := range fn.Blocks {
+				for _, instruction := range block.Instrs {
+					spawn, ok := instruction.(*ssa.Go)
+					if !ok {
+						continue
+					}
+					target, err := in.closedStaticSpawnTarget(fn, spawn)
+					if err != nil {
+						return nil, fmt.Errorf("closed static spawn in %q: %w", fn.Name(), err)
+					}
+					seeded[fn] = struct{}{}
+					seeded[target] = struct{}{}
+				}
+			}
+		}
+		classify := config.ClassifyFunction
+		config.ClassifyFunction = func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+			var policy coro.SSAFunctionPolicy
+			var err error
+			if classify != nil {
+				policy, err = classify(fn)
+				if err != nil {
+					return coro.SSAFunctionPolicy{}, err
+				}
+			}
+			if _, required := seeded[fn]; required {
+				if policy.IgnoreBody {
+					return coro.SSAFunctionPolicy{}, fmt.Errorf("closed static spawn function %q is not a Go-emitted body", fn.Name())
+				}
+				policy.Effect = policy.Effect.Join(coro.YieldOnly)
 			}
 			return policy, nil
 		}
@@ -240,7 +401,13 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 			if policy.Effect != coro.NoSuspend {
 				return coro.SSAFunctionPolicy{}, fmt.Errorf("compiler runtime ABI function %q conflicts with required no-suspend policy: %s", fn.Name(), policy.Effect)
 			}
-			const supportedExec = coro.MayUnwind | coro.NeedsCleanupFrame
+			// IRQUnsafe is an entry-context restriction, not a requirement for a
+			// second physical body. Compiler/runtime ABI helpers execute on the
+			// ordinary scheduler/executor stack, never as an IRQ root, so retain
+			// the bit in the frozen plan while keeping the exact required-plain
+			// implementation. ThreadAffine and opaque/blocking execution remain
+			// rejected until their scheduler protocols exist.
+			const supportedExec = coro.MayUnwind | coro.NeedsCleanupFrame | coro.IRQUnsafe
 			if unsupported := policy.Exec &^ supportedExec; unsupported != 0 {
 				return coro.SSAFunctionPolicy{}, fmt.Errorf("compiler runtime ABI function %q conflicts with required plain execution policy: %s", fn.Name(), unsupported)
 			}
@@ -280,7 +447,7 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 			if err != nil {
 				return false, fmt.Errorf("classify frozen intrinsic call in %q: %w", caller.Name(), err)
 			}
-			frontendElided = intrinsic && semantics == cl.CoroIntrinsicCallInlineNoSuspend
+			frontendElided = intrinsic && semantics.ElidesManagedCall()
 		}
 		if classifyElided != nil {
 			requested, err := classifyElided(caller, call)
@@ -292,6 +459,29 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 			}
 		}
 		return frontendElided, nil
+	}
+	if in.rawFunctionAddressCallArgument != nil || config.ClassifyRawFunctionAddressCallArgument != nil {
+		classifyRawAddress := config.ClassifyRawFunctionAddressCallArgument
+		config.ClassifyRawFunctionAddressCallArgument = func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+			compilerRequired := false
+			var err error
+			if in.rawFunctionAddressCallArgument != nil {
+				compilerRequired, err = in.rawFunctionAddressCallArgument(call, argument)
+				if err != nil {
+					return false, fmt.Errorf("classify frozen raw function-address argument %d in %q: %w", argument, caller.Name(), err)
+				}
+			}
+			if classifyRawAddress != nil {
+				requested, err := classifyRawAddress(caller, call, argument)
+				if err != nil {
+					return false, err
+				}
+				if requested && !compilerRequired {
+					return false, fmt.Errorf("builder cannot authorize raw function-address lowering for non-compiler call argument %d in %q", argument, caller.Name())
+				}
+			}
+			return compilerRequired, nil
+		}
 	}
 	if len(in.requiredDirectPlain) != 0 || config.ClassifyDirectPlainCallArgument != nil {
 		required := make(map[coroCallArgumentKey]struct{}, len(in.requiredDirectPlain))
@@ -314,6 +504,79 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 			return compilerRequired, nil
 		}
 	}
+	if len(in.requiredClosedDynamic) != 0 || config.ClassifyClosedDynamicCall != nil {
+		classifyClosed := config.ClassifyClosedDynamicCall
+		config.ClassifyClosedDynamicCall = func(caller *ssa.Function, call ssa.CallInstruction) (coro.SSAClosedDynamicCallCertificate, bool, error) {
+			compilerCertificate, compilerRequired := in.requiredClosedDynamic[call]
+			if classifyClosed != nil {
+				requested, classified, err := classifyClosed(caller, call)
+				if err != nil {
+					return coro.SSAClosedDynamicCallCertificate{}, false, err
+				}
+				if !classified && (requested.MayBeNil || len(requested.Targets) != 0) {
+					return coro.SSAClosedDynamicCallCertificate{}, false, fmt.Errorf("builder returned closed dynamic call facts without classifying the call in %q", caller.Name())
+				}
+				if classified && !compilerRequired {
+					return coro.SSAClosedDynamicCallCertificate{}, false, fmt.Errorf("builder cannot close ordinary dynamic call in %q without a frozen compiler field-flow proof", caller.Name())
+				}
+				if classified && !sameCoroClosedDynamicCallCertificate(requested, compilerCertificate) {
+					return coro.SSAClosedDynamicCallCertificate{}, false, fmt.Errorf("builder closed dynamic call certificate in %q conflicts with the frozen compiler proof", caller.Name())
+				}
+			}
+			if !compilerRequired {
+				return coro.SSAClosedDynamicCallCertificate{}, false, nil
+			}
+			return cloneCoroClosedDynamicCallCertificate(compilerCertificate), true, nil
+		}
+	}
+	if in.demandReferences != nil || config.ClassifyDemandReferences != nil {
+		classifyDemandReferences := config.ClassifyDemandReferences
+		config.ClassifyDemandReferences = func(owner *ssa.Function) ([]*ssa.Function, error) {
+			var compilerTargets []*ssa.Function
+			var err error
+			if in.demandReferences != nil {
+				compilerTargets, err = in.demandReferences(owner)
+				if err != nil {
+					return nil, fmt.Errorf("classify frozen frontend demand references for %q: %w", owner.Name(), err)
+				}
+			}
+			compilerTargets = append([]*ssa.Function(nil), compilerTargets...)
+			if classifyDemandReferences != nil {
+				requested, err := classifyDemandReferences(owner)
+				if err != nil {
+					return nil, err
+				}
+				if !sameExactCoroFunctionReferences(requested, compilerTargets) {
+					return nil, fmt.Errorf("builder demand references in %q conflict with the frozen frontend method-table references", owner.Name())
+				}
+			}
+			return compilerTargets, nil
+		}
+	}
+	if in.loweredCalls != nil || config.ClassifyLoweredCalls != nil {
+		classifyLoweredCalls := config.ClassifyLoweredCalls
+		config.ClassifyLoweredCalls = func(owner *ssa.Function) ([]coro.SSALoweredCall, error) {
+			var compilerCalls []coro.SSALoweredCall
+			var err error
+			if in.loweredCalls != nil {
+				compilerCalls, err = in.loweredCalls(owner)
+				if err != nil {
+					return nil, fmt.Errorf("classify frozen frontend lowered calls for %q: %w", owner.Name(), err)
+				}
+			}
+			compilerCalls = append([]coro.SSALoweredCall(nil), compilerCalls...)
+			if classifyLoweredCalls != nil {
+				requested, err := classifyLoweredCalls(owner)
+				if err != nil {
+					return nil, err
+				}
+				if !sameExactCoroLoweredCalls(requested, compilerCalls) {
+					return nil, fmt.Errorf("builder lowered calls in %q conflict with the frozen frontend helper calls", owner.Name())
+				}
+			}
+			return compilerCalls, nil
+		}
+	}
 	if in.augmentFunctionIDs != nil {
 		config.FunctionIDs = in.augmentFunctionIDs(config.FunctionIDs)
 	}
@@ -326,10 +589,187 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 	if err == nil {
 		err = validateRequiredCoroDirectPlainCallArguments(plan, in.requiredDirectPlain)
 	}
+	if err == nil {
+		err = validateRequiredCoroClosedDynamicCalls(plan, in.requiredClosedDynamic)
+	}
+	if err == nil && in.enableClosedStaticSpawn {
+		err = validateClosedStaticSpawnPlan(plan)
+	}
 	if err == nil && in.recordAnalysis != nil {
 		in.recordAnalysis(plan)
 	}
 	return plan, err
+}
+
+func (in CoroPlanInput) closedStaticSpawnTarget(owner *ssa.Function, spawn *ssa.Go) (*ssa.Function, error) {
+	if owner == nil || spawn == nil || spawn.Common() == nil || spawn.Parent() != owner {
+		return nil, fmt.Errorf("requires an exact owner and call site")
+	}
+	common := spawn.Common()
+	raw, direct := common.Value.(*ssa.Function)
+	if !direct || raw == nil || common.IsInvoke() || common.Method != nil || common.StaticCallee() != raw {
+		return nil, fmt.Errorf("requires a direct static function operand; closures, methods, interfaces, and function values are unsupported")
+	}
+	target, ok := in.ResolveFunction(raw)
+	if !ok || target == nil {
+		return nil, fmt.Errorf("target %q is outside the frozen emission universe", raw.Name())
+	}
+	if target.Parent() != nil || len(target.FreeVars) != 0 || target.Synthetic != "" || target.Origin() != nil || len(target.TypeArgs()) != 0 {
+		return nil, fmt.Errorf("target %q is not an exact non-capturing top-level function", target.Name())
+	}
+	if params := target.TypeParams(); params != nil && params.Len() != 0 {
+		return nil, fmt.Errorf("target %q is a generic declaration", target.Name())
+	}
+	sig := target.Signature
+	if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Results().Len() != 0 ||
+		typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 {
+		return nil, fmt.Errorf("target %q must have a non-method, non-variadic, zero-result signature", target.Name())
+	}
+	if len(target.Blocks) == 0 {
+		return nil, fmt.Errorf("target %q has no defined Go body", target.Name())
+	}
+	if in.functionBackground != nil {
+		background, classified, err := in.functionBackground(target)
+		if err != nil {
+			return nil, fmt.Errorf("classify target %q frontend ABI: %w", target.Name(), err)
+		}
+		if !classified || background != llssa.InGo {
+			return nil, fmt.Errorf("target %q is not one frozen Go-emitted body", target.Name())
+		}
+	}
+	return target, nil
+}
+
+func validateClosedStaticSpawnPlan(plan *coro.SSAPlan) error {
+	if plan == nil {
+		return fmt.Errorf("closed static spawn validation requires a coroutine plan")
+	}
+	for _, owner := range plan.Functions() {
+		if owner.Function == nil || owner.Plan.Emission == coro.EmitNone || plan.IgnoresBody(owner.Function) {
+			continue
+		}
+		for _, block := range owner.Function.Blocks {
+			for _, instruction := range block.Instrs {
+				spawn, ok := instruction.(*ssa.Go)
+				if !ok {
+					continue
+				}
+				if _, _, err := plan.ResolveClosedStaticSpawn(spawn); err != nil {
+					return fmt.Errorf("closed static spawn in %q: %w", owner.Plan.ID, err)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func coroPlanContainsSpawn(plan *coro.SSAPlan) bool {
+	if plan == nil {
+		return false
+	}
+	for _, owner := range plan.Functions() {
+		if owner.Function == nil || owner.Plan.Emission == coro.EmitNone || plan.IgnoresBody(owner.Function) {
+			continue
+		}
+		for _, block := range owner.Function.Blocks {
+			for _, instruction := range block.Instrs {
+				if _, spawn := instruction.(*ssa.Go); spawn {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func validateCoroClosedStaticSpawnRunGate(conf *Config, plan *coro.SSAPlan) error {
+	if conf == nil || !conf.EnableCoroClosedStaticSpawn {
+		return nil
+	}
+	if !conf.EnableCoroProgramBootstrapRun {
+		return fmt.Errorf("validate coroutine closed static spawn: runnable program bootstrap v2 is required")
+	}
+	if plan == nil {
+		return fmt.Errorf("validate coroutine closed static spawn: runnable capability requires a coroutine plan")
+	}
+	// Main-return cancellation can safely retire ready/yielded children and a
+	// structured await tree. Platform, host, foreign, channel/select and opaque
+	// waits need separate producer quiescence/cancellation protocols, so keep
+	// those targets outside this first production slice.
+	allowed := coro.YieldOnly | coro.AwaitStructured
+	for _, owner := range plan.Functions() {
+		if owner.Function == nil || owner.Plan.Emission == coro.EmitNone || plan.IgnoresBody(owner.Function) {
+			continue
+		}
+		for _, block := range owner.Function.Blocks {
+			for _, instruction := range block.Instrs {
+				spawn, ok := instruction.(*ssa.Go)
+				if !ok {
+					continue
+				}
+				_, target, err := plan.ResolveClosedStaticSpawn(spawn)
+				if err != nil {
+					return fmt.Errorf("validate coroutine closed static spawn in %q: %w", owner.Plan.ID, err)
+				}
+				effect := target.Effect.Normalize()
+				if !effect.Contains(coro.YieldOnly) || effect&^allowed != 0 {
+					return fmt.Errorf(
+						"validate coroutine closed static spawn in %q: target %q effect %s is outside the production main-return cancellation subset %s",
+						owner.Plan.ID, target.ID, effect, allowed,
+					)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func sameExactCoroFunctionReferences(left, right []*ssa.Function) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	counts := make(map[*ssa.Function]int, len(left))
+	for _, fn := range left {
+		if fn == nil || counts[fn] != 0 {
+			return false
+		}
+		counts[fn] = 1
+	}
+	for _, fn := range right {
+		if fn == nil || counts[fn] != 1 {
+			return false
+		}
+		counts[fn] = 0
+	}
+	return true
+}
+
+func sameExactCoroLoweredCalls(left, right []coro.SSALoweredCall) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	type exactLoweredCall struct {
+		target     *ssa.Function
+		unwindOnly bool
+	}
+	byName := make(map[string]exactLoweredCall, len(left))
+	for _, call := range left {
+		if call.LogicalName == "" || call.Target == nil {
+			return false
+		}
+		if _, duplicate := byName[call.LogicalName]; duplicate {
+			return false
+		}
+		byName[call.LogicalName] = exactLoweredCall{target: call.Target, unwindOnly: call.UnwindOnly}
+	}
+	for _, call := range right {
+		frozen, ok := byName[call.LogicalName]
+		if call.LogicalName == "" || call.Target == nil || !ok || frozen.target != call.Target || frozen.unwindOnly != call.UnwindOnly {
+			return false
+		}
+		delete(byName, call.LogicalName)
+	}
+	return len(byName) == 0
 }
 
 // frontendElidesNoInitCall mirrors cl.context.funcKind: the frontend emits no
@@ -450,6 +890,11 @@ type Config struct {
 	// leaving it false preserves report-only behavior. Package archives are
 	// reused only when their complete plan/ABI/target fingerprint matches.
 	EnableCoroEntryResolution bool
+	// EnableCoroExplicitStatusPanicABI selects the reserved target-wide
+	// explicit-status panic identity. Hidden outcomes, cleanup edges, and the
+	// runtime protocol are not implemented by this slice; active builds select
+	// the identity for validation and then fail closed before code generation.
+	EnableCoroExplicitStatusPanicABI bool
 	// EnableCoroPhysicalABI enables the experimental LLVM coroutine physical ABI.
 	// It requires EnableCoroEntryResolution and remains leaf-only unless a more
 	// specific lowering capability is enabled.
@@ -459,6 +904,19 @@ type Config struct {
 	// async root receives a typed factory descriptor. It requires the physical
 	// ABI and does not enable a runtime scheduler, spawn, park, or preemption.
 	EnableCoroChildAwait bool
+	// EnableCoroPlainDispatch enables the v1 descriptor/context ABI for the
+	// narrowly supported ordinary call of a no-capture, non-suspending plain Go
+	// function value. It requires entry resolution and does not authorize
+	// coroutine, interface, reflect, method, go/defer, aggregate, or captured
+	// closure dispatch.
+	EnableCoroPlainDispatch bool
+	// EnableCoroClosedStaticSpawn enables only an exact source `go f(args)`
+	// whose operand is one closed, top-level static function. This first
+	// capability accepts only zero-result targets; that is a lowering gate, not
+	// a Go language restriction. It requires the runnable program-bootstrap v2
+	// scheduler (including the v1 physical/child-await ABI) and never gives the
+	// runtime a user callback.
+	EnableCoroClosedStaticSpawn bool
 	// EnableCoroProgramBootstrapABI emits the target-neutral v1 startup table
 	// for an executable after the exact init/main entries have been validated
 	// against the frozen whole-program plan. It does not replace the legacy
@@ -469,8 +927,10 @@ type Config struct {
 	// EnableCoroProgramBootstrapRun activates the production v1 bootstrap
 	// driver. It requires EnableCoroProgramBootstrapABI, emits a compiler-owned
 	// LLVM coroutine factory, and replaces only the legacy init/main calls in
-	// the platform entry. Keeping this separate preserves the descriptor-only
-	// ABI gate as an independently testable and reversible boundary.
+	// the platform entry. This is also the first scheduler ABI that accepts
+	// NeedsPreempt and emits conditional poll/yield handoffs. Keeping it separate
+	// preserves the descriptor-only ABI gate as an independently testable and
+	// reversible boundary.
 	EnableCoroProgramBootstrapRun bool
 	CoroPlanBuilder               CoroPlanBuilder
 	CoroPlanObserver              CoroPlanObserver
@@ -594,6 +1054,22 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	tags := "llgo,math_big_pure_go,purego"
 	if conf.AbiMode == cabi.ModeAllFunc {
 		tags += ",llgo_abi_2"
+	}
+	if conf.EnableCoroProgramBootstrapRun {
+		// The stackless runtime does not yet have a RawCritical bridge that can
+		// turn a synchronous hardware fault into a G-owned panic completion.
+		// Exclude the legacy pthread-TLS/SJLJ SIGSEGV recovery hook instead of
+		// admitting a signal callback that can allocate, block, or retain the
+		// native signal stack. Language-level nil/bounds/divide checks remain
+		// explicit compiler operations.
+		tags += ",llgo_coro"
+	}
+	gcTags, err := targetGCBuildTags(export.GC)
+	if err != nil {
+		return nil, err
+	}
+	if len(gcTags) != 0 {
+		tags += "," + strings.Join(gcTags, ",")
 	}
 	if conf.Tags != "" {
 		tags += "," + conf.Tags
@@ -889,9 +1365,28 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	return allPkgs, nil
 }
 
+func targetGCBuildTags(gc string) ([]string, error) {
+	switch gc {
+	case "", "precise", "conservative":
+		return nil, nil
+	case "leaking", "none":
+		return []string{"nogc"}, nil
+	default:
+		return nil, fmt.Errorf("unsupported target GC capability %q", gc)
+	}
+}
+
 func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	if ctx == nil || ctx.buildConf == nil {
 		return nil
+	}
+	if ctx.buildConf.EnableCoroClosedStaticSpawn {
+		if !ctx.buildConf.EnableCoroProgramBootstrapRun {
+			return fmt.Errorf("enable coroutine closed static spawn: runnable program bootstrap v2 is required")
+		}
+		if !ctx.buildConf.EnableCoroChildAwait {
+			return fmt.Errorf("enable coroutine closed static spawn: coroutine child await is required")
+		}
 	}
 	if err := validateCoroProgramBootstrapConfig(ctx.buildConf); err != nil {
 		return err
@@ -902,6 +1397,12 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	}
 	if ctx.buildConf.EnableCoroChildAwait && !ctx.buildConf.EnableCoroPhysicalABI {
 		return fmt.Errorf("enable coroutine child await: coroutine physical ABI is required")
+	}
+	if ctx.buildConf.EnableCoroPlainDispatch && !ctx.buildConf.EnableCoroEntryResolution {
+		return fmt.Errorf("enable coroutine plain dispatch: coroutine entry resolution is required")
+	}
+	if ctx.buildConf.EnableCoroExplicitStatusPanicABI && !ctx.buildConf.EnableCoroEntryResolution {
+		return fmt.Errorf("enable coroutine explicit-status panic ABI: coroutine entry resolution is required")
 	}
 	if ctx.buildConf.EnableCoroChildAwait && ctx.buildConf.BuildMode == BuildModeCArchive {
 		return fmt.Errorf("enable coroutine child await: c-archive requires flattened package members and an explicit host bootstrap extraction contract")
@@ -923,15 +1424,35 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	}
 	analyzedPlans := make(map[*coro.SSAPlan]struct{})
 	var analyzedPlansMu sync.Mutex
-	requiredRoots, requiredPlain, requiredDirectPlain, err := requiredCoroProgramRuntimePlan(ctx)
+	var requiredRoots coro.Roots
+	var requiredPlain map[*ssa.Function]struct{}
+	var requiredDirectPlain []requiredCoroDirectPlainCallArgument
+	var requiredClosedDynamic map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate
+	if ctx.coroEmission != nil && ctx.coroEmission.CompleteRuntimeABI() {
+		// Compiler-owned runtime edges belong only to a frozen whole-program
+		// universe containing the exact LLGo runtime package. Isolated frontend
+		// fixtures and report universes intentionally remain incomplete; making
+		// them resolve production runtime roots would guess bodies outside their
+		// declared emission universe. Real Do builds pass all packages above and
+		// therefore retain the fail-closed complete-runtime path.
+		var err error
+		requiredRoots, requiredPlain, requiredDirectPlain, requiredClosedDynamic, err = requiredCoroProgramRuntimePlan(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	managedEntryRoots, err := requiredCoroProgramManagedEntryRoots(ctx)
 	if err != nil {
 		return err
 	}
+	requiredRoots = append(requiredRoots, managedEntryRoots...)
 	input := CoroPlanInput{
-		Program:             ctx.progSSA,
-		requiredRoots:       requiredRoots,
-		requiredPlain:       requiredPlain,
-		requiredDirectPlain: requiredDirectPlain,
+		Program:                 ctx.progSSA,
+		requiredRoots:           requiredRoots,
+		requiredPlain:           requiredPlain,
+		requiredDirectPlain:     requiredDirectPlain,
+		requiredClosedDynamic:   requiredClosedDynamic,
+		enableClosedStaticSpawn: ctx.buildConf.EnableCoroClosedStaticSpawn,
 		recordAnalysis: func(plan *coro.SSAPlan) {
 			if plan != nil {
 				analyzedPlansMu.Lock()
@@ -944,7 +1465,11 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		input.EmissionUniverse = ctx.coroSSAEmission
 		input.resolveFunction = ctx.coroEmission.Resolve
 		input.functionBackground = ctx.coroEmission.FunctionBackground
+		input.foreignNoBlock = ctx.coroEmission.CoroForeignNoBlockCertificate
 		input.intrinsicCallSemantics = ctx.coroEmission.CoroIntrinsicCallSiteSemantics
+		input.rawFunctionAddressCallArgument = ctx.coroEmission.CoroRawFunctionAddressCallArgument
+		input.demandReferences = ctx.coroEmission.CoroDemandReferences
+		input.loweredCalls = ctx.coroEmission.CoroLoweredCalls
 		input.augmentFunctionIDs = func(config coro.FunctionIDConfig) coro.FunctionIDConfig {
 			if ctx.buildConf.EnableCoroEntryResolution {
 				if config.CoroABI == "" {
@@ -976,6 +1501,9 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 			return fmt.Errorf("validate coroutine plan coverage: %w", err)
 		}
 	}
+	if err := validateCoroClosedStaticSpawnRunGate(ctx.buildConf, plan); err != nil {
+		return err
+	}
 	var metadata coro.PlanDigestMetadata
 	var digest string
 	if ctx.buildConf.EnableCoroEntryResolution {
@@ -992,18 +1520,28 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	ctx.coroPlanDigest = digest
 	ctx.coroPlanMetadata = metadata
 	ctx.clCompilation = &cl.Compilation{
-		CoroPlan:                      plan,
-		CoroPlanObserver:              ctx.buildConf.CoroPlanObserver,
-		EnableCoroEntryResolution:     ctx.buildConf.EnableCoroEntryResolution,
-		EnableCoroPhysicalABI:         ctx.buildConf.EnableCoroPhysicalABI,
-		EnableCoroChildAwait:          ctx.buildConf.EnableCoroChildAwait,
-		EnableCoroProgramBootstrapRun: ctx.buildConf.EnableCoroProgramBootstrapRun,
-		CoroPlanDigest:                digest,
-		CoroABI:                       metadata.CoroABI,
-		SchedulerABI:                  metadata.SchedulerABI,
-		PanicABI:                      metadata.PanicABI,
-		FuncRepABI:                    metadata.FuncRepABI,
-		EmissionUniverse:              ctx.coroEmission,
+		CoroPlan:                         plan,
+		CoroPlanObserver:                 ctx.buildConf.CoroPlanObserver,
+		EnableCoroEntryResolution:        ctx.buildConf.EnableCoroEntryResolution,
+		EnableCoroExplicitStatusPanicABI: ctx.buildConf.EnableCoroExplicitStatusPanicABI,
+		EnableCoroPhysicalABI:            ctx.buildConf.EnableCoroPhysicalABI,
+		EnableCoroChildAwait:             ctx.buildConf.EnableCoroChildAwait,
+		EnableCoroPlainDispatch:          ctx.buildConf.EnableCoroPlainDispatch,
+		EnableCoroClosedStaticSpawn:      ctx.buildConf.EnableCoroClosedStaticSpawn,
+		EnableCoroProgramBootstrapRun:    ctx.buildConf.EnableCoroProgramBootstrapRun,
+		CoroPlanDigest:                   digest,
+		CoroABI:                          metadata.CoroABI,
+		SchedulerABI:                     metadata.SchedulerABI,
+		PanicABI:                         metadata.PanicABI,
+		FuncRepABI:                       metadata.FuncRepABI,
+		EmissionUniverse:                 ctx.coroEmission,
+	}
+	if ctx.buildConf.EnableCoroExplicitStatusPanicABI {
+		ctx.coroPlan = nil
+		ctx.coroPlanDigest = ""
+		ctx.coroPlanMetadata = coro.PlanDigestMetadata{}
+		ctx.clCompilation = nil
+		return fmt.Errorf("enable coroutine explicit-status panic ABI %q: identity-only capability; lowering and runtime semantics are not implemented", metadata.PanicABI)
 	}
 	if ctx.buildConf.EnableCoroProgramBootstrapABI {
 		bootstraps, err := prepareCoroProgramBootstrapsV1(ctx)
@@ -1017,7 +1555,211 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		}
 		ctx.coroProgramBootstraps = bootstraps
 	}
+	if ctx.buildConf.EnableCoroEntryResolution {
+		if err := validateCoroUnwindOnlyLoweredCalls(plan, metadata.PanicABI); err != nil {
+			ctx.coroPlan = nil
+			ctx.coroPlanDigest = ""
+			ctx.coroPlanMetadata = coro.PlanDigestMetadata{}
+			ctx.clCompilation = nil
+			ctx.coroProgramBootstraps = nil
+			return fmt.Errorf("validate coroutine unwind-only lowered calls before codegen: %w", err)
+		}
+	}
 	return nil
+}
+
+// validateCoroUnwindOnlyLoweredCalls preserves the legacy panic boundary's
+// fail-closed physical contract. Unwind-only edges do not taint an owner's
+// normal-return plan, but PanicLegacyABIV0 still emits a direct synchronous
+// helper call. Until a panic ABI defines coroutine child unwind propagation,
+// every physically emitted unwind-only target must therefore have one bounded
+// plain primary body.
+func validateCoroUnwindOnlyLoweredCalls(plan *coro.SSAPlan, panicABI string) error {
+	if plan == nil {
+		return fmt.Errorf("unwind-only lowered-call validation requires a coroutine plan")
+	}
+	for _, owner := range plan.Functions() {
+		if owner.Function == nil || owner.Plan.Emission == coro.EmitNone {
+			continue
+		}
+		for _, lowered := range plan.LoweredCalls(owner.Function) {
+			if !lowered.UnwindOnly {
+				continue
+			}
+			if panicABI != coro.PanicLegacyABIV0 {
+				return fmt.Errorf("lowered call %q in %q is unwind-only, but panic ABI %q has no certified unwind-helper call contract", lowered.LogicalName, owner.Plan.ID, panicABI)
+			}
+			certificate := coroLegacyPanicPlainCertificate{
+				owner:       owner.Function,
+				logicalName: lowered.LogicalName,
+				target:      lowered.Target,
+			}
+			if err := certificate.validate(plan); err != nil {
+				return fmt.Errorf("unwind-only lowered call %q in %q cannot use its exact %s plain certificate: %w",
+					lowered.LogicalName, owner.Plan.ID, panicABI, err)
+			}
+		}
+	}
+	return nil
+}
+
+// coroLegacyPanicPlainCertificate is deliberately an object-identity
+// certificate, not a symbol-name exception. owner, logicalName, and target are
+// copied from the immutable lowered-call table in SSAPlan. That table is frozen
+// by the frontend which physically emits the helper call.
+//
+// CallUnwind prevents the panic episode from tainting the normal-return effect
+// of owner, but it cannot make a coroutine target synchronously callable. The
+// legacy ABI therefore also requires the exact target's physically reachable
+// managed closure to contain only bounded DirectPlain calls. In particular, a
+// terminal panic printer must not turn error.Error, Stringer.String, or another
+// user callback into a trusted plain function merely because it is reachable
+// only while panicking.
+type coroLegacyPanicPlainCertificate struct {
+	owner       *ssa.Function
+	logicalName string
+	target      *ssa.Function
+}
+
+func (certificate coroLegacyPanicPlainCertificate) validate(plan *coro.SSAPlan) error {
+	if plan == nil || certificate.owner == nil || certificate.target == nil || certificate.logicalName == "" {
+		return fmt.Errorf("legacy panic plain certificate is incomplete")
+	}
+	matched := false
+	for _, lowered := range plan.LoweredCalls(certificate.owner) {
+		if lowered.LogicalName == certificate.logicalName && lowered.Target == certificate.target && lowered.UnwindOnly {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return fmt.Errorf("legacy panic plain certificate is not bound to an exact frozen unwind-only target")
+	}
+	targetPlan, planned := plan.FunctionPlan(certificate.target)
+	if !planned {
+		return fmt.Errorf("legacy panic plain certificate targets an unplanned function")
+	}
+	if targetPlan.External != coro.Defined {
+		return fmt.Errorf("legacy panic plain certificate target %q is not a defined Go body (external=%s)", targetPlan.ID, targetPlan.External)
+	}
+
+	validator := coroLegacyPanicPlainClosureValidator{
+		plan:      plan,
+		validated: make(map[*ssa.Function]bool),
+		active:    make(map[*ssa.Function]bool),
+	}
+	return validator.validateFunction(certificate.target, nil)
+}
+
+type coroLegacyPanicPlainClosureValidator struct {
+	plan      *coro.SSAPlan
+	validated map[*ssa.Function]bool
+	active    map[*ssa.Function]bool
+}
+
+func (validator *coroLegacyPanicPlainClosureValidator) validateFunction(function *ssa.Function, path []string) error {
+	functionPlan, ok := validator.plan.FunctionPlan(function)
+	if !ok {
+		return fmt.Errorf("legacy panic target closure contains an unplanned function")
+	}
+	path = append(path, fmt.Sprintf("%s[%s]", function.String(), functionPlan.ID))
+	if validator.validated[function] {
+		return nil
+	}
+	if validator.active[function] {
+		// Recursion is diagnosed below by the fixed-point plan (YieldOnly /
+		// NeedsPreempt). Avoid hiding that deterministic plan error behind a DFS
+		// cycle diagnostic.
+		return nil
+	}
+	validator.active[function] = true
+	defer delete(validator.active, function)
+
+	// Inspect the exact physical managed-call closure before reporting the
+	// aggregate Effect on this function. This turns an opaque-suspend symptom on
+	// runtime.Panic into the actionable dynamic edge which caused it. Foreign
+	// leaves remain governed by their ordinary plan; this code never grants or
+	// manufactures a foreign-noblock certificate.
+	if !validator.plan.IgnoresBody(function) {
+		for _, block := range function.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(ssa.CallInstruction)
+				if !ok || call.Common() == nil {
+					continue
+				}
+				if _, builtin := call.Common().Value.(*ssa.Builtin); builtin {
+					continue
+				}
+				if validator.plan.ElidesCall(call) {
+					continue
+				}
+				callPlan, planned := validator.plan.CallPlan(call)
+				if !planned {
+					return coroLegacyPanicPlainPathError(path, "physical call %q has no coroutine call plan", call.String())
+				}
+				if callPlan.Kind == coro.CallSpawn {
+					return coroLegacyPanicPlainPathError(path, "spawns asynchronous work at %q", call.String())
+				}
+				if callPlan.Open || callPlan.Rep == coro.Dispatch || call.Common().StaticCallee() == nil || len(callPlan.Targets) != 1 {
+					kind := "dynamic call"
+					if call.Common().IsInvoke() {
+						kind = "dynamic invoke"
+						if method := call.Common().Method; method != nil {
+							kind += " " + method.Name()
+						}
+					}
+					return coroLegacyPanicPlainPathError(path, "%s is not a bounded DirectPlain edge at %q", kind, call.String())
+				}
+				target, found := validator.plan.Function(callPlan.Targets[0])
+				if !found || target == nil {
+					return coroLegacyPanicPlainPathError(path, "physical call %q has an unresolved planned target", call.String())
+				}
+				if err := validator.validateFunction(target, path); err != nil {
+					return err
+				}
+				if callPlan.Rep != coro.DirectPlain {
+					return coroLegacyPanicPlainPathError(path, "physical call %q requires %s", call.String(), callPlan.Rep)
+				}
+			}
+		}
+		for _, lowered := range validator.plan.LoweredCalls(function) {
+			if lowered.Target == nil {
+				return coroLegacyPanicPlainPathError(path, "lowered call %q has no exact target", lowered.LogicalName)
+			}
+			if err := validator.validateFunction(lowered.Target, path); err != nil {
+				return err
+			}
+		}
+	}
+
+	if functionPlan.External != coro.Defined {
+		// A bodyless foreign declaration is a structural leaf, not a managed
+		// callback to be pulled into this certificate. Its CallForeign edge still
+		// contributes WaitForeign to the containing Go function in the ordinary
+		// fixed point, so accepting it for DFS purposes cannot make that Go body
+		// pass the bounded-plain check below. This merely lets the diagnostic reach
+		// a more specific managed/dynamic blocker later in the same panic path.
+		if functionPlan.Demand != coro.NoDemand && functionPlan.FuncRep == coro.DirectPlain &&
+			functionPlan.Primary == coro.PrimaryExternal && functionPlan.Emission == coro.EmitExternal {
+			validator.validated[function] = true
+			return nil
+		}
+		return coroLegacyPanicPlainPathError(path,
+			"foreign leaf has no direct physical entry (external=%s demand=%s effect=%s exec=%s representation=%s primary=%s emission=%s)",
+			functionPlan.External, functionPlan.Demand, functionPlan.Effect, functionPlan.Exec, functionPlan.FuncRep, functionPlan.Primary, functionPlan.Emission)
+	}
+	if functionPlan.Demand == coro.NoDemand || functionPlan.Effect != coro.NoSuspend ||
+		functionPlan.Emission != coro.EmitPlain || functionPlan.FuncRep != coro.DirectPlain || functionPlan.Primary != coro.PrimaryPlain {
+		return coroLegacyPanicPlainPathError(path,
+			"target is not one bounded plain Go body (external=%s demand=%s effect=%s exec=%s representation=%s primary=%s emission=%s)",
+			functionPlan.External, functionPlan.Demand, functionPlan.Effect, functionPlan.Exec, functionPlan.FuncRep, functionPlan.Primary, functionPlan.Emission)
+	}
+	validator.validated[function] = true
+	return nil
+}
+
+func coroLegacyPanicPlainPathError(path []string, format string, args ...any) error {
+	return fmt.Errorf("legacy panic plain closure %s: %s", strings.Join(path, " -> "), fmt.Sprintf(format, args...))
 }
 
 func activeCoroABIVersion(conf *Config) string {
@@ -1030,14 +1772,89 @@ func activeCoroABIVersion(conf *Config) string {
 	return coro.EntryResolutionABIV0
 }
 
+// requiredCoroProgramManagedEntryRoots injects the exact main-package
+// initializer and main body as managed async-capable roots for the runnable
+// startup program. Duplicate builder roots are harmless: AnalyzeSSA joins
+// demand by canonical function. Descriptor-only builds keep their historical
+// explicit-root contract and legacy native entry.
+func requiredCoroProgramManagedEntryRoots(ctx *context) (coro.Roots, error) {
+	if ctx == nil || ctx.buildConf == nil || !ctx.buildConf.EnableCoroProgramBootstrapRun {
+		return nil, nil
+	}
+	if ctx.coroEmission == nil {
+		return nil, fmt.Errorf("coroutine managed program roots require a frozen emission universe")
+	}
+	publicRuntimeInit, hasPublicRuntimeInit, err := findCoroProgramFunction(ctx, "runtime", "init", "public runtime init")
+	if err != nil {
+		return nil, err
+	}
+	var roots coro.Roots
+	if hasPublicRuntimeInit {
+		roots = append(roots, coro.Root{Function: publicRuntimeInit, Demand: coro.AsyncDemand})
+	}
+	seenPackages := make(map[string]struct{})
+	for _, pkg := range ctx.initial {
+		if pkg == nil || !needLink(pkg, ctx.mode) {
+			continue
+		}
+		if _, duplicate := seenPackages[pkg.ID]; duplicate {
+			return nil, fmt.Errorf("coroutine managed program roots contain duplicate linked package ID %q", pkg.ID)
+		}
+		seenPackages[pkg.ID] = struct{}{}
+		aPkg := ctx.pkgs[pkg]
+		if aPkg == nil {
+			aPkg = ctx.pkgByID[pkg.ID]
+		}
+		if aPkg == nil || aPkg.SSA == nil || aPkg.SSA.Pkg == nil || llssa.PathOf(aPkg.SSA.Pkg) != pkg.PkgPath {
+			return nil, fmt.Errorf("coroutine managed program roots: linked main package %q has no exact SSA package", pkg.ID)
+		}
+		for _, name := range []string{"init", "main"} {
+			original := aPkg.SSA.Func(name)
+			if original == nil {
+				return nil, fmt.Errorf("coroutine managed program root %s: exact SSA function is missing", name)
+			}
+			fn, ok := ctx.coroEmission.Resolve(original)
+			if !ok || fn == nil || fn != original {
+				return nil, fmt.Errorf("coroutine managed program root %s: exact function is absent from the frozen emission universe", name)
+			}
+			goBody, err := frozenGoEmittedBody(ctx.coroEmission, fn)
+			if err != nil {
+				return nil, fmt.Errorf("classify coroutine managed program root %s: %w", name, err)
+			}
+			if !goBody {
+				return nil, fmt.Errorf("coroutine managed program root %s has no emitted Go body", name)
+			}
+			roots = append(roots, coro.Root{Function: fn, Demand: coro.AsyncDemand})
+		}
+	}
+	return roots, nil
+}
+
 func activeCoroSchedulerABIVersion(conf *Config) string {
+	if conf != nil && conf.EnableCoroClosedStaticSpawn {
+		return coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0
+	}
 	if conf != nil && conf.EnableCoroProgramBootstrapRun {
-		return coro.SchedulerProgramBootstrapABIV1
+		return coro.SchedulerProgramBootstrapABIV2
 	}
 	if conf != nil && conf.EnableCoroChildAwait {
 		return coro.SchedulerChildAwaitABIV0
 	}
 	return coro.SchedulerNoneABIV0
+}
+
+func activeCoroPanicABIVersion(conf *Config) string {
+	if conf != nil && conf.EnableCoroExplicitStatusPanicABI {
+		return coro.PanicExplicitStatusABIV0
+	}
+	return coro.PanicLegacyABIV0
+}
+
+func activeCoroFuncRepABIVersion(conf *Config) string {
+	if conf != nil && conf.EnableCoroPlainDispatch {
+		return coro.FuncRepABIV1
+	}
+	return coro.FuncRepABIV0
 }
 
 // requiredCoroProgramRuntimePlan returns the Go bodies referenced only by
@@ -1047,22 +1864,75 @@ func activeCoroSchedulerABIVersion(conf *Config) string {
 // coroutine, and exact frozen C leaves receive a temporary compatible-known
 // summary. Their fallback SSA stubs remain ignored; ordinary C declarations
 // outside this compiler-owned closure stay unknown foreign.
-func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function]struct{}, []requiredCoroDirectPlainCallArgument, error) {
-	if ctx == nil || ctx.buildConf == nil || !ctx.buildConf.EnableCoroProgramBootstrapRun {
-		return nil, nil, nil, nil
+func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function]struct{}, []requiredCoroDirectPlainCallArgument, map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate, error) {
+	if ctx == nil || ctx.buildConf == nil {
+		return nil, nil, nil, nil, nil
+	}
+	if ctx.buildConf.EnableCoroClosedStaticSpawn && !ctx.buildConf.EnableCoroProgramBootstrapRun {
+		return nil, nil, nil, nil, fmt.Errorf("coroutine closed static spawn runtime roots require runnable program bootstrap v2")
+	}
+	if !ctx.buildConf.EnableCoroChildAwait {
+		return nil, nil, nil, nil, nil
 	}
 	if ctx.coroSSAEmission == nil || ctx.coroEmission == nil {
-		return nil, nil, nil, fmt.Errorf("coroutine program bootstrap runtime roots require a frozen emission universe")
+		return nil, nil, nil, nil, fmt.Errorf("coroutine program bootstrap runtime roots require a frozen emission universe")
 	}
-	names := []string{
-		"init",
-		coroProgramBeginSymbolV1,
-		coroProgramRunSymbolV1,
-		"__llgo_coro_frame_alloc_v1",
-		"__llgo_coro_frame_publish_v1",
-		"__llgo_coro_await_prepare_v1",
-		"__llgo_coro_complete_prepare_v1",
-		"__llgo_coro_frame_free_v1",
+	closedDynamic, err := proveCoroTLSDestructorClosedDynamicCalls(ctx)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	// runtimeLinkRequirements makes the real LLGo runtime package init an
+	// entry-module call for every active child-await executable. That edge is
+	// compiler-generated LLVM IR and therefore invisible to the source SSA call
+	// graph; keep it as an explicit synchronous root even when the runnable
+	// program-bootstrap gate is disabled. The scheduler driver/hooks below are
+	// referenced only by the runnable bootstrap path and must not leak into the
+	// descriptor-only plan.
+	names := []string{"init"}
+	demandByName := map[string]coro.Demand{"init": coro.SyncDemand}
+	plainRootByName := map[string]bool{"init": true}
+	if ctx.buildConf.EnableCoroProgramBootstrapRun {
+		// The managed startup program owns runtime.init. Its synchronous Go source
+		// style is preserved by AsyncDemand propagation: a non-suspending body
+		// remains one DirectPlain body, while an async-tainted body has one
+		// DirectCoro primary and is awaited by the compiler bootstrap.
+		demandByName["init"] = coro.AsyncDemand
+		plainRootByName["init"] = false
+		names = append(names,
+			coroFrameAllocatorBootstrapSymbolV1,
+			coroProgramBeginSymbolV1,
+			coroProgramRunSymbolV1,
+		)
+	}
+	if ctx.buildConf.EnableCoroProgramBootstrapRun {
+		names = append(names,
+			"__llgo_coro_frame_alloc_v1",
+			"__llgo_coro_frame_publish_v1",
+			"__llgo_coro_await_prepare_v1",
+			"__llgo_coro_preempt_poll_v1",
+			"__llgo_coro_yield_prepare_v1",
+			"__llgo_coro_park_prepare_v1",
+			"__llgo_coro_complete_prepare_v1",
+			"__llgo_coro_frame_free_v1",
+		)
+	}
+	if ctx.buildConf.EnableCoroExplicitStatusPanicABI {
+		// Physical coroutine bodies reference this hook from compiler-generated
+		// IR, so the source SSA graph has no edge that could retain it. Keep the
+		// exact runtime body as a synchronous direct-plain root only while the
+		// target-wide ExplicitStatus panic identity is selected.
+		names = append(names, "__llgo_coro_panic_prepare_v1")
+	}
+	if ctx.buildConf.EnableCoroClosedStaticSpawn {
+		names = append(names,
+			"__llgo_coro_spawn_begin_v1",
+			"__llgo_coro_spawn_commit_v1",
+			coroProgramMainReturnSymbolV1,
+		)
+	}
+	for _, name := range names[1:] {
+		demandByName[name] = coro.SyncDemand
+		plainRootByName[name] = true
 	}
 	byName := make(map[string]*ssa.Function, len(names))
 	wanted := make(map[string]struct{}, len(names))
@@ -1077,7 +1947,7 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			continue
 		}
 		if previous := byName[fn.Name()]; previous != nil && previous != fn {
-			return nil, nil, nil, fmt.Errorf("coroutine program bootstrap runtime ABI %q has multiple canonical SSA bodies", fn.Name())
+			return nil, nil, nil, nil, fmt.Errorf("coroutine program bootstrap runtime ABI %q has multiple canonical SSA bodies", fn.Name())
 		}
 		byName[fn.Name()] = fn
 	}
@@ -1085,23 +1955,25 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 	for _, name := range names {
 		fn := byName[name]
 		if fn == nil {
-			return nil, nil, nil, fmt.Errorf("coroutine program bootstrap runtime ABI %q has no emitted Go body in %q", name, llssa.PkgRuntime)
+			return nil, nil, nil, nil, fmt.Errorf("coroutine program bootstrap runtime ABI %q has no emitted Go body in %q", name, llssa.PkgRuntime)
 		}
 		goBody, err := frozenGoEmittedBody(ctx.coroEmission, fn)
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("classify coroutine program bootstrap runtime ABI %q: %w", name, err)
+			return nil, nil, nil, nil, fmt.Errorf("classify coroutine program bootstrap runtime ABI %q: %w", name, err)
 		}
 		if !goBody {
-			return nil, nil, nil, fmt.Errorf("coroutine program bootstrap runtime ABI %q has no emitted Go body in %q", name, llssa.PkgRuntime)
+			return nil, nil, nil, nil, fmt.Errorf("coroutine program bootstrap runtime ABI %q has no emitted Go body in %q", name, llssa.PkgRuntime)
 		}
-		roots = append(roots, coro.Root{Function: fn, Demand: coro.SyncDemand})
+		roots = append(roots, coro.Root{Function: fn, Demand: demandByName[name]})
 	}
 
 	plain := make(map[*ssa.Function]struct{})
 	var directPlain []requiredCoroDirectPlainCallArgument
 	queue := make([]*ssa.Function, 0, len(roots))
 	for _, root := range roots {
-		queue = append(queue, root.Function)
+		if plainRootByName[root.Function.Name()] {
+			queue = append(queue, root.Function)
+		}
 	}
 	for head := 0; head < len(queue); head++ {
 		fn := queue[head]
@@ -1111,13 +1983,25 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 		plain[fn] = struct{}{}
 		goBody, err := frozenGoEmittedBody(ctx.coroEmission, fn)
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("classify compiler runtime ABI function %q: %w", fn.Name(), err)
+			return nil, nil, nil, nil, fmt.Errorf("classify compiler runtime ABI function %q: %w", fn.Name(), err)
 		}
 		if !goBody {
 			// Exact C declarations remain required plain leaves, but their Go
 			// fallback SSA body is not part of the emitted program. Other kinds
 			// are retained here and rejected by requiredPlain classification.
 			continue
+		}
+		loweredCalls, err := ctx.coroEmission.CoroLoweredCalls(fn)
+		if err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("classify compiler runtime ABI lowered calls in %q: %w", fn.Name(), err)
+		}
+		for _, lowered := range loweredCalls {
+			if lowered.Target == nil {
+				return nil, nil, nil, nil, fmt.Errorf("compiler runtime ABI function %q has a nil lowered helper target for %q", fn.Name(), lowered.LogicalName)
+			}
+			if _, seen := plain[lowered.Target]; !seen {
+				queue = append(queue, lowered.Target)
+			}
 		}
 		for _, block := range fn.Blocks {
 			for _, instruction := range block.Instrs {
@@ -1127,6 +2011,13 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 				}
 				raw := call.Common().StaticCallee()
 				if raw == nil {
+					if _, certified := closedDynamic[call]; certified {
+						// The certified descriptor call is part of this exact plain
+						// callback body, but its target remains outside the trusted
+						// scheduler-stack island. Fixed-point analysis must prove the
+						// target NoSuspend/!NeedsPreempt without suppressing either.
+						continue
+					}
 					continue
 				}
 				callee, ok := ctx.coroEmission.Resolve(raw)
@@ -1135,12 +2026,12 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 				}
 				semantics, intrinsic, err := ctx.coroEmission.CoroIntrinsicCallSiteSemantics(call)
 				if err != nil {
-					return nil, nil, nil, fmt.Errorf("classify compiler runtime ABI intrinsic %q in %q: %w", callee.Name(), fn.Name(), err)
+					return nil, nil, nil, nil, fmt.Errorf("classify compiler runtime ABI intrinsic %q in %q: %w", callee.Name(), fn.Name(), err)
 				}
-				if intrinsic && semantics == cl.CoroIntrinsicCallInlineNoSuspend {
-					// cl emits the proven no-suspend operation inline in fn; it
-					// has no callable ABI body and is not a member of the trusted
-					// runtime plain-function island.
+				if intrinsic && semantics.ElidesManagedCall() {
+					// cl emits no call to the intrinsic declaration itself. Any
+					// managed calls inserted by the operation were queued above
+					// from its exact frozen lowered-call set.
 					continue
 				}
 				if _, seen := plain[callee]; !seen {
@@ -1158,9 +2049,9 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 					if !ok {
 						continue
 					}
-					closure, ok, err := provenCoroDirectPlainStaticClosure(ctx, target)
+					closure, ok, err := provenCoroDirectPlainStaticClosure(ctx, target, closedDynamic)
 					if err != nil {
-						return nil, nil, nil, fmt.Errorf("prove direct-plain callback target %q in %q: %w", target.Name(), fn.Name(), err)
+						return nil, nil, nil, nil, fmt.Errorf("prove direct-plain callback target %q in %q: %w", target.Name(), fn.Name(), err)
 					}
 					if !ok {
 						continue
@@ -1177,7 +2068,7 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			}
 		}
 	}
-	return roots, plain, directPlain, nil
+	return roots, plain, directPlain, closedDynamic, nil
 }
 
 func frozenGoEmittedBody(universe *cl.EmissionUniverse, fn *ssa.Function) (bool, error) {
@@ -1252,12 +2143,17 @@ func exactCoroStaticFunctionValue(ctx *context, value ssa.Value) (*ssa.Function,
 }
 
 // provenCoroDirectPlainStaticClosure accepts only a closed Go body whose calls
-// are direct, statically resolved emitted bodies (or builtins). Dynamic calls,
-// go/defer, bodyless leaves, captured closures, and unresolved aliases remain
-// on the ordinary Dispatch path. Effect and representation are independently
-// checked after fixed-point analysis; this prefilter only establishes that it
-// is sound to seed the candidate's bounded scheduler-stack island.
-func provenCoroDirectPlainStaticClosure(ctx *context, target *ssa.Function) ([]*ssa.Function, bool, error) {
+// are direct, statically resolved emitted bodies (or builtins). An exact frozen
+// C declaration may terminate the closure only for the compiler-owned TLS
+// callback whose field-flow proof supplied one of closedDynamic's calls. The
+// declaration then enters requiredPlain and is classified through the same
+// frozen IgnoreBody/ExternalKnown path as the compiler runtime ABI. Dynamic
+// calls, go/defer, other bodyless leaves, captured closures, and unresolved
+// aliases remain on the ordinary Dispatch path. Effect and representation are
+// independently checked after fixed-point analysis; this prefilter only
+// establishes that it is sound to seed the candidate's bounded scheduler-stack
+// island.
+func provenCoroDirectPlainStaticClosure(ctx *context, target *ssa.Function, closedDynamic map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate) ([]*ssa.Function, bool, error) {
 	if ctx == nil || ctx.coroEmission == nil || target == nil || len(target.FreeVars) != 0 {
 		return nil, false, nil
 	}
@@ -1269,8 +2165,10 @@ func provenCoroDirectPlainStaticClosure(ctx *context, target *ssa.Function) ([]*
 		return nil, false, nil
 	}
 	seen := make(map[*ssa.Function]struct{})
+	seenCLeaves := make(map[*ssa.Function]struct{})
 	queue := []*ssa.Function{target}
 	closure := make([]*ssa.Function, 0, 4)
+	tlsCallback := provenCoroTLSDirectPlainClosureRoot(ctx, target, closedDynamic)
 	for head := 0; head < len(queue); head++ {
 		function := queue[head]
 		if _, ok := seen[function]; ok {
@@ -1299,6 +2197,13 @@ func provenCoroDirectPlainStaticClosure(ctx *context, target *ssa.Function) ([]*
 				}
 				raw := call.Common().StaticCallee()
 				if raw == nil {
+					if _, certified := closedDynamic[call]; certified && !call.Common().IsInvoke() {
+						// The exact descriptor target is deliberately not added to
+						// closure: unlike the raw C callback it is not trusted to run
+						// without preemption. Post-plan validation checks its real
+						// fixed-point Effect/Exec instead.
+						continue
+					}
 					return nil, false, nil
 				}
 				callee, ok := ctx.coroEmission.Resolve(raw)
@@ -1310,7 +2215,18 @@ func provenCoroDirectPlainStaticClosure(ctx *context, target *ssa.Function) ([]*
 					return nil, false, err
 				}
 				if !calleeGoBody {
-					return nil, false, nil
+					background, classified, err := ctx.coroEmission.FunctionBackground(callee)
+					if err != nil {
+						return nil, false, err
+					}
+					if !tlsCallback || !classified || background != llssa.InC {
+						return nil, false, nil
+					}
+					if _, ok := seenCLeaves[callee]; !ok {
+						seenCLeaves[callee] = struct{}{}
+						closure = append(closure, callee)
+					}
+					continue
 				}
 				if _, ok := seen[callee]; !ok {
 					queue = append(queue, callee)
@@ -1319,6 +2235,25 @@ func provenCoroDirectPlainStaticClosure(ctx *context, target *ssa.Function) ([]*
 		}
 	}
 	return closure, true, nil
+}
+
+// provenCoroTLSDirectPlainClosureRoot binds the frozen-C-leaf exception to the
+// exact callback body audited by proveCoroTLSDestructorClosedDynamicCalls. A
+// certificate reachable only through a helper is insufficient: otherwise an
+// unrelated user callback could call that helper and inherit the exception.
+func provenCoroTLSDirectPlainClosureRoot(ctx *context, target *ssa.Function, closedDynamic map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate) bool {
+	if !coroTLSFunctionInOwnedPackage(ctx, target) {
+		return false
+	}
+	for call := range closedDynamic {
+		if call == nil || call.Parent() != target || call.Common() == nil || call.Common().IsInvoke() {
+			continue
+		}
+		if _, ordinary := call.(*ssa.Call); ordinary {
+			return true
+		}
+	}
+	return false
 }
 
 func buildCoroPlanDigestMetadata(ctx *context) (coro.PlanDigestMetadata, error) {
@@ -1338,8 +2273,8 @@ func buildCoroPlanDigestMetadata(ctx *context) (coro.PlanDigestMetadata, error) 
 	return coro.PlanDigestMetadata{
 		CoroABI:        activeCoroABIVersion(ctx.buildConf),
 		SchedulerABI:   activeCoroSchedulerABIVersion(ctx.buildConf),
-		PanicABI:       coro.PanicLegacyABIV0,
-		FuncRepABI:     coro.FuncRepABIV0,
+		PanicABI:       activeCoroPanicABIVersion(ctx.buildConf),
+		FuncRepABI:     activeCoroFuncRepABIVersion(ctx.buildConf),
 		TargetTriple:   target.Triple,
 		TargetCPU:      target.CPU,
 		TargetFeatures: target.Features,
@@ -1352,6 +2287,7 @@ func buildCoroPlanDigestMetadata(ctx *context) (coro.PlanDigestMetadata, error) 
 
 func prepareCoroEmissionUniverse(ctx *context, packages []*aPackage) error {
 	inputs := make([]cl.EmissionPackage, 0, len(packages))
+	hasRuntimeABI := false
 	for _, aPkg := range packages {
 		if aPkg == nil || aPkg.Package == nil || aPkg.SSA == nil || llruntime.SkipToBuild(aPkg.PkgPath) {
 			continue
@@ -1381,8 +2317,14 @@ func prepareCoroEmissionUniverse(ctx *context, packages []*aPackage) error {
 			Identity:     aPkg.ID,
 			MetadataOnly: metadataOnly,
 		})
+		hasRuntimeABI = hasRuntimeABI || aPkg.PkgPath == llssa.PkgRuntime
 	}
-	emission, err := cl.PrepareEmissionUniverse(ctx.prog, ctx.patches, inputs)
+	emission, err := cl.PrepareEmissionUniverseWithOptions(ctx.prog, ctx.patches, inputs, cl.EmissionUniverseOptions{
+		// Active archive-producing entry resolution with the real runtime input
+		// must freeze every hidden compiler/runtime ABI edge. Isolated plan tests
+		// and report-only builds preserve the legacy incomplete-package behavior.
+		CompleteRuntimeABI: hasRuntimeABI && ctx.buildConf != nil && ctx.buildConf.EnableCoroEntryResolution,
+	})
 	if err != nil {
 		return err
 	}
@@ -1532,11 +2474,14 @@ type context struct {
 
 	// coroPlan is compilation-scoped. It remains report-only unless
 	// EnableCoroEntryResolution is set explicitly.
-	coroPlan         *coro.SSAPlan
-	coroEmission     *cl.EmissionUniverse
-	coroSSAEmission  *coro.SSAEmissionUniverse
-	coroPlanDigest   string
-	coroPlanMetadata coro.PlanDigestMetadata
+	coroPlan        *coro.SSAPlan
+	coroEmission    *cl.EmissionUniverse
+	coroSSAEmission *coro.SSAEmissionUniverse
+	// coroTLSDestructorFixturePkg is an internal test-only identity override.
+	// Production builds leave it empty and accept only runtime/internal/clite/tls.
+	coroTLSDestructorFixturePkg string
+	coroPlanDigest              string
+	coroPlanMetadata            coro.PlanDigestMetadata
 	// Frozen immediately after whole-program analysis, before package codegen.
 	// linkMainPkg only consumes these exact per-entry-package tables.
 	coroProgramBootstraps map[string]*coroProgramBootstrapV1
@@ -2059,6 +3004,10 @@ func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, outputPa
 			coroBootstrap = ctx.coroProgramBootstraps[pkg.ID]
 			if coroBootstrap == nil {
 				return fmt.Errorf("coroutine program bootstrap: no pre-codegen table was frozen for linked package %q", pkg.ID)
+			}
+			coroBootstrap, err = bindCoroProgramBootstrapV2(coroBootstrap, linkedOrder)
+			if err != nil {
+				return fmt.Errorf("bind coroutine program bootstrap: %w", err)
 			}
 		}
 		coroManifestHash, err = coroProgramManifestHashV1(ctx, coroRootAnchors, coroBootstrap)

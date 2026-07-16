@@ -22,8 +22,9 @@ import (
 )
 
 type Info struct {
-	Kind llssa.DoAction
-	Next int
+	Kind   llssa.DoAction
+	Next   int
+	InLoop bool
 }
 
 // -----------------------------------------------------------------------------
@@ -168,7 +169,11 @@ retry:
 	ret := make([]Info, n)
 	for i := 0; i < n; i++ {
 		iblk := order[i]
-		ret[iblk] = Info{states[iblk].kind(), order[i+1]}
+		ret[iblk] = Info{
+			Kind:   states[iblk].kind(),
+			Next:   order[i+1],
+			InLoop: states[iblk].inLoop,
+		}
 	}
 	return ret
 }

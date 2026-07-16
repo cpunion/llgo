@@ -600,6 +600,7 @@ var llgoInstrs = map[string]int{
 	"skip":        llgoSkip,
 	"syscall":     llgoSyscall,
 	"boolToUint8": llgoBoolToUint8,
+	"coroPark":    llgoCoroPark,
 	"pystr":       llgoPyStr,
 	"pyList":      llgoPyList,
 	"pyTuple":     llgoPyTuple,
@@ -2084,6 +2085,12 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 			ret = b.Do(act, llssa.Nil, func(b llssa.Builder, _ llssa.Expr, args ...llssa.Expr) llssa.Expr {
 				return p.boolToUint8(b, args)
 			}, args...)
+		case llgoCoroPark:
+			if act != llssa.Call || ds != nil {
+				panic("llgo.coroPark requires an exact direct call")
+			}
+			args := p.compileValues(b, args, kind)
+			p.compileCoroPark(b, args)
 		case llgoUnreachable: // func unreachable()
 			b.Unreachable()
 		case llgoAtomicLoad:

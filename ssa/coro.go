@@ -120,8 +120,9 @@ type CoroProgramManifestOptions struct {
 }
 
 // CoroProgramStepKind identifies one statically ordered program startup step.
-// The numeric values are part of the version-one runtime ABI; zero is reserved
-// so a zero-initialized or missing step always fails validation.
+// The numeric values are shared by the version-one and version-two runtime
+// ABIs; zero is reserved so a zero-initialized or missing step always fails
+// validation.
 type CoroProgramStepKind uint32
 
 const (
@@ -140,11 +141,23 @@ const (
 	CoroProgramStepMain
 )
 
-// CoroProgramStep describes one entry in a version-one program startup table.
-// Flags is exactly one CoroProgramStepInit or CoroProgramStepMain role. Target
-// must be a same-module constant function for DirectPlain or a same-module
-// constant global for CoroRoot. Aux is encoded as target uintptr and is the
-// root descriptor index for CoroRoot.
+// Version-two startup step role flags. The bits intentionally start at bit
+// zero again: a bootstrap version selects the meaning of the complete table,
+// and a step role is never interpreted without first validating that version.
+// Exactly one role is required on every step in this order.
+const (
+	CoroProgramStepInternalRuntimeInitV2 uint32 = 1 << iota
+	CoroProgramStepCompilerABIInitV2
+	CoroProgramStepPublicRuntimeInitV2
+	CoroProgramStepMainPackageInitV2
+	CoroProgramStepMainV2
+)
+
+// CoroProgramStep describes one entry in a versioned program startup table.
+// Flags is the exact role required at the entry's canonical position for that
+// bootstrap version. Target must be a same-module constant function for
+// DirectPlain or a same-module constant global for CoroRoot. Aux is encoded as
+// target uintptr and is the root descriptor index for CoroRoot.
 type CoroProgramStep struct {
 	Kind   CoroProgramStepKind
 	Flags  uint32
@@ -153,9 +166,10 @@ type CoroProgramStep struct {
 }
 
 // CoroProgramBootstrapOptions describes the entry module's immutable startup
-// table. Flags is reserved and must be zero. ABIHash covers the ordered steps
-// and their referenced catalog. Factory may be Nil in the data-only phase; a
-// non-Nil factory must use the root factory ABI and belong to this module.
+// table. Version must be one or two. Flags is reserved and must be zero.
+// ABIHash covers the ordered steps and their referenced catalog. Factory may
+// be Nil in the data-only phase; a non-Nil factory must use the root factory
+// ABI and belong to this module.
 type CoroProgramBootstrapOptions struct {
 	Version uint32
 	Flags   uint32
@@ -537,16 +551,16 @@ func (p Package) CoroProgramManifest() string {
 //	{ version i32, flags i32, hashLo i64, hashHi i64,
 //	  stepCount uintptr, steps ptr, factory ptr }
 //
-// The canonical Init/Main step list is materialized as an internal constant
-// array named name + ".steps", whose element layout is:
+// The canonical version-specific step list is materialized as an internal
+// constant array named name + ".steps", whose element layout is:
 //
 //	{ kind i32, flags i32, target ptr, aux uintptr }
 //
-// Exactly two steps in Init, Main order are required, so a successfully emitted
-// descriptor always has count two and a non-null steps pointer. Factory is null
-// when omitted. Both the table and each step use target uintptr width and
-// alignment. Each entry module may define at most one program bootstrap
-// descriptor.
+// Version one requires exactly Init, Main. Version two requires exactly
+// InternalRuntimeInit, CompilerABIInit, PublicRuntimeInit, MainPackageInit,
+// Main. Factory is null when omitted. Both the table and each step use target
+// uintptr width and alignment. Each entry module may define at most one program
+// bootstrap descriptor.
 func (p Package) NewCoroProgramBootstrap(
 	name string, opts CoroProgramBootstrapOptions,
 ) Expr {
@@ -559,8 +573,29 @@ func (p Package) NewCoroProgramBootstrap(
 	if opts.Flags != 0 {
 		panic("ssa: coroutine program bootstrap flags must be zero")
 	}
-	if len(opts.Steps) != 2 {
-		panic(fmt.Sprintf("ssa: coroutine program bootstrap requires exactly two steps, got %d", len(opts.Steps)))
+	var roles []uint32
+	switch opts.Version {
+	case 1:
+		roles = []uint32{CoroProgramStepInit, CoroProgramStepMain}
+	case 2:
+		roles = []uint32{
+			CoroProgramStepInternalRuntimeInitV2,
+			CoroProgramStepCompilerABIInitV2,
+			CoroProgramStepPublicRuntimeInitV2,
+			CoroProgramStepMainPackageInitV2,
+			CoroProgramStepMainV2,
+		}
+	default:
+		panic(fmt.Sprintf("ssa: coroutine program bootstrap has unsupported version %d", opts.Version))
+	}
+	if len(opts.Steps) != len(roles) {
+		if opts.Version == 1 {
+			panic(fmt.Sprintf("ssa: coroutine program bootstrap requires exactly two steps, got %d", len(opts.Steps)))
+		}
+		panic(fmt.Sprintf(
+			"ssa: coroutine program bootstrap version %d requires exactly %d steps, got %d",
+			opts.Version, len(roles), len(opts.Steps),
+		))
 	}
 	if !coroProgramFitsUintptr(p.Prog, uint64(len(opts.Steps))) {
 		panic("ssa: coroutine program bootstrap step count overflows target uintptr")
@@ -588,10 +623,7 @@ func (p Package) NewCoroProgramBootstrap(
 	stepValues := make([]llvm.Value, len(opts.Steps))
 	constantDeclarations := make([]llvm.Value, 0, len(opts.Steps))
 	for i, step := range opts.Steps {
-		wantRole := CoroProgramStepInit
-		if i == 1 {
-			wantRole = CoroProgramStepMain
-		}
+		wantRole := roles[i]
 		if step.Flags != wantRole {
 			panic(fmt.Sprintf(
 				"ssa: coroutine program bootstrap step %d flags %#x must be %#x",
@@ -892,6 +924,60 @@ func (c *CoroBuilder) InitialResumeBlock() BasicBlock {
 func (c *CoroBuilder) Suspend() BasicBlock {
 	c.requireActive("suspend")
 	return c.emitSuspend(false)
+}
+
+// SuspendCurrentBlock emits a non-final stack cut while preserving the
+// builder's current logical BasicBlock. The physical resume block becomes the
+// logical block's last LLVM block, so later branches and phi incoming edges
+// continue to refer to the source block even when one or more coroutine cuts
+// split its physical control flow. Frontends lowering a multi-block source CFG
+// must use this form; Suspend remains the low-level form that exposes the new
+// resume block as a distinct logical block.
+func (c *CoroBuilder) SuspendCurrentBlock() BasicBlock {
+	c.requireActive("suspend current block")
+	b := c.b
+	logical := b.blk
+	if logical == nil {
+		panic("ssa: suspend current block requires an active logical block")
+	}
+	resume := c.emitSuspend(false)
+	logical.last = resume.last
+	b.blk = logical
+	return logical
+}
+
+// SuspendCurrentBlockIf emits a non-final stack cut only on condition's true
+// edge. before runs in that edge immediately before llvm.coro.suspend and must
+// append straight-line state publication only. Both the false edge and the
+// resumed true edge join a new physical continuation that becomes the current
+// logical block's tail, preserving source-CFG phi predecessor identity.
+func (c *CoroBuilder) SuspendCurrentBlockIf(condition Expr, before func(Builder)) BasicBlock {
+	c.requireActive("conditionally suspend current block")
+	b := c.b
+	logical := b.blk
+	if logical == nil {
+		panic("ssa: conditionally suspend current block requires an active logical block")
+	}
+	if condition.IsNil() || condition.kind != vkBool {
+		panic("ssa: conditional coroutine suspend requires a boolean condition")
+	}
+	suspendBlk := b.Func.MakeBlock()
+	continueBlk := b.Func.MakeBlock()
+	b.If(condition, suspendBlk, continueBlk)
+
+	b.SetBlock(suspendBlk)
+	if before != nil {
+		callbackPoint := captureCoroFrameCallbackPoint(b)
+		before(b)
+		callbackPoint.ensureContinuation(b, "conditional-suspend")
+	}
+	c.emitSuspend(false)
+	b.Jump(continueBlk)
+
+	b.SetBlock(continueBlk)
+	logical.last = continueBlk.last
+	b.blk = logical
+	return logical
 }
 
 // Finish emits the final suspend and completes the shared cleanup/return

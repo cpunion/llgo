@@ -23,6 +23,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"go/ast"
+	"go/types"
 	"regexp"
 	"strconv"
 	"strings"
@@ -168,8 +169,20 @@ func Leaf(value uint32) uint32 {
 	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("verify debug coroutine before CoroSplit: %v\n%s", err, module.String())
 	}
-	if !strings.Contains(module.String(), "!dbg") {
-		t.Fatalf("debug coroutine omitted function/parameter metadata:\n%s", module.String())
+	ir := module.String()
+	if !strings.Contains(ir, "!dbg") {
+		t.Fatalf("debug coroutine omitted function/parameter metadata:\n%s", ir)
+	}
+	parameter := regexp.MustCompile(`(?m)^(!\d+) = !DILocalVariable\(name: "value", arg: 1,`).FindStringSubmatch(ir)
+	if len(parameter) != 2 {
+		t.Fatalf("debug coroutine omitted source parameter metadata:\n%s", ir)
+	}
+	location := regexp.MustCompile(
+		`(?m)(?:#dbg_(?:value|declare)|@llvm\.dbg\.(?:value|declare))\([^\n]*` +
+			regexp.QuoteMeta(parameter[1]) + `(?:,|\))`,
+	)
+	if !location.MatchString(ir) {
+		t.Fatalf("debug coroutine parameter metadata has no location record:\n%s", ir)
 	}
 	options := llvm.NewPassBuilderOptions()
 	defer options.Dispose()
@@ -233,6 +246,7 @@ func TestCoroChildAwaitPhysicalABIV1Presplit(t *testing.T) {
 		coroFrameAllocHookV1,
 		coroFramePublishHookV1,
 		coroAwaitPrepareHookV1,
+		coroPreemptPollHookV1,
 		coroCompletePrepareHookV1,
 		coroFrameFreeHookV1,
 	} {
@@ -329,6 +343,513 @@ func TestCoroChildAwaitPhysicalABIV1CoroSplit(t *testing.T) {
 		if !strings.Contains(destroy, "call void @"+coroFrameFreeHookV1) {
 			t.Fatalf("%s destroy entry lost task-aware frame free:\n%s", function, destroy)
 		}
+	}
+}
+
+func TestCoroPreemptiveLoopPhysicalABIV1(t *testing.T) {
+	const source = `package foo
+func Loop(limit uint32) uint32 {
+	var value uint32
+	for value < limit {
+		value++
+	}
+	return value
+}
+`
+	prog, ssaPkg, files, universe, plan := prepareCoroPreemptTestPlan(
+		t,
+		source,
+		[]coroRootFactoryTestRoot{{name: "Loop", demand: coro.AsyncDemand}},
+		nil,
+		-1,
+	)
+	defer prog.Dispose()
+	loop := ssaPkg.Func("Loop")
+	loopPlan, ok := plan.FunctionPlan(loop)
+	if !ok || loopPlan.Emission != coro.EmitCoroutine || loopPlan.FuncRep != coro.DirectCoro ||
+		!loopPlan.Exec.Contains(coro.NeedsPreempt) || !loopPlan.Effect.Contains(coro.YieldOnly) {
+		t.Fatalf("Loop plan = %+v, present=%t; want direct needs-preempt coroutine", loopPlan, ok)
+	}
+	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+	enableCoroPreemptCompilation(compilation)
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	body := requireCoroPhysicalFunction(t, module, "foo.Loop").String()
+	if !strings.Contains(body, "call i1 @"+coroPreemptPollHookV1) {
+		t.Fatalf("Loop lacks compiler-inserted preemption poll:\n%s", body)
+	}
+	if !strings.Contains(body, "call void @"+coroYieldPrepareHookV1) {
+		t.Fatalf("Loop lacks compiler-inserted scheduler yield handoff:\n%s", body)
+	}
+	if !regexp.MustCompile(`(?s)store i16 3,.*store i16 3,.*call void @` + regexp.QuoteMeta(coroYieldPrepareHookV1)).MatchString(body) {
+		t.Fatalf("Loop does not publish Yield/Suspended before its handoff:\n%s", body)
+	}
+	poll := strings.Index(body, "call i1 @"+coroPreemptPollHookV1)
+	handoff := strings.Index(body, "call void @"+coroYieldPrepareHookV1)
+	if poll < 0 || handoff < 0 || poll >= handoff || !strings.Contains(body[poll:handoff], "br i1") {
+		t.Fatalf("Loop yield handoff is not guarded by its preemption poll:\n%s", body)
+	}
+	if got := strings.Count(body, "call i8 @llvm.coro.suspend"); got < 3 {
+		t.Fatalf("Loop coroutine suspends = %d, want initial + yield + final:\n%s", got, body)
+	}
+	runCoroABITestPipeline(t, prog, module)
+	post := module.String()
+	for _, suffix := range []string{".resume", ".destroy"} {
+		if fn := module.NamedFunction("foo.Loop$coro" + suffix); fn.IsNil() {
+			t.Fatalf("CoroSplit did not create Loop%s:\n%s", suffix, post)
+		}
+	}
+}
+
+func TestCoroProgramInitPhysicalABIV2(t *testing.T) {
+	const source = `package foo
+import (
+	"embed"
+	_ "unsafe"
+)
+
+var State uint32
+var Files embed.FS
+
+func Plain() { State = 1 }
+func Yield() { State = 2 }
+func init() {
+	Plain()
+	Yield()
+}
+`
+	prog, ssaPkg, files, universe, plan := prepareCoroProgramInitTestPlan(t, source)
+	defer prog.Dispose()
+	packageInit := ssaPkg.Func("init")
+	initPlan, ok := plan.FunctionPlan(packageInit)
+	if !ok || initPlan.Emission != coro.EmitCoroutine || initPlan.FuncRep != coro.DirectCoro || initPlan.Demand != coro.AsyncDemand {
+		t.Fatalf("package init plan = %+v, present=%t; want async-only direct coroutine", initPlan, ok)
+	}
+	foundElidedUnsafeInit := false
+	for _, block := range packageInit.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(*ssa.Call)
+			if !ok || call.Call.StaticCallee() == nil || call.Call.StaticCallee().Pkg == nil ||
+				call.Call.StaticCallee().Pkg.Pkg.Path() != "unsafe" || call.Call.StaticCallee().Name() != "init" {
+				continue
+			}
+			foundElidedUnsafeInit = plan.ElidesCall(call)
+			if _, planned := plan.CallPlan(call); planned {
+				t.Fatal("frontend-elided unsafe.init unexpectedly has a CallPlan")
+			}
+		}
+	}
+	if !foundElidedUnsafeInit {
+		t.Fatal("package init fixture has no exact frontend-elided unsafe.init call")
+	}
+	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+	enableCoroPreemptCompilation(compilation)
+	embedMap := goembed.VarMap{
+		"Files": {Files: []goembed.FileData{{Name: "asset.txt", Data: []byte("payload")}}},
+	}
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, embedMap,
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify coroutine package init: %v\n%s", err, module.String())
+	}
+
+	packageInitIR := requireCoroPhysicalFunction(t, module, "foo.init").String()
+	if !strings.Contains(packageInitIR, `load i1, ptr @"foo.init$guard"`) ||
+		!strings.Contains(packageInitIR, `store i1 true, ptr @"foo.init$guard"`) {
+		t.Fatalf("package init coroutine lost its canonical guard load/store:\n%s", packageInitIR)
+	}
+	if !strings.Contains(module.String(), "asset.txt") || !strings.Contains(module.String(), "payload") {
+		t.Fatalf("package init coroutine did not apply compiler-generated embed initialization:\n%s", packageInitIR)
+	}
+	if !regexp.MustCompile(`call void @"?embed\.init"?\(`).MatchString(packageInitIR) {
+		t.Fatalf("package init lost its exact known-external no-suspend call:\n%s", packageInitIR)
+	}
+	declaredInit := requireCoroPhysicalFunction(t, module, "foo.init#1").String()
+	if !regexp.MustCompile(`call void @"?foo\.Plain"?\(`).MatchString(declaredInit) {
+		t.Fatalf("declared init lost its exact direct plain call:\n%s", declaredInit)
+	}
+	if !regexp.MustCompile(`call ptr @"?foo\.Yield\$coro"?\(`).MatchString(declaredInit) ||
+		!strings.Contains(declaredInit, "call void @"+coroAwaitPrepareHookV1) {
+		t.Fatalf("declared init lost its static child await:\n%s", declaredInit)
+	}
+	runCoroABITestPipeline(t, prog, module)
+}
+
+func TestCoroPhysicalValueTransportABIV1NativeAndWasm(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	for _, test := range []struct {
+		name        string
+		target      *llssa.Target
+		pointerBits int
+		uintptrIR   string
+	}{
+		{name: "native"},
+		{name: "wasm32", target: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}, pointerBits: 32, uintptrIR: "i32"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			prog, ssaPkg, files, universe, plan := prepareCoroPhysicalValueTransportABI(t, test.target)
+			defer prog.Dispose()
+			pointerBits := prog.PointerSize() * 8
+			if test.pointerBits != 0 && pointerBits != test.pointerBits {
+				t.Fatalf("pointer width = %d, want %d", pointerBits, test.pointerBits)
+			}
+			uintptrIR := test.uintptrIR
+			if uintptrIR == "" {
+				uintptrIR = "i" + strconv.Itoa(pointerBits)
+			}
+
+			child := ssaPkg.Func("Child")
+			callbackPlan, ok := plan.ValuePlan(child.Params[0])
+			if !ok || len(callbackPlan.Funcs) != 1 || len(callbackPlan.Funcs[0].Path) != 0 ||
+				callbackPlan.Funcs[0].Rep != coro.Dispatch {
+				t.Fatalf("Child callback ValuePlan = %+v, present=%t; want one canonical scalar Dispatch leaf", callbackPlan, ok)
+			}
+			parent := ssaPkg.Func("Parent")
+			var childCall *ssa.Call
+			for _, block := range parent.Blocks {
+				for _, instruction := range block.Instrs {
+					call, ok := instruction.(*ssa.Call)
+					if ok && call.Call.StaticCallee() == child {
+						childCall = call
+					}
+				}
+			}
+			if childCall == nil {
+				t.Fatal("Parent has no static Child call")
+			}
+			nilCallbackPlan, ok := plan.ValuePlan(childCall.Call.Args[0])
+			if !ok || len(nilCallbackPlan.Funcs) != 1 || len(nilCallbackPlan.Funcs[0].Path) != 0 ||
+				nilCallbackPlan.Funcs[0].Rep != coro.Dispatch || !nilCallbackPlan.Funcs[0].MayBeNil ||
+				len(nilCallbackPlan.Funcs[0].Targets) != 0 {
+				t.Fatalf("nil callback ValuePlan = %+v, present=%t; want closed nil canonical Dispatch leaf", nilCallbackPlan, ok)
+			}
+			disabled := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+			enableCoroChildAwaitCompilation(disabled)
+			got, _, err := NewPackageExWithEmbedOptions(
+				prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+				PackageOptions{Compilation: disabled},
+			)
+			if err == nil || !strings.Contains(err.Error(), "require canonical ValuePlan validation") {
+				t.Fatalf("function-value gate-off result = %v, %v; want canonical ValuePlan rejection", got, err)
+			}
+			if got != nil {
+				t.Fatal("function-value preflight failure returned a partial package")
+			}
+
+			compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+			enableCoroChildAwaitCompilation(compilation)
+			compilation.EnableCoroPlainDispatch = true
+			compilation.FuncRepABI = coro.FuncRepABIV1
+			pkg, _, err := NewPackageExWithEmbedOptions(
+				prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+				PackageOptions{Compilation: compilation},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			module := pkg.Module()
+			defer module.Dispose()
+			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("verify physical value transport before CoroSplit: %v\n%s", err, module.String())
+			}
+
+			childIR := requireCoroPhysicalFunction(t, module, "foo.Child").String()
+			parentIR := requireCoroPhysicalFunction(t, module, "foo.Parent").String()
+			pairIR := requireCoroPhysicalFunction(t, module, "foo.Pair").String()
+			if !regexp.MustCompile(`define ptr @"?foo\.Child\$coro"?\(ptr [^,]+, ptr [^,]+, \{ ptr, ptr \} [^,]+, ptr `).MatchString(childIR) {
+				t.Fatalf("Child callback/pointer parameters do not use LLGo's canonical two-pointer closure layout:\n%s", childIR)
+			}
+			if !regexp.MustCompile(`call ptr @"?foo\.Child\$coro"?\([^\n]*\{ ptr, ptr \} zeroinitializer, ptr `).MatchString(parentIR) {
+				t.Fatalf("Parent did not transport the nil callback through the typed canonical closure argument:\n%s", parentIR)
+			}
+			assertCoroResultSlotFields(t, "Pair before CoroSplit", pairIR, uintptrIR)
+			if !regexp.MustCompile(`store %foo\.Payload [^,]+, ptr `).MatchString(childIR) {
+				t.Fatalf("Child did not copy the complete named struct result into its typed result slot:\n%s", childIR)
+			}
+
+			runCoroABITestPipeline(t, prog, module)
+			post := module.String()
+			for _, function := range []string{"foo.Child$coro", "foo.Parent$coro", "foo.Pair$coro"} {
+				for _, suffix := range []string{".resume", ".destroy"} {
+					if module.NamedFunction(function + suffix).IsNil() {
+						t.Fatalf("CoroSplit did not create %s%s:\n%s", function, suffix, post)
+					}
+				}
+			}
+			assertCoroResultSlotFields(t, "Pair after CoroSplit", module.NamedFunction("foo.Pair$coro.resume").String(), uintptrIR)
+			if !regexp.MustCompile(`store %foo\.Payload [^,]+, ptr `).MatchString(module.NamedFunction("foo.Child$coro.resume").String()) {
+				t.Fatalf("Child struct result store did not survive CoroSplit:\n%s", module.NamedFunction("foo.Child$coro.resume").String())
+			}
+		})
+	}
+}
+
+func TestCoroAwaitResultReconstruction(t *testing.T) {
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	pkg := prog.NewPackage("awaitresult", "await/result")
+	module := pkg.Module()
+	defer module.Dispose()
+	physical := &context{prog: prog}
+	pointer := types.NewPointer(types.Typ[types.Uint32])
+	for _, test := range []struct {
+		name    string
+		results *types.Tuple
+		loads   int
+		inserts int
+	}{
+		{name: "zero", results: types.NewTuple()},
+		{name: "one", results: types.NewTuple(types.NewVar(0, nil, "ptr", pointer)), loads: 1},
+		{name: "many", results: types.NewTuple(
+			types.NewVar(0, nil, "ptr", pointer),
+			types.NewVar(0, nil, "count", types.Typ[types.Uintptr]),
+		), loads: 2, inserts: 2},
+	} {
+		resultCount := 0
+		if test.results != nil {
+			resultCount = test.results.Len()
+		}
+		fields := make([]*types.Var, resultCount)
+		for i := range fields {
+			fields[i] = types.NewField(0, nil, test.results.At(i).Name(), test.results.At(i).Type(), false)
+		}
+		name := "await_" + test.name
+		fn := pkg.NewFunc(name, llssa.NoArgsNoRet, llssa.InGo)
+		b := fn.MakeBody(1)
+		slot := b.AllocaT(prog.Type(types.NewStruct(fields, nil), llssa.InGo))
+		got := physical.loadCoroAwaitResult(b, slot, test.results)
+		switch resultCount {
+		case 0:
+			if !got.IsNil() {
+				t.Fatalf("zero-result await value type = %v, want llssa.Nil", got.RawType())
+			}
+		case 1:
+			if got.IsNil() || !types.Identical(got.RawType(), prog.Type(pointer, llssa.InGo).RawType()) {
+				t.Fatalf("one-result await value type = %v, want field type %v", got.RawType(), pointer)
+			}
+		default:
+			if got.IsNil() || !types.Identical(got.RawType(), prog.Type(test.results, llssa.InGo).RawType()) {
+				t.Fatalf("multi-result await value type = %v, want source tuple %v", got.RawType(), test.results)
+			}
+		}
+		b.Return()
+		b.EndBuild()
+		b.Dispose()
+		body := module.NamedFunction(name).String()
+		if got := strings.Count(body, "load "); got != test.loads {
+			t.Fatalf("%s await result loads = %d, want %d:\n%s", test.name, got, test.loads, body)
+		}
+		if got := strings.Count(body, "insertvalue "); got != test.inserts {
+			t.Fatalf("%s await result tuple inserts = %d, want %d:\n%s", test.name, got, test.inserts, body)
+		}
+	}
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify await result reconstruction: %v\n%s", err, module.String())
+	}
+}
+
+func assertCoroResultSlotFields(t *testing.T, name, body, uintptrIR string) {
+	t.Helper()
+	resultType := regexp.QuoteMeta("{ ptr, " + uintptrIR + " }")
+	for index, storeType := range []string{"ptr", uintptrIR} {
+		field := regexp.MustCompile(
+			`(?m)^\s*(%[-a-zA-Z$._0-9]+) = getelementptr inbounds(?: (?:nuw|nusw))* ` + resultType +
+				`, ptr [^,]+, i32 0, i32 ` + strconv.Itoa(index) + `\s*$`,
+		).FindStringSubmatch(body)
+		if len(field) != 2 || !regexp.MustCompile(`(?m)^\s*store `+storeType+` [^,]+, ptr `+regexp.QuoteMeta(field[1])+`(?:,|\s*$)`).MatchString(body) {
+			t.Fatalf("%s has no typed store for result field %d (%s):\n%s", name, index, storeType, body)
+		}
+	}
+}
+
+func TestCoroStaticPlainCallExecutionConstraints(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		exec    coro.ExecFlags
+		wantErr string
+	}{
+		{name: "thread affine rejected", exec: coro.ThreadAffine, wantErr: "thread-affine"},
+		{name: "IRQ unsafe allowed on ordinary G", exec: coro.IRQUnsafe},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			const source = `package foo
+func Plain() {}
+func Root() { Plain() }
+`
+			ssaPkg, _, files := buildGoSSAPkg(t, source)
+			prog := newLLSSAProg(t)
+			defer prog.Dispose()
+			universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+			if err != nil {
+				t.Fatal(err)
+			}
+			root, plain := ssaPkg.Func("Root"), ssaPkg.Func("Plain")
+			functionIDs := universe.FunctionIDConfig()
+			functionIDs.CoroABI = coro.PhysicalABIV1
+			functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+			functionIDs.ArchiveReady = true
+			plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+				EmissionUniverse:     ssaUniverse,
+				FunctionIDs:          functionIDs,
+				MaxPlainInstructions: -1,
+				ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+					switch fn {
+					case root:
+						return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+					case plain:
+						return coro.SSAFunctionPolicy{Exec: test.exec}, nil
+					default:
+						return coro.SSAFunctionPolicy{}, nil
+					}
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var plainCall *ssa.Call
+			for _, instruction := range root.Blocks[0].Instrs {
+				call, ok := instruction.(*ssa.Call)
+				if ok && call.Call.StaticCallee() == plain {
+					plainCall = call
+					break
+				}
+			}
+			if plainCall == nil {
+				t.Fatal("Root has no static Plain call")
+			}
+			_, _, resolveErr := resolveCoroStaticPlainCall(plan, plainCall)
+			if test.wantErr == "" && resolveErr != nil {
+				t.Fatalf("ordinary-G direct plain target rejected: %v", resolveErr)
+			}
+			if test.wantErr != "" && (resolveErr == nil || !strings.Contains(resolveErr.Error(), test.wantErr)) {
+				t.Fatalf("direct plain target error = %v, want %q", resolveErr, test.wantErr)
+			}
+			if test.wantErr == "" {
+				rootPlan, ok := plan.FunctionPlan(root)
+				if !ok {
+					t.Fatal("Root has no function plan")
+				}
+				if err := validateCoroPhysicalABI(root, rootPlan, plan, true, true); err != nil {
+					t.Fatalf("ordinary-G IRQ-unsafe CFG preflight rejected: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestCoroPreemptiveStraightLineBudgetPhysicalABIV1(t *testing.T) {
+	source := "package foo\nfunc Heavy(value uint32) uint32 {\n" +
+		strings.Repeat("value++\n", 150) +
+		"return value\n}\n"
+	prog, ssaPkg, files, universe, plan := prepareCoroPreemptTestPlan(
+		t,
+		source,
+		[]coroRootFactoryTestRoot{{name: "Heavy", demand: coro.AsyncDemand}},
+		nil,
+		16,
+	)
+	defer prog.Dispose()
+	heavy := ssaPkg.Func("Heavy")
+	heavyPlan, ok := plan.FunctionPlan(heavy)
+	if !ok || !heavyPlan.Exec.Contains(coro.NeedsPreempt) || !heavyPlan.Effect.Contains(coro.YieldOnly) {
+		t.Fatalf("Heavy plan = %+v, present=%t; want instruction-budget preemption", heavyPlan, ok)
+	}
+	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+	enableCoroPreemptCompilation(compilation)
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	body := requireCoroPhysicalFunction(t, module, "foo.Heavy").String()
+	if got := strings.Count(body, "call void @"+coroYieldPrepareHookV1); got < 2 {
+		t.Fatalf("Heavy compiler yield handoffs = %d, want at least two periodic cuts:\n%s", got, body)
+	}
+	runCoroABITestPipeline(t, prog, module)
+}
+
+func TestCoroPreemptiveInstructionBudgetBoundary(t *testing.T) {
+	source := "package foo\nfunc AtLimit(value uint32) uint32 {\n" +
+		strings.Repeat("value++\n", coroPreemptInstructionBudget-1) +
+		"return value\n}\nfunc OverLimit(value uint32) uint32 {\n" +
+		strings.Repeat("value++\n", coroPreemptInstructionBudget) +
+		"return value\n}\n"
+	prog, ssaPkg, files, universe, plan := prepareCoroPreemptTestPlan(
+		t,
+		source,
+		[]coroRootFactoryTestRoot{
+			{name: "AtLimit", demand: coro.AsyncDemand},
+			{name: "OverLimit", demand: coro.AsyncDemand},
+		},
+		nil,
+		16,
+	)
+	defer prog.Dispose()
+	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+	enableCoroPreemptCompilation(compilation)
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	if got := strings.Count(requireCoroPhysicalFunction(t, module, "foo.AtLimit").String(), "call i1 @"+coroPreemptPollHookV1); got != 1 {
+		t.Fatalf("AtLimit preemption polls = %d, want block-zero chain-boundary poll only", got)
+	}
+	if got := strings.Count(requireCoroPhysicalFunction(t, module, "foo.OverLimit").String(), "call i1 @"+coroPreemptPollHookV1); got != 2 {
+		t.Fatalf("OverLimit preemption polls = %d, want block-zero plus one instruction-budget poll", got)
+	}
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify instruction-budget boundary coroutines: %v\n%s", err, module.String())
+	}
+}
+
+func TestCoroNeedsPreemptRequiresRunnableSchedulerABI(t *testing.T) {
+	const source = `package foo
+func Loop(limit uint32) uint32 {
+	var value uint32
+	for value < limit { value++ }
+	return value
+}
+`
+	prog, ssaPkg, files, universe, plan := prepareCoroRootFactoryTestPlan(
+		t, source,
+		[]coroRootFactoryTestRoot{{name: "Loop", demand: coro.AsyncDemand}},
+		nil,
+	)
+	defer prog.Dispose()
+	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+	enableCoroChildAwaitCompilation(compilation)
+	if _, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	); err == nil || !strings.Contains(err.Error(), "needs-preempt execution requires the runnable scheduler ABI") {
+		t.Fatalf("child-await-only preflight error = %v, want runnable-scheduler rejection", err)
 	}
 }
 
@@ -901,9 +1422,9 @@ func TestCoroLeafPhysicalABIPreflightRejectsUnsupported(t *testing.T) {
 		want   string
 	}{
 		{
-			name:   "pointer parameter",
-			source: `package foo; func Leaf(value *int) {}`,
-			want:   "parameter 0 has unsupported type *int",
+			name:   "variadic parameter",
+			source: `package foo; func Leaf(values ...int) {}`,
+			want:   "variadic coroutine ABI is not implemented",
 		},
 		{
 			name: "control flow",
@@ -940,12 +1461,6 @@ func Leaf(channel chan uint32) uint32 { return <-channel }`,
 //export Leaf
 func Leaf(value uint32) uint32 { return value + 1 }`,
 			want: "ABI directive",
-		},
-		{
-			name: "multiple results",
-			source: `package foo
-func Leaf(value uint32) (uint32, uint32) { return value, value }`,
-			want: "supports at most one result",
 		},
 		{
 			name: "shift requires hidden panic check",
@@ -1311,6 +1826,82 @@ func Parent(first uint8, second uint32) uint32 { return Child(first, second) + 1
 	return prog, ssaPkg, files, universe, plan
 }
 
+func prepareCoroPhysicalValueTransportABI(t *testing.T, target *llssa.Target) (
+	llssa.Program, *ssa.Package, []*ast.File, *EmissionUniverse, *coro.SSAPlan,
+) {
+	t.Helper()
+	const source = `package foo
+
+type Payload struct {
+	Ptr   *uint32
+	Count uintptr
+	Label string
+	Bytes []byte
+	Slots [2]uintptr
+}
+
+func Child(callback func(*uint32), ptr *uint32, value Payload) Payload {
+	return value
+}
+
+func Parent(ptr *uint32, value Payload) Payload {
+	return Child(nil, ptr, value)
+}
+
+func Pair(ptr *uint32, count uintptr) (*uint32, uintptr) {
+	return ptr, count
+}
+`
+	ssaPkg, _, files := buildGoSSAPkg(t, source)
+	var prog llssa.Program
+	if target == nil {
+		prog = newLLSSAProg(t)
+	} else {
+		prog = newLLSSAProgForTarget(t, target)
+	}
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	if err != nil {
+		prog.Dispose()
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+	if err != nil {
+		prog.Dispose()
+		t.Fatal(err)
+	}
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerChildAwaitABIV0
+	functionIDs.ArchiveReady = true
+	parent, child, pair := ssaPkg.Func("Parent"), ssaPkg.Func("Child"), ssaPkg.Func("Pair")
+	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{
+		{Function: parent, Demand: coro.AsyncDemand},
+		{Function: pair, Demand: coro.AsyncDemand},
+	}, coro.SSAConfig{
+		EmissionUniverse:     ssaUniverse,
+		FunctionIDs:          functionIDs,
+		MaxPlainInstructions: -1,
+		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+			if fn == child || fn == pair {
+				return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+			}
+			return coro.SSAFunctionPolicy{}, nil
+		},
+	})
+	if err != nil {
+		prog.Dispose()
+		t.Fatal(err)
+	}
+	for name, fn := range map[string]*ssa.Function{"Parent": parent, "Child": child, "Pair": pair} {
+		function, ok := plan.FunctionPlan(fn)
+		if !ok || function.Primary != coro.PrimaryCoroutine || function.FuncRep != coro.DirectCoro || function.Demand != coro.AsyncDemand {
+			prog.Dispose()
+			t.Fatalf("%s value-transport plan = %+v, present=%t; want async-only direct coroutine", name, function, ok)
+		}
+	}
+	return prog, ssaPkg, files, universe, plan
+}
+
 func enableCoroChildAwaitCompilation(compilation *Compilation) {
 	compilation.EnableCoroEntryResolution = true
 	compilation.EnableCoroPhysicalABI = true
@@ -1319,6 +1910,12 @@ func enableCoroChildAwaitCompilation(compilation *Compilation) {
 	compilation.SchedulerABI = coro.SchedulerChildAwaitABIV0
 	compilation.PanicABI = coro.PanicLegacyABIV0
 	compilation.FuncRepABI = coro.FuncRepABIV0
+}
+
+func enableCoroPreemptCompilation(compilation *Compilation) {
+	enableCoroChildAwaitCompilation(compilation)
+	compilation.EnableCoroProgramBootstrapRun = true
+	compilation.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
 }
 
 func requireCoroPhysicalFunction(t *testing.T, module llvm.Module, sourceName string) llvm.Value {
@@ -1497,6 +2094,36 @@ func prepareCoroRootFactoryTestPlan(
 	testRoots []coroRootFactoryTestRoot,
 	yieldOnly []string,
 ) (llssa.Program, *ssa.Package, []*ast.File, *EmissionUniverse, *coro.SSAPlan) {
+	return prepareCoroRootFactoryTestPlanWithMaxPlainInstructions(t, source, testRoots, yieldOnly, -1)
+}
+
+func prepareCoroRootFactoryTestPlanWithMaxPlainInstructions(
+	t *testing.T,
+	source string,
+	testRoots []coroRootFactoryTestRoot,
+	yieldOnly []string,
+	maxPlainInstructions int,
+) (llssa.Program, *ssa.Package, []*ast.File, *EmissionUniverse, *coro.SSAPlan) {
+	return prepareCoroRootFactoryTestPlanWithScheduler(
+		t, source, testRoots, yieldOnly, maxPlainInstructions, coro.SchedulerChildAwaitABIV0,
+	)
+}
+
+func prepareCoroPreemptTestPlan(
+	t *testing.T,
+	source string,
+	testRoots []coroRootFactoryTestRoot,
+	yieldOnly []string,
+	maxPlainInstructions int,
+) (llssa.Program, *ssa.Package, []*ast.File, *EmissionUniverse, *coro.SSAPlan) {
+	return prepareCoroRootFactoryTestPlanWithScheduler(
+		t, source, testRoots, yieldOnly, maxPlainInstructions, coro.SchedulerProgramBootstrapABIV2,
+	)
+}
+
+func prepareCoroProgramInitTestPlan(
+	t *testing.T, source string,
+) (llssa.Program, *ssa.Package, []*ast.File, *EmissionUniverse, *coro.SSAPlan) {
 	t.Helper()
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
 	prog := newLLSSAProg(t)
@@ -1512,7 +2139,64 @@ func prepareCoroRootFactoryTestPlan(
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerChildAwaitABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+	functionIDs.ArchiveReady = true
+	packageInit := ssaPkg.Func("init")
+	yield := ssaPkg.Func("Yield")
+	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: packageInit, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+		EmissionUniverse:     ssaUniverse,
+		FunctionIDs:          functionIDs,
+		MaxPlainInstructions: -1,
+		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+			switch {
+			case fn == yield:
+				return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+			case fn.Pkg != nil && fn.Pkg.Pkg.Path() == "embed" && fn.Name() == "init":
+				// The fixture does not compile the standard embed package, but its
+				// package initializer is an exact frozen no-suspend external edge.
+				return coro.SSAFunctionPolicy{
+					Effect: coro.NoSuspend, External: coro.ExternalKnown, OverrideExternal: true,
+				}, nil
+			default:
+				return coro.SSAFunctionPolicy{}, nil
+			}
+		},
+		ClassifyElidedCall: func(_ *ssa.Function, call ssa.CallInstruction) (bool, error) {
+			callee := call.Common().StaticCallee()
+			return callee != nil && callee.Pkg != nil && callee.Pkg.Pkg.Path() == "unsafe" && callee.Name() == "init", nil
+		},
+	})
+	if err != nil {
+		prog.Dispose()
+		t.Fatal(err)
+	}
+	return prog, ssaPkg, files, universe, plan
+}
+
+func prepareCoroRootFactoryTestPlanWithScheduler(
+	t *testing.T,
+	source string,
+	testRoots []coroRootFactoryTestRoot,
+	yieldOnly []string,
+	maxPlainInstructions int,
+	schedulerABI string,
+) (llssa.Program, *ssa.Package, []*ast.File, *EmissionUniverse, *coro.SSAPlan) {
+	t.Helper()
+	ssaPkg, _, files := buildGoSSAPkg(t, source)
+	prog := newLLSSAProg(t)
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	if err != nil {
+		prog.Dispose()
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+	if err != nil {
+		prog.Dispose()
+		t.Fatal(err)
+	}
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = schedulerABI
 	functionIDs.ArchiveReady = true
 	roots := make(coro.Roots, len(testRoots))
 	for i, root := range testRoots {
@@ -1535,7 +2219,7 @@ func prepareCoroRootFactoryTestPlan(
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, roots, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
 		FunctionIDs:          functionIDs,
-		MaxPlainInstructions: -1,
+		MaxPlainInstructions: maxPlainInstructions,
 		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
 			if yieldSet[fn] {
 				return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil

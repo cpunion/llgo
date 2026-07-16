@@ -3,11 +3,134 @@
 package libc
 
 import (
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 )
+
+func TestWasmBuiltinsCompileConfigIsFreestandingAndTripleScoped(t *testing.T) {
+	baseDir := "/cache/wasmbuiltins"
+	includeDir := filepath.Join(baseDir, "llgo-wasmbuiltins-include")
+	wasip2 := GetWasmBuiltinsCompileConfig(baseDir, includeDir, "wasm32-unknown-wasi")
+	unknown := GetWasmBuiltinsCompileConfig(baseDir, includeDir, "wasm32-unknown-unknown")
+
+	if len(wasip2.Groups) != 1 || len(unknown.Groups) != 1 {
+		t.Fatalf("wasmbuiltins groups = %d/%d, want 1/1", len(wasip2.Groups), len(unknown.Groups))
+	}
+	if wasip2.Groups[0].OutputFileName == unknown.Groups[0].OutputFileName {
+		t.Fatalf("different WebAssembly ABIs share archive %q", wasip2.Groups[0].OutputFileName)
+	}
+	if !strings.Contains(wasip2.Groups[0].OutputFileName, "wasm32-unknown-wasi") ||
+		!strings.Contains(unknown.Groups[0].OutputFileName, "wasm32-unknown-unknown") {
+		t.Fatalf("archive names do not preserve target triples: %q, %q",
+			wasip2.Groups[0].OutputFileName, unknown.Groups[0].OutputFileName)
+	}
+	for _, name := range []string{"dlmalloc.c", "sbrk.c", "errno.c", "errno_state.c", "abort.c", "memcpy.c", "memmove.c", "memset.c", "exp.c", "log.c"} {
+		if !slices.ContainsFunc(wasip2.Groups[0].Files, func(path string) bool {
+			return filepath.Base(path) == name
+		}) {
+			t.Errorf("wasmbuiltins is missing %s", name)
+		}
+	}
+	for _, forbidden := range []string{"pthread", "socket", "preview1", "wasi_snapshot_preview1"} {
+		if slices.ContainsFunc(wasip2.Groups[0].Files, func(path string) bool {
+			return strings.Contains(filepath.Base(path), forbidden)
+		}) {
+			t.Errorf("freestanding wasmbuiltins unexpectedly contains %q source", forbidden)
+		}
+	}
+	for _, flag := range []string{
+		"-nostdlibinc",
+		"-D__wasilibc_unmodified_upstream",
+		"-mno-bulk-memory",
+		"-I" + includeDir,
+		"-I" + filepath.Join(baseDir, "dlmalloc", "include"),
+		"-idirafter" + filepath.Join(baseDir, "libc-top-half", "musl", "include"),
+	} {
+		if !slices.Contains(wasip2.Groups[0].CFlags, flag) {
+			t.Errorf("wasmbuiltins C flags = %v, want %q", wasip2.Groups[0].CFlags, flag)
+		}
+	}
+}
+
+func TestPrepareWasmBuiltinsHeadersDoesNotRequireWASISysroot(t *testing.T) {
+	baseDir := t.TempDir()
+	archDir := filepath.Join(baseDir, "libc-top-half", "musl", "arch", "wasm32", "bits")
+	includeSourceDir := filepath.Join(baseDir, "libc-top-half", "musl", "include")
+	typeHeaderDir := filepath.Join(baseDir, "libc-bottom-half", "headers", "public")
+	for _, dir := range []string{archDir, includeSourceDir, typeHeaderDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{
+		"__typedef_time_t.h",
+		"__typedef_suseconds_t.h",
+		"__typedef_clockid_t.h",
+		"__typedef_sigset_t.h",
+		"__typedef_clock_t.h",
+	} {
+		if err := os.WriteFile(filepath.Join(typeHeaderDir, name), []byte("/* pinned scalar type */\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(archDir, "alltypes.h.in"), []byte(`
+#define _Addr long
+#if defined(__NEED_sigset_t) && !defined(__DEFINED_sigset_t)
+#include <__typedef_sigset_t.h>
+#define __DEFINED_sigset_t
+#endif
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(includeSourceDir, "alltypes.h.in"), []byte(`
+TYPEDEF unsigned _Addr size_t;
+TYPEDEF _Addr intptr_t;
+TYPEDEF unsigned wchar_t;
+TYPEDEF struct __sigset_t { unsigned long __bits[128/sizeof(long)]; } sigset_t;
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	includeDir, err := PrepareWasmBuiltinsHeaders(baseDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(filepath.Join(includeDir, "bits", "alltypes.h"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, declaration := range []string{
+		"__NEED_size_t",
+		"__NEED_intptr_t",
+		"__NEED_wchar_t",
+		"__NEED_sigset_t",
+		"__typedef_sigset_t.h",
+	} {
+		if !strings.Contains(string(contents), declaration) {
+			t.Errorf("generated alltypes.h is missing %q", declaration)
+		}
+	}
+	if strings.Contains(string(contents), "TYPEDEF ") {
+		t.Errorf("generated alltypes.h still contains unexpanded TYPEDEF directives:\n%s", contents)
+	}
+	for _, supportFile := range []string{
+		"errno.h",
+		"errno_state.c",
+		"__macro_PAGESIZE.h",
+		"__typedef_time_t.h",
+		"__typedef_suseconds_t.h",
+		"__typedef_clockid_t.h",
+		"__typedef_sigset_t.h",
+		"__typedef_clock_t.h",
+	} {
+		if _, err := os.Stat(filepath.Join(includeDir, supportFile)); err != nil {
+			t.Errorf("generated support file %s: %v", supportFile, err)
+		}
+	}
+}
 
 func TestGetNewlibESP32Config_LibConfig(t *testing.T) {
 	config := GetNewlibESP32Config()

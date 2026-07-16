@@ -116,6 +116,7 @@ type commonSection struct {
 	AbiMode            string       `yaml:"ABI_MODE,omitempty"`
 	BuildTags          []string     `yaml:"BUILD_TAGS,omitempty"`
 	Target             string       `yaml:"TARGET,omitempty"`
+	RuntimeGC          string       `yaml:"RUNTIME_GC,omitempty"`
 	LLVMCPU            string       `yaml:"LLVM_CPU,omitempty"`
 	LLVMFeatures       string       `yaml:"LLVM_FEATURES,omitempty"`
 	TargetABI          string       `yaml:"TARGET_ABI,omitempty"`
@@ -141,7 +142,7 @@ type commonSection struct {
 }
 
 func (s *commonSection) empty() bool {
-	return s.AbiMode == "" && len(s.BuildTags) == 0 && s.Target == "" && s.LLVMCPU == "" &&
+	return s.AbiMode == "" && len(s.BuildTags) == 0 && s.Target == "" && s.RuntimeGC == "" && s.LLVMCPU == "" &&
 		s.LLVMFeatures == "" && s.TargetABI == "" &&
 		s.CoroPlanDigest == "" && s.CoroABI == "" && s.CoroSchedulerABI == "" && s.CoroPanicABI == "" &&
 		s.CoroFuncRepABI == "" && s.CoroTargetTriple == "" && s.CoroTargetCPU == "" &&

@@ -109,16 +109,97 @@ func (p *SSAPlan) CallPlan(call ssa.CallInstruction) (SSACallPlan, bool) {
 	return plan, true
 }
 
+// ResolveClosedStaticSpawn proves the exact source and whole-plan shape used
+// by the first stackless goroutine-spawn lowering. The target is selected by
+// the immutable CallPlan, never by a display name or a runtime callback. The
+// target must have one coroutine primary even when its source body is bounded:
+// this preserves preemption if that goroutine becomes CPU-heavy and lets sync
+// callers reuse the same body through ordinary async-effect propagation.
+func (p *SSAPlan) ResolveClosedStaticSpawn(call *ssa.Go) (*ssa.Function, FunctionPlan, error) {
+	if p == nil || call == nil || call.Common() == nil {
+		return nil, FunctionPlan{}, fmt.Errorf("requires a compilation CallPlan")
+	}
+	common := call.Common()
+	raw, direct := common.Value.(*ssa.Function)
+	if !direct || raw == nil || common.IsInvoke() || common.Method != nil || common.StaticCallee() != raw {
+		return nil, FunctionPlan{}, fmt.Errorf("requires an exact static top-level function operand")
+	}
+	callPlan, ok := p.CallPlan(call)
+	if !ok {
+		return nil, FunctionPlan{}, fmt.Errorf("spawn has no compilation CallPlan")
+	}
+	if callPlan.Kind != CallSpawn || callPlan.Open || callPlan.MayBeNil || len(callPlan.Targets) != 1 {
+		return nil, FunctionPlan{}, fmt.Errorf(
+			"requires one closed non-nil spawn target, got kind=%v open=%t may-be-nil=%t targets=%d",
+			callPlan.Kind, callPlan.Open, callPlan.MayBeNil, len(callPlan.Targets),
+		)
+	}
+	target, ok := p.Function(callPlan.Targets[0])
+	if !ok || target == nil {
+		return nil, FunctionPlan{}, fmt.Errorf("spawn target %q is absent from the compilation plan", callPlan.Targets[0])
+	}
+	targetPlan, ok := p.FunctionPlan(target)
+	if !ok || targetPlan.ID != callPlan.Targets[0] {
+		return nil, FunctionPlan{}, fmt.Errorf("spawn target %q has no canonical function plan", callPlan.Targets[0])
+	}
+	if target.Parent() != nil || len(target.FreeVars) != 0 || target.Synthetic != "" || target.Origin() != nil || len(target.TypeArgs()) != 0 {
+		return nil, FunctionPlan{}, fmt.Errorf("target %q is not an exact non-capturing top-level function", targetPlan.ID)
+	}
+	if params := target.TypeParams(); params != nil && params.Len() != 0 {
+		return nil, FunctionPlan{}, fmt.Errorf("target %q is a generic declaration", targetPlan.ID)
+	}
+	sig := target.Signature
+	if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Results().Len() != 0 ||
+		(sig.TypeParams() != nil && sig.TypeParams().Len() != 0) ||
+		(sig.RecvTypeParams() != nil && sig.RecvTypeParams().Len() != 0) {
+		return nil, FunctionPlan{}, fmt.Errorf("target %q must have one non-method, non-variadic, zero-result signature", targetPlan.ID)
+	}
+	if targetPlan.External != Defined || targetPlan.Demand != AsyncDemand {
+		return nil, FunctionPlan{}, fmt.Errorf(
+			"target %q is not one demanded defined async root (external=%s demand=%s)",
+			targetPlan.ID, targetPlan.External, targetPlan.Demand,
+		)
+	}
+	if targetPlan.Emission != EmitCoroutine || targetPlan.Primary != PrimaryCoroutine || targetPlan.FuncRep != DirectCoro ||
+		!targetPlan.Effect.Contains(YieldOnly) || callPlan.Rep != DirectCoro {
+		return nil, FunctionPlan{}, fmt.Errorf(
+			"target %q is not one preemptible direct coroutine primary (emission=%s primary=%s representation=%s effect=%s call-representation=%s)",
+			targetPlan.ID, targetPlan.Emission, targetPlan.Primary, targetPlan.FuncRep, targetPlan.Effect, callPlan.Rep,
+		)
+	}
+	caller := call.Parent()
+	callerPlan, ok := p.FunctionPlan(caller)
+	if !ok || callerPlan.Emission != EmitCoroutine || callerPlan.Primary != PrimaryCoroutine || callerPlan.FuncRep != DirectCoro ||
+		callerPlan.Demand != AsyncDemand || !callerPlan.Effect.Contains(YieldOnly) {
+		return nil, FunctionPlan{}, fmt.Errorf(
+			"spawn owner is not one async-only contextful coroutine primary (emission=%s primary=%s representation=%s demand=%s effect=%s)",
+			callerPlan.Emission, callerPlan.Primary, callerPlan.FuncRep, callerPlan.Demand, callerPlan.Effect,
+		)
+	}
+	return target, targetPlan, nil
+}
+
 // ElidesCall reports whether trusted frontend policy proved that the exact SSA
-// call emits no callable function edge. The source operation may be omitted or
-// lowered inline as a no-suspend compiler intrinsic. Elided calls deliberately
-// have no CallPlan and must not be treated as DirectPlain or another callable
-// ABI edge.
+// declaration call emits no callable edge. The source operation may be omitted,
+// lowered inline, or replaced by separately frozen lowered calls. Elided calls
+// deliberately have no CallPlan and must not be treated as DirectPlain or
+// another callable ABI edge; replacement edges retain their own effects.
 func (p *SSAPlan) ElidesCall(call ssa.CallInstruction) bool {
 	if p == nil || call == nil {
 		return false
 	}
 	_, ok := p.elidedCalls[call]
+	return ok
+}
+
+// RawFunctionAddressArgument reports whether the exact call argument is
+// lowered as a raw static function entry rather than as a Go interface or
+// descriptor value.
+func (p *SSAPlan) RawFunctionAddressArgument(call ssa.CallInstruction, argument int) bool {
+	if p == nil || call == nil || argument < 0 {
+		return false
+	}
+	_, ok := p.rawAddressArgs[ssaCallArgumentUse{call: call, argument: argument}]
 	return ok
 }
 
@@ -161,6 +242,10 @@ type ssaFuncFlow struct {
 	canonicalizer     *ssaFunctionCanonicalizer
 	directPlainArgs   map[ssaCallArgumentUse]struct{}
 	directPlainOrder  []ssaCallArgumentUse
+	rawAddressArgs    map[ssaCallArgumentUse]struct{}
+	rawAddressOrder   []ssaCallArgumentUse
+	rawAddressBoxes   map[*ssa.MakeInterface]ssaCallArgumentUse
+	closedValues      map[ssa.Value]SSAClosedDynamicCallCertificate
 }
 
 type ssaCallArgumentUse struct {
@@ -176,10 +261,22 @@ func analyzeSSAFunctionFlow(
 	dynamicResolution DynamicResolution,
 	canonicalizer *ssaFunctionCanonicalizer,
 	directPlainArgs []ssaCallArgumentUse,
+	rawAddressArgs []ssaCallArgumentUse,
+	closedDynamicCalls map[ssa.CallInstruction]SSAClosedDynamicCallCertificate,
 ) (*ssaFuncFlow, error) {
 	directPlainSet := make(map[ssaCallArgumentUse]struct{}, len(directPlainArgs))
 	for _, use := range directPlainArgs {
 		directPlainSet[use] = struct{}{}
+	}
+	rawAddressSet := make(map[ssaCallArgumentUse]struct{}, len(rawAddressArgs))
+	rawAddressBoxes := make(map[*ssa.MakeInterface]ssaCallArgumentUse, len(rawAddressArgs))
+	for _, use := range rawAddressArgs {
+		rawAddressSet[use] = struct{}{}
+		if use.call != nil && use.call.Common() != nil && use.argument >= 0 && use.argument < len(use.call.Common().Args) {
+			if boxed, ok := use.call.Common().Args[use.argument].(*ssa.MakeInterface); ok {
+				rawAddressBoxes[boxed] = use
+			}
+		}
 	}
 	flow := &ssaFuncFlow{
 		allValues:         make(map[ssa.Value]struct{}),
@@ -192,6 +289,23 @@ func analyzeSSAFunctionFlow(
 		canonicalizer:     canonicalizer,
 		directPlainArgs:   directPlainSet,
 		directPlainOrder:  append([]ssaCallArgumentUse(nil), directPlainArgs...),
+		rawAddressArgs:    rawAddressSet,
+		rawAddressOrder:   append([]ssaCallArgumentUse(nil), rawAddressArgs...),
+		rawAddressBoxes:   rawAddressBoxes,
+		closedValues:      make(map[ssa.Value]SSAClosedDynamicCallCertificate, len(closedDynamicCalls)),
+	}
+	for call, certificate := range closedDynamicCalls {
+		value := call.Common().Value
+		if previous, exists := flow.closedValues[value]; exists {
+			if !sameSSAClosedDynamicCallCertificate(previous, certificate) {
+				return nil, fmt.Errorf("conflicting closed dynamic call certificates for callee value in %q", call.Parent().Name())
+			}
+			continue
+		}
+		flow.closedValues[value] = SSAClosedDynamicCallCertificate{
+			Targets:  append([]*ssa.Function(nil), certificate.Targets...),
+			MayBeNil: certificate.MayBeNil,
+		}
 	}
 
 	for _, fn := range functions {
@@ -255,6 +369,20 @@ func analyzeSSAFunctionFlow(
 		if !isScalarFuncType(value.Type()) {
 			continue
 		}
+		if certificate, certified := flow.closedValues[value]; certified {
+			for _, target := range certificate.Targets {
+				if err := flow.addTarget(value, target); err != nil {
+					return nil, fmt.Errorf("resolve certified function-value target %q: %w", target.Name(), err)
+				}
+			}
+			if certificate.MayBeNil {
+				flow.markMayBeNil(value)
+			}
+			// The proof closes the target set, not the physical representation:
+			// this value crossed canonical storage and must retain Dispatch.
+			flow.markBoundary(value)
+			continue
+		}
 		switch value := value.(type) {
 		case *ssa.Function:
 			if err := flow.addTarget(value, value); err != nil {
@@ -301,6 +429,18 @@ func analyzeSSAFunctionFlow(
 		}
 	}
 	return flow, nil
+}
+
+func sameSSAClosedDynamicCallCertificate(left, right SSAClosedDynamicCallCertificate) bool {
+	if left.MayBeNil != right.MayBeNil || len(left.Targets) != len(right.Targets) {
+		return false
+	}
+	for i := range left.Targets {
+		if left.Targets[i] != right.Targets[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (f *ssaFuncFlow) recordValue(value ssa.Value) {
@@ -460,7 +600,9 @@ func (f *ssaFuncFlow) seedInstruction(instruction ssa.Instruction) {
 			}
 		}
 	case *ssa.MakeInterface:
-		f.markBoundary(instruction.X)
+		if _, rawAddress := f.rawAddressBoxes[instruction]; !rawAddress {
+			f.markBoundary(instruction.X)
+		}
 	case *ssa.MakeClosure:
 		for _, binding := range instruction.Bindings {
 			f.markBoundary(binding)
@@ -494,6 +636,9 @@ func (f *ssaFuncFlow) seedInstruction(instruction ssa.Instruction) {
 			if _, directPlain := f.directPlainArgs[ssaCallArgumentUse{call: instruction, argument: argument}]; directPlain {
 				continue
 			}
+			if _, rawAddress := f.rawAddressArgs[ssaCallArgumentUse{call: instruction, argument: argument}]; rawAddress {
+				continue
+			}
 			f.markBoundary(value)
 		}
 	}
@@ -513,6 +658,38 @@ func (f *ssaFuncFlow) validateDirectPlainCallArguments() error {
 		if f.unknown[root] || f.mayBeNil[root] || len(f.targets[root]) != 1 || f.requiresDispatch(root) {
 			return fmt.Errorf("call argument %d in %q is not a closed non-nil singleton without another canonical boundary (unknown=%t nil=%t targets=%d canonical=%t)",
 				use.argument, use.call.Parent().Name(), f.unknown[root], f.mayBeNil[root], len(f.targets[root]), f.canonical[root])
+		}
+	}
+	return nil
+}
+
+func (f *ssaFuncFlow) validateRawFunctionAddressCallArguments() error {
+	for _, use := range f.rawAddressOrder {
+		if use.call == nil || use.call.Common() == nil || use.argument < 0 || use.argument >= len(use.call.Common().Args) {
+			return fmt.Errorf("invalid raw function-address call argument index %d", use.argument)
+		}
+		boxed, ok := use.call.Common().Args[use.argument].(*ssa.MakeInterface)
+		if !ok {
+			return fmt.Errorf("raw function-address call argument %d in %q is not a MakeInterface", use.argument, use.call.Parent().Name())
+		}
+		target, ok := boxed.X.(*ssa.Function)
+		if !ok {
+			return fmt.Errorf("raw function-address call argument %d in %q does not contain a static function", use.argument, use.call.Parent().Name())
+		}
+		index, ok := f.index[target]
+		if !ok {
+			return fmt.Errorf("raw function-address target %q in %q has no function-value flow component", target.Name(), use.call.Parent().Name())
+		}
+		root := f.root(index)
+		canonical, resolved, err := f.resolveTarget(target)
+		if err != nil {
+			return fmt.Errorf("resolve raw function-address target %q in %q: %w", target.Name(), use.call.Parent().Name(), err)
+		}
+		if !resolved || canonical == nil || !f.included[canonical] || f.unknown[root] || f.mayBeNil[root] || len(f.targets[root]) != 1 {
+			return fmt.Errorf("raw function-address target %q in %q is not a closed non-nil singleton in the emission universe", target.Name(), use.call.Parent().Name())
+		}
+		if _, present := f.targets[root][canonical]; !present {
+			return fmt.Errorf("raw function-address target %q in %q disagrees with canonical function-value flow", target.Name(), use.call.Parent().Name())
 		}
 	}
 	return nil

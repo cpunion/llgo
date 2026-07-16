@@ -79,6 +79,7 @@ func coroProgramManifestHashV1(ctx *context, anchors []string, bootstrap ...*cor
 	write(ctx.coroPlanDigest)
 	write(activeCoroABIVersion(ctx.buildConf))
 	write(activeCoroSchedulerABIVersion(ctx.buildConf))
+	write(activeCoroPanicABIVersion(ctx.buildConf))
 	write(target.Triple)
 	write(target.CPU)
 	write(target.Features)
@@ -91,8 +92,18 @@ func coroProgramManifestHashV1(ctx *context, anchors []string, bootstrap ...*cor
 		return [16]byte{}, fmt.Errorf("coroutine program manifest accepts at most one bootstrap table")
 	}
 	if len(bootstrap) == 1 && bootstrap[0] != nil {
-		write("llgo.coro.program-bootstrap.v1")
-		write(hex.EncodeToString(bootstrap[0].StepHash[:]))
+		program := bootstrap[0]
+		write(fmt.Sprintf("llgo.coro.program-bootstrap.v%d", program.abiVersion()))
+		write(hex.EncodeToString(program.StepHash[:]))
+		for _, step := range program.Steps {
+			write(fmt.Sprintf("%d", step.Kind))
+			write(fmt.Sprintf("%d", step.Role))
+			write(string(step.FunctionID))
+			write(step.Target)
+			write(step.Owner)
+			write(step.CatalogTarget)
+			write(fmt.Sprintf("%d", step.Aux))
+		}
 	}
 	sum := h.Sum(nil)
 	var hash [16]byte

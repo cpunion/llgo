@@ -28,6 +28,7 @@ type Export struct {
 
 	// Additional fields from target configuration
 	BuildTags    []string
+	GC           string // Runtime GC capability: precise, conservative, leaking, or none.
 	GOOS         string
 	GOARCH       string
 	Libc         string
@@ -186,7 +187,13 @@ func compileWithConfig(
 	compileConfig compile.CompileConfig,
 	outputDir string, options compile.CompileOptions,
 ) (ldflags []string, err error) {
-	ldflags = append(ldflags, "-nostdlib", "-L"+outputDir)
+	// -nostdlib is a compiler-driver option, not part of wasm-ld's interface.
+	// Named WebAssembly targets invoke wasm-ld directly and already provide
+	// every archive explicitly.
+	if filepath.Base(options.Linker) != "wasm-ld" {
+		ldflags = append(ldflags, "-nostdlib")
+	}
+	ldflags = append(ldflags, "-L"+outputDir)
 
 	for _, group := range compileConfig.Groups {
 		err = group.Compile(outputDir, options)
@@ -201,6 +208,36 @@ func compileWithConfig(
 	return
 }
 
+func linkerSupportsICF(linker string) bool {
+	if linker == "" {
+		return false
+	}
+	output, err := exec.Command(linker, "--help").CombinedOutput()
+	return err == nil && linkerHelpSupportsICF(string(output))
+}
+
+func linkerHelpSupportsICF(help string) bool {
+	return strings.Contains(help, "--icf=") || strings.Contains(help, "--icf <")
+}
+
+func validateLibcTargetCompatibility(config *targets.Config) error {
+	if config == nil || config.Libc != "wasmbuiltins" {
+		return nil
+	}
+	if !strings.HasPrefix(config.LLVMTarget, "wasm32-") {
+		return fmt.Errorf("libc wasmbuiltins requires a wasm32 LLVM target, got %q", config.LLVMTarget)
+	}
+	if config.Linker != "wasm-ld" {
+		return fmt.Errorf("libc wasmbuiltins requires linker wasm-ld, got %q", config.Linker)
+	}
+	for _, feature := range strings.Split(config.Features, ",") {
+		if strings.TrimSpace(feature) == "+atomics" {
+			return fmt.Errorf("libc wasmbuiltins does not provide a threaded malloc/errno ABI for +atomics targets")
+		}
+	}
+	return nil
+}
+
 func use(goos, goarch string, wasiThreads, forceEspClang bool, level optlevel.Level, ltoMode lto.Mode, goGlobalDCE bool) (export Export, err error) {
 	targetSpec := resolvedLLVMTargetSpec(goos, goarch, wasiThreads)
 	targetTriple := targetSpec.Triple
@@ -209,6 +246,12 @@ func use(goos, goarch string, wasiThreads, forceEspClang bool, level optlevel.Le
 	export.LLVMTarget = targetSpec.Triple
 	export.CPU = targetSpec.CPU
 	export.Features = targetSpec.Features
+	if goarch == "wasm" {
+		// LLGo does not yet have a tracing collector for WebAssembly linear
+		// memory. Keep the direct GOOS/GOARCH route honest and select the same
+		// explicit leaking profile as the named wasm targets.
+		export.GC = "leaking"
+	}
 	llgoRoot := env.LLGoROOT()
 
 	// Check for ESP Clang support for target-based builds
@@ -478,6 +521,9 @@ func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (expor
 	if cpu == "" {
 		return export, fmt.Errorf("target '%s' does not have a valid CPU configuration", targetName)
 	}
+	if err = validateLibcTargetCompatibility(config); err != nil {
+		return export, fmt.Errorf("target '%s' has incompatible libc/toolchain configuration: %w", targetName, err)
+	}
 
 	// Check for ESP Clang support for target-based builds
 	clangRoot, err := getESPClangRoot(true)
@@ -491,6 +537,7 @@ func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (expor
 
 	// Convert target config to Export - only export necessary fields
 	export.BuildTags = config.BuildTags
+	export.GC = config.GC
 	export.GOOS = config.GOOS
 	export.GOARCH = config.GOARCH
 	export.ExtraFiles = config.ExtraFiles
@@ -525,9 +572,16 @@ func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (expor
 	// Build environment map for template variable expansion
 	envs := buildEnvMap(env.LLGoROOT())
 
-	// Convert LLVMTarget, CPU, Features to CCFLAGS/LDFLAGS
-	// ICF off for Go pc-identity semantics (see the non-cross flags above).
-	ldflags := []string{"-S", "--icf=none"}
+	// Convert LLVMTarget, CPU, Features to CCFLAGS/LDFLAGS. Some wasm-ld
+	// distributions expose the lld ICF switch while others (including the ESP
+	// LLVM 19 build) reject it. Keep the Go pc-identity policy explicit whenever
+	// the selected linker advertises the option; older wasm-ld defaults to no
+	// ICF, so omitting the unsupported switch preserves the same semantics.
+	ldflags := []string{"-S"}
+	targetLinker := filepath.Join(clangRoot, "bin", config.Linker)
+	if config.Linker != "wasm-ld" || linkerSupportsICF(targetLinker) {
+		ldflags = append(ldflags, "--icf=none")
+	}
 	ccflags := []string{level.Flag()}
 	cflags := []string{"-Wno-override-module", "-Qunused-arguments", "-Wno-unused-command-line-argument"}
 	if config.LLVMTarget != "" {
@@ -714,8 +768,32 @@ func UseTarget(targetName string, level optlevel.Level, ltoMode lto.Mode) (expor
 // Use extends the original Use function to support target-based configuration
 // If targetName is provided, it takes precedence over goos/goarch
 func Use(goos, goarch, targetName string, wasiThreads, forceEspClang bool, level optlevel.Level, ltoMode lto.Mode, goGlobalDCE bool) (export Export, err error) {
-	if targetName != "" && !strings.HasPrefix(targetName, "wasm") && !strings.HasPrefix(targetName, "wasi") {
+	if targetName == "" {
+		return use(goos, goarch, wasiThreads, forceEspClang, level, ltoMode, goGlobalDCE)
+	}
+	if !strings.HasPrefix(targetName, "wasm") && !strings.HasPrefix(targetName, "wasi") {
 		return UseTarget(targetName, level, ltoMode)
 	}
-	return use(goos, goarch, wasiThreads, forceEspClang, level, ltoMode, goGlobalDCE)
+
+	// The legacy wasm driver route has the complete WASI-SDK/Emscripten setup
+	// for frontend wasm GOARCH targets. Resolve the named target first so
+	// -target=wasm/wasip1 cannot accidentally compile a host Mach-O image using
+	// the caller's default GOOS/GOARCH. Targets such as wasip2 and wasm-unknown
+	// intentionally use an ARM frontend with a wasm LLVM triple and therefore
+	// continue through the JSON-driven target pipeline.
+	config, resolveErr := targets.NewDefaultResolver().Resolve(targetName)
+	if resolveErr != nil {
+		return export, fmt.Errorf("failed to resolve target %s: %w", targetName, resolveErr)
+	}
+	if config.GOARCH != "wasm" {
+		return UseTarget(targetName, level, ltoMode)
+	}
+	export, err = use(config.GOOS, config.GOARCH, wasiThreads, forceEspClang, level, ltoMode, goGlobalDCE)
+	if err != nil {
+		return export, err
+	}
+	export.BuildTags = append([]string(nil), config.BuildTags...)
+	export.GC = config.GC
+	export.Emulator = config.Emulator
+	return export, nil
 }

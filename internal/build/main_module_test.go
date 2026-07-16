@@ -352,6 +352,251 @@ func TestGenMainModuleCoroProgramBootstrapNativeAndWasm(t *testing.T) {
 	}
 }
 
+func TestGenMainModuleCoroProgramBootstrapV2MixedNativeAndWasm(t *testing.T) {
+	llvm.InitializeAllTargets()
+	t.Setenv(llgoStdioNobuf, "")
+	tests := []struct {
+		name      string
+		target    *llssa.Target
+		goos      string
+		goarch    string
+		uintptrIR string
+		entryIR   string
+		entryName string
+	}{
+		{
+			name:      "native",
+			goos:      "linux",
+			goarch:    "amd64",
+			uintptrIR: "i64",
+			entryIR:   "define i32 @main(",
+			entryName: "main",
+		},
+		{
+			name:      "wasm",
+			target:    &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"},
+			goos:      "wasip1",
+			goarch:    "wasm",
+			uintptrIR: "i32",
+			entryIR:   "define hidden i32 @__main_argc_argv(",
+			entryName: "__main_argc_argv",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			prog := llssa.NewProgram(test.target)
+			defer prog.Dispose()
+			ctx := &context{
+				prog: prog,
+				buildConf: &Config{
+					BuildMode:                     BuildModeExe,
+					Goos:                          test.goos,
+					Goarch:                        test.goarch,
+					EnableCoroEntryResolution:     true,
+					EnableCoroPhysicalABI:         true,
+					EnableCoroChildAwait:          true,
+					EnableCoroProgramBootstrapABI: true,
+					EnableCoroProgramBootstrapRun: true,
+					EnableCoroClosedStaticSpawn:   true,
+				},
+			}
+			const anchor = "__llgo_coro_root_package_v1.0123456789abcdef0123456789abcdef"
+			var programHash [16]byte
+			for i := range programHash {
+				programHash[i] = byte(i + 1)
+			}
+			bootstrap := &coroProgramBootstrapV1{
+				Version: coroProgramBootstrapVersionV2,
+				Steps: []coroProgramBootstrapStepV1{
+					{
+						Kind: coroProgramStepCoroRootV1, Role: coroProgramStepRoleRuntimeInitV2,
+						FunctionID: "runtime-init-id", Target: llssa.PkgRuntime + ".init$coro",
+						Owner: llssa.PkgRuntime, CatalogTarget: anchor, Aux: 0,
+					},
+					{
+						Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleABIInitV2,
+						FunctionID: "abi-init-id", Target: "init$abitypes",
+					},
+					{
+						Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRolePublicRuntimeInitV2,
+						FunctionID: "public-runtime-init-id", Target: "runtime.init",
+					},
+					{
+						Kind: coroProgramStepCoroRootV1, Role: coroProgramStepRolePackageInitV2,
+						FunctionID: "package-init-id", Target: "example.com/foo.init$coro",
+						Owner: "example.com/foo", CatalogTarget: anchor, Aux: 1,
+					},
+					{
+						Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleMainV2,
+						FunctionID: "main-id", Target: "example.com/foo.main",
+					},
+				},
+			}
+			entry := genMainModule(ctx, llssa.PkgRuntime,
+				&packages.Package{ID: "example.com/foo", PkgPath: "example.com/foo", ExportFile: "foo.a"},
+				&genConfig{
+					rtInit:           true,
+					pyInit:           true,
+					coroRootAnchors:  []string{anchor},
+					coroManifestHash: programHash,
+					coroBootstrap:    bootstrap,
+				})
+			ir := entry.LPkg.String()
+			if !strings.Contains(ir, test.entryIR) {
+				t.Fatalf("mixed v2 bootstrap entry module missing %q:\n%s", test.entryIR, ir)
+			}
+			stepsLine := irLineWithPrefix(ir, "@"+coroProgramBootstrapSymbolV2+".steps =")
+			bootstrapLine := irLineWithPrefix(ir, "@"+coroProgramBootstrapSymbolV2+" =")
+			manifestLine := irLineWithPrefix(ir, "@"+coroProgramManifestSymbolV1+" =")
+			if stepsLine == "" || bootstrapLine == "" || manifestLine == "" {
+				t.Fatalf("missing mixed v2 bootstrap/manifest globals:\n%s", ir)
+			}
+			for _, want := range []string{
+				"i32 2, i32 1, ptr @" + anchor + ", " + test.uintptrIR + " 0",
+				"i32 1, i32 2, ptr @\"init$abitypes\", " + test.uintptrIR + " 0",
+				"i32 1, i32 4, ptr @runtime.init, " + test.uintptrIR + " 0",
+				"i32 2, i32 8, ptr @" + anchor + ", " + test.uintptrIR + " 1",
+				"i32 1, i32 16, ptr @\"example.com/foo.main\", " + test.uintptrIR + " 0",
+			} {
+				if !strings.Contains(stepsLine, want) {
+					t.Fatalf("mixed v2 startup table missing %q: %s", want, stepsLine)
+				}
+			}
+			if !strings.Contains(bootstrapLine, "i32 2, i32 0") ||
+				!strings.Contains(bootstrapLine, test.uintptrIR+" 5, ptr @"+coroProgramBootstrapSymbolV2+".steps, ptr @"+coroProgramBootstrapFactorySymbolV2) {
+				t.Fatalf("mixed v2 bootstrap version/count/steps/factory are not canonical: %s", bootstrapLine)
+			}
+			if !strings.Contains(manifestLine, "ptr @"+coroProgramBootstrapSymbolV2) {
+				t.Fatalf("manifest does not reference the mixed v2 bootstrap: %s", manifestLine)
+			}
+			if got := entry.LPkg.CoroProgramBootstrap(); got != coroProgramBootstrapSymbolV2 {
+				t.Fatalf("program bootstrap symbol = %q, want %q", got, coroProgramBootstrapSymbolV2)
+			}
+
+			mod := entry.LPkg.Module()
+			publicRuntimeInit := mod.NamedFunction("runtime.init")
+			if publicRuntimeInit.IsNil() || !publicRuntimeInit.IsDeclaration() {
+				t.Fatalf("managed public runtime init must remain an unresolved archive reference, not an entry-module weak body:\n%s", ir)
+			}
+			factory := mod.NamedFunction(coroProgramBootstrapFactorySymbolV2)
+			if factory.IsNil() || factory.IsDeclaration() {
+				t.Fatalf("compiler-owned mixed v2 bootstrap factory is missing:\n%s", ir)
+			}
+			factoryBody := factory.String()
+			if got := strings.Count(factoryBody, "call void @__llgo_coro_await_prepare_v1"); got != 2 {
+				t.Fatalf("mixed v2 main-module factory await calls = %d, want 2:\n%s", got, factoryBody)
+			}
+			if got := strings.Count(factoryBody, "call void @"+coroProgramMainReturnSymbolV1); got != 1 {
+				t.Fatalf("mixed v2 main-module main-return calls = %d, want 1:\n%s", got, factoryBody)
+			}
+			assertInOrder(t, factoryBody,
+				"call ptr %",
+				"call void @__llgo_coro_await_prepare_v1",
+				"call void @\"init$abitypes\"()",
+				"call void @runtime.init()",
+				"call ptr %",
+				"call void @__llgo_coro_await_prepare_v1",
+				"call void @\"example.com/foo.main\"()",
+				"call void @"+coroProgramMainReturnSymbolV1,
+				"call void @"+coroProgramCompletePrepareHookV1,
+			)
+
+			entryBody := mod.NamedFunction(test.entryName).String()
+			for _, legacyCall := range []string{
+				"call void @\"" + llssa.PkgRuntime + ".init\"()",
+				"call void @\"init$abitypes\"()",
+				"call void @runtime.init()",
+				"call void @\"example.com/foo.init\"()",
+				"call void @\"example.com/foo.main\"()",
+			} {
+				if strings.Contains(entryBody, legacyCall) {
+					t.Fatalf("mixed v2 platform entry retained legacy call %q:\n%s", legacyCall, entryBody)
+				}
+			}
+			assertInOrder(t, entryBody,
+				"call void @"+coroFrameAllocatorBootstrapSymbolV1+"()",
+				"call void @Py_Initialize()",
+				"call ptr @"+coroProgramBeginSymbolV1,
+				"call ptr @"+coroProgramBootstrapFactorySymbolV2,
+				"call void @"+coroProgramRunSymbolV1,
+				"call void @Py_Finalize()",
+			)
+			if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("verify mixed v2 main module before coroutine passes: %v\n%s", err, ir)
+			}
+			if err := lowerCoroControlWrappers(ctx, entry.LPkg); err != nil {
+				t.Fatalf("lower mixed v2 main module coroutine: %v\n%s", err, entry.LPkg.String())
+			}
+			post := mod.String()
+			for _, suffix := range []string{".resume", ".destroy"} {
+				if mod.NamedFunction(coroProgramBootstrapFactorySymbolV2 + suffix).IsNil() {
+					t.Fatalf("main-module CoroSplit did not create mixed v2 factory%s:\n%s", suffix, post)
+				}
+			}
+			for _, intrinsic := range []string{"llvm.coro.id", "llvm.coro.begin", "llvm.coro.suspend", "llvm.coro.resume", "llvm.coro.done", "llvm.coro.destroy"} {
+				if regexp.MustCompile(`call [^\n]*@` + regexp.QuoteMeta(intrinsic) + `\b`).MatchString(post) {
+					t.Fatalf("lowered mixed v2 main module still references %s:\n%s", intrinsic, post)
+				}
+			}
+			object, err := prog.TargetMachine().EmitToMemoryBuffer(mod, llvm.ObjectFile)
+			if err != nil {
+				t.Fatalf("emit mixed v2 main-module object: %v\n%s", err, post)
+			}
+			object.Dispose()
+		})
+	}
+}
+
+func TestGenMainModuleCoroProgramBootstrapV2DefinesOnlyOwnedPublicRuntimeNoop(t *testing.T) {
+	llvm.InitializeAllTargets()
+	t.Setenv(llgoStdioNobuf, "")
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	ctx := &context{
+		prog: prog,
+		buildConf: &Config{
+			BuildMode:                     BuildModeExe,
+			Goos:                          "linux",
+			Goarch:                        "amd64",
+			EnableCoroEntryResolution:     true,
+			EnableCoroPhysicalABI:         true,
+			EnableCoroChildAwait:          true,
+			EnableCoroProgramBootstrapABI: true,
+			EnableCoroProgramBootstrapRun: true,
+		},
+	}
+	bootstrap := &coroProgramBootstrapV1{
+		Version: coroProgramBootstrapVersionV2,
+		Steps: []coroProgramBootstrapStepV1{
+			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleRuntimeInitV2, FunctionID: "internal-runtime", Target: llssa.PkgRuntime + ".init"},
+			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleABIInitV2, FunctionID: "compiler-abi", Target: "init$abitypes"},
+			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRolePublicRuntimeInitV2, FunctionID: coroProgramPublicRuntimeNoopIDV2, Target: coroProgramPublicRuntimeNoopSymbolV2},
+			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRolePackageInitV2, FunctionID: "package-init", Target: "example.com/no-public-runtime.init"},
+			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleMainV2, FunctionID: "main", Target: "example.com/no-public-runtime.main"},
+		},
+	}
+	entry := genMainModule(ctx, llssa.PkgRuntime,
+		&packages.Package{ID: "example.com/no-public-runtime", PkgPath: "example.com/no-public-runtime", ExportFile: "no-public-runtime.a"},
+		&genConfig{coroBootstrap: bootstrap},
+	)
+	module := entry.LPkg.Module()
+	if function := module.NamedFunction(coroProgramPublicRuntimeNoopSymbolV2); function.IsNil() || function.IsDeclaration() {
+		t.Fatalf("compiler-owned public runtime no-op is not defined:\n%s", module.String())
+	}
+	if function := module.NamedFunction("runtime.init"); !function.IsNil() {
+		t.Fatalf("absent public runtime acquired a guessed runtime.init symbol:\n%s", module.String())
+	}
+	if function := module.NamedFunction("syscall.init"); !function.IsNil() {
+		t.Fatalf("managed V2 entry retained a weak syscall.init interception body:\n%s", module.String())
+	}
+	if function := module.NamedFunction(coroProgramMainReturnSymbolV1); !function.IsNil() {
+		t.Fatalf("V2 bootstrap without closed-static spawn declared main-return cancellation:\n%s", module.String())
+	}
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify absent-public-runtime v2 module: %v\n%s", err, module.String())
+	}
+}
+
 func TestGenMainModuleCoroProgramBootstrapRuntimeSwitch(t *testing.T) {
 	llvm.InitializeAllTargets()
 	t.Setenv(llgoStdioNobuf, "")
@@ -403,7 +648,11 @@ func TestGenMainModuleCoroProgramBootstrapRuntimeSwitch(t *testing.T) {
 	if strings.Contains(entryBody, "call void @\"example.com/foo.init\"()") || strings.Contains(entryBody, "call void @\"example.com/foo.main\"()") {
 		t.Fatalf("platform entry retained legacy direct init/main calls:\n%s", entryBody)
 	}
+	if got := strings.Count(entryBody, "call void @"+coroFrameAllocatorBootstrapSymbolV1+"()"); got != 1 {
+		t.Fatalf("platform entry allocator bootstrap calls = %d, want exactly one:\n%s", got, entryBody)
+	}
 	assertInOrder(t, entryBody,
+		"call void @"+coroFrameAllocatorBootstrapSymbolV1+"()",
 		"call void @Py_Initialize()",
 		"call void @\""+llssa.PkgRuntime+".init\"()",
 		"call void @runtime.init()",

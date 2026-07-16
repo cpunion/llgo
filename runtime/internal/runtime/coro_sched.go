@@ -59,17 +59,68 @@ func coroRunG(p *coroP, g *coroG) bool {
 	return coroRunActions(p, g, action)
 }
 
-func coroRun(p *coroP) bool {
+func coroRun(p *coroP, main *coroG) bool {
 	for {
 		g, ok := coro.NextRunnable(p)
 		if !ok {
 			return false
 		}
 		if g == nil {
-			return true
+			// Platform event-loop integration is the next adapter layer. Never
+			// confuse an empty ready queue with completion while parked Gs remain.
+			return !coro.HasWaiting(p)
 		}
 		if !coroRunG(p, g) {
 			return false
+		}
+		if g == main && coroProgramLifecycleV1State == coroProgramMainReturnRequestedV1 && !coro.DeadG(main) {
+			// The compiler hook is valid only on main's normal continuation
+			// immediately before the bootstrap root's final suspend. Yielding or
+			// parking after publishing the marker is an ABI violation.
+			return false
+		}
+		if g == main && coro.DeadG(main) {
+			// Command main never drains background goroutines. The program adapter
+			// either enters the explicit ready-child cancellation protocol after a
+			// normal-main hook, or fails closed.
+			return true
+		}
+	}
+}
+
+// coroCancelReady destroys every ready child deepest-to-root. It deliberately
+// never calls coro.done or coro.resume: command shutdown owns only suspended
+// YieldOnly/AwaitStructured frame chains.
+func coroCancelReady(p *coroP) bool {
+	for {
+		g, action, ok := coro.NextCommandCancel(p)
+		if !ok {
+			return false
+		}
+		if g == nil {
+			return action.Kind == coro.ActionInvalid && action.Handle == nil
+		}
+		for {
+			switch action.Kind {
+			case coro.ActionCancelDestroy:
+				coroHandleDestroy(action.Handle)
+				action, ok = coro.CancelDestroyed(p, g, action)
+				if !ok {
+					return false
+				}
+			case coro.ActionCancelComplete:
+				if action.Handle != nil || !coroReleaseCompletedTask(g) {
+					return false
+				}
+				// g may have been physically freed. Never inspect it again.
+				g = nil
+				break
+			default:
+				return false
+			}
+			if g == nil {
+				break
+			}
 		}
 	}
 }
@@ -78,9 +129,13 @@ func coroRun(p *coroP) bool {
 // wrappers stay direct calls so scheduler internals do not introduce function
 // values, interface dispatch, or unnecessary dual sync/async versions.
 func coroRunActions(p *coroP, g *coroG, action coro.Action) bool {
-	for action.Kind != coro.ActionComplete {
+	for {
 		var ok bool
 		switch action.Kind {
+		case coro.ActionComplete:
+			return coroReleaseCompletedTask(g)
+		case coro.ActionYield, coro.ActionPark:
+			return true
 		case coro.ActionCheckResume, coro.ActionCheckDestroy:
 			action, ok = coro.Checked(p, g, action, coroHandleDone(action.Handle))
 		case coro.ActionResume:
@@ -88,7 +143,43 @@ func coroRunActions(p *coroP, g *coroG, action coro.Action) bool {
 			action, ok = coro.Resumed(p, g, action)
 		case coro.ActionDestroy:
 			coroHandleDestroy(action.Handle)
-			action, ok = coro.Destroyed(p, g, action)
+			for {
+				next, committed := coro.Destroyed(p, g, action)
+				if committed {
+					action, ok = next, true
+					break
+				}
+				if !coro.AcknowledgeTerminalSchedule(p, g, action) {
+					ok = false
+					break
+				}
+				// Retry only the scheduler commit. The LLVM handle was already
+				// destroyed exactly once before entering this loop.
+			}
+		case coro.ActionPanicDestroy:
+			coroHandleDestroy(action.Handle)
+			for {
+				next, committed := coro.PanicDestroyed(p, g, action)
+				if committed {
+					action, ok = next, true
+					break
+				}
+				if !coro.AcknowledgePanicTerminalSchedule(p, g, action) {
+					ok = false
+					break
+				}
+				// Retry only the state commit. The suspended ancestor handle was
+				// already destroyed exactly once.
+			}
+		case coro.ActionPanicComplete:
+			// The core has retained a stable task-local two-word record and has
+			// destroyed every frame. Printing/fatal ownership and compiler-side
+			// cleanup/recover semantics are not part of this prototype, so stop
+			// here instead of misclassifying panic as ordinary G completion.
+			if _, published := coro.LoadPanicRecord(g); !published {
+				return false
+			}
+			return false
 		default:
 			return false
 		}
@@ -96,5 +187,24 @@ func coroRunActions(p *coroP, g *coroG, action coro.Action) bool {
 			return false
 		}
 	}
-	return true
+}
+
+// __llgo_coro_panic_prepare_v1 is the compiler-to-runtime terminal panic
+// handoff. The physical G is an explicit ABI argument: this boundary must
+// never discover scheduler ownership through TLS or a process-global current
+// G. A rejected once-only publication is a terminal ABI violation and aborts
+// immediately, so malformed cleanup/recover/Goexit/implicit-fault lowering
+// cannot resume ordinary execution on a poisoned G.
+//
+//export __llgo_coro_panic_prepare_v1
+func __llgo_coro_panic_prepare_v1(g, handle, header, typeWord, dataWord unsafe.Pointer) {
+	if !coro.PreparePanic(
+		(*coro.G)(g),
+		handle,
+		(*coro.HeaderV1)(header),
+		typeWord,
+		dataWord,
+	) {
+		coroRuntimeAbort("invalid coroutine panic handoff")
+	}
 }

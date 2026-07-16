@@ -28,6 +28,12 @@ type Config struct {
 	CodeModel       string `json:"code-model"`
 	TargetABI       string `json:"target-abi"`
 	RelocationModel string `json:"relocation-model"`
+	// GC is the runtime memory-management capability selected by this target.
+	// Supported values match the target JSON vocabulary: precise,
+	// conservative, leaking, and none. A leaking/none profile is consumed by
+	// the build pipeline as the explicit nogc runtime rather than being treated
+	// as documentation-only metadata.
+	GC string `json:"gc"`
 
 	// Binary and firmware configuration
 	BinaryFormat string `json:"binary-format"`

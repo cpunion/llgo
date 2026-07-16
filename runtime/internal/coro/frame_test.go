@@ -171,9 +171,9 @@ func TestFramePublishAndHandoffState(t *testing.T) {
 	if PrepareAwait(g, parentHandle, childHandle) {
 		t.Fatal("duplicate child handoff accepted")
 	}
-	destroy, ok := dispatchPending(g, g.active)
-	if !ok || destroy != nil || g.active.handle != childHandle || g.root.state != FrameSuspended {
-		t.Fatalf("await dispatch = (destroy=%p, ok=%t, active=%p, parent=%d)", destroy, ok, g.active.handle, g.root.state)
+	destroy, yielded, ok := dispatchPending(g, g.active)
+	if !ok || destroy != nil || yielded || g.active.handle != childHandle || g.root.state != FrameSuspended {
+		t.Fatalf("await dispatch = (destroy=%p, yielded=%t, ok=%t, active=%p, parent=%d)", destroy, yielded, ok, g.active.handle, g.root.state)
 	}
 
 	g.active.state = FrameActive
@@ -182,10 +182,10 @@ func TestFramePublishAndHandoffState(t *testing.T) {
 	if !PrepareComplete(g, childHandle, child.header) {
 		t.Fatal("valid child completion rejected")
 	}
-	destroy, ok = dispatchPending(g, g.active)
-	if !ok || destroy == nil || destroy.handle != childHandle || g.active != g.root || g.destroyTarget != destroy ||
+	destroy, yielded, ok = dispatchPending(g, g.active)
+	if !ok || destroy == nil || yielded || destroy.handle != childHandle || g.active != g.root || g.destroyTarget != destroy ||
 		destroy.state != FrameDestroyPending || child.header.Lifecycle != uint16(FrameDestroyPending) {
-		t.Fatalf("completion dispatch = (destroy=%p, ok=%t, active=%p, target=%p)", destroy, ok, g.active, g.destroyTarget)
+		t.Fatalf("completion dispatch = (destroy=%p, yielded=%t, ok=%t, active=%p, target=%p)", destroy, yielded, ok, g.active, g.destroyTarget)
 	}
 	releaseTestFrame(t, g, child)
 	runtime.KeepAlive(parent.memory)
@@ -224,7 +224,12 @@ func TestTerminalGRejectsResidualSchedulerState(t *testing.T) {
 	terminal := func() *G {
 		return &G{magic: gMagic, state: GDead}
 	}
-	if !TerminalG(new(P), terminal()) {
+	terminalP := func() *P {
+		p := new(P)
+		preemptStore(&p.schedule, scheduleDisabled)
+		return p
+	}
+	if !TerminalG(terminalP(), terminal()) {
 		t.Fatal("strict zero-residue dead G did not report terminal")
 	}
 
@@ -235,6 +240,7 @@ func TestTerminalGRejectsResidualSchedulerState(t *testing.T) {
 		mutate func(*G)
 	}{
 		{"magic", func(g *G) { g.magic = 0 }},
+		{"preempt", func(g *G) { preemptStore(preemptAddress(g), preemptRequested) }},
 		{"state", func(g *G) { g.state = GRunnable }},
 		{"root", func(g *G) { g.root = dummyFrame }},
 		{"active", func(g *G) { g.active = dummyFrame }},
@@ -242,16 +248,23 @@ func TestTerminalGRejectsResidualSchedulerState(t *testing.T) {
 		{"pending kind", func(g *G) { g.pending.kind = pendingAwait }},
 		{"pending from", func(g *G) { g.pending.from = dummyFrame }},
 		{"pending target", func(g *G) { g.pending.target = dummyFrame }},
+		{"pending wait", func(g *G) { g.pending.wait = new(WaitToken) }},
+		{"pending ticket", func(g *G) { g.pending.ticket = 1 }},
 		{"destroy target", func(g *G) { g.destroyTarget = dummyFrame }},
 		{"destroy root", func(g *G) { g.destroyRoot = true }},
 		{"ready link", func(g *G) { g.nextReady = dummyG }},
 		{"queued", func(g *G) { g.queued = true }},
+		{"wait token", func(g *G) { g.waitToken = new(WaitToken) }},
+		{"wait ticket", func(g *G) { g.waitTicket = 1 }},
+		{"wait link", func(g *G) { g.nextWait = dummyG }},
+		{"waiting", func(g *G) { g.waiting = true }},
+		{"running P", func(g *G) { g.runP = new(P) }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			g := terminal()
 			test.mutate(g)
-			if TerminalG(new(P), g) {
+			if TerminalG(terminalP(), g) {
 				t.Fatal("G with residual scheduler state reported terminal")
 			}
 		})
@@ -265,13 +278,18 @@ func TestTerminalGRejectsResidualSchedulerState(t *testing.T) {
 		{"current", func(p *P) { p.current = dummyG }},
 		{"ready head", func(p *P) { p.readyHead = dummyG }},
 		{"ready tail", func(p *P) { p.readyTail = dummyG }},
+		{"wait head", func(p *P) { p.waitHead = dummyG }},
+		{"wait tail", func(p *P) { p.waitTail = dummyG }},
+		{"schedule idle", func(p *P) { preemptStore(&p.schedule, scheduleIdle) }},
+		{"schedule requested", func(p *P) { preemptStore(&p.schedule, scheduleRequested) }},
+		{"schedule stopping", func(p *P) { preemptStore(&p.schedule, scheduleStopping) }},
 		{"in resume", func(p *P) { p.inResume = true }},
 		{"action kind", func(p *P) { p.action.Kind = ActionResume }},
 		{"action handle", func(p *P) { p.action.Handle = dummyActionHandle }},
 	}
 	for _, test := range pTests {
 		t.Run("P "+test.name, func(t *testing.T) {
-			p := new(P)
+			p := terminalP()
 			test.mutate(p)
 			if TerminalG(p, terminal()) {
 				t.Fatal("P with residual scheduler state reported terminal")

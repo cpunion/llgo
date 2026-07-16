@@ -32,15 +32,20 @@ const coroPrimarySuffix = "$coro"
 // FuncRep only describes escaped function values and never authorizes a
 // second body.
 type plannedFunctionSymbol struct {
-	function   *ssa.Function
-	pkgTypes   *types.Package
-	name       string
-	ftype      int
-	plan       coro.FunctionPlan
-	planned    bool
-	physical   bool
-	childAwait bool
-	coroPlan   *coro.SSAPlan
+	function      *ssa.Function
+	pkgTypes      *types.Package
+	name          string
+	ftype         int
+	plan          coro.FunctionPlan
+	planned       bool
+	physical      bool
+	childAwait    bool
+	programRun    bool
+	plainDispatch bool
+	staticSpawn   bool
+	explicitPanic bool
+	coroPlan      *coro.SSAPlan
+	emission      *EmissionUniverse
 }
 
 // resolveFunctionSymbol is shared by function definitions and declarations so
@@ -84,7 +89,12 @@ func (p *context) resolveFunctionSymbol(fn *ssa.Function) (plannedFunctionSymbol
 	entry.planned = true
 	entry.physical = p.compilation.EnableCoroPhysicalABI
 	entry.childAwait = p.compilation.EnableCoroChildAwait
+	entry.programRun = p.compilation.EnableCoroProgramBootstrapRun
+	entry.plainDispatch = p.compilation.EnableCoroPlainDispatch
+	entry.staticSpawn = p.compilation.EnableCoroClosedStaticSpawn
+	entry.explicitPanic = p.compilation.EnableCoroExplicitStatusPanicABI
 	entry.coroPlan = p.compilation.CoroPlan
+	entry.emission = p.compilation.EmissionUniverse
 	if p.compilation.CoroPlan.IgnoresBody(fn) {
 		return entry, fmt.Errorf("coroutine entry resolution: Go-emitted function %q has an ignored SSA body", plan.ID)
 	}
@@ -162,14 +172,23 @@ func (e plannedFunctionSymbol) checkSupported() error {
 	if e.plan.Emission == coro.EmitNone {
 		return fmt.Errorf("coroutine entry resolution: function %q has no emitted entry", e.plan.ID)
 	}
+	if e.explicitPanic && e.plan.Emission == coro.EmitPlain {
+		return fmt.Errorf("coroutine explicit-status panic ABI: managed plain function %q has no certified hidden-outcome/unwind contract", e.plan.ID)
+	}
 	if e.plan.FuncRep == coro.Dispatch {
-		return fmt.Errorf("coroutine entry resolution: function %q requires an unimplemented dispatch descriptor", e.plan.ID)
+		if !e.plainDispatch {
+			return fmt.Errorf("coroutine entry resolution: function %q requires an unimplemented dispatch descriptor", e.plan.ID)
+		}
+		return validateCoroPlainDispatchTarget(e.function, e.plan)
 	}
 	if e.plan.Emission == coro.EmitCoroutine {
 		if !e.physical {
 			return fmt.Errorf("coroutine emission %q requires coroutine physical ABI lowering", e.plan.ID)
 		}
-		return validateCoroPhysicalABI(e.function, e.plan, e.coroPlan, e.childAwait)
+		if err := validateCoroPhysicalFunctionValueABI(e.plan, e.function.Signature, e.plainDispatch); err != nil {
+			return err
+		}
+		return validateCoroPhysicalABIWithUniverseCapabilities(e.function, e.plan, e.coroPlan, e.emission, e.childAwait, e.programRun, e.staticSpawn, e.explicitPanic)
 	}
 	if e.plan.Emission == coro.EmitExternal && e.plan.FuncRep == coro.DirectCoro {
 		return fmt.Errorf("external coroutine emission %q requires coroutine physical ABI lowering", e.plan.ID)
@@ -190,6 +209,23 @@ func (c *Compilation) preflightCoroPlan() error {
 	}
 	if c.EnableCoroChildAwait && !c.EnableCoroPhysicalABI {
 		return fmt.Errorf("coroutine child await requires coroutine physical ABI")
+	}
+	if c.EnableCoroPlainDispatch && !c.EnableCoroEntryResolution {
+		return fmt.Errorf("coroutine plain dispatch requires coroutine entry resolution")
+	}
+	if c.EnableCoroExplicitStatusPanicABI && !c.EnableCoroEntryResolution {
+		return fmt.Errorf("coroutine explicit-status panic ABI requires coroutine entry resolution")
+	}
+	if c.EnableCoroExplicitStatusPanicABI && !c.EnableCoroChildAwait {
+		return fmt.Errorf("coroutine explicit-status panic ABI requires PhysicalABIV1 child-await lowering")
+	}
+	if c.EnableCoroClosedStaticSpawn {
+		if !c.EnableCoroChildAwait {
+			return fmt.Errorf("coroutine closed static spawn requires coroutine child await")
+		}
+		if !c.EnableCoroProgramBootstrapRun {
+			return fmt.Errorf("coroutine closed static spawn requires runnable program bootstrap v2")
+		}
 	}
 	if !c.EnableCoroEntryResolution {
 		return nil
@@ -231,12 +267,17 @@ func (c *Compilation) preflightCoroPlan() error {
 				continue
 			}
 			entry := plannedFunctionSymbol{
-				function:   function.Function,
-				plan:       function.Plan,
-				planned:    true,
-				physical:   c.EnableCoroPhysicalABI,
-				childAwait: c.EnableCoroChildAwait,
-				coroPlan:   c.CoroPlan,
+				function:      function.Function,
+				plan:          function.Plan,
+				planned:       true,
+				physical:      c.EnableCoroPhysicalABI,
+				childAwait:    c.EnableCoroChildAwait,
+				programRun:    c.EnableCoroProgramBootstrapRun,
+				plainDispatch: c.EnableCoroPlainDispatch,
+				staticSpawn:   c.EnableCoroClosedStaticSpawn,
+				explicitPanic: c.EnableCoroExplicitStatusPanicABI,
+				coroPlan:      c.CoroPlan,
+				emission:      c.EmissionUniverse,
 			}
 			if err := entry.checkSupported(); err != nil {
 				c.coroPreflightErr = err
@@ -247,6 +288,9 @@ func (c *Compilation) preflightCoroPlan() error {
 				if err == nil {
 					err = validateCoroLeafPhysicalSignature(function.Plan, sig)
 				}
+				if err == nil {
+					err = validateCoroPhysicalFunctionValueABI(function.Plan, sig, c.EnableCoroPlainDispatch)
+				}
 				if err != nil {
 					c.coroPreflightErr = err
 					return
@@ -254,7 +298,13 @@ func (c *Compilation) preflightCoroPlan() error {
 			}
 		}
 		if c.EnableCoroPhysicalABI {
-			c.coroPreflightErr = validateCoroPhysicalConsumers(c.CoroPlan, c.EnableCoroChildAwait)
+			c.coroPreflightErr = validateCoroPhysicalConsumersCapabilities(c.CoroPlan, c.EnableCoroChildAwait, c.EnableCoroClosedStaticSpawn)
+			if c.coroPreflightErr != nil {
+				return
+			}
+		}
+		if c.EnableCoroPlainDispatch {
+			c.coroPreflightErr = validateCoroPlainDispatchConsumers(c.CoroPlan)
 		}
 	})
 	return c.coroPreflightErr

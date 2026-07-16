@@ -331,3 +331,28 @@ func TestResolveAllRealTargets(t *testing.T) {
 	t.Logf("GOOS distribution: %v", goosCounts)
 	t.Logf("GOARCH distribution: %v", goarchCounts)
 }
+
+func TestWebAssemblyTargetsDeclareLeakingGC(t *testing.T) {
+	resolver := NewDefaultResolver()
+	for _, name := range []string{"wasm", "wasip1", "wasip2", "wasm-unknown"} {
+		t.Run(name, func(t *testing.T) {
+			config, err := resolver.Resolve(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if config.GC != "leaking" {
+				t.Fatalf("target GC = %q, want leaking", config.GC)
+			}
+		})
+	}
+}
+
+func TestResolverRejectsUnknownGC(t *testing.T) {
+	tempDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tempDir, "bad.json"), []byte(`{"gc":"magic"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewResolver(tempDir).Resolve("bad"); err == nil {
+		t.Fatal("Resolve accepted an unknown GC capability")
+	}
+}

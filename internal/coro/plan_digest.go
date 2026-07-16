@@ -31,7 +31,7 @@ import (
 // PlanDigestSchema is the independent canonical schema used for archive cache
 // identity. It is deliberately separate from SummarySchema: summaries remain
 // diagnostic snapshots, while this document covers every lowering plan site.
-const PlanDigestSchema = "llgo.coro.plan-digest.v4"
+const PlanDigestSchema = "llgo.coro.plan-digest.v7"
 
 // Current experimental ABI identities. Keeping these in the analysis package
 // gives build, cache, and lowering code one version source of truth.
@@ -45,13 +45,33 @@ const (
 	// its stack, but only the scheduler may subsequently resume or destroy either
 	// frame. It deliberately does not claim spawn, park, preemption, or roots.
 	SchedulerChildAwaitABIV0 = "llgo.coro.scheduler.child-await.v0"
-	// SchedulerProgramBootstrapABIV1 extends child-await with one
-	// compiler-owned stackless program root and the runtime's static single-P
-	// prepare/adopt/run driver. It still does not claim spawn, park, timers, or
-	// preemption.
+	// SchedulerProgramBootstrapABIV1 is the first compiler-owned stackless
+	// program root and static single-P prepare/adopt/run driver. It does not
+	// include preemption or heterogeneous startup steps.
 	SchedulerProgramBootstrapABIV1 = "llgo.coro.scheduler.program-bootstrap.v1"
-	PanicLegacyABIV0               = "llgo.coro.panic.legacy.v0"
-	FuncRepABIV0                   = "llgo.coro.func-rep.v0"
+	// SchedulerProgramBootstrapABIV2 adds conditional compiler safepoints,
+	// atomic preemption requests/requeue, and the heterogeneous startup-program
+	// contract. It still does not claim spawn, park, timers, or a production
+	// source of concurrent runnable Gs.
+	SchedulerProgramBootstrapABIV2 = "llgo.coro.scheduler.program-bootstrap.v2"
+	// SchedulerProgramBootstrapClosedStaticSpawnABIV0 is the explicit superset
+	// of SchedulerProgramBootstrapABIV2 that adds compiler-owned begin/commit
+	// for one exact closed static `go f(args)` target and normal-main-return
+	// cancellation. The runtime never receives a user callback; the compiler
+	// creates the child only to its initial suspend before commit.
+	SchedulerProgramBootstrapClosedStaticSpawnABIV0 = "llgo.coro.scheduler.program-bootstrap.v2.closed-static-spawn.v0"
+	PanicLegacyABIV0                                = "llgo.coro.panic.legacy.v0"
+	// PanicExplicitStatusABIV0 reserves the target-wide identity for the first
+	// compiler-carried panic outcome ABI. The identity is intentionally wired
+	// before its lowering and runtime protocol: selecting it must remain
+	// fail-closed until those semantics are implemented.
+	PanicExplicitStatusABIV0 = "llgo.coro.panic.explicit-status.v0"
+	FuncRepABIV0             = "llgo.coro.func-rep.v0"
+	// FuncRepABIV1 introduces an explicit descriptor/context representation for
+	// dynamically consumed Go function values. The first producer/consumer slice
+	// supports only one no-capture, non-suspending plain body; unsupported value
+	// shapes and call capabilities remain fail-closed.
+	FuncRepABIV1 = "llgo.coro.func-rep.v1"
 )
 
 // PlanDigestMetadata contains every effective ABI and target input that may
@@ -72,14 +92,15 @@ type PlanDigestMetadata struct {
 }
 
 type planDigestDocument struct {
-	Schema           string                 `json:"schema"`
-	FunctionIDSchema string                 `json:"function_id_schema"`
-	Metadata         PlanDigestMetadata     `json:"metadata"`
-	Roots            []planDigestRoot       `json:"roots"`
-	Functions        []planDigestFunction   `json:"functions"`
-	Calls            []planDigestCall       `json:"calls"`
-	ElidedCalls      []planDigestElidedCall `json:"elided_calls,omitempty"`
-	Values           []planDigestValue      `json:"values"`
+	Schema           string                  `json:"schema"`
+	FunctionIDSchema string                  `json:"function_id_schema"`
+	Metadata         PlanDigestMetadata      `json:"metadata"`
+	Roots            []planDigestRoot        `json:"roots"`
+	Functions        []planDigestFunction    `json:"functions"`
+	Calls            []planDigestCall        `json:"calls"`
+	LoweredCalls     []planDigestLoweredCall `json:"lowered_calls"`
+	ElidedCalls      []planDigestElidedCall  `json:"elided_calls,omitempty"`
+	Values           []planDigestValue       `json:"values"`
 }
 
 type planDigestRoot struct {
@@ -88,20 +109,21 @@ type planDigestRoot struct {
 }
 
 type planDigestFunction struct {
-	ID             FunctionID `json:"id"`
-	IgnoredBody    bool       `json:"ignored_body"`
-	DeclaredEffect uint16     `json:"declared_effect"`
-	LocalEffect    uint16     `json:"local_effect"`
-	Effect         uint16     `json:"effect"`
-	DeclaredExec   uint16     `json:"declared_exec"`
-	LocalExec      uint16     `json:"local_exec"`
-	Exec           uint16     `json:"exec"`
-	Demand         uint8      `json:"demand"`
-	Emission       uint8      `json:"emission"`
-	FuncRep        uint8      `json:"func_rep"`
-	External       uint8      `json:"external"`
-	Recursive      bool       `json:"recursive"`
-	Primary        uint8      `json:"primary"`
+	ID                        FunctionID `json:"id"`
+	IgnoredBody               bool       `json:"ignored_body"`
+	ForeignNoBlockCertificate string     `json:"foreign_noblock_certificate,omitempty"`
+	DeclaredEffect            uint16     `json:"declared_effect"`
+	LocalEffect               uint16     `json:"local_effect"`
+	Effect                    uint16     `json:"effect"`
+	DeclaredExec              uint16     `json:"declared_exec"`
+	LocalExec                 uint16     `json:"local_exec"`
+	Exec                      uint16     `json:"exec"`
+	Demand                    uint8      `json:"demand"`
+	Emission                  uint8      `json:"emission"`
+	FuncRep                   uint8      `json:"func_rep"`
+	External                  uint8      `json:"external"`
+	Recursive                 bool       `json:"recursive"`
+	Primary                   uint8      `json:"primary"`
 }
 
 type planDigestCall struct {
@@ -114,6 +136,13 @@ type planDigestCall struct {
 	Open        bool         `json:"open"`
 	Unresolved  uint8        `json:"unresolved"`
 	MayBeNil    bool         `json:"may_be_nil"`
+}
+
+type planDigestLoweredCall struct {
+	Owner       FunctionID `json:"owner"`
+	LogicalName string     `json:"logical_name"`
+	Target      FunctionID `json:"target"`
+	UnwindOnly  bool       `json:"unwind_only"`
 }
 
 type planDigestElidedCall struct {
@@ -202,6 +231,11 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 		return planDigestDocument{}, err
 	}
 
+	loweredCalls, err := p.canonicalDigestLoweredCalls()
+	if err != nil {
+		return planDigestDocument{}, err
+	}
+
 	document := planDigestDocument{
 		Schema:           PlanDigestSchema,
 		FunctionIDSchema: FunctionIDSchema,
@@ -209,6 +243,7 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 		Roots:            roots,
 		Functions:        functions,
 		Calls:            make([]planDigestCall, 0, len(p.callPlans)),
+		LoweredCalls:     loweredCalls,
 		ElidedCalls:      make([]planDigestElidedCall, 0, len(p.elidedCalls)),
 		Values:           make([]planDigestValue, 0, len(p.valuePlans)),
 	}
@@ -311,6 +346,43 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 		return planDigestDocument{}, fmt.Errorf("coro: SSAValuePlan coverage mismatch: projected %d of %d plans", len(coveredValues), len(p.valuePlans))
 	}
 	return document, nil
+}
+
+func (p *SSAPlan) canonicalDigestLoweredCalls() ([]planDigestLoweredCall, error) {
+	ret := make([]planDigestLoweredCall, 0)
+	for owner, calls := range p.loweredCalls {
+		ownerID, ok := p.byFunction[owner]
+		if !ok {
+			return nil, fmt.Errorf("coro: lowered-call owner %q is absent from the plan", owner.Name())
+		}
+		previous := ""
+		for index, call := range calls {
+			if call.LogicalName == "" || !utf8.ValidString(call.LogicalName) || strings.IndexByte(call.LogicalName, 0) >= 0 {
+				return nil, fmt.Errorf("coro: lowered call %d in %q has invalid logical name %q", index, ownerID, call.LogicalName)
+			}
+			if index != 0 && previous >= call.LogicalName {
+				return nil, fmt.Errorf("coro: lowered calls in %q are not in strict logical-name order", ownerID)
+			}
+			previous = call.LogicalName
+			targetID, ok := p.byFunction[call.Target]
+			if !ok {
+				return nil, fmt.Errorf("coro: lowered call %q in %q targets a function outside the plan", call.LogicalName, ownerID)
+			}
+			ret = append(ret, planDigestLoweredCall{
+				Owner:       ownerID,
+				LogicalName: call.LogicalName,
+				Target:      targetID,
+				UnwindOnly:  call.UnwindOnly,
+			})
+		}
+	}
+	sort.Slice(ret, func(i, j int) bool {
+		if ret[i].Owner != ret[j].Owner {
+			return ret[i].Owner < ret[j].Owner
+		}
+		return ret[i].LogicalName < ret[j].LogicalName
+	})
+	return ret, nil
 }
 
 func (m PlanDigestMetadata) validate() error {
@@ -456,6 +528,9 @@ func (p *SSAPlan) canonicalDigestFunctions() ([]planDigestFunction, error) {
 			Recursive:      plan.Recursive,
 			Primary:        uint8(plan.Primary),
 		})
+		if certificate, ok := p.ForeignNoBlockCertificate(function.Function); ok {
+			ret[len(ret)-1].ForeignNoBlockCertificate = certificate
+		}
 	}
 	return ret, nil
 }

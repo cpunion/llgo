@@ -27,7 +27,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/goplus/llgo/internal/coro"
 	"github.com/goplus/llgo/internal/env"
 	"github.com/goplus/llgo/internal/packages"
 	intllvm "github.com/goplus/llgo/internal/xtool/llvm"
@@ -109,6 +108,7 @@ func (c *context) collectCommonInputs(m *manifestBuilder) {
 		m.common.BuildTags = strings.Split(c.buildConf.Tags, ",")
 	}
 	m.common.Target = c.buildConf.Target
+	m.common.RuntimeGC = c.crossCompile.GC
 	if c.hasNonDefaultLLVMConfig() {
 		m.common.LLVMCPU = c.crossCompile.CPU
 		m.common.LLVMFeatures = c.crossCompile.Features
@@ -376,14 +376,18 @@ func (c *context) canUsePackageCache() bool {
 	return c.clCompilation.EnableCoroEntryResolution &&
 		c.clCompilation.EnableCoroPhysicalABI == c.buildConf.EnableCoroPhysicalABI &&
 		c.clCompilation.EnableCoroChildAwait == c.buildConf.EnableCoroChildAwait &&
+		c.clCompilation.EnableCoroPlainDispatch == c.buildConf.EnableCoroPlainDispatch &&
+		c.clCompilation.EnableCoroExplicitStatusPanicABI == c.buildConf.EnableCoroExplicitStatusPanicABI &&
+		c.clCompilation.EnableCoroClosedStaticSpawn == c.buildConf.EnableCoroClosedStaticSpawn &&
+		c.clCompilation.EnableCoroProgramBootstrapRun == c.buildConf.EnableCoroProgramBootstrapRun &&
 		c.clCompilation.CoroABI == metadata.CoroABI &&
 		c.clCompilation.SchedulerABI == metadata.SchedulerABI &&
 		c.clCompilation.PanicABI == metadata.PanicABI &&
 		c.clCompilation.FuncRepABI == metadata.FuncRepABI &&
 		metadata.CoroABI == activeCoroABIVersion(c.buildConf) &&
 		metadata.SchedulerABI == activeCoroSchedulerABIVersion(c.buildConf) &&
-		metadata.PanicABI == coro.PanicLegacyABIV0 &&
-		metadata.FuncRepABI == coro.FuncRepABIV0 &&
+		metadata.PanicABI == activeCoroPanicABIVersion(c.buildConf) &&
+		metadata.FuncRepABI == activeCoroFuncRepABIVersion(c.buildConf) &&
 		metadata.TargetTriple != "" && metadata.PointerBits > 0 &&
 		(metadata.Endianness == "little" || metadata.Endianness == "big") &&
 		metadata.DataLayout != ""

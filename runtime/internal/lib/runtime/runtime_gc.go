@@ -5,11 +5,17 @@ package runtime
 import (
 	"runtime"
 
+	c "github.com/goplus/llgo/runtime/internal/clite"
 	"github.com/goplus/llgo/runtime/internal/clite/bdwgc"
+	"github.com/goplus/llgo/runtime/internal/coroalloc"
 )
 
 func init() {
-	bdwgc.Init()
+	// Legacy entry paths initialize the same allocator here. Coroutine entry
+	// performs this phase explicitly before any Go/runtime initialization.
+	if !coroalloc.Bootstrap() {
+		c.Exit(2)
+	}
 }
 
 func ReadMemStats(m *runtime.MemStats) {

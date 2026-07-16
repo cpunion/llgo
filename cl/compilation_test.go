@@ -94,6 +94,62 @@ func TestCompilationCoroABIIdentityValidation(t *testing.T) {
 	if err := (&Compilation{EnableCoroEntryResolution: true, EnableCoroPhysicalABI: true}).validateCoroABIIdentity(false); err != nil {
 		t.Fatalf("omitted source ABI identity should use current defaults: %v", err)
 	}
+	newPlainDispatch := func() *Compilation {
+		return &Compilation{
+			EnableCoroEntryResolution: true,
+			EnableCoroPlainDispatch:   true,
+			CoroABI:                   coro.EntryResolutionABIV0,
+			SchedulerABI:              coro.SchedulerNoneABIV0,
+			PanicABI:                  coro.PanicLegacyABIV0,
+			FuncRepABI:                coro.FuncRepABIV1,
+		}
+	}
+	plainDispatch := newPlainDispatch()
+	if err := plainDispatch.validateCoroABIIdentity(false); err != nil {
+		t.Fatalf("complete plain-dispatch ABI identity: %v", err)
+	}
+	wrongPlainDispatch := newPlainDispatch()
+	wrongPlainDispatch.FuncRepABI = coro.FuncRepABIV0
+	if err := wrongPlainDispatch.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "function representation ABI") {
+		t.Fatalf("plain-dispatch function representation mismatch = %v", err)
+	}
+	withoutEntry := newPlainDispatch()
+	withoutEntry.EnableCoroEntryResolution = false
+	if err := withoutEntry.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "requires coroutine entry resolution") {
+		t.Fatalf("plain-dispatch dependency error = %v", err)
+	}
+	if err := withoutEntry.preflightCoroPlan(); err == nil || !strings.Contains(err.Error(), "requires coroutine entry resolution") {
+		t.Fatalf("plain-dispatch preflight dependency error = %v", err)
+	}
+	newExplicitStatus := func() *Compilation {
+		compilation := newPhysical()
+		compilation.EnableCoroChildAwait = true
+		compilation.EnableCoroExplicitStatusPanicABI = true
+		compilation.CoroABI = coro.PhysicalABIV1
+		compilation.SchedulerABI = coro.SchedulerChildAwaitABIV0
+		compilation.PanicABI = coro.PanicExplicitStatusABIV0
+		return compilation
+	}
+	explicitStatus := newExplicitStatus()
+	if err := explicitStatus.validateCoroABIIdentity(false); err != nil {
+		t.Fatalf("complete explicit-status panic ABI identity: %v", err)
+	}
+	legacyIdentity := newExplicitStatus()
+	legacyIdentity.PanicABI = coro.PanicLegacyABIV0
+	if err := legacyIdentity.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "panic ABI") {
+		t.Fatalf("explicit-status panic ABI mismatch = %v", err)
+	}
+	withoutExplicitStatusEntry := newExplicitStatus()
+	withoutExplicitStatusEntry.EnableCoroEntryResolution = false
+	if err := withoutExplicitStatusEntry.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "requires coroutine entry resolution") {
+		t.Fatalf("explicit-status panic ABI dependency error = %v", err)
+	}
+	if err := withoutExplicitStatusEntry.preflightCoroPlan(); err == nil || !strings.Contains(err.Error(), "requires coroutine entry resolution") {
+		t.Fatalf("explicit-status panic ABI preflight dependency error = %v", err)
+	}
+	if err := explicitStatus.preflightCoroPlan(); err == nil || !strings.Contains(err.Error(), "requires a compilation CoroPlan") {
+		t.Fatalf("explicit-status panic ABI active preflight error = %v", err)
+	}
 	newChildAwait := func() *Compilation {
 		return &Compilation{
 			EnableCoroEntryResolution: true,
@@ -111,9 +167,20 @@ func TestCompilationCoroABIIdentityValidation(t *testing.T) {
 	}
 	programBootstrap := newChildAwait()
 	programBootstrap.EnableCoroProgramBootstrapRun = true
-	programBootstrap.SchedulerABI = coro.SchedulerProgramBootstrapABIV1
+	programBootstrap.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
 	if err := programBootstrap.validateCoroABIIdentity(false); err != nil {
 		t.Fatalf("complete program-bootstrap ABI identity: %v", err)
+	}
+	closedStaticSpawn := newChildAwait()
+	closedStaticSpawn.EnableCoroProgramBootstrapRun = true
+	closedStaticSpawn.EnableCoroClosedStaticSpawn = true
+	closedStaticSpawn.SchedulerABI = coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0
+	if err := closedStaticSpawn.validateCoroABIIdentity(false); err != nil {
+		t.Fatalf("complete closed-static-spawn ABI identity: %v", err)
+	}
+	closedStaticSpawn.EnableCoroProgramBootstrapRun = false
+	if err := closedStaticSpawn.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "runnable program-bootstrap v2") {
+		t.Fatalf("closed-static-spawn bootstrap dependency error = %v", err)
 	}
 	programBootstrap.EnableCoroChildAwait = false
 	if err := programBootstrap.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "requires child-await") {
