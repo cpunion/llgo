@@ -17,6 +17,7 @@
 package ssa
 
 import (
+	"encoding/binary"
 	"fmt"
 	"go/types"
 	"strconv"
@@ -53,9 +54,64 @@ type CoroFrameOps struct {
 // always passed an effective alignment that satisfies this guarantee as well as
 // llvm.coro.align.
 type CoroOptions struct {
-	Promise         Expr
-	AllocationAlign uint32
-	Frame           CoroFrameOps
+	Promise Expr
+	Frame   CoroFrameOps
+	// BeforeInitialSuspend runs after llvm.coro.begin has produced the handle
+	// and before the initial suspend is published. It may initialize the
+	// promise/header and register the handle, but must leave the builder in the
+	// same unterminated insertion block.
+	BeforeInitialSuspend func(b Builder, handle Expr)
+	AllocationAlign      uint32
+}
+
+// CoroFrameDescriptorOptions describes the target-specific constant passed to
+// the coroutine frame allocator and deallocator. ABIHash is computed by the
+// frontend from the complete logical/physical function ABI. Result is the
+// external result-slot payload type and must be non-nil.
+type CoroFrameDescriptorOptions struct {
+	Version uint32
+	ABIHash [16]byte
+	Flags   uint32
+	Result  Type
+}
+
+// NewCoroFrameDescriptor defines a link-once constant descriptor with layout:
+//
+//	{ version i32, flags i32, hashLo i64, hashHi i64,
+//	  resultSize uintptr, resultAlign uintptr }
+//
+// The returned expression points at the descriptor. The hash words use big
+// endian byte order so their textual IR form is deterministic across hosts.
+func (p Package) NewCoroFrameDescriptor(name string, opts CoroFrameDescriptorOptions) Expr {
+	if name == "" {
+		panic("ssa: coroutine frame descriptor requires a name")
+	}
+	if opts.Result == nil {
+		panic("ssa: coroutine frame descriptor requires a result type")
+	}
+	prog := p.Prog
+	descriptorType := prog.Struct(
+		prog.Uint32(),
+		prog.Uint32(),
+		prog.Uint64(),
+		prog.Uint64(),
+		prog.Uintptr(),
+		prog.Uintptr(),
+	)
+	descriptor := p.NewVarEx(name, prog.Pointer(descriptorType))
+	fields := []llvm.Value{
+		prog.IntVal(uint64(opts.Version), prog.Uint32()).impl,
+		prog.IntVal(uint64(opts.Flags), prog.Uint32()).impl,
+		prog.IntVal(binary.BigEndian.Uint64(opts.ABIHash[:8]), prog.Uint64()).impl,
+		prog.IntVal(binary.BigEndian.Uint64(opts.ABIHash[8:]), prog.Uint64()).impl,
+		prog.IntVal(prog.SizeOf(opts.Result), prog.Uintptr()).impl,
+		prog.IntVal(uint64(prog.td.ABITypeAlignment(opts.Result.ll)), prog.Uintptr()).impl,
+	}
+	descriptor.impl.SetInitializer(prog.ctx.ConstStruct(fields, false))
+	descriptor.impl.SetGlobalConstant(true)
+	descriptor.impl.SetLinkage(llvm.LinkOnceODRLinkage)
+	descriptor.impl.SetUnnamedAddr(true)
+	return descriptor.Expr
 }
 
 // CoroBuilder owns the structured presplit control flow for one coroutine.
@@ -70,9 +126,10 @@ type CoroBuilder struct {
 	// retains LLVM's target-dependent 2*pointer default.
 	allocationAlign uint32
 
-	suspendBlk BasicBlock
-	cleanupBlk BasicBlock
-	finished   bool
+	suspendBlk       BasicBlock
+	cleanupBlk       BasicBlock
+	initialResumeBlk BasicBlock
+	finished         bool
 }
 
 // BeginCoro emits the coroutine allocation prologue and initial suspend. The
@@ -145,7 +202,12 @@ func (b Builder) BeginCoro(opts CoroOptions) *CoroBuilder {
 		suspendBlk:      suspendBlk,
 		cleanupBlk:      cleanupBlk,
 	}
-	coro.emitSuspend(false)
+	if callback := opts.BeforeInitialSuspend; callback != nil {
+		callbackPoint := captureCoroFrameCallbackPoint(b)
+		callback(b, coro.handle)
+		callbackPoint.ensureContinuation(b, "before-initial-suspend")
+	}
+	coro.initialResumeBlk = coro.emitSuspend(false)
 	return coro
 }
 
@@ -155,6 +217,16 @@ func (c *CoroBuilder) Handle() Expr {
 		return Nil
 	}
 	return c.handle
+}
+
+// InitialResumeBlock returns the block in which the source coroutine body must
+// begin. It is distinct from the ramp entry block, which has already emitted
+// allocation, coro.begin, and the initial suspend.
+func (c *CoroBuilder) InitialResumeBlock() BasicBlock {
+	if c == nil {
+		return nil
+	}
+	return c.initialResumeBlk
 }
 
 // Suspend emits a non-final stack cut and positions the builder at the newly

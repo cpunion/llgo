@@ -252,8 +252,12 @@ type Config struct {
 	// leaving it false preserves report-only behavior. Package archive caching
 	// is disabled until the plan digest participates in fingerprints.
 	EnableCoroEntryResolution bool
-	CoroPlanBuilder           CoroPlanBuilder
-	CoroPlanObserver          CoroPlanObserver
+	// EnableCoroPhysicalABI enables the experimental, leaf-only LLVM coroutine
+	// physical ABI. It requires EnableCoroEntryResolution and remains fail-closed
+	// for await, dispatch, spawn, defer, and scheduler paths.
+	EnableCoroPhysicalABI bool
+	CoroPlanBuilder       CoroPlanBuilder
+	CoroPlanObserver      CoroPlanObserver
 }
 
 type Rewrites map[string]string
@@ -673,6 +677,9 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	if ctx == nil || ctx.buildConf == nil {
 		return nil
 	}
+	if ctx.buildConf.EnableCoroPhysicalABI && !ctx.buildConf.EnableCoroEntryResolution {
+		return fmt.Errorf("enable coroutine physical ABI: coroutine entry resolution is required")
+	}
 	builder := ctx.buildConf.CoroPlanBuilder
 	if builder == nil {
 		if ctx.buildConf.EnableCoroEntryResolution {
@@ -728,6 +735,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		CoroPlan:                  plan,
 		CoroPlanObserver:          ctx.buildConf.CoroPlanObserver,
 		EnableCoroEntryResolution: ctx.buildConf.EnableCoroEntryResolution,
+		EnableCoroPhysicalABI:     ctx.buildConf.EnableCoroPhysicalABI,
 		EmissionUniverse:          ctx.coroEmission,
 	}
 	return nil

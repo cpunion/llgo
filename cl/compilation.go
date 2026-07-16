@@ -40,6 +40,10 @@ type Compilation struct {
 	CoroPlan                  *coro.SSAPlan
 	CoroPlanObserver          CoroPlanObserver
 	EnableCoroEntryResolution bool
+	// EnableCoroPhysicalABI permits the conservative leaf-only coroutine ABI
+	// lowering implemented by the current experimental slice. It requires entry
+	// resolution and does not enable await, dispatch, roots, or a scheduler.
+	EnableCoroPhysicalABI bool
 
 	// EmissionUniverse is the immutable, compilation-scoped set of exact SSA
 	// functions that cl may resolve while emitting this compilation. Active

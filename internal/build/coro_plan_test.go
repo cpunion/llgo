@@ -223,6 +223,17 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 		}
 	})
 
+	t.Run("physical ABI requires entry resolution", func(t *testing.T) {
+		ctx := &context{buildConf: &Config{EnableCoroPhysicalABI: true}}
+		err := buildCoroPlan(ctx)
+		if err == nil || !strings.Contains(err.Error(), "entry resolution is required") {
+			t.Fatalf("buildCoroPlan error = %v, want entry-resolution requirement", err)
+		}
+		if ctx.coroPlan != nil || ctx.clCompilation != nil {
+			t.Fatal("invalid physical ABI configuration installed coroutine compilation state")
+		}
+	})
+
 	t.Run("entry resolution requires prepared emission universe", func(t *testing.T) {
 		builderCalls := 0
 		ctx := &context{buildConf: &Config{

@@ -29,6 +29,7 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/goplus/llgo/internal/coro"
 	llssa "github.com/goplus/llgo/ssa"
 )
 
@@ -667,6 +668,10 @@ func (p *context) funcOf(fn *ssa.Function) (aFn llssa.Function, pyFn llssa.PyObj
 				return nil, nil, ignoredFunc
 			}
 			sig := p.patchType(fn.Signature).(*types.Signature)
+			if entry.physical && entry.plan.Primary == coro.PrimaryCoroutine {
+				abi := newCoroPhysicalABI(p, entry, sig)
+				sig = abi.physicalSig
+			}
 			aFn = pkg.NewFuncEx(name, sig, llssa.Background(ftype), false, p.needsLinkOnce(fn))
 			if disableInline {
 				aFn.Inline(llssa.NoInline)

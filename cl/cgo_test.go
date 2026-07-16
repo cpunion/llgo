@@ -28,6 +28,11 @@ func init() {
 
 func buildGoSSAPkg(t *testing.T, src string) (*gossa.Package, *token.FileSet, []*ast.File) {
 	t.Helper()
+	return buildGoSSAPkgWithMode(t, src, gossa.SanityCheckFunctions|gossa.InstantiateGenerics)
+}
+
+func buildGoSSAPkgWithMode(t *testing.T, src string, mode gossa.BuilderMode) (*gossa.Package, *token.FileSet, []*ast.File) {
+	t.Helper()
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "foo.go", src, parser.ParseComments)
 	if err != nil {
@@ -36,7 +41,6 @@ func buildGoSSAPkg(t *testing.T, src string) (*gossa.Package, *token.FileSet, []
 	files := []*ast.File{f}
 	pkg := types.NewPackage(f.Name.Name, f.Name.Name)
 	imp := packages.NewImporter(fset)
-	mode := gossa.SanityCheckFunctions | gossa.InstantiateGenerics
 	ssaPkg, _, err := ssautil.BuildPackage(&types.Config{Importer: imp}, fset, pkg, files, mode)
 	if err != nil {
 		t.Fatal(err)

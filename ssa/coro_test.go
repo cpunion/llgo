@@ -166,12 +166,22 @@ func TestCoroBuilderRejectsMisuse(t *testing.T) {
 	if (*CoroBuilder)(nil).Handle() != Nil {
 		t.Fatal("nil coroutine builder returned a non-nil handle")
 	}
+	if (*CoroBuilder)(nil).InitialResumeBlock() != nil {
+		t.Fatal("nil coroutine builder returned a non-nil initial resume block")
+	}
 
 	prog := NewProgram(nil)
 	defer prog.Dispose()
 	pkg := prog.NewPackage("badcoro", "bad/coro")
 	defer pkg.Module().Dispose()
 	fn := pkg.NewFunc("bad_alignment", coroHandleSignature(), InC)
+	mustPanicContains(t, "physical parameter index", func() { fn.PhysicalParam(0) })
+	mustPanicContains(t, "requires a name", func() {
+		pkg.NewCoroFrameDescriptor("", CoroFrameDescriptorOptions{Result: prog.Byte()})
+	})
+	mustPanicContains(t, "requires a result type", func() {
+		pkg.NewCoroFrameDescriptor("bad_descriptor", CoroFrameDescriptorOptions{})
+	})
 	b := fn.MakeBody(1)
 	defer b.Dispose()
 	mustPanicContains(t, "alignment", func() {
@@ -225,6 +235,23 @@ func TestCoroBuilderRejectsCallbackControlFlow(t *testing.T) {
 		}})
 		mustPanicContains(t, "free callback terminated insertion block", coro.Finish)
 	})
+
+	t.Run("before initial suspend terminates block", func(t *testing.T) {
+		prog, b := newCoroCallbackTestBuilder(t)
+		mustPanicContains(t, "before-initial-suspend callback terminated insertion block", func() {
+			b.BeginCoro(CoroOptions{
+				Frame: CoroFrameOps{
+					Alloc: func(Builder, Expr, Expr) Expr {
+						return prog.Nil(prog.VoidPtr())
+					},
+					Free: func(Builder, Expr, Expr, Expr) {},
+				},
+				BeforeInitialSuspend: func(b Builder, _ Expr) {
+					b.Unreachable()
+				},
+			})
+		})
+	})
 }
 
 func newCoroCallbackTestBuilder(t *testing.T) (Program, Builder) {
@@ -276,6 +303,12 @@ func newCoroTestFixture(t *testing.T, target *Target, allocationAlign uint32) *c
 			Free: func(b Builder, frame, size, align Expr) {
 				b.Call(free.Expr, frame, size, align)
 			},
+		},
+		BeforeInitialSuspend: func(b Builder, handle Expr) {
+			if handle.IsNil() {
+				t.Fatal("before-initial-suspend callback received a nil handle")
+			}
+			b.Store(promise, prog.IntVal(1, prog.Byte()))
 		},
 	})
 
