@@ -23,6 +23,11 @@ import (
 	"unsafe"
 )
 
+func consumeCompletedWait(token *WaitToken, ticket WaitTicket) bool {
+	outcome, ok := consumeWait(token, ticket)
+	return ok && outcome == WaitOutcomeCompleted
+}
+
 func TestWaitTicketGenerationRejectsDuplicateAndABACompletion(t *testing.T) {
 	if ticket, ok := ArmWait(nil); ok || ticket != 0 || CompleteWait(nil, 1) {
 		t.Fatal("nil wait token accepted")
@@ -38,7 +43,7 @@ func TestWaitTicketGenerationRejectsDuplicateAndABACompletion(t *testing.T) {
 	if ticket, ok := ArmWait(token); ok || ticket != 0 {
 		t.Fatal("ready wait token rearmed before scheduler consumption")
 	}
-	if !claimWait(token, first) || !consumeWait(token, first) {
+	if !claimWait(token, first) || !consumeCompletedWait(token, first) {
 		t.Fatal("consume first ready generation")
 	}
 	second, ok := ArmWait(token)
@@ -48,11 +53,11 @@ func TestWaitTicketGenerationRejectsDuplicateAndABACompletion(t *testing.T) {
 	if CompleteWait(token, first) {
 		t.Fatal("stale first-generation completion woke second generation")
 	}
-	if !claimWait(token, second) || !CompleteWait(token, second) || !consumeWait(token, second) {
+	if !claimWait(token, second) || !CompleteWait(token, second) || !consumeCompletedWait(token, second) {
 		t.Fatal("complete and consume second generation")
 	}
 
-	preemptStore(&token.word, waitWord(waitMaxGen, waitConsumed))
+	preemptStore(&token.word, waitWord(waitMaxGen, waitUnused))
 	if ticket, ok := ArmWait(token); ok || ticket != 0 {
 		t.Fatal("generation counter wrapped and reopened an ABA window")
 	}
@@ -67,10 +72,10 @@ func TestWaitTicketRejectsTruncatingOutOfRangeAlias(t *testing.T) {
 	// Before the range check, shifting this value discarded its high bit and
 	// produced the exact same atomic word as ticket 1.
 	alias := WaitTicket(uint32(ticket) + waitMaxGen + 1)
-	if validWaitTicket(alias) || CompleteWait(token, alias) || claimWait(token, alias) || consumeWait(token, alias) {
+	if validWaitTicket(alias) || CompleteWait(token, alias) || claimWait(token, alias) || consumeCompletedWait(token, alias) {
 		t.Fatalf("out-of-range alias ticket %d was accepted", alias)
 	}
-	if !claimWait(token, ticket) || !CompleteWait(token, ticket) || !consumeWait(token, ticket) {
+	if !claimWait(token, ticket) || !CompleteWait(token, ticket) || !consumeCompletedWait(token, ticket) {
 		t.Fatal("rejecting alias damaged the valid generation")
 	}
 }
@@ -94,7 +99,7 @@ func TestWaitClaimAndCompletionRace(t *testing.T) {
 			results <- CompleteWait(token, ticket)
 		}()
 		close(start)
-		if !<-results || !<-results || !consumeWait(token, ticket) {
+		if !<-results || !<-results || !consumeCompletedWait(token, ticket) {
 			t.Fatalf("iteration %d: claim/completion race lost transition", iteration)
 		}
 	}
@@ -121,7 +126,7 @@ func TestWaitClaimAllowsExactlyOneConcurrentWaiter(t *testing.T) {
 		if first == second {
 			t.Fatalf("iteration %d: claim results = %t, %t; want exactly one", iteration, first, second)
 		}
-		if !CompleteWait(token, ticket) || !consumeWait(token, ticket) {
+		if !CompleteWait(token, ticket) || !consumeCompletedWait(token, ticket) {
 			t.Fatalf("iteration %d: winning waiter could not consume completion", iteration)
 		}
 	}
@@ -653,7 +658,7 @@ func TestPrepareParkSameTicketAllowsExactlyOneG(t *testing.T) {
 		!validClaimedWait(token, ticket) {
 		t.Fatal("winning G lost exact claimed wait ownership")
 	}
-	if !CompleteWait(token, ticket) || !consumeWait(token, ticket) {
+	if !CompleteWait(token, ticket) || !consumeCompletedWait(token, ticket) {
 		t.Fatal("winning G's claimed ticket could not complete")
 	}
 	runtime.KeepAlive(first.frame.memory)

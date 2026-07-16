@@ -257,7 +257,8 @@ func TaskStorageOwned(g *G) (owned bool, ok bool) {
 // ReleaseTaskStorage transfers one terminal spawned G allocation back to the
 // runtime adapter. It marks the transfer before returning; the caller must not
 // dereference g after clearing/freeing raw. External completion producers own
-// only stable P/WaitToken objects and must never retain a child G pointer.
+// only POD registration handles; the stable table retains P/WaitToken state
+// until quiescence and must never retain this child after task retirement.
 func ReleaseTaskStorage(g *G) (raw unsafe.Pointer, size uintptr, ok bool) {
 	owned, valid := TaskStorageOwned(g)
 	if !valid || !owned {
