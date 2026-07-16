@@ -252,12 +252,17 @@ type Config struct {
 	// leaving it false preserves report-only behavior. Package archives are
 	// reused only when their complete plan/ABI/target fingerprint matches.
 	EnableCoroEntryResolution bool
-	// EnableCoroPhysicalABI enables the experimental, leaf-only LLVM coroutine
-	// physical ABI. It requires EnableCoroEntryResolution and remains fail-closed
-	// for await, dispatch, spawn, defer, and scheduler paths.
+	// EnableCoroPhysicalABI enables the experimental LLVM coroutine physical ABI.
+	// It requires EnableCoroEntryResolution and remains leaf-only unless a more
+	// specific lowering capability is enabled.
 	EnableCoroPhysicalABI bool
-	CoroPlanBuilder       CoroPlanBuilder
-	CoroPlanObserver      CoroPlanObserver
+	// EnableCoroChildAwait enables the first scheduler handoff slice: a physical
+	// coroutine may await a statically resolved coroutine child, and an explicit
+	// async root receives a typed factory descriptor. It requires the physical
+	// ABI and does not enable a runtime scheduler, spawn, park, or preemption.
+	EnableCoroChildAwait bool
+	CoroPlanBuilder      CoroPlanBuilder
+	CoroPlanObserver     CoroPlanObserver
 }
 
 type Rewrites map[string]string
@@ -680,6 +685,9 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	if ctx.buildConf.EnableCoroPhysicalABI && !ctx.buildConf.EnableCoroEntryResolution {
 		return fmt.Errorf("enable coroutine physical ABI: coroutine entry resolution is required")
 	}
+	if ctx.buildConf.EnableCoroChildAwait && !ctx.buildConf.EnableCoroPhysicalABI {
+		return fmt.Errorf("enable coroutine child await: coroutine physical ABI is required")
+	}
 	builder := ctx.buildConf.CoroPlanBuilder
 	if builder == nil {
 		if ctx.buildConf.EnableCoroEntryResolution {
@@ -716,7 +724,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 					config.CoroABI = activeCoroABIVersion(ctx.buildConf)
 				}
 				if config.SchedulerABI == "" {
-					config.SchedulerABI = coro.SchedulerNoneABIV0
+					config.SchedulerABI = activeCoroSchedulerABIVersion(ctx.buildConf)
 				}
 				config.ArchiveReady = true
 			}
@@ -761,6 +769,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		CoroPlanObserver:          ctx.buildConf.CoroPlanObserver,
 		EnableCoroEntryResolution: ctx.buildConf.EnableCoroEntryResolution,
 		EnableCoroPhysicalABI:     ctx.buildConf.EnableCoroPhysicalABI,
+		EnableCoroChildAwait:      ctx.buildConf.EnableCoroChildAwait,
 		CoroPlanDigest:            digest,
 		CoroABI:                   metadata.CoroABI,
 		SchedulerABI:              metadata.SchedulerABI,
@@ -772,10 +781,20 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 }
 
 func activeCoroABIVersion(conf *Config) string {
+	if conf != nil && conf.EnableCoroChildAwait {
+		return coro.PhysicalABIV1
+	}
 	if conf != nil && conf.EnableCoroPhysicalABI {
 		return coro.PhysicalABIV0
 	}
 	return coro.EntryResolutionABIV0
+}
+
+func activeCoroSchedulerABIVersion(conf *Config) string {
+	if conf != nil && conf.EnableCoroChildAwait {
+		return coro.SchedulerChildAwaitABIV0
+	}
+	return coro.SchedulerNoneABIV0
 }
 
 func buildCoroPlanDigestMetadata(ctx *context) (coro.PlanDigestMetadata, error) {
@@ -794,7 +813,7 @@ func buildCoroPlanDigestMetadata(ctx *context) (coro.PlanDigestMetadata, error) 
 	}
 	return coro.PlanDigestMetadata{
 		CoroABI:        activeCoroABIVersion(ctx.buildConf),
-		SchedulerABI:   coro.SchedulerNoneABIV0,
+		SchedulerABI:   activeCoroSchedulerABIVersion(ctx.buildConf),
 		PanicABI:       coro.PanicLegacyABIV0,
 		FuncRepABI:     coro.FuncRepABIV0,
 		TargetTriple:   target.Triple,

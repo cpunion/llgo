@@ -356,6 +356,29 @@ func g() {}
 	}
 }
 
+func TestActiveCoroABIVersions(t *testing.T) {
+	tests := []struct {
+		name      string
+		config    *Config
+		coroABI   string
+		scheduler string
+	}{
+		{"entry resolution", &Config{}, coro.EntryResolutionABIV0, coro.SchedulerNoneABIV0},
+		{"physical leaf", &Config{EnableCoroPhysicalABI: true}, coro.PhysicalABIV0, coro.SchedulerNoneABIV0},
+		{"child await", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true}, coro.PhysicalABIV1, coro.SchedulerChildAwaitABIV0},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := activeCoroABIVersion(test.config); got != test.coroABI {
+				t.Fatalf("coroutine ABI = %q, want %q", got, test.coroABI)
+			}
+			if got := activeCoroSchedulerABIVersion(test.config); got != test.scheduler {
+				t.Fatalf("scheduler ABI = %q, want %q", got, test.scheduler)
+			}
+		})
+	}
+}
+
 func TestBuildCoroPlanErrors(t *testing.T) {
 	t.Run("builder error", func(t *testing.T) {
 		sentinel := errors.New("sentinel")
@@ -423,6 +446,20 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 		}
 		if ctx.coroPlan != nil || ctx.clCompilation != nil {
 			t.Fatal("invalid physical ABI configuration installed coroutine compilation state")
+		}
+	})
+
+	t.Run("child await requires physical ABI", func(t *testing.T) {
+		ctx := &context{buildConf: &Config{
+			EnableCoroEntryResolution: true,
+			EnableCoroChildAwait:      true,
+		}}
+		err := buildCoroPlan(ctx)
+		if err == nil || !strings.Contains(err.Error(), "physical ABI is required") {
+			t.Fatalf("buildCoroPlan error = %v, want physical-ABI requirement", err)
+		}
+		if ctx.coroPlan != nil || ctx.clCompilation != nil {
+			t.Fatal("invalid child-await configuration installed coroutine compilation state")
 		}
 	})
 

@@ -94,6 +94,31 @@ func TestCompilationCoroABIIdentityValidation(t *testing.T) {
 	if err := (&Compilation{EnableCoroEntryResolution: true, EnableCoroPhysicalABI: true}).validateCoroABIIdentity(false); err != nil {
 		t.Fatalf("omitted source ABI identity should use current defaults: %v", err)
 	}
+	newChildAwait := func() *Compilation {
+		return &Compilation{
+			EnableCoroEntryResolution: true,
+			EnableCoroPhysicalABI:     true,
+			EnableCoroChildAwait:      true,
+			CoroABI:                   coro.PhysicalABIV1,
+			SchedulerABI:              coro.SchedulerChildAwaitABIV0,
+			PanicABI:                  coro.PanicLegacyABIV0,
+			FuncRepABI:                coro.FuncRepABIV0,
+		}
+	}
+	childAwait := newChildAwait()
+	if err := childAwait.validateCoroABIIdentity(false); err != nil {
+		t.Fatalf("complete child-await ABI identity: %v", err)
+	}
+	wrongChildAwait := newChildAwait()
+	wrongChildAwait.CoroABI = coro.PhysicalABIV0
+	if err := wrongChildAwait.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "coroutine ABI") {
+		t.Fatalf("child-await physical ABI mismatch = %v", err)
+	}
+	wrongChildAwait = newChildAwait()
+	wrongChildAwait.SchedulerABI = coro.SchedulerNoneABIV0
+	if err := wrongChildAwait.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "scheduler ABI") {
+		t.Fatalf("child-await scheduler ABI mismatch = %v", err)
+	}
 	partial := newPhysical()
 	partial.SchedulerABI = ""
 	if err := partial.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "scheduler ABI") {

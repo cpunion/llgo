@@ -45,7 +45,7 @@ jobs:
 
       - name: Test coroutine build integration
         if: matrix.llvm == 19
-        run: go test ./internal/build -run 'Test(CoroPlanBuilderRunsBeforeCodegenWithoutChangingIR|CoroPlanInputCanonicalizesPatchedRoot|BuildCoroPlanErrors|CoroEntryResolutionUsesPlanMatchedPackageCache|CoroEntryResolutionBuildsPreparedRuntimePackages|CoroEmissionCoverageStopsBeforeAnyPackageCodegen|CoroUnsupportedEntryResolutionReturnsErrorBeforeCodegen|CoroEmissionUniverseAcceptsModeTestVariants)$' -count=1
+        run: go test ./internal/build -run 'Test(CoroPlanBuilderRunsBeforeCodegenWithoutChangingIR|CoroPlanInputCanonicalizesPatchedRoot|ActiveCoroABIVersions|BuildCoroPlanErrors|CoroEntryResolutionUsesPlanMatchedPackageCache|CoroEntryResolutionBuildsPreparedRuntimePackages|CoroEmissionCoverageStopsBeforeAnyPackageCodegen|CoroUnsupportedEntryResolutionReturnsErrorBeforeCodegen|CoroEmissionUniverseAcceptsModeTestVariants)$' -count=1
 
       - name: Test coroutine compiler integration
         if: matrix.llvm == 19
@@ -54,7 +54,7 @@ jobs:
           go test -race ./cl -run '^Test(CompilationCoroPlanObservationAndCacheRegistration|CoroEntryResolutionPlainPrimaryPreservesIR|ResolveFunctionSymbolUsesPrimaryAndExactPlan|CoroEntryRejectsUnsupportedBeforeCreatingSymbol|CoroEntryResolutionPreflightRejectsWholePlanBeforeCodegen|CoroEntryResolutionPreflightRejectsMissingPlanAndCache|Emission.*)$' -count=1
 
       - name: Test structured LLVM coroutine builder
-        run: go test -tags='${{ matrix.tags }}' -v ./ssa -run '^TestCoroBuilder' -count=1
+        run: go test -tags='${{ matrix.tags }}' -v ./ssa -run '^TestCoro(Builder|Handle|Promise|RootFactory)' -count=1
 
       - name: Test canonical coroutine plan digest and cache identity
         run: |
@@ -63,7 +63,7 @@ jobs:
           go test -tags='${{ matrix.tags }}' ./cl -run '^Test(CompilationCoroABIIdentityValidation|CoroEntryResolutionCacheRegistrationWithDigest|CoroPhysicalABICacheRegistrationPreservesPhysicalMetadata)$' -count=1
 
       - name: Test coroutine physical ABI lowering
-        run: go test -tags='${{ matrix.tags }}' -v ./cl -run '^TestCoro(LeafPhysicalABI|PhysicalABI)' -count=1
+        run: go test -tags='${{ matrix.tags }}' -v ./cl -run '^TestCoro(LeafPhysicalABI|PhysicalABI|ChildAwaitPhysicalABIV1|ExplicitAsyncRootFactoryV1|ExplicitRootFactoryV1)' -count=1
 
       - name: Test LLVM 22 tool configuration
         if: matrix.llvm == 22

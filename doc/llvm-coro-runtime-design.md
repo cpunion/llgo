@@ -1778,14 +1778,16 @@ Pure sync library/archive不需要链接scheduler。Executable一旦选择 `-sch
 
 验收：纯 sync chain 只有 `F`；纯 async chain 只有 `F$coro`；动态 escape 才出现 descriptor/adapter；所有 `go` root和可挂起call都以LLVM-coro frame表示。
 
-当前落地状态（2026-07，实验 ABI v0）：
+当前落地状态（2026-07，实验 ABI v0/v1）：
 
 - 已完成全程序 SSA 的 Effect、Demand、FuncRep、稳定 FunctionID、精确 emission universe 和单 primary symbol 选择。激活 lowering 使用 archive-ready FunctionID，并以独立 canonical schema 对全部 function/call/value plan、Coro/Scheduler/Panic/FuncRep ABI 及 effective LLVM target/data layout 生成 `CoroPlanDigest`；相同完整计划可安全复用 package build cache，缺失或不匹配的 manifest 继续 fail closed。
-- `cpunion/llvm` 已覆盖 LLVM 19、21、22 的 switched-resume builder/CoroSplit；LLGo 已能为严格受限的 top-level `YieldOnly` 单块 leaf 只生成 `F$coro(Task, ResultSlot, args...) -> CoroHandle`，并生成目标相关 result descriptor 与版本化 frame alloc/free hook。
-- Promise/header 在 `coro.begin` 后、initial suspend 前发布；结果写入 frame 外的 caller-owned slot。pre-/post-CoroSplit 与 wasm32 pointer-width 测试覆盖该时序，且禁止 malloc、pthread、stack-copy fallback。
-- 该 v0 切片故意拒绝 call/await、spawn consumer、循环与抢占、channel/select、defer/panic、closure/method/generic、aggregate/pointer result、Dispatch 和 root/bootstrap；这些路径在 module 创建前 fail closed。因此它只计入 Phase 0 的 ABI/codegen 骨架，尚不表示 scheduler 或标准库兼容已经完成。
+- `cpunion/llvm` 已覆盖 LLVM 19、21、22 的 switched-resume builder/CoroSplit；LLGo 的 v0 路径能为严格受限的 top-level `YieldOnly` 单块 leaf 只生成 `F$coro(Task, ResultSlot, args...) -> CoroHandle`，并生成目标相关 result descriptor 与版本化 frame alloc/free hook。未启用 v1 时，v0 symbol、hook 与 `scheduler.none` 行为保持不变。
+- v1 已加入 closed static `CallDirect + DirectCoro` 的 ordinary child await。父 frame 先按 Go 的从左到右顺序求值参数，在自己的 frame 中保留 result slot，创建只运行到 initial suspend 的 child，写入 parent link，发布 `Call/Suspended/stateID`，调用 `__llgo_coro_await_prepare_v1` 后切断栈。父代码不调用 child 的 `resume`、`done` 或 `destroy`；调度器是后续所有 resume/done/destroy 以及 active-frame 转换的唯一 owner。
+- v1 只为显式 `AsyncDemand` root 生成 `(g, out, startup) -> handle` typed factory 和 linker-discoverable descriptor；仅因调用传播成为 async 的函数不生成第二入口。startup/result 的 size/alignment 使用目标 data layout，native64 与 wasm32 都有 pre-/post-CoroSplit 覆盖，descriptor 由 linker-retained `llvm.used` 保活，不能被 `-dead_strip`/`--gc-sections` 删除。`llvm.used` 不会主动抽取完全无人引用的静态 archive member；当前 descriptor 与会被普通 init/import/main 引用拉入的 package object 同处一员，未来若拆成独立 registry archive，必须增加 anchor 或 whole-archive/force-load 协议。
+- Promise/header 在 `coro.begin` 后、initial suspend 前发布；结果写入 frame 外、由 parent/root runtime 持有的 slot。v1 runtime contract 通过 `__llgo_coro_frame_alloc_v1`、`__llgo_coro_frame_publish_v1`、`__llgo_coro_await_prepare_v1`、`__llgo_coro_complete_prepare_v1`、`__llgo_coro_frame_free_v1` 传递 task/handle/header/storage；这些 hook 必须 NoSuspend、NoCallback，且不得进入用户 Go。`frame_publish_v1` 负责登记 handle/storage 并使 header 的 allocation-base 记录与实际分配一致。
+- 当前 v1 仍只允许线性单块 scalar body，故意拒绝 spawn consumer、循环与抢占、channel/select、defer/panic、closure/method/generic、aggregate/pointer result、Dispatch、普通 main/init bootstrap 及动态 call。所有未实现路径在 module 创建前 fail closed；该切片只完成 child 生命周期与 root ABI，不表示 runtime scheduler 或标准库兼容已经完成。
 - 当前 cache digest 只解决同一完整程序计划下的内部 package cache；未知未来 caller 可复用的预编译 archive/标准库仍需 producer summary、canonical boundary Dispatch 和 linker ABI 校验，不能把 cache digest 当作 producer ABI summary。
-- 下一依赖顺序为：加入 ordinary child await 与 root factory，落地单 P scheduler 和 frame registry，再插入并验证 loop/recursion/long-block 抢占 poll。不得用扩大 leaf allowlist 绕过这些生命周期协议。
+- 下一依赖顺序为：实现遵循上述 v1 owner 规则的单 P scheduler、frame registry，以及由 build driver 生成显式 descriptor 数组/anchor 的 root bootstrap（`llvm.used` 负责保留，不承担运行时枚举）；随后扩展 CFG/递归 lowering，并插入和验证 loop/recursion/long-block 抢占 poll。不得用扩大线性 allowlist 绕过这些生命周期协议。
 
 ### Phase 1：单 P deterministic scheduler
 

@@ -30,13 +30,15 @@ const coroPrimarySuffix = "$coro"
 // Primary selects the source body; FuncRep only describes escaped function
 // values and never authorizes a second body.
 type plannedFunctionSymbol struct {
-	function *ssa.Function
-	pkgTypes *types.Package
-	name     string
-	ftype    int
-	plan     coro.FunctionPlan
-	planned  bool
-	physical bool
+	function   *ssa.Function
+	pkgTypes   *types.Package
+	name       string
+	ftype      int
+	plan       coro.FunctionPlan
+	planned    bool
+	physical   bool
+	childAwait bool
+	coroPlan   *coro.SSAPlan
 }
 
 // resolveFunctionSymbol is shared by function definitions and declarations so
@@ -79,6 +81,8 @@ func (p *context) resolveFunctionSymbol(fn *ssa.Function) (plannedFunctionSymbol
 	entry.plan = plan
 	entry.planned = true
 	entry.physical = p.compilation.EnableCoroPhysicalABI
+	entry.childAwait = p.compilation.EnableCoroChildAwait
+	entry.coroPlan = p.compilation.CoroPlan
 	if err := validatePlannedFunction(fn, plan); err != nil {
 		return entry, err
 	}
@@ -125,7 +129,7 @@ func (e plannedFunctionSymbol) checkSupported() error {
 		if !e.physical {
 			return fmt.Errorf("coroutine primary %q requires coroutine physical ABI lowering", e.plan.ID)
 		}
-		return validateCoroLeafPhysicalABI(e.function, e.plan)
+		return validateCoroPhysicalABI(e.function, e.plan, e.coroPlan, e.childAwait)
 	}
 	if e.plan.Primary == coro.PrimaryExternal && e.plan.FuncRep == coro.DirectCoro {
 		return fmt.Errorf("external coroutine primary %q requires coroutine physical ABI lowering", e.plan.ID)
@@ -143,6 +147,9 @@ func (c *Compilation) preflightCoroPlan() error {
 	}
 	if c.EnableCoroPhysicalABI && !c.EnableCoroEntryResolution {
 		return fmt.Errorf("coroutine physical ABI requires coroutine entry resolution")
+	}
+	if c.EnableCoroChildAwait && !c.EnableCoroPhysicalABI {
+		return fmt.Errorf("coroutine child await requires coroutine physical ABI")
 	}
 	if !c.EnableCoroEntryResolution {
 		return nil
@@ -164,16 +171,24 @@ func (c *Compilation) preflightCoroPlan() error {
 			c.coroPreflightErr = err
 			return
 		}
+		if c.EnableCoroChildAwait {
+			if err := validateCoroRootFactories(c.CoroPlan); err != nil {
+				c.coroPreflightErr = err
+				return
+			}
+		}
 		for _, function := range c.CoroPlan.Functions() {
 			if err := validatePlannedFunction(function.Function, function.Plan); err != nil {
 				c.coroPreflightErr = err
 				return
 			}
 			entry := plannedFunctionSymbol{
-				function: function.Function,
-				plan:     function.Plan,
-				planned:  true,
-				physical: c.EnableCoroPhysicalABI,
+				function:   function.Function,
+				plan:       function.Plan,
+				planned:    true,
+				physical:   c.EnableCoroPhysicalABI,
+				childAwait: c.EnableCoroChildAwait,
+				coroPlan:   c.CoroPlan,
 			}
 			if err := entry.checkSupported(); err != nil {
 				c.coroPreflightErr = err
@@ -191,7 +206,7 @@ func (c *Compilation) preflightCoroPlan() error {
 			}
 		}
 		if c.EnableCoroPhysicalABI {
-			c.coroPreflightErr = validateCoroPhysicalConsumers(c.CoroPlan)
+			c.coroPreflightErr = validateCoroPhysicalConsumers(c.CoroPlan, c.EnableCoroChildAwait)
 		}
 	})
 	return c.coroPreflightErr
