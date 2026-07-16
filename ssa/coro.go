@@ -93,6 +93,32 @@ type CoroRootFactoryDescriptorOptions struct {
 	Result  Type
 }
 
+// CoroRootPackageAnchorOptions describes the linker-visible package root
+// anchor. Descriptors must be non-empty constant root descriptor globals from
+// this package module. ABIHash identifies the complete package root registry
+// ABI, including the ordered descriptor list.
+//
+// The anchor flags field is reserved and is emitted as zero in this ABI.
+type CoroRootPackageAnchorOptions struct {
+	Version     uint32
+	ABIHash     [16]byte
+	Descriptors []Expr
+}
+
+// CoroProgramManifestOptions describes the entry module's complete package
+// root catalog. PackageAnchors are constant package anchor globals declared or
+// defined in the entry module. ABIHash identifies the ordered package catalog.
+// Bootstrap may be Nil while the runtime catalog remains fail-closed, or a
+// constant function/global pointer from the entry module.
+//
+// The manifest flags field is reserved and is emitted as zero in this ABI.
+type CoroProgramManifestOptions struct {
+	Version        uint32
+	ABIHash        [16]byte
+	PackageAnchors []Expr
+	Bootstrap      Expr
+}
+
 // NewCoroFrameDescriptor defines a link-once constant descriptor with layout:
 //
 //	{ version i32, flags i32, hashLo i64, hashHi i64,
@@ -211,6 +237,264 @@ func (p Package) NewCoroRootFactoryDescriptor(
 	// dead stripping; its initializer keeps the typed wrapper reachable.
 	p.markLLVMRetained(descriptor.impl)
 	return descriptor.Expr
+}
+
+// NewCoroRootPackageAnchor defines one externally named, hidden package root
+// anchor and its explicit descriptor pointer array. Its layout is:
+//
+//	{ version i32, flags i32, hashLo i64, hashHi i64,
+//	  count uintptr, entries ptr }
+//
+// The entries array is an internal constant named name + ".entries". The
+// anchor is retained through llvm.used so final-link dead stripping cannot
+// remove the registry after its package object has been selected from an
+// archive. The external anchor name lets the build driver select that archive
+// member explicitly; runtime discovery never relies on section enumeration.
+// Each package may define at most one root anchor.
+func (p Package) NewCoroRootPackageAnchor(
+	name string, opts CoroRootPackageAnchorOptions,
+) Expr {
+	if name == "" {
+		panic("ssa: coroutine root package anchor requires a name")
+	}
+	if p.coroRootAnchor != "" {
+		panic(fmt.Sprintf("ssa: coroutine root package anchor already defined as %q", p.coroRootAnchor))
+	}
+	if len(opts.Descriptors) == 0 {
+		panic("ssa: coroutine root package anchor requires at least one descriptor")
+	}
+
+	entriesName := name + ".entries"
+	for _, symbol := range []string{name, entriesName} {
+		_, knownGlobal := p.vars[symbol]
+		_, knownFunction := p.fns[symbol]
+		if knownGlobal || knownFunction ||
+			!p.mod.NamedGlobal(symbol).IsNil() || !p.mod.NamedFunction(symbol).IsNil() {
+			panic(fmt.Sprintf("ssa: coroutine root package anchor symbol %q already exists", symbol))
+		}
+	}
+
+	values := make([]llvm.Value, len(opts.Descriptors))
+	seen := make(map[llvm.Value]struct{}, len(opts.Descriptors))
+	voidPtrType := p.Prog.VoidPtr().ll
+	for i, descriptor := range opts.Descriptors {
+		if descriptor.IsNil() || descriptor.impl.IsNil() || descriptor.impl.IsAConstant().IsNil() {
+			panic(fmt.Sprintf("ssa: coroutine root package anchor descriptor %d is not a constant global", i))
+		}
+		global := descriptor.impl.IsAGlobalVariable()
+		if global.IsNil() || !global.IsGlobalConstant() || global.Initializer().IsNil() ||
+			global.Initializer().IsAConstant().IsNil() {
+			panic(fmt.Sprintf("ssa: coroutine root package anchor descriptor %d is not a constant global", i))
+		}
+		if global.GlobalParent().C != p.mod.C {
+			panic(fmt.Sprintf("ssa: coroutine root package anchor descriptor %d belongs to another package module", i))
+		}
+		if _, exists := seen[global]; exists {
+			panic(fmt.Sprintf("ssa: coroutine root package anchor contains duplicate descriptor %q", global.Name()))
+		}
+		seen[global] = struct{}{}
+		value := global
+		if value.Type().C != voidPtrType.C {
+			value = llvm.ConstBitCast(value, voidPtrType)
+		}
+		values[i] = value
+	}
+
+	prog := p.Prog
+	entriesType := prog.rawType(types.NewArray(types.Typ[types.UnsafePointer], int64(len(values))))
+	entries := p.NewVarEx(entriesName, prog.Pointer(entriesType))
+	entries.impl.SetInitializer(llvm.ConstArray(voidPtrType, values))
+	entries.impl.SetGlobalConstant(true)
+	entries.impl.SetLinkage(llvm.InternalLinkage)
+	entries.impl.SetUnnamedAddr(true)
+
+	anchorType := prog.Struct(
+		prog.Uint32(),
+		prog.Uint32(),
+		prog.Uint64(),
+		prog.Uint64(),
+		prog.Uintptr(),
+		prog.VoidPtr(),
+	)
+	anchor := p.NewVarEx(name, prog.Pointer(anchorType))
+	entriesPointer := entries.impl
+	if entriesPointer.Type().C != voidPtrType.C {
+		entriesPointer = llvm.ConstBitCast(entriesPointer, voidPtrType)
+	}
+	fields := []llvm.Value{
+		prog.IntVal(uint64(opts.Version), prog.Uint32()).impl,
+		prog.IntVal(0, prog.Uint32()).impl,
+		prog.IntVal(binary.BigEndian.Uint64(opts.ABIHash[:8]), prog.Uint64()).impl,
+		prog.IntVal(binary.BigEndian.Uint64(opts.ABIHash[8:]), prog.Uint64()).impl,
+		prog.IntVal(uint64(len(values)), prog.Uintptr()).impl,
+		entriesPointer,
+	}
+	anchor.impl.SetInitializer(prog.ctx.ConstStruct(fields, false))
+	anchor.impl.SetGlobalConstant(true)
+	anchor.impl.SetLinkage(llvm.ExternalLinkage)
+	anchor.impl.SetVisibility(llvm.HiddenVisibility)
+	p.markLLVMRetained(anchor.impl)
+	p.coroRootAnchor = name
+	return anchor.Expr
+}
+
+// CoroRootPackageAnchor returns the linker-visible root anchor symbol emitted
+// by this package, or an empty string when the package has no root anchor.
+func (p Package) CoroRootPackageAnchor() string {
+	return p.coroRootAnchor
+}
+
+// NewCoroProgramManifest defines the entry module's one externally named,
+// hidden program manifest. Its layout is:
+//
+//	{ version i32, flags i32, hashLo i64, hashHi i64,
+//	  packageCount uintptr, packages ptr, bootstrap ptr }
+//
+// A non-empty package catalog is materialized as an internal constant pointer
+// array named name + ".packages". An empty catalog uses count zero and a null
+// packages pointer, without creating an empty array. External package anchor
+// declarations are normalized to constant declarations; definitions must
+// already be constant. The manifest is retained through llvm.used. Each entry
+// module may define at most one program manifest.
+func (p Package) NewCoroProgramManifest(
+	name string, opts CoroProgramManifestOptions,
+) Expr {
+	if name == "" {
+		panic("ssa: coroutine program manifest requires a name")
+	}
+	if p.coroProgramManifest != "" {
+		panic(fmt.Sprintf("ssa: coroutine program manifest already defined as %q", p.coroProgramManifest))
+	}
+
+	packagesName := name + ".packages"
+	symbols := []string{name}
+	if len(opts.PackageAnchors) != 0 {
+		symbols = append(symbols, packagesName)
+	}
+	for _, symbol := range symbols {
+		_, knownGlobal := p.vars[symbol]
+		_, knownFunction := p.fns[symbol]
+		if knownGlobal || knownFunction ||
+			!p.mod.NamedGlobal(symbol).IsNil() || !p.mod.NamedFunction(symbol).IsNil() {
+			panic(fmt.Sprintf("ssa: coroutine program manifest symbol %q already exists", symbol))
+		}
+	}
+
+	voidPtrType := p.Prog.VoidPtr().ll
+	packageValues := make([]llvm.Value, len(opts.PackageAnchors))
+	packageDeclarations := make([]llvm.Value, 0, len(opts.PackageAnchors))
+	seen := make(map[llvm.Value]struct{}, len(opts.PackageAnchors))
+	for i, anchor := range opts.PackageAnchors {
+		if anchor.IsNil() || anchor.impl.IsNil() || anchor.impl.IsAConstant().IsNil() ||
+			!anchor.impl.IsAConstantPointerNull().IsNil() {
+			panic(fmt.Sprintf("ssa: coroutine program manifest package anchor %d is not a non-null constant global", i))
+		}
+		global := coroManifestGlobal(anchor.impl)
+		if global.IsNil() {
+			panic(fmt.Sprintf("ssa: coroutine program manifest package anchor %d is not a non-null constant global", i))
+		}
+		if global.GlobalParent().C != p.mod.C {
+			panic(fmt.Sprintf("ssa: coroutine program manifest package anchor %d belongs to another entry module", i))
+		}
+		if _, exists := seen[global]; exists {
+			panic(fmt.Sprintf("ssa: coroutine program manifest contains duplicate package anchor %q", global.Name()))
+		}
+		seen[global] = struct{}{}
+		if global.Initializer().IsNil() {
+			packageDeclarations = append(packageDeclarations, global)
+		} else if !global.IsGlobalConstant() || global.Initializer().IsAConstant().IsNil() {
+			panic(fmt.Sprintf("ssa: coroutine program manifest package anchor %d is not a constant global", i))
+		}
+		value := anchor.impl
+		if value.Type().C != voidPtrType.C {
+			value = llvm.ConstBitCast(value, voidPtrType)
+		}
+		packageValues[i] = value
+	}
+
+	bootstrap := llvm.ConstNull(voidPtrType)
+	if !opts.Bootstrap.IsNil() {
+		if opts.Bootstrap.impl.IsNil() || opts.Bootstrap.impl.IsAConstant().IsNil() ||
+			!opts.Bootstrap.impl.IsAConstantPointerNull().IsNil() {
+			panic("ssa: coroutine program manifest bootstrap is not a non-null constant function/global pointer")
+		}
+		base := coroManifestPointerBase(opts.Bootstrap.impl)
+		if base.IsNil() || (base.IsAFunction().IsNil() && base.IsAGlobalVariable().IsNil()) {
+			panic("ssa: coroutine program manifest bootstrap is not a non-null constant function/global pointer")
+		}
+		if base.GlobalParent().C != p.mod.C {
+			panic("ssa: coroutine program manifest bootstrap belongs to another entry module")
+		}
+		bootstrap = opts.Bootstrap.impl
+		if bootstrap.Type().C != voidPtrType.C {
+			bootstrap = llvm.ConstBitCast(bootstrap, voidPtrType)
+		}
+	}
+
+	// Commit declaration normalization only after all validation succeeds.
+	for _, declaration := range packageDeclarations {
+		declaration.SetGlobalConstant(true)
+	}
+
+	packages := llvm.ConstNull(voidPtrType)
+	if len(packageValues) != 0 {
+		prog := p.Prog
+		packagesType := prog.rawType(types.NewArray(types.Typ[types.UnsafePointer], int64(len(packageValues))))
+		array := p.NewVarEx(packagesName, prog.Pointer(packagesType))
+		array.impl.SetInitializer(llvm.ConstArray(voidPtrType, packageValues))
+		array.impl.SetGlobalConstant(true)
+		array.impl.SetLinkage(llvm.InternalLinkage)
+		array.impl.SetUnnamedAddr(true)
+		packages = array.impl
+		if packages.Type().C != voidPtrType.C {
+			packages = llvm.ConstBitCast(packages, voidPtrType)
+		}
+	}
+
+	prog := p.Prog
+	manifestType := prog.Struct(
+		prog.Uint32(),
+		prog.Uint32(),
+		prog.Uint64(),
+		prog.Uint64(),
+		prog.Uintptr(),
+		prog.VoidPtr(),
+		prog.VoidPtr(),
+	)
+	manifest := p.NewVarEx(name, prog.Pointer(manifestType))
+	fields := []llvm.Value{
+		prog.IntVal(uint64(opts.Version), prog.Uint32()).impl,
+		prog.IntVal(0, prog.Uint32()).impl,
+		prog.IntVal(binary.BigEndian.Uint64(opts.ABIHash[:8]), prog.Uint64()).impl,
+		prog.IntVal(binary.BigEndian.Uint64(opts.ABIHash[8:]), prog.Uint64()).impl,
+		prog.IntVal(uint64(len(packageValues)), prog.Uintptr()).impl,
+		packages,
+		bootstrap,
+	}
+	manifest.impl.SetInitializer(prog.ctx.ConstStruct(fields, false))
+	manifest.impl.SetGlobalConstant(true)
+	manifest.impl.SetLinkage(llvm.ExternalLinkage)
+	manifest.impl.SetVisibility(llvm.HiddenVisibility)
+	p.markLLVMRetained(manifest.impl)
+	p.coroProgramManifest = name
+	return manifest.Expr
+}
+
+// CoroProgramManifest returns the linker-visible program manifest symbol
+// emitted by this entry module, or an empty string when none was emitted.
+func (p Package) CoroProgramManifest() string {
+	return p.coroProgramManifest
+}
+
+func coroManifestGlobal(value llvm.Value) llvm.Value {
+	return coroManifestPointerBase(value).IsAGlobalVariable()
+}
+
+func coroManifestPointerBase(value llvm.Value) llvm.Value {
+	for !value.IsAConstantExpr().IsNil() && value.OperandsCount() == 1 {
+		value = value.Operand(0)
+	}
+	return value
 }
 
 func coroRootFactoryFunction(value llvm.Value) llvm.Value {

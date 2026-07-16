@@ -506,6 +506,505 @@ func TestCoroRootFactoryDescriptorRejectsMisuse(t *testing.T) {
 	})
 }
 
+func TestCoroRootPackageAnchorTargetLayout(t *testing.T) {
+	Initialize(InitAll)
+	tests := []struct {
+		name          string
+		target        *Target
+		descriptors   int
+		pointerSize   int
+		anchorSize    uint64
+		entriesOffset uint64
+	}{
+		{name: "native_one", descriptors: 1, pointerSize: 8, anchorSize: 40, entriesOffset: 32},
+		{name: "native_many", descriptors: 3, pointerSize: 8, anchorSize: 40, entriesOffset: 32},
+		{
+			name:          "wasm32_one",
+			target:        &Target{GOOS: "wasip1", GOARCH: "wasm"},
+			descriptors:   1,
+			pointerSize:   4,
+			anchorSize:    32,
+			entriesOffset: 28,
+		},
+		{
+			name:          "wasm32_many",
+			target:        &Target{GOOS: "wasip1", GOARCH: "wasm"},
+			descriptors:   3,
+			pointerSize:   4,
+			anchorSize:    32,
+			entriesOffset: 28,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			prog := NewProgram(test.target)
+			pkg := prog.NewPackage("coroanchor", "coro/anchor/"+test.name)
+			t.Cleanup(func() {
+				pkg.Module().Dispose()
+				prog.Dispose()
+			})
+
+			if got := pkg.CoroRootPackageAnchor(); got != "" {
+				t.Fatalf("anchor before emission = %q, want empty", got)
+			}
+			descriptors := make([]Expr, test.descriptors)
+			for i := range descriptors {
+				descriptors[i] = newCoroRootDescriptorForAnchor(pkg, fmt.Sprintf("root%d", i))
+			}
+			hash := [16]byte{
+				0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+				0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+			}
+			const anchorName = "__llgo_coro_root_anchor_test"
+			anchor := pkg.NewCoroRootPackageAnchor(
+				anchorName,
+				CoroRootPackageAnchorOptions{
+					Version:     11,
+					ABIHash:     hash,
+					Descriptors: descriptors,
+				},
+			)
+			if got := pkg.CoroRootPackageAnchor(); got != anchorName {
+				t.Fatalf("anchor symbol = %q, want %q", got, anchorName)
+			}
+			if !anchor.impl.IsGlobalConstant() {
+				t.Fatal("package root anchor is not a constant global")
+			}
+			if got := anchor.impl.Linkage(); got != llvm.ExternalLinkage {
+				t.Fatalf("anchor linkage = %v, want external", got)
+			}
+			if got := anchor.impl.Visibility(); got != llvm.HiddenVisibility {
+				t.Fatalf("anchor visibility = %v, want hidden", got)
+			}
+
+			anchorType := prog.Elem(anchor.Type)
+			if got := prog.SizeOf(anchorType); got != test.anchorSize {
+				t.Fatalf("anchor size = %d, want %d", got, test.anchorSize)
+			}
+			if got := prog.OffsetOf(anchorType, 5); got != test.entriesOffset {
+				t.Fatalf("anchor entries offset = %d, want %d", got, test.entriesOffset)
+			}
+			initializer := anchor.impl.Initializer()
+			if initializer.IsAConstantStruct().IsNil() || initializer.OperandsCount() != 6 {
+				t.Fatalf("anchor initializer is not a six-field constant struct: %v", initializer)
+			}
+			wantFixed := []uint64{
+				11,
+				0,
+				0x1011121314151617,
+				0x2021222324252627,
+				uint64(test.descriptors),
+			}
+			for i, want := range wantFixed {
+				if got := initializer.Operand(i).ZExtValue(); got != want {
+					t.Fatalf("anchor field %d = %#x, want %#x", i, got, want)
+				}
+			}
+			if got := initializer.Operand(4).Type().IntTypeWidth(); got != test.pointerSize*8 {
+				t.Fatalf("anchor count width = %d, want %d", got, test.pointerSize*8)
+			}
+
+			entries := pkg.Module().NamedGlobal(anchorName + ".entries")
+			if entries.IsNil() {
+				t.Fatal("package root anchor lacks its entries array")
+			}
+			if !entries.IsGlobalConstant() || entries.Linkage() != llvm.InternalLinkage {
+				t.Fatalf("entries array is not an internal constant: %v", entries)
+			}
+			entriesPointer := stripCoroAnchorConstantPointer(initializer.Operand(5))
+			if entriesPointer.C != entries.C {
+				t.Fatalf("anchor entries pointer = %v, want %v", entriesPointer, entries)
+			}
+			entriesInitializer := entries.Initializer()
+			if entriesInitializer.IsAConstantArray().IsNil() ||
+				entriesInitializer.OperandsCount() != test.descriptors {
+				t.Fatalf("entries initializer has %d entries, want %d: %v",
+					entriesInitializer.OperandsCount(), test.descriptors, entriesInitializer)
+			}
+			for i, descriptor := range descriptors {
+				got := stripCoroAnchorConstantPointer(entriesInitializer.Operand(i))
+				if got.C != descriptor.impl.C {
+					t.Fatalf("entries[%d] = %v, want %v", i, got, descriptor.impl)
+				}
+			}
+
+			pkg.MaterializePreserveSyms()
+			used := pkg.Module().NamedGlobal("llvm.used")
+			if used.IsNil() {
+				t.Fatal("package root anchor was not retained in llvm.used")
+			}
+			retained := false
+			for i := 0; i < used.Initializer().OperandsCount(); i++ {
+				if stripCoroAnchorConstantPointer(used.Initializer().Operand(i)).C == anchor.impl.C {
+					retained = true
+					break
+				}
+			}
+			if !retained {
+				t.Fatalf("llvm.used does not retain package root anchor:\n%s", pkg.String())
+			}
+			if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("verify package root anchor: %v\n%s", err, pkg.String())
+			}
+		})
+	}
+}
+
+func TestCoroRootPackageAnchorRejectsMisuse(t *testing.T) {
+	Initialize(InitAll)
+	prog := NewProgram(nil)
+	defer prog.Dispose()
+	pkg := prog.NewPackage("badcoroanchor", "bad/coro/anchor")
+	defer pkg.Module().Dispose()
+	descriptor := newCoroRootDescriptorForAnchor(pkg, "valid")
+	valid := CoroRootPackageAnchorOptions{Descriptors: []Expr{descriptor}}
+
+	mustPanicContains(t, "requires a name", func() {
+		pkg.NewCoroRootPackageAnchor("", valid)
+	})
+	mustPanicContains(t, "at least one descriptor", func() {
+		pkg.NewCoroRootPackageAnchor("empty", CoroRootPackageAnchorOptions{})
+	})
+	mustPanicContains(t, "not a constant global", func() {
+		bad := valid
+		bad.Descriptors = []Expr{Nil}
+		pkg.NewCoroRootPackageAnchor("nil_descriptor", bad)
+	})
+	mustPanicContains(t, "not a constant global", func() {
+		bad := valid
+		bad.Descriptors = []Expr{prog.IntVal(1, prog.Uintptr())}
+		pkg.NewCoroRootPackageAnchor("integer_descriptor", bad)
+	})
+	mutable := pkg.NewVarEx("mutable_descriptor", prog.Pointer(prog.Uint32()))
+	mutable.Init(prog.IntVal(0, prog.Uint32()))
+	mustPanicContains(t, "not a constant global", func() {
+		bad := valid
+		bad.Descriptors = []Expr{mutable.Expr}
+		pkg.NewCoroRootPackageAnchor("mutable_descriptor_anchor", bad)
+	})
+	foreignPkg := prog.NewPackage("foreigncoroanchor", "foreign/coro/anchor")
+	defer foreignPkg.Module().Dispose()
+	foreign := newCoroRootDescriptorForAnchor(foreignPkg, "foreign")
+	mustPanicContains(t, "another package module", func() {
+		bad := valid
+		bad.Descriptors = []Expr{foreign}
+		pkg.NewCoroRootPackageAnchor("foreign_descriptor", bad)
+	})
+	mustPanicContains(t, "duplicate descriptor", func() {
+		bad := valid
+		bad.Descriptors = []Expr{descriptor, descriptor}
+		pkg.NewCoroRootPackageAnchor("duplicate_descriptor", bad)
+	})
+	pkg.NewVarEx("occupied_anchor", prog.Pointer(prog.Uint32()))
+	mustPanicContains(t, "symbol \"occupied_anchor\" already exists", func() {
+		pkg.NewCoroRootPackageAnchor("occupied_anchor", valid)
+	})
+	pkg.NewVarEx("occupied_entries.entries", prog.Pointer(prog.Uint32()))
+	mustPanicContains(t, "symbol \"occupied_entries.entries\" already exists", func() {
+		pkg.NewCoroRootPackageAnchor("occupied_entries", valid)
+	})
+	if got := pkg.CoroRootPackageAnchor(); got != "" {
+		t.Fatalf("rejected anchor attempts recorded symbol %q", got)
+	}
+
+	pkg.NewCoroRootPackageAnchor("valid_anchor", valid)
+	mustPanicContains(t, "already defined as \"valid_anchor\"", func() {
+		pkg.NewCoroRootPackageAnchor("second_anchor", valid)
+	})
+}
+
+func TestCoroProgramManifestTargetLayout(t *testing.T) {
+	Initialize(InitAll)
+	tests := []struct {
+		name            string
+		target          *Target
+		anchors         int
+		bootstrap       string
+		pointerSize     int
+		manifestSize    uint64
+		packagesOffset  uint64
+		bootstrapOffset uint64
+	}{
+		{
+			name:            "native_empty",
+			pointerSize:     8,
+			manifestSize:    48,
+			packagesOffset:  32,
+			bootstrapOffset: 40,
+		},
+		{
+			name:            "native_one",
+			anchors:         1,
+			bootstrap:       "function",
+			pointerSize:     8,
+			manifestSize:    48,
+			packagesOffset:  32,
+			bootstrapOffset: 40,
+		},
+		{
+			name:            "native_many",
+			anchors:         3,
+			bootstrap:       "global",
+			pointerSize:     8,
+			manifestSize:    48,
+			packagesOffset:  32,
+			bootstrapOffset: 40,
+		},
+		{
+			name:            "wasm32_empty",
+			target:          &Target{GOOS: "wasip1", GOARCH: "wasm"},
+			pointerSize:     4,
+			manifestSize:    40,
+			packagesOffset:  28,
+			bootstrapOffset: 32,
+		},
+		{
+			name:            "wasm32_one",
+			target:          &Target{GOOS: "wasip1", GOARCH: "wasm"},
+			anchors:         1,
+			bootstrap:       "function",
+			pointerSize:     4,
+			manifestSize:    40,
+			packagesOffset:  28,
+			bootstrapOffset: 32,
+		},
+		{
+			name:            "wasm32_many",
+			target:          &Target{GOOS: "wasip1", GOARCH: "wasm"},
+			anchors:         3,
+			bootstrap:       "global",
+			pointerSize:     4,
+			manifestSize:    40,
+			packagesOffset:  28,
+			bootstrapOffset: 32,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			prog := NewProgram(test.target)
+			pkg := prog.NewPackage("coromanifest", "coro/manifest/"+test.name)
+			t.Cleanup(func() {
+				pkg.Module().Dispose()
+				prog.Dispose()
+			})
+
+			if got := pkg.CoroProgramManifest(); got != "" {
+				t.Fatalf("manifest before emission = %q, want empty", got)
+			}
+			anchors := make([]Expr, test.anchors)
+			for i := range anchors {
+				// Exercise both constant definitions and external declarations.
+				anchors[i] = newCoroProgramPackageAnchor(pkg, fmt.Sprintf("package_anchor_%d", i), i%2 == 0)
+			}
+			var bootstrap Expr
+			switch test.bootstrap {
+			case "function":
+				bootstrap = pkg.NewFunc("manifest_bootstrap", functionSignature(nil, nil), InC).Expr
+			case "global":
+				global := pkg.NewVarEx("manifest_bootstrap", prog.Pointer(prog.Uintptr()))
+				global.Init(prog.IntVal(0, prog.Uintptr()))
+				bootstrap = global.Expr
+			}
+			hash := [16]byte{
+				0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
+				0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47,
+			}
+			const manifestName = "__llgo_coro_program_manifest_test"
+			manifest := pkg.NewCoroProgramManifest(
+				manifestName,
+				CoroProgramManifestOptions{
+					Version:        12,
+					ABIHash:        hash,
+					PackageAnchors: anchors,
+					Bootstrap:      bootstrap,
+				},
+			)
+			if got := pkg.CoroProgramManifest(); got != manifestName {
+				t.Fatalf("manifest symbol = %q, want %q", got, manifestName)
+			}
+			if !manifest.impl.IsGlobalConstant() {
+				t.Fatal("program manifest is not a constant global")
+			}
+			if got := manifest.impl.Linkage(); got != llvm.ExternalLinkage {
+				t.Fatalf("manifest linkage = %v, want external", got)
+			}
+			if got := manifest.impl.Visibility(); got != llvm.HiddenVisibility {
+				t.Fatalf("manifest visibility = %v, want hidden", got)
+			}
+
+			manifestType := prog.Elem(manifest.Type)
+			if got := prog.SizeOf(manifestType); got != test.manifestSize {
+				t.Fatalf("manifest size = %d, want %d", got, test.manifestSize)
+			}
+			if got := prog.OffsetOf(manifestType, 5); got != test.packagesOffset {
+				t.Fatalf("manifest packages offset = %d, want %d", got, test.packagesOffset)
+			}
+			if got := prog.OffsetOf(manifestType, 6); got != test.bootstrapOffset {
+				t.Fatalf("manifest bootstrap offset = %d, want %d", got, test.bootstrapOffset)
+			}
+			initializer := manifest.impl.Initializer()
+			if initializer.IsAConstantStruct().IsNil() || initializer.OperandsCount() != 7 {
+				t.Fatalf("manifest initializer is not a seven-field constant struct: %v", initializer)
+			}
+			wantFixed := []uint64{
+				12,
+				0,
+				0x3031323334353637,
+				0x4041424344454647,
+				uint64(test.anchors),
+			}
+			for i, want := range wantFixed {
+				if got := initializer.Operand(i).ZExtValue(); got != want {
+					t.Fatalf("manifest field %d = %#x, want %#x", i, got, want)
+				}
+			}
+			if got := initializer.Operand(4).Type().IntTypeWidth(); got != test.pointerSize*8 {
+				t.Fatalf("manifest package count width = %d, want %d", got, test.pointerSize*8)
+			}
+
+			packages := pkg.Module().NamedGlobal(manifestName + ".packages")
+			if test.anchors == 0 {
+				if !packages.IsNil() {
+					t.Fatalf("empty catalog unexpectedly emitted packages array: %v", packages)
+				}
+				if initializer.Operand(5).IsAConstantPointerNull().IsNil() {
+					t.Fatalf("empty catalog packages pointer is not null: %v", initializer.Operand(5))
+				}
+			} else {
+				if packages.IsNil() {
+					t.Fatal("non-empty catalog lacks its packages array")
+				}
+				if !packages.IsGlobalConstant() || packages.Linkage() != llvm.InternalLinkage {
+					t.Fatalf("packages array is not an internal constant: %v", packages)
+				}
+				if got := stripCoroAnchorConstantPointer(initializer.Operand(5)); got.C != packages.C {
+					t.Fatalf("manifest packages pointer = %v, want %v", got, packages)
+				}
+				array := packages.Initializer()
+				if array.IsAConstantArray().IsNil() || array.OperandsCount() != test.anchors {
+					t.Fatalf("packages initializer has %d entries, want %d: %v",
+						array.OperandsCount(), test.anchors, array)
+				}
+				for i, anchor := range anchors {
+					if got := stripCoroAnchorConstantPointer(array.Operand(i)); got.C != anchor.impl.C {
+						t.Fatalf("packages[%d] = %v, want %v", i, got, anchor.impl)
+					}
+					if !anchor.impl.IsGlobalConstant() {
+						t.Fatalf("package anchor %d was not emitted/normalized as constant", i)
+					}
+				}
+			}
+			if bootstrap.IsNil() {
+				if initializer.Operand(6).IsAConstantPointerNull().IsNil() {
+					t.Fatalf("nil bootstrap was not encoded as null: %v", initializer.Operand(6))
+				}
+			} else if got := stripCoroAnchorConstantPointer(initializer.Operand(6)); got.C != bootstrap.impl.C {
+				t.Fatalf("manifest bootstrap = %v, want %v", got, bootstrap.impl)
+			}
+
+			pkg.MaterializePreserveSyms()
+			used := pkg.Module().NamedGlobal("llvm.used")
+			if used.IsNil() {
+				t.Fatal("program manifest was not retained in llvm.used")
+			}
+			retained := false
+			for i := 0; i < used.Initializer().OperandsCount(); i++ {
+				if stripCoroAnchorConstantPointer(used.Initializer().Operand(i)).C == manifest.impl.C {
+					retained = true
+					break
+				}
+			}
+			if !retained {
+				t.Fatalf("llvm.used does not retain program manifest:\n%s", pkg.String())
+			}
+			if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("verify coroutine program manifest: %v\n%s", err, pkg.String())
+			}
+		})
+	}
+}
+
+func TestCoroProgramManifestRejectsMisuse(t *testing.T) {
+	Initialize(InitAll)
+	prog := NewProgram(nil)
+	defer prog.Dispose()
+	pkg := prog.NewPackage("badcoromanifest", "bad/coro/manifest")
+	defer pkg.Module().Dispose()
+	anchor := newCoroProgramPackageAnchor(pkg, "valid_package_anchor", true)
+	valid := CoroProgramManifestOptions{PackageAnchors: []Expr{anchor}}
+
+	mustPanicContains(t, "requires a name", func() {
+		pkg.NewCoroProgramManifest("", valid)
+	})
+	mustPanicContains(t, "not a non-null constant global", func() {
+		bad := valid
+		bad.PackageAnchors = []Expr{Nil}
+		pkg.NewCoroProgramManifest("nil_anchor", bad)
+	})
+	mustPanicContains(t, "not a non-null constant global", func() {
+		bad := valid
+		bad.PackageAnchors = []Expr{prog.IntVal(1, prog.Uintptr())}
+		pkg.NewCoroProgramManifest("integer_anchor", bad)
+	})
+	mustPanicContains(t, "not a non-null constant global", func() {
+		bad := valid
+		bad.PackageAnchors = []Expr{prog.Nil(prog.VoidPtr())}
+		pkg.NewCoroProgramManifest("null_anchor", bad)
+	})
+	mutable := pkg.NewVarEx("mutable_package_anchor", prog.Pointer(prog.Uint32()))
+	mutable.Init(prog.IntVal(0, prog.Uint32()))
+	mustPanicContains(t, "not a constant global", func() {
+		bad := valid
+		bad.PackageAnchors = []Expr{mutable.Expr}
+		pkg.NewCoroProgramManifest("mutable_anchor", bad)
+	})
+	foreignPkg := prog.NewPackage("foreigncoromanifest", "foreign/coro/manifest")
+	defer foreignPkg.Module().Dispose()
+	foreignAnchor := newCoroProgramPackageAnchor(foreignPkg, "foreign_package_anchor", true)
+	mustPanicContains(t, "another entry module", func() {
+		bad := valid
+		bad.PackageAnchors = []Expr{foreignAnchor}
+		pkg.NewCoroProgramManifest("foreign_anchor", bad)
+	})
+	mustPanicContains(t, "duplicate package anchor", func() {
+		bad := valid
+		bad.PackageAnchors = []Expr{anchor, anchor}
+		pkg.NewCoroProgramManifest("duplicate_anchor", bad)
+	})
+	mustPanicContains(t, "not a non-null constant function/global pointer", func() {
+		bad := valid
+		bad.Bootstrap = prog.IntVal(1, prog.Uintptr())
+		pkg.NewCoroProgramManifest("integer_bootstrap", bad)
+	})
+	mustPanicContains(t, "not a non-null constant function/global pointer", func() {
+		bad := valid
+		bad.Bootstrap = prog.Nil(prog.VoidPtr())
+		pkg.NewCoroProgramManifest("null_bootstrap", bad)
+	})
+	foreignBootstrap := foreignPkg.NewFunc("foreign_bootstrap", functionSignature(nil, nil), InC)
+	mustPanicContains(t, "another entry module", func() {
+		bad := valid
+		bad.Bootstrap = foreignBootstrap.Expr
+		pkg.NewCoroProgramManifest("foreign_bootstrap", bad)
+	})
+	pkg.NewVarEx("occupied_manifest", prog.Pointer(prog.Uint32()))
+	mustPanicContains(t, "symbol \"occupied_manifest\" already exists", func() {
+		pkg.NewCoroProgramManifest("occupied_manifest", valid)
+	})
+	pkg.NewVarEx("occupied_packages.packages", prog.Pointer(prog.Uint32()))
+	mustPanicContains(t, "symbol \"occupied_packages.packages\" already exists", func() {
+		pkg.NewCoroProgramManifest("occupied_packages", valid)
+	})
+	if got := pkg.CoroProgramManifest(); got != "" {
+		t.Fatalf("rejected manifest attempts recorded symbol %q", got)
+	}
+
+	pkg.NewCoroProgramManifest("valid_manifest", valid)
+	mustPanicContains(t, "already defined as \"valid_manifest\"", func() {
+		pkg.NewCoroProgramManifest("second_manifest", CoroProgramManifestOptions{})
+	})
+}
+
 func TestCoroBuilderRejectsMisuse(t *testing.T) {
 	fixture := newCoroTestFixture(t, nil, 0)
 	mustPanicContains(t, "finished coroutine", func() { fixture.coro.Suspend() })
@@ -733,6 +1232,37 @@ func coroRootFactoryTestSignature() *types.Signature {
 		},
 		[]types.Type{types.Typ[types.UnsafePointer]},
 	)
+}
+
+func newCoroRootDescriptorForAnchor(pkg Package, name string) Expr {
+	prog := pkg.Prog
+	factory := pkg.NewFunc(name+".factory", coroRootFactoryTestSignature(), InC)
+	return pkg.NewCoroRootFactoryDescriptor(
+		name+".descriptor",
+		CoroRootFactoryDescriptorOptions{
+			Version: 1,
+			Factory: factory.Expr,
+			Startup: prog.VoidPtr(),
+			Result:  prog.VoidPtr(),
+		},
+	)
+}
+
+func newCoroProgramPackageAnchor(pkg Package, name string, definition bool) Expr {
+	prog := pkg.Prog
+	global := pkg.NewVarEx(name, prog.Pointer(prog.Uint32()))
+	if definition {
+		global.Init(prog.IntVal(0, prog.Uint32()))
+		global.impl.SetGlobalConstant(true)
+	}
+	return global.Expr
+}
+
+func stripCoroAnchorConstantPointer(value llvm.Value) llvm.Value {
+	for !value.IsAConstantExpr().IsNil() && value.OperandsCount() == 1 {
+		value = value.Operand(0)
+	}
+	return value
 }
 
 func runCoroPasses(t *testing.T, fixture *coroTestFixture, pipeline string) {
