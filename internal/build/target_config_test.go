@@ -14,6 +14,44 @@ import (
 	llssa "github.com/goplus/llgo/ssa"
 )
 
+func TestCoroPlanDigestMetadataUsesEffectiveLLVMTarget(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		target      *llssa.Target
+		pointerBits int
+	}{
+		{name: "native", target: &llssa.Target{GOOS: runtime.GOOS, GOARCH: runtime.GOARCH}, pointerBits: 64},
+		{name: "wasm32", target: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}, pointerBits: 32},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			prog := llssa.NewProgram(tt.target)
+			defer prog.Dispose()
+			ctx := &context{
+				prog:      prog,
+				buildConf: &Config{EnableCoroEntryResolution: true},
+			}
+			metadata, err := buildCoroPlanDigestMetadata(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			effective := prog.TargetSpec()
+			if metadata.TargetTriple != effective.Triple || metadata.TargetCPU != effective.CPU ||
+				metadata.TargetFeatures != effective.Features || metadata.TargetABI != effective.TargetABI {
+				t.Fatalf("metadata target = %+v, want effective target %+v", metadata, effective)
+			}
+			if metadata.PointerBits != tt.pointerBits {
+				t.Fatalf("metadata pointer bits = %d, want %d", metadata.PointerBits, tt.pointerBits)
+			}
+			if metadata.DataLayout != prog.DataLayout() || metadata.DataLayout == "" {
+				t.Fatalf("metadata data layout = %q, want %q", metadata.DataLayout, prog.DataLayout())
+			}
+			if metadata.Endianness != "little" && metadata.Endianness != "big" {
+				t.Fatalf("metadata endianness = %q", metadata.Endianness)
+			}
+		})
+	}
+}
+
 func TestNewLLSSATargetUsesResolvedLLVMConfig(t *testing.T) {
 	nativeConf := &Config{Goos: runtime.GOOS, Goarch: runtime.GOARCH, OptLevel: optlevel.O2}
 	nativeSpec := intllvm.GetTargetSpec(runtime.GOOS, runtime.GOARCH, "")

@@ -148,6 +148,10 @@ func (c *Compilation) preflightCoroPlan() error {
 		return nil
 	}
 	c.coroPreflight.Do(func() {
+		if err := c.validateCoroABIIdentity(false); err != nil {
+			c.coroPreflightErr = err
+			return
+		}
 		if c.CoroPlan == nil {
 			c.coroPreflightErr = fmt.Errorf("coroutine entry resolution requires a compilation CoroPlan")
 			return

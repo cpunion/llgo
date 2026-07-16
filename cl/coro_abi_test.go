@@ -324,6 +324,86 @@ func TestCoroPhysicalABIRequiresEntryResolution(t *testing.T) {
 	}
 }
 
+func TestCoroPhysicalABICacheRegistrationPreservesPhysicalMetadata(t *testing.T) {
+	const source = `package foo
+func Leaf(value uint32) uint32 { return value + 1 }
+`
+	compile := func(cacheHit bool) (string, int) {
+		t.Helper()
+		ssaPkg, _, files := buildGoSSAPkg(t, source)
+		prog := newLLSSAProg(t)
+		defer prog.Dispose()
+		prog.EnableFuncInfoMetadata(true)
+		universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+		if err != nil {
+			t.Fatal(err)
+		}
+		functionIDs := universe.FunctionIDConfig()
+		functionIDs.CoroABI = coro.PhysicalABIV0
+		functionIDs.SchedulerABI = coro.SchedulerNoneABIV0
+		functionIDs.ArchiveReady = true
+		leaf := ssaPkg.Func("Leaf")
+		plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: leaf, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+			EmissionUniverse:     ssaUniverse,
+			FunctionIDs:          functionIDs,
+			MaxPlainInstructions: -1,
+			ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+				if fn == leaf {
+					return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+				}
+				return coro.SSAFunctionPolicy{}, nil
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		observerCalls := 0
+		pkg, _, err := NewPackageExWithEmbedOptions(prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{}, PackageOptions{
+			Compilation: &Compilation{
+				CoroPlan:                  plan,
+				CoroPlanObserver:          func(*ssa.Package, *coro.SSAPlan) { observerCalls++ },
+				EnableCoroEntryResolution: true,
+				EnableCoroPhysicalABI:     true,
+				CoroPlanDigest:            strings.Repeat("0", 64),
+				CoroABI:                   coro.PhysicalABIV0,
+				SchedulerABI:              coro.SchedulerNoneABIV0,
+				PanicABI:                  coro.PanicLegacyABIV0,
+				FuncRepABI:                coro.FuncRepABIV0,
+				EmissionUniverse:          universe,
+			},
+			CacheHit: cacheHit,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pkg.String(), observerCalls
+	}
+
+	sourceIR, sourceObserverCalls := compile(false)
+	if sourceObserverCalls != 1 {
+		t.Fatalf("source observer calls = %d, want 1", sourceObserverCalls)
+	}
+	cachedIR, cachedObserverCalls := compile(true)
+	if cachedObserverCalls != 0 {
+		t.Fatalf("cache registration observer calls = %d, want 0", cachedObserverCalls)
+	}
+	if cachedIR != sourceIR {
+		t.Fatalf("cache registration changed plan-aware frontend metadata:\nsource:\n%s\ncached:\n%s", sourceIR, cachedIR)
+	}
+	for _, required := range []string{"$coro", "llvm.coro.", coroFrameAllocHook, coroFrameFreeHook, coroDescriptorPrefix} {
+		if !strings.Contains(cachedIR, required) {
+			t.Fatalf("cache registration is missing physical coroutine marker %q:\n%s", required, cachedIR)
+		}
+	}
+	if !strings.Contains(cachedIR, `!"foo.Leaf$coro"`) {
+		t.Fatalf("cache registration funcinfo does not name the archived coroutine symbol:\n%s", cachedIR)
+	}
+}
+
 func compileCoroLeafPhysicalABI(t *testing.T, target *llssa.Target) (llssa.Program, llssa.Package) {
 	t.Helper()
 	return compileCoroLeafPhysicalABISource(t, target, `package foo

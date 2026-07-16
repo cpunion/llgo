@@ -144,12 +144,13 @@ type SSAFunctionPlan struct {
 // SSAPlan is the compilation-scoped whole-program result. Its maps remain
 // private so consumers cannot reconstruct identities from display strings.
 type SSAPlan struct {
-	plan       *Plan
-	functions  []SSAFunctionPlan
-	byFunction map[*ssa.Function]FunctionID
-	byID       map[FunctionID]*ssa.Function
-	valuePlans map[ssa.Value]SSAValuePlan
-	callPlans  map[ssa.CallInstruction]SSACallPlan
+	plan        *Plan
+	functions   []SSAFunctionPlan
+	byFunction  map[*ssa.Function]FunctionID
+	byID        map[FunctionID]*ssa.Function
+	valuePlans  map[ssa.Value]SSAValuePlan
+	callPlans   map[ssa.CallInstruction]SSACallPlan
+	functionIDs FunctionIDConfig
 }
 
 type ssaFunctionResolution struct {
@@ -648,12 +649,13 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		return nil, fmt.Errorf("coro: finalize SSA value and call plans: %w", err)
 	}
 	result := &SSAPlan{
-		plan:       base,
-		functions:  make([]SSAFunctionPlan, 0, len(included)),
-		byFunction: ids,
-		byID:       byID,
-		valuePlans: valuePlans,
-		callPlans:  callPlans,
+		plan:        base,
+		functions:   make([]SSAFunctionPlan, 0, len(included)),
+		byFunction:  ids,
+		byID:        byID,
+		valuePlans:  valuePlans,
+		callPlans:   callPlans,
+		functionIDs: config.FunctionIDs,
 	}
 	for _, functionPlan := range base.Functions() {
 		result.functions = append(result.functions, SSAFunctionPlan{
@@ -773,6 +775,9 @@ func closeCanonicalStaticFunctions(
 		operands := make([]*ssa.Value, 0, 8)
 		for _, block := range fn.Blocks {
 			for _, instruction := range block.Instrs {
+				if _, debug := instruction.(*ssa.DebugRef); debug {
+					continue
+				}
 				operands = instruction.Operands(operands[:0])
 				for _, operand := range operands {
 					if operand == nil {

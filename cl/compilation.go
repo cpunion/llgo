@@ -17,6 +17,8 @@
 package cl
 
 import (
+	"encoding/hex"
+	"fmt"
 	"sync"
 
 	"github.com/goplus/llgo/internal/coro"
@@ -33,13 +35,22 @@ type CoroPlanObserver func(pkg *ssa.Package, plan *coro.SSAPlan)
 // Compilation contains immutable inputs shared by every package compiled as
 // part of one frontend compilation. Pass it by pointer and do not copy it after
 // first use. A CoroPlan remains report-only unless EnableCoroEntryResolution is
-// explicitly set. Functions materialized after analysis still fail closed at
-// their first symbol resolution; a later slice will establish the complete
-// effective emission universe before codegen.
+// explicitly set. The prepared emission universe freezes every function that
+// codegen may materialize, and any later out-of-universe lookup fails closed at
+// its first symbol resolution.
 type Compilation struct {
 	CoroPlan                  *coro.SSAPlan
 	CoroPlanObserver          CoroPlanObserver
 	EnableCoroEntryResolution bool
+	// CoroPlanDigest and the ABI identities are populated by the build driver
+	// after whole-program analysis and participate in every package archive
+	// fingerprint. They are required before an active compilation may register
+	// a cache hit.
+	CoroPlanDigest string
+	CoroABI        string
+	SchedulerABI   string
+	PanicABI       string
+	FuncRepABI     string
 	// EnableCoroPhysicalABI permits the conservative leaf-only coroutine ABI
 	// lowering implemented by the current experimental slice. It requires entry
 	// resolution and does not enable await, dispatch, roots, or a scheduler.
@@ -55,13 +66,61 @@ type Compilation struct {
 	coroPreflightErr error
 }
 
+func (c *Compilation) validateCoroCacheIdentity() error {
+	if c == nil {
+		return fmt.Errorf("coroutine cache registration requires a compilation")
+	}
+	decoded, err := hex.DecodeString(c.CoroPlanDigest)
+	if err != nil || len(decoded) != 32 || hex.EncodeToString(decoded) != c.CoroPlanDigest {
+		return fmt.Errorf("coroutine cache registration requires a canonical SHA-256 CoroPlanDigest")
+	}
+	return c.validateCoroABIIdentity(true)
+}
+
+func (c *Compilation) validateCoroABIIdentity(required bool) error {
+	if c == nil {
+		return fmt.Errorf("coroutine ABI validation requires a compilation")
+	}
+	wantCoroABI := coro.EntryResolutionABIV0
+	if c.EnableCoroPhysicalABI {
+		wantCoroABI = coro.PhysicalABIV0
+	}
+	checks := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"coroutine", c.CoroABI, wantCoroABI},
+		{"scheduler", c.SchedulerABI, coro.SchedulerNoneABIV0},
+		{"panic", c.PanicABI, coro.PanicLegacyABIV0},
+		{"function representation", c.FuncRepABI, coro.FuncRepABIV0},
+	}
+	if !required {
+		populated := false
+		for _, check := range checks {
+			populated = populated || check.got != ""
+		}
+		if !populated {
+			return nil
+		}
+	}
+	for _, check := range checks {
+		if check.got != check.want {
+			return fmt.Errorf("coroutine compilation %s ABI %q does not match %q", check.name, check.got, check.want)
+		}
+	}
+	return nil
+}
+
 // PackageOptions contains inputs that vary for each package invocation.
 type PackageOptions struct {
 	Compilation *Compilation
 
-	// CacheHit means cl is rebuilding frontend type registrations for an
-	// already-compiled archive. Report-only plans are not installed in that cl
-	// context. Active coroutine entry resolution rejects cache registration
-	// until its plan digest is part of the archive fingerprint.
+	// CacheHit means cl is rebuilding frontend registrations and link-time
+	// metadata for an already-compiled archive. The transient module is discarded
+	// by the build driver. Report-only observers are skipped; active coroutine
+	// entry resolution accepts the cache hit only after the driver has matched the
+	// archive's canonical plan digest and ABI identity, and keeps that plan
+	// installed so symbol and physical-ABI metadata match a source compilation.
 	CacheHit bool
 }

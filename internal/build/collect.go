@@ -17,6 +17,7 @@
 package build
 
 import (
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -26,6 +27,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/goplus/llgo/internal/coro"
 	"github.com/goplus/llgo/internal/env"
 	"github.com/goplus/llgo/internal/packages"
 	intllvm "github.com/goplus/llgo/internal/xtool/llvm"
@@ -113,6 +115,21 @@ func (c *context) collectCommonInputs(m *manifestBuilder) {
 	}
 	m.common.TargetABI = c.crossCompile.TargetABI
 	m.common.GoGlobalDCE = c.buildConf.goGlobalDCEEnabled()
+	if c.coroPlanDigest != "" {
+		metadata := c.coroPlanMetadata
+		m.common.CoroPlanDigest = c.coroPlanDigest
+		m.common.CoroABI = metadata.CoroABI
+		m.common.CoroSchedulerABI = metadata.SchedulerABI
+		m.common.CoroPanicABI = metadata.PanicABI
+		m.common.CoroFuncRepABI = metadata.FuncRepABI
+		m.common.CoroTargetTriple = metadata.TargetTriple
+		m.common.CoroTargetCPU = metadata.TargetCPU
+		m.common.CoroTargetFeatures = metadata.TargetFeatures
+		m.common.CoroTargetABI = metadata.TargetABI
+		m.common.CoroPointerBits = metadata.PointerBits
+		m.common.CoroEndianness = metadata.Endianness
+		m.common.CoroDataLayout = metadata.DataLayout
+	}
 
 	// Compiler configuration
 	if c.crossCompile.CC != "" {
@@ -340,11 +357,57 @@ func (c *context) ensureCacheManager() *cacheManager {
 }
 
 // canUsePackageCache reports whether the current compilation's emitted IR is
-// fully represented by the package fingerprint. Coroutine entry resolution
-// must remain isolated from archive cache reads and writes until CoroPlanDigest
-// is included in that fingerprint.
+// fully represented by the package fingerprint. Active coroutine lowering is
+// fail-closed until a complete plan/ABI/target record has been installed.
 func (c *context) canUsePackageCache() bool {
-	return c.buildConf == nil || !c.buildConf.EnableCoroEntryResolution
+	if c.buildConf == nil || !c.buildConf.EnableCoroEntryResolution {
+		return true
+	}
+	if c.clCompilation == nil || c.coroPlan == nil || c.clCompilation.CoroPlan != c.coroPlan ||
+		c.coroEmission == nil || c.clCompilation.EmissionUniverse != c.coroEmission || c.coroPlanDigest == "" ||
+		c.clCompilation.CoroPlanDigest != c.coroPlanDigest {
+		return false
+	}
+	decoded, err := hex.DecodeString(c.coroPlanDigest)
+	if err != nil || len(decoded) != 32 || hex.EncodeToString(decoded) != c.coroPlanDigest {
+		return false
+	}
+	metadata := c.coroPlanMetadata
+	return c.clCompilation.EnableCoroEntryResolution &&
+		c.clCompilation.EnableCoroPhysicalABI == c.buildConf.EnableCoroPhysicalABI &&
+		c.clCompilation.CoroABI == metadata.CoroABI &&
+		c.clCompilation.SchedulerABI == metadata.SchedulerABI &&
+		c.clCompilation.PanicABI == metadata.PanicABI &&
+		c.clCompilation.FuncRepABI == metadata.FuncRepABI &&
+		metadata.CoroABI == activeCoroABIVersion(c.buildConf) &&
+		metadata.SchedulerABI == coro.SchedulerNoneABIV0 &&
+		metadata.PanicABI == coro.PanicLegacyABIV0 &&
+		metadata.FuncRepABI == coro.FuncRepABIV0 &&
+		metadata.TargetTriple != "" && metadata.PointerBits > 0 &&
+		(metadata.Endianness == "little" || metadata.Endianness == "big") &&
+		metadata.DataLayout != ""
+}
+
+func activeCoroCacheManifestMatches(content string, pkg *aPackage) bool {
+	if pkg == nil || pkg.Manifest == "" {
+		return false
+	}
+	actual, err := decodeManifest(content)
+	if err != nil {
+		return false
+	}
+	expected, err := decodeManifest(pkg.Manifest)
+	if err != nil {
+		return false
+	}
+	actual.Metadata = nil
+	expected.Metadata = nil
+	actualText, err := buildManifestYAML(actual)
+	if err != nil {
+		return false
+	}
+	expectedText, err := buildManifestYAML(expected)
+	return err == nil && actualText == expectedText && digestBytes([]byte(expectedText)) == pkg.Fingerprint
 }
 
 // tryLoadFromCache attempts to load a package from cache.
@@ -381,6 +444,9 @@ func (c *context) tryLoadFromCache(pkg *aPackage) bool {
 	// Read metadata from manifest
 	content, err := readManifest(paths.Manifest)
 	if err != nil {
+		return false
+	}
+	if c.buildConf != nil && c.buildConf.EnableCoroEntryResolution && !activeCoroCacheManifestMatches(content, pkg) {
 		return false
 	}
 

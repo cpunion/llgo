@@ -184,8 +184,8 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 // report-only plan; EnableCoroEntryResolution must be set explicitly before cl
 // may consume its primary-symbol decisions. An active builder must return a
 // plan created by input.Analyze so patch aliases and frontend structural
-// identities cannot be bypassed. Active entry resolution bypasses package
-// archive caching until CoroPlanDigest is part of the cache fingerprint.
+// identities cannot be bypassed. Active entry resolution uses archive-ready
+// identities and fingerprints its canonical CoroPlanDigest into every package.
 type CoroPlanBuilder func(input CoroPlanInput) (*coro.SSAPlan, error)
 
 // CoroPlanObserver observes the same compilation-scoped plan from each cl
@@ -249,8 +249,8 @@ type Config struct {
 	// EnableCoroEntryResolution explicitly allows cl to consume the
 	// compilation-scoped plan for primary-symbol validation. It does not enable
 	// physical coroutine ABI or scheduler lowering. It requires CoroPlanBuilder;
-	// leaving it false preserves report-only behavior. Package archive caching
-	// is disabled until the plan digest participates in fingerprints.
+	// leaving it false preserves report-only behavior. Package archives are
+	// reused only when their complete plan/ABI/target fingerprint matches.
 	EnableCoroEntryResolution bool
 	// EnableCoroPhysicalABI enables the experimental, leaf-only LLVM coroutine
 	// physical ABI. It requires EnableCoroEntryResolution and remains fail-closed
@@ -710,7 +710,18 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	if ctx.coroEmission != nil {
 		input.EmissionUniverse = ctx.coroSSAEmission
 		input.resolveFunction = ctx.coroEmission.Resolve
-		input.augmentFunctionIDs = ctx.coroEmission.AugmentFunctionIDConfig
+		input.augmentFunctionIDs = func(config coro.FunctionIDConfig) coro.FunctionIDConfig {
+			if ctx.buildConf.EnableCoroEntryResolution {
+				if config.CoroABI == "" {
+					config.CoroABI = activeCoroABIVersion(ctx.buildConf)
+				}
+				if config.SchedulerABI == "" {
+					config.SchedulerABI = coro.SchedulerNoneABIV0
+				}
+				config.ArchiveReady = true
+			}
+			return ctx.coroEmission.AugmentFunctionIDConfig(config)
+		}
 	}
 	plan, err := builder(input)
 	if err != nil {
@@ -730,15 +741,70 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 			return fmt.Errorf("validate coroutine plan coverage: %w", err)
 		}
 	}
+	var metadata coro.PlanDigestMetadata
+	var digest string
+	if ctx.buildConf.EnableCoroEntryResolution {
+		metadata, err = buildCoroPlanDigestMetadata(ctx)
+		if err != nil {
+			return fmt.Errorf("build coroutine plan digest metadata: %w", err)
+		}
+		digest, err = plan.CoroPlanDigest(metadata)
+		if err != nil {
+			return fmt.Errorf("build coroutine plan digest: %w", err)
+		}
+	}
 	ctx.coroPlan = plan
+	ctx.coroPlanDigest = digest
+	ctx.coroPlanMetadata = metadata
 	ctx.clCompilation = &cl.Compilation{
 		CoroPlan:                  plan,
 		CoroPlanObserver:          ctx.buildConf.CoroPlanObserver,
 		EnableCoroEntryResolution: ctx.buildConf.EnableCoroEntryResolution,
 		EnableCoroPhysicalABI:     ctx.buildConf.EnableCoroPhysicalABI,
+		CoroPlanDigest:            digest,
+		CoroABI:                   metadata.CoroABI,
+		SchedulerABI:              metadata.SchedulerABI,
+		PanicABI:                  metadata.PanicABI,
+		FuncRepABI:                metadata.FuncRepABI,
 		EmissionUniverse:          ctx.coroEmission,
 	}
 	return nil
+}
+
+func activeCoroABIVersion(conf *Config) string {
+	if conf != nil && conf.EnableCoroPhysicalABI {
+		return coro.PhysicalABIV0
+	}
+	return coro.EntryResolutionABIV0
+}
+
+func buildCoroPlanDigestMetadata(ctx *context) (coro.PlanDigestMetadata, error) {
+	if ctx == nil || ctx.buildConf == nil {
+		return coro.PlanDigestMetadata{}, fmt.Errorf("missing build context")
+	}
+	target := ctx.prog.TargetSpec()
+	endianness := ""
+	switch ctx.prog.TargetData().ByteOrder() {
+	case gllvm.LittleEndian:
+		endianness = "little"
+	case gllvm.BigEndian:
+		endianness = "big"
+	default:
+		return coro.PlanDigestMetadata{}, fmt.Errorf("unsupported LLVM byte order")
+	}
+	return coro.PlanDigestMetadata{
+		CoroABI:        activeCoroABIVersion(ctx.buildConf),
+		SchedulerABI:   coro.SchedulerNoneABIV0,
+		PanicABI:       coro.PanicLegacyABIV0,
+		FuncRepABI:     coro.FuncRepABIV0,
+		TargetTriple:   target.Triple,
+		TargetCPU:      target.CPU,
+		TargetFeatures: target.Features,
+		TargetABI:      target.TargetABI,
+		PointerBits:    ctx.prog.PointerSize() * 8,
+		Endianness:     endianness,
+		DataLayout:     ctx.prog.DataLayout(),
+	}, nil
 }
 
 func prepareCoroEmissionUniverse(ctx *context, packages []*aPackage) error {
@@ -912,13 +978,15 @@ type context struct {
 
 	// coroPlan is compilation-scoped. It remains report-only unless
 	// EnableCoroEntryResolution is set explicitly.
-	coroPlan        *coro.SSAPlan
-	coroEmission    *cl.EmissionUniverse
-	coroSSAEmission *coro.SSAEmissionUniverse
+	coroPlan         *coro.SSAPlan
+	coroEmission     *cl.EmissionUniverse
+	coroSSAEmission  *coro.SSAEmissionUniverse
+	coroPlanDigest   string
+	coroPlanMetadata coro.PlanDigestMetadata
 
 	// clCompilation is shared by all source packages in this build. Active
-	// entry resolution disables package-cache reads and writes until
-	// CoroPlanDigest is represented in archive fingerprints.
+	// cache registration is enabled only after coroPlanDigest and its complete
+	// ABI/target record have been frozen into archive fingerprints.
 	clCompilation *cl.Compilation
 }
 
@@ -1067,7 +1135,9 @@ func buildAllPkgs(ctx *context, pkgs []*aPackage, verbose bool) ([]*aPackage, er
 			if err := buildPkg(ctx, aPkg, verbose); err != nil {
 				return err
 			}
-			aPkg.setNeedRuntimeOrPyInit(aPkg.LPkg.NeedRuntime, aPkg.LPkg.NeedPyInit)
+			if !aPkg.CacheHit {
+				aPkg.setNeedRuntimeOrPyInit(aPkg.LPkg.NeedRuntime, aPkg.LPkg.NeedPyInit)
+			}
 			needRuntime = needRuntime || aPkg.NeedRt
 			needPyInit = needPyInit || aPkg.NeedPyInit
 			if !aPkg.CacheHit {
@@ -1687,7 +1757,9 @@ func buildPkg(ctx *context, aPkg *aPackage, verbose bool) error {
 		hook(aPkg)
 	}
 
-	// If cache hit, we only needed to register types - skip compilation
+	// A cache hit reconstructed frontend registrations and link-time metadata;
+	// the archived module already owns C ABI transformation, optimization, and
+	// object emission, so discard this transient frontend module here.
 	if aPkg.CacheHit {
 		return nil
 	}

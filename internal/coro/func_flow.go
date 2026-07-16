@@ -177,6 +177,9 @@ func analyzeSSAFunctionFlow(
 		operands := make([]*ssa.Value, 0, 8)
 		for _, block := range fn.Blocks {
 			for _, instruction := range block.Instrs {
+				if _, debug := instruction.(*ssa.DebugRef); debug {
+					continue
+				}
 				if value, ok := instruction.(ssa.Value); ok {
 					flow.recordValue(value)
 				}
@@ -263,6 +266,9 @@ func analyzeSSAFunctionFlow(
 		}
 		for _, block := range fn.Blocks {
 			for _, instruction := range block.Instrs {
+				if _, debug := instruction.(*ssa.DebugRef); debug {
+					continue
+				}
 				flow.seedInstruction(instruction)
 			}
 		}

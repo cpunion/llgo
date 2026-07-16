@@ -29,7 +29,8 @@ import (
 
 // SummarySchema is the experimental wire schema for deterministic plan
 // snapshots. Version v0 is intentionally not an archive ABI: producer ABI
-// summaries and the final CoroPlanDigest will be split before a v1 is frozen.
+// summaries remain future work, and cache identity uses the separate
+// PlanDigestSchema.
 const SummarySchema = "llgo.coro.plan.v0"
 
 // SummaryMetadata identifies ABI and target properties that affect an
@@ -59,8 +60,8 @@ type FunctionSummary struct {
 }
 
 // Summary is a stable v0 snapshot used to test plan determinism. It
-// intentionally contains no maps or pointer identities and is not yet the
-// producer ABI summary or final CoroPlanDigest wire format.
+// intentionally contains no maps or pointer identities and is neither the
+// producer ABI summary nor the separate CoroPlanDigest wire format.
 type Summary struct {
 	Schema    string            `json:"schema"`
 	Metadata  SummaryMetadata   `json:"metadata"`

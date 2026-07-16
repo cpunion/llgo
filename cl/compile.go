@@ -179,9 +179,9 @@ type context struct {
 	anonDefers           map[*ssa.Function]bool
 	paramDIVars          map[*types.Var]llssa.DIVar
 	runtimeCallerFuncs   map[*ssa.Function]bool
-	compilation          *Compilation // nil for report-only cache registration
+	compilation          *Compilation
 	emissionUniverse     *EmissionUniverse
-	cacheRegistration    bool // cached archive: types only, no lowering
+	cacheRegistration    bool // cached archive: skip observers; emitted IR is transient
 	pcLineSeq            uint64
 	sourceParamBase      int // hidden physical parameters before source params
 
@@ -1969,7 +1969,9 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 			return nil, nil, err
 		}
 		if opts.CacheHit {
-			return nil, nil, fmt.Errorf("coroutine entry resolution cannot reuse cached archives before CoroPlanDigest is fingerprinted")
+			if err := opts.Compilation.validateCoroCacheIdentity(); err != nil {
+				return nil, nil, err
+			}
 		}
 		if opts.Compilation.EmissionUniverse != nil {
 			prepared, err = opts.Compilation.EmissionUniverse.checkPackage(pkg, files, patches)
@@ -2005,12 +2007,6 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 	if ct == nil {
 		ct = NewCallerTracking()
 	}
-	compilation := opts.Compilation
-	if opts.CacheHit {
-		// A cache hit has no source lowering phase. Keep the plan out of the cl
-		// context so future lowering cannot accidentally consume it here.
-		compilation = nil
-	}
 	ctx := &context{
 		prog:             prog,
 		pkg:              ret,
@@ -2030,14 +2026,14 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 		cgoSymbols: make([]string, 0, 128),
 		rewrites:   rewrites,
 
-		compilation:       compilation,
+		compilation:       opts.Compilation,
 		cacheRegistration: opts.CacheHit,
 
 		trackCallerFrames:  filesUseRuntimeCaller(files) || packageUsesRuntimeCaller(ct, pkg),
 		runtimeCallerFuncs: runtimeCallerFuncSet(ct, pkg),
 	}
-	if compilation != nil && compilation.EnableCoroEntryResolution {
-		ctx.emissionUniverse = compilation.EmissionUniverse
+	if opts.Compilation != nil && opts.Compilation.EnableCoroEntryResolution {
+		ctx.emissionUniverse = opts.Compilation.EmissionUniverse
 	}
 	ctx.observeCoroPlan()
 	if embedMap != nil {
@@ -2053,7 +2049,7 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 	ctx.prog.SetPatch(ctx.patchType)
 	ctx.prog.SetCompileMethods(ctx.checkCompileMethods)
 	ret.SetResolveLinkname(ctx.resolveLinkname)
-	if compilation != nil && compilation.EnableCoroEntryResolution {
+	if opts.Compilation != nil && opts.Compilation.EnableCoroEntryResolution {
 		ret.SetResolveMethodLinkname(ctx.resolveMethodLinkname)
 	}
 
