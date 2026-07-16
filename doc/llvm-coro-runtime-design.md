@@ -1319,6 +1319,25 @@ Go 1.23+还要求未Stop且已不可达的channel Timer/Ticker可被GC回收。T
 - 除 `Post/Pending` 外，table 控制 API 全部由同一 scheduler owner 串行调用。backend ack 只能投递给 owner，不能从 callback/ISR 直接执行 `ConfirmQuiesced`。
 - 当前 slot 尚不携带 syscall result payload，真实 pipe/eventfd、JS microtask、WASI poll、RTOS notification 和 IRQ/WFI doorbell 也尚未接入；本阶段完成的是 target-neutral lifetime/ABA/cancel 基线。
 
+Platform completion 还需要一个稳定的 executor request gate，不能在 callback/ISR 中保留 `*P` 或读取 `P.currentG`。第一版同样采用固定容量 registry，平台 ABI 为：
+
+    ExecutorHandle { slot, generation }
+
+每个 active generation 的 gate 只有以下合法组合：
+
+    Running                    = 0
+    Requested                  = 1
+    IdleArmed                  = 2
+    Requested | IdleArmed      = 3
+    Closed                     = 4
+
+- producer 必须先发布 durable source，再调用 `Request(executor)`。`Running -> Requested` 表示正在执行的 G 会在 compiler safepoint 观察请求，不需要平台 doorbell；`IdleArmed -> Requested|IdleArmed` 的唯一赢家返回 `IdleWake`，此时才必须 doorbell；已有 Requested 时只合并。
+- running G 的 poll 只 acquire-observe Requested 并 yield，绝不清位。scheduler 取得所有权后先 drain timer/wait/channel/syscall 等事实源，再 `Acknowledge Requested -> Running`，随后无条件重扫所有事实源；第二个 producer 可能在 drain 与 ack 之间合并，不能把 gate 当作完成队列。
+- idle 协议是 `ArmIdle(0 -> IdleArmed)`、重扫事实源、`CommitSleep(exact IdleArmed -> IdleArmed)`、进入 retained-doorbell wait。Request 若先赢则 commit 失败；commit 若先赢，后来的 Request 仍看到 IdleArmed 并响铃。retained wait 必须保存“commit 已成功但物理 block 尚未开始”窗口中的 wake，例如 pipe/eventfd 字节、latched host task、RTOS notification 或 IRQ pending bit；普通 edge-only callback 不满足契约。
+- real/spurious wake 后 scheduler 先 `LeaveIdle`，只清 IdleArmed 并保留 Requested，再执行 drain/ack/recheck。`Acknowledge` 只接受精确 Running/Requested；`LeaveIdle`、`ArmIdle`、`CommitSleep` 和 close 对非法/Closed 组合 fail closed。
+- close 通过精确 `Running -> Closed` 与 Request 竞争，再 seal producer admission。physical unregister/join 必须覆盖 callback 进入 registry lease 前以及 `Request` 返回到 doorbell 完成之间的整个 shim。因为 close 可能赢在 durable Post 与 Request 之间，join 后必须再做一次无条件 durable-source drain，才能确认 quiescence并复用 generation。
+- 当前 `ExecutorRegistry` 只完成 target-neutral gate、ABA/admission/lifetime 和 fake retained-doorbell 模型；尚未绑定 `P`、接入 `PollPreempt`/scheduler idle driver，也尚未替换 `WaitRegistrationTable.Drain` 当前使用的旧 `P.schedule` 请求。接线完成前不能把它描述为可运行 platform executor wake。
+
 平台实现：
 
 - Linux：初期统一 poll array + wake pipe，后续 epoll/eventfd。
@@ -1807,15 +1826,16 @@ Pure sync library/archive不需要链接scheduler。Executable一旦选择 `-sch
 - terminal-only ExplicitStatus runtime core 已有 task-local 两字 `PanicRecord`、原子 once publication和无 TLS 的 `__llgo_coro_panic_prepare_v1(g, handle, header, typeWord, dataWord)`。compiler 对精确 cleanup-free PhysicalABIV1 body 生成 `SuspendPanic`/`FinalSuspended`，panic 与 normal return branch 到同一个 LLVM final suspend；active panic frame 先经过 `coro.done` 验证并 destroy，之后 suspended-await ancestor 不再 resume，而是从深到 root 直接 destroy，最终保留 record 并返回独立 `PanicComplete`。当前 payload 只接受 typed nil 或从 package global 派生的 concrete pointer，确保 frame destroy 后 data word 仍有效；dynamic interface、scalar/local/parameter payload、cleanup/recover、Goexit、implicit fault、重复发布及 managed plain unwind 均 fail closed。尚未实现用户 `Error/String` 报告、最终进程退出所有权或 defer/recover。
 - park/wake handshake 已落地 32-bit 原子 `WaitToken`、generation ticket、early/late completion、park 前后 cancellation、唯一 waiter claim、ABA 范围校验及 terminal gate。完成/取消 outcome 在 scheduler consume 后仍保持到下一次 Arm，恢复后的同步风格 continuation 可用 exact ticket 查询赢家；精确 intrinsic `llgo.coroPark(token, ticket)` 被 Effect 分析识别为 `MayPark`，并在调用者当前 LLVM frame 中生成 park prepare、stateID、`coro.suspend` 和恢复路径，没有隐藏在普通同步 helper 中。channel/timer/syscall 的 submit/retry producer 尚未接入。
 - 固定容量 `WaitRegistrationTable` 已实现 POD `{slot,generation}` handle、producer admission seal/refcount、`Active→Posting→Posted→Draining→Delivered` one-shot mailbox、scheduler-side Drain、strong unregister/quiescence handoff、cancel-vs-complete winner、silent late callback、generation reuse 和 capacity fail-closed。平台 Post 不接触 P/G/token/LLVM handle；P 只由 Drain 解引用并保持到 Retire。race+shuffle 已覆盖 concurrent post、post-vs-close、旧 producer pin/reuse、pre-park cancel 和 exactly-once promotion。真实 backend 的 strong unregister/join 与 doorbell 仍需各 target adapter 证明。
+- 固定容量 `ExecutorRegistry` 已实现 POD `{slot,generation}` handle、`Requested|IdleArmed|Closed` gate、producer admission seal/refcount、exact idle commit、request/close 线性化、strong join/quiescence、generation reuse 和 capacity fail-closed。确定性交错覆盖 drain→ack 窗口的 coalesced completion、ArmIdle×Request、wake-before-physical-block retained doorbell、Post→Request 窗口的 final idle recheck 与 close 后 final drain；race+shuffle 覆盖 publish/coalesce、close 和旧 producer pin。当前仍是 target-neutral gate，尚未接到 `P`、compiler poll、scheduler idle loop 或真实 target backend。
 - wait/preempt core 要求目标提供可靠的 32-bit atomic load/store/CAS。WASM 可直接满足；带 A 扩展的 RISC-V 可满足；ESP32-C3 RV32IMC 当前会在链接时缺少 `__atomic_*_4`，直到平台用 IRQ critical section 提供单核适配。这里故意不使用非原子 fallback。
 - `wasip1`、`wasip2` 和 `wasm-unknown` 明确选择 leaking/nogc frame backend，不依赖 libuv 或 BDWGC。`wasip2` 与 `wasm-unknown` 已通过真实 `llgo build -target=...`、wasm magic/symbol closure、无 `GC_*`/undefined 检查，并由 wasmtime 运行返回 0。当前 `wasip2` 产物是 Preview 2 目标的 core module，尚不是 WIT component。
 - frame allocator 已有 conservative BDWGC、nogc/WASM malloc 和 tinygogc/baremetal 后端。跨 suspend 的 pointer 目前只在 conservative 或 non-collecting 配置下安全；精确 frame root map、write barrier、STW、weak timer/finalizer 与 cleanup 语义尚未实现，不能据此宣称完整 Go GC 兼容。
-- deterministic single-P runtime 已能管理多个 frame、ready queue、preempt request、park/wake、稳定 wait registration/cancel core、closed-static spawned G、正常 main-return ready-child cancellation、terminal panic frame destruction和 idle/requested/stopping/disabled 状态。尚未把 registration registry/platform unregister 枚举接入 command-wide waiting-G shutdown，也尚无动态/closure/method `go` target、真实 tick/alarm request source、channel/select/sync slow path、timer/netpoll、异步 syscall submit/retry、完整 panic/defer/recover/Goexit 或多 P。
+- deterministic single-P runtime 已能管理多个 frame、ready queue、旧 P-level preempt request、park/wake、稳定 wait registration/cancel core、target-neutral executor request gate、closed-static spawned G、正常 main-return ready-child cancellation、terminal panic frame destruction和 idle/requested/stopping/disabled 状态。新 executor gate 尚未绑定 P 或接入 poll/idle driver；registration registry/platform unregister 枚举也尚未接入 command-wide waiting-G shutdown。仍无动态/closure/method `go` target、真实 tick/alarm request source、channel/select/sync slow path、timer/netpoll、异步 syscall submit/retry、完整 panic/defer/recover/Goexit 或多 P。
 - native+nogc scheduler-island 已把真实 nested static `go` lowering、V2 entry/factory/control wrapper、production scheduler/spawn/shutdown/coroalloc 最终链接并执行。确定性 fixture 验证 `Before=1, After=0, Leaf=0`，最终符号审计同时要求 production `CommitSpawn`/`BeginCommandShutdown` 且禁止 legacy `Panic/Rethrow/TracePanic/printany`。该测试以四个 bounded init no-op 和 fail-stop nil-check/libc allocation stub 隔离完整标准库 runtime，因此证明的是可运行 scheduler 原型，不是完整 runtime 启动兼容。
 - terminal panic 的独立 native+nogc scheduler-island 已真实编译并运行 `panic(&GlobalPayload)`。production runner 必须返回 `PanicComplete` 的失败状态；bootstrap、main、panicChild 三个不同 LLVM handle 各 destroy 一次，两个祖先均不 resume，task-local record 在三层 frame 销毁后仍保持 exact type/data word，且 G 为 Dead/non-Reclaimable。最终二进制要求 production `PreparePanic`/`PanicDestroyed`/`LoadPanicRecord` 并禁止 legacy panic/print 链；测试 report 只观察当前 fail-closed terminal 状态，不代替 production printer/exit owner。
 - 完整真实 `entry → allocator → v2 factory → runtime/package init → main → scheduler` linked smoke 仍受上述 runtime/Panic/foreign blockers 限制；scheduler-island、runtime adapter 和 freestanding wasm CLI fixture 各自证明的边界不能合并表述为完整 Go runtime 已经端到端运行。
 - 当前 cache digest 只解决同一完整程序计划下的内部 package cache；未知未来 caller 可复用的预编译 archive/标准库仍需 producer summary、canonical boundary Dispatch 和 linker ABI 校验。
-- 后续依赖顺序是：在已完成的稳定 wait registration core 上接入 Native wake pipe、WASM/JS requestRun、WASI poll、RTOS notification 与 baremetal IRQ/WFI request source，同时为 terminal ExplicitStatus 增加 dynamic `error.Error`/`Stringer` descriptor 与 production printer/exit owner；随后接 channel/timer/syscall producer并跑完整 runtime linked smoke，再补 suspended-frame GC、defer/recover/Goexit、多 P。动态/closure/method `go` target只在 canonical descriptor transport 完成后开启。所有阶段保持无栈、单 primary 和未证明即 fail closed。
+- 后续依赖顺序是：先把已完成的 target-neutral executor gate 绑定 P，并接入 `PollPreempt` 的 observe-only yield 与 scheduler 的 `LeaveIdle→drain→ack→recheck→ArmIdle→recheck→CommitSleep` driver；再接 Native wake pipe、WASM/JS requestRun、WASI poll、RTOS notification 与 baremetal IRQ/WFI request source。同时为 terminal ExplicitStatus 增加 dynamic `error.Error`/`Stringer` descriptor 与 production printer/exit owner；随后接 channel/timer/syscall producer并跑完整 runtime linked smoke，再补 suspended-frame GC、defer/recover/Goexit、多 P。动态/closure/method `go` target只在 canonical descriptor transport 完成后开启。所有阶段保持无栈、单 primary 和未证明即 fail closed。
 
 ### Phase 1：单 P deterministic scheduler
 
