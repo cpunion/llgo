@@ -515,6 +515,20 @@ func PollReady(p *P) (int, bool) {
 	return pollReady(p)
 }
 
+// PollReadyAt is the timer-aware scheduler poll. A bound timer driver requires
+// the caller's current monotonic nanoseconds; an unbound P has no target timer
+// table and continues to use the legacy internal poll.
+func PollReadyAt(p *P, now int64) (int, bool) {
+	if p == nil || now < 0 {
+		return 0, false
+	}
+	if preemptLoad(&p.executorMode) == executorModeBound {
+		_, _, promoted, ok := PollExecutorAt(p.executor, now)
+		return promoted, ok
+	}
+	return pollReady(p)
+}
+
 // HasWaiting reports whether an otherwise idle P owns parked Gs. The runtime
 // adapter uses this distinction to wait for a host/platform event instead of
 // misreporting an empty ready queue as program completion.
@@ -535,6 +549,22 @@ func NextRunnable(p *P) (g *G, ok bool) {
 		return nil, validReadyQueue(p) && validWaitQueue(p) && p.readyHead == nil && p.waitHead == nil
 	}
 	if _, ok := PollReady(p); !ok {
+		return nil, false
+	}
+	return dequeue(p), true
+}
+
+// NextRunnableAt is the timer-aware dequeue path. It prevents a runnable loop
+// from bypassing due timers and rejects a timer-bound executor if the caller
+// omits or supplies an invalid monotonic timestamp.
+func NextRunnableAt(p *P, now int64) (g *G, ok bool) {
+	if p == nil || now < 0 || p.current != nil || p.inResume || p.action.Kind != ActionInvalid {
+		return nil, false
+	}
+	if preemptLoad(&p.schedule) == scheduleDisabled {
+		return nil, validReadyQueue(p) && validWaitQueue(p) && p.readyHead == nil && p.waitHead == nil
+	}
+	if _, ok := PollReadyAt(p, now); !ok {
 		return nil, false
 	}
 	return dequeue(p), true
