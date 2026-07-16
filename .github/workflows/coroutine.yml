@@ -78,15 +78,24 @@ jobs:
             local goarch="$3"
             local tags="$4"
             local log="/tmp/coroalloc-${label}.log"
-            (
+            if ! (
               cd runtime
               LLGO_BUILD_CACHE=off GOOS="$goos" GOARCH="$goarch" \
                 /tmp/llgo-coro build -v -tags="$tags" ./internal/coroalloc
-            ) >"$log" 2>&1
-            grep -F 'backend_webassembly.go' "$log"
-            grep -F 'NewFunc malloc func' "$log"
-            grep -F 'NewFunc free func' "$log"
-            ! grep -E 'backend_gc\.go|GC_malloc_uncollectable|GC_free' "$log"
+            ) >"$log" 2>&1; then
+              cat "$log"
+              return 1
+            fi
+            # Named wasm targets add nogc at LLGo target resolution, while a
+            # direct Go source-selection build uses backend_webassembly. Both
+            # are malloc/free backends and neither may retain BDWGC.
+            if ! grep -E 'Location: .*backend_(nogc|webassembly)\.go' "$log" ||
+              ! grep -F 'NewFunc malloc func' "$log" ||
+              ! grep -F 'NewFunc free func' "$log" ||
+              grep -E 'backend_gc\.go|GC_malloc_uncollectable|GC_free' "$log"; then
+              cat "$log"
+              return 1
+            fi
           }
           check_backend js-wasm js wasm tinygo.wasm
           check_backend wasip1 wasip1 wasm tinygo.wasm
