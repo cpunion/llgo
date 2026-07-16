@@ -385,6 +385,49 @@ func TestCoroPlanDigestCanonicalEmptyArrays(t *testing.T) {
 	}
 }
 
+func TestCoroPlanDigestProjectsDefinitionlessValueOccurrences(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "occurrences.go", `package coroid
+func target() {}
+func take(func()) {}
+func root() {
+	take(target)
+	take(target)
+}
+`)
+	root := packageFunction(t, pkg, "root")
+	target := packageFunction(t, pkg, "target")
+	plan, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: AsyncDemand}}, planDigestSSAConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := plan.canonicalPlanDigest(validPlanDigestMetadata())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootID, ok := plan.FunctionID(root)
+	if !ok {
+		t.Fatal("root has no FunctionID")
+	}
+	targetID, ok := plan.FunctionID(target)
+	if !ok {
+		t.Fatal("target has no FunctionID")
+	}
+	var instructions []int
+	for _, value := range document.Values {
+		if value.Site.Function != rootID || value.Site.Kind != "operand" {
+			continue
+		}
+		for _, leaf := range value.Funcs {
+			if len(leaf.Targets) == 1 && leaf.Targets[0] == targetID {
+				instructions = append(instructions, value.Site.Instruction)
+			}
+		}
+	}
+	if len(instructions) != 2 || instructions[0] == instructions[1] {
+		t.Fatalf("definition-less target operand sites = %v, want two distinct stable occurrences", instructions)
+	}
+}
+
 func buildPlanDigestTestPlan(t *testing.T, mode ssa.BuilderMode) (*SSAPlan, *ssa.Package) {
 	t.Helper()
 	prog, pkg := buildCoroTestSSAWithMode(t, "digest.go", planDigestTestSource, mode)

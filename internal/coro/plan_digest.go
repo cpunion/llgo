@@ -180,19 +180,19 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 		Values:           make([]planDigestValue, 0, len(p.valuePlans)),
 	}
 	seenCalls := make(map[ssa.CallInstruction]struct{}, len(p.callPlans))
-	seenValues := make(map[ssa.Value]struct{}, len(p.valuePlans))
+	coveredValues := make(map[ssa.Value]struct{}, len(p.valuePlans))
 	for _, function := range p.functions {
 		fn := function.Function
 		id := function.Plan.ID
 		for index, value := range fn.Params {
 			site := planDigestValueSite{Function: id, Kind: "param", Index: index, Block: -1, Instruction: -1, Operand: -1}
-			if err := p.appendDigestValue(&document.Values, seenValues, value, site, true); err != nil {
+			if err := p.appendDigestValue(&document.Values, coveredValues, value, site, true); err != nil {
 				return planDigestDocument{}, err
 			}
 		}
 		for index, value := range fn.FreeVars {
 			site := planDigestValueSite{Function: id, Kind: "freevar", Index: index, Block: -1, Instruction: -1, Operand: -1}
-			if err := p.appendDigestValue(&document.Values, seenValues, value, site, true); err != nil {
+			if err := p.appendDigestValue(&document.Values, coveredValues, value, site, true); err != nil {
 				return planDigestDocument{}, err
 			}
 		}
@@ -211,7 +211,7 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 				}
 				if value, ok := instruction.(ssa.Value); ok {
 					site := planDigestValueSite{Function: id, Kind: "instruction", Index: -1, Block: blockIndex, Instruction: semanticIndex, Operand: -1}
-					if err := p.appendDigestValue(&document.Values, seenValues, value, site, true); err != nil {
+					if err := p.appendDigestValue(&document.Values, coveredValues, value, site, true); err != nil {
 						return planDigestDocument{}, err
 					}
 				}
@@ -243,7 +243,7 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 						continue
 					}
 					site := planDigestValueSite{Function: id, Kind: "operand", Index: -1, Block: blockIndex, Instruction: semanticIndex, Operand: operandIndex}
-					if err := p.appendDigestValue(&document.Values, seenValues, value, site, true); err != nil {
+					if err := p.appendDigestValue(&document.Values, coveredValues, value, site, true); err != nil {
 						return planDigestDocument{}, err
 					}
 				}
@@ -254,8 +254,8 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 	if len(seenCalls) != len(p.callPlans) {
 		return planDigestDocument{}, fmt.Errorf("coro: CallPlan coverage mismatch: projected %d of %d plans", len(seenCalls), len(p.callPlans))
 	}
-	if len(seenValues) != len(p.valuePlans) {
-		return planDigestDocument{}, fmt.Errorf("coro: SSAValuePlan coverage mismatch: projected %d of %d plans", len(seenValues), len(p.valuePlans))
+	if len(coveredValues) != len(p.valuePlans) {
+		return planDigestDocument{}, fmt.Errorf("coro: SSAValuePlan coverage mismatch: projected %d of %d plans", len(coveredValues), len(p.valuePlans))
 	}
 	return document, nil
 }
@@ -488,7 +488,7 @@ func requiresDigestValuePlan(value ssa.Value) bool {
 	return value != nil && value.Type() != nil && len(funcLeafPaths(value.Type())) != 0
 }
 
-func (p *SSAPlan) appendDigestValue(output *[]planDigestValue, seen map[ssa.Value]struct{}, value ssa.Value, site planDigestValueSite, required bool) error {
+func (p *SSAPlan) appendDigestValue(output *[]planDigestValue, covered map[ssa.Value]struct{}, value ssa.Value, site planDigestValueSite, required bool) error {
 	if !requiresDigestValuePlan(value) {
 		return nil
 	}
@@ -503,7 +503,12 @@ func (p *SSAPlan) appendDigestValue(output *[]planDigestValue, seen map[ssa.Valu
 	if err != nil {
 		return err
 	}
-	seen[value] = struct{}{}
+	// Values with SSA definitions are visited once at that definition. Constants,
+	// globals, and function values have no instruction definition, so the caller
+	// deliberately projects every stable operand occurrence. Do not deduplicate
+	// those occurrences by pointer: covered only proves that every map plan was
+	// represented at least once in the pointer-free document.
+	covered[value] = struct{}{}
 	*output = append(*output, entry)
 	return nil
 }
