@@ -49,6 +49,7 @@ const (
 	coroPanicNativeE2ESecondDestroy    = "__llgo_coro_panic_e2e_second_destroy"
 	coroPanicNativeE2EThirdDestroy     = "__llgo_coro_panic_e2e_third_destroy"
 	coroPanicNativeE2EExplicitStatus   = uint64(1)
+	coroPanicNativeE2EDrivePanic       = uint64(3)
 	coroPanicNativeE2EExpectedDestroys = uint64(3)
 )
 
@@ -76,14 +77,15 @@ func main() {
 // links the production native-nogc scheduler/core and panic prepare hook, and
 // runs without the legacy panic printer/runtime closure.
 //
-// Production ActionPanicComplete is fail-closed today: coroProgramRunV1
-// returns false and the exported program-run ABI aborts. The entry module is
-// therefore retargeted to a test-only report ABI. That ABI still calls the
-// production internal runner and accepts only the terminal-panic shape: a
+// Production ActionPanicComplete now returns the explicit drive-panic status;
+// the exported void program-run ABI remains fail-stop until the production
+// printer/exit owner exists. The entry module is therefore retargeted to a
+// test-only report ABI. That ABI still calls the production internal runner
+// and accepts only the terminal-panic shape: the exact drive status, a
 // published record on a dead, non-reclaimable G, the original package-global
-// payload word, and exactly one destroy of each distinct handle in the
-// child -> main -> bootstrap chain. It does not turn panic into production
-// success or provide a replacement printer.
+// payload word, and exactly one destroy of each distinct handle in the child
+// -> main -> bootstrap chain. It does not turn panic into production success
+// or provide a replacement printer.
 func TestCoroExplicitPanicNativeNoStdlibRuntimeE2E(t *testing.T) {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("native coroutine link smoke requires Darwin or Linux")
@@ -352,7 +354,7 @@ func buildCoroPanicNativeE2EDriver(t *testing.T, prog llssa.Program, temp string
 	// list, so its private Go symbols belong to command-line-arguments while its
 	// exported C ABI remains stable.
 	runtimeRun := pkg.NewFunc("command-line-arguments.coroProgramRunV1", newSignature(
-		[]types.Type{pointer, pointer}, []types.Type{types.Typ[types.Bool]},
+		[]types.Type{pointer, pointer}, []types.Type{types.Typ[types.Uint8]},
 	), llssa.InGo)
 	panicRecordType := types.NewStruct([]*types.Var{
 		types.NewField(token.NoPos, nil, "Status", uint32Type, false),
@@ -379,8 +381,12 @@ func buildCoroPanicNativeE2EDriver(t *testing.T, prog llssa.Program, temp string
 		reportBody.Call(require.Expr, condition, prog.IntVal(requireCode, prog.Int32()))
 		requireCode++
 	}
-	normal := reportBody.Call(runtimeRun.Expr, report.Param(0), report.Param(1))
-	requireCondition(reportBody.UnOp(token.NOT, normal))
+	driveStatus := reportBody.Call(runtimeRun.Expr, report.Param(0), report.Param(1))
+	requireCondition(reportBody.BinOp(
+		token.EQL,
+		driveStatus,
+		prog.IntVal(coroPanicNativeE2EDrivePanic, prog.Byte()),
+	))
 	loaded := reportBody.Call(loadPanicRecord.Expr, report.Param(0))
 	record := reportBody.Extract(loaded, 0)
 	published := reportBody.Extract(loaded, 1)
@@ -500,6 +506,7 @@ func assertCoroPanicNativeE2ELinkedSymbols(t *testing.T, executable string) {
 	symbols := string(output)
 	for _, required := range []string{
 		"__llgo_coro_panic_prepare_v1",
+		coroProgramContinueSymbolV1,
 		coroPanicNativeE2ERunReport,
 		coroPanicNativeE2EDestroyObserve,
 		"github.com/goplus/llgo/runtime/internal/coro.PreparePanic",

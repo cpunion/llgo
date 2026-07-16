@@ -407,6 +407,7 @@ func TestRequiredCoroProgramRuntimePlanPlainClosureAndConflicts(t *testing.T) {
 	ssaPkg, files := buildCoroPlanTestPackage(t, llssa.PkgRuntime, `package runtime
 func __llgo_coro_program_begin_v1() { bootstrapHelper() }
 func __llgo_coro_program_run_v1() {}
+func __llgo_coro_program_continue_v1(uint32) {}
 func __llgo_coro_frame_allocator_bootstrap_v1() {}
 func __llgo_coro_frame_alloc_v1() {}
 func __llgo_coro_frame_publish_v1() {}
@@ -463,11 +464,22 @@ func atomicExchange(*uint32, uint32) uint32
 	if len(directPlain) != 0 {
 		t.Fatalf("required direct-plain C callbacks = %d, want none", len(directPlain))
 	}
+	continueFn := ssaPkg.Func(coroProgramContinueSymbolV1)
+	originalContinueSignature := continueFn.Signature
+	continueFn.Signature = types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(types.NewParam(token.NoPos, nil, "epoch", types.Typ[types.Uint64])),
+		types.NewTuple(), false)
+	_, _, _, _, invalidContinueErr := requiredCoroProgramRuntimePlan(ctx)
+	continueFn.Signature = originalContinueSignature
+	if invalidContinueErr == nil || !strings.Contains(invalidContinueErr.Error(), "must have exact func(uint32) signature") {
+		t.Fatalf("invalid continuation ABI error = %v", invalidContinueErr)
+	}
 	wantRoots := []string{
 		"init",
 		coroFrameAllocatorBootstrapSymbolV1,
 		coroProgramBeginSymbolV1,
 		coroProgramRunSymbolV1,
+		coroProgramContinueSymbolV1,
 		"__llgo_coro_frame_alloc_v1",
 		"__llgo_coro_frame_publish_v1",
 		"__llgo_coro_await_prepare_v1",
@@ -731,6 +743,7 @@ func TestRequiredCoroProgramRuntimePlanKeepsEntryInitWithoutRunnableBootstrap(t 
 	ssaPkg, files := buildCoroPlanTestPackage(t, llssa.PkgRuntime, `package runtime
 func __llgo_coro_program_begin_v1() {}
 func __llgo_coro_program_run_v1() {}
+func __llgo_coro_program_continue_v1(uint32) {}
 func __llgo_coro_frame_allocator_bootstrap_v1() {}
 func __llgo_coro_frame_alloc_v1() {}
 func __llgo_coro_frame_publish_v1() {}
@@ -772,6 +785,7 @@ func __llgo_coro_frame_free_v1() {}
 		coroFrameAllocatorBootstrapSymbolV1,
 		coroProgramBeginSymbolV1,
 		coroProgramRunSymbolV1,
+		coroProgramContinueSymbolV1,
 		"__llgo_coro_frame_alloc_v1",
 		"__llgo_coro_frame_publish_v1",
 		"__llgo_coro_await_prepare_v1",
@@ -794,6 +808,7 @@ func TestRequiredCoroProgramRuntimePlanRejectsInvalidIntrinsicSite(t *testing.T)
 	ssaPkg, files := buildCoroPlanTestPackage(t, llssa.PkgRuntime, `package runtime
 func __llgo_coro_program_begin_v1() { bootstrapHelper() }
 func __llgo_coro_program_run_v1() {}
+func __llgo_coro_program_continue_v1(uint32) {}
 func __llgo_coro_frame_allocator_bootstrap_v1() {}
 func __llgo_coro_frame_alloc_v1() {}
 func __llgo_coro_frame_publish_v1() {}
@@ -1164,6 +1179,7 @@ func buildRequiredCoroRuntimeFixture(t *testing.T, body string) requiredCoroRunt
 	source := `package runtime
 func __llgo_coro_program_begin_v1() { install() }
 func __llgo_coro_program_run_v1() {}
+func __llgo_coro_program_continue_v1(uint32) {}
 func __llgo_coro_frame_allocator_bootstrap_v1() {}
 func __llgo_coro_frame_alloc_v1() {}
 func __llgo_coro_frame_publish_v1() {}

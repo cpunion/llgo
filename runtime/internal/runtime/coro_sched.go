@@ -39,6 +39,31 @@ func coroHandleDestroy(unsafe.Pointer)
 type coroG = coro.G
 type coroP = coro.P
 
+type coroRunStopV1 uint8
+
+const (
+	coroRunInvalidV1 coroRunStopV1 = iota
+	coroRunMainDoneV1
+	coroRunExecutorSleepV1
+	coroRunTerminalExecutorCloseV1
+	coroRunPanicCompleteV1
+)
+
+type coroRunResultV1 struct {
+	stop   coroRunStopV1
+	g      *coroG
+	action coro.Action
+}
+
+type coroActionStopV1 uint8
+
+const (
+	coroActionInvalidV1 coroActionStopV1 = iota
+	coroActionSliceDoneV1
+	coroActionTerminalExecutorCloseV1
+	coroActionPanicCompleteV1
+)
+
 func coroInitG(g *coroG) bool {
 	return coro.InitG(g)
 }
@@ -51,39 +76,62 @@ func coroEnqueue(p *coroP, g *coroG) bool {
 	return coro.Enqueue(p, g)
 }
 
-func coroRunG(p *coroP, g *coroG) bool {
+func coroRunG(p *coroP, g *coroG) (coroActionStopV1, coro.Action) {
 	action, ok := coro.BeginRunG(p, g)
 	if !ok {
-		return false
+		return coroActionInvalidV1, coro.Action{}
 	}
 	return coroRunActions(p, g, action)
 }
 
-func coroRun(p *coroP, main *coroG) bool {
+func coroRun(p *coroP, main *coroG, driver *coro.ExecutorDriver) coroRunResultV1 {
 	for {
 		g, ok := coro.NextRunnable(p)
 		if !ok {
-			return false
+			return coroRunResultV1{}
 		}
 		if g == nil {
-			// Platform event-loop integration is the next adapter layer. Never
-			// confuse an empty ready queue with completion while parked Gs remain.
-			return !coro.HasWaiting(p)
+			if !coro.HasWaiting(p) {
+				return coroRunResultV1{}
+			}
+			sleep, prepared := coro.PrepareExecutorSleep(driver)
+			if !prepared {
+				return coroRunResultV1{}
+			}
+			if sleep {
+				return coroRunResultV1{stop: coroRunExecutorSleepV1}
+			}
+			continue
 		}
-		if !coroRunG(p, g) {
-			return false
+		stop, action := coroRunG(p, g)
+		switch stop {
+		case coroActionSliceDoneV1:
+		case coroActionTerminalExecutorCloseV1:
+			return coroRunResultV1{
+				stop:   coroRunTerminalExecutorCloseV1,
+				g:      g,
+				action: action,
+			}
+		case coroActionPanicCompleteV1:
+			return coroRunResultV1{
+				stop:   coroRunPanicCompleteV1,
+				g:      g,
+				action: action,
+			}
+		default:
+			return coroRunResultV1{}
 		}
 		if g == main && coroProgramLifecycleV1State == coroProgramMainReturnRequestedV1 && !coro.DeadG(main) {
 			// The compiler hook is valid only on main's normal continuation
 			// immediately before the bootstrap root's final suspend. Yielding or
 			// parking after publishing the marker is an ABI violation.
-			return false
+			return coroRunResultV1{}
 		}
 		if g == main && coro.DeadG(main) {
 			// Command main never drains background goroutines. The program adapter
 			// either enters the explicit ready-child cancellation protocol after a
 			// normal-main hook, or fails closed.
-			return true
+			return coroRunResultV1{stop: coroRunMainDoneV1, g: main}
 		}
 	}
 }
@@ -128,14 +176,17 @@ func coroCancelReady(p *coroP) bool {
 // coroRunActions is deliberately a static dispatcher. The compiler-owned
 // wrappers stay direct calls so scheduler internals do not introduce function
 // values, interface dispatch, or unnecessary dual sync/async versions.
-func coroRunActions(p *coroP, g *coroG, action coro.Action) bool {
+func coroRunActions(p *coroP, g *coroG, action coro.Action) (coroActionStopV1, coro.Action) {
 	for {
 		var ok bool
 		switch action.Kind {
 		case coro.ActionComplete:
-			return coroReleaseCompletedTask(g)
+			if !coroReleaseCompletedTask(g) {
+				return coroActionInvalidV1, coro.Action{}
+			}
+			return coroActionSliceDoneV1, action
 		case coro.ActionYield, coro.ActionPark:
-			return true
+			return coroActionSliceDoneV1, action
 		case coro.ActionCheckResume, coro.ActionCheckDestroy:
 			action, ok = coro.Checked(p, g, action, coroHandleDone(action.Handle))
 		case coro.ActionResume:
@@ -177,21 +228,19 @@ func coroRunActions(p *coroP, g *coroG, action coro.Action) bool {
 			// cleanup/recover semantics are not part of this prototype, so stop
 			// here instead of misclassifying panic as ordinary G completion.
 			if _, published := coro.LoadPanicRecord(g); !published {
-				return false
+				return coroActionInvalidV1, coro.Action{}
 			}
-			return false
+			return coroActionPanicCompleteV1, action
 		case coro.ActionTerminalExecutorClose:
-			// The core has already sealed the bound executor and hidden the
-			// destroyed LLVM handle. A target adapter must now strong-unregister
-			// and join its complete ingress shim, then resume from stable driver
-			// state through ConfirmTerminalExecutorClose. No production target
-			// owns that retained-doorbell backend yet, so fail closed here.
-			return false
+			if action.Handle != nil {
+				return coroActionInvalidV1, coro.Action{}
+			}
+			return coroActionTerminalExecutorCloseV1, action
 		default:
-			return false
+			return coroActionInvalidV1, coro.Action{}
 		}
 		if !ok {
-			return false
+			return coroActionInvalidV1, coro.Action{}
 		}
 	}
 }

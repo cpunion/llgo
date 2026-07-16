@@ -347,7 +347,9 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_frame.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_program.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_sched.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_spawn.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_none.go"),
 	}
 	conf := NewDefaultConf(ModeGen)
 	conf.ForceRebuild = true
@@ -414,6 +416,7 @@ func assertCoroSpawnNativeE2ELinkedSymbols(t *testing.T, executable string) {
 	}
 	symbols := string(output)
 	for _, required := range []string{
+		coroProgramContinueSymbolV1,
 		"__llgo_coro_spawn_begin_v1",
 		"__llgo_coro_spawn_commit_v1",
 		"github.com/goplus/llgo/runtime/internal/coro.CommitSpawn",

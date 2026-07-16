@@ -453,6 +453,7 @@ func buildCoroTLSRuntimePlanError(t *testing.T, body string) error {
 	source += `
 func __llgo_coro_program_begin_v1() { install() }
 func __llgo_coro_program_run_v1() {}
+func __llgo_coro_program_continue_v1(uint32) {}
 func __llgo_coro_frame_allocator_bootstrap_v1() {}
 func __llgo_coro_frame_alloc_v1() {}
 func __llgo_coro_frame_publish_v1() {}
