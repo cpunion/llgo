@@ -51,10 +51,10 @@ type Compilation struct {
 	SchedulerABI   string
 	PanicABI       string
 	FuncRepABI     string
-	// EnableCoroExplicitStatusPanicABI selects the reserved target-wide
-	// explicit-status panic identity. This slice does not implement its hidden
-	// outcome, cleanup, or runtime protocol, so active code generation remains
-	// fail-closed when the capability is selected.
+	// EnableCoroExplicitStatusPanicABI selects the target-wide explicit-status
+	// panic identity. The first lowering slice accepts only exact cleanup-free
+	// physical coroutine bodies whose explicit panic payload can outlive frame
+	// destruction; every wider hidden-outcome or unwind shape remains fail-closed.
 	EnableCoroExplicitStatusPanicABI bool
 	// EnableCoroPhysicalABI permits the conservative leaf-only coroutine ABI
 	// lowering implemented by the current experimental slice. It requires entry

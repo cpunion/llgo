@@ -372,6 +372,18 @@ func (b Builder) InterfaceData(x Expr) Expr {
 	return Expr{b.faceData(x.impl), b.Prog.VoidPtr()}
 }
 
+// EfaceType returns the dynamic ABI type descriptor stored directly in an
+// empty-interface value. It deliberately rejects non-empty interfaces: their
+// first word is an itab rather than an ABI type descriptor.
+func (b Builder) EfaceType(x Expr) Expr {
+	raw, ok := types.Unalias(x.raw.Type).Underlying().(*types.Interface)
+	if !ok || !raw.Empty() {
+		panic("EfaceType requires an empty-interface value")
+	}
+	dbgInstrf("EfaceType %v\n", x.impl)
+	return Expr{llvm.CreateExtractValue(b.impl, x.impl, 0), b.Prog.AbiTypePtr()}
+}
+
 func (b Builder) faceData(x llvm.Value) llvm.Value {
 	return llvm.CreateExtractValue(b.impl, x, 1)
 }

@@ -123,7 +123,10 @@ func TestCompilationCoroABIIdentityValidation(t *testing.T) {
 	}
 	newExplicitStatus := func() *Compilation {
 		compilation := newPhysical()
+		compilation.EnableCoroChildAwait = true
 		compilation.EnableCoroExplicitStatusPanicABI = true
+		compilation.CoroABI = coro.PhysicalABIV1
+		compilation.SchedulerABI = coro.SchedulerChildAwaitABIV0
 		compilation.PanicABI = coro.PanicExplicitStatusABIV0
 		return compilation
 	}
@@ -144,8 +147,7 @@ func TestCompilationCoroABIIdentityValidation(t *testing.T) {
 	if err := withoutExplicitStatusEntry.preflightCoroPlan(); err == nil || !strings.Contains(err.Error(), "requires coroutine entry resolution") {
 		t.Fatalf("explicit-status panic ABI preflight dependency error = %v", err)
 	}
-	if err := explicitStatus.preflightCoroPlan(); err == nil ||
-		!strings.Contains(err.Error(), "identity-only") || !strings.Contains(err.Error(), "runtime semantics are not implemented") {
+	if err := explicitStatus.preflightCoroPlan(); err == nil || !strings.Contains(err.Error(), "requires a compilation CoroPlan") {
 		t.Fatalf("explicit-status panic ABI active preflight error = %v", err)
 	}
 	newChildAwait := func() *Compilation {

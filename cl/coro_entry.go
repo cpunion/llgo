@@ -43,6 +43,7 @@ type plannedFunctionSymbol struct {
 	programRun    bool
 	plainDispatch bool
 	staticSpawn   bool
+	explicitPanic bool
 	coroPlan      *coro.SSAPlan
 	emission      *EmissionUniverse
 }
@@ -91,6 +92,7 @@ func (p *context) resolveFunctionSymbol(fn *ssa.Function) (plannedFunctionSymbol
 	entry.programRun = p.compilation.EnableCoroProgramBootstrapRun
 	entry.plainDispatch = p.compilation.EnableCoroPlainDispatch
 	entry.staticSpawn = p.compilation.EnableCoroClosedStaticSpawn
+	entry.explicitPanic = p.compilation.EnableCoroExplicitStatusPanicABI
 	entry.coroPlan = p.compilation.CoroPlan
 	entry.emission = p.compilation.EmissionUniverse
 	if p.compilation.CoroPlan.IgnoresBody(fn) {
@@ -170,6 +172,9 @@ func (e plannedFunctionSymbol) checkSupported() error {
 	if e.plan.Emission == coro.EmitNone {
 		return fmt.Errorf("coroutine entry resolution: function %q has no emitted entry", e.plan.ID)
 	}
+	if e.explicitPanic && e.plan.Emission == coro.EmitPlain {
+		return fmt.Errorf("coroutine explicit-status panic ABI: managed plain function %q has no certified hidden-outcome/unwind contract", e.plan.ID)
+	}
 	if e.plan.FuncRep == coro.Dispatch {
 		if !e.plainDispatch {
 			return fmt.Errorf("coroutine entry resolution: function %q requires an unimplemented dispatch descriptor", e.plan.ID)
@@ -183,7 +188,7 @@ func (e plannedFunctionSymbol) checkSupported() error {
 		if err := validateCoroPhysicalFunctionValueABI(e.plan, e.function.Signature, e.plainDispatch); err != nil {
 			return err
 		}
-		return validateCoroPhysicalABIWithUniverseCapabilities(e.function, e.plan, e.coroPlan, e.emission, e.childAwait, e.programRun, e.staticSpawn)
+		return validateCoroPhysicalABIWithUniverseCapabilities(e.function, e.plan, e.coroPlan, e.emission, e.childAwait, e.programRun, e.staticSpawn, e.explicitPanic)
 	}
 	if e.plan.Emission == coro.EmitExternal && e.plan.FuncRep == coro.DirectCoro {
 		return fmt.Errorf("external coroutine emission %q requires coroutine physical ABI lowering", e.plan.ID)
@@ -211,6 +216,9 @@ func (c *Compilation) preflightCoroPlan() error {
 	if c.EnableCoroExplicitStatusPanicABI && !c.EnableCoroEntryResolution {
 		return fmt.Errorf("coroutine explicit-status panic ABI requires coroutine entry resolution")
 	}
+	if c.EnableCoroExplicitStatusPanicABI && !c.EnableCoroChildAwait {
+		return fmt.Errorf("coroutine explicit-status panic ABI requires PhysicalABIV1 child-await lowering")
+	}
 	if c.EnableCoroClosedStaticSpawn {
 		if !c.EnableCoroChildAwait {
 			return fmt.Errorf("coroutine closed static spawn requires coroutine child await")
@@ -225,10 +233,6 @@ func (c *Compilation) preflightCoroPlan() error {
 	c.coroPreflight.Do(func() {
 		if err := c.validateCoroABIIdentity(false); err != nil {
 			c.coroPreflightErr = err
-			return
-		}
-		if c.EnableCoroExplicitStatusPanicABI {
-			c.coroPreflightErr = fmt.Errorf("coroutine explicit-status panic ABI %q is identity-only: lowering and runtime semantics are not implemented", coro.PanicExplicitStatusABIV0)
 			return
 		}
 		if c.CoroPlan == nil {
@@ -271,6 +275,7 @@ func (c *Compilation) preflightCoroPlan() error {
 				programRun:    c.EnableCoroProgramBootstrapRun,
 				plainDispatch: c.EnableCoroPlainDispatch,
 				staticSpawn:   c.EnableCoroClosedStaticSpawn,
+				explicitPanic: c.EnableCoroExplicitStatusPanicABI,
 				coroPlan:      c.CoroPlan,
 				emission:      c.EmissionUniverse,
 			}

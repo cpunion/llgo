@@ -1709,6 +1709,9 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		p.recordPanicLocation(b, v.Pos())
 		b.RunDefers()
 	case *ssa.Panic:
+		if p.tryCompileCoroExplicitStatusPanic(b, v) {
+			return
+		}
 		arg := p.compileValue(b, v.X)
 		p.recordPanicLocation(b, v.Pos())
 		b.Panic(arg)

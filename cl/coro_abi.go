@@ -46,6 +46,7 @@ const (
 	coroPreemptPollHookV1            = "__llgo_coro_preempt_poll_v1"
 	coroYieldPrepareHookV1           = "__llgo_coro_yield_prepare_v1"
 	coroParkPrepareHookV1            = "__llgo_coro_park_prepare_v1"
+	coroPanicPrepareHookV1           = "__llgo_coro_panic_prepare_v1"
 	coroSpawnBeginHookV1             = "__llgo_coro_spawn_begin_v1"
 	coroSpawnCommitHookV1            = "__llgo_coro_spawn_commit_v1"
 	coroCompletePrepareHookV1        = "__llgo_coro_complete_prepare_v1"
@@ -71,6 +72,7 @@ const (
 	coroSuspendFrameComplete
 	coroSuspendYield
 	coroSuspendPark
+	coroSuspendPanic
 )
 
 const (
@@ -99,6 +101,7 @@ type coroPhysicalABI struct {
 	preemptPollHook     string
 	yieldPrepareHook    string
 	parkPrepareHook     string
+	panicPrepareHook    string
 	completePrepareHook string
 	physicalSig         *types.Signature
 	resultSlotType      types.Type
@@ -115,11 +118,14 @@ type coroBodyContext struct {
 	task            llssa.Expr
 	resultSlot      llssa.Expr
 	completion      llssa.BasicBlock
+	finalSuspend    llssa.BasicBlock
 	preemptPoll     llssa.Expr
 	yieldPrepare    llssa.Expr
 	parkPrepare     llssa.Expr
+	panicPrepare    llssa.Expr
 	completePrepare llssa.Expr
 	nextState       uint32
+	terminalState   uint32
 	needsPreempt    bool
 	instructions    int
 }
@@ -134,6 +140,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 	preemptPollHook := ""
 	yieldPrepareHook := ""
 	parkPrepareHook := ""
+	panicPrepareHook := ""
 	completePrepareHook := ""
 	if p.compilation != nil && p.compilation.EnableCoroChildAwait {
 		version = coroPhysicalABIVersionV1
@@ -146,6 +153,9 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		yieldPrepareHook = coroYieldPrepareHookV1
 		parkPrepareHook = coroParkPrepareHookV1
 		completePrepareHook = coroCompletePrepareHookV1
+	}
+	if p.compilation != nil && p.compilation.EnableCoroExplicitStatusPanicABI {
+		panicPrepareHook = coroPanicPrepareHookV1
 	}
 	resultFields := make([]*types.Var, sourceSig.Results().Len())
 	for i := range resultFields {
@@ -223,6 +233,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		preemptPollHook:     preemptPollHook,
 		yieldPrepareHook:    yieldPrepareHook,
 		parkPrepareHook:     parkPrepareHook,
+		panicPrepareHook:    panicPrepareHook,
 		completePrepareHook: completePrepareHook,
 		physicalSig:         physicalSig,
 		resultSlotType:      resultSlotType,
@@ -307,6 +318,9 @@ func (p *context) beginCoroBody(b llssa.Builder, abi coroPhysicalABI) *coroBodyC
 	}
 	if abi.parkPrepareHook != "" {
 		body.parkPrepare = p.pkg.NewFunc(abi.parkPrepareHook, coroParkPrepareSignature(), llssa.InC).Expr
+	}
+	if abi.panicPrepareHook != "" {
+		body.panicPrepare = p.pkg.NewFunc(abi.panicPrepareHook, coroPanicPrepareSignature(), llssa.InC).Expr
 	}
 	if abi.preemptPollHook != "" {
 		body.preemptPoll = p.pkg.NewFunc(abi.preemptPollHook, coroPreemptPollSignature(), llssa.InC).Expr
@@ -402,6 +416,18 @@ func coroPreemptPollSignature() *types.Signature {
 	return types.NewSignatureType(nil, nil, nil, params, results, false)
 }
 
+func coroPanicPrepareSignature() *types.Signature {
+	pointer := types.Typ[types.UnsafePointer]
+	params := types.NewTuple(
+		types.NewParam(token.NoPos, nil, "g", pointer),
+		types.NewParam(token.NoPos, nil, "handle", pointer),
+		types.NewParam(token.NoPos, nil, "header", pointer),
+		types.NewParam(token.NoPos, nil, "typeWord", pointer),
+		types.NewParam(token.NoPos, nil, "dataWord", pointer),
+	)
+	return types.NewSignatureType(nil, nil, nil, params, nil, false)
+}
+
 func (c *coroBodyContext) publishState(b llssa.Builder, reason, lifecycle uint64, stateID uint32) {
 	prog := b.Prog
 	b.Store(b.FieldAddr(c.header, coroHeaderSuspendReason), prog.IntVal(reason, prog.Uint16()))
@@ -493,17 +519,43 @@ func (c *coroBodyContext) countInstructionAndMaybeYield(b llssa.Builder) {
 	c.instructions++
 }
 
-func (c *coroBodyContext) finish(b llssa.Builder) {
+func (c *coroBodyContext) terminalStateID() uint32 {
+	if c.terminalState == 0 {
+		c.terminalState = c.nextState
+		c.nextState++
+	}
+	return c.terminalState
+}
+
+func (c *coroBodyContext) complete(b llssa.Builder) {
 	if c.abi.version < coroPhysicalABIVersionV1 {
-		c.coro.Finish()
+		b.Jump(c.finalSuspend)
 		return
 	}
-	stateID := c.nextState
-	c.nextState++
-	c.publishState(b, coroSuspendFrameComplete, coroLifecycleFinalSuspended, stateID)
+	c.publishState(b, coroSuspendFrameComplete, coroLifecycleFinalSuspended, c.terminalStateID())
 	if !c.completePrepare.IsNil() {
 		b.Call(c.completePrepare, c.task, c.coro.Handle(), b.Convert(b.Prog.VoidPtr(), c.header))
 	}
+	b.Jump(c.finalSuspend)
+}
+
+func (c *coroBodyContext) panic(b llssa.Builder, typeWord, dataWord llssa.Expr) {
+	if c.abi.version < coroPhysicalABIVersionV1 || c.panicPrepare.IsNil() || c.finalSuspend == nil {
+		panic("explicit-status panic requires a PhysicalABIV1 prepare hook and shared final suspend")
+	}
+	c.publishState(b, coroSuspendPanic, coroLifecycleFinalSuspended, c.terminalStateID())
+	b.Call(
+		c.panicPrepare,
+		c.task,
+		c.coro.Handle(),
+		b.Convert(b.Prog.VoidPtr(), c.header),
+		b.Convert(b.Prog.VoidPtr(), typeWord),
+		b.Convert(b.Prog.VoidPtr(), dataWord),
+	)
+	b.Jump(c.finalSuspend)
+}
+
+func (c *coroBodyContext) finish(b llssa.Builder) {
 	c.coro.Finish()
 }
 
@@ -544,6 +596,7 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	}
 	p.coroSourceBlocks = sourceBlocks
 	physical.completion = p.fn.MakeBlock()
+	physical.finalSuspend = p.fn.MakeBlock()
 	b.SetBlock(physical.coro.InitialResumeBlock())
 	physical.activate(b)
 	b.Jump(sourceBlocks[0])
@@ -584,11 +637,13 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	}
 
 	b.SetBlock(physical.completion)
+	physical.complete(b)
+	b.SetBlock(physical.finalSuspend)
 	physical.finish(b)
 }
 
 func validateCoroPhysicalABI(fn *ssa.Function, plan coro.FunctionPlan, whole *coro.SSAPlan, childAwait, programRun bool) error {
-	return validateCoroPhysicalABIWithUniverseCapabilities(fn, plan, whole, nil, childAwait, programRun, false)
+	return validateCoroPhysicalABIWithUniverseCapabilities(fn, plan, whole, nil, childAwait, programRun, false, false)
 }
 
 // validateCoroPhysicalABIWithUniverse is the production preflight. The
@@ -597,11 +652,14 @@ func validateCoroPhysicalABI(fn *ssa.Function, plan coro.FunctionPlan, whole *co
 // The wrapper above is retained for narrow structural unit tests; active
 // Compilation paths always call this form with their frozen universe.
 func validateCoroPhysicalABIWithUniverse(fn *ssa.Function, plan coro.FunctionPlan, whole *coro.SSAPlan, universe *EmissionUniverse, childAwait, programRun bool) error {
-	return validateCoroPhysicalABIWithUniverseCapabilities(fn, plan, whole, universe, childAwait, programRun, false)
+	return validateCoroPhysicalABIWithUniverseCapabilities(fn, plan, whole, universe, childAwait, programRun, false, false)
 }
 
-func validateCoroPhysicalABIWithUniverseCapabilities(fn *ssa.Function, plan coro.FunctionPlan, whole *coro.SSAPlan, universe *EmissionUniverse, childAwait, programRun, staticSpawn bool) error {
+func validateCoroPhysicalABIWithUniverseCapabilities(fn *ssa.Function, plan coro.FunctionPlan, whole *coro.SSAPlan, universe *EmissionUniverse, childAwait, programRun, staticSpawn, explicitPanic bool) error {
 	if !childAwait {
+		if explicitPanic {
+			return fmt.Errorf("coroutine physical ABI: function %q: explicit-status panic requires PhysicalABIV1 child-await lowering", plan.ID)
+		}
 		return validateCoroLeafPhysicalABI(fn, plan)
 	}
 
@@ -676,6 +734,7 @@ func validateCoroPhysicalABIWithUniverseCapabilities(fn *ssa.Function, plan coro
 	}
 
 	returns := 0
+	panics := 0
 	awaits := 0
 	parks := 0
 	spawns := 0
@@ -699,6 +758,14 @@ func validateCoroPhysicalABIWithUniverseCapabilities(fn *ssa.Function, plan coro
 			case *ssa.DebugRef, *ssa.Jump:
 			case *ssa.Return:
 				returns++
+			case *ssa.Panic:
+				if !explicitPanic {
+					return coroLeafInstructionError(fn, plan, instr, "explicit panic requires the explicit-status panic ABI")
+				}
+				if reason := validateCoroExplicitStatusPanic(pureSSA, instr); reason != "" {
+					return coroLeafInstructionError(fn, plan, instr, reason)
+				}
+				panics++
 			case *ssa.If:
 				if !coroLeafScalar(instr.Cond.Type()) {
 					return coroLeafInstructionError(fn, plan, instr, "non-scalar branch condition")
@@ -740,6 +807,14 @@ func validateCoroPhysicalABIWithUniverseCapabilities(fn *ssa.Function, plan coro
 					awaits++
 					continue
 				}
+				if explicitPanic {
+					if _, targetPlan, plainErr := resolveCoroStaticPlainCall(whole, instr); plainErr == nil {
+						return coroLeafInstructionError(fn, plan, instr, fmt.Sprintf(
+							"direct plain target %q (exec=%s) has no certified explicit-status hidden-outcome/unwind contract",
+							targetPlan.ID, targetPlan.Exec,
+						))
+					}
+				}
 				if !programRun {
 					return coroLeafInstructionError(fn, plan, instr, "unsupported child await: "+err.Error())
 				}
@@ -769,6 +844,9 @@ func validateCoroPhysicalABIWithUniverseCapabilities(fn *ssa.Function, plan coro
 	if returns == 0 {
 		return fail("requires at least one return instruction")
 	}
+	if panics != 0 && !plan.Exec.Contains(coro.MayUnwind) {
+		return fail("explicit panic body lacks may-unwind execution classification: %s", plan.Exec)
+	}
 	if !plan.Effect.MaySuspend() {
 		return fail("CFG physical body lacks a suspension-capable final effect: %s", plan.Effect)
 	}
@@ -794,6 +872,59 @@ func validateCoroPhysicalABIWithUniverseCapabilities(fn *ssa.Function, plan coro
 		return fail("child-await body has unsupported local effect %s", unsupported)
 	}
 	return nil
+}
+
+func validateCoroExplicitStatusPanic(audit *coroPhysicalPureSSAAudit, instruction *ssa.Panic) string {
+	if instruction == nil || instruction.X == nil {
+		return "explicit-status panic requires a non-nil operand"
+	}
+	boxed, ok := instruction.X.(*ssa.MakeInterface)
+	if !ok || boxed.X == nil {
+		return "explicit-status panic requires one concrete MakeInterface operand"
+	}
+	if boxed.Parent() != instruction.Parent() {
+		return "explicit-status panic MakeInterface belongs to a different SSA body"
+	}
+	refs := boxed.Referrers()
+	if refs == nil || len(*refs) != 1 || (*refs)[0] != instruction {
+		return "explicit-status panic requires its MakeInterface to have the panic site as its sole consumer"
+	}
+	target, ok := types.Unalias(boxed.Type()).Underlying().(*types.Interface)
+	if !ok || !target.Empty() {
+		return "explicit-status panic requires an empty-interface MakeInterface result"
+	}
+	if isUntypedNilConst(boxed.X) {
+		return "explicit-status panic does not yet support an untyped nil value"
+	}
+	source := boxed.X.Type()
+	if audit != nil {
+		source = audit.typeOf(source)
+	}
+	if source == nil {
+		return "explicit-status panic MakeInterface has no concrete source type"
+	}
+	if _, ok := types.Unalias(source).Underlying().(*types.Pointer); !ok {
+		return "explicit-status panic currently requires one concrete pointer payload"
+	}
+	if audit == nil {
+		return "explicit-status panic requires a prepared pure-SSA audit"
+	}
+	if reason := audit.validateMakeInterface(boxed); reason != "" {
+		return "explicit-status panic MakeInterface is not pure: " + reason
+	}
+	if constant, ok := boxed.X.(*ssa.Const); ok && constant.Value == nil {
+		// A typed nil pointer still produces a non-nil interface type word and
+		// carries no frame-owned storage in its data word.
+		return ""
+	}
+	root, reason := audit.stableAddress(boxed.X, make(map[ssa.Value]bool))
+	if reason != "" || root != coroPhysicalAddressGlobal {
+		if reason == "" {
+			reason = "payload is not rooted in package-global storage"
+		}
+		return "explicit-status panic data word may outlive its coroutine frame: " + reason
+	}
+	return ""
 }
 
 func isCoroProgramManagedEntry(fn *ssa.Function) bool {
