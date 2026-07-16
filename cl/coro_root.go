@@ -65,25 +65,53 @@ func explicitCoroRoot(plan *coro.SSAPlan, fn *ssa.Function) (coro.SSARootPlan, b
 	return coro.SSARootPlan{}, false
 }
 
-func validateCoroRootFactories(plan *coro.SSAPlan) error {
+func validateCoroRootEntries(plan *coro.SSAPlan) error {
 	if plan == nil {
-		return fmt.Errorf("coroutine root factory requires a compilation CoroPlan")
+		return fmt.Errorf("coroutine root validation requires a compilation CoroPlan")
 	}
 	for _, root := range plan.Roots() {
 		if root.Function == nil {
 			return fmt.Errorf("coroutine root factory %q has no SSA function", root.ID)
 		}
-		if root.Demand != coro.AsyncDemand {
-			return fmt.Errorf("coroutine root factory %q requires explicit async-only demand, got %s", root.ID, root.Demand)
-		}
 		function, ok := plan.FunctionPlan(root.Function)
 		if !ok || function.ID != root.ID {
 			return fmt.Errorf("coroutine root factory %q has no canonical function plan", root.ID)
 		}
-		if function.External != coro.Defined || function.Emission != coro.EmitCoroutine || function.FuncRep != coro.DirectCoro || function.Demand != coro.AsyncDemand {
+		if function.External != coro.Defined || !function.Demand.Contains(root.Demand) {
 			return fmt.Errorf(
-				"coroutine root factory %q requires an async-only defined direct coroutine (external=%s emission=%s representation=%s demand=%s)",
-				root.ID, function.External, function.Emission, function.FuncRep, function.Demand,
+				"coroutine root %q requires a defined body whose demand contains the explicit root (external=%s emission=%s representation=%s demand=%s root-demand=%s)",
+				root.ID, function.External, function.Emission, function.FuncRep, function.Demand, root.Demand,
+			)
+		}
+		switch function.Emission {
+		case coro.EmitPlain:
+			// AsyncDemand describes an entry context, not a requirement to clone
+			// or coroutine-lower a body that cannot suspend. A direct plain root
+			// is invoked inside a scheduler-owned bootstrap coroutine and needs no
+			// per-function root factory or package-anchor descriptor.
+			if function.FuncRep != coro.DirectPlain {
+				return fmt.Errorf(
+					"plain coroutine root %q requires direct-plain representation, got %s",
+					root.ID, function.FuncRep,
+				)
+			}
+		case coro.EmitCoroutine:
+			if root.Demand != coro.AsyncDemand || function.Demand != coro.AsyncDemand {
+				return fmt.Errorf(
+					"coroutine root factory %q requires explicit and total async-only demand, got root=%s total=%s",
+					root.ID, root.Demand, function.Demand,
+				)
+			}
+			if function.FuncRep != coro.DirectCoro {
+				return fmt.Errorf(
+					"coroutine root factory %q requires direct-coro representation, got %s",
+					root.ID, function.FuncRep,
+				)
+			}
+		default:
+			return fmt.Errorf(
+				"coroutine root %q requires a plain or coroutine body, got emission %s",
+				root.ID, function.Emission,
 			)
 		}
 	}

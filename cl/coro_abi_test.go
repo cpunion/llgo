@@ -764,7 +764,7 @@ func Parent(first uint8, second uint32) uint32 { return Child(first, second) + 1
 			source:    childAwaitSource,
 			roots:     []coroRootFactoryTestRoot{{name: "Parent", demand: coro.SyncDemand}},
 			yieldOnly: []string{"Child"},
-			want:      "requires explicit async-only demand, got sync",
+			want:      "requires explicit and total async-only demand, got root=sync total=sync",
 		},
 		{
 			name:   "both-demand explicit coroutine root",
@@ -774,13 +774,7 @@ func Parent(first uint8, second uint32) uint32 { return Child(first, second) + 1
 				{name: "Parent", demand: coro.AsyncDemand},
 			},
 			yieldOnly: []string{"Child"},
-			want:      "requires explicit async-only demand, got both",
-		},
-		{
-			name:   "plain explicit async root",
-			source: `package foo; func Plain(first uint8, second uint32) uint32 { return uint32(first) + second }`,
-			roots:  []coroRootFactoryTestRoot{{name: "Plain", demand: coro.AsyncDemand}},
-			want:   "requires an async-only defined direct coroutine",
+			want:      "requires explicit and total async-only demand, got root=both total=both",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -806,6 +800,97 @@ func Parent(first uint8, second uint32) uint32 { return Child(first, second) + 1
 				t.Fatalf("observer calls = %d, want pre-codegen rejection", observerCalls)
 			}
 		})
+	}
+}
+
+func TestCoroExplicitPlainRootKeepsSinglePlainBody(t *testing.T) {
+	const source = `package foo; func Plain(first uint8, second uint32) uint32 { return uint32(first) + second }`
+	for _, demand := range []coro.Demand{coro.SyncDemand, coro.AsyncDemand, coro.BothDemand} {
+		t.Run(demand.String(), func(t *testing.T) {
+			roots := []coroRootFactoryTestRoot{{name: "Plain", demand: demand}}
+			if demand == coro.BothDemand {
+				roots = []coroRootFactoryTestRoot{
+					{name: "Plain", demand: coro.SyncDemand},
+					{name: "Plain", demand: coro.AsyncDemand},
+				}
+			}
+			prog, ssaPkg, files, universe, plan := prepareCoroRootFactoryTestPlan(t, source, roots, nil)
+			defer prog.Dispose()
+			plain := ssaPkg.Func("Plain")
+			function, ok := plan.FunctionPlan(plain)
+			if !ok || function.External != coro.Defined || function.Emission != coro.EmitPlain ||
+				function.FuncRep != coro.DirectPlain || function.Demand != demand {
+				t.Fatalf("plain root plan = %+v, present=%t", function, ok)
+			}
+			compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+			enableCoroChildAwaitCompilation(compilation)
+			pkg, _, err := NewPackageExWithEmbedOptions(
+				prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+				PackageOptions{Compilation: compilation},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			module := pkg.Module()
+			if module.NamedFunction("foo.Plain").IsNil() {
+				t.Fatalf("plain root body is absent:\n%s", module.String())
+			}
+			if !module.NamedFunction("foo.Plain" + coroPrimarySuffix).IsNil() {
+				t.Fatalf("plain root incorrectly gained a coroutine body:\n%s", module.String())
+			}
+			if got := pkg.CoroRootPackageAnchor(); got != "" {
+				t.Fatalf("plain root package anchor = %q, want none", got)
+			}
+			if strings.Contains(module.String(), coroRootFactoryPrefix) ||
+				strings.Contains(module.String(), coroRootFactoryDescriptorPrefix) {
+				t.Fatalf("plain root incorrectly gained a root factory or descriptor:\n%s", module.String())
+			}
+		})
+	}
+}
+
+func TestCoroExplicitPlainAsyncRootAcceptsPropagatedSyncDemand(t *testing.T) {
+	const source = `package foo
+func Plain(value uint32) uint32 { return value + 1 }
+func Caller() uint32 { return Plain(41) }
+`
+	prog, ssaPkg, files, universe, plan := prepareCoroRootFactoryTestPlan(
+		t, source,
+		[]coroRootFactoryTestRoot{
+			{name: "Plain", demand: coro.AsyncDemand},
+			{name: "Caller", demand: coro.SyncDemand},
+		},
+		nil,
+	)
+	defer prog.Dispose()
+	plain := ssaPkg.Func("Plain")
+	function, ok := plan.FunctionPlan(plain)
+	if !ok || function.Demand != coro.BothDemand || function.Emission != coro.EmitPlain ||
+		function.FuncRep != coro.DirectPlain {
+		t.Fatalf("propagated-demand plain root plan = %+v, present=%t", function, ok)
+	}
+	roots := plan.Roots()
+	foundExplicitAsync := false
+	for _, root := range roots {
+		if root.Function == plain {
+			foundExplicitAsync = root.Demand == coro.AsyncDemand
+		}
+	}
+	if !foundExplicitAsync {
+		t.Fatalf("plain explicit root set = %+v, want async-only root with total both demand", roots)
+	}
+	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+	enableCoroChildAwaitCompilation(compilation)
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pkg.Module().NamedFunction("foo.Plain").IsNil() ||
+		!pkg.Module().NamedFunction("foo.Plain"+coroPrimarySuffix).IsNil() {
+		t.Fatalf("propagated-demand plain root did not keep one plain body:\n%s", pkg.Module().String())
 	}
 }
 
