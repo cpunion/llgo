@@ -92,15 +92,25 @@ const (
 	scheduleDisabled
 )
 
+const (
+	executorModeUnbound uint32 = iota
+	executorModeBound
+)
+
 func preemptAddress(g *G) *uint32 {
 	return (*uint32)(unsafe.Add(unsafe.Pointer(g), unsafe.Offsetof(G{}.preempt)))
 }
 
 // P is a deterministic single-P ready queue and resume guard.
 type P struct {
-	// schedule is the only P field touched by asynchronous completion
-	// producers. All queue and current-G fields remain scheduler-thread-only.
-	schedule  uint32
+	// schedule and executorMode are the only P fields that legacy asynchronous
+	// requesters may inspect. Platform completion shims never retain P: a bound
+	// executor makes RequestSchedule fail and uses its stable ExecutorHandle.
+	schedule     uint32
+	executorMode uint32
+	// executor is scheduler-thread-only and is published before executorMode.
+	executor *ExecutorDriver
+
 	current   *G
 	readyHead *G
 	readyTail *G
@@ -200,9 +210,10 @@ func InitG(g *G) bool {
 // A dynamically allocated G is not a stable asynchronous handle. Compiler
 // safepoints and the scheduler may call RequestPreempt while they synchronously
 // own that G. Platform wait callbacks retain only WaitRegistrationHandle;
-// scheduler-side Drain resolves the stable owning P and calls RequestSchedule.
-// This lifetime rule makes per-G task reclamation safe without a per-request
-// heap reference or epoch protocol.
+// they first publish that durable handle and then request a stable
+// ExecutorHandle. The scheduler-side driver resolves P only after it owns the
+// executor again. This lifetime rule makes per-G task reclamation safe without
+// a per-request heap reference or epoch protocol.
 func RequestPreempt(g *G) bool {
 	if g == nil {
 		return false
@@ -235,32 +246,39 @@ func PollPreempt(g *G) bool {
 		return false
 	}
 	requested := preemptCompareAndSwap(preemptAddress(g), preemptRequested, preemptIdle)
-	// A platform completion cannot safely inspect non-atomic P.current to find
-	// this G. Consume the owning P's coalesced scheduling request at the same
-	// compiler safepoint instead. Consume both gates when both are set so one
-	// event causes at most one yield.
-	if g.runP != nil && preemptCompareAndSwap(&g.runP.schedule, scheduleRequested, scheduleIdle) {
-		requested = true
+	if p := g.runP; p != nil {
+		mode := preemptLoad(&p.executorMode)
+		if mode == executorModeBound {
+			// The running G only observes the stable executor request. It must
+			// remain published until the scheduler owns P again, drains every
+			// durable source, and acknowledges through ExecutorDriver.
+			driver := p.executor
+			if validExecutorDriverForP(driver, p) && driver.registry.ObserveRequested(driver.handle) {
+				requested = true
+			}
+		} else if mode == executorModeUnbound && preemptCompareAndSwap(&p.schedule, scheduleRequested, scheduleIdle) {
+			// Preserve the legacy/internal P request gate while no platform
+			// executor is bound. Unlike ExecutorRegistry, this gate is consumed
+			// directly at the safepoint.
+			requested = true
+		}
 	}
 	return requested
 }
 
-// RequestSchedule coalesces one asynchronous request for the G currently
-// executing on p, without reading any scheduler-owned P or G field. A stable
-// wait registration's scheduler-side Drain publishes the token outcome and
-// calls RequestSchedule; the platform ingress only posts its POD handle and
-// triggers the platform executor/event-loop doorbell. A running coroutine
-// observes the request at PollPreempt; an idle scheduler consumes it while
-// polling completed waits.
+// RequestSchedule is the legacy/internal P request gate. It coalesces one
+// request without reading scheduler-owned queue or current-G fields, but it has
+// no retained platform doorbell and is therefore rejected after BindExecutor.
+// Bound platform callbacks must publish their durable source and call
+// ExecutorRegistry.Request through a POD ExecutorHandle instead.
 //
-// p must remain alive and no logical G using it may enter its final Destroyed
-// transition until every runtime source that can call RequestSchedule is
-// quiescent.
+// An unbound p must remain alive until every internal source that can call this
+// function is quiescent.
 // The last terminal transition atomically disables this gate: a request that
 // wins that race prevents terminal success, while a request linearized after
 // terminal disable fails without touching scheduler state.
 func RequestSchedule(p *P) bool {
-	if p == nil {
+	if p == nil || preemptLoad(&p.executorMode) != executorModeUnbound {
 		return false
 	}
 	switch preemptLoad(&p.schedule) {
@@ -418,12 +436,19 @@ func pollReady(p *P) (int, bool) {
 		return 0, false
 	}
 	schedule := preemptLoad(&p.schedule)
-	if schedule != scheduleIdle && schedule != scheduleRequested {
+	mode := preemptLoad(&p.executorMode)
+	if mode == executorModeBound {
+		if schedule != scheduleIdle {
+			return 0, false
+		}
+	} else if mode != executorModeUnbound || (schedule != scheduleIdle && schedule != scheduleRequested) {
 		return 0, false
 	}
-	// There is no running G to preempt. Observing the idle scheduler is itself
-	// sufficient acknowledgement of an asynchronous scheduling request.
-	preemptCompareAndSwap(&p.schedule, scheduleRequested, scheduleIdle)
+	if mode == executorModeUnbound {
+		// There is no running G to preempt. Observing the idle scheduler is
+		// sufficient acknowledgement of the legacy/internal scheduling gate.
+		preemptCompareAndSwap(&p.schedule, scheduleRequested, scheduleIdle)
+	}
 	promoted := 0
 	var previous *G
 	for g := p.waitHead; g != nil; {
@@ -473,9 +498,13 @@ func pollReady(p *P) (int, bool) {
 }
 
 // PollReady promotes every completed or safely canceled platform wait while
-// the scheduler is idle. It never polls or calls platform code; registration
-// Drain and in-runtime wait owners publish token outcomes before this call.
+// the scheduler is idle. For a bound P it first runs the target-neutral
+// ExecutorDriver drain/ack/recheck transaction. It never calls target code.
 func PollReady(p *P) (int, bool) {
+	if p != nil && preemptLoad(&p.executorMode) == executorModeBound {
+		_, promoted, ok := PollExecutor(p.executor)
+		return promoted, ok
+	}
 	return pollReady(p)
 }
 
@@ -498,7 +527,7 @@ func NextRunnable(p *P) (g *G, ok bool) {
 		// corruption rather than runnable work.
 		return nil, validReadyQueue(p) && validWaitQueue(p) && p.readyHead == nil && p.waitHead == nil
 	}
-	if _, ok := pollReady(p); !ok {
+	if _, ok := PollReady(p); !ok {
 		return nil, false
 	}
 	return dequeue(p), true
@@ -706,6 +735,10 @@ func Destroyed(p *P, g *G, action Action) (Action, bool) {
 		// ready/waiting peers still need the gate. CAS makes terminal success and
 		// a late asynchronous producer request one exact total order.
 		if p.readyHead == nil && p.waitHead == nil &&
+			(preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil) {
+			return Action{}, false
+		}
+		if p.readyHead == nil && p.waitHead == nil &&
 			!preemptCompareAndSwap(&p.schedule, scheduleIdle, scheduleDisabled) {
 			return Action{}, false
 		}
@@ -736,6 +769,7 @@ func Destroyed(p *P, g *G, action Action) (Action, bool) {
 // llvm.coro.destroy again. Any queue, action, or G-state mismatch fails closed.
 func AcknowledgeTerminalSchedule(p *P, g *G, action Action) bool {
 	return expectedAction(p, g, action, ActionDestroy) && !p.inResume &&
+		preemptLoad(&p.executorMode) == executorModeUnbound && p.executor == nil &&
 		g.state == GDispatching && g.destroyTarget == nil && g.destroyRoot &&
 		g.active == nil && g.frames == nil && p.readyHead == nil && p.readyTail == nil &&
 		p.waitHead == nil && p.waitTail == nil && validReadyQueue(p) && validWaitQueue(p) &&
@@ -749,7 +783,8 @@ func AcknowledgeTerminalSchedule(p *P, g *G, action Action) bool {
 func TerminalG(p *P, g *G) bool {
 	return p != nil && p.current == nil && p.readyHead == nil && p.readyTail == nil &&
 		p.waitHead == nil && p.waitTail == nil &&
-		preemptLoad(&p.schedule) == scheduleDisabled && !p.inResume && p.action.Kind == ActionInvalid && p.action.Handle == nil &&
+		preemptLoad(&p.schedule) == scheduleDisabled && preemptLoad(&p.executorMode) == executorModeUnbound && p.executor == nil &&
+		!p.inResume && p.action.Kind == ActionInvalid && p.action.Handle == nil &&
 		ValidG(g) && preemptLoad(preemptAddress(g)) == preemptDisabled && g.state == GDead && g.root == nil && g.active == nil && g.frames == nil &&
 		g.pending.kind == pendingNone && g.pending.from == nil && g.pending.target == nil && g.pending.wait == nil && g.pending.ticket == 0 &&
 		g.destroyTarget == nil && !g.destroyRoot && g.nextReady == nil && !g.queued &&

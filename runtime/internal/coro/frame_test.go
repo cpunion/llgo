@@ -283,6 +283,8 @@ func TestTerminalGRejectsResidualSchedulerState(t *testing.T) {
 		{"schedule idle", func(p *P) { preemptStore(&p.schedule, scheduleIdle) }},
 		{"schedule requested", func(p *P) { preemptStore(&p.schedule, scheduleRequested) }},
 		{"schedule stopping", func(p *P) { preemptStore(&p.schedule, scheduleStopping) }},
+		{"executor mode", func(p *P) { preemptStore(&p.executorMode, executorModeBound) }},
+		{"executor pointer", func(p *P) { p.executor = new(ExecutorDriver) }},
 		{"in resume", func(p *P) { p.inResume = true }},
 		{"action kind", func(p *P) { p.action.Kind = ActionResume }},
 		{"action handle", func(p *P) { p.action.Handle = dummyActionHandle }},

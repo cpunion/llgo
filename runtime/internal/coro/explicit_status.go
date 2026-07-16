@@ -193,6 +193,10 @@ func finishPanicG(p *P, g *G, wasRoot bool) (Action, bool) {
 	// retain the P gate: the runtime will surface the panic immediately, but no
 	// child/peer ownership is silently discarded by this core transition.
 	if p.readyHead == nil && p.waitHead == nil &&
+		(preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil) {
+		return Action{}, false
+	}
+	if p.readyHead == nil && p.waitHead == nil &&
 		!preemptCompareAndSwap(&p.schedule, scheduleIdle, scheduleDisabled) {
 		return Action{}, false
 	}
@@ -251,6 +255,7 @@ func PanicDestroyed(p *P, g *G, action Action) (Action, bool) {
 // calling llvm.coro.destroy twice.
 func AcknowledgePanicTerminalSchedule(p *P, g *G, action Action) bool {
 	return expectedAction(p, g, action, ActionPanicDestroy) && !p.inResume &&
+		preemptLoad(&p.executorMode) == executorModeUnbound && p.executor == nil &&
 		g.state == GPanicking && g.panicUnwind && publishedPanicRecord(&g.panicRecord) &&
 		g.destroyTarget == nil && g.destroyRoot && g.active == nil && g.frames == nil &&
 		p.readyHead == nil && p.readyTail == nil && p.waitHead == nil && p.waitTail == nil &&

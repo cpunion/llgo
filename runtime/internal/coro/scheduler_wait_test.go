@@ -136,8 +136,8 @@ func TestWaitAtomicFieldsAre32BitAligned(t *testing.T) {
 	if unsafe.Offsetof(WaitToken{}.word)%4 != 0 || unsafe.Alignof(WaitToken{}) < 4 {
 		t.Fatalf("WaitToken atomic word is not 32-bit aligned: offset=%d align=%d", unsafe.Offsetof(WaitToken{}.word), unsafe.Alignof(WaitToken{}))
 	}
-	if unsafe.Offsetof(G{}.preempt)%4 != 0 || unsafe.Offsetof(P{}.schedule)%4 != 0 {
-		t.Fatalf("scheduler atomic words are not 32-bit aligned: G.preempt=%d P.schedule=%d", unsafe.Offsetof(G{}.preempt), unsafe.Offsetof(P{}.schedule))
+	if unsafe.Offsetof(G{}.preempt)%4 != 0 || unsafe.Offsetof(P{}.schedule)%4 != 0 || unsafe.Offsetof(P{}.executorMode)%4 != 0 {
+		t.Fatalf("scheduler atomic words are not 32-bit aligned: G.preempt=%d P.schedule=%d P.executorMode=%d", unsafe.Offsetof(G{}.preempt), unsafe.Offsetof(P{}.schedule), unsafe.Offsetof(P{}.executorMode))
 	}
 }
 

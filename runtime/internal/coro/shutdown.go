@@ -135,6 +135,7 @@ func validCancelableReadyG(g *G) bool {
 // or platform-specific unregister callback for command-wide cancellation.
 func BeginCommandShutdown(p *P, main *G) bool {
 	if p == nil || !ReclaimableG(main) || main.taskState != taskStorageStatic ||
+		preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil ||
 		p.current != nil || p.inResume || p.action.Kind != ActionInvalid || p.action.Handle != nil ||
 		!validReadyQueue(p) || !validWaitQueue(p) || p.waitHead != nil || p.waitTail != nil {
 		return false
@@ -233,6 +234,7 @@ func CancelDestroyed(p *P, g *G, action Action) (Action, bool) {
 // shutdown because BeginCommandShutdown rejected a non-empty wait set.
 func FinishCommandShutdown(p *P, main *G) bool {
 	if p == nil || !ReclaimableG(main) || main.taskState != taskStorageStatic ||
+		preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil ||
 		p.current != nil || p.inResume || p.action.Kind != ActionInvalid || p.action.Handle != nil ||
 		!validReadyQueue(p) || !validWaitQueue(p) || p.readyHead != nil || p.readyTail != nil ||
 		p.waitHead != nil || p.waitTail != nil {

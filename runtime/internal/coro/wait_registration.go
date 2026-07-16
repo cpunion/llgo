@@ -115,6 +115,9 @@ type waitRegistrationSlot struct {
 type WaitRegistrationTable struct {
 	pending uint32
 	slots   [WaitRegistrationCapacity]waitRegistrationSlot
+	// owner is scheduler-only and is never read by Post. A non-nil owner binds
+	// every future registration to one target-neutral single-P driver.
+	owner *P
 }
 
 func registrationSlot(table *WaitRegistrationTable, handle WaitRegistrationHandle) (*waitRegistrationSlot, bool) {
@@ -178,7 +181,8 @@ func registrationProducersQuiesced(slot *waitRegistrationSlot) bool {
 // and must run before the platform operation is submitted. Owner fields are
 // initialized before the release publication of Active.
 func (table *WaitRegistrationTable) Register(p *P, token *WaitToken, ticket WaitTicket) (WaitRegistrationHandle, bool) {
-	if table == nil || p == nil || token == nil || !validWaitTicket(ticket) {
+	if table == nil || p == nil || token == nil || !validWaitTicket(ticket) ||
+		(table.owner != nil && table.owner != p) {
 		return WaitRegistrationHandle{}, false
 	}
 	word := preemptLoad(&token.word)
@@ -279,13 +283,25 @@ func (table *WaitRegistrationTable) Pending() bool {
 }
 
 // Drain publishes every posted completion into its WaitToken. It is
-// scheduler-thread-only. RequestSchedule is deliberately performed here, not
-// by the platform callback. A false RequestSchedule during a terminal seal
-// does not roll back a completion; shutdown must still observe the token.
+// scheduler-thread-only. A standalone table may use Drain directly; a table
+// bound to an ExecutorDriver must be serviced by that driver so completion
+// publication, executor acknowledgement, and the mandatory source recheck stay
+// one scheduler-owned transaction.
 func (table *WaitRegistrationTable) Drain() (int, bool) {
-	if table == nil {
+	if table == nil || table.owner != nil {
 		return 0, false
 	}
+	return table.drain(nil, false)
+}
+
+func (table *WaitRegistrationTable) drainFor(p *P) (int, bool) {
+	if table == nil || p == nil || table.owner != p {
+		return 0, false
+	}
+	return table.drain(p, true)
+}
+
+func (table *WaitRegistrationTable) drain(owner *P, enforceOwner bool) (int, bool) {
 	preemptStore(&table.pending, 0)
 	drained := 0
 	for index := range table.slots {
@@ -297,13 +313,12 @@ func (table *WaitRegistrationTable) Drain() (int, bool) {
 			continue
 		}
 		p, token, ticket := slot.p, slot.token, slot.ticket
-		if p == nil || token == nil || !validWaitTicket(ticket) || !CompleteWait(token, ticket) {
+		if p == nil || (enforceOwner && p != owner) || token == nil || !validWaitTicket(ticket) || !CompleteWait(token, ticket) {
 			// Keep Draining permanently fail-closed: owner storage cannot be
 			// retired after a corrupt or competing raw token transition.
 			return drained, false
 		}
 		preemptStore(&slot.state, uint32(waitRegistrationDelivered))
-		RequestSchedule(p)
 		drained++
 	}
 	return drained, true
@@ -356,7 +371,8 @@ func (table *WaitRegistrationTable) BeginClose(handle WaitRegistrationHandle) Wa
 // losing completion producer cannot still access the table or frame storage.
 func (table *WaitRegistrationTable) ConfirmQuiesced(handle WaitRegistrationHandle) (WaitCancelResult, bool) {
 	slot, ok := registrationSlot(table, handle)
-	if !ok || preemptLoad(&slot.generation) != handle.Generation || !registrationProducersQuiesced(slot) {
+	if !ok || preemptLoad(&slot.generation) != handle.Generation || !registrationProducersQuiesced(slot) ||
+		slot.p == nil || (table.owner != nil && table.owner != slot.p) {
 		return WaitCancelInvalid, false
 	}
 	state := waitRegistrationState(preemptLoad(&slot.state))
@@ -370,7 +386,6 @@ func (table *WaitRegistrationTable) ConfirmQuiesced(handle WaitRegistrationHandl
 		preemptStore(&slot.state, uint32(waitRegistrationQuiescedDelivered))
 		return WaitCancelCompletionWon, true
 	}
-	p := slot.p
 	result := publishWaitCancellation(slot.token, slot.ticket)
 	finalState := waitRegistrationState(0)
 	switch result {
@@ -384,10 +399,9 @@ func (table *WaitRegistrationTable) ConfirmQuiesced(handle WaitRegistrationHandl
 		// Quiescing is deliberately unrecoverable without owner diagnosis.
 		return result, false
 	}
-	RequestSchedule(p)
 	// Publish Quiesced only after the last slot-owner access. A concurrent
 	// scheduler may consume the token earlier, but Retire must keep failing on
-	// Quiescing until this call no longer reads p/token/ticket.
+	// Quiescing until this call no longer reads token/ticket.
 	preemptStore(&slot.state, uint32(finalState))
 	return result, true
 }
@@ -422,12 +436,13 @@ func (table *WaitRegistrationTable) Retire(handle WaitRegistrationHandle) bool {
 	return true
 }
 
-// CanRelease reports whether the table has no live registration or producer.
-// The owner may use it after its platform backend has been shut down; it must
-// not race Register, Drain, BeginClose, ConfirmQuiesced, or Retire. A false
-// result requires retaining the table at its stable address.
-func (table *WaitRegistrationTable) CanRelease() bool {
-	if table == nil || preemptLoad(&table.pending) != 0 {
+// CanRelease reports whether an unbound table has no live registration or
+// producer. A table attached to ExecutorDriver remains non-releasable even when
+// its slot set is empty. The owner may use this after its platform backend has
+// been shut down; it must not race control methods. A false result requires
+// retaining the table at its stable address.
+func registrationTableEmpty(table *WaitRegistrationTable, owner *P) bool {
+	if table == nil || table.owner != owner || preemptLoad(&table.pending) != 0 {
 		return false
 	}
 	for index := range table.slots {
@@ -441,4 +456,24 @@ func (table *WaitRegistrationTable) CanRelease() bool {
 		}
 	}
 	return true
+}
+
+func bindRegistrationTable(table *WaitRegistrationTable, p *P) bool {
+	if p == nil || !registrationTableEmpty(table, nil) {
+		return false
+	}
+	table.owner = p
+	return true
+}
+
+func unbindRegistrationTable(table *WaitRegistrationTable, p *P) bool {
+	if p == nil || !registrationTableEmpty(table, p) {
+		return false
+	}
+	table.owner = nil
+	return true
+}
+
+func (table *WaitRegistrationTable) CanRelease() bool {
+	return registrationTableEmpty(table, nil)
 }
