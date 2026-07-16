@@ -1310,11 +1310,16 @@ func exactCoroStaticFunctionValue(ctx *context, value ssa.Value) (*ssa.Function,
 }
 
 // provenCoroDirectPlainStaticClosure accepts only a closed Go body whose calls
-// are direct, statically resolved emitted bodies (or builtins). Dynamic calls,
-// go/defer, bodyless leaves, captured closures, and unresolved aliases remain
-// on the ordinary Dispatch path. Effect and representation are independently
-// checked after fixed-point analysis; this prefilter only establishes that it
-// is sound to seed the candidate's bounded scheduler-stack island.
+// are direct, statically resolved emitted bodies (or builtins). An exact frozen
+// C declaration may terminate the closure only for the compiler-owned TLS
+// callback whose field-flow proof supplied one of closedDynamic's calls. The
+// declaration then enters requiredPlain and is classified through the same
+// frozen IgnoreBody/ExternalKnown path as the compiler runtime ABI. Dynamic
+// calls, go/defer, other bodyless leaves, captured closures, and unresolved
+// aliases remain on the ordinary Dispatch path. Effect and representation are
+// independently checked after fixed-point analysis; this prefilter only
+// establishes that it is sound to seed the candidate's bounded scheduler-stack
+// island.
 func provenCoroDirectPlainStaticClosure(ctx *context, target *ssa.Function, closedDynamic map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate) ([]*ssa.Function, bool, error) {
 	if ctx == nil || ctx.coroEmission == nil || target == nil || len(target.FreeVars) != 0 {
 		return nil, false, nil
@@ -1327,8 +1332,10 @@ func provenCoroDirectPlainStaticClosure(ctx *context, target *ssa.Function, clos
 		return nil, false, nil
 	}
 	seen := make(map[*ssa.Function]struct{})
+	seenCLeaves := make(map[*ssa.Function]struct{})
 	queue := []*ssa.Function{target}
 	closure := make([]*ssa.Function, 0, 4)
+	tlsCallback := provenCoroTLSDirectPlainClosureRoot(ctx, target, closedDynamic)
 	for head := 0; head < len(queue); head++ {
 		function := queue[head]
 		if _, ok := seen[function]; ok {
@@ -1375,7 +1382,18 @@ func provenCoroDirectPlainStaticClosure(ctx *context, target *ssa.Function, clos
 					return nil, false, err
 				}
 				if !calleeGoBody {
-					return nil, false, nil
+					background, classified, err := ctx.coroEmission.FunctionBackground(callee)
+					if err != nil {
+						return nil, false, err
+					}
+					if !tlsCallback || !classified || background != llssa.InC {
+						return nil, false, nil
+					}
+					if _, ok := seenCLeaves[callee]; !ok {
+						seenCLeaves[callee] = struct{}{}
+						closure = append(closure, callee)
+					}
+					continue
 				}
 				if _, ok := seen[callee]; !ok {
 					queue = append(queue, callee)
@@ -1384,6 +1402,25 @@ func provenCoroDirectPlainStaticClosure(ctx *context, target *ssa.Function, clos
 		}
 	}
 	return closure, true, nil
+}
+
+// provenCoroTLSDirectPlainClosureRoot binds the frozen-C-leaf exception to the
+// exact callback body audited by proveCoroTLSDestructorClosedDynamicCalls. A
+// certificate reachable only through a helper is insufficient: otherwise an
+// unrelated user callback could call that helper and inherit the exception.
+func provenCoroTLSDirectPlainClosureRoot(ctx *context, target *ssa.Function, closedDynamic map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate) bool {
+	if !coroTLSFunctionInOwnedPackage(ctx, target) {
+		return false
+	}
+	for call := range closedDynamic {
+		if call == nil || call.Parent() != target || call.Common() == nil || call.Common().IsInvoke() {
+			continue
+		}
+		if _, ordinary := call.(*ssa.Call); ordinary {
+			return true
+		}
+	}
+	return false
 }
 
 func buildCoroPlanDigestMetadata(ctx *context) (coro.PlanDigestMetadata, error) {

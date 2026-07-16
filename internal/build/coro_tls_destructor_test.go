@@ -296,6 +296,112 @@ func TestCoroTLSDestructorTargetMustRemainAtomic(t *testing.T) {
 	}
 }
 
+func TestCoroTLSDestructorDirectPlainClosureFrozenCLeaf(t *testing.T) {
+	source := coroTLSRuntimeFixtureSource(`
+func hiddenFallback() {}
+func callback(*int) {}
+func ordinaryCaller() { ordinaryC() }
+`)
+	source = strings.Replace(source, "func slotDestructor(dst *slot) {", `
+//llgo:link tlsCLeaf C.tls_c_leaf
+func tlsCLeaf() { hiddenFallback() }
+
+//llgo:link ordinaryC C.ordinary_c
+func ordinaryC()
+
+func slotDestructor(dst *slot) {
+	tlsCLeaf()
+`, 1)
+	fixture := buildRequiredCoroRuntimeFixture(t, source)
+	if len(fixture.directPlain) != 1 {
+		t.Fatalf("TLS direct-plain callbacks = %d, want 1", len(fixture.directPlain))
+	}
+	slotDestructor := fixture.pkg.Func("slotDestructor")
+	tlsCLeaf := fixture.pkg.Func("tlsCLeaf")
+	if use := fixture.directPlain[0]; use.target != slotDestructor {
+		t.Fatalf("TLS direct-plain target = %v, want slotDestructor", use.target)
+	}
+	if _, required := fixture.requiredPlain[tlsCLeaf]; !required {
+		t.Fatal("exact frozen TLS C leaf did not enter the required plain island")
+	}
+	if _, required := fixture.requiredPlain[fixture.pkg.Func("hiddenFallback")]; required {
+		t.Fatal("ignored C fallback body leaked into the required plain island")
+	}
+	if _, required := fixture.requiredPlain[fixture.pkg.Func("ordinaryC")]; required {
+		t.Fatal("ordinary external C declaration entered the required plain island")
+	}
+
+	plan, err := fixture.analyze(coro.SSAConfig{MaxPlainInstructions: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	callbackPlan := functionPlanForBuildTest(t, plan, slotDestructor)
+	if callbackPlan.External != coro.Defined || callbackPlan.Effect != coro.NoSuspend || callbackPlan.Exec.Contains(coro.NeedsPreempt) ||
+		callbackPlan.FuncRep != coro.DirectPlain || callbackPlan.Primary != coro.PrimaryPlain || callbackPlan.Emission != coro.EmitPlain {
+		t.Fatalf("TLS callback plan = %+v, want post-plan validated direct plain", callbackPlan)
+	}
+	leafPlan := functionPlanForBuildTest(t, plan, tlsCLeaf)
+	if !plan.IgnoresBody(tlsCLeaf) || leafPlan.External != coro.ExternalKnown || leafPlan.Effect != coro.NoSuspend ||
+		leafPlan.Exec.Contains(coro.BlockForeign|coro.NeedsPreempt) || leafPlan.FuncRep != coro.DirectPlain || leafPlan.Emission != coro.EmitExternal {
+		t.Fatalf("TLS C leaf plan = %+v, ignored=%t; want exact compatible-known declaration", leafPlan, plan.IgnoresBody(tlsCLeaf))
+	}
+	ordinaryC := functionPlanForBuildTest(t, plan, fixture.pkg.Func("ordinaryC"))
+	if ordinaryC.External != coro.ExternalUnknownForeign || !ordinaryC.Exec.Contains(coro.BlockForeign|coro.IRQUnsafe) {
+		t.Fatalf("ordinary C declaration plan = %+v, want unknown foreign", ordinaryC)
+	}
+}
+
+func TestCoroTLSDestructorDirectPlainClosureCLeafFailsClosed(t *testing.T) {
+	t.Run("user callback", func(t *testing.T) {
+		fixture := buildRequiredCoroRuntimeFixture(t, coroTLSRuntimeFixtureSource(`
+//llgo:link userCLeaf C.user_c_leaf
+func userCLeaf()
+func callback(*int) {}
+func userCallback(*slot) { userCLeaf() }
+func install() {
+	handle := Alloc(callback)
+	handle.ensureSlot(new(slot))
+	installC(CCallback(userCallback))
+}
+`))
+		if len(fixture.directPlain) != 1 || fixture.directPlain[0].target != fixture.pkg.Func("slotDestructor") {
+			t.Fatalf("direct-plain callbacks = %+v, want only compiler-owned slotDestructor", fixture.directPlain)
+		}
+		if _, required := fixture.requiredPlain[fixture.pkg.Func("userCallback")]; required {
+			t.Fatal("user callback inherited the TLS C-leaf exception")
+		}
+		if _, required := fixture.requiredPlain[fixture.pkg.Func("userCLeaf")]; required {
+			t.Fatal("user callback C leaf entered the required plain island")
+		}
+		if _, ok, err := provenCoroDirectPlainStaticClosure(fixture.ctx, fixture.pkg.Func("userCallback"), fixture.closedDynamic); err != nil || ok {
+			t.Fatalf("user callback closure proof = ok:%t err:%v, want false/nil", ok, err)
+		}
+	})
+
+	t.Run("non C declaration", func(t *testing.T) {
+		source := coroTLSRuntimeFixtureSource(`
+func unknownManaged()
+func callback(*int) {}
+`)
+		source = strings.Replace(source, "func slotDestructor(dst *slot) {", `func slotDestructor(dst *slot) {
+	unknownManaged()
+`, 1)
+		fixture := buildRequiredCoroRuntimeFixture(t, source)
+		if len(fixture.closedDynamic) != 1 {
+			t.Fatalf("TLS closed dynamic certificates = %d, want 1", len(fixture.closedDynamic))
+		}
+		if len(fixture.directPlain) != 0 {
+			t.Fatalf("unknown managed leaf produced direct-plain callback uses: %+v", fixture.directPlain)
+		}
+		if _, required := fixture.requiredPlain[fixture.pkg.Func("unknownManaged")]; required {
+			t.Fatal("non-C declaration entered the required plain island")
+		}
+		if _, ok, err := provenCoroDirectPlainStaticClosure(fixture.ctx, fixture.pkg.Func("slotDestructor"), fixture.closedDynamic); err != nil || ok {
+			t.Fatalf("non-C leaf closure proof = ok:%t err:%v, want false/nil", ok, err)
+		}
+	})
+}
+
 func coroTLSRuntimeFixtureSource(extra string) string {
 	base := `
 //llgo:type C
