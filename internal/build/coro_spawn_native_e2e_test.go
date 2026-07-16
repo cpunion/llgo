@@ -353,7 +353,12 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 	}
 	conf := NewDefaultConf(ModeGen)
 	conf.ForceRebuild = true
-	conf.Tags = "nogc,llgo_coro,llgo_coro_native_pipe"
+	conf.Tags = "nogc"
+	// This source-island compile intentionally does not enable the complete
+	// program bootstrap and its whole-program planner. Select its production
+	// runtime files through the private compiler channel; the public Config.Tags
+	// path must reject this capability as forged.
+	conf.compilerBuildTags = []string{"llgo_coro", coroNativePipeBuildTag}
 	allowed := map[string]bool{
 		"command-line-arguments":                               true,
 		"github.com/goplus/llgo/runtime/internal/coro":         true,

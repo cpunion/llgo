@@ -23,9 +23,12 @@ import (
 	"fmt"
 	"go/types"
 	"runtime"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/goplus/llgo/internal/coro"
+	"github.com/goplus/llgo/internal/crosscompile"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -43,6 +46,10 @@ func TestNativeCoroDoorbellRuntimeABISelection(t *testing.T) {
 		{name: "named-target", conf: &Config{Goos: "linux", Target: "rp2040", EnableCoroProgramBootstrapRun: true}},
 		{name: "baremetal-comma", conf: &Config{Goos: "linux", Tags: "nogc,baremetal,cortexm", EnableCoroProgramBootstrapRun: true}},
 		{name: "baremetal-space", conf: &Config{Goos: "linux", Tags: "nogc baremetal cortexm", EnableCoroProgramBootstrapRun: true}},
+		{name: "adapter-test", conf: &Config{Goos: "linux", Tags: "nogc,coro_runtime_adapter_test", EnableCoroProgramBootstrapRun: true}},
+		{name: "adapter-test-go-build-flags-equals", conf: &Config{Goos: "linux", GoBuildFlags: []string{"-tags=coro_runtime_adapter_test"}, EnableCoroProgramBootstrapRun: true}},
+		{name: "adapter-test-go-build-flags-pair", conf: &Config{Goos: "linux", GoBuildFlags: []string{"-tags", "coro_runtime_adapter_test"}, EnableCoroProgramBootstrapRun: true}},
+		{name: "adapter-test-go-build-flags-double-dash", conf: &Config{Goos: "linux", GoBuildFlags: []string{"--tags=coro_runtime_adapter_test"}, EnableCoroProgramBootstrapRun: true}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -50,6 +57,151 @@ func TestNativeCoroDoorbellRuntimeABISelection(t *testing.T) {
 				t.Fatalf("native coroutine doorbell selection = %t, want %t", got, test.want)
 			}
 		})
+	}
+}
+
+func TestEffectiveBuildTagsRejectsForgedNativeCapability(t *testing.T) {
+	tests := []struct {
+		name       string
+		conf       *Config
+		export     crosscompile.Export
+		wantSource string
+	}{
+		{
+			name:       "config-tags",
+			conf:       &Config{Tags: "nogc," + coroNativePipeBuildTag},
+			wantSource: "Config.Tags",
+		},
+		{
+			name:       "go-build-flags-equals",
+			conf:       &Config{GoBuildFlags: []string{"-tags=nogc," + coroNativePipeBuildTag}},
+			wantSource: "Config.GoBuildFlags",
+		},
+		{
+			name:       "go-build-flags-pair",
+			conf:       &Config{GoBuildFlags: []string{"-tags", "nogc " + coroNativePipeBuildTag}},
+			wantSource: "Config.GoBuildFlags",
+		},
+		{
+			name:       "go-build-flags-double-dash-equals",
+			conf:       &Config{GoBuildFlags: []string{"--tags=nogc," + coroNativePipeBuildTag}},
+			wantSource: "Config.GoBuildFlags",
+		},
+		{
+			name:       "go-build-flags-double-dash-pair",
+			conf:       &Config{GoBuildFlags: []string{"--tags", "nogc " + coroNativePipeBuildTag}},
+			wantSource: "Config.GoBuildFlags",
+		},
+		{
+			name:       "named-target-build-tags",
+			conf:       &Config{Goos: "linux", Target: "nintendoswitch", EnableCoroProgramBootstrapRun: true},
+			export:     crosscompile.Export{BuildTags: []string{"nintendoswitch", coroNativePipeBuildTag}},
+			wantSource: "named-target BuildTags",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := effectiveBuildTags(test.conf, test.export)
+			if err == nil {
+				t.Fatal("forged native capability was accepted")
+			}
+			for _, want := range []string{coroNativePipeBuildTag, test.wantSource, "compiler-reserved capability"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("error = %q, want %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestDoRejectsForgedNativeCapabilityBeforePackageSelection(t *testing.T) {
+	conf := NewDefaultConf(ModeGen)
+	conf.Tags = "nogc," + coroNativePipeBuildTag
+	_, err := Do([]string{"../../cl/_testgo/print"}, conf)
+	if err == nil {
+		t.Fatal("Do accepted a forged native capability")
+	}
+	for _, want := range []string{coroNativePipeBuildTag, "Config.Tags", "compiler-reserved capability"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("Do error = %q, want %q", err, want)
+		}
+	}
+}
+
+func TestEffectiveBuildTagsKeepsNativeCapabilityCompilerOwned(t *testing.T) {
+	tests := []struct {
+		name string
+		conf *Config
+		want bool
+	}{
+		{
+			name: "default-linux-program-bootstrap",
+			conf: &Config{Goos: "linux", EnableCoroProgramBootstrapRun: true},
+			want: true,
+		},
+		{
+			name: "named-linux-target",
+			conf: &Config{Goos: "linux", Target: "nintendoswitch", EnableCoroProgramBootstrapRun: true},
+		},
+		{
+			name: "runtime-adapter",
+			conf: &Config{Goos: "linux", Tags: "coro_runtime_adapter_test", EnableCoroProgramBootstrapRun: true},
+		},
+		{
+			name: "isolated-runtime-compiler-channel",
+			conf: &Config{Goos: "linux", compilerBuildTags: []string{"llgo_coro", coroNativePipeBuildTag}},
+			want: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			tags, err := effectiveBuildTags(test.conf, crosscompile.Export{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := slices.Contains(strings.Split(tags, ","), coroNativePipeBuildTag)
+			if got != test.want {
+				t.Fatalf("effective tags = %q, native capability=%t, want %t", tags, got, test.want)
+			}
+		})
+	}
+}
+
+func TestEffectiveBuildTagsDoesNotMisreadOrdinaryFlagValues(t *testing.T) {
+	conf := &Config{GoBuildFlags: []string{
+		"-gcflags=-tags=" + coroNativePipeBuildTag,
+		"-ldflags=-X=main.tag=" + coroNativePipeBuildTag,
+	}}
+	if _, err := effectiveBuildTags(conf, crosscompile.Export{}); err != nil {
+		t.Fatalf("ordinary non-tag flag value was rejected: %v", err)
+	}
+}
+
+func TestEffectiveBuildTagsMergesGoBuildFlagTags(t *testing.T) {
+	conf := &Config{
+		Goos:                          "linux",
+		EnableCoroProgramBootstrapRun: true,
+		GoBuildFlags: []string{
+			"-mod=mod",
+			"-tags=user_feature_a",
+			"-gcflags=-N",
+			"-tags", "user_feature_b user_feature_c",
+			"--tags=user_feature_d",
+		},
+	}
+	tags, err := effectiveBuildTags(conf, crosscompile.Export{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	effective := strings.Split(tags, ",")
+	for _, want := range []string{"llgo", "llgo_coro", coroNativePipeBuildTag, "user_feature_a", "user_feature_b", "user_feature_c", "user_feature_d"} {
+		if !slices.Contains(effective, want) {
+			t.Fatalf("effective tags = %q, missing %q", tags, want)
+		}
+	}
+	_, other := partitionGoBuildFlags(conf.GoBuildFlags)
+	if want := []string{"-mod=mod", "-gcflags=-N"}; !slices.Equal(other, want) {
+		t.Fatalf("non-tag GoBuildFlags = %v, want %v", other, want)
 	}
 }
 

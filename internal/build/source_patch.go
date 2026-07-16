@@ -231,19 +231,35 @@ func newSourcePatchMatchContext(goroot string, ctx sourcePatchBuildContext) (bui
 }
 
 func parseSourcePatchBuildTags(buildFlags []string) []string {
-	var tags []string
+	tags, _ := partitionGoBuildFlags(buildFlags)
+	return slices.Compact(tags)
+}
+
+// partitionGoBuildFlags extracts the exact single- and double-dash forms
+// understood by the Go command (-tags=value, -tags value, --tags=value, and
+// --tags value) and preserves every other flag in its original order.
+// Build-tag assembly uses the same split so a later user flag cannot replace
+// the compiler-owned tag set. GOFLAGS is outside Config.GoBuildFlags; the
+// explicit compiler -tags argument is later on the command line and wins.
+func partitionGoBuildFlags(buildFlags []string) (tags, other []string) {
 	for i := 0; i < len(buildFlags); i++ {
 		flag := buildFlags[i]
-		if flag == "-tags" && i+1 < len(buildFlags) {
+		if (flag == "-tags" || flag == "--tags") && i+1 < len(buildFlags) {
 			tags = append(tags, splitSourcePatchBuildTags(buildFlags[i+1])...)
 			i++
 			continue
 		}
-		if strings.HasPrefix(flag, "-tags=") {
-			tags = append(tags, splitSourcePatchBuildTags(strings.TrimPrefix(flag, "-tags="))...)
+		if value, ok := strings.CutPrefix(flag, "-tags="); ok {
+			tags = append(tags, splitSourcePatchBuildTags(value)...)
+			continue
 		}
+		if value, ok := strings.CutPrefix(flag, "--tags="); ok {
+			tags = append(tags, splitSourcePatchBuildTags(value)...)
+			continue
+		}
+		other = append(other, flag)
 	}
-	return slices.Compact(tags)
+	return tags, other
 }
 
 func splitSourcePatchBuildTags(s string) []string {

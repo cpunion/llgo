@@ -33,6 +33,7 @@ func TestCoroNativeTargetBuildSelection(t *testing.T) {
 		goarch     string
 		tags       string
 		native     bool
+		adapter    bool
 		doorbellOK bool
 	}{
 		{name: "linux-amd64-llgo", goos: "linux", goarch: "amd64", tags: "llgo,llgo_coro,llgo_coro_native_pipe,nogc", native: true, doorbellOK: true},
@@ -41,6 +42,7 @@ func TestCoroNativeTargetBuildSelection(t *testing.T) {
 		{name: "host-go-fallback", goos: "linux", goarch: "amd64", tags: "llgo_coro,nogc"},
 		{name: "js-wasm-fallback", goos: "js", goarch: "wasm", tags: "llgo,llgo_coro,nogc"},
 		{name: "baremetal-fallback", goos: "linux", goarch: "arm", tags: "llgo,llgo_coro,llgo_coro_native_pipe,nogc,baremetal,cortexm"},
+		{name: "runtime-adapter-overrides-native", goos: "linux", goarch: "amd64", tags: "llgo,llgo_coro,llgo_coro_native_pipe,nogc,coro_runtime_adapter_test", adapter: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -59,8 +61,9 @@ func TestCoroNativeTargetBuildSelection(t *testing.T) {
 			}
 			native := slices.Contains(pkg.GoFiles, "coro_target_native_llgo.go")
 			fallback := slices.Contains(pkg.GoFiles, "coro_target_none.go")
-			if native != test.native || fallback == test.native {
-				t.Fatalf("GoFiles = %v, native=%t fallback=%t", pkg.GoFiles, native, fallback)
+			adapter := slices.Contains(pkg.GoFiles, "coro_target_test_adapter.go")
+			if native != test.native || adapter != test.adapter || fallback != (!test.native && !test.adapter) {
+				t.Fatalf("GoFiles = %v, native=%t adapter=%t fallback=%t", pkg.GoFiles, native, adapter, fallback)
 			}
 			const doorbell = "github.com/goplus/llgo/runtime/internal/corodoorbell"
 			if imported := slices.Contains(pkg.Imports, doorbell); imported != test.doorbellOK {
