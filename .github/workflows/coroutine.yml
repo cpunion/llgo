@@ -59,14 +59,14 @@ jobs:
             ./internal/runtime/coro_program.go \
             ./internal/runtime/coro_sched.go \
             ./internal/runtime/coro_program_test.go \
-            -run '^TestCoroProgram(V1|V2)' -count=1
+            -run '^TestCoroProgram' -count=1
           GOOS=js GOARCH=wasm CGO_ENABLED=0 go test \
             -tags=coro_runtime_adapter_test \
             -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" \
             ./internal/runtime/coro_program.go \
             ./internal/runtime/coro_sched.go \
             ./internal/runtime/coro_program_test.go \
-            -run '^TestCoroProgram(V1|V2)' -count=1
+            -run '^TestCoroProgram' -count=1
 
       - name: Link named freestanding WebAssembly targets
         if: matrix.llvm == 19 && matrix.go == '1.24.2'

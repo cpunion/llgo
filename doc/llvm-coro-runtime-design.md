@@ -1778,7 +1778,7 @@ Pure sync library/archive不需要链接scheduler。Executable一旦选择 `-sch
 
 验收：纯 sync chain 只有 `F`；纯 async chain 只有 `F$coro`；动态 escape 才出现 descriptor/adapter；所有 `go` root和可挂起call都以LLVM-coro frame表示。
 
-当前落地状态（2026-07-16，实验 physical ABI v0/v1；scheduler ABI `llgo.coro.scheduler.program-bootstrap.v2`）：
+当前落地状态（2026-07-16，实验 physical ABI v0/v1；scheduler ABI 已扩展到 `llgo.coro.scheduler.program-bootstrap.v2.closed-static-spawn.v0`）：
 
 - 全程序 SSA 的 Effect、Demand、FuncRep、稳定 FunctionID、精确 emission universe、单 primary symbol 选择和 `CoroPlanDigest` 已落地。明确 plain 或 coro 的函数仍只有一个主体；仅真正动态的 func/`any`/interface consumer 才进入 descriptor/dispatch。缺失、过期或目标布局不匹配的计划与 cache manifest 均 fail closed。
 - LLGo 已固定使用 `cpunion/llvm` PR #5 的 LLVM 19–22 绑定。该分支吸收上游 LLVM 22 的完整 switch API 变更，并保留 LLGo 所需的 switched-resume builder/CoroSplit API；19、20、21、22 CI 均通过。LLGo 不再覆盖 LLVM 19 以下版本。
@@ -1789,14 +1789,16 @@ Pure sync library/archive不需要链接scheduler。Executable一旦选择 `-sch
 - frozen foreign `//llgo:coro noblock` certificate 当前只授予已审计的 `time`、`pthread_self`、`pthread_mutex_init` 和 `pthread_mutex_unlock`。证书只移除未知阻塞，`IRQUnsafe` 仍保留但允许在普通 G 上执行。真实 runtime init 仍被 `pthread_key_create`、`rand`/`srand`、`GC_malloc`、mutex lock、Memcpy/Memset 等未完成边界挡住。
 - legacy PanicABI 仍是完整启动链的正式 blocker。exact proof 可追踪 `runtime.Panic → Rethrow → TracePanic → printany`，并在动态 `error.Error` 调用处停止；这里必须落地 non-legacy task-local PanicABI/descriptor dispatch，不能把动态调用误标为 plain。
 - 多基本块 CFG、聚合值、PHI 和抢占 lowering 已完成。自然循环、循环入口及每 64 条有效指令的长直线块插入 poll；scheduler 的 P 级原子 request 只有在 slow path 才执行 publish/yield/`llvm.coro.suspend`，fast path 不切换。LLVM 19–22 上均有 native64/wasm32 pre-/post-CoroSplit 与 object 测试。
+- 第一条 production `go` 路径已经落地：严格限定为 closed static、top-level、非捕获、非泛型、非变参、零返回的 `go f(args)`。编译器先按 Go 顺序完整求值参数，再以显式 parent G 执行 begin，调用 target 唯一的 `DirectCoro` primary 到 LLVM initial suspend，commit 后在 parent 上 poll/yield；runtime 不接收用户 callback，也不依赖 TLS。owner 与 target 都由精确 `YieldOnly` seed 进入 effect 传播，因此 target 即使当前很短也保留抢占点，普通同步 caller 则透明 await 同一主体。
+- Command `main` 的正常 continuation 现在显式通知 runtime。main root 完成后，single-P shutdown 先整体校验 ready/wait/current/action 状态，再封闭调度 gate，按 FIFO 取 ready G、按 active-child 到 root 顺序直接 `llvm.coro.destroy`，最后每个 task storage 只释放一次。该 v1 路径只接收 `YieldOnly|AwaitStructured` target 且拒绝非空 wait set；panic/Goexit 不经过正常 main-return hook。
 - park/wake handshake 已落地 32-bit 原子 `WaitToken`、generation ticket、early/late completion、唯一 waiter claim、ABA 范围校验及 terminal gate。精确 intrinsic `llgo.coroPark(token, ticket)` 被 Effect 分析识别为 `MayPark`，并在调用者当前 LLVM frame 中生成 park prepare、stateID、`coro.suspend` 和恢复路径；没有隐藏在普通同步 helper 中。channel/timer/syscall 的 submit/retry producer 尚未接入。
 - wait/preempt core 要求目标提供可靠的 32-bit atomic load/store/CAS。WASM 可直接满足；带 A 扩展的 RISC-V 可满足；ESP32-C3 RV32IMC 当前会在链接时缺少 `__atomic_*_4`，直到平台用 IRQ critical section 提供单核适配。这里故意不使用非原子 fallback。
 - `wasip1`、`wasip2` 和 `wasm-unknown` 明确选择 leaking/nogc frame backend，不依赖 libuv 或 BDWGC。`wasip2` 与 `wasm-unknown` 已通过真实 `llgo build -target=...`、wasm magic/symbol closure、无 `GC_*`/undefined 检查，并由 wasmtime 运行返回 0。当前 `wasip2` 产物是 Preview 2 目标的 core module，尚不是 WIT component。
 - frame allocator 已有 conservative BDWGC、nogc/WASM malloc 和 tinygogc/baremetal 后端。跨 suspend 的 pointer 目前只在 conservative 或 non-collecting 配置下安全；精确 frame root map、write barrier、STW、weak timer/finalizer 与 cleanup 语义尚未实现，不能据此宣称完整 Go GC 兼容。
-- deterministic single-P runtime 已能管理多个 frame、ready queue、preempt request、park/wake 和 terminal idle/requested/disabled 状态，但 production program 目前仍只有静态 bootstrap G。尚无 `go` spawn/newG、真实 tick/alarm request source、channel/select/sync slow path、timer/netpoll、异步 syscall submit/retry、task-local panic/defer/recover/Goexit 或多 P。
+- deterministic single-P runtime 已能管理多个 frame、ready queue、preempt request、park/wake、closed-static spawned G、正常 main-return ready-child cancellation 和 terminal idle/requested/stopping/disabled 状态。尚无动态/closure/method `go` target、等待中 G 的 producer 解注册与取消、真实 tick/alarm request source、channel/select/sync slow path、timer/netpoll、异步 syscall submit/retry、task-local panic/defer/recover/Goexit 或多 P。
 - 完整真实 `entry → allocator → v2 factory → runtime/package init → main → scheduler` linked smoke 仍受上述 runtime/Panic/foreign blockers 限制；现有 runtime adapter 测试和 freestanding wasm CLI fixture 分别证明 scheduler ABI 与目标链接，不能合并表述为完整 Go runtime 已经端到端运行。
 - 当前 cache digest 只解决同一完整程序计划下的内部 package cache；未知未来 caller 可复用的预编译 archive/标准库仍需 producer summary、canonical boundary Dispatch 和 linker ABI 校验。
-- 后续依赖顺序是：closed static `go f(args)`/newG 与真实 platform request source；随后接 channel/timer/syscall producer 并跑完整 linked smoke；并行实现 non-legacy PanicABI；再补 suspended-frame GC、defer/recover/Goexit、多 P 与各 target event backend。所有阶段保持无栈、单 primary 和未证明即 fail closed。
+- 后续依赖顺序是：先解除完整 runtime 链的 non-legacy PanicABI/动态 `error.Error` blocker，并为 WaitToken 增加可注销、可静默迟到 completion 的稳定 registration；再接真实 platform request source 与 channel/timer/syscall producer并跑完整 linked smoke；随后补 suspended-frame GC、defer/recover/Goexit、多 P 与各 target event backend。动态/closure/method `go` target只在 canonical descriptor transport 完成后开启。所有阶段保持无栈、单 primary 和未证明即 fail closed。
 
 ### Phase 1：单 P deterministic scheduler
 
