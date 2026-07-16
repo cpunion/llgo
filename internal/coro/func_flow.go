@@ -161,6 +161,7 @@ type ssaFuncFlow struct {
 	canonicalizer     *ssaFunctionCanonicalizer
 	directPlainArgs   map[ssaCallArgumentUse]struct{}
 	directPlainOrder  []ssaCallArgumentUse
+	closedValues      map[ssa.Value]SSAClosedDynamicCallCertificate
 }
 
 type ssaCallArgumentUse struct {
@@ -176,6 +177,7 @@ func analyzeSSAFunctionFlow(
 	dynamicResolution DynamicResolution,
 	canonicalizer *ssaFunctionCanonicalizer,
 	directPlainArgs []ssaCallArgumentUse,
+	closedDynamicCalls map[ssa.CallInstruction]SSAClosedDynamicCallCertificate,
 ) (*ssaFuncFlow, error) {
 	directPlainSet := make(map[ssaCallArgumentUse]struct{}, len(directPlainArgs))
 	for _, use := range directPlainArgs {
@@ -192,6 +194,20 @@ func analyzeSSAFunctionFlow(
 		canonicalizer:     canonicalizer,
 		directPlainArgs:   directPlainSet,
 		directPlainOrder:  append([]ssaCallArgumentUse(nil), directPlainArgs...),
+		closedValues:      make(map[ssa.Value]SSAClosedDynamicCallCertificate, len(closedDynamicCalls)),
+	}
+	for call, certificate := range closedDynamicCalls {
+		value := call.Common().Value
+		if previous, exists := flow.closedValues[value]; exists {
+			if !sameSSAClosedDynamicCallCertificate(previous, certificate) {
+				return nil, fmt.Errorf("conflicting closed dynamic call certificates for callee value in %q", call.Parent().Name())
+			}
+			continue
+		}
+		flow.closedValues[value] = SSAClosedDynamicCallCertificate{
+			Targets:  append([]*ssa.Function(nil), certificate.Targets...),
+			MayBeNil: certificate.MayBeNil,
+		}
 	}
 
 	for _, fn := range functions {
@@ -255,6 +271,20 @@ func analyzeSSAFunctionFlow(
 		if !isScalarFuncType(value.Type()) {
 			continue
 		}
+		if certificate, certified := flow.closedValues[value]; certified {
+			for _, target := range certificate.Targets {
+				if err := flow.addTarget(value, target); err != nil {
+					return nil, fmt.Errorf("resolve certified function-value target %q: %w", target.Name(), err)
+				}
+			}
+			if certificate.MayBeNil {
+				flow.markMayBeNil(value)
+			}
+			// The proof closes the target set, not the physical representation:
+			// this value crossed canonical storage and must retain Dispatch.
+			flow.markBoundary(value)
+			continue
+		}
 		switch value := value.(type) {
 		case *ssa.Function:
 			if err := flow.addTarget(value, value); err != nil {
@@ -301,6 +331,18 @@ func analyzeSSAFunctionFlow(
 		}
 	}
 	return flow, nil
+}
+
+func sameSSAClosedDynamicCallCertificate(left, right SSAClosedDynamicCallCertificate) bool {
+	if left.MayBeNil != right.MayBeNil || len(left.Targets) != len(right.Targets) {
+		return false
+	}
+	for i := range left.Targets {
+		if left.Targets[i] != right.Targets[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (f *ssaFuncFlow) recordValue(value ssa.Value) {

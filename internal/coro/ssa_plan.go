@@ -101,6 +101,20 @@ type SSAFunctionPolicy struct {
 // refer to the replaced SSA declaration.
 type SSAFunctionResolver func(fn *ssa.Function) (canonical *ssa.Function, ok bool, err error)
 
+// SSAClosedDynamicCallCertificate is a trusted frontend proof for one exact
+// ordinary dynamic call. V0 intentionally accepts at most one non-nil target:
+// the narrow form is sufficient for fields whose whole-program writes are
+// proven to contain either nil or one descriptor-backed function value.
+//
+// Targets is copied and validated before analysis. An empty Targets slice is a
+// closed nil-only value and therefore requires MayBeNil. A singleton may be
+// either nullable or non-null. The target must be an exact canonical, owned Go
+// body in the effective emission universe with the call's exact signature.
+type SSAClosedDynamicCallCertificate struct {
+	Targets  []*ssa.Function
+	MayBeNil bool
+}
+
 // SSAConfig controls the SSA-to-Graph analysis bridge. It deliberately has no
 // lowering or runtime switches.
 type SSAConfig struct {
@@ -165,6 +179,19 @@ type SSAConfig struct {
 	// arguments. Frontends should reserve it for source-level ABI facts such as
 	// a named //llgo:type C callback parameter.
 	ClassifyDirectPlainCallArgument func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error)
+
+	// ClassifyClosedDynamicCall supplies a frozen whole-program proof for one
+	// exact ordinary dynamic *ssa.Call whose callee value crosses descriptor
+	// storage but has a closed nil-or-singleton target set. This is not a general
+	// points-to hint: AnalyzeSSA rejects static calls, invokes, go/defer sites,
+	// multiple targets, captured functions, signature mismatches, aliases,
+	// external declarations, and targets outside the effective universe.
+	//
+	// A certified callee remains Dispatch because it crossed canonical storage;
+	// the certificate only closes its graph edge and CallPlan target set. The
+	// callback is trusted to have rejected every unknown physical write or escape
+	// that could reach the exact value loaded at call.
+	ClassifyClosedDynamicCall func(caller *ssa.Function, call ssa.CallInstruction) (SSAClosedDynamicCallCertificate, bool, error)
 }
 
 // SSAFunctionPlan binds an immutable FunctionPlan back to its SSA function.
@@ -593,7 +620,11 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if err != nil {
 		return nil, err
 	}
-	flow, err := analyzeSSAFunctionFlow(bodyFunctions, includedSet, ids, dynamicCandidates, config.DynamicResolution, canonicalizer, directPlainCallArguments)
+	closedDynamicCalls, err := classifySSAClosedDynamicCalls(bodyFunctions, includedSet, bodyFunctionSet, trustedPolicies, canonicalizer, config)
+	if err != nil {
+		return nil, err
+	}
+	flow, err := analyzeSSAFunctionFlow(bodyFunctions, includedSet, ids, dynamicCandidates, config.DynamicResolution, canonicalizer, directPlainCallArguments, closedDynamicCalls)
 	if err != nil {
 		return nil, fmt.Errorf("coro: analyze SSA function-value flow: %w", err)
 	}
@@ -875,6 +906,94 @@ func classifySSADirectPlainCallArguments(functions []*ssa.Function, config SSACo
 					}
 					result = append(result, ssaCallArgumentUse{call: call, argument: argument})
 				}
+			}
+		}
+	}
+	return result, nil
+}
+
+func classifySSAClosedDynamicCalls(
+	functions []*ssa.Function,
+	included map[*ssa.Function]bool,
+	bodyFunctions map[*ssa.Function]bool,
+	policies map[*ssa.Function]SSAFunctionPolicy,
+	canonicalizer *ssaFunctionCanonicalizer,
+	config SSAConfig,
+) (map[ssa.CallInstruction]SSAClosedDynamicCallCertificate, error) {
+	result := make(map[ssa.CallInstruction]SSAClosedDynamicCallCertificate)
+	if config.ClassifyClosedDynamicCall == nil {
+		return result, nil
+	}
+	for _, caller := range functions {
+		for _, block := range caller.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(ssa.CallInstruction)
+				if !ok {
+					continue
+				}
+				certificate, certified, err := config.ClassifyClosedDynamicCall(caller, call)
+				if err != nil {
+					return nil, fmt.Errorf("coro: classify closed dynamic call in %q: %w", caller.Name(), err)
+				}
+				if !certified {
+					if len(certificate.Targets) != 0 || certificate.MayBeNil {
+						return nil, fmt.Errorf("coro: unclassified dynamic call in %q returned non-empty certificate facts", caller.Name())
+					}
+					continue
+				}
+				common := call.Common()
+				if _, direct := call.(*ssa.Call); !direct || common == nil || call.Parent() != caller {
+					return nil, fmt.Errorf("coro: closed dynamic call certificate in %q must identify an exact ordinary *ssa.Call", caller.Name())
+				}
+				if common.StaticCallee() != nil {
+					return nil, fmt.Errorf("coro: closed dynamic call certificate in %q cannot identify a static call", caller.Name())
+				}
+				if common.IsInvoke() {
+					return nil, fmt.Errorf("coro: closed dynamic call certificate in %q cannot identify an interface invoke", caller.Name())
+				}
+				if _, builtin := common.Value.(*ssa.Builtin); builtin || common.Value == nil || !isScalarFuncType(common.Value.Type()) {
+					return nil, fmt.Errorf("coro: closed dynamic call certificate in %q requires a scalar Go function callee", caller.Name())
+				}
+				if len(certificate.Targets) > 1 {
+					return nil, fmt.Errorf("coro: closed dynamic call certificate in %q has %d targets; only nil or one exact target is supported", caller.Name(), len(certificate.Targets))
+				}
+				if len(certificate.Targets) == 0 && !certificate.MayBeNil {
+					return nil, fmt.Errorf("coro: closed dynamic call certificate in %q has neither a target nor nil", caller.Name())
+				}
+
+				cloned := SSAClosedDynamicCallCertificate{MayBeNil: certificate.MayBeNil}
+				if len(certificate.Targets) == 1 {
+					target := certificate.Targets[0]
+					if target == nil {
+						return nil, fmt.Errorf("coro: closed dynamic call certificate in %q has a nil target entry", caller.Name())
+					}
+					if target.Prog != caller.Prog {
+						return nil, fmt.Errorf("coro: closed dynamic call certificate in %q targets function %q from another SSA program", caller.Name(), target.Name())
+					}
+					canonical, resolved, resolveErr := canonicalizer.resolve(target)
+					if resolveErr != nil {
+						return nil, fmt.Errorf("coro: resolve closed dynamic target %q in %q: %w", target.Name(), caller.Name(), resolveErr)
+					}
+					if !resolved || canonical == nil || !included[canonical] {
+						return nil, fmt.Errorf("coro: closed dynamic target %q in %q is outside the effective emission universe", target.Name(), caller.Name())
+					}
+					if canonical != target {
+						return nil, fmt.Errorf("coro: closed dynamic target %q in %q is not the exact canonical function", target.Name(), caller.Name())
+					}
+					policy := policies[target]
+					if !bodyFunctions[target] || len(target.Blocks) == 0 || policy.IgnoreBody || (policy.OverrideExternal && policy.External != Defined) {
+						return nil, fmt.Errorf("coro: closed dynamic target %q in %q must be an owned emitted Go body, not an external target", target.Name(), caller.Name())
+					}
+					if len(target.FreeVars) != 0 {
+						return nil, fmt.Errorf("coro: closed dynamic target %q in %q has %d captured variables", target.Name(), caller.Name(), len(target.FreeVars))
+					}
+					callSignature := common.Signature()
+					if callSignature == nil || target.Signature == nil || !types.Identical(callSignature, target.Signature) {
+						return nil, fmt.Errorf("coro: closed dynamic target %q in %q has signature %v, want %v", target.Name(), caller.Name(), target.Signature, callSignature)
+					}
+					cloned.Targets = []*ssa.Function{target}
+				}
+				result[call] = cloned
 			}
 		}
 	}
