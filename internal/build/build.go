@@ -1989,6 +1989,9 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			coroProgramBeginSymbolV1,
 			coroProgramRunSymbolV1,
 			coroProgramContinueSymbolV1,
+			coroWaitPrepareSymbolV1,
+			coroWaitRollbackSymbolV1,
+			coroWaitRetireCompletedSymbolV1,
 		)
 	}
 	if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
@@ -2065,6 +2068,35 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			for parameter := 0; parameter < sig.Params().Len(); parameter++ {
 				if !types.Identical(sig.Params().At(parameter).Type(), types.Typ[types.Uint32]) {
 					return nil, nil, nil, nil, fmt.Errorf("coroutine native post-wait ABI %q must have exact func(uint32, uint32, uint32, uint32) uint32 signature", name)
+				}
+			}
+		}
+		if name == coroWaitPrepareSymbolV1 {
+			sig := fn.Signature
+			uint32Pointer := types.NewPointer(types.Typ[types.Uint32])
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 6 || sig.Results().Len() != 1 ||
+				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Results().At(0).Type(), types.Typ[types.Bool]) ||
+				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf("coroutine wait prepare ABI %q must have exact func(unsafe.Pointer, *uint32, *uint32, *uint32, *uint32, *uint32) bool signature", name)
+			}
+			for parameter := 1; parameter < sig.Params().Len(); parameter++ {
+				if !types.Identical(sig.Params().At(parameter).Type(), uint32Pointer) {
+					return nil, nil, nil, nil, fmt.Errorf("coroutine wait prepare ABI %q must have exact func(unsafe.Pointer, *uint32, *uint32, *uint32, *uint32, *uint32) bool signature", name)
+				}
+			}
+		}
+		if name == coroWaitRollbackSymbolV1 || name == coroWaitRetireCompletedSymbolV1 {
+			sig := fn.Signature
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 4 || sig.Results().Len() != 1 ||
+				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Results().At(0).Type(), types.Typ[types.Bool]) ||
+				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf("coroutine wait owner ABI %q must have exact func(unsafe.Pointer, uint32, uint32, uint32) bool signature", name)
+			}
+			for parameter := 1; parameter < sig.Params().Len(); parameter++ {
+				if !types.Identical(sig.Params().At(parameter).Type(), types.Typ[types.Uint32]) {
+					return nil, nil, nil, nil, fmt.Errorf("coroutine wait owner ABI %q must have exact func(unsafe.Pointer, uint32, uint32, uint32) bool signature", name)
 				}
 			}
 		}

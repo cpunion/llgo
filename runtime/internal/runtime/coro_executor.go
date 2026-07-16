@@ -16,7 +16,11 @@
 
 package runtime
 
-import "github.com/goplus/llgo/runtime/internal/coro"
+import (
+	"unsafe"
+
+	"github.com/goplus/llgo/runtime/internal/coro"
+)
 
 // The first production runner owns one statically addressed executor domain.
 // Platform callback ABIs retain only coroProgramExecutorHandleV1State and wait
@@ -72,4 +76,96 @@ func coroProgramExecutorRetiredV1() bool {
 	coroProgramExecutorBoundV1State = false
 	coroProgramExecutorHandleV1State = coro.ExecutorHandle{}
 	return true
+}
+
+func coroProgramPrepareWaitV1(token *coro.WaitToken) (coro.WaitTicket, coro.WaitRegistrationHandle, coro.ExecutorHandle, coro.WaitRegistrationPrepareResult) {
+	if !coroProgramExecutorBoundV1State || token == nil ||
+		coroProgramExecutorHandleV1State == (coro.ExecutorHandle{}) {
+		return 0, coro.WaitRegistrationHandle{}, coro.ExecutorHandle{}, coro.WaitRegistrationPrepareInvalid
+	}
+	ticket, wait, result := coro.PrepareExecutorWaitRegistration(
+		&coroProgramExecutorDriverV1State,
+		token,
+	)
+	if result != coro.WaitRegistrationPrepared {
+		return 0, coro.WaitRegistrationHandle{}, coro.ExecutorHandle{}, result
+	}
+	return ticket, wait, coroProgramExecutorHandleV1State, result
+}
+
+func coroProgramRollbackWaitV1(token *coro.WaitToken, ticket coro.WaitTicket, wait coro.WaitRegistrationHandle) bool {
+	return coroProgramExecutorBoundV1State && token != nil &&
+		coro.RollbackExecutorWaitRegistration(&coroProgramExecutorDriverV1State, token, ticket, wait)
+}
+
+func coroProgramRetireCompletedWaitV1(token *coro.WaitToken, ticket coro.WaitTicket, wait coro.WaitRegistrationHandle) bool {
+	return coroProgramExecutorBoundV1State && token != nil &&
+		coro.RetireCompletedExecutorWait(&coroProgramExecutorDriverV1State, token, ticket, wait)
+}
+
+func validCoroWaitOutputWordsV1(token unsafe.Pointer, ticket, waitSlot, waitGeneration, executorSlot, executorGeneration *uint32) bool {
+	return token != nil && ticket != nil && waitSlot != nil && waitGeneration != nil && executorSlot != nil && executorGeneration != nil &&
+		unsafe.Pointer(ticket) != token && unsafe.Pointer(waitSlot) != token && unsafe.Pointer(waitGeneration) != token &&
+		unsafe.Pointer(executorSlot) != token && unsafe.Pointer(executorGeneration) != token &&
+		ticket != waitSlot && ticket != waitGeneration && ticket != executorSlot && ticket != executorGeneration &&
+		waitSlot != waitGeneration && waitSlot != executorSlot && waitSlot != executorGeneration &&
+		waitGeneration != executorSlot && waitGeneration != executorGeneration && executorSlot != executorGeneration
+}
+
+// __llgo_coro_wait_prepare_v1 is the bounded owner-side half of platform wait
+// submission. It atomically pairs a fresh token ticket with one durable wait
+// registration and returns only the ticket plus the four POD words that a
+// producer may retain. If registration fails after ArmWait, the unpublished
+// ticket is rolled back to a consumed cancellation and remains safely reusable.
+//
+//export __llgo_coro_wait_prepare_v1
+func __llgo_coro_wait_prepare_v1(token unsafe.Pointer, ticket, waitSlot, waitGeneration, executorSlot, executorGeneration *uint32) bool {
+	if !validCoroWaitOutputWordsV1(token, ticket, waitSlot, waitGeneration, executorSlot, executorGeneration) {
+		return false
+	}
+	*ticket = 0
+	*waitSlot = 0
+	*waitGeneration = 0
+	*executorSlot = 0
+	*executorGeneration = 0
+	preparedTicket, wait, executor, result := coroProgramPrepareWaitV1((*coro.WaitToken)(token))
+	if result == coro.WaitRegistrationPreparePoisoned {
+		coroRuntimeAbort("coroutine wait prepare rollback failed")
+		return false
+	}
+	if result != coro.WaitRegistrationPrepared {
+		return false
+	}
+	*ticket = uint32(preparedTicket)
+	*waitSlot = wait.Slot
+	*waitGeneration = wait.Generation
+	*executorSlot = executor.Slot
+	*executorGeneration = executor.Generation
+	return true
+}
+
+// __llgo_coro_wait_rollback_v1 is used only when an operation submission
+// failed before it could start a callback and the caller has proved that
+// source quiesced. It is invalid after coroPark or producer publication.
+//
+//export __llgo_coro_wait_rollback_v1
+func __llgo_coro_wait_rollback_v1(token unsafe.Pointer, ticket, waitSlot, waitGeneration uint32) bool {
+	return token != nil && coroProgramRollbackWaitV1(
+		(*coro.WaitToken)(token),
+		coro.WaitTicket(ticket),
+		coro.WaitRegistrationHandle{Slot: waitSlot, Generation: waitGeneration},
+	)
+}
+
+// __llgo_coro_wait_retire_completed_v1 releases a delivered registration only
+// after its synchronous-style continuation has resumed and strongly joined or
+// unregistered the external source that knew the POD handle.
+//
+//export __llgo_coro_wait_retire_completed_v1
+func __llgo_coro_wait_retire_completed_v1(token unsafe.Pointer, ticket, waitSlot, waitGeneration uint32) bool {
+	return token != nil && coroProgramRetireCompletedWaitV1(
+		(*coro.WaitToken)(token),
+		coro.WaitTicket(ticket),
+		coro.WaitRegistrationHandle{Slot: waitSlot, Generation: waitGeneration},
+	)
 }

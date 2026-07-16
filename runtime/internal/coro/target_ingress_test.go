@@ -24,7 +24,7 @@ import (
 
 func TestTargetIngressStrongSealJoinsWholeShim(t *testing.T) {
 	var ingress TargetIngress
-	if !ingress.CanReleaseResources() || !ingress.Start() || ingress.CanReleaseResources() {
+	if !ingress.CanReleaseResources() || ingress.Retired() || !ingress.Start() || ingress.CanReleaseResources() || ingress.Retired() {
 		t.Fatal("start target ingress")
 	}
 
@@ -62,7 +62,8 @@ func TestTargetIngressStrongSealJoinsWholeShim(t *testing.T) {
 			t.Fatalf("sealed producer release = %v", result)
 		}
 	}
-	if !ingress.Quiesced() || !ingress.Retire() || !ingress.CanReleaseResources() || ingress.Enter() || ingress.Start() {
+	if !ingress.Quiesced() || ingress.Retired() || !ingress.Retire() || !ingress.Retired() ||
+		!ingress.CanReleaseResources() || ingress.Enter() || ingress.Start() {
 		t.Fatal("strongly joined ingress did not retire permanently")
 	}
 }

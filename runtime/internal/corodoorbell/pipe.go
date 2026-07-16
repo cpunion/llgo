@@ -156,6 +156,13 @@ func (pipe *Pipe) WaitBounded(timeoutMS int32) (woke, ok bool) {
 		return drained, drained
 	}
 	for {
+		// The test-only hook linearizes a producer after the pending recheck
+		// and immediately before the real poll syscall. Production builds use
+		// an empty implementation. This exact placement exercises the retained
+		// CommitSleep-to-poll window without timing guesses.
+		if nativeBeforePollHookEnabled && !nativeBeforePollHook() {
+			return false, false
+		}
 		result, revents, errno := nativePipePoll(pipe.readFD, timeoutMS)
 		switch {
 		case result < 0 && nativeErrInterrupted(errno):
