@@ -188,13 +188,14 @@ func newCoroProgramTestFrameV1(t *testing.T, g *coro.G) *coroProgramTestFrameV1 
 }
 
 type coroProgramTestDriverV1 struct {
-	t             *testing.T
-	frame         *coroProgramTestFrameV1
-	doneCalls     int
-	resumeCalls   int
-	destroyCalls  int
-	completeReady bool
-	released      bool
+	t                        *testing.T
+	frame                    *coroProgramTestFrameV1
+	doneCalls                int
+	resumeCalls              int
+	destroyCalls             int
+	completeReady            bool
+	released                 bool
+	requestScheduleOnDestroy bool
 }
 
 var activeCoroProgramDriver *coroProgramTestDriverV1
@@ -213,6 +214,15 @@ var testCoroAllocatorBootstrapState uint8
 // non-returning stand-in. Valid test paths never call it.
 func coroRuntimeAbort(message string) {
 	panic(message)
+}
+
+// The named-source adapter test exercises only the static bootstrap G and does
+// not link the target allocator backend. Keep the ActionComplete ownership
+// check real while avoiding a reference to the production physical free hook.
+// Spawn/task-storage tests live in runtime/internal/coro.
+func coroReleaseCompletedTask(g *coroG) bool {
+	owned, ok := coro.TaskStorageOwned(g)
+	return ok && !owned
 }
 
 func (driver *coroProgramTestDriverV1) requireHandle(handle unsafe.Pointer) {
@@ -263,6 +273,9 @@ func (driver *coroProgramTestDriverV1) destroy(handle unsafe.Pointer) {
 		driver.t.Fatalf("release simulated coroutine frame = (%p, %d, %t), want (%p, %d, true)", raw, total, ok, frame.raw, frame.total)
 	}
 	driver.released = true
+	if driver.requestScheduleOnDestroy && !coro.RequestSchedule(&coroProgramPV1State) {
+		driver.t.Fatal("request terminal schedule retry")
+	}
 }
 
 func resetCoroProgramTestStateV1(t *testing.T) {
@@ -339,6 +352,34 @@ func TestCoroProgramV2BeginRunAndDestroy(t *testing.T) {
 	}
 	if driver.doneCalls != 2 || driver.resumeCalls != 1 || driver.destroyCalls != 1 || !driver.released {
 		t.Fatalf("coroutine v2 wrapper calls = done:%d resume:%d destroy:%d released:%t", driver.doneCalls, driver.resumeCalls, driver.destroyCalls, driver.released)
+	}
+	runtime.KeepAlive(frame.memory)
+	runtime.KeepAlive(manifest)
+}
+
+func TestCoroProgramTerminalScheduleRetryDoesNotRedestroy(t *testing.T) {
+	resetCoroProgramTestStateV1(t)
+	manifest := newCoroProgramTestManifestV1()
+	factory := unsafe.Pointer(&manifest.factoryMarker)
+
+	gPointer, ok := coroProgramBeginV1(unsafe.Pointer(&manifest.manifest), factory)
+	if !ok {
+		t.Fatal("begin terminal-retry coroutine program")
+	}
+	frame := newCoroProgramTestFrameV1(t, &coroProgramGV1State)
+	driver := &coroProgramTestDriverV1{
+		t:                        t,
+		frame:                    frame,
+		requestScheduleOnDestroy: true,
+	}
+	activeCoroProgramDriver = driver
+	if !coroProgramRunV1(gPointer, frame.handle) {
+		t.Fatal("terminal schedule request was treated as corruption")
+	}
+	if driver.destroyCalls != 1 || !driver.released ||
+		coroProgramLifecycleV1State != coroProgramCompleteV1 ||
+		!coro.TerminalG(&coroProgramPV1State, &coroProgramGV1State) {
+		t.Fatalf("terminal retry = destroys:%d released:%t lifecycle:%d", driver.destroyCalls, driver.released, coroProgramLifecycleV1State)
 	}
 	runtime.KeepAlive(frame.memory)
 	runtime.KeepAlive(manifest)

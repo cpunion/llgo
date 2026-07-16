@@ -513,7 +513,7 @@ func TestTerminalDisableLinearizesWithLateScheduleRequest(t *testing.T) {
 				task.g.state != GDispatching || p.current != task.g || p.action != action {
 				t.Fatalf("iteration %d: request won race but terminal partially committed: request=%t gate=%d state=%d", iteration, requestOK, preemptLoad(&p.schedule), task.g.state)
 			}
-			if !preemptCompareAndSwap(&p.schedule, scheduleRequested, scheduleIdle) {
+			if !AcknowledgeTerminalSchedule(p, task.g, action) {
 				t.Fatalf("iteration %d: acknowledge winning late request", iteration)
 			}
 			terminalAction, terminalOK = Destroyed(p, task.g, action)

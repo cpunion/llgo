@@ -59,7 +59,7 @@ func coroRunG(p *coroP, g *coroG) bool {
 	return coroRunActions(p, g, action)
 }
 
-func coroRun(p *coroP) bool {
+func coroRun(p *coroP, main *coroG) bool {
 	for {
 		g, ok := coro.NextRunnable(p)
 		if !ok {
@@ -73,6 +73,12 @@ func coroRun(p *coroP) bool {
 		if !coroRunG(p, g) {
 			return false
 		}
+		if g == main && coro.DeadG(main) {
+			// Command main must not drain background goroutines after returning.
+			// Until the runtime can cancel every ready/suspended child safely, only
+			// a fully terminal P is a supported main-return state.
+			return coro.TerminalG(p, main)
+		}
 	}
 }
 
@@ -83,7 +89,9 @@ func coroRunActions(p *coroP, g *coroG, action coro.Action) bool {
 	for {
 		var ok bool
 		switch action.Kind {
-		case coro.ActionComplete, coro.ActionYield, coro.ActionPark:
+		case coro.ActionComplete:
+			return coroReleaseCompletedTask(g)
+		case coro.ActionYield, coro.ActionPark:
 			return true
 		case coro.ActionCheckResume, coro.ActionCheckDestroy:
 			action, ok = coro.Checked(p, g, action, coroHandleDone(action.Handle))
@@ -92,7 +100,19 @@ func coroRunActions(p *coroP, g *coroG, action coro.Action) bool {
 			action, ok = coro.Resumed(p, g, action)
 		case coro.ActionDestroy:
 			coroHandleDestroy(action.Handle)
-			action, ok = coro.Destroyed(p, g, action)
+			for {
+				next, committed := coro.Destroyed(p, g, action)
+				if committed {
+					action, ok = next, true
+					break
+				}
+				if !coro.AcknowledgeTerminalSchedule(p, g, action) {
+					ok = false
+					break
+				}
+				// Retry only the scheduler commit. The LLVM handle was already
+				// destroyed exactly once before entering this loop.
+			}
 		default:
 			return false
 		}

@@ -36,6 +36,19 @@ type HeaderV1 struct {
 	Flags          uint32
 }
 
+// FrameDescriptorV1 is the runtime prefix emitted for every physical
+// coroutine frame. SpawnCommit currently admits only zero-result goroutine
+// roots, so it validates this descriptor instead of trusting a nil result
+// slot alone.
+type FrameDescriptorV1 struct {
+	Version     uint32
+	Flags       uint32
+	HashLo      uint64
+	HashHi      uint64
+	ResultSize  uintptr
+	ResultAlign uintptr
+}
+
 // SuspendReason describes why a coroutine returned control to its scheduler.
 type SuspendReason uint16
 
@@ -240,7 +253,7 @@ func PublishFrame(g *G, handle unsafe.Pointer, header *HeaderV1, storage unsafe.
 // coroutine; only the runtime driver may perform handle operations requested
 // by the scheduler action protocol.
 func PrepareAwait(g *G, parentHandle, childHandle unsafe.Pointer) bool {
-	if !ValidG(g) || g.pending.kind != pendingNone {
+	if !ValidG(g) || g.pending.kind != pendingNone || g.spawnChild != nil {
 		return false
 	}
 	parent := findFrame(g, parentHandle)
@@ -260,7 +273,7 @@ func PrepareAwait(g *G, parentHandle, childHandle unsafe.Pointer) bool {
 // PrepareComplete records a final-suspended frame. Destruction remains owned
 // by the scheduler and occurs only after the resume operation returns.
 func PrepareComplete(g *G, handle unsafe.Pointer, header *HeaderV1) bool {
-	if !ValidG(g) || handle == nil || header == nil || g.pending.kind != pendingNone {
+	if !ValidG(g) || handle == nil || header == nil || g.pending.kind != pendingNone || g.spawnChild != nil {
 		return false
 	}
 	frame := findFrame(g, handle)
@@ -278,7 +291,7 @@ func PrepareComplete(g *G, handle unsafe.Pointer, header *HeaderV1) bool {
 // handle remain owned by g; Resumed commits the transition only after the
 // direct llvm.coro.resume wrapper has returned to the scheduler.
 func PrepareYield(g *G, handle unsafe.Pointer, header *HeaderV1) bool {
-	if !ValidG(g) || handle == nil || header == nil || g.pending.kind != pendingNone {
+	if !ValidG(g) || handle == nil || header == nil || g.pending.kind != pendingNone || g.spawnChild != nil {
 		return false
 	}
 	frame := findFrame(g, handle)
@@ -297,7 +310,7 @@ func PrepareYield(g *G, handle unsafe.Pointer, header *HeaderV1) bool {
 // coroutine hooks, the transition is committed only after llvm.coro.resume
 // returns to Resumed on the scheduler stack.
 func PreparePark(g *G, handle unsafe.Pointer, header *HeaderV1, token *WaitToken, ticket WaitTicket) bool {
-	if !ValidG(g) || handle == nil || header == nil || g.pending.kind != pendingNone ||
+	if !ValidG(g) || handle == nil || header == nil || g.pending.kind != pendingNone || g.spawnChild != nil ||
 		g.waitToken != nil || g.waitTicket != 0 || g.waiting || g.nextWait != nil {
 		return false
 	}

@@ -50,6 +50,20 @@ type G struct {
 	// runP is scheduler-thread-only. An asynchronous producer requests a
 	// reschedule through P's atomic gate and never reads this pointer.
 	runP *P
+
+	// spawnChild is non-nil only while this running G owns a begin/commit spawn
+	// transaction. The child remains reachable through the current P's root G
+	// while its initial-suspended root frame is being created.
+	spawnChild  *G
+	spawnParent *G
+	spawnP      *P
+
+	// taskStorage owns the separately allocated scheduler G for a spawned
+	// goroutine. Static bootstrap Gs leave these fields zero. Target allocators
+	// must provide scanned/root memory whenever a collector is enabled.
+	taskStorage unsafe.Pointer
+	taskSize    uintptr
+	taskState   taskStorageState
 }
 
 const (
@@ -137,7 +151,9 @@ func InitG(g *G) bool {
 	if g == nil || g.magic != 0 || preemptLoad(preemptAddress(g)) != preemptDisabled || g.state != GNew || g.frames != nil || g.active != nil || g.root != nil ||
 		g.pending.kind != pendingNone || g.pending.from != nil || g.pending.target != nil || g.pending.wait != nil || g.pending.ticket != 0 ||
 		g.destroyTarget != nil || g.destroyRoot || g.nextReady != nil || g.queued ||
-		g.waitToken != nil || g.waitTicket != 0 || g.nextWait != nil || g.waiting || g.runP != nil {
+		g.waitToken != nil || g.waitTicket != 0 || g.nextWait != nil || g.waiting || g.runP != nil ||
+		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
+		g.taskStorage != nil || g.taskSize != 0 || g.taskState != taskStorageStatic {
 		return false
 	}
 	g.magic = gMagic
@@ -153,6 +169,12 @@ func InitG(g *G) bool {
 // frame-chain transitions are non-atomic and remain confined to the scheduler
 // thread. InitG enables the gate only after initialization, and terminal root
 // destruction disables it so a late requester cannot resurrect residual state.
+//
+// A dynamically allocated G is not a stable asynchronous handle. Compiler
+// safepoints and the scheduler may call RequestPreempt while they synchronously
+// own that G; platform/event producers must retain the stable P instead and use
+// RequestSchedule. This lifetime rule is what makes per-G task reclamation safe
+// without a per-request heap reference or epoch protocol.
 func RequestPreempt(g *G) bool {
 	if g == nil {
 		return false
@@ -181,7 +203,7 @@ func PollPreempt(g *G) bool {
 		g.active.owner != g || g.active.handle == nil || g.active.header == nil ||
 		g.active.state != FrameActive || g.active.header.G != unsafe.Pointer(g) ||
 		g.active.header.SuspendReason != uint16(SuspendNone) ||
-		g.active.header.Lifecycle != uint16(FrameActive) || g.pending.kind != pendingNone {
+		g.active.header.Lifecycle != uint16(FrameActive) || g.pending.kind != pendingNone || g.spawnChild != nil {
 		return false
 	}
 	requested := preemptCompareAndSwap(preemptAddress(g), preemptRequested, preemptIdle)
@@ -244,7 +266,8 @@ func AdoptRoot(g *G, handle unsafe.Pointer) bool {
 // Enqueue appends a runnable G to p exactly once.
 func Enqueue(p *P, g *G) bool {
 	if p == nil || !ValidG(g) || g.state != GRunnable || g.queued || g.nextReady != nil ||
-		g.waiting || g.nextWait != nil || g.waitToken != nil || g.waitTicket != 0 || g.runP != nil {
+		g.waiting || g.nextWait != nil || g.waitToken != nil || g.waitTicket != 0 || g.runP != nil ||
+		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil {
 		return false
 	}
 	schedule := preemptLoad(&p.schedule)
@@ -319,7 +342,8 @@ func validReadyQueue(p *P) bool {
 	var tail *G
 	for g := p.readyHead; g != nil; g = g.nextReady {
 		if !ValidG(g) || g.state != GRunnable || !g.queued || g.waiting || g.nextWait != nil ||
-			g.waitToken != nil || g.waitTicket != 0 || g.runP != nil {
+			g.waitToken != nil || g.waitTicket != 0 || g.runP != nil ||
+			g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil {
 			return false
 		}
 		tail = g
@@ -345,7 +369,8 @@ func validWaitQueue(p *P) bool {
 	var tail *G
 	for g := p.waitHead; g != nil; g = g.nextWait {
 		if !ValidG(g) || g.state != GWaiting || !g.waiting || g.waitToken == nil || g.waitTicket == 0 ||
-			g.queued || g.nextReady != nil || g.runP != nil || !validClaimedWait(g.waitToken, g.waitTicket) {
+			g.queued || g.nextReady != nil || g.runP != nil ||
+			g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil || !validClaimedWait(g.waitToken, g.waitTicket) {
 			return false
 		}
 		tail = g
@@ -506,7 +531,8 @@ func BeginRunG(p *P, g *G) (Action, bool) {
 	if p == nil || p.current != nil || p.inResume || p.action.Kind != ActionInvalid ||
 		!ValidG(g) || g.state != GRunnable || g.active == nil || g.root == nil ||
 		g.destroyTarget != nil || g.destroyRoot || g.queued || g.nextReady != nil ||
-		g.waitToken != nil || g.waitTicket != 0 || g.nextWait != nil || g.waiting || g.runP != nil {
+		g.waitToken != nil || g.waitTicket != 0 || g.nextWait != nil || g.waiting || g.runP != nil ||
+		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil {
 		return Action{}, false
 	}
 	schedule := preemptLoad(&p.schedule)
@@ -656,6 +682,19 @@ func Destroyed(p *P, g *G, action Action) (Action, bool) {
 	return setAction(p, ActionCheckResume, g.active.handle)
 }
 
+// AcknowledgeTerminalSchedule classifies and consumes the one non-corruption
+// failure of Destroyed: an asynchronous RequestSchedule won the final
+// idle-to-disabled race after the last frame had already been destroyed. The
+// runtime adapter may retry the same ActionDestroy without invoking
+// llvm.coro.destroy again. Any queue, action, or G-state mismatch fails closed.
+func AcknowledgeTerminalSchedule(p *P, g *G, action Action) bool {
+	return expectedAction(p, g, action, ActionDestroy) && !p.inResume &&
+		g.state == GDispatching && g.destroyTarget == nil && g.destroyRoot &&
+		g.active == nil && g.frames == nil && p.readyHead == nil && p.readyTail == nil &&
+		p.waitHead == nil && p.waitTail == nil && validReadyQueue(p) && validWaitQueue(p) &&
+		preemptCompareAndSwap(&p.schedule, scheduleRequested, scheduleIdle)
+}
+
 // TerminalG reports whether a scheduler run completely consumed g and left p
 // idle. This is a deliberately strict terminal-state check for program
 // startup: a dead G state alone is insufficient if any frame, transition,
@@ -667,5 +706,6 @@ func TerminalG(p *P, g *G) bool {
 		ValidG(g) && preemptLoad(preemptAddress(g)) == preemptDisabled && g.state == GDead && g.root == nil && g.active == nil && g.frames == nil &&
 		g.pending.kind == pendingNone && g.pending.from == nil && g.pending.target == nil && g.pending.wait == nil && g.pending.ticket == 0 &&
 		g.destroyTarget == nil && !g.destroyRoot && g.nextReady == nil && !g.queued &&
-		g.waitToken == nil && g.waitTicket == 0 && g.nextWait == nil && !g.waiting && g.runP == nil
+		g.waitToken == nil && g.waitTicket == 0 && g.nextWait == nil && !g.waiting && g.runP == nil &&
+		g.spawnChild == nil && g.spawnParent == nil && g.spawnP == nil && validTerminalTaskStorage(g)
 }

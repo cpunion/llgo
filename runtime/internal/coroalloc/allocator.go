@@ -103,3 +103,26 @@ func FreeFrame(ptr unsafe.Pointer) bool {
 	backendFreeFrame(ptr)
 	return true
 }
+
+// AllocTask allocates pointer-containing scheduler task storage. It uses the
+// same statically selected scanned/root backend as coroutine frames: BDWGC's
+// uncollectable allocation is conservatively scanned, tinygogc sees the task
+// through the scheduler's static P/parent links, and nogc/WASM profiles have
+// no tracing collector that an ordinary malloc range could hide pointers from.
+func AllocTask(size uintptr) unsafe.Pointer {
+	if !Ready() || size == 0 {
+		return nil
+	}
+	return backendAllocFrame(size)
+}
+
+// FreeTask performs the physical half of the scheduler's exactly-once task
+// retirement protocol. The caller must first unlink and logically release the
+// G through coro.ReleaseTaskStorage.
+func FreeTask(ptr unsafe.Pointer) bool {
+	if !Ready() || ptr == nil {
+		return false
+	}
+	backendFreeFrame(ptr)
+	return true
+}

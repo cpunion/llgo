@@ -96,7 +96,7 @@ func coroProgramRunV1(gPointer, handle unsafe.Pointer) bool {
 		return false
 	}
 	coroProgramLifecycleV1State = coroProgramRunningV1
-	if !coroRun(&coroProgramPV1State) || !coro.TerminalG(&coroProgramPV1State, &coroProgramGV1State) {
+	if !coroRun(&coroProgramPV1State, &coroProgramGV1State) || !coro.TerminalG(&coroProgramPV1State, &coroProgramGV1State) {
 		coroProgramLifecycleV1State = coroProgramFailedV1
 		return false
 	}
