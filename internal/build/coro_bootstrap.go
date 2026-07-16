@@ -42,6 +42,7 @@ const (
 	coroProgramPublicRuntimeNoopIDV2            coro.FunctionID = "llgo.bootstrap.v2.public-runtime-init.noop"
 	coroProgramBeginSymbolV1                                    = "__llgo_coro_program_begin_v1"
 	coroProgramRunSymbolV1                                      = "__llgo_coro_program_run_v1"
+	coroProgramContinueSymbolV1                                 = "__llgo_coro_program_continue_v1"
 	coroProgramMainReturnSymbolV1                               = "__llgo_coro_program_main_return_v1"
 
 	// Step kinds and semantic roles are part of the cross-target bootstrap ABI.
@@ -613,7 +614,7 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 			factory = coroProgramBootstrapFactorySymbolV2
 		}
 		write("factory=compiler-static-mixed-v" + strconv.FormatUint(uint64(version), 10) + ":" + factory)
-		write("driver=runtime-static-single-p-v1:" + coroProgramBeginSymbolV1 + ":" + coroProgramRunSymbolV1)
+		write("driver=runtime-static-single-p-v1:" + coroProgramBeginSymbolV1 + ":" + coroProgramRunSymbolV1 + ":" + coroProgramContinueSymbolV1 + ":continue(epoch:u32)->void")
 		write("header=physical-abi-v1")
 	} else {
 		write("factory=null")

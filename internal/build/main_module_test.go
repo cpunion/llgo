@@ -344,6 +344,12 @@ func TestGenMainModuleCoroProgramBootstrapNativeAndWasm(t *testing.T) {
 			if got := entry.LPkg.CoroProgramBootstrap(); got != coroProgramBootstrapSymbolV1 {
 				t.Fatalf("program bootstrap symbol = %q, want %q", got, coroProgramBootstrapSymbolV1)
 			}
+			if function := entry.LPkg.Module().NamedFunction(coroProgramContinueSymbolV1); !function.IsNil() {
+				t.Fatalf("descriptor-only bootstrap declared runnable continuation ABI:\n%s", ir)
+			}
+			if reference := entry.LPkg.Module().NamedGlobal(coroProgramContinueReferenceSymbolV1); !reference.IsNil() {
+				t.Fatalf("descriptor-only bootstrap retained runnable continuation ABI:\n%s", ir)
+			}
 			assertInOrder(t, ir,
 				"call void @\"example.com/foo.init\"()",
 				"call void @\"example.com/foo.main\"()",
@@ -474,6 +480,7 @@ func TestGenMainModuleCoroProgramBootstrapV2MixedNativeAndWasm(t *testing.T) {
 			}
 
 			mod := entry.LPkg.Module()
+			assertCoroProgramContinueRetention(t, mod, test.entryName)
 			publicRuntimeInit := mod.NamedFunction("runtime.init")
 			if publicRuntimeInit.IsNil() || !publicRuntimeInit.IsDeclaration() {
 				t.Fatalf("managed public runtime init must remain an unresolved archive reference, not an entry-module weak body:\n%s", ir)
@@ -645,6 +652,7 @@ func TestGenMainModuleCoroProgramBootstrapRuntimeSwitch(t *testing.T) {
 		"call void @"+coroProgramCompletePrepareHookV1,
 	)
 	entryBody := entry.LPkg.Module().NamedFunction("main").String()
+	assertCoroProgramContinueRetention(t, entry.LPkg.Module(), "main")
 	if strings.Contains(entryBody, "call void @\"example.com/foo.init\"()") || strings.Contains(entryBody, "call void @\"example.com/foo.main\"()") {
 		t.Fatalf("platform entry retained legacy direct init/main calls:\n%s", entryBody)
 	}
@@ -706,6 +714,12 @@ func TestGenMainModuleCoroProgramBootstrapRuntimeAfterCoroPasses(t *testing.T) {
 			}
 			mod := entry.LPkg.Module()
 			post := mod.String()
+			assertCoroProgramContinueRetention(t, mod, func() string {
+				if isWasmTarget(test.goos) {
+					return "__main_argc_argv"
+				}
+				return "main"
+			}())
 			for _, suffix := range []string{".resume", ".destroy"} {
 				if mod.NamedFunction(coroProgramBootstrapFactorySymbolV1 + suffix).IsNil() {
 					t.Fatalf("entry CoroSplit did not create factory%s:\n%s", suffix, post)
@@ -722,6 +736,30 @@ func TestGenMainModuleCoroProgramBootstrapRuntimeAfterCoroPasses(t *testing.T) {
 			}
 			object.Dispose()
 		})
+	}
+}
+
+func assertCoroProgramContinueRetention(t *testing.T, module llvm.Module, entryName string) {
+	t.Helper()
+	callback := module.NamedFunction(coroProgramContinueSymbolV1)
+	if callback.IsNil() || !callback.IsDeclaration() || callback.GlobalValueType().String() != "void (i32)" {
+		t.Fatalf("program continuation declaration is not void(i32): %v\n%s", callback, module.String())
+	}
+	anchor := module.NamedGlobal(coroProgramContinueReferenceSymbolV1)
+	if anchor.IsNil() || !anchor.IsGlobalConstant() || anchor.Linkage() != llvm.InternalLinkage ||
+		anchor.Initializer().IsNil() || anchor.Initializer().C != callback.C {
+		t.Fatalf("program continuation reference does not retain the exact callback: %v\n%s", anchor, module.String())
+	}
+	entry := module.NamedFunction(entryName)
+	if entry.IsNil() || entry.IsDeclaration() {
+		t.Fatalf("program continuation retention entry %q is missing: %s", entryName, module.String())
+	}
+	body := entry.String()
+	if got := strings.Count(body, "load volatile ptr, ptr @"+coroProgramContinueReferenceSymbolV1); got != 1 {
+		t.Fatalf("program entry continuation-reference volatile loads = %d, want 1:\n%s", got, body)
+	}
+	if strings.Contains(body, "call void @"+coroProgramContinueSymbolV1) {
+		t.Fatalf("program entry invoked the asynchronous continuation during startup:\n%s", body)
 	}
 }
 

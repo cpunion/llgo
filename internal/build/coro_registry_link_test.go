@@ -139,4 +139,48 @@ func TestCoroProgramManifestExtractsRootArchiveMember(t *testing.T) {
 			t.Fatalf("final link lost %q after archive extraction/dead strip:\n%s", want, symbols)
 		}
 	}
+
+	// The program continuation is entered only by a retained target callback, so
+	// prove that the entry's volatile callback anchor extracts a standalone
+	// runtime archive member and survives the same final-link dead stripping. In
+	// particular, this must not pass merely because begin/run happened to select a
+	// larger runtime object containing the continuation.
+	callbackPkg := prog.NewPackage("callback", "example.com/callback")
+	callback := callbackPkg.NewFunc(coroProgramContinueSymbolV1, newSignature(
+		[]types.Type{types.Typ[types.Uint32]}, nil,
+	), llssa.InC)
+	callback.MakeBody(1).Return()
+	callbackPkg.MaterializePreserveSyms()
+	callbackObject := emit("callback", callbackPkg)
+	callbackArchive := filepath.Join(temp, "libcallback.a")
+	if output, err := exec.Command(ar, "rcs", callbackArchive, callbackObject).CombinedOutput(); err != nil {
+		t.Fatalf("archive continuation object: %v\n%s", err, output)
+	}
+
+	callbackEntryPkg := prog.NewPackage("callback-entry", "callback-entry")
+	callbackDeclaration := declareCoroProgramContinueV1(callbackEntryPkg)
+	callbackMain := callbackEntryPkg.NewFunc("main", newSignature(nil, []types.Type{types.Typ[types.Int32]}), llssa.InC)
+	callbackMain.MakeBody(1).Return(prog.IntVal(0, prog.Int32()))
+	retainCoroProgramContinueV1(callbackEntryPkg, callbackMain, callbackDeclaration)
+	callbackEntryPkg.MaterializePreserveSyms()
+	callbackEntryObject := emit("callback-entry", callbackEntryPkg)
+
+	callbackExecutable := filepath.Join(temp, "callback-extract")
+	callbackArgs := []string{callbackEntryObject, callbackArchive, "-o", callbackExecutable}
+	if runtime.GOOS == "darwin" {
+		callbackArgs = append(callbackArgs, "-Wl,-dead_strip")
+	} else {
+		callbackArgs = append(callbackArgs, "-Wl,--gc-sections")
+	}
+	if output, err := exec.Command(clang, callbackArgs...).CombinedOutput(); err != nil {
+		t.Fatalf("link continuation archive without whole-archive: %v\n%s", err, output)
+	}
+	output, err = exec.Command(nm, callbackExecutable).CombinedOutput()
+	if err != nil {
+		t.Fatalf("inspect linked continuation symbol: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), coroProgramContinueSymbolV1) {
+		t.Fatalf("final link lost retained continuation %q after archive extraction/dead strip:\n%s",
+			coroProgramContinueSymbolV1, output)
+	}
 }

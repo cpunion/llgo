@@ -1902,6 +1902,7 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			coroFrameAllocatorBootstrapSymbolV1,
 			coroProgramBeginSymbolV1,
 			coroProgramRunSymbolV1,
+			coroProgramContinueSymbolV1,
 		)
 	}
 	if ctx.buildConf.EnableCoroProgramBootstrapRun {
@@ -1956,6 +1957,14 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 		fn := byName[name]
 		if fn == nil {
 			return nil, nil, nil, nil, fmt.Errorf("coroutine program bootstrap runtime ABI %q has no emitted Go body in %q", name, llssa.PkgRuntime)
+		}
+		if name == coroProgramContinueSymbolV1 {
+			sig := fn.Signature
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 1 ||
+				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.Uint32]) || sig.Results().Len() != 0 ||
+				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf("coroutine program bootstrap runtime ABI %q must have exact func(uint32) signature", name)
+			}
 		}
 		goBody, err := frozenGoEmittedBody(ctx.coroEmission, fn)
 		if err != nil {

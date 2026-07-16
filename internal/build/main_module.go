@@ -149,6 +149,7 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 	}
 	var coroBegin llssa.Function
 	var coroRun llssa.Function
+	var coroContinue llssa.Function
 	var coroAllocatorBootstrap llssa.Function
 	if ctx.buildConf.EnableCoroProgramBootstrapRun {
 		if coroEntry.manifest.IsNil() || coroEntry.factory == nil {
@@ -157,6 +158,7 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 		coroAllocatorBootstrap = declareNoArgFunc(mainPkg, coroFrameAllocatorBootstrapSymbolV1)
 		coroBegin = declareCoroProgramBeginV1(mainPkg)
 		coroRun = declareCoroProgramRunV1(mainPkg)
+		coroContinue = declareCoroProgramContinueV1(mainPkg)
 	}
 
 	entryFn := defineEntryFunction(ctx, mainPkg, argcVar, argvVar, argvValueType, entryFunctions{
@@ -174,6 +176,9 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 		coroRun:                coroRun,
 		coroBootstrapVersion:   cfg.coroBootstrap.abiVersion(),
 	})
+	if coroContinue != nil {
+		retainCoroProgramContinueV1(mainPkg, entryFn, coroContinue)
+	}
 
 	if needStart(ctx) {
 		defineStart(mainPkg, entryFn, argvValueType)
@@ -498,6 +503,53 @@ func declareCoroProgramRunV1(pkg llssa.Package) llssa.Function {
 		[]types.Type{pointer, pointer},
 		nil,
 	), llssa.InC)
+}
+
+func declareCoroProgramContinueV1(pkg llssa.Package) llssa.Function {
+	return pkg.NewFunc(coroProgramContinueSymbolV1, newSignature(
+		[]types.Type{types.Typ[types.Uint32]},
+		nil,
+	), llssa.InC)
+}
+
+const coroProgramContinueReferenceSymbolV1 = "__llgo_coro_program_continue_reference_v1"
+
+// retainCoroProgramContinueV1 gives the target callback ABI a live relocation
+// from the always-selected entry object. The continuation is entered by a
+// platform callback, so neither the Go SSA graph nor the entry control-flow
+// graph contains an ordinary call edge that would extract its runtime archive
+// member. A declaration or llvm.compiler.used alone would also be insufficient
+// under --gc-sections/-dead_strip. The volatile load is target-neutral LLVM IR:
+// it keeps the internal pointer anchor live, whose initializer in turn retains
+// the exact external continuation body without invoking it during startup.
+func retainCoroProgramContinueV1(pkg llssa.Package, entry, continuation llssa.Function) {
+	if pkg == nil || entry == nil || continuation == nil {
+		panic("coroutine program continuation retention requires entry and callback functions")
+	}
+	module := pkg.Module()
+	callback := module.NamedFunction(coroProgramContinueSymbolV1)
+	entryValue := module.NamedFunction(entry.Name())
+	if callback.IsNil() || !callback.IsDeclaration() || entryValue.IsNil() || entryValue.IsDeclaration() {
+		panic("coroutine program continuation retention requires one external callback declaration and defined entry")
+	}
+	if !module.NamedGlobal(coroProgramContinueReferenceSymbolV1).IsNil() {
+		panic("coroutine program continuation reference is already defined")
+	}
+	anchor := llvm.AddGlobal(module, callback.Type(), coroProgramContinueReferenceSymbolV1)
+	anchor.SetInitializer(callback)
+	anchor.SetGlobalConstant(true)
+	anchor.SetLinkage(llvm.InternalLinkage)
+	anchor.SetUnnamedAddr(true)
+
+	first := entryValue.EntryBasicBlock().FirstInstruction()
+	if first.IsNil() {
+		panic("coroutine program continuation retention requires a non-empty entry block")
+	}
+	builder := module.Context().NewBuilder()
+	defer builder.Dispose()
+	builder.SetInsertPointBefore(first)
+	load := builder.CreateLoad(anchor.GlobalValueType(), anchor, "")
+	load.SetVolatile(true)
 }
 
 func defineStart(pkg llssa.Package, entry llssa.Function, argvType llssa.Type) {
