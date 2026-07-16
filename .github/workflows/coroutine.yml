@@ -18,6 +18,7 @@ jobs:
       matrix:
         include:
           - { llvm: 19, go: "1.24.2", tags: "llvm19" }
+          - { llvm: 20, go: "1.24.2", tags: "llvm20" }
           - { llvm: 21, go: "1.24.2", tags: "llvm21" }
           - { llvm: 22, go: "1.24.2", tags: "llvm22" }
           - { llvm: 19, go: "1.26.5", tags: "llvm19" }
@@ -46,6 +47,7 @@ jobs:
       - name: Test target-neutral coroutine runtime core
         run: |
           cd runtime
+          go test -race -shuffle=on ./internal/coroalloc -count=1
           go test -race -shuffle=on ./internal/coro -count=1
           # The complete LLGo runtime package intentionally owns symbols that
           # collide with the host Go runtime. Use the real production adapter
@@ -57,14 +59,64 @@ jobs:
             ./internal/runtime/coro_program.go \
             ./internal/runtime/coro_sched.go \
             ./internal/runtime/coro_program_test.go \
-            -run '^TestCoroProgramV1' -count=1
+            -run '^TestCoroProgram(V1|V2)' -count=1
           GOOS=js GOARCH=wasm CGO_ENABLED=0 go test \
             -tags=coro_runtime_adapter_test \
             -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" \
             ./internal/runtime/coro_program.go \
             ./internal/runtime/coro_sched.go \
             ./internal/runtime/coro_program_test.go \
-            -run '^TestCoroProgramV1' -count=1
+            -run '^TestCoroProgram(V1|V2)' -count=1
+
+      - name: Compile coroutine allocator target backends
+        if: matrix.llvm == 19 && matrix.go == '1.24.2'
+        run: |
+          go build -o /tmp/llgo-coro ./cmd/llgo
+          check_backend() {
+            local label="$1"
+            local goos="$2"
+            local goarch="$3"
+            local tags="$4"
+            local log="/tmp/coroalloc-${label}.log"
+            (
+              cd runtime
+              LLGO_BUILD_CACHE=off GOOS="$goos" GOARCH="$goarch" \
+                /tmp/llgo-coro build -v -tags="$tags" ./internal/coroalloc
+            ) >"$log" 2>&1
+            grep -F 'backend_webassembly.go' "$log"
+            grep -F 'NewFunc malloc func' "$log"
+            grep -F 'NewFunc free func' "$log"
+            ! grep -E 'backend_gc\.go|GC_malloc_uncollectable|GC_free' "$log"
+          }
+          check_backend js-wasm js wasm tinygo.wasm
+          check_backend wasip1 wasip1 wasm tinygo.wasm
+          check_backend wasip2 linux arm tinygo.wasm,wasip2
+          check_backend wasm-unknown linux arm tinygo.wasm,wasm_unknown
+
+      - name: Link named freestanding WebAssembly targets
+        if: matrix.llvm == 19 && matrix.go == '1.24.2'
+        env:
+          LLGO_WASM_TARGET_SMOKE: "1"
+        run: |
+          go test -v ./internal/crosscompile -run '^TestFreestandingWasmTargetToolchainSmoke$' -count=1
+          go build -o /tmp/llgo-wasm-target ./cmd/llgo
+          for target in wasip2 wasm-unknown; do
+            output="/tmp/llgo-${target}.wasm"
+            LLGO_BUILD_CACHE=off LDFLAGS='--export=main' \
+              /tmp/llgo-wasm-target build -target="$target" -o "$output" \
+              ./internal/crosscompile/testdata/wasm_allocator
+            test "$(od -An -t x1 -N4 "$output" | tr -d ' \n')" = '0061736d'
+            symbols="$(llvm-nm --defined-only --format=just-symbols "$output")"
+            for symbol in main malloc free sbrk abort; do
+              grep -Fx "$symbol" <<<"$symbols"
+            done
+            ! grep -E '^GC_' <<<"$symbols"
+            test -z "$(llvm-nm --undefined-only --format=just-symbols "$output")"
+            if command -v wasmtime >/dev/null; then
+              result="$(wasmtime run --invoke main "$output" 0 0)"
+              test "$result" = '0'
+            fi
+          done
 
       - name: Compile coroutine runtime adapter across targets
         if: matrix.llvm == 19
@@ -77,7 +129,10 @@ jobs:
 
       - name: Test coroutine build integration
         if: matrix.llvm == 19
-        run: go test ./internal/build -run 'Test(CoroPlanBuilderRunsBeforeCodegenWithoutChangingIR|CoroPlanInputCanonicalizesPatchedRoot|CoroPlanInputElidesOnlyFrontendNoInitCalls|CoroPlanInputOwnsFrozenDemandReferences|RequiredCoroProgramRuntimePlanPlainClosureAndConflicts|ActiveCoroABIVersions|BuildCoroPlanErrors|CoroEntryResolutionUsesPlanMatchedPackageCache|CoroEntryResolutionBuildsPreparedRuntimePackages|CoroRuntimeLinkRequirements|CoroEmissionCoverageStopsBeforeAnyPackageCodegen|CoroUnsupportedEntryResolutionReturnsErrorBeforeCodegen|CoroEmissionUniverseAcceptsModeTestVariants|CoroProgramBootstrapRejectsInvalidRootsBeforePackageCodegen)$' -count=1
+        # Keep the focused workflow exhaustive for the build-side coroutine
+        # contract. This includes park effect seeding, frozen foreign noblock
+        # certificates, IRQUnsafe handling, and the exact legacy PanicABI stop.
+        run: go test ./internal/build -run 'Coro|Coroutine' -timeout=10m -count=1
 
       - name: Test coroutine compiler integration
         if: matrix.llvm == 19
@@ -98,7 +153,10 @@ jobs:
           go test -tags='${{ matrix.tags }}' ./cl -run '^Test(CompilationCoroABIIdentityValidation|CoroEntryResolutionCacheRegistrationWithDigest|CoroPhysicalABICacheRegistrationPreservesPhysicalMetadata)$' -count=1
 
       - name: Test coroutine physical ABI and function dispatch lowering
-        run: go test -tags='${{ matrix.tags }}' -v ./cl -run '^Test(Coro(LeafPhysicalABI|PhysicalABI|ChildAwaitPhysicalABIV1|ExplicitAsyncRootFactoryV1|ExplicitRootFactoryV1|ExplicitPlain|RootPackageAnchorV1|PlainDispatch)|EmissionUniverse(ActiveABIMethodTablesUseFrozenWrapperSymbols|ABIMethodDemandReferencesAreExactRecursiveAndOwnerScoped))' -count=1
+        # Run every compiler test whose name is part of the coroutine contract;
+        # in particular this covers pure SSA aggregates/PHI and caller-frame
+        # park lowering on native64 and wasm32 before and after CoroSplit.
+        run: go test -tags='${{ matrix.tags }}' -v ./cl -run '^Test(Coro|EmissionUniverse(ActiveABIMethodTablesUseFrozenWrapperSymbols|ABIMethodDemandReferencesAreExactRecursiveAndOwnerScoped))' -count=1
 
       - name: Test coroutine TLS function dispatch proof
         run: go test -tags='${{ matrix.tags }}' -v ./internal/build -run '^TestCoroTLS' -count=1
