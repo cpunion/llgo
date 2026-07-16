@@ -16,6 +16,8 @@
 
 package coro
 
+import "unsafe"
+
 // ExecutorDriver is the target-neutral single-P bridge between a stable
 // ExecutorRegistry gate and scheduler-owned durable wait registrations. It is
 // never retained by a platform callback: the platform ABI remains the two POD
@@ -27,15 +29,17 @@ package coro
 // wait and calls WakeExecutor after a real or spurious wake.
 //
 // This first driver deliberately owns exactly one P and one registration
-// table. Timer/channel/syscall source sets, terminal close handoff, and multi-P
-// executor migration are later layers.
+// table. It provides the handle-free last-G terminal close handoff, while the
+// target-specific join dispatcher, timer/channel/syscall source sets, and
+// multi-P executor migration remain later layers.
 type ExecutorDriver struct {
-	magic    uint32
-	state    executorDriverState
-	p        *P
-	registry *ExecutorRegistry
-	handle   ExecutorHandle
-	waits    *WaitRegistrationTable
+	magic        uint32
+	state        executorDriverState
+	p            *P
+	registry     *ExecutorRegistry
+	handle       ExecutorHandle
+	waits        *WaitRegistrationTable
+	terminalKind ActionKind
 }
 
 type executorDriverState uint8
@@ -45,12 +49,22 @@ const (
 	executorDriverActive
 	executorDriverSleeping
 	executorDriverClosing
+	executorDriverTerminalClosing
 )
 
 const executorDriverMagic uint32 = 0x45584431 // "EXD1"
 
 func validExecutorDriver(driver *ExecutorDriver) bool {
-	return driver != nil && driver.magic == executorDriverMagic && driver.state != executorDriverUnbound &&
+	if driver == nil || driver.magic != executorDriverMagic || driver.state == executorDriverUnbound {
+		return false
+	}
+	terminalKind := driver.terminalKind
+	validTerminalState := driver.state == executorDriverTerminalClosing &&
+		(terminalKind == ActionDestroy || terminalKind == ActionPanicDestroy)
+	if !validTerminalState && terminalKind != ActionInvalid {
+		return false
+	}
+	return (driver.state == executorDriverTerminalClosing) == validTerminalState &&
 		driver.p != nil && driver.registry != nil && driver.handle.Slot != 0 && driver.handle.Generation != 0 &&
 		driver.waits != nil && driver.p.executor == driver &&
 		preemptLoad(&driver.p.executorMode) == executorModeBound && driver.waits.owner == driver.p
@@ -82,6 +96,7 @@ func idleExecutorScheduler(p *P) bool {
 func BindExecutor(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, waits *WaitRegistrationTable) bool {
 	if driver == nil || driver.magic != 0 || driver.state != executorDriverUnbound || driver.p != nil ||
 		driver.registry != nil || driver.handle != (ExecutorHandle{}) || driver.waits != nil ||
+		driver.terminalKind != ActionInvalid ||
 		p == nil || p.executor != nil || preemptLoad(&p.executorMode) != executorModeUnbound ||
 		preemptLoad(&p.schedule) != scheduleIdle || !idleExecutorScheduler(p) ||
 		p.readyHead != nil || p.readyTail != nil || p.waitHead != nil || p.waitTail != nil ||
@@ -228,6 +243,7 @@ func WakeExecutor(driver *ExecutorDriver) (drained, promoted int, ok bool) {
 // this close before entering those state machines.
 func BeginExecutorClose(driver *ExecutorDriver) bool {
 	if !validExecutorDriver(driver) || driver.state != executorDriverActive || !idleExecutorScheduler(driver.p) ||
+		driver.terminalKind != ActionInvalid ||
 		driver.p.waitHead != nil || driver.p.waitTail != nil ||
 		!registrationTableEmpty(driver.waits, driver.p) {
 		return false
@@ -243,13 +259,16 @@ func BeginExecutorClose(driver *ExecutorDriver) bool {
 	return true
 }
 
-// ConfirmExecutorClose records the caller's strong join of the complete target
-// shim, including pre-lease entry and the Request-to-doorbell tail. It retires
-// the stable generation and unbinds the empty wait table and P.
-func ConfirmExecutorClose(driver *ExecutorDriver) bool {
-	if !validExecutorDriver(driver) || driver.state != executorDriverClosing || !idleExecutorScheduler(driver.p) ||
-		driver.p.waitHead != nil || driver.p.waitTail != nil ||
-		!registrationTableEmpty(driver.waits, driver.p) ||
+func finalDrainExecutorSources(driver *ExecutorDriver) bool {
+	if !validExecutorDriver(driver) {
+		return false
+	}
+	drained, ok := driver.waits.drainFor(driver.p)
+	return ok && drained == 0 && registrationTableEmpty(driver.waits, driver.p)
+}
+
+func retireExecutorBinding(driver *ExecutorDriver, restoreAction *Action) bool {
+	if !validExecutorDriver(driver) ||
 		!driver.registry.ConfirmQuiesced(driver.handle) || !driver.registry.Retire(driver.handle) {
 		return false
 	}
@@ -259,6 +278,181 @@ func ConfirmExecutorClose(driver *ExecutorDriver) bool {
 	}
 	p.executor = nil
 	*driver = ExecutorDriver{}
+	if restoreAction != nil {
+		p.action = *restoreAction
+	}
 	preemptStore(&p.executorMode, executorModeUnbound)
 	return true
+}
+
+// ConfirmExecutorClose records the caller's strong join of the complete target
+// shim, including pre-lease entry and the Request-to-doorbell tail. It retires
+// the stable generation and unbinds the empty wait table and P.
+func ConfirmExecutorClose(driver *ExecutorDriver) bool {
+	if !validExecutorDriver(driver) || driver.state != executorDriverClosing || !idleExecutorScheduler(driver.p) ||
+		driver.terminalKind != ActionInvalid ||
+		driver.p.waitHead != nil || driver.p.waitTail != nil ||
+		!finalDrainExecutorSources(driver) {
+		return false
+	}
+	return retireExecutorBinding(driver, nil)
+}
+
+func terminalExecutorRootPending(p *P, g *G, kind ActionKind) bool {
+	if p == nil || g == nil || p.current != g || p.inResume ||
+		!ValidG(g) || g.runP != p || g.destroyTarget != nil || !g.destroyRoot ||
+		g.active != nil || g.frames != nil ||
+		p.readyHead != nil || p.readyTail != nil || p.waitHead != nil || p.waitTail != nil ||
+		!validReadyQueue(p) || !validWaitQueue(p) || preemptLoad(&p.schedule) != scheduleIdle {
+		return false
+	}
+	switch kind {
+	case ActionDestroy:
+		if g.state != GDispatching {
+			return false
+		}
+		if g.panicUnwind {
+			return publishedPanicRecord(&g.panicRecord)
+		}
+		return emptyPanicRecord(&g.panicRecord)
+	case ActionPanicDestroy:
+		return g.state == GPanicking && g.panicUnwind && publishedPanicRecord(&g.panicRecord)
+	default:
+		return false
+	}
+}
+
+func terminalExecutorCloseCandidate(p *P, g *G, action Action) (*ExecutorDriver, bool) {
+	if !expectedAction(p, g, action, action.Kind) || !terminalExecutorRootPending(p, g, action.Kind) ||
+		preemptLoad(&p.executorMode) != executorModeBound {
+		return nil, false
+	}
+	driver := p.executor
+	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
+		driver.terminalKind != ActionInvalid || !registrationTableEmpty(driver.waits, p) {
+		return nil, false
+	}
+	return driver, true
+}
+
+func settleTerminalExecutorClose(driver *ExecutorDriver, p *P) bool {
+	for {
+		if !validExecutorDriver(driver) || driver.state != executorDriverActive || driver.p != p ||
+			driver.terminalKind != ActionInvalid || !registrationTableEmpty(driver.waits, p) {
+			return false
+		}
+		drained, ok := driver.waits.drainFor(p)
+		if !ok || drained != 0 {
+			return false
+		}
+		if _, ok = driver.registry.Acknowledge(driver.handle); !ok {
+			return false
+		}
+
+		// Recheck the complete durable source set after acknowledgement. If a
+		// request wins the following exact close race, loop and repeat the same
+		// transaction; the destroyed LLVM handle is not part of this path.
+		drained, ok = driver.waits.drainFor(p)
+		if !ok || drained != 0 || !registrationTableEmpty(driver.waits, p) {
+			return false
+		}
+		if driver.waits.Pending() || driver.registry.ObserveRequested(driver.handle) {
+			continue
+		}
+		if driver.registry.BeginClose(driver.handle) {
+			return true
+		}
+		if !driver.registry.ObserveRequested(driver.handle) {
+			return false
+		}
+	}
+}
+
+// beginTerminalExecutorClose seals a bound executor after the last LLVM frame
+// has already been destroyed. Only the logical commit kind is moved into the
+// scheduler-owned driver; the freed root pointer and physical handle are both
+// discarded before P publishes a handle-free control action, so neither a
+// target adapter nor an asynchronous GC scan can retain or reuse them.
+func beginTerminalExecutorClose(p *P, g *G, action Action) (Action, bool) {
+	driver, ok := terminalExecutorCloseCandidate(p, g, action)
+	if !ok || !settleTerminalExecutorClose(driver, p) {
+		return Action{}, false
+	}
+	driver.terminalKind = action.Kind
+	driver.state = executorDriverTerminalClosing
+	g.root = nil
+	closeAction := Action{Kind: ActionTerminalExecutorClose}
+	p.action = closeAction
+	return closeAction, true
+}
+
+func terminalExecutorCloseDriver(p *P, g *G, action Action) (*ExecutorDriver, bool) {
+	if p == nil || action.Kind != ActionTerminalExecutorClose || action.Handle != nil ||
+		p.action != action || preemptLoad(&p.executorMode) != executorModeBound {
+		return nil, false
+	}
+	driver := p.executor
+	if !validExecutorDriver(driver) || driver.state != executorDriverTerminalClosing ||
+		!terminalExecutorRootPending(p, g, driver.terminalKind) {
+		return nil, false
+	}
+	return driver, true
+}
+
+// TerminalExecutorCloseDriver returns the opaque driver whose target ingress
+// shim must be strongly unregistered and joined for a terminal close action.
+// The caller must not confirm a different driver; the core retains only a
+// logical commit kind and has already discarded the physical destroy handle.
+// The pointer stays in scheduler-owned stable runtime storage; a host callback
+// ABI must continue to carry only its target POD identity/doorbell, never this
+// Go pointer.
+func TerminalExecutorCloseDriver(p *P, g *G, action Action) (*ExecutorDriver, bool) {
+	return terminalExecutorCloseDriver(p, g, action)
+}
+
+// ConfirmTerminalExecutorClose records the caller's strong target join, scans
+// durable sources one final time, retires and unbinds the executor, then commits
+// the already-destroyed normal or panic root. It derives P, G, the close marker,
+// and the private commit token entirely from stable scheduler state, so an
+// asynchronous WASM/embedded backend need not retain a native caller stack.
+// The returned action can only be a post-destroy scheduler action; the original
+// LLVM handle is never returned.
+func ConfirmTerminalExecutorClose(driver *ExecutorDriver) (*G, Action, bool) {
+	if !validExecutorDriver(driver) {
+		return nil, Action{}, false
+	}
+	p, g, action := driver.p, driver.p.current, driver.p.action
+	want, ok := terminalExecutorCloseDriver(p, g, action)
+	if !ok || want != driver || !finalDrainExecutorSources(driver) {
+		return nil, Action{}, false
+	}
+	// The synthetic token is a stable core-private equality marker. Destroyed
+	// and PanicDestroyed never dereference it, and it is never returned to the
+	// adapter as a handle operation.
+	original := Action{Kind: driver.terminalKind, Handle: unsafe.Pointer(driver)}
+	if !retireExecutorBinding(driver, &original) {
+		return nil, Action{}, false
+	}
+	for {
+		var next Action
+		switch original.Kind {
+		case ActionDestroy:
+			next, ok = Destroyed(p, g, original)
+			if !ok && AcknowledgeTerminalSchedule(p, g, original) {
+				continue
+			}
+		case ActionPanicDestroy:
+			next, ok = PanicDestroyed(p, g, original)
+			if !ok && AcknowledgePanicTerminalSchedule(p, g, original) {
+				continue
+			}
+		default:
+			return nil, Action{}, false
+		}
+		if !ok || next.Handle != nil ||
+			(next.Kind != ActionComplete && next.Kind != ActionPanicComplete) {
+			return nil, Action{}, false
+		}
+		return g, next, true
+	}
 }

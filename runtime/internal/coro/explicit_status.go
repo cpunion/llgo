@@ -194,7 +194,7 @@ func finishPanicG(p *P, g *G, wasRoot bool) (Action, bool) {
 	// child/peer ownership is silently discarded by this core transition.
 	if p.readyHead == nil && p.waitHead == nil &&
 		(preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil) {
-		return Action{}, false
+		return beginTerminalExecutorClose(p, g, p.action)
 	}
 	if p.readyHead == nil && p.waitHead == nil &&
 		!preemptCompareAndSwap(&p.schedule, scheduleIdle, scheduleDisabled) {

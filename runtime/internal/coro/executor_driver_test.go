@@ -19,6 +19,7 @@ package coro
 import (
 	"runtime"
 	"testing"
+	"unsafe"
 )
 
 func bindTestExecutorDriver(t *testing.T, p *P) (*ExecutorDriver, *ExecutorRegistry, *WaitRegistrationTable, ExecutorHandle) {
@@ -368,9 +369,9 @@ func TestExecutorDriverPostSleepRace(t *testing.T) {
 	}
 }
 
-func TestExecutorDriverRejectsUnclosedLastGTerminal(t *testing.T) {
+func TestExecutorDriverTerminalCloseDoesNotRedestroy(t *testing.T) {
 	p := new(P)
-	_, _, _, _ = bindTestExecutorDriver(t, p)
+	driver, registry, waits, executor := bindTestExecutorDriver(t, p)
 	task := newYieldingTestG(t, "driver-terminal-boundary")
 	if !Enqueue(p, task.g) {
 		t.Fatal("enqueue bound terminal task")
@@ -393,15 +394,240 @@ func TestExecutorDriverRejectsUnclosedLastGTerminal(t *testing.T) {
 		t.Fatal("check bound terminal destroy")
 	}
 	releaseTestFrame(t, task.g, task.frame)
-	if next, committed := Destroyed(p, task.g, action); committed || next != (Action{}) {
-		t.Fatalf("last G crossed active executor binding = (%+v, %t)", next, committed)
+	slot, slotOK := executorSlot(registry, executor)
+	if !slotOK || !executorAcquireProducer(slot) {
+		t.Fatal("pin terminal executor producer")
 	}
-	if AcknowledgeTerminalSchedule(p, task.g, action) || TerminalG(p, task.g) ||
-		preemptLoad(&p.executorMode) != executorModeBound {
-		t.Fatal("bound terminal failure was misclassified as a legacy request race")
+	if result := registry.Request(executor); result != ExecutorRequestPublished {
+		t.Fatalf("request terminal executor before close = %d", result)
 	}
-	// This is an intentional fail-closed boundary, not a recoverable test
-	// teardown path: the production terminal close/join/retry action is a later
-	// phase. Keep the backing allocation alive while checking poisoned state.
+	closeAction, committed := Destroyed(p, task.g, action)
+	if !committed || closeAction.Kind != ActionTerminalExecutorClose || closeAction.Handle != nil {
+		t.Fatalf("begin last-G executor close = (%+v, %t)", closeAction, committed)
+	}
+	if p.action != closeAction || driver.state != executorDriverTerminalClosing ||
+		driver.terminalKind != action.Kind || task.g.root != nil || registry.ObserveRequested(executor) {
+		t.Fatal("terminal close did not hide the destroyed handle and settle requests")
+	}
+	if got, ok := TerminalExecutorCloseDriver(p, task.g, closeAction); !ok || got != driver {
+		t.Fatalf("terminal close driver = (%p, %t), want %p", got, ok, driver)
+	}
+	if got, ok := TerminalExecutorCloseDriver(p, new(G), closeAction); ok || got != nil ||
+		ConfirmExecutorClose(driver) {
+		t.Fatal("terminal close accepted the wrong G or the generic close path")
+	}
+	if stale, ok := Destroyed(p, task.g, action); ok || stale != (Action{}) ||
+		AcknowledgeTerminalSchedule(p, task.g, action) || TerminalG(p, task.g) {
+		t.Fatal("stale destroyed action crossed the handle-free close marker")
+	}
+	if result := registry.Request(executor); result != ExecutorRequestClosed {
+		t.Fatalf("request after terminal seal = %d", result)
+	}
+	if completed, terminal, ok := ConfirmTerminalExecutorClose(driver); ok || completed != nil || terminal != (Action{}) {
+		t.Fatalf("terminal close confirmed before producer join = (%p, %+v, %t)", completed, terminal, ok)
+	}
+	executorReleaseProducer(slot)
+	completed, terminal, ok := ConfirmTerminalExecutorClose(driver)
+	if !ok || completed != task.g || terminal.Kind != ActionComplete || terminal.Handle != nil || !TerminalG(p, task.g) {
+		t.Fatalf("confirm last-G executor close = (%p, %+v, %t), terminal=%t", completed, terminal, ok, TerminalG(p, task.g))
+	}
+	if *driver != (ExecutorDriver{}) || !waits.CanRelease() || !registry.CanRelease() {
+		t.Fatal("terminal close retained stable executor ownership")
+	}
+	if completed, repeated, ok := ConfirmTerminalExecutorClose(driver); ok || completed != nil || repeated != (Action{}) {
+		t.Fatalf("terminal close confirmed twice = (%p, %+v, %t)", completed, repeated, ok)
+	}
+	runtime.KeepAlive(task.frame.memory)
+}
+
+func TestExecutorDriverTerminalCloseRequestRace(t *testing.T) {
+	const iterations = 300
+	type destroyResult struct {
+		action Action
+		ok     bool
+	}
+	for iteration := 0; iteration < iterations; iteration++ {
+		p := new(P)
+		driver, registry, waits, executor := bindTestExecutorDriver(t, p)
+		task := newYieldingTestG(t, "driver-terminal-request-race")
+		if !Enqueue(p, task.g) {
+			t.Fatalf("iteration %d: enqueue terminal race G", iteration)
+		}
+		if next, ok := NextRunnable(p); !ok || next != task.g {
+			t.Fatalf("iteration %d: dequeue terminal race G", iteration)
+		}
+		action := beginWaitTestResume(t, p, task)
+		task.frame.header.SuspendReason = uint16(SuspendFrameComplete)
+		task.frame.header.Lifecycle = uint16(FrameFinalSuspended)
+		if !PrepareComplete(task.g, task.handle, task.frame.header) {
+			t.Fatalf("iteration %d: prepare terminal race completion", iteration)
+		}
+		action, ok := Resumed(p, task.g, action)
+		if !ok || action.Kind != ActionCheckDestroy {
+			t.Fatalf("iteration %d: resume terminal race completion", iteration)
+		}
+		action, ok = Checked(p, task.g, action, true)
+		if !ok || action.Kind != ActionDestroy {
+			t.Fatalf("iteration %d: check terminal race destroy", iteration)
+		}
+		releaseTestFrame(t, task.g, task.frame)
+
+		start := make(chan struct{})
+		destroyed := make(chan destroyResult, 1)
+		requested := make(chan ExecutorRequestResult, 1)
+		go func() {
+			<-start
+			next, committed := Destroyed(p, task.g, action)
+			destroyed <- destroyResult{action: next, ok: committed}
+		}()
+		go func() {
+			<-start
+			requested <- registry.Request(executor)
+		}()
+		close(start)
+		closed, request := <-destroyed, <-requested
+		if !closed.ok || closed.action.Kind != ActionTerminalExecutorClose || closed.action.Handle != nil ||
+			(request != ExecutorRequestPublished && request != ExecutorRequestClosed) {
+			t.Fatalf("iteration %d: terminal close/request race = (%+v, %d)", iteration, closed, request)
+		}
+		completed, terminal, ok := ConfirmTerminalExecutorClose(driver)
+		if !ok || completed != task.g || terminal.Kind != ActionComplete || !TerminalG(p, task.g) ||
+			*driver != (ExecutorDriver{}) || !waits.CanRelease() || !registry.CanRelease() {
+			t.Fatalf("iteration %d: confirm terminal request race = (%p, %+v, %t)", iteration, completed, terminal, ok)
+		}
+		runtime.KeepAlive(task.frame.memory)
+	}
+}
+
+func TestExecutorDriverPanicTerminalCloseDoesNotRedestroy(t *testing.T) {
+	p := new(P)
+	driver, registry, waits, _ := bindTestExecutorDriver(t, p)
+	g := new(G)
+	if !InitG(g) {
+		t.Fatal("initialize panic terminal G")
+	}
+	rootHandle, leafHandle := unsafe.Pointer(new(byte)), unsafe.Pointer(new(byte))
+	root := newTestFrame(t, g, rootHandle, nil)
+	leaf := newTestFrame(t, g, leafHandle, rootHandle)
+	if !AdoptRoot(g, rootHandle) || !Enqueue(p, g) {
+		t.Fatal("adopt and enqueue panic terminal G")
+	}
+	if next, ok := NextRunnable(p); !ok || next != g {
+		t.Fatal("dequeue panic terminal G")
+	}
+	action, ok := BeginRunG(p, g)
+	if !ok {
+		t.Fatal("begin panic terminal G")
+	}
+	action, ok = Checked(p, g, action, false)
+	if !ok || action.Kind != ActionResume || action.Handle != rootHandle {
+		t.Fatal("resume panic terminal root")
+	}
+	root.header.SuspendReason = uint16(SuspendCall)
+	root.header.Lifecycle = uint16(FrameSuspended)
+	if !PrepareAwait(g, rootHandle, leafHandle) {
+		t.Fatal("prepare panic terminal child")
+	}
+	action, ok = Resumed(p, g, action)
+	if !ok || action.Kind != ActionCheckResume || action.Handle != leafHandle {
+		t.Fatal("dispatch panic terminal child")
+	}
+	action, ok = Checked(p, g, action, false)
+	if !ok || action.Kind != ActionResume || action.Handle != leafHandle {
+		t.Fatal("resume panic terminal child")
+	}
+	typeWord, dataWord := new(byte), new(byte)
+	leaf.header.SuspendReason = uint16(SuspendPanic)
+	leaf.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PreparePanic(g, leafHandle, leaf.header, unsafe.Pointer(typeWord), unsafe.Pointer(dataWord)) {
+		t.Fatal("publish panic terminal record")
+	}
+	action, ok = Resumed(p, g, action)
+	if !ok || action.Kind != ActionCheckDestroy || action.Handle != leafHandle {
+		t.Fatal("prepare panic leaf destroy")
+	}
+	action, ok = Checked(p, g, action, true)
+	if !ok || action.Kind != ActionDestroy {
+		t.Fatal("check panic leaf destroy")
+	}
+	releaseTestFrame(t, g, leaf)
+	action, ok = Destroyed(p, g, action)
+	if !ok || action.Kind != ActionPanicDestroy || action.Handle != rootHandle {
+		t.Fatalf("panic ancestor action = (%+v, %t)", action, ok)
+	}
+	releaseTestFrame(t, g, root)
+	closeAction, ok := PanicDestroyed(p, g, action)
+	if !ok || closeAction.Kind != ActionTerminalExecutorClose || closeAction.Handle != nil ||
+		driver.terminalKind != action.Kind || g.root != nil {
+		t.Fatalf("panic terminal close action = (%+v, %t)", closeAction, ok)
+	}
+	completed, terminal, ok := ConfirmTerminalExecutorClose(driver)
+	if !ok || completed != g || terminal.Kind != ActionPanicComplete || terminal.Handle != nil {
+		t.Fatalf("confirm panic terminal close = (%p, %+v, %t)", completed, terminal, ok)
+	}
+	record, published := LoadPanicRecord(g)
+	if !published || record.TypeWord != unsafe.Pointer(typeWord) || record.DataWord != unsafe.Pointer(dataWord) ||
+		g.state != GDead || g.panicUnwind || preemptLoad(&p.schedule) != scheduleDisabled ||
+		preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil ||
+		!waits.CanRelease() || !registry.CanRelease() || *driver != (ExecutorDriver{}) {
+		t.Fatalf("panic terminal close state = record:(%+v,%t) g:%d unwind:%t schedule:%d mode:%d",
+			record, published, g.state, g.panicUnwind, preemptLoad(&p.schedule), preemptLoad(&p.executorMode))
+	}
+	if TerminalG(p, g) || ReclaimableG(g) {
+		t.Fatal("panic terminal close was misclassified as normal completion")
+	}
+	runtime.KeepAlive(typeWord)
+	runtime.KeepAlive(dataWord)
+	runtime.KeepAlive(root.memory)
+	runtime.KeepAlive(leaf.memory)
+}
+
+func TestExecutorDriverInitialPanicTerminalCloseDoesNotRedestroy(t *testing.T) {
+	p := new(P)
+	driver, registry, waits, _ := bindTestExecutorDriver(t, p)
+	task := newYieldingTestG(t, "driver-initial-panic-terminal")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue initial panic terminal G")
+	}
+	if next, ok := NextRunnable(p); !ok || next != task.g {
+		t.Fatal("dequeue initial panic terminal G")
+	}
+	action := beginWaitTestResume(t, p, task)
+	typeWord, dataWord := new(byte), new(byte)
+	task.frame.header.SuspendReason = uint16(SuspendPanic)
+	task.frame.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PreparePanic(task.g, task.handle, task.frame.header, unsafe.Pointer(typeWord), unsafe.Pointer(dataWord)) {
+		t.Fatal("publish initial panic terminal record")
+	}
+	action, ok := Resumed(p, task.g, action)
+	if !ok || action.Kind != ActionCheckDestroy || action.Handle != task.handle {
+		t.Fatal("prepare initial panic terminal destroy")
+	}
+	action, ok = Checked(p, task.g, action, true)
+	if !ok || action.Kind != ActionDestroy {
+		t.Fatal("check initial panic terminal destroy")
+	}
+	releaseTestFrame(t, task.g, task.frame)
+	closeAction, ok := Destroyed(p, task.g, action)
+	if !ok || closeAction.Kind != ActionTerminalExecutorClose || closeAction.Handle != nil ||
+		driver.terminalKind != action.Kind || task.g.root != nil || !task.g.panicUnwind {
+		t.Fatalf("initial panic terminal close = (%+v, %t)", closeAction, ok)
+	}
+	if stale, ok := Destroyed(p, task.g, action); ok || stale != (Action{}) {
+		t.Fatal("initial panic stale destroy crossed close marker")
+	}
+	completed, terminal, ok := ConfirmTerminalExecutorClose(driver)
+	if !ok || completed != task.g || terminal.Kind != ActionPanicComplete || terminal.Handle != nil {
+		t.Fatalf("confirm initial panic terminal close = (%p, %+v, %t)", completed, terminal, ok)
+	}
+	record, published := LoadPanicRecord(task.g)
+	if !published || record.TypeWord != unsafe.Pointer(typeWord) || record.DataWord != unsafe.Pointer(dataWord) ||
+		task.g.state != GDead || task.g.panicUnwind || preemptLoad(&p.schedule) != scheduleDisabled ||
+		!waits.CanRelease() || !registry.CanRelease() || *driver != (ExecutorDriver{}) {
+		t.Fatalf("initial panic terminal state = record:(%+v,%t) g:%d unwind:%t schedule:%d",
+			record, published, task.g.state, task.g.panicUnwind, preemptLoad(&p.schedule))
+	}
+	runtime.KeepAlive(typeWord)
+	runtime.KeepAlive(dataWord)
 	runtime.KeepAlive(task.frame.memory)
 }
