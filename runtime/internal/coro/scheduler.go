@@ -26,6 +26,7 @@ const (
 	GRunnable
 	GRunning
 	GDispatching
+	GCanceling
 	GWaiting
 	GDead
 )
@@ -78,6 +79,7 @@ const (
 const (
 	scheduleIdle uint32 = iota
 	scheduleRequested
+	scheduleStopping
 	scheduleDisabled
 )
 
@@ -122,6 +124,13 @@ const (
 	// ticket has been linked into P's wait set. A platform event source may now
 	// complete the ticket; only PollReady/NextRunnable can enqueue its G again.
 	ActionPark
+	// ActionCancelDestroy asks the runtime shutdown adapter to call
+	// llvm.coro.destroy directly on one suspended frame. It never performs a
+	// coro.done check and never resumes an ancestor frame.
+	ActionCancelDestroy
+	// ActionCancelComplete transfers one fully destroyed spawned G to the task
+	// storage reclaimer.
+	ActionCancelComplete
 )
 
 // Action is one deterministic scheduler operation or control event. Handle is
@@ -133,7 +142,7 @@ type Action struct {
 }
 
 func setAction(p *P, kind ActionKind, handle unsafe.Pointer) (Action, bool) {
-	if p == nil || kind == ActionInvalid || kind == ActionComplete || kind == ActionYield || kind == ActionPark || handle == nil {
+	if p == nil || kind == ActionInvalid || kind == ActionComplete || kind == ActionYield || kind == ActionPark || kind == ActionCancelComplete || handle == nil {
 		return Action{}, false
 	}
 	action := Action{Kind: kind, Handle: handle}

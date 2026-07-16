@@ -471,7 +471,7 @@ func TestRequestScheduleConcurrentCoalescing(t *testing.T) {
 	if count, ok := PollReady(p); !ok || count != 0 || preemptLoad(&p.schedule) != scheduleIdle {
 		t.Fatalf("idle schedule acknowledgement = (%d, %t), gate=%d", count, ok, preemptLoad(&p.schedule))
 	}
-	preemptStore(&p.schedule, scheduleRequested+1)
+	preemptStore(&p.schedule, scheduleDisabled+1)
 	if RequestSchedule(p) {
 		t.Fatal("corrupt schedule gate accepted")
 	}

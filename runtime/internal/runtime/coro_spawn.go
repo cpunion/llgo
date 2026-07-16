@@ -23,12 +23,10 @@ import (
 	"github.com/goplus/llgo/runtime/internal/coroalloc"
 )
 
-// Safe cancellation of every ready/suspended background G at command-main
-// return is not implemented yet. Keep the production C ABI present for
-// compiler/link validation, but fail closed before allocating a child. Core and
-// adapter tests call the unexported begin/commit functions to exercise the
-// complete scheduler transaction without claiming production Go semantics.
-const coroSpawnProductionEnabledV1 = false
+// Version one is production-enabled only for plans whose spawn targets are
+// proven YieldOnly/AwaitStructured. Command shutdown rejects every wait queue
+// and directly destroys ready children deepest-to-root.
+const coroSpawnProductionEnabledV1 = true
 
 func coroSpawnBeginV1(parentPointer unsafe.Pointer) (unsafe.Pointer, bool) {
 	parent := (*coroG)(parentPointer)

@@ -73,11 +73,54 @@ func coroRun(p *coroP, main *coroG) bool {
 		if !coroRunG(p, g) {
 			return false
 		}
+		if g == main && coroProgramLifecycleV1State == coroProgramMainReturnRequestedV1 && !coro.DeadG(main) {
+			// The compiler hook is valid only on main's normal continuation
+			// immediately before the bootstrap root's final suspend. Yielding or
+			// parking after publishing the marker is an ABI violation.
+			return false
+		}
 		if g == main && coro.DeadG(main) {
-			// Command main must not drain background goroutines after returning.
-			// Until the runtime can cancel every ready/suspended child safely, only
-			// a fully terminal P is a supported main-return state.
-			return coro.TerminalG(p, main)
+			// Command main never drains background goroutines. The program adapter
+			// either enters the explicit ready-child cancellation protocol after a
+			// normal-main hook, or fails closed.
+			return true
+		}
+	}
+}
+
+// coroCancelReady destroys every ready child deepest-to-root. It deliberately
+// never calls coro.done or coro.resume: command shutdown owns only suspended
+// YieldOnly/AwaitStructured frame chains.
+func coroCancelReady(p *coroP) bool {
+	for {
+		g, action, ok := coro.NextCommandCancel(p)
+		if !ok {
+			return false
+		}
+		if g == nil {
+			return action.Kind == coro.ActionInvalid && action.Handle == nil
+		}
+		for {
+			switch action.Kind {
+			case coro.ActionCancelDestroy:
+				coroHandleDestroy(action.Handle)
+				action, ok = coro.CancelDestroyed(p, g, action)
+				if !ok {
+					return false
+				}
+			case coro.ActionCancelComplete:
+				if action.Handle != nil || !coroReleaseCompletedTask(g) {
+					return false
+				}
+				// g may have been physically freed. Never inspect it again.
+				g = nil
+				break
+			default:
+				return false
+			}
+			if g == nil {
+				break
+			}
 		}
 	}
 }

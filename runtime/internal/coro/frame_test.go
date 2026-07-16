@@ -282,6 +282,7 @@ func TestTerminalGRejectsResidualSchedulerState(t *testing.T) {
 		{"wait tail", func(p *P) { p.waitTail = dummyG }},
 		{"schedule idle", func(p *P) { preemptStore(&p.schedule, scheduleIdle) }},
 		{"schedule requested", func(p *P) { preemptStore(&p.schedule, scheduleRequested) }},
+		{"schedule stopping", func(p *P) { preemptStore(&p.schedule, scheduleStopping) }},
 		{"in resume", func(p *P) { p.inResume = true }},
 		{"action kind", func(p *P) { p.action.Kind = ActionResume }},
 		{"action handle", func(p *P) { p.action.Handle = dummyActionHandle }},

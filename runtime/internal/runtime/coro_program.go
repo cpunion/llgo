@@ -29,6 +29,8 @@ const (
 	coroProgramUnusedV1 coroProgramLifecycleV1 = iota
 	coroProgramBegunV1
 	coroProgramRunningV1
+	coroProgramMainReturnRequestedV1
+	coroProgramStoppingV1
 	coroProgramCompleteV1
 	coroProgramFailedV1
 )
@@ -96,11 +98,49 @@ func coroProgramRunV1(gPointer, handle unsafe.Pointer) bool {
 		return false
 	}
 	coroProgramLifecycleV1State = coroProgramRunningV1
-	if !coroRun(&coroProgramPV1State, &coroProgramGV1State) || !coro.TerminalG(&coroProgramPV1State, &coroProgramGV1State) {
+	if !coroRun(&coroProgramPV1State, &coroProgramGV1State) {
+		coroProgramLifecycleV1State = coroProgramFailedV1
+		return false
+	}
+	switch coroProgramLifecycleV1State {
+	case coroProgramRunningV1:
+		// Backward-compatible no-spawn startup tables do not yet contain the
+		// explicit main-return hook. They remain valid only when the whole P is
+		// already terminal; a surviving child fails closed.
+		if !coro.TerminalG(&coroProgramPV1State, &coroProgramGV1State) {
+			coroProgramLifecycleV1State = coroProgramFailedV1
+			return false
+		}
+	case coroProgramMainReturnRequestedV1:
+		if !coro.TerminalG(&coroProgramPV1State, &coroProgramGV1State) {
+			if !coro.BeginCommandShutdown(&coroProgramPV1State, &coroProgramGV1State) {
+				coroProgramLifecycleV1State = coroProgramFailedV1
+				return false
+			}
+			coroProgramLifecycleV1State = coroProgramStoppingV1
+			if !coroCancelReady(&coroProgramPV1State) ||
+				!coro.FinishCommandShutdown(&coroProgramPV1State, &coroProgramGV1State) ||
+				!coro.TerminalG(&coroProgramPV1State, &coroProgramGV1State) {
+				coroProgramLifecycleV1State = coroProgramFailedV1
+				return false
+			}
+		}
+	default:
 		coroProgramLifecycleV1State = coroProgramFailedV1
 		return false
 	}
 	coroProgramLifecycleV1State = coroProgramCompleteV1
+	return true
+}
+
+func coroProgramMainReturnV1(gPointer unsafe.Pointer) bool {
+	if coroProgramLifecycleV1State != coroProgramRunningV1 ||
+		gPointer != unsafe.Pointer(&coroProgramGV1State) ||
+		!coro.CommandMainReturnPoint(&coroProgramPV1State, &coroProgramGV1State) {
+		coroProgramLifecycleV1State = coroProgramFailedV1
+		return false
+	}
+	coroProgramLifecycleV1State = coroProgramMainReturnRequestedV1
 	return true
 }
 
@@ -118,5 +158,12 @@ func __llgo_coro_program_begin_v1(manifest, expectedFactory unsafe.Pointer) unsa
 func __llgo_coro_program_run_v1(g, handle unsafe.Pointer) {
 	if !coroProgramRunV1(g, handle) {
 		coroRuntimeAbort("invalid coroutine program execution")
+	}
+}
+
+//export __llgo_coro_program_main_return_v1
+func __llgo_coro_program_main_return_v1(g unsafe.Pointer) {
+	if !coroProgramMainReturnV1(g) {
+		coroRuntimeAbort("invalid coroutine command main return")
 	}
 }
