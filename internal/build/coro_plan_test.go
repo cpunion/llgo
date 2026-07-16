@@ -463,6 +463,22 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 		}
 	})
 
+	t.Run("child await rejects nested c-archive", func(t *testing.T) {
+		ctx := &context{buildConf: &Config{
+			BuildMode:                 BuildModeCArchive,
+			EnableCoroEntryResolution: true,
+			EnableCoroPhysicalABI:     true,
+			EnableCoroChildAwait:      true,
+		}}
+		err := buildCoroPlan(ctx)
+		if err == nil || !strings.Contains(err.Error(), "c-archive requires flattened package members") {
+			t.Fatalf("buildCoroPlan error = %v, want c-archive extraction rejection", err)
+		}
+		if ctx.coroPlan != nil || ctx.clCompilation != nil {
+			t.Fatal("invalid c-archive configuration installed coroutine compilation state")
+		}
+	})
+
 	t.Run("entry resolution requires prepared emission universe", func(t *testing.T) {
 		builderCalls := 0
 		ctx := &context{buildConf: &Config{
@@ -679,6 +695,7 @@ func TestCoroEntryResolutionUsesPlanMatchedPackageCache(t *testing.T) {
 	seedPkg.ArchiveFile = archive.Name()
 	seedPkg.NeedRt = true
 	seedPkg.NeedPyInit = true
+	seedPkg.CoroRootAnchorV1 = "__llgo_coro_root_package_v1.0123456789abcdef0123456789abcdef"
 	if err := seedCtx.saveToCache(seedPkg); err != nil {
 		t.Fatalf("seed cache: %v", err)
 	}
@@ -693,6 +710,9 @@ func TestCoroEntryResolutionUsesPlanMatchedPackageCache(t *testing.T) {
 	}
 	if !matchingPkg.NeedRt || !matchingPkg.NeedPyInit {
 		t.Fatalf("cache metadata runtime flags = %v/%v, want true/true", matchingPkg.NeedRt, matchingPkg.NeedPyInit)
+	}
+	if matchingPkg.CoroRootAnchorV1 != seedPkg.CoroRootAnchorV1 {
+		t.Fatalf("cache metadata coroutine root anchor = %q, want %q", matchingPkg.CoroRootAnchorV1, seedPkg.CoroRootAnchorV1)
 	}
 
 	digestB := strings.Repeat("b", 64)
@@ -766,6 +786,31 @@ func TestCoroEntryResolutionBuildsPreparedRuntimePackages(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			if got := shouldBuildRuntimePackages(&test.conf, test.needRuntime, test.needPyInit); got != test.want {
 				t.Fatalf("shouldBuildRuntimePackages = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestCoroRuntimeLinkRequirements(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		conf        Config
+		needRuntime bool
+		needPyInit  bool
+		wantInit    bool
+		wantLink    bool
+	}{
+		{name: "host keeps runtime link", conf: Config{}, wantLink: true},
+		{name: "named target stays lazy", conf: Config{Target: "embedded"}},
+		{name: "entry resolution alone stays lazy", conf: Config{Target: "embedded", EnableCoroEntryResolution: true}},
+		{name: "child await initializes and links runtime", conf: Config{Target: "embedded", EnableCoroChildAwait: true}, wantInit: true, wantLink: true},
+		{name: "legacy runtime reference", conf: Config{Target: "embedded"}, needRuntime: true, wantInit: true, wantLink: true},
+		{name: "python links without runtime init", conf: Config{Target: "embedded"}, needPyInit: true, wantLink: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			gotInit, gotLink := runtimeLinkRequirements(&test.conf, test.needRuntime, test.needPyInit)
+			if gotInit != test.wantInit || gotLink != test.wantLink {
+				t.Fatalf("runtime link requirements = init:%v link:%v, want init:%v link:%v", gotInit, gotLink, test.wantInit, test.wantLink)
 			}
 		})
 	}

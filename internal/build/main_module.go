@@ -27,6 +27,7 @@
 package build
 
 import (
+	"fmt"
 	"go/token"
 	"go/types"
 
@@ -37,15 +38,17 @@ import (
 )
 
 type genConfig struct {
-	rtInit        bool
-	pyInit        bool
-	abiInit       int
-	methodByIndex map[int]none
-	methodByName  map[string]none
-	abiSymbols    map[string]none
-	funcInfo      []funcInfoRecord
-	pcLineInfo    []pcLineRecord
-	funcInfoStubs []funcInfoStubRecord
+	rtInit           bool
+	pyInit           bool
+	abiInit          int
+	coroRootAnchors  []string
+	coroManifestHash [16]byte
+	methodByIndex    map[int]none
+	methodByName     map[string]none
+	abiSymbols       map[string]none
+	funcInfo         []funcInfoRecord
+	pcLineInfo       []pcLineRecord
+	funcInfoStubs    []funcInfoStubRecord
 }
 
 // genMainModule generates the main entry module for an llgo program.
@@ -56,6 +59,7 @@ type genConfig struct {
 func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *genConfig) Package {
 	prog := ctx.prog
 	mainPkg := prog.NewPackage("", pkg.ID+".main")
+	defer mainPkg.MaterializePreserveSyms()
 
 	argcVar := mainPkg.NewVarEx("__llgo_argc", prog.Pointer(prog.Int32()))
 	argcVar.Init(prog.Zero(prog.Int32()))
@@ -64,6 +68,8 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 	argvVar := mainPkg.NewVarEx("__llgo_argv", prog.Pointer(argvValueType))
 	argvVar.InitNil()
 	emitFuncInfoTable(ctx, mainPkg, cfg.funcInfo, cfg.pcLineInfo, cfg.funcInfoStubs)
+	emitCoroControlWrappers(ctx, mainPkg)
+	emitCoroProgramManifest(ctx, mainPkg, cfg)
 
 	exportFile := pkg.ExportFile
 	if exportFile == "" {
@@ -125,6 +131,95 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 	}
 
 	return mainAPkg
+}
+
+// emitCoroControlWrappers defines the compiler-owned handle control boundary
+// used by the v1 scheduler. Keeping the LLVM coroutine intrinsics in the entry
+// module gives every build mode one fixed C ABI without exposing LLVM's handle
+// representation to the runtime.
+func emitCoroControlWrappers(ctx *context, pkg llssa.Package) {
+	if !ctx.buildConf.EnableCoroChildAwait {
+		return
+	}
+
+	handleType := types.Typ[types.UnsafePointer]
+	controlSignature := newSignature([]types.Type{handleType}, nil)
+
+	resume := pkg.NewFunc("__llgo_coro_resume_v1", controlSignature, llssa.InC)
+	resumeBody := resume.MakeBody(1)
+	resumeBody.CoroResume(resume.Param(0))
+	resumeBody.Return()
+
+	done := pkg.NewFunc("__llgo_coro_done_v1", newSignature(
+		[]types.Type{handleType},
+		[]types.Type{types.Typ[types.Bool]},
+	), llssa.InC)
+	doneBody := done.MakeBody(1)
+	doneBody.Return(doneBody.CoroDone(done.Param(0)))
+
+	destroy := pkg.NewFunc("__llgo_coro_destroy_v1", controlSignature, llssa.InC)
+	destroyBody := destroy.MakeBody(1)
+	destroyBody.CoroDestroy(destroy.Param(0))
+	destroyBody.Return()
+}
+
+const coroProgramManifestSymbolV1 = "__llgo_coro_program_manifest_v1"
+
+func emitCoroProgramManifest(ctx *context, pkg llssa.Package, cfg *genConfig) {
+	if ctx == nil || ctx.buildConf == nil || !ctx.buildConf.EnableCoroChildAwait {
+		return
+	}
+	prog := pkg.Prog
+	anchorType := prog.Struct(
+		prog.Uint32(),
+		prog.Uint32(),
+		prog.Uint64(),
+		prog.Uint64(),
+		prog.Uintptr(),
+		prog.VoidPtr(),
+	)
+	anchors := make([]llssa.Expr, len(cfg.coroRootAnchors))
+	for i, name := range cfg.coroRootAnchors {
+		anchor := pkg.NewVarEx(name, prog.Pointer(anchorType))
+		global := pkg.Module().NamedGlobal(name)
+		global.SetLinkage(llvm.ExternalLinkage)
+		global.SetVisibility(llvm.HiddenVisibility)
+		anchors[i] = anchor.Expr
+	}
+	pkg.NewCoroProgramManifest(coroProgramManifestSymbolV1, llssa.CoroProgramManifestOptions{
+		Version:        1,
+		ABIHash:        cfg.coroManifestHash,
+		PackageAnchors: anchors,
+	})
+}
+
+// lowerCoroControlWrappers runs the coroutine cleanup pipeline before the
+// entry module reaches object selection. TargetMachine object emission cannot
+// select raw llvm.coro.resume/done/destroy intrinsics; keeping this step next to
+// their definitions makes the requirement independent of optimization level,
+// LTO mode, or whether clang participates in the final codegen path.
+func lowerCoroControlWrappers(ctx *context, pkg llssa.Package) error {
+	if ctx == nil || ctx.buildConf == nil || !ctx.buildConf.EnableCoroChildAwait {
+		return nil
+	}
+	if pkg == nil || ctx.prog == nil {
+		return fmt.Errorf("coroutine control lowering requires an entry module and program")
+	}
+	mod := pkg.Module()
+	mod.SetDataLayout(ctx.prog.DataLayout())
+	mod.SetTarget(ctx.prog.TargetSpec().Triple)
+	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+		return fmt.Errorf("verify coroutine control wrappers before lowering: %w", err)
+	}
+	options := llvm.NewPassBuilderOptions()
+	defer options.Dispose()
+	if err := mod.RunPasses("default<O0>", ctx.prog.TargetMachine(), options); err != nil {
+		return fmt.Errorf("lower coroutine control wrappers: %w", err)
+	}
+	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+		return fmt.Errorf("verify coroutine control wrappers after lowering: %w", err)
+	}
+	return nil
 }
 
 func filterAbiSymbol(abiInit int, sym *llssa.AbiSymbol) bool {

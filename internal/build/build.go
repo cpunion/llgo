@@ -688,6 +688,9 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	if ctx.buildConf.EnableCoroChildAwait && !ctx.buildConf.EnableCoroPhysicalABI {
 		return fmt.Errorf("enable coroutine child await: coroutine physical ABI is required")
 	}
+	if ctx.buildConf.EnableCoroChildAwait && ctx.buildConf.BuildMode == BuildModeCArchive {
+		return fmt.Errorf("enable coroutine child await: c-archive requires flattened package members and an explicit host bootstrap extraction contract")
+	}
 	builder := ctx.buildConf.CoroPlanBuilder
 	if builder == nil {
 		if ctx.buildConf.EnableCoroEntryResolution {
@@ -1200,6 +1203,17 @@ func shouldBuildRuntimePackages(conf *Config, needRuntime, needPyInit bool) bool
 	return needRuntime || needPyInit || conf.Target == "" || conf.EnableCoroEntryResolution
 }
 
+// runtimeLinkRequirements keeps active child-await runtime initialization on
+// the same path as legacy runtime references without changing the lazy-link
+// behavior of entry-resolution-only named targets.
+func runtimeLinkRequirements(conf *Config, needRuntime, needPyInit bool) (initRuntime, linkRuntime bool) {
+	if conf != nil && conf.EnableCoroChildAwait {
+		needRuntime = true
+	}
+	host := conf != nil && conf.Target == ""
+	return needRuntime, needRuntime || needPyInit || host
+}
+
 func appendExternalLinkArgs(ctx *context, aPkg *aPackage, spec string) {
 	// need to be linked with external library
 	// format: ';' separated alternative link methods. e.g.
@@ -1476,8 +1490,17 @@ func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, outputPa
 		}
 	}
 
-	// Only link runtime objects when needed (or for host builds where runtime is always required).
-	if needRuntime || needPyInit || ctx.buildConf.Target == "" {
+	// The v1 frame hooks and scheduler adapter live in the runtime tree. Their
+	// references originate in compiler-generated coroutine ramps, so they do
+	// not pass through the ordinary runtimeFunc path that sets NeedRuntime.
+	// Force runtime initialization before any root factory can allocate a frame.
+	var linkRuntime bool
+	needRuntime, linkRuntime = runtimeLinkRequirements(ctx.buildConf, needRuntime, needPyInit)
+
+	// Only link runtime objects when needed (or for host builds where runtime is
+	// always required). The child-await requirement above participates through
+	// the same NeedRuntime path as ordinary runtime calls.
+	if linkRuntime {
 		linkArgs = append(linkArgs, rtLinkArgs...)
 		archiveInputs = append(archiveInputs, rtLinkInputs...)
 	}
@@ -1488,17 +1511,35 @@ func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, outputPa
 	funcInfo := prepareFuncInfoTableRecords(collectFuncInfo(linkedOrder), nil)
 	pcLineInfo := collectPCLineInfo(linkedOrder)
 	funcInfoStubs := collectFuncInfoStubRecords(linkedOrder, funcInfo)
+	var coroRootAnchors []string
+	var coroManifestHash [16]byte
+	if ctx.buildConf.EnableCoroChildAwait {
+		var err error
+		coroRootAnchors, err = collectLinkedCoroRootAnchors(linkedOrder)
+		if err != nil {
+			return err
+		}
+		coroManifestHash, err = coroProgramManifestHashV1(ctx, coroRootAnchors)
+		if err != nil {
+			return err
+		}
+	}
 	entryPkg := genMainModule(ctx, llssa.PkgRuntime, pkg, &genConfig{
-		rtInit:        needRuntime,
-		pyInit:        needPyInit,
-		abiInit:       needAbiInit,
-		methodByIndex: methodByIndex,
-		methodByName:  methodByName,
-		abiSymbols:    linkedModuleGlobals(linkedOrder),
-		funcInfo:      funcInfo,
-		pcLineInfo:    pcLineInfo,
-		funcInfoStubs: funcInfoStubs,
+		rtInit:           needRuntime,
+		pyInit:           needPyInit,
+		abiInit:          needAbiInit,
+		coroRootAnchors:  coroRootAnchors,
+		coroManifestHash: coroManifestHash,
+		methodByIndex:    methodByIndex,
+		methodByName:     methodByName,
+		abiSymbols:       linkedModuleGlobals(linkedOrder),
+		funcInfo:         funcInfo,
+		pcLineInfo:       pcLineInfo,
+		funcInfoStubs:    funcInfoStubs,
 	})
+	if err := lowerCoroControlWrappers(ctx, entryPkg.LPkg); err != nil {
+		return err
+	}
 	entryObjFile, err := exportObject(ctx, "entry_main", entryPkg.ExportFile, entryPkg.LPkg)
 	if err != nil {
 		return err
@@ -1772,6 +1813,17 @@ func buildPkg(ctx *context, aPkg *aPackage, verbose bool) error {
 	}
 
 	aPkg.LPkg = ret
+	emittedCoroRootAnchor := ret.CoroRootPackageAnchor()
+	if aPkg.CacheHit {
+		if aPkg.CoroRootAnchorV1 != emittedCoroRootAnchor {
+			return fmt.Errorf(
+				"cached package %s coroutine root anchor %q does not match frontend registration %q",
+				pkgPath, aPkg.CoroRootAnchorV1, emittedCoroRootAnchor,
+			)
+		}
+	} else {
+		aPkg.CoroRootAnchorV1 = emittedCoroRootAnchor
+	}
 	if hook := ctx.buildConf.ModuleHook; hook != nil {
 		hook(aPkg)
 	}
@@ -2084,9 +2136,10 @@ type aPackage struct {
 	rewriteVars map[string]string
 
 	// Cache related fields
-	Fingerprint string // fingerprint digest
-	Manifest    string // manifest text content
-	CacheHit    bool   // whether cache was hit
+	Fingerprint      string // fingerprint digest
+	Manifest         string // manifest text content
+	CoroRootAnchorV1 string // linker-visible coroutine root package anchor
+	CacheHit         bool   // whether cache was hit
 }
 
 type Package = *aPackage
