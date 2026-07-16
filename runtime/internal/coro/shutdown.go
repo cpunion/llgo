@@ -137,6 +137,7 @@ func BeginCommandShutdown(p *P, main *G) bool {
 	if p == nil || !ReclaimableG(main) || main.taskState != taskStorageStatic ||
 		preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil ||
 		p.current != nil || p.inResume || p.action.Kind != ActionInvalid || p.action.Handle != nil ||
+		p.timerPreemptBudget != 0 ||
 		!validReadyQueue(p) || !validWaitQueue(p) || p.waitHead != nil || p.waitTail != nil {
 		return false
 	}
@@ -177,6 +178,7 @@ func prepareCancelFrame(p *P, g *G, frame *Frame) (Action, bool) {
 func NextCommandCancel(p *P) (*G, Action, bool) {
 	if p == nil || preemptLoad(&p.schedule) != scheduleStopping || p.current != nil ||
 		p.inResume || p.action.Kind != ActionInvalid || p.action.Handle != nil ||
+		p.timerPreemptBudget != 0 ||
 		!validReadyQueue(p) || !validWaitQueue(p) || p.waitHead != nil || p.waitTail != nil {
 		return nil, Action{}, false
 	}
@@ -225,6 +227,7 @@ func CancelDestroyed(p *P, g *G, action Action) (Action, bool) {
 	g.state = GDead
 	g.runP = nil
 	p.current = nil
+	p.timerPreemptBudget = 0
 	p.action = Action{}
 	return Action{Kind: ActionCancelComplete}, true
 }
@@ -236,6 +239,7 @@ func FinishCommandShutdown(p *P, main *G) bool {
 	if p == nil || !ReclaimableG(main) || main.taskState != taskStorageStatic ||
 		preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil ||
 		p.current != nil || p.inResume || p.action.Kind != ActionInvalid || p.action.Handle != nil ||
+		p.timerPreemptBudget != 0 ||
 		!validReadyQueue(p) || !validWaitQueue(p) || p.readyHead != nil || p.readyTail != nil ||
 		p.waitHead != nil || p.waitTail != nil {
 		return false

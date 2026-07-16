@@ -174,7 +174,7 @@ func activeExecutorHandle(registry *ExecutorRegistry, handle ExecutorHandle) boo
 
 func idleExecutorScheduler(p *P) bool {
 	return p != nil && p.current == nil && !p.inResume && p.action.Kind == ActionInvalid && p.action.Handle == nil &&
-		validReadyQueue(p) && validWaitQueue(p)
+		p.timerPreemptBudget == 0 && validReadyQueue(p) && validWaitQueue(p)
 }
 
 // BindExecutor attaches a newly registered exact-zero executor gate and an
@@ -330,9 +330,10 @@ func PollExecutorAt(driver *ExecutorDriver, now int64) (waits, timers, promoted 
 }
 
 // NextExecutorTimerDeadline exposes the scheduler owner's current earliest
-// active absolute deadline without draining it. A later run-budget policy can
-// query this before BeginRunG so a continuously runnable G cannot hide timer
-// pressure. The query deliberately accepts no clock or callback.
+// active absolute deadline without draining it. BeginRunG queries this while
+// the scheduler is idle and arms its fixed safepoint budget so a continuously
+// runnable G cannot hide timer pressure. The query deliberately accepts no
+// clock or callback.
 func NextExecutorTimerDeadline(driver *ExecutorDriver) (deadline int64, hasDeadline, ok bool) {
 	if !validExecutorDriver(driver) || driver.timers == nil || driver.state != executorDriverActive ||
 		!idleExecutorScheduler(driver.p) {
