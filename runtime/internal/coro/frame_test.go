@@ -217,6 +217,69 @@ func TestSinglePSchedulerChildDestroyedBeforeParentResume(t *testing.T) {
 	runSchedulerScenario(t)
 }
 
+func TestTerminalGRejectsResidualSchedulerState(t *testing.T) {
+	if TerminalG(nil, nil) || TerminalG(new(P), nil) || TerminalG(nil, new(G)) {
+		t.Fatal("nil scheduler state reported terminal")
+	}
+	terminal := func() *G {
+		return &G{magic: gMagic, state: GDead}
+	}
+	if !TerminalG(new(P), terminal()) {
+		t.Fatal("strict zero-residue dead G did not report terminal")
+	}
+
+	dummyFrame := new(Frame)
+	dummyG := new(G)
+	tests := []struct {
+		name   string
+		mutate func(*G)
+	}{
+		{"magic", func(g *G) { g.magic = 0 }},
+		{"state", func(g *G) { g.state = GRunnable }},
+		{"root", func(g *G) { g.root = dummyFrame }},
+		{"active", func(g *G) { g.active = dummyFrame }},
+		{"frames", func(g *G) { g.frames = dummyFrame }},
+		{"pending kind", func(g *G) { g.pending.kind = pendingAwait }},
+		{"pending from", func(g *G) { g.pending.from = dummyFrame }},
+		{"pending target", func(g *G) { g.pending.target = dummyFrame }},
+		{"destroy target", func(g *G) { g.destroyTarget = dummyFrame }},
+		{"destroy root", func(g *G) { g.destroyRoot = true }},
+		{"ready link", func(g *G) { g.nextReady = dummyG }},
+		{"queued", func(g *G) { g.queued = true }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			g := terminal()
+			test.mutate(g)
+			if TerminalG(new(P), g) {
+				t.Fatal("G with residual scheduler state reported terminal")
+			}
+		})
+	}
+
+	dummyActionHandle := unsafe.Pointer(new(byte))
+	pTests := []struct {
+		name   string
+		mutate func(*P)
+	}{
+		{"current", func(p *P) { p.current = dummyG }},
+		{"ready head", func(p *P) { p.readyHead = dummyG }},
+		{"ready tail", func(p *P) { p.readyTail = dummyG }},
+		{"in resume", func(p *P) { p.inResume = true }},
+		{"action kind", func(p *P) { p.action.Kind = ActionResume }},
+		{"action handle", func(p *P) { p.action.Handle = dummyActionHandle }},
+	}
+	for _, test := range pTests {
+		t.Run("P "+test.name, func(t *testing.T) {
+			p := new(P)
+			test.mutate(p)
+			if TerminalG(p, terminal()) {
+				t.Fatal("P with residual scheduler state reported terminal")
+			}
+		})
+	}
+}
+
 func runSchedulerScenario(t *testing.T) {
 	t.Helper()
 	g := &G{}
@@ -324,6 +387,9 @@ func runSchedulerScenario(t *testing.T) {
 	}
 	if g.state != GDead || g.root != nil || g.active != nil || g.frames != nil || g.destroyTarget != nil || g.destroyRoot {
 		t.Fatalf("completed G retained state: state=%d root=%p active=%p frames=%p destroy=%p destroyRoot=%t", g.state, g.root, g.active, g.frames, g.destroyTarget, g.destroyRoot)
+	}
+	if !TerminalG(p, g) {
+		t.Fatal("completed G failed strict terminal-state validation")
 	}
 	if p.current != nil || p.readyHead != nil || p.readyTail != nil || p.inResume || p.action.Kind != ActionInvalid {
 		t.Fatalf("completed P retained state: current=%p head=%p tail=%p resume=%t action=%d", p.current, p.readyHead, p.readyTail, p.inResume, p.action.Kind)

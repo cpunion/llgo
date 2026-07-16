@@ -70,7 +70,7 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 	argvVar.InitNil()
 	emitFuncInfoTable(ctx, mainPkg, cfg.funcInfo, cfg.pcLineInfo, cfg.funcInfoStubs)
 	emitCoroControlWrappers(ctx, mainPkg)
-	emitCoroProgramManifest(ctx, mainPkg, cfg)
+	coroEntry := emitCoroProgramManifest(ctx, mainPkg, cfg)
 
 	exportFile := pkg.ExportFile
 	if exportFile == "" {
@@ -116,15 +116,28 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 
 	mainInit := declareNoArgFunc(mainPkg, pkg.PkgPath+".init")
 	mainMain := declareNoArgFunc(mainPkg, pkg.PkgPath+".main")
+	var coroBegin llssa.Function
+	var coroRun llssa.Function
+	if ctx.buildConf.EnableCoroProgramBootstrapRun {
+		if coroEntry.manifest.IsNil() || coroEntry.factory == nil {
+			panic("coroutine program bootstrap runtime enabled without a manifest and factory")
+		}
+		coroBegin = declareCoroProgramBeginV1(mainPkg)
+		coroRun = declareCoroProgramRunV1(mainPkg)
+	}
 
 	entryFn := defineEntryFunction(ctx, mainPkg, argcVar, argvVar, argvValueType, entryFunctions{
-		runtimeStub: runtimeStub,
-		mainInit:    mainInit,
-		mainMain:    mainMain,
-		pyInit:      pyInit,
-		pyFinalize:  pyFinalize,
-		rtInit:      rtInit,
-		abiInit:     abiInit,
+		runtimeStub:  runtimeStub,
+		mainInit:     mainInit,
+		mainMain:     mainMain,
+		pyInit:       pyInit,
+		pyFinalize:   pyFinalize,
+		rtInit:       rtInit,
+		abiInit:      abiInit,
+		coroManifest: coroEntry.manifest,
+		coroFactory:  coroEntry.factory,
+		coroBegin:    coroBegin,
+		coroRun:      coroRun,
 	})
 
 	if needStart(ctx) {
@@ -169,9 +182,14 @@ const (
 	coroProgramBootstrapSymbolV1 = "__llgo_coro_program_bootstrap_v1"
 )
 
-func emitCoroProgramManifest(ctx *context, pkg llssa.Package, cfg *genConfig) {
+type coroProgramEntryV1 struct {
+	manifest llssa.Expr
+	factory  llssa.Function
+}
+
+func emitCoroProgramManifest(ctx *context, pkg llssa.Package, cfg *genConfig) coroProgramEntryV1 {
 	if ctx == nil || ctx.buildConf == nil || !ctx.buildConf.EnableCoroChildAwait {
-		return
+		return coroProgramEntryV1{}
 	}
 	prog := pkg.Prog
 	anchorType := prog.Struct(
@@ -191,19 +209,37 @@ func emitCoroProgramManifest(ctx *context, pkg llssa.Package, cfg *genConfig) {
 		anchors[i] = anchor.Expr
 	}
 	var bootstrap llssa.Expr
+	var factory llssa.Function
 	if ctx.buildConf.EnableCoroProgramBootstrapABI {
 		if cfg.coroBootstrap == nil {
 			panic("coroutine program bootstrap ABI enabled without a validated startup table")
 		}
 		steps := make([]llssa.CoroProgramStep, len(cfg.coroBootstrap.Steps))
+		targets := make([]llssa.Function, len(cfg.coroBootstrap.Steps))
 		for i, step := range cfg.coroBootstrap.Steps {
 			target := declareNoArgFunc(pkg, step.Target)
+			targets[i] = target
 			steps[i] = llssa.CoroProgramStep{
 				Kind:   llssa.CoroProgramStepKind(step.Kind),
 				Flags:  step.Role,
 				Target: target.Expr,
 				Aux:    uint64(step.Aux),
 			}
+		}
+		if ctx.buildConf.EnableCoroProgramBootstrapRun {
+			if len(targets) != 2 {
+				panic("coroutine program bootstrap runtime requires exactly two static targets")
+			}
+			factory = emitCoroProgramBootstrapFactoryV1(
+				pkg,
+				cfg.coroBootstrap,
+				[2]llssa.Function{targets[0], targets[1]},
+				cfg.coroManifestHash,
+			)
+		}
+		var factoryExpr llssa.Expr
+		if factory != nil {
+			factoryExpr = factory.Expr
 		}
 		bootstrap = pkg.NewCoroProgramBootstrap(coroProgramBootstrapSymbolV1, llssa.CoroProgramBootstrapOptions{
 			Version: coroProgramBootstrapVersionV1,
@@ -212,14 +248,16 @@ func emitCoroProgramManifest(ctx *context, pkg llssa.Package, cfg *genConfig) {
 			// not a second externally visible ABI identity.
 			ABIHash: cfg.coroManifestHash,
 			Steps:   steps,
+			Factory: factoryExpr,
 		})
 	}
-	pkg.NewCoroProgramManifest(coroProgramManifestSymbolV1, llssa.CoroProgramManifestOptions{
+	manifest := pkg.NewCoroProgramManifest(coroProgramManifestSymbolV1, llssa.CoroProgramManifestOptions{
 		Version:        1,
 		ABIHash:        cfg.coroManifestHash,
 		PackageAnchors: anchors,
 		Bootstrap:      bootstrap,
 	})
+	return coroProgramEntryV1{manifest: manifest, factory: factory}
 }
 
 // lowerCoroControlWrappers runs the coroutine cleanup pipeline before the
@@ -289,13 +327,17 @@ func filterAbiSymbol(abiInit int, sym *llssa.AbiSymbol) bool {
 }
 
 type entryFunctions struct {
-	runtimeStub llssa.Function
-	mainInit    llssa.Function
-	mainMain    llssa.Function
-	pyInit      llssa.Function
-	pyFinalize  llssa.Function
-	rtInit      llssa.Function
-	abiInit     llssa.Function
+	runtimeStub  llssa.Function
+	mainInit     llssa.Function
+	mainMain     llssa.Function
+	pyInit       llssa.Function
+	pyFinalize   llssa.Function
+	rtInit       llssa.Function
+	abiInit      llssa.Function
+	coroManifest llssa.Expr
+	coroFactory  llssa.Function
+	coroBegin    llssa.Function
+	coroRun      llssa.Function
 }
 
 // defineEntryFunction creates the program's entry function. The name is
@@ -334,13 +376,41 @@ func defineEntryFunction(ctx *context, pkg llssa.Package, argcVar, argvVar llssa
 		b.Call(fns.abiInit.Expr)
 	}
 	b.Call(fns.runtimeStub.Expr)
-	b.Call(fns.mainInit.Expr)
-	b.Call(fns.mainMain.Expr)
+	if fns.coroFactory != nil {
+		if fns.coroManifest.IsNil() || fns.coroBegin == nil || fns.coroRun == nil {
+			panic("coroutine program entry requires manifest, begin, factory, and run")
+		}
+		null := prog.Nil(prog.VoidPtr())
+		manifest := b.Convert(prog.VoidPtr(), fns.coroManifest)
+		factory := b.Convert(prog.VoidPtr(), fns.coroFactory.Expr)
+		g := b.Call(fns.coroBegin.Expr, manifest, factory)
+		handle := b.Call(fns.coroFactory.Expr, g, null, null)
+		b.Call(fns.coroRun.Expr, g, handle)
+	} else {
+		b.Call(fns.mainInit.Expr)
+		b.Call(fns.mainMain.Expr)
+	}
 	if fns.pyFinalize != nil {
 		b.Call(fns.pyFinalize.Expr)
 	}
 	b.Return(prog.IntVal(0, prog.Int32()))
 	return fn
+}
+
+func declareCoroProgramBeginV1(pkg llssa.Package) llssa.Function {
+	pointer := types.Typ[types.UnsafePointer]
+	return pkg.NewFunc(coroProgramBeginSymbolV1, newSignature(
+		[]types.Type{pointer, pointer},
+		[]types.Type{pointer},
+	), llssa.InC)
+}
+
+func declareCoroProgramRunV1(pkg llssa.Package) llssa.Function {
+	pointer := types.Typ[types.UnsafePointer]
+	return pkg.NewFunc(coroProgramRunSymbolV1, newSignature(
+		[]types.Type{pointer, pointer},
+		nil,
+	), llssa.InC)
 }
 
 func defineStart(pkg llssa.Package, entry llssa.Function, argvType llssa.Type) {

@@ -146,6 +146,72 @@ func TestCoroPlanDigestDeterministicCompleteAndDomainSeparated(t *testing.T) {
 	}
 }
 
+func TestCoroPlanDigestRecordsIgnoredPhysicalBodySemantics(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "ignored_digest.go", `package coroid
+func external() {}
+func root() { external() }
+`)
+	external := packageFunction(t, pkg, "external")
+	root := packageFunction(t, pkg, "root")
+	build := func(ignore bool) *SSAPlan {
+		t.Helper()
+		config := planDigestSSAConfig()
+		config.ClassifyFunction = func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+			if fn == external {
+				return SSAFunctionPolicy{
+					IgnoreBody:       ignore,
+					Exec:             MayUnwind,
+					External:         ExternalUnknownForeign,
+					OverrideExternal: true,
+				}, nil
+			}
+			return SSAFunctionPolicy{}, nil
+		}
+		plan, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: AsyncDemand}}, config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return plan
+	}
+
+	ordinary := build(false)
+	ignored := build(true)
+	ordinaryPlan := functionPlanFor(t, ordinary, external)
+	ignoredPlan := functionPlanFor(t, ignored, external)
+	if ordinaryPlan != ignoredPlan {
+		t.Fatalf("fixture must isolate ignored-body identity:\nordinary %+v\nignored  %+v", ordinaryPlan, ignoredPlan)
+	}
+	metadata := validPlanDigestMetadata()
+	ordinaryDigest, err := ordinary.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ignoredDigest, err := ignored.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ordinaryDigest == ignoredDigest {
+		t.Fatal("ignored and physically emitted SSA bodies have the same plan digest")
+	}
+	document, err := ignored.canonicalPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	externalID, _ := ignored.FunctionID(external)
+	found := false
+	for _, function := range document.Functions {
+		if function.ID == externalID {
+			found = true
+			if !function.IgnoredBody {
+				t.Fatal("ignored external function record lost ignored_body=true")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("ignored external function is absent from digest")
+	}
+}
+
 func TestCoroPlanDigestCanonicalTargetsAndPlanMutations(t *testing.T) {
 	plan, _ := buildPlanDigestTestPlan(t, ssa.SanityCheckFunctions|ssa.InstantiateGenerics)
 	metadata := validPlanDigestMetadata()
@@ -265,6 +331,101 @@ func TestCoroPlanDigestCanonicalTargetsAndPlanMutations(t *testing.T) {
 	plan.plan.functions[0] = originalFunction
 	if restored, err := plan.CoroPlanDigest(metadata); err != nil || restored != baseline {
 		t.Fatalf("restored digest = %q, %v; want %q", restored, err, baseline)
+	}
+}
+
+func TestCoroPlanDigestRecordsFrontendElidedCalls(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "elided_digest.go", `package coroid
+func target() {}
+func root() { target() }
+func other() { target() }
+`)
+	target := packageFunction(t, pkg, "target")
+	root := packageFunction(t, pkg, "root")
+	other := packageFunction(t, pkg, "other")
+	rootCall := onlyNonBuiltinCall(t, root)
+	otherCall := onlyNonBuiltinCall(t, other)
+	includeWithoutTarget := func(fn *ssa.Function) (bool, error) { return fn != target, nil }
+	config := planDigestSSAConfig()
+	config.Include = includeWithoutTarget
+	conservative, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: SyncDemand}}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.ClassifyElidedCall = func(_ *ssa.Function, call ssa.CallInstruction) (bool, error) {
+		return call == rootCall, nil
+	}
+	elided, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: SyncDemand}}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := validPlanDigestMetadata()
+	first, err := elided.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := elided.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != again {
+		t.Fatalf("elided-call digest is unstable: %s != %s", first, again)
+	}
+	ordinary, err := conservative.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == ordinary {
+		t.Fatal("frontend-elided policy did not change the canonical digest")
+	}
+	document, err := elided.canonicalPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootPlan, ok := elided.FunctionPlan(root)
+	if !ok {
+		t.Fatal("elided root has no FunctionPlan")
+	}
+	if len(document.ElidedCalls) != 1 || !document.ElidedCalls[0].Elided || document.ElidedCalls[0].Function != rootPlan.ID ||
+		document.ElidedCalls[0].Block < 0 || document.ElidedCalls[0].Instruction < 0 {
+		t.Fatalf("canonical elided-call record = %+v", document.ElidedCalls)
+	}
+	if len(document.Calls) != len(elided.callPlans) {
+		t.Fatalf("elided call was disguised as a CallPlan: calls=%d plans=%d", len(document.Calls), len(elided.callPlans))
+	}
+	otherConfig := planDigestSSAConfig()
+	otherConfig.Include = includeWithoutTarget
+	otherConfig.ClassifyElidedCall = func(_ *ssa.Function, call ssa.CallInstruction) (bool, error) {
+		return call == otherCall, nil
+	}
+	otherElided, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: SyncDemand}}, otherConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherDigest, err := otherElided.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if otherDigest == first {
+		t.Fatal("moving the exact elided identity to another SSA call site did not change the digest")
+	}
+	otherDocument, err := otherElided.canonicalPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherPlan, ok := otherElided.FunctionPlan(other)
+	if !ok || len(otherDocument.ElidedCalls) != 1 || otherDocument.ElidedCalls[0].Function != otherPlan.ID {
+		t.Fatalf("other exact elided-call record = %+v (plan=%+v, ok=%t)", otherDocument.ElidedCalls, otherPlan, ok)
+	}
+
+	delete(elided.elidedCalls, rootCall)
+	if _, err := elided.CoroPlanDigest(metadata); err == nil || !strings.Contains(err.Error(), "missing CallPlan") {
+		t.Fatalf("missing elided identity digest error = %v", err)
+	}
+	elided.elidedCalls[rootCall] = struct{}{}
+	elided.elidedCalls[otherCall] = struct{}{}
+	if _, err := elided.CoroPlanDigest(metadata); err == nil || !strings.Contains(err.Error(), "both elided and assigned a CallPlan") {
+		t.Fatalf("overlapping elided/CallPlan digest error = %v", err)
 	}
 }
 

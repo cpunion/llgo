@@ -21,6 +21,7 @@ import (
 	"go/types"
 
 	"github.com/goplus/llgo/internal/coro"
+	llssa "github.com/goplus/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -84,7 +85,10 @@ func (p *context) resolveFunctionSymbol(fn *ssa.Function) (plannedFunctionSymbol
 	entry.physical = p.compilation.EnableCoroPhysicalABI
 	entry.childAwait = p.compilation.EnableCoroChildAwait
 	entry.coroPlan = p.compilation.CoroPlan
-	if err := validatePlannedFunction(fn, plan); err != nil {
+	if p.compilation.CoroPlan.IgnoresBody(fn) {
+		return entry, fmt.Errorf("coroutine entry resolution: Go-emitted function %q has an ignored SSA body", plan.ID)
+	}
+	if err := validatePlannedFunction(fn, plan, len(fn.Blocks) != 0); err != nil {
 		return entry, err
 	}
 	if plan.Emission == coro.EmitCoroutine {
@@ -93,11 +97,10 @@ func (p *context) resolveFunctionSymbol(fn *ssa.Function) (plannedFunctionSymbol
 	return entry, nil
 }
 
-func validatePlannedFunction(fn *ssa.Function, plan coro.FunctionPlan) error {
+func validatePlannedFunction(fn *ssa.Function, plan coro.FunctionPlan, hasEmittedBody bool) error {
 	if fn == nil {
 		return fmt.Errorf("coroutine entry resolution: function plan %q has no SSA function", plan.ID)
 	}
-	hasBody := len(fn.Blocks) != 0
 	switch plan.Emission {
 	case coro.EmitNone:
 		if plan.Demand != coro.NoDemand {
@@ -105,21 +108,37 @@ func validatePlannedFunction(fn *ssa.Function, plan coro.FunctionPlan) error {
 		}
 		return nil
 	case coro.EmitPlain:
-		if plan.External != coro.Defined || !hasBody {
-			return fmt.Errorf("coroutine entry resolution: plain emission %q has external kind %s and body=%t", plan.ID, plan.External, hasBody)
+		if plan.External != coro.Defined || !hasEmittedBody {
+			return fmt.Errorf("coroutine entry resolution: plain emission %q has external kind %s and emitted-body=%t", plan.ID, plan.External, hasEmittedBody)
 		}
 	case coro.EmitCoroutine:
-		if plan.External != coro.Defined || !hasBody {
-			return fmt.Errorf("coroutine entry resolution: coroutine emission %q has external kind %s and body=%t", plan.ID, plan.External, hasBody)
+		if plan.External != coro.Defined || !hasEmittedBody {
+			return fmt.Errorf("coroutine entry resolution: coroutine emission %q has external kind %s and emitted-body=%t", plan.ID, plan.External, hasEmittedBody)
 		}
 	case coro.EmitExternal:
-		if plan.External == coro.Defined || hasBody {
-			return fmt.Errorf("coroutine entry resolution: external emission %q has external kind %s and body=%t", plan.ID, plan.External, hasBody)
+		if plan.External == coro.Defined || hasEmittedBody {
+			return fmt.Errorf("coroutine entry resolution: external emission %q has external kind %s and emitted-body=%t", plan.ID, plan.External, hasEmittedBody)
 		}
 	default:
 		return fmt.Errorf("coroutine entry resolution: function %q has invalid emission kind %d", plan.ID, uint8(plan.Emission))
 	}
 	return nil
+}
+
+func (c *Compilation) plannedFunctionEmittedBody(fn *ssa.Function) (bool, error) {
+	if c == nil || c.CoroPlan == nil || c.EmissionUniverse == nil || fn == nil {
+		return false, fmt.Errorf("coroutine entry resolution: cannot classify a nil or unprepared planned function")
+	}
+	background, classified, err := c.EmissionUniverse.FunctionBackground(fn)
+	if err != nil {
+		return false, fmt.Errorf("coroutine entry resolution: classify frozen frontend ABI for %q: %w", fn.Name(), err)
+	}
+	ignored := c.CoroPlan.IgnoresBody(fn)
+	frozenIgnored := classified && background == llssa.InC
+	if ignored != frozenIgnored {
+		return false, fmt.Errorf("coroutine entry resolution: function %q ignored-body=%t conflicts with frozen frontend background classified=%t kind=%d", fn.Name(), ignored, classified, background)
+	}
+	return classified && background == llssa.InGo && len(fn.Blocks) != 0, nil
 }
 
 // omitUnemittedFunction is used only by eager package/type/closure
@@ -199,12 +218,17 @@ func (c *Compilation) preflightCoroPlan() error {
 			}
 		}
 		for _, function := range c.CoroPlan.Functions() {
-			if function.Plan.Emission == coro.EmitNone {
-				continue
-			}
-			if err := validatePlannedFunction(function.Function, function.Plan); err != nil {
+			hasEmittedBody, err := c.plannedFunctionEmittedBody(function.Function)
+			if err != nil {
 				c.coroPreflightErr = err
 				return
+			}
+			if err := validatePlannedFunction(function.Function, function.Plan, hasEmittedBody); err != nil {
+				c.coroPreflightErr = err
+				return
+			}
+			if function.Plan.Emission == coro.EmitNone {
+				continue
 			}
 			entry := plannedFunctionSymbol{
 				function:   function.Function,

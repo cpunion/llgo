@@ -223,7 +223,7 @@ func (p *Target) targetRelocMode() llvm.RelocMode {
 }
 
 func (p *Target) targetMachineOptions() llvm.TargetMachineOptions {
-	if !p.useNativeObjectSections() {
+	if !p.useNativeObjectSections() && !p.useWasmObjectSections() {
 		return llvm.TargetMachineOptions{}
 	}
 	return llvm.TargetMachineOptions{
@@ -231,6 +231,20 @@ func (p *Target) targetMachineOptions() llvm.TargetMachineOptions {
 		DataSections:       true,
 		UniqueSectionNames: true,
 	}
+}
+
+// The WebAssembly backend requires each defined function to own a distinct
+// object section. A single-function module can appear to work without these
+// options, but coroutine splitting materializes ramp, resume, destroy, and
+// cleanup functions in the same module and object emission then fails because
+// they all try to define the shared .text section. Keep relocation selection
+// independent: wasm needs section uniqueness, not the native PIC policy.
+func (p *Target) useWasmObjectSections() bool {
+	goarch := p.GOARCH
+	if goarch == "" {
+		goarch = runtime.GOARCH
+	}
+	return goarch == "wasm"
 }
 
 func (p *Target) useNativeObjectSections() bool {

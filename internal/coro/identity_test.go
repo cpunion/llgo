@@ -436,6 +436,63 @@ func instantiate() {
 	}
 }
 
+func TestFunctionIDLocalTypeDiscoveryIgnoresFrontendExternalBody(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "ignored_local_type.go", `package coroid
+func Generic[T any]() {}
+func ExternalFallback[T any]() {
+	type Poison struct { Value T }
+	Generic[Poison]()
+}
+func instantiate() { ExternalFallback[int]() }
+`)
+	instantiate := packageFunction(t, pkg, "instantiate")
+	var external *ssa.Function
+	for _, block := range instantiate.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(ssa.CallInstruction)
+			if !ok {
+				continue
+			}
+			callee := call.Common().StaticCallee()
+			if callee != nil && callee.Origin() != nil && callee.Origin().Name() == "ExternalFallback" {
+				external = callee
+			}
+		}
+	}
+	if external == nil {
+		t.Fatal("fixture has no instantiated ExternalFallback body")
+	}
+	full := parentlessNamedTypesInFunction(external, false)
+	var poison *types.Named
+	for named := range full {
+		if named.Obj() != nil && named.Obj().Name() == "Poison" {
+			poison = named
+			break
+		}
+	}
+	if poison == nil {
+		t.Fatal("fixture SSA body has no discoverable local Poison type")
+	}
+	if ignored := parentlessNamedTypesInFunction(external, true); len(ignored) != 0 {
+		t.Fatalf("ignored fallback body leaked local types: %v", ignored)
+	}
+
+	ordinary := functionIDBuilder{prog: prog, localTypeCandidates: []*ssa.Function{external}}
+	ordinary.prepareLocalTypeOwners()
+	if owner := ordinary.localTypeOwners[poison]; owner != external {
+		t.Fatalf("ordinary local type owner = %v, want externalFallback", owner)
+	}
+	ignored := functionIDBuilder{
+		prog:                   prog,
+		localTypeCandidates:    []*ssa.Function{external},
+		localTypeIgnoredBodies: map[*ssa.Function]struct{}{external: {}},
+	}
+	ignored.prepareLocalTypeOwners()
+	if owner := ignored.localTypeOwners[poison]; owner != nil {
+		t.Fatalf("ignored fallback body poisoned local type ownership with %v", owner)
+	}
+}
+
 func TestStableFunctionIDResolvesUnreachableLocalTypeOwner(t *testing.T) {
 	_, pkg := buildCoroTestSSA(t, "source.go", `package coroid
 func Generic[T any]() {}

@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"go/ast"
+	"go/constant"
 	"go/types"
 	"path"
 	"sort"
@@ -39,27 +40,29 @@ import (
 // compilation. Files must be the exact combined syntax slice used by codegen:
 // original package files followed by enabled alternate-package files.
 type EmissionPackage struct {
-	SSA      *ssa.Package
-	Files    []*ast.File
-	Identity string // stable build package identity; required for same-path variants
+	SSA          *ssa.Package
+	Files        []*ast.File
+	Identity     string // stable build package identity; required for same-path variants
+	MetadataOnly bool   // freeze frontend directives/ownership without selecting definitions
 }
 
 type preparedEmissionPackage struct {
-	order     int
-	identity  string
-	ssa       *ssa.Package
-	files     []*ast.File
-	pkgPath   string
-	oldTypes  *types.Package
-	altTypes  *types.Package
-	pkgTypes  *types.Package
-	patch     Patch
-	hasPatch  bool
-	skips     map[string]none
-	skipall   bool
-	winners   map[string]*ssa.Function
-	selected  map[*ssa.Function]none
-	fromPatch map[*ssa.Function]bool
+	order        int
+	identity     string
+	ssa          *ssa.Package
+	files        []*ast.File
+	pkgPath      string
+	oldTypes     *types.Package
+	altTypes     *types.Package
+	pkgTypes     *types.Package
+	patch        Patch
+	hasPatch     bool
+	skips        map[string]none
+	skipall      bool
+	winners      map[string]*ssa.Function
+	selected     map[*ssa.Function]none
+	fromPatch    map[*ssa.Function]bool
+	metadataOnly bool
 }
 
 // EmissionUniverse is an immutable set of canonical exact SSA functions and
@@ -80,6 +83,8 @@ type EmissionUniverse struct {
 	aliases            map[*ssa.Function]*ssa.Function
 	fnOwners           map[*ssa.Function]*preparedEmissionPackage
 	fnStates           map[*ssa.Function]emissionFunctionState
+	functionKinds      map[emissionFunctionOwnerKey]int
+	intrinsicOps       map[emissionFunctionOwnerKey]int
 	finalKeys          map[emissionFunctionOwnerKey]string
 	physicalNames      map[emissionFunctionOwnerKey]string
 	linkOnceNames      map[*ssa.Function]string
@@ -99,6 +104,22 @@ type EmissionUniverse struct {
 	localGenericOwners map[*types.Named]*ssa.Function
 	genericNamedTypes  map[*types.Named]*types.Named
 }
+
+// CoroIntrinsicCallSemantics is the frozen physical call-edge behavior of an
+// llgo compiler intrinsic. It deliberately says nothing about ordinary C/Go
+// functions and does not expose cl's private intrinsic opcode/name table.
+type CoroIntrinsicCallSemantics uint8
+
+const (
+	// CoroIntrinsicCallUnsupported keeps the conservative managed-call edge.
+	// Blocking, allocating, and otherwise unproved intrinsics use this value.
+	CoroIntrinsicCallUnsupported CoroIntrinsicCallSemantics = iota
+	// CoroIntrinsicCallInlineNoSuspend means cl lowers the operation directly
+	// in the caller and the operation cannot suspend. There is no callable
+	// coroutine edge, although the exact SSA call site remains in the plan
+	// digest and the intrinsic operation is still emitted by cl.
+	CoroIntrinsicCallInlineNoSuspend
+)
 
 type intrinsicWrapperKey struct {
 	owner     *ssa.Package
@@ -143,6 +164,8 @@ func PrepareEmissionUniverse(prog llssa.Program, patches Patches, inputs []Emiss
 		aliases:            make(map[*ssa.Function]*ssa.Function),
 		fnOwners:           make(map[*ssa.Function]*preparedEmissionPackage),
 		fnStates:           make(map[*ssa.Function]emissionFunctionState),
+		functionKinds:      make(map[emissionFunctionOwnerKey]int),
+		intrinsicOps:       make(map[emissionFunctionOwnerKey]int),
 		finalKeys:          make(map[emissionFunctionOwnerKey]string),
 		physicalNames:      make(map[emissionFunctionOwnerKey]string),
 		linkOnceNames:      make(map[*ssa.Function]string),
@@ -192,18 +215,19 @@ func PrepareEmissionUniverse(prog llssa.Program, patches Patches, inputs []Emiss
 		scan := &context{prog: prog, skips: make(map[string]none)}
 		scan.initFiles(pkgPath, input.Files, input.SSA.Pkg.Name() == "C")
 		prepared := &preparedEmissionPackage{
-			order:     i,
-			identity:  identity,
-			ssa:       input.SSA,
-			files:     append([]*ast.File(nil), input.Files...),
-			pkgPath:   pkgPath,
-			oldTypes:  input.SSA.Pkg,
-			pkgTypes:  input.SSA.Pkg,
-			skips:     cloneNoneMap(scan.skips),
-			skipall:   scan.skipall,
-			winners:   make(map[string]*ssa.Function),
-			selected:  make(map[*ssa.Function]none),
-			fromPatch: make(map[*ssa.Function]bool),
+			order:        i,
+			identity:     identity,
+			ssa:          input.SSA,
+			files:        append([]*ast.File(nil), input.Files...),
+			pkgPath:      pkgPath,
+			oldTypes:     input.SSA.Pkg,
+			pkgTypes:     input.SSA.Pkg,
+			skips:        cloneNoneMap(scan.skips),
+			skipall:      scan.skipall,
+			winners:      make(map[string]*ssa.Function),
+			selected:     make(map[*ssa.Function]none),
+			fromPatch:    make(map[*ssa.Function]bool),
+			metadataOnly: input.MetadataOnly,
 		}
 		if patch, ok := patches[pkgPath]; ok {
 			if patch.Alt == nil || patch.Types == nil {
@@ -239,9 +263,16 @@ func PrepareEmissionUniverse(prog llssa.Program, patches Patches, inputs []Emiss
 		}
 	}
 
-	// Link directives of every package are now registered. Select definitions
-	// in exactly the same alt-first order as newPackageEx/processPkg.
+	// Link directives of every frontend package are now registered. Select
+	// definitions in exactly the same alt-first order as
+	// newPackageEx/processPkg. Declaration-only packages participate above so
+	// calls into them have exact frozen C/Python ownership, but they never add
+	// their fallback SSA declarations unless an emitted body actually reaches
+	// one.
 	for _, input := range inputs {
+		if input.MetadataOnly {
+			continue
+		}
 		prepared := u.packages[input.SSA]
 		if prepared.hasPatch {
 			if err := u.selectPackage(prepared, prepared.patch.Alt, pkgInPatch, nil, true); err != nil {
@@ -262,6 +293,9 @@ func PrepareEmissionUniverse(prog llssa.Program, patches Patches, inputs []Emiss
 	// owns their final managed symbol. Ambiguous or missing managed replacements
 	// remain unaliased and are rejected if an effective body reaches them.
 	for _, input := range inputs {
+		if input.MetadataOnly {
+			continue
+		}
 		prepared := u.packages[input.SSA]
 		if prepared.hasPatch {
 			if err := u.aliasPackageMembers(prepared, prepared.ssa); err != nil {
@@ -334,6 +368,214 @@ func (u *EmissionUniverse) Resolve(fn *ssa.Function) (*ssa.Function, bool) {
 	}
 	_, ok := u.required[fn]
 	return fn, ok
+}
+
+// FunctionBackground reports the frozen frontend ABI background of fn's exact
+// canonical emission function. The classification comes only from the final
+// per-owner function-kind and managed-symbol metadata recorded while preparing
+// the universe; it never reclassifies a function from its name or package.
+// llgo intrinsics and deliberately ignored declarations are valid but
+// unclassified and return classified=false.
+func (u *EmissionUniverse) FunctionBackground(fn *ssa.Function) (background llssa.Background, classified bool, err error) {
+	if u == nil {
+		return 0, false, fmt.Errorf("emission universe function background: nil universe")
+	}
+	if fn == nil {
+		return 0, false, fmt.Errorf("emission universe function background: nil function")
+	}
+	canonical := u.canonicalAlias(fn)
+	if canonical == nil {
+		return 0, false, fmt.Errorf("emission universe function background: function has cyclic canonical aliases")
+	}
+	if _, required := u.required[canonical]; !required {
+		return 0, false, fmt.Errorf("emission universe function background: function %q is absent from the frozen emission universe", canonical.Name())
+	}
+	ownerSet := u.useOwners[canonical]
+	if len(ownerSet) == 0 {
+		return 0, false, fmt.Errorf("emission universe function background: canonical function %q has no frozen use owner", canonical.Name())
+	}
+	owners := make([]*preparedEmissionPackage, 0, len(ownerSet))
+	for owner := range ownerSet {
+		if owner == nil {
+			return 0, false, fmt.Errorf("emission universe function background: canonical function %q has a nil frozen use owner", canonical.Name())
+		}
+		owners = append(owners, owner)
+	}
+	sort.SliceStable(owners, func(i, j int) bool {
+		if owners[i].order != owners[j].order {
+			return owners[i].order < owners[j].order
+		}
+		if owners[i].identity != owners[j].identity {
+			return owners[i].identity < owners[j].identity
+		}
+		return owners[i].pkgPath < owners[j].pkgPath
+	})
+	states := u.ownerStates[canonical]
+	var frozenKind int
+	haveKind := false
+	for _, owner := range owners {
+		if _, ok := states[owner]; !ok {
+			return 0, false, fmt.Errorf("emission universe function background: canonical function %q has no frozen provenance for owner %q", canonical.Name(), owner.identity)
+		}
+		ownerKey := emissionFunctionOwnerKey{function: canonical, owner: owner}
+		kind, ok := u.functionKinds[ownerKey]
+		if !ok {
+			return 0, false, fmt.Errorf("emission universe function background: canonical function %q has no frozen frontend function kind for owner %q", canonical.Name(), owner.identity)
+		}
+		finalKey := u.finalKeys[ownerKey]
+		if finalKey != "" {
+			finalKind, _, _, valid := splitManagedSymbolKey(finalKey)
+			if !valid {
+				return 0, false, fmt.Errorf("emission universe function background: canonical function %q has malformed frozen managed-symbol metadata for owner %q", canonical.Name(), owner.identity)
+			}
+			if finalKind != kind {
+				return 0, false, fmt.Errorf("emission universe function background: canonical function %q has inconsistent frozen frontend kinds %d and %d for owner %q", canonical.Name(), kind, finalKind, owner.identity)
+			}
+		} else if kind == llgoInstr {
+			if _, ok := u.intrinsicOps[ownerKey]; !ok {
+				return 0, false, fmt.Errorf("emission universe function background: canonical intrinsic %q has no frozen compiler opcode for owner %q", canonical.Name(), owner.identity)
+			}
+		} else if kind != ignoredFunc {
+			// Intrinsic function-value wrappers are exact synthetic Go functions.
+			// Their frozen synthetic provenance replaces a managed declaration key.
+			_, intrinsicWrapper := u.callWrapInfo[canonical]
+			if kind != goFunc || !intrinsicWrapper || u.syntheticKeys[canonical] == "" {
+				return 0, false, fmt.Errorf("emission universe function background: canonical function %q has no frozen managed-symbol metadata for owner %q", canonical.Name(), owner.identity)
+			}
+		}
+		if haveKind && frozenKind != kind {
+			return 0, false, fmt.Errorf("emission universe function background: canonical function %q has inconsistent frozen frontend kinds %d and %d across owners", canonical.Name(), frozenKind, kind)
+		}
+		frozenKind = kind
+		haveKind = true
+	}
+	if !haveKind {
+		return 0, false, fmt.Errorf("emission universe function background: canonical function %q has no frozen frontend function kind", canonical.Name())
+	}
+	switch frozenKind {
+	case goFunc:
+		return llssa.InGo, true, nil
+	case cFunc:
+		return llssa.InC, true, nil
+	case pyFunc:
+		return llssa.InPython, true, nil
+	case ignoredFunc, llgoInstr:
+		return 0, false, nil
+	default:
+		return 0, false, fmt.Errorf("emission universe function background: canonical function %q has unknown frozen frontend function kind %d", canonical.Name(), frozenKind)
+	}
+}
+
+// CoroIntrinsicSemantics reports whether fn is an exact frozen llgo compiler
+// intrinsic and, if so, its narrow coroutine call-edge semantics. The result
+// is recorded during universe construction and never inferred from the Go
+// function name at analysis time. This function-level result does not prove
+// opcode-specific operand preconditions; consumers deciding whether to elide a
+// physical call must use CoroIntrinsicCallSiteSemantics instead.
+func (u *EmissionUniverse) CoroIntrinsicSemantics(fn *ssa.Function) (semantics CoroIntrinsicCallSemantics, intrinsic bool, err error) {
+	opcode, intrinsic, err := u.coroIntrinsicOpcode(fn)
+	if err != nil || !intrinsic {
+		return CoroIntrinsicCallUnsupported, intrinsic, err
+	}
+	return coroIntrinsicCallSemantics(opcode), true, nil
+}
+
+// CoroIntrinsicCallSiteSemantics reports the frozen physical semantics of one
+// exact SSA call site. A function-level intrinsic opcode is insufficient proof
+// that a particular source operation can be elided: opcode-specific lowering
+// preconditions are checked here against the same SSA arguments consumed by
+// cl. Invalid intrinsic sites fail closed instead of being disguised as an
+// ordinary managed call and reaching a later lowering panic.
+func (u *EmissionUniverse) CoroIntrinsicCallSiteSemantics(call ssa.CallInstruction) (semantics CoroIntrinsicCallSemantics, intrinsic bool, err error) {
+	if call == nil || call.Common() == nil {
+		return CoroIntrinsicCallUnsupported, false, fmt.Errorf("emission universe intrinsic call semantics: nil SSA call")
+	}
+	callee := call.Common().StaticCallee()
+	if callee == nil {
+		return CoroIntrinsicCallUnsupported, false, nil
+	}
+	opcode, intrinsic, err := u.coroIntrinsicOpcode(callee)
+	if err != nil || !intrinsic {
+		return CoroIntrinsicCallUnsupported, intrinsic, err
+	}
+	semantics = coroIntrinsicCallSemantics(opcode)
+	if semantics != CoroIntrinsicCallInlineNoSuspend {
+		return semantics, true, nil
+	}
+	direct, ok := call.(*ssa.Call)
+	if !ok || direct.Common() == nil || direct.Common().IsInvoke() {
+		return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+			"emission universe intrinsic call semantics: inline intrinsic %q must be an exact direct call", callee.Name(),
+		)
+	}
+	switch opcode {
+	case llgoCstr:
+		args := direct.Common().Args
+		if len(args) != 1 {
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: llgo.cstr call %q requires exactly one compile-time string constant argument", direct.String(),
+			)
+		}
+		value, ok := args[0].(*ssa.Const)
+		if !ok || value.Value == nil || value.Value.Kind() != constant.String {
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: llgo.cstr call %q requires exactly one compile-time string constant argument", direct.String(),
+			)
+		}
+		return CoroIntrinsicCallInlineNoSuspend, true, nil
+	default:
+		return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+			"emission universe intrinsic call semantics: inline intrinsic %q has no exact call-site verifier", callee.Name(),
+		)
+	}
+}
+
+func (u *EmissionUniverse) coroIntrinsicOpcode(fn *ssa.Function) (opcode int, intrinsic bool, err error) {
+	_, classified, err := u.FunctionBackground(fn)
+	if err != nil {
+		return 0, false, err
+	}
+	if classified {
+		return 0, false, nil
+	}
+	canonical := u.canonicalAlias(fn)
+	if canonical == nil {
+		return 0, false, fmt.Errorf("emission universe intrinsic semantics: function has cyclic canonical aliases")
+	}
+	owners := u.sortedUseOwners(canonical)
+	if len(owners) == 0 {
+		return 0, false, fmt.Errorf("emission universe intrinsic semantics: canonical function %q has no frozen use owner", canonical.Name())
+	}
+	for _, owner := range owners {
+		ownerKey := emissionFunctionOwnerKey{function: canonical, owner: owner}
+		kind, ok := u.functionKinds[ownerKey]
+		if !ok {
+			return 0, false, fmt.Errorf("emission universe intrinsic semantics: canonical function %q has no frozen frontend function kind for owner %q", canonical.Name(), owner.identity)
+		}
+		if kind != llgoInstr {
+			return 0, false, nil
+		}
+		ownerOpcode, ok := u.intrinsicOps[ownerKey]
+		if !ok {
+			return 0, false, fmt.Errorf("emission universe intrinsic semantics: canonical intrinsic %q has no frozen compiler opcode for owner %q", canonical.Name(), owner.identity)
+		}
+		if opcode != 0 && opcode != ownerOpcode {
+			return 0, false, fmt.Errorf("emission universe intrinsic semantics: canonical intrinsic %q has inconsistent compiler opcodes across owners", canonical.Name())
+		}
+		opcode = ownerOpcode
+	}
+	return opcode, true, nil
+}
+
+func coroIntrinsicCallSemantics(opcode int) CoroIntrinsicCallSemantics {
+	switch opcode {
+	case llgoCstr:
+		// cstr accepts only a compile-time string literal and lowers directly
+		// to an LLVM constant C string pointer.
+		return CoroIntrinsicCallInlineNoSuspend
+	default:
+		return CoroIntrinsicCallUnsupported
+	}
 }
 
 func (u *EmissionUniverse) physicalName(ownerSSA *ssa.Package, fn *ssa.Function, legacy string) (string, error) {
@@ -602,9 +844,21 @@ func (u *EmissionUniverse) selectFunction(prepared *preparedEmissionPackage, fn 
 			state, fromPatch = u.functionProvenance(exact, fn)
 		}
 	}
-	key, managed, err := u.managedSymbolKey(prepared, fn, state)
+	key, managed, intrinsicName, ftype, err := u.managedSymbolInfo(prepared, fn, state)
 	if err != nil {
 		return err
+	}
+	functionKind := ignoredFunc
+	intrinsicOpcode := 0
+	if ftype == llgoInstr {
+		opcode, ok := llgoInstrs[intrinsicName]
+		if !ok {
+			return fmt.Errorf("prepare emission universe: function %q resolves to unknown llgo intrinsic %q", fn.Name(), intrinsicName)
+		}
+		functionKind = llgoInstr
+		intrinsicOpcode = opcode
+	} else if managed {
+		functionKind = managedKeyFunctionType(key)
 	}
 	canonical := fn
 	if managed {
@@ -651,6 +905,23 @@ func (u *EmissionUniverse) selectFunction(prepared *preparedEmissionPackage, fn 
 			u.finalKeys[emissionFunctionOwnerKey{function: fn, owner: prepared}] = key
 		}
 	}
+	if err := u.recordFunctionKind(fn, prepared, functionKind); err != nil {
+		return err
+	}
+	if canonical != fn {
+		if err := u.recordFunctionKind(canonical, prepared, functionKind); err != nil {
+			return err
+		}
+	}
+	if functionKind == llgoInstr {
+		for _, target := range []*ssa.Function{fn, canonical} {
+			ownerKey := emissionFunctionOwnerKey{function: target, owner: prepared}
+			if previous, frozen := u.intrinsicOps[ownerKey]; frozen && previous != intrinsicOpcode {
+				return fmt.Errorf("prepare emission universe: function %q has conflicting frozen llgo intrinsic opcodes", target.Name())
+			}
+			u.intrinsicOps[ownerKey] = intrinsicOpcode
+		}
+	}
 	prepared.selected[fn] = none{}
 	if u.fnOwners[fn] == nil {
 		u.fnOwners[fn] = prepared
@@ -659,6 +930,29 @@ func (u *EmissionUniverse) selectFunction(prepared *preparedEmissionPackage, fn 
 		u.fnStates[fn] = emissionFunctionState{state: state, fromPatch: fromPatch}
 	}
 	u.addRequired(canonical, prepared)
+	return nil
+}
+
+func (u *EmissionUniverse) recordFunctionKind(fn *ssa.Function, owner *preparedEmissionPackage, kind int) error {
+	if fn == nil || owner == nil {
+		return fmt.Errorf("prepare emission universe: cannot record frontend function kind without an exact function and owner")
+	}
+	switch kind {
+	case ignoredFunc, goFunc, cFunc, pyFunc, llgoInstr:
+	default:
+		return fmt.Errorf("prepare emission universe: function %q has unknown frontend function kind %d", fn.Name(), kind)
+	}
+	if u.functionKinds == nil {
+		u.functionKinds = make(map[emissionFunctionOwnerKey]int)
+	}
+	key := emissionFunctionOwnerKey{function: fn, owner: owner}
+	if previous, exists := u.functionKinds[key]; exists && previous != kind {
+		return fmt.Errorf(
+			"prepare emission universe: function %q has inconsistent frontend function kinds %d and %d for owner %q",
+			fn.Name(), previous, kind, owner.identity,
+		)
+	}
+	u.functionKinds[key] = kind
 	return nil
 }
 
@@ -947,6 +1241,95 @@ func (u *EmissionUniverse) replaceManagedWinner(prepared *preparedEmissionPackag
 	if _, materialized := u.materialized[old]; materialized {
 		return fmt.Errorf("prepare emission universe: cannot replace already-materialized original %s with late patch winner %s", emissionFunctionDiagnostic(old), emissionFunctionDiagnostic(replacement))
 	}
+	if u.ownerStateErr != nil {
+		return u.ownerStateErr
+	}
+	type ownerMetadata struct {
+		owner              *preparedEmissionPackage
+		state              emissionFunctionState
+		kind               int
+		finalKey           string
+		intrinsicOpcode    int
+		hasIntrinsicOpcode bool
+	}
+	ownerSet := u.useOwners[old]
+	if len(ownerSet) == 0 {
+		return fmt.Errorf("prepare emission universe: cannot replace ownerless managed function %q", old.Name())
+	}
+	owners := make([]*preparedEmissionPackage, 0, len(ownerSet))
+	for owner := range ownerSet {
+		if owner == nil {
+			return fmt.Errorf("prepare emission universe: cannot replace managed function %q with a nil frozen use owner", old.Name())
+		}
+		owners = append(owners, owner)
+	}
+	sort.SliceStable(owners, func(i, j int) bool {
+		if owners[i].order != owners[j].order {
+			return owners[i].order < owners[j].order
+		}
+		if owners[i].identity != owners[j].identity {
+			return owners[i].identity < owners[j].identity
+		}
+		return owners[i].pkgPath < owners[j].pkgPath
+	})
+	metadata := make([]ownerMetadata, 0, len(owners))
+	currentOwner := false
+	for _, owner := range owners {
+		state, stateOK := u.ownerStates[old][owner]
+		if !stateOK {
+			return fmt.Errorf("prepare emission universe: managed function %q has no frozen provenance for owner %q during replacement", old.Name(), owner.identity)
+		}
+		oldOwnerKey := emissionFunctionOwnerKey{function: old, owner: owner}
+		kind, kindOK := u.functionKinds[oldOwnerKey]
+		if !kindOK {
+			return fmt.Errorf("prepare emission universe: managed function %q has no frozen frontend function kind for owner %q during replacement", old.Name(), owner.identity)
+		}
+		finalKey, finalKeyOK := u.finalKeys[oldOwnerKey]
+		if !finalKeyOK || finalKey == "" {
+			return fmt.Errorf("prepare emission universe: managed function %q has no frozen managed-symbol metadata for owner %q during replacement", old.Name(), owner.identity)
+		}
+		finalKind, _, _, valid := splitManagedSymbolKey(finalKey)
+		if !valid || finalKind != kind {
+			return fmt.Errorf("prepare emission universe: managed function %q has inconsistent frozen frontend kind and symbol metadata for owner %q during replacement", old.Name(), owner.identity)
+		}
+		replacementOwnerKey := emissionFunctionOwnerKey{function: replacement, owner: owner}
+		intrinsicOpcode, hasIntrinsicOpcode := u.intrinsicOps[oldOwnerKey]
+		if kind == llgoInstr && !hasIntrinsicOpcode {
+			return fmt.Errorf("prepare emission universe: managed intrinsic %q has no frozen compiler opcode for owner %q during replacement", old.Name(), owner.identity)
+		}
+		if kind != llgoInstr && hasIntrinsicOpcode {
+			return fmt.Errorf("prepare emission universe: non-intrinsic function %q has unexpected frozen compiler opcode for owner %q during replacement", old.Name(), owner.identity)
+		}
+		if previous, exists := u.functionKinds[replacementOwnerKey]; exists && previous != kind {
+			return fmt.Errorf("prepare emission universe: replacement function %q has conflicting frozen frontend kinds %d and %d for owner %q", replacement.Name(), previous, kind, owner.identity)
+		}
+		if previous, exists := u.finalKeys[replacementOwnerKey]; exists && previous != finalKey {
+			return fmt.Errorf("prepare emission universe: replacement function %q has conflicting frozen managed-symbol metadata for owner %q", replacement.Name(), owner.identity)
+		}
+		if previous, exists := u.intrinsicOps[replacementOwnerKey]; exists && (!hasIntrinsicOpcode || previous != intrinsicOpcode) {
+			return fmt.Errorf("prepare emission universe: replacement function %q has conflicting frozen llgo intrinsic opcode for owner %q", replacement.Name(), owner.identity)
+		}
+		if previous, exists := u.ownerStates[replacement][owner]; exists {
+			merged, err := mergeEmissionOwnerState(replacement, owner, previous, state)
+			if err != nil {
+				return err
+			}
+			state = merged
+		}
+		if owner == prepared {
+			currentOwner = true
+			if finalKey != key {
+				return fmt.Errorf("prepare emission universe: patch replacement function %q changes frozen managed-symbol metadata for owner %q", replacement.Name(), owner.identity)
+			}
+		}
+		metadata = append(metadata, ownerMetadata{
+			owner: owner, state: state, kind: kind, finalKey: finalKey,
+			intrinsicOpcode: intrinsicOpcode, hasIntrinsicOpcode: hasIntrinsicOpcode,
+		})
+	}
+	if !currentOwner {
+		return fmt.Errorf("prepare emission universe: managed function %q has no frozen metadata for replacement owner %q", old.Name(), prepared.identity)
+	}
 	prepared.winners[key] = replacement
 	prepared.fromPatch[replacement] = true
 	u.aliases[old] = replacement
@@ -955,14 +1338,29 @@ func (u *EmissionUniverse) replaceManagedWinner(prepared *preparedEmissionPackag
 			u.aliases[alias] = replacement
 		}
 	}
-	for owner := range u.useOwners[old] {
-		u.recordUseOwner(replacement, owner, u.ownerStates[old][owner])
+	if u.useOwners[replacement] == nil {
+		u.useOwners[replacement] = make(map[*preparedEmissionPackage]none)
+	}
+	if u.ownerStates[replacement] == nil {
+		u.ownerStates[replacement] = make(map[*preparedEmissionPackage]emissionFunctionState)
+	}
+	for _, item := range metadata {
+		u.useOwners[replacement][item.owner] = none{}
+		u.ownerStates[replacement][item.owner] = item.state
+		oldOwnerKey := emissionFunctionOwnerKey{function: old, owner: item.owner}
+		replacementOwnerKey := emissionFunctionOwnerKey{function: replacement, owner: item.owner}
+		u.functionKinds[replacementOwnerKey] = item.kind
+		u.finalKeys[replacementOwnerKey] = item.finalKey
+		if item.hasIntrinsicOpcode {
+			u.intrinsicOps[replacementOwnerKey] = item.intrinsicOpcode
+		}
+		delete(u.functionKinds, oldOwnerKey)
+		delete(u.finalKeys, oldOwnerKey)
+		delete(u.intrinsicOps, oldOwnerKey)
 	}
 	delete(u.useOwners, old)
 	delete(u.ownerStates, old)
 	delete(u.required, old)
-	delete(u.finalKeys, emissionFunctionOwnerKey{function: old, owner: prepared})
-	u.finalKeys[emissionFunctionOwnerKey{function: replacement, owner: prepared}] = key
 	return nil
 }
 
@@ -1045,17 +1443,26 @@ func (u *EmissionUniverse) aliasFunction(prepared *preparedEmissionPackage, fn *
 }
 
 func (u *EmissionUniverse) managedSymbolKey(prepared *preparedEmissionPackage, fn *ssa.Function, state pkgState) (string, bool, error) {
+	key, managed, _, _, err := u.managedSymbolInfo(prepared, fn, state)
+	return key, managed, err
+}
+
+func (u *EmissionUniverse) managedSymbolInfo(prepared *preparedEmissionPackage, fn *ssa.Function, state pkgState) (key string, managed bool, intrinsicName string, ftype int, err error) {
 	name, sig, ftype, managed, err := u.classifiedManagedSymbol(prepared, fn, state)
 	if err != nil || !managed {
-		return "", managed, err
+		return "", managed, name, ftype, err
 	}
 	if isEmissionGeneratedWrapper(fn) {
 		name, err = u.promotedWrapperPhysicalName(prepared, fn, state, name, sig)
 		if err != nil {
-			return "", false, err
+			return "", false, "", ftype, err
 		}
 	}
-	return managedSymbolKey(ftype, name, sig), true, nil
+	intrinsicName = ""
+	if ftype == llgoInstr {
+		intrinsicName = name
+	}
+	return managedSymbolKey(ftype, name, sig), true, intrinsicName, ftype, nil
 }
 
 func (u *EmissionUniverse) classifiedManagedSymbol(prepared *preparedEmissionPackage, fn *ssa.Function, state pkgState) (name, sig string, ftype int, managed bool, err error) {
@@ -1324,6 +1731,9 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 			u.callWrapInfo[wrapper] = key
 			u.syntheticKeys[wrapper] = structuralKey
 		}
+		if err := u.recordFunctionKind(wrapper, owner, goFunc); err != nil {
+			return err
+		}
 		u.fnOwners[wrapper] = owner
 		u.fnStates[wrapper] = emissionState
 		u.addRequired(wrapper, owner)
@@ -1424,6 +1834,43 @@ func (u *EmissionUniverse) addResolvedRequired(fn *ssa.Function, owner *prepared
 			state = u.fnStates[fn]
 		}
 	}
+	if owner == nil {
+		return nil, fmt.Errorf("prepare emission universe: reached function %q has no emission owner for frozen frontend metadata", fn.Name())
+	}
+	ownerKey := emissionFunctionOwnerKey{function: fn, owner: owner}
+	functionKind, kindFrozen := u.functionKinds[ownerKey]
+	_, finalKeyFrozen := u.finalKeys[ownerKey]
+	if kindFrozen != finalKeyFrozen {
+		// Ignored declarations deliberately have a frozen unclassified kind and
+		// no managed symbol. Every emitted Go/C/Python function must freeze the
+		// kind and managed provenance atomically during construction.
+		if !kindFrozen || functionKind != ignoredFunc {
+			return nil, fmt.Errorf(
+				"prepare emission universe: reached function %q has partially frozen frontend metadata for owner %q (kind=%t, managed-symbol=%t)",
+				fn.Name(), owner.identity, kindFrozen, finalKeyFrozen,
+			)
+		}
+	}
+	if !kindFrozen && !finalKeyFrozen {
+		// Package selection records functions from explicit EmissionPackage
+		// inputs. Nested closures and dependencies reached through an emitted
+		// body may belong to an SSA package omitted from those inputs; select them
+		// under their exact emitting owner now, before the universe is frozen.
+		if err := u.selectFunction(owner, fn, state.state, state.fromPatch); err != nil {
+			return nil, err
+		}
+		fn = u.canonicalAlias(fn)
+		if fn == nil {
+			return nil, fmt.Errorf("prepare emission universe: reached function has cyclic canonical aliases")
+		}
+		if _, excluded := u.excluded[fn]; excluded {
+			return nil, fmt.Errorf(
+				"prepare emission universe: effective function %q reaches excluded function %q",
+				u.finalIdentity(caller), u.finalIdentity(fn),
+			)
+		}
+		return fn, nil
+	}
 	if _, known := u.fnStates[fn]; !known {
 		u.fnStates[fn] = state
 	}
@@ -1476,32 +1923,46 @@ func (u *EmissionUniverse) recordUseOwner(fn *ssa.Function, owner *preparedEmiss
 		u.ownerStates[fn] = states
 	}
 	if previous, exists := states[owner]; exists {
-		switch {
-		case previous == state:
-			return
-		case previous.fromPatch && !state.fromPatch:
-			return
-		case state.fromPatch && !previous.fromPatch:
-			states[owner] = state
-			return
-		case previous.state == pkgNormal:
-			// pkgNormal is the provenance fallback for an anonymous type. An
-			// exact original/alt observation is stronger.
-			states[owner] = state
-			return
-		case state.state == pkgNormal:
-			return
-		default:
+		merged, err := mergeEmissionOwnerState(fn, owner, previous, state)
+		if err != nil {
 			if u.ownerStateErr == nil {
-				u.ownerStateErr = fmt.Errorf(
-					"prepare emission universe: conflicting emission provenance for %q in package %q: (%d,%t) and (%d,%t)",
-					fn.Name(), owner.pkgPath, previous.state, previous.fromPatch, state.state, state.fromPatch,
-				)
+				u.ownerStateErr = err
 			}
 			return
 		}
+		states[owner] = merged
+		return
 	}
 	states[owner] = state
+}
+
+func mergeEmissionOwnerState(fn *ssa.Function, owner *preparedEmissionPackage, previous, incoming emissionFunctionState) (emissionFunctionState, error) {
+	switch {
+	case previous == incoming:
+		return previous, nil
+	case previous.fromPatch && !incoming.fromPatch:
+		return previous, nil
+	case incoming.fromPatch && !previous.fromPatch:
+		return incoming, nil
+	case previous.state == pkgNormal:
+		// pkgNormal is the provenance fallback for an anonymous type. An exact
+		// original/alt observation is stronger.
+		return incoming, nil
+	case incoming.state == pkgNormal:
+		return previous, nil
+	default:
+		name, pkgPath := "<nil>", "<nil>"
+		if fn != nil {
+			name = fn.Name()
+		}
+		if owner != nil {
+			pkgPath = owner.pkgPath
+		}
+		return emissionFunctionState{}, fmt.Errorf(
+			"prepare emission universe: conflicting emission provenance for %q in package %q: (%d,%t) and (%d,%t)",
+			name, pkgPath, previous.state, previous.fromPatch, incoming.state, incoming.fromPatch,
+		)
+	}
 }
 
 func (u *EmissionUniverse) ownerOf(fn *ssa.Function) *preparedEmissionPackage {

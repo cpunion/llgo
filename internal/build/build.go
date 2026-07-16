@@ -133,9 +133,25 @@ type CoroPlanInput struct {
 	Program          *ssa.Program
 	EmissionUniverse *coro.SSAEmissionUniverse
 
-	resolveFunction    func(*ssa.Function) (*ssa.Function, bool)
-	augmentFunctionIDs func(coro.FunctionIDConfig) coro.FunctionIDConfig
-	recordAnalysis     func(*coro.SSAPlan)
+	resolveFunction        func(*ssa.Function) (*ssa.Function, bool)
+	augmentFunctionIDs     func(coro.FunctionIDConfig) coro.FunctionIDConfig
+	functionBackground     func(*ssa.Function) (llssa.Background, bool, error)
+	intrinsicCallSemantics func(ssa.CallInstruction) (cl.CoroIntrinsicCallSemantics, bool, error)
+	requiredRoots          coro.Roots
+	requiredPlain          map[*ssa.Function]struct{}
+	requiredDirectPlain    []requiredCoroDirectPlainCallArgument
+	recordAnalysis         func(*coro.SSAPlan)
+}
+
+type coroCallArgumentKey struct {
+	call     ssa.CallInstruction
+	argument int
+}
+
+type requiredCoroDirectPlainCallArgument struct {
+	call     ssa.CallInstruction
+	argument int
+	target   *ssa.Function
 }
 
 // ResolveFunction maps a function that may be reached through an original
@@ -161,6 +177,143 @@ func (in CoroPlanInput) ResolveFunction(fn *ssa.Function) (*ssa.Function, bool) 
 // structural identity resolver is composed with builder identity policy.
 // Builders use this helper instead of calling AnalyzeSSA directly.
 func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.SSAPlan, error) {
+	// Compiler/runtime ABI roots are added only by the build driver. Copy both
+	// slices so a builder retains ownership of its input and cannot mutate the
+	// production root set after analysis begins.
+	allRoots := make(coro.Roots, 0, len(roots)+len(in.requiredRoots))
+	allRoots = append(allRoots, roots...)
+	allRoots = append(allRoots, in.requiredRoots...)
+	// Frozen InC is a physical lowering fact: cl never emits the fallback Go
+	// SSA body. It does not by itself prove that the foreign operation is
+	// nonblocking. Preserve an explicit known/unknown-foreign effect summary;
+	// otherwise use the conservative unknown-foreign boundary.
+	if in.functionBackground != nil || config.ClassifyFunction != nil {
+		classify := config.ClassifyFunction
+		config.ClassifyFunction = func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+			var policy coro.SSAFunctionPolicy
+			var err error
+			if classify != nil {
+				policy, err = classify(fn)
+				if err != nil {
+					return coro.SSAFunctionPolicy{}, err
+				}
+			}
+			frontendC := false
+			if in.functionBackground != nil {
+				background, classified, err := in.functionBackground(fn)
+				if err != nil {
+					return coro.SSAFunctionPolicy{}, fmt.Errorf("classify frozen frontend ABI for %q: %w", fn.Name(), err)
+				}
+				frontendC = classified && background == llssa.InC
+			}
+			if policy.IgnoreBody && !frontendC {
+				return coro.SSAFunctionPolicy{}, fmt.Errorf("builder cannot ignore the SSA body of non-C function %q", fn.Name())
+			}
+			if !frontendC {
+				return policy, nil
+			}
+			if policy.OverrideExternal && policy.External != coro.ExternalUnknownForeign && policy.External != coro.ExternalKnown {
+				return coro.SSAFunctionPolicy{}, fmt.Errorf("frontend C declaration %q conflicts with external classification %s", fn.Name(), policy.External)
+			}
+			policy.IgnoreBody = true
+			if !policy.OverrideExternal {
+				policy.External = coro.ExternalUnknownForeign
+				policy.OverrideExternal = true
+			}
+			return policy, nil
+		}
+	}
+	if len(in.requiredPlain) != 0 {
+		classify := config.ClassifyFunction
+		config.ClassifyFunction = func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+			var policy coro.SSAFunctionPolicy
+			var err error
+			if classify != nil {
+				policy, err = classify(fn)
+				if err != nil {
+					return coro.SSAFunctionPolicy{}, err
+				}
+			}
+			if _, required := in.requiredPlain[fn]; !required {
+				return policy, nil
+			}
+			if policy.Effect != coro.NoSuspend {
+				return coro.SSAFunctionPolicy{}, fmt.Errorf("compiler runtime ABI function %q conflicts with required no-suspend policy: %s", fn.Name(), policy.Effect)
+			}
+			const supportedExec = coro.MayUnwind | coro.NeedsCleanupFrame
+			if unsupported := policy.Exec &^ supportedExec; unsupported != 0 {
+				return coro.SSAFunctionPolicy{}, fmt.Errorf("compiler runtime ABI function %q conflicts with required plain execution policy: %s", fn.Name(), unsupported)
+			}
+			if policy.NeedsDispatch {
+				return coro.SSAFunctionPolicy{}, fmt.Errorf("compiler runtime ABI function %q conflicts with required direct representation", fn.Name())
+			}
+			background := llssa.Background(0)
+			classified := false
+			if in.functionBackground != nil {
+				background, classified, err = in.functionBackground(fn)
+				if err != nil {
+					return coro.SSAFunctionPolicy{}, fmt.Errorf("classify required runtime ABI function %q: %w", fn.Name(), err)
+				}
+			}
+			policy.TrustedNoPreempt = true
+			if classified && background == llssa.InC {
+				if !policy.IgnoreBody || !policy.OverrideExternal || (policy.External != coro.ExternalUnknownForeign && policy.External != coro.ExternalKnown) {
+					return coro.SSAFunctionPolicy{}, fmt.Errorf("compiler runtime ABI C declaration %q conflicts with frozen foreign classification: %s", fn.Name(), policy.External)
+				}
+				policy.External = coro.ExternalKnown
+				policy.OverrideExternal = true
+			} else if classified && background == llssa.InGo && len(fn.Blocks) != 0 {
+				if policy.OverrideExternal && policy.External != coro.Defined {
+					return coro.SSAFunctionPolicy{}, fmt.Errorf("compiler runtime ABI function %q conflicts with required defined classification: %s", fn.Name(), policy.External)
+				}
+			} else {
+				return coro.SSAFunctionPolicy{}, fmt.Errorf("compiler runtime ABI declaration %q has no frozen frontend C ABI proof", fn.Name())
+			}
+			return policy, nil
+		}
+	}
+	classifyElided := config.ClassifyElidedCall
+	config.ClassifyElidedCall = func(caller *ssa.Function, call ssa.CallInstruction) (bool, error) {
+		frontendElided := frontendElidesNoInitCall(call)
+		if !frontendElided && in.intrinsicCallSemantics != nil {
+			semantics, intrinsic, err := in.intrinsicCallSemantics(call)
+			if err != nil {
+				return false, fmt.Errorf("classify frozen intrinsic call in %q: %w", caller.Name(), err)
+			}
+			frontendElided = intrinsic && semantics == cl.CoroIntrinsicCallInlineNoSuspend
+		}
+		if classifyElided != nil {
+			requested, err := classifyElided(caller, call)
+			if err != nil {
+				return false, err
+			}
+			if requested && !frontendElided {
+				return false, fmt.Errorf("builder cannot elide ordinary call in %q; only calls omitted by the build frontend may be elided", caller.Name())
+			}
+		}
+		return frontendElided, nil
+	}
+	if len(in.requiredDirectPlain) != 0 || config.ClassifyDirectPlainCallArgument != nil {
+		required := make(map[coroCallArgumentKey]struct{}, len(in.requiredDirectPlain))
+		for _, use := range in.requiredDirectPlain {
+			required[coroCallArgumentKey{call: use.call, argument: use.argument}] = struct{}{}
+		}
+		classifyDirectPlain := config.ClassifyDirectPlainCallArgument
+		config.ClassifyDirectPlainCallArgument = func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+			key := coroCallArgumentKey{call: call, argument: argument}
+			_, compilerRequired := required[key]
+			if classifyDirectPlain != nil {
+				requested, err := classifyDirectPlain(caller, call, argument)
+				if err != nil {
+					return false, err
+				}
+				if requested && !compilerRequired {
+					return false, fmt.Errorf("builder cannot authorize direct-plain ABI for non-compiler call argument %d in %q", argument, caller.Name())
+				}
+			}
+			return compilerRequired, nil
+		}
+	}
 	if in.augmentFunctionIDs != nil {
 		config.FunctionIDs = in.augmentFunctionIDs(config.FunctionIDs)
 	}
@@ -169,11 +322,56 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 		return canonical, ok, nil
 	}
 	config.EmissionUniverse = in.EmissionUniverse
-	plan, err := coro.AnalyzeSSA(in.Program, roots, config)
+	plan, err := coro.AnalyzeSSA(in.Program, allRoots, config)
+	if err == nil {
+		err = validateRequiredCoroDirectPlainCallArguments(plan, in.requiredDirectPlain)
+	}
 	if err == nil && in.recordAnalysis != nil {
 		in.recordAnalysis(plan)
 	}
 	return plan, err
+}
+
+// frontendElidesNoInitCall mirrors cl.context.funcKind: the frontend emits no
+// call for the synthetic zero-argument init of a noinit/decl package. Treating
+// this as an unresolved managed call would invent an OpaqueSuspend edge that
+// cannot exist in the generated program.
+func frontendElidesNoInitCall(call ssa.CallInstruction) bool {
+	return cl.FrontendElidesNoInitCall(call)
+}
+
+func validateRequiredCoroDirectPlainCallArguments(plan *coro.SSAPlan, uses []requiredCoroDirectPlainCallArgument) error {
+	if len(uses) == 0 {
+		return nil
+	}
+	if plan == nil {
+		return fmt.Errorf("compiler runtime direct-plain callback validation requires a coroutine plan")
+	}
+	for index, use := range uses {
+		if use.call == nil || use.call.Common() == nil || use.argument < 0 || use.argument >= len(use.call.Common().Args) || use.target == nil {
+			return fmt.Errorf("compiler runtime direct-plain callback %d is malformed", index)
+		}
+		function, ok := plan.FunctionPlan(use.target)
+		if !ok {
+			return fmt.Errorf("compiler runtime direct-plain callback %q has no function plan", use.target.Name())
+		}
+		if function.External != coro.Defined || function.Effect != coro.NoSuspend || function.Exec.Contains(coro.NeedsPreempt) ||
+			function.FuncRep != coro.DirectPlain || function.Primary != coro.PrimaryPlain || function.Emission != coro.EmitPlain {
+			return fmt.Errorf("compiler runtime direct-plain callback %q is not a defined closed singleton with one non-suspending plain body (external=%s effect=%s exec=%s representation=%s primary=%s emission=%s)",
+				use.target.Name(), function.External, function.Effect, function.Exec, function.FuncRep, function.Primary, function.Emission)
+		}
+		targetID, ok := plan.FunctionID(use.target)
+		if !ok {
+			return fmt.Errorf("compiler runtime direct-plain callback %q has no FunctionID", use.target.Name())
+		}
+		argument := use.call.Common().Args[use.argument]
+		value, ok := plan.ValuePlan(argument)
+		if !ok || len(value.Funcs) != 1 || len(value.Funcs[0].Path) != 0 || value.Funcs[0].Rep != coro.DirectPlain ||
+			value.Funcs[0].MayBeNil || len(value.Funcs[0].Targets) != 1 || value.Funcs[0].Targets[0] != targetID {
+			return fmt.Errorf("compiler runtime direct-plain callback argument %d for %q is not an exact non-nil direct-plain singleton", use.argument, use.target.Name())
+		}
+	}
+	return nil
 }
 
 // CoroPlanBuilder builds one compilation-scoped coroutine plan after every SSA
@@ -268,6 +466,12 @@ type Config struct {
 	// gated separately and requires entry resolution, the physical ABI, and
 	// child-await lowering.
 	EnableCoroProgramBootstrapABI bool
+	// EnableCoroProgramBootstrapRun activates the production v1 bootstrap
+	// driver. It requires EnableCoroProgramBootstrapABI, emits a compiler-owned
+	// LLVM coroutine factory, and replaces only the legacy init/main calls in
+	// the platform entry. Keeping this separate preserves the descriptor-only
+	// ABI gate as an independently testable and reversible boundary.
+	EnableCoroProgramBootstrapRun bool
 	CoroPlanBuilder               CoroPlanBuilder
 	CoroPlanObserver              CoroPlanObserver
 }
@@ -719,8 +923,15 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	}
 	analyzedPlans := make(map[*coro.SSAPlan]struct{})
 	var analyzedPlansMu sync.Mutex
+	requiredRoots, requiredPlain, requiredDirectPlain, err := requiredCoroProgramRuntimePlan(ctx)
+	if err != nil {
+		return err
+	}
 	input := CoroPlanInput{
-		Program: ctx.progSSA,
+		Program:             ctx.progSSA,
+		requiredRoots:       requiredRoots,
+		requiredPlain:       requiredPlain,
+		requiredDirectPlain: requiredDirectPlain,
 		recordAnalysis: func(plan *coro.SSAPlan) {
 			if plan != nil {
 				analyzedPlansMu.Lock()
@@ -732,6 +943,8 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	if ctx.coroEmission != nil {
 		input.EmissionUniverse = ctx.coroSSAEmission
 		input.resolveFunction = ctx.coroEmission.Resolve
+		input.functionBackground = ctx.coroEmission.FunctionBackground
+		input.intrinsicCallSemantics = ctx.coroEmission.CoroIntrinsicCallSiteSemantics
 		input.augmentFunctionIDs = func(config coro.FunctionIDConfig) coro.FunctionIDConfig {
 			if ctx.buildConf.EnableCoroEntryResolution {
 				if config.CoroABI == "" {
@@ -779,17 +992,18 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	ctx.coroPlanDigest = digest
 	ctx.coroPlanMetadata = metadata
 	ctx.clCompilation = &cl.Compilation{
-		CoroPlan:                  plan,
-		CoroPlanObserver:          ctx.buildConf.CoroPlanObserver,
-		EnableCoroEntryResolution: ctx.buildConf.EnableCoroEntryResolution,
-		EnableCoroPhysicalABI:     ctx.buildConf.EnableCoroPhysicalABI,
-		EnableCoroChildAwait:      ctx.buildConf.EnableCoroChildAwait,
-		CoroPlanDigest:            digest,
-		CoroABI:                   metadata.CoroABI,
-		SchedulerABI:              metadata.SchedulerABI,
-		PanicABI:                  metadata.PanicABI,
-		FuncRepABI:                metadata.FuncRepABI,
-		EmissionUniverse:          ctx.coroEmission,
+		CoroPlan:                      plan,
+		CoroPlanObserver:              ctx.buildConf.CoroPlanObserver,
+		EnableCoroEntryResolution:     ctx.buildConf.EnableCoroEntryResolution,
+		EnableCoroPhysicalABI:         ctx.buildConf.EnableCoroPhysicalABI,
+		EnableCoroChildAwait:          ctx.buildConf.EnableCoroChildAwait,
+		EnableCoroProgramBootstrapRun: ctx.buildConf.EnableCoroProgramBootstrapRun,
+		CoroPlanDigest:                digest,
+		CoroABI:                       metadata.CoroABI,
+		SchedulerABI:                  metadata.SchedulerABI,
+		PanicABI:                      metadata.PanicABI,
+		FuncRepABI:                    metadata.FuncRepABI,
+		EmissionUniverse:              ctx.coroEmission,
 	}
 	if ctx.buildConf.EnableCoroProgramBootstrapABI {
 		bootstraps, err := prepareCoroProgramBootstrapsV1(ctx)
@@ -817,10 +1031,294 @@ func activeCoroABIVersion(conf *Config) string {
 }
 
 func activeCoroSchedulerABIVersion(conf *Config) string {
+	if conf != nil && conf.EnableCoroProgramBootstrapRun {
+		return coro.SchedulerProgramBootstrapABIV1
+	}
 	if conf != nil && conf.EnableCoroChildAwait {
 		return coro.SchedulerChildAwaitABIV0
 	}
 	return coro.SchedulerNoneABIV0
+}
+
+// requiredCoroProgramRuntimePlan returns the Go bodies referenced only by
+// compiler-generated entry/coroutine IR and their exact static call closure.
+// They are not visible from the application's source roots. The closure is a
+// trusted scheduler-stack island: CFG loops do not turn its fixed C ABI into a
+// coroutine, and exact frozen C leaves receive a temporary compatible-known
+// summary. Their fallback SSA stubs remain ignored; ordinary C declarations
+// outside this compiler-owned closure stay unknown foreign.
+func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function]struct{}, []requiredCoroDirectPlainCallArgument, error) {
+	if ctx == nil || ctx.buildConf == nil || !ctx.buildConf.EnableCoroProgramBootstrapRun {
+		return nil, nil, nil, nil
+	}
+	if ctx.coroSSAEmission == nil || ctx.coroEmission == nil {
+		return nil, nil, nil, fmt.Errorf("coroutine program bootstrap runtime roots require a frozen emission universe")
+	}
+	names := []string{
+		"init",
+		coroProgramBeginSymbolV1,
+		coroProgramRunSymbolV1,
+		"__llgo_coro_frame_alloc_v1",
+		"__llgo_coro_frame_publish_v1",
+		"__llgo_coro_await_prepare_v1",
+		"__llgo_coro_complete_prepare_v1",
+		"__llgo_coro_frame_free_v1",
+	}
+	byName := make(map[string]*ssa.Function, len(names))
+	wanted := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		wanted[name] = struct{}{}
+	}
+	for _, fn := range ctx.coroSSAEmission.Functions() {
+		if fn == nil || fn.Pkg == nil || fn.Pkg.Pkg == nil || llssa.PathOf(fn.Pkg.Pkg) != llssa.PkgRuntime {
+			continue
+		}
+		if _, ok := wanted[fn.Name()]; !ok {
+			continue
+		}
+		if previous := byName[fn.Name()]; previous != nil && previous != fn {
+			return nil, nil, nil, fmt.Errorf("coroutine program bootstrap runtime ABI %q has multiple canonical SSA bodies", fn.Name())
+		}
+		byName[fn.Name()] = fn
+	}
+	roots := make(coro.Roots, 0, len(names))
+	for _, name := range names {
+		fn := byName[name]
+		if fn == nil {
+			return nil, nil, nil, fmt.Errorf("coroutine program bootstrap runtime ABI %q has no emitted Go body in %q", name, llssa.PkgRuntime)
+		}
+		goBody, err := frozenGoEmittedBody(ctx.coroEmission, fn)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("classify coroutine program bootstrap runtime ABI %q: %w", name, err)
+		}
+		if !goBody {
+			return nil, nil, nil, fmt.Errorf("coroutine program bootstrap runtime ABI %q has no emitted Go body in %q", name, llssa.PkgRuntime)
+		}
+		roots = append(roots, coro.Root{Function: fn, Demand: coro.SyncDemand})
+	}
+
+	plain := make(map[*ssa.Function]struct{})
+	var directPlain []requiredCoroDirectPlainCallArgument
+	queue := make([]*ssa.Function, 0, len(roots))
+	for _, root := range roots {
+		queue = append(queue, root.Function)
+	}
+	for head := 0; head < len(queue); head++ {
+		fn := queue[head]
+		if _, seen := plain[fn]; seen {
+			continue
+		}
+		plain[fn] = struct{}{}
+		goBody, err := frozenGoEmittedBody(ctx.coroEmission, fn)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("classify compiler runtime ABI function %q: %w", fn.Name(), err)
+		}
+		if !goBody {
+			// Exact C declarations remain required plain leaves, but their Go
+			// fallback SSA body is not part of the emitted program. Other kinds
+			// are retained here and rejected by requiredPlain classification.
+			continue
+		}
+		for _, block := range fn.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(ssa.CallInstruction)
+				if !ok || call.Common() == nil {
+					continue
+				}
+				raw := call.Common().StaticCallee()
+				if raw == nil {
+					continue
+				}
+				callee, ok := ctx.coroEmission.Resolve(raw)
+				if !ok || callee == nil {
+					continue
+				}
+				semantics, intrinsic, err := ctx.coroEmission.CoroIntrinsicCallSiteSemantics(call)
+				if err != nil {
+					return nil, nil, nil, fmt.Errorf("classify compiler runtime ABI intrinsic %q in %q: %w", callee.Name(), fn.Name(), err)
+				}
+				if intrinsic && semantics == cl.CoroIntrinsicCallInlineNoSuspend {
+					// cl emits the proven no-suspend operation inline in fn; it
+					// has no callable ABI body and is not a member of the trusted
+					// runtime plain-function island.
+					continue
+				}
+				if _, seen := plain[callee]; !seen {
+					queue = append(queue, callee)
+				}
+				for argument, value := range call.Common().Args {
+					parameter, ok := staticCallArgumentParameterType(call, argument)
+					if !ok || ctx.prog.TypeBackground(parameter) != llssa.InC {
+						continue
+					}
+					if _, signature := types.Unalias(parameter).Underlying().(*types.Signature); !signature {
+						continue
+					}
+					target, ok := exactCoroStaticFunctionValue(ctx, value)
+					if !ok {
+						continue
+					}
+					closure, ok, err := provenCoroDirectPlainStaticClosure(ctx, target)
+					if err != nil {
+						return nil, nil, nil, fmt.Errorf("prove direct-plain callback target %q in %q: %w", target.Name(), fn.Name(), err)
+					}
+					if !ok {
+						continue
+					}
+					directPlain = append(directPlain, requiredCoroDirectPlainCallArgument{
+						call: call, argument: argument, target: target,
+					})
+					for _, member := range closure {
+						if _, seen := plain[member]; !seen {
+							queue = append(queue, member)
+						}
+					}
+				}
+			}
+		}
+	}
+	return roots, plain, directPlain, nil
+}
+
+func frozenGoEmittedBody(universe *cl.EmissionUniverse, fn *ssa.Function) (bool, error) {
+	if universe == nil || fn == nil || len(fn.Blocks) == 0 {
+		return false, nil
+	}
+	background, classified, err := universe.FunctionBackground(fn)
+	if err != nil {
+		return false, err
+	}
+	return classified && background == llssa.InGo, nil
+}
+
+func staticCallArgumentParameterType(call ssa.CallInstruction, argument int) (types.Type, bool) {
+	if call == nil || call.Common() == nil || call.Common().StaticCallee() == nil || argument < 0 || argument >= len(call.Common().Args) {
+		return nil, false
+	}
+	signature := call.Common().StaticCallee().Signature
+	if signature == nil {
+		return nil, false
+	}
+	if receiver := signature.Recv(); receiver != nil {
+		if argument == 0 {
+			return receiver.Type(), true
+		}
+		argument--
+	}
+	parameters := signature.Params()
+	if parameters == nil || parameters.Len() == 0 {
+		return nil, false
+	}
+	if signature.Variadic() && argument >= parameters.Len()-1 {
+		slice, ok := types.Unalias(parameters.At(parameters.Len() - 1).Type()).Underlying().(*types.Slice)
+		if !ok {
+			return nil, false
+		}
+		return slice.Elem(), true
+	}
+	if argument >= parameters.Len() {
+		return nil, false
+	}
+	return parameters.At(argument).Type(), true
+}
+
+func exactCoroStaticFunctionValue(ctx *context, value ssa.Value) (*ssa.Function, bool) {
+	for value != nil {
+		switch current := value.(type) {
+		case *ssa.Function:
+			if len(current.FreeVars) != 0 {
+				return nil, false
+			}
+			target, ok := ctx.coroEmission.Resolve(current)
+			return target, ok && target != nil && len(target.FreeVars) == 0
+		case *ssa.MakeClosure:
+			if len(current.Bindings) != 0 {
+				return nil, false
+			}
+			function, ok := current.Fn.(*ssa.Function)
+			if !ok {
+				return nil, false
+			}
+			value = function
+		case *ssa.ChangeType:
+			value = current.X
+		case *ssa.Convert:
+			value = current.X
+		default:
+			return nil, false
+		}
+	}
+	return nil, false
+}
+
+// provenCoroDirectPlainStaticClosure accepts only a closed Go body whose calls
+// are direct, statically resolved emitted bodies (or builtins). Dynamic calls,
+// go/defer, bodyless leaves, captured closures, and unresolved aliases remain
+// on the ordinary Dispatch path. Effect and representation are independently
+// checked after fixed-point analysis; this prefilter only establishes that it
+// is sound to seed the candidate's bounded scheduler-stack island.
+func provenCoroDirectPlainStaticClosure(ctx *context, target *ssa.Function) ([]*ssa.Function, bool, error) {
+	if ctx == nil || ctx.coroEmission == nil || target == nil || len(target.FreeVars) != 0 {
+		return nil, false, nil
+	}
+	goBody, err := frozenGoEmittedBody(ctx.coroEmission, target)
+	if err != nil {
+		return nil, false, err
+	}
+	if !goBody {
+		return nil, false, nil
+	}
+	seen := make(map[*ssa.Function]struct{})
+	queue := []*ssa.Function{target}
+	closure := make([]*ssa.Function, 0, 4)
+	for head := 0; head < len(queue); head++ {
+		function := queue[head]
+		if _, ok := seen[function]; ok {
+			continue
+		}
+		goBody, err := frozenGoEmittedBody(ctx.coroEmission, function)
+		if err != nil {
+			return nil, false, err
+		}
+		if !goBody || len(function.FreeVars) != 0 {
+			return nil, false, nil
+		}
+		seen[function] = struct{}{}
+		closure = append(closure, function)
+		for _, block := range function.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(ssa.CallInstruction)
+				if !ok || call.Common() == nil {
+					continue
+				}
+				if _, builtin := call.Common().Value.(*ssa.Builtin); builtin {
+					continue
+				}
+				if _, direct := call.(*ssa.Call); !direct {
+					return nil, false, nil
+				}
+				raw := call.Common().StaticCallee()
+				if raw == nil {
+					return nil, false, nil
+				}
+				callee, ok := ctx.coroEmission.Resolve(raw)
+				if !ok || callee == nil || len(callee.FreeVars) != 0 {
+					return nil, false, nil
+				}
+				calleeGoBody, err := frozenGoEmittedBody(ctx.coroEmission, callee)
+				if err != nil {
+					return nil, false, err
+				}
+				if !calleeGoBody {
+					return nil, false, nil
+				}
+				if _, ok := seen[callee]; !ok {
+					queue = append(queue, callee)
+				}
+			}
+		}
+	}
+	return closure, true, nil
 }
 
 func buildCoroPlanDigestMetadata(ctx *context) (coro.PlanDigestMetadata, error) {
@@ -858,10 +1356,16 @@ func prepareCoroEmissionUniverse(ctx *context, packages []*aPackage) error {
 		if aPkg == nil || aPkg.Package == nil || aPkg.SSA == nil || llruntime.SkipToBuild(aPkg.PkgPath) {
 			continue
 		}
+		metadataOnly := false
 		kind, _ := cl.PkgKindOf(aPkg.Types)
 		switch kind {
 		case cl.PkgDeclOnly:
-			continue
+			// Declaration-only packages do not emit LLVM definitions, but their
+			// exact syntax owns the C/Python link directives used to classify
+			// declarations reached from emitted Go bodies. Freeze that frontend
+			// metadata in the universe instead of rediscovering it from a name or
+			// from a fallback SSA body.
+			metadataOnly = true
 		case cl.PkgLinkIR, cl.PkgLinkExtern, cl.PkgPyModule:
 			if len(aPkg.GoFiles) == 0 {
 				continue
@@ -871,7 +1375,12 @@ func prepareCoroEmissionUniverse(ctx *context, packages []*aPackage) error {
 		if aPkg.AltPkg != nil {
 			files = append(files, aPkg.AltPkg.Syntax...)
 		}
-		inputs = append(inputs, cl.EmissionPackage{SSA: aPkg.SSA, Files: files, Identity: aPkg.ID})
+		inputs = append(inputs, cl.EmissionPackage{
+			SSA:          aPkg.SSA,
+			Files:        files,
+			Identity:     aPkg.ID,
+			MetadataOnly: metadataOnly,
+		})
 	}
 	emission, err := cl.PrepareEmissionUniverse(ctx.prog, ctx.patches, inputs)
 	if err != nil {

@@ -1024,6 +1024,77 @@ func TestCoroPhysicalABIRequiresEntryResolution(t *testing.T) {
 	}
 }
 
+func TestCoroPhysicalConsumersAcceptBuiltinInPlainBody(t *testing.T) {
+	const source = `package foo
+func Helper() {}
+func Plain(values []int) int { return len(values) }
+`
+	ssaPkg, _, files := buildGoSSAPkg(t, source)
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := ssaPkg.Func("Plain")
+	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: plain, Demand: coro.SyncDemand}}, coro.SSAConfig{
+		EmissionUniverse:     ssaUniverse,
+		FunctionIDs:          universe.FunctionIDConfig(),
+		MaxPlainInstructions: -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var builtinCall ssa.CallInstruction
+	for _, block := range plain.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(ssa.CallInstruction)
+			if !ok || call.Common() == nil {
+				continue
+			}
+			builtin, ok := call.Common().Value.(*ssa.Builtin)
+			if ok && builtin.Name() == "len" {
+				builtinCall = call
+			}
+		}
+	}
+	if builtinCall == nil {
+		t.Fatal("Plain has no SSA len builtin call")
+	}
+	if _, found := plan.CallPlan(builtinCall); found {
+		t.Fatal("AnalyzeSSA unexpectedly created a CallPlan for len")
+	}
+	pkg, _, err := NewPackageExWithEmbedOptions(prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{}, PackageOptions{
+		Compilation: &Compilation{
+			CoroPlan:                  plan,
+			EmissionUniverse:          universe,
+			EnableCoroEntryResolution: true,
+			EnableCoroPhysicalABI:     true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("compile active physical ABI plain builtin: %v", err)
+	}
+	if pkg.Module().NamedFunction("foo.Plain").IsNil() {
+		t.Fatalf("plain builtin body was not emitted:\n%s", pkg.String())
+	}
+
+	// The exemption is exact: a non-builtin CallInstruction introduced after
+	// analysis still has no CallPlan and must remain fail-closed.
+	helper := ssaPkg.Func("Helper")
+	plain.Blocks[0].Instrs = append(plain.Blocks[0].Instrs, &ssa.Call{
+		Call: ssa.CallCommon{Value: helper},
+	})
+	err = validateCoroPhysicalConsumers(plan, false)
+	if err == nil || !strings.Contains(err.Error(), "call has no compilation CallPlan") {
+		t.Fatalf("non-builtin call without CallPlan error = %v", err)
+	}
+}
+
 func TestCoroPhysicalABICacheRegistrationPreservesPhysicalMetadata(t *testing.T) {
 	const source = `package foo
 func Leaf(value uint32) uint32 { return value + 1 }

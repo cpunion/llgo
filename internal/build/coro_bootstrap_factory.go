@@ -1,0 +1,201 @@
+/*
+ * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package build
+
+import (
+	"encoding/hex"
+	"fmt"
+	"go/types"
+
+	llssa "github.com/goplus/llgo/ssa"
+	llvm "github.com/xgo-dev/llvm"
+)
+
+const (
+	coroProgramFrameAllocHookV1       = "__llgo_coro_frame_alloc_v1"
+	coroProgramFramePublishHookV1     = "__llgo_coro_frame_publish_v1"
+	coroProgramCompletePrepareHookV1  = "__llgo_coro_complete_prepare_v1"
+	coroProgramFrameFreeHookV1        = "__llgo_coro_frame_free_v1"
+	coroProgramPhysicalABIVersionV1   = 1
+	coroProgramSuspendNoneV1          = 0
+	coroProgramSuspendFrameCompleteV1 = 2
+	coroProgramLifecycleInitialV1     = 1
+	coroProgramLifecycleActiveV1      = 2
+	coroProgramLifecycleFinalV1       = 4
+)
+
+const (
+	coroProgramHeaderGV1 = iota
+	coroProgramHeaderParentV1
+	coroProgramHeaderDescriptorV1
+	coroProgramHeaderAllocationBaseV1
+	coroProgramHeaderResultSlotV1
+	coroProgramHeaderSuspendReasonV1
+	coroProgramHeaderLifecycleV1
+	coroProgramHeaderStateIDV1
+	coroProgramHeaderFlagsV1
+)
+
+// emitCoroProgramBootstrapFactoryV1 defines the compiler-owned program-root
+// coroutine. The caller supplies the exact two target declarations used by the
+// already validated bootstrap table; the factory deliberately does not look up
+// symbols or rediscover startup semantics from the LLVM module.
+//
+// The third physical parameter is the v1 startup payload. This first runnable
+// boundary has an empty startup payload, so the parameter is required to be nil
+// by the caller and is intentionally never read or otherwise materialized in
+// the generated body. The result payload is also empty; out is nevertheless
+// published in HeaderV1.ResultSlot so the frame contract remains identical to
+// later result-bearing roots.
+func emitCoroProgramBootstrapFactoryV1(
+	pkg llssa.Package,
+	bootstrap *coroProgramBootstrapV1,
+	targets [2]llssa.Function,
+	finalHash [16]byte,
+) llssa.Function {
+	validateCoroProgramBootstrapFactoryV1(pkg, bootstrap, targets)
+
+	prog := pkg.Prog
+	pointer := types.Typ[types.UnsafePointer]
+	factory := pkg.NewFunc(coroProgramBootstrapFactorySymbolV1, newSignature(
+		[]types.Type{pointer, pointer, pointer},
+		[]types.Type{pointer},
+	), llssa.InC)
+	if factory.HasBody() {
+		panic(fmt.Sprintf("coroutine program bootstrap factory symbol %q already has a body", coroProgramBootstrapFactorySymbolV1))
+	}
+	factoryValue := pkg.Module().NamedFunction(coroProgramBootstrapFactorySymbolV1)
+	factoryValue.SetVisibility(llvm.HiddenVisibility)
+
+	emptyPayload := prog.Struct()
+	descriptor := pkg.NewCoroFrameDescriptor(
+		coroProgramBootstrapFrameDescriptorPrefixV1+hex.EncodeToString(finalHash[:]),
+		llssa.CoroFrameDescriptorOptions{
+			Version: coroProgramPhysicalABIVersionV1,
+			ABIHash: finalHash,
+			Result:  emptyPayload,
+		},
+	)
+
+	b := factory.MakeBody(1)
+	g := factory.Param(0)
+	out := factory.Param(1)
+	// factory.Param(2) is the empty startup payload and must remain unused.
+	null := prog.Nil(prog.VoidPtr())
+	descriptorPointer := b.Convert(prog.VoidPtr(), descriptor)
+	headerType := coroProgramBootstrapHeaderTypeV1(prog)
+	header := b.AllocaT(headerType)
+
+	alloc := pkg.NewFunc(coroProgramFrameAllocHookV1, newSignature(
+		[]types.Type{pointer, types.Typ[types.Uintptr], types.Typ[types.Uintptr], pointer},
+		[]types.Type{pointer},
+	), llssa.InC)
+	publish := pkg.NewFunc(coroProgramFramePublishHookV1, newSignature(
+		[]types.Type{pointer, pointer, pointer, pointer}, nil,
+	), llssa.InC)
+	complete := pkg.NewFunc(coroProgramCompletePrepareHookV1, newSignature(
+		[]types.Type{pointer, pointer, pointer}, nil,
+	), llssa.InC)
+	free := pkg.NewFunc(coroProgramFrameFreeHookV1, newSignature(
+		[]types.Type{pointer, pointer, types.Typ[types.Uintptr], types.Typ[types.Uintptr], pointer}, nil,
+	), llssa.InC)
+
+	frame := llssa.CoroFrameOps{
+		Alloc: func(b llssa.Builder, size, align llssa.Expr) llssa.Expr {
+			return b.Call(alloc.Expr, g, size, align, descriptorPointer)
+		},
+		Free: func(b llssa.Builder, storage, size, align llssa.Expr) {
+			b.Call(free.Expr, g, storage, size, align, descriptorPointer)
+		},
+	}
+	coro := b.BeginCoro(llssa.CoroOptions{
+		Promise: header,
+		Frame:   frame,
+		BeforeInitialSuspend: func(b llssa.Builder, handle, storage llssa.Expr) {
+			values := []llssa.Expr{
+				g,
+				null,
+				descriptorPointer,
+				null,
+				out,
+				prog.IntVal(coroProgramSuspendNoneV1, prog.Uint16()),
+				prog.IntVal(coroProgramLifecycleInitialV1, prog.Uint16()),
+				prog.IntVal(0, prog.Uint32()),
+				prog.IntVal(0, prog.Uint32()),
+			}
+			for index, value := range values {
+				b.Store(b.FieldAddr(header, index), value)
+			}
+			b.Call(publish.Expr, g, handle, b.Convert(prog.VoidPtr(), header), storage)
+		},
+	})
+
+	b.SetBlock(coro.InitialResumeBlock())
+	b.Store(b.FieldAddr(header, coroProgramHeaderSuspendReasonV1), prog.IntVal(coroProgramSuspendNoneV1, prog.Uint16()))
+	b.Store(b.FieldAddr(header, coroProgramHeaderLifecycleV1), prog.IntVal(coroProgramLifecycleActiveV1, prog.Uint16()))
+	b.Call(targets[0].Expr)
+	b.Call(targets[1].Expr)
+
+	b.Store(b.FieldAddr(header, coroProgramHeaderSuspendReasonV1), prog.IntVal(coroProgramSuspendFrameCompleteV1, prog.Uint16()))
+	b.Store(b.FieldAddr(header, coroProgramHeaderLifecycleV1), prog.IntVal(coroProgramLifecycleFinalV1, prog.Uint16()))
+	b.Store(b.FieldAddr(header, coroProgramHeaderStateIDV1), prog.IntVal(1, prog.Uint32()))
+	b.Call(complete.Expr, g, coro.Handle(), b.Convert(prog.VoidPtr(), header))
+	coro.Finish()
+	b.Dispose()
+	return factory
+}
+
+// coroProgramBootstrapHeaderTypeV1 must remain field-for-field identical to
+// runtime/internal/coro.HeaderV1 and cl's physical coroutine header.
+func coroProgramBootstrapHeaderTypeV1(prog llssa.Program) llssa.Type {
+	return prog.Struct(
+		prog.VoidPtr(), // G
+		prog.VoidPtr(), // Parent
+		prog.VoidPtr(), // Descriptor
+		prog.VoidPtr(), // AllocationBase
+		prog.VoidPtr(), // ResultSlot
+		prog.Uint16(),  // SuspendReason
+		prog.Uint16(),  // Lifecycle
+		prog.Uint32(),  // StateID
+		prog.Uint32(),  // Flags
+	)
+}
+
+func validateCoroProgramBootstrapFactoryV1(
+	pkg llssa.Package, bootstrap *coroProgramBootstrapV1, targets [2]llssa.Function,
+) {
+	if pkg == nil || pkg.Prog == nil {
+		panic("coroutine program bootstrap factory requires an LLVM package")
+	}
+	if bootstrap == nil || len(bootstrap.Steps) != len(targets) {
+		panic("coroutine program bootstrap factory requires exactly two validated steps")
+	}
+	roles := [...]uint32{coroProgramStepRoleInitV1, coroProgramStepRoleMainV1}
+	for index, step := range bootstrap.Steps {
+		target := targets[index]
+		if step.Kind != coroProgramStepDirectPlainV1 || step.Role != roles[index] || step.Aux != 0 {
+			panic(fmt.Sprintf("coroutine program bootstrap factory step %d is not canonical DirectPlain Init/Main", index))
+		}
+		if step.FunctionID == "" || step.Target == "" || target == nil || target.Pkg != pkg || target.Name() != step.Target {
+			panic(fmt.Sprintf("coroutine program bootstrap factory step %d target does not match %q", index, step.Target))
+		}
+		sig, ok := target.RawType().(*types.Signature)
+		if !ok || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 0 || sig.Results().Len() != 0 {
+			panic(fmt.Sprintf("coroutine program bootstrap factory step %d target %q does not have the exact void() C ABI", index, step.Target))
+		}
+	}
+}

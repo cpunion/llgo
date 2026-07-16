@@ -72,6 +72,18 @@ type Roots []Root
 type SSAFunctionPolicy struct {
 	Effect Effect
 	Exec   ExecFlags
+	// IgnoreBody states that the frontend does not emit this SSA body's Go
+	// instructions because the function is an external declaration in the
+	// frozen physical ABI. AnalyzeSSA excludes that body from value flow, calls,
+	// references, recursion, local-body identity, Call/Value plans, and digest
+	// sites. The same trusted policy must explicitly override External to a
+	// non-Defined kind.
+	IgnoreBody bool
+	// TrustedNoPreempt clears only the scanner's local CFG/instruction-budget
+	// NeedsPreempt seed. It is reserved for bounded compiler/runtime islands
+	// that execute on the scheduler stack and therefore must retain a plain ABI.
+	// It does not clear recursion, suspend effects, or any other execution flag.
+	TrustedNoPreempt bool
 
 	External         ExternalKind
 	OverrideExternal bool
@@ -133,6 +145,26 @@ type SSAConfig struct {
 	// representation. Exact Go targets use ClassifyFunction instead. The default
 	// is UnknownManaged.
 	ClassifyUnknownCall func(caller *ssa.Function, call ssa.CallInstruction) (UnknownTarget, error)
+
+	// ClassifyElidedCall identifies a direct static call for which the frontend
+	// emits no callable function edge: either the call is omitted entirely or a
+	// proven no-suspend compiler intrinsic is lowered inline in the caller. Such
+	// a site contributes no graph edge and has no CallPlan, but remains in the
+	// plan/digest. The callback is trusted frontend policy, not an effect
+	// summary: AnalyzeSSA rejects attempts to elide go, defer, or dynamic calls.
+	// Argument-producing SSA instructions remain analyzed independently.
+	ClassifyElidedCall func(caller *ssa.Function, call ssa.CallInstruction) (bool, error)
+
+	// ClassifyDirectPlainCallArgument identifies one exact static-call argument
+	// use whose frontend ABI is a synchronously invoked raw function pointer
+	// rather than a Go closure/dispatch value. The exemption applies only to
+	// that (call, argument-index) boundary: any store, interface conversion,
+	// ordinary Go argument, open flow, or multi-target flow in the same value
+	// component still requires Dispatch and makes the trusted claim fail closed.
+	// The callback must not classify go, defer, dynamic, builtin, or non-function
+	// arguments. Frontends should reserve it for source-level ABI facts such as
+	// a named //llgo:type C callback parameter.
+	ClassifyDirectPlainCallArgument func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error)
 }
 
 // SSAFunctionPlan binds an immutable FunctionPlan back to its SSA function.
@@ -152,14 +184,16 @@ type SSARootPlan struct {
 // SSAPlan is the compilation-scoped whole-program result. Its maps remain
 // private so consumers cannot reconstruct identities from display strings.
 type SSAPlan struct {
-	plan        *Plan
-	roots       []SSARootPlan
-	functions   []SSAFunctionPlan
-	byFunction  map[*ssa.Function]FunctionID
-	byID        map[FunctionID]*ssa.Function
-	valuePlans  map[ssa.Value]SSAValuePlan
-	callPlans   map[ssa.CallInstruction]SSACallPlan
-	functionIDs FunctionIDConfig
+	plan          *Plan
+	roots         []SSARootPlan
+	functions     []SSAFunctionPlan
+	byFunction    map[*ssa.Function]FunctionID
+	byID          map[FunctionID]*ssa.Function
+	ignoredBodies map[*ssa.Function]struct{}
+	valuePlans    map[ssa.Value]SSAValuePlan
+	callPlans     map[ssa.CallInstruction]SSACallPlan
+	elidedCalls   map[ssa.CallInstruction]struct{}
+	functionIDs   FunctionIDConfig
 }
 
 type ssaFunctionResolution struct {
@@ -287,6 +321,17 @@ func (p *SSAPlan) FunctionPlan(fn *ssa.Function) (FunctionPlan, bool) {
 		return FunctionPlan{}, false
 	}
 	return p.plan.Lookup(id)
+}
+
+// IgnoresBody reports whether trusted frontend policy declared that fn's SSA
+// body is not part of the physically emitted program. Such a body contributes
+// no flow, calls, references, effects, recursion, or digest sites.
+func (p *SSAPlan) IgnoresBody(fn *ssa.Function) bool {
+	if p == nil || fn == nil {
+		return false
+	}
+	_, ok := p.ignoredBodies[fn]
+	return ok
 }
 
 // Function returns the SSA function assigned to id.
@@ -454,10 +499,6 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		}
 	}
 	allFunctions = canonicalFunctions
-	dynamicCandidates, err = canonicalizeSSADynamicCandidates(dynamicCandidates, canonicalizer)
-	if err != nil {
-		return nil, err
-	}
 
 	included := make([]*ssa.Function, 0, len(allFunctions))
 	includedSet := make(map[*ssa.Function]bool, len(allFunctions))
@@ -482,9 +523,50 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		}
 	}
 
+	// Freeze trusted per-function policy before inspecting any body. In
+	// particular, a frontend-owned external declaration may retain an SSA stub
+	// body even though lowering emits no Go instructions for it. Such a body is
+	// outside the physical program and must be absent from every downstream
+	// analysis, not merely have its scanner effects discarded afterwards.
+	trustedPolicies := make(map[*ssa.Function]SSAFunctionPolicy, len(included))
+	ignoredBodies := make(map[*ssa.Function]struct{})
+	bodyFunctions := make([]*ssa.Function, 0, len(included))
+	bodyFunctionSet := make(map[*ssa.Function]bool, len(included))
+	for _, fn := range included {
+		trusted := SSAFunctionPolicy{}
+		if config.ClassifyFunction != nil {
+			trusted, err = config.ClassifyFunction(fn)
+			if err != nil {
+				return nil, fmt.Errorf("coro: classify SSA function %q: %w", fn.Name(), err)
+			}
+		}
+		if trusted.IgnoreBody {
+			if !trusted.OverrideExternal || trusted.External == Defined {
+				return nil, fmt.Errorf("coro: classify SSA function %q: IgnoreBody requires an explicit non-defined external classification", fn.Name())
+			}
+			ignoredBodies[fn] = struct{}{}
+		} else {
+			bodyFunctions = append(bodyFunctions, fn)
+			bodyFunctionSet[fn] = true
+		}
+		trustedPolicies[fn] = trusted
+	}
+	dynamicCandidates, err = filterSSADynamicCandidateSites(dynamicCandidates, bodyFunctionSet, canonicalizer)
+	if err != nil {
+		return nil, err
+	}
+	dynamicCandidates, err = canonicalizeSSADynamicCandidates(dynamicCandidates, canonicalizer)
+	if err != nil {
+		return nil, err
+	}
+
 	ids := make(map[*ssa.Function]FunctionID, len(included))
 	byID := make(map[FunctionID]*ssa.Function, len(included))
-	idBuilder := functionIDBuilder{config: config.FunctionIDs, localTypeCandidates: allFunctions}
+	idBuilder := functionIDBuilder{
+		config:                 config.FunctionIDs,
+		localTypeCandidates:    allFunctions,
+		localTypeIgnoredBodies: ignoredBodies,
+	}
 	for _, fn := range included {
 		id, err := idBuilder.stableFunctionID(fn)
 		if err != nil {
@@ -507,11 +589,22 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	}
 	sort.Slice(canonicalRoots, func(i, j int) bool { return canonicalRoots[i].ID < canonicalRoots[j].ID })
 
-	flow, err := analyzeSSAFunctionFlow(included, includedSet, ids, dynamicCandidates, config.DynamicResolution, canonicalizer)
+	directPlainCallArguments, err := classifySSADirectPlainCallArguments(bodyFunctions, config)
+	if err != nil {
+		return nil, err
+	}
+	flow, err := analyzeSSAFunctionFlow(bodyFunctions, includedSet, ids, dynamicCandidates, config.DynamicResolution, canonicalizer, directPlainCallArguments)
 	if err != nil {
 		return nil, fmt.Errorf("coro: analyze SSA function-value flow: %w", err)
 	}
-	unknownTargets, err := classifySSAUnknownCalls(included, includedSet, flow, config)
+	if err := flow.validateDirectPlainCallArguments(); err != nil {
+		return nil, fmt.Errorf("coro: validate trusted direct-plain call arguments: %w", err)
+	}
+	elidedCalls, err := classifySSAElidedCalls(bodyFunctions, config)
+	if err != nil {
+		return nil, err
+	}
+	unknownTargets, err := classifySSAUnknownCalls(bodyFunctions, includedSet, flow, elidedCalls, config)
 	if err != nil {
 		return nil, err
 	}
@@ -523,21 +616,24 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 			policy.External = ExternalUnknownManaged
 			policy.OverrideExternal = true
 		}
-		bodyEffect, bodyExec := scanSSAFunctionBody(fn, maxPlain)
-		policy.Effect = policy.Effect.Join(bodyEffect)
-		policy.Exec = policy.Exec.Join(bodyExec)
-		if config.ClassifyFunction != nil {
-			trusted, err := config.ClassifyFunction(fn)
-			if err != nil {
-				return nil, fmt.Errorf("coro: classify SSA function %q: %w", fn.Name(), err)
+		trusted := trustedPolicies[fn]
+		if _, ignored := ignoredBodies[fn]; !ignored {
+			bodyEffect, bodyExec := scanSSAFunctionBody(fn, maxPlain)
+			policy.Effect = policy.Effect.Join(bodyEffect)
+			policy.Exec = policy.Exec.Join(bodyExec)
+			if trusted.TrustedNoPreempt {
+				policy.Exec &^= NeedsPreempt
 			}
-			policy.Effect = policy.Effect.Join(trusted.Effect)
-			policy.Exec = policy.Exec.Join(trusted.Exec)
-			policy.NeedsDispatch = policy.NeedsDispatch || trusted.NeedsDispatch
-			if trusted.OverrideExternal {
-				policy.External = trusted.External
-				policy.OverrideExternal = true
-			}
+		}
+		policy.Effect = policy.Effect.Join(trusted.Effect)
+		// TrustedNoPreempt suppresses only the scanner's local budget/CFG
+		// seed above. An explicit trusted NeedsPreempt declaration remains
+		// authoritative and is joined only after that suppression.
+		policy.Exec = policy.Exec.Join(trusted.Exec)
+		policy.NeedsDispatch = policy.NeedsDispatch || trusted.NeedsDispatch
+		if trusted.OverrideExternal {
+			policy.External = trusted.External
+			policy.OverrideExternal = true
 		}
 		policy.NeedsDispatch = policy.NeedsDispatch || needsDispatch[fn]
 		if !policy.OverrideExternal {
@@ -565,11 +661,14 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	}
 
 	callKinds := make(map[ssa.CallInstruction]CallKind)
-	for _, caller := range included {
+	for _, caller := range bodyFunctions {
 		for _, block := range caller.Blocks {
 			for _, instruction := range block.Instrs {
 				call, ok := instruction.(ssa.CallInstruction)
 				if !ok {
+					continue
+				}
+				if elidedCalls[call] {
 					continue
 				}
 				common := call.Common()
@@ -666,7 +765,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 			}
 		}
 	}
-	if err := addSSAReferenceEdges(graph, included, includedSet, ids, flow); err != nil {
+	if err := addSSAReferenceEdges(graph, bodyFunctions, includedSet, ids, flow); err != nil {
 		return nil, err
 	}
 
@@ -678,15 +777,23 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if err != nil {
 		return nil, fmt.Errorf("coro: finalize SSA value and call plans: %w", err)
 	}
+	elidedCallSet := make(map[ssa.CallInstruction]struct{}, len(elidedCalls))
+	for call, elided := range elidedCalls {
+		if elided {
+			elidedCallSet[call] = struct{}{}
+		}
+	}
 	result := &SSAPlan{
-		plan:        base,
-		roots:       canonicalRoots,
-		functions:   make([]SSAFunctionPlan, 0, len(included)),
-		byFunction:  ids,
-		byID:        byID,
-		valuePlans:  valuePlans,
-		callPlans:   callPlans,
-		functionIDs: config.FunctionIDs,
+		plan:          base,
+		roots:         canonicalRoots,
+		functions:     make([]SSAFunctionPlan, 0, len(included)),
+		byFunction:    ids,
+		byID:          byID,
+		ignoredBodies: ignoredBodies,
+		valuePlans:    valuePlans,
+		callPlans:     callPlans,
+		elidedCalls:   elidedCallSet,
+		functionIDs:   config.FunctionIDs,
 	}
 	for _, functionPlan := range base.Functions() {
 		result.functions = append(result.functions, SSAFunctionPlan{
@@ -737,10 +844,77 @@ func addSSAReferenceEdges(
 	return nil
 }
 
+func classifySSADirectPlainCallArguments(functions []*ssa.Function, config SSAConfig) ([]ssaCallArgumentUse, error) {
+	var result []ssaCallArgumentUse
+	if config.ClassifyDirectPlainCallArgument == nil {
+		return nil, nil
+	}
+	for _, caller := range functions {
+		for _, block := range caller.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(ssa.CallInstruction)
+				if !ok || call.Common() == nil {
+					continue
+				}
+				for argument, value := range call.Common().Args {
+					directPlain, err := config.ClassifyDirectPlainCallArgument(caller, call, argument)
+					if err != nil {
+						return nil, fmt.Errorf("coro: classify trusted direct-plain call argument %d in %q: %w", argument, caller.Name(), err)
+					}
+					if !directPlain {
+						continue
+					}
+					if _, direct := call.(*ssa.Call); !direct || call.Common().StaticCallee() == nil {
+						return nil, fmt.Errorf("coro: trusted direct-plain call argument %d in %q must belong to a direct static call", argument, caller.Name())
+					}
+					if _, builtin := call.Common().Value.(*ssa.Builtin); builtin {
+						return nil, fmt.Errorf("coro: trusted direct-plain call argument %d in %q cannot belong to a builtin call", argument, caller.Name())
+					}
+					if value == nil || !isScalarFuncType(value.Type()) {
+						return nil, fmt.Errorf("coro: trusted direct-plain call argument %d in %q must be a scalar function value", argument, caller.Name())
+					}
+					result = append(result, ssaCallArgumentUse{call: call, argument: argument})
+				}
+			}
+		}
+	}
+	return result, nil
+}
+
+func classifySSAElidedCalls(functions []*ssa.Function, config SSAConfig) (map[ssa.CallInstruction]bool, error) {
+	result := make(map[ssa.CallInstruction]bool)
+	if config.ClassifyElidedCall == nil {
+		return result, nil
+	}
+	for _, caller := range functions {
+		for _, block := range caller.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(ssa.CallInstruction)
+				if !ok {
+					continue
+				}
+				elided, err := config.ClassifyElidedCall(caller, call)
+				if err != nil {
+					return nil, fmt.Errorf("coro: classify frontend-elided call in %q: %w", caller.Name(), err)
+				}
+				if !elided {
+					continue
+				}
+				if call.Common() == nil || call.Common().StaticCallee() == nil || ssaCallKind(call) != CallDirect {
+					return nil, fmt.Errorf("coro: frontend-elided call in %q must be a direct static call", caller.Name())
+				}
+				result[call] = true
+			}
+		}
+	}
+	return result, nil
+}
+
 func classifySSAUnknownCalls(
 	functions []*ssa.Function,
 	included map[*ssa.Function]bool,
 	flow *ssaFuncFlow,
+	elided map[ssa.CallInstruction]bool,
 	config SSAConfig,
 ) (map[ssa.CallInstruction]UnknownTarget, error) {
 	result := make(map[ssa.CallInstruction]UnknownTarget)
@@ -749,6 +923,9 @@ func classifySSAUnknownCalls(
 			for _, instruction := range block.Instrs {
 				call, ok := instruction.(ssa.CallInstruction)
 				if !ok {
+					continue
+				}
+				if elided[call] {
 					continue
 				}
 				common := call.Common()
@@ -805,6 +982,34 @@ func canonicalizeSSADynamicCandidates(
 		if len(canonicalTargets) != 0 {
 			result[call] = canonicalTargets
 		}
+	}
+	return result, nil
+}
+
+// filterSSADynamicCandidateSites removes CHA sites belonging to SSA stub bodies
+// that the frontend does not physically emit. Candidate target functions remain
+// untouched: a real emitted call may still dispatch to an external declaration.
+func filterSSADynamicCandidateSites(
+	candidates map[ssa.CallInstruction]map[*ssa.Function]struct{},
+	bodyFunctions map[*ssa.Function]bool,
+	canonicalizer *ssaFunctionCanonicalizer,
+) (map[ssa.CallInstruction]map[*ssa.Function]struct{}, error) {
+	if len(candidates) == 0 {
+		return candidates, nil
+	}
+	result := make(map[ssa.CallInstruction]map[*ssa.Function]struct{}, len(candidates))
+	for call, targets := range candidates {
+		if call == nil || call.Parent() == nil {
+			continue
+		}
+		owner, ok, err := canonicalizer.resolve(call.Parent())
+		if err != nil {
+			return nil, fmt.Errorf("coro: resolve dynamic-call owner %q before candidate classification: %w", call.Parent().Name(), err)
+		}
+		if !ok || !bodyFunctions[owner] {
+			continue
+		}
+		result[call] = targets
 	}
 	return result, nil
 }

@@ -729,6 +729,18 @@ func validateCoroPhysicalConsumers(plan *coro.SSAPlan, childAwait bool) error {
 					return coroLeafInstructionError(fn, function.Plan, instr, "goroutine spawn requires scheduler root lowering")
 				}
 				if call, ok := instr.(ssa.CallInstruction); ok {
+					if plan.ElidesCall(call) {
+						continue
+					}
+					// SSA builtins are compiler-lowered operations, not managed
+					// function consumers. AnalyzeSSA deliberately does not create
+					// CallPlans for them, so keep the physical-ABI check focused on
+					// every non-builtin call instruction.
+					if common := call.Common(); common != nil {
+						if _, builtin := common.Value.(*ssa.Builtin); builtin {
+							continue
+						}
+					}
 					callPlan, found := plan.CallPlan(call)
 					if !found {
 						return coroLeafInstructionError(fn, function.Plan, instr, "call has no compilation CallPlan")

@@ -31,7 +31,7 @@ import (
 // PlanDigestSchema is the independent canonical schema used for archive cache
 // identity. It is deliberately separate from SummarySchema: summaries remain
 // diagnostic snapshots, while this document covers every lowering plan site.
-const PlanDigestSchema = "llgo.coro.plan-digest.v2"
+const PlanDigestSchema = "llgo.coro.plan-digest.v4"
 
 // Current experimental ABI identities. Keeping these in the analysis package
 // gives build, cache, and lowering code one version source of truth.
@@ -45,8 +45,13 @@ const (
 	// its stack, but only the scheduler may subsequently resume or destroy either
 	// frame. It deliberately does not claim spawn, park, preemption, or roots.
 	SchedulerChildAwaitABIV0 = "llgo.coro.scheduler.child-await.v0"
-	PanicLegacyABIV0         = "llgo.coro.panic.legacy.v0"
-	FuncRepABIV0             = "llgo.coro.func-rep.v0"
+	// SchedulerProgramBootstrapABIV1 extends child-await with one
+	// compiler-owned stackless program root and the runtime's static single-P
+	// prepare/adopt/run driver. It still does not claim spawn, park, timers, or
+	// preemption.
+	SchedulerProgramBootstrapABIV1 = "llgo.coro.scheduler.program-bootstrap.v1"
+	PanicLegacyABIV0               = "llgo.coro.panic.legacy.v0"
+	FuncRepABIV0                   = "llgo.coro.func-rep.v0"
 )
 
 // PlanDigestMetadata contains every effective ABI and target input that may
@@ -67,13 +72,14 @@ type PlanDigestMetadata struct {
 }
 
 type planDigestDocument struct {
-	Schema           string               `json:"schema"`
-	FunctionIDSchema string               `json:"function_id_schema"`
-	Metadata         PlanDigestMetadata   `json:"metadata"`
-	Roots            []planDigestRoot     `json:"roots"`
-	Functions        []planDigestFunction `json:"functions"`
-	Calls            []planDigestCall     `json:"calls"`
-	Values           []planDigestValue    `json:"values"`
+	Schema           string                 `json:"schema"`
+	FunctionIDSchema string                 `json:"function_id_schema"`
+	Metadata         PlanDigestMetadata     `json:"metadata"`
+	Roots            []planDigestRoot       `json:"roots"`
+	Functions        []planDigestFunction   `json:"functions"`
+	Calls            []planDigestCall       `json:"calls"`
+	ElidedCalls      []planDigestElidedCall `json:"elided_calls,omitempty"`
+	Values           []planDigestValue      `json:"values"`
 }
 
 type planDigestRoot struct {
@@ -83,6 +89,7 @@ type planDigestRoot struct {
 
 type planDigestFunction struct {
 	ID             FunctionID `json:"id"`
+	IgnoredBody    bool       `json:"ignored_body"`
 	DeclaredEffect uint16     `json:"declared_effect"`
 	LocalEffect    uint16     `json:"local_effect"`
 	Effect         uint16     `json:"effect"`
@@ -107,6 +114,13 @@ type planDigestCall struct {
 	Open        bool         `json:"open"`
 	Unresolved  uint8        `json:"unresolved"`
 	MayBeNil    bool         `json:"may_be_nil"`
+}
+
+type planDigestElidedCall struct {
+	Function    FunctionID `json:"function"`
+	Block       int        `json:"block"`
+	Instruction int        `json:"instruction"`
+	Elided      bool       `json:"elided"`
 }
 
 type planDigestValue struct {
@@ -195,13 +209,18 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 		Roots:            roots,
 		Functions:        functions,
 		Calls:            make([]planDigestCall, 0, len(p.callPlans)),
+		ElidedCalls:      make([]planDigestElidedCall, 0, len(p.elidedCalls)),
 		Values:           make([]planDigestValue, 0, len(p.valuePlans)),
 	}
 	seenCalls := make(map[ssa.CallInstruction]struct{}, len(p.callPlans))
+	seenElidedCalls := make(map[ssa.CallInstruction]struct{}, len(p.elidedCalls))
 	coveredValues := make(map[ssa.Value]struct{}, len(p.valuePlans))
 	for _, function := range p.functions {
 		fn := function.Function
 		id := function.Plan.ID
+		if p.IgnoresBody(fn) {
+			continue
+		}
 		for index, value := range fn.Params {
 			site := planDigestValueSite{Function: id, Kind: "param", Index: index, Block: -1, Instruction: -1, Operand: -1}
 			if err := p.appendDigestValue(&document.Values, coveredValues, value, site, true); err != nil {
@@ -235,19 +254,32 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 				}
 				if call, ok := instruction.(ssa.CallInstruction); ok {
 					if _, builtin := call.Common().Value.(*ssa.Builtin); !builtin {
-						plan, ok := p.callPlans[call]
-						if !ok {
-							return planDigestDocument{}, fmt.Errorf("coro: missing CallPlan for function %q block %d instruction %d", id, blockIndex, semanticIndex)
+						if p.ElidesCall(call) {
+							if _, planned := p.callPlans[call]; planned {
+								return planDigestDocument{}, fmt.Errorf("coro: function %q block %d instruction %d is both elided and assigned a CallPlan", id, blockIndex, semanticIndex)
+							}
+							if _, duplicate := seenElidedCalls[call]; duplicate {
+								return planDigestDocument{}, fmt.Errorf("coro: duplicate elided SSA call occurrence for function %q block %d instruction %d", id, blockIndex, semanticIndex)
+							}
+							seenElidedCalls[call] = struct{}{}
+							document.ElidedCalls = append(document.ElidedCalls, planDigestElidedCall{
+								Function: id, Block: blockIndex, Instruction: semanticIndex, Elided: true,
+							})
+						} else {
+							plan, ok := p.callPlans[call]
+							if !ok {
+								return planDigestDocument{}, fmt.Errorf("coro: missing CallPlan for function %q block %d instruction %d", id, blockIndex, semanticIndex)
+							}
+							entry, err := p.canonicalDigestCall(id, blockIndex, semanticIndex, call, plan)
+							if err != nil {
+								return planDigestDocument{}, err
+							}
+							if _, duplicate := seenCalls[call]; duplicate {
+								return planDigestDocument{}, fmt.Errorf("coro: duplicate SSA call occurrence for function %q block %d instruction %d", id, blockIndex, semanticIndex)
+							}
+							seenCalls[call] = struct{}{}
+							document.Calls = append(document.Calls, entry)
 						}
-						entry, err := p.canonicalDigestCall(id, blockIndex, semanticIndex, call, plan)
-						if err != nil {
-							return planDigestDocument{}, err
-						}
-						if _, duplicate := seenCalls[call]; duplicate {
-							return planDigestDocument{}, fmt.Errorf("coro: duplicate SSA call occurrence for function %q block %d instruction %d", id, blockIndex, semanticIndex)
-						}
-						seenCalls[call] = struct{}{}
-						document.Calls = append(document.Calls, entry)
 					}
 				}
 
@@ -271,6 +303,9 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 	}
 	if len(seenCalls) != len(p.callPlans) {
 		return planDigestDocument{}, fmt.Errorf("coro: CallPlan coverage mismatch: projected %d of %d plans", len(seenCalls), len(p.callPlans))
+	}
+	if len(seenElidedCalls) != len(p.elidedCalls) {
+		return planDigestDocument{}, fmt.Errorf("coro: elided-call coverage mismatch: projected %d of %d calls", len(seenElidedCalls), len(p.elidedCalls))
 	}
 	if len(coveredValues) != len(p.valuePlans) {
 		return planDigestDocument{}, fmt.Errorf("coro: SSAValuePlan coverage mismatch: projected %d of %d plans", len(coveredValues), len(p.valuePlans))
@@ -407,6 +442,7 @@ func (p *SSAPlan) canonicalDigestFunctions() ([]planDigestFunction, error) {
 		}
 		ret = append(ret, planDigestFunction{
 			ID:             plan.ID,
+			IgnoredBody:    p.IgnoresBody(function.Function),
 			DeclaredEffect: uint16(plan.DeclaredEffect),
 			LocalEffect:    uint16(plan.LocalEffect),
 			Effect:         uint16(plan.Effect),
@@ -504,6 +540,9 @@ func (p *SSAPlan) digestValueDefinitions() (map[ssa.Value]struct{}, error) {
 	}
 	for _, function := range p.functions {
 		id := function.Plan.ID
+		if p.IgnoresBody(function.Function) {
+			continue
+		}
 		for index, value := range function.Function.Params {
 			if err := add(value, fmt.Sprintf("function %q parameter %d", id, index)); err != nil {
 				return nil, err

@@ -94,6 +94,26 @@ func PkgKindOf(pkg *types.Package) (int, string) {
 	return kind, param
 }
 
+// FrontendElidesNoInitCall reports whether cl omits a synthetic imported-init
+// call because the imported package is noinit/decl (or another package kind
+// with the same no-init contract). Keep emission-universe closure and
+// coroutine call-graph analysis on the same physical frontend rule as
+// context.funcKind.
+func FrontendElidesNoInitCall(call ssa.CallInstruction) bool {
+	if _, direct := call.(*ssa.Call); !direct || call.Common() == nil {
+		return false
+	}
+	fn := call.Common().StaticCallee()
+	if fn == nil || fn.Name() != "init" || fn.Pkg == nil || fn.Pkg.Pkg == nil || fn.Signature == nil {
+		return false
+	}
+	if fn.Signature.Recv() != nil || fn.Signature.Params().Len() != 0 {
+		return false
+	}
+	kind, _ := PkgKindOf(fn.Pkg.Pkg)
+	return kind >= PkgNoInit
+}
+
 // decl: a package that only contains declarations
 // noinit: a package that does not need to be initialized
 func pkgKind(v string) (int, string) {

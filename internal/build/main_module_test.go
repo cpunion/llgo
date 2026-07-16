@@ -4,6 +4,7 @@
 package build
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -347,6 +348,130 @@ func TestGenMainModuleCoroProgramBootstrapNativeAndWasm(t *testing.T) {
 				"call void @\"example.com/foo.init\"()",
 				"call void @\"example.com/foo.main\"()",
 			)
+		})
+	}
+}
+
+func TestGenMainModuleCoroProgramBootstrapRuntimeSwitch(t *testing.T) {
+	llvm.InitializeAllTargets()
+	t.Setenv(llgoStdioNobuf, "")
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	ctx := &context{
+		prog: prog,
+		buildConf: &Config{
+			BuildMode:                     BuildModeExe,
+			Goos:                          "linux",
+			Goarch:                        "amd64",
+			EnableCoroEntryResolution:     true,
+			EnableCoroPhysicalABI:         true,
+			EnableCoroChildAwait:          true,
+			EnableCoroProgramBootstrapABI: true,
+			EnableCoroProgramBootstrapRun: true,
+		},
+	}
+	var programHash [16]byte
+	for i := range programHash {
+		programHash[i] = byte(i + 1)
+	}
+	entry := genMainModule(ctx, llssa.PkgRuntime,
+		&packages.Package{ID: "example.com/foo", PkgPath: "example.com/foo", ExportFile: "foo.a"},
+		&genConfig{
+			rtInit:           true,
+			pyInit:           true,
+			coroManifestHash: programHash,
+			coroBootstrap: &coroProgramBootstrapV1{Steps: []coroProgramBootstrapStepV1{
+				{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleInitV1, FunctionID: "init-id", Target: "example.com/foo.init"},
+				{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleMainV1, FunctionID: "main-id", Target: "example.com/foo.main"},
+			}},
+		})
+	ir := entry.LPkg.String()
+	bootstrapLine := irLineWithPrefix(ir, "@"+coroProgramBootstrapSymbolV1+" =")
+	if !strings.Contains(bootstrapLine, "ptr @"+coroProgramBootstrapFactorySymbolV1) {
+		t.Fatalf("runnable bootstrap does not publish its factory: %s\n%s", bootstrapLine, ir)
+	}
+	factory := entry.LPkg.Module().NamedFunction(coroProgramBootstrapFactorySymbolV1)
+	if factory.IsNil() || factory.IsDeclaration() {
+		t.Fatalf("compiler-owned bootstrap factory is missing:\n%s", ir)
+	}
+	assertInOrder(t, factory.String(),
+		"call void @\"example.com/foo.init\"()",
+		"call void @\"example.com/foo.main\"()",
+		"call void @"+coroProgramCompletePrepareHookV1,
+	)
+	entryBody := entry.LPkg.Module().NamedFunction("main").String()
+	if strings.Contains(entryBody, "call void @\"example.com/foo.init\"()") || strings.Contains(entryBody, "call void @\"example.com/foo.main\"()") {
+		t.Fatalf("platform entry retained legacy direct init/main calls:\n%s", entryBody)
+	}
+	assertInOrder(t, entryBody,
+		"call void @Py_Initialize()",
+		"call void @\""+llssa.PkgRuntime+".init\"()",
+		"call void @runtime.init()",
+		"call ptr @"+coroProgramBeginSymbolV1,
+		"call ptr @"+coroProgramBootstrapFactorySymbolV1,
+		"call void @"+coroProgramRunSymbolV1,
+		"call void @Py_Finalize()",
+	)
+	if strings.Contains(entryBody, "call ptr %") {
+		t.Fatalf("platform entry introduced indirect factory dispatch:\n%s", entryBody)
+	}
+}
+
+func TestGenMainModuleCoroProgramBootstrapRuntimeAfterCoroPasses(t *testing.T) {
+	llvm.InitializeAllTargets()
+	t.Setenv(llgoStdioNobuf, "")
+	tests := []struct {
+		name   string
+		target *llssa.Target
+		goos   string
+		goarch string
+	}{
+		{name: "native", goos: "linux", goarch: "amd64"},
+		{name: "wasm", target: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}, goos: "wasip1", goarch: "wasm"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			prog := llssa.NewProgram(test.target)
+			defer prog.Dispose()
+			ctx := &context{
+				prog: prog,
+				buildConf: &Config{
+					BuildMode:                     BuildModeExe,
+					Goos:                          test.goos,
+					Goarch:                        test.goarch,
+					EnableCoroEntryResolution:     true,
+					EnableCoroPhysicalABI:         true,
+					EnableCoroChildAwait:          true,
+					EnableCoroProgramBootstrapABI: true,
+					EnableCoroProgramBootstrapRun: true,
+				},
+			}
+			entry := genMainModule(ctx, llssa.PkgRuntime,
+				&packages.Package{ID: "example.com/foo", PkgPath: "example.com/foo", ExportFile: "foo.a"},
+				&genConfig{coroBootstrap: &coroProgramBootstrapV1{Steps: []coroProgramBootstrapStepV1{
+					{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleInitV1, FunctionID: "init-id", Target: "example.com/foo.init"},
+					{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleMainV1, FunctionID: "main-id", Target: "example.com/foo.main"},
+				}}})
+			if err := lowerCoroControlWrappers(ctx, entry.LPkg); err != nil {
+				t.Fatalf("lower production entry coroutine: %v\n%s", err, entry.LPkg.String())
+			}
+			mod := entry.LPkg.Module()
+			post := mod.String()
+			for _, suffix := range []string{".resume", ".destroy"} {
+				if mod.NamedFunction(coroProgramBootstrapFactorySymbolV1 + suffix).IsNil() {
+					t.Fatalf("entry CoroSplit did not create factory%s:\n%s", suffix, post)
+				}
+			}
+			for _, intrinsic := range []string{"llvm.coro.id", "llvm.coro.begin", "llvm.coro.suspend", "llvm.coro.resume", "llvm.coro.done", "llvm.coro.destroy"} {
+				if regexp.MustCompile(`call [^\n]*@` + regexp.QuoteMeta(intrinsic) + `\b`).MatchString(post) {
+					t.Fatalf("lowered production entry still references %s:\n%s", intrinsic, post)
+				}
+			}
+			object, err := prog.TargetMachine().EmitToMemoryBuffer(mod, llvm.ObjectFile)
+			if err != nil {
+				t.Fatalf("emit production entry object: %v\n%s", err, post)
+			}
+			object.Dispose()
 		})
 	}
 }

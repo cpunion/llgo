@@ -283,3 +283,15 @@ func Destroyed(p *P, g *G, action Action) (Action, bool) {
 	}
 	return setAction(p, ActionCheckResume, g.active.handle)
 }
+
+// TerminalG reports whether a scheduler run completely consumed g and left p
+// idle. This is a deliberately strict terminal-state check for program
+// startup: a dead G state alone is insufficient if any frame, transition,
+// ready-queue link, destruction bookkeeping, or P operation survived.
+func TerminalG(p *P, g *G) bool {
+	return p != nil && p.current == nil && p.readyHead == nil && p.readyTail == nil &&
+		!p.inResume && p.action.Kind == ActionInvalid && p.action.Handle == nil &&
+		ValidG(g) && g.state == GDead && g.root == nil && g.active == nil && g.frames == nil &&
+		g.pending.kind == pendingNone && g.pending.from == nil && g.pending.target == nil &&
+		g.destroyTarget == nil && !g.destroyRoot && g.nextReady == nil && !g.queued
+}

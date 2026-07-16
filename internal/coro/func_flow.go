@@ -109,6 +109,19 @@ func (p *SSAPlan) CallPlan(call ssa.CallInstruction) (SSACallPlan, bool) {
 	return plan, true
 }
 
+// ElidesCall reports whether trusted frontend policy proved that the exact SSA
+// call emits no callable function edge. The source operation may be omitted or
+// lowered inline as a no-suspend compiler intrinsic. Elided calls deliberately
+// have no CallPlan and must not be treated as DirectPlain or another callable
+// ABI edge.
+func (p *SSAPlan) ElidesCall(call ssa.CallInstruction) bool {
+	if p == nil || call == nil {
+		return false
+	}
+	_, ok := p.elidedCalls[call]
+	return ok
+}
+
 func cloneSSAValuePlan(plan SSAValuePlan) SSAValuePlan {
 	plan.Funcs = cloneFuncRepMap(plan.Funcs)
 	return plan
@@ -146,6 +159,13 @@ type ssaFuncFlow struct {
 	dynamicCandidates map[ssa.CallInstruction]map[*ssa.Function]struct{}
 	dynamicResolution DynamicResolution
 	canonicalizer     *ssaFunctionCanonicalizer
+	directPlainArgs   map[ssaCallArgumentUse]struct{}
+	directPlainOrder  []ssaCallArgumentUse
+}
+
+type ssaCallArgumentUse struct {
+	call     ssa.CallInstruction
+	argument int
 }
 
 func analyzeSSAFunctionFlow(
@@ -155,7 +175,12 @@ func analyzeSSAFunctionFlow(
 	dynamicCandidates map[ssa.CallInstruction]map[*ssa.Function]struct{},
 	dynamicResolution DynamicResolution,
 	canonicalizer *ssaFunctionCanonicalizer,
+	directPlainArgs []ssaCallArgumentUse,
 ) (*ssaFuncFlow, error) {
+	directPlainSet := make(map[ssaCallArgumentUse]struct{}, len(directPlainArgs))
+	for _, use := range directPlainArgs {
+		directPlainSet[use] = struct{}{}
+	}
 	flow := &ssaFuncFlow{
 		allValues:         make(map[ssa.Value]struct{}),
 		index:             make(map[ssa.Value]int),
@@ -165,6 +190,8 @@ func analyzeSSAFunctionFlow(
 		dynamicCandidates: dynamicCandidates,
 		dynamicResolution: dynamicResolution,
 		canonicalizer:     canonicalizer,
+		directPlainArgs:   directPlainSet,
+		directPlainOrder:  append([]ssaCallArgumentUse(nil), directPlainArgs...),
 	}
 
 	for _, fn := range functions {
@@ -463,10 +490,32 @@ func (f *ssaFuncFlow) seedInstruction(instruction ssa.Instruction) {
 			}
 			return
 		}
-		for _, argument := range common.Args {
-			f.markBoundary(argument)
+		for argument, value := range common.Args {
+			if _, directPlain := f.directPlainArgs[ssaCallArgumentUse{call: instruction, argument: argument}]; directPlain {
+				continue
+			}
+			f.markBoundary(value)
 		}
 	}
+}
+
+func (f *ssaFuncFlow) validateDirectPlainCallArguments() error {
+	for _, use := range f.directPlainOrder {
+		if use.call == nil || use.call.Common() == nil || use.argument < 0 || use.argument >= len(use.call.Common().Args) {
+			return fmt.Errorf("invalid classified call argument index %d", use.argument)
+		}
+		value := use.call.Common().Args[use.argument]
+		index, ok := f.index[value]
+		if !ok {
+			return fmt.Errorf("call argument %d in %q has no scalar function-value flow component", use.argument, use.call.Parent().Name())
+		}
+		root := f.root(index)
+		if f.unknown[root] || f.mayBeNil[root] || len(f.targets[root]) != 1 || f.requiresDispatch(root) {
+			return fmt.Errorf("call argument %d in %q is not a closed non-nil singleton without another canonical boundary (unknown=%t nil=%t targets=%d canonical=%t)",
+				use.argument, use.call.Parent().Name(), f.unknown[root], f.mayBeNil[root], len(f.targets[root]), f.canonical[root])
+		}
+	}
+	return nil
 }
 
 func (f *ssaFuncFlow) descriptorTargets(unknownTargets map[ssa.CallInstruction]UnknownTarget) map[*ssa.Function]bool {

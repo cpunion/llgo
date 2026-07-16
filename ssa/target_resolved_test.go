@@ -134,6 +134,36 @@ func TestResolvedTargetConfig(t *testing.T) {
 	}
 }
 
+func TestCoroWasmTargetMachineEmitsMultipleDefinedFunctions(t *testing.T) {
+	prog := NewProgram(&Target{GOOS: "wasip1", GOARCH: "wasm"})
+	defer prog.Dispose()
+	pkg := prog.NewPackage("wasmsections", "target/wasmsections")
+	mod := pkg.Module()
+	defer mod.Dispose()
+
+	ctx := mod.Context()
+	functionType := llvm.FunctionType(ctx.VoidType(), nil, false)
+	for _, name := range []string{"first", "second"} {
+		function := llvm.AddFunction(mod, name, functionType)
+		entry := llvm.AddBasicBlock(function, "entry")
+		builder := ctx.NewBuilder()
+		builder.SetInsertPointAtEnd(entry)
+		builder.CreateRetVoid()
+		builder.Dispose()
+	}
+	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify wasm multi-function module: %v\n%s", err, mod.String())
+	}
+	object, err := prog.TargetMachine().EmitToMemoryBuffer(mod, llvm.ObjectFile)
+	if err != nil {
+		t.Fatalf("emit wasm multi-function object: %v\n%s", err, mod.String())
+	}
+	defer object.Dispose()
+	if len(object.Bytes()) == 0 {
+		t.Fatal("wasm multi-function object is empty")
+	}
+}
+
 func TestResolvedTargetConfigIsAuthoritativeAndFrozen(t *testing.T) {
 	resolved := &TargetSpec{
 		Triple: "avr",
