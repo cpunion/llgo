@@ -29,7 +29,7 @@ func TestSummaryStableAcrossInsertionOrder(t *testing.T) {
 		functions := []FunctionSpec{
 			{ID: "pkg.a"},
 			{ID: "pkg.b"},
-			{ID: "runtime.sleep", Seed: WaitPlatform, External: ExternalKnown},
+			{ID: "runtime.sleep", Seed: WaitPlatform, Demand: AsyncDemand, External: ExternalKnown},
 		}
 		edges := []CallEdge{
 			{Caller: "pkg.a", Callee: "pkg.b", Kind: CallDirect},
@@ -84,6 +84,9 @@ func TestSummaryStableAcrossInsertionOrder(t *testing.T) {
 	if !strings.Contains(string(aData), `"effect":"await-structured,wait-platform"`) {
 		t.Fatalf("summary does not use stable effect spelling: %s", aData)
 	}
+	if !strings.Contains(string(aData), `"emission":"none"`) || !strings.Contains(string(aData), `"emission":"external"`) {
+		t.Fatalf("summary does not encode body emission: %s", aData)
+	}
 
 	parsed, err := ParseSummary(aData)
 	if err != nil {
@@ -110,22 +113,25 @@ func TestEmptySummaryRoundTrip(t *testing.T) {
 }
 
 func TestSummaryRejectsIncompatibleOrInvalidInput(t *testing.T) {
-	if _, err := ParseSummary([]byte(`{"schema":"llgo.coro.plan.v1","metadata":{},"functions":[]}`)); err == nil {
+	if _, err := ParseSummary([]byte(`{"schema":"llgo.coro.plan.v2","metadata":{},"functions":[]}`)); err == nil {
 		t.Fatal("newer schema unexpectedly accepted")
 	}
-	if _, err := ParseSummary([]byte(`{"schema":"llgo.coro.plan.v0","metadata":{},"functions":[],"future":true}`)); err == nil {
+	if _, err := ParseSummary([]byte(`{"schema":"llgo.coro.plan.v0","metadata":{},"functions":[]}`)); err == nil {
+		t.Fatal("older schema unexpectedly accepted")
+	}
+	if _, err := ParseSummary([]byte(`{"schema":"llgo.coro.plan.v1","metadata":{},"functions":[],"future":true}`)); err == nil {
 		t.Fatal("unknown summary field unexpectedly accepted")
 	}
-	if _, err := ParseSummary([]byte(`{"schema":"llgo.coro.plan.v0","schema":"llgo.coro.plan.v0","metadata":{"coro_abi":"","scheduler_abi":"","panic_abi":"","target_triple":""},"functions":[]}`)); err == nil {
+	if _, err := ParseSummary([]byte(`{"schema":"llgo.coro.plan.v1","schema":"llgo.coro.plan.v1","metadata":{"coro_abi":"","scheduler_abi":"","panic_abi":"","target_triple":""},"functions":[]}`)); err == nil {
 		t.Fatal("duplicate JSON key unexpectedly accepted")
 	}
-	if _, err := ParseSummary([]byte(`{"schema":"llgo.coro.plan.v0","metadata":{"coro_abi":"","scheduler_abi":"","panic_abi":"","target_triple":""},"functions":[{"id":"f"}]}`)); err == nil {
+	if _, err := ParseSummary([]byte(`{"schema":"llgo.coro.plan.v1","metadata":{"coro_abi":"","scheduler_abi":"","panic_abi":"","target_triple":""},"functions":[{"id":"f"}]}`)); err == nil {
 		t.Fatal("truncated function summary unexpectedly accepted")
 	}
-	if _, err := ParseSummary([]byte(`{"schema":"bad","Schema":"llgo.coro.plan.v0","metadata":{"coro_abi":"","scheduler_abi":"","panic_abi":"","target_triple":""},"functions":[]}`)); err == nil {
+	if _, err := ParseSummary([]byte(`{"schema":"bad","Schema":"llgo.coro.plan.v1","metadata":{"coro_abi":"","scheduler_abi":"","panic_abi":"","target_triple":""},"functions":[]}`)); err == nil {
 		t.Fatal("non-canonical JSON key unexpectedly accepted")
 	}
-	invalidUTF8 := []byte(`{"schema":"llgo.coro.plan.v0","metadata":{"coro_abi":"`)
+	invalidUTF8 := []byte(`{"schema":"llgo.coro.plan.v1","metadata":{"coro_abi":"`)
 	invalidUTF8 = append(invalidUTF8, 0xff)
 	invalidUTF8 = append(invalidUTF8, []byte(`","scheduler_abi":"","panic_abi":"","target_triple":""},"functions":[]}`)...)
 	if _, err := ParseSummary(invalidUTF8); err == nil {
@@ -160,6 +166,8 @@ func TestSummaryRejectsIncompatibleOrInvalidInput(t *testing.T) {
 			ID:          "managed",
 			LocalEffect: OpaqueSuspend,
 			Effect:      OpaqueSuspend,
+			Demand:      AsyncDemand,
+			Emission:    EmitExternal,
 			FuncRep:     DirectCoro,
 			External:    ExternalUnknownManaged,
 			Primary:     PrimaryExternal,
@@ -173,6 +181,8 @@ func TestSummaryRejectsIncompatibleOrInvalidInput(t *testing.T) {
 		Schema: SummarySchema,
 		Functions: []FunctionSummary{{
 			ID:       "foreign",
+			Demand:   SyncDemand,
+			Emission: EmitExternal,
 			FuncRep:  DirectPlain,
 			External: ExternalUnknownForeign,
 			Primary:  PrimaryExternal,
@@ -193,6 +203,24 @@ func TestSummaryRejectsIncompatibleOrInvalidInput(t *testing.T) {
 	}
 	if _, err := invalidPropagatedExec.MarshalStable(); err == nil {
 		t.Fatal("non-inheritable execution flags unexpectedly appeared only in final plan")
+	}
+
+	invalidEmission := Summary{
+		Schema: SummarySchema,
+		Functions: []FunctionSummary{{
+			ID:       "live",
+			Demand:   SyncDemand,
+			Emission: EmitNone,
+			FuncRep:  DirectPlain,
+			Primary:  PrimaryPlain,
+		}},
+	}
+	if _, err := invalidEmission.MarshalStable(); err == nil || !strings.Contains(err.Error(), "emission none does not match") {
+		t.Fatalf("mismatched body emission error = %v", err)
+	}
+	invalidEmission.Functions[0].Emission = BodyEmission(255)
+	if _, err := invalidEmission.MarshalStable(); err == nil || !strings.Contains(err.Error(), "invalid body emission") {
+		t.Fatalf("invalid body emission error = %v", err)
 	}
 }
 
@@ -215,7 +243,7 @@ func FuzzParseSummary(f *testing.F) {
 	}
 	f.Add(valid)
 	f.Add([]byte(`{}`))
-	f.Add([]byte(`{"schema":"llgo.coro.plan.v0","schema":"duplicate"}`))
+	f.Add([]byte(`{"schema":"llgo.coro.plan.v1","schema":"duplicate"}`))
 	f.Add([]byte{0xff})
 
 	f.Fuzz(func(t *testing.T, data []byte) {

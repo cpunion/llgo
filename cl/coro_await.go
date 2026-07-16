@@ -53,13 +53,13 @@ func resolveCoroStaticAwait(plan *coro.SSAPlan, caller coro.FunctionPlan, call s
 	if !ok || targetPlan.ID != callPlan.Targets[0] {
 		return nil, coro.FunctionPlan{}, fmt.Errorf("direct coroutine target %q has no canonical function plan", callPlan.Targets[0])
 	}
-	if caller.Primary != coro.PrimaryCoroutine {
-		return nil, coro.FunctionPlan{}, fmt.Errorf("caller primary is %s, want coroutine", caller.Primary)
+	if caller.Emission != coro.EmitCoroutine {
+		return nil, coro.FunctionPlan{}, fmt.Errorf("caller emission is %s, want coroutine", caller.Emission)
 	}
-	if targetPlan.External != coro.Defined || targetPlan.Primary != coro.PrimaryCoroutine || targetPlan.FuncRep != coro.DirectCoro || targetPlan.Demand != coro.AsyncDemand {
+	if targetPlan.External != coro.Defined || targetPlan.Emission != coro.EmitCoroutine || targetPlan.FuncRep != coro.DirectCoro || targetPlan.Demand != coro.AsyncDemand {
 		return nil, coro.FunctionPlan{}, fmt.Errorf(
-			"target %q is not an async-only defined direct coroutine (external=%s primary=%s representation=%s demand=%s)",
-			targetPlan.ID, targetPlan.External, targetPlan.Primary, targetPlan.FuncRep, targetPlan.Demand,
+			"target %q is not an async-only defined direct coroutine (external=%s emission=%s representation=%s demand=%s)",
+			targetPlan.ID, targetPlan.External, targetPlan.Emission, targetPlan.FuncRep, targetPlan.Demand,
 		)
 	}
 	return target, targetPlan, nil

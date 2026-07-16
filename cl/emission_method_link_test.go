@@ -47,7 +47,18 @@ func Value() any { return struct{ Base }{} }
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := coro.AnalyzeSSA(testProg.ssa, nil, coro.SSAConfig{
+	roots := coro.Roots{{Function: pkg.ssa.Func("Value"), Demand: coro.SyncDemand}}
+	foundPromoted := false
+	for _, fn := range universe.Functions() {
+		if wrapperKind(fn) == "promoted" && fn.Name() == "M" {
+			roots = append(roots, coro.Root{Function: fn, Demand: coro.SyncDemand})
+			foundPromoted = true
+		}
+	}
+	if !foundPromoted {
+		t.Fatal("prepared universe has no promoted M wrapper to demand")
+	}
+	plan, err := coro.AnalyzeSSA(testProg.ssa, roots, coro.SSAConfig{
 		EmissionUniverse: ssaUniverse,
 		FunctionIDs:      universe.FunctionIDConfig(),
 	})

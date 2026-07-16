@@ -18,6 +18,7 @@ package coro
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -235,16 +236,94 @@ func TestAnalyzeDemandAndFunctionRepresentation(t *testing.T) {
 		t.Fatal(err)
 	}
 	entry := mustLookup(t, plan, "entry")
-	if entry.Effect != NoSuspend || entry.Demand != AsyncDemand || entry.FuncRep != DirectPlain {
+	if entry.Effect != NoSuspend || entry.Demand != AsyncDemand || entry.Emission != EmitPlain || entry.FuncRep != DirectPlain {
 		t.Fatalf("entry plan = %+v", entry)
 	}
 	helper := mustLookup(t, plan, "helper")
-	if helper.Demand != SyncDemand || helper.FuncRep != DirectPlain {
+	if helper.Demand != SyncDemand || helper.Emission != EmitPlain || helper.FuncRep != DirectPlain {
 		t.Fatalf("bounded helper plan = %+v", helper)
 	}
 	callback := mustLookup(t, plan, "callback")
-	if callback.Demand != BothDemand || callback.FuncRep != Dispatch || callback.Primary != PrimaryCoroutine {
+	if callback.Demand != BothDemand || callback.Emission != EmitCoroutine || callback.FuncRep != Dispatch || callback.Primary != PrimaryCoroutine {
 		t.Fatalf("dynamic callback plan = %+v", callback)
+	}
+}
+
+func TestAnalyzeBodyEmissionUsesDemandEffectAndExternalKind(t *testing.T) {
+	g := NewGraph()
+	for _, spec := range []FunctionSpec{
+		{ID: "dead-plain"},
+		{ID: "dead-coro", Seed: MayPark},
+		{ID: "live-plain", Demand: SyncDemand},
+		{ID: "live-coro", Seed: YieldOnly, Demand: BothDemand},
+		{ID: "external-dead", Seed: WaitHost, External: ExternalKnown},
+		{ID: "external-live", Demand: AsyncDemand, External: ExternalKnown},
+	} {
+		mustAddFunction(t, g, spec)
+	}
+	plan, err := g.Analyze()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	checks := map[FunctionID]struct {
+		emission BodyEmission
+		primary  PrimaryKind
+		rep      FuncRep
+	}{
+		"dead-plain":    {EmitNone, PrimaryPlain, DirectPlain},
+		"dead-coro":     {EmitNone, PrimaryCoroutine, DirectCoro},
+		"live-plain":    {EmitPlain, PrimaryPlain, DirectPlain},
+		"live-coro":     {EmitCoroutine, PrimaryCoroutine, DirectCoro},
+		"external-dead": {EmitNone, PrimaryExternal, DirectCoro},
+		"external-live": {EmitExternal, PrimaryExternal, DirectPlain},
+	}
+	for id, want := range checks {
+		got := mustLookup(t, plan, id)
+		if got.Emission != want.emission || got.Primary != want.primary || got.FuncRep != want.rep {
+			t.Fatalf("%s plan = %+v, want emission=%s primary=%s rep=%s", id, got, want.emission, want.primary, want.rep)
+		}
+	}
+}
+
+func TestAnalyzeReferencePropagatesDemandOnly(t *testing.T) {
+	g := NewGraph()
+	for _, spec := range []FunctionSpec{
+		{ID: "root", Demand: AsyncDemand},
+		{ID: "owner"},
+		{ID: "plain-target", Exec: MayUnwind},
+		{ID: "coro-target", Seed: MayPark, Exec: NeedsCleanupFrame},
+		{ID: "dead-target", Seed: YieldOnly},
+	} {
+		mustAddFunction(t, g, spec)
+	}
+	mustAddCall(t, g, CallEdge{Caller: "root", Callee: "owner", Kind: CallDirect})
+	mustAddReference(t, g, ReferenceEdge{Owner: "owner", Target: "plain-target"})
+	mustAddReference(t, g, ReferenceEdge{Owner: "owner", Target: "coro-target"})
+
+	plan, err := g.Analyze()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := mustLookup(t, plan, "root")
+	owner := mustLookup(t, plan, "owner")
+	if root.Effect != NoSuspend || root.Exec != 0 || owner.Effect != NoSuspend || owner.Exec != 0 {
+		t.Fatalf("reference edge propagated target semantics: root=%+v owner=%+v", root, owner)
+	}
+	if owner.Demand != SyncDemand || owner.Emission != EmitPlain {
+		t.Fatalf("owner plan = %+v", owner)
+	}
+	plain := mustLookup(t, plan, "plain-target")
+	if plain.Demand != SyncDemand || plain.Emission != EmitPlain {
+		t.Fatalf("plain reference target = %+v", plain)
+	}
+	coro := mustLookup(t, plan, "coro-target")
+	if coro.Demand != AsyncDemand || coro.Emission != EmitCoroutine {
+		t.Fatalf("coroutine reference target = %+v", coro)
+	}
+	dead := mustLookup(t, plan, "dead-target")
+	if dead.Demand != NoDemand || dead.Emission != EmitNone || dead.Primary != PrimaryCoroutine {
+		t.Fatalf("unreferenced effectful target = %+v", dead)
 	}
 }
 
@@ -360,6 +439,13 @@ func TestAnalyzeValidation(t *testing.T) {
 		t.Fatal("duplicate function unexpectedly accepted")
 	}
 
+	missingReference := NewGraph()
+	mustAddFunction(t, missingReference, FunctionSpec{ID: "owner", Demand: SyncDemand})
+	mustAddReference(t, missingReference, ReferenceEdge{Owner: "owner", Target: "missing"})
+	if _, err := missingReference.Analyze(); err == nil {
+		t.Fatal("missing reference target unexpectedly accepted")
+	}
+
 	conflict := NewGraph()
 	mustAddFunction(t, conflict, FunctionSpec{ID: "bad", Seed: MayPark, Exec: BlockForeign})
 	if _, err := conflict.Analyze(); err == nil {
@@ -401,6 +487,34 @@ func TestAnalyzeValidationIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestAnalyzeReferenceValidationIsDeterministic(t *testing.T) {
+	build := func(reverse bool) string {
+		t.Helper()
+		g := NewGraph()
+		mustAddFunction(t, g, FunctionSpec{ID: "known"})
+		references := []ReferenceEdge{
+			{Owner: "missing-z", Target: "known"},
+			{Owner: "missing-a", Target: "known"},
+		}
+		if reverse {
+			for i, j := 0, len(references)-1; i < j; i, j = i+1, j-1 {
+				references[i], references[j] = references[j], references[i]
+			}
+		}
+		for _, edge := range references {
+			mustAddReference(t, g, edge)
+		}
+		_, err := g.Analyze()
+		if err == nil {
+			t.Fatal("invalid reference graph unexpectedly analyzed")
+		}
+		return err.Error()
+	}
+	if a, b := build(false), build(true); a != b || !strings.Contains(a, "missing-a") {
+		t.Fatalf("reference diagnostic depends on insertion order: %q vs %q", a, b)
+	}
+}
+
 func mustAddFunction(t *testing.T, g *Graph, spec FunctionSpec) {
 	t.Helper()
 	if err := g.AddFunction(spec); err != nil {
@@ -411,6 +525,13 @@ func mustAddFunction(t *testing.T, g *Graph, spec FunctionSpec) {
 func mustAddCall(t *testing.T, g *Graph, edge CallEdge) {
 	t.Helper()
 	if err := g.AddCall(edge); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustAddReference(t *testing.T, g *Graph, edge ReferenceEdge) {
+	t.Helper()
+	if err := g.AddReference(edge); err != nil {
 		t.Fatal(err)
 	}
 }

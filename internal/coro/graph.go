@@ -49,6 +49,16 @@ type CallEdge struct {
 	Kind   CallKind
 }
 
+// ReferenceEdge records that a demanded owner materializes or publishes a
+// reference to target. It propagates entry demand only: taking a function value
+// neither calls the target nor inherits its suspend effect or execution flags.
+// SSA value-flow uses this edge for function values crossing boxing, aggregate,
+// or other dynamically consumed boundaries.
+type ReferenceEdge struct {
+	Owner  FunctionID
+	Target FunctionID
+}
+
 // UnknownTarget describes an unresolved call target.
 type UnknownTarget uint8
 
@@ -80,6 +90,11 @@ type edgeKey struct {
 	kind   CallKind
 }
 
+type referenceKey struct {
+	owner  FunctionID
+	target FunctionID
+}
+
 type unknownKey struct {
 	caller FunctionID
 	kind   CallKind
@@ -88,17 +103,19 @@ type unknownKey struct {
 
 // Graph is a target-independent function call graph.
 type Graph struct {
-	functions map[FunctionID]FunctionSpec
-	edges     map[edgeKey]CallEdge
-	unknown   map[unknownKey]UnknownCall
+	functions  map[FunctionID]FunctionSpec
+	edges      map[edgeKey]CallEdge
+	references map[referenceKey]ReferenceEdge
+	unknown    map[unknownKey]UnknownCall
 }
 
 // NewGraph creates an empty call graph.
 func NewGraph() *Graph {
 	return &Graph{
-		functions: make(map[FunctionID]FunctionSpec),
-		edges:     make(map[edgeKey]CallEdge),
-		unknown:   make(map[unknownKey]UnknownCall),
+		functions:  make(map[FunctionID]FunctionSpec),
+		edges:      make(map[edgeKey]CallEdge),
+		references: make(map[referenceKey]ReferenceEdge),
+		unknown:    make(map[unknownKey]UnknownCall),
 	}
 }
 
@@ -156,6 +173,27 @@ func (g *Graph) AddCall(edge CallEdge) error {
 	return nil
 }
 
+// AddReference adds a demand-only owner-to-target function-value edge.
+// Duplicate references are ignored. Endpoints may be added later; Analyze
+// validates the complete graph deterministically.
+func (g *Graph) AddReference(edge ReferenceEdge) error {
+	if g == nil {
+		return fmt.Errorf("coro: add reference to nil graph")
+	}
+	if g.references == nil {
+		g.references = make(map[referenceKey]ReferenceEdge)
+	}
+	if err := edge.Owner.validate(); err != nil {
+		return err
+	}
+	if err := edge.Target.validate(); err != nil {
+		return err
+	}
+	key := referenceKey{owner: edge.Owner, target: edge.Target}
+	g.references[key] = edge
+	return nil
+}
+
 // AddUnknownCall adds an unresolved call site. Duplicate descriptions are
 // ignored.
 func (g *Graph) AddUnknownCall(call UnknownCall) error {
@@ -179,8 +217,9 @@ func (g *Graph) AddUnknownCall(call UnknownCall) error {
 	return nil
 }
 
-// Analyze computes the least suspend-effect fixed point. Traversal and output
-// are deterministic regardless of graph insertion order.
+// Analyze computes the least suspend-effect, execution-flag, and entry-demand
+// fixed points, then derives one physical body emission per function. Traversal
+// and output are deterministic regardless of graph insertion order.
 func (g *Graph) Analyze() (*Plan, error) {
 	if g == nil {
 		return nil, fmt.Errorf("coro: analyze nil graph")
@@ -192,6 +231,10 @@ func (g *Graph) Analyze() (*Plan, error) {
 	sortFunctionIDs(ids)
 
 	edges, err := g.sortedEdges()
+	if err != nil {
+		return nil, err
+	}
+	references, err := g.sortedReferences()
 	if err != nil {
 		return nil, err
 	}
@@ -324,6 +367,10 @@ func (g *Graph) Analyze() (*Plan, error) {
 	for _, edge := range edges {
 		outgoing[edge.Caller] = append(outgoing[edge.Caller], edge)
 	}
+	referenced := make(map[FunctionID][]ReferenceEdge, len(ids))
+	for _, edge := range references {
+		referenced[edge.Owner] = append(referenced[edge.Owner], edge)
+	}
 	queue = queue[:0]
 	clear(queued)
 	for _, id := range ids {
@@ -357,6 +404,20 @@ func (g *Graph) Analyze() (*Plan, error) {
 				}
 			}
 		}
+		for _, edge := range referenced[caller] {
+			contribution := SyncDemand
+			if effects[edge.Target].MaySuspend() {
+				contribution = AsyncDemand
+			}
+			next := demands[edge.Target].Join(contribution)
+			if next != demands[edge.Target] {
+				demands[edge.Target] = next
+				if !queued[edge.Target] {
+					queue = append(queue, edge.Target)
+					queued[edge.Target] = true
+				}
+			}
+		}
 	}
 
 	plan := &Plan{
@@ -379,6 +440,7 @@ func (g *Graph) Analyze() (*Plan, error) {
 				primary = PrimaryCoroutine
 			}
 		}
+		emission := bodyEmissionFor(demands[id], effects[id], spec.External)
 		plan.byID[id] = len(plan.functions)
 		plan.functions = append(plan.functions, FunctionPlan{
 			ID:             id,
@@ -389,6 +451,7 @@ func (g *Graph) Analyze() (*Plan, error) {
 			LocalExec:      localExec[id],
 			Exec:           execFlags[id],
 			Demand:         demands[id],
+			Emission:       emission,
 			FuncRep:        rep,
 			External:       spec.External,
 			Recursive:      recursive[id],
@@ -396,6 +459,28 @@ func (g *Graph) Analyze() (*Plan, error) {
 		})
 	}
 	return plan, nil
+}
+
+func (g *Graph) sortedReferences() ([]ReferenceEdge, error) {
+	references := make([]ReferenceEdge, 0, len(g.references))
+	for _, edge := range g.references {
+		references = append(references, edge)
+	}
+	sort.Slice(references, func(i, j int) bool {
+		if references[i].Owner != references[j].Owner {
+			return references[i].Owner < references[j].Owner
+		}
+		return references[i].Target < references[j].Target
+	})
+	for _, edge := range references {
+		if _, ok := g.functions[edge.Owner]; !ok {
+			return nil, fmt.Errorf("coro: reference has unknown owner %q", edge.Owner)
+		}
+		if _, ok := g.functions[edge.Target]; !ok {
+			return nil, fmt.Errorf("coro: reference from %q has unknown target %q", edge.Owner, edge.Target)
+		}
+	}
+	return references, nil
 }
 
 func (g *Graph) sortedEdges() ([]CallEdge, error) {

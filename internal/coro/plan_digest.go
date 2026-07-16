@@ -31,7 +31,7 @@ import (
 // PlanDigestSchema is the independent canonical schema used for archive cache
 // identity. It is deliberately separate from SummarySchema: summaries remain
 // diagnostic snapshots, while this document covers every lowering plan site.
-const PlanDigestSchema = "llgo.coro.plan-digest.v1"
+const PlanDigestSchema = "llgo.coro.plan-digest.v2"
 
 // Current experimental ABI identities. Keeping these in the analysis package
 // gives build, cache, and lowering code one version source of truth.
@@ -90,6 +90,7 @@ type planDigestFunction struct {
 	LocalExec      uint16     `json:"local_exec"`
 	Exec           uint16     `json:"exec"`
 	Demand         uint8      `json:"demand"`
+	Emission       uint8      `json:"emission"`
 	FuncRep        uint8      `json:"func_rep"`
 	External       uint8      `json:"external"`
 	Recursive      bool       `json:"recursive"`
@@ -413,6 +414,7 @@ func (p *SSAPlan) canonicalDigestFunctions() ([]planDigestFunction, error) {
 			LocalExec:      uint16(plan.LocalExec),
 			Exec:           uint16(plan.Exec),
 			Demand:         uint8(plan.Demand),
+			Emission:       uint8(plan.Emission),
 			FuncRep:        uint8(plan.FuncRep),
 			External:       uint8(plan.External),
 			Recursive:      plan.Recursive,
@@ -455,13 +457,23 @@ func validateDigestFunctionPlan(plan FunctionPlan) error {
 	if err := plan.Demand.Validate(); err != nil {
 		return err
 	}
+	if err := plan.Emission.Validate(); err != nil {
+		return err
+	}
 	if err := plan.FuncRep.Validate(); err != nil {
 		return err
 	}
 	if err := plan.External.validate(); err != nil {
 		return err
 	}
-	return plan.Primary.validate()
+	if err := plan.Primary.validate(); err != nil {
+		return err
+	}
+	expectedEmission := bodyEmissionFor(plan.Demand, plan.Effect, plan.External)
+	if plan.Emission != expectedEmission {
+		return fmt.Errorf("coro: function %q emission %s does not match demand %s, effect %s, and external kind %s (want %s)", plan.ID, plan.Emission, plan.Demand, plan.Effect, plan.External, expectedEmission)
+	}
+	return nil
 }
 
 func validateDigestFunctionID(id FunctionID) error {

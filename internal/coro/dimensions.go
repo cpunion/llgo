@@ -254,3 +254,70 @@ func (r *FuncRep) UnmarshalText(text []byte) error {
 	}
 	return nil
 }
+
+// BodyEmission is the physical body selected for the current closed-world
+// plan. It is deliberately distinct from Demand, FuncRep, and PrimaryKind:
+// Demand records required entry capabilities, FuncRep records the value ABI,
+// and PrimaryKind records the one logical implementation ABI. In particular,
+// EmitNone does not change an effectful function's PrimaryCoroutine identity;
+// it only says that the current plan has no reachable consumer and therefore
+// must not materialize that body.
+type BodyEmission uint8
+
+const (
+	EmitNone BodyEmission = iota
+	EmitPlain
+	EmitCoroutine
+	EmitExternal
+)
+
+// Validate reports whether e names a defined physical-emission choice.
+func (e BodyEmission) Validate() error {
+	if e > EmitExternal {
+		return fmt.Errorf("coro: invalid body emission %d", uint8(e))
+	}
+	return nil
+}
+
+func (e BodyEmission) String() string {
+	switch e {
+	case EmitNone:
+		return "none"
+	case EmitPlain:
+		return "plain"
+	case EmitCoroutine:
+		return "coroutine"
+	case EmitExternal:
+		return "external"
+	default:
+		return fmt.Sprintf("body-emission(%d)", uint8(e))
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler for stable summaries.
+func (e BodyEmission) MarshalText() ([]byte, error) {
+	if err := e.Validate(); err != nil {
+		return nil, err
+	}
+	return []byte(e.String()), nil
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler for stable summaries.
+func (e *BodyEmission) UnmarshalText(text []byte) error {
+	if e == nil {
+		return fmt.Errorf("coro: cannot unmarshal body emission into nil receiver")
+	}
+	switch strings.TrimSpace(string(text)) {
+	case "none":
+		*e = EmitNone
+	case "plain":
+		*e = EmitPlain
+	case "coroutine":
+		*e = EmitCoroutine
+	case "external":
+		*e = EmitExternal
+	default:
+		return fmt.Errorf("coro: unknown body emission %q", text)
+	}
+	return nil
+}

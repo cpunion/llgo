@@ -39,7 +39,7 @@ func TestExecFlagsTextRoundTrip(t *testing.T) {
 	}
 }
 
-func TestDemandAndFuncRepText(t *testing.T) {
+func TestDemandFuncRepAndBodyEmissionText(t *testing.T) {
 	if SyncDemand == NoDemand || AsyncDemand == NoDemand || BothDemand != SyncDemand|AsyncDemand {
 		t.Fatalf("invalid demand lattice: sync=%d async=%d both=%d", SyncDemand, AsyncDemand, BothDemand)
 	}
@@ -68,6 +68,22 @@ func TestDemandAndFuncRepText(t *testing.T) {
 		if parsed != rep {
 			t.Fatalf("function representation round trip = %s, want %s", parsed, rep)
 		}
+	}
+	for _, emission := range []BodyEmission{EmitNone, EmitPlain, EmitCoroutine, EmitExternal} {
+		text, err := emission.MarshalText()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var parsed BodyEmission
+		if err := parsed.UnmarshalText(text); err != nil {
+			t.Fatal(err)
+		}
+		if parsed != emission {
+			t.Fatalf("body emission round trip = %s, want %s", parsed, emission)
+		}
+	}
+	if err := (BodyEmission(255)).Validate(); err == nil {
+		t.Fatal("invalid body emission unexpectedly accepted")
 	}
 }
 
@@ -98,6 +114,21 @@ func TestDemandAndFuncRepTextWhitespace(t *testing.T) {
 		}
 		if got != want {
 			t.Fatalf("FuncRep.UnmarshalText(%q) = %s, want %s", text, got, want)
+		}
+	}
+
+	for text, want := range map[string]BodyEmission{
+		"  none\n":       EmitNone,
+		"\tplain ":       EmitPlain,
+		" coroutine\r\n": EmitCoroutine,
+		"\nexternal\t":   EmitExternal,
+	} {
+		var got BodyEmission
+		if err := got.UnmarshalText([]byte(text)); err != nil {
+			t.Fatalf("BodyEmission.UnmarshalText(%q): %v", text, err)
+		}
+		if got != want {
+			t.Fatalf("BodyEmission.UnmarshalText(%q) = %s, want %s", text, got, want)
 		}
 	}
 }

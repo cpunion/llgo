@@ -212,6 +212,7 @@ func F(value int) int { return value + 1 }
 			}
 			plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{
 				{Function: ssaPkg.Func("F"), Demand: coro.SyncDemand},
+				{Function: ssaPkg.Func("init"), Demand: coro.SyncDemand},
 			}, coro.SSAConfig{
 				EmissionUniverse: ssaUniverse,
 				FunctionIDs:      universe.FunctionIDConfig(),

@@ -891,7 +891,11 @@ func Leaf(value uint32) uint32 {
 				t.Fatal(err)
 			}
 			leaf := ssaPkg.Func("Leaf")
-			plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: leaf, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+			roots := coro.Roots{{Function: leaf, Demand: coro.AsyncDemand}}
+			if test.name == "spawn consumer" {
+				roots = append(roots, coro.Root{Function: ssaPkg.Func("Launch"), Demand: coro.SyncDemand})
+			}
+			plan, err := coro.AnalyzeSSA(ssaPkg.Prog, roots, coro.SSAConfig{
 				EmissionUniverse:     ssaUniverse,
 				FunctionIDs:          universe.FunctionIDConfig(),
 				MaxPlainInstructions: -1,
