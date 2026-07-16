@@ -459,6 +459,12 @@ type Config struct {
 	// async root receives a typed factory descriptor. It requires the physical
 	// ABI and does not enable a runtime scheduler, spawn, park, or preemption.
 	EnableCoroChildAwait bool
+	// EnableCoroPlainDispatch enables the v1 descriptor/context ABI for the
+	// narrowly supported ordinary call of a no-capture, non-suspending plain Go
+	// function value. It requires entry resolution and does not authorize
+	// coroutine, interface, reflect, method, go/defer, aggregate, or captured
+	// closure dispatch.
+	EnableCoroPlainDispatch bool
 	// EnableCoroProgramBootstrapABI emits the target-neutral v1 startup table
 	// for an executable after the exact init/main entries have been validated
 	// against the frozen whole-program plan. It does not replace the legacy
@@ -903,6 +909,9 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	if ctx.buildConf.EnableCoroChildAwait && !ctx.buildConf.EnableCoroPhysicalABI {
 		return fmt.Errorf("enable coroutine child await: coroutine physical ABI is required")
 	}
+	if ctx.buildConf.EnableCoroPlainDispatch && !ctx.buildConf.EnableCoroEntryResolution {
+		return fmt.Errorf("enable coroutine plain dispatch: coroutine entry resolution is required")
+	}
 	if ctx.buildConf.EnableCoroChildAwait && ctx.buildConf.BuildMode == BuildModeCArchive {
 		return fmt.Errorf("enable coroutine child await: c-archive requires flattened package members and an explicit host bootstrap extraction contract")
 	}
@@ -997,6 +1006,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		EnableCoroEntryResolution:     ctx.buildConf.EnableCoroEntryResolution,
 		EnableCoroPhysicalABI:         ctx.buildConf.EnableCoroPhysicalABI,
 		EnableCoroChildAwait:          ctx.buildConf.EnableCoroChildAwait,
+		EnableCoroPlainDispatch:       ctx.buildConf.EnableCoroPlainDispatch,
 		EnableCoroProgramBootstrapRun: ctx.buildConf.EnableCoroProgramBootstrapRun,
 		CoroPlanDigest:                digest,
 		CoroABI:                       metadata.CoroABI,
@@ -1038,6 +1048,13 @@ func activeCoroSchedulerABIVersion(conf *Config) string {
 		return coro.SchedulerChildAwaitABIV0
 	}
 	return coro.SchedulerNoneABIV0
+}
+
+func activeCoroFuncRepABIVersion(conf *Config) string {
+	if conf != nil && conf.EnableCoroPlainDispatch {
+		return coro.FuncRepABIV1
+	}
+	return coro.FuncRepABIV0
 }
 
 // requiredCoroProgramRuntimePlan returns the Go bodies referenced only by
@@ -1339,7 +1356,7 @@ func buildCoroPlanDigestMetadata(ctx *context) (coro.PlanDigestMetadata, error) 
 		CoroABI:        activeCoroABIVersion(ctx.buildConf),
 		SchedulerABI:   activeCoroSchedulerABIVersion(ctx.buildConf),
 		PanicABI:       coro.PanicLegacyABIV0,
-		FuncRepABI:     coro.FuncRepABIV0,
+		FuncRepABI:     activeCoroFuncRepABIVersion(ctx.buildConf),
 		TargetTriple:   target.Triple,
 		TargetCPU:      target.CPU,
 		TargetFeatures: target.Features,

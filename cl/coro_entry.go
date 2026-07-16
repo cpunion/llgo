@@ -191,6 +191,9 @@ func (c *Compilation) preflightCoroPlan() error {
 	if c.EnableCoroChildAwait && !c.EnableCoroPhysicalABI {
 		return fmt.Errorf("coroutine child await requires coroutine physical ABI")
 	}
+	if c.EnableCoroPlainDispatch && !c.EnableCoroEntryResolution {
+		return fmt.Errorf("coroutine plain dispatch requires coroutine entry resolution")
+	}
 	if !c.EnableCoroEntryResolution {
 		return nil
 	}

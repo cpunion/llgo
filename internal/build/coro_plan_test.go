@@ -1198,11 +1198,13 @@ func TestActiveCoroABIVersions(t *testing.T) {
 		config    *Config
 		coroABI   string
 		scheduler string
+		funcRep   string
 	}{
-		{"entry resolution", &Config{}, coro.EntryResolutionABIV0, coro.SchedulerNoneABIV0},
-		{"physical leaf", &Config{EnableCoroPhysicalABI: true}, coro.PhysicalABIV0, coro.SchedulerNoneABIV0},
-		{"child await", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true}, coro.PhysicalABIV1, coro.SchedulerChildAwaitABIV0},
-		{"program bootstrap runtime", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true, EnableCoroProgramBootstrapRun: true}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapABIV1},
+		{"entry resolution", &Config{}, coro.EntryResolutionABIV0, coro.SchedulerNoneABIV0, coro.FuncRepABIV0},
+		{"physical leaf", &Config{EnableCoroPhysicalABI: true}, coro.PhysicalABIV0, coro.SchedulerNoneABIV0, coro.FuncRepABIV0},
+		{"plain dispatch", &Config{EnableCoroPlainDispatch: true}, coro.EntryResolutionABIV0, coro.SchedulerNoneABIV0, coro.FuncRepABIV1},
+		{"child await", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true}, coro.PhysicalABIV1, coro.SchedulerChildAwaitABIV0, coro.FuncRepABIV0},
+		{"program bootstrap runtime with plain dispatch", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true, EnableCoroPlainDispatch: true, EnableCoroProgramBootstrapRun: true}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapABIV1, coro.FuncRepABIV1},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -1211,6 +1213,9 @@ func TestActiveCoroABIVersions(t *testing.T) {
 			}
 			if got := activeCoroSchedulerABIVersion(test.config); got != test.scheduler {
 				t.Fatalf("scheduler ABI = %q, want %q", got, test.scheduler)
+			}
+			if got := activeCoroFuncRepABIVersion(test.config); got != test.funcRep {
+				t.Fatalf("function representation ABI = %q, want %q", got, test.funcRep)
 			}
 		})
 	}
@@ -1321,6 +1326,11 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 		conf Config
 		want string
 	}{
+		{
+			name: "plain dispatch requires entry resolution",
+			conf: Config{EnableCoroPlainDispatch: true},
+			want: "plain dispatch: coroutine entry resolution is required",
+		},
 		{
 			name: "program bootstrap runtime requires descriptor ABI",
 			conf: Config{BuildMode: BuildModeExe, EnableCoroEntryResolution: true, EnableCoroPhysicalABI: true, EnableCoroChildAwait: true, EnableCoroProgramBootstrapRun: true},
@@ -1595,6 +1605,18 @@ func TestCoroEntryResolutionUsesPlanMatchedPackageCache(t *testing.T) {
 	matchingPkg := newPackage(seedCtx)
 	if !seedCtx.tryLoadFromCache(matchingPkg) || !matchingPkg.CacheHit {
 		t.Fatal("matching coroutine plan did not reuse the package archive")
+	}
+	dispatchCtx := newContext(digestA)
+	dispatchCtx.buildConf.EnableCoroPlainDispatch = true
+	dispatchCtx.clCompilation.EnableCoroPlainDispatch = true
+	dispatchCtx.clCompilation.FuncRepABI = coro.FuncRepABIV1
+	dispatchCtx.coroPlanMetadata.FuncRepABI = coro.FuncRepABIV1
+	if !dispatchCtx.canUsePackageCache() {
+		t.Fatal("matching plain-dispatch ABI unexpectedly disabled package cache")
+	}
+	dispatchCtx.clCompilation.EnableCoroPlainDispatch = false
+	if dispatchCtx.canUsePackageCache() {
+		t.Fatal("plain-dispatch capability mismatch unexpectedly permits package cache")
 	}
 	if !matchingPkg.NeedRt || !matchingPkg.NeedPyInit {
 		t.Fatalf("cache metadata runtime flags = %v/%v, want true/true", matchingPkg.NeedRt, matchingPkg.NeedPyInit)

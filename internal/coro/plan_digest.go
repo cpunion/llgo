@@ -52,6 +52,11 @@ const (
 	SchedulerProgramBootstrapABIV1 = "llgo.coro.scheduler.program-bootstrap.v1"
 	PanicLegacyABIV0               = "llgo.coro.panic.legacy.v0"
 	FuncRepABIV0                   = "llgo.coro.func-rep.v0"
+	// FuncRepABIV1 introduces an explicit descriptor/context representation for
+	// dynamically consumed Go function values. The first producer/consumer slice
+	// supports only one no-capture, non-suspending plain body; unsupported value
+	// shapes and call capabilities remain fail-closed.
+	FuncRepABIV1 = "llgo.coro.func-rep.v1"
 )
 
 // PlanDigestMetadata contains every effective ABI and target input that may

@@ -62,6 +62,11 @@ type Compilation struct {
 	// suspends itself; a matching scheduler owns every resume and destroy
 	// operation.
 	EnableCoroChildAwait bool
+	// EnableCoroPlainDispatch permits the first descriptor/context function-value
+	// ABI. Only a no-capture, non-suspending plain target at an ordinary scalar
+	// call is accepted by this capability; every wider dynamic form remains an
+	// unsupported preflight error.
+	EnableCoroPlainDispatch bool
 	// EnableCoroProgramBootstrapRun selects the program-root scheduler ABI for
 	// package identities. The factory itself lives in the uncached entry module,
 	// but every linked archive must agree with the runtime driver contract.
@@ -109,6 +114,13 @@ func (c *Compilation) validateCoroABIIdentity(required bool) error {
 		}
 		wantSchedulerABI = coro.SchedulerProgramBootstrapABIV1
 	}
+	if c.EnableCoroPlainDispatch && !c.EnableCoroEntryResolution {
+		return fmt.Errorf("coroutine plain dispatch requires coroutine entry resolution")
+	}
+	wantFuncRepABI := coro.FuncRepABIV0
+	if c.EnableCoroPlainDispatch {
+		wantFuncRepABI = coro.FuncRepABIV1
+	}
 	checks := []struct {
 		name string
 		got  string
@@ -117,7 +129,7 @@ func (c *Compilation) validateCoroABIIdentity(required bool) error {
 		{"coroutine", c.CoroABI, wantCoroABI},
 		{"scheduler", c.SchedulerABI, wantSchedulerABI},
 		{"panic", c.PanicABI, coro.PanicLegacyABIV0},
-		{"function representation", c.FuncRepABI, coro.FuncRepABIV0},
+		{"function representation", c.FuncRepABI, wantFuncRepABI},
 	}
 	if !required {
 		populated := false

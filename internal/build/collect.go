@@ -376,6 +376,7 @@ func (c *context) canUsePackageCache() bool {
 	return c.clCompilation.EnableCoroEntryResolution &&
 		c.clCompilation.EnableCoroPhysicalABI == c.buildConf.EnableCoroPhysicalABI &&
 		c.clCompilation.EnableCoroChildAwait == c.buildConf.EnableCoroChildAwait &&
+		c.clCompilation.EnableCoroPlainDispatch == c.buildConf.EnableCoroPlainDispatch &&
 		c.clCompilation.CoroABI == metadata.CoroABI &&
 		c.clCompilation.SchedulerABI == metadata.SchedulerABI &&
 		c.clCompilation.PanicABI == metadata.PanicABI &&
@@ -383,7 +384,7 @@ func (c *context) canUsePackageCache() bool {
 		metadata.CoroABI == activeCoroABIVersion(c.buildConf) &&
 		metadata.SchedulerABI == activeCoroSchedulerABIVersion(c.buildConf) &&
 		metadata.PanicABI == coro.PanicLegacyABIV0 &&
-		metadata.FuncRepABI == coro.FuncRepABIV0 &&
+		metadata.FuncRepABI == activeCoroFuncRepABIVersion(c.buildConf) &&
 		metadata.TargetTriple != "" && metadata.PointerBits > 0 &&
 		(metadata.Endianness == "little" || metadata.Endianness == "big") &&
 		metadata.DataLayout != ""
