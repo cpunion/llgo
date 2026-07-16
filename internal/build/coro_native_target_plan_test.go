@@ -128,6 +128,19 @@ func TestDoRejectsForgedNativeCapabilityBeforePackageSelection(t *testing.T) {
 	}
 }
 
+func TestEffectiveBuildTagsRejectsForgedNativeIngressTestCapability(t *testing.T) {
+	conf := &Config{Tags: "nogc," + coroNativeIngressTestBuildTag}
+	_, err := effectiveBuildTags(conf, crosscompile.Export{})
+	if err == nil {
+		t.Fatal("forged native ingress test capability was accepted")
+	}
+	for _, want := range []string{coroNativeIngressTestBuildTag, "Config.Tags", "compiler-reserved capability"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want %q", err, want)
+		}
+	}
+}
+
 func TestEffectiveBuildTagsKeepsNativeCapabilityCompilerOwned(t *testing.T) {
 	tests := []struct {
 		name string
@@ -256,6 +269,9 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 			{path: runtimePath, name: "coroTargetBeginExecutorWaitV1"},
 			{path: runtimePath, name: "coroTargetBeginExecutorCloseV1"},
 			{path: runtimePath, name: coroNativePostWaitSymbolV1},
+			{path: runtimePath, name: coroWaitPrepareSymbolV1},
+			{path: runtimePath, name: coroWaitRollbackSymbolV1},
+			{path: runtimePath, name: coroWaitRetireCompletedSymbolV1},
 			{path: doorbellPath, name: "nativePipeOpen"},
 			{path: doorbellPath, name: "nativePipeRead"},
 			{path: doorbellPath, name: "nativePipeWrite"},

@@ -280,6 +280,85 @@ func TestExecutorDriverEnforcesWaitTableOwner(t *testing.T) {
 	closeTestExecutorDriver(t, driver)
 }
 
+func TestExecutorDriverWaitOwnerABIPrepareRollbackAndRetire(t *testing.T) {
+	p := new(P)
+	driver, registry, waits, executor := bindTestExecutorDriver(t, p)
+	task := newYieldingTestG(t, "driver-wait-owner-abi")
+	var token WaitToken
+	if ticket, wait, result := PrepareExecutorWaitRegistration(new(ExecutorDriver), &token); result != WaitRegistrationPrepareInvalid ||
+		ticket != 0 || wait != (WaitRegistrationHandle{}) {
+		t.Fatalf("unbound owner prepare = (%d, %+v, %d)", ticket, wait, result)
+	}
+	if ticket, wait, result := PrepareExecutorWaitRegistration(driver, &token); result != WaitRegistrationPrepareInvalid ||
+		ticket != 0 || wait != (WaitRegistrationHandle{}) {
+		t.Fatalf("idle owner prepare = (%d, %+v, %d)", ticket, wait, result)
+	}
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue wait-owner task")
+	}
+	if next, ok := NextRunnable(p); !ok || next != task.g {
+		t.Fatal("dequeue wait-owner task")
+	}
+	action := beginWaitTestResume(t, p, task)
+	savedAction := p.action
+	p.action.Kind = ActionCheckResume
+	if ticket, wait, result := PrepareExecutorWaitRegistration(driver, &token); result != WaitRegistrationPrepareInvalid ||
+		ticket != 0 || wait != (WaitRegistrationHandle{}) {
+		t.Fatalf("wrong-action owner prepare = (%d, %+v, %d)", ticket, wait, result)
+	}
+	p.action = savedAction
+	ticket, wait, result := PrepareExecutorWaitRegistration(driver, &token)
+	if result != WaitRegistrationPrepared || ticket != 1 || wait == (WaitRegistrationHandle{}) {
+		t.Fatalf("running owner prepare = (%d, %+v, %d)", ticket, wait, result)
+	}
+	if !RollbackExecutorWaitRegistration(driver, &token, ticket, wait) {
+		t.Fatal("running owner rollback")
+	}
+	ticket, wait, result = PrepareExecutorWaitRegistration(driver, &token)
+	if result != WaitRegistrationPrepared || ticket != 2 || wait == (WaitRegistrationHandle{}) {
+		t.Fatalf("second running owner prepare = (%d, %+v, %d)", ticket, wait, result)
+	}
+	task.frame.header.SuspendReason = uint16(SuspendPark)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+	if !PreparePark(task.g, task.handle, task.frame.header, &token, ticket) {
+		t.Fatal("prepare wait-owner park")
+	}
+	if parked, ok := Resumed(p, task.g, action); !ok || parked.Kind != ActionPark {
+		t.Fatalf("commit wait-owner park = (%+v, %t)", parked, ok)
+	}
+	if RetireCompletedExecutorWait(driver, &token, ticket, wait) {
+		t.Fatal("retired wait outside resumed owner")
+	}
+	posted := PostWaitAndRequest(waits, wait, registry, executor)
+	if posted.Wait != WaitRegistrationPosted || posted.Executor != ExecutorRequestPublished {
+		t.Fatalf("post wait-owner completion = %+v", posted)
+	}
+	if drained, promoted, ok := PollExecutor(driver); !ok || drained != 1 || promoted != 1 {
+		t.Fatalf("poll wait-owner completion = (%d, %d, %t)", drained, promoted, ok)
+	}
+	if next, ok := NextRunnable(p); !ok || next != task.g {
+		t.Fatal("dequeue resumed wait-owner task")
+	}
+	action = beginWaitTestResume(t, p, task)
+	if !RetireCompletedExecutorWait(driver, &token, ticket, wait) {
+		t.Fatal("retire completed wait from resumed owner")
+	}
+	task.frame.header.SuspendReason = uint16(SuspendYield)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+	if !PrepareYield(task.g, task.handle, task.frame.header) {
+		t.Fatal("prepare wait-owner close yield")
+	}
+	if yielded, ok := Resumed(p, task.g, action); !ok || yielded.Kind != ActionYield {
+		t.Fatalf("commit wait-owner close yield = (%+v, %t)", yielded, ok)
+	}
+	closeTestExecutorDriver(t, driver)
+	finishReadyDriverTasks(t, p, map[*G]*yieldingTestG{task.g: task})
+	if !TerminalG(p, task.g) || !waits.CanRelease() || !registry.CanRelease() {
+		t.Fatal("wait-owner ABI cleanup retained state")
+	}
+	runtime.KeepAlive(task.frame.memory)
+}
+
 func TestExecutorDriverFindsPostBeforeDelayedRequest(t *testing.T) {
 	p := new(P)
 	driver, registry, waits, executor := bindTestExecutorDriver(t, p)

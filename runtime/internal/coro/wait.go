@@ -122,6 +122,39 @@ func ArmWait(token *WaitToken) (WaitTicket, bool) {
 	}
 }
 
+// rollbackArmedWait abandons a ticket that has not been published to a
+// completion producer and has not been claimed by a G. It preserves the
+// generation and records a consumed cancellation instead of restoring the
+// previous word, so a stale ticket can never become valid again. The next
+// ArmWait advances to a fresh generation.
+func rollbackArmedWait(token *WaitToken, ticket WaitTicket) bool {
+	if token == nil || !validWaitTicket(ticket) {
+		return false
+	}
+	generation := uint32(ticket)
+	return preemptCompareAndSwap(
+		&token.word,
+		waitWord(generation, waitArmed),
+		waitWord(generation, waitConsumedCanceled),
+	)
+}
+
+// consumeUnclaimedCanceledWait completes rollback after a prepared
+// registration has been strongly quiesced before any G could claim it. This
+// transition is deliberately unavailable to ordinary cancellation: once a G
+// has claimed the ticket, only the scheduler may consume its outcome.
+func consumeUnclaimedCanceledWait(token *WaitToken, ticket WaitTicket) bool {
+	if token == nil || !validWaitTicket(ticket) {
+		return false
+	}
+	generation := uint32(ticket)
+	return preemptCompareAndSwap(
+		&token.word,
+		waitWord(generation, waitCanceled),
+		waitWord(generation, waitConsumedCanceled),
+	)
+}
+
 // CompleteWait publishes completion of one exact generation. Writes to the
 // stable result record must happen before this call. The atomic CAS publishes
 // them to the scheduler that consumes the ready ticket. Duplicate, stale, and

@@ -446,14 +446,14 @@ func install() {
 
 func buildCoroTLSRuntimePlanError(t *testing.T, body string) error {
 	t.Helper()
-	source := "package runtime\n"
-	if strings.Contains(body, "unsafe.") {
-		source += "import \"unsafe\"\n"
-	}
+	source := "package runtime\nimport \"unsafe\"\n"
 	source += `
 func __llgo_coro_program_begin_v1() { install() }
 func __llgo_coro_program_run_v1() {}
 func __llgo_coro_program_continue_v1(uint32) {}
+func __llgo_coro_wait_prepare_v1(unsafe.Pointer, *uint32, *uint32, *uint32, *uint32, *uint32) bool { return false }
+func __llgo_coro_wait_rollback_v1(unsafe.Pointer, uint32, uint32, uint32) bool { return false }
+func __llgo_coro_wait_retire_completed_v1(unsafe.Pointer, uint32, uint32, uint32) bool { return false }
 func __llgo_coro_frame_allocator_bootstrap_v1() {}
 func __llgo_coro_frame_alloc_v1() {}
 func __llgo_coro_frame_publish_v1() {}

@@ -74,6 +74,43 @@ func validExecutorDriverForP(driver *ExecutorDriver, p *P) bool {
 	return validExecutorDriver(driver) && driver.state == executorDriverActive && driver.p == p
 }
 
+func validRunningExecutorOwner(driver *ExecutorDriver) bool {
+	if !validExecutorDriver(driver) || driver.state != executorDriverActive {
+		return false
+	}
+	p := driver.p
+	g := p.current
+	return g != nil && p.inResume && expectedAction(p, g, p.action, ActionResume) &&
+		g.state == GRunning && g.active != nil && g.active.state == FrameActive &&
+		g.active.handle == p.action.Handle && g.active.header != nil &&
+		g.active.header.G == unsafe.Pointer(g) &&
+		g.active.header.SuspendReason == uint16(SuspendNone) &&
+		g.active.header.Lifecycle == uint16(FrameActive) &&
+		g.pending.kind == pendingNone && g.waitToken == nil && g.waitTicket == 0
+}
+
+// PrepareExecutorWaitRegistration is the only production owner entry for
+// arming a platform wait. It is accepted solely from the currently resumed
+// frame on this exact executor; producer threads must use the POD post ABI.
+func PrepareExecutorWaitRegistration(driver *ExecutorDriver, token *WaitToken) (WaitTicket, WaitRegistrationHandle, WaitRegistrationPrepareResult) {
+	if !validRunningExecutorOwner(driver) {
+		return 0, WaitRegistrationHandle{}, WaitRegistrationPrepareInvalid
+	}
+	return PrepareWaitRegistration(driver.p, driver.waits, token)
+}
+
+// RollbackExecutorWaitRegistration is owner-only and valid before coroPark
+// when external submission never made the POD handle callback-reachable.
+func RollbackExecutorWaitRegistration(driver *ExecutorDriver, token *WaitToken, ticket WaitTicket, wait WaitRegistrationHandle) bool {
+	return validRunningExecutorOwner(driver) && driver.waits.RollbackPreparedWait(wait, token, ticket)
+}
+
+// RetireCompletedExecutorWait is owner-only and valid after the matching park
+// resumed and the external source was strongly joined or unregistered.
+func RetireCompletedExecutorWait(driver *ExecutorDriver, token *WaitToken, ticket WaitTicket, wait WaitRegistrationHandle) bool {
+	return validRunningExecutorOwner(driver) && driver.waits.RetireCompletedWait(wait, token, ticket)
+}
+
 func activeExecutorHandle(registry *ExecutorRegistry, handle ExecutorHandle) bool {
 	slot, ok := executorSlot(registry, handle)
 	return ok && preemptLoad(&slot.generation) == handle.Generation &&

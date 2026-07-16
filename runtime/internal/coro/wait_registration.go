@@ -57,6 +57,18 @@ const (
 	WaitRegistrationAlreadyQuiesced
 )
 
+// WaitRegistrationPrepareResult distinguishes ordinary caller rejection from
+// an impossible rollback failure that poisons token ownership and requires the
+// runtime adapter to fail-stop.
+type WaitRegistrationPrepareResult uint8
+
+const (
+	WaitRegistrationPrepareInvalid WaitRegistrationPrepareResult = iota
+	WaitRegistrationPrepared
+	WaitRegistrationPrepareRejected
+	WaitRegistrationPreparePoisoned
+)
+
 type waitRegistrationState uint32
 
 const (
@@ -118,6 +130,30 @@ type WaitRegistrationTable struct {
 	// owner is scheduler-only and is never read by Post. A non-nil owner binds
 	// every future registration to one target-neutral single-P driver.
 	owner *P
+}
+
+// PrepareWaitRegistration arms token and publishes the matching stable table
+// slot as one owner-side transaction. If registration fails, it consumes that
+// unpublished ticket as a cancellation while preserving its generation, so
+// token remains reusable and no stale ticket can be accepted later.
+//
+// The returned ticket and handle may be copied into a platform operation only
+// when the result is WaitRegistrationPrepared. If submission then fails before
+// the operation can start a callback, the owner must call
+// RollbackPreparedWait after proving that source quiesced.
+func PrepareWaitRegistration(p *P, table *WaitRegistrationTable, token *WaitToken) (WaitTicket, WaitRegistrationHandle, WaitRegistrationPrepareResult) {
+	ticket, ok := ArmWait(token)
+	if !ok {
+		return 0, WaitRegistrationHandle{}, WaitRegistrationPrepareInvalid
+	}
+	handle, ok := table.Register(p, token, ticket)
+	if !ok {
+		if !rollbackArmedWait(token, ticket) {
+			return 0, WaitRegistrationHandle{}, WaitRegistrationPreparePoisoned
+		}
+		return 0, WaitRegistrationHandle{}, WaitRegistrationPrepareRejected
+	}
+	return ticket, handle, WaitRegistrationPrepared
 }
 
 func registrationSlot(table *WaitRegistrationTable, handle WaitRegistrationHandle) (*waitRegistrationSlot, bool) {
@@ -434,6 +470,42 @@ func (table *WaitRegistrationTable) Retire(handle WaitRegistrationHandle) bool {
 	slot.ticket = 0
 	preemptStore(&slot.state, uint32(waitRegistrationFree))
 	return true
+}
+
+// RollbackPreparedWait releases a registration whose external submission
+// failed before any callback could start and before a G claimed the ticket.
+// The caller supplies that strong quiescence guarantee; this method closes the
+// slot admission gate, publishes and consumes cancellation, then retires the
+// exact generation. It fails closed once a post or park has won.
+func (table *WaitRegistrationTable) RollbackPreparedWait(handle WaitRegistrationHandle, token *WaitToken, ticket WaitTicket) bool {
+	slot, ok := registrationSlot(table, handle)
+	if !ok || token == nil || !validWaitTicket(ticket) ||
+		preemptLoad(&slot.generation) != handle.Generation || slot.token != token || slot.ticket != ticket ||
+		table.BeginClose(handle) != WaitRegistrationCloseStarted {
+		return false
+	}
+	result, quiesced := table.ConfirmQuiesced(handle)
+	if !quiesced || result != WaitCancelWon || !consumeUnclaimedCanceledWait(token, ticket) {
+		return false
+	}
+	return table.Retire(handle)
+}
+
+// RetireCompletedWait releases an exact delivered registration after the
+// resumed owner has strongly joined/unregistered its external source. The
+// matching completion must already have been consumed by the scheduler.
+func (table *WaitRegistrationTable) RetireCompletedWait(handle WaitRegistrationHandle, token *WaitToken, ticket WaitTicket) bool {
+	slot, ok := registrationSlot(table, handle)
+	if !ok || token == nil || !validWaitTicket(ticket) ||
+		preemptLoad(&slot.generation) != handle.Generation || slot.token != token || slot.ticket != ticket ||
+		table.BeginClose(handle) != WaitRegistrationCloseStarted {
+		return false
+	}
+	result, quiesced := table.ConfirmQuiesced(handle)
+	if !quiesced || result != WaitCancelCompletionWon {
+		return false
+	}
+	return table.Retire(handle)
 }
 
 // CanRelease reports whether an unbound table has no live registration or

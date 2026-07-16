@@ -106,6 +106,12 @@ func (ingress *TargetIngress) Retire() bool {
 	return ingress != nil && preemptCompareAndSwap(&ingress.state, targetIngressSealed, targetIngressRetired)
 }
 
+// Retired reports the permanent terminal tombstone. It is diagnostic and does
+// not grant permission to reset or reuse the ingress storage.
+func (ingress *TargetIngress) Retired() bool {
+	return ingress != nil && preemptLoad(&ingress.state) == targetIngressRetired
+}
+
 // CanReleaseResources is true for pristine storage and after the only
 // generation is permanently retired. It permits releasing external resources
 // protected by the barrier; it never permits freeing, resetting, or reusing
