@@ -137,6 +137,7 @@ type CoroPlanInput struct {
 	augmentFunctionIDs     func(coro.FunctionIDConfig) coro.FunctionIDConfig
 	functionBackground     func(*ssa.Function) (llssa.Background, bool, error)
 	intrinsicCallSemantics func(ssa.CallInstruction) (cl.CoroIntrinsicCallSemantics, bool, error)
+	demandReferences       func(*ssa.Function) ([]*ssa.Function, error)
 	requiredRoots          coro.Roots
 	requiredPlain          map[*ssa.Function]struct{}
 	requiredDirectPlain    []requiredCoroDirectPlainCallArgument
@@ -340,6 +341,30 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 			return cloneCoroClosedDynamicCallCertificate(compilerCertificate), true, nil
 		}
 	}
+	if in.demandReferences != nil || config.ClassifyDemandReferences != nil {
+		classifyDemandReferences := config.ClassifyDemandReferences
+		config.ClassifyDemandReferences = func(owner *ssa.Function) ([]*ssa.Function, error) {
+			var compilerTargets []*ssa.Function
+			var err error
+			if in.demandReferences != nil {
+				compilerTargets, err = in.demandReferences(owner)
+				if err != nil {
+					return nil, fmt.Errorf("classify frozen frontend demand references for %q: %w", owner.Name(), err)
+				}
+			}
+			compilerTargets = append([]*ssa.Function(nil), compilerTargets...)
+			if classifyDemandReferences != nil {
+				requested, err := classifyDemandReferences(owner)
+				if err != nil {
+					return nil, err
+				}
+				if !sameExactCoroFunctionReferences(requested, compilerTargets) {
+					return nil, fmt.Errorf("builder demand references in %q conflict with the frozen frontend method-table references", owner.Name())
+				}
+			}
+			return compilerTargets, nil
+		}
+	}
 	if in.augmentFunctionIDs != nil {
 		config.FunctionIDs = in.augmentFunctionIDs(config.FunctionIDs)
 	}
@@ -359,6 +384,26 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 		in.recordAnalysis(plan)
 	}
 	return plan, err
+}
+
+func sameExactCoroFunctionReferences(left, right []*ssa.Function) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	counts := make(map[*ssa.Function]int, len(left))
+	for _, fn := range left {
+		if fn == nil || counts[fn] != 0 {
+			return false
+		}
+		counts[fn] = 1
+	}
+	for _, fn := range right {
+		if fn == nil || counts[fn] != 1 {
+			return false
+		}
+		counts[fn] = 0
+	}
+	return true
 }
 
 // frontendElidesNoInitCall mirrors cl.context.funcKind: the frontend emits no
@@ -984,6 +1029,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		input.resolveFunction = ctx.coroEmission.Resolve
 		input.functionBackground = ctx.coroEmission.FunctionBackground
 		input.intrinsicCallSemantics = ctx.coroEmission.CoroIntrinsicCallSiteSemantics
+		input.demandReferences = ctx.coroEmission.CoroDemandReferences
 		input.augmentFunctionIDs = func(config coro.FunctionIDConfig) coro.FunctionIDConfig {
 			if ctx.buildConf.EnableCoroEntryResolution {
 				if config.CoroABI == "" {

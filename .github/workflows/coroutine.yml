@@ -77,7 +77,7 @@ jobs:
 
       - name: Test coroutine build integration
         if: matrix.llvm == 19
-        run: go test ./internal/build -run 'Test(CoroPlanBuilderRunsBeforeCodegenWithoutChangingIR|CoroPlanInputCanonicalizesPatchedRoot|CoroPlanInputElidesOnlyFrontendNoInitCalls|RequiredCoroProgramRuntimePlanPlainClosureAndConflicts|ActiveCoroABIVersions|BuildCoroPlanErrors|CoroEntryResolutionUsesPlanMatchedPackageCache|CoroEntryResolutionBuildsPreparedRuntimePackages|CoroRuntimeLinkRequirements|CoroEmissionCoverageStopsBeforeAnyPackageCodegen|CoroUnsupportedEntryResolutionReturnsErrorBeforeCodegen|CoroEmissionUniverseAcceptsModeTestVariants|CoroProgramBootstrapRejectsInvalidRootsBeforePackageCodegen)$' -count=1
+        run: go test ./internal/build -run 'Test(CoroPlanBuilderRunsBeforeCodegenWithoutChangingIR|CoroPlanInputCanonicalizesPatchedRoot|CoroPlanInputElidesOnlyFrontendNoInitCalls|CoroPlanInputOwnsFrozenDemandReferences|RequiredCoroProgramRuntimePlanPlainClosureAndConflicts|ActiveCoroABIVersions|BuildCoroPlanErrors|CoroEntryResolutionUsesPlanMatchedPackageCache|CoroEntryResolutionBuildsPreparedRuntimePackages|CoroRuntimeLinkRequirements|CoroEmissionCoverageStopsBeforeAnyPackageCodegen|CoroUnsupportedEntryResolutionReturnsErrorBeforeCodegen|CoroEmissionUniverseAcceptsModeTestVariants|CoroProgramBootstrapRejectsInvalidRootsBeforePackageCodegen)$' -count=1
 
       - name: Test coroutine compiler integration
         if: matrix.llvm == 19
@@ -98,7 +98,7 @@ jobs:
           go test -tags='${{ matrix.tags }}' ./cl -run '^Test(CompilationCoroABIIdentityValidation|CoroEntryResolutionCacheRegistrationWithDigest|CoroPhysicalABICacheRegistrationPreservesPhysicalMetadata)$' -count=1
 
       - name: Test coroutine physical ABI and function dispatch lowering
-        run: go test -tags='${{ matrix.tags }}' -v ./cl -run '^TestCoro(LeafPhysicalABI|PhysicalABI|ChildAwaitPhysicalABIV1|ExplicitAsyncRootFactoryV1|ExplicitRootFactoryV1|ExplicitPlain|RootPackageAnchorV1|PlainDispatch)' -count=1
+        run: go test -tags='${{ matrix.tags }}' -v ./cl -run '^Test(Coro(LeafPhysicalABI|PhysicalABI|ChildAwaitPhysicalABIV1|ExplicitAsyncRootFactoryV1|ExplicitRootFactoryV1|ExplicitPlain|RootPackageAnchorV1|PlainDispatch)|EmissionUniverse(ActiveABIMethodTablesUseFrozenWrapperSymbols|ABIMethodDemandReferencesAreExactRecursiveAndOwnerScoped))' -count=1
 
       - name: Test coroutine TLS function dispatch proof
         run: go test -tags='${{ matrix.tags }}' -v ./internal/build -run '^TestCoroTLS' -count=1

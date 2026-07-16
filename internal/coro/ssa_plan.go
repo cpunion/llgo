@@ -192,6 +192,17 @@ type SSAConfig struct {
 	// callback is trusted to have rejected every unknown physical write or escape
 	// that could reach the exact value loaded at call.
 	ClassifyClosedDynamicCall func(caller *ssa.Function, call ssa.CallInstruction) (SSAClosedDynamicCallCertificate, bool, error)
+
+	// ClassifyDemandReferences supplies exact function addresses that the
+	// frontend implicitly embeds while lowering one function body, even though
+	// they are not operands in that body's SSA instructions. Runtime ABI method
+	// tables are the canonical example. These references propagate entry demand
+	// only; they do not propagate suspend effects or execution flags.
+	//
+	// Every returned target must be a non-nil exact canonical member of the
+	// effective emission universe. AnalyzeSSA calls the classifier only for
+	// owned, non-ignored bodies and copies the returned slice before use.
+	ClassifyDemandReferences func(owner *ssa.Function) ([]*ssa.Function, error)
 }
 
 // SSAFunctionPlan binds an immutable FunctionPlan back to its SSA function.
@@ -799,6 +810,9 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if err := addSSAReferenceEdges(graph, bodyFunctions, includedSet, ids, flow); err != nil {
 		return nil, err
 	}
+	if err := addSSAClassifiedDemandReferences(graph, bodyFunctions, includedSet, ids, canonicalizer, config); err != nil {
+		return nil, err
+	}
 
 	base, err := graph.Analyze()
 	if err != nil {
@@ -833,6 +847,50 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		})
 	}
 	return result, nil
+}
+
+func addSSAClassifiedDemandReferences(
+	graph *Graph,
+	functions []*ssa.Function,
+	included map[*ssa.Function]bool,
+	ids map[*ssa.Function]FunctionID,
+	canonicalizer *ssaFunctionCanonicalizer,
+	config SSAConfig,
+) error {
+	if config.ClassifyDemandReferences == nil {
+		return nil
+	}
+	for _, owner := range functions {
+		targets, err := config.ClassifyDemandReferences(owner)
+		if err != nil {
+			return fmt.Errorf("coro: classify demand-only references in %q: %w", owner.Name(), err)
+		}
+		// The classifier owns its backing storage. Copy before validation so
+		// analysis never retains a frontend-owned slice.
+		targets = append([]*ssa.Function(nil), targets...)
+		for index, target := range targets {
+			if target == nil {
+				return fmt.Errorf("coro: demand-only reference %d in %q has a nil target", index, owner.Name())
+			}
+			if target.Prog != owner.Prog {
+				return fmt.Errorf("coro: demand-only reference %d in %q targets function %q from another SSA program", index, owner.Name(), target.Name())
+			}
+			canonical, resolved, resolveErr := canonicalizer.resolve(target)
+			if resolveErr != nil {
+				return fmt.Errorf("coro: resolve demand-only target %q in %q: %w", target.Name(), owner.Name(), resolveErr)
+			}
+			if !resolved || canonical == nil || !included[canonical] {
+				return fmt.Errorf("coro: demand-only target %q in %q is outside the effective emission universe", target.Name(), owner.Name())
+			}
+			if canonical != target {
+				return fmt.Errorf("coro: demand-only target %q in %q is not the exact canonical function", target.Name(), owner.Name())
+			}
+			if err := graph.AddReference(ReferenceEdge{Owner: ids[owner], Target: ids[target]}); err != nil {
+				return fmt.Errorf("coro: add demand-only function reference from %q to %q: %w", owner.Name(), target.Name(), err)
+			}
+		}
+	}
+	return nil
 }
 
 // addSSAReferenceEdges projects known function values used by demanded bodies

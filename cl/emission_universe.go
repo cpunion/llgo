@@ -78,26 +78,27 @@ type EmissionUniverse struct {
 	byPath   map[string]*preparedEmissionPackage
 	pathDup  map[string]bool
 
-	functions          []*ssa.Function
-	required           map[*ssa.Function]none
-	aliases            map[*ssa.Function]*ssa.Function
-	fnOwners           map[*ssa.Function]*preparedEmissionPackage
-	fnStates           map[*ssa.Function]emissionFunctionState
-	functionKinds      map[emissionFunctionOwnerKey]int
-	intrinsicOps       map[emissionFunctionOwnerKey]int
-	finalKeys          map[emissionFunctionOwnerKey]string
-	physicalNames      map[emissionFunctionOwnerKey]string
-	linkOnceNames      map[*ssa.Function]string
-	callWraps          map[intrinsicWrapperKey]*ssa.Function
-	callWrapInfo       map[*ssa.Function]intrinsicWrapperKey
-	syntheticKeys      map[*ssa.Function]string
-	linkIdentities     map[*ssa.Function]string
-	excluded           map[*ssa.Function]none
-	materialized       map[*ssa.Function]none
-	useOwners          map[*ssa.Function]map[*preparedEmissionPackage]none
-	ownerStates        map[*ssa.Function]map[*preparedEmissionPackage]emissionFunctionState
-	materializedOwners map[*ssa.Function]map[*preparedEmissionPackage]none
-	ownerStateErr      error
+	functions           []*ssa.Function
+	required            map[*ssa.Function]none
+	aliases             map[*ssa.Function]*ssa.Function
+	fnOwners            map[*ssa.Function]*preparedEmissionPackage
+	fnStates            map[*ssa.Function]emissionFunctionState
+	functionKinds       map[emissionFunctionOwnerKey]int
+	intrinsicOps        map[emissionFunctionOwnerKey]int
+	finalKeys           map[emissionFunctionOwnerKey]string
+	physicalNames       map[emissionFunctionOwnerKey]string
+	linkOnceNames       map[*ssa.Function]string
+	callWraps           map[intrinsicWrapperKey]*ssa.Function
+	callWrapInfo        map[*ssa.Function]intrinsicWrapperKey
+	syntheticKeys       map[*ssa.Function]string
+	linkIdentities      map[*ssa.Function]string
+	excluded            map[*ssa.Function]none
+	materialized        map[*ssa.Function]none
+	useOwners           map[*ssa.Function]map[*preparedEmissionPackage]none
+	ownerStates         map[*ssa.Function]map[*preparedEmissionPackage]emissionFunctionState
+	materializedOwners  map[*ssa.Function]map[*preparedEmissionPackage]none
+	ownerStateErr       error
+	abiMethodReferences map[*ssa.Function]map[*ssa.Function]none
 
 	localGenericMu     sync.Mutex
 	localGenericTypes  map[*types.Named]emissionLocalGenericType
@@ -153,34 +154,35 @@ func PrepareEmissionUniverse(prog llssa.Program, patches Patches, inputs []Emiss
 	}
 	identities := make(map[string]*ssa.Package, len(inputs))
 	u := &EmissionUniverse{
-		prog:               prog,
-		patches:            patches,
-		packages:           make(map[*ssa.Package]*preparedEmissionPackage, len(inputs)),
-		byTypes:            make(map[*types.Package]*preparedEmissionPackage, len(inputs)*3),
-		typesDup:           make(map[*types.Package]bool),
-		byPath:             make(map[string]*preparedEmissionPackage, len(inputs)),
-		pathDup:            make(map[string]bool),
-		required:           make(map[*ssa.Function]none),
-		aliases:            make(map[*ssa.Function]*ssa.Function),
-		fnOwners:           make(map[*ssa.Function]*preparedEmissionPackage),
-		fnStates:           make(map[*ssa.Function]emissionFunctionState),
-		functionKinds:      make(map[emissionFunctionOwnerKey]int),
-		intrinsicOps:       make(map[emissionFunctionOwnerKey]int),
-		finalKeys:          make(map[emissionFunctionOwnerKey]string),
-		physicalNames:      make(map[emissionFunctionOwnerKey]string),
-		linkOnceNames:      make(map[*ssa.Function]string),
-		callWraps:          make(map[intrinsicWrapperKey]*ssa.Function),
-		callWrapInfo:       make(map[*ssa.Function]intrinsicWrapperKey),
-		syntheticKeys:      make(map[*ssa.Function]string),
-		linkIdentities:     make(map[*ssa.Function]string),
-		excluded:           make(map[*ssa.Function]none),
-		materialized:       make(map[*ssa.Function]none),
-		useOwners:          make(map[*ssa.Function]map[*preparedEmissionPackage]none),
-		ownerStates:        make(map[*ssa.Function]map[*preparedEmissionPackage]emissionFunctionState),
-		materializedOwners: make(map[*ssa.Function]map[*preparedEmissionPackage]none),
-		localGenericTypes:  make(map[*types.Named]emissionLocalGenericType),
-		localGenericOwners: make(map[*types.Named]*ssa.Function),
-		genericNamedTypes:  make(map[*types.Named]*types.Named),
+		prog:                prog,
+		patches:             patches,
+		packages:            make(map[*ssa.Package]*preparedEmissionPackage, len(inputs)),
+		byTypes:             make(map[*types.Package]*preparedEmissionPackage, len(inputs)*3),
+		typesDup:            make(map[*types.Package]bool),
+		byPath:              make(map[string]*preparedEmissionPackage, len(inputs)),
+		pathDup:             make(map[string]bool),
+		required:            make(map[*ssa.Function]none),
+		aliases:             make(map[*ssa.Function]*ssa.Function),
+		fnOwners:            make(map[*ssa.Function]*preparedEmissionPackage),
+		fnStates:            make(map[*ssa.Function]emissionFunctionState),
+		functionKinds:       make(map[emissionFunctionOwnerKey]int),
+		intrinsicOps:        make(map[emissionFunctionOwnerKey]int),
+		finalKeys:           make(map[emissionFunctionOwnerKey]string),
+		physicalNames:       make(map[emissionFunctionOwnerKey]string),
+		linkOnceNames:       make(map[*ssa.Function]string),
+		callWraps:           make(map[intrinsicWrapperKey]*ssa.Function),
+		callWrapInfo:        make(map[*ssa.Function]intrinsicWrapperKey),
+		syntheticKeys:       make(map[*ssa.Function]string),
+		abiMethodReferences: make(map[*ssa.Function]map[*ssa.Function]none),
+		linkIdentities:      make(map[*ssa.Function]string),
+		excluded:            make(map[*ssa.Function]none),
+		materialized:        make(map[*ssa.Function]none),
+		useOwners:           make(map[*ssa.Function]map[*preparedEmissionPackage]none),
+		ownerStates:         make(map[*ssa.Function]map[*preparedEmissionPackage]emissionFunctionState),
+		materializedOwners:  make(map[*ssa.Function]map[*preparedEmissionPackage]none),
+		localGenericTypes:   make(map[*types.Named]emissionLocalGenericType),
+		localGenericOwners:  make(map[*types.Named]*ssa.Function),
+		genericNamedTypes:   make(map[*types.Named]*types.Named),
 	}
 	for i, input := range inputs {
 		if input.SSA == nil || input.SSA.Prog == nil || input.SSA.Pkg == nil {
@@ -345,6 +347,85 @@ func (u *EmissionUniverse) Functions() []*ssa.Function {
 		return nil
 	}
 	return append([]*ssa.Function(nil), u.functions...)
+}
+
+// CoroDemandReferences returns the exact functions whose addresses are
+// embedded in runtime ABI method tables emitted while lowering owner. These
+// are demand-only references: a demanded owner must materialize the selected
+// tfn/ifn bodies, but taking their addresses does not inherit their effects.
+//
+// The map is completed together with the emission universe, before coroutine
+// analysis or LLVM codegen. Results are sorted by the frozen frontend identity
+// and defensively copied so callers cannot change the universe after freezing.
+func (u *EmissionUniverse) CoroDemandReferences(owner *ssa.Function) ([]*ssa.Function, error) {
+	if u == nil {
+		return nil, fmt.Errorf("coroutine ABI method references require a prepared emission universe")
+	}
+	if owner == nil {
+		return nil, fmt.Errorf("coroutine ABI method references require an exact owner function")
+	}
+	canonical := u.canonicalAlias(owner)
+	if canonical == nil {
+		return nil, fmt.Errorf("coroutine ABI method reference owner %q has cyclic canonical aliases", owner.Name())
+	}
+	if canonical != owner {
+		return nil, fmt.Errorf("coroutine ABI method reference owner %q is not the exact canonical function", owner.Name())
+	}
+	if _, frozen := u.required[owner]; !frozen {
+		return nil, fmt.Errorf("coroutine ABI method reference owner %q is outside the frozen emission universe", owner.Name())
+	}
+	targets := make([]*ssa.Function, 0, len(u.abiMethodReferences[owner]))
+	for target := range u.abiMethodReferences[owner] {
+		if target == nil {
+			return nil, fmt.Errorf("coroutine ABI method reference owner %q has a nil target", owner.Name())
+		}
+		if canonicalTarget := u.canonicalAlias(target); canonicalTarget == nil || canonicalTarget != target {
+			return nil, fmt.Errorf("coroutine ABI method reference owner %q has a non-canonical target %q", owner.Name(), target.Name())
+		}
+		if _, frozen := u.required[target]; !frozen {
+			return nil, fmt.Errorf("coroutine ABI method reference owner %q targets method %q outside the frozen emission universe", owner.Name(), target.Name())
+		}
+		targets = append(targets, target)
+	}
+	sort.SliceStable(targets, func(i, j int) bool {
+		return u.functionSortKey(targets[i]) < u.functionSortKey(targets[j])
+	})
+	return targets, nil
+}
+
+func (u *EmissionUniverse) recordABIMethodReferences(owner *ssa.Function, targets []*ssa.Function) error {
+	if owner == nil {
+		return fmt.Errorf("prepare emission universe: ABI method references have no owner")
+	}
+	owner = u.canonicalAlias(owner)
+	if owner == nil {
+		return fmt.Errorf("prepare emission universe: ABI method reference owner has cyclic canonical aliases")
+	}
+	if _, frozen := u.required[owner]; !frozen {
+		return fmt.Errorf("prepare emission universe: ABI method reference owner %q is outside the emission universe", owner.Name())
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+	references := u.abiMethodReferences[owner]
+	if references == nil {
+		references = make(map[*ssa.Function]none)
+		u.abiMethodReferences[owner] = references
+	}
+	for _, target := range targets {
+		if target == nil {
+			return fmt.Errorf("prepare emission universe: ABI method reference owner %q has a nil target", owner.Name())
+		}
+		target = u.canonicalAlias(target)
+		if target == nil {
+			return fmt.Errorf("prepare emission universe: ABI method reference owner %q reached a cyclic target alias", owner.Name())
+		}
+		if _, frozen := u.required[target]; !frozen {
+			return fmt.Errorf("prepare emission universe: ABI method reference owner %q targets method %q outside the emission universe", owner.Name(), target.Name())
+		}
+		references[target] = none{}
+	}
+	return nil
 }
 
 // Contains reports whether fn is an exact canonical required function.
@@ -770,7 +851,7 @@ func (u *EmissionUniverse) selectTypeMethods(prepared *preparedEmissionPackage, 
 	return nil
 }
 
-func (u *EmissionUniverse) selectABITypeMethods(prepared *preparedEmissionPackage, typ types.Type, state pkgState, fromPatch bool) error {
+func (u *EmissionUniverse) selectABITypeMethods(prepared *preparedEmissionPackage, typ types.Type, state pkgState, fromPatch bool) ([]*ssa.Function, error) {
 	base := types.Unalias(typ)
 	for {
 		pointer, ok := base.(*types.Pointer)
@@ -785,16 +866,54 @@ func (u *EmissionUniverse) selectABITypeMethods(prepared *preparedEmissionPackag
 		packageNamed = obj != nil && obj.Pkg() != nil && obj.Parent() == obj.Pkg().Scope()
 	}
 	mset := u.goProg.MethodSets.MethodSet(typ)
+	methods := make([]*ssa.Function, 0, mset.Len()*2)
+	selectMethod := func(selection *types.Selection) error {
+		fn := u.goProg.MethodValue(selection)
+		if fn == nil {
+			return fmt.Errorf("prepare emission universe: ABI method table for %v has no SSA implementation for method %q", typ, selection.Obj().Name())
+		}
+		if !packageNamed || functionNeedsLinkOnce(fn) {
+			if err := u.selectFunction(prepared, fn, state, fromPatch); err != nil {
+				return err
+			}
+		}
+		fn = u.canonicalAlias(fn)
+		if fn == nil {
+			return fmt.Errorf("prepare emission universe: ABI method table for %v reached a cyclic method alias", typ)
+		}
+		if _, frozen := u.required[fn]; !frozen {
+			return fmt.Errorf("prepare emission universe: ABI method table for %v references method %q outside the frozen emission universe", typ, fn.Name())
+		}
+		methods = append(methods, fn)
+		return nil
+	}
 	for index := 0; index < mset.Len(); index++ {
-		fn := u.goProg.MethodValue(mset.At(index))
-		if fn == nil || packageNamed && !functionNeedsLinkOnce(fn) {
+		selection := mset.At(index)
+		if err := selectMethod(selection); err != nil {
+			return nil, err
+		}
+
+		// abiUncommonMethods uses the pointer-receiver method value as ifn for
+		// every value-receiver selection. Freeze that exact wrapper alongside
+		// tfn instead of assuming a later pointer descriptor happens to request
+		// it as an unrelated side effect.
+		sig, ok := selection.Type().(*types.Signature)
+		if !ok || sig.Recv() == nil {
+			return nil, fmt.Errorf("prepare emission universe: ABI method table for %v has a non-method selection %q", typ, selection.Obj().Name())
+		}
+		if _, pointerReceiver := selection.Recv().Underlying().(*types.Pointer); pointerReceiver {
 			continue
 		}
-		if err := u.selectFunction(prepared, fn, state, fromPatch); err != nil {
-			return err
+		pointerReceiver := types.NewPointer(sig.Recv().Type())
+		pointerSelection := u.goProg.MethodSets.MethodSet(pointerReceiver).Lookup(selection.Obj().Pkg(), selection.Obj().Name())
+		if pointerSelection == nil {
+			return nil, fmt.Errorf("prepare emission universe: ABI method table for %v cannot resolve pointer ifn for method %q", typ, selection.Obj().Name())
+		}
+		if err := selectMethod(pointerSelection); err != nil {
+			return nil, err
 		}
 	}
-	return nil
+	return stableUniqueFunctions(methods), nil
 }
 
 func (u *EmissionUniverse) functionProvenance(prepared *preparedEmissionPackage, fn *ssa.Function) (pkgState, bool) {

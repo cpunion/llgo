@@ -47,20 +47,24 @@ func Value() any { return struct{ Base }{} }
 	if err != nil {
 		t.Fatal(err)
 	}
-	roots := coro.Roots{{Function: pkg.ssa.Func("Value"), Demand: coro.SyncDemand}}
+	value := pkg.ssa.Func("Value")
+	references, err := universe.CoroDemandReferences(value)
+	if err != nil {
+		t.Fatal(err)
+	}
 	foundPromoted := false
-	for _, fn := range universe.Functions() {
+	for _, fn := range references {
 		if wrapperKind(fn) == "promoted" && fn.Name() == "M" {
-			roots = append(roots, coro.Root{Function: fn, Demand: coro.SyncDemand})
 			foundPromoted = true
 		}
 	}
 	if !foundPromoted {
-		t.Fatal("prepared universe has no promoted M wrapper to demand")
+		t.Fatal("Value has no frozen promoted M method-table reference")
 	}
-	plan, err := coro.AnalyzeSSA(testProg.ssa, roots, coro.SSAConfig{
-		EmissionUniverse: ssaUniverse,
-		FunctionIDs:      universe.FunctionIDConfig(),
+	plan, err := coro.AnalyzeSSA(testProg.ssa, coro.Roots{{Function: value, Demand: coro.SyncDemand}}, coro.SSAConfig{
+		EmissionUniverse:         ssaUniverse,
+		FunctionIDs:              universe.FunctionIDConfig(),
+		ClassifyDemandReferences: universe.CoroDemandReferences,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -114,6 +118,148 @@ func Value() any { return struct{ Base }{} }
 	}
 	if found == 0 {
 		t.Fatal("test did not materialize an anonymous promoted wrapper")
+	}
+}
+
+func TestEmissionUniverseABIMethodDemandReferencesAreExactRecursiveAndOwnerScoped(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/methoddemand", `package methoddemand
+var channel chan int
+type Base struct{}
+func (Base) Suspend() { <-channel }
+type Leaf struct{}
+func (Leaf) Plain() {}
+type Outer struct { Base; Child Leaf; Next *Outer }
+type Dead struct{}
+func (Dead) Method() {}
+func Demanded() any { return Outer{} }
+func Unreachable() any { return Dead{} }
+`)
+	testProg.ssa.Build()
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{
+		SSA: pkg.ssa, Files: []*ast.File{pkg.file},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	demanded := pkg.ssa.Func("Demanded")
+	unreachable := pkg.ssa.Func("Unreachable")
+	references, err := universe.CoroDemandReferences(demanded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(references) == 0 {
+		t.Fatal("Demanded has no frozen ABI method references")
+	}
+	for index := 1; index < len(references); index++ {
+		if universe.functionSortKey(references[index-1]) > universe.functionSortKey(references[index]) {
+			t.Fatalf("ABI method references are not deterministically sorted at %d", index)
+		}
+	}
+	repeated, err := universe.CoroDemandReferences(demanded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repeated) != len(references) {
+		t.Fatalf("repeated reference count = %d; want %d", len(repeated), len(references))
+	}
+	for index := range references {
+		if repeated[index] != references[index] {
+			t.Fatalf("repeated reference %d = %v; want exact %v", index, repeated[index], references[index])
+		}
+	}
+	references[0] = nil
+	defensive, err := universe.CoroDemandReferences(demanded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(defensive) == 0 || defensive[0] == nil {
+		t.Fatal("caller mutation changed frozen ABI method references")
+	}
+
+	memberType := func(name string) types.Type {
+		member, ok := pkg.ssa.Members[name].(*ssa.Type)
+		if !ok {
+			t.Fatalf("SSA member %q is not a type", name)
+		}
+		return member.Type()
+	}
+	exactMethod := func(typ types.Type, name string) *ssa.Function {
+		selection := emissionABIDemandMethodSelection(t, testProg.ssa, typ, name)
+		method := testProg.ssa.MethodValue(selection)
+		if method == nil {
+			t.Fatalf("method %s.%s has no SSA value", typ, name)
+		}
+		canonical, ok := universe.Resolve(method)
+		if !ok {
+			t.Fatalf("method %s.%s is outside the frozen universe", typ, name)
+		}
+		return canonical
+	}
+	hasReference := func(list []*ssa.Function, target *ssa.Function) bool {
+		for _, candidate := range list {
+			if candidate == target {
+				return true
+			}
+		}
+		return false
+	}
+	outer := memberType("Outer")
+	valueTFN := exactMethod(outer, "Suspend")
+	pointerIFN := exactMethod(types.NewPointer(outer), "Suspend")
+	if valueTFN == pointerIFN {
+		t.Fatal("promoted value tfn and pointer ifn unexpectedly share one SSA wrapper")
+	}
+	leafPlain := exactMethod(memberType("Leaf"), "Plain")
+	for label, target := range map[string]*ssa.Function{
+		"value tfn": valueTFN, "pointer ifn": pointerIFN, "recursive field method": leafPlain,
+	} {
+		if !hasReference(defensive, target) {
+			t.Fatalf("Demanded references omit exact %s %v", label, target)
+		}
+	}
+
+	deadReferences, err := universe.CoroDemandReferences(unreachable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadMethod := exactMethod(memberType("Dead"), "Method")
+	if !hasReference(deadReferences, deadMethod) {
+		t.Fatalf("Unreachable references omit exact Dead.Method %v", deadMethod)
+	}
+
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(testProg.ssa, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := coro.AnalyzeSSA(testProg.ssa, coro.Roots{{Function: demanded, Demand: coro.SyncDemand}}, coro.SSAConfig{
+		EmissionUniverse:         ssaUniverse,
+		FunctionIDs:              universe.FunctionIDConfig(),
+		ClassifyDemandReferences: universe.CoroDemandReferences,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	demandedPlan, _ := plan.FunctionPlan(demanded)
+	if demandedPlan.Effect != coro.NoSuspend || demandedPlan.Emission != coro.EmitPlain {
+		t.Fatalf("Demanded plan = %+v, method addresses must not propagate effects", demandedPlan)
+	}
+	for _, target := range []*ssa.Function{valueTFN, pointerIFN} {
+		methodPlan, ok := plan.FunctionPlan(target)
+		if !ok || methodPlan.Demand != coro.AsyncDemand || methodPlan.Emission != coro.EmitCoroutine || methodPlan.Primary != coro.PrimaryCoroutine {
+			t.Fatalf("suspending method %v plan = %+v, present=%v; want demanded coroutine entry", target, methodPlan, ok)
+		}
+	}
+	deadPlan, ok := plan.FunctionPlan(deadMethod)
+	if !ok || deadPlan.Demand != coro.NoDemand || deadPlan.Emission != coro.EmitNone {
+		t.Fatalf("unreachable method plan = %+v, present=%v; want no over-emission", deadPlan, ok)
+	}
+
+	delete(universe.required, leafPlain)
+	if _, err := universe.CoroDemandReferences(demanded); err == nil || !strings.Contains(err.Error(), "outside the frozen emission universe") {
+		t.Fatalf("missing frozen ABI method error = %v", err)
 	}
 }
 

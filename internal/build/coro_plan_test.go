@@ -1198,6 +1198,101 @@ func g() {}
 	}
 }
 
+func TestCoroPlanInputOwnsFrozenDemandReferences(t *testing.T) {
+	ssaPkg, _ := buildCoroPlanTestPackage(t, "example.com/demandrefs", `package demandrefs
+func owner() {}
+func method() {}
+func method2() {}
+func extra() {}
+func alias() {}
+`, nil)
+	owner := ssaPkg.Func("owner")
+	method := ssaPkg.Func("method")
+	method2 := ssaPkg.Func("method2")
+	extra := ssaPkg.Func("extra")
+	alias := ssaPkg.Func("alias")
+	universe, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, []*ssa.Function{owner, method, method2, extra})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozen := []*ssa.Function{method, method2}
+	input := CoroPlanInput{
+		Program:          ssaPkg.Prog,
+		EmissionUniverse: universe,
+		resolveFunction: func(fn *ssa.Function) (*ssa.Function, bool) {
+			if fn == alias {
+				return method, true
+			}
+			return fn, universe.Contains(fn)
+		},
+		demandReferences: func(fn *ssa.Function) ([]*ssa.Function, error) {
+			if fn == owner {
+				return frozen, nil
+			}
+			return nil, nil
+		},
+	}
+	roots := coro.Roots{{Function: owner, Demand: coro.SyncDemand}}
+	plan, err := input.Analyze(roots, coro.SSAConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []*ssa.Function{method, method2} {
+		methodPlan, ok := plan.FunctionPlan(target)
+		if !ok || methodPlan.Demand != coro.SyncDemand || methodPlan.Emission != coro.EmitPlain {
+			t.Fatalf("frozen method %s plan = %+v, present=%v", target.Name(), methodPlan, ok)
+		}
+	}
+	// A completed exact-pointer plan does not retain the frontend callback's
+	// backing slice.
+	frozen[0] = extra
+	methodPlan, ok := plan.FunctionPlan(method)
+	if !ok || methodPlan.Demand != coro.SyncDemand {
+		t.Fatalf("callback slice mutation changed completed method plan = %+v, present=%v", methodPlan, ok)
+	}
+	frozen[0] = method
+
+	tests := []struct {
+		name      string
+		requested []*ssa.Function
+	}{
+		{name: "missing", requested: []*ssa.Function{method}},
+		{name: "extra", requested: []*ssa.Function{method, method2, extra}},
+		{name: "alias", requested: []*ssa.Function{method, alias}},
+		{name: "duplicate", requested: []*ssa.Function{method, method}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := input.Analyze(roots, coro.SSAConfig{
+				ClassifyDemandReferences: func(fn *ssa.Function) ([]*ssa.Function, error) {
+					if fn == owner {
+						return test.requested, nil
+					}
+					return nil, nil
+				},
+			})
+			if err == nil || !strings.Contains(err.Error(), "conflict with the frozen frontend method-table references") {
+				t.Fatalf("builder %s demand-reference error = %v", test.name, err)
+			}
+		})
+	}
+
+	accepted, err := input.Analyze(roots, coro.SSAConfig{
+		ClassifyDemandReferences: func(fn *ssa.Function) ([]*ssa.Function, error) {
+			if fn == owner {
+				return []*ssa.Function{method2, method}, nil
+			}
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("builder exact frozen reference was rejected: %v", err)
+	}
+	if got, ok := accepted.FunctionPlan(method); !ok || got.Demand != coro.SyncDemand {
+		t.Fatalf("accepted exact reference plan = %+v, present=%v", got, ok)
+	}
+}
+
 func TestActiveCoroABIVersions(t *testing.T) {
 	tests := []struct {
 		name      string

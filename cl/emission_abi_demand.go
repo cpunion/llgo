@@ -253,7 +253,11 @@ func (u *EmissionUniverse) materializeABITypeDemand(fn *ssa.Function, owner *pre
 		if exactState, exactFromPatch, known := u.typeProvenance(owner, typ); known {
 			methodState, methodFromPatch = exactState, exactFromPatch
 		}
-		return u.selectABITypeMethods(owner, typ, methodState, methodFromPatch)
+		methods, err := u.selectABITypeMethods(owner, typ, methodState, methodFromPatch)
+		if err != nil {
+			return err
+		}
+		return u.recordABIMethodReferences(fn, methods)
 	})
 }
 

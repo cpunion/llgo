@@ -358,6 +358,71 @@ func deadOwner() {
 	}
 }
 
+func TestAnalyzeSSAClassifiedDemandReferencesAreOwnerScopedAndFailClosed(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "implicit_references.go", `package coroid
+
+var channel chan int
+
+func owner() {}
+func deadOwner() {}
+func suspendingMethod() { <-channel }
+func deadMethod() {}
+func outsideFrozenUniverse() {}
+`)
+	owner := packageFunction(t, pkg, "owner")
+	deadOwner := packageFunction(t, pkg, "deadOwner")
+	suspending := packageFunction(t, pkg, "suspendingMethod")
+	deadMethod := packageFunction(t, pkg, "deadMethod")
+	outside := packageFunction(t, pkg, "outsideFrozenUniverse")
+	universe, err := NewSSAEmissionUniverse(prog, []*ssa.Function{owner, deadOwner, suspending, deadMethod})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := AnalyzeSSA(prog, Roots{{Function: owner, Demand: SyncDemand}}, SSAConfig{
+		EmissionUniverse: universe,
+		ClassifyDemandReferences: func(fn *ssa.Function) ([]*ssa.Function, error) {
+			switch fn {
+			case owner:
+				return []*ssa.Function{suspending}, nil
+			case deadOwner:
+				return []*ssa.Function{deadMethod}, nil
+			default:
+				return nil, nil
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerPlan := functionPlanFor(t, plan, owner)
+	if ownerPlan.Effect != NoSuspend || ownerPlan.Emission != EmitPlain {
+		t.Fatalf("owner plan = %+v, demand-only method address inherited its effect", ownerPlan)
+	}
+	suspendingPlan := functionPlanFor(t, plan, suspending)
+	if suspendingPlan.Demand != AsyncDemand || suspendingPlan.Emission != EmitCoroutine || suspendingPlan.Primary != PrimaryCoroutine {
+		t.Fatalf("suspending method plan = %+v, want demanded coroutine entry", suspendingPlan)
+	}
+	for _, fn := range []*ssa.Function{deadOwner, deadMethod} {
+		got := functionPlanFor(t, plan, fn)
+		if got.Demand != NoDemand || got.Emission != EmitNone {
+			t.Fatalf("unreachable %s plan = %+v, want no demand and no emission", fn.Name(), got)
+		}
+	}
+
+	_, err = AnalyzeSSA(prog, Roots{{Function: owner, Demand: SyncDemand}}, SSAConfig{
+		EmissionUniverse: universe,
+		ClassifyDemandReferences: func(fn *ssa.Function) ([]*ssa.Function, error) {
+			if fn == owner {
+				return []*ssa.Function{outside}, nil
+			}
+			return nil, nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "outside the effective emission universe") {
+		t.Fatalf("missing frozen method error = %v", err)
+	}
+}
+
 func TestAnalyzeSSADynamicOpenAndClosedWorld(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "source.go", `package coroid
 
