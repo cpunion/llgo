@@ -97,8 +97,11 @@ jobs:
           go test -tags='${{ matrix.tags }}' ./internal/build -run '^Test(BuildCoroPlanInstallsArchiveDigest|CoroutinePlanInputsAffectFingerprint|CoroEntryResolutionUsesPlanMatchedPackageCache|CoroPlanDigestMetadataUsesEffectiveLLVMTarget|CoroPhysicalABICacheRegistrationPreservesCollectedFuncInfo)$' -count=1
           go test -tags='${{ matrix.tags }}' ./cl -run '^Test(CompilationCoroABIIdentityValidation|CoroEntryResolutionCacheRegistrationWithDigest|CoroPhysicalABICacheRegistrationPreservesPhysicalMetadata)$' -count=1
 
-      - name: Test coroutine physical ABI lowering
-        run: go test -tags='${{ matrix.tags }}' -v ./cl -run '^TestCoro(LeafPhysicalABI|PhysicalABI|ChildAwaitPhysicalABIV1|ExplicitAsyncRootFactoryV1|ExplicitRootFactoryV1|ExplicitPlain|RootPackageAnchorV1)' -count=1
+      - name: Test coroutine physical ABI and function dispatch lowering
+        run: go test -tags='${{ matrix.tags }}' -v ./cl -run '^TestCoro(LeafPhysicalABI|PhysicalABI|ChildAwaitPhysicalABIV1|ExplicitAsyncRootFactoryV1|ExplicitRootFactoryV1|ExplicitPlain|RootPackageAnchorV1|PlainDispatch)' -count=1
+
+      - name: Test coroutine TLS function dispatch proof
+        run: go test -tags='${{ matrix.tags }}' -v ./internal/build -run '^TestCoroTLS' -count=1
 
       - name: Test coroutine registry and control integration
         run: go test -tags='${{ matrix.tags }}' -v ./internal/build -run '^Test(CollectLinkedCoroRootAnchors|ActiveCoroABIVersions|BuildCoroPlanErrors|CoroProgramManifest.*|CoroProgramBootstrap.*|SelectCoroProgramBootstrap.*|GenMainModule.*Coro.*)$' -count=1
