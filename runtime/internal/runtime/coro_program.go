@@ -59,6 +59,10 @@ func coroProgramBeginV1(manifest, expectedFactory unsafe.Pointer) (unsafe.Pointe
 		state.lifecycle = coroProgramFailedV1
 		return nil, false
 	}
+	if manifest == nil {
+		state.lifecycle = coroProgramFailedV1
+		return nil, false
+	}
 	if _, code := coro.ValidateRunnableDirectProgramV1(
 		(*coro.ProgramManifestV1)(manifest), expectedFactory,
 	); code != coro.ProgramValidationOKV1 {

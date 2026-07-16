@@ -269,6 +269,14 @@ func TestCoroProgramV1BeginFailsClosedOnFactoryIdentity(t *testing.T) {
 	runtime.KeepAlive(manifest)
 }
 
+func TestCoroProgramV1BeginFailsClosedOnNilManifest(t *testing.T) {
+	resetCoroProgramTestStateV1(t)
+	if g, ok := coroProgramBeginV1(nil, unsafe.Pointer(new(byte))); ok || g != nil ||
+		coroProgramV1.lifecycle != coroProgramFailedV1 || coro.ValidG(&coroProgramV1.g) {
+		t.Fatalf("nil manifest = (%p, %t), lifecycle=%d validG=%t", g, ok, coroProgramV1.lifecycle, coro.ValidG(&coroProgramV1.g))
+	}
+}
+
 func TestCoroProgramV1RunFailsClosedOnInvalidHandle(t *testing.T) {
 	resetCoroProgramTestStateV1(t)
 	manifest := newCoroProgramTestManifestV1()
