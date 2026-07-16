@@ -97,3 +97,38 @@ func __llgo_coro_timer_retire_completed_v1(token unsafe.Pointer, ticket, timerSl
 		coro.TimerRegistrationHandle{Slot: timerSlot, Generation: timerGeneration},
 	)
 }
+
+// __llgo_coro_timer_prepare_after_or_abort_v1 is the compiler-certified
+// current-frame adapter. Returning normally means that the exact token is
+// armed and retained by the timer owner and that every output identity word is
+// valid. Rejection is terminal, so synchronous-style source can continue
+// directly into the matching coroPark without a branch that could expose a
+// registered frame to ordinary cancellation.
+//
+//export __llgo_coro_timer_prepare_after_or_abort_v1
+func __llgo_coro_timer_prepare_after_or_abort_v1(token unsafe.Pointer, delay int64, ticket, timerSlot, timerGeneration *uint32) {
+	if !__llgo_coro_timer_prepare_after_v1(token, delay, ticket, timerSlot, timerGeneration) {
+		coroRuntimeAbort("coroutine timer prepare failed")
+		// Keep the owner fail-closed even if a broken platform exit shim
+		// unexpectedly returns. A retained-frame caller may never observe a
+		// normal return from a rejected prepare transaction.
+		for {
+		}
+	}
+}
+
+// __llgo_coro_timer_retire_completed_or_abort_v1 is the compiler-certified
+// current-frame retirement adapter. Returning normally proves that the timer
+// table no longer retains token; a mismatched or incomplete transaction is a
+// terminal runtime ABI failure and may never let the coroutine frame finish.
+//
+//export __llgo_coro_timer_retire_completed_or_abort_v1
+func __llgo_coro_timer_retire_completed_or_abort_v1(token unsafe.Pointer, ticket, timerSlot, timerGeneration uint32) {
+	if !__llgo_coro_timer_retire_completed_v1(token, ticket, timerSlot, timerGeneration) {
+		coroRuntimeAbort("coroutine timer retirement failed")
+		// A failed retire may still leave token owned by the timer table. Never
+		// return to code that could complete and destroy its coroutine frame.
+		for {
+		}
+	}
+}
