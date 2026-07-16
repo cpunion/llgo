@@ -430,6 +430,15 @@ func buildCoroPanicNativeE2EDriver(t *testing.T, prog llssa.Program, temp string
 	assertBody.SetBlock(assertFail).Call(abort.Expr)
 	assertBody.Return()
 	assertBody.SetBlock(assertValid).Return()
+	checkIndexRange := pkg.NewFunc(llssa.PkgRuntime+".CheckIndexRange", newSignature(
+		[]types.Type{types.Typ[types.Bool], types.Typ[types.Int64], types.Typ[types.Bool], types.Typ[types.Int]}, nil,
+	), llssa.InGo)
+	rangeBody := checkIndexRange.MakeBody(3)
+	rangeFail, rangeValid := checkIndexRange.Block(1), checkIndexRange.Block(2)
+	rangeBody.If(checkIndexRange.Param(0), rangeFail, rangeValid)
+	rangeBody.SetBlock(rangeFail).Call(abort.Expr)
+	rangeBody.Return()
+	rangeBody.SetBlock(rangeValid).Return()
 	uintptrType := types.Typ[types.Uintptr]
 	malloc := pkg.NewFunc("malloc", newSignature([]types.Type{uintptrType}, []types.Type{pointer}), llssa.InC)
 	calloc := pkg.NewFunc("calloc", newSignature([]types.Type{uintptrType, uintptrType}, []types.Type{pointer}), llssa.InC)

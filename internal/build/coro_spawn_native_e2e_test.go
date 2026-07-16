@@ -295,6 +295,19 @@ func buildCoroSpawnNativeE2EDriver(t *testing.T, prog llssa.Program, temp, check
 	assertBody.SetBlock(fail).Call(abort.Expr)
 	assertBody.Return()
 	assertBody.SetBlock(valid).Return()
+	// Fixed-capacity executor/wait registries intentionally keep explicit Go
+	// bounds checks. The complete runtime would report those through the normal
+	// panic path; this closed island instead aborts on the impossible invalid
+	// branch without linking that unrelated runtime closure.
+	checkIndexRange := pkg.NewFunc(llssa.PkgRuntime+".CheckIndexRange", newSignature(
+		[]types.Type{types.Typ[types.Bool], types.Typ[types.Int64], types.Typ[types.Bool], types.Typ[types.Int]}, nil,
+	), llssa.InGo)
+	rangeBody := checkIndexRange.MakeBody(3)
+	rangeFail, rangeValid := checkIndexRange.Block(1), checkIndexRange.Block(2)
+	rangeBody.If(checkIndexRange.Param(0), rangeFail, rangeValid)
+	rangeBody.SetBlock(rangeFail).Call(abort.Expr)
+	rangeBody.Return()
+	rangeBody.SetBlock(rangeValid).Return()
 	// Compiling the complete production core object also leaves relocations for
 	// ordinary runtime allocation helpers in currently unreachable panic-status
 	// code. Resolve those helpers directly to libc so archive extraction cannot
