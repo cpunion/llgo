@@ -128,6 +128,19 @@ func TestDoRejectsForgedNativeCapabilityBeforePackageSelection(t *testing.T) {
 	}
 }
 
+func TestEffectiveBuildTagsRejectsForgedNativeIngressTestCapability(t *testing.T) {
+	conf := &Config{Tags: "nogc," + coroNativeIngressTestBuildTag}
+	_, err := effectiveBuildTags(conf, crosscompile.Export{})
+	if err == nil {
+		t.Fatal("forged native ingress test capability was accepted")
+	}
+	for _, want := range []string{coroNativeIngressTestBuildTag, "Config.Tags", "compiler-reserved capability"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want %q", err, want)
+		}
+	}
+}
+
 func TestEffectiveBuildTagsKeepsNativeCapabilityCompilerOwned(t *testing.T) {
 	tests := []struct {
 		name string

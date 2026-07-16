@@ -514,7 +514,8 @@ func buildCoroNativeIngressE2ERuntimeIsland(t *testing.T, temp string) []string 
 	}
 	conf := NewDefaultConf(ModeGen)
 	conf.ForceRebuild = true
-	conf.Tags = "nogc,llgo_coro,llgo_coro_native_pipe,llgo_coro_native_ingress_test"
+	conf.Tags = "nogc"
+	conf.compilerBuildTags = []string{"llgo_coro", coroNativePipeBuildTag, coroNativeIngressTestBuildTag}
 	allowed := map[string]bool{
 		"command-line-arguments":                               true,
 		"github.com/goplus/llgo/runtime/internal/coro":         true,

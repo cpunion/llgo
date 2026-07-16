@@ -1362,13 +1362,16 @@ func targetGCBuildTags(gc string) ([]string, error) {
 	}
 }
 
-const coroNativePipeBuildTag = "llgo_coro_native_pipe"
+const (
+	coroNativePipeBuildTag        = "llgo_coro_native_pipe"
+	coroNativeIngressTestBuildTag = "llgo_coro_native_ingress_test"
+)
 
 // effectiveBuildTags is the single build-tag assembly boundary used by Do.
-// The native-pipe tag is a compiler/runtime ABI capability, not a user or
-// target customization: accepting it from an external tag source could select
-// a runtime body that disagrees with the planner roots, bootstrap hash, and
-// entry relocation anchor.
+// Native coroutine capability tags are compiler/runtime ABI choices, not user
+// or target customizations: accepting one from an external tag source could
+// select a runtime body that disagrees with the planner roots, bootstrap hash,
+// entry relocation anchor, or focused test harness.
 func effectiveBuildTags(conf *Config, export crosscompile.Export) (string, error) {
 	if conf == nil {
 		return "", fmt.Errorf("assemble build tags: missing build configuration")
@@ -1421,7 +1424,8 @@ func effectiveBuildTags(conf *Config, export crosscompile.Export) (string, error
 
 func rejectCompilerReservedBuildTags(source string, tags []string) error {
 	for _, tag := range tags {
-		if tag == coroNativePipeBuildTag {
+		switch tag {
+		case coroNativePipeBuildTag, coroNativeIngressTestBuildTag:
 			return fmt.Errorf("build tag %q from %s is a compiler-reserved capability and cannot be supplied externally", tag, source)
 		}
 	}
