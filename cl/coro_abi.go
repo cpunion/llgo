@@ -419,10 +419,6 @@ func validateCoroPhysicalConsumers(plan *coro.SSAPlan) error {
 }
 
 func coroLeafScalar(typ types.Type) bool {
-	typ = types.Unalias(typ)
-	if named, ok := typ.(*types.Named); ok {
-		typ = named.Underlying()
-	}
 	basic, ok := typ.Underlying().(*types.Basic)
 	if !ok || basic.Kind() == types.Uintptr {
 		return false
