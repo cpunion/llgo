@@ -138,6 +138,7 @@ type CoroPlanInput struct {
 	functionBackground     func(*ssa.Function) (llssa.Background, bool, error)
 	intrinsicCallSemantics func(ssa.CallInstruction) (cl.CoroIntrinsicCallSemantics, bool, error)
 	demandReferences       func(*ssa.Function) ([]*ssa.Function, error)
+	loweredCalls           func(*ssa.Function) ([]coro.SSALoweredCall, error)
 	requiredRoots          coro.Roots
 	requiredPlain          map[*ssa.Function]struct{}
 	requiredDirectPlain    []requiredCoroDirectPlainCallArgument
@@ -365,6 +366,30 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 			return compilerTargets, nil
 		}
 	}
+	if in.loweredCalls != nil || config.ClassifyLoweredCalls != nil {
+		classifyLoweredCalls := config.ClassifyLoweredCalls
+		config.ClassifyLoweredCalls = func(owner *ssa.Function) ([]coro.SSALoweredCall, error) {
+			var compilerCalls []coro.SSALoweredCall
+			var err error
+			if in.loweredCalls != nil {
+				compilerCalls, err = in.loweredCalls(owner)
+				if err != nil {
+					return nil, fmt.Errorf("classify frozen frontend lowered calls for %q: %w", owner.Name(), err)
+				}
+			}
+			compilerCalls = append([]coro.SSALoweredCall(nil), compilerCalls...)
+			if classifyLoweredCalls != nil {
+				requested, err := classifyLoweredCalls(owner)
+				if err != nil {
+					return nil, err
+				}
+				if !sameExactCoroLoweredCalls(requested, compilerCalls) {
+					return nil, fmt.Errorf("builder lowered calls in %q conflict with the frozen frontend helper calls", owner.Name())
+				}
+			}
+			return compilerCalls, nil
+		}
+	}
 	if in.augmentFunctionIDs != nil {
 		config.FunctionIDs = in.augmentFunctionIDs(config.FunctionIDs)
 	}
@@ -404,6 +429,29 @@ func sameExactCoroFunctionReferences(left, right []*ssa.Function) bool {
 		counts[fn] = 0
 	}
 	return true
+}
+
+func sameExactCoroLoweredCalls(left, right []coro.SSALoweredCall) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	byName := make(map[string]*ssa.Function, len(left))
+	for _, call := range left {
+		if call.LogicalName == "" || call.Target == nil {
+			return false
+		}
+		if _, duplicate := byName[call.LogicalName]; duplicate {
+			return false
+		}
+		byName[call.LogicalName] = call.Target
+	}
+	for _, call := range right {
+		if call.LogicalName == "" || call.Target == nil || byName[call.LogicalName] != call.Target {
+			return false
+		}
+		delete(byName, call.LogicalName)
+	}
+	return len(byName) == 0
 }
 
 // frontendElidesNoInitCall mirrors cl.context.funcKind: the frontend emits no
@@ -1030,6 +1078,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		input.functionBackground = ctx.coroEmission.FunctionBackground
 		input.intrinsicCallSemantics = ctx.coroEmission.CoroIntrinsicCallSiteSemantics
 		input.demandReferences = ctx.coroEmission.CoroDemandReferences
+		input.loweredCalls = ctx.coroEmission.CoroLoweredCalls
 		input.augmentFunctionIDs = func(config coro.FunctionIDConfig) coro.FunctionIDConfig {
 			if ctx.buildConf.EnableCoroEntryResolution {
 				if config.CoroABI == "" {

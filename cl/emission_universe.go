@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/goplus/llgo/cl/ssawrap"
 	"github.com/goplus/llgo/internal/coro"
@@ -99,6 +100,7 @@ type EmissionUniverse struct {
 	materializedOwners  map[*ssa.Function]map[*preparedEmissionPackage]none
 	ownerStateErr       error
 	abiMethodReferences map[*ssa.Function]map[*ssa.Function]none
+	loweredCalls        map[*ssa.Function]map[string]*ssa.Function
 
 	localGenericMu     sync.Mutex
 	localGenericTypes  map[*types.Named]emissionLocalGenericType
@@ -174,6 +176,7 @@ func PrepareEmissionUniverse(prog llssa.Program, patches Patches, inputs []Emiss
 		callWrapInfo:        make(map[*ssa.Function]intrinsicWrapperKey),
 		syntheticKeys:       make(map[*ssa.Function]string),
 		abiMethodReferences: make(map[*ssa.Function]map[*ssa.Function]none),
+		loweredCalls:        make(map[*ssa.Function]map[string]*ssa.Function),
 		linkIdentities:      make(map[*ssa.Function]string),
 		excluded:            make(map[*ssa.Function]none),
 		materialized:        make(map[*ssa.Function]none),
@@ -425,6 +428,108 @@ func (u *EmissionUniverse) recordABIMethodReferences(owner *ssa.Function, target
 		}
 		references[target] = none{}
 	}
+	return nil
+}
+
+// CoroLoweredCalls returns the exact managed helper calls that frontend
+// lowering inserts into owner without a corresponding source SSA call. Records
+// are sorted by logical helper identity and defensively copied. The mapping is
+// frozen together with the emission universe, before coroutine analysis and
+// LLVM codegen.
+func (u *EmissionUniverse) CoroLoweredCalls(owner *ssa.Function) ([]coro.SSALoweredCall, error) {
+	if u == nil {
+		return nil, fmt.Errorf("coroutine lowered calls require a prepared emission universe")
+	}
+	if owner == nil {
+		return nil, fmt.Errorf("coroutine lowered calls require an exact owner function")
+	}
+	canonical := u.canonicalAlias(owner)
+	if canonical == nil {
+		return nil, fmt.Errorf("coroutine lowered-call owner %q has cyclic canonical aliases", owner.Name())
+	}
+	if canonical != owner {
+		return nil, fmt.Errorf("coroutine lowered-call owner %q is not the exact canonical function", owner.Name())
+	}
+	if _, frozen := u.required[owner]; !frozen {
+		return nil, fmt.Errorf("coroutine lowered-call owner %q is outside the frozen emission universe", owner.Name())
+	}
+	byName := u.loweredCalls[owner]
+	calls := make([]coro.SSALoweredCall, 0, len(byName))
+	for logicalName, target := range byName {
+		if logicalName == "" || !utf8.ValidString(logicalName) || strings.IndexByte(logicalName, 0) >= 0 {
+			return nil, fmt.Errorf("coroutine lowered-call owner %q has invalid logical name %q", owner.Name(), logicalName)
+		}
+		if target == nil {
+			return nil, fmt.Errorf("coroutine lowered call %q in %q has a nil target", logicalName, owner.Name())
+		}
+		if canonicalTarget := u.canonicalAlias(target); canonicalTarget == nil || canonicalTarget != target {
+			return nil, fmt.Errorf("coroutine lowered call %q in %q has a non-canonical target %q", logicalName, owner.Name(), target.Name())
+		}
+		if _, frozen := u.required[target]; !frozen {
+			return nil, fmt.Errorf("coroutine lowered call %q in %q targets helper %q outside the frozen emission universe", logicalName, owner.Name(), target.Name())
+		}
+		calls = append(calls, coro.SSALoweredCall{LogicalName: logicalName, Target: target})
+	}
+	sort.Slice(calls, func(i, j int) bool {
+		return calls[i].LogicalName < calls[j].LogicalName
+	})
+	return calls, nil
+}
+
+// ResolveCoroLoweredCall resolves one exact frozen helper mapping. It is used
+// by codegen to recover the same canonical target that analysis projected as a
+// real call edge, without rediscovering it from an LLVM symbol name.
+func (u *EmissionUniverse) ResolveCoroLoweredCall(owner *ssa.Function, logicalName string) (*ssa.Function, bool, error) {
+	calls, err := u.CoroLoweredCalls(owner)
+	if err != nil {
+		return nil, false, err
+	}
+	index := sort.Search(len(calls), func(index int) bool {
+		return calls[index].LogicalName >= logicalName
+	})
+	if index == len(calls) || calls[index].LogicalName != logicalName {
+		return nil, false, nil
+	}
+	return calls[index].Target, true, nil
+}
+
+// recordCoroLoweredCall freezes one compiler-inserted helper mapping while the
+// emission universe is being materialized. Repeated uses of the same logical
+// helper in one owner are idempotent; resolving that identity to two exact
+// targets fails closed.
+func (u *EmissionUniverse) recordCoroLoweredCall(owner *ssa.Function, logicalName string, target *ssa.Function) error {
+	if owner == nil {
+		return fmt.Errorf("prepare emission universe: lowered call has no owner")
+	}
+	if logicalName == "" || !utf8.ValidString(logicalName) || strings.IndexByte(logicalName, 0) >= 0 {
+		return fmt.Errorf("prepare emission universe: lowered call in %q has invalid logical name %q", owner.Name(), logicalName)
+	}
+	owner = u.canonicalAlias(owner)
+	if owner == nil {
+		return fmt.Errorf("prepare emission universe: lowered-call owner has cyclic canonical aliases")
+	}
+	if _, frozen := u.required[owner]; !frozen {
+		return fmt.Errorf("prepare emission universe: lowered-call owner %q is outside the emission universe", owner.Name())
+	}
+	if target == nil {
+		return fmt.Errorf("prepare emission universe: lowered call %q in %q has a nil target", logicalName, owner.Name())
+	}
+	target = u.canonicalAlias(target)
+	if target == nil {
+		return fmt.Errorf("prepare emission universe: lowered call %q in %q reached a cyclic target alias", logicalName, owner.Name())
+	}
+	if _, frozen := u.required[target]; !frozen {
+		return fmt.Errorf("prepare emission universe: lowered call %q in %q targets helper %q outside the emission universe", logicalName, owner.Name(), target.Name())
+	}
+	byName := u.loweredCalls[owner]
+	if byName == nil {
+		byName = make(map[string]*ssa.Function)
+		u.loweredCalls[owner] = byName
+	}
+	if previous := byName[logicalName]; previous != nil && previous != target {
+		return fmt.Errorf("prepare emission universe: lowered call %q in %q resolves to both %q and %q", logicalName, owner.Name(), previous.Name(), target.Name())
+	}
+	byName[logicalName] = target
 	return nil
 }
 

@@ -423,6 +423,163 @@ func outsideFrozenUniverse() {}
 	}
 }
 
+func TestAnalyzeSSAClassifiedLoweredCallsPropagateEffectAndAreOwnerScoped(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "lowered_calls.go", `package coroid
+
+var channel chan int
+
+func owner() {}
+func deadOwner() {}
+func plainHelper() {}
+func suspendingHelper() { <-channel }
+func deadHelper() { <-channel }
+func outsideFrozenUniverse() {}
+`)
+	owner := packageFunction(t, pkg, "owner")
+	deadOwner := packageFunction(t, pkg, "deadOwner")
+	plain := packageFunction(t, pkg, "plainHelper")
+	suspending := packageFunction(t, pkg, "suspendingHelper")
+	dead := packageFunction(t, pkg, "deadHelper")
+	outside := packageFunction(t, pkg, "outsideFrozenUniverse")
+	universe, err := NewSSAEmissionUniverse(prog, []*ssa.Function{owner, deadOwner, plain, suspending, dead})
+	if err != nil {
+		t.Fatal(err)
+	}
+	classify := func(fn *ssa.Function) ([]SSALoweredCall, error) {
+		switch fn {
+		case owner:
+			// Deliberately reverse logical order. The frozen plan must sort it.
+			return []SSALoweredCall{{LogicalName: "runtime.suspend", Target: suspending}, {LogicalName: "runtime.plain", Target: plain}}, nil
+		case deadOwner:
+			return []SSALoweredCall{{LogicalName: "runtime.dead", Target: dead}}, nil
+		default:
+			return nil, nil
+		}
+	}
+	plan, err := AnalyzeSSA(prog, Roots{{Function: owner, Demand: SyncDemand}}, SSAConfig{
+		EmissionUniverse:     universe,
+		ClassifyLoweredCalls: classify,
+		MaxPlainInstructions: -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerPlan := functionPlanFor(t, plan, owner)
+	if !ownerPlan.Effect.Contains(MayPark) || ownerPlan.Demand != SyncDemand || ownerPlan.Emission != EmitCoroutine {
+		t.Fatalf("owner plan = %+v, want lowered helper effect and coroutine emission", ownerPlan)
+	}
+	if got := functionPlanFor(t, plan, plain); got.Demand != SyncDemand || got.Emission != EmitPlain {
+		t.Fatalf("plain helper plan = %+v", got)
+	}
+	if got := functionPlanFor(t, plan, suspending); got.Demand != AsyncDemand || got.Emission != EmitCoroutine {
+		t.Fatalf("suspending helper plan = %+v", got)
+	}
+	if got := functionPlanFor(t, plan, deadOwner); !got.Effect.Contains(MayPark) || got.Demand != NoDemand || got.Emission != EmitNone {
+		t.Fatalf("dead owner plan = %+v, want analyzed effect without entry demand", got)
+	}
+	if got := functionPlanFor(t, plan, dead); got.Demand != NoDemand || got.Emission != EmitNone {
+		t.Fatalf("dead helper plan = %+v, want no demand", got)
+	}
+
+	calls := plan.LoweredCalls(owner)
+	if len(calls) != 2 || calls[0].LogicalName != "runtime.plain" || calls[0].Target != plain || calls[1].LogicalName != "runtime.suspend" || calls[1].Target != suspending {
+		t.Fatalf("owner lowered calls = %+v, want sorted exact mapping", calls)
+	}
+	calls[0].Target = dead
+	if target, ok := plan.ResolveLoweredCall(owner, "runtime.plain"); !ok || target != plain {
+		t.Fatalf("ResolveLoweredCall(runtime.plain) = %v, %v", target, ok)
+	}
+	if _, ok := plan.ResolveLoweredCall(owner, "runtime.missing"); ok {
+		t.Fatal("missing lowered call unexpectedly resolved")
+	}
+	if got := plan.LoweredCalls(outside); got != nil {
+		t.Fatalf("outside owner lowered calls = %v, want nil", got)
+	}
+
+	// Permuting classifier order cannot change fixed-point results or the
+	// immutable logical-name mapping.
+	permuted, err := AnalyzeSSA(prog, Roots{{Function: owner, Demand: SyncDemand}}, SSAConfig{
+		EmissionUniverse: universe,
+		ClassifyLoweredCalls: func(fn *ssa.Function) ([]SSALoweredCall, error) {
+			calls, err := classify(fn)
+			if len(calls) == 2 {
+				calls[0], calls[1] = calls[1], calls[0]
+			}
+			return calls, err
+		},
+		MaxPlainInstructions: -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := functionPlanFor(t, permuted, owner); got != ownerPlan {
+		t.Fatalf("permuted owner plan = %+v, want %+v", got, ownerPlan)
+	}
+	if got := permuted.LoweredCalls(owner); len(got) != 2 || got[0].LogicalName != "runtime.plain" || got[1].LogicalName != "runtime.suspend" {
+		t.Fatalf("permuted lowered calls = %+v", got)
+	}
+
+	_, err = AnalyzeSSA(prog, Roots{{Function: owner, Demand: SyncDemand}}, SSAConfig{
+		EmissionUniverse: universe,
+		ClassifyLoweredCalls: func(fn *ssa.Function) ([]SSALoweredCall, error) {
+			if fn == owner {
+				return []SSALoweredCall{{LogicalName: "runtime.outside", Target: outside}}, nil
+			}
+			return nil, nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "outside the effective emission universe") {
+		t.Fatalf("missing frozen lowered target error = %v", err)
+	}
+}
+
+func TestAnalyzeSSAClassifiedLoweredCallsFailClosed(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "lowered_calls_invalid.go", `package coroid
+func owner() {}
+func helper() {}
+func alias() {}
+`)
+	owner := packageFunction(t, pkg, "owner")
+	helper := packageFunction(t, pkg, "helper")
+	alias := packageFunction(t, pkg, "alias")
+	universe, err := NewSSAEmissionUniverse(prog, []*ssa.Function{owner, helper})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name  string
+		calls []SSALoweredCall
+		want  string
+	}{
+		{name: "empty name", calls: []SSALoweredCall{{Target: helper}}, want: "empty logical name"},
+		{name: "nil target", calls: []SSALoweredCall{{LogicalName: "runtime.nil"}}, want: "nil target"},
+		{name: "duplicate name", calls: []SSALoweredCall{{LogicalName: "runtime.same", Target: helper}, {LogicalName: "runtime.same", Target: helper}}, want: "duplicated"},
+		{name: "alias", calls: []SSALoweredCall{{LogicalName: "runtime.alias", Target: alias}}, want: "not the exact canonical function"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := AnalyzeSSA(prog, Roots{{Function: owner, Demand: SyncDemand}}, SSAConfig{
+				EmissionUniverse: universe,
+				ResolveFunction: func(fn *ssa.Function) (*ssa.Function, bool, error) {
+					if fn == alias {
+						return helper, true, nil
+					}
+					return fn, universe.Contains(fn), nil
+				},
+				ClassifyLoweredCalls: func(fn *ssa.Function) ([]SSALoweredCall, error) {
+					if fn == owner {
+						return test.calls, nil
+					}
+					return nil, nil
+				},
+			})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("AnalyzeSSA error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestAnalyzeSSADynamicOpenAndClosedWorld(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "source.go", `package coroid
 

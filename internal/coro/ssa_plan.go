@@ -22,6 +22,7 @@ import (
 	"go/types"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/tools/go/callgraph/cha"
 	"golang.org/x/tools/go/ssa"
@@ -115,6 +116,19 @@ type SSAClosedDynamicCallCertificate struct {
 	MayBeNil bool
 }
 
+// SSALoweredCall records one exact managed call inserted by frontend lowering
+// even though no CallInstruction for it exists in the source SSA body.
+// LogicalName is a frontend-owned stable identity used to resolve the exact
+// helper again during code generation; it is not a symbol-name heuristic.
+//
+// The first lowering slice projects every record as an ordinary direct call.
+// AnalyzeSSA may refine that edge to a foreign boundary from the target's
+// frozen function policy, exactly as it does for an explicit static call.
+type SSALoweredCall struct {
+	LogicalName string
+	Target      *ssa.Function
+}
+
 // SSAConfig controls the SSA-to-Graph analysis bridge. It deliberately has no
 // lowering or runtime switches.
 type SSAConfig struct {
@@ -203,6 +217,19 @@ type SSAConfig struct {
 	// effective emission universe. AnalyzeSSA calls the classifier only for
 	// owned, non-ignored bodies and copies the returned slice before use.
 	ClassifyDemandReferences func(owner *ssa.Function) ([]*ssa.Function, error)
+
+	// ClassifyLoweredCalls supplies exact runtime/helper calls that the frontend
+	// inserts while lowering one function body but which have no corresponding
+	// source SSA CallInstruction. Unlike ClassifyDemandReferences, these are real
+	// calls: their effects and inheritable execution constraints propagate into
+	// owner, and demand reaches their selected plain or coroutine entry only when
+	// owner itself is demanded.
+	//
+	// LogicalName must be nonempty and unique within owner. Every target must be
+	// a non-nil exact canonical member of the effective emission universe. The
+	// classifier is called only for owned, non-ignored bodies and its result is
+	// copied, validated, and sorted before it becomes part of the immutable plan.
+	ClassifyLoweredCalls func(owner *ssa.Function) ([]SSALoweredCall, error)
 }
 
 // SSAFunctionPlan binds an immutable FunctionPlan back to its SSA function.
@@ -231,6 +258,7 @@ type SSAPlan struct {
 	valuePlans    map[ssa.Value]SSAValuePlan
 	callPlans     map[ssa.CallInstruction]SSACallPlan
 	elidedCalls   map[ssa.CallInstruction]struct{}
+	loweredCalls  map[*ssa.Function][]SSALoweredCall
 	functionIDs   FunctionIDConfig
 }
 
@@ -370,6 +398,31 @@ func (p *SSAPlan) IgnoresBody(fn *ssa.Function) bool {
 	}
 	_, ok := p.ignoredBodies[fn]
 	return ok
+}
+
+// LoweredCalls returns the exact compiler-inserted calls frozen for owner in
+// LogicalName order. The returned slice is a defensive copy.
+func (p *SSAPlan) LoweredCalls(owner *ssa.Function) []SSALoweredCall {
+	if p == nil || owner == nil {
+		return nil
+	}
+	return append([]SSALoweredCall(nil), p.loweredCalls[owner]...)
+}
+
+// ResolveLoweredCall resolves one frontend logical helper identity for owner.
+// ok is false when the exact owner has no call with that identity.
+func (p *SSAPlan) ResolveLoweredCall(owner *ssa.Function, logicalName string) (*ssa.Function, bool) {
+	if p == nil || owner == nil || logicalName == "" {
+		return nil, false
+	}
+	calls := p.loweredCalls[owner]
+	index := sort.Search(len(calls), func(index int) bool {
+		return calls[index].LogicalName >= logicalName
+	})
+	if index == len(calls) || calls[index].LogicalName != logicalName {
+		return nil, false
+	}
+	return calls[index].Target, true
 }
 
 // Function returns the SSA function assigned to id.
@@ -807,6 +860,10 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 			}
 		}
 	}
+	loweredCalls, err := addSSAClassifiedLoweredCalls(graph, bodyFunctions, includedSet, ids, canonicalizer, policies, config)
+	if err != nil {
+		return nil, err
+	}
 	if err := addSSAReferenceEdges(graph, bodyFunctions, includedSet, ids, flow); err != nil {
 		return nil, err
 	}
@@ -838,6 +895,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		valuePlans:    valuePlans,
 		callPlans:     callPlans,
 		elidedCalls:   elidedCallSet,
+		loweredCalls:  loweredCalls,
 		functionIDs:   config.FunctionIDs,
 	}
 	for _, functionPlan := range base.Functions() {
@@ -845,6 +903,74 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 			Function: byID[functionPlan.ID],
 			Plan:     functionPlan,
 		})
+	}
+	return result, nil
+}
+
+func addSSAClassifiedLoweredCalls(
+	graph *Graph,
+	functions []*ssa.Function,
+	included map[*ssa.Function]bool,
+	ids map[*ssa.Function]FunctionID,
+	canonicalizer *ssaFunctionCanonicalizer,
+	policies map[*ssa.Function]SSAFunctionPolicy,
+	config SSAConfig,
+) (map[*ssa.Function][]SSALoweredCall, error) {
+	result := make(map[*ssa.Function][]SSALoweredCall)
+	if config.ClassifyLoweredCalls == nil {
+		return result, nil
+	}
+	for _, owner := range functions {
+		calls, err := config.ClassifyLoweredCalls(owner)
+		if err != nil {
+			return nil, fmt.Errorf("coro: classify lowered calls in %q: %w", owner.Name(), err)
+		}
+		// The classifier owns its backing storage. Copy before validating or
+		// retaining any record in the immutable plan.
+		calls = append([]SSALoweredCall(nil), calls...)
+		seen := make(map[string]struct{}, len(calls))
+		for index := range calls {
+			call := &calls[index]
+			if call.LogicalName == "" {
+				return nil, fmt.Errorf("coro: lowered call %d in %q has an empty logical name", index, owner.Name())
+			}
+			if !utf8.ValidString(call.LogicalName) || strings.IndexByte(call.LogicalName, 0) >= 0 {
+				return nil, fmt.Errorf("coro: lowered call %d in %q has an invalid logical name %q", index, owner.Name(), call.LogicalName)
+			}
+			if _, duplicate := seen[call.LogicalName]; duplicate {
+				return nil, fmt.Errorf("coro: lowered call logical name %q is duplicated in %q", call.LogicalName, owner.Name())
+			}
+			seen[call.LogicalName] = struct{}{}
+			target := call.Target
+			if target == nil {
+				return nil, fmt.Errorf("coro: lowered call %q in %q has a nil target", call.LogicalName, owner.Name())
+			}
+			if target.Prog != owner.Prog {
+				return nil, fmt.Errorf("coro: lowered call %q in %q targets function %q from another SSA program", call.LogicalName, owner.Name(), target.Name())
+			}
+			canonical, resolved, resolveErr := canonicalizer.resolve(target)
+			if resolveErr != nil {
+				return nil, fmt.Errorf("coro: resolve lowered call %q target %q in %q: %w", call.LogicalName, target.Name(), owner.Name(), resolveErr)
+			}
+			if !resolved || canonical == nil || !included[canonical] {
+				return nil, fmt.Errorf("coro: lowered call %q target %q in %q is outside the effective emission universe", call.LogicalName, target.Name(), owner.Name())
+			}
+			if canonical != target {
+				return nil, fmt.Errorf("coro: lowered call %q target %q in %q is not the exact canonical function", call.LogicalName, target.Name(), owner.Name())
+			}
+		}
+		sort.Slice(calls, func(i, j int) bool {
+			return calls[i].LogicalName < calls[j].LogicalName
+		})
+		if len(calls) != 0 {
+			result[owner] = calls
+		}
+		for _, call := range calls {
+			kind := staticCallKind(CallDirect, policies[call.Target])
+			if err := graph.AddCall(CallEdge{Caller: ids[owner], Callee: ids[call.Target], Kind: kind}); err != nil {
+				return nil, fmt.Errorf("coro: add lowered call %q from %q to %q: %w", call.LogicalName, owner.Name(), call.Target.Name(), err)
+			}
+		}
 	}
 	return result, nil
 }

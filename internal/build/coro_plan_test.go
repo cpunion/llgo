@@ -1293,6 +1293,110 @@ func alias() {}
 	}
 }
 
+func TestCoroPlanInputOwnsFrozenLoweredCalls(t *testing.T) {
+	ssaPkg, _ := buildCoroPlanTestPackage(t, "example.com/loweredcalls", `package loweredcalls
+var channel chan int
+func owner() {}
+func helper() { <-channel }
+func helper2() {}
+func extra() {}
+func alias() {}
+`, nil)
+	owner := ssaPkg.Func("owner")
+	helper := ssaPkg.Func("helper")
+	helper2 := ssaPkg.Func("helper2")
+	extra := ssaPkg.Func("extra")
+	alias := ssaPkg.Func("alias")
+	universe, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, []*ssa.Function{owner, helper, helper2, extra})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozen := []coro.SSALoweredCall{
+		{LogicalName: "runtime.helper", Target: helper},
+		{LogicalName: "runtime.helper2", Target: helper2},
+	}
+	input := CoroPlanInput{
+		Program:          ssaPkg.Prog,
+		EmissionUniverse: universe,
+		resolveFunction: func(fn *ssa.Function) (*ssa.Function, bool) {
+			if fn == alias {
+				return helper, true
+			}
+			return fn, universe.Contains(fn)
+		},
+		loweredCalls: func(fn *ssa.Function) ([]coro.SSALoweredCall, error) {
+			if fn == owner {
+				return frozen, nil
+			}
+			return nil, nil
+		},
+	}
+	roots := coro.Roots{{Function: owner, Demand: coro.SyncDemand}}
+	plan, err := input.Analyze(roots, coro.SSAConfig{MaxPlainInstructions: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerPlan, ok := plan.FunctionPlan(owner)
+	if !ok || !ownerPlan.Effect.Contains(coro.MayPark) || ownerPlan.Emission != coro.EmitCoroutine {
+		t.Fatalf("owner plan = %+v, present=%v; frozen lowered call did not propagate effect", ownerPlan, ok)
+	}
+	if got, ok := plan.FunctionPlan(helper); !ok || got.Demand != coro.AsyncDemand || got.Emission != coro.EmitCoroutine {
+		t.Fatalf("suspending helper plan = %+v, present=%v", got, ok)
+	}
+	// The completed plan owns both the record slice and its exact mapping.
+	frozen[0].Target = extra
+	if target, ok := plan.ResolveLoweredCall(owner, "runtime.helper"); !ok || target != helper {
+		t.Fatalf("callback slice mutation changed completed lowered call: %v, %v", target, ok)
+	}
+	frozen[0].Target = helper
+
+	tests := []struct {
+		name      string
+		requested []coro.SSALoweredCall
+	}{
+		{name: "missing", requested: []coro.SSALoweredCall{{LogicalName: "runtime.helper", Target: helper}}},
+		{name: "extra", requested: []coro.SSALoweredCall{{LogicalName: "runtime.helper", Target: helper}, {LogicalName: "runtime.helper2", Target: helper2}, {LogicalName: "runtime.extra", Target: extra}}},
+		{name: "renamed", requested: []coro.SSALoweredCall{{LogicalName: "runtime.renamed", Target: helper}, {LogicalName: "runtime.helper2", Target: helper2}}},
+		{name: "retargeted", requested: []coro.SSALoweredCall{{LogicalName: "runtime.helper", Target: helper2}, {LogicalName: "runtime.helper2", Target: helper}}},
+		{name: "alias", requested: []coro.SSALoweredCall{{LogicalName: "runtime.helper", Target: alias}, {LogicalName: "runtime.helper2", Target: helper2}}},
+		{name: "duplicate", requested: []coro.SSALoweredCall{{LogicalName: "runtime.helper", Target: helper}, {LogicalName: "runtime.helper", Target: helper}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := input.Analyze(roots, coro.SSAConfig{
+				ClassifyLoweredCalls: func(fn *ssa.Function) ([]coro.SSALoweredCall, error) {
+					if fn == owner {
+						return test.requested, nil
+					}
+					return nil, nil
+				},
+			})
+			if err == nil || !strings.Contains(err.Error(), "conflict with the frozen frontend helper calls") {
+				t.Fatalf("builder %s lowered-call error = %v", test.name, err)
+			}
+		})
+	}
+
+	accepted, err := input.Analyze(roots, coro.SSAConfig{
+		MaxPlainInstructions: -1,
+		ClassifyLoweredCalls: func(fn *ssa.Function) ([]coro.SSALoweredCall, error) {
+			if fn == owner {
+				return []coro.SSALoweredCall{
+					{LogicalName: "runtime.helper2", Target: helper2},
+					{LogicalName: "runtime.helper", Target: helper},
+				}, nil
+			}
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("builder exact frozen lowered calls were rejected: %v", err)
+	}
+	if got := accepted.LoweredCalls(owner); len(got) != 2 || got[0].LogicalName != "runtime.helper" || got[1].LogicalName != "runtime.helper2" {
+		t.Fatalf("accepted lowered calls = %+v", got)
+	}
+}
+
 func TestActiveCoroABIVersions(t *testing.T) {
 	tests := []struct {
 		name      string

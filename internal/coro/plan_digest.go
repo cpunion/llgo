@@ -31,7 +31,7 @@ import (
 // PlanDigestSchema is the independent canonical schema used for archive cache
 // identity. It is deliberately separate from SummarySchema: summaries remain
 // diagnostic snapshots, while this document covers every lowering plan site.
-const PlanDigestSchema = "llgo.coro.plan-digest.v4"
+const PlanDigestSchema = "llgo.coro.plan-digest.v5"
 
 // Current experimental ABI identities. Keeping these in the analysis package
 // gives build, cache, and lowering code one version source of truth.
@@ -77,14 +77,15 @@ type PlanDigestMetadata struct {
 }
 
 type planDigestDocument struct {
-	Schema           string                 `json:"schema"`
-	FunctionIDSchema string                 `json:"function_id_schema"`
-	Metadata         PlanDigestMetadata     `json:"metadata"`
-	Roots            []planDigestRoot       `json:"roots"`
-	Functions        []planDigestFunction   `json:"functions"`
-	Calls            []planDigestCall       `json:"calls"`
-	ElidedCalls      []planDigestElidedCall `json:"elided_calls,omitempty"`
-	Values           []planDigestValue      `json:"values"`
+	Schema           string                  `json:"schema"`
+	FunctionIDSchema string                  `json:"function_id_schema"`
+	Metadata         PlanDigestMetadata      `json:"metadata"`
+	Roots            []planDigestRoot        `json:"roots"`
+	Functions        []planDigestFunction    `json:"functions"`
+	Calls            []planDigestCall        `json:"calls"`
+	LoweredCalls     []planDigestLoweredCall `json:"lowered_calls"`
+	ElidedCalls      []planDigestElidedCall  `json:"elided_calls,omitempty"`
+	Values           []planDigestValue       `json:"values"`
 }
 
 type planDigestRoot struct {
@@ -119,6 +120,12 @@ type planDigestCall struct {
 	Open        bool         `json:"open"`
 	Unresolved  uint8        `json:"unresolved"`
 	MayBeNil    bool         `json:"may_be_nil"`
+}
+
+type planDigestLoweredCall struct {
+	Owner       FunctionID `json:"owner"`
+	LogicalName string     `json:"logical_name"`
+	Target      FunctionID `json:"target"`
 }
 
 type planDigestElidedCall struct {
@@ -207,6 +214,11 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 		return planDigestDocument{}, err
 	}
 
+	loweredCalls, err := p.canonicalDigestLoweredCalls()
+	if err != nil {
+		return planDigestDocument{}, err
+	}
+
 	document := planDigestDocument{
 		Schema:           PlanDigestSchema,
 		FunctionIDSchema: FunctionIDSchema,
@@ -214,6 +226,7 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 		Roots:            roots,
 		Functions:        functions,
 		Calls:            make([]planDigestCall, 0, len(p.callPlans)),
+		LoweredCalls:     loweredCalls,
 		ElidedCalls:      make([]planDigestElidedCall, 0, len(p.elidedCalls)),
 		Values:           make([]planDigestValue, 0, len(p.valuePlans)),
 	}
@@ -316,6 +329,38 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 		return planDigestDocument{}, fmt.Errorf("coro: SSAValuePlan coverage mismatch: projected %d of %d plans", len(coveredValues), len(p.valuePlans))
 	}
 	return document, nil
+}
+
+func (p *SSAPlan) canonicalDigestLoweredCalls() ([]planDigestLoweredCall, error) {
+	ret := make([]planDigestLoweredCall, 0)
+	for owner, calls := range p.loweredCalls {
+		ownerID, ok := p.byFunction[owner]
+		if !ok {
+			return nil, fmt.Errorf("coro: lowered-call owner %q is absent from the plan", owner.Name())
+		}
+		previous := ""
+		for index, call := range calls {
+			if call.LogicalName == "" || !utf8.ValidString(call.LogicalName) || strings.IndexByte(call.LogicalName, 0) >= 0 {
+				return nil, fmt.Errorf("coro: lowered call %d in %q has invalid logical name %q", index, ownerID, call.LogicalName)
+			}
+			if index != 0 && previous >= call.LogicalName {
+				return nil, fmt.Errorf("coro: lowered calls in %q are not in strict logical-name order", ownerID)
+			}
+			previous = call.LogicalName
+			targetID, ok := p.byFunction[call.Target]
+			if !ok {
+				return nil, fmt.Errorf("coro: lowered call %q in %q targets a function outside the plan", call.LogicalName, ownerID)
+			}
+			ret = append(ret, planDigestLoweredCall{Owner: ownerID, LogicalName: call.LogicalName, Target: targetID})
+		}
+	}
+	sort.Slice(ret, func(i, j int) bool {
+		if ret[i].Owner != ret[j].Owner {
+			return ret[i].Owner < ret[j].Owner
+		}
+		return ret[i].LogicalName < ret[j].LogicalName
+	})
+	return ret, nil
 }
 
 func (m PlanDigestMetadata) validate() error {
