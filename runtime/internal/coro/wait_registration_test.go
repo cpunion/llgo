@@ -416,6 +416,93 @@ func TestWaitRegistrationCancellationBeforeParkResumesOnce(t *testing.T) {
 	runtime.KeepAlive(task.frame.memory)
 }
 
+func TestPrepareWaitRegistrationRollsBackArmFailure(t *testing.T) {
+	var table WaitRegistrationTable
+	var token WaitToken
+	if ticket, handle, result := PrepareWaitRegistration(nil, &table, &token); result != WaitRegistrationPrepareRejected || ticket != 0 || handle != (WaitRegistrationHandle{}) {
+		t.Fatalf("invalid prepare = (%d, %+v, %d)", ticket, handle, result)
+	}
+	if ticket, ok := ArmWait(&token); !ok || ticket != 2 {
+		t.Fatalf("arm after failed registration = (%d, %t), want fresh generation 2", ticket, ok)
+	}
+}
+
+func TestPreparedWaitRollbackAndCompletedRetire(t *testing.T) {
+	p := new(P)
+	var table WaitRegistrationTable
+	if !bindRegistrationTable(&table, p) {
+		t.Fatal("bind prepared-wait table")
+	}
+	var token WaitToken
+	ticket, handle, result := PrepareWaitRegistration(p, &table, &token)
+	if result != WaitRegistrationPrepared || ticket != 1 || handle == (WaitRegistrationHandle{}) {
+		t.Fatalf("prepare rollback wait = (%d, %+v, %d)", ticket, handle, result)
+	}
+	if !table.RollbackPreparedWait(handle, &token, ticket) {
+		t.Fatal("rollback prepared wait")
+	}
+	if outcome, ok := WaitOutcomeOf(&token, ticket); !ok || outcome != WaitOutcomeCanceled {
+		t.Fatalf("rolled-back outcome = (%d, %t)", outcome, ok)
+	}
+
+	ticket, handle, result = PrepareWaitRegistration(p, &table, &token)
+	if result != WaitRegistrationPrepared || ticket != 2 || handle == (WaitRegistrationHandle{}) {
+		t.Fatalf("prepare completed wait = (%d, %+v, %d)", ticket, handle, result)
+	}
+	if result := table.Post(handle); result != WaitRegistrationPosted {
+		t.Fatalf("post completed wait = %d", result)
+	}
+	if drained, ok := table.drainFor(p); !ok || drained != 1 {
+		t.Fatalf("drain completed wait = (%d, %t)", drained, ok)
+	}
+	if !claimWait(&token, ticket) {
+		t.Fatal("claim completed wait")
+	}
+	if outcome, ok := consumeWait(&token, ticket); !ok || outcome != WaitOutcomeCompleted {
+		t.Fatalf("consume completed wait = (%d, %t)", outcome, ok)
+	}
+	if !table.RetireCompletedWait(handle, &token, ticket) {
+		t.Fatal("retire completed wait")
+	}
+	if !registrationTableEmpty(&table, p) || !unbindRegistrationTable(&table, p) || !table.CanRelease() {
+		t.Fatal("prepared-wait table retained state")
+	}
+}
+
+func TestPrepareWaitRegistrationFullTableRollsBackTicket(t *testing.T) {
+	p := new(P)
+	var table WaitRegistrationTable
+	if !bindRegistrationTable(&table, p) {
+		t.Fatal("bind full prepared-wait table")
+	}
+	tokens := make([]WaitToken, WaitRegistrationCapacity)
+	tickets := make([]WaitTicket, WaitRegistrationCapacity)
+	handles := make([]WaitRegistrationHandle, WaitRegistrationCapacity)
+	for index := range tokens {
+		var result WaitRegistrationPrepareResult
+		tickets[index], handles[index], result = PrepareWaitRegistration(p, &table, &tokens[index])
+		if result != WaitRegistrationPrepared {
+			t.Fatalf("fill prepared wait %d = %d", index, result)
+		}
+	}
+	var extra WaitToken
+	if ticket, handle, result := PrepareWaitRegistration(p, &table, &extra); result != WaitRegistrationPrepareRejected ||
+		ticket != 0 || handle != (WaitRegistrationHandle{}) {
+		t.Fatalf("full-table prepare = (%d, %+v, %d)", ticket, handle, result)
+	}
+	if ticket, ok := ArmWait(&extra); !ok || ticket != 2 || !rollbackArmedWait(&extra, ticket) {
+		t.Fatalf("arm after full-table rejection = (%d, %t)", ticket, ok)
+	}
+	for index := range tokens {
+		if !table.RollbackPreparedWait(handles[index], &tokens[index], tickets[index]) {
+			t.Fatalf("rollback filled prepared wait %d", index)
+		}
+	}
+	if !registrationTableEmpty(&table, p) || !unbindRegistrationTable(&table, p) || !table.CanRelease() {
+		t.Fatal("full prepared-wait table retained state")
+	}
+}
+
 func TestWaitRegistrationAtomicPrefixAlignment(t *testing.T) {
 	if unsafe.Sizeof(WaitRegistrationHandle{}) != 8 || unsafe.Alignof(WaitRegistrationHandle{}) != 4 {
 		t.Fatalf("producer handle layout = size %d align %d", unsafe.Sizeof(WaitRegistrationHandle{}), unsafe.Alignof(WaitRegistrationHandle{}))
