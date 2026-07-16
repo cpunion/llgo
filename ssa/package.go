@@ -541,6 +541,7 @@ func (p Program) NewPackage(name, pkgPath string) Package {
 		preserveSyms:       make(map[string]struct{}),
 		llvmUsedValues:     make([]llvm.Value, 0, 4),
 		llvmRetainedValues: make([]llvm.Value, 0, 1),
+		runtimeFuncs:       make(map[Type]string),
 
 		abiTypeFakeUseCache: make(map[llvm.Value][]llvm.Value),
 	}
@@ -798,14 +799,16 @@ type aPackage struct {
 	cu         CompilationUnit
 	glbDbgVars map[Expr]bool
 
-	vars       map[string]Global
-	fns        map[string]Function
-	pyobjs     map[string]PyObjRef
-	pymods     map[string]Global
-	strs       map[string]llvm.Value
-	goStrs     map[string]llvm.Value
-	fnlink     func(string) string
-	methodlink func(string, *types.Func, *types.Signature) string
+	vars         map[string]Global
+	fns          map[string]Function
+	pyobjs       map[string]PyObjRef
+	pymods       map[string]Global
+	strs         map[string]llvm.Value
+	goStrs       map[string]llvm.Value
+	fnlink       func(string) string
+	methodlink   func(string, *types.Func, *types.Signature) string
+	runtimeCall  RuntimeCallResolver
+	runtimeFuncs map[Type]string
 
 	iRoutine int
 
@@ -887,7 +890,19 @@ func (p Package) rtFunc(fnName string) Expr {
 		name = p.fnlink(name)
 	}
 	sig := fn.Type().(*types.Signature)
-	return p.NewFunc(name, sig, InGo).Expr
+	ret := p.NewFunc(name, sig, InGo).Expr
+	if p.runtimeCall == nil {
+		return ret
+	}
+	// NewFunc reuses the declaration and its canonical Type. Clone only the
+	// Type wrapper so Builder.Call can recognize this exact compiler-inserted
+	// runtime helper expression without confusing an ordinary call to the same
+	// LLVM declaration, or a helper whose address is merely retained in an ABI
+	// table. The raw and LLVM function types remain unchanged.
+	typ := *ret.Type
+	ret.Type = &typ
+	p.runtimeFuncs[ret.Type] = fnName
+	return ret
 }
 
 func (p Package) cFunc(fullName string, sig *types.Signature) Expr {
@@ -945,6 +960,19 @@ func (p Package) SetResolveLinkname(fn func(string) string) {
 // A nil resolver preserves the legacy SetResolveLinkname behavior.
 func (p Package) SetResolveMethodLinkname(fn func(string, *types.Func, *types.Signature) string) {
 	p.methodlink = fn
+}
+
+// RuntimeCallResolver may replace a compiler-inserted runtime helper call.
+// helper is the logical runtime function name passed to rtFunc; fn already
+// contains the resolved physical symbol and args are already lowered.
+// Returning ok=false preserves the ordinary direct call.
+type RuntimeCallResolver func(b Builder, helper string, fn Expr, args []Expr) (ret Expr, ok bool)
+
+// SetResolveRuntimeCall installs the resolver for compiler-inserted runtime
+// helper calls. Install it before lowering function bodies. A nil resolver
+// preserves the legacy lowering, including the canonical function Type.
+func (p Package) SetResolveRuntimeCall(fn RuntimeCallResolver) {
+	p.runtimeCall = fn
 }
 
 // -----------------------------------------------------------------------------

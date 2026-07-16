@@ -1224,6 +1224,9 @@ func (b Builder) InlineCall(fn Expr, args ...Expr) (ret Expr) {
 //	t4 = t3()
 func (b Builder) Call(fn Expr, args ...Expr) (ret Expr) {
 	dbgInstrCall("Call", fn, args)
+	if ret, resolved := b.resolveRuntimeCall(fn, args); resolved {
+		return ret
+	}
 	var kind = fn.kind
 	if kind == vkPyFuncRef {
 		return b.pyCall(fn, args)
@@ -1273,6 +1276,25 @@ func (b Builder) Call(fn Expr, args ...Expr) (ret Expr) {
 	}
 	b.EmitReflectValueMethodCheckedLoad(ret, reflectCheck)
 	return
+}
+
+func (b Builder) resolveRuntimeCall(fn Expr, args []Expr) (ret Expr, resolved bool) {
+	resolver := b.Pkg.runtimeCall
+	if resolver == nil || b.resolvingRuntimeCalls[fn.Type] {
+		return Nil, false
+	}
+	helper, ok := b.Pkg.runtimeFuncs[fn.Type]
+	if !ok {
+		return Nil, false
+	}
+	if b.resolvingRuntimeCalls == nil {
+		b.resolvingRuntimeCalls = make(map[Type]bool)
+	}
+	b.resolvingRuntimeCalls[fn.Type] = true
+	defer func() {
+		delete(b.resolvingRuntimeCalls, fn.Type)
+	}()
+	return resolver(b, helper, fn, args)
 }
 
 const (
