@@ -32,6 +32,13 @@ func getLibcCompileConfigByName(baseDir, libcName, target, mcpu string) (outputD
 		config = libc.GetNewlibESP32Config()
 		libcDir = filepath.Join(baseDir, config.String())
 		compileConfig = libc.GetNewlibESP32CompileConfig(libcDir, target, mcpu)
+	case "wasmbuiltins":
+		config = libc.GetWasmBuiltinsConfig()
+		libcDir = filepath.Join(baseDir, config.String())
+		// The skipped-download test path only inspects the declarative recipe.
+		// Use the final deterministic location without touching the filesystem.
+		includeDir := filepath.Join(libcDir, "llgo-wasmbuiltins-include")
+		compileConfig = libc.GetWasmBuiltinsCompileConfig(libcDir, includeDir, target)
 	default:
 		err = fmt.Errorf("unsupported libc: %s", libcName)
 		return
@@ -42,6 +49,14 @@ func getLibcCompileConfigByName(baseDir, libcName, target, mcpu string) (outputD
 
 	if err = checkDownloadAndExtractLib(config.Url, libcDir, config.ResourceSubDir); err != nil {
 		return
+	}
+	if libcName == "wasmbuiltins" {
+		var includeDir string
+		includeDir, err = libc.PrepareWasmBuiltinsHeaders(libcDir)
+		if err != nil {
+			return
+		}
+		compileConfig = libc.GetWasmBuiltinsCompileConfig(libcDir, includeDir, target)
 	}
 
 	return libcDir, compileConfig, nil

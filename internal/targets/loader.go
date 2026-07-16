@@ -155,6 +155,9 @@ func (l *Loader) mergeConfig(dst, src *Config) {
 	if src.RelocationModel != "" {
 		dst.RelocationModel = src.RelocationModel
 	}
+	if src.GC != "" {
+		dst.GC = src.GC
+	}
 	if src.BinaryFormat != "" {
 		dst.BinaryFormat = src.BinaryFormat
 	}

@@ -76,6 +76,31 @@ func TestGetLibcCompileConfigByName(t *testing.T) {
 			t.Errorf("Expected flags %v, got: %v", expectedFlags, group.CFlags)
 		}
 	})
+
+	t.Run("WasmBuiltins", func(t *testing.T) {
+		wasmTarget := "wasm32-unknown-unknown"
+		outputDir, cfg, err := getLibcCompileConfigByName(baseDir, "wasmbuiltins", wasmTarget, "generic")
+		if err != nil {
+			t.Fatalf("wasmbuiltins setup failed: %v", err)
+		}
+		expectedDir := filepath.Join(baseDir, libc.GetWasmBuiltinsConfig().String())
+		if outputDir != expectedDir {
+			t.Fatalf("wasmbuiltins output dir = %q, want %q", outputDir, expectedDir)
+		}
+		if len(cfg.Groups) != 1 {
+			t.Fatalf("wasmbuiltins groups = %d, want 1", len(cfg.Groups))
+		}
+		group := cfg.Groups[0]
+		if group.OutputFileName != "libwasmbuiltins-"+wasmTarget+".a" {
+			t.Fatalf("wasmbuiltins archive = %q", group.OutputFileName)
+		}
+		if !slices.Contains(group.Files, filepath.Join(expectedDir, "libc-top-half", "musl", "src", "string", "memcpy.c")) {
+			t.Fatalf("wasmbuiltins files = %v, want pinned wasi-libc memcpy", group.Files)
+		}
+		if !slices.Contains(group.CFlags, "-I"+filepath.Join(expectedDir, "llgo-wasmbuiltins-include")) {
+			t.Fatalf("wasmbuiltins flags = %v, want generated header path", group.CFlags)
+		}
+	})
 }
 
 func TestGetRTCompileConfigByName(t *testing.T) {

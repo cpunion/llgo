@@ -8,7 +8,7 @@
 	"linker":        "wasm-ld",
 	"libc":          "wasi-libc",
 	"rtlib":         "compiler-rt",
-	"gc":            "precise",
+	"gc":            "leaking",
 	"scheduler":     "asyncify",
 	"default-stack-size": 65536,
 	"cflags": [
