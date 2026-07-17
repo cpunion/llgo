@@ -27,12 +27,12 @@ func coroProgramBindExecutorDriverV1(driver *coro.ExecutorDriver, p *coroP, regi
 	return coro.BindExecutorWithTimers(driver, p, registry, handle, waits, &coroProgramTimerTableV1State)
 }
 
-func coroProgramNextRunnableV1(p *coroP, _ *coro.ExecutorDriver) (*coroG, bool) {
+func coroProgramNextRunStepV1(driver *coro.ExecutorDriver) (coro.ExecutorRunStep, bool) {
 	now, ok := coroclock.MonotonicNano()
 	if !ok {
-		return nil, false
+		return coro.ExecutorRunStep{}, false
 	}
-	return coro.NextRunnableAt(p, now)
+	return coro.NextExecutorRunStepAt(driver, now)
 }
 
 func coroProgramPrepareExecutorSleepV1(driver *coro.ExecutorDriver) (sleep bool, deadline int64, hasDeadline, ok bool) {

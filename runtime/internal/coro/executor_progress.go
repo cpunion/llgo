@@ -393,8 +393,9 @@ func pollExecutorSliceAt(driver *ExecutorDriver, now int64, withDeadline bool, b
 			completed := transaction.total
 			retryBudget, awaitExternal := transaction.retryBudget, transaction.awaitExternal
 			*transaction = executorPollTransaction{}
-			more := retryBudget || driver.sources.pending(driver.p) || driver.p.readyHead != nil ||
+			sourceMore := retryBudget || driver.sources.pending(driver.p) ||
 				driver.registry.ObserveRequested(driver.handle) || preemptLoad(&driver.p.schedule) != scheduleIdle
+			more := sourceMore || driver.p.readyHead != nil
 			blocked := !more && (awaitExternal || HasWaiting(driver.p))
 			progress, progressOK := executorProgressFromScan(completed, used, budget, true, more, blocked)
 			return completed, progress, progressOK

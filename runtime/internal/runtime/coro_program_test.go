@@ -483,6 +483,65 @@ func TestCoroProgramV1BeginRunAndDestroy(t *testing.T) {
 	runtime.KeepAlive(manifest)
 }
 
+func TestCoroProgramRunSliceBudgetOneKeepsPhysicalActionsAtomic(t *testing.T) {
+	resetCoroProgramTestStateV1(t)
+	manifest := newCoroProgramTestManifestV1()
+	factory := unsafe.Pointer(&manifest.factoryMarker)
+	gPointer, ok := coroProgramBeginV1(unsafe.Pointer(&manifest.manifest), factory)
+	if !ok || gPointer != unsafe.Pointer(&coroProgramGV1State) {
+		t.Fatal("begin budget-one coroutine program")
+	}
+	frame := newCoroProgramTestFrameV1(t, &coroProgramGV1State)
+	driver := &coroProgramTestDriverV1{t: t, frame: frame}
+	activeCoroProgramDriver = driver
+	if !coroProgramDriveAdmissionV1State.Acquire() {
+		t.Fatal("acquire budget-one scheduler owner")
+	}
+	if !coroAdoptRoot(&coroProgramGV1State, frame.handle) ||
+		!coroEnqueue(&coroProgramPV1State, &coroProgramGV1State) ||
+		!coroTargetExecutorStartV1(coroProgramExecutorHandleV1State) {
+		t.Fatal("start budget-one coroutine program")
+	}
+	coroProgramLifecycleV1State = coroProgramRunningV1
+
+	var sources, dispatches, resumes, destroys uint32
+	for entry := 0; entry < 10000; entry++ {
+		result := coroRunSlice(
+			&coroProgramPV1State,
+			&coroProgramGV1State,
+			&coroProgramExecutorDriverV1State,
+			1,
+		)
+		if result.used != 1 || result.sources+result.dispatches+result.resumes+result.destroys != 1 {
+			t.Fatalf("budget-one entry %d accounting = %+v", entry, result)
+		}
+		sources += result.sources
+		dispatches += result.dispatches
+		resumes += result.resumes
+		destroys += result.destroys
+		if result.stop == coroRunDestroyCommitV1 {
+			if result.action.Kind != coro.ActionCommitDestroy || result.action.Handle != nil {
+				t.Fatalf("budget-one destroy receipt = %+v", result)
+			}
+			break
+		}
+		if result.stop != coroRunSliceBudgetV1 {
+			t.Fatalf("budget-one entry %d stop = %+v", entry, result)
+		}
+	}
+	if dispatches != 2 || resumes != 1 || destroys != 1 ||
+		driver.doneCalls != 2 || driver.resumeCalls != 1 || driver.destroyCalls != 1 || !driver.released {
+		t.Fatalf("budget-one totals = source:%d dispatch:%d resume:%d destroy:%d wrappers={done:%d resume:%d destroy:%d released:%t}",
+			sources, dispatches, resumes, destroys, driver.doneCalls, driver.resumeCalls, driver.destroyCalls, driver.released)
+	}
+	if status := coroProgramFinishDriveAdmissionV1(coroProgramDriveStepV1()); status != coroProgramDriveCompleteV1 ||
+		!coro.TerminalG(&coroProgramPV1State, &coroProgramGV1State) {
+		t.Fatalf("finish budget-one coroutine program = %d", status)
+	}
+	runtime.KeepAlive(frame.memory)
+	runtime.KeepAlive(manifest)
+}
+
 func TestCoroProgramV2BeginRunAndDestroy(t *testing.T) {
 	resetCoroProgramTestStateV1(t)
 	manifest := newCoroProgramTestManifestV2()

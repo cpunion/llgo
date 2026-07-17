@@ -23,6 +23,13 @@ import (
 	"unsafe"
 )
 
+const wantSchedulerGSize = 168 + (unsafe.Sizeof(uintptr(0))/4-1)*120
+
+var (
+	_ [wantSchedulerGSize - unsafe.Sizeof(G{})]byte
+	_ [unsafe.Sizeof(G{}) - wantSchedulerGSize]byte
+)
+
 func closeTaskControlFixture(t *testing.T, source *TaskControlSource, p *P, id OperationID) {
 	t.Helper()
 	if !BeginCloseTaskControl(source, p, id) {
@@ -335,12 +342,19 @@ func TestTaskControlLeaseUsesExistingGAlignmentPadding(t *testing.T) {
 	stateEnd := unsafe.Offsetof(G{}.state) + unsafe.Sizeof(GState(0))
 	leaseOffset := unsafe.Offsetof(G{}.taskControlLeases)
 	leaseEnd := leaseOffset + unsafe.Sizeof(G{}.taskControlLeases)
+	runActionOffset := unsafe.Offsetof(G{}.runAction)
 	pointerAlign := unsafe.Alignof(uintptr(0))
 	align := func(offset uintptr) uintptr { return (offset + pointerAlign - 1) &^ (pointerAlign - 1) }
 	rootOffset := unsafe.Offsetof(G{}.root)
-	if leaseOffset != stateEnd || align(stateEnd) != rootOffset || align(leaseEnd) != rootOffset {
-		t.Fatalf("task control lease changed G pointer layout: stateEnd=%d lease=%d..%d root=%d align=%d",
-			stateEnd, leaseOffset, leaseEnd, rootOffset, pointerAlign)
+	wantRootOffset := uintptr(12)
+	if pointerAlign == 8 {
+		wantRootOffset = 16
+	}
+	if unsafe.Offsetof(G{}.state) != 8 || leaseOffset != 9 || runActionOffset != 10 ||
+		leaseOffset != stateEnd || align(stateEnd) != rootOffset || align(leaseEnd+2) != rootOffset ||
+		rootOffset != wantRootOffset || unsafe.Sizeof(G{}) != wantSchedulerGSize {
+		t.Fatalf("G scalar padding/layout changed: state=%d lease=%d..%d runAction=%d root=%d size=%d align=%d",
+			unsafe.Offsetof(G{}.state), leaseOffset, leaseEnd, runActionOffset, rootOffset, unsafe.Sizeof(G{}), pointerAlign)
 	}
 }
 

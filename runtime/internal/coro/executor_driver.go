@@ -43,6 +43,7 @@ type ExecutorDriver struct {
 	route         RouteID
 	sources       ExecutorSourceSet
 	poll          executorPollTransaction
+	run           executorRunCursor
 	prepareNow    int64
 	hasPrepareNow bool
 	terminalKind  ActionKind
@@ -80,7 +81,8 @@ func validExecutorDriver(driver *ExecutorDriver) bool {
 		driver.p != nil && driver.registry != nil && driver.handle.Slot != 0 && driver.handle.Generation != 0 &&
 		driver.route.Valid() && driver.sources.route == driver.route &&
 		driver.p.executor == driver && preemptLoad(&driver.p.executorMode) == executorModeBound &&
-		validExecutorSourceSet(&driver.sources, driver.p) && validExecutorPollTransaction(&driver.poll, &driver.sources)
+		validExecutorSourceSet(&driver.sources, driver.p) && validExecutorPollTransaction(&driver.poll, &driver.sources) &&
+		validExecutorRunCursor(&driver.run, driver.p)
 }
 
 func validExecutorDriverForP(driver *ExecutorDriver, p *P) bool {
@@ -207,6 +209,7 @@ func bindExecutorAtRoute(driver *ExecutorDriver, p *P, registry *ExecutorRegistr
 	if driver == nil || driver.magic != 0 || driver.state != executorDriverUnbound || driver.p != nil ||
 		driver.registry != nil || driver.handle != (ExecutorHandle{}) || driver.route != 0 || driver.sources != (ExecutorSourceSet{}) ||
 		driver.poll != (executorPollTransaction{}) ||
+		driver.run != (executorRunCursor{}) ||
 		driver.prepareNow != 0 || driver.hasPrepareNow ||
 		driver.terminalKind != ActionInvalid ||
 		p == nil || p.executor != nil || preemptLoad(&p.executorMode) != executorModeUnbound ||
@@ -270,7 +273,7 @@ func (driver *ExecutorDriver) Route() (RouteID, bool) {
 
 func publishExecutorSourcesInState(driver *ExecutorDriver, now int64, withDeadline bool, state executorDriverState) (scan executorSourceScan, ok bool) {
 	if !validExecutorDriver(driver) || driver.state != state || driver.poll.phase != executorPollIdle ||
-		!idleExecutorScheduler(driver.p) {
+		!emptyExecutorRunCursor(driver) || !idleExecutorScheduler(driver.p) {
 		return executorSourceScan{}, false
 	}
 	return driver.sources.publishPass(driver.p, now, withDeadline)
@@ -300,7 +303,8 @@ func serviceExecutorPublishedEpochAt(driver *ExecutorDriver, now int64, withDead
 }
 
 func pollExecutorSourcesAt(driver *ExecutorDriver, now int64, withDeadline bool) (total executorSourceScan, ok bool) {
-	if !validExecutorDriver(driver) || driver.state != executorDriverActive || !idleExecutorScheduler(driver.p) {
+	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
+		!emptyExecutorRunCursor(driver) || !idleExecutorScheduler(driver.p) {
 		return executorSourceScan{}, false
 	}
 	if driver.poll.phase != executorPollIdle || !driver.sources.acceptsScan(driver.p, now, withDeadline) {
@@ -396,7 +400,8 @@ func leaveExecutorIdleAndPollAt(driver *ExecutorDriver, now int64) (scan executo
 // retained wait. false,true means work or a racing request won and the
 // scheduler should continue without blocking.
 func PrepareExecutorSleep(driver *ExecutorDriver) (sleep bool, ok bool) {
-	if !validExecutorDriver(driver) || driver.sources.usesMonotonicTime() || driver.state != executorDriverActive || !idleExecutorScheduler(driver.p) {
+	if !validExecutorDriver(driver) || driver.sources.usesMonotonicTime() || driver.state != executorDriverActive ||
+		!emptyExecutorRunCursor(driver) || !idleExecutorScheduler(driver.p) {
 		return false, false
 	}
 	if _, _, ok = pollExecutor(driver); !ok {
@@ -450,7 +455,7 @@ func PrepareExecutorSleep(driver *ExecutorDriver) (sleep bool, ok bool) {
 // active. A failure never leaves a newly armed idle gate behind.
 func PrepareExecutorSleepAt(driver *ExecutorDriver, now int64) (prepared bool, ok bool) {
 	if !validExecutorDriver(driver) || !driver.sources.usesMonotonicTime() || driver.state != executorDriverActive ||
-		!idleExecutorScheduler(driver.p) || now < 0 {
+		!emptyExecutorRunCursor(driver) || !idleExecutorScheduler(driver.p) || now < 0 {
 		return false, false
 	}
 	if _, ok = pollExecutorSourcesAt(driver, now, true); !ok {
@@ -497,7 +502,7 @@ func PrepareExecutorSleepAt(driver *ExecutorDriver, now int64) (prepared bool, o
 // preparation and restores the active driver.
 func CommitExecutorSleepAt(driver *ExecutorDriver, now int64) (sleep bool, deadline int64, hasDeadline, ok bool) {
 	if !validExecutorDriver(driver) || !driver.sources.usesMonotonicTime() ||
-		driver.state != executorDriverIdlePreparing || !idleExecutorScheduler(driver.p) {
+		driver.state != executorDriverIdlePreparing || !emptyExecutorRunCursor(driver) || !idleExecutorScheduler(driver.p) {
 		return false, 0, false, false
 	}
 	if now < driver.prepareNow {
@@ -539,7 +544,8 @@ func CommitExecutorSleepAt(driver *ExecutorDriver, now int64) (sleep bool, deadl
 // durable sources. It also accepts a spurious target wake while the gate still
 // contains exact IdleArmed.
 func WakeExecutor(driver *ExecutorDriver) (drained, promoted int, ok bool) {
-	if !validExecutorDriver(driver) || driver.sources.usesMonotonicTime() || driver.state != executorDriverSleeping || !idleExecutorScheduler(driver.p) {
+	if !validExecutorDriver(driver) || driver.sources.usesMonotonicTime() || driver.state != executorDriverSleeping ||
+		!emptyExecutorRunCursor(driver) || !idleExecutorScheduler(driver.p) {
 		return 0, 0, false
 	}
 	return leaveExecutorIdleAndPoll(driver)
@@ -549,7 +555,7 @@ func WakeExecutor(driver *ExecutorDriver) (drained, promoted int, ok bool) {
 // source set using the target's fresh post-wake monotonic sample.
 func WakeExecutorAt(driver *ExecutorDriver, now int64) (waits, timers, promoted int, ok bool) {
 	if !validExecutorDriver(driver) || !driver.sources.usesMonotonicTime() || driver.state != executorDriverSleeping ||
-		!idleExecutorScheduler(driver.p) || now < 0 {
+		!emptyExecutorRunCursor(driver) || !idleExecutorScheduler(driver.p) || now < 0 {
 		return 0, 0, 0, false
 	}
 	scan, ok := leaveExecutorIdleAndPollAt(driver, now)
@@ -563,7 +569,7 @@ func WakeExecutorAt(driver *ExecutorDriver, now int64) (waits, timers, promoted 
 // this close before entering those state machines.
 func BeginExecutorClose(driver *ExecutorDriver) bool {
 	if !validExecutorDriver(driver) || driver.state != executorDriverActive || !idleExecutorScheduler(driver.p) ||
-		driver.poll.phase != executorPollIdle || driver.terminalKind != ActionInvalid ||
+		driver.poll.phase != executorPollIdle || !emptyExecutorRunCursor(driver) || driver.terminalKind != ActionInvalid ||
 		!emptySchedulerWaitQueues(driver.p) ||
 		!driver.sources.empty(driver.p) {
 		return false
@@ -644,8 +650,8 @@ func terminalExecutorRootPending(p *P, g *G, kind ActionKind) bool {
 	}
 }
 
-func terminalExecutorCloseCandidate(p *P, g *G, action Action) (*ExecutorDriver, bool) {
-	if !expectedAction(p, g, action, action.Kind) || !terminalExecutorRootPending(p, g, action.Kind) ||
+func terminalExecutorCloseCandidate(p *P, g *G, kind ActionKind) (*ExecutorDriver, bool) {
+	if !terminalExecutorRootPending(p, g, kind) ||
 		preemptLoad(&p.executorMode) != executorModeBound {
 		return nil, false
 	}
@@ -695,12 +701,12 @@ func settleTerminalExecutorClose(driver *ExecutorDriver, p *P, terminal *G) bool
 // scheduler-owned driver; the freed root pointer and physical handle are both
 // discarded before P publishes a handle-free control action, so neither a
 // target adapter nor an asynchronous GC scan can retain or reuse them.
-func beginTerminalExecutorClose(p *P, g *G, action Action) (Action, bool) {
-	driver, ok := terminalExecutorCloseCandidate(p, g, action)
+func beginTerminalExecutorClose(p *P, g *G, kind ActionKind) (Action, bool) {
+	driver, ok := terminalExecutorCloseCandidate(p, g, kind)
 	if !ok || !driver.sources.beginTerminalClose(p) || !settleTerminalExecutorClose(driver, p, g) {
 		return Action{}, false
 	}
-	driver.terminalKind = action.Kind
+	driver.terminalKind = kind
 	driver.state = executorDriverTerminalClosing
 	g.root = nil
 	closeAction := Action{Kind: ActionTerminalExecutorClose}
@@ -760,30 +766,16 @@ func ConfirmTerminalExecutorClose(driver *ExecutorDriver) (*G, Action, bool) {
 	if !driver.sources.finishTerminalClose(p) {
 		return nil, Action{}, false
 	}
-	// The synthetic token is a stable core-private equality marker. Destroyed
-	// and PanicDestroyed never dereference it, and it is never returned to the
-	// adapter as a handle operation.
-	original := Action{Kind: driver.terminalKind, Handle: unsafe.Pointer(driver)}
-	if !retireExecutorBinding(driver, &original) {
+	kind := driver.terminalKind
+	if !retireExecutorBinding(driver, nil) {
 		return nil, Action{}, false
 	}
 	for {
-		var next Action
-		switch original.Kind {
-		case ActionDestroy:
-			next, ok = Destroyed(p, g, original)
-			if !ok && AcknowledgeTerminalSchedule(p, g, original) {
-				continue
-			}
-		case ActionPanicDestroy:
-			next, ok = PanicDestroyed(p, g, original)
-			if !ok && AcknowledgePanicTerminalSchedule(p, g, original) {
-				continue
-			}
-		default:
-			return nil, Action{}, false
+		next, committed := commitRootDestroyedCompatibility(p, g, kind)
+		if !committed && acknowledgeRootTerminalSchedule(p, g, kind) {
+			continue
 		}
-		if !ok || next.Handle != nil ||
+		if !committed || next.Handle != nil ||
 			(next.Kind != ActionComplete && next.Kind != ActionPanicComplete) {
 			return nil, Action{}, false
 		}
