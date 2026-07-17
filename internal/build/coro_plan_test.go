@@ -409,6 +409,9 @@ import "unsafe"
 func __llgo_coro_program_begin_v1() { bootstrapHelper() }
 func __llgo_coro_program_run_v1() {}
 func __llgo_coro_program_continue_v1(uint32) {}
+type coroProgramRunResultV2 struct { Flags, Used, ExecutorSlot, ExecutorGeneration, Epoch, DeadlineLo, DeadlineHi, Reserved uint32 }
+func __llgo_coro_program_run_slice_v2(unsafe.Pointer, unsafe.Pointer, uint32, *coroProgramRunResultV2) uint32 { return 0 }
+func __llgo_coro_program_continue_slice_v2(uint32, uint32, uint32, uint32, *coroProgramRunResultV2) uint32 { return 0 }
 func __llgo_coro_wait_prepare_v1(unsafe.Pointer, *uint32, *uint32, *uint32, *uint32, *uint32) bool { return false }
 func __llgo_coro_wait_rollback_v1(unsafe.Pointer, uint32, uint32, uint32) bool { return false }
 func __llgo_coro_wait_retire_completed_v1(unsafe.Pointer, uint32, uint32, uint32) bool { return false }
@@ -590,8 +593,8 @@ func atomicExchange(*uint32, uint32) uint32
 		"init",
 		coroFrameAllocatorBootstrapSymbolV1,
 		coroProgramBeginSymbolV1,
-		coroProgramRunSymbolV1,
-		coroProgramContinueSymbolV1,
+		coroProgramRunSliceSymbolV2,
+		coroProgramContinueSliceSymbolV2,
 		coroWaitPrepareSymbolV1,
 		coroWaitRollbackSymbolV1,
 		coroWaitRetireCompletedSymbolV1,
@@ -620,6 +623,32 @@ func atomicExchange(*uint32, uint32) uint32
 		if root.Function == nil || root.Function.Name() != wantTimerRoots[index] || root.Demand != wantDemand {
 			t.Fatalf("native timer root %d = %+v, want %s/%s", index, root, wantTimerRoots[index], wantDemand)
 		}
+	}
+	runSliceFn := ssaPkg.Func(coroProgramRunSliceSymbolV2)
+	originalRunSliceSignature := runSliceFn.Signature
+	runSliceFn.Signature = types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(types.NewParam(token.NoPos, nil, "g", types.Typ[types.UnsafePointer])),
+		types.NewTuple(types.NewParam(token.NoPos, nil, "status", types.Typ[types.Uint32])), false)
+	_, _, _, _, invalidRunSliceErr := requiredCoroProgramRuntimePlan(timerCtx)
+	runSliceFn.Signature = originalRunSliceSignature
+	if invalidRunSliceErr == nil || !strings.Contains(invalidRunSliceErr.Error(), "run-slice ABI") {
+		t.Fatalf("invalid native run-slice ABI error = %v", invalidRunSliceErr)
+	}
+	continueSliceFn := ssaPkg.Func(coroProgramContinueSliceSymbolV2)
+	originalContinueSliceSignature := continueSliceFn.Signature
+	continueSliceFn.Signature = types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(
+			types.NewParam(token.NoPos, nil, "executorSlot", types.Typ[types.Uint32]),
+			types.NewParam(token.NoPos, nil, "executorGeneration", types.Typ[types.Uint32]),
+			types.NewParam(token.NoPos, nil, "epoch", types.Typ[types.Uint32]),
+			types.NewParam(token.NoPos, nil, "budget", types.Typ[types.Uint32]),
+			types.NewParam(token.NoPos, nil, "out", types.NewPointer(types.Typ[types.Uint64])),
+		),
+		types.NewTuple(types.NewParam(token.NoPos, nil, "status", types.Typ[types.Uint32])), false)
+	_, _, _, _, invalidContinueSliceErr := requiredCoroProgramRuntimePlan(timerCtx)
+	continueSliceFn.Signature = originalContinueSliceSignature
+	if invalidContinueSliceErr == nil || !strings.Contains(invalidContinueSliceErr.Error(), "continue-slice ABI") {
+		t.Fatalf("invalid native continue-slice ABI error = %v", invalidContinueSliceErr)
 	}
 	for _, name := range []string{
 		coroNativePostWaitSymbolV1,

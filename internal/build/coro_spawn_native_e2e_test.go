@@ -432,7 +432,8 @@ func assertCoroSpawnNativeE2ELinkedSymbols(t *testing.T, executable string) {
 	}
 	symbols := string(output)
 	for _, required := range []string{
-		coroProgramContinueSymbolV1,
+		coroProgramRunSliceSymbolV2,
+		coroProgramContinueSliceSymbolV2,
 		coroNativePostWaitSymbolV1,
 		"__llgo_coro_spawn_begin_v1",
 		"__llgo_coro_spawn_commit_v1",

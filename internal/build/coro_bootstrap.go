@@ -43,6 +43,8 @@ const (
 	coroProgramBeginSymbolV1                                    = "__llgo_coro_program_begin_v1"
 	coroProgramRunSymbolV1                                      = "__llgo_coro_program_run_v1"
 	coroProgramContinueSymbolV1                                 = "__llgo_coro_program_continue_v1"
+	coroProgramRunSliceSymbolV2                                 = "__llgo_coro_program_run_slice_v2"
+	coroProgramContinueSliceSymbolV2                            = "__llgo_coro_program_continue_slice_v2"
 	coroProgramMainReturnSymbolV1                               = "__llgo_coro_program_main_return_v1"
 	coroNativePostWaitSymbolV1                                  = "__llgo_coro_native_post_wait_v1"
 	coroWaitPrepareSymbolV1                                     = "__llgo_coro_wait_prepare_v1"
@@ -67,6 +69,17 @@ const (
 	coroProgramStepRolePublicRuntimeInitV2 uint32 = 4
 	coroProgramStepRolePackageInitV2       uint32 = 8
 	coroProgramStepRoleMainV2              uint32 = 16
+
+	// Native pipe targets use a fixed-stack compiler loop. Each public runtime
+	// call executes at most this many certified scheduler reductions before it
+	// must return an exact POD continuation tuple to the entry module.
+	coroProgramNativeRunBudgetV2 uint32 = 1024
+
+	coroProgramDriveCompleteV2 uint32 = 1
+	coroProgramDriveYieldedV2  uint32 = 3
+
+	coroProgramRunMoreV2          uint32 = 1 << 0
+	coroProgramRunRequestInlineV2 uint32 = 1 << 3
 )
 
 type coroProgramBootstrapStepV1 struct {
@@ -625,7 +638,19 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 			factory = coroProgramBootstrapFactorySymbolV2
 		}
 		write("factory=compiler-static-mixed-v" + strconv.FormatUint(uint64(version), 10) + ":" + factory)
-		write("driver=runtime-static-single-p-v1:" + coroProgramBeginSymbolV1 + ":" + coroProgramRunSymbolV1 + ":" + coroProgramContinueSymbolV1 + ":continue(epoch:u32)->void")
+		if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
+			write("driver=runtime-static-single-p-native-v2:" +
+				coroProgramBeginSymbolV1 + ":" +
+				coroProgramRunSliceSymbolV2 + "(g:ptr,handle:ptr,budget:u32,out:*run-result-v2)->u32:" +
+				coroProgramContinueSliceSymbolV2 + "(executor-slot:u32,executor-generation:u32,epoch:u32,budget:u32,out:*run-result-v2)->u32:" +
+				"budget=" + strconv.FormatUint(uint64(coroProgramNativeRunBudgetV2), 10) + ":" +
+				"run-result-v2={flags:u32,used:u32,executor-slot:u32,executor-generation:u32,epoch:u32,deadline-lo:u32,deadline-hi:u32,reserved:u32}:" +
+				"complete=" + strconv.FormatUint(uint64(coroProgramDriveCompleteV2), 10) + ":" +
+				"yielded=" + strconv.FormatUint(uint64(coroProgramDriveYieldedV2), 10) + ":" +
+				"inline-flags=" + strconv.FormatUint(uint64(coroProgramRunMoreV2|coroProgramRunRequestInlineV2), 10))
+		} else {
+			write("driver=runtime-static-single-p-v1:" + coroProgramBeginSymbolV1 + ":" + coroProgramRunSymbolV1 + ":" + coroProgramContinueSymbolV1 + ":continue(epoch:u32)->void")
+		}
 		write("resume-decision-v1=" + coroRunDecisionTakeSymbolV1 + "(g:ptr,expected-epoch:u32,expected-generation:u32,outcome:*u32,case:*u32,task-kind:*u32,operation-source-slot:*u32,operation-generation:*u32)->void")
 		write("resume-decision-zero-v1=" + coroRunDecisionTakeZeroSymbolV1 + "(g:ptr)->u32")
 		write("wait-owner-v1=" +

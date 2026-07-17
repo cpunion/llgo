@@ -20,6 +20,7 @@ package build
 
 import (
 	stdcontext "context"
+	"fmt"
 	goimporter "go/importer"
 	"go/token"
 	"go/types"
@@ -42,14 +43,14 @@ import (
 const (
 	coroPanicNativeE2EPackage          = "example.com/llgo-coro-panic-e2e"
 	coroPanicNativeE2EEntry            = "__llgo_coro_panic_e2e_entry"
-	coroPanicNativeE2ERunReport        = "__llgo_coro_program_run_report_e2e_v1"
+	coroPanicNativeE2ERunReport        = "__llgo_coro_program_run_report_e2e_v2"
 	coroPanicNativeE2EDestroyObserve   = "__llgo_coro_destroy_observe_e2e_v1"
 	coroPanicNativeE2EDestroyCount     = "__llgo_coro_panic_e2e_destroy_count"
 	coroPanicNativeE2EFirstDestroy     = "__llgo_coro_panic_e2e_first_destroy"
 	coroPanicNativeE2ESecondDestroy    = "__llgo_coro_panic_e2e_second_destroy"
 	coroPanicNativeE2EThirdDestroy     = "__llgo_coro_panic_e2e_third_destroy"
 	coroPanicNativeE2EExplicitStatus   = uint64(1)
-	coroPanicNativeE2EDrivePanic       = uint64(3)
+	coroPanicNativeE2EDrivePanic       = uint64(4)
 	coroPanicNativeE2EExpectedDestroys = uint64(3)
 )
 
@@ -77,11 +78,13 @@ func main() {
 // links the production native-nogc scheduler/core and panic prepare hook, and
 // runs without the legacy panic printer/runtime closure.
 //
-// Production ActionPanicComplete now returns the explicit drive-panic status;
-// the exported void program-run ABI remains fail-stop until the production
-// printer/exit owner exists. The entry module is therefore retargeted to a
-// test-only report ABI. That ABI still calls the production internal runner
-// and accepts only the terminal-panic shape: the exact drive status, a
+// Production ActionPanicComplete returns the explicit V2 drive-panic status;
+// the native entry loop fail-stops that status until the production printer/
+// exit owner exists. This fixture retargets only the initial run-slice
+// declaration to a test report ABI. The report still calls the production
+// internal V2 runner, validates the terminal panic, then returns a canonical
+// Complete POD so the compiler-owned loop can exit normally. It accepts only
+// the exact drive status, a
 // published record on a dead, non-reclaimable G, the original package-global
 // payload word, and exactly one destroy of each distinct handle in the child
 // -> main -> bootstrap chain. It does not turn panic into production success
@@ -276,9 +279,9 @@ func buildCoroPanicNativeE2EEntry(t *testing.T, prog llssa.Program, temp, anchor
 		t.Fatalf("entry module has no native main:\n%s", entry.LPkg.String())
 	}
 	entryMain.SetName(coroPanicNativeE2EEntry)
-	run := module.NamedFunction(coroProgramRunSymbolV1)
+	run := module.NamedFunction(coroProgramRunSliceSymbolV2)
 	if run.IsNil() || !run.IsDeclaration() {
-		t.Fatalf("entry module has no program-run declaration %q:\n%s", coroProgramRunSymbolV1, entry.LPkg.String())
+		t.Fatalf("entry module has no program run-slice declaration %q:\n%s", coroProgramRunSliceSymbolV2, entry.LPkg.String())
 	}
 	run.SetName(coroPanicNativeE2ERunReport)
 
@@ -306,6 +309,12 @@ func buildCoroPanicNativeE2EDriver(t *testing.T, prog llssa.Program, temp string
 	defer pkg.Module().Dispose()
 	pointer := types.Typ[types.UnsafePointer]
 	uint32Type := types.Typ[types.Uint32]
+	runResultFields := make([]*types.Var, 8)
+	for index := range runResultFields {
+		runResultFields[index] = types.NewField(token.NoPos, nil, fmt.Sprintf("Word%d", index), uint32Type, false)
+	}
+	runResultType := types.NewStruct(runResultFields, nil)
+	runResultPointer := types.NewPointer(runResultType)
 
 	abort := pkg.NewFunc("abort", newSignature(nil, nil), llssa.InC)
 	exit := pkg.NewFunc("exit", newSignature([]types.Type{types.Typ[types.Int32]}, nil), llssa.InC)
@@ -353,8 +362,8 @@ func buildCoroPanicNativeE2EDriver(t *testing.T, prog llssa.Program, temp string
 	// The production adapter island is compiled from an explicit runtime file
 	// list, so its private Go symbols belong to command-line-arguments while its
 	// exported C ABI remains stable.
-	runtimeRun := pkg.NewFunc("command-line-arguments.coroProgramRunV1", newSignature(
-		[]types.Type{pointer, pointer}, []types.Type{types.Typ[types.Uint8]},
+	runtimeRun := pkg.NewFunc("command-line-arguments.coroProgramRunSliceV2", newSignature(
+		[]types.Type{pointer, pointer, uint32Type, runResultPointer}, []types.Type{uint32Type},
 	), llssa.InGo)
 	panicRecordType := types.NewStruct([]*types.Var{
 		types.NewField(token.NoPos, nil, "Status", uint32Type, false),
@@ -374,18 +383,25 @@ func buildCoroPanicNativeE2EDriver(t *testing.T, prog llssa.Program, temp string
 	before := pkg.NewVar(coroPanicNativeE2EPackage+".Before", types.NewPointer(uint32Type), llssa.InGo)
 	after := pkg.NewVar(coroPanicNativeE2EPackage+".After", types.NewPointer(uint32Type), llssa.InGo)
 
-	report := pkg.NewFunc(coroPanicNativeE2ERunReport, newSignature([]types.Type{pointer, pointer}, nil), llssa.InC)
+	report := pkg.NewFunc(coroPanicNativeE2ERunReport, newSignature(
+		[]types.Type{pointer, pointer, uint32Type, runResultPointer}, []types.Type{uint32Type},
+	), llssa.InC)
 	reportBody := report.MakeBody(1)
 	requireCode := uint64(21)
 	requireCondition := func(condition llssa.Expr) {
 		reportBody.Call(require.Expr, condition, prog.IntVal(requireCode, prog.Int32()))
 		requireCode++
 	}
-	driveStatus := reportBody.Call(runtimeRun.Expr, report.Param(0), report.Param(1))
+	requireCondition(reportBody.BinOp(
+		token.EQL,
+		report.Param(2),
+		prog.IntVal(uint64(coroProgramNativeRunBudgetV2), prog.Uint32()),
+	))
+	driveStatus := reportBody.Call(runtimeRun.Expr, report.Param(0), report.Param(1), report.Param(2), report.Param(3))
 	requireCondition(reportBody.BinOp(
 		token.EQL,
 		driveStatus,
-		prog.IntVal(coroPanicNativeE2EDrivePanic, prog.Byte()),
+		prog.IntVal(coroPanicNativeE2EDrivePanic, prog.Uint32()),
 	))
 	loaded := reportBody.Call(loadPanicRecord.Expr, report.Param(0))
 	record := reportBody.Extract(loaded, 0)
@@ -421,7 +437,10 @@ func buildCoroPanicNativeE2EDriver(t *testing.T, prog llssa.Program, temp string
 	requireCondition(reportBody.BinOp(token.NEQ, second, third))
 	requireCondition(reportBody.BinOp(token.EQL, reportBody.Load(before.Expr), one32))
 	requireCondition(reportBody.BinOp(token.EQL, reportBody.Load(after.Expr), zero32))
-	reportBody.Return()
+	for index := range runResultFields {
+		reportBody.Store(reportBody.FieldAddr(report.Param(3), index), zero32)
+	}
+	reportBody.Return(prog.IntVal(uint64(coroProgramDriveCompleteV2), prog.Uint32()))
 
 	// The production scheduler core is intentionally compiled without the full
 	// standard-library runtime package. Keep ordinary pointer checks fail-stop
@@ -498,9 +517,10 @@ func assertCoroPanicNativeE2ELinkedSymbols(t *testing.T, executable string) {
 	symbols := string(output)
 	for _, required := range []string{
 		"__llgo_coro_panic_prepare_v1",
-		coroProgramContinueSymbolV1,
+		coroProgramContinueSliceSymbolV2,
 		coroNativePostWaitSymbolV1,
 		coroPanicNativeE2ERunReport,
+		"command-line-arguments.coroProgramRunSliceV2",
 		coroPanicNativeE2EDestroyObserve,
 		"github.com/goplus/llgo/runtime/internal/coro.PreparePanic",
 		"github.com/goplus/llgo/runtime/internal/coro.PanicDestroyed",
