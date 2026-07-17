@@ -1767,11 +1767,19 @@ func TestCoroBuilderRejectsMisuse(t *testing.T) {
 	mustPanicContains(t, "finished coroutine", func() {
 		fixture.coro.SuspendCurrentBlockWithAfterResume(func(Builder) {})
 	})
+	mustPanicContains(t, "finished coroutine", func() {
+		fixture.coro.SuspendCurrentBlockWithResumeDispatch(func(b Builder, normal BasicBlock) {
+			b.Jump(normal)
+		})
+	})
 	mustPanicContains(t, "finished coroutine", func() { fixture.coro.SuspendCurrentBlockIf(fixture.prog.BoolVal(true), nil) })
 	mustPanicContains(t, "finished coroutine", func() { fixture.coro.Finish() })
 	mustPanicContains(t, "nil coroutine builder", func() { (*CoroBuilder)(nil).SuspendCurrentBlock() })
 	mustPanicContains(t, "nil coroutine builder", func() {
 		(*CoroBuilder)(nil).SuspendCurrentBlockWithAfterResume(func(Builder) {})
+	})
+	mustPanicContains(t, "nil coroutine builder", func() {
+		(*CoroBuilder)(nil).SuspendCurrentBlockWithResumeDispatch(func(Builder, BasicBlock) {})
 	})
 	mustPanicContains(t, "nil coroutine builder", func() { (*CoroBuilder)(nil).SuspendCurrentBlockIf(Nil, nil) })
 	if (*CoroBuilder)(nil).Handle() != Nil {
