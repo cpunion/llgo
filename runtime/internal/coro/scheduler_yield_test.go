@@ -80,7 +80,7 @@ func TestSinglePRoundRobinTwoGYield(t *testing.T) {
 		for {
 			switch action.Kind {
 			case ActionCheckResume:
-				action, ok = Checked(p, g, action, false)
+				action, ok = checkedTestAction(p, g, action, false)
 			case ActionResume:
 				task.resumes++
 				if task.resumes <= 2 {
@@ -141,12 +141,24 @@ func TestSinglePRoundRobinTwoGYield(t *testing.T) {
 
 func TestPrepareYieldFailsClosed(t *testing.T) {
 	task := newYieldingTestG(t, "yield-validation")
-	frame := FrameFromStorage(task.frame.storage)
 	if PrepareYield(task.g, task.handle, task.frame.header) {
 		t.Fatal("yield accepted outside an active resume")
 	}
-	task.g.state = GRunning
-	frame.state = FrameActive
+	p := new(P)
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue yield-validation G")
+	}
+	if next, ok := NextRunnable(p); !ok || next != task.g {
+		t.Fatal("dequeue yield-validation G")
+	}
+	action, ok := BeginRunG(p, task.g)
+	if !ok {
+		t.Fatal("begin yield-validation G")
+	}
+	action, ok = checkedTestAction(p, task.g, action, false)
+	if !ok || action.Kind != ActionResume {
+		t.Fatal("activate yield-validation G")
+	}
 	task.frame.header.SuspendReason = uint16(SuspendYield)
 	task.frame.header.Lifecycle = uint16(FrameSuspended)
 	if !PrepareYield(task.g, task.handle, task.frame.header) {

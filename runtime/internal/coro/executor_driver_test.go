@@ -1259,7 +1259,7 @@ func TestExecutorDriverPanicTerminalCloseDoesNotRedestroy(t *testing.T) {
 	if !ok {
 		t.Fatal("begin panic terminal G")
 	}
-	action, ok = Checked(p, g, action, false)
+	action, ok = checkedTestAction(p, g, action, false)
 	if !ok || action.Kind != ActionResume || action.Handle != rootHandle {
 		t.Fatal("resume panic terminal root")
 	}
@@ -1276,7 +1276,7 @@ func TestExecutorDriverPanicTerminalCloseDoesNotRedestroy(t *testing.T) {
 	if !ok || action.Kind != ActionCheckResume || action.Handle != leafHandle {
 		t.Fatal("dispatch panic terminal child")
 	}
-	action, ok = Checked(p, g, action, false)
+	action, ok = checkedTestAction(p, g, action, false)
 	if !ok || action.Kind != ActionResume || action.Handle != leafHandle {
 		t.Fatal("resume panic terminal child")
 	}

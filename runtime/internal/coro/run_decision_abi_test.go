@@ -61,7 +61,7 @@ func TestTakeRunDecisionWordsAcceptsZeroTicketNormalResume(t *testing.T) {
 	if g, ok := NextRunnable(p); !ok || g != task.g {
 		t.Fatal("dequeue normal scalar decision task")
 	}
-	action := beginWaitTestResume(t, p, task)
+	action := beginWaitTestResumeWithoutGate(t, p, task)
 	outcome, caseID, taskKind, sourceSlot, generation, ok := TakeRunDecisionWords(task.g, 0, 0)
 	if !ok || outcome != uint32(ParkOutcomePending) || caseID != 0 || taskKind != uint32(TaskCancelNone) ||
 		sourceSlot != 0 || generation != 0 {

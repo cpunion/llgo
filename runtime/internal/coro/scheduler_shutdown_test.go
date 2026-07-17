@@ -217,7 +217,7 @@ func TestCommandShutdownDestroysStructuredChainDeepestToRoot(t *testing.T) {
 	if !ok || action.Kind != ActionCheckResume || action.Handle != midHandle {
 		t.Fatal("dispatch mid frame")
 	}
-	action, ok = Checked(fixture.p, child.g, action, false)
+	action, ok = checkedTestAction(fixture.p, child.g, action, false)
 	if !ok || action.Kind != ActionResume {
 		t.Fatal("activate mid frame")
 	}
@@ -235,7 +235,7 @@ func TestCommandShutdownDestroysStructuredChainDeepestToRoot(t *testing.T) {
 	if !ok || action.Kind != ActionCheckResume || action.Handle != leafHandle {
 		t.Fatal("dispatch leaf frame")
 	}
-	action, ok = Checked(fixture.p, child.g, action, false)
+	action, ok = checkedTestAction(fixture.p, child.g, action, false)
 	if !ok || action.Kind != ActionResume {
 		t.Fatal("activate leaf frame")
 	}

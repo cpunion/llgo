@@ -287,7 +287,7 @@ func PollPreempt(g *G) bool {
 		g.active.state != FrameActive || g.active.header.G != unsafe.Pointer(g) ||
 		g.active.header.SuspendReason != uint16(SuspendNone) ||
 		g.active.header.Lifecycle != uint16(FrameActive) || g.pending.kind != pendingNone || g.spawnChild != nil ||
-		hasPendingRunDecision(g) || !releasableParkState(&g.park) {
+		!resumeGateTaken(g) || !releasableParkState(&g.park) {
 		return false
 	}
 	requested := preemptCompareAndSwap(preemptAddress(g), preemptRequested, preemptIdle)
@@ -791,8 +791,8 @@ func Checked(p *P, g *G, action Action, done bool) (Action, bool) {
 // hooks must have recorded exactly one await or completion transition while
 // the frame was active.
 func Resumed(p *P, g *G, action Action) (Action, bool) {
-	if !expectedAction(p, g, action, ActionResume) || !p.inResume || g.state != GRunning ||
-		p.runDecision != (RunDecision{}) || g.active == nil || g.active.handle != action.Handle || g.active.state != FrameActive {
+	if !resumeGateTaken(g) || p != g.runP || action != p.action ||
+		g.active == nil || g.active.handle != action.Handle || g.active.state != FrameActive {
 		return Action{}, false
 	}
 	p.inResume = false

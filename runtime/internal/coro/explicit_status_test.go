@@ -64,7 +64,7 @@ func newExplicitPanicFixture(t *testing.T, depth int) *explicitPanicFixture {
 	if !ok || action.Kind != ActionCheckResume {
 		t.Fatalf("begin explicit panic G = (%+v, %t)", action, ok)
 	}
-	action, ok = Checked(p, g, action, false)
+	action, ok = checkedTestAction(p, g, action, false)
 	if !ok || action.Kind != ActionResume {
 		t.Fatalf("activate explicit panic root = (%+v, %t)", action, ok)
 	}
@@ -82,7 +82,7 @@ func newExplicitPanicFixture(t *testing.T, depth int) *explicitPanicFixture {
 		if !ok || action.Kind != ActionCheckResume || action.Handle != child.handle {
 			t.Fatalf("dispatch explicit panic child %d = (%+v, %t)", index, action, ok)
 		}
-		action, ok = Checked(p, g, action, false)
+		action, ok = checkedTestAction(p, g, action, false)
 		if !ok || action.Kind != ActionResume || action.Handle != child.handle {
 			t.Fatalf("activate explicit panic child %d = (%+v, %t)", index, action, ok)
 		}

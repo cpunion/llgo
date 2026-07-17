@@ -71,7 +71,7 @@ func beginSpawnTestResume(t *testing.T, p *P, task *yieldingTestG) Action {
 	if !ok || action.Kind != ActionCheckResume {
 		t.Fatalf("begin spawn test G %s = (%+v, %t)", task.name, action, ok)
 	}
-	action, ok = Checked(p, task.g, action, false)
+	action, ok = checkedTestAction(p, task.g, action, false)
 	if !ok || action.Kind != ActionResume {
 		t.Fatalf("activate spawn test G %s = (%+v, %t)", task.name, action, ok)
 	}
@@ -86,7 +86,7 @@ func beginSpawnTestChildResume(t *testing.T, p *P, g *G, frame *testFrame) Actio
 	if !ok || action.Kind != ActionCheckResume {
 		t.Fatalf("begin spawned child = (%+v, %t)", action, ok)
 	}
-	action, ok = Checked(p, g, action, false)
+	action, ok = checkedTestAction(p, g, action, false)
 	if !ok || action.Kind != ActionResume {
 		t.Fatalf("activate spawned child = (%+v, %t)", action, ok)
 	}

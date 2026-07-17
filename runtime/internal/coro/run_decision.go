@@ -62,8 +62,16 @@ func validRunDecision(decision RunDecision) bool {
 		(decision.task != TaskCancelNone && decision.lease.Valid() && decision.lease.ticket == decision.ticket))
 }
 
-func hasPendingRunDecision(g *G) bool {
-	return ValidG(g) && g.runP != nil && g.runP.runDecision != (RunDecision{})
+// resumeGateTaken proves that compiler-generated code consumed exactly the
+// current P/G resume decision before it can publish another transition.
+func resumeGateTaken(g *G) bool {
+	if !ValidG(g) || g.runP == nil {
+		return false
+	}
+	p := g.runP
+	return p.current == g && p.inResume && g.state == GRunning &&
+		expectedAction(p, g, p.action, ActionResume) &&
+		p.runDecision == (RunDecision{}) && p.runDecisionTaken
 }
 
 // prepareRunDecision is the scheduler's last gate before llvm.coro.resume.
