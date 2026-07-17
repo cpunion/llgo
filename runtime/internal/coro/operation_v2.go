@@ -193,6 +193,38 @@ func InitOperation(record *OperationRecord, id OperationID) bool {
 	return true
 }
 
+// PrepareOperationAtGeneration aligns a V2 record with the generation owned
+// by a physical slot which may also have been used by a legacy protocol. It is
+// deliberately more restrictive than initialization: only exact-zero unused
+// storage or the canonical reusable residue may be advanced, the physical
+// source/slot identity cannot change, and the requested generation must be
+// strictly newer than every V2 identity previously retained by the record.
+//
+// The physical source remains the sole generation authority. This helper does
+// not maintain a parallel V2 counter and does not accept a terminal, linked,
+// or otherwise partially recycled record.
+func PrepareOperationAtGeneration(record *OperationRecord, desired OperationID) bool {
+	if record == nil || !desired.Valid() {
+		return false
+	}
+	switch record.phase {
+	case operationUnused:
+		if *record != (OperationRecord{}) {
+			return false
+		}
+	case operationReusable:
+		previous := record.id
+		if !previous.Valid() || previous.Source() != desired.Source() || previous.Slot() != desired.Slot() ||
+			desired.Generation <= previous.Generation || *record != (OperationRecord{id: previous, phase: operationReusable}) {
+			return false
+		}
+	default:
+		return false
+	}
+	*record = OperationRecord{id: desired, phase: operationReserved}
+	return true
+}
+
 // RearmOperation is the only way to reuse a recycled physical record. The
 // record retains its previous ID, advances generation internally, and refuses
 // exhaustion, so a caller cannot reinitialize it with an old callback ID.

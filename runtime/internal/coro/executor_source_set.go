@@ -226,6 +226,11 @@ func (sources *ExecutorSourceSet) applyOne(p *P, link *ParkLink) OperationApplyR
 		return OperationApplyInvalid
 	}
 	switch link.operation.id.Source() {
+	case OperationSourceTimer:
+		if sources.timers == nil {
+			return OperationApplyInvalid
+		}
+		return sources.timers.ApplyTimerV2One(p, link.operation.id, link.operation)
 	case OperationSourceManual:
 		if sources.manual == nil {
 			return OperationApplyInvalid
@@ -284,8 +289,11 @@ func (sources *ExecutorSourceSet) resolvePublishedEpoch(p *P) (promoted, applyVi
 		return 0, 0, false
 	}
 	// Phase one resolves every source's affected entries against the same
-	// complete sticky snapshot. When another V2 source joins this catalog, its
-	// ResolveAffected call belongs here before any source-specific ApplyOne call.
+	// complete sticky snapshot. Timer V2 completion publication marks its
+	// WaitSetRecord directly and therefore has no source-local affected chain;
+	// importantly, timer publication still completed before this phase. Any V2
+	// source which does retain a local chain must resolve it here before the
+	// shared wait-set batch and before any source-specific ApplyOne call.
 	if sources.manual != nil {
 		standalone, valid := sources.manual.standaloneAffected(p)
 		if !valid || standalone {
