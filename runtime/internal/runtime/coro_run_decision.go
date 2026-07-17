@@ -22,37 +22,62 @@ import (
 	"github.com/goplus/llgo/runtime/internal/coro"
 )
 
-func validCoroRunDecisionOutputWordsV1(
+type coroRunDecisionOutputModeV1 uint8
+
+const (
+	coroRunDecisionOutputInvalidV1 coroRunDecisionOutputModeV1 = iota
+	coroRunDecisionOutputNormalOnlyV1
+	coroRunDecisionOutputWordsV1
+)
+
+func coroRunDecisionOutputModeOfV1(
 	g unsafe.Pointer,
 	outcome, caseID, taskKind, operationSourceSlot, operationGeneration *uint32,
-) bool {
-	if g == nil || outcome == nil || caseID == nil || taskKind == nil || operationSourceSlot == nil || operationGeneration == nil {
-		return false
+) coroRunDecisionOutputModeV1 {
+	if g == nil {
+		return coroRunDecisionOutputInvalidV1
+	}
+	allNil := outcome == nil && caseID == nil && taskKind == nil && operationSourceSlot == nil && operationGeneration == nil
+	if allNil {
+		return coroRunDecisionOutputNormalOnlyV1
+	}
+	if outcome == nil || caseID == nil || taskKind == nil || operationSourceSlot == nil || operationGeneration == nil {
+		return coroRunDecisionOutputInvalidV1
 	}
 	words := [5]*uint32{outcome, caseID, taskKind, operationSourceSlot, operationGeneration}
 	for index, word := range words {
 		if unsafe.Pointer(word) == g {
-			return false
+			return coroRunDecisionOutputInvalidV1
 		}
 		for prior := 0; prior < index; prior++ {
 			if word == words[prior] {
-				return false
+				return coroRunDecisionOutputInvalidV1
 			}
 		}
 	}
-	return true
+	return coroRunDecisionOutputWordsV1
+}
+
+func normalCoroRunDecisionWordsV1(
+	outcome, caseID, taskKind, operationSourceSlot, operationGeneration uint32,
+	ok bool,
+) bool {
+	return ok && outcome == 0 && caseID == 0 && taskKind == 0 && operationSourceSlot == 0 && operationGeneration == 0
 }
 
 // __llgo_coro_run_decision_take_v1 is the compiler resume-prologue gate. Its
 // ABI contains only the current G pointer, the expected logical ticket's two
-// uint32 words, and five distinct uint32 output addresses. No Go aggregate,
+// uint32 words, and either five distinct uint32 output addresses or five nil
+// addresses selecting the normal-only zero-ticket gate. No Go aggregate,
 // ParkTicket, result lease, operation record, or LLVM coroutine handle crosses
-// this boundary.
+// this boundary. The normal-only form is used until compiler cleanup/select
+// lowering can consume non-normal decisions; observing one aborts rather than
+// silently continuing user code.
 //
 // A stale ticket, wrong G, duplicate take, or malformed output tuple is an
-// unrecoverable compiler/runtime protocol violation. Outputs are cleared
-// before taking the decision so a non-returning failure cannot expose a
-// partially initialized result to a broken exit shim.
+// unrecoverable compiler/runtime protocol violation. In words mode, outputs
+// are cleared before taking the decision so a non-returning failure cannot
+// expose a partially initialized result to a broken exit shim.
 //
 //export __llgo_coro_run_decision_take_v1
 func __llgo_coro_run_decision_take_v1(
@@ -60,8 +85,17 @@ func __llgo_coro_run_decision_take_v1(
 	expectedEpoch, expectedGeneration uint32,
 	outcome, caseID, taskKind, operationSourceSlot, operationGeneration *uint32,
 ) {
-	if !validCoroRunDecisionOutputWordsV1(g, outcome, caseID, taskKind, operationSourceSlot, operationGeneration) {
+	mode := coroRunDecisionOutputModeOfV1(g, outcome, caseID, taskKind, operationSourceSlot, operationGeneration)
+	if mode == coroRunDecisionOutputInvalidV1 ||
+		mode == coroRunDecisionOutputNormalOnlyV1 && (expectedEpoch != 0 || expectedGeneration != 0) {
 		coroRuntimeAbort("invalid coroutine run-decision output")
+		return
+	}
+	if mode == coroRunDecisionOutputNormalOnlyV1 {
+		decisionOutcome, selectedCase, cancelKind, sourceSlot, generation, ok := coro.TakeRunDecisionWords((*coro.G)(g), 0, 0)
+		if !normalCoroRunDecisionWordsV1(decisionOutcome, selectedCase, cancelKind, sourceSlot, generation, ok) {
+			coroRuntimeAbort("unsupported non-normal coroutine run decision")
+		}
 		return
 	}
 	*outcome = 0

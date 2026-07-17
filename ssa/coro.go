@@ -63,7 +63,12 @@ type CoroOptions struct {
 	// handle/storage pair, but must leave the builder in the same unterminated
 	// insertion block.
 	BeforeInitialSuspend func(b Builder, handle, storage Expr)
-	AllocationAlign      uint32
+	// AfterResume runs on every non-final case-0 resume edge immediately after
+	// llvm.coro.suspend and before the frontend's resumed continuation. It does
+	// not run on a conditional suspend's false edge. The callback may append
+	// straight-line resume-prologue instructions only.
+	AfterResume     func(b Builder)
+	AllocationAlign uint32
 }
 
 // CoroFrameDescriptorOptions describes the target-specific constant passed to
@@ -818,6 +823,7 @@ type CoroBuilder struct {
 	suspendBlk       BasicBlock
 	cleanupBlk       BasicBlock
 	initialResumeBlk BasicBlock
+	afterResume      func(Builder)
 	finished         bool
 }
 
@@ -890,6 +896,7 @@ func (b Builder) BeginCoro(opts CoroOptions) *CoroBuilder {
 		allocationAlign: opts.AllocationAlign,
 		suspendBlk:      suspendBlk,
 		cleanupBlk:      cleanupBlk,
+		afterResume:     opts.AfterResume,
 	}
 	if callback := opts.BeforeInitialSuspend; callback != nil {
 		callbackPoint := captureCoroFrameCallbackPoint(b)
@@ -941,6 +948,27 @@ func (c *CoroBuilder) SuspendCurrentBlock() BasicBlock {
 		panic("ssa: suspend current block requires an active logical block")
 	}
 	resume := c.emitSuspend(false)
+	logical.last = resume.last
+	b.blk = logical
+	return logical
+}
+
+// SuspendCurrentBlockWithAfterResume is SuspendCurrentBlock with one non-nil
+// resume callback that replaces CoroOptions.AfterResume for this suspend only.
+// It is the specialization point for a suspension whose resume protocol (for
+// example an exact V2 park ticket) differs from the coroutine's default gate.
+// The callback may append straight-line instructions only.
+func (c *CoroBuilder) SuspendCurrentBlockWithAfterResume(afterResume func(Builder)) BasicBlock {
+	c.requireActive("suspend current block with after-resume override")
+	if afterResume == nil {
+		panic("ssa: suspend current block after-resume override requires a callback")
+	}
+	b := c.b
+	logical := b.blk
+	if logical == nil {
+		panic("ssa: suspend current block with after-resume override requires an active logical block")
+	}
+	resume := c.emitSuspendWithAfterResume(false, afterResume)
 	logical.last = resume.last
 	b.blk = logical
 	return logical
@@ -1032,6 +1060,10 @@ func (c *CoroBuilder) Finish() {
 }
 
 func (c *CoroBuilder) emitSuspend(final bool) BasicBlock {
+	return c.emitSuspendWithAfterResume(final, c.afterResume)
+}
+
+func (c *CoroBuilder) emitSuspendWithAfterResume(final bool, afterResume func(Builder)) BasicBlock {
 	b := c.b
 	prog := b.Prog
 	resumeBlk := b.Func.MakeBlock()
@@ -1040,6 +1072,11 @@ func (c *CoroBuilder) emitSuspend(final bool) BasicBlock {
 	switchValue.AddCase(llvm.ConstInt(prog.tyInt8(), 0, false), resumeBlk.first)
 	switchValue.AddCase(llvm.ConstInt(prog.tyInt8(), 1, false), c.cleanupBlk.first)
 	b.SetBlock(resumeBlk)
+	if callback := afterResume; !final && callback != nil {
+		callbackPoint := captureCoroFrameCallbackPoint(b)
+		callback(b)
+		callbackPoint.ensureContinuation(b, "after-resume")
+	}
 	return resumeBlk
 }
 

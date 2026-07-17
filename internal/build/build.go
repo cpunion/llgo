@@ -2062,6 +2062,7 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			"__llgo_coro_preempt_poll_v1",
 			"__llgo_coro_yield_prepare_v1",
 			"__llgo_coro_park_prepare_v1",
+			coroRunDecisionTakeSymbolV1,
 			"__llgo_coro_complete_prepare_v1",
 			"__llgo_coro_frame_free_v1",
 		)
@@ -2182,6 +2183,25 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			for parameter := 1; parameter < sig.Params().Len(); parameter++ {
 				if !types.Identical(sig.Params().At(parameter).Type(), types.Typ[types.Uint32]) {
 					return nil, nil, nil, nil, fmt.Errorf("coroutine timer retire-or-abort ABI %q must have exact func(unsafe.Pointer, uint32, uint32, uint32) signature", name)
+				}
+			}
+		}
+		if name == coroRunDecisionTakeSymbolV1 {
+			sig := fn.Signature
+			uint32Pointer := types.NewPointer(types.Typ[types.Uint32])
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 8 || sig.Results().Len() != 0 ||
+				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
+				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf("coroutine run-decision ABI %q must have exact func(unsafe.Pointer, uint32, uint32, *uint32, *uint32, *uint32, *uint32, *uint32) signature", name)
+			}
+			for parameter := 1; parameter < 3; parameter++ {
+				if !types.Identical(sig.Params().At(parameter).Type(), types.Typ[types.Uint32]) {
+					return nil, nil, nil, nil, fmt.Errorf("coroutine run-decision ABI %q must have exact func(unsafe.Pointer, uint32, uint32, *uint32, *uint32, *uint32, *uint32, *uint32) signature", name)
+				}
+			}
+			for parameter := 3; parameter < sig.Params().Len(); parameter++ {
+				if !types.Identical(sig.Params().At(parameter).Type(), uint32Pointer) {
+					return nil, nil, nil, nil, fmt.Errorf("coroutine run-decision ABI %q must have exact func(unsafe.Pointer, uint32, uint32, *uint32, *uint32, *uint32, *uint32, *uint32) signature", name)
 				}
 			}
 		}

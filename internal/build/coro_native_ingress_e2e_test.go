@@ -506,6 +506,7 @@ func buildCoroNativeIngressE2ERuntimeIsland(t *testing.T, temp string) []string 
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_allocator.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_frame.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_program.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_run_decision.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_sched.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor_driver_legacy.go"),
@@ -514,6 +515,7 @@ func buildCoroNativeIngressE2ERuntimeIsland(t *testing.T, temp string) []string 
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_wait_pipe_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_ingress_test_llgo.go"),
 	}
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_run_decision.go")
 	conf := NewDefaultConf(ModeGen)
 	conf.ForceRebuild = true
 	conf.Tags = "nogc"

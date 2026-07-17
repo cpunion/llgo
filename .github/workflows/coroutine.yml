@@ -50,6 +50,13 @@ jobs:
           go test -race -shuffle=on ./internal/coroalloc -count=1
           go test -race -shuffle=on ./internal/coro -count=1
           go test -race -shuffle=on ./internal/corodoorbell -count=1
+          # The run-decision wrapper needs the production coro package but a
+          # test-local abort shim, so select its two sources instead of loading
+          # the complete LLGo runtime package into the host Go runtime.
+          go test -race -shuffle=on -tags=coro_run_decision_abi_test \
+            ./internal/runtime/coro_run_decision.go \
+            ./internal/runtime/coro_run_decision_test.go \
+            -run '^Test(CoroRunDecisionOutputModeV1|NormalCoroRunDecisionWordsV1|CoroRunDecisionWrapperRejectsMalformedNormalOnlyMode)$' -count=1
           go test . -run '^(TestCoroNativeTargetBuildSelection|TestCoroTimerOwnerOrAbortSourceABI|TestTimeSleep)' -count=1
           # The complete LLGo runtime package intentionally owns symbols that
           # collide with the host Go runtime. Use the real production adapter

@@ -57,6 +57,45 @@ type coroProgramBootstrapFactoryTargetV2 struct {
 	Anchor llssa.Expr
 }
 
+func declareCoroProgramRunDecisionTakeV1(pkg llssa.Package) llssa.Function {
+	pointer := types.Typ[types.UnsafePointer]
+	uint32Type := types.Typ[types.Uint32]
+	uint32Pointer := types.NewPointer(uint32Type)
+	return pkg.NewFunc(coroRunDecisionTakeSymbolV1, newSignature(
+		[]types.Type{
+			pointer,
+			uint32Type,
+			uint32Type,
+			uint32Pointer,
+			uint32Pointer,
+			uint32Pointer,
+			uint32Pointer,
+			uint32Pointer,
+		},
+		nil,
+	), llssa.InC)
+}
+
+func emitCoroProgramTakeNormalRunDecisionV1(
+	b llssa.Builder,
+	take llssa.Function,
+	g llssa.Expr,
+) {
+	zero := b.Prog.IntVal(0, b.Prog.Uint32())
+	nilWord := b.Prog.Nil(b.Prog.Pointer(b.Prog.Uint32()))
+	b.Call(
+		take.Expr,
+		g,
+		zero,
+		zero,
+		nilWord,
+		nilWord,
+		nilWord,
+		nilWord,
+		nilWord,
+	)
+}
+
 // emitCoroProgramBootstrapFactoryV1 defines the compiler-owned program-root
 // coroutine. The caller supplies the exact two target declarations used by the
 // already validated bootstrap table; the factory deliberately does not look up
@@ -120,6 +159,7 @@ func emitCoroProgramBootstrapFactoryV1(
 	free := pkg.NewFunc(coroProgramFrameFreeHookV1, newSignature(
 		[]types.Type{pointer, pointer, types.Typ[types.Uintptr], types.Typ[types.Uintptr], pointer}, nil,
 	), llssa.InC)
+	runDecisionTake := declareCoroProgramRunDecisionTakeV1(pkg)
 
 	frame := llssa.CoroFrameOps{
 		Alloc: func(b llssa.Builder, size, align llssa.Expr) llssa.Expr {
@@ -132,6 +172,9 @@ func emitCoroProgramBootstrapFactoryV1(
 	coro := b.BeginCoro(llssa.CoroOptions{
 		Promise: header,
 		Frame:   frame,
+		AfterResume: func(b llssa.Builder) {
+			emitCoroProgramTakeNormalRunDecisionV1(b, runDecisionTake, g)
+		},
 		BeforeInitialSuspend: func(b llssa.Builder, handle, storage llssa.Expr) {
 			values := []llssa.Expr{
 				g,
@@ -227,6 +270,7 @@ func emitCoroProgramBootstrapFactoryV2(
 	free := pkg.NewFunc(coroProgramFrameFreeHookV1, newSignature(
 		[]types.Type{pointer, pointer, types.Typ[types.Uintptr], types.Typ[types.Uintptr], pointer}, nil,
 	), llssa.InC)
+	runDecisionTake := declareCoroProgramRunDecisionTakeV1(pkg)
 	var mainReturn llssa.Function
 	if notifyMainReturn {
 		mainReturn = pkg.NewFunc(coroProgramMainReturnSymbolV1, newSignature(
@@ -245,6 +289,9 @@ func emitCoroProgramBootstrapFactoryV2(
 	coroBuilder := b.BeginCoro(llssa.CoroOptions{
 		Promise: header,
 		Frame:   frame,
+		AfterResume: func(b llssa.Builder) {
+			emitCoroProgramTakeNormalRunDecisionV1(b, runDecisionTake, g)
+		},
 		BeforeInitialSuspend: func(b llssa.Builder, handle, storage llssa.Expr) {
 			values := []llssa.Expr{
 				g,

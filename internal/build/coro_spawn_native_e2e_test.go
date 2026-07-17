@@ -346,6 +346,7 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_allocator.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_frame.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_program.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_run_decision.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_sched.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor_driver_legacy.go"),
@@ -353,6 +354,7 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_native_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_wait_pipe_llgo.go"),
 	}
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_run_decision.go")
 	conf := NewDefaultConf(ModeGen)
 	conf.ForceRebuild = true
 	conf.Tags = "nogc"
@@ -406,6 +408,20 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 		t.Fatalf("production coroutine runtime island objects = %d, want exactly %d", len(objects), len(allowed))
 	}
 	return objects
+}
+
+func requireCoroRuntimeIslandProductionSource(t *testing.T, files []string, name string) {
+	t.Helper()
+	want := filepath.Join("..", "..", "runtime", "internal", "runtime", name)
+	count := 0
+	for _, file := range files {
+		if file == want {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("production coroutine runtime island source %q occurs %d times, want exactly one", want, count)
+	}
 }
 
 func sanitizeCoroSpawnNativeE2EObjectName(name string) string {

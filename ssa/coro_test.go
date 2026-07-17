@@ -160,10 +160,20 @@ func TestCoroBuilderConditionalSuspendPreservesLogicalCFG(t *testing.T) {
 	fn := pkg.NewFunc("coro_conditional_block", coroHandleSignature(), InGo)
 	b := fn.MakeBody(1)
 	defer b.Dispose()
-	coro := b.BeginCoro(CoroOptions{Frame: CoroFrameOps{
-		Alloc: func(Builder, Expr, Expr) Expr { return prog.Nil(prog.VoidPtr()) },
-		Free:  func(Builder, Expr, Expr, Expr) {},
-	}})
+	var resumeCallbackBlocks []BasicBlock
+	coro := b.BeginCoro(CoroOptions{
+		Frame: CoroFrameOps{
+			Alloc: func(Builder, Expr, Expr) Expr { return prog.Nil(prog.VoidPtr()) },
+			Free:  func(Builder, Expr, Expr, Expr) {},
+		},
+		AfterResume: func(b Builder) {
+			resumeCallbackBlocks = append(resumeCallbackBlocks, b.blk)
+			b.Call(pkg.NewFunc("take_resume_decision", functionSignature(nil, nil), InC).Expr)
+		},
+	})
+	if len(resumeCallbackBlocks) != 1 {
+		t.Fatalf("initial resume callbacks = %d, want 1", len(resumeCallbackBlocks))
+	}
 	logical := fn.MakeBlock()
 	join := fn.MakeBlock()
 	b.Jump(logical)
@@ -173,16 +183,24 @@ func TestCoroBuilderConditionalSuspendPreservesLogicalCFG(t *testing.T) {
 		coro.SuspendCurrentBlockIf(prog.IntVal(1, prog.Byte()), nil)
 	})
 	callbackCalls := 0
+	var suspendCallbackBlock BasicBlock
 	if got := coro.SuspendCurrentBlockIf(prog.BoolVal(true), func(b Builder) {
 		callbackCalls++
+		suspendCallbackBlock = b.blk
 		b.Call(pkg.NewFunc("publish_yield", functionSignature(nil, nil), InC).Expr)
 	}); got != logical {
 		t.Fatalf("conditional suspend returned block %p, want %p", got, logical)
 	}
-	if callbackCalls != 1 || logical.first.C != first.C || b.blk != logical {
+	if callbackCalls != 1 || len(resumeCallbackBlocks) != 2 || logical.first.C != first.C || b.blk != logical {
 		t.Fatal("conditional suspend did not preserve its logical block or publication callback")
 	}
+	resumeCallbackBlock := resumeCallbackBlocks[1]
 	continuation := logical.last
+	if suspendCallbackBlock == nil || resumeCallbackBlock == nil ||
+		suspendCallbackBlock.last.C == resumeCallbackBlock.last.C ||
+		resumeCallbackBlock.last.C == continuation.C {
+		t.Fatal("conditional resume callback is not isolated from the suspend and false-edge continuation blocks")
+	}
 	b.Jump(join)
 	b.SetBlock(join)
 	phi := b.Phi(prog.Byte())
@@ -196,11 +214,66 @@ func TestCoroBuilderConditionalSuspendPreservesLogicalCFG(t *testing.T) {
 		t.Fatal("conditional suspend phi predecessor does not use the joined physical continuation")
 	}
 	ir := pkg.Module().String()
-	if !strings.Contains(ir, "br i1 true") || !strings.Contains(ir, "call void @publish_yield") {
+	if !strings.Contains(ir, "br i1 true") || !strings.Contains(ir, "call void @publish_yield") ||
+		strings.Count(ir, "call void @take_resume_decision") != 2 {
 		t.Fatalf("conditional suspend lacks poll branch/publication path:\n%s", ir)
 	}
 	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("verify conditional coroutine suspend: %v\n%s", err, ir)
+	}
+}
+
+func TestCoroBuilderPerSuspendAfterResumeOverride(t *testing.T) {
+	Initialize(InitAll)
+	prog := NewProgram(nil)
+	defer prog.Dispose()
+	pkg := prog.NewPackage("corooverride", "coro/resume/override")
+	defer pkg.Module().Dispose()
+
+	fn := pkg.NewFunc("coro_resume_override", coroHandleSignature(), InGo)
+	b := fn.MakeBody(1)
+	defer b.Dispose()
+	defaultCalls := 0
+	overrideCalls := 0
+	coro := b.BeginCoro(CoroOptions{
+		Frame: CoroFrameOps{
+			Alloc: func(Builder, Expr, Expr) Expr { return prog.Nil(prog.VoidPtr()) },
+			Free:  func(Builder, Expr, Expr, Expr) {},
+		},
+		AfterResume: func(b Builder) {
+			defaultCalls++
+			b.Call(pkg.NewFunc("default_resume_gate", functionSignature(nil, nil), InC).Expr)
+		},
+	})
+	logical := fn.MakeBlock()
+	b.Jump(logical)
+	b.SetBlock(logical)
+	if got := coro.SuspendCurrentBlock(); got != logical {
+		t.Fatal("default suspend did not preserve its logical block")
+	}
+	mustPanicContains(t, "requires a callback", func() {
+		coro.SuspendCurrentBlockWithAfterResume(nil)
+	})
+	if got := coro.SuspendCurrentBlockWithAfterResume(func(b Builder) {
+		overrideCalls++
+		b.Call(pkg.NewFunc("exact_resume_gate", functionSignature(nil, nil), InC).Expr)
+	}); got != logical {
+		t.Fatal("override suspend did not preserve its logical block")
+	}
+	if defaultCalls != 2 || overrideCalls != 1 {
+		t.Fatalf("resume callbacks before final suspend = default:%d override:%d, want 2/1", defaultCalls, overrideCalls)
+	}
+	coro.Finish()
+	b.EndBuild()
+	if defaultCalls != 2 || overrideCalls != 1 {
+		t.Fatalf("final suspend invoked a resume callback: default:%d override:%d", defaultCalls, overrideCalls)
+	}
+	ir := pkg.Module().String()
+	if strings.Count(ir, "call void @default_resume_gate") != 2 || strings.Count(ir, "call void @exact_resume_gate") != 1 {
+		t.Fatalf("default and per-suspend override were not mutually exclusive:\n%s", ir)
+	}
+	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify per-suspend resume override: %v\n%s", err, ir)
 	}
 }
 
@@ -1691,9 +1764,15 @@ func TestCoroBuilderRejectsMisuse(t *testing.T) {
 	fixture := newCoroTestFixture(t, nil, 0)
 	mustPanicContains(t, "finished coroutine", func() { fixture.coro.Suspend() })
 	mustPanicContains(t, "finished coroutine", func() { fixture.coro.SuspendCurrentBlock() })
+	mustPanicContains(t, "finished coroutine", func() {
+		fixture.coro.SuspendCurrentBlockWithAfterResume(func(Builder) {})
+	})
 	mustPanicContains(t, "finished coroutine", func() { fixture.coro.SuspendCurrentBlockIf(fixture.prog.BoolVal(true), nil) })
 	mustPanicContains(t, "finished coroutine", func() { fixture.coro.Finish() })
 	mustPanicContains(t, "nil coroutine builder", func() { (*CoroBuilder)(nil).SuspendCurrentBlock() })
+	mustPanicContains(t, "nil coroutine builder", func() {
+		(*CoroBuilder)(nil).SuspendCurrentBlockWithAfterResume(func(Builder) {})
+	})
 	mustPanicContains(t, "nil coroutine builder", func() { (*CoroBuilder)(nil).SuspendCurrentBlockIf(Nil, nil) })
 	if (*CoroBuilder)(nil).Handle() != Nil {
 		t.Fatal("nil coroutine builder returned a non-nil handle")
@@ -1818,6 +1897,40 @@ func TestCoroBuilderRejectsCallbackControlFlow(t *testing.T) {
 				BeforeInitialSuspend: func(b Builder, _, _ Expr) {
 					b.Unreachable()
 				},
+			})
+		})
+	})
+
+	t.Run("after resume terminates block", func(t *testing.T) {
+		prog, b := newCoroCallbackTestBuilder(t)
+		mustPanicContains(t, "after-resume callback terminated insertion block", func() {
+			b.BeginCoro(CoroOptions{
+				Frame: CoroFrameOps{
+					Alloc: func(Builder, Expr, Expr) Expr {
+						return prog.Nil(prog.VoidPtr())
+					},
+					Free: func(Builder, Expr, Expr, Expr) {},
+				},
+				AfterResume: func(b Builder) {
+					b.Unreachable()
+				},
+			})
+		})
+	})
+
+	t.Run("after resume override terminates block", func(t *testing.T) {
+		prog, b := newCoroCallbackTestBuilder(t)
+		coro := b.BeginCoro(CoroOptions{
+			Frame: CoroFrameOps{
+				Alloc: func(Builder, Expr, Expr) Expr {
+					return prog.Nil(prog.VoidPtr())
+				},
+				Free: func(Builder, Expr, Expr, Expr) {},
+			},
+		})
+		mustPanicContains(t, "after-resume callback terminated insertion block", func() {
+			coro.SuspendCurrentBlockWithAfterResume(func(b Builder) {
+				b.Unreachable()
 			})
 		})
 	})
