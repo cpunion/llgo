@@ -132,6 +132,7 @@ func TakeRunDecision(
 		if expected != (ParkTicket{}) {
 			return ParkOutcomePending, 0, OperationResultLease{}, TaskCancelNone, false
 		}
+		p.runDecisionTaken = true
 		return ParkOutcomePending, 0, OperationResultLease{}, TaskCancelNone, true
 	}
 	if decision.g != g || decision.ticket != expected {
