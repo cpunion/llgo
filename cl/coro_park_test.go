@@ -99,16 +99,23 @@ func TestCoroParkCurrentFrameNativeAndWasm32(t *testing.T) {
 				t.Fatalf("Root has no park hook followed by a caller-frame suspend:\n%s", body)
 			}
 			parkSuspend := hook + parkSuspendRelative
-			activate := regexp.MustCompile(`(?s)store i16 0,.*store i16 2,`).FindStringIndex(body[parkSuspend:])
+			decisionRelative := strings.Index(body[parkSuspend:], "call i32 @"+coroRunDecisionTakeZeroHookV1)
+			if decisionRelative < 0 {
+				t.Fatalf("Root does not take its run decision after park resume:\n%s", body)
+			}
+			decision := parkSuspend + decisionRelative
+			activate := regexp.MustCompile(`(?s)store i16 0,.*store i16 2,`).FindStringIndex(body[decision:])
 			if activate == nil {
 				t.Fatalf("Root does not reactivate its exact frame after resume:\n%s", body)
 			}
+			assertCoroScalarRunDecisionCalls(t, "Root park", body, 2)
 
 			runCoroABITestPipeline(t, prog, module)
 			resume := module.NamedFunction("foo.Root$coro.resume")
 			if resume.IsNil() || !strings.Contains(resume.String(), "call void @"+coroParkPrepareHookV1) {
 				t.Fatalf("CoroSplit lost the park handoff in Root.resume:\n%s", module.String())
 			}
+			assertCoroRunDecisionResumeOnly(t, module, "foo.Root$coro", 2)
 			for _, intrinsic := range []string{"llvm.coro.id", "llvm.coro.begin", "llvm.coro.suspend", "llvm.coro.end"} {
 				if hasLLVMCall(module.String(), intrinsic) {
 					t.Fatalf("post-split park module still calls %s:\n%s", intrinsic, module.String())
@@ -121,6 +128,9 @@ func TestCoroParkCurrentFrameNativeAndWasm32(t *testing.T) {
 			defer object.Dispose()
 			if len(object.Bytes()) == 0 || !bytes.Contains(object.Bytes(), []byte(coroParkPrepareHookV1)) {
 				t.Fatalf("post-CoroSplit object lost unresolved park ABI symbol %q", coroParkPrepareHookV1)
+			}
+			if !bytes.Contains(object.Bytes(), []byte(coroRunDecisionTakeZeroHookV1)) {
+				t.Fatalf("post-CoroSplit object lost unresolved run-decision ABI symbol %q", coroRunDecisionTakeZeroHookV1)
 			}
 		})
 	}

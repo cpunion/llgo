@@ -15,8 +15,9 @@ on:
   pull_request:
     branches:
       - "**"
-      # Temporary: llvm-coro PRs use the focused Coroutine workflow below.
+      # Temporary: stacked coroutine PRs use the focused workflow below.
       - "!llvm-coro"
+      - "!coro/**"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}

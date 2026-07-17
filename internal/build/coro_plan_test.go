@@ -429,6 +429,8 @@ var preemptRequest uint32
 func __llgo_coro_preempt_poll_v1() bool { return atomicExchange(&preemptRequest, 0) == 1 }
 func __llgo_coro_yield_prepare_v1() {}
 func __llgo_coro_park_prepare_v1() {}
+func __llgo_coro_run_decision_take_v1(unsafe.Pointer, uint32, uint32, *uint32, *uint32, *uint32, *uint32, *uint32) {}
+func __llgo_coro_run_decision_take_zero_v1(unsafe.Pointer) uint32 { return 0 }
 func __llgo_coro_complete_prepare_v1() {}
 func __llgo_coro_frame_free_v1() {}
 func __llgo_coro_panic_prepare_v1() {}
@@ -497,6 +499,32 @@ func atomicExchange(*uint32, uint32) uint32
 	if invalidPrepareErr == nil || !strings.Contains(invalidPrepareErr.Error(), "wait prepare ABI") {
 		t.Fatalf("invalid wait prepare ABI error = %v", invalidPrepareErr)
 	}
+	runDecisionFn := ssaPkg.Func(coroRunDecisionTakeSymbolV1)
+	if runDecisionFn == nil {
+		t.Fatal("run-decision hook is absent from the runtime fixture")
+	}
+	originalRunDecisionSignature := runDecisionFn.Signature
+	runDecisionFn.Signature = types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(types.NewParam(token.NoPos, nil, "g", types.Typ[types.UnsafePointer])),
+		types.NewTuple(), false)
+	_, _, _, _, invalidRunDecisionErr := requiredCoroProgramRuntimePlan(ctx)
+	runDecisionFn.Signature = originalRunDecisionSignature
+	if invalidRunDecisionErr == nil || !strings.Contains(invalidRunDecisionErr.Error(), "run-decision ABI") {
+		t.Fatalf("invalid run-decision ABI error = %v", invalidRunDecisionErr)
+	}
+	runDecisionZeroFn := ssaPkg.Func(coroRunDecisionTakeZeroSymbolV1)
+	if runDecisionZeroFn == nil {
+		t.Fatal("zero-ticket run-decision hook is absent from the runtime fixture")
+	}
+	originalRunDecisionZeroSignature := runDecisionZeroFn.Signature
+	runDecisionZeroFn.Signature = types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(types.NewParam(token.NoPos, nil, "g", types.Typ[types.UnsafePointer])),
+		types.NewTuple(), false)
+	_, _, _, _, invalidRunDecisionZeroErr := requiredCoroProgramRuntimePlan(ctx)
+	runDecisionZeroFn.Signature = originalRunDecisionZeroSignature
+	if invalidRunDecisionZeroErr == nil || !strings.Contains(invalidRunDecisionZeroErr.Error(), "zero-ticket run-decision ABI") {
+		t.Fatalf("invalid zero-ticket run-decision ABI error = %v", invalidRunDecisionZeroErr)
+	}
 	retireFn := ssaPkg.Func(coroWaitRetireCompletedSymbolV1)
 	originalRetireSignature := retireFn.Signature
 	retireFn.Signature = types.NewSignatureType(nil, nil, nil,
@@ -522,6 +550,8 @@ func atomicExchange(*uint32, uint32) uint32
 		"__llgo_coro_preempt_poll_v1",
 		"__llgo_coro_yield_prepare_v1",
 		"__llgo_coro_park_prepare_v1",
+		coroRunDecisionTakeSymbolV1,
+		coroRunDecisionTakeZeroSymbolV1,
 		"__llgo_coro_complete_prepare_v1",
 		"__llgo_coro_frame_free_v1",
 	}
@@ -574,6 +604,8 @@ func atomicExchange(*uint32, uint32) uint32
 		"__llgo_coro_preempt_poll_v1",
 		"__llgo_coro_yield_prepare_v1",
 		"__llgo_coro_park_prepare_v1",
+		coroRunDecisionTakeSymbolV1,
+		coroRunDecisionTakeZeroSymbolV1,
 		"__llgo_coro_complete_prepare_v1",
 		"__llgo_coro_frame_free_v1",
 	}
@@ -786,6 +818,18 @@ func atomicExchange(*uint32, uint32) uint32
 		parkHookPlan.FuncRep != coro.DirectPlain {
 		t.Fatalf("park prepare hook plan = %+v, want one required sync direct-plain body", parkHookPlan)
 	}
+	runDecisionPlan, ok := plan.FunctionPlan(runDecisionFn)
+	if !ok || runDecisionPlan.Effect.MaySuspend() || runDecisionPlan.Exec.Contains(coro.NeedsPreempt) ||
+		runDecisionPlan.Emission != coro.EmitPlain || runDecisionPlan.Demand != coro.SyncDemand ||
+		runDecisionPlan.FuncRep != coro.DirectPlain {
+		t.Fatalf("run-decision hook plan = %+v, want one required sync direct-plain body", runDecisionPlan)
+	}
+	runDecisionZeroPlan, ok := plan.FunctionPlan(runDecisionZeroFn)
+	if !ok || runDecisionZeroPlan.Effect.MaySuspend() || runDecisionZeroPlan.Exec.Contains(coro.NeedsPreempt) ||
+		runDecisionZeroPlan.Emission != coro.EmitPlain || runDecisionZeroPlan.Demand != coro.SyncDemand ||
+		runDecisionZeroPlan.FuncRep != coro.DirectPlain {
+		t.Fatalf("zero-ticket run-decision hook plan = %+v, want one required sync direct-plain body", runDecisionZeroPlan)
+	}
 	unrelatedPlan, ok := plan.FunctionPlan(unrelatedLoop)
 	if !ok || !unrelatedPlan.Exec.Contains(coro.NeedsPreempt) || !unrelatedPlan.Effect.Contains(coro.YieldOnly) || unrelatedPlan.Emission != coro.EmitCoroutine {
 		t.Fatalf("unrelated loop plan = %+v, want coroutine preemption", unrelatedPlan)
@@ -925,6 +969,8 @@ func __llgo_coro_frame_free_v1() {}
 		"__llgo_coro_preempt_poll_v1",
 		"__llgo_coro_yield_prepare_v1",
 		"__llgo_coro_park_prepare_v1",
+		coroRunDecisionTakeSymbolV1,
+		coroRunDecisionTakeZeroSymbolV1,
 		"__llgo_coro_complete_prepare_v1",
 		"__llgo_coro_frame_free_v1",
 	} {
@@ -953,6 +999,8 @@ func __llgo_coro_await_prepare_v1() {}
 func __llgo_coro_preempt_poll_v1() bool { return false }
 func __llgo_coro_yield_prepare_v1() {}
 func __llgo_coro_park_prepare_v1() {}
+func __llgo_coro_run_decision_take_v1(unsafe.Pointer, uint32, uint32, *uint32, *uint32, *uint32, *uint32, *uint32) {}
+func __llgo_coro_run_decision_take_zero_v1(unsafe.Pointer) uint32 { return 0 }
 func __llgo_coro_complete_prepare_v1() {}
 func __llgo_coro_frame_free_v1() {}
 func intrinsicInput() string { return "not constant at the call site" }
@@ -1328,6 +1376,8 @@ func __llgo_coro_await_prepare_v1() {}
 func __llgo_coro_preempt_poll_v1() bool { return false }
 func __llgo_coro_yield_prepare_v1() {}
 func __llgo_coro_park_prepare_v1() {}
+func __llgo_coro_run_decision_take_v1(unsafe.Pointer, uint32, uint32, *uint32, *uint32, *uint32, *uint32, *uint32) {}
+func __llgo_coro_run_decision_take_zero_v1(unsafe.Pointer) uint32 { return 0 }
 func __llgo_coro_complete_prepare_v1() {}
 func __llgo_coro_frame_free_v1() {}
 ` + body

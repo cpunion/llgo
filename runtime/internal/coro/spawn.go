@@ -78,13 +78,15 @@ func runningSpawnContext(parent *G) (*P, bool) {
 		parent.pending.wait != nil || parent.pending.ticket != 0 ||
 		parent.destroyTarget != nil || parent.destroyRoot || parent.queued || parent.nextReady != nil ||
 		parent.waitToken != nil || parent.waitTicket != 0 || parent.nextWait != nil || parent.waiting ||
+		!releasableParkState(&parent.park) ||
 		parent.spawnParent != nil || parent.spawnP != nil || !validLiveTaskStorage(parent) {
 		return nil, false
 	}
 	p := parent.runP
 	if p == nil || p.current != parent || !p.inResume ||
 		!expectedAction(p, parent, p.action, ActionResume) ||
-		!validReadyQueue(p) || !validWaitQueue(p) {
+		p.runDecision != (RunDecision{}) ||
+		!validReadyQueue(p) || !validSchedulerWaitQueues(p) {
 		return nil, false
 	}
 	schedule := preemptLoad(&p.schedule)
@@ -205,6 +207,7 @@ func RollbackSpawn(parent, child *G) (unsafe.Pointer, uintptr, bool) {
 		child.pending.kind != pendingNone || child.destroyTarget != nil || child.destroyRoot ||
 		child.nextReady != nil || child.queued || child.waitToken != nil || child.waitTicket != 0 ||
 		child.nextWait != nil || child.waiting || child.runP != nil ||
+		!releasableParkState(&child.park) || child.park.taskCancelKind != TaskCancelNone ||
 		child.taskState != taskStorageOwned || child.taskStorage != unsafe.Pointer(child) ||
 		child.taskSize != TaskStorageSize() || preemptLoad(preemptAddress(child)) != preemptIdle {
 		return nil, 0, false
@@ -228,11 +231,12 @@ func RollbackSpawn(parent, child *G) (unsafe.Pointer, uintptr, bool) {
 // transfer its allocation.
 func ReclaimableG(g *G) bool {
 	return ValidG(g) && preemptLoad(preemptAddress(g)) == preemptDisabled && g.state == GDead &&
-		g.root == nil && g.active == nil && g.frames == nil &&
+		g.taskControlLeases == 0 && g.root == nil && g.active == nil && g.frames == nil &&
 		g.pending.kind == pendingNone && g.pending.from == nil && g.pending.target == nil &&
 		g.pending.wait == nil && g.pending.ticket == 0 &&
 		g.destroyTarget == nil && !g.destroyRoot && g.nextReady == nil && !g.queued &&
 		g.waitToken == nil && g.waitTicket == 0 && g.nextWait == nil && !g.waiting && g.runP == nil &&
+		releasableParkState(&g.park) && g.park.taskCancelKind == TaskCancelNone &&
 		g.spawnChild == nil && g.spawnParent == nil && g.spawnP == nil && validLiveTaskStorage(g) &&
 		emptyPanicRecord(&g.panicRecord) && !g.panicUnwind
 }

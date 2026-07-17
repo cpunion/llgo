@@ -111,7 +111,7 @@ func TestPreemptPollFailsClosedAndConsumesOnlyActiveRequest(t *testing.T) {
 	runtime.KeepAlive(task.frame.memory)
 }
 
-func TestBeginRunGDoesNotRequestPreemptWithoutCompetitor(t *testing.T) {
+func TestBeginRunGDoesNotImmediatelyPreemptWithoutCompetitor(t *testing.T) {
 	task := newYieldingTestG(t, "single")
 	p := new(P)
 	action, ok := BeginRunG(p, task.g)
@@ -120,7 +120,10 @@ func TestBeginRunGDoesNotRequestPreemptWithoutCompetitor(t *testing.T) {
 	}
 	activatePreemptTestFrame(t, p, task, action)
 	if PollPreempt(task.g) {
-		t.Fatal("sole runnable G received an automatic preemption request")
+		t.Fatal("sole runnable G was preempted before its service quantum")
+	}
+	if p.servicePreemptBudget != servicePreemptPollBudget-1 {
+		t.Fatalf("sole runnable G budget = %d, want %d", p.servicePreemptBudget, servicePreemptPollBudget-1)
 	}
 	runtime.KeepAlive(task.frame.memory)
 }

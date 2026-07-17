@@ -133,11 +133,12 @@ func PrepareExplicitStatus(
 	if status != ExplicitStatusPanic || typeWord == nil || handle == nil || header == nil || header.Flags != 0 ||
 		g.state != GRunning || g.active == nil || g.root == nil || g.runP == nil ||
 		g.runP.current != g || !g.runP.inResume || !expectedAction(g.runP, g, g.runP.action, ActionResume) ||
+		g.runP.runDecision != (RunDecision{}) ||
 		g.pending.kind != pendingNone || g.pending.from != nil || g.pending.target != nil ||
 		g.pending.wait != nil || g.pending.ticket != 0 || g.destroyTarget != nil || g.destroyRoot ||
 		g.queued || g.nextReady != nil || g.waitToken != nil || g.waitTicket != 0 ||
 		g.nextWait != nil || g.waiting || g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
-		g.panicUnwind {
+		!releasableParkState(&g.park) || g.park.taskCancelPhase == taskCancelRequested || g.panicUnwind {
 		return reject()
 	}
 	frame := findFrame(g, handle)
@@ -182,7 +183,7 @@ func preparePanicAncestor(p *P, g *G, frame *Frame) (Action, bool) {
 func finishPanicG(p *P, g *G, wasRoot bool) (Action, bool) {
 	if p == nil || g == nil || !wasRoot || g.active != nil || g.frames != nil ||
 		!g.panicUnwind || !publishedPanicRecord(&g.panicRecord) ||
-		!validReadyQueue(p) || !validWaitQueue(p) {
+		!validReadyQueue(p) || !validSchedulerWaitQueues(p) {
 		return Action{}, false
 	}
 	schedule := preemptLoad(&p.schedule)
@@ -192,11 +193,11 @@ func finishPanicG(p *P, g *G, wasRoot bool) (Action, bool) {
 	// Match normal terminal linearization when this is the last G. With peers,
 	// retain the P gate: the runtime will surface the panic immediately, but no
 	// child/peer ownership is silently discarded by this core transition.
-	if p.readyHead == nil && p.waitHead == nil &&
+	if p.readyHead == nil && emptySchedulerWaitQueues(p) &&
 		(preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil) {
 		return beginTerminalExecutorClose(p, g, p.action)
 	}
-	if p.readyHead == nil && p.waitHead == nil &&
+	if p.readyHead == nil && emptySchedulerWaitQueues(p) &&
 		!preemptCompareAndSwap(&p.schedule, scheduleIdle, scheduleDisabled) {
 		return Action{}, false
 	}
@@ -207,7 +208,7 @@ func finishPanicG(p *P, g *G, wasRoot bool) (Action, bool) {
 	g.state = GDead
 	g.runP = nil
 	p.current = nil
-	p.timerPreemptBudget = 0
+	p.servicePreemptBudget = 0
 	p.action = Action{}
 	return Action{Kind: ActionPanicComplete}, true
 }
@@ -259,7 +260,7 @@ func AcknowledgePanicTerminalSchedule(p *P, g *G, action Action) bool {
 		preemptLoad(&p.executorMode) == executorModeUnbound && p.executor == nil &&
 		g.state == GPanicking && g.panicUnwind && publishedPanicRecord(&g.panicRecord) &&
 		g.destroyTarget == nil && g.destroyRoot && g.active == nil && g.frames == nil &&
-		p.readyHead == nil && p.readyTail == nil && p.waitHead == nil && p.waitTail == nil &&
-		validReadyQueue(p) && validWaitQueue(p) &&
+		p.readyHead == nil && p.readyTail == nil && emptySchedulerWaitQueues(p) &&
+		validReadyQueue(p) && validSchedulerWaitQueues(p) &&
 		preemptCompareAndSwap(&p.schedule, scheduleRequested, scheduleIdle)
 }

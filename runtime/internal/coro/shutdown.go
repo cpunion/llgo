@@ -41,6 +41,7 @@ func validCancelFrame(frame *Frame, g *G) bool {
 func validCancelableReadyG(g *G) bool {
 	if !ValidG(g) || g.state != GRunnable || !g.queued || g.waiting || g.waitToken != nil ||
 		g.waitTicket != 0 || g.nextWait != nil || g.runP != nil || g.root == nil || g.active == nil ||
+		!releasableParkState(&g.park) || g.park.taskCancelKind != TaskCancelNone ||
 		g.pending.kind != pendingNone || g.pending.from != nil || g.pending.target != nil ||
 		g.pending.wait != nil || g.pending.ticket != 0 || g.destroyTarget != nil || g.destroyRoot ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
@@ -137,8 +138,8 @@ func BeginCommandShutdown(p *P, main *G) bool {
 	if p == nil || !ReclaimableG(main) || main.taskState != taskStorageStatic ||
 		preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil ||
 		p.current != nil || p.inResume || p.action.Kind != ActionInvalid || p.action.Handle != nil ||
-		p.timerPreemptBudget != 0 ||
-		!validReadyQueue(p) || !validWaitQueue(p) || p.waitHead != nil || p.waitTail != nil {
+		p.runDecision != (RunDecision{}) || p.runDecisionTaken || p.servicePreemptBudget != 0 ||
+		!validReadyQueue(p) || !validSchedulerWaitQueues(p) || !emptySchedulerWaitQueues(p) {
 		return false
 	}
 	for g := p.readyHead; g != nil; g = g.nextReady {
@@ -178,8 +179,8 @@ func prepareCancelFrame(p *P, g *G, frame *Frame) (Action, bool) {
 func NextCommandCancel(p *P) (*G, Action, bool) {
 	if p == nil || preemptLoad(&p.schedule) != scheduleStopping || p.current != nil ||
 		p.inResume || p.action.Kind != ActionInvalid || p.action.Handle != nil ||
-		p.timerPreemptBudget != 0 ||
-		!validReadyQueue(p) || !validWaitQueue(p) || p.waitHead != nil || p.waitTail != nil {
+		p.runDecision != (RunDecision{}) || p.runDecisionTaken || p.servicePreemptBudget != 0 ||
+		!validReadyQueue(p) || !validSchedulerWaitQueues(p) || !emptySchedulerWaitQueues(p) {
 		return nil, Action{}, false
 	}
 	g := p.readyHead
@@ -227,7 +228,7 @@ func CancelDestroyed(p *P, g *G, action Action) (Action, bool) {
 	g.state = GDead
 	g.runP = nil
 	p.current = nil
-	p.timerPreemptBudget = 0
+	p.servicePreemptBudget = 0
 	p.action = Action{}
 	return Action{Kind: ActionCancelComplete}, true
 }
@@ -239,9 +240,9 @@ func FinishCommandShutdown(p *P, main *G) bool {
 	if p == nil || !ReclaimableG(main) || main.taskState != taskStorageStatic ||
 		preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil ||
 		p.current != nil || p.inResume || p.action.Kind != ActionInvalid || p.action.Handle != nil ||
-		p.timerPreemptBudget != 0 ||
-		!validReadyQueue(p) || !validWaitQueue(p) || p.readyHead != nil || p.readyTail != nil ||
-		p.waitHead != nil || p.waitTail != nil {
+		p.runDecision != (RunDecision{}) || p.runDecisionTaken || p.servicePreemptBudget != 0 ||
+		!validReadyQueue(p) || !validSchedulerWaitQueues(p) || p.readyHead != nil || p.readyTail != nil ||
+		!emptySchedulerWaitQueues(p) {
 		return false
 	}
 	return preemptCompareAndSwap(&p.schedule, scheduleStopping, scheduleDisabled)

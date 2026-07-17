@@ -65,11 +65,6 @@ const (
 	executorQuiesced
 )
 
-const (
-	executorProducerClosed = uint32(1 << 31)
-	executorProducerMask   = executorProducerClosed - 1
-)
-
 type executorRequestSlot struct {
 	// Every platform-visible word is an aligned uint32 atomic. The first slice
 	// deliberately has no scheduler-owned pointer suffix.
@@ -91,12 +86,14 @@ type executorRequestSlot struct {
 // The request gate is advisory. Posted wait slots, timer epochs, and other
 // durable sources remain the truth. The scheduler protocol is:
 //
-//  1. drain all durable sources;
+//  1. run bounded publish/resolve/promote epoch A over every durable source;
 //  2. Acknowledge the coalesced request;
-//  3. recheck every durable source and loop if any appeared before the ack;
-//  4. ArmIdle with a 0 -> IdleArmed CAS and recheck sources once more;
-//  5. CommitSleep against the exact IdleArmed word;
-//  6. enter the platform's retained-doorbell wait.
+//  3. unconditionally run the same bounded epoch B, then return even if a
+//     later durable fact or request remains pending for the next Poll;
+//  4. ArmIdle with a 0 -> IdleArmed CAS and publish sources once more;
+//  5. on work, leave idle before running the active two-epoch transaction;
+//  6. otherwise CommitSleep against the exact IdleArmed word;
+//  7. enter the platform's retained-doorbell wait.
 //
 // A successful CommitSleep is not by itself a blocking primitive. The target
 // wait must retain a doorbell delivered after that CAS but before the physical
@@ -118,54 +115,24 @@ func executorSlot(registry *ExecutorRegistry, handle ExecutorHandle) (*executorR
 }
 
 func executorAcquireProducer(slot *executorRequestSlot) bool {
-	if slot == nil {
-		return false
-	}
-	for {
-		inflight := preemptLoad(&slot.inflight)
-		if inflight&executorProducerClosed != 0 || inflight&executorProducerMask == executorProducerMask {
-			return false
-		}
-		if preemptCompareAndSwap(&slot.inflight, inflight, inflight+1) {
-			return true
-		}
-	}
+	return slot != nil && producerAdmissionAcquire(&slot.inflight)
 }
 
 func executorReleaseProducer(slot *executorRequestSlot) {
-	for {
-		inflight := preemptLoad(&slot.inflight)
-		if inflight&executorProducerMask == 0 {
-			return
-		}
-		if preemptCompareAndSwap(&slot.inflight, inflight, inflight-1) {
-			return
-		}
-	}
+	producerAdmissionRelease(&slot.inflight)
 }
 
 func executorSealProducers(slot *executorRequestSlot) bool {
-	if slot == nil {
-		return false
-	}
-	for {
-		inflight := preemptLoad(&slot.inflight)
-		if inflight&executorProducerClosed != 0 {
-			return true
-		}
-		if preemptCompareAndSwap(&slot.inflight, inflight, inflight|executorProducerClosed) {
-			return true
-		}
-	}
+	return slot != nil && producerAdmissionSeal(&slot.inflight)
 }
 
 func executorProducersQuiesced(slot *executorRequestSlot) bool {
-	return slot != nil && preemptLoad(&slot.inflight) == executorProducerClosed
+	return slot != nil && producerAdmissionQuiesced(&slot.inflight)
 }
 
 func executorFreeSlotReusable(generation, inflight, gate uint32) bool {
 	pristine := generation == 0 && inflight == 0 && gate == 0
-	retired := generation != 0 && inflight == executorProducerClosed && gate == executorGateClosed
+	retired := generation != 0 && inflight == producerAdmissionClosed && gate == executorGateClosed
 	return pristine || retired
 }
 
@@ -200,7 +167,7 @@ func (registry *ExecutorRegistry) Register() (ExecutorHandle, bool) {
 		}
 		preemptStore(&slot.generation, generation)
 		preemptStore(&slot.gate, 0)
-		if !preemptCompareAndSwap(&slot.inflight, executorProducerClosed, 0) {
+		if !producerAdmissionReopen(&slot.inflight) {
 			return ExecutorHandle{}, false
 		}
 		preemptStore(&slot.state, uint32(executorActive))
@@ -262,9 +229,10 @@ func (registry *ExecutorRegistry) ObserveRequested(handle ExecutorHandle) bool {
 	return gate&^executorGateMask == 0 && gate&executorGateClosed == 0 && gate&executorGateRequested != 0
 }
 
-// Acknowledge clears the advisory request after the scheduler has drained all
-// durable sources. The caller must recheck those sources after this CAS because
-// a producer may have coalesced immediately before the clear.
+// Acknowledge clears the advisory request after publication epoch A. The
+// caller must run one unconditional full epoch B after this CAS because a
+// producer may have coalesced immediately before the clear. A request arriving
+// after the CAS remains durable for a later Poll; B does not wait for silence.
 func (registry *ExecutorRegistry) Acknowledge(handle ExecutorHandle) (bool, bool) {
 	slot, ok := executorSlot(registry, handle)
 	if !ok || preemptLoad(&slot.generation) != handle.Generation {
@@ -367,10 +335,15 @@ func (registry *ExecutorRegistry) BeginClose(handle ExecutorHandle) bool {
 // one paused before taking a slot lease or between Request and its doorbell,
 // has returned. The scheduler must already have performed the final
 // post-backend-join durable-source drain required by BeginClose.
-func (registry *ExecutorRegistry) ConfirmQuiesced(handle ExecutorHandle) bool {
+func (registry *ExecutorRegistry) canConfirmQuiesced(handle ExecutorHandle) bool {
 	slot, ok := executorSlot(registry, handle)
 	return ok && preemptLoad(&slot.generation) == handle.Generation && executorProducersQuiesced(slot) &&
-		preemptLoad(&slot.gate) == executorGateClosed &&
+		preemptLoad(&slot.gate) == executorGateClosed && preemptLoad(&slot.state) == uint32(executorClosing)
+}
+
+func (registry *ExecutorRegistry) ConfirmQuiesced(handle ExecutorHandle) bool {
+	slot, ok := executorSlot(registry, handle)
+	return ok && registry.canConfirmQuiesced(handle) &&
 		preemptCompareAndSwap(&slot.state, uint32(executorClosing), uint32(executorQuiesced))
 }
 

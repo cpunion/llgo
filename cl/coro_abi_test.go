@@ -247,6 +247,7 @@ func TestCoroChildAwaitPhysicalABIV1Presplit(t *testing.T) {
 		coroFramePublishHookV1,
 		coroAwaitPrepareHookV1,
 		coroPreemptPollHookV1,
+		coroRunDecisionTakeZeroHookV1,
 		coroCompletePrepareHookV1,
 		coroFrameFreeHookV1,
 	} {
@@ -277,6 +278,12 @@ func TestCoroChildAwaitPhysicalABIV1Presplit(t *testing.T) {
 	for name, body := range map[string]string{"Parent": parentIR, "Child": childIR} {
 		assertCoroV1TaskAwareFrameCalls(t, name, body, prog.PointerSize()*8)
 		assertCoroV1InitialPublish(t, name, body)
+		wantRunDecisions := 1
+		if name == "Parent" {
+			wantRunDecisions = 2
+		}
+		assertCoroScalarRunDecisionCalls(t, name, body, wantRunDecisions)
+		assertCoroV1InitialRunDecision(t, name, body)
 		assertCoroV1Completion(t, name, body)
 	}
 	assertCoroStaticChildAwait(t, parentIR)
@@ -320,6 +327,8 @@ func TestCoroChildAwaitPhysicalABIV1CoroSplit(t *testing.T) {
 			t.Fatalf("post-split module still calls %s:\n%s", intrinsic, ir)
 		}
 	}
+	assertCoroRunDecisionResumeOnly(t, module, "foo.Parent$coro", 2)
+	assertCoroRunDecisionResumeOnly(t, module, "foo.Child$coro", 1)
 	parentResume := module.NamedFunction("foo.Parent$coro.resume").String()
 	if !regexp.MustCompile(`call ptr @"?foo\.Child\$coro"?\(`).MatchString(parentResume) {
 		t.Fatalf("Parent resume entry lost the static child ramp call:\n%s", parentResume)
@@ -343,6 +352,24 @@ func TestCoroChildAwaitPhysicalABIV1CoroSplit(t *testing.T) {
 		if !strings.Contains(destroy, "call void @"+coroFrameFreeHookV1) {
 			t.Fatalf("%s destroy entry lost task-aware frame free:\n%s", function, destroy)
 		}
+	}
+}
+
+func TestCoroScalarRunDecisionDoesNotGrowFrameNativeAndWasm(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		target *llssa.Target
+	}{
+		{name: "native"},
+		{name: "wasm32", target: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			baseline := compileCoroDecisionFrameProbe(t, test.target, false)
+			withScalarGate := compileCoroDecisionFrameProbe(t, test.target, true)
+			if withScalarGate != baseline {
+				t.Fatalf("scalar run-decision frame size = %d, want gate-off baseline %d", withScalarGate, baseline)
+			}
+		})
 	}
 }
 
@@ -399,6 +426,22 @@ func Loop(limit uint32) uint32 {
 	if got := strings.Count(body, "call i8 @llvm.coro.suspend"); got < 3 {
 		t.Fatalf("Loop coroutine suspends = %d, want initial + yield + final:\n%s", got, body)
 	}
+	polls := strings.Count(body, "call i1 @"+coroPreemptPollHookV1)
+	assertCoroScalarRunDecisionCalls(t, "Loop", body, polls+1)
+	initialDecision := strings.Index(body, "call i32 @"+coroRunDecisionTakeZeroHookV1)
+	yieldSuspend := strings.Index(body[handoff:], "call i8 @llvm.coro.suspend")
+	if yieldSuspend < 0 {
+		t.Fatalf("Loop yield handoff has no suspend:\n%s", body)
+	}
+	yieldSuspend += handoff
+	yieldDecision := strings.Index(body[yieldSuspend:], "call i32 @"+coroRunDecisionTakeZeroHookV1)
+	if yieldDecision < 0 {
+		t.Fatalf("Loop resumed yield edge has no decision gate:\n%s", body)
+	}
+	yieldDecision += yieldSuspend
+	if initialDecision < 0 || yieldDecision <= yieldSuspend {
+		t.Fatalf("Loop decision gates are not on initial/resumed paths:\n%s", body)
+	}
 	runCoroABITestPipeline(t, prog, module)
 	post := module.String()
 	for _, suffix := range []string{".resume", ".destroy"} {
@@ -406,6 +449,7 @@ func Loop(limit uint32) uint32 {
 			t.Fatalf("CoroSplit did not create Loop%s:\n%s", suffix, post)
 		}
 	}
+	assertCoroRunDecisionResumeOnly(t, module, "foo.Loop$coro", polls+1)
 }
 
 func TestCoroProgramInitPhysicalABIV2(t *testing.T) {
@@ -892,6 +936,8 @@ func TestCoroChildAwaitPhysicalABIV1Wasm32(t *testing.T) {
 			}
 		}
 	}
+	assertCoroRunDecisionResumeOnly(t, module, "foo.Parent$coro", 2)
+	assertCoroRunDecisionResumeOnly(t, module, "foo.Child$coro", 1)
 }
 
 func TestCoroChildAwaitPhysicalABIV1FailsClosed(t *testing.T) {
@@ -1996,6 +2042,281 @@ func assertCoroV1InitialPublish(t *testing.T, name, body string) {
 	}
 }
 
+func assertCoroScalarRunDecisionCalls(t *testing.T, name, body string, want int) {
+	t.Helper()
+	callPrefix := "call i32 @" + coroRunDecisionTakeZeroHookV1
+	if got := strings.Count(body, callPrefix); got != want {
+		t.Fatalf("%s run-decision calls = %d, want %d:\n%s", name, got, want, body)
+	}
+	dispatch := regexp.MustCompile(
+		`(?m)(%[-a-zA-Z$._0-9]+) = call i32 @` + regexp.QuoteMeta(coroRunDecisionTakeZeroHookV1) +
+			`\(ptr [^)]+\)\n\s+(%[-a-zA-Z$._0-9]+) = icmp ne i32 (%[-a-zA-Z$._0-9]+), 0\n` +
+			`\s+br i1 (%[-a-zA-Z$._0-9]+), label %([-a-zA-Z$._0-9]+), label %[-a-zA-Z$._0-9]+`,
+	)
+	matches := dispatch.FindAllStringSubmatch(body, -1)
+	if got := len(matches); got != want {
+		t.Fatalf("%s scalar zero-ticket dispatches = %d, want %d:\n%s", name, got, want, body)
+	}
+	unsupported := ""
+	for _, match := range matches {
+		if match[1] != match[3] || match[2] != match[4] {
+			t.Fatalf("%s scalar run-decision result does not directly control its branch: %v:\n%s", name, match, body)
+		}
+		if unsupported == "" {
+			unsupported = match[5]
+		} else if match[5] != unsupported {
+			t.Fatalf("%s run-decision gates do not share one unsupported target: %s and %s:\n%s",
+				name, unsupported, match[5], body)
+		}
+	}
+	trap := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(unsupported) + `:.*\n\s+call void @llvm\.trap\(\)\n\s+unreachable`)
+	if unsupported == "" || !trap.MatchString(body) {
+		t.Fatalf("%s shared unsupported decision target %q is not trap/unreachable:\n%s", name, unsupported, body)
+	}
+}
+
+func coroFrameAllocationSize(t *testing.T, ramp llvm.Value, pointerBits int) uint64 {
+	t.Helper()
+	if ramp.IsNil() {
+		t.Fatal("cannot inspect frame allocation of nil coroutine ramp")
+	}
+	pattern := regexp.MustCompile(
+		`call ptr @` + regexp.QuoteMeta(coroFrameAllocHookV1) +
+			`\(ptr [^,]+, i` + strconv.Itoa(pointerBits) + ` ([0-9]+),`,
+	)
+	match := pattern.FindStringSubmatch(ramp.String())
+	if len(match) != 2 {
+		t.Fatalf("%s has no constant PhysicalABIV1 frame allocation:\n%s", ramp.Name(), ramp.String())
+	}
+	got, err := strconv.ParseUint(match[1], 10, 64)
+	if err != nil {
+		t.Fatalf("parse %s frame size %q: %v", ramp.Name(), match[1], err)
+	}
+	return got
+}
+
+func compileCoroDecisionFrameProbe(t *testing.T, target *llssa.Target, scalarGate bool) uint64 {
+	t.Helper()
+	var prog llssa.Program
+	if target == nil {
+		prog = newLLSSAProg(t)
+	} else {
+		prog = newLLSSAProgForTarget(t, target)
+	}
+	defer prog.Dispose()
+	pkg := prog.NewPackage("coro_decision_frame_probe", "llgo/test/coro-decision-frame-probe")
+	defer pkg.Module().Dispose()
+	ctx := &context{
+		prog: prog,
+		pkg:  pkg,
+		compilation: &Compilation{
+			EnableCoroChildAwait: true,
+			CoroABI:              coro.PhysicalABIV1,
+			SchedulerABI:         coro.SchedulerChildAwaitABIV0,
+		},
+	}
+	sourceSignature := types.NewSignatureType(nil, nil, nil, nil, nil, false)
+	abi := newCoroPhysicalABI(ctx, plannedFunctionSymbol{
+		plan: coro.FunctionPlan{ID: "llgo.test.coro-decision-frame-probe"},
+	}, sourceSignature)
+	if !scalarGate {
+		abi.runDecisionTakeZeroHook = ""
+	}
+	const name = "coro_decision_frame_probe$coro"
+	ctx.fn = pkg.NewFunc(name, abi.physicalSig, llssa.InGo)
+	b := ctx.fn.MakeBody(1)
+	defer b.Dispose()
+	body := ctx.beginCoroBody(b, abi)
+	b.SetBlock(body.coro.InitialResumeBlock())
+	body.activate(b)
+	body.coro.Finish()
+	b.EndBuild()
+	module := pkg.Module()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify target=%v scalar-gate=%t probe before CoroSplit: %v\n%s", target, scalarGate, err, module.String())
+	}
+	runCoroABITestPipeline(t, prog, module)
+	ramp := module.NamedFunction(name)
+	if scalarGate {
+		assertCoroRunDecisionResumeOnly(t, module, name, 1)
+	} else if functionHasReachableDirectCall(module.NamedFunction(name+".resume"), coroRunDecisionTakeZeroHookV1) {
+		t.Fatalf("gate-off frame probe retained scalar run-decision call:\n%s", module.String())
+	}
+	return coroFrameAllocationSize(t, ramp, prog.PointerSize()*8)
+}
+
+func assertCoroRunDecisionResumeOnly(t *testing.T, module llvm.Module, rampName string, want int) {
+	t.Helper()
+	for _, name := range []string{rampName, rampName + ".destroy"} {
+		function := module.NamedFunction(name)
+		if function.IsNil() {
+			t.Fatalf("post-CoroSplit module has no function %q:\n%s", name, module.String())
+		}
+		if functionHasReachableDirectCall(function, coroRunDecisionTakeZeroHookV1) {
+			t.Fatalf("run-decision gate is reachable outside the resume entry in %s:\n%s", name, function.String())
+		}
+	}
+	resumeName := rampName + ".resume"
+	resume := module.NamedFunction(resumeName)
+	if resume.IsNil() {
+		t.Fatalf("post-CoroSplit module has no function %q:\n%s", resumeName, module.String())
+	}
+	assertCoroScalarRunDecisionCalls(t, resumeName, resume.String(), want)
+}
+
+// functionHasReachableDirectCall follows only executable CFG edges. LLVM's
+// coro-split clones case-0 resume blocks into .destroy, then makes those blocks
+// dead by replacing llvm.coro.suspend with the constant destroy result 1.
+// Frontend test functions are optnone, so simplifycfg intentionally retains
+// that textual dead clone; it must not be mistaken for an executable gate.
+func functionHasReachableDirectCall(function llvm.Value, callee string) bool {
+	entry := function.EntryBasicBlock()
+	if entry.IsNil() {
+		return false
+	}
+	type cfgEdge struct {
+		block       llvm.BasicBlock
+		predecessor llvm.BasicBlock
+	}
+	type cfgState struct {
+		cfgEdge
+		constants map[llvm.Value]uint64
+	}
+	seen := make(map[cfgEdge][]map[llvm.Value]uint64)
+	pending := []cfgState{{cfgEdge: cfgEdge{block: entry}, constants: make(map[llvm.Value]uint64)}}
+	for len(pending) != 0 {
+		state := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		alreadySeen := false
+		for _, constants := range seen[state.cfgEdge] {
+			if sameCoroCFGConstants(constants, state.constants) {
+				alreadySeen = true
+				break
+			}
+		}
+		if alreadySeen {
+			continue
+		}
+		seen[state.cfgEdge] = append(seen[state.cfgEdge], state.constants)
+		constants := copyCoroCFGConstants(state.constants)
+		for instruction := state.block.FirstInstruction(); !instruction.IsNil(); instruction = llvm.NextInstruction(instruction) {
+			if !instruction.IsAPHINode().IsNil() {
+				value, ok := coroCFGPHIIncomingConstant(instruction, state.predecessor, constants)
+				if ok {
+					constants[instruction] = value
+				} else {
+					delete(constants, instruction)
+				}
+			}
+			if (!instruction.IsACallInst().IsNil() || !instruction.IsAInvokeInst().IsNil()) &&
+				instruction.CalledValue().Name() == callee {
+				return true
+			}
+		}
+		terminator := state.block.LastInstruction()
+		for _, successor := range executableTerminatorSuccessors(terminator, constants) {
+			pending = append(pending, cfgState{
+				cfgEdge:   cfgEdge{block: successor, predecessor: state.block},
+				constants: constants,
+			})
+		}
+	}
+	return false
+}
+
+func executableTerminatorSuccessors(terminator llvm.Value, constants map[llvm.Value]uint64) []llvm.BasicBlock {
+	count := terminator.SuccessorsCount()
+	if count == 0 {
+		return nil
+	}
+	if terminator.InstructionOpcode() == llvm.Br && count == 2 {
+		if condition, ok := coroCFGConstant(terminator.Operand(0), constants); ok {
+			if condition != 0 {
+				return []llvm.BasicBlock{terminator.Successor(0)}
+			}
+			return []llvm.BasicBlock{terminator.Successor(1)}
+		}
+	}
+	if terminator.InstructionOpcode() == llvm.Switch {
+		if condition, ok := coroCFGConstant(terminator.Operand(0), constants); ok {
+			selected := 0
+			for successor := 1; successor < count; successor++ {
+				if terminator.GetSwitchCaseValue(successor).ZExtValue() == condition {
+					selected = successor
+					break
+				}
+			}
+			return []llvm.BasicBlock{terminator.Successor(selected)}
+		}
+	}
+	successors := make([]llvm.BasicBlock, count)
+	for successor := range successors {
+		successors[successor] = terminator.Successor(successor)
+	}
+	return successors
+}
+
+func coroCFGPHIIncomingConstant(
+	phi llvm.Value,
+	predecessor llvm.BasicBlock,
+	constants map[llvm.Value]uint64,
+) (uint64, bool) {
+	if predecessor.IsNil() {
+		return 0, false
+	}
+	for incoming := 0; incoming < phi.IncomingCount(); incoming++ {
+		if phi.IncomingBlock(incoming) == predecessor {
+			return coroCFGConstant(phi.IncomingValue(incoming), constants)
+		}
+	}
+	return 0, false
+}
+
+func coroCFGConstant(value llvm.Value, constants map[llvm.Value]uint64) (uint64, bool) {
+	if !value.IsAConstantInt().IsNil() {
+		return value.ZExtValue(), true
+	}
+	constant, ok := constants[value]
+	return constant, ok
+}
+
+func copyCoroCFGConstants(constants map[llvm.Value]uint64) map[llvm.Value]uint64 {
+	copy := make(map[llvm.Value]uint64, len(constants))
+	for value, constant := range constants {
+		copy[value] = constant
+	}
+	return copy
+}
+
+func sameCoroCFGConstants(left, right map[llvm.Value]uint64) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for value, constant := range left {
+		if other, ok := right[value]; !ok || other != constant {
+			return false
+		}
+	}
+	return true
+}
+
+func assertCoroV1InitialRunDecision(t *testing.T, name, body string) {
+	t.Helper()
+	initialSuspend := strings.Index(body, "call i8 @llvm.coro.suspend")
+	if initialSuspend < 0 {
+		t.Fatalf("%s initial resume has no initial suspend:\n%s", name, body)
+	}
+	decisionRelative := strings.Index(body[initialSuspend:], "call i32 @"+coroRunDecisionTakeZeroHookV1)
+	if decisionRelative < 0 {
+		t.Fatalf("%s initial resume has no run-decision gate:\n%s", name, body)
+	}
+	decision := initialSuspend + decisionRelative
+	activate := regexp.MustCompile(`(?s)store i16 0,.*store i16 2,`).FindStringIndex(body[decision:])
+	if activate == nil {
+		t.Fatalf("%s run-decision gate is not before initial frame activation:\n%s", name, body)
+	}
+}
+
 func assertCoroV1Completion(t *testing.T, name, body string) {
 	t.Helper()
 	complete := strings.Index(body, "call void @"+coroCompletePrepareHookV1)
@@ -2042,11 +2363,21 @@ func assertCoroStaticChildAwait(t *testing.T, parent string) {
 		t.Fatalf("Parent does not suspend after await_prepare:\n%s", parent)
 	}
 	awaitSuspend += await
+	decisionRelative := strings.Index(parent[awaitSuspend:], "call i32 @"+coroRunDecisionTakeZeroHookV1)
+	if decisionRelative < 0 {
+		t.Fatalf("Parent does not take its run decision after await resume:\n%s", parent)
+	}
+	decision := awaitSuspend + decisionRelative
 	complete := strings.Index(parent[awaitSuspend:], "call void @"+coroCompletePrepareHookV1)
 	if complete < 0 {
 		t.Fatalf("Parent does not complete after its await resume:\n%s", parent)
 	}
 	complete += awaitSuspend
+	resumeContinuation := parent[decision:]
+	if !regexp.MustCompile(`(?s)call i32 @` + regexp.QuoteMeta(coroRunDecisionTakeZeroHookV1) +
+		`.*store i16 0,.*store i16 2,.*load i32,`).MatchString(resumeContinuation) {
+		t.Fatalf("Parent await run-decision gate does not precede activation and result continuation:\n%s", parent)
+	}
 	completionState := regexp.MustCompile(`(?s)store i16 2,.*store i16 4,.*store i32 2,`)
 	if !completionState.MatchString(parent[awaitSuspend:complete]) {
 		t.Fatalf("Parent does not publish FrameComplete/FinalSuspended/stateID=2 after await:\n%s", parent[awaitSuspend:complete])

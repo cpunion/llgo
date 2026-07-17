@@ -63,8 +63,27 @@ type CoroOptions struct {
 	// handle/storage pair, but must leave the builder in the same unterminated
 	// insertion block.
 	BeforeInitialSuspend func(b Builder, handle, storage Expr)
-	AllocationAlign      uint32
+	// AfterResume runs on every non-final case-0 resume edge immediately after
+	// llvm.coro.suspend and before the frontend's resumed continuation. It does
+	// not run on a conditional suspend's false edge. The callback may append
+	// straight-line resume-prologue instructions only.
+	AfterResume func(b Builder)
+	// AfterResumeDispatch is the control-flow form of AfterResume. It runs in
+	// a compiler-owned gate on every non-final case-0 resume edge. normal is a
+	// fresh compiler-owned block in which the resumed frontend continuation
+	// begins. The callback must terminate the gate without changing the
+	// builder's insertion block; it may branch to normal or to a frontend-owned
+	// shared cleanup block captured by the callback. AfterResume and
+	// AfterResumeDispatch are mutually exclusive.
+	AfterResumeDispatch CoroResumeDispatch
+	AllocationAlign     uint32
 }
+
+// CoroResumeDispatch emits a terminating decision in a non-final coroutine
+// resume gate. normal is the compiler-owned normal continuation. A dispatch
+// callback may branch to another frontend-owned block (for example a shared
+// language cleanup path), but it must not emit into that destination itself.
+type CoroResumeDispatch func(b Builder, normal BasicBlock)
 
 // CoroFrameDescriptorOptions describes the target-specific constant passed to
 // the coroutine frame allocator and deallocator. ABIHash is computed by the
@@ -815,10 +834,12 @@ type CoroBuilder struct {
 	// retains LLVM's target-dependent 2*pointer default.
 	allocationAlign uint32
 
-	suspendBlk       BasicBlock
-	cleanupBlk       BasicBlock
-	initialResumeBlk BasicBlock
-	finished         bool
+	suspendBlk          BasicBlock
+	cleanupBlk          BasicBlock
+	initialResumeBlk    BasicBlock
+	afterResume         func(Builder)
+	afterResumeDispatch CoroResumeDispatch
+	finished            bool
 }
 
 // BeginCoro emits the coroutine allocation prologue and initial suspend. The
@@ -883,13 +904,15 @@ func (b Builder) BeginCoro(opts CoroOptions) *CoroBuilder {
 	)
 
 	coro := &CoroBuilder{
-		b:               b,
-		id:              id,
-		handle:          Expr{handleValue, prog.VoidPtr()},
-		frame:           opts.Frame,
-		allocationAlign: opts.AllocationAlign,
-		suspendBlk:      suspendBlk,
-		cleanupBlk:      cleanupBlk,
+		b:                   b,
+		id:                  id,
+		handle:              Expr{handleValue, prog.VoidPtr()},
+		frame:               opts.Frame,
+		allocationAlign:     opts.AllocationAlign,
+		suspendBlk:          suspendBlk,
+		cleanupBlk:          cleanupBlk,
+		afterResume:         opts.AfterResume,
+		afterResumeDispatch: opts.AfterResumeDispatch,
 	}
 	if callback := opts.BeforeInitialSuspend; callback != nil {
 		callbackPoint := captureCoroFrameCallbackPoint(b)
@@ -941,6 +964,49 @@ func (c *CoroBuilder) SuspendCurrentBlock() BasicBlock {
 		panic("ssa: suspend current block requires an active logical block")
 	}
 	resume := c.emitSuspend(false)
+	logical.last = resume.last
+	b.blk = logical
+	return logical
+}
+
+// SuspendCurrentBlockWithAfterResume is SuspendCurrentBlock with one non-nil
+// resume callback that replaces CoroOptions.AfterResume for this suspend only.
+// It is the specialization point for a suspension whose resume protocol (for
+// example an exact V2 park ticket) differs from the coroutine's default gate.
+// The callback may append straight-line instructions only.
+func (c *CoroBuilder) SuspendCurrentBlockWithAfterResume(afterResume func(Builder)) BasicBlock {
+	c.requireActive("suspend current block with after-resume override")
+	if afterResume == nil {
+		panic("ssa: suspend current block after-resume override requires a callback")
+	}
+	b := c.b
+	logical := b.blk
+	if logical == nil {
+		panic("ssa: suspend current block with after-resume override requires an active logical block")
+	}
+	resume := c.emitSuspendWithAfterResume(false, afterResume)
+	logical.last = resume.last
+	b.blk = logical
+	return logical
+}
+
+// SuspendCurrentBlockWithResumeDispatch is SuspendCurrentBlock with one
+// non-nil terminating resume dispatch that replaces both CoroOptions resume
+// callbacks for this suspend only. The callback runs in a compiler-owned gate
+// and receives the compiler-owned normal continuation. After it terminates the
+// gate, the builder is restored to normal and the logical block's physical tail
+// is updated to that block.
+func (c *CoroBuilder) SuspendCurrentBlockWithResumeDispatch(dispatch CoroResumeDispatch) BasicBlock {
+	c.requireActive("suspend current block with resume-dispatch override")
+	if dispatch == nil {
+		panic("ssa: suspend current block resume-dispatch override requires a callback")
+	}
+	b := c.b
+	logical := b.blk
+	if logical == nil {
+		panic("ssa: suspend current block with resume-dispatch override requires an active logical block")
+	}
+	resume := c.emitSuspendWithResumeDispatch(false, dispatch)
 	logical.last = resume.last
 	b.blk = logical
 	return logical
@@ -1032,15 +1098,49 @@ func (c *CoroBuilder) Finish() {
 }
 
 func (c *CoroBuilder) emitSuspend(final bool) BasicBlock {
+	return c.emitSuspendWithCallbacks(final, c.afterResume, c.afterResumeDispatch)
+}
+
+func (c *CoroBuilder) emitSuspendWithAfterResume(final bool, afterResume func(Builder)) BasicBlock {
+	return c.emitSuspendWithCallbacks(final, afterResume, nil)
+}
+
+func (c *CoroBuilder) emitSuspendWithResumeDispatch(final bool, dispatch CoroResumeDispatch) BasicBlock {
+	return c.emitSuspendWithCallbacks(final, nil, dispatch)
+}
+
+func (c *CoroBuilder) emitSuspendWithCallbacks(
+	final bool, afterResume func(Builder), dispatch CoroResumeDispatch,
+) BasicBlock {
+	if afterResume != nil && dispatch != nil {
+		panic("ssa: coroutine resume callbacks are mutually exclusive")
+	}
 	b := c.b
 	prog := b.Prog
 	resumeBlk := b.Func.MakeBlock()
+	normalBlk := resumeBlk
+	if !final && dispatch != nil {
+		// A terminating dispatch needs a destination that it cannot accidentally
+		// populate. Keeping normal distinct also lets this helper restore the
+		// frontend insertion point after validating the gate.
+		normalBlk = b.Func.MakeBlock()
+	}
 	result := c.suspendIntrinsic(final)
 	switchValue := b.impl.CreateSwitch(result, c.suspendBlk.first, 2)
 	switchValue.AddCase(llvm.ConstInt(prog.tyInt8(), 0, false), resumeBlk.first)
 	switchValue.AddCase(llvm.ConstInt(prog.tyInt8(), 1, false), c.cleanupBlk.first)
 	b.SetBlock(resumeBlk)
-	return resumeBlk
+	if !final && dispatch != nil {
+		callbackPoint := captureCoroFrameCallbackPoint(b)
+		dispatch(b, normalBlk)
+		callbackPoint.ensureResumeDispatch(b)
+		b.SetBlock(normalBlk)
+	} else if callback := afterResume; !final && callback != nil {
+		callbackPoint := captureCoroFrameCallbackPoint(b)
+		callback(b)
+		callbackPoint.ensureContinuation(b, "after-resume")
+	}
+	return normalBlk
 }
 
 func (c *CoroBuilder) suspendIntrinsic(final bool) llvm.Value {
@@ -1149,6 +1249,9 @@ func validateCoroOptions(b Builder, opts CoroOptions) {
 	if opts.Frame.Alloc == nil || opts.Frame.Free == nil {
 		panic("ssa: coroutine frame allocator and free callbacks are required")
 	}
+	if opts.AfterResume != nil && opts.AfterResumeDispatch != nil {
+		panic("ssa: coroutine AfterResume and AfterResumeDispatch callbacks are mutually exclusive")
+	}
 	if opts.Promise.IsNil() {
 		// A nil promise is valid independently of the frame allocation guarantee.
 	} else if opts.Promise.kind != vkPtr {
@@ -1198,6 +1301,43 @@ func (p coroFrameCallbackPoint) ensureContinuation(b Builder, callback string) {
 	// The callbacks are append-only. Re-establish the insertion point at the
 	// end before CoroBuilder emits its own control-flow edge.
 	b.impl.SetInsertPointAtEnd(p.insert)
+}
+
+func (p coroFrameCallbackPoint) ensureResumeDispatch(b Builder) {
+	if b.blk != p.blk || b.impl.GetInsertBlock().C != p.insert.C {
+		panic("ssa: coroutine frame resume-dispatch callback changed insertion block")
+	}
+	current := coroBlockInstructions(p.insert)
+	if len(current) < len(p.instructions) {
+		panic("ssa: coroutine frame resume-dispatch callback modified instructions before append point")
+	}
+	for i, instruction := range p.instructions {
+		if current[i].C != instruction.C {
+			panic("ssa: coroutine frame resume-dispatch callback modified instructions before append point")
+		}
+	}
+	appended := current[len(p.instructions):]
+	if len(appended) == 0 || !isCoroTerminator(appended[len(appended)-1]) {
+		panic("ssa: coroutine frame resume-dispatch callback must terminate insertion block")
+	}
+	for _, instruction := range appended[:len(appended)-1] {
+		if isCoroTerminator(instruction) {
+			panic("ssa: coroutine frame resume-dispatch callback emitted instructions after a terminator")
+		}
+	}
+}
+
+func isCoroTerminator(instruction llvm.Value) bool {
+	if instruction.IsNil() {
+		return false
+	}
+	switch instruction.InstructionOpcode() {
+	case llvm.Ret, llvm.Br, llvm.Switch, llvm.IndirectBr, llvm.Invoke,
+		llvm.Unreachable, llvm.Resume, llvm.CleanupRet, llvm.CatchRet,
+		llvm.CatchSwitch:
+		return true
+	}
+	return false
 }
 
 func coroBlockInstructions(block llvm.BasicBlock) []llvm.Value {

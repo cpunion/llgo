@@ -17,6 +17,7 @@
 package build
 
 import (
+	"bytes"
 	"go/types"
 	"regexp"
 	"strings"
@@ -80,6 +81,10 @@ func TestCoroProgramBootstrapFactoryV1NativeAndWasm(t *testing.T) {
 					t.Fatalf("CoroSplit did not create bootstrap factory%s:\n%s", suffix, post)
 				}
 			}
+			assertCoroProgramRunDecisionResumeOnly(t, mod, coroProgramBootstrapFactorySymbolV1, 1)
+			runCoroProgramPostSplitSimplifyCFG(t, prog, mod)
+			assertCoroProgramRunDecisionDeadClonesEliminated(t, mod, coroProgramBootstrapFactorySymbolV1)
+			post = mod.String()
 			for _, intrinsic := range []string{"llvm.coro.id", "llvm.coro.begin", "llvm.coro.suspend"} {
 				if regexp.MustCompile(`call [^\n]*@` + regexp.QuoteMeta(intrinsic) + `\b`).MatchString(post) {
 					t.Fatalf("post-split bootstrap still calls %s:\n%s", intrinsic, post)
@@ -88,6 +93,10 @@ func TestCoroProgramBootstrapFactoryV1NativeAndWasm(t *testing.T) {
 			object, err := prog.TargetMachine().EmitToMemoryBuffer(mod, llvm.ObjectFile)
 			if err != nil {
 				t.Fatalf("emit bootstrap factory object: %v\n%s", err, post)
+			}
+			if !bytes.Contains(object.Bytes(), []byte(coroRunDecisionTakeSymbolV1)) {
+				object.Dispose()
+				t.Fatalf("bootstrap object lost unresolved run-decision ABI symbol %q", coroRunDecisionTakeSymbolV1)
 			}
 			object.Dispose()
 		})
@@ -145,6 +154,10 @@ func TestCoroProgramBootstrapFactoryV2MixedNativeAndWasm(t *testing.T) {
 					t.Fatalf("CoroSplit did not create mixed v2 bootstrap factory%s:\n%s", suffix, post)
 				}
 			}
+			assertCoroProgramRunDecisionResumeOnly(t, mod, coroProgramBootstrapFactorySymbolV2, 3)
+			runCoroProgramPostSplitSimplifyCFG(t, prog, mod)
+			assertCoroProgramRunDecisionDeadClonesEliminated(t, mod, coroProgramBootstrapFactorySymbolV2)
+			post = mod.String()
 			for _, intrinsic := range []string{"llvm.coro.id", "llvm.coro.begin", "llvm.coro.suspend"} {
 				if regexp.MustCompile(`call [^\n]*@` + regexp.QuoteMeta(intrinsic) + `\b`).MatchString(post) {
 					t.Fatalf("post-split mixed v2 bootstrap still calls %s:\n%s", intrinsic, post)
@@ -153,6 +166,10 @@ func TestCoroProgramBootstrapFactoryV2MixedNativeAndWasm(t *testing.T) {
 			object, err := prog.TargetMachine().EmitToMemoryBuffer(mod, llvm.ObjectFile)
 			if err != nil {
 				t.Fatalf("emit mixed v2 bootstrap factory object: %v\n%s", err, post)
+			}
+			if !bytes.Contains(object.Bytes(), []byte(coroRunDecisionTakeSymbolV1)) {
+				object.Dispose()
+				t.Fatalf("mixed v2 bootstrap object lost unresolved run-decision ABI symbol %q", coroRunDecisionTakeSymbolV1)
 			}
 			object.Dispose()
 		})
@@ -183,11 +200,14 @@ func TestCoroProgramBootstrapFactoryV2MainReturnIsOnlyOnCoroMainContinuation(t *
 		t.Fatalf("coroutine-main return calls = %d, want 1:\n%s", got, body)
 	}
 	lastAwait := strings.LastIndex(body, "call void @__llgo_coro_await_prepare_v1")
+	lastDecision := strings.LastIndex(body, "call void @"+coroRunDecisionTakeSymbolV1)
 	mainReturn := strings.Index(body, "call void @"+coroProgramMainReturnSymbolV1)
 	complete := strings.Index(body, "call void @"+coroProgramCompletePrepareHookV1)
-	if lastAwait < 0 || mainReturn < 0 || complete < 0 || !(lastAwait < mainReturn && mainReturn < complete) {
+	if lastAwait < 0 || lastDecision < 0 || mainReturn < 0 || complete < 0 ||
+		!(lastAwait < lastDecision && lastDecision < mainReturn && mainReturn < complete) {
 		t.Fatalf("main-return cancellation is not on the normal post-await continuation:\n%s", body)
 	}
+	assertCoroProgramZeroRunDecisionCalls(t, body, 4)
 	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("verify coroutine-main return factory: %v\n%s", err, pkg.Module().String())
 	}
@@ -404,6 +424,7 @@ func assertCoroProgramBootstrapFactoryPresplitV1(t *testing.T, ir, uintptrIR str
 	for _, hook := range []string{
 		coroProgramFrameAllocHookV1,
 		coroProgramFramePublishHookV1,
+		coroRunDecisionTakeSymbolV1,
 		coroProgramCompletePrepareHookV1,
 		coroProgramFrameFreeHookV1,
 	} {
@@ -415,6 +436,7 @@ func assertCoroProgramBootstrapFactoryPresplitV1(t *testing.T, ir, uintptrIR str
 		"store i16 1",
 		"call void @"+coroProgramFramePublishHookV1,
 		"call i8 @llvm.coro.suspend",
+		"call void @"+coroRunDecisionTakeSymbolV1,
 		"store i16 2",
 		"call void @\"example.com/program.init\"()",
 		"call void @\"example.com/program.main\"()",
@@ -432,6 +454,7 @@ func assertCoroProgramBootstrapFactoryPresplitV1(t *testing.T, ir, uintptrIR str
 	if strings.Contains(body, "store ptr %2") || strings.Contains(body, "load ptr, ptr %2") {
 		t.Fatalf("empty startup parameter is read or stored:\n%s", body)
 	}
+	assertCoroProgramZeroRunDecisionCalls(t, body, 1)
 }
 
 func assertCoroProgramBootstrapFactoryPresplitV2(t *testing.T, ir, uintptrIR string) {
@@ -471,20 +494,83 @@ func assertCoroProgramBootstrapFactoryPresplitV2(t *testing.T, ir, uintptrIR str
 	assertInOrder(t, body,
 		"call void @"+coroProgramFramePublishHookV1,
 		"call i8 @llvm.coro.suspend",
+		"call void @"+coroRunDecisionTakeSymbolV1,
 		"store i16 2",
 		"call ptr %",
 		"store i16 1",
 		"store i16 3",
 		"call void @__llgo_coro_await_prepare_v1",
 		"call i8 @llvm.coro.suspend",
+		"call void @"+coroRunDecisionTakeSymbolV1,
 		"call void @\"init$abitypes\"()",
 		"call void @runtime.init()",
 		"call ptr %",
 		"call void @__llgo_coro_await_prepare_v1",
 		"call i8 @llvm.coro.suspend",
+		"call void @"+coroRunDecisionTakeSymbolV1,
 		"call void @\"example.com/program.main\"()",
 		"call void @"+coroProgramCompletePrepareHookV1,
 	)
+	assertCoroProgramZeroRunDecisionCalls(t, body, 3)
+}
+
+func assertCoroProgramZeroRunDecisionCalls(t *testing.T, body string, want int) {
+	t.Helper()
+	callPrefix := "call void @" + coroRunDecisionTakeSymbolV1
+	if got := strings.Count(body, callPrefix); got != want {
+		t.Fatalf("bootstrap run-decision calls = %d, want %d:\n%s", got, want, body)
+	}
+	zeroTicket := regexp.MustCompile(
+		`call void @` + regexp.QuoteMeta(coroRunDecisionTakeSymbolV1) +
+			`\(ptr [^,]+, i32 0, i32 0, ptr null, ptr null, ptr null, ptr null, ptr null\)`,
+	)
+	if got := len(zeroTicket.FindAllString(body, -1)); got != want {
+		t.Fatalf("bootstrap normal-only zero-ticket run-decision calls = %d, want %d:\n%s", got, want, body)
+	}
+}
+
+func assertCoroProgramRunDecisionResumeOnly(t *testing.T, module llvm.Module, rampName string, want int) {
+	t.Helper()
+	ramp := module.NamedFunction(rampName)
+	if ramp.IsNil() {
+		t.Fatalf("post-CoroSplit module has no ramp %q:\n%s", rampName, module.String())
+	}
+	if body := ramp.String(); strings.Contains(body, "call void @"+coroRunDecisionTakeSymbolV1) {
+		t.Fatalf("run-decision gate escaped the resume entry into ramp %s:\n%s", rampName, body)
+	}
+	if destroy := module.NamedFunction(rampName + ".destroy"); destroy.IsNil() {
+		t.Fatalf("post-CoroSplit module has no destroy function %q:\n%s", rampName+".destroy", module.String())
+	}
+	resumeName := rampName + ".resume"
+	resume := module.NamedFunction(resumeName)
+	if resume.IsNil() {
+		t.Fatalf("post-CoroSplit module has no function %q:\n%s", resumeName, module.String())
+	}
+	assertCoroProgramZeroRunDecisionCalls(t, resume.String(), want)
+}
+
+func runCoroProgramPostSplitSimplifyCFG(t *testing.T, prog llssa.Program, module llvm.Module) {
+	t.Helper()
+	options := llvm.NewPassBuilderOptions()
+	defer options.Dispose()
+	options.SetVerifyEach(true)
+	if err := module.RunPasses("function(simplifycfg)", prog.TargetMachine(), options); err != nil {
+		t.Fatalf("simplify post-CoroSplit bootstrap CFG: %v\n%s", err, module.String())
+	}
+}
+
+func assertCoroProgramRunDecisionDeadClonesEliminated(t *testing.T, module llvm.Module, rampName string) {
+	t.Helper()
+	call := "call void @" + coroRunDecisionTakeSymbolV1
+	for _, name := range []string{rampName, rampName + ".destroy"} {
+		function := module.NamedFunction(name)
+		if function.IsNil() {
+			t.Fatalf("canonical post-CoroSplit module has no function %q:\n%s", name, module.String())
+		}
+		if body := function.String(); strings.Contains(body, call) {
+			t.Fatalf("simplifycfg retained a dead run-decision clone in %s:\n%s", name, body)
+		}
+	}
 }
 
 func llvmFunctionIRV1(ir, name string) string {

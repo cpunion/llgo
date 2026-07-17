@@ -19,8 +19,7 @@ package coro
 import "unsafe"
 
 // ExecutorDriver is the target-neutral single-P bridge between a stable
-// ExecutorRegistry gate and scheduler-owned durable wait and timer
-// registrations. It is
+// ExecutorRegistry gate and a scheduler-owned durable source set. It is
 // never retained by a platform callback: the platform ABI remains the two POD
 // handles carried by PostWaitAndRequest.
 //
@@ -29,11 +28,11 @@ import "unsafe"
 // A real target surrounds a successful PrepareExecutorSleep with its retained
 // wait and calls WakeExecutor after a real or spurious wake.
 //
-// This first driver deliberately owns exactly one P, one wait table, and an
-// optional timer table. Targets with timers must use the explicit At APIs and
-// supply monotonic timestamps; the driver never retains a clock callback or an
-// interface value. It provides the handle-free last-G terminal close handoff,
-// while the target-specific join dispatcher, channel/syscall source sets, and
+// This first driver deliberately owns exactly one P and one statically
+// assembled ExecutorSourceSet. Targets with deadline sources must use the
+// explicit At APIs and supply monotonic timestamps; the driver never retains a
+// clock callback, interface, or function value. It provides the handle-free
+// last-G terminal close handoff, while the target-specific join dispatcher and
 // multi-P executor migration remain later layers.
 type ExecutorDriver struct {
 	magic         uint32
@@ -41,8 +40,9 @@ type ExecutorDriver struct {
 	p             *P
 	registry      *ExecutorRegistry
 	handle        ExecutorHandle
-	waits         *WaitRegistrationTable
-	timers        *TimerRegistrationTable
+	route         RouteID
+	sources       ExecutorSourceSet
+	poll          executorPollTransaction
 	prepareNow    int64
 	hasPrepareNow bool
 	terminalKind  ActionKind
@@ -76,11 +76,11 @@ func validExecutorDriver(driver *ExecutorDriver) bool {
 		driver.hasPrepareNow && driver.prepareNow < 0 {
 		return false
 	}
-	validTimers := driver.timers == nil || driver.timers.owner == driver.p
-	return (driver.state == executorDriverTerminalClosing) == validTerminalState && validTimers &&
+	return (driver.state == executorDriverTerminalClosing) == validTerminalState &&
 		driver.p != nil && driver.registry != nil && driver.handle.Slot != 0 && driver.handle.Generation != 0 &&
-		driver.waits != nil && driver.p.executor == driver &&
-		preemptLoad(&driver.p.executorMode) == executorModeBound && driver.waits.owner == driver.p
+		driver.route.Valid() && driver.sources.route == driver.route &&
+		driver.p.executor == driver && preemptLoad(&driver.p.executorMode) == executorModeBound &&
+		validExecutorSourceSet(&driver.sources, driver.p) && validExecutorPollTransaction(&driver.poll, &driver.sources)
 }
 
 func validExecutorDriverForP(driver *ExecutorDriver, p *P) bool {
@@ -94,6 +94,7 @@ func validRunningExecutorOwner(driver *ExecutorDriver) bool {
 	p := driver.p
 	g := p.current
 	return g != nil && p.inResume && expectedAction(p, g, p.action, ActionResume) &&
+		p.runDecision == (RunDecision{}) &&
 		g.state == GRunning && g.active != nil && g.active.state == FrameActive &&
 		g.active.handle == p.action.Handle && g.active.header != nil &&
 		g.active.header.G == unsafe.Pointer(g) &&
@@ -109,60 +110,77 @@ func PrepareExecutorWaitRegistration(driver *ExecutorDriver, token *WaitToken) (
 	if !validRunningExecutorOwner(driver) {
 		return 0, WaitRegistrationHandle{}, WaitRegistrationPrepareInvalid
 	}
-	return PrepareWaitRegistration(driver.p, driver.waits, token)
+	return PrepareWaitRegistration(driver.p, driver.sources.waitTable(), token)
 }
 
 // RollbackExecutorWaitRegistration is owner-only and valid before coroPark
 // when external submission never made the POD handle callback-reachable.
 func RollbackExecutorWaitRegistration(driver *ExecutorDriver, token *WaitToken, ticket WaitTicket, wait WaitRegistrationHandle) bool {
-	return validRunningExecutorOwner(driver) && driver.waits.RollbackPreparedWait(wait, token, ticket)
+	return validRunningExecutorOwner(driver) && driver.sources.waitTable().RollbackPreparedWait(wait, token, ticket)
 }
 
 // RetireCompletedExecutorWait is owner-only and valid after the matching park
 // resumed and the external source was strongly joined or unregistered.
 func RetireCompletedExecutorWait(driver *ExecutorDriver, token *WaitToken, ticket WaitTicket, wait WaitRegistrationHandle) bool {
-	return validRunningExecutorOwner(driver) && driver.waits.RetireCompletedWait(wait, token, ticket)
+	return validRunningExecutorOwner(driver) && driver.sources.waitTable().RetireCompletedWait(wait, token, ticket)
 }
 
 // PrepareExecutorTimerRegistration is the only production owner entry for an
 // absolute monotonic one-shot timer. It is valid only for a timer-bound driver
 // while its exact frame is running.
 func PrepareExecutorTimerRegistration(driver *ExecutorDriver, token *WaitToken, deadline int64) (WaitTicket, TimerRegistrationHandle, TimerRegistrationPrepareResult) {
-	if !validRunningExecutorOwner(driver) || driver.timers == nil {
+	if !validRunningExecutorOwner(driver) {
 		return 0, TimerRegistrationHandle{}, TimerRegistrationPrepareInvalid
 	}
-	return PrepareTimerRegistration(driver.p, driver.timers, token, deadline)
+	timers := driver.sources.timerTable()
+	if timers == nil {
+		return 0, TimerRegistrationHandle{}, TimerRegistrationPrepareInvalid
+	}
+	return PrepareTimerRegistration(driver.p, timers, token, deadline)
 }
 
 // RollbackExecutorTimerRegistration releases a timer that was prepared by the
 // running owner but was never made visible to coroPark.
 func RollbackExecutorTimerRegistration(driver *ExecutorDriver, token *WaitToken, ticket WaitTicket, timer TimerRegistrationHandle) bool {
-	return validRunningExecutorOwner(driver) && driver.timers != nil &&
-		driver.timers.RollbackPreparedTimer(timer, token, ticket)
+	if !validRunningExecutorOwner(driver) {
+		return false
+	}
+	timers := driver.sources.timerTable()
+	return timers != nil && timers.RollbackPreparedTimer(timer, token, ticket)
 }
 
 // CancelExecutorTimerRegistration publishes cancellation from the exact
 // running owner. The matching terminal outcome must still be consumed before
 // the timer can be retired.
 func CancelExecutorTimerRegistration(driver *ExecutorDriver, timer TimerRegistrationHandle) WaitCancelResult {
-	if !validRunningExecutorOwner(driver) || driver.timers == nil {
+	if !validRunningExecutorOwner(driver) {
 		return WaitCancelInvalid
 	}
-	return driver.timers.Cancel(timer)
+	timers := driver.sources.timerTable()
+	if timers == nil {
+		return WaitCancelInvalid
+	}
+	return timers.Cancel(timer)
 }
 
 // RetireCompletedExecutorTimer validates and retires a consumed timer
 // completion from its resumed synchronous continuation.
 func RetireCompletedExecutorTimer(driver *ExecutorDriver, token *WaitToken, ticket WaitTicket, timer TimerRegistrationHandle) bool {
-	return validRunningExecutorOwner(driver) && driver.timers != nil &&
-		driver.timers.RetireCompletedTimer(timer, token, ticket)
+	if !validRunningExecutorOwner(driver) {
+		return false
+	}
+	timers := driver.sources.timerTable()
+	return timers != nil && timers.RetireCompletedTimer(timer, token, ticket)
 }
 
 // RetireCanceledExecutorTimer validates and retires a consumed timer
 // cancellation from its resumed synchronous continuation.
 func RetireCanceledExecutorTimer(driver *ExecutorDriver, token *WaitToken, ticket WaitTicket, timer TimerRegistrationHandle) bool {
-	return validRunningExecutorOwner(driver) && driver.timers != nil &&
-		driver.timers.RetireCanceledTimer(timer, token, ticket)
+	if !validRunningExecutorOwner(driver) {
+		return false
+	}
+	timers := driver.sources.timerTable()
+	return timers != nil && timers.RetireCanceledTimer(timer, token, ticket)
 }
 
 func activeExecutorHandle(registry *ExecutorRegistry, handle ExecutorHandle) bool {
@@ -174,7 +192,8 @@ func activeExecutorHandle(registry *ExecutorRegistry, handle ExecutorHandle) boo
 
 func idleExecutorScheduler(p *P) bool {
 	return p != nil && p.current == nil && !p.inResume && p.action.Kind == ActionInvalid && p.action.Handle == nil &&
-		p.timerPreemptBudget == 0 && validReadyQueue(p) && validWaitQueue(p)
+		p.runDecision == (RunDecision{}) && !p.runDecisionTaken && p.servicePreemptBudget == 0 &&
+		validReadyQueueHeader(p) && validWaitQueueHeader(p) && validParkWaitQueueHeader(p) && validAffectedWaitQueueHeader(p)
 }
 
 // BindExecutor attaches a newly registered exact-zero executor gate and an
@@ -184,21 +203,16 @@ func idleExecutorScheduler(p *P) bool {
 // quiesced every legacy source that knew this P, including a call paused before
 // its executorMode load; executorMode is a capability guard, not a refcounted
 // admission barrier for migration from the legacy ABI.
-func bindExecutor(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, waits *WaitRegistrationTable, timers *TimerRegistrationTable) bool {
+func bindExecutorAtRoute(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, route RouteID, catalog ExecutorSourceCatalog) bool {
 	if driver == nil || driver.magic != 0 || driver.state != executorDriverUnbound || driver.p != nil ||
-		driver.registry != nil || driver.handle != (ExecutorHandle{}) || driver.waits != nil || driver.timers != nil ||
+		driver.registry != nil || driver.handle != (ExecutorHandle{}) || driver.route != 0 || driver.sources != (ExecutorSourceSet{}) ||
+		driver.poll != (executorPollTransaction{}) ||
 		driver.prepareNow != 0 || driver.hasPrepareNow ||
 		driver.terminalKind != ActionInvalid ||
 		p == nil || p.executor != nil || preemptLoad(&p.executorMode) != executorModeUnbound ||
 		preemptLoad(&p.schedule) != scheduleIdle || !idleExecutorScheduler(p) ||
-		p.readyHead != nil || p.readyTail != nil || p.waitHead != nil || p.waitTail != nil ||
-		!activeExecutorHandle(registry, handle) || !bindRegistrationTable(waits, p) {
-		return false
-	}
-	if timers != nil && !bindTimerRegistrationTable(timers, p) {
-		// The wait table was empty when bound above, so rollback cannot lose a
-		// registration. Preserve a zero driver and unbound P on rejection.
-		_ = unbindRegistrationTable(waits, p)
+		p.readyHead != nil || p.readyTail != nil || !emptySchedulerWaitQueues(p) ||
+		!route.Valid() || !activeExecutorHandle(registry, handle) || !bindExecutorSourceSetAtRoute(&driver.sources, p, route, catalog) {
 		return false
 	}
 	driver.magic = executorDriverMagic
@@ -206,98 +220,108 @@ func bindExecutor(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, hand
 	driver.p = p
 	driver.registry = registry
 	driver.handle = handle
-	driver.waits = waits
-	driver.timers = timers
+	driver.route = route
 	p.executor = driver
 	preemptStore(&p.executorMode, executorModeBound)
 	return true
 }
 
+func bindExecutor(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, catalog ExecutorSourceCatalog) bool {
+	return bindExecutorAtRoute(driver, p, registry, handle, RouteID(1), catalog)
+}
+
 func BindExecutor(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, waits *WaitRegistrationTable) bool {
-	return bindExecutor(driver, p, registry, handle, waits, nil)
+	return bindExecutor(driver, p, registry, handle, ExecutorSourceCatalog{Waits: waits})
 }
 
-// BindExecutorWithTimers attaches both durable source tables. A timer-bound
-// driver accepts only the explicit At poll/sleep/wake APIs, so omitting a
-// monotonic timestamp fails closed instead of silently delaying expiry.
+func BindExecutorAtRoute(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, route RouteID, waits *WaitRegistrationTable) bool {
+	return bindExecutorAtRoute(driver, p, registry, handle, route, ExecutorSourceCatalog{Waits: waits})
+}
+
+// BindExecutorWithTimers preserves the timer-aware V1 binding ABI while
+// assembling one durable source set. A deadline-capable set accepts only the
+// explicit At poll/sleep/wake APIs, so omitting a monotonic timestamp fails
+// closed instead of silently delaying expiry.
 func BindExecutorWithTimers(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, waits *WaitRegistrationTable, timers *TimerRegistrationTable) bool {
-	return timers != nil && bindExecutor(driver, p, registry, handle, waits, timers)
+	return timers != nil && bindExecutor(driver, p, registry, handle, ExecutorSourceCatalog{Waits: waits, Timers: timers})
 }
 
-type executorSourceScan struct {
-	waits    int
-	timers   int
-	promoted int
-	deadline int64
-	hasTimer bool
+func BindExecutorWithTimersAtRoute(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, route RouteID, waits *WaitRegistrationTable, timers *TimerRegistrationTable) bool {
+	return timers != nil && bindExecutorAtRoute(driver, p, registry, handle, route, ExecutorSourceCatalog{Waits: waits, Timers: timers})
 }
 
-func (scan *executorSourceScan) add(other executorSourceScan) {
-	scan.waits += other.waits
-	scan.timers += other.timers
-	scan.promoted += other.promoted
-	scan.deadline = other.deadline
-	scan.hasTimer = other.hasTimer
+// BindExecutorSourceCatalog binds a frozen direct-call source catalog. It is
+// the extensible entry point; the V1 helpers above retain their exact source
+// subsets without creating timer/manual/host API combinations.
+func BindExecutorSourceCatalog(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, catalog ExecutorSourceCatalog) bool {
+	return bindExecutor(driver, p, registry, handle, catalog)
 }
 
-func drainExecutorSourcesInState(driver *ExecutorDriver, now int64, withTimers bool, state executorDriverState) (scan executorSourceScan, ok bool) {
-	if !validExecutorDriver(driver) || driver.state != state || !idleExecutorScheduler(driver.p) {
+func BindExecutorSourceCatalogAtRoute(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, route RouteID, catalog ExecutorSourceCatalog) bool {
+	return bindExecutorAtRoute(driver, p, registry, handle, route, catalog)
+}
+
+func (driver *ExecutorDriver) Route() (RouteID, bool) {
+	if !validExecutorDriver(driver) {
+		return 0, false
+	}
+	return driver.route, true
+}
+
+func publishExecutorSourcesInState(driver *ExecutorDriver, now int64, withDeadline bool, state executorDriverState) (scan executorSourceScan, ok bool) {
+	if !validExecutorDriver(driver) || driver.state != state || driver.poll.phase != executorPollIdle ||
+		!idleExecutorScheduler(driver.p) {
 		return executorSourceScan{}, false
 	}
-	if withTimers != (driver.timers != nil) || withTimers && now < 0 {
-		return executorSourceScan{}, false
-	}
-	scan.waits, ok = driver.waits.drainFor(driver.p)
+	return driver.sources.publishPass(driver.p, now, withDeadline)
+}
+
+func publishExecutorSourcesAt(driver *ExecutorDriver, now int64, withDeadline bool) (scan executorSourceScan, ok bool) {
+	return publishExecutorSourcesInState(driver, now, withDeadline, executorDriverActive)
+}
+
+func publishExecutorSources(driver *ExecutorDriver) (drained int, ok bool) {
+	scan, ok := publishExecutorSourcesAt(driver, 0, false)
+	return scan.completed, ok
+}
+
+// serviceExecutorPublishedEpochAt performs one bounded publication epoch:
+// every configured source is visited once, then the complete owner-claimed
+// snapshot is resolved, detached, and promoted. Producers never mutate that
+// snapshot; facts not claimed by this pass remain durable for a later epoch.
+func serviceExecutorPublishedEpochAt(driver *ExecutorDriver, now int64, withDeadline bool) (scan executorSourceScan, ok bool) {
+	scan, ok = publishExecutorSourcesAt(driver, now, withDeadline)
 	if !ok {
-		// A prior slot delivery is irreversible. Preserve partial progress just
-		// like an I/O count returned with an error; callers must still fail closed.
 		return scan, false
 	}
-	if withTimers {
-		scan.timers, scan.deadline, scan.hasTimer, ok = driver.timers.drainDueFor(driver.p, now)
-		if !ok {
-			return scan, false
-		}
-	}
-	scan.promoted, ok = pollReady(driver.p)
+	scan.epochs = 1
+	scan.promoted, scan.applyVisits, ok = driver.sources.resolvePublishedEpoch(driver.p)
 	return scan, ok
 }
 
-func drainExecutorSourcesAt(driver *ExecutorDriver, now int64, withTimers bool) (scan executorSourceScan, ok bool) {
-	return drainExecutorSourcesInState(driver, now, withTimers, executorDriverActive)
-}
-
-func drainExecutorSources(driver *ExecutorDriver) (drained, promoted int, ok bool) {
-	scan, ok := drainExecutorSourcesAt(driver, 0, false)
-	return scan.waits, scan.promoted, ok
-}
-
-func pollExecutorSourcesAt(driver *ExecutorDriver, now int64, withTimers bool) (total executorSourceScan, ok bool) {
+func pollExecutorSourcesAt(driver *ExecutorDriver, now int64, withDeadline bool) (total executorSourceScan, ok bool) {
 	if !validExecutorDriver(driver) || driver.state != executorDriverActive || !idleExecutorScheduler(driver.p) {
 		return executorSourceScan{}, false
 	}
-	if withTimers != (driver.timers != nil) || withTimers && now < 0 {
+	if driver.poll.phase != executorPollIdle || !driver.sources.acceptsScan(driver.p, now, withDeadline) {
+		return executorSourceScan{}, false
+	}
+	// The compatibility entry keeps advancing bounded catalog and common
+	// resolution slices until the current A/ack/B transaction completes, so its
+	// old call boundary remains unchanged. The explicit host API returns after
+	// its reduction budget; this legacy wrapper supplies the outer iteration.
+	budget, budgetOK := executorMinPollBudget(&driver.sources)
+	if !budgetOK {
 		return executorSourceScan{}, false
 	}
 	for {
-		first, passOK := drainExecutorSourcesAt(driver, now, withTimers)
-		total.add(first)
-		if !passOK {
+		var progress ExecutorPollProgress
+		var polled bool
+		total, progress, polled = pollExecutorSliceAt(driver, now, withDeadline, budget)
+		if !polled {
 			return total, false
 		}
-		if _, ackOK := driver.registry.Acknowledge(driver.handle); !ackOK {
-			return total, false
-		}
-
-		// This pass is unconditional. A producer may have coalesced into the
-		// request that Acknowledge just cleared, and pending is only advisory.
-		recheck, recheckOK := drainExecutorSourcesAt(driver, now, withTimers)
-		total.add(recheck)
-		if !recheckOK {
-			return total, false
-		}
-		if recheck.waits == 0 && recheck.timers == 0 && !driver.waits.Pending() &&
-			!driver.registry.ObserveRequested(driver.handle) {
+		if progress.Complete {
 			return total, true
 		}
 	}
@@ -305,24 +329,24 @@ func pollExecutorSourcesAt(driver *ExecutorDriver, now int64, withTimers bool) (
 
 func pollExecutor(driver *ExecutorDriver) (drained, promoted int, ok bool) {
 	scan, ok := pollExecutorSourcesAt(driver, 0, false)
-	return scan.waits, scan.promoted, ok
+	return scan.completed, scan.promoted, ok
 }
 
 // PollExecutor services the bound durable source set after a running G has
 // yielded or while the scheduler otherwise owns P. It is the only place that
 // acknowledges the stable executor request.
 func PollExecutor(driver *ExecutorDriver) (drained, promoted int, ok bool) {
-	if driver == nil || driver.timers != nil {
+	if driver == nil || driver.sources.usesMonotonicTime() {
 		return 0, 0, false
 	}
 	return pollExecutor(driver)
 }
 
-// PollExecutorAt services both durable source tables with one explicit
-// monotonic sample. Every drain/ack/unconditional-rescan transaction drains
-// wait posts, completes due timers, and promotes ready Gs in that order.
+// PollExecutorAt services the complete deadline-capable source set with one
+// explicit monotonic sample. Its wait/timer component counts are retained for
+// the V1 adapter ABI; scheduling decisions use the aggregate scan.
 func PollExecutorAt(driver *ExecutorDriver, now int64) (waits, timers, promoted int, ok bool) {
-	if driver == nil || driver.timers == nil {
+	if driver == nil || !driver.sources.usesMonotonicTime() {
 		return 0, 0, 0, false
 	}
 	scan, ok := pollExecutorSourcesAt(driver, now, true)
@@ -330,16 +354,15 @@ func PollExecutorAt(driver *ExecutorDriver, now int64) (waits, timers, promoted 
 }
 
 // NextExecutorTimerDeadline exposes the scheduler owner's current earliest
-// active absolute deadline without draining it. BeginRunG queries this while
-// the scheduler is idle and arms its fixed safepoint budget so a continuously
-// runnable G cannot hide timer pressure. The query deliberately accepts no
-// clock or callback.
+// active absolute deadline without draining it. Platform wait adapters use it
+// to choose a sleep deadline; scheduler-service preemption is independent of
+// this timer query. The query deliberately accepts no clock or callback.
 func NextExecutorTimerDeadline(driver *ExecutorDriver) (deadline int64, hasDeadline, ok bool) {
-	if !validExecutorDriver(driver) || driver.timers == nil || driver.state != executorDriverActive ||
-		!idleExecutorScheduler(driver.p) {
+	if !validExecutorDriver(driver) || !driver.sources.usesMonotonicTime() || driver.state != executorDriverActive ||
+		driver.poll.phase != executorPollIdle || !idleExecutorScheduler(driver.p) {
 		return 0, false, false
 	}
-	return driver.timers.nextDeadlineFor(driver.p)
+	return driver.sources.nextDeadline(driver.p)
 }
 
 func leaveExecutorIdle(driver *ExecutorDriver) bool {
@@ -373,7 +396,7 @@ func leaveExecutorIdleAndPollAt(driver *ExecutorDriver, now int64) (scan executo
 // retained wait. false,true means work or a racing request won and the
 // scheduler should continue without blocking.
 func PrepareExecutorSleep(driver *ExecutorDriver) (sleep bool, ok bool) {
-	if !validExecutorDriver(driver) || driver.timers != nil || driver.state != executorDriverActive || !idleExecutorScheduler(driver.p) {
+	if !validExecutorDriver(driver) || driver.sources.usesMonotonicTime() || driver.state != executorDriverActive || !idleExecutorScheduler(driver.p) {
 		return false, false
 	}
 	if _, _, ok = pollExecutor(driver); !ok {
@@ -392,7 +415,7 @@ func PrepareExecutorSleep(driver *ExecutorDriver) (sleep bool, ok bool) {
 
 	// Scan facts, not just pending, after publishing IdleArmed. This closes a
 	// producer paused between Posted and its advisory pending store.
-	drained, promoted, scanOK := drainExecutorSources(driver)
+	drained, scanOK := publishExecutorSources(driver)
 	if !scanOK {
 		// ArmIdle succeeded from exact zero, so the only legal gates here are
 		// IdleArmed with or without Requested and LeaveIdle must disarm either.
@@ -401,7 +424,7 @@ func PrepareExecutorSleep(driver *ExecutorDriver) (sleep bool, ok bool) {
 		_, _ = driver.registry.LeaveIdle(driver.handle)
 		return false, false
 	}
-	hasWork := drained != 0 || promoted != 0 || driver.p.readyHead != nil || driver.waits.Pending() ||
+	hasWork := drained != 0 || driver.p.readyHead != nil || driver.sources.pending(driver.p) ||
 		driver.registry.ObserveRequested(driver.handle) || preemptLoad(&driver.p.schedule) != scheduleIdle
 	if hasWork {
 		if _, _, ok = leaveExecutorIdleAndPoll(driver); !ok {
@@ -420,13 +443,13 @@ func PrepareExecutorSleep(driver *ExecutorDriver) (sleep bool, ok bool) {
 }
 
 // PrepareExecutorSleepAt performs the first half of timer-aware retained-wait
-// admission. It services both source tables at now, publishes IdleArmed, and
-// scans both sources once more. true,true leaves the driver in an explicit
+// admission. It services the complete source set at now, publishes IdleArmed,
+// and scans the complete set once more. true,true leaves the driver in an explicit
 // idle-preparing state and requires the caller to take a fresh monotonic sample
 // and call CommitExecutorSleepAt. false,true means work won and the driver is
 // active. A failure never leaves a newly armed idle gate behind.
 func PrepareExecutorSleepAt(driver *ExecutorDriver, now int64) (prepared bool, ok bool) {
-	if !validExecutorDriver(driver) || driver.timers == nil || driver.state != executorDriverActive ||
+	if !validExecutorDriver(driver) || !driver.sources.usesMonotonicTime() || driver.state != executorDriverActive ||
 		!idleExecutorScheduler(driver.p) || now < 0 {
 		return false, false
 	}
@@ -446,13 +469,13 @@ func PrepareExecutorSleepAt(driver *ExecutorDriver, now int64) (prepared bool, o
 
 	// Scan facts, not just pending, after publishing IdleArmed. Commit performs
 	// another complete scan at a caller-supplied fresh timestamp.
-	scan, scanOK := drainExecutorSourcesAt(driver, now, true)
+	scan, scanOK := publishExecutorSourcesAt(driver, now, true)
 	if !scanOK {
 		_ = leaveExecutorIdle(driver)
 		return false, false
 	}
-	hasWork := scan.waits != 0 || scan.timers != 0 || scan.promoted != 0 || driver.p.readyHead != nil ||
-		driver.waits.Pending() || driver.registry.ObserveRequested(driver.handle) ||
+	hasWork := scan.completed != 0 || driver.p.readyHead != nil ||
+		driver.sources.pending(driver.p) || driver.registry.ObserveRequested(driver.handle) ||
 		preemptLoad(&driver.p.schedule) != scheduleIdle
 	if hasWork {
 		if _, ok = leaveExecutorIdleAndPollAt(driver, now); !ok {
@@ -467,13 +490,13 @@ func PrepareExecutorSleepAt(driver *ExecutorDriver, now int64) (prepared bool, o
 }
 
 // CommitExecutorSleepAt finishes timer-aware retained-wait admission after the
-// target has sampled its monotonic clock again. It unconditionally rescans
-// wait posts and timers at now before exact CommitSleep. A successful sleep
+// target has sampled its monotonic clock again. It unconditionally rescans the
+// complete source set at now before exact CommitSleep. A successful sleep
 // returns the earliest still-active absolute deadline; a future deadline is a
 // poll bound, not runnable work. Passing an invalid timestamp aborts a pending
 // preparation and restores the active driver.
 func CommitExecutorSleepAt(driver *ExecutorDriver, now int64) (sleep bool, deadline int64, hasDeadline, ok bool) {
-	if !validExecutorDriver(driver) || driver.timers == nil ||
+	if !validExecutorDriver(driver) || !driver.sources.usesMonotonicTime() ||
 		driver.state != executorDriverIdlePreparing || !idleExecutorScheduler(driver.p) {
 		return false, 0, false, false
 	}
@@ -482,13 +505,13 @@ func CommitExecutorSleepAt(driver *ExecutorDriver, now int64) (sleep bool, deadl
 		return false, 0, false, false
 	}
 
-	scan, scanOK := drainExecutorSourcesInState(driver, now, true, executorDriverIdlePreparing)
+	scan, scanOK := publishExecutorSourcesInState(driver, now, true, executorDriverIdlePreparing)
 	if !scanOK {
 		_ = leaveExecutorIdle(driver)
 		return false, 0, false, false
 	}
-	hasWork := scan.waits != 0 || scan.timers != 0 || scan.promoted != 0 || driver.p.readyHead != nil ||
-		driver.waits.Pending() || driver.registry.ObserveRequested(driver.handle) ||
+	hasWork := scan.completed != 0 || driver.p.readyHead != nil ||
+		driver.sources.pending(driver.p) || driver.registry.ObserveRequested(driver.handle) ||
 		preemptLoad(&driver.p.schedule) != scheduleIdle
 	if hasWork {
 		if _, ok = leaveExecutorIdleAndPollAt(driver, now); !ok {
@@ -496,7 +519,7 @@ func CommitExecutorSleepAt(driver *ExecutorDriver, now int64) (sleep bool, deadl
 		}
 		return false, 0, false, true
 	}
-	if scan.hasTimer && scan.deadline <= now {
+	if scan.hasDeadline && scan.deadline <= now {
 		_ = leaveExecutorIdle(driver)
 		return false, 0, false, false
 	}
@@ -509,32 +532,28 @@ func CommitExecutorSleepAt(driver *ExecutorDriver, now int64) (sleep bool, deadl
 	driver.prepareNow = 0
 	driver.hasPrepareNow = false
 	driver.state = executorDriverSleeping
-	return true, scan.deadline, scan.hasTimer, true
+	return true, scan.deadline, scan.hasDeadline, true
 }
 
 // WakeExecutor leaves a committed retained wait and immediately services all
 // durable sources. It also accepts a spurious target wake while the gate still
 // contains exact IdleArmed.
 func WakeExecutor(driver *ExecutorDriver) (drained, promoted int, ok bool) {
-	if !validExecutorDriver(driver) || driver.timers != nil || driver.state != executorDriverSleeping || !idleExecutorScheduler(driver.p) {
+	if !validExecutorDriver(driver) || driver.sources.usesMonotonicTime() || driver.state != executorDriverSleeping || !idleExecutorScheduler(driver.p) {
 		return 0, 0, false
 	}
 	return leaveExecutorIdleAndPoll(driver)
 }
 
 // WakeExecutorAt leaves a committed timer-aware retained wait and services both
-// source tables using the target's fresh post-wake monotonic sample.
+// source set using the target's fresh post-wake monotonic sample.
 func WakeExecutorAt(driver *ExecutorDriver, now int64) (waits, timers, promoted int, ok bool) {
-	if !validExecutorDriver(driver) || driver.timers == nil || driver.state != executorDriverSleeping ||
+	if !validExecutorDriver(driver) || !driver.sources.usesMonotonicTime() || driver.state != executorDriverSleeping ||
 		!idleExecutorScheduler(driver.p) || now < 0 {
 		return 0, 0, 0, false
 	}
 	scan, ok := leaveExecutorIdleAndPollAt(driver, now)
 	return scan.waits, scan.timers, scan.promoted, ok
-}
-
-func executorTimerTableEmpty(driver *ExecutorDriver, p *P) bool {
-	return driver != nil && (driver.timers == nil || timerRegistrationTableEmpty(driver.timers, p))
 }
 
 // BeginExecutorClose seals a quiescent driver before physical backend
@@ -544,9 +563,9 @@ func executorTimerTableEmpty(driver *ExecutorDriver, p *P) bool {
 // this close before entering those state machines.
 func BeginExecutorClose(driver *ExecutorDriver) bool {
 	if !validExecutorDriver(driver) || driver.state != executorDriverActive || !idleExecutorScheduler(driver.p) ||
-		driver.terminalKind != ActionInvalid ||
-		driver.p.waitHead != nil || driver.p.waitTail != nil ||
-		!registrationTableEmpty(driver.waits, driver.p) || !executorTimerTableEmpty(driver, driver.p) {
+		driver.poll.phase != executorPollIdle || driver.terminalKind != ActionInvalid ||
+		!emptySchedulerWaitQueues(driver.p) ||
+		!driver.sources.empty(driver.p) {
 		return false
 	}
 	schedule := preemptLoad(&driver.p.schedule)
@@ -564,22 +583,18 @@ func finalDrainExecutorSources(driver *ExecutorDriver) bool {
 	if !validExecutorDriver(driver) {
 		return false
 	}
-	drained, ok := driver.waits.drainFor(driver.p)
-	return ok && drained == 0 && registrationTableEmpty(driver.waits, driver.p) &&
-		executorTimerTableEmpty(driver, driver.p)
+	scan, ok := driver.sources.drainForClose(driver.p)
+	return ok && scan.completed == 0
 }
 
 func retireExecutorBinding(driver *ExecutorDriver, restoreAction *Action) bool {
 	if !validExecutorDriver(driver) ||
-		!registrationTableEmpty(driver.waits, driver.p) || !executorTimerTableEmpty(driver, driver.p) ||
+		!driver.sources.empty(driver.p) ||
 		!driver.registry.ConfirmQuiesced(driver.handle) || !driver.registry.Retire(driver.handle) {
 		return false
 	}
-	p, waits, timers := driver.p, driver.waits, driver.timers
-	if timers != nil && !unbindTimerRegistrationTable(timers, p) {
-		return false
-	}
-	if !unbindRegistrationTable(waits, p) {
+	p := driver.p
+	if !unbindExecutorSourceSet(&driver.sources, p) {
 		return false
 	}
 	p.executor = nil
@@ -593,11 +608,11 @@ func retireExecutorBinding(driver *ExecutorDriver, restoreAction *Action) bool {
 
 // ConfirmExecutorClose records the caller's strong join of the complete target
 // shim, including pre-lease entry and the Request-to-doorbell tail. It retires
-// the stable generation and unbinds the empty wait table and P.
+// the stable generation and unbinds the empty source set and P.
 func ConfirmExecutorClose(driver *ExecutorDriver) bool {
 	if !validExecutorDriver(driver) || driver.state != executorDriverClosing || !idleExecutorScheduler(driver.p) ||
 		driver.terminalKind != ActionInvalid ||
-		driver.p.waitHead != nil || driver.p.waitTail != nil ||
+		!emptySchedulerWaitQueues(driver.p) ||
 		!finalDrainExecutorSources(driver) {
 		return false
 	}
@@ -606,10 +621,11 @@ func ConfirmExecutorClose(driver *ExecutorDriver) bool {
 
 func terminalExecutorRootPending(p *P, g *G, kind ActionKind) bool {
 	if p == nil || g == nil || p.current != g || p.inResume ||
+		p.runDecision != (RunDecision{}) || p.runDecisionTaken ||
 		!ValidG(g) || g.runP != p || g.destroyTarget != nil || !g.destroyRoot ||
 		g.active != nil || g.frames != nil ||
-		p.readyHead != nil || p.readyTail != nil || p.waitHead != nil || p.waitTail != nil ||
-		!validReadyQueue(p) || !validWaitQueue(p) || preemptLoad(&p.schedule) != scheduleIdle {
+		p.readyHead != nil || p.readyTail != nil || !emptySchedulerWaitQueues(p) ||
+		!validReadyQueue(p) || !validSchedulerWaitQueues(p) || preemptLoad(&p.schedule) != scheduleIdle {
 		return false
 	}
 	switch kind {
@@ -635,22 +651,20 @@ func terminalExecutorCloseCandidate(p *P, g *G, action Action) (*ExecutorDriver,
 	}
 	driver := p.executor
 	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
-		driver.terminalKind != ActionInvalid || !registrationTableEmpty(driver.waits, p) ||
-		!executorTimerTableEmpty(driver, p) {
+		driver.poll.phase != executorPollIdle || driver.terminalKind != ActionInvalid || !driver.sources.canBeginTerminalClose(p) {
 		return nil, false
 	}
 	return driver, true
 }
 
-func settleTerminalExecutorClose(driver *ExecutorDriver, p *P) bool {
+func settleTerminalExecutorClose(driver *ExecutorDriver, p *P, terminal *G) bool {
 	for {
 		if !validExecutorDriver(driver) || driver.state != executorDriverActive || driver.p != p ||
-			driver.terminalKind != ActionInvalid || !registrationTableEmpty(driver.waits, p) ||
-			!executorTimerTableEmpty(driver, p) {
+			driver.terminalKind != ActionInvalid || terminal == nil || !driver.sources.canBeginTerminalClose(p) {
 			return false
 		}
-		drained, ok := driver.waits.drainFor(p)
-		if !ok || drained != 0 {
+		_, ok := driver.sources.publishTerminalPass(p, terminal)
+		if !ok {
 			return false
 		}
 		if _, ok = driver.registry.Acknowledge(driver.handle); !ok {
@@ -660,12 +674,11 @@ func settleTerminalExecutorClose(driver *ExecutorDriver, p *P) bool {
 		// Recheck the complete durable source set after acknowledgement. If a
 		// request wins the following exact close race, loop and repeat the same
 		// transaction; the destroyed LLVM handle is not part of this path.
-		drained, ok = driver.waits.drainFor(p)
-		if !ok || drained != 0 || !registrationTableEmpty(driver.waits, p) ||
-			!executorTimerTableEmpty(driver, p) {
+		scan, ok := driver.sources.publishTerminalPass(p, terminal)
+		if !ok {
 			return false
 		}
-		if driver.waits.Pending() || driver.registry.ObserveRequested(driver.handle) {
+		if scan.completed != 0 || driver.sources.pending(p) || driver.registry.ObserveRequested(driver.handle) {
 			continue
 		}
 		if driver.registry.BeginClose(driver.handle) {
@@ -684,7 +697,7 @@ func settleTerminalExecutorClose(driver *ExecutorDriver, p *P) bool {
 // target adapter nor an asynchronous GC scan can retain or reuse them.
 func beginTerminalExecutorClose(p *P, g *G, action Action) (Action, bool) {
 	driver, ok := terminalExecutorCloseCandidate(p, g, action)
-	if !ok || !settleTerminalExecutorClose(driver, p) {
+	if !ok || !driver.sources.beginTerminalClose(p) || !settleTerminalExecutorClose(driver, p, g) {
 		return Action{}, false
 	}
 	driver.terminalKind = action.Kind
@@ -732,7 +745,19 @@ func ConfirmTerminalExecutorClose(driver *ExecutorDriver) (*G, Action, bool) {
 	}
 	p, g, action := driver.p, driver.p.current, driver.p.action
 	want, ok := terminalExecutorCloseDriver(p, g, action)
-	if !ok || want != driver || !finalDrainExecutorSources(driver) {
+	if !ok || want != driver {
+		return nil, Action{}, false
+	}
+	// The adapter's strong join covers both a TaskControl Post admitted before
+	// its endpoint seal and that call's later ExecutorRegistry Request/doorbell
+	// tail. Drain those final Closing mailboxes before proving both admission
+	// domains quiescent. Terminal-late facts are normal discards because the
+	// final root was already destroyed before ActionTerminalExecutorClose.
+	if _, drainOK := driver.sources.publishTerminalPass(p, g); !drainOK ||
+		!driver.sources.canFinishTerminalClose(p) || !driver.registry.canConfirmQuiesced(driver.handle) {
+		return nil, Action{}, false
+	}
+	if !driver.sources.finishTerminalClose(p) {
 		return nil, Action{}, false
 	}
 	// The synthetic token is a stable core-private equality marker. Destroyed

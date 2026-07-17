@@ -286,15 +286,7 @@ func buildCoroSpawnNativeE2EDriver(t *testing.T, prog llssa.Program, temp, check
 	// path passes false. Keep the test island fail-stop without pulling the
 	// legacy panic/printing closure into the final executable.
 	abort := pkg.NewFunc("abort", newSignature(nil, nil), llssa.InC)
-	assertNil := pkg.NewFunc(llssa.PkgRuntime+".AssertNilDeref", newSignature(
-		[]types.Type{types.Typ[types.Bool]}, nil,
-	), llssa.InGo)
-	assertBody := assertNil.MakeBody(3)
-	fail, valid := assertNil.Block(1), assertNil.Block(2)
-	assertBody.If(assertNil.Param(0), fail, valid)
-	assertBody.SetBlock(fail).Call(abort.Expr)
-	assertBody.Return()
-	assertBody.SetBlock(valid).Return()
+	defineCoroNativeE2ENilDerefStubs(prog, pkg, abort)
 	// Fixed-capacity executor/wait registries intentionally keep explicit Go
 	// bounds checks. The complete runtime would report those through the normal
 	// panic path; this closed island instead aborts on the impossible invalid
@@ -346,6 +338,7 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_allocator.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_frame.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_program.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_run_decision.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_sched.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor_driver_legacy.go"),
@@ -353,6 +346,7 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_native_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_wait_pipe_llgo.go"),
 	}
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_run_decision.go")
 	conf := NewDefaultConf(ModeGen)
 	conf.ForceRebuild = true
 	conf.Tags = "nogc"
@@ -406,6 +400,20 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 		t.Fatalf("production coroutine runtime island objects = %d, want exactly %d", len(objects), len(allowed))
 	}
 	return objects
+}
+
+func requireCoroRuntimeIslandProductionSource(t *testing.T, files []string, name string) {
+	t.Helper()
+	want := filepath.Join("..", "..", "runtime", "internal", "runtime", name)
+	count := 0
+	for _, file := range files {
+		if file == want {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("production coroutine runtime island source %q occurs %d times, want exactly one", want, count)
+	}
 }
 
 func sanitizeCoroSpawnNativeE2EObjectName(name string) string {

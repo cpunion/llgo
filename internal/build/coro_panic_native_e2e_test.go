@@ -427,15 +427,7 @@ func buildCoroPanicNativeE2EDriver(t *testing.T, prog llssa.Program, temp string
 	// standard-library runtime package. Keep ordinary pointer checks fail-stop
 	// and resolve unreachable core allocation edges directly to libc, matching
 	// the closed-static-spawn island.
-	assertNil := pkg.NewFunc(llssa.PkgRuntime+".AssertNilDeref", newSignature(
-		[]types.Type{types.Typ[types.Bool]}, nil,
-	), llssa.InGo)
-	assertBody := assertNil.MakeBody(3)
-	assertFail, assertValid := assertNil.Block(1), assertNil.Block(2)
-	assertBody.If(assertNil.Param(0), assertFail, assertValid)
-	assertBody.SetBlock(assertFail).Call(abort.Expr)
-	assertBody.Return()
-	assertBody.SetBlock(assertValid).Return()
+	defineCoroNativeE2ENilDerefStubs(prog, pkg, abort)
 	checkIndexRange := pkg.NewFunc(llssa.PkgRuntime+".CheckIndexRange", newSignature(
 		[]types.Type{types.Typ[types.Bool], types.Typ[types.Int64], types.Typ[types.Bool], types.Typ[types.Int]}, nil,
 	), llssa.InGo)

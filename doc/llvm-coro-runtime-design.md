@@ -12,6 +12,8 @@
 
 历史原型：[PR #1532](https://github.com/xgo-dev/llgo/pull/1532)
 
+统一异步核心与扩展成本契约：[`coro-async-core-contract.md`](./coro-async-core-contract.md)
+
 ## 1. 结论与核心决策
 
 本设计以 LLVM stackless coroutine 作为可挂起 Go 调用帧的唯一底层机制，重新设计编译器分析、函数 ABI、逻辑 goroutine、抢占调度、GC、同步原语和平台事件驱动。无栈不是可选优化，而是跨 Native、WASM、RTOS 和 baremetal 共用同一调度模型的硬性架构约束。PR #1532 仅作为 LLVM intrinsic 与 IR 结构参考，不在其调度器和“所有函数双版本”模型上继续演进。
@@ -31,6 +33,7 @@
 11. coroutine frame 必须由可扫描的 runtime allocator 管理，不能使用不受 GC 管理的普通 C `malloc`。
 12. Native 使用 M/P/G 形式的多 executor 调度；JS/WASM、WASI 初期、RTOS 初期和 baremetal 使用同一抽象的单 P 形态。
 13. JS/WASM scheduler必须按slice返回host；Sync export不能执行未证明可在当前同步任务闭包内完成的park，更不能等待未来Promise/timer。只有ABI已声明Async/Dual时才生成Promise wrapper，否则必须启用声明的JSPI/Asyncify边界能力或诊断。
+14. 借鉴其他语言只采纳operation lifetime、commit、cooperative cancellation、reduction和executor ownership等底层机制；不把`Future`、`Task/Job`、`Promise`、sender/receiver对象图、STM retry log或每G mailbox引入Go源码、Go ABI或基础G常驻布局。
 
 这里的“抢占式”指对 Go 用户透明、由异步请求触发并在编译器安全点完成的抢占。LLVM stackless coroutine 不能在任意机器指令、POSIX signal handler 或 ISR 中保存普通 native 调用栈，因此本设计不承诺任意 PC 硬抢占。
 
@@ -630,7 +633,7 @@ Hard-sync callsite：
        }
 
 3. Wrapper调用 `newG(typedRootFactory, BoundaryRecord)`。Root trampoline在G内选择 `plainEntry` 或 `coroEntry`，result slot始终指向BoundaryRecord。
-4. 外层`blockOn`等待root完成DestroyPending/unregister后的terminal ack。`Return`才把result复制回foreign ABI；`Panic/Goexit/CancelledRuntime`必须已运行Go defer并冻结logical trace，再按ABI声明的boundaryPolicy处理。同步C/host export默认不得language-unwind或伪造零值返回，只能采用与cgo兼容的fatal/abort；显式支持error outcome的embedding ABI可返回该outcome，Promise风格异步边界可reject。Record只在terminal ack被consumer确认后释放。
+4. 外层`blockOn`等待root完成DestroyPending/unregister后的terminal ack。`Return`才把result复制回foreign ABI；`Panic/Goexit/Abort/Shutdown`必须已运行Go defer并冻结logical trace，再按ABI声明的boundaryPolicy处理。同步C/host export默认不得language-unwind或伪造零值返回，只能采用与cgo兼容的fatal/abort；显式支持error outcome的embedding ABI可返回该outcome，Promise风格异步边界可reject。Record只在terminal ack被consumer确认后释放。
 
 动态callback trampoline分三类：
 
@@ -834,8 +837,9 @@ Runtime 可选配置每 G 的 `maxFrameDepth/maxFrameBytes`，用于资源受限
         ownerP
         lockedM
         waitReason
-        parkGeneration
-        wakePending
+        parkState       ParkState
+        resumePermitEpoch
+        taskCancelState
         preemptRequested
         preemptDisable
         pendingRequest[RequestKind]
@@ -843,7 +847,7 @@ Runtime 可选配置每 G 的 `maxFrameDepth/maxFrameBytes`，用于资源受限
         pollBudget
         quantumDeadline
         panicState
-        intrusive ready/wait/timer links
+        intrusive ready link
     }
 
 #### P
@@ -852,6 +856,8 @@ Runtime 可选配置每 G 的 `maxFrameDepth/maxFrameBytes`，用于资源受限
         id
         localRunQueue
         timerHeap
+        sourceSet
+        runSliceCursor
         currentG
         seenEpoch[RequestKind]
         allocatorCache
@@ -872,6 +878,8 @@ Runtime 可选配置每 G 的 `maxFrameDepth/maxFrameBytes`，用于资源受限
     }
 
 Native 上 M 是 pthread，P 数量通常受 GOMAXPROCS 控制。JS/WASM、单线程 WASI 和 baremetal 初期折叠为一个 M、一个 P、多个 G。
+
+这里的结构只表达ownership，不冻结字段排列。V2等待由稳定G内嵌的`ParkState`、直接park frame拥有的`WaitSetRecord`和source-owned `OperationRecord/ParkLink`共同表示；旧`parkGeneration + wakePending`只属于legacy单等待迁移层，不能继续作为channel、select、timer或I/O的新契约。
 
 ### 11.2 G 状态机
 
@@ -895,7 +903,7 @@ Native 上 M 是 pthread，P 数量通常受 GOMAXPROCS 控制。JS/WASM、单�
 | `Call` / structured await | parent suspended，activeFrame切child | Dispatching；若quantum到期可转Runnable | 当前M direct或ready queue |
 | `FrameComplete` | publish completion，activeFrame切parent，child入DestroyPending后销毁 | Dispatching | 当前M direct或ready queue |
 | `Preempt/Yield` | activeFrame不变 | Runnable，exactly-once入队；preempt放队尾 | 任意允许的M |
-| `Park` | waiter已release publish | Parking；handoff后按wakePending变Waiting或Runnable | wait owner / ready queue |
+| `Park` | exact ParkTicket已seal，candidate operation已release publish | Parking；owner提交后按sticky fact变Waiting或进入resolution/detach | wait owner / source-affine ready queue |
 | `GCStop` | 发布stateID和stack/root状态 | GCStopped，STW list | GC恢复后原/任意M |
 | `ForeignCall` | publish ForeignOp | ForeignWait，foreign-op registry | foreign worker/targetM；完成后ready |
 | `ForeignReentry start` | 在owner G push special child | ForeignWait -> Dispatching -> Running | 持有C boundary的M |
@@ -923,34 +931,25 @@ ForeignReentry/HostReentry child若park，使用普通Parking/Waiting协议但pi
 
 Ready 和 wait link 内嵌在 G/等待对象中，普通切换不分配 queue node。
 
+等待完成后的G先是`source-affine ready`，不自动等于可偷取的Runnable：winner record、result lease或cleanup disposition仍属于原P时，只能留在原owner队列。原P通过source-specific静态hook把exact ticket、outcome、case和typed payload物化到compiler提供的frame-local `ResumePacket/ResultCell`，对被prompt cancellation压制的结果执行Discard，并结束所有需要跨P读取的source lease；release-publish packet后，G才成为P-neutral runnable并可进入global injection或work stealing。新P acquire packet后只能选择normal continuation或cleanup，不能回访旧route/source。packet未物化、ticket不匹配、重复消费或仍带source lease时一律fail closed。
+
 ### 11.4 Park/Wake handshake
 
 必须正确处理 wake-before-park。
 
-Park：
+Park preparation由owner P执行短小事务：`BeginParkSet -> Attach* -> Seal -> Prepare/Commit`。`ParkTicket`标识本次G的logical wait；每个candidate另有带source/route/local/generation的`OperationID`，两者不能合并。事务seal前失败必须同步abort并撤销已准入registration；seal后active frame执行suspend并回到scheduler，其他M、producer、host callback或ISR都不能直接resume handle。
 
-1. Running G 在 wait object 锁或原子协议下注册 wait node。
-2. 增加 `parkGeneration`，状态变为 `Parking`。
-3. Active frame 执行 suspend。
-4. Resume 返回 owner scheduler 后提交状态：
-   - 若 `wakePending` 已设置，转 `Runnable` 并入队。
-   - 否则转 `Waiting`。
+Producer只向exact `OperationID` release-publish sticky fact并请求可合并doorbell。early fact可以发生在G仍为`Parking`时，但事实保存在source-owned record；owner P完成整个SourceSet publication barrier后才扫描受影响`WaitSetRecord`、决定logical outcome并启动loser detach。winner result lease必须已有exact owner，且所有loser都达到Detached或pointer-free tombstone，G才进入source-affine ready；Take/Discard在resume gate或P-neutral packet物化时完成。物理backend的Quiesced与slot Recycle仍是更晚、独立的阶段。
 
-Wake：
-
-- 观察到 `Parking`：只设置 `wakePending`，不能由另一个 M 提前 resume。
-- 观察到 `Waiting`：CAS `Waiting -> Runnable`，然后 enqueue。
-- generation 不匹配：该事件属于旧 timer/I/O/wait，丢弃。
-- 已 Runnable/Running/Dead：不重复 enqueue。
+Stale generation、duplicate fact和已经terminal的operation静默拒绝或按debug策略fail closed，绝不能重复enqueue。等待对象只发布事实，不拥有G frame；同一suspension epoch的`ResumePermit(frame, epoch)`只能被scheduler消费一次。
 
 内存序要求：
 
-- waiter/result 初始化后 release publish。
-- waker acquire 读取。
-- `Waiting -> Runnable` 使用 release CAS。
-- queue pop 或 `Runnable -> Running` 使用 acquire。
-- completion 先写 result，再 release 发布完成状态。
-- parent resume 前 acquire completion。
+- waiter、result record和candidate link初始化后release publish。
+- producer在验证exact generation并取得admission lease后写payload，再release发布terminal fact；owner acquire后才读取payload。
+- logical terminal、detach、quiescence和recycle各自有独立状态/ack，后者不能倒推或覆盖前者。
+- `ResumePacket`/completion先写typed result和control kind，再release发布ready；queue pop或`Runnable -> Running`后acquire读取。
+- parent恢复前acquire `CompletionRecord`；只有`Return`读取普通结果，其他kind进入cleanup。
 
 初期可使用锁或 seq-cst 原子；状态机稳定后再细化 acquire/release。
 
@@ -1046,6 +1045,8 @@ Slow path按固定优先级处理所有pending kind，而不是只读取最后�
 Scheduler只在完成对应handoff后清除pending request并重置budget。时间片属于G，不在每次进入child frame时重置，否则深调用可以逃避抢占。
 
 `runtime.Gosched` 是显式 `SuspendYield`：当前active frame在安全点suspend，G进入当前P队尾，不等待timer/host event，也不创建新frame。
+
+上述`g.pollBudget`只约束managed resume episode，不能代替executor的service budget。每次executor entry还接受统一reduction budget，并以同一账本计费source slot/fact、affected wait-set、candidate apply/detach、G dequeue/resume/destroy、inline-ready wrapper和连续child await；可拆工作保存cursor，select winner决策只允许在声明的`MaxSelectCases`内有界overshoot。`RunSlice`返回`{status, used, more, blocked, nextDeadline}`：`RetryBudget`设置`more`并安排下一次外层迭代或host entry，`AwaitExternalFact`设置`blocked`且不能因同一operation同时设置`more`。callback、ISR、同步`requestRun`和doorbell都只publish fact，永不因`more`递归进入executor。timer publication epoch在入口冻结一个monotonic `now`，不能因分片扫描让同一epoch的不同slot观察不同时间基准。
 
 ### 12.4 有界抢占条件
 
@@ -1188,7 +1189,7 @@ ForeignReentry completion固定为：
 
 - `Return`：release-publish到ReentryRecord，pop并按DestroyPending协议销毁child，之后才把result复制回C ABI、释放record、恢复ForeignWait并返回C。
 - `Panic`：先运行全部Go defer并冻结trace，绝不language-unwind穿过C。V1默认process-fatal；只有外部ABI明确提供cooperative abort/错误outcome且C已确认退出时，才可把整个ForeignOp提交为非Return终态。
-- `Goexit/CancelledRuntime`：同样先运行defer；默认process-fatal。不能在C仍执行时先唤醒owner G、释放record/permit或伪造正常callback返回。
+- `Goexit/Abort/Shutdown`：同样先运行defer；默认process-fatal。不能在C仍执行时先唤醒owner G、释放record/permit或伪造正常callback返回。
 
 若boundaryPolicy支持cooperative nonReturn，整个ForeignOp只能在C确认退出后提交一次terminal completion；默认process-fatal路径绝不恢复owner G。专项测试覆盖nested callback panic/Goexit、LockOSThread和permit回收。
 
@@ -1263,11 +1264,13 @@ Boundary自身的C/host调用栈可以在最外层同步契约期间存在，但
 
 ### 14.4 Select
 
-- 每次 select 创建一个逻辑 ticket/generation。
-- 按伪随机顺序检查 case。
-- 注册多个 waiter 后只允许一个 case CAS 赢得 ticket。
-- 失败 case 在 G resume 前或安全 cleanup 阶段注销。
-- timer/default case 使用同一 generation 防止 stale wake。
+- 每次select创建一个logical `ParkTicket`和稳定`WaitSetRecord`；所有candidate分别保存exact `OperationID`、case index、预生成随机rank以及自己的readiness/reservation generation。source只发布ready fact，不能按扫描先后直接CAS成winner或resume G。
+- 每种candidate静态声明一种commit contract：`ReadyThenTryCommit`在channel等自身同步域内用exact readiness generation执行`TryCommit`；失败或stale只消费该次hint，source要在状态再次可提交时发布新generation。`Reservable`先取得exact reservation，logical winner之后source仍须physical `Commit`，loser须`Rollback`；对应ack完成前仍计入promotion barrier。`IrreversibleCompletion`只允许结果可显式Discard的operation参加多路等待。
+- Resolver在本轮完整sticky snapshot上按随机rank尝试candidate。多个ready case只有一个logical winner；ReadyThen失败后继续其他candidate，全部失败则重新probe/repark。带`default`时，只有本轮所有非nil candidate都已完成“当前不可提交”的exact probe，且不存在待确认reservation/commit时才能发布明确`Default` outcome，不能把没有ready通知或budget耗尽当成证明。
+- `Shutdown/Abort`在发出source commit request前被claim时进入cleanup；commit成功后物理副作用不能撤销，late prompt cancellation只能压制normal continuation并Discard结果lease。普通operation cancellation与completion竞争同一terminal ownership，不能跳过尚可能成功的TryCommit而伪造cancel winner。
+- Winner确定后所有loserregistration仍须cancel并达到Detached或pointer-free tombstone；reservation physical commit/rollback都ack后，G才可进入source-affine ready。winner result lease可随exact RunDecision保留到resume gate，但normal continuation或P-neutral迁移前必须Take或Discard；ticket、candidate generation不匹配以及重复commit/rollback/Take一律fail closed。
+
+该协议保持Go channel select的一次求值、nil禁用、closed send/receive、uniform pseudo-random selection和default语义，但不引入STM日志、handler对象图或新的语言级async API。
 
 ## 15. Timer 与 I/O
 
@@ -1450,7 +1453,12 @@ Frame completion 至少有：
     Return
     Panic
     Goexit
-    CancelledRuntime
+    Abort
+    Shutdown
+
+`Abort/Shutdown`是不可被`recover`捕获的runtime控制kind，不与普通operation返回的`context.Canceled`或I/O error混合；强度单调为`Shutdown > Abort`。每个非final resume先由compiler-owned gate取得exact `RunDecision`，再执行本地reconciliation：child await读取parent-owned`CompletionRecord`，park/select按ticket取得case与result lease，被prompt cancellation压制的winner也必须显式Discard。只有所有本地payload/physical disposition都已确定后，frame才进入normal continuation或共享cleanup入口；gate不能看到取消就直接destroy frame。
+
+可能cleanup的frame使用可跨suspend的显式状态机`Idle -> Draining(cursor, control stack) -> AwaitingDeferredCall -> Draining -> PublishingCompletion -> FinalSuspended`。这允许defer自身park，同时保证LIFO节点exactly once；claim时冻结本次control cause，同一task cancellation在cleanup中保持sticky但不反复打断，后续request由terminal/shutdown policy记录而不能重入或跳过当前cleanup。
 
 ### 18.1 Panic 传播
 
@@ -1623,6 +1631,7 @@ RTOS/baremetal/static-memory profile必须为G header、live frame/depth、timer
 ### 20.3 Native
 
 - 初期单 P 验证状态机，之后启用 worker pool 和 work stealing。
+- 多P producer identity不能沿用per-P local slot：V2 `OperationID`冻结为两字`source:8/route:9/local:15 + generation:32`，route在runtime instance内单调分配且退休后永久tombstone。Waiting/Running G不可偷；原owner必须先把winner payload物化到frame-local ResumePacket并结束source lease，才可把P-neutral Runnable G放进stealable deque。
 - 每个 M 一份 OS stack，G数量不增加thread/stack；worker数量有硬上限。
 - 每个同时parked的LockOSThread G需要保留M identity，但受 `maxLockedM/maxThreads` 限制；超限遵守 `SetMaxThreads` fatal语义。
 - Poller 用 wake pipe/eventfd/kqueue 唤醒。
@@ -1634,15 +1643,15 @@ RTOS/baremetal/static-memory profile必须为G header、live frame/depth、timer
 
 Scheduler API 采用版本化 host protocol：
 
-    runSlice(budget) -> { runnable, nextDeadline, status }
+    runSlice(budget) -> { status, used, more, nextDeadline }
     notify(token, generation)
     requestRun()
 
 流程：
 
 1. JS 调用 `runSlice`。
-2. Scheduler 执行到 budget 用完、无 runnable 或必须返回 host。
-3. 返回最近 deadline 和 pending host operation。
+2. Scheduler 执行到 budget 用完、无 runnable 或必须返回 host；source fact、affected wait、candidate apply和立即ready child同样扣reduction，不只计算loop扣预算。
+3. 返回最近 deadline和`more`；`more`只要求安排新的host entry，当前entry必须先返回，callback/requestRun不得同步递归执行scheduler。
 4. JS arm `setTimeout`/Promise。
 5. Callback 调用 `notify`，再 queueMicrotask/requestRun。
 
@@ -1711,6 +1720,10 @@ Command模式保留Go程序“所有G均等待且无未来事件”deadlock。Re
 - 测试/embedded graceful shutdown可遍历G，标记runtime cancellation并wake，使其沿显式unwind运行defer；只有到FinalSuspended后才destroy。
 - ForeignWait G只标cancel并等待ForeignOp completion/ack，不能提前unwind或释放C仍在使用的record/root；never-return foreign op单独报告。
 - Stale token、timer 和 wait registration 必须按 generation 解注册。
+
+取消不能压缩成一个boolean，而是`CancelRequested -> LogicalCanceled -> Detached -> Quiesced -> Recycled`的分层协议。Completion与取消竞争同一个exact-generation terminal ownership；已经发生的syscall、channel commit或其他物理副作用不能追溯撤销。`Detached`只保证source不能再访问G/frame/result pointer，`Quiesced`才保证旧backend callback不会再进入，只有后者完成且result lease已Take/Discard后才能复用slot generation。
+
+Source admission同样必须无缝覆盖取消窗口：`reserve/attach -> observe sticky cancel -> backend Start -> recheck`，或由backend提供等价原子register。`Start`只允许一次，inline completion也只能publish terminal fact，不能递归resume或执行cleanup。固定容量source返回`Accepted | RetryBudget | AwaitCapacity | Unsupported`；`AwaitCapacity`依赖新的generation fact而不是本地自旋，并支持尚未Start的operation被cancel。worker/host/RTOS容量耗尽不能静默丢请求、无限创建线程或为每operation分配新的调度对象。
 
 Coroutine frame ownership 始终属于一个 G；wait object 只借用 G reference，不拥有 frame。
 
@@ -1854,6 +1867,13 @@ Pure sync library/archive不需要链接scheduler。Executable一旦选择 `-sch
 - Phase 21 已通过真实 `nogc` pthread producer E2E覆盖 `prepare -> publish POD -> llgo.coroPark -> CommitSleep -> pending-clear/poll窗口 post -> pipe wake -> scheduler drain/consume -> 原frame恢复 -> pthread_join -> registration retire -> terminal target close`。unit/race覆盖transactional prepare在nil owner与满64槽时回滚到新generation、pre-park rollback、只有当前resume owner可prepare/retire、以及永久retired ingress诊断；planner把三个owner ABI作为精确DirectPlain runtime roots并把完整签名纳入bootstrap hash。hook和终态audit只在compiler-reserved测试capability下存在，production默认IR常量消除hook调用。
 - Phase 22 已接入第一个真实native monotonic timer source：64位Linux/Darwin使用绝对monotonic deadline和`pipe/poll` idle wait，`poll` timeout向上取整且在`EINTR`后重新取时计算；存在active timer时，唯一running G也有有界安全点预占，避免无ready peer时timer被纯计算任务无限拖延。timer table当前是64槽固定容量，slot+generation防ABA，prepare/rollback/cancel/retire保持显式交易。
 - Phase 22 的编译器新增 `llgo.coro.frame-retention.timer.v1` 证书，只对frozen emission universe中精确void fail-stop prepare/retire C ABI、一个精确`{uint32}` pointer-free token、三个独立`uint32`输出和同一SSA basic block的`prepare -> llgo.coroPark -> retire`开放。完整address-use graph禁止store、escape、alias reuse、外部call和额外control transfer；证明成功后才把x/tools `Heap` alloc改降为LLVM coroutine-frame `alloca`。若函数需要抢占，编译器在prepare紧前poll，并从prepare返回到retire返回完全禁止普通budget poll/yield；未证明形状保持managed-allocation拒绝而不猜测。该ABI identity已进入plan digest、cache fingerprint、manifest和bootstrap hash；production builder只在runtime ABI暴露精确owner符号和签名时开启，fail-stop owner body另由源码结构测试锁定，并非compiler语义证明。
+- Phase 23 的V2高并发promotion已使用直接park frame拥有的48/28-byte `WaitSetRecord`、独立active双链和per-P affected FIFO；completion与取消只合并标记受影响record，每个published epoch完成catalog pass后立即扫描其candidate snapshot，record-aware attach/detach/promotion均为O(1)邻接操作。active Poll固定执行epoch A、ack、无条件epoch B，B后不等待pending/request静默，因此连续producer不会饿死已经claim的wait-set。`ParkLink`的transient predecessor由同时parked operation支付，普通G布局不增加；1024-candidate测试通过破坏远端link证明fast detach没有退化成完整链审计。legacy WaitToken队列在迁移期独立保留。
+- Phase 23 的跨线程执行取消使用固定容量`TaskControlSource`。只有显式host/export task handle分配两字`OperationID` generation endpoint；producer原子合并`Shutdown > Abort`并请求公共doorbell，owner P在SourceSet published epoch交付sticky task token。endpoint admission seal、late accepted fact、strong join、terminal late fact和generation reuse相互分离；G现有state后对齐空洞承载owner-only lease count，使普通G不增尺寸，同时阻止endpoint仍持有`*G`时提前回收task storage。
+- Phase 23 已把monotonic timer迁入同一个Operation V2事务，同时保留现有V1 owner ABI：两种协议共享物理slot generation并由显式mode隔离；V2到期只publish sticky completion和affected wait，完整source epoch之后才统一resolve并按resolved candidate执行O(1) `ApplyOne`。winner结果lease未Take/Discard前不能recycle，task/shutdown取消可以压制selected continuation但不能泄漏结果所有权；Manual与Timer混合select的winner只由rank决定，不受静态source访问顺序影响。legacy WaitRegistration仍待迁移。
+- Phase 26/27 已实现唯一的commit-capable select resolver：`ReadyThenTryCommit`的request精确绑定logical ticket、physical generation、record和readiness generation，失败从已排序链的下一link继续；`Reservable`与`IrreversibleCompletion`进入同一个逐candidate settle/finalize路径，ordinary/strong cancel与default也不再有旁路winner逻辑。兼容API只loop-drive该primitive。Channel/Poll/Host尚未在production `ExecutorSourceSet`中提供成功`TryCommit`分支，所以当前证明覆盖runtime core和fake exact source，不能当作真实channel/netpoll/select完成。
+- Phase 27 已把source catalog和common wait-set resolver变成真正可续的bounded transaction。A/ack/B的每个固定slot以及affected wait、candidate scan、Ready commit attempt、settle、`ApplyOne`、finish、promotion和legacy-G visit各消耗一个reduction；`budget=1`连续调用不会隐藏O(N)工作或overshoot。跨host entry的snapshot由不增加`ParkState`尺寸的owner-only `resolving`位冻结，热路径只验证O(1) scalar header和当前link邻接；`RetryBudget`与`AwaitExternalFact`严格分离。该slice尚未覆盖ready-G dequeue/resume/destroy、inline-ready wrapper和连续child await的wall-work，因此完整`RunSlice`仍是后续项。
+- compiler的所有现有initial、child-await、yield和legacy-park resume边已接入terminating dispatch gate。zero-ticket路径调用scalar `__llgo_coro_run_decision_take_zero_v1(g) uint32`，正常值进入唯一normal continuation，Abort/Shutdown在cleanup lowering完成前进入共享trap而不会误执行用户continuation；full ticket/lease ABI继续供bootstrap与未来park-site reconciliation使用。同一LLVM/target的gate开关对照证明scalar gate不会增加stackless coroutine frame，CoroSplit ramp/destroy也没有可达gate。
+- 两字Operation identity已冻结为`source:8/route:9/local:15 + generation:32`，保持size 8、align 4。route按runtime instance单调分配且永不复用，关闭后保留永久tombstone；Manual/TaskControl ingress的producer lease覆盖`source.Post -> executor.Request`完整tail，strong join后才允许清除source/executor pointer；Timer V2 reserve、publish、Apply和result lease也验证exact route/local/generation。该机制只解决多executor寻址与ABA前置条件；P-neutral ResumePacket、global injection与work stealing仍未完成。
 - 第一个标准库同步风格原型已以GOROOT source patch实现`time.Sleep`：普通`time.Sleep(d)`被Effect分析自动传播为`DirectCoro/AwaitStructured`，不修改public signature，不依赖libuv、BDWGC、pthread producer或用户goroutine。真实linked native+nogc E2E已编译production runtime island，实际等待30ms并恢复原frame；timer/wake路径由monotonic clock与pipe/poll/fcntl实现，符号审计确认不依赖libuv、BDWGC或pthread producer。另一focused production-overlay测试直接读取真实注入的`time.Sleep`源，不用测试effect seed，验证跨包同步caller染色、frame证书和CoroSplit，但不声称链接执行标准库`time.Sleep`。LLVM 19–22都跑该契约，Go 1.24跑真实linked E2E，Go 1.26也跑production overlay分析/codegen。
 - Phase 22 仍是有界prototype，不是完整`time`runtime：第65个同时live timer会按fail-stop ABI终止，尚需dynamic/sharded table和heap；`Timer`/`Ticker`/`AfterFunc`仍使用legacy libuv路径；`f := time.Sleep`、interface/reflect和dynamic dispatch还没有end-to-end callable coroutine descriptor；`Sleep(0)`/负值在Sleep体内不注册timer，但value-insensitive caller仍会创建并await child frame，尚需conditional effect或call-site fast path才能避免可观测的多余handoff。完整`Do`标准库构建现在先被`sync.Pool` TLS destructor的捕获闭包挡住：exact同步C callback ABI没有closure context slot，不能直接放宽。后续需改成显式`owner/local` TLS state，并同时为`tls.Handle[T]`经`Pool.local`的unsafe transport建立字段级whole-program证书。WASM、WASI、RTOS和baremetal也尚未有对应timer source。
 - wait/preempt core 要求目标提供可靠的 32-bit atomic load/store/CAS。WASM 可直接满足；带 A 扩展的 RISC-V 可满足；ESP32-C3 RV32IMC 当前会在链接时缺少 `__atomic_*_4`，直到平台用 IRQ critical section 提供单核适配。这里故意不使用非原子 fallback。
@@ -1864,42 +1884,44 @@ Pure sync library/archive不需要链接scheduler。Executable一旦选择 `-sch
 - terminal panic 的独立 native+nogc scheduler-island 已真实编译并运行 `panic(&GlobalPayload)`。production internal runner返回精确`DrivePanic`状态，导出的void program-run ABI随后执行fatal abort；bootstrap、main、panicChild三个不同LLVM handle各destroy一次，两个祖先均不resume，task-local record在三层frame销毁后仍保持exact type/data word，且G为Dead/non-Reclaimable。最终二进制要求production `PreparePanic`/`PanicDestroyed`/`LoadPanicRecord`并禁止legacy panic/print链；测试report只观察internal drive-panic与record，不代替production printer/exit owner。
 - 完整真实 `entry → allocator → v2 factory → runtime/package init → main → scheduler` linked smoke 仍受上述 runtime/Panic/foreign blockers 限制；scheduler-island、runtime adapter 和 freestanding wasm CLI fixture 各自证明的边界不能合并表述为完整 Go runtime 已经端到端运行。
 - 当前 cache digest 只解决同一完整程序计划下的内部 package cache；未知未来 caller 可复用的预编译 archive/标准库仍需 producer summary、canonical boundary Dispatch 和 linker ABI 校验。
-- 后续依赖顺序是：先把当前64槽native timer table升级为高并发dynamic/sharded timer heap，补齐`Sleep(0)`调用点fast path、Timer/Ticker/AfterFunc和dynamic callable coroutine descriptor；同时实现有界blocking worker compensation、registration unregister和真实异步syscall source。然后实现WASM/JS requestRun、WASI poll、RTOS notification与baremetal IRQ/WFI backend；每个target都必须证明pre-lease entry、durable-source-to-Request窗口、Request-to-doorbell tail和continue callback属于完整ingress shim join边界。并行补齐fatal panic仍有peer、command main返回时仍有parked/live registration的generic teardown。与此同时为terminal ExplicitStatus增加dynamic `error.Error`/`Stringer` descriptor及production printer/exit owner；再接channel/timer/syscall producer并跑完整runtime linked smoke，之后补suspended-frame GC、defer/recover/Goexit、多P。动态/closure/method `go` target只在canonical descriptor transport完成后开启。所有阶段保持无栈、单primary和未证明即fail closed。
+- 后续依赖顺序先把已完成的bounded source/common-resolution账本扩展到ready-G dequeue/resume/destroy、inline-ready wrapper和连续child await，形成全路径bounded `RunSlice`；同时为已完成的commit-capable core接入真实Channel/Poll/Host `TryCommit`，再完成真实payload/result lease、`CompletionRecord`和可挂起cleanup。其后才把当前64槽native timer升级为dynamic/sharded heap，补齐`Sleep(0)` fast path、Timer/Ticker/AfterFunc和dynamic callable descriptor，并实现有界blocking worker、registration unregister和异步syscall source。WASM/JS requestRun、WASI poll、RTOS notification与baremetal IRQ/WFI backend都复用同一core，并分别证明完整ingress join边界。多P开放前还必须先物化P-neutral `ResumePacket`和parkable capacity permit；未物化packet的G不可steal。随后补suspended-frame GC、完整defer/recover/Goexit、dynamic/closure/method `go`及平台tooling。所有阶段保持无栈、单primary、静态source catalog和未证明即fail closed，不引入其他语言的Task/Future对象层。
 
 ### Phase 1：单 P deterministic scheduler
 
 - Fake platform、虚拟时钟和 event token。
 - G、frame chain、spawn、ordinary async call、completion/destroy。
-- Park/wake handshake。
+- 稳定`ParkState/WaitSetRecord/OperationID`、logical terminal/detach/quiesce/recycle分层和防丢park/wake handshake。
+- 静态`SourceSet`、A/ack/B idle transaction与全路径bounded `RunSlice` cursor。
+- 最小resume reconciliation、versioned `CompletionRecord`和`Abort/Shutdown` cleanup skeleton；完整Go defer/recover在Phase 4扩展。
 - Async bootstrap/init/main。
 - 单 executor native 参考实现。
 - 一份共享executor stack运行任意数量G，禁止每G pthread/ucontext/RTOS task fallback。
 
-验收：无lost wake、无重复resume、main返回语义正确、frame exactly-once destroy；10万普通parked G不增加M/机器栈数量。
+验收：无lost wake、无重复resume、`AwaitExternalFact`不产生无事件忙转、main返回语义正确、frame exactly-once destroy；10万普通parked G不增加M/机器栈数量。执行取消只有在result lease已Take/Discard且cleanup skeleton可达时才可标通过。
 
 ### Phase 2：抢占
 
 - Loop/recursion/long-block poll。
-- Budget + epoch。
+- managed poll budget + request epoch，以及source/affected/candidate/G动作共用的executor reduction budget。
 - Preempt disable。
 - Post-optimization safepoint verifier。
 - Infinite-loop fairness 测试。
 
-验收：两个不含显式yield的无限计算G都持续前进，且可由测试控制器请求preempt/GCStop；本阶段不依赖尚未实现的timer。
+验收：两个不含显式yield的无限计算G都持续前进，且可由测试控制器请求preempt/GCStop；持续source producer、inline-ready和child-await也不能绕过budget或饿死已claim epoch，本阶段不依赖尚未实现的timer。
 
 ### Phase 3：Go 阻塞原语
 
 - Scheduler-aware sema。
 - Mutex/RWMutex/WaitGroup/Cond/Once slow path。
-- Channel、select。
+- Channel，以及具备`ReadyThenTryCommit/Reservable/IrreversibleCompletion`、default不可提交证明和physical ack barrier的select。
 - Sleep、公共 timer heap、AfterFunc。
 - 单线程 netpoll。
 
-验收：单executor下持锁者被抢占不会导致waiter阻塞executor；select/timer race通过；ticker在另一个G纯循环期间仍可唤醒。
+验收：单executor下持锁者被抢占不会导致waiter阻塞executor；stale readiness、reservation rollback、all-fail+default和cancel-vs-commit通过；ticker在另一个G纯循环期间仍可唤醒。
 
 ### Phase 4：Panic/GC/调试
 
-- Task-local panic/defer/recover/Goexit。
+- 在Phase 1最小CompletionRecord/cleanup skeleton上补齐task-local panic/defer/recover/Goexit、nested control stack和可挂起defer。
 - NativeEH/WasmEH/ExplicitStatus/EpisodeSJLJ PanicABI与语言fault显式check。
 - Frame root allocator。
 - STW handshake。
@@ -1914,7 +1936,8 @@ Pure sync library/archive不需要链接scheduler。Executable一旦选择 `-sch
 
 ### Phase 5：Native 多 P
 
-- Worker pool、本地 deque、global injection、work stealing。
+- P-neutral `ResumePacket/ResultCell`物化和source-affine ready边界完成后，再启用本地deque、global injection与work stealing。
+- Worker pool及其他有限source使用generation capacity permit/backpressure，不按operation增生线程或对象。
 - ForeignOp worker/locked-M clean-stack execution、P release/reacquire和ForeignReentry。
 - `Syscall*`/`RawSyscall*`的single-call ForeignOp、PollWait wrapper event lowering、pointer provenance/pin和thread-affine thunk。
 - LockOSThread。
@@ -2015,9 +2038,12 @@ Pre-CoroSplit verifier按CoroPlan检查 `coro.id/begin/suspend/end`、park/await
 - Duplicate wake/ready。
 - G 不能同时在两个 queue。
 - Frame 不能并发 resume。
+- 每个suspension epoch的ResumePermit只能消费一次，stale/duplicate permit不能resume或destroy新epoch。
 - Timer Stop/Reset/fire generation race。
 - I/O cancel/completion race。
 - Work stealing 和 pinned G。
+- 未物化P-neutral ResumePacket的source-affine ready G不能进入global queue或被steal；物化后新P不访问旧route/source，packet只能消费一次。
+- 小budget下持续source producer、affected batch、loser detach和inline-ready分别保留cursor并返回`more`；只有external ack缺失时返回`blocked`，连续空Poll不得因`AwaitExternalFact`忙转。
 - Command main返回立即退出；Reactor/Embedded bootstrap返回host后仍可接受export。
 - Main Goexit deadlock。
 - Deterministic trace/replay。
@@ -2054,6 +2080,10 @@ Pre-CoroSplit verifier按CoroPlan检查 `coro.id/begin/suspend/end`、park/await
 - Close 与 send/recv race。
 - Select 多 case 同时 ready。
 - Select + timeout + cancel。
+- `ReadyThenTryCommit`的stale/duplicate readiness generation、TryCommit失败后republish以及多个candidate依次失败。
+- `Reservable` winner physical Commit、loser Rollback、ack前不promote，以及commit/rollback duplicate与旧generation拒绝。
+- 所有候选TryCommit失败后才允许default；budget耗尽、缺少ready通知和pending reservation都不能伪造default证明。
+- Abort/Shutdown-before-commit、late prompt cancellation-after-commit和ordinary cancel-vs-completion分别验证结果Take/Discard与不可撤销副作用。
 - Timer Stop/Reset stale value、Ticker drop和AfterFunc Stop/reset race。
 - Go1.23+ channel Timer/Ticker丢弃最后引用后forced GC会detach heap lease；GC-vs-fire/Reset/Stop generation race无UAF/stale callback，Sleep/AfterFunc仍被正确强保活。
 - Native多P memory-model litmus/stress；Cortex-M/RISC-V 64位atomic对齐、关中断/锁fallback和atomic.Pointer barrier。
@@ -2062,6 +2092,8 @@ Pre-CoroSplit verifier按CoroPlan检查 `coro.id/begin/suspend/end`、park/await
 ### 26.6 GC 与生命周期
 
 - Plain→plain panic/Goexit运行各层defer后再跨coro completion；baremetal显式PanicABI专项。
+- Park/select resume先按exact ticket reconciliation并Take/Discard result lease，再进入normal continuation或Abort/Shutdown cleanup；ticket mismatch与重复消费fail closed。
+- Child先release发布`CompletionRecord{Return/Panic/Goexit/Abort/Shutdown}`再destroy；parent只在Return读取普通result，其他kind经可挂起cleanup传播。
 - Direct deferred function先park再recover成功，间接helper recover失败，nested panic generation不混淆。
 - 对象只被 suspended frame 引用，强制 GC 后仍存活。
 - Frame completion/unlink 后对象可回收。
@@ -2150,13 +2182,19 @@ Runtime 暴露 debug counters：
 18. Cancellation在destroy前完成defer/unwind。
 19. Per-kind target request在ack前不被覆盖，G迁移不能代消耗其pending generation。
 20. 所有有限capacity遵守reserve-before-publish，失败后queue/root/token状态不变。
+21. 每个suspension epoch的ResumePermit只能消费一次；destroy使该frame全部旧permit失效。
+22. Operation的logical terminal、waiter detach、backend quiescence和storage recycle是四个独立阶段，result lease未Take/Discard不得recycle。
+23. `ReadyThenTryCommit`和`Reservable`只接受exact readiness/reservation generation；default只有在完整不可提交证明后发布，physical commit/rollback ack前不得promote。
+24. `AwaitExternalFact`不能因同一operation设置`more`；budget耗尽和可续cursor只能返回`RetryBudget/more`，不能伪装成external blocked。
+25. 持有source-affine result/cleanup lease的G不能steal；P-neutral ResumePacket release发布且旧lease结束后，新P才可acquire运行并且不得回访旧route。
+26. Abort/Shutdown只在resume gate或safepoint claim并先完成本地result reconciliation；取消不能直接destroy仍有defer、payload或physical disposition的frame。
 
 ## 29. 风险与缓解
 
 | 风险 | 等级 | 缓解 |
 |---|---|---|
 | IR外backend/helper循环漏掉抢占 | Critical | target-machine cost proof + unboundedRegions=0 + link failure |
-| Wake/park handoff 丢唤醒或并发 resume | Critical | 明确 Parking/WakePending 协议 + deterministic model test |
+| Wake/park handoff 丢唤醒或并发 resume | Critical | 稳定ParkState、exact ticket、sticky source fact与deterministic model test |
 | G迁移/并发kind覆盖抢占或STW请求 | Critical | Per-kind request slot + target-owned seen/ack + migration model test |
 | Frame 未进入 GC root graph | Critical | Runtime allocator + suspended-frame forced-GC tests |
 | 继续使用 pthread cond 阻塞 executor | Critical | Coroutine mode 全量切换 sema/channel/poll |
@@ -2310,10 +2348,12 @@ Nil function value的求值发生在 caller，但调用 panic属于新 G 开始�
 
 - 进入 select 时，所有 channel operands以及 send RHS 按规范求值一次。
 - Case permutation只影响选择，不重复表达式求值。
-- Default 存在且无 case ready时立即返回。
+- 每个channel case使用`ReadyThenTryCommit`：ready notification只提名candidate，必须携带exact readiness generation并在channel同步域内原子`TryCommit`；状态已变化时消费该hint并继续本轮其他candidate或重新probe。
+- Default存在时，只有本轮所有非nil case都完成不可提交probe、所有TryCommit均失败且没有待确认reservation/commit时才立即返回；budget耗尽或暂时没有notification不是default证明。
 - Nil channel case永不 ready。
-- 多 case 同时 ready使用伪随机顺序。
-- Wait registration采用 ticket/generation，确保只提交一个 case。
+- 多case同时ready使用预生成伪随机rank，source扫描顺序不能决定winner。
+- Wait registration采用logical ParkTicket、per-candidate readiness generation和loser detach barrier，确保只提交一个case；winner payload和所有physical ack完成前不恢复用户continuation。
+- Closed receive、closed send panic、timer case和任务Abort/Shutdown都保留各自payload/control kind，不能压成一个ready boolean。
 
 Go memory model中的 channel send/recv、close happens-before由 value publish 的 release 和 waker/resume 的 acquire 建立。
 

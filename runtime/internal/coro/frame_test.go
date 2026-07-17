@@ -288,7 +288,7 @@ func TestTerminalGRejectsResidualSchedulerState(t *testing.T) {
 		{"in resume", func(p *P) { p.inResume = true }},
 		{"action kind", func(p *P) { p.action.Kind = ActionResume }},
 		{"action handle", func(p *P) { p.action.Handle = dummyActionHandle }},
-		{"timer preempt budget", func(p *P) { p.timerPreemptBudget = 1 }},
+		{"service preempt budget", func(p *P) { p.servicePreemptBudget = 1 }},
 	}
 	for _, test := range pTests {
 		t.Run("P "+test.name, func(t *testing.T) {

@@ -89,11 +89,6 @@ const (
 	waitRegistrationQuiescedDelivered
 )
 
-const (
-	waitRegistrationProducerClosed = uint32(1 << 31)
-	waitRegistrationProducerMask   = waitRegistrationProducerClosed - 1
-)
-
 type waitRegistrationSlot struct {
 	// The producer-visible prefix contains only naturally aligned uint32 words.
 	// All accesses to these fields are atomic.
@@ -164,30 +159,11 @@ func registrationSlot(table *WaitRegistrationTable, handle WaitRegistrationHandl
 }
 
 func registrationAcquireProducer(slot *waitRegistrationSlot) bool {
-	if slot == nil {
-		return false
-	}
-	for {
-		inflight := preemptLoad(&slot.inflight)
-		if inflight&waitRegistrationProducerClosed != 0 || inflight&waitRegistrationProducerMask == waitRegistrationProducerMask {
-			return false
-		}
-		if preemptCompareAndSwap(&slot.inflight, inflight, inflight+1) {
-			return true
-		}
-	}
+	return slot != nil && producerAdmissionAcquire(&slot.inflight)
 }
 
 func registrationReleaseProducer(slot *waitRegistrationSlot) {
-	for {
-		inflight := preemptLoad(&slot.inflight)
-		if inflight&waitRegistrationProducerMask == 0 {
-			return
-		}
-		if preemptCompareAndSwap(&slot.inflight, inflight, inflight-1) {
-			return
-		}
-	}
+	producerAdmissionRelease(&slot.inflight)
 }
 
 // registrationSealProducers atomically closes admission while preserving the
@@ -195,22 +171,11 @@ func registrationReleaseProducer(slot *waitRegistrationSlot) {
 // an open word either wins before this CAS and is included in the count, or
 // loses to the closed bit and cannot enter afterward.
 func registrationSealProducers(slot *waitRegistrationSlot) bool {
-	if slot == nil {
-		return false
-	}
-	for {
-		inflight := preemptLoad(&slot.inflight)
-		if inflight&waitRegistrationProducerClosed != 0 {
-			return true
-		}
-		if preemptCompareAndSwap(&slot.inflight, inflight, inflight|waitRegistrationProducerClosed) {
-			return true
-		}
-	}
+	return slot != nil && producerAdmissionSeal(&slot.inflight)
 }
 
 func registrationProducersQuiesced(slot *waitRegistrationSlot) bool {
-	return slot != nil && preemptLoad(&slot.inflight) == waitRegistrationProducerClosed
+	return slot != nil && producerAdmissionQuiesced(&slot.inflight)
 }
 
 // Register reserves one slot for an armed token. It is scheduler-thread-only
@@ -239,7 +204,7 @@ func (table *WaitRegistrationTable) Register(p *P, token *WaitToken, ticket Wait
 			continue
 		}
 		inflight := preemptLoad(&slot.inflight)
-		if (generation == 0 && inflight != 0) || (generation != 0 && inflight != waitRegistrationProducerClosed) ||
+		if (generation == 0 && inflight != 0) || (generation != 0 && inflight != producerAdmissionClosed) ||
 			!preemptCompareAndSwap(&slot.state, uint32(waitRegistrationFree), uint32(waitRegistrationInitializing)) {
 			continue
 		}
@@ -256,7 +221,7 @@ func (table *WaitRegistrationTable) Register(p *P, token *WaitToken, ticket Wait
 		slot.token = token
 		slot.ticket = ticket
 		preemptStore(&slot.generation, generation)
-		if !preemptCompareAndSwap(&slot.inflight, waitRegistrationProducerClosed, 0) {
+		if !producerAdmissionReopen(&slot.inflight) {
 			// Initializing is a permanent fail-closed state if the sealed
 			// admission word was corrupted by an out-of-contract owner.
 			return WaitRegistrationHandle{}, false
@@ -320,9 +285,9 @@ func (table *WaitRegistrationTable) Pending() bool {
 
 // Drain publishes every posted completion into its WaitToken. It is
 // scheduler-thread-only. A standalone table may use Drain directly; a table
-// bound to an ExecutorDriver must be serviced by that driver so completion
-// publication, executor acknowledgement, and the mandatory source recheck stay
-// one scheduler-owned transaction.
+// bound into an ExecutorSourceSet must be serviced by its ExecutorDriver so
+// completion publication, executor acknowledgement, and the mandatory source
+// recheck stay one scheduler-owned transaction.
 func (table *WaitRegistrationTable) Drain() (int, bool) {
 	if table == nil || table.owner != nil {
 		return 0, false
@@ -337,25 +302,56 @@ func (table *WaitRegistrationTable) drainFor(p *P) (int, bool) {
 	return table.drain(p)
 }
 
-func (table *WaitRegistrationTable) drain(owner *P) (int, bool) {
+// beginDrainPass clears only the coalesced producer hint. Posted slot states
+// remain the source of truth, so a bounded ExecutorSourceSet pass may visit one
+// slot at a time across several host entries without losing a callback which
+// races either side of this store.
+func (table *WaitRegistrationTable) beginDrainPass(owner *P) bool {
+	if table == nil || table.owner != owner {
+		return false
+	}
 	preemptStore(&table.pending, 0)
+	return true
+}
+
+// drainSlot publishes at most one exact physical slot. index is an owner-side
+// cursor, never a producer ABI. Keeping this operation O(1) lets the common
+// executor charge every real catalog entry to its reduction budget.
+func (table *WaitRegistrationTable) drainSlot(owner *P, index uint32) (int, bool) {
+	if table == nil || table.owner != owner || index >= uint32(len(table.slots)) {
+		return 0, false
+	}
+	slot := &table.slots[index]
+	if waitRegistrationState(preemptLoad(&slot.state)) != waitRegistrationPosted {
+		return 0, true
+	}
+	if !preemptCompareAndSwap(&slot.state, uint32(waitRegistrationPosted), uint32(waitRegistrationDraining)) {
+		// Only the serialized owner performs Posted -> Draining. A failed CAS
+		// after observing Posted is therefore a second owner or corruption, not
+		// a benign producer race; fail closed instead of silently skipping it.
+		return 0, false
+	}
+	p, token, ticket := slot.p, slot.token, slot.ticket
+	if p == nil || (owner != nil && p != owner) || token == nil || !validWaitTicket(ticket) || !CompleteWait(token, ticket) {
+		// Keep Draining permanently fail-closed: owner storage cannot be
+		// retired after a corrupt or competing raw token transition.
+		return 0, false
+	}
+	preemptStore(&slot.state, uint32(waitRegistrationDelivered))
+	return 1, true
+}
+
+func (table *WaitRegistrationTable) drain(owner *P) (int, bool) {
+	if !table.beginDrainPass(owner) {
+		return 0, false
+	}
 	drained := 0
 	for index := range table.slots {
-		slot := &table.slots[index]
-		if waitRegistrationState(preemptLoad(&slot.state)) != waitRegistrationPosted {
-			continue
-		}
-		if !preemptCompareAndSwap(&slot.state, uint32(waitRegistrationPosted), uint32(waitRegistrationDraining)) {
-			continue
-		}
-		p, token, ticket := slot.p, slot.token, slot.ticket
-		if p == nil || (owner != nil && p != owner) || token == nil || !validWaitTicket(ticket) || !CompleteWait(token, ticket) {
-			// Keep Draining permanently fail-closed: owner storage cannot be
-			// retired after a corrupt or competing raw token transition.
+		one, ok := table.drainSlot(owner, uint32(index))
+		drained += one
+		if !ok {
 			return drained, false
 		}
-		preemptStore(&slot.state, uint32(waitRegistrationDelivered))
-		drained++
 	}
 	return drained, true
 }
@@ -522,7 +518,7 @@ func registrationTableEmpty(table *WaitRegistrationTable, owner *P) bool {
 		inflight := preemptLoad(&slot.inflight)
 		generation := preemptLoad(&slot.generation)
 		if preemptLoad(&slot.state) != uint32(waitRegistrationFree) ||
-			(generation == 0 && inflight != 0) || (generation != 0 && inflight != waitRegistrationProducerClosed) ||
+			(generation == 0 && inflight != 0) || (generation != 0 && inflight != producerAdmissionClosed) ||
 			slot.p != nil || slot.token != nil || slot.ticket != 0 {
 			return false
 		}

@@ -47,6 +47,19 @@ func bindTestExecutorDriverWithTimers(t *testing.T, p *P) (*ExecutorDriver, *Exe
 	return driver, registry, waits, timers, handle
 }
 
+func bindTestExecutorDriverWithManual(t *testing.T, p *P) (*ExecutorDriver, *ExecutorRegistry, *WaitRegistrationTable, *ManualOperationSource, ExecutorHandle) {
+	t.Helper()
+	driver := new(ExecutorDriver)
+	registry := new(ExecutorRegistry)
+	waits := new(WaitRegistrationTable)
+	manual := new(ManualOperationSource)
+	handle := registerTestExecutor(t, registry)
+	if !BindExecutorSourceCatalog(driver, p, registry, handle, ExecutorSourceCatalog{Waits: waits, Manual: manual}) {
+		t.Fatal("bind manual-source test executor driver")
+	}
+	return driver, registry, waits, manual, handle
+}
+
 func closeTestExecutorDriver(t *testing.T, driver *ExecutorDriver) {
 	t.Helper()
 	if !BeginExecutorClose(driver) {
@@ -190,6 +203,183 @@ func TestExecutorDriverBindCloseLifecycle(t *testing.T) {
 	if !BeginCommandShutdown(p, main) || !FinishCommandShutdown(p, main) || !TerminalG(p, main) {
 		t.Fatal("unbound command shutdown did not reach terminal state")
 	}
+}
+
+func TestExecutorDriverManualSourceUsesUnifiedPublishedEpochAndParkGate(t *testing.T) {
+	p := new(P)
+	driver, registry, waits, manual, executor := bindTestExecutorDriverWithManual(t, p)
+	// Keep an unrelated live slot in the same fixed-capacity source. Production
+	// apply must visit only the resolved batch's two ParkLinks, not this slot or
+	// either free capacity entry.
+	unrelatedState, unrelatedTicket, unrelatedIDs := reserveManualWaitSet(t, manual, p, 71, []uint32{7})
+	unrelatedSlot, _ := manualOperationSlotFor(manual, unrelatedIDs[0])
+	task := newYieldingTestG(t, "driver-manual")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue manual-source driver task")
+	}
+	if g, ok := NextRunnable(p); !ok || g != task.g {
+		t.Fatal("dequeue manual-source driver task")
+	}
+	action := beginWaitTestResume(t, p, task)
+	ticket, ok := BeginParkSet(&task.g.park, 2, 73)
+	if !ok {
+		t.Fatal("begin manual-source driver park")
+	}
+	var wait WaitSetRecord
+	if !PrepareWaitSetRecord(&wait, task.g, ticket) {
+		t.Fatal("prepare manual-source driver wait record")
+	}
+	first, firstOK := manual.ReserveAndAttachWait(p, &task.g.park, ticket, &wait, 101)
+	second, secondOK := manual.ReserveAndAttachWait(p, &task.g.park, ticket, &wait, 202)
+	if !firstOK || !secondOK || !SealParkSet(&task.g.park, ticket) {
+		t.Fatal("attach manual-source driver candidates")
+	}
+	task.frame.header.SuspendReason = uint16(SuspendPark)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+	if !PrepareParkSet(task.g, task.handle, task.frame.header, ticket, &wait) {
+		t.Fatal("prepare manual-source driver park")
+	}
+	if action, ok = Resumed(p, task.g, action); !ok || action.Kind != ActionPark {
+		t.Fatalf("commit manual-source driver park = (%+v, %t)", action, ok)
+	}
+
+	if posted := manual.Post(first); posted != ManualOperationPosted {
+		t.Fatalf("post manual-source driver completion = %d", posted)
+	}
+	if requested := registry.Request(executor); requested != ExecutorRequestPublished {
+		t.Fatalf("request manual-source driver poll = %d", requested)
+	}
+	firstEpoch, firstEpochOK := serviceExecutorPublishedEpochAt(driver, 0, false)
+	if !firstEpochOK || firstEpoch.epochs != 1 || firstEpoch.completed != 1 || firstEpoch.applyVisits != 2 || firstEpoch.promoted != 1 ||
+		!registry.ObserveRequested(executor) {
+		t.Fatalf("first manual-source epoch = (%+v, %t), requested=%t",
+			firstEpoch, firstEpochOK, registry.ObserveRequested(executor))
+	}
+	if cleared, ackOK := registry.Acknowledge(executor); !ackOK || !cleared {
+		t.Fatalf("acknowledge first manual-source epoch = (%t, %t)", cleared, ackOK)
+	}
+	// Model a producer request published after A's acknowledgement. Epoch B
+	// must return without waiting for that advisory bit to become quiet; the
+	// request remains durable and causes a later Poll to service two more
+	// bounded epochs.
+	if requested := registry.Request(executor); requested != ExecutorRequestPublished {
+		t.Fatalf("publish request before second manual-source epoch = %d", requested)
+	}
+	secondEpoch, secondEpochOK := serviceExecutorPublishedEpochAt(driver, 0, false)
+	if !secondEpochOK || secondEpoch.epochs != 1 || secondEpoch.completed != 0 || secondEpoch.promoted != 0 ||
+		!registry.ObserveRequested(executor) {
+		t.Fatalf("second manual-source epoch = (%+v, %t), requested=%t",
+			secondEpoch, secondEpochOK, registry.ObserveRequested(executor))
+	}
+	settled, settledOK := pollExecutorSourcesAt(driver, 0, false)
+	if !settledOK || settled.epochs != 2 || settled.completed != 0 || settled.promoted != 0 ||
+		registry.ObserveRequested(executor) {
+		t.Fatalf("next fixed two-epoch poll = (%+v, %t), requested=%t",
+			settled, settledOK, registry.ObserveRequested(executor))
+	}
+	firstSlot, _ := manualOperationSlotFor(manual, first)
+	secondSlot, _ := manualOperationSlotFor(manual, second)
+	if firstSlot.record.disposition != OperationDispositionWinner || secondSlot.record.disposition != OperationDispositionLost ||
+		firstSlot.record.phase != operationDetached || secondSlot.record.phase != operationDetached || HasWaiting(p) {
+		t.Fatal("unified manual-source transaction did not resolve and detach every candidate")
+	}
+	if unrelatedSlot.record.phase != operationActive || unrelatedSlot.record.disposition != OperationDispositionPending ||
+		unrelatedSlot.record.resolutionApplied || unrelatedSlot.record.cancelRequested ||
+		preemptLoad(&unrelatedSlot.state) != uint32(manualOperationActive) {
+		t.Fatal("batch apply inspected or changed an unrelated live manual slot")
+	}
+
+	if g, ok := NextRunnable(p); !ok || g != task.g {
+		t.Fatal("dequeue manual-source promoted task")
+	}
+	action = beginWaitTestResume(t, p, task)
+	outcome, caseID, lease, taskCancel, ok := TakeRunDecision(task.g, ticket)
+	leaseID, leaseOK := lease.ID()
+	if !ok || outcome != ParkOutcomeCompleted || caseID != 101 || taskCancel != TaskCancelNone || !leaseOK || leaseID != first {
+		t.Fatalf("take manual-source driver decision = (%d, %d, %+v, %d, %t)", outcome, caseID, lease, taskCancel, ok)
+	}
+	if !manual.ConfirmQuiesced(p, first) || !manual.ConfirmQuiesced(p, second) ||
+		!manual.TakeResult(p, lease) || !manual.Recycle(p, first) || !manual.Recycle(p, second) {
+		t.Fatal("release manual-source driver operations")
+	}
+	if !RequestParkCancel(unrelatedState, unrelatedTicket, ParkCancelOperation) {
+		t.Fatal("cancel unrelated manual operation")
+	}
+	if resolution, resolved := ResolveParkSnapshot(unrelatedState, unrelatedTicket); !resolved ||
+		resolution != (CompletionResolution{WaitSets: 1, Canceled: 1, Losers: 1}) {
+		t.Fatalf("resolve unrelated manual operation = (%+v, %t)", resolution, resolved)
+	}
+	if applied, detached, applyOK := manual.ApplyAndDetach(p); !applyOK || applied != 1 || detached != 1 {
+		t.Fatalf("standalone cleanup apply = (%d, %d, %t)", applied, detached, applyOK)
+	}
+	if outcome, _, unrelatedLease, consumed := ConsumeParkSet(unrelatedState, unrelatedTicket); !consumed ||
+		outcome != ParkOutcomeCanceled || unrelatedLease != (OperationResultLease{}) {
+		t.Fatalf("consume unrelated manual cancellation = (%d, %+v, %t)", outcome, unrelatedLease, consumed)
+	}
+	finishManualOperations(t, manual, p, unrelatedIDs, OperationResultLease{})
+	yieldRunningDriverTask(t, p, task, action)
+	closeTestExecutorDriver(t, driver)
+	finishReadyDriverTasks(t, p, map[*G]*yieldingTestG{task.g: task})
+	if !TerminalG(p, task.g) || !manual.CanRelease() || !waits.CanRelease() || !registry.CanRelease() {
+		t.Fatal("manual-source driver cleanup retained state")
+	}
+	runtime.KeepAlive(task.frame.memory)
+}
+
+func TestExecutorDriverManualCancellationMarksFrameLocalWaitSet(t *testing.T) {
+	p := new(P)
+	driver, registry, waits, manual, _ := bindTestExecutorDriverWithManual(t, p)
+	task := newYieldingTestG(t, "driver-manual-cancel")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue manual-cancel task")
+	}
+	if g, ok := NextRunnable(p); !ok || g != task.g {
+		t.Fatal("dequeue manual-cancel task")
+	}
+	action := beginWaitTestResume(t, p, task)
+	ticket, ok := BeginParkSet(&task.g.park, 1, 79)
+	var wait WaitSetRecord
+	if !ok || !PrepareWaitSetRecord(&wait, task.g, ticket) {
+		t.Fatal("begin manual-cancel wait-set")
+	}
+	id, attached := manual.ReserveAndAttachWait(p, &task.g.park, ticket, &wait, 303)
+	if !attached || !SealParkSet(&task.g.park, ticket) {
+		t.Fatal("attach manual-cancel operation")
+	}
+	task.frame.header.SuspendReason = uint16(SuspendPark)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+	if !PrepareParkSet(task.g, task.handle, task.frame.header, ticket, &wait) {
+		t.Fatal("prepare manual-cancel park")
+	}
+	if action, ok = Resumed(p, task.g, action); !ok || action.Kind != ActionPark ||
+		p.parkWaitHead != &wait || p.parkWaitTail != &wait || FrameFromStorage(task.frame.storage).parkWait != &wait {
+		t.Fatalf("commit manual-cancel park = (%+v, %t)", action, ok)
+	}
+	if !manual.RequestCancel(p, &wait) {
+		t.Fatal("mark manual cancellation")
+	}
+	if drained, promoted, pollOK := PollExecutor(driver); !pollOK || drained != 0 || promoted != 1 ||
+		wait != (WaitSetRecord{}) || p.parkWaitHead != nil || p.parkWaitTail != nil {
+		t.Fatalf("poll manual cancellation = (%d, %d, %t)", drained, promoted, pollOK)
+	}
+	if g, nextOK := NextRunnable(p); !nextOK || g != task.g {
+		t.Fatal("dequeue manual-canceled task")
+	}
+	action = beginWaitTestResume(t, p, task)
+	outcome, caseID, lease, taskCancel, decisionOK := TakeRunDecision(task.g, ticket)
+	if !decisionOK || outcome != ParkOutcomeCanceled || caseID != 0 || lease != (OperationResultLease{}) || taskCancel != TaskCancelNone {
+		t.Fatalf("take manual cancellation = (%d, %d, %+v, %d, %t)", outcome, caseID, lease, taskCancel, decisionOK)
+	}
+	if !manual.ConfirmQuiesced(p, id) || !manual.Recycle(p, id) {
+		t.Fatal("release manual-canceled operation")
+	}
+	yieldRunningDriverTask(t, p, task, action)
+	closeTestExecutorDriver(t, driver)
+	finishReadyDriverTasks(t, p, map[*G]*yieldingTestG{task.g: task})
+	if !TerminalG(p, task.g) || !manual.CanRelease() || !waits.CanRelease() || !registry.CanRelease() {
+		t.Fatal("manual-canceled task retained state")
+	}
+	runtime.KeepAlive(task.frame.memory)
 }
 
 func TestExecutorDriverTimerBindingIsTransactionalAndAPIFamiliesDoNotMix(t *testing.T) {
@@ -1044,7 +1234,14 @@ func TestExecutorDriverTerminalCloseRequestRace(t *testing.T) {
 
 func TestExecutorDriverPanicTerminalCloseDoesNotRedestroy(t *testing.T) {
 	p := new(P)
-	driver, registry, waits, _ := bindTestExecutorDriver(t, p)
+	driver := new(ExecutorDriver)
+	registry := new(ExecutorRegistry)
+	waits := new(WaitRegistrationTable)
+	control := new(TaskControlSource)
+	executor := registerTestExecutor(t, registry)
+	if !BindExecutorSourceCatalog(driver, p, registry, executor, ExecutorSourceCatalog{Waits: waits, Control: control}) {
+		t.Fatal("bind panic terminal control-source executor")
+	}
 	g := new(G)
 	if !InitG(g) {
 		t.Fatal("initialize panic terminal G")
@@ -1065,6 +1262,10 @@ func TestExecutorDriverPanicTerminalCloseDoesNotRedestroy(t *testing.T) {
 	action, ok = Checked(p, g, action, false)
 	if !ok || action.Kind != ActionResume || action.Handle != rootHandle {
 		t.Fatal("resume panic terminal root")
+	}
+	controlID, controlOK := RegisterTaskControl(control, p, g)
+	if !controlOK || g.taskControlLeases != 1 {
+		t.Fatalf("register panic terminal control = (%+v, %t), leases=%d", controlID, controlOK, g.taskControlLeases)
 	}
 	root.header.SuspendReason = uint16(SuspendCall)
 	root.header.Lifecycle = uint16(FrameSuspended)
@@ -1099,10 +1300,18 @@ func TestExecutorDriverPanicTerminalCloseDoesNotRedestroy(t *testing.T) {
 		t.Fatalf("panic ancestor action = (%+v, %t)", action, ok)
 	}
 	releaseTestFrame(t, g, root)
+	posted := PostTaskControlAndRequest(control, controlID, TaskCancelShutdown, registry, executor)
+	if posted.Control != TaskControlPosted || posted.Executor != ExecutorRequestPublished {
+		t.Fatalf("post panic terminal-late control = (%d, %d)", posted.Control, posted.Executor)
+	}
 	closeAction, ok := PanicDestroyed(p, g, action)
 	if !ok || closeAction.Kind != ActionTerminalExecutorClose || closeAction.Handle != nil ||
-		driver.terminalKind != action.Kind || g.root != nil {
+		driver.terminalKind != action.Kind || g.root != nil || g.taskControlLeases != 1 ||
+		g.park.taskCancelKind != TaskCancelNone || g.park.taskCancelPhase != taskCancelIdle {
 		t.Fatalf("panic terminal close action = (%+v, %t)", closeAction, ok)
+	}
+	if result := control.Post(controlID, TaskCancelAbort); result != TaskControlPostClosed {
+		t.Fatalf("panic control post after terminal seal = %d", result)
 	}
 	completed, terminal, ok := ConfirmTerminalExecutorClose(driver)
 	if !ok || completed != g || terminal.Kind != ActionPanicComplete || terminal.Handle != nil {
@@ -1112,7 +1321,8 @@ func TestExecutorDriverPanicTerminalCloseDoesNotRedestroy(t *testing.T) {
 	if !published || record.TypeWord != unsafe.Pointer(typeWord) || record.DataWord != unsafe.Pointer(dataWord) ||
 		g.state != GDead || g.panicUnwind || preemptLoad(&p.schedule) != scheduleDisabled ||
 		preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil ||
-		!waits.CanRelease() || !registry.CanRelease() || *driver != (ExecutorDriver{}) {
+		g.taskControlLeases != 0 || g.park.taskCancelKind != TaskCancelNone || g.park.taskCancelPhase != taskCancelIdle ||
+		!control.CanRelease() || !waits.CanRelease() || !registry.CanRelease() || *driver != (ExecutorDriver{}) {
 		t.Fatalf("panic terminal close state = record:(%+v,%t) g:%d unwind:%t schedule:%d mode:%d",
 			record, published, g.state, g.panicUnwind, preemptLoad(&p.schedule), preemptLoad(&p.executorMode))
 	}

@@ -411,15 +411,7 @@ func buildCoroNativeTimerE2EDriver(t *testing.T, prog llssa.Program, temp, check
 		[]types.Type{types.Typ[types.Int32], types.Typ[types.Uint32]}, []types.Type{types.Typ[types.Int32]},
 	), llssa.InC)
 	abort := pkg.NewFunc("abort", newSignature(nil, nil), llssa.InC)
-	assertNil := pkg.NewFunc(llssa.PkgRuntime+".AssertNilDeref", newSignature(
-		[]types.Type{types.Typ[types.Bool]}, nil,
-	), llssa.InGo)
-	assertBody := assertNil.MakeBody(3)
-	fail, valid := assertNil.Block(1), assertNil.Block(2)
-	assertBody.If(assertNil.Param(0), fail, valid)
-	assertBody.SetBlock(fail).Call(abort.Expr)
-	assertBody.Return()
-	assertBody.SetBlock(valid).Return()
+	defineCoroNativeE2ENilDerefStubs(prog, pkg, abort)
 	checkIndexRange := pkg.NewFunc(llssa.PkgRuntime+".CheckIndexRange", newSignature(
 		[]types.Type{types.Typ[types.Bool], types.Typ[types.Int64], types.Typ[types.Bool], types.Typ[types.Int]}, nil,
 	), llssa.InGo)
@@ -469,6 +461,7 @@ func buildCoroNativeTimerE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_allocator.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_frame.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_program.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_run_decision.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_sched.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor_driver_timer_llgo.go"),
@@ -478,6 +471,7 @@ func buildCoroNativeTimerE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_timer_owner_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_ingress_test_llgo.go"),
 	}
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_run_decision.go")
 	conf := NewDefaultConf(ModeGen)
 	conf.ForceRebuild = true
 	conf.Tags = "nogc"

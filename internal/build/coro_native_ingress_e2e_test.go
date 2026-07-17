@@ -448,15 +448,7 @@ func buildCoroNativeIngressE2EDriver(t *testing.T, prog llssa.Program, temp, che
 	start := pkg.NewFunc("__llgo_coro_native_ingress_start_v1", newSignature(nil, nil), llssa.InC)
 	verify := pkg.NewFunc("__llgo_coro_native_ingress_verify_closed_v1", newSignature(nil, nil), llssa.InC)
 	abort := pkg.NewFunc("abort", newSignature(nil, nil), llssa.InC)
-	assertNil := pkg.NewFunc(llssa.PkgRuntime+".AssertNilDeref", newSignature(
-		[]types.Type{types.Typ[types.Bool]}, nil,
-	), llssa.InGo)
-	assertBody := assertNil.MakeBody(3)
-	fail, valid := assertNil.Block(1), assertNil.Block(2)
-	assertBody.If(assertNil.Param(0), fail, valid)
-	assertBody.SetBlock(fail).Call(abort.Expr)
-	assertBody.Return()
-	assertBody.SetBlock(valid).Return()
+	defineCoroNativeE2ENilDerefStubs(prog, pkg, abort)
 	checkIndexRange := pkg.NewFunc(llssa.PkgRuntime+".CheckIndexRange", newSignature(
 		[]types.Type{types.Typ[types.Bool], types.Typ[types.Int64], types.Typ[types.Bool], types.Typ[types.Int]}, nil,
 	), llssa.InGo)
@@ -506,6 +498,7 @@ func buildCoroNativeIngressE2ERuntimeIsland(t *testing.T, temp string) []string 
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_allocator.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_frame.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_program.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_run_decision.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_sched.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor_driver_legacy.go"),
@@ -514,6 +507,7 @@ func buildCoroNativeIngressE2ERuntimeIsland(t *testing.T, temp string) []string 
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_wait_pipe_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_ingress_test_llgo.go"),
 	}
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_run_decision.go")
 	conf := NewDefaultConf(ModeGen)
 	conf.ForceRebuild = true
 	conf.Tags = "nogc"
