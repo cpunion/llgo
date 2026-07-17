@@ -1625,6 +1625,7 @@ RTOS/baremetal/static-memory profile必须为G header、live frame/depth、timer
 ### 20.3 Native
 
 - 初期单 P 验证状态机，之后启用 worker pool 和 work stealing。
+- 多P producer identity不能沿用per-P local slot：V2 `OperationID`冻结为两字`source:8/route:9/local:15 + generation:32`，route在runtime instance内单调分配且退休后永久tombstone。Waiting/Running G不可偷；原owner必须先把winner payload物化到frame-local ResumePacket并结束source lease，才可把P-neutral Runnable G放进stealable deque。
 - 每个 M 一份 OS stack，G数量不增加thread/stack；worker数量有硬上限。
 - 每个同时parked的LockOSThread G需要保留M identity，但受 `maxLockedM/maxThreads` 限制；超限遵守 `SetMaxThreads` fatal语义。
 - Poller 用 wake pipe/eventfd/kqueue 唤醒。
@@ -1636,15 +1637,15 @@ RTOS/baremetal/static-memory profile必须为G header、live frame/depth、timer
 
 Scheduler API 采用版本化 host protocol：
 
-    runSlice(budget) -> { runnable, nextDeadline, status }
+    runSlice(budget) -> { status, used, more, nextDeadline }
     notify(token, generation)
     requestRun()
 
 流程：
 
 1. JS 调用 `runSlice`。
-2. Scheduler 执行到 budget 用完、无 runnable 或必须返回 host。
-3. 返回最近 deadline 和 pending host operation。
+2. Scheduler 执行到 budget 用完、无 runnable 或必须返回 host；source fact、affected wait、candidate apply和立即ready child同样扣reduction，不只计算loop扣预算。
+3. 返回最近 deadline和`more`；`more`只要求安排新的host entry，当前entry必须先返回，callback/requestRun不得同步递归执行scheduler。
 4. JS arm `setTimeout`/Promise。
 5. Callback 调用 `notify`，再 queueMicrotask/requestRun。
 

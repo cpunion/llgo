@@ -285,6 +285,14 @@ Source-specific submit保留在各自模块，但成功后必须返回统一 `Op
 
 Doorbell是通知，不是事实源；即使通知被coalesce或出现spurious wake，事实仍在source table/completion queue中。
 
+### 5.4 Service budget 与 `more`
+
+一次executor entry接受确定性的reduction budget，不用墙钟时间猜测公平性。至少以下动作计费：source slot/ring item、claimed fact、affected wait-set、candidate apply/detach、G dequeue/resume/destroy、立即ready wrapper和child await。epoch A与B仍各自完整访问静态catalog一次，因此target必须提供不小于`MinPollBudget`的slice；dynamic source只claim固定quantum并保留cursor，不能把“扫描全部容量”作为长期API。
+
+Select winner决策是不可拆的原子工作单元，允许在声明的`MaxSelectCases`内有界overshoot；winner确定后的loser detach可以分批，但barrier归零前不能promote。source若只扫描mailbox前缀，必须用cursor/sequence或ready-index ring保证先清pending不会丢掉未扫描事实。
+
+`RunSlice`返回`{status, used, more, nextDeadline}`。`more`是必须再次调度的义务，不是递归调用许可；budget耗尽、ready/injection队列非空、source/affected/detach backlog、request仍sticky、deadline已到或DriveAdmission存在deferred entry都设置`more`。Native worker可在同一个固定scheduler stack外层迭代；WASM/embedded必须安排新的host entry后先返回；RTOS/baremetal只置notification或让下一main-loop iteration跳过WFI。同步`requestRun`、completion callback和IRQ永远不能因为`more`直接重入executor。
+
 ## 6. 并行模型
 
 ### 6.1 逻辑映射
@@ -294,9 +302,15 @@ Doorbell是通知，不是事实源；即使通知被coalesce或出现spurious w
 - `M` 是实际执行上下文，例如native线程、RTOS task、WASM host re-entry或baremetal core loop。
 - M必须取得P后才能运行managed G；一次只有一个M拥有某个P。
 
-Runnable G可在P间steal或通过global injection迁移；Running和Waiting G不可迁移，completion必须投递原owner，G被steal后从下一次operation开始才绑定新P。Pinned/ThreadAffine G使用固定M/P协议，不能退化成全局TLS猜测。
+Running和Waiting G不可迁移，completion必须投递原owner；只有已经清除source-affine状态的Runnable G可在P间steal或通过global injection迁移，G被steal后从下一次operation开始才绑定新P。Pinned/ThreadAffine G使用固定M/P协议，不能退化成全局TLS猜测。
+
+当前`parkReady`仍持有原source的winner record/result lease，因此“进入ready queue”尚不等于“可偷”。多P开放前，原owner必须通过source-specific typed hook把winner payload和cleanup ownership物化到compiler提供的frame-local `ResumePacket/ResultCell`，结束winner lease，并让backend quiesce/recycle继续留在原route；随后发布的G才是P-neutral runnable。prompt task cancellation在新P上只选择消费packet或进入cleanup，不再回访原source。该物化完成前，带pending park result的G必须留在原P，不能以数据竞态换取work stealing。
 
 两字`OperationID`在多P下必须拥有全局无歧义的source namespace。目标profile需要在实现前冻结一种route：全局slot allocator、`slot`内编码instance/shard/local slot，或显式稳定route generation；不能让两个P的同类source都从local slot 1开始、再假设callback能从`{source, slot, generation}`猜出owner。P teardown必须先seal route并strong-join producer，旧route generation永久拒绝；该路由约束不允许重新引入Go pointer callback ABI。
+
+推荐的V2编码保持两字布局：`word0 = source:8 | route:9 | local:15`，`word1 = operationGeneration:32`。`route`是runtime instance生命周期内单调分配且不复用的`RouteID`，route close后留下永久tombstone；local slot和operation generation都从1开始，generation不回绕。这样只凭POD ID即可O(1)找到owner source，不引入per-operation全局目录，并保留完整32-bit热slot generation。超过511个lifetime route或每route/source超过32767个live slot的profile必须选择versioned wider/flat-directory ABI并明确内存代价，不能偷占generation bits。
+
+第一阶段外部task handle可以把G视为pinned；开放其迁移前，control endpoint必须拥有原子current-route locator。到达旧route的sticky fact转发到新route并再次校验，迁移竞态最多再次转发，不能丢失或在旧P执行cleanup。普通没有外部handle的G仍不增加全局registry或常驻route pointer。
 
 ### 6.2 各目标映射
 
@@ -378,7 +392,7 @@ worker queue满必须确定地失败或背压，shutdown在owner P之外join已�
 - 执行取消已收敛为G内嵌的`Abort/Shutdown` sticky kind和`Requested/CleanupClaimed` phase；owner P可把请求映射到当前或下一次ParkState，shutdown可覆盖同一完整snapshot中的operation completion，late cancel通过每P瞬态`RunDecision` gate抑制selected continuation但保留winner result lease。固定容量`TaskControlSource`已经作为第四种source接入统一published-epoch catalog：只为显式host/export handle分配generation端点，并以占用G现有对齐空洞的owner-only lease计数阻止task storage早回收。`Goexit`已从远程task cancel kind移出。
 - runtime已具备V2 Prepare/Waiting/Ready/Checked/Take、exactly-once scalar resume ABI；compiler所有现有initial/child-await/yield/legacy-park/bootstrap resume已进入normal-only zero-ticket gate，非normal decision在cleanup/select lowering完成前fail closed而不会吞掉取消继续执行。full outputs分派、running G safepoint cleanup/defer/panic/Goexit lowering、child状态传播、wait/timer source迁移以及真实target host shim仍未实现。
 - 取消路径没有每G外部registry、callback链或独立executor；普通G的control lease为零且不增加G尺寸。source admission容量仍由各target静态catalog负责，embedded/baremetal和未来multi-P还需要证明统一的slot/queue bound与endpoint迁移协议。
-- 当前driver固定一个P，尚未实现native多P/M、global injection和work stealing。
+- 当前driver固定一个P，`OperationID`仍是`source:8 + local:24 + generation:32`，不同P的同类local slot会碰撞；`parkReady` winner lease和`TaskControlSource`也仍绑定原P。因此native多P/M、route-safe ID、P-neutral ResumePacket、global injection和work stealing均未实现，不能只增加一个steal queue后宣称多P完成。
 - frame-local`WaitSetRecord`、独立V2 active双链与affected FIFO已经替代V2 `PollReady`全waiting扫描；record-aware attach/mark/detach/promote为O(1)，一次resolution扫描其C个candidate。1024-candidate测试通过破坏远端节点证明fast detach没有隐藏全链审计。当前Manual source的`ApplyAndDetach`仍扫描其4个固定slots；下一种大容量source必须按resolved batch/operation分派，不能把全source容量扫描扩展为长期模型。
 
 因此Phase 22应视为首个可运行vertical slice，而不是“核心已经完成后新增一个timer功能”。
