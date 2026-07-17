@@ -320,9 +320,9 @@ func (table *WaitRegistrationTable) Pending() bool {
 
 // Drain publishes every posted completion into its WaitToken. It is
 // scheduler-thread-only. A standalone table may use Drain directly; a table
-// bound to an ExecutorDriver must be serviced by that driver so completion
-// publication, executor acknowledgement, and the mandatory source recheck stay
-// one scheduler-owned transaction.
+// bound into an ExecutorSourceSet must be serviced by its ExecutorDriver so
+// completion publication, executor acknowledgement, and the mandatory source
+// recheck stay one scheduler-owned transaction.
 func (table *WaitRegistrationTable) Drain() (int, bool) {
 	if table == nil || table.owner != nil {
 		return 0, false

@@ -687,7 +687,7 @@ func BeginRunG(p *P, g *G) (Action, bool) {
 		return Action{}, false
 	}
 	budget := uint32(0)
-	if driver := p.executor; driver != nil && driver.timers != nil {
+	if driver := p.executor; driver != nil && driver.sources.usesMonotonicTime() {
 		_, hasDeadline, ok := NextExecutorTimerDeadline(driver)
 		if !ok {
 			return Action{}, false

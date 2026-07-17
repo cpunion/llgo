@@ -193,8 +193,8 @@ func (table *TimerRegistrationTable) nextDeadlineFor(owner *P) (deadline int64, 
 // DrainDue completes every Active timer whose deadline is at or before now.
 // It returns the number completed plus the earliest still-active deadline.
 // The tuple ends with (hasDeadline, validTable). It does not mutate scheduler
-// queues; ExecutorDriver will pair this scan with pollReady in the same durable
-// source transaction.
+// queues; ExecutorSourceSet pairs this scan with scheduler park-state promotion
+// in the same durable source transaction.
 func (table *TimerRegistrationTable) DrainDue(now int64) (completed int, deadline int64, hasDeadline, ok bool) {
 	if table == nil || table.owner != nil || now < 0 {
 		return 0, 0, false, false
