@@ -827,6 +827,76 @@ func (pair *channelExternalCommitPair) commit() bool {
 	return true
 }
 
+// ChannelExternalCommitPair is the typed hchan-facing wrapper around the C0
+// pair proof. The inner self certificate still points at its exact field, so a
+// copied wrapper fails every transition before touching either endpoint. The
+// wrapper exposes no admissions, source slots, or owner-only records.
+type ChannelExternalCommitPair struct {
+	transaction channelExternalCommitPair
+}
+
+type ChannelExternalCommitPairBeginResult uint8
+
+const (
+	ChannelExternalCommitPairBeginInvalid ChannelExternalCommitPairBeginResult = iota
+	ChannelExternalCommitPairBeginPrepared
+	ChannelExternalCommitPairBeginFirstAdmissionFailed
+	ChannelExternalCommitPairBeginSecondAdmissionFailed
+	ChannelExternalCommitPairBeginClaimMismatch
+	ChannelExternalCommitPairBeginClaimContended
+	ChannelExternalCommitPairBeginInvariantFailure
+)
+
+// BeginChannelExternalCommitPair acquires both endpoint lifetimes and both
+// claims. Prepared is still reversible and contains no physical channel
+// effect. A non-zero wrapper returned with InvariantFailure is Broken and must
+// be treated as terminal by the hchan caller.
+func BeginChannelExternalCommitPair(
+	out *ChannelExternalCommitPair,
+	sourceA *ChannelOperationSource,
+	idA OperationID,
+	claimA *SelectClaim,
+	sourceB *ChannelOperationSource,
+	idB OperationID,
+	claimB *SelectClaim,
+) ChannelExternalCommitPairBeginResult {
+	if out == nil || *out != (ChannelExternalCommitPair{}) {
+		return ChannelExternalCommitPairBeginInvalid
+	}
+	switch beginChannelExternalCommitPair(
+		&out.transaction,
+		sourceA, idA, claimA,
+		sourceB, idB, claimB,
+	) {
+	case channelExternalCommitPairBeginPrepared:
+		return ChannelExternalCommitPairBeginPrepared
+	case channelExternalCommitPairBeginFirstAdmissionFailed:
+		return ChannelExternalCommitPairBeginFirstAdmissionFailed
+	case channelExternalCommitPairBeginSecondAdmissionFailed:
+		return ChannelExternalCommitPairBeginSecondAdmissionFailed
+	case channelExternalCommitPairBeginClaimMismatch:
+		return ChannelExternalCommitPairBeginClaimMismatch
+	case channelExternalCommitPairBeginClaimContended:
+		return ChannelExternalCommitPairBeginClaimContended
+	case channelExternalCommitPairBeginInvariantFailure:
+		return ChannelExternalCommitPairBeginInvariantFailure
+	default:
+		return ChannelExternalCommitPairBeginInvalid
+	}
+}
+
+func (pair *ChannelExternalCommitPair) BeginEffect() bool {
+	return pair != nil && pair.transaction.beginEffect()
+}
+
+func (pair *ChannelExternalCommitPair) Abort() bool {
+	return pair != nil && pair.transaction.abort()
+}
+
+func (pair *ChannelExternalCommitPair) Commit() bool {
+	return pair != nil && pair.transaction.commit()
+}
+
 // ChannelExternalCommit is the single-endpoint counterpart of the pair
 // transaction above. A typed hchan buffer/close path has one physical effect
 // but still has to exclude the owner resolver, pin the exact frame endpoint,

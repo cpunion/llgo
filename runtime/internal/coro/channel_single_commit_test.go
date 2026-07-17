@@ -131,3 +131,35 @@ func TestChannelExternalCommitSingleFailureIsAtomic(t *testing.T) {
 	}
 	releaseChannelClaimCoreFixture(t, fixture, decision)
 }
+
+func TestChannelExternalCommitPairPublicWrapper(t *testing.T) {
+	a := newChannelClaimCoreFixture(t, "channel-public-pair-a", []uint32{93}, true, 0)
+	b := newChannelClaimCoreFixture(t, "channel-public-pair-b", []uint32{94}, true, 0)
+	var pair ChannelExternalCommitPair
+	if result := BeginChannelExternalCommitPair(
+		&pair,
+		a.source, a.ids[0], a.claim,
+		b.source, b.ids[0], b.claim,
+	); result != ChannelExternalCommitPairBeginPrepared {
+		t.Fatalf("begin public pair = %d", result)
+	}
+	copied := pair
+	if copied.Abort() || copied.BeginEffect() || copied.Commit() ||
+		selectClaimLoad(a.claim) != selectClaimAcquiring || selectClaimLoad(b.claim) != selectClaimAcquiring {
+		t.Fatalf("copied public pair mutated claims: copied=%+v pair=%+v", copied, pair)
+	}
+	if !pair.BeginEffect() || pair.Abort() || !pair.Commit() || pair != (ChannelExternalCommitPair{}) ||
+		selectClaimLoad(a.claim) != selectClaimClaimed || selectClaimLoad(b.claim) != selectClaimClaimed {
+		t.Fatalf("commit public pair = pair:%+v claims:(%d,%d)",
+			pair, selectClaimLoad(a.claim), selectClaimLoad(b.claim))
+	}
+	for _, fixture := range []*channelClaimCoreFixture{a, b} {
+		requestChannelClaimCoreFixture(t, fixture)
+		pollChannelClaimCoreComplete(t, fixture)
+		decision := takeChannelClaimCoreDecision(t, fixture)
+		if decision.outcome != ParkOutcomeCompleted || !decision.lease.Valid() {
+			t.Fatalf("public pair decision = %+v", decision)
+		}
+		releaseChannelClaimCoreFixture(t, fixture, decision)
+	}
+}
