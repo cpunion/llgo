@@ -1046,6 +1046,53 @@ func (c *CoroBuilder) SuspendCurrentBlockIf(condition Expr, before func(Builder)
 	return logical
 }
 
+// SuspendCurrentBlockIfWithResumeDispatch combines a conditional stack cut
+// with a per-site terminating resume gate. The false edge enters the joined
+// continuation directly; only the resumed true edge passes through dispatch.
+// This is the specialization point for operations with a synchronous fast
+// path and an exact-ticket slow path, such as a channel operation which parks
+// only when its first non-blocking attempt fails.
+//
+// before has the same straight-line publication contract as
+// SuspendCurrentBlockIf. dispatch has the same terminating contract as
+// SuspendCurrentBlockWithResumeDispatch and replaces the coroutine's default
+// resume callbacks for this suspend only.
+func (c *CoroBuilder) SuspendCurrentBlockIfWithResumeDispatch(
+	condition Expr,
+	before func(Builder),
+	dispatch CoroResumeDispatch,
+) BasicBlock {
+	c.requireActive("conditionally suspend current block with resume dispatch")
+	if dispatch == nil {
+		panic("ssa: conditional coroutine suspend resume-dispatch override requires a callback")
+	}
+	b := c.b
+	logical := b.blk
+	if logical == nil {
+		panic("ssa: conditional coroutine suspend with resume dispatch requires an active logical block")
+	}
+	if condition.IsNil() || condition.kind != vkBool {
+		panic("ssa: conditional coroutine suspend requires a boolean condition")
+	}
+	suspendBlk := b.Func.MakeBlock()
+	continueBlk := b.Func.MakeBlock()
+	b.If(condition, suspendBlk, continueBlk)
+
+	b.SetBlock(suspendBlk)
+	if before != nil {
+		callbackPoint := captureCoroFrameCallbackPoint(b)
+		before(b)
+		callbackPoint.ensureContinuation(b, "conditional-suspend")
+	}
+	c.emitSuspendWithResumeDispatch(false, dispatch)
+	b.Jump(continueBlk)
+
+	b.SetBlock(continueBlk)
+	logical.last = continueBlk.last
+	b.blk = logical
+	return logical
+}
+
 // Finish emits the final suspend and completes the shared cleanup/return
 // blocks. No further instructions may be emitted through c afterwards.
 func (c *CoroBuilder) Finish() {
