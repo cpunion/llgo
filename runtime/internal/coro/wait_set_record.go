@@ -38,6 +38,10 @@ const (
 	// ResolvingDirty is defensive support for an owner-side source operation
 	// which publishes another sticky fact while the record is being resolved.
 	waitSetWorkResolvingDirty
+	// AwaitingExternal retains a logically resolved/detaching wait without
+	// putting it on the owner work queue. The source must call
+	// MarkWaitSetAffected when its physical acknowledgement becomes sticky.
+	waitSetWorkAwaitingExternal
 )
 
 // WaitSetRecord contains the queue links which exist only while one G is
@@ -194,6 +198,8 @@ func canAppendAffectedWaitSet(p *P, record *WaitSetRecord) bool {
 		return true
 	case waitSetWorkResolvingDirty:
 		return true
+	case waitSetWorkAwaitingExternal:
+		return record.workNext == nil
 	case waitSetWorkIdle:
 		if record.workNext != nil {
 			return false
@@ -211,7 +217,7 @@ func appendAffectedWaitSetUnchecked(p *P, record *WaitSetRecord) {
 	case waitSetWorkResolving:
 		record.work = waitSetWorkResolvingDirty
 		return
-	case waitSetWorkIdle:
+	case waitSetWorkIdle, waitSetWorkAwaitingExternal:
 	}
 	record.work = waitSetWorkQueued
 	if p.affectedWaitTail == nil {
@@ -387,8 +393,16 @@ func promoteResolvedWaitSets(p *P, batch *WaitSetRecord) (promoted int, ok bool)
 	for record := batch; record != nil; {
 		next := record.workNext
 		record.workNext = nil
-		if record.work != waitSetWorkResolving && record.work != waitSetWorkResolvingDirty {
+		if record.work != waitSetWorkResolving && record.work != waitSetWorkResolvingDirty &&
+			record.work != waitSetWorkAwaitingExternal {
 			return promoted, false
+		}
+		if record.work == waitSetWorkAwaitingExternal {
+			if record.g.park.phase != parkDetaching {
+				return promoted, false
+			}
+			record = next
+			continue
 		}
 		dirty := record.work == waitSetWorkResolvingDirty
 		record.work = waitSetWorkResolving

@@ -334,39 +334,62 @@ func (source *ManualOperationSource) appendAffected(index uint32) bool {
 // facts. Lost counts a completion that arrived after another case or cancel had
 // already chosen the logical outcome; it is normal and is not enqueued for
 // resolution again.
-func (source *ManualOperationSource) PublishPass(p *P) (published, lost uint32, ok bool) {
+func (source *ManualOperationSource) beginPublishPass(p *P) bool {
 	if !validManualOperationOwner(source, p) {
-		return 0, 0, false
+		return false
 	}
 	preemptStore(&source.pending, 0)
-	for index := range source.slots {
-		slot := &source.slots[index]
-		mailbox := manualOperationMailbox(preemptLoad(&slot.mailbox))
-		if mailbox == manualOperationMailboxPosting || mailbox == manualOperationMailboxEmpty || mailbox == manualOperationMailboxDelivered {
-			continue
-		}
-		if mailbox != manualOperationMailboxPosted ||
-			!preemptCompareAndSwap(&slot.mailbox, uint32(manualOperationMailboxPosted), uint32(manualOperationMailboxDraining)) ||
-			!validManualOperationLiveSlot(source, p, uint32(index)) {
-			return published, lost, false
-		}
-		id := slot.record.id
-		switch result := PublishOperationCompletion(&slot.record, id); result {
-		case OperationCompletionPublished:
-			if slot.record.link.wait != nil {
-				if !MarkWaitSetAffected(p, slot.record.link.wait) {
-					return published, lost, false
-				}
-			} else if !source.appendAffected(uint32(index)) {
-				return published, lost, false
+	return true
+}
+
+// publishSlot visits one exact producer mailbox. Producer publication after
+// an earlier cursor position stays sticky with pending set for the next epoch;
+// it cannot hold the current catalog pass open.
+func (source *ManualOperationSource) publishSlot(p *P, index uint32) (published, lost uint32, ok bool) {
+	if !validManualOperationOwner(source, p) || index >= uint32(len(source.slots)) {
+		return 0, 0, false
+	}
+	slot := &source.slots[index]
+	mailbox := manualOperationMailbox(preemptLoad(&slot.mailbox))
+	if mailbox == manualOperationMailboxPosting || mailbox == manualOperationMailboxEmpty || mailbox == manualOperationMailboxDelivered {
+		return 0, 0, true
+	}
+	if mailbox != manualOperationMailboxPosted ||
+		!preemptCompareAndSwap(&slot.mailbox, uint32(manualOperationMailboxPosted), uint32(manualOperationMailboxDraining)) ||
+		!validManualOperationLiveSlot(source, p, index) {
+		return 0, 0, false
+	}
+	id := slot.record.id
+	switch result := PublishOperationCompletion(&slot.record, id); result {
+	case OperationCompletionPublished:
+		if slot.record.link.wait != nil {
+			if !MarkWaitSetAffected(p, slot.record.link.wait) {
+				return 0, 0, false
 			}
-			published++
-		case OperationCompletionLost:
-			lost++
-		default:
+		} else if !source.appendAffected(index) {
+			return 0, 0, false
+		}
+		published = 1
+	case OperationCompletionLost:
+		lost = 1
+	default:
+		return 0, 0, false
+	}
+	preemptStore(&slot.mailbox, uint32(manualOperationMailboxDelivered))
+	return published, lost, true
+}
+
+func (source *ManualOperationSource) PublishPass(p *P) (published, lost uint32, ok bool) {
+	if !source.beginPublishPass(p) {
+		return 0, 0, false
+	}
+	for index := range source.slots {
+		onePublished, oneLost, slotOK := source.publishSlot(p, uint32(index))
+		published += onePublished
+		lost += oneLost
+		if !slotOK {
 			return published, lost, false
 		}
-		preemptStore(&slot.mailbox, uint32(manualOperationMailboxDelivered))
 	}
 	return published, lost, true
 }

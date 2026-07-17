@@ -42,6 +42,7 @@ type ExecutorDriver struct {
 	handle        ExecutorHandle
 	route         RouteID
 	sources       ExecutorSourceSet
+	poll          executorPollTransaction
 	prepareNow    int64
 	hasPrepareNow bool
 	terminalKind  ActionKind
@@ -79,7 +80,7 @@ func validExecutorDriver(driver *ExecutorDriver) bool {
 		driver.p != nil && driver.registry != nil && driver.handle.Slot != 0 && driver.handle.Generation != 0 &&
 		driver.route.Valid() && driver.sources.route == driver.route &&
 		driver.p.executor == driver && preemptLoad(&driver.p.executorMode) == executorModeBound &&
-		validExecutorSourceSet(&driver.sources, driver.p)
+		validExecutorSourceSet(&driver.sources, driver.p) && validExecutorPollTransaction(&driver.poll, &driver.sources)
 }
 
 func validExecutorDriverForP(driver *ExecutorDriver, p *P) bool {
@@ -205,6 +206,7 @@ func idleExecutorScheduler(p *P) bool {
 func bindExecutorAtRoute(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, route RouteID, catalog ExecutorSourceCatalog) bool {
 	if driver == nil || driver.magic != 0 || driver.state != executorDriverUnbound || driver.p != nil ||
 		driver.registry != nil || driver.handle != (ExecutorHandle{}) || driver.route != 0 || driver.sources != (ExecutorSourceSet{}) ||
+		driver.poll != (executorPollTransaction{}) ||
 		driver.prepareNow != 0 || driver.hasPrepareNow ||
 		driver.terminalKind != ActionInvalid ||
 		p == nil || p.executor != nil || preemptLoad(&p.executorMode) != executorModeUnbound ||
@@ -267,7 +269,8 @@ func (driver *ExecutorDriver) Route() (RouteID, bool) {
 }
 
 func publishExecutorSourcesInState(driver *ExecutorDriver, now int64, withDeadline bool, state executorDriverState) (scan executorSourceScan, ok bool) {
-	if !validExecutorDriver(driver) || driver.state != state || !idleExecutorScheduler(driver.p) {
+	if !validExecutorDriver(driver) || driver.state != state || driver.poll.phase != executorPollIdle ||
+		!idleExecutorScheduler(driver.p) {
 		return executorSourceScan{}, false
 	}
 	return driver.sources.publishPass(driver.p, now, withDeadline)
@@ -300,28 +303,29 @@ func pollExecutorSourcesAt(driver *ExecutorDriver, now int64, withDeadline bool)
 	if !validExecutorDriver(driver) || driver.state != executorDriverActive || !idleExecutorScheduler(driver.p) {
 		return executorSourceScan{}, false
 	}
-	if !driver.sources.acceptsScan(driver.p, now, withDeadline) {
+	if driver.poll.phase != executorPollIdle || !driver.sources.acceptsScan(driver.p, now, withDeadline) {
 		return executorSourceScan{}, false
 	}
-	// Epoch A resolves and promotes its complete owner-claimed snapshot
-	// immediately. Continuous producer traffic must not delay that promotion.
-	first, firstOK := serviceExecutorPublishedEpochAt(driver, now, withDeadline)
-	total.add(first)
-	if !firstOK {
-		return total, false
+	// The compatibility entry keeps advancing bounded catalog slices until the
+	// current A/ack/B transaction completes, so its old call boundary remains
+	// unchanged. Candidate dispatch can make an atomic common resolve overshoot
+	// one base catalog budget; the explicit host API returns that slice instead
+	// of looping, while this legacy wrapper supplies another outer iteration.
+	budget, budgetOK := executorMinPollBudget(&driver.sources)
+	if !budgetOK {
+		return executorSourceScan{}, false
 	}
-	if _, ackOK := driver.registry.Acknowledge(driver.handle); !ackOK {
-		return total, false
+	for {
+		var progress ExecutorPollProgress
+		var polled bool
+		total, progress, polled = pollExecutorSliceAt(driver, now, withDeadline, budget)
+		if !polled {
+			return total, false
+		}
+		if progress.Complete {
+			return total, true
+		}
 	}
-
-	// Epoch B is unconditional. It closes the post-before-request race around
-	// Acknowledge: an earlier coalesced request is caught by this full pass,
-	// while a later request remains published for the next Poll. Pending and
-	// Requested are therefore scheduling hints after B, never reasons to wait
-	// for a producer-silent cut inside this Poll.
-	recheck, recheckOK := serviceExecutorPublishedEpochAt(driver, now, withDeadline)
-	total.add(recheck)
-	return total, recheckOK
 }
 
 func pollExecutor(driver *ExecutorDriver) (drained, promoted int, ok bool) {
@@ -356,7 +360,7 @@ func PollExecutorAt(driver *ExecutorDriver, now int64) (waits, timers, promoted 
 // this timer query. The query deliberately accepts no clock or callback.
 func NextExecutorTimerDeadline(driver *ExecutorDriver) (deadline int64, hasDeadline, ok bool) {
 	if !validExecutorDriver(driver) || !driver.sources.usesMonotonicTime() || driver.state != executorDriverActive ||
-		!idleExecutorScheduler(driver.p) {
+		driver.poll.phase != executorPollIdle || !idleExecutorScheduler(driver.p) {
 		return 0, false, false
 	}
 	return driver.sources.nextDeadline(driver.p)
@@ -560,7 +564,7 @@ func WakeExecutorAt(driver *ExecutorDriver, now int64) (waits, timers, promoted 
 // this close before entering those state machines.
 func BeginExecutorClose(driver *ExecutorDriver) bool {
 	if !validExecutorDriver(driver) || driver.state != executorDriverActive || !idleExecutorScheduler(driver.p) ||
-		driver.terminalKind != ActionInvalid ||
+		driver.poll.phase != executorPollIdle || driver.terminalKind != ActionInvalid ||
 		!emptySchedulerWaitQueues(driver.p) ||
 		!driver.sources.empty(driver.p) {
 		return false
@@ -648,7 +652,7 @@ func terminalExecutorCloseCandidate(p *P, g *G, action Action) (*ExecutorDriver,
 	}
 	driver := p.executor
 	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
-		driver.terminalKind != ActionInvalid || !driver.sources.canBeginTerminalClose(p) {
+		driver.poll.phase != executorPollIdle || driver.terminalKind != ActionInvalid || !driver.sources.canBeginTerminalClose(p) {
 		return nil, false
 	}
 	return driver, true

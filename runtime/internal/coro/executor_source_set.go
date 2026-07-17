@@ -259,48 +259,91 @@ func (sources *ExecutorSourceSet) applyOne(p *P, link *ParkLink) OperationApplyR
 
 // applyResolvedWaitSetBatch dispatches source-specific apply through only the
 // candidate links retained by the resolved batch. Detach mutates the intrusive
-// list, so next is captured before each direct source call. A deferred source
-// must leave its exact link attached; promotion then requeues that wait-set for
-// the next bounded epoch without any capacity or all-G scan.
-func (sources *ExecutorSourceSet) applyResolvedWaitSetBatch(p *P, batch *WaitSetRecord) (visits int, ok bool) {
+// list, so next is captured before each direct source call. A budget retry
+// leaves the exact link attached and requeues the wait-set; an external-fact
+// wait stays off owner work until its source marks the record affected again.
+func finishWaitSetApplyProgress(wait *WaitSetRecord, retryBudget, awaitExternal bool) (retry, await, ok bool) {
+	if wait == nil {
+		return false, false, false
+	}
+	switch wait.work {
+	case waitSetWorkResolvingDirty:
+		// Re-observe after every ApplyOne. A source may publish another owner-side
+		// sticky fact while applying an earlier candidate; that dirty fact must
+		// beat AwaitExternal and keep the record runnable for epoch B.
+		return true, false, true
+	case waitSetWorkResolving:
+		if retryBudget {
+			return true, false, true
+		}
+		if awaitExternal {
+			wait.work = waitSetWorkAwaitingExternal
+			return false, true, true
+		}
+		return false, false, true
+	default:
+		return false, false, false
+	}
+}
+
+func (sources *ExecutorSourceSet) applyResolvedWaitSetBatchProgress(p *P, batch *WaitSetRecord) (visits int, retryBudget, awaitExternal, ok bool) {
 	if !validExecutorSourceSet(sources, p) {
-		return 0, false
+		return 0, false, false, false
 	}
 	for wait := batch; wait != nil; wait = wait.workNext {
 		if !validActiveWaitSetRecordFast(p, wait) ||
 			(wait.work != waitSetWorkResolving && wait.work != waitSetWorkResolvingDirty) ||
 			(wait.g.park.phase != parkDetaching && wait.g.park.phase != parkReady) {
-			return visits, false
+			return visits, retryBudget, awaitExternal, false
 		}
 		state := &wait.g.park
+		waitRetry, waitAwait := wait.work == waitSetWorkResolvingDirty, false
 		for link := state.head; link != nil; {
 			next := link.next
 			if link.park != state || link.wait != wait || link.ticket != wait.ticket ||
 				link.operation == nil || link.operation.link.operation != link.operation {
-				return visits, false
+				return visits, retryBudget, awaitExternal, false
 			}
 			visits++
 			switch sources.applyOne(p, link) {
 			case OperationApplyDetached:
 				// The source cleared this exact embedded link. next remains stable
 				// source-owned storage even when its predecessor changed.
-			case OperationApplyDeferred:
+			case OperationApplyRetryBudget:
 				if link.park != state || link.wait != wait || link.operation == nil ||
 					&link.operation.link != link || link.operation.phase != operationActive {
-					return visits, false
+					return visits, retryBudget, awaitExternal, false
 				}
+				waitRetry = true
+			case OperationApplyAwaitExternalFact:
+				if link.park != state || link.wait != wait || link.operation == nil ||
+					&link.operation.link != link || link.operation.phase != operationActive {
+					return visits, retryBudget, awaitExternal, false
+				}
+				waitAwait = true
 			default:
-				return visits, false
+				return visits, retryBudget, awaitExternal, false
 			}
 			link = next
 		}
+		waitRetry, waitAwait, settled := finishWaitSetApplyProgress(wait, waitRetry, waitAwait)
+		if !settled {
+			return visits, retryBudget, awaitExternal, false
+		}
+		retryBudget = retryBudget || waitRetry
+		awaitExternal = awaitExternal || waitAwait
 	}
-	return visits, true
+	return visits, retryBudget, awaitExternal, true
 }
 
-func (sources *ExecutorSourceSet) resolvePublishedEpoch(p *P) (promoted, applyVisits int, ok bool) {
+func (sources *ExecutorSourceSet) applyResolvedWaitSetBatch(p *P, batch *WaitSetRecord) (visits int, ok bool) {
+	visits, _, _, ok = sources.applyResolvedWaitSetBatchProgress(p, batch)
+	return visits, ok
+}
+
+func (sources *ExecutorSourceSet) resolvePublishedEpochProgress(p *P) (promoted, applyVisits int, retryBudget, awaitExternal, ok bool) {
 	if !validExecutorSourceSet(sources, p) {
-		return 0, 0, false
+		return 0, 0, false, false, false
 	}
 	// Phase one resolves every source's affected entries against the same
 	// complete sticky snapshot. Timer V2 completion publication marks its
@@ -314,31 +357,36 @@ func (sources *ExecutorSourceSet) resolvePublishedEpoch(p *P) (promoted, applyVi
 			// A source-local (link.wait == nil) entry has no resolved batch link.
 			// Fail before consuming it rather than silently leaving an attached
 			// terminal operation outside the production apply transaction.
-			return 0, 0, false
+			return 0, 0, false, false, false
 		}
 		resolution, duplicates, resolved := sources.manual.ResolveAffectedPublishedEpoch(p)
 		if !resolved || resolution != (CompletionResolution{}) || duplicates != 0 {
-			return 0, 0, false
+			return 0, 0, false, false, false
 		}
 	}
 	batch, _, _, resolved := resolveAffectedWaitSets(p)
 	if !resolved {
-		return 0, 0, false
+		return 0, 0, false, false, false
 	}
 	// Phase two walks only the resolved batch's candidate links and directly
 	// dispatches each exact source identity. All source resolve passes above are
 	// complete before any source applies or detaches, so static source order can
 	// neither select a winner nor hide a cross-source loser.
-	applyVisits, ok = sources.applyResolvedWaitSetBatch(p, batch)
+	applyVisits, retryBudget, awaitExternal, ok = sources.applyResolvedWaitSetBatchProgress(p, batch)
 	if !ok {
-		return 0, applyVisits, false
+		return 0, applyVisits, retryBudget, awaitExternal, false
 	}
 	promoted, ok = promoteResolvedWaitSets(p, batch)
 	if !ok {
-		return promoted, applyVisits, false
+		return promoted, applyVisits, retryBudget, awaitExternal, false
 	}
 	legacyPromoted, legacyOK := pollReady(p)
-	return promoted + legacyPromoted, applyVisits, legacyOK
+	return promoted + legacyPromoted, applyVisits, retryBudget, awaitExternal, legacyOK
+}
+
+func (sources *ExecutorSourceSet) resolvePublishedEpoch(p *P) (promoted, applyVisits int, ok bool) {
+	promoted, applyVisits, _, _, ok = sources.resolvePublishedEpochProgress(p)
+	return promoted, applyVisits, ok
 }
 
 // pending reports producer-published facts that require another owner scan.

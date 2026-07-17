@@ -201,15 +201,23 @@ const (
 
 // OperationApplyResult is the source-owner result of applying one terminal
 // logical disposition reached through an exact ParkLink. Detached means the
-// source acknowledged the disposition and removed that link. Deferred means
-// the exact operation remains attached and must be retried by a later owner
-// epoch; it is not a failed or partially detached operation.
+// source acknowledged the disposition and removed that link. RetryBudget and
+// AwaitExternalFact both retain the exact link, but deliberately have opposite
+// scheduling consequences: RetryBudget requires another executor slice,
+// whereas AwaitExternalFact must stay off the affected queue until its source
+// publishes the missing acknowledgement/quiescence fact. Keeping those states
+// distinct prevents a physically blocked operation from busy-spinning. The
+// current timer and manual sources always detach synchronously and therefore
+// return neither deferred result. Any future source which returns
+// AwaitExternalFact must make its later sticky acknowledgement call
+// MarkWaitSetAffected for the retained WaitSetRecord.
 type OperationApplyResult uint8
 
 const (
 	OperationApplyInvalid OperationApplyResult = iota
 	OperationApplyDetached
-	OperationApplyDeferred
+	OperationApplyRetryBudget
+	OperationApplyAwaitExternalFact
 )
 
 // OperationRecord is stable scheduler/source-owned storage. The producer does

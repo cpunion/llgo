@@ -337,25 +337,56 @@ func (table *WaitRegistrationTable) drainFor(p *P) (int, bool) {
 	return table.drain(p)
 }
 
-func (table *WaitRegistrationTable) drain(owner *P) (int, bool) {
+// beginDrainPass clears only the coalesced producer hint. Posted slot states
+// remain the source of truth, so a bounded ExecutorSourceSet pass may visit one
+// slot at a time across several host entries without losing a callback which
+// races either side of this store.
+func (table *WaitRegistrationTable) beginDrainPass(owner *P) bool {
+	if table == nil || table.owner != owner {
+		return false
+	}
 	preemptStore(&table.pending, 0)
+	return true
+}
+
+// drainSlot publishes at most one exact physical slot. index is an owner-side
+// cursor, never a producer ABI. Keeping this operation O(1) lets the common
+// executor charge every real catalog entry to its reduction budget.
+func (table *WaitRegistrationTable) drainSlot(owner *P, index uint32) (int, bool) {
+	if table == nil || table.owner != owner || index >= uint32(len(table.slots)) {
+		return 0, false
+	}
+	slot := &table.slots[index]
+	if waitRegistrationState(preemptLoad(&slot.state)) != waitRegistrationPosted {
+		return 0, true
+	}
+	if !preemptCompareAndSwap(&slot.state, uint32(waitRegistrationPosted), uint32(waitRegistrationDraining)) {
+		// Only the serialized owner performs Posted -> Draining. A failed CAS
+		// after observing Posted is therefore a second owner or corruption, not
+		// a benign producer race; fail closed instead of silently skipping it.
+		return 0, false
+	}
+	p, token, ticket := slot.p, slot.token, slot.ticket
+	if p == nil || (owner != nil && p != owner) || token == nil || !validWaitTicket(ticket) || !CompleteWait(token, ticket) {
+		// Keep Draining permanently fail-closed: owner storage cannot be
+		// retired after a corrupt or competing raw token transition.
+		return 0, false
+	}
+	preemptStore(&slot.state, uint32(waitRegistrationDelivered))
+	return 1, true
+}
+
+func (table *WaitRegistrationTable) drain(owner *P) (int, bool) {
+	if !table.beginDrainPass(owner) {
+		return 0, false
+	}
 	drained := 0
 	for index := range table.slots {
-		slot := &table.slots[index]
-		if waitRegistrationState(preemptLoad(&slot.state)) != waitRegistrationPosted {
-			continue
-		}
-		if !preemptCompareAndSwap(&slot.state, uint32(waitRegistrationPosted), uint32(waitRegistrationDraining)) {
-			continue
-		}
-		p, token, ticket := slot.p, slot.token, slot.ticket
-		if p == nil || (owner != nil && p != owner) || token == nil || !validWaitTicket(ticket) || !CompleteWait(token, ticket) {
-			// Keep Draining permanently fail-closed: owner storage cannot be
-			// retired after a corrupt or competing raw token transition.
+		one, ok := table.drainSlot(owner, uint32(index))
+		drained += one
+		if !ok {
 			return drained, false
 		}
-		preemptStore(&slot.state, uint32(waitRegistrationDelivered))
-		drained++
 	}
 	return drained, true
 }

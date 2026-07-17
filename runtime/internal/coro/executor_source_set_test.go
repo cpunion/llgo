@@ -158,7 +158,7 @@ func TestExecutorSourceSetRejectsStandaloneAffectedOperationBeforeResolution(t *
 	}
 }
 
-func TestExecutorSourceSetDeferredBatchRemainsPendingForExactRetry(t *testing.T) {
+func TestExecutorSourceSetRetryBudgetAndExternalFactHaveDistinctScheduling(t *testing.T) {
 	p := new(P)
 	waits := new(WaitRegistrationTable)
 	manual := new(ManualOperationSource)
@@ -207,19 +207,34 @@ func TestExecutorSourceSetDeferredBatchRemainsPendingForExactRetry(t *testing.T)
 	if !resolved || batch != &wait || task.g.park.phase != parkDetaching {
 		t.Fatal("resolve deferred scheduler batch")
 	}
-	// Model a source-specific ApplyOne returning Deferred: no link is detached,
-	// and promotion must put this exact WaitSetRecord back on owner work.
+	// Model ApplyOne returning RetryBudget: no link is detached, and promotion
+	// must put this exact WaitSetRecord back on owner work.
 	if promoted, ok := promoteResolvedWaitSets(p, batch); !ok || promoted != 0 ||
 		p.affectedWaitHead != &wait || p.affectedWaitTail != &wait || !sources.pending(p) {
-		t.Fatalf("deferred batch requeue = (%d, %t), pending=%t", promoted, ok, sources.pending(p))
+		t.Fatalf("budget retry requeue = (%d, %t), pending=%t", promoted, ok, sources.pending(p))
 	}
 
 	retry, _, _, resolved := resolveAffectedWaitSets(p)
 	if !resolved || retry != &wait {
-		t.Fatal("pop exact deferred retry batch")
+		t.Fatal("pop exact budget retry batch")
+	}
+	// The same retained operation may instead be waiting for physical backend
+	// acknowledgement. It must leave owner work until its source publishes that
+	// fact; otherwise More would cause an event-free busy loop.
+	retry.work = waitSetWorkAwaitingExternal
+	if promoted, ok := promoteResolvedWaitSets(p, retry); !ok || promoted != 0 ||
+		p.affectedWaitHead != nil || p.affectedWaitTail != nil || sources.pending(p) {
+		t.Fatalf("external-fact wait = (%d, %t), pending=%t", promoted, ok, sources.pending(p))
+	}
+	if !MarkWaitSetAffected(p, &wait) || !sources.pending(p) {
+		t.Fatal("external acknowledgement did not republish exact wait-set")
+	}
+	retry, _, _, resolved = resolveAffectedWaitSets(p)
+	if !resolved || retry != &wait {
+		t.Fatal("pop external acknowledgement retry batch")
 	}
 	if visits, applied := sources.applyResolvedWaitSetBatch(p, retry); !applied || visits != 1 {
-		t.Fatalf("apply exact deferred retry = (%d, %t)", visits, applied)
+		t.Fatalf("apply exact acknowledged retry = (%d, %t)", visits, applied)
 	}
 	if promoted, ok := promoteResolvedWaitSets(p, retry); !ok || promoted != 1 || sources.pending(p) {
 		t.Fatalf("promote exact deferred retry = (%d, %t), pending=%t", promoted, ok, sources.pending(p))
@@ -239,6 +254,19 @@ func TestExecutorSourceSetDeferredBatchRemainsPendingForExactRetry(t *testing.T)
 		t.Fatal("unbind deferred-batch source set")
 	}
 	finishWaitTestTask(t, p, task, action)
+}
+
+func TestExecutorSourceSetDirtyApplyBeatsAwaitExternal(t *testing.T) {
+	wait := WaitSetRecord{work: waitSetWorkResolving}
+	// Model an owner-side source calling MarkWaitSetAffected from inside
+	// ApplyOne and then returning AwaitExternalFact. The mark changes Resolving
+	// to ResolvingDirty; the post-call observation must preserve that fact as a
+	// runnable retry instead of overwriting it with AwaitingExternal.
+	wait.work = waitSetWorkResolvingDirty
+	retry, await, ok := finishWaitSetApplyProgress(&wait, false, true)
+	if !ok || !retry || await || wait.work != waitSetWorkResolvingDirty {
+		t.Fatalf("dirty apply/await classification = (%t, %t, %t), work=%d", retry, await, ok, wait.work)
+	}
 }
 
 func TestExecutorSourceSetBindRollsBackEarlierSources(t *testing.T) {

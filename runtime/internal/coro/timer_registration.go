@@ -321,56 +321,70 @@ func (table *TimerRegistrationTable) DrainDue(now int64) (completed int, deadlin
 	return table.drainDueFor(nil, now)
 }
 
+// drainDueSlotFor visits one real timer catalog entry. The caller combines
+// the returned deadline minima across a complete pass. A bounded pass keeps a
+// fixed now sample from its first entry through resolution, matching the
+// legacy all-slot DrainDue semantics even when the host yields between slots.
+func (table *TimerRegistrationTable) drainDueSlotFor(owner *P, now int64, index uint32) (completed int, deadline int64, hasDeadline, ok bool) {
+	if table == nil || table.owner != owner || now < 0 || index >= uint32(len(table.slots)) {
+		return 0, 0, false, false
+	}
+	slot := &table.slots[index]
+	switch slot.state {
+	case timerRegistrationFree:
+		if !reusableTimerRegistrationSlot(slot, table.route, index) {
+			return 0, 0, false, false
+		}
+	case timerRegistrationActive:
+		if !validLiveTimerRegistration(slot, owner, table.route, index) {
+			return 0, 0, false, false
+		}
+		if slot.deadline <= now {
+			switch slot.mode {
+			case timerRegistrationModeV1:
+				if !CompleteWait(slot.token, slot.ticket) {
+					// Keep this slot Active and fail-closed for diagnosis.
+					return 0, 0, false, false
+				}
+			case timerRegistrationModeV2:
+				id, idOK := timerRegistrationOperationID(table.route, index, slot.generation)
+				if !idOK || PublishOperationCompletion(&slot.record, id) != OperationCompletionPublished {
+					return 0, 0, false, false
+				}
+				if slot.record.link.wait == nil || !MarkWaitSetAffected(owner, slot.record.link.wait) {
+					// Completion publication is sticky and irreversible. Leave the
+					// physical slot Active so it cannot be recycled.
+					return 0, 0, false, false
+				}
+			default:
+				return 0, 0, false, false
+			}
+			slot.state = timerRegistrationDelivered
+			return 1, 0, false, true
+		}
+		return 0, slot.deadline, true, true
+	case timerRegistrationDelivered, timerRegistrationCanceled:
+		if !validLiveTimerRegistration(slot, owner, table.route, index) {
+			return 0, 0, false, false
+		}
+	default:
+		return 0, 0, false, false
+	}
+	return 0, 0, false, true
+}
+
 func (table *TimerRegistrationTable) drainDueFor(owner *P, now int64) (completed int, deadline int64, hasDeadline, ok bool) {
 	if table == nil || table.owner != owner || now < 0 {
 		return 0, 0, false, false
 	}
 	for index := range table.slots {
-		slot := &table.slots[index]
-		switch slot.state {
-		case timerRegistrationFree:
-			if !reusableTimerRegistrationSlot(slot, table.route, uint32(index)) {
-				return completed, 0, false, false
-			}
-		case timerRegistrationActive:
-			if !validLiveTimerRegistration(slot, owner, table.route, uint32(index)) {
-				return completed, 0, false, false
-			}
-			if slot.deadline <= now {
-				switch slot.mode {
-				case timerRegistrationModeV1:
-					if !CompleteWait(slot.token, slot.ticket) {
-						// Prior completions are irreversible. Preserve partial progress
-						// and keep this slot Active and fail-closed for diagnosis.
-						return completed, 0, false, false
-					}
-				case timerRegistrationModeV2:
-					id, idOK := timerRegistrationOperationID(table.route, uint32(index), slot.generation)
-					if !idOK || PublishOperationCompletion(&slot.record, id) != OperationCompletionPublished {
-						return completed, 0, false, false
-					}
-					if slot.record.link.wait == nil || !MarkWaitSetAffected(owner, slot.record.link.wait) {
-						// Completion publication is sticky and irreversible. Leave the
-						// physical slot Active so it cannot be recycled; the false scan
-						// is a fail-stop diagnostic rather than silent fact loss.
-						return completed, 0, false, false
-					}
-				default:
-					return completed, 0, false, false
-				}
-				slot.state = timerRegistrationDelivered
-				completed++
-				continue
-			}
-			if !hasDeadline || slot.deadline < deadline {
-				deadline, hasDeadline = slot.deadline, true
-			}
-		case timerRegistrationDelivered, timerRegistrationCanceled:
-			if !validLiveTimerRegistration(slot, owner, table.route, uint32(index)) {
-				return completed, 0, false, false
-			}
-		default:
+		one, next, hasNext, slotOK := table.drainDueSlotFor(owner, now, uint32(index))
+		completed += one
+		if !slotOK {
 			return completed, 0, false, false
+		}
+		if hasNext && (!hasDeadline || next < deadline) {
+			deadline, hasDeadline = next, true
 		}
 	}
 	return completed, deadline, hasDeadline, true

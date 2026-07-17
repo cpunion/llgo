@@ -256,69 +256,81 @@ func taskControlRestoreRequest(source *TaskControlSource, slot *taskControlSlot,
 	}
 }
 
-func (source *TaskControlSource) publishPass(p *P, terminal *G) (delivered, discarded uint32, ok bool) {
+func (source *TaskControlSource) beginPublishPass(p *P) bool {
 	if !validTaskControlOwner(source, p) {
-		return 0, 0, false
+		return false
 	}
 	preemptStore(&source.pending, 0)
+	return true
+}
+
+// publishSlot claims at most one merged request from one real endpoint. A
+// producer which posts after this cursor position leaves pending set and is
+// serviced by the next epoch instead of extending this one indefinitely.
+func (source *TaskControlSource) publishSlot(p *P, terminal *G, index uint32) (delivered, discarded uint32, ok bool) {
+	if !validTaskControlOwner(source, p) || index >= uint32(len(source.slots)) {
+		return 0, 0, false
+	}
+	slot := &source.slots[index]
+	kind := TaskCancelKind(preemptLoad(&slot.request))
+	if kind == TaskCancelNone {
+		return 0, 0, true
+	}
+	if !validTaskCancelKind(kind) {
+		return 0, 0, false
+	}
+	if !preemptCompareAndSwap(&slot.request, uint32(kind), uint32(TaskCancelNone)) {
+		// A producer upgraded or same-value-CASed the monotonic mailbox after
+		// our load. Do not spin inside this catalog entry: its request remains
+		// sticky and producer pending/request publication (plus epoch B) makes
+		// it visible to a later pass.
+		return 0, 0, true
+	}
+
+	// Drain at most one merged fact per slot and pass. A producer that
+	// publishes after the take leaves pending set for the next pass, so a hot
+	// control endpoint cannot starve timer, I/O, or IRQ sources.
+	state := taskControlLifecycle(preemptLoad(&slot.state))
+	switch state {
+	case taskControlActive, taskControlClosing:
+		generation := preemptLoad(&slot.generation)
+		_, valid := MakeOperationIDAtRoute(OperationSourceControl, source.route, index+1, generation)
+		if !valid || slot.task == nil {
+			return 0, 0, false
+		}
+		// Once the final LLVM root has been destroyed there is no user or
+		// cleanup continuation into which an admitted-late task stop can be
+		// delivered. The endpoint remains pinned until the adapter joins it.
+		if terminal != nil && slot.task == terminal {
+			return 0, 1, true
+		}
+		if RequestTaskCancellation(p, slot.task, kind) {
+			return 1, 0, true
+		}
+		if slot.task.state == GCanceling || slot.task.state == GPanicking || slot.task.state == GDead {
+			return 0, 1, true
+		}
+		// Legacy waits and a future owner migration may reject delivery without
+		// making the request invalid. Restore the exact durable fact and report
+		// no progress; a later external state transition must make it applicable.
+		if !taskControlRestoreRequest(source, slot, kind) {
+			return 0, 0, false
+		}
+		return 0, 0, false
+	default:
+		return 0, 0, false
+	}
+}
+
+func (source *TaskControlSource) publishPass(p *P, terminal *G) (delivered, discarded uint32, ok bool) {
+	if !source.beginPublishPass(p) {
+		return 0, 0, false
+	}
 	for index := range source.slots {
-		slot := &source.slots[index]
-		var kind TaskCancelKind
-		for {
-			kind = TaskCancelKind(preemptLoad(&slot.request))
-			if kind == TaskCancelNone {
-				break
-			}
-			if !validTaskCancelKind(kind) ||
-				!preemptCompareAndSwap(&slot.request, uint32(kind), uint32(TaskCancelNone)) {
-				if validTaskCancelKind(kind) {
-					continue
-				}
-				return delivered, discarded, false
-			}
-			break
-		}
-		if kind == TaskCancelNone {
-			continue
-		}
-		// Drain at most one merged fact per slot and pass. A producer that
-		// publishes after the take leaves pending set for the next pass, so a
-		// hot control endpoint cannot starve timer, I/O, or IRQ sources.
-		state := taskControlLifecycle(preemptLoad(&slot.state))
-		switch state {
-		case taskControlActive, taskControlClosing:
-			generation := preemptLoad(&slot.generation)
-			_, valid := MakeOperationIDAtRoute(OperationSourceControl, source.route, uint32(index)+1, generation)
-			if !valid || slot.task == nil {
-				return delivered, discarded, false
-			}
-			// Once the final LLVM root has been destroyed there is no user or
-			// cleanup continuation into which an admitted-late task stop can be
-			// delivered. The terminal completion is already committed; the exact
-			// endpoint generation remains pinned until the adapter strong-joins
-			// it, so consuming this fact is a normal terminal-late discard.
-			if terminal != nil && slot.task == terminal {
-				discarded++
-				continue
-			}
-			if RequestTaskCancellation(p, slot.task, kind) {
-				delivered++
-			} else if slot.task.state == GCanceling || slot.task.state == GPanicking || slot.task.state == GDead {
-				// A terminal task has no continuation into which a new stop
-				// request can be delivered. Its endpoint generation remains
-				// pinned until explicit close/join, so this is a normal late
-				// host request rather than a stale pointer or driver failure.
-				discarded++
-			} else {
-				// Legacy waits and a future owner migration may reject delivery
-				// without making the request invalid. Preserve the durable fact;
-				// a later V2 migration/owner pass must still observe it.
-				if !taskControlRestoreRequest(source, slot, kind) {
-					return delivered, discarded, false
-				}
-				return delivered, discarded, false
-			}
-		default:
+		oneDelivered, oneDiscarded, slotOK := source.publishSlot(p, terminal, uint32(index))
+		delivered += oneDelivered
+		discarded += oneDiscarded
+		if !slotOK {
 			return delivered, discarded, false
 		}
 	}
