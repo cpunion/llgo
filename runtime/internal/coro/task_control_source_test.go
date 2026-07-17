@@ -315,7 +315,7 @@ func TestTaskControlRegisteredDeliveryProofFailsClosed(t *testing.T) {
 			case "generation":
 				proofID.Generation++
 			case "slot-lifecycle":
-				preemptStore(&slot.state, uint32(taskControlInitializing))
+				preemptStore(&slot.state, uint32(producerSourceInitializing))
 			case "task":
 				slot.task = nil
 			case "lease":
@@ -399,7 +399,7 @@ func TestTaskControlSourceFinalDrainDeliversAdmittedLatePost(t *testing.T) {
 		t.Fatal("register task control")
 	}
 	slot, valid := taskControlSlotFor(&source, id)
-	if !valid || !taskControlAcquireProducer(slot) {
+	if !valid || acquireProducerSourceGeneration(&slot.producerSourceSlot, id.Generation) != producerSourceAcquired {
 		t.Fatal("admit producer before endpoint close")
 	}
 	if !BeginCloseTaskControl(&source, p, id) {
@@ -408,7 +408,9 @@ func TestTaskControlSourceFinalDrainDeliversAdmittedLatePost(t *testing.T) {
 	// Model a producer paused after validating Active but before publishing.
 	preemptStore(&slot.request, uint32(TaskCancelAbort))
 	preemptStore(&source.pending, 1)
-	taskControlReleaseProducer(slot)
+	if !producerAdmissionReleaseChecked(&slot.inflight) {
+		t.Fatal("release producer after endpoint close")
+	}
 	if ConfirmTaskControlQuiesced(&source, p, id) {
 		t.Fatal("confirmed endpoint before final late-fact drain")
 	}
@@ -655,9 +657,9 @@ func TestExecutorDriverTerminalCloseJoinsActiveTaskControls(t *testing.T) {
 	// target call which entered before the terminal seal but does not publish
 	// its durable fact or executor request tail until after the close action.
 	lateSlot, valid := taskControlSlotFor(control, late)
-	if !valid || !taskControlAcquireProducer(lateSlot) ||
+	if !valid || acquireProducerSourceGeneration(&lateSlot.producerSourceSlot, late.Generation) != producerSourceAcquired ||
 		preemptLoad(&lateSlot.generation) != late.Generation ||
-		preemptLoad(&lateSlot.state) != uint32(taskControlActive) {
+		preemptLoad(&lateSlot.state) != uint32(producerSourceActive) {
 		t.Fatal("admit late terminal control producer")
 	}
 
@@ -684,7 +686,7 @@ func TestExecutorDriverTerminalCloseJoinsActiveTaskControls(t *testing.T) {
 			closeAction, committed, driver.state, task.g.taskControlLeases,
 			task.g.park.taskCancelKind, task.g.park.taskCancelPhase)
 	}
-	if preemptLoad(&lateSlot.state) != uint32(taskControlClosing) ||
+	if preemptLoad(&lateSlot.state) != uint32(producerSourceClosing) ||
 		preemptLoad(&lateSlot.inflight) != producerAdmissionClosed|1 {
 		t.Fatalf("terminal seal did not retain admitted producer: state=%d inflight=%#x",
 			preemptLoad(&lateSlot.state), preemptLoad(&lateSlot.inflight))
@@ -708,7 +710,9 @@ func TestExecutorDriverTerminalCloseJoinsActiveTaskControls(t *testing.T) {
 		t.Fatal("publish admitted terminal-late request")
 	}
 	preemptStore(&control.pending, 1)
-	taskControlReleaseProducer(lateSlot)
+	if !producerAdmissionReleaseChecked(&lateSlot.inflight) {
+		t.Fatal("release terminal-late producer")
+	}
 	if request := registry.Request(executor); request != ExecutorRequestClosed {
 		t.Fatalf("terminal-late executor request = %d", request)
 	}
