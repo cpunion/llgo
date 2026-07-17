@@ -50,7 +50,7 @@ jobs:
           go test -race -shuffle=on ./internal/coroalloc -count=1
           go test -race -shuffle=on ./internal/coro -count=1
           go test -race -shuffle=on ./internal/corodoorbell -count=1
-          go test . -run '^TestCoroNativeTargetBuildSelection$' -count=1
+          go test . -run '^(TestCoroNativeTargetBuildSelection|TestCoroTimerOwnerOrAbortSourceABI|TestTimeSleep)' -count=1
           # The complete LLGo runtime package intentionally owns symbols that
           # collide with the host Go runtime. Use the real production adapter
           # sources plus test-only definitions of the compiler-owned C wrappers
@@ -120,7 +120,7 @@ jobs:
         # contract. This includes park effect seeding, frozen foreign noblock
         # certificates, IRQUnsafe handling, the exact legacy PanicABI stop, and
         # the native linked static-spawn scheduler-island execution smoke. The
-        # timer E2Es have their own LLVM 19-22 steps below, so do not run them
+        # timer checks have their own LLVM 19-22 steps below, so do not run them
         # twice in the LLVM 19 job.
         run: go test ./internal/build -run 'Coro|Coroutine' -skip '^TestCoroNative(TimerNoGCProductionE2E|TimeSleepProductionPlanAndCodegen)$' -timeout=10m -count=1
 
