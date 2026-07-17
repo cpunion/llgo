@@ -1999,7 +1999,7 @@ func validCoroProgramRunResultPointerV2(typ types.Type) bool {
 	if !ok {
 		return false
 	}
-	result, ok := types.Unalias(pointer.Elem()).Underlying().(*types.Struct)
+	result, ok := pointer.Elem().Underlying().(*types.Struct)
 	if !ok || result.NumFields() != 8 {
 		return false
 	}
