@@ -39,13 +39,31 @@ type coroProgramTestTargetStateV1 struct {
 	waitEpoch                      uint32
 	wakePollCalls                  uint32
 	wakeReady                      bool
+	runEpoch                       uint32
+	runCalls                       uint32
+	runConsumeCalls                uint32
+	runBeginDepth                  uint32
+	maxRunBeginDepth               uint32
+	reenterRunBeforeBeginReturn    bool
+	reentrantRunStatus             uint32
+	reentrantRunResult             coroProgramRunResultV2
+	reenterWrongRunBeforeReturn    bool
+	reentrantWrongRunStatus        uint32
+	reentrantWrongRunResult        coroProgramRunResultV2
+	reenterLegacyRunBeforeReturn   bool
+	reentrantLegacyRunStatus       coroProgramDriveStatusV1
 	completeWaitBeforeBeginReturn  bool
 	waitBeginDepth                 uint32
 	maxWaitBeginDepth              uint32
 	completeCloseBeforeBeginReturn bool
 	reentrantCloseStatus           coroProgramDriveStatusV1
+	reenterSliceCloseBeforeReturn  bool
+	reentrantSliceCloseStatus      uint32
+	reentrantSliceCloseResult      coroProgramRunResultV2
 	closePollEntered               chan struct{}
 	closePollRelease               chan struct{}
+	wakePollEntered                chan struct{}
+	wakePollRelease                chan struct{}
 }
 
 var coroProgramTestTargetV1State coroProgramTestTargetStateV1
@@ -60,9 +78,58 @@ func coroTargetExecutorStartV1(handle coro.ExecutorHandle) bool {
 	return true
 }
 
+func coroTargetBeginExecutorRunV2(handle coro.ExecutorHandle, epoch uint32) coroTargetRunRequestResultV2 {
+	state := &coroProgramTestTargetV1State
+	if !state.started || state.handle != handle || epoch == 0 || state.runEpoch != 0 || state.waitEpoch != 0 {
+		return coroTargetRunRequestInvalidV2
+	}
+	state.runCalls++
+	state.runEpoch = epoch
+	state.runBeginDepth++
+	if state.runBeginDepth > state.maxRunBeginDepth {
+		state.maxRunBeginDepth = state.runBeginDepth
+	}
+	defer func() { state.runBeginDepth-- }()
+	if state.reenterRunBeforeBeginReturn {
+		state.reentrantRunStatus = coroProgramContinueSliceV2(
+			handle.Slot,
+			handle.Generation,
+			epoch,
+			1,
+			&state.reentrantRunResult,
+		)
+	}
+	if state.reenterWrongRunBeforeReturn {
+		state.reentrantWrongRunStatus = coroProgramContinueSliceV2(
+			handle.Slot+1,
+			handle.Generation,
+			epoch,
+			1,
+			&state.reentrantWrongRunResult,
+		)
+	}
+	if state.reenterLegacyRunBeforeReturn {
+		state.reentrantLegacyRunStatus = coroProgramContinueV1(epoch)
+	}
+	if state.mode == coroProgramTestTargetAsyncV1 {
+		return coroTargetRunRequestQueuedV2
+	}
+	return coroTargetRunRequestInlineV2
+}
+
+func coroTargetConsumeExecutorRunV2(handle coro.ExecutorHandle, epoch uint32) bool {
+	state := &coroProgramTestTargetV1State
+	if !state.started || state.handle != handle || epoch == 0 || state.runEpoch != epoch {
+		return false
+	}
+	state.runConsumeCalls++
+	state.runEpoch = 0
+	return true
+}
+
 func coroTargetBeginExecutorCloseV1(handle coro.ExecutorHandle, epoch uint32) coroTargetDispatchResultV1 {
 	state := &coroProgramTestTargetV1State
-	if !state.started || state.handle != handle || state.epoch != 0 || state.waitEpoch != 0 || epoch == 0 {
+	if !state.started || state.handle != handle || state.epoch != 0 || state.waitEpoch != 0 || state.runEpoch != 0 || epoch == 0 {
 		return coroTargetDispatchInvalidV1
 	}
 	state.closeCalls++
@@ -70,6 +137,15 @@ func coroTargetBeginExecutorCloseV1(handle coro.ExecutorHandle, epoch uint32) co
 	if state.completeCloseBeforeBeginReturn {
 		state.joined = true
 		state.reentrantCloseStatus = coroProgramContinueV1(epoch)
+	}
+	if state.reenterSliceCloseBeforeReturn {
+		state.reentrantSliceCloseStatus = coroProgramContinueSliceV2(
+			handle.Slot,
+			handle.Generation,
+			epoch,
+			1,
+			&state.reentrantSliceCloseResult,
+		)
 	}
 	if state.mode == coroProgramTestTargetAsyncV1 {
 		return coroTargetDispatchPendingV1
@@ -129,6 +205,10 @@ func coroTargetPollExecutorWakeV1(handle coro.ExecutorHandle, epoch uint32) coro
 	state := &coroProgramTestTargetV1State
 	if !state.started || state.handle != handle || state.waitEpoch != epoch || epoch == 0 {
 		return coroTargetDispatchInvalidV1
+	}
+	if state.wakePollEntered != nil {
+		state.wakePollEntered <- struct{}{}
+		<-state.wakePollRelease
 	}
 	state.wakePollCalls++
 	if !state.wakeReady {

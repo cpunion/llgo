@@ -28,6 +28,16 @@ func coroTargetExecutorStartV1(handle coro.ExecutorHandle) bool {
 	return handle.Slot != 0 && handle.Generation != 0
 }
 
+func coroTargetBeginExecutorRunV2(coro.ExecutorHandle, uint32) coroTargetRunRequestResultV2 {
+	// A target without a real host-run capability must fail closed. Treating
+	// this as Inline would let WASM or an embedded host monopolize its entry.
+	return coroTargetRunRequestInvalidV2
+}
+
+func coroTargetConsumeExecutorRunV2(coro.ExecutorHandle, uint32) bool {
+	return false
+}
+
 func coroTargetBeginExecutorCloseV1(handle coro.ExecutorHandle, epoch uint32) coroTargetDispatchResultV1 {
 	if handle != coroProgramExecutorHandleV1State || epoch == 0 {
 		return coroTargetDispatchInvalidV1

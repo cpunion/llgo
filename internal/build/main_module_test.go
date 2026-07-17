@@ -5,6 +5,7 @@ package build
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -480,11 +481,14 @@ func TestGenMainModuleCoroProgramBootstrapV2MixedNativeAndWasm(t *testing.T) {
 			}
 
 			mod := entry.LPkg.Module()
-			assertCoroProgramContinueRetention(t, mod, test.entryName)
 			if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
+				assertCoroProgramNativeSliceV2(t, mod, test.entryName)
 				assertCoroNativePostWaitRetention(t, mod, test.entryName)
-			} else if callback := mod.NamedFunction(coroNativePostWaitSymbolV1); !callback.IsNil() {
-				t.Fatalf("non-native entry declared native post-wait callback:\n%s", ir)
+			} else {
+				assertCoroProgramContinueRetention(t, mod, test.entryName)
+				if callback := mod.NamedFunction(coroNativePostWaitSymbolV1); !callback.IsNil() {
+					t.Fatalf("non-native entry declared native post-wait callback:\n%s", ir)
+				}
 			}
 			publicRuntimeInit := mod.NamedFunction("runtime.init")
 			if publicRuntimeInit.IsNil() || !publicRuntimeInit.IsDeclaration() {
@@ -525,12 +529,16 @@ func TestGenMainModuleCoroProgramBootstrapV2MixedNativeAndWasm(t *testing.T) {
 					t.Fatalf("mixed v2 platform entry retained legacy call %q:\n%s", legacyCall, entryBody)
 				}
 			}
+			driverCall := "call void @" + coroProgramRunSymbolV1
+			if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
+				driverCall = "call i32 @" + coroProgramRunSliceSymbolV2
+			}
 			assertInOrder(t, entryBody,
 				"call void @"+coroFrameAllocatorBootstrapSymbolV1+"()",
 				"call void @Py_Initialize()",
 				"call ptr @"+coroProgramBeginSymbolV1,
 				"call ptr @"+coroProgramBootstrapFactorySymbolV2,
-				"call void @"+coroProgramRunSymbolV1,
+				driverCall,
 				"call void @Py_Finalize()",
 			)
 			if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
@@ -657,7 +665,7 @@ func TestGenMainModuleCoroProgramBootstrapRuntimeSwitch(t *testing.T) {
 		"call void @"+coroProgramCompletePrepareHookV1,
 	)
 	entryBody := entry.LPkg.Module().NamedFunction("main").String()
-	assertCoroProgramContinueRetention(t, entry.LPkg.Module(), "main")
+	assertCoroProgramNativeSliceV2(t, entry.LPkg.Module(), "main")
 	assertCoroNativePostWaitRetention(t, entry.LPkg.Module(), "main")
 	if strings.Contains(entryBody, "call void @\"example.com/foo.init\"()") || strings.Contains(entryBody, "call void @\"example.com/foo.main\"()") {
 		t.Fatalf("platform entry retained legacy direct init/main calls:\n%s", entryBody)
@@ -672,7 +680,7 @@ func TestGenMainModuleCoroProgramBootstrapRuntimeSwitch(t *testing.T) {
 		"call void @runtime.init()",
 		"call ptr @"+coroProgramBeginSymbolV1,
 		"call ptr @"+coroProgramBootstrapFactorySymbolV1,
-		"call void @"+coroProgramRunSymbolV1,
+		"call i32 @"+coroProgramRunSliceSymbolV2,
 		"call void @Py_Finalize()",
 	)
 	if strings.Contains(entryBody, "call ptr %") {
@@ -720,16 +728,20 @@ func TestGenMainModuleCoroProgramBootstrapRuntimeAfterCoroPasses(t *testing.T) {
 			}
 			mod := entry.LPkg.Module()
 			post := mod.String()
-			assertCoroProgramContinueRetention(t, mod, func() string {
+			entryName := func() string {
 				if isWasmTarget(test.goos) {
 					return "__main_argc_argv"
 				}
 				return "main"
-			}())
+			}()
 			if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
+				assertCoroProgramNativeSliceV2(t, mod, entryName)
 				assertCoroNativePostWaitRetention(t, mod, "main")
-			} else if callback := mod.NamedFunction(coroNativePostWaitSymbolV1); !callback.IsNil() {
-				t.Fatalf("non-native lowered entry declared native post-wait callback:\n%s", post)
+			} else {
+				assertCoroProgramContinueRetention(t, mod, entryName)
+				if callback := mod.NamedFunction(coroNativePostWaitSymbolV1); !callback.IsNil() {
+					t.Fatalf("non-native lowered entry declared native post-wait callback:\n%s", post)
+				}
 			}
 			for _, suffix := range []string{".resume", ".destroy"} {
 				if mod.NamedFunction(coroProgramBootstrapFactorySymbolV1 + suffix).IsNil() {
@@ -750,8 +762,70 @@ func TestGenMainModuleCoroProgramBootstrapRuntimeAfterCoroPasses(t *testing.T) {
 	}
 }
 
+func assertCoroProgramNativeSliceV2(t *testing.T, module llvm.Module, entryName string) {
+	t.Helper()
+	run := module.NamedFunction(coroProgramRunSliceSymbolV2)
+	if run.IsNil() || !run.IsDeclaration() || run.GlobalValueType().String() != "i32 (ptr, ptr, i32, ptr)" {
+		t.Fatalf("native program run-slice declaration has the wrong ABI: %v\n%s", run, module.String())
+	}
+	continueRun := module.NamedFunction(coroProgramContinueSliceSymbolV2)
+	if continueRun.IsNil() || !continueRun.IsDeclaration() || continueRun.GlobalValueType().String() != "i32 (i32, i32, i32, i32, ptr)" {
+		t.Fatalf("native program continue-slice declaration has the wrong ABI: %v\n%s", continueRun, module.String())
+	}
+	if legacy := module.NamedFunction(coroProgramRunSymbolV1); !legacy.IsNil() {
+		t.Fatalf("native V2 entry retained the legacy whole-program run ABI: %v\n%s", legacy, module.String())
+	}
+	if legacy := module.NamedFunction(coroProgramContinueSymbolV1); !legacy.IsNil() {
+		t.Fatalf("native V2 entry retained the legacy callback ABI: %v\n%s", legacy, module.String())
+	}
+	if anchor := module.NamedGlobal(coroProgramContinueReferenceSymbolV1); !anchor.IsNil() {
+		t.Fatalf("native V2 entry retained the legacy callback anchor: %v\n%s", anchor, module.String())
+	}
+	entry := module.NamedFunction(entryName)
+	if entry.IsNil() || entry.IsDeclaration() {
+		t.Fatalf("native V2 program entry %q is missing: %s", entryName, module.String())
+	}
+	body := entry.String()
+	for _, want := range []string{
+		"alloca { i32, i32, i32, i32, i32, i32, i32, i32 }",
+		"call i32 @" + coroProgramRunSliceSymbolV2 + "(ptr",
+		"i32 " + strconv.FormatUint(uint64(coroProgramNativeRunBudgetV2), 10),
+		"phi i32",
+		"icmp eq i32",
+		"call i32 @" + coroProgramContinueSliceSymbolV2 + "(i32",
+		"call void @abort()",
+		"unreachable",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("native V2 program entry missing %q:\n%s", want, body)
+		}
+	}
+	if got := strings.Count(body, "call i32 @"+coroProgramRunSliceSymbolV2); got != 1 {
+		t.Fatalf("native V2 initial run calls = %d, want 1:\n%s", got, body)
+	}
+	if got := strings.Count(body, "call i32 @"+coroProgramContinueSliceSymbolV2); got != 1 {
+		t.Fatalf("native V2 continuation calls = %d, want one fixed-stack loop edge:\n%s", got, body)
+	}
+	for label, pattern := range map[string]string{
+		"complete status": `icmp eq i32 [^,\n]+, 1`,
+		"yielded status":  `icmp eq i32 [^,\n]+, 3`,
+		"inline flags":    `icmp eq i32 [^,\n]+, 9`,
+		"bounded used":    `icmp ule i32 [^,\n]+, 1024`,
+	} {
+		if !regexp.MustCompile(pattern).MatchString(body) {
+			t.Fatalf("native V2 entry has no exact %s check %q:\n%s", label, pattern, body)
+		}
+	}
+}
+
 func assertCoroProgramContinueRetention(t *testing.T, module llvm.Module, entryName string) {
 	t.Helper()
+	if run := module.NamedFunction(coroProgramRunSliceSymbolV2); !run.IsNil() {
+		t.Fatalf("non-native V1 entry retained the native run-slice ABI: %v\n%s", run, module.String())
+	}
+	if continueRun := module.NamedFunction(coroProgramContinueSliceSymbolV2); !continueRun.IsNil() {
+		t.Fatalf("non-native V1 entry retained the native continue-slice ABI: %v\n%s", continueRun, module.String())
+	}
 	callback := module.NamedFunction(coroProgramContinueSymbolV1)
 	if callback.IsNil() || !callback.IsDeclaration() || callback.GlobalValueType().String() != "void (i32)" {
 		t.Fatalf("program continuation declaration is not void(i32): %v\n%s", callback, module.String())

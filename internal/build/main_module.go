@@ -150,6 +150,8 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 	var coroBegin llssa.Function
 	var coroRun llssa.Function
 	var coroContinue llssa.Function
+	var coroRunSliceV2 llssa.Function
+	var coroContinueSliceV2 llssa.Function
 	var coroNativePostWait llssa.Function
 	var coroAllocatorBootstrap llssa.Function
 	if ctx.buildConf.EnableCoroProgramBootstrapRun {
@@ -158,10 +160,13 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 		}
 		coroAllocatorBootstrap = declareNoArgFunc(mainPkg, coroFrameAllocatorBootstrapSymbolV1)
 		coroBegin = declareCoroProgramBeginV1(mainPkg)
-		coroRun = declareCoroProgramRunV1(mainPkg)
-		coroContinue = declareCoroProgramContinueV1(mainPkg)
 		if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
+			coroRunSliceV2 = declareCoroProgramRunSliceV2(mainPkg)
+			coroContinueSliceV2 = declareCoroProgramContinueSliceV2(mainPkg)
 			coroNativePostWait = declareCoroNativePostWaitV1(mainPkg)
+		} else {
+			coroRun = declareCoroProgramRunV1(mainPkg)
+			coroContinue = declareCoroProgramContinueV1(mainPkg)
 		}
 	}
 
@@ -178,6 +183,8 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 		coroAllocatorBootstrap: coroAllocatorBootstrap,
 		coroBegin:              coroBegin,
 		coroRun:                coroRun,
+		coroRunSliceV2:         coroRunSliceV2,
+		coroContinueSliceV2:    coroContinueSliceV2,
 		coroBootstrapVersion:   cfg.coroBootstrap.abiVersion(),
 	})
 	if coroContinue != nil {
@@ -431,6 +438,8 @@ type entryFunctions struct {
 	coroAllocatorBootstrap llssa.Function
 	coroBegin              llssa.Function
 	coroRun                llssa.Function
+	coroRunSliceV2         llssa.Function
+	coroContinueSliceV2    llssa.Function
 	coroBootstrapVersion   uint32
 }
 
@@ -476,7 +485,10 @@ func defineEntryFunction(ctx *context, pkg llssa.Package, argcVar, argvVar llssa
 		b.Call(fns.runtimeStub.Expr)
 	}
 	if fns.coroFactory != nil {
-		if fns.coroManifest.IsNil() || fns.coroAllocatorBootstrap == nil || fns.coroBegin == nil || fns.coroRun == nil {
+		nativeSliceV2 := fns.coroRunSliceV2 != nil && fns.coroContinueSliceV2 != nil
+		legacyRunV1 := fns.coroRun != nil && fns.coroRunSliceV2 == nil && fns.coroContinueSliceV2 == nil
+		if fns.coroManifest.IsNil() || fns.coroAllocatorBootstrap == nil || fns.coroBegin == nil ||
+			(!nativeSliceV2 && !legacyRunV1) {
 			panic("coroutine program entry requires allocator bootstrap, manifest, begin, factory, and run")
 		}
 		null := prog.Nil(prog.VoidPtr())
@@ -484,7 +496,11 @@ func defineEntryFunction(ctx *context, pkg llssa.Package, argcVar, argvVar llssa
 		factory := b.Convert(prog.VoidPtr(), fns.coroFactory.Expr)
 		g := b.Call(fns.coroBegin.Expr, manifest, factory)
 		handle := b.Call(fns.coroFactory.Expr, g, null, null)
-		b.Call(fns.coroRun.Expr, g, handle)
+		if nativeSliceV2 {
+			b = emitCoroNativeRunLoopV2(b, pkg, g, handle, fns.coroRunSliceV2, fns.coroContinueSliceV2)
+		} else {
+			b.Call(fns.coroRun.Expr, g, handle)
+		}
 	} else {
 		b.Call(fns.mainInit.Expr)
 		b.Call(fns.mainMain.Expr)
@@ -510,6 +526,164 @@ func declareCoroProgramRunV1(pkg llssa.Package) llssa.Function {
 		[]types.Type{pointer, pointer},
 		nil,
 	), llssa.InC)
+}
+
+const (
+	coroProgramRunResultFlagsV2 = iota
+	coroProgramRunResultUsedV2
+	coroProgramRunResultExecutorSlotV2
+	coroProgramRunResultExecutorGenerationV2
+	coroProgramRunResultEpochV2
+	coroProgramRunResultDeadlineLoV2
+	coroProgramRunResultDeadlineHiV2
+	coroProgramRunResultReservedV2
+)
+
+func coroProgramRunResultTypeV2(prog llssa.Program) llssa.Type {
+	word := prog.Uint32()
+	return prog.Struct(word, word, word, word, word, word, word, word)
+}
+
+func declareCoroProgramRunSliceV2(pkg llssa.Package) llssa.Function {
+	pointer := types.Typ[types.UnsafePointer]
+	word := types.Typ[types.Uint32]
+	resultPointer := types.NewPointer(coroProgramRunResultTypeV2(pkg.Prog).RawType())
+	return pkg.NewFunc(coroProgramRunSliceSymbolV2, newSignature(
+		[]types.Type{pointer, pointer, word, resultPointer},
+		[]types.Type{word},
+	), llssa.InC)
+}
+
+func declareCoroProgramContinueSliceV2(pkg llssa.Package) llssa.Function {
+	word := types.Typ[types.Uint32]
+	resultPointer := types.NewPointer(coroProgramRunResultTypeV2(pkg.Prog).RawType())
+	return pkg.NewFunc(coroProgramContinueSliceSymbolV2, newSignature(
+		[]types.Type{word, word, word, word, resultPointer},
+		[]types.Type{word},
+	), llssa.InC)
+}
+
+// emitCoroNativeRunLoopV2 is the native pipe target's fixed machine-stack
+// host loop. Each runtime call owns at most one bounded scheduler slice. The
+// only legal re-entry is an exact Yielded/More/Inline tuple, and it happens
+// after the public ABI call has returned, so target requestRun cannot recurse
+// through the scheduler stack. Queued, blocked, stale, panic, or malformed
+// results fail closed at this native-only boundary.
+func emitCoroNativeRunLoopV2(
+	b llssa.Builder,
+	pkg llssa.Package,
+	g, handle llssa.Expr,
+	run, continueRun llssa.Function,
+) llssa.Builder {
+	if b == nil || pkg == nil || run == nil || continueRun == nil {
+		panic("native coroutine run loop requires entry builder and exact slice ABI")
+	}
+	prog := pkg.Prog
+	word := prog.Uint32()
+	zero := prog.Zero(word)
+	budget := prog.IntVal(uint64(coroProgramNativeRunBudgetV2), word)
+	result := b.AllocaT(coroProgramRunResultTypeV2(prog))
+	initialStatus := b.Call(run.Expr, g, handle, budget, result)
+	initialBlock := b.Func.Block(0)
+
+	blocks := b.Func.MakeBlocks(6)
+	inspectBlock := blocks[0]
+	completeCheckBlock := blocks[1]
+	yieldedCheckBlock := blocks[2]
+	continueBlock := blocks[3]
+	completeBlock := blocks[4]
+	failBlock := blocks[5]
+	b.Jump(inspectBlock)
+
+	b.SetBlock(inspectBlock)
+	status := b.Phi(word)
+	b.If(
+		b.BinOp(token.EQL, status.Expr, prog.IntVal(uint64(coroProgramDriveCompleteV2), word)),
+		completeCheckBlock,
+		yieldedCheckBlock,
+	)
+
+	and := func(left, right llssa.Expr) llssa.Expr {
+		return b.BinOp(token.AND, left, right)
+	}
+	equalField := func(index int, value llssa.Expr) llssa.Expr {
+		return b.BinOp(token.EQL, b.Load(b.FieldAddr(result, index)), value)
+	}
+	nonzeroField := func(index int) llssa.Expr {
+		return b.BinOp(token.NEQ, b.Load(b.FieldAddr(result, index)), zero)
+	}
+
+	b.SetBlock(completeCheckBlock)
+	validComplete := equalField(coroProgramRunResultFlagsV2, zero)
+	validComplete = and(validComplete, b.BinOp(
+		token.LEQ,
+		b.Load(b.FieldAddr(result, coroProgramRunResultUsedV2)),
+		budget,
+	))
+	for _, index := range []int{
+		coroProgramRunResultExecutorSlotV2,
+		coroProgramRunResultExecutorGenerationV2,
+		coroProgramRunResultEpochV2,
+		coroProgramRunResultDeadlineLoV2,
+		coroProgramRunResultDeadlineHiV2,
+		coroProgramRunResultReservedV2,
+	} {
+		validComplete = and(validComplete, equalField(index, zero))
+	}
+	b.If(validComplete, completeBlock, failBlock)
+
+	b.SetBlock(yieldedCheckBlock)
+	validYielded := b.BinOp(
+		token.EQL,
+		status.Expr,
+		prog.IntVal(uint64(coroProgramDriveYieldedV2), word),
+	)
+	validYielded = and(validYielded, equalField(
+		coroProgramRunResultFlagsV2,
+		prog.IntVal(uint64(coroProgramRunMoreV2|coroProgramRunRequestInlineV2), word),
+	))
+	used := b.Load(b.FieldAddr(result, coroProgramRunResultUsedV2))
+	validYielded = and(validYielded, b.BinOp(token.NEQ, used, zero))
+	validYielded = and(validYielded, b.BinOp(token.LEQ, used, budget))
+	for _, index := range []int{
+		coroProgramRunResultExecutorSlotV2,
+		coroProgramRunResultExecutorGenerationV2,
+		coroProgramRunResultEpochV2,
+	} {
+		validYielded = and(validYielded, nonzeroField(index))
+	}
+	for _, index := range []int{
+		coroProgramRunResultDeadlineLoV2,
+		coroProgramRunResultDeadlineHiV2,
+		coroProgramRunResultReservedV2,
+	} {
+		validYielded = and(validYielded, equalField(index, zero))
+	}
+	b.If(validYielded, continueBlock, failBlock)
+
+	b.SetBlock(continueBlock)
+	nextStatus := b.Call(
+		continueRun.Expr,
+		b.Load(b.FieldAddr(result, coroProgramRunResultExecutorSlotV2)),
+		b.Load(b.FieldAddr(result, coroProgramRunResultExecutorGenerationV2)),
+		b.Load(b.FieldAddr(result, coroProgramRunResultEpochV2)),
+		budget,
+		result,
+	)
+	b.Jump(inspectBlock)
+	status.AddIncoming(b, []llssa.BasicBlock{initialBlock, continueBlock}, func(index int, _ llssa.BasicBlock) llssa.Expr {
+		if index == 0 {
+			return initialStatus
+		}
+		return nextStatus
+	})
+
+	b.SetBlock(failBlock)
+	abort := declareNoArgFunc(pkg, "abort")
+	b.Call(abort.Expr)
+	b.Unreachable()
+
+	return b.SetBlock(completeBlock)
 }
 
 func declareCoroProgramContinueV1(pkg llssa.Package) llssa.Function {

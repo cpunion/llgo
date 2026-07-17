@@ -1994,6 +1994,23 @@ func configHasBuildTag(conf *Config, want string) bool {
 	return false
 }
 
+func validCoroProgramRunResultPointerV2(typ types.Type) bool {
+	pointer, ok := types.Unalias(typ).(*types.Pointer)
+	if !ok {
+		return false
+	}
+	result, ok := pointer.Elem().Underlying().(*types.Struct)
+	if !ok || result.NumFields() != 8 {
+		return false
+	}
+	for index := 0; index < result.NumFields(); index++ {
+		if !types.Identical(result.Field(index).Type(), types.Typ[types.Uint32]) || result.Tag(index) != "" {
+			return false
+		}
+	}
+	return true
+}
+
 // requiredCoroProgramRuntimePlan returns the Go bodies referenced only by
 // compiler-generated entry/coroutine IR and their exact static call closure.
 // They are not visible from the application's source roots. The closure is a
@@ -2038,8 +2055,13 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 		names = append(names,
 			coroFrameAllocatorBootstrapSymbolV1,
 			coroProgramBeginSymbolV1,
-			coroProgramRunSymbolV1,
-			coroProgramContinueSymbolV1,
+		)
+		if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
+			names = append(names, coroProgramRunSliceSymbolV2, coroProgramContinueSliceSymbolV2)
+		} else {
+			names = append(names, coroProgramRunSymbolV1, coroProgramContinueSymbolV1)
+		}
+		names = append(names,
 			coroWaitPrepareSymbolV1,
 			coroWaitRollbackSymbolV1,
 			coroWaitRetireCompletedSymbolV1,
@@ -2115,6 +2137,32 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.Uint32]) || sig.Results().Len() != 0 ||
 				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
 				return nil, nil, nil, nil, fmt.Errorf("coroutine program bootstrap runtime ABI %q must have exact func(uint32) signature", name)
+			}
+		}
+		if name == coroProgramRunSliceSymbolV2 {
+			sig := fn.Signature
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 4 || sig.Results().Len() != 1 ||
+				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Params().At(1).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Params().At(2).Type(), types.Typ[types.Uint32]) ||
+				!validCoroProgramRunResultPointerV2(sig.Params().At(3).Type()) ||
+				!types.Identical(sig.Results().At(0).Type(), types.Typ[types.Uint32]) ||
+				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf("coroutine program run-slice ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer, uint32, *{8 x uint32}) uint32 signature", name)
+			}
+		}
+		if name == coroProgramContinueSliceSymbolV2 {
+			sig := fn.Signature
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 5 || sig.Results().Len() != 1 ||
+				!validCoroProgramRunResultPointerV2(sig.Params().At(4).Type()) ||
+				!types.Identical(sig.Results().At(0).Type(), types.Typ[types.Uint32]) ||
+				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf("coroutine program continue-slice ABI %q must have exact func(uint32, uint32, uint32, uint32, *{8 x uint32}) uint32 signature", name)
+			}
+			for parameter := 0; parameter != 4; parameter++ {
+				if !types.Identical(sig.Params().At(parameter).Type(), types.Typ[types.Uint32]) {
+					return nil, nil, nil, nil, fmt.Errorf("coroutine program continue-slice ABI %q must have exact func(uint32, uint32, uint32, uint32, *{8 x uint32}) uint32 signature", name)
+				}
 			}
 		}
 		if name == coroNativePostWaitSymbolV1 {
