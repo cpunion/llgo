@@ -491,6 +491,7 @@ func AcknowledgeTaskCancellation(g *G, kind TaskCancelKind) bool {
 	if !ValidG(g) || !validTaskCancelKind(kind) || g.park.taskCancelKind != kind ||
 		g.park.taskCancelPhase != taskCancelCleanup ||
 		g.state != GDead || preemptLoad(preemptAddress(g)) != preemptDisabled ||
+		g.runAction != ActionInvalid ||
 		g.root != nil || g.active != nil || g.frames != nil || g.runP != nil ||
 		g.nextReady != nil || g.queued || g.nextWait != nil || g.waiting ||
 		g.waitToken != nil || g.waitTicket != 0 ||

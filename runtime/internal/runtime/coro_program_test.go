@@ -200,8 +200,12 @@ type coroProgramTestDriverV1 struct {
 	panicTypeWord            unsafe.Pointer
 	panicDataWord            unsafe.Pointer
 	spawnOnMainReturn        bool
+	spawnBeforeMainReturn    bool
 	child                    *coro.G
 	childFrame               *coroProgramTestFrameV1
+	childCompleteReady       bool
+	childDoneCalls           int
+	childResumeCalls         int
 	cancelDestroyCalls       int
 	taskReleaseCalls         int
 	parkOnFirstResume        bool
@@ -266,12 +270,35 @@ func (driver *coroProgramTestDriverV1) requireHandle(handle unsafe.Pointer) {
 }
 
 func (driver *coroProgramTestDriverV1) done(handle unsafe.Pointer) bool {
+	if driver != nil && driver.childFrame != nil && handle == driver.childFrame.handle {
+		driver.childDoneCalls++
+		return driver.childCompleteReady
+	}
 	driver.requireHandle(handle)
 	driver.doneCalls++
 	return driver.completeReady
 }
 
 func (driver *coroProgramTestDriverV1) resume(handle unsafe.Pointer) {
+	if driver != nil && driver.childFrame != nil && handle == driver.childFrame.handle {
+		driver.childResumeCalls++
+		if driver.childResumeCalls != 1 {
+			driver.t.Fatalf("child coroutine resume calls = %d, want 1", driver.childResumeCalls)
+		}
+		frame := driver.childFrame
+		outcome, caseID, taskKind, sourceSlot, generation, decisionOK := coro.TakeRunDecisionWords(frame.g, 0, 0)
+		if !decisionOK || outcome != 0 || caseID != 0 || taskKind != 0 || sourceSlot != 0 || generation != 0 {
+			driver.t.Fatalf("take child coroutine run decision = (%d, %d, %d, %d, %d, %t)",
+				outcome, caseID, taskKind, sourceSlot, generation, decisionOK)
+		}
+		frame.header.SuspendReason = uint16(coro.SuspendFrameComplete)
+		frame.header.Lifecycle = uint16(coro.FrameFinalSuspended)
+		if !coro.PrepareComplete(frame.g, handle, frame.header) {
+			driver.t.Fatal("prepare simulated child final suspend")
+		}
+		driver.childCompleteReady = true
+		return
+	}
 	driver.requireHandle(handle)
 	driver.resumeCalls++
 	parkCount := driver.parkResumeCount
@@ -279,6 +306,9 @@ func (driver *coroProgramTestDriverV1) resume(handle unsafe.Pointer) {
 		parkCount = 1
 	}
 	maxResumeCalls := parkCount + 1
+	if driver.spawnBeforeMainReturn {
+		maxResumeCalls = 2
+	}
 	if driver.resumeCalls > maxResumeCalls {
 		driver.t.Fatalf("coroutine resume calls = %d, max %d", driver.resumeCalls, maxResumeCalls)
 	}
@@ -345,7 +375,7 @@ func (driver *coroProgramTestDriverV1) resume(handle unsafe.Pointer) {
 		driver.completeReady = true
 		return
 	}
-	if driver.spawnOnMainReturn {
+	if driver.spawnOnMainReturn || driver.spawnBeforeMainReturn && driver.resumeCalls == 1 {
 		driver.child = new(coro.G)
 		if !coro.BeginSpawn(frame.g, driver.child, unsafe.Pointer(driver.child), coro.TaskStorageSize()) {
 			driver.t.Fatal("begin named-adapter command child")
@@ -353,6 +383,20 @@ func (driver *coroProgramTestDriverV1) resume(handle unsafe.Pointer) {
 		driver.childFrame = newCoroProgramTestFrameV1(driver.t, driver.child)
 		if !coro.CommitSpawn(frame.g, driver.child, driver.childFrame.handle) {
 			driver.t.Fatal("commit named-adapter command child")
+		}
+	}
+	if driver.spawnBeforeMainReturn && driver.resumeCalls == 1 {
+		frame.header.SuspendReason = uint16(coro.SuspendYield)
+		frame.header.Lifecycle = uint16(coro.FrameSuspended)
+		if !coro.PrepareYield(frame.g, handle, frame.header) {
+			driver.t.Fatal("prepare named-adapter main yield before return")
+		}
+		return
+	}
+	if driver.spawnOnMainReturn || driver.spawnBeforeMainReturn {
+		if driver.child == nil || driver.childFrame == nil ||
+			driver.spawnBeforeMainReturn && driver.childResumeCalls != 1 {
+			driver.t.Fatal("main return did not observe the completed child physical resume")
 		}
 		if !coroProgramMainReturnV1(unsafe.Pointer(frame.g)) {
 			driver.t.Fatal("publish named-adapter normal main return")
@@ -988,6 +1032,40 @@ func TestCoroProgramNormalMainReturnCancelsReadyChild(t *testing.T) {
 		t.Fatalf("command shutdown = lifecycle:%d done:%d resume:%d mainDestroy:%d childDestroy:%d taskRelease:%d",
 			coroProgramLifecycleV1State, driver.doneCalls, driver.resumeCalls, driver.destroyCalls,
 			driver.cancelDestroyCalls, driver.taskReleaseCalls)
+	}
+	runtime.KeepAlive(frame.memory)
+	runtime.KeepAlive(driver.childFrame.memory)
+	runtime.KeepAlive(driver.child)
+	runtime.KeepAlive(manifest)
+}
+
+func TestCoroProgramMainReturnCancelsBoundedChildDestroyContinuation(t *testing.T) {
+	resetCoroProgramTestStateV1(t)
+	manifest := newCoroProgramTestManifestV1()
+	factory := unsafe.Pointer(&manifest.factoryMarker)
+	gPointer, ok := coroProgramBeginV1(unsafe.Pointer(&manifest.manifest), factory)
+	if !ok {
+		t.Fatal("begin bounded-child command program")
+	}
+	frame := newCoroProgramTestFrameV1(t, &coroProgramGV1State)
+	driver := &coroProgramTestDriverV1{t: t, frame: frame, spawnBeforeMainReturn: true}
+	activeCoroProgramDriver = driver
+	if status := coroProgramRunV1(gPointer, frame.handle); status != coroProgramDriveCompleteV1 {
+		t.Fatalf("run bounded-child command program = %d", status)
+	}
+	if coroProgramLifecycleV1State != coroProgramCompleteV1 ||
+		driver.doneCalls != 3 || driver.resumeCalls != 2 || driver.destroyCalls != 1 ||
+		driver.childDoneCalls != 1 || driver.childResumeCalls != 1 || !driver.childCompleteReady ||
+		driver.cancelDestroyCalls != 1 || driver.taskReleaseCalls != 1 ||
+		driver.child == nil || driver.childFrame == nil ||
+		!coroProgramTestTargetV1State.joined || coroProgramTestTargetV1State.closeCalls != 1 ||
+		coroProgramExecutorBoundV1State || !coroProgramExecutorRegistryV1State.CanRelease() ||
+		!coroProgramWaitTableV1State.CanRelease() ||
+		!coro.TerminalG(&coroProgramPV1State, &coroProgramGV1State) ||
+		!coro.TerminalG(&coroProgramPV1State, driver.child) {
+		t.Fatalf("bounded child shutdown = lifecycle:%d main={done:%d resume:%d destroy:%d} child={done:%d resume:%d cancelDestroy:%d release:%d}",
+			coroProgramLifecycleV1State, driver.doneCalls, driver.resumeCalls, driver.destroyCalls,
+			driver.childDoneCalls, driver.childResumeCalls, driver.cancelDestroyCalls, driver.taskReleaseCalls)
 	}
 	runtime.KeepAlive(frame.memory)
 	runtime.KeepAlive(driver.childFrame.memory)
