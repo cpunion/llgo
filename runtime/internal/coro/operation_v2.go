@@ -268,7 +268,7 @@ func PrepareOperationAtGeneration(record *OperationRecord, desired OperationID) 
 		}
 	case operationReusable:
 		previous := record.id
-		if !previous.Valid() || previous.Source() != desired.Source() || previous.Slot() != desired.Slot() ||
+		if !previous.Valid() || previous.SourceSlot != desired.SourceSlot ||
 			desired.Generation <= previous.Generation || *record != (OperationRecord{id: previous, phase: operationReusable}) {
 			return false
 		}

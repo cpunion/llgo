@@ -96,6 +96,7 @@ type timerRegistrationSlot struct {
 type TimerRegistrationTable struct {
 	slots [TimerRegistrationCapacity]timerRegistrationSlot
 	owner *P
+	route RouteID
 }
 
 // PrepareTimerRegistration arms token and publishes an absolute monotonic
@@ -129,7 +130,7 @@ func validTimerRegistrationHeader(slot *timerRegistrationSlot, owner *P) bool {
 		(owner == nil || slot.p == owner) && slot.deadline >= 0
 }
 
-func validTimerRegistrationRecordResidue(slot *timerRegistrationSlot, index uint32) bool {
+func validTimerRegistrationRecordResidue(slot *timerRegistrationSlot, route RouteID, index uint32) bool {
 	if slot == nil {
 		return false
 	}
@@ -137,52 +138,53 @@ func validTimerRegistrationRecordResidue(slot *timerRegistrationSlot, index uint
 		return true
 	}
 	id := slot.record.id
-	return slot.generation != 0 && id.Valid() && id.Source() == OperationSourceTimer && id.Slot() == index+1 &&
+	return route.Valid() && slot.generation != 0 && id.Valid() && id.Source() == OperationSourceTimer &&
+		id.Route() == route && id.LocalSlot() == index+1 &&
 		id.Generation <= slot.generation && slot.record == (OperationRecord{id: id, phase: operationReusable})
 }
 
-func validLiveTimerRegistrationV1(slot *timerRegistrationSlot, owner *P, index uint32) bool {
+func validLiveTimerRegistrationV1(slot *timerRegistrationSlot, owner *P, route RouteID, index uint32) bool {
 	return validTimerRegistrationHeader(slot, owner) && slot.mode == timerRegistrationModeV1 &&
-		slot.token != nil && validWaitTicket(slot.ticket) && validTimerRegistrationRecordResidue(slot, index)
+		slot.token != nil && validWaitTicket(slot.ticket) && validTimerRegistrationRecordResidue(slot, route, index)
 }
 
-func timerRegistrationOperationID(index uint32, generation uint32) (OperationID, bool) {
-	return MakeOperationID(OperationSourceTimer, index+1, generation)
+func timerRegistrationOperationID(route RouteID, index uint32, generation uint32) (OperationID, bool) {
+	return MakeOperationIDAtRoute(OperationSourceTimer, route, index+1, generation)
 }
 
-func timerRegistrationIDForHandle(handle TimerRegistrationHandle) (OperationID, bool) {
-	if handle.Slot == 0 {
+func timerRegistrationIDForHandle(table *TimerRegistrationTable, handle TimerRegistrationHandle) (OperationID, bool) {
+	if table == nil || handle.Slot == 0 {
 		return OperationID{}, false
 	}
-	return MakeOperationID(OperationSourceTimer, handle.Slot, handle.Generation)
+	return MakeOperationIDAtRoute(OperationSourceTimer, table.route, handle.Slot, handle.Generation)
 }
 
-func validLiveTimerRegistrationV2(slot *timerRegistrationSlot, owner *P, index uint32) bool {
+func validLiveTimerRegistrationV2(slot *timerRegistrationSlot, owner *P, route RouteID, index uint32) bool {
 	if !validTimerRegistrationHeader(slot, owner) || slot.mode != timerRegistrationModeV2 ||
 		slot.token != nil || slot.ticket != 0 {
 		return false
 	}
-	id, ok := timerRegistrationOperationID(index, slot.generation)
+	id, ok := timerRegistrationOperationID(route, index, slot.generation)
 	return ok && slot.record.Matches(id)
 }
 
-func validLiveTimerRegistration(slot *timerRegistrationSlot, owner *P, index uint32) bool {
+func validLiveTimerRegistration(slot *timerRegistrationSlot, owner *P, route RouteID, index uint32) bool {
 	switch slot.mode {
 	case timerRegistrationModeV1:
-		return validLiveTimerRegistrationV1(slot, owner, index)
+		return validLiveTimerRegistrationV1(slot, owner, route, index)
 	case timerRegistrationModeV2:
-		return validLiveTimerRegistrationV2(slot, owner, index)
+		return validLiveTimerRegistrationV2(slot, owner, route, index)
 	default:
 		return false
 	}
 }
 
-func reusableTimerRegistrationSlot(slot *timerRegistrationSlot, index uint32) bool {
+func reusableTimerRegistrationSlot(slot *timerRegistrationSlot, route RouteID, index uint32) bool {
 	if slot == nil || slot.state != timerRegistrationFree || slot.mode != timerRegistrationModeNone ||
 		slot.p != nil || slot.token != nil || slot.ticket != 0 || slot.deadline != 0 {
 		return false
 	}
-	return validTimerRegistrationRecordResidue(slot, index)
+	return validTimerRegistrationRecordResidue(slot, route, index)
 }
 
 // Register reserves one legacy V1 timer slot for an already-armed token.
@@ -203,7 +205,7 @@ func (table *TimerRegistrationTable) Register(p *P, token *WaitToken, ticket Wai
 	}
 	for index := range table.slots {
 		slot := &table.slots[index]
-		if slot.generation == ^uint32(0) || !reusableTimerRegistrationSlot(slot, uint32(index)) {
+		if slot.generation == ^uint32(0) || !reusableTimerRegistrationSlot(slot, table.route, uint32(index)) {
 			continue
 		}
 		slot.state = timerRegistrationInitializing
@@ -231,16 +233,16 @@ func (table *TimerRegistrationTable) Register(p *P, token *WaitToken, ticket Wai
 // if a V2 generation was prepared before attachment failed, it is retained as
 // reusable residue so no copied identity can alias a later reservation.
 func (table *TimerRegistrationTable) ReserveAndAttachTimerV2(p *P, state *ParkState, ticket ParkTicket, wait *WaitSetRecord, caseID uint32, deadline int64) (TimerRegistrationHandle, bool) {
-	if table == nil || p == nil || table.owner != p || state == nil || wait == nil || deadline < 0 {
+	if table == nil || p == nil || table.owner != p || !table.route.Valid() || state == nil || wait == nil || deadline < 0 {
 		return TimerRegistrationHandle{}, false
 	}
 	for index := range table.slots {
 		slot := &table.slots[index]
-		if slot.generation == ^uint32(0) || !reusableTimerRegistrationSlot(slot, uint32(index)) {
+		if slot.generation == ^uint32(0) || !reusableTimerRegistrationSlot(slot, table.route, uint32(index)) {
 			continue
 		}
 		slot.state = timerRegistrationInitializing
-		desired, idOK := timerRegistrationOperationID(uint32(index), slot.generation+1)
+		desired, idOK := timerRegistrationOperationID(table.route, uint32(index), slot.generation+1)
 		if !idOK || !PrepareOperationAtGeneration(&slot.record, desired) {
 			slot.state = timerRegistrationFree
 			continue
@@ -282,18 +284,18 @@ func (table *TimerRegistrationTable) nextDeadlineFor(owner *P) (deadline int64, 
 		slot := &table.slots[index]
 		switch slot.state {
 		case timerRegistrationFree:
-			if !reusableTimerRegistrationSlot(slot, uint32(index)) {
+			if !reusableTimerRegistrationSlot(slot, table.route, uint32(index)) {
 				return 0, false, false
 			}
 		case timerRegistrationActive:
-			if !validLiveTimerRegistration(slot, owner, uint32(index)) {
+			if !validLiveTimerRegistration(slot, owner, table.route, uint32(index)) {
 				return 0, false, false
 			}
 			if !hasDeadline || slot.deadline < deadline {
 				deadline, hasDeadline = slot.deadline, true
 			}
 		case timerRegistrationDelivered, timerRegistrationCanceled:
-			if !validLiveTimerRegistration(slot, owner, uint32(index)) {
+			if !validLiveTimerRegistration(slot, owner, table.route, uint32(index)) {
 				return 0, false, false
 			}
 		default:
@@ -327,11 +329,11 @@ func (table *TimerRegistrationTable) drainDueFor(owner *P, now int64) (completed
 		slot := &table.slots[index]
 		switch slot.state {
 		case timerRegistrationFree:
-			if !reusableTimerRegistrationSlot(slot, uint32(index)) {
+			if !reusableTimerRegistrationSlot(slot, table.route, uint32(index)) {
 				return completed, 0, false, false
 			}
 		case timerRegistrationActive:
-			if !validLiveTimerRegistration(slot, owner, uint32(index)) {
+			if !validLiveTimerRegistration(slot, owner, table.route, uint32(index)) {
 				return completed, 0, false, false
 			}
 			if slot.deadline <= now {
@@ -343,7 +345,7 @@ func (table *TimerRegistrationTable) drainDueFor(owner *P, now int64) (completed
 						return completed, 0, false, false
 					}
 				case timerRegistrationModeV2:
-					id, idOK := timerRegistrationOperationID(uint32(index), slot.generation)
+					id, idOK := timerRegistrationOperationID(table.route, uint32(index), slot.generation)
 					if !idOK || PublishOperationCompletion(&slot.record, id) != OperationCompletionPublished {
 						return completed, 0, false, false
 					}
@@ -364,7 +366,7 @@ func (table *TimerRegistrationTable) drainDueFor(owner *P, now int64) (completed
 				deadline, hasDeadline = slot.deadline, true
 			}
 		case timerRegistrationDelivered, timerRegistrationCanceled:
-			if !validLiveTimerRegistration(slot, owner, uint32(index)) {
+			if !validLiveTimerRegistration(slot, owner, table.route, uint32(index)) {
 				return completed, 0, false, false
 			}
 		default:
@@ -382,7 +384,7 @@ func (table *TimerRegistrationTable) drainDueFor(owner *P, now int64) (completed
 func (table *TimerRegistrationTable) Cancel(handle TimerRegistrationHandle) WaitCancelResult {
 	slot, ok := timerRegistrationSlotFor(table, handle)
 	if !ok || table.owner != nil && slot.p != table.owner || slot.generation != handle.Generation ||
-		!validLiveTimerRegistrationV1(slot, table.owner, handle.Slot-1) {
+		!validLiveTimerRegistrationV1(slot, table.owner, table.route, handle.Slot-1) {
 		return WaitCancelInvalid
 	}
 	switch slot.state {
@@ -424,7 +426,7 @@ func (table *TimerRegistrationTable) RollbackPreparedTimer(handle TimerRegistrat
 func (table *TimerRegistrationTable) Retire(handle TimerRegistrationHandle) bool {
 	slot, ok := timerRegistrationSlotFor(table, handle)
 	if !ok || table.owner != nil && slot.p != table.owner || slot.generation != handle.Generation ||
-		!validLiveTimerRegistrationV1(slot, table.owner, handle.Slot-1) {
+		!validLiveTimerRegistrationV1(slot, table.owner, table.route, handle.Slot-1) {
 		return false
 	}
 	want := WaitOutcomeInvalid
@@ -481,13 +483,14 @@ func (table *TimerRegistrationTable) RequestTimerV2Cancel(p *P, wait *WaitSetRec
 // callback or backend producer, logical close is also immediate physical
 // quiescence.
 func (table *TimerRegistrationTable) ApplyTimerV2One(p *P, id OperationID, record *OperationRecord) OperationApplyResult {
-	if table == nil || table.owner != p || id.Source() != OperationSourceTimer || id.Slot() == 0 || id.Slot() > TimerRegistrationCapacity {
+	if table == nil || table.owner != p || id.Source() != OperationSourceTimer || id.Route() != table.route ||
+		id.LocalSlot() == 0 || id.LocalSlot() > TimerRegistrationCapacity {
 		return OperationApplyInvalid
 	}
-	index := id.Slot() - 1
+	index := id.LocalSlot() - 1
 	slot := &table.slots[index]
 	if slot.generation != id.Generation || slot.mode != timerRegistrationModeV2 || &slot.record != record ||
-		!validLiveTimerRegistrationV2(slot, p, index) || slot.record.phase != operationActive {
+		!validLiveTimerRegistrationV2(slot, p, table.route, index) || slot.record.phase != operationActive {
 		return OperationApplyInvalid
 	}
 	disposition, terminal := OperationDispositionOf(&slot.record, id)
@@ -526,10 +529,10 @@ func (table *TimerRegistrationTable) ApplyTimerV2One(p *P, id OperationID, recor
 
 func (table *TimerRegistrationTable) releaseTimerV2Result(p *P, handle TimerRegistrationHandle, lease OperationResultLease) bool {
 	slot, ok := timerRegistrationSlotFor(table, handle)
-	id, idOK := timerRegistrationIDForHandle(handle)
+	id, idOK := timerRegistrationIDForHandle(table, handle)
 	return ok && idOK && table.owner == p && slot.generation == handle.Generation &&
 		slot.mode == timerRegistrationModeV2 && slot.state == timerRegistrationDelivered &&
-		slot.record.id == id && validLiveTimerRegistrationV2(slot, p, handle.Slot-1) &&
+		slot.record.id == id && validLiveTimerRegistrationV2(slot, p, table.route, handle.Slot-1) &&
 		slot.record.disposition == OperationDispositionWinner && TakeOperationResult(&slot.record, lease)
 }
 
@@ -550,10 +553,10 @@ func (table *TimerRegistrationTable) DiscardTimerV2Result(p *P, handle TimerRegi
 // blocked until TakeTimerV2Result or DiscardTimerV2Result consumes its lease.
 func (table *TimerRegistrationTable) RecycleTimerV2(p *P, handle TimerRegistrationHandle) bool {
 	slot, ok := timerRegistrationSlotFor(table, handle)
-	id, idOK := timerRegistrationIDForHandle(handle)
+	id, idOK := timerRegistrationIDForHandle(table, handle)
 	if !ok || !idOK || table.owner != p || slot.generation != handle.Generation ||
 		slot.mode != timerRegistrationModeV2 || (slot.state != timerRegistrationDelivered && slot.state != timerRegistrationCanceled) ||
-		!validLiveTimerRegistrationV2(slot, p, handle.Slot-1) ||
+		!validLiveTimerRegistrationV2(slot, p, table.route, handle.Slot-1) ||
 		!OperationCanRecycle(&slot.record, id) || !RecycleOperation(&slot.record, id) {
 		return false
 	}
@@ -572,19 +575,27 @@ func timerRegistrationTableEmpty(table *TimerRegistrationTable, owner *P) bool {
 	}
 	for index := range table.slots {
 		slot := &table.slots[index]
-		if !reusableTimerRegistrationSlot(slot, uint32(index)) {
+		if !reusableTimerRegistrationSlot(slot, table.route, uint32(index)) {
 			return false
 		}
 	}
 	return true
 }
 
-func bindTimerRegistrationTable(table *TimerRegistrationTable, p *P) bool {
-	if p == nil || !timerRegistrationTableEmpty(table, nil) {
+func bindTimerRegistrationTableAtRoute(table *TimerRegistrationTable, p *P, route RouteID) bool {
+	if p == nil || !route.Valid() || !timerRegistrationTableEmpty(table, nil) ||
+		table.route != 0 && table.route != route {
 		return false
 	}
+	table.route = route
 	table.owner = p
 	return true
+}
+
+// bindTimerRegistrationTable is the route-1 compatibility binding. Timer V1
+// handles remain route-free; only V2 OperationIDs use the persistent route.
+func bindTimerRegistrationTable(table *TimerRegistrationTable, p *P) bool {
+	return bindTimerRegistrationTableAtRoute(table, p, RouteID(1))
 }
 
 func unbindTimerRegistrationTable(table *TimerRegistrationTable, p *P) bool {
@@ -598,4 +609,13 @@ func unbindTimerRegistrationTable(table *TimerRegistrationTable, p *P) bool {
 // CanRelease reports that no live timer or driver binding retains this table.
 func (table *TimerRegistrationTable) CanRelease() bool {
 	return timerRegistrationTableEmpty(table, nil)
+}
+
+// Route returns the persistent executor identity used by Timer V2. Unbinding
+// clears the owner but never changes or releases an established route.
+func (table *TimerRegistrationTable) Route() (RouteID, bool) {
+	if table == nil || !table.route.Valid() {
+		return 0, false
+	}
+	return table.route, true
 }

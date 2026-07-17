@@ -83,11 +83,15 @@ func resumeTimerV2TestPark(t *testing.T, p *P, park *timerV2TestPark) (Action, P
 }
 
 func bindTimerV2TestSources(t *testing.T, p *P, manual *ManualOperationSource) (*ExecutorSourceSet, *WaitRegistrationTable, *TimerRegistrationTable) {
+	return bindTimerV2TestSourcesAtRoute(t, p, RouteID(1), manual)
+}
+
+func bindTimerV2TestSourcesAtRoute(t *testing.T, p *P, route RouteID, manual *ManualOperationSource) (*ExecutorSourceSet, *WaitRegistrationTable, *TimerRegistrationTable) {
 	t.Helper()
 	sources := new(ExecutorSourceSet)
 	waits := new(WaitRegistrationTable)
 	timers := new(TimerRegistrationTable)
-	if !bindExecutorSourceSet(sources, p, ExecutorSourceCatalog{Waits: waits, Timers: timers, Manual: manual}) {
+	if !bindExecutorSourceSetAtRoute(sources, p, route, ExecutorSourceCatalog{Waits: waits, Timers: timers, Manual: manual}) {
 		t.Fatal("bind timer V2 source set")
 	}
 	return sources, waits, timers
@@ -112,8 +116,10 @@ func TestPrepareOperationAtGenerationSkipsLegacyPhysicalGenerations(t *testing.T
 	older, _ := MakeOperationID(OperationSourceTimer, 3, 2)
 	wrongSlot, _ := MakeOperationID(OperationSourceTimer, 4, 7)
 	wrongSource, _ := MakeOperationID(OperationSourceManual, 3, 7)
+	wrongRoute, _ := MakeOperationIDAtRoute(OperationSourceTimer, RouteID(2), 3, 7)
 	if PrepareOperationAtGeneration(&record, stale) || PrepareOperationAtGeneration(&record, older) ||
-		PrepareOperationAtGeneration(&record, wrongSlot) || PrepareOperationAtGeneration(&record, wrongSource) {
+		PrepareOperationAtGeneration(&record, wrongSlot) || PrepareOperationAtGeneration(&record, wrongSource) ||
+		PrepareOperationAtGeneration(&record, wrongRoute) {
 		t.Fatal("generation helper accepted stale or different physical identity")
 	}
 	next, _ := MakeOperationID(OperationSourceTimer, 3, 9)
@@ -151,7 +157,7 @@ func TestTimerRegistrationV2DueEpochDetachLeaseAndUnrelatedSlot(t *testing.T) {
 	for index := range timers.slots {
 		slot := &timers.slots[index]
 		if slot.state == timerRegistrationFree && slot.generation != 0 && slot.record != (OperationRecord{}) {
-			if failedSlot != 0 || !reusableTimerRegistrationSlot(slot, uint32(index)) ||
+			if failedSlot != 0 || !reusableTimerRegistrationSlot(slot, timers.route, uint32(index)) ||
 				slot.record.id.Generation != slot.generation {
 				t.Fatal("failed timer V2 preparation left non-canonical residue")
 			}
@@ -196,7 +202,7 @@ func TestTimerRegistrationV2DueEpochDetachLeaseAndUnrelatedSlot(t *testing.T) {
 
 	action, outcome, caseID, lease, taskCancel := resumeTimerV2TestPark(t, p, park)
 	leaseID, leaseOK := lease.ID()
-	id, _ := timerRegistrationIDForHandle(handle)
+	id, _ := timerRegistrationIDForHandle(timers, handle)
 	if outcome != ParkOutcomeCompleted || caseID != 77 || taskCancel != TaskCancelNone || !leaseOK || leaseID != id {
 		t.Fatalf("due timer V2 decision = (%d, %d, %+v, %d)", outcome, caseID, lease, taskCancel)
 	}
@@ -377,7 +383,7 @@ func TestTimerRegistrationV2MixedManualSelectIsIndependentOfSourceOrder(t *testi
 
 func TestTimerRegistrationAlternatesV1AndV2OnOnePhysicalGeneration(t *testing.T) {
 	p := new(P)
-	sources, waits, timers := bindTimerV2TestSources(t, p, nil)
+	sources, waits, timers := bindTimerV2TestSourcesAtRoute(t, p, RouteID(2), nil)
 
 	v1Token, v1Ticket, v1 := prepareTestTimer(t, timers, p, 10)
 	if !claimWait(v1Token, v1Ticket) {
@@ -393,7 +399,9 @@ func TestTimerRegistrationAlternatesV1AndV2OnOnePhysicalGeneration(t *testing.T)
 
 	park := beginTimerV2TestPark(t, p, "timer-v2-alternating", 1, 113)
 	v2, attached := timers.ReserveAndAttachTimerV2(p, &park.task.g.park, park.ticket, park.wait, 1, 100)
-	if !attached || v2.Slot != v1.Slot || v2.Generation != v1.Generation+1 {
+	v2ID, v2IDOK := timerRegistrationIDForHandle(timers, v2)
+	if !attached || !v2IDOK || v2ID.Route() != RouteID(2) || v2ID.LocalSlot() != v2.Slot ||
+		v2.Slot != v1.Slot || v2.Generation != v1.Generation+1 {
 		t.Fatalf("first alternating V2 identity = %+v after %+v", v2, v1)
 	}
 	commitTimerV2TestPark(t, p, park)
@@ -424,7 +432,9 @@ func TestTimerRegistrationAlternatesV1AndV2OnOnePhysicalGeneration(t *testing.T)
 
 	park2 := rebeginTimerV2TestPark(t, park.task, action, 1, 127)
 	v2b, attached := timers.ReserveAndAttachTimerV2(p, &park2.task.g.park, park2.ticket, park2.wait, 2, 300)
-	if !attached || v2b.Slot != v1b.Slot || v2b.Generation != v1b.Generation+1 {
+	v2bID, v2bIDOK := timerRegistrationIDForHandle(timers, v2b)
+	if !attached || !v2bIDOK || v2bID.Route() != RouteID(2) || v2bID.LocalSlot() != v2b.Slot ||
+		v2b.Slot != v1b.Slot || v2b.Generation != v1b.Generation+1 {
 		t.Fatalf("second alternating V2 identity = %+v after %+v", v2b, v1b)
 	}
 	commitTimerV2TestPark(t, p, park2)
@@ -446,5 +456,82 @@ func TestTimerRegistrationAlternatesV1AndV2OnOnePhysicalGeneration(t *testing.T)
 
 	if !unbindExecutorSourceSet(sources, p) || !waits.CanRelease() || !timers.CanRelease() {
 		t.Fatal("release alternating timer source set")
+	}
+}
+
+func TestTimerRegistrationV2RouteIdentityLeaseIsolationAndPersistentBinding(t *testing.T) {
+	type routedTimer struct {
+		p       *P
+		sources *ExecutorSourceSet
+		waits   *WaitRegistrationTable
+		timers  *TimerRegistrationTable
+		park    *timerV2TestPark
+		action  Action
+		handle  TimerRegistrationHandle
+		id      OperationID
+		lease   OperationResultLease
+	}
+	complete := func(route RouteID, name string, seed, caseID uint32) *routedTimer {
+		t.Helper()
+		result := &routedTimer{p: new(P)}
+		result.sources, result.waits, result.timers = bindTimerV2TestSourcesAtRoute(t, result.p, route, nil)
+		if got, ok := result.timers.Route(); !ok || got != route {
+			t.Fatalf("timer route binding = (%d, %t), want %d", got, ok, route)
+		}
+		result.park = beginTimerV2TestPark(t, result.p, name, 1, seed)
+		var attached bool
+		result.handle, attached = result.timers.ReserveAndAttachTimerV2(
+			result.p, &result.park.task.g.park, result.park.ticket, result.park.wait, caseID, 0)
+		result.id, _ = timerRegistrationIDForHandle(result.timers, result.handle)
+		if !attached || !result.id.Valid() || result.id.Route() != route ||
+			result.id.LocalSlot() != result.handle.Slot || result.id.Generation != result.handle.Generation {
+			t.Fatalf("routed timer reservation = (%+v, %+v, %t)", result.handle, result.id, attached)
+		}
+		commitTimerV2TestPark(t, result.p, result.park)
+		if scan, ok := result.sources.publishPass(result.p, 0, true); !ok || scan.timers != 1 || scan.completed != 1 {
+			t.Fatalf("publish routed timer = (%+v, %t)", scan, ok)
+		}
+		if promoted, visits, ok := result.sources.resolvePublishedEpoch(result.p); !ok || promoted != 1 || visits != 1 {
+			t.Fatalf("resolve routed timer = (%d, %d, %t)", promoted, visits, ok)
+		}
+		var outcome ParkOutcome
+		var resolvedCase uint32
+		var taskCancel TaskCancelKind
+		result.action, outcome, resolvedCase, result.lease, taskCancel = resumeTimerV2TestPark(t, result.p, result.park)
+		leaseID, leaseOK := result.lease.ID()
+		if outcome != ParkOutcomeCompleted || resolvedCase != caseID || taskCancel != TaskCancelNone ||
+			!leaseOK || leaseID != result.id {
+			t.Fatalf("routed timer decision = (%d, %d, %+v, %d)", outcome, resolvedCase, result.lease, taskCancel)
+		}
+		return result
+	}
+
+	route1 := complete(RouteID(1), "timer-v2-route-1", 131, 11)
+	route2 := complete(RouteID(2), "timer-v2-route-2", 137, 22)
+	if route1.handle != route2.handle || route1.id == route2.id || route1.id.LocalSlot() != route2.id.LocalSlot() ||
+		route1.id.Generation != route2.id.Generation {
+		t.Fatalf("cross-route physical identities = route1(%+v, %+v), route2(%+v, %+v)",
+			route1.handle, route1.id, route2.handle, route2.id)
+	}
+	if route1.timers.TakeTimerV2Result(route1.p, route1.handle, route2.lease) ||
+		route2.timers.TakeTimerV2Result(route2.p, route2.handle, route1.lease) {
+		t.Fatal("cross-route result lease was accepted for the same local generation")
+	}
+	if !route1.timers.TakeTimerV2Result(route1.p, route1.handle, route1.lease) ||
+		!route2.timers.TakeTimerV2Result(route2.p, route2.handle, route2.lease) ||
+		!route1.timers.RecycleTimerV2(route1.p, route1.handle) ||
+		!route2.timers.RecycleTimerV2(route2.p, route2.handle) {
+		t.Fatal("release exact routed timer leases")
+	}
+	finishTimerV2Test(t, route1.p, route1.sources, route1.waits, route1.timers, route1.park, route1.action)
+	finishTimerV2Test(t, route2.p, route2.sources, route2.waits, route2.timers, route2.park, route2.action)
+
+	if bindTimerRegistrationTable(route2.timers, route2.p) ||
+		bindTimerRegistrationTableAtRoute(route2.timers, route2.p, RouteID(3)) {
+		t.Fatal("timer table changed its persistent route after unbind")
+	}
+	if !bindTimerRegistrationTableAtRoute(route2.timers, route2.p, RouteID(2)) ||
+		!unbindTimerRegistrationTable(route2.timers, route2.p) {
+		t.Fatal("timer table could not rebind its persistent route")
 	}
 }

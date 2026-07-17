@@ -93,7 +93,7 @@ func validExecutorSourceSet(sources *ExecutorSourceSet, p *P) bool {
 		!sources.route.Valid() || sources.waits == nil || sources.waits.owner != p {
 		return false
 	}
-	return (sources.timers == nil || sources.timers.owner == p) &&
+	return (sources.timers == nil || sources.timers.owner == p && sources.timers.route == sources.route) &&
 		(sources.manual == nil || sources.manual.owner == p && sources.manual.route == sources.route) &&
 		(sources.control == nil || sources.control.owner == p && sources.control.route == sources.route)
 }
@@ -117,7 +117,7 @@ func bindExecutorSourceSetAtRoute(sources *ExecutorSourceSet, p *P, route RouteI
 		!bindRegistrationTable(catalog.Waits, p) {
 		return false
 	}
-	if catalog.Timers != nil && !bindTimerRegistrationTable(catalog.Timers, p) {
+	if catalog.Timers != nil && !bindTimerRegistrationTableAtRoute(catalog.Timers, p, route) {
 		_ = unbindRegistrationTable(catalog.Waits, p)
 		return false
 	}
