@@ -125,6 +125,12 @@ type P struct {
 	executorMode uint32
 	// executor is scheduler-thread-only and is published before executorMode.
 	executor *ExecutorDriver
+	// channelSource is the canonical Channel commit-domain catalog for this P.
+	// A second source cannot self-certify that a frame-local SelectClaim is no
+	// longer referenced by the first source and therefore may not bind beside
+	// it. P is not a frozen wire layout; C1 may evolve this pointer into a
+	// canonical sharded catalog while preserving whole-domain Reset proof.
+	channelSource *ChannelOperationSource
 
 	current   *G
 	readyHead *G
@@ -1081,9 +1087,10 @@ func validRootDestroyedCommitMarker(p *P, g *G, kind ActionKind) bool {
 		return p.action.Handle == nil && g.root == nil
 	case ActionTerminalExecutorClose:
 		// A successful strong join retires the driver before retrying the
-		// logical root commit. No executor or physical handle may survive it.
+		// logical root commit. No executor, canonical source, or physical
+		// handle may survive it.
 		return p.action.Handle == nil && g.root == nil &&
-			preemptLoad(&p.executorMode) == executorModeUnbound && p.executor == nil
+			preemptLoad(&p.executorMode) == executorModeUnbound && p.executor == nil && p.channelSource == nil
 	default:
 		return false
 	}
@@ -1128,7 +1135,7 @@ func commitRootDestroyedCompatibility(p *P, g *G, kind ActionKind) (Action, bool
 		return beginTerminalExecutorClose(p, g, kind)
 	}
 	if p.readyHead == nil && emptySchedulerWaitQueues(p) &&
-		!preemptCompareAndSwap(&p.schedule, scheduleIdle, scheduleDisabled) {
+		(p.channelSource != nil || !preemptCompareAndSwap(&p.schedule, scheduleIdle, scheduleDisabled)) {
 		return Action{}, false
 	}
 	g.destroyRoot = false
@@ -1273,7 +1280,7 @@ func CommitDestroyedReceiptCompatibility(p *P, g *G, receipt Action) (Action, bo
 
 func acknowledgeRootTerminalSchedule(p *P, g *G, kind ActionKind) bool {
 	if p == nil || g == nil || p.current != g || p.inResume || g.runP != p ||
-		preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil ||
+		preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil || p.channelSource != nil ||
 		g.destroyTarget != nil || !g.destroyRoot || g.active != nil || g.frames != nil ||
 		p.readyHead != nil || p.readyTail != nil || !emptySchedulerWaitQueues(p) ||
 		!validReadyQueue(p) || !validSchedulerWaitQueues(p) {
@@ -1298,7 +1305,7 @@ func acknowledgeRootTerminalSchedule(p *P, g *G, kind ActionKind) bool {
 // llvm.coro.destroy again. Any queue, action, or G-state mismatch fails closed.
 func AcknowledgeTerminalSchedule(p *P, g *G, action Action) bool {
 	return expectedAction(p, g, action, ActionDestroy) && !p.inResume &&
-		preemptLoad(&p.executorMode) == executorModeUnbound && p.executor == nil &&
+		preemptLoad(&p.executorMode) == executorModeUnbound && p.executor == nil && p.channelSource == nil &&
 		g.state == GDispatching && g.destroyTarget == nil && g.destroyRoot &&
 		g.active == nil && g.frames == nil && p.readyHead == nil && p.readyTail == nil &&
 		emptySchedulerWaitQueues(p) && validReadyQueue(p) && validSchedulerWaitQueues(p) &&
@@ -1312,7 +1319,8 @@ func AcknowledgeTerminalSchedule(p *P, g *G, action Action) bool {
 func TerminalG(p *P, g *G) bool {
 	return p != nil && p.current == nil && p.readyHead == nil && p.readyTail == nil &&
 		emptySchedulerWaitQueues(p) &&
-		preemptLoad(&p.schedule) == scheduleDisabled && preemptLoad(&p.executorMode) == executorModeUnbound && p.executor == nil &&
+		preemptLoad(&p.schedule) == scheduleDisabled && preemptLoad(&p.executorMode) == executorModeUnbound &&
+		p.executor == nil && p.channelSource == nil &&
 		!p.inResume && p.action.Kind == ActionInvalid && p.action.Handle == nil && p.runDecision == (RunDecision{}) && !p.runDecisionTaken && p.servicePreemptBudget == 0 &&
 		ValidG(g) && preemptLoad(preemptAddress(g)) == preemptDisabled && g.state == GDead && g.root == nil && g.active == nil && g.frames == nil &&
 		g.taskControlLeases == 0 && g.runAction == ActionInvalid &&

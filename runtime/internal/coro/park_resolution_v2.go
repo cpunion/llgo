@@ -427,6 +427,28 @@ func abortParkCommitCompatibility(state *ParkState, ticket ParkTicket, request P
 	return validParkState(state)
 }
 
+// parkSnapshotRequiresClaimAwareResolution is a read-only compatibility gate.
+// The generic Step/Resolve entries cannot acquire a Channel SelectClaim and
+// cannot safely reinterpret an already committed ReadyThen physical effect as
+// an ordinary readiness handshake. Detect either shape before seed, resolving,
+// or winner markers are touched. The expected bound also makes a corrupt cycle
+// fail through the normal full audit without turning this preflight into an
+// unbounded traversal.
+func parkSnapshotRequiresClaimAwareResolution(state *ParkState, ticket ParkTicket) bool {
+	if state == nil || state.phase != parkParked || state.ticket != ticket || !validParkTicket(ticket) {
+		return false
+	}
+	visited := uint32(0)
+	for link := state.head; link != nil && visited < state.expected; link = link.next {
+		visited++
+		record := link.operation
+		if record != nil && (record.id.Source() == OperationSourceChannel || operationCandidateExternallyCommitted(record)) {
+			return true
+		}
+	}
+	return false
+}
+
 func parkResolutionCommitRequest(state *ParkState, ticket ParkTicket, cursor *parkResolutionCursor) (ParkCommitRequest, bool) {
 	if !validParkResolutionCursor(state, ticket, cursor) || cursor.phase != parkResolutionCommit ||
 		!currentParkCommitRequest(cursor.request) {
@@ -632,7 +654,8 @@ func ResolveParkSnapshotStep(
 	if attempt == (ParkCommitAttempt{}) {
 		// Compatibility begins with the retained full diagnostic audit, then loop-
 		// drives the same bounded primitive used by the production executor.
-		if !beginParkSnapshotResolution(state, ticket, &cursor, true) {
+		if parkSnapshotRequiresClaimAwareResolution(state, ticket) ||
+			!beginParkSnapshotResolution(state, ticket, &cursor, true) {
 			return CompletionResolution{}, ParkCommitRequest{}, ParkResolveInvalid
 		}
 	} else {

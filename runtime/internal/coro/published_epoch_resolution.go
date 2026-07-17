@@ -287,20 +287,26 @@ func advancePublishedEpochWaitAfterCleared(sources *ExecutorSourceSet, cursor *p
 }
 
 // restorePublishedEpochDiscovery restores the exact unprocessed affected FIFO
-// before ParkState enters resolving. Acquiring or Committing yields the whole
-// source epoch so an unrelated ready G can run while the peer owns the claim;
-// Claimed with no forced record means its sticky mailbox landed behind this
-// source cursor, so A/ack/B (or the next transaction after B) must publish that
-// exact fact.
-func restorePublishedEpochDiscovery(p *P, cursor *publishedEpochResolveCursor, step *publishedEpochResolveStep, retry bool) bool {
+// before ParkState enters resolving. An observed Acquiring/Committing state or
+// a failed owner CAS is a certificate for this reduction to yield the whole
+// source epoch; the peer may already have rolled the shared state back to Open
+// by the time restoration runs. Claimed with no forced record means its sticky
+// mailbox landed behind this source cursor, so A/ack/B (or the next transaction
+// after B) must publish that exact fact.
+func restorePublishedEpochDiscovery(
+	p *P,
+	cursor *publishedEpochResolveCursor,
+	step *publishedEpochResolveStep,
+	retry bool,
+	claimCertificate uint32,
+) bool {
 	if !validPublishedEpochResolveCursor(cursor, p) || cursor.phase != publishedEpochResolveDiscover ||
 		cursor.claim == nil || cursor.claimOwned || cursor.wait.work != waitSetWorkResolving ||
 		cursor.batchTail == nil || cursor.batchTail.workNext != nil || !validAffectedWaitQueueHeader(p) {
 		return false
 	}
-	claimState := selectClaimLoad(cursor.claim)
-	if (retry && claimState != selectClaimAcquiring && claimState != selectClaimCommitting) ||
-		(!retry && claimState != selectClaimClaimed) {
+	if (retry && claimCertificate != selectClaimAcquiring && claimCertificate != selectClaimCommitting &&
+		claimCertificate != selectClaimContended) || (!retry && claimCertificate != selectClaimClaimed) {
 		return false
 	}
 	wait, tail := cursor.wait, cursor.batchTail
@@ -322,7 +328,7 @@ func resolvePublishedEpochDiscoverStep(sources *ExecutorSourceSet, p *P, cursor 
 	if cursor.claim != nil {
 		claimState := selectClaimLoad(cursor.claim)
 		if claimState == selectClaimAcquiring || claimState == selectClaimCommitting {
-			return restorePublishedEpochDiscovery(p, cursor, step, true)
+			return restorePublishedEpochDiscovery(p, cursor, step, true, claimState)
 		}
 	}
 	if cursor.link != nil {
@@ -360,7 +366,7 @@ func resolvePublishedEpochDiscoverStep(sources *ExecutorSourceSet, p *P, cursor 
 	if cursor.forced != nil {
 		switch claimState {
 		case selectClaimAcquiring, selectClaimCommitting:
-			return restorePublishedEpochDiscovery(p, cursor, step, true)
+			return restorePublishedEpochDiscovery(p, cursor, step, true, claimState)
 		case selectClaimClaimed:
 			if !beginForcedParkSnapshotResolution(state, wait.ticket, &cursor.park, cursor.forced) {
 				return false
@@ -372,7 +378,7 @@ func resolvePublishedEpochDiscoverStep(sources *ExecutorSourceSet, p *P, cursor 
 		}
 	}
 
-	switch selectClaimOwnerAcquire(cursor.claim) {
+	switch ownerState := selectClaimOwnerAcquire(cursor.claim); ownerState {
 	case selectClaimOpen:
 		cursor.claimOwned = true
 		if !beginParkSnapshotResolution(state, wait.ticket, &cursor.park, false) {
@@ -382,10 +388,10 @@ func resolvePublishedEpochDiscoverStep(sources *ExecutorSourceSet, p *P, cursor 
 		}
 		cursor.phase = publishedEpochResolvePark
 		return true
-	case selectClaimAcquiring, selectClaimCommitting:
-		return restorePublishedEpochDiscovery(p, cursor, step, true)
+	case selectClaimAcquiring, selectClaimCommitting, selectClaimContended:
+		return restorePublishedEpochDiscovery(p, cursor, step, true, ownerState)
 	case selectClaimClaimed:
-		return restorePublishedEpochDiscovery(p, cursor, step, false)
+		return restorePublishedEpochDiscovery(p, cursor, step, false, ownerState)
 	default:
 		return false
 	}

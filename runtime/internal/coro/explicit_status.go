@@ -255,7 +255,7 @@ func PanicDestroyedBounded(p *P, g *G, action Action) (Action, bool) {
 // calling llvm.coro.destroy twice.
 func AcknowledgePanicTerminalSchedule(p *P, g *G, action Action) bool {
 	return expectedAction(p, g, action, ActionPanicDestroy) && !p.inResume &&
-		preemptLoad(&p.executorMode) == executorModeUnbound && p.executor == nil &&
+		preemptLoad(&p.executorMode) == executorModeUnbound && p.executor == nil && p.channelSource == nil &&
 		g.state == GPanicking && g.panicUnwind && publishedPanicRecord(&g.panicRecord) &&
 		g.destroyTarget == nil && g.destroyRoot && g.active == nil && g.frames == nil &&
 		p.readyHead == nil && p.readyTail == nil && emptySchedulerWaitQueues(p) &&

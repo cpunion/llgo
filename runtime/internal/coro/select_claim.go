@@ -34,6 +34,11 @@ const (
 	selectClaimAcquiring
 	selectClaimCommitting
 	selectClaimClaimed
+	// selectClaimContended is a return-only certificate from
+	// selectClaimOwnerAcquire. It is never stored in SelectClaim: it records
+	// that this bounded owner attempt lost its single Open->Acquiring CAS even
+	// if the winner has already rolled the shared state back to Open.
+	selectClaimContended
 )
 
 var (
@@ -54,15 +59,14 @@ func selectClaimOwnerAcquire(claim *SelectClaim) uint32 {
 	if claim == nil {
 		return selectClaimOpen
 	}
-	for {
-		state := selectClaimLoad(claim)
-		if state != selectClaimOpen {
-			return state
-		}
-		if preemptCompareAndSwap(&claim.state, selectClaimOpen, selectClaimAcquiring) {
-			return selectClaimOpen
-		}
+	state := selectClaimLoad(claim)
+	if state != selectClaimOpen {
+		return state
 	}
+	if preemptCompareAndSwap(&claim.state, selectClaimOpen, selectClaimAcquiring) {
+		return selectClaimOpen
+	}
+	return selectClaimContended
 }
 
 func selectClaimOwnerReleasePending(claim *SelectClaim) bool {
