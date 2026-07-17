@@ -364,20 +364,24 @@ func TestSchedulerParkSetEarlyCompletionDetachGateAndRunDecision(t *testing.T) {
 		t.Fatal("dequeue promoted park-set task")
 	}
 	action = beginWaitTestResume(t, p, task)
+	if resumeGateTaken(task.g) {
+		t.Fatal("nonzero run decision opened resume gate before exact take")
+	}
 	wrongTicket := operations.ticket
 	wrongTicket.generation++
 	if outcome, caseID, lease, taskCancel, ok := TakeRunDecision(task.g, wrongTicket); ok ||
 		outcome != ParkOutcomePending || caseID != 0 || lease != (OperationResultLease{}) || taskCancel != TaskCancelNone ||
-		p.runDecision == (RunDecision{}) || p.runDecisionTaken {
+		p.runDecision == (RunDecision{}) || p.runDecisionTaken || resumeGateTaken(task.g) {
 		t.Fatalf("stale decision take = (%d, %d, %+v, %d, %t), retained=%t taken=%t", outcome, caseID, lease, taskCancel, ok, p.runDecision != (RunDecision{}), p.runDecisionTaken)
 	}
 	outcome, caseID, winnerLease, taskCancel, ok := TakeRunDecision(task.g, operations.ticket)
 	if !ok || outcome != ParkOutcomeCompleted || caseID != operations.cases[0] || !winnerLease.Valid() || taskCancel != TaskCancelNone ||
-		p.runDecision != (RunDecision{}) || !p.runDecisionTaken || task.g.park.phase != parkDelivered {
+		p.runDecision != (RunDecision{}) || !p.runDecisionTaken || !resumeGateTaken(task.g) || task.g.park.phase != parkDelivered {
 		t.Fatalf("take ready decision = (%d, %d, %+v, %d, %t), retained=%t taken=%t phase=%d", outcome, caseID, winnerLease, taskCancel, ok, p.runDecision != (RunDecision{}), p.runDecisionTaken, task.g.park.phase)
 	}
 	if outcome, caseID, lease, taskCancel, ok := TakeRunDecision(task.g, operations.ticket); ok ||
-		outcome != ParkOutcomePending || caseID != 0 || lease != (OperationResultLease{}) || taskCancel != TaskCancelNone {
+		outcome != ParkOutcomePending || caseID != 0 || lease != (OperationResultLease{}) || taskCancel != TaskCancelNone ||
+		!resumeGateTaken(task.g) {
 		t.Fatalf("duplicate decision take = (%d, %d, %+v, %d, %t)", outcome, caseID, lease, taskCancel, ok)
 	}
 
@@ -791,7 +795,7 @@ func TestSchedulerParkSetAndLegacyWaitPreserveQueueOrder(t *testing.T) {
 	if g, ok := NextRunnable(p); !ok || g != legacy.g {
 		t.Fatal("dequeue legacy task after V2 task")
 	}
-	legacyAction = beginWaitTestResume(t, p, legacy)
+	legacyAction = beginWaitTestResumeWithoutGate(t, p, legacy)
 	if outcome, caseID, lease, taskCancel, ok := TakeRunDecision(legacy.g, ParkTicket{}); !ok ||
 		outcome != ParkOutcomePending || caseID != 0 || lease != (OperationResultLease{}) || taskCancel != TaskCancelNone {
 		t.Fatalf("legacy normal resume decision = (%d, %d, %+v, %d, %t)", outcome, caseID, lease, taskCancel, ok)

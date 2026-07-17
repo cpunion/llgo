@@ -83,9 +83,7 @@ func runningSpawnContext(parent *G) (*P, bool) {
 		return nil, false
 	}
 	p := parent.runP
-	if p == nil || p.current != parent || !p.inResume ||
-		!expectedAction(p, parent, p.action, ActionResume) ||
-		p.runDecision != (RunDecision{}) ||
+	if !resumeGateTaken(parent) ||
 		!validReadyQueue(p) || !validSchedulerWaitQueues(p) {
 		return nil, false
 	}

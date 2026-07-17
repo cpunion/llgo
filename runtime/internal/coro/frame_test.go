@@ -161,8 +161,21 @@ func TestFramePublishAndHandoffState(t *testing.T) {
 	if !AdoptRoot(g, parentHandle) {
 		t.Fatal("adopt root")
 	}
-	g.state = GRunning
-	g.active.state = FrameActive
+	p := new(P)
+	if !Enqueue(p, g) {
+		t.Fatal("enqueue handoff G")
+	}
+	if next, ok := NextRunnable(p); !ok || next != g {
+		t.Fatal("dequeue handoff G")
+	}
+	action, ok := BeginRunG(p, g)
+	if !ok {
+		t.Fatal("begin handoff G")
+	}
+	action, ok = checkedTestAction(p, g, action, false)
+	if !ok || action.Kind != ActionResume || action.Handle != parentHandle {
+		t.Fatal("activate handoff root")
+	}
 	parent.header.SuspendReason = uint16(SuspendCall)
 	parent.header.Lifecycle = uint16(FrameSuspended)
 	if !PrepareAwait(g, parentHandle, childHandle) {
@@ -171,21 +184,25 @@ func TestFramePublishAndHandoffState(t *testing.T) {
 	if PrepareAwait(g, parentHandle, childHandle) {
 		t.Fatal("duplicate child handoff accepted")
 	}
-	destroy, yielded, ok := dispatchPending(g, g.active)
-	if !ok || destroy != nil || yielded || g.active.handle != childHandle || g.root.state != FrameSuspended {
-		t.Fatalf("await dispatch = (destroy=%p, yielded=%t, ok=%t, active=%p, parent=%d)", destroy, yielded, ok, g.active.handle, g.root.state)
+	action, ok = Resumed(p, g, action)
+	if !ok || action.Kind != ActionCheckResume || action.Handle != childHandle || g.active.handle != childHandle || g.root.state != FrameSuspended {
+		t.Fatalf("await dispatch = (action=%+v, ok=%t, active=%p, parent=%d)", action, ok, g.active.handle, g.root.state)
 	}
-
-	g.active.state = FrameActive
+	action, ok = checkedTestAction(p, g, action, false)
+	if !ok || action.Kind != ActionResume || action.Handle != childHandle {
+		t.Fatal("activate handoff child")
+	}
 	child.header.SuspendReason = uint16(SuspendFrameComplete)
 	child.header.Lifecycle = uint16(FrameFinalSuspended)
 	if !PrepareComplete(g, childHandle, child.header) {
 		t.Fatal("valid child completion rejected")
 	}
-	destroy, yielded, ok = dispatchPending(g, g.active)
-	if !ok || destroy == nil || yielded || destroy.handle != childHandle || g.active != g.root || g.destroyTarget != destroy ||
-		destroy.state != FrameDestroyPending || child.header.Lifecycle != uint16(FrameDestroyPending) {
-		t.Fatalf("completion dispatch = (destroy=%p, yielded=%t, ok=%t, active=%p, target=%p)", destroy, yielded, ok, g.active, g.destroyTarget)
+	action, ok = Resumed(p, g, action)
+	destroy := g.destroyTarget
+	if !ok || action.Kind != ActionCheckDestroy || action.Handle != childHandle || destroy == nil ||
+		destroy.handle != childHandle || g.active != g.root || destroy.state != FrameDestroyPending ||
+		child.header.Lifecycle != uint16(FrameDestroyPending) {
+		t.Fatalf("completion dispatch = (action=%+v, ok=%t, active=%p, target=%p)", action, ok, g.active, g.destroyTarget)
 	}
 	releaseTestFrame(t, g, child)
 	runtime.KeepAlive(parent.memory)
@@ -335,7 +352,7 @@ func runSchedulerScenario(t *testing.T) {
 	for action.Kind != ActionComplete {
 		switch action.Kind {
 		case ActionCheckResume, ActionCheckDestroy:
-			action, ok = Checked(p, g, action, done[action.Handle])
+			action, ok = checkedTestAction(p, g, action, done[action.Handle])
 		case ActionResume:
 			handle := action.Handle
 			switch handle {

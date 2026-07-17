@@ -141,7 +141,7 @@ func TestWaitAtomicFieldsAre32BitAligned(t *testing.T) {
 	}
 }
 
-func beginWaitTestResume(t *testing.T, p *P, task *yieldingTestG) Action {
+func beginWaitTestResumeWithoutGate(t *testing.T, p *P, task *yieldingTestG) Action {
 	t.Helper()
 	action, ok := BeginRunG(p, task.g)
 	if !ok || action.Kind != ActionCheckResume {
@@ -153,6 +153,15 @@ func beginWaitTestResume(t *testing.T, p *P, task *yieldingTestG) Action {
 	}
 	task.frame.header.SuspendReason = uint16(SuspendNone)
 	task.frame.header.Lifecycle = uint16(FrameActive)
+	return action
+}
+
+func beginWaitTestResume(t *testing.T, p *P, task *yieldingTestG) Action {
+	t.Helper()
+	action := beginWaitTestResumeWithoutGate(t, p, task)
+	if p.runDecision == (RunDecision{}) {
+		takeNormalResumeGateForTest(t, task.g)
+	}
 	return action
 }
 
@@ -614,9 +623,14 @@ func TestPrepareParkFailsClosed(t *testing.T) {
 	if PreparePark(task.g, task.handle, task.frame.header, token, ticket) {
 		t.Fatal("park accepted outside active resume")
 	}
-	task.g.state = GRunning
-	frame := FrameFromStorage(task.frame.storage)
-	frame.state = FrameActive
+	p := new(P)
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue park-validation G")
+	}
+	if next, nextOK := NextRunnable(p); !nextOK || next != task.g {
+		t.Fatal("dequeue park-validation G")
+	}
+	_ = beginWaitTestResume(t, p, task)
 	task.frame.header.SuspendReason = uint16(SuspendPark)
 	task.frame.header.Lifecycle = uint16(FrameSuspended)
 	if PreparePark(task.g, task.handle, task.frame.header, token, ticket+1) {
@@ -635,8 +649,14 @@ func TestPrepareParkSameTicketAllowsExactlyOneG(t *testing.T) {
 	first := newYieldingTestG(t, "first-waiter")
 	second := newYieldingTestG(t, "second-waiter")
 	for _, task := range []*yieldingTestG{first, second} {
-		task.g.state = GRunning
-		FrameFromStorage(task.frame.storage).state = FrameActive
+		p := new(P)
+		if !Enqueue(p, task.g) {
+			t.Fatal("enqueue shared-ticket waiter")
+		}
+		if next, nextOK := NextRunnable(p); !nextOK || next != task.g {
+			t.Fatal("dequeue shared-ticket waiter")
+		}
+		_ = beginWaitTestResume(t, p, task)
 		task.frame.header.SuspendReason = uint16(SuspendPark)
 		task.frame.header.Lifecycle = uint16(FrameSuspended)
 	}
