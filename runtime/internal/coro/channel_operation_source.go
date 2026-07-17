@@ -83,7 +83,8 @@ func channelOperationSlotFor(source *ChannelOperationSource, id OperationID) (*c
 }
 
 func validChannelOperationOwner(source *ChannelOperationSource, p *P) bool {
-	return source != nil && validRoutedProducerSource(&source.routedProducerSource, p)
+	return source != nil && p != nil && p.channelSource == source &&
+		validRoutedProducerSource(&source.routedProducerSource, p)
 }
 
 func channelOperationReusableSlot(source *ChannelOperationSource, slot *channelOperationSlot, index uint32) bool {
@@ -105,8 +106,23 @@ func channelOperationReusableSlot(source *ChannelOperationSource, slot *channelO
 	return ok && slot.record == (OperationRecord{id: id, phase: operationReusable})
 }
 
+// channelOperationExternalReservable separates an empty lifecycle slot from
+// one which can still issue a fresh linear external token. The last even token
+// remains lifecycle-reusable so a retired slot can be recycled, unbound, and
+// released; claim-backed reservations skip it permanently instead of creating
+// an operation whose every external admission must fail contended. A
+// claim-less local operation does not consume this token domain.
+func channelOperationExternalReservable(slot *channelOperationSlot) bool {
+	if slot == nil {
+		return false
+	}
+	lease := preemptLoad(&slot.externalLease)
+	return lease&1 == 0 && lease < ^uint32(0)-1
+}
+
 func BindChannelOperationSourceAtRoute(source *ChannelOperationSource, p *P, route RouteID) bool {
 	if source == nil || p == nil || !route.Valid() || source.owner != nil || preemptLoad(&source.pending) != 0 ||
+		p.channelSource != nil || preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil ||
 		source.route != 0 && source.route != route {
 		return false
 	}
@@ -118,11 +134,55 @@ func BindChannelOperationSourceAtRoute(source *ChannelOperationSource, p *P, rou
 			return false
 		}
 	}
-	return bindRoutedProducerSource(&source.routedProducerSource, p, route)
+	if !bindRoutedProducerSource(&source.routedProducerSource, p, route) {
+		source.route = previousRoute
+		return false
+	}
+	p.channelSource = source
+	return true
 }
 
 func BindChannelOperationSource(source *ChannelOperationSource, p *P) bool {
 	return BindChannelOperationSourceAtRoute(source, p, RouteID(1))
+}
+
+// channelOperationCommitDomainCompatible binds every Channel case in one
+// preparing logical wait to the same frame-local SelectClaim, and prevents one
+// non-nil claim from being reused by another wait/ticket. The source has a
+// fixed four-slot C0 catalog, so this is constant work and runs before a new
+// slot generation becomes producer-visible. A nil/non-nil mix and two distinct
+// claims are both rejected. A claim-less local operation is valid only when it
+// is the ParkSet's sole candidate; a larger set needs one shared claim even if
+// only one case is Channel. Otherwise two peers could acquire independent
+// claims, or production discovery could encounter a multi-candidate Channel
+// set it cannot arbitrate, after the slots were already producer-visible.
+func channelOperationCommitDomainCompatible(
+	source *ChannelOperationSource,
+	state *ParkState,
+	ticket ParkTicket,
+	wait *WaitSetRecord,
+	claim *SelectClaim,
+) bool {
+	if source == nil || state == nil || wait == nil || !validParkTicket(ticket) ||
+		claim == nil && state.expected != 1 {
+		return false
+	}
+	for index := range source.slots {
+		slot := &source.slots[index]
+		record := &slot.record
+		samePark := record.link.park == state
+		sameClaim := claim != nil && slot.claim == claim
+		if !samePark && !sameClaim {
+			continue
+		}
+		lifecycle := producerSourceLifecycle(preemptLoad(&slot.state))
+		if lifecycle != producerSourceActive && lifecycle != producerSourceClosing ||
+			record.phase != operationActive || record.link.operation != record ||
+			record.link.ticket != ticket || record.link.wait != wait || slot.claim != claim {
+			return false
+		}
+	}
+	return true
 }
 
 func (source *ChannelOperationSource) ReserveAndAttachWait(
@@ -133,12 +193,14 @@ func (source *ChannelOperationSource) ReserveAndAttachWait(
 	caseID uint32,
 	claim *SelectClaim,
 ) (OperationID, bool) {
-	if !validChannelOperationOwner(source, p) || claim != nil && selectClaimLoad(claim) != selectClaimOpen {
+	if !validChannelOperationOwner(source, p) || claim != nil && selectClaimLoad(claim) != selectClaimOpen ||
+		!channelOperationCommitDomainCompatible(source, state, ticket, wait, claim) {
 		return OperationID{}, false
 	}
 	for index := range source.slots {
 		slot := &source.slots[index]
-		if !channelOperationReusableSlot(source, slot, uint32(index)) || preemptLoad(&slot.generation) == ^uint32(0) {
+		if !channelOperationReusableSlot(source, slot, uint32(index)) || preemptLoad(&slot.generation) == ^uint32(0) ||
+			claim != nil && !channelOperationExternalReservable(slot) {
 			continue
 		}
 		generation, begun := beginProducerSourceSlot(&slot.producerSourceSlot)
@@ -167,6 +229,68 @@ func (source *ChannelOperationSource) ReserveAndAttachWait(
 		return id, true
 	}
 	return OperationID{}, false
+}
+
+// AbortSelectPreparation atomically excludes external claimers, aborts one
+// owner preparation transaction, and terminalizes its Channel commit domain.
+// This is not a general cancellation or resolver entry: wait must still be
+// uncommitted compiler frame storage, and every attached Channel case must
+// belong to this exact source, wait, ticket, and claim. ApplyOne deliberately
+// continues to require a terminal claim; this entry supplies that fact without
+// weakening detection of a resolver which forgot to claim a parked select.
+//
+// C1 hchan lowering must keep every queue node and OperationID unreachable by
+// a matcher until CommitParkSet/PrepareParkSet publishes Parked. The compiler
+// calls this method only inside the same NoSuspend/NoPanic, preemption-disabled
+// preparation transaction. Publishing a node earlier would let an external
+// matcher inspect ParkState while Seal/Commit/Abort writes owner-only fields
+// and is a contract violation even though its pre-effect validation would
+// eventually reject a non-Parked endpoint.
+func (source *ChannelOperationSource) AbortSelectPreparation(
+	p *P,
+	state *ParkState,
+	ticket ParkTicket,
+	wait *WaitSetRecord,
+	claim *SelectClaim,
+) bool {
+	if !validChannelOperationOwner(source, p) || state == nil || wait == nil || claim == nil ||
+		!validParkTicket(ticket) || state.ticket != ticket ||
+		(state.phase != parkPreparing && state.phase != parkSealed) || state.resolving || !validParkState(state) ||
+		wait.g == nil || &wait.g.park != state || wait.ticket != ticket ||
+		wait.state != waitSetRecordPreparing || wait.work != waitSetWorkIdle ||
+		wait.activePrev != nil || wait.activeNext != nil || wait.workNext != nil {
+		return false
+	}
+	if !channelOperationCommitDomainCompatible(source, state, ticket, wait, claim) {
+		return false
+	}
+	channelLinks := uint32(0)
+	for link := state.head; link != nil; link = link.next {
+		record := link.operation
+		if record == nil || record.id.Source() != OperationSourceChannel {
+			continue
+		}
+		slot, ok := channelOperationSlotFor(source, record.id)
+		if !ok || &slot.record != record || slot.claim != claim || link.wait != wait ||
+			preemptLoad(&slot.generation) != record.id.Generation ||
+			producerSourceLifecycle(preemptLoad(&slot.state)) != producerSourceActive ||
+			record.phase != operationActive || record.disposition != OperationDispositionPending ||
+			record.resolutionApplied {
+			return false
+		}
+		channelLinks++
+	}
+	if channelLinks == 0 {
+		return false
+	}
+	if selectClaimOwnerAcquire(claim) != selectClaimOpen {
+		return false
+	}
+	if !AbortParkSet(state, ticket) {
+		_ = selectClaimOwnerReleasePending(claim)
+		return false
+	}
+	return selectClaimOwnerReleaseTerminal(claim)
 }
 
 type ChannelOperationPostResult uint8
@@ -250,6 +374,13 @@ func (source *ChannelOperationSource) postReadyAdmitted(slot *channelOperationSl
 	}
 }
 
+// channelExternalCommitAdmission is an internal fragment of
+// channelExternalCommitPair, not a producer
+// handle. C0 tests exercise its scalar transitions directly, but real hchan
+// wiring must enter only through the pair transaction and must not copy or
+// expose endpointA/B. Before C1 makes that wiring reachable, the endpoint
+// helpers should additionally receive an exact parent/address certificate so
+// a copied child value cannot race the owning pair for its linear token.
 type channelExternalCommitAdmission struct {
 	source *ChannelOperationSource
 	slot   *channelOperationSlot
@@ -458,7 +589,7 @@ type channelExternalCommitPair struct {
 }
 
 func releaseChannelExternalCommitPairWithoutEffect(pair *channelExternalCommitPair) bool {
-	if pair == nil || pair.self != pair {
+	if pair == nil || pair.self != pair || pair.phase != channelExternalCommitPairPrepared {
 		return false
 	}
 	first, second := &pair.endpointA, &pair.endpointB
@@ -474,11 +605,28 @@ func releaseChannelExternalCommitPairWithoutEffect(pair *channelExternalCommitPa
 	return true
 }
 
+// validChannelExternalActiveWaitHeld is the claim-held lifetime/identity
+// predicate for one exact parked endpoint. SelectClaim excludes target
+// resolution and detach, but deliberately does not exclude owner-side
+// cancellation or unrelated G park/promote operations. Therefore this
+// predicate inspects neither cancelKind/taskCancel*/affected-work fields nor
+// P's global active queue and WaitSetRecord neighbour links. The latter may be
+// rewritten when another wait joins or leaves the same P even though this
+// target remains pinned and claimed.
+func validChannelExternalActiveWaitHeld(wait *WaitSetRecord, state *ParkState, ticket ParkTicket) bool {
+	return wait != nil && state != nil && wait.state == waitSetRecordActive &&
+		wait.ticket == ticket && validParkTicket(ticket) && wait.g != nil && ValidG(wait.g) &&
+		&wait.g.park == state && wait.g.state == GWaiting && wait.g.waiting &&
+		wait.g.waitToken == nil && wait.g.waitTicket == 0 && wait.g.nextWait == nil &&
+		!wait.g.queued && wait.g.nextReady == nil && wait.g.runP == nil && wait.g.active != nil &&
+		wait.g.active.parkWait == wait
+}
+
 // validChannelExternalEndpointHeld is called only after both select claims
-// were acquired. Admission pins the frame/link lifetime; claim ownership is
-// what makes these owner-only record and ParkState reads race-free. The check
-// is O(1): it validates the exact link and local adjacency, never the full
-// candidate chain.
+// were acquired. Admission pins the frame/link lifetime and claim ownership
+// excludes resolver mutation. The check is O(1): it validates the exact link
+// and local adjacency, never the full candidate chain or cancellation/work
+// publication fields.
 func validChannelExternalEndpointHeld(admission *channelExternalCommitAdmission, claim *SelectClaim) bool {
 	if admission == nil || !admission.held || admission.posted || admission.broken ||
 		admission.source == nil || admission.slot == nil || !admission.id.Valid() || claim == nil ||
@@ -506,7 +654,7 @@ func validChannelExternalEndpointHeld(admission *channelExternalCommitAdmission,
 	state := link.park
 	return state.phase == parkParked && !state.resolving && state.ticket == link.ticket && validParkTicket(state.ticket) &&
 		state.outcome == ParkOutcomePending && state.winnerRecord == nil && state.winnerID == (OperationID{}) &&
-		state.attached == state.expected && validActiveWaitSetRecordFast(source.owner, link.wait) &&
+		state.attached == state.expected && validChannelExternalActiveWaitHeld(link.wait, state, link.ticket) &&
 		validPendingParkResolutionLink(state, link.ticket, link)
 }
 
@@ -518,6 +666,12 @@ func validChannelExternalEndpointHeld(admission *channelExternalCommitAdmission,
 // rollback. An invariant failure deliberately returns a non-zero Broken
 // transaction retaining any lifetime lease; callers must fail-stop rather
 // than risk release followed by frame use.
+//
+// A C1 matcher may receive an endpoint only after its owner has atomically
+// published the Parked preparation boundary. ReserveAndAttachWait deliberately
+// makes the source slot producer-visible earlier so ordinary readiness cannot
+// be lost, but that scalar admission is not permission to expose an hchan queue
+// node or call this pair gate while Seal/Commit/Abort still mutates ParkState.
 func beginChannelExternalCommitPair(
 	pair *channelExternalCommitPair,
 	sourceA *ChannelOperationSource,
@@ -786,6 +940,110 @@ func beginChannelMailboxDrain(slot *channelOperationSlot, mailbox channelOperati
 	}
 }
 
+func releaseChannelPublishClaim(claim *SelectClaim, held bool) bool {
+	return !held || selectClaimOwnerReleasePending(claim)
+}
+
+// publishDrainedSlot owns one mailbox draining state. A claim-backed Ready
+// publication temporarily acquires the same SelectClaim used by resolution
+// and external matching before it reads or writes the OperationRecord. A
+// Forced mailbox is published only after the external effect has made Claimed
+// terminal; Acquiring/Committing keeps the mailbox sticky for a later epoch.
+// Thus neither an admission nor a claim load is mistaken for serialization:
+// the only mutable-record paths are an exact Open->Acquiring lease or the
+// terminal Claimed state.
+func (source *ChannelOperationSource) publishDrainedSlot(
+	p *P,
+	slot *channelOperationSlot,
+	mailbox channelOperationMailbox,
+) (published, lost uint32, ok bool) {
+	if !validChannelOperationOwner(source, p) || slot == nil ||
+		(mailbox != channelMailboxReady && mailbox != channelMailboxForced) {
+		return 0, 0, false
+	}
+	switch producerSourceLifecycle(preemptLoad(&slot.state)) {
+	case producerSourceActive, producerSourceClosing:
+	default:
+		return 0, 0, false
+	}
+	draining := channelOperationMailbox(preemptLoad(&slot.mailbox))
+	if mailbox == channelMailboxReady {
+		if draining != channelMailboxDrainingReady && draining != channelMailboxForcedBehindReadyDrain {
+			return 0, 0, false
+		}
+	} else if draining != channelMailboxDrainingForced {
+		return 0, 0, false
+	}
+
+	claim, claimHeld := slot.claim, false
+	if claim != nil {
+		switch mailbox {
+		case channelMailboxReady:
+			switch selectClaimOwnerAcquire(claim) {
+			case selectClaimOpen:
+				claimHeld = true
+			case selectClaimAcquiring, selectClaimCommitting, selectClaimContended:
+				return 0, 0, restoreChannelMailboxDrain(source, slot, mailbox)
+			case selectClaimClaimed:
+				// Claimed is terminal: no external matcher or resolver can
+				// mutate this record while the source pass publishes the
+				// remaining loser facts before forced discovery.
+			default:
+				_ = restoreChannelMailboxDrain(source, slot, mailbox)
+				return 0, 0, false
+			}
+		case channelMailboxForced:
+			switch selectClaimLoad(claim) {
+			case selectClaimAcquiring, selectClaimCommitting:
+				return 0, 0, restoreChannelMailboxDrain(source, slot, mailbox)
+			case selectClaimClaimed:
+			default:
+				_ = restoreChannelMailboxDrain(source, slot, mailbox)
+				return 0, 0, false
+			}
+		}
+	} else if mailbox == channelMailboxForced {
+		_ = restoreChannelMailboxDrain(source, slot, mailbox)
+		return 0, 0, false
+	}
+
+	id := slot.record.id
+	if preemptLoad(&slot.generation) != id.Generation || !slot.record.Matches(id) {
+		_ = restoreChannelMailboxDrain(source, slot, mailbox)
+		_ = releaseChannelPublishClaim(claim, claimHeld)
+		return 0, 0, false
+	}
+	var result OperationCompletionResult
+	if mailbox == channelMailboxForced {
+		result = PublishExternallyCommittedReadyThenCandidate(&slot.record, id)
+	} else {
+		result = PublishReadyThenTryCommitCandidate(&slot.record, id)
+	}
+	switch result {
+	case OperationCompletionPublished:
+		if slot.record.link.wait == nil || !MarkWaitSetAffected(p, slot.record.link.wait) {
+			_ = restoreChannelMailboxDrain(source, slot, mailbox)
+			_ = releaseChannelPublishClaim(claim, claimHeld)
+			return 0, 0, false
+		}
+		published = 1
+	case OperationCompletionDuplicate:
+	case OperationCompletionLost:
+		lost = 1
+	case OperationCompletionDeferred:
+		restored := restoreChannelMailboxDrain(source, slot, mailbox)
+		released := releaseChannelPublishClaim(claim, claimHeld)
+		return 0, 0, restored && released
+	default:
+		_ = restoreChannelMailboxDrain(source, slot, mailbox)
+		_ = releaseChannelPublishClaim(claim, claimHeld)
+		return 0, 0, false
+	}
+	finished := finishChannelMailboxDrain(source, slot, mailbox)
+	released := releaseChannelPublishClaim(claim, claimHeld)
+	return published, lost, finished && released
+}
+
 func (source *ChannelOperationSource) publishSlot(p *P, index uint32) (published, lost uint32, ok bool) {
 	if !validChannelOperationOwner(source, p) || index >= ChannelOperationSourceCapacity {
 		return 0, 0, false
@@ -802,34 +1060,7 @@ func (source *ChannelOperationSource) publishSlot(p *P, index uint32) (published
 	if mailbox == channelMailboxEmpty {
 		return 0, 0, true
 	}
-	id := slot.record.id
-	if preemptLoad(&slot.generation) != id.Generation || !slot.record.Matches(id) {
-		_ = restoreChannelMailboxDrain(source, slot, mailbox)
-		return 0, 0, false
-	}
-	var result OperationCompletionResult
-	if mailbox == channelMailboxForced {
-		result = PublishExternallyCommittedReadyThenCandidate(&slot.record, id)
-	} else {
-		result = PublishReadyThenTryCommitCandidate(&slot.record, id)
-	}
-	switch result {
-	case OperationCompletionPublished:
-		if slot.record.link.wait == nil || !MarkWaitSetAffected(p, slot.record.link.wait) {
-			_ = restoreChannelMailboxDrain(source, slot, mailbox)
-			return 0, 0, false
-		}
-		published = 1
-	case OperationCompletionDuplicate:
-	case OperationCompletionLost:
-		lost = 1
-	case OperationCompletionDeferred:
-		return 0, 0, restoreChannelMailboxDrain(source, slot, mailbox)
-	default:
-		_ = restoreChannelMailboxDrain(source, slot, mailbox)
-		return 0, 0, false
-	}
-	return published, lost, finishChannelMailboxDrain(source, slot, mailbox)
+	return source.publishDrainedSlot(p, slot, mailbox)
 }
 
 type selectClaimOwner struct {
@@ -1026,7 +1257,8 @@ func (source *ChannelOperationSource) ConfirmQuiesced(p *P, id OperationID) bool
 // remains Claimed through logical resolution and every Channel detach; it may
 // return to Open only after this source no longer retains that frame pointer.
 func (source *ChannelOperationSource) ResetSelectClaim(p *P, claim *SelectClaim) bool {
-	if !validChannelOperationOwner(source, p) || claim == nil || selectClaimLoad(claim) != selectClaimClaimed {
+	if !validChannelOperationOwner(source, p) || p.channelSource != source || claim == nil ||
+		selectClaimLoad(claim) != selectClaimClaimed {
 		return false
 	}
 	for index := range source.slots {
@@ -1088,10 +1320,14 @@ func channelOperationSourceEmpty(source *ChannelOperationSource, owner *P) bool 
 }
 
 func UnbindChannelOperationSource(source *ChannelOperationSource, p *P) bool {
-	if p == nil || !channelOperationSourceEmpty(source, p) {
+	if p == nil || p.channelSource != source || !channelOperationSourceEmpty(source, p) {
 		return false
 	}
-	return unbindRoutedProducerSource(&source.routedProducerSource, p)
+	if !unbindRoutedProducerSource(&source.routedProducerSource, p) {
+		return false
+	}
+	p.channelSource = nil
+	return true
 }
 
 func (source *ChannelOperationSource) CanRelease() bool {

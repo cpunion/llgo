@@ -95,7 +95,9 @@ func (scan *executorSourceScan) add(other executorSourceScan) {
 
 func validExecutorSourceSet(sources *ExecutorSourceSet, p *P) bool {
 	if sources == nil || sources.magic != executorSourceSetMagic || p == nil || sources.owner != p ||
-		!sources.route.Valid() || sources.waits == nil || sources.waits.owner != p {
+		!sources.route.Valid() || sources.waits == nil || sources.waits.owner != p ||
+		(sources.channel == nil) != (p.channelSource == nil) ||
+		sources.channel != nil && p.channelSource != sources.channel {
 		return false
 	}
 	return (sources.timers == nil || sources.timers.owner == p && sources.timers.route == sources.route) &&
@@ -121,7 +123,7 @@ type ExecutorSourceCatalog struct {
 // leaves the source set exact-zero.
 func bindExecutorSourceSetAtRoute(sources *ExecutorSourceSet, p *P, route RouteID, catalog ExecutorSourceCatalog) bool {
 	if sources == nil || *sources != (ExecutorSourceSet{}) || p == nil || !route.Valid() || catalog.Waits == nil ||
-		!bindRegistrationTable(catalog.Waits, p) {
+		p.channelSource != nil || !bindRegistrationTable(catalog.Waits, p) {
 		return false
 	}
 	if catalog.Timers != nil && !bindTimerRegistrationTableAtRoute(catalog.Timers, p, route) {

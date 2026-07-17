@@ -674,7 +674,18 @@ func TestChannelReservationAttachFailureLeavesReusableGeneration(t *testing.T) {
 	if !BindChannelOperationSource(source, p) {
 		t.Fatal("bind channel source for attach rollback")
 	}
-	if id, ok := source.ReserveAndAttachWait(p, nil, ParkTicket{}, nil, 1, nil); ok || id != (OperationID{}) {
+	var g G
+	if !InitG(&g) {
+		t.Fatal("initialize attach-rollback G")
+	}
+	ticket, begun := BeginParkSet(&g.park, 1, 1)
+	var wait WaitSetRecord
+	if !begun || !PrepareWaitSetRecord(&wait, &g, ticket) {
+		t.Fatal("prepare attach-rollback wait")
+	}
+	wrongTicket := ticket
+	wrongTicket.generation++
+	if id, ok := source.ReserveAndAttachWait(p, &g.park, wrongTicket, &wait, 1, nil); ok || id != (OperationID{}) {
 		t.Fatalf("invalid channel attach = (%+v, %t)", id, ok)
 	}
 	slot := &source.slots[0]
@@ -684,6 +695,13 @@ func TestChannelReservationAttachFailureLeavesReusableGeneration(t *testing.T) {
 		slot.record != (OperationRecord{id: id, phase: operationReusable}) || slot.claim != nil {
 		t.Fatalf("failed channel attach leaked generation: state=%d inflight=%#x generation=%d record=%+v claim=%p",
 			preemptLoad(&slot.state), preemptLoad(&slot.inflight), preemptLoad(&slot.generation), slot.record, slot.claim)
+	}
+	if !AbortParkSet(&g.park, ticket) {
+		t.Fatal("abort attach-rollback park")
+	}
+	if outcome, _, lease, consumed := ConsumeParkSet(&g.park, ticket); !consumed ||
+		outcome != ParkOutcomeCanceled || lease != (OperationResultLease{}) || !ReleasePreparedWaitSetRecord(&wait) {
+		t.Fatalf("consume attach-rollback park = (%d,%+v,%t)", outcome, lease, consumed)
 	}
 	if !UnbindChannelOperationSource(source, p) || !source.CanRelease() {
 		t.Fatal("release channel source after attach rollback")
@@ -883,8 +901,10 @@ func TestChannelDiscoveryAcquiringStopsWithoutParkMutation(t *testing.T) {
 	slot, _ := channelOperationSlotFor(fixture.source, fixture.ids[0])
 	if !ok || !progress.Complete || !progress.More || fixture.task.g.park.resolving ||
 		fixture.driver.poll != (executorPollTransaction{}) || fixture.p.affectedWaitHead != &fixture.wait ||
-		fixture.p.affectedWaitTail != &fixture.wait || operationCandidateState(&slot.record) != OperationCommitReady ||
-		slot.record.resultState != operationResultEmpty || selectClaimLoad(fixture.claim) != selectClaimAcquiring {
+		fixture.p.affectedWaitTail != &fixture.wait || operationCandidateState(&slot.record) != OperationCommitIdle ||
+		operationCandidateIsPublished(&slot.record) || slot.record.resultState != operationResultEmpty ||
+		preemptLoad(&slot.mailbox) != uint32(channelMailboxReady) ||
+		selectClaimLoad(fixture.claim) != selectClaimAcquiring {
 		t.Fatalf("contended discovery mutated park/candidate: progress=%+v resolve=%+v park=%+v record=%+v",
 			progress, fixture.driver.poll.resolve, fixture.task.g.park, slot.record)
 	}
@@ -896,6 +916,55 @@ func TestChannelDiscoveryAcquiringStopsWithoutParkMutation(t *testing.T) {
 	decision := takeChannelClaimCoreDecision(t, fixture)
 	if decision.outcome != ParkOutcomeCompleted || decision.caseID != 31 || !decision.lease.Valid() {
 		t.Fatalf("post-contention channel decision = %+v", decision)
+	}
+	releaseChannelClaimCoreFixture(t, fixture, decision)
+}
+
+func TestChannelContendedOwnerCertificateRestoresDiscoveryAfterPeerRollback(t *testing.T) {
+	fixture := newChannelClaimCoreFixture(t, "channel-discovery-cas-contention", []uint32{35}, true, 0)
+	if result := fixture.source.PostReady(fixture.ids[0]); result != ChannelOperationPosted ||
+		!fixture.source.beginPublishPass(fixture.p) {
+		t.Fatalf("publish readiness before contended discovery certificate = %d", result)
+	}
+	slot, _ := channelOperationSlotFor(fixture.source, fixture.ids[0])
+	if published, lost, ok := fixture.source.publishSlot(fixture.p, 0); !ok || published != 1 || lost != 0 {
+		t.Fatalf("publish candidate before contended discovery certificate = (%d,%d,%t)", published, lost, ok)
+	}
+	beforePark, beforeRecord := fixture.task.g.park, slot.record
+	var cursor publishedEpochResolveCursor
+	var step publishedEpochResolveStep
+	if !initializePublishedEpochResolution(&fixture.driver.sources, fixture.p, &cursor, &step) ||
+		cursor.phase != publishedEpochResolveDiscover || cursor.link == nil || cursor.claim != nil ||
+		fixture.p.affectedWaitHead != nil || fixture.p.affectedWaitTail != nil {
+		t.Fatalf("initialize contended discovery cursor = cursor:%+v step:%+v affected:(%p,%p)",
+			cursor, step, fixture.p.affectedWaitHead, fixture.p.affectedWaitTail)
+	}
+	if !resolvePublishedEpochDiscoverStep(&fixture.driver.sources, fixture.p, &cursor, &step) ||
+		cursor.phase != publishedEpochResolveDiscover || cursor.link != nil || cursor.claim != fixture.claim ||
+		selectClaimLoad(fixture.claim) != selectClaimOpen {
+		t.Fatalf("discover contended claim domain = cursor:%+v step:%+v claim:%d",
+			cursor, step, selectClaimLoad(fixture.claim))
+	}
+
+	// Model the exact single-CAS failure window: the peer won Open->Acquiring
+	// and rolled back to Open before this owner restores the FIFO. Contended is
+	// the reduction-local certificate; it is deliberately not a shared state.
+	if !restorePublishedEpochDiscovery(fixture.p, &cursor, &step, true, selectClaimContended) ||
+		!step.complete || !step.retryBudget || cursor != (publishedEpochResolveCursor{}) ||
+		selectClaimLoad(fixture.claim) != selectClaimOpen || fixture.task.g.park != beforePark ||
+		slot.record != beforeRecord || fixture.p.affectedWaitHead != &fixture.wait ||
+		fixture.p.affectedWaitTail != &fixture.wait || fixture.wait.work != waitSetWorkQueued ||
+		fixture.wait.workNext != nil {
+		t.Fatalf("Contended certificate did not restore exact FIFO: cursor=%+v step=%+v park=%+v record=%+v affected=(%p,%p) work=%d",
+			cursor, step, fixture.task.g.park, slot.record, fixture.p.affectedWaitHead,
+			fixture.p.affectedWaitTail, fixture.wait.work)
+	}
+
+	requestChannelClaimCoreFixture(t, fixture)
+	pollChannelClaimCoreComplete(t, fixture)
+	decision := takeChannelClaimCoreDecision(t, fixture)
+	if decision.outcome != ParkOutcomeCompleted || decision.caseID != 35 || !decision.lease.Valid() {
+		t.Fatalf("post-Contended channel decision = %+v", decision)
 	}
 	releaseChannelClaimCoreFixture(t, fixture, decision)
 }
@@ -919,14 +988,26 @@ func TestChannelDiscoveryCommittingYieldsUntilForcedPublication(t *testing.T) {
 	slot, _ := channelOperationSlotFor(fixture.source, fixture.ids[0])
 	if !ok || !progress.Complete || !progress.More || fixture.task.g.park.resolving ||
 		fixture.driver.poll != (executorPollTransaction{}) || fixture.p.affectedWaitHead != &fixture.wait ||
-		fixture.p.affectedWaitTail != &fixture.wait || operationCandidateState(&slot.record) != OperationCommitReady ||
-		slot.record.resultState != operationResultEmpty || selectClaimLoad(fixture.claim) != selectClaimCommitting {
+		fixture.p.affectedWaitTail != &fixture.wait || operationCandidateState(&slot.record) != OperationCommitIdle ||
+		operationCandidateIsPublished(&slot.record) || slot.record.resultState != operationResultEmpty ||
+		preemptLoad(&slot.mailbox) != uint32(channelMailboxReady) ||
+		selectClaimLoad(fixture.claim) != selectClaimCommitting {
 		t.Fatalf("Committing discovery retained resolver: progress=%+v resolve=%+v park=%+v record=%+v claim=%d",
 			progress, fixture.driver.poll.resolve, fixture.task.g.park, slot.record, selectClaimLoad(fixture.claim))
 	}
-	if admission.publishExternallyCommitted() != ChannelOperationPosted ||
-		!publishExternalSelectClaim(fixture.claim) || !admission.releaseCommitted() {
+	beforeRecord := slot.record
+	if admission.publishExternallyCommitted() != ChannelOperationPosted || !fixture.source.beginPublishPass(fixture.p) {
 		t.Fatal("complete external effect after Committing discovery yield")
+	}
+	if published, lost, publishOK := fixture.source.publishSlot(fixture.p, 0); !publishOK || published != 0 || lost != 0 ||
+		slot.record != beforeRecord || preemptLoad(&slot.mailbox) != uint32(channelMailboxForced) ||
+		selectClaimLoad(fixture.claim) != selectClaimCommitting || !fixture.source.Pending() {
+		t.Fatalf("Committing forced drain touched owner record: (%d,%d,%t) record=%+v mailbox=%d claim=%d pending=%t",
+			published, lost, publishOK, slot.record, preemptLoad(&slot.mailbox),
+			selectClaimLoad(fixture.claim), fixture.source.Pending())
+	}
+	if !publishExternalSelectClaim(fixture.claim) || !admission.releaseCommitted() {
+		t.Fatal("publish external claim after sticky Committing forced drain")
 	}
 	requestChannelClaimCoreFixture(t, fixture)
 	pollChannelClaimCoreComplete(t, fixture)
@@ -963,10 +1044,12 @@ func TestChannelExternallyCommittedOvertakesPausedReadyDrain(t *testing.T) {
 		t.Fatalf("forced publication behind Ready drain = result:%d mailbox:%d physical:%d",
 			forcedResult, preemptLoad(&slot.mailbox), preemptLoad(&slot.physical))
 	}
-	if result := PublishReadyThenTryCommitCandidate(&slot.record, id); result != OperationCompletionPublished ||
-		!finishChannelMailboxDrain(fixture.source, slot, channelMailboxReady) ||
-		preemptLoad(&slot.mailbox) != uint32(channelMailboxForced) || !fixture.source.Pending() {
-		t.Fatal("Ready drain cleared a sticky forced handoff")
+	beforeRecord := slot.record
+	if published, lost, publishOK := fixture.source.publishDrainedSlot(fixture.p, slot, channelMailboxReady); !publishOK || published != 0 || lost != 0 || slot.record != beforeRecord ||
+		preemptLoad(&slot.mailbox) != uint32(channelMailboxForced) || !fixture.source.Pending() ||
+		selectClaimLoad(fixture.claim) != selectClaimCommitting {
+		t.Fatalf("Committing Ready drain did not preserve sticky forced handoff: (%d,%d,%t) record=%+v mailbox=%d pending=%t",
+			published, lost, publishOK, slot.record, preemptLoad(&slot.mailbox), fixture.source.Pending())
 	}
 	if !publishExternalSelectClaim(fixture.claim) || !admission.releaseCommitted() ||
 		!fixture.source.beginPublishPass(fixture.p) {
@@ -1273,6 +1356,707 @@ func TestChannelDeferredForcedRestoresAThenBWithoutFIFOCycle(t *testing.T) {
 		t.Fatalf("deferred forced B decision = %+v", decision)
 	}
 	releaseChannelClaimCoreFixture(t, fixture, decision)
+}
+
+func TestChannelExternalValidationRacesTaskCancellationAndPreservesEffectSemantics(t *testing.T) {
+	a := newChannelClaimCoreFixture(t, "channel-cancel-race-a", []uint32{73}, true, 0)
+	b := newChannelClaimCoreFixture(t, "channel-cancel-race-b", []uint32{74}, true, 0)
+	var pair channelExternalCommitPair
+	if result := beginChannelExternalCommitPair(
+		&pair, a.source, a.ids[0], a.claim, b.source, b.ids[0], b.claim,
+	); result != channelExternalCommitPairBeginPrepared {
+		t.Fatalf("prepare cancellation-race pair = (%d,%+v)", result, pair)
+	}
+
+	start := make(chan struct{})
+	validated := make(chan bool, 1)
+	go func() {
+		<-start
+		valid := true
+		for iteration := 0; iteration < 1<<15; iteration++ {
+			if !validChannelExternalEndpointHeld(&pair.endpointA, a.claim) ||
+				!validChannelExternalEndpointHeld(&pair.endpointB, b.claim) {
+				valid = false
+				break
+			}
+			runtime.Gosched()
+		}
+		validated <- valid
+	}()
+	close(start)
+	for iteration := 0; iteration < 1<<15; iteration++ {
+		if !RequestTaskCancellation(a.p, a.task.g, TaskCancelAbort) ||
+			!RequestTaskCancellation(b.p, b.task.g, TaskCancelAbort) {
+			t.Fatalf("publish task cancellation during external validation at %d", iteration)
+		}
+		runtime.Gosched()
+	}
+	if !<-validated || pair.phase != channelExternalCommitPairPrepared ||
+		selectClaimLoad(a.claim) != selectClaimAcquiring || selectClaimLoad(b.claim) != selectClaimAcquiring {
+		t.Fatalf("cancellation invalidated pre-effect endpoint identity: pair=%+v claims=(%d,%d)",
+			pair, selectClaimLoad(a.claim), selectClaimLoad(b.claim))
+	}
+	if !pair.beginEffect() || !pair.commit() {
+		t.Fatal("strong cancellation incorrectly prohibited the physical channel effect")
+	}
+
+	for _, fixture := range []*channelClaimCoreFixture{a, b} {
+		requestChannelClaimCoreFixture(t, fixture)
+		pollChannelClaimCoreComplete(t, fixture)
+		slot, _ := channelOperationSlotFor(fixture.source, fixture.ids[0])
+		if slot.record.disposition != OperationDispositionCanceled ||
+			operationCandidateState(&slot.record) != OperationCommitCommitted ||
+			slot.record.resultState != operationResultDiscarded ||
+			preemptLoad(&slot.physical) != uint32(channelPhysicalCommitted) {
+			t.Fatalf("strong cancellation lost committed physical ownership: record=%+v physical=%d",
+				slot.record, preemptLoad(&slot.physical))
+		}
+		decision := takeChannelClaimCoreDecision(t, fixture)
+		if decision.outcome != ParkOutcomeCanceled || decision.caseID != 0 ||
+			decision.lease != (OperationResultLease{}) || decision.taskCancel != TaskCancelAbort {
+			t.Fatalf("cancellation-race decision = %+v", decision)
+		}
+		releaseChannelClaimCoreFixture(t, fixture, decision)
+	}
+}
+
+func TestChannelExternalValidationIgnoresUnrelatedActiveQueueMutation(t *testing.T) {
+	a := newChannelClaimCoreFixture(t, "channel-neighbor-race-a", []uint32{141}, true, 0)
+	b := newChannelClaimCoreFixture(t, "channel-neighbor-race-b", []uint32{142}, true, 0)
+	var pair channelExternalCommitPair
+	if result := beginChannelExternalCommitPair(
+		&pair, a.source, a.ids[0], a.claim, b.source, b.ids[0], b.claim,
+	); result != channelExternalCommitPairBeginPrepared {
+		t.Fatalf("prepare active-neighbor race pair = (%d,%+v)", result, pair)
+	}
+
+	// Another G may join and leave the same P's active queue while this target
+	// remains pinned by its admission and SelectClaim. These owner-only queue
+	// fields are outside the external endpoint validation domain.
+	neighbor := new(WaitSetRecord)
+	mutated := make(chan struct{})
+	mutationDone := make(chan struct{})
+	go func() {
+		close(mutated)
+		for iteration := 0; iteration < 1<<15; iteration++ {
+			neighbor.activeNext = &a.wait
+			a.wait.activePrev = neighbor
+			a.p.parkWaitHead = neighbor
+			runtime.Gosched()
+			a.p.parkWaitHead = &a.wait
+			a.wait.activePrev = nil
+			neighbor.activeNext = nil
+		}
+		close(mutationDone)
+	}()
+	<-mutated
+	valid := true
+	for iteration := 0; iteration < 1<<15; iteration++ {
+		if !validChannelExternalEndpointHeld(&pair.endpointA, a.claim) ||
+			!validChannelExternalEndpointHeld(&pair.endpointB, b.claim) {
+			valid = false
+			break
+		}
+		runtime.Gosched()
+	}
+	<-mutationDone
+	if !valid || a.p.parkWaitHead != &a.wait || a.p.parkWaitTail != &a.wait ||
+		a.wait.activePrev != nil || a.wait.activeNext != nil || neighbor.activeNext != nil ||
+		!validChannelExternalEndpointHeld(&pair.endpointA, a.claim) ||
+		!validChannelExternalEndpointHeld(&pair.endpointB, b.claim) || !pair.abort() {
+		t.Fatalf("unrelated active-queue mutation invalidated held endpoint: valid=%t pair=%+v queue=(%p,%p) target=(%p,%p)",
+			valid, pair, a.p.parkWaitHead, a.p.parkWaitTail, a.wait.activePrev, a.wait.activeNext)
+	}
+
+	for _, fixture := range []*channelClaimCoreFixture{a, b} {
+		if result := fixture.source.PostReady(fixture.ids[0]); result != ChannelOperationPosted {
+			t.Fatalf("post active-neighbor cleanup = %d", result)
+		}
+		requestChannelClaimCoreFixture(t, fixture)
+		pollChannelClaimCoreComplete(t, fixture)
+		decision := takeChannelClaimCoreDecision(t, fixture)
+		if decision.outcome != ParkOutcomeCompleted || !decision.lease.Valid() {
+			t.Fatalf("active-neighbor cleanup decision = %+v", decision)
+		}
+		releaseChannelClaimCoreFixture(t, fixture, decision)
+	}
+}
+
+func TestChannelReadyPublisherAndExternalBeginShareClaimDomain(t *testing.T) {
+	a := newChannelClaimCoreFixture(t, "channel-publish-claim-a", []uint32{75}, true, 0)
+	b := newChannelClaimCoreFixture(t, "channel-publish-claim-b", []uint32{76}, true, 0)
+	if result := a.source.PostReady(a.ids[0]); result != ChannelOperationPosted {
+		t.Fatalf("post readiness before claim-domain race = %d", result)
+	}
+	var pair channelExternalCommitPair
+	if result := beginChannelExternalCommitPair(
+		&pair, a.source, a.ids[0], a.claim, b.source, b.ids[0], b.claim,
+	); result != channelExternalCommitPairBeginPrepared {
+		t.Fatalf("prepare publisher-race pair = (%d,%+v)", result, pair)
+	}
+	slot, _ := channelOperationSlotFor(a.source, a.ids[0])
+	beforeRecord := slot.record
+	start := make(chan struct{})
+	published := make(chan bool, 1)
+	go func() {
+		<-start
+		valid := true
+		for iteration := 0; iteration < 1<<12; iteration++ {
+			completed, lost, ok := a.source.publishSlot(a.p, 0)
+			if !ok || completed != 0 || lost != 0 {
+				valid = false
+				break
+			}
+			runtime.Gosched()
+		}
+		published <- valid
+	}()
+	close(start)
+	for iteration := 0; iteration < 1<<12; iteration++ {
+		if !validChannelExternalEndpointHeld(&pair.endpointA, a.claim) ||
+			!validChannelExternalEndpointHeld(&pair.endpointB, b.claim) {
+			t.Fatalf("publisher contention invalidated held endpoints at %d", iteration)
+		}
+		runtime.Gosched()
+	}
+	if !<-published || slot.record != beforeRecord ||
+		preemptLoad(&slot.mailbox) != uint32(channelMailboxReady) ||
+		selectClaimLoad(a.claim) != selectClaimAcquiring || !pair.abort() {
+		t.Fatalf("claim-contended publisher touched record: record=%+v mailbox=%d claim=%d pair=%+v",
+			slot.record, preemptLoad(&slot.mailbox), selectClaimLoad(a.claim), pair)
+	}
+	if !a.source.beginPublishPass(a.p) {
+		t.Fatal("begin owner publication after external abort")
+	}
+	if completed, lost, ok := a.source.publishSlot(a.p, 0); !ok || completed != 1 || lost != 0 ||
+		operationCandidateState(&slot.record) != OperationCommitReady ||
+		selectClaimLoad(a.claim) != selectClaimOpen {
+		t.Fatalf("owner publication after claim release = (%d,%d,%t), record=%+v claim=%d",
+			completed, lost, ok, slot.record, selectClaimLoad(a.claim))
+	}
+	if result := b.source.PostReady(b.ids[0]); result != ChannelOperationPosted {
+		t.Fatalf("post publisher-race peer cleanup = %d", result)
+	}
+	for _, fixture := range []*channelClaimCoreFixture{a, b} {
+		requestChannelClaimCoreFixture(t, fixture)
+		pollChannelClaimCoreComplete(t, fixture)
+		decision := takeChannelClaimCoreDecision(t, fixture)
+		if decision.outcome != ParkOutcomeCompleted || !decision.lease.Valid() {
+			t.Fatalf("publisher-race cleanup decision = %+v", decision)
+		}
+		releaseChannelClaimCoreFixture(t, fixture, decision)
+	}
+}
+
+func TestChannelPairRawReleaseRequiresPreparedPhase(t *testing.T) {
+	a := newChannelClaimCoreFixture(t, "channel-release-phase-a", []uint32{77}, true, 0)
+	b := newChannelClaimCoreFixture(t, "channel-release-phase-b", []uint32{78}, true, 0)
+	var effect channelExternalCommitPair
+	if result := beginChannelExternalCommitPair(
+		&effect, a.source, a.ids[0], a.claim, b.source, b.ids[0], b.claim,
+	); result != channelExternalCommitPairBeginPrepared || !effect.beginEffect() {
+		t.Fatalf("enter Effect for raw-release gate = (%d,%+v)", result, effect)
+	}
+	beforeA, beforeB := effect.endpointA, effect.endpointB
+	beforeInflightA := preemptLoad(&beforeA.slot.inflight)
+	beforeInflightB := preemptLoad(&beforeB.slot.inflight)
+	if releaseChannelExternalCommitPairWithoutEffect(&effect) || effect.phase != channelExternalCommitPairEffect ||
+		effect.endpointA != beforeA || effect.endpointB != beforeB ||
+		preemptLoad(&beforeA.slot.inflight) != beforeInflightA ||
+		preemptLoad(&beforeB.slot.inflight) != beforeInflightB ||
+		selectClaimLoad(a.claim) != selectClaimCommitting || selectClaimLoad(b.claim) != selectClaimCommitting {
+		t.Fatalf("raw release crossed Effect boundary: pair=%+v inflight=(%#x,%#x) claims=(%d,%d)",
+			effect, preemptLoad(&beforeA.slot.inflight), preemptLoad(&beforeB.slot.inflight),
+			selectClaimLoad(a.claim), selectClaimLoad(b.claim))
+	}
+	if !effect.commit() {
+		t.Fatal("commit pair after rejected raw Effect release")
+	}
+	for _, fixture := range []*channelClaimCoreFixture{a, b} {
+		requestChannelClaimCoreFixture(t, fixture)
+		pollChannelClaimCoreComplete(t, fixture)
+		decision := takeChannelClaimCoreDecision(t, fixture)
+		if decision.outcome != ParkOutcomeCompleted || !decision.lease.Valid() {
+			t.Fatalf("Effect raw-release cleanup decision = %+v", decision)
+		}
+		releaseChannelClaimCoreFixture(t, fixture, decision)
+	}
+
+	c := newChannelClaimCoreFixture(t, "channel-release-broken-c", []uint32{79}, true, 0)
+	d := newChannelClaimCoreFixture(t, "channel-release-broken-d", []uint32{80}, true, 0)
+	var broken channelExternalCommitPair
+	if result := beginChannelExternalCommitPair(
+		&broken, c.source, c.ids[0], c.claim, d.source, d.ids[0], d.claim,
+	); result != channelExternalCommitPairBeginPrepared {
+		t.Fatalf("prepare Broken raw-release gate = (%d,%+v)", result, broken)
+	}
+	broken.phase = channelExternalCommitPairBroken
+	beforeA, beforeB = broken.endpointA, broken.endpointB
+	beforeInflightA = preemptLoad(&beforeA.slot.inflight)
+	beforeInflightB = preemptLoad(&beforeB.slot.inflight)
+	if releaseChannelExternalCommitPairWithoutEffect(&broken) || broken.phase != channelExternalCommitPairBroken ||
+		broken.endpointA != beforeA || broken.endpointB != beforeB ||
+		preemptLoad(&beforeA.slot.inflight) != beforeInflightA ||
+		preemptLoad(&beforeB.slot.inflight) != beforeInflightB ||
+		selectClaimLoad(c.claim) != selectClaimAcquiring || selectClaimLoad(d.claim) != selectClaimAcquiring {
+		t.Fatalf("raw release crossed Broken boundary: pair=%+v inflight=(%#x,%#x) claims=(%d,%d)",
+			broken, preemptLoad(&beforeA.slot.inflight), preemptLoad(&beforeB.slot.inflight),
+			selectClaimLoad(c.claim), selectClaimLoad(d.claim))
+	}
+	broken.phase = channelExternalCommitPairPrepared
+	if !broken.abort() {
+		t.Fatal("clean up synthetic Broken raw-release fixture")
+	}
+	for _, fixture := range []*channelClaimCoreFixture{c, d} {
+		if result := fixture.source.PostReady(fixture.ids[0]); result != ChannelOperationPosted {
+			t.Fatalf("post Broken raw-release cleanup = %d", result)
+		}
+		requestChannelClaimCoreFixture(t, fixture)
+		pollChannelClaimCoreComplete(t, fixture)
+		decision := takeChannelClaimCoreDecision(t, fixture)
+		if decision.outcome != ParkOutcomeCompleted || !decision.lease.Valid() {
+			t.Fatalf("Broken raw-release cleanup decision = %+v", decision)
+		}
+		releaseChannelClaimCoreFixture(t, fixture, decision)
+	}
+}
+
+func TestChannelCompatibilityResolversRejectForcedShapeWithoutMutation(t *testing.T) {
+	fixture := newChannelClaimCoreFixture(t, "channel-legacy-forced-reject", []uint32{91}, true, 0)
+	externallyCommitChannelCandidate(t, fixture, 0)
+	if !fixture.source.beginPublishPass(fixture.p) {
+		t.Fatal("begin forced compatibility publication pass")
+	}
+	slot, _ := channelOperationSlotFor(fixture.source, fixture.ids[0])
+	if published, lost, ok := fixture.source.publishSlot(fixture.p, 0); !ok || published != 1 || lost != 0 ||
+		!operationCandidateExternallyCommitted(&slot.record) {
+		t.Fatalf("publish forced compatibility candidate = (%d,%d,%t), record=%+v",
+			published, lost, ok, slot.record)
+	}
+
+	assertUnchanged := func(name string, state ParkState, record OperationRecord, wait WaitSetRecord,
+		head, tail *WaitSetRecord) {
+		t.Helper()
+		if fixture.task.g.park != state || slot.record != record || fixture.wait != wait ||
+			fixture.p.affectedWaitHead != head || fixture.p.affectedWaitTail != tail {
+			t.Fatalf("%s mutated claim-aware state: park=%+v record=%+v wait=%+v affected=(%p,%p)",
+				name, fixture.task.g.park, slot.record, fixture.wait,
+				fixture.p.affectedWaitHead, fixture.p.affectedWaitTail)
+		}
+	}
+	beforeState, beforeRecord, beforeWait := fixture.task.g.park, slot.record, fixture.wait
+	beforeHead, beforeTail := fixture.p.affectedWaitHead, fixture.p.affectedWaitTail
+	if resolution, request, status := ResolveParkSnapshotStep(
+		&fixture.task.g.park, fixture.ticket, ParkCommitAttempt{},
+	); status != ParkResolveInvalid || resolution != (CompletionResolution{}) || request != (ParkCommitRequest{}) {
+		t.Fatalf("generic Step accepted forced Channel shape = (%+v,%+v,%d)", resolution, request, status)
+	}
+	assertUnchanged("ResolveParkSnapshotStep", beforeState, beforeRecord, beforeWait, beforeHead, beforeTail)
+	if resolution, ok := ResolveParkSnapshot(&fixture.task.g.park, fixture.ticket); ok || resolution != (CompletionResolution{}) {
+		t.Fatalf("generic Resolve accepted forced Channel shape = (%+v,%t)", resolution, ok)
+	}
+	assertUnchanged("ResolveParkSnapshot", beforeState, beforeRecord, beforeWait, beforeHead, beforeTail)
+	if head, tail, resolution, ok := resolveAffectedWaitSets(fixture.p, &fixture.driver.sources); ok || head != nil || tail != nil || resolution != (CompletionResolution{}) {
+		t.Fatalf("legacy affected resolver accepted forced Channel shape = (%p,%p,%+v,%t)",
+			head, tail, resolution, ok)
+	}
+	assertUnchanged("resolveAffectedWaitSets", beforeState, beforeRecord, beforeWait, beforeHead, beforeTail)
+
+	requestChannelClaimCoreFixture(t, fixture)
+	pollChannelClaimCoreComplete(t, fixture)
+	decision := takeChannelClaimCoreDecision(t, fixture)
+	if decision.outcome != ParkOutcomeCompleted || decision.caseID != 91 || !decision.lease.Valid() {
+		t.Fatalf("claim-aware compatibility cleanup decision = %+v", decision)
+	}
+	releaseChannelClaimCoreFixture(t, fixture, decision)
+}
+
+func TestChannelReservationRejectsSplitSelectClaimDomainsBeforeVisibility(t *testing.T) {
+	tests := []struct {
+		name        string
+		firstClaim  bool
+		secondClaim bool
+		distinct    bool
+	}{
+		{name: "distinct-claims", firstClaim: true, secondClaim: true, distinct: true},
+		{name: "claim-then-nil", firstClaim: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			p := new(P)
+			source := new(ChannelOperationSource)
+			if !BindChannelOperationSource(source, p) {
+				t.Fatal("bind split-claim source")
+			}
+			g := new(G)
+			if !InitG(g) {
+				t.Fatal("initialize split-claim G")
+			}
+			ticket, ok := BeginParkSet(&g.park, 2, 107)
+			wait := new(WaitSetRecord)
+			if !ok || !PrepareWaitSetRecord(wait, g, ticket) {
+				t.Fatal("prepare split-claim wait")
+			}
+			var firstClaim, secondClaim *SelectClaim
+			if test.firstClaim {
+				firstClaim = new(SelectClaim)
+			}
+			if test.secondClaim {
+				if test.distinct || firstClaim == nil {
+					secondClaim = new(SelectClaim)
+				} else {
+					secondClaim = firstClaim
+				}
+			}
+			firstID, attached := source.ReserveAndAttachWait(p, &g.park, ticket, wait, 1, firstClaim)
+			if !attached || firstID.LocalSlot() != 1 {
+				t.Fatalf("reserve first split-claim case = (%+v,%t)", firstID, attached)
+			}
+			firstSlot, _ := channelOperationSlotFor(source, firstID)
+			beforeState, beforeFirst, beforeSecond := g.park, firstSlot.record, source.slots[1]
+			secondID, secondAttached := source.ReserveAndAttachWait(p, &g.park, ticket, wait, 2, secondClaim)
+			if secondAttached || secondID != (OperationID{}) || g.park != beforeState ||
+				firstSlot.record != beforeFirst || source.slots[1] != beforeSecond ||
+				preemptLoad(&source.slots[1].state) != uint32(producerSourceFree) ||
+				preemptLoad(&source.slots[1].generation) != 0 ||
+				selectClaimLoad(firstClaim) != selectClaimOpen || selectClaimLoad(secondClaim) != selectClaimOpen {
+				t.Fatalf("split claim became producer-visible: id=%+v attached=%t park=%+v slot=%+v claims=(%d,%d)",
+					secondID, secondAttached, g.park, source.slots[1],
+					selectClaimLoad(firstClaim), selectClaimLoad(secondClaim))
+			}
+			if admission, result := source.acquireExternalCommit(secondID); result != channelExternalCommitAcquireInvalid || admission != (channelExternalCommitAdmission{}) ||
+				preemptLoad(&source.slots[1].physical) != uint32(channelPhysicalIdle) {
+				t.Fatalf("rejected second peer entered effect path = (%+v,%d)", admission, result)
+			}
+
+			if firstClaim != nil && !source.AbortSelectPreparation(p, &g.park, ticket, wait, firstClaim) {
+				t.Fatal("terminalize first split claim")
+			} else if firstClaim == nil && !AbortParkSet(&g.park, ticket) {
+				t.Fatal("abort claim-less split preparation")
+			}
+			if source.ApplyOne(p, firstID, &firstSlot.record) != OperationApplyDetached ||
+				!source.ConfirmQuiesced(p, firstID) {
+				t.Fatal("apply first split-claim operation")
+			}
+			if firstClaim != nil && !source.ResetSelectClaim(p, firstClaim) {
+				t.Fatal("reset first split claim")
+			}
+			if !source.Recycle(p, firstID) {
+				t.Fatal("recycle first split-claim operation")
+			}
+			if outcome, _, lease, consumed := ConsumeParkSet(&g.park, ticket); !consumed || outcome != ParkOutcomeCanceled || lease != (OperationResultLease{}) ||
+				!ReleasePreparedWaitSetRecord(wait) {
+				t.Fatalf("consume split-claim abort = (%d,%+v,%t)", outcome, lease, consumed)
+			}
+			if !UnbindChannelOperationSource(source, p) || !source.CanRelease() {
+				t.Fatal("release split-claim source")
+			}
+		})
+	}
+}
+
+func TestChannelReservationRejectsMultiCandidateClaimlessDomainBeforeVisibility(t *testing.T) {
+	p := new(P)
+	source := new(ChannelOperationSource)
+	if !BindChannelOperationSource(source, p) {
+		t.Fatal("bind multi-candidate claim-less source")
+	}
+	g := new(G)
+	if !InitG(g) {
+		t.Fatal("initialize multi-candidate claim-less G")
+	}
+	ticket, ok := BeginParkSet(&g.park, 2, 108)
+	wait := new(WaitSetRecord)
+	if !ok || !PrepareWaitSetRecord(wait, g, ticket) {
+		t.Fatal("prepare multi-candidate claim-less wait")
+	}
+	beforePark, beforeSlot := g.park, source.slots[0]
+	if id, attached := source.ReserveAndAttachWait(p, &g.park, ticket, wait, 1, nil); attached ||
+		id != (OperationID{}) || g.park != beforePark || source.slots[0] != beforeSlot ||
+		preemptLoad(&source.slots[0].generation) != 0 ||
+		preemptLoad(&source.slots[0].state) != uint32(producerSourceFree) {
+		t.Fatalf("multi-candidate nil claim became producer-visible: id=%+v attached=%t park=%+v slot=%+v",
+			id, attached, g.park, source.slots[0])
+	}
+	if !AbortParkSet(&g.park, ticket) {
+		t.Fatal("abort rejected multi-candidate claim-less park")
+	}
+	if outcome, _, lease, consumed := ConsumeParkSet(&g.park, ticket); !consumed ||
+		outcome != ParkOutcomeCanceled || lease != (OperationResultLease{}) ||
+		!ReleasePreparedWaitSetRecord(wait) {
+		t.Fatalf("consume rejected multi-candidate claim-less park = (%d,%+v,%t)", outcome, lease, consumed)
+	}
+	if !UnbindChannelOperationSource(source, p) || !source.CanRelease() {
+		t.Fatal("release multi-candidate claim-less source")
+	}
+}
+
+func TestChannelReservationRejectsClaimReuseAcrossWaitsBeforeVisibility(t *testing.T) {
+	p := new(P)
+	source := new(ChannelOperationSource)
+	if !BindChannelOperationSource(source, p) {
+		t.Fatal("bind cross-wait claim source")
+	}
+	claim := new(SelectClaim)
+	firstG, secondG := new(G), new(G)
+	if !InitG(firstG) || !InitG(secondG) {
+		t.Fatal("initialize cross-wait claim Gs")
+	}
+	firstTicket, firstOK := BeginParkSet(&firstG.park, 1, 109)
+	secondTicket, secondOK := BeginParkSet(&secondG.park, 1, 110)
+	firstWait, secondWait := new(WaitSetRecord), new(WaitSetRecord)
+	if !firstOK || !secondOK ||
+		!PrepareWaitSetRecord(firstWait, firstG, firstTicket) ||
+		!PrepareWaitSetRecord(secondWait, secondG, secondTicket) {
+		t.Fatal("prepare cross-wait claim parks")
+	}
+	firstID, attached := source.ReserveAndAttachWait(p, &firstG.park, firstTicket, firstWait, 1, claim)
+	if !attached {
+		t.Fatal("reserve first cross-wait claim")
+	}
+	beforeSecond := source.slots[1]
+	if secondID, secondAttached := source.ReserveAndAttachWait(
+		p, &secondG.park, secondTicket, secondWait, 2, claim,
+	); secondAttached || secondID != (OperationID{}) || source.slots[1] != beforeSecond ||
+		preemptLoad(&source.slots[1].generation) != 0 || selectClaimLoad(claim) != selectClaimOpen {
+		t.Fatalf("claim reused across waits = (%+v,%t), slot=%+v claim=%d",
+			secondID, secondAttached, source.slots[1], selectClaimLoad(claim))
+	}
+	if !source.AbortSelectPreparation(p, &firstG.park, firstTicket, firstWait, claim) {
+		t.Fatal("abort first cross-wait claim preparation")
+	}
+	firstSlot, _ := channelOperationSlotFor(source, firstID)
+	if source.ApplyOne(p, firstID, &firstSlot.record) != OperationApplyDetached ||
+		!source.ConfirmQuiesced(p, firstID) || !source.ResetSelectClaim(p, claim) ||
+		!source.Recycle(p, firstID) {
+		t.Fatal("release first cross-wait claim operation")
+	}
+	if outcome, _, lease, consumed := ConsumeParkSet(&firstG.park, firstTicket); !consumed ||
+		outcome != ParkOutcomeCanceled || lease != (OperationResultLease{}) ||
+		!ReleasePreparedWaitSetRecord(firstWait) {
+		t.Fatalf("consume first cross-wait abort = (%d,%+v,%t)", outcome, lease, consumed)
+	}
+	if !AbortParkSet(&secondG.park, secondTicket) {
+		t.Fatal("abort unattached second cross-wait preparation")
+	}
+	if outcome, _, lease, consumed := ConsumeParkSet(&secondG.park, secondTicket); !consumed ||
+		outcome != ParkOutcomeCanceled || lease != (OperationResultLease{}) ||
+		!ReleasePreparedWaitSetRecord(secondWait) {
+		t.Fatalf("consume second cross-wait abort = (%d,%+v,%t)", outcome, lease, consumed)
+	}
+	if !UnbindChannelOperationSource(source, p) || !source.CanRelease() {
+		t.Fatal("release cross-wait claim source")
+	}
+}
+
+func TestChannelPreparationAbortLifecycleAndCanonicalClaimReset(t *testing.T) {
+	t.Run("seal-reject-multi-slot", func(t *testing.T) {
+		p := new(P)
+		source := new(ChannelOperationSource)
+		other := new(ChannelOperationSource)
+		if !BindChannelOperationSource(source, p) || BindChannelOperationSource(other, p) ||
+			p.channelSource != source || other.owner != nil {
+			t.Fatalf("canonical Channel source binding = source:%p canonical:%p otherOwner:%p",
+				source, p.channelSource, other.owner)
+		}
+		g := new(G)
+		if !InitG(g) {
+			t.Fatal("initialize Seal-abort G")
+		}
+		ticket, ok := BeginParkSet(&g.park, 2, 111)
+		wait := new(WaitSetRecord)
+		claim := new(SelectClaim)
+		if !ok || !PrepareWaitSetRecord(wait, g, ticket) {
+			t.Fatal("prepare Seal-abort wait")
+		}
+		ids := make([]OperationID, 2)
+		for index := range ids {
+			ids[index], ok = source.ReserveAndAttachWait(p, &g.park, ticket, wait, 7, claim)
+			if !ok {
+				t.Fatalf("reserve duplicate Seal-abort case %d", index)
+			}
+		}
+		if SealParkSet(&g.park, ticket) || g.park.phase != parkPreparing ||
+			!source.AbortSelectPreparation(p, &g.park, ticket, wait, claim) ||
+			g.park.phase != parkDetaching || selectClaimLoad(claim) != selectClaimClaimed ||
+			other.ResetSelectClaim(p, claim) {
+			t.Fatalf("Seal-abort domain = park:%+v claim:%d otherResetOwner:%p",
+				g.park, selectClaimLoad(claim), other.owner)
+		}
+		for index, id := range ids {
+			slot, _ := channelOperationSlotFor(source, id)
+			if source.ApplyOne(p, id, &slot.record) != OperationApplyDetached ||
+				!source.ConfirmQuiesced(p, id) {
+				t.Fatalf("apply Seal-abort case %d", index)
+			}
+			if index == 0 && source.ResetSelectClaim(p, claim) {
+				t.Fatal("reset multi-slot claim before every registration detached")
+			}
+		}
+		if !source.ResetSelectClaim(p, claim) || selectClaimLoad(claim) != selectClaimOpen {
+			t.Fatal("reset multi-slot claim after complete detach")
+		}
+		for _, id := range ids {
+			if !source.Recycle(p, id) {
+				t.Fatalf("recycle Seal-abort case %+v", id)
+			}
+		}
+		if outcome, _, lease, consumed := ConsumeParkSet(&g.park, ticket); !consumed ||
+			outcome != ParkOutcomeCanceled || lease != (OperationResultLease{}) ||
+			!ReleasePreparedWaitSetRecord(wait) {
+			t.Fatalf("consume Seal-abort park = (%d,%+v,%t)", outcome, lease, consumed)
+		}
+		if !UnbindChannelOperationSource(source, p) || !source.CanRelease() || !other.CanRelease() ||
+			p.channelSource != nil {
+			t.Fatal("release canonical Seal-abort sources")
+		}
+	})
+
+	t.Run("early-ready-before-park", func(t *testing.T) {
+		p := new(P)
+		source := new(ChannelOperationSource)
+		if !BindChannelOperationSource(source, p) {
+			t.Fatal("bind early-Ready abort source")
+		}
+		g := new(G)
+		if !InitG(g) {
+			t.Fatal("initialize early-Ready abort G")
+		}
+		ticket, ok := BeginParkSet(&g.park, 1, 113)
+		wait := new(WaitSetRecord)
+		claim := new(SelectClaim)
+		if !ok || !PrepareWaitSetRecord(wait, g, ticket) {
+			t.Fatal("prepare early-Ready abort wait")
+		}
+		id, attached := source.ReserveAndAttachWait(p, &g.park, ticket, wait, 9, claim)
+		if !attached || !SealParkSet(&g.park, ticket) || source.PostReady(id) != ChannelOperationPosted ||
+			!source.AbortSelectPreparation(p, &g.park, ticket, wait, claim) {
+			t.Fatal("abort sealed preparation with early Ready")
+		}
+		slot, _ := channelOperationSlotFor(source, id)
+		if g.state == GWaiting || wait.state != waitSetRecordPreparing ||
+			selectClaimLoad(claim) != selectClaimClaimed || !source.beginPublishPass(p) {
+			t.Fatal("early-Ready abort crossed physical park boundary")
+		}
+		if published, lost, publishOK := source.publishSlot(p, 0); !publishOK || published != 0 || lost != 1 ||
+			preemptLoad(&slot.mailbox) != uint32(channelMailboxEmpty) ||
+			operationCandidateIsPublished(&slot.record) {
+			t.Fatalf("drain early Ready after preparation abort = (%d,%d,%t), record=%+v mailbox=%d",
+				published, lost, publishOK, slot.record, preemptLoad(&slot.mailbox))
+		}
+		if source.ApplyOne(p, id, &slot.record) != OperationApplyDetached ||
+			!source.ConfirmQuiesced(p, id) || !source.ResetSelectClaim(p, claim) ||
+			!source.Recycle(p, id) {
+			t.Fatal("release early-Ready aborted operation")
+		}
+		if outcome, _, lease, consumed := ConsumeParkSet(&g.park, ticket); !consumed ||
+			outcome != ParkOutcomeCanceled || lease != (OperationResultLease{}) ||
+			!ReleasePreparedWaitSetRecord(wait) {
+			t.Fatalf("consume early-Ready abort = (%d,%+v,%t)", outcome, lease, consumed)
+		}
+		if !UnbindChannelOperationSource(source, p) || !source.CanRelease() {
+			t.Fatal("release early-Ready abort source")
+		}
+	})
+}
+
+func TestChannelExternalLeaseExhaustionRetiresOnlyClaimBackedReservation(t *testing.T) {
+	p := new(P)
+	source := new(ChannelOperationSource)
+	if !BindChannelOperationSource(source, p) {
+		t.Fatal("bind external-lease exhaustion source")
+	}
+	type preparedOperation struct {
+		g      *G
+		wait   *WaitSetRecord
+		claim  *SelectClaim
+		ticket ParkTicket
+		id     OperationID
+	}
+	prepare := func(withClaim bool, caseID uint32) preparedOperation {
+		t.Helper()
+		operation := preparedOperation{g: new(G), wait: new(WaitSetRecord)}
+		if !InitG(operation.g) {
+			t.Fatal("initialize external-lease preparation G")
+		}
+		var ok bool
+		operation.ticket, ok = BeginParkSet(&operation.g.park, 1, caseID)
+		if !ok || !PrepareWaitSetRecord(operation.wait, operation.g, operation.ticket) {
+			t.Fatal("prepare external-lease wait")
+		}
+		if withClaim {
+			operation.claim = new(SelectClaim)
+		}
+		operation.id, ok = source.ReserveAndAttachWait(
+			p, &operation.g.park, operation.ticket, operation.wait, caseID, operation.claim,
+		)
+		if !ok {
+			t.Fatal("reserve external-lease operation")
+		}
+		return operation
+	}
+	cleanup := func(operation preparedOperation) {
+		t.Helper()
+		if operation.claim != nil && !source.AbortSelectPreparation(
+			p, &operation.g.park, operation.ticket, operation.wait, operation.claim,
+		) {
+			t.Fatal("terminalize external-lease claim")
+		} else if operation.claim == nil && !AbortParkSet(&operation.g.park, operation.ticket) {
+			t.Fatal("abort claim-less external-lease preparation")
+		}
+		slot, ok := channelOperationSlotFor(source, operation.id)
+		if !ok || source.ApplyOne(p, operation.id, &slot.record) != OperationApplyDetached ||
+			!source.ConfirmQuiesced(p, operation.id) {
+			t.Fatal("apply external-lease aborted operation")
+		}
+		if operation.claim != nil && !source.ResetSelectClaim(p, operation.claim) {
+			t.Fatal("reset external-lease claim")
+		}
+		if !source.Recycle(p, operation.id) {
+			t.Fatal("recycle external-lease operation")
+		}
+		if outcome, _, lease, ok := ConsumeParkSet(&operation.g.park, operation.ticket); !ok || outcome != ParkOutcomeCanceled || lease != (OperationResultLease{}) ||
+			!ReleasePreparedWaitSetRecord(operation.wait) {
+			t.Fatalf("consume external-lease aborted park = (%d,%+v,%t)", outcome, lease, ok)
+		}
+	}
+
+	first := prepare(true, 101)
+	retired, _ := channelOperationSlotFor(source, first.id)
+	nearExhaustion := ^uint32(0) - 3
+	preemptStore(&retired.externalLease, nearExhaustion)
+	admission, acquired := source.acquireExternalCommit(first.id)
+	if acquired != channelExternalCommitAcquired || admission.token != nearExhaustion+1 ||
+		preemptLoad(&retired.externalLease) != nearExhaustion+1 {
+		t.Fatalf("acquire final external lease = (%+v,%d), lease=%#x", admission, acquired,
+			preemptLoad(&retired.externalLease))
+	}
+	if !admission.releaseWithoutCommit() || preemptLoad(&retired.externalLease) != ^uint32(0)-1 {
+		t.Fatalf("release final external lease = admission:%+v lease:%#x",
+			admission, preemptLoad(&retired.externalLease))
+	}
+	cleanup(first)
+	if !channelOperationReusableSlot(source, retired, 0) || channelOperationExternalReservable(retired) {
+		t.Fatalf("exhausted slot lifecycle/external state = reusable:%t external:%t lease:%#x",
+			channelOperationReusableSlot(source, retired, 0), channelOperationExternalReservable(retired),
+			preemptLoad(&retired.externalLease))
+	}
+
+	claimBacked := prepare(true, 102)
+	if claimBacked.id.LocalSlot() != 2 {
+		t.Fatalf("claim-backed reservation reused exhausted slot: id=%+v", claimBacked.id)
+	}
+	cleanup(claimBacked)
+	claimless := prepare(false, 103)
+	if claimless.id.LocalSlot() != 1 {
+		t.Fatalf("claim-less local reservation could not use lifecycle-empty retired slot: id=%+v", claimless.id)
+	}
+	cleanup(claimless)
+	if preemptLoad(&retired.externalLease) != ^uint32(0)-1 ||
+		!UnbindChannelOperationSource(source, p) || !source.CanRelease() {
+		t.Fatalf("retired external lease blocked lifecycle release: lease=%#x owner=%p releasable=%t",
+			preemptLoad(&retired.externalLease), source.owner, source.CanRelease())
+	}
 }
 
 func TestForcedResolutionBeginsLocallyAndVisitsOneLinkPerReduction(t *testing.T) {

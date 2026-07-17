@@ -176,6 +176,7 @@ func finishReadyDriverTasks(t *testing.T, p *P, tasks map[*G]*yieldingTestG) {
 func TestExecutorDriverBindCloseLifecycle(t *testing.T) {
 	p := new(P)
 	driver, registry, waits, handle := bindTestExecutorDriver(t, p)
+	lateChannel := new(ChannelOperationSource)
 	if waits.CanRelease() {
 		t.Fatal("bound wait table reported releasable")
 	}
@@ -187,6 +188,10 @@ func TestExecutorDriverBindCloseLifecycle(t *testing.T) {
 	}
 	if BindExecutor(new(ExecutorDriver), p, registry, handle, new(WaitRegistrationTable)) {
 		t.Fatal("P accepted a second executor binding")
+	}
+	if BindChannelOperationSource(lateChannel, p) || p.channelSource != nil || lateChannel.owner != nil ||
+		!validExecutorDriver(driver) {
+		t.Fatal("active driver accepted a late canonical Channel source")
 	}
 	if ConfirmExecutorClose(driver) {
 		t.Fatal("confirmed executor close before begin/join")
@@ -200,8 +205,45 @@ func TestExecutorDriverBindCloseLifecycle(t *testing.T) {
 		!waits.CanRelease() || !registry.CanRelease() {
 		t.Fatal("closed driver retained stable ownership")
 	}
-	if !BeginCommandShutdown(p, main) || !FinishCommandShutdown(p, main) || !TerminalG(p, main) {
+	if !BindChannelOperationSource(lateChannel, p) || BeginCommandShutdown(p, main) ||
+		!UnbindChannelOperationSource(lateChannel, p) {
+		t.Fatal("canonical Channel source crossed command-shutdown admission")
+	}
+	if !BeginCommandShutdown(p, main) {
+		t.Fatal("unbound command shutdown did not begin")
+	}
+	p.channelSource = lateChannel
+	if FinishCommandShutdown(p, main) {
+		t.Fatal("command shutdown finished with residual canonical Channel source")
+	}
+	p.channelSource = nil
+	if !FinishCommandShutdown(p, main) || !TerminalG(p, main) {
 		t.Fatal("unbound command shutdown did not reach terminal state")
+	}
+}
+
+func TestExecutorDriverRejectsPreboundChannelBeforeSourceSetMutation(t *testing.T) {
+	p := new(P)
+	channel := new(ChannelOperationSource)
+	driver := new(ExecutorDriver)
+	registry := new(ExecutorRegistry)
+	waits := new(WaitRegistrationTable)
+	handle := registerTestExecutor(t, registry)
+	if !BindChannelOperationSource(channel, p) {
+		t.Fatal("bind canonical Channel before executor")
+	}
+	if BindExecutor(driver, p, registry, handle, waits) || *driver != (ExecutorDriver{}) ||
+		p.executor != nil || preemptLoad(&p.executorMode) != executorModeUnbound ||
+		p.channelSource != channel || channel.owner != p || !waits.CanRelease() {
+		t.Fatalf("prebound Channel partially published executor: driver=%+v executor=%p mode=%d canonical=%p owner=%p waitsRelease=%t",
+			*driver, p.executor, preemptLoad(&p.executorMode), p.channelSource, channel.owner, waits.CanRelease())
+	}
+	if !UnbindChannelOperationSource(channel, p) || !channel.CanRelease() {
+		t.Fatal("release prebound canonical Channel after rejected executor")
+	}
+	retireTestExecutor(t, registry, handle)
+	if !registry.CanRelease() {
+		t.Fatal("release executor registry after prebind rejection")
 	}
 }
 

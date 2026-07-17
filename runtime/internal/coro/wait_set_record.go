@@ -304,12 +304,43 @@ func activateWaitSetRecord(p *P, g *G, record *WaitSetRecord) bool {
 	return true
 }
 
+// legacyAffectedWaitSetsClaimlessCompatible audits the complete affected FIFO
+// before the compatibility resolver detaches its head or changes any work
+// state. Channel candidates require the production claim-aware bounded cursor,
+// and an already committed ReadyThen effect requires its forced-resolution
+// entry even when a synthetic source ID is used. Reject both while the Park,
+// WaitSetRecord, and P queues are still byte-for-byte untouched.
+func legacyAffectedWaitSetsClaimlessCompatible(p *P) bool {
+	if !validParkWaitQueueHeader(p) || !validAffectedWaitQueueHeader(p) {
+		return false
+	}
+	for slow, fast := p.affectedWaitHead, p.affectedWaitHead; fast != nil && fast.workNext != nil; {
+		slow = slow.workNext
+		fast = fast.workNext.workNext
+		if slow == fast {
+			return false
+		}
+	}
+	var tail *WaitSetRecord
+	for record := p.affectedWaitHead; record != nil; record = record.workNext {
+		if record.work != waitSetWorkQueued || !validActiveWaitSetRecordFast(p, record) {
+			return false
+		}
+		if state := &record.g.park; state.phase == parkParked &&
+			parkSnapshotRequiresClaimAwareResolution(state, record.ticket) {
+			return false
+		}
+		tail = record
+	}
+	return tail == p.affectedWaitTail
+}
+
 // resolveAffectedWaitSets detaches the current FIFO as one published-epoch batch.
 // Pending initial visits are discarded; terminal or already-detaching parks
 // remain in the returned linear batch until every source has applied and
 // detached its OperationRecords.
 func resolveAffectedWaitSets(p *P, sources *ExecutorSourceSet) (batchHead, batchTail *WaitSetRecord, total CompletionResolution, ok bool) {
-	if !validParkWaitQueueHeader(p) || !validAffectedWaitQueueHeader(p) {
+	if !legacyAffectedWaitSetsClaimlessCompatible(p) {
 		return nil, nil, CompletionResolution{}, false
 	}
 	head := p.affectedWaitHead
