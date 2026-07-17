@@ -117,11 +117,13 @@ func (sources *ExecutorSourceSet) timerTable() *TimerRegistrationTable {
 	return sources.timers
 }
 
-// drain consumes one complete source-set snapshot and then asks scheduler park
-// state to promote newly ready Gs. Source order is a property of the static
-// catalog, not of the executor transaction. Partial completion counts are
-// retained on failure.
-func (sources *ExecutorSourceSet) drain(p *P, now int64, withDeadline bool) (scan executorSourceScan, ok bool) {
+// publishPass consumes one complete source catalog pass without resolving a
+// logical wait or promoting a G. A producer may publish into an earlier source
+// after that source was scanned, so even a complete catalog pass is not yet a
+// fair multi-source snapshot. ExecutorDriver establishes the quiet cut with
+// request acknowledgement and an unconditional full recheck before calling
+// resolveAfterQuietCut. Partial completion counts are retained on failure.
+func (sources *ExecutorSourceSet) publishPass(p *P, now int64, withDeadline bool) (scan executorSourceScan, ok bool) {
 	if !sources.acceptsScan(p, now, withDeadline) {
 		return executorSourceScan{}, false
 	}
@@ -137,8 +139,19 @@ func (sources *ExecutorSourceSet) drain(p *P, now int64, withDeadline bool) (sca
 			return scan, false
 		}
 	}
-	scan.promoted, ok = pollReady(p)
-	return scan, ok
+	return scan, true
+}
+
+// resolveAfterQuietCut is the only SourceSet entry that may resolve logical
+// park state and publish runnable work. The caller must have completed a full
+// publish/ack/full-recheck transaction with no new fact, pending source, or
+// executor request. Keeping this separate prevents static source order from
+// becoming a select tie breaker.
+func (sources *ExecutorSourceSet) resolveAfterQuietCut(p *P) (promoted int, ok bool) {
+	if !validExecutorSourceSet(sources, p) {
+		return 0, false
+	}
+	return pollReady(p)
 }
 
 // pending reports producer-published facts that require another owner scan.

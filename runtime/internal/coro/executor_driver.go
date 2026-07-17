@@ -232,20 +232,20 @@ func BindExecutorWithTimers(driver *ExecutorDriver, p *P, registry *ExecutorRegi
 	return timers != nil && bindExecutor(driver, p, registry, handle, waits, timers)
 }
 
-func drainExecutorSourcesInState(driver *ExecutorDriver, now int64, withDeadline bool, state executorDriverState) (scan executorSourceScan, ok bool) {
+func publishExecutorSourcesInState(driver *ExecutorDriver, now int64, withDeadline bool, state executorDriverState) (scan executorSourceScan, ok bool) {
 	if !validExecutorDriver(driver) || driver.state != state || !idleExecutorScheduler(driver.p) {
 		return executorSourceScan{}, false
 	}
-	return driver.sources.drain(driver.p, now, withDeadline)
+	return driver.sources.publishPass(driver.p, now, withDeadline)
 }
 
-func drainExecutorSourcesAt(driver *ExecutorDriver, now int64, withDeadline bool) (scan executorSourceScan, ok bool) {
-	return drainExecutorSourcesInState(driver, now, withDeadline, executorDriverActive)
+func publishExecutorSourcesAt(driver *ExecutorDriver, now int64, withDeadline bool) (scan executorSourceScan, ok bool) {
+	return publishExecutorSourcesInState(driver, now, withDeadline, executorDriverActive)
 }
 
-func drainExecutorSources(driver *ExecutorDriver) (drained, promoted int, ok bool) {
-	scan, ok := drainExecutorSourcesAt(driver, 0, false)
-	return scan.completed, scan.promoted, ok
+func publishExecutorSources(driver *ExecutorDriver) (drained int, ok bool) {
+	scan, ok := publishExecutorSourcesAt(driver, 0, false)
+	return scan.completed, ok
 }
 
 func pollExecutorSourcesAt(driver *ExecutorDriver, now int64, withDeadline bool) (total executorSourceScan, ok bool) {
@@ -256,7 +256,7 @@ func pollExecutorSourcesAt(driver *ExecutorDriver, now int64, withDeadline bool)
 		return executorSourceScan{}, false
 	}
 	for {
-		first, passOK := drainExecutorSourcesAt(driver, now, withDeadline)
+		first, passOK := publishExecutorSourcesAt(driver, now, withDeadline)
 		total.add(first)
 		if !passOK {
 			return total, false
@@ -267,13 +267,18 @@ func pollExecutorSourcesAt(driver *ExecutorDriver, now int64, withDeadline bool)
 
 		// This pass is unconditional. A producer may have coalesced into the
 		// request that Acknowledge just cleared, and pending is only advisory.
-		recheck, recheckOK := drainExecutorSourcesAt(driver, now, withDeadline)
+		recheck, recheckOK := publishExecutorSourcesAt(driver, now, withDeadline)
 		total.add(recheck)
 		if !recheckOK {
 			return total, false
 		}
 		if recheck.completed == 0 && !driver.sources.pending(driver.p) &&
 			!driver.registry.ObserveRequested(driver.handle) {
+			promoted, resolveOK := driver.sources.resolveAfterQuietCut(driver.p)
+			total.promoted += promoted
+			if !resolveOK {
+				return total, false
+			}
 			return total, true
 		}
 	}
@@ -367,7 +372,7 @@ func PrepareExecutorSleep(driver *ExecutorDriver) (sleep bool, ok bool) {
 
 	// Scan facts, not just pending, after publishing IdleArmed. This closes a
 	// producer paused between Posted and its advisory pending store.
-	drained, promoted, scanOK := drainExecutorSources(driver)
+	drained, scanOK := publishExecutorSources(driver)
 	if !scanOK {
 		// ArmIdle succeeded from exact zero, so the only legal gates here are
 		// IdleArmed with or without Requested and LeaveIdle must disarm either.
@@ -376,7 +381,7 @@ func PrepareExecutorSleep(driver *ExecutorDriver) (sleep bool, ok bool) {
 		_, _ = driver.registry.LeaveIdle(driver.handle)
 		return false, false
 	}
-	hasWork := drained != 0 || promoted != 0 || driver.p.readyHead != nil || driver.sources.pending(driver.p) ||
+	hasWork := drained != 0 || driver.p.readyHead != nil || driver.sources.pending(driver.p) ||
 		driver.registry.ObserveRequested(driver.handle) || preemptLoad(&driver.p.schedule) != scheduleIdle
 	if hasWork {
 		if _, _, ok = leaveExecutorIdleAndPoll(driver); !ok {
@@ -421,12 +426,12 @@ func PrepareExecutorSleepAt(driver *ExecutorDriver, now int64) (prepared bool, o
 
 	// Scan facts, not just pending, after publishing IdleArmed. Commit performs
 	// another complete scan at a caller-supplied fresh timestamp.
-	scan, scanOK := drainExecutorSourcesAt(driver, now, true)
+	scan, scanOK := publishExecutorSourcesAt(driver, now, true)
 	if !scanOK {
 		_ = leaveExecutorIdle(driver)
 		return false, false
 	}
-	hasWork := scan.completed != 0 || scan.promoted != 0 || driver.p.readyHead != nil ||
+	hasWork := scan.completed != 0 || driver.p.readyHead != nil ||
 		driver.sources.pending(driver.p) || driver.registry.ObserveRequested(driver.handle) ||
 		preemptLoad(&driver.p.schedule) != scheduleIdle
 	if hasWork {
@@ -457,12 +462,12 @@ func CommitExecutorSleepAt(driver *ExecutorDriver, now int64) (sleep bool, deadl
 		return false, 0, false, false
 	}
 
-	scan, scanOK := drainExecutorSourcesInState(driver, now, true, executorDriverIdlePreparing)
+	scan, scanOK := publishExecutorSourcesInState(driver, now, true, executorDriverIdlePreparing)
 	if !scanOK {
 		_ = leaveExecutorIdle(driver)
 		return false, 0, false, false
 	}
-	hasWork := scan.completed != 0 || scan.promoted != 0 || driver.p.readyHead != nil ||
+	hasWork := scan.completed != 0 || driver.p.readyHead != nil ||
 		driver.sources.pending(driver.p) || driver.registry.ObserveRequested(driver.handle) ||
 		preemptLoad(&driver.p.schedule) != scheduleIdle
 	if hasWork {

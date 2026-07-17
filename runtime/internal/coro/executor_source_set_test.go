@@ -33,7 +33,7 @@ func TestExecutorSourceSetScansCompleteStaticCatalog(t *testing.T) {
 		t.Fatalf("post aggregate wait = %d, pending=%t", posted, sources.pending(p))
 	}
 
-	scan, ok := sources.drain(p, 90, true)
+	scan, ok := sources.publishPass(p, 90, true)
 	if !ok || scan.completed != 1 || scan.waits != 1 || scan.timers != 0 || scan.promoted != 0 ||
 		!scan.hasDeadline || scan.deadline != 100 || sources.pending(p) {
 		t.Fatalf("first aggregate scan = %+v, ok=%t, pending=%t", scan, ok, sources.pending(p))
@@ -46,7 +46,7 @@ func TestExecutorSourceSetScansCompleteStaticCatalog(t *testing.T) {
 		t.Fatalf("retire completed aggregate wait = (%d, %t)", result, ok)
 	}
 
-	scan, ok = sources.drain(p, 100, true)
+	scan, ok = sources.publishPass(p, 100, true)
 	if !ok || scan.completed != 1 || scan.waits != 0 || scan.timers != 1 || scan.promoted != 0 ||
 		scan.hasDeadline || scan.deadline != 0 {
 		t.Fatalf("second aggregate scan = %+v, ok=%t", scan, ok)
@@ -62,6 +62,61 @@ func TestExecutorSourceSetScansCompleteStaticCatalog(t *testing.T) {
 		!waits.CanRelease() || !timers.CanRelease() {
 		t.Fatal("unbind source set")
 	}
+}
+
+func TestExecutorSourceSetDefersPromotionUntilQuietCut(t *testing.T) {
+	p := new(P)
+	waits := new(WaitRegistrationTable)
+	sources := new(ExecutorSourceSet)
+	if !bindExecutorSourceSet(sources, p, waits, nil) {
+		t.Fatal("bind source set")
+	}
+
+	task := newYieldingTestG(t, "quiet-cut")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue quiet-cut task")
+	}
+	g, ok := NextRunnable(p)
+	if !ok || g != task.g {
+		t.Fatalf("dequeue quiet-cut task = (%p, %t)", g, ok)
+	}
+	action := beginWaitTestResume(t, p, task)
+	token, ticket, wait := registerTestWait(t, waits, p)
+	task.frame.header.SuspendReason = uint16(SuspendPark)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+	if !PreparePark(task.g, task.handle, task.frame.header, token, ticket) {
+		t.Fatal("prepare quiet-cut park")
+	}
+	if action, ok = Resumed(p, task.g, action); !ok || action.Kind != ActionPark {
+		t.Fatalf("commit quiet-cut park = (%+v, %t)", action, ok)
+	}
+	if posted := waits.Post(wait); posted != WaitRegistrationPosted {
+		t.Fatalf("post quiet-cut wait = %d", posted)
+	}
+
+	scan, ok := sources.publishPass(p, 0, false)
+	if !ok || scan.completed != 1 || scan.promoted != 0 {
+		t.Fatalf("quiet-cut publish = (%+v, %t)", scan, ok)
+	}
+	if !task.g.waiting || task.g.state != GWaiting || p.readyHead != nil {
+		t.Fatal("publish pass promoted a G before the quiet cut")
+	}
+	if promoted, ok := sources.resolveAfterQuietCut(p); !ok || promoted != 1 {
+		t.Fatalf("quiet-cut resolve = (%d, %t)", promoted, ok)
+	}
+	if task.g.waiting || task.g.state != GRunnable || p.readyHead != task.g {
+		t.Fatal("quiet-cut resolve did not promote the completed G")
+	}
+
+	retireCompletedRegistration(t, waits, wait)
+	if !unbindExecutorSourceSet(sources, p) {
+		t.Fatal("unbind source set")
+	}
+	g, ok = NextRunnable(p)
+	if !ok || g != task.g {
+		t.Fatalf("dequeue promoted quiet-cut task = (%p, %t)", g, ok)
+	}
+	finishWaitTestTask(t, p, task, beginWaitTestResume(t, p, task))
 }
 
 func TestExecutorSourceSetBindRollsBackEarlierSources(t *testing.T) {
