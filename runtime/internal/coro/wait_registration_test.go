@@ -102,7 +102,7 @@ func TestWaitRegistrationCancellationRequiresQuiescenceAndConsumption(t *testing
 	p := new(P)
 	token, ticket, handle := registerTestWait(t, table, p)
 	slot, _ := registrationSlot(table, handle)
-	if !registrationAcquireProducer(slot) {
+	if acquireProducerSourceGeneration(&slot.producerSourceSlot, handle.Generation) != producerSourceAcquired {
 		t.Fatal("model admitted callback")
 	}
 	if result := table.BeginClose(handle); result != WaitRegistrationCloseStarted {
@@ -117,7 +117,9 @@ func TestWaitRegistrationCancellationRequiresQuiescenceAndConsumption(t *testing
 	if result, ok := table.ConfirmQuiesced(handle); ok || result != WaitCancelInvalid {
 		t.Fatalf("quiesced with inflight callback = (%d, %t)", result, ok)
 	}
-	registrationReleaseProducer(slot)
+	if !producerAdmissionReleaseChecked(&slot.inflight) {
+		t.Fatal("release admitted callback")
+	}
 	if result, ok := table.ConfirmQuiesced(handle); !ok || result != WaitCancelWon {
 		t.Fatalf("confirm cancellation quiescence = (%d, %t)", result, ok)
 	}
@@ -140,7 +142,8 @@ func TestWaitRegistrationAdmittedOldProducerPinsSlotGeneration(t *testing.T) {
 	slot, _ := registrationSlot(table, old)
 	// Model an old callback immediately after it acquired a producer lease and
 	// validated the old generation, but before it attempted Active->Posting.
-	if !registrationAcquireProducer(slot) || preemptLoad(&slot.generation) != old.Generation {
+	if acquireProducerSourceGeneration(&slot.producerSourceSlot, old.Generation) != producerSourceAcquired ||
+		preemptLoad(&slot.generation) != old.Generation {
 		t.Fatal("admit old producer")
 	}
 	if table.BeginClose(old) != WaitRegistrationCloseStarted {
@@ -152,7 +155,9 @@ func TestWaitRegistrationAdmittedOldProducerPinsSlotGeneration(t *testing.T) {
 	if state := waitRegistrationState(preemptLoad(&slot.state)); state != waitRegistrationClosingCancel {
 		t.Fatalf("closing state = %d", state)
 	}
-	registrationReleaseProducer(slot)
+	if !producerAdmissionReleaseChecked(&slot.inflight) {
+		t.Fatal("release old producer")
+	}
 	if result, ok := table.ConfirmQuiesced(old); !ok || result != WaitCancelWon {
 		t.Fatalf("confirm pinned generation = (%d, %t)", result, ok)
 	}
