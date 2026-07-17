@@ -355,6 +355,47 @@ func TestScalarResultLosersClearBeforeResolutionAck(t *testing.T) {
 	recycleScalarCommitFake(t, source, cells)
 }
 
+func TestScalarResultCleanupIgnoresInvalidPayloadMetadata(t *testing.T) {
+	t.Run("staged", func(t *testing.T) {
+		id, ok := MakeOperationID(OperationSourceManual, 1, 1)
+		if !ok {
+			t.Fatal("make staged scalar operation ID")
+		}
+		cell := ScalarResultCell{id: id}
+		if cell.payload.Valid() || !clearStagedScalarOperationResult(&cell, id) || cell != (ScalarResultCell{}) {
+			t.Fatal("invalid staged payload blocked exact cleanup")
+		}
+	})
+
+	t.Run("unselected", func(t *testing.T) {
+		source := newCommitSelectFakeSource(t, 0x809, []commitSelectCandidateSpec{{caseID: 90}}, []int{0}, false, 0)
+		payload := scalarPayloadForTest(t, 1, 51)
+		var cell ScalarResultCell
+		if PublishScalarOperationCompletion(&cell, &source.records[0], source.ids[0], payload) != OperationCompletionPublished ||
+			!RequestParkCancel(source.state, source.ticket, ParkCancelTaskAbort) {
+			t.Fatal("prepare invalid unselected scalar payload")
+		}
+		if resolution, status := source.resolve(t); status != ParkResolveResolved || resolution.Canceled != 1 ||
+			resolution.Losers != 1 {
+			t.Fatalf("resolve invalid unselected scalar payload = (%+v,%d)", resolution, status)
+		}
+		cell.payload.Meta = 0
+		if cell.payload.Valid() || !DiscardUnselectedScalarOperationResult(&cell, &source.records[0], source.ids[0]) ||
+			cell != (ScalarResultCell{}) || source.records[0].resultState != operationResultDiscarded {
+			t.Fatal("invalid unselected payload blocked loser cleanup")
+		}
+		if !AcknowledgeOperationResolution(&source.records[0], source.ids[0], OperationDispositionCanceled) ||
+			!DetachParkWaitOperation(source.state, source.ticket, &source.records[0], source.ids[0]) ||
+			!ConfirmOperationQuiesced(&source.records[0], source.ids[0]) {
+			t.Fatal("finish invalid unselected scalar payload")
+		}
+		if outcome, _, lease, ok := ConsumeParkSet(source.state, source.ticket); !ok || outcome != ParkOutcomeCanceled ||
+			lease.Valid() || !ReleasePreparedWaitSetRecord(&source.wait) || !RecycleOperation(&source.records[0], source.ids[0]) {
+			t.Fatal("consume invalid unselected scalar payload")
+		}
+	})
+}
+
 func TestScalarReadyFailureRepublishAndBindDoNotLeak(t *testing.T) {
 	source := newCommitSelectFakeSource(t, 0x806, []commitSelectCandidateSpec{{
 		caseID: 87, mode: OperationCommitReadyThenTryCommit,

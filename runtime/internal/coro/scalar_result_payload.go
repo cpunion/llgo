@@ -157,7 +157,7 @@ func stageScalarOperationResult(cell *ScalarResultCell, id OperationID, payload 
 }
 
 func clearStagedScalarOperationResult(cell *ScalarResultCell, id OperationID) bool {
-	if cell == nil || cell.id != id || !id.Valid() || !cell.payload.Valid() {
+	if cell == nil || cell.id != id || !id.Valid() {
 		return false
 	}
 	*cell = ScalarResultCell{}
@@ -283,7 +283,7 @@ func DiscardScalarOperationResult(cell *ScalarResultCell, record *OperationRecor
 // before the generic Owned -> Discarded transition; only then may the source
 // acknowledge and detach this loser.
 func DiscardUnselectedScalarOperationResult(cell *ScalarResultCell, record *OperationRecord, id OperationID) bool {
-	if cell == nil || record == nil || cell.id != id || !cell.payload.Valid() || !record.Matches(id) ||
+	if cell == nil || record == nil || cell.id != id || !record.Matches(id) ||
 		record.phase != operationActive || record.resolutionApplied ||
 		(record.disposition != OperationDispositionLost && record.disposition != OperationDispositionCanceled) ||
 		!operationCandidateSettledForDisposition(record, record.disposition) || record.resultState != operationResultOwned {
