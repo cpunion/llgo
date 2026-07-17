@@ -199,7 +199,7 @@ func idleExecutorScheduler(p *P) bool {
 // quiesced every legacy source that knew this P, including a call paused before
 // its executorMode load; executorMode is a capability guard, not a refcounted
 // admission barrier for migration from the legacy ABI.
-func bindExecutor(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, waits *WaitRegistrationTable, timers *TimerRegistrationTable) bool {
+func bindExecutor(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, catalog ExecutorSourceCatalog) bool {
 	if driver == nil || driver.magic != 0 || driver.state != executorDriverUnbound || driver.p != nil ||
 		driver.registry != nil || driver.handle != (ExecutorHandle{}) || driver.sources != (ExecutorSourceSet{}) ||
 		driver.prepareNow != 0 || driver.hasPrepareNow ||
@@ -207,7 +207,7 @@ func bindExecutor(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, hand
 		p == nil || p.executor != nil || preemptLoad(&p.executorMode) != executorModeUnbound ||
 		preemptLoad(&p.schedule) != scheduleIdle || !idleExecutorScheduler(p) ||
 		p.readyHead != nil || p.readyTail != nil || p.waitHead != nil || p.waitTail != nil ||
-		!activeExecutorHandle(registry, handle) || !bindExecutorSourceSet(&driver.sources, p, waits, timers) {
+		!activeExecutorHandle(registry, handle) || !bindExecutorSourceSet(&driver.sources, p, catalog) {
 		return false
 	}
 	driver.magic = executorDriverMagic
@@ -221,7 +221,7 @@ func bindExecutor(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, hand
 }
 
 func BindExecutor(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, waits *WaitRegistrationTable) bool {
-	return bindExecutor(driver, p, registry, handle, waits, nil)
+	return bindExecutor(driver, p, registry, handle, ExecutorSourceCatalog{Waits: waits})
 }
 
 // BindExecutorWithTimers preserves the timer-aware V1 binding ABI while
@@ -229,7 +229,14 @@ func BindExecutor(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, hand
 // explicit At poll/sleep/wake APIs, so omitting a monotonic timestamp fails
 // closed instead of silently delaying expiry.
 func BindExecutorWithTimers(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, waits *WaitRegistrationTable, timers *TimerRegistrationTable) bool {
-	return timers != nil && bindExecutor(driver, p, registry, handle, waits, timers)
+	return timers != nil && bindExecutor(driver, p, registry, handle, ExecutorSourceCatalog{Waits: waits, Timers: timers})
+}
+
+// BindExecutorSourceCatalog binds a frozen direct-call source catalog. It is
+// the extensible entry point; the V1 helpers above retain their exact source
+// subsets without creating timer/manual/host API combinations.
+func BindExecutorSourceCatalog(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, catalog ExecutorSourceCatalog) bool {
+	return bindExecutor(driver, p, registry, handle, catalog)
 }
 
 func publishExecutorSourcesInState(driver *ExecutorDriver, now int64, withDeadline bool, state executorDriverState) (scan executorSourceScan, ok bool) {

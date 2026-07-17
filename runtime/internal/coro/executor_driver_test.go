@@ -47,6 +47,19 @@ func bindTestExecutorDriverWithTimers(t *testing.T, p *P) (*ExecutorDriver, *Exe
 	return driver, registry, waits, timers, handle
 }
 
+func bindTestExecutorDriverWithManual(t *testing.T, p *P) (*ExecutorDriver, *ExecutorRegistry, *WaitRegistrationTable, *ManualOperationSource, ExecutorHandle) {
+	t.Helper()
+	driver := new(ExecutorDriver)
+	registry := new(ExecutorRegistry)
+	waits := new(WaitRegistrationTable)
+	manual := new(ManualOperationSource)
+	handle := registerTestExecutor(t, registry)
+	if !BindExecutorSourceCatalog(driver, p, registry, handle, ExecutorSourceCatalog{Waits: waits, Manual: manual}) {
+		t.Fatal("bind manual-source test executor driver")
+	}
+	return driver, registry, waits, manual, handle
+}
+
 func closeTestExecutorDriver(t *testing.T, driver *ExecutorDriver) {
 	t.Helper()
 	if !BeginExecutorClose(driver) {
@@ -190,6 +203,73 @@ func TestExecutorDriverBindCloseLifecycle(t *testing.T) {
 	if !BeginCommandShutdown(p, main) || !FinishCommandShutdown(p, main) || !TerminalG(p, main) {
 		t.Fatal("unbound command shutdown did not reach terminal state")
 	}
+}
+
+func TestExecutorDriverManualSourceUsesUnifiedQuietCutAndParkGate(t *testing.T) {
+	p := new(P)
+	driver, registry, waits, manual, executor := bindTestExecutorDriverWithManual(t, p)
+	task := newYieldingTestG(t, "driver-manual")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue manual-source driver task")
+	}
+	if g, ok := NextRunnable(p); !ok || g != task.g {
+		t.Fatal("dequeue manual-source driver task")
+	}
+	action := beginWaitTestResume(t, p, task)
+	ticket, ok := BeginParkSet(&task.g.park, 2, 73)
+	if !ok {
+		t.Fatal("begin manual-source driver park")
+	}
+	first, firstOK := manual.ReserveAndAttach(p, &task.g.park, ticket, 101)
+	second, secondOK := manual.ReserveAndAttach(p, &task.g.park, ticket, 202)
+	if !firstOK || !secondOK || !SealParkSet(&task.g.park, ticket) {
+		t.Fatal("attach manual-source driver candidates")
+	}
+	task.frame.header.SuspendReason = uint16(SuspendPark)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+	if !PrepareParkSet(task.g, task.handle, task.frame.header, ticket) {
+		t.Fatal("prepare manual-source driver park")
+	}
+	if action, ok = Resumed(p, task.g, action); !ok || action.Kind != ActionPark {
+		t.Fatalf("commit manual-source driver park = (%+v, %t)", action, ok)
+	}
+
+	if posted := manual.Post(first); posted != ManualOperationPosted {
+		t.Fatalf("post manual-source driver completion = %d", posted)
+	}
+	if requested := registry.Request(executor); requested != ExecutorRequestPublished {
+		t.Fatalf("request manual-source driver poll = %d", requested)
+	}
+	if drained, promoted, ok := PollExecutor(driver); !ok || drained != 1 || promoted != 1 {
+		t.Fatalf("poll manual-source driver = (%d, %d, %t)", drained, promoted, ok)
+	}
+	firstSlot, _ := manualOperationSlotFor(manual, first)
+	secondSlot, _ := manualOperationSlotFor(manual, second)
+	if firstSlot.record.disposition != OperationDispositionWinner || secondSlot.record.disposition != OperationDispositionLost ||
+		firstSlot.record.phase != operationDetached || secondSlot.record.phase != operationDetached || HasWaiting(p) {
+		t.Fatal("unified manual-source transaction did not resolve and detach every candidate")
+	}
+
+	if g, ok := NextRunnable(p); !ok || g != task.g {
+		t.Fatal("dequeue manual-source promoted task")
+	}
+	action = beginWaitTestResume(t, p, task)
+	outcome, caseID, lease, taskCancel, ok := TakeRunDecision(task.g, ticket)
+	leaseID, leaseOK := lease.ID()
+	if !ok || outcome != ParkOutcomeCompleted || caseID != 101 || taskCancel != TaskCancelNone || !leaseOK || leaseID != first {
+		t.Fatalf("take manual-source driver decision = (%d, %d, %+v, %d, %t)", outcome, caseID, lease, taskCancel, ok)
+	}
+	if !manual.ConfirmQuiesced(p, first) || !manual.ConfirmQuiesced(p, second) ||
+		!manual.TakeResult(p, lease) || !manual.Recycle(p, first) || !manual.Recycle(p, second) {
+		t.Fatal("release manual-source driver operations")
+	}
+	yieldRunningDriverTask(t, p, task, action)
+	closeTestExecutorDriver(t, driver)
+	finishReadyDriverTasks(t, p, map[*G]*yieldingTestG{task.g: task})
+	if !TerminalG(p, task.g) || !manual.CanRelease() || !waits.CanRelease() || !registry.CanRelease() {
+		t.Fatal("manual-source driver cleanup retained state")
+	}
+	runtime.KeepAlive(task.frame.memory)
 }
 
 func TestExecutorDriverTimerBindingIsTransactionalAndAPIFamiliesDoNotMix(t *testing.T) {

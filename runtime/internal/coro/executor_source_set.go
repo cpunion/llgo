@@ -42,6 +42,7 @@ type ExecutorSourceSet struct {
 	owner  *P
 	waits  *WaitRegistrationTable
 	timers *TimerRegistrationTable
+	manual *ManualOperationSource
 }
 
 const executorSourceSetMagic uint32 = 0x53524331 // "SRC1"
@@ -50,6 +51,8 @@ type executorSourceScan struct {
 	completed   int
 	waits       int
 	timers      int
+	manual      int
+	manualLost  int
 	promoted    int
 	deadline    int64
 	hasDeadline bool
@@ -59,6 +62,8 @@ func (scan *executorSourceScan) add(other executorSourceScan) {
 	scan.completed += other.completed
 	scan.waits += other.waits
 	scan.timers += other.timers
+	scan.manual += other.manual
+	scan.manualLost += other.manualLost
 	scan.promoted += other.promoted
 	// Every successful source-set scan reports the complete current deadline
 	// view, so the last scan is authoritative rather than a minimum of stale
@@ -72,25 +77,44 @@ func validExecutorSourceSet(sources *ExecutorSourceSet, p *P) bool {
 		sources.waits == nil || sources.waits.owner != p {
 		return false
 	}
-	return sources.timers == nil || sources.timers.owner == p
+	return (sources.timers == nil || sources.timers.owner == p) &&
+		(sources.manual == nil || sources.manual.owner == p)
+}
+
+// ExecutorSourceCatalog is the frozen direct-call source catalog for one
+// executor. Waits remains mandatory during the V1 migration; every additional
+// source is optional and extends the common transaction without adding another
+// scheduler driver or interface dispatch layer.
+type ExecutorSourceCatalog struct {
+	Waits  *WaitRegistrationTable
+	Timers *TimerRegistrationTable
+	Manual *ManualOperationSource
 }
 
 // bindExecutorSourceSet binds every statically configured source as one
 // transaction. A later-source failure rolls back earlier empty bindings and
 // leaves the source set exact-zero.
-func bindExecutorSourceSet(sources *ExecutorSourceSet, p *P, waits *WaitRegistrationTable, timers *TimerRegistrationTable) bool {
-	if sources == nil || *sources != (ExecutorSourceSet{}) || p == nil || waits == nil ||
-		!bindRegistrationTable(waits, p) {
+func bindExecutorSourceSet(sources *ExecutorSourceSet, p *P, catalog ExecutorSourceCatalog) bool {
+	if sources == nil || *sources != (ExecutorSourceSet{}) || p == nil || catalog.Waits == nil ||
+		!bindRegistrationTable(catalog.Waits, p) {
 		return false
 	}
-	if timers != nil && !bindTimerRegistrationTable(timers, p) {
-		_ = unbindRegistrationTable(waits, p)
+	if catalog.Timers != nil && !bindTimerRegistrationTable(catalog.Timers, p) {
+		_ = unbindRegistrationTable(catalog.Waits, p)
+		return false
+	}
+	if catalog.Manual != nil && !BindManualOperationSource(catalog.Manual, p) {
+		if catalog.Timers != nil {
+			_ = unbindTimerRegistrationTable(catalog.Timers, p)
+		}
+		_ = unbindRegistrationTable(catalog.Waits, p)
 		return false
 	}
 	sources.magic = executorSourceSetMagic
 	sources.owner = p
-	sources.waits = waits
-	sources.timers = timers
+	sources.waits = catalog.Waits
+	sources.timers = catalog.Timers
+	sources.manual = catalog.Manual
 	return true
 }
 
@@ -139,6 +163,15 @@ func (sources *ExecutorSourceSet) publishPass(p *P, now int64, withDeadline bool
 			return scan, false
 		}
 	}
+	if sources.manual != nil {
+		published, lost, manualOK := sources.manual.PublishPass(p)
+		scan.manual = int(published)
+		scan.manualLost = int(lost)
+		scan.completed += scan.manual + scan.manualLost
+		if !manualOK {
+			return scan, false
+		}
+	}
 	return scan, true
 }
 
@@ -151,6 +184,22 @@ func (sources *ExecutorSourceSet) resolveAfterQuietCut(p *P) (promoted int, ok b
 	if !validExecutorSourceSet(sources, p) {
 		return 0, false
 	}
+	// Phase one resolves every source's affected entries against the same
+	// complete sticky snapshot. When another V2 source joins this catalog, its
+	// ResolveAffected call belongs here before any ApplyAndDetach call below.
+	if sources.manual != nil {
+		if _, _, resolved := sources.manual.ResolveAffectedAfterQuietCut(p); !resolved {
+			return 0, false
+		}
+	}
+	// Phase two applies each source's winner/loser disposition and clears every
+	// ParkLink. Keeping the phases global prevents a source scanned first from
+	// detaching a cross-source loser before that loser's affected entry is seen.
+	if sources.manual != nil {
+		if _, _, applied := sources.manual.ApplyAndDetach(p); !applied {
+			return 0, false
+		}
+	}
 	return pollReady(p)
 }
 
@@ -158,7 +207,8 @@ func (sources *ExecutorSourceSet) resolveAfterQuietCut(p *P) (promoted int, ok b
 // Deadline sources are sampled by drain and represented by the aggregate
 // deadline; future deadlines are not pending runnable work.
 func (sources *ExecutorSourceSet) pending(p *P) bool {
-	return validExecutorSourceSet(sources, p) && sources.waits.Pending()
+	return validExecutorSourceSet(sources, p) &&
+		(sources.waits.Pending() || sources.manual != nil && sources.manual.Pending())
 }
 
 func (sources *ExecutorSourceSet) nextDeadline(p *P) (deadline int64, hasDeadline, ok bool) {
@@ -170,7 +220,8 @@ func (sources *ExecutorSourceSet) nextDeadline(p *P) (deadline int64, hasDeadlin
 
 func (sources *ExecutorSourceSet) empty(p *P) bool {
 	return validExecutorSourceSet(sources, p) && registrationTableEmpty(sources.waits, p) &&
-		(sources.timers == nil || timerRegistrationTableEmpty(sources.timers, p))
+		(sources.timers == nil || timerRegistrationTableEmpty(sources.timers, p)) &&
+		(sources.manual == nil || manualOperationSourceEmpty(sources.manual, p))
 }
 
 // drainForClose consumes sources that can publish without a clock sample and
@@ -183,7 +234,19 @@ func (sources *ExecutorSourceSet) drainForClose(p *P) (scan executorSourceScan, 
 	}
 	scan.waits, ok = sources.waits.drainFor(p)
 	scan.completed = scan.waits
-	if !ok || !sources.empty(p) {
+	if !ok {
+		return scan, false
+	}
+	if sources.manual != nil {
+		published, lost, manualOK := sources.manual.PublishPass(p)
+		scan.manual = int(published)
+		scan.manualLost = int(lost)
+		scan.completed += scan.manual + scan.manualLost
+		if !manualOK {
+			return scan, false
+		}
+	}
+	if !sources.empty(p) {
 		return scan, false
 	}
 	return scan, true
@@ -191,6 +254,9 @@ func (sources *ExecutorSourceSet) drainForClose(p *P) (scan executorSourceScan, 
 
 func unbindExecutorSourceSet(sources *ExecutorSourceSet, p *P) bool {
 	if !validExecutorSourceSet(sources, p) || !sources.empty(p) {
+		return false
+	}
+	if sources.manual != nil && !UnbindManualOperationSource(sources.manual, p) {
 		return false
 	}
 	if sources.timers != nil && !unbindTimerRegistrationTable(sources.timers, p) {

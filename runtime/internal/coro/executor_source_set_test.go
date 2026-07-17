@@ -23,7 +23,7 @@ func TestExecutorSourceSetScansCompleteStaticCatalog(t *testing.T) {
 	waits := new(WaitRegistrationTable)
 	timers := new(TimerRegistrationTable)
 	sources := new(ExecutorSourceSet)
-	if !bindExecutorSourceSet(sources, p, waits, timers) || !validExecutorSourceSet(sources, p) {
+	if !bindExecutorSourceSet(sources, p, ExecutorSourceCatalog{Waits: waits, Timers: timers}) || !validExecutorSourceSet(sources, p) {
 		t.Fatal("bind source set")
 	}
 
@@ -68,7 +68,7 @@ func TestExecutorSourceSetDefersPromotionUntilQuietCut(t *testing.T) {
 	p := new(P)
 	waits := new(WaitRegistrationTable)
 	sources := new(ExecutorSourceSet)
-	if !bindExecutorSourceSet(sources, p, waits, nil) {
+	if !bindExecutorSourceSet(sources, p, ExecutorSourceCatalog{Waits: waits}) {
 		t.Fatal("bind source set")
 	}
 
@@ -129,11 +129,31 @@ func TestExecutorSourceSetBindRollsBackEarlierSources(t *testing.T) {
 	}
 
 	sources := new(ExecutorSourceSet)
-	if bindExecutorSourceSet(sources, p, waits, timers) || *sources != (ExecutorSourceSet{}) ||
+	if bindExecutorSourceSet(sources, p, ExecutorSourceCatalog{Waits: waits, Timers: timers}) || *sources != (ExecutorSourceSet{}) ||
 		!waits.CanRelease() || waits.owner != nil || timers.owner != other {
 		t.Fatal("failed source-set bind did not roll back transaction")
 	}
 	if !unbindTimerRegistrationTable(timers, other) || !timers.CanRelease() {
 		t.Fatal("release conflicting timer source")
+	}
+}
+
+func TestExecutorSourceSetBindRollsBackWaitAndTimerBeforeOwnedManualSource(t *testing.T) {
+	p := new(P)
+	other := new(P)
+	waits := new(WaitRegistrationTable)
+	timers := new(TimerRegistrationTable)
+	manual := new(ManualOperationSource)
+	if !BindManualOperationSource(manual, other) {
+		t.Fatal("bind conflicting manual source")
+	}
+
+	sources := new(ExecutorSourceSet)
+	if bindExecutorSourceSet(sources, p, ExecutorSourceCatalog{Waits: waits, Timers: timers, Manual: manual}) ||
+		*sources != (ExecutorSourceSet{}) || !waits.CanRelease() || !timers.CanRelease() || manual.owner != other {
+		t.Fatal("failed manual-source bind did not roll back earlier source bindings")
+	}
+	if !UnbindManualOperationSource(manual, other) || !manual.CanRelease() {
+		t.Fatal("release conflicting manual source")
 	}
 }
