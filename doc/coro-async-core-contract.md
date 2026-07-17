@@ -102,6 +102,24 @@ Import 时 summary 参与与源码函数相同的固定点；link 时验证版�
 
 Compiler 不得按 `time.Sleep`、`read` 等函数名证明 prepare/park/retire。若确需 frame-borrow，必须使用通用、版本化的 `SuspendRegionContract` 描述角色、retained roots、alias closure、lifetime end、GC policy 和 no-preempt region；优先通过稳定 operation record消除 borrow。
 
+### 3.5 Resume gate 与逐 frame cleanup
+
+每次非final suspension epoch恢复时都先进入compiler-owned resume gate。initial entry、普通yield/park、child await和conditional suspend的true-resume边都执行gate；conditional false边直接进入normal join；final suspend、CoroSplit ramp和destroy helper永远不执行gate。直线型gate只能读取并消费`RunDecision`；需要转入cleanup或select reconciliation时，compiler必须使用可终止的dispatch gate，并保留一个compiler-owned normal block作为SSA/PHI的唯一普通后继。全局default与单个suspend site override互斥，不能让任意callback夺走CoroBuilder的logical tail所有权。
+
+Gate不能只看task cancellation后立即销毁frame。每个suspend site先完成本地reconciliation：child await读取parent-owned completion；park/select按exact ticket取得outcome、case和result lease；被task stop压制的selected result仍按`OperationID`显式discard。然后才进入共享cleanup入口。这样completion、operation cancel、panic/Goexit与task stop不会因同时可见而漏掉payload或physical resource。
+
+每个可能cleanup的coroutine frame使用可跨suspend的显式状态机，而不在LLVM coroutine之间保存native jump buffer：
+
+```text
+Idle -> Draining(cursor, control stack)
+     -> AwaitingDeferredCall -> Draining
+     -> PublishingCompletion -> FinalSuspended
+```
+
+defer参数在statement执行时求值一次；cursor保证LIFO defer即使自身park也只执行一次。`Return/Panic/Goexit/Abort/Shutdown`是不同control kind；defer中的新panic压在原control之上，recover只消费direct deferred invocation携带的`RecoverToken{panicGeneration, ownerFrame}`，原Goexit或task stop在该panic被recover后继续。`Abort/Shutdown`运行defer但不可被recover；`os.Exit`仍不运行defer。
+
+Child的frame可能在parent恢复前销毁，因此非普通终态不能只留在child header或G的一次性cancel token。structured await使用parent-owned、release/acquire发布的versioned `CompletionRecord`保存`Return/Panic/Goexit/Abort/Shutdown`、panic identity和用户result；parent先读取kind，只有`Return`才读取普通result。root终态同样在destroy前复制到稳定boundary/G storage。现有cleanup-free terminal panic和直接command destroy只能保留为证明无defer/recover的受限快路径，不能作为通用Go unwind。
+
 ## 4. Scheduler 与 operation contract
 
 ### 4.1 稳定对象
@@ -160,6 +178,8 @@ physical ParkSource slot
 
 这里的V2 `ParkState`首先覆盖timer、I/O、host、worker和IRQ等“完成事实一旦发布就可提交”的多事件等待。完整Go channel `select`还多一层语言契约：channel和send右值只求值一次；nil case被禁用；只有没有通信可提交时才选择`default`；closed receive、closed send panic以及当前所有可执行通信之间的uniform pseudo-random selection都必须保持。event-ready snapshot只能提名candidate，channel candidate必须在channel同步域内执行原子`TryCommit(ticket, case)`；若状态已变化则继续尝试本轮其他candidate或重新park。因此当前多事件wait-set是channel select lowering的公共底座，但尚不能单独宣称已经完成Go channel select。
 
+每种candidate在catalog中固定一种commit contract：`ReadyThenTryCommit`只提名ready并在自己的同步域提交（channel）；`Reservable`先取得可回滚reservation，winner提交、loser退回；`IrreversibleCompletion`表示副作用已经发生，只有result允许明确discard时才能参加多路等待。resolver只处理这些统一的claim/disposition，不尝试为任意I/O伪造事务回滚。
+
 取消是分层协议，不是一个boolean：
 
 1. `CancelRequested`：已将请求durable publish，但completion仍可能已经获胜。
@@ -180,6 +200,8 @@ Completion与取消必须竞争同一terminal ownership；已经完成的syscall
 | Kotlin [`suspendCancellableCoroutine`](https://kotlinlang.org/api/kotlinx.coroutines/kotlinx-coroutines-core/kotlinx.coroutines/suspend-cancellable-coroutine.html) | 与`CoroutineDispatcher`协同的prompt cancellation：ready但尚未执行时仍可转入cleanup，同时保留`onCancellation`结果资源清理责任 | 把该保证泛化到任意interceptor；每G常驻`Job`、`CoroutineContext`、异常对象和callback链 |
 | Java [virtual thread](https://openjdk.org/jeps/444)与interrupt | 保持同步阻塞调用风格；逻辑G与carrier M分离；各operation定义取消后的error/close语义 | stackful heap stack、可清除interrupt flag、`Thread.stop`以及把Loom误当成公平time-slice抢占 |
 | C# async、`CancellationToken`与[`IValueTaskSource`](https://learn.microsoft.com/en-us/dotnet/api/system.threading.tasks.sources.ivaluetasksource-1) | cooperative cancellation、同步完成fast path、opaque version token、可复用operation source和单次结果消费 | 默认`Task`对象ABI、隐式ExecutionContext捕获、同步取消callback和用异常承载runtime core状态 |
+| Haskell [`STM/orElse`](https://hackage.haskell.org/package/stm/docs/Control-Monad-STM.html)与`async` | 多路等待先组合再原子commit；`mask/bracket`把取消交付与资源cleanup分离；调度budget必须覆盖立即ready路径 | 异步异常注入任意用户点、STM retry log、lazy runtime或heap stack成为Go ABI |
+| Ada [selective accept](https://www.adaic.org/resources/add_content/standards/05rm/html/RM-9-7-1.html)与CSP/[core.async `alts!`](https://clojure.github.io/core.async/clojure.core.async.html) | 多候选只提交一个alternative，timeout/default与普通候选共享明确选择点；败者registration必须撤销 | stackful task/rendezvous runtime、异步transfer-of-control或每次select创建channel handler对象图 |
 | JavaScript Promise与`AbortSignal` | abort state、通知与physical completion分离；host callback只带generation token | abort listener可在`abort()`中同步执行，llgo仍只允许publish fact；不用`Promise.race`实现Go select，不让microtask直接resume G；Promise loser默认继续运行，不能代替detach barrier |
 | Python [Trio cancel scope](https://trio.readthedocs.io/en/stable/reference-core.html) / AnyIO | cancellation是level-triggered sticky状态，只在checkpoint交付；deadline、嵌套scope和shield是可组合的控制结构；cleanup可继续await | 用异常承载runtime core状态、每层调用动态分配scope/context，或强制普通`go f()`进入结构化task tree |
 | [OCaml 5 effect handler](https://ocaml.org/manual/effects.html)与Eio switch | continuation是one-shot并只由handler/executor恢复；显式switch可收口child与resource lifetime | multi-shot/clone continuation、source/waker直接resume LLVM handle，或引入通用algebraic-effect ABI |
@@ -189,19 +211,27 @@ Completion与取消必须竞争同一terminal ownership；已经完成的syscall
 | RTOS/baremetal event loop | ISR只写固定POD slot/ring、sticky bit并通知executor；result写入/release publish与owner acquire drain配对；generation先校验再访问结果；静态容量、明确溢出策略和one-shot alarm | 用`volatile`替代happens-before；每G一个RTOS task、ISR分配/加锁/访问Go pointer、每operation一个event-group object |
 | Zig/freestanding工程约束 | 显式allocator、无隐藏线程、target capability与确定性allocation failure | 不把它当作成熟异步模型，也不依赖Zig的语言级coroutine ABI；该能力并不是可供llgo复用的稳定契约 |
 
-这些模型共同支持一条轻量流水线：producer只发布`OpID`对应的sticky source fact并触发可合并doorbell；owner P完整drain所有source后扫描受影响的wait-set；按预生成随机rank选择winner；source对loser执行detach或生成pointer-free tombstone；最后才enqueue G。初期实现可以扫描P的waiting集合验证正确性，但最终高并发实现应由source记录affected wait-set，不能把每轮`O(全部parked G)`冻结成长期契约。
+这些模型共同支持一条轻量流水线：producer只发布`OpID`对应的sticky source fact并触发可合并doorbell；owner P按有界publication epoch完整访问所有source，再扫描受影响的wait-set；按预生成随机rank选择winner；source对loser执行detach或生成pointer-free tombstone；最后才enqueue G。初期实现可以扫描P的waiting集合验证正确性，但最终高并发实现应由source记录affected wait-set，不能把每轮`O(全部parked G)`冻结成长期契约。
 
 由这些参考模型得到的公共约束是：
 
-- continuation永远one-shot；`resume`、`destroy`和terminal completion只能由唯一owner排他提交，source、waker、requester和ISR都不得直接执行它们；
+- one-shot的单位是一次suspension epoch的`ResumePermit(frame, epoch)`，不是整个LLVM coroutine frame；同一frame可以跨多个epoch反复suspend/resume，但每个epoch的resume或destroy权只能消费一次，destroy使全部旧permit失效；
 - operation的logical terminal、ParkLink detach、backend quiescence和storage recycle是四个不同阶段；完成可以携带普通值或error payload，task stop则转入cleanup控制流，不能用一个`done`位混合；
 - cancellation是durable单调事实，只能在safepoint、park boundary或resume prologue claim；claim后冻结本次cause，cleanup/defer允许再次park且不会被同一请求反复打断；
+- cancel registration必须完成`reserve/attach -> 观察sticky cancel -> backend admission -> 再确认`的无缝握手，或由backend提供等价原子register；cancel发生在任何窗口都不能遗漏，也不能在loser detach前释放result ownership；
 - 每类operation必须声明取消强度：不可取消、仅阻止启动、cooperative或best-effort physical cancel；已发生的syscall/I/O副作用不能追溯撤销；
+- 每个select candidate还必须声明commit模式：`ReadyThenTryCommit`、`Reservable`或`IrreversibleCompletion`。不可回滚且loser副作用不可接受的operation不能伪装成通用select candidate；Go channel只在channel同步域`TryCommit`；
+- backend `Start`只执行一次，inline同步完成仍只能publish一个terminal fact，不能递归resume、Poll或运行cleanup；value、普通Go `error`、panic/Goexit/task-stop必须保持不同payload或控制流分类；
+- 每个source静态声明mailbox合并代数：one-shot、OR、max、saturating-count、replace-latest或bounded queue；容量耗尽必须同步失败、背压或发布可观测overflow fact，不能静默丢失；
 - structured scope是按API显式创建的可选对象；scope close需要等待child terminal和其source quiescence，普通`go f()`不为此常驻父子树；
-- 每个P对control、timer、I/O、host和worker source采用有界公平drain，不能复制JS microtask或高优先级dispatch source无限压制其他source的行为；
+- 每个P对control、timer、I/O、host和worker source采用有界公平drain；连续producer不能阻止已经claim的epoch进入resolve/promotion，也不能复制JS microtask或高优先级dispatch source无限压制其他source；
+- 调度budget覆盖所有取得进展的路径，包括立即ready wrapper、连续child await、runtime helper、source batch和ready task连跑，而不只compiler loop backedge；超长不可切分helper必须转有界worker；
+- executor禁止同线程递归re-entry，也禁止两个M同时拥有一个P；同步`requestRun` callback只置pending后返回，WASM/embedded slice若返回`more`必须安排下一次host entry；
 - 同步完成保留allocation-free fast path；只有真正跨线程、跨host或开放lifetime的边界才分配`{slot,generation}` endpoint。
 
 基础G因此只保留`TaskCancelKind`和`Idle -> Requested -> CleanupClaimed`的轻量phase，复用现有preempt/park/SourceSet wake路径；claim后冻结terminal cause，cleanup/defer内可以再次park而不会被同一请求反复取消。Go本身没有任意goroutine handle，不为每个G常驻外部handle registry。`context`、I/O和host取消仍是普通`OperationID`事件。`Goexit`是当前G同步进入cleanup的独立compiler控制流，不是可向其他G注入的task cancel kind。只有未来某个host/export API明确暴露可取消task handle时，才为该边界分配generation端点。
+
+显式host/export task handle使用固定容量`TaskControlSource`，其producer ABI仍是两字`OperationID`。producer只把`Abort/Shutdown`按强度单调合并到原子mailbox，再走公共executor request/doorbell；owner P每轮对每个slot最多取一个合并事实，因此高频control请求不能饿死timer、I/O或IRQ source。endpoint close先seal admission，close前已经接受的fact仍必须交付；task已经terminal时才作为正常late fact丢弃。generation只有在所有已进入producer返回、final drain完成且owner清除G指针后才能复用。这相当于采纳`stop_token`的单调状态、Trio的checkpoint交付和dispatch source的cancel/quiescence分离，但没有同步callback、每G对象树或foreign-thread cleanup。
 
 `ParkReady`不等于selected continuation已经开始执行。为兼容Kotlin所谓prompt cancellation但不引入其Job/exception对象，LLGo在每个P保留一个瞬态`RunDecision`槽：`PollReady`只把完成detach barrier的G移入ready queue；scheduler在返回`ActionResume`前消费ParkState、claim task cancellation并发布ticket/outcome/case/result lease；compiler生成的resume prologue必须先取走exact ticket的decision，再复制或丢弃winner result并选择普通continuation或cleanup。未取走、ticket不匹配或重复取走均fail closed。decision在P上按执行资源计费，不给每个G增加常驻结果字段；编译期布局预算将`ParkState`锁定为64-bit 56 bytes/32-bit 48 bytes，将`RunDecision`锁定为64-bit 40 bytes/32-bit 36 bytes。
 
@@ -213,7 +243,7 @@ Completion与取消必须竞争同一terminal ownership；已经完成的syscall
 
 Event source概念上提供以下 owner-side能力；实现不要求使用 Go interface，可由静态 source table、generated ops或目标特化函数实现：
 
-- `Drain(now)`：消费producer mailbox并把完成事实sticky publish到source-owned `OperationRecord`；
+- `Publish(now, budget)`：在pass入口capture本source当前可claim的有界prefix/slots，把事实sticky publish到source-owned `OperationRecord`；未claim或并发到达的事实保持`Pending`留给下一epoch；
 - `ResolveAffected()`：只能在完整SourceSet drain barrier之后扫描受影响wait-set并决定logical outcome；
 - `NextDeadline()`：返回最早绝对 monotonic deadline；
 - `Cancel(OpID)`：竞争或发布取消；
@@ -234,23 +264,24 @@ Source-specific submit保留在各自模块，但成功后必须返回统一 `Op
 
 引入第三种 fake source时，compiler不变，executor idle/shutdown算法不复制，只增加source实现和SourceSet注册。这是第一项结构验收。
 
-不设置中心化completion fact容量。`OperationRecord.completionPublished`本身是durable fact；所有source完成publish pass后，再由各source枚举本轮affected operation并调用同一个park resolver。多个candidate指向同一ParkState时，第一次扫描完整sticky snapshot完成决策，后续重复项看到已进入detaching phase即可跳过。因此winner不依赖source顺序，也不需要每P固定大数组、batch overflow或全局transaction rollback。
+不设置中心化completion fact容量。`OperationRecord.completionPublished`本身是durable fact；所有source完成一个有界publication epoch后，再由各source枚举本轮affected operation并调用同一个park resolver。多个candidate指向同一ParkState时，第一次扫描本epoch完整sticky snapshot完成决策，后续重复项看到已进入detaching phase即可跳过。因此epoch开始前已durable的winner不依赖source顺序，也不需要每P固定大数组、batch overflow或全局transaction rollback；epoch进行期间并发到达的事实允许本轮或下一轮处理。
 
-高并发promotion使用直接park物理协程frame内的临时`WaitSetRecord`，不为所有G常驻增加`prevWait`或affected link。record只包含owner G、exact ParkTicket、active-wait双链和affected work link/state；预计64-bit为48 bytes、32-bit/WASM为28 bytes。active双链允许ready wait-set在O(1)内从P移除，per-P单指针循环affected FIFO在quiet cut后切成线性batch；同一wait-set的多个source fact通过`clean/queued/processing/dirty`状态合并。bootstrap或无法由compiler提供frame slot的入口使用调用方提供的静态pool，且必须在任何producer admission前reserve；native profile可选择可增长pool，baremetal/RTOS必须显式声明静态容量和同步失败。
+高并发promotion使用直接park物理协程frame内的临时`WaitSetRecord`，不为所有G常驻增加`prevWait`或affected link。record只包含owner G、exact ParkTicket、active-wait双链和affected work link/state；64-bit为48 bytes、32-bit/WASM为28 bytes。active双链允许ready wait-set在O(1)内从P移除，per-P affected FIFO在每个published epoch结束时切成线性batch；同一wait-set的多个source fact通过`clean/queued/processing/dirty`状态合并。bootstrap或无法由compiler提供frame slot的入口使用调用方提供的静态pool，且必须在任何producer admission前reserve；native profile可选择可增长pool，baremetal/RTOS必须显式声明静态容量和同步失败。
 
-该结构只让同时parked的任务付费，并保持producer/ISR仍只处理两字POD `OperationID`。完成迁移后，`G.nextWait`可原位替换成一个`waitRecord`指针，P现有wait head/tail改指向record而不增尺寸，P仅增加affected tail一个指针。热路径还必须把`validWaitQueue/validReadyQueue/validParkState`的全量结构审计改为O(1) header/preflight；完整审计保留在测试、debug和terminal边界，否则即使affected queue正确，executor仍会隐含扫描全部waiter/candidate。目标复杂度是`O(F + A + C)`：本轮source fact数F、受影响wait-set数A以及这些wait-set的candidate数C，与其余parked G无关。
+该结构只让同时parked的任务付费，并保持producer/ISR仍只处理两字POD `OperationID`。迁移阶段legacy与V2各保留一对active head/tail，P另有affected head/tail，`Frame`暂存一个record pointer；legacy删除后应让`G.nextWait`原位承担当前record入口并合并这些队列字段。V2 fact mark、affected pop、promotion以及record-aware attach/detach已经只做O(1) header/邻接preflight，完整审计保留在测试、debug和terminal边界；`ParkLink.previous`由同时parked的source-owned operation支付。目标复杂度是`O(F + A + C)`：本轮source fact数F、受影响wait-set数A以及这些wait-set的candidate数C，与其余parked G无关。
 
 ### 5.3 防丢唤醒 idle transaction
 
 所有平台执行相同协议：
 
-1. Active poll先Publish完整 SourceSet，只把producer mailbox转成sticky operation fact，不决定winner或resume G。
-2. Acknowledge coalesced executor request，再无条件完整Publish一次；若又出现fact、pending或request则重复该poll transaction。
-3. 只有得到无新fact、无pending且无request的quiet cut，才统一`ResolveAffected -> Apply/Detach -> Promote`。
-4. 检查local ready、global injection和waiting状态；确实需要阻塞时才发布`IdleArmed`。
-5. `IdleArmed`后无条件final Publish完整SourceSet。若发现工作，先离开idle gate，再重新执行完整active poll，不能在idle gate中直接resolve。
-6. 若仍无工作，按最早deadline执行`CommitSleep`。
-7. Platform wait返回后先离开idle gate，再执行完整active poll。
+1. Active poll执行有界epoch A：完整访问一次SourceSet，把各source本轮claim的producer mailbox转成sticky operation fact，随后立即统一`ResolveAffected -> Apply/Detach -> Promote`。
+2. Acknowledge coalesced executor request。
+3. 无条件执行同构的有界epoch B，然后本次Poll返回；B结束时即使仍有pending/request，也只表示下一次Poll仍需服务，不能循环等待producer静默。这样持续producer不能饿死A已经claim的wait-set。
+4. A前已durable但其request在ack前被coalesce的fact必被B的完整catalog pass看见；ack后到达的request保持sticky。epoch中未claim的fact仍留在source mailbox，不依赖瞬时全局快照。
+5. 检查local ready、global injection和waiting状态；确实需要阻塞时才发布`IdleArmed`。
+6. `IdleArmed`后无条件final Publish完整SourceSet，但不在idle gate中resolve。若发现工作，先离开idle gate，再重新执行active的A/ack/B transaction；其A会解析idle final pass已经发布的affected batch。
+7. 若仍无工作，按最早deadline执行`CommitSleep`。
+8. Platform wait返回后先离开idle gate，再执行完整active poll。
 
 Doorbell是通知，不是事实源；即使通知被coalesce或出现spurious wake，事实仍在source table/completion queue中。
 
@@ -263,7 +294,9 @@ Doorbell是通知，不是事实源；即使通知被coalesce或出现spurious w
 - `M` 是实际执行上下文，例如native线程、RTOS task、WASM host re-entry或baremetal core loop。
 - M必须取得P后才能运行managed G；一次只有一个M拥有某个P。
 
-Runnable G可在P间steal或通过global injection迁移；Running G不可迁移。等待operation记录目标P或可重定向的owner generation。Pinned/ThreadAffine G使用固定M/P协议，不能退化成全局TLS猜测。
+Runnable G可在P间steal或通过global injection迁移；Running和Waiting G不可迁移，completion必须投递原owner，G被steal后从下一次operation开始才绑定新P。Pinned/ThreadAffine G使用固定M/P协议，不能退化成全局TLS猜测。
+
+两字`OperationID`在多P下必须拥有全局无歧义的source namespace。目标profile需要在实现前冻结一种route：全局slot allocator、`slot`内编码instance/shard/local slot，或显式稳定route generation；不能让两个P的同类source都从local slot 1开始、再假设callback能从`{source, slot, generation}`猜出owner。P teardown必须先seal route并strong-join producer，旧route generation永久拒绝；该路由约束不允许重新引入Go pointer callback ABI。
 
 ### 6.2 各目标映射
 
@@ -282,7 +315,7 @@ Runnable G可在P间steal或通过global injection迁移；Running G不可迁移
 
 抢占属于scheduler core，不属于timer source。
 
-- Compiler在所有可能无界的 managed path插入suspendable poll。
+- Compiler在所有可能无界的 managed path插入suspendable poll；runtime还必须给立即ready wrapper、连续child await、source drain和ready task连跑扣除同一service budget。
 - Runtime维护独立 `preemptRequested` generation/bitset。
 - Native sysmon/tick、WASM slice budget、RTOS tick和baremetal IRQ只负责提出请求与唤醒executor。
 - Timer deadline只是一个event deadline；即使没有active timer，CPU-heavy G也必须有界让出。
@@ -304,12 +337,12 @@ Runnable G可在P间steal或通过global injection迁移；Running G不可迁移
 POSIX regular file、DNS或阻塞C调用根据target capability选择：
 
 - io_uring/IOCP等completion backend；
-- 有界blocking worker pool，operation record在worker期间保根/pin；
+- 有界blocking worker pool，operation record在worker期间保根/pin；排队任务允许cancel-before-start，已启动任务只有best-effort physical cancel并仍需接收late terminal fact；
 - thread-affine专用M；
 - 单线程host的async import；
 - 不支持目标上的明确capability诊断。
 
-不允许为每个operation创建一个G专属pthread或保留调用者native stack。
+worker queue满必须确定地失败或背压，shutdown在owner P之外join已启动worker并等待source quiescence。不允许为每个operation创建一个G专属pthread、无限增生补偿线程或保留调用者native stack。
 
 ## 9. 当前实现审查
 
@@ -339,13 +372,14 @@ POSIX regular file、DNS或阻塞C调用根据target capability选择：
 - Physical coroutine lowering仍是pure-SSA子集，method、closure、generic instance、variadic、recursive/defer/recover和大量runtime helper路径仍fail closed。
 - suspended frame没有精确GC root map和write barrier contract。
 - Timer frame retention按两个timer符号和精确SSA形状硬编码，证明通用lifetime core缺失。
-- Phase 23已将ExecutorDriver的bind/publish/pending/deadline/empty/close/unbind收口到静态`ExecutorSourceSet`，并把source fact publication与logical resolution分开：driver只在publish/ack/unconditional full recheck形成quiet cut后统一resolve，`IdleArmed` final scan发现事实则先离开idle再重跑完整transaction。固定容量的第三种`ManualOperationSource`已通过同一catalog和driver端到端运行，producer只访问POD identity与原子mailbox，owner执行source-local affected resolve、全live-slot loser apply/detach、strong quiescence、result lease和generation recycle；加入第二个V2 source时必须保持“所有source先resolve，再所有source apply”。现有wait/timer source仍在各自publish中立即`CompleteWait`，尚未迁入该V2生命周期。
+- Phase 23已将ExecutorDriver的bind/publish/pending/deadline/empty/close/unbind收口到静态`ExecutorSourceSet`，并把source fact publication与logical resolution分开：active Poll固定执行有界epoch A并立即resolve/promote、ack request、再无条件执行同构epoch B，B后不等待pending/request静默；`IdleArmed` final scan发现事实则先离开idle再重跑完整transaction。固定容量的第三种`ManualOperationSource`已通过同一catalog和driver端到端运行，producer只访问POD identity与原子mailbox，owner执行source-local affected resolve、全live-slot loser apply/detach、strong quiescence、result lease和generation recycle；加入第二个V2 source时必须保持“所有source先resolve，再所有source apply”。现有wait/timer source仍在各自publish中立即`CompleteWait`，尚未迁入该V2生命周期。
 - Phase 23已将每个G run slice的scheduler service budget与active timer解耦；但WASM/embedded的`RunSlice`返回host边界、外部tick/sysmon请求和post-optimization safepoint上界证明仍未完成。
 - Phase 23已实现V2 `OperationID/OperationRecord`和G-owned `ParkState`核心：支持多source完整sticky snapshot、与publish/source顺序无关的唯一事件winner、普通取消与task/shutdown abort竞态、败者resolution-ack/detach barrier、物理quiesce/recycle分离、结果lease、准备失败清理以及不回绕的双`u32`logical ticket。固定`CompletionSink` fact数组已经删除，owner直接扫描operation sticky facts；`ParkState`已内嵌到稳定G。它目前是generalized multi-event wait，现有wait/timer SourceSet尚未迁移，channel candidate原子`TryCommit`和Go select完整语义也尚未接线。
-- 执行取消已收敛为G内嵌的`Abort/Shutdown` sticky kind和`Requested/CleanupClaimed` phase；owner P可把请求映射到当前或下一次ParkState，shutdown可覆盖同一完整snapshot中的operation completion，late cancel通过每P瞬态`RunDecision` gate抑制selected continuation但保留winner result lease。`Goexit`已从远程task cancel kind移出。runtime已具备V2 Prepare/Waiting/Ready/Checked/Take的完整scheduler gate、exactly-once zero/exact-ticket scalar resume ABI，并拒绝未claim取消绕过gate直接complete/panic；compiler resume prologue、running G safepoint cleanup lowering、child状态传播、wait/timer source迁移以及跨线程OperationID control source接线尚未实现。
-- 取消路径没有每G外部registry、callback链或独立executor；source admission容量仍由各target静态catalog负责，embedded/baremetal和未来multi-P还需要证明统一的slot/queue bound。
+- 执行取消已收敛为G内嵌的`Abort/Shutdown` sticky kind和`Requested/CleanupClaimed` phase；owner P可把请求映射到当前或下一次ParkState，shutdown可覆盖同一完整snapshot中的operation completion，late cancel通过每P瞬态`RunDecision` gate抑制selected continuation但保留winner result lease。固定容量`TaskControlSource`已经作为第四种source接入统一published-epoch catalog：只为显式host/export handle分配generation端点，并以占用G现有对齐空洞的owner-only lease计数阻止task storage早回收。`Goexit`已从远程task cancel kind移出。
+- runtime已具备V2 Prepare/Waiting/Ready/Checked/Take、exactly-once scalar resume ABI；compiler所有现有initial/child-await/yield/legacy-park/bootstrap resume已进入normal-only zero-ticket gate，非normal decision在cleanup/select lowering完成前fail closed而不会吞掉取消继续执行。full outputs分派、running G safepoint cleanup/defer/panic/Goexit lowering、child状态传播、wait/timer source迁移以及真实target host shim仍未实现。
+- 取消路径没有每G外部registry、callback链或独立executor；普通G的control lease为零且不增加G尺寸。source admission容量仍由各target静态catalog负责，embedded/baremetal和未来multi-P还需要证明统一的slot/queue bound与endpoint迁移协议。
 - 当前driver固定一个P，尚未实现native多P/M、global injection和work stealing。
-- Manual source已经证明source-local affected枚举不需要中心fact数组或wait-set哈希，但当前promotion仍由`PollReady`扫描P的全部waiting G，attach/detach中的完整invariant遍历还会使一个N-way wait生命周期达到`O(N²)`验证成本；compiler生成frame-local`WaitSetRecord`、O(1) active unlink/affected FIFO和低成本release-build检查完成前，这条路径不能视为最终高并发性能模型。
+- frame-local`WaitSetRecord`、独立V2 active双链与affected FIFO已经替代V2 `PollReady`全waiting扫描；record-aware attach/mark/detach/promote为O(1)，一次resolution扫描其C个candidate。1024-candidate测试通过破坏远端节点证明fast detach没有隐藏全链审计。当前Manual source的`ApplyAndDetach`仍扫描其4个固定slots；下一种大容量source必须按resolved batch/operation分派，不能把全source容量扫描扩展为长期模型。
 
 因此Phase 22应视为首个可运行vertical slice，而不是“核心已经完成后新增一个timer功能”。
 
