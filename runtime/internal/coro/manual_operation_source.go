@@ -61,11 +61,6 @@ const (
 	manualOperationMailboxDelivered
 )
 
-const (
-	manualOperationProducerClosed = uint32(1 << 31)
-	manualOperationProducerMask   = manualOperationProducerClosed - 1
-)
-
 type manualOperationSlot struct {
 	// Producer-visible prefix. A target ingress shim resolves the stable source
 	// internally, then touches only these aligned atomic uint32 words using the
@@ -111,49 +106,19 @@ func manualOperationSlotFor(source *ManualOperationSource, id OperationID) (*man
 }
 
 func manualOperationAcquireProducer(slot *manualOperationSlot) bool {
-	if slot == nil {
-		return false
-	}
-	for {
-		inflight := preemptLoad(&slot.inflight)
-		if inflight&manualOperationProducerClosed != 0 || inflight&manualOperationProducerMask == manualOperationProducerMask {
-			return false
-		}
-		if preemptCompareAndSwap(&slot.inflight, inflight, inflight+1) {
-			return true
-		}
-	}
+	return slot != nil && producerAdmissionAcquire(&slot.inflight)
 }
 
 func manualOperationReleaseProducer(slot *manualOperationSlot) {
-	for {
-		inflight := preemptLoad(&slot.inflight)
-		if inflight&manualOperationProducerMask == 0 {
-			return
-		}
-		if preemptCompareAndSwap(&slot.inflight, inflight, inflight-1) {
-			return
-		}
-	}
+	producerAdmissionRelease(&slot.inflight)
 }
 
 func manualOperationSealProducers(slot *manualOperationSlot) bool {
-	if slot == nil {
-		return false
-	}
-	for {
-		inflight := preemptLoad(&slot.inflight)
-		if inflight&manualOperationProducerClosed != 0 {
-			return true
-		}
-		if preemptCompareAndSwap(&slot.inflight, inflight, inflight|manualOperationProducerClosed) {
-			return true
-		}
-	}
+	return slot != nil && producerAdmissionSeal(&slot.inflight)
 }
 
 func manualOperationProducersQuiesced(slot *manualOperationSlot) bool {
-	return slot != nil && preemptLoad(&slot.inflight) == manualOperationProducerClosed
+	return slot != nil && producerAdmissionQuiesced(&slot.inflight)
 }
 
 func manualOperationReusableSlot(source *ManualOperationSource, slot *manualOperationSlot, index uint32) bool {
@@ -169,7 +134,7 @@ func manualOperationReusableSlot(source *ManualOperationSource, slot *manualOper
 		return false
 	}
 	id, ok := MakeOperationIDAtRoute(OperationSourceManual, source.route, index+1, generation)
-	return ok && preemptLoad(&slot.inflight) == manualOperationProducerClosed &&
+	return ok && preemptLoad(&slot.inflight) == producerAdmissionClosed &&
 		slot.record == (OperationRecord{id: id, phase: operationReusable})
 }
 
@@ -237,7 +202,7 @@ func (source *ManualOperationSource) reserveAndAttach(p *P, state *ParkState, ti
 			preemptStore(&slot.state, uint32(manualOperationFree))
 			return OperationID{}, false
 		}
-		if !preemptCompareAndSwap(&slot.inflight, manualOperationProducerClosed, 0) {
+		if !producerAdmissionReopen(&slot.inflight) {
 			return OperationID{}, false
 		}
 		preemptStore(&slot.state, uint32(manualOperationActive))

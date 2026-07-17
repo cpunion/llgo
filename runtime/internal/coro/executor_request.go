@@ -65,11 +65,6 @@ const (
 	executorQuiesced
 )
 
-const (
-	executorProducerClosed = uint32(1 << 31)
-	executorProducerMask   = executorProducerClosed - 1
-)
-
 type executorRequestSlot struct {
 	// Every platform-visible word is an aligned uint32 atomic. The first slice
 	// deliberately has no scheduler-owned pointer suffix.
@@ -120,54 +115,24 @@ func executorSlot(registry *ExecutorRegistry, handle ExecutorHandle) (*executorR
 }
 
 func executorAcquireProducer(slot *executorRequestSlot) bool {
-	if slot == nil {
-		return false
-	}
-	for {
-		inflight := preemptLoad(&slot.inflight)
-		if inflight&executorProducerClosed != 0 || inflight&executorProducerMask == executorProducerMask {
-			return false
-		}
-		if preemptCompareAndSwap(&slot.inflight, inflight, inflight+1) {
-			return true
-		}
-	}
+	return slot != nil && producerAdmissionAcquire(&slot.inflight)
 }
 
 func executorReleaseProducer(slot *executorRequestSlot) {
-	for {
-		inflight := preemptLoad(&slot.inflight)
-		if inflight&executorProducerMask == 0 {
-			return
-		}
-		if preemptCompareAndSwap(&slot.inflight, inflight, inflight-1) {
-			return
-		}
-	}
+	producerAdmissionRelease(&slot.inflight)
 }
 
 func executorSealProducers(slot *executorRequestSlot) bool {
-	if slot == nil {
-		return false
-	}
-	for {
-		inflight := preemptLoad(&slot.inflight)
-		if inflight&executorProducerClosed != 0 {
-			return true
-		}
-		if preemptCompareAndSwap(&slot.inflight, inflight, inflight|executorProducerClosed) {
-			return true
-		}
-	}
+	return slot != nil && producerAdmissionSeal(&slot.inflight)
 }
 
 func executorProducersQuiesced(slot *executorRequestSlot) bool {
-	return slot != nil && preemptLoad(&slot.inflight) == executorProducerClosed
+	return slot != nil && producerAdmissionQuiesced(&slot.inflight)
 }
 
 func executorFreeSlotReusable(generation, inflight, gate uint32) bool {
 	pristine := generation == 0 && inflight == 0 && gate == 0
-	retired := generation != 0 && inflight == executorProducerClosed && gate == executorGateClosed
+	retired := generation != 0 && inflight == producerAdmissionClosed && gate == executorGateClosed
 	return pristine || retired
 }
 
@@ -202,7 +167,7 @@ func (registry *ExecutorRegistry) Register() (ExecutorHandle, bool) {
 		}
 		preemptStore(&slot.generation, generation)
 		preemptStore(&slot.gate, 0)
-		if !preemptCompareAndSwap(&slot.inflight, executorProducerClosed, 0) {
+		if !producerAdmissionReopen(&slot.inflight) {
 			return ExecutorHandle{}, false
 		}
 		preemptStore(&slot.state, uint32(executorActive))

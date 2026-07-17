@@ -41,11 +41,6 @@ const (
 	taskControlQuiesced
 )
 
-const (
-	taskControlProducerClosed = uint32(1 << 31)
-	taskControlProducerMask   = taskControlProducerClosed - 1
-)
-
 type taskControlSlot struct {
 	// Producer-visible prefix. A host keeps only OperationID and reaches these
 	// aligned atomic words through a stable target-owned source.
@@ -83,49 +78,19 @@ func taskControlSlotFor(source *TaskControlSource, id OperationID) (*taskControl
 }
 
 func taskControlAcquireProducer(slot *taskControlSlot) bool {
-	if slot == nil {
-		return false
-	}
-	for {
-		inflight := preemptLoad(&slot.inflight)
-		if inflight&taskControlProducerClosed != 0 || inflight&taskControlProducerMask == taskControlProducerMask {
-			return false
-		}
-		if preemptCompareAndSwap(&slot.inflight, inflight, inflight+1) {
-			return true
-		}
-	}
+	return slot != nil && producerAdmissionAcquire(&slot.inflight)
 }
 
 func taskControlReleaseProducer(slot *taskControlSlot) {
-	for {
-		inflight := preemptLoad(&slot.inflight)
-		if inflight&taskControlProducerMask == 0 {
-			return
-		}
-		if preemptCompareAndSwap(&slot.inflight, inflight, inflight-1) {
-			return
-		}
-	}
+	producerAdmissionRelease(&slot.inflight)
 }
 
 func taskControlSealProducers(slot *taskControlSlot) bool {
-	if slot == nil {
-		return false
-	}
-	for {
-		inflight := preemptLoad(&slot.inflight)
-		if inflight&taskControlProducerClosed != 0 {
-			return true
-		}
-		if preemptCompareAndSwap(&slot.inflight, inflight, inflight|taskControlProducerClosed) {
-			return true
-		}
-	}
+	return slot != nil && producerAdmissionSeal(&slot.inflight)
 }
 
 func taskControlProducersQuiesced(slot *taskControlSlot) bool {
-	return slot != nil && preemptLoad(&slot.inflight) == taskControlProducerClosed
+	return slot != nil && producerAdmissionQuiesced(&slot.inflight)
 }
 
 func taskControlReusableSlot(slot *taskControlSlot) bool {
@@ -137,7 +102,7 @@ func taskControlReusableSlot(slot *taskControlSlot) bool {
 	if generation == 0 {
 		return preemptLoad(&slot.inflight) == 0
 	}
-	return preemptLoad(&slot.inflight) == taskControlProducerClosed
+	return preemptLoad(&slot.inflight) == producerAdmissionClosed
 }
 
 func validTaskControlOwner(source *TaskControlSource, p *P) bool {
@@ -173,7 +138,7 @@ func RegisterTaskControl(source *TaskControlSource, p *P, task *G) (OperationID,
 		}
 		preemptStore(&slot.request, uint32(TaskCancelNone))
 		preemptStore(&slot.generation, id.Generation)
-		if !preemptCompareAndSwap(&slot.inflight, taskControlProducerClosed, 0) {
+		if !producerAdmissionReopen(&slot.inflight) {
 			return OperationID{}, false
 		}
 		slot.task = task
@@ -392,9 +357,9 @@ func validTaskControlTerminalSlot(source *TaskControlSource, index int, state ta
 		}
 		inflight := preemptLoad(&slot.inflight)
 		if state == taskControlActive {
-			return inflight&taskControlProducerClosed == 0
+			return inflight&producerAdmissionClosed == 0
 		}
-		return inflight&taskControlProducerClosed != 0
+		return inflight&producerAdmissionClosed != 0
 	case taskControlQuiesced:
 		generation := preemptLoad(&slot.generation)
 		_, ok := MakeOperationIDAtRoute(OperationSourceControl, source.route, uint32(index)+1, generation)

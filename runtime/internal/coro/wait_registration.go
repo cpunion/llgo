@@ -89,11 +89,6 @@ const (
 	waitRegistrationQuiescedDelivered
 )
 
-const (
-	waitRegistrationProducerClosed = uint32(1 << 31)
-	waitRegistrationProducerMask   = waitRegistrationProducerClosed - 1
-)
-
 type waitRegistrationSlot struct {
 	// The producer-visible prefix contains only naturally aligned uint32 words.
 	// All accesses to these fields are atomic.
@@ -164,30 +159,11 @@ func registrationSlot(table *WaitRegistrationTable, handle WaitRegistrationHandl
 }
 
 func registrationAcquireProducer(slot *waitRegistrationSlot) bool {
-	if slot == nil {
-		return false
-	}
-	for {
-		inflight := preemptLoad(&slot.inflight)
-		if inflight&waitRegistrationProducerClosed != 0 || inflight&waitRegistrationProducerMask == waitRegistrationProducerMask {
-			return false
-		}
-		if preemptCompareAndSwap(&slot.inflight, inflight, inflight+1) {
-			return true
-		}
-	}
+	return slot != nil && producerAdmissionAcquire(&slot.inflight)
 }
 
 func registrationReleaseProducer(slot *waitRegistrationSlot) {
-	for {
-		inflight := preemptLoad(&slot.inflight)
-		if inflight&waitRegistrationProducerMask == 0 {
-			return
-		}
-		if preemptCompareAndSwap(&slot.inflight, inflight, inflight-1) {
-			return
-		}
-	}
+	producerAdmissionRelease(&slot.inflight)
 }
 
 // registrationSealProducers atomically closes admission while preserving the
@@ -195,22 +171,11 @@ func registrationReleaseProducer(slot *waitRegistrationSlot) {
 // an open word either wins before this CAS and is included in the count, or
 // loses to the closed bit and cannot enter afterward.
 func registrationSealProducers(slot *waitRegistrationSlot) bool {
-	if slot == nil {
-		return false
-	}
-	for {
-		inflight := preemptLoad(&slot.inflight)
-		if inflight&waitRegistrationProducerClosed != 0 {
-			return true
-		}
-		if preemptCompareAndSwap(&slot.inflight, inflight, inflight|waitRegistrationProducerClosed) {
-			return true
-		}
-	}
+	return slot != nil && producerAdmissionSeal(&slot.inflight)
 }
 
 func registrationProducersQuiesced(slot *waitRegistrationSlot) bool {
-	return slot != nil && preemptLoad(&slot.inflight) == waitRegistrationProducerClosed
+	return slot != nil && producerAdmissionQuiesced(&slot.inflight)
 }
 
 // Register reserves one slot for an armed token. It is scheduler-thread-only
@@ -239,7 +204,7 @@ func (table *WaitRegistrationTable) Register(p *P, token *WaitToken, ticket Wait
 			continue
 		}
 		inflight := preemptLoad(&slot.inflight)
-		if (generation == 0 && inflight != 0) || (generation != 0 && inflight != waitRegistrationProducerClosed) ||
+		if (generation == 0 && inflight != 0) || (generation != 0 && inflight != producerAdmissionClosed) ||
 			!preemptCompareAndSwap(&slot.state, uint32(waitRegistrationFree), uint32(waitRegistrationInitializing)) {
 			continue
 		}
@@ -256,7 +221,7 @@ func (table *WaitRegistrationTable) Register(p *P, token *WaitToken, ticket Wait
 		slot.token = token
 		slot.ticket = ticket
 		preemptStore(&slot.generation, generation)
-		if !preemptCompareAndSwap(&slot.inflight, waitRegistrationProducerClosed, 0) {
+		if !producerAdmissionReopen(&slot.inflight) {
 			// Initializing is a permanent fail-closed state if the sealed
 			// admission word was corrupted by an out-of-contract owner.
 			return WaitRegistrationHandle{}, false
@@ -553,7 +518,7 @@ func registrationTableEmpty(table *WaitRegistrationTable, owner *P) bool {
 		inflight := preemptLoad(&slot.inflight)
 		generation := preemptLoad(&slot.generation)
 		if preemptLoad(&slot.state) != uint32(waitRegistrationFree) ||
-			(generation == 0 && inflight != 0) || (generation != 0 && inflight != waitRegistrationProducerClosed) ||
+			(generation == 0 && inflight != 0) || (generation != 0 && inflight != producerAdmissionClosed) ||
 			slot.p != nil || slot.token != nil || slot.ticket != 0 {
 			return false
 		}

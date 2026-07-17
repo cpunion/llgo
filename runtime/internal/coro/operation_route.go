@@ -36,11 +36,6 @@ const (
 	operationRouteRetired
 )
 
-const (
-	operationRouteProducerClosed = uint32(1 << 31)
-	operationRouteProducerMask   = operationRouteProducerClosed - 1
-)
-
 // operationRouteSlot is target-owned stable storage. Its atomic prefix is the
 // only state consulted before a producer lease is acquired. The immutable
 // pointer suffix is published before Active and is cleared only after the
@@ -83,49 +78,19 @@ func operationRouteSlotFor(registry *OperationRouteRegistry, route RouteID) (*op
 }
 
 func operationRouteAcquireProducer(slot *operationRouteSlot) bool {
-	if slot == nil {
-		return false
-	}
-	for {
-		inflight := preemptLoad(&slot.inflight)
-		if inflight&operationRouteProducerClosed != 0 || inflight&operationRouteProducerMask == operationRouteProducerMask {
-			return false
-		}
-		if preemptCompareAndSwap(&slot.inflight, inflight, inflight+1) {
-			return true
-		}
-	}
+	return slot != nil && producerAdmissionAcquire(&slot.inflight)
 }
 
 func operationRouteReleaseProducer(slot *operationRouteSlot) {
-	for {
-		inflight := preemptLoad(&slot.inflight)
-		if inflight&operationRouteProducerMask == 0 {
-			return
-		}
-		if preemptCompareAndSwap(&slot.inflight, inflight, inflight-1) {
-			return
-		}
-	}
+	producerAdmissionRelease(&slot.inflight)
 }
 
 func operationRouteSealProducers(slot *operationRouteSlot) bool {
-	if slot == nil {
-		return false
-	}
-	for {
-		inflight := preemptLoad(&slot.inflight)
-		if inflight&operationRouteProducerClosed != 0 {
-			return true
-		}
-		if preemptCompareAndSwap(&slot.inflight, inflight, inflight|operationRouteProducerClosed) {
-			return true
-		}
-	}
+	return slot != nil && producerAdmissionSeal(&slot.inflight)
 }
 
 func operationRouteProducersQuiesced(slot *operationRouteSlot) bool {
-	return slot != nil && preemptLoad(&slot.inflight) == operationRouteProducerClosed
+	return slot != nil && producerAdmissionQuiesced(&slot.inflight)
 }
 
 func validOperationRouteBinding(slot *operationRouteSlot, route RouteID) bool {
@@ -143,7 +108,7 @@ func validOperationRouteBinding(slot *operationRouteSlot, route RouteID) bool {
 	}
 	gate := preemptLoad(&gateSlot.gate)
 	if gate&^executorGateMask != 0 || gate&executorGateClosed != 0 ||
-		preemptLoad(&gateSlot.inflight)&executorProducerClosed != 0 {
+		preemptLoad(&gateSlot.inflight)&producerAdmissionClosed != 0 {
 		return false
 	}
 	return (slot.manual != nil || slot.control != nil) &&
@@ -171,7 +136,7 @@ func (registry *OperationRouteRegistry) Allocate() (RouteID, bool) {
 	}
 	registry.next++
 	preemptStore(&slot.route, uint32(route))
-	preemptStore(&slot.inflight, operationRouteProducerClosed)
+	preemptStore(&slot.inflight, producerAdmissionClosed)
 	preemptStore(&slot.state, uint32(operationRouteAllocated))
 	return route, true
 }
@@ -193,7 +158,7 @@ func (registry *OperationRouteRegistry) Bind(route RouteID, driver *ExecutorDriv
 	slot.executor = driver.handle
 	slot.manual = driver.sources.manual
 	slot.control = driver.sources.control
-	if !preemptCompareAndSwap(&slot.inflight, operationRouteProducerClosed, 0) {
+	if !producerAdmissionReopen(&slot.inflight) {
 		slot.executorRegistry = nil
 		slot.executor = ExecutorHandle{}
 		slot.manual = nil

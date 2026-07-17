@@ -425,7 +425,7 @@ func TestExecutorDriverTerminalCloseJoinsActiveTaskControls(t *testing.T) {
 			task.g.park.taskCancelKind, task.g.park.taskCancelPhase)
 	}
 	if preemptLoad(&lateSlot.state) != uint32(taskControlClosing) ||
-		preemptLoad(&lateSlot.inflight) != taskControlProducerClosed|1 {
+		preemptLoad(&lateSlot.inflight) != producerAdmissionClosed|1 {
 		t.Fatalf("terminal seal did not retain admitted producer: state=%d inflight=%#x",
 			preemptLoad(&lateSlot.state), preemptLoad(&lateSlot.inflight))
 	}
