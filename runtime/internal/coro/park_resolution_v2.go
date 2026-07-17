@@ -85,18 +85,25 @@ type ParkCommitAttempt struct {
 	result  ParkCommitAttemptResult
 }
 
-func (request ParkCommitRequest) Succeeded() ParkCommitAttempt {
-	if !request.Valid() {
-		return ParkCommitAttempt{}
-	}
-	return ParkCommitAttempt{request: request, result: ParkCommitAttemptSucceeded}
-}
-
 func (request ParkCommitRequest) Failed() ParkCommitAttempt {
-	if !request.Valid() {
+	if !currentParkCommitRequest(request) {
 		return ParkCommitAttempt{}
 	}
 	return ParkCommitAttempt{request: request, result: ParkCommitAttemptFailed}
+}
+
+// BindParkCommitResult is the only successful ReadyThenTryCommit attempt
+// constructor. The source gates before its synchronous exact-ID effect, then
+// binds the result in the same owner-serialized, non-reentrant handshake. A
+// stale or duplicate request cannot manufacture an unowned successful attempt;
+// a future reentrant dispatcher must roll back a physical effect if binding
+// can fail rather than publishing an unbound success.
+func BindParkCommitResult(request ParkCommitRequest) (ParkCommitAttempt, bool) {
+	if !currentParkCommitRequest(request) {
+		return ParkCommitAttempt{}, false
+	}
+	request.record.resultState = operationResultOwned
+	return ParkCommitAttempt{request: request, result: ParkCommitAttemptSucceeded}, true
 }
 
 // parkResolveProgress is private because callers of the compatibility Step API
@@ -169,8 +176,27 @@ func validPendingParkResolutionLink(state *ParkState, ticket ParkTicket, link *P
 	}
 	record := link.operation
 	return record.disposition == OperationDispositionPending && !record.resolutionApplied &&
-		!record.resultConsumable && !record.resultTaken &&
 		operationCandidatePendingResultStorageValid(record) && operationCandidatePendingForResolution(record)
+}
+
+func validChosenParkResultStorage(record *OperationRecord) bool {
+	if record == nil || record.resultState != operationResultOwned {
+		return false
+	}
+	if operationCandidateMode(record) == OperationCommitReadyThenTryCommit {
+		return validParkTicket(record.resultTicket)
+	}
+	return record.resultTicket == (ParkTicket{})
+}
+
+func validSettlingParkResolutionLink(state *ParkState, ticket ParkTicket, link *ParkLink, winner *OperationRecord) bool {
+	if link == nil || link.operation != winner {
+		return validPendingParkResolutionLink(state, ticket, link)
+	}
+	record := link.operation
+	return validParkResolutionLink(state, ticket, link) && record.disposition == OperationDispositionPending &&
+		!record.resolutionApplied && validChosenParkResultStorage(record) &&
+		operationCandidatePendingForResolution(record)
 }
 
 func validParkCommitRequest(state *ParkState, ticket ParkTicket, candidate *OperationRecord, request ParkCommitRequest) bool {
@@ -180,7 +206,8 @@ func validParkCommitRequest(state *ParkState, ticket ParkTicket, candidate *Oper
 		candidate.phase == operationActive && candidate.disposition == OperationDispositionPending &&
 		candidate.link.park == state && candidate.link.ticket == ticket && candidate.link.operation == candidate &&
 		operationCandidateMode(candidate) == OperationCommitReadyThenTryCommit &&
-		operationCandidateState(candidate) == OperationCommitReady && operationCandidateIsPublished(candidate)
+		operationCandidateState(candidate) == OperationCommitReady && operationCandidateIsPublished(candidate) &&
+		(candidate.resultState == operationResultEmpty || candidate.resultState == operationResultOwned)
 }
 
 // currentParkCommitRequest is the source-side pre-effect gate. Structural
@@ -194,7 +221,8 @@ func currentParkCommitRequest(request ParkCommitRequest) bool {
 	}
 	state := request.record.link.park
 	if !validParkResolutionHeader(state, request.ticket) || state.winnerRecord != request.record || state.winnerID != request.id ||
-		state.cancelKind == ParkCancelTaskAbort || state.cancelKind == ParkCancelShutdown {
+		state.cancelKind == ParkCancelTaskAbort || state.cancelKind == ParkCancelShutdown ||
+		request.record.resultState != operationResultEmpty {
 		return false
 	}
 	return validParkCommitRequest(state, request.ticket, request.record, request)
@@ -216,7 +244,7 @@ func validParkResolutionChoice(state *ParkState, ticket ParkTicket, cursor *park
 	switch cursor.winner.disposition {
 	case OperationDispositionPending:
 		return !cursor.winner.resolutionApplied && operationCandidateIsPublished(cursor.winner) &&
-			operationCandidatePendingForResolution(cursor.winner)
+			validChosenParkResultStorage(cursor.winner) && operationCandidatePendingForResolution(cursor.winner)
 	case OperationDispositionWinner:
 		return !cursor.winner.resolutionApplied && cursor.winner.resultTicket == ticket &&
 			operationCandidateSettledForDisposition(cursor.winner, OperationDispositionWinner)
@@ -253,7 +281,7 @@ func validParkResolutionCursor(state *ParkState, ticket ParkTicket, cursor *park
 	case parkResolutionSettle:
 		return cursor.request == (ParkCommitRequest{}) && cursor.link != nil &&
 			validParkResolutionChoice(state, ticket, cursor) &&
-			validPendingParkResolutionLink(state, ticket, cursor.link) &&
+			validSettlingParkResolutionLink(state, ticket, cursor.link, cursor.winner) &&
 			(cursor.link.previous == nil || cursor.link.previous.operation != nil &&
 				cursor.link.previous.operation.disposition != OperationDispositionPending &&
 				operationCandidateSettledForDisposition(cursor.link.previous.operation,
@@ -418,7 +446,10 @@ func resolveParkSnapshotBoundedStep(
 		return CompletionResolution{WaitSets: 1}, ParkCommitRequest{}, ParkResolvePending
 	case parkResolutionCommit:
 		if (attempt.result != ParkCommitAttemptSucceeded && attempt.result != ParkCommitAttemptFailed) ||
-			attempt.request != cursor.request || !currentParkCommitRequest(attempt.request) {
+			attempt.request != cursor.request ||
+			!validParkCommitRequest(state, ticket, cursor.winner, attempt.request) ||
+			(attempt.result == ParkCommitAttemptSucceeded && cursor.winner.resultState != operationResultOwned) ||
+			(attempt.result == ParkCommitAttemptFailed && !currentParkCommitRequest(attempt.request)) {
 			return CompletionResolution{}, ParkCommitRequest{}, ParkResolveInvalid
 		}
 		candidate := cursor.winner
@@ -447,7 +478,7 @@ func resolveParkSnapshotBoundedStep(
 		link := cursor.link
 		record, next := link.operation, link.next
 		if record == cursor.winner {
-			if !commitOperationCandidate(record) {
+			if record.resultState != operationResultOwned || !commitOperationCandidate(record) {
 				return CompletionResolution{}, ParkCommitRequest{}, ParkResolveInvalid
 			}
 			record.resultTicket = ticket
@@ -512,7 +543,7 @@ func resolveParkSnapshotBoundedStep(
 // A zero attempt starts or continues resolution. ReadyThenTryCommit returns an
 // exact request and freezes the transient ParkState cursor; the static source
 // dispatcher performs its non-reentrant synchronous TryCommit and calls this
-// function again with request.Succeeded or request.Failed before any other
+// function again with BindParkCommitResult(request) or request.Failed before any other
 // owner publication/cancellation. A failure consumes that one ready hint and
 // immediately continues from the next seeded-rank link without a rescan.
 func ResolveParkSnapshotStep(
@@ -530,7 +561,9 @@ func ResolveParkSnapshotStep(
 	} else {
 		if !validParkResolutionHeader(state, ticket) || state.winnerRecord == nil ||
 			(attempt.result != ParkCommitAttemptSucceeded && attempt.result != ParkCommitAttemptFailed) ||
-			!validParkCommitRequest(state, ticket, state.winnerRecord, attempt.request) {
+			!validParkCommitRequest(state, ticket, state.winnerRecord, attempt.request) ||
+			(attempt.result == ParkCommitAttemptSucceeded && state.winnerRecord.resultState != operationResultOwned) ||
+			(attempt.result == ParkCommitAttemptFailed && !currentParkCommitRequest(attempt.request)) {
 			return CompletionResolution{}, ParkCommitRequest{}, ParkResolveInvalid
 		}
 		// A strong cancellation cannot interleave the owner-serialized source

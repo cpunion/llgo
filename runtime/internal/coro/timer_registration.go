@@ -524,6 +524,15 @@ func (table *TimerRegistrationTable) ApplyTimerV2One(p *P, id OperationID, recor
 	default:
 		return OperationApplyInvalid
 	}
+	if disposition != OperationDispositionWinner {
+		// Timer cancellation is the complete source-specific rollback: after
+		// this transition no due delivery can retain or recreate the result.
+		slot.state = timerRegistrationCanceled
+		if slot.record.resultState == operationResultOwned &&
+			!DiscardUnselectedOperationResult(&slot.record, id) {
+			return OperationApplyInvalid
+		}
+	}
 	if !AcknowledgeOperationResolution(&slot.record, id, disposition) || !ConfirmOperationQuiesced(&slot.record, id) {
 		return OperationApplyInvalid
 	}
@@ -535,32 +544,35 @@ func (table *TimerRegistrationTable) ApplyTimerV2One(p *P, id OperationID, recor
 	if !DetachParkWaitOperation(park, ticket, &slot.record, id) {
 		return OperationApplyInvalid
 	}
-	if disposition != OperationDispositionWinner {
-		slot.state = timerRegistrationCanceled
-	}
 	return OperationApplyDetached
 }
 
-func (table *TimerRegistrationTable) releaseTimerV2Result(p *P, handle TimerRegistrationHandle, lease OperationResultLease) bool {
+func (table *TimerRegistrationTable) releaseTimerV2Result(p *P, handle TimerRegistrationHandle, lease OperationResultLease, discard bool) bool {
 	slot, ok := timerRegistrationSlotFor(table, handle)
 	id, idOK := timerRegistrationIDForHandle(table, handle)
-	return ok && idOK && table.owner == p && slot.generation == handle.Generation &&
-		slot.mode == timerRegistrationModeV2 && slot.state == timerRegistrationDelivered &&
-		slot.record.id == id && validLiveTimerRegistrationV2(slot, p, table.route, handle.Slot-1) &&
-		slot.record.disposition == OperationDispositionWinner && TakeOperationResult(&slot.record, lease)
+	if !ok || !idOK || table.owner != p || slot.generation != handle.Generation ||
+		slot.mode != timerRegistrationModeV2 || slot.state != timerRegistrationDelivered ||
+		slot.record.id != id || !validLiveTimerRegistrationV2(slot, p, table.route, handle.Slot-1) ||
+		slot.record.disposition != OperationDispositionWinner {
+		return false
+	}
+	if discard {
+		return DiscardOperationResult(&slot.record, lease)
+	}
+	return TakeOperationResult(&slot.record, lease)
 }
 
 // TakeTimerV2Result releases the exact winner lease after the synchronous
 // continuation has copied the timer result (timers currently carry no payload).
 func (table *TimerRegistrationTable) TakeTimerV2Result(p *P, handle TimerRegistrationHandle, lease OperationResultLease) bool {
-	return table.releaseTimerV2Result(p, handle, lease)
+	return table.releaseTimerV2Result(p, handle, lease, false)
 }
 
 // DiscardTimerV2Result releases the same exact lease when cancellation or
 // cleanup suppresses the selected continuation. It is separate from Take to
 // make generated cleanup intent explicit even though a timer has no payload.
 func (table *TimerRegistrationTable) DiscardTimerV2Result(p *P, handle TimerRegistrationHandle, lease OperationResultLease) bool {
-	return table.releaseTimerV2Result(p, handle, lease)
+	return table.releaseTimerV2Result(p, handle, lease, true)
 }
 
 // RecycleTimerV2 releases one detached timer generation. Winner recycle is

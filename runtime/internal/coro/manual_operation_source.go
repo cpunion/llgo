@@ -473,6 +473,10 @@ func (source *ManualOperationSource) ApplyOne(p *P, id OperationID, record *Oper
 		closeResult != ManualOperationAlreadyQuiesced {
 		return OperationApplyInvalid
 	}
+	if disposition != OperationDispositionWinner && slot.record.resultState == operationResultOwned &&
+		!DiscardUnselectedOperationResult(&slot.record, id) {
+		return OperationApplyInvalid
+	}
 	if !slot.record.resolutionApplied && !AcknowledgeOperationResolution(&slot.record, id, disposition) {
 		return OperationApplyInvalid
 	}
@@ -554,6 +558,17 @@ func (source *ManualOperationSource) TakeResult(p *P, lease OperationResultLease
 	}
 	slot, ok := manualOperationSlotFor(source, id)
 	return ok && preemptLoad(&slot.generation) == id.Generation && TakeOperationResult(&slot.record, lease)
+}
+
+// DiscardResult releases an exact winner lease when cleanup suppresses its
+// continuation instead of copying the source payload.
+func (source *ManualOperationSource) DiscardResult(p *P, lease OperationResultLease) bool {
+	id, ok := lease.ID()
+	if !ok || !validManualOperationOwner(source, p) {
+		return false
+	}
+	slot, ok := manualOperationSlotFor(source, id)
+	return ok && preemptLoad(&slot.generation) == id.Generation && DiscardOperationResult(&slot.record, lease)
 }
 
 // Recycle releases a detached exact generation only after producer quiescence,

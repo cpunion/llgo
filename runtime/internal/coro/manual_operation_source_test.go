@@ -191,7 +191,10 @@ func TestManualOperationSourceApplyOneRequiresExactGenerationAndRecord(t *testin
 	if !consumed || outcome != ParkOutcomeCompleted || !lease.Valid() {
 		t.Fatalf("consume exact-apply winner = (%d, %+v, %t)", outcome, lease, consumed)
 	}
-	finishManualOperations(t, source, p, ids, lease)
+	if !source.ConfirmQuiesced(p, id) || source.Recycle(p, id) ||
+		!source.DiscardResult(p, lease) || source.TakeResult(p, lease) || !source.Recycle(p, id) {
+		t.Fatal("discard exact manual winner lease")
+	}
 	if !UnbindManualOperationSource(source, p) || !source.CanRelease() {
 		t.Fatal("release exact-apply manual source")
 	}

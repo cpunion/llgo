@@ -180,6 +180,8 @@ physical ParkSource slot
 
 每种candidate在catalog中固定一种commit contract：`ReadyThenTryCommit`只提名ready并在自己的同步域提交（channel）；`Reservable`先取得可回滚reservation，winner提交、loser退回；`IrreversibleCompletion`表示副作用已经发生，只有result允许明确discard时才能参加多路等待。resolver只处理这些统一的claim/disposition，不尝试为任意I/O伪造事务回滚。
 
+Operation result ownership使用单字节显式状态，而不是两个可组合出非法形状的boolean：`Empty -> Owned -> Leased -> Taken|Discarded`是winner路径，已完成物理cancel/rollback的loser可执行`Owned -> Discarded`。`IrreversibleCompletion`和`Reservable`只有成功publication才建立`Owned`；`ReadyThenTryCommit`的ready hint始终保持`Empty`，source先用exact request做pre-effect gate，在同一个owner-serialized、不可重入握手中完成物理effect，再由唯一bind入口建立`Owned`并生成success attempt，不能从request直接构造未绑定的success。loser source必须先做真实cleanup/rollback，再`Owned -> Discarded`，之后才能ack；winner只有在`ConsumeParkSet`时`Owned -> Leased`，resume/cleanup分别显式`Take`或`Discard`。winner仅`Taken|Discarded`可recycle，loser仅`Empty|Discarded`可recycle；stale ticket、重复bind、重复Take/Discard全部fail closed。
+
 取消是分层协议，不是一个boolean：
 
 1. `CancelRequested`：已将请求durable publish，但completion仍可能已经获胜。
@@ -396,6 +398,7 @@ worker queue满必须确定地失败或背压，shutdown在owner P之外join已�
 - frame-local`WaitSetRecord`、独立V2 active双链与affected FIFO已经替代V2 `PollReady`全waiting扫描；record-aware attach/mark/detach/promote为O(1)，一次resolution扫描其C个candidate。1024-candidate测试通过破坏远端节点证明fast detach没有隐藏全链审计。production apply已按resolved batch逐candidate静态分派到source `ApplyOne`，不再扫描Manual/Timer全容量；后续大容量source必须保持该复杂度。
 - Phase 26/27已把commit-capable select core和common published-epoch resolver收敛为同一个allocation-free状态机。`ReadyThenTryCommit`绑定logical ticket、exact `OperationID`和单调readiness generation，失败只消费该hint并从下一个rank继续；`Reservable`逐candidate commit/rollback；ordinary cancel、strong cancel和default共用唯一terminal decision与physical acknowledgement/detach barrier。兼容同步wrapper只循环驱动同一bounded primitive，不再保留第二套`published -> winner -> disposition`逻辑。当前production静态dispatcher尚没有Channel/Poll/Host的成功`TryCommit`分支，因此这些模式已由exact fake source验证core，但不能宣称真实channel/netpoll/select已接线。
 - Phase 27已使固定source catalog和common wait-set resolution全路径有界：A/B各source slot、ack、affected wait-set、rank scan、Ready `TryCommit`、candidate settle、`ApplyOne`、finish、promotion及legacy-G visit都保存owner-only cursor并各计一个reduction；`budget=1`可持续前进，且snapshot跨host entry由`ParkState.resolving`冻结。`RetryBudget`保持`more`，`AwaitExternalFact`离开affected queue并等待新sticky fact，二者不会制造无事件忙转。这里完成的是executor transaction的source/common-resolution部分；ready-G dequeue/resume/destroy、inline-ready wrapper和连续child await尚未纳入同一wall-work slice，因此完整`RunSlice`仍未完成。
+- Phase 29已把operation result lifetime冻结为`Empty/Owned/Leased/Taken/Discarded`单字节状态，替换原来的`resultConsumable/resultTaken`且保持`OperationRecord`为64-bit 80 bytes、32-bit 60 bytes。Irreversible/Reservable publication建立`Owned`，Ready hint保持`Empty`，只有exact `BindParkCommitResult`可生成成功attempt；Manual、Timer和exact fake source都按“source cleanup/rollback -> loser Discard -> Ack”执行，winner在Consume时取得lease并由Take或Discard结束。late task cancellation保留lease供cleanup Discard，stale/duplicate lease和未绑定Ready success均fail closed。这里完成的是无真实payload的所有权协议；typed payload copy/materialization、`ResumePacket/ResultCell`、`CompletionRecord`和compiler逐frame reconciliation仍是后续工作。
 
 因此Phase 22应视为首个可运行vertical slice，而不是“核心已经完成后新增一个timer功能”。
 
@@ -412,7 +415,7 @@ worker queue满必须确定地失败或背压，shutdown在owner P之外join已�
 7. 将抢占请求与timer解耦，并固定P/M/global injection ownership。
 8. 把`RunSlice` reduction budget落实到source、affected wait-set、candidate apply/detach、G resume/destroy和inline-ready/child-await的同一账本；所有可续工作保存cursor，并严格区分`RetryBudget`与`AwaitExternalFact`，后者不能设置同一operation的`more`形成忙转。
 9. 实现commit-capable select：`ReadyThenTryCommit`携带exact readiness generation，`Reservable`携带exact reservation generation，失败或stale只消费对应hint；`default`只能在本轮所有candidate均给出不可提交证明后选择，logical winner后的physical commit/rollback acknowledgement仍属于promotion barrier。
-10. 完成真实payload/result lease、`CompletionRecord`和逐frame cleanup：每次resume先按exact ticket reconciliation并Take或Discard结果，再进入normal continuation或`Return/Panic/Goexit/Abort/Shutdown` cleanup；在此之前执行取消只能标为fail-closed原型。
+10. 在已完成的显式result ownership/lease协议上接入真实typed payload、`CompletionRecord`和逐frame cleanup：每次resume先按exact ticket reconciliation并复制后Take或直接Discard结果，再进入normal continuation或`Return/Panic/Goexit/Abort/Shutdown` cleanup；在此之前执行取消只能标为fail-closed原型。
 
 ### P1：完成公共source、P-neutral并行与容量协议
 

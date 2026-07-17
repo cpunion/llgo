@@ -175,8 +175,11 @@ func TestSchedulerOnlyReadyCommitFailsClosedAndRestoresAffectedSnapshot(t *testi
 			promoted, polled, task.g.park.phase, p.affectedWaitHead, p.affectedWaitTail)
 	}
 	disposition, dispositionOK := OperationDispositionOf(&record, id)
-	if !dispositionOK || disposition != OperationDispositionCanceled ||
-		!AcknowledgeOperationResolution(&record, id, disposition) ||
+	if !dispositionOK || disposition != OperationDispositionCanceled {
+		t.Fatal("read scheduler-only Ready cleanup disposition")
+	}
+	discardUnselectedTestResult(t, &record, id)
+	if !AcknowledgeOperationResolution(&record, id, disposition) ||
 		!DetachParkWaitOperation(&task.g.park, ticket, &record, id) {
 		t.Fatal("detach scheduler-only Ready cleanup")
 	}

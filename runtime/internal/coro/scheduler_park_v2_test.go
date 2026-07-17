@@ -265,7 +265,11 @@ func publishSchedulerParkV2(t *testing.T, p *P, operations *schedulerParkV2Opera
 func detachSchedulerParkV2(t *testing.T, g *G, operations *schedulerParkV2Operations, index int) {
 	t.Helper()
 	disposition, ok := OperationDispositionOf(&operations.records[index], operations.ids[index])
-	if !ok || !AcknowledgeOperationResolution(&operations.records[index], operations.ids[index], disposition) {
+	if !ok {
+		t.Fatalf("read scheduler park candidate %d disposition", index)
+	}
+	discardUnselectedTestResult(t, &operations.records[index], operations.ids[index])
+	if !AcknowledgeOperationResolution(&operations.records[index], operations.ids[index], disposition) {
 		t.Fatalf("acknowledge scheduler park candidate %d", index)
 	}
 	if !DetachParkWaitOperation(&g.park, operations.ticket, &operations.records[index], operations.ids[index]) {

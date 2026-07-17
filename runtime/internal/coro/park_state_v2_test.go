@@ -81,7 +81,11 @@ func detachParkV2(t *testing.T, fixture *parkV2Fixture, order ...int) {
 	t.Helper()
 	for position, index := range order {
 		disposition, ok := OperationDispositionOf(&fixture.records[index], fixture.ids[index])
-		if !ok || !AcknowledgeOperationResolution(&fixture.records[index], fixture.ids[index], disposition) {
+		if !ok {
+			t.Fatalf("read candidate %d resolution", index)
+		}
+		discardUnselectedTestResult(t, &fixture.records[index], fixture.ids[index])
+		if !AcknowledgeOperationResolution(&fixture.records[index], fixture.ids[index], disposition) {
 			t.Fatalf("apply candidate %d resolution", index)
 		}
 		if !DetachParkOperation(&fixture.state, fixture.ticket, &fixture.records[index], fixture.ids[index]) {
@@ -221,8 +225,11 @@ func TestAbortParkPreparationUsesNormalDetachBarrier(t *testing.T) {
 	}
 	for index := 0; index < 2; index++ {
 		disposition, dispositionOK := OperationDispositionOf(&records[index], ids[index])
-		if !dispositionOK || disposition != OperationDispositionCanceled ||
-			!AcknowledgeOperationResolution(&records[index], ids[index], disposition) ||
+		if !dispositionOK || disposition != OperationDispositionCanceled {
+			t.Fatalf("read aborted operation %d disposition", index)
+		}
+		discardUnselectedTestResult(t, &records[index], ids[index])
+		if !AcknowledgeOperationResolution(&records[index], ids[index], disposition) ||
 			!DetachParkOperation(&state, ticket, &records[index], ids[index]) {
 			t.Fatalf("detach aborted operation %d", index)
 		}
@@ -266,6 +273,7 @@ func TestDuplicateCaseSealFailureRemainsAbortable(t *testing.T) {
 		t.Fatal("abort duplicate-case preparation")
 	}
 	for index := range records {
+		discardUnselectedTestResult(t, &records[index], ids[index])
 		if !AcknowledgeOperationResolution(&records[index], ids[index], OperationDispositionCanceled) ||
 			!DetachParkWaitOperation(&g.park, ticket, &records[index], ids[index]) {
 			t.Fatalf("detach duplicate case %d", index)
@@ -300,6 +308,7 @@ func TestAbortPartialParkPreparationDiscardsPublishedCompletion(t *testing.T) {
 		first.disposition != OperationDispositionCanceled || !first.cancelRequested {
 		t.Fatal("abort partial park after early completion")
 	}
+	discardUnselectedTestResult(t, &first, firstID)
 	if !AcknowledgeOperationResolution(&first, firstID, OperationDispositionCanceled) ||
 		!DetachParkOperation(&state, ticket, &first, firstID) || !ParkReady(&state, ticket) ||
 		!AbortReservedOperation(&second, secondID) {
@@ -519,7 +528,11 @@ func TestDetachBarrierAndPhysicalQuiescenceAreIndependent(t *testing.T) {
 		t.Fatal("detached before source applied logical resolution")
 	}
 	disposition, dispositionOK := OperationDispositionOf(&fixture.records[0], fixture.ids[0])
-	if !dispositionOK || !AcknowledgeOperationResolution(&fixture.records[0], fixture.ids[0], disposition) ||
+	if !dispositionOK {
+		t.Fatal("read first detach disposition")
+	}
+	discardUnselectedTestResult(t, &fixture.records[0], fixture.ids[0])
+	if !AcknowledgeOperationResolution(&fixture.records[0], fixture.ids[0], disposition) ||
 		!DetachParkOperation(&fixture.state, fixture.ticket, &fixture.records[0], fixture.ids[0]) || ParkReady(&fixture.state, fixture.ticket) {
 		t.Fatal("first detach crossed ready barrier")
 	}
@@ -527,12 +540,20 @@ func TestDetachBarrierAndPhysicalQuiescenceAreIndependent(t *testing.T) {
 		t.Fatal("winner result lease did not block early recycle")
 	}
 	disposition, dispositionOK = OperationDispositionOf(&fixture.records[1], fixture.ids[1])
-	if !dispositionOK || !AcknowledgeOperationResolution(&fixture.records[1], fixture.ids[1], disposition) ||
+	if !dispositionOK {
+		t.Fatal("read second detach disposition")
+	}
+	discardUnselectedTestResult(t, &fixture.records[1], fixture.ids[1])
+	if !AcknowledgeOperationResolution(&fixture.records[1], fixture.ids[1], disposition) ||
 		!DetachParkOperation(&fixture.state, fixture.ticket, &fixture.records[1], fixture.ids[1]) || ParkReady(&fixture.state, fixture.ticket) {
 		t.Fatal("second detach crossed ready barrier")
 	}
 	disposition, dispositionOK = OperationDispositionOf(&fixture.records[2], fixture.ids[2])
-	if !dispositionOK || !AcknowledgeOperationResolution(&fixture.records[2], fixture.ids[2], disposition) ||
+	if !dispositionOK {
+		t.Fatal("read final detach disposition")
+	}
+	discardUnselectedTestResult(t, &fixture.records[2], fixture.ids[2])
+	if !AcknowledgeOperationResolution(&fixture.records[2], fixture.ids[2], disposition) ||
 		!DetachParkOperation(&fixture.state, fixture.ticket, &fixture.records[2], fixture.ids[2]) || !ParkReady(&fixture.state, fixture.ticket) {
 		t.Fatal("last detach did not publish ready")
 	}

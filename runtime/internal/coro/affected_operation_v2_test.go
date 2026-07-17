@@ -196,7 +196,11 @@ func runAffectedSourceOrder(t *testing.T, publishOrder []affectedTestEntry, reso
 	for _, entry := range entries {
 		slot := &sources[entry.source].slots[entry.slot]
 		disposition, dispositionOK := OperationDispositionOf(&slot.record, slot.id)
-		if !dispositionOK || !AcknowledgeOperationResolution(&slot.record, slot.id, disposition) ||
+		if !dispositionOK {
+			t.Fatalf("read affected operation %+v disposition", entry)
+		}
+		discardUnselectedTestResult(t, &slot.record, slot.id)
+		if !AcknowledgeOperationResolution(&slot.record, slot.id, disposition) ||
 			!DetachParkOperation(&state, ticket, &slot.record, slot.id) {
 			t.Fatalf("detach affected operation %+v", entry)
 		}
