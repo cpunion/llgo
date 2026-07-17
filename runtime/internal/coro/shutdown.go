@@ -41,6 +41,7 @@ func validCancelFrame(frame *Frame, g *G) bool {
 func validCancelableReadyG(g *G) bool {
 	if !ValidG(g) || g.state != GRunnable || !g.queued || g.waiting || g.waitToken != nil ||
 		g.waitTicket != 0 || g.nextWait != nil || g.runP != nil || g.root == nil || g.active == nil ||
+		!releasableParkState(&g.park) || g.park.taskCancelKind != TaskCancelNone ||
 		g.pending.kind != pendingNone || g.pending.from != nil || g.pending.target != nil ||
 		g.pending.wait != nil || g.pending.ticket != 0 || g.destroyTarget != nil || g.destroyRoot ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||

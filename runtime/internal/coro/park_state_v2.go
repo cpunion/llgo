@@ -19,8 +19,8 @@ package coro
 // ParkTicket identifies one logical park generation owned by one stable G.
 // It never crosses a producer ABI or a cross-thread cancellation queue and is
 // intentionally independent of every physical OperationID registered for a
-// select/wait-set. Cross-thread task cancellation carries a stable TaskHandle;
-// the owner P resolves that handle to the G's current ParkTicket.
+// select/wait-set. Cross-thread cancellation enters through a durable source;
+// the owner P alone resolves it against the G's current ParkTicket.
 //
 // Two explicit uint32 words preserve 32-bit/WASM ABI alignment without a
 // uint64 atomic dependency. generation never wraps within an epoch, and epoch
@@ -112,22 +112,25 @@ type ParkLink struct {
 // explicit rather than relying on a coroutine-frame WaitToken pointer.
 // All ParkState and ParkLink operations are strictly owner-P-only.
 type ParkState struct {
-	ticket        ParkTicket
-	phase         parkPhase
-	expected      uint32
-	attached      uint32
-	detachPending uint32
-	seed          uint32
-	cancelKind    ParkCancelKind
-	outcome       ParkOutcome
-	winnerCase    uint32
-	winnerID      OperationID
-	winnerRecord  *OperationRecord
-	head          *ParkLink
+	ticket          ParkTicket
+	phase           parkPhase
+	expected        uint32
+	attached        uint32
+	detachPending   uint32
+	seed            uint32
+	taskCancelKind  TaskCancelKind
+	taskCancelPhase taskCancelPhase
+	cancelKind      ParkCancelKind
+	outcome         ParkOutcome
+	winnerCase      uint32
+	winnerID        OperationID
+	winnerRecord    *OperationRecord
+	head            *ParkLink
 }
 
 func validParkState(state *ParkState) bool {
-	if state == nil || state.cancelKind > ParkCancelShutdown || state.attached > state.expected || state.detachPending > state.attached {
+	if state == nil || !validTaskCancelState(state.taskCancelKind, state.taskCancelPhase) || state.cancelKind > ParkCancelShutdown ||
+		state.attached > state.expected || state.detachPending > state.attached {
 		return false
 	}
 	links := uint32(0)
@@ -203,11 +206,18 @@ func validParkState(state *ParkState) bool {
 	}
 }
 
+func releasableParkState(state *ParkState) bool {
+	if !validParkState(state) {
+		return false
+	}
+	return state.phase == parkIdle || state.phase == parkConsumed
+}
+
 // BeginParkSet starts one logical N-candidate wait. The two-word ticket only
 // advances from a fully consumed, pointer-free state and fails closed at full
 // exhaustion; it never aliases an old owner-side ticket.
 func BeginParkSet(state *ParkState, expected, seed uint32) (ParkTicket, bool) {
-	if state == nil || expected > CompletionSinkOperationCapacity {
+	if state == nil {
 		return ParkTicket{}, false
 	}
 	if state.phase == parkIdle {
@@ -222,10 +232,12 @@ func BeginParkSet(state *ParkState, expected, seed uint32) (ParkTicket, bool) {
 		return ParkTicket{}, false
 	}
 	*state = ParkState{
-		ticket:   ticket,
-		phase:    parkPreparing,
-		expected: expected,
-		seed:     seed ^ ticket.generation*0x9e3779b9 ^ ticket.epoch*0x85ebca6b,
+		ticket:          ticket,
+		phase:           parkPreparing,
+		expected:        expected,
+		seed:            seed ^ ticket.generation*0x9e3779b9 ^ ticket.epoch*0x85ebca6b,
+		taskCancelKind:  state.taskCancelKind,
+		taskCancelPhase: state.taskCancelPhase,
 	}
 	return ticket, true
 }
@@ -288,6 +300,10 @@ func SealParkSet(state *ParkState, ticket ParkTicket) bool {
 // records, but they are resolved only after this transition.
 func CommitParkSet(state *ParkState, ticket ParkTicket) bool {
 	if !validParkState(state) || state.phase != parkSealed || ticket != state.ticket {
+		return false
+	}
+	if state.taskCancelPhase == taskCancelRequested &&
+		!RequestParkCancel(state, ticket, taskCancelParkKind(state.taskCancelKind)) {
 		return false
 	}
 	state.phase = parkParked
@@ -462,7 +478,14 @@ func ConsumeParkSet(state *ParkState, ticket ParkTicket) (outcome ParkOutcome, c
 		return ParkOutcomePending, 0, OperationResultLease{}, false
 	}
 	outcome = state.outcome
-	caseID = state.winnerCase
+	if state.taskCancelPhase != taskCancelRequested {
+		caseID = state.winnerCase
+	} else {
+		// A task stop that arrives after winner resolution cannot undo the
+		// physical completion. It does suppress the selected continuation; the
+		// lease below lets cleanup discard/copy the winner payload before recycle.
+		outcome = ParkOutcomeCanceled
+	}
 	if state.outcome == ParkOutcomeCompleted {
 		if state.winnerRecord == nil || state.winnerRecord.id != state.winnerID || state.winnerRecord.phase != operationDetached ||
 			state.winnerRecord.resultConsumable {

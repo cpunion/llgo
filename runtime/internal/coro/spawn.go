@@ -205,6 +205,7 @@ func RollbackSpawn(parent, child *G) (unsafe.Pointer, uintptr, bool) {
 		child.pending.kind != pendingNone || child.destroyTarget != nil || child.destroyRoot ||
 		child.nextReady != nil || child.queued || child.waitToken != nil || child.waitTicket != 0 ||
 		child.nextWait != nil || child.waiting || child.runP != nil ||
+		!releasableParkState(&child.park) || child.park.taskCancelKind != TaskCancelNone ||
 		child.taskState != taskStorageOwned || child.taskStorage != unsafe.Pointer(child) ||
 		child.taskSize != TaskStorageSize() || preemptLoad(preemptAddress(child)) != preemptIdle {
 		return nil, 0, false
@@ -233,6 +234,7 @@ func ReclaimableG(g *G) bool {
 		g.pending.wait == nil && g.pending.ticket == 0 &&
 		g.destroyTarget == nil && !g.destroyRoot && g.nextReady == nil && !g.queued &&
 		g.waitToken == nil && g.waitTicket == 0 && g.nextWait == nil && !g.waiting && g.runP == nil &&
+		releasableParkState(&g.park) && g.park.taskCancelKind == TaskCancelNone &&
 		g.spawnChild == nil && g.spawnParent == nil && g.spawnP == nil && validLiveTaskStorage(g) &&
 		emptyPanicRecord(&g.panicRecord) && !g.panicUnwind
 }

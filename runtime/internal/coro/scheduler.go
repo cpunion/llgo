@@ -51,6 +51,10 @@ type G struct {
 	waitTicket    WaitTicket
 	nextWait      *G
 	waiting       bool
+	// park is the common multi-source logical wait cell. The legacy one-token
+	// fields above remain during migration; new sources must target park. It
+	// also owns the one-byte task stop token so park commit cannot forget it.
+	park ParkState
 	// runP is scheduler-thread-only. An asynchronous producer requests a
 	// reschedule through P's atomic gate and never reads this pointer.
 	runP *P
@@ -209,6 +213,7 @@ func InitG(g *G) bool {
 		g.pending.kind != pendingNone || g.pending.from != nil || g.pending.target != nil || g.pending.wait != nil || g.pending.ticket != 0 ||
 		g.destroyTarget != nil || g.destroyRoot || g.nextReady != nil || g.queued ||
 		g.waitToken != nil || g.waitTicket != 0 || g.nextWait != nil || g.waiting || g.runP != nil ||
+		g.park != (ParkState{}) ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
 		g.taskStorage != nil || g.taskSize != 0 || g.taskState != taskStorageStatic ||
 		!emptyPanicRecord(&g.panicRecord) || g.panicUnwind {
@@ -862,6 +867,7 @@ func TerminalG(p *P, g *G) bool {
 		g.pending.kind == pendingNone && g.pending.from == nil && g.pending.target == nil && g.pending.wait == nil && g.pending.ticket == 0 &&
 		g.destroyTarget == nil && !g.destroyRoot && g.nextReady == nil && !g.queued &&
 		g.waitToken == nil && g.waitTicket == 0 && g.nextWait == nil && !g.waiting && g.runP == nil &&
+		releasableParkState(&g.park) && g.park.taskCancelKind == TaskCancelNone &&
 		g.spawnChild == nil && g.spawnParent == nil && g.spawnP == nil && validTerminalTaskStorage(g) &&
 		emptyPanicRecord(&g.panicRecord) && !g.panicUnwind
 }

@@ -68,28 +68,11 @@ func publishParkV2(t *testing.T, fixture *parkV2Fixture, indices ...int) {
 	}
 }
 
-func resolveParkV2(t *testing.T, fixture *parkV2Fixture, order []int, includeCancel bool) CompletionResolution {
+func resolveParkV2(t *testing.T, fixture *parkV2Fixture) CompletionResolution {
 	t.Helper()
-	var sink CompletionSink
-	if !BeginCompletionBatch(&sink) {
-		t.Fatal("begin completion batch")
-	}
-	for _, index := range order {
-		if result := CollectOperationCompletion(&sink, &fixture.records[index], fixture.ids[index]); result != CompletionCollectAccepted {
-			t.Fatalf("collect candidate %d = %d", index, result)
-		}
-	}
-	if includeCancel {
-		if result := CollectParkCancellation(&sink, &fixture.state, fixture.ticket); result != CompletionCollectAccepted {
-			t.Fatalf("collect cancel = %d", result)
-		}
-	}
-	if !SealCompletionBatch(&sink) {
-		t.Fatal("seal completion batch")
-	}
-	resolution, ok := ResolveCompletionBatch(&sink)
-	if !ok {
-		t.Fatal("resolve completion batch")
+	resolution, ok := ResolveParkSnapshot(&fixture.state, fixture.ticket)
+	if !ok || resolution.Completed+resolution.Canceled != 1 {
+		t.Fatalf("resolve park snapshot = (%+v, %t)", resolution, ok)
 	}
 	return resolution
 }
@@ -137,8 +120,8 @@ func finishParkV2Operations(t *testing.T, fixture *parkV2Fixture, winnerLease Op
 func resolveWinnerForOrder(t *testing.T, seed uint32, order []int) uint32 {
 	t.Helper()
 	fixture := newParkV2Fixture(t, seed, []uint32{10, 20, 30})
-	publishParkV2(t, fixture, 0, 1, 2)
-	resolution := resolveParkV2(t, fixture, order, false)
+	publishParkV2(t, fixture, order...)
+	resolution := resolveParkV2(t, fixture)
 	if resolution != (CompletionResolution{WaitSets: 1, Completed: 1, Winners: 1, Losers: 2}) {
 		t.Fatalf("resolution = %+v", resolution)
 	}
@@ -205,12 +188,7 @@ func TestZeroCandidateParkCanOnlyResumeThroughLogicalCancel(t *testing.T) {
 	if !RequestParkCancel(&state, ticket, ParkCancelTaskAbort) {
 		t.Fatal("cancel zero-candidate park")
 	}
-	var sink CompletionSink
-	if !BeginCompletionBatch(&sink) || CollectParkCancellation(&sink, &state, ticket) != CompletionCollectAccepted ||
-		!SealCompletionBatch(&sink) {
-		t.Fatal("collect zero-candidate cancellation")
-	}
-	resolution, resolved := ResolveCompletionBatch(&sink)
+	resolution, resolved := ResolveParkSnapshot(&state, ticket)
 	if !resolved || resolution != (CompletionResolution{WaitSets: 1, Canceled: 1}) || !ParkReady(&state, ticket) {
 		t.Fatalf("resolve zero-candidate cancellation = (%+v, %t)", resolution, resolved)
 	}
@@ -310,22 +288,17 @@ func TestOperationBecomesProducerVisibleOnlyAfterAttach(t *testing.T) {
 	if !SealParkSet(&state, ticket) || !CommitParkSet(&state, ticket) {
 		t.Fatal("commit early-completed park")
 	}
-	var sink CompletionSink
-	if !BeginCompletionBatch(&sink) || CollectOperationCompletion(&sink, &record, id) != CompletionCollectAccepted ||
-		!SealCompletionBatch(&sink) {
-		t.Fatal("collect synchronous early completion")
-	}
-	if resolution, resolved := ResolveCompletionBatch(&sink); !resolved || resolution.Completed != 1 {
+	if resolution, resolved := ResolveParkSnapshot(&state, ticket); !resolved || resolution.Completed != 1 {
 		t.Fatalf("resolve synchronous early completion = (%+v, %t)", resolution, resolved)
 	}
 }
 
-func TestCompletionBatchWinnerIsIndependentOfFactOrder(t *testing.T) {
+func TestParkSnapshotWinnerIsIndependentOfPublicationOrder(t *testing.T) {
 	forward := resolveWinnerForOrder(t, 0x13579bdf, []int{0, 1, 2})
 	reverse := resolveWinnerForOrder(t, 0x13579bdf, []int{2, 1, 0})
 	mixed := resolveWinnerForOrder(t, 0x13579bdf, []int{1, 2, 0})
 	if forward != reverse || forward != mixed {
-		t.Fatalf("winner depends on fact order: %d %d %d", forward, reverse, mixed)
+		t.Fatalf("winner depends on publication order: %d %d %d", forward, reverse, mixed)
 	}
 }
 
@@ -334,7 +307,7 @@ func TestParkCaseRankVariesWinnerAcrossSeeds(t *testing.T) {
 	for seed := uint32(0); seed < 256 && len(seen) != 3; seed++ {
 		fixture := newParkV2Fixture(t, seed, []uint32{10, 20, 30})
 		publishParkV2(t, fixture, 0, 1, 2)
-		resolveParkV2(t, fixture, []int{2, 0, 1}, false)
+		resolveParkV2(t, fixture)
 		caseID, _, ok := ParkWinner(&fixture.state, fixture.ticket)
 		if !ok {
 			t.Fatal("missing seeded winner")
@@ -375,49 +348,18 @@ func TestFixedCallerSeedMixesEachLogicalParkGeneration(t *testing.T) {
 	}
 }
 
-func TestCompletionBatchRequiresCompletePublishedSnapshot(t *testing.T) {
+func TestParkSnapshotWithoutCompletionRemainsPending(t *testing.T) {
 	fixture := newParkV2Fixture(t, 7, []uint32{1, 2})
-	publishParkV2(t, fixture, 0, 1)
-	var sink CompletionSink
-	if !BeginCompletionBatch(&sink) || CollectOperationCompletion(&sink, &fixture.records[0], fixture.ids[0]) != CompletionCollectAccepted ||
-		!SealCompletionBatch(&sink) {
-		t.Fatal("build incomplete completion batch")
-	}
-	if resolution, ok := ResolveCompletionBatch(&sink); ok || resolution != (CompletionResolution{}) ||
+	resolution, ok := ResolveParkSnapshot(&fixture.state, fixture.ticket)
+	if !ok || resolution != (CompletionResolution{WaitSets: 1}) ||
 		fixture.state.phase != parkParked || fixture.records[0].disposition != OperationDispositionPending ||
 		fixture.records[1].disposition != OperationDispositionPending {
-		t.Fatalf("incomplete batch partially resolved: %+v, ok=%t", resolution, ok)
+		t.Fatalf("pending snapshot = (%+v, %t), phase=%d", resolution, ok, fixture.state.phase)
 	}
-	if !ResetCompletionBatch(&sink) || !BeginCompletionBatch(&sink) {
-		t.Fatal("reset incomplete batch")
-	}
-	for index := range fixture.records {
-		if CollectOperationCompletion(&sink, &fixture.records[index], fixture.ids[index]) != CompletionCollectAccepted {
-			t.Fatalf("recollect candidate %d", index)
-		}
-	}
-	if !SealCompletionBatch(&sink) {
-		t.Fatal("seal complete replay")
-	}
-	if resolution, ok := ResolveCompletionBatch(&sink); !ok || resolution.WaitSets != 1 || resolution.Winners != 1 {
-		t.Fatalf("resolve complete replay = (%+v, %t)", resolution, ok)
-	}
-}
-
-func TestCompletionBatchRequiresStickyCancelFact(t *testing.T) {
-	fixture := newParkV2Fixture(t, 9, []uint32{1})
-	if !RequestParkCancel(&fixture.state, fixture.ticket, ParkCancelOperation) {
-		t.Fatal("request sticky cancel")
-	}
-	publishParkV2(t, fixture, 0)
-	var sink CompletionSink
-	if !BeginCompletionBatch(&sink) || CollectOperationCompletion(&sink, &fixture.records[0], fixture.ids[0]) != CompletionCollectAccepted ||
-		!SealCompletionBatch(&sink) {
-		t.Fatal("build batch without cancel fact")
-	}
-	if resolution, ok := ResolveCompletionBatch(&sink); ok || resolution != (CompletionResolution{}) ||
-		fixture.state.phase != parkParked || fixture.records[0].disposition != OperationDispositionPending {
-		t.Fatalf("missing cancel fact partially resolved: %+v, ok=%t", resolution, ok)
+	publishParkV2(t, fixture, 1)
+	resolution, ok = ResolveParkSnapshot(&fixture.state, fixture.ticket)
+	if !ok || resolution != (CompletionResolution{WaitSets: 1, Completed: 1, Winners: 1, Losers: 1}) {
+		t.Fatalf("completed snapshot = (%+v, %t)", resolution, ok)
 	}
 }
 
@@ -431,7 +373,7 @@ func TestPhysicalCancelRequestDoesNotChooseLogicalWinner(t *testing.T) {
 			t.Fatalf("duplicate physical cancel = %d", result)
 		}
 		publishParkV2(t, fixture, 0)
-		resolution := resolveParkV2(t, fixture, []int{0}, false)
+		resolution := resolveParkV2(t, fixture)
 		if resolution.Completed != 1 || ParkOperationClaim(&fixture.records[0], fixture.ids[0]) != ParkClaimWon {
 			t.Fatalf("physical request incorrectly chose logical cancel: %+v", resolution)
 		}
@@ -443,7 +385,7 @@ func TestPhysicalCancelRequestDoesNotChooseLogicalWinner(t *testing.T) {
 		if result := RequestPhysicalOperationCancel(&fixture.records[0], fixture.ids[0]); result != OperationCancelCompletionPending {
 			t.Fatalf("cancel after completion publish = %d", result)
 		}
-		resolution := resolveParkV2(t, fixture, []int{0}, false)
+		resolution := resolveParkV2(t, fixture)
 		if resolution.Completed != 1 || resolution.Canceled != 0 {
 			t.Fatalf("published completion lost to physical request: %+v", resolution)
 		}
@@ -458,7 +400,7 @@ func TestParkCancelCompletionRaceAndLateLoser(t *testing.T) {
 			t.Fatal("park cancellation was not idempotent")
 		}
 		publishParkV2(t, fixture, 1)
-		resolution := resolveParkV2(t, fixture, []int{1}, true)
+		resolution := resolveParkV2(t, fixture)
 		if resolution.Completed != 1 || resolution.Canceled != 0 || resolution.Losers != 1 {
 			t.Fatalf("completion/cancel resolution = %+v", resolution)
 		}
@@ -482,7 +424,7 @@ func TestParkCancelCompletionRaceAndLateLoser(t *testing.T) {
 			t.Fatalf("task-abort kind = (%d, %t)", kind, ok)
 		}
 		publishParkV2(t, fixture, 0)
-		resolution := resolveParkV2(t, fixture, []int{0}, true)
+		resolution := resolveParkV2(t, fixture)
 		if resolution != (CompletionResolution{WaitSets: 1, Canceled: 1, Losers: 2}) {
 			t.Fatalf("task-abort resolution = %+v", resolution)
 		}
@@ -499,7 +441,7 @@ func TestParkCancelCompletionRaceAndLateLoser(t *testing.T) {
 		if !RequestParkCancel(&fixture.state, fixture.ticket, ParkCancelOperation) {
 			t.Fatal("request park cancel")
 		}
-		resolution := resolveParkV2(t, fixture, nil, true)
+		resolution := resolveParkV2(t, fixture)
 		if resolution != (CompletionResolution{WaitSets: 1, Canceled: 1, Losers: 2}) {
 			t.Fatalf("cancel resolution = %+v", resolution)
 		}
@@ -523,7 +465,7 @@ func TestParkCancelCompletionRaceAndLateLoser(t *testing.T) {
 func TestDetachBarrierAndPhysicalQuiescenceAreIndependent(t *testing.T) {
 	fixture := newParkV2Fixture(t, 17, []uint32{7, 8, 9})
 	publishParkV2(t, fixture, 0)
-	resolveParkV2(t, fixture, []int{0}, false)
+	resolveParkV2(t, fixture)
 	_, winnerID, ok := ParkWinner(&fixture.state, fixture.ticket)
 	if !ok {
 		t.Fatal("winner before detach")
@@ -566,166 +508,44 @@ func TestDetachBarrierAndPhysicalQuiescenceAreIndependent(t *testing.T) {
 	}
 }
 
-func TestCompletionBatchResolvesMultipleWaitSets(t *testing.T) {
+func TestParkSnapshotsResolveIndependentlyWithoutBatchStorage(t *testing.T) {
 	left := newParkV2Fixture(t, 21, []uint32{1, 2})
 	right := newParkV2Fixture(t, 22, []uint32{3})
 	publishParkV2(t, left, 0, 1)
 	publishParkV2(t, right, 0)
-	var sink CompletionSink
-	if !BeginCompletionBatch(&sink) {
-		t.Fatal("begin multi-set batch")
+	leftResolution, leftOK := ResolveParkSnapshot(&left.state, left.ticket)
+	rightResolution, rightOK := ResolveParkSnapshot(&right.state, right.ticket)
+	resolution := CompletionResolution{
+		WaitSets:  leftResolution.WaitSets + rightResolution.WaitSets,
+		Completed: leftResolution.Completed + rightResolution.Completed,
+		Canceled:  leftResolution.Canceled + rightResolution.Canceled,
+		Winners:   leftResolution.Winners + rightResolution.Winners,
+		Losers:    leftResolution.Losers + rightResolution.Losers,
 	}
-	collect := []struct {
-		fixture *parkV2Fixture
-		index   int
-	}{{left, 1}, {right, 0}, {left, 0}}
-	for _, item := range collect {
-		if CollectOperationCompletion(&sink, &item.fixture.records[item.index], item.fixture.ids[item.index]) != CompletionCollectAccepted {
-			t.Fatal("collect multi-set fact")
-		}
-	}
-	if !SealCompletionBatch(&sink) {
-		t.Fatal("seal multi-set batch")
-	}
-	resolution, ok := ResolveCompletionBatch(&sink)
-	if !ok || resolution != (CompletionResolution{WaitSets: 2, Completed: 2, Winners: 2, Losers: 1}) {
-		t.Fatalf("multi-set resolution = (%+v, %t)", resolution, ok)
+	if !leftOK || !rightOK || resolution != (CompletionResolution{WaitSets: 2, Completed: 2, Winners: 2, Losers: 1}) {
+		t.Fatalf("independent snapshot resolution = (%+v, %t, %t)", resolution, leftOK, rightOK)
 	}
 }
 
-func TestCompletionBatchInvalidLaterWaitSetDoesNotResolveEarlierSet(t *testing.T) {
-	left := newParkV2Fixture(t, 25, []uint32{1})
-	right := newParkV2Fixture(t, 26, []uint32{2})
-	publishParkV2(t, left, 0)
-	publishParkV2(t, right, 0)
-	var sink CompletionSink
-	if !BeginCompletionBatch(&sink) ||
-		CollectOperationCompletion(&sink, &left.records[0], left.ids[0]) != CompletionCollectAccepted ||
-		CollectOperationCompletion(&sink, &right.records[0], right.ids[0]) != CompletionCollectAccepted ||
-		!SealCompletionBatch(&sink) {
-		t.Fatal("build multi-set validation batch")
+func TestParkSetHasNoResolverCapacityLimit(t *testing.T) {
+	var state ParkState
+	ticket, ok := BeginParkSet(&state, ^uint32(0), 23)
+	if !ok || !AbortParkSet(&state, ticket) || !ParkReady(&state, ticket) {
+		t.Fatalf("large logical wait-set preparation = (%+v, %t)", ticket, ok)
 	}
-	right.records[0].completionPublished = false
-	if resolution, ok := ResolveCompletionBatch(&sink); ok || resolution != (CompletionResolution{}) ||
-		left.state.phase != parkParked || left.records[0].disposition != OperationDispositionPending ||
-		right.state.phase != parkParked || right.records[0].disposition != OperationDispositionPending {
-		t.Fatalf("invalid later set partially resolved batch: %+v, ok=%t", resolution, ok)
+	if outcome, _, _, consumed := ConsumeParkSet(&state, ticket); !consumed || outcome != ParkOutcomeCanceled {
+		t.Fatal("consume large aborted wait-set")
 	}
 }
 
-func TestParkSetRejectsUnrepresentableOperationSnapshot(t *testing.T) {
-	if ticket, ok := BeginParkSet(new(ParkState), CompletionSinkOperationCapacity+1, 23); ok || ticket != (ParkTicket{}) {
-		t.Fatalf("oversized park-set = (%+v, %t)", ticket, ok)
-	}
-}
-
-func TestCompletionSinkMergesCancelWithReadyFact(t *testing.T) {
-	fixture := newParkV2Fixture(t, 24, []uint32{1})
-	if !RequestParkCancel(&fixture.state, fixture.ticket, ParkCancelOperation) {
-		t.Fatal("request merged cancellation")
-	}
+func TestParkSnapshotRejectsStaleTicketWithoutMutation(t *testing.T) {
+	fixture := newParkV2Fixture(t, 25, []uint32{1})
 	publishParkV2(t, fixture, 0)
-	var sink CompletionSink
-	if !BeginCompletionBatch(&sink) {
-		t.Fatal("begin merged batch")
-	}
-	if CollectParkCancellation(&sink, &fixture.state, fixture.ticket) != CompletionCollectAccepted || sink.count != 1 ||
-		sink.cancelOnlyFacts != 1 || CollectOperationCompletion(&sink, &fixture.records[0], fixture.ids[0]) != CompletionCollectAccepted ||
-		sink.count != 1 || sink.cancelOnlyFacts != 0 || sink.operationFacts != 1 {
-		t.Fatalf("cancel/ready merge: count=%d operations=%d cancels=%d", sink.count, sink.operationFacts, sink.cancelOnlyFacts)
-	}
-	if !SealCompletionBatch(&sink) {
-		t.Fatal("seal merged batch")
-	}
-	if resolution, ok := ResolveCompletionBatch(&sink); !ok || resolution.Completed != 1 || resolution.Canceled != 0 {
-		t.Fatalf("resolve merged batch = (%+v, %t)", resolution, ok)
-	}
-}
-
-func TestCompletionSinkCatalogBoundIncludesCompletionAndCancel(t *testing.T) {
-	states := make([]ParkState, CompletionSinkOperationCapacity)
-	records := make([]OperationRecord, len(states))
-	var sink CompletionSink
-	if !BeginCompletionBatch(&sink) {
-		t.Fatal("begin catalog-bound batch")
-	}
-	for index := range states {
-		ticket, ok := BeginParkSet(&states[index], 1, uint32(index+1))
-		id, idOK := MakeOperationID(OperationSourceManual, uint32(index+1), 1)
-		if !ok || !idOK || !InitOperation(&records[index], id) ||
-			!AttachParkOperation(&states[index], ticket, &records[index], uint32(index)) ||
-			!SealParkSet(&states[index], ticket) || !CommitParkSet(&states[index], ticket) ||
-			!RequestParkCancel(&states[index], ticket, ParkCancelOperation) || PublishOperationCompletion(&records[index], id) != OperationCompletionPublished {
-			t.Fatalf("prepare catalog-bound wait-set %d", index)
-		}
-		if CollectParkCancellation(&sink, &states[index], ticket) != CompletionCollectAccepted ||
-			CollectOperationCompletion(&sink, &records[index], id) != CompletionCollectAccepted {
-			t.Fatalf("collect catalog-bound wait-set %d", index)
-		}
-	}
-	if sink.count != CompletionSinkOperationCapacity || sink.operationFacts != CompletionSinkOperationCapacity ||
-		sink.cancelOnlyFacts != 0 || sink.overflow || !SealCompletionBatch(&sink) {
-		t.Fatalf("catalog-bound counts: total=%d operations=%d cancels=%d overflow=%t", sink.count, sink.operationFacts, sink.cancelOnlyFacts, sink.overflow)
-	}
-	resolution, ok := ResolveCompletionBatch(&sink)
-	if !ok || resolution.WaitSets != CompletionSinkOperationCapacity || resolution.Completed != CompletionSinkOperationCapacity ||
-		resolution.Canceled != 0 || resolution.Winners != CompletionSinkOperationCapacity {
-		t.Fatalf("catalog-bound resolution = (%+v, %t)", resolution, ok)
-	}
-}
-
-func TestCompletionSinkCancelAdmissionOverflowDoesNotResolve(t *testing.T) {
-	states := make([]ParkState, CompletionSinkCancelOnlyCapacity+1)
-	tickets := make([]ParkTicket, len(states))
-	var sink CompletionSink
-	if !BeginCompletionBatch(&sink) {
-		t.Fatal("begin cancel overflow batch")
-	}
-	for index := range states {
-		ticket, ok := BeginParkSet(&states[index], 0, uint32(index+1))
-		if !ok || !SealParkSet(&states[index], ticket) || !CommitParkSet(&states[index], ticket) ||
-			!RequestParkCancel(&states[index], ticket, ParkCancelOperation) {
-			t.Fatalf("prepare cancel-only wait-set %d", index)
-		}
-		tickets[index] = ticket
-		result := CollectParkCancellation(&sink, &states[index], ticket)
-		if index < CompletionSinkCancelOnlyCapacity {
-			if result != CompletionCollectAccepted {
-				t.Fatalf("collect cancel %d = %d", index, result)
-			}
-		} else if result != CompletionCollectOverflow {
-			t.Fatalf("cancel overflow = %d", result)
-		}
-	}
-	if SealCompletionBatch(&sink) {
-		t.Fatal("sealed overflowed cancel batch")
-	}
-	for index := range states {
-		if states[index].phase != parkParked || states[index].outcome != ParkOutcomePending {
-			t.Fatalf("overflow resolved cancel wait-set %d", index)
-		}
-	}
-	if !ResetCompletionBatch(&sink) {
-		t.Fatal("reset cancel overflow")
-	}
-}
-
-func TestCompletionSinkCorruptCountsFailClosed(t *testing.T) {
-	sink := CompletionSink{
-		phase:           completionSinkCollecting,
-		count:           CompletionSinkCapacity + 1,
-		operationFacts:  CompletionSinkOperationCapacity,
-		cancelOnlyFacts: CompletionSinkCancelOnlyCapacity,
-	}
-	if SealCompletionBatch(&sink) || ResetCompletionBatch(&sink) {
-		t.Fatal("accepted corrupt completion count")
-	}
-	if resolution, ok := ResolveCompletionBatch(&sink); ok || resolution != (CompletionResolution{}) {
-		t.Fatalf("resolved corrupt completion count = (%+v, %t)", resolution, ok)
-	}
-	idle := CompletionSink{count: 1, operationFacts: 1}
-	if BeginCompletionBatch(&idle) {
-		t.Fatal("accepted non-zero idle sink")
+	before := fixture.state
+	stale := ParkTicket{epoch: fixture.ticket.epoch, generation: fixture.ticket.generation + 1}
+	if resolution, ok := ResolveParkSnapshot(&fixture.state, stale); ok || resolution != (CompletionResolution{}) ||
+		fixture.state != before || fixture.records[0].disposition != OperationDispositionPending {
+		t.Fatalf("stale snapshot resolve = (%+v, %t)", resolution, ok)
 	}
 }
 
@@ -770,7 +590,7 @@ func TestLogicalTicketExhaustionFailsClosed(t *testing.T) {
 func TestPhysicalOperationGenerationRejectsStaleIDAfterRecycle(t *testing.T) {
 	fixture := newParkV2Fixture(t, 31, []uint32{1})
 	publishParkV2(t, fixture, 0)
-	resolveParkV2(t, fixture, []int{0}, false)
+	resolveParkV2(t, fixture)
 	detachParkV2(t, fixture, 0)
 	oldID := fixture.ids[0]
 	if TakeOperationResult(&fixture.records[0], OperationResultLease{id: oldID, ticket: fixture.ticket}) {
