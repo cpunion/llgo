@@ -827,6 +827,150 @@ func (pair *channelExternalCommitPair) commit() bool {
 	return true
 }
 
+// ChannelExternalCommit is the single-endpoint counterpart of the pair
+// transaction above. A typed hchan buffer/close path has one physical effect
+// but still has to exclude the owner resolver, pin the exact frame endpoint,
+// publish Forced after the effect, and release the lifetime admission only
+// after SelectClaim becomes terminal. It is caller-owned fixed storage, not a
+// Task/Future object, and it never survives the hchan critical section.
+//
+// self gives the value linear identity. Every exported transition checks it
+// before dereferencing endpoint or claim, so copying a Prepared/Effect value
+// cannot release or commit the original transaction. A compiler wiring this
+// primitive into hchan must prove that the local does not become a managed
+// heap allocation and that Begin -> BeginEffect -> typed effect -> Commit is a
+// NoSuspend/NoPanic span.
+type ChannelExternalCommit struct {
+	self     *ChannelExternalCommit
+	endpoint channelExternalCommitAdmission
+	claim    *SelectClaim
+	phase    channelExternalCommitPairPhase
+	_        [7]byte
+}
+
+// ChannelExternalCommitBeginResult distinguishes ordinary stale/contention
+// from a fail-closed invariant break without exposing source internals to the
+// typed hchan layer.
+type ChannelExternalCommitBeginResult uint8
+
+const (
+	ChannelExternalCommitBeginInvalid ChannelExternalCommitBeginResult = iota
+	ChannelExternalCommitBeginPrepared
+	ChannelExternalCommitBeginAdmissionFailed
+	ChannelExternalCommitBeginClaimMismatch
+	ChannelExternalCommitBeginClaimContended
+	ChannelExternalCommitBeginInvariantFailure
+)
+
+func releaseChannelExternalCommitWithoutClaim(transaction *ChannelExternalCommit) bool {
+	if transaction == nil || transaction.self != transaction ||
+		transaction.phase != channelExternalCommitPairPrepared || transaction.claim == nil {
+		return false
+	}
+	if !transaction.endpoint.releaseWithoutCommit() {
+		transaction.phase = channelExternalCommitPairBroken
+		return false
+	}
+	*transaction = ChannelExternalCommit{}
+	return true
+}
+
+// BeginChannelExternalCommit acquires the exact endpoint admission before it
+// reads the frame-local claim, then acquires that claim before inspecting the
+// owner-only record/link. Prepared means the caller owns reversible pre-effect
+// permission. Admission failure, claim mismatch, and contention leave out
+// exact-zero. InvariantFailure is recoverably zero only when rollback was
+// proven; a non-zero Broken out must be treated as terminal by the caller.
+func BeginChannelExternalCommit(
+	out *ChannelExternalCommit,
+	source *ChannelOperationSource,
+	id OperationID,
+	claim *SelectClaim,
+) ChannelExternalCommitBeginResult {
+	if out == nil || *out != (ChannelExternalCommit{}) || source == nil || !id.Valid() || claim == nil {
+		return ChannelExternalCommitBeginInvalid
+	}
+	endpoint, acquired := source.acquireExternalCommit(id)
+	if acquired != channelExternalCommitAcquired {
+		return ChannelExternalCommitBeginAdmissionFailed
+	}
+	*out = ChannelExternalCommit{
+		self: out, endpoint: endpoint, claim: claim, phase: channelExternalCommitPairPrepared,
+	}
+	// Admission pins the stable claim pointer and generation. Record/link reads
+	// remain forbidden until the claim has excluded the owner resolver.
+	if out.endpoint.slot.claim != claim || preemptLoad(&out.endpoint.slot.generation) != id.Generation {
+		if !releaseChannelExternalCommitWithoutClaim(out) {
+			return ChannelExternalCommitBeginInvariantFailure
+		}
+		return ChannelExternalCommitBeginClaimMismatch
+	}
+	switch state := selectClaimOwnerAcquire(claim); state {
+	case selectClaimOpen:
+	case selectClaimAcquiring, selectClaimCommitting, selectClaimClaimed, selectClaimContended:
+		if !releaseChannelExternalCommitWithoutClaim(out) {
+			return ChannelExternalCommitBeginInvariantFailure
+		}
+		return ChannelExternalCommitBeginClaimContended
+	default:
+		out.phase = channelExternalCommitPairBroken
+		return ChannelExternalCommitBeginInvariantFailure
+	}
+	if !validChannelExternalEndpointHeld(&out.endpoint, claim) {
+		if !out.Abort() {
+			return ChannelExternalCommitBeginInvariantFailure
+		}
+		return ChannelExternalCommitBeginInvariantFailure
+	}
+	return ChannelExternalCommitBeginPrepared
+}
+
+// BeginEffect is the single-endpoint no-return boundary. Once it succeeds,
+// Abort is forbidden even when a later invariant fails.
+func (transaction *ChannelExternalCommit) BeginEffect() bool {
+	if transaction == nil || transaction.self != transaction ||
+		transaction.phase != channelExternalCommitPairPrepared || transaction.claim == nil {
+		return false
+	}
+	if !beginExternalSelectClaimEffect(transaction.claim) {
+		transaction.phase = channelExternalCommitPairBroken
+		return false
+	}
+	transaction.phase = channelExternalCommitPairEffect
+	return true
+}
+
+// Abort releases a Prepared transaction in claim-before-admission order.
+func (transaction *ChannelExternalCommit) Abort() bool {
+	if transaction == nil || transaction.self != transaction ||
+		transaction.phase != channelExternalCommitPairPrepared || transaction.claim == nil {
+		return false
+	}
+	if !selectClaimOwnerReleasePending(transaction.claim) {
+		transaction.phase = channelExternalCommitPairBroken
+		return false
+	}
+	return releaseChannelExternalCommitWithoutClaim(transaction)
+}
+
+// Commit publishes the irreversible source fact, then terminal Claim, then
+// releases the frame-lifetime admission. The hchan caller requests the exact
+// executor only after this method returns true.
+func (transaction *ChannelExternalCommit) Commit() bool {
+	if transaction == nil || transaction.self != transaction ||
+		transaction.phase != channelExternalCommitPairEffect || transaction.claim == nil {
+		return false
+	}
+	if transaction.endpoint.publishExternallyCommitted() != ChannelOperationPosted ||
+		!publishExternalSelectClaim(transaction.claim) ||
+		!transaction.endpoint.releaseCommitted() {
+		transaction.phase = channelExternalCommitPairBroken
+		return false
+	}
+	*transaction = ChannelExternalCommit{}
+	return true
+}
+
 func (source *ChannelOperationSource) publishExternallyCommittedHeld(slot *channelOperationSlot, id OperationID) ChannelOperationPostResult {
 	if preemptLoad(&slot.generation) != id.Generation || preemptLoad(&slot.external) != 1 {
 		return ChannelOperationPostStale
