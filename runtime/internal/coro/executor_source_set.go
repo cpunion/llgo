@@ -44,6 +44,7 @@ type ExecutorSourceSet struct {
 	waits   *WaitRegistrationTable
 	timers  *TimerRegistrationTable
 	manual  *ManualOperationSource
+	channel *ChannelOperationSource
 	control *TaskControlSource
 }
 
@@ -55,6 +56,8 @@ type executorSourceScan struct {
 	timers      int
 	manual      int
 	manualLost  int
+	channel     int
+	channelLost int
 	control     int
 	controlLate int
 	// applyVisits is executor work charged once per exact ParkLink candidate
@@ -77,6 +80,8 @@ func (scan *executorSourceScan) add(other executorSourceScan) {
 	scan.timers += other.timers
 	scan.manual += other.manual
 	scan.manualLost += other.manualLost
+	scan.channel += other.channel
+	scan.channelLost += other.channelLost
 	scan.control += other.control
 	scan.controlLate += other.controlLate
 	scan.applyVisits += other.applyVisits
@@ -95,6 +100,7 @@ func validExecutorSourceSet(sources *ExecutorSourceSet, p *P) bool {
 	}
 	return (sources.timers == nil || sources.timers.owner == p && sources.timers.route == sources.route) &&
 		(sources.manual == nil || sources.manual.owner == p && sources.manual.route == sources.route) &&
+		(sources.channel == nil || sources.channel.owner == p && sources.channel.route == sources.route) &&
 		(sources.control == nil || sources.control.owner == p && sources.control.route == sources.route)
 }
 
@@ -106,6 +112,7 @@ type ExecutorSourceCatalog struct {
 	Waits   *WaitRegistrationTable
 	Timers  *TimerRegistrationTable
 	Manual  *ManualOperationSource
+	Channel *ChannelOperationSource
 	Control *TaskControlSource
 }
 
@@ -128,7 +135,20 @@ func bindExecutorSourceSetAtRoute(sources *ExecutorSourceSet, p *P, route RouteI
 		_ = unbindRegistrationTable(catalog.Waits, p)
 		return false
 	}
+	if catalog.Channel != nil && !BindChannelOperationSourceAtRoute(catalog.Channel, p, route) {
+		if catalog.Manual != nil {
+			_ = UnbindManualOperationSource(catalog.Manual, p)
+		}
+		if catalog.Timers != nil {
+			_ = unbindTimerRegistrationTable(catalog.Timers, p)
+		}
+		_ = unbindRegistrationTable(catalog.Waits, p)
+		return false
+	}
 	if catalog.Control != nil && !BindTaskControlSourceAtRoute(catalog.Control, p, route) {
+		if catalog.Channel != nil {
+			_ = UnbindChannelOperationSource(catalog.Channel, p)
+		}
 		if catalog.Manual != nil {
 			_ = UnbindManualOperationSource(catalog.Manual, p)
 		}
@@ -144,6 +164,7 @@ func bindExecutorSourceSetAtRoute(sources *ExecutorSourceSet, p *P, route RouteI
 	sources.waits = catalog.Waits
 	sources.timers = catalog.Timers
 	sources.manual = catalog.Manual
+	sources.channel = catalog.Channel
 	sources.control = catalog.Control
 	return true
 }
@@ -215,6 +236,20 @@ func (sources *ExecutorSourceSet) publishPass(p *P, now int64, withDeadline bool
 			return scan, false
 		}
 	}
+	if sources.channel != nil {
+		if !sources.channel.beginPublishPass(p) {
+			return scan, false
+		}
+		for index := uint32(0); index < ChannelOperationSourceCapacity; index++ {
+			published, lost, channelOK := sources.channel.publishSlot(p, index)
+			scan.channel += int(published)
+			scan.channelLost += int(lost)
+			scan.completed += int(published + lost)
+			if !channelOK {
+				return scan, false
+			}
+		}
+	}
 	if sources.control != nil {
 		delivered, late, controlOK := sources.control.PublishPass(p)
 		scan.control = int(delivered)
@@ -250,6 +285,11 @@ func (sources *ExecutorSourceSet) applyOne(p *P, link *ParkLink) OperationApplyR
 			return OperationApplyInvalid
 		}
 		return sources.manual.ApplyOne(p, link.operation.id, link.operation)
+	case OperationSourceChannel:
+		if sources.channel == nil {
+			return OperationApplyInvalid
+		}
+		return sources.channel.ApplyOne(p, link.operation.id, link.operation)
 	default:
 		// A V2 ParkLink from a source absent from this frozen direct-call catalog
 		// is a binding/programming error, not deferred backend work.
@@ -264,17 +304,36 @@ func (sources *ExecutorSourceSet) applyOne(p *P, link *ParkLink) OperationApplyR
 // reach this method. This phase provides the production handshake core and
 // fail-closed static boundary; it intentionally has no successful production
 // ReadyThen source until a later channel/poll source adds its direct case here.
-func (sources *ExecutorSourceSet) tryCommitReadyCandidate(request ParkCommitRequest) (ParkCommitAttempt, bool) {
+func (sources *ExecutorSourceSet) tryCommitReadyCandidate(request ParkCommitRequest, owner selectClaimOwner) (ParkCommitAttempt, bool) {
 	id, ok := request.ID()
 	if !ok || sources == nil || !currentParkCommitRequest(request) {
 		return ParkCommitAttempt{}, false
 	}
 	switch id.Source() {
+	case OperationSourceChannel:
+		if sources.channel == nil {
+			return ParkCommitAttempt{}, false
+		}
+		return sources.channel.TryCommit(request, owner)
 	case OperationSourceTimer, OperationSourceManual:
 		return ParkCommitAttempt{}, false
 	default:
 		return ParkCommitAttempt{}, false
 	}
+}
+
+func (sources *ExecutorSourceSet) selectCommitDomainFor(link *ParkLink) (claim *SelectClaim, forced, channel, ok bool) {
+	if link == nil || link.operation == nil || &link.operation.link != link {
+		return nil, false, false, false
+	}
+	if link.operation.id.Source() != OperationSourceChannel {
+		return nil, false, false, true
+	}
+	if sources == nil || sources.channel == nil {
+		return nil, false, true, false
+	}
+	claim, ok = sources.channel.ClaimFor(link.operation)
+	return claim, operationCandidateExternallyCommitted(link.operation), true, ok
 }
 
 func (sources *ExecutorSourceSet) resolveCommitCapablePark(state *ParkState, ticket ParkTicket) (CompletionResolution, bool) {
@@ -290,7 +349,7 @@ func (sources *ExecutorSourceSet) resolveCommitCapablePark(state *ParkState, tic
 			return resolution, true
 		case ParkResolveNeedsCommit:
 			var ok bool
-			attempt, ok = sources.tryCommitReadyCandidate(request)
+			attempt, ok = sources.tryCommitReadyCandidate(request, selectClaimOwner{})
 			if !ok {
 				abortParkCommitCompatibility(state, ticket, request, previousSeed)
 				return CompletionResolution{}, false
@@ -416,6 +475,7 @@ func (sources *ExecutorSourceSet) resolvePublishedEpoch(p *P) (promoted, applyVi
 func (sources *ExecutorSourceSet) pending(p *P) bool {
 	return validExecutorSourceSet(sources, p) &&
 		(p.affectedWaitHead != nil || sources.waits.Pending() || sources.manual != nil && sources.manual.Pending() ||
+			sources.channel != nil && sources.channel.Pending() ||
 			sources.control != nil && sources.control.Pending())
 }
 
@@ -430,6 +490,7 @@ func (sources *ExecutorSourceSet) empty(p *P) bool {
 	return validExecutorSourceSet(sources, p) && registrationTableEmpty(sources.waits, p) &&
 		(sources.timers == nil || timerRegistrationTableEmpty(sources.timers, p)) &&
 		(sources.manual == nil || manualOperationSourceEmpty(sources.manual, p)) &&
+		(sources.channel == nil || channelOperationSourceEmpty(sources.channel, p)) &&
 		(sources.control == nil || taskControlSourceEmpty(sources.control, p))
 }
 
@@ -442,6 +503,7 @@ func (sources *ExecutorSourceSet) canBeginTerminalClose(p *P) bool {
 	return validExecutorSourceSet(sources, p) && registrationTableEmpty(sources.waits, p) &&
 		(sources.timers == nil || timerRegistrationTableEmpty(sources.timers, p)) &&
 		(sources.manual == nil || manualOperationSourceEmpty(sources.manual, p)) &&
+		(sources.channel == nil || channelOperationSourceEmpty(sources.channel, p)) &&
 		(sources.control == nil || taskControlSourceCanBeginTerminalClose(sources.control, p))
 }
 
@@ -474,6 +536,7 @@ func (sources *ExecutorSourceSet) canFinishTerminalClose(p *P) bool {
 	return validExecutorSourceSet(sources, p) && registrationTableEmpty(sources.waits, p) &&
 		(sources.timers == nil || timerRegistrationTableEmpty(sources.timers, p)) &&
 		(sources.manual == nil || manualOperationSourceEmpty(sources.manual, p)) &&
+		(sources.channel == nil || channelOperationSourceEmpty(sources.channel, p)) &&
 		(sources.control == nil || taskControlSourceCanFinishTerminalClose(sources.control, p))
 }
 
@@ -509,6 +572,20 @@ func (sources *ExecutorSourceSet) drainForClose(p *P) (scan executorSourceScan, 
 			return scan, false
 		}
 	}
+	if sources.channel != nil {
+		if !sources.channel.beginPublishPass(p) {
+			return scan, false
+		}
+		for index := uint32(0); index < ChannelOperationSourceCapacity; index++ {
+			published, lost, channelOK := sources.channel.publishSlot(p, index)
+			scan.channel += int(published)
+			scan.channelLost += int(lost)
+			scan.completed += int(published + lost)
+			if !channelOK {
+				return scan, false
+			}
+		}
+	}
 	if sources.control != nil {
 		delivered, late, controlOK := sources.control.PublishPass(p)
 		scan.control = int(delivered)
@@ -529,6 +606,9 @@ func unbindExecutorSourceSet(sources *ExecutorSourceSet, p *P) bool {
 		return false
 	}
 	if sources.control != nil && !UnbindTaskControlSource(sources.control, p) {
+		return false
+	}
+	if sources.channel != nil && !UnbindChannelOperationSource(sources.channel, p) {
 		return false
 	}
 	if sources.manual != nil && !UnbindManualOperationSource(sources.manual, p) {
