@@ -98,10 +98,10 @@ func pQueueContainsWaiter(p *P, target *G) bool {
 	return false
 }
 
-// pOwnsTaskCancellation proves scheduler ownership without adding a permanent
-// P pointer or external handle to every G. Cancellation is rare, so an owner
-// queue scan is preferable to inflating the hot G/P representation. A future
-// multi-P global injection path routes the request to the owning P first.
+// pOwnsTaskCancellation proves scheduler ownership for the public arbitrary-G
+// APIs without adding a permanent P pointer or external handle to every G.
+// Those APIs retain a full queue audit: cancellation is rare, so a scan is
+// preferable to inflating the hot G/P representation.
 func pOwnsTaskCancellation(p *P, g *G) bool {
 	if p == nil || !ValidG(g) {
 		return false
@@ -130,19 +130,229 @@ func pOwnsTaskCancellation(p *P, g *G) bool {
 	}
 }
 
+type taskCancellationOwnerProof uint8
+
+const (
+	taskCancellationProofFull taskCancellationOwnerProof = iota
+	taskCancellationProofRegistered
+)
+
+func validRegisteredParkHead(state *ParkState) bool {
+	if state == nil || (state.attached == 0) != (state.head == nil) {
+		return false
+	}
+	if state.head == nil {
+		return true
+	}
+	link := state.head
+	record := link.operation
+	if link.previous != nil || link.park != state || link.ticket != state.ticket || record == nil ||
+		&record.link != link || record.link.operation != record || record.phase != operationActive ||
+		!record.id.Valid() || !validOperationCandidate(record) {
+		return false
+	}
+	if link.wait != nil && (link.wait.g == nil || &link.wait.g.park != state ||
+		link.wait.ticket != state.ticket || link.wait.state == waitSetRecordUnused) {
+		return false
+	}
+	switch state.phase {
+	case parkPreparing, parkSealed, parkParked:
+		return record.disposition == OperationDispositionPending && !record.resolutionApplied &&
+			operationCandidatePendingResultStorageValid(record) && operationCandidatePendingForResolution(record)
+	case parkDetaching:
+		switch state.outcome {
+		case ParkOutcomeCompleted:
+			if record.id == state.winnerID {
+				if link.caseID != state.winnerCase || record.disposition != OperationDispositionWinner ||
+					record.resultTicket != state.ticket || record.resultState != operationResultOwned {
+					return false
+				}
+			} else if record.disposition != OperationDispositionLost || !record.cancelRequested ||
+				record.resultTicket != (ParkTicket{}) || !operationUnselectedResultStateValid(record) {
+				return false
+			}
+		case ParkOutcomeDefault:
+			if record.disposition != OperationDispositionLost || !record.cancelRequested ||
+				record.resultTicket != (ParkTicket{}) || !operationUnselectedResultStateValid(record) {
+				return false
+			}
+		case ParkOutcomeCanceled:
+			if record.disposition != OperationDispositionCanceled || !record.cancelRequested ||
+				record.resultTicket != (ParkTicket{}) || !operationUnselectedResultStateValid(record) {
+				return false
+			}
+		default:
+			return false
+		}
+		return operationCandidateSettledForDisposition(record, record.disposition)
+	default:
+		return false
+	}
+}
+
+func validRegisteredActiveParkHeader(state *ParkState) bool {
+	if state == nil || !validActiveParkStateHeader(state, state.ticket) || !validRegisteredParkHead(state) {
+		return false
+	}
+	if state.phase != parkReady || state.outcome != ParkOutcomeCompleted {
+		return true
+	}
+	record := state.winnerRecord
+	return record != nil && record.phase == operationDetached && record.resultTicket == state.ticket &&
+		record.resultState == operationResultOwned &&
+		operationCandidateSettledForDisposition(record, OperationDispositionWinner)
+}
+
+func validRegisteredReleasableParkHeader(state *ParkState) bool {
+	if state == nil || state.resolving || !validTaskCancelState(state.taskCancelKind, state.taskCancelPhase) ||
+		state.cancelKind > ParkCancelShutdown || state.attached > state.expected {
+		return false
+	}
+	switch state.phase {
+	case parkIdle:
+		return state.ticket == (ParkTicket{}) && state.expected == 0 && state.attached == 0 &&
+			state.seed == 0 && !state.hasDefault && state.cancelKind == ParkCancelNone &&
+			state.outcome == ParkOutcomePending && state.winnerCase == 0 &&
+			state.winnerID == (OperationID{}) && state.winnerRecord == nil && state.head == nil
+	case parkConsumed:
+		if !validParkTicket(state.ticket) || state.attached != 0 || state.head != nil {
+			return false
+		}
+		switch state.outcome {
+		case ParkOutcomeCompleted:
+			return !state.hasDefault && state.cancelKind < ParkCancelTaskAbort &&
+				state.winnerID.Valid() && state.winnerRecord == nil
+		case ParkOutcomeCanceled:
+			return !state.hasDefault && state.cancelKind != ParkCancelNone && state.winnerCase == 0 &&
+				state.winnerID == (OperationID{}) && state.winnerRecord == nil
+		case ParkOutcomeDefault:
+			return state.hasDefault && state.cancelKind == ParkCancelNone &&
+				state.winnerID == (OperationID{}) && state.winnerRecord == nil
+		default:
+			return false
+		}
+	case parkDelivered:
+		return validParkTicket(state.ticket) && state.expected == 0 && state.attached == 0 &&
+			state.seed == 0 && !state.hasDefault && state.cancelKind == ParkCancelNone &&
+			state.outcome == ParkOutcomePending && state.winnerCase == 0 &&
+			state.winnerID == (OperationID{}) && state.winnerRecord == nil && state.head == nil
+	default:
+		return false
+	}
+}
+
+// validRegisteredRunningParkHeader is deliberately scalar/adjacent-only. A
+// preparing or sealed candidate chain was structurally audited by its owner
+// transition; registered delivery must not hide another candidate traversal
+// in what is only an ownership proof.
+func validRegisteredRunningParkHeader(state *ParkState) bool {
+	if validRegisteredReleasableParkHeader(state) {
+		return true
+	}
+	if state == nil || state.resolving {
+		return false
+	}
+	switch state.phase {
+	case parkPreparing:
+		return validPreparingParkStateHeader(state, state.ticket) && validRegisteredParkHead(state)
+	case parkSealed:
+		return validParkTicket(state.ticket) &&
+			validTaskCancelState(state.taskCancelKind, state.taskCancelPhase) &&
+			state.cancelKind <= ParkCancelShutdown && state.attached == state.expected &&
+			state.seed == 0 && state.outcome == ParkOutcomePending &&
+			(state.hasDefault || state.winnerCase == 0) && state.winnerID == (OperationID{}) &&
+			state.winnerRecord == nil && validRegisteredParkHead(state)
+	case parkParked, parkDetaching, parkReady:
+		return validRegisteredActiveParkHeader(state)
+	default:
+		return false
+	}
+}
+
+func validRegisteredRunnableParkHeader(state *ParkState) bool {
+	return validRegisteredReleasableParkHeader(state) ||
+		state != nil && state.phase == parkReady && validRegisteredActiveParkHeader(state)
+}
+
+// pOwnsRegisteredTaskCancellation is the O(1) local ownership predicate used
+// only after a TaskControlSource has proved an exact registered endpoint. The
+// endpoint's owner and taskControlLeases pin the task to this P in the current
+// single-P runtime, so Runnable and legacy Waiting need not walk unrelated
+// queue links. V2 Waiting has an exact frame-local record and therefore keeps
+// its stronger constant-time neighbour/link validation.
+//
+// This predicate is not a public arbitrary-G ownership query. Multi-P task
+// migration must transfer or forward the registered control lease locator
+// before changing ownership; merely reusing this single-P proof would be a
+// use-after-migration bug.
+func pOwnsRegisteredTaskCancellation(p *P, g *G) bool {
+	if p == nil || !ValidG(g) || g.taskControlLeases == 0 {
+		return false
+	}
+	gate := preemptLoad(preemptAddress(g))
+	if gate != preemptIdle && gate != preemptRequested {
+		return false
+	}
+	switch g.state {
+	case GRunnable:
+		return g.queued && !g.waiting && g.nextWait == nil &&
+			g.waitToken == nil && g.waitTicket == 0 && g.runP == nil &&
+			validRegisteredRunnableParkHeader(&g.park) &&
+			g.spawnChild == nil && g.spawnParent == nil && g.spawnP == nil &&
+			(g.active == nil || g.active.parkWait == nil) &&
+			p.readyHead != nil && p.readyTail != nil
+	case GRunning, GDispatching:
+		return p.current == g && g.runP == p && !g.queued && g.nextReady == nil &&
+			!g.waiting && g.nextWait == nil && g.waitToken == nil && g.waitTicket == 0 &&
+			validRegisteredRunningParkHeader(&g.park)
+	case GWaiting:
+		if !g.waiting || g.queued || g.nextReady != nil || g.runP != nil ||
+			g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil {
+			return false
+		}
+		if g.waitToken != nil {
+			return g.nextWait != g && g.waitTicket != 0 && validClaimedWait(g.waitToken, g.waitTicket) &&
+				validRegisteredReleasableParkHeader(&g.park) && g.park.taskCancelKind == TaskCancelNone &&
+				(g.active == nil || g.active.parkWait == nil) &&
+				p.waitHead != nil && p.waitTail != nil
+		}
+		return g.active != nil && g.active.parkWait != nil &&
+			validActiveWaitSetRecordFast(p, g.active.parkWait) && validRegisteredActiveParkHeader(&g.park)
+	default:
+		return false
+	}
+}
+
 // applyTaskCancellationToPark maps the strongest task request into the current
 // logical wait. Preparing/sealed/parked waits receive a sticky logical cancel;
 // detaching/ready already have a terminal outcome, so the task token is simply
 // observed before the selected continuation executes.
-func applyTaskCancellationToPark(g *G, kind TaskCancelKind) bool {
-	if !ValidG(g) || !validTaskCancelKind(kind) || g.park.resolving || !validParkState(&g.park) {
+func applyTaskCancellationToParkOwned(g *G, kind TaskCancelKind, proof taskCancellationOwnerProof) bool {
+	if !ValidG(g) || !validTaskCancelKind(kind) || g.park.resolving {
+		return false
+	}
+	if proof == taskCancellationProofRegistered {
+		if !validRegisteredRunningParkHeader(&g.park) {
+			return false
+		}
+	} else if proof != taskCancellationProofFull || !validParkState(&g.park) {
 		return false
 	}
 	switch g.park.phase {
 	case parkIdle, parkConsumed, parkDelivered:
 		return g.state != GWaiting
 	case parkPreparing, parkSealed, parkParked:
-		return RequestParkCancel(&g.park, g.park.ticket, taskCancelParkKind(kind))
+		parkKind := taskCancelParkKind(kind)
+		if proof == taskCancellationProofFull {
+			return RequestParkCancel(&g.park, g.park.ticket, parkKind)
+		}
+		if parkKind == ParkCancelNone || g.park.phase == parkParked && g.park.winnerRecord != nil {
+			return false
+		}
+		if parkKind > g.park.cancelKind {
+			g.park.cancelKind = parkKind
+		}
+		return true
 	case parkDetaching, parkReady:
 		return true
 	default:
@@ -150,23 +360,34 @@ func applyTaskCancellationToPark(g *G, kind TaskCancelKind) bool {
 	}
 }
 
-// RequestTaskCancellation is owner-P-only. Cross-thread context/I/O/host
-// cancellation first publishes a normal OperationID fact and requests the
-// executor; the owner P then calls this function if that fact represents task
-// termination. Go does not expose an arbitrary goroutine-kill handle, so the
-// base G representation needs no per-task external registry.
-func RequestTaskCancellation(p *P, g *G, kind TaskCancelKind) bool {
-	if !pOwnsTaskCancellation(p, g) || !validTaskCancelKind(kind) {
+func applyTaskCancellationToPark(g *G, kind TaskCancelKind) bool {
+	return applyTaskCancellationToParkOwned(g, kind, taskCancellationProofFull)
+}
+
+// requestTaskCancellationOwned is the single cancellation mutation core. Its
+// caller must first prove owner-P authority either through the public full
+// queue audit or through one exact registered TaskControl endpoint.
+func requestTaskCancellationOwned(p *P, g *G, kind TaskCancelKind, proof taskCancellationOwnerProof) bool {
+	if p == nil || !ValidG(g) || !validTaskCancelKind(kind) ||
+		(proof != taskCancellationProofFull && proof != taskCancellationProofRegistered) {
 		return false
 	}
 	var wait *WaitSetRecord
 	if g.state == GWaiting && g.waitToken == nil && g.active != nil && g.active.parkWait != nil {
 		wait = g.active.parkWait
-		if g.park.resolving || g.park.winnerRecord != nil || !canAppendAffectedWaitSet(p, wait) {
+		if g.park.resolving || g.park.winnerRecord != nil ||
+			proof == taskCancellationProofRegistered && !validRegisteredActiveParkHeader(&g.park) ||
+			!canAppendAffectedWaitSet(p, wait) {
 			return false
 		}
-	} else if !validParkState(&g.park) {
-		return false
+	} else {
+		if proof == taskCancellationProofRegistered {
+			if !validRegisteredRunningParkHeader(&g.park) {
+				return false
+			}
+		} else if !validParkState(&g.park) {
+			return false
+		}
 	}
 	if g.park.taskCancelPhase == taskCancelCleanup {
 		// The first cleanup claim freezes the terminal cause. An old stop token
@@ -178,7 +399,7 @@ func RequestTaskCancellation(p *P, g *G, kind TaskCancelKind) bool {
 		strongest = g.park.taskCancelKind
 	}
 	if wait == nil {
-		if !applyTaskCancellationToPark(g, strongest) {
+		if !applyTaskCancellationToParkOwned(g, strongest, proof) {
 			return false
 		}
 	} else {
@@ -202,6 +423,18 @@ func RequestTaskCancellation(p *P, g *G, kind TaskCancelKind) bool {
 		appendAffectedWaitSetUnchecked(p, wait)
 	}
 	return true
+}
+
+// RequestTaskCancellation is owner-P-only. Cross-thread context/I/O/host
+// cancellation first publishes a normal OperationID fact and requests the
+// executor; the owner P then calls this function if that fact represents task
+// termination. The public arbitrary-G API deliberately retains its complete
+// ready/wait queue ownership audit. Go does not expose an arbitrary
+// goroutine-kill handle, so the base G representation needs no per-task
+// external registry.
+func RequestTaskCancellation(p *P, g *G, kind TaskCancelKind) bool {
+	return pOwnsTaskCancellation(p, g) &&
+		requestTaskCancellationOwned(p, g, kind, taskCancellationProofFull)
 }
 
 // TaskCancellationOf is a non-consuming owner/current-G observation.

@@ -55,8 +55,9 @@ type taskControlSlot struct {
 
 // TaskControlSource is the cross-thread ingress for cooperative task abort and
 // shutdown. Post only merges a durable monotonic request. The owner P later
-// drains it through RequestTaskCancellation in a common published epoch;
-// producer threads never run Go cleanup, touch a ParkState, or resume a frame.
+// drains it through the common owner-side cancellation mutation core in a
+// published epoch; producer threads never run Go cleanup, touch a ParkState,
+// or resume a frame.
 //
 // The source has a stable address from Bind through Unbind. A target shim must
 // Post before it requests the common executor doorbell. Closing seals producer
@@ -107,6 +108,32 @@ func taskControlReusableSlot(slot *taskControlSlot) bool {
 
 func validTaskControlOwner(source *TaskControlSource, p *P) bool {
 	return source != nil && p != nil && source.owner == p && source.route.Valid()
+}
+
+// registeredTaskControlDelivery proves that one exact endpoint still pins its
+// owner-only G lease to source.owner. The final state-specific ownership check
+// is O(1); unlike the public arbitrary-G cancellation APIs, it never audits an
+// unrelated ready or legacy-wait queue tail.
+func registeredTaskControlDelivery(source *TaskControlSource, p *P, slot *taskControlSlot, id OperationID) (*G, bool) {
+	exact, ok := taskControlSlotFor(source, id)
+	if !ok || !validTaskControlOwner(source, p) || exact != slot ||
+		preemptLoad(&slot.generation) != id.Generation {
+		return nil, false
+	}
+	state := taskControlLifecycle(preemptLoad(&slot.state))
+	if state != taskControlActive && state != taskControlClosing {
+		return nil, false
+	}
+	task := slot.task
+	if task == nil || task.taskControlLeases == 0 || !pOwnsRegisteredTaskCancellation(p, task) {
+		return nil, false
+	}
+	return task, true
+}
+
+func requestRegisteredTaskCancellation(source *TaskControlSource, p *P, slot *taskControlSlot, id OperationID, kind TaskCancelKind) bool {
+	task, ok := registeredTaskControlDelivery(source, p, slot, id)
+	return ok && requestTaskCancellationOwned(p, task, kind, taskCancellationProofRegistered)
 }
 
 // RegisterTaskControl allocates an external handle for an already owner-P
@@ -259,7 +286,7 @@ func (source *TaskControlSource) publishSlot(p *P, terminal *G, index uint32) (d
 	switch state {
 	case taskControlActive, taskControlClosing:
 		generation := preemptLoad(&slot.generation)
-		_, valid := MakeOperationIDAtRoute(OperationSourceControl, source.route, index+1, generation)
+		id, valid := MakeOperationIDAtRoute(OperationSourceControl, source.route, index+1, generation)
 		if !valid || slot.task == nil {
 			return 0, 0, false
 		}
@@ -269,7 +296,7 @@ func (source *TaskControlSource) publishSlot(p *P, terminal *G, index uint32) (d
 		if terminal != nil && slot.task == terminal {
 			return 0, 1, true
 		}
-		if RequestTaskCancellation(p, slot.task, kind) {
+		if requestRegisteredTaskCancellation(source, p, slot, id, kind) {
 			return 1, 0, true
 		}
 		if slot.task.state == GCanceling || slot.task.state == GPanicking || slot.task.state == GDead {
