@@ -223,6 +223,7 @@ func (source *ChannelOperationSource) ReserveAndAttachWait(
 		}
 		id, ok := MakeOperationIDAtRoute(OperationSourceChannel, source.route, uint32(index)+1, generation)
 		if !ok || !PrepareOperationAtGeneration(&slot.record, id) {
+			_ = resetProducerSourceSlot(&slot.producerSourceSlot, generation)
 			return OperationID{}, false
 		}
 		if !DeclareOperationCommitMode(&slot.record, OperationCommitReadyThenTryCommit) ||
