@@ -51,6 +51,91 @@ func runnerYieldAction(t *testing.T, driver *ExecutorDriver, step ExecutorRunSte
 	}
 }
 
+func runnerNextPhysicalAction(t *testing.T, driver *ExecutorDriver, task *yieldingTestG, want ActionKind) ExecutorRunStep {
+	t.Helper()
+	step, ok := NextExecutorRunStep(driver)
+	if !ok || step.Kind != ExecutorRunStepDispatch || step.G != task.g || step.Action.Kind != want {
+		t.Fatalf("runner dispatch %d = (%+v, %t)", want, step, ok)
+	}
+	step, ok = NextExecutorRunStep(driver)
+	if !ok || step.Kind != ExecutorRunStepAction || step.G != task.g || step.Action.Kind != want {
+		t.Fatalf("runner action %d = (%+v, %t)", want, step, ok)
+	}
+	return step
+}
+
+func queueRunnerCheckDestroy(t *testing.T, driver *ExecutorDriver, task *yieldingTestG) *Frame {
+	t.Helper()
+	step := runnerNextPhysicalAction(t, driver, task, ActionCheckResume)
+	resume, ok := Checked(driver.p, task.g, step.Action, false)
+	if !ok || resume.Kind != ActionResume {
+		t.Fatal("check completing runner root")
+	}
+	takeNormalRunnerDecision(t, task.g)
+	task.frame.header.SuspendReason = uint16(SuspendFrameComplete)
+	task.frame.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PrepareComplete(task.g, task.handle, task.frame.header) {
+		t.Fatal("prepare completing runner root")
+	}
+	next, ok := Resumed(driver.p, task.g, resume)
+	if !ok || next.Kind != ActionCheckDestroy || !CommitExecutorRunAction(driver, task.g, next) {
+		t.Fatalf("queue runner check-destroy = (%+v, %t)", next, ok)
+	}
+	return task.g.destroyTarget
+}
+
+func queueRunnerPanicDestroy(t *testing.T, driver *ExecutorDriver, task *yieldingTestG) (*Frame, *testFrame) {
+	t.Helper()
+	leafHandle := unsafe.Pointer(new(byte))
+	leaf := newTestFrame(t, task.g, leafHandle, task.handle)
+	step := runnerNextPhysicalAction(t, driver, task, ActionCheckResume)
+	resume, ok := Checked(driver.p, task.g, step.Action, false)
+	if !ok || resume.Kind != ActionResume {
+		t.Fatal("check panicking runner root")
+	}
+	takeNormalRunnerDecision(t, task.g)
+	task.frame.header.SuspendReason = uint16(SuspendCall)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+	if !PrepareAwait(task.g, task.handle, leafHandle) {
+		t.Fatal("prepare panicking runner leaf")
+	}
+	next, ok := Resumed(driver.p, task.g, resume)
+	if !ok || next.Kind != ActionCheckResume || !CommitExecutorRunAction(driver, task.g, next) {
+		t.Fatalf("queue panicking runner leaf = (%+v, %t)", next, ok)
+	}
+
+	step = runnerNextPhysicalAction(t, driver, task, ActionCheckResume)
+	resume, ok = Checked(driver.p, task.g, step.Action, false)
+	if !ok || resume.Kind != ActionResume {
+		t.Fatal("check panicking runner leaf")
+	}
+	takeNormalRunnerDecision(t, task.g)
+	typeWord, dataWord := new(byte), new(byte)
+	leaf.header.SuspendReason = uint16(SuspendPanic)
+	leaf.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PreparePanic(task.g, leafHandle, leaf.header, unsafe.Pointer(typeWord), unsafe.Pointer(dataWord)) {
+		t.Fatal("publish runner panic")
+	}
+	next, ok = Resumed(driver.p, task.g, resume)
+	if !ok || next.Kind != ActionCheckDestroy || !CommitExecutorRunAction(driver, task.g, next) {
+		t.Fatalf("queue runner panic leaf destroy = (%+v, %t)", next, ok)
+	}
+
+	step = runnerNextPhysicalAction(t, driver, task, ActionCheckDestroy)
+	destroy, ok := Checked(driver.p, task.g, step.Action, true)
+	if !ok || destroy.Kind != ActionDestroy {
+		t.Fatal("check runner panic leaf destroy")
+	}
+	releaseTestFrame(t, task.g, leaf)
+	next, ok = DestroyedBounded(driver.p, task.g, destroy)
+	if !ok || next.Kind != ActionPanicDestroy || !CommitExecutorRunAction(driver, task.g, next) {
+		t.Fatalf("queue runner panic ancestor destroy = (%+v, %t)", next, ok)
+	}
+	runtime.KeepAlive(typeWord)
+	runtime.KeepAlive(dataWord)
+	return task.g.destroyTarget, leaf
+}
+
 func TestExecutorRunBudgetOneStableProgressAndFIFO(t *testing.T) {
 	p := new(P)
 	driver, _, _, _ := bindTestExecutorDriver(t, p)
@@ -216,6 +301,234 @@ func TestExecutorRunCursorRejectsImplicitLegacySwitch(t *testing.T) {
 		t.Fatalf("explicit legacy dequeue = (%p, %t)", g, ok)
 	}
 	runtime.KeepAlive(task.frame.memory)
+}
+
+func TestExecutorRunCursorRejectsExportedPollSlice(t *testing.T) {
+	for _, timed := range []bool{false, true} {
+		name := "plain"
+		if timed {
+			name = "deadline"
+		}
+		t.Run(name, func(t *testing.T) {
+			p := new(P)
+			var driver *ExecutorDriver
+			var registry *ExecutorRegistry
+			var handle ExecutorHandle
+			if timed {
+				driver, registry, _, _, handle = bindTestExecutorDriverWithTimers(t, p)
+			} else {
+				driver, registry, _, handle = bindTestExecutorDriver(t, p)
+			}
+			task := newYieldingTestG(t, "poll-slice-cursor")
+			if !Enqueue(p, task.g) || registry.Request(handle) != ExecutorRequestPublished {
+				t.Fatal("prepare mixed hot-source/ready-debt cursor")
+			}
+
+			requestedBehindA := false
+			now := int64(1)
+			for {
+				var step ExecutorRunStep
+				var ok bool
+				if timed {
+					step, ok = NextExecutorRunStepAt(driver, now)
+					now++
+				} else {
+					step, ok = NextExecutorRunStep(driver)
+				}
+				if !ok || step.Kind != ExecutorRunStepSource {
+					t.Fatalf("mixed cursor source = (%+v, %t)", step, ok)
+				}
+				if !requestedBehindA && driver.poll.phase >= executorPollEpochBPublish {
+					if registry.Request(handle) != ExecutorRequestPublished {
+						t.Fatal("publish hot source behind acknowledged epoch A")
+					}
+					requestedBehindA = true
+				}
+				if step.Poll.Complete {
+					break
+				}
+			}
+			if !requestedBehindA || !driver.run.sourceMore || !driver.run.readyDebt ||
+				driver.poll != (executorPollTransaction{}) || p.readyHead != task.g {
+				t.Fatalf("mixed cursor precondition = requested:%t run:%+v poll:%+v head:%p",
+					requestedBehindA, driver.run, driver.poll, p.readyHead)
+			}
+			beforeRun, beforePoll := driver.run, driver.poll
+			var progress ExecutorPollProgress
+			var ok bool
+			if timed {
+				progress, ok = PollExecutorSliceAt(driver, now, 1)
+			} else {
+				progress, ok = PollExecutorSlice(driver, 1)
+			}
+			if ok || progress != (ExecutorPollProgress{}) {
+				t.Fatalf("exported poll crossed bounded cursor = (%+v, %t)", progress, ok)
+			}
+			if driver.run != beforeRun || driver.poll != beforePoll || p.readyHead != task.g ||
+				!registry.ObserveRequested(handle) {
+				t.Fatalf("rejected poll mutated mixed cursor: run=%+v poll=%+v head=%p requested=%t",
+					driver.run, driver.poll, p.readyHead, registry.ObserveRequested(handle))
+			}
+			var step ExecutorRunStep
+			if timed {
+				step, ok = NextExecutorRunStepAt(driver, now)
+			} else {
+				step, ok = NextExecutorRunStep(driver)
+			}
+			if !ok || step.Kind != ExecutorRunStepDispatch || step.G != task.g {
+				t.Fatalf("runner lost ready-debt priority after rejected poll = (%+v, %t)", step, ok)
+			}
+			runtime.KeepAlive(task.frame.memory)
+		})
+	}
+}
+
+func TestExecutorRunTaskControlBlocksQueuedDestroy(t *testing.T) {
+	for _, kind := range []ActionKind{ActionCheckDestroy, ActionPanicDestroy} {
+		name := "check-destroy"
+		if kind == ActionPanicDestroy {
+			name = "panic-destroy"
+		}
+		t.Run(name, func(t *testing.T) {
+			p := new(P)
+			driver := new(ExecutorDriver)
+			registry := new(ExecutorRegistry)
+			waits := new(WaitRegistrationTable)
+			control := new(TaskControlSource)
+			handle := registerTestExecutor(t, registry)
+			if !BindExecutorSourceCatalog(driver, p, registry, handle, ExecutorSourceCatalog{Waits: waits, Control: control}) {
+				t.Fatal("bind runner task-control source")
+			}
+			task := newYieldingTestG(t, "late-source-cancel")
+			if !Enqueue(p, task.g) {
+				t.Fatal("enqueue late-source-cancel task")
+			}
+			var target *Frame
+			var releasedLeaf *testFrame
+			if kind == ActionCheckDestroy {
+				target = queueRunnerCheckDestroy(t, driver, task)
+			} else {
+				target, releasedLeaf = queueRunnerPanicDestroy(t, driver, task)
+			}
+			if target == nil || target.handle == nil || target.state != FrameDestroyPending || task.g.runAction != kind {
+				t.Fatalf("queued destroy precondition = target:%p action:%d", target, task.g.runAction)
+			}
+			controlID, ok := RegisterTaskControl(control, p, task.g)
+			if !ok {
+				t.Fatal("register queued destroy task control")
+			}
+			post := PostTaskControlAndRequest(control, controlID, TaskCancelAbort, registry, handle)
+			if post.Control != TaskControlPosted || post.Executor != ExecutorRequestPublished {
+				t.Fatalf("post queued destroy task control = (%d, %d)", post.Control, post.Executor)
+			}
+			for {
+				step, advanced := NextExecutorRunStep(driver)
+				if !advanced || step.Kind != ExecutorRunStepSource {
+					t.Fatalf("deliver queued destroy task control = (%+v, %t)", step, advanced)
+				}
+				if step.Poll.Complete {
+					break
+				}
+			}
+			if task.g.park.taskCancelKind != TaskCancelAbort || task.g.park.taskCancelPhase != taskCancelRequested {
+				t.Fatalf("queued destroy cancellation = (%d, %d)", task.g.park.taskCancelKind, task.g.park.taskCancelPhase)
+			}
+			if claimed, ok := ClaimTaskCancellation(p, task.g); ok || claimed != TaskCancelNone ||
+				task.g.park.taskCancelKind != TaskCancelAbort || task.g.park.taskCancelPhase != taskCancelRequested {
+				t.Fatalf("queued destroy cancellation was claimable = (%d, %t), token=(%d,%d)",
+					claimed, ok, task.g.park.taskCancelKind, task.g.park.taskCancelPhase)
+			}
+
+			destroyCount := 0
+			step, advanced := NextExecutorRunStep(driver)
+			if advanced && step.Kind == ExecutorRunStepAction &&
+				(step.Action.Kind == ActionCheckDestroy || step.Action.Kind == ActionPanicDestroy) {
+				destroyCount++
+			}
+			if advanced || step != (ExecutorRunStep{}) || destroyCount != 0 ||
+				p.current != nil || p.action != (Action{}) || driver.run.issued != ActionInvalid ||
+				p.readyHead != task.g || p.readyTail != task.g || !task.g.queued || task.g.nextReady != nil ||
+				task.g.runAction != kind || task.g.destroyTarget != target || target.handle == nil ||
+				target.state != FrameDestroyPending {
+				t.Fatalf("late cancellation crossed queued destroy: step=(%+v,%t) destroys=%d current=%p action=%+v cursor=%+v head=%p tail=%p queued=%t runAction=%d target=%p state=%d",
+					step, advanced, destroyCount, p.current, p.action, driver.run, p.readyHead, p.readyTail,
+					task.g.queued, task.g.runAction, task.g.destroyTarget, target.state)
+			}
+			closeTaskControlFixture(t, control, p, controlID)
+			runtime.KeepAlive(task.frame.memory)
+			if releasedLeaf != nil {
+				runtime.KeepAlive(releasedLeaf.memory)
+			}
+		})
+	}
+}
+
+func TestExecutorRunOwnerCancellationBlocksCheckedDestroy(t *testing.T) {
+	p := new(P)
+	driver, _, _, _ := bindTestExecutorDriver(t, p)
+	task := newYieldingTestG(t, "late-owner-cancel")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue late owner cancellation task")
+	}
+	target := queueRunnerCheckDestroy(t, driver, task)
+	step := runnerNextPhysicalAction(t, driver, task, ActionCheckDestroy)
+	if !RequestTaskCancellation(p, task.g, TaskCancelAbort) {
+		t.Fatal("insert owner cancellation before checked destroy")
+	}
+	destroyCount := 0
+	if destroy, ok := Checked(p, task.g, step.Action, true); ok || destroy != (Action{}) {
+		destroyCount++
+	}
+	if destroyCount != 0 || p.current != task.g || p.action != step.Action || driver.run.issued != ActionCheckDestroy ||
+		task.g.runP != p || task.g.state != GDispatching || task.g.destroyTarget != target ||
+		target.handle != step.Action.Handle || target.state != FrameDestroyPending ||
+		task.g.park.taskCancelKind != TaskCancelAbort || task.g.park.taskCancelPhase != taskCancelRequested {
+		t.Fatalf("owner cancellation crossed checked destroy: destroys=%d current=%p action=%+v cursor=%+v state=%d target=%p handle=%p cancel=(%d,%d)",
+			destroyCount, p.current, p.action, driver.run, task.g.state, task.g.destroyTarget,
+			target.handle, task.g.park.taskCancelKind, task.g.park.taskCancelPhase)
+	}
+	runtime.KeepAlive(task.frame.memory)
+}
+
+func TestExecutorRunRejectsCancellationAfterDestroyIssued(t *testing.T) {
+	p := new(P)
+	driver, _, _, _ := bindTestExecutorDriver(t, p)
+	task := newYieldingTestG(t, "issued-destroy-cancel")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue issued destroy cancellation task")
+	}
+	target := queueRunnerCheckDestroy(t, driver, task)
+	step := runnerNextPhysicalAction(t, driver, task, ActionCheckDestroy)
+	destroy, ok := Checked(p, task.g, step.Action, true)
+	if !ok || destroy.Kind != ActionDestroy || RequestTaskCancellation(p, task.g, TaskCancelAbort) ||
+		task.g.park.taskCancelKind != TaskCancelNone || task.g.park.taskCancelPhase != taskCancelIdle ||
+		p.action != destroy || task.g.destroyTarget != target || target.state != FrameDestroyPending {
+		t.Fatalf("post-issue cancellation boundary = destroy:(%+v,%t) paction:%+v target:%p state:%d cancel:(%d,%d)",
+			destroy, ok, p.action, task.g.destroyTarget, target.state,
+			task.g.park.taskCancelKind, task.g.park.taskCancelPhase)
+	}
+	runtime.KeepAlive(task.frame.memory)
+}
+
+func TestExecutorRunPanicDestroyHasNoLateOwnerInjectionPoint(t *testing.T) {
+	p := new(P)
+	driver, _, _, _ := bindTestExecutorDriver(t, p)
+	task := newYieldingTestG(t, "panic-destroy-owner-cancel")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue panic destroy owner cancellation task")
+	}
+	target, leaf := queueRunnerPanicDestroy(t, driver, task)
+	step := runnerNextPhysicalAction(t, driver, task, ActionPanicDestroy)
+	if RequestTaskCancellation(p, task.g, TaskCancelAbort) || task.g.state != GPanicking ||
+		task.g.park.taskCancelKind != TaskCancelNone || task.g.park.taskCancelPhase != taskCancelIdle ||
+		p.current != task.g || p.action != step.Action || driver.run.issued != ActionPanicDestroy ||
+		task.g.destroyTarget != target || target.state != FrameDestroyPending {
+		t.Fatalf("panic destroy accepted late owner injection: state=%d cancel=(%d,%d) current=%p action=%+v cursor=%+v target=%p targetState=%d",
+			task.g.state, task.g.park.taskCancelKind, task.g.park.taskCancelPhase, p.current,
+			p.action, driver.run, task.g.destroyTarget, target.state)
+	}
+	runtime.KeepAlive(task.frame.memory)
+	runtime.KeepAlive(leaf.memory)
 }
 
 func TestExecutorRun2048SynchronousAwaitsAreIterative(t *testing.T) {

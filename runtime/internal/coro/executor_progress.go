@@ -418,8 +418,11 @@ func pollExecutorSliceAt(driver *ExecutorDriver, now int64, withDeadline bool, b
 // PollExecutorSlice services a no-deadline source catalog for at most budget
 // catalog, resolution, and acknowledgement reductions. More never authorizes
 // direct recursion; a target schedules a later host entry and returns first.
+// A non-empty bounded-runner cursor requires EnterExecutorRunCompatibility;
+// the runner itself advances the private primitive so its fairness debt is not
+// silently discarded by this legacy exported entry.
 func PollExecutorSlice(driver *ExecutorDriver, budget uint32) (ExecutorPollProgress, bool) {
-	if driver == nil || driver.sources.usesMonotonicTime() {
+	if driver == nil || driver.sources.usesMonotonicTime() || !emptyExecutorRunCursor(driver) {
 		return ExecutorPollProgress{}, false
 	}
 	_, progress, ok := pollExecutorSliceAt(driver, 0, false, budget)
@@ -430,8 +433,9 @@ func PollExecutorSlice(driver *ExecutorDriver, budget uint32) (ExecutorPollProgr
 // the first slice of each logical epoch; later samples passed while that epoch
 // is incomplete are ignored by the driver. When a prior entry ended exactly at
 // Acknowledge, B takes the next call's fresh value before its first source slot.
+// Like PollExecutorSlice it rejects a non-empty bounded-runner cursor.
 func PollExecutorSliceAt(driver *ExecutorDriver, now int64, budget uint32) (ExecutorPollProgress, bool) {
-	if driver == nil || !driver.sources.usesMonotonicTime() {
+	if driver == nil || !driver.sources.usesMonotonicTime() || !emptyExecutorRunCursor(driver) {
 		return ExecutorPollProgress{}, false
 	}
 	_, progress, ok := pollExecutorSliceAt(driver, now, true, budget)

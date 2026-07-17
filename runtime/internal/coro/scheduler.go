@@ -803,6 +803,22 @@ func beginRunAction(g *G) (kind ActionKind, handle unsafe.Pointer, state GState,
 	}
 }
 
+// queuedDestroyBlockedByTaskCancellation protects the last suspended frame
+// until compiler cleanup lowering can consume a sticky task stop. CheckResume
+// remains runnable because its synchronous continuation is the cleanup entry.
+//
+// Once ActionPanicDestroy passes this gate BeginRunG changes the task to
+// GPanicking. Owner cancellation APIs do not accept that state, source service
+// requires an idle P, and the runner executes the returned action without a
+// host boundary. There is therefore no later cancellation injection point on
+// the direct panic-destroy path.
+func queuedDestroyBlockedByTaskCancellation(g *G) bool {
+	if g == nil || g.park.taskCancelPhase != taskCancelRequested {
+		return false
+	}
+	return g.runAction == ActionCheckDestroy || g.runAction == ActionPanicDestroy
+}
+
 // BeginRunG starts one runnable G. An ordinary suspension starts with a done
 // check; a bounded-runner continuation restores the exact stable action that
 // was placed at the ready tail. Nested drivers are rejected by the P guards.
@@ -814,6 +830,9 @@ func BeginRunG(p *P, g *G) (Action, bool) {
 		g.waitToken != nil || g.waitTicket != 0 || g.nextWait != nil || g.waiting || g.runP != nil ||
 		!validRunnableParkState(&g.park) ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil || p.servicePreemptBudget != 0 {
+		return Action{}, false
+	}
+	if queuedDestroyBlockedByTaskCancellation(g) {
 		return Action{}, false
 	}
 	schedule := preemptLoad(&p.schedule)
@@ -925,7 +944,8 @@ func Checked(p *P, g *G, action Action, done bool) (Action, bool) {
 	case ActionCheckDestroy:
 		if !expectedAction(p, g, action, ActionCheckDestroy) || !done || p.inResume ||
 			g.state != GDispatching || g.destroyTarget == nil ||
-			g.destroyTarget.handle != action.Handle || g.destroyTarget.state != FrameDestroyPending {
+			g.destroyTarget.handle != action.Handle || g.destroyTarget.state != FrameDestroyPending ||
+			g.park.taskCancelPhase == taskCancelRequested {
 			return Action{}, false
 		}
 		return setAction(p, ActionDestroy, action.Handle)

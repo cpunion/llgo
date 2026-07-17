@@ -107,9 +107,9 @@ func serviceExecutorRunSource(driver *ExecutorDriver, now int64, withDeadline bo
 	var progress ExecutorPollProgress
 	var ok bool
 	if withDeadline {
-		progress, ok = PollExecutorSliceAt(driver, now, 1)
+		_, progress, ok = pollExecutorSliceAt(driver, now, true, 1)
 	} else {
-		progress, ok = PollExecutorSlice(driver, 1)
+		_, progress, ok = pollExecutorSliceAt(driver, 0, false, 1)
 	}
 	if !ok || progress.Used != 1 {
 		return ExecutorRunStep{}, false

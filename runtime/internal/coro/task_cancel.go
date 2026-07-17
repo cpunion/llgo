@@ -372,6 +372,13 @@ func requestTaskCancellationOwned(p *P, g *G, kind TaskCancelKind, proof taskCan
 		(proof != taskCancellationProofFull && proof != taskCancellationProofRegistered) {
 		return false
 	}
+	// ActionDestroy is already the indivisible physical half of a checked
+	// reduction. No owner callback may publish a new stop after that point and
+	// then let the selected handle be destroyed. A request admitted while the
+	// preceding CheckDestroy is still selected is instead caught by Checked.
+	if p.current == g && g.runP == p && p.action.Kind == ActionDestroy {
+		return false
+	}
 	var wait *WaitSetRecord
 	if g.state == GWaiting && g.waitToken == nil && g.active != nil && g.active.parkWait != nil {
 		wait = g.active.parkWait
@@ -453,6 +460,7 @@ func TaskCancellationOf(p *P, g *G) (TaskCancelKind, bool) {
 func ClaimTaskCancellation(p *P, g *G) (TaskCancelKind, bool) {
 	if !pOwnsTaskCancellation(p, g) ||
 		(g.state != GRunnable && g.state != GRunning && g.state != GDispatching) ||
+		g.runAction != ActionInvalid ||
 		g.park.taskCancelPhase != taskCancelRequested || !validTaskCancelKind(g.park.taskCancelKind) {
 		return TaskCancelNone, false
 	}
