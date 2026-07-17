@@ -28,7 +28,26 @@ type coroNativeTargetStateV1 struct {
 	doorbell  corodoorbell.Pipe
 	handle    coro.ExecutorHandle
 	waitEpoch uint32
+	runEpoch  uint32
 	started   bool
+}
+
+func coroTargetBeginExecutorRunV2(handle coro.ExecutorHandle, epoch uint32) coroTargetRunRequestResultV2 {
+	state := &coroNativeTargetV1State
+	if !state.started || state.handle != handle || epoch == 0 || state.runEpoch != 0 || state.waitEpoch != 0 {
+		return coroTargetRunRequestInvalidV2
+	}
+	state.runEpoch = epoch
+	return coroTargetRunRequestInlineV2
+}
+
+func coroTargetConsumeExecutorRunV2(handle coro.ExecutorHandle, epoch uint32) bool {
+	state := &coroNativeTargetV1State
+	if !state.started || state.handle != handle || epoch == 0 || state.runEpoch != epoch {
+		return false
+	}
+	state.runEpoch = 0
+	return true
 }
 
 var coroNativeTargetV1State coroNativeTargetStateV1
@@ -52,7 +71,7 @@ func coroTargetExecutorStartV1(handle coro.ExecutorHandle) bool {
 
 func coroTargetBeginExecutorWaitV1(handle coro.ExecutorHandle, epoch uint32, deadline int64, hasDeadline bool) coroTargetDispatchResultV1 {
 	state := &coroNativeTargetV1State
-	if !state.started || state.handle != handle || epoch == 0 || state.waitEpoch != 0 {
+	if !state.started || state.handle != handle || epoch == 0 || state.waitEpoch != 0 || state.runEpoch != 0 {
 		return coroTargetDispatchInvalidV1
 	}
 	state.waitEpoch = epoch
@@ -71,7 +90,7 @@ func coroTargetPollExecutorWakeV1(coro.ExecutorHandle, uint32) coroTargetDispatc
 
 func coroTargetBeginExecutorCloseV1(handle coro.ExecutorHandle, epoch uint32) coroTargetDispatchResultV1 {
 	state := &coroNativeTargetV1State
-	if !state.started || state.handle != handle || epoch == 0 || state.waitEpoch != 0 || !state.ingress.Seal() {
+	if !state.started || state.handle != handle || epoch == 0 || state.waitEpoch != 0 || state.runEpoch != 0 || !state.ingress.Seal() {
 		return coroTargetDispatchInvalidV1
 	}
 

@@ -52,6 +52,7 @@ const (
 	coroRunSliceBudgetV1
 	coroRunIdleV1
 	coroRunDestroyCommitV1
+	coroRunAgainV1
 )
 
 type coroRunResultV1 struct {
@@ -202,62 +203,94 @@ func coroRunSlice(p *coroP, main *coroG, driver *coro.ExecutorDriver, budget uin
 
 const coroCompatibilityRunBudgetV1 uint32 = 64
 
+// coroFinishRunSliceCompatibility crosses one still-uncertified runner
+// boundary without hiding another RunSlice invocation. Keeping this as one
+// explicit step lets the host-facing driver return a budget or handoff stop,
+// while the legacy whole-episode wrapper below may continue iteratively.
+func coroFinishRunSliceCompatibility(
+	p *coroP,
+	main *coroG,
+	driver *coro.ExecutorDriver,
+	result coroRunResultV1,
+) coroRunResultV1 {
+	switch result.stop {
+	case coroRunSliceBudgetV1, coroRunPanicCompleteV1:
+		return result
+	case coroRunMainDoneV1:
+		if !coro.EnterExecutorRunCompatibility(driver) {
+			return coroRunResultV1{}
+		}
+		return result
+	case coroRunIdleV1:
+		if !coro.EnterExecutorRunCompatibility(driver) || !coro.HasWaiting(p) {
+			return coroRunResultV1{}
+		}
+		sleep, deadline, hasDeadline, prepared := coroProgramPrepareExecutorSleepV1(driver)
+		if !prepared {
+			return coroRunResultV1{}
+		}
+		if sleep {
+			result.stop = coroRunExecutorSleepV1
+			result.deadline = deadline
+			result.hasDeadline = hasDeadline
+			return result
+		}
+		result.stop = coroRunAgainV1
+		return result
+	case coroRunDestroyCommitV1:
+		next, committed := coro.CommitDestroyedReceiptCompatibility(p, result.g, result.action)
+		if !committed {
+			return coroRunResultV1{}
+		}
+		result.action = next
+		switch next.Kind {
+		case coro.ActionCommitDestroy:
+			result.stop = coroRunAgainV1
+			return result
+		case coro.ActionTerminalExecutorClose:
+			result.stop = coroRunTerminalExecutorCloseV1
+			return result
+		case coro.ActionPanicComplete:
+			result.stop = coroRunPanicCompleteV1
+			return result
+		case coro.ActionComplete:
+			isMain := result.g == main
+			if !coroReleaseCompletedTask(result.g) {
+				return coroRunResultV1{}
+			}
+			if isMain {
+				result.stop = coroRunMainDoneV1
+				result.g = main
+				result.action = coro.Action{}
+				return result
+			}
+			result.stop = coroRunAgainV1
+			return result
+		default:
+			return coroRunResultV1{}
+		}
+	default:
+		return coroRunResultV1{}
+	}
+}
+
 // coroRun is the legacy whole-episode compatibility loop. The resumable runner
 // above is the production ordering primitive; physical resume wall-work is not
 // yet cost-certified. This wrapper explicitly owns the still-unbounded idle
 // preparation and terminal-close boundaries.
 func coroRun(p *coroP, main *coroG, driver *coro.ExecutorDriver) coroRunResultV1 {
 	for {
-		result := coroRunSlice(p, main, driver, coroCompatibilityRunBudgetV1)
+		result := coroFinishRunSliceCompatibility(
+			p,
+			main,
+			driver,
+			coroRunSlice(p, main, driver, coroCompatibilityRunBudgetV1),
+		)
 		switch result.stop {
-		case coroRunSliceBudgetV1:
+		case coroRunSliceBudgetV1, coroRunAgainV1:
 			continue
-		case coroRunMainDoneV1:
-			if !coro.EnterExecutorRunCompatibility(driver) {
-				return coroRunResultV1{}
-			}
-			return result
-		case coroRunPanicCompleteV1:
-			return result
-		case coroRunIdleV1:
-			if !coro.EnterExecutorRunCompatibility(driver) {
-				return coroRunResultV1{}
-			}
-			if !coro.HasWaiting(p) {
-				return coroRunResultV1{}
-			}
-			sleep, deadline, hasDeadline, prepared := coroProgramPrepareExecutorSleepV1(driver)
-			if !prepared {
-				return coroRunResultV1{}
-			}
-			if sleep {
-				return coroRunResultV1{stop: coroRunExecutorSleepV1, deadline: deadline, hasDeadline: hasDeadline}
-			}
-		case coroRunDestroyCommitV1:
-			next, committed := coro.CommitDestroyedReceiptCompatibility(p, result.g, result.action)
-			if !committed {
-				return coroRunResultV1{}
-			}
-			switch next.Kind {
-			case coro.ActionCommitDestroy:
-				continue
-			case coro.ActionTerminalExecutorClose:
-				return coroRunResultV1{stop: coroRunTerminalExecutorCloseV1, g: result.g, action: next}
-			case coro.ActionPanicComplete:
-				return coroRunResultV1{stop: coroRunPanicCompleteV1, g: result.g, action: next}
-			case coro.ActionComplete:
-				isMain := result.g == main
-				if !coroReleaseCompletedTask(result.g) {
-					return coroRunResultV1{}
-				}
-				if isMain {
-					return coroRunResultV1{stop: coroRunMainDoneV1, g: main}
-				}
-			default:
-				return coroRunResultV1{}
-			}
 		default:
-			return coroRunResultV1{}
+			return result
 		}
 	}
 }

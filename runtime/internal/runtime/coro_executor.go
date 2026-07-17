@@ -43,6 +43,21 @@ const (
 	coroTargetDispatchPendingV1
 )
 
+// A host-run request is executor-scoped scheduling state, not an operation or
+// G continuation. Inline means the target does not self-post: the caller first
+// returns across the V2 program ABI and its fixed-stack host loop re-enters with
+// the tuple. Queued means a future host turn remains durable when Begin returns.
+// An early queued callback must handle Repost by arranging that same tuple
+// again after the current ABI call; every callback also treats Ignored as a
+// settled stale/duplicate turn. No result permits recursive scheduler entry.
+type coroTargetRunRequestResultV2 uint8
+
+const (
+	coroTargetRunRequestInvalidV2 coroTargetRunRequestResultV2 = iota
+	coroTargetRunRequestInlineV2
+	coroTargetRunRequestQueuedV2
+)
+
 func coroProgramBindExecutorV1() bool {
 	if coroProgramExecutorBoundV1State ||
 		coroProgramExecutorHandleV1State != (coro.ExecutorHandle{}) ||
@@ -59,7 +74,7 @@ func coroProgramBindExecutorV1() bool {
 		&coroProgramExecutorRegistryV1State,
 		handle,
 		&coroProgramWaitTableV1State,
-	) {
+	) || !coroProgramDriveAdmissionV1State.PublishExecutor(handle.Slot, handle.Generation) {
 		return false
 	}
 	coroProgramExecutorHandleV1State = handle

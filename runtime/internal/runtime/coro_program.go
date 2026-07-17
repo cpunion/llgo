@@ -49,6 +49,54 @@ const (
 	coroProgramDriveAgainV1
 )
 
+// coroProgramDriveStatusV2 is the exact uint32 status returned by the
+// host-facing slice ABI. Values are frozen independently of the private V1
+// status enum so a target can inspect them without a Go type or pointer.
+type coroProgramDriveStatusV2 uint32
+
+const (
+	coroProgramDriveInvalidV2 coroProgramDriveStatusV2 = iota
+	coroProgramDriveCompleteV2
+	coroProgramDriveSuspendedV2
+	coroProgramDriveYieldedV2
+	coroProgramDrivePanicV2
+	coroProgramDriveIgnoredV2
+	coroProgramDriveRepostV2
+	// AgainFresh is private. It is returned only after continuation settlement
+	// has advanced the admission phase and before that same owner runs another
+	// slice.
+	coroProgramDriveAgainFreshV2
+)
+
+const (
+	coroProgramRunMoreV2 uint32 = 1 << iota
+	coroProgramRunBlockedV2
+	coroProgramRunHasDeadlineV2
+	coroProgramRunRequestInlineV2
+	coroProgramRunRequestQueuedV2
+)
+
+// coroProgramRunResultV2 is a padding-free 32-byte POD result. Deadline is an
+// absolute monotonic int64 split into two uint32 words so wasm32 hosts do not
+// need an i64/BigInt calling convention. The caller owns this object; the
+// runtime clears it before admission and never retains its address.
+type coroProgramRunResultV2 struct {
+	Flags              uint32
+	Used               uint32
+	ExecutorSlot       uint32
+	ExecutorGeneration uint32
+	Epoch              uint32
+	DeadlineLo         uint32
+	DeadlineHi         uint32
+	Reserved           uint32
+}
+
+type coroProgramDriveOutcomeV2 struct {
+	status   coroProgramDriveStatusV2
+	result   coroProgramRunResultV2
+	ranSlice bool
+}
+
 type coroProgramContinuationV1 uint8
 
 const (
@@ -56,6 +104,15 @@ const (
 	coroProgramContinuationExecutorWakeV1
 	coroProgramContinuationTerminalJoinV1
 	coroProgramContinuationCommandJoinV1
+	coroProgramContinuationHostRunV2
+)
+
+type coroProgramDriverModeV2 uint8
+
+const (
+	coroProgramDriverModeUnusedV2 coroProgramDriverModeV2 = iota
+	coroProgramDriverModeLegacyV1
+	coroProgramDriverModeSliceV2
 )
 
 // The coroutine program globals form the allocation-free, single-start state used by
@@ -73,15 +130,31 @@ const (
 // address of one aggregate global; the process-entry ABI must remain a plain,
 // non-suspending call island.
 var (
-	coroProgramLifecycleV1State      coroProgramLifecycleV1
-	coroProgramManifestV1State       *coro.ProgramManifestV1
-	coroProgramFactoryV1State        unsafe.Pointer
-	coroProgramGV1State              coroG
-	coroProgramPV1State              coroP
-	coroProgramContinuationV1State   coroProgramContinuationV1
-	coroProgramContinuationEpochV1   uint32
-	coroProgramDriveAdmissionV1State coro.DriveAdmission
+	coroProgramLifecycleV1State          coroProgramLifecycleV1
+	coroProgramManifestV1State           *coro.ProgramManifestV1
+	coroProgramFactoryV1State            unsafe.Pointer
+	coroProgramGV1State                  coroG
+	coroProgramPV1State                  coroP
+	coroProgramContinuationV1State       coroProgramContinuationV1
+	coroProgramContinuationEpochV1       uint32
+	coroProgramContinuationDeadlineV2    int64
+	coroProgramContinuationHasDeadlineV2 bool
+	coroProgramDriveAdmissionV1State     coro.DriveAdmission
+	coroProgramDriverModeV2State         coroProgramDriverModeV2
 )
+
+func coroProgramSelectDriverModeV2(mode coroProgramDriverModeV2) bool {
+	if mode != coroProgramDriverModeLegacyV1 && mode != coroProgramDriverModeSliceV2 {
+		return false
+	}
+	if coroProgramDriverModeV2State == coroProgramDriverModeUnusedV2 {
+		if !coroProgramDriveAdmissionV1State.PublishMode(uint32(mode)) {
+			return false
+		}
+		coroProgramDriverModeV2State = mode
+	}
+	return coroProgramDriverModeV2State == mode
+}
 
 func coroProgramFailV1() coroProgramDriveStatusV1 {
 	_ = coroProgramDriveAdmissionV1State.RevokeEpoch()
@@ -91,6 +164,7 @@ func coroProgramFailV1() coroProgramDriveStatusV1 {
 
 func coroProgramPublishContinuationV1(kind coroProgramContinuationV1) (uint32, bool) {
 	if kind == coroProgramContinuationNoneV1 || coroProgramContinuationV1State != coroProgramContinuationNoneV1 ||
+		coroProgramContinuationDeadlineV2 != 0 || coroProgramContinuationHasDeadlineV2 ||
 		coroProgramContinuationEpochV1 == ^uint32(0) {
 		return 0, false
 	}
@@ -113,7 +187,65 @@ func coroProgramClearContinuationV1(kind coroProgramContinuationV1) bool {
 		return false
 	}
 	coroProgramContinuationV1State = coroProgramContinuationNoneV1
+	coroProgramContinuationDeadlineV2 = 0
+	coroProgramContinuationHasDeadlineV2 = false
+	// Clearing E1 and publishing E2 while retaining the same gate phase lets a
+	// delayed E1 callback CAS become the owner (or Pending) of E2. Centralize the
+	// transition here so every settled continuation invalidates its observed
+	// phase before any caller can publish later work. The first publication does
+	// not need an advance; only a completed publication crosses this boundary.
+	return coroProgramDriveAdmissionV1State.AdvancePhase()
+}
+
+func coroProgramSetOutcomeContinuationV2(outcome *coroProgramDriveOutcomeV2, flags uint32) bool {
+	if outcome == nil || !coroProgramExecutorBoundV1State ||
+		coroProgramExecutorHandleV1State.Slot == 0 || coroProgramExecutorHandleV1State.Generation == 0 ||
+		coroProgramContinuationV1State == coroProgramContinuationNoneV1 || coroProgramContinuationEpochV1 == 0 {
+		return false
+	}
+	outcome.result.Flags |= flags
+	outcome.result.ExecutorSlot = coroProgramExecutorHandleV1State.Slot
+	outcome.result.ExecutorGeneration = coroProgramExecutorHandleV1State.Generation
+	outcome.result.Epoch = coroProgramContinuationEpochV1
 	return true
+}
+
+func coroProgramSetOutcomeDeadlineV2(outcome *coroProgramDriveOutcomeV2, deadline int64, hasDeadline bool) {
+	if outcome == nil || !hasDeadline {
+		return
+	}
+	word := uint64(deadline)
+	outcome.result.Flags |= coroProgramRunHasDeadlineV2
+	outcome.result.DeadlineLo = uint32(word)
+	outcome.result.DeadlineHi = uint32(word >> 32)
+}
+
+func coroProgramOutcomeFromV1(status coroProgramDriveStatusV1) coroProgramDriveOutcomeV2 {
+	switch status {
+	case coroProgramDriveCompleteV1:
+		return coroProgramDriveOutcomeV2{status: coroProgramDriveCompleteV2}
+	case coroProgramDriveSuspendedV1:
+		return coroProgramDriveOutcomeV2{status: coroProgramDriveSuspendedV2}
+	case coroProgramDrivePanicV1:
+		return coroProgramDriveOutcomeV2{status: coroProgramDrivePanicV2}
+	case coroProgramDriveIgnoredV1:
+		return coroProgramDriveOutcomeV2{status: coroProgramDriveIgnoredV2}
+	case coroProgramDriveAgainV1:
+		return coroProgramDriveOutcomeV2{status: coroProgramDriveAgainFreshV2}
+	default:
+		return coroProgramDriveOutcomeV2{status: coroProgramDriveInvalidV2}
+	}
+}
+
+func coroProgramMergeOutcomeV2(previous, next coroProgramDriveOutcomeV2) coroProgramDriveOutcomeV2 {
+	if previous.ranSlice {
+		next.ranSlice = true
+		if ^next.result.Used < previous.result.Used {
+			return coroProgramDriveOutcomeV2{status: coroProgramDriveInvalidV2}
+		}
+		next.result.Used += previous.result.Used
+	}
+	return next
 }
 
 func coroProgramBeginOwnedV1(manifest, expectedFactory unsafe.Pointer) (unsafe.Pointer, bool) {
@@ -286,6 +418,8 @@ func coroProgramBeginExecutorWaitV1(deadline int64, hasDeadline bool) coroProgra
 	if !ok {
 		return coroProgramFailV1()
 	}
+	coroProgramContinuationDeadlineV2 = deadline
+	coroProgramContinuationHasDeadlineV2 = hasDeadline
 	switch coroTargetBeginExecutorWaitV1(coroProgramExecutorHandleV1State, epoch, deadline, hasDeadline) {
 	case coroTargetDispatchPendingV1:
 		return coroProgramDriveSuspendedV1
@@ -300,15 +434,7 @@ func coroProgramBeginExecutorWaitV1(deadline int64, hasDeadline bool) coroProgra
 	}
 }
 
-func coroProgramDriveStepV1() coroProgramDriveStatusV1 {
-	if coroProgramContinuationV1State != coroProgramContinuationNoneV1 {
-		return coroProgramFailV1()
-	}
-	result := coroRun(
-		&coroProgramPV1State,
-		&coroProgramGV1State,
-		&coroProgramExecutorDriverV1State,
-	)
+func coroProgramHandleRunResultV1(result coroRunResultV1) coroProgramDriveStatusV1 {
 	switch result.stop {
 	case coroRunMainDoneV1:
 		if result.g != &coroProgramGV1State || result.action != (coro.Action{}) {
@@ -337,13 +463,95 @@ func coroProgramDriveStepV1() coroProgramDriveStatusV1 {
 	}
 }
 
-func coroProgramDriveV1() coroProgramDriveStatusV1 {
-	for {
-		status := coroProgramDriveStepV1()
-		if status != coroProgramDriveAgainV1 {
-			return status
+func coroProgramDriveStepV1() coroProgramDriveStatusV1 {
+	if coroProgramContinuationV1State != coroProgramContinuationNoneV1 {
+		return coroProgramFailV1()
+	}
+	return coroProgramHandleRunResultV1(coroRun(
+		&coroProgramPV1State,
+		&coroProgramGV1State,
+		&coroProgramExecutorDriverV1State,
+	))
+}
+
+func coroProgramFailOutcomeV2() coroProgramDriveOutcomeV2 {
+	_ = coroProgramFailV1()
+	return coroProgramDriveOutcomeV2{status: coroProgramDriveInvalidV2}
+}
+
+func coroProgramBeginHostRunV2(outcome coroProgramDriveOutcomeV2) coroProgramDriveOutcomeV2 {
+	if coroProgramContinuationV1State != coroProgramContinuationNoneV1 ||
+		!coroProgramExecutorBoundV1State {
+		return coroProgramFailOutcomeV2()
+	}
+	epoch, ok := coroProgramPublishContinuationV1(coroProgramContinuationHostRunV2)
+	if !ok {
+		return coroProgramFailOutcomeV2()
+	}
+	outcome.status = coroProgramDriveYieldedV2
+	outcome.result.Flags = coroProgramRunMoreV2
+	if !coroProgramSetOutcomeContinuationV2(&outcome, 0) {
+		return coroProgramFailOutcomeV2()
+	}
+	switch coroTargetBeginExecutorRunV2(coroProgramExecutorHandleV1State, epoch) {
+	case coroTargetRunRequestInlineV2:
+		outcome.result.Flags |= coroProgramRunRequestInlineV2
+	case coroTargetRunRequestQueuedV2:
+		outcome.result.Flags |= coroProgramRunRequestQueuedV2
+	default:
+		return coroProgramFailOutcomeV2()
+	}
+	return outcome
+}
+
+// coroProgramDriveStepV2 executes at most one certified RunSlice. Used counts
+// only source/dispatch/resume/destroy transitions certified by that RunSlice;
+// compatibility bookkeeping after its boundary is deliberately not charged.
+// Any
+// compatibility transition that still needs scheduler work is converted into
+// HostRun rather than hiding a second slice in this ABI entry.
+func coroProgramDriveStepV2(budget uint32) coroProgramDriveOutcomeV2 {
+	if budget == 0 ||
+		coroProgramContinuationV1State != coroProgramContinuationNoneV1 {
+		return coroProgramFailOutcomeV2()
+	}
+	result := coroFinishRunSliceCompatibility(
+		&coroProgramPV1State,
+		&coroProgramGV1State,
+		&coroProgramExecutorDriverV1State,
+		coroRunSlice(
+			&coroProgramPV1State,
+			&coroProgramGV1State,
+			&coroProgramExecutorDriverV1State,
+			budget,
+		),
+	)
+	outcome := coroProgramDriveOutcomeV2{
+		result:   coroProgramRunResultV2{Used: result.used},
+		ranSlice: true,
+	}
+	switch result.stop {
+	case coroRunSliceBudgetV1, coroRunAgainV1:
+		return coroProgramBeginHostRunV2(outcome)
+	case coroRunInvalidV1:
+		return coroProgramFailOutcomeV2()
+	}
+	mapped := coroProgramOutcomeFromV1(coroProgramHandleRunResultV1(result))
+	mapped.result.Used = outcome.result.Used
+	mapped.ranSlice = true
+	switch mapped.status {
+	case coroProgramDriveAgainFreshV2:
+		return coroProgramBeginHostRunV2(mapped)
+	case coroProgramDriveSuspendedV2:
+		mapped.result.Flags |= coroProgramRunBlockedV2
+		if !coroProgramSetOutcomeContinuationV2(&mapped, 0) {
+			return coroProgramFailOutcomeV2()
+		}
+		if result.stop == coroRunExecutorSleepV1 {
+			coroProgramSetOutcomeDeadlineV2(&mapped, result.deadline, result.hasDeadline)
 		}
 	}
+	return mapped
 }
 
 func coroProgramRunOwnedV1(gPointer, handle unsafe.Pointer) coroProgramDriveStatusV1 {
@@ -359,7 +567,7 @@ func coroProgramRunOwnedV1(gPointer, handle unsafe.Pointer) coroProgramDriveStat
 		return coroProgramFailV1()
 	}
 	coroProgramLifecycleV1State = coroProgramRunningV1
-	return coroProgramDriveV1()
+	return coroProgramDriveStepV1()
 }
 
 func coroProgramContinueOwnedV1(epoch uint32) coroProgramDriveStatusV1 {
@@ -392,7 +600,9 @@ func coroProgramContinueOwnedV1(epoch uint32) coroProgramDriveStatusV1 {
 			!coroProgramClearContinuationV1(kind) {
 			return coroProgramFailV1()
 		}
-		return coroProgramDriveV1()
+		// coroProgramClearContinuationV1 already invalidated the old admission
+		// phase while retaining ownership; later work may now publish a new epoch.
+		return coroProgramDriveAgainV1
 	case coroProgramContinuationTerminalJoinV1:
 		return coroProgramConfirmTerminalJoinV1()
 	case coroProgramContinuationCommandJoinV1:
@@ -402,12 +612,52 @@ func coroProgramContinueOwnedV1(epoch uint32) coroProgramDriveStatusV1 {
 	}
 }
 
+func coroProgramContinueOwnedV2(handle coro.ExecutorHandle, epoch uint32) coroProgramDriveOutcomeV2 {
+	if handle.Slot == 0 || handle.Generation == 0 || handle != coroProgramExecutorHandleV1State {
+		return coroProgramDriveOutcomeV2{status: coroProgramDriveIgnoredV2}
+	}
+	if epoch == 0 || epoch != coroProgramContinuationEpochV1 ||
+		coroProgramContinuationV1State == coroProgramContinuationNoneV1 ||
+		coroProgramLifecycleV1State == coroProgramCompleteV1 ||
+		coroProgramLifecycleV1State == coroProgramFailedV1 {
+		return coroProgramFailOutcomeV2()
+	}
+	if coroProgramContinuationV1State == coroProgramContinuationHostRunV2 {
+		if !coroTargetConsumeExecutorRunV2(handle, epoch) ||
+			!coroProgramClearContinuationV1(coroProgramContinuationHostRunV2) {
+			return coroProgramFailOutcomeV2()
+		}
+		return coroProgramDriveOutcomeV2{status: coroProgramDriveAgainFreshV2}
+	}
+	outcome := coroProgramOutcomeFromV1(coroProgramContinueOwnedV1(epoch))
+	if outcome.status == coroProgramDriveSuspendedV2 {
+		outcome.result.Flags |= coroProgramRunBlockedV2
+		if !coroProgramSetOutcomeContinuationV2(&outcome, 0) {
+			return coroProgramFailOutcomeV2()
+		}
+		if coroProgramContinuationV1State == coroProgramContinuationExecutorWakeV1 {
+			coroProgramSetOutcomeDeadlineV2(
+				&outcome,
+				coroProgramContinuationDeadlineV2,
+				coroProgramContinuationHasDeadlineV2,
+			)
+		}
+	}
+	return outcome
+}
+
 // coroProgramFinishDriveAdmissionV1 closes one scheduler-owner episode. A
 // callback that raced target Begin or another continuation can only publish the
 // atomic Pending bit; this loop claims it before releasing ownership and resumes
 // exclusively from the still-published POD epoch.
 func coroProgramFinishDriveAdmissionV1(status coroProgramDriveStatusV1) coroProgramDriveStatusV1 {
 	for {
+		if status == coroProgramDriveAgainV1 {
+			// Every Again source has settled a continuation through
+			// coroProgramClearContinuationV1, which already advanced the phase
+			// while preserving this owner.
+			return status
+		}
 		epoch, pending, ok := coroProgramDriveAdmissionV1State.Finish()
 		if !ok {
 			coroProgramLifecycleV1State = coroProgramFailedV1
@@ -425,17 +675,93 @@ func coroProgramFinishDriveAdmissionV1(status coroProgramDriveStatusV1) coroProg
 	}
 }
 
+// coroProgramFinishDriveAdmissionV2 closes one V2 owner episode. A callback
+// deferred while BeginRun is still publishing a HostRun request has already
+// received Repost from the public ABI. Claim its Pending hint without consuming
+// HostRun: the exact epoch remains durable and the target must post the same
+// tuple in a later host turn. Other pending continuations retain the V1
+// early-completion behavior, but settlement may only return AgainFresh and
+// cannot publish a later epoch here.
+func coroProgramFinishDriveAdmissionV2(outcome coroProgramDriveOutcomeV2) coroProgramDriveOutcomeV2 {
+	for {
+		if outcome.status == coroProgramDriveAgainFreshV2 {
+			// Every AgainFresh source has settled a continuation through
+			// coroProgramClearContinuationV1, which already advanced the phase
+			// while preserving this owner.
+			return outcome
+		}
+		epoch, pending, ok := coroProgramDriveAdmissionV1State.Finish()
+		if !ok {
+			return coroProgramFailOutcomeV2()
+		}
+		if !pending {
+			return outcome
+		}
+		if epoch == 0 {
+			continue
+		}
+		if outcome.status == coroProgramDriveYieldedV2 &&
+			coroProgramContinuationV1State == coroProgramContinuationHostRunV2 {
+			continue
+		}
+		next := coroProgramContinueOwnedV2(coroProgramExecutorHandleV1State, epoch)
+		outcome = coroProgramMergeOutcomeV2(outcome, next)
+	}
+}
+
+// coroProgramFinishFreshDriveV2 runs at most one RunSlice for a public V2
+// entry. A continuation callback starts with ranSlice=false and may therefore
+// settle, advance the admission phase while retaining ownership, and run one
+// slice. If an early physical callback settled after a slice already ran, the
+// phase-advanced owner only publishes HostRun.
+func coroProgramFinishFreshDriveV2(outcome coroProgramDriveOutcomeV2, budget uint32) coroProgramDriveOutcomeV2 {
+	for {
+		outcome = coroProgramFinishDriveAdmissionV2(outcome)
+		if outcome.status != coroProgramDriveAgainFreshV2 {
+			return outcome
+		}
+		if outcome.ranSlice {
+			outcome = coroProgramBeginHostRunV2(outcome)
+		} else {
+			outcome = coroProgramDriveStepV2(budget)
+		}
+	}
+}
+
+// coroProgramFinishFreshDriveV1 is the legacy whole-program pump with an
+// explicit phase boundary between continuation settlement and later scheduler
+// work. In particular, E1 is cleared and its admission phase advanced before
+// the retained owner may publish E2.
+func coroProgramFinishFreshDriveV1(status coroProgramDriveStatusV1) coroProgramDriveStatusV1 {
+	for {
+		status = coroProgramFinishDriveAdmissionV1(status)
+		if status != coroProgramDriveAgainV1 {
+			return status
+		}
+		status = coroProgramDriveStepV1()
+	}
+}
+
 func coroProgramRunV1(gPointer, handle unsafe.Pointer) coroProgramDriveStatusV1 {
 	if !coroProgramDriveAdmissionV1State.Acquire() {
 		return coroProgramDriveInvalidV1
 	}
-	return coroProgramFinishDriveAdmissionV1(coroProgramRunOwnedV1(gPointer, handle))
+	if !coroProgramSelectDriverModeV2(coroProgramDriverModeLegacyV1) {
+		return coroProgramFinishDriveAdmissionV1(coroProgramFailV1())
+	}
+	return coroProgramFinishFreshDriveV1(coroProgramRunOwnedV1(gPointer, handle))
 }
 
 func coroProgramContinueV1(epoch uint32) coroProgramDriveStatusV1 {
-	switch coroProgramDriveAdmissionV1State.Enter(epoch) {
+	switch coroProgramDriveAdmissionV1State.EnterMode(
+		uint32(coroProgramDriverModeLegacyV1),
+		epoch,
+	) {
 	case coro.DriveAdmissionAcquired:
-		return coroProgramFinishDriveAdmissionV1(coroProgramContinueOwnedV1(epoch))
+		if !coroProgramSelectDriverModeV2(coroProgramDriverModeLegacyV1) {
+			return coroProgramFinishDriveAdmissionV1(coroProgramFailV1())
+		}
+		return coroProgramFinishFreshDriveV1(coroProgramContinueOwnedV1(epoch))
 	case coro.DriveAdmissionDeferred:
 		return coroProgramDriveSuspendedV1
 	case coro.DriveAdmissionStale:
@@ -444,6 +770,109 @@ func coroProgramContinueV1(epoch uint32) coroProgramDriveStatusV1 {
 		return coroProgramDriveIgnoredV1
 	default:
 		return coroProgramDriveInvalidV1
+	}
+}
+
+func coroProgramWriteOutcomeV2(out *coroProgramRunResultV2, outcome coroProgramDriveOutcomeV2) uint32 {
+	if out == nil {
+		return uint32(coroProgramDriveInvalidV2)
+	}
+	if outcome.status == coroProgramDriveAgainFreshV2 || outcome.status > coroProgramDriveAgainFreshV2 {
+		outcome.status = coroProgramDriveInvalidV2
+	}
+	if outcome.status == coroProgramDriveInvalidV2 || outcome.status == coroProgramDriveIgnoredV2 {
+		*out = coroProgramRunResultV2{}
+	} else {
+		*out = outcome.result
+	}
+	return uint32(outcome.status)
+}
+
+func coroProgramRunSliceV2(
+	gPointer, handle unsafe.Pointer,
+	budget uint32,
+	out *coroProgramRunResultV2,
+) uint32 {
+	if out == nil {
+		return uint32(coroProgramDriveInvalidV2)
+	}
+	*out = coroProgramRunResultV2{}
+	if budget == 0 ||
+		!coroProgramDriveAdmissionV1State.Acquire() {
+		return uint32(coroProgramDriveInvalidV2)
+	}
+	if !coroProgramSelectDriverModeV2(coroProgramDriverModeSliceV2) {
+		return coroProgramWriteOutcomeV2(
+			out,
+			coroProgramFinishDriveAdmissionV2(coroProgramFailOutcomeV2()),
+		)
+	}
+	if coroProgramLifecycleV1State != coroProgramBegunV1 ||
+		coroProgramManifestV1State == nil || coroProgramFactoryV1State == nil ||
+		gPointer != unsafe.Pointer(&coroProgramGV1State) || handle == nil ||
+		!coroProgramExecutorBoundV1State ||
+		coroProgramContinuationV1State != coroProgramContinuationNoneV1 ||
+		!coroAdoptRoot(&coroProgramGV1State, handle) ||
+		!coroEnqueue(&coroProgramPV1State, &coroProgramGV1State) ||
+		!coroTargetExecutorStartV1(coroProgramExecutorHandleV1State) {
+		return coroProgramWriteOutcomeV2(
+			out,
+			coroProgramFinishDriveAdmissionV2(coroProgramFailOutcomeV2()),
+		)
+	}
+	coroProgramLifecycleV1State = coroProgramRunningV1
+	outcome := coroProgramDriveStepV2(budget)
+	return coroProgramWriteOutcomeV2(out, coroProgramFinishFreshDriveV2(outcome, budget))
+}
+
+func coroProgramContinueSliceV2(
+	executorSlot, executorGeneration, epoch, budget uint32,
+	out *coroProgramRunResultV2,
+) uint32 {
+	if out == nil {
+		return uint32(coroProgramDriveInvalidV2)
+	}
+	*out = coroProgramRunResultV2{}
+	if executorSlot == 0 || executorGeneration == 0 || epoch == 0 ||
+		budget == 0 {
+		return uint32(coroProgramDriveInvalidV2)
+	}
+	handle := coro.ExecutorHandle{Slot: executorSlot, Generation: executorGeneration}
+	switch coroProgramDriveAdmissionV1State.EnterExecutorMode(
+		executorSlot,
+		executorGeneration,
+		uint32(coroProgramDriverModeSliceV2),
+		epoch,
+	) {
+	case coro.DriveAdmissionAcquired:
+		var outcome coroProgramDriveOutcomeV2
+		if !coroProgramSelectDriverModeV2(coroProgramDriverModeSliceV2) {
+			outcome = coroProgramFailOutcomeV2()
+		} else {
+			outcome = coroProgramContinueOwnedV2(handle, epoch)
+		}
+		return coroProgramWriteOutcomeV2(
+			out,
+			coroProgramFinishFreshDriveV2(outcome, budget),
+		)
+	case coro.DriveAdmissionDeferred:
+		outcome := coroProgramDriveOutcomeV2{
+			status: coroProgramDriveRepostV2,
+			result: coroProgramRunResultV2{
+				Flags:              coroProgramRunMoreV2 | coroProgramRunRequestQueuedV2,
+				ExecutorSlot:       executorSlot,
+				ExecutorGeneration: executorGeneration,
+				Epoch:              epoch,
+			},
+		}
+		return coroProgramWriteOutcomeV2(out, outcome)
+	case coro.DriveAdmissionStale:
+		return coroProgramWriteOutcomeV2(
+			out,
+			coroProgramDriveOutcomeV2{status: coroProgramDriveIgnoredV2},
+		)
+	default:
+		return uint32(coroProgramDriveInvalidV2)
 	}
 }
 
@@ -480,6 +909,19 @@ func __llgo_coro_program_run_v1(g, handle unsafe.Pointer) {
 	}
 }
 
+// __llgo_coro_program_run_slice_v2 runs at most one bounded scheduler slice.
+// Its result is caller-owned POD storage and is never retained across the host
+// boundary.
+//
+//export __llgo_coro_program_run_slice_v2
+func __llgo_coro_program_run_slice_v2(
+	g, handle unsafe.Pointer,
+	budget uint32,
+	out *coroProgramRunResultV2,
+) uint32 {
+	return coroProgramRunSliceV2(g, handle, budget, out)
+}
+
 // __llgo_coro_program_continue_v1 is a clean target re-entry after a retained
 // wait or asynchronous strong join. The epoch is POD target state; all managed
 // continuation ownership remains in static scheduler objects.
@@ -494,6 +936,24 @@ func __llgo_coro_program_continue_v1(epoch uint32) {
 	default:
 		coroRuntimeAbort("invalid coroutine program continuation")
 	}
+}
+
+// __llgo_coro_program_continue_slice_v2 is the versioned host re-entry for an
+// exact executor tuple and continuation epoch. Deferred callers receive
+// Repost; they never recurse or spin inside the scheduler.
+//
+//export __llgo_coro_program_continue_slice_v2
+func __llgo_coro_program_continue_slice_v2(
+	executorSlot, executorGeneration, epoch, budget uint32,
+	out *coroProgramRunResultV2,
+) uint32 {
+	return coroProgramContinueSliceV2(
+		executorSlot,
+		executorGeneration,
+		epoch,
+		budget,
+		out,
+	)
 }
 
 //export __llgo_coro_program_main_return_v1
