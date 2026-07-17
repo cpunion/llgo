@@ -175,6 +175,25 @@ const (
 	OperationDispositionCanceled
 )
 
+// operationResultState is the complete owner-side lifetime of one physical
+// result. Empty carries no source result; Owned is retained by the source;
+// Leased is the exact winner capability issued to resumed code; Taken and
+// Discarded are distinct terminal release intents. Keeping this a byte
+// replaces the former two booleans without growing OperationRecord.
+type operationResultState uint8
+
+const (
+	operationResultEmpty operationResultState = iota
+	operationResultOwned
+	operationResultLeased
+	operationResultTaken
+	operationResultDiscarded
+)
+
+func validOperationResultState(state operationResultState) bool {
+	return state <= operationResultDiscarded
+}
+
 // OperationCompletionResult classifies a scheduler-side completion publish.
 // Lost is normal for a select loser or an operation canceled before a late
 // backend completion; it must not be treated as runtime corruption.
@@ -332,16 +351,23 @@ func operationCandidatePendingForResolution(record *OperationRecord) bool {
 // park is pending. A failed hint retains its generation so the next publish
 // must advance it; terminal settlement clears loser tokens, while the winner
 // replaces its token with the logical ParkTicket used by the result lease.
-// Other candidate modes keep resultTicket at zero until they win.
+// Other candidate modes keep resultTicket at zero until they win. Successful
+// irreversible/reservable publication owns a physical result; a Ready hint
+// does not, and only its later exact TryCommit binding may establish Owned.
 func operationCandidatePendingResultStorageValid(record *OperationRecord) bool {
-	if record == nil {
+	if record == nil || !validOperationResultState(record.resultState) {
 		return false
 	}
-	if operationCandidateMode(record) != OperationCommitReadyThenTryCommit {
-		return record.resultTicket == (ParkTicket{})
+	mode, published := operationCandidateMode(record), operationCandidateIsPublished(record)
+	if mode != OperationCommitReadyThenTryCommit {
+		return record.resultTicket == (ParkTicket{}) &&
+			(record.resultState == operationResultEmpty && !published || record.resultState == operationResultOwned && published)
+	}
+	if record.resultState != operationResultEmpty {
+		return false
 	}
 	if record.resultTicket == (ParkTicket{}) {
-		return !operationCandidateIsPublished(record) && operationCandidateState(record) == OperationCommitIdle
+		return !published && operationCandidateState(record) == OperationCommitIdle
 	}
 	return validParkTicket(record.resultTicket)
 }
@@ -368,6 +394,31 @@ func operationCandidateSettledForDisposition(record *OperationRecord, dispositio
 	default:
 		return false
 	}
+}
+
+func operationResultReadyForResolutionAck(record *OperationRecord, disposition OperationDisposition) bool {
+	if record == nil || !validOperationResultState(record.resultState) {
+		return false
+	}
+	if disposition == OperationDispositionWinner {
+		return record.resultState == operationResultOwned
+	}
+	return (disposition == OperationDispositionLost || disposition == OperationDispositionCanceled) &&
+		(record.resultState == operationResultEmpty || record.resultState == operationResultDiscarded)
+}
+
+// operationUnselectedResultStateValid admits Owned only until source Apply
+// has performed its real cleanup. An acknowledged loser must already be Empty
+// or explicitly Discarded and can never expose a lease.
+func operationUnselectedResultStateValid(record *OperationRecord) bool {
+	if record == nil {
+		return false
+	}
+	if record.resolutionApplied {
+		return record.resultState == operationResultEmpty || record.resultState == operationResultDiscarded
+	}
+	return record.resultState == operationResultEmpty || record.resultState == operationResultOwned ||
+		record.resultState == operationResultDiscarded
 }
 
 func commitOperationCandidate(record *OperationRecord) bool {
@@ -465,8 +516,7 @@ type OperationRecord struct {
 	candidate         uint8
 	cancelRequested   bool
 	quiesced          bool
-	resultConsumable  bool
-	resultTaken       bool
+	resultState       operationResultState
 	resultTicket      ParkTicket
 	link              ParkLink
 }
@@ -604,12 +654,17 @@ func publishOperationCandidate(record *OperationRecord, id OperationID, mode Ope
 	if record.link.park.phase == parkParked && record.link.park.resolving {
 		return OperationCompletionDeferred
 	}
+	if record.resultState != operationResultEmpty {
+		return OperationCompletionInvalid
+	}
 	if mode == OperationCommitReadyThenTryCommit {
 		readyTicket, ok := nextParkTicket(record.resultTicket)
 		if !ok {
 			return OperationCompletionInvalid
 		}
 		record.resultTicket = readyTicket
+	} else {
+		record.resultState = operationResultOwned
 	}
 	setOperationCandidate(record, mode, state, true)
 	return OperationCompletionPublished
@@ -672,7 +727,8 @@ func OperationDispositionOf(record *OperationRecord, id OperationID) (OperationD
 func AcknowledgeOperationResolution(record *OperationRecord, id OperationID, disposition OperationDisposition) bool {
 	if record == nil || !record.Matches(id) || record.phase != operationActive ||
 		disposition == OperationDispositionPending || record.disposition != disposition || record.resolutionApplied ||
-		!operationCandidateSettledForDisposition(record, disposition) {
+		!operationCandidateSettledForDisposition(record, disposition) ||
+		!operationResultReadyForResolutionAck(record, disposition) {
 		return false
 	}
 	record.resolutionApplied = true
@@ -695,7 +751,10 @@ func OperationCanRecycle(record *OperationRecord, id OperationID) bool {
 		record.link.park == nil && record.link.wait == nil && record.link.operation == nil && record.link.previous == nil && record.link.next == nil &&
 		record.disposition != OperationDispositionPending && record.resolutionApplied &&
 		operationCandidateSettledForDisposition(record, record.disposition) &&
-		(record.disposition != OperationDispositionWinner || record.resultTaken)
+		(record.disposition == OperationDispositionWinner &&
+			(record.resultState == operationResultTaken || record.resultState == operationResultDiscarded) ||
+			record.disposition != OperationDispositionWinner &&
+				(record.resultState == operationResultEmpty || record.resultState == operationResultDiscarded))
 }
 
 // OperationResultLease is issued only by ConsumeParkSet. A resumed wrapper
@@ -707,7 +766,7 @@ type OperationResultLease struct {
 }
 
 func (lease OperationResultLease) Valid() bool {
-	return lease.id.Valid() && lease.ticket != (ParkTicket{})
+	return lease.id.Valid() && validParkTicket(lease.ticket)
 }
 
 func (lease OperationResultLease) ID() (OperationID, bool) {
@@ -717,15 +776,38 @@ func (lease OperationResultLease) ID() (OperationID, bool) {
 	return lease.id, true
 }
 
-// TakeOperationResult ends the winner's source-owned result lease. Losers
-// have no result lease; detach plus quiescence is sufficient for them.
-func TakeOperationResult(record *OperationRecord, lease OperationResultLease) bool {
-	if record == nil || !lease.Valid() || !record.Matches(lease.id) || record.phase != operationDetached ||
-		record.disposition != OperationDispositionWinner || !record.resultConsumable || record.resultTaken || record.resultTicket != lease.ticket {
+// DiscardUnselectedOperationResult is the generic ownership transition used
+// only after a source has physically canceled/rolled back and released its
+// unselected payload. Empty losers need no transition.
+func DiscardUnselectedOperationResult(record *OperationRecord, id OperationID) bool {
+	if record == nil || !record.Matches(id) || record.phase != operationActive || record.resolutionApplied ||
+		(record.disposition != OperationDispositionLost && record.disposition != OperationDispositionCanceled) ||
+		!operationCandidateSettledForDisposition(record, record.disposition) || record.resultState != operationResultOwned {
 		return false
 	}
-	record.resultTaken = true
+	record.resultState = operationResultDiscarded
 	return true
+}
+
+func releaseOperationResult(record *OperationRecord, lease OperationResultLease, terminal operationResultState) bool {
+	if record == nil || !lease.Valid() || !record.Matches(lease.id) || record.phase != operationDetached ||
+		record.disposition != OperationDispositionWinner || record.resultState != operationResultLeased ||
+		record.resultTicket != lease.ticket || (terminal != operationResultTaken && terminal != operationResultDiscarded) {
+		return false
+	}
+	record.resultState = terminal
+	return true
+}
+
+// TakeOperationResult ends the exact winner lease after its payload was copied.
+func TakeOperationResult(record *OperationRecord, lease OperationResultLease) bool {
+	return releaseOperationResult(record, lease, operationResultTaken)
+}
+
+// DiscardOperationResult ends the exact winner lease without presenting its
+// payload, for example when a late task cancellation suppresses continuation.
+func DiscardOperationResult(record *OperationRecord, lease OperationResultLease) bool {
+	return releaseOperationResult(record, lease, operationResultDiscarded)
 }
 
 func RecycleOperation(record *OperationRecord, id OperationID) bool {

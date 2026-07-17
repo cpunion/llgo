@@ -126,7 +126,7 @@ func TestPrepareOperationAtGenerationSkipsLegacyPhysicalGenerations(t *testing.T
 	if !PrepareOperationAtGeneration(&record, next) || record.id != next || !AbortReservedOperation(&record, next) {
 		t.Fatal("generation helper did not skip legacy generations")
 	}
-	corrupt := OperationRecord{id: next, phase: operationReusable, resultTaken: true}
+	corrupt := OperationRecord{id: next, phase: operationReusable, resultState: operationResultTaken}
 	newer, _ := MakeOperationID(OperationSourceTimer, 3, 10)
 	if PrepareOperationAtGeneration(&corrupt, newer) {
 		t.Fatal("generation helper accepted terminal residue")

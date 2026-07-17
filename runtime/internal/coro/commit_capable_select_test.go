@@ -50,6 +50,8 @@ type commitSelectFakeSource struct {
 	ids       []OperationID
 	attempts  []uint32
 	canCommit []bool
+	committed []bool
+	released  []bool
 }
 
 func newCommitSelectFakeSource(
@@ -68,6 +70,8 @@ func newCommitSelectFakeSource(
 		ids:       make([]OperationID, count),
 		attempts:  make([]uint32, count),
 		canCommit: make([]bool, count),
+		committed: make([]bool, count),
+		released:  make([]bool, count),
 	}
 	for index := range specs {
 		source.canCommit[index] = specs[index].canCommit
@@ -144,7 +148,15 @@ func (source *commitSelectFakeSource) tryCommit(request ParkCommitRequest) (Park
 	}
 	source.attempts[index]++
 	if source.canCommit[index] {
-		return request.Succeeded(), true
+		// Simulate the source-local physical effect between the exact pre-effect
+		// gate and result binding. A future reentrant source must undo this bit
+		// if Bind fails; this fake is owner-serialized and cannot interleave.
+		source.committed[index] = true
+		attempt, bound := BindParkCommitResult(request)
+		if !bound {
+			source.committed[index] = false
+		}
+		return attempt, bound
 	}
 	return request.Failed(), true
 }
@@ -177,7 +189,15 @@ func (source *commitSelectFakeSource) finish(
 	t.Helper()
 	for index := range source.records {
 		disposition, ok := OperationDispositionOf(&source.records[index], source.ids[index])
-		if !ok || !AcknowledgeOperationResolution(&source.records[index], source.ids[index], disposition) {
+		if !ok {
+			t.Fatalf("read candidate %d disposition", index)
+		}
+		if disposition != OperationDispositionWinner {
+			source.released[index] = true
+		}
+		discardUnselectedTestResult(t, &source.records[index], source.ids[index])
+		if !source.records[index].resolutionApplied &&
+			!AcknowledgeOperationResolution(&source.records[index], source.ids[index], disposition) {
 			t.Fatalf("acknowledge candidate %d", index)
 		}
 		if !DetachParkWaitOperation(source.state, source.ticket, &source.records[index], source.ids[index]) {
@@ -933,10 +953,12 @@ func TestReservableSelectFreezesLogicalCommitAndRollbackBeforePhysicalAckDetach(
 }
 
 func TestCommitCapableSelectCoreLayoutAndPendingStepAreAllocationFree(t *testing.T) {
-	if unsafe.Offsetof(OperationRecord{}.candidate) != 11 || unsafe.Offsetof(OperationRecord{}.resultTicket) != 16 ||
+	if unsafe.Sizeof(operationResultState(0)) != 1 || unsafe.Offsetof(OperationRecord{}.candidate) != 11 ||
+		unsafe.Offsetof(OperationRecord{}.resultState) != 14 || unsafe.Offsetof(OperationRecord{}.resultTicket) != 16 ||
 		unsafe.Offsetof(OperationRecord{}.link) != 24 {
-		t.Fatalf("OperationRecord compact offsets = candidate %d resultTicket %d link %d",
-			unsafe.Offsetof(OperationRecord{}.candidate), unsafe.Offsetof(OperationRecord{}.resultTicket), unsafe.Offsetof(OperationRecord{}.link))
+		t.Fatalf("OperationRecord compact layout = resultState size %d candidate %d resultState %d resultTicket %d link %d",
+			unsafe.Sizeof(operationResultState(0)), unsafe.Offsetof(OperationRecord{}.candidate), unsafe.Offsetof(OperationRecord{}.resultState),
+			unsafe.Offsetof(OperationRecord{}.resultTicket), unsafe.Offsetof(OperationRecord{}.link))
 	}
 	if unsafe.Offsetof(ParkState{}.hasDefault) != 9 || unsafe.Offsetof(ParkState{}.resolving) != 10 ||
 		unsafe.Offsetof(ParkState{}.expected) != 12 {

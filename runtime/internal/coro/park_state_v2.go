@@ -168,7 +168,7 @@ func validPendingParkCommitCursor(state *ParkState) bool {
 		record.link.operation == record && record.link.ticket == state.ticket &&
 		operationCandidateMode(record) == OperationCommitReadyThenTryCommit &&
 		operationCandidateState(record) == OperationCommitReady && operationCandidateIsPublished(record) &&
-		validParkTicket(record.resultTicket)
+		validParkTicket(record.resultTicket) && record.resultState == operationResultEmpty
 }
 
 func validParkState(state *ParkState) bool {
@@ -201,7 +201,6 @@ func validParkState(state *ParkState) bool {
 		switch state.phase {
 		case parkPreparing, parkSealed, parkParked:
 			if link.operation.disposition != OperationDispositionPending || link.operation.resolutionApplied ||
-				link.operation.resultConsumable || link.operation.resultTaken ||
 				!operationCandidatePendingResultStorageValid(link.operation) ||
 				!operationCandidatePendingForResolution(link.operation) {
 				return false
@@ -211,21 +210,21 @@ func validParkState(state *ParkState) bool {
 			case ParkOutcomeCompleted:
 				if link.operation.id == state.winnerID {
 					if link.caseID != state.winnerCase || link.operation.disposition != OperationDispositionWinner ||
-						link.operation.resultTicket != link.ticket || link.operation.resultConsumable || link.operation.resultTaken {
+						link.operation.resultTicket != link.ticket || link.operation.resultState != operationResultOwned {
 						return false
 					}
 				} else if link.operation.disposition != OperationDispositionLost || !link.operation.cancelRequested ||
-					link.operation.resultTicket != (ParkTicket{}) || link.operation.resultConsumable || link.operation.resultTaken {
+					link.operation.resultTicket != (ParkTicket{}) || !operationUnselectedResultStateValid(link.operation) {
 					return false
 				}
 			case ParkOutcomeDefault:
 				if link.operation.disposition != OperationDispositionLost || !link.operation.cancelRequested ||
-					link.operation.resultTicket != (ParkTicket{}) || link.operation.resultConsumable || link.operation.resultTaken {
+					link.operation.resultTicket != (ParkTicket{}) || !operationUnselectedResultStateValid(link.operation) {
 					return false
 				}
 			case ParkOutcomeCanceled:
 				if link.operation.disposition != OperationDispositionCanceled || !link.operation.cancelRequested ||
-					link.operation.resultTicket != (ParkTicket{}) || link.operation.resultConsumable || link.operation.resultTaken {
+					link.operation.resultTicket != (ParkTicket{}) || !operationUnselectedResultStateValid(link.operation) {
 					return false
 				}
 			default:
@@ -273,7 +272,7 @@ func validParkState(state *ParkState) bool {
 		return validParkTicket(state.ticket) && state.attached == 0 && state.head == nil &&
 			((state.outcome == ParkOutcomeCompleted && !state.hasDefault && state.cancelKind < ParkCancelTaskAbort && state.winnerID.Valid() && state.winnerRecord != nil &&
 				state.winnerRecord.id == state.winnerID && state.winnerRecord.phase == operationDetached &&
-				state.winnerRecord.resultTicket == state.ticket && !state.winnerRecord.resultConsumable && !state.winnerRecord.resultTaken &&
+				state.winnerRecord.resultTicket == state.ticket && state.winnerRecord.resultState == operationResultOwned &&
 				operationCandidateSettledForDisposition(state.winnerRecord, OperationDispositionWinner)) ||
 				(state.outcome == ParkOutcomeCanceled && !state.hasDefault && state.cancelKind != ParkCancelNone && state.winnerCase == 0 &&
 					state.winnerID == (OperationID{}) && state.winnerRecord == nil) ||
@@ -706,10 +705,10 @@ func ConsumeParkSet(state *ParkState, ticket ParkTicket) (outcome ParkOutcome, c
 	}
 	if state.outcome == ParkOutcomeCompleted {
 		if state.winnerRecord == nil || state.winnerRecord.id != state.winnerID || state.winnerRecord.phase != operationDetached ||
-			state.winnerRecord.resultConsumable {
+			state.winnerRecord.resultState != operationResultOwned {
 			return ParkOutcomePending, 0, OperationResultLease{}, false
 		}
-		state.winnerRecord.resultConsumable = true
+		state.winnerRecord.resultState = operationResultLeased
 		lease = OperationResultLease{id: state.winnerID, ticket: ticket}
 		state.winnerRecord = nil
 	}

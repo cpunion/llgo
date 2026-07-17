@@ -138,6 +138,7 @@ func TestTaskCancellationOverridesCompletionAtWaitingPark(t *testing.T) {
 		record.disposition != OperationDispositionCanceled {
 		t.Fatalf("resolve task cancel/completion race = (%+v, %t)", resolution, resolved)
 	}
+	discardUnselectedTestResult(t, &record, id)
 	if !AcknowledgeOperationResolution(&record, id, OperationDispositionCanceled) ||
 		!DetachParkOperation(&g.park, ticket, &record, id) || !ParkReady(&g.park, ticket) {
 		t.Fatal("detach task-canceled operation")
@@ -222,7 +223,7 @@ func TestLateTaskCancellationSuppressesReadyWinnerAndKeepsLease(t *testing.T) {
 	if !ConfirmOperationQuiesced(&record, id) || OperationCanRecycle(&record, id) {
 		t.Fatal("winner recycled before cleanup discarded its leased result")
 	}
-	if !TakeOperationResult(&record, lease) || !OperationCanRecycle(&record, id) || !RecycleOperation(&record, id) {
+	if !DiscardOperationResult(&record, lease) || !OperationCanRecycle(&record, id) || !RecycleOperation(&record, id) {
 		t.Fatal("discard and recycle late-canceled winner result")
 	}
 	finishTaskCancelFixture(t, p, g, TaskCancelAbort)
