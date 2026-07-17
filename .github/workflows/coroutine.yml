@@ -75,10 +75,7 @@ jobs:
             ./internal/runtime/coro_target_test_adapter.go \
             ./internal/runtime/coro_program_test.go \
             -run '^TestCoroProgram' -count=1
-          go test \
-            ./internal/runtime/coro_timer_deadline.go \
-            ./internal/runtime/coro_timer_deadline_test.go \
-            -run '^TestCoroTimerDeadlineAfterV1$' -count=1
+          go test ./internal/corotimer -run '^TestDeadlineAfter$' -count=1
 
       - name: Link named freestanding WebAssembly targets
         if: matrix.llvm == 19 && matrix.go == '1.24.2'
@@ -122,8 +119,17 @@ jobs:
         # Keep the focused workflow exhaustive for the build-side coroutine
         # contract. This includes park effect seeding, frozen foreign noblock
         # certificates, IRQUnsafe handling, the exact legacy PanicABI stop, and
-        # the native linked static-spawn scheduler-island execution smoke.
-        run: go test ./internal/build -run 'Coro|Coroutine' -timeout=10m -count=1
+        # the native linked static-spawn scheduler-island execution smoke. The
+        # timer E2Es have their own LLVM 19-22 steps below, so do not run them
+        # twice in the LLVM 19 job.
+        run: go test ./internal/build -run 'Coro|Coroutine' -skip '^TestCoroNative(TimerNoGCProductionE2E|TimeSleepProductionPlanAndCodegen)$' -timeout=10m -count=1
+
+      - name: Run linked native coroutine timer E2E
+        if: matrix.go == '1.24.2'
+        run: go test -tags='${{ matrix.tags }}' -v ./internal/build -run '^TestCoroNativeTimerNoGCProductionE2E$' -timeout=10m -count=1
+
+      - name: Verify production time.Sleep coroutine plan
+        run: go test -tags='${{ matrix.tags }}' -v ./internal/build -run '^TestCoroNativeTimeSleepProductionPlanAndCodegen$' -timeout=10m -count=1
 
       - name: Test coroutine compiler integration
         if: matrix.llvm == 19
