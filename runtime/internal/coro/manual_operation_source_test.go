@@ -146,6 +146,57 @@ func TestManualOperationSourceAffectedResolveAndUnpublishedLoserDetach(t *testin
 	}
 }
 
+func TestManualOperationSourceApplyOneRequiresExactGenerationAndRecord(t *testing.T) {
+	p := new(P)
+	source := new(ManualOperationSource)
+	if !BindManualOperationSource(source, p) {
+		t.Fatal("bind exact-apply manual source")
+	}
+	state, ticket, ids := reserveManualWaitSet(t, source, p, 47, []uint32{11})
+	id := ids[0]
+	slot, _ := manualOperationSlotFor(source, id)
+	if result := source.Post(id); result != ManualOperationPosted {
+		t.Fatalf("post exact-apply completion = %d", result)
+	}
+	if published, lost, ok := source.PublishPass(p); !ok || published != 1 || lost != 0 {
+		t.Fatalf("publish exact-apply completion = (%d, %d, %t)", published, lost, ok)
+	}
+	if resolution, duplicates, ok := source.ResolveAffectedPublishedEpoch(p); !ok || duplicates != 0 ||
+		resolution != (CompletionResolution{WaitSets: 1, Completed: 1, Winners: 1}) {
+		t.Fatalf("resolve exact-apply completion = (%+v, %d, %t)", resolution, duplicates, ok)
+	}
+
+	wrongGeneration := id
+	wrongGeneration.Generation++
+	if result := source.ApplyOne(p, wrongGeneration, &slot.record); result != OperationApplyInvalid {
+		t.Fatalf("wrong-generation apply = %d", result)
+	}
+	copyRecord := slot.record
+	if result := source.ApplyOne(p, id, &copyRecord); result != OperationApplyInvalid {
+		t.Fatalf("copied-record apply = %d", result)
+	}
+	if slot.record.phase != operationActive || slot.record.resolutionApplied ||
+		preemptLoad(&slot.state) != uint32(manualOperationActive) {
+		t.Fatal("invalid exact apply changed live operation")
+	}
+	if result := source.ApplyOne(p, id, &slot.record); result != OperationApplyDetached ||
+		!ParkReady(state, ticket) || slot.record.phase != operationDetached || !slot.record.resolutionApplied ||
+		preemptLoad(&slot.state) != uint32(manualOperationClosing) {
+		t.Fatalf("exact manual apply = %d", result)
+	}
+	if result := source.ApplyOne(p, id, &slot.record); result != OperationApplyInvalid {
+		t.Fatalf("duplicate detached apply = %d", result)
+	}
+	outcome, _, lease, consumed := ConsumeParkSet(state, ticket)
+	if !consumed || outcome != ParkOutcomeCompleted || !lease.Valid() {
+		t.Fatalf("consume exact-apply winner = (%d, %+v, %t)", outcome, lease, consumed)
+	}
+	finishManualOperations(t, source, p, ids, lease)
+	if !UnbindManualOperationSource(source, p) || !source.CanRelease() {
+		t.Fatal("release exact-apply manual source")
+	}
+}
+
 func TestManualOperationSourceLateAdmittedLoserRequiresDrainBeforeQuiescence(t *testing.T) {
 	p := new(P)
 	source := new(ManualOperationSource)

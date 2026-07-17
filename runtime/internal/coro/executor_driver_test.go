@@ -208,6 +208,11 @@ func TestExecutorDriverBindCloseLifecycle(t *testing.T) {
 func TestExecutorDriverManualSourceUsesUnifiedPublishedEpochAndParkGate(t *testing.T) {
 	p := new(P)
 	driver, registry, waits, manual, executor := bindTestExecutorDriverWithManual(t, p)
+	// Keep an unrelated live slot in the same fixed-capacity source. Production
+	// apply must visit only the resolved batch's two ParkLinks, not this slot or
+	// either free capacity entry.
+	unrelatedState, unrelatedTicket, unrelatedIDs := reserveManualWaitSet(t, manual, p, 71, []uint32{7})
+	unrelatedSlot, _ := manualOperationSlotFor(manual, unrelatedIDs[0])
 	task := newYieldingTestG(t, "driver-manual")
 	if !Enqueue(p, task.g) {
 		t.Fatal("enqueue manual-source driver task")
@@ -245,7 +250,7 @@ func TestExecutorDriverManualSourceUsesUnifiedPublishedEpochAndParkGate(t *testi
 		t.Fatalf("request manual-source driver poll = %d", requested)
 	}
 	firstEpoch, firstEpochOK := serviceExecutorPublishedEpochAt(driver, 0, false)
-	if !firstEpochOK || firstEpoch.epochs != 1 || firstEpoch.completed != 1 || firstEpoch.promoted != 1 ||
+	if !firstEpochOK || firstEpoch.epochs != 1 || firstEpoch.completed != 1 || firstEpoch.applyVisits != 2 || firstEpoch.promoted != 1 ||
 		!registry.ObserveRequested(executor) {
 		t.Fatalf("first manual-source epoch = (%+v, %t), requested=%t",
 			firstEpoch, firstEpochOK, registry.ObserveRequested(executor))
@@ -278,6 +283,11 @@ func TestExecutorDriverManualSourceUsesUnifiedPublishedEpochAndParkGate(t *testi
 		firstSlot.record.phase != operationDetached || secondSlot.record.phase != operationDetached || HasWaiting(p) {
 		t.Fatal("unified manual-source transaction did not resolve and detach every candidate")
 	}
+	if unrelatedSlot.record.phase != operationActive || unrelatedSlot.record.disposition != OperationDispositionPending ||
+		unrelatedSlot.record.resolutionApplied || unrelatedSlot.record.cancelRequested ||
+		preemptLoad(&unrelatedSlot.state) != uint32(manualOperationActive) {
+		t.Fatal("batch apply inspected or changed an unrelated live manual slot")
+	}
 
 	if g, ok := NextRunnable(p); !ok || g != task.g {
 		t.Fatal("dequeue manual-source promoted task")
@@ -292,6 +302,21 @@ func TestExecutorDriverManualSourceUsesUnifiedPublishedEpochAndParkGate(t *testi
 		!manual.TakeResult(p, lease) || !manual.Recycle(p, first) || !manual.Recycle(p, second) {
 		t.Fatal("release manual-source driver operations")
 	}
+	if !RequestParkCancel(unrelatedState, unrelatedTicket, ParkCancelOperation) {
+		t.Fatal("cancel unrelated manual operation")
+	}
+	if resolution, resolved := ResolveParkSnapshot(unrelatedState, unrelatedTicket); !resolved ||
+		resolution != (CompletionResolution{WaitSets: 1, Canceled: 1, Losers: 1}) {
+		t.Fatalf("resolve unrelated manual operation = (%+v, %t)", resolution, resolved)
+	}
+	if applied, detached, applyOK := manual.ApplyAndDetach(p); !applyOK || applied != 1 || detached != 1 {
+		t.Fatalf("standalone cleanup apply = (%d, %d, %t)", applied, detached, applyOK)
+	}
+	if outcome, _, unrelatedLease, consumed := ConsumeParkSet(unrelatedState, unrelatedTicket); !consumed ||
+		outcome != ParkOutcomeCanceled || unrelatedLease != (OperationResultLease{}) {
+		t.Fatalf("consume unrelated manual cancellation = (%d, %+v, %t)", outcome, unrelatedLease, consumed)
+	}
+	finishManualOperations(t, manual, p, unrelatedIDs, OperationResultLease{})
 	yieldRunningDriverTask(t, p, task, action)
 	closeTestExecutorDriver(t, driver)
 	finishReadyDriverTasks(t, p, map[*G]*yieldingTestG{task.g: task})

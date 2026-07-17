@@ -56,6 +56,10 @@ type executorSourceScan struct {
 	manualLost  int
 	control     int
 	controlLate int
+	// applyVisits is executor work charged once per exact ParkLink candidate
+	// dispatched after logical resolution. It is independent of source capacity
+	// and is the unit a bounded scheduler-service budget can consume.
+	applyVisits int
 	promoted    int
 	deadline    int64
 	hasDeadline bool
@@ -74,6 +78,7 @@ func (scan *executorSourceScan) add(other executorSourceScan) {
 	scan.manualLost += other.manualLost
 	scan.control += other.control
 	scan.controlLate += other.controlLate
+	scan.applyVisits += other.applyVisits
 	scan.promoted += other.promoted
 	// Every successful source-set scan reports the complete current deadline
 	// view, so the last scan is authoritative rather than a minimum of stale
@@ -214,36 +219,104 @@ func (sources *ExecutorSourceSet) publishPass(p *P, now int64, withDeadline bool
 // immediately; it does not wait for producer mailboxes or the executor request
 // bit to become quiet. Keeping this separate prevents static source order from
 // becoming a select tie breaker.
-func (sources *ExecutorSourceSet) resolvePublishedEpoch(p *P) (promoted int, ok bool) {
+func (sources *ExecutorSourceSet) applyOne(p *P, link *ParkLink) OperationApplyResult {
+	if !validExecutorSourceSet(sources, p) || link == nil || link.operation == nil ||
+		link.operation.link.operation != link.operation || &link.operation.link != link ||
+		link.operation.phase != operationActive || link.operation.id.Source() == OperationSourceInvalid {
+		return OperationApplyInvalid
+	}
+	switch link.operation.id.Source() {
+	case OperationSourceManual:
+		if sources.manual == nil {
+			return OperationApplyInvalid
+		}
+		return sources.manual.ApplyOne(p, link.operation.id, link.operation)
+	default:
+		// A V2 ParkLink from a source absent from this frozen direct-call catalog
+		// is a binding/programming error, not deferred backend work.
+		return OperationApplyInvalid
+	}
+}
+
+// applyResolvedWaitSetBatch dispatches source-specific apply through only the
+// candidate links retained by the resolved batch. Detach mutates the intrusive
+// list, so next is captured before each direct source call. A deferred source
+// must leave its exact link attached; promotion then requeues that wait-set for
+// the next bounded epoch without any capacity or all-G scan.
+func (sources *ExecutorSourceSet) applyResolvedWaitSetBatch(p *P, batch *WaitSetRecord) (visits int, ok bool) {
 	if !validExecutorSourceSet(sources, p) {
 		return 0, false
 	}
+	for wait := batch; wait != nil; wait = wait.workNext {
+		if !validActiveWaitSetRecordFast(p, wait) ||
+			(wait.work != waitSetWorkResolving && wait.work != waitSetWorkResolvingDirty) ||
+			(wait.g.park.phase != parkDetaching && wait.g.park.phase != parkReady) {
+			return visits, false
+		}
+		state := &wait.g.park
+		for link := state.head; link != nil; {
+			next := link.next
+			if link.park != state || link.wait != wait || link.ticket != wait.ticket ||
+				link.operation == nil || link.operation.link.operation != link.operation {
+				return visits, false
+			}
+			visits++
+			switch sources.applyOne(p, link) {
+			case OperationApplyDetached:
+				// The source cleared this exact embedded link. next remains stable
+				// source-owned storage even when its predecessor changed.
+			case OperationApplyDeferred:
+				if link.park != state || link.wait != wait || link.operation == nil ||
+					&link.operation.link != link || link.operation.phase != operationActive {
+					return visits, false
+				}
+			default:
+				return visits, false
+			}
+			link = next
+		}
+	}
+	return visits, true
+}
+
+func (sources *ExecutorSourceSet) resolvePublishedEpoch(p *P) (promoted, applyVisits int, ok bool) {
+	if !validExecutorSourceSet(sources, p) {
+		return 0, 0, false
+	}
 	// Phase one resolves every source's affected entries against the same
 	// complete sticky snapshot. When another V2 source joins this catalog, its
-	// ResolveAffected call belongs here before any ApplyAndDetach call below.
+	// ResolveAffected call belongs here before any source-specific ApplyOne call.
 	if sources.manual != nil {
-		if _, _, resolved := sources.manual.ResolveAffectedPublishedEpoch(p); !resolved {
-			return 0, false
+		standalone, valid := sources.manual.standaloneAffected(p)
+		if !valid || standalone {
+			// A source-local (link.wait == nil) entry has no resolved batch link.
+			// Fail before consuming it rather than silently leaving an attached
+			// terminal operation outside the production apply transaction.
+			return 0, 0, false
+		}
+		resolution, duplicates, resolved := sources.manual.ResolveAffectedPublishedEpoch(p)
+		if !resolved || resolution != (CompletionResolution{}) || duplicates != 0 {
+			return 0, 0, false
 		}
 	}
 	batch, _, _, resolved := resolveAffectedWaitSets(p)
 	if !resolved {
-		return 0, false
+		return 0, 0, false
 	}
-	// Phase two applies each source's winner/loser disposition and clears every
-	// ParkLink. Keeping the phases global prevents a source scanned first from
-	// detaching a cross-source loser before that loser's affected entry is seen.
-	if sources.manual != nil {
-		if _, _, applied := sources.manual.ApplyAndDetach(p); !applied {
-			return 0, false
-		}
+	// Phase two walks only the resolved batch's candidate links and directly
+	// dispatches each exact source identity. All source resolve passes above are
+	// complete before any source applies or detaches, so static source order can
+	// neither select a winner nor hide a cross-source loser.
+	applyVisits, ok = sources.applyResolvedWaitSetBatch(p, batch)
+	if !ok {
+		return 0, applyVisits, false
 	}
 	promoted, ok = promoteResolvedWaitSets(p, batch)
 	if !ok {
-		return promoted, false
+		return promoted, applyVisits, false
 	}
 	legacyPromoted, legacyOK := pollReady(p)
-	return promoted + legacyPromoted, legacyOK
+	return promoted + legacyPromoted, applyVisits, legacyOK
 }
 
 // pending reports producer-published facts that require another owner scan.
@@ -251,7 +324,7 @@ func (sources *ExecutorSourceSet) resolvePublishedEpoch(p *P) (promoted int, ok 
 // deadline; future deadlines are not pending runnable work.
 func (sources *ExecutorSourceSet) pending(p *P) bool {
 	return validExecutorSourceSet(sources, p) &&
-		(sources.waits.Pending() || sources.manual != nil && sources.manual.Pending() ||
+		(p.affectedWaitHead != nil || sources.waits.Pending() || sources.manual != nil && sources.manual.Pending() ||
 			sources.control != nil && sources.control.Pending())
 }
 

@@ -408,6 +408,18 @@ func (source *ManualOperationSource) ResolveAffectedPublishedEpoch(p *P) (total 
 	return total, duplicates, source.affectedTail == 0
 }
 
+// standaloneAffected reports source-local work created by ReserveAndAttach
+// without a WaitSetRecord. ExecutorSourceSet must reject this shape before
+// logical resolution: its production apply phase is intentionally driven only
+// by the resolved scheduler batch, while standalone callers retain the explicit
+// ResolveAffectedPublishedEpoch plus ApplyAndDetach sequence.
+func (source *ManualOperationSource) standaloneAffected(p *P) (affected, ok bool) {
+	if !validManualOperationOwner(source, p) || (source.affectedHead == 0) != (source.affectedTail == 0) {
+		return false, false
+	}
+	return source.affectedHead != 0, true
+}
+
 func (source *ManualOperationSource) beginCloseSlot(p *P, id OperationID) ManualOperationCloseResult {
 	slot, ok := manualOperationSlotFor(source, id)
 	if !ok || !validManualOperationOwner(source, p) || preemptLoad(&slot.generation) != id.Generation || !slot.record.Matches(id) {
@@ -441,10 +453,47 @@ func (source *ManualOperationSource) BeginClose(p *P, id OperationID) ManualOper
 	return source.beginCloseSlot(p, id)
 }
 
-// ApplyAndDetach scans all live source slots, rather than only the affected
-// completion chain. Consequently a select loser with no completion is closed,
-// acknowledged, and detached in the same pass. Physical quiescence is not a
-// prerequisite for logical detach or ParkReady.
+// ApplyOne applies one terminal logical disposition reached through an exact
+// source-owned record identity. It is the production SourceSet path: unrelated
+// live slots are neither inspected nor changed. Closing producer admission is
+// independent of physical quiescence, so the ParkLink may detach immediately
+// after the source has acknowledged winner/loser/canceled disposition.
+func (source *ManualOperationSource) ApplyOne(p *P, id OperationID, record *OperationRecord) OperationApplyResult {
+	slot, ok := manualOperationSlotFor(source, id)
+	if !ok || !validManualOperationOwner(source, p) || preemptLoad(&slot.generation) != id.Generation ||
+		&slot.record != record || !slot.record.Matches(id) || slot.record.phase != operationActive {
+		return OperationApplyInvalid
+	}
+	state := manualOperationLifecycle(preemptLoad(&slot.state))
+	if state != manualOperationActive && state != manualOperationClosing && state != manualOperationQuiesced {
+		return OperationApplyInvalid
+	}
+	disposition, terminal := OperationDispositionOf(&slot.record, id)
+	if !terminal || slot.record.link.park == nil || slot.record.link.operation != &slot.record ||
+		slot.record.link.ticket == (ParkTicket{}) {
+		return OperationApplyInvalid
+	}
+	closeResult := source.beginCloseSlot(p, id)
+	if closeResult != ManualOperationCloseStarted && closeResult != ManualOperationAlreadyClosing &&
+		closeResult != ManualOperationAlreadyQuiesced {
+		return OperationApplyInvalid
+	}
+	if !slot.record.resolutionApplied && !AcknowledgeOperationResolution(&slot.record, id, disposition) {
+		return OperationApplyInvalid
+	}
+	park, ticket, wait := slot.record.link.park, slot.record.link.ticket, slot.record.link.wait
+	detached := wait != nil && DetachParkWaitOperation(park, ticket, &slot.record, id) ||
+		wait == nil && DetachParkOperation(park, ticket, &slot.record, id)
+	if !detached {
+		return OperationApplyInvalid
+	}
+	return OperationApplyDetached
+}
+
+// ApplyAndDetach is the standalone/legacy convenience path. It intentionally
+// retains its all-capacity scan for callers which do not carry a WaitSetRecord;
+// ExecutorSourceSet never calls it. Physical quiescence is not a prerequisite
+// for logical detach or ParkReady.
 func (source *ManualOperationSource) ApplyAndDetach(p *P) (applied, detached uint32, ok bool) {
 	if !validManualOperationOwner(source, p) || source.affectedHead != 0 || source.affectedTail != 0 {
 		return 0, 0, false
@@ -468,25 +517,16 @@ func (source *ManualOperationSource) ApplyAndDetach(p *P) (applied, detached uin
 			}
 			continue
 		}
-		disposition, terminal := OperationDispositionOf(&slot.record, id)
+		_, terminal := OperationDispositionOf(&slot.record, id)
 		if !terminal {
 			continue
 		}
-		closeResult := source.beginCloseSlot(p, id)
-		if closeResult != ManualOperationCloseStarted && closeResult != ManualOperationAlreadyClosing && closeResult != ManualOperationAlreadyQuiesced {
+		wasApplied := slot.record.resolutionApplied
+		if source.ApplyOne(p, id, &slot.record) != OperationApplyDetached {
 			return applied, detached, false
 		}
-		if !slot.record.resolutionApplied {
-			if !AcknowledgeOperationResolution(&slot.record, id, disposition) {
-				return applied, detached, false
-			}
+		if !wasApplied {
 			applied++
-		}
-		park, ticket, wait := slot.record.link.park, slot.record.link.ticket, slot.record.link.wait
-		detachedRecord := wait != nil && DetachParkWaitOperation(park, ticket, &slot.record, id) ||
-			wait == nil && DetachParkOperation(park, ticket, &slot.record, id)
-		if !detachedRecord {
-			return applied, detached, false
 		}
 		detached++
 	}

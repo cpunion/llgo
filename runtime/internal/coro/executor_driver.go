@@ -266,7 +266,7 @@ func serviceExecutorPublishedEpochAt(driver *ExecutorDriver, now int64, withDead
 		return scan, false
 	}
 	scan.epochs = 1
-	scan.promoted, ok = driver.sources.resolvePublishedEpoch(driver.p)
+	scan.promoted, scan.applyVisits, ok = driver.sources.resolvePublishedEpoch(driver.p)
 	return scan, ok
 }
 

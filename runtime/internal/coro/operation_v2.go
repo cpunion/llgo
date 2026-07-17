@@ -145,6 +145,19 @@ const (
 	OperationCancelAlreadyTerminal
 )
 
+// OperationApplyResult is the source-owner result of applying one terminal
+// logical disposition reached through an exact ParkLink. Detached means the
+// source acknowledged the disposition and removed that link. Deferred means
+// the exact operation remains attached and must be retried by a later owner
+// epoch; it is not a failed or partially detached operation.
+type OperationApplyResult uint8
+
+const (
+	OperationApplyInvalid OperationApplyResult = iota
+	OperationApplyDetached
+	OperationApplyDeferred
+)
+
 // OperationRecord is stable scheduler/source-owned storage. The producer does
 // not receive this pointer: it retains only OperationID and reaches the record
 // through its source table after generation validation.
