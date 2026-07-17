@@ -37,6 +37,10 @@ const (
 	// only when a host/export boundary explicitly exposes a task handle; an
 	// ordinary G never enters a global handle registry.
 	OperationSourceControl
+	// OperationSourceChannel is appended after the frozen producer-visible
+	// source values. Its first slice supplies only the claim/forced-publication
+	// protocol; typed hchan payloads arrive in the following channel phase.
+	OperationSourceChannel
 )
 
 const (
@@ -128,7 +132,8 @@ func (id OperationID) Valid() bool {
 func validOperationSource(source OperationSource) bool {
 	switch source {
 	case OperationSourceWait, OperationSourceTimer, OperationSourceManual, OperationSourcePoll,
-		OperationSourceWorker, OperationSourceHost, OperationSourceIRQ, OperationSourceControl:
+		OperationSourceWorker, OperationSourceHost, OperationSourceIRQ, OperationSourceControl,
+		OperationSourceChannel:
 		return true
 	default:
 		return false
@@ -338,12 +343,27 @@ func operationCandidatePendingForResolution(record *OperationRecord) bool {
 	case OperationCommitIrreversibleCompletion:
 		return !published && state == OperationCommitIdle || published && state == OperationCommitCommitted
 	case OperationCommitReadyThenTryCommit:
-		return !published && state == OperationCommitIdle || published && state == OperationCommitReady
+		return !published && state == OperationCommitIdle || published &&
+			(state == OperationCommitReady || state == OperationCommitCommitted)
 	case OperationCommitReservable:
 		return !published && state == OperationCommitIdle || published && state == OperationCommitReserved
 	default:
 		return false
 	}
+}
+
+func operationCandidateExternallyCommitted(record *OperationRecord) bool {
+	return record != nil && record.disposition == OperationDispositionPending && !record.resolutionApplied &&
+		validOperationCandidate(record) && operationCandidateMode(record) == OperationCommitReadyThenTryCommit &&
+		operationCandidateIsPublished(record) && operationCandidateState(record) == OperationCommitCommitted &&
+		record.resultState == operationResultOwned && validParkTicket(record.resultTicket)
+}
+
+func operationCandidateForcedCanceled(record *OperationRecord) bool {
+	return record != nil && record.disposition == OperationDispositionCanceled && !record.resolutionApplied &&
+		validOperationCandidate(record) && operationCandidateMode(record) == OperationCommitReadyThenTryCommit &&
+		operationCandidateIsPublished(record) && operationCandidateState(record) == OperationCommitCommitted &&
+		record.resultState == operationResultOwned && record.resultTicket == (ParkTicket{})
 }
 
 // operationCandidatePendingResultStorageValid permits ReadyThenTryCommit to
@@ -363,11 +383,15 @@ func operationCandidatePendingResultStorageValid(record *OperationRecord) bool {
 		return record.resultTicket == (ParkTicket{}) &&
 			(record.resultState == operationResultEmpty && !published || record.resultState == operationResultOwned && published)
 	}
+	state := operationCandidateState(record)
+	if state == OperationCommitCommitted {
+		return published && record.resultState == operationResultOwned && validParkTicket(record.resultTicket)
+	}
 	if record.resultState != operationResultEmpty {
 		return false
 	}
 	if record.resultTicket == (ParkTicket{}) {
-		return !published && operationCandidateState(record) == OperationCommitIdle
+		return !published && state == OperationCommitIdle
 	}
 	return validParkTicket(record.resultTicket)
 }
@@ -390,6 +414,12 @@ func operationCandidateSettledForDisposition(record *OperationRecord, dispositio
 	case OperationCommitIrreversibleCompletion:
 		return !published && state == OperationCommitIdle || published && state == OperationCommitCommitted
 	case OperationCommitReadyThenTryCommit, OperationCommitReservable:
+		if disposition == OperationDispositionCanceled && mode == OperationCommitReadyThenTryCommit &&
+			published && state == OperationCommitCommitted {
+			// Only the forced strong-cancel settlement path can create this
+			// Canceled-but-not-RolledBack shape. Lost never admits it.
+			return true
+		}
 		return !published && state == OperationCommitIdle || published && state == OperationCommitRolledBack
 	default:
 		return false
@@ -680,6 +710,47 @@ func PublishOperationCompletion(record *OperationRecord, id OperationID) Operati
 // advances the record's non-wrapping readiness generation.
 func PublishReadyThenTryCommitCandidate(record *OperationRecord, id OperationID) OperationCompletionResult {
 	return publishOperationCandidate(record, id, OperationCommitReadyThenTryCommit, OperationCommitReady)
+}
+
+// PublishExternallyCommittedReadyThenCandidate is the owner-drain half of a
+// channel peer rendezvous. The producer has already published its physical
+// result and exact mailbox before setting SelectClaim to Claimed. Unlike an
+// ordinary Ready hint this transition establishes result ownership and cannot
+// later be ranked behind another candidate or rolled back.
+func PublishExternallyCommittedReadyThenCandidate(record *OperationRecord, id OperationID) OperationCompletionResult {
+	if record == nil || !record.Matches(id) || !validOperationCandidate(record) ||
+		operationCandidateMode(record) != OperationCommitReadyThenTryCommit {
+		return OperationCompletionInvalid
+	}
+	if record.disposition == OperationDispositionWinner ||
+		operationCandidateIsPublished(record) && operationCandidateState(record) == OperationCommitCommitted {
+		return OperationCompletionDuplicate
+	}
+	if record.disposition == OperationDispositionLost || record.disposition == OperationDispositionCanceled ||
+		record.phase == operationDetached {
+		return OperationCompletionLost
+	}
+	if record.link.park == nil || record.link.operation != record || record.link.ticket == (ParkTicket{}) {
+		return OperationCompletionInvalid
+	}
+	if record.link.park.phase == parkParked && record.link.park.resolving {
+		return OperationCompletionDeferred
+	}
+	state, published := operationCandidateState(record), operationCandidateIsPublished(record)
+	if record.resultState != operationResultEmpty ||
+		(state != OperationCommitIdle || published) && (state != OperationCommitReady || !published) {
+		return OperationCompletionInvalid
+	}
+	if !published {
+		readyTicket, ok := nextParkTicket(record.resultTicket)
+		if !ok {
+			return OperationCompletionInvalid
+		}
+		record.resultTicket = readyTicket
+	}
+	record.resultState = operationResultOwned
+	setOperationCandidate(record, OperationCommitReadyThenTryCommit, OperationCommitCommitted, true)
+	return OperationCompletionPublished
 }
 
 // PublishReservableCandidate publishes one source-owned reversible

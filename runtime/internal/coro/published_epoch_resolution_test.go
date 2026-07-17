@@ -49,8 +49,8 @@ func TestPublishedEpochResolutionHighCardinalityHasExactLinearSteps(t *testing.T
 	operations := sealSchedulerParkV2(t, task.g, 103, cases...)
 	commitSchedulerParkV2(t, p, task, action, operations)
 
-	// The activation visit scans each exact candidate once, then performs one
-	// pending decision action. No call can consume two candidate links.
+	// A source set without Channel keeps the original rank-only path. No call
+	// can consume two candidate links.
 	var cursor publishedEpochResolveCursor
 	initialSteps := 0
 	for {

@@ -76,14 +76,16 @@ func TestMinExecutorPollBudgetCountsCompleteProductionCatalog(t *testing.T) {
 	waits := new(WaitRegistrationTable)
 	timers := new(TimerRegistrationTable)
 	manual := new(ManualOperationSource)
+	channel := new(ChannelOperationSource)
 	control := new(TaskControlSource)
 	handle := registerTestExecutor(t, registry)
 	if !BindExecutorSourceCatalog(driver, p, registry, handle, ExecutorSourceCatalog{
-		Waits: waits, Timers: timers, Manual: manual, Control: control,
+		Waits: waits, Timers: timers, Manual: manual, Channel: channel, Control: control,
 	}) {
 		t.Fatal("bind complete production catalog")
 	}
-	want := uint32(2*(WaitRegistrationCapacity+TimerRegistrationCapacity+ManualOperationSourceCapacity+TaskControlSourceCapacity+1) + 1)
+	want := uint32(2*(WaitRegistrationCapacity+TimerRegistrationCapacity+ManualOperationSourceCapacity+
+		ChannelOperationSourceCapacity+TaskControlSourceCapacity+1) + 1)
 	if budget, ok := MinExecutorPollBudget(driver); !ok || budget != want {
 		t.Fatalf("complete catalog minimum = (%d, %t), want %d", budget, ok, want)
 	}

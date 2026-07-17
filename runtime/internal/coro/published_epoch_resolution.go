@@ -26,6 +26,7 @@ type publishedEpochResolvePhase uint8
 
 const (
 	publishedEpochResolveIdle publishedEpochResolvePhase = iota
+	publishedEpochResolveDiscover
 	publishedEpochResolvePark
 	publishedEpochResolveApply
 	publishedEpochResolveFinish
@@ -48,11 +49,15 @@ type publishedEpochResolveCursor struct {
 	link           *ParkLink
 	legacyPrevious *G
 	legacy         *G
+	claim          *SelectClaim
+	forced         *OperationRecord
 	park           parkResolutionCursor
 	phase          publishedEpochResolvePhase
 	waitRetry      bool
 	waitAwait      bool
-	_              [5]byte
+	hasChannel     bool
+	claimOwned     bool
+	_              [3]byte
 }
 
 type publishedEpochResolveStep struct {
@@ -102,7 +107,7 @@ func validPublishedEpochResolveCursor(cursor *publishedEpochResolveCursor, p *P)
 			cursor.park == (parkResolutionCursor{}) &&
 			!cursor.waitRetry && !cursor.waitAwait && cursor.legacy != nil
 	}
-	if cursor.phase < publishedEpochResolvePark || cursor.phase > publishedEpochResolvePromote ||
+	if cursor.phase < publishedEpochResolveDiscover || cursor.phase > publishedEpochResolvePromote ||
 		cursor.wait == nil || cursor.wait.g == nil || cursor.wait.state != waitSetRecordActive ||
 		cursor.wait.ticket != cursor.wait.g.park.ticket || cursor.batchTail == nil || cursor.batchTail.workNext != nil ||
 		cursor.legacyPrevious != nil || cursor.legacy != nil {
@@ -112,8 +117,16 @@ func validPublishedEpochResolveCursor(cursor *publishedEpochResolveCursor, p *P)
 		return false
 	}
 	switch cursor.phase {
+	case publishedEpochResolveDiscover:
+		return cursor.park == (parkResolutionCursor{}) && !cursor.claimOwned &&
+			cursor.wait.work == waitSetWorkResolving && validActiveWaitSetRecordFast(p, cursor.wait) &&
+			cursor.wait.g.park.phase == parkParked &&
+			(cursor.link == nil || validPublishedEpochWaitLink(cursor.wait, cursor.link))
 	case publishedEpochResolvePark:
 		return cursor.link == nil && !cursor.waitRetry && !cursor.waitAwait &&
+			(cursor.claim == nil && !cursor.claimOwned || cursor.claim != nil &&
+				(cursor.claimOwned && selectClaimLoad(cursor.claim) == selectClaimAcquiring ||
+					!cursor.claimOwned && cursor.forced != nil && selectClaimLoad(cursor.claim) == selectClaimClaimed)) &&
 			validPublishedEpochResolvingWait(p, cursor.wait) &&
 			validParkResolutionCursor(&cursor.wait.g.park, cursor.wait.ticket, &cursor.park)
 	case publishedEpochResolveApply:
@@ -147,15 +160,17 @@ func validPublishedEpochWaitLink(wait *WaitSetRecord, link *ParkLink) bool {
 // startPublishedEpochWait binds the next record after the caller has validated
 // its owner P. It performs only O(1) bookkeeping; the same reduction is charged
 // to the logical candidate, finish, or promotion action selected below.
-func startPublishedEpochWait(cursor *publishedEpochResolveCursor, wait *WaitSetRecord) bool {
+func startPublishedEpochWait(sources *ExecutorSourceSet, cursor *publishedEpochResolveCursor, wait *WaitSetRecord) bool {
 	if cursor == nil || wait == nil || wait.work != waitSetWorkQueued || wait.g == nil {
 		return false
 	}
 	phase := wait.g.park.phase
-	if phase == parkParked && !beginParkSnapshotResolution(&wait.g.park, wait.ticket, &cursor.park, false) {
+	if phase != parkParked && phase != parkDetaching && phase != parkReady {
 		return false
 	}
-	if phase != parkParked && phase != parkDetaching && phase != parkReady {
+	discoverChannel := sources != nil && sources.channel != nil
+	if phase == parkParked && !discoverChannel &&
+		!beginParkSnapshotResolution(&wait.g.park, wait.ticket, &cursor.park, false) {
 		return false
 	}
 	cursor.wait = wait
@@ -166,7 +181,12 @@ func startPublishedEpochWait(cursor *publishedEpochResolveCursor, wait *WaitSetR
 	wait.work = waitSetWorkResolving
 	switch phase {
 	case parkParked:
-		cursor.phase = publishedEpochResolvePark
+		if discoverChannel {
+			cursor.phase = publishedEpochResolveDiscover
+			cursor.link = wait.g.park.head
+		} else {
+			cursor.phase = publishedEpochResolvePark
+		}
 	case parkDetaching, parkReady:
 		cursor.phase = publishedEpochResolveApply
 		cursor.link = wait.g.park.head
@@ -203,7 +223,7 @@ func initializePublishedEpochResolution(sources *ExecutorSourceSet, p *P, cursor
 			return false
 		}
 		cursor.batchTail = tail
-		if !startPublishedEpochWait(cursor, head) {
+		if !startPublishedEpochWait(sources, cursor, head) {
 			cursor.batchTail = nil
 			return false
 		}
@@ -218,7 +238,7 @@ func initializePublishedEpochResolution(sources *ExecutorSourceSet, p *P, cursor
 	return true
 }
 
-func finishPendingPublishedEpochWait(p *P, cursor *publishedEpochResolveCursor, step *publishedEpochResolveStep) bool {
+func finishPendingPublishedEpochWait(sources *ExecutorSourceSet, p *P, cursor *publishedEpochResolveCursor, step *publishedEpochResolveStep) bool {
 	wait := cursor.wait
 	if wait.work == waitSetWorkResolvingDirty {
 		wait.work = waitSetWorkIdle
@@ -233,10 +253,10 @@ func finishPendingPublishedEpochWait(p *P, cursor *publishedEpochResolveCursor, 
 		return false
 	}
 	step.resolution.WaitSets = 1
-	return advancePublishedEpochWaitAfterCleared(cursor, p, step)
+	return advancePublishedEpochWaitAfterCleared(sources, cursor, p, step)
 }
 
-func advancePublishedEpochWaitAfterCleared(cursor *publishedEpochResolveCursor, p *P, step *publishedEpochResolveStep) bool {
+func advancePublishedEpochWaitAfterCleared(sources *ExecutorSourceSet, cursor *publishedEpochResolveCursor, p *P, step *publishedEpochResolveStep) bool {
 	if cursor == nil || p == nil || step == nil || cursor.wait == nil || cursor.wait.workNext != nil {
 		return false
 	}
@@ -246,12 +266,16 @@ func advancePublishedEpochWaitAfterCleared(cursor *publishedEpochResolveCursor, 
 	cursor.nextWait = nil
 	cursor.link = nil
 	cursor.park = parkResolutionCursor{}
+	cursor.claim = nil
+	cursor.forced = nil
+	cursor.hasChannel = false
+	cursor.claimOwned = false
 	cursor.waitRetry = false
 	cursor.waitAwait = false
 	if next != nil {
 		// batchTail remains the exact endpoint of the detached snapshot.
 		cursor.batchTail = batchTail
-		return validActiveWaitSetRecordFast(p, next) && startPublishedEpochWait(cursor, next)
+		return validActiveWaitSetRecordFast(p, next) && startPublishedEpochWait(sources, cursor, next)
 	}
 	cursor.batchTail = nil
 	cursor.phase = publishedEpochResolveLegacy
@@ -260,6 +284,111 @@ func advancePublishedEpochWaitAfterCleared(cursor *publishedEpochResolveCursor, 
 		completePublishedEpochCursor(cursor, step)
 	}
 	return true
+}
+
+// restorePublishedEpochDiscovery restores the exact unprocessed affected FIFO
+// before ParkState enters resolving. Acquiring or Committing yields the whole
+// source epoch so an unrelated ready G can run while the peer owns the claim;
+// Claimed with no forced record means its sticky mailbox landed behind this
+// source cursor, so A/ack/B (or the next transaction after B) must publish that
+// exact fact.
+func restorePublishedEpochDiscovery(p *P, cursor *publishedEpochResolveCursor, step *publishedEpochResolveStep, retry bool) bool {
+	if !validPublishedEpochResolveCursor(cursor, p) || cursor.phase != publishedEpochResolveDiscover ||
+		cursor.claim == nil || cursor.claimOwned || cursor.wait.work != waitSetWorkResolving ||
+		cursor.batchTail == nil || cursor.batchTail.workNext != nil || !validAffectedWaitQueueHeader(p) {
+		return false
+	}
+	claimState := selectClaimLoad(cursor.claim)
+	if (retry && claimState != selectClaimAcquiring && claimState != selectClaimCommitting) ||
+		(!retry && claimState != selectClaimClaimed) {
+		return false
+	}
+	wait, tail := cursor.wait, cursor.batchTail
+	wait.work = waitSetWorkQueued
+	if p.affectedWaitHead == nil {
+		p.affectedWaitHead, p.affectedWaitTail = wait, tail
+	} else {
+		tail.workNext = p.affectedWaitHead
+		p.affectedWaitHead = wait
+	}
+	*cursor = publishedEpochResolveCursor{}
+	step.retryBudget = retry
+	step.complete = true
+	return validAffectedWaitQueueHeader(p) && validActiveWaitSetRecordFast(p, wait)
+}
+
+func resolvePublishedEpochDiscoverStep(sources *ExecutorSourceSet, p *P, cursor *publishedEpochResolveCursor, step *publishedEpochResolveStep) bool {
+	wait, state := cursor.wait, &cursor.wait.g.park
+	if cursor.claim != nil {
+		claimState := selectClaimLoad(cursor.claim)
+		if claimState == selectClaimAcquiring || claimState == selectClaimCommitting {
+			return restorePublishedEpochDiscovery(p, cursor, step, true)
+		}
+	}
+	if cursor.link != nil {
+		link := cursor.link
+		claim, forced, channel, ok := sources.selectCommitDomainFor(link)
+		if !ok || channel && state.expected > 1 && claim == nil {
+			return false
+		}
+		if channel {
+			if cursor.hasChannel && cursor.claim != claim {
+				return false
+			}
+			cursor.hasChannel = true
+			cursor.claim = claim
+			if forced {
+				if cursor.forced != nil && cursor.forced != link.operation {
+					return false
+				}
+				cursor.forced = link.operation
+			}
+		}
+		cursor.link = link.next
+		return true
+	}
+
+	if cursor.claim == nil {
+		if !beginParkSnapshotResolution(state, wait.ticket, &cursor.park, false) {
+			return false
+		}
+		cursor.phase = publishedEpochResolvePark
+		return true
+	}
+
+	claimState := selectClaimLoad(cursor.claim)
+	if cursor.forced != nil {
+		switch claimState {
+		case selectClaimAcquiring, selectClaimCommitting:
+			return restorePublishedEpochDiscovery(p, cursor, step, true)
+		case selectClaimClaimed:
+			if !beginForcedParkSnapshotResolution(state, wait.ticket, &cursor.park, cursor.forced) {
+				return false
+			}
+			cursor.phase = publishedEpochResolvePark
+			return true
+		default:
+			return false
+		}
+	}
+
+	switch selectClaimOwnerAcquire(cursor.claim) {
+	case selectClaimOpen:
+		cursor.claimOwned = true
+		if !beginParkSnapshotResolution(state, wait.ticket, &cursor.park, false) {
+			_ = selectClaimOwnerReleasePending(cursor.claim)
+			cursor.claimOwned = false
+			return false
+		}
+		cursor.phase = publishedEpochResolvePark
+		return true
+	case selectClaimAcquiring, selectClaimCommitting:
+		return restorePublishedEpochDiscovery(p, cursor, step, true)
+	case selectClaimClaimed:
+		return restorePublishedEpochDiscovery(p, cursor, step, false)
+	default:
+		return false
+	}
 }
 
 // abortPublishedEpochReadyCommit restores the unprocessed suffix of the
@@ -277,6 +406,9 @@ func abortPublishedEpochReadyCommit(p *P, cursor *publishedEpochResolveCursor) b
 	if !abortParkSnapshotCommit(&wait.g.park, wait.ticket, &cursor.park) {
 		return false
 	}
+	if cursor.claimOwned && !selectClaimOwnerReleasePending(cursor.claim) {
+		return false
+	}
 	wait.work = waitSetWorkQueued
 	if p.affectedWaitHead == nil {
 		p.affectedWaitHead, p.affectedWaitTail = wait, tail
@@ -286,6 +418,15 @@ func abortPublishedEpochReadyCommit(p *P, cursor *publishedEpochResolveCursor) b
 	}
 	*cursor = publishedEpochResolveCursor{}
 	return validAffectedWaitQueueHeader(p) && validActiveWaitSetRecordFast(p, wait)
+}
+
+func retryPublishedEpochReadyCommit(p *P, cursor *publishedEpochResolveCursor, step *publishedEpochResolveStep) bool {
+	if !abortPublishedEpochReadyCommit(p, cursor) {
+		return false
+	}
+	step.retryBudget = true
+	step.complete = true
+	return true
 }
 
 func resolvePublishedEpochParkStep(sources *ExecutorSourceSet, p *P, cursor *publishedEpochResolveCursor, step *publishedEpochResolveStep) bool {
@@ -301,7 +442,7 @@ func resolvePublishedEpochParkStep(sources *ExecutorSourceSet, p *P, cursor *pub
 			abortPublishedEpochReadyCommit(p, cursor)
 			return false
 		}
-		attempt, ok = sources.tryCommitReadyCandidate(request)
+		attempt, ok = sources.tryCommitReadyCandidate(request, selectClaimOwner{claim: cursor.claim, held: cursor.claimOwned})
 		if !ok {
 			abortPublishedEpochReadyCommit(p, cursor)
 			return false
@@ -309,14 +450,25 @@ func resolvePublishedEpochParkStep(sources *ExecutorSourceSet, p *P, cursor *pub
 	}
 	resolution, request, status := resolveParkSnapshotBoundedStep(state, wait.ticket, &cursor.park, attempt)
 	switch status {
+	case parkResolveRetryBudget:
+		return request.Valid() && currentParkCommitRequest(request) &&
+			retryPublishedEpochReadyCommit(p, cursor, step)
 	case parkResolveProgress:
 		return true
 	case ParkResolveNeedsCommit:
 		return request.Valid() && currentParkCommitRequest(request)
 	case ParkResolvePending:
+		if cursor.claimOwned && !selectClaimOwnerReleasePending(cursor.claim) {
+			return false
+		}
+		cursor.claim, cursor.forced, cursor.claimOwned, cursor.hasChannel = nil, nil, false, false
 		step.resolution = resolution
-		return finishPendingPublishedEpochWait(p, cursor, step)
+		return finishPendingPublishedEpochWait(sources, p, cursor, step)
 	case ParkResolveResolved:
+		if cursor.claimOwned && !selectClaimOwnerReleaseTerminal(cursor.claim) {
+			return false
+		}
+		cursor.claim, cursor.forced, cursor.claimOwned, cursor.hasChannel = nil, nil, false, false
 		step.resolution = resolution
 		cursor.phase = publishedEpochResolveApply
 		cursor.link = state.head
@@ -386,7 +538,7 @@ func resolvePublishedEpochFinishStep(cursor *publishedEpochResolveCursor, step *
 	return true
 }
 
-func resolvePublishedEpochPromoteStep(p *P, cursor *publishedEpochResolveCursor, step *publishedEpochResolveStep) bool {
+func resolvePublishedEpochPromoteStep(sources *ExecutorSourceSet, p *P, cursor *publishedEpochResolveCursor, step *publishedEpochResolveStep) bool {
 	wait := cursor.wait
 	if wait == nil || wait.workNext != cursor.nextWait {
 		return false
@@ -425,7 +577,7 @@ func resolvePublishedEpochPromoteStep(p *P, cursor *publishedEpochResolveCursor,
 			return false
 		}
 	}
-	return advancePublishedEpochWaitAfterCleared(cursor, p, step)
+	return advancePublishedEpochWaitAfterCleared(sources, cursor, p, step)
 }
 
 func resolvePublishedEpochLegacyStep(p *P, cursor *publishedEpochResolveCursor, step *publishedEpochResolveStep) bool {
@@ -500,6 +652,8 @@ func resolvePublishedEpochStep(sources *ExecutorSourceSet, p *P, cursor *publish
 	}
 
 	switch cursor.phase {
+	case publishedEpochResolveDiscover:
+		ok = resolvePublishedEpochDiscoverStep(sources, p, cursor, &step)
 	case publishedEpochResolvePark:
 		ok = resolvePublishedEpochParkStep(sources, p, cursor, &step)
 	case publishedEpochResolveApply:
@@ -507,7 +661,7 @@ func resolvePublishedEpochStep(sources *ExecutorSourceSet, p *P, cursor *publish
 	case publishedEpochResolveFinish:
 		ok = resolvePublishedEpochFinishStep(cursor, &step)
 	case publishedEpochResolvePromote:
-		ok = resolvePublishedEpochPromoteStep(p, cursor, &step)
+		ok = resolvePublishedEpochPromoteStep(sources, p, cursor, &step)
 	case publishedEpochResolveLegacy:
 		ok = resolvePublishedEpochLegacyStep(p, cursor, &step)
 	default:
