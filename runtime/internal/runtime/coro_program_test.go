@@ -283,6 +283,15 @@ func (driver *coroProgramTestDriverV1) resume(handle unsafe.Pointer) {
 		driver.t.Fatalf("coroutine resume calls = %d, max %d", driver.resumeCalls, maxResumeCalls)
 	}
 	frame := driver.frame
+	// The named-source test driver stands in for compiler-generated coroutine
+	// code. Model its mandatory resume prologue before invoking any runtime
+	// transition hook; every resume shape in this fixture is a normal
+	// zero-ticket continuation.
+	outcome, caseID, taskKind, sourceSlot, generation, decisionOK := coro.TakeRunDecisionWords(frame.g, 0, 0)
+	if !decisionOK || outcome != 0 || caseID != 0 || taskKind != 0 || sourceSlot != 0 || generation != 0 {
+		driver.t.Fatalf("take simulated coroutine run decision = (%d, %d, %d, %d, %d, %t)",
+			outcome, caseID, taskKind, sourceSlot, generation, decisionOK)
+	}
 	frame.header.SuspendReason = uint16(coro.SuspendNone)
 	frame.header.Lifecycle = uint16(coro.FrameActive)
 	if parkCount != 0 && driver.resumeCalls > 1 {
