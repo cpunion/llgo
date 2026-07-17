@@ -97,15 +97,17 @@ type ManualOperationSource struct {
 	slots   [ManualOperationSourceCapacity]manualOperationSlot
 
 	owner        *P
+	route        RouteID
 	affectedHead uint32
 	affectedTail uint32
 }
 
 func manualOperationSlotFor(source *ManualOperationSource, id OperationID) (*manualOperationSlot, bool) {
-	if source == nil || !id.Valid() || id.Source() != OperationSourceManual || id.Slot() == 0 || id.Slot() > ManualOperationSourceCapacity {
+	if source == nil || !source.route.Valid() || !id.Valid() || id.Source() != OperationSourceManual ||
+		id.Route() != source.route || id.LocalSlot() == 0 || id.LocalSlot() > ManualOperationSourceCapacity {
 		return nil, false
 	}
-	return &source.slots[id.Slot()-1], true
+	return &source.slots[id.LocalSlot()-1], true
 }
 
 func manualOperationAcquireProducer(slot *manualOperationSlot) bool {
@@ -154,7 +156,7 @@ func manualOperationProducersQuiesced(slot *manualOperationSlot) bool {
 	return slot != nil && preemptLoad(&slot.inflight) == manualOperationProducerClosed
 }
 
-func manualOperationReusableSlot(slot *manualOperationSlot, index uint32) bool {
+func manualOperationReusableSlot(source *ManualOperationSource, slot *manualOperationSlot, index uint32) bool {
 	if slot == nil || preemptLoad(&slot.state) != uint32(manualOperationFree) ||
 		preemptLoad(&slot.mailbox) != uint32(manualOperationMailboxEmpty) || slot.nextAffected != 0 {
 		return false
@@ -163,13 +165,16 @@ func manualOperationReusableSlot(slot *manualOperationSlot, index uint32) bool {
 	if generation == 0 {
 		return preemptLoad(&slot.inflight) == 0 && slot.record == (OperationRecord{})
 	}
-	id, ok := MakeOperationID(OperationSourceManual, index+1, generation)
+	if source == nil || !source.route.Valid() {
+		return false
+	}
+	id, ok := MakeOperationIDAtRoute(OperationSourceManual, source.route, index+1, generation)
 	return ok && preemptLoad(&slot.inflight) == manualOperationProducerClosed &&
 		slot.record == (OperationRecord{id: id, phase: operationReusable})
 }
 
 func validManualOperationOwner(source *ManualOperationSource, p *P) bool {
-	return source != nil && p != nil && source.owner == p
+	return source != nil && p != nil && source.owner == p && source.route.Valid()
 }
 
 func validManualOperationLiveSlot(source *ManualOperationSource, p *P, index uint32) bool {
@@ -182,7 +187,7 @@ func validManualOperationLiveSlot(source *ManualOperationSource, p *P, index uin
 		return false
 	}
 	generation := preemptLoad(&slot.generation)
-	id, ok := MakeOperationID(OperationSourceManual, index+1, generation)
+	id, ok := MakeOperationIDAtRoute(OperationSourceManual, source.route, index+1, generation)
 	return ok && slot.record.Matches(id)
 }
 
@@ -197,7 +202,7 @@ func (source *ManualOperationSource) reserveAndAttach(p *P, state *ParkState, ti
 	for index := range source.slots {
 		slot := &source.slots[index]
 		generation := preemptLoad(&slot.generation)
-		if generation == ^uint32(0) || !manualOperationReusableSlot(slot, uint32(index)) ||
+		if generation == ^uint32(0) || !manualOperationReusableSlot(source, slot, uint32(index)) ||
 			!preemptCompareAndSwap(&slot.state, uint32(manualOperationFree), uint32(manualOperationInitializing)) {
 			continue
 		}
@@ -208,11 +213,12 @@ func (source *ManualOperationSource) reserveAndAttach(p *P, state *ParkState, ti
 		var id OperationID
 		var ok bool
 		if generation == 0 {
-			id, ok = MakeOperationID(OperationSourceManual, uint32(index)+1, 1)
+			id, ok = MakeOperationIDAtRoute(OperationSourceManual, source.route, uint32(index)+1, 1)
 			ok = ok && InitOperation(&slot.record, id)
 		} else {
 			id, ok = RearmOperation(&slot.record)
-			ok = ok && id.Generation == generation+1 && id.Source() == OperationSourceManual && id.Slot() == uint32(index)+1
+			ok = ok && id.Generation == generation+1 && id.Source() == OperationSourceManual &&
+				id.Route() == source.route && id.LocalSlot() == uint32(index)+1
 		}
 		if !ok {
 			return OperationID{}, false
@@ -502,7 +508,7 @@ func (source *ManualOperationSource) ApplyAndDetach(p *P) (applied, detached uin
 		slot := &source.slots[index]
 		state := manualOperationLifecycle(preemptLoad(&slot.state))
 		if state == manualOperationFree {
-			if !manualOperationReusableSlot(slot, uint32(index)) {
+			if !manualOperationReusableSlot(source, slot, uint32(index)) {
 				return applied, detached, false
 			}
 			continue
@@ -588,19 +594,28 @@ func manualOperationSourceEmpty(source *ManualOperationSource, owner *P) bool {
 		return false
 	}
 	for index := range source.slots {
-		if !manualOperationReusableSlot(&source.slots[index], uint32(index)) {
+		if !manualOperationReusableSlot(source, &source.slots[index], uint32(index)) {
 			return false
 		}
 	}
 	return true
 }
 
-func BindManualOperationSource(source *ManualOperationSource, p *P) bool {
-	if p == nil || !manualOperationSourceEmpty(source, nil) {
+func BindManualOperationSourceAtRoute(source *ManualOperationSource, p *P, route RouteID) bool {
+	if p == nil || !route.Valid() || !manualOperationSourceEmpty(source, nil) ||
+		source.route != 0 && source.route != route {
 		return false
 	}
+	source.route = route
 	source.owner = p
 	return true
+}
+
+// BindManualOperationSource is the legacy single-P binding. Its IDs are
+// explicitly scoped to route 1 and must not be inserted into another route's
+// ingress table.
+func BindManualOperationSource(source *ManualOperationSource, p *P) bool {
+	return BindManualOperationSourceAtRoute(source, p, RouteID(1))
 }
 
 func UnbindManualOperationSource(source *ManualOperationSource, p *P) bool {
@@ -613,4 +628,11 @@ func UnbindManualOperationSource(source *ManualOperationSource, p *P) bool {
 
 func (source *ManualOperationSource) CanRelease() bool {
 	return manualOperationSourceEmpty(source, nil)
+}
+
+func (source *ManualOperationSource) Route() (RouteID, bool) {
+	if source == nil || !source.route.Valid() {
+		return 0, false
+	}
+	return source.route, true
 }

@@ -71,14 +71,15 @@ type TaskControlSource struct {
 	pending uint32
 	slots   [TaskControlSourceCapacity]taskControlSlot
 	owner   *P
+	route   RouteID
 }
 
 func taskControlSlotFor(source *TaskControlSource, id OperationID) (*taskControlSlot, bool) {
-	if source == nil || !id.Valid() || id.Source() != OperationSourceControl ||
-		id.Slot() == 0 || id.Slot() > TaskControlSourceCapacity {
+	if source == nil || !source.route.Valid() || !id.Valid() || id.Source() != OperationSourceControl ||
+		id.Route() != source.route || id.LocalSlot() == 0 || id.LocalSlot() > TaskControlSourceCapacity {
 		return nil, false
 	}
-	return &source.slots[id.Slot()-1], true
+	return &source.slots[id.LocalSlot()-1], true
 }
 
 func taskControlAcquireProducer(slot *taskControlSlot) bool {
@@ -140,7 +141,7 @@ func taskControlReusableSlot(slot *taskControlSlot) bool {
 }
 
 func validTaskControlOwner(source *TaskControlSource, p *P) bool {
-	return source != nil && p != nil && source.owner == p
+	return source != nil && p != nil && source.owner == p && source.route.Valid()
 }
 
 // RegisterTaskControl allocates an external handle for an already owner-P
@@ -159,13 +160,13 @@ func RegisterTaskControl(source *TaskControlSource, p *P, task *G) (OperationID,
 		if !taskControlSealProducers(slot) || !taskControlProducersQuiesced(slot) {
 			return OperationID{}, false
 		}
-		id, ok := NextOperationID(OperationID{}, OperationSourceControl, uint32(index)+1)
+		id, ok := NextOperationIDAtRoute(OperationID{}, OperationSourceControl, source.route, uint32(index)+1)
 		if generation != 0 {
-			previous, made := MakeOperationID(OperationSourceControl, uint32(index)+1, generation)
+			previous, made := MakeOperationIDAtRoute(OperationSourceControl, source.route, uint32(index)+1, generation)
 			if !made {
 				return OperationID{}, false
 			}
-			id, ok = NextOperationID(previous, OperationSourceControl, uint32(index)+1)
+			id, ok = NextOperationIDAtRoute(previous, OperationSourceControl, source.route, uint32(index)+1)
 		}
 		if !ok {
 			return OperationID{}, false
@@ -287,7 +288,7 @@ func (source *TaskControlSource) publishPass(p *P, terminal *G) (delivered, disc
 		switch state {
 		case taskControlActive, taskControlClosing:
 			generation := preemptLoad(&slot.generation)
-			_, valid := MakeOperationID(OperationSourceControl, uint32(index)+1, generation)
+			_, valid := MakeOperationIDAtRoute(OperationSourceControl, source.route, uint32(index)+1, generation)
 			if !valid || slot.task == nil {
 				return delivered, discarded, false
 			}
@@ -373,7 +374,7 @@ func validTaskControlTerminalSlot(source *TaskControlSource, index int, state ta
 		return taskControlReusableSlot(slot)
 	case taskControlActive, taskControlClosing:
 		generation := preemptLoad(&slot.generation)
-		if _, ok := MakeOperationID(OperationSourceControl, uint32(index)+1, generation); !ok ||
+		if _, ok := MakeOperationIDAtRoute(OperationSourceControl, source.route, uint32(index)+1, generation); !ok ||
 			slot.task == nil || slot.task.taskControlLeases == 0 {
 			return false
 		}
@@ -384,7 +385,7 @@ func validTaskControlTerminalSlot(source *TaskControlSource, index int, state ta
 		return inflight&taskControlProducerClosed != 0
 	case taskControlQuiesced:
 		generation := preemptLoad(&slot.generation)
-		_, ok := MakeOperationID(OperationSourceControl, uint32(index)+1, generation)
+		_, ok := MakeOperationIDAtRoute(OperationSourceControl, source.route, uint32(index)+1, generation)
 		return ok && request == TaskCancelNone && taskControlProducersQuiesced(slot) && slot.task == nil
 	default:
 		return false
@@ -541,12 +542,19 @@ func taskControlSourceEmpty(source *TaskControlSource, p *P) bool {
 	return true
 }
 
-func BindTaskControlSource(source *TaskControlSource, p *P) bool {
-	if p == nil || !taskControlSourceEmpty(source, nil) {
+func BindTaskControlSourceAtRoute(source *TaskControlSource, p *P, route RouteID) bool {
+	if p == nil || !route.Valid() || !taskControlSourceEmpty(source, nil) ||
+		source.route != 0 && source.route != route {
 		return false
 	}
+	source.route = route
 	source.owner = p
 	return true
+}
+
+// BindTaskControlSource is the explicit route-1 compatibility binding.
+func BindTaskControlSource(source *TaskControlSource, p *P) bool {
+	return BindTaskControlSourceAtRoute(source, p, RouteID(1))
 }
 
 func UnbindTaskControlSource(source *TaskControlSource, p *P) bool {
@@ -559,6 +567,13 @@ func UnbindTaskControlSource(source *TaskControlSource, p *P) bool {
 
 func (source *TaskControlSource) CanRelease() bool {
 	return taskControlSourceEmpty(source, nil)
+}
+
+func (source *TaskControlSource) Route() (RouteID, bool) {
+	if source == nil || !source.route.Valid() {
+		return 0, false
+	}
+	return source.route, true
 }
 
 type TaskControlExecutorPostResult struct {

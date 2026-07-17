@@ -40,6 +40,7 @@ type ExecutorDriver struct {
 	p             *P
 	registry      *ExecutorRegistry
 	handle        ExecutorHandle
+	route         RouteID
 	sources       ExecutorSourceSet
 	prepareNow    int64
 	hasPrepareNow bool
@@ -76,6 +77,7 @@ func validExecutorDriver(driver *ExecutorDriver) bool {
 	}
 	return (driver.state == executorDriverTerminalClosing) == validTerminalState &&
 		driver.p != nil && driver.registry != nil && driver.handle.Slot != 0 && driver.handle.Generation != 0 &&
+		driver.route.Valid() && driver.sources.route == driver.route &&
 		driver.p.executor == driver && preemptLoad(&driver.p.executorMode) == executorModeBound &&
 		validExecutorSourceSet(&driver.sources, driver.p)
 }
@@ -200,15 +202,15 @@ func idleExecutorScheduler(p *P) bool {
 // quiesced every legacy source that knew this P, including a call paused before
 // its executorMode load; executorMode is a capability guard, not a refcounted
 // admission barrier for migration from the legacy ABI.
-func bindExecutor(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, catalog ExecutorSourceCatalog) bool {
+func bindExecutorAtRoute(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, route RouteID, catalog ExecutorSourceCatalog) bool {
 	if driver == nil || driver.magic != 0 || driver.state != executorDriverUnbound || driver.p != nil ||
-		driver.registry != nil || driver.handle != (ExecutorHandle{}) || driver.sources != (ExecutorSourceSet{}) ||
+		driver.registry != nil || driver.handle != (ExecutorHandle{}) || driver.route != 0 || driver.sources != (ExecutorSourceSet{}) ||
 		driver.prepareNow != 0 || driver.hasPrepareNow ||
 		driver.terminalKind != ActionInvalid ||
 		p == nil || p.executor != nil || preemptLoad(&p.executorMode) != executorModeUnbound ||
 		preemptLoad(&p.schedule) != scheduleIdle || !idleExecutorScheduler(p) ||
 		p.readyHead != nil || p.readyTail != nil || !emptySchedulerWaitQueues(p) ||
-		!activeExecutorHandle(registry, handle) || !bindExecutorSourceSet(&driver.sources, p, catalog) {
+		!route.Valid() || !activeExecutorHandle(registry, handle) || !bindExecutorSourceSetAtRoute(&driver.sources, p, route, catalog) {
 		return false
 	}
 	driver.magic = executorDriverMagic
@@ -216,13 +218,22 @@ func bindExecutor(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, hand
 	driver.p = p
 	driver.registry = registry
 	driver.handle = handle
+	driver.route = route
 	p.executor = driver
 	preemptStore(&p.executorMode, executorModeBound)
 	return true
 }
 
+func bindExecutor(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, catalog ExecutorSourceCatalog) bool {
+	return bindExecutorAtRoute(driver, p, registry, handle, RouteID(1), catalog)
+}
+
 func BindExecutor(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, waits *WaitRegistrationTable) bool {
 	return bindExecutor(driver, p, registry, handle, ExecutorSourceCatalog{Waits: waits})
+}
+
+func BindExecutorAtRoute(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, route RouteID, waits *WaitRegistrationTable) bool {
+	return bindExecutorAtRoute(driver, p, registry, handle, route, ExecutorSourceCatalog{Waits: waits})
 }
 
 // BindExecutorWithTimers preserves the timer-aware V1 binding ABI while
@@ -233,11 +244,26 @@ func BindExecutorWithTimers(driver *ExecutorDriver, p *P, registry *ExecutorRegi
 	return timers != nil && bindExecutor(driver, p, registry, handle, ExecutorSourceCatalog{Waits: waits, Timers: timers})
 }
 
+func BindExecutorWithTimersAtRoute(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, route RouteID, waits *WaitRegistrationTable, timers *TimerRegistrationTable) bool {
+	return timers != nil && bindExecutorAtRoute(driver, p, registry, handle, route, ExecutorSourceCatalog{Waits: waits, Timers: timers})
+}
+
 // BindExecutorSourceCatalog binds a frozen direct-call source catalog. It is
 // the extensible entry point; the V1 helpers above retain their exact source
 // subsets without creating timer/manual/host API combinations.
 func BindExecutorSourceCatalog(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, catalog ExecutorSourceCatalog) bool {
 	return bindExecutor(driver, p, registry, handle, catalog)
+}
+
+func BindExecutorSourceCatalogAtRoute(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, route RouteID, catalog ExecutorSourceCatalog) bool {
+	return bindExecutorAtRoute(driver, p, registry, handle, route, catalog)
+}
+
+func (driver *ExecutorDriver) Route() (RouteID, bool) {
+	if !validExecutorDriver(driver) {
+		return 0, false
+	}
+	return driver.route, true
 }
 
 func publishExecutorSourcesInState(driver *ExecutorDriver, now int64, withDeadline bool, state executorDriverState) (scan executorSourceScan, ok bool) {

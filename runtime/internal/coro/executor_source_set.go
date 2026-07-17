@@ -40,6 +40,7 @@ package coro
 type ExecutorSourceSet struct {
 	magic   uint32
 	owner   *P
+	route   RouteID
 	waits   *WaitRegistrationTable
 	timers  *TimerRegistrationTable
 	manual  *ManualOperationSource
@@ -89,12 +90,12 @@ func (scan *executorSourceScan) add(other executorSourceScan) {
 
 func validExecutorSourceSet(sources *ExecutorSourceSet, p *P) bool {
 	if sources == nil || sources.magic != executorSourceSetMagic || p == nil || sources.owner != p ||
-		sources.waits == nil || sources.waits.owner != p {
+		!sources.route.Valid() || sources.waits == nil || sources.waits.owner != p {
 		return false
 	}
 	return (sources.timers == nil || sources.timers.owner == p) &&
-		(sources.manual == nil || sources.manual.owner == p) &&
-		(sources.control == nil || sources.control.owner == p)
+		(sources.manual == nil || sources.manual.owner == p && sources.manual.route == sources.route) &&
+		(sources.control == nil || sources.control.owner == p && sources.control.route == sources.route)
 }
 
 // ExecutorSourceCatalog is the frozen direct-call source catalog for one
@@ -111,8 +112,8 @@ type ExecutorSourceCatalog struct {
 // bindExecutorSourceSet binds every statically configured source as one
 // transaction. A later-source failure rolls back earlier empty bindings and
 // leaves the source set exact-zero.
-func bindExecutorSourceSet(sources *ExecutorSourceSet, p *P, catalog ExecutorSourceCatalog) bool {
-	if sources == nil || *sources != (ExecutorSourceSet{}) || p == nil || catalog.Waits == nil ||
+func bindExecutorSourceSetAtRoute(sources *ExecutorSourceSet, p *P, route RouteID, catalog ExecutorSourceCatalog) bool {
+	if sources == nil || *sources != (ExecutorSourceSet{}) || p == nil || !route.Valid() || catalog.Waits == nil ||
 		!bindRegistrationTable(catalog.Waits, p) {
 		return false
 	}
@@ -120,14 +121,14 @@ func bindExecutorSourceSet(sources *ExecutorSourceSet, p *P, catalog ExecutorSou
 		_ = unbindRegistrationTable(catalog.Waits, p)
 		return false
 	}
-	if catalog.Manual != nil && !BindManualOperationSource(catalog.Manual, p) {
+	if catalog.Manual != nil && !BindManualOperationSourceAtRoute(catalog.Manual, p, route) {
 		if catalog.Timers != nil {
 			_ = unbindTimerRegistrationTable(catalog.Timers, p)
 		}
 		_ = unbindRegistrationTable(catalog.Waits, p)
 		return false
 	}
-	if catalog.Control != nil && !BindTaskControlSource(catalog.Control, p) {
+	if catalog.Control != nil && !BindTaskControlSourceAtRoute(catalog.Control, p, route) {
 		if catalog.Manual != nil {
 			_ = UnbindManualOperationSource(catalog.Manual, p)
 		}
@@ -139,11 +140,24 @@ func bindExecutorSourceSet(sources *ExecutorSourceSet, p *P, catalog ExecutorSou
 	}
 	sources.magic = executorSourceSetMagic
 	sources.owner = p
+	sources.route = route
 	sources.waits = catalog.Waits
 	sources.timers = catalog.Timers
 	sources.manual = catalog.Manual
 	sources.control = catalog.Control
 	return true
+}
+
+// bindExecutorSourceSet is the route-1 compatibility transaction.
+func bindExecutorSourceSet(sources *ExecutorSourceSet, p *P, catalog ExecutorSourceCatalog) bool {
+	return bindExecutorSourceSetAtRoute(sources, p, RouteID(1), catalog)
+}
+
+func (sources *ExecutorSourceSet) Route() (RouteID, bool) {
+	if sources == nil || !sources.route.Valid() {
+		return 0, false
+	}
+	return sources.route, true
 }
 
 func (sources *ExecutorSourceSet) usesMonotonicTime() bool {

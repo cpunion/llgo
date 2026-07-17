@@ -16,6 +16,8 @@
 
 package coro
 
+import "unsafe"
+
 // OperationSource identifies one statically registered physical event-source
 // family. Zero is invalid. Source-specific producer ABIs still carry their own
 // two uint32 words; this type is the scheduler-side common encoding.
@@ -39,13 +41,29 @@ const (
 
 const (
 	operationSourceBits = 8
-	operationSlotBits   = 32 - operationSourceBits
-	operationSlotMask   = uint32(1<<operationSlotBits - 1)
+	operationRouteBits  = 9
+	operationLocalBits  = 32 - operationSourceBits - operationRouteBits
+	operationRouteMask  = uint32(1<<operationRouteBits - 1)
+	operationLocalMask  = uint32(1<<operationLocalBits - 1)
+	// operationSlotMask is retained for the route-1 compatibility API. A slot
+	// is now local to one route rather than globally identifying an owner.
+	operationSlotMask = operationLocalMask
 )
 
-// OperationID is the pointer-free physical source identity. SourceSlot packs
-// an 8-bit source family and a 24-bit one-based slot. Generation is owned by
-// the physical source and must not be reused until that source is quiescent.
+// RouteID identifies one executor/source catalog in the pointer-free
+// OperationID namespace. Zero is invalid. The wire codec reserves 511 routes;
+// a target profile may expose a smaller fixed route registry without changing
+// producer handles or reusing an ID it has already issued.
+type RouteID uint16
+
+func (route RouteID) Valid() bool {
+	return route != 0 && uint32(route) <= operationRouteMask
+}
+
+// OperationID is the pointer-free physical source identity. SourceSlot has a
+// frozen 8/9/15 split: source family, executor route, and one-based local slot.
+// Generation is owned by the physical source and must not be reused until that
+// source is quiescent. All four identity components are non-zero.
 //
 // Keeping two explicit uint32 words preserves size 8/alignment 4 on 32-bit,
 // WASM, embedded, and C ABI boundaries instead of depending on uint64 layout.
@@ -54,27 +72,57 @@ type OperationID struct {
 	Generation uint32
 }
 
-// MakeOperationID constructs an exact source/slot generation identity.
-func MakeOperationID(source OperationSource, slot, generation uint32) (OperationID, bool) {
-	if !validOperationSource(source) || slot == 0 || slot > operationSlotMask || generation == 0 {
+// Keep the producer ABI exact on every target at compile time, including
+// 32-bit native, WASM, and bare-metal profiles where tests cannot execute on
+// the host. Both subtraction directions reject either a smaller or larger
+// layout.
+var (
+	_ [8 - unsafe.Sizeof(OperationID{})]byte
+	_ [unsafe.Sizeof(OperationID{}) - 8]byte
+	_ [4 - unsafe.Alignof(OperationID{})]byte
+	_ [unsafe.Alignof(OperationID{}) - 4]byte
+	_ [4 - unsafe.Offsetof(OperationID{}.Generation)]byte
+	_ [unsafe.Offsetof(OperationID{}.Generation) - 4]byte
+)
+
+// MakeOperationIDAtRoute constructs an exact source/route/local/generation
+// identity. It is the production constructor for route-aware sources.
+func MakeOperationIDAtRoute(source OperationSource, route RouteID, local, generation uint32) (OperationID, bool) {
+	if !validOperationSource(source) || !route.Valid() || local == 0 || local > operationLocalMask || generation == 0 {
 		return OperationID{}, false
 	}
 	return OperationID{
-		SourceSlot: uint32(source)<<operationSlotBits | slot,
+		SourceSlot: uint32(source)<<(operationRouteBits+operationLocalBits) |
+			uint32(route)<<operationLocalBits | local,
 		Generation: generation,
 	}, true
 }
 
-func (id OperationID) Source() OperationSource {
-	return OperationSource(id.SourceSlot >> operationSlotBits)
+// MakeOperationID is the single-route compatibility constructor. New source
+// catalogs must use MakeOperationIDAtRoute and an explicitly allocated route.
+func MakeOperationID(source OperationSource, local, generation uint32) (OperationID, bool) {
+	return MakeOperationIDAtRoute(source, RouteID(1), local, generation)
 }
 
+func (id OperationID) Source() OperationSource {
+	return OperationSource(id.SourceSlot >> (operationRouteBits + operationLocalBits))
+}
+
+func (id OperationID) Route() RouteID {
+	return RouteID(id.SourceSlot >> operationLocalBits & operationRouteMask)
+}
+
+func (id OperationID) LocalSlot() uint32 {
+	return id.SourceSlot & operationLocalMask
+}
+
+// Slot is the route-1 compatibility spelling for LocalSlot.
 func (id OperationID) Slot() uint32 {
-	return id.SourceSlot & operationSlotMask
+	return id.LocalSlot()
 }
 
 func (id OperationID) Valid() bool {
-	return validOperationSource(id.Source()) && id.Slot() != 0 && id.Generation != 0
+	return validOperationSource(id.Source()) && id.Route().Valid() && id.LocalSlot() != 0 && id.Generation != 0
 }
 
 func validOperationSource(source OperationSource) bool {
@@ -87,17 +135,23 @@ func validOperationSource(source OperationSource) bool {
 	}
 }
 
-// NextOperationID advances one exact physical slot generation. Exhaustion
+// NextOperationIDAtRoute advances one exact physical slot generation.
+// Exhaustion
 // fails closed: a physical slot may be widened or retired, but never wraps
 // while an old callback could still carry the same two POD words.
-func NextOperationID(previous OperationID, source OperationSource, slot uint32) (OperationID, bool) {
+func NextOperationIDAtRoute(previous OperationID, source OperationSource, route RouteID, local uint32) (OperationID, bool) {
 	if previous == (OperationID{}) {
-		return MakeOperationID(source, slot, 1)
+		return MakeOperationIDAtRoute(source, route, local, 1)
 	}
-	if !previous.Valid() || previous.Source() != source || previous.Slot() != slot || previous.Generation == ^uint32(0) {
+	if !previous.Valid() || previous.Source() != source || previous.Route() != route || previous.LocalSlot() != local || previous.Generation == ^uint32(0) {
 		return OperationID{}, false
 	}
-	return MakeOperationID(source, slot, previous.Generation+1)
+	return MakeOperationIDAtRoute(source, route, local, previous.Generation+1)
+}
+
+// NextOperationID is the explicit route-1 compatibility helper.
+func NextOperationID(previous OperationID, source OperationSource, local uint32) (OperationID, bool) {
+	return NextOperationIDAtRoute(previous, source, RouteID(1), local)
 }
 
 type operationPhase uint8
@@ -233,7 +287,7 @@ func RearmOperation(record *OperationRecord) (OperationID, bool) {
 		record.link.park != nil || record.link.wait != nil || record.link.operation != nil || record.link.previous != nil || record.link.next != nil {
 		return OperationID{}, false
 	}
-	next, ok := NextOperationID(record.id, record.id.Source(), record.id.Slot())
+	next, ok := NextOperationIDAtRoute(record.id, record.id.Source(), record.id.Route(), record.id.LocalSlot())
 	if !ok {
 		return OperationID{}, false
 	}
