@@ -36,21 +36,26 @@ const (
 
 // G owns the stackless frame chain for one logical Go task.
 type G struct {
-	magic         uint32
-	preempt       uint32
-	state         GState
-	root          *Frame
-	active        *Frame
-	frames        *Frame
-	pending       pendingTransition
-	destroyTarget *Frame
-	destroyRoot   bool
-	nextReady     *G
-	queued        bool
-	waitToken     *WaitToken
-	waitTicket    WaitTicket
-	nextWait      *G
-	waiting       bool
+	magic   uint32
+	preempt uint32
+	state   GState
+	// taskControlLeases occupies existing pointer-alignment padding. It is
+	// owner-P-only and counts only explicitly exported task endpoints, so an
+	// ordinary G pays no size or registry cost. Terminal storage cannot be
+	// reclaimed until the last endpoint has completed its strong close.
+	taskControlLeases uint8
+	root              *Frame
+	active            *Frame
+	frames            *Frame
+	pending           pendingTransition
+	destroyTarget     *Frame
+	destroyRoot       bool
+	nextReady         *G
+	queued            bool
+	waitToken         *WaitToken
+	waitTicket        WaitTicket
+	nextWait          *G
+	waiting           bool
 	// park is the common multi-source logical wait cell. The legacy one-token
 	// fields above remain during migration; new sources must target park. It
 	// also owns the one-byte task stop token so park commit cannot forget it.
@@ -221,7 +226,8 @@ func expectedAction(p *P, g *G, action Action, kind ActionKind) bool {
 
 // InitG initializes a zero G.
 func InitG(g *G) bool {
-	if g == nil || g.magic != 0 || preemptLoad(preemptAddress(g)) != preemptDisabled || g.state != GNew || g.frames != nil || g.active != nil || g.root != nil ||
+	if g == nil || g.magic != 0 || preemptLoad(preemptAddress(g)) != preemptDisabled || g.state != GNew || g.taskControlLeases != 0 ||
+		g.frames != nil || g.active != nil || g.root != nil ||
 		g.pending.kind != pendingNone || g.pending.from != nil || g.pending.target != nil || g.pending.wait != nil || g.pending.ticket != 0 ||
 		g.destroyTarget != nil || g.destroyRoot || g.nextReady != nil || g.queued ||
 		g.waitToken != nil || g.waitTicket != 0 || g.nextWait != nil || g.waiting || g.runP != nil ||
@@ -977,6 +983,7 @@ func TerminalG(p *P, g *G) bool {
 		preemptLoad(&p.schedule) == scheduleDisabled && preemptLoad(&p.executorMode) == executorModeUnbound && p.executor == nil &&
 		!p.inResume && p.action.Kind == ActionInvalid && p.action.Handle == nil && p.runDecision == (RunDecision{}) && !p.runDecisionTaken && p.servicePreemptBudget == 0 &&
 		ValidG(g) && preemptLoad(preemptAddress(g)) == preemptDisabled && g.state == GDead && g.root == nil && g.active == nil && g.frames == nil &&
+		g.taskControlLeases == 0 &&
 		g.pending.kind == pendingNone && g.pending.from == nil && g.pending.target == nil && g.pending.wait == nil && g.pending.ticket == 0 &&
 		g.destroyTarget == nil && !g.destroyRoot && g.nextReady == nil && !g.queued &&
 		g.waitToken == nil && g.waitTicket == 0 && g.nextWait == nil && !g.waiting && g.runP == nil &&

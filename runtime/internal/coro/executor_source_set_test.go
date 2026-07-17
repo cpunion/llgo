@@ -157,3 +157,25 @@ func TestExecutorSourceSetBindRollsBackWaitAndTimerBeforeOwnedManualSource(t *te
 		t.Fatal("release conflicting manual source")
 	}
 }
+
+func TestExecutorSourceSetBindRollsBackOperationSourcesBeforeOwnedControlSource(t *testing.T) {
+	p := new(P)
+	other := new(P)
+	waits := new(WaitRegistrationTable)
+	timers := new(TimerRegistrationTable)
+	manual := new(ManualOperationSource)
+	control := new(TaskControlSource)
+	if !BindTaskControlSource(control, other) {
+		t.Fatal("bind conflicting control source")
+	}
+
+	sources := new(ExecutorSourceSet)
+	catalog := ExecutorSourceCatalog{Waits: waits, Timers: timers, Manual: manual, Control: control}
+	if bindExecutorSourceSet(sources, p, catalog) || *sources != (ExecutorSourceSet{}) ||
+		!waits.CanRelease() || !timers.CanRelease() || !manual.CanRelease() || control.owner != other {
+		t.Fatal("failed control-source bind did not roll back earlier source bindings")
+	}
+	if !UnbindTaskControlSource(control, other) || !control.CanRelease() {
+		t.Fatal("release conflicting control source")
+	}
+}

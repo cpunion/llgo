@@ -231,7 +231,7 @@ func RollbackSpawn(parent, child *G) (unsafe.Pointer, uintptr, bool) {
 // transfer its allocation.
 func ReclaimableG(g *G) bool {
 	return ValidG(g) && preemptLoad(preemptAddress(g)) == preemptDisabled && g.state == GDead &&
-		g.root == nil && g.active == nil && g.frames == nil &&
+		g.taskControlLeases == 0 && g.root == nil && g.active == nil && g.frames == nil &&
 		g.pending.kind == pendingNone && g.pending.from == nil && g.pending.target == nil &&
 		g.pending.wait == nil && g.pending.ticket == 0 &&
 		g.destroyTarget == nil && !g.destroyRoot && g.nextReady == nil && !g.queued &&

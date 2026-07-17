@@ -1184,7 +1184,14 @@ func TestExecutorDriverTerminalCloseRequestRace(t *testing.T) {
 
 func TestExecutorDriverPanicTerminalCloseDoesNotRedestroy(t *testing.T) {
 	p := new(P)
-	driver, registry, waits, _ := bindTestExecutorDriver(t, p)
+	driver := new(ExecutorDriver)
+	registry := new(ExecutorRegistry)
+	waits := new(WaitRegistrationTable)
+	control := new(TaskControlSource)
+	executor := registerTestExecutor(t, registry)
+	if !BindExecutorSourceCatalog(driver, p, registry, executor, ExecutorSourceCatalog{Waits: waits, Control: control}) {
+		t.Fatal("bind panic terminal control-source executor")
+	}
 	g := new(G)
 	if !InitG(g) {
 		t.Fatal("initialize panic terminal G")
@@ -1205,6 +1212,10 @@ func TestExecutorDriverPanicTerminalCloseDoesNotRedestroy(t *testing.T) {
 	action, ok = Checked(p, g, action, false)
 	if !ok || action.Kind != ActionResume || action.Handle != rootHandle {
 		t.Fatal("resume panic terminal root")
+	}
+	controlID, controlOK := RegisterTaskControl(control, p, g)
+	if !controlOK || g.taskControlLeases != 1 {
+		t.Fatalf("register panic terminal control = (%+v, %t), leases=%d", controlID, controlOK, g.taskControlLeases)
 	}
 	root.header.SuspendReason = uint16(SuspendCall)
 	root.header.Lifecycle = uint16(FrameSuspended)
@@ -1239,10 +1250,18 @@ func TestExecutorDriverPanicTerminalCloseDoesNotRedestroy(t *testing.T) {
 		t.Fatalf("panic ancestor action = (%+v, %t)", action, ok)
 	}
 	releaseTestFrame(t, g, root)
+	posted := PostTaskControlAndRequest(control, controlID, TaskCancelShutdown, registry, executor)
+	if posted.Control != TaskControlPosted || posted.Executor != ExecutorRequestPublished {
+		t.Fatalf("post panic terminal-late control = (%d, %d)", posted.Control, posted.Executor)
+	}
 	closeAction, ok := PanicDestroyed(p, g, action)
 	if !ok || closeAction.Kind != ActionTerminalExecutorClose || closeAction.Handle != nil ||
-		driver.terminalKind != action.Kind || g.root != nil {
+		driver.terminalKind != action.Kind || g.root != nil || g.taskControlLeases != 1 ||
+		g.park.taskCancelKind != TaskCancelNone || g.park.taskCancelPhase != taskCancelIdle {
 		t.Fatalf("panic terminal close action = (%+v, %t)", closeAction, ok)
+	}
+	if result := control.Post(controlID, TaskCancelAbort); result != TaskControlPostClosed {
+		t.Fatalf("panic control post after terminal seal = %d", result)
 	}
 	completed, terminal, ok := ConfirmTerminalExecutorClose(driver)
 	if !ok || completed != g || terminal.Kind != ActionPanicComplete || terminal.Handle != nil {
@@ -1252,7 +1271,8 @@ func TestExecutorDriverPanicTerminalCloseDoesNotRedestroy(t *testing.T) {
 	if !published || record.TypeWord != unsafe.Pointer(typeWord) || record.DataWord != unsafe.Pointer(dataWord) ||
 		g.state != GDead || g.panicUnwind || preemptLoad(&p.schedule) != scheduleDisabled ||
 		preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil ||
-		!waits.CanRelease() || !registry.CanRelease() || *driver != (ExecutorDriver{}) {
+		g.taskControlLeases != 0 || g.park.taskCancelKind != TaskCancelNone || g.park.taskCancelPhase != taskCancelIdle ||
+		!control.CanRelease() || !waits.CanRelease() || !registry.CanRelease() || *driver != (ExecutorDriver{}) {
 		t.Fatalf("panic terminal close state = record:(%+v,%t) g:%d unwind:%t schedule:%d mode:%d",
 			record, published, g.state, g.panicUnwind, preemptLoad(&p.schedule), preemptLoad(&p.executorMode))
 	}

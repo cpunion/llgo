@@ -367,10 +367,15 @@ func (registry *ExecutorRegistry) BeginClose(handle ExecutorHandle) bool {
 // one paused before taking a slot lease or between Request and its doorbell,
 // has returned. The scheduler must already have performed the final
 // post-backend-join durable-source drain required by BeginClose.
-func (registry *ExecutorRegistry) ConfirmQuiesced(handle ExecutorHandle) bool {
+func (registry *ExecutorRegistry) canConfirmQuiesced(handle ExecutorHandle) bool {
 	slot, ok := executorSlot(registry, handle)
 	return ok && preemptLoad(&slot.generation) == handle.Generation && executorProducersQuiesced(slot) &&
-		preemptLoad(&slot.gate) == executorGateClosed &&
+		preemptLoad(&slot.gate) == executorGateClosed && preemptLoad(&slot.state) == uint32(executorClosing)
+}
+
+func (registry *ExecutorRegistry) ConfirmQuiesced(handle ExecutorHandle) bool {
+	slot, ok := executorSlot(registry, handle)
+	return ok && registry.canConfirmQuiesced(handle) &&
 		preemptCompareAndSwap(&slot.state, uint32(executorClosing), uint32(executorQuiesced))
 }
 

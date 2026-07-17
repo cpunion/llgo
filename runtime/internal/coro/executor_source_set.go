@@ -38,11 +38,12 @@ package coro
 // from bind through unbind. Its fields are scheduler-owner-only; producers
 // retain only their source's scalar handle and the ExecutorHandle doorbell.
 type ExecutorSourceSet struct {
-	magic  uint32
-	owner  *P
-	waits  *WaitRegistrationTable
-	timers *TimerRegistrationTable
-	manual *ManualOperationSource
+	magic   uint32
+	owner   *P
+	waits   *WaitRegistrationTable
+	timers  *TimerRegistrationTable
+	manual  *ManualOperationSource
+	control *TaskControlSource
 }
 
 const executorSourceSetMagic uint32 = 0x53524331 // "SRC1"
@@ -53,6 +54,8 @@ type executorSourceScan struct {
 	timers      int
 	manual      int
 	manualLost  int
+	control     int
+	controlLate int
 	promoted    int
 	deadline    int64
 	hasDeadline bool
@@ -64,6 +67,8 @@ func (scan *executorSourceScan) add(other executorSourceScan) {
 	scan.timers += other.timers
 	scan.manual += other.manual
 	scan.manualLost += other.manualLost
+	scan.control += other.control
+	scan.controlLate += other.controlLate
 	scan.promoted += other.promoted
 	// Every successful source-set scan reports the complete current deadline
 	// view, so the last scan is authoritative rather than a minimum of stale
@@ -78,7 +83,8 @@ func validExecutorSourceSet(sources *ExecutorSourceSet, p *P) bool {
 		return false
 	}
 	return (sources.timers == nil || sources.timers.owner == p) &&
-		(sources.manual == nil || sources.manual.owner == p)
+		(sources.manual == nil || sources.manual.owner == p) &&
+		(sources.control == nil || sources.control.owner == p)
 }
 
 // ExecutorSourceCatalog is the frozen direct-call source catalog for one
@@ -86,9 +92,10 @@ func validExecutorSourceSet(sources *ExecutorSourceSet, p *P) bool {
 // source is optional and extends the common transaction without adding another
 // scheduler driver or interface dispatch layer.
 type ExecutorSourceCatalog struct {
-	Waits  *WaitRegistrationTable
-	Timers *TimerRegistrationTable
-	Manual *ManualOperationSource
+	Waits   *WaitRegistrationTable
+	Timers  *TimerRegistrationTable
+	Manual  *ManualOperationSource
+	Control *TaskControlSource
 }
 
 // bindExecutorSourceSet binds every statically configured source as one
@@ -110,11 +117,22 @@ func bindExecutorSourceSet(sources *ExecutorSourceSet, p *P, catalog ExecutorSou
 		_ = unbindRegistrationTable(catalog.Waits, p)
 		return false
 	}
+	if catalog.Control != nil && !BindTaskControlSource(catalog.Control, p) {
+		if catalog.Manual != nil {
+			_ = UnbindManualOperationSource(catalog.Manual, p)
+		}
+		if catalog.Timers != nil {
+			_ = unbindTimerRegistrationTable(catalog.Timers, p)
+		}
+		_ = unbindRegistrationTable(catalog.Waits, p)
+		return false
+	}
 	sources.magic = executorSourceSetMagic
 	sources.owner = p
 	sources.waits = catalog.Waits
 	sources.timers = catalog.Timers
 	sources.manual = catalog.Manual
+	sources.control = catalog.Control
 	return true
 }
 
@@ -172,6 +190,15 @@ func (sources *ExecutorSourceSet) publishPass(p *P, now int64, withDeadline bool
 			return scan, false
 		}
 	}
+	if sources.control != nil {
+		delivered, late, controlOK := sources.control.PublishPass(p)
+		scan.control = int(delivered)
+		scan.controlLate = int(late)
+		scan.completed += scan.control + scan.controlLate
+		if !controlOK {
+			return scan, false
+		}
+	}
 	return scan, true
 }
 
@@ -217,7 +244,8 @@ func (sources *ExecutorSourceSet) resolveAfterQuietCut(p *P) (promoted int, ok b
 // deadline; future deadlines are not pending runnable work.
 func (sources *ExecutorSourceSet) pending(p *P) bool {
 	return validExecutorSourceSet(sources, p) &&
-		(sources.waits.Pending() || sources.manual != nil && sources.manual.Pending())
+		(sources.waits.Pending() || sources.manual != nil && sources.manual.Pending() ||
+			sources.control != nil && sources.control.Pending())
 }
 
 func (sources *ExecutorSourceSet) nextDeadline(p *P) (deadline int64, hasDeadline, ok bool) {
@@ -230,7 +258,62 @@ func (sources *ExecutorSourceSet) nextDeadline(p *P) (deadline int64, hasDeadlin
 func (sources *ExecutorSourceSet) empty(p *P) bool {
 	return validExecutorSourceSet(sources, p) && registrationTableEmpty(sources.waits, p) &&
 		(sources.timers == nil || timerRegistrationTableEmpty(sources.timers, p)) &&
-		(sources.manual == nil || manualOperationSourceEmpty(sources.manual, p))
+		(sources.manual == nil || manualOperationSourceEmpty(sources.manual, p)) &&
+		(sources.control == nil || taskControlSourceEmpty(sources.control, p))
+}
+
+// canBeginTerminalClose differs from empty only for TaskControlSource. A task
+// endpoint is allowed to outlive the final LLVM frame specifically so its G
+// storage remains pinned until the host/export shim is strongly joined. Every
+// operation-producing source must already be empty; the terminal-close action
+// then owns sealing and retiring the remaining control endpoints.
+func (sources *ExecutorSourceSet) canBeginTerminalClose(p *P) bool {
+	return validExecutorSourceSet(sources, p) && registrationTableEmpty(sources.waits, p) &&
+		(sources.timers == nil || timerRegistrationTableEmpty(sources.timers, p)) &&
+		(sources.manual == nil || manualOperationSourceEmpty(sources.manual, p)) &&
+		(sources.control == nil || taskControlSourceCanBeginTerminalClose(sources.control, p))
+}
+
+func (sources *ExecutorSourceSet) beginTerminalClose(p *P) bool {
+	if !sources.canBeginTerminalClose(p) {
+		return false
+	}
+	return sources.control == nil || beginTaskControlSourceTerminalClose(sources.control, p)
+}
+
+// publishTerminalPass drains only the control source after the final root has
+// been destroyed. The terminal G has no continuation, so its accepted facts
+// are counted as normal late discards; facts for any unexpected live task are
+// still delivered or preserved by TaskControlSource rather than erased.
+func (sources *ExecutorSourceSet) publishTerminalPass(p *P, terminal *G) (scan executorSourceScan, ok bool) {
+	if terminal == nil || !sources.canBeginTerminalClose(p) {
+		return executorSourceScan{}, false
+	}
+	if sources.control == nil {
+		return scan, true
+	}
+	delivered, late, controlOK := sources.control.publishTerminalPass(p, terminal)
+	scan.control = int(delivered)
+	scan.controlLate = int(late)
+	scan.completed = scan.control + scan.controlLate
+	return scan, controlOK
+}
+
+func (sources *ExecutorSourceSet) canFinishTerminalClose(p *P) bool {
+	return validExecutorSourceSet(sources, p) && registrationTableEmpty(sources.waits, p) &&
+		(sources.timers == nil || timerRegistrationTableEmpty(sources.timers, p)) &&
+		(sources.manual == nil || manualOperationSourceEmpty(sources.manual, p)) &&
+		(sources.control == nil || taskControlSourceCanFinishTerminalClose(sources.control, p))
+}
+
+func (sources *ExecutorSourceSet) finishTerminalClose(p *P) bool {
+	if !sources.canFinishTerminalClose(p) {
+		return false
+	}
+	if sources.control != nil && !finishTaskControlSourceTerminalClose(sources.control, p) {
+		return false
+	}
+	return sources.empty(p)
 }
 
 // drainForClose consumes sources that can publish without a clock sample and
@@ -255,6 +338,15 @@ func (sources *ExecutorSourceSet) drainForClose(p *P) (scan executorSourceScan, 
 			return scan, false
 		}
 	}
+	if sources.control != nil {
+		delivered, late, controlOK := sources.control.PublishPass(p)
+		scan.control = int(delivered)
+		scan.controlLate = int(late)
+		scan.completed += scan.control + scan.controlLate
+		if !controlOK {
+			return scan, false
+		}
+	}
 	if !sources.empty(p) {
 		return scan, false
 	}
@@ -263,6 +355,9 @@ func (sources *ExecutorSourceSet) drainForClose(p *P) (scan executorSourceScan, 
 
 func unbindExecutorSourceSet(sources *ExecutorSourceSet, p *P) bool {
 	if !validExecutorSourceSet(sources, p) || !sources.empty(p) {
+		return false
+	}
+	if sources.control != nil && !UnbindTaskControlSource(sources.control, p) {
 		return false
 	}
 	if sources.manual != nil && !UnbindManualOperationSource(sources.manual, p) {

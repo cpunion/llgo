@@ -30,6 +30,11 @@ const (
 	OperationSourceWorker
 	OperationSourceHost
 	OperationSourceIRQ
+	// OperationSourceControl identifies a generation-stable external task
+	// cancellation endpoint. It carries no operation result and is allocated
+	// only when a host/export boundary explicitly exposes a task handle; an
+	// ordinary G never enters a global handle registry.
+	OperationSourceControl
 )
 
 const (
@@ -75,7 +80,7 @@ func (id OperationID) Valid() bool {
 func validOperationSource(source OperationSource) bool {
 	switch source {
 	case OperationSourceWait, OperationSourceTimer, OperationSourceManual, OperationSourcePoll,
-		OperationSourceWorker, OperationSourceHost, OperationSourceIRQ:
+		OperationSourceWorker, OperationSourceHost, OperationSourceIRQ, OperationSourceControl:
 		return true
 	default:
 		return false

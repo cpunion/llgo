@@ -616,20 +616,20 @@ func terminalExecutorCloseCandidate(p *P, g *G, action Action) (*ExecutorDriver,
 	}
 	driver := p.executor
 	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
-		driver.terminalKind != ActionInvalid || !driver.sources.empty(p) {
+		driver.terminalKind != ActionInvalid || !driver.sources.canBeginTerminalClose(p) {
 		return nil, false
 	}
 	return driver, true
 }
 
-func settleTerminalExecutorClose(driver *ExecutorDriver, p *P) bool {
+func settleTerminalExecutorClose(driver *ExecutorDriver, p *P, terminal *G) bool {
 	for {
 		if !validExecutorDriver(driver) || driver.state != executorDriverActive || driver.p != p ||
-			driver.terminalKind != ActionInvalid || !driver.sources.empty(p) {
+			driver.terminalKind != ActionInvalid || terminal == nil || !driver.sources.canBeginTerminalClose(p) {
 			return false
 		}
-		scan, ok := driver.sources.drainForClose(p)
-		if !ok || scan.completed != 0 {
+		_, ok := driver.sources.publishTerminalPass(p, terminal)
+		if !ok {
 			return false
 		}
 		if _, ok = driver.registry.Acknowledge(driver.handle); !ok {
@@ -639,11 +639,11 @@ func settleTerminalExecutorClose(driver *ExecutorDriver, p *P) bool {
 		// Recheck the complete durable source set after acknowledgement. If a
 		// request wins the following exact close race, loop and repeat the same
 		// transaction; the destroyed LLVM handle is not part of this path.
-		scan, ok = driver.sources.drainForClose(p)
-		if !ok || scan.completed != 0 {
+		scan, ok := driver.sources.publishTerminalPass(p, terminal)
+		if !ok {
 			return false
 		}
-		if driver.sources.pending(p) || driver.registry.ObserveRequested(driver.handle) {
+		if scan.completed != 0 || driver.sources.pending(p) || driver.registry.ObserveRequested(driver.handle) {
 			continue
 		}
 		if driver.registry.BeginClose(driver.handle) {
@@ -662,7 +662,7 @@ func settleTerminalExecutorClose(driver *ExecutorDriver, p *P) bool {
 // target adapter nor an asynchronous GC scan can retain or reuse them.
 func beginTerminalExecutorClose(p *P, g *G, action Action) (Action, bool) {
 	driver, ok := terminalExecutorCloseCandidate(p, g, action)
-	if !ok || !settleTerminalExecutorClose(driver, p) {
+	if !ok || !driver.sources.beginTerminalClose(p) || !settleTerminalExecutorClose(driver, p, g) {
 		return Action{}, false
 	}
 	driver.terminalKind = action.Kind
@@ -710,7 +710,19 @@ func ConfirmTerminalExecutorClose(driver *ExecutorDriver) (*G, Action, bool) {
 	}
 	p, g, action := driver.p, driver.p.current, driver.p.action
 	want, ok := terminalExecutorCloseDriver(p, g, action)
-	if !ok || want != driver || !finalDrainExecutorSources(driver) {
+	if !ok || want != driver {
+		return nil, Action{}, false
+	}
+	// The adapter's strong join covers both a TaskControl Post admitted before
+	// its endpoint seal and that call's later ExecutorRegistry Request/doorbell
+	// tail. Drain those final Closing mailboxes before proving both admission
+	// domains quiescent. Terminal-late facts are normal discards because the
+	// final root was already destroyed before ActionTerminalExecutorClose.
+	if _, drainOK := driver.sources.publishTerminalPass(p, g); !drainOK ||
+		!driver.sources.canFinishTerminalClose(p) || !driver.registry.canConfirmQuiesced(driver.handle) {
+		return nil, Action{}, false
+	}
+	if !driver.sources.finishTerminalClose(p) {
 		return nil, Action{}, false
 	}
 	// The synthetic token is a stable core-private equality marker. Destroyed
