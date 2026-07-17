@@ -118,7 +118,21 @@ type P struct {
 	waitTail  *G
 	inResume  bool
 	action    Action
+
+	// timerPreemptBudget is scheduler-thread-only. A non-zero value belongs
+	// to current's run slice and counts legal compiler safepoints until the
+	// scheduler must regain ownership to resample monotonic time. It is armed
+	// only when BeginRunG observes an Active timer on a timer-bound executor;
+	// idle Ps and targets without an Active timer keep the exact zero value.
+	timerPreemptBudget uint32
 }
+
+// timerPreemptPollBudget bounds how many legal compiler safepoints a sole
+// runnable G may cross while another G is parked on an Active timer. This is a
+// deterministic safepoint budget rather than a wall-clock quantum: the yield
+// returns ownership to the executor loop, whose NextRunnableAt call samples
+// the target monotonic clock and publishes every newly due timer.
+const timerPreemptPollBudget uint32 = 64
 
 // ActionKind identifies either the next compiler-owned handle operation or a
 // terminal control event for the current scheduler slice. The core never
@@ -268,6 +282,24 @@ func PollPreempt(g *G) bool {
 			// executor is bound. Unlike ExecutorRegistry, this gate is consumed
 			// directly at the safepoint.
 			requested = true
+		}
+		if !requested && p.current == g {
+			// Only BeginRunG writes a legal non-zero budget. Corrupt values fail
+			// closed instead of manufacturing an unbounded or immediate yield.
+			budget := p.timerPreemptBudget
+			switch {
+			case budget == 0:
+			case budget > timerPreemptPollBudget:
+				return false
+			case budget == 1:
+				// Reload so a caller that fails to honor this request cannot spin
+				// on true at every subsequent safepoint. A successful yield clears
+				// the budget before the P becomes idle.
+				p.timerPreemptBudget = timerPreemptPollBudget
+				requested = true
+			default:
+				p.timerPreemptBudget = budget - 1
+			}
 		}
 	}
 	return requested
@@ -515,6 +547,20 @@ func PollReady(p *P) (int, bool) {
 	return pollReady(p)
 }
 
+// PollReadyAt is the timer-aware scheduler poll. A bound timer driver requires
+// the caller's current monotonic nanoseconds; an unbound P has no target timer
+// table and continues to use the legacy internal poll.
+func PollReadyAt(p *P, now int64) (int, bool) {
+	if p == nil || now < 0 {
+		return 0, false
+	}
+	if preemptLoad(&p.executorMode) == executorModeBound {
+		_, _, promoted, ok := PollExecutorAt(p.executor, now)
+		return promoted, ok
+	}
+	return pollReady(p)
+}
+
 // HasWaiting reports whether an otherwise idle P owns parked Gs. The runtime
 // adapter uses this distinction to wait for a host/platform event instead of
 // misreporting an empty ready queue as program completion.
@@ -535,6 +581,22 @@ func NextRunnable(p *P) (g *G, ok bool) {
 		return nil, validReadyQueue(p) && validWaitQueue(p) && p.readyHead == nil && p.waitHead == nil
 	}
 	if _, ok := PollReady(p); !ok {
+		return nil, false
+	}
+	return dequeue(p), true
+}
+
+// NextRunnableAt is the timer-aware dequeue path. It prevents a runnable loop
+// from bypassing due timers and rejects a timer-bound executor if the caller
+// omits or supplies an invalid monotonic timestamp.
+func NextRunnableAt(p *P, now int64) (g *G, ok bool) {
+	if p == nil || now < 0 || p.current != nil || p.inResume || p.action.Kind != ActionInvalid {
+		return nil, false
+	}
+	if preemptLoad(&p.schedule) == scheduleDisabled {
+		return nil, validReadyQueue(p) && validWaitQueue(p) && p.readyHead == nil && p.waitHead == nil
+	}
+	if _, ok := PollReadyAt(p, now); !ok {
 		return nil, false
 	}
 	return dequeue(p), true
@@ -612,7 +674,7 @@ func BeginRunG(p *P, g *G) (Action, bool) {
 		!ValidG(g) || g.state != GRunnable || g.active == nil || g.root == nil ||
 		g.destroyTarget != nil || g.destroyRoot || g.queued || g.nextReady != nil ||
 		g.waitToken != nil || g.waitTicket != 0 || g.nextWait != nil || g.waiting || g.runP != nil ||
-		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil {
+		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil || p.timerPreemptBudget != 0 {
 		return Action{}, false
 	}
 	schedule := preemptLoad(&p.schedule)
@@ -624,10 +686,21 @@ func BeginRunG(p *P, g *G) (Action, bool) {
 		(frame.state != FrameInitialSuspended && frame.state != FrameSuspended) {
 		return Action{}, false
 	}
+	budget := uint32(0)
+	if driver := p.executor; driver != nil && driver.timers != nil {
+		_, hasDeadline, ok := NextExecutorTimerDeadline(driver)
+		if !ok {
+			return Action{}, false
+		}
+		if hasDeadline {
+			budget = timerPreemptPollBudget
+		}
+	}
 	if p.readyHead != nil && !RequestPreempt(g) {
 		return Action{}, false
 	}
 	p.current = g
+	p.timerPreemptBudget = budget
 	g.state = GRunning
 	g.runP = p
 	return setAction(p, ActionCheckResume, frame.handle)
@@ -686,6 +759,7 @@ func Resumed(p *P, g *G, action Action) (Action, bool) {
 		g.state = GRunnable
 		g.runP = nil
 		p.current = nil
+		p.timerPreemptBudget = 0
 		p.action = Action{}
 		if !Enqueue(p, g) {
 			return Action{}, false
@@ -700,6 +774,7 @@ func Resumed(p *P, g *G, action Action) (Action, bool) {
 		g.state = GWaiting
 		g.runP = nil
 		p.current = nil
+		p.timerPreemptBudget = 0
 		p.action = Action{}
 		if !enqueueWait(p, g) {
 			return Action{}, false
@@ -758,6 +833,7 @@ func Destroyed(p *P, g *G, action Action) (Action, bool) {
 		g.state = GDead
 		g.runP = nil
 		p.current = nil
+		p.timerPreemptBudget = 0
 		p.action = Action{}
 		return Action{Kind: ActionComplete}, true
 	}
@@ -791,7 +867,7 @@ func TerminalG(p *P, g *G) bool {
 	return p != nil && p.current == nil && p.readyHead == nil && p.readyTail == nil &&
 		p.waitHead == nil && p.waitTail == nil &&
 		preemptLoad(&p.schedule) == scheduleDisabled && preemptLoad(&p.executorMode) == executorModeUnbound && p.executor == nil &&
-		!p.inResume && p.action.Kind == ActionInvalid && p.action.Handle == nil &&
+		!p.inResume && p.action.Kind == ActionInvalid && p.action.Handle == nil && p.timerPreemptBudget == 0 &&
 		ValidG(g) && preemptLoad(preemptAddress(g)) == preemptDisabled && g.state == GDead && g.root == nil && g.active == nil && g.frames == nil &&
 		g.pending.kind == pendingNone && g.pending.from == nil && g.pending.target == nil && g.pending.wait == nil && g.pending.ticket == 0 &&
 		g.destroyTarget == nil && !g.destroyRoot && g.nextReady == nil && !g.queued &&

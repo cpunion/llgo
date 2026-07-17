@@ -42,12 +42,16 @@ import (
 // capabilities before enabling the same local-frame operations for that
 // profile.
 type coroPhysicalPureSSAAudit struct {
-	universe *EmissionUniverse
-	ctx      *context
+	universe                 *EmissionUniverse
+	ctx                      *context
+	fn                       *ssa.Function
+	frameRetentionABI        string
+	frameRetentionBuilt      bool
+	frameRetentionProofCache *coroFrameRetentionProof
 }
 
-func newCoroPhysicalPureSSAAudit(universe *EmissionUniverse, fn *ssa.Function) (*coroPhysicalPureSSAAudit, error) {
-	audit := &coroPhysicalPureSSAAudit{universe: universe}
+func newCoroPhysicalPureSSAAudit(universe *EmissionUniverse, fn *ssa.Function, frameRetentionABI string) (*coroPhysicalPureSSAAudit, error) {
+	audit := &coroPhysicalPureSSAAudit{universe: universe, fn: fn, frameRetentionABI: frameRetentionABI}
 	if universe == nil {
 		// Structural unit tests may call the validator directly. Active
 		// Compilation paths always supply their prepared emission universe.
@@ -107,13 +111,52 @@ func (a *coroPhysicalPureSSAAudit) validate(instr ssa.Instruction) (handled bool
 		if _, builtin := instr.Call.Value.(*ssa.Builtin); builtin {
 			return true, a.validateBuiltin(instr)
 		}
+		if recognized, reason := a.validateFrameRetentionOwnerCall(instr); recognized && reason != "" {
+			return true, reason
+		}
 	}
 	return false, ""
 }
 
+func (a *coroPhysicalPureSSAAudit) validateFrameRetentionOwnerCall(call *ssa.Call) (bool, string) {
+	if a == nil || a.frameRetentionABI != CoroFrameRetentionTimerABIV1 || a.universe == nil || call == nil {
+		return false, ""
+	}
+	kind, recognized := a.universe.coroFrameRetentionOwnerCallSite(call)
+	if !recognized {
+		return false, ""
+	}
+	want := coroFrameRetentionInstructionNone
+	switch kind {
+	case coroFrameRetentionCallPrepare:
+		want = coroFrameRetentionInstructionPrepare
+	case coroFrameRetentionCallRetire:
+		want = coroFrameRetentionInstructionRetire
+	default:
+		return true, "exact frame-retention owner call has an unknown compiler role"
+	}
+	proof := a.currentFrameRetentionProof()
+	if proof == nil || proof.roles[call] != want {
+		return true, "exact frame-retention owner call is outside a certified prepare/park/retire transaction"
+	}
+	// A certified owner call still passes through the ordinary CallPlan/direct-
+	// plain validation below. The retention proof changes pointer lifetime and
+	// poll placement only; it does not manufacture a callable edge.
+	return true, ""
+}
+
 func (a *coroPhysicalPureSSAAudit) validateAlloc(alloc *ssa.Alloc) string {
-	if alloc == nil || alloc.Heap {
+	if alloc == nil {
 		return "heap allocation requires managed allocation and coroutine GC-root lowering"
+	}
+	if alloc.Heap {
+		if !a.frameRetainsAllocation(alloc) {
+			return "heap allocation requires managed allocation and coroutine GC-root lowering"
+		}
+		// The complete address-use proof changes this exact lowering from
+		// runtime.AllocZ to an LLVM alloca in the current coroutine frame. Do
+		// not consult the ordinary Heap helper-demand table for that allocation.
+		return ""
 	}
 	if a.ctx != nil && (a.ctx.skipSyntheticMakeSliceAlloc(alloc) || isEmissionVargsAlloc(a.ctx, alloc)) {
 		return "synthetic slice/varargs allocation belongs to a non-pure enclosing lowering"
@@ -397,7 +440,7 @@ func (a *coroPhysicalPureSSAAudit) stableAddress(value ssa.Value, visiting map[s
 		}
 		return coroPhysicalAddressGlobal, ""
 	case *ssa.Alloc:
-		if value.Heap {
+		if value.Heap && !a.frameRetainsAllocation(value) {
 			return coroPhysicalAddressInvalid, "heap allocation requires managed allocation/root lowering"
 		}
 		if a.ctx != nil && (a.ctx.skipSyntheticMakeSliceAlloc(value) || isEmissionVargsAlloc(a.ctx, value)) {

@@ -31,7 +31,7 @@ import (
 // PlanDigestSchema is the independent canonical schema used for archive cache
 // identity. It is deliberately separate from SummarySchema: summaries remain
 // diagnostic snapshots, while this document covers every lowering plan site.
-const PlanDigestSchema = "llgo.coro.plan-digest.v7"
+const PlanDigestSchema = "llgo.coro.plan-digest.v8"
 
 // Current experimental ABI identities. Keeping these in the analysis package
 // gives build, cache, and lowering code one version source of truth.
@@ -72,23 +72,28 @@ const (
 	// supports only one no-capture, non-suspending plain body; unsupported value
 	// shapes and call capabilities remain fail-closed.
 	FuncRepABIV1 = "llgo.coro.func-rep.v1"
+	// FrameRetentionTimerABIV1 authorizes one exact fail-stop native timer
+	// prepare/park/retire transaction to retain pointer-free locals in the
+	// current LLVM coroutine frame instead of the managed heap.
+	FrameRetentionTimerABIV1 = "llgo.coro.frame-retention.timer.v1"
 )
 
 // PlanDigestMetadata contains every effective ABI and target input that may
 // affect coroutine lowering. TargetABI, TargetCPU, and TargetFeatures use the
 // empty string for the target's canonical default.
 type PlanDigestMetadata struct {
-	CoroABI        string `json:"coro_abi"`
-	SchedulerABI   string `json:"scheduler_abi"`
-	PanicABI       string `json:"panic_abi"`
-	FuncRepABI     string `json:"func_rep_abi"`
-	TargetTriple   string `json:"target_triple"`
-	TargetCPU      string `json:"target_cpu"`
-	TargetFeatures string `json:"target_features"`
-	TargetABI      string `json:"target_abi"`
-	PointerBits    int    `json:"pointer_bits"`
-	Endianness     string `json:"endianness"`
-	DataLayout     string `json:"data_layout"`
+	CoroABI           string `json:"coro_abi"`
+	SchedulerABI      string `json:"scheduler_abi"`
+	PanicABI          string `json:"panic_abi"`
+	FuncRepABI        string `json:"func_rep_abi"`
+	FrameRetentionABI string `json:"frame_retention_abi,omitempty"`
+	TargetTriple      string `json:"target_triple"`
+	TargetCPU         string `json:"target_cpu"`
+	TargetFeatures    string `json:"target_features"`
+	TargetABI         string `json:"target_abi"`
+	PointerBits       int    `json:"pointer_bits"`
+	Endianness        string `json:"endianness"`
+	DataLayout        string `json:"data_layout"`
 }
 
 type planDigestDocument struct {
@@ -409,11 +414,22 @@ func (m PlanDigestMetadata) validate() error {
 		{"target CPU", m.TargetCPU},
 		{"target features", m.TargetFeatures},
 		{"target ABI", m.TargetABI},
+		{"frame-retention ABI", m.FrameRetentionABI},
 	}
 	for _, field := range optional {
 		if err := validatePlanDigestText(field.name, field.value, true); err != nil {
 			return err
 		}
+	}
+	switch m.FrameRetentionABI {
+	case "":
+	case FrameRetentionTimerABIV1:
+		if m.CoroABI != PhysicalABIV1 ||
+			(m.SchedulerABI != SchedulerProgramBootstrapABIV2 && m.SchedulerABI != SchedulerProgramBootstrapClosedStaticSpawnABIV0) {
+			return fmt.Errorf("coro: plan digest frame-retention ABI %q requires PhysicalABIV1 runnable program-bootstrap metadata", m.FrameRetentionABI)
+		}
+	default:
+		return fmt.Errorf("coro: plan digest has unknown frame-retention ABI %q", m.FrameRetentionABI)
 	}
 	if m.PointerBits <= 0 || m.PointerBits%8 != 0 {
 		return fmt.Errorf("coro: plan digest pointer width %d is not a positive multiple of 8", m.PointerBits)

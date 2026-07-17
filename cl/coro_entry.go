@@ -32,20 +32,21 @@ const coroPrimarySuffix = "$coro"
 // FuncRep only describes escaped function values and never authorizes a
 // second body.
 type plannedFunctionSymbol struct {
-	function      *ssa.Function
-	pkgTypes      *types.Package
-	name          string
-	ftype         int
-	plan          coro.FunctionPlan
-	planned       bool
-	physical      bool
-	childAwait    bool
-	programRun    bool
-	plainDispatch bool
-	staticSpawn   bool
-	explicitPanic bool
-	coroPlan      *coro.SSAPlan
-	emission      *EmissionUniverse
+	function          *ssa.Function
+	pkgTypes          *types.Package
+	name              string
+	ftype             int
+	plan              coro.FunctionPlan
+	planned           bool
+	physical          bool
+	childAwait        bool
+	programRun        bool
+	plainDispatch     bool
+	staticSpawn       bool
+	explicitPanic     bool
+	frameRetentionABI string
+	coroPlan          *coro.SSAPlan
+	emission          *EmissionUniverse
 }
 
 // resolveFunctionSymbol is shared by function definitions and declarations so
@@ -93,6 +94,7 @@ func (p *context) resolveFunctionSymbol(fn *ssa.Function) (plannedFunctionSymbol
 	entry.plainDispatch = p.compilation.EnableCoroPlainDispatch
 	entry.staticSpawn = p.compilation.EnableCoroClosedStaticSpawn
 	entry.explicitPanic = p.compilation.EnableCoroExplicitStatusPanicABI
+	entry.frameRetentionABI = p.compilation.CoroFrameRetentionABI
 	entry.coroPlan = p.compilation.CoroPlan
 	entry.emission = p.compilation.EmissionUniverse
 	if p.compilation.CoroPlan.IgnoresBody(fn) {
@@ -188,7 +190,10 @@ func (e plannedFunctionSymbol) checkSupported() error {
 		if err := validateCoroPhysicalFunctionValueABI(e.plan, e.function.Signature, e.plainDispatch); err != nil {
 			return err
 		}
-		return validateCoroPhysicalABIWithUniverseCapabilities(e.function, e.plan, e.coroPlan, e.emission, e.childAwait, e.programRun, e.staticSpawn, e.explicitPanic)
+		return validateCoroPhysicalABIWithUniverseCapabilitiesAndFrameRetention(
+			e.function, e.plan, e.coroPlan, e.emission, e.childAwait, e.programRun,
+			e.staticSpawn, e.explicitPanic, e.frameRetentionABI,
+		)
 	}
 	if e.plan.Emission == coro.EmitExternal && e.plan.FuncRep == coro.DirectCoro {
 		return fmt.Errorf("external coroutine emission %q requires coroutine physical ABI lowering", e.plan.ID)
@@ -267,17 +272,18 @@ func (c *Compilation) preflightCoroPlan() error {
 				continue
 			}
 			entry := plannedFunctionSymbol{
-				function:      function.Function,
-				plan:          function.Plan,
-				planned:       true,
-				physical:      c.EnableCoroPhysicalABI,
-				childAwait:    c.EnableCoroChildAwait,
-				programRun:    c.EnableCoroProgramBootstrapRun,
-				plainDispatch: c.EnableCoroPlainDispatch,
-				staticSpawn:   c.EnableCoroClosedStaticSpawn,
-				explicitPanic: c.EnableCoroExplicitStatusPanicABI,
-				coroPlan:      c.CoroPlan,
-				emission:      c.EmissionUniverse,
+				function:          function.Function,
+				plan:              function.Plan,
+				planned:           true,
+				physical:          c.EnableCoroPhysicalABI,
+				childAwait:        c.EnableCoroChildAwait,
+				programRun:        c.EnableCoroProgramBootstrapRun,
+				plainDispatch:     c.EnableCoroPlainDispatch,
+				staticSpawn:       c.EnableCoroClosedStaticSpawn,
+				explicitPanic:     c.EnableCoroExplicitStatusPanicABI,
+				frameRetentionABI: c.CoroFrameRetentionABI,
+				coroPlan:          c.CoroPlan,
+				emission:          c.EmissionUniverse,
 			}
 			if err := entry.checkSupported(); err != nil {
 				c.coroPreflightErr = err

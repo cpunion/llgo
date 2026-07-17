@@ -34,6 +34,19 @@ func bindTestExecutorDriver(t *testing.T, p *P) (*ExecutorDriver, *ExecutorRegis
 	return driver, registry, waits, handle
 }
 
+func bindTestExecutorDriverWithTimers(t *testing.T, p *P) (*ExecutorDriver, *ExecutorRegistry, *WaitRegistrationTable, *TimerRegistrationTable, ExecutorHandle) {
+	t.Helper()
+	driver := new(ExecutorDriver)
+	registry := new(ExecutorRegistry)
+	waits := new(WaitRegistrationTable)
+	timers := new(TimerRegistrationTable)
+	handle := registerTestExecutor(t, registry)
+	if !BindExecutorWithTimers(driver, p, registry, handle, waits, timers) {
+		t.Fatal("bind timer-aware test executor driver")
+	}
+	return driver, registry, waits, timers, handle
+}
+
 func closeTestExecutorDriver(t *testing.T, driver *ExecutorDriver) {
 	t.Helper()
 	if !BeginExecutorClose(driver) {
@@ -69,6 +82,64 @@ func parkRegisteredDriverTask(t *testing.T, p *P, waits *WaitRegistrationTable, 
 		t.Fatalf("commit driver park = (%+v, %t)", action, ok)
 	}
 	return token, ticket, wait
+}
+
+func parkRegisteredDriverTimer(t *testing.T, driver *ExecutorDriver, p *P, task *yieldingTestG, now, deadline int64) (*WaitToken, WaitTicket, TimerRegistrationHandle) {
+	t.Helper()
+	g, ok := NextRunnableAt(p, now)
+	if !ok || g != task.g {
+		t.Fatalf("dequeue timer driver task = (%p, %t)", g, ok)
+	}
+	action := beginWaitTestResume(t, p, task)
+	token := new(WaitToken)
+	ticket, timer, result := PrepareExecutorTimerRegistration(driver, token, deadline)
+	if result != TimerRegistrationPrepared {
+		t.Fatalf("prepare driver timer = (%d, %+v, %d)", ticket, timer, result)
+	}
+	task.frame.header.SuspendReason = uint16(SuspendPark)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+	if !PreparePark(task.g, task.handle, task.frame.header, token, ticket) {
+		t.Fatal("prepare driver timer park")
+	}
+	if action, ok = Resumed(p, task.g, action); !ok || action.Kind != ActionPark {
+		t.Fatalf("commit driver timer park = (%+v, %t)", action, ok)
+	}
+	return token, ticket, timer
+}
+
+func parkRegisteredDriverWaitAt(t *testing.T, driver *ExecutorDriver, p *P, task *yieldingTestG, now int64) (*WaitToken, WaitTicket, WaitRegistrationHandle) {
+	t.Helper()
+	g, ok := NextRunnableAt(p, now)
+	if !ok || g != task.g {
+		t.Fatalf("dequeue timed wait driver task = (%p, %t)", g, ok)
+	}
+	action := beginWaitTestResume(t, p, task)
+	token := new(WaitToken)
+	ticket, wait, result := PrepareExecutorWaitRegistration(driver, token)
+	if result != WaitRegistrationPrepared {
+		t.Fatalf("prepare timed driver wait = (%d, %+v, %d)", ticket, wait, result)
+	}
+	task.frame.header.SuspendReason = uint16(SuspendPark)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+	if !PreparePark(task.g, task.handle, task.frame.header, token, ticket) {
+		t.Fatal("prepare timed driver wait park")
+	}
+	if action, ok = Resumed(p, task.g, action); !ok || action.Kind != ActionPark {
+		t.Fatalf("commit timed driver wait park = (%+v, %t)", action, ok)
+	}
+	return token, ticket, wait
+}
+
+func yieldRunningDriverTask(t *testing.T, p *P, task *yieldingTestG, action Action) {
+	t.Helper()
+	task.frame.header.SuspendReason = uint16(SuspendYield)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+	if !PrepareYield(task.g, task.handle, task.frame.header) {
+		t.Fatalf("prepare driver yield for G %s", task.name)
+	}
+	if yielded, ok := Resumed(p, task.g, action); !ok || yielded.Kind != ActionYield {
+		t.Fatalf("commit driver yield for G %s = (%+v, %t)", task.name, yielded, ok)
+	}
 }
 
 func finishReadyDriverTasks(t *testing.T, p *P, tasks map[*G]*yieldingTestG) {
@@ -119,6 +190,166 @@ func TestExecutorDriverBindCloseLifecycle(t *testing.T) {
 	if !BeginCommandShutdown(p, main) || !FinishCommandShutdown(p, main) || !TerminalG(p, main) {
 		t.Fatal("unbound command shutdown did not reach terminal state")
 	}
+}
+
+func TestExecutorDriverTimerBindingIsTransactionalAndAPIFamiliesDoNotMix(t *testing.T) {
+	legacyP := new(P)
+	legacy, _, _, _ := bindTestExecutorDriver(t, legacyP)
+	if waits, timers, promoted, ok := PollExecutorAt(legacy, 0); ok || waits != 0 || timers != 0 || promoted != 0 {
+		t.Fatalf("timed poll accepted legacy binding = (%d, %d, %d, %t)", waits, timers, promoted, ok)
+	}
+	if prepared, ok := PrepareExecutorSleepAt(legacy, 0); ok || prepared {
+		t.Fatalf("timed sleep prepare accepted legacy binding = (%t, %t)", prepared, ok)
+	}
+	if deadline, has, ok := NextExecutorTimerDeadline(legacy); ok || has || deadline != 0 {
+		t.Fatalf("legacy timer deadline query = (%d, %t, %t)", deadline, has, ok)
+	}
+	closeTestExecutorDriver(t, legacy)
+
+	badTimers := new(TimerRegistrationTable)
+	other := new(P)
+	if !bindTimerRegistrationTable(badTimers, other) {
+		t.Fatal("bind conflicting timer owner")
+	}
+	p := new(P)
+	driver := new(ExecutorDriver)
+	registry := new(ExecutorRegistry)
+	waits := new(WaitRegistrationTable)
+	executor := registerTestExecutor(t, registry)
+	if BindExecutorWithTimers(driver, p, registry, executor, waits, badTimers) {
+		t.Fatal("bound driver to an already-owned timer table")
+	}
+	if *driver != (ExecutorDriver{}) || p.executor != nil || preemptLoad(&p.executorMode) != executorModeUnbound ||
+		!waits.CanRelease() || badTimers.owner != other {
+		t.Fatal("rejected timer bind retained a partial wait/P binding")
+	}
+	if !unbindTimerRegistrationTable(badTimers, other) {
+		t.Fatal("unbind conflicting timer owner")
+	}
+	retireTestExecutor(t, registry, executor)
+
+	timedP := new(P)
+	timed, timedRegistry, timedWaits, timedTimers, timedExecutor := bindTestExecutorDriverWithTimers(t, timedP)
+	if drained, promoted, ok := PollExecutor(timed); ok || drained != 0 || promoted != 0 {
+		t.Fatalf("legacy poll accepted timer binding = (%d, %d, %t)", drained, promoted, ok)
+	}
+	if sleep, ok := PrepareExecutorSleep(timed); ok || sleep {
+		t.Fatalf("legacy sleep accepted timer binding = (%t, %t)", sleep, ok)
+	}
+	if drained, promoted, ok := WakeExecutor(timed); ok || drained != 0 || promoted != 0 {
+		t.Fatalf("legacy wake accepted timer binding = (%d, %d, %t)", drained, promoted, ok)
+	}
+	if g, ok := NextRunnable(timedP); ok || g != nil {
+		t.Fatalf("legacy dequeue crossed timer binding = (%p, %t)", g, ok)
+	}
+	if g, ok := NextRunnableAt(timedP, -1); ok || g != nil {
+		t.Fatalf("negative timed dequeue = (%p, %t)", g, ok)
+	}
+	if g, ok := NextRunnableAt(timedP, 0); !ok || g != nil {
+		t.Fatalf("empty timed dequeue = (%p, %t)", g, ok)
+	}
+	closeTestExecutorDriver(t, timed)
+	if !timedWaits.CanRelease() || !timedTimers.CanRelease() || !timedRegistry.CanRelease() ||
+		timedExecutor == (ExecutorHandle{}) {
+		t.Fatal("timer-aware close retained stable ownership")
+	}
+}
+
+func TestExecutorDriverTimerOwnerPrepareRollbackCancelAndRetire(t *testing.T) {
+	p := new(P)
+	driver, registry, waits, timers, _ := bindTestExecutorDriverWithTimers(t, p)
+	task := newYieldingTestG(t, "driver-timer-owner")
+	var token WaitToken
+	if ticket, timer, result := PrepareExecutorTimerRegistration(driver, &token, 100); result != TimerRegistrationPrepareInvalid ||
+		ticket != 0 || timer != (TimerRegistrationHandle{}) {
+		t.Fatalf("idle timer owner prepare = (%d, %+v, %d)", ticket, timer, result)
+	}
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue timer-owner task")
+	}
+	if next, ok := NextRunnableAt(p, 0); !ok || next != task.g {
+		t.Fatal("dequeue timer-owner task")
+	}
+	action := beginWaitTestResume(t, p, task)
+	savedAction := p.action
+	p.action.Kind = ActionCheckResume
+	if ticket, timer, result := PrepareExecutorTimerRegistration(driver, &token, 100); result != TimerRegistrationPrepareInvalid ||
+		ticket != 0 || timer != (TimerRegistrationHandle{}) {
+		t.Fatalf("wrong-action timer owner prepare = (%d, %+v, %d)", ticket, timer, result)
+	}
+	p.action = savedAction
+	ticket, timer, result := PrepareExecutorTimerRegistration(driver, &token, 100)
+	if result != TimerRegistrationPrepared || ticket != 1 || timer == (TimerRegistrationHandle{}) {
+		t.Fatalf("running timer owner prepare = (%d, %+v, %d)", ticket, timer, result)
+	}
+	if !RollbackExecutorTimerRegistration(driver, &token, ticket, timer) {
+		t.Fatal("running timer owner rollback")
+	}
+	ticket, timer, result = PrepareExecutorTimerRegistration(driver, &token, 100)
+	if result != TimerRegistrationPrepared || ticket != 2 || timer == (TimerRegistrationHandle{}) {
+		t.Fatalf("second timer owner prepare = (%d, %+v, %d)", ticket, timer, result)
+	}
+	task.frame.header.SuspendReason = uint16(SuspendPark)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+	if !PreparePark(task.g, task.handle, task.frame.header, &token, ticket) {
+		t.Fatal("prepare timer-owner park")
+	}
+	if parked, ok := Resumed(p, task.g, action); !ok || parked.Kind != ActionPark {
+		t.Fatalf("commit timer-owner park = (%+v, %t)", parked, ok)
+	}
+	if RetireCompletedExecutorTimer(driver, &token, ticket, timer) || BeginExecutorClose(driver) {
+		t.Fatal("idle owner retired or closed a live timer")
+	}
+	if deadline, has, ok := NextExecutorTimerDeadline(driver); !ok || !has || deadline != 100 {
+		t.Fatalf("active timer deadline = (%d, %t, %t)", deadline, has, ok)
+	}
+	if waitCount, timerCount, promoted, ok := PollExecutorAt(driver, 100); !ok || waitCount != 0 || timerCount != 1 || promoted != 1 {
+		t.Fatalf("complete owner timer = (%d, %d, %d, %t)", waitCount, timerCount, promoted, ok)
+	}
+	if BeginExecutorClose(driver) {
+		t.Fatal("closed with delivered but unretired timer")
+	}
+	if next, ok := NextRunnableAt(p, 100); !ok || next != task.g {
+		t.Fatal("dequeue completed timer-owner task")
+	}
+	action = beginWaitTestResume(t, p, task)
+	if !RetireCompletedExecutorTimer(driver, &token, ticket, timer) {
+		t.Fatal("retire completed timer from resumed owner")
+	}
+
+	var canceledToken WaitToken
+	canceledTicket, canceledTimer, result := PrepareExecutorTimerRegistration(driver, &canceledToken, 200)
+	if result != TimerRegistrationPrepared || CancelExecutorTimerRegistration(driver, canceledTimer) != WaitCancelWon {
+		t.Fatal("prepare and cancel running-owner timer")
+	}
+	task.frame.header.SuspendReason = uint16(SuspendPark)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+	if !PreparePark(task.g, task.handle, task.frame.header, &canceledToken, canceledTicket) {
+		t.Fatal("prepare canceled timer park")
+	}
+	if parked, ok := Resumed(p, task.g, action); !ok || parked.Kind != ActionPark {
+		t.Fatalf("commit canceled timer park = (%+v, %t)", parked, ok)
+	}
+	if BeginExecutorClose(driver) {
+		t.Fatal("closed with canceled but unretired timer")
+	}
+	if waitCount, timerCount, promoted, ok := PollExecutorAt(driver, 100); !ok || waitCount != 0 || timerCount != 0 || promoted != 1 {
+		t.Fatalf("promote canceled owner timer = (%d, %d, %d, %t)", waitCount, timerCount, promoted, ok)
+	}
+	if next, ok := NextRunnableAt(p, 100); !ok || next != task.g {
+		t.Fatal("dequeue canceled timer-owner task")
+	}
+	action = beginWaitTestResume(t, p, task)
+	if !RetireCanceledExecutorTimer(driver, &canceledToken, canceledTicket, canceledTimer) {
+		t.Fatal("retire canceled timer from resumed owner")
+	}
+	yieldRunningDriverTask(t, p, task, action)
+	closeTestExecutorDriver(t, driver)
+	finishReadyDriverTasks(t, p, map[*G]*yieldingTestG{task.g: task})
+	if !TerminalG(p, task.g) || !waits.CanRelease() || !timers.CanRelease() || !registry.CanRelease() {
+		t.Fatal("timer owner ABI cleanup retained state")
+	}
+	runtime.KeepAlive(task.frame.memory)
 }
 
 func TestWaitRegistrationSchedulerDrainDoesNotRequestLegacyP(t *testing.T) {
@@ -250,6 +481,190 @@ func TestExecutorDriverRetainedSleepAndSpuriousWake(t *testing.T) {
 		t.Fatal("idle driver cleanup retained scheduler state")
 	}
 	runtime.KeepAlive(parked.frame.memory)
+}
+
+func TestExecutorDriverTimerSleepUsesFreshFinalAndWakeSamples(t *testing.T) {
+	p := new(P)
+	driver, registry, waits, timers, _ := bindTestExecutorDriverWithTimers(t, p)
+	task := newYieldingTestG(t, "driver-timer-sleep")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue timer-sleep task")
+	}
+	token, ticket, timer := parkRegisteredDriverTimer(t, driver, p, task, 0, 100)
+
+	if prepared, ok := PrepareExecutorSleepAt(driver, 90); !ok || !prepared || driver.state != executorDriverIdlePreparing {
+		t.Fatalf("prepare timer sleep = (%t, %t), state=%d", prepared, ok, driver.state)
+	}
+	if _, _, _, ok := PollExecutorAt(driver, 90); ok || BeginExecutorClose(driver) {
+		t.Fatal("idle-preparing state admitted poll or close")
+	}
+	if sleep, deadline, has, ok := CommitExecutorSleepAt(driver, 90); !ok || !sleep || !has || deadline != 100 ||
+		driver.state != executorDriverSleeping {
+		t.Fatalf("commit future timer sleep = (%t, %d, %t, %t), state=%d", sleep, deadline, has, ok, driver.state)
+	}
+	if waitCount, timerCount, promoted, ok := WakeExecutorAt(driver, 90); !ok || waitCount != 0 || timerCount != 0 ||
+		promoted != 0 || !HasWaiting(p) || driver.state != executorDriverActive {
+		t.Fatalf("fresh spurious timer wake = (%d, %d, %d, %t), state=%d", waitCount, timerCount, promoted, ok, driver.state)
+	}
+
+	if prepared, ok := PrepareExecutorSleepAt(driver, 95); !ok || !prepared {
+		t.Fatalf("prepare abortable timer sleep = (%t, %t)", prepared, ok)
+	}
+	if sleep, deadline, has, ok := CommitExecutorSleepAt(driver, 94); ok || sleep || has || deadline != 0 ||
+		driver.state != executorDriverActive {
+		t.Fatalf("backward final sample did not abort = (%t, %d, %t, %t), state=%d", sleep, deadline, has, ok, driver.state)
+	}
+
+	if prepared, ok := PrepareExecutorSleepAt(driver, 99); !ok || !prepared {
+		t.Fatalf("prepare final-due timer sleep = (%t, %t)", prepared, ok)
+	}
+	if sleep, deadline, has, ok := CommitExecutorSleepAt(driver, 100); !ok || sleep || has || deadline != 0 ||
+		driver.state != executorDriverActive || HasWaiting(p) || p.readyHead != task.g {
+		t.Fatalf("timer due in final scan = (%t, %d, %t, %t), state=%d", sleep, deadline, has, ok, driver.state)
+	}
+	if next, ok := NextRunnableAt(p, 100); !ok || next != task.g {
+		t.Fatal("dequeue timer after final scan")
+	}
+	action := beginWaitTestResume(t, p, task)
+	if !RetireCompletedExecutorTimer(driver, token, ticket, timer) {
+		t.Fatal("retire final-scan timer")
+	}
+	yieldRunningDriverTask(t, p, task, action)
+	closeTestExecutorDriver(t, driver)
+	finishReadyDriverTasks(t, p, map[*G]*yieldingTestG{task.g: task})
+	if !TerminalG(p, task.g) || !waits.CanRelease() || !timers.CanRelease() || !registry.CanRelease() {
+		t.Fatal("timer sleep cleanup retained state")
+	}
+	runtime.KeepAlive(task.frame.memory)
+}
+
+func TestExecutorDriverTimerDueBeforeIdleArmRefusesSleep(t *testing.T) {
+	p := new(P)
+	driver, _, _, timers, _ := bindTestExecutorDriverWithTimers(t, p)
+	task := newYieldingTestG(t, "driver-timer-due-before-arm")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue due-before-arm task")
+	}
+	token, ticket, timer := parkRegisteredDriverTimer(t, driver, p, task, 0, 50)
+	if prepared, ok := PrepareExecutorSleepAt(driver, 50); !ok || prepared || driver.state != executorDriverActive ||
+		HasWaiting(p) || p.readyHead != task.g {
+		t.Fatalf("due-before-arm sleep = (%t, %t), state=%d", prepared, ok, driver.state)
+	}
+	if deadline, has, ok := NextExecutorTimerDeadline(driver); !ok || has || deadline != 0 {
+		t.Fatalf("delivered timer remained an active deadline = (%d, %t, %t)", deadline, has, ok)
+	}
+	if next, ok := NextRunnableAt(p, 50); !ok || next != task.g {
+		t.Fatal("dequeue due-before-arm task")
+	}
+	action := beginWaitTestResume(t, p, task)
+	if !RetireCompletedExecutorTimer(driver, token, ticket, timer) {
+		t.Fatal("retire due-before-arm timer")
+	}
+	yieldRunningDriverTask(t, p, task, action)
+	closeTestExecutorDriver(t, driver)
+	finishReadyDriverTasks(t, p, map[*G]*yieldingTestG{task.g: task})
+	if !TerminalG(p, task.g) || !timers.CanRelease() {
+		t.Fatal("due-before-arm cleanup retained state")
+	}
+	runtime.KeepAlive(task.frame.memory)
+}
+
+func TestExecutorDriverPostBetweenTimedSleepPhasesWinsCommit(t *testing.T) {
+	p := new(P)
+	driver, registry, waits, timers, executor := bindTestExecutorDriverWithTimers(t, p)
+	waitTask := newYieldingTestG(t, "driver-between-phase-wait")
+	timerTask := newYieldingTestG(t, "driver-between-phase-timer")
+	if !Enqueue(p, waitTask.g) || !Enqueue(p, timerTask.g) {
+		t.Fatal("enqueue between-phase tasks")
+	}
+	waitToken, waitTicket, wait := parkRegisteredDriverWaitAt(t, driver, p, waitTask, 0)
+	timerToken, timerTicket, timer := parkRegisteredDriverTimer(t, driver, p, timerTask, 0, 100)
+	if prepared, ok := PrepareExecutorSleepAt(driver, 90); !ok || !prepared {
+		t.Fatalf("prepare between-phase sleep = (%t, %t)", prepared, ok)
+	}
+	posted := PostWaitAndRequest(waits, wait, registry, executor)
+	if posted.Wait != WaitRegistrationPosted || posted.Executor != ExecutorRequestIdleWake {
+		t.Fatalf("between-phase post = %+v", posted)
+	}
+	if sleep, deadline, has, ok := CommitExecutorSleepAt(driver, 90); !ok || sleep || has || deadline != 0 ||
+		driver.state != executorDriverActive || p.readyHead != waitTask.g || !HasWaiting(p) {
+		t.Fatalf("post won timed commit = (%t, %d, %t, %t), state=%d", sleep, deadline, has, ok, driver.state)
+	}
+	if deadline, has, ok := NextExecutorTimerDeadline(driver); !ok || !has || deadline != 100 {
+		t.Fatalf("future timer lost after post won = (%d, %t, %t)", deadline, has, ok)
+	}
+	if next, ok := NextRunnableAt(p, 90); !ok || next != waitTask.g {
+		t.Fatal("dequeue between-phase wait task")
+	}
+	action := beginWaitTestResume(t, p, waitTask)
+	if !RetireCompletedExecutorWait(driver, waitToken, waitTicket, wait) {
+		t.Fatal("retire between-phase wait")
+	}
+	finishWaitTestTask(t, p, waitTask, action)
+
+	if waitCount, timerCount, promoted, ok := PollExecutorAt(driver, 100); !ok || waitCount != 0 || timerCount != 1 || promoted != 1 {
+		t.Fatalf("complete preserved future timer = (%d, %d, %d, %t)", waitCount, timerCount, promoted, ok)
+	}
+	if next, ok := NextRunnableAt(p, 100); !ok || next != timerTask.g {
+		t.Fatal("dequeue preserved timer task")
+	}
+	action = beginWaitTestResume(t, p, timerTask)
+	if !RetireCompletedExecutorTimer(driver, timerToken, timerTicket, timer) {
+		t.Fatal("retire preserved timer")
+	}
+	yieldRunningDriverTask(t, p, timerTask, action)
+	closeTestExecutorDriver(t, driver)
+	finishReadyDriverTasks(t, p, map[*G]*yieldingTestG{timerTask.g: timerTask})
+	if !TerminalG(p, waitTask.g) || !TerminalG(p, timerTask.g) || !waits.CanRelease() || !timers.CanRelease() {
+		t.Fatal("between-phase cleanup retained state")
+	}
+	runtime.KeepAlive(waitTask.frame.memory)
+	runtime.KeepAlive(timerTask.frame.memory)
+}
+
+func TestExecutorDriverWaitPostAndDueTimerDrainInOneTransaction(t *testing.T) {
+	p := new(P)
+	driver, registry, waits, timers, executor := bindTestExecutorDriverWithTimers(t, p)
+	waitTask := newYieldingTestG(t, "driver-mixed-wait")
+	timerTask := newYieldingTestG(t, "driver-mixed-timer")
+	if !Enqueue(p, waitTask.g) || !Enqueue(p, timerTask.g) {
+		t.Fatal("enqueue mixed-source tasks")
+	}
+	waitToken, waitTicket, wait := parkRegisteredDriverWaitAt(t, driver, p, waitTask, 0)
+	timerToken, timerTicket, timer := parkRegisteredDriverTimer(t, driver, p, timerTask, 0, 100)
+	if posted := PostWaitAndRequest(waits, wait, registry, executor); posted.Wait != WaitRegistrationPosted ||
+		posted.Executor != ExecutorRequestPublished {
+		t.Fatalf("mixed source post = %+v", posted)
+	}
+	if waitCount, timerCount, promoted, ok := PollExecutorAt(driver, 100); !ok || waitCount != 1 || timerCount != 1 || promoted != 2 {
+		t.Fatalf("mixed source transaction = (%d, %d, %d, %t)", waitCount, timerCount, promoted, ok)
+	}
+	if HasWaiting(p) || p.readyHead != waitTask.g || p.readyTail != timerTask.g {
+		t.Fatal("mixed source promotion lost wait insertion order")
+	}
+	if next, ok := NextRunnableAt(p, 100); !ok || next != waitTask.g {
+		t.Fatal("dequeue mixed wait task")
+	}
+	action := beginWaitTestResume(t, p, waitTask)
+	if !RetireCompletedExecutorWait(driver, waitToken, waitTicket, wait) {
+		t.Fatal("retire mixed wait")
+	}
+	finishWaitTestTask(t, p, waitTask, action)
+	if next, ok := NextRunnableAt(p, 100); !ok || next != timerTask.g {
+		t.Fatal("dequeue mixed timer task")
+	}
+	action = beginWaitTestResume(t, p, timerTask)
+	if !RetireCompletedExecutorTimer(driver, timerToken, timerTicket, timer) {
+		t.Fatal("retire mixed timer")
+	}
+	yieldRunningDriverTask(t, p, timerTask, action)
+	closeTestExecutorDriver(t, driver)
+	finishReadyDriverTasks(t, p, map[*G]*yieldingTestG{timerTask.g: timerTask})
+	if !TerminalG(p, waitTask.g) || !TerminalG(p, timerTask.g) || !waits.CanRelease() || !timers.CanRelease() {
+		t.Fatal("mixed source cleanup retained state")
+	}
+	runtime.KeepAlive(waitTask.frame.memory)
+	runtime.KeepAlive(timerTask.frame.memory)
 }
 
 func TestExecutorDriverEnforcesWaitTableOwner(t *testing.T) {
@@ -446,6 +861,55 @@ func TestExecutorDriverPostSleepRace(t *testing.T) {
 		}
 		runtime.KeepAlive(parked.frame.memory)
 	}
+}
+
+func TestExecutorDriverLiveTimerRejectsTerminalClose(t *testing.T) {
+	p := new(P)
+	driver, registry, waits, timers, _ := bindTestExecutorDriverWithTimers(t, p)
+	task := newYieldingTestG(t, "driver-live-timer-terminal")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue live-timer terminal task")
+	}
+	if next, ok := NextRunnableAt(p, 0); !ok || next != task.g {
+		t.Fatal("dequeue live-timer terminal task")
+	}
+	action := beginWaitTestResume(t, p, task)
+	token := new(WaitToken)
+	ticket, timer, result := PrepareExecutorTimerRegistration(driver, token, 100)
+	if result != TimerRegistrationPrepared {
+		t.Fatalf("prepare leaked terminal timer = (%d, %+v, %d)", ticket, timer, result)
+	}
+	task.frame.header.SuspendReason = uint16(SuspendFrameComplete)
+	task.frame.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PrepareComplete(task.g, task.handle, task.frame.header) {
+		t.Fatal("prepare live-timer terminal completion")
+	}
+	action, ok := Resumed(p, task.g, action)
+	if !ok || action.Kind != ActionCheckDestroy {
+		t.Fatal("resume live-timer terminal completion")
+	}
+	action, ok = Checked(p, task.g, action, true)
+	if !ok || action.Kind != ActionDestroy {
+		t.Fatal("check live-timer terminal destroy")
+	}
+	releaseTestFrame(t, task.g, task.frame)
+	if closeAction, committed := Destroyed(p, task.g, action); committed || closeAction != (Action{}) ||
+		driver.state != executorDriverActive {
+		t.Fatalf("live timer crossed terminal close = (%+v, %t), state=%d", closeAction, committed, driver.state)
+	}
+	if timers.Cancel(timer) != WaitCancelWon || !consumeUnclaimedCanceledWait(token, ticket) || !timers.Retire(timer) {
+		t.Fatal("clean leaked terminal timer after rejection")
+	}
+	closeAction, committed := Destroyed(p, task.g, action)
+	if !committed || closeAction.Kind != ActionTerminalExecutorClose || closeAction.Handle != nil {
+		t.Fatalf("terminal close after timer retirement = (%+v, %t)", closeAction, committed)
+	}
+	completed, terminal, ok := ConfirmTerminalExecutorClose(driver)
+	if !ok || completed != task.g || terminal.Kind != ActionComplete || !TerminalG(p, task.g) ||
+		!waits.CanRelease() || !timers.CanRelease() || !registry.CanRelease() {
+		t.Fatalf("confirm terminal close after timer retirement = (%p, %+v, %t)", completed, terminal, ok)
+	}
+	runtime.KeepAlive(task.frame.memory)
 }
 
 func TestExecutorDriverTerminalCloseDoesNotRedestroy(t *testing.T) {

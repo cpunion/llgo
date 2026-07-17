@@ -32,6 +32,14 @@ import (
 // the build cache. Observers must treat both arguments as read-only.
 type CoroPlanObserver func(pkg *ssa.Package, plan *coro.SSAPlan)
 
+// CoroFrameRetentionTimerABIV1 names the one current-frame pointer-retention
+// contract implemented by the native scheduler timer owner. It is deliberately
+// separate from //llgo:coro noblock: a nonblocking C call may still retain any
+// pointer passed to it. This identity authorizes cl to prove only the exact
+// prepare/park/retire transaction whose retained pointer dies before the
+// current LLVM coroutine frame can complete.
+const CoroFrameRetentionTimerABIV1 = coro.FrameRetentionTimerABIV1
+
 // Compilation contains immutable inputs shared by every package compiled as
 // part of one frontend compilation. Pass it by pointer and do not copy it after
 // first use. A CoroPlan remains report-only unless EnableCoroEntryResolution is
@@ -80,6 +88,12 @@ type Compilation struct {
 	// package identities. The factory itself lives in the uncached entry module,
 	// but every linked archive must agree with the runtime driver contract.
 	EnableCoroProgramBootstrapRun bool
+	// CoroFrameRetentionABI selects one compiler/runtime-owned contract under
+	// which x/tools Heap Allocs may be re-proved as current LLVM coroutine-frame
+	// storage. The zero value preserves the ordinary managed-allocation rule.
+	// Unknown identities and identities without runnable PhysicalABIV1 lowering
+	// fail before LLVM code generation.
+	CoroFrameRetentionABI string
 
 	// EmissionUniverse is the immutable, compilation-scoped set of exact SSA
 	// functions that cl may resolve while emitting this compilation. Active
@@ -136,6 +150,15 @@ func (c *Compilation) validateCoroABIIdentity(required bool) error {
 	}
 	if c.EnableCoroExplicitStatusPanicABI && !c.EnableCoroEntryResolution {
 		return fmt.Errorf("coroutine explicit-status panic ABI requires coroutine entry resolution")
+	}
+	switch c.CoroFrameRetentionABI {
+	case "":
+	case CoroFrameRetentionTimerABIV1:
+		if !c.EnableCoroEntryResolution || !c.EnableCoroPhysicalABI || !c.EnableCoroChildAwait || !c.EnableCoroProgramBootstrapRun {
+			return fmt.Errorf("coroutine frame-retention ABI %q requires runnable PhysicalABIV1 program-bootstrap lowering", c.CoroFrameRetentionABI)
+		}
+	default:
+		return fmt.Errorf("unknown coroutine frame-retention ABI %q", c.CoroFrameRetentionABI)
 	}
 	wantPanicABI := coro.PanicLegacyABIV0
 	if c.EnableCoroExplicitStatusPanicABI {

@@ -33,11 +33,15 @@ func TestCoroNativeTargetBuildSelection(t *testing.T) {
 		goarch     string
 		tags       string
 		native     bool
+		timer      bool
 		adapter    bool
 		doorbellOK bool
 	}{
 		{name: "linux-amd64-llgo", goos: "linux", goarch: "amd64", tags: "llgo,llgo_coro,llgo_coro_native_pipe,nogc", native: true, doorbellOK: true},
+		{name: "linux-amd64-timer", goos: "linux", goarch: "amd64", tags: "llgo,llgo_coro,llgo_coro_native_pipe,llgo_coro_native_timer,nogc", native: true, timer: true, doorbellOK: true},
 		{name: "darwin-arm64-llgo", goos: "darwin", goarch: "arm64", tags: "llgo,llgo_coro,llgo_coro_native_pipe,nogc", native: true, doorbellOK: true},
+		{name: "darwin-arm64-timer", goos: "darwin", goarch: "arm64", tags: "llgo,llgo_coro,llgo_coro_native_pipe,llgo_coro_native_timer,nogc", native: true, timer: true, doorbellOK: true},
+		{name: "linux-386-pipe-only", goos: "linux", goarch: "386", tags: "llgo,llgo_coro,llgo_coro_native_pipe,nogc", native: true, doorbellOK: true},
 		{name: "named-linux-without-capability", goos: "linux", goarch: "arm64", tags: "llgo,llgo_coro,nogc,nintendoswitch"},
 		{name: "host-go-fallback", goos: "linux", goarch: "amd64", tags: "llgo_coro,nogc"},
 		{name: "js-wasm-fallback", goos: "js", goarch: "wasm", tags: "llgo,llgo_coro,nogc"},
@@ -60,14 +64,24 @@ func TestCoroNativeTargetBuildSelection(t *testing.T) {
 				t.Fatalf("decode coroutine target package: %v", err)
 			}
 			native := slices.Contains(pkg.GoFiles, "coro_target_native_llgo.go")
+			timer := slices.Contains(pkg.GoFiles, "coro_executor_driver_timer_llgo.go") &&
+				slices.Contains(pkg.GoFiles, "coro_target_wait_timer_llgo.go") &&
+				slices.Contains(pkg.GoFiles, "coro_timer_owner_llgo.go")
+			legacyDriver := slices.Contains(pkg.GoFiles, "coro_executor_driver_legacy.go")
+			pipeWait := slices.Contains(pkg.GoFiles, "coro_target_wait_pipe_llgo.go")
 			fallback := slices.Contains(pkg.GoFiles, "coro_target_none.go")
 			adapter := slices.Contains(pkg.GoFiles, "coro_target_test_adapter.go")
-			if native != test.native || adapter != test.adapter || fallback != (!test.native && !test.adapter) {
-				t.Fatalf("GoFiles = %v, native=%t adapter=%t fallback=%t", pkg.GoFiles, native, adapter, fallback)
+			if native != test.native || timer != test.timer || legacyDriver == test.timer || pipeWait != (test.native && !test.timer) ||
+				adapter != test.adapter || fallback != (!test.native && !test.adapter) {
+				t.Fatalf("GoFiles = %v, native=%t timer=%t legacy-driver=%t pipe-wait=%t adapter=%t fallback=%t", pkg.GoFiles, native, timer, legacyDriver, pipeWait, adapter, fallback)
 			}
 			const doorbell = "github.com/goplus/llgo/runtime/internal/corodoorbell"
 			if imported := slices.Contains(pkg.Imports, doorbell); imported != test.doorbellOK {
 				t.Fatalf("Imports = %v, doorbell=%t", pkg.Imports, imported)
+			}
+			const clock = "github.com/goplus/llgo/runtime/internal/coroclock"
+			if imported := slices.Contains(pkg.Imports, clock); imported != test.timer {
+				t.Fatalf("Imports = %v, clock=%t", pkg.Imports, imported)
 			}
 		})
 	}

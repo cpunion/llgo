@@ -48,6 +48,10 @@ const (
 	coroWaitPrepareSymbolV1                                     = "__llgo_coro_wait_prepare_v1"
 	coroWaitRollbackSymbolV1                                    = "__llgo_coro_wait_rollback_v1"
 	coroWaitRetireCompletedSymbolV1                             = "__llgo_coro_wait_retire_completed_v1"
+	coroTimerPrepareAfterSymbolV1                               = "__llgo_coro_timer_prepare_after_v1"
+	coroTimerRetireCompletedSymbolV1                            = "__llgo_coro_timer_retire_completed_v1"
+	coroTimerPrepareAfterOrAbortSymbolV1                        = "__llgo_coro_timer_prepare_after_or_abort_v1"
+	coroTimerRetireCompletedOrAbortSymbolV1                     = "__llgo_coro_timer_retire_completed_or_abort_v1"
 
 	// Step kinds and semantic roles are part of the cross-target bootstrap ABI.
 	// Keep these numeric values synchronized with ssa and runtime/internal/coro.
@@ -594,6 +598,7 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 	if err != nil {
 		return [16]byte{}, fmt.Errorf("coroutine program bootstrap hash metadata: %w", err)
 	}
+	metadata.FrameRetentionABI = ctx.coroPlanMetadata.FrameRetentionABI
 	target := ctx.prog.TargetSpec()
 	h := sha256.New()
 	write := func(value string) {
@@ -626,6 +631,11 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 		if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
 			write("native-doorbell=pipe-poll-v1:" + coroNativePostWaitSymbolV1 + ":post(wait-slot:u32,wait-generation:u32,executor-slot:u32,executor-generation:u32)->u32")
 		}
+		if nativeCoroTimerRuntimeABI(ctx.buildConf) {
+			write("native-timer=monotonic-poll-deadline-v1:" +
+				coroTimerPrepareAfterOrAbortSymbolV1 + "(token:ptr,delay-ns:i64,ticket-out:*u32,timer-slot-out:*u32,timer-generation-out:*u32)->void;" +
+				coroTimerRetireCompletedOrAbortSymbolV1 + "(token:ptr,ticket:u32,timer-slot:u32,timer-generation:u32)->void")
+		}
 		write("header=physical-abi-v1")
 	} else {
 		write("factory=null")
@@ -636,6 +646,7 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 	write(metadata.SchedulerABI)
 	write(metadata.PanicABI)
 	write(metadata.FuncRepABI)
+	write(metadata.FrameRetentionABI)
 	write(target.Triple)
 	write(target.CPU)
 	write(target.Features)

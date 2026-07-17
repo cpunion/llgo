@@ -29,6 +29,7 @@ import (
 var (
 	coroProgramExecutorRegistryV1State coro.ExecutorRegistry
 	coroProgramWaitTableV1State        coro.WaitRegistrationTable
+	coroProgramTimerTableV1State       coro.TimerRegistrationTable
 	coroProgramExecutorDriverV1State   coro.ExecutorDriver
 	coroProgramExecutorHandleV1State   coro.ExecutorHandle
 	coroProgramExecutorBoundV1State    bool
@@ -47,11 +48,12 @@ func coroProgramBindExecutorV1() bool {
 		coroProgramExecutorHandleV1State != (coro.ExecutorHandle{}) ||
 		coroProgramExecutorDriverV1State != (coro.ExecutorDriver{}) ||
 		!coroProgramExecutorRegistryV1State.CanRelease() ||
-		!coroProgramWaitTableV1State.CanRelease() {
+		!coroProgramWaitTableV1State.CanRelease() ||
+		!coroProgramTimerTableV1State.CanRelease() {
 		return false
 	}
 	handle, ok := coroProgramExecutorRegistryV1State.Register()
-	if !ok || !coro.BindExecutor(
+	if !ok || !coroProgramBindExecutorDriverV1(
 		&coroProgramExecutorDriverV1State,
 		&coroProgramPV1State,
 		&coroProgramExecutorRegistryV1State,
@@ -70,7 +72,8 @@ func coroProgramExecutorRetiredV1() bool {
 		coroProgramExecutorHandleV1State == (coro.ExecutorHandle{}) ||
 		coroProgramExecutorDriverV1State != (coro.ExecutorDriver{}) ||
 		!coroProgramExecutorRegistryV1State.CanRelease() ||
-		!coroProgramWaitTableV1State.CanRelease() {
+		!coroProgramWaitTableV1State.CanRelease() ||
+		!coroProgramTimerTableV1State.CanRelease() {
 		return false
 	}
 	coroProgramExecutorBoundV1State = false

@@ -909,7 +909,33 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 				p.compileInstr(b, instr)
 				continue
 			}
-			p.currentCoro.countInstructionAndMaybeYield(b)
+			role := coroFrameRetentionInstructionNone
+			if p.currentCoro.frameRetention != nil {
+				role = p.currentCoro.frameRetention.roles[instr]
+			}
+			switch role {
+			case coroFrameRetentionInstructionPrepare:
+				if p.currentCoro.frameRetaining {
+					panic("nested coroutine frame-retention critical span")
+				}
+				// A retained frame pointer must never exist while an ordinary
+				// preemption handoff can make this G independently runnable. Poll
+				// immediately before the fail-stop prepare, then suppress budget
+				// polls until the exact fail-stop retire has returned.
+				if p.currentCoro.needsPreempt {
+					p.currentCoro.pollAndSuspendForPreempt(b)
+				}
+				p.currentCoro.instructions = 0
+				p.currentCoro.frameRetaining = true
+			case coroFrameRetentionInstructionPark, coroFrameRetentionInstructionRetire:
+				if !p.currentCoro.frameRetaining {
+					panic("coroutine frame-retention park/retire outside its critical span")
+				}
+			default:
+				if !p.currentCoro.frameRetaining {
+					p.currentCoro.countInstructionAndMaybeYield(b)
+				}
+			}
 		}
 		if i == 1 && doModInit && p.state == pkgInPatch { // in patch package but no pkgFNoOldInit
 			initFnNameOld := initFnNameOfHasPatch(p.fn.Name())
@@ -953,6 +979,11 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 			}
 		} else {
 			p.compileInstr(b, instr)
+		}
+		if p.currentCoro != nil && p.currentCoro.frameRetention != nil &&
+			p.currentCoro.frameRetention.roles[instr] == coroFrameRetentionInstructionRetire {
+			p.currentCoro.frameRetaining = false
+			p.currentCoro.instructions = 0
 		}
 	}
 	// is cgo cfunc but not return yet, some funcs has multiple blocks
@@ -1372,7 +1403,12 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			return
 		}
 		elem := p.type_(t.Elem(), llssa.InGo)
-		ret = b.Alloc(elem, v.Heap)
+		heap := v.Heap
+		if heap && p.currentCoro != nil && p.currentCoro.frameRetention != nil {
+			_, retained := p.currentCoro.frameRetention.allocations[v]
+			heap = !retained
+		}
+		ret = b.Alloc(elem, heap)
 	case *ssa.IndexAddr:
 		vx := v.X
 		if _, ok := p.isVArgs(vx); ok { // varargs: this is a varargs index

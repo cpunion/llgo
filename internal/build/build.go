@@ -1364,6 +1364,7 @@ func targetGCBuildTags(gc string) ([]string, error) {
 
 const (
 	coroNativePipeBuildTag        = "llgo_coro_native_pipe"
+	coroNativeTimerBuildTag       = "llgo_coro_native_timer"
 	coroNativeIngressTestBuildTag = "llgo_coro_native_ingress_test"
 )
 
@@ -1409,6 +1410,13 @@ func effectiveBuildTags(conf *Config, export crosscompile.Export) (string, error
 			// process pipe/poll environment.
 			tags = append(tags, coroNativePipeBuildTag)
 		}
+		if nativeCoroTimerRuntimeABI(conf) {
+			// The first clock ABI is intentionally restricted to native
+			// 64-bit POSIX targets. A separate compiler-owned tag keeps a
+			// 32-bit pipe backend from silently selecting an unverified libc
+			// timespec/time64 layout.
+			tags = append(tags, coroNativeTimerBuildTag)
+		}
 	}
 	tags = append(tags, conf.compilerBuildTags...)
 	gcTags, err := targetGCBuildTags(export.GC)
@@ -1425,7 +1433,7 @@ func effectiveBuildTags(conf *Config, export crosscompile.Export) (string, error
 func rejectCompilerReservedBuildTags(source string, tags []string) error {
 	for _, tag := range tags {
 		switch tag {
-		case coroNativePipeBuildTag, coroNativeIngressTestBuildTag:
+		case coroNativePipeBuildTag, coroNativeTimerBuildTag, coroNativeIngressTestBuildTag:
 			return fmt.Errorf("build tag %q from %s is a compiler-reserved capability and cannot be supplied externally", tag, source)
 		}
 	}
@@ -1484,6 +1492,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	var requiredPlain map[*ssa.Function]struct{}
 	var requiredDirectPlain []requiredCoroDirectPlainCallArgument
 	var requiredClosedDynamic map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate
+	var frameRetentionABI string
 	if ctx.coroEmission != nil && ctx.coroEmission.CompleteRuntimeABI() {
 		// Compiler-owned runtime edges belong only to a frozen whole-program
 		// universe containing the exact LLGo runtime package. Isolated frontend
@@ -1496,6 +1505,9 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		if err != nil {
 			return err
 		}
+		// Reaching this call proves that the complete runtime universe contained
+		// and validated the exact fail-stop timer owner roots.
+		frameRetentionABI = validatedCoroFrameRetentionABI(ctx, true)
 	}
 	managedEntryRoots, err := requiredCoroProgramManagedEntryRoots(ctx)
 	if err != nil {
@@ -1567,6 +1579,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		if err != nil {
 			return fmt.Errorf("build coroutine plan digest metadata: %w", err)
 		}
+		metadata.FrameRetentionABI = frameRetentionABI
 		digest, err = plan.CoroPlanDigest(metadata)
 		if err != nil {
 			return fmt.Errorf("build coroutine plan digest: %w", err)
@@ -1585,6 +1598,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		EnableCoroPlainDispatch:          ctx.buildConf.EnableCoroPlainDispatch,
 		EnableCoroClosedStaticSpawn:      ctx.buildConf.EnableCoroClosedStaticSpawn,
 		EnableCoroProgramBootstrapRun:    ctx.buildConf.EnableCoroProgramBootstrapRun,
+		CoroFrameRetentionABI:            frameRetentionABI,
 		CoroPlanDigest:                   digest,
 		CoroABI:                          metadata.CoroABI,
 		SchedulerABI:                     metadata.SchedulerABI,
@@ -1930,6 +1944,39 @@ func nativeCoroDoorbellRuntimeABI(conf *Config) bool {
 	return true
 }
 
+// nativeCoroTimerRuntimeABI is narrower than the retained pipe capability.
+// The current Linux clock_gettime declaration and Darwin uptime clock have a
+// verified 64-bit timespec domain; 32-bit libc time32/time64 variants require
+// a target-specific declaration or C wrapper before this capability can be
+// widened. Named and embedded targets remain excluded by the doorbell gate.
+func nativeCoroTimerRuntimeABI(conf *Config) bool {
+	if !nativeCoroDoorbellRuntimeABI(conf) {
+		return false
+	}
+	switch conf.Goos {
+	case "darwin":
+		return conf.Goarch == "amd64" || conf.Goarch == "arm64"
+	case "linux":
+		switch conf.Goarch {
+		case "amd64", "arm64", "loong64", "ppc64", "ppc64le", "riscv64", "s390x":
+			return true
+		}
+	}
+	return false
+}
+
+// validatedCoroFrameRetentionABI selects a lowering identity only after the
+// caller has successfully closed and signature-validated the compiler-owned
+// runtime root plan. The redundant complete-universe check keeps incomplete
+// report/test universes fail-closed even if this selector is called directly.
+func validatedCoroFrameRetentionABI(ctx *context, runtimePlanValidated bool) string {
+	if !runtimePlanValidated || ctx == nil || ctx.coroEmission == nil || !ctx.coroEmission.CompleteRuntimeABI() ||
+		!nativeCoroTimerRuntimeABI(ctx.buildConf) {
+		return ""
+	}
+	return cl.CoroFrameRetentionTimerABIV1
+}
+
 func configHasBuildTag(conf *Config, want string) bool {
 	if conf == nil || want == "" {
 		return false
@@ -2000,6 +2047,12 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 	}
 	if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
 		names = append(names, coroNativePostWaitSymbolV1)
+	}
+	if nativeCoroTimerRuntimeABI(ctx.buildConf) {
+		names = append(names,
+			coroTimerPrepareAfterOrAbortSymbolV1,
+			coroTimerRetireCompletedOrAbortSymbolV1,
+		)
 	}
 	if ctx.buildConf.EnableCoroProgramBootstrapRun {
 		names = append(names,
@@ -2101,6 +2154,34 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			for parameter := 1; parameter < sig.Params().Len(); parameter++ {
 				if !types.Identical(sig.Params().At(parameter).Type(), types.Typ[types.Uint32]) {
 					return nil, nil, nil, nil, fmt.Errorf("coroutine wait owner ABI %q must have exact func(unsafe.Pointer, uint32, uint32, uint32) bool signature", name)
+				}
+			}
+		}
+		if name == coroTimerPrepareAfterOrAbortSymbolV1 {
+			sig := fn.Signature
+			uint32Pointer := types.NewPointer(types.Typ[types.Uint32])
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 5 || sig.Results().Len() != 0 ||
+				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Params().At(1).Type(), types.Typ[types.Int64]) ||
+				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf("coroutine timer prepare-or-abort ABI %q must have exact func(unsafe.Pointer, int64, *uint32, *uint32, *uint32) signature", name)
+			}
+			for parameter := 2; parameter < sig.Params().Len(); parameter++ {
+				if !types.Identical(sig.Params().At(parameter).Type(), uint32Pointer) {
+					return nil, nil, nil, nil, fmt.Errorf("coroutine timer prepare-or-abort ABI %q must have exact func(unsafe.Pointer, int64, *uint32, *uint32, *uint32) signature", name)
+				}
+			}
+		}
+		if name == coroTimerRetireCompletedOrAbortSymbolV1 {
+			sig := fn.Signature
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 4 || sig.Results().Len() != 0 ||
+				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
+				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf("coroutine timer retire-or-abort ABI %q must have exact func(unsafe.Pointer, uint32, uint32, uint32) signature", name)
+			}
+			for parameter := 1; parameter < sig.Params().Len(); parameter++ {
+				if !types.Identical(sig.Params().At(parameter).Type(), types.Typ[types.Uint32]) {
+					return nil, nil, nil, nil, fmt.Errorf("coroutine timer retire-or-abort ABI %q must have exact func(unsafe.Pointer, uint32, uint32, uint32) signature", name)
 				}
 			}
 		}

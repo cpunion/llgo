@@ -163,7 +163,7 @@ func (pipe *Pipe) WaitBounded(timeoutMS int32) (woke, ok bool) {
 		if nativeBeforePollHookEnabled && !nativeBeforePollHook() {
 			return false, false
 		}
-		result, revents, errno := nativePipePoll(pipe.readFD, timeoutMS)
+		result, revents, errno := nativePipePollForWait(pipe.readFD, timeoutMS)
 		switch {
 		case result < 0 && nativeErrInterrupted(errno):
 			continue
@@ -179,6 +179,40 @@ func (pipe *Pipe) WaitBounded(timeoutMS int32) (woke, ok bool) {
 		default:
 			return false, false
 		}
+	}
+}
+
+// waitBoundedInterruptible performs at most one physical poll. Unlike
+// WaitBounded, EINTR is returned as an ordinary non-wake so an absolute-
+// deadline owner can resample its monotonic clock and recompute the remaining
+// timeout. The retained pending check and drain are repeated on every call, so
+// handing EINTR back to that owner does not open a lost-wake window.
+func (pipe *Pipe) waitBoundedInterruptible(timeoutMS int32) (woke, ok bool) {
+	if pipe == nil || nativeAtomicLoad(&pipe.open) != 1 || pipe.readFD < 0 || timeoutMS < 0 {
+		return false, false
+	}
+	if nativeAtomicExchange(&pipe.pending, 0) != 0 {
+		drained := pipe.Drain()
+		return drained, drained
+	}
+	if nativeBeforePollHookEnabled && !nativeBeforePollHook() {
+		return false, false
+	}
+	result, revents, errno := nativePipePollForWait(pipe.readFD, timeoutMS)
+	switch {
+	case result < 0 && nativeErrInterrupted(errno):
+		return false, true
+	case result < 0:
+		return false, false
+	case result == 0:
+		return false, true
+	case revents&physicalPollBadFD != 0:
+		return false, false
+	case revents&(physicalPollIn|physicalPollError|physicalPollHangup) != 0:
+		drained := pipe.Drain()
+		return drained, drained
+	default:
+		return false, false
 	}
 }
 

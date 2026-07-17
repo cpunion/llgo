@@ -113,6 +113,78 @@ func TestGo126PayloadsUseSourcePatchInsteadOfAltPkg(t *testing.T) {
 	}
 }
 
+func TestNativeCoroTimeSleepUsesSourcePatch(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("native coroutine time.Sleep patch requires Darwin or Linux")
+	}
+	overlay, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
+		goos:       runtime.GOOS,
+		goarch:     runtime.GOARCH,
+		buildFlags: []string{"-tags=llgo,llgo_coro,llgo_coro_native_pipe,llgo_coro_native_timer,nogc"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	timeDir := filepath.Join(runtime.GOROOT(), "src", "time")
+	patchFile := filepath.Join(timeDir, "z_llgo_patch_sleep_coro_native_llgo.go")
+	patch, ok := overlay[patchFile]
+	if !ok {
+		t.Fatalf("missing native coroutine time.Sleep patch %s", patchFile)
+	}
+	patchText := string(patch)
+	for _, want := range []string{
+		"func Sleep(d Duration)",
+		"C.__llgo_coro_timer_prepare_after_or_abort_v1",
+		"llgo.coroPark",
+		"C.__llgo_coro_timer_retire_completed_or_abort_v1",
+	} {
+		if !strings.Contains(patchText, want) {
+			t.Fatalf("native coroutine time.Sleep patch does not contain %q", want)
+		}
+	}
+	if count := strings.Count(patchText, "//llgo:coro noblock"); count != 2 {
+		t.Fatalf("native coroutine time.Sleep patch noblock certificates = %d, want 2", count)
+	}
+	for _, forbidden := range []string{"libuv", "bdwgc", "pthread", "make(chan", "go func"} {
+		if strings.Contains(patchText, forbidden) {
+			t.Fatalf("native coroutine time.Sleep patch unexpectedly contains %q", forbidden)
+		}
+	}
+
+	stdlibSleep := filepath.Join(timeDir, "sleep.go")
+	patchedStdlib, ok := overlay[stdlibSleep]
+	if !ok {
+		t.Fatalf("native coroutine time.Sleep patch did not filter %s", stdlibSleep)
+	}
+	parsed, err := parser.ParseFile(token.NewFileSet(), stdlibSleep, patchedStdlib, 0)
+	if err != nil {
+		t.Fatalf("parse filtered time/sleep.go: %v", err)
+	}
+	for _, decl := range parsed.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "Sleep" {
+			t.Fatal("filtered GOROOT time/sleep.go retained the original Sleep declaration")
+		}
+	}
+}
+
+func TestNativeCoroTimeSleepPatchIsCapabilityGated(t *testing.T) {
+	overlay, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
+		goos:       runtime.GOOS,
+		goarch:     runtime.GOARCH,
+		buildFlags: []string{"-tags=llgo,llgo_coro,llgo_coro_native_pipe,nogc"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	patchFile := filepath.Join(runtime.GOROOT(), "src", "time", "z_llgo_patch_sleep_coro_native_llgo.go")
+	if _, ok := overlay[patchFile]; ok {
+		t.Fatalf("native coroutine time.Sleep patch selected without timer capability: %s", patchFile)
+	}
+	if !llruntime.HasSourcePatchPkg("time") || llruntime.HasAltPkg("time") {
+		t.Fatalf("time patch registration = source:%t alt:%t", llruntime.HasSourcePatchPkg("time"), llruntime.HasAltPkg("time"))
+	}
+}
+
 func TestSyncAtomicRemainsAltPkg(t *testing.T) {
 	if llruntime.HasSourcePatchPkg("sync/atomic") {
 		t.Fatal("sync/atomic should not be registered as a source patch package")

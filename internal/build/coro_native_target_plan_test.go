@@ -60,6 +60,40 @@ func TestNativeCoroDoorbellRuntimeABISelection(t *testing.T) {
 	}
 }
 
+func TestNativeCoroTimerRuntimeABISelection(t *testing.T) {
+	tests := []struct {
+		name string
+		conf *Config
+		want bool
+	}{
+		{name: "nil"},
+		{name: "disabled", conf: &Config{Goos: "linux", Goarch: "amd64"}},
+		{name: "linux-amd64", conf: &Config{Goos: "linux", Goarch: "amd64", EnableCoroProgramBootstrapRun: true}, want: true},
+		{name: "linux-arm64", conf: &Config{Goos: "linux", Goarch: "arm64", EnableCoroProgramBootstrapRun: true}, want: true},
+		{name: "linux-loong64", conf: &Config{Goos: "linux", Goarch: "loong64", EnableCoroProgramBootstrapRun: true}, want: true},
+		{name: "linux-ppc64", conf: &Config{Goos: "linux", Goarch: "ppc64", EnableCoroProgramBootstrapRun: true}, want: true},
+		{name: "linux-ppc64le", conf: &Config{Goos: "linux", Goarch: "ppc64le", EnableCoroProgramBootstrapRun: true}, want: true},
+		{name: "linux-riscv64", conf: &Config{Goos: "linux", Goarch: "riscv64", EnableCoroProgramBootstrapRun: true}, want: true},
+		{name: "linux-s390x", conf: &Config{Goos: "linux", Goarch: "s390x", EnableCoroProgramBootstrapRun: true}, want: true},
+		{name: "darwin-amd64", conf: &Config{Goos: "darwin", Goarch: "amd64", EnableCoroProgramBootstrapRun: true}, want: true},
+		{name: "darwin-arm64", conf: &Config{Goos: "darwin", Goarch: "arm64", EnableCoroProgramBootstrapRun: true}, want: true},
+		{name: "darwin-loong64-not-a-supported-clock-target", conf: &Config{Goos: "darwin", Goarch: "loong64", EnableCoroProgramBootstrapRun: true}},
+		{name: "linux-386-unverified-time-abi", conf: &Config{Goos: "linux", Goarch: "386", EnableCoroProgramBootstrapRun: true}},
+		{name: "linux-arm-unverified-time-abi", conf: &Config{Goos: "linux", Goarch: "arm", EnableCoroProgramBootstrapRun: true}},
+		{name: "windows-amd64", conf: &Config{Goos: "windows", Goarch: "amd64", EnableCoroProgramBootstrapRun: true}},
+		{name: "named-target", conf: &Config{Goos: "linux", Goarch: "arm64", Target: "nintendoswitch", EnableCoroProgramBootstrapRun: true}},
+		{name: "baremetal", conf: &Config{Goos: "linux", Goarch: "arm64", Tags: "baremetal", EnableCoroProgramBootstrapRun: true}},
+		{name: "adapter-test", conf: &Config{Goos: "linux", Goarch: "amd64", Tags: "coro_runtime_adapter_test", EnableCoroProgramBootstrapRun: true}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := nativeCoroTimerRuntimeABI(test.conf); got != test.want {
+				t.Fatalf("native coroutine timer selection = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestEffectiveBuildTagsRejectsForgedNativeCapability(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -138,6 +172,77 @@ func TestEffectiveBuildTagsRejectsForgedNativeIngressTestCapability(t *testing.T
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %q, want %q", err, want)
 		}
+	}
+}
+
+func TestEffectiveBuildTagsRejectsForgedNativeTimerCapability(t *testing.T) {
+	tests := []struct {
+		name       string
+		conf       *Config
+		export     crosscompile.Export
+		wantSource string
+	}{
+		{
+			name:       "config-tags",
+			conf:       &Config{Tags: "nogc," + coroNativeTimerBuildTag},
+			wantSource: "Config.Tags",
+		},
+		{
+			name:       "go-build-flags-equals",
+			conf:       &Config{GoBuildFlags: []string{"-tags=nogc," + coroNativeTimerBuildTag}},
+			wantSource: "Config.GoBuildFlags",
+		},
+		{
+			name:       "go-build-flags-pair",
+			conf:       &Config{GoBuildFlags: []string{"--tags", "nogc " + coroNativeTimerBuildTag}},
+			wantSource: "Config.GoBuildFlags",
+		},
+		{
+			name: "named-target-build-tags",
+			conf: &Config{
+				Goos: "linux", Goarch: "arm64", Target: "nintendoswitch",
+				EnableCoroProgramBootstrapRun: true,
+			},
+			export:     crosscompile.Export{BuildTags: []string{"nintendoswitch", coroNativeTimerBuildTag}},
+			wantSource: "named-target BuildTags",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := effectiveBuildTags(test.conf, test.export)
+			if err == nil {
+				t.Fatal("forged native timer capability was accepted")
+			}
+			for _, want := range []string{coroNativeTimerBuildTag, test.wantSource, "compiler-reserved capability"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("error = %q, want %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestEffectiveBuildTagsKeepsNativeTimerCapabilityCompilerOwned(t *testing.T) {
+	conf := &Config{Goos: "linux", Goarch: "amd64", EnableCoroProgramBootstrapRun: true}
+	tags, err := effectiveBuildTags(conf, crosscompile.Export{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	effective := strings.Split(tags, ",")
+	for _, want := range []string{coroNativePipeBuildTag, coroNativeTimerBuildTag} {
+		if !slices.Contains(effective, want) {
+			t.Fatalf("effective tags = %q, missing %q", tags, want)
+		}
+	}
+
+	conf.Goarch = "arm"
+	tags, err = effectiveBuildTags(conf, crosscompile.Export{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	effective = strings.Split(tags, ",")
+	if !slices.Contains(effective, coroNativePipeBuildTag) || slices.Contains(effective, coroNativeTimerBuildTag) {
+		t.Fatalf("32-bit effective tags = %q, want pipe without unverified timer", tags)
 	}
 }
 
