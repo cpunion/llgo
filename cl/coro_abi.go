@@ -449,22 +449,6 @@ func coroParkPrepareSignature() *types.Signature {
 	return types.NewSignatureType(nil, nil, nil, params, nil, false)
 }
 
-func coroRunDecisionTakeSignature() *types.Signature {
-	uint32Type := types.Typ[types.Uint32]
-	uint32Pointer := types.NewPointer(uint32Type)
-	params := types.NewTuple(
-		types.NewParam(token.NoPos, nil, "g", types.Typ[types.UnsafePointer]),
-		types.NewParam(token.NoPos, nil, "expectedEpoch", uint32Type),
-		types.NewParam(token.NoPos, nil, "expectedGeneration", uint32Type),
-		types.NewParam(token.NoPos, nil, "outcome", uint32Pointer),
-		types.NewParam(token.NoPos, nil, "caseID", uint32Pointer),
-		types.NewParam(token.NoPos, nil, "taskKind", uint32Pointer),
-		types.NewParam(token.NoPos, nil, "operationSourceSlot", uint32Pointer),
-		types.NewParam(token.NoPos, nil, "operationGeneration", uint32Pointer),
-	)
-	return types.NewSignatureType(nil, nil, nil, params, nil, false)
-}
-
 func coroRunDecisionTakeZeroSignature() *types.Signature {
 	params := types.NewTuple(types.NewParam(token.NoPos, nil, "g", types.Typ[types.UnsafePointer]))
 	results := types.NewTuple(types.NewParam(token.NoPos, nil, "taskKind", types.Typ[types.Uint32]))
