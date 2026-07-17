@@ -83,6 +83,21 @@ jobs:
             ./internal/runtime/coro_target_test_adapter.go \
             ./internal/runtime/coro_program_test.go \
             -run '^TestCoroProgram' -count=1
+          # Exercise the production typed hchan queue and exact coroutine
+          # source transaction together. Test-only C/pthread symbols keep this
+          # a dependency-free named source island on both host and wasm.
+          go test -race -shuffle=on -tags=coro_channel_adapter_test \
+            ./internal/runtime/z_chan.go \
+            ./internal/runtime/z_chan_coro.go \
+            ./internal/runtime/coro_channel_adapter_test.go \
+            -run '^TestCoroChannelAdapter' -count=1
+          GOOS=js GOARCH=wasm CGO_ENABLED=0 go test \
+            -tags=coro_channel_adapter_test \
+            -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" \
+            ./internal/runtime/z_chan.go \
+            ./internal/runtime/z_chan_coro.go \
+            ./internal/runtime/coro_channel_adapter_test.go \
+            -run '^TestCoroChannelAdapter' -count=1
           go test ./internal/corotimer -run '^TestDeadlineAfter$' -count=1
 
       - name: Link named freestanding WebAssembly targets

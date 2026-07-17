@@ -56,3 +56,8 @@ func coroTargetBeginExecutorWaitV1(coro.ExecutorHandle, uint32, int64, bool) cor
 func coroTargetPollExecutorWakeV1(coro.ExecutorHandle, uint32) coroTargetDispatchResultV1 {
 	return coroTargetDispatchInvalidV1
 }
+
+func coroTargetRequestExecutorV1(handle coro.ExecutorHandle) bool {
+	result := coroProgramExecutorRegistryV1State.Request(handle)
+	return result == coro.ExecutorRequestPublished || result == coro.ExecutorRequestCoalesced
+}

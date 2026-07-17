@@ -436,6 +436,10 @@ func __llgo_coro_run_decision_take_v1(unsafe.Pointer, uint32, uint32, *uint32, *
 func __llgo_coro_run_decision_take_zero_v1(unsafe.Pointer) uint32 { return 0 }
 func __llgo_coro_complete_prepare_v1() {}
 func __llgo_coro_frame_free_v1() {}
+func __llgo_coro_chan_send_park_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uintptr) {}
+func __llgo_coro_chan_recv_park_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uintptr) {}
+func __llgo_coro_chan_resume_v1(unsafe.Pointer, unsafe.Pointer) uint32 { return 0 }
+func __llgo_coro_chan_send_closed_panic_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_panic_prepare_v1() {}
 func __llgo_coro_spawn_begin_v1() {}
 func __llgo_coro_spawn_commit_v1() {}
@@ -725,6 +729,50 @@ func atomicExchange(*uint32, uint32) uint32
 	}
 	if len(panicDirect) != 0 || len(panicClosed) != 0 {
 		t.Fatalf("explicit-status panic hook produced callback proofs: direct=%d dynamic=%d", len(panicDirect), len(panicClosed))
+	}
+	channelCtx := &context{
+		buildConf: &Config{
+			EnableCoroChildAwait:          true,
+			EnableCoroProgramBootstrapRun: true,
+			EnableCoroChannel:             true,
+		},
+		coroEmission:    ctx.coroEmission,
+		coroSSAEmission: ctx.coroSSAEmission,
+	}
+	channelRoots, channelPlain, channelDirect, channelClosed, err := requiredCoroProgramRuntimePlan(channelCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	channelNames := []string{
+		coroChanSendParkSymbolV1,
+		coroChanRecvParkSymbolV1,
+		coroChanResumeSymbolV1,
+		coroChanSendClosedPanicSymbolV1,
+	}
+	if len(channelRoots) != len(wantRoots)+len(channelNames) {
+		t.Fatalf("channel runtime roots = %d, want %d", len(channelRoots), len(wantRoots)+len(channelNames))
+	}
+	for _, name := range channelNames {
+		fn := ssaPkg.Func(name)
+		if fn == nil {
+			t.Fatalf("channel runtime hook %q is absent", name)
+		}
+		if _, ok := channelPlain[fn]; !ok {
+			t.Fatalf("channel runtime hook %q is not a required plain root", name)
+		}
+	}
+	if len(channelDirect) != 0 || len(channelClosed) != 0 {
+		t.Fatalf("channel hooks produced callback proofs: direct=%d dynamic=%d", len(channelDirect), len(channelClosed))
+	}
+	channelResume := ssaPkg.Func(coroChanResumeSymbolV1)
+	originalChannelResumeSignature := channelResume.Signature
+	channelResume.Signature = types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(types.NewParam(token.NoPos, nil, "g", types.Typ[types.UnsafePointer])),
+		types.NewTuple(types.NewParam(token.NoPos, nil, "status", types.Typ[types.Uint32])), false)
+	_, _, _, _, invalidChannelResumeErr := requiredCoroProgramRuntimePlan(channelCtx)
+	channelResume.Signature = originalChannelResumeSignature
+	if invalidChannelResumeErr == nil || !strings.Contains(invalidChannelResumeErr.Error(), "channel resume ABI") {
+		t.Fatalf("invalid channel resume ABI error = %v", invalidChannelResumeErr)
 	}
 	spawnCtx := &context{
 		buildConf: &Config{
@@ -2118,7 +2166,9 @@ func TestActiveCoroABIVersions(t *testing.T) {
 		{"explicit status panic", &Config{EnableCoroExplicitStatusPanicABI: true}, coro.EntryResolutionABIV0, coro.SchedulerNoneABIV0, coro.PanicExplicitStatusABIV0, coro.FuncRepABIV0},
 		{"plain dispatch", &Config{EnableCoroPlainDispatch: true}, coro.EntryResolutionABIV0, coro.SchedulerNoneABIV0, coro.PanicLegacyABIV0, coro.FuncRepABIV1},
 		{"child await", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true}, coro.PhysicalABIV1, coro.SchedulerChildAwaitABIV0, coro.PanicLegacyABIV0, coro.FuncRepABIV0},
+		{"channel", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true, EnableCoroChannel: true, EnableCoroProgramBootstrapRun: true}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapChannelABIV0, coro.PanicLegacyABIV0, coro.FuncRepABIV0},
 		{"closed static spawn", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true, EnableCoroClosedStaticSpawn: true, EnableCoroProgramBootstrapRun: true}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0, coro.PanicLegacyABIV0, coro.FuncRepABIV0},
+		{"channel and closed static spawn", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true, EnableCoroChannel: true, EnableCoroClosedStaticSpawn: true, EnableCoroProgramBootstrapRun: true}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0, coro.PanicLegacyABIV0, coro.FuncRepABIV0},
 		{"program bootstrap runtime with plain dispatch", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true, EnableCoroPlainDispatch: true, EnableCoroProgramBootstrapRun: true}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapABIV2, coro.PanicLegacyABIV0, coro.FuncRepABIV1},
 	}
 	for _, test := range tests {
@@ -2264,6 +2314,11 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 			name: "program bootstrap runtime requires descriptor ABI",
 			conf: Config{BuildMode: BuildModeExe, EnableCoroEntryResolution: true, EnableCoroPhysicalABI: true, EnableCoroChildAwait: true, EnableCoroProgramBootstrapRun: true},
 			want: "program bootstrap ABI is required",
+		},
+		{
+			name: "channel requires runnable program bootstrap",
+			conf: Config{BuildMode: BuildModeExe, EnableCoroEntryResolution: true, EnableCoroPhysicalABI: true, EnableCoroChildAwait: true, EnableCoroChannel: true},
+			want: "runnable program bootstrap is required",
 		},
 		{
 			name: "program bootstrap requires entry resolution",

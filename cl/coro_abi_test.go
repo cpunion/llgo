@@ -2057,21 +2057,21 @@ func assertCoroScalarRunDecisionCalls(t *testing.T, name, body string, want int)
 	if got := len(matches); got != want {
 		t.Fatalf("%s scalar zero-ticket dispatches = %d, want %d:\n%s", name, got, want, body)
 	}
-	unsupported := ""
+	cancellation := ""
 	for _, match := range matches {
 		if match[1] != match[3] || match[2] != match[4] {
 			t.Fatalf("%s scalar run-decision result does not directly control its branch: %v:\n%s", name, match, body)
 		}
-		if unsupported == "" {
-			unsupported = match[5]
-		} else if match[5] != unsupported {
-			t.Fatalf("%s run-decision gates do not share one unsupported target: %s and %s:\n%s",
-				name, unsupported, match[5], body)
+		if cancellation == "" {
+			cancellation = match[5]
+		} else if match[5] != cancellation {
+			t.Fatalf("%s run-decision gates do not share one cancellation target: %s and %s:\n%s",
+				name, cancellation, match[5], body)
 		}
 	}
-	trap := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(unsupported) + `:.*\n\s+call void @llvm\.trap\(\)\n\s+unreachable`)
-	if unsupported == "" || !trap.MatchString(body) {
-		t.Fatalf("%s shared unsupported decision target %q is not trap/unreachable:\n%s", name, unsupported, body)
+	cleanup := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(cancellation) + `:.*\n\s+br label %[-a-zA-Z$._0-9]+`)
+	if cancellation == "" || !cleanup.MatchString(body) {
+		t.Fatalf("%s shared cancellation target %q does not branch to completion:\n%s", name, cancellation, body)
 	}
 }
 
@@ -2127,9 +2127,16 @@ func compileCoroDecisionFrameProbe(t *testing.T, target *llssa.Target, scalarGat
 	b := ctx.fn.MakeBody(1)
 	defer b.Dispose()
 	body := ctx.beginCoroBody(b, abi)
+	body.completion = ctx.fn.MakeBlock()
+	body.finalSuspend = ctx.fn.MakeBlock()
+	body.bindCancellationCompletion(b)
 	b.SetBlock(body.coro.InitialResumeBlock())
 	body.activate(b)
-	body.coro.Finish()
+	b.Jump(body.completion)
+	b.SetBlock(body.completion)
+	body.complete(b)
+	b.SetBlock(body.finalSuspend)
+	body.finish(b)
 	b.EndBuild()
 	module := pkg.Module()
 	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {

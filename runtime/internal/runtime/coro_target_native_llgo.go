@@ -88,6 +88,30 @@ func coroTargetPollExecutorWakeV1(coro.ExecutorHandle, uint32) coroTargetDispatc
 	return coroTargetDispatchInvalidV1
 }
 
+// coroTargetRequestExecutorV1 is the common durable-source wake tail for
+// channel commits. It holds the target ingress lease across registry request,
+// optional pipe ring, and Leave so native shutdown cannot retire the static
+// target state in the Post -> Request -> Doorbell window.
+func coroTargetRequestExecutorV1(handle coro.ExecutorHandle) bool {
+	state := &coroNativeTargetV1State
+	if !state.ingress.Enter() {
+		return false
+	}
+	if !state.started || state.handle != handle {
+		_, _ = state.ingress.Leave()
+		return false
+	}
+	result := coroProgramExecutorRegistryV1State.Request(handle)
+	accepted := result == coro.ExecutorRequestPublished || result == coro.ExecutorRequestCoalesced ||
+		result == coro.ExecutorRequestIdleWake
+	ringOK := true
+	if coro.ExecutorRequestNeedsDoorbell(result) {
+		ringOK = state.doorbell.Ring()
+	}
+	_, leaveOK := state.ingress.Leave()
+	return accepted && ringOK && leaveOK
+}
+
 func coroTargetBeginExecutorCloseV1(handle coro.ExecutorHandle, epoch uint32) coroTargetDispatchResultV1 {
 	state := &coroNativeTargetV1State
 	if !state.started || state.handle != handle || epoch == 0 || state.waitEpoch != 0 || state.runEpoch != 0 || !state.ingress.Seal() {

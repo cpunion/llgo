@@ -448,6 +448,14 @@ func (p Program) rtType(name string) Type {
 	return p.rawType(p.rtNamed(name))
 }
 
+// RuntimeType returns the target-specific physical layout of one named LLGo
+// runtime type. Compiler-owned lowering uses this only for typed storage whose
+// address may cross an LLVM coroutine suspension; no runtime aggregate is
+// passed through a C ABI.
+func (p Program) RuntimeType(name string) Type {
+	return p.rtType(name)
+}
+
 func (p Program) rtEface() llvm.Type {
 	if p.rtEfaceTy.IsNil() {
 		p.rtEfaceTy = p.rtType("Eface").ll

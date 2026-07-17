@@ -932,8 +932,13 @@ type Config struct {
 	// preserves the descriptor-only ABI gate as an independently testable and
 	// reversible boundary.
 	EnableCoroProgramBootstrapRun bool
-	CoroPlanBuilder               CoroPlanBuilder
-	CoroPlanObserver              CoroPlanObserver
+	// EnableCoroChannel enables compiler-owned stackless lowering for direct
+	// blocking channel send/receive. It requires the runnable PhysicalABIV1
+	// program bootstrap and freezes its runtime hooks/helper edges before plan
+	// analysis and package caching.
+	EnableCoroChannel bool
+	CoroPlanBuilder   CoroPlanBuilder
+	CoroPlanObserver  CoroPlanObserver
 
 	// compilerBuildTags is a compiler-owned channel for isolated runtime-island
 	// builds that deliberately do not enable the complete program-bootstrap
@@ -1462,6 +1467,11 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	if ctx.buildConf.EnableCoroChildAwait && !ctx.buildConf.EnableCoroPhysicalABI {
 		return fmt.Errorf("enable coroutine child await: coroutine physical ABI is required")
 	}
+	if ctx.buildConf.EnableCoroChannel {
+		if !ctx.buildConf.EnableCoroChildAwait || !ctx.buildConf.EnableCoroProgramBootstrapRun {
+			return fmt.Errorf("enable coroutine channel lowering: runnable PhysicalABIV1 program bootstrap is required")
+		}
+	}
 	if ctx.buildConf.EnableCoroPlainDispatch && !ctx.buildConf.EnableCoroEntryResolution {
 		return fmt.Errorf("enable coroutine plain dispatch: coroutine entry resolution is required")
 	}
@@ -1598,6 +1608,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		EnableCoroPlainDispatch:          ctx.buildConf.EnableCoroPlainDispatch,
 		EnableCoroClosedStaticSpawn:      ctx.buildConf.EnableCoroClosedStaticSpawn,
 		EnableCoroProgramBootstrapRun:    ctx.buildConf.EnableCoroProgramBootstrapRun,
+		EnableCoroChannel:                ctx.buildConf.EnableCoroChannel,
 		CoroFrameRetentionABI:            frameRetentionABI,
 		CoroPlanDigest:                   digest,
 		CoroABI:                          metadata.CoroABI,
@@ -1902,7 +1913,13 @@ func requiredCoroProgramManagedEntryRoots(ctx *context) (coro.Roots, error) {
 
 func activeCoroSchedulerABIVersion(conf *Config) string {
 	if conf != nil && conf.EnableCoroClosedStaticSpawn {
+		if conf.EnableCoroChannel {
+			return coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+		}
 		return coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0
+	}
+	if conf != nil && conf.EnableCoroChannel {
+		return coro.SchedulerProgramBootstrapChannelABIV0
 	}
 	if conf != nil && conf.EnableCoroProgramBootstrapRun {
 		return coro.SchedulerProgramBootstrapABIV2
@@ -2090,6 +2107,14 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			"__llgo_coro_frame_free_v1",
 		)
 	}
+	if ctx.buildConf.EnableCoroChannel {
+		names = append(names,
+			coroChanSendParkSymbolV1,
+			coroChanRecvParkSymbolV1,
+			coroChanResumeSymbolV1,
+			coroChanSendClosedPanicSymbolV1,
+		)
+	}
 	if ctx.buildConf.EnableCoroExplicitStatusPanicABI {
 		// Physical coroutine bodies reference this hook from compiler-generated
 		// IR, so the source SSA graph has no edge that could retain it. Keep the
@@ -2251,6 +2276,43 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			for parameter := 3; parameter < sig.Params().Len(); parameter++ {
 				if !types.Identical(sig.Params().At(parameter).Type(), uint32Pointer) {
 					return nil, nil, nil, nil, fmt.Errorf("coroutine run-decision ABI %q must have exact func(unsafe.Pointer, uint32, uint32, *uint32, *uint32, *uint32, *uint32, *uint32) signature", name)
+				}
+			}
+		}
+		if name == coroChanSendParkSymbolV1 || name == coroChanRecvParkSymbolV1 {
+			sig := fn.Signature
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 7 || sig.Results().Len() != 0 ||
+				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf("coroutine channel park ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uintptr) signature", name)
+			}
+			for parameter := 0; parameter < 6; parameter++ {
+				if !types.Identical(sig.Params().At(parameter).Type(), types.Typ[types.UnsafePointer]) {
+					return nil, nil, nil, nil, fmt.Errorf("coroutine channel park ABI %q must use unsafe.Pointer for parameter %d", name, parameter)
+				}
+			}
+			if !types.Identical(sig.Params().At(6).Type(), types.Typ[types.Uintptr]) {
+				return nil, nil, nil, nil, fmt.Errorf("coroutine channel park ABI %q must use uintptr element size", name)
+			}
+		}
+		if name == coroChanResumeSymbolV1 {
+			sig := fn.Signature
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 2 || sig.Results().Len() != 1 ||
+				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Params().At(1).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Results().At(0).Type(), types.Typ[types.Uint32]) ||
+				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf("coroutine channel resume ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer) uint32 signature", name)
+			}
+		}
+		if name == coroChanSendClosedPanicSymbolV1 {
+			sig := fn.Signature
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 3 || sig.Results().Len() != 0 ||
+				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf("coroutine channel send-closed panic ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) signature", name)
+			}
+			for parameter := 0; parameter < sig.Params().Len(); parameter++ {
+				if !types.Identical(sig.Params().At(parameter).Type(), types.Typ[types.UnsafePointer]) {
+					return nil, nil, nil, nil, fmt.Errorf("coroutine channel send-closed panic ABI %q must use unsafe.Pointer for parameter %d", name, parameter)
 				}
 			}
 		}
@@ -2630,6 +2692,7 @@ func prepareCoroEmissionUniverse(ctx *context, packages []*aPackage) error {
 		// must freeze every hidden compiler/runtime ABI edge. Isolated plan tests
 		// and report-only builds preserve the legacy incomplete-package behavior.
 		CompleteRuntimeABI: hasRuntimeABI && ctx.buildConf != nil && ctx.buildConf.EnableCoroEntryResolution,
+		EnableCoroChannel:  ctx.buildConf != nil && ctx.buildConf.EnableCoroChannel,
 	})
 	if err != nil {
 		return err

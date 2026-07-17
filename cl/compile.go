@@ -1358,7 +1358,11 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			b.AssertNilDeref(x)
 		}
 		if v.Op == token.ARROW {
-			ret = b.Recv(x, v.CommaOk)
+			if p.currentCoro != nil && p.compilation != nil && p.compilation.EnableCoroChannel {
+				ret = p.compileCoroChanRecv(b, v, x)
+			} else {
+				ret = b.Recv(x, v.CommaOk)
+			}
 		} else {
 			if v.Op == token.MUL {
 				if t := p.type_(v.Type(), llssa.InGo); t.RawType() != nil && p.prog.SizeOf(t) == 0 {
@@ -1755,7 +1759,11 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		ch := p.compileValue(b, v.Chan)
 		x := p.compileValue(b, v.X)
 		p.recordPanicLocation(b, v.Pos())
-		b.Send(ch, x)
+		if p.currentCoro != nil && p.compilation != nil && p.compilation.EnableCoroChannel {
+			p.compileCoroChanSend(b, ch, x)
+		} else {
+			b.Send(ch, x)
+		}
 	case *ssa.DebugRef:
 		if enableDbgSyms && v.Parent().Origin() == nil {
 			p.debugRef(b, v)

@@ -178,6 +178,18 @@ func TestCompilationCoroABIIdentityValidation(t *testing.T) {
 	if err := programBootstrap.validateCoroABIIdentity(false); err != nil {
 		t.Fatalf("complete program-bootstrap ABI identity: %v", err)
 	}
+	channel := newChildAwait()
+	channel.EnableCoroProgramBootstrapRun = true
+	channel.EnableCoroChannel = true
+	channel.SchedulerABI = coro.SchedulerProgramBootstrapChannelABIV0
+	if err := channel.validateCoroABIIdentity(false); err != nil {
+		t.Fatalf("complete channel ABI identity: %v", err)
+	}
+	withoutChannelBootstrap := *channel
+	withoutChannelBootstrap.EnableCoroProgramBootstrapRun = false
+	if err := withoutChannelBootstrap.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "requires runnable PhysicalABIV1") {
+		t.Fatalf("channel bootstrap dependency error = %v", err)
+	}
 	frameRetention := newFrameRetention()
 	if err := frameRetention.validateCoroABIIdentity(false); err != nil {
 		t.Fatalf("complete frame-retention ABI identity: %v", err)
@@ -198,6 +210,12 @@ func TestCompilationCoroABIIdentityValidation(t *testing.T) {
 	closedStaticSpawn.SchedulerABI = coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0
 	if err := closedStaticSpawn.validateCoroABIIdentity(false); err != nil {
 		t.Fatalf("complete closed-static-spawn ABI identity: %v", err)
+	}
+	channelAndSpawn := *closedStaticSpawn
+	channelAndSpawn.EnableCoroChannel = true
+	channelAndSpawn.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	if err := channelAndSpawn.validateCoroABIIdentity(false); err != nil {
+		t.Fatalf("complete channel plus closed-static-spawn ABI identity: %v", err)
 	}
 	closedStaticSpawn.EnableCoroProgramBootstrapRun = false
 	if err := closedStaticSpawn.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "runnable program-bootstrap v2") {

@@ -281,7 +281,7 @@ func (b Builder) Times(n Expr, loop func(i Expr)) {
 }
 
 // -----------------------------------------------------------------------------
-/*
+
 type caseStmt struct {
 	v   llvm.Value
 	blk llvm.BasicBlock
@@ -315,7 +315,7 @@ func (b Builder) Switch(v Expr, defb BasicBlock) Switch {
 	dbgInstrf("Switch %v, _llgo_%v\n", v.impl, defb.idx)
 	return &aSwitch{v.impl, defb.first, nil}
 }
-*/
+
 // -----------------------------------------------------------------------------
 
 // Phi represents a phi node.

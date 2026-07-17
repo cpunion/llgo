@@ -59,6 +59,15 @@ func coroSpawnCommitV1(parentPointer, childPointer, handle unsafe.Pointer) bool 
 // handle, never a child G pointer. The stable registration table owns any
 // P/WaitToken references until it is quiesced and retired.
 func coroReleaseCompletedTask(g *coroG) bool {
+	// A compiler resume gate turns task cancellation into ordinary terminal
+	// frame completion after source-specific park cleanup. The cancellation
+	// record remains sticky until the G is physically dead; acknowledge it here
+	// before applying the normal reclaimability/storage transfer contract.
+	if !coro.ReclaimableG(g) &&
+		!coro.AcknowledgeTaskCancellation(g, coro.TaskCancelAbort) &&
+		!coro.AcknowledgeTaskCancellation(g, coro.TaskCancelShutdown) {
+		return false
+	}
 	owned, ok := coro.TaskStorageOwned(g)
 	if !ok {
 		return false

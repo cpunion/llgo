@@ -217,3 +217,16 @@ func coroTargetPollExecutorWakeV1(handle coro.ExecutorHandle, epoch uint32) coro
 	state.waitEpoch = 0
 	return coroTargetDispatchCompleteV1
 }
+
+func coroTargetRequestExecutorV1(handle coro.ExecutorHandle) bool {
+	state := &coroProgramTestTargetV1State
+	if !state.started || state.handle != handle {
+		return false
+	}
+	result := coroProgramExecutorRegistryV1State.Request(handle)
+	if result == coro.ExecutorRequestIdleWake {
+		state.wakeReady = true
+	}
+	return result == coro.ExecutorRequestPublished || result == coro.ExecutorRequestCoalesced ||
+		result == coro.ExecutorRequestIdleWake
+}

@@ -64,6 +64,11 @@ type chanWaiter struct {
 
 	sel       *selectState
 	caseIndex int
+	// coro is non-nil only for a compiler-spilled stackless waiter. Such a
+	// waiter never owns pthread mutex/cond state; z_chan_coro.go commits it
+	// through the exact ChannelOperationSource transaction before any typed
+	// payload or completion status is published.
+	coro *CoroChanParkV1
 }
 
 type selectState struct {
@@ -107,6 +112,18 @@ func (q *chanWaitq) enqueue(w *chanWaiter) {
 		q.last.next = w
 	}
 	q.last = w
+}
+
+func (q *chanWaitq) enqueueFront(w *chanWaiter) {
+	w.prev = nil
+	w.next = q.first
+	w.queued = true
+	if q.first == nil {
+		q.last = w
+	} else {
+		q.first.prev = w
+	}
+	q.first = w
 }
 
 func (q *chanWaitq) dequeue() *chanWaiter {
@@ -256,6 +273,10 @@ func (w *chanWaiter) wait() {
 }
 
 func (w *chanWaiter) finish(status waitStatus) {
+	if w.coro != nil {
+		coroRuntimeAbort("pthread completion used for coroutine channel waiter")
+		return
+	}
 	if w.sel != nil {
 		w.sel.mutex.Lock()
 		w.sel.status = status
@@ -270,6 +291,9 @@ func (w *chanWaiter) finish(status waitStatus) {
 }
 
 func claimWaiter(w *chanWaiter) bool {
+	if w.coro != nil {
+		return false
+	}
 	if w.sel != nil {
 		w.sel.mutex.Lock()
 		if w.sel.status != waitPending {
@@ -284,9 +308,12 @@ func claimWaiter(w *chanWaiter) bool {
 	return true
 }
 
-func completeRecvWaiter(w *chanWaiter, src unsafe.Pointer, eltSize int, status waitStatus) bool {
+func completeRecvWaiter(w *chanWaiter, src unsafe.Pointer, eltSize int, status waitStatus) coroChanMatchResult {
+	if w.coro != nil {
+		return commitCoroRecvWaiterLocked(w, src, eltSize, status)
+	}
 	if !claimWaiter(w) {
-		return false
+		return coroChanMatchDiscarded
 	}
 	if status.recvOK() {
 		copyChanElem(w.elem, src, eltSize)
@@ -294,24 +321,30 @@ func completeRecvWaiter(w *chanWaiter, src unsafe.Pointer, eltSize int, status w
 		zeroChanRecv(w.elem, eltSize)
 	}
 	w.finish(status)
-	return true
+	return coroChanMatchCommitted
 }
 
-func completeSendWaiter(w *chanWaiter, status waitStatus) bool {
+func completeSendWaiter(w *chanWaiter, status waitStatus) coroChanMatchResult {
+	if w.coro != nil {
+		return commitCoroSendWaiterLocked(w, nil, w.size, status)
+	}
 	if !claimWaiter(w) {
-		return false
+		return coroChanMatchDiscarded
 	}
 	w.finish(status)
-	return true
+	return coroChanMatchCommitted
 }
 
-func recvFromSendWaiter(dst unsafe.Pointer, w *chanWaiter, eltSize int) bool {
+func recvFromSendWaiter(dst unsafe.Pointer, w *chanWaiter, eltSize int) coroChanMatchResult {
+	if w.coro != nil {
+		return commitCoroSendWaiterLocked(w, dst, eltSize, waitSendOK)
+	}
 	if !claimWaiter(w) {
-		return false
+		return coroChanMatchDiscarded
 	}
 	copyChanElem(dst, w.elem, eltSize)
 	w.finish(waitSendOK)
-	return true
+	return coroChanMatchCommitted
 }
 
 func dequeueRecvAndComplete(p *Chan, src unsafe.Pointer, eltSize int, status waitStatus) bool {
@@ -320,8 +353,17 @@ func dequeueRecvAndComplete(p *Chan, src unsafe.Pointer, eltSize int, status wai
 		if w == nil {
 			return false
 		}
-		if completeRecvWaiter(w, src, eltSize, status) {
+		switch result := completeRecvWaiter(w, src, eltSize, status); result {
+		case coroChanMatchCommitted:
 			return true
+		case coroChanMatchDiscarded:
+			continue
+		case coroChanMatchRetry:
+			p.recvq.enqueueFront(w)
+			return false
+		default:
+			coroRuntimeAbort("invalid coroutine receive waiter completion")
+			return false
 		}
 	}
 }
@@ -332,8 +374,17 @@ func dequeueSendAndRecv(p *Chan, dst unsafe.Pointer, eltSize int) bool {
 		if w == nil {
 			return false
 		}
-		if recvFromSendWaiter(dst, w, eltSize) {
+		switch result := recvFromSendWaiter(dst, w, eltSize); result {
+		case coroChanMatchCommitted:
 			return true
+		case coroChanMatchDiscarded:
+			continue
+		case coroChanMatchRetry:
+			p.sendq.enqueueFront(w)
+			return false
+		default:
+			coroRuntimeAbort("invalid coroutine send waiter completion")
+			return false
 		}
 	}
 }
@@ -369,6 +420,20 @@ func ChanTrySend(p *Chan, v unsafe.Pointer, eltSize int) bool {
 		panicSendOnClosedChan()
 	}
 	return ok
+}
+
+// CoroChanTrySend is the nonblocking, non-panicking first attempt used by
+// compiler-owned stackless channel lowering. A closed channel deliberately
+// returns false: the exact park transaction rechecks it and returns a typed
+// send-closed status without unwinding across an LLVM coroutine suspension.
+func CoroChanTrySend(p *Chan, v unsafe.Pointer, eltSize int) bool {
+	if p == nil {
+		return false
+	}
+	p.mutex.Lock()
+	ok, closed := chanTrySendLocked(p, v, eltSize)
+	p.mutex.Unlock()
+	return ok && !closed
 }
 
 func ChanSend(p *Chan, v unsafe.Pointer, eltSize int) bool {
@@ -411,23 +476,7 @@ func chanTryRecvLocked(p *Chan, v unsafe.Pointer, eltSize int) (recvOK bool, try
 			p.recvx = 0
 		}
 		p.qcount--
-		for p.qcount < p.dataqsiz {
-			w := p.sendq.dequeue()
-			if w == nil {
-				break
-			}
-			if !claimWaiter(w) {
-				continue
-			}
-			copyChanElem(chanBuf(p, p.sendx), w.elem, elemSize)
-			p.sendx++
-			if p.sendx == p.dataqsiz {
-				p.sendx = 0
-			}
-			p.qcount++
-			w.finish(waitSendOK)
-			break
-		}
+		dequeueSendToBuffer(p)
 		return true, true
 	}
 	if p.closed {
@@ -445,6 +494,13 @@ func ChanTryRecv(p *Chan, v unsafe.Pointer, eltSize int) (recvOK bool, tryOK boo
 	recvOK, tryOK = chanTryRecvLocked(p, v, eltSize)
 	p.mutex.Unlock()
 	return
+}
+
+// CoroChanTryRecv is the nonblocking first attempt used by compiler-owned
+// stackless channel lowering. Unlike ChanRecv it never retains the caller's
+// activation; a false tryOK is completed by the exact park transaction.
+func CoroChanTryRecv(p *Chan, v unsafe.Pointer, eltSize int) (recvOK bool, tryOK bool) {
+	return ChanTryRecv(p, v, eltSize)
 }
 
 func ChanRecv(p *Chan, v unsafe.Pointer, eltSize int) (recvOK bool) {
@@ -475,13 +531,41 @@ func ChanClose(p *Chan) {
 		panic("close of closed channel")
 	}
 	p.closed = true
+	// Claim contention can temporarily leave buffered data behind a queued
+	// receiver. Preserve Go's close ordering: publish those values before the
+	// remaining receivers observe the closed zero value.
+	if !reconcileBufferedChanLocked(p, false) {
+		p.mutex.Unlock()
+		coroRuntimeAbort("invalid coroutine buffered channel close reconciliation")
+		return
+	}
+	if !drainClosedChanWaitersLocked(p) {
+		p.mutex.Unlock()
+		coroRuntimeAbort("invalid coroutine channel close completion")
+		return
+	}
+	p.mutex.Unlock()
+}
+
+// drainClosedChanWaitersLocked publishes every currently claimable waiter.
+// Claim contention is not corruption: the competing select/cancel owner will
+// eventually resume and remove that exact node. Its resume tail calls this
+// helper again, so ordinary waiters behind it cannot remain stranded on an
+// already-closed channel.
+func drainClosedChanWaitersLocked(p *Chan) bool {
 	for {
 		w := p.recvq.dequeue()
 		if w == nil {
 			break
 		}
-		if completeRecvWaiter(w, nil, p.elemsize, waitRecvClosed) {
+		switch result := completeRecvWaiter(w, nil, p.elemsize, waitRecvClosed); result {
+		case coroChanMatchCommitted, coroChanMatchDiscarded:
 			continue
+		case coroChanMatchRetry:
+			p.recvq.enqueueFront(w)
+			return true
+		default:
+			return false
 		}
 	}
 	for {
@@ -489,11 +573,17 @@ func ChanClose(p *Chan) {
 		if w == nil {
 			break
 		}
-		if completeSendWaiter(w, waitSendClosed) {
+		switch result := completeSendWaiter(w, waitSendClosed); result {
+		case coroChanMatchCommitted, coroChanMatchDiscarded:
 			continue
+		case coroChanMatchRetry:
+			p.sendq.enqueueFront(w)
+			return true
+		default:
+			return false
 		}
 	}
-	p.mutex.Unlock()
+	return true
 }
 
 func blockForever() {
