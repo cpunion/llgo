@@ -86,10 +86,10 @@ func TestManualOperationSourceAffectedResolveAndUnpublishedLoserDetach(t *testin
 		t.Fatalf("manual publish pass = (%d, %d, %t), pending=%t", published, lost, ok, source.Pending())
 	}
 	if state.phase != parkParked || state.outcome != ParkOutcomePending {
-		t.Fatalf("manual publish resolved before quiet cut: phase=%d outcome=%d", state.phase, state.outcome)
+		t.Fatalf("manual publish resolved before published epoch: phase=%d outcome=%d", state.phase, state.outcome)
 	}
 
-	resolution, duplicates, ok := source.ResolveAffectedAfterQuietCut(p)
+	resolution, duplicates, ok := source.ResolveAffectedPublishedEpoch(p)
 	wantResolution := CompletionResolution{WaitSets: 1, Completed: 1, Winners: 1, Losers: 2}
 	if !ok || resolution != wantResolution || duplicates != 1 {
 		t.Fatalf("manual affected resolve = (%+v, duplicates=%d, %t), want %+v", resolution, duplicates, ok, wantResolution)
@@ -242,7 +242,7 @@ func TestManualOperationSourceConcurrentProducerCoalescing(t *testing.T) {
 	if published, lost, ok := source.PublishPass(p); !ok || published != 1 || lost != 0 {
 		t.Fatalf("publish concurrent manual post = (%d, %d, %t)", published, lost, ok)
 	}
-	resolution, duplicates, ok := source.ResolveAffectedAfterQuietCut(p)
+	resolution, duplicates, ok := source.ResolveAffectedPublishedEpoch(p)
 	if !ok || duplicates != 0 || resolution != (CompletionResolution{WaitSets: 1, Completed: 1, Winners: 1}) {
 		t.Fatalf("resolve concurrent manual post = (%+v, %d, %t)", resolution, duplicates, ok)
 	}

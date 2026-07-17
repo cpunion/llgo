@@ -475,7 +475,7 @@ func TestExecutorDriverTerminalCloseJoinsActiveTaskControls(t *testing.T) {
 	runtime.KeepAlive(task.frame.memory)
 }
 
-func TestExecutorDriverControlSourceCancelsFrameLocalParkAtQuietCut(t *testing.T) {
+func TestExecutorDriverControlSourceCancelsFrameLocalParkInPublishedEpoch(t *testing.T) {
 	p := new(P)
 	driver := new(ExecutorDriver)
 	registry := new(ExecutorRegistry)
@@ -516,7 +516,7 @@ func TestExecutorDriverControlSourceCancelsFrameLocalParkAtQuietCut(t *testing.T
 	}
 	if drained, promoted, ok := PollExecutor(driver); !ok || drained != 1 || promoted != 1 ||
 		HasWaiting(p) || wait != (WaitSetRecord{}) {
-		t.Fatalf("poll control-source quiet cut = (%d, %d, %t), waiting=%t wait=%+v",
+		t.Fatalf("poll control-source published epoch = (%d, %d, %t), waiting=%t wait=%+v",
 			drained, promoted, ok, HasWaiting(p), wait)
 	}
 	if g, ok := NextRunnable(p); !ok || g != task.g {

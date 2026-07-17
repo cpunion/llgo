@@ -64,7 +64,7 @@ func TestExecutorSourceSetScansCompleteStaticCatalog(t *testing.T) {
 	}
 }
 
-func TestExecutorSourceSetDefersPromotionUntilQuietCut(t *testing.T) {
+func TestExecutorSourceSetDefersPromotionUntilPublishedEpochResolution(t *testing.T) {
 	p := new(P)
 	waits := new(WaitRegistrationTable)
 	sources := new(ExecutorSourceSet)
@@ -72,40 +72,40 @@ func TestExecutorSourceSetDefersPromotionUntilQuietCut(t *testing.T) {
 		t.Fatal("bind source set")
 	}
 
-	task := newYieldingTestG(t, "quiet-cut")
+	task := newYieldingTestG(t, "published-epoch")
 	if !Enqueue(p, task.g) {
-		t.Fatal("enqueue quiet-cut task")
+		t.Fatal("enqueue published-epoch task")
 	}
 	g, ok := NextRunnable(p)
 	if !ok || g != task.g {
-		t.Fatalf("dequeue quiet-cut task = (%p, %t)", g, ok)
+		t.Fatalf("dequeue published-epoch task = (%p, %t)", g, ok)
 	}
 	action := beginWaitTestResume(t, p, task)
 	token, ticket, wait := registerTestWait(t, waits, p)
 	task.frame.header.SuspendReason = uint16(SuspendPark)
 	task.frame.header.Lifecycle = uint16(FrameSuspended)
 	if !PreparePark(task.g, task.handle, task.frame.header, token, ticket) {
-		t.Fatal("prepare quiet-cut park")
+		t.Fatal("prepare published-epoch park")
 	}
 	if action, ok = Resumed(p, task.g, action); !ok || action.Kind != ActionPark {
-		t.Fatalf("commit quiet-cut park = (%+v, %t)", action, ok)
+		t.Fatalf("commit published-epoch park = (%+v, %t)", action, ok)
 	}
 	if posted := waits.Post(wait); posted != WaitRegistrationPosted {
-		t.Fatalf("post quiet-cut wait = %d", posted)
+		t.Fatalf("post published-epoch wait = %d", posted)
 	}
 
 	scan, ok := sources.publishPass(p, 0, false)
 	if !ok || scan.completed != 1 || scan.promoted != 0 {
-		t.Fatalf("quiet-cut publish = (%+v, %t)", scan, ok)
+		t.Fatalf("published-epoch publish = (%+v, %t)", scan, ok)
 	}
 	if !task.g.waiting || task.g.state != GWaiting || p.readyHead != nil {
-		t.Fatal("publish pass promoted a G before the quiet cut")
+		t.Fatal("publish pass promoted a G before epoch resolution")
 	}
-	if promoted, ok := sources.resolveAfterQuietCut(p); !ok || promoted != 1 {
-		t.Fatalf("quiet-cut resolve = (%d, %t)", promoted, ok)
+	if promoted, ok := sources.resolvePublishedEpoch(p); !ok || promoted != 1 {
+		t.Fatalf("published-epoch resolve = (%d, %t)", promoted, ok)
 	}
 	if task.g.waiting || task.g.state != GRunnable || p.readyHead != task.g {
-		t.Fatal("quiet-cut resolve did not promote the completed G")
+		t.Fatal("published-epoch resolve did not promote the completed G")
 	}
 
 	retireCompletedRegistration(t, waits, wait)
@@ -114,7 +114,7 @@ func TestExecutorSourceSetDefersPromotionUntilQuietCut(t *testing.T) {
 	}
 	g, ok = NextRunnable(p)
 	if !ok || g != task.g {
-		t.Fatalf("dequeue promoted quiet-cut task = (%p, %t)", g, ok)
+		t.Fatalf("dequeue promoted published-epoch task = (%p, %t)", g, ok)
 	}
 	finishWaitTestTask(t, p, task, beginWaitTestResume(t, p, task))
 }

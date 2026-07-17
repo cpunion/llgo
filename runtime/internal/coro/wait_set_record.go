@@ -238,7 +238,7 @@ func MarkWaitSetAffected(p *P, record *WaitSetRecord) bool {
 }
 
 // RequestWaitSetCancel publishes an owner-side logical cancellation and makes
-// the exact active wait-set visible to the next quiet-cut resolver. The queue
+// the exact active wait-set visible to the next published-epoch resolver. The queue
 // preflight runs before the monotonic cancellation mutation, making a valid
 // call allocation-free and failure-atomic.
 func RequestWaitSetCancel(p *P, record *WaitSetRecord, kind ParkCancelKind) bool {
@@ -279,7 +279,7 @@ func activateWaitSetRecord(p *P, g *G, record *WaitSetRecord) bool {
 	return true
 }
 
-// resolveAffectedWaitSets detaches the current FIFO as one quiet-cut batch.
+// resolveAffectedWaitSets detaches the current FIFO as one published-epoch batch.
 // Pending initial visits are discarded; terminal or already-detaching parks
 // remain in the returned linear batch until every source has applied and
 // detached its OperationRecords.
@@ -376,8 +376,8 @@ func promoteReadyWaitSet(p *P, record *WaitSetRecord) bool {
 	return true
 }
 
-// promoteResolvedWaitSets completes the post-source-apply half of one quiet
-// cut. A still-detaching record stays on the small affected queue; a later
+// promoteResolvedWaitSets completes the post-source-apply half of one published
+// epoch. A still-detaching record stays on the small affected queue; a later
 // source acknowledgement therefore never requires rediscovering it by walking
 // every parked G.
 func promoteResolvedWaitSets(p *P, batch *WaitSetRecord) (promoted int, ok bool) {

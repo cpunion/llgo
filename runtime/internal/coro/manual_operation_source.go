@@ -83,7 +83,7 @@ type manualOperationSlot struct {
 
 // ManualOperationSource is a fixed-capacity, one-shot completion source. It is
 // a concrete reference for the four source phases: mailbox publish, affected
-// wait-set resolution after a quiet cut, logical apply/detach, and physical
+// wait-set resolution after a published epoch, logical apply/detach, and physical
 // quiescence/recycle. It must remain at a stable address from bind until every
 // producer has been strongly joined and UnbindManualOperationSource succeeds.
 // It must not be copied after first use.
@@ -373,10 +373,10 @@ func addManualOperationResolution(total *CompletionResolution, resolution Comple
 	total.Losers += resolution.Losers
 }
 
-// ResolveAffectedAfterQuietCut consumes this source's intrusive affected chain.
-// The caller must first establish the complete SourceSet quiet cut and must run
-// every source's resolve pass before any source's ApplyAndDetach pass.
-func (source *ManualOperationSource) ResolveAffectedAfterQuietCut(p *P) (total CompletionResolution, duplicates uint32, ok bool) {
+// ResolveAffectedPublishedEpoch consumes this source's intrusive affected
+// chain after one complete bounded SourceSet publication pass. The caller must
+// run every source's resolve pass before any source's ApplyAndDetach pass.
+func (source *ManualOperationSource) ResolveAffectedPublishedEpoch(p *P) (total CompletionResolution, duplicates uint32, ok bool) {
 	if !validManualOperationOwner(source, p) {
 		return CompletionResolution{}, 0, false
 	}
@@ -389,7 +389,7 @@ func (source *ManualOperationSource) ResolveAffectedAfterQuietCut(p *P) (total C
 		if !validManualOperationLiveSlot(source, p, index) {
 			return total, duplicates, false
 		}
-		resolution, result := resolveAffectedOperationAfterQuietCut(&slot.record, slot.record.id)
+		resolution, result := resolveAffectedOperationPublishedEpoch(&slot.record, slot.record.id)
 		if result == affectedOperationResolveInvalid {
 			return total, duplicates, false
 		}

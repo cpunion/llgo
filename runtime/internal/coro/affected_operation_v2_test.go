@@ -89,7 +89,7 @@ func addAffectedTestResolution(total *CompletionResolution, resolution Completio
 	total.Losers += resolution.Losers
 }
 
-func (source *affectedTestSource) resolveAfterQuietCut() (total CompletionResolution, resolved, duplicates uint32, ok bool) {
+func (source *affectedTestSource) resolvePublishedEpoch() (total CompletionResolution, resolved, duplicates uint32, ok bool) {
 	if source == nil {
 		return CompletionResolution{}, 0, 0, false
 	}
@@ -98,7 +98,7 @@ func (source *affectedTestSource) resolveAfterQuietCut() (total CompletionResolu
 			return total, resolved, duplicates, false
 		}
 		slot := &source.slots[source.affectedHead-1]
-		resolution, result := resolveAffectedOperationAfterQuietCut(&slot.record, slot.id)
+		resolution, result := resolveAffectedOperationPublishedEpoch(&slot.record, slot.id)
 		if result == affectedOperationResolveInvalid {
 			return total, resolved, duplicates, false
 		}
@@ -154,20 +154,20 @@ func runAffectedSourceOrder(t *testing.T, publishOrder []affectedTestEntry, reso
 		}
 	}
 	// Publishing all source-local facts is not itself resolution. The caller now
-	// simulates the executor's quiet cut before invoking either source resolver.
+	// simulates one complete catalog publication before invoking either source resolver.
 	if state.phase != parkParked || state.outcome != ParkOutcomePending {
-		t.Fatalf("publication resolved before quiet cut: phase=%d outcome=%d", state.phase, state.outcome)
+		t.Fatalf("publication resolved before the epoch resolver: phase=%d outcome=%d", state.phase, state.outcome)
 	}
 	for _, entry := range entries {
 		if sources[entry.source].slots[entry.slot].record.disposition != OperationDispositionPending {
-			t.Fatalf("published operation %+v resolved before quiet cut", entry)
+			t.Fatalf("published operation %+v resolved before the epoch resolver", entry)
 		}
 	}
 
 	var total CompletionResolution
 	var resolved, duplicates uint32
 	for _, sourceIndex := range resolveOrder {
-		resolution, sourceResolved, sourceDuplicates, resolveOK := sources[sourceIndex].resolveAfterQuietCut()
+		resolution, sourceResolved, sourceDuplicates, resolveOK := sources[sourceIndex].resolvePublishedEpoch()
 		if !resolveOK {
 			t.Fatalf("resolve affected source %d", sourceIndex)
 		}
@@ -183,7 +183,7 @@ func runAffectedSourceOrder(t *testing.T, publishOrder []affectedTestEntry, reso
 		if sources[sourceIndex].affectedHead != 0 || sources[sourceIndex].affectedTail != 0 {
 			t.Fatalf("source %d retained drained affected chain", sourceIndex)
 		}
-		if resolution, sourceResolved, sourceDuplicates, resolveOK := sources[sourceIndex].resolveAfterQuietCut(); !resolveOK || resolution != (CompletionResolution{}) || sourceResolved != 0 || sourceDuplicates != 0 {
+		if resolution, sourceResolved, sourceDuplicates, resolveOK := sources[sourceIndex].resolvePublishedEpoch(); !resolveOK || resolution != (CompletionResolution{}) || sourceResolved != 0 || sourceDuplicates != 0 {
 			t.Fatalf("repeat source %d resolve = (%+v, %d, %d, %t)", sourceIndex, resolution, sourceResolved, sourceDuplicates, resolveOK)
 		}
 	}
@@ -220,7 +220,7 @@ func runAffectedSourceOrder(t *testing.T, publishOrder []affectedTestEntry, reso
 	return winnerCase
 }
 
-func TestSourceLocalAffectedOperationsDeduplicateWaitSetAfterQuietCut(t *testing.T) {
+func TestSourceLocalAffectedOperationsDeduplicateWaitSetWithinPublishedEpoch(t *testing.T) {
 	forwardEntries := []affectedTestEntry{{source: 0, slot: 0}, {source: 1, slot: 0}, {source: 0, slot: 1}}
 	reverseEntries := []affectedTestEntry{{source: 0, slot: 1}, {source: 1, slot: 0}, {source: 0, slot: 0}}
 	forwardWinner := runAffectedSourceOrder(t, forwardEntries, []int{0, 1})

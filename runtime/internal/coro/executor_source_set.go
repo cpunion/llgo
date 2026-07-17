@@ -59,9 +59,14 @@ type executorSourceScan struct {
 	promoted    int
 	deadline    int64
 	hasDeadline bool
+	// epochs is a white-box diagnostic count. A successful active Poll adds
+	// exactly two, so uint8 cannot wrap; placing it after hasDeadline consumes
+	// existing tail padding on both 32-bit and 64-bit targets.
+	epochs uint8
 }
 
 func (scan *executorSourceScan) add(other executorSourceScan) {
+	scan.epochs += other.epochs
 	scan.completed += other.completed
 	scan.waits += other.waits
 	scan.timers += other.timers
@@ -159,12 +164,13 @@ func (sources *ExecutorSourceSet) timerTable() *TimerRegistrationTable {
 	return sources.timers
 }
 
-// publishPass consumes one complete source catalog pass without resolving a
-// logical wait or promoting a G. A producer may publish into an earlier source
-// after that source was scanned, so even a complete catalog pass is not yet a
-// fair multi-source snapshot. ExecutorDriver establishes the quiet cut with
-// request acknowledgement and an unconditional full recheck before calling
-// resolveAfterQuietCut. Partial completion counts are retained on failure.
+// publishPass consumes one complete bounded source-catalog pass without
+// resolving a logical wait or promoting a G. Each source claims only the facts
+// visible to that bounded pass; facts arriving later remain durable in the
+// source mailbox and keep its pending/request state for a later epoch. The
+// owner-visible OperationRecord and affected-wait snapshot is stable after the
+// pass because producers only mutate source mailboxes. Partial completion
+// counts are retained on failure.
 func (sources *ExecutorSourceSet) publishPass(p *P, now int64, withDeadline bool) (scan executorSourceScan, ok bool) {
 	if !sources.acceptsScan(p, now, withDeadline) {
 		return executorSourceScan{}, false
@@ -202,12 +208,13 @@ func (sources *ExecutorSourceSet) publishPass(p *P, now int64, withDeadline bool
 	return scan, true
 }
 
-// resolveAfterQuietCut is the only SourceSet entry that may resolve logical
-// park state and publish runnable work. The caller must have completed a full
-// publish/ack/full-recheck transaction with no new fact, pending source, or
-// executor request. Keeping this separate prevents static source order from
+// resolvePublishedEpoch is the only SourceSet entry that may resolve logical
+// park state and publish runnable work. The caller must have completed exactly
+// one full bounded source-catalog pass. It resolves the owner-claimed snapshot
+// immediately; it does not wait for producer mailboxes or the executor request
+// bit to become quiet. Keeping this separate prevents static source order from
 // becoming a select tie breaker.
-func (sources *ExecutorSourceSet) resolveAfterQuietCut(p *P) (promoted int, ok bool) {
+func (sources *ExecutorSourceSet) resolvePublishedEpoch(p *P) (promoted int, ok bool) {
 	if !validExecutorSourceSet(sources, p) {
 		return 0, false
 	}
@@ -215,7 +222,7 @@ func (sources *ExecutorSourceSet) resolveAfterQuietCut(p *P) (promoted int, ok b
 	// complete sticky snapshot. When another V2 source joins this catalog, its
 	// ResolveAffected call belongs here before any ApplyAndDetach call below.
 	if sources.manual != nil {
-		if _, _, resolved := sources.manual.ResolveAffectedAfterQuietCut(p); !resolved {
+		if _, _, resolved := sources.manual.ResolveAffectedPublishedEpoch(p); !resolved {
 			return 0, false
 		}
 	}

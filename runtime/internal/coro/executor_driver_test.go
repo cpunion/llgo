@@ -205,7 +205,7 @@ func TestExecutorDriverBindCloseLifecycle(t *testing.T) {
 	}
 }
 
-func TestExecutorDriverManualSourceUsesUnifiedQuietCutAndParkGate(t *testing.T) {
+func TestExecutorDriverManualSourceUsesUnifiedPublishedEpochAndParkGate(t *testing.T) {
 	p := new(P)
 	driver, registry, waits, manual, executor := bindTestExecutorDriverWithManual(t, p)
 	task := newYieldingTestG(t, "driver-manual")
@@ -244,8 +244,33 @@ func TestExecutorDriverManualSourceUsesUnifiedQuietCutAndParkGate(t *testing.T) 
 	if requested := registry.Request(executor); requested != ExecutorRequestPublished {
 		t.Fatalf("request manual-source driver poll = %d", requested)
 	}
-	if drained, promoted, ok := PollExecutor(driver); !ok || drained != 1 || promoted != 1 {
-		t.Fatalf("poll manual-source driver = (%d, %d, %t)", drained, promoted, ok)
+	firstEpoch, firstEpochOK := serviceExecutorPublishedEpochAt(driver, 0, false)
+	if !firstEpochOK || firstEpoch.epochs != 1 || firstEpoch.completed != 1 || firstEpoch.promoted != 1 ||
+		!registry.ObserveRequested(executor) {
+		t.Fatalf("first manual-source epoch = (%+v, %t), requested=%t",
+			firstEpoch, firstEpochOK, registry.ObserveRequested(executor))
+	}
+	if cleared, ackOK := registry.Acknowledge(executor); !ackOK || !cleared {
+		t.Fatalf("acknowledge first manual-source epoch = (%t, %t)", cleared, ackOK)
+	}
+	// Model a producer request published after A's acknowledgement. Epoch B
+	// must return without waiting for that advisory bit to become quiet; the
+	// request remains durable and causes a later Poll to service two more
+	// bounded epochs.
+	if requested := registry.Request(executor); requested != ExecutorRequestPublished {
+		t.Fatalf("publish request before second manual-source epoch = %d", requested)
+	}
+	secondEpoch, secondEpochOK := serviceExecutorPublishedEpochAt(driver, 0, false)
+	if !secondEpochOK || secondEpoch.epochs != 1 || secondEpoch.completed != 0 || secondEpoch.promoted != 0 ||
+		!registry.ObserveRequested(executor) {
+		t.Fatalf("second manual-source epoch = (%+v, %t), requested=%t",
+			secondEpoch, secondEpochOK, registry.ObserveRequested(executor))
+	}
+	settled, settledOK := pollExecutorSourcesAt(driver, 0, false)
+	if !settledOK || settled.epochs != 2 || settled.completed != 0 || settled.promoted != 0 ||
+		registry.ObserveRequested(executor) {
+		t.Fatalf("next fixed two-epoch poll = (%+v, %t), requested=%t",
+			settled, settledOK, registry.ObserveRequested(executor))
 	}
 	firstSlot, _ := manualOperationSlotFor(manual, first)
 	secondSlot, _ := manualOperationSlotFor(manual, second)

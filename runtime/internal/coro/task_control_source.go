@@ -60,7 +60,7 @@ type taskControlSlot struct {
 
 // TaskControlSource is the cross-thread ingress for cooperative task abort and
 // shutdown. Post only merges a durable monotonic request. The owner P later
-// drains it through RequestTaskCancellation at the common source quiet cut;
+// drains it through RequestTaskCancellation in a common published epoch;
 // producer threads never run Go cleanup, touch a ParkState, or resume a frame.
 //
 // The source has a stable address from Bind through Unbind. A target shim must

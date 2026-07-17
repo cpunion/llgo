@@ -91,12 +91,14 @@ type executorRequestSlot struct {
 // The request gate is advisory. Posted wait slots, timer epochs, and other
 // durable sources remain the truth. The scheduler protocol is:
 //
-//  1. drain all durable sources;
+//  1. run bounded publish/resolve/promote epoch A over every durable source;
 //  2. Acknowledge the coalesced request;
-//  3. recheck every durable source and loop if any appeared before the ack;
-//  4. ArmIdle with a 0 -> IdleArmed CAS and recheck sources once more;
-//  5. CommitSleep against the exact IdleArmed word;
-//  6. enter the platform's retained-doorbell wait.
+//  3. unconditionally run the same bounded epoch B, then return even if a
+//     later durable fact or request remains pending for the next Poll;
+//  4. ArmIdle with a 0 -> IdleArmed CAS and publish sources once more;
+//  5. on work, leave idle before running the active two-epoch transaction;
+//  6. otherwise CommitSleep against the exact IdleArmed word;
+//  7. enter the platform's retained-doorbell wait.
 //
 // A successful CommitSleep is not by itself a blocking primitive. The target
 // wait must retain a doorbell delivered after that CAS but before the physical
@@ -262,9 +264,10 @@ func (registry *ExecutorRegistry) ObserveRequested(handle ExecutorHandle) bool {
 	return gate&^executorGateMask == 0 && gate&executorGateClosed == 0 && gate&executorGateRequested != 0
 }
 
-// Acknowledge clears the advisory request after the scheduler has drained all
-// durable sources. The caller must recheck those sources after this CAS because
-// a producer may have coalesced immediately before the clear.
+// Acknowledge clears the advisory request after publication epoch A. The
+// caller must run one unconditional full epoch B after this CAS because a
+// producer may have coalesced immediately before the clear. A request arriving
+// after the CAS remains durable for a later Poll; B does not wait for silence.
 func (registry *ExecutorRegistry) Acknowledge(handle ExecutorHandle) (bool, bool) {
 	slot, ok := executorSlot(registry, handle)
 	if !ok || preemptLoad(&slot.generation) != handle.Generation {

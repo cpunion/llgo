@@ -552,7 +552,7 @@ func DetachParkOperation(state *ParkState, ticket ParkTicket, record *OperationR
 
 // DetachParkWaitOperation is the O(1) scheduler-integrated detach path. Its
 // transient ParkLink carries the predecessor, and the complete wait-set was
-// already audited once by quiet-cut resolution.
+// already audited once by published-epoch resolution.
 func DetachParkWaitOperation(state *ParkState, ticket ParkTicket, record *OperationRecord, id OperationID) bool {
 	return detachParkOperation(state, ticket, record, id, true)
 }

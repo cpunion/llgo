@@ -256,6 +256,20 @@ func publishExecutorSources(driver *ExecutorDriver) (drained int, ok bool) {
 	return scan.completed, ok
 }
 
+// serviceExecutorPublishedEpochAt performs one bounded publication epoch:
+// every configured source is visited once, then the complete owner-claimed
+// snapshot is resolved, detached, and promoted. Producers never mutate that
+// snapshot; facts not claimed by this pass remain durable for a later epoch.
+func serviceExecutorPublishedEpochAt(driver *ExecutorDriver, now int64, withDeadline bool) (scan executorSourceScan, ok bool) {
+	scan, ok = publishExecutorSourcesAt(driver, now, withDeadline)
+	if !ok {
+		return scan, false
+	}
+	scan.epochs = 1
+	scan.promoted, ok = driver.sources.resolvePublishedEpoch(driver.p)
+	return scan, ok
+}
+
 func pollExecutorSourcesAt(driver *ExecutorDriver, now int64, withDeadline bool) (total executorSourceScan, ok bool) {
 	if !validExecutorDriver(driver) || driver.state != executorDriverActive || !idleExecutorScheduler(driver.p) {
 		return executorSourceScan{}, false
@@ -263,33 +277,25 @@ func pollExecutorSourcesAt(driver *ExecutorDriver, now int64, withDeadline bool)
 	if !driver.sources.acceptsScan(driver.p, now, withDeadline) {
 		return executorSourceScan{}, false
 	}
-	for {
-		first, passOK := publishExecutorSourcesAt(driver, now, withDeadline)
-		total.add(first)
-		if !passOK {
-			return total, false
-		}
-		if _, ackOK := driver.registry.Acknowledge(driver.handle); !ackOK {
-			return total, false
-		}
-
-		// This pass is unconditional. A producer may have coalesced into the
-		// request that Acknowledge just cleared, and pending is only advisory.
-		recheck, recheckOK := publishExecutorSourcesAt(driver, now, withDeadline)
-		total.add(recheck)
-		if !recheckOK {
-			return total, false
-		}
-		if recheck.completed == 0 && !driver.sources.pending(driver.p) &&
-			!driver.registry.ObserveRequested(driver.handle) {
-			promoted, resolveOK := driver.sources.resolveAfterQuietCut(driver.p)
-			total.promoted += promoted
-			if !resolveOK {
-				return total, false
-			}
-			return total, true
-		}
+	// Epoch A resolves and promotes its complete owner-claimed snapshot
+	// immediately. Continuous producer traffic must not delay that promotion.
+	first, firstOK := serviceExecutorPublishedEpochAt(driver, now, withDeadline)
+	total.add(first)
+	if !firstOK {
+		return total, false
 	}
+	if _, ackOK := driver.registry.Acknowledge(driver.handle); !ackOK {
+		return total, false
+	}
+
+	// Epoch B is unconditional. It closes the post-before-request race around
+	// Acknowledge: an earlier coalesced request is caught by this full pass,
+	// while a later request remains published for the next Poll. Pending and
+	// Requested are therefore scheduling hints after B, never reasons to wait
+	// for a producer-silent cut inside this Poll.
+	recheck, recheckOK := serviceExecutorPublishedEpochAt(driver, now, withDeadline)
+	total.add(recheck)
+	return total, recheckOK
 }
 
 func pollExecutor(driver *ExecutorDriver) (drained, promoted int, ok bool) {

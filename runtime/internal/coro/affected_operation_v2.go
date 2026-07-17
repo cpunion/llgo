@@ -17,7 +17,7 @@
 package coro
 
 // affectedOperationResolveResult is the owner-side result of visiting one
-// source-local affected operation after the complete SourceSet quiet cut.
+// source-local affected operation in one complete published SourceSet epoch.
 // AlreadyResolved is normal when two source-local entries belong to the same
 // logical wait-set: the first entry resolves the complete sticky snapshot and
 // changes every candidate disposition, so the later entry requires no central
@@ -30,18 +30,18 @@ const (
 	affectedOperationAlreadyResolved
 )
 
-// resolveAffectedOperationAfterQuietCut resolves the logical wait-set reached
+// resolveAffectedOperationPublishedEpoch resolves the logical wait-set reached
 // through one exact source-owned OperationRecord. The source must call it only
 // while enumerating entries retained by its publish pass and only after the
-// executor has established the complete publish/ack/full-recheck quiet cut.
-// It deliberately cannot infer that cross-source barrier from one record.
+// executor has completed the full bounded catalog pass for this epoch. It
+// deliberately cannot infer that cross-source barrier from one record.
 //
 // Source-local enumeration must finish before source resolution is applied or
 // detached. An attached terminal record in a detaching ParkState is the normal
 // duplicate shape; a detached record or any other lifecycle mismatch fails
 // closed. A successful first visit always resolves because an affected entry
 // necessarily carries a sticky completion fact.
-func resolveAffectedOperationAfterQuietCut(record *OperationRecord, id OperationID) (CompletionResolution, affectedOperationResolveResult) {
+func resolveAffectedOperationPublishedEpoch(record *OperationRecord, id OperationID) (CompletionResolution, affectedOperationResolveResult) {
 	if record == nil || !record.Matches(id) || record.phase != operationActive || !record.completionPublished ||
 		record.link.park == nil || record.link.operation != record || !validParkTicket(record.link.ticket) {
 		return CompletionResolution{}, affectedOperationResolveInvalid
