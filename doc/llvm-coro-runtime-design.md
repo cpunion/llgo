@@ -12,6 +12,8 @@
 
 历史原型：[PR #1532](https://github.com/xgo-dev/llgo/pull/1532)
 
+统一异步核心与扩展成本契约：[`coro-async-core-contract.md`](./coro-async-core-contract.md)
+
 ## 1. 结论与核心决策
 
 本设计以 LLVM stackless coroutine 作为可挂起 Go 调用帧的唯一底层机制，重新设计编译器分析、函数 ABI、逻辑 goroutine、抢占调度、GC、同步原语和平台事件驱动。无栈不是可选优化，而是跨 Native、WASM、RTOS 和 baremetal 共用同一调度模型的硬性架构约束。PR #1532 仅作为 LLVM intrinsic 与 IR 结构参考，不在其调度器和“所有函数双版本”模型上继续演进。
