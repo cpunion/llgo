@@ -37,6 +37,17 @@ type channelClaimCoreFixture struct {
 }
 
 func newChannelClaimCoreFixture(t *testing.T, name string, caseIDs []uint32, withClaim bool, defaultCase uint32) *channelClaimCoreFixture {
+	return newChannelClaimCoreFixtureBeforeResume(t, name, caseIDs, withClaim, defaultCase, nil)
+}
+
+func newChannelClaimCoreFixtureBeforeResume(
+	t *testing.T,
+	name string,
+	caseIDs []uint32,
+	withClaim bool,
+	defaultCase uint32,
+	beforeResume func(*channelClaimCoreFixture),
+) *channelClaimCoreFixture {
 	t.Helper()
 	fixture := &channelClaimCoreFixture{
 		p:        new(P),
@@ -88,6 +99,18 @@ func newChannelClaimCoreFixture(t *testing.T, name string, caseIDs []uint32, wit
 	fixture.task.frame.header.Lifecycle = uint16(FrameSuspended)
 	if !PrepareParkSet(fixture.task.g, fixture.task.handle, fixture.task.frame.header, fixture.ticket, &fixture.wait) {
 		t.Fatal("prepare channel claim-core park")
+	}
+	if fixture.claim != nil {
+		for index, id := range fixture.ids {
+			if !fixture.source.ExposeExternalCommit(
+				fixture.p, fixture.task.g, id, fixture.ticket, &fixture.wait, fixture.claim,
+			) {
+				t.Fatalf("expose channel candidate %d", index)
+			}
+		}
+	}
+	if beforeResume != nil {
+		beforeResume(fixture)
 	}
 	if parked, resumed := Resumed(fixture.p, fixture.task.g, action); !resumed || parked.Kind != ActionPark {
 		t.Fatalf("commit channel claim-core park = (%+v, %t)", parked, resumed)
@@ -2023,6 +2046,14 @@ func TestChannelExternalLeaseExhaustionRetiresOnlyClaimBackedReservation(t *test
 
 	first := prepare(true, 101)
 	retired, _ := channelOperationSlotFor(source, first.id)
+	if admission, acquired := source.acquireExternalCommit(first.id); acquired != channelExternalCommitAcquireUnsupported ||
+		admission != (channelExternalCommitAdmission{}) {
+		t.Fatalf("unexposed external lease was admitted = (%+v,%d)", admission, acquired)
+	}
+	// This test isolates lease-sequence exhaustion from the owner preparation
+	// state machine. Full fixtures above publish Exposed only through
+	// ExposeExternalCommit after PrepareParkSet.
+	preemptStore(&retired.external, uint32(channelExternalExposed))
 	nearExhaustion := ^uint32(0) - 3
 	preemptStore(&retired.externalLease, nearExhaustion)
 	admission, acquired := source.acquireExternalCommit(first.id)

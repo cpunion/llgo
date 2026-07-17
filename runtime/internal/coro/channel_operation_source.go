@@ -46,6 +46,20 @@ const (
 	channelPhysicalCommitted
 )
 
+type channelExternalState uint32
+
+const (
+	channelExternalDisabled channelExternalState = iota
+	// Reserved means the exact claim/generation mapping is installed, but a
+	// typed hchan queue node must not expose the endpoint yet.
+	channelExternalReserved
+	// Exposed is the release-published certificate that PrepareParkSet has
+	// completed and the owner will perform no fallible work before suspending.
+	// A peer may acquire the admission/claim and commit either before or after
+	// the physical llvm.coro.suspend without reading fields mutated by Resumed.
+	channelExternalExposed
+)
+
 type channelOperationSlot struct {
 	// Producer-concurrent POD prefix. Producers retain only OperationID; source
 	// lookup supplies this stable slot and never exports claim or record pointers.
@@ -221,7 +235,7 @@ func (source *ChannelOperationSource) ReserveAndAttachWait(
 		}
 		slot.claim = claim
 		if claim != nil {
-			preemptStore(&slot.external, 1)
+			preemptStore(&slot.external, uint32(channelExternalReserved))
 		}
 		if !activateProducerSourceSlot(&slot.producerSourceSlot, generation) {
 			return OperationID{}, false
@@ -229,6 +243,41 @@ func (source *ChannelOperationSource) ReserveAndAttachWait(
 		return id, true
 	}
 	return OperationID{}, false
+}
+
+// ExposeExternalCommit is the final owner-side publication before a typed
+// hchan node becomes reachable. PrepareParkSet has already frozen the exact
+// ParkState/WaitSet/frame relation and installed pendingParkSet; after this
+// release publication the compiler/runtime path may only publish the node and
+// execute llvm.coro.suspend. Rejection leaves Reserved unchanged, so no peer
+// can mistake a partial preparation for a committable endpoint.
+func (source *ChannelOperationSource) ExposeExternalCommit(
+	p *P,
+	g *G,
+	id OperationID,
+	ticket ParkTicket,
+	wait *WaitSetRecord,
+	claim *SelectClaim,
+) bool {
+	slot, ok := channelOperationSlotFor(source, id)
+	if !ok || !validChannelOperationOwner(source, p) || g == nil || claim == nil ||
+		preemptLoad(&slot.generation) != id.Generation || preemptLoad(&slot.state) != uint32(producerSourceActive) ||
+		preemptLoad(&slot.external) != uint32(channelExternalReserved) || slot.claim != claim ||
+		selectClaimLoad(claim) != selectClaimOpen || g.runP != p || p.current != g || !p.inResume ||
+		g.state != GRunning || g.pending.kind != pendingParkSet || g.pending.from == nil ||
+		g.pending.from != g.active || g.pending.from.parkWait != wait || wait == nil ||
+		wait.state != waitSetRecordCommitted || wait.g != g || wait.ticket != ticket ||
+		&g.park != slot.record.link.park || g.park.phase != parkParked || g.park.ticket != ticket ||
+		slot.record.phase != operationActive || slot.record.id != id || slot.record.link.operation != &slot.record ||
+		slot.record.link.wait != wait || slot.record.link.ticket != ticket ||
+		operationCandidateMode(&slot.record) != OperationCommitReadyThenTryCommit {
+		return false
+	}
+	return preemptCompareAndSwap(
+		&slot.external,
+		uint32(channelExternalReserved),
+		uint32(channelExternalExposed),
+	)
 }
 
 // AbortSelectPreparation atomically excludes external claimers, aborts one
@@ -453,7 +502,7 @@ func (source *ChannelOperationSource) acquireExternalCommit(id OperationID) (cha
 		}
 		return channelExternalCommitAdmission{}, channelExternalCommitAcquireClosed
 	}
-	if preemptLoad(&slot.external) != 1 {
+	if preemptLoad(&slot.external) != uint32(channelExternalExposed) {
 		if !producerAdmissionReleaseChecked(&slot.inflight) {
 			return channelExternalCommitAdmission{}, channelExternalCommitAcquireInvalid
 		}
@@ -605,28 +654,11 @@ func releaseChannelExternalCommitPairWithoutEffect(pair *channelExternalCommitPa
 	return true
 }
 
-// validChannelExternalActiveWaitHeld is the claim-held lifetime/identity
-// predicate for one exact parked endpoint. SelectClaim excludes target
-// resolution and detach, but deliberately does not exclude owner-side
-// cancellation or unrelated G park/promote operations. Therefore this
-// predicate inspects neither cancelKind/taskCancel*/affected-work fields nor
-// P's global active queue and WaitSetRecord neighbour links. The latter may be
-// rewritten when another wait joins or leaves the same P even though this
-// target remains pinned and claimed.
-func validChannelExternalActiveWaitHeld(wait *WaitSetRecord, state *ParkState, ticket ParkTicket) bool {
-	return wait != nil && state != nil && wait.state == waitSetRecordActive &&
-		wait.ticket == ticket && validParkTicket(ticket) && wait.g != nil && ValidG(wait.g) &&
-		&wait.g.park == state && wait.g.state == GWaiting && wait.g.waiting &&
-		wait.g.waitToken == nil && wait.g.waitTicket == 0 && wait.g.nextWait == nil &&
-		!wait.g.queued && wait.g.nextReady == nil && wait.g.runP == nil && wait.g.active != nil &&
-		wait.g.active.parkWait == wait
-}
-
 // validChannelExternalEndpointHeld is called only after both select claims
-// were acquired. Admission pins the frame/link lifetime and claim ownership
-// excludes resolver mutation. The check is O(1): it validates the exact link
-// and local adjacency, never the full candidate chain or cancellation/work
-// publication fields.
+// were acquired. Admission pins the frame/link lifetime, Exposed certifies the
+// final owner preparation boundary, and claim ownership excludes resolver
+// mutation. The check is O(1) and deliberately avoids G/WaitSet/ParkState
+// fields which Resumed may update concurrently with an early peer match.
 func validChannelExternalEndpointHeld(admission *channelExternalCommitAdmission, claim *SelectClaim) bool {
 	if admission == nil || !admission.held || admission.posted || admission.broken ||
 		admission.source == nil || admission.slot == nil || !admission.id.Valid() || claim == nil ||
@@ -636,7 +668,7 @@ func validChannelExternalEndpointHeld(admission *channelExternalCommitAdmission,
 	source, slot, id := admission.source, admission.slot, admission.id
 	resolvedSlot, ok := channelOperationSlotFor(source, id)
 	if !ok || resolvedSlot != slot || slot.claim != claim || preemptLoad(&slot.generation) != id.Generation ||
-		preemptLoad(&slot.external) != 1 || admission.token == 0 || admission.token&1 == 0 ||
+		preemptLoad(&slot.external) != uint32(channelExternalExposed) || admission.token == 0 || admission.token&1 == 0 ||
 		preemptLoad(&slot.externalLease) != admission.token || preemptLoad(&slot.inflight)&producerAdmissionCountMask == 0 {
 		return false
 	}
@@ -651,11 +683,28 @@ func validChannelExternalEndpointHeld(admission *channelExternalCommitAdmission,
 		operationCandidateMode(record) != OperationCommitReadyThenTryCommit {
 		return false
 	}
+	// Exposed was release-published only after the owner validated the complete
+	// pendingParkSet relation. Resumed may concurrently change G state,
+	// WaitSetRecord state, and the active-wait queue, so none of those fields is
+	// read here. ParkState/link/record are unchanged by Resumed; the acquired
+	// claim excludes their later resolver/detach mutation.
 	state := link.park
-	return state.phase == parkParked && !state.resolving && state.ticket == link.ticket && validParkTicket(state.ticket) &&
-		state.outcome == ParkOutcomePending && state.winnerRecord == nil && state.winnerID == (OperationID{}) &&
-		state.attached == state.expected && validChannelExternalActiveWaitHeld(link.wait, state, link.ticket) &&
-		validPendingParkResolutionLink(state, link.ticket, link)
+	if state == nil || state.phase != parkParked || state.resolving || state.ticket != link.ticket ||
+		!validParkTicket(state.ticket) || state.outcome != ParkOutcomePending ||
+		state.winnerRecord != nil || state.winnerID != (OperationID{}) ||
+		state.attached != state.expected || state.attached == 0 || state.head == nil ||
+		record.disposition != OperationDispositionPending || record.resolutionApplied ||
+		!operationCandidatePendingResultStorageValid(record) || !operationCandidatePendingForResolution(record) {
+		return false
+	}
+	if link.previous == nil {
+		if state.head != link {
+			return false
+		}
+	} else if link.previous.next != link || link.previous.rank >= link.rank {
+		return false
+	}
+	return link.next == nil || link.next.previous == link && link.rank < link.next.rank
 }
 
 // beginChannelExternalCommitPair is the all-or-none pre-effect gate used by a
@@ -1042,7 +1091,8 @@ func (transaction *ChannelExternalCommit) Commit() bool {
 }
 
 func (source *ChannelOperationSource) publishExternallyCommittedHeld(slot *channelOperationSlot, id OperationID) ChannelOperationPostResult {
-	if preemptLoad(&slot.generation) != id.Generation || preemptLoad(&slot.external) != 1 {
+	if preemptLoad(&slot.generation) != id.Generation ||
+		preemptLoad(&slot.external) != uint32(channelExternalExposed) {
 		return ChannelOperationPostStale
 	}
 	state := producerSourceLifecycle(preemptLoad(&slot.state))

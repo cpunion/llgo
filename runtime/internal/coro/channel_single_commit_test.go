@@ -163,3 +163,35 @@ func TestChannelExternalCommitPairPublicWrapper(t *testing.T) {
 		releaseChannelClaimCoreFixture(t, fixture, decision)
 	}
 }
+
+func TestChannelExternalCommitCanWinAfterExposureBeforeResumed(t *testing.T) {
+	committed := false
+	fixture := newChannelClaimCoreFixtureBeforeResume(
+		t,
+		"channel-pre-resume-commit",
+		[]uint32{95},
+		true,
+		0,
+		func(fixture *channelClaimCoreFixture) {
+			var transaction ChannelExternalCommit
+			if result := BeginChannelExternalCommit(
+				&transaction, fixture.source, fixture.ids[0], fixture.claim,
+			); result != ChannelExternalCommitBeginPrepared ||
+				!transaction.BeginEffect() || !transaction.Commit() {
+				t.Fatalf("commit exposed endpoint before Resumed = result:%d transaction:%+v",
+					result, transaction)
+			}
+			committed = true
+		},
+	)
+	if !committed || selectClaimLoad(fixture.claim) != selectClaimClaimed {
+		t.Fatal("pre-Resumed commit was not durably published")
+	}
+	requestChannelClaimCoreFixture(t, fixture)
+	pollChannelClaimCoreComplete(t, fixture)
+	decision := takeChannelClaimCoreDecision(t, fixture)
+	if decision.outcome != ParkOutcomeCompleted || decision.caseID != 95 || !decision.lease.Valid() {
+		t.Fatalf("pre-Resumed committed decision = %+v", decision)
+	}
+	releaseChannelClaimCoreFixture(t, fixture, decision)
+}
