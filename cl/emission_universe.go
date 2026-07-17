@@ -55,6 +55,9 @@ type EmissionUniverseOptions struct {
 	// every compiler-inserted runtime helper edge. Missing runtime helpers fail
 	// construction instead of being left to the legacy LLVM symbol resolver.
 	CompleteRuntimeABI bool
+	// EnableCoroChannel freezes the alternate nonblocking runtime-helper edges
+	// used by physical channel operations. It must match Compilation exactly.
+	EnableCoroChannel bool
 }
 
 type preparedEmissionPackage struct {
@@ -84,6 +87,7 @@ type EmissionUniverse struct {
 	goProg             *ssa.Program
 	patches            Patches
 	completeRuntimeABI bool
+	enableCoroChannel  bool
 	packages           map[*ssa.Package]*preparedEmissionPackage
 	byTypes            map[*types.Package]*preparedEmissionPackage
 	typesDup           map[*types.Package]bool
@@ -225,6 +229,7 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		prog:                prog,
 		patches:             patches,
 		completeRuntimeABI:  options.CompleteRuntimeABI,
+		enableCoroChannel:   options.EnableCoroChannel,
 		packages:            make(map[*ssa.Package]*preparedEmissionPackage, len(inputs)),
 		byTypes:             make(map[*types.Package]*preparedEmissionPackage, len(inputs)*3),
 		typesDup:            make(map[*types.Package]bool),
@@ -436,6 +441,12 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 // report-only or isolated frontend compilation.
 func (u *EmissionUniverse) CompleteRuntimeABI() bool {
 	return u != nil && u.completeRuntimeABI
+}
+
+// CoroChannelEnabled reports the immutable channel-lowering choice frozen
+// while the emission universe was prepared.
+func (u *EmissionUniverse) CoroChannelEnabled() bool {
+	return u != nil && u.enableCoroChannel
 }
 
 // Functions returns canonical required functions in deterministic order.

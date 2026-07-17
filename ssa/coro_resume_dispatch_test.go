@@ -125,6 +125,106 @@ func TestCoroBuilderResumeDispatchCFG(t *testing.T) {
 	}
 }
 
+func TestCoroBuilderConditionalResumeDispatchOverridesDefault(t *testing.T) {
+	Initialize(InitAll)
+	for _, test := range []struct {
+		name   string
+		target *Target
+	}{
+		{name: "native"},
+		{name: "wasm", target: &Target{GOOS: "wasip1", GOARCH: "wasm"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			prog := NewProgram(test.target)
+			defer prog.Dispose()
+			pkg := prog.NewPackage("coroconditionaldispatch", "coro/resume/conditional/dispatch")
+			defer pkg.Module().Dispose()
+			fn := pkg.NewFunc("coro_conditional_resume_dispatch", functionSignature(
+				[]types.Type{types.Typ[types.Bool]},
+				[]types.Type{types.Typ[types.UnsafePointer]},
+			), InGo)
+			b := fn.MakeBody(1)
+			defer b.Dispose()
+			defaultMarker := pkg.NewFunc("conditional_default_gate", functionSignature(nil, nil), InC)
+			exactMarker := pkg.NewFunc("conditional_exact_gate", functionSignature(nil, nil), InC)
+			publishMarker := pkg.NewFunc("conditional_exact_publish", functionSignature(nil, nil), InC)
+			cleanup := fn.MakeBlock()
+			finish := fn.MakeBlock()
+			defaultCalls := 0
+			exactCalls := 0
+			coro := b.BeginCoro(CoroOptions{
+				Frame: CoroFrameOps{
+					Alloc: func(Builder, Expr, Expr) Expr { return prog.Nil(prog.VoidPtr()) },
+					Free:  func(Builder, Expr, Expr, Expr) {},
+				},
+				AfterResumeDispatch: func(b Builder, normal BasicBlock) {
+					defaultCalls++
+					b.Call(defaultMarker.Expr)
+					b.Jump(normal)
+				},
+			})
+
+			logical := fn.MakeBlock()
+			b.Jump(logical)
+			b.SetBlock(logical)
+			entry := logical.last
+			var suspend llvm.BasicBlock
+			var gate llvm.BasicBlock
+			var normal BasicBlock
+			if got := coro.SuspendCurrentBlockIfWithResumeDispatch(
+				fn.Param(0),
+				func(b Builder) {
+					suspend = b.impl.GetInsertBlock()
+					b.Call(publishMarker.Expr)
+				},
+				func(b Builder, destination BasicBlock) {
+					exactCalls++
+					gate = b.impl.GetInsertBlock()
+					normal = destination
+					b.Call(exactMarker.Expr)
+					b.If(fn.Param(0), destination, cleanup)
+				},
+			); got != logical {
+				t.Fatal("conditional dispatch suspend did not preserve its logical block")
+			}
+			continuation := logical.last
+			b.Jump(finish)
+			b.SetBlock(cleanup)
+			b.Jump(finish)
+			b.SetBlock(finish)
+			coro.Finish()
+			b.EndBuild()
+
+			if defaultCalls != 1 || exactCalls != 1 {
+				t.Fatalf("resume dispatch calls = default:%d exact:%d, want 1/1", defaultCalls, exactCalls)
+			}
+			branch := entry.LastInstruction()
+			if branch.IsNil() || branch.InstructionOpcode() != llvm.Br || branch.SuccessorsCount() != 2 ||
+				branch.Successor(0).C != suspend.C || branch.Successor(1).C != continuation.C {
+				t.Fatalf("conditional dispatch entry has the wrong true/false edges: %v", branch)
+			}
+			if branch.Successor(1).C == gate.C {
+				t.Fatal("conditional dispatch false edge passed through the exact resume gate")
+			}
+			if normal == nil || normal.last.LastInstruction().Successor(0).C != continuation.C {
+				t.Fatal("exact resume normal path did not join the shared continuation")
+			}
+			if !coroSuspendSwitchTargets(fn, gate) {
+				t.Fatal("exact conditional gate is not a case-0 coro.suspend target")
+			}
+			ir := pkg.Module().String()
+			if strings.Count(ir, "call void @conditional_default_gate") != 1 ||
+				strings.Count(ir, "call void @conditional_exact_gate") != 1 ||
+				strings.Count(ir, "call void @conditional_exact_publish") != 1 {
+				t.Fatalf("conditional per-site dispatch did not remain exclusive:\n%s", ir)
+			}
+			if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("verify conditional per-site dispatch: %v\n%s", err, ir)
+			}
+		})
+	}
+}
+
 func TestCoroBuilderResumeDispatchOverridesAndRejectsMisuse(t *testing.T) {
 	t.Run("option callbacks are mutually exclusive", func(t *testing.T) {
 		prog, b := newCoroCallbackTestBuilder(t)
@@ -191,6 +291,9 @@ func TestCoroBuilderResumeDispatchOverridesAndRejectsMisuse(t *testing.T) {
 		})
 		mustPanicContains(t, "requires a callback", func() {
 			coro.SuspendCurrentBlockWithResumeDispatch(nil)
+		})
+		mustPanicContains(t, "requires a callback", func() {
+			coro.SuspendCurrentBlockIfWithResumeDispatch(prog.BoolVal(true), nil, nil)
 		})
 		coro.SuspendCurrentBlockWithResumeDispatch(func(b Builder, normal BasicBlock) {
 			dispatchCalls++

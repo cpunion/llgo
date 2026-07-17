@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	llssa "github.com/goplus/llgo/ssa"
+	"golang.org/x/tools/go/ssa"
 )
 
 func TestEmissionUniverseCompleteRuntimeABIGate(t *testing.T) {
@@ -108,5 +109,54 @@ func Use() {}
 	}}, EmissionUniverseOptions{CompleteRuntimeABI: true})
 	if err == nil || !strings.Contains(err.Error(), "complete runtime ABI requires package") {
 		t.Fatalf("complete runtime ABI without runtime error = %v", err)
+	}
+}
+
+func TestEmissionUniverseCoroChannelRetainsPlainAndPhysicalHelpers(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	runtimePkg := testProg.addPackage(t, llssa.PkgRuntime, `package runtime
+func CoroChanTrySend(ch chan int, value *int, size int) bool { return false }
+func CoroChanTryRecv(ch chan int, value *int, size int) (bool, bool) { return false, false }
+func ChanSend(ch chan int, value *int, size int) bool { return false }
+func ChanRecv(ch chan int, value *int, size int) bool { return false }
+`)
+	callerPkg := testProg.addPackage(t, "example.com/emission/corochannelhelpers", `package corochannelhelpers
+func Send(ch chan int, value int) { ch <- value }
+func Recv(ch chan int) int { return <-ch }
+`)
+	testProg.ssa.Build()
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
+		{SSA: runtimePkg.ssa, Files: []*ast.File{runtimePkg.file}},
+		{SSA: callerPkg.ssa, Files: []*ast.File{callerPkg.file}},
+	}, EmissionUniverseOptions{CompleteRuntimeABI: true, EnableCoroChannel: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	required := make(map[*ssa.Function]bool)
+	for _, fn := range universe.Functions() {
+		required[fn] = true
+	}
+	for _, helper := range []string{"CoroChanTrySend", "CoroChanTryRecv", "ChanSend", "ChanRecv"} {
+		if fn := runtimePkg.ssa.Func(helper); fn == nil || !required[fn] {
+			t.Fatalf("runtime helper %q was not retained for dual channel representations", helper)
+		}
+	}
+	for _, test := range []struct {
+		owner string
+		want  string
+	}{
+		{owner: "Send", want: "CoroChanTrySend"},
+		{owner: "Recv", want: "CoroChanTryRecv"},
+	} {
+		lowered, err := universe.CoroLoweredCalls(callerPkg.ssa.Func(test.owner))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(lowered) != 1 || lowered[0].LogicalName != test.want {
+			t.Fatalf("%s physical lowered calls = %+v; want only %q", test.owner, lowered, test.want)
+		}
 	}
 }

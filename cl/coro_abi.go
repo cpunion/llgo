@@ -129,6 +129,7 @@ type coroBodyContext struct {
 	runDecisionTakeZero    llssa.Expr
 	runDecisionTrap        llssa.Expr
 	unsupportedRunDecision llssa.BasicBlock
+	cancelRunDecision      llssa.BasicBlock
 	panicPrepare           llssa.Expr
 	completePrepare        llssa.Expr
 	nextState              uint32
@@ -331,9 +332,12 @@ func (p *context) beginCoroBody(b llssa.Builder, abi coroPhysicalABI) *coroBodyC
 		body.runDecisionTakeZero = p.pkg.NewFunc(
 			abi.runDecisionTakeZeroHook, coroRunDecisionTakeZeroSignature(), llssa.InC,
 		).Expr
-		body.runDecisionTrap = p.pkg.NewFunc(
-			"llvm.trap", types.NewSignatureType(nil, nil, nil, nil, nil, false), llssa.InC,
-		).Expr
+		if p.compilation != nil && p.compilation.EnableCoroChannel {
+			body.unsupportedRunDecision = p.fn.MakeBlock()
+			body.runDecisionTrap = p.pkg.NewFunc(
+				"llvm.trap", types.NewSignatureType(nil, nil, nil, nil, nil, false), llssa.InC,
+			).Expr
+		}
 	}
 	if abi.completePrepareHook != "" {
 		body.completePrepare = p.pkg.NewFunc(abi.completePrepareHook, coroCompletePrepareSignature(), llssa.InC).Expr
@@ -499,11 +503,24 @@ func (c *coroBodyContext) dispatchZeroRunDecision(b llssa.Builder, normal llssa.
 	}
 	zero := b.Prog.IntVal(0, b.Prog.Uint32())
 	taskKind := b.Call(c.runDecisionTakeZero, c.task)
-	unsupported := b.BinOp(token.NEQ, taskKind, zero)
-	if c.unsupportedRunDecision == nil {
-		c.unsupportedRunDecision = b.Func.MakeBlock()
+	if c.cancelRunDecision == nil {
+		c.cancelRunDecision = b.Func.MakeBlock()
 	}
-	b.If(unsupported, c.unsupportedRunDecision, normal)
+	// The runtime ABI validates the complete decision and aborts before return
+	// for every value other than None/Abort/Shutdown. Any nonzero value reaching
+	// generated IR is therefore an exact task-cancellation cleanup request.
+	b.If(b.BinOp(token.NEQ, taskKind, zero), c.cancelRunDecision, normal)
+}
+
+func (c *coroBodyContext) bindCancellationCompletion(b llssa.Builder) {
+	if c.cancelRunDecision == nil && c.runDecisionTakeZero.IsNil() {
+		return
+	}
+	if c.cancelRunDecision == nil || c.completion == nil {
+		panic("coroutine cancellation resume gate requires a completion block")
+	}
+	b.SetBlock(c.cancelRunDecision)
+	b.Jump(c.completion)
 }
 
 func (c *coroBodyContext) suspendForChild(b llssa.Builder) uint32 {
@@ -665,6 +682,7 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	p.coroSourceBlocks = sourceBlocks
 	physical.completion = p.fn.MakeBlock()
 	physical.finalSuspend = p.fn.MakeBlock()
+	physical.bindCancellationCompletion(b)
 	b.SetBlock(physical.coro.InitialResumeBlock())
 	physical.activate(b)
 	b.Jump(sourceBlocks[0])
@@ -733,6 +751,12 @@ func validateCoroPhysicalABIWithUniverseCapabilities(fn *ssa.Function, plan coro
 }
 
 func validateCoroPhysicalABIWithUniverseCapabilitiesAndFrameRetention(fn *ssa.Function, plan coro.FunctionPlan, whole *coro.SSAPlan, universe *EmissionUniverse, childAwait, programRun, staticSpawn, explicitPanic bool, frameRetentionABI string) error {
+	return validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(
+		fn, plan, whole, universe, childAwait, programRun, staticSpawn, explicitPanic, frameRetentionABI, false,
+	)
+}
+
+func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn *ssa.Function, plan coro.FunctionPlan, whole *coro.SSAPlan, universe *EmissionUniverse, childAwait, programRun, staticSpawn, explicitPanic bool, frameRetentionABI string, channel bool) error {
 	if !childAwait {
 		if explicitPanic {
 			return fmt.Errorf("coroutine physical ABI: function %q: explicit-status panic requires PhysicalABIV1 child-await lowering", plan.ID)
@@ -853,7 +877,25 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesAndFrameRetention(fn *ssa.Fu
 					!coroLeafScalar(instr.X.Type()) || !coroLeafScalar(instr.Y.Type()) {
 					return coroLeafInstructionError(fn, plan, instr, "potentially panicking or non-scalar binary operation")
 				}
+			case *ssa.Send:
+				if !channel {
+					return coroLeafInstructionError(fn, plan, instr, "blocking channel send requires the channel scheduler capability")
+				}
+				if err := validateCoroPhysicalChannelType(instr.Chan.Type()); err != nil {
+					return coroLeafInstructionError(fn, plan, instr, "channel send type: "+err.Error())
+				}
+				parks++
 			case *ssa.UnOp:
+				if instr.Op == token.ARROW {
+					if !channel {
+						return coroLeafInstructionError(fn, plan, instr, "blocking channel receive requires the channel scheduler capability")
+					}
+					if err := validateCoroPhysicalChannelType(instr.X.Type()); err != nil {
+						return coroLeafInstructionError(fn, plan, instr, "channel receive type: "+err.Error())
+					}
+					parks++
+					continue
+				}
 				if (instr.Op != token.SUB && instr.Op != token.XOR && instr.Op != token.NOT) || !coroLeafScalar(instr.Type()) {
 					return coroLeafInstructionError(fn, plan, instr, "unsupported unary operation")
 				}
@@ -947,6 +989,17 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesAndFrameRetention(fn *ssa.Fu
 	}
 	if unsupported := plan.LocalEffect &^ (coro.YieldOnly | coro.MayPark); unsupported != 0 {
 		return fail("child-await body has unsupported local effect %s", unsupported)
+	}
+	return nil
+}
+
+func validateCoroPhysicalChannelType(typ types.Type) error {
+	channel, ok := types.Unalias(typ).Underlying().(*types.Chan)
+	if !ok {
+		return fmt.Errorf("operand is not a channel")
+	}
+	if err := validateCoroPhysicalValueType(channel.Elem(), make(map[types.Type]bool)); err != nil {
+		return fmt.Errorf("element type: %w", err)
 	}
 	return nil
 }

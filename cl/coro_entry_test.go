@@ -360,7 +360,7 @@ func Complex(ch chan int) int {
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		PackageOptions{Compilation: compilation},
 	)
-	if err == nil || !strings.Contains(err.Error(), "unsupported unary operation") {
+	if err == nil || !strings.Contains(err.Error(), "requires the channel scheduler capability") {
 		t.Fatalf("demanded complex preflight = %v, %v; want fail-closed unsupported channel-receive instruction diagnostic", got, err)
 	}
 	if got != nil {

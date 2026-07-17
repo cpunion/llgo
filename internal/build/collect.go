@@ -381,6 +381,7 @@ func (c *context) canUsePackageCache() bool {
 		c.clCompilation.EnableCoroExplicitStatusPanicABI == c.buildConf.EnableCoroExplicitStatusPanicABI &&
 		c.clCompilation.EnableCoroClosedStaticSpawn == c.buildConf.EnableCoroClosedStaticSpawn &&
 		c.clCompilation.EnableCoroProgramBootstrapRun == c.buildConf.EnableCoroProgramBootstrapRun &&
+		c.clCompilation.EnableCoroChannel == c.buildConf.EnableCoroChannel &&
 		c.clCompilation.CoroABI == metadata.CoroABI &&
 		c.clCompilation.SchedulerABI == metadata.SchedulerABI &&
 		c.clCompilation.PanicABI == metadata.PanicABI &&

@@ -32,7 +32,8 @@ func TestProducerSourceSlotLayoutAndEmbedding(t *testing.T) {
 	}
 	if unsafe.Offsetof(manualOperationSlot{}.producerSourceSlot) != 0 ||
 		unsafe.Offsetof(taskControlSlot{}.producerSourceSlot) != 0 ||
-		unsafe.Offsetof(waitRegistrationSlot{}.producerSourceSlot) != 0 {
+		unsafe.Offsetof(waitRegistrationSlot{}.producerSourceSlot) != 0 ||
+		unsafe.Offsetof(channelOperationSlot{}.producerSourceSlot) != 0 {
 		t.Fatal("producer source slot is not the first concrete slot field")
 	}
 	if uint32(waitRegistrationFree) != uint32(producerSourceFree) ||

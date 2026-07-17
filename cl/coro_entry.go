@@ -41,6 +41,7 @@ type plannedFunctionSymbol struct {
 	physical          bool
 	childAwait        bool
 	programRun        bool
+	channel           bool
 	plainDispatch     bool
 	staticSpawn       bool
 	explicitPanic     bool
@@ -91,6 +92,7 @@ func (p *context) resolveFunctionSymbol(fn *ssa.Function) (plannedFunctionSymbol
 	entry.physical = p.compilation.EnableCoroPhysicalABI
 	entry.childAwait = p.compilation.EnableCoroChildAwait
 	entry.programRun = p.compilation.EnableCoroProgramBootstrapRun
+	entry.channel = p.compilation.EnableCoroChannel
 	entry.plainDispatch = p.compilation.EnableCoroPlainDispatch
 	entry.staticSpawn = p.compilation.EnableCoroClosedStaticSpawn
 	entry.explicitPanic = p.compilation.EnableCoroExplicitStatusPanicABI
@@ -190,9 +192,9 @@ func (e plannedFunctionSymbol) checkSupported() error {
 		if err := validateCoroPhysicalFunctionValueABI(e.plan, e.function.Signature, e.plainDispatch); err != nil {
 			return err
 		}
-		return validateCoroPhysicalABIWithUniverseCapabilitiesAndFrameRetention(
+		return validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(
 			e.function, e.plan, e.coroPlan, e.emission, e.childAwait, e.programRun,
-			e.staticSpawn, e.explicitPanic, e.frameRetentionABI,
+			e.staticSpawn, e.explicitPanic, e.frameRetentionABI, e.channel,
 		)
 	}
 	if e.plan.Emission == coro.EmitExternal && e.plan.FuncRep == coro.DirectCoro {
@@ -214,6 +216,9 @@ func (c *Compilation) preflightCoroPlan() error {
 	}
 	if c.EnableCoroChildAwait && !c.EnableCoroPhysicalABI {
 		return fmt.Errorf("coroutine child await requires coroutine physical ABI")
+	}
+	if c.EnableCoroChannel && (!c.EnableCoroChildAwait || !c.EnableCoroProgramBootstrapRun) {
+		return fmt.Errorf("coroutine channel lowering requires runnable PhysicalABIV1 program-bootstrap lowering")
 	}
 	if c.EnableCoroPlainDispatch && !c.EnableCoroEntryResolution {
 		return fmt.Errorf("coroutine plain dispatch requires coroutine entry resolution")
@@ -248,6 +253,10 @@ func (c *Compilation) preflightCoroPlan() error {
 			c.coroPreflightErr = fmt.Errorf("coroutine entry resolution requires a prepared emission universe")
 			return
 		}
+		if c.EmissionUniverse.CoroChannelEnabled() != c.EnableCoroChannel {
+			c.coroPreflightErr = fmt.Errorf("coroutine channel lowering disagrees with the prepared emission universe")
+			return
+		}
 		if err := c.EmissionUniverse.ValidateCoroPlan(c.CoroPlan); err != nil {
 			c.coroPreflightErr = err
 			return
@@ -278,6 +287,7 @@ func (c *Compilation) preflightCoroPlan() error {
 				physical:          c.EnableCoroPhysicalABI,
 				childAwait:        c.EnableCoroChildAwait,
 				programRun:        c.EnableCoroProgramBootstrapRun,
+				channel:           c.EnableCoroChannel,
 				plainDispatch:     c.EnableCoroPlainDispatch,
 				staticSpawn:       c.EnableCoroClosedStaticSpawn,
 				explicitPanic:     c.EnableCoroExplicitStatusPanicABI,

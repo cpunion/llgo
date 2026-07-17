@@ -21,7 +21,9 @@ package runtime
 import "github.com/goplus/llgo/runtime/internal/coro"
 
 func coroProgramBindExecutorDriverV1(driver *coro.ExecutorDriver, p *coroP, registry *coro.ExecutorRegistry, handle coro.ExecutorHandle, waits *coro.WaitRegistrationTable) bool {
-	return coro.BindExecutor(driver, p, registry, handle, waits)
+	return coro.BindExecutorSourceCatalog(driver, p, registry, handle, coro.ExecutorSourceCatalog{
+		Waits: waits, Channel: &coroProgramChannelSourceV1State,
+	})
 }
 
 func coroProgramNextRunStepV1(driver *coro.ExecutorDriver) (coro.ExecutorRunStep, bool) {

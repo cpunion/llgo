@@ -59,7 +59,37 @@ func (u *EmissionUniverse) materializeLoweredRuntimeHelpers(ctx *context, ownerF
 			return err
 		}
 	}
+	// One source function may need both a plain and a physical coroutine
+	// representation. Channel instructions in the physical representation use
+	// the nonblocking CoroChanTry* edge above, while the plain representation
+	// still lowers to the synchronous ChanSend/ChanRecv helper. Retain that
+	// helper without recording a second physical lowered-call edge: the source
+	// channel instruction already contributes MayPark to coroutine analysis.
+	if helper := u.plainChannelRuntimeHelper(instr); helper != "" {
+		target := runtimePkg.ssa.Func(helper)
+		if target == nil {
+			return fmt.Errorf("prepare emission universe: function %q lowers its plain representation to missing runtime helper %q", ownerFn.Name(), helper)
+		}
+		if _, err := u.addResolvedRequired(target, ownerPkg, ownerFn, state); err != nil {
+			return fmt.Errorf("prepare emission universe: function %q plain-representation runtime helper %q: %w", ownerFn.Name(), helper, err)
+		}
+	}
 	return nil
+}
+
+func (u *EmissionUniverse) plainChannelRuntimeHelper(instr ssa.Instruction) string {
+	if u == nil || !u.enableCoroChannel {
+		return ""
+	}
+	switch instruction := instr.(type) {
+	case *ssa.Send:
+		return "ChanSend"
+	case *ssa.UnOp:
+		if instruction.Op == token.ARROW {
+			return "ChanRecv"
+		}
+	}
+	return ""
 }
 
 // loweredCallUnwindOnly reports a structural CFG proof: the instruction's
@@ -144,7 +174,11 @@ func (u *EmissionUniverse) loweredRuntimeHelpers(ctx *context, instr ssa.Instruc
 	case *ssa.UnOp:
 		switch v.Op {
 		case token.ARROW:
-			add("ChanRecv")
+			if u.enableCoroChannel {
+				add("CoroChanTryRecv")
+			} else {
+				add("ChanRecv")
+			}
 		case token.MUL:
 			if _, checkedReceiver := ctx.methodNilDerefChecks[v]; checkedReceiver {
 				// compileCheckedDeref preserves the checked pointer through the
@@ -271,7 +305,11 @@ func (u *EmissionUniverse) loweredRuntimeHelpers(ctx *context, instr ssa.Instruc
 	case *ssa.Panic:
 		add("Panic")
 	case *ssa.Send:
-		add("ChanSend")
+		if u.enableCoroChannel {
+			add("CoroChanTrySend")
+		} else {
+			add("ChanSend")
+		}
 	case *ssa.Call:
 		if v.Call.IsInvoke() {
 			// Builder.Imethod extracts the receiver through this runtime helper

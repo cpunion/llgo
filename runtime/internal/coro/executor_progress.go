@@ -64,6 +64,7 @@ const (
 	executorCatalogWaits executorCatalogSource = iota
 	executorCatalogTimers
 	executorCatalogManual
+	executorCatalogChannel
 	executorCatalogControl
 	executorCatalogDone
 )
@@ -123,6 +124,8 @@ func validExecutorPollTransaction(transaction *executorPollTransaction, sources 
 			return sources.timers != nil && transaction.cursor < TimerRegistrationCapacity
 		case executorCatalogManual:
 			return sources.manual != nil && transaction.cursor < ManualOperationSourceCapacity
+		case executorCatalogChannel:
+			return sources.channel != nil && transaction.cursor < ChannelOperationSourceCapacity
 		case executorCatalogControl:
 			return sources.control != nil && transaction.cursor < TaskControlSourceCapacity
 		case executorCatalogDone:
@@ -180,6 +183,9 @@ func executorMinPollBudget(sources *ExecutorSourceSet) (uint32, bool) {
 	if sources.manual != nil {
 		epoch += ManualOperationSourceCapacity
 	}
+	if sources.channel != nil {
+		epoch += ChannelOperationSourceCapacity
+	}
 	if sources.control != nil {
 		epoch += TaskControlSourceCapacity
 	}
@@ -208,6 +214,10 @@ func (transaction *executorPollTransaction) advanceCatalogSource(sources *Execut
 			}
 		case executorCatalogManual:
 			if sources.manual != nil {
+				return
+			}
+		case executorCatalogChannel:
+			if sources.channel != nil {
 				return
 			}
 		case executorCatalogControl:
@@ -274,6 +284,21 @@ func publishExecutorCatalogEntry(driver *ExecutorDriver) bool {
 		if transaction.cursor == ManualOperationSourceCapacity {
 			transaction.advanceCatalogSource(sources)
 		}
+	case executorCatalogChannel:
+		if index == 0 && !sources.channel.beginPublishPass(p) {
+			return false
+		}
+		published, lost, ok := sources.channel.publishSlot(p, index)
+		transaction.total.channel += int(published)
+		transaction.total.channelLost += int(lost)
+		transaction.total.completed += int(published + lost)
+		if !ok {
+			return false
+		}
+		transaction.cursor++
+		if transaction.cursor == ChannelOperationSourceCapacity {
+			transaction.advanceCatalogSource(sources)
+		}
 	case executorCatalogControl:
 		if index == 0 && !sources.control.beginPublishPass(p) {
 			return false
@@ -297,6 +322,7 @@ func publishExecutorCatalogEntry(driver *ExecutorDriver) bool {
 
 func executorProgressFromScan(scan executorSourceScan, used, budget uint32, complete, more, blocked bool) (ExecutorPollProgress, bool) {
 	if scan.completed < 0 || scan.waits < 0 || scan.timers < 0 || scan.manual < 0 || scan.manualLost < 0 ||
+		scan.channel < 0 || scan.channelLost < 0 ||
 		scan.control < 0 || scan.controlLate < 0 || scan.applyVisits < 0 || scan.promoted < 0 ||
 		used > budget || more && blocked {
 		return ExecutorPollProgress{}, false

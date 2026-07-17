@@ -88,6 +88,10 @@ type Compilation struct {
 	// package identities. The factory itself lives in the uncached entry module,
 	// but every linked archive must agree with the runtime driver contract.
 	EnableCoroProgramBootstrapRun bool
+	// EnableCoroChannel enables the exact single blocking send/receive lowering
+	// on the runnable scheduler. It requires PhysicalABIV1 program bootstrap and
+	// is independently fingerprinted from child-await, spawn, and timer support.
+	EnableCoroChannel bool
 	// CoroFrameRetentionABI selects one compiler/runtime-owned contract under
 	// which x/tools Heap Allocs may be re-proved as current LLVM coroutine-frame
 	// storage. The zero value preserves the ordinary managed-allocation rule.
@@ -131,6 +135,12 @@ func (c *Compilation) validateCoroABIIdentity(required bool) error {
 	if c.EnableCoroChildAwait {
 		wantSchedulerABI = coro.SchedulerChildAwaitABIV0
 	}
+	if c.EnableCoroChannel {
+		if !c.EnableCoroChildAwait || !c.EnableCoroProgramBootstrapRun {
+			return fmt.Errorf("coroutine channel lowering requires runnable PhysicalABIV1 program-bootstrap lowering")
+		}
+		wantSchedulerABI = coro.SchedulerProgramBootstrapChannelABIV0
+	}
 	if c.EnableCoroClosedStaticSpawn {
 		if !c.EnableCoroChildAwait {
 			return fmt.Errorf("coroutine closed static spawn requires child-await lowering")
@@ -138,12 +148,18 @@ func (c *Compilation) validateCoroABIIdentity(required bool) error {
 		if !c.EnableCoroProgramBootstrapRun {
 			return fmt.Errorf("coroutine closed static spawn requires the runnable program-bootstrap v2 scheduler")
 		}
-		wantSchedulerABI = coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0
+		if c.EnableCoroChannel {
+			wantSchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+		} else {
+			wantSchedulerABI = coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0
+		}
 	} else if c.EnableCoroProgramBootstrapRun {
 		if !c.EnableCoroChildAwait {
 			return fmt.Errorf("coroutine program bootstrap runtime requires child-await lowering")
 		}
-		wantSchedulerABI = coro.SchedulerProgramBootstrapABIV2
+		if !c.EnableCoroChannel {
+			wantSchedulerABI = coro.SchedulerProgramBootstrapABIV2
+		}
 	}
 	if c.EnableCoroPlainDispatch && !c.EnableCoroEntryResolution {
 		return fmt.Errorf("coroutine plain dispatch requires coroutine entry resolution")

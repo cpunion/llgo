@@ -200,6 +200,42 @@ func TestCoroPlanDigestFrameRetentionIdentityIsExactAndDomainSeparated(t *testin
 	}
 }
 
+func TestCoroPlanDigestAcceptsChannelSchedulerIdentities(t *testing.T) {
+	for _, schedulerABI := range []string{
+		SchedulerProgramBootstrapChannelABIV0,
+		SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+	} {
+		t.Run(schedulerABI, func(t *testing.T) {
+			prog, pkg := buildCoroTestSSAWithMode(
+				t, "channel_scheduler_digest.go", planDigestTestSource,
+				ssa.SanityCheckFunctions|ssa.InstantiateGenerics,
+			)
+			root := packageFunction(t, pkg, "root")
+			config := planDigestSSAConfig()
+			config.FunctionIDs.CoroABI = PhysicalABIV1
+			config.FunctionIDs.SchedulerABI = schedulerABI
+			plan, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: AsyncDemand}}, config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			metadata := validPlanDigestMetadata()
+			metadata.CoroABI = PhysicalABIV1
+			metadata.SchedulerABI = schedulerABI
+			metadata.FrameRetentionABI = FrameRetentionTimerABIV1
+			if _, err := plan.CoroPlanDigest(metadata); err != nil {
+				t.Fatalf("channel scheduler digest: %v", err)
+			}
+			document, err := plan.canonicalPlanDigest(metadata)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if document.Metadata.SchedulerABI != schedulerABI {
+				t.Fatalf("canonical scheduler ABI = %q, want %q", document.Metadata.SchedulerABI, schedulerABI)
+			}
+		})
+	}
+}
+
 func TestCoroPlanDigestRecordsClosedStaticSpawnConsumerAndOwnerSeed(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "spawn_digest.go", `package coroid
 func worker(value int) { _ = value }

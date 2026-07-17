@@ -20,13 +20,17 @@ import "testing"
 
 func TestProducerAdmissionLifecycle(t *testing.T) {
 	if producerAdmissionAcquire(nil) || producerAdmissionSeal(nil) ||
-		producerAdmissionQuiesced(nil) || producerAdmissionReopen(nil) {
+		producerAdmissionQuiesced(nil) || producerAdmissionReopen(nil) ||
+		producerAdmissionReleaseChecked(nil) {
 		t.Fatal("nil admission word accepted")
 	}
 	producerAdmissionRelease(nil)
 
 	var word uint32
 	producerAdmissionRelease(&word)
+	if producerAdmissionReleaseChecked(&word) {
+		t.Fatal("checked release accepted open zero")
+	}
 	if preemptLoad(&word) != 0 || !producerAdmissionAcquire(&word) ||
 		!producerAdmissionAcquire(&word) || preemptLoad(&word) != 2 {
 		t.Fatalf("open admission = %#x", preemptLoad(&word))
@@ -36,9 +40,10 @@ func TestProducerAdmissionLifecycle(t *testing.T) {
 		producerAdmissionReopen(&word) {
 		t.Fatalf("sealed live admission = %#x", preemptLoad(&word))
 	}
-	producerAdmissionRelease(&word)
-	producerAdmissionRelease(&word)
-	producerAdmissionRelease(&word)
+	if !producerAdmissionReleaseChecked(&word) || !producerAdmissionReleaseChecked(&word) ||
+		producerAdmissionReleaseChecked(&word) {
+		t.Fatal("checked release did not reject sealed zero")
+	}
 	if !producerAdmissionQuiesced(&word) || !producerAdmissionSeal(&word) ||
 		!producerAdmissionReopen(&word) || preemptLoad(&word) != 0 {
 		t.Fatalf("quiesced admission = %#x", preemptLoad(&word))

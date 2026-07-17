@@ -56,6 +56,10 @@ const (
 	coroTimerRetireCompletedSymbolV1                            = "__llgo_coro_timer_retire_completed_v1"
 	coroTimerPrepareAfterOrAbortSymbolV1                        = "__llgo_coro_timer_prepare_after_or_abort_v1"
 	coroTimerRetireCompletedOrAbortSymbolV1                     = "__llgo_coro_timer_retire_completed_or_abort_v1"
+	coroChanSendParkSymbolV1                                    = "__llgo_coro_chan_send_park_v1"
+	coroChanRecvParkSymbolV1                                    = "__llgo_coro_chan_recv_park_v1"
+	coroChanResumeSymbolV1                                      = "__llgo_coro_chan_resume_v1"
+	coroChanSendClosedPanicSymbolV1                             = "__llgo_coro_chan_send_closed_panic_v1"
 
 	// Step kinds and semantic roles are part of the cross-target bootstrap ABI.
 	// Keep these numeric values synchronized with ssa and runtime/internal/coro.
@@ -118,6 +122,9 @@ func validateCoroProgramBootstrapConfig(conf *Config) error {
 	}
 	if conf.EnableCoroProgramBootstrapRun && !conf.EnableCoroProgramBootstrapABI {
 		return fmt.Errorf("enable coroutine program bootstrap runtime: program bootstrap ABI is required")
+	}
+	if conf.EnableCoroChannel && !conf.EnableCoroProgramBootstrapRun {
+		return fmt.Errorf("enable coroutine channel lowering: runnable program bootstrap is required")
 	}
 	if !conf.EnableCoroProgramBootstrapABI {
 		return nil
@@ -664,6 +671,13 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 			write("native-timer=monotonic-poll-deadline-v1:" +
 				coroTimerPrepareAfterOrAbortSymbolV1 + "(token:ptr,delay-ns:i64,ticket-out:*u32,timer-slot-out:*u32,timer-generation-out:*u32)->void;" +
 				coroTimerRetireCompletedOrAbortSymbolV1 + "(token:ptr,ticket:u32,timer-slot:u32,timer-generation:u32)->void")
+		}
+		if ctx.buildConf.EnableCoroChannel {
+			write("channel-v1=" +
+				coroChanSendParkSymbolV1 + "(g:ptr,handle:ptr,header:ptr,channel:ptr,elem:ptr,state:ptr,size:uintptr)->void;" +
+				coroChanRecvParkSymbolV1 + "(g:ptr,handle:ptr,header:ptr,channel:ptr,elem:ptr,state:ptr,size:uintptr)->void;" +
+				coroChanResumeSymbolV1 + "(g:ptr,state:ptr)->u32;" +
+				coroChanSendClosedPanicSymbolV1 + "(g:ptr,handle:ptr,header:ptr)->void")
 		}
 		write("header=physical-abi-v1")
 	} else {
