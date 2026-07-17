@@ -408,13 +408,20 @@ worker queue满必须确定地失败或背压，shutdown在owner P之外join已�
 5. 实现分层执行取消：request、logical terminal、detach和quiesce。
 6. 用第三种fake/manual source验证executor不再按source分支。
 7. 将抢占请求与timer解耦，并固定P/M/global injection ownership。
+8. 把`RunSlice` reduction budget落实到source、affected wait-set、candidate apply/detach、G resume/destroy和inline-ready/child-await的同一账本；所有可续工作保存cursor，并严格区分`RetryBudget`与`AwaitExternalFact`，后者不能设置同一operation的`more`形成忙转。
+9. 实现commit-capable select：`ReadyThenTryCommit`携带exact readiness generation，`Reservable`携带exact reservation generation，失败或stale只消费对应hint；`default`只能在本轮所有candidate均给出不可提交证明后选择，logical winner后的physical commit/rollback acknowledgement仍属于promotion barrier。
+10. 完成真实payload/result lease、`CompletionRecord`和逐frame cleanup：每次resume先按exact ticket reconciliation并Take或Discard结果，再进入normal continuation或`Return/Panic/Goexit/Abort/Shutdown` cleanup；在此之前执行取消只能标为fail-closed原型。
 
-### P1：把timer迁入公共模型
+### P1：完成公共source、P-neutral并行与容量协议
 
 1. Timer table改为公共source contract，先保持固定容量保证迁移正确。
 2. 再升级dynamic/sharded heap和Go Timer/Stop/Reset/Ticker/AfterFunc语义。
 3. Native、WASM/WASI、RTOS和baremetal只实现各自clock/alarm/wait adapter。
 4. 删除compiler中的timer symbol-specific frame retention。
+5. 在进入global injection或work stealing前，把source-affine winner物化为compiler提供的P-neutral `ResumePacket/ResultCell`，结束原route的result lease；新P不得回访旧source取得payload或执行cleanup。
+6. 为worker、netpoll、host和静态RTOS/baremetal source定义统一admission/backpressure结果：`Accepted | RetryBudget | AwaitCapacity | Unsupported`。`AwaitCapacity`使用generation稳定的source fact并支持cancel-before-start；任何容量都遵守reserve-before-publish，不能静默丢请求或退化成每operation线程/对象。
+
+以上机制使用紧凑record、标量identity和静态source catalog实现；其他语言的`Future`、`Task/Job`、`Promise`、sender/receiver对象图、STM retry log或每G mailbox都不进入Go ABI或每G常驻布局。
 
 ### P2：补齐compiler core
 
