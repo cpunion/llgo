@@ -238,6 +238,51 @@ func TestAbortParkPreparationUsesNormalDetachBarrier(t *testing.T) {
 	}
 }
 
+func TestDuplicateCaseSealFailureRemainsAbortable(t *testing.T) {
+	var g G
+	if !InitG(&g) {
+		t.Fatal("initialize duplicate-case G")
+	}
+	ticket, ok := BeginParkSet(&g.park, 2, 0x91)
+	var wait WaitSetRecord
+	if !ok || !PrepareWaitSetRecord(&wait, &g, ticket) {
+		t.Fatal("prepare duplicate-case wait-set")
+	}
+	var records [2]OperationRecord
+	var ids [2]OperationID
+	for index := range records {
+		id, idOK := MakeOperationID(OperationSourceHost, uint32(index+1), 1)
+		if !idOK || !InitOperation(&records[index], id) ||
+			!AttachParkWaitOperation(&g.park, ticket, &wait, &records[index], 7) {
+			t.Fatalf("attach duplicate case %d", index)
+		}
+		ids[index] = id
+	}
+	beforeSeed := g.park.seed
+	if SealParkSet(&g.park, ticket) || g.park.phase != parkPreparing || g.park.seed != beforeSeed || !validParkState(&g.park) {
+		t.Fatal("duplicate case Seal did not remain valid and abortable")
+	}
+	if !AbortParkSet(&g.park, ticket) {
+		t.Fatal("abort duplicate-case preparation")
+	}
+	for index := range records {
+		if !AcknowledgeOperationResolution(&records[index], ids[index], OperationDispositionCanceled) ||
+			!DetachParkWaitOperation(&g.park, ticket, &records[index], ids[index]) {
+			t.Fatalf("detach duplicate case %d", index)
+		}
+	}
+	if !ParkReady(&g.park, ticket) {
+		t.Fatal("duplicate-case abort did not cross detach barrier")
+	}
+	if outcome, _, lease, consumed := ConsumeParkSet(&g.park, ticket); !consumed ||
+		outcome != ParkOutcomeCanceled || lease != (OperationResultLease{}) {
+		t.Fatalf("consume duplicate-case abort = (%d, %+v, %t)", outcome, lease, consumed)
+	}
+	if !ReleasePreparedWaitSetRecord(&wait) {
+		t.Fatal("release duplicate-case wait-set record")
+	}
+}
+
 func TestAbortPartialParkPreparationDiscardsPublishedCompletion(t *testing.T) {
 	var state ParkState
 	ticket, ok := BeginParkSet(&state, 2, 6)
@@ -527,14 +572,33 @@ func TestParkSnapshotsResolveIndependentlyWithoutBatchStorage(t *testing.T) {
 	}
 }
 
-func TestParkSetHasNoResolverCapacityLimit(t *testing.T) {
+func TestParkSetMatchesGoSelectCaseLimit(t *testing.T) {
 	var state ParkState
-	ticket, ok := BeginParkSet(&state, ^uint32(0), 23)
+	ticket, ok := BeginParkSet(&state, MaxSelectOperationCases, 23)
 	if !ok || !AbortParkSet(&state, ticket) || !ParkReady(&state, ticket) {
-		t.Fatalf("large logical wait-set preparation = (%+v, %t)", ticket, ok)
+		t.Fatalf("maximum logical wait-set preparation = (%+v, %t)", ticket, ok)
 	}
 	if outcome, _, _, consumed := ConsumeParkSet(&state, ticket); !consumed || outcome != ParkOutcomeCanceled {
-		t.Fatal("consume large aborted wait-set")
+		t.Fatal("consume maximum aborted wait-set")
+	}
+	before := state
+	if rejected, accepted := BeginParkSet(&state, MaxSelectOperationCases+1, 24); accepted || rejected != (ParkTicket{}) || state != before {
+		t.Fatal("accepted more than Go's select case limit")
+	}
+
+	var defaultState ParkState
+	defaultTicket, defaultOK := BeginParkSetWithDefault(&defaultState, MaxSelectOperationCases, 25, 1)
+	if !defaultOK || !AbortParkSet(&defaultState, defaultTicket) {
+		t.Fatal("rejected maximum operation set plus compiler default")
+	}
+	var tooManyDefault ParkState
+	if rejected, accepted := BeginParkSetWithDefault(&tooManyDefault, MaxSelectOperationCases+1, 26, 1); accepted ||
+		rejected != (ParkTicket{}) || tooManyDefault != (ParkState{}) {
+		t.Fatal("accepted default with too many physical operations")
+	}
+	fullTicket, fullOK := BeginParkSet(&tooManyDefault, MaxSelectOperationCases, 27)
+	if !fullOK || !SetParkDefault(&tooManyDefault, fullTicket, 1) || !AbortParkSet(&tooManyDefault, fullTicket) {
+		t.Fatal("rejected compiler default beside a full operation set")
 	}
 }
 

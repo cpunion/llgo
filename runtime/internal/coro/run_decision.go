@@ -37,7 +37,7 @@ func validRunDecision(decision RunDecision) bool {
 	if decision == (RunDecision{}) {
 		return true
 	}
-	if !ValidG(decision.g) || decision.outcome > ParkOutcomeCanceled ||
+	if !ValidG(decision.g) || decision.outcome > ParkOutcomeDefault ||
 		(decision.task != TaskCancelNone && !validTaskCancelKind(decision.task)) {
 		return false
 	}
@@ -51,6 +51,9 @@ func validRunDecision(decision RunDecision) bool {
 	}
 	if decision.outcome == ParkOutcomeCompleted {
 		return decision.task == TaskCancelNone && decision.lease.Valid() && decision.lease.ticket == decision.ticket
+	}
+	if decision.outcome == ParkOutcomeDefault {
+		return decision.task == TaskCancelNone && decision.lease == (OperationResultLease{})
 	}
 	// A canceled logical park normally has no winner lease. Prompt task
 	// cancellation may suppress an already selected completion, in which case

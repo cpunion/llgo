@@ -101,7 +101,7 @@ func TestManualOperationSourceAffectedResolveAndUnpublishedLoserDetach(t *testin
 	// ids[2] never posted and therefore was never in the affected chain. The
 	// all-live-slot apply pass must still close, acknowledge, and detach it.
 	thirdSlot, _ := manualOperationSlotFor(source, ids[2])
-	if thirdSlot.record.completionPublished || thirdSlot.record.phase != operationDetached ||
+	if operationCandidateIsPublished(&thirdSlot.record) || thirdSlot.record.phase != operationDetached ||
 		thirdSlot.record.disposition != OperationDispositionLost || !thirdSlot.record.resolutionApplied ||
 		preemptLoad(&thirdSlot.state) != uint32(manualOperationClosing) {
 		t.Fatal("unpublished select loser was not detached by source apply pass")

@@ -162,7 +162,7 @@ func RequestTaskCancellation(p *P, g *G, kind TaskCancelKind) bool {
 	var wait *WaitSetRecord
 	if g.state == GWaiting && g.waitToken == nil && g.active != nil && g.active.parkWait != nil {
 		wait = g.active.parkWait
-		if !canAppendAffectedWaitSet(p, wait) {
+		if g.park.winnerRecord != nil || !canAppendAffectedWaitSet(p, wait) {
 			return false
 		}
 	} else if !validParkState(&g.park) {

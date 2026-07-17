@@ -567,7 +567,7 @@ func pollReady(p *P) (int, bool) {
 		// sufficient acknowledgement of the legacy/internal scheduling gate.
 		preemptCompareAndSwap(&p.schedule, scheduleRequested, scheduleIdle)
 	}
-	batch, _, _, affectedOK := resolveAffectedWaitSets(p)
+	batch, _, _, affectedOK := resolveAffectedWaitSets(p, nil)
 	if !affectedOK {
 		return 0, false
 	}

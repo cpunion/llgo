@@ -185,6 +185,10 @@ const (
 	OperationCompletionPublished
 	OperationCompletionDuplicate
 	OperationCompletionLost
+	// OperationCompletionDeferred means another ReadyThen TryCommit owns this
+	// ParkState snapshot. The source must retain its mailbox fact and retry it
+	// in the next owner epoch; no OperationRecord field was changed.
+	OperationCompletionDeferred
 )
 
 // OperationCancelResult separates a durable request from the later logical
@@ -220,6 +224,227 @@ const (
 	OperationApplyAwaitExternalFact
 )
 
+// OperationCommitMode describes how a ready select candidate becomes the one
+// logical winner. The zero value preserves existing timer/manual behavior.
+//
+// IrreversibleCompletion means publication itself already committed the
+// physical result. ReadyThenTryCommit is only a readiness hint: the resolver
+// must ask the owning source to perform one synchronous exact-ID TryCommit.
+// Reservable means publication owns a reversible reservation which the
+// resolver can logically commit for the winner or roll back for every loser.
+type OperationCommitMode uint8
+
+const (
+	OperationCommitIrreversibleCompletion OperationCommitMode = iota
+	OperationCommitReadyThenTryCommit
+	OperationCommitReservable
+)
+
+// OperationCommitState is an owner-side diagnostic view of the compact
+// candidate byte. Committed and RolledBack record the resolver's immutable
+// logical decision; the owning source still performs the corresponding
+// physical effect before AcknowledgeOperationResolution and detach. This byte
+// does not cross producer or platform ABIs.
+type OperationCommitState uint8
+
+const (
+	OperationCommitIdle OperationCommitState = iota
+	OperationCommitReady
+	OperationCommitReserved
+	OperationCommitCommitted
+	OperationCommitRolledBack
+)
+
+const (
+	operationCandidatePublished  = uint8(1 << 0)
+	operationCandidateModeShift  = 1
+	operationCandidateModeBits   = uint8(3 << operationCandidateModeShift)
+	operationCandidateStateShift = operationCandidateModeShift + 2
+	operationCandidateStateBits  = uint8(7 << operationCandidateStateShift)
+)
+
+func operationCandidateMode(record *OperationRecord) OperationCommitMode {
+	if record == nil {
+		return OperationCommitMode(255)
+	}
+	return OperationCommitMode(record.candidate&operationCandidateModeBits) >> operationCandidateModeShift
+}
+
+func operationCandidateState(record *OperationRecord) OperationCommitState {
+	if record == nil {
+		return OperationCommitState(255)
+	}
+	return OperationCommitState(record.candidate&operationCandidateStateBits) >> operationCandidateStateShift
+}
+
+func operationCandidateIsPublished(record *OperationRecord) bool {
+	return record != nil && record.candidate&operationCandidatePublished != 0
+}
+
+func setOperationCandidate(record *OperationRecord, mode OperationCommitMode, state OperationCommitState, published bool) {
+	record.candidate = uint8(mode)<<operationCandidateModeShift | uint8(state)<<operationCandidateStateShift
+	if published {
+		record.candidate |= operationCandidatePublished
+	}
+}
+
+func validOperationCandidate(record *OperationRecord) bool {
+	if record == nil || record.candidate&^(operationCandidatePublished|operationCandidateModeBits|operationCandidateStateBits) != 0 {
+		return false
+	}
+	mode, state, published := operationCandidateMode(record), operationCandidateState(record), operationCandidateIsPublished(record)
+	switch mode {
+	case OperationCommitIrreversibleCompletion:
+		return !published && state == OperationCommitIdle || published && state == OperationCommitCommitted
+	case OperationCommitReadyThenTryCommit:
+		return !published && state == OperationCommitIdle || published &&
+			(state == OperationCommitReady || state == OperationCommitCommitted || state == OperationCommitRolledBack)
+	case OperationCommitReservable:
+		return !published && state == OperationCommitIdle || published &&
+			(state == OperationCommitReserved || state == OperationCommitCommitted || state == OperationCommitRolledBack)
+	default:
+		return false
+	}
+}
+
+// operationCandidatePendingForResolution is the strict shape admitted while
+// a ParkState can still choose a winner. Logical commit/rollback states appear
+// only after resolution has atomically frozen every candidate disposition.
+func operationCandidatePendingForResolution(record *OperationRecord) bool {
+	if !validOperationCandidate(record) {
+		return false
+	}
+	mode, state, published := operationCandidateMode(record), operationCandidateState(record), operationCandidateIsPublished(record)
+	switch mode {
+	case OperationCommitIrreversibleCompletion:
+		return !published && state == OperationCommitIdle || published && state == OperationCommitCommitted
+	case OperationCommitReadyThenTryCommit:
+		return !published && state == OperationCommitIdle || published && state == OperationCommitReady
+	case OperationCommitReservable:
+		return !published && state == OperationCommitIdle || published && state == OperationCommitReserved
+	default:
+		return false
+	}
+}
+
+// operationCandidatePendingResultStorageValid permits ReadyThenTryCommit to
+// reuse resultTicket as an owner-local readiness generation while the logical
+// park is pending. A failed hint retains its generation so the next publish
+// must advance it; terminal settlement clears loser tokens, while the winner
+// replaces its token with the logical ParkTicket used by the result lease.
+// Other candidate modes keep resultTicket at zero until they win.
+func operationCandidatePendingResultStorageValid(record *OperationRecord) bool {
+	if record == nil {
+		return false
+	}
+	if operationCandidateMode(record) != OperationCommitReadyThenTryCommit {
+		return record.resultTicket == (ParkTicket{})
+	}
+	if record.resultTicket == (ParkTicket{}) {
+		return !operationCandidateIsPublished(record) && operationCandidateState(record) == OperationCommitIdle
+	}
+	return validParkTicket(record.resultTicket)
+}
+
+func operationCandidateSettledForDisposition(record *OperationRecord, disposition OperationDisposition) bool {
+	if !validOperationCandidate(record) {
+		return false
+	}
+	mode, state, published := operationCandidateMode(record), operationCandidateState(record), operationCandidateIsPublished(record)
+	if disposition == OperationDispositionWinner {
+		return published && state == OperationCommitCommitted && validParkTicket(record.resultTicket)
+	}
+	if disposition != OperationDispositionLost && disposition != OperationDispositionCanceled {
+		return false
+	}
+	if record.resultTicket != (ParkTicket{}) {
+		return false
+	}
+	switch mode {
+	case OperationCommitIrreversibleCompletion:
+		return !published && state == OperationCommitIdle || published && state == OperationCommitCommitted
+	case OperationCommitReadyThenTryCommit, OperationCommitReservable:
+		return !published && state == OperationCommitIdle || published && state == OperationCommitRolledBack
+	default:
+		return false
+	}
+}
+
+func commitOperationCandidate(record *OperationRecord) bool {
+	if !validOperationCandidate(record) || !operationCandidateIsPublished(record) {
+		return false
+	}
+	mode, state := operationCandidateMode(record), operationCandidateState(record)
+	switch mode {
+	case OperationCommitIrreversibleCompletion:
+		return state == OperationCommitCommitted
+	case OperationCommitReadyThenTryCommit:
+		if state != OperationCommitReady && state != OperationCommitCommitted {
+			return false
+		}
+	case OperationCommitReservable:
+		if state != OperationCommitReserved && state != OperationCommitCommitted {
+			return false
+		}
+	default:
+		return false
+	}
+	setOperationCandidate(record, mode, OperationCommitCommitted, true)
+	return true
+}
+
+func rejectReadyThenTryCommitCandidate(record *OperationRecord) bool {
+	if !validOperationCandidate(record) || operationCandidateMode(record) != OperationCommitReadyThenTryCommit ||
+		!operationCandidateIsPublished(record) || operationCandidateState(record) != OperationCommitReady ||
+		!validParkTicket(record.resultTicket) {
+		return false
+	}
+	// Failure consumes only this exact ready hint. The operation remains active
+	// and can become a candidate again solely through a later source publish.
+	setOperationCandidate(record, OperationCommitReadyThenTryCommit, OperationCommitIdle, false)
+	return true
+}
+
+func rollBackOperationCandidate(record *OperationRecord) bool {
+	if !validOperationCandidate(record) {
+		return false
+	}
+	mode, state, published := operationCandidateMode(record), operationCandidateState(record), operationCandidateIsPublished(record)
+	switch mode {
+	case OperationCommitIrreversibleCompletion:
+		return !published && state == OperationCommitIdle || published && state == OperationCommitCommitted
+	case OperationCommitReadyThenTryCommit:
+		if !published {
+			if state != OperationCommitIdle {
+				return false
+			}
+			record.resultTicket = ParkTicket{}
+			return true
+		}
+		if state != OperationCommitReady {
+			if state != OperationCommitRolledBack {
+				return false
+			}
+			record.resultTicket = ParkTicket{}
+			return true
+		}
+	case OperationCommitReservable:
+		if !published {
+			return state == OperationCommitIdle
+		}
+		if state != OperationCommitReserved {
+			return state == OperationCommitRolledBack
+		}
+	default:
+		return false
+	}
+	setOperationCandidate(record, mode, OperationCommitRolledBack, true)
+	if mode == OperationCommitReadyThenTryCommit {
+		record.resultTicket = ParkTicket{}
+	}
+	return true
+}
+
 // OperationRecord is stable scheduler/source-owned storage. The producer does
 // not receive this pointer: it retains only OperationID and reaches the record
 // through its source table after generation validation.
@@ -233,21 +458,49 @@ const (
 // runnable. quiesced may become true on either side of detach; only both facts
 // together permit RecycleOperation.
 type OperationRecord struct {
-	id                  OperationID
-	phase               operationPhase
-	disposition         OperationDisposition
-	resolutionApplied   bool
-	completionPublished bool
-	cancelRequested     bool
-	quiesced            bool
-	resultConsumable    bool
-	resultTaken         bool
-	resultTicket        ParkTicket
-	link                ParkLink
+	id                OperationID
+	phase             operationPhase
+	disposition       OperationDisposition
+	resolutionApplied bool
+	candidate         uint8
+	cancelRequested   bool
+	quiesced          bool
+	resultConsumable  bool
+	resultTaken       bool
+	resultTicket      ParkTicket
+	link              ParkLink
+}
+
+// DeclareOperationCommitMode changes one unlinked reservation from the
+// default irreversible mode. It is intentionally separate from Init/Rearm so
+// existing sources retain their exact preparation API and generated sources
+// can choose a mode without allocating a candidate object.
+func DeclareOperationCommitMode(record *OperationRecord, mode OperationCommitMode) bool {
+	if record == nil || record.phase != operationReserved || !record.id.Valid() || record.disposition != OperationDispositionPending ||
+		record.candidate != 0 || record.link != (ParkLink{}) || mode > OperationCommitReservable {
+		return false
+	}
+	setOperationCandidate(record, mode, OperationCommitIdle, false)
+	return true
+}
+
+func OperationCommitModeOf(record *OperationRecord, id OperationID) (OperationCommitMode, bool) {
+	if record == nil || !record.Matches(id) || !validOperationCandidate(record) {
+		return OperationCommitIrreversibleCompletion, false
+	}
+	return operationCandidateMode(record), true
+}
+
+func OperationCommitStateOf(record *OperationRecord, id OperationID) (OperationCommitState, bool) {
+	if record == nil || !record.Matches(id) || !validOperationCandidate(record) {
+		return OperationCommitIdle, false
+	}
+	return operationCandidateState(record), true
 }
 
 func InitOperation(record *OperationRecord, id OperationID) bool {
 	if record == nil || !id.Valid() || id.Generation != 1 || record.phase != operationUnused || record.id != (OperationID{}) ||
+		record.candidate != 0 ||
 		record.link.park != nil || record.link.wait != nil || record.link.operation != nil || record.link.previous != nil || record.link.next != nil {
 		return false
 	}
@@ -328,11 +581,14 @@ func (record *OperationRecord) Matches(id OperationID) bool {
 		(record.phase == operationActive || record.phase == operationDetached)
 }
 
-func PublishOperationCompletion(record *OperationRecord, id OperationID) OperationCompletionResult {
+func publishOperationCandidate(record *OperationRecord, id OperationID, mode OperationCommitMode, state OperationCommitState) OperationCompletionResult {
 	if record == nil || !record.Matches(id) {
 		return OperationCompletionInvalid
 	}
-	if record.disposition == OperationDispositionWinner || record.completionPublished {
+	if !validOperationCandidate(record) || operationCandidateMode(record) != mode {
+		return OperationCompletionInvalid
+	}
+	if record.disposition == OperationDispositionWinner || operationCandidateIsPublished(record) {
 		return OperationCompletionDuplicate
 	}
 	if record.disposition == OperationDispositionLost || record.disposition == OperationDispositionCanceled || record.phase == operationDetached {
@@ -341,8 +597,40 @@ func PublishOperationCompletion(record *OperationRecord, id OperationID) Operati
 	if record.link.park == nil || record.link.operation != record || record.link.ticket == (ParkTicket{}) {
 		return OperationCompletionInvalid
 	}
-	record.completionPublished = true
+	// One ReadyThen source call owns the ParkState cursor synchronously. Other
+	// owner-side publication is deferred to the next source epoch; accepting it
+	// here would invalidate seeded order after TryCommit may have taken effect.
+	if record.link.park.phase == parkParked && record.link.park.winnerRecord != nil {
+		return OperationCompletionDeferred
+	}
+	if mode == OperationCommitReadyThenTryCommit {
+		readyTicket, ok := nextParkTicket(record.resultTicket)
+		if !ok {
+			return OperationCompletionInvalid
+		}
+		record.resultTicket = readyTicket
+	}
+	setOperationCandidate(record, mode, state, true)
 	return OperationCompletionPublished
+}
+
+func PublishOperationCompletion(record *OperationRecord, id OperationID) OperationCompletionResult {
+	return publishOperationCandidate(record, id, OperationCommitIrreversibleCompletion, OperationCommitCommitted)
+}
+
+// PublishReadyThenTryCommitCandidate publishes only a readiness hint. The
+// owner resolver later returns an exact ParkCommitRequest to the source; no
+// irreversible effect may occur in this call. Every accepted republish first
+// advances the record's non-wrapping readiness generation.
+func PublishReadyThenTryCommitCandidate(record *OperationRecord, id OperationID) OperationCompletionResult {
+	return publishOperationCandidate(record, id, OperationCommitReadyThenTryCommit, OperationCommitReady)
+}
+
+// PublishReservableCandidate publishes one source-owned reversible
+// reservation. The resolver freezes its commit/rollback decision before any
+// source applies and detaches the resolved wait-set.
+func PublishReservableCandidate(record *OperationRecord, id OperationID) OperationCompletionResult {
+	return publishOperationCandidate(record, id, OperationCommitReservable, OperationCommitReserved)
 }
 
 // RequestPhysicalOperationCancel asks one backend operation to stop. It does
@@ -360,7 +648,7 @@ func RequestPhysicalOperationCancel(record *OperationRecord, id OperationID) Ope
 		return OperationCancelAlreadyRequested
 	}
 	record.cancelRequested = true
-	if record.completionPublished {
+	if operationCandidateIsPublished(record) {
 		return OperationCancelCompletionPending
 	}
 	return OperationCancelRequested
@@ -379,7 +667,8 @@ func OperationDispositionOf(record *OperationRecord, id OperationID) (OperationD
 // physical backend quiescence remains a separate acknowledgement.
 func AcknowledgeOperationResolution(record *OperationRecord, id OperationID, disposition OperationDisposition) bool {
 	if record == nil || !record.Matches(id) || record.phase != operationActive ||
-		disposition == OperationDispositionPending || record.disposition != disposition || record.resolutionApplied {
+		disposition == OperationDispositionPending || record.disposition != disposition || record.resolutionApplied ||
+		!operationCandidateSettledForDisposition(record, disposition) {
 		return false
 	}
 	record.resolutionApplied = true
@@ -401,6 +690,7 @@ func OperationCanRecycle(record *OperationRecord, id OperationID) bool {
 	return record != nil && record.Matches(id) && record.phase == operationDetached && record.quiesced &&
 		record.link.park == nil && record.link.wait == nil && record.link.operation == nil && record.link.previous == nil && record.link.next == nil &&
 		record.disposition != OperationDispositionPending && record.resolutionApplied &&
+		operationCandidateSettledForDisposition(record, record.disposition) &&
 		(record.disposition != OperationDispositionWinner || record.resultTaken)
 }
 

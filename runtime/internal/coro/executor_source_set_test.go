@@ -203,7 +203,7 @@ func TestExecutorSourceSetRetryBudgetAndExternalFactHaveDistinctScheduling(t *te
 	if _, _, resolved := manual.ResolveAffectedPublishedEpoch(p); !resolved {
 		t.Fatal("resolve empty manual source-local phase")
 	}
-	batch, _, _, resolved := resolveAffectedWaitSets(p)
+	batch, _, _, resolved := resolveAffectedWaitSets(p, sources)
 	if !resolved || batch != &wait || task.g.park.phase != parkDetaching {
 		t.Fatal("resolve deferred scheduler batch")
 	}
@@ -214,7 +214,7 @@ func TestExecutorSourceSetRetryBudgetAndExternalFactHaveDistinctScheduling(t *te
 		t.Fatalf("budget retry requeue = (%d, %t), pending=%t", promoted, ok, sources.pending(p))
 	}
 
-	retry, _, _, resolved := resolveAffectedWaitSets(p)
+	retry, _, _, resolved := resolveAffectedWaitSets(p, sources)
 	if !resolved || retry != &wait {
 		t.Fatal("pop exact budget retry batch")
 	}
@@ -229,7 +229,7 @@ func TestExecutorSourceSetRetryBudgetAndExternalFactHaveDistinctScheduling(t *te
 	if !MarkWaitSetAffected(p, &wait) || !sources.pending(p) {
 		t.Fatal("external acknowledgement did not republish exact wait-set")
 	}
-	retry, _, _, resolved = resolveAffectedWaitSets(p)
+	retry, _, _, resolved = resolveAffectedWaitSets(p, sources)
 	if !resolved || retry != &wait {
 		t.Fatal("pop external acknowledgement retry batch")
 	}

@@ -105,13 +105,30 @@ func validActiveParkStateHeader(state *ParkState, ticket ParkTicket) bool {
 	switch state.phase {
 	case parkParked:
 		return state.attached == state.expected && state.outcome == ParkOutcomePending &&
-			state.winnerID == (OperationID{}) && state.winnerRecord == nil &&
+			(state.hasDefault || state.winnerCase == 0) &&
+			validPendingParkCommitCursor(state) &&
 			(state.attached == 0) == (state.head == nil) &&
 			(state.head == nil || state.head.previous == nil)
 	case parkDetaching:
-		return state.attached != 0 && state.head != nil && state.head.previous == nil && state.outcome != ParkOutcomePending
+		if state.attached == 0 || state.head == nil || state.head.previous != nil {
+			return false
+		}
 	case parkReady:
-		return state.attached == 0 && state.head == nil && state.outcome != ParkOutcomePending
+		if state.attached != 0 || state.head != nil {
+			return false
+		}
+	default:
+		return false
+	}
+	switch state.outcome {
+	case ParkOutcomeCompleted:
+		return !state.hasDefault && state.cancelKind < ParkCancelTaskAbort && state.winnerID.Valid() &&
+			state.winnerRecord != nil && state.winnerRecord.id == state.winnerID
+	case ParkOutcomeCanceled:
+		return !state.hasDefault && state.cancelKind != ParkCancelNone && state.winnerCase == 0 &&
+			state.winnerID == (OperationID{}) && state.winnerRecord == nil
+	case ParkOutcomeDefault:
+		return state.hasDefault && state.cancelKind == ParkCancelNone && state.winnerID == (OperationID{}) && state.winnerRecord == nil
 	default:
 		return false
 	}
@@ -249,7 +266,7 @@ func MarkWaitSetAffected(p *P, record *WaitSetRecord) bool {
 // call allocation-free and failure-atomic.
 func RequestWaitSetCancel(p *P, record *WaitSetRecord, kind ParkCancelKind) bool {
 	if !canAppendAffectedWaitSet(p, record) || record.g.park.phase != parkParked ||
-		kind < ParkCancelOperation || kind > ParkCancelShutdown {
+		record.g.park.winnerRecord != nil || kind < ParkCancelOperation || kind > ParkCancelShutdown {
 		return false
 	}
 	if kind > record.g.park.cancelKind {
@@ -289,7 +306,7 @@ func activateWaitSetRecord(p *P, g *G, record *WaitSetRecord) bool {
 // Pending initial visits are discarded; terminal or already-detaching parks
 // remain in the returned linear batch until every source has applied and
 // detached its OperationRecords.
-func resolveAffectedWaitSets(p *P) (batchHead, batchTail *WaitSetRecord, total CompletionResolution, ok bool) {
+func resolveAffectedWaitSets(p *P, sources *ExecutorSourceSet) (batchHead, batchTail *WaitSetRecord, total CompletionResolution, ok bool) {
 	if !validParkWaitQueueHeader(p) || !validAffectedWaitQueueHeader(p) {
 		return nil, nil, CompletionResolution{}, false
 	}
@@ -306,16 +323,23 @@ func resolveAffectedWaitSets(p *P) (batchHead, batchTail *WaitSetRecord, total C
 		keep := false
 		switch record.g.park.phase {
 		case parkParked:
-			resolution, resolved := ResolveParkSnapshot(&record.g.park, record.ticket)
+			var resolution CompletionResolution
+			var resolved bool
+			if sources == nil {
+				resolution, resolved = ResolveParkSnapshot(&record.g.park, record.ticket)
+			} else {
+				resolution, resolved = sources.resolveCommitCapablePark(&record.g.park, record.ticket)
+			}
 			if !resolved || resolution.WaitSets != 1 {
 				return batchHead, batchTail, total, false
 			}
 			total.WaitSets += resolution.WaitSets
 			total.Completed += resolution.Completed
 			total.Canceled += resolution.Canceled
+			total.Defaulted += resolution.Defaulted
 			total.Winners += resolution.Winners
 			total.Losers += resolution.Losers
-			keep = resolution.Completed+resolution.Canceled != 0
+			keep = resolution.Completed+resolution.Canceled+resolution.Defaulted != 0
 		case parkDetaching, parkReady:
 			keep = true
 		default:

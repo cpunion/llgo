@@ -398,6 +398,7 @@ func addManualOperationResolution(total *CompletionResolution, resolution Comple
 	total.WaitSets += resolution.WaitSets
 	total.Completed += resolution.Completed
 	total.Canceled += resolution.Canceled
+	total.Defaulted += resolution.Defaulted
 	total.Winners += resolution.Winners
 	total.Losers += resolution.Losers
 }

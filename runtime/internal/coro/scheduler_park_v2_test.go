@@ -26,6 +26,7 @@ const (
 	wantParkStateSize     = 40 + 2*unsafe.Sizeof(uintptr(0))
 	wantRunDecisionSize   = 32 + unsafe.Sizeof(uintptr(0))
 	wantWaitSetRecordSize = 8 + 5*unsafe.Sizeof(uintptr(0))
+	wantOperationSize     = 40 + 5*unsafe.Sizeof(uintptr(0))
 )
 
 // Keep the always-live G park cell and the transient per-P resume decision
@@ -38,6 +39,8 @@ var (
 	_ [unsafe.Sizeof(RunDecision{}) - wantRunDecisionSize]byte
 	_ [wantWaitSetRecordSize - unsafe.Sizeof(WaitSetRecord{})]byte
 	_ [unsafe.Sizeof(WaitSetRecord{}) - wantWaitSetRecordSize]byte
+	_ [wantOperationSize - unsafe.Sizeof(OperationRecord{})]byte
+	_ [unsafe.Sizeof(OperationRecord{}) - wantOperationSize]byte
 )
 
 func TestRunDecisionBindsLeaseToExactTicketAndSuppressesCanceledCase(t *testing.T) {
@@ -79,6 +82,132 @@ func TestRunDecisionBindsLeaseToExactTicketAndSuppressesCanceledCase(t *testing.
 	}) {
 		t.Fatal("rejected exact late-cancellation winner lease")
 	}
+}
+
+func TestRunDecisionRepresentsDefaultWithoutWinnerLease(t *testing.T) {
+	g := new(G)
+	if !InitG(g) {
+		t.Fatal("initialize default run-decision G")
+	}
+	ticket := ParkTicket{generation: 1}
+	id, idOK := MakeOperationID(OperationSourceManual, 1, 1)
+	if !idOK {
+		t.Fatal("initialize default run-decision operation")
+	}
+	if !validRunDecision(RunDecision{g: g, ticket: ticket, caseID: 19, outcome: ParkOutcomeDefault}) {
+		t.Fatal("rejected lease-free default decision")
+	}
+	if validRunDecision(RunDecision{
+		g:       g,
+		ticket:  ticket,
+		caseID:  19,
+		outcome: ParkOutcomeDefault,
+		lease:   OperationResultLease{id: id, ticket: ticket},
+	}) {
+		t.Fatal("accepted winner lease on default decision")
+	}
+	if validRunDecision(RunDecision{g: g, ticket: ticket, caseID: 19, outcome: ParkOutcomeDefault, task: TaskCancelAbort}) {
+		t.Fatal("accepted task cancellation on default decision")
+	}
+}
+
+func TestSchedulerPromotesZeroCandidateDefaultAsLeaseFreeRunDecision(t *testing.T) {
+	p := new(P)
+	task := newYieldingTestG(t, "park-v2-default")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue default task")
+	}
+	if g, ok := NextRunnable(p); !ok || g != task.g {
+		t.Fatal("dequeue default task")
+	}
+	action := beginWaitTestResume(t, p, task)
+	ticket, ok := BeginParkSetWithDefault(&task.g.park, 0, 67, 707)
+	if !ok {
+		t.Fatal("begin scheduler default park")
+	}
+	var wait WaitSetRecord
+	if !PrepareWaitSetRecord(&wait, task.g, ticket) || !SealParkSet(&task.g.park, ticket) {
+		t.Fatal("prepare scheduler default park")
+	}
+	task.frame.header.SuspendReason = uint16(SuspendPark)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+	if !PrepareParkSet(task.g, task.handle, task.frame.header, ticket, &wait) {
+		t.Fatal("commit scheduler default park")
+	}
+	action, ok = Resumed(p, task.g, action)
+	if !ok || action.Kind != ActionPark || task.g.state != GWaiting || !task.g.waiting {
+		t.Fatalf("park default task = (%+v, %t), state=%d waiting=%t", action, ok, task.g.state, task.g.waiting)
+	}
+	if count, pollOK := PollReady(p); !pollOK || count != 1 || !task.g.queued || task.g.park.phase != parkReady {
+		t.Fatalf("promote default task = (%d, %t), queued=%t phase=%d", count, pollOK, task.g.queued, task.g.park.phase)
+	}
+	if g, runnableOK := NextRunnable(p); !runnableOK || g != task.g {
+		t.Fatal("dequeue promoted default task")
+	}
+	action = beginWaitTestResume(t, p, task)
+	outcome, caseID, taskCancel, sourceSlot, generation, decisionOK := TakeRunDecisionWords(
+		task.g, ticket.epoch, ticket.generation,
+	)
+	if !decisionOK || outcome != uint32(ParkOutcomeDefault) || caseID != 707 || taskCancel != uint32(TaskCancelNone) ||
+		sourceSlot != 0 || generation != 0 || task.g.park.phase != parkDelivered {
+		t.Fatalf("take default decision words = (%d, %d, %d, %d, %d, %t), phase=%d",
+			outcome, caseID, taskCancel, sourceSlot, generation, decisionOK, task.g.park.phase)
+	}
+	finishWaitTestTask(t, p, task, action)
+	if !TerminalG(p, task.g) {
+		t.Fatal("scheduler default retained task state")
+	}
+	runtime.KeepAlive(task.frame.memory)
+}
+
+func TestSchedulerLateTaskCancelSuppressesReadyDefault(t *testing.T) {
+	p := new(P)
+	task := newYieldingTestG(t, "park-v2-default-late-cancel")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue late-canceled default task")
+	}
+	if g, ok := NextRunnable(p); !ok || g != task.g {
+		t.Fatal("dequeue late-canceled default task")
+	}
+	action := beginWaitTestResume(t, p, task)
+	ticket, ok := BeginParkSetWithDefault(&task.g.park, 0, 68, 708)
+	if !ok {
+		t.Fatal("begin late-canceled default park")
+	}
+	var wait WaitSetRecord
+	if !PrepareWaitSetRecord(&wait, task.g, ticket) || !SealParkSet(&task.g.park, ticket) {
+		t.Fatal("prepare late-canceled default park")
+	}
+	task.frame.header.SuspendReason = uint16(SuspendPark)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+	if !PrepareParkSet(task.g, task.handle, task.frame.header, ticket, &wait) {
+		t.Fatal("commit late-canceled default park")
+	}
+	action, ok = Resumed(p, task.g, action)
+	if !ok || action.Kind != ActionPark || task.g.state != GWaiting {
+		t.Fatalf("park late-canceled default task = (%+v, %t), state=%d", action, ok, task.g.state)
+	}
+	if count, pollOK := PollReady(p); !pollOK || count != 1 || task.g.park.phase != parkReady {
+		t.Fatalf("promote late-canceled default = (%d, %t), phase=%d", count, pollOK, task.g.park.phase)
+	}
+	if !RequestTaskCancellation(p, task.g, TaskCancelAbort) {
+		t.Fatal("request task cancellation after default became ready")
+	}
+	if g, runnableOK := NextRunnable(p); !runnableOK || g != task.g {
+		t.Fatal("dequeue late-canceled default")
+	}
+	action = beginWaitTestResume(t, p, task)
+	outcome, caseID, lease, taskCancel, decisionOK := TakeRunDecision(task.g, ticket)
+	if !decisionOK || outcome != ParkOutcomeCanceled || caseID != 0 || lease != (OperationResultLease{}) ||
+		taskCancel != TaskCancelAbort || task.g.park.taskCancelPhase != taskCancelCleanup || task.g.park.phase != parkDelivered {
+		t.Fatalf("take late-canceled default = (%d, %d, %+v, %d, %t), cancelPhase=%d parkPhase=%d",
+			outcome, caseID, lease, taskCancel, decisionOK, task.g.park.taskCancelPhase, task.g.park.phase)
+	}
+	finishWaitTestTask(t, p, task, action)
+	if !AcknowledgeTaskCancellation(task.g, TaskCancelAbort) || !TerminalG(p, task.g) {
+		t.Fatal("late-canceled default did not reach acknowledged terminal state")
+	}
+	runtime.KeepAlive(task.frame.memory)
 }
 
 type schedulerParkV2Operations struct {
@@ -290,19 +419,37 @@ func TestSchedulerRecordAwareWaitSetHighCardinalityUsesLocalDetach(t *testing.T)
 		t.Fatalf("resolve high-cardinality wait = (%d, %t), phase=%d", count, ok, task.g.park.phase)
 	}
 
-	// The first record attached is now the distant tail. Corrupting its ticket
-	// makes a complete ParkState audit fail. Detaching the current head must
-	// nevertheless succeed: the production record-aware path inspects only the
-	// ParkState header and the target's two neighboring links.
-	distant := &operations.records[0]
+	indexOf := func(record *OperationRecord) int {
+		for index := range operations.records {
+			if record == &operations.records[index] {
+				return index
+			}
+		}
+		return -1
+	}
+	headIndex := indexOf(task.g.park.head.operation)
+	distantLink := task.g.park.head
+	for distantLink.next != nil {
+		distantLink = distantLink.next
+	}
+	distantIndex := indexOf(distantLink.operation)
+	if headIndex < 0 || distantIndex < 0 || headIndex == distantIndex {
+		t.Fatalf("locate sorted high-cardinality endpoints = head %d tail %d", headIndex, distantIndex)
+	}
+
+	// Corrupting the rank-sorted tail makes a complete ParkState audit fail.
+	// Detaching the current head must nevertheless succeed: the production
+	// record-aware path inspects only the ParkState header and the target's two
+	// neighboring links.
+	distant := &operations.records[distantIndex]
 	savedTicket := distant.link.ticket
 	distant.link.ticket = ParkTicket{}
 	if validParkState(&task.g.park) {
 		t.Fatal("distant candidate corruption escaped complete audit")
 	}
 	detached := make([]bool, candidateCount)
-	detachSchedulerParkV2(t, task.g, operations, candidateCount-1)
-	detached[candidateCount-1] = true
+	detachSchedulerParkV2(t, task.g, operations, headIndex)
+	detached[headIndex] = true
 	distant.link.ticket = savedTicket
 	if !validParkState(&task.g.park) {
 		t.Fatal("restored high-cardinality wait-set failed complete audit")
@@ -310,7 +457,11 @@ func TestSchedulerRecordAwareWaitSetHighCardinalityUsesLocalDetach(t *testing.T)
 
 	// Exercise the tail and a middle unlink before draining all remaining
 	// records. Every successful call removes exactly one physical candidate.
-	for _, index := range []int{0, candidateCount / 2} {
+	middleIndex := candidateCount / 2
+	for detached[middleIndex] || middleIndex == distantIndex {
+		middleIndex++
+	}
+	for _, index := range []int{distantIndex, middleIndex} {
 		detachSchedulerParkV2(t, task.g, operations, index)
 		detached[index] = true
 	}

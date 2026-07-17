@@ -74,7 +74,14 @@ const (
 	ParkOutcomePending ParkOutcome = iota
 	ParkOutcomeCompleted
 	ParkOutcomeCanceled
+	ParkOutcomeDefault
 )
+
+// MaxSelectOperationCases matches the Go 1.26 runtime.selectgo limit on
+// send+receive operations. A compiler-lowered default is represented
+// separately and therefore does not consume this physical-operation budget.
+// reflect.Select applies its separate len(cases) limit before entering core.
+const MaxSelectOperationCases uint32 = 1 << 16
 
 // ParkCancelKind separates an API/operation cancellation that still races a
 // completed result from task/shutdown abort, which must detach every source
@@ -118,10 +125,19 @@ type ParkLink struct {
 // than relying on a coroutine-frame WaitToken pointer. During detaching,
 // attached itself is the remaining barrier count; a duplicate counter would
 // add state without carrying independent information.
+//
+// seed is phase-overlaid without changing the cross-target layout: Preparing
+// uses it to assign immutable candidate ranks; Seal sorts the intrusive list
+// and resets it; Parked resolution uses it as the current snapshot's exact
+// candidate-visit count. While a ReadyThenTryCommit request is outstanding,
+// the otherwise-terminal winnerRecord/winnerID pair is the atomic resolver
+// cursor. A failed request resumes at winnerRecord.link.next, so one snapshot
+// never rescans an earlier rank.
 // All ParkState and ParkLink operations are strictly owner-P-only.
 type ParkState struct {
 	ticket          ParkTicket
 	phase           parkPhase
+	hasDefault      bool
 	expected        uint32
 	attached        uint32
 	seed            uint32
@@ -135,6 +151,22 @@ type ParkState struct {
 	head            *ParkLink
 }
 
+func validPendingParkCommitCursor(state *ParkState) bool {
+	if state == nil {
+		return false
+	}
+	if state.winnerRecord == nil {
+		return state.winnerID == (OperationID{})
+	}
+	record := state.winnerRecord
+	return state.winnerID == record.id && record.id.Valid() && record.phase == operationActive &&
+		record.disposition == OperationDispositionPending && record.link.park == state &&
+		record.link.operation == record && record.link.ticket == state.ticket &&
+		operationCandidateMode(record) == OperationCommitReadyThenTryCommit &&
+		operationCandidateState(record) == OperationCommitReady && operationCandidateIsPublished(record) &&
+		validParkTicket(record.resultTicket)
+}
+
 func validParkState(state *ParkState) bool {
 	if state == nil || !validTaskCancelState(state.taskCancelKind, state.taskCancelPhase) || state.cancelKind > ParkCancelShutdown ||
 		state.attached > state.expected {
@@ -142,13 +174,21 @@ func validParkState(state *ParkState) bool {
 	}
 	links := uint32(0)
 	var previous *ParkLink
+	var firstPublished *OperationRecord
 	for link := state.head; link != nil; link = link.next {
 		links++
 		if links > state.expected || link.park != state || link.operation == nil || &link.operation.link != link || link.operation.link.park != state ||
 			link.operation.link.operation != link.operation || link.ticket != state.ticket ||
-			link.operation.phase != operationActive || link.previous != previous ||
+			link.operation.phase != operationActive || !validOperationCandidate(link.operation) || link.previous != previous ||
 			(link.next != nil && link.next.previous != link) {
 			return false
+		}
+		if previous != nil && (state.phase == parkSealed || state.phase == parkParked) &&
+			previous.rank >= link.rank {
+			return false
+		}
+		if firstPublished == nil && operationCandidateIsPublished(link.operation) {
+			firstPublished = link.operation
 		}
 		if link.wait != nil && (link.wait.g == nil || &link.wait.g.park != state || link.wait.ticket != state.ticket ||
 			link.wait.state == waitSetRecordUnused) {
@@ -157,7 +197,9 @@ func validParkState(state *ParkState) bool {
 		switch state.phase {
 		case parkPreparing, parkSealed, parkParked:
 			if link.operation.disposition != OperationDispositionPending || link.operation.resolutionApplied ||
-				link.operation.resultTicket != (ParkTicket{}) || link.operation.resultConsumable || link.operation.resultTaken {
+				link.operation.resultConsumable || link.operation.resultTaken ||
+				!operationCandidatePendingResultStorageValid(link.operation) ||
+				!operationCandidatePendingForResolution(link.operation) {
 				return false
 			}
 		case parkDetaching:
@@ -172,12 +214,20 @@ func validParkState(state *ParkState) bool {
 					link.operation.resultTicket != (ParkTicket{}) || link.operation.resultConsumable || link.operation.resultTaken {
 					return false
 				}
+			case ParkOutcomeDefault:
+				if link.operation.disposition != OperationDispositionLost || !link.operation.cancelRequested ||
+					link.operation.resultTicket != (ParkTicket{}) || link.operation.resultConsumable || link.operation.resultTaken {
+					return false
+				}
 			case ParkOutcomeCanceled:
 				if link.operation.disposition != OperationDispositionCanceled || !link.operation.cancelRequested ||
 					link.operation.resultTicket != (ParkTicket{}) || link.operation.resultConsumable || link.operation.resultTaken {
 					return false
 				}
 			default:
+				return false
+			}
+			if !operationCandidateSettledForDisposition(link.operation, link.operation.disposition) {
 				return false
 			}
 		}
@@ -189,35 +239,52 @@ func validParkState(state *ParkState) bool {
 	switch state.phase {
 	case parkIdle:
 		return state.ticket == (ParkTicket{}) && state.expected == 0 && state.attached == 0 &&
-			state.seed == 0 && state.cancelKind == ParkCancelNone && state.outcome == ParkOutcomePending && state.winnerID == (OperationID{}) &&
+			state.seed == 0 && !state.hasDefault && state.cancelKind == ParkCancelNone && state.outcome == ParkOutcomePending && state.winnerCase == 0 && state.winnerID == (OperationID{}) &&
 			state.winnerRecord == nil && state.head == nil
 	case parkPreparing:
 		return validParkTicket(state.ticket) && state.attached <= state.expected &&
-			state.outcome == ParkOutcomePending && state.winnerID == (OperationID{}) && state.winnerRecord == nil
-	case parkSealed, parkParked:
+			state.outcome == ParkOutcomePending && (state.hasDefault || state.winnerCase == 0) &&
+			state.winnerID == (OperationID{}) && state.winnerRecord == nil
+	case parkSealed:
 		return validParkTicket(state.ticket) && state.attached == state.expected &&
-			state.outcome == ParkOutcomePending && state.winnerID == (OperationID{}) && state.winnerRecord == nil
+			state.seed == 0 && state.outcome == ParkOutcomePending && (state.hasDefault || state.winnerCase == 0) &&
+			state.winnerID == (OperationID{}) && state.winnerRecord == nil
+	case parkParked:
+		return validParkTicket(state.ticket) && state.attached == state.expected &&
+			state.outcome == ParkOutcomePending && (state.hasDefault || state.winnerCase == 0) &&
+			validPendingParkCommitCursor(state) &&
+			(state.winnerRecord == nil || firstPublished == state.winnerRecord)
 	case parkDetaching:
 		if !validParkTicket(state.ticket) || state.attached == 0 ||
 			state.outcome == ParkOutcomePending {
 			return false
 		}
-		return (state.outcome == ParkOutcomeCompleted && state.cancelKind < ParkCancelTaskAbort && state.winnerID.Valid() &&
+		return (state.outcome == ParkOutcomeCompleted && !state.hasDefault && state.cancelKind < ParkCancelTaskAbort && state.winnerID.Valid() &&
 			state.winnerRecord != nil && state.winnerRecord.id == state.winnerID) ||
-			(state.outcome == ParkOutcomeCanceled && state.cancelKind != ParkCancelNone && state.winnerID == (OperationID{}) && state.winnerRecord == nil)
+			(state.outcome == ParkOutcomeCanceled && !state.hasDefault && state.cancelKind != ParkCancelNone && state.winnerCase == 0 &&
+				state.winnerID == (OperationID{}) && state.winnerRecord == nil) ||
+			(state.outcome == ParkOutcomeDefault && state.hasDefault && state.cancelKind == ParkCancelNone &&
+				state.winnerID == (OperationID{}) && state.winnerRecord == nil)
 	case parkReady:
 		return validParkTicket(state.ticket) && state.attached == 0 && state.head == nil &&
-			((state.outcome == ParkOutcomeCompleted && state.cancelKind < ParkCancelTaskAbort && state.winnerID.Valid() && state.winnerRecord != nil &&
+			((state.outcome == ParkOutcomeCompleted && !state.hasDefault && state.cancelKind < ParkCancelTaskAbort && state.winnerID.Valid() && state.winnerRecord != nil &&
 				state.winnerRecord.id == state.winnerID && state.winnerRecord.phase == operationDetached &&
-				state.winnerRecord.resultTicket == state.ticket && !state.winnerRecord.resultConsumable && !state.winnerRecord.resultTaken) ||
-				(state.outcome == ParkOutcomeCanceled && state.cancelKind != ParkCancelNone && state.winnerID == (OperationID{}) && state.winnerRecord == nil))
+				state.winnerRecord.resultTicket == state.ticket && !state.winnerRecord.resultConsumable && !state.winnerRecord.resultTaken &&
+				operationCandidateSettledForDisposition(state.winnerRecord, OperationDispositionWinner)) ||
+				(state.outcome == ParkOutcomeCanceled && !state.hasDefault && state.cancelKind != ParkCancelNone && state.winnerCase == 0 &&
+					state.winnerID == (OperationID{}) && state.winnerRecord == nil) ||
+				(state.outcome == ParkOutcomeDefault && state.hasDefault && state.cancelKind == ParkCancelNone &&
+					state.winnerID == (OperationID{}) && state.winnerRecord == nil))
 	case parkConsumed:
 		return validParkTicket(state.ticket) && state.attached == 0 && state.head == nil &&
-			((state.outcome == ParkOutcomeCompleted && state.cancelKind < ParkCancelTaskAbort && state.winnerID.Valid() && state.winnerRecord == nil) ||
-				(state.outcome == ParkOutcomeCanceled && state.cancelKind != ParkCancelNone && state.winnerID == (OperationID{}) && state.winnerRecord == nil))
+			((state.outcome == ParkOutcomeCompleted && !state.hasDefault && state.cancelKind < ParkCancelTaskAbort && state.winnerID.Valid() && state.winnerRecord == nil) ||
+				(state.outcome == ParkOutcomeCanceled && !state.hasDefault && state.cancelKind != ParkCancelNone && state.winnerCase == 0 &&
+					state.winnerID == (OperationID{}) && state.winnerRecord == nil) ||
+				(state.outcome == ParkOutcomeDefault && state.hasDefault && state.cancelKind == ParkCancelNone &&
+					state.winnerID == (OperationID{}) && state.winnerRecord == nil))
 	case parkDelivered:
 		return validParkTicket(state.ticket) && state.expected == 0 && state.attached == 0 && state.seed == 0 &&
-			state.cancelKind == ParkCancelNone && state.outcome == ParkOutcomePending && state.winnerCase == 0 &&
+			!state.hasDefault && state.cancelKind == ParkCancelNone && state.outcome == ParkOutcomePending && state.winnerCase == 0 &&
 			state.winnerID == (OperationID{}) && state.winnerRecord == nil && state.head == nil
 	default:
 		return false
@@ -235,7 +302,7 @@ func releasableParkState(state *ParkState) bool {
 // advances from a fully consumed, pointer-free state and fails closed at full
 // exhaustion; it never aliases an old owner-side ticket.
 func BeginParkSet(state *ParkState, expected, seed uint32) (ParkTicket, bool) {
-	if state == nil {
+	if state == nil || expected > MaxSelectOperationCases {
 		return ParkTicket{}, false
 	}
 	if state.phase == parkIdle {
@@ -277,9 +344,39 @@ func parkCaseRank(seed, caseID uint32) uint32 {
 func validPreparingParkStateHeader(state *ParkState, ticket ParkTicket) bool {
 	return state != nil && state.phase == parkPreparing && state.ticket == ticket && validParkTicket(ticket) &&
 		validTaskCancelState(state.taskCancelKind, state.taskCancelPhase) && state.cancelKind <= ParkCancelShutdown &&
-		state.attached <= state.expected && state.outcome == ParkOutcomePending && state.winnerID == (OperationID{}) &&
+		state.attached <= state.expected && state.outcome == ParkOutcomePending && (state.hasDefault || state.winnerCase == 0) &&
+		state.winnerID == (OperationID{}) &&
 		state.winnerRecord == nil && (state.attached == 0) == (state.head == nil) &&
 		(state.head == nil || state.head.previous == nil)
+}
+
+// SetParkDefault records a compiler-provided default continuation without
+// allocating or attaching a synthetic physical operation. The default case is
+// considered only after every ready candidate with a better or worse seeded
+// rank has either failed TryCommit or disappeared from this exact snapshot.
+func SetParkDefault(state *ParkState, ticket ParkTicket, caseID uint32) bool {
+	if !validPreparingParkStateHeader(state, ticket) || state.hasDefault {
+		return false
+	}
+	for link := state.head; link != nil; link = link.next {
+		if link.caseID == caseID {
+			return false
+		}
+	}
+	state.hasDefault = true
+	state.winnerCase = caseID
+	return validPreparingParkStateHeader(state, ticket)
+}
+
+func BeginParkSetWithDefault(state *ParkState, expected, seed, defaultCaseID uint32) (ParkTicket, bool) {
+	if expected > MaxSelectOperationCases {
+		return ParkTicket{}, false
+	}
+	ticket, ok := BeginParkSet(state, expected, seed)
+	if !ok || !SetParkDefault(state, ticket, defaultCaseID) {
+		return ParkTicket{}, false
+	}
+	return ticket, true
 }
 
 func attachParkOperation(state *ParkState, ticket ParkTicket, wait *WaitSetRecord, record *OperationRecord, caseID uint32) bool {
@@ -287,7 +384,8 @@ func attachParkOperation(state *ParkState, ticket ParkTicket, wait *WaitSetRecor
 	if !validState || state.phase != parkPreparing || ticket != state.ticket ||
 		!validParkTicket(ticket) || state.attached >= state.expected || record == nil || record.phase != operationReserved ||
 		!record.id.Valid() || record.disposition != OperationDispositionPending || record.link.park != nil || record.link.wait != nil ||
-		record.link.operation != nil || record.link.previous != nil || record.link.next != nil {
+		record.link.operation != nil || record.link.previous != nil || record.link.next != nil ||
+		state.hasDefault && state.winnerCase == caseID {
 		return false
 	}
 	if wait != nil && !validPreparingWaitSetRecord(wait, state, ticket) {
@@ -350,12 +448,92 @@ func AttachParkWaitOperation(state *ParkState, ticket ParkTicket, wait *WaitSetR
 	return attachParkOperation(state, ticket, wait, record, caseID)
 }
 
+// sortParkLinksByRank performs an allocation-free bottom-up merge sort over
+// the existing intrusive links. Attach remains O(1) on the production
+// record-aware path; Seal pays O(N log N) once so commit retries can advance a
+// single monotonic cursor instead of selecting the next rank with O(N) rescans.
+func sortParkLinksByRank(state *ParkState) bool {
+	if state == nil || state.phase != parkPreparing || state.attached != state.expected ||
+		(state.attached == 0) != (state.head == nil) {
+		return false
+	}
+	for width := uint32(1); width < state.attached; {
+		remaining := state.head
+		var sortedHead, sortedTail *ParkLink
+		for remaining != nil {
+			left := remaining
+			leftCount := uint32(0)
+			right := left
+			for leftCount < width && right != nil {
+				right = right.next
+				leftCount++
+			}
+			rightCount := uint32(0)
+			nextRun := right
+			for rightCount < width && nextRun != nil {
+				nextRun = nextRun.next
+				rightCount++
+			}
+
+			for leftCount != 0 || rightCount != 0 {
+				fromLeft := rightCount == 0 || leftCount != 0 && left.rank < right.rank
+				var selected *ParkLink
+				if fromLeft {
+					selected = left
+					left = left.next
+					leftCount--
+				} else {
+					selected = right
+					right = right.next
+					rightCount--
+				}
+				selected.previous = sortedTail
+				if sortedTail == nil {
+					sortedHead = selected
+				} else {
+					sortedTail.next = selected
+				}
+				sortedTail = selected
+			}
+			remaining = nextRun
+		}
+		if sortedTail == nil {
+			return false
+		}
+		sortedTail.next = nil
+		state.head = sortedHead
+		if width > state.attached/2 {
+			break
+		}
+		width *= 2
+	}
+	return state.head == nil || state.head.previous == nil
+}
+
 func SealParkSet(state *ParkState, ticket ParkTicket) bool {
 	if !validParkState(state) || state.phase != parkPreparing || ticket != state.ticket || state.attached != state.expected {
 		return false
 	}
+	if !sortParkLinksByRank(state) {
+		return false
+	}
+	// Record-aware O(1) attachment deliberately defers case/rank uniqueness.
+	// Preflight it while the phase and mixed seed still describe a valid,
+	// abortable Preparing state; failure must not strand producer-visible links
+	// in an invalid Sealed state.
+	var previous *ParkLink
+	for link := state.head; link != nil; link = link.next {
+		if previous != nil && previous.rank >= link.rank {
+			return false
+		}
+		previous = link
+	}
+	// Every rank is now retained in its ParkLink, so the mixed preparation seed
+	// can become the exact per-snapshot visit count without adding ParkState
+	// storage. A duplicate case/rank is rejected by the sealed invariant.
+	state.seed = 0
 	state.phase = parkSealed
-	return true
+	return validParkState(state)
 }
 
 // CommitParkSet represents the scheduler accepting the exact logical ticket
@@ -376,7 +554,8 @@ func CommitParkSet(state *ParkState, ticket ParkTicket) bool {
 func RequestParkCancel(state *ParkState, ticket ParkTicket, kind ParkCancelKind) bool {
 	if !validParkState(state) || ticket != state.ticket ||
 		(state.phase != parkPreparing && state.phase != parkSealed && state.phase != parkParked) ||
-		kind < ParkCancelOperation || kind > ParkCancelShutdown {
+		kind < ParkCancelOperation || kind > ParkCancelShutdown ||
+		state.phase == parkParked && state.winnerRecord != nil {
 		return false
 	}
 	if kind <= state.cancelKind {
@@ -409,8 +588,13 @@ func AbortParkSet(state *ParkState, ticket ParkTicket) bool {
 	if state.cancelKind == ParkCancelNone {
 		state.cancelKind = ParkCancelOperation
 	}
+	state.hasDefault = false
+	state.winnerCase = 0
 	state.outcome = ParkOutcomeCanceled
 	for link := state.head; link != nil; link = link.next {
+		if !rollBackOperationCandidate(link.operation) {
+			return false
+		}
 		link.operation.cancelRequested = true
 		link.operation.disposition = OperationDispositionCanceled
 	}
@@ -444,17 +628,22 @@ func ParkOperationClaim(record *OperationRecord, id OperationID) ParkClaimResult
 	return ParkClaimLost
 }
 
-func resolveParkSet(state *ParkState, ticket ParkTicket, winner *OperationRecord) bool {
+func resolveParkSet(state *ParkState, ticket ParkTicket, winner *OperationRecord, defaultSelected bool) bool {
 	if !validParkState(state) || state.phase != parkParked || ticket != state.ticket {
 		return false
 	}
 	if state.cancelKind == ParkCancelTaskAbort || state.cancelKind == ParkCancelShutdown {
 		winner = nil
+		defaultSelected = false
 	}
-	if winner == nil && state.cancelKind == ParkCancelNone {
+	if winner == nil && !defaultSelected && state.cancelKind == ParkCancelNone {
 		return false
 	}
-	if winner != nil && (winner.phase != operationActive || winner.link.park != state || winner.link.ticket != ticket || !winner.completionPublished) {
+	if defaultSelected && (winner != nil || !state.hasDefault || state.cancelKind != ParkCancelNone) {
+		return false
+	}
+	if winner != nil && (defaultSelected || winner.phase != operationActive || winner.link.park != state || winner.link.ticket != ticket ||
+		!operationCandidateIsPublished(winner) || !operationCandidatePendingForResolution(winner)) {
 		return false
 	}
 	if winner != nil {
@@ -469,11 +658,26 @@ func resolveParkSet(state *ParkState, ticket ParkTicket, winner *OperationRecord
 			return false
 		}
 	}
+	// Freeze every logical commit/rollback decision before exposing terminal
+	// dispositions to physical sources. Source-specific ApplyOne still performs
+	// the effect and acknowledges it before any ParkLink may detach.
+	if !settleParkCandidates(state, winner) {
+		return false
+	}
 	state.phase = parkDetaching
-	if winner == nil {
+	if defaultSelected {
+		state.outcome = ParkOutcomeDefault
+		state.winnerID = OperationID{}
+		state.winnerRecord = nil
+	} else if winner == nil {
 		state.outcome = ParkOutcomeCanceled
+		state.hasDefault = false
+		state.winnerCase = 0
+		state.winnerID = OperationID{}
+		state.winnerRecord = nil
 	} else {
 		state.outcome = ParkOutcomeCompleted
+		state.hasDefault = false
 		state.winnerCase = winner.link.caseID
 		state.winnerID = winner.id
 		state.winnerRecord = winner

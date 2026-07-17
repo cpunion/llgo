@@ -42,7 +42,7 @@ const (
 // closed. A successful first visit always resolves because an affected entry
 // necessarily carries a sticky completion fact.
 func resolveAffectedOperationPublishedEpoch(record *OperationRecord, id OperationID) (CompletionResolution, affectedOperationResolveResult) {
-	if record == nil || !record.Matches(id) || record.phase != operationActive || !record.completionPublished ||
+	if record == nil || !record.Matches(id) || record.phase != operationActive || !operationCandidateIsPublished(record) ||
 		record.link.park == nil || record.link.operation != record || !validParkTicket(record.link.ticket) {
 		return CompletionResolution{}, affectedOperationResolveInvalid
 	}
@@ -62,7 +62,7 @@ func resolveAffectedOperationPublishedEpoch(record *OperationRecord, id Operatio
 	}
 
 	resolution, ok := ResolveParkSnapshot(state, ticket)
-	if !ok || resolution.WaitSets != 1 || resolution.Completed+resolution.Canceled != 1 {
+	if !ok || resolution.WaitSets != 1 || resolution.Completed+resolution.Canceled+resolution.Defaulted != 1 {
 		return CompletionResolution{}, affectedOperationResolveInvalid
 	}
 	return resolution, affectedOperationResolved

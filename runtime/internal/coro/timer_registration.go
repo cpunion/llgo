@@ -514,7 +514,7 @@ func (table *TimerRegistrationTable) ApplyTimerV2One(p *P, id OperationID, recor
 	}
 	switch disposition {
 	case OperationDispositionWinner:
-		if slot.state != timerRegistrationDelivered || !slot.record.completionPublished {
+		if slot.state != timerRegistrationDelivered || !operationCandidateIsPublished(&slot.record) {
 			return OperationApplyInvalid
 		}
 	case OperationDispositionLost, OperationDispositionCanceled:

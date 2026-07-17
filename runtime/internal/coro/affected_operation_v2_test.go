@@ -85,6 +85,7 @@ func addAffectedTestResolution(total *CompletionResolution, resolution Completio
 	total.WaitSets += resolution.WaitSets
 	total.Completed += resolution.Completed
 	total.Canceled += resolution.Canceled
+	total.Defaulted += resolution.Defaulted
 	total.Winners += resolution.Winners
 	total.Losers += resolution.Losers
 }

@@ -186,7 +186,7 @@ func TestTimerRegistrationV2DueEpochDetachLeaseAndUnrelatedSlot(t *testing.T) {
 		t.Fatalf("publish due timer V2 = (%+v, %t)", scan, ok)
 	}
 	dueSlot, _ := timerRegistrationSlotFor(timers, handle)
-	if dueSlot.state != timerRegistrationDelivered || !dueSlot.record.completionPublished ||
+	if dueSlot.state != timerRegistrationDelivered || !operationCandidateIsPublished(&dueSlot.record) ||
 		park.task.g.state != GWaiting || !park.task.g.waiting {
 		t.Fatal("timer V2 publication resolved or promoted before the common epoch phase")
 	}

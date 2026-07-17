@@ -257,6 +257,45 @@ func (sources *ExecutorSourceSet) applyOne(p *P, link *ParkLink) OperationApplyR
 	}
 }
 
+// tryCommitReadyCandidate is the one static dispatch boundary between seeded
+// logical selection and a source's atomic ReadyThenTryCommit operation. No
+// interface or function value enters ParkState. Existing Timer and Manual
+// candidates are contractually IrreversibleCompletion and therefore can never
+// reach this method. This phase provides the production handshake core and
+// fail-closed static boundary; it intentionally has no successful production
+// ReadyThen source until a later channel/poll source adds its direct case here.
+func (sources *ExecutorSourceSet) tryCommitReadyCandidate(request ParkCommitRequest) (ParkCommitAttempt, bool) {
+	id, ok := request.ID()
+	if !ok || sources == nil || !currentParkCommitRequest(request) {
+		return ParkCommitAttempt{}, false
+	}
+	switch id.Source() {
+	case OperationSourceTimer, OperationSourceManual:
+		return ParkCommitAttempt{}, false
+	default:
+		return ParkCommitAttempt{}, false
+	}
+}
+
+func (sources *ExecutorSourceSet) resolveCommitCapablePark(state *ParkState, ticket ParkTicket) (CompletionResolution, bool) {
+	var attempt ParkCommitAttempt
+	for {
+		resolution, request, status := ResolveParkSnapshotStep(state, ticket, attempt)
+		switch status {
+		case ParkResolvePending, ParkResolveResolved:
+			return resolution, true
+		case ParkResolveNeedsCommit:
+			var ok bool
+			attempt, ok = sources.tryCommitReadyCandidate(request)
+			if !ok {
+				return CompletionResolution{}, false
+			}
+		default:
+			return CompletionResolution{}, false
+		}
+	}
+}
+
 // applyResolvedWaitSetBatch dispatches source-specific apply through only the
 // candidate links retained by the resolved batch. Detach mutates the intrusive
 // list, so next is captured before each direct source call. A budget retry
@@ -364,7 +403,7 @@ func (sources *ExecutorSourceSet) resolvePublishedEpochProgress(p *P) (promoted,
 			return 0, 0, false, false, false
 		}
 	}
-	batch, _, _, resolved := resolveAffectedWaitSets(p)
+	batch, _, _, resolved := resolveAffectedWaitSets(p, sources)
 	if !resolved {
 		return 0, 0, false, false, false
 	}
