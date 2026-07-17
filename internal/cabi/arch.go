@@ -192,19 +192,19 @@ func (p *TypeInfoArm64) GetTypeInfo(ctx llvm.Context, ftyp llvm.Type, typ llvm.T
 	info.Align = p.Alignof(typ)
 	switch kind {
 	case llvm.StructTypeKind, llvm.ArrayTypeKind:
-		types := elementTypes(p.td, typ)
-		n := len(types)
+		n := elementTypesCount(typ)
 		if bret && n == 1 {
 			return info
 		}
-		if n == 2 {
-			// skip (i64/ptr,i64/ptr)
-			if (types[0].TypeKind() == llvm.PointerTypeKind || types[0] == ctx.Int64Type()) &&
-				(types[1].TypeKind() == llvm.PointerTypeKind || types[1] == ctx.Int64Type()) {
-				return info
-			}
-		}
 		if n <= 4 {
+			types := elementTypes(p.td, typ)
+			if n == 2 {
+				// skip (i64/ptr,i64/ptr)
+				if (types[0].TypeKind() == llvm.PointerTypeKind || types[0] == ctx.Int64Type()) &&
+					(types[1].TypeKind() == llvm.PointerTypeKind || types[1] == ctx.Int64Type()) {
+					return info
+				}
+			}
 			if checkTypes(types, ctx.FloatType()) || checkTypes(types, ctx.DoubleType()) {
 				return info
 			}

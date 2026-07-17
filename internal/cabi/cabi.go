@@ -105,6 +105,10 @@ type CallInstr struct {
 	fn   llvm.Value
 }
 
+// LLVM's instruction selector may scalarize larger aggregate copies element by
+// element. Keep such values in memory while adapting indirect C ABI returns.
+const maxDirectAggregateCopySize = 1 << 20
+
 func (p *Transformer) TransformModule(path string, m llvm.Module) {
 	ctx := m.Context()
 	var fns []llvm.Value
@@ -180,6 +184,19 @@ func (p *Transformer) TransformModule(path string, m llvm.Module) {
 	for _, fn := range fns {
 		p.transformFunc(m, fn)
 	}
+}
+
+func (p *Transformer) isLargeAggregate(typ llvm.Type) bool {
+	switch typ.TypeKind() {
+	case llvm.ArrayTypeKind, llvm.StructTypeKind:
+		return p.Sizeof(typ) > maxDirectAggregateCopySize
+	}
+	return false
+}
+
+func hasSingleUse(value, user llvm.Value) bool {
+	use := value.FirstUse()
+	return !use.IsNil() && use.User() == user && use.NextUse().IsNil()
 }
 
 func (p *Transformer) isWrapFunctionType(ctx llvm.Context, ft llvm.Type) bool {
@@ -472,16 +489,28 @@ func (p *Transformer) transformFuncBody(m llvm.Module, ctx llvm.Context, info *F
 
 	if info.Return.Kind >= AttrPointer {
 		var retInstrs []llvm.Value
+		var selfCopies [][2]llvm.Value
 		bb := nfn.FirstBasicBlock()
 		for !bb.IsNil() {
 			instr := bb.FirstInstruction()
 			for !instr.IsNil() {
 				if !instr.IsAReturnInst().IsNil() {
 					retInstrs = append(retInstrs, instr)
+				} else if store := instr.IsAStoreInst(); info.Return.Kind == AttrPointer &&
+					!store.IsNil() && !store.IsVolatile() {
+					load := store.Operand(0).IsALoadInst()
+					if !load.IsNil() && !load.IsVolatile() && p.isLargeAggregate(load.Type()) &&
+						store.Operand(1) == load.Operand(0) && hasSingleUse(load, store) {
+						selfCopies = append(selfCopies, [2]llvm.Value{load, store})
+					}
 				}
 				instr = llvm.NextInstruction(instr)
 			}
 			bb = llvm.NextBasicBlock(bb)
+		}
+		for _, copy := range selfCopies {
+			copy[1].EraseFromParentAsInstruction()
+			copy[0].EraseFromParentAsInstruction()
 		}
 		for _, instr := range retInstrs {
 			ret := instr.Operand(0)
@@ -489,6 +518,19 @@ func (p *Transformer) transformFuncBody(m llvm.Module, ctx llvm.Context, info *F
 			var rv llvm.Value
 			switch info.Return.Kind {
 			case AttrPointer:
+				if load := ret.IsALoadInst(); !load.IsNil() && !load.IsVolatile() &&
+					p.isLargeAggregate(ret.Type()) && hasSingleUse(ret, instr) {
+					// Preserve Go value semantics by copying at the original load,
+					// before the source can be modified (see issue #1608).
+					b.SetInsertPointBefore(load)
+					p.callMemcpy(m, ctx, b, params[0], load.Operand(0), p.Sizeof(ret.Type()))
+					b.SetInsertPointBefore(instr)
+					rv = b.CreateRetVoid()
+					instr.ReplaceAllUsesWith(rv)
+					instr.EraseFromParentAsInstruction()
+					load.EraseFromParentAsInstruction()
+					continue
+				}
 				// %typ @fn()
 				// %2 = load %typ, ptr %1
 				// ret %typ %2
@@ -498,8 +540,8 @@ func (p *Transformer) transformFuncBody(m llvm.Module, ctx llvm.Context, info *F
 				// store %typ %2, ptr %0
 				// ret void
 				//
-				// Note: We don't use memcpy optimization here because the source
-				// address content may be modified between load and ret.
+				// For other values, don't defer a memcpy from a load source: that
+				// source may be modified between the load and ret.
 				// See: https://github.com/goplus/llgo/issues/1608
 				b.CreateStore(ret, params[0])
 				rv = b.CreateRetVoid()
@@ -608,16 +650,16 @@ func (p *Transformer) transformCallInstr(m llvm.Module, ctx llvm.Context, call l
 		}
 	}
 
-	var instr llvm.Value
+	var instr, indirectRet llvm.Value
 	switch info.Return.Kind {
 	case AttrVoid:
 		instr = llvm.CreateCall(b, nft, nfn, nparams)
 		updateCallAttr(instr)
 	case AttrPointer:
-		ret := createAlloca(info.Return.Type)
-		call := llvm.CreateCall(b, nft, nfn, append([]llvm.Value{ret}, nparams...))
+		indirectRet = createAlloca(info.Return.Type)
+		call := llvm.CreateCall(b, nft, nfn, append([]llvm.Value{indirectRet}, nparams...))
 		updateCallAttr(call)
-		instr = b.CreateLoad(info.Return.Type, ret, "")
+		instr = b.CreateLoad(info.Return.Type, indirectRet, "")
 	case AttrWidthType, AttrWidthType2:
 		ret := llvm.CreateCall(b, nft, nfn, nparams)
 		updateCallAttr(ret)
@@ -631,6 +673,24 @@ func (p *Transformer) transformCallInstr(m llvm.Module, ctx llvm.Context, call l
 	}
 	call.ReplaceAllUsesWith(instr)
 	call.EraseFromParentAsInstruction()
+	if !indirectRet.IsNil() && p.isLargeAggregate(info.Return.Type) {
+		var stores []llvm.Value
+		for use := instr.FirstUse(); !use.IsNil(); use = use.NextUse() {
+			store := use.User().IsAStoreInst()
+			if store.IsNil() || store.IsVolatile() || store.Operand(0) != instr {
+				return true
+			}
+			stores = append(stores, store)
+		}
+		for _, store := range stores {
+			b.SetInsertPointBefore(store)
+			p.callMemcpy(m, ctx, b, store.Operand(1), indirectRet, p.Sizeof(info.Return.Type))
+			store.EraseFromParentAsInstruction()
+		}
+		if len(stores) != 0 {
+			instr.EraseFromParentAsInstruction()
+		}
+	}
 	return true
 }
 
