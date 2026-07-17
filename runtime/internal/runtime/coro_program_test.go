@@ -629,6 +629,7 @@ func resetCoroProgramTestStateV1(t *testing.T) {
 	coroProgramDriverModeV2State = coroProgramDriverModeUnusedV2
 	coroProgramExecutorRegistryV1State = coro.ExecutorRegistry{}
 	coroProgramWaitTableV1State = coro.WaitRegistrationTable{}
+	coroProgramChannelSourceV1State = coro.ChannelOperationSource{}
 	coroProgramExecutorDriverV1State = coro.ExecutorDriver{}
 	coroProgramExecutorHandleV1State = coro.ExecutorHandle{}
 	coroProgramExecutorBoundV1State = false
@@ -649,6 +650,7 @@ func resetCoroProgramTestStateV1(t *testing.T) {
 		coroProgramDriverModeV2State = coroProgramDriverModeUnusedV2
 		coroProgramExecutorRegistryV1State = coro.ExecutorRegistry{}
 		coroProgramWaitTableV1State = coro.WaitRegistrationTable{}
+		coroProgramChannelSourceV1State = coro.ChannelOperationSource{}
 		coroProgramExecutorDriverV1State = coro.ExecutorDriver{}
 		coroProgramExecutorHandleV1State = coro.ExecutorHandle{}
 		coroProgramExecutorBoundV1State = false
@@ -669,6 +671,9 @@ func TestCoroProgramV1BeginRunAndDestroy(t *testing.T) {
 	if coroProgramLifecycleV1State != coroProgramBegunV1 || coroProgramManifestV1State != &manifest.manifest || coroProgramFactoryV1State != factory {
 		t.Fatalf("begun coroutine program state = {lifecycle:%d manifest:%p factory:%p}", coroProgramLifecycleV1State, coroProgramManifestV1State, coroProgramFactoryV1State)
 	}
+	if coroProgramChannelSourceV1State.CanRelease() {
+		t.Fatal("begun coroutine program did not bind its canonical Channel source")
+	}
 
 	frame := newCoroProgramTestFrameV1(t, &coroProgramGV1State)
 	driver := &coroProgramTestDriverV1{t: t, frame: frame}
@@ -684,7 +689,8 @@ func TestCoroProgramV1BeginRunAndDestroy(t *testing.T) {
 	}
 	if !coroProgramTestTargetV1State.joined || coroProgramTestTargetV1State.closeCalls != 1 ||
 		coroProgramExecutorBoundV1State || coroProgramExecutorDriverV1State != (coro.ExecutorDriver{}) ||
-		!coroProgramExecutorRegistryV1State.CanRelease() || !coroProgramWaitTableV1State.CanRelease() {
+		!coroProgramExecutorRegistryV1State.CanRelease() || !coroProgramWaitTableV1State.CanRelease() ||
+		!coroProgramChannelSourceV1State.CanRelease() {
 		t.Fatal("completed coroutine program retained executor target state")
 	}
 
