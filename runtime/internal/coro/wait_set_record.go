@@ -98,6 +98,7 @@ func validAffectedWaitQueueHeader(p *P) bool {
 
 func validActiveParkStateHeader(state *ParkState, ticket ParkTicket) bool {
 	if state == nil || state.ticket != ticket || !validParkTicket(ticket) ||
+		state.resolving ||
 		!validTaskCancelState(state.taskCancelKind, state.taskCancelPhase) ||
 		state.cancelKind > ParkCancelShutdown || state.attached > state.expected {
 		return false
@@ -266,7 +267,8 @@ func MarkWaitSetAffected(p *P, record *WaitSetRecord) bool {
 // call allocation-free and failure-atomic.
 func RequestWaitSetCancel(p *P, record *WaitSetRecord, kind ParkCancelKind) bool {
 	if !canAppendAffectedWaitSet(p, record) || record.g.park.phase != parkParked ||
-		record.g.park.winnerRecord != nil || kind < ParkCancelOperation || kind > ParkCancelShutdown {
+		record.g.park.resolving || record.g.park.winnerRecord != nil ||
+		kind < ParkCancelOperation || kind > ParkCancelShutdown {
 		return false
 	}
 	if kind > record.g.park.cancelKind {

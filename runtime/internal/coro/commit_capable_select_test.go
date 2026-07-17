@@ -449,6 +449,185 @@ func TestReadyThenTryCommitLargeSnapshotVisitsEachCandidateOnce(t *testing.T) {
 	source.finish(t)
 }
 
+func driveBoundedCommitSelect(
+	t *testing.T,
+	source *commitSelectFakeSource,
+	cursor *parkResolutionCursor,
+) (CompletionResolution, ParkResolveStatus, int) {
+	t.Helper()
+	for step := 1; step <= 3*len(source.records)+8; step++ {
+		var attempt ParkCommitAttempt
+		if cursor.phase == parkResolutionCommit {
+			request, ok := parkResolutionCommitRequest(source.state, source.ticket, cursor)
+			if !ok {
+				t.Fatal("load bounded commit request")
+			}
+			attempt, ok = source.tryCommit(request)
+			if !ok {
+				t.Fatal("dispatch bounded commit request")
+			}
+		}
+		beforeSeed := source.state.seed
+		before := append([]OperationRecord(nil), source.records...)
+		resolution, request, status := resolveParkSnapshotBoundedStep(source.state, source.ticket, cursor, attempt)
+		if source.state.seed < beforeSeed || source.state.seed-beforeSeed > 1 {
+			t.Fatalf("bounded step %d candidate visits = %d -> %d", step, beforeSeed, source.state.seed)
+		}
+		changed := 0
+		for index := range before {
+			if before[index] != source.records[index] {
+				changed++
+			}
+		}
+		if changed > 1 {
+			t.Fatalf("bounded step %d changed %d candidate records", step, changed)
+		}
+		switch status {
+		case parkResolveProgress:
+			if request != (ParkCommitRequest{}) {
+				t.Fatalf("bounded progress step %d returned request %+v", step, request)
+			}
+		case ParkResolveNeedsCommit:
+			if !currentParkCommitRequest(request) {
+				t.Fatalf("bounded step %d returned stale request %+v", step, request)
+			}
+		case ParkResolvePending, ParkResolveResolved:
+			return resolution, status, step
+		default:
+			t.Fatalf("bounded step %d failed with status %d", step, status)
+		}
+	}
+	t.Fatal("bounded commit-capable resolution did not terminate")
+	return CompletionResolution{}, ParkResolveInvalid, 0
+}
+
+func TestBoundedCommitResolverFreezesSnapshotAndSettlesOneCandidatePerStep(t *testing.T) {
+	const seed = uint32(0x6a31)
+	specs := []commitSelectCandidateSpec{{caseID: 141}, {caseID: 142}, {caseID: 143}, {caseID: 144}}
+	ranks := firstCommitSelectRankOrder(seed, specs)
+	failed, winner, irreversible, deferred := ranks[0], ranks[1], ranks[2], ranks[3]
+	specs[failed].mode = OperationCommitReadyThenTryCommit
+	specs[winner].mode = OperationCommitReservable
+	specs[irreversible].mode = OperationCommitIrreversibleCompletion
+	specs[deferred].mode = OperationCommitReadyThenTryCommit
+	source := newCommitSelectFakeSource(t, seed, specs, []int{3, 1, 0, 2}, false, 0)
+	source.publish(t, failed)
+	source.publish(t, winner)
+	source.publish(t, irreversible)
+
+	var cursor parkResolutionCursor
+	if !beginParkSnapshotResolution(source.state, source.ticket, &cursor, true) || !source.state.resolving {
+		t.Fatal("begin bounded frozen snapshot")
+	}
+	beforeState, beforeDeferred := *source.state, source.records[deferred]
+	if result := PublishReadyThenTryCommitCandidate(&source.records[deferred], source.ids[deferred]); result != OperationCompletionDeferred || *source.state != beforeState || source.records[deferred] != beforeDeferred {
+		t.Fatalf("publication entered frozen snapshot: result=%d", result)
+	}
+	if RequestParkCancel(source.state, source.ticket, ParkCancelTaskAbort) || *source.state != beforeState ||
+		applyTaskCancellationToPark(&source.g, TaskCancelAbort) || *source.state != beforeState {
+		t.Fatal("cancellation entered frozen snapshot")
+	}
+	if result := RequestPhysicalOperationCancel(&source.records[deferred], source.ids[deferred]); result != OperationCancelInvalid || source.records[deferred] != beforeDeferred {
+		t.Fatalf("physical cancellation entered frozen snapshot: %d", result)
+	}
+
+	resolution, status, steps := driveBoundedCommitSelect(t, source, &cursor)
+	if status != ParkResolveResolved || resolution != (CompletionResolution{WaitSets: 1, Completed: 1, Winners: 1, Losers: 3}) ||
+		steps != len(source.records)+4 || source.state.resolving || source.attempts[failed] != 1 {
+		t.Fatalf("bounded mixed resolution = (%+v, %d), steps=%d resolving=%t attempts=%v",
+			resolution, status, steps, source.state.resolving, source.attempts)
+	}
+	assertCommitCandidate(t, source, failed, OperationCommitReadyThenTryCommit, OperationCommitIdle, false)
+	assertCommitCandidate(t, source, winner, OperationCommitReservable, OperationCommitCommitted, true)
+	assertCommitCandidate(t, source, irreversible, OperationCommitIrreversibleCompletion, OperationCommitCommitted, true)
+	assertCommitCandidate(t, source, deferred, OperationCommitReadyThenTryCommit, OperationCommitIdle, false)
+	if outcome, caseID, _ := source.finish(t); outcome != ParkOutcomeCompleted || caseID != specs[winner].caseID {
+		t.Fatalf("bounded mixed consume = (%d, %d)", outcome, caseID)
+	}
+}
+
+func TestBoundedCommitResolverDefaultWaitsForEveryFailedHint(t *testing.T) {
+	specs := []commitSelectCandidateSpec{
+		{caseID: 151, mode: OperationCommitReadyThenTryCommit},
+		{caseID: 152, mode: OperationCommitReadyThenTryCommit},
+		{caseID: 153, mode: OperationCommitReadyThenTryCommit},
+	}
+	source := newCommitSelectFakeSource(t, 0x6b41, specs, []int{2, 0, 1}, true, 159)
+	for index := range specs {
+		source.publish(t, index)
+	}
+	var cursor parkResolutionCursor
+	if !beginParkSnapshotResolution(source.state, source.ticket, &cursor, true) {
+		t.Fatal("begin bounded default snapshot")
+	}
+	resolution, status, steps := driveBoundedCommitSelect(t, source, &cursor)
+	wantSteps := 3*len(specs) + 2 // scan+TryCommit, decision, settle, finalize
+	if status != ParkResolveResolved || resolution != (CompletionResolution{WaitSets: 1, Defaulted: 1, Losers: 3}) ||
+		steps != wantSteps || source.state.seed != uint32(len(specs)) {
+		t.Fatalf("bounded default = (%+v, %d), steps=%d/%d visits=%d attempts=%v",
+			resolution, status, steps, wantSteps, source.state.seed, source.attempts)
+	}
+	for index, attempts := range source.attempts {
+		if attempts != 1 {
+			t.Fatalf("bounded default candidate %d attempts = %d", index, attempts)
+		}
+	}
+	if outcome, caseID, lease := source.finish(t); outcome != ParkOutcomeDefault || caseID != 159 || lease.Valid() {
+		t.Fatalf("bounded default consume = (%d, %d, %+v)", outcome, caseID, lease)
+	}
+}
+
+func TestBoundedCommitResolverStrongCancelSkipsReadyDispatch(t *testing.T) {
+	specs := []commitSelectCandidateSpec{
+		{caseID: 161, mode: OperationCommitReadyThenTryCommit, canCommit: true},
+		{caseID: 162, mode: OperationCommitReservable},
+	}
+	source := newCommitSelectFakeSource(t, 0x6c51, specs, []int{1, 0}, false, 0)
+	source.publish(t, 0)
+	source.publish(t, 1)
+	if !RequestParkCancel(source.state, source.ticket, ParkCancelTaskAbort) {
+		t.Fatal("request bounded strong cancellation")
+	}
+	var cursor parkResolutionCursor
+	if !beginParkSnapshotResolution(source.state, source.ticket, &cursor, true) || cursor.phase != parkResolutionDecision {
+		t.Fatal("begin bounded strong-cancel snapshot")
+	}
+	resolution, status, steps := driveBoundedCommitSelect(t, source, &cursor)
+	if status != ParkResolveResolved || resolution != (CompletionResolution{WaitSets: 1, Canceled: 1, Losers: 2}) ||
+		steps != len(specs)+2 || source.state.seed != 0 || source.attempts[0] != 0 {
+		t.Fatalf("bounded strong cancel = (%+v, %d), steps=%d visits=%d attempts=%v",
+			resolution, status, steps, source.state.seed, source.attempts)
+	}
+	assertCommitCandidate(t, source, 0, OperationCommitReadyThenTryCommit, OperationCommitRolledBack, true)
+	assertCommitCandidate(t, source, 1, OperationCommitReservable, OperationCommitRolledBack, true)
+	if outcome, caseID, lease := source.finish(t); outcome != ParkOutcomeCanceled || caseID != 0 || lease.Valid() {
+		t.Fatalf("bounded strong-cancel consume = (%d, %d, %+v)", outcome, caseID, lease)
+	}
+}
+
+func TestBoundedCommitResolverFastBeginRejectsBadFirstLinkWithoutPoison(t *testing.T) {
+	specs := []commitSelectCandidateSpec{{caseID: 171}}
+	source := newCommitSelectFakeSource(t, 0x6d61, specs, []int{0}, false, 0)
+	source.state.seed = 37
+	link := source.state.head
+	record := link.operation
+	link.operation = nil
+	var cursor parkResolutionCursor
+	if beginParkSnapshotResolution(source.state, source.ticket, &cursor, false) || source.state.resolving ||
+		source.state.seed != 37 || cursor != (parkResolutionCursor{}) {
+		t.Fatalf("failed fast begin left transient state: resolving=%t seed=%d cursor=%+v",
+			source.state.resolving, source.state.seed, cursor)
+	}
+	link.operation = record
+	if !validParkState(source.state) || !RequestParkCancel(source.state, source.ticket, ParkCancelOperation) {
+		t.Fatal("restore fast-begin rollback fixture")
+	}
+	if resolution, status := source.resolve(t); status != ParkResolveResolved || resolution.Canceled != 1 {
+		t.Fatalf("resolve fast-begin rollback fixture = (%+v, %d)", resolution, status)
+	}
+	source.finish(t)
+}
+
 func TestResolveParkSnapshotCompatibilityDoesNotPoisonReadyHandshake(t *testing.T) {
 	specs := []commitSelectCandidateSpec{{caseID: 49, mode: OperationCommitReadyThenTryCommit}}
 	source := newCommitSelectFakeSource(t, 22, specs, []int{0}, false, 0)
@@ -460,6 +639,10 @@ func TestResolveParkSnapshotCompatibilityDoesNotPoisonReadyHandshake(t *testing.
 	if *source.state != beforeState || source.records[0] != beforeRecord ||
 		source.state.winnerRecord != nil || source.state.winnerID != (OperationID{}) {
 		t.Fatal("compatibility wrapper retained transient commit cursor")
+	}
+	if resolution, ok := new(ExecutorSourceSet).resolveCommitCapablePark(source.state, source.ticket); ok ||
+		resolution != (CompletionResolution{}) || *source.state != beforeState || source.records[0] != beforeRecord {
+		t.Fatalf("unsupported static dispatcher poisoned snapshot = (%+v, %t)", resolution, ok)
 	}
 
 	source.canCommit[0] = true
@@ -755,12 +938,14 @@ func TestCommitCapableSelectCoreLayoutAndPendingStepAreAllocationFree(t *testing
 		t.Fatalf("OperationRecord compact offsets = candidate %d resultTicket %d link %d",
 			unsafe.Offsetof(OperationRecord{}.candidate), unsafe.Offsetof(OperationRecord{}.resultTicket), unsafe.Offsetof(OperationRecord{}.link))
 	}
-	if unsafe.Offsetof(ParkState{}.hasDefault) != 9 || unsafe.Offsetof(ParkState{}.expected) != 12 {
-		t.Fatalf("ParkState padding reuse offsets = default %d expected %d",
-			unsafe.Offsetof(ParkState{}.hasDefault), unsafe.Offsetof(ParkState{}.expected))
+	if unsafe.Offsetof(ParkState{}.hasDefault) != 9 || unsafe.Offsetof(ParkState{}.resolving) != 10 ||
+		unsafe.Offsetof(ParkState{}.expected) != 12 {
+		t.Fatalf("ParkState padding reuse offsets = default %d resolving %d expected %d",
+			unsafe.Offsetof(ParkState{}.hasDefault), unsafe.Offsetof(ParkState{}.resolving), unsafe.Offsetof(ParkState{}.expected))
 	}
 	for _, value := range []any{
 		OperationRecord{}, ParkLink{}, ParkState{}, ParkCommitRequest{}, ParkCommitAttempt{}, ExecutorSourceSet{},
+		parkResolutionCursor{}, publishedEpochResolveCursor{},
 	} {
 		typeOf := reflect.TypeOf(value)
 		for fieldIndex := 0; fieldIndex < typeOf.NumField(); fieldIndex++ {

@@ -18,11 +18,10 @@ package coro
 
 // ExecutorPollProgress is the pointer-free host boundary for one bounded
 // source-service entry. Counts are cumulative for the current A/ack/B
-// transaction; Used is charged only for this call. The first implementation
-// bounds and charges every production source-catalog slot, while AtomicResolve
-// explicitly reports that common affected/candidate/legacy resolution is still
-// one indivisible action; ApplyVisits exposes its known candidate work instead
-// of pretending the entire RunSlice is bounded already. Complete means that
+// transaction; Used is charged only for this call. Every production catalog
+// slot, affected wait-set decision, candidate scan/settle/apply, promotion, and
+// legacy-G visit is resumable and charged as one reduction. ApplyVisits counts
+// only source-specific candidate ApplyOne actions. Complete means that
 // the transaction reached the end of epoch B. More requests a later,
 // non-recursive scheduler entry, while Blocked means that only a new external
 // fact (or a reported future deadline) can make progress. More and Blocked are
@@ -89,6 +88,7 @@ type executorPollTransaction struct {
 	awaitExternal bool
 	resampleNow   bool
 	_             [2]byte
+	resolve       publishedEpochResolveCursor
 }
 
 func validExecutorPollTransaction(transaction *executorPollTransaction, sources *ExecutorSourceSet) bool {
@@ -113,6 +113,9 @@ func validExecutorPollTransaction(transaction *executorPollTransaction, sources 
 		return false
 	}
 	if transaction.phase == executorPollEpochAPublish || transaction.phase == executorPollEpochBPublish {
+		if transaction.resolve != (publishedEpochResolveCursor{}) {
+			return false
+		}
 		switch transaction.source {
 		case executorCatalogWaits:
 			return transaction.cursor < WaitRegistrationCapacity
@@ -127,7 +130,14 @@ func validExecutorPollTransaction(transaction *executorPollTransaction, sources 
 		}
 		return false
 	}
-	return transaction.source == executorCatalogDone && transaction.cursor == 0
+	if transaction.source != executorCatalogDone || transaction.cursor != 0 {
+		return false
+	}
+	if transaction.phase == executorPollEpochAResolve || transaction.phase == executorPollEpochBResolve {
+		return transaction.resolve == (publishedEpochResolveCursor{}) ||
+			validPublishedEpochResolveCursor(&transaction.resolve, sources.owner)
+	}
+	return transaction.resolve == (publishedEpochResolveCursor{})
 }
 
 func beginExecutorPollTransaction(driver *ExecutorDriver, now int64, withDeadline bool) bool {
@@ -149,6 +159,7 @@ func beginExecutorPollEpoch(transaction *executorPollTransaction, phase executor
 	transaction.deadline = 0
 	transaction.hasDeadline = false
 	transaction.retryBudget = false
+	transaction.resolve = publishedEpochResolveCursor{}
 	// AwaitExternal is transaction-sticky: unlike a budget retry, epoch B does
 	// not itself satisfy a physical acknowledgement missing in epoch A.
 	transaction.resampleNow = transaction.withDeadline
@@ -176,9 +187,9 @@ func executorMinPollBudget(sources *ExecutorSourceSet) (uint32, bool) {
 }
 
 // MinExecutorPollBudget is the exact base budget for one idle driver's fixed
-// A/ack/B catalog and phase actions. Atomic common resolution may overshoot it
-// by ApplyVisits until candidate/affected cursors land; smaller budgets are
-// valid and retain an explicit phase/cursor for a later host entry.
+// A/ack/B catalog and two empty common-resolution actions. Non-empty affected
+// waits and legacy waiters add explicitly charged reductions; smaller budgets
+// are valid and retain exact source and resolution cursors for a later entry.
 func MinExecutorPollBudget(driver *ExecutorDriver) (uint32, bool) {
 	if !validExecutorDriver(driver) || driver.state != executorDriverActive || driver.poll.phase != executorPollIdle {
 		return 0, false
@@ -286,7 +297,8 @@ func publishExecutorCatalogEntry(driver *ExecutorDriver) bool {
 
 func executorProgressFromScan(scan executorSourceScan, used, budget uint32, complete, more, blocked bool) (ExecutorPollProgress, bool) {
 	if scan.completed < 0 || scan.waits < 0 || scan.timers < 0 || scan.manual < 0 || scan.manualLost < 0 ||
-		scan.control < 0 || scan.controlLate < 0 || scan.applyVisits < 0 || scan.promoted < 0 || more && blocked {
+		scan.control < 0 || scan.controlLate < 0 || scan.applyVisits < 0 || scan.promoted < 0 ||
+		used > budget || more && blocked {
 		return ExecutorPollProgress{}, false
 	}
 	return ExecutorPollProgress{
@@ -306,17 +318,16 @@ func executorProgressFromScan(scan executorSourceScan, used, budget uint32, comp
 		More:          more,
 		Blocked:       blocked,
 		HasDeadline:   scan.hasDeadline,
-		AtomicResolve: scan.epochs != 0,
-		Overshot:      used > budget,
+		AtomicResolve: false,
+		Overshot:      false,
 	}, true
 }
 
 // pollExecutorSliceAt advances the first production-bounded part of one
 // A/ack/B transaction without recursively re-entering the scheduler. Every
-// source entry and acknowledgement costs one reduction. Candidate-level and
-// legacy-wait cursors remain a later slice; until then common resolve is one
-// indivisible charged action, AtomicResolve says so, and ApplyVisits exposes
-// the known overshoot for profiling.
+// source entry, acknowledgement, candidate action, promotion, and legacy-G
+// visit costs exactly one reduction. Administrative phase transitions are
+// folded into the action they expose and never hide a collection scan.
 func pollExecutorSliceAt(driver *ExecutorDriver, now int64, withDeadline bool, budget uint32) (scan executorSourceScan, progress ExecutorPollProgress, ok bool) {
 	if budget == 0 || !validExecutorDriver(driver) || driver.state != executorDriverActive || !idleExecutorScheduler(driver.p) ||
 		!driver.sources.acceptsScan(driver.p, now, withDeadline) {
@@ -354,24 +365,21 @@ func pollExecutorSliceAt(driver *ExecutorDriver, now int64, withDeadline bool, b
 			}
 			used++
 		case executorPollEpochAResolve, executorPollEpochBResolve:
-			promoted, visits, retryBudget, awaitExternal, resolved := driver.sources.resolvePublishedEpochProgress(driver.p)
-			if visits < 0 || uint64(used)+1+uint64(visits) > uint64(^uint32(0)) {
+			step, resolved := resolvePublishedEpochStep(&driver.sources, driver.p, &transaction.resolve)
+			if !resolved || step.applyVisits < 0 || step.promoted < 0 {
 				return transaction.total, ExecutorPollProgress{}, false
 			}
-			transaction.total.promoted += promoted
-			transaction.total.applyVisits += visits
+			transaction.total.promoted += step.promoted
+			transaction.total.applyVisits += step.applyVisits
+			transaction.retryBudget = transaction.retryBudget || step.retryBudget
+			transaction.awaitExternal = transaction.awaitExternal || step.awaitExternal
+			used++
+			if !step.complete {
+				continue
+			}
 			transaction.total.epochs++
 			transaction.total.deadline = transaction.deadline
 			transaction.total.hasDeadline = transaction.hasDeadline
-			transaction.retryBudget = transaction.retryBudget || retryBudget
-			transaction.awaitExternal = transaction.awaitExternal || awaitExternal
-			// Candidate dispatch is charged exactly even though this first slice
-			// cannot yet stop halfway through common resolve. Used may exceed
-			// budget and Overshot makes that limitation explicit.
-			used += 1 + uint32(visits)
-			if !resolved {
-				return transaction.total, ExecutorPollProgress{}, false
-			}
 			if transaction.phase == executorPollEpochAResolve {
 				transaction.phase = executorPollAcknowledge
 				transaction.source = executorCatalogDone
@@ -383,7 +391,7 @@ func pollExecutorSliceAt(driver *ExecutorDriver, now int64, withDeadline bool, b
 			// the continuation state to exact zero. Facts published behind B's
 			// cursor remain sticky and produce More for a later host entry.
 			completed := transaction.total
-			retryBudget, awaitExternal = transaction.retryBudget, transaction.awaitExternal
+			retryBudget, awaitExternal := transaction.retryBudget, transaction.awaitExternal
 			*transaction = executorPollTransaction{}
 			more := retryBudget || driver.sources.pending(driver.p) || driver.p.readyHead != nil ||
 				driver.registry.ObserveRequested(driver.handle) || preemptLoad(&driver.p.schedule) != scheduleIdle
@@ -407,9 +415,8 @@ func pollExecutorSliceAt(driver *ExecutorDriver, now int64, withDeadline bool, b
 }
 
 // PollExecutorSlice services a no-deadline source catalog for at most budget
-// catalog/phase reductions. AtomicResolve identifies the remaining common
-// resolve overshoot. More never authorizes direct recursion; a target schedules
-// a later host entry and returns first.
+// catalog, resolution, and acknowledgement reductions. More never authorizes
+// direct recursion; a target schedules a later host entry and returns first.
 func PollExecutorSlice(driver *ExecutorDriver, budget uint32) (ExecutorPollProgress, bool) {
 	if driver == nil || driver.sources.usesMonotonicTime() {
 		return ExecutorPollProgress{}, false

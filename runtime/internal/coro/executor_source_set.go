@@ -278,6 +278,10 @@ func (sources *ExecutorSourceSet) tryCommitReadyCandidate(request ParkCommitRequ
 }
 
 func (sources *ExecutorSourceSet) resolveCommitCapablePark(state *ParkState, ticket ParkTicket) (CompletionResolution, bool) {
+	previousSeed := uint32(0)
+	if state != nil {
+		previousSeed = state.seed
+	}
 	var attempt ParkCommitAttempt
 	for {
 		resolution, request, status := ResolveParkSnapshotStep(state, ticket, attempt)
@@ -288,6 +292,7 @@ func (sources *ExecutorSourceSet) resolveCommitCapablePark(state *ParkState, tic
 			var ok bool
 			attempt, ok = sources.tryCommitReadyCandidate(request)
 			if !ok {
+				abortParkCommitCompatibility(state, ticket, request, previousSeed)
 				return CompletionResolution{}, false
 			}
 		default:
@@ -384,43 +389,20 @@ func (sources *ExecutorSourceSet) resolvePublishedEpochProgress(p *P) (promoted,
 	if !validExecutorSourceSet(sources, p) {
 		return 0, 0, false, false, false
 	}
-	// Phase one resolves every source's affected entries against the same
-	// complete sticky snapshot. Timer V2 completion publication marks its
-	// WaitSetRecord directly and therefore has no source-local affected chain;
-	// importantly, timer publication still completed before this phase. Any V2
-	// source which does retain a local chain must resolve it here before the
-	// shared wait-set batch and before any source-specific ApplyOne call.
-	if sources.manual != nil {
-		standalone, valid := sources.manual.standaloneAffected(p)
-		if !valid || standalone {
-			// A source-local (link.wait == nil) entry has no resolved batch link.
-			// Fail before consuming it rather than silently leaving an attached
-			// terminal operation outside the production apply transaction.
-			return 0, 0, false, false, false
+	var cursor publishedEpochResolveCursor
+	for {
+		step, advanced := resolvePublishedEpochStep(sources, p, &cursor)
+		if !advanced {
+			return promoted, applyVisits, retryBudget, awaitExternal, false
 		}
-		resolution, duplicates, resolved := sources.manual.ResolveAffectedPublishedEpoch(p)
-		if !resolved || resolution != (CompletionResolution{}) || duplicates != 0 {
-			return 0, 0, false, false, false
+		promoted += step.promoted
+		applyVisits += step.applyVisits
+		retryBudget = retryBudget || step.retryBudget
+		awaitExternal = awaitExternal || step.awaitExternal
+		if step.complete {
+			return promoted, applyVisits, retryBudget, awaitExternal, true
 		}
 	}
-	batch, _, _, resolved := resolveAffectedWaitSets(p, sources)
-	if !resolved {
-		return 0, 0, false, false, false
-	}
-	// Phase two walks only the resolved batch's candidate links and directly
-	// dispatches each exact source identity. All source resolve passes above are
-	// complete before any source applies or detaches, so static source order can
-	// neither select a winner nor hide a cross-source loser.
-	applyVisits, retryBudget, awaitExternal, ok = sources.applyResolvedWaitSetBatchProgress(p, batch)
-	if !ok {
-		return 0, applyVisits, retryBudget, awaitExternal, false
-	}
-	promoted, ok = promoteResolvedWaitSets(p, batch)
-	if !ok {
-		return promoted, applyVisits, retryBudget, awaitExternal, false
-	}
-	legacyPromoted, legacyOK := pollReady(p)
-	return promoted + legacyPromoted, applyVisits, retryBudget, awaitExternal, legacyOK
 }
 
 func (sources *ExecutorSourceSet) resolvePublishedEpoch(p *P) (promoted, applyVisits int, ok bool) {

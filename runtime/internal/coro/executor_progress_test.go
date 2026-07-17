@@ -88,7 +88,7 @@ func TestMinExecutorPollBudgetCountsCompleteProductionCatalog(t *testing.T) {
 		t.Fatalf("complete catalog minimum = (%d, %t), want %d", budget, ok, want)
 	}
 	if progress, ok := PollExecutorSliceAt(driver, 0, want); !ok || !progress.Complete || progress.Used != want ||
-		progress.Overshot || !progress.AtomicResolve || progress.Epochs != 2 {
+		progress.Overshot || progress.AtomicResolve || progress.Epochs != 2 {
 		t.Fatalf("complete empty catalog poll = (%+v, %t)", progress, ok)
 	}
 	closeTestExecutorDriver(t, driver)
@@ -171,7 +171,7 @@ func TestExecutorPollSliceDoesNotResolveBeforeCompleteEpochA(t *testing.T) {
 			progress, ok, p.readyHead, HasWaiting(p), registry.ObserveRequested(handle))
 	}
 	progress, ok = PollExecutorSlice(driver, 1)
-	if !ok || progress.Complete || !progress.AtomicResolve || progress.Promoted != 1 || p.readyHead != task.g || HasWaiting(p) ||
+	if !ok || progress.Complete || progress.AtomicResolve || progress.Promoted != 1 || p.readyHead != task.g || HasWaiting(p) ||
 		!registry.ObserveRequested(handle) {
 		t.Fatalf("A resolution boundary = (%+v, %t), ready=%p waiting=%t requested=%t",
 			progress, ok, p.readyHead, HasWaiting(p), registry.ObserveRequested(handle))

@@ -597,10 +597,11 @@ func publishOperationCandidate(record *OperationRecord, id OperationID, mode Ope
 	if record.link.park == nil || record.link.operation != record || record.link.ticket == (ParkTicket{}) {
 		return OperationCompletionInvalid
 	}
-	// One ReadyThen source call owns the ParkState cursor synchronously. Other
-	// owner-side publication is deferred to the next source epoch; accepting it
-	// here would invalidate seeded order after TryCommit may have taken effect.
-	if record.link.park.phase == parkParked && record.link.park.winnerRecord != nil {
+	// A bounded logical resolution owns a frozen source snapshot across host
+	// entries. Retain a newly publishable re-entrant/behind-cursor fact in its
+	// source mailbox; already-published and terminal facts keep their stable
+	// Duplicate/Lost classification above.
+	if record.link.park.phase == parkParked && record.link.park.resolving {
 		return OperationCompletionDeferred
 	}
 	if mode == OperationCommitReadyThenTryCommit {
@@ -643,6 +644,9 @@ func RequestPhysicalOperationCancel(record *OperationRecord, id OperationID) Ope
 	}
 	if record.disposition != OperationDispositionPending {
 		return OperationCancelAlreadyTerminal
+	}
+	if record.link.park != nil && record.link.park.resolving {
+		return OperationCancelInvalid
 	}
 	if record.cancelRequested {
 		return OperationCancelAlreadyRequested

@@ -567,63 +567,18 @@ func pollReady(p *P) (int, bool) {
 		// sufficient acknowledgement of the legacy/internal scheduling gate.
 		preemptCompareAndSwap(&p.schedule, scheduleRequested, scheduleIdle)
 	}
-	batch, _, _, affectedOK := resolveAffectedWaitSets(p, nil)
-	if !affectedOK {
-		return 0, false
+	var cursor publishedEpochResolveCursor
+	promoted := 0
+	for {
+		step, advanced := resolvePublishedEpochStep(nil, p, &cursor)
+		if !advanced {
+			return promoted, false
+		}
+		promoted += step.promoted
+		if step.complete {
+			return promoted, true
+		}
 	}
-	promoted, promotedOK := promoteResolvedWaitSets(p, batch)
-	if !promotedOK {
-		return promoted, false
-	}
-	var previous *G
-	for g := p.waitHead; g != nil; {
-		next := g.nextWait
-		if !ValidG(g) || g.state != GWaiting || !g.waiting || g.queued || g.nextReady != nil ||
-			!validLegacyWaitingG(g) {
-			return promoted, false
-		}
-		ready := false
-		word := preemptLoad(&g.waitToken.word)
-		if waitGeneration(word) != uint32(g.waitTicket) {
-			return promoted, false
-		}
-		switch waitWordState(word) {
-		case waitParked:
-		case waitParkedReady, waitParkedCanceled:
-			if _, consumed := consumeWait(g.waitToken, g.waitTicket); !consumed {
-				// Outcome producers only publish terminal token states. Failure
-				// means another scheduler consumer or corrupted ownership.
-				return promoted, false
-			}
-			ready = true
-		default:
-			return promoted, false
-		}
-		if !ready {
-			previous = g
-			g = next
-			continue
-		}
-		if previous == nil {
-			p.waitHead = next
-		} else {
-			previous.nextWait = next
-		}
-		if p.waitTail == g {
-			p.waitTail = previous
-		}
-		g.nextWait = nil
-		g.waiting = false
-		g.waitToken = nil
-		g.waitTicket = 0
-		g.state = GRunnable
-		if !Enqueue(p, g) {
-			return promoted, false
-		}
-		promoted++
-		g = next
-	}
-	return promoted, true
 }
 
 // PollReady promotes every completed or safely canceled platform wait while

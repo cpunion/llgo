@@ -135,7 +135,7 @@ func pOwnsTaskCancellation(p *P, g *G) bool {
 // detaching/ready already have a terminal outcome, so the task token is simply
 // observed before the selected continuation executes.
 func applyTaskCancellationToPark(g *G, kind TaskCancelKind) bool {
-	if !ValidG(g) || !validTaskCancelKind(kind) || !validParkState(&g.park) {
+	if !ValidG(g) || !validTaskCancelKind(kind) || g.park.resolving || !validParkState(&g.park) {
 		return false
 	}
 	switch g.park.phase {
@@ -162,7 +162,7 @@ func RequestTaskCancellation(p *P, g *G, kind TaskCancelKind) bool {
 	var wait *WaitSetRecord
 	if g.state == GWaiting && g.waitToken == nil && g.active != nil && g.active.parkWait != nil {
 		wait = g.active.parkWait
-		if g.park.winnerRecord != nil || !canAppendAffectedWaitSet(p, wait) {
+		if g.park.resolving || g.park.winnerRecord != nil || !canAppendAffectedWaitSet(p, wait) {
 			return false
 		}
 	} else if !validParkState(&g.park) {

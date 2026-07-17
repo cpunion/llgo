@@ -129,15 +129,19 @@ type ParkLink struct {
 // seed is phase-overlaid without changing the cross-target layout: Preparing
 // uses it to assign immutable candidate ranks; Seal sorts the intrusive list
 // and resets it; Parked resolution uses it as the current snapshot's exact
-// candidate-visit count. While a ReadyThenTryCommit request is outstanding,
-// the otherwise-terminal winnerRecord/winnerID pair is the atomic resolver
-// cursor. A failed request resumes at winnerRecord.link.next, so one snapshot
-// never rescans an earlier rank.
+// candidate-visit count. resolving occupies existing scalar padding and freezes
+// every owner-side publication/cancellation entry while the resumable resolver
+// spans host entries; it does not change the 32-bit/WASM or native layout.
+// While a ReadyThenTryCommit request is outstanding, the otherwise-terminal
+// winnerRecord/winnerID pair is only the exact source handshake marker. The
+// private resolver cursor retains scan/settle continuation and tentative
+// irreversible/reservable winners.
 // All ParkState and ParkLink operations are strictly owner-P-only.
 type ParkState struct {
 	ticket          ParkTicket
 	phase           parkPhase
 	hasDefault      bool
+	resolving       bool
 	expected        uint32
 	attached        uint32
 	seed            uint32
@@ -168,7 +172,7 @@ func validPendingParkCommitCursor(state *ParkState) bool {
 }
 
 func validParkState(state *ParkState) bool {
-	if state == nil || !validTaskCancelState(state.taskCancelKind, state.taskCancelPhase) || state.cancelKind > ParkCancelShutdown ||
+	if state == nil || state.resolving || !validTaskCancelState(state.taskCancelKind, state.taskCancelPhase) || state.cancelKind > ParkCancelShutdown ||
 		state.attached > state.expected {
 		return false
 	}
@@ -552,7 +556,7 @@ func CommitParkSet(state *ParkState, ticket ParkTicket) bool {
 }
 
 func RequestParkCancel(state *ParkState, ticket ParkTicket, kind ParkCancelKind) bool {
-	if !validParkState(state) || ticket != state.ticket ||
+	if state == nil || state.resolving || !validParkState(state) || ticket != state.ticket ||
 		(state.phase != parkPreparing && state.phase != parkSealed && state.phase != parkParked) ||
 		kind < ParkCancelOperation || kind > ParkCancelShutdown ||
 		state.phase == parkParked && state.winnerRecord != nil {
@@ -626,80 +630,6 @@ func ParkOperationClaim(record *OperationRecord, id OperationID) ParkClaimResult
 		return ParkClaimWon
 	}
 	return ParkClaimLost
-}
-
-func resolveParkSet(state *ParkState, ticket ParkTicket, winner *OperationRecord, defaultSelected bool) bool {
-	if !validParkState(state) || state.phase != parkParked || ticket != state.ticket {
-		return false
-	}
-	if state.cancelKind == ParkCancelTaskAbort || state.cancelKind == ParkCancelShutdown {
-		winner = nil
-		defaultSelected = false
-	}
-	if winner == nil && !defaultSelected && state.cancelKind == ParkCancelNone {
-		return false
-	}
-	if defaultSelected && (winner != nil || !state.hasDefault || state.cancelKind != ParkCancelNone) {
-		return false
-	}
-	if winner != nil && (defaultSelected || winner.phase != operationActive || winner.link.park != state || winner.link.ticket != ticket ||
-		!operationCandidateIsPublished(winner) || !operationCandidatePendingForResolution(winner)) {
-		return false
-	}
-	if winner != nil {
-		found := false
-		for link := state.head; link != nil; link = link.next {
-			if link.operation == winner {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
-		}
-	}
-	// Freeze every logical commit/rollback decision before exposing terminal
-	// dispositions to physical sources. Source-specific ApplyOne still performs
-	// the effect and acknowledges it before any ParkLink may detach.
-	if !settleParkCandidates(state, winner) {
-		return false
-	}
-	state.phase = parkDetaching
-	if defaultSelected {
-		state.outcome = ParkOutcomeDefault
-		state.winnerID = OperationID{}
-		state.winnerRecord = nil
-	} else if winner == nil {
-		state.outcome = ParkOutcomeCanceled
-		state.hasDefault = false
-		state.winnerCase = 0
-		state.winnerID = OperationID{}
-		state.winnerRecord = nil
-	} else {
-		state.outcome = ParkOutcomeCompleted
-		state.hasDefault = false
-		state.winnerCase = winner.link.caseID
-		state.winnerID = winner.id
-		state.winnerRecord = winner
-		winner.resultTicket = ticket
-	}
-	for link := state.head; link != nil; link = link.next {
-		record := link.operation
-		if record == winner {
-			record.disposition = OperationDispositionWinner
-			continue
-		}
-		record.cancelRequested = true
-		if state.outcome == ParkOutcomeCanceled {
-			record.disposition = OperationDispositionCanceled
-		} else {
-			record.disposition = OperationDispositionLost
-		}
-	}
-	if state.attached == 0 {
-		state.phase = parkReady
-	}
-	return validParkState(state)
 }
 
 // DetachParkOperation clears the only physical-source pointer path to the

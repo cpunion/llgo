@@ -99,36 +99,78 @@ func (request ParkCommitRequest) Failed() ParkCommitAttempt {
 	return ParkCommitAttempt{request: request, result: ParkCommitAttemptFailed}
 }
 
+// parkResolveProgress is private because callers of the compatibility Step API
+// still observe only Pending, NeedsCommit, Resolved, or Invalid. The production
+// executor persists parkResolutionCursor and charges each Progress transition
+// as one reduction, like one Rust-style poll without allocating a Future/Task.
+const parkResolveProgress ParkResolveStatus = 255
+
+type parkResolutionPhase uint8
+
+const (
+	parkResolutionIdle parkResolutionPhase = iota
+	parkResolutionScan
+	parkResolutionDecision
+	parkResolutionCommit
+	parkResolutionSettle
+	parkResolutionFinalize
+)
+
+// parkResolutionCursor is owner-only continuation embedded in the executor's
+// published-epoch transaction. It contains no interface, function, allocation,
+// or producer-visible pointer. tentative winners live here; ParkState's winner
+// fields remain reserved for an exact ReadyThen handshake or the terminal
+// completed winner.
+type parkResolutionCursor struct {
+	link            *ParkLink
+	winner          *OperationRecord
+	request         ParkCommitRequest
+	previousSeed    uint32
+	phase           parkResolutionPhase
+	defaultSelected bool
+	_               [2]byte
+}
+
+// validParkResolutionHeader accepts only the deliberately transient Parked
+// shape owned by a persisted cursor. It is O(1): SealParkSet performed the full
+// structural audit, while each reduction validates its exact link and adjacent
+// rank/backlinks before mutation.
 func validParkResolutionHeader(state *ParkState, ticket ParkTicket) bool {
-	return state != nil && state.phase == parkParked && state.ticket == ticket && validParkTicket(ticket) &&
+	return state != nil && state.phase == parkParked && state.resolving && state.ticket == ticket && validParkTicket(ticket) &&
 		validTaskCancelState(state.taskCancelKind, state.taskCancelPhase) && state.cancelKind <= ParkCancelShutdown &&
-		state.attached == state.expected && state.outcome == ParkOutcomePending &&
-		(state.hasDefault || state.winnerCase == 0) && validPendingParkCommitCursor(state) &&
+		state.attached == state.expected && state.seed <= state.attached && state.outcome == ParkOutcomePending &&
+		(state.hasDefault || state.winnerCase == 0) &&
 		(state.attached == 0) == (state.head == nil) && (state.head == nil || state.head.previous == nil)
 }
 
-// nextPublishedParkCandidateFrom walks the rank-sorted intrusive list exactly
-// once from cursor. visits is persisted in ParkState.seed for white-box work
-// accounting and for the large-N regression which locks one snapshot to O(N).
-func nextPublishedParkCandidateFrom(cursor *ParkLink) (candidate *OperationRecord, visits uint32, ok bool) {
-	for link := cursor; link != nil; link = link.next {
-		visits++
-		if link.operation == nil || &link.operation.link != link || link.operation.link.operation != link.operation {
-			return nil, visits, false
-		}
-		if operationCandidateIsPublished(link.operation) {
-			return link.operation, visits, true
-		}
-	}
-	return nil, visits, true
-}
-
-func addParkResolutionVisits(state *ParkState, visits uint32) bool {
-	if state == nil || visits > ^uint32(0)-state.seed {
+func validParkResolutionLink(state *ParkState, ticket ParkTicket, link *ParkLink) bool {
+	if link == nil || link.park != state || link.ticket != ticket || link.operation == nil ||
+		&link.operation.link != link || link.operation.link.operation != link.operation ||
+		link.operation.phase != operationActive || !link.operation.id.Valid() || !validOperationCandidate(link.operation) {
 		return false
 	}
-	state.seed += visits
-	return true
+	if link.wait != nil && (link.wait.g == nil || &link.wait.g.park != state || link.wait.ticket != ticket ||
+		link.wait.state == waitSetRecordUnused) {
+		return false
+	}
+	if link.previous == nil {
+		if state.head != link {
+			return false
+		}
+	} else if link.previous.next != link || link.previous.rank >= link.rank {
+		return false
+	}
+	return link.next == nil || link.next.previous == link && link.rank < link.next.rank
+}
+
+func validPendingParkResolutionLink(state *ParkState, ticket ParkTicket, link *ParkLink) bool {
+	if !validParkResolutionLink(state, ticket, link) {
+		return false
+	}
+	record := link.operation
+	return record.disposition == OperationDispositionPending && !record.resolutionApplied &&
+		!record.resultConsumable && !record.resultTaken &&
+		operationCandidatePendingResultStorageValid(record) && operationCandidatePendingForResolution(record)
 }
 
 func validParkCommitRequest(state *ParkState, ticket ParkTicket, candidate *OperationRecord, request ParkCommitRequest) bool {
@@ -144,9 +186,8 @@ func validParkCommitRequest(state *ParkState, ticket ParkTicket, candidate *Oper
 // currentParkCommitRequest is the source-side pre-effect gate. Structural
 // validity alone is insufficient because a cached request can retain a valid
 // record generation after another candidate or a task abort has resolved the
-// logical park. The static dispatcher calls this immediately before touching
-// source state; ResolveParkSnapshotStep repeats the exact check when accepting
-// the synchronous result.
+// logical park. The static dispatcher calls this before touching source state;
+// the compatibility API rechecks it before accepting the synchronous result.
 func currentParkCommitRequest(request ParkCommitRequest) bool {
 	if !request.Valid() {
 		return false
@@ -159,19 +200,312 @@ func currentParkCommitRequest(request ParkCommitRequest) bool {
 	return validParkCommitRequest(state, request.ticket, request.record, request)
 }
 
-func settleParkCandidates(state *ParkState, winner *OperationRecord) bool {
-	for link := state.head; link != nil; link = link.next {
-		if link.operation == winner {
-			if !commitOperationCandidate(link.operation) {
-				return false
-			}
-			continue
-		}
-		if !rollBackOperationCandidate(link.operation) {
+func validParkResolutionChoice(state *ParkState, ticket ParkTicket, cursor *parkResolutionCursor) bool {
+	if cursor.defaultSelected {
+		return cursor.winner == nil && state.cancelKind == ParkCancelNone && state.hasDefault &&
+			state.winnerRecord == nil && state.winnerID == (OperationID{})
+	}
+	if cursor.winner == nil {
+		return state.cancelKind != ParkCancelNone && state.winnerRecord == nil && state.winnerID == (OperationID{})
+	}
+	if state.cancelKind == ParkCancelTaskAbort || state.cancelKind == ParkCancelShutdown ||
+		state.winnerRecord != nil || state.winnerID != (OperationID{}) ||
+		!validParkResolutionLink(state, ticket, &cursor.winner.link) {
+		return false
+	}
+	switch cursor.winner.disposition {
+	case OperationDispositionPending:
+		return !cursor.winner.resolutionApplied && operationCandidateIsPublished(cursor.winner) &&
+			operationCandidatePendingForResolution(cursor.winner)
+	case OperationDispositionWinner:
+		return !cursor.winner.resolutionApplied && cursor.winner.resultTicket == ticket &&
+			operationCandidateSettledForDisposition(cursor.winner, OperationDispositionWinner)
+	default:
+		return false
+	}
+}
+
+func validParkResolutionCursor(state *ParkState, ticket ParkTicket, cursor *parkResolutionCursor) bool {
+	if cursor == nil {
+		return false
+	}
+	if cursor.phase == parkResolutionIdle {
+		return *cursor == (parkResolutionCursor{}) && state != nil && !state.resolving
+	}
+	if cursor.phase < parkResolutionScan || cursor.phase > parkResolutionFinalize ||
+		!validParkResolutionHeader(state, ticket) {
+		return false
+	}
+	switch cursor.phase {
+	case parkResolutionScan:
+		return cursor.link != nil && cursor.winner == nil && cursor.request == (ParkCommitRequest{}) &&
+			!cursor.defaultSelected && state.winnerRecord == nil && state.winnerID == (OperationID{}) &&
+			validPendingParkResolutionLink(state, ticket, cursor.link) &&
+			(state.seed == 0) == (cursor.link.previous == nil)
+	case parkResolutionDecision:
+		return cursor.link == nil && cursor.winner == nil && cursor.request == (ParkCommitRequest{}) &&
+			!cursor.defaultSelected && state.winnerRecord == nil && state.winnerID == (OperationID{})
+	case parkResolutionCommit:
+		return !cursor.defaultSelected && cursor.winner != nil && cursor.request.Valid() &&
+			cursor.link == cursor.winner.link.next && state.seed != 0 &&
+			(cursor.link == nil || validPendingParkResolutionLink(state, ticket, cursor.link)) &&
+			validParkCommitRequest(state, ticket, cursor.winner, cursor.request)
+	case parkResolutionSettle:
+		return cursor.request == (ParkCommitRequest{}) && cursor.link != nil &&
+			validParkResolutionChoice(state, ticket, cursor) &&
+			validPendingParkResolutionLink(state, ticket, cursor.link) &&
+			(cursor.link.previous == nil || cursor.link.previous.operation != nil &&
+				cursor.link.previous.operation.disposition != OperationDispositionPending &&
+				operationCandidateSettledForDisposition(cursor.link.previous.operation,
+					cursor.link.previous.operation.disposition))
+	case parkResolutionFinalize:
+		return cursor.request == (ParkCommitRequest{}) && cursor.link == nil &&
+			validParkResolutionChoice(state, ticket, cursor)
+	default:
+		return false
+	}
+}
+
+func beginParkSnapshotResolution(state *ParkState, ticket ParkTicket, cursor *parkResolutionCursor, fullAudit bool) bool {
+	if cursor == nil || *cursor != (parkResolutionCursor{}) || state == nil || state.resolving ||
+		state.phase != parkParked || state.ticket != ticket || !validParkTicket(ticket) ||
+		state.winnerRecord != nil || state.winnerID != (OperationID{}) {
+		return false
+	}
+	if fullAudit {
+		if !validParkState(state) {
 			return false
 		}
+	} else if !validTaskCancelState(state.taskCancelKind, state.taskCancelPhase) ||
+		state.cancelKind > ParkCancelShutdown || state.attached != state.expected ||
+		state.outcome != ParkOutcomePending || (!state.hasDefault && state.winnerCase != 0) ||
+		(state.attached == 0) != (state.head == nil) || state.head != nil && state.head.previous != nil {
+		return false
 	}
-	return true
+	if state.head != nil && !validPendingParkResolutionLink(state, ticket, state.head) {
+		return false
+	}
+	previousSeed := state.seed
+	cursor.previousSeed = previousSeed
+	state.seed = 0
+	state.resolving = true
+	if state.head == nil || state.cancelKind == ParkCancelTaskAbort || state.cancelKind == ParkCancelShutdown {
+		cursor.phase = parkResolutionDecision
+	} else {
+		cursor.phase = parkResolutionScan
+		cursor.link = state.head
+	}
+	if validParkResolutionCursor(state, ticket, cursor) {
+		return true
+	}
+	state.seed = previousSeed
+	state.resolving = false
+	*cursor = parkResolutionCursor{}
+	return false
+}
+
+// abortParkSnapshotCommit restores the byte-visible ParkState overlay when a
+// caller has no static dispatcher for an outstanding Ready hint. No candidate
+// has been changed before this phase: only seed, resolving, and the exact
+// handshake marker require restoration. The affected FIFO owner restores its
+// separate record cursor before returning the fail-closed result.
+func abortParkSnapshotCommit(state *ParkState, ticket ParkTicket, cursor *parkResolutionCursor) bool {
+	if !validParkResolutionCursor(state, ticket, cursor) || cursor.phase != parkResolutionCommit ||
+		!currentParkCommitRequest(cursor.request) {
+		return false
+	}
+	state.winnerID = OperationID{}
+	state.winnerRecord = nil
+	state.seed = cursor.previousSeed
+	state.resolving = false
+	*cursor = parkResolutionCursor{}
+	return state.phase == parkParked && state.ticket == ticket && state.outcome == ParkOutcomePending &&
+		state.winnerID == (OperationID{}) && state.winnerRecord == nil
+}
+
+func abortParkCommitCompatibility(state *ParkState, ticket ParkTicket, request ParkCommitRequest, previousSeed uint32) bool {
+	if state == nil || state.ticket != ticket || state.winnerRecord != request.record || state.winnerID != request.id ||
+		!currentParkCommitRequest(request) {
+		return false
+	}
+	state.winnerID = OperationID{}
+	state.winnerRecord = nil
+	state.seed = previousSeed
+	state.resolving = false
+	return validParkState(state)
+}
+
+func parkResolutionCommitRequest(state *ParkState, ticket ParkTicket, cursor *parkResolutionCursor) (ParkCommitRequest, bool) {
+	if !validParkResolutionCursor(state, ticket, cursor) || cursor.phase != parkResolutionCommit ||
+		!currentParkCommitRequest(cursor.request) {
+		return ParkCommitRequest{}, false
+	}
+	return cursor.request, true
+}
+
+// resolveParkSnapshotBoundedStep performs exactly one candidate scan, one
+// TryCommit result consumption, one terminal decision, one candidate settle,
+// or one scalar finalize. Administrative cursor changes are folded into that
+// action. The caller owns source dispatch and snapshot serialization.
+func resolveParkSnapshotBoundedStep(
+	state *ParkState,
+	ticket ParkTicket,
+	cursor *parkResolutionCursor,
+	attempt ParkCommitAttempt,
+) (resolution CompletionResolution, request ParkCommitRequest, status ParkResolveStatus) {
+	if !validParkResolutionCursor(state, ticket, cursor) {
+		return CompletionResolution{}, ParkCommitRequest{}, ParkResolveInvalid
+	}
+	switch cursor.phase {
+	case parkResolutionScan:
+		if attempt != (ParkCommitAttempt{}) || state.seed == ^uint32(0) {
+			return CompletionResolution{}, ParkCommitRequest{}, ParkResolveInvalid
+		}
+		link := cursor.link
+		record, next := link.operation, link.next
+		state.seed++
+		cursor.link = next
+		if !operationCandidateIsPublished(record) {
+			if next == nil {
+				cursor.phase = parkResolutionDecision
+			}
+			return CompletionResolution{}, ParkCommitRequest{}, parkResolveProgress
+		}
+		switch operationCandidateMode(record) {
+		case OperationCommitIrreversibleCompletion, OperationCommitReservable:
+			cursor.winner = record
+			cursor.link = state.head
+			cursor.phase = parkResolutionSettle
+			return CompletionResolution{}, ParkCommitRequest{}, parkResolveProgress
+		case OperationCommitReadyThenTryCommit:
+			state.winnerID = record.id
+			state.winnerRecord = record
+			cursor.winner = record
+			cursor.request = ParkCommitRequest{ticket: ticket, id: record.id, readyTicket: record.resultTicket, record: record}
+			cursor.phase = parkResolutionCommit
+			if !validParkResolutionCursor(state, ticket, cursor) || !currentParkCommitRequest(cursor.request) {
+				return CompletionResolution{}, ParkCommitRequest{}, ParkResolveInvalid
+			}
+			return CompletionResolution{}, cursor.request, ParkResolveNeedsCommit
+		default:
+			return CompletionResolution{}, ParkCommitRequest{}, ParkResolveInvalid
+		}
+	case parkResolutionDecision:
+		if attempt != (ParkCommitAttempt{}) {
+			return CompletionResolution{}, ParkCommitRequest{}, ParkResolveInvalid
+		}
+		if state.cancelKind != ParkCancelNone {
+			cursor.link = state.head
+			if cursor.link == nil {
+				cursor.phase = parkResolutionFinalize
+			} else {
+				cursor.phase = parkResolutionSettle
+			}
+			return CompletionResolution{}, ParkCommitRequest{}, parkResolveProgress
+		}
+		if state.hasDefault {
+			cursor.defaultSelected = true
+			cursor.link = state.head
+			if cursor.link == nil {
+				cursor.phase = parkResolutionFinalize
+			} else {
+				cursor.phase = parkResolutionSettle
+			}
+			return CompletionResolution{}, ParkCommitRequest{}, parkResolveProgress
+		}
+		state.resolving = false
+		*cursor = parkResolutionCursor{}
+		return CompletionResolution{WaitSets: 1}, ParkCommitRequest{}, ParkResolvePending
+	case parkResolutionCommit:
+		if (attempt.result != ParkCommitAttemptSucceeded && attempt.result != ParkCommitAttemptFailed) ||
+			attempt.request != cursor.request || !currentParkCommitRequest(attempt.request) {
+			return CompletionResolution{}, ParkCommitRequest{}, ParkResolveInvalid
+		}
+		candidate := cursor.winner
+		state.winnerID = OperationID{}
+		state.winnerRecord = nil
+		cursor.request = ParkCommitRequest{}
+		if attempt.result == ParkCommitAttemptFailed {
+			if !rejectReadyThenTryCommitCandidate(candidate) {
+				return CompletionResolution{}, ParkCommitRequest{}, ParkResolveInvalid
+			}
+			cursor.winner = nil
+			if cursor.link == nil {
+				cursor.phase = parkResolutionDecision
+			} else {
+				cursor.phase = parkResolutionScan
+			}
+			return CompletionResolution{}, ParkCommitRequest{}, parkResolveProgress
+		}
+		cursor.link = state.head
+		cursor.phase = parkResolutionSettle
+		return CompletionResolution{}, ParkCommitRequest{}, parkResolveProgress
+	case parkResolutionSettle:
+		if attempt != (ParkCommitAttempt{}) {
+			return CompletionResolution{}, ParkCommitRequest{}, ParkResolveInvalid
+		}
+		link := cursor.link
+		record, next := link.operation, link.next
+		if record == cursor.winner {
+			if !commitOperationCandidate(record) {
+				return CompletionResolution{}, ParkCommitRequest{}, ParkResolveInvalid
+			}
+			record.resultTicket = ticket
+			record.disposition = OperationDispositionWinner
+		} else {
+			if !rollBackOperationCandidate(record) {
+				return CompletionResolution{}, ParkCommitRequest{}, ParkResolveInvalid
+			}
+			record.cancelRequested = true
+			if cursor.winner == nil && !cursor.defaultSelected {
+				record.disposition = OperationDispositionCanceled
+			} else {
+				record.disposition = OperationDispositionLost
+			}
+		}
+		cursor.link = next
+		if next == nil {
+			cursor.phase = parkResolutionFinalize
+		}
+		return CompletionResolution{}, ParkCommitRequest{}, parkResolveProgress
+	case parkResolutionFinalize:
+		if attempt != (ParkCommitAttempt{}) {
+			return CompletionResolution{}, ParkCommitRequest{}, ParkResolveInvalid
+		}
+		state.phase = parkDetaching
+		switch {
+		case cursor.defaultSelected:
+			state.outcome = ParkOutcomeDefault
+			state.winnerID = OperationID{}
+			state.winnerRecord = nil
+			resolution = CompletionResolution{WaitSets: 1, Defaulted: 1, Losers: state.attached}
+		case cursor.winner == nil:
+			state.outcome = ParkOutcomeCanceled
+			state.hasDefault = false
+			state.winnerCase = 0
+			state.winnerID = OperationID{}
+			state.winnerRecord = nil
+			resolution = CompletionResolution{WaitSets: 1, Canceled: 1, Losers: state.attached}
+		default:
+			state.outcome = ParkOutcomeCompleted
+			state.hasDefault = false
+			state.winnerCase = cursor.winner.link.caseID
+			state.winnerID = cursor.winner.id
+			state.winnerRecord = cursor.winner
+			resolution = CompletionResolution{WaitSets: 1, Completed: 1, Winners: 1, Losers: state.attached - 1}
+		}
+		if state.attached == 0 {
+			state.phase = parkReady
+		}
+		state.resolving = false
+		*cursor = parkResolutionCursor{}
+		if !validActiveParkStateHeader(state, ticket) {
+			return CompletionResolution{}, ParkCommitRequest{}, ParkResolveInvalid
+		}
+		return resolution, ParkCommitRequest{}, ParkResolveResolved
+	default:
+		return CompletionResolution{}, ParkCommitRequest{}, ParkResolveInvalid
+	}
 }
 
 // ResolveParkSnapshotStep is the allocation-free commit-capable resolver.
@@ -186,16 +520,13 @@ func ResolveParkSnapshotStep(
 	ticket ParkTicket,
 	attempt ParkCommitAttempt,
 ) (resolution CompletionResolution, request ParkCommitRequest, status ParkResolveStatus) {
-	var cursor *ParkLink
+	var cursor parkResolutionCursor
 	if attempt == (ParkCommitAttempt{}) {
-		// A zero step begins one complete source snapshot. Full structural audit
-		// happens once here; every synchronous attempt continuation below uses
-		// only the O(1) exact cursor/header gate.
-		if !validParkState(state) || state.phase != parkParked || ticket != state.ticket || state.winnerRecord != nil {
+		// Compatibility begins with the retained full diagnostic audit, then loop-
+		// drives the same bounded primitive used by the production executor.
+		if !beginParkSnapshotResolution(state, ticket, &cursor, true) {
 			return CompletionResolution{}, ParkCommitRequest{}, ParkResolveInvalid
 		}
-		state.seed = 0
-		cursor = state.head
 	} else {
 		if !validParkResolutionHeader(state, ticket) || state.winnerRecord == nil ||
 			(attempt.result != ParkCommitAttemptSucceeded && attempt.result != ParkCommitAttemptFailed) ||
@@ -209,77 +540,34 @@ func ResolveParkSnapshotStep(
 			return CompletionResolution{}, ParkCommitRequest{}, ParkResolveInvalid
 		}
 		candidate := state.winnerRecord
-		if attempt.result == ParkCommitAttemptSucceeded {
-			if !resolveParkSet(state, ticket, candidate, false) {
-				return CompletionResolution{}, ParkCommitRequest{}, ParkResolveInvalid
-			}
-			resolution = CompletionResolution{
-				WaitSets:  1,
-				Completed: 1,
-				Winners:   1,
-				Losers:    state.attached - 1,
-			}
-			return resolution, ParkCommitRequest{}, ParkResolveResolved
+		cursor = parkResolutionCursor{
+			link:    candidate.link.next,
+			winner:  candidate,
+			request: attempt.request,
+			phase:   parkResolutionCommit,
 		}
-		cursor = candidate.link.next
-		if !rejectReadyThenTryCommitCandidate(candidate) {
+		if !validParkResolutionCursor(state, ticket, &cursor) {
 			return CompletionResolution{}, ParkCommitRequest{}, ParkResolveInvalid
 		}
-		state.winnerID = OperationID{}
-		state.winnerRecord = nil
 	}
-	resolution.WaitSets = 1
-
-	strongCancel := state.cancelKind == ParkCancelTaskAbort || state.cancelKind == ParkCancelShutdown
-	for !strongCancel {
-		candidate, visits, ok := nextPublishedParkCandidateFrom(cursor)
-		if !ok || !addParkResolutionVisits(state, visits) {
-			return CompletionResolution{}, ParkCommitRequest{}, ParkResolveInvalid
-		}
-		if candidate == nil {
-			break
-		}
-		switch operationCandidateMode(candidate) {
-		case OperationCommitIrreversibleCompletion, OperationCommitReservable:
-			if !resolveParkSet(state, ticket, candidate, false) {
+	for {
+		resolution, request, status = resolveParkSnapshotBoundedStep(state, ticket, &cursor, attempt)
+		attempt = ParkCommitAttempt{}
+		switch status {
+		case parkResolveProgress:
+			continue
+		case ParkResolveNeedsCommit:
+			resolution.WaitSets = 1
+			return resolution, request, status
+		case ParkResolvePending, ParkResolveResolved:
+			if !validParkState(state) {
 				return CompletionResolution{}, ParkCommitRequest{}, ParkResolveInvalid
 			}
-			resolution.Completed = 1
-			resolution.Winners = 1
-			resolution.Losers = state.attached - 1
-			return resolution, ParkCommitRequest{}, ParkResolveResolved
-		case OperationCommitReadyThenTryCommit:
-			state.winnerID = candidate.id
-			state.winnerRecord = candidate
-			request = ParkCommitRequest{ticket: ticket, id: candidate.id, readyTicket: candidate.resultTicket, record: candidate}
-			if !request.Valid() || !validParkCommitRequest(state, ticket, candidate, request) {
-				state.winnerID = OperationID{}
-				state.winnerRecord = nil
-				return CompletionResolution{}, ParkCommitRequest{}, ParkResolveInvalid
-			}
-			return resolution, request, ParkResolveNeedsCommit
+			return resolution, request, status
 		default:
 			return CompletionResolution{}, ParkCommitRequest{}, ParkResolveInvalid
 		}
 	}
-
-	if state.cancelKind != ParkCancelNone {
-		if !resolveParkSet(state, ticket, nil, false) {
-			return CompletionResolution{}, ParkCommitRequest{}, ParkResolveInvalid
-		}
-		resolution.Canceled = 1
-		resolution.Losers = state.attached
-		return resolution, ParkCommitRequest{}, ParkResolveResolved
-	}
-	if state.hasDefault {
-		if !resolveParkSet(state, ticket, nil, true) {
-			return CompletionResolution{}, ParkCommitRequest{}, ParkResolveInvalid
-		}
-		resolution.Defaulted = 1
-		resolution.Losers = state.attached
-		return resolution, ParkCommitRequest{}, ParkResolveResolved
-	}
-	return resolution, ParkCommitRequest{}, ParkResolvePending
 }
 
 // ResolveParkSnapshot resolves one logical wait-set after the executor has
@@ -305,16 +593,9 @@ func ResolveParkSnapshot(state *ParkState, ticket ParkTicket) (resolution Comple
 	resolution, request, status := ResolveParkSnapshotStep(state, ticket, ParkCommitAttempt{})
 	if status == ParkResolveNeedsCommit {
 		// The compatibility caller has no source dispatcher. Undo only the
-		// transient atomic cursor/visit overlay; the ready hint and its monotonic
+		// transient owner cursor/visit overlay; the ready hint and its monotonic
 		// generation remain untouched for a later production Step handshake.
-		if state == nil || state.phase != parkParked || state.ticket != ticket ||
-			state.winnerRecord != request.record || state.winnerID != request.id {
-			return CompletionResolution{}, false
-		}
-		state.winnerID = OperationID{}
-		state.winnerRecord = nil
-		state.seed = previousVisits
-		if !validParkState(state) {
+		if !abortParkCommitCompatibility(state, ticket, request, previousVisits) {
 			return CompletionResolution{}, false
 		}
 		return CompletionResolution{}, false

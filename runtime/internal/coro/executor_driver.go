@@ -306,11 +306,10 @@ func pollExecutorSourcesAt(driver *ExecutorDriver, now int64, withDeadline bool)
 	if driver.poll.phase != executorPollIdle || !driver.sources.acceptsScan(driver.p, now, withDeadline) {
 		return executorSourceScan{}, false
 	}
-	// The compatibility entry keeps advancing bounded catalog slices until the
-	// current A/ack/B transaction completes, so its old call boundary remains
-	// unchanged. Candidate dispatch can make an atomic common resolve overshoot
-	// one base catalog budget; the explicit host API returns that slice instead
-	// of looping, while this legacy wrapper supplies another outer iteration.
+	// The compatibility entry keeps advancing bounded catalog and common
+	// resolution slices until the current A/ack/B transaction completes, so its
+	// old call boundary remains unchanged. The explicit host API returns after
+	// its reduction budget; this legacy wrapper supplies the outer iteration.
 	budget, budgetOK := executorMinPollBudget(&driver.sources)
 	if !budgetOK {
 		return executorSourceScan{}, false
