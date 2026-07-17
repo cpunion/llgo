@@ -117,6 +117,10 @@ func Check() int32 {
 // elapsed-time assertion, an inert before-poll test hook, and the final marker.
 // It has no pthread, callback, producer, timer, or scheduler responsibility.
 const coroNativeTimerE2ECSource = `
+#if !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include <stdint.h>
 #include <stddef.h>
 #include <time.h>
