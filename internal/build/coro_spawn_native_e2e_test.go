@@ -21,6 +21,7 @@ package build
 import (
 	stdcontext "context"
 	"fmt"
+	goimporter "go/importer"
 	"go/types"
 	"os"
 	"os/exec"
@@ -47,46 +48,84 @@ const (
 
 const coroSpawnNativeE2ESource = `package main
 
-var Before uint32
-var After uint32
-var Leaf uint32
+var Data chan uint32
+var Ack chan uint32
+var Done chan uint32
+var Buffered chan uint32
 
-func leaf() { Leaf = 1 }
+var Got uint32
+var After uint32
+var BufferedGot uint32
 
 func child() {
-	Before = 1
-	go leaf()
+	Data <- 0x1234abcd
+	<-Ack
 	After = 1
+	Done <- 1
 }
 
-func main() { go child() }
+func Setup() {
+	Data = make(chan uint32)
+	Ack = make(chan uint32)
+	Done = make(chan uint32)
+	Buffered = make(chan uint32, 1)
+}
+
+func main() {
+	go child()
+	Got = <-Data
+	Ack <- 1
+	<-Done
+	Buffered <- 0xdecafbad
+	BufferedGot = <-Buffered
+}
 
 func Check() int32 {
-	if Before != 1 {
+	if Got != 0x1234abcd {
 		return 11
 	}
-	if After != 0 {
+	if After != 1 {
 		return 12
 	}
-	if Leaf != 0 {
+	if BufferedGot != 0xdecafbad {
 		return 13
 	}
 	return 0
 }
 `
 
-// TestCoroClosedStaticSpawnNativeNoStdlibRuntimeE2E is deliberately a
+const coroChannelNativeE2ERuntimeShim = `package runtime
+
+import "unsafe"
+
+const maxAlloc = ^uintptr(0) >> 1
+
+type errorString string
+
+type eface struct {
+	_type unsafe.Pointer
+	data  unsafe.Pointer
+}
+
+//go:linkname AllocU C.malloc
+func AllocU(uintptr) unsafe.Pointer
+
+//go:linkname fastrand C.rand
+func fastrand() uint32
+`
+
+// TestCoroChannelAndClosedStaticSpawnNativeNoStdlibRuntimeE2E is deliberately a
 // scheduler-island smoke test, not a claim that the complete standard-library
 // runtime startup or its legacy PanicABI is coroutine-safe. The compiler emits
-// the real closed-static-go lowering and the real V2 entry/factory/control
-// wrappers. The first four V2 init stages are bounded no-ops, while the linked
-// production coroutine adapter/core uses its native nogc allocator backend.
+// the real closed-static-go and typed channel lowering plus the real V2
+// entry/factory/control wrappers. The first four V2 init stages are bounded
+// no-ops, while the linked production coroutine adapter/core uses its native
+// nogc allocator backend.
 //
-// The two nested spawns make the result deterministic without a timer source:
-// main yields to child, child publishes leaf and yields back behind main, and
-// main then returns with leaf initial-suspended and child yield-suspended.
-// Command shutdown must destroy both instead of resuming either one.
-func TestCoroClosedStaticSpawnNativeNoStdlibRuntimeE2E(t *testing.T) {
+// Three unbuffered rendezvous force main and its child through both send and
+// receive slow paths. A capacity-one channel then verifies the same lowering's
+// nonblocking buffer fast path before main returns and command shutdown runs.
+func TestCoroChannelAndClosedStaticSpawnNativeNoStdlibRuntimeE2E(t *testing.T) {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("native coroutine link smoke requires Darwin or Linux")
 	}
@@ -105,11 +144,19 @@ func TestCoroClosedStaticSpawnNativeNoStdlibRuntimeE2E(t *testing.T) {
 	llssa.Initialize(llssa.InitAll)
 	temp := t.TempDir()
 	prog := llssa.NewProgram(nil)
+	prog.SetRuntime(func() *types.Package {
+		rt, err := goimporter.For("source", nil).Import(llssa.PkgRuntime)
+		if err != nil {
+			t.Fatal("load runtime type model:", err)
+		}
+		return rt
+	})
+	prog.TypeSizes(types.SizesFor("gc", runtime.GOARCH))
 	defer prog.Dispose()
 
-	userObject, anchor, checkSymbol := buildCoroSpawnNativeE2EUser(t, prog, temp)
+	userObject, anchor, setupSymbol, checkSymbol := buildCoroSpawnNativeE2EUser(t, prog, temp)
 	entryObject := buildCoroSpawnNativeE2EEntry(t, prog, temp, anchor)
-	driverObject := buildCoroSpawnNativeE2EDriver(t, prog, temp, checkSymbol)
+	driverObject := buildCoroSpawnNativeE2EDriver(t, prog, temp, setupSymbol, checkSymbol)
 	runtimeObjects := buildCoroSpawnNativeE2ERuntimeIsland(t, temp)
 	runtimeArchive := filepath.Join(temp, "libllgo-coro-runtime-island.a")
 	arArgs := append([]string{"rcs", runtimeArchive}, runtimeObjects...)
@@ -140,12 +187,12 @@ func TestCoroClosedStaticSpawnNativeNoStdlibRuntimeE2E(t *testing.T) {
 	}
 }
 
-func buildCoroSpawnNativeE2EUser(t *testing.T, prog llssa.Program, temp string) (object, anchor, checkSymbol string) {
+func buildCoroSpawnNativeE2EUser(t *testing.T, prog llssa.Program, temp string) (object, anchor, setupSymbol, checkSymbol string) {
 	t.Helper()
 	ssaPkg, files := buildCoroPlanTestPackage(t, coroSpawnNativeE2EPackage, coroSpawnNativeE2ESource, nil)
-	universe, err := cl.PrepareEmissionUniverse(prog, nil, []cl.EmissionPackage{{
+	universe, err := cl.PrepareEmissionUniverseWithOptions(prog, nil, []cl.EmissionPackage{{
 		SSA: ssaPkg, Files: files, Identity: coroSpawnNativeE2EPackage,
-	}})
+	}}, cl.EmissionUniverseOptions{EnableCoroChannel: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,13 +200,15 @@ func buildCoroSpawnNativeE2EUser(t *testing.T, prog llssa.Program, temp string) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	mainFn, childFn, leafFn, checkFn := ssaPkg.Func("main"), ssaPkg.Func("child"), ssaPkg.Func("leaf"), ssaPkg.Func("Check")
+	mainFn, childFn := ssaPkg.Func("main"), ssaPkg.Func("child")
+	setupFn, checkFn := ssaPkg.Func("Setup"), ssaPkg.Func("Check")
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{
 		{Function: mainFn, Demand: coro.AsyncDemand},
+		{Function: setupFn, Demand: coro.SyncDemand},
 		{Function: checkFn, Demand: coro.SyncDemand},
 	}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
@@ -167,7 +216,7 @@ func buildCoroSpawnNativeE2EUser(t *testing.T, prog llssa.Program, temp string) 
 		MaxPlainInstructions: -1,
 		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
 			switch fn {
-			case mainFn, childFn, leafFn:
+			case mainFn, childFn:
 				return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
 			default:
 				return coro.SSAFunctionPolicy{}, nil
@@ -182,10 +231,11 @@ func buildCoroSpawnNativeE2EUser(t *testing.T, prog llssa.Program, temp string) 
 		EnableCoroEntryResolution:     true,
 		EnableCoroPhysicalABI:         true,
 		EnableCoroChildAwait:          true,
+		EnableCoroChannel:             true,
 		EnableCoroClosedStaticSpawn:   true,
 		EnableCoroProgramBootstrapRun: true,
 		CoroABI:                       coro.PhysicalABIV1,
-		SchedulerABI:                  coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0,
+		SchedulerABI:                  coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 		PanicABI:                      coro.PanicLegacyABIV0,
 		FuncRepABI:                    coro.FuncRepABIV0,
 		EmissionUniverse:              universe,
@@ -208,7 +258,11 @@ func buildCoroSpawnNativeE2EUser(t *testing.T, prog llssa.Program, temp string) 
 	if module.NamedFunction(checkSymbol).IsNil() {
 		t.Fatalf("compiled E2E user module has no plain checker %q:\n%s", checkSymbol, ir)
 	}
-	return emitCoroSpawnNativeE2EObject(t, prog, module, filepath.Join(temp, "user.o")), match[1], checkSymbol
+	setupSymbol = coroSpawnNativeE2EPackage + ".Setup"
+	if module.NamedFunction(setupSymbol).IsNil() {
+		t.Fatalf("compiled E2E user module has no plain setup %q:\n%s", setupSymbol, ir)
+	}
+	return emitCoroSpawnNativeE2EObject(t, prog, module, filepath.Join(temp, "user.o")), match[1], setupSymbol, checkSymbol
 }
 
 func buildCoroSpawnNativeE2EEntry(t *testing.T, prog llssa.Program, temp, anchor string) string {
@@ -220,6 +274,7 @@ func buildCoroSpawnNativeE2EEntry(t *testing.T, prog llssa.Program, temp, anchor
 		EnableCoroEntryResolution:     true,
 		EnableCoroPhysicalABI:         true,
 		EnableCoroChildAwait:          true,
+		EnableCoroChannel:             true,
 		EnableCoroClosedStaticSpawn:   true,
 		EnableCoroProgramBootstrapABI: true,
 		EnableCoroProgramBootstrapRun: true,
@@ -271,7 +326,7 @@ func buildCoroSpawnNativeE2EEntry(t *testing.T, prog llssa.Program, temp, anchor
 	return emitCoroSpawnNativeE2EObject(t, prog, entry.LPkg.Module(), filepath.Join(temp, "entry.o"))
 }
 
-func buildCoroSpawnNativeE2EDriver(t *testing.T, prog llssa.Program, temp, checkSymbol string) string {
+func buildCoroSpawnNativeE2EDriver(t *testing.T, prog llssa.Program, temp, setupSymbol, checkSymbol string) string {
 	t.Helper()
 	pkg := prog.NewPackage("coro-spawn-e2e-driver", "coro-spawn-e2e-driver")
 	defer pkg.Module().Dispose()
@@ -279,13 +334,18 @@ func buildCoroSpawnNativeE2EDriver(t *testing.T, prog llssa.Program, temp, check
 	entry := pkg.NewFunc(coroSpawnNativeE2EEntry, newSignature(
 		[]types.Type{types.Typ[types.Int32], pointer}, []types.Type{types.Typ[types.Int32]},
 	), llssa.InC)
+	setup := pkg.NewFunc(setupSymbol, newSignature(nil, nil), llssa.InGo)
 	check := pkg.NewFunc(checkSymbol, newSignature(nil, []types.Type{types.Typ[types.Int32]}), llssa.InGo)
 	// The production scheduler core is intentionally compiled without the full
 	// standard-library runtime package in its coroutine plan. LLGo's ordinary
 	// pointer checks name this legacy helper even though every valid scheduler
 	// path passes false. Keep the test island fail-stop without pulling the
 	// legacy panic/printing closure into the final executable.
-	abort := pkg.NewFunc("abort", newSignature(nil, nil), llssa.InC)
+	exit := pkg.NewFunc("exit", newSignature([]types.Type{types.Typ[types.Int32]}, nil), llssa.InC)
+	abort := pkg.NewFunc("__llgo_coro_channel_e2e_fail", newSignature(nil, nil), llssa.InC)
+	abortBody := abort.MakeBody(1)
+	abortBody.Call(exit.Expr, prog.IntVal(70, prog.Int32()))
+	abortBody.Return()
 	defineCoroNativeE2ENilDerefStubs(prog, pkg, abort)
 	// Fixed-capacity executor/wait registries intentionally keep explicit Go
 	// bounds checks. The complete runtime would report those through the normal
@@ -322,10 +382,67 @@ func buildCoroSpawnNativeE2EDriver(t *testing.T, prog llssa.Program, temp, check
 	), llssa.InGo)
 	allocZBody := allocZ.MakeBody(1)
 	allocZBody.Return(allocZBody.Call(calloc.Expr, prog.IntVal(1, prog.Uintptr()), allocZ.Param(0)))
+	// The production channel sources are compiled as a closed named-file
+	// island, so their ordinary Go helper symbols carry the temporary
+	// command-line package owner. Exact wrappers expose the runtime helper names
+	// frozen into the user module; the exported coroutine hooks already use
+	// their production C ABI names directly.
+	intType := types.Typ[types.Int]
+	boolType := types.Typ[types.Bool]
+	rawNewChan := pkg.NewFunc("command-line-arguments.NewChan", newSignature(
+		[]types.Type{intType, intType}, []types.Type{pointer},
+	), llssa.InGo)
+	newChan := pkg.NewFunc(llssa.PkgRuntime+".NewChan", newSignature(
+		[]types.Type{intType, intType}, []types.Type{pointer},
+	), llssa.InGo)
+	newChanBody := newChan.MakeBody(1)
+	newChanBody.Return(newChanBody.Call(rawNewChan.Expr, newChan.Param(0), newChan.Param(1)))
+	rawTrySend := pkg.NewFunc("command-line-arguments.CoroChanTrySend", newSignature(
+		[]types.Type{pointer, pointer, intType}, []types.Type{boolType},
+	), llssa.InGo)
+	trySend := pkg.NewFunc(llssa.PkgRuntime+".CoroChanTrySend", newSignature(
+		[]types.Type{pointer, pointer, intType}, []types.Type{boolType},
+	), llssa.InGo)
+	trySendBody := trySend.MakeBody(1)
+	trySendBody.Return(trySendBody.Call(rawTrySend.Expr, trySend.Param(0), trySend.Param(1), trySend.Param(2)))
+	rawTryRecv := pkg.NewFunc("command-line-arguments.CoroChanTryRecv", newSignature(
+		[]types.Type{pointer, pointer, intType}, []types.Type{boolType, boolType},
+	), llssa.InGo)
+	tryRecv := pkg.NewFunc(llssa.PkgRuntime+".CoroChanTryRecv", newSignature(
+		[]types.Type{pointer, pointer, intType}, []types.Type{boolType, boolType},
+	), llssa.InGo)
+	tryRecvBody := tryRecv.MakeBody(1)
+	tryRecvResult := tryRecvBody.Call(rawTryRecv.Expr, tryRecv.Param(0), tryRecv.Param(1), tryRecv.Param(2))
+	tryRecvBody.Return(tryRecvBody.Extract(tryRecvResult, 0), tryRecvBody.Extract(tryRecvResult, 1))
+	anyType := types.NewInterfaceType(nil, nil)
+	anyType.Complete()
+	panicStub := pkg.NewFunc(llssa.PkgRuntime+".Panic", newSignature(
+		[]types.Type{anyType}, nil,
+	), llssa.InGo)
+	panicBody := panicStub.MakeBody(1)
+	panicBody.Call(abort.Expr)
+	panicBody.Return()
+	for _, name := range []string{"memequalptr", "strequal"} {
+		equal := pkg.NewFunc(llssa.PkgRuntime+"."+name, newSignature(
+			[]types.Type{pointer, pointer}, []types.Type{boolType},
+		), llssa.InGo)
+		equalBody := equal.MakeBody(1)
+		equalBody.Return(prog.BoolVal(false))
+	}
+	assertDivide := pkg.NewFunc(llssa.PkgRuntime+".AssertDivideByZero", newSignature(
+		[]types.Type{boolType}, nil,
+	), llssa.InGo)
+	assertDivideBody := assertDivide.MakeBody(3)
+	divideFail, divideValid := assertDivide.Block(1), assertDivide.Block(2)
+	assertDivideBody.If(assertDivide.Param(0), divideFail, divideValid)
+	assertDivideBody.SetBlock(divideFail).Call(abort.Expr)
+	assertDivideBody.Return()
+	assertDivideBody.SetBlock(divideValid).Return()
 	main := pkg.NewFunc("main", newSignature(
 		[]types.Type{types.Typ[types.Int32], pointer}, []types.Type{types.Typ[types.Int32]},
 	), llssa.InC)
 	body := main.MakeBody(1)
+	body.Call(setup.Expr)
 	body.Call(entry.Expr, main.Param(0), main.Param(1))
 	body.Return(body.Call(check.Expr))
 	pkg.MaterializePreserveSyms()
@@ -345,8 +462,13 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_spawn.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_native_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_wait_pipe_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan_coro.go"),
 	}
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_run_decision.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "z_chan.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "z_chan_coro.go")
+	files = materializeCoroChannelNativeE2ERuntimeIsland(t, files)
 	conf := NewDefaultConf(ModeGen)
 	conf.ForceRebuild = true
 	conf.Tags = "nogc"
@@ -356,10 +478,12 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 	// path must reject this capability as forged.
 	conf.compilerBuildTags = []string{"llgo_coro", coroNativePipeBuildTag}
 	allowed := map[string]bool{
-		"command-line-arguments":                               true,
-		"github.com/goplus/llgo/runtime/internal/coro":         true,
-		"github.com/goplus/llgo/runtime/internal/coroalloc":    true,
-		"github.com/goplus/llgo/runtime/internal/corodoorbell": true,
+		"command-line-arguments":                                     true,
+		"github.com/goplus/llgo/runtime/internal/clite/pthread/sync": true,
+		"github.com/goplus/llgo/runtime/internal/coro":               true,
+		"github.com/goplus/llgo/runtime/internal/coroalloc":          true,
+		"github.com/goplus/llgo/runtime/internal/corodoorbell":       true,
+		"github.com/goplus/llgo/runtime/internal/runtime/math":       true,
 	}
 	seen := make(map[string]bool, len(allowed))
 	var objects []string
@@ -402,6 +526,32 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 	return objects
 }
 
+func materializeCoroChannelNativeE2ERuntimeIsland(t *testing.T, production []string) []string {
+	t.Helper()
+	dir, err := os.MkdirTemp(filepath.Join("..", "..", "runtime"), ".coro-channel-e2e-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	files := make([]string, 0, len(production)+1)
+	for _, source := range production {
+		data, err := os.ReadFile(source)
+		if err != nil {
+			t.Fatalf("read production coroutine runtime source %q: %v", source, err)
+		}
+		destination := filepath.Join(dir, filepath.Base(source))
+		if err := os.WriteFile(destination, data, 0o644); err != nil {
+			t.Fatalf("materialize production coroutine runtime source %q: %v", source, err)
+		}
+		files = append(files, destination)
+	}
+	shim := filepath.Join(dir, "coro_channel_e2e_shim.go")
+	if err := os.WriteFile(shim, []byte(coroChannelNativeE2ERuntimeShim), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return append(files, shim)
+}
+
 func requireCoroRuntimeIslandProductionSource(t *testing.T, files []string, name string) {
 	t.Helper()
 	want := filepath.Join("..", "..", "runtime", "internal", "runtime", name)
@@ -437,7 +587,13 @@ func assertCoroSpawnNativeE2ELinkedSymbols(t *testing.T, executable string) {
 		coroNativePostWaitSymbolV1,
 		"__llgo_coro_spawn_begin_v1",
 		"__llgo_coro_spawn_commit_v1",
+		"__llgo_coro_chan_send_park_v1",
+		"__llgo_coro_chan_recv_park_v1",
+		"__llgo_coro_chan_resume_v1",
 		"github.com/goplus/llgo/runtime/internal/coro.CommitSpawn",
+		"github.com/goplus/llgo/runtime/internal/coro.BeginChannelExternalCommit",
+		"github.com/goplus/llgo/runtime/internal/coro.BeginChannelExternalCommitPair",
+		"github.com/goplus/llgo/runtime/internal/coro.RequestCommandShutdownDrain",
 		"github.com/goplus/llgo/runtime/internal/coro.BeginCommandShutdown",
 	} {
 		if !strings.Contains(symbols, required) {
@@ -445,7 +601,6 @@ func assertCoroSpawnNativeE2ELinkedSymbols(t *testing.T, executable string) {
 		}
 	}
 	for _, forbidden := range []string{
-		"github.com/goplus/llgo/runtime/internal/runtime.Panic",
 		"github.com/goplus/llgo/runtime/internal/runtime.Rethrow",
 		"github.com/goplus/llgo/runtime/internal/runtime.TracePanic",
 		"github.com/goplus/llgo/runtime/internal/runtime.printany",
