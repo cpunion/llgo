@@ -397,7 +397,7 @@ func TestCommandShutdownConsumesBoundedCheckResume(t *testing.T) {
 				}
 				wants = wants[1:]
 			}
-			if !pauseExecutorRunAction(fixture.p, child.g, action, false) ||
+			if !pauseExecutorRunAction(fixture.p, child.g, action, executorRunQueueTail) ||
 				child.g.runAction != ActionCheckResume {
 				t.Fatal("queue bounded check-resume continuation")
 			}
@@ -433,7 +433,7 @@ func TestCommandShutdownConsumesBoundedCheckDestroy(t *testing.T) {
 	}
 	action, ok = Resumed(fixture.p, child.g, action)
 	if !ok || action.Kind != ActionCheckDestroy ||
-		!pauseExecutorRunAction(fixture.p, child.g, action, false) ||
+		!pauseExecutorRunAction(fixture.p, child.g, action, executorRunQueueTail) ||
 		child.g.runAction != ActionCheckDestroy {
 		t.Fatalf("queue bounded check-destroy continuation = (%+v, %t)", action, ok)
 	}
@@ -495,7 +495,7 @@ func TestCommandShutdownConsumesBoundedPanicDestroyAndDiscardsRecord(t *testing.
 	releaseTestFrame(t, child.g, leaf)
 	action, ok = DestroyedBounded(fixture.p, child.g, destroy)
 	if !ok || action.Kind != ActionPanicDestroy || action.Handle != midHandle ||
-		!pauseExecutorRunAction(fixture.p, child.g, action, false) ||
+		!pauseExecutorRunAction(fixture.p, child.g, action, executorRunQueueTail) ||
 		child.g.runAction != ActionPanicDestroy {
 		t.Fatalf("queue bounded panic-destroy continuation = (%+v, %t)", action, ok)
 	}

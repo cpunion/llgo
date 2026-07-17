@@ -172,6 +172,242 @@ func TestExecutorRunBudgetOneStableProgressAndFIFO(t *testing.T) {
 	runtime.KeepAlive(b.frame.memory)
 }
 
+func TestExecutorRunCommandBootstrapDirectChildHandoffPrecedesTwoPeers(t *testing.T) {
+	p := new(P)
+	driver, _, _, _ := bindTestExecutorDriver(t, p)
+	command := new(G)
+	if !InitG(command) {
+		t.Fatal("initialize command bootstrap G")
+	}
+	rootHandle := unsafe.Pointer(new(byte))
+	childHandle := unsafe.Pointer(new(byte))
+	root := newTestFrame(t, command, rootHandle, nil)
+	child := newTestFrame(t, command, childHandle, rootHandle)
+	if !AdoptRoot(command, rootHandle) || !Enqueue(p, command) {
+		t.Fatal("publish command bootstrap G")
+	}
+
+	step, ok := NextExecutorRunStep(driver)
+	if !ok || step.Kind != ExecutorRunStepDispatch || step.G != command || step.Action.Handle != rootHandle {
+		t.Fatalf("dispatch command bootstrap root = (%+v, %t)", step, ok)
+	}
+	step, ok = NextExecutorRunStep(driver)
+	if !ok || step.Kind != ExecutorRunStepAction || step.G != command ||
+		step.Action.Kind != ActionCheckResume || step.Action.Handle != rootHandle {
+		t.Fatalf("run command bootstrap root = (%+v, %t)", step, ok)
+	}
+	resume, ok := Checked(p, command, step.Action, false)
+	if !ok || resume.Kind != ActionResume {
+		t.Fatal("check command bootstrap root")
+	}
+	takeNormalRunnerDecision(t, command)
+	root.header.SuspendReason = uint16(SuspendCall)
+	root.header.Lifecycle = uint16(FrameSuspended)
+	if !PrepareAwait(command, rootHandle, childHandle) {
+		t.Fatal("prepare command bootstrap direct child")
+	}
+	next, ok := Resumed(p, command, resume)
+	if !ok || next.Kind != ActionCheckResume || next.Handle != childHandle ||
+		!CommitExecutorRunAction(driver, command, next) {
+		t.Fatalf("queue command bootstrap direct child = (%+v, %t)", next, ok)
+	}
+
+	peerA := newYieldingTestG(t, "command-exit-peer-a")
+	peerB := newYieldingTestG(t, "command-exit-peer-b")
+	if !Enqueue(p, peerA.g) || !Enqueue(p, peerB.g) {
+		t.Fatal("enqueue command-exit peers")
+	}
+	step, ok = NextExecutorRunStep(driver)
+	if !ok || step.Kind != ExecutorRunStepDispatch || step.G != command || step.Action.Handle != childHandle {
+		t.Fatalf("dispatch command direct child = (%+v, %t)", step, ok)
+	}
+	step, ok = NextExecutorRunStep(driver)
+	if !ok || step.Kind != ExecutorRunStepAction || step.G != command ||
+		step.Action.Kind != ActionCheckResume || step.Action.Handle != childHandle {
+		t.Fatalf("run command direct child = (%+v, %t)", step, ok)
+	}
+	resume, ok = Checked(p, command, step.Action, false)
+	if !ok || resume.Kind != ActionResume {
+		t.Fatal("check command direct child")
+	}
+	takeNormalRunnerDecision(t, command)
+	child.header.SuspendReason = uint16(SuspendFrameComplete)
+	child.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PrepareComplete(command, childHandle, child.header) {
+		t.Fatal("prepare command direct-child completion")
+	}
+	next, ok = Resumed(p, command, resume)
+	if !ok || next.Kind != ActionCheckDestroy || next.Handle != childHandle ||
+		!CommitExecutorRunCommandBootstrapDirectChildHandoff(driver, command, next) {
+		t.Fatalf("commit command direct-child destroy handoff = (%+v, %t)", next, ok)
+	}
+	if p.readyHead != command || command.nextReady != peerA.g || peerA.g.nextReady != peerB.g ||
+		p.readyTail != peerB.g {
+		t.Fatalf("direct-child destroy handoff queue = head:%p commandNext:%p peerANext:%p tail:%p",
+			p.readyHead, command.nextReady, peerA.g.nextReady, p.readyTail)
+	}
+
+	step, ok = NextExecutorRunStep(driver)
+	if !ok || step.Kind != ExecutorRunStepDispatch || step.G != command || step.Action.Handle != childHandle {
+		t.Fatalf("dispatch command direct-child destroy = (%+v, %t)", step, ok)
+	}
+	step, ok = NextExecutorRunStep(driver)
+	if !ok || step.Kind != ExecutorRunStepAction || step.G != command ||
+		step.Action.Kind != ActionCheckDestroy || step.Action.Handle != childHandle {
+		t.Fatalf("run command direct-child destroy = (%+v, %t)", step, ok)
+	}
+	destroy, ok := Checked(p, command, step.Action, true)
+	if !ok || destroy.Kind != ActionDestroy {
+		t.Fatal("check command direct-child destroy")
+	}
+	releaseTestFrame(t, command, child)
+	next, ok = DestroyedBounded(p, command, destroy)
+	if !ok || next.Kind != ActionCheckResume || next.Handle != rootHandle ||
+		!CommitExecutorRunCommandBootstrapDirectChildHandoff(driver, command, next) {
+		t.Fatalf("commit command exact-root resume handoff = (%+v, %t)", next, ok)
+	}
+	if p.readyHead != command || command.nextReady != peerA.g || peerA.g.nextReady != peerB.g ||
+		p.readyTail != peerB.g {
+		t.Fatalf("exact-root resume handoff queue = head:%p commandNext:%p peerANext:%p tail:%p",
+			p.readyHead, command.nextReady, peerA.g.nextReady, p.readyTail)
+	}
+	runtime.KeepAlive(root.memory)
+	runtime.KeepAlive(child.memory)
+	runtime.KeepAlive(peerA.frame.memory)
+	runtime.KeepAlive(peerB.frame.memory)
+}
+
+func TestExecutorRunCommandBootstrapDirectChildHandoffKeepsNestedChildFIFO(t *testing.T) {
+	p := new(P)
+	driver, _, _, _ := bindTestExecutorDriver(t, p)
+	command := new(G)
+	if !InitG(command) {
+		t.Fatal("initialize nested command G")
+	}
+	rootHandle := unsafe.Pointer(new(byte))
+	parentHandle := unsafe.Pointer(new(byte))
+	nestedHandle := unsafe.Pointer(new(byte))
+	root := newTestFrame(t, command, rootHandle, nil)
+	parent := newTestFrame(t, command, parentHandle, rootHandle)
+	nested := newTestFrame(t, command, nestedHandle, parentHandle)
+	if !AdoptRoot(command, rootHandle) || !Enqueue(p, command) {
+		t.Fatal("publish nested command G")
+	}
+
+	await := func(from *testFrame, fromHandle, toHandle unsafe.Pointer) {
+		t.Helper()
+		step, ok := NextExecutorRunStep(driver)
+		if !ok || step.Kind != ExecutorRunStepDispatch || step.G != command || step.Action.Handle != fromHandle {
+			t.Fatalf("dispatch await frame %p = (%+v, %t)", fromHandle, step, ok)
+		}
+		step, ok = NextExecutorRunStep(driver)
+		if !ok || step.Kind != ExecutorRunStepAction || step.G != command ||
+			step.Action.Kind != ActionCheckResume || step.Action.Handle != fromHandle {
+			t.Fatalf("run await frame %p = (%+v, %t)", fromHandle, step, ok)
+		}
+		resume, ok := Checked(p, command, step.Action, false)
+		if !ok || resume.Kind != ActionResume {
+			t.Fatalf("check await frame %p", fromHandle)
+		}
+		takeNormalRunnerDecision(t, command)
+		from.header.SuspendReason = uint16(SuspendCall)
+		from.header.Lifecycle = uint16(FrameSuspended)
+		if !PrepareAwait(command, fromHandle, toHandle) {
+			t.Fatalf("prepare await %p -> %p", fromHandle, toHandle)
+		}
+		next, ok := Resumed(p, command, resume)
+		if !ok || next.Kind != ActionCheckResume || next.Handle != toHandle ||
+			!CommitExecutorRunAction(driver, command, next) {
+			t.Fatalf("commit await %p -> %p = (%+v, %t)", fromHandle, toHandle, next, ok)
+		}
+	}
+	await(root, rootHandle, parentHandle)
+	await(parent, parentHandle, nestedHandle)
+
+	peerA := newYieldingTestG(t, "nested-fifo-peer-a")
+	peerB := newYieldingTestG(t, "nested-fifo-peer-b")
+	if !Enqueue(p, peerA.g) || !Enqueue(p, peerB.g) {
+		t.Fatal("enqueue nested FIFO peers")
+	}
+	step, ok := NextExecutorRunStep(driver)
+	if !ok || step.Kind != ExecutorRunStepDispatch || step.G != command || step.Action.Handle != nestedHandle {
+		t.Fatalf("dispatch nested child = (%+v, %t)", step, ok)
+	}
+	step, ok = NextExecutorRunStep(driver)
+	if !ok || step.Kind != ExecutorRunStepAction || step.G != command ||
+		step.Action.Kind != ActionCheckResume || step.Action.Handle != nestedHandle {
+		t.Fatalf("run nested child = (%+v, %t)", step, ok)
+	}
+	resume, ok := Checked(p, command, step.Action, false)
+	if !ok || resume.Kind != ActionResume {
+		t.Fatal("check nested child")
+	}
+	takeNormalRunnerDecision(t, command)
+	nested.header.SuspendReason = uint16(SuspendFrameComplete)
+	nested.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PrepareComplete(command, nestedHandle, nested.header) {
+		t.Fatal("prepare nested child completion")
+	}
+	next, ok := Resumed(p, command, resume)
+	if !ok || next.Kind != ActionCheckDestroy || next.Handle != nestedHandle {
+		t.Fatalf("nested child completion = (%+v, %t)", next, ok)
+	}
+	if CommitExecutorRunCommandBootstrapDirectChildHandoff(driver, command, next) {
+		t.Fatal("nested child destroy accepted as command bootstrap exit handoff")
+	}
+	if p.current != command || p.readyHead != peerA.g || driver.run.issued != ActionCheckResume ||
+		!CommitExecutorRunAction(driver, command, next) {
+		t.Fatal("rejected nested child handoff was not atomic")
+	}
+	if p.readyHead != peerA.g || peerA.g.nextReady != peerB.g || peerB.g.nextReady != command ||
+		p.readyTail != command {
+		t.Fatalf("nested destroy FIFO queue = head:%p peerANext:%p peerBNext:%p tail:%p",
+			p.readyHead, peerA.g.nextReady, peerB.g.nextReady, p.readyTail)
+	}
+	if dequeue(p) != peerA.g || dequeue(p) != peerB.g {
+		t.Fatal("remove nested FIFO peers")
+	}
+
+	step, ok = NextExecutorRunStep(driver)
+	if !ok || step.Kind != ExecutorRunStepDispatch || step.G != command || step.Action.Handle != nestedHandle {
+		t.Fatalf("dispatch nested destroy = (%+v, %t)", step, ok)
+	}
+	step, ok = NextExecutorRunStep(driver)
+	if !ok || step.Kind != ExecutorRunStepAction || step.G != command ||
+		step.Action.Kind != ActionCheckDestroy || step.Action.Handle != nestedHandle {
+		t.Fatalf("run nested destroy = (%+v, %t)", step, ok)
+	}
+	destroy, ok := Checked(p, command, step.Action, true)
+	if !ok || destroy.Kind != ActionDestroy {
+		t.Fatal("check nested destroy")
+	}
+	releaseTestFrame(t, command, nested)
+	next, ok = DestroyedBounded(p, command, destroy)
+	if !ok || next.Kind != ActionCheckResume || next.Handle != parentHandle {
+		t.Fatalf("nested parent resume = (%+v, %t)", next, ok)
+	}
+	if !Enqueue(p, peerA.g) || !Enqueue(p, peerB.g) {
+		t.Fatal("re-enqueue nested FIFO peers")
+	}
+	if CommitExecutorRunCommandBootstrapDirectChildHandoff(driver, command, next) {
+		t.Fatal("non-root parent resume accepted as command bootstrap exit handoff")
+	}
+	if p.current != command || p.readyHead != peerA.g || driver.run.issued != ActionCheckDestroy ||
+		!CommitExecutorRunAction(driver, command, next) {
+		t.Fatal("rejected nested parent handoff was not atomic")
+	}
+	if p.readyHead != peerA.g || peerA.g.nextReady != peerB.g || peerB.g.nextReady != command ||
+		p.readyTail != command {
+		t.Fatalf("nested parent resume FIFO queue = head:%p peerANext:%p peerBNext:%p tail:%p",
+			p.readyHead, peerA.g.nextReady, peerB.g.nextReady, p.readyTail)
+	}
+	runtime.KeepAlive(root.memory)
+	runtime.KeepAlive(parent.memory)
+	runtime.KeepAlive(nested.memory)
+	runtime.KeepAlive(peerA.frame.memory)
+	runtime.KeepAlive(peerB.frame.memory)
+}
+
 func TestPauseExecutorRunActionFailureIsAtomic(t *testing.T) {
 	p := new(P)
 	task := newYieldingTestG(t, "pause-atomic")
@@ -183,7 +419,7 @@ func TestPauseExecutorRunActionFailureIsAtomic(t *testing.T) {
 		t.Fatal("begin pause atomic task")
 	}
 	preemptStore(&p.schedule, scheduleDisabled)
-	if pauseExecutorRunAction(p, task.g, action, false) {
+	if pauseExecutorRunAction(p, task.g, action, executorRunQueueTail) {
 		t.Fatal("pause accepted disabled queue")
 	}
 	if p.current != task.g || p.action != action || p.readyHead != nil || p.readyTail != nil ||

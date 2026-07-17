@@ -858,18 +858,28 @@ func BeginRunG(p *P, g *G) (Action, bool) {
 	return action, true
 }
 
-// pauseExecutorRunAction moves one stable post-operation continuation to the
-// ready tail. It is called only after the runtime adapter completed a whole
-// physical reduction, so ActionResume and ActionDestroy can never be retained
-// across a host boundary.
-func pauseExecutorRunAction(p *P, g *G, action Action, first bool) bool {
+type executorRunQueuePlacement uint8
+
+const (
+	executorRunQueueTail executorRunQueuePlacement = iota
+	executorRunQueueCommandBootstrapDirectChildHandoff
+	executorRunQueueCommandRootDestroy
+)
+
+// pauseExecutorRunAction moves one stable post-operation continuation back to
+// the ready queue. It is called only after the runtime adapter completed a
+// whole physical reduction, so ActionResume and ActionDestroy can never be
+// retained across a host boundary. Ordinary continuations retain FIFO order;
+// command/bootstrap control placements are selected only by their validating
+// exported commit boundaries.
+func pauseExecutorRunAction(p *P, g *G, action Action, placement executorRunQueuePlacement) bool {
 	if p == nil || g == nil || p.current != g || g.runP != p || p.inResume ||
 		p.action != action || action.Handle == nil || g.runAction != ActionInvalid ||
 		p.runDecision != (RunDecision{}) || p.runDecisionTaken || p.servicePreemptBudget == 0 ||
 		g.queued || g.nextReady != nil || g.waiting || g.nextWait != nil ||
 		g.waitToken != nil || g.waitTicket != 0 || !validRunnableParkState(&g.park) ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
-		!validReadyQueueHeader(p) {
+		!validReadyQueueHeader(p) || placement > executorRunQueueCommandRootDestroy {
 		return false
 	}
 	schedule := preemptLoad(&p.schedule)
@@ -878,7 +888,7 @@ func pauseExecutorRunAction(p *P, g *G, action Action, first bool) bool {
 	}
 	switch action.Kind {
 	case ActionCheckResume:
-		if first {
+		if placement == executorRunQueueCommandRootDestroy {
 			return false
 		}
 		if g.state != GRunning || g.destroyTarget != nil || g.destroyRoot || g.active == nil ||
@@ -892,7 +902,7 @@ func pauseExecutorRunAction(p *P, g *G, action Action, first bool) bool {
 			return false
 		}
 	case ActionPanicDestroy:
-		if first {
+		if placement != executorRunQueueTail {
 			return false
 		}
 		if g.state != GPanicking || !g.panicUnwind || !publishedPanicRecord(&g.panicRecord) ||
@@ -910,11 +920,11 @@ func pauseExecutorRunAction(p *P, g *G, action Action, first bool) bool {
 	p.current = nil
 	p.servicePreemptBudget = 0
 	p.action = Action{}
-	if first {
-		// Command main has published its normal-return marker and completed its
-		// root. Go exit semantics forbid starting another user G after that point.
-		// This is at most one root destroy, still charged as later dispatch/action
-		// reductions; all ordinary and panic cleanup continuations remain FIFO.
+	if placement != executorRunQueueTail {
+		// A frozen command-bootstrap direct CoroRoot step retains the same
+		// logical G only for its one child destroy and exact-root resume. After
+		// normal-main return, the final root destroy has its separate placement.
+		// Every physical operation remains a separately charged later reduction.
 		prependReadyUnchecked(p, g)
 	} else {
 		appendReadyUnchecked(p, g)

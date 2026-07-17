@@ -139,6 +139,9 @@ func coroRunSlice(p *coroP, main *coroG, driver *coro.ExecutorDriver, budget uin
 			if advanced && step.G == main && coroProgramLifecycleV1State == coroProgramMainReturnRequestedV1 &&
 				next.Kind == coro.ActionCheckDestroy {
 				committed = coro.CommitExecutorRunCommandRootDestroy(driver, step.G, next)
+			} else if advanced && step.G == main && coroProgramLifecycleV1State == coroProgramRunningV1 &&
+				coro.CommitExecutorRunCommandBootstrapDirectChildHandoff(driver, step.G, next) {
+				committed = true
 			} else if advanced {
 				committed = coro.CommitExecutorRunAction(driver, step.G, next)
 			}

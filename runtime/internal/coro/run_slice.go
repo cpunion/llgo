@@ -242,7 +242,7 @@ func completedExecutorRunAction(p *P, g *G, action Action) bool {
 // yield/park control actions are already stable. The function retains neither
 // the completed G nor its old handle, so a runtime may reclaim a dynamic G
 // immediately after a successful ActionComplete commit.
-func commitExecutorRunAction(driver *ExecutorDriver, g *G, next Action, first bool) bool {
+func commitExecutorRunAction(driver *ExecutorDriver, g *G, next Action, placement executorRunQueuePlacement) bool {
 	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
 		driver.run.issued == ActionInvalid || g == nil {
 		return false
@@ -251,14 +251,14 @@ func commitExecutorRunAction(driver *ExecutorDriver, g *G, next Action, first bo
 	committed := false
 	switch next.Kind {
 	case ActionCheckResume, ActionCheckDestroy, ActionPanicDestroy:
-		committed = pauseExecutorRunAction(p, g, next, first)
+		committed = pauseExecutorRunAction(p, g, next, placement)
 	case ActionYield, ActionPark, ActionComplete, ActionPanicComplete:
-		if first {
+		if placement != executorRunQueueTail {
 			return false
 		}
 		committed = completedExecutorRunAction(p, g, next)
 	case ActionCommitDestroy:
-		if first {
+		if placement != executorRunQueueTail {
 			return false
 		}
 		committed = validDestroyCommitReceipt(p, g, next)
@@ -278,18 +278,49 @@ func commitExecutorRunAction(driver *ExecutorDriver, g *G, next Action, first bo
 // CommitExecutorRunAction closes an ordinary physical action and retains FIFO
 // ordering for every live continuation.
 func CommitExecutorRunAction(driver *ExecutorDriver, g *G, next Action) bool {
-	return commitExecutorRunAction(driver, g, next, false)
+	return commitExecutorRunAction(driver, g, next, executorRunQueueTail)
 }
 
-// CommitExecutorRunCommandRootDestroy is the sole non-FIFO continuation. It is
-// valid only for the one final root destroy after command main published its
-// normal-return marker; running another user G first would violate Go process
-// exit semantics. The destroy remains a separately charged later reduction.
+// CommitExecutorRunCommandBootstrapDirectChildHandoff retains the frozen
+// command-bootstrap G at the ready head while one direct CoroRoot step is
+// destroyed and the exact bootstrap-root continuation is resumed. This covers
+// each fixed runtime/package-init/main step, with a strict upper bound of one
+// child destroy plus one root resume per step. Nested non-root cleanup remains
+// ordinary FIFO work; normal-main return's final root destroy is separate.
+func CommitExecutorRunCommandBootstrapDirectChildHandoff(driver *ExecutorDriver, g *G, next Action) bool {
+	if !validExecutorDriver(driver) || driver.state != executorDriverActive || g == nil ||
+		g.root == nil || g.active != g.root || g.panicUnwind || !emptyPanicRecord(&g.panicRecord) {
+		return false
+	}
+	switch next.Kind {
+	case ActionCheckDestroy:
+		target := g.destroyTarget
+		if driver.run.issued != ActionCheckResume || g.state != GDispatching || target == nil ||
+			target == g.root || target.parent != g.root || target.handle != next.Handle ||
+			target.state != FrameDestroyPending || g.destroyRoot {
+			return false
+		}
+	case ActionCheckResume:
+		if driver.run.issued != ActionCheckDestroy || g.state != GRunning ||
+			g.destroyTarget != nil || g.destroyRoot || g.root.handle != next.Handle ||
+			(g.root.state != FrameInitialSuspended && g.root.state != FrameSuspended) {
+			return false
+		}
+	default:
+		return false
+	}
+	return commitExecutorRunAction(driver, g, next, executorRunQueueCommandBootstrapDirectChildHandoff)
+}
+
+// CommitExecutorRunCommandRootDestroy is valid only for the one final root
+// destroy after command main published its normal-return marker; running
+// another user G first would violate Go process exit semantics. The destroy
+// remains a separately charged later reduction.
 func CommitExecutorRunCommandRootDestroy(driver *ExecutorDriver, g *G, next Action) bool {
 	if g == nil || next.Kind != ActionCheckDestroy || g.destroyTarget == nil ||
 		g.destroyTarget != g.root || !g.destroyRoot || g.active != nil || g.panicUnwind ||
 		!emptyPanicRecord(&g.panicRecord) {
 		return false
 	}
-	return commitExecutorRunAction(driver, g, next, true)
+	return commitExecutorRunAction(driver, g, next, executorRunQueueCommandRootDestroy)
 }
