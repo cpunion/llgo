@@ -61,6 +61,10 @@ const (
 	parkDetaching
 	parkReady
 	parkConsumed
+	// parkDelivered records that the scheduler's pre-resume gate transferred
+	// the logical outcome into its transient RunDecision. Keeping this distinct
+	// from parkConsumed prevents a later yield from replaying the old outcome.
+	parkDelivered
 )
 
 // ParkOutcome is the single logical terminal decision for a wait-set.
@@ -107,16 +111,17 @@ type ParkLink struct {
 }
 
 // ParkState is intended to be embedded in stable G storage. One G owns at
-// most one live logical wait-set. expected/attached/detachPending together
-// make early completion, N-way select, cancellation, and ready publication
-// explicit rather than relying on a coroutine-frame WaitToken pointer.
+// most one live logical wait-set. expected/attached make early completion,
+// N-way select, cancellation, and the detach-to-ready barrier explicit rather
+// than relying on a coroutine-frame WaitToken pointer. During detaching,
+// attached itself is the remaining barrier count; a duplicate counter would
+// add state without carrying independent information.
 // All ParkState and ParkLink operations are strictly owner-P-only.
 type ParkState struct {
 	ticket          ParkTicket
 	phase           parkPhase
 	expected        uint32
 	attached        uint32
-	detachPending   uint32
 	seed            uint32
 	taskCancelKind  TaskCancelKind
 	taskCancelPhase taskCancelPhase
@@ -130,7 +135,7 @@ type ParkState struct {
 
 func validParkState(state *ParkState) bool {
 	if state == nil || !validTaskCancelState(state.taskCancelKind, state.taskCancelPhase) || state.cancelKind > ParkCancelShutdown ||
-		state.attached > state.expected || state.detachPending > state.attached {
+		state.attached > state.expected {
 		return false
 	}
 	links := uint32(0)
@@ -174,17 +179,17 @@ func validParkState(state *ParkState) bool {
 	}
 	switch state.phase {
 	case parkIdle:
-		return state.ticket == (ParkTicket{}) && state.expected == 0 && state.attached == 0 && state.detachPending == 0 &&
+		return state.ticket == (ParkTicket{}) && state.expected == 0 && state.attached == 0 &&
 			state.seed == 0 && state.cancelKind == ParkCancelNone && state.outcome == ParkOutcomePending && state.winnerID == (OperationID{}) &&
 			state.winnerRecord == nil && state.head == nil
 	case parkPreparing:
-		return validParkTicket(state.ticket) && state.attached <= state.expected && state.detachPending == 0 &&
+		return validParkTicket(state.ticket) && state.attached <= state.expected &&
 			state.outcome == ParkOutcomePending && state.winnerID == (OperationID{}) && state.winnerRecord == nil
 	case parkSealed, parkParked:
-		return validParkTicket(state.ticket) && state.attached == state.expected && state.detachPending == 0 &&
+		return validParkTicket(state.ticket) && state.attached == state.expected &&
 			state.outcome == ParkOutcomePending && state.winnerID == (OperationID{}) && state.winnerRecord == nil
 	case parkDetaching:
-		if !validParkTicket(state.ticket) || state.detachPending != state.attached || state.detachPending == 0 ||
+		if !validParkTicket(state.ticket) || state.attached == 0 ||
 			state.outcome == ParkOutcomePending {
 			return false
 		}
@@ -192,15 +197,19 @@ func validParkState(state *ParkState) bool {
 			state.winnerRecord != nil && state.winnerRecord.id == state.winnerID) ||
 			(state.outcome == ParkOutcomeCanceled && state.cancelKind != ParkCancelNone && state.winnerID == (OperationID{}) && state.winnerRecord == nil)
 	case parkReady:
-		return validParkTicket(state.ticket) && state.attached == 0 && state.detachPending == 0 && state.head == nil &&
+		return validParkTicket(state.ticket) && state.attached == 0 && state.head == nil &&
 			((state.outcome == ParkOutcomeCompleted && state.cancelKind < ParkCancelTaskAbort && state.winnerID.Valid() && state.winnerRecord != nil &&
 				state.winnerRecord.id == state.winnerID && state.winnerRecord.phase == operationDetached &&
 				state.winnerRecord.resultTicket == state.ticket && !state.winnerRecord.resultConsumable && !state.winnerRecord.resultTaken) ||
 				(state.outcome == ParkOutcomeCanceled && state.cancelKind != ParkCancelNone && state.winnerID == (OperationID{}) && state.winnerRecord == nil))
 	case parkConsumed:
-		return validParkTicket(state.ticket) && state.attached == 0 && state.detachPending == 0 && state.head == nil &&
+		return validParkTicket(state.ticket) && state.attached == 0 && state.head == nil &&
 			((state.outcome == ParkOutcomeCompleted && state.cancelKind < ParkCancelTaskAbort && state.winnerID.Valid() && state.winnerRecord == nil) ||
 				(state.outcome == ParkOutcomeCanceled && state.cancelKind != ParkCancelNone && state.winnerID == (OperationID{}) && state.winnerRecord == nil))
+	case parkDelivered:
+		return validParkTicket(state.ticket) && state.expected == 0 && state.attached == 0 && state.seed == 0 &&
+			state.cancelKind == ParkCancelNone && state.outcome == ParkOutcomePending && state.winnerCase == 0 &&
+			state.winnerID == (OperationID{}) && state.winnerRecord == nil && state.head == nil
 	default:
 		return false
 	}
@@ -210,7 +219,7 @@ func releasableParkState(state *ParkState) bool {
 	if !validParkState(state) {
 		return false
 	}
-	return state.phase == parkIdle || state.phase == parkConsumed
+	return state.phase == parkIdle || state.phase == parkConsumed || state.phase == parkDelivered
 }
 
 // BeginParkSet starts one logical N-candidate wait. The two-word ticket only
@@ -224,7 +233,8 @@ func BeginParkSet(state *ParkState, expected, seed uint32) (ParkTicket, bool) {
 		if !validParkState(state) {
 			return ParkTicket{}, false
 		}
-	} else if state.phase != parkConsumed || !validParkState(state) || state.attached != 0 || state.detachPending != 0 || state.head != nil {
+	} else if (state.phase != parkConsumed && state.phase != parkDelivered) || !validParkState(state) ||
+		state.attached != 0 || state.head != nil {
 		return ParkTicket{}, false
 	}
 	ticket, ok := nextParkTicket(state.ticket)
@@ -347,7 +357,6 @@ func AbortParkSet(state *ParkState, ticket ParkTicket) bool {
 		state.cancelKind = ParkCancelOperation
 	}
 	state.outcome = ParkOutcomeCanceled
-	state.detachPending = state.attached
 	for link := state.head; link != nil; link = link.next {
 		link.operation.cancelRequested = true
 		link.operation.disposition = OperationDispositionCanceled
@@ -408,7 +417,6 @@ func resolveParkSet(state *ParkState, ticket ParkTicket, winner *OperationRecord
 		}
 	}
 	state.phase = parkDetaching
-	state.detachPending = state.attached
 	if winner == nil {
 		state.outcome = ParkOutcomeCanceled
 	} else {
@@ -431,7 +439,7 @@ func resolveParkSet(state *ParkState, ticket ParkTicket, winner *OperationRecord
 			record.disposition = OperationDispositionLost
 		}
 	}
-	if state.detachPending == 0 {
+	if state.attached == 0 {
 		state.phase = parkReady
 	}
 	return validParkState(state)
@@ -463,9 +471,8 @@ func DetachParkOperation(state *ParkState, ticket ParkTicket, record *OperationR
 	record.phase = operationDetached
 	record.link = ParkLink{}
 	state.attached--
-	state.detachPending--
-	if state.detachPending == 0 {
-		if state.attached != 0 || state.head != nil {
+	if state.attached == 0 {
+		if state.head != nil {
 			return false
 		}
 		state.phase = parkReady
@@ -497,4 +504,23 @@ func ConsumeParkSet(state *ParkState, ticket ParkTicket) (outcome ParkOutcome, c
 	}
 	state.phase = parkConsumed
 	return outcome, caseID, lease, true
+}
+
+// DeliverParkResume is the scheduler-side acknowledgement that a consumed
+// park outcome has been copied into the transient pre-resume decision. Direct
+// unit/runtime consumers may begin the next park from parkConsumed; scheduler
+// integration uses parkDelivered so an unrelated later yield cannot replay the
+// old case or result lease.
+func DeliverParkResume(state *ParkState, ticket ParkTicket) bool {
+	if !validParkState(state) || state.phase != parkConsumed || ticket != state.ticket {
+		return false
+	}
+	kind, phase := state.taskCancelKind, state.taskCancelPhase
+	*state = ParkState{
+		ticket:          ticket,
+		phase:           parkDelivered,
+		taskCancelKind:  kind,
+		taskCancelPhase: phase,
+	}
+	return validParkState(state)
 }

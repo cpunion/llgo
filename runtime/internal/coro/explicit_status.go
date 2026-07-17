@@ -133,11 +133,12 @@ func PrepareExplicitStatus(
 	if status != ExplicitStatusPanic || typeWord == nil || handle == nil || header == nil || header.Flags != 0 ||
 		g.state != GRunning || g.active == nil || g.root == nil || g.runP == nil ||
 		g.runP.current != g || !g.runP.inResume || !expectedAction(g.runP, g, g.runP.action, ActionResume) ||
+		g.runP.runDecision != (RunDecision{}) ||
 		g.pending.kind != pendingNone || g.pending.from != nil || g.pending.target != nil ||
 		g.pending.wait != nil || g.pending.ticket != 0 || g.destroyTarget != nil || g.destroyRoot ||
 		g.queued || g.nextReady != nil || g.waitToken != nil || g.waitTicket != 0 ||
 		g.nextWait != nil || g.waiting || g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
-		g.panicUnwind {
+		!releasableParkState(&g.park) || g.park.taskCancelPhase == taskCancelRequested || g.panicUnwind {
 		return reject()
 	}
 	frame := findFrame(g, handle)

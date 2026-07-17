@@ -91,6 +91,7 @@ func validRunningExecutorOwner(driver *ExecutorDriver) bool {
 	p := driver.p
 	g := p.current
 	return g != nil && p.inResume && expectedAction(p, g, p.action, ActionResume) &&
+		p.runDecision == (RunDecision{}) &&
 		g.state == GRunning && g.active != nil && g.active.state == FrameActive &&
 		g.active.handle == p.action.Handle && g.active.header != nil &&
 		g.active.header.G == unsafe.Pointer(g) &&
@@ -188,7 +189,7 @@ func activeExecutorHandle(registry *ExecutorRegistry, handle ExecutorHandle) boo
 
 func idleExecutorScheduler(p *P) bool {
 	return p != nil && p.current == nil && !p.inResume && p.action.Kind == ActionInvalid && p.action.Handle == nil &&
-		p.servicePreemptBudget == 0 && validReadyQueue(p) && validWaitQueue(p)
+		p.runDecision == (RunDecision{}) && !p.runDecisionTaken && p.servicePreemptBudget == 0 && validReadyQueue(p) && validWaitQueue(p)
 }
 
 // BindExecutor attaches a newly registered exact-zero executor gate and an
@@ -572,6 +573,7 @@ func ConfirmExecutorClose(driver *ExecutorDriver) bool {
 
 func terminalExecutorRootPending(p *P, g *G, kind ActionKind) bool {
 	if p == nil || g == nil || p.current != g || p.inResume ||
+		p.runDecision != (RunDecision{}) || p.runDecisionTaken ||
 		!ValidG(g) || g.runP != p || g.destroyTarget != nil || !g.destroyRoot ||
 		g.active != nil || g.frames != nil ||
 		p.readyHead != nil || p.readyTail != nil || p.waitHead != nil || p.waitTail != nil ||

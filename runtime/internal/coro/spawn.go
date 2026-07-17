@@ -78,12 +78,14 @@ func runningSpawnContext(parent *G) (*P, bool) {
 		parent.pending.wait != nil || parent.pending.ticket != 0 ||
 		parent.destroyTarget != nil || parent.destroyRoot || parent.queued || parent.nextReady != nil ||
 		parent.waitToken != nil || parent.waitTicket != 0 || parent.nextWait != nil || parent.waiting ||
+		!releasableParkState(&parent.park) ||
 		parent.spawnParent != nil || parent.spawnP != nil || !validLiveTaskStorage(parent) {
 		return nil, false
 	}
 	p := parent.runP
 	if p == nil || p.current != parent || !p.inResume ||
 		!expectedAction(p, parent, p.action, ActionResume) ||
+		p.runDecision != (RunDecision{}) ||
 		!validReadyQueue(p) || !validWaitQueue(p) {
 		return nil, false
 	}

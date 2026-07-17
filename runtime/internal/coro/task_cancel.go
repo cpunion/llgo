@@ -127,7 +127,7 @@ func applyTaskCancellationToPark(g *G, kind TaskCancelKind) bool {
 		return false
 	}
 	switch g.park.phase {
-	case parkIdle, parkConsumed:
+	case parkIdle, parkConsumed, parkDelivered:
 		return g.state != GWaiting
 	case parkPreparing, parkSealed, parkParked:
 		return RequestParkCancel(&g.park, g.park.ticket, taskCancelParkKind(kind))
