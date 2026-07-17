@@ -31,23 +31,11 @@ const (
 	TaskControlPostStale
 )
 
-type taskControlLifecycle uint32
-
-const (
-	taskControlFree taskControlLifecycle = iota
-	taskControlInitializing
-	taskControlActive
-	taskControlClosing
-	taskControlQuiesced
-)
-
 type taskControlSlot struct {
 	// Producer-visible prefix. A host keeps only OperationID and reaches these
 	// aligned atomic words through a stable target-owned source.
-	state      uint32
-	generation uint32
-	inflight   uint32
-	request    uint32
+	producerSourceSlot
+	request uint32
 
 	// Owner-only suffix. Producers never read or retain the G pointer.
 	task *G
@@ -64,10 +52,8 @@ type taskControlSlot struct {
 // admission; ConfirmQuiesced additionally requires every admitted Post to have
 // returned and a final owner drain to have consumed any late request.
 type TaskControlSource struct {
-	pending uint32
-	slots   [TaskControlSourceCapacity]taskControlSlot
-	owner   *P
-	route   RouteID
+	routedProducerSource
+	slots [TaskControlSourceCapacity]taskControlSlot
 }
 
 func taskControlSlotFor(source *TaskControlSource, id OperationID) (*taskControlSlot, bool) {
@@ -78,36 +64,16 @@ func taskControlSlotFor(source *TaskControlSource, id OperationID) (*taskControl
 	return &source.slots[id.LocalSlot()-1], true
 }
 
-func taskControlAcquireProducer(slot *taskControlSlot) bool {
-	return slot != nil && producerAdmissionAcquire(&slot.inflight)
-}
-
-func taskControlReleaseProducer(slot *taskControlSlot) {
-	producerAdmissionRelease(&slot.inflight)
-}
-
-func taskControlSealProducers(slot *taskControlSlot) bool {
-	return slot != nil && producerAdmissionSeal(&slot.inflight)
-}
-
-func taskControlProducersQuiesced(slot *taskControlSlot) bool {
-	return slot != nil && producerAdmissionQuiesced(&slot.inflight)
-}
-
 func taskControlReusableSlot(slot *taskControlSlot) bool {
-	if slot == nil || preemptLoad(&slot.state) != uint32(taskControlFree) ||
+	if slot == nil || !producerSourceSlotReusable(&slot.producerSourceSlot) ||
 		preemptLoad(&slot.request) != uint32(TaskCancelNone) || slot.task != nil {
 		return false
 	}
-	generation := preemptLoad(&slot.generation)
-	if generation == 0 {
-		return preemptLoad(&slot.inflight) == 0
-	}
-	return preemptLoad(&slot.inflight) == producerAdmissionClosed
+	return true
 }
 
 func validTaskControlOwner(source *TaskControlSource, p *P) bool {
-	return source != nil && p != nil && source.owner == p && source.route.Valid()
+	return source != nil && validRoutedProducerSource(&source.routedProducerSource, p)
 }
 
 // registeredTaskControlDelivery proves that one exact endpoint still pins its
@@ -120,8 +86,8 @@ func registeredTaskControlDelivery(source *TaskControlSource, p *P, slot *taskCo
 		preemptLoad(&slot.generation) != id.Generation {
 		return nil, false
 	}
-	state := taskControlLifecycle(preemptLoad(&slot.state))
-	if state != taskControlActive && state != taskControlClosing {
+	state := producerSourceLifecycle(preemptLoad(&slot.state))
+	if state != producerSourceActive && state != producerSourceClosing {
 		return nil, false
 	}
 	task := slot.task
@@ -144,33 +110,23 @@ func RegisterTaskControl(source *TaskControlSource, p *P, task *G) (OperationID,
 	}
 	for index := range source.slots {
 		slot := &source.slots[index]
-		generation := preemptLoad(&slot.generation)
-		if generation == ^uint32(0) || !taskControlReusableSlot(slot) ||
-			!preemptCompareAndSwap(&slot.state, uint32(taskControlFree), uint32(taskControlInitializing)) {
+		if !taskControlReusableSlot(slot) || preemptLoad(&slot.generation) == ^uint32(0) {
 			continue
 		}
-		if !taskControlSealProducers(slot) || !taskControlProducersQuiesced(slot) {
+		generation, begun := beginProducerSourceSlot(&slot.producerSourceSlot)
+		if !begun {
 			return OperationID{}, false
 		}
-		id, ok := NextOperationIDAtRoute(OperationID{}, OperationSourceControl, source.route, uint32(index)+1)
-		if generation != 0 {
-			previous, made := MakeOperationIDAtRoute(OperationSourceControl, source.route, uint32(index)+1, generation)
-			if !made {
-				return OperationID{}, false
-			}
-			id, ok = NextOperationIDAtRoute(previous, OperationSourceControl, source.route, uint32(index)+1)
-		}
+		id, ok := MakeOperationIDAtRoute(OperationSourceControl, source.route, uint32(index)+1, generation)
 		if !ok {
 			return OperationID{}, false
 		}
 		preemptStore(&slot.request, uint32(TaskCancelNone))
-		preemptStore(&slot.generation, id.Generation)
-		if !producerAdmissionReopen(&slot.inflight) {
-			return OperationID{}, false
-		}
 		slot.task = task
 		task.taskControlLeases++
-		preemptStore(&slot.state, uint32(taskControlActive))
+		if !activateProducerSourceSlot(&slot.producerSourceSlot, generation) {
+			return OperationID{}, false
+		}
 		return id, true
 	}
 	return OperationID{}, false
@@ -185,21 +141,23 @@ func (source *TaskControlSource) Post(id OperationID, kind TaskCancelKind) TaskC
 	if !ok || !validTaskCancelKind(kind) {
 		return TaskControlPostInvalid
 	}
-	if !taskControlAcquireProducer(slot) {
+	switch acquireProducerSourceGeneration(&slot.producerSourceSlot, id.Generation) {
+	case producerSourceAcquireClosed:
 		return TaskControlPostClosed
-	}
-	if preemptLoad(&slot.generation) != id.Generation {
-		taskControlReleaseProducer(slot)
+	case producerSourceAcquireStale:
 		return TaskControlPostStale
+	case producerSourceAcquired:
+	default:
+		return TaskControlPostInvalid
 	}
-	if preemptLoad(&slot.state) != uint32(taskControlActive) {
-		taskControlReleaseProducer(slot)
+	if preemptLoad(&slot.state) != uint32(producerSourceActive) {
+		producerAdmissionRelease(&slot.inflight)
 		return TaskControlPostClosed
 	}
 	for {
 		old := TaskCancelKind(preemptLoad(&slot.request))
 		if old != TaskCancelNone && !validTaskCancelKind(old) {
-			taskControlReleaseProducer(slot)
+			producerAdmissionRelease(&slot.inflight)
 			return TaskControlPostInvalid
 		}
 		merged := kind
@@ -210,7 +168,7 @@ func (source *TaskControlSource) Post(id OperationID, kind TaskCancelKind) TaskC
 			continue
 		}
 		preemptStore(&source.pending, 1)
-		taskControlReleaseProducer(slot)
+		producerAdmissionRelease(&slot.inflight)
 		if old == TaskCancelNone || merged > old {
 			return TaskControlPosted
 		}
@@ -219,7 +177,7 @@ func (source *TaskControlSource) Post(id OperationID, kind TaskCancelKind) TaskC
 }
 
 func (source *TaskControlSource) Pending() bool {
-	return source != nil && preemptLoad(&source.pending) != 0
+	return source != nil && routedProducerPending(&source.routedProducerSource)
 }
 
 // taskControlRestoreRequest puts an owner-claimed fact back into the atomic
@@ -249,11 +207,7 @@ func taskControlRestoreRequest(source *TaskControlSource, slot *taskControlSlot,
 }
 
 func (source *TaskControlSource) beginPublishPass(p *P) bool {
-	if !validTaskControlOwner(source, p) {
-		return false
-	}
-	preemptStore(&source.pending, 0)
-	return true
+	return source != nil && beginRoutedProducerPass(&source.routedProducerSource, p)
 }
 
 // publishSlot claims at most one merged request from one real endpoint. A
@@ -282,9 +236,9 @@ func (source *TaskControlSource) publishSlot(p *P, terminal *G, index uint32) (d
 	// Drain at most one merged fact per slot and pass. A producer that
 	// publishes after the take leaves pending set for the next pass, so a hot
 	// control endpoint cannot starve timer, I/O, or IRQ sources.
-	state := taskControlLifecycle(preemptLoad(&slot.state))
+	state := producerSourceLifecycle(preemptLoad(&slot.state))
 	switch state {
-	case taskControlActive, taskControlClosing:
+	case producerSourceActive, producerSourceClosing:
 		generation := preemptLoad(&slot.generation)
 		id, valid := MakeOperationIDAtRoute(OperationSourceControl, source.route, index+1, generation)
 		if !valid || slot.task == nil {
@@ -342,55 +296,52 @@ func (source *TaskControlSource) PublishPass(p *P) (delivered, discarded uint32,
 func BeginCloseTaskControl(source *TaskControlSource, p *P, id OperationID) bool {
 	slot, ok := taskControlSlotFor(source, id)
 	return ok && validTaskControlOwner(source, p) && preemptLoad(&slot.generation) == id.Generation &&
-		slot.task != nil &&
-		preemptCompareAndSwap(&slot.state, uint32(taskControlActive), uint32(taskControlClosing)) &&
-		taskControlSealProducers(slot)
+		slot.task != nil && beginProducerSourceClose(&slot.producerSourceSlot) == producerSourceCloseStarted
 }
 
 func ConfirmTaskControlQuiesced(source *TaskControlSource, p *P, id OperationID) bool {
 	slot, ok := taskControlSlotFor(source, id)
 	if !ok || !validTaskControlOwner(source, p) || preemptLoad(&slot.generation) != id.Generation ||
-		preemptLoad(&slot.state) != uint32(taskControlClosing) || !taskControlProducersQuiesced(slot) ||
+		preemptLoad(&slot.state) != uint32(producerSourceClosing) || !producerSourceSlotQuiesced(&slot.producerSourceSlot) ||
 		preemptLoad(&slot.request) != uint32(TaskCancelNone) || slot.task == nil || slot.task.taskControlLeases == 0 {
 		return false
 	}
 	slot.task.taskControlLeases--
 	slot.task = nil
-	preemptStore(&slot.state, uint32(taskControlQuiesced))
-	return true
+	return markProducerSourceQuiesced(&slot.producerSourceSlot)
 }
 
 func RetireTaskControl(source *TaskControlSource, p *P, id OperationID) bool {
 	slot, ok := taskControlSlotFor(source, id)
 	return ok && validTaskControlOwner(source, p) && preemptLoad(&slot.generation) == id.Generation &&
-		taskControlProducersQuiesced(slot) && preemptLoad(&slot.request) == uint32(TaskCancelNone) && slot.task == nil &&
-		preemptCompareAndSwap(&slot.state, uint32(taskControlQuiesced), uint32(taskControlFree))
+		producerSourceSlotQuiesced(&slot.producerSourceSlot) && preemptLoad(&slot.request) == uint32(TaskCancelNone) &&
+		slot.task == nil && recycleProducerSourceSlot(&slot.producerSourceSlot)
 }
 
-func validTaskControlTerminalSlot(source *TaskControlSource, index int, state taskControlLifecycle) bool {
+func validTaskControlTerminalSlot(source *TaskControlSource, index int, state producerSourceLifecycle) bool {
 	slot := &source.slots[index]
 	request := TaskCancelKind(preemptLoad(&slot.request))
 	if request != TaskCancelNone && !validTaskCancelKind(request) {
 		return false
 	}
 	switch state {
-	case taskControlFree:
+	case producerSourceFree:
 		return taskControlReusableSlot(slot)
-	case taskControlActive, taskControlClosing:
+	case producerSourceActive, producerSourceClosing:
 		generation := preemptLoad(&slot.generation)
 		if _, ok := MakeOperationIDAtRoute(OperationSourceControl, source.route, uint32(index)+1, generation); !ok ||
 			slot.task == nil || slot.task.taskControlLeases == 0 {
 			return false
 		}
 		inflight := preemptLoad(&slot.inflight)
-		if state == taskControlActive {
+		if state == producerSourceActive {
 			return inflight&producerAdmissionClosed == 0
 		}
 		return inflight&producerAdmissionClosed != 0
-	case taskControlQuiesced:
+	case producerSourceQuiesced:
 		generation := preemptLoad(&slot.generation)
 		_, ok := MakeOperationIDAtRoute(OperationSourceControl, source.route, uint32(index)+1, generation)
-		return ok && request == TaskCancelNone && taskControlProducersQuiesced(slot) && slot.task == nil
+		return ok && request == TaskCancelNone && producerSourceSlotQuiesced(&slot.producerSourceSlot) && slot.task == nil
 	default:
 		return false
 	}
@@ -399,15 +350,15 @@ func validTaskControlTerminalSlot(source *TaskControlSource, index int, state ta
 func taskControlTerminalLeaseCountsValid(source *TaskControlSource) bool {
 	for index := range source.slots {
 		slot := &source.slots[index]
-		state := taskControlLifecycle(preemptLoad(&slot.state))
-		if state != taskControlActive && state != taskControlClosing {
+		state := producerSourceLifecycle(preemptLoad(&slot.state))
+		if state != producerSourceActive && state != producerSourceClosing {
 			continue
 		}
 		needed := uint8(1)
 		for prior := 0; prior < index; prior++ {
 			other := &source.slots[prior]
-			otherState := taskControlLifecycle(preemptLoad(&other.state))
-			if (otherState == taskControlActive || otherState == taskControlClosing) && other.task == slot.task {
+			otherState := producerSourceLifecycle(preemptLoad(&other.state))
+			if (otherState == producerSourceActive || otherState == producerSourceClosing) && other.task == slot.task {
 				if needed == ^uint8(0) {
 					return false
 				}
@@ -431,7 +382,7 @@ func taskControlSourceCanBeginTerminalClose(source *TaskControlSource, p *P) boo
 		return false
 	}
 	for index := range source.slots {
-		state := taskControlLifecycle(preemptLoad(&source.slots[index].state))
+		state := producerSourceLifecycle(preemptLoad(&source.slots[index].state))
 		if !validTaskControlTerminalSlot(source, index, state) {
 			return false
 		}
@@ -449,19 +400,18 @@ func beginTaskControlSourceTerminalClose(source *TaskControlSource, p *P) bool {
 	}
 	for index := range source.slots {
 		slot := &source.slots[index]
-		switch state := taskControlLifecycle(preemptLoad(&slot.state)); state {
-		case taskControlFree:
-		case taskControlActive:
-			if !preemptCompareAndSwap(&slot.state, uint32(state), uint32(taskControlClosing)) ||
-				!taskControlSealProducers(slot) {
+		switch state := producerSourceLifecycle(preemptLoad(&slot.state)); state {
+		case producerSourceFree:
+		case producerSourceActive:
+			if beginProducerSourceClose(&slot.producerSourceSlot) != producerSourceCloseStarted {
 				return false
 			}
-		case taskControlClosing:
-			if !taskControlSealProducers(slot) {
+		case producerSourceClosing:
+			if !producerAdmissionSeal(&slot.inflight) {
 				return false
 			}
-		case taskControlQuiesced:
-			if !preemptCompareAndSwap(&slot.state, uint32(state), uint32(taskControlFree)) {
+		case producerSourceQuiesced:
+			if !recycleProducerSourceSlot(&slot.producerSourceSlot) {
 				return false
 			}
 		default:
@@ -479,23 +429,24 @@ func (source *TaskControlSource) publishTerminalPass(p *P, terminal *G) (deliver
 }
 
 func taskControlSourceCanFinishTerminalClose(source *TaskControlSource, p *P) bool {
-	if !validTaskControlOwner(source, p) || preemptLoad(&source.pending) != 0 {
+	if !validTaskControlOwner(source, p) || routedProducerPending(&source.routedProducerSource) {
 		return false
 	}
 	for index := range source.slots {
 		slot := &source.slots[index]
-		state := taskControlLifecycle(preemptLoad(&slot.state))
+		state := producerSourceLifecycle(preemptLoad(&slot.state))
 		switch state {
-		case taskControlFree:
+		case producerSourceFree:
 			if !taskControlReusableSlot(slot) {
 				return false
 			}
-		case taskControlClosing:
-			if !validTaskControlTerminalSlot(source, index, state) || !taskControlProducersQuiesced(slot) ||
+		case producerSourceClosing:
+			if !validTaskControlTerminalSlot(source, index, state) ||
+				!producerSourceSlotQuiesced(&slot.producerSourceSlot) ||
 				preemptLoad(&slot.request) != uint32(TaskCancelNone) {
 				return false
 			}
-		case taskControlQuiesced:
+		case producerSourceQuiesced:
 			if !validTaskControlTerminalSlot(source, index, state) {
 				return false
 			}
@@ -517,17 +468,19 @@ func finishTaskControlSourceTerminalClose(source *TaskControlSource, p *P) bool 
 	}
 	for index := range source.slots {
 		slot := &source.slots[index]
-		if taskControlLifecycle(preemptLoad(&slot.state)) != taskControlClosing {
+		if producerSourceLifecycle(preemptLoad(&slot.state)) != producerSourceClosing {
 			continue
 		}
 		slot.task.taskControlLeases--
 		slot.task = nil
-		preemptStore(&slot.state, uint32(taskControlQuiesced))
+		if !markProducerSourceQuiesced(&slot.producerSourceSlot) {
+			return false
+		}
 	}
 	for index := range source.slots {
 		slot := &source.slots[index]
-		if taskControlLifecycle(preemptLoad(&slot.state)) == taskControlQuiesced &&
-			!preemptCompareAndSwap(&slot.state, uint32(taskControlQuiesced), uint32(taskControlFree)) {
+		if producerSourceLifecycle(preemptLoad(&slot.state)) == producerSourceQuiesced &&
+			!recycleProducerSourceSlot(&slot.producerSourceSlot) {
 			return false
 		}
 	}
@@ -535,7 +488,7 @@ func finishTaskControlSourceTerminalClose(source *TaskControlSource, p *P) bool 
 }
 
 func taskControlSourceEmpty(source *TaskControlSource, p *P) bool {
-	if source == nil || source.owner != p || preemptLoad(&source.pending) != 0 {
+	if source == nil || !routedProducerHeaderEmpty(&source.routedProducerSource, p) {
 		return false
 	}
 	for index := range source.slots {
@@ -547,13 +500,10 @@ func taskControlSourceEmpty(source *TaskControlSource, p *P) bool {
 }
 
 func BindTaskControlSourceAtRoute(source *TaskControlSource, p *P, route RouteID) bool {
-	if p == nil || !route.Valid() || !taskControlSourceEmpty(source, nil) ||
-		source.route != 0 && source.route != route {
+	if !taskControlSourceEmpty(source, nil) {
 		return false
 	}
-	source.route = route
-	source.owner = p
-	return true
+	return bindRoutedProducerSource(&source.routedProducerSource, p, route)
 }
 
 // BindTaskControlSource is the explicit route-1 compatibility binding.
@@ -565,8 +515,7 @@ func UnbindTaskControlSource(source *TaskControlSource, p *P) bool {
 	if !taskControlSourceEmpty(source, p) {
 		return false
 	}
-	source.owner = nil
-	return true
+	return unbindRoutedProducerSource(&source.routedProducerSource, p)
 }
 
 func (source *TaskControlSource) CanRelease() bool {
@@ -574,10 +523,10 @@ func (source *TaskControlSource) CanRelease() bool {
 }
 
 func (source *TaskControlSource) Route() (RouteID, bool) {
-	if source == nil || !source.route.Valid() {
+	if source == nil {
 		return 0, false
 	}
-	return source.route, true
+	return routedProducerRoute(&source.routedProducerSource)
 }
 
 type TaskControlExecutorPostResult struct {

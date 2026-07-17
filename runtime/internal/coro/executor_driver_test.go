@@ -285,7 +285,7 @@ func TestExecutorDriverManualSourceUsesUnifiedPublishedEpochAndParkGate(t *testi
 	}
 	if unrelatedSlot.record.phase != operationActive || unrelatedSlot.record.disposition != OperationDispositionPending ||
 		unrelatedSlot.record.resolutionApplied || unrelatedSlot.record.cancelRequested ||
-		preemptLoad(&unrelatedSlot.state) != uint32(manualOperationActive) {
+		preemptLoad(&unrelatedSlot.state) != uint32(producerSourceActive) {
 		t.Fatal("batch apply inspected or changed an unrelated live manual slot")
 	}
 

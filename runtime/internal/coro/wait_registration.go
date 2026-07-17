@@ -91,10 +91,11 @@ const (
 
 type waitRegistrationSlot struct {
 	// The producer-visible prefix contains only naturally aligned uint32 words.
-	// All accesses to these fields are atomic.
-	state      uint32
-	generation uint32
-	inflight   uint32
+	// All accesses to these fields are atomic. WaitRegistration fuses mailbox
+	// and lifecycle states after Active, so it must not use the common
+	// close/quiesce/recycle helpers: its Posting and Posted values overlap the
+	// common Closing and Quiesced values.
+	producerSourceSlot
 
 	// The scheduler-only suffix is published before Active and cleared before
 	// Free. A producer never reads or writes any of these Go pointers.
@@ -158,26 +159,6 @@ func registrationSlot(table *WaitRegistrationTable, handle WaitRegistrationHandl
 	return &table.slots[handle.Slot-1], true
 }
 
-func registrationAcquireProducer(slot *waitRegistrationSlot) bool {
-	return slot != nil && producerAdmissionAcquire(&slot.inflight)
-}
-
-func registrationReleaseProducer(slot *waitRegistrationSlot) {
-	producerAdmissionRelease(&slot.inflight)
-}
-
-// registrationSealProducers atomically closes admission while preserving the
-// count of callbacks that entered first. An acquire CAS that was prepared from
-// an open word either wins before this CAS and is included in the count, or
-// loses to the closed bit and cannot enter afterward.
-func registrationSealProducers(slot *waitRegistrationSlot) bool {
-	return slot != nil && producerAdmissionSeal(&slot.inflight)
-}
-
-func registrationProducersQuiesced(slot *waitRegistrationSlot) bool {
-	return slot != nil && producerAdmissionQuiesced(&slot.inflight)
-}
-
 // Register reserves one slot for an armed token. It is scheduler-thread-only
 // and must run before the platform operation is submitted. Owner fields are
 // initialized before the release publication of Active.
@@ -196,37 +177,21 @@ func (table *WaitRegistrationTable) Register(p *P, token *WaitToken, ticket Wait
 	}
 	for index := range table.slots {
 		slot := &table.slots[index]
-		if preemptLoad(&slot.state) != uint32(waitRegistrationFree) {
+		if !producerSourceSlotReusable(&slot.producerSourceSlot) || preemptLoad(&slot.generation) == ^uint32(0) {
 			continue
 		}
-		generation := preemptLoad(&slot.generation)
-		if generation == ^uint32(0) {
+		generation, begun := beginProducerSourceSlot(&slot.producerSourceSlot)
+		if !begun {
 			continue
-		}
-		inflight := preemptLoad(&slot.inflight)
-		if (generation == 0 && inflight != 0) || (generation != 0 && inflight != producerAdmissionClosed) ||
-			!preemptCompareAndSwap(&slot.state, uint32(waitRegistrationFree), uint32(waitRegistrationInitializing)) {
-			continue
-		}
-		if !registrationSealProducers(slot) || !registrationProducersQuiesced(slot) {
-			// Initializing remains fail-closed if an invalid pre-registration
-			// producer raced the first use of a zero-value slot.
-			continue
-		}
-		generation++
-		if generation == 0 {
-			return WaitRegistrationHandle{}, false
 		}
 		slot.p = p
 		slot.token = token
 		slot.ticket = ticket
-		preemptStore(&slot.generation, generation)
-		if !producerAdmissionReopen(&slot.inflight) {
-			// Initializing is a permanent fail-closed state if the sealed
-			// admission word was corrupted by an out-of-contract owner.
+		if !activateProducerSourceSlot(&slot.producerSourceSlot, generation) {
+			// The slot remains non-reusable and fail-closed if an out-of-contract
+			// owner corrupted either the lifecycle or sealed admission word.
 			return WaitRegistrationHandle{}, false
 		}
-		preemptStore(&slot.state, uint32(waitRegistrationActive))
 		return WaitRegistrationHandle{Slot: uint32(index) + 1, Generation: generation}, true
 	}
 	return WaitRegistrationHandle{}, false
@@ -241,12 +206,14 @@ func (table *WaitRegistrationTable) Post(handle WaitRegistrationHandle) WaitRegi
 	if !ok {
 		return WaitRegistrationPostInvalid
 	}
-	if !registrationAcquireProducer(slot) {
+	switch acquireProducerSourceGeneration(&slot.producerSourceSlot, handle.Generation) {
+	case producerSourceAcquireClosed:
 		return WaitRegistrationPostClosed
-	}
-	if preemptLoad(&slot.generation) != handle.Generation {
-		registrationReleaseProducer(slot)
+	case producerSourceAcquireStale:
 		return WaitRegistrationPostStale
+	case producerSourceAcquired:
+	default:
+		return WaitRegistrationPostInvalid
 	}
 	for {
 		state := waitRegistrationState(preemptLoad(&slot.state))
@@ -259,18 +226,18 @@ func (table *WaitRegistrationTable) Post(handle WaitRegistrationHandle) WaitRegi
 			// owner, before Posted publishes it to the scheduler.
 			preemptStore(&slot.state, uint32(waitRegistrationPosted))
 			preemptStore(&table.pending, 1)
-			registrationReleaseProducer(slot)
+			producerAdmissionRelease(&slot.inflight)
 			return WaitRegistrationPosted
 		case waitRegistrationPosting, waitRegistrationPosted, waitRegistrationDraining, waitRegistrationDelivered:
-			registrationReleaseProducer(slot)
+			producerAdmissionRelease(&slot.inflight)
 			return WaitRegistrationPostDuplicate
 		case waitRegistrationClosingCancel, waitRegistrationClosingDelivered, waitRegistrationQuiescing,
 			waitRegistrationQuiescedCanceled, waitRegistrationQuiescedDelivered, waitRegistrationInitializing,
 			waitRegistrationFree:
-			registrationReleaseProducer(slot)
+			producerAdmissionRelease(&slot.inflight)
 			return WaitRegistrationPostClosed
 		default:
-			registrationReleaseProducer(slot)
+			producerAdmissionRelease(&slot.inflight)
 			return WaitRegistrationPostInvalid
 		}
 	}
@@ -370,7 +337,7 @@ func (table *WaitRegistrationTable) BeginClose(handle WaitRegistrationHandle) Wa
 		switch state {
 		case waitRegistrationActive:
 			if preemptCompareAndSwap(&slot.state, uint32(state), uint32(waitRegistrationClosingCancel)) {
-				if !registrationSealProducers(slot) {
+				if !producerAdmissionSeal(&slot.inflight) {
 					return WaitRegistrationCloseInvalid
 				}
 				return WaitRegistrationCloseStarted
@@ -379,7 +346,7 @@ func (table *WaitRegistrationTable) BeginClose(handle WaitRegistrationHandle) Wa
 			return WaitRegistrationCompletionPending
 		case waitRegistrationDelivered:
 			if preemptCompareAndSwap(&slot.state, uint32(state), uint32(waitRegistrationClosingDelivered)) {
-				if !registrationSealProducers(slot) {
+				if !producerAdmissionSeal(&slot.inflight) {
 					return WaitRegistrationCloseInvalid
 				}
 				return WaitRegistrationCloseStarted
@@ -403,7 +370,8 @@ func (table *WaitRegistrationTable) BeginClose(handle WaitRegistrationHandle) Wa
 // losing completion producer cannot still access the table or frame storage.
 func (table *WaitRegistrationTable) ConfirmQuiesced(handle WaitRegistrationHandle) (WaitCancelResult, bool) {
 	slot, ok := registrationSlot(table, handle)
-	if !ok || preemptLoad(&slot.generation) != handle.Generation || !registrationProducersQuiesced(slot) ||
+	if !ok || preemptLoad(&slot.generation) != handle.Generation ||
+		!producerSourceSlotQuiesced(&slot.producerSourceSlot) ||
 		slot.p == nil || (table.owner != nil && table.owner != slot.p) {
 		return WaitCancelInvalid, false
 	}
@@ -444,7 +412,8 @@ func (table *WaitRegistrationTable) ConfirmQuiesced(handle WaitRegistrationHandl
 // generation, and stale handles remain harmless.
 func (table *WaitRegistrationTable) Retire(handle WaitRegistrationHandle) bool {
 	slot, ok := registrationSlot(table, handle)
-	if !ok || preemptLoad(&slot.generation) != handle.Generation || !registrationProducersQuiesced(slot) {
+	if !ok || preemptLoad(&slot.generation) != handle.Generation ||
+		!producerSourceSlotQuiesced(&slot.producerSourceSlot) {
 		return false
 	}
 	state := waitRegistrationState(preemptLoad(&slot.state))
@@ -515,10 +484,7 @@ func registrationTableEmpty(table *WaitRegistrationTable, owner *P) bool {
 	}
 	for index := range table.slots {
 		slot := &table.slots[index]
-		inflight := preemptLoad(&slot.inflight)
-		generation := preemptLoad(&slot.generation)
-		if preemptLoad(&slot.state) != uint32(waitRegistrationFree) ||
-			(generation == 0 && inflight != 0) || (generation != 0 && inflight != producerAdmissionClosed) ||
+		if !producerSourceSlotReusable(&slot.producerSourceSlot) ||
 			slot.p != nil || slot.token != nil || slot.ticket != 0 {
 			return false
 		}
