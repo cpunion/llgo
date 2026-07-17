@@ -139,7 +139,7 @@ physical ParkSource slot
 - Timer 没有外部 producer，due drain时可以同时完成、detach和recycle。
 - fd/host/worker operation可以先形成 pointer-free tombstone，等待backend quiesce后再recycle。
 
-一个 G 同时只会因一个逻辑 wait进入 `GWaiting`。稳定G中应内嵌完整`ParkState`，而不只是一个临时`WaitToken`；它至少包含ticket、phase、outcome和wait-set reference。ticket generation的wrap/reset只能在不再有raw token pointer逃逸、所有关联source都已detach后发生，不得依赖29-bit计数器fail-stop作为正常运行策略。
+一个 G 同时只会因一个逻辑 wait进入 `GWaiting`。稳定G中应内嵌完整`ParkState`，而不只是一个临时`WaitToken`；它至少包含ticket、phase、outcome和wait-set reference。logical ticket使用两个显式`u32`的epoch/generation，只在完全consumed且所有source已detach后递增，epoch耗尽时fail closed，不能主动回绕到旧identity；ticket不进入producer ABI或跨线程cancel queue。
 
 `select` 可以注册多个source candidate，但它们共享同一个 G-owned winner cell；loser在winner确定后取消并完成detach barrier，之后winner才可以ready。Detached/background operation使用独立 operation record，不占用 G 当前 wait cell。
 
@@ -149,7 +149,7 @@ physical ParkSource slot
 
 `select` 使用一个稳定`WaitSet`：
 
-- 一个owner G、一个logical ticket和一个原子winner cell；
+- 一个owner G、一个logical ticket和一个owner-P winner cell；producer只发布source fact，不直接竞争或修改winner；
 - 多个candidate，每个持有独立`OpID`、case index、result record和detach phase；
 - ready的candidate只尝试claim winner，不直接唤醒G；
 - 败选candidate返回`Lost`并进入cancel/detach，不得当作stale/corruption；
@@ -292,6 +292,9 @@ POSIX regular file、DNS或阻塞C调用根据target capability选择：
 - Timer frame retention按两个timer符号和精确SSA形状硬编码，证明通用lifetime core缺失。
 - Phase 23已将ExecutorDriver的bind/drain/pending/deadline/empty/close/unbind收口到静态`ExecutorSourceSet`；但现有wait/timer source仍在各自drain中立即`CompleteWait`，尚未改为完整snapshot的completion sink批量决策。
 - Phase 23已将每个G run slice的scheduler service budget与active timer解耦；但WASM/embedded的`RunSlice`返回host边界、外部tick/sysmon请求和post-optimization safepoint上界证明仍未完成。
+- Phase 23已实现独立的V2 `OperationID/OperationRecord`、G-owned `ParkState`和owner-P `CompletionSink`核心：支持多source完整snapshot、与扫描顺序无关的唯一select winner、普通取消与task/shutdown abort竞态、败者resolution-ack/detach barrier、物理quiesce/recycle分离、结果lease、准备失败清理以及不回绕的双`u32`logical ticket。该核心目前仍是standalone，尚未内嵌到`G`或接入现有wait/timer SourceSet。
+- 执行取消目前只有owner-P logical terminal语义；稳定`TaskHandle`、POD跨线程cancel ingress、doorbell、running G safepoint观察、waiting G唤醒、child传播和shutdown/Goexit cleanup接线尚未实现。
+- `CompletionSink`当前使用Phase 23 host固定容量；SourceSet/取消队列尚未证明统一admission bound，embedded/baremetal和未来multi-P必须使用生成的容量profile。
 - 当前driver固定一个P，尚未实现native多P/M、global injection和work stealing。
 
 因此Phase 22应视为首个可运行vertical slice，而不是“核心已经完成后新增一个timer功能”。
