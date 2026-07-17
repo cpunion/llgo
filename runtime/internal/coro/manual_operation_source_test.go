@@ -103,7 +103,7 @@ func TestManualOperationSourceAffectedResolveAndUnpublishedLoserDetach(t *testin
 	thirdSlot, _ := manualOperationSlotFor(source, ids[2])
 	if operationCandidateIsPublished(&thirdSlot.record) || thirdSlot.record.phase != operationDetached ||
 		thirdSlot.record.disposition != OperationDispositionLost || !thirdSlot.record.resolutionApplied ||
-		preemptLoad(&thirdSlot.state) != uint32(manualOperationClosing) {
+		preemptLoad(&thirdSlot.state) != uint32(producerSourceClosing) {
 		t.Fatal("unpublished select loser was not detached by source apply pass")
 	}
 
@@ -176,12 +176,12 @@ func TestManualOperationSourceApplyOneRequiresExactGenerationAndRecord(t *testin
 		t.Fatalf("copied-record apply = %d", result)
 	}
 	if slot.record.phase != operationActive || slot.record.resolutionApplied ||
-		preemptLoad(&slot.state) != uint32(manualOperationActive) {
+		preemptLoad(&slot.state) != uint32(producerSourceActive) {
 		t.Fatal("invalid exact apply changed live operation")
 	}
 	if result := source.ApplyOne(p, id, &slot.record); result != OperationApplyDetached ||
 		!ParkReady(state, ticket) || slot.record.phase != operationDetached || !slot.record.resolutionApplied ||
-		preemptLoad(&slot.state) != uint32(manualOperationClosing) {
+		preemptLoad(&slot.state) != uint32(producerSourceClosing) {
 		t.Fatalf("exact manual apply = %d", result)
 	}
 	if result := source.ApplyOne(p, id, &slot.record); result != OperationApplyInvalid {
@@ -212,8 +212,8 @@ func TestManualOperationSourceLateAdmittedLoserRequiresDrainBeforeQuiescence(t *
 
 	// Model a producer which entered and observed the active generation before
 	// owner close, but was descheduled before publishing its mailbox.
-	if !manualOperationAcquireProducer(slot) || preemptLoad(&slot.generation) != id.Generation ||
-		preemptLoad(&slot.state) != uint32(manualOperationActive) {
+	if acquireProducerSourceGeneration(&slot.producerSourceSlot, id.Generation) != producerSourceAcquired ||
+		preemptLoad(&slot.generation) != id.Generation || preemptLoad(&slot.state) != uint32(producerSourceActive) {
 		t.Fatal("admit manual producer")
 	}
 	if !RequestParkCancel(state, ticket, ParkCancelOperation) {
@@ -240,7 +240,9 @@ func TestManualOperationSourceLateAdmittedLoserRequiresDrainBeforeQuiescence(t *
 	}
 	preemptStore(&slot.mailbox, uint32(manualOperationMailboxPosted))
 	preemptStore(&source.pending, 1)
-	manualOperationReleaseProducer(slot)
+	if !producerAdmissionReleaseChecked(&slot.inflight) {
+		t.Fatal("release manual producer")
+	}
 	if source.ConfirmQuiesced(p, id) {
 		t.Fatal("manual source quiesced before final mailbox drain")
 	}

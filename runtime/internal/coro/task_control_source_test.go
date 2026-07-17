@@ -23,6 +23,13 @@ import (
 	"unsafe"
 )
 
+const wantSchedulerGSize = 168 + (unsafe.Sizeof(uintptr(0))/4-1)*120
+
+var (
+	_ [wantSchedulerGSize - unsafe.Sizeof(G{})]byte
+	_ [unsafe.Sizeof(G{}) - wantSchedulerGSize]byte
+)
+
 func closeTaskControlFixture(t *testing.T, source *TaskControlSource, p *P, id OperationID) {
 	t.Helper()
 	if !BeginCloseTaskControl(source, p, id) {
@@ -85,16 +92,269 @@ func TestTaskControlSourceDeliversStrongestRequestOnOwner(t *testing.T) {
 	finishTaskCancelFixture(t, p, g, TaskCancelShutdown)
 }
 
+func TestTaskControlRegisteredDeliveryDoesNotAuditDistantReadyTail(t *testing.T) {
+	p, task := newReadyTaskCancelFixture(t)
+	var source TaskControlSource
+	if !BindTaskControlSource(&source, p) {
+		t.Fatal("bind task control source")
+	}
+	id, ok := RegisterTaskControl(&source, p, task)
+	if !ok {
+		t.Fatal("register task control before extending ready queue")
+	}
+
+	const unrelated = 256
+	fillers := make([]*G, unrelated)
+	for index := range fillers {
+		fillers[index] = new(G)
+		if !InitG(fillers[index]) {
+			t.Fatalf("initialize unrelated ready G %d", index)
+		}
+		fillers[index].state = GRunnable
+		if !Enqueue(p, fillers[index]) {
+			t.Fatalf("enqueue unrelated ready G %d", index)
+		}
+	}
+	// A distant malformed cycle proves that the public arbitrary-G audit still
+	// walks the whole queue. The exact registered endpoint must not inspect it:
+	// its owner/lease and the target's local runnable fields are sufficient in
+	// the current no-migration single-P runtime.
+	p.readyTail.nextReady = fillers[unrelated/2]
+	if RequestTaskCancellation(p, task, TaskCancelAbort) ||
+		task.park.taskCancelKind != TaskCancelNone || task.park.taskCancelPhase != taskCancelIdle {
+		t.Fatal("public task cancellation skipped corrupt distant queue audit")
+	}
+	if result := source.Post(id, TaskCancelAbort); result != TaskControlPosted {
+		t.Fatalf("post registered cancellation = %d", result)
+	}
+	if delivered, discarded, published := source.PublishPass(p); !published || delivered != 1 || discarded != 0 {
+		t.Fatalf("O(1) registered delivery = (%d, %d, %t)", delivered, discarded, published)
+	}
+	p.readyTail.nextReady = nil
+	if kind, pending := TaskCancellationOf(p, task); !pending || kind != TaskCancelAbort {
+		t.Fatalf("registered cancellation after restoring audit queue = (%d, %t)", kind, pending)
+	}
+	closeTaskControlFixture(t, &source, p, id)
+	if !UnbindTaskControlSource(&source, p) {
+		t.Fatal("unbind registered delivery source")
+	}
+	if kind, claimed := ClaimTaskCancellation(p, task); !claimed || kind != TaskCancelAbort {
+		t.Fatalf("claim registered cancellation = (%d, %t)", kind, claimed)
+	}
+	finishTaskCancelFixture(t, p, task, TaskCancelAbort)
+}
+
+func TestTaskControlRegisteredDeliveryDoesNotScanParkCandidates(t *testing.T) {
+	p, task := newReadyTaskCancelFixture(t)
+	var source TaskControlSource
+	if !BindTaskControlSource(&source, p) {
+		t.Fatal("bind task control source")
+	}
+	id, ok := RegisterTaskControl(&source, p, task)
+	if !ok || dequeue(p) != task {
+		t.Fatal("register and dequeue task before park preparation")
+	}
+	task.state = GRunning
+	task.runP = p
+	p.current = task
+
+	const candidates = 256
+	ticket, ok := BeginParkSet(&task.park, candidates, 211)
+	records := make([]OperationRecord, candidates)
+	if !ok {
+		t.Fatal("begin long registered park")
+	}
+	for index := range records {
+		operationID, made := MakeOperationID(OperationSourceManual, uint32(index)+1, 1)
+		if !made || !InitOperation(&records[index], operationID) ||
+			!AttachParkOperation(&task.park, ticket, &records[index], uint32(index)+1) {
+			t.Fatalf("attach registered park candidate %d", index)
+		}
+	}
+	if !SealParkSet(&task.park, ticket) {
+		t.Fatal("seal long registered park")
+	}
+	var middle, tail *ParkLink
+	count := 0
+	for link := task.park.head; link != nil; link = link.next {
+		if count == candidates/2 {
+			middle = link
+		}
+		tail = link
+		count++
+	}
+	if count != candidates || middle == nil || tail == nil || tail.next != nil {
+		t.Fatalf("long park chain = (count=%d middle=%p tail=%p next=%p)", count, middle, tail, tail.next)
+	}
+
+	// Poison only a distant tail. The public path performs its full ParkLink
+	// audit and rejects it; exact registered delivery must inspect only the
+	// already-audited scalar/head record before setting the sticky cancel fact.
+	tail.next = middle
+	if RequestTaskCancellation(p, task, TaskCancelAbort) ||
+		task.park.taskCancelKind != TaskCancelNone || task.park.cancelKind != ParkCancelNone {
+		t.Fatal("public task cancellation skipped corrupt candidate audit")
+	}
+	if result := source.Post(id, TaskCancelShutdown); result != TaskControlPosted {
+		t.Fatalf("post registered long-park cancellation = %d", result)
+	}
+	if delivered, discarded, published := source.PublishPass(p); !published || delivered != 1 || discarded != 0 {
+		t.Fatalf("registered long-park delivery = (%d, %d, %t)", delivered, discarded, published)
+	}
+	if task.park.taskCancelKind != TaskCancelShutdown || task.park.taskCancelPhase != taskCancelRequested ||
+		task.park.cancelKind != ParkCancelShutdown {
+		t.Fatalf("registered long-park cancel = (task=%d phase=%d park=%d)",
+			task.park.taskCancelKind, task.park.taskCancelPhase, task.park.cancelKind)
+	}
+	tail.next = nil
+	closeTaskControlFixture(t, &source, p, id)
+	if !UnbindTaskControlSource(&source, p) {
+		t.Fatal("unbind long-park task control source")
+	}
+}
+
+func TestTaskControlRegisteredHeadersRejectLocalDamage(t *testing.T) {
+	t.Run("head", func(t *testing.T) {
+		var state ParkState
+		ticket, ok := BeginParkSet(&state, 1, 223)
+		id, made := MakeOperationID(OperationSourceManual, 1, 1)
+		var record OperationRecord
+		if !ok || !made || !InitOperation(&record, id) ||
+			!AttachParkOperation(&state, ticket, &record, 1) ||
+			!validRegisteredRunningParkHeader(&state) {
+			t.Fatal("prepare valid registered park header")
+		}
+		record.link.previous = &record.link
+		if validRegisteredRunningParkHeader(&state) {
+			t.Fatal("registered header accepted corrupt local head predecessor")
+		}
+		record.link.previous = nil
+		record.link.park = nil
+		if validRegisteredRunningParkHeader(&state) {
+			t.Fatal("registered header accepted corrupt local head owner")
+		}
+		record.link.park = &state
+		record.disposition = OperationDispositionWinner
+		if validRegisteredRunningParkHeader(&state) {
+			t.Fatal("registered header accepted terminal local head disposition")
+		}
+		record.disposition = OperationDispositionPending
+		record.resultState = operationResultOwned
+		if validRegisteredRunningParkHeader(&state) {
+			t.Fatal("registered header accepted invalid pending result ownership")
+		}
+	})
+
+	t.Run("winner-record", func(t *testing.T) {
+		var state ParkState
+		ticket, ok := BeginParkSet(&state, 1, 227)
+		id, made := MakeOperationID(OperationSourceManual, 1, 1)
+		var record OperationRecord
+		if !ok || !made || !InitOperation(&record, id) ||
+			!AttachParkOperation(&state, ticket, &record, 1) || !SealParkSet(&state, ticket) ||
+			!CommitParkSet(&state, ticket) || PublishOperationCompletion(&record, id) != OperationCompletionPublished {
+			t.Fatal("prepare registered ready winner")
+		}
+		if resolution, resolved := ResolveParkSnapshot(&state, ticket); !resolved ||
+			resolution != (CompletionResolution{WaitSets: 1, Completed: 1, Winners: 1}) ||
+			!AcknowledgeOperationResolution(&record, id, OperationDispositionWinner) ||
+			!DetachParkOperation(&state, ticket, &record, id) || !ParkReady(&state, ticket) ||
+			!validRegisteredRunnableParkHeader(&state) {
+			t.Fatalf("resolve valid registered ready winner = (%+v, %t)", resolution, resolved)
+		}
+		record.phase = operationActive
+		if validRegisteredRunnableParkHeader(&state) {
+			t.Fatal("registered header accepted non-detached winner record")
+		}
+		record.phase = operationDetached
+		record.resultState = operationResultEmpty
+		if validRegisteredRunnableParkHeader(&state) {
+			t.Fatal("registered header accepted winner without owned result")
+		}
+	})
+}
+
+func TestTaskControlRegisteredDeliveryProofFailsClosed(t *testing.T) {
+	cases := []string{
+		"source",
+		"owner",
+		"slot",
+		"generation",
+		"slot-lifecycle",
+		"task",
+		"lease",
+		"task-state",
+		"task-local-fields",
+	}
+	for _, name := range cases {
+		t.Run(name, func(t *testing.T) {
+			p, task := newReadyTaskCancelFixture(t)
+			var source TaskControlSource
+			if !BindTaskControlSource(&source, p) {
+				t.Fatal("bind task control source")
+			}
+			id, ok := RegisterTaskControl(&source, p, task)
+			if !ok {
+				t.Fatal("register task control")
+			}
+			slot, valid := taskControlSlotFor(&source, id)
+			if !valid {
+				t.Fatal("resolve registered task control slot")
+			}
+			proofSource, proofP, proofSlot, proofID := &source, p, slot, id
+			switch name {
+			case "source":
+				proofSource = new(TaskControlSource)
+				if !BindTaskControlSource(proofSource, p) {
+					t.Fatal("bind mismatched task control source")
+				}
+			case "owner":
+				proofP = new(P)
+			case "slot":
+				proofSlot = &source.slots[1]
+			case "generation":
+				proofID.Generation++
+			case "slot-lifecycle":
+				preemptStore(&slot.state, uint32(producerSourceInitializing))
+			case "task":
+				slot.task = nil
+			case "lease":
+				task.taskControlLeases = 0
+			case "task-state":
+				task.state = GNew
+			case "task-local-fields":
+				task.queued = false
+			default:
+				t.Fatalf("unknown proof case %q", name)
+			}
+			if got, owned := registeredTaskControlDelivery(proofSource, proofP, proofSlot, proofID); owned || got != nil {
+				t.Fatalf("mismatched registered proof = (%p, %t)", got, owned)
+			}
+			if requestRegisteredTaskCancellation(proofSource, proofP, proofSlot, proofID, TaskCancelAbort) ||
+				task.park.taskCancelKind != TaskCancelNone || task.park.taskCancelPhase != taskCancelIdle {
+				t.Fatal("mismatched registered proof mutated task cancellation")
+			}
+		})
+	}
+}
+
 func TestTaskControlLeaseUsesExistingGAlignmentPadding(t *testing.T) {
 	stateEnd := unsafe.Offsetof(G{}.state) + unsafe.Sizeof(GState(0))
 	leaseOffset := unsafe.Offsetof(G{}.taskControlLeases)
 	leaseEnd := leaseOffset + unsafe.Sizeof(G{}.taskControlLeases)
+	runActionOffset := unsafe.Offsetof(G{}.runAction)
 	pointerAlign := unsafe.Alignof(uintptr(0))
 	align := func(offset uintptr) uintptr { return (offset + pointerAlign - 1) &^ (pointerAlign - 1) }
 	rootOffset := unsafe.Offsetof(G{}.root)
-	if leaseOffset != stateEnd || align(stateEnd) != rootOffset || align(leaseEnd) != rootOffset {
-		t.Fatalf("task control lease changed G pointer layout: stateEnd=%d lease=%d..%d root=%d align=%d",
-			stateEnd, leaseOffset, leaseEnd, rootOffset, pointerAlign)
+	wantRootOffset := uintptr(12)
+	if pointerAlign == 8 {
+		wantRootOffset = 16
+	}
+	if unsafe.Offsetof(G{}.state) != 8 || leaseOffset != 9 || runActionOffset != 10 ||
+		leaseOffset != stateEnd || align(stateEnd) != rootOffset || align(leaseEnd+2) != rootOffset ||
+		rootOffset != wantRootOffset || unsafe.Sizeof(G{}) != wantSchedulerGSize {
+		t.Fatalf("G scalar padding/layout changed: state=%d lease=%d..%d runAction=%d root=%d size=%d align=%d",
+			unsafe.Offsetof(G{}.state), leaseOffset, leaseEnd, runActionOffset, rootOffset, unsafe.Sizeof(G{}), pointerAlign)
 	}
 }
 
@@ -139,7 +399,7 @@ func TestTaskControlSourceFinalDrainDeliversAdmittedLatePost(t *testing.T) {
 		t.Fatal("register task control")
 	}
 	slot, valid := taskControlSlotFor(&source, id)
-	if !valid || !taskControlAcquireProducer(slot) {
+	if !valid || acquireProducerSourceGeneration(&slot.producerSourceSlot, id.Generation) != producerSourceAcquired {
 		t.Fatal("admit producer before endpoint close")
 	}
 	if !BeginCloseTaskControl(&source, p, id) {
@@ -148,7 +408,9 @@ func TestTaskControlSourceFinalDrainDeliversAdmittedLatePost(t *testing.T) {
 	// Model a producer paused after validating Active but before publishing.
 	preemptStore(&slot.request, uint32(TaskCancelAbort))
 	preemptStore(&source.pending, 1)
-	taskControlReleaseProducer(slot)
+	if !producerAdmissionReleaseChecked(&slot.inflight) {
+		t.Fatal("release producer after endpoint close")
+	}
 	if ConfirmTaskControlQuiesced(&source, p, id) {
 		t.Fatal("confirmed endpoint before final late-fact drain")
 	}
@@ -395,9 +657,9 @@ func TestExecutorDriverTerminalCloseJoinsActiveTaskControls(t *testing.T) {
 	// target call which entered before the terminal seal but does not publish
 	// its durable fact or executor request tail until after the close action.
 	lateSlot, valid := taskControlSlotFor(control, late)
-	if !valid || !taskControlAcquireProducer(lateSlot) ||
+	if !valid || acquireProducerSourceGeneration(&lateSlot.producerSourceSlot, late.Generation) != producerSourceAcquired ||
 		preemptLoad(&lateSlot.generation) != late.Generation ||
-		preemptLoad(&lateSlot.state) != uint32(taskControlActive) {
+		preemptLoad(&lateSlot.state) != uint32(producerSourceActive) {
 		t.Fatal("admit late terminal control producer")
 	}
 
@@ -424,7 +686,7 @@ func TestExecutorDriverTerminalCloseJoinsActiveTaskControls(t *testing.T) {
 			closeAction, committed, driver.state, task.g.taskControlLeases,
 			task.g.park.taskCancelKind, task.g.park.taskCancelPhase)
 	}
-	if preemptLoad(&lateSlot.state) != uint32(taskControlClosing) ||
+	if preemptLoad(&lateSlot.state) != uint32(producerSourceClosing) ||
 		preemptLoad(&lateSlot.inflight) != producerAdmissionClosed|1 {
 		t.Fatalf("terminal seal did not retain admitted producer: state=%d inflight=%#x",
 			preemptLoad(&lateSlot.state), preemptLoad(&lateSlot.inflight))
@@ -448,7 +710,9 @@ func TestExecutorDriverTerminalCloseJoinsActiveTaskControls(t *testing.T) {
 		t.Fatal("publish admitted terminal-late request")
 	}
 	preemptStore(&control.pending, 1)
-	taskControlReleaseProducer(lateSlot)
+	if !producerAdmissionReleaseChecked(&lateSlot.inflight) {
+		t.Fatal("release terminal-late producer")
+	}
 	if request := registry.Request(executor); request != ExecutorRequestClosed {
 		t.Fatalf("terminal-late executor request = %d", request)
 	}

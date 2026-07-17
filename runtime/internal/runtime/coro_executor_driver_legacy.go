@@ -24,8 +24,8 @@ func coroProgramBindExecutorDriverV1(driver *coro.ExecutorDriver, p *coroP, regi
 	return coro.BindExecutor(driver, p, registry, handle, waits)
 }
 
-func coroProgramNextRunnableV1(p *coroP, _ *coro.ExecutorDriver) (*coroG, bool) {
-	return coro.NextRunnable(p)
+func coroProgramNextRunStepV1(driver *coro.ExecutorDriver) (coro.ExecutorRunStep, bool) {
+	return coro.NextExecutorRunStep(driver)
 }
 
 func coroProgramPrepareExecutorSleepV1(driver *coro.ExecutorDriver) (sleep bool, deadline int64, hasDeadline, ok bool) {

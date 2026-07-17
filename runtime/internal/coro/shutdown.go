@@ -34,17 +34,29 @@ func validCancelFrame(frame *Frame, g *G) bool {
 }
 
 // validCancelableReadyG proves that a ready G contains exactly one structured
-// suspended frame chain and no orphan allocation. The active leaf may be a root
-// that has never resumed, or a frame suspended only for scheduler yield. Every
-// ancestor must be suspended awaiting its direct child. Parked/opaque states
-// are rejected before command shutdown changes P.schedule.
+// suspended frame chain and no orphan allocation. In addition to the legacy
+// initial/yield boundary, command shutdown accepts the three stable physical
+// continuations that the bounded runner may leave at the ready tail:
+//
+//   - CheckResume owns either a newly-created initial frame or an await parent
+//     whose completed child has already been destroyed;
+//   - CheckDestroy owns the final-suspended active frame before its first
+//     physical destroy; and
+//   - PanicDestroy owns a suspended-await ancestor after a deeper panic frame
+//     has already been destroyed.
+//
+// No action has started at these boundaries. NextCommandCancel consumes the
+// continuation without calling done/resume and reuses an existing destroy
+// target exactly once. Parked/opaque states are rejected before command
+// shutdown changes P.schedule.
 func validCancelableReadyG(g *G) bool {
 	if !ValidG(g) || g.state != GRunnable || !g.queued || g.waiting || g.waitToken != nil ||
-		g.waitTicket != 0 || g.nextWait != nil || g.runP != nil || g.root == nil || g.active == nil ||
+		g.waitTicket != 0 || g.nextWait != nil || g.runP != nil || g.root == nil ||
 		!releasableParkState(&g.park) || g.park.taskCancelKind != TaskCancelNone ||
 		g.pending.kind != pendingNone || g.pending.from != nil || g.pending.target != nil ||
-		g.pending.wait != nil || g.pending.ticket != 0 || g.destroyTarget != nil || g.destroyRoot ||
+		g.pending.wait != nil || g.pending.ticket != 0 ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
+		g.taskControlLeases != 0 ||
 		g.taskState != taskStorageOwned || g.taskStorage != unsafe.Pointer(g) || g.taskSize != TaskStorageSize() {
 		return false
 	}
@@ -72,8 +84,48 @@ func validCancelableReadyG(g *G) bool {
 		return false
 	}
 
+	leaf := g.active
+	continuation := g.runAction
+	switch continuation {
+	case ActionInvalid:
+		if leaf == nil || g.destroyTarget != nil || g.destroyRoot || g.panicUnwind ||
+			!emptyPanicRecord(&g.panicRecord) {
+			return false
+		}
+	case ActionCheckResume:
+		if leaf == nil || g.destroyTarget != nil || g.destroyRoot || g.panicUnwind ||
+			!emptyPanicRecord(&g.panicRecord) {
+			return false
+		}
+	case ActionCheckDestroy, ActionPanicDestroy:
+		leaf = g.destroyTarget
+		if leaf == nil || g.active != leaf.parent || g.destroyRoot != (leaf == g.root) ||
+			leaf.state != FrameDestroyPending || leaf.header == nil ||
+			leaf.header.Lifecycle != uint16(FrameDestroyPending) {
+			return false
+		}
+		if continuation == ActionPanicDestroy {
+			if !g.panicUnwind || !publishedPanicRecord(&g.panicRecord) ||
+				leaf.header.SuspendReason != uint16(SuspendCall) {
+				return false
+			}
+		} else if g.panicUnwind {
+			// The first destroy of a panicking G still uses CheckDestroy. Later
+			// suspended-await ancestors use PanicDestroy.
+			if !publishedPanicRecord(&g.panicRecord) ||
+				leaf.header.SuspendReason != uint16(SuspendPanic) {
+				return false
+			}
+		} else if !emptyPanicRecord(&g.panicRecord) ||
+			leaf.header.SuspendReason != uint16(SuspendFrameComplete) {
+			return false
+		}
+	default:
+		return false
+	}
+
 	chainCount := 0
-	for frame := g.active; frame != nil; frame = frame.parent {
+	for frame := leaf; frame != nil; frame = frame.parent {
 		if !validCancelFrame(frame, g) {
 			return false
 		}
@@ -81,18 +133,32 @@ func validCancelableReadyG(g *G) bool {
 		if chainCount > frameCount {
 			return false
 		}
-		if frame == g.active {
-			switch frame.state {
-			case FrameInitialSuspended:
-				if frame.header.SuspendReason != uint16(SuspendNone) ||
-					frame.header.Lifecycle != uint16(FrameInitialSuspended) {
-					return false
-				}
-			case FrameSuspended:
-				if frame.header.SuspendReason != uint16(SuspendYield) ||
+		if frame == leaf {
+			switch continuation {
+			case ActionInvalid:
+				if frame.state == FrameInitialSuspended {
+					if frame.header.SuspendReason != uint16(SuspendNone) ||
+						frame.header.Lifecycle != uint16(FrameInitialSuspended) {
+						return false
+					}
+				} else if frame.state != FrameSuspended ||
+					frame.header.SuspendReason != uint16(SuspendYield) ||
 					frame.header.Lifecycle != uint16(FrameSuspended) {
 					return false
 				}
+			case ActionCheckResume:
+				if frame.state == FrameInitialSuspended {
+					if frame.header.SuspendReason != uint16(SuspendNone) ||
+						frame.header.Lifecycle != uint16(FrameInitialSuspended) {
+						return false
+					}
+				} else if frame.state != FrameSuspended ||
+					frame.header.SuspendReason != uint16(SuspendCall) ||
+					frame.header.Lifecycle != uint16(FrameSuspended) {
+					return false
+				}
+			case ActionCheckDestroy, ActionPanicDestroy:
+				// The exact destroy-target shape was checked before traversal.
 			default:
 				return false
 			}
@@ -116,7 +182,7 @@ func validCancelableReadyG(g *G) bool {
 	// membership without allocating a map.
 	for listed := g.frames; listed != nil; listed = listed.next {
 		matches := 0
-		for frame := g.active; frame != nil; frame = frame.parent {
+		for frame := leaf; frame != nil; frame = frame.parent {
 			if listed == frame {
 				matches++
 			}
@@ -193,10 +259,29 @@ func NextCommandCancel(p *P) (*G, Action, bool) {
 	if dequeue(p) != g {
 		return nil, Action{}, false
 	}
+	continuation := g.runAction
+	target := g.destroyTarget
+	g.runAction = ActionInvalid
 	p.current = g
 	g.runP = p
 	g.state = GCanceling
-	action, ok := prepareCancelFrame(p, g, g.active)
+	var action Action
+	var ok bool
+	switch continuation {
+	case ActionInvalid, ActionCheckResume:
+		action, ok = prepareCancelFrame(p, g, g.active)
+	case ActionCheckDestroy, ActionPanicDestroy:
+		// The bounded runner has not executed this physical destroy. Preserve
+		// the exact already-prepared target and issue it once as command cancel;
+		// no done check or coroutine resume is needed or permitted.
+		if target == nil || target != g.destroyTarget || target.handle == nil ||
+			target.state != FrameDestroyPending {
+			return nil, Action{}, false
+		}
+		action, ok = setAction(p, ActionCancelDestroy, target.handle)
+	default:
+		return nil, Action{}, false
+	}
 	if !ok {
 		return nil, Action{}, false
 	}
@@ -219,7 +304,22 @@ func CancelDestroyed(p *P, g *G, action Action) (Action, bool) {
 		g.destroyRoot = false
 		return prepareCancelFrame(p, g, g.active)
 	}
-	if !wasRoot || g.frames != nil {
+	if !wasRoot || g.frames != nil || g.runAction != ActionInvalid || g.taskControlLeases != 0 {
+		return Action{}, false
+	}
+	if g.panicUnwind {
+		// A normal command-main return terminates the process without waiting for
+		// background goroutines. If it wins before a child panic is reported, the
+		// child is command-canceled and its retained panic payload is discarded
+		// only after every child frame has been physically destroyed.
+		if !publishedPanicRecord(&g.panicRecord) {
+			return Action{}, false
+		}
+		g.panicRecord.typeWord = nil
+		g.panicRecord.dataWord = nil
+		preemptStore(&g.panicRecord.status, uint32(ExplicitStatusNone))
+		g.panicUnwind = false
+	} else if !emptyPanicRecord(&g.panicRecord) {
 		return Action{}, false
 	}
 	g.destroyRoot = false

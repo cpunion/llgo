@@ -41,16 +41,6 @@ const (
 	ManualOperationAlreadyQuiesced
 )
 
-type manualOperationLifecycle uint32
-
-const (
-	manualOperationFree manualOperationLifecycle = iota
-	manualOperationInitializing
-	manualOperationActive
-	manualOperationClosing
-	manualOperationQuiesced
-)
-
 type manualOperationMailbox uint32
 
 const (
@@ -65,10 +55,8 @@ type manualOperationSlot struct {
 	// Producer-visible prefix. A target ingress shim resolves the stable source
 	// internally, then touches only these aligned atomic uint32 words using the
 	// POD OperationID supplied to the backend.
-	state      uint32
-	generation uint32
-	inflight   uint32
-	mailbox    uint32
+	producerSourceSlot
+	mailbox uint32
 
 	// Owner-P-only suffix. A producer never reads an OperationRecord, ParkState,
 	// Go pointer, affected link, or coroutine handle.
@@ -88,11 +76,9 @@ type manualOperationSlot struct {
 // must publish this durable mailbox first and then use the common executor
 // request/doorbell path.
 type ManualOperationSource struct {
-	pending uint32
-	slots   [ManualOperationSourceCapacity]manualOperationSlot
+	routedProducerSource
+	slots [ManualOperationSourceCapacity]manualOperationSlot
 
-	owner        *P
-	route        RouteID
 	affectedHead uint32
 	affectedTail uint32
 }
@@ -105,41 +91,24 @@ func manualOperationSlotFor(source *ManualOperationSource, id OperationID) (*man
 	return &source.slots[id.LocalSlot()-1], true
 }
 
-func manualOperationAcquireProducer(slot *manualOperationSlot) bool {
-	return slot != nil && producerAdmissionAcquire(&slot.inflight)
-}
-
-func manualOperationReleaseProducer(slot *manualOperationSlot) {
-	producerAdmissionRelease(&slot.inflight)
-}
-
-func manualOperationSealProducers(slot *manualOperationSlot) bool {
-	return slot != nil && producerAdmissionSeal(&slot.inflight)
-}
-
-func manualOperationProducersQuiesced(slot *manualOperationSlot) bool {
-	return slot != nil && producerAdmissionQuiesced(&slot.inflight)
-}
-
 func manualOperationReusableSlot(source *ManualOperationSource, slot *manualOperationSlot, index uint32) bool {
-	if slot == nil || preemptLoad(&slot.state) != uint32(manualOperationFree) ||
+	if slot == nil || !producerSourceSlotReusable(&slot.producerSourceSlot) ||
 		preemptLoad(&slot.mailbox) != uint32(manualOperationMailboxEmpty) || slot.nextAffected != 0 {
 		return false
 	}
 	generation := preemptLoad(&slot.generation)
 	if generation == 0 {
-		return preemptLoad(&slot.inflight) == 0 && slot.record == (OperationRecord{})
+		return slot.record == (OperationRecord{})
 	}
 	if source == nil || !source.route.Valid() {
 		return false
 	}
 	id, ok := MakeOperationIDAtRoute(OperationSourceManual, source.route, index+1, generation)
-	return ok && preemptLoad(&slot.inflight) == producerAdmissionClosed &&
-		slot.record == (OperationRecord{id: id, phase: operationReusable})
+	return ok && slot.record == (OperationRecord{id: id, phase: operationReusable})
 }
 
 func validManualOperationOwner(source *ManualOperationSource, p *P) bool {
-	return source != nil && p != nil && source.owner == p && source.route.Valid()
+	return source != nil && validRoutedProducerSource(&source.routedProducerSource, p)
 }
 
 func validManualOperationLiveSlot(source *ManualOperationSource, p *P, index uint32) bool {
@@ -147,8 +116,8 @@ func validManualOperationLiveSlot(source *ManualOperationSource, p *P, index uin
 		return false
 	}
 	slot := &source.slots[index]
-	state := manualOperationLifecycle(preemptLoad(&slot.state))
-	if state != manualOperationActive && state != manualOperationClosing && state != manualOperationQuiesced {
+	state := producerSourceLifecycle(preemptLoad(&slot.state))
+	if state != producerSourceActive && state != producerSourceClosing && state != producerSourceQuiesced {
 		return false
 	}
 	generation := preemptLoad(&slot.generation)
@@ -166,29 +135,17 @@ func (source *ManualOperationSource) reserveAndAttach(p *P, state *ParkState, ti
 	}
 	for index := range source.slots {
 		slot := &source.slots[index]
-		generation := preemptLoad(&slot.generation)
-		if generation == ^uint32(0) || !manualOperationReusableSlot(source, slot, uint32(index)) ||
-			!preemptCompareAndSwap(&slot.state, uint32(manualOperationFree), uint32(manualOperationInitializing)) {
+		if !manualOperationReusableSlot(source, slot, uint32(index)) || preemptLoad(&slot.generation) == ^uint32(0) {
 			continue
 		}
-		if !manualOperationSealProducers(slot) || !manualOperationProducersQuiesced(slot) {
+		generation, begun := beginProducerSourceSlot(&slot.producerSourceSlot)
+		if !begun {
 			return OperationID{}, false
 		}
-
-		var id OperationID
-		var ok bool
-		if generation == 0 {
-			id, ok = MakeOperationIDAtRoute(OperationSourceManual, source.route, uint32(index)+1, 1)
-			ok = ok && InitOperation(&slot.record, id)
-		} else {
-			id, ok = RearmOperation(&slot.record)
-			ok = ok && id.Generation == generation+1 && id.Source() == OperationSourceManual &&
-				id.Route() == source.route && id.LocalSlot() == uint32(index)+1
-		}
-		if !ok {
+		id, ok := MakeOperationIDAtRoute(OperationSourceManual, source.route, uint32(index)+1, generation)
+		if !ok || !PrepareOperationAtGeneration(&slot.record, id) {
 			return OperationID{}, false
 		}
-		preemptStore(&slot.generation, id.Generation)
 		attached := false
 		if wait == nil {
 			attached = AttachParkOperation(state, ticket, &slot.record, caseID)
@@ -196,16 +153,15 @@ func (source *ManualOperationSource) reserveAndAttach(p *P, state *ParkState, ti
 			attached = AttachParkWaitOperation(state, ticket, wait, &slot.record, caseID)
 		}
 		if !attached {
-			if !AbortReservedOperation(&slot.record, id) {
+			if !AbortReservedOperation(&slot.record, id) ||
+				!resetProducerSourceSlot(&slot.producerSourceSlot, generation) {
 				return OperationID{}, false
 			}
-			preemptStore(&slot.state, uint32(manualOperationFree))
 			return OperationID{}, false
 		}
-		if !producerAdmissionReopen(&slot.inflight) {
+		if !activateProducerSourceSlot(&slot.producerSourceSlot, generation) {
 			return OperationID{}, false
 		}
-		preemptStore(&slot.state, uint32(manualOperationActive))
 		return id, true
 	}
 	return OperationID{}, false
@@ -229,15 +185,17 @@ func (source *ManualOperationSource) Post(id OperationID) ManualOperationPostRes
 	if !ok {
 		return ManualOperationPostInvalid
 	}
-	if !manualOperationAcquireProducer(slot) {
+	switch acquireProducerSourceGeneration(&slot.producerSourceSlot, id.Generation) {
+	case producerSourceAcquireClosed:
 		return ManualOperationPostClosed
-	}
-	if preemptLoad(&slot.generation) != id.Generation {
-		manualOperationReleaseProducer(slot)
+	case producerSourceAcquireStale:
 		return ManualOperationPostStale
+	case producerSourceAcquired:
+	default:
+		return ManualOperationPostInvalid
 	}
-	if preemptLoad(&slot.state) != uint32(manualOperationActive) {
-		manualOperationReleaseProducer(slot)
+	if preemptLoad(&slot.state) != uint32(producerSourceActive) {
+		producerAdmissionRelease(&slot.inflight)
 		return ManualOperationPostClosed
 	}
 	for {
@@ -251,20 +209,20 @@ func (source *ManualOperationSource) Post(id OperationID) ManualOperationPostRes
 			// release store of Posted. ManualOperationSource has no payload.
 			preemptStore(&slot.mailbox, uint32(manualOperationMailboxPosted))
 			preemptStore(&source.pending, 1)
-			manualOperationReleaseProducer(slot)
+			producerAdmissionRelease(&slot.inflight)
 			return ManualOperationPosted
 		case manualOperationMailboxPosting, manualOperationMailboxPosted, manualOperationMailboxDraining, manualOperationMailboxDelivered:
-			manualOperationReleaseProducer(slot)
+			producerAdmissionRelease(&slot.inflight)
 			return ManualOperationPostDuplicate
 		default:
-			manualOperationReleaseProducer(slot)
+			producerAdmissionRelease(&slot.inflight)
 			return ManualOperationPostInvalid
 		}
 	}
 }
 
 func (source *ManualOperationSource) Pending() bool {
-	return source != nil && preemptLoad(&source.pending) != 0
+	return source != nil && routedProducerPending(&source.routedProducerSource)
 }
 
 // RequestCancel publishes a logical operation cancellation for one active
@@ -300,11 +258,7 @@ func (source *ManualOperationSource) appendAffected(index uint32) bool {
 // already chosen the logical outcome; it is normal and is not enqueued for
 // resolution again.
 func (source *ManualOperationSource) beginPublishPass(p *P) bool {
-	if !validManualOperationOwner(source, p) {
-		return false
-	}
-	preemptStore(&source.pending, 0)
-	return true
+	return source != nil && beginRoutedProducerPass(&source.routedProducerSource, p)
 }
 
 // publishSlot visits one exact producer mailbox. Producer publication after
@@ -420,23 +374,15 @@ func (source *ManualOperationSource) beginCloseSlot(p *P, id OperationID) Manual
 	if !ok || !validManualOperationOwner(source, p) || preemptLoad(&slot.generation) != id.Generation || !slot.record.Matches(id) {
 		return ManualOperationCloseInvalid
 	}
-	for {
-		switch state := manualOperationLifecycle(preemptLoad(&slot.state)); state {
-		case manualOperationActive:
-			if !preemptCompareAndSwap(&slot.state, uint32(state), uint32(manualOperationClosing)) {
-				continue
-			}
-			if !manualOperationSealProducers(slot) {
-				return ManualOperationCloseInvalid
-			}
-			return ManualOperationCloseStarted
-		case manualOperationClosing:
-			return ManualOperationAlreadyClosing
-		case manualOperationQuiesced:
-			return ManualOperationAlreadyQuiesced
-		default:
-			return ManualOperationCloseInvalid
-		}
+	switch beginProducerSourceClose(&slot.producerSourceSlot) {
+	case producerSourceCloseStarted:
+		return ManualOperationCloseStarted
+	case producerSourceAlreadyClosing:
+		return ManualOperationAlreadyClosing
+	case producerSourceAlreadyQuiesced:
+		return ManualOperationAlreadyQuiesced
+	default:
+		return ManualOperationCloseInvalid
 	}
 }
 
@@ -459,8 +405,8 @@ func (source *ManualOperationSource) ApplyOne(p *P, id OperationID, record *Oper
 		&slot.record != record || !slot.record.Matches(id) || slot.record.phase != operationActive {
 		return OperationApplyInvalid
 	}
-	state := manualOperationLifecycle(preemptLoad(&slot.state))
-	if state != manualOperationActive && state != manualOperationClosing && state != manualOperationQuiesced {
+	state := producerSourceLifecycle(preemptLoad(&slot.state))
+	if state != producerSourceActive && state != producerSourceClosing && state != producerSourceQuiesced {
 		return OperationApplyInvalid
 	}
 	disposition, terminal := OperationDispositionOf(&slot.record, id)
@@ -499,8 +445,8 @@ func (source *ManualOperationSource) ApplyAndDetach(p *P) (applied, detached uin
 	}
 	for index := range source.slots {
 		slot := &source.slots[index]
-		state := manualOperationLifecycle(preemptLoad(&slot.state))
-		if state == manualOperationFree {
+		state := producerSourceLifecycle(preemptLoad(&slot.state))
+		if state == producerSourceFree {
 			if !manualOperationReusableSlot(source, slot, uint32(index)) {
 				return applied, detached, false
 			}
@@ -511,7 +457,7 @@ func (source *ManualOperationSource) ApplyAndDetach(p *P) (applied, detached uin
 		}
 		id := slot.record.id
 		if slot.record.phase == operationDetached {
-			if state != manualOperationClosing && state != manualOperationQuiesced {
+			if state != producerSourceClosing && state != producerSourceQuiesced {
 				return applied, detached, false
 			}
 			continue
@@ -542,13 +488,12 @@ func (source *ManualOperationSource) ConfirmQuiesced(p *P, id OperationID) bool 
 		mailbox = manualOperationMailbox(preemptLoad(&slot.mailbox))
 	}
 	if !ok || !validManualOperationOwner(source, p) || preemptLoad(&slot.generation) != id.Generation ||
-		preemptLoad(&slot.state) != uint32(manualOperationClosing) || !manualOperationProducersQuiesced(slot) ||
+		preemptLoad(&slot.state) != uint32(producerSourceClosing) || !producerSourceSlotQuiesced(&slot.producerSourceSlot) ||
 		(mailbox != manualOperationMailboxEmpty && mailbox != manualOperationMailboxDelivered) ||
 		!ConfirmOperationQuiesced(&slot.record, id) {
 		return false
 	}
-	preemptStore(&slot.state, uint32(manualOperationQuiesced))
-	return true
+	return markProducerSourceQuiesced(&slot.producerSourceSlot)
 }
 
 func (source *ManualOperationSource) TakeResult(p *P, lease OperationResultLease) bool {
@@ -578,8 +523,8 @@ func (source *ManualOperationSource) DiscardResult(p *P, lease OperationResultLe
 func (source *ManualOperationSource) Recycle(p *P, id OperationID) bool {
 	slot, ok := manualOperationSlotFor(source, id)
 	if !ok || !validManualOperationOwner(source, p) || source.affectedHead != 0 || source.affectedTail != 0 ||
-		preemptLoad(&slot.generation) != id.Generation || preemptLoad(&slot.state) != uint32(manualOperationQuiesced) ||
-		!manualOperationProducersQuiesced(slot) {
+		preemptLoad(&slot.generation) != id.Generation || preemptLoad(&slot.state) != uint32(producerSourceQuiesced) ||
+		!producerSourceSlotQuiesced(&slot.producerSourceSlot) {
 		return false
 	}
 	mailbox := manualOperationMailbox(preemptLoad(&slot.mailbox))
@@ -589,12 +534,12 @@ func (source *ManualOperationSource) Recycle(p *P, id OperationID) bool {
 	}
 	slot.nextAffected = 0
 	preemptStore(&slot.mailbox, uint32(manualOperationMailboxEmpty))
-	preemptStore(&slot.state, uint32(manualOperationFree))
-	return true
+	return recycleProducerSourceSlot(&slot.producerSourceSlot)
 }
 
 func manualOperationSourceEmpty(source *ManualOperationSource, owner *P) bool {
-	if source == nil || source.owner != owner || preemptLoad(&source.pending) != 0 || source.affectedHead != 0 || source.affectedTail != 0 {
+	if source == nil || !routedProducerHeaderEmpty(&source.routedProducerSource, owner) ||
+		source.affectedHead != 0 || source.affectedTail != 0 {
 		return false
 	}
 	for index := range source.slots {
@@ -606,13 +551,10 @@ func manualOperationSourceEmpty(source *ManualOperationSource, owner *P) bool {
 }
 
 func BindManualOperationSourceAtRoute(source *ManualOperationSource, p *P, route RouteID) bool {
-	if p == nil || !route.Valid() || !manualOperationSourceEmpty(source, nil) ||
-		source.route != 0 && source.route != route {
+	if !manualOperationSourceEmpty(source, nil) {
 		return false
 	}
-	source.route = route
-	source.owner = p
-	return true
+	return bindRoutedProducerSource(&source.routedProducerSource, p, route)
 }
 
 // BindManualOperationSource is the legacy single-P binding. Its IDs are
@@ -626,8 +568,7 @@ func UnbindManualOperationSource(source *ManualOperationSource, p *P) bool {
 	if p == nil || !manualOperationSourceEmpty(source, p) {
 		return false
 	}
-	source.owner = nil
-	return true
+	return unbindRoutedProducerSource(&source.routedProducerSource, p)
 }
 
 func (source *ManualOperationSource) CanRelease() bool {
@@ -635,8 +576,8 @@ func (source *ManualOperationSource) CanRelease() bool {
 }
 
 func (source *ManualOperationSource) Route() (RouteID, bool) {
-	if source == nil || !source.route.Valid() {
+	if source == nil {
 		return 0, false
 	}
-	return source.route, true
+	return routedProducerRoute(&source.routedProducerSource)
 }

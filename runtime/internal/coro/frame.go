@@ -265,7 +265,7 @@ func PublishFrame(g *G, handle unsafe.Pointer, header *HeaderV1, storage unsafe.
 // coroutine; only the runtime driver may perform handle operations requested
 // by the scheduler action protocol.
 func PrepareAwait(g *G, parentHandle, childHandle unsafe.Pointer) bool {
-	if !ValidG(g) || g.pending.kind != pendingNone || g.spawnChild != nil || hasPendingRunDecision(g) ||
+	if !ValidG(g) || !resumeGateTaken(g) || g.pending.kind != pendingNone || g.spawnChild != nil ||
 		!releasableParkState(&g.park) {
 		return false
 	}
@@ -286,7 +286,7 @@ func PrepareAwait(g *G, parentHandle, childHandle unsafe.Pointer) bool {
 // PrepareComplete records a final-suspended frame. Destruction remains owned
 // by the scheduler and occurs only after the resume operation returns.
 func PrepareComplete(g *G, handle unsafe.Pointer, header *HeaderV1) bool {
-	if !ValidG(g) || handle == nil || header == nil || g.pending.kind != pendingNone || g.spawnChild != nil || hasPendingRunDecision(g) ||
+	if !ValidG(g) || !resumeGateTaken(g) || handle == nil || header == nil || g.pending.kind != pendingNone || g.spawnChild != nil ||
 		!releasableParkState(&g.park) || g.park.taskCancelPhase == taskCancelRequested {
 		return false
 	}
@@ -305,7 +305,7 @@ func PrepareComplete(g *G, handle unsafe.Pointer, header *HeaderV1) bool {
 // handle remain owned by g; Resumed commits the transition only after the
 // direct llvm.coro.resume wrapper has returned to the scheduler.
 func PrepareYield(g *G, handle unsafe.Pointer, header *HeaderV1) bool {
-	if !ValidG(g) || handle == nil || header == nil || g.pending.kind != pendingNone || g.spawnChild != nil || hasPendingRunDecision(g) ||
+	if !ValidG(g) || !resumeGateTaken(g) || handle == nil || header == nil || g.pending.kind != pendingNone || g.spawnChild != nil ||
 		!releasableParkState(&g.park) {
 		return false
 	}
@@ -325,8 +325,8 @@ func PrepareYield(g *G, handle unsafe.Pointer, header *HeaderV1) bool {
 // coroutine hooks, the transition is committed only after llvm.coro.resume
 // returns to Resumed on the scheduler stack.
 func PreparePark(g *G, handle unsafe.Pointer, header *HeaderV1, token *WaitToken, ticket WaitTicket) bool {
-	if !ValidG(g) || handle == nil || header == nil || g.pending.kind != pendingNone || g.spawnChild != nil ||
-		hasPendingRunDecision(g) || g.waitToken != nil || g.waitTicket != 0 || g.waiting || g.nextWait != nil ||
+	if !ValidG(g) || !resumeGateTaken(g) || handle == nil || header == nil || g.pending.kind != pendingNone || g.spawnChild != nil ||
+		g.waitToken != nil || g.waitTicket != 0 || g.waiting || g.nextWait != nil ||
 		!releasableParkState(&g.park) || g.park.taskCancelKind != TaskCancelNone {
 		return false
 	}
@@ -352,8 +352,8 @@ func PreparePark(g *G, handle unsafe.Pointer, header *HeaderV1, token *WaitToken
 // Completion may have been published early in an OperationRecord, but no
 // callback receives G, ParkState, or an LLVM handle.
 func PrepareParkSet(g *G, handle unsafe.Pointer, header *HeaderV1, ticket ParkTicket, record *WaitSetRecord) bool {
-	if !ValidG(g) || handle == nil || header == nil || g.pending.kind != pendingNone || g.spawnChild != nil ||
-		hasPendingRunDecision(g) || g.waitToken != nil || g.waitTicket != 0 || g.waiting || g.nextWait != nil ||
+	if !ValidG(g) || !resumeGateTaken(g) || handle == nil || header == nil || g.pending.kind != pendingNone || g.spawnChild != nil ||
+		g.waitToken != nil || g.waitTicket != 0 || g.waiting || g.nextWait != nil ||
 		!validParkState(&g.park) || g.park.phase != parkSealed || ticket != g.park.ticket ||
 		!validPreparingWaitSetRecord(record, &g.park, ticket) {
 		return false

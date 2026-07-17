@@ -285,7 +285,7 @@ func TestExecutorDriverManualSourceUsesUnifiedPublishedEpochAndParkGate(t *testi
 	}
 	if unrelatedSlot.record.phase != operationActive || unrelatedSlot.record.disposition != OperationDispositionPending ||
 		unrelatedSlot.record.resolutionApplied || unrelatedSlot.record.cancelRequested ||
-		preemptLoad(&unrelatedSlot.state) != uint32(manualOperationActive) {
+		preemptLoad(&unrelatedSlot.state) != uint32(producerSourceActive) {
 		t.Fatal("batch apply inspected or changed an unrelated live manual slot")
 	}
 
@@ -1259,7 +1259,7 @@ func TestExecutorDriverPanicTerminalCloseDoesNotRedestroy(t *testing.T) {
 	if !ok {
 		t.Fatal("begin panic terminal G")
 	}
-	action, ok = Checked(p, g, action, false)
+	action, ok = checkedTestAction(p, g, action, false)
 	if !ok || action.Kind != ActionResume || action.Handle != rootHandle {
 		t.Fatal("resume panic terminal root")
 	}
@@ -1276,7 +1276,7 @@ func TestExecutorDriverPanicTerminalCloseDoesNotRedestroy(t *testing.T) {
 	if !ok || action.Kind != ActionCheckResume || action.Handle != leafHandle {
 		t.Fatal("dispatch panic terminal child")
 	}
-	action, ok = Checked(p, g, action, false)
+	action, ok = checkedTestAction(p, g, action, false)
 	if !ok || action.Kind != ActionResume || action.Handle != leafHandle {
 		t.Fatal("resume panic terminal child")
 	}

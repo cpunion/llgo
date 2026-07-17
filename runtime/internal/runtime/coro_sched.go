@@ -47,6 +47,11 @@ const (
 	coroRunExecutorSleepV1
 	coroRunTerminalExecutorCloseV1
 	coroRunPanicCompleteV1
+	// The remaining stops are internal to the explicit compatibility loop.
+	// coroRunSlice itself never prepares host sleep or crosses terminal close.
+	coroRunSliceBudgetV1
+	coroRunIdleV1
+	coroRunDestroyCommitV1
 )
 
 type coroRunResultV1 struct {
@@ -55,16 +60,12 @@ type coroRunResultV1 struct {
 	action      coro.Action
 	deadline    int64
 	hasDeadline bool
+	used        uint32
+	sources     uint32
+	dispatches  uint32
+	resumes     uint32
+	destroys    uint32
 }
-
-type coroActionStopV1 uint8
-
-const (
-	coroActionInvalidV1 coroActionStopV1 = iota
-	coroActionSliceDoneV1
-	coroActionTerminalExecutorCloseV1
-	coroActionPanicCompleteV1
-)
 
 func coroInitG(g *coroG) bool {
 	return coro.InitG(g)
@@ -78,21 +79,150 @@ func coroEnqueue(p *coroP, g *coroG) bool {
 	return coro.Enqueue(p, g)
 }
 
-func coroRunG(p *coroP, g *coroG) (coroActionStopV1, coro.Action) {
-	action, ok := coro.BeginRunG(p, g)
-	if !ok {
-		return coroActionInvalidV1, coro.Action{}
+// coroRunPhysicalActionV1 is the indivisible runtime half of one runner action
+// reduction. Neither Checked's ActionResume/ActionDestroy nor a freed handle is
+// observable at a RunSlice return boundary.
+func coroRunPhysicalActionV1(p *coroP, g *coroG, action coro.Action) (coro.Action, bool) {
+	switch action.Kind {
+	case coro.ActionCheckResume:
+		next, ok := coro.Checked(p, g, action, coroHandleDone(action.Handle))
+		if !ok || next.Kind != coro.ActionResume || next.Handle != action.Handle {
+			return coro.Action{}, false
+		}
+		coroHandleResume(next.Handle)
+		return coro.Resumed(p, g, next)
+	case coro.ActionCheckDestroy:
+		next, ok := coro.Checked(p, g, action, coroHandleDone(action.Handle))
+		if !ok || next.Kind != coro.ActionDestroy || next.Handle != action.Handle {
+			return coro.Action{}, false
+		}
+		coroHandleDestroy(next.Handle)
+		return coro.DestroyedBounded(p, g, next)
+	case coro.ActionPanicDestroy:
+		coroHandleDestroy(action.Handle)
+		return coro.PanicDestroyedBounded(p, g, action)
+	default:
+		return coro.Action{}, false
 	}
-	return coroRunActions(p, g, action)
 }
 
-func coroRun(p *coroP, main *coroG, driver *coro.ExecutorDriver) coroRunResultV1 {
-	for {
-		g, ok := coroProgramNextRunnableV1(p, driver)
+// coroRunSlice advances at most budget reductions. Source service, dequeue,
+// and each complete physical resume/destroy are charged separately. Idle host
+// preparation, terminal close, command shutdown, and cost certification are
+// intentionally outside this primitive.
+func coroRunSlice(p *coroP, main *coroG, driver *coro.ExecutorDriver, budget uint32) coroRunResultV1 {
+	if p == nil || main == nil || driver == nil || budget == 0 {
+		return coroRunResultV1{}
+	}
+	result := coroRunResultV1{}
+	for result.used < budget {
+		step, ok := coroProgramNextRunStepV1(driver)
 		if !ok {
 			return coroRunResultV1{}
 		}
-		if g == nil {
+		switch step.Kind {
+		case coro.ExecutorRunStepSource:
+			result.used++
+			result.sources++
+		case coro.ExecutorRunStepDispatch:
+			if step.G == nil || step.Action.Handle == nil {
+				return coroRunResultV1{}
+			}
+			result.used++
+			result.dispatches++
+		case coro.ExecutorRunStepAction:
+			if step.G == nil || step.Action.Handle == nil {
+				return coroRunResultV1{}
+			}
+			next, advanced := coroRunPhysicalActionV1(p, step.G, step.Action)
+			committed := false
+			if advanced && step.G == main && coroProgramLifecycleV1State == coroProgramMainReturnRequestedV1 &&
+				next.Kind == coro.ActionCheckDestroy {
+				committed = coro.CommitExecutorRunCommandRootDestroy(driver, step.G, next)
+			} else if advanced && step.G == main && coroProgramLifecycleV1State == coroProgramRunningV1 &&
+				coro.CommitExecutorRunCommandBootstrapDirectChildHandoff(driver, step.G, next) {
+				committed = true
+			} else if advanced {
+				committed = coro.CommitExecutorRunAction(driver, step.G, next)
+			}
+			if !committed {
+				return coroRunResultV1{}
+			}
+			result.used++
+			switch step.Action.Kind {
+			case coro.ActionCheckResume:
+				result.resumes++
+			case coro.ActionCheckDestroy, coro.ActionPanicDestroy:
+				result.destroys++
+			}
+			switch next.Kind {
+			case coro.ActionCheckResume, coro.ActionCheckDestroy, coro.ActionPanicDestroy:
+				if step.G == main && coroProgramLifecycleV1State == coroProgramMainReturnRequestedV1 &&
+					next.Kind == coro.ActionCheckResume {
+					return coroRunResultV1{}
+				}
+			case coro.ActionYield, coro.ActionPark:
+				if step.G == main && coroProgramLifecycleV1State == coroProgramMainReturnRequestedV1 {
+					return coroRunResultV1{}
+				}
+			case coro.ActionComplete:
+				isMain := step.G == main
+				if !coroReleaseCompletedTask(step.G) {
+					return coroRunResultV1{}
+				}
+				if isMain {
+					result.stop, result.g = coroRunMainDoneV1, main
+					return result
+				}
+			case coro.ActionPanicComplete:
+				result.stop, result.g, result.action = coroRunPanicCompleteV1, step.G, next
+				return result
+			case coro.ActionCommitDestroy:
+				result.stop, result.g, result.action = coroRunDestroyCommitV1, step.G, next
+				return result
+			default:
+				return coroRunResultV1{}
+			}
+		case coro.ExecutorRunStepDestroyCommit:
+			if step.G == nil || step.Action.Kind != coro.ActionCommitDestroy || step.Action.Handle != nil {
+				return coroRunResultV1{}
+			}
+			result.stop, result.g, result.action = coroRunDestroyCommitV1, step.G, step.Action
+			return result
+		case coro.ExecutorRunStepIdle:
+			result.stop = coroRunIdleV1
+			return result
+		default:
+			return coroRunResultV1{}
+		}
+	}
+	result.stop = coroRunSliceBudgetV1
+	return result
+}
+
+const coroCompatibilityRunBudgetV1 uint32 = 64
+
+// coroRun is the legacy whole-episode compatibility loop. The resumable runner
+// above is the production ordering primitive; physical resume wall-work is not
+// yet cost-certified. This wrapper explicitly owns the still-unbounded idle
+// preparation and terminal-close boundaries.
+func coroRun(p *coroP, main *coroG, driver *coro.ExecutorDriver) coroRunResultV1 {
+	for {
+		result := coroRunSlice(p, main, driver, coroCompatibilityRunBudgetV1)
+		switch result.stop {
+		case coroRunSliceBudgetV1:
+			continue
+		case coroRunMainDoneV1:
+			if !coro.EnterExecutorRunCompatibility(driver) {
+				return coroRunResultV1{}
+			}
+			return result
+		case coroRunPanicCompleteV1:
+			return result
+		case coroRunIdleV1:
+			if !coro.EnterExecutorRunCompatibility(driver) {
+				return coroRunResultV1{}
+			}
 			if !coro.HasWaiting(p) {
 				return coroRunResultV1{}
 			}
@@ -101,43 +231,33 @@ func coroRun(p *coroP, main *coroG, driver *coro.ExecutorDriver) coroRunResultV1
 				return coroRunResultV1{}
 			}
 			if sleep {
-				return coroRunResultV1{
-					stop:        coroRunExecutorSleepV1,
-					deadline:    deadline,
-					hasDeadline: hasDeadline,
+				return coroRunResultV1{stop: coroRunExecutorSleepV1, deadline: deadline, hasDeadline: hasDeadline}
+			}
+		case coroRunDestroyCommitV1:
+			next, committed := coro.CommitDestroyedReceiptCompatibility(p, result.g, result.action)
+			if !committed {
+				return coroRunResultV1{}
+			}
+			switch next.Kind {
+			case coro.ActionCommitDestroy:
+				continue
+			case coro.ActionTerminalExecutorClose:
+				return coroRunResultV1{stop: coroRunTerminalExecutorCloseV1, g: result.g, action: next}
+			case coro.ActionPanicComplete:
+				return coroRunResultV1{stop: coroRunPanicCompleteV1, g: result.g, action: next}
+			case coro.ActionComplete:
+				isMain := result.g == main
+				if !coroReleaseCompletedTask(result.g) {
+					return coroRunResultV1{}
 				}
-			}
-			continue
-		}
-		stop, action := coroRunG(p, g)
-		switch stop {
-		case coroActionSliceDoneV1:
-		case coroActionTerminalExecutorCloseV1:
-			return coroRunResultV1{
-				stop:   coroRunTerminalExecutorCloseV1,
-				g:      g,
-				action: action,
-			}
-		case coroActionPanicCompleteV1:
-			return coroRunResultV1{
-				stop:   coroRunPanicCompleteV1,
-				g:      g,
-				action: action,
+				if isMain {
+					return coroRunResultV1{stop: coroRunMainDoneV1, g: main}
+				}
+			default:
+				return coroRunResultV1{}
 			}
 		default:
 			return coroRunResultV1{}
-		}
-		if g == main && coroProgramLifecycleV1State == coroProgramMainReturnRequestedV1 && !coro.DeadG(main) {
-			// The compiler hook is valid only on main's normal continuation
-			// immediately before the bootstrap root's final suspend. Yielding or
-			// parking after publishing the marker is an ABI violation.
-			return coroRunResultV1{}
-		}
-		if g == main && coro.DeadG(main) {
-			// Command main never drains background goroutines. The program adapter
-			// either enters the explicit ready-child cancellation protocol after a
-			// normal-main hook, or fails closed.
-			return coroRunResultV1{stop: coroRunMainDoneV1, g: main}
 		}
 	}
 }
@@ -175,78 +295,6 @@ func coroCancelReady(p *coroP) bool {
 			if g == nil {
 				break
 			}
-		}
-	}
-}
-
-// coroRunActions is deliberately a static dispatcher. The compiler-owned
-// wrappers stay direct calls so scheduler internals do not introduce function
-// values, interface dispatch, or unnecessary dual sync/async versions.
-func coroRunActions(p *coroP, g *coroG, action coro.Action) (coroActionStopV1, coro.Action) {
-	for {
-		var ok bool
-		switch action.Kind {
-		case coro.ActionComplete:
-			if !coroReleaseCompletedTask(g) {
-				return coroActionInvalidV1, coro.Action{}
-			}
-			return coroActionSliceDoneV1, action
-		case coro.ActionYield, coro.ActionPark:
-			return coroActionSliceDoneV1, action
-		case coro.ActionCheckResume, coro.ActionCheckDestroy:
-			action, ok = coro.Checked(p, g, action, coroHandleDone(action.Handle))
-		case coro.ActionResume:
-			coroHandleResume(action.Handle)
-			action, ok = coro.Resumed(p, g, action)
-		case coro.ActionDestroy:
-			coroHandleDestroy(action.Handle)
-			for {
-				next, committed := coro.Destroyed(p, g, action)
-				if committed {
-					action, ok = next, true
-					break
-				}
-				if !coro.AcknowledgeTerminalSchedule(p, g, action) {
-					ok = false
-					break
-				}
-				// Retry only the scheduler commit. The LLVM handle was already
-				// destroyed exactly once before entering this loop.
-			}
-		case coro.ActionPanicDestroy:
-			coroHandleDestroy(action.Handle)
-			for {
-				next, committed := coro.PanicDestroyed(p, g, action)
-				if committed {
-					action, ok = next, true
-					break
-				}
-				if !coro.AcknowledgePanicTerminalSchedule(p, g, action) {
-					ok = false
-					break
-				}
-				// Retry only the state commit. The suspended ancestor handle was
-				// already destroyed exactly once.
-			}
-		case coro.ActionPanicComplete:
-			// The core has retained a stable task-local two-word record and has
-			// destroyed every frame. Printing/fatal ownership and compiler-side
-			// cleanup/recover semantics are not part of this prototype, so stop
-			// here instead of misclassifying panic as ordinary G completion.
-			if _, published := coro.LoadPanicRecord(g); !published {
-				return coroActionInvalidV1, coro.Action{}
-			}
-			return coroActionPanicCompleteV1, action
-		case coro.ActionTerminalExecutorClose:
-			if action.Handle != nil {
-				return coroActionInvalidV1, coro.Action{}
-			}
-			return coroActionTerminalExecutorCloseV1, action
-		default:
-			return coroActionInvalidV1, coro.Action{}
-		}
-		if !ok {
-			return coroActionInvalidV1, coro.Action{}
 		}
 	}
 }

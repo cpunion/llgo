@@ -48,19 +48,31 @@ func producerAdmissionAcquire(word *uint32) bool {
 	}
 }
 
-func producerAdmissionRelease(word *uint32) {
+// producerAdmissionReleaseChecked removes one outstanding admission and
+// rejects nil or an already empty aggregate count. The count does not identify
+// an individual lease: ownership-carrying transactions must additionally use
+// their own linear token/state certificate to reject copied or duplicate
+// releases while another producer is still admitted.
+func producerAdmissionReleaseChecked(word *uint32) bool {
 	if word == nil {
-		return
+		return false
 	}
 	for {
 		state := preemptLoad(word)
 		if state&producerAdmissionCountMask == 0 {
-			return
+			return false
 		}
 		if preemptCompareAndSwap(word, state, state-1) {
-			return
+			return true
 		}
 	}
+}
+
+// producerAdmissionRelease preserves the callback-leaf compatibility surface.
+// Source shims which already prove their own linear lease use the checked form
+// directly when an invalid aggregate release must fail closed.
+func producerAdmissionRelease(word *uint32) {
+	_ = producerAdmissionReleaseChecked(word)
 }
 
 func producerAdmissionSeal(word *uint32) bool {

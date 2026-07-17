@@ -29,7 +29,7 @@ func activatePreemptTestFrame(t *testing.T, p *P, task *yieldingTestG, action Ac
 	if action.Kind != ActionCheckResume {
 		t.Fatalf("initial action for G %s = %d, want check-resume", task.name, action.Kind)
 	}
-	action, ok := Checked(p, task.g, action, false)
+	action, ok := checkedTestAction(p, task.g, action, false)
 	if !ok || action.Kind != ActionResume {
 		t.Fatalf("activate G %s = (%+v, %t), want resume", task.name, action, ok)
 	}
@@ -82,7 +82,7 @@ func TestPreemptPollFailsClosedAndConsumesOnlyActiveRequest(t *testing.T) {
 	if PollPreempt(task.g) || preemptLoad(preemptAddress(task.g)) != preemptRequested {
 		t.Fatal("pre-resume poll consumed a request")
 	}
-	action, ok = Checked(p, task.g, action, false)
+	action, ok = checkedTestAction(p, task.g, action, false)
 	if !ok || action.Kind != ActionResume {
 		t.Fatal("enter active resume")
 	}
