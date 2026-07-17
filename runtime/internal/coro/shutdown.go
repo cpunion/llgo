@@ -242,7 +242,7 @@ func BeginCommandShutdown(p *P, main *G) bool {
 // drain. A false needed result proves that command shutdown can proceed to the
 // executor close transaction without running another task.
 func RequestCommandShutdownDrain(p *P, main *G) (needed, ok bool) {
-	if p == nil || !ReclaimableG(main) || main.taskState != taskStorageStatic ||
+	if p == nil || main == nil || !ReclaimableG(main) || main.taskState != taskStorageStatic ||
 		preemptLoad(&p.executorMode) != executorModeBound || p.executor == nil ||
 		p.current != nil || p.inResume || p.action != (Action{}) ||
 		p.runDecision != (RunDecision{}) || p.runDecisionTaken || p.servicePreemptBudget != 0 ||

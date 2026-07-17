@@ -116,6 +116,9 @@ func TestCommandShutdownDrainConsumesCompletedChannelBeforeExecutorClose(t *test
 		t.Fatalf("publish command-drain completion = promoted:%d ready:%p sourceEmpty:%t",
 			progress.Promoted, fixture.p.readyHead, channelOperationSourceEmpty(fixture.source, fixture.p))
 	}
+	if needed, ok := RequestCommandShutdownDrain(fixture.p, nil); needed || ok {
+		t.Fatalf("nil command main accepted = needed:%t ok:%t", needed, ok)
+	}
 	main := &G{magic: gMagic, state: GDead}
 	if needed, ok := RequestCommandShutdownDrain(fixture.p, main); !ok || !needed ||
 		fixture.task.g.park.taskCancelKind != TaskCancelShutdown ||
