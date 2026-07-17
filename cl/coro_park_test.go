@@ -99,7 +99,7 @@ func TestCoroParkCurrentFrameNativeAndWasm32(t *testing.T) {
 				t.Fatalf("Root has no park hook followed by a caller-frame suspend:\n%s", body)
 			}
 			parkSuspend := hook + parkSuspendRelative
-			decisionRelative := strings.Index(body[parkSuspend:], "call void @"+coroRunDecisionTakeHookV1)
+			decisionRelative := strings.Index(body[parkSuspend:], "call i32 @"+coroRunDecisionTakeZeroHookV1)
 			if decisionRelative < 0 {
 				t.Fatalf("Root does not take its run decision after park resume:\n%s", body)
 			}
@@ -108,7 +108,7 @@ func TestCoroParkCurrentFrameNativeAndWasm32(t *testing.T) {
 			if activate == nil {
 				t.Fatalf("Root does not reactivate its exact frame after resume:\n%s", body)
 			}
-			assertCoroZeroRunDecisionCalls(t, "Root park", body, 2)
+			assertCoroScalarRunDecisionCalls(t, "Root park", body, 2)
 
 			runCoroABITestPipeline(t, prog, module)
 			resume := module.NamedFunction("foo.Root$coro.resume")
@@ -129,8 +129,8 @@ func TestCoroParkCurrentFrameNativeAndWasm32(t *testing.T) {
 			if len(object.Bytes()) == 0 || !bytes.Contains(object.Bytes(), []byte(coroParkPrepareHookV1)) {
 				t.Fatalf("post-CoroSplit object lost unresolved park ABI symbol %q", coroParkPrepareHookV1)
 			}
-			if !bytes.Contains(object.Bytes(), []byte(coroRunDecisionTakeHookV1)) {
-				t.Fatalf("post-CoroSplit object lost unresolved run-decision ABI symbol %q", coroRunDecisionTakeHookV1)
+			if !bytes.Contains(object.Bytes(), []byte(coroRunDecisionTakeZeroHookV1)) {
+				t.Fatalf("post-CoroSplit object lost unresolved run-decision ABI symbol %q", coroRunDecisionTakeZeroHookV1)
 			}
 		})
 	}

@@ -39,20 +39,21 @@ const (
 	coroFrameFreeHook             = "__llgo_coro_frame_free_v0"
 	coroDescriptorPrefix          = "__llgo_coro_frame_descriptor_v0."
 
-	coroPhysicalABIVersionV1  uint32 = 1
-	coroFrameAllocHookV1             = "__llgo_coro_frame_alloc_v1"
-	coroFramePublishHookV1           = "__llgo_coro_frame_publish_v1"
-	coroAwaitPrepareHookV1           = "__llgo_coro_await_prepare_v1"
-	coroPreemptPollHookV1            = "__llgo_coro_preempt_poll_v1"
-	coroYieldPrepareHookV1           = "__llgo_coro_yield_prepare_v1"
-	coroParkPrepareHookV1            = "__llgo_coro_park_prepare_v1"
-	coroRunDecisionTakeHookV1        = "__llgo_coro_run_decision_take_v1"
-	coroPanicPrepareHookV1           = "__llgo_coro_panic_prepare_v1"
-	coroSpawnBeginHookV1             = "__llgo_coro_spawn_begin_v1"
-	coroSpawnCommitHookV1            = "__llgo_coro_spawn_commit_v1"
-	coroCompletePrepareHookV1        = "__llgo_coro_complete_prepare_v1"
-	coroFrameFreeHookV1              = "__llgo_coro_frame_free_v1"
-	coroDescriptorPrefixV1           = "__llgo_coro_frame_descriptor_v1."
+	coroPhysicalABIVersionV1      uint32 = 1
+	coroFrameAllocHookV1                 = "__llgo_coro_frame_alloc_v1"
+	coroFramePublishHookV1               = "__llgo_coro_frame_publish_v1"
+	coroAwaitPrepareHookV1               = "__llgo_coro_await_prepare_v1"
+	coroPreemptPollHookV1                = "__llgo_coro_preempt_poll_v1"
+	coroYieldPrepareHookV1               = "__llgo_coro_yield_prepare_v1"
+	coroParkPrepareHookV1                = "__llgo_coro_park_prepare_v1"
+	coroRunDecisionTakeHookV1            = "__llgo_coro_run_decision_take_v1"
+	coroRunDecisionTakeZeroHookV1        = "__llgo_coro_run_decision_take_zero_v1"
+	coroPanicPrepareHookV1               = "__llgo_coro_panic_prepare_v1"
+	coroSpawnBeginHookV1                 = "__llgo_coro_spawn_begin_v1"
+	coroSpawnCommitHookV1                = "__llgo_coro_spawn_commit_v1"
+	coroCompletePrepareHookV1            = "__llgo_coro_complete_prepare_v1"
+	coroFrameFreeHookV1                  = "__llgo_coro_frame_free_v1"
+	coroDescriptorPrefixV1               = "__llgo_coro_frame_descriptor_v1."
 )
 
 const (
@@ -92,47 +93,50 @@ const (
 const coroPreemptInstructionBudget = 64
 
 type coroPhysicalABI struct {
-	version             uint32
-	hash                [16]byte
-	descriptorName      string
-	frameAllocHook      string
-	frameFreeHook       string
-	framePublishHook    string
-	awaitPrepareHook    string
-	preemptPollHook     string
-	yieldPrepareHook    string
-	parkPrepareHook     string
-	runDecisionTakeHook string
-	panicPrepareHook    string
-	completePrepareHook string
-	physicalSig         *types.Signature
-	resultSlotType      types.Type
-	resultCount         int
+	version                 uint32
+	hash                    [16]byte
+	descriptorName          string
+	frameAllocHook          string
+	frameFreeHook           string
+	framePublishHook        string
+	awaitPrepareHook        string
+	preemptPollHook         string
+	yieldPrepareHook        string
+	parkPrepareHook         string
+	runDecisionTakeHook     string
+	runDecisionTakeZeroHook string
+	panicPrepareHook        string
+	completePrepareHook     string
+	physicalSig             *types.Signature
+	resultSlotType          types.Type
+	resultCount             int
 }
 
 // coroBodyContext exists only while emitting one physical coroutine body. It
 // carries the current handle/header explicitly so call lowering never guesses a
 // frame layout from a raw handle.
 type coroBodyContext struct {
-	coro            *llssa.CoroBuilder
-	abi             coroPhysicalABI
-	header          llssa.Expr
-	task            llssa.Expr
-	resultSlot      llssa.Expr
-	completion      llssa.BasicBlock
-	finalSuspend    llssa.BasicBlock
-	preemptPoll     llssa.Expr
-	yieldPrepare    llssa.Expr
-	parkPrepare     llssa.Expr
-	runDecisionTake llssa.Expr
-	panicPrepare    llssa.Expr
-	completePrepare llssa.Expr
-	nextState       uint32
-	terminalState   uint32
-	needsPreempt    bool
-	instructions    int
-	frameRetention  *coroFrameRetentionProof
-	frameRetaining  bool
+	coro                   *llssa.CoroBuilder
+	abi                    coroPhysicalABI
+	header                 llssa.Expr
+	task                   llssa.Expr
+	resultSlot             llssa.Expr
+	completion             llssa.BasicBlock
+	finalSuspend           llssa.BasicBlock
+	preemptPoll            llssa.Expr
+	yieldPrepare           llssa.Expr
+	parkPrepare            llssa.Expr
+	runDecisionTakeZero    llssa.Expr
+	runDecisionTrap        llssa.Expr
+	unsupportedRunDecision llssa.BasicBlock
+	panicPrepare           llssa.Expr
+	completePrepare        llssa.Expr
+	nextState              uint32
+	terminalState          uint32
+	needsPreempt           bool
+	instructions           int
+	frameRetention         *coroFrameRetentionProof
+	frameRetaining         bool
 }
 
 func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *types.Signature) coroPhysicalABI {
@@ -146,6 +150,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 	yieldPrepareHook := ""
 	parkPrepareHook := ""
 	runDecisionTakeHook := ""
+	runDecisionTakeZeroHook := ""
 	panicPrepareHook := ""
 	completePrepareHook := ""
 	if p.compilation != nil && p.compilation.EnableCoroChildAwait {
@@ -159,6 +164,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		yieldPrepareHook = coroYieldPrepareHookV1
 		parkPrepareHook = coroParkPrepareHookV1
 		runDecisionTakeHook = coroRunDecisionTakeHookV1
+		runDecisionTakeZeroHook = coroRunDecisionTakeZeroHookV1
 		completePrepareHook = coroCompletePrepareHookV1
 	}
 	if p.compilation != nil && p.compilation.EnableCoroExplicitStatusPanicABI {
@@ -210,7 +216,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		}
 	}
 	key := fmt.Sprintf(
-		"llgo-coro-physical-v%d\x00%s\x00coro=%s\x00scheduler=%s\x00panic=%s\x00func-rep=%s\x00resume-decision=%s\x00triple=%s\x00cpu=%s\x00features=%s\x00target-abi=%s\x00data-layout=%s\x00ptr=%d\x00sig=%s\x00result=%s",
+		"llgo-coro-physical-v%d\x00%s\x00coro=%s\x00scheduler=%s\x00panic=%s\x00func-rep=%s\x00resume-decision=%s\x00resume-decision-zero=%s\x00triple=%s\x00cpu=%s\x00features=%s\x00target-abi=%s\x00data-layout=%s\x00ptr=%d\x00sig=%s\x00result=%s",
 		version,
 		entry.plan.ID,
 		coroABI,
@@ -218,6 +224,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		panicABI,
 		funcRepABI,
 		runDecisionTakeHook,
+		runDecisionTakeZeroHook,
 		target.Triple,
 		target.CPU,
 		target.Features,
@@ -231,22 +238,23 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 	var hash [16]byte
 	copy(hash[:], sum[:len(hash)])
 	return coroPhysicalABI{
-		version:             version,
-		hash:                hash,
-		descriptorName:      descriptorPrefix + hex.EncodeToString(hash[:]),
-		frameAllocHook:      frameAllocHook,
-		frameFreeHook:       frameFreeHook,
-		framePublishHook:    framePublishHook,
-		awaitPrepareHook:    awaitPrepareHook,
-		preemptPollHook:     preemptPollHook,
-		yieldPrepareHook:    yieldPrepareHook,
-		parkPrepareHook:     parkPrepareHook,
-		runDecisionTakeHook: runDecisionTakeHook,
-		panicPrepareHook:    panicPrepareHook,
-		completePrepareHook: completePrepareHook,
-		physicalSig:         physicalSig,
-		resultSlotType:      resultSlotType,
-		resultCount:         sourceSig.Results().Len(),
+		version:                 version,
+		hash:                    hash,
+		descriptorName:          descriptorPrefix + hex.EncodeToString(hash[:]),
+		frameAllocHook:          frameAllocHook,
+		frameFreeHook:           frameFreeHook,
+		framePublishHook:        framePublishHook,
+		awaitPrepareHook:        awaitPrepareHook,
+		preemptPollHook:         preemptPollHook,
+		yieldPrepareHook:        yieldPrepareHook,
+		parkPrepareHook:         parkPrepareHook,
+		runDecisionTakeHook:     runDecisionTakeHook,
+		runDecisionTakeZeroHook: runDecisionTakeZeroHook,
+		panicPrepareHook:        panicPrepareHook,
+		completePrepareHook:     completePrepareHook,
+		physicalSig:             physicalSig,
+		resultSlotType:          resultSlotType,
+		resultCount:             sourceSig.Results().Len(),
 	}
 }
 
@@ -319,8 +327,13 @@ func (p *context) beginCoroBody(b llssa.Builder, abi coroPhysicalABI) *coroBodyC
 		resultSlot: resultSlot,
 		nextState:  1,
 	}
-	if abi.runDecisionTakeHook != "" {
-		body.runDecisionTake = p.pkg.NewFunc(abi.runDecisionTakeHook, coroRunDecisionTakeSignature(), llssa.InC).Expr
+	if abi.runDecisionTakeZeroHook != "" {
+		body.runDecisionTakeZero = p.pkg.NewFunc(
+			abi.runDecisionTakeZeroHook, coroRunDecisionTakeZeroSignature(), llssa.InC,
+		).Expr
+		body.runDecisionTrap = p.pkg.NewFunc(
+			"llvm.trap", types.NewSignatureType(nil, nil, nil, nil, nil, false), llssa.InC,
+		).Expr
 	}
 	if abi.completePrepareHook != "" {
 		body.completePrepare = p.pkg.NewFunc(abi.completePrepareHook, coroCompletePrepareSignature(), llssa.InC).Expr
@@ -350,10 +363,20 @@ func (p *context) beginCoroBody(b llssa.Builder, abi coroPhysicalABI) *coroBodyC
 			}
 		},
 	}
-	if !body.runDecisionTake.IsNil() {
-		coroOptions.AfterResume = body.takeNormalRunDecision
+	if !body.runDecisionTakeZero.IsNil() {
+		coroOptions.AfterResumeDispatch = body.dispatchZeroRunDecision
 	}
 	body.coro = b.BeginCoro(coroOptions)
+	if body.unsupportedRunDecision != nil {
+		// Every zero-ticket gate in this physical body shares one fail-closed
+		// destination. Restore the compiler-owned initial normal continuation
+		// before source lowering starts.
+		initialResume := body.coro.InitialResumeBlock()
+		b.SetBlock(body.unsupportedRunDecision)
+		b.Call(body.runDecisionTrap)
+		b.Unreachable()
+		b.SetBlock(initialResume)
+	}
 	return body
 }
 
@@ -442,6 +465,12 @@ func coroRunDecisionTakeSignature() *types.Signature {
 	return types.NewSignatureType(nil, nil, nil, params, nil, false)
 }
 
+func coroRunDecisionTakeZeroSignature() *types.Signature {
+	params := types.NewTuple(types.NewParam(token.NoPos, nil, "g", types.Typ[types.UnsafePointer]))
+	results := types.NewTuple(types.NewParam(token.NoPos, nil, "taskKind", types.Typ[types.Uint32]))
+	return types.NewSignatureType(nil, nil, nil, params, results, false)
+}
+
 func coroPreemptPollSignature() *types.Signature {
 	params := types.NewTuple(types.NewParam(token.NoPos, nil, "g", types.Typ[types.UnsafePointer]))
 	results := types.NewTuple(types.NewParam(token.NoPos, nil, "requested", types.Typ[types.Bool]))
@@ -476,27 +505,21 @@ func (c *coroBodyContext) activate(b llssa.Builder) {
 	b.Store(b.FieldAddr(c.header, coroHeaderLifecycle), prog.IntVal(coroLifecycleActive, prog.Uint16()))
 }
 
-// takeNormalRunDecision emits the exactly-once compiler resume gate for a
-// zero-ticket continuation. Five typed nil outputs select the runtime's
-// normal-only fail-closed mode: cancellation, a selected case, a result lease,
-// or any other non-normal decision aborts until its compiler lowering exists.
-func (c *coroBodyContext) takeNormalRunDecision(b llssa.Builder) {
-	if c.abi.version < coroPhysicalABIVersionV1 || c.runDecisionTake.IsNil() {
-		panic("coroutine resume requires PhysicalABIV1 run-decision hook")
+// dispatchZeroRunDecision emits the exactly-once compiler resume gate for a
+// non-park continuation. The runtime scalar ABI validates the complete
+// zero-ticket decision and returns only None/Abort/Shutdown. No output address
+// exists for CoroSplit to retain in the stackless coroutine frame.
+func (c *coroBodyContext) dispatchZeroRunDecision(b llssa.Builder, normal llssa.BasicBlock) {
+	if c.abi.version < coroPhysicalABIVersionV1 || c.runDecisionTakeZero.IsNil() {
+		panic("coroutine resume requires PhysicalABIV1 zero-ticket run-decision hook")
 	}
 	zero := b.Prog.IntVal(0, b.Prog.Uint32())
-	nilWord := b.Prog.Nil(b.Prog.Pointer(b.Prog.Uint32()))
-	b.Call(
-		c.runDecisionTake,
-		c.task,
-		zero,
-		zero,
-		nilWord,
-		nilWord,
-		nilWord,
-		nilWord,
-		nilWord,
-	)
+	taskKind := b.Call(c.runDecisionTakeZero, c.task)
+	unsupported := b.BinOp(token.NEQ, taskKind, zero)
+	if c.unsupportedRunDecision == nil {
+		c.unsupportedRunDecision = b.Func.MakeBlock()
+	}
+	b.If(unsupported, c.unsupportedRunDecision, normal)
 }
 
 func (c *coroBodyContext) suspendForChild(b llssa.Builder) uint32 {

@@ -49,6 +49,7 @@ const (
 	coroWaitRollbackSymbolV1                                    = "__llgo_coro_wait_rollback_v1"
 	coroWaitRetireCompletedSymbolV1                             = "__llgo_coro_wait_retire_completed_v1"
 	coroRunDecisionTakeSymbolV1                                 = "__llgo_coro_run_decision_take_v1"
+	coroRunDecisionTakeZeroSymbolV1                             = "__llgo_coro_run_decision_take_zero_v1"
 	coroTimerPrepareAfterSymbolV1                               = "__llgo_coro_timer_prepare_after_v1"
 	coroTimerRetireCompletedSymbolV1                            = "__llgo_coro_timer_retire_completed_v1"
 	coroTimerPrepareAfterOrAbortSymbolV1                        = "__llgo_coro_timer_prepare_after_or_abort_v1"
@@ -626,6 +627,7 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 		write("factory=compiler-static-mixed-v" + strconv.FormatUint(uint64(version), 10) + ":" + factory)
 		write("driver=runtime-static-single-p-v1:" + coroProgramBeginSymbolV1 + ":" + coroProgramRunSymbolV1 + ":" + coroProgramContinueSymbolV1 + ":continue(epoch:u32)->void")
 		write("resume-decision-v1=" + coroRunDecisionTakeSymbolV1 + "(g:ptr,expected-epoch:u32,expected-generation:u32,outcome:*u32,case:*u32,task-kind:*u32,operation-source-slot:*u32,operation-generation:*u32)->void")
+		write("resume-decision-zero-v1=" + coroRunDecisionTakeZeroSymbolV1 + "(g:ptr)->u32")
 		write("wait-owner-v1=" +
 			coroWaitPrepareSymbolV1 + "(token:ptr,ticket-out:*u32,wait-slot-out:*u32,wait-generation-out:*u32,executor-slot-out:*u32,executor-generation-out:*u32)->bool;" +
 			coroWaitRollbackSymbolV1 + "(token:ptr,ticket:u32,wait-slot:u32,wait-generation:u32)->bool;" +

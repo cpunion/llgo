@@ -157,6 +157,9 @@ func (p *context) compileCoroTargetAwait(b llssa.Builder, callee *ssa.Function, 
 	}
 	publish := p.pkg.NewFunc(p.currentCoro.abi.awaitPrepareHook, coroAwaitPrepareSignature(), llssa.InC)
 	b.Call(publish.Expr, p.currentCoro.task, p.currentCoro.coro.Handle(), child)
+	// Child await remains a zero-ticket continuation for now. It may branch to
+	// shared task cleanup, but exact result/cancel reconciliation must remain at
+	// this site once CompletionRecord and result-lease lowering are connected.
 	p.currentCoro.coro.SuspendCurrentBlock()
 	p.currentCoro.activate(b)
 

@@ -18,6 +18,40 @@ package coro
 
 import "testing"
 
+func TestTakeRunDecisionWordsReturnsZeroTicketTaskCancellationExactlyOnce(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		kind TaskCancelKind
+	}{
+		{name: "abort", kind: TaskCancelAbort},
+		{name: "shutdown", kind: TaskCancelShutdown},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			kind := test.kind
+			p := new(P)
+			task := newYieldingTestG(t, "run-decision-words-task-cancel")
+			if !Enqueue(p, task.g) || !RequestTaskCancellation(p, task.g, kind) {
+				t.Fatalf("enqueue/request task cancellation %d", kind)
+			}
+			if g, ok := NextRunnable(p); !ok || g != task.g {
+				t.Fatal("dequeue task cancellation decision")
+			}
+			_ = beginWaitTestResume(t, p, task)
+			outcome, caseID, taskKind, sourceSlot, generation, ok := TakeRunDecisionWords(task.g, 0, 0)
+			if !ok || outcome != 0 || caseID != 0 || taskKind != uint32(kind) || sourceSlot != 0 || generation != 0 ||
+				task.g.park.taskCancelPhase != taskCancelCleanup {
+				t.Fatalf("task cancellation %d words = (%d,%d,%d,%d,%d,%t), phase=%d",
+					kind, outcome, caseID, taskKind, sourceSlot, generation, ok, task.g.park.taskCancelPhase)
+			}
+			if outcome, caseID, taskKind, sourceSlot, generation, ok = TakeRunDecisionWords(task.g, 0, 0); ok ||
+				outcome != 0 || caseID != 0 || taskKind != 0 || sourceSlot != 0 || generation != 0 {
+				t.Fatalf("task cancellation %d replay = (%d,%d,%d,%d,%d,%t)",
+					kind, outcome, caseID, taskKind, sourceSlot, generation, ok)
+			}
+		})
+	}
+}
+
 func TestTakeRunDecisionWordsAcceptsZeroTicketNormalResume(t *testing.T) {
 	p := new(P)
 	task := newYieldingTestG(t, "run-decision-words-normal")

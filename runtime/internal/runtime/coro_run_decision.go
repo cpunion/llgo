@@ -65,6 +65,39 @@ func normalCoroRunDecisionWordsV1(
 	return ok && outcome == 0 && caseID == 0 && taskKind == 0 && operationSourceSlot == 0 && operationGeneration == 0
 }
 
+func zeroTicketCoroRunDecisionTaskV1(
+	outcome, caseID, taskKind, operationSourceSlot, operationGeneration uint32,
+	ok bool,
+) (uint32, bool) {
+	if !ok || outcome != 0 || caseID != 0 || operationSourceSlot != 0 || operationGeneration != 0 {
+		return 0, false
+	}
+	switch taskKind {
+	case uint32(coro.TaskCancelNone), uint32(coro.TaskCancelAbort), uint32(coro.TaskCancelShutdown):
+		return taskKind, true
+	default:
+		return 0, false
+	}
+}
+
+// __llgo_coro_run_decision_take_zero_v1 is the scalar compiler gate for a
+// non-park resume point. It deliberately has no output pointers: normal,
+// abort, and shutdown are the complete zero-ticket decision space, so the
+// compiler can branch on one uint32 without retaining scratch in the stackless
+// coroutine frame. A selected case, result lease, malformed task kind, stale
+// take, or wrong G is a compiler/runtime protocol violation.
+//
+//export __llgo_coro_run_decision_take_zero_v1
+func __llgo_coro_run_decision_take_zero_v1(g unsafe.Pointer) uint32 {
+	outcome, caseID, taskKind, sourceSlot, generation, ok := coro.TakeRunDecisionWords((*coro.G)(g), 0, 0)
+	task, valid := zeroTicketCoroRunDecisionTaskV1(outcome, caseID, taskKind, sourceSlot, generation, ok)
+	if !valid {
+		coroRuntimeAbort("invalid zero-ticket coroutine run decision")
+		return 0
+	}
+	return task
+}
+
 // __llgo_coro_run_decision_take_v1 is the compiler resume-prologue gate. Its
 // ABI contains only the current G pointer, the expected logical ticket's two
 // uint32 words, and either five distinct uint32 output addresses or five nil

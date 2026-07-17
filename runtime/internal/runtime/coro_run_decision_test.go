@@ -73,6 +73,35 @@ func TestNormalCoroRunDecisionWordsV1(t *testing.T) {
 	}
 }
 
+func TestZeroTicketCoroRunDecisionTaskV1(t *testing.T) {
+	for taskKind := uint32(0); taskKind <= 2; taskKind++ {
+		if got, ok := zeroTicketCoroRunDecisionTaskV1(0, 0, taskKind, 0, 0, true); !ok || got != taskKind {
+			t.Fatalf("zero-ticket task decision %d = (%d, %t)", taskKind, got, ok)
+		}
+	}
+	invalid := [][6]uint32{
+		{1, 0, 0, 0, 0, 1},
+		{0, 1, 0, 0, 0, 1},
+		{0, 0, 3, 0, 0, 1},
+		{0, 0, 0, 1, 0, 1},
+		{0, 0, 0, 0, 1, 1},
+		{0, 0, 0, 0, 0, 0},
+	}
+	for index, words := range invalid {
+		if got, ok := zeroTicketCoroRunDecisionTaskV1(
+			words[0], words[1], words[2], words[3], words[4], words[5] != 0,
+		); ok || got != 0 {
+			t.Fatalf("invalid zero-ticket decision %d = (%d, %t)", index, got, ok)
+		}
+	}
+}
+
+func TestZeroTicketCoroRunDecisionWrapperRejectsInvalidG(t *testing.T) {
+	expectCoroRunDecisionAbort(t, func() {
+		__llgo_coro_run_decision_take_zero_v1(nil)
+	})
+}
+
 func TestCoroRunDecisionWrapperRejectsMalformedNormalOnlyMode(t *testing.T) {
 	g := unsafe.Pointer(new(byte))
 	expectCoroRunDecisionAbort(t, func() {

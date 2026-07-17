@@ -2063,6 +2063,7 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			"__llgo_coro_yield_prepare_v1",
 			"__llgo_coro_park_prepare_v1",
 			coroRunDecisionTakeSymbolV1,
+			coroRunDecisionTakeZeroSymbolV1,
 			"__llgo_coro_complete_prepare_v1",
 			"__llgo_coro_frame_free_v1",
 		)
@@ -2203,6 +2204,15 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 				if !types.Identical(sig.Params().At(parameter).Type(), uint32Pointer) {
 					return nil, nil, nil, nil, fmt.Errorf("coroutine run-decision ABI %q must have exact func(unsafe.Pointer, uint32, uint32, *uint32, *uint32, *uint32, *uint32, *uint32) signature", name)
 				}
+			}
+		}
+		if name == coroRunDecisionTakeZeroSymbolV1 {
+			sig := fn.Signature
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 1 || sig.Results().Len() != 1 ||
+				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Results().At(0).Type(), types.Typ[types.Uint32]) ||
+				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf("coroutine zero-ticket run-decision ABI %q must have exact func(unsafe.Pointer) uint32 signature", name)
 			}
 		}
 		goBody, err := frozenGoEmittedBody(ctx.coroEmission, fn)
