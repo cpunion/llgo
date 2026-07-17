@@ -411,15 +411,7 @@ func buildCoroNativeTimerE2EDriver(t *testing.T, prog llssa.Program, temp, check
 		[]types.Type{types.Typ[types.Int32], types.Typ[types.Uint32]}, []types.Type{types.Typ[types.Int32]},
 	), llssa.InC)
 	abort := pkg.NewFunc("abort", newSignature(nil, nil), llssa.InC)
-	assertNil := pkg.NewFunc(llssa.PkgRuntime+".AssertNilDeref", newSignature(
-		[]types.Type{types.Typ[types.Bool]}, nil,
-	), llssa.InGo)
-	assertBody := assertNil.MakeBody(3)
-	fail, valid := assertNil.Block(1), assertNil.Block(2)
-	assertBody.If(assertNil.Param(0), fail, valid)
-	assertBody.SetBlock(fail).Call(abort.Expr)
-	assertBody.Return()
-	assertBody.SetBlock(valid).Return()
+	defineCoroNativeE2ENilDerefStubs(prog, pkg, abort)
 	checkIndexRange := pkg.NewFunc(llssa.PkgRuntime+".CheckIndexRange", newSignature(
 		[]types.Type{types.Typ[types.Bool], types.Typ[types.Int64], types.Typ[types.Bool], types.Typ[types.Int]}, nil,
 	), llssa.InGo)
