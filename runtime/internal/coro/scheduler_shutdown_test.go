@@ -374,7 +374,7 @@ func TestCommandShutdownAcceptsIdleOrRequestedGateAndRejectsBusyP(t *testing.T) 
 		{"current", func(p *P) { p.current = new(G) }},
 		{"in-resume", func(p *P) { p.inResume = true }},
 		{"action", func(p *P) { p.action = Action{Kind: ActionResume, Handle: unsafe.Pointer(new(byte))} }},
-		{"timer-preempt-budget", func(p *P) { p.timerPreemptBudget = 1 }},
+		{"service-preempt-budget", func(p *P) { p.servicePreemptBudget = 1 }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

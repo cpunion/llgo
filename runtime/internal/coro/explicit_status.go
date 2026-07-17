@@ -207,7 +207,7 @@ func finishPanicG(p *P, g *G, wasRoot bool) (Action, bool) {
 	g.state = GDead
 	g.runP = nil
 	p.current = nil
-	p.timerPreemptBudget = 0
+	p.servicePreemptBudget = 0
 	p.action = Action{}
 	return Action{Kind: ActionPanicComplete}, true
 }

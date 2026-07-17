@@ -119,20 +119,20 @@ type P struct {
 	inResume  bool
 	action    Action
 
-	// timerPreemptBudget is scheduler-thread-only. A non-zero value belongs
+	// servicePreemptBudget is scheduler-thread-only. A non-zero value belongs
 	// to current's run slice and counts legal compiler safepoints until the
-	// scheduler must regain ownership to resample monotonic time. It is armed
-	// only when BeginRunG observes an Active timer on a timer-bound executor;
-	// idle Ps and targets without an Active timer keep the exact zero value.
-	timerPreemptBudget uint32
+	// scheduler must regain ownership to service runnable work and every bound
+	// event source. Every successful BeginRunG loads one full quantum; an idle
+	// P keeps the exact zero value.
+	servicePreemptBudget uint32
 }
 
-// timerPreemptPollBudget bounds how many legal compiler safepoints a sole
-// runnable G may cross while another G is parked on an Active timer. This is a
+// servicePreemptPollBudget bounds how many legal compiler safepoints one G may
+// cross before returning ownership to the scheduler service loop. This is a
 // deterministic safepoint budget rather than a wall-clock quantum: the yield
-// returns ownership to the executor loop, whose NextRunnableAt call samples
-// the target monotonic clock and publishes every newly due timer.
-const timerPreemptPollBudget uint32 = 64
+// lets the executor drain all durable event sources, publish ready work, and
+// make the next scheduling decision without depending on a particular source.
+const servicePreemptPollBudget uint32 = 64
 
 // ActionKind identifies either the next compiler-owned handle operation or a
 // terminal control event for the current scheduler slice. The core never
@@ -286,19 +286,19 @@ func PollPreempt(g *G) bool {
 		if !requested && p.current == g {
 			// Only BeginRunG writes a legal non-zero budget. Corrupt values fail
 			// closed instead of manufacturing an unbounded or immediate yield.
-			budget := p.timerPreemptBudget
+			budget := p.servicePreemptBudget
 			switch {
 			case budget == 0:
-			case budget > timerPreemptPollBudget:
+			case budget > servicePreemptPollBudget:
 				return false
 			case budget == 1:
 				// Reload so a caller that fails to honor this request cannot spin
 				// on true at every subsequent safepoint. A successful yield clears
 				// the budget before the P becomes idle.
-				p.timerPreemptBudget = timerPreemptPollBudget
+				p.servicePreemptBudget = servicePreemptPollBudget
 				requested = true
 			default:
-				p.timerPreemptBudget = budget - 1
+				p.servicePreemptBudget = budget - 1
 			}
 		}
 	}
@@ -674,7 +674,7 @@ func BeginRunG(p *P, g *G) (Action, bool) {
 		!ValidG(g) || g.state != GRunnable || g.active == nil || g.root == nil ||
 		g.destroyTarget != nil || g.destroyRoot || g.queued || g.nextReady != nil ||
 		g.waitToken != nil || g.waitTicket != 0 || g.nextWait != nil || g.waiting || g.runP != nil ||
-		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil || p.timerPreemptBudget != 0 {
+		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil || p.servicePreemptBudget != 0 {
 		return Action{}, false
 	}
 	schedule := preemptLoad(&p.schedule)
@@ -686,21 +686,11 @@ func BeginRunG(p *P, g *G) (Action, bool) {
 		(frame.state != FrameInitialSuspended && frame.state != FrameSuspended) {
 		return Action{}, false
 	}
-	budget := uint32(0)
-	if driver := p.executor; driver != nil && driver.sources.usesMonotonicTime() {
-		_, hasDeadline, ok := NextExecutorTimerDeadline(driver)
-		if !ok {
-			return Action{}, false
-		}
-		if hasDeadline {
-			budget = timerPreemptPollBudget
-		}
-	}
 	if p.readyHead != nil && !RequestPreempt(g) {
 		return Action{}, false
 	}
 	p.current = g
-	p.timerPreemptBudget = budget
+	p.servicePreemptBudget = servicePreemptPollBudget
 	g.state = GRunning
 	g.runP = p
 	return setAction(p, ActionCheckResume, frame.handle)
@@ -759,7 +749,7 @@ func Resumed(p *P, g *G, action Action) (Action, bool) {
 		g.state = GRunnable
 		g.runP = nil
 		p.current = nil
-		p.timerPreemptBudget = 0
+		p.servicePreemptBudget = 0
 		p.action = Action{}
 		if !Enqueue(p, g) {
 			return Action{}, false
@@ -774,7 +764,7 @@ func Resumed(p *P, g *G, action Action) (Action, bool) {
 		g.state = GWaiting
 		g.runP = nil
 		p.current = nil
-		p.timerPreemptBudget = 0
+		p.servicePreemptBudget = 0
 		p.action = Action{}
 		if !enqueueWait(p, g) {
 			return Action{}, false
@@ -833,7 +823,7 @@ func Destroyed(p *P, g *G, action Action) (Action, bool) {
 		g.state = GDead
 		g.runP = nil
 		p.current = nil
-		p.timerPreemptBudget = 0
+		p.servicePreemptBudget = 0
 		p.action = Action{}
 		return Action{Kind: ActionComplete}, true
 	}
@@ -867,7 +857,7 @@ func TerminalG(p *P, g *G) bool {
 	return p != nil && p.current == nil && p.readyHead == nil && p.readyTail == nil &&
 		p.waitHead == nil && p.waitTail == nil &&
 		preemptLoad(&p.schedule) == scheduleDisabled && preemptLoad(&p.executorMode) == executorModeUnbound && p.executor == nil &&
-		!p.inResume && p.action.Kind == ActionInvalid && p.action.Handle == nil && p.timerPreemptBudget == 0 &&
+		!p.inResume && p.action.Kind == ActionInvalid && p.action.Handle == nil && p.servicePreemptBudget == 0 &&
 		ValidG(g) && preemptLoad(preemptAddress(g)) == preemptDisabled && g.state == GDead && g.root == nil && g.active == nil && g.frames == nil &&
 		g.pending.kind == pendingNone && g.pending.from == nil && g.pending.target == nil && g.pending.wait == nil && g.pending.ticket == 0 &&
 		g.destroyTarget == nil && !g.destroyRoot && g.nextReady == nil && !g.queued &&
