@@ -290,8 +290,8 @@ POSIX regular file、DNS或阻塞C调用根据target capability选择：
 - Physical coroutine lowering仍是pure-SSA子集，method、closure、generic instance、variadic、recursive/defer/recover和大量runtime helper路径仍fail closed。
 - suspended frame没有精确GC root map和write barrier contract。
 - Timer frame retention按两个timer符号和精确SSA形状硬编码，证明通用lifetime core缺失。
-- ExecutorDriver直接持有wait/timer表并复制timer-aware `*At` 状态机；第三种source会继续扩大driver。
-- 抢占预算目前与active timer绑定，不是独立的完整抢占服务。
+- Phase 23已将ExecutorDriver的bind/drain/pending/deadline/empty/close/unbind收口到静态`ExecutorSourceSet`；但现有wait/timer source仍在各自drain中立即`CompleteWait`，尚未改为完整snapshot的completion sink批量决策。
+- Phase 23已将每个G run slice的scheduler service budget与active timer解耦；但WASM/embedded的`RunSlice`返回host边界、外部tick/sysmon请求和post-optimization safepoint上界证明仍未完成。
 - 当前driver固定一个P，尚未实现native多P/M、global injection和work stealing。
 
 因此Phase 22应视为首个可运行vertical slice，而不是“核心已经完成后新增一个timer功能”。
