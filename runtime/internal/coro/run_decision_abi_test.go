@@ -51,7 +51,7 @@ func TestTakeRunDecisionWordsPreservesExactTicketAndScalarizesLease(t *testing.T
 	}
 	action := beginWaitTestResume(t, p, task)
 	operations := sealSchedulerParkV2(t, task.g, 29, 71)
-	publishSchedulerParkV2(t, operations, 0)
+	publishSchedulerParkV2(t, p, operations, 0)
 	commitSchedulerParkV2(t, p, task, action, operations)
 	if count, ok := PollReady(p); !ok || count != 0 {
 		t.Fatalf("resolve scalar decision park = (%d, %t)", count, ok)

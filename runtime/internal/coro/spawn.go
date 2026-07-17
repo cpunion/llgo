@@ -86,7 +86,7 @@ func runningSpawnContext(parent *G) (*P, bool) {
 	if p == nil || p.current != parent || !p.inResume ||
 		!expectedAction(p, parent, p.action, ActionResume) ||
 		p.runDecision != (RunDecision{}) ||
-		!validReadyQueue(p) || !validWaitQueue(p) {
+		!validReadyQueue(p) || !validSchedulerWaitQueues(p) {
 		return nil, false
 	}
 	schedule := preemptLoad(&p.schedule)

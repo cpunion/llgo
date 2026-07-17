@@ -220,14 +220,18 @@ func TestExecutorDriverManualSourceUsesUnifiedQuietCutAndParkGate(t *testing.T) 
 	if !ok {
 		t.Fatal("begin manual-source driver park")
 	}
-	first, firstOK := manual.ReserveAndAttach(p, &task.g.park, ticket, 101)
-	second, secondOK := manual.ReserveAndAttach(p, &task.g.park, ticket, 202)
+	var wait WaitSetRecord
+	if !PrepareWaitSetRecord(&wait, task.g, ticket) {
+		t.Fatal("prepare manual-source driver wait record")
+	}
+	first, firstOK := manual.ReserveAndAttachWait(p, &task.g.park, ticket, &wait, 101)
+	second, secondOK := manual.ReserveAndAttachWait(p, &task.g.park, ticket, &wait, 202)
 	if !firstOK || !secondOK || !SealParkSet(&task.g.park, ticket) {
 		t.Fatal("attach manual-source driver candidates")
 	}
 	task.frame.header.SuspendReason = uint16(SuspendPark)
 	task.frame.header.Lifecycle = uint16(FrameSuspended)
-	if !PrepareParkSet(task.g, task.handle, task.frame.header, ticket) {
+	if !PrepareParkSet(task.g, task.handle, task.frame.header, ticket, &wait) {
 		t.Fatal("prepare manual-source driver park")
 	}
 	if action, ok = Resumed(p, task.g, action); !ok || action.Kind != ActionPark {
@@ -268,6 +272,62 @@ func TestExecutorDriverManualSourceUsesUnifiedQuietCutAndParkGate(t *testing.T) 
 	finishReadyDriverTasks(t, p, map[*G]*yieldingTestG{task.g: task})
 	if !TerminalG(p, task.g) || !manual.CanRelease() || !waits.CanRelease() || !registry.CanRelease() {
 		t.Fatal("manual-source driver cleanup retained state")
+	}
+	runtime.KeepAlive(task.frame.memory)
+}
+
+func TestExecutorDriverManualCancellationMarksFrameLocalWaitSet(t *testing.T) {
+	p := new(P)
+	driver, registry, waits, manual, _ := bindTestExecutorDriverWithManual(t, p)
+	task := newYieldingTestG(t, "driver-manual-cancel")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue manual-cancel task")
+	}
+	if g, ok := NextRunnable(p); !ok || g != task.g {
+		t.Fatal("dequeue manual-cancel task")
+	}
+	action := beginWaitTestResume(t, p, task)
+	ticket, ok := BeginParkSet(&task.g.park, 1, 79)
+	var wait WaitSetRecord
+	if !ok || !PrepareWaitSetRecord(&wait, task.g, ticket) {
+		t.Fatal("begin manual-cancel wait-set")
+	}
+	id, attached := manual.ReserveAndAttachWait(p, &task.g.park, ticket, &wait, 303)
+	if !attached || !SealParkSet(&task.g.park, ticket) {
+		t.Fatal("attach manual-cancel operation")
+	}
+	task.frame.header.SuspendReason = uint16(SuspendPark)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+	if !PrepareParkSet(task.g, task.handle, task.frame.header, ticket, &wait) {
+		t.Fatal("prepare manual-cancel park")
+	}
+	if action, ok = Resumed(p, task.g, action); !ok || action.Kind != ActionPark ||
+		p.parkWaitHead != &wait || p.parkWaitTail != &wait || FrameFromStorage(task.frame.storage).parkWait != &wait {
+		t.Fatalf("commit manual-cancel park = (%+v, %t)", action, ok)
+	}
+	if !manual.RequestCancel(p, &wait) {
+		t.Fatal("mark manual cancellation")
+	}
+	if drained, promoted, pollOK := PollExecutor(driver); !pollOK || drained != 0 || promoted != 1 ||
+		wait != (WaitSetRecord{}) || p.parkWaitHead != nil || p.parkWaitTail != nil {
+		t.Fatalf("poll manual cancellation = (%d, %d, %t)", drained, promoted, pollOK)
+	}
+	if g, nextOK := NextRunnable(p); !nextOK || g != task.g {
+		t.Fatal("dequeue manual-canceled task")
+	}
+	action = beginWaitTestResume(t, p, task)
+	outcome, caseID, lease, taskCancel, decisionOK := TakeRunDecision(task.g, ticket)
+	if !decisionOK || outcome != ParkOutcomeCanceled || caseID != 0 || lease != (OperationResultLease{}) || taskCancel != TaskCancelNone {
+		t.Fatalf("take manual cancellation = (%d, %d, %+v, %d, %t)", outcome, caseID, lease, taskCancel, decisionOK)
+	}
+	if !manual.ConfirmQuiesced(p, id) || !manual.Recycle(p, id) {
+		t.Fatal("release manual-canceled operation")
+	}
+	yieldRunningDriverTask(t, p, task, action)
+	closeTestExecutorDriver(t, driver)
+	finishReadyDriverTasks(t, p, map[*G]*yieldingTestG{task.g: task})
+	if !TerminalG(p, task.g) || !manual.CanRelease() || !waits.CanRelease() || !registry.CanRelease() {
+		t.Fatal("manual-canceled task retained state")
 	}
 	runtime.KeepAlive(task.frame.memory)
 }

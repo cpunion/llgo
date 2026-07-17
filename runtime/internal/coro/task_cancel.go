@@ -112,7 +112,19 @@ func pOwnsTaskCancellation(p *P, g *G) bool {
 	case GRunning, GDispatching:
 		return p.current == g && g.runP == p
 	case GWaiting:
-		return g.waiting && pQueueContainsWaiter(p, g)
+		if !g.waiting {
+			return false
+		}
+		if g.waitToken != nil {
+			return pQueueContainsWaiter(p, g)
+		}
+		if g.active != nil && g.active.parkWait != nil {
+			return validActiveWaitSetRecordFast(p, g.active.parkWait)
+		}
+		// Pure ParkState tests may model scheduler ownership with the legacy
+		// list while omitting frame metadata. Production V2 parks always take
+		// the record path above.
+		return pQueueContainsWaiter(p, g)
 	default:
 		return false
 	}
@@ -144,7 +156,16 @@ func applyTaskCancellationToPark(g *G, kind TaskCancelKind) bool {
 // termination. Go does not expose an arbitrary goroutine-kill handle, so the
 // base G representation needs no per-task external registry.
 func RequestTaskCancellation(p *P, g *G, kind TaskCancelKind) bool {
-	if !pOwnsTaskCancellation(p, g) || !validTaskCancelKind(kind) || !validParkState(&g.park) {
+	if !pOwnsTaskCancellation(p, g) || !validTaskCancelKind(kind) {
+		return false
+	}
+	var wait *WaitSetRecord
+	if g.state == GWaiting && g.waitToken == nil && g.active != nil && g.active.parkWait != nil {
+		wait = g.active.parkWait
+		if !canAppendAffectedWaitSet(p, wait) {
+			return false
+		}
+	} else if !validParkState(&g.park) {
 		return false
 	}
 	if g.park.taskCancelPhase == taskCancelCleanup {
@@ -156,11 +177,30 @@ func RequestTaskCancellation(p *P, g *G, kind TaskCancelKind) bool {
 	if g.park.taskCancelKind > strongest {
 		strongest = g.park.taskCancelKind
 	}
-	if !applyTaskCancellationToPark(g, strongest) {
-		return false
+	if wait == nil {
+		if !applyTaskCancellationToPark(g, strongest) {
+			return false
+		}
+	} else {
+		switch g.park.phase {
+		case parkParked:
+			parkKind := taskCancelParkKind(strongest)
+			if parkKind == ParkCancelNone {
+				return false
+			}
+			if parkKind > g.park.cancelKind {
+				g.park.cancelKind = parkKind
+			}
+		case parkDetaching, parkReady:
+		default:
+			return false
+		}
 	}
 	g.park.taskCancelKind = strongest
 	g.park.taskCancelPhase = taskCancelRequested
+	if wait != nil {
+		appendAffectedWaitSetUnchecked(p, wait)
+	}
 	return true
 }
 

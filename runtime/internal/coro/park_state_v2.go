@@ -103,7 +103,9 @@ const (
 // the list and clears all pointer fields before decrementing the ready barrier.
 type ParkLink struct {
 	park      *ParkState
+	wait      *WaitSetRecord
 	operation *OperationRecord
+	previous  *ParkLink
 	next      *ParkLink
 	ticket    ParkTicket
 	caseID    uint32
@@ -139,11 +141,17 @@ func validParkState(state *ParkState) bool {
 		return false
 	}
 	links := uint32(0)
+	var previous *ParkLink
 	for link := state.head; link != nil; link = link.next {
 		links++
 		if links > state.expected || link.park != state || link.operation == nil || &link.operation.link != link || link.operation.link.park != state ||
 			link.operation.link.operation != link.operation || link.ticket != state.ticket ||
-			link.operation.phase != operationActive {
+			link.operation.phase != operationActive || link.previous != previous ||
+			(link.next != nil && link.next.previous != link) {
+			return false
+		}
+		if link.wait != nil && (link.wait.g == nil || &link.wait.g.park != state || link.wait.ticket != state.ticket ||
+			link.wait.state == waitSetRecordUnused) {
 			return false
 		}
 		switch state.phase {
@@ -173,6 +181,7 @@ func validParkState(state *ParkState) bool {
 				return false
 			}
 		}
+		previous = link
 	}
 	if links != state.attached {
 		return false
@@ -265,29 +274,59 @@ func parkCaseRank(seed, caseID uint32) uint32 {
 	return x
 }
 
-func AttachParkOperation(state *ParkState, ticket ParkTicket, record *OperationRecord, caseID uint32) bool {
-	if state == nil || !validParkState(state) || state.phase != parkPreparing || ticket != state.ticket ||
+func validPreparingParkStateHeader(state *ParkState, ticket ParkTicket) bool {
+	return state != nil && state.phase == parkPreparing && state.ticket == ticket && validParkTicket(ticket) &&
+		validTaskCancelState(state.taskCancelKind, state.taskCancelPhase) && state.cancelKind <= ParkCancelShutdown &&
+		state.attached <= state.expected && state.outcome == ParkOutcomePending && state.winnerID == (OperationID{}) &&
+		state.winnerRecord == nil && (state.attached == 0) == (state.head == nil) &&
+		(state.head == nil || state.head.previous == nil)
+}
+
+func attachParkOperation(state *ParkState, ticket ParkTicket, wait *WaitSetRecord, record *OperationRecord, caseID uint32) bool {
+	validState := wait != nil && validPreparingParkStateHeader(state, ticket) || wait == nil && validParkState(state)
+	if !validState || state.phase != parkPreparing || ticket != state.ticket ||
 		!validParkTicket(ticket) || state.attached >= state.expected || record == nil || record.phase != operationReserved ||
-		!record.id.Valid() || record.disposition != OperationDispositionPending || record.link.park != nil || record.link.operation != nil || record.link.next != nil {
+		!record.id.Valid() || record.disposition != OperationDispositionPending || record.link.park != nil || record.link.wait != nil ||
+		record.link.operation != nil || record.link.previous != nil || record.link.next != nil {
 		return false
 	}
-	for link := state.head; link != nil; link = link.next {
-		if link.caseID == caseID || link.operation.id == record.id {
-			return false
+	if wait != nil && !validPreparingWaitSetRecord(wait, state, ticket) {
+		return false
+	}
+	if wait == nil {
+		for link := state.head; link != nil; link = link.next {
+			if link.caseID == caseID || link.operation.id == record.id {
+				return false
+			}
 		}
 	}
 	record.link = ParkLink{
 		park:      state,
+		wait:      wait,
 		operation: record,
 		next:      state.head,
 		ticket:    ticket,
 		caseID:    caseID,
 		rank:      parkCaseRank(state.seed, caseID),
 	}
+	if state.head != nil {
+		state.head.previous = &record.link
+	}
 	record.phase = operationActive
 	state.head = &record.link
 	state.attached++
-	if !validParkState(state) {
+	validAttached := false
+	if wait == nil {
+		validAttached = validParkState(state)
+	} else {
+		validAttached = validPreparingParkStateHeader(state, ticket) && state.head == &record.link &&
+			record.link.park == state && record.link.wait == wait && record.link.operation == record &&
+			record.link.ticket == ticket && record.phase == operationActive
+	}
+	if !validAttached {
+		if record.link.next != nil {
+			record.link.next.previous = nil
+		}
 		state.head = record.link.next
 		state.attached--
 		record.link = ParkLink{}
@@ -295,6 +334,20 @@ func AttachParkOperation(state *ParkState, ticket ParkTicket, record *OperationR
 		return false
 	}
 	return true
+}
+
+func AttachParkOperation(state *ParkState, ticket ParkTicket, record *OperationRecord, caseID uint32) bool {
+	return attachParkOperation(state, ticket, nil, record, caseID)
+}
+
+// AttachParkWaitOperation associates a physical operation with the transient
+// frame-local record used by scheduler-integrated V2 promotion. Pure logical
+// ParkState tests may continue to use AttachParkOperation without a record.
+// Candidate case-ID uniqueness is a compiler/preparation preflight invariant;
+// avoiding a repeated link scan keeps N candidate attachments O(N). SealParkSet
+// performs the one complete structural audit before scheduler commit.
+func AttachParkWaitOperation(state *ParkState, ticket ParkTicket, wait *WaitSetRecord, record *OperationRecord, caseID uint32) bool {
+	return attachParkOperation(state, ticket, wait, record, caseID)
 }
 
 func SealParkSet(state *ParkState, ticket ParkTicket) bool {
@@ -448,25 +501,35 @@ func resolveParkSet(state *ParkState, ticket ParkTicket, winner *OperationRecord
 // DetachParkOperation clears the only physical-source pointer path to the
 // logical wait before publishing the ready transition. Physical quiescence is
 // intentionally not required here.
-func DetachParkOperation(state *ParkState, ticket ParkTicket, record *OperationRecord, id OperationID) bool {
-	if !validParkState(state) || state.phase != parkDetaching || ticket != state.ticket ||
+func detachParkOperation(state *ParkState, ticket ParkTicket, record *OperationRecord, id OperationID, fast bool) bool {
+	validState := fast && validActiveParkStateHeader(state, ticket) || !fast && validParkState(state)
+	if !validState || state.phase != parkDetaching || ticket != state.ticket ||
 		record == nil || !record.Matches(id) || record.phase != operationActive || record.disposition == OperationDispositionPending ||
 		!record.resolutionApplied || record.link.park != state || record.link.operation != record || record.link.ticket != ticket {
 		return false
 	}
-	var previous *ParkLink
-	link := state.head
-	for link != nil && link != &record.link {
-		previous = link
-		link = link.next
+	link := &record.link
+	if fast && link.wait == nil {
+		return false
 	}
-	if link == nil {
+	previous, next := link.previous, link.next
+	if previous == nil {
+		if state.head != link {
+			return false
+		}
+	} else if previous.next != link {
+		return false
+	}
+	if next != nil && next.previous != link {
 		return false
 	}
 	if previous == nil {
-		state.head = link.next
+		state.head = next
 	} else {
-		previous.next = link.next
+		previous.next = next
+	}
+	if next != nil {
+		next.previous = previous
 	}
 	record.phase = operationDetached
 	record.link = ParkLink{}
@@ -477,7 +540,21 @@ func DetachParkOperation(state *ParkState, ticket ParkTicket, record *OperationR
 		}
 		state.phase = parkReady
 	}
+	if fast {
+		return validActiveParkStateHeader(state, ticket)
+	}
 	return validParkState(state)
+}
+
+func DetachParkOperation(state *ParkState, ticket ParkTicket, record *OperationRecord, id OperationID) bool {
+	return detachParkOperation(state, ticket, record, id, false)
+}
+
+// DetachParkWaitOperation is the O(1) scheduler-integrated detach path. Its
+// transient ParkLink carries the predecessor, and the complete wait-set was
+// already audited once by quiet-cut resolution.
+func DetachParkWaitOperation(state *ParkState, ticket ParkTicket, record *OperationRecord, id OperationID) bool {
+	return detachParkOperation(state, ticket, record, id, true)
 }
 
 func ConsumeParkSet(state *ParkState, ticket ParkTicket) (outcome ParkOutcome, caseID uint32, lease OperationResultLease, ok bool) {

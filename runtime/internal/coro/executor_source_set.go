@@ -192,6 +192,10 @@ func (sources *ExecutorSourceSet) resolveAfterQuietCut(p *P) (promoted int, ok b
 			return 0, false
 		}
 	}
+	batch, _, _, resolved := resolveAffectedWaitSets(p)
+	if !resolved {
+		return 0, false
+	}
 	// Phase two applies each source's winner/loser disposition and clears every
 	// ParkLink. Keeping the phases global prevents a source scanned first from
 	// detaching a cross-source loser before that loser's affected entry is seen.
@@ -200,7 +204,12 @@ func (sources *ExecutorSourceSet) resolveAfterQuietCut(p *P) (promoted int, ok b
 			return 0, false
 		}
 	}
-	return pollReady(p)
+	promoted, ok = promoteResolvedWaitSets(p, batch)
+	if !ok {
+		return promoted, false
+	}
+	legacyPromoted, legacyOK := pollReady(p)
+	return promoted + legacyPromoted, legacyOK
 }
 
 // pending reports producer-published facts that require another owner scan.

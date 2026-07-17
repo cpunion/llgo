@@ -111,9 +111,14 @@ type pendingTransition struct {
 // before storage makes the free hook independent of maps, TLS, pthreads,
 // libuv, and any particular garbage collector.
 type Frame struct {
-	owner          *G
-	handle         unsafe.Pointer
-	header         *HeaderV1
+	owner  *G
+	handle unsafe.Pointer
+	header *HeaderV1
+	// parkWait points to caller-owned storage only from PrepareParkSet until
+	// the matching V2 park is promoted. The record itself is spilled into the
+	// direct-parking LLVM coroutine frame; ordinary frames pay only this
+	// metadata pointer during the first migration stage.
+	parkWait       *WaitSetRecord
 	storage        unsafe.Pointer
 	rawBase        unsafe.Pointer
 	descriptor     unsafe.Pointer
@@ -346,21 +351,30 @@ func PreparePark(g *G, handle unsafe.Pointer, header *HeaderV1, token *WaitToken
 // claim that makes the logical ticket eligible for SourceSet resolution.
 // Completion may have been published early in an OperationRecord, but no
 // callback receives G, ParkState, or an LLVM handle.
-func PrepareParkSet(g *G, handle unsafe.Pointer, header *HeaderV1, ticket ParkTicket) bool {
+func PrepareParkSet(g *G, handle unsafe.Pointer, header *HeaderV1, ticket ParkTicket, record *WaitSetRecord) bool {
 	if !ValidG(g) || handle == nil || header == nil || g.pending.kind != pendingNone || g.spawnChild != nil ||
 		hasPendingRunDecision(g) || g.waitToken != nil || g.waitTicket != 0 || g.waiting || g.nextWait != nil ||
-		!validParkState(&g.park) || g.park.phase != parkSealed || ticket != g.park.ticket {
+		!validParkState(&g.park) || g.park.phase != parkSealed || ticket != g.park.ticket ||
+		!validPreparingWaitSetRecord(record, &g.park, ticket) {
 		return false
 	}
 	frame := findFrame(g, handle)
 	if frame == nil || frame != g.active || frame.header != header || frame.state != FrameActive ||
+		frame.parkWait != nil ||
 		header.SuspendReason != uint16(SuspendPark) ||
 		header.Lifecycle != uint16(FrameSuspended) {
 		return false
 	}
+	for link := g.park.head; link != nil; link = link.next {
+		if link.wait != record {
+			return false
+		}
+	}
 	if !CommitParkSet(&g.park, ticket) {
 		return false
 	}
+	record.state = waitSetRecordCommitted
+	frame.parkWait = record
 	g.pending = pendingTransition{kind: pendingParkSet, from: frame}
 	return true
 }
@@ -394,7 +408,7 @@ func ReleaseFrame(g *G, storage unsafe.Pointer, size, align uintptr, descriptor 
 	frame := FrameFromStorage(storage)
 	if frame == nil || frame.owner != g || frame.storage != storage || frame.size != size ||
 		frame.align != align || frame.descriptor != descriptor || frame.state != FrameDestroyPending ||
-		g.destroyTarget != frame || frame.header == nil ||
+		g.destroyTarget != frame || frame.header == nil || frame.parkWait != nil ||
 		frame.header.Lifecycle != uint16(FrameDestroyPending) {
 		return nil, 0, false
 	}

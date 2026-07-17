@@ -190,7 +190,7 @@ func validManualOperationLiveSlot(source *ManualOperationSource, p *P, index uin
 // attaches its stable OperationRecord to a preparing logical wait-set. No
 // producer is admitted until all owner pointers are initialized and Active is
 // release-published.
-func (source *ManualOperationSource) ReserveAndAttach(p *P, state *ParkState, ticket ParkTicket, caseID uint32) (OperationID, bool) {
+func (source *ManualOperationSource) reserveAndAttach(p *P, state *ParkState, ticket ParkTicket, wait *WaitSetRecord, caseID uint32) (OperationID, bool) {
 	if !validManualOperationOwner(source, p) {
 		return OperationID{}, false
 	}
@@ -218,7 +218,13 @@ func (source *ManualOperationSource) ReserveAndAttach(p *P, state *ParkState, ti
 			return OperationID{}, false
 		}
 		preemptStore(&slot.generation, id.Generation)
-		if !AttachParkOperation(state, ticket, &slot.record, caseID) {
+		attached := false
+		if wait == nil {
+			attached = AttachParkOperation(state, ticket, &slot.record, caseID)
+		} else {
+			attached = AttachParkWaitOperation(state, ticket, wait, &slot.record, caseID)
+		}
+		if !attached {
 			if !AbortReservedOperation(&slot.record, id) {
 				return OperationID{}, false
 			}
@@ -232,6 +238,16 @@ func (source *ManualOperationSource) ReserveAndAttach(p *P, state *ParkState, ti
 		return id, true
 	}
 	return OperationID{}, false
+}
+
+func (source *ManualOperationSource) ReserveAndAttach(p *P, state *ParkState, ticket ParkTicket, caseID uint32) (OperationID, bool) {
+	return source.reserveAndAttach(p, state, ticket, nil, caseID)
+}
+
+// ReserveAndAttachWait is the scheduler-integrated form. wait is caller-owned
+// stable storage in the direct-parking coroutine frame; callbacks never see it.
+func (source *ManualOperationSource) ReserveAndAttachWait(p *P, state *ParkState, ticket ParkTicket, wait *WaitSetRecord, caseID uint32) (OperationID, bool) {
+	return source.reserveAndAttach(p, state, ticket, wait, caseID)
 }
 
 // Post publishes one pointer-free sticky mailbox fact. The OperationID is the
@@ -280,6 +296,13 @@ func (source *ManualOperationSource) Pending() bool {
 	return source != nil && preemptLoad(&source.pending) != 0
 }
 
+// RequestCancel publishes a logical operation cancellation for one active
+// scheduler-integrated manual wait. Source-independent task cancellation uses
+// the same WaitSetRecord gate directly.
+func (source *ManualOperationSource) RequestCancel(p *P, wait *WaitSetRecord) bool {
+	return validManualOperationOwner(source, p) && RequestWaitSetCancel(p, wait, ParkCancelOperation)
+}
+
 func (source *ManualOperationSource) appendAffected(index uint32) bool {
 	oneBased := index + 1
 	if source.affectedHead == 0 {
@@ -324,7 +347,11 @@ func (source *ManualOperationSource) PublishPass(p *P) (published, lost uint32, 
 		id := slot.record.id
 		switch result := PublishOperationCompletion(&slot.record, id); result {
 		case OperationCompletionPublished:
-			if !source.appendAffected(uint32(index)) {
+			if slot.record.link.wait != nil {
+				if !MarkWaitSetAffected(p, slot.record.link.wait) {
+					return published, lost, false
+				}
+			} else if !source.appendAffected(uint32(index)) {
 				return published, lost, false
 			}
 			published++
@@ -455,8 +482,10 @@ func (source *ManualOperationSource) ApplyAndDetach(p *P) (applied, detached uin
 			}
 			applied++
 		}
-		park, ticket := slot.record.link.park, slot.record.link.ticket
-		if !DetachParkOperation(park, ticket, &slot.record, id) {
+		park, ticket, wait := slot.record.link.park, slot.record.link.ticket, slot.record.link.wait
+		detachedRecord := wait != nil && DetachParkWaitOperation(park, ticket, &slot.record, id) ||
+			wait == nil && DetachParkOperation(park, ticket, &slot.record, id)
+		if !detachedRecord {
 			return applied, detached, false
 		}
 		detached++

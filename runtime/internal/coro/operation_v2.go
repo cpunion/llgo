@@ -168,7 +168,7 @@ type OperationRecord struct {
 
 func InitOperation(record *OperationRecord, id OperationID) bool {
 	if record == nil || !id.Valid() || id.Generation != 1 || record.phase != operationUnused || record.id != (OperationID{}) ||
-		record.link.park != nil || record.link.operation != nil || record.link.next != nil {
+		record.link.park != nil || record.link.wait != nil || record.link.operation != nil || record.link.previous != nil || record.link.next != nil {
 		return false
 	}
 	*record = OperationRecord{id: id, phase: operationReserved}
@@ -180,7 +180,7 @@ func InitOperation(record *OperationRecord, id OperationID) bool {
 // exhaustion, so a caller cannot reinitialize it with an old callback ID.
 func RearmOperation(record *OperationRecord) (OperationID, bool) {
 	if record == nil || record.phase != operationReusable || !record.id.Valid() ||
-		record.link.park != nil || record.link.operation != nil || record.link.next != nil {
+		record.link.park != nil || record.link.wait != nil || record.link.operation != nil || record.link.previous != nil || record.link.next != nil {
 		return OperationID{}, false
 	}
 	next, ok := NextOperationID(record.id, record.id.Source(), record.id.Slot())
@@ -197,7 +197,7 @@ func RearmOperation(record *OperationRecord) (OperationID, bool) {
 // accepted later.
 func AbortReservedOperation(record *OperationRecord, id OperationID) bool {
 	if record == nil || record.phase != operationReserved || record.id != id || !id.Valid() ||
-		record.link.park != nil || record.link.operation != nil || record.link.next != nil {
+		record.link.park != nil || record.link.wait != nil || record.link.operation != nil || record.link.previous != nil || record.link.next != nil {
 		return false
 	}
 	*record = OperationRecord{id: id, phase: operationReusable}
@@ -287,7 +287,7 @@ func ConfirmOperationQuiesced(record *OperationRecord, id OperationID) bool {
 
 func OperationCanRecycle(record *OperationRecord, id OperationID) bool {
 	return record != nil && record.Matches(id) && record.phase == operationDetached && record.quiesced &&
-		record.link.park == nil && record.link.operation == nil && record.link.next == nil &&
+		record.link.park == nil && record.link.wait == nil && record.link.operation == nil && record.link.previous == nil && record.link.next == nil &&
 		record.disposition != OperationDispositionPending && record.resolutionApplied &&
 		(record.disposition != OperationDispositionWinner || record.resultTaken)
 }

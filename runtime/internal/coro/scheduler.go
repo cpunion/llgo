@@ -118,10 +118,17 @@ type P struct {
 	current   *G
 	readyHead *G
 	readyTail *G
-	waitHead  *G
-	waitTail  *G
-	inResume  bool
-	action    Action
+	// waitHead/waitTail remain the legacy WaitToken queue. V2 waits use
+	// frame-local WaitSetRecords so an affected task can be removed in O(1)
+	// without adding a permanent prev link to every G.
+	waitHead         *G
+	waitTail         *G
+	parkWaitHead     *WaitSetRecord
+	parkWaitTail     *WaitSetRecord
+	affectedWaitHead *WaitSetRecord
+	affectedWaitTail *WaitSetRecord
+	inResume         bool
+	action           Action
 	// runDecision is populated immediately before ActionResume and must be
 	// consumed by the compiler-generated resume prologue before control can
 	// publish another scheduler transition. It scales with P, not G.
@@ -427,12 +434,12 @@ func enqueueWait(p *P, g *G) bool {
 }
 
 func enqueueParkSet(p *P, g *G) bool {
-	if p == nil || !ValidG(g) || g.state != GWaiting || g.waiting || g.nextWait != nil ||
-		g.waitToken != nil || g.waitTicket != 0 || g.queued || g.nextReady != nil || g.runP != nil ||
-		!validParkState(&g.park) || g.park.phase != parkParked {
+	if p == nil || !ValidG(g) || g.active == nil || g.active.parkWait == nil ||
+		g.state != GWaiting || g.waiting || g.nextWait != nil || g.waitToken != nil || g.waitTicket != 0 ||
+		g.queued || g.nextReady != nil || g.runP != nil || !validParkState(&g.park) || g.park.phase != parkParked {
 		return false
 	}
-	return appendWaiter(p, g)
+	return activateWaitSetRecord(p, g, g.active.parkWait)
 }
 
 func validRunnableParkState(state *ParkState) bool {
@@ -455,9 +462,13 @@ func validParkSetWaitingG(g *G) bool {
 	return g.park.phase == parkParked || g.park.phase == parkDetaching || g.park.phase == parkReady
 }
 
+func validReadyQueueHeader(p *P) bool {
+	return p != nil && (p.readyHead == nil) == (p.readyTail == nil) &&
+		(p.readyTail == nil || p.readyTail.nextReady == nil)
+}
+
 func validReadyQueue(p *P) bool {
-	if p == nil || (p.readyHead == nil) != (p.readyTail == nil) ||
-		(p.readyTail != nil && p.readyTail.nextReady != nil) {
+	if !validReadyQueueHeader(p) {
 		return false
 	}
 	if p.readyHead == nil {
@@ -476,6 +487,7 @@ func validReadyQueue(p *P) bool {
 	for g := p.readyHead; g != nil; g = g.nextReady {
 		if !ValidG(g) || g.state != GRunnable || !g.queued || g.waiting || g.nextWait != nil ||
 			g.waitToken != nil || g.waitTicket != 0 || g.runP != nil ||
+			g.active == nil || g.active.parkWait != nil ||
 			!validRunnableParkState(&g.park) ||
 			g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil {
 			return false
@@ -485,9 +497,13 @@ func validReadyQueue(p *P) bool {
 	return tail == p.readyTail
 }
 
+func validWaitQueueHeader(p *P) bool {
+	return p != nil && (p.waitHead == nil) == (p.waitTail == nil) &&
+		(p.waitTail == nil || p.waitTail.nextWait == nil)
+}
+
 func validWaitQueue(p *P) bool {
-	if p == nil || (p.waitHead == nil) != (p.waitTail == nil) ||
-		(p.waitTail != nil && p.waitTail.nextWait != nil) {
+	if !validWaitQueueHeader(p) {
 		return false
 	}
 	if p.waitHead == nil {
@@ -504,7 +520,7 @@ func validWaitQueue(p *P) bool {
 	for g := p.waitHead; g != nil; g = g.nextWait {
 		if !ValidG(g) || g.state != GWaiting || !g.waiting || g.queued || g.nextReady != nil || g.runP != nil ||
 			g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
-			(!validLegacyWaitingG(g) && !validParkSetWaitingG(g)) {
+			!validLegacyWaitingG(g) || g.active == nil || g.active.parkWait != nil {
 			return false
 		}
 		tail = g
@@ -512,13 +528,23 @@ func validWaitQueue(p *P) bool {
 	return tail == p.waitTail
 }
 
-// pollReady is scheduler-thread-only. Legacy tickets are consumed here. A V2
-// park is resolved only from the complete sticky source snapshot, remains
-// waiting through its source detach barrier, and is promoted in ParkReady
-// without consuming its outcome; Checked owns that pre-resume gate.
+func validSchedulerWaitQueues(p *P) bool {
+	return validWaitQueue(p) && validParkWaitQueue(p)
+}
+
+func emptySchedulerWaitQueues(p *P) bool {
+	return p != nil && p.waitHead == nil && p.waitTail == nil &&
+		p.parkWaitHead == nil && p.parkWaitTail == nil &&
+		p.affectedWaitHead == nil && p.affectedWaitTail == nil
+}
+
+// pollReady is scheduler-thread-only. Legacy WaitTokens retain their migration
+// scan. V2 parks are reached only through P's affected queue, so neither their
+// logical resolution nor ParkReady promotion walks unrelated waiting Gs.
 func pollReady(p *P) (int, bool) {
 	if p == nil || p.current != nil || p.inResume || p.action.Kind != ActionInvalid ||
-		p.runDecision != (RunDecision{}) || p.runDecisionTaken || !validReadyQueue(p) || !validWaitQueue(p) {
+		p.runDecision != (RunDecision{}) || p.runDecisionTaken || !validReadyQueueHeader(p) || !validWaitQueue(p) ||
+		!validParkWaitQueueHeader(p) || !validAffectedWaitQueueHeader(p) {
 		return 0, false
 	}
 	schedule := preemptLoad(&p.schedule)
@@ -535,52 +561,36 @@ func pollReady(p *P) (int, bool) {
 		// sufficient acknowledgement of the legacy/internal scheduling gate.
 		preemptCompareAndSwap(&p.schedule, scheduleRequested, scheduleIdle)
 	}
-	promoted := 0
+	batch, _, _, affectedOK := resolveAffectedWaitSets(p)
+	if !affectedOK {
+		return 0, false
+	}
+	promoted, promotedOK := promoteResolvedWaitSets(p, batch)
+	if !promotedOK {
+		return promoted, false
+	}
 	var previous *G
 	for g := p.waitHead; g != nil; {
 		next := g.nextWait
-		if !ValidG(g) || g.state != GWaiting || !g.waiting || g.queued || g.nextReady != nil {
+		if !ValidG(g) || g.state != GWaiting || !g.waiting || g.queued || g.nextReady != nil ||
+			!validLegacyWaitingG(g) {
 			return promoted, false
 		}
-		legacy := validLegacyWaitingG(g)
 		ready := false
-		if legacy {
-			word := preemptLoad(&g.waitToken.word)
-			if waitGeneration(word) != uint32(g.waitTicket) {
+		word := preemptLoad(&g.waitToken.word)
+		if waitGeneration(word) != uint32(g.waitTicket) {
+			return promoted, false
+		}
+		switch waitWordState(word) {
+		case waitParked:
+		case waitParkedReady, waitParkedCanceled:
+			if _, consumed := consumeWait(g.waitToken, g.waitTicket); !consumed {
+				// Outcome producers only publish terminal token states. Failure
+				// means another scheduler consumer or corrupted ownership.
 				return promoted, false
 			}
-			switch waitWordState(word) {
-			case waitParked:
-			case waitParkedReady, waitParkedCanceled:
-				if _, consumed := consumeWait(g.waitToken, g.waitTicket); !consumed {
-					// Outcome producers only publish terminal token states. Failure
-					// means another scheduler consumer or corrupted ownership.
-					return promoted, false
-				}
-				ready = true
-			default:
-				return promoted, false
-			}
-		} else if validParkSetWaitingG(g) {
-			switch g.park.phase {
-			case parkParked:
-				resolution, ok := ResolveParkSnapshot(&g.park, g.park.ticket)
-				if !ok {
-					return promoted, false
-				}
-				if resolution.Completed+resolution.Canceled == 0 {
-					break
-				}
-				ready = g.park.phase == parkReady
-			case parkDetaching:
-				// Source-specific resolution acknowledgement and pointer-free
-				// detach run before a later complete SourceSet promotion pass.
-			case parkReady:
-				ready = true
-			default:
-				return promoted, false
-			}
-		} else {
+			ready = true
+		default:
 			return promoted, false
 		}
 		if !ready {
@@ -598,10 +608,8 @@ func pollReady(p *P) (int, bool) {
 		}
 		g.nextWait = nil
 		g.waiting = false
-		if legacy {
-			g.waitToken = nil
-			g.waitTicket = 0
-		}
+		g.waitToken = nil
+		g.waitTicket = 0
 		g.state = GRunnable
 		if !Enqueue(p, g) {
 			return promoted, false
@@ -641,7 +649,8 @@ func PollReadyAt(p *P, now int64) (int, bool) {
 // adapter uses this distinction to wait for a host/platform event instead of
 // misreporting an empty ready queue as program completion.
 func HasWaiting(p *P) bool {
-	return p != nil && p.waitHead != nil && p.waitTail != nil
+	return p != nil && (p.waitHead != nil && p.waitTail != nil ||
+		p.parkWaitHead != nil && p.parkWaitTail != nil)
 }
 
 // NextRunnable removes the next ready G. It returns ok=false when a scheduler
@@ -654,7 +663,7 @@ func NextRunnable(p *P) (g *G, ok bool) {
 		// Preserve the ordinary drain-loop contract after the last G atomically
 		// sealed the P. A disabled P is not reusable, and any residual queue is
 		// corruption rather than runnable work.
-		return nil, validReadyQueue(p) && validWaitQueue(p) && p.readyHead == nil && p.waitHead == nil
+		return nil, validReadyQueue(p) && validSchedulerWaitQueues(p) && p.readyHead == nil && emptySchedulerWaitQueues(p)
 	}
 	if _, ok := PollReady(p); !ok {
 		return nil, false
@@ -670,7 +679,7 @@ func NextRunnableAt(p *P, now int64) (g *G, ok bool) {
 		return nil, false
 	}
 	if preemptLoad(&p.schedule) == scheduleDisabled {
-		return nil, validReadyQueue(p) && validWaitQueue(p) && p.readyHead == nil && p.waitHead == nil
+		return nil, validReadyQueue(p) && validSchedulerWaitQueues(p) && p.readyHead == nil && emptySchedulerWaitQueues(p)
 	}
 	if _, ok := PollReadyAt(p, now); !ok {
 		return nil, false
@@ -718,7 +727,8 @@ func dispatchPending(g *G, resumed *Frame) (destroy *Frame, yielded bool, ok boo
 		if pending.target != nil || resumed.header == nil ||
 			resumed.header.SuspendReason != uint16(SuspendPark) ||
 			resumed.header.Lifecycle != uint16(FrameSuspended) ||
-			!validClaimedWait(pending.wait, pending.ticket) || g.waitToken != nil || g.waitTicket != 0 || g.waiting || g.nextWait != nil {
+			!validClaimedWait(pending.wait, pending.ticket) || resumed.parkWait != nil ||
+			g.waitToken != nil || g.waitTicket != 0 || g.waiting || g.nextWait != nil {
 			return nil, false, false
 		}
 		resumed.state = FrameSuspended
@@ -730,7 +740,8 @@ func dispatchPending(g *G, resumed *Frame) (destroy *Frame, yielded bool, ok boo
 			resumed.header.SuspendReason != uint16(SuspendPark) ||
 			resumed.header.Lifecycle != uint16(FrameSuspended) ||
 			g.waitToken != nil || g.waitTicket != 0 || g.waiting || g.nextWait != nil ||
-			!validParkState(&g.park) || g.park.phase != parkParked {
+			!validParkState(&g.park) || g.park.phase != parkParked ||
+			!validCommittedWaitSetRecord(resumed.parkWait, g, resumed) {
 			return nil, false, false
 		}
 		resumed.state = FrameSuspended
@@ -865,8 +876,7 @@ func Resumed(p *P, g *G, action Action) (Action, bool) {
 		return Action{Kind: ActionPark}, true
 	}
 	if g.park.phase == parkParked {
-		if g.queued || g.nextReady != nil || (p.waitHead == nil) != (p.waitTail == nil) ||
-			(p.waitTail != nil && p.waitTail.nextWait != nil) {
+		if g.queued || g.nextReady != nil || !validParkWaitQueueHeader(p) || !validAffectedWaitQueueHeader(p) {
 			return Action{}, false
 		}
 		g.state = GWaiting
@@ -904,7 +914,7 @@ func Destroyed(p *P, g *G, action Action) (Action, bool) {
 		return commitInitialPanicDestroyed(p, g, isRoot)
 	}
 	if isRoot {
-		if g.active != nil || g.frames != nil || !validReadyQueue(p) || !validWaitQueue(p) {
+		if g.active != nil || g.frames != nil || !validReadyQueue(p) || !validSchedulerWaitQueues(p) {
 			return Action{}, false
 		}
 		schedule := preemptLoad(&p.schedule)
@@ -914,11 +924,11 @@ func Destroyed(p *P, g *G, action Action) (Action, bool) {
 		// Disable only when this root is the last G owned by the P. Otherwise
 		// ready/waiting peers still need the gate. CAS makes terminal success and
 		// a late asynchronous producer request one exact total order.
-		if p.readyHead == nil && p.waitHead == nil &&
+		if p.readyHead == nil && emptySchedulerWaitQueues(p) &&
 			(preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil) {
 			return beginTerminalExecutorClose(p, g, action)
 		}
-		if p.readyHead == nil && p.waitHead == nil &&
+		if p.readyHead == nil && emptySchedulerWaitQueues(p) &&
 			!preemptCompareAndSwap(&p.schedule, scheduleIdle, scheduleDisabled) {
 			return Action{}, false
 		}
@@ -953,7 +963,7 @@ func AcknowledgeTerminalSchedule(p *P, g *G, action Action) bool {
 		preemptLoad(&p.executorMode) == executorModeUnbound && p.executor == nil &&
 		g.state == GDispatching && g.destroyTarget == nil && g.destroyRoot &&
 		g.active == nil && g.frames == nil && p.readyHead == nil && p.readyTail == nil &&
-		p.waitHead == nil && p.waitTail == nil && validReadyQueue(p) && validWaitQueue(p) &&
+		emptySchedulerWaitQueues(p) && validReadyQueue(p) && validSchedulerWaitQueues(p) &&
 		preemptCompareAndSwap(&p.schedule, scheduleRequested, scheduleIdle)
 }
 
@@ -963,7 +973,7 @@ func AcknowledgeTerminalSchedule(p *P, g *G, action Action) bool {
 // ready-queue link, destruction bookkeeping, or P operation survived.
 func TerminalG(p *P, g *G) bool {
 	return p != nil && p.current == nil && p.readyHead == nil && p.readyTail == nil &&
-		p.waitHead == nil && p.waitTail == nil &&
+		emptySchedulerWaitQueues(p) &&
 		preemptLoad(&p.schedule) == scheduleDisabled && preemptLoad(&p.executorMode) == executorModeUnbound && p.executor == nil &&
 		!p.inResume && p.action.Kind == ActionInvalid && p.action.Handle == nil && p.runDecision == (RunDecision{}) && !p.runDecisionTaken && p.servicePreemptBudget == 0 &&
 		ValidG(g) && preemptLoad(preemptAddress(g)) == preemptDisabled && g.state == GDead && g.root == nil && g.active == nil && g.frames == nil &&

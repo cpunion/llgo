@@ -189,7 +189,8 @@ func activeExecutorHandle(registry *ExecutorRegistry, handle ExecutorHandle) boo
 
 func idleExecutorScheduler(p *P) bool {
 	return p != nil && p.current == nil && !p.inResume && p.action.Kind == ActionInvalid && p.action.Handle == nil &&
-		p.runDecision == (RunDecision{}) && !p.runDecisionTaken && p.servicePreemptBudget == 0 && validReadyQueue(p) && validWaitQueue(p)
+		p.runDecision == (RunDecision{}) && !p.runDecisionTaken && p.servicePreemptBudget == 0 &&
+		validReadyQueueHeader(p) && validWaitQueueHeader(p) && validParkWaitQueueHeader(p) && validAffectedWaitQueueHeader(p)
 }
 
 // BindExecutor attaches a newly registered exact-zero executor gate and an
@@ -206,7 +207,7 @@ func bindExecutor(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, hand
 		driver.terminalKind != ActionInvalid ||
 		p == nil || p.executor != nil || preemptLoad(&p.executorMode) != executorModeUnbound ||
 		preemptLoad(&p.schedule) != scheduleIdle || !idleExecutorScheduler(p) ||
-		p.readyHead != nil || p.readyTail != nil || p.waitHead != nil || p.waitTail != nil ||
+		p.readyHead != nil || p.readyTail != nil || !emptySchedulerWaitQueues(p) ||
 		!activeExecutorHandle(registry, handle) || !bindExecutorSourceSet(&driver.sources, p, catalog) {
 		return false
 	}
@@ -528,7 +529,7 @@ func WakeExecutorAt(driver *ExecutorDriver, now int64) (waits, timers, promoted 
 func BeginExecutorClose(driver *ExecutorDriver) bool {
 	if !validExecutorDriver(driver) || driver.state != executorDriverActive || !idleExecutorScheduler(driver.p) ||
 		driver.terminalKind != ActionInvalid ||
-		driver.p.waitHead != nil || driver.p.waitTail != nil ||
+		!emptySchedulerWaitQueues(driver.p) ||
 		!driver.sources.empty(driver.p) {
 		return false
 	}
@@ -576,7 +577,7 @@ func retireExecutorBinding(driver *ExecutorDriver, restoreAction *Action) bool {
 func ConfirmExecutorClose(driver *ExecutorDriver) bool {
 	if !validExecutorDriver(driver) || driver.state != executorDriverClosing || !idleExecutorScheduler(driver.p) ||
 		driver.terminalKind != ActionInvalid ||
-		driver.p.waitHead != nil || driver.p.waitTail != nil ||
+		!emptySchedulerWaitQueues(driver.p) ||
 		!finalDrainExecutorSources(driver) {
 		return false
 	}
@@ -588,8 +589,8 @@ func terminalExecutorRootPending(p *P, g *G, kind ActionKind) bool {
 		p.runDecision != (RunDecision{}) || p.runDecisionTaken ||
 		!ValidG(g) || g.runP != p || g.destroyTarget != nil || !g.destroyRoot ||
 		g.active != nil || g.frames != nil ||
-		p.readyHead != nil || p.readyTail != nil || p.waitHead != nil || p.waitTail != nil ||
-		!validReadyQueue(p) || !validWaitQueue(p) || preemptLoad(&p.schedule) != scheduleIdle {
+		p.readyHead != nil || p.readyTail != nil || !emptySchedulerWaitQueues(p) ||
+		!validReadyQueue(p) || !validSchedulerWaitQueues(p) || preemptLoad(&p.schedule) != scheduleIdle {
 		return false
 	}
 	switch kind {

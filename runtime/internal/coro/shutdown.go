@@ -139,7 +139,7 @@ func BeginCommandShutdown(p *P, main *G) bool {
 		preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil ||
 		p.current != nil || p.inResume || p.action.Kind != ActionInvalid || p.action.Handle != nil ||
 		p.runDecision != (RunDecision{}) || p.runDecisionTaken || p.servicePreemptBudget != 0 ||
-		!validReadyQueue(p) || !validWaitQueue(p) || p.waitHead != nil || p.waitTail != nil {
+		!validReadyQueue(p) || !validSchedulerWaitQueues(p) || !emptySchedulerWaitQueues(p) {
 		return false
 	}
 	for g := p.readyHead; g != nil; g = g.nextReady {
@@ -180,7 +180,7 @@ func NextCommandCancel(p *P) (*G, Action, bool) {
 	if p == nil || preemptLoad(&p.schedule) != scheduleStopping || p.current != nil ||
 		p.inResume || p.action.Kind != ActionInvalid || p.action.Handle != nil ||
 		p.runDecision != (RunDecision{}) || p.runDecisionTaken || p.servicePreemptBudget != 0 ||
-		!validReadyQueue(p) || !validWaitQueue(p) || p.waitHead != nil || p.waitTail != nil {
+		!validReadyQueue(p) || !validSchedulerWaitQueues(p) || !emptySchedulerWaitQueues(p) {
 		return nil, Action{}, false
 	}
 	g := p.readyHead
@@ -241,8 +241,8 @@ func FinishCommandShutdown(p *P, main *G) bool {
 		preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil ||
 		p.current != nil || p.inResume || p.action.Kind != ActionInvalid || p.action.Handle != nil ||
 		p.runDecision != (RunDecision{}) || p.runDecisionTaken || p.servicePreemptBudget != 0 ||
-		!validReadyQueue(p) || !validWaitQueue(p) || p.readyHead != nil || p.readyTail != nil ||
-		p.waitHead != nil || p.waitTail != nil {
+		!validReadyQueue(p) || !validSchedulerWaitQueues(p) || p.readyHead != nil || p.readyTail != nil ||
+		!emptySchedulerWaitQueues(p) {
 		return false
 	}
 	return preemptCompareAndSwap(&p.schedule, scheduleStopping, scheduleDisabled)
