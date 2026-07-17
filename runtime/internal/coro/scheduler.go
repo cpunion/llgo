@@ -44,18 +44,24 @@ type G struct {
 	// ordinary G pays no size or registry cost. Terminal storage cannot be
 	// reclaimed until the last endpoint has completed its strong close.
 	taskControlLeases uint8
-	root              *Frame
-	active            *Frame
-	frames            *Frame
-	pending           pendingTransition
-	destroyTarget     *Frame
-	destroyRoot       bool
-	nextReady         *G
-	queued            bool
-	waitToken         *WaitToken
-	waitTicket        WaitTicket
-	nextWait          *G
-	waiting           bool
+	// runAction occupies the remaining pointer-alignment padding. A non-zero
+	// value means that a bounded executor returned one physical handle action
+	// to the ready tail before starting it. Only check-resume, check-destroy,
+	// and direct panic-destroy continuations may cross that stable boundary.
+	runAction     ActionKind
+	_             uint8
+	root          *Frame
+	active        *Frame
+	frames        *Frame
+	pending       pendingTransition
+	destroyTarget *Frame
+	destroyRoot   bool
+	nextReady     *G
+	queued        bool
+	waitToken     *WaitToken
+	waitTicket    WaitTicket
+	nextWait      *G
+	waiting       bool
 	// park is the common multi-source logical wait cell. The legacy one-token
 	// fields above remain during migration; new sources must target park. It
 	// also owns the one-byte task stop token so park commit cannot forget it.
@@ -199,6 +205,12 @@ const (
 	// the final source scan, unbinds the executor, and commits terminal state
 	// without exposing the destroyed handle again.
 	ActionTerminalExecutorClose
+	// ActionCommitDestroy is a handle-free post-destroy receipt. The bounded
+	// runner publishes it only after ReleaseFrame removed the final root and
+	// every pointer to the freed LLVM handle was discarded. Terminal close and
+	// the legacy schedule-disable race are separate, explicitly unbounded
+	// compatibility boundaries.
+	ActionCommitDestroy
 )
 
 // Action is one deterministic scheduler operation or control event. Handle is
@@ -227,6 +239,7 @@ func expectedAction(p *P, g *G, action Action, kind ActionKind) bool {
 // InitG initializes a zero G.
 func InitG(g *G) bool {
 	if g == nil || g.magic != 0 || preemptLoad(preemptAddress(g)) != preemptDisabled || g.state != GNew || g.taskControlLeases != 0 ||
+		g.runAction != ActionInvalid ||
 		g.frames != nil || g.active != nil || g.root != nil ||
 		g.pending.kind != pendingNone || g.pending.from != nil || g.pending.target != nil || g.pending.wait != nil || g.pending.ticket != 0 ||
 		g.destroyTarget != nil || g.destroyRoot || g.nextReady != nil || g.queued ||
@@ -360,6 +373,7 @@ func RequestSchedule(p *P) bool {
 // AdoptRoot associates an initial-suspended root frame with g.
 func AdoptRoot(g *G, handle unsafe.Pointer) bool {
 	if !ValidG(g) || g.state != GNew || g.root != nil || g.active != nil || g.pending.kind != pendingNone ||
+		g.runAction != ActionInvalid ||
 		g.waitToken != nil || g.waitTicket != 0 || g.nextWait != nil || g.waiting || g.runP != nil {
 		return false
 	}
@@ -379,13 +393,18 @@ func Enqueue(p *P, g *G) bool {
 	if p == nil || !ValidG(g) || g.state != GRunnable || g.queued || g.nextReady != nil ||
 		g.waiting || g.nextWait != nil || g.waitToken != nil || g.waitTicket != 0 || g.runP != nil ||
 		!validRunnableParkState(&g.park) ||
-		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil {
+		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil || !validRunnableRunAction(g) {
 		return false
 	}
 	schedule := preemptLoad(&p.schedule)
 	if schedule != scheduleIdle && schedule != scheduleRequested {
 		return false
 	}
+	appendReadyUnchecked(p, g)
+	return true
+}
+
+func appendReadyUnchecked(p *P, g *G) {
 	g.queued = true
 	if p.readyTail == nil {
 		p.readyHead = g
@@ -393,7 +412,15 @@ func Enqueue(p *P, g *G) bool {
 		p.readyTail.nextReady = g
 	}
 	p.readyTail = g
-	return true
+}
+
+func prependReadyUnchecked(p *P, g *G) {
+	g.queued = true
+	g.nextReady = p.readyHead
+	p.readyHead = g
+	if p.readyTail == nil {
+		p.readyTail = g
+	}
 }
 
 func dequeue(p *P) *G {
@@ -455,6 +482,34 @@ func validRunnableParkState(state *ParkState) bool {
 	return state.phase == parkIdle || state.phase == parkConsumed || state.phase == parkDelivered || state.phase == parkReady
 }
 
+// validRunnableRunAction distinguishes an ordinary runnable suspension from a
+// bounded-runner continuation. It is deliberately local: a ready-queue audit
+// may validate each element, while the production dequeue path only validates
+// the selected G and the queue header.
+func validRunnableRunAction(g *G) bool {
+	if g == nil {
+		return false
+	}
+	switch g.runAction {
+	case ActionInvalid:
+		return g.destroyTarget == nil && !g.destroyRoot
+	case ActionCheckResume:
+		return g.destroyTarget == nil && !g.destroyRoot && !g.panicUnwind &&
+			g.active != nil && g.active.handle != nil && g.active.header != nil &&
+			(g.active.state == FrameInitialSuspended || g.active.state == FrameSuspended)
+	case ActionCheckDestroy:
+		return (!g.panicUnwind || publishedPanicRecord(&g.panicRecord)) &&
+			g.destroyTarget != nil && g.destroyTarget.handle != nil &&
+			g.destroyTarget.state == FrameDestroyPending
+	case ActionPanicDestroy:
+		return g.panicUnwind && publishedPanicRecord(&g.panicRecord) &&
+			g.destroyTarget != nil && g.destroyTarget.handle != nil &&
+			g.destroyTarget.state == FrameDestroyPending
+	default:
+		return false
+	}
+}
+
 func validLegacyWaitingG(g *G) bool {
 	return ValidG(g) && g.waitToken != nil && g.waitTicket != 0 &&
 		validClaimedWait(g.waitToken, g.waitTicket) && releasableParkState(&g.park) &&
@@ -493,9 +548,10 @@ func validReadyQueue(p *P) bool {
 	for g := p.readyHead; g != nil; g = g.nextReady {
 		if !ValidG(g) || g.state != GRunnable || !g.queued || g.waiting || g.nextWait != nil ||
 			g.waitToken != nil || g.waitTicket != 0 || g.runP != nil ||
-			g.active == nil || g.active.parkWait != nil ||
+			(g.active == nil && g.runAction != ActionCheckDestroy && g.runAction != ActionPanicDestroy) ||
+			(g.active != nil && g.active.parkWait != nil) ||
 			!validRunnableParkState(&g.park) ||
-			g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil {
+			g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil || !validRunnableRunAction(g) {
 			return false
 		}
 		tail = g
@@ -725,25 +781,66 @@ func dispatchPending(g *G, resumed *Frame) (destroy *Frame, yielded bool, ok boo
 	}
 }
 
-// BeginRunG starts one runnable G and requests a done check before its first
-// resume. Nested drivers are rejected by the P guards.
+func beginRunAction(g *G) (kind ActionKind, handle unsafe.Pointer, state GState, ok bool) {
+	if g == nil || !validRunnableRunAction(g) {
+		return ActionInvalid, nil, GNew, false
+	}
+	switch g.runAction {
+	case ActionInvalid:
+		if g.active == nil || g.active.handle == nil || g.active.header == nil ||
+			(g.active.state != FrameInitialSuspended && g.active.state != FrameSuspended) {
+			return ActionInvalid, nil, GNew, false
+		}
+		return ActionCheckResume, g.active.handle, GRunning, true
+	case ActionCheckResume:
+		return ActionCheckResume, g.active.handle, GRunning, true
+	case ActionCheckDestroy:
+		return ActionCheckDestroy, g.destroyTarget.handle, GDispatching, true
+	case ActionPanicDestroy:
+		return ActionPanicDestroy, g.destroyTarget.handle, GPanicking, true
+	default:
+		return ActionInvalid, nil, GNew, false
+	}
+}
+
+// queuedDestroyBlockedByTaskCancellation protects the last suspended frame
+// until compiler cleanup lowering can consume a sticky task stop. CheckResume
+// remains runnable because its synchronous continuation is the cleanup entry.
+//
+// Once ActionPanicDestroy passes this gate BeginRunG changes the task to
+// GPanicking. Owner cancellation APIs do not accept that state, source service
+// requires an idle P, and the runner executes the returned action without a
+// host boundary. There is therefore no later cancellation injection point on
+// the direct panic-destroy path.
+func queuedDestroyBlockedByTaskCancellation(g *G) bool {
+	if g == nil || g.park.taskCancelPhase != taskCancelRequested {
+		return false
+	}
+	return g.runAction == ActionCheckDestroy || g.runAction == ActionPanicDestroy
+}
+
+// BeginRunG starts one runnable G. An ordinary suspension starts with a done
+// check; a bounded-runner continuation restores the exact stable action that
+// was placed at the ready tail. Nested drivers are rejected by the P guards.
 func BeginRunG(p *P, g *G) (Action, bool) {
 	if p == nil || p.current != nil || p.inResume || p.action.Kind != ActionInvalid ||
 		p.runDecision != (RunDecision{}) || p.runDecisionTaken ||
-		!ValidG(g) || g.state != GRunnable || g.active == nil || g.root == nil ||
-		g.destroyTarget != nil || g.destroyRoot || g.queued || g.nextReady != nil ||
+		!ValidG(g) || g.state != GRunnable || g.root == nil ||
+		g.queued || g.nextReady != nil ||
 		g.waitToken != nil || g.waitTicket != 0 || g.nextWait != nil || g.waiting || g.runP != nil ||
 		!validRunnableParkState(&g.park) ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil || p.servicePreemptBudget != 0 {
+		return Action{}, false
+	}
+	if queuedDestroyBlockedByTaskCancellation(g) {
 		return Action{}, false
 	}
 	schedule := preemptLoad(&p.schedule)
 	if schedule != scheduleIdle && schedule != scheduleRequested {
 		return Action{}, false
 	}
-	frame := g.active
-	if frame.handle == nil || frame.header == nil ||
-		(frame.state != FrameInitialSuspended && frame.state != FrameSuspended) {
+	kind, handle, state, valid := beginRunAction(g)
+	if !valid || handle == nil {
 		return Action{}, false
 	}
 	if p.readyHead != nil && !RequestPreempt(g) {
@@ -751,9 +848,88 @@ func BeginRunG(p *P, g *G) (Action, bool) {
 	}
 	p.current = g
 	p.servicePreemptBudget = servicePreemptPollBudget
-	g.state = GRunning
+	g.state = state
 	g.runP = p
-	return setAction(p, ActionCheckResume, frame.handle)
+	g.runAction = ActionInvalid
+	action, ok := setAction(p, kind, handle)
+	if !ok {
+		return Action{}, false
+	}
+	return action, true
+}
+
+type executorRunQueuePlacement uint8
+
+const (
+	executorRunQueueTail executorRunQueuePlacement = iota
+	executorRunQueueCommandBootstrapDirectChildHandoff
+	executorRunQueueCommandRootDestroy
+)
+
+// pauseExecutorRunAction moves one stable post-operation continuation back to
+// the ready queue. It is called only after the runtime adapter completed a
+// whole physical reduction, so ActionResume and ActionDestroy can never be
+// retained across a host boundary. Ordinary continuations retain FIFO order;
+// command/bootstrap control placements are selected only by their validating
+// exported commit boundaries.
+func pauseExecutorRunAction(p *P, g *G, action Action, placement executorRunQueuePlacement) bool {
+	if p == nil || g == nil || p.current != g || g.runP != p || p.inResume ||
+		p.action != action || action.Handle == nil || g.runAction != ActionInvalid ||
+		p.runDecision != (RunDecision{}) || p.runDecisionTaken || p.servicePreemptBudget == 0 ||
+		g.queued || g.nextReady != nil || g.waiting || g.nextWait != nil ||
+		g.waitToken != nil || g.waitTicket != 0 || !validRunnableParkState(&g.park) ||
+		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
+		!validReadyQueueHeader(p) || placement > executorRunQueueCommandRootDestroy {
+		return false
+	}
+	schedule := preemptLoad(&p.schedule)
+	if schedule != scheduleIdle && schedule != scheduleRequested {
+		return false
+	}
+	switch action.Kind {
+	case ActionCheckResume:
+		if placement == executorRunQueueCommandRootDestroy {
+			return false
+		}
+		if g.state != GRunning || g.destroyTarget != nil || g.destroyRoot || g.active == nil ||
+			g.active.handle != action.Handle || g.active.header == nil ||
+			(g.active.state != FrameInitialSuspended && g.active.state != FrameSuspended) {
+			return false
+		}
+	case ActionCheckDestroy:
+		if g.state != GDispatching || g.panicUnwind && !publishedPanicRecord(&g.panicRecord) || g.destroyTarget == nil ||
+			g.destroyTarget.handle != action.Handle || g.destroyTarget.state != FrameDestroyPending {
+			return false
+		}
+	case ActionPanicDestroy:
+		if placement != executorRunQueueTail {
+			return false
+		}
+		if g.state != GPanicking || !g.panicUnwind || !publishedPanicRecord(&g.panicRecord) ||
+			g.destroyTarget == nil || g.destroyTarget.handle != action.Handle ||
+			g.destroyTarget.state != FrameDestroyPending {
+			return false
+		}
+	default:
+		return false
+	}
+
+	g.runAction = action.Kind
+	g.state = GRunnable
+	g.runP = nil
+	p.current = nil
+	p.servicePreemptBudget = 0
+	p.action = Action{}
+	if placement != executorRunQueueTail {
+		// A frozen command-bootstrap direct CoroRoot step retains the same
+		// logical G only for its one child destroy and exact-root resume. After
+		// normal-main return, the final root destroy has its separate placement.
+		// Every physical operation remains a separately charged later reduction.
+		prependReadyUnchecked(p, g)
+	} else {
+		appendReadyUnchecked(p, g)
+	}
+	return true
 }
 
 // Checked commits an llvm.coro.done result. A resumable frame must not be
@@ -778,7 +954,8 @@ func Checked(p *P, g *G, action Action, done bool) (Action, bool) {
 	case ActionCheckDestroy:
 		if !expectedAction(p, g, action, ActionCheckDestroy) || !done || p.inResume ||
 			g.state != GDispatching || g.destroyTarget == nil ||
-			g.destroyTarget.handle != action.Handle || g.destroyTarget.state != FrameDestroyPending {
+			g.destroyTarget.handle != action.Handle || g.destroyTarget.state != FrameDestroyPending ||
+			g.park.taskCancelPhase == taskCancelRequested {
 			return Action{}, false
 		}
 		return setAction(p, ActionDestroy, action.Handle)
@@ -875,36 +1052,7 @@ func Destroyed(p *P, g *G, action Action) (Action, bool) {
 		return commitInitialPanicDestroyed(p, g, isRoot)
 	}
 	if isRoot {
-		if g.active != nil || g.frames != nil || !validReadyQueue(p) || !validSchedulerWaitQueues(p) {
-			return Action{}, false
-		}
-		schedule := preemptLoad(&p.schedule)
-		if schedule != scheduleIdle && schedule != scheduleRequested {
-			return Action{}, false
-		}
-		// Disable only when this root is the last G owned by the P. Otherwise
-		// ready/waiting peers still need the gate. CAS makes terminal success and
-		// a late asynchronous producer request one exact total order.
-		if p.readyHead == nil && emptySchedulerWaitQueues(p) &&
-			(preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil) {
-			return beginTerminalExecutorClose(p, g, action)
-		}
-		if p.readyHead == nil && emptySchedulerWaitQueues(p) &&
-			!preemptCompareAndSwap(&p.schedule, scheduleIdle, scheduleDisabled) {
-			return Action{}, false
-		}
-		g.destroyRoot = false
-		g.root = nil
-		// Disable requests before publishing the terminal scheduler state. A
-		// requester that observed idle before this store can only CAS against the
-		// now-disabled gate and fail; an earlier successful CAS is overwritten.
-		preemptStore(preemptAddress(g), preemptDisabled)
-		g.state = GDead
-		g.runP = nil
-		p.current = nil
-		p.servicePreemptBudget = 0
-		p.action = Action{}
-		return Action{Kind: ActionComplete}, true
+		return commitRootDestroyedCompatibility(p, g, ActionDestroy)
 	}
 	g.destroyRoot = false
 	g.state = GRunning
@@ -912,6 +1060,235 @@ func Destroyed(p *P, g *G, action Action) (Action, bool) {
 		return Action{}, false
 	}
 	return setAction(p, ActionCheckResume, g.active.handle)
+}
+
+// validRootDestroyedCommitMarker distinguishes the legacy physical marker,
+// bounded handle-free receipt, and post-join terminal marker without ever
+// manufacturing a replacement handle.
+func validRootDestroyedCommitMarker(p *P, g *G, kind ActionKind) bool {
+	if p == nil || g == nil {
+		return false
+	}
+	switch p.action.Kind {
+	case kind:
+		// The legacy whole-operation path still owns the just-destroyed
+		// physical action. ReleaseFrame unlinked the allocation but the cached
+		// root identity is retained until this compatibility commit.
+		return p.action.Handle != nil && g.root != nil
+	case ActionCommitDestroy:
+		// The bounded path discarded both the handle and cached root before it
+		// published this receipt.
+		return p.action.Handle == nil && g.root == nil
+	case ActionTerminalExecutorClose:
+		// A successful strong join retires the driver before retrying the
+		// logical root commit. No executor or physical handle may survive it.
+		return p.action.Handle == nil && g.root == nil &&
+			preemptLoad(&p.executorMode) == executorModeUnbound && p.executor == nil
+	default:
+		return false
+	}
+}
+
+// commitRootDestroyedCompatibility owns the legacy full-audit, terminal-close,
+// and schedule-disable boundary after a root handle has already been destroyed.
+// Its input is a logical commit kind, never a physical or synthetic handle, so
+// both the old whole-episode adapter and a bounded handle-free receipt can use
+// the same state transition.
+func commitRootDestroyedCompatibility(p *P, g *G, kind ActionKind) (Action, bool) {
+	if p == nil || g == nil || p.current != g || p.inResume || g.runP != p ||
+		g.destroyTarget != nil || !g.destroyRoot || g.active != nil || g.frames != nil ||
+		!validRootDestroyedCommitMarker(p, g, kind) ||
+		!validReadyQueue(p) || !validSchedulerWaitQueues(p) {
+		return Action{}, false
+	}
+	panicking := g.panicUnwind
+	if kind != ActionDestroy && kind != ActionPanicDestroy {
+		return Action{}, false
+	}
+	if panicking {
+		wantState := GPanicking
+		if kind == ActionDestroy {
+			wantState = GDispatching
+		}
+		if g.state != wantState || !publishedPanicRecord(&g.panicRecord) {
+			return Action{}, false
+		}
+	} else if kind != ActionDestroy || g.state != GDispatching || !emptyPanicRecord(&g.panicRecord) {
+		return Action{}, false
+	}
+	schedule := preemptLoad(&p.schedule)
+	if schedule != scheduleIdle && schedule != scheduleRequested {
+		return Action{}, false
+	}
+	// Disable only when this root is the last G owned by the P. Otherwise
+	// ready/waiting peers still need the gate. CAS makes terminal success and a
+	// late asynchronous producer request one exact total order.
+	if p.readyHead == nil && emptySchedulerWaitQueues(p) &&
+		(preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil) {
+		return beginTerminalExecutorClose(p, g, kind)
+	}
+	if p.readyHead == nil && emptySchedulerWaitQueues(p) &&
+		!preemptCompareAndSwap(&p.schedule, scheduleIdle, scheduleDisabled) {
+		return Action{}, false
+	}
+	g.destroyRoot = false
+	g.root = nil
+	preemptStore(preemptAddress(g), preemptDisabled)
+	if panicking {
+		g.panicUnwind = false
+	}
+	g.state = GDead
+	g.runP = nil
+	p.current = nil
+	p.servicePreemptBudget = 0
+	p.action = Action{}
+	if panicking {
+		return Action{Kind: ActionPanicComplete}, true
+	}
+	return Action{Kind: ActionComplete}, true
+}
+
+func validBoundedRootHeaders(p *P, g *G, wasRoot bool) bool {
+	if p == nil || g == nil || !wasRoot || g.active != nil || g.frames != nil ||
+		g.runAction != ActionInvalid || !validReadyQueueHeader(p) ||
+		!validWaitQueueHeader(p) || !validParkWaitQueueHeader(p) ||
+		!validAffectedWaitQueueHeader(p) {
+		return false
+	}
+	schedule := preemptLoad(&p.schedule)
+	return schedule == scheduleIdle || schedule == scheduleRequested
+}
+
+// finishBoundedRootDestroy commits only O(1) scheduler headers after the
+// physical root destroy. A root with peers becomes terminal immediately. The
+// last root publishes a handle-free receipt instead of entering executor
+// close, rescanning queues, or looping on the legacy schedule CAS.
+func finishBoundedRootDestroy(p *P, g *G, wasRoot, panicking bool) (Action, bool) {
+	if !validBoundedRootHeaders(p, g, wasRoot) {
+		return Action{}, false
+	}
+	if panicking {
+		if !g.panicUnwind || !publishedPanicRecord(&g.panicRecord) || g.state != GPanicking {
+			return Action{}, false
+		}
+	} else if g.panicUnwind || !emptyPanicRecord(&g.panicRecord) || g.state != GDispatching {
+		return Action{}, false
+	}
+
+	// ReleaseFrame has already freed the combined root allocation. Clear the
+	// cached root before publishing any return boundary; destroyRoot remains the
+	// logical receipt bit and is never dereferenced.
+	g.root = nil
+	preemptStore(preemptAddress(g), preemptDisabled)
+	if p.readyHead == nil && emptySchedulerWaitQueues(p) {
+		receipt := Action{Kind: ActionCommitDestroy}
+		p.action = receipt
+		return receipt, true
+	}
+
+	g.destroyRoot = false
+	if panicking {
+		g.panicUnwind = false
+	}
+	g.state = GDead
+	g.runP = nil
+	p.current = nil
+	p.servicePreemptBudget = 0
+	p.action = Action{}
+	if panicking {
+		return Action{Kind: ActionPanicComplete}, true
+	}
+	return Action{Kind: ActionComplete}, true
+}
+
+// DestroyedBounded is the production post-destroy commit used by RunSlice.
+// It never performs a full queue audit or terminal close and never returns the
+// freed action handle. Non-root destruction resumes through a later ready-tail
+// reduction; final-root work stops at ActionCommitDestroy.
+func DestroyedBounded(p *P, g *G, action Action) (Action, bool) {
+	if !expectedAction(p, g, action, ActionDestroy) || p.inResume || g.state != GDispatching ||
+		g.destroyTarget != nil || g.runAction != ActionInvalid {
+		return Action{}, false
+	}
+	isRoot := g.destroyRoot
+	if g.panicUnwind {
+		if !publishedPanicRecord(&g.panicRecord) {
+			return Action{}, false
+		}
+		if g.active != nil {
+			if isRoot {
+				return Action{}, false
+			}
+			g.destroyRoot = false
+			g.state = GPanicking
+			return preparePanicAncestor(p, g, g.active)
+		}
+		g.state = GPanicking
+		return finishBoundedRootDestroy(p, g, isRoot, true)
+	}
+	if isRoot {
+		return finishBoundedRootDestroy(p, g, true, false)
+	}
+	g.destroyRoot = false
+	g.state = GRunning
+	if g.active == nil {
+		return Action{}, false
+	}
+	return setAction(p, ActionCheckResume, g.active.handle)
+}
+
+func validDestroyCommitReceipt(p *P, g *G, receipt Action) bool {
+	if p == nil || g == nil || receipt.Kind != ActionCommitDestroy || receipt.Handle != nil ||
+		p.current != g || p.action != receipt || p.inResume || p.runDecision != (RunDecision{}) ||
+		p.runDecisionTaken || p.servicePreemptBudget == 0 || !ValidG(g) || g.runP != p ||
+		g.runAction != ActionInvalid || g.destroyTarget != nil || !g.destroyRoot ||
+		g.root != nil || g.active != nil || g.frames != nil ||
+		!validReadyQueueHeader(p) || !validWaitQueueHeader(p) ||
+		!validParkWaitQueueHeader(p) || !validAffectedWaitQueueHeader(p) {
+		return false
+	}
+	return g.state == GDispatching && !g.panicUnwind && emptyPanicRecord(&g.panicRecord) ||
+		g.state == GPanicking && g.panicUnwind && publishedPanicRecord(&g.panicRecord)
+}
+
+// CommitDestroyedReceiptCompatibility crosses the explicitly unbounded
+// terminal-close compatibility boundary. It passes only the logical normal or
+// panic commit kind; no replacement handle is manufactured. An unbound
+// schedule race consumes at most one acknowledgement and republishes the
+// receipt so a later outer iteration performs the next commit attempt.
+func CommitDestroyedReceiptCompatibility(p *P, g *G, receipt Action) (Action, bool) {
+	if !validDestroyCommitReceipt(p, g, receipt) {
+		return Action{}, false
+	}
+	kind := ActionDestroy
+	if g.state == GPanicking {
+		kind = ActionPanicDestroy
+	}
+	next, ok := commitRootDestroyedCompatibility(p, g, kind)
+	if !ok && acknowledgeRootTerminalSchedule(p, g, kind) {
+		return receipt, true
+	}
+	return next, ok
+}
+
+func acknowledgeRootTerminalSchedule(p *P, g *G, kind ActionKind) bool {
+	if p == nil || g == nil || p.current != g || p.inResume || g.runP != p ||
+		preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil ||
+		g.destroyTarget != nil || !g.destroyRoot || g.active != nil || g.frames != nil ||
+		p.readyHead != nil || p.readyTail != nil || !emptySchedulerWaitQueues(p) ||
+		!validReadyQueue(p) || !validSchedulerWaitQueues(p) {
+		return false
+	}
+	if kind == ActionDestroy {
+		if g.state != GDispatching || g.panicUnwind && !publishedPanicRecord(&g.panicRecord) ||
+			!g.panicUnwind && !emptyPanicRecord(&g.panicRecord) {
+			return false
+		}
+	} else if kind != ActionPanicDestroy || g.state != GPanicking || !g.panicUnwind ||
+		!publishedPanicRecord(&g.panicRecord) {
+		return false
+	}
+	return preemptCompareAndSwap(&p.schedule, scheduleRequested, scheduleIdle)
 }
 
 // AcknowledgeTerminalSchedule classifies and consumes the one non-corruption
@@ -938,7 +1315,7 @@ func TerminalG(p *P, g *G) bool {
 		preemptLoad(&p.schedule) == scheduleDisabled && preemptLoad(&p.executorMode) == executorModeUnbound && p.executor == nil &&
 		!p.inResume && p.action.Kind == ActionInvalid && p.action.Handle == nil && p.runDecision == (RunDecision{}) && !p.runDecisionTaken && p.servicePreemptBudget == 0 &&
 		ValidG(g) && preemptLoad(preemptAddress(g)) == preemptDisabled && g.state == GDead && g.root == nil && g.active == nil && g.frames == nil &&
-		g.taskControlLeases == 0 &&
+		g.taskControlLeases == 0 && g.runAction == ActionInvalid &&
 		g.pending.kind == pendingNone && g.pending.from == nil && g.pending.target == nil && g.pending.wait == nil && g.pending.ticket == 0 &&
 		g.destroyTarget == nil && !g.destroyRoot && g.nextReady == nil && !g.queued &&
 		g.waitToken == nil && g.waitTicket == 0 && g.nextWait == nil && !g.waiting && g.runP == nil &&

@@ -309,6 +309,11 @@ func TestTaskCancellationAcknowledgesOnlyClaimedTerminalCleanG(t *testing.T) {
 	if ReclaimableG(g) || AcknowledgeTaskCancellation(g, TaskCancelShutdown) {
 		t.Fatal("unacknowledged or mismatched task became reclaimable")
 	}
+	g.runAction = ActionCheckResume
+	if ReclaimableG(g) || AcknowledgeTaskCancellation(g, TaskCancelAbort) {
+		t.Fatal("terminal task retained an unconsumed runner continuation")
+	}
+	g.runAction = ActionInvalid
 	if !AcknowledgeTaskCancellation(g, TaskCancelAbort) || !ReclaimableG(g) {
 		t.Fatal("terminal task acknowledgement")
 	}

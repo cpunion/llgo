@@ -180,35 +180,14 @@ func preparePanicAncestor(p *P, g *G, frame *Frame) (Action, bool) {
 
 func finishPanicG(p *P, g *G, wasRoot bool) (Action, bool) {
 	if p == nil || g == nil || !wasRoot || g.active != nil || g.frames != nil ||
-		!g.panicUnwind || !publishedPanicRecord(&g.panicRecord) ||
-		!validReadyQueue(p) || !validSchedulerWaitQueues(p) {
+		!g.panicUnwind || !publishedPanicRecord(&g.panicRecord) {
 		return Action{}, false
 	}
-	schedule := preemptLoad(&p.schedule)
-	if schedule != scheduleIdle && schedule != scheduleRequested {
-		return Action{}, false
+	kind := ActionPanicDestroy
+	if g.state == GDispatching {
+		kind = ActionDestroy
 	}
-	// Match normal terminal linearization when this is the last G. With peers,
-	// retain the P gate: the runtime will surface the panic immediately, but no
-	// child/peer ownership is silently discarded by this core transition.
-	if p.readyHead == nil && emptySchedulerWaitQueues(p) &&
-		(preemptLoad(&p.executorMode) != executorModeUnbound || p.executor != nil) {
-		return beginTerminalExecutorClose(p, g, p.action)
-	}
-	if p.readyHead == nil && emptySchedulerWaitQueues(p) &&
-		!preemptCompareAndSwap(&p.schedule, scheduleIdle, scheduleDisabled) {
-		return Action{}, false
-	}
-	g.destroyRoot = false
-	g.root = nil
-	g.panicUnwind = false
-	preemptStore(preemptAddress(g), preemptDisabled)
-	g.state = GDead
-	g.runP = nil
-	p.current = nil
-	p.servicePreemptBudget = 0
-	p.action = Action{}
-	return Action{Kind: ActionPanicComplete}, true
+	return commitRootDestroyedCompatibility(p, g, kind)
 }
 
 // commitInitialPanicDestroyed is entered only after the active final-suspended
@@ -247,6 +226,27 @@ func PanicDestroyed(p *P, g *G, action Action) (Action, bool) {
 		return preparePanicAncestor(p, g, g.active)
 	}
 	return finishPanicG(p, g, wasRoot)
+}
+
+// PanicDestroyedBounded is the direct-ancestor counterpart of
+// DestroyedBounded. Each call commits exactly one already-performed physical
+// destroy. A surviving ancestor is returned as a ready-tail continuation; the
+// root publishes the same handle-free terminal receipt as normal completion.
+func PanicDestroyedBounded(p *P, g *G, action Action) (Action, bool) {
+	if !expectedAction(p, g, action, ActionPanicDestroy) || p.inResume ||
+		g.state != GPanicking || !g.panicUnwind || !publishedPanicRecord(&g.panicRecord) ||
+		g.destroyTarget != nil || g.runAction != ActionInvalid {
+		return Action{}, false
+	}
+	wasRoot := g.destroyRoot
+	if g.active != nil {
+		if wasRoot {
+			return Action{}, false
+		}
+		g.destroyRoot = false
+		return preparePanicAncestor(p, g, g.active)
+	}
+	return finishBoundedRootDestroy(p, g, wasRoot, true)
 }
 
 // AcknowledgePanicTerminalSchedule consumes the only legal failed terminal

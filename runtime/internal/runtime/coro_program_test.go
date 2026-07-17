@@ -147,6 +147,11 @@ type coroProgramTestFrameV1 struct {
 
 func newCoroProgramTestFrameV1(t *testing.T, g *coro.G) *coroProgramTestFrameV1 {
 	t.Helper()
+	return newCoroProgramTestFrameWithParentV1(t, g, nil)
+}
+
+func newCoroProgramTestFrameWithParentV1(t *testing.T, g *coro.G, parent unsafe.Pointer) *coroProgramTestFrameV1 {
+	t.Helper()
 	const (
 		size  = uintptr(37)
 		align = uintptr(16)
@@ -166,6 +171,7 @@ func newCoroProgramTestFrameV1(t *testing.T, g *coro.G) *coroProgramTestFrameV1 
 	handle := unsafe.Pointer(new(byte))
 	header := &coro.HeaderV1{
 		G:             unsafe.Pointer(g),
+		Parent:        parent,
 		Descriptor:    descriptor,
 		SuspendReason: uint16(coro.SuspendNone),
 		Lifecycle:     uint16(coro.FrameInitialSuspended),
@@ -188,29 +194,43 @@ func newCoroProgramTestFrameV1(t *testing.T, g *coro.G) *coroProgramTestFrameV1 
 }
 
 type coroProgramTestDriverV1 struct {
-	t                        *testing.T
-	frame                    *coroProgramTestFrameV1
-	doneCalls                int
-	resumeCalls              int
-	destroyCalls             int
-	completeReady            bool
-	released                 bool
-	requestScheduleOnDestroy bool
-	panicOnResume            bool
-	panicTypeWord            unsafe.Pointer
-	panicDataWord            unsafe.Pointer
-	spawnOnMainReturn        bool
-	child                    *coro.G
-	childFrame               *coroProgramTestFrameV1
-	cancelDestroyCalls       int
-	taskReleaseCalls         int
-	parkOnFirstResume        bool
-	parkResumeCount          int
-	waitToken                coro.WaitToken
-	waitTicket               coro.WaitTicket
-	waitRegistration         coro.WaitRegistrationHandle
-	waitRetired              bool
-	waitRetireCalls          int
+	t                           *testing.T
+	frame                       *coroProgramTestFrameV1
+	doneCalls                   int
+	resumeCalls                 int
+	destroyCalls                int
+	completeReady               bool
+	released                    bool
+	requestScheduleOnDestroy    bool
+	panicOnResume               bool
+	panicTypeWord               unsafe.Pointer
+	panicDataWord               unsafe.Pointer
+	spawnOnMainReturn           bool
+	spawnBeforeMainReturn       bool
+	commandBootstrapDirectChild bool
+	bootstrapChildFrame         *coroProgramTestFrameV1
+	bootstrapChildCompleteReady bool
+	bootstrapChildDoneCalls     int
+	bootstrapChildResumeCalls   int
+	bootstrapChildDestroyCalls  int
+	bootstrapPeers              [2]*coro.G
+	bootstrapPeerFrames         [2]*coroProgramTestFrameV1
+	bootstrapPeerDestroyCalls   int
+	bootstrapEvents             []string
+	child                       *coro.G
+	childFrame                  *coroProgramTestFrameV1
+	childCompleteReady          bool
+	childDoneCalls              int
+	childResumeCalls            int
+	cancelDestroyCalls          int
+	taskReleaseCalls            int
+	parkOnFirstResume           bool
+	parkResumeCount             int
+	waitToken                   coro.WaitToken
+	waitTicket                  coro.WaitTicket
+	waitRegistration            coro.WaitRegistrationHandle
+	waitRetired                 bool
+	waitRetireCalls             int
 }
 
 var activeCoroProgramDriver *coroProgramTestDriverV1
@@ -245,11 +265,38 @@ func coroReleaseCompletedTask(g *coroG) bool {
 	}
 	raw, size, ok := coro.ReleaseTaskStorage(g)
 	if !ok || raw != unsafe.Pointer(g) || size != coro.TaskStorageSize() ||
-		activeCoroProgramDriver == nil || activeCoroProgramDriver.child != g {
+		activeCoroProgramDriver == nil || !activeCoroProgramDriver.ownsSpawnedTask(g) {
 		return false
 	}
 	activeCoroProgramDriver.taskReleaseCalls++
-	return activeCoroProgramDriver.taskReleaseCalls == 1
+	return true
+}
+
+func (driver *coroProgramTestDriverV1) ownsSpawnedTask(g *coro.G) bool {
+	if driver == nil || g == nil {
+		return false
+	}
+	if driver.child == g {
+		return true
+	}
+	for _, peer := range driver.bootstrapPeers {
+		if peer == g {
+			return true
+		}
+	}
+	return false
+}
+
+func (driver *coroProgramTestDriverV1) bootstrapPeerIndex(handle unsafe.Pointer) int {
+	if driver == nil || handle == nil {
+		return -1
+	}
+	for index, frame := range driver.bootstrapPeerFrames {
+		if frame != nil && frame.handle == handle {
+			return index
+		}
+	}
+	return -1
 }
 
 func (driver *coroProgramTestDriverV1) requireHandle(handle unsafe.Pointer) {
@@ -266,12 +313,81 @@ func (driver *coroProgramTestDriverV1) requireHandle(handle unsafe.Pointer) {
 }
 
 func (driver *coroProgramTestDriverV1) done(handle unsafe.Pointer) bool {
+	if driver != nil && driver.bootstrapChildFrame != nil && handle == driver.bootstrapChildFrame.handle {
+		driver.bootstrapChildDoneCalls++
+		return driver.bootstrapChildCompleteReady
+	}
+	if index := driver.bootstrapPeerIndex(handle); index >= 0 {
+		driver.t.Fatalf("command bootstrap peer %d reached done check before command exit", index)
+		return false
+	}
+	if driver != nil && driver.childFrame != nil && handle == driver.childFrame.handle {
+		driver.childDoneCalls++
+		return driver.childCompleteReady
+	}
 	driver.requireHandle(handle)
 	driver.doneCalls++
 	return driver.completeReady
 }
 
 func (driver *coroProgramTestDriverV1) resume(handle unsafe.Pointer) {
+	if driver != nil && driver.bootstrapChildFrame != nil && handle == driver.bootstrapChildFrame.handle {
+		driver.bootstrapChildResumeCalls++
+		if driver.bootstrapChildResumeCalls != 1 {
+			driver.t.Fatalf("command bootstrap direct-child resume calls = %d, want 1", driver.bootstrapChildResumeCalls)
+		}
+		frame := driver.bootstrapChildFrame
+		outcome, caseID, taskKind, sourceSlot, generation, decisionOK := coro.TakeRunDecisionWords(frame.g, 0, 0)
+		if !decisionOK || outcome != 0 || caseID != 0 || taskKind != 0 || sourceSlot != 0 || generation != 0 {
+			driver.t.Fatalf("take command bootstrap direct-child run decision = (%d, %d, %d, %d, %d, %t)",
+				outcome, caseID, taskKind, sourceSlot, generation, decisionOK)
+		}
+		frame.header.SuspendReason = uint16(coro.SuspendNone)
+		frame.header.Lifecycle = uint16(coro.FrameActive)
+		driver.bootstrapEvents = append(driver.bootstrapEvents, "direct-child-resume")
+		for index := range driver.bootstrapPeers {
+			peer := new(coro.G)
+			if !coro.BeginSpawn(frame.g, peer, unsafe.Pointer(peer), coro.TaskStorageSize()) {
+				driver.t.Fatalf("begin command bootstrap peer %d", index)
+			}
+			peerFrame := newCoroProgramTestFrameV1(driver.t, peer)
+			if !coro.CommitSpawn(frame.g, peer, peerFrame.handle) {
+				driver.t.Fatalf("commit command bootstrap peer %d", index)
+			}
+			driver.bootstrapPeers[index] = peer
+			driver.bootstrapPeerFrames[index] = peerFrame
+		}
+		frame.header.SuspendReason = uint16(coro.SuspendFrameComplete)
+		frame.header.Lifecycle = uint16(coro.FrameFinalSuspended)
+		if !coro.PrepareComplete(frame.g, handle, frame.header) {
+			driver.t.Fatal("prepare command bootstrap direct-child final suspend")
+		}
+		driver.bootstrapChildCompleteReady = true
+		return
+	}
+	if index := driver.bootstrapPeerIndex(handle); index >= 0 {
+		driver.t.Fatalf("command bootstrap peer %d resumed before command exit", index)
+		return
+	}
+	if driver != nil && driver.childFrame != nil && handle == driver.childFrame.handle {
+		driver.childResumeCalls++
+		if driver.childResumeCalls != 1 {
+			driver.t.Fatalf("child coroutine resume calls = %d, want 1", driver.childResumeCalls)
+		}
+		frame := driver.childFrame
+		outcome, caseID, taskKind, sourceSlot, generation, decisionOK := coro.TakeRunDecisionWords(frame.g, 0, 0)
+		if !decisionOK || outcome != 0 || caseID != 0 || taskKind != 0 || sourceSlot != 0 || generation != 0 {
+			driver.t.Fatalf("take child coroutine run decision = (%d, %d, %d, %d, %d, %t)",
+				outcome, caseID, taskKind, sourceSlot, generation, decisionOK)
+		}
+		frame.header.SuspendReason = uint16(coro.SuspendFrameComplete)
+		frame.header.Lifecycle = uint16(coro.FrameFinalSuspended)
+		if !coro.PrepareComplete(frame.g, handle, frame.header) {
+			driver.t.Fatal("prepare simulated child final suspend")
+		}
+		driver.childCompleteReady = true
+		return
+	}
 	driver.requireHandle(handle)
 	driver.resumeCalls++
 	parkCount := driver.parkResumeCount
@@ -279,6 +395,12 @@ func (driver *coroProgramTestDriverV1) resume(handle unsafe.Pointer) {
 		parkCount = 1
 	}
 	maxResumeCalls := parkCount + 1
+	if driver.spawnBeforeMainReturn {
+		maxResumeCalls = 2
+	}
+	if driver.commandBootstrapDirectChild {
+		maxResumeCalls = 2
+	}
 	if driver.resumeCalls > maxResumeCalls {
 		driver.t.Fatalf("coroutine resume calls = %d, max %d", driver.resumeCalls, maxResumeCalls)
 	}
@@ -294,6 +416,43 @@ func (driver *coroProgramTestDriverV1) resume(handle unsafe.Pointer) {
 	}
 	frame.header.SuspendReason = uint16(coro.SuspendNone)
 	frame.header.Lifecycle = uint16(coro.FrameActive)
+	if driver.commandBootstrapDirectChild {
+		switch driver.resumeCalls {
+		case 1:
+			driver.bootstrapEvents = append(driver.bootstrapEvents, "bootstrap-enter")
+			if driver.bootstrapChildFrame == nil {
+				driver.t.Fatal("command bootstrap direct child is unavailable")
+			}
+			frame.header.SuspendReason = uint16(coro.SuspendCall)
+			frame.header.Lifecycle = uint16(coro.FrameSuspended)
+			if !coro.PrepareAwait(frame.g, frame.handle, driver.bootstrapChildFrame.handle) {
+				driver.t.Fatal("prepare command bootstrap direct-child await")
+			}
+			return
+		case 2:
+			driver.bootstrapEvents = append(driver.bootstrapEvents, "bootstrap-exit")
+			if driver.bootstrapChildDestroyCalls != 1 || driver.bootstrapPeerDestroyCalls != 0 {
+				driver.t.Fatalf("bootstrap exit ordering = childDestroy:%d peerDestroy:%d",
+					driver.bootstrapChildDestroyCalls, driver.bootstrapPeerDestroyCalls)
+			}
+			if !coroProgramMainReturnV1(unsafe.Pointer(frame.g)) {
+				driver.t.Fatal("publish command bootstrap normal-main return")
+			}
+			if coroProgramLifecycleV1State != coroProgramMainReturnRequestedV1 ||
+				!coro.CommandMainReturnPoint(&coroProgramPV1State, frame.g) {
+				driver.t.Fatal("command bootstrap main-return marker is not stable")
+			}
+			frame.header.SuspendReason = uint16(coro.SuspendFrameComplete)
+			frame.header.Lifecycle = uint16(coro.FrameFinalSuspended)
+			if !coro.PrepareComplete(frame.g, handle, frame.header) {
+				driver.t.Fatal("prepare command bootstrap root final suspend")
+			}
+			driver.completeReady = true
+			return
+		default:
+			driver.t.Fatalf("command bootstrap root resume calls = %d, want at most 2", driver.resumeCalls)
+		}
+	}
 	if parkCount != 0 && driver.resumeCalls > 1 {
 		if outcome, ok := coro.WaitOutcomeOf(&driver.waitToken, driver.waitTicket); !ok || outcome != coro.WaitOutcomeCompleted {
 			driver.t.Fatalf("resumed executor wait outcome = (%d, %t), want completed", outcome, ok)
@@ -345,7 +504,7 @@ func (driver *coroProgramTestDriverV1) resume(handle unsafe.Pointer) {
 		driver.completeReady = true
 		return
 	}
-	if driver.spawnOnMainReturn {
+	if driver.spawnOnMainReturn || driver.spawnBeforeMainReturn && driver.resumeCalls == 1 {
 		driver.child = new(coro.G)
 		if !coro.BeginSpawn(frame.g, driver.child, unsafe.Pointer(driver.child), coro.TaskStorageSize()) {
 			driver.t.Fatal("begin named-adapter command child")
@@ -353,6 +512,20 @@ func (driver *coroProgramTestDriverV1) resume(handle unsafe.Pointer) {
 		driver.childFrame = newCoroProgramTestFrameV1(driver.t, driver.child)
 		if !coro.CommitSpawn(frame.g, driver.child, driver.childFrame.handle) {
 			driver.t.Fatal("commit named-adapter command child")
+		}
+	}
+	if driver.spawnBeforeMainReturn && driver.resumeCalls == 1 {
+		frame.header.SuspendReason = uint16(coro.SuspendYield)
+		frame.header.Lifecycle = uint16(coro.FrameSuspended)
+		if !coro.PrepareYield(frame.g, handle, frame.header) {
+			driver.t.Fatal("prepare named-adapter main yield before return")
+		}
+		return
+	}
+	if driver.spawnOnMainReturn || driver.spawnBeforeMainReturn {
+		if driver.child == nil || driver.childFrame == nil ||
+			driver.spawnBeforeMainReturn && driver.childResumeCalls != 1 {
+			driver.t.Fatal("main return did not observe the completed child physical resume")
 		}
 		if !coroProgramMainReturnV1(unsafe.Pointer(frame.g)) {
 			driver.t.Fatal("publish named-adapter normal main return")
@@ -372,6 +545,36 @@ func (driver *coroProgramTestDriverV1) resume(handle unsafe.Pointer) {
 }
 
 func (driver *coroProgramTestDriverV1) destroy(handle unsafe.Pointer) {
+	if driver.bootstrapChildFrame != nil && handle == driver.bootstrapChildFrame.handle {
+		driver.bootstrapChildDestroyCalls++
+		if driver.bootstrapChildDestroyCalls != 1 {
+			driver.t.Fatalf("command bootstrap direct-child destroy calls = %d, want 1", driver.bootstrapChildDestroyCalls)
+		}
+		frame := driver.bootstrapChildFrame
+		raw, total, ok := coro.ReleaseFrame(frame.g, frame.storage, frame.size, frame.align, frame.descriptor)
+		if !ok || raw != frame.raw || total != frame.total {
+			driver.t.Fatalf("release command bootstrap direct child = (%p, %d, %t)", raw, total, ok)
+		}
+		driver.bootstrapEvents = append(driver.bootstrapEvents, "direct-child-destroy")
+		return
+	}
+	if index := driver.bootstrapPeerIndex(handle); index >= 0 {
+		if !coroProgramTestTargetV1State.joined {
+			driver.t.Fatalf("command bootstrap peer %d canceled before target strong join", index)
+		}
+		driver.bootstrapPeerDestroyCalls++
+		frame := driver.bootstrapPeerFrames[index]
+		raw, total, ok := coro.ReleaseFrame(frame.g, frame.storage, frame.size, frame.align, frame.descriptor)
+		if !ok || raw != frame.raw || total != frame.total {
+			driver.t.Fatalf("release command bootstrap peer %d = (%p, %d, %t)", index, raw, total, ok)
+		}
+		if index == 0 {
+			driver.bootstrapEvents = append(driver.bootstrapEvents, "peer-0-cancel")
+		} else {
+			driver.bootstrapEvents = append(driver.bootstrapEvents, "peer-1-cancel")
+		}
+		return
+	}
 	if driver.childFrame != nil && handle == driver.childFrame.handle {
 		if !coroProgramTestTargetV1State.joined {
 			driver.t.Fatal("ready child cancellation ran before target strong join")
@@ -400,6 +603,9 @@ func (driver *coroProgramTestDriverV1) destroy(handle unsafe.Pointer) {
 		driver.t.Fatalf("release simulated coroutine frame = (%p, %d, %t), want (%p, %d, true)", raw, total, ok, frame.raw, frame.total)
 	}
 	driver.released = true
+	if driver.commandBootstrapDirectChild {
+		driver.bootstrapEvents = append(driver.bootstrapEvents, "bootstrap-root-destroy")
+	}
 	if driver.requestScheduleOnDestroy {
 		if result := coroProgramExecutorRegistryV1State.Request(coroProgramExecutorHandleV1State); result != coro.ExecutorRequestPublished {
 			driver.t.Fatalf("request terminal executor retry = %d", result)
@@ -478,6 +684,65 @@ func TestCoroProgramV1BeginRunAndDestroy(t *testing.T) {
 
 	if _, ok := coroProgramBeginV1(unsafe.Pointer(&manifest.manifest), factory); ok || coroProgramLifecycleV1State != coroProgramFailedV1 {
 		t.Fatalf("completed coroutine program was reusable: ok=%t lifecycle=%d", ok, coroProgramLifecycleV1State)
+	}
+	runtime.KeepAlive(frame.memory)
+	runtime.KeepAlive(manifest)
+}
+
+func TestCoroProgramRunSliceBudgetOneKeepsPhysicalActionsAtomic(t *testing.T) {
+	resetCoroProgramTestStateV1(t)
+	manifest := newCoroProgramTestManifestV1()
+	factory := unsafe.Pointer(&manifest.factoryMarker)
+	gPointer, ok := coroProgramBeginV1(unsafe.Pointer(&manifest.manifest), factory)
+	if !ok || gPointer != unsafe.Pointer(&coroProgramGV1State) {
+		t.Fatal("begin budget-one coroutine program")
+	}
+	frame := newCoroProgramTestFrameV1(t, &coroProgramGV1State)
+	driver := &coroProgramTestDriverV1{t: t, frame: frame}
+	activeCoroProgramDriver = driver
+	if !coroProgramDriveAdmissionV1State.Acquire() {
+		t.Fatal("acquire budget-one scheduler owner")
+	}
+	if !coroAdoptRoot(&coroProgramGV1State, frame.handle) ||
+		!coroEnqueue(&coroProgramPV1State, &coroProgramGV1State) ||
+		!coroTargetExecutorStartV1(coroProgramExecutorHandleV1State) {
+		t.Fatal("start budget-one coroutine program")
+	}
+	coroProgramLifecycleV1State = coroProgramRunningV1
+
+	var sources, dispatches, resumes, destroys uint32
+	for entry := 0; entry < 10000; entry++ {
+		result := coroRunSlice(
+			&coroProgramPV1State,
+			&coroProgramGV1State,
+			&coroProgramExecutorDriverV1State,
+			1,
+		)
+		if result.used != 1 || result.sources+result.dispatches+result.resumes+result.destroys != 1 {
+			t.Fatalf("budget-one entry %d accounting = %+v", entry, result)
+		}
+		sources += result.sources
+		dispatches += result.dispatches
+		resumes += result.resumes
+		destroys += result.destroys
+		if result.stop == coroRunDestroyCommitV1 {
+			if result.action.Kind != coro.ActionCommitDestroy || result.action.Handle != nil {
+				t.Fatalf("budget-one destroy receipt = %+v", result)
+			}
+			break
+		}
+		if result.stop != coroRunSliceBudgetV1 {
+			t.Fatalf("budget-one entry %d stop = %+v", entry, result)
+		}
+	}
+	if dispatches != 2 || resumes != 1 || destroys != 1 ||
+		driver.doneCalls != 2 || driver.resumeCalls != 1 || driver.destroyCalls != 1 || !driver.released {
+		t.Fatalf("budget-one totals = source:%d dispatch:%d resume:%d destroy:%d wrappers={done:%d resume:%d destroy:%d released:%t}",
+			sources, dispatches, resumes, destroys, driver.doneCalls, driver.resumeCalls, driver.destroyCalls, driver.released)
+	}
+	if status := coroProgramFinishDriveAdmissionV1(coroProgramDriveStepV1()); status != coroProgramDriveCompleteV1 ||
+		!coro.TerminalG(&coroProgramPV1State, &coroProgramGV1State) {
+		t.Fatalf("finish budget-one coroutine program = %d", status)
 	}
 	runtime.KeepAlive(frame.memory)
 	runtime.KeepAlive(manifest)
@@ -933,6 +1198,104 @@ func TestCoroProgramNormalMainReturnCancelsReadyChild(t *testing.T) {
 	runtime.KeepAlive(frame.memory)
 	runtime.KeepAlive(driver.childFrame.memory)
 	runtime.KeepAlive(driver.child)
+	runtime.KeepAlive(manifest)
+}
+
+func TestCoroProgramMainReturnCancelsBoundedChildDestroyContinuation(t *testing.T) {
+	resetCoroProgramTestStateV1(t)
+	manifest := newCoroProgramTestManifestV1()
+	factory := unsafe.Pointer(&manifest.factoryMarker)
+	gPointer, ok := coroProgramBeginV1(unsafe.Pointer(&manifest.manifest), factory)
+	if !ok {
+		t.Fatal("begin bounded-child command program")
+	}
+	frame := newCoroProgramTestFrameV1(t, &coroProgramGV1State)
+	driver := &coroProgramTestDriverV1{t: t, frame: frame, spawnBeforeMainReturn: true}
+	activeCoroProgramDriver = driver
+	if status := coroProgramRunV1(gPointer, frame.handle); status != coroProgramDriveCompleteV1 {
+		t.Fatalf("run bounded-child command program = %d", status)
+	}
+	if coroProgramLifecycleV1State != coroProgramCompleteV1 ||
+		driver.doneCalls != 3 || driver.resumeCalls != 2 || driver.destroyCalls != 1 ||
+		driver.childDoneCalls != 1 || driver.childResumeCalls != 1 || !driver.childCompleteReady ||
+		driver.cancelDestroyCalls != 1 || driver.taskReleaseCalls != 1 ||
+		driver.child == nil || driver.childFrame == nil ||
+		!coroProgramTestTargetV1State.joined || coroProgramTestTargetV1State.closeCalls != 1 ||
+		coroProgramExecutorBoundV1State || !coroProgramExecutorRegistryV1State.CanRelease() ||
+		!coroProgramWaitTableV1State.CanRelease() ||
+		!coro.TerminalG(&coroProgramPV1State, &coroProgramGV1State) ||
+		!coro.TerminalG(&coroProgramPV1State, driver.child) {
+		t.Fatalf("bounded child shutdown = lifecycle:%d main={done:%d resume:%d destroy:%d} child={done:%d resume:%d cancelDestroy:%d release:%d}",
+			coroProgramLifecycleV1State, driver.doneCalls, driver.resumeCalls, driver.destroyCalls,
+			driver.childDoneCalls, driver.childResumeCalls, driver.cancelDestroyCalls, driver.taskReleaseCalls)
+	}
+	runtime.KeepAlive(frame.memory)
+	runtime.KeepAlive(driver.childFrame.memory)
+	runtime.KeepAlive(driver.child)
+	runtime.KeepAlive(manifest)
+}
+
+func TestCoroProgramCommandBootstrapDirectChildHandoffPrecedesTwoPeers(t *testing.T) {
+	resetCoroProgramTestStateV1(t)
+	manifest := newCoroProgramTestManifestV2()
+	factory := unsafe.Pointer(&manifest.factoryMarker)
+	gPointer, ok := coroProgramBeginV1(unsafe.Pointer(&manifest.manifest), factory)
+	if !ok {
+		t.Fatal("begin command-bootstrap handoff program")
+	}
+	root := newCoroProgramTestFrameV1(t, &coroProgramGV1State)
+	directChild := newCoroProgramTestFrameWithParentV1(t, &coroProgramGV1State, root.handle)
+	driver := &coroProgramTestDriverV1{
+		t:                           t,
+		frame:                       root,
+		commandBootstrapDirectChild: true,
+		bootstrapChildFrame:         directChild,
+	}
+	activeCoroProgramDriver = driver
+	if status := coroProgramRunV1(gPointer, root.handle); status != coroProgramDriveCompleteV1 {
+		t.Fatalf("run command-bootstrap handoff program = %d", status)
+	}
+	wantEvents := [...]string{
+		"bootstrap-enter",
+		"direct-child-resume",
+		"direct-child-destroy",
+		"bootstrap-exit",
+		"bootstrap-root-destroy",
+		"peer-0-cancel",
+		"peer-1-cancel",
+	}
+	if len(driver.bootstrapEvents) != len(wantEvents) {
+		t.Fatalf("command-bootstrap handoff events = %v, want %v", driver.bootstrapEvents, wantEvents)
+	}
+	for index, want := range wantEvents {
+		if driver.bootstrapEvents[index] != want {
+			t.Fatalf("command-bootstrap handoff event %d = %q, want %q; all=%v",
+				index, driver.bootstrapEvents[index], want, driver.bootstrapEvents)
+		}
+	}
+	if coroProgramLifecycleV1State != coroProgramCompleteV1 ||
+		driver.doneCalls != 3 || driver.resumeCalls != 2 || driver.destroyCalls != 1 || !driver.released ||
+		driver.bootstrapChildDoneCalls != 2 || driver.bootstrapChildResumeCalls != 1 ||
+		driver.bootstrapChildDestroyCalls != 1 || driver.bootstrapPeerDestroyCalls != 2 ||
+		driver.taskReleaseCalls != 2 || !coroProgramTestTargetV1State.joined ||
+		coroProgramTestTargetV1State.closeCalls != 1 || coroProgramExecutorBoundV1State ||
+		!coroProgramExecutorRegistryV1State.CanRelease() || !coroProgramWaitTableV1State.CanRelease() ||
+		!coro.TerminalG(&coroProgramPV1State, &coroProgramGV1State) {
+		t.Fatalf("command-bootstrap handoff completion = lifecycle:%d root={done:%d resume:%d destroy:%d released:%t} direct={done:%d resume:%d destroy:%d} peers={destroy:%d release:%d}",
+			coroProgramLifecycleV1State, driver.doneCalls, driver.resumeCalls, driver.destroyCalls, driver.released,
+			driver.bootstrapChildDoneCalls, driver.bootstrapChildResumeCalls, driver.bootstrapChildDestroyCalls,
+			driver.bootstrapPeerDestroyCalls, driver.taskReleaseCalls)
+	}
+	for index, peer := range driver.bootstrapPeers {
+		if peer == nil || driver.bootstrapPeerFrames[index] == nil ||
+			!coro.TerminalG(&coroProgramPV1State, peer) {
+			t.Fatalf("command-bootstrap peer %d did not terminate", index)
+		}
+		runtime.KeepAlive(driver.bootstrapPeerFrames[index].memory)
+		runtime.KeepAlive(peer)
+	}
+	runtime.KeepAlive(root.memory)
+	runtime.KeepAlive(directChild.memory)
 	runtime.KeepAlive(manifest)
 }
 
