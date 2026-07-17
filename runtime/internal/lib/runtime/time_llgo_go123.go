@@ -530,27 +530,6 @@ func time_runtimeIsBubbled() bool {
 	return false
 }
 
-//go:linkname timeSleep time.Sleep
-func timeSleep(ns int64) {
-	if ns <= 0 {
-		return
-	}
-	done := make(chan struct{}, 1)
-	r := &runtimeTimer{
-		when: runtimeNano() + ns,
-		f:    timeSleepWake,
-		arg:  done,
-	}
-	startRuntimeTimer(r)
-	<-done
-	stopRuntimeTimer(r)
-}
-
-func timeSleepWake(arg any, _ uintptr, _ int64) {
-	ch := arg.(chan struct{})
-	ch <- struct{}{}
-}
-
 //go:linkname newTimer time.newTimer
 func newTimer(when, period int64, f func(any, uintptr, int64), arg any, cp unsafe.Pointer) *timeTimer {
 	t := &timeTimer{c: cp, init: true}
