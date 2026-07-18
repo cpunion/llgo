@@ -1752,6 +1752,10 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		p.recordPanicLocation(b, v.Pos())
 		b.MapUpdate(m, key, val)
 	case *ssa.Defer:
+		if p.currentCoro != nil && p.currentCoro.cleanup != nil {
+			p.currentCoro.cleanup.register(p, b, v)
+			return
+		}
 		if v.DeferStack != nil {
 			p.callDeferStack(b, p.blkInfos[v.Block().Index].Kind, &v.Call, v.DeferStack, v.Parent())
 			return
@@ -1763,6 +1767,10 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		}
 		p.call(b, llssa.Go, &v.Call)
 	case *ssa.RunDefers:
+		if p.currentCoro != nil && p.currentCoro.cleanup != nil {
+			p.currentCoro.cleanup.runDefers(b, v)
+			return
+		}
 		p.recordPanicLocation(b, v.Pos())
 		b.RunDefers()
 	case *ssa.Panic:

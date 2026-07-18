@@ -161,6 +161,7 @@ type coroPhysicalABI struct {
 type coroBodyContext struct {
 	coro                   *llssa.CoroBuilder
 	abi                    coroPhysicalABI
+	cleanup                *coroStaticCleanupState
 	header                 llssa.Expr
 	task                   llssa.Expr
 	resultSlot             llssa.Expr
@@ -715,10 +716,22 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 		panic(fmt.Errorf("rebuild coroutine frame-retention proof: %w", err))
 	}
 	frameRetention := audit.currentFrameRetentionProof()
+	cleanupPlan, err := prepareCoroStaticCleanupPlan(
+		fn, p.compilation.CoroPlan, p.emissionUniverse, p.compilation.CoroFrameRetentionABI,
+		p.compilation.EnableCoroExplicitStatusPanicABI,
+	)
+	if err != nil {
+		panic(fmt.Errorf("rebuild coroutine static-cleanup proof: %w", err))
+	}
 
 	b.SetBlock(p.fn.Block(0))
+	cleanup := p.beginCoroStaticCleanup(b, cleanupPlan)
 	physical := p.beginCoroBody(b, abi)
 	physical.frameRetention = frameRetention
+	physical.cleanup = cleanup
+	if physical.cleanup != nil {
+		physical.cleanup.bindBlocks(p.fn)
+	}
 	p.currentCoro = physical
 
 	// Create source blocks after BeginCoro's canonical ramp/suspend blocks so
@@ -774,7 +787,20 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	}
 
 	b.SetBlock(physical.completion)
-	physical.complete(b)
+	if physical.cleanup == nil {
+		physical.complete(b)
+	} else {
+		physical.cleanup.enterCompletion(b)
+		physical.cleanup.emit(p, b)
+		b.SetBlock(physical.cleanup.complete)
+		physical.complete(b)
+		b.SetBlock(physical.cleanup.panic)
+		physical.panic(
+			b,
+			b.Load(physical.cleanup.panicType),
+			b.Load(physical.cleanup.panicData),
+		)
+	}
 	b.SetBlock(physical.finalSuspend)
 	physical.finish(b)
 }
@@ -830,6 +856,12 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 	if plan.Recursive {
 		return fail("recursive coroutine lowering requires child frames and preemption polls")
 	}
+	cleanupPlan, cleanupErr := prepareCoroStaticCleanupPlan(
+		fn, whole, universe, frameRetentionABI, explicitPanic,
+	)
+	if cleanupErr != nil {
+		return fail("static cleanup: %v", cleanupErr)
+	}
 	if plan.Exec.Contains(coro.NeedsPreempt) && !programRun {
 		return fail("needs-preempt execution requires the runnable scheduler ABI")
 	}
@@ -837,7 +869,11 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 	// not an IRQ context. Preserve the bit in the plan/digest while allowing the
 	// CFG lowering to execute it. Thread affinity and opaque execution still
 	// require scheduler protocols that this ABI does not provide.
-	if unsupported := plan.Exec &^ (coro.MayUnwind | coro.NeedsPreempt | coro.IRQUnsafe); unsupported != 0 {
+	allowedExec := coro.MayUnwind | coro.NeedsPreempt | coro.IRQUnsafe
+	if cleanupPlan != nil {
+		allowedExec |= coro.NeedsCleanupFrame
+	}
+	if unsupported := plan.Exec &^ allowedExec; unsupported != 0 {
 		return fail("execution flags %s require lowering outside the CFG physical ABI", unsupported)
 	}
 	if fn.Parent() != nil || len(fn.FreeVars) != 0 {
@@ -846,8 +882,13 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 	if len(fn.AnonFuncs) != 0 {
 		return fail("nested function literals require closure body lowering")
 	}
-	if fn.Recover != nil {
+	if fn.Recover != nil && cleanupPlan == nil {
 		return fail("recover blocks require coroutine cleanup/unwind lowering")
+	}
+	if cleanupPlan != nil {
+		if err := validateCoroStaticCleanupRecoverBlock(fn); err != nil {
+			return fail("static cleanup recover block: %v", err)
+		}
 	}
 	if fn.Signature.Variadic() {
 		return fail("variadic coroutine ABI is not implemented")
@@ -897,6 +938,13 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 	awaits := 0
 	parks := 0
 	spawns := 0
+	if cleanupPlan != nil {
+		for _, site := range cleanupPlan.sites {
+			if site.kind == coroStaticCleanupCoroutine {
+				awaits++
+			}
+		}
+	}
 	infos := blocks.Infos(fn.Blocks)
 	hasCyclicBlock := false
 	for _, info := range infos {
@@ -922,6 +970,10 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 			switch instr := instr.(type) {
 			case *ssa.DebugRef, *ssa.Jump:
 			case *ssa.Return:
+			case *ssa.Defer, *ssa.RunDefers:
+				if cleanupPlan == nil {
+					return coroLeafInstructionError(fn, plan, instr, "defer instruction has no certified static cleanup plan")
+				}
 			case *ssa.Panic:
 				if !explicitPanic {
 					return coroLeafInstructionError(fn, plan, instr, "explicit panic requires the explicit-status panic ABI")
@@ -941,6 +993,9 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 					return coroLeafInstructionError(fn, plan, instr, "potentially panicking or non-scalar binary operation")
 				}
 			case *ssa.Send:
+				if cleanupPlan != nil {
+					return coroLeafInstructionError(fn, plan, instr, "channel send panic outcomes require cleanup-aware channel lowering")
+				}
 				if !channel {
 					return coroLeafInstructionError(fn, plan, instr, "blocking channel send requires the channel scheduler capability")
 				}
@@ -949,6 +1004,9 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 				}
 				parks++
 			case *ssa.Select:
+				if cleanupPlan != nil {
+					return coroLeafInstructionError(fn, plan, instr, "channel select outcomes require cleanup-aware channel lowering")
+				}
 				if !channel {
 					return coroLeafInstructionError(fn, plan, instr, "channel select requires the channel scheduler capability")
 				}
@@ -968,6 +1026,9 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 				}
 			case *ssa.UnOp:
 				if instr.Op == token.ARROW {
+					if cleanupPlan != nil {
+						return coroLeafInstructionError(fn, plan, instr, "channel receive outcomes require cleanup-aware channel lowering")
+					}
 					if !channel {
 						return coroLeafInstructionError(fn, plan, instr, "blocking channel receive requires the channel scheduler capability")
 					}
@@ -988,6 +1049,10 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 							semantics, intrinsic, err := universe.CoroIntrinsicCallSiteSemantics(instr)
 							if err != nil {
 								return coroLeafInstructionError(fn, plan, instr, "invalid frozen intrinsic: "+err.Error())
+							}
+							if cleanupPlan != nil && (!intrinsic ||
+								(semantics != CoroIntrinsicCallInlineNoSuspend && semantics != CoroIntrinsicCallInlineSuspend)) {
+								return coroLeafInstructionError(fn, plan, instr, "elided intrinsic has no cleanup-safe no-unwind contract")
 							}
 							if intrinsic && semantics.SuspendsCurrentFrame() {
 								parks++
@@ -1010,6 +1075,13 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 				}
 				callee, calleePlan, err := resolveCoroStaticAwait(whole, plan, instr)
 				if err == nil {
+					if cleanupPlan != nil {
+						if reason := validateCoroStaticCleanupNoUnwind(
+							whole, universe, callee, calleePlan, frameRetentionABI,
+						); reason != "" {
+							return coroLeafInstructionError(fn, plan, instr, "child await may bypass static cleanup: "+reason)
+						}
+					}
 					if err := validateCoroLeafPhysicalSignature(calleePlan, callee.Signature); err != nil {
 						return coroLeafInstructionError(fn, plan, instr, "child await signature: "+err.Error())
 					}
@@ -1601,6 +1673,14 @@ func validateCoroPhysicalConsumersCapabilities(plan *coro.SSAPlan, childAwait, s
 							if _, _, err := resolveCoroStaticAwait(plan, function.Plan, direct); err == nil {
 								// The static callee operand is represented by this exact
 								// CallPlan and is not an escaped function value.
+								continue
+							}
+						}
+						deferred, cleanup := call.(*ssa.Defer)
+						if childAwait && cleanup && function.Plan.Emission == coro.EmitCoroutine {
+							if _, _, kind, err := resolveCoroStaticCleanupTarget(plan, function.Plan, deferred); err == nil && kind == coroStaticCleanupCoroutine {
+								// The physical-body preflight separately proves the
+								// frame-resident record and child no-unwind contract.
 								continue
 							}
 						}

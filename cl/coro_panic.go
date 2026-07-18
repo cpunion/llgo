@@ -41,6 +41,10 @@ func (p *context) tryCompileCoroExplicitStatusPanic(b llssa.Builder, instruction
 	value := p.compileValue(b, instruction.X)
 	typeWord := b.EfaceType(value)
 	dataWord := b.InterfaceData(value)
-	p.currentCoro.panic(b, typeWord, dataWord)
+	if p.currentCoro.cleanup == nil {
+		p.currentCoro.panic(b, typeWord, dataWord)
+	} else {
+		p.currentCoro.cleanup.enterPanic(b, typeWord, dataWord)
+	}
 	return true
 }
