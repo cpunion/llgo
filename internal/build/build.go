@@ -1743,7 +1743,10 @@ func validateCoroUnwindOnlyLoweredCalls(plan *coro.SSAPlan, panicABI string) err
 // CallUnwind prevents the panic episode from tainting the normal-return effect
 // of owner, but it cannot make a coroutine target synchronously callable. The
 // legacy ABI therefore also requires the exact target's physically reachable
-// managed closure to contain only bounded DirectPlain calls. In particular, a
+// managed closure to contain only bounded direct calls to plain primary bodies.
+// A target may still have FuncRep=Dispatch when some other consumer stores it
+// as a first-class value; representation is independent from the one primary
+// body selected by this exact static edge. In particular, a
 // terminal panic printer must not turn error.Error, Stringer.String, or another
 // user callback into a trusted plain function merely because it is reachable
 // only while panicking.
@@ -1881,7 +1884,7 @@ func (validator *coroLegacyPanicPlainClosureValidator) validateFunction(function
 			functionPlan.External, functionPlan.Demand, functionPlan.Effect, functionPlan.Exec, functionPlan.FuncRep, functionPlan.Primary, functionPlan.Emission)
 	}
 	if functionPlan.Demand == coro.NoDemand || functionPlan.Effect != coro.NoSuspend ||
-		functionPlan.Emission != coro.EmitPlain || functionPlan.FuncRep != coro.DirectPlain || functionPlan.Primary != coro.PrimaryPlain {
+		functionPlan.Emission != coro.EmitPlain || functionPlan.Primary != coro.PrimaryPlain {
 		return coroLegacyPanicPlainPathError(path,
 			"target is not one bounded plain Go body (external=%s demand=%s effect=%s exec=%s representation=%s primary=%s emission=%s)",
 			functionPlan.External, functionPlan.Demand, functionPlan.Effect, functionPlan.Exec, functionPlan.FuncRep, functionPlan.Primary, functionPlan.Emission)

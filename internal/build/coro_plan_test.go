@@ -2151,6 +2151,47 @@ func failure(err error) { _ = err.Error() }
 	}
 }
 
+func TestValidateCoroUnwindOnlyLoweredCallsAcceptsStaticCallToDispatchRepresentedPlainBody(t *testing.T) {
+	ssaPkg, _ := buildCoroPlanTestPackage(t, "example.com/unwindstaticdispatch", `package unwindstaticdispatch
+var sink func()
+func owner() {}
+func helper() { target() }
+func target() {}
+func publish() { sink = target }
+`, nil)
+	owner := ssaPkg.Func("owner")
+	helper := ssaPkg.Func("helper")
+	target := ssaPkg.Func("target")
+	publish := ssaPkg.Func("publish")
+	universe, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, []*ssa.Function{owner, helper, target, publish})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{
+		{Function: owner, Demand: coro.SyncDemand},
+		{Function: publish, Demand: coro.SyncDemand},
+	}, coro.SSAConfig{
+		EmissionUniverse: universe,
+		ClassifyLoweredCalls: func(fn *ssa.Function) ([]coro.SSALoweredCall, error) {
+			if fn == owner {
+				return []coro.SSALoweredCall{{LogicalName: "runtime.Panic", Target: helper, UnwindOnly: true}}, nil
+			}
+			return nil, nil
+		},
+		MaxPlainInstructions: -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := plan.FunctionPlan(target); !ok || got.FuncRep != coro.Dispatch ||
+		got.Emission != coro.EmitPlain || got.Primary != coro.PrimaryPlain || got.Effect != coro.NoSuspend {
+		t.Fatalf("stored static target plan = %+v, present=%v; want Dispatch representation with one plain body", got, ok)
+	}
+	if err := validateCoroUnwindOnlyLoweredCalls(plan, coro.PanicLegacyABIV0); err != nil {
+		t.Fatalf("exact static edge to Dispatch-represented plain body rejected: %v", err)
+	}
+}
+
 func TestActiveCoroABIVersions(t *testing.T) {
 	tests := []struct {
 		name      string
