@@ -234,12 +234,96 @@ func nilinterequal(p, q unsafe.Pointer) bool {
 	y := *(*eface)(q)
 	return x._type == y._type && efaceeq(x._type, x.data, y.data)
 }
+
+// typeequal compares the values of type t at p and q without calling the
+// equality callback stored in t. LLGo emits those callbacks in runtime type
+// descriptors for compatibility with the Go ABI, but a callback invocation is
+// an opaque indirect call to coroutine analysis. The descriptor itself carries
+// all information needed to perform the same comparison with static calls.
+//
+// Keep this in step with typehash above: map keys accepted by typehash must use
+// the same equality relation here. In particular, floating-point zeroes compare
+// equal, NaNs compare unequal, blank struct fields are ignored, and comparing
+// an interface containing an uncomparable value panics.
+func typeequal(t *_type, p, q unsafe.Pointer) bool {
+	if t.TFlag&abi.TFlagRegularMemory != 0 {
+		return memequal(p, q, t.Size_, t.Align_)
+	}
+
+	switch t.Kind() {
+	case abi.Bool, abi.Int8, abi.Uint8:
+		return memequal8(p, q)
+	case abi.Int16, abi.Uint16:
+		return memequal16(p, q)
+	case abi.Int32, abi.Uint32:
+		return memequal32(p, q)
+	case abi.Int64, abi.Uint64:
+		return memequal64(p, q)
+	case abi.Int, abi.Uint, abi.Uintptr:
+		return memequal(p, q, t.Size_, t.Align_)
+	case abi.Float32:
+		return f32equal(p, q)
+	case abi.Float64:
+		return f64equal(p, q)
+	case abi.Complex64:
+		return c64equal(p, q)
+	case abi.Complex128:
+		return c128equal(p, q)
+	case abi.Chan, abi.Pointer, abi.UnsafePointer:
+		return memequalptr(p, q)
+	case abi.String:
+		return strequal(p, q)
+	case abi.Interface:
+		i := (*interfacetype)(unsafe.Pointer(t))
+		if len(i.Methods) == 0 {
+			return nilinterequal(p, q)
+		}
+		return interequal(p, q)
+	case abi.Array:
+		return arrayequal(unsafe.Pointer(t), p, q)
+	case abi.Struct:
+		return structequal(unsafe.Pointer(t), p, q)
+	default:
+		panic(errorString("comparing uncomparable type " + t.Str_))
+	}
+}
+
+func memequal(p, q unsafe.Pointer, size uintptr, align uint8) bool {
+	switch size {
+	case 0:
+		return true
+	case 1:
+		return memequal8(p, q)
+	case 2:
+		if align >= 2 {
+			return memequal16(p, q)
+		}
+	case 4:
+		if align >= 4 {
+			return memequal32(p, q)
+		}
+	case 8:
+		if align >= 8 {
+			return memequal64(p, q)
+		}
+	case 16:
+		if align >= 8 {
+			return memequal128(p, q)
+		}
+	}
+	for i := uintptr(0); i < size; i++ {
+		if *(*byte)(add(p, i)) != *(*byte)(add(q, i)) {
+			return false
+		}
+	}
+	return true
+}
+
 func efaceeq(t *_type, x, y unsafe.Pointer) bool {
 	if t == nil {
 		return true
 	}
-	eq := t.Equal
-	if eq == nil {
+	if t.Equal == nil {
 		panic(errorString("comparing uncomparable type " + t.Str_))
 	}
 	if isDirectIface(t) {
@@ -248,22 +332,21 @@ func efaceeq(t *_type, x, y unsafe.Pointer) bool {
 		// Ptrs, chans, and single-element items can be compared directly using ==.
 		return x == y
 	}
-	return eq(x, y)
+	return typeequal(t, x, y)
 }
 func ifaceeq(tab *itab, x, y unsafe.Pointer) bool {
 	if tab == nil {
 		return true
 	}
 	t := tab._type
-	eq := t.Equal
-	if eq == nil {
+	if t.Equal == nil {
 		panic(errorString("comparing uncomparable type " + t.Str_))
 	}
 	if isDirectIface(t) {
 		// See comment in efaceeq.
 		return x == y
 	}
-	return eq(x, y)
+	return typeequal(t, x, y)
 }
 
 func structFieldsHaveCheapMismatch(fields []structfield, p, q unsafe.Pointer) bool {
@@ -287,7 +370,7 @@ func typeHasCheapMismatch(t *_type, p, q unsafe.Pointer) bool {
 		abi.Uint, abi.Uint8, abi.Uint16, abi.Uint32, abi.Uint64, abi.Uintptr,
 		abi.Float32, abi.Float64, abi.Complex64, abi.Complex128,
 		abi.Pointer, abi.Chan, abi.UnsafePointer:
-		return !t.Equal(p, q)
+		return !typeequal(t, p, q)
 	case abi.String:
 		return len(*(*string)(p)) != len(*(*string)(q))
 	case abi.Struct:
@@ -343,7 +426,7 @@ func structequal(t, p, q unsafe.Pointer) bool {
 			}
 			pi := add(p, ft.Offset)
 			qi := add(q, ft.Offset)
-			if !ft.Typ.Equal(pi, qi) {
+			if !typeequal(ft.Typ, pi, qi) {
 				return false
 			}
 		}
@@ -358,7 +441,7 @@ func structequal(t, p, q unsafe.Pointer) bool {
 		}
 		pi := add(p, ft.Offset)
 		qi := add(q, ft.Offset)
-		if !ft.Typ.Equal(pi, qi) {
+		if !typeequal(ft.Typ, pi, qi) {
 			return false
 		}
 	}
@@ -371,7 +454,7 @@ func arrayequal(t, p, q unsafe.Pointer) bool {
 	for i := uintptr(0); i < x.Len; i++ {
 		pi := add(p, i*elem.Size_)
 		qi := add(q, i*elem.Size_)
-		if !elem.Equal(pi, qi) {
+		if !typeequal(elem, pi, qi) {
 			return false
 		}
 	}
