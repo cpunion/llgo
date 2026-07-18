@@ -2079,7 +2079,14 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 				ret = p.zeroResult(results)
 			}
 		case llgoSyscall:
-			ret = p.syscallIntrinsic(b, args, call.Signature().Results())
+			if p.currentCoro != nil && p.compilation != nil && p.compilation.EnableCoroWorker {
+				if act != llssa.Call || ds != nil {
+					panic("coroutine llgo.syscall requires an exact direct call")
+				}
+				ret = p.compileCoroWorkerSyscall(b, args, call.Signature().Results())
+			} else {
+				ret = p.syscallIntrinsic(b, args, call.Signature().Results())
+			}
 		case llgoBoolToUint8:
 			args := p.compileValues(b, args, kind)
 			ret = b.Do(act, llssa.Nil, func(b llssa.Builder, _ llssa.Expr, args ...llssa.Expr) llssa.Expr {

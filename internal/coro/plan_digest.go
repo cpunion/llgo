@@ -54,21 +54,34 @@ const (
 	// contract. It still does not claim spawn, park, timers, or a production
 	// source of concurrent runnable Gs.
 	SchedulerProgramBootstrapABIV2 = "llgo.coro.scheduler.program-bootstrap.v2"
+	// SchedulerProgramBootstrapWorkerABIV0 adds the bounded native foreign-call
+	// worker source and its prepare/suspend/resume transaction. It keeps the
+	// synchronous Go source API while ensuring a blocking call never owns P.
+	SchedulerProgramBootstrapWorkerABIV0 = "llgo.coro.scheduler.program-bootstrap.v2.worker.v0"
 	// SchedulerProgramBootstrapChannelABIV0 adds the exact single-channel
 	// fast-attempt/park/resume transaction and terminal send-closed status to
 	// the runnable v2 scheduler. Channel payload storage remains in the LLVM
 	// coroutine frame; no Future/Task object is introduced.
 	SchedulerProgramBootstrapChannelABIV0 = "llgo.coro.scheduler.program-bootstrap.v2.channel.v0"
+	// SchedulerProgramBootstrapChannelWorkerABIV0 is the explicit combined
+	// identity when channel and worker operation sources are both enabled.
+	SchedulerProgramBootstrapChannelWorkerABIV0 = "llgo.coro.scheduler.program-bootstrap.v2.channel.v0.worker.v0"
 	// SchedulerProgramBootstrapClosedStaticSpawnABIV0 is the explicit superset
 	// of SchedulerProgramBootstrapABIV2 that adds compiler-owned begin/commit
 	// for one exact closed static `go f(args)` target and normal-main-return
 	// cancellation. The runtime never receives a user callback; the compiler
 	// creates the child only to its initial suspend before commit.
 	SchedulerProgramBootstrapClosedStaticSpawnABIV0 = "llgo.coro.scheduler.program-bootstrap.v2.closed-static-spawn.v0"
+	// SchedulerProgramBootstrapWorkerClosedStaticSpawnABIV0 combines the
+	// bounded worker source with closed static spawn.
+	SchedulerProgramBootstrapWorkerClosedStaticSpawnABIV0 = "llgo.coro.scheduler.program-bootstrap.v2.worker.v0.closed-static-spawn.v0"
 	// SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0 is the explicit
 	// combined identity when both independently gated capabilities are active.
 	SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0 = "llgo.coro.scheduler.program-bootstrap.v2.channel.v0.closed-static-spawn.v0"
-	PanicLegacyABIV0                                       = "llgo.coro.panic.legacy.v0"
+	// SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0 is the
+	// complete identity for all three independently gated scheduler sources.
+	SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0 = "llgo.coro.scheduler.program-bootstrap.v2.channel.v0.worker.v0.closed-static-spawn.v0"
+	PanicLegacyABIV0                                             = "llgo.coro.panic.legacy.v0"
 	// PanicExplicitStatusABIV0 reserves the target-wide identity for the first
 	// compiler-carried panic outcome ABI. The identity is intentionally wired
 	// before its lowering and runtime protocol: selecting it must remain
@@ -434,8 +447,12 @@ func (m PlanDigestMetadata) validate() error {
 	case FrameRetentionTimerABIV1:
 		if m.CoroABI != PhysicalABIV1 ||
 			(m.SchedulerABI != SchedulerProgramBootstrapABIV2 &&
+				m.SchedulerABI != SchedulerProgramBootstrapWorkerABIV0 &&
 				m.SchedulerABI != SchedulerProgramBootstrapClosedStaticSpawnABIV0 &&
+				m.SchedulerABI != SchedulerProgramBootstrapWorkerClosedStaticSpawnABIV0 &&
 				m.SchedulerABI != SchedulerProgramBootstrapChannelABIV0 &&
+				m.SchedulerABI != SchedulerProgramBootstrapChannelWorkerABIV0 &&
+				m.SchedulerABI != SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0 &&
 				m.SchedulerABI != SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0) {
 			return fmt.Errorf("coro: plan digest frame-retention ABI %q requires PhysicalABIV1 runnable program-bootstrap metadata", m.FrameRetentionABI)
 		}

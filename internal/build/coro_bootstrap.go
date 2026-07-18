@@ -60,6 +60,8 @@ const (
 	coroChanRecvParkSymbolV1                                    = "__llgo_coro_chan_recv_park_v1"
 	coroChanResumeSymbolV1                                      = "__llgo_coro_chan_resume_v1"
 	coroChanSendClosedPanicSymbolV1                             = "__llgo_coro_chan_send_closed_panic_v1"
+	coroWorkerParkSymbolV1                                      = "__llgo_coro_worker_park_v1"
+	coroWorkerResumeSymbolV1                                    = "__llgo_coro_worker_resume_v1"
 
 	// Step kinds and semantic roles are part of the cross-target bootstrap ABI.
 	// Keep these numeric values synchronized with ssa and runtime/internal/coro.
@@ -125,6 +127,9 @@ func validateCoroProgramBootstrapConfig(conf *Config) error {
 	}
 	if conf.EnableCoroChannel && !conf.EnableCoroProgramBootstrapRun {
 		return fmt.Errorf("enable coroutine channel lowering: runnable program bootstrap is required")
+	}
+	if conf.EnableCoroWorker && !conf.EnableCoroProgramBootstrapRun {
+		return fmt.Errorf("enable coroutine worker lowering: runnable program bootstrap is required")
 	}
 	if !conf.EnableCoroProgramBootstrapABI {
 		return nil
@@ -678,6 +683,11 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 				coroChanRecvParkSymbolV1 + "(g:ptr,handle:ptr,header:ptr,channel:ptr,elem:ptr,state:ptr,size:uintptr)->void;" +
 				coroChanResumeSymbolV1 + "(g:ptr,state:ptr)->u32;" +
 				coroChanSendClosedPanicSymbolV1 + "(g:ptr,handle:ptr,header:ptr)->void")
+		}
+		if ctx.buildConf.EnableCoroWorker {
+			write("worker-v1=" +
+				coroWorkerParkSymbolV1 + "(g:ptr,handle:ptr,header:ptr,state:ptr,fn:uintptr,argc:u32,a0:uintptr,a1:uintptr,a2:uintptr,a3:uintptr,a4:uintptr,a5:uintptr)->void;" +
+				coroWorkerResumeSymbolV1 + "(g:ptr,state:ptr,r1:*uintptr,r2:*uintptr,errno:*uintptr)->u32")
 		}
 		write("header=physical-abi-v1")
 	} else {

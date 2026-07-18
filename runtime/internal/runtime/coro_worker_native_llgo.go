@@ -105,8 +105,6 @@ func coroNativeWorkerPoolResetV1(state *coroNativeWorkerPoolV1) {
 // implementation is GC_pthread_create for collecting builds and pthread_create
 // for nogc builds. Threads remain joinable and are strongly joined at target
 // close; none is created per G or per operation.
-//
-//llgo:coro noblock
 func coroNativeWorkerPoolStartV1(handle coro.ExecutorHandle) bool {
 	state := &coroNativeWorkerPoolV1State
 	if !coroNativeWorkerPoolCanReleaseV1() || !coroProgramExecutorBoundV1State ||
@@ -153,8 +151,6 @@ func coroNativeWorkerPoolStartV1(handle coro.ExecutorHandle) bool {
 // The single owner may retain at most one reservation while it prepares the
 // matching Worker ParkState. Consumers only remove jobs, so this capacity
 // cannot disappear before SubmitReserved commits it.
-//
-//llgo:coro noblock
 func coroNativeWorkerPoolReserveV1(handle coro.ExecutorHandle) bool {
 	state := &coroNativeWorkerPoolV1State
 	if !state.started || state.handle != handle || state.mutex.TryLock() != 0 {
@@ -168,7 +164,6 @@ func coroNativeWorkerPoolReserveV1(handle coro.ExecutorHandle) bool {
 	return ok
 }
 
-//llgo:coro noblock
 func coroNativeWorkerPoolCancelReservationV1(handle coro.ExecutorHandle) bool {
 	state := &coroNativeWorkerPoolV1State
 	if !state.started || state.handle != handle {
@@ -187,8 +182,6 @@ func coroNativeWorkerPoolCancelReservationV1(handle coro.ExecutorHandle) bool {
 // made the exact source generation submitted. The earlier reservation makes a
 // full queue impossible; any rejection after that point is a fatal invariant,
 // not ordinary backpressure.
-//
-//llgo:coro noblock
 func coroNativeWorkerPoolSubmitReservedV1(
 	handle coro.ExecutorHandle,
 	id coro.OperationID,
@@ -258,7 +251,6 @@ func coroNativeWorkerFinishRunningV1(state *coroNativeWorkerPoolV1) bool {
 	return true
 }
 
-//llgo:coro noblock
 func coroNativeWorkerCompleteV1(handle coro.ExecutorHandle, job coroNativeWorkerJobV1) bool {
 	var result coroworker.Result
 	if !job.valid() || !coroworker.Call(job.function, job.argc, &job.args, &result) {
@@ -283,8 +275,6 @@ func coroNativeWorkerCompleteV1(handle coro.ExecutorHandle, job coroNativeWorker
 // coroNativeWorkerMainV1 is an ordinary fixed-stack pthread routine. Its
 // foreign call may block, but it is deliberately outside every LLVM coroutine
 // and must never be transformed into another scheduler continuation.
-//
-//llgo:coro noblock
 func coroNativeWorkerMainV1(c.Pointer) c.Pointer {
 	state := &coroNativeWorkerPoolV1State
 	for {
@@ -306,8 +296,6 @@ func coroNativeWorkerMainV1(c.Pointer) c.Pointer {
 // coroNativeWorkerPoolStopV1 seals submission, wakes all idle workers, drains
 // any already committed jobs, and joins every GC-registered/native pthread.
 // It returns only when no worker can still touch the source or target ingress.
-//
-//llgo:coro noblock
 func coroNativeWorkerPoolStopV1(handle coro.ExecutorHandle) bool {
 	state := &coroNativeWorkerPoolV1State
 	if !state.started || state.handle != handle || state.created != coroNativeWorkerThreadCountV1 {

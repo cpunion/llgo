@@ -220,6 +220,9 @@ func (c *Compilation) preflightCoroPlan() error {
 	if c.EnableCoroChannel && (!c.EnableCoroChildAwait || !c.EnableCoroProgramBootstrapRun) {
 		return fmt.Errorf("coroutine channel lowering requires runnable PhysicalABIV1 program-bootstrap lowering")
 	}
+	if c.EnableCoroWorker && (!c.EnableCoroChildAwait || !c.EnableCoroProgramBootstrapRun) {
+		return fmt.Errorf("coroutine worker lowering requires runnable PhysicalABIV1 program-bootstrap lowering")
+	}
 	if c.EnableCoroPlainDispatch && !c.EnableCoroEntryResolution {
 		return fmt.Errorf("coroutine plain dispatch requires coroutine entry resolution")
 	}
@@ -255,6 +258,10 @@ func (c *Compilation) preflightCoroPlan() error {
 		}
 		if c.EmissionUniverse.CoroChannelEnabled() != c.EnableCoroChannel {
 			c.coroPreflightErr = fmt.Errorf("coroutine channel lowering disagrees with the prepared emission universe")
+			return
+		}
+		if c.EmissionUniverse.CoroWorkerEnabled() != c.EnableCoroWorker {
+			c.coroPreflightErr = fmt.Errorf("coroutine worker lowering disagrees with the prepared emission universe")
 			return
 		}
 		if err := c.EmissionUniverse.ValidateCoroPlan(c.CoroPlan); err != nil {

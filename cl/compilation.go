@@ -92,6 +92,10 @@ type Compilation struct {
 	// on the runnable scheduler. It requires PhysicalABIV1 program bootstrap and
 	// is independently fingerprinted from child-await, spawn, and timer support.
 	EnableCoroChannel bool
+	// EnableCoroWorker enables the bounded ForeignWait operation recipe used by
+	// exact uintptr-only llgo.syscall sites. It requires the runnable scheduler;
+	// the blocking foreign call executes only on a fixed native worker pool.
+	EnableCoroWorker bool
 	// CoroFrameRetentionABI selects one compiler/runtime-owned contract under
 	// which x/tools Heap Allocs may be re-proved as current LLVM coroutine-frame
 	// storage. The zero value preserves the ordinary managed-allocation rule.
@@ -141,6 +145,16 @@ func (c *Compilation) validateCoroABIIdentity(required bool) error {
 		}
 		wantSchedulerABI = coro.SchedulerProgramBootstrapChannelABIV0
 	}
+	if c.EnableCoroWorker {
+		if !c.EnableCoroChildAwait || !c.EnableCoroProgramBootstrapRun {
+			return fmt.Errorf("coroutine worker lowering requires runnable PhysicalABIV1 program-bootstrap lowering")
+		}
+		if c.EnableCoroChannel {
+			wantSchedulerABI = coro.SchedulerProgramBootstrapChannelWorkerABIV0
+		} else {
+			wantSchedulerABI = coro.SchedulerProgramBootstrapWorkerABIV0
+		}
+	}
 	if c.EnableCoroClosedStaticSpawn {
 		if !c.EnableCoroChildAwait {
 			return fmt.Errorf("coroutine closed static spawn requires child-await lowering")
@@ -148,8 +162,12 @@ func (c *Compilation) validateCoroABIIdentity(required bool) error {
 		if !c.EnableCoroProgramBootstrapRun {
 			return fmt.Errorf("coroutine closed static spawn requires the runnable program-bootstrap v2 scheduler")
 		}
-		if c.EnableCoroChannel {
+		if c.EnableCoroChannel && c.EnableCoroWorker {
+			wantSchedulerABI = coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0
+		} else if c.EnableCoroChannel {
 			wantSchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+		} else if c.EnableCoroWorker {
+			wantSchedulerABI = coro.SchedulerProgramBootstrapWorkerClosedStaticSpawnABIV0
 		} else {
 			wantSchedulerABI = coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0
 		}
@@ -157,7 +175,7 @@ func (c *Compilation) validateCoroABIIdentity(required bool) error {
 		if !c.EnableCoroChildAwait {
 			return fmt.Errorf("coroutine program bootstrap runtime requires child-await lowering")
 		}
-		if !c.EnableCoroChannel {
+		if !c.EnableCoroChannel && !c.EnableCoroWorker {
 			wantSchedulerABI = coro.SchedulerProgramBootstrapABIV2
 		}
 	}

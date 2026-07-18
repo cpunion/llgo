@@ -937,8 +937,12 @@ type Config struct {
 	// program bootstrap and freezes its runtime hooks/helper edges before plan
 	// analysis and package caching.
 	EnableCoroChannel bool
-	CoroPlanBuilder   CoroPlanBuilder
-	CoroPlanObserver  CoroPlanObserver
+	// EnableCoroWorker enables the bounded native worker source and the exact
+	// uintptr-only llgo.syscall suspend/resume lowering. Source code keeps the
+	// ordinary synchronous syscall/file/network calling style.
+	EnableCoroWorker bool
+	CoroPlanBuilder  CoroPlanBuilder
+	CoroPlanObserver CoroPlanObserver
 
 	// compilerBuildTags is a compiler-owned channel for isolated runtime-island
 	// builds that deliberately do not enable the complete program-bootstrap
@@ -1472,6 +1476,11 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 			return fmt.Errorf("enable coroutine channel lowering: runnable PhysicalABIV1 program bootstrap is required")
 		}
 	}
+	if ctx.buildConf.EnableCoroWorker {
+		if !ctx.buildConf.EnableCoroChildAwait || !ctx.buildConf.EnableCoroProgramBootstrapRun {
+			return fmt.Errorf("enable coroutine worker lowering: runnable PhysicalABIV1 program bootstrap is required")
+		}
+	}
 	if ctx.buildConf.EnableCoroPlainDispatch && !ctx.buildConf.EnableCoroEntryResolution {
 		return fmt.Errorf("enable coroutine plain dispatch: coroutine entry resolution is required")
 	}
@@ -1609,6 +1618,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		EnableCoroClosedStaticSpawn:      ctx.buildConf.EnableCoroClosedStaticSpawn,
 		EnableCoroProgramBootstrapRun:    ctx.buildConf.EnableCoroProgramBootstrapRun,
 		EnableCoroChannel:                ctx.buildConf.EnableCoroChannel,
+		EnableCoroWorker:                 ctx.buildConf.EnableCoroWorker,
 		CoroFrameRetentionABI:            frameRetentionABI,
 		CoroPlanDigest:                   digest,
 		CoroABI:                          metadata.CoroABI,
@@ -1913,13 +1923,25 @@ func requiredCoroProgramManagedEntryRoots(ctx *context) (coro.Roots, error) {
 
 func activeCoroSchedulerABIVersion(conf *Config) string {
 	if conf != nil && conf.EnableCoroClosedStaticSpawn {
+		if conf.EnableCoroChannel && conf.EnableCoroWorker {
+			return coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0
+		}
 		if conf.EnableCoroChannel {
 			return coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 		}
+		if conf.EnableCoroWorker {
+			return coro.SchedulerProgramBootstrapWorkerClosedStaticSpawnABIV0
+		}
 		return coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0
+	}
+	if conf != nil && conf.EnableCoroChannel && conf.EnableCoroWorker {
+		return coro.SchedulerProgramBootstrapChannelWorkerABIV0
 	}
 	if conf != nil && conf.EnableCoroChannel {
 		return coro.SchedulerProgramBootstrapChannelABIV0
+	}
+	if conf != nil && conf.EnableCoroWorker {
+		return coro.SchedulerProgramBootstrapWorkerABIV0
 	}
 	if conf != nil && conf.EnableCoroProgramBootstrapRun {
 		return coro.SchedulerProgramBootstrapABIV2
@@ -2083,6 +2105,9 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			coroWaitRollbackSymbolV1,
 			coroWaitRetireCompletedSymbolV1,
 		)
+	}
+	if ctx.buildConf.EnableCoroWorker {
+		names = append(names, coroWorkerParkSymbolV1, coroWorkerResumeSymbolV1)
 	}
 	if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
 		names = append(names, coroNativePostWaitSymbolV1)
@@ -2693,6 +2718,7 @@ func prepareCoroEmissionUniverse(ctx *context, packages []*aPackage) error {
 		// and report-only builds preserve the legacy incomplete-package behavior.
 		CompleteRuntimeABI: hasRuntimeABI && ctx.buildConf != nil && ctx.buildConf.EnableCoroEntryResolution,
 		EnableCoroChannel:  ctx.buildConf != nil && ctx.buildConf.EnableCoroChannel,
+		EnableCoroWorker:   ctx.buildConf != nil && ctx.buildConf.EnableCoroWorker,
 	})
 	if err != nil {
 		return err

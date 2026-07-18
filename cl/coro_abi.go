@@ -375,7 +375,7 @@ func (p *context) beginCoroBody(b llssa.Builder, abi coroPhysicalABI) *coroBodyC
 		body.runDecisionTakeZero = p.pkg.NewFunc(
 			abi.runDecisionTakeZeroHook, coroRunDecisionTakeZeroSignature(), llssa.InC,
 		).Expr
-		if p.compilation != nil && p.compilation.EnableCoroChannel {
+		if p.compilation != nil && (p.compilation.EnableCoroChannel || p.compilation.EnableCoroWorker) {
 			body.unsupportedRunDecision = p.fn.MakeBlock()
 			body.runDecisionTrap = p.pkg.NewFunc(
 				"llvm.trap", types.NewSignatureType(nil, nil, nil, nil, nil, false), llssa.InC,

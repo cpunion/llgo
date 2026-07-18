@@ -58,6 +58,11 @@ type EmissionUniverseOptions struct {
 	// EnableCoroChannel freezes the alternate nonblocking runtime-helper edges
 	// used by physical channel operations. It must match Compilation exactly.
 	EnableCoroChannel bool
+	// EnableCoroWorker freezes the llgo.syscall call-site contract as one
+	// compiler-owned worker operation in the current coroutine frame. The
+	// declaration call is erased only for the exact uintptr-only V1 shape; all
+	// wider/typed syscall forms remain fail-closed.
+	EnableCoroWorker bool
 }
 
 type preparedEmissionPackage struct {
@@ -88,6 +93,7 @@ type EmissionUniverse struct {
 	patches            Patches
 	completeRuntimeABI bool
 	enableCoroChannel  bool
+	enableCoroWorker   bool
 	packages           map[*ssa.Package]*preparedEmissionPackage
 	byTypes            map[*types.Package]*preparedEmissionPackage
 	typesDup           map[*types.Package]bool
@@ -230,6 +236,7 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		patches:             patches,
 		completeRuntimeABI:  options.CompleteRuntimeABI,
 		enableCoroChannel:   options.EnableCoroChannel,
+		enableCoroWorker:    options.EnableCoroWorker,
 		packages:            make(map[*ssa.Package]*preparedEmissionPackage, len(inputs)),
 		byTypes:             make(map[*types.Package]*preparedEmissionPackage, len(inputs)*3),
 		typesDup:            make(map[*types.Package]bool),
@@ -447,6 +454,12 @@ func (u *EmissionUniverse) CompleteRuntimeABI() bool {
 // while the emission universe was prepared.
 func (u *EmissionUniverse) CoroChannelEnabled() bool {
 	return u != nil && u.enableCoroChannel
+}
+
+// CoroWorkerEnabled reports the immutable worker-lowering choice frozen
+// while the emission universe was prepared.
+func (u *EmissionUniverse) CoroWorkerEnabled() bool {
+	return u != nil && u.enableCoroWorker
 }
 
 // Functions returns canonical required functions in deterministic order.
@@ -831,6 +844,23 @@ func (u *EmissionUniverse) CoroIntrinsicCallSiteSemantics(call ssa.CallInstructi
 	if err != nil || !intrinsic {
 		return CoroIntrinsicCallUnsupported, intrinsic, err
 	}
+	if opcode == llgoSyscall && u.enableCoroWorker {
+		direct, ok := call.(*ssa.Call)
+		if !ok || direct.Common() == nil || direct.Common().IsInvoke() {
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: worker llgo.syscall must be an exact direct call",
+			)
+		}
+		if err := validateCoroWorkerSyscallIntrinsicCallSite(direct); err != nil {
+			// llgo.syscall also owns wider and typed synchronous intrinsic
+			// families (for example Darwin's float64 and 9-word forms). They
+			// remain valid plain lowering sites, but are not worker operations.
+			// If one becomes reachable from a coroutine, the physical ABI
+			// validator rejects its retained conservative call edge.
+			return CoroIntrinsicCallUnsupported, true, nil
+		}
+		return CoroIntrinsicCallInlineSuspend, true, nil
+	}
 	semantics = coroIntrinsicCallSemantics(opcode)
 	if !semantics.ElidesManagedCall() {
 		return semantics, true, nil
@@ -1071,6 +1101,51 @@ func (u *EmissionUniverse) CoroIntrinsicCallSiteSemantics(call ssa.CallInstructi
 			"emission universe intrinsic call semantics: inline intrinsic %q has no exact call-site verifier", callee.Name(),
 		)
 	}
+}
+
+const coroWorkerMaxArgsV1 = 6
+
+func validateCoroWorkerSyscallIntrinsicCallSite(call *ssa.Call) error {
+	if call == nil || call.Common() == nil || call.Common().IsInvoke() {
+		return fmt.Errorf("emission universe intrinsic call semantics: worker llgo.syscall must be an exact direct call")
+	}
+	common := call.Common()
+	signature := common.Signature()
+	if signature == nil || signature.Recv() != nil || signature.Variadic() || signature.Params() == nil ||
+		signature.Params().Len() != len(common.Args) || len(common.Args) < 1 || len(common.Args)-1 > coroWorkerMaxArgsV1 {
+		return fmt.Errorf(
+			"emission universe intrinsic call semantics: worker llgo.syscall call %q requires one function word and zero to %d argument words",
+			call.String(), coroWorkerMaxArgsV1,
+		)
+	}
+	uintptrLike := func(typ types.Type) bool {
+		basic, ok := types.Unalias(typ).Underlying().(*types.Basic)
+		return ok && basic.Kind() == types.Uintptr
+	}
+	for index, argument := range common.Args {
+		if argument == nil || !uintptrLike(argument.Type()) || !uintptrLike(signature.Params().At(index).Type()) {
+			return fmt.Errorf(
+				"emission universe intrinsic call semantics: worker llgo.syscall call %q argument %d is not uintptr-shaped",
+				call.String(), index,
+			)
+		}
+	}
+	results := signature.Results()
+	if results == nil || results.Len() != 3 {
+		return fmt.Errorf(
+			"emission universe intrinsic call semantics: worker llgo.syscall call %q requires exactly three uintptr results",
+			call.String(),
+		)
+	}
+	for index := 0; index < results.Len(); index++ {
+		if !uintptrLike(results.At(index).Type()) {
+			return fmt.Errorf(
+				"emission universe intrinsic call semantics: worker llgo.syscall call %q result %d is not uintptr-shaped",
+				call.String(), index,
+			)
+		}
+	}
+	return nil
 }
 
 // CoroRawFunctionAddressCallArgument reports the one exact call argument that
