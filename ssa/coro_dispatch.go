@@ -26,17 +26,21 @@ import (
 	"github.com/xgo-dev/llvm"
 )
 
-// Coro plain-dispatch version and capability flags are linker-visible ABI.
-// HasCoro is reserved by v1 even though the first production slice emits only
-// the exact HasPlain|NoCapture capability set.
-const CoroPlainDispatchVersionV1 uint32 = 1
+// Coroutine dynamic-dispatch versions and capability flags are linker-visible
+// ABI. CoroPlainDispatchVersionV1 remains the compatibility name used by the
+// first plain-only frontend slice.
+const CoroDispatchVersionV1 uint32 = 1
+
+const CoroPlainDispatchVersionV1 = CoroDispatchVersionV1
 
 const (
 	CoroDispatchFlagHasPlain uint32 = 1 << iota
 	CoroDispatchFlagHasCoro
 	CoroDispatchFlagNoCapture
 
-	CoroPlainDispatchFlagsV1 = CoroDispatchFlagHasPlain | CoroDispatchFlagNoCapture
+	CoroDispatchCapabilityMaskV1 = CoroDispatchFlagHasPlain | CoroDispatchFlagHasCoro
+	CoroDispatchKnownFlagsV1     = CoroDispatchCapabilityMaskV1 | CoroDispatchFlagNoCapture
+	CoroPlainDispatchFlagsV1     = CoroDispatchFlagHasPlain | CoroDispatchFlagNoCapture
 )
 
 const coroPlainDispatchThunkPrefix = "__llgo_coro_func_plain_v1."
@@ -148,23 +152,10 @@ func (p Package) NewCoroPlainDispatchDescriptor(
 	}
 
 	thunk := p.newCoroPlainDispatchThunk(opts.ThunkName, opts.PlainTarget, physicalSig)
-	descriptorType := p.Prog.coroPlainDispatchDescriptorType()
-	descriptor := p.NewVarEx(name, p.Prog.Pointer(descriptorType))
-	fields := []llvm.Value{
-		p.Prog.IntVal(uint64(opts.Version), p.Prog.Uint32()).impl,
-		p.Prog.IntVal(uint64(opts.Flags), p.Prog.Uint32()).impl,
-		p.Prog.IntVal(binary.BigEndian.Uint64(opts.ABIHash[:8]), p.Prog.Uint64()).impl,
-		p.Prog.IntVal(binary.BigEndian.Uint64(opts.ABIHash[8:]), p.Prog.Uint64()).impl,
-		thunk.impl,
-		p.Prog.Nil(p.Prog.VoidPtr()).impl,
-		p.Prog.IntVal(p.Prog.SizeOf(opts.Result), p.Prog.Uintptr()).impl,
-		p.Prog.IntVal(p.Prog.AlignOf(opts.Result), p.Prog.Uintptr()).impl,
-	}
-	descriptor.impl.SetInitializer(p.Prog.ctx.ConstStruct(fields, false))
-	descriptor.impl.SetGlobalConstant(true)
-	descriptor.impl.SetLinkage(llvm.LinkOnceODRLinkage)
-	descriptor.impl.SetUnnamedAddr(true)
-	return descriptor.Expr
+	return p.newCoroDispatchDescriptorGlobal(
+		name, opts.Version, opts.Flags, opts.ABIHash,
+		thunk.impl, llvm.Value{}, opts.Result,
+	)
 }
 
 // MakeCoroPlainDispatchValue constructs the canonical two-pointer function
@@ -229,7 +220,7 @@ func (b Builder) CallCoroPlainDispatch(
 	envNonNil.SetName("coro.dispatch.env.nonnull")
 	b.coroPlainDispatchTrapIf(envNonNil)
 
-	descriptorType := b.Prog.coroPlainDispatchDescriptorType()
+	descriptorType := b.Prog.coroDispatchDescriptorType()
 	descriptorPtr := Expr{descriptorWord.impl, b.Prog.Pointer(descriptorType)}
 	descriptor := b.Load(descriptorPtr)
 	fields := make([]Expr, 8)
@@ -283,7 +274,7 @@ func (b Builder) CallCoroPlainDispatch(
 	return
 }
 
-func (p Program) coroPlainDispatchDescriptorType() Type {
+func (p Program) coroDispatchDescriptorType() Type {
 	return p.Struct(
 		p.Uint32(),
 		p.Uint32(),
@@ -312,6 +303,10 @@ func (p Package) newCoroPlainDispatchThunk(
 }
 
 func (p Package) isCoroPlainDispatchDescriptor(descriptor Expr) bool {
+	return p.isCoroDispatchDescriptor(descriptor)
+}
+
+func (p Package) isCoroDispatchDescriptor(descriptor Expr) bool {
 	if descriptor.IsNil() || descriptor.kind != vkPtr ||
 		!descriptor.impl.IsAConstantPointerNull().IsNil() {
 		return false
@@ -321,7 +316,7 @@ func (p Package) isCoroPlainDispatchDescriptor(descriptor Expr) bool {
 		!global.IsGlobalConstant() || global.Linkage() != llvm.LinkOnceODRLinkage {
 		return false
 	}
-	want := p.Prog.Pointer(p.Prog.coroPlainDispatchDescriptorType())
+	want := p.Prog.Pointer(p.Prog.coroDispatchDescriptorType())
 	return types.Identical(descriptor.RawType(), want.RawType())
 }
 
