@@ -145,6 +145,9 @@ func TestTypeEqualStaticInterface(t *testing.T) {
 	if !typeequal(&interfaceType.Type, unsafe.Pointer(&a), unsafe.Pointer(&b)) {
 		t.Fatal("interfaces containing equal ints compare unequal")
 	}
+	if !EfaceEqual(a, b) {
+		t.Fatal("EfaceEqual reports equal ints as unequal")
+	}
 
 	sliceType := &abi.Type{
 		Size_: unsafe.Sizeof([]int(nil)),
@@ -158,5 +161,5 @@ func TestTypeEqualStaticInterface(t *testing.T) {
 			t.Fatal("comparing an interface containing a slice did not panic")
 		}
 	}()
-	typeequal(&interfaceType.Type, unsafe.Pointer(&u), unsafe.Pointer(&u))
+	EfaceEqual(u, u)
 }

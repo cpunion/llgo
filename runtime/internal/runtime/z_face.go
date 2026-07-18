@@ -318,14 +318,13 @@ func EfaceEqual(v, u eface) bool {
 	if v._type != u._type {
 		return false
 	}
-	equal := v._type.Equal
-	if equal == nil {
+	if v._type.Equal == nil {
 		panic(errorString("comparing uncomparable type " + v._type.String()))
 	}
 	if isDirectIface(v._type) {
 		return v.data == u.data
 	}
-	return equal(v.data, u.data)
+	return typeequal(v._type, v.data, u.data)
 }
 
 func (v eface) Kind() abi.Kind {
