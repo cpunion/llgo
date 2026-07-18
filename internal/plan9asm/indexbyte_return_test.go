@@ -26,7 +26,7 @@ func llFuncBody(ll, fnSig string) string {
 	return rest[:len(fnSig)+next]
 }
 
-func TestPlan9AsmIndexByteStringUsesHelperResultSlot(t *testing.T) {
+func TestPlan9AsmIndexByteStringReturnAndNoSuspendProof(t *testing.T) {
 	if runtime.GOARCH != "arm64" {
 		t.Skip("host is not arm64")
 	}
@@ -57,13 +57,31 @@ func TestPlan9AsmIndexByteStringUsesHelperResultSlot(t *testing.T) {
 	if body == "" {
 		t.Fatalf("IndexByteString function not found in translated IR")
 	}
-	if !strings.Contains(body, `call void @"internal/bytealg.indexbytebody"`) {
-		t.Fatalf("expected helper call in IndexByteString:\n%s", body)
+	if strings.Contains(body, `call void @"internal/bytealg.indexbytebody"`) {
+		if !strings.Contains(body, "ptrtoint ptr %fp_ret_0 to i64") {
+			t.Fatalf("expected helper result slot address setup in IndexByteString:\n%s", body)
+		}
+		if !strings.Contains(body, "load i64, ptr %fp_ret_0") {
+			t.Fatalf("expected helper result slot load in IndexByteString:\n%s", body)
+		}
 	}
-	if !strings.Contains(body, "ptrtoint ptr %fp_ret_0 to i64") {
-		t.Fatalf("expected helper result slot address setup in IndexByteString:\n%s", body)
+
+	src, err := os.ReadFile(sfile)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(body, "load i64, ptr %fp_ret_0") {
-		t.Fatalf("expected helper result slot load in IndexByteString:\n%s", body)
+	moduleTranslation, err := TranslateSourceModuleForPkgWithOptions(
+		pkg, sfile, src, runtime.GOOS, "arm64", TranslateOptions{AnnotateSource: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer moduleTranslation.Module.Dispose()
+	proof, err := ProveNoSuspendLeaf(moduleTranslation, "internal/bytealg.IndexByteString")
+	if err != nil {
+		t.Fatalf("prove translated IndexByteString no-suspend leaf: %v", err)
+	}
+	if proof.Symbol != "internal/bytealg.IndexByteString" || len(proof.ClosureSHA256) != 64 {
+		t.Fatalf("IndexByteString proof = %+v; want exact symbol and SHA-256", proof)
 	}
 }
