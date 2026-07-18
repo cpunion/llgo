@@ -421,7 +421,7 @@ func selectCoroProgramManagedStepV2(
 		// an explicit locked-M/pinned-P contract.
 		const supportedPlain = coro.MayUnwind | coro.NeedsCleanupFrame | coro.IRQUnsafe
 		if unsupported := plan.Exec &^ supportedPlain; unsupported != 0 {
-			return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: plain target %q has unsupported execution constraints %s", label, plan.ID, unsupported)
+			return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: plain function %q target %q has unsupported execution constraints %s", label, fn.String(), plan.ID, unsupported)
 		}
 		return coroProgramBootstrapStepV1{
 			Kind: coroProgramStepDirectPlainV1, Role: role, FunctionID: plan.ID, Target: target,
@@ -429,11 +429,15 @@ func selectCoroProgramManagedStepV2(
 
 	case coro.EmitCoroutine:
 		if rootDemand != coro.AsyncDemand || plan.Demand != coro.AsyncDemand || plan.FuncRep != coro.DirectCoro || plan.Primary != coro.PrimaryCoroutine || !plan.Effect.MaySuspend() {
-			return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: coroutine target %q is not one async-only direct coroutine (root=%s demand=%s rep=%s primary=%s effect=%s)",
-				label, plan.ID, rootDemand, plan.Demand, plan.FuncRep, plan.Primary, plan.Effect)
+			return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: coroutine target %q is not one async-only direct coroutine (root=%s demand=%s rep=%s primary=%s effect=%s; value-sites=%v)",
+				label, plan.ID, rootDemand, plan.Demand, plan.FuncRep, plan.Primary, plan.Effect, coroProgramFunctionValueSites(ctx.coroPlan, fn))
 		}
 		if unsupported := plan.Exec &^ (coro.MayUnwind | coro.NeedsPreempt | coro.IRQUnsafe); unsupported != 0 {
-			return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: coroutine target %q has unsupported execution constraints %s", label, plan.ID, unsupported)
+			trace := ""
+			if unsupported.Contains(coro.OpaqueExec) {
+				trace = "; opaque path: " + coroProgramOpaqueExecPath(ctx.coroPlan, fn)
+			}
+			return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: coroutine function %q target %q has unsupported execution constraints %s%s", label, fn.String(), plan.ID, unsupported, trace)
 		}
 		index, err := coroProgramRootDescriptorIndexV2(ctx.coroPlan, fn)
 		if err != nil {
@@ -451,6 +455,107 @@ func selectCoroProgramManagedStepV2(
 	default:
 		return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: target %q has unsupported emission %s", label, plan.ID, plan.Emission)
 	}
+}
+
+func coroProgramFunctionValueSites(plan *coro.SSAPlan, target *ssa.Function) []string {
+	if plan == nil || target == nil {
+		return nil
+	}
+	var sites []string
+	for _, item := range plan.Functions() {
+		owner := item.Function
+		if owner == nil || plan.IgnoresBody(owner) {
+			continue
+		}
+		operands := make([]*ssa.Value, 0, 8)
+		for _, block := range owner.Blocks {
+			for _, instruction := range block.Instrs {
+				operands = instruction.Operands(operands[:0])
+				for _, operand := range operands {
+					if operand == nil || *operand != target {
+						continue
+					}
+					if call, ok := instruction.(ssa.CallInstruction); ok && operand == &call.Common().Value && call.Common().StaticCallee() == target {
+						continue
+					}
+					sites = append(sites, owner.String()+": "+instruction.String())
+				}
+			}
+		}
+	}
+	sort.Strings(sites)
+	return sites
+}
+
+func coroProgramOpaqueExecPath(plan *coro.SSAPlan, root *ssa.Function) string {
+	if plan == nil || root == nil {
+		return "unavailable"
+	}
+	seen := make(map[*ssa.Function]bool)
+	var visit func(*ssa.Function, int) string
+	visit = func(function *ssa.Function, depth int) string {
+		if function == nil {
+			return "<nil>"
+		}
+		name := function.String()
+		if depth >= 32 {
+			return name + " -> <depth-limit>"
+		}
+		if seen[function] {
+			return name + " -> <cycle>"
+		}
+		seen[function] = true
+		defer delete(seen, function)
+
+		// Prefer the local open boundary over propagated target flags. Otherwise
+		// an initializer SCC can hide the actual unresolved call behind a cycle.
+		for _, block := range function.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(ssa.CallInstruction)
+				if !ok {
+					continue
+				}
+				callPlan, planned := plan.CallPlan(call)
+				if !planned || callPlan.Kind == coro.CallSpawn || callPlan.Kind == coro.CallUnwind {
+					continue
+				}
+				if callPlan.Open && callPlan.Unresolved == coro.UnknownManaged {
+					return fmt.Sprintf("%s -> open call %q (kind=%d targets=%d)", name, call.String(), callPlan.Kind, len(callPlan.Targets))
+				}
+			}
+		}
+		for _, block := range function.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(ssa.CallInstruction)
+				if !ok {
+					continue
+				}
+				callPlan, planned := plan.CallPlan(call)
+				if !planned || callPlan.Kind == coro.CallSpawn || callPlan.Kind == coro.CallUnwind {
+					continue
+				}
+				for _, targetID := range callPlan.Targets {
+					target, found := plan.Function(targetID)
+					if !found || target == nil {
+						continue
+					}
+					targetPlan, found := plan.FunctionPlan(target)
+					if found && targetPlan.Exec.Contains(coro.OpaqueExec) && !seen[target] {
+						return name + " -> " + visit(target, depth+1)
+					}
+				}
+			}
+		}
+		for _, lowered := range plan.LoweredCalls(function) {
+			targetPlan, found := plan.FunctionPlan(lowered.Target)
+			if found && !lowered.UnwindOnly && targetPlan.Exec.Contains(coro.OpaqueExec) {
+				return name + " -> lowered " + lowered.LogicalName + " -> " + visit(lowered.Target, depth+1)
+			}
+		}
+		functionPlan, _ := plan.FunctionPlan(function)
+		return fmt.Sprintf("%s (local=%s declared=%s)", name, functionPlan.LocalExec, functionPlan.DeclaredExec)
+	}
+	return visit(root, 0)
 }
 
 func coroProgramRootDescriptorIndexV2(plan *coro.SSAPlan, target *ssa.Function) (uint64, error) {
@@ -590,7 +695,7 @@ func selectCoroProgramPlainStepV1(ctx *context, aPkg *aPackage, name string, rol
 	if ctx.buildConf.EnableCoroProgramBootstrapRun {
 		const supported = coro.MayUnwind | coro.NeedsCleanupFrame
 		if unsupported := plan.Exec &^ supported; unsupported != 0 {
-			return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap runtime %s: target %q has unsupported execution constraints %s (complete=%s)", name, plan.ID, unsupported, plan.Exec)
+			return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap runtime %s: function %q target %q has unsupported execution constraints %s (complete=%s)", name, fn.String(), plan.ID, unsupported, plan.Exec)
 		}
 	}
 	return coroProgramBootstrapStepV1{
