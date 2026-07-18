@@ -30,6 +30,7 @@ var (
 	coroProgramExecutorRegistryV1State coro.ExecutorRegistry
 	coroProgramWaitTableV1State        coro.WaitRegistrationTable
 	coroProgramTimerTableV1State       coro.TimerRegistrationTable
+	coroProgramWorkerSourceV1State     coro.WorkerOperationSource
 	coroProgramChannelSourceV1State    coro.ChannelOperationSource
 	coroProgramExecutorDriverV1State   coro.ExecutorDriver
 	coroProgramExecutorHandleV1State   coro.ExecutorHandle
@@ -66,6 +67,7 @@ func coroProgramBindExecutorV1() bool {
 		!coroProgramExecutorRegistryV1State.CanRelease() ||
 		!coroProgramWaitTableV1State.CanRelease() ||
 		!coroProgramTimerTableV1State.CanRelease() ||
+		!coroProgramWorkerSourceV1State.CanRelease() ||
 		!coroProgramChannelSourceV1State.CanRelease() {
 		return false
 	}
@@ -91,6 +93,7 @@ func coroProgramExecutorRetiredV1() bool {
 		!coroProgramExecutorRegistryV1State.CanRelease() ||
 		!coroProgramWaitTableV1State.CanRelease() ||
 		!coroProgramTimerTableV1State.CanRelease() ||
+		!coroProgramWorkerSourceV1State.CanRelease() ||
 		!coroProgramChannelSourceV1State.CanRelease() {
 		return false
 	}

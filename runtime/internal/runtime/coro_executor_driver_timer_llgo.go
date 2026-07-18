@@ -25,7 +25,10 @@ import (
 
 func coroProgramBindExecutorDriverV1(driver *coro.ExecutorDriver, p *coroP, registry *coro.ExecutorRegistry, handle coro.ExecutorHandle, waits *coro.WaitRegistrationTable) bool {
 	return coro.BindExecutorSourceCatalog(driver, p, registry, handle, coro.ExecutorSourceCatalog{
-		Waits: waits, Timers: &coroProgramTimerTableV1State, Channel: &coroProgramChannelSourceV1State,
+		Waits:   waits,
+		Timers:  &coroProgramTimerTableV1State,
+		Worker:  &coroProgramWorkerSourceV1State,
+		Channel: &coroProgramChannelSourceV1State,
 	})
 }
 

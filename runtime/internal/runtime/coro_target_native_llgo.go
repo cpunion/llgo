@@ -55,6 +55,7 @@ var coroNativeTargetV1State coroNativeTargetStateV1
 func coroTargetExecutorStartV1(handle coro.ExecutorHandle) bool {
 	state := &coroNativeTargetV1State
 	if state.started || state.handle != (coro.ExecutorHandle{}) || !state.ingress.CanReleaseResources() ||
+		!coroNativeWorkerPoolCanReleaseV1() ||
 		handle != coroProgramExecutorHandleV1State || handle.Slot == 0 || handle.Generation == 0 ||
 		!state.doorbell.Open() {
 		return false
@@ -66,6 +67,17 @@ func coroTargetExecutorStartV1(handle coro.ExecutorHandle) bool {
 		return false
 	}
 	state.started = true
+	if !coroNativeWorkerPoolStartV1(handle) {
+		state.started = false
+		sealed := state.ingress.Seal()
+		retired := sealed && state.ingress.Retire()
+		closed := state.doorbell.Close()
+		state.handle = coro.ExecutorHandle{}
+		if !retired || !closed {
+			coroRuntimeAbort("native coroutine target start rollback failed")
+		}
+		return false
+	}
 	return true
 }
 
@@ -114,7 +126,8 @@ func coroTargetRequestExecutorV1(handle coro.ExecutorHandle) bool {
 
 func coroTargetBeginExecutorCloseV1(handle coro.ExecutorHandle, epoch uint32) coroTargetDispatchResultV1 {
 	state := &coroNativeTargetV1State
-	if !state.started || state.handle != handle || epoch == 0 || state.waitEpoch != 0 || state.runEpoch != 0 || !state.ingress.Seal() {
+	if !state.started || state.handle != handle || epoch == 0 || state.waitEpoch != 0 || state.runEpoch != 0 ||
+		!coroNativeWorkerPoolStopV1(handle) || !state.ingress.Seal() {
 		return coroTargetDispatchInvalidV1
 	}
 
