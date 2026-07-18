@@ -4,15 +4,17 @@
 
 更新：2026-07-18
 
-当前实现分支：`cpunion/llgo:coro/phase35-select`
+当前审查基线：`cpunion/llgo:llvm-coro` @ `897d251f8`
 
-集成基线：`cpunion/llgo:llvm-coro`（已合并至 Phase 34 / PR #41）
+集成状态：已合并至 Phase 35 / PR #42
 
 关联提案：[Issue #1546](https://github.com/xgo-dev/llgo/issues/1546)
 
 历史原型：[PR #1532](https://github.com/xgo-dev/llgo/pull/1532)
 
 统一异步核心与扩展成本契约：[`coro-async-core-contract.md`](./coro-async-core-contract.md)
+
+编译器语义标准化 IR 与统一 lowering 审查：[`coro-ir-design.md`](./coro-ir-design.md)
 
 ## 1. 结论与核心决策
 

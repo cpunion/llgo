@@ -6,6 +6,8 @@
 
 关联总体设计：[`llvm-coro-runtime-design.md`](./llvm-coro-runtime-design.md)
 
+编译器语义标准化 IR 与统一 lowering 审查：[`coro-ir-design.md`](./coro-ir-design.md)
+
 ## 1. 结论
 
 LLVM coroutine 只负责保存、恢复和销毁无栈 continuation。它不是异步模型，也不应知道 timer、文件、网络或某个 syscall 的语义。
