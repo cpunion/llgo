@@ -18,6 +18,17 @@ package coro
 
 import "unsafe"
 
+// ActiveChannelParkOwner returns the scheduler-owner context used by the
+// trusted typed-channel adapter while a compiler resume gate is active. The
+// returned ParkState pointer is frame-independent G storage and must not be
+// retained after the adapter returns or passed to a producer.
+func ActiveChannelParkOwner(g *G, source *ChannelOperationSource) (*P, *ParkState, bool) {
+	if !ValidG(g) || !resumeGateTaken(g) || g.runP == nil || !validChannelOperationOwner(source, g.runP) {
+		return nil, nil, false
+	}
+	return g.runP, &g.park, true
+}
+
 // PrepareSingleChannelPark is the bounded owner-P transaction used by the
 // compiler-generated slow path for one blocking send or receive. wait and
 // claim are stable caller storage in the LLVM coroutine frame. The function
@@ -42,7 +53,7 @@ func PrepareSingleChannelPark(
 	if !ValidG(g) || handle == nil || header == nil || source == nil || wait == nil || claim == nil ||
 		*wait != (WaitSetRecord{}) || *claim != (SelectClaim{}) || caseID == 0 ||
 		!resumeGateTaken(g) || g.runP == nil || !validChannelOperationOwner(source, g.runP) ||
-		!sourceHasReusableChannelSlot(source) {
+		!CanReserveChannelOperations(g.runP, source, 1) {
 		return ParkTicket{}, OperationID{}, false
 	}
 	p := g.runP
@@ -82,15 +93,24 @@ func PrepareEmptyChannelPark(
 	return ticket, true
 }
 
-func sourceHasReusableChannelSlot(source *ChannelOperationSource) bool {
-	if source == nil {
+// CanReserveChannelOperations is the allocation/preflight boundary for a
+// compiler park transaction. No ParkState field or producer-visible
+// generation changes until this check succeeds. The fixed C0 source uses a
+// bounded scan; the scalable catalog keeps this API and may grow stable pages
+// here before the no-fail preparation section begins.
+func CanReserveChannelOperations(p *P, source *ChannelOperationSource, needed uint32) bool {
+	if !validChannelOperationOwner(source, p) || needed == 0 || needed > ChannelOperationSourceCapacity {
 		return false
 	}
+	available := uint32(0)
 	for index := range source.slots {
 		if channelOperationReusableSlot(source, &source.slots[index], uint32(index)) &&
 			preemptLoad(&source.slots[index].generation) != ^uint32(0) &&
 			channelOperationExternalReservable(&source.slots[index]) {
-			return true
+			available++
+			if available == needed {
+				return true
+			}
 		}
 	}
 	return false

@@ -102,7 +102,7 @@ func main() {
 // CHECK-NEXT:   %32 = insertvalue %"{{.*}}/runtime/internal/runtime.ChanOp" %31, ptr %30, 1
 // CHECK-NEXT:   %33 = insertvalue %"{{.*}}/runtime/internal/runtime.ChanOp" %32, i32 0, 2
 // CHECK-NEXT:   %34 = insertvalue %"{{.*}}/runtime/internal/runtime.ChanOp" %33, i1 false, 3
-// CHECK-NEXT:   %35 = alloca i8, i64 48, align 1
+// CHECK-NEXT:   %35 = alloca %"{{.*}}/runtime/internal/runtime.ChanOp", i64 2, align 8
 // CHECK-NEXT:   %36 = getelementptr %"{{.*}}/runtime/internal/runtime.ChanOp", ptr %35, i64 0
 // CHECK-NEXT:   store %"{{.*}}/runtime/internal/runtime.ChanOp" %29, ptr %36, align 8
 // CHECK-NEXT:   %37 = getelementptr %"{{.*}}/runtime/internal/runtime.ChanOp", ptr %35, i64 1
@@ -185,7 +185,7 @@ func main() {
 // CHECK-NEXT:   %20 = insertvalue %"{{.*}}/runtime/internal/runtime.ChanOp" %19, ptr %18, 1
 // CHECK-NEXT:   %21 = insertvalue %"{{.*}}/runtime/internal/runtime.ChanOp" %20, i32 0, 2
 // CHECK-NEXT:   %22 = insertvalue %"{{.*}}/runtime/internal/runtime.ChanOp" %21, i1 false, 3
-// CHECK-NEXT:   %23 = alloca i8, i64 48, align 1
+// CHECK-NEXT:   %23 = alloca %"{{.*}}/runtime/internal/runtime.ChanOp", i64 2, align 8
 // CHECK-NEXT:   %24 = getelementptr %"{{.*}}/runtime/internal/runtime.ChanOp", ptr %23, i64 0
 // CHECK-NEXT:   store %"{{.*}}/runtime/internal/runtime.ChanOp" %17, ptr %24, align 8
 // CHECK-NEXT:   %25 = getelementptr %"{{.*}}/runtime/internal/runtime.ChanOp", ptr %23, i64 1

@@ -64,11 +64,12 @@ type chanWaiter struct {
 
 	sel       *selectState
 	caseIndex int
-	// coro is non-nil only for a compiler-spilled stackless waiter. Such a
-	// waiter never owns pthread mutex/cond state; z_chan_coro.go commits it
-	// through the exact ChannelOperationSource transaction before any typed
-	// payload or completion status is published.
-	coro *CoroChanParkV1
+	// coro is non-nil only for a compiler-spilled stackless waiter. The compact
+	// operation record is embedded either in a direct park or in one case of a
+	// multi-channel select. Such a waiter never owns pthread mutex/cond state;
+	// z_chan_coro.go commits it through the exact ChannelOperationSource
+	// transaction before any typed payload or completion status is published.
+	coro *coroChanOperationV1
 }
 
 type selectState struct {

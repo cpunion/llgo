@@ -22,7 +22,22 @@ import (
 	"github.com/goplus/llgo/runtime/internal/coro"
 )
 
-const coroChanParkMagicV1 uint32 = 0x43485031 // "CHP1"
+const (
+	coroChanParkMagicV1      uint32 = 0x43485031 // "CHP1"
+	coroChanOperationMagicV1 uint32 = 0x43484f31 // "CHO1"
+	coroChanSelectMagicV1    uint32 = 0x43485331 // "CHS1"
+)
+
+// coroChanOperationV1 is the common compact endpoint embedded by direct
+// channel parks and every case of a multi-channel select. Keeping arbitration
+// here lets chanWaiter stay agnostic to the surrounding frame layout without
+// introducing an interface or allocating one object per case.
+type coroChanOperationV1 struct {
+	id     coro.OperationID
+	claim  *coro.SelectClaim
+	waiter *chanWaiter
+	magic  uint32
+}
 
 // CoroChanParkV1 is compiler-spilled storage for one direct blocking channel
 // operation. It is not a Future/Task object and is never separately allocated:
@@ -34,12 +49,34 @@ const coroChanParkMagicV1 uint32 = 0x43485031 // "CHP1"
 // from the frozen runtime package. Its fields remain runtime-private and no Go
 // aggregate crosses a C or compiler hook ABI.
 type CoroChanParkV1 struct {
-	wait   coro.WaitSetRecord
-	claim  coro.SelectClaim
-	ticket coro.ParkTicket
-	id     coro.OperationID
-	waiter chanWaiter
-	magic  uint32
+	wait      coro.WaitSetRecord
+	claim     coro.SelectClaim
+	ticket    coro.ParkTicket
+	operation coroChanOperationV1
+	waiter    chanWaiter
+	magic     uint32
+}
+
+// CoroChanSelectCaseV1 is one compiler-spilled physical channel candidate.
+// Its typed value remains in the adjacent ChanOp storage emitted by the
+// compiler; this object owns only queue linkage and the exact source endpoint.
+type CoroChanSelectCaseV1 struct {
+	operation coroChanOperationV1
+	waiter    chanWaiter
+	order     uint32
+}
+
+// CoroChanSelectV1 is shared compiler-spilled state for one blocking select.
+// candidates points to the sibling fixed-size alloca in the same LLVM
+// coroutine frame. Neither object is a Future and neither is separately
+// allocated by the runtime.
+type CoroChanSelectV1 struct {
+	wait       coro.WaitSetRecord
+	claim      coro.SelectClaim
+	ticket     coro.ParkTicket
+	candidates unsafe.Pointer
+	count      uintptr
+	magic      uint32
 }
 
 type coroChanMatchResult uint8
@@ -63,9 +100,102 @@ const (
 	coroChanResumeShutdown
 )
 
+func validCoroChanOperationV1(operation *coroChanOperationV1, waiter *chanWaiter) bool {
+	return operation != nil && waiter != nil && operation.magic == coroChanOperationMagicV1 &&
+		operation.waiter == waiter && waiter.coro == operation && operation.id.Valid() &&
+		operation.claim != nil && waiter.ch != nil && waiter.status <= waitSendClosed && waiter.size >= 0
+}
+
 func validCoroChanParkV1(state *CoroChanParkV1) bool {
-	return state != nil && state.magic == coroChanParkMagicV1 && state.waiter.coro == state &&
-		state.waiter.status <= waitSendClosed && state.waiter.size >= 0
+	if state == nil || state.magic != coroChanParkMagicV1 || state.waiter.coro != &state.operation ||
+		state.operation.waiter != &state.waiter || state.operation.claim != &state.claim ||
+		state.waiter.status > waitSendClosed || state.waiter.size < 0 {
+		return false
+	}
+	if state.waiter.ch == nil {
+		return state.operation.id == (coro.OperationID{}) && state.operation.magic == 0
+	}
+	return validCoroChanOperationV1(&state.operation, &state.waiter)
+}
+
+func coroChanSelectCaseAt(base unsafe.Pointer, index uintptr) *CoroChanSelectCaseV1 {
+	return (*CoroChanSelectCaseV1)(unsafe.Add(base, index*unsafe.Sizeof(CoroChanSelectCaseV1{})))
+}
+
+func coroChanSelectOrderLess(candidates unsafe.Pointer, ops []ChanOp, left, right int) bool {
+	leftIndex := coroChanSelectCaseAt(candidates, uintptr(left)).order
+	rightIndex := coroChanSelectCaseAt(candidates, uintptr(right)).order
+	leftAddress := uintptr(unsafe.Pointer(ops[leftIndex].C))
+	rightAddress := uintptr(unsafe.Pointer(ops[rightIndex].C))
+	return leftAddress < rightAddress || leftAddress == rightAddress && leftIndex < rightIndex
+}
+
+func swapCoroChanSelectOrder(candidates unsafe.Pointer, left, right int) {
+	a := coroChanSelectCaseAt(candidates, uintptr(left))
+	b := coroChanSelectCaseAt(candidates, uintptr(right))
+	a.order, b.order = b.order, a.order
+}
+
+func siftDownCoroChanSelectOrder(candidates unsafe.Pointer, ops []ChanOp, root, end int) {
+	for {
+		child := root*2 + 1
+		if child >= end {
+			return
+		}
+		if child+1 < end && coroChanSelectOrderLess(candidates, ops, child, child+1) {
+			child++
+		}
+		if !coroChanSelectOrderLess(candidates, ops, root, child) {
+			return
+		}
+		swapCoroChanSelectOrder(candidates, root, child)
+		root = child
+	}
+}
+
+// sortCoroChanSelectOrder builds a channel-address lock permutation in the
+// candidate array itself. Heap sort needs no interface dispatch, recursion,
+// or auxiliary allocation and remains O(n log n) for large source selects.
+func sortCoroChanSelectOrder(candidates unsafe.Pointer, ops []ChanOp) {
+	for index := range ops {
+		coroChanSelectCaseAt(candidates, uintptr(index)).order = uint32(index)
+	}
+	for root := len(ops)/2 - 1; root >= 0; root-- {
+		siftDownCoroChanSelectOrder(candidates, ops, root, len(ops))
+	}
+	for end := len(ops) - 1; end > 0; end-- {
+		swapCoroChanSelectOrder(candidates, 0, end)
+		siftDownCoroChanSelectOrder(candidates, ops, 0, end)
+	}
+}
+
+func lockCoroChanSelectChannels(candidates unsafe.Pointer, ops []ChanOp) {
+	var previous *Chan
+	for position := range ops {
+		index := coroChanSelectCaseAt(candidates, uintptr(position)).order
+		ch := ops[index].C
+		if ch != nil && ch != previous {
+			ch.mutex.Lock()
+			previous = ch
+		}
+	}
+}
+
+func unlockCoroChanSelectChannels(candidates unsafe.Pointer, ops []ChanOp) {
+	var previous *Chan
+	for position := len(ops) - 1; position >= 0; position-- {
+		index := coroChanSelectCaseAt(candidates, uintptr(position)).order
+		ch := ops[index].C
+		if ch != nil && ch != previous {
+			ch.mutex.Unlock()
+			previous = ch
+		}
+	}
+}
+
+func validCoroChanSelectV1(state *CoroChanSelectV1, candidates unsafe.Pointer, count uintptr) bool {
+	return state != nil && state.magic == coroChanSelectMagicV1 && state.candidates == candidates &&
+		state.count == count && (count == 0 || candidates != nil)
 }
 
 func classifyCoroChanSingleBegin(result coro.ChannelExternalCommitBeginResult) coroChanMatchResult {
@@ -104,17 +234,16 @@ func requestCoroChannelExecutorV1() bool {
 }
 
 func commitCoroRecvWaiterLocked(w *chanWaiter, src unsafe.Pointer, eltSize int, status waitStatus) coroChanMatchResult {
-	state := w.coro
-	if !validCoroChanParkV1(state) || state.waiter.ch == nil || state.waiter.send ||
-		state.waiter.size != eltSize || !status.done() || status == waitSendClosed {
+	if !validCoroChanOperationV1(w.coro, w) || w.send || w.size != eltSize ||
+		!status.done() || status == waitSendClosed {
 		return coroChanMatchInvalid
 	}
 	var transaction coro.ChannelExternalCommit
 	result := coro.BeginChannelExternalCommit(
 		&transaction,
 		&coroProgramChannelSourceV1State,
-		state.id,
-		&state.claim,
+		w.coro.id,
+		w.coro.claim,
 	)
 	classified := classifyCoroChanSingleBegin(result)
 	if classified != coroChanMatchCommitted {
@@ -136,17 +265,16 @@ func commitCoroRecvWaiterLocked(w *chanWaiter, src unsafe.Pointer, eltSize int, 
 }
 
 func commitCoroSendWaiterLocked(w *chanWaiter, dst unsafe.Pointer, eltSize int, status waitStatus) coroChanMatchResult {
-	state := w.coro
-	if !validCoroChanParkV1(state) || state.waiter.ch == nil || !state.waiter.send ||
-		state.waiter.size != eltSize || (status != waitSendOK && status != waitSendClosed) {
+	if !validCoroChanOperationV1(w.coro, w) || !w.send || w.size != eltSize ||
+		(status != waitSendOK && status != waitSendClosed) {
 		return coroChanMatchInvalid
 	}
 	var transaction coro.ChannelExternalCommit
 	result := coro.BeginChannelExternalCommit(
 		&transaction,
 		&coroProgramChannelSourceV1State,
-		state.id,
-		&state.claim,
+		w.coro.id,
+		w.coro.claim,
 	)
 	classified := classifyCoroChanSingleBegin(result)
 	if classified != coroChanMatchCommitted {
@@ -167,7 +295,8 @@ func commitCoroSendWaiterLocked(w *chanWaiter, dst unsafe.Pointer, eltSize int, 
 
 func commitCoroPairLocked(send, recv *chanWaiter, eltSize int) coroChanMatchResult {
 	if send == nil || recv == nil || send.coro == nil || recv.coro == nil || send.coro == recv.coro ||
-		!validCoroChanParkV1(send.coro) || !validCoroChanParkV1(recv.coro) ||
+		send.coro.claim == recv.coro.claim || !validCoroChanOperationV1(send.coro, send) ||
+		!validCoroChanOperationV1(recv.coro, recv) ||
 		!send.send || recv.send || send.ch == nil || send.ch != recv.ch ||
 		send.size != eltSize || recv.size != eltSize {
 		return coroChanMatchInvalid
@@ -177,10 +306,10 @@ func commitCoroPairLocked(send, recv *chanWaiter, eltSize int) coroChanMatchResu
 		&transaction,
 		&coroProgramChannelSourceV1State,
 		send.coro.id,
-		&send.coro.claim,
+		send.coro.claim,
 		&coroProgramChannelSourceV1State,
 		recv.coro.id,
-		&recv.coro.claim,
+		recv.coro.claim,
 	)
 	classified := classifyCoroChanPairBegin(result)
 	if classified != coroChanMatchCommitted {
@@ -198,40 +327,41 @@ func commitCoroPairLocked(send, recv *chanWaiter, eltSize int) coroChanMatchResu
 	return coroChanMatchCommitted
 }
 
-func beginCurrentCoroChannelCommit(state *CoroChanParkV1, transaction *coro.ChannelExternalCommit) coroChanMatchResult {
-	if !validCoroChanParkV1(state) || transaction == nil || *transaction != (coro.ChannelExternalCommit{}) {
+func beginCurrentCoroChannelCommit(waiter *chanWaiter, transaction *coro.ChannelExternalCommit) coroChanMatchResult {
+	if !validCoroChanOperationV1(waiter.coro, waiter) || transaction == nil ||
+		*transaction != (coro.ChannelExternalCommit{}) {
 		return coroChanMatchInvalid
 	}
 	return classifyCoroChanSingleBegin(coro.BeginChannelExternalCommit(
 		transaction,
 		&coroProgramChannelSourceV1State,
-		state.id,
-		&state.claim,
+		waiter.coro.id,
+		waiter.coro.claim,
 	))
 }
 
 func finishCurrentCoroChannelCommit(
-	state *CoroChanParkV1,
+	waiter *chanWaiter,
 	transaction *coro.ChannelExternalCommit,
 	status waitStatus,
 ) bool {
-	if !validCoroChanParkV1(state) || transaction == nil || !status.done() ||
+	if !validCoroChanOperationV1(waiter.coro, waiter) || transaction == nil || !status.done() ||
 		!transaction.BeginEffect() {
 		return false
 	}
-	state.waiter.status = status
+	waiter.status = status
 	return transaction.Commit() && requestCoroChannelExecutorV1()
 }
 
-func coroChanTrySendLocked(ch *Chan, state *CoroChanParkV1) (ready bool, ok bool) {
-	if ch == nil || !validCoroChanParkV1(state) || state.waiter.ch != ch || !state.waiter.send ||
-		state.waiter.size != ch.elemsize {
+func coroChanTrySendLocked(ch *Chan, waiter *chanWaiter) (ready bool, ok bool) {
+	if ch == nil || !validCoroChanOperationV1(waiter.coro, waiter) || waiter.ch != ch || !waiter.send ||
+		waiter.size != ch.elemsize {
 		return false, false
 	}
 	if ch.closed {
 		var transaction coro.ChannelExternalCommit
-		if beginCurrentCoroChannelCommit(state, &transaction) != coroChanMatchCommitted ||
-			!finishCurrentCoroChannelCommit(state, &transaction, waitSendClosed) {
+		if beginCurrentCoroChannelCommit(waiter, &transaction) != coroChanMatchCommitted ||
+			!finishCurrentCoroChannelCommit(waiter, &transaction, waitSendClosed) {
 			return false, false
 		}
 		return true, true
@@ -242,7 +372,7 @@ func coroChanTrySendLocked(ch *Chan, state *CoroChanParkV1) (ready bool, ok bool
 			break
 		}
 		if peer.coro != nil {
-			switch result := commitCoroPairLocked(&state.waiter, peer, ch.elemsize); result {
+			switch result := commitCoroPairLocked(waiter, peer, ch.elemsize); result {
 			case coroChanMatchCommitted:
 				return true, true
 			case coroChanMatchDiscarded:
@@ -255,7 +385,7 @@ func coroChanTrySendLocked(ch *Chan, state *CoroChanParkV1) (ready bool, ok bool
 			}
 		}
 		var transaction coro.ChannelExternalCommit
-		classified := beginCurrentCoroChannelCommit(state, &transaction)
+		classified := beginCurrentCoroChannelCommit(waiter, &transaction)
 		if classified != coroChanMatchCommitted {
 			if classified == coroChanMatchRetry {
 				ch.recvq.enqueueFront(peer)
@@ -272,8 +402,8 @@ func coroChanTrySendLocked(ch *Chan, state *CoroChanParkV1) (ready bool, ok bool
 		if !transaction.BeginEffect() {
 			return false, false
 		}
-		copyChanElem(peer.elem, state.waiter.elem, ch.elemsize)
-		state.waiter.status = waitSendOK
+		copyChanElem(peer.elem, waiter.elem, ch.elemsize)
+		waiter.status = waitSendOK
 		peer.finish(waitRecvOK)
 		if !transaction.Commit() || !requestCoroChannelExecutorV1() {
 			return false, false
@@ -282,17 +412,17 @@ func coroChanTrySendLocked(ch *Chan, state *CoroChanParkV1) (ready bool, ok bool
 	}
 	if ch.qcount < ch.dataqsiz {
 		var transaction coro.ChannelExternalCommit
-		if beginCurrentCoroChannelCommit(state, &transaction) != coroChanMatchCommitted ||
+		if beginCurrentCoroChannelCommit(waiter, &transaction) != coroChanMatchCommitted ||
 			!transaction.BeginEffect() {
 			return false, false
 		}
-		copyChanElem(chanBuf(ch, ch.sendx), state.waiter.elem, ch.elemsize)
+		copyChanElem(chanBuf(ch, ch.sendx), waiter.elem, ch.elemsize)
 		ch.sendx++
 		if ch.sendx == ch.dataqsiz {
 			ch.sendx = 0
 		}
 		ch.qcount++
-		state.waiter.status = waitSendOK
+		waiter.status = waitSendOK
 		if !transaction.Commit() || !requestCoroChannelExecutorV1() {
 			return false, false
 		}
@@ -301,9 +431,9 @@ func coroChanTrySendLocked(ch *Chan, state *CoroChanParkV1) (ready bool, ok bool
 	return false, true
 }
 
-func coroChanTryRecvLocked(ch *Chan, state *CoroChanParkV1) (ready bool, ok bool) {
-	if ch == nil || !validCoroChanParkV1(state) || state.waiter.ch != ch || state.waiter.send ||
-		state.waiter.size != ch.elemsize {
+func coroChanTryRecvLocked(ch *Chan, waiter *chanWaiter) (ready bool, ok bool) {
+	if ch == nil || !validCoroChanOperationV1(waiter.coro, waiter) || waiter.ch != ch || waiter.send ||
+		waiter.size != ch.elemsize {
 		return false, false
 	}
 	if ch.dataqsiz == 0 {
@@ -313,7 +443,7 @@ func coroChanTryRecvLocked(ch *Chan, state *CoroChanParkV1) (ready bool, ok bool
 				break
 			}
 			if peer.coro != nil {
-				switch result := commitCoroPairLocked(peer, &state.waiter, ch.elemsize); result {
+				switch result := commitCoroPairLocked(peer, waiter, ch.elemsize); result {
 				case coroChanMatchCommitted:
 					return true, true
 				case coroChanMatchDiscarded:
@@ -326,7 +456,7 @@ func coroChanTryRecvLocked(ch *Chan, state *CoroChanParkV1) (ready bool, ok bool
 				}
 			}
 			var transaction coro.ChannelExternalCommit
-			classified := beginCurrentCoroChannelCommit(state, &transaction)
+			classified := beginCurrentCoroChannelCommit(waiter, &transaction)
 			if classified != coroChanMatchCommitted {
 				if classified == coroChanMatchRetry {
 					ch.sendq.enqueueFront(peer)
@@ -343,8 +473,8 @@ func coroChanTryRecvLocked(ch *Chan, state *CoroChanParkV1) (ready bool, ok bool
 			if !transaction.BeginEffect() {
 				return false, false
 			}
-			copyChanElem(state.waiter.elem, peer.elem, ch.elemsize)
-			state.waiter.status = waitRecvOK
+			copyChanElem(waiter.elem, peer.elem, ch.elemsize)
+			waiter.status = waitRecvOK
 			peer.finish(waitSendOK)
 			if !transaction.Commit() || !requestCoroChannelExecutorV1() {
 				return false, false
@@ -353,18 +483,18 @@ func coroChanTryRecvLocked(ch *Chan, state *CoroChanParkV1) (ready bool, ok bool
 		}
 	} else if ch.qcount > 0 {
 		var transaction coro.ChannelExternalCommit
-		if beginCurrentCoroChannelCommit(state, &transaction) != coroChanMatchCommitted ||
+		if beginCurrentCoroChannelCommit(waiter, &transaction) != coroChanMatchCommitted ||
 			!transaction.BeginEffect() {
 			return false, false
 		}
-		copyChanElem(state.waiter.elem, chanBuf(ch, ch.recvx), ch.elemsize)
+		copyChanElem(waiter.elem, chanBuf(ch, ch.recvx), ch.elemsize)
 		zeroChanRecv(chanBuf(ch, ch.recvx), ch.elemsize)
 		ch.recvx++
 		if ch.recvx == ch.dataqsiz {
 			ch.recvx = 0
 		}
 		ch.qcount--
-		state.waiter.status = waitRecvOK
+		waiter.status = waitRecvOK
 		if !transaction.Commit() || !requestCoroChannelExecutorV1() {
 			return false, false
 		}
@@ -376,12 +506,12 @@ func coroChanTryRecvLocked(ch *Chan, state *CoroChanParkV1) (ready bool, ok bool
 	}
 	if ch.closed {
 		var transaction coro.ChannelExternalCommit
-		if beginCurrentCoroChannelCommit(state, &transaction) != coroChanMatchCommitted ||
+		if beginCurrentCoroChannelCommit(waiter, &transaction) != coroChanMatchCommitted ||
 			!transaction.BeginEffect() {
 			return false, false
 		}
-		zeroChanRecv(state.waiter.elem, ch.elemsize)
-		state.waiter.status = waitRecvClosed
+		zeroChanRecv(waiter.elem, ch.elemsize)
+		waiter.status = waitRecvClosed
 		if !transaction.Commit() || !requestCoroChannelExecutorV1() {
 			return false, false
 		}
@@ -501,6 +631,366 @@ func reconcileBufferedChanLocked(ch *Chan, refill bool) bool {
 	}
 }
 
+// CoroChanSelectTry is the nonblocking first pass for compiler-owned blocking
+// select. A closed send deliberately falls through to the physical park path:
+// that path turns it into an explicit resume status instead of unwinding a Go
+// panic through an active LLVM coroutine frame.
+func CoroChanSelectTry(ops ...ChanOp) (isel int, recvOK, tryOK, sendClosed bool) {
+	isel = -1
+	if len(ops) == 0 {
+		return
+	}
+	start := selectStart(len(ops))
+	for offset := 0; offset < len(ops); offset++ {
+		index := (start + offset) % len(ops)
+		op := ops[index]
+		if op.C == nil {
+			continue
+		}
+		if op.Size < 0 || int(op.Size) != op.C.elemsize {
+			coroRuntimeAbort("invalid coroutine select channel operation")
+			return
+		}
+		op.C.mutex.Lock()
+		if op.Send {
+			var closed bool
+			tryOK, closed = chanTrySendLocked(op.C, op.Val, int(op.Size))
+			recvOK = true
+			op.C.mutex.Unlock()
+			if closed {
+				return -1, false, false, true
+			}
+		} else {
+			recvOK, tryOK = chanTryRecvLocked(op.C, op.Val, int(op.Size))
+			op.C.mutex.Unlock()
+		}
+		if tryOK {
+			return index, recvOK, true, false
+		}
+	}
+	return -1, false, false, false
+}
+
+func prepareCoroChanSelectV1(
+	g, handle, header, candidates, storage unsafe.Pointer,
+	ops []ChanOp,
+) {
+	if g == nil || handle == nil || header == nil || storage == nil ||
+		len(ops) > int(coro.MaxSelectOperationCases) || len(ops) != 0 && candidates == nil {
+		coroRuntimeAbort("invalid coroutine channel select park ABI")
+		return
+	}
+	physical := uint32(0)
+	for index := range ops {
+		op := &ops[index]
+		candidate := coroChanSelectCaseAt(candidates, uintptr(index))
+		*candidate = CoroChanSelectCaseV1{}
+		if op.C == nil {
+			continue
+		}
+		if op.Size < 0 || int(op.Size) != op.C.elemsize {
+			coroRuntimeAbort("coroutine select channel element size mismatch")
+			return
+		}
+		physical++
+	}
+	sortCoroChanSelectOrder(candidates, ops)
+	state := (*CoroChanSelectV1)(storage)
+	*state = CoroChanSelectV1{
+		candidates: candidates,
+		count:      uintptr(len(ops)),
+		magic:      coroChanSelectMagicV1,
+	}
+	task := (*coro.G)(g)
+	frameHeader := (*coro.HeaderV1)(header)
+	if physical == 0 {
+		ticket, ok := coro.PrepareEmptyChannelPark(task, handle, frameHeader, &state.wait, fastrand())
+		if !ok {
+			coroRuntimeAbort("cannot prepare empty coroutine channel select")
+			return
+		}
+		state.ticket = ticket
+		return
+	}
+	p, park, ownerOK := coro.ActiveChannelParkOwner(task, &coroProgramChannelSourceV1State)
+	if !ownerOK || !coro.CanReserveChannelOperations(p, &coroProgramChannelSourceV1State, physical) {
+		coroRuntimeAbort("coroutine channel select source capacity exhausted")
+		return
+	}
+	ticket, ok := coro.BeginParkSet(park, physical, fastrand())
+	if !ok || !coro.PrepareWaitSetRecord(&state.wait, task, ticket) {
+		coroRuntimeAbort("cannot begin coroutine channel select park")
+		return
+	}
+	for index := range ops {
+		op := &ops[index]
+		if op.C == nil {
+			continue
+		}
+		candidate := coroChanSelectCaseAt(candidates, uintptr(index))
+		candidate.operation = coroChanOperationV1{
+			claim:  &state.claim,
+			waiter: &candidate.waiter,
+			magic:  coroChanOperationMagicV1,
+		}
+		candidate.waiter = chanWaiter{
+			ch: op.C, elem: op.Val, size: int(op.Size), send: op.Send, coro: &candidate.operation,
+		}
+		id, attached := coroProgramChannelSourceV1State.ReserveAndAttachWait(
+			p,
+			park,
+			ticket,
+			&state.wait,
+			uint32(index)+1,
+			&state.claim,
+		)
+		if !attached {
+			coroRuntimeAbort("cannot attach coroutine channel select case")
+			return
+		}
+		candidate.operation.id = id
+	}
+	if !coro.SealParkSet(park, ticket) ||
+		!coro.PrepareParkSet(task, handle, frameHeader, ticket, &state.wait) {
+		coroRuntimeAbort("cannot seal coroutine channel select park")
+		return
+	}
+	for index := range ops {
+		candidate := coroChanSelectCaseAt(candidates, uintptr(index))
+		if ops[index].C != nil && !coroProgramChannelSourceV1State.ExposeExternalCommit(
+			p,
+			task,
+			candidate.operation.id,
+			ticket,
+			&state.wait,
+			&state.claim,
+		) {
+			coroRuntimeAbort("cannot expose coroutine channel select case")
+			return
+		}
+	}
+	state.ticket = ticket
+	lockCoroChanSelectChannels(candidates, ops)
+	start := selectStart(len(ops))
+	for offset := 0; offset < len(ops); offset++ {
+		index := (start + offset) % len(ops)
+		op := &ops[index]
+		if op.C == nil {
+			continue
+		}
+		candidate := coroChanSelectCaseAt(candidates, uintptr(index))
+		var ready bool
+		if op.Send {
+			ready, ok = coroChanTrySendLocked(op.C, &candidate.waiter)
+		} else {
+			ready, ok = coroChanTryRecvLocked(op.C, &candidate.waiter)
+		}
+		if !ok {
+			unlockCoroChanSelectChannels(candidates, ops)
+			coroRuntimeAbort("cannot commit coroutine channel select case")
+			return
+		}
+		if ready {
+			unlockCoroChanSelectChannels(candidates, ops)
+			return
+		}
+	}
+	for offset := 0; offset < len(ops); offset++ {
+		index := (start + offset) % len(ops)
+		op := &ops[index]
+		if op.C == nil {
+			continue
+		}
+		waiter := &coroChanSelectCaseAt(candidates, uintptr(index)).waiter
+		if op.Send {
+			op.C.sendq.enqueue(waiter)
+		} else {
+			op.C.recvq.enqueue(waiter)
+		}
+	}
+	unlockCoroChanSelectChannels(candidates, ops)
+}
+
+// CoroChanSelectPark installs all slow-path cases immediately before the
+// compiler emits llvm.coro.suspend. The variadic ChanOp backing array and both
+// state objects are compiler allocas retained by CoroSplit.
+func CoroChanSelectPark(g, handle, header, candidates, storage unsafe.Pointer, ops ...ChanOp) {
+	prepareCoroChanSelectV1(g, handle, header, candidates, storage, ops)
+}
+
+func cleanupCoroChanSelectWaiters(candidates unsafe.Pointer, ops []ChanOp) bool {
+	for index := range ops {
+		op := &ops[index]
+		if op.C == nil {
+			continue
+		}
+		candidate := coroChanSelectCaseAt(candidates, uintptr(index))
+		if !validCoroChanOperationV1(&candidate.operation, &candidate.waiter) ||
+			candidate.operation.claim == nil || candidate.waiter.ch != op.C ||
+			candidate.waiter.elem != op.Val || candidate.waiter.size != int(op.Size) ||
+			candidate.waiter.send != op.Send {
+			return false
+		}
+		ch := op.C
+		ch.mutex.Lock()
+		if op.Send {
+			ch.sendq.remove(&candidate.waiter)
+		} else {
+			ch.recvq.remove(&candidate.waiter)
+		}
+		if !reconcileBufferedChanLocked(ch, !ch.closed) || ch.closed && !drainClosedChanWaitersLocked(ch) {
+			ch.mutex.Unlock()
+			return false
+		}
+		ch.mutex.Unlock()
+	}
+	return true
+}
+
+func finishCoroChanSelectOperations(
+	g *coro.G,
+	state *CoroChanSelectV1,
+	candidates unsafe.Pointer,
+	ops []ChanOp,
+	lease coro.OperationResultLease,
+	discard bool,
+) bool {
+	p, _, ownerOK := coro.ActiveChannelParkOwner(g, &coroProgramChannelSourceV1State)
+	if !ownerOK {
+		return false
+	}
+	for index := range ops {
+		if ops[index].C == nil {
+			continue
+		}
+		id := coroChanSelectCaseAt(candidates, uintptr(index)).operation.id
+		if !coroProgramChannelSourceV1State.ConfirmQuiesced(p, id) {
+			return false
+		}
+	}
+	if !coroProgramChannelSourceV1State.ResetSelectClaim(p, &state.claim) {
+		return false
+	}
+	if lease.Valid() {
+		var released bool
+		if discard {
+			released = coroProgramChannelSourceV1State.DiscardResult(p, lease)
+		} else {
+			released = coroProgramChannelSourceV1State.TakeResult(p, lease)
+		}
+		if !released {
+			return false
+		}
+	}
+	for index := range ops {
+		if ops[index].C == nil {
+			continue
+		}
+		id := coroChanSelectCaseAt(candidates, uintptr(index)).operation.id
+		if !coroProgramChannelSourceV1State.Recycle(p, id) {
+			return false
+		}
+	}
+	return true
+}
+
+// CoroChanSelectResume consumes the exact ParkTicket decision, detaches every
+// queue node before releasing frame storage, and returns the selected SSA
+// tuple prefix plus the same typed status used by direct channel lowering.
+func CoroChanSelectResume(
+	g, candidates, storage unsafe.Pointer,
+	ops ...ChanOp,
+) (isel int, recvOK bool, status uint32) {
+	isel = -1
+	state := (*CoroChanSelectV1)(storage)
+	if g == nil || !validCoroChanSelectV1(state, candidates, uintptr(len(ops))) {
+		coroRuntimeAbort("invalid coroutine channel select resume ABI")
+		return -1, false, coroChanResumeInvalid
+	}
+	task := (*coro.G)(g)
+	outcome, caseID, lease, cancel, ok := coro.TakeRunDecision(task, state.ticket)
+	if !ok {
+		coroRuntimeAbort("invalid coroutine channel select run decision")
+		return -1, false, coroChanResumeInvalid
+	}
+	physical := 0
+	for index := range ops {
+		if ops[index].C != nil {
+			physical++
+		}
+	}
+	if physical == 0 {
+		if outcome != coro.ParkOutcomeCanceled || caseID != 0 || lease.Valid() ||
+			cancel != coro.TaskCancelAbort && cancel != coro.TaskCancelShutdown {
+			coroRuntimeAbort("invalid empty coroutine channel select decision")
+			return -1, false, coroChanResumeInvalid
+		}
+		for index := range ops {
+			*coroChanSelectCaseAt(candidates, uintptr(index)) = CoroChanSelectCaseV1{}
+		}
+		*state = CoroChanSelectV1{}
+		if cancel == coro.TaskCancelShutdown {
+			return -1, false, coroChanResumeShutdown
+		}
+		return -1, false, coroChanResumeTaskAbort
+	}
+	if !cleanupCoroChanSelectWaiters(candidates, ops) {
+		coroRuntimeAbort("cannot clean coroutine channel select waiters")
+		return -1, false, coroChanResumeInvalid
+	}
+	discard := outcome == coro.ParkOutcomeCanceled
+	var selected *CoroChanSelectCaseV1
+	if outcome == coro.ParkOutcomeCompleted {
+		if caseID == 0 || int(caseID) > len(ops) || ops[caseID-1].C == nil ||
+			cancel != coro.TaskCancelNone || !lease.Valid() {
+			coroRuntimeAbort("invalid completed coroutine channel select decision")
+			return -1, false, coroChanResumeInvalid
+		}
+		selected = coroChanSelectCaseAt(candidates, uintptr(caseID-1))
+		leaseID, validLease := lease.ID()
+		if !validLease || leaseID != selected.operation.id || !selected.waiter.status.done() {
+			coroRuntimeAbort("invalid coroutine channel select winner")
+			return -1, false, coroChanResumeInvalid
+		}
+	} else if outcome != coro.ParkOutcomeCanceled || caseID != 0 ||
+		cancel != coro.TaskCancelAbort && cancel != coro.TaskCancelShutdown {
+		coroRuntimeAbort("invalid canceled coroutine channel select decision")
+		return -1, false, coroChanResumeInvalid
+	}
+	if !finishCoroChanSelectOperations(task, state, candidates, ops, lease, discard) {
+		coroRuntimeAbort("cannot finish coroutine channel select operations")
+		return -1, false, coroChanResumeInvalid
+	}
+	if selected != nil {
+		isel = int(caseID - 1)
+		status = uint32(selected.waiter.status)
+		recvOK = selected.waiter.status.recvOK()
+	}
+	for index := range ops {
+		*coroChanSelectCaseAt(candidates, uintptr(index)) = CoroChanSelectCaseV1{}
+	}
+	*state = CoroChanSelectV1{}
+	if discard {
+		if cancel == coro.TaskCancelShutdown {
+			return -1, false, coroChanResumeShutdown
+		}
+		return -1, false, coroChanResumeTaskAbort
+	}
+	switch waitStatus(status) {
+	case waitSendOK:
+		return isel, recvOK, coroChanResumeSendOK
+	case waitRecvOK:
+		return isel, recvOK, coroChanResumeRecvOK
+	case waitRecvClosed:
+		return isel, recvOK, coroChanResumeRecvClosed
+	case waitSendClosed:
+		return isel, recvOK, coroChanResumeSendClosed
+	default:
+		coroRuntimeAbort("invalid coroutine channel select completion status")
+		return -1, false, coroChanResumeInvalid
+	}
+}
+
 func prepareCoroChanParkV1(
 	g, handle, header, channel, elem, storage unsafe.Pointer,
 	eltSize uintptr,
@@ -516,7 +1006,8 @@ func prepareCoroChanParkV1(
 	ch := (*Chan)(channel)
 	size := int(eltSize)
 	state.magic = coroChanParkMagicV1
-	state.waiter = chanWaiter{ch: ch, elem: elem, size: size, send: send, coro: state}
+	state.operation = coroChanOperationV1{claim: &state.claim, waiter: &state.waiter}
+	state.waiter = chanWaiter{ch: ch, elem: elem, size: size, send: send, coro: &state.operation}
 	if ch == nil {
 		ticket, ok := coro.PrepareEmptyChannelPark(
 			(*coro.G)(g), handle, (*coro.HeaderV1)(header), &state.wait, fastrand(),
@@ -546,13 +1037,15 @@ func prepareCoroChanParkV1(
 		coroRuntimeAbort("cannot prepare coroutine channel park")
 		return
 	}
-	state.ticket, state.id = ticket, id
+	state.ticket = ticket
+	state.operation.id = id
+	state.operation.magic = coroChanOperationMagicV1
 	ch.mutex.Lock()
 	var ready bool
 	if send {
-		ready, ok = coroChanTrySendLocked(ch, state)
+		ready, ok = coroChanTrySendLocked(ch, &state.waiter)
 	} else {
-		ready, ok = coroChanTryRecvLocked(ch, state)
+		ready, ok = coroChanTryRecvLocked(ch, &state.waiter)
 	}
 	if !ok {
 		ch.mutex.Unlock()
@@ -647,8 +1140,8 @@ func __llgo_coro_chan_resume_v1(g, storage unsafe.Pointer) uint32 {
 	if !coro.FinishSingleChannelPark(
 		(*coro.G)(g),
 		&coroProgramChannelSourceV1State,
-		state.id,
-		&state.claim,
+		state.operation.id,
+		state.operation.claim,
 		lease,
 		discard,
 	) {

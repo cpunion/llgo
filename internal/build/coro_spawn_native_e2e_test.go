@@ -52,16 +52,27 @@ var Data chan uint32
 var Ack chan uint32
 var Done chan uint32
 var Buffered chan uint32
+var SelectSend chan uint32
+var SelectRecv chan uint32
 
 var Got uint32
 var After uint32
 var BufferedGot uint32
+var SelectGot uint32
+var MainStage uint32
+var ChildStage uint32
 
 func child() {
+	ChildStage = 1
 	Data <- 0x1234abcd
+	ChildStage = 2
 	<-Ack
+	ChildStage = 3
 	After = 1
+	SelectRecv <- 0x0badcafe
+	ChildStage = 4
 	Done <- 1
+	ChildStage = 5
 }
 
 func Setup() {
@@ -69,15 +80,27 @@ func Setup() {
 	Ack = make(chan uint32)
 	Done = make(chan uint32)
 	Buffered = make(chan uint32, 1)
+	SelectSend = make(chan uint32)
+	SelectRecv = make(chan uint32)
 }
 
 func main() {
+	MainStage = 1
 	go child()
 	Got = <-Data
+	MainStage = 2
 	Ack <- 1
+	MainStage = 3
+	select {
+	case SelectSend <- 0xfeedface:
+	case SelectGot = <-SelectRecv:
+	}
+	MainStage = 4
 	<-Done
+	MainStage = 5
 	Buffered <- 0xdecafbad
 	BufferedGot = <-Buffered
+	MainStage = 6
 }
 
 func Check() int32 {
@@ -89,6 +112,12 @@ func Check() int32 {
 	}
 	if BufferedGot != 0xdecafbad {
 		return 13
+	}
+	if SelectGot != 0x0badcafe {
+		return 14
+	}
+	if MainStage != 6 || ChildStage != 5 {
+		return 15
 	}
 	return 0
 }
@@ -122,8 +151,9 @@ func fastrand() uint32
 // no-ops, while the linked production coroutine adapter/core uses its native
 // nogc allocator backend.
 //
-// Three unbuffered rendezvous force main and its child through both send and
-// receive slow paths. A capacity-one channel then verifies the same lowering's
+// Three direct unbuffered rendezvous force main and its child through both send
+// and receive slow paths. A two-case select adds one multi-event rendezvous and
+// loser cleanup, then a capacity-one channel verifies the same lowering's
 // nonblocking buffer fast path before main returns and command shutdown runs.
 func TestCoroChannelAndClosedStaticSpawnNativeNoStdlibRuntimeE2E(t *testing.T) {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
@@ -414,6 +444,60 @@ func buildCoroSpawnNativeE2EDriver(t *testing.T, prog llssa.Program, temp, setup
 	tryRecvBody := tryRecv.MakeBody(1)
 	tryRecvResult := tryRecvBody.Call(rawTryRecv.Expr, tryRecv.Param(0), tryRecv.Param(1), tryRecv.Param(2))
 	tryRecvBody.Return(tryRecvBody.Extract(tryRecvResult, 0), tryRecvBody.Extract(tryRecvResult, 1))
+	chanOpSliceType := types.NewSlice(prog.RuntimeType("ChanOp").RawType())
+	uint32Type := types.Typ[types.Uint32]
+	rawSelectTry := pkg.NewFunc("command-line-arguments.CoroChanSelectTry", newSignature(
+		[]types.Type{chanOpSliceType}, []types.Type{intType, boolType, boolType, boolType},
+	), llssa.InGo)
+	selectTry := pkg.NewFunc(llssa.PkgRuntime+".CoroChanSelectTry", newSignature(
+		[]types.Type{chanOpSliceType}, []types.Type{intType, boolType, boolType, boolType},
+	), llssa.InGo)
+	selectTryBody := selectTry.MakeBody(1)
+	selectTryResult := selectTryBody.Call(rawSelectTry.Expr, selectTry.Param(0))
+	selectTryBody.Return(
+		selectTryBody.Extract(selectTryResult, 0),
+		selectTryBody.Extract(selectTryResult, 1),
+		selectTryBody.Extract(selectTryResult, 2),
+		selectTryBody.Extract(selectTryResult, 3),
+	)
+	selectParkParams := []types.Type{pointer, pointer, pointer, pointer, pointer, chanOpSliceType}
+	rawSelectPark := pkg.NewFunc("command-line-arguments.CoroChanSelectPark", newSignature(
+		selectParkParams, nil,
+	), llssa.InGo)
+	selectPark := pkg.NewFunc(llssa.PkgRuntime+".CoroChanSelectPark", newSignature(
+		selectParkParams, nil,
+	), llssa.InGo)
+	selectParkBody := selectPark.MakeBody(1)
+	selectParkBody.Call(
+		rawSelectPark.Expr,
+		selectPark.Param(0),
+		selectPark.Param(1),
+		selectPark.Param(2),
+		selectPark.Param(3),
+		selectPark.Param(4),
+		selectPark.Param(5),
+	)
+	selectParkBody.Return()
+	selectResumeParams := []types.Type{pointer, pointer, pointer, chanOpSliceType}
+	rawSelectResume := pkg.NewFunc("command-line-arguments.CoroChanSelectResume", newSignature(
+		selectResumeParams, []types.Type{intType, boolType, uint32Type},
+	), llssa.InGo)
+	selectResume := pkg.NewFunc(llssa.PkgRuntime+".CoroChanSelectResume", newSignature(
+		selectResumeParams, []types.Type{intType, boolType, uint32Type},
+	), llssa.InGo)
+	selectResumeBody := selectResume.MakeBody(1)
+	selectResumeResult := selectResumeBody.Call(
+		rawSelectResume.Expr,
+		selectResume.Param(0),
+		selectResume.Param(1),
+		selectResume.Param(2),
+		selectResume.Param(3),
+	)
+	selectResumeBody.Return(
+		selectResumeBody.Extract(selectResumeResult, 0),
+		selectResumeBody.Extract(selectResumeResult, 1),
+		selectResumeBody.Extract(selectResumeResult, 2),
+	)
 	anyType := types.NewInterfaceType(nil, nil)
 	anyType.Complete()
 	panicStub := pkg.NewFunc(llssa.PkgRuntime+".Panic", newSignature(

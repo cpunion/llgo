@@ -749,6 +749,105 @@ type SelectState struct {
 	Send  bool // direction of case (SendOnly or RecvOnly)
 }
 
+// CoroSelect is compiler-owned storage for one blocking channel select in a
+// physical LLVM coroutine body. ChanOp values, queue candidates, and shared
+// runtime state are all typed allocas whose addresses cross the suspend and
+// are therefore retained by CoroSplit in the stackless frame.
+type CoroSelect struct {
+	fn         Function
+	states     []*SelectState
+	ops        []Expr
+	opsSlice   Expr
+	candidates Expr
+	storage    Expr
+}
+
+// NewCoroSelect evaluates and materializes every already-compiled channel
+// operand exactly once. The caller may first use CoroChanSelectTry, then pass
+// the same plan to CoroChanSelectPark and CoroChanSelectResume.
+func (b Builder) NewCoroSelect(states []*SelectState) *CoroSelect {
+	if b == nil || b.Func == nil {
+		panic("ssa: coroutine select requires an active function builder")
+	}
+	ops := make([]Expr, len(states))
+	for index, state := range states {
+		if state == nil || state.Chan.IsNil() {
+			panic("ssa: coroutine select requires complete channel states")
+		}
+		ops[index] = b.chanOp(state)
+	}
+	return &CoroSelect{
+		fn:         b.Func,
+		states:     states,
+		ops:        ops,
+		opsSlice:   b.selectOpsSlice(lastParamType(b.Prog, b.Pkg.rtFunc("CoroChanSelectTry")), ops),
+		candidates: b.ArrayAlloca(b.Prog.rtType("CoroChanSelectCaseV1"), b.Prog.Val(len(states))),
+		storage:    b.Alloc(b.Prog.rtType("CoroChanSelectV1"), false),
+	}
+}
+
+func (b Builder) requireCoroSelect(plan *CoroSelect) {
+	if b == nil || plan == nil || plan.fn == nil || plan.fn != b.Func || len(plan.states) != len(plan.ops) ||
+		plan.opsSlice.IsNil() || plan.candidates.IsNil() || plan.storage.IsNil() {
+		panic("ssa: invalid coroutine select plan")
+	}
+}
+
+// CoroChanSelectTry performs the randomized, nonblocking, non-panicking first
+// pass. It returns the runtime tuple (index, recvOK, tryOK, sendClosed).
+func (b Builder) CoroChanSelectTry(plan *CoroSelect) Expr {
+	b.requireCoroSelect(plan)
+	return b.Call(b.Pkg.rtFunc("CoroChanSelectTry"), plan.opsSlice)
+}
+
+// CoroChanSelectPark installs all physical cases at the compiler's exact
+// before-suspend point.
+func (b Builder) CoroChanSelectPark(plan *CoroSelect, g, handle, header Expr) {
+	b.requireCoroSelect(plan)
+	void := b.Prog.VoidPtr()
+	b.Call(
+		b.Pkg.rtFunc("CoroChanSelectPark"),
+		g,
+		handle,
+		header,
+		b.Convert(void, plan.candidates),
+		b.Convert(void, plan.storage),
+		plan.opsSlice,
+	)
+}
+
+// CoroChanSelectResume consumes the exact runtime decision and returns
+// (index, recvOK, typedStatus).
+func (b Builder) CoroChanSelectResume(plan *CoroSelect, g Expr) Expr {
+	b.requireCoroSelect(plan)
+	void := b.Prog.VoidPtr()
+	return b.Call(
+		b.Pkg.rtFunc("CoroChanSelectResume"),
+		g,
+		b.Convert(void, plan.candidates),
+		b.Convert(void, plan.storage),
+		plan.opsSlice,
+	)
+}
+
+// CoroChanSelectResult assembles the x/tools SSA tuple from the chosen prefix
+// and the receive-value storage shared by the fast and resumed paths.
+func (b Builder) CoroChanSelectResult(plan *CoroSelect, chosen, recvOK Expr) Expr {
+	b.requireCoroSelect(plan)
+	results := []llvm.Value{chosen.impl, recvOK.impl}
+	typs := []Type{b.Prog.Int(), b.Prog.Bool()}
+	for index, state := range plan.states {
+		if state.Send {
+			continue
+		}
+		etyp := b.Prog.Elem(state.Chan.Type)
+		typs = append(typs, etyp)
+		value := b.Load(Expr{b.impl.CreateExtractValue(plan.ops[index].impl, 1, ""), b.Prog.Pointer(etyp)})
+		results = append(results, value.impl)
+	}
+	return b.aggregateValue(b.Prog.Struct(typs...), results...)
+}
+
 // The Select instruction tests whether (or blocks until) one
 // of the specified sent or received states is entered.
 //
@@ -827,8 +926,7 @@ func (b Builder) Select(states []*SelectState, blocking bool) (ret Expr) {
 func (b Builder) selectOpsSlice(t Type, ops []Expr) Expr {
 	prog := b.Prog
 	telem := prog.Index(t)
-	size := SizeOf(prog, telem, int64(len(ops)))
-	opPtr := Expr{b.Alloca(size).impl, prog.Pointer(telem)}
+	opPtr := b.ArrayAlloca(telem, prog.Val(len(ops)))
 	for i, op := range ops {
 		b.Store(b.Advance(opPtr, prog.Val(i)), op)
 	}
