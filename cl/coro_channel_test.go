@@ -374,3 +374,45 @@ func TestCoroChannelCompilationCapabilityFailsClosed(t *testing.T) {
 		t.Fatalf("channel scheduler identity error = %v", err)
 	}
 }
+
+func TestCoroChannelPhysicalABIRejectsNilSelectChannel(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	prog, pkg, plan, functions := compileCoroChannelFixture(t, nil)
+	defer prog.Dispose()
+	module := pkg.Module()
+	defer module.Dispose()
+
+	var selectFn *ssa.Function
+	for _, fn := range functions {
+		if fn.Name() == "Select" {
+			selectFn = fn
+			break
+		}
+	}
+	if selectFn == nil {
+		t.Fatal("Select function not found")
+	}
+	var instruction *ssa.Select
+	for _, block := range selectFn.Blocks {
+		for _, candidate := range block.Instrs {
+			if candidate, ok := candidate.(*ssa.Select); ok {
+				instruction = candidate
+				break
+			}
+		}
+	}
+	if instruction == nil || len(instruction.States) == 0 || instruction.States[0] == nil {
+		t.Fatal("Select instruction has no concrete channel case")
+	}
+	instruction.States[0].Chan = nil
+	functionPlan, ok := plan.FunctionPlan(selectFn)
+	if !ok {
+		t.Fatal("Select function plan not found")
+	}
+	err := validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(
+		selectFn, functionPlan, plan, nil, true, true, false, false, "", true,
+	)
+	if err == nil || !strings.Contains(err.Error(), "channel select case 0 channel is nil") {
+		t.Fatalf("nil select channel validation error = %v", err)
+	}
+}

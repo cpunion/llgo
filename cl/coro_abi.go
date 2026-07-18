@@ -940,6 +940,9 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 					if state == nil {
 						return coroLeafInstructionError(fn, plan, instr, fmt.Sprintf("channel select case %d is nil", index))
 					}
+					if state.Chan == nil {
+						return coroLeafInstructionError(fn, plan, instr, fmt.Sprintf("channel select case %d channel is nil", index))
+					}
 					if err := validateCoroPhysicalChannelType(state.Chan.Type()); err != nil {
 						return coroLeafInstructionError(fn, plan, instr, fmt.Sprintf("channel select case %d type: %v", index, err))
 					}
