@@ -141,7 +141,7 @@ x/tools Go SSA
 - source logical block 到 physical LLVM tail 的映射；
 - 普通 compiler 的 cgo、debug、init 和 patch 行为。
 
-`ssa.CoroBuilder.SuspendCurrentBlock*` 为保留 PHI 的 logical predecessor，会修改 logical block 的 physical tail。该接口是合理的 backend primitive，但 frontend 每增加一种 fast-path/park/resume 协议，就必须手工选择 callback、dispatch block 和 join block。
+`ssa.CoroBuilder.SuspendCurrentBlock*` 为保留 Phi 的 logical predecessor，会修改 logical block 的 physical tail。该接口是合理的 backend primitive，但 frontend 每增加一种 fast-path/park/resume 协议，就必须手工选择 callback、dispatch block 和 join block。
 
 Phase 35 修复过 direct receive resume status 跳回 logical block 首部、重放 receive 前副作用的问题。这个错误不是 channel 算法本身造成的，而是“source logical block”与“suspend 后唯一 physical continuation”没有成为显式、可验证的 frontend 对象。`CoroOverlay` 应直接表达两者，emitter 不再猜 logical tail。
 
@@ -172,7 +172,7 @@ Phase 35 修复过 direct receive resume status 跳回 logical block 首部、�
 1. 按语义规则保守 join；或
 2. 证明差异只影响物理 name/layout；或
 3. 把它们分成不同的逻辑 identity；或
-4. fail closed。
+4. 以 fail-closed 方式拒绝。
 
 不能把任意一个 owner 的结果当作全局事实。迁移第一版采用第4项；在CallPlan和physical consumer有明确instance模型前不实现保守join。
 
@@ -291,7 +291,7 @@ freeze EmissionUniverse and LoweringFacts together
 
 closure 不能用尚未冻结的 FunctionID 构造 `EmissionInstanceID`，否则 identity 存在循环。`ProvisionalInstanceKey` 直接复用当前 `emissionFunctionOwnerKey{function *ssa.Function, owner *preparedEmissionPackage}`，必要时附加 patch/effective-context generation；它只在进程内存在。最终 ID 也不得包含自己的 plan/digest。
 
-迁移初期不必马上重写 `EmissionUniverse`：可以在现有 `materializeFunctionForOwner` 内建立 `LoweringFacts` cache，使现有 closure 仍负责 worklist，但 helper materialization、AnalyzeSSA callback 和 codegen audit 都读取同一份 facts。第一版若同一 FunctionID 的不同 owner 得出不同 local effect、managed edge 或 function-value schema，直接 fail closed；在有明确消费模型前不要先做保守 join。等行为等价后，再把 worklist 抽成 `ProgramModelBuilder`。
+迁移初期不必马上重写 `EmissionUniverse`：可以在现有 `materializeFunctionForOwner` 内建立 `LoweringFacts` cache，使现有 closure 仍负责 worklist，但 helper materialization、AnalyzeSSA callback 和 codegen audit 都读取同一份 facts。第一版若同一 FunctionID 的不同 owner 得出不同 local effect、managed edge 或 function-value schema，直接以 fail-closed 方式拒绝；在有明确消费模型前不要先做保守 join。等行为等价后，再把 worklist 抽成 `ProgramModelBuilder`。
 
 Demand、dynamic dispatch 或 host boundary 在 plan 后才确定，但其 thunk/boundary driver 不能在 closure 冻结后突然引入 managed edge。推荐让封闭 `EntryTemplateCatalog` 预先声明每种可能入口的 helper/primitive footprint，并在 closure 阶段按 root、function-value use 和 target capability 保守 materialize 候选；plan 只选择子集。若某类 target driver 无法满足这个约束，必须把 `closure -> plan -> entry footprint` 放入外层单调 fixed point，直到没有新增 instance/helper 后才分配最终 FunctionID 和 digest。
 
@@ -323,7 +323,7 @@ type VirtualStoragePlan struct {
 
 `DescriptorPlan` 是 capability/ABI 数据，LLVM CoroSplit 自动生成的 ramp/resume/destroy 也不是第二个 Go entry。
 
-单 primary 是 `FunctionID` 级约束，不是 owner instance 级约束。多个 `EmissionInstanceID` 只参与 normalization 和 layout projection；一个 target link unit 中只能有一个 instance 成为 defining `BodyArtifact`。若不同 owner 导致主体语义或 ABI 不同，builder 必须证明可合并、拆成不同逻辑 FunctionID，或 fail closed，不能只 join effect 后各生成一份 body。
+单 primary 是 `FunctionID` 级约束，不是 owner instance 级约束。多个 `EmissionInstanceID` 只参与 normalization 和 layout projection；一个 target link unit 中只能有一个 instance 成为 defining `BodyArtifact`。若不同 owner 导致主体语义或 ABI 不同，builder 必须证明可合并、拆成不同逻辑 FunctionID，或以 fail-closed 方式拒绝，不能只 join effect 后各生成一份 body。
 
 `VirtualStoragePlan` 只决定显式 compiler/runtime slot、签名、对齐和 descriptor 物理形式，不预先固定由 LLVM CoroSplit 决定的普通 value frame offset。需要 runtime 取址的 frame-owned slot 通过稳定 alloca/metadata 进入 CoroSplit；split 后再机械产生只读 `FinalFrameLayout/DescriptorMap` 并校验 target layout。这样 32/64 位、native/WASM 和不同 GC profile 的物理差异不会渗入 CoroOverlay 控制规则。
 
@@ -397,7 +397,7 @@ OpClass 应少而稳定：
 
 Timer、fd read、socket write、worker job 或某个 syscall number不是新的 OpClass。它们应通过普通 wrapper、generic operation record 和 `Park/ForeignOp/HostOp` primitive 表达。
 
-`Pure` 不能只表示“frontend 没看到 helper”。memcpy、compiler-rt、原子重试、target intrinsic 和 assembly loop 仍可能破坏 bounded-cost 或 GC 假设；recipe 必须提供可信 backend footprint，无法证明时降级为 `Lowered/Call`、增加 poll/offload，或由 post-codegen verifier fail closed。
+`Pure` 不能只表示“frontend 没看到 helper”。memcpy、compiler-rt、原子重试、target intrinsic 和 assembly loop 仍可能破坏 bounded-cost 或 GC 假设；recipe 必须提供可信 backend footprint，无法证明时降级为 `Lowered/Call`、增加 poll/offload，或由 post-codegen verifier 执行 fail-closed 拒绝。
 
 ### 6.3 LoweringRecipe
 
@@ -554,7 +554,7 @@ type OperationRecipe struct {
 4. backend 不得从 `Pure` op 发出未登记 managed call、suspend、panic/unwind、未知 allocation/barrier 或无界 backend loop。
 5. helper/call target 必须属于共同冻结的 emission closure。
 6. provisional instance/primitive ref 在 freeze 后全部解析为 canonical ID；digest 不包含 provisional pointer 或自引用 identity。
-7. 同一 logical helper identity 在一个 owner 中只能解析到一个 exact target；不同 owner 的语义差异在第一版 fail closed。
+7. 同一 logical helper identity 在一个 owner 中只能解析到一个 exact target；不同 owner 的语义差异在第一版以 fail-closed 方式拒绝。
 8. local effect/exec 是 op facts 的保守 join。
 9. function-value definition/use/escape projection与后续 FuncRep flow输入一致。
 10. `SuspendRegionContract` 的 begin/end、slot、alias 和 forbidden operation完整闭合。
@@ -573,7 +573,7 @@ type OperationRecipe struct {
 9. select protocol静态上只暴露一个 selected continuation；loser完成cancel/detach barrier后才允许 ready。
 10. runtime在 suspend期间可访问的地址只来自稳定 frame、operation、G或boundary storage。
 11. prepare/no-preempt region内没有 suspend、spawn、未登记call或 uncontrolled panic。
-12. PHI incoming 使用 source-edge mapping 到 generated continuation 的显式映射。
+12. Phi incoming 使用 source-edge mapping 到 generated continuation 的显式映射。
 13. defer参数求值一次，cleanup cursor保证LIFO且 deferred call park后不重复执行。
 14. return、panic、Goexit、abort和shutdown保留独立 control kind。
 15. 每条静态terminal path对final suspend、completion publication、destroy和frame free各有唯一合法调用位置。
@@ -583,7 +583,7 @@ type OperationRecipe struct {
 19. 一个函数的整个 coroutine body 只能由一个 backend 拥有，禁止旧/新 emitter 混拼 CFG。
 20. runtime ABI、layout hash、primitive schema和IR schema全部进入cache identity。
 
-静态 verifier 只能证明primitive调用次序、ticket/slot传递、continuation/outcome完备和contract覆盖，不能单独证明runtime状态机真的exactly once。result lease、detach、quiescence、resume/destroy和并发linearizability仍必须由runtime invariant审计、模型测试、race/shuffle和压力测试证明；两层证据缺一不可。
+静态 verifier 只能证明primitive调用次序、ticket/slot传递、continuation/outcome完备和contract覆盖，不能单独证明runtime状态机满足 exactly-once。result lease、detach、quiescence、resume/destroy和并发linearizability仍必须由runtime invariant审计、模型测试、race/shuffle和压力测试证明；两层证据缺一不可。
 
 ## 9. Go 语言与标准库能力审查
 
@@ -754,14 +754,14 @@ Op(frame-spilled for internal waits, registry-backed for external callbacks)
 
 - select进入时对已ready cases保持Go伪随机选择，而不是被source扫描或callback先后顺序永久偏置；
 - channel-to-channel/select-to-select的双端物理提交不会出现只赢一端、effect后回滚或两个Park半提交；
-- cancellation覆盖selected continuation时，已发生的物理effect和result lease仍能exactly once discard；
+- cancellation覆盖selected continuation时，已发生的物理effect和result lease仍按 exactly-once 规则 discard；
 - 所有loser从hchan/source摘除且producer strong-quiesced之后才允许frame destroy；
 - producer跨线程访问的Park/Op字段具备稳定地址、GC root和正确memory ordering；
 - producer不持有裸G/P/frame pointer，而是通过稳定registry lease取得P-neutral `ResumePacket`；packet在multi-P迁移、GC barrier和frame teardown期间保持有效；
 - native global/MPSC injection、registry pin和目标P选择在producer可直接enqueue前已经闭环；
 - idle arm、request coalescing和once-enqueue不会丢唤醒或形成ABA。
 
-因此建议把Park V3作为IR等价迁移后的独立feature-flag实验：只在deterministic fake source下用旧resolver比较允许outcome；真实并发trace不要求逐步相同，而用mixed channel/timer/select/cancel、双select pairing和frame teardown压力测试验证linearizability、exact-once和quiescence不变量。没有这些证据前，不应为了行数直接删除A/ack/B和detach/quiescence层。
+因此建议把Park V3作为IR等价迁移后的独立feature-flag实验：只在deterministic fake source下用旧resolver比较允许outcome；真实并发trace不要求逐步相同，而用mixed channel/timer/select/cancel、双select pairing和frame teardown压力测试验证linearizability、exactly-once和quiescence不变量。没有这些证据前，不应为了行数直接删除A/ack/B和detach/quiescence层。
 
 ## 11. LLVM backend 与平台兼容性
 
@@ -794,7 +794,7 @@ LLVM CoroSplit继续负责普通 SSA liveness和frame materialization。精确 G
 | RTOS/embedded | 静态执行模型候选，未验证 | 需要HAL clock/notification/ISR ingress、boundary driver和容量证明 |
 | baremetal | event-loop模型候选，未验证 | 需要main loop、IRQ mailbox、WFI/WFE、static/tinygc frame和production adapter |
 
-架构不要求每G native stack、libuv或BDWGC，但这只是兼容候选，不是平台完成度。当前production target adapter实际只有llgo native Linux/Darwin；`coro_target_none.go` 对queued host run与retained wait fail closed。缺少filesystem、process、socket或host async能力的平台仍按target capability决定可用package。
+架构不要求每G native stack、libuv或BDWGC，但这只是兼容候选，不是平台完成度。当前production target adapter实际只有llgo native Linux/Darwin；`coro_target_none.go` 对queued host run与retained wait采用fail-closed行为。缺少filesystem、process、socket或host async能力的平台仍按target capability决定可用package。
 
 ## 12. Cache、archive 与 summary
 
@@ -878,7 +878,7 @@ cl/coro_recipe_*.go        ordinary lowering recipe planning/emission pairs
 - 先增加集中 `EmissionLedger`：编译source instruction前安装 `EmissionSiteID`，managed helper resolver、explicit coroutine feature、panic/suspend都通过统一record API；若LLSSA调用无法集中观测，则增加call/control observer。未接入observer的类别只能标为尚未覆盖，不能宣称全量精确比较。
 - 将 canonical LoweringFacts/PrimitiveCatalog digest接入 `SSAPlan.CoroPlanDigest`、`internal/build.buildCoroPlan`、`cl.Compilation`、fingerprint和manifest，升级schema v9。
 
-验收：FunctionPlan、可执行LLVM CFG、runtime ABI和运行行为不变；cache/manifest digest与相关metadata按v9预期变化；已接入observer的预测/实际差异fail closed；fact mutation/cache schema测试通过。
+验收：FunctionPlan、可执行LLVM CFG、runtime ABI和运行行为不变；cache/manifest digest与相关metadata按v9预期变化；已接入observer的预测/实际差异触发fail-closed拒绝；fact mutation/cache schema测试通过。
 
 ### Phase C：analysis只消费facts
 
@@ -909,7 +909,7 @@ cl/coro_recipe_*.go        ordinary lowering recipe planning/emission pairs
 ### Phase F：按完整函数切换并删除重复实现
 
 - 按whole-function eligibility cohort依次切换pure-only、preempt、await/spawn、park/channel/select；一个函数的全部SuspendKind均被新backend支持后才切换。
-- 禁止同一coroutine physical body按op/feature混用两套emitter，否则PHI、continuation和logical tail没有唯一owner。
+- 禁止同一coroutine physical body按op/feature混用两套emitter，否则Phi、continuation和logical tail没有唯一owner。
 - 删除旧instruction allowlist、pure SSA镜像、直接CFG callback和timer专用proof。
 - 将 `currentCoro` 收缩到新emitter内部。
 
@@ -1058,7 +1058,7 @@ Phase A先报告多次运行中位数和离散度；取得稳定噪声后，再�
 下一实施PR只做 Phase A/B 的最小可验收切片：
 
 - 新增 `internal/coro/ir` 的provisional/frozen site ID、稀疏LoweringFacts、canonical semantic dump和verifier；
-- 在 `EmissionUniverse.materializeFunctionForOwner` 中生成owner-scoped facts，owner投影不同先fail closed；
+- 在 `EmissionUniverse.materializeFunctionForOwner` 中生成owner-scoped facts，owner投影不同先以fail-closed方式拒绝；
 - 增加集中EmissionLedger observer，先覆盖managed helper、explicit coroutine feature、panic和suspend；
 - 让现有 lowered helper、intrinsic和frame retention路径读取或对照这些facts；
 - 将facts/catalog digest以schema v9接入build/cache/manifest；
