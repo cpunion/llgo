@@ -686,7 +686,7 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 		}
 		if ctx.buildConf.EnableCoroWorker {
 			write("worker-v1=" +
-				coroWorkerParkSymbolV1 + "(g:ptr,handle:ptr,header:ptr,state:ptr,fn:uintptr,argc:u32,a0:uintptr,a1:uintptr,a2:uintptr,a3:uintptr,a4:uintptr,a5:uintptr)->void;" +
+				coroWorkerParkSymbolV1 + "(g:ptr,handle:ptr,header:ptr,state:ptr,fn:uintptr,argc:u32,a0:uintptr,a1:uintptr,a2:uintptr,a3:uintptr,a4:uintptr,a5:uintptr,a6:uintptr,a7:uintptr,a8:uintptr)->void;" +
 				coroWorkerResumeSymbolV1 + "(g:ptr,state:ptr,r1:*uintptr,r2:*uintptr,errno:*uintptr)->u32")
 		}
 		write("header=physical-abi-v1")

@@ -72,7 +72,7 @@ func __llgo_coro_worker_park_v1(
 	g, handle, header, storage unsafe.Pointer,
 	function uintptr,
 	argc uint32,
-	a0, a1, a2, a3, a4, a5 uintptr,
+	a0, a1, a2, a3, a4, a5, a6, a7, a8 uintptr,
 ) {
 	state := (*CoroWorkerParkV1)(storage)
 	if g == nil || handle == nil || header == nil || state == nil ||
@@ -104,7 +104,7 @@ func __llgo_coro_worker_park_v1(
 	}
 	state.ticket = ticket
 	state.operation = operation
-	args := [coroworker.MaxArgs]uintptr{a0, a1, a2, a3, a4, a5}
+	args := [coroworker.MaxArgs]uintptr{a0, a1, a2, a3, a4, a5, a6, a7, a8}
 	if !coroProgramCommitNativeWorkerSubmissionV1((*coroG)(g), operation, function, argc, &args) {
 		coroWorkerAbortV1("cannot commit coroutine worker submission")
 	}

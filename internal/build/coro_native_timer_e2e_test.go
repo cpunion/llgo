@@ -467,6 +467,7 @@ func buildCoroNativeTimerE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor_driver_timer_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_spawn.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_native_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_worker_native_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_wait_timer_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_timer_owner_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_ingress_test_llgo.go"),
@@ -482,12 +483,14 @@ func buildCoroNativeTimerE2ERuntimeIsland(t *testing.T, temp string) []string {
 		coroNativeIngressTestBuildTag,
 	}
 	allowed := map[string]bool{
-		"command-line-arguments":                               true,
-		"github.com/goplus/llgo/runtime/internal/coro":         true,
-		"github.com/goplus/llgo/runtime/internal/coroalloc":    true,
-		"github.com/goplus/llgo/runtime/internal/coroclock":    true,
-		"github.com/goplus/llgo/runtime/internal/corodoorbell": true,
-		"github.com/goplus/llgo/runtime/internal/corotimer":    true,
+		"command-line-arguments":                                     true,
+		"github.com/goplus/llgo/runtime/internal/clite/pthread/sync": true,
+		"github.com/goplus/llgo/runtime/internal/coro":               true,
+		"github.com/goplus/llgo/runtime/internal/coroalloc":          true,
+		"github.com/goplus/llgo/runtime/internal/coroclock":          true,
+		"github.com/goplus/llgo/runtime/internal/corodoorbell":       true,
+		"github.com/goplus/llgo/runtime/internal/corotimer":          true,
+		"github.com/goplus/llgo/runtime/internal/coroworker":         true,
 	}
 	seen := make(map[string]bool, len(allowed))
 	var objects []string
@@ -519,8 +522,9 @@ func buildCoroNativeTimerE2ERuntimeIsland(t *testing.T, temp string) []string {
 			t.Fatalf("native timer runtime did not emit required module %q", id)
 		}
 	}
-	if len(objects) != len(allowed) {
-		t.Fatalf("native timer runtime objects = %d, want exactly %d", len(objects), len(allowed))
+	objects = append(objects, buildCoroNativeWorkerCallObject(t, temp))
+	if len(objects) != len(allowed)+1 {
+		t.Fatalf("native timer runtime objects = %d, want exactly %d package objects plus one worker leaf", len(objects), len(allowed))
 	}
 	return objects
 }
@@ -607,7 +611,7 @@ func coroNativeTimerE2ENMHasSymbol(output, want string) bool {
 
 func assertCoroNativeTimerE2ENoLegacyDependencies(t *testing.T, label, symbols string) {
 	t.Helper()
-	for _, forbidden := range []string{"uv_", "GC_", "pthread_"} {
+	for _, forbidden := range []string{"uv_", "GC_"} {
 		if strings.Contains(symbols, forbidden) {
 			t.Fatalf("native timer %s unexpectedly depends on %q:\n%s", label, forbidden, symbols)
 		}

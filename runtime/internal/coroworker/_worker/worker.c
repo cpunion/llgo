@@ -19,7 +19,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-enum { LLGO_CORO_WORKER_MAX_ARGS_V1 = 6 };
+enum { LLGO_CORO_WORKER_MAX_ARGS_V1 = 9 };
 
 struct llgo_coro_worker_result_v1 {
     uintptr_t r1;
@@ -34,6 +34,9 @@ typedef uintptr_t (*llgo_coro_worker_fn3_v1)(uintptr_t, uintptr_t, uintptr_t);
 typedef uintptr_t (*llgo_coro_worker_fn4_v1)(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
 typedef uintptr_t (*llgo_coro_worker_fn5_v1)(uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t);
 typedef uintptr_t (*llgo_coro_worker_fn6_v1)(uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t);
+typedef uintptr_t (*llgo_coro_worker_fn7_v1)(uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t);
+typedef uintptr_t (*llgo_coro_worker_fn8_v1)(uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t);
+typedef uintptr_t (*llgo_coro_worker_fn9_v1)(uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t);
 
 bool __llgo_coro_worker_call_v1(
     uintptr_t function,
@@ -67,6 +70,15 @@ bool __llgo_coro_worker_call_v1(
         break;
     case 6:
         r1 = ((llgo_coro_worker_fn6_v1)function)(args[0], args[1], args[2], args[3], args[4], args[5]);
+        break;
+    case 7:
+        r1 = ((llgo_coro_worker_fn7_v1)function)(args[0], args[1], args[2], args[3], args[4], args[5], args[6]);
+        break;
+    case 8:
+        r1 = ((llgo_coro_worker_fn8_v1)function)(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]);
+        break;
+    case 9:
+        r1 = ((llgo_coro_worker_fn9_v1)function)(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8]);
         break;
     default:
         return false;

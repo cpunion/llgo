@@ -504,6 +504,7 @@ func buildCoroNativeIngressE2ERuntimeIsland(t *testing.T, temp string) []string 
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor_driver_legacy.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_spawn.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_native_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_worker_native_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_wait_pipe_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_ingress_test_llgo.go"),
 	}
@@ -513,10 +514,12 @@ func buildCoroNativeIngressE2ERuntimeIsland(t *testing.T, temp string) []string 
 	conf.Tags = "nogc"
 	conf.compilerBuildTags = []string{"llgo_coro", coroNativePipeBuildTag, coroNativeIngressTestBuildTag}
 	allowed := map[string]bool{
-		"command-line-arguments":                               true,
-		"github.com/goplus/llgo/runtime/internal/coro":         true,
-		"github.com/goplus/llgo/runtime/internal/coroalloc":    true,
-		"github.com/goplus/llgo/runtime/internal/corodoorbell": true,
+		"command-line-arguments":                                     true,
+		"github.com/goplus/llgo/runtime/internal/clite/pthread/sync": true,
+		"github.com/goplus/llgo/runtime/internal/coro":               true,
+		"github.com/goplus/llgo/runtime/internal/coroalloc":          true,
+		"github.com/goplus/llgo/runtime/internal/corodoorbell":       true,
+		"github.com/goplus/llgo/runtime/internal/coroworker":         true,
 	}
 	seen := make(map[string]bool, len(allowed))
 	var objects []string
@@ -548,6 +551,7 @@ func buildCoroNativeIngressE2ERuntimeIsland(t *testing.T, temp string) []string 
 			t.Fatalf("native ingress runtime did not emit required module %q", id)
 		}
 	}
+	objects = append(objects, buildCoroNativeWorkerCallObject(t, temp))
 	return objects
 }
 

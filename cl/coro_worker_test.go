@@ -40,10 +40,10 @@ const coroWorkerTestSource = `package foo
 import _ "unsafe"
 
 //go:linkname raw llgo.syscall
-func raw(fn, a0, a1, a2, a3, a4, a5 uintptr) (uintptr, uintptr, uintptr)
+func raw(fn, a0, a1, a2, a3, a4, a5, a6, a7, a8 uintptr) (uintptr, uintptr, uintptr)
 
-func Root(fn, a0, a1, a2, a3, a4, a5 uintptr) (uintptr, uintptr, uintptr) {
-	return raw(fn, a0, a1, a2, a3, a4, a5)
+func Root(fn, a0, a1, a2, a3, a4, a5, a6, a7, a8 uintptr) (uintptr, uintptr, uintptr) {
+	return raw(fn, a0, a1, a2, a3, a4, a5, a6, a7, a8)
 }
 `
 

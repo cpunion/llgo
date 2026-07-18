@@ -17,9 +17,10 @@
 package coroworker
 
 // MaxArgs is the fixed V1 scalar argument capacity. It covers the uintptr-only
-// llgo.syscall families used by POSIX file and socket paths. Wider or typed
-// foreign signatures fail closed before submission.
-const MaxArgs = 6
+// llgo.syscall families used by POSIX file and socket paths, including Go's
+// RawSyscall9 dispatch shape. Wider or typed foreign signatures fail closed
+// before submission.
+const MaxArgs = 9
 
 // Result is the pointer-free result copied into a WorkerOperationSource
 // payload before publication.

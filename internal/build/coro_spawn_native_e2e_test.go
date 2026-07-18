@@ -545,6 +545,7 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor_driver_legacy.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_spawn.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_native_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_worker_native_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_wait_pipe_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan_coro.go"),
@@ -567,6 +568,7 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 		"github.com/goplus/llgo/runtime/internal/coro":               true,
 		"github.com/goplus/llgo/runtime/internal/coroalloc":          true,
 		"github.com/goplus/llgo/runtime/internal/corodoorbell":       true,
+		"github.com/goplus/llgo/runtime/internal/coroworker":         true,
 		"github.com/goplus/llgo/runtime/internal/runtime/math":       true,
 	}
 	seen := make(map[string]bool, len(allowed))
@@ -604,8 +606,9 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 			t.Fatalf("production coroutine runtime island did not emit required module %q", id)
 		}
 	}
-	if len(objects) != len(allowed) {
-		t.Fatalf("production coroutine runtime island objects = %d, want exactly %d", len(objects), len(allowed))
+	objects = append(objects, buildCoroNativeWorkerCallObject(t, temp))
+	if len(objects) != len(allowed)+1 {
+		t.Fatalf("production coroutine runtime island objects = %d, want exactly %d package objects plus one worker leaf", len(objects), len(allowed))
 	}
 	return objects
 }
