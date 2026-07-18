@@ -20,10 +20,12 @@ import "testing"
 
 func TestWorkerParkOwnerPrepareCompleteAndFinish(t *testing.T) {
 	p := new(P)
+	driver := new(ExecutorDriver)
+	registry := new(ExecutorRegistry)
 	waits := new(WaitRegistrationTable)
 	workers := new(WorkerOperationSource)
-	sources := new(ExecutorSourceSet)
-	if !bindExecutorSourceSet(sources, p, ExecutorSourceCatalog{Waits: waits, Worker: workers}) {
+	executor := registerTestExecutor(t, registry)
+	if !BindExecutorSourceCatalog(driver, p, registry, executor, ExecutorSourceCatalog{Waits: waits, Worker: workers}) {
 		t.Fatal("bind worker owner catalog")
 	}
 	task := newYieldingTestG(t, "worker-owner")
@@ -50,11 +52,20 @@ func TestWorkerParkOwnerPrepareCompleteAndFinish(t *testing.T) {
 	if workers.Post(id, payload) != WorkerOperationPosted {
 		t.Fatal("post worker owner result")
 	}
-	if scan, ok := sources.publishPass(p, 0, false); !ok || scan.worker != 1 {
-		t.Fatalf("publish worker owner result = (%+v, %t)", scan, ok)
+	var complete ExecutorPollProgress
+	for entries := 0; entries < 1000; entries++ {
+		progress, ok := PollExecutorSlice(driver, 1)
+		if !ok || progress.Used != 1 {
+			t.Fatalf("bounded worker owner poll %d = (%+v, %t)", entries, progress, ok)
+		}
+		if progress.Complete {
+			complete = progress
+			break
+		}
 	}
-	if promoted, visits, ok := sources.resolvePublishedEpoch(p); !ok || promoted != 1 || visits != 1 {
-		t.Fatalf("resolve worker owner result = (%d, %d, %t)", promoted, visits, ok)
+	if !complete.Complete || complete.Worker != 1 || complete.WorkerLost != 0 ||
+		complete.Completed != 1 || complete.Promoted != 1 || complete.ApplyVisits != 1 {
+		t.Fatalf("complete bounded worker owner poll = %+v", complete)
 	}
 	if g, ok := NextRunnable(p); !ok || g != task.g {
 		t.Fatal("dequeue completed worker owner")
@@ -68,8 +79,29 @@ func TestWorkerParkOwnerPrepareCompleteAndFinish(t *testing.T) {
 	if !FinishSingleWorkerPark(task.g, workers, id, lease, false, &got) || got != payload {
 		t.Fatalf("finish worker owner result = %+v, want %+v", got, payload)
 	}
-	finishWaitTestTask(t, p, task, action)
-	if !unbindExecutorSourceSet(sources, p) || !workers.CanRelease() || !waits.CanRelease() {
+	task.frame.header.SuspendReason = uint16(SuspendFrameComplete)
+	task.frame.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PrepareComplete(task.g, task.handle, task.frame.header) {
+		t.Fatal("prepare worker owner completion")
+	}
+	action, ok = Resumed(p, task.g, action)
+	if !ok || action.Kind != ActionCheckDestroy {
+		t.Fatalf("resume worker owner completion = (%+v, %t)", action, ok)
+	}
+	action, ok = Checked(p, task.g, action, true)
+	if !ok || action.Kind != ActionDestroy {
+		t.Fatalf("check worker owner destroy = (%+v, %t)", action, ok)
+	}
+	releaseTestFrame(t, task.g, task.frame)
+	closeAction, ok := Destroyed(p, task.g, action)
+	if !ok || closeAction.Kind != ActionTerminalExecutorClose || closeAction.Handle != nil {
+		t.Fatalf("begin worker owner terminal close = (%+v, %t)", closeAction, ok)
+	}
+	closed, terminal, ok := ConfirmTerminalExecutorClose(driver)
+	if !ok || closed != task.g || terminal.Kind != ActionComplete || terminal.Handle != nil {
+		t.Fatalf("confirm worker owner terminal close = (%p, %+v, %t)", closed, terminal, ok)
+	}
+	if !workers.CanRelease() || !waits.CanRelease() || !registry.CanRelease() {
 		t.Fatal("release worker owner catalog")
 	}
 }

@@ -24,8 +24,8 @@ import (
 )
 
 var (
-	_ [56 - unsafe.Sizeof(ExecutorPollProgress{})]byte
-	_ [unsafe.Sizeof(ExecutorPollProgress{}) - 56]byte
+	_ [64 - unsafe.Sizeof(ExecutorPollProgress{})]byte
+	_ [unsafe.Sizeof(ExecutorPollProgress{}) - 64]byte
 )
 
 func TestExecutorPollProgressPODLayout(t *testing.T) {
@@ -33,14 +33,14 @@ func TestExecutorPollProgressPODLayout(t *testing.T) {
 		t.Fatalf("executor progress alignment = %d, want natural uint32/int64 alignment", alignment)
 	}
 	if unsafe.Offsetof(ExecutorPollProgress{}.Used) != 0 ||
-		unsafe.Offsetof(ExecutorPollProgress{}.NextDeadline) != 40 ||
-		unsafe.Offsetof(ExecutorPollProgress{}.Epochs) != 48 ||
-		unsafe.Offsetof(ExecutorPollProgress{}.Complete) != 49 ||
-		unsafe.Offsetof(ExecutorPollProgress{}.More) != 50 ||
-		unsafe.Offsetof(ExecutorPollProgress{}.Blocked) != 51 ||
-		unsafe.Offsetof(ExecutorPollProgress{}.HasDeadline) != 52 ||
-		unsafe.Offsetof(ExecutorPollProgress{}.AtomicResolve) != 53 ||
-		unsafe.Offsetof(ExecutorPollProgress{}.Overshot) != 54 {
+		unsafe.Offsetof(ExecutorPollProgress{}.NextDeadline) != 48 ||
+		unsafe.Offsetof(ExecutorPollProgress{}.Epochs) != 56 ||
+		unsafe.Offsetof(ExecutorPollProgress{}.Complete) != 57 ||
+		unsafe.Offsetof(ExecutorPollProgress{}.More) != 58 ||
+		unsafe.Offsetof(ExecutorPollProgress{}.Blocked) != 59 ||
+		unsafe.Offsetof(ExecutorPollProgress{}.HasDeadline) != 60 ||
+		unsafe.Offsetof(ExecutorPollProgress{}.AtomicResolve) != 61 ||
+		unsafe.Offsetof(ExecutorPollProgress{}.Overshot) != 62 {
 		t.Fatalf("executor progress layout offsets changed: %+v", ExecutorPollProgress{})
 	}
 	typeOf := reflect.TypeOf(ExecutorPollProgress{})
