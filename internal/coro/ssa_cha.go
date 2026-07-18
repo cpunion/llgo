@@ -59,12 +59,22 @@ func restrictedSSACHACandidatesWithDynamicImplements(
 	}
 	var funcsBySignature typeutil.Map
 	methodsByID := make(map[string][]*ssa.Function)
+	addressTaken := restrictedSSAAddressTakenFunctions(functions)
 	for _, fn := range functions {
 		if fn == nil || fn.Signature == nil {
 			continue
 		}
 		if fn.Signature.Recv() == nil {
 			if fn.Name() == "init" && fn.Synthetic == "package initializer" {
+				continue
+			}
+			// A scalar dynamic call can receive only a function that is actually
+			// materialized as a first-class value in the frozen program. Indexing
+			// every same-signature top-level function makes unrelated entry points
+			// such as main.main descriptor-backed merely because some func() value
+			// is open elsewhere. An external value with no frozen source remains
+			// open; it does not authorize invented in-program targets.
+			if !addressTaken[fn] {
 				continue
 			}
 			matches, _ := funcsBySignature.At(fn.Signature).([]*ssa.Function)
@@ -146,6 +156,35 @@ func restrictedSSACHACandidatesWithDynamicImplements(
 		}
 	}
 	return result, nil
+}
+
+func restrictedSSAAddressTakenFunctions(functions []*ssa.Function) map[*ssa.Function]bool {
+	result := make(map[*ssa.Function]bool)
+	operands := make([]*ssa.Value, 0, 8)
+	for _, owner := range functions {
+		if owner == nil {
+			continue
+		}
+		for _, block := range owner.Blocks {
+			for _, instruction := range block.Instrs {
+				operands = instruction.Operands(operands[:0])
+				for _, operand := range operands {
+					if operand == nil {
+						continue
+					}
+					target, ok := (*operand).(*ssa.Function)
+					if !ok || target == nil {
+						continue
+					}
+					if call, ok := instruction.(ssa.CallInstruction); ok && operand == &call.Common().Value && call.Common().StaticCallee() == target {
+						continue
+					}
+					result[target] = true
+				}
+			}
+		}
+	}
+	return result
 }
 
 func restrictedCHATypeString(typ types.Type) string {

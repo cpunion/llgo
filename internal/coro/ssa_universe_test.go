@@ -309,6 +309,31 @@ func invokeB(value Interface) { value.Method() }
 	}
 }
 
+func TestRestrictedSSACHAIndexesOnlyAddressTakenScalarFunctions(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "address_taken.go", `package coroid
+var callback func()
+func selected() {}
+func unrelated() {}
+func install() { callback = selected }
+func invoke() { callback() }
+`)
+	selected := packageFunction(t, pkg, "selected")
+	unrelated := packageFunction(t, pkg, "unrelated")
+	invoke := packageFunction(t, pkg, "invoke")
+	functions := matchingFunctions(prog, func(fn *ssa.Function) bool {
+		return fn.Pkg == pkg
+	})
+	candidates := restrictedSSACHACandidates(functions)
+	call := onlyNonBuiltinCall(t, invoke)
+	targets := candidates[call]
+	if _, ok := targets[selected]; !ok {
+		t.Fatalf("dynamic call candidates = %v, want address-taken selected", targets)
+	}
+	if _, ok := targets[unrelated]; ok {
+		t.Fatalf("dynamic call candidates include unrelated same-signature function: %v", targets)
+	}
+}
+
 func TestAnalyzeSSAEmissionUniverseRejectsMissingRootAndProgram(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "source.go", "package coroid; func root() {}; func other() {}")
 	root := packageFunction(t, pkg, "root")
