@@ -122,6 +122,7 @@ func Memset(s Pointer, c Int, n uintptr) Pointer
 //go:linkname Memchr C.memchr
 func Memchr(s Pointer, c Int, n uintptr) Pointer
 
+//llgo:coro noblock
 //go:linkname Memcmp C.memcmp
 func Memcmp(s1, s2 Pointer, n uintptr) Int
 
