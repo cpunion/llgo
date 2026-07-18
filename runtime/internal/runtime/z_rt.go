@@ -82,7 +82,12 @@ func init() {
 // TracePanic prints panic message.
 func TracePanic(v any) {
 	print("panic: ")
-	printany(v)
+	// TracePanic is the terminal, no-return fallback of the legacy panic ABI.
+	// It must remain synchronously callable even when v implements Error or
+	// String with a coroutine-capable method. User formatting belongs to the
+	// ordinary panic pre-format/cleanup path; invoking it here would attempt to
+	// suspend after the legacy unwinder has already abandoned that path.
+	printanyraw(v)
 	println("\n")
 }
 
