@@ -96,7 +96,10 @@ func coroStdlibSyncAcceptanceConfig(fixture coroStdlibSyncFixture, output string
 	conf.EnableCoroChannel = fixture.wantGo
 	conf.EnableCoroWorker = true
 	conf.CoroPlanBuilder = func(input CoroPlanInput) (*coro.SSAPlan, error) {
-		return input.Analyze(nil, coro.SSAConfig{MaxPlainInstructions: -1})
+		return input.Analyze(nil, coro.SSAConfig{
+			DynamicResolution:    coro.DynamicCHAClosed,
+			MaxPlainInstructions: -1,
+		})
 	}
 	return conf
 }

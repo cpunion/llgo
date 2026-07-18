@@ -48,6 +48,7 @@ type plannedFunctionSymbol struct {
 	frameRetentionABI string
 	coroPlan          *coro.SSAPlan
 	emission          *EmissionUniverse
+	interfacePlain    *coroClosedInterfacePlainPlan
 }
 
 // resolveFunctionSymbol is shared by function definitions and declarations so
@@ -99,6 +100,7 @@ func (p *context) resolveFunctionSymbol(fn *ssa.Function) (plannedFunctionSymbol
 	entry.frameRetentionABI = p.compilation.CoroFrameRetentionABI
 	entry.coroPlan = p.compilation.CoroPlan
 	entry.emission = p.compilation.EmissionUniverse
+	entry.interfacePlain = p.compilation.coroClosedInterfacePlain
 	if p.compilation.CoroPlan.IgnoresBody(fn) {
 		return entry, fmt.Errorf("coroutine entry resolution: Go-emitted function %q has an ignored SSA body", plan.ID)
 	}
@@ -180,6 +182,9 @@ func (e plannedFunctionSymbol) checkSupported() error {
 		return fmt.Errorf("coroutine explicit-status panic ABI: managed plain function %q has no certified hidden-outcome/unwind contract", e.plan.ID)
 	}
 	if e.plan.FuncRep == coro.Dispatch {
+		if e.interfacePlain.acceptsTarget(e.function, e.plan) {
+			return nil
+		}
 		if !e.plainDispatch {
 			return fmt.Errorf("coroutine entry resolution: function %q requires an unimplemented dispatch descriptor", e.plan.ID)
 		}
@@ -268,6 +273,12 @@ func (c *Compilation) preflightCoroPlan() error {
 			c.coroPreflightErr = err
 			return
 		}
+		interfacePlain, err := analyzeCoroClosedInterfacePlainPlan(c.CoroPlan, c.EnableCoroExplicitStatusPanicABI)
+		if err != nil {
+			c.coroPreflightErr = err
+			return
+		}
+		c.coroClosedInterfacePlain = interfacePlain
 		if c.EnableCoroChildAwait {
 			if err := validateCoroRootEntries(c.CoroPlan); err != nil {
 				c.coroPreflightErr = err
@@ -301,6 +312,7 @@ func (c *Compilation) preflightCoroPlan() error {
 				frameRetentionABI: c.CoroFrameRetentionABI,
 				coroPlan:          c.CoroPlan,
 				emission:          c.EmissionUniverse,
+				interfacePlain:    c.coroClosedInterfacePlain,
 			}
 			if err := entry.checkSupported(); err != nil {
 				c.coroPreflightErr = err
@@ -327,7 +339,7 @@ func (c *Compilation) preflightCoroPlan() error {
 			}
 		}
 		if c.EnableCoroPlainDispatch {
-			c.coroPreflightErr = validateCoroPlainDispatchConsumers(c.CoroPlan)
+			c.coroPreflightErr = validateCoroPlainDispatchConsumers(c.CoroPlan, c.coroClosedInterfacePlain)
 		}
 	})
 	return c.coroPreflightErr

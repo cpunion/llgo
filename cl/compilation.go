@@ -109,8 +109,9 @@ type Compilation struct {
 	// before any package enters LLVM codegen.
 	EmissionUniverse *EmissionUniverse
 
-	coroPreflight    sync.Once
-	coroPreflightErr error
+	coroPreflight            sync.Once
+	coroPreflightErr         error
+	coroClosedInterfacePlain *coroClosedInterfacePlainPlan
 }
 
 func (c *Compilation) validateCoroCacheIdentity() error {

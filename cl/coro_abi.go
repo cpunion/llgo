@@ -983,6 +983,15 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 					// noinit/inline intrinsics need no await/plain entry.
 					continue
 				}
+				if instr.Common().IsInvoke() {
+					if explicitPanic {
+						return coroLeafInstructionError(fn, plan, instr, "closed interface plain invoke requires the legacy panic ABI")
+					}
+					if _, invokeErr := resolveCoroClosedInterfacePlainCall(whole, instr); invokeErr != nil {
+						return coroLeafInstructionError(fn, plan, instr, "unsupported interface invoke: "+invokeErr.Error())
+					}
+					continue
+				}
 				callee, calleePlan, err := resolveCoroStaticAwait(whole, plan, instr)
 				if err == nil {
 					if err := validateCoroLeafPhysicalSignature(calleePlan, callee.Signature); err != nil {
@@ -1503,6 +1512,11 @@ func validateCoroPhysicalConsumersCapabilities(plan *coro.SSAPlan, childAwait, s
 					if common := call.Common(); common != nil {
 						if _, builtin := common.Value.(*ssa.Builtin); builtin {
 							continue
+						}
+						if function.Plan.Emission == coro.EmitCoroutine && common.IsInvoke() {
+							if _, err := resolveCoroClosedInterfacePlainCall(plan, call); err != nil {
+								return coroLeafInstructionError(fn, function.Plan, instr, "unsupported interface invoke: "+err.Error())
+							}
 						}
 					}
 					callPlan, found := plan.CallPlan(call)

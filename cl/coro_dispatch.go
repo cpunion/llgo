@@ -135,7 +135,7 @@ func coroPlainDispatchSourceScalar(typ types.Type) bool {
 	}
 }
 
-func validateCoroPlainDispatchConsumers(plan *coro.SSAPlan) error {
+func validateCoroPlainDispatchConsumers(plan *coro.SSAPlan, interfacePlain *coroClosedInterfacePlainPlan) error {
 	if plan == nil {
 		return fmt.Errorf("coroutine plain dispatch ABI requires a compilation plan")
 	}
@@ -188,6 +188,9 @@ func validateCoroPlainDispatchConsumers(plan *coro.SSAPlan) error {
 					return coroPlainDispatchInstructionError(fn, instr, "call has no compilation CallPlan")
 				}
 				if callPlan.Rep != coro.Dispatch {
+					continue
+				}
+				if interfacePlain.acceptsCall(call) {
 					continue
 				}
 				if err := validateCoroPlainDispatchCall(plan, fn, call, callPlan); err != nil {
@@ -602,6 +605,11 @@ func (p *context) tryCompileCoroPlainDispatchCall(b llssa.Builder, call *ssa.Cal
 	}
 	callPlan, found := p.compilation.CoroPlan.CallPlan(call)
 	if !found || callPlan.Rep != coro.Dispatch {
+		return llssa.Expr{}, false
+	}
+	if p.compilation.coroClosedInterfacePlain.acceptsCall(call) {
+		// Preserve the ordinary LLGo itab invoke. The closed candidate proof is
+		// a scheduling constraint, not a second function-value representation.
 		return llssa.Expr{}, false
 	}
 	if err := validateCoroPlainDispatchCall(p.compilation.CoroPlan, call.Parent(), call, callPlan); err != nil {
