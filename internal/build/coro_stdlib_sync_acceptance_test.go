@@ -37,20 +37,22 @@ import (
 const coroStdlibAcceptanceEnv = "LLGO_CORO_STDLIB_ACCEPTANCE"
 
 type coroStdlibSyncFixture struct {
-	name       string
-	dir        string
-	wantSource []string
-	wantGo     bool
-	args       func(*testing.T) []string
-	check      func(*testing.T, time.Duration)
+	name             string
+	dir              string
+	wantSource       []string
+	wantSchedulerABI string
+	wantGo           bool
+	args             func(*testing.T) []string
+	check            func(*testing.T, time.Duration)
 }
 
 func coroStdlibSyncFixtures() []coroStdlibSyncFixture {
 	return []coroStdlibSyncFixture{
 		{
-			name:       "time",
-			dir:        "./_testgo/coro_stdlib_time_sleep",
-			wantSource: []string{"time.Sleep("},
+			name:             "time",
+			dir:              "./_testgo/coro_stdlib_time_sleep",
+			wantSource:       []string{"time.Sleep("},
+			wantSchedulerABI: coro.SchedulerProgramBootstrapWorkerABIV0,
 			check: func(t *testing.T, elapsed time.Duration) {
 				t.Helper()
 				// The child sleeps for 200 ms. Keep enough margin for coarse host
@@ -61,20 +63,125 @@ func coroStdlibSyncFixtures() []coroStdlibSyncFixture {
 			},
 		},
 		{
-			name:       "file",
-			dir:        "./_testgo/coro_stdlib_file_rw",
-			wantSource: []string{"os.OpenFile(", ".Write(", ".Read("},
+			name:             "file",
+			dir:              "./_testgo/coro_stdlib_file_rw",
+			wantSource:       []string{"os.OpenFile(", ".Write(", ".Read("},
+			wantSchedulerABI: coro.SchedulerProgramBootstrapWorkerABIV0,
 			args: func(t *testing.T) []string {
 				t.Helper()
 				return []string{filepath.Join(t.TempDir(), "roundtrip.txt")}
 			},
 		},
 		{
-			name:       "tcp",
-			dir:        "./_testgo/coro_stdlib_tcp_loopback",
-			wantSource: []string{"net.ListenTCP(", "net.DialTCP(", ".AcceptTCP(", ".Write(", ".Read("},
-			wantGo:     true,
+			name:             "tcp",
+			dir:              "./_testgo/coro_stdlib_tcp_loopback",
+			wantSource:       []string{"net.ListenTCP(", "net.DialTCP(", ".AcceptTCP(", ".Write(", ".Read("},
+			wantSchedulerABI: coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
+			wantGo:           true,
 		},
+	}
+}
+
+func coroStdlibSyncAcceptanceConfig(fixture coroStdlibSyncFixture, output string) *Config {
+	conf := NewDefaultConf(ModeBuild)
+	conf.OutFile = output
+	conf.ForceRebuild = true
+	conf.EnableCoroEntryResolution = true
+	conf.EnableCoroPhysicalABI = true
+	conf.EnableCoroChildAwait = true
+	conf.EnableCoroPlainDispatch = true
+	conf.EnableCoroProgramBootstrapABI = true
+	conf.EnableCoroProgramBootstrapRun = true
+	conf.EnableCoroClosedStaticSpawn = fixture.wantGo
+	conf.EnableCoroChannel = fixture.wantGo
+	conf.EnableCoroWorker = true
+	conf.CoroPlanBuilder = func(input CoroPlanInput) (*coro.SSAPlan, error) {
+		return input.Analyze(nil, coro.SSAConfig{MaxPlainInstructions: -1})
+	}
+	return conf
+}
+
+func TestCoroStdlibSyncAcceptanceConfiguration(t *testing.T) {
+	for _, fixture := range coroStdlibSyncFixtures() {
+		fixture := fixture
+		t.Run(fixture.name, func(t *testing.T) {
+			conf := coroStdlibSyncAcceptanceConfig(fixture, filepath.Join(t.TempDir(), "acceptance"))
+			if !conf.EnableCoroWorker {
+				t.Fatal("synchronous stdlib acceptance must enable the native worker capability")
+			}
+			if got := activeCoroSchedulerABIVersion(conf); got != fixture.wantSchedulerABI {
+				t.Fatalf("configured scheduler ABI = %q, want %q", got, fixture.wantSchedulerABI)
+			}
+		})
+	}
+}
+
+func assertCoroStdlibSyncRuntimeSelection(t *testing.T, fixture coroStdlibSyncFixture, packages []Package) {
+	t.Helper()
+	const runtimePackage = "github.com/goplus/llgo/runtime/internal/runtime"
+	required := map[string]bool{
+		"coro_executor_driver_timer_llgo.go": false,
+		"coro_target_native_llgo.go":         false,
+		"coro_target_wait_timer_llgo.go":     false,
+		"coro_timer_owner_llgo.go":           false,
+		"coro_worker_native_llgo.go":         false,
+		"coro_worker_owner_llgo.go":          false,
+	}
+	forbidden := map[string]bool{
+		"coro_executor_driver_legacy.go": false,
+		"coro_target_none.go":            false,
+		"coro_target_test_adapter.go":    false,
+		"coro_target_wait_pipe_llgo.go":  false,
+	}
+	var runtimePkg Package
+	var mainPkg Package
+	for _, pkg := range packages {
+		if pkg == nil {
+			continue
+		}
+		if pkg.PkgPath == runtimePackage {
+			runtimePkg = pkg
+		}
+		if pkg.Name == "main" && mainPkg == nil {
+			mainPkg = pkg
+		}
+	}
+	if runtimePkg == nil {
+		t.Fatalf("%s acceptance build has no production runtime package %q", fixture.name, runtimePackage)
+	}
+	for _, path := range append(append([]string(nil), runtimePkg.GoFiles...), runtimePkg.CompiledGoFiles...) {
+		name := filepath.Base(path)
+		if _, ok := required[name]; ok {
+			required[name] = true
+		}
+		if _, ok := forbidden[name]; ok {
+			forbidden[name] = true
+		}
+	}
+	for name, selected := range required {
+		if !selected {
+			t.Errorf("%s acceptance runtime did not select %s", fixture.name, name)
+		}
+	}
+	for name, selected := range forbidden {
+		if selected {
+			t.Errorf("%s acceptance runtime selected incompatible %s", fixture.name, name)
+		}
+	}
+
+	if mainPkg == nil || mainPkg.Manifest == "" {
+		t.Fatalf("%s acceptance build has no main-package manifest", fixture.name)
+	}
+	manifest, err := decodeManifest(mainPkg.Manifest)
+	if err != nil {
+		t.Fatalf("decode %s acceptance manifest: %v", fixture.name, err)
+	}
+	if manifest.Common == nil || manifest.Common.CoroSchedulerABI != fixture.wantSchedulerABI {
+		got := ""
+		if manifest.Common != nil {
+			got = manifest.Common.CoroSchedulerABI
+		}
+		t.Fatalf("%s acceptance scheduler ABI = %q, want %q", fixture.name, got, fixture.wantSchedulerABI)
 	}
 }
 
@@ -155,24 +262,16 @@ func TestCoroStdlibSyncAcceptance(t *testing.T) {
 			if runtime.GOOS == "windows" {
 				bin += ".exe"
 			}
-			conf := NewDefaultConf(ModeBuild)
-			conf.OutFile = bin
-			conf.ForceRebuild = true
-			conf.EnableCoroEntryResolution = true
-			conf.EnableCoroPhysicalABI = true
-			conf.EnableCoroChildAwait = true
-			conf.EnableCoroPlainDispatch = true
-			conf.EnableCoroProgramBootstrapABI = true
-			conf.EnableCoroProgramBootstrapRun = true
-			conf.EnableCoroClosedStaticSpawn = fixture.wantGo
-			conf.EnableCoroChannel = fixture.wantGo
-			conf.CoroPlanBuilder = func(input CoroPlanInput) (*coro.SSAPlan, error) {
-				return input.Analyze(nil, coro.SSAConfig{MaxPlainInstructions: -1})
+			conf := coroStdlibSyncAcceptanceConfig(fixture, bin)
+			if got := activeCoroSchedulerABIVersion(conf); got != fixture.wantSchedulerABI {
+				t.Fatalf("%s acceptance configured scheduler ABI = %q, want %q", fixture.name, got, fixture.wantSchedulerABI)
 			}
 
-			if _, err := Do([]string{fixture.dir}, conf); err != nil {
+			packages, err := Do([]string{fixture.dir}, conf)
+			if err != nil {
 				t.Fatalf("%s synchronous stdlib acceptance build failed: %v", fixture.name, err)
 			}
+			assertCoroStdlibSyncRuntimeSelection(t, fixture, packages)
 			var args []string
 			if fixture.args != nil {
 				args = fixture.args(t)
