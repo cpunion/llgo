@@ -138,6 +138,8 @@ type CoroPlanInput struct {
 	augmentFunctionIDs             func(coro.FunctionIDConfig) coro.FunctionIDConfig
 	functionBackground             func(*ssa.Function) (llssa.Background, bool, error)
 	foreignNoBlock                 func(*ssa.Function) (cl.CoroForeignNoBlockCertificate, bool, error)
+	assemblyNoSuspend              func(*ssa.Function) (string, bool, error)
+	dynamicImplements              func(types.Type, *types.Interface) (bool, error)
 	intrinsicCallSemantics         func(ssa.CallInstruction) (cl.CoroIntrinsicCallSemantics, bool, error)
 	rawFunctionAddressCallArgument func(ssa.CallInstruction, int) (bool, error)
 	demandReferences               func(*ssa.Function) ([]*ssa.Function, error)
@@ -184,6 +186,10 @@ func (in CoroPlanInput) ResolveFunction(fn *ssa.Function) (*ssa.Function, bool) 
 // structural identity resolver is composed with builder identity policy.
 // Builders use this helper instead of calling AnalyzeSSA directly.
 func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.SSAPlan, error) {
+	if config.DynamicImplements != nil {
+		return nil, fmt.Errorf("build coroutine plan: builder cannot override the frozen frontend dynamic implementation relation")
+	}
+	config.DynamicImplements = in.dynamicImplements
 	// Compiler/runtime ABI roots are added only by the build driver. Copy both
 	// slices so a builder retains ownership of its input and cannot mutate the
 	// production root set after analysis begins.
@@ -194,7 +200,7 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 	// SSA body. It does not by itself prove that the foreign operation is
 	// nonblocking. Preserve an explicit known/unknown-foreign effect summary;
 	// otherwise use the conservative unknown-foreign boundary.
-	if in.functionBackground != nil || in.foreignNoBlock != nil || config.ClassifyFunction != nil {
+	if in.functionBackground != nil || in.foreignNoBlock != nil || in.assemblyNoSuspend != nil || config.ClassifyFunction != nil {
 		classify := config.ClassifyFunction
 		config.ClassifyFunction = func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
 			var policy coro.SSAFunctionPolicy
@@ -246,7 +252,37 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 				policy.Exec = coro.IRQUnsafe
 				policy.ForeignNoBlockCertificate = certificate.ID
 			}
-			if policy.IgnoreBody && !frontendC {
+			assemblyCertificate := ""
+			assemblyCertified := false
+			if in.assemblyNoSuspend != nil {
+				assemblyCertificate, assemblyCertified, err = in.assemblyNoSuspend(fn)
+				if err != nil {
+					return coro.SSAFunctionPolicy{}, fmt.Errorf("classify frozen assembly no-suspend certificate for %q: %w", fn.Name(), err)
+				}
+			}
+			if requested := policy.AssemblyNoSuspendCertificate; requested != "" {
+				if !assemblyCertified {
+					return coro.SSAFunctionPolicy{}, fmt.Errorf("builder cannot certify assembly function %q without exact frozen translated-module metadata", fn.Name())
+				}
+				if requested != assemblyCertificate {
+					return coro.SSAFunctionPolicy{}, fmt.Errorf("builder assembly no-suspend certificate for %q conflicts with the frozen proof", fn.Name())
+				}
+			}
+			if assemblyCertified {
+				if frontendC {
+					return coro.SSAFunctionPolicy{}, fmt.Errorf("frozen assembly no-suspend certificate for %q names a frontend C declaration", fn.Name())
+				}
+				if certified || policy.Effect != coro.NoSuspend || policy.Exec != 0 || policy.NeedsDispatch ||
+					policy.OverrideExternal && policy.External != coro.ExternalKnown {
+					return coro.SSAFunctionPolicy{}, fmt.Errorf("translated assembly declaration %q conflicts with its frozen no-suspend certificate", fn.Name())
+				}
+				policy.IgnoreBody = true
+				policy.External = coro.ExternalKnown
+				policy.OverrideExternal = true
+				policy.Exec = coro.IRQUnsafe
+				policy.AssemblyNoSuspendCertificate = assemblyCertificate
+			}
+			if policy.IgnoreBody && !frontendC && !assemblyCertified {
 				return coro.SSAFunctionPolicy{}, fmt.Errorf("builder cannot ignore the SSA body of non-C function %q", fn.Name())
 			}
 			if !frontendC {
@@ -1553,6 +1589,11 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		input.resolveFunction = ctx.coroEmission.Resolve
 		input.functionBackground = ctx.coroEmission.FunctionBackground
 		input.foreignNoBlock = ctx.coroEmission.CoroForeignNoBlockCertificate
+		input.dynamicImplements = ctx.coroEmission.CoroDynamicImplements
+		input.assemblyNoSuspend = func(fn *ssa.Function) (string, bool, error) {
+			certificate, ok, err := ctx.coroEmission.CoroAssemblyNoSuspendCertificate(fn)
+			return certificate.ID, ok, err
+		}
 		input.intrinsicCallSemantics = ctx.coroEmission.CoroIntrinsicCallSiteSemantics
 		input.rawFunctionAddressCallArgument = ctx.coroEmission.CoroRawFunctionAddressCallArgument
 		input.demandReferences = ctx.coroEmission.CoroDemandReferences
@@ -2704,11 +2745,31 @@ func prepareCoroEmissionUniverse(ctx *context, packages []*aPackage) error {
 		if aPkg.AltPkg != nil {
 			files = append(files, aPkg.AltPkg.Syntax...)
 		}
+		assemblyProofMap, err := plan9asmNoSuspendProofsForPkg(ctx, aPkg.PkgPath)
+		if err != nil {
+			return fmt.Errorf("freeze coroutine assembly proofs for %q: %w", aPkg.PkgPath, err)
+		}
+		assemblyProofSymbols := make([]string, 0, len(assemblyProofMap))
+		for symbol := range assemblyProofMap {
+			assemblyProofSymbols = append(assemblyProofSymbols, symbol)
+		}
+		slices.Sort(assemblyProofSymbols)
+		assemblyProofs := make([]cl.CoroAssemblyNoSuspendProof, 0, len(assemblyProofSymbols))
+		for _, symbol := range assemblyProofSymbols {
+			proof := assemblyProofMap[symbol]
+			assemblyProofs = append(assemblyProofs, cl.CoroAssemblyNoSuspendProof{
+				PhysicalSymbol: proof.Symbol,
+				ABISignature:   proof.Signature,
+				CallClosure:    append([]string(nil), proof.CallClosure...),
+				ClosureSHA256:  proof.ClosureSHA256,
+			})
+		}
 		inputs = append(inputs, cl.EmissionPackage{
-			SSA:          aPkg.SSA,
-			Files:        files,
-			Identity:     aPkg.ID,
-			MetadataOnly: metadataOnly,
+			SSA:                     aPkg.SSA,
+			Files:                   files,
+			Identity:                aPkg.ID,
+			MetadataOnly:            metadataOnly,
+			AssemblyNoSuspendProofs: assemblyProofs,
 		})
 		hasRuntimeABI = hasRuntimeABI || aPkg.PkgPath == llssa.PkgRuntime
 	}

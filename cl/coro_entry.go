@@ -101,10 +101,22 @@ func (p *context) resolveFunctionSymbol(fn *ssa.Function) (plannedFunctionSymbol
 	entry.coroPlan = p.compilation.CoroPlan
 	entry.emission = p.compilation.EmissionUniverse
 	entry.interfacePlain = p.compilation.coroClosedInterfacePlain
-	if p.compilation.CoroPlan.IgnoresBody(fn) {
-		return entry, fmt.Errorf("coroutine entry resolution: Go-emitted function %q has an ignored SSA body", plan.ID)
+	ignored := p.compilation.CoroPlan.IgnoresBody(fn)
+	assemblyCertified := false
+	if ignored {
+		if p.compilation.EmissionUniverse == nil {
+			return entry, fmt.Errorf("coroutine entry resolution: Go-emitted function %q has an ignored SSA body", plan.ID)
+		}
+		_, certified, certificateErr := p.compilation.EmissionUniverse.CoroAssemblyNoSuspendCertificate(fn)
+		if certificateErr != nil {
+			return entry, certificateErr
+		}
+		assemblyCertified = certified
+		if !assemblyCertified {
+			return entry, fmt.Errorf("coroutine entry resolution: Go-emitted function %q has an ignored SSA body without a frozen assembly proof", plan.ID)
+		}
 	}
-	if err := validatePlannedFunction(fn, plan, len(fn.Blocks) != 0); err != nil {
+	if err := validatePlannedFunction(fn, plan, len(fn.Blocks) != 0 && !assemblyCertified); err != nil {
 		return entry, err
 	}
 	if plan.Emission == coro.EmitCoroutine {
@@ -150,7 +162,14 @@ func (c *Compilation) plannedFunctionEmittedBody(fn *ssa.Function) (bool, error)
 		return false, fmt.Errorf("coroutine entry resolution: classify frozen frontend ABI for %q: %w", fn.Name(), err)
 	}
 	ignored := c.CoroPlan.IgnoresBody(fn)
-	frozenIgnored := classified && background == llssa.InC
+	_, assemblyCertified, assemblyErr := c.EmissionUniverse.CoroAssemblyNoSuspendCertificate(fn)
+	if assemblyErr != nil {
+		return false, fmt.Errorf("coroutine entry resolution: classify frozen assembly ABI for %q: %w", fn.Name(), assemblyErr)
+	}
+	if assemblyCertified && (!classified || background != llssa.InGo || len(fn.Blocks) != 0) {
+		return false, fmt.Errorf("coroutine entry resolution: assembly-certified function %q has frontend classified=%t kind=%d body=%t", fn.Name(), classified, background, len(fn.Blocks) != 0)
+	}
+	frozenIgnored := classified && background == llssa.InC || assemblyCertified
 	if ignored != frozenIgnored {
 		return false, fmt.Errorf("coroutine entry resolution: function %q ignored-body=%t conflicts with frozen frontend background classified=%t kind=%d", fn.Name(), ignored, classified, background)
 	}
@@ -179,7 +198,19 @@ func (e plannedFunctionSymbol) checkSupported() error {
 		return fmt.Errorf("coroutine entry resolution: function %q has no emitted entry", e.plan.ID)
 	}
 	if e.explicitPanic && e.plan.Emission == coro.EmitPlain {
-		return fmt.Errorf("coroutine explicit-status panic ABI: managed plain function %q has no certified hidden-outcome/unwind contract", e.plan.ID)
+		cleanupOnly := false
+		if e.emission != nil && e.coroPlan != nil {
+			var err error
+			cleanupOnly, err = e.emission.CoroStaticCleanupPlainTarget(
+				e.coroPlan, e.function, e.frameRetentionABI,
+			)
+			if err != nil {
+				return err
+			}
+		}
+		if !cleanupOnly {
+			return fmt.Errorf("coroutine explicit-status panic ABI: managed plain function %q has no certified hidden-outcome/unwind contract", e.plan.ID)
+		}
 	}
 	if e.plan.FuncRep == coro.Dispatch {
 		if e.interfacePlain.acceptsTarget(e.function, e.plan) {

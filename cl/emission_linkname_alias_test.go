@@ -29,6 +29,35 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
+func TestEmissionUniverseAliasesOrdinaryBodylessRuntimeHookToExactLinknameDefinition(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	declaration := testProg.addPackage(t, "example.com/emission/hookdecl", `package hookdecl
+func runtimeHook(cleanup func())
+func Call(cleanup func()) { runtimeHook(cleanup) }
+`)
+	definition := testProg.addPackage(t, "example.com/emission/hookdef", `package hookdef
+//go:linkname llgoHook example.com/emission/hookdecl.runtimeHook
+func llgoHook(cleanup func()) { cleanup() }
+`)
+	testProg.ssa.Build()
+
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{
+		{SSA: declaration.ssa, Files: []*ast.File{declaration.file}},
+		{SSA: definition.ssa, Files: []*ast.File{definition.file}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	declared := declaration.ssa.Func("runtimeHook")
+	defined := definition.ssa.Func("llgoHook")
+	resolved, ok := universe.Resolve(declared)
+	if !ok || resolved != defined {
+		t.Fatalf("Resolve(ordinary bodyless runtime hook) = %v, %t; want %v, true", resolved, ok, defined)
+	}
+}
+
 func TestEmissionUniverseAliasesBodylessGoLinknameToExactDefinition(t *testing.T) {
 	testProg := newEmissionTestProgram()
 	declaration := testProg.addPackage(t, "example.com/emission/linkdecl", `package linkdecl

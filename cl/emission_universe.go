@@ -41,10 +41,11 @@ import (
 // compilation. Files must be the exact combined syntax slice used by codegen:
 // original package files followed by enabled alternate-package files.
 type EmissionPackage struct {
-	SSA          *ssa.Package
-	Files        []*ast.File
-	Identity     string // stable build package identity; required for same-path variants
-	MetadataOnly bool   // freeze frontend directives/ownership without selecting definitions
+	SSA                     *ssa.Package
+	Files                   []*ast.File
+	Identity                string // stable build package identity; required for same-path variants
+	MetadataOnly            bool   // freeze frontend directives/ownership without selecting definitions
+	AssemblyNoSuspendProofs []CoroAssemblyNoSuspendProof
 }
 
 // EmissionUniverseOptions selects construction contracts that are available
@@ -66,22 +67,23 @@ type EmissionUniverseOptions struct {
 }
 
 type preparedEmissionPackage struct {
-	order        int
-	identity     string
-	ssa          *ssa.Package
-	files        []*ast.File
-	pkgPath      string
-	oldTypes     *types.Package
-	altTypes     *types.Package
-	pkgTypes     *types.Package
-	patch        Patch
-	hasPatch     bool
-	skips        map[string]none
-	skipall      bool
-	winners      map[string]*ssa.Function
-	selected     map[*ssa.Function]none
-	fromPatch    map[*ssa.Function]bool
-	metadataOnly bool
+	order             int
+	identity          string
+	ssa               *ssa.Package
+	files             []*ast.File
+	pkgPath           string
+	oldTypes          *types.Package
+	altTypes          *types.Package
+	pkgTypes          *types.Package
+	patch             Patch
+	hasPatch          bool
+	skips             map[string]none
+	skipall           bool
+	winners           map[string]*ssa.Function
+	selected          map[*ssa.Function]none
+	fromPatch         map[*ssa.Function]bool
+	metadataOnly      bool
+	assemblyNoSuspend map[string]CoroAssemblyNoSuspendProof
 }
 
 // EmissionUniverse is an immutable set of canonical exact SSA functions and
@@ -125,6 +127,7 @@ type EmissionUniverse struct {
 	loweredCalls          map[*ssa.Function]map[string]coroLoweredCallTarget
 	normalReturnBlocks    map[*ssa.Function]map[*ssa.BasicBlock]none
 	foreignNoBlock        map[*ssa.Function]CoroForeignNoBlockCertificate
+	assemblyNoSuspend     map[*ssa.Function]CoroAssemblyNoSuspendCertificate
 
 	localGenericMu     sync.Mutex
 	localGenericTypes  map[*types.Named]emissionLocalGenericType
@@ -260,6 +263,7 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		loweredCalls:          make(map[*ssa.Function]map[string]coroLoweredCallTarget),
 		normalReturnBlocks:    make(map[*ssa.Function]map[*ssa.BasicBlock]none),
 		foreignNoBlock:        make(map[*ssa.Function]CoroForeignNoBlockCertificate),
+		assemblyNoSuspend:     make(map[*ssa.Function]CoroAssemblyNoSuspendCertificate),
 		linkIdentities:        make(map[*ssa.Function]string),
 		excluded:              make(map[*ssa.Function]none),
 		materialized:          make(map[*ssa.Function]none),
@@ -302,20 +306,25 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		identities[identity] = input.SSA
 		scan := &context{prog: prog, skips: make(map[string]none)}
 		scan.initFiles(pkgPath, input.Files, input.SSA.Pkg.Name() == "C")
+		assemblyNoSuspend, err := cloneCoroAssemblyNoSuspendProofs(input.AssemblyNoSuspendProofs)
+		if err != nil {
+			return nil, fmt.Errorf("prepare emission universe: package %q: %w", identity, err)
+		}
 		prepared := &preparedEmissionPackage{
-			order:        i,
-			identity:     identity,
-			ssa:          input.SSA,
-			files:        append([]*ast.File(nil), input.Files...),
-			pkgPath:      pkgPath,
-			oldTypes:     input.SSA.Pkg,
-			pkgTypes:     input.SSA.Pkg,
-			skips:        cloneNoneMap(scan.skips),
-			skipall:      scan.skipall,
-			winners:      make(map[string]*ssa.Function),
-			selected:     make(map[*ssa.Function]none),
-			fromPatch:    make(map[*ssa.Function]bool),
-			metadataOnly: input.MetadataOnly,
+			order:             i,
+			identity:          identity,
+			ssa:               input.SSA,
+			files:             append([]*ast.File(nil), input.Files...),
+			pkgPath:           pkgPath,
+			oldTypes:          input.SSA.Pkg,
+			pkgTypes:          input.SSA.Pkg,
+			skips:             cloneNoneMap(scan.skips),
+			skipall:           scan.skipall,
+			winners:           make(map[string]*ssa.Function),
+			selected:          make(map[*ssa.Function]none),
+			fromPatch:         make(map[*ssa.Function]bool),
+			metadataOnly:      input.MetadataOnly,
+			assemblyNoSuspend: assemblyNoSuspend,
 		}
 		if patch, ok := patches[pkgPath]; ok {
 			if patch.Alt == nil || patch.Types == nil {
@@ -446,6 +455,9 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		return nil, err
 	}
 	if err := u.freezeCoroForeignNoBlockCertificates(); err != nil {
+		return nil, err
+	}
+	if err := u.freezeCoroAssemblyNoSuspendCertificates(); err != nil {
 		return nil, err
 	}
 	return u, nil
@@ -2321,11 +2333,12 @@ type emissionGoLinknameGroup struct {
 
 // aliasBodylessGoLinknameDeclarations joins the two source-level views of one
 // emitted Go operation before body materialization. Standard-library packages
-// commonly carry a bodyless, one-argument //go:linkname declaration while the
-// LLGo runtime provides a differently named, bodyful function with a two-
-// argument directive. The only join key is the already classified final
-// managed key: frontend kind, final physical Go symbol, and structural ABI
-// signature. Source/display names are never used as a fallback.
+// carry both explicit one-argument //go:linkname declarations and ordinary
+// bodyless runtime-hook declarations, while the LLGo runtime provides a
+// differently named, bodyful function with a two-argument directive. The only
+// join key is the already classified final managed key: frontend kind, final
+// physical Go symbol, and structural ABI signature. Source/display names are
+// never used as a fallback.
 func (u *EmissionUniverse) aliasBodylessGoLinknameDeclarations() error {
 	packages := make([]*preparedEmissionPackage, 0, len(u.packages))
 	for _, prepared := range u.packages {
@@ -2403,6 +2416,9 @@ func (u *EmissionUniverse) aliasBodylessGoLinknameDeclarations() error {
 			candidate, err := bodylessGoLinknameDeclaration(function)
 			if err != nil {
 				return fmt.Errorf("prepare emission universe: %s: %w", emissionFunctionDiagnostic(function), err)
+			}
+			if !candidate {
+				candidate = bodylessManagedGoDeclaration(function)
 			}
 			if !candidate || functionNeedsLinkOnce(function) {
 				continue
@@ -2574,6 +2590,15 @@ func (u *EmissionUniverse) activateBodylessGoLinknameAlias(declaration *ssa.Func
 	delete(u.linkIdentities, declaration)
 	delete(u.linkOnceNames, declaration)
 	return nil
+}
+
+func bodylessManagedGoDeclaration(function *ssa.Function) bool {
+	if function == nil || len(function.Blocks) != 0 || functionNeedsLinkOnce(function) || function.Pkg == nil ||
+		function.Parent() != nil || function.Signature == nil || function.Signature.Recv() != nil {
+		return false
+	}
+	declaration, _ := function.Syntax().(*ast.FuncDecl)
+	return declaration != nil && declaration.Body == nil
 }
 
 func bodylessGoLinknameDeclaration(function *ssa.Function) (bool, error) {
