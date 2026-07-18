@@ -49,7 +49,10 @@ func Recover() (ret any) {
 
 // Panic panics with a value.
 func Panic(v any) {
-	if v == nil {
+	// Inspect the empty-interface header directly. The generic interface ==
+	// helper recursively compares dynamic values and may itself need a
+	// preemption-capable coroutine; the nil test here only needs the type word.
+	if efaceOf(&v)._type == nil {
 		v = &PanicNilError{}
 	}
 	SavePanicCallerFrames()
