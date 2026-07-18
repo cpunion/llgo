@@ -195,14 +195,10 @@ func StringEqual(x, y String) bool {
 	if x.len != y.len {
 		return false
 	}
-	if x.data != y.data {
-		for i := 0; i < x.len; i++ {
-			if *(*byte)(c.Advance(x.data, i)) != *(*byte)(c.Advance(y.data, i)) {
-				return false
-			}
-		}
+	if x.len == 0 || x.data == y.data {
+		return true
 	}
-	return true
+	return c.Memcmp(x.data, y.data, uintptr(x.len)) == 0
 }
 
 func StringLess(x, y String) bool {
@@ -210,12 +206,11 @@ func StringLess(x, y String) bool {
 	if n > y.len {
 		n = y.len
 	}
-	for i := 0; i < n; i++ {
-		ix := *(*byte)(c.Advance(x.data, i))
-		iy := *(*byte)(c.Advance(y.data, i))
-		if ix < iy {
+	if n != 0 && x.data != y.data {
+		switch comparison := c.Memcmp(x.data, y.data, uintptr(n)); {
+		case comparison < 0:
 			return true
-		} else if ix > iy {
+		case comparison > 0:
 			return false
 		}
 	}
