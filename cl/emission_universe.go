@@ -406,6 +406,9 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 			}
 		}
 	}
+	if err := u.aliasPatchedFuncPCABI0Declarations(); err != nil {
+		return nil, err
+	}
 	if err := u.aliasBodylessGoLinknameDeclarations(); err != nil {
 		return nil, err
 	}
@@ -1096,6 +1099,11 @@ func (u *EmissionUniverse) CoroIntrinsicCallSiteSemantics(call ssa.CallInstructi
 			return CoroIntrinsicCallUnsupported, true, err
 		}
 		return CoroIntrinsicCallInlineNoSuspend, true, nil
+	case llgoFuncPCABI0:
+		if err := u.validateCoroFuncPCABI0CallSite(direct); err != nil {
+			return CoroIntrinsicCallUnsupported, true, err
+		}
+		return CoroIntrinsicCallInlineNoSuspend, true, nil
 	case llgoCoroPark:
 		if err := validateCoroParkIntrinsicCallSite(direct); err != nil {
 			return CoroIntrinsicCallUnsupported, true, err
@@ -1168,17 +1176,23 @@ func (u *EmissionUniverse) CoroRawFunctionAddressCallArgument(call ssa.CallInstr
 		return false, nil
 	}
 	opcode, intrinsic, err := u.coroIntrinsicOpcode(callee)
-	if err != nil || !intrinsic || opcode != llgoFuncAddr {
+	if err != nil || !intrinsic || (opcode != llgoFuncAddr && opcode != llgoFuncPCABI0) {
 		return false, err
 	}
 	direct, ok := call.(*ssa.Call)
 	if !ok || direct.Common() == nil || direct.Common().IsInvoke() {
 		return false, fmt.Errorf("emission universe raw function address: llgo.funcAddr must be an exact direct call")
 	}
-	if _, _, err := u.validateCoroFuncAddrCallSite(direct); err != nil {
+	if opcode == llgoFuncAddr {
+		if _, _, err := u.validateCoroFuncAddrCallSite(direct); err != nil {
+			return false, err
+		}
+		return argument == 0, nil
+	}
+	if err := u.validateCoroFuncPCABI0CallSite(direct); err != nil {
 		return false, err
 	}
-	return argument == 0, nil
+	return argument == 0 && coroFuncPCABI0RawStaticOperand(direct), nil
 }
 
 func (u *EmissionUniverse) validateCoroFuncAddrCallSite(direct *ssa.Call) (*ssa.MakeInterface, *ssa.Function, error) {
@@ -1316,6 +1330,10 @@ func coroIntrinsicCallSemantics(opcode int) CoroIntrinsicCallSemantics {
 	case llgoFuncAddr:
 		// funcAddr structurally unwraps one exact MakeInterface{X:*ssa.Function}
 		// and emits the selected raw function entry address directly.
+		return CoroIntrinsicCallInlineNoSuspend
+	case llgoFuncPCABI0:
+		// funcPCABI0 selects the raw entry PC from a static function operand or
+		// loads it from an existing function value. It emits no managed call.
 		return CoroIntrinsicCallInlineNoSuspend
 	case llgoCoroPark:
 		return CoroIntrinsicCallInlineSuspend
