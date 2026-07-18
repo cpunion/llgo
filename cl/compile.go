@@ -1463,6 +1463,10 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		ret = b.Slice(x, low, high, max)
 		ret.Type = p.type_(v.Type(), llssa.InGo)
 	case *ssa.MakeInterface:
+		if p.currentCoro != nil && coroSyntheticSelectNoCaseBox(v) {
+			ret = p.prog.Nil(p.type_(v.Type(), llssa.InGo))
+			break
+		}
 		if refs := *v.Referrers(); len(refs) == 1 {
 			switch ref := refs[0].(type) {
 			case *ssa.Store:
@@ -1566,7 +1570,15 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 				states[i].Value = p.compileValue(b, s.Send)
 			}
 		}
-		ret = b.Select(states, v.Blocking)
+		if p.currentCoro != nil && p.compilation != nil && p.compilation.EnableCoroChannel {
+			if v.Blocking {
+				ret = p.compileCoroChanSelect(b, states)
+			} else {
+				ret = p.compileCoroChanTrySelect(b, states)
+			}
+		} else {
+			ret = b.Select(states, v.Blocking)
+		}
 	case *ssa.SliceToArrayPointer:
 		t := p.type_(v.Type(), llssa.InGo)
 		x := p.compileValue(b, v.X)
@@ -1749,6 +1761,13 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		p.recordPanicLocation(b, v.Pos())
 		b.RunDefers()
 	case *ssa.Panic:
+		if p.currentCoro != nil && coroSyntheticSelectNoCasePanic(v) {
+			if p.currentCoro.unsupportedRunDecision == nil {
+				panic("coroutine select invariant panic requires a fail-closed trap block")
+			}
+			b.Jump(p.currentCoro.unsupportedRunDecision)
+			return
+		}
 		if p.tryCompileCoroExplicitStatusPanic(b, v) {
 			return
 		}

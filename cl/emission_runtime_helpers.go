@@ -65,7 +65,7 @@ func (u *EmissionUniverse) materializeLoweredRuntimeHelpers(ctx *context, ownerF
 	// still lowers to the synchronous ChanSend/ChanRecv helper. Retain that
 	// helper without recording a second physical lowered-call edge: the source
 	// channel instruction already contributes MayPark to coroutine analysis.
-	if helper := u.plainChannelRuntimeHelper(instr); helper != "" {
+	for _, helper := range u.plainRepresentationRuntimeHelpers(ctx, instr) {
 		target := runtimePkg.ssa.Func(helper)
 		if target == nil {
 			return fmt.Errorf("prepare emission universe: function %q lowers its plain representation to missing runtime helper %q", ownerFn.Name(), helper)
@@ -77,19 +77,53 @@ func (u *EmissionUniverse) materializeLoweredRuntimeHelpers(ctx *context, ownerF
 	return nil
 }
 
-func (u *EmissionUniverse) plainChannelRuntimeHelper(instr ssa.Instruction) string {
-	if u == nil || !u.enableCoroChannel {
-		return ""
+func (u *EmissionUniverse) plainRepresentationRuntimeHelpers(ctx *context, instr ssa.Instruction) []string {
+	if u == nil {
+		return nil
 	}
-	switch instruction := instr.(type) {
-	case *ssa.Send:
-		return "ChanSend"
-	case *ssa.UnOp:
-		if instruction.Op == token.ARROW {
-			return "ChanRecv"
+	set := make(map[string]struct{})
+	add := func(names ...string) {
+		for _, name := range names {
+			if name != "" {
+				set[name] = struct{}{}
+			}
 		}
 	}
-	return ""
+	if u.enableCoroChannel {
+		switch instruction := instr.(type) {
+		case *ssa.Send:
+			add("ChanSend")
+		case *ssa.UnOp:
+			if instruction.Op == token.ARROW {
+				add("ChanRecv")
+			}
+		case *ssa.Select:
+			if instruction.Blocking {
+				add("Select")
+			} else {
+				add("TrySelect")
+			}
+		}
+	}
+	// The physical select lowering turns x/tools' unreachable no-case panic
+	// into a trap. A dual plain representation still emits the original box and
+	// panic instructions, so retain only those plain-only helper edges here.
+	switch instruction := instr.(type) {
+	case *ssa.MakeInterface:
+		if coroSyntheticSelectNoCaseBox(instruction) {
+			u.makeInterfaceRuntimeHelpers(ctx, instruction, add)
+		}
+	case *ssa.Panic:
+		if coroSyntheticSelectNoCasePanic(instruction) {
+			add("Panic")
+		}
+	}
+	helpers := make([]string, 0, len(set))
+	for helper := range set {
+		helpers = append(helpers, helper)
+	}
+	sort.Strings(helpers)
+	return helpers
 }
 
 // loweredCallUnwindOnly reports a structural CFG proof: the instruction's
@@ -248,7 +282,9 @@ func (u *EmissionUniverse) loweredRuntimeHelpers(ctx *context, instr ssa.Instruc
 			}
 		}
 	case *ssa.MakeInterface:
-		u.makeInterfaceRuntimeHelpers(ctx, v, add)
+		if !coroSyntheticSelectNoCaseBox(v) {
+			u.makeInterfaceRuntimeHelpers(ctx, v, add)
+		}
 	case *ssa.MakeSlice:
 		add("MakeSlice")
 	case *ssa.MakeMap:
@@ -292,7 +328,12 @@ func (u *EmissionUniverse) loweredRuntimeHelpers(ctx *context, instr ssa.Instruc
 	case *ssa.MakeChan:
 		add("NewChan")
 	case *ssa.Select:
-		if v.Blocking {
+		if u.enableCoroChannel {
+			add("CoroChanSelectTry")
+			if v.Blocking {
+				add("CoroChanSelectPark", "CoroChanSelectResume")
+			}
+		} else if v.Blocking {
 			add("Select")
 		} else {
 			add("TrySelect")
@@ -303,7 +344,9 @@ func (u *EmissionUniverse) loweredRuntimeHelpers(ctx *context, instr ssa.Instruc
 		// Builder.MapUpdate uses the same mapKeyPtr lowering as Lookup.
 		add("AllocU", "MapAssign")
 	case *ssa.Panic:
-		add("Panic")
+		if !coroSyntheticSelectNoCasePanic(v) {
+			add("Panic")
+		}
 	case *ssa.Send:
 		if u.enableCoroChannel {
 			add("CoroChanTrySend")

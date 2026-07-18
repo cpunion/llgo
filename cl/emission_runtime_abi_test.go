@@ -117,12 +117,28 @@ func TestEmissionUniverseCoroChannelRetainsPlainAndPhysicalHelpers(t *testing.T)
 	runtimePkg := testProg.addPackage(t, llssa.PkgRuntime, `package runtime
 func CoroChanTrySend(ch chan int, value *int, size int) bool { return false }
 func CoroChanTryRecv(ch chan int, value *int, size int) (bool, bool) { return false, false }
+type ChanOp struct{}
+func CoroChanSelectTry(ops ...ChanOp) (int, bool, bool, bool) { return 0, false, false, false }
+func CoroChanSelectPark(ops ...ChanOp) {}
+func CoroChanSelectResume(ops ...ChanOp) (int, bool, uint32) { return 0, false, 0 }
 func ChanSend(ch chan int, value *int, size int) bool { return false }
 func ChanRecv(ch chan int, value *int, size int) bool { return false }
+func Select(ops ...ChanOp) (int, bool) { return 0, false }
+func TrySelect(ops ...ChanOp) (int, bool, bool) { return 0, false, false }
+func AllocU(size uintptr) *byte { return nil }
+func Panic(value any) {}
+func strequal(left, right string) bool { return false }
+func memequalptr(left, right *byte) bool { return false }
 `)
 	callerPkg := testProg.addPackage(t, "example.com/emission/corochannelhelpers", `package corochannelhelpers
 func Send(ch chan int, value int) { ch <- value }
 func Recv(ch chan int) int { return <-ch }
+func BlockingSelect(first, second chan int, value int) {
+	select { case first <- value: case <-second: }
+}
+func NonblockingSelect(first, second chan int, value int) {
+	select { case first <- value: case <-second: default: }
+}
 `)
 	testProg.ssa.Build()
 	prog := newLLSSAProg(t)
@@ -139,24 +155,34 @@ func Recv(ch chan int) int { return <-ch }
 	for _, fn := range universe.Functions() {
 		required[fn] = true
 	}
-	for _, helper := range []string{"CoroChanTrySend", "CoroChanTryRecv", "ChanSend", "ChanRecv"} {
+	for _, helper := range []string{
+		"CoroChanTrySend", "CoroChanTryRecv", "CoroChanSelectTry", "CoroChanSelectPark", "CoroChanSelectResume",
+		"ChanSend", "ChanRecv", "Select", "TrySelect",
+	} {
 		if fn := runtimePkg.ssa.Func(helper); fn == nil || !required[fn] {
 			t.Fatalf("runtime helper %q was not retained for dual channel representations", helper)
 		}
 	}
 	for _, test := range []struct {
 		owner string
-		want  string
+		want  []string
 	}{
-		{owner: "Send", want: "CoroChanTrySend"},
-		{owner: "Recv", want: "CoroChanTryRecv"},
+		{owner: "Send", want: []string{"CoroChanTrySend"}},
+		{owner: "Recv", want: []string{"CoroChanTryRecv"}},
+		{owner: "BlockingSelect", want: []string{"CoroChanSelectPark", "CoroChanSelectResume", "CoroChanSelectTry"}},
+		{owner: "NonblockingSelect", want: []string{"CoroChanSelectTry"}},
 	} {
 		lowered, err := universe.CoroLoweredCalls(callerPkg.ssa.Func(test.owner))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(lowered) != 1 || lowered[0].LogicalName != test.want {
-			t.Fatalf("%s physical lowered calls = %+v; want only %q", test.owner, lowered, test.want)
+		if len(lowered) != len(test.want) {
+			t.Fatalf("%s physical lowered calls = %+v; want %v", test.owner, lowered, test.want)
+		}
+		for index, want := range test.want {
+			if lowered[index].LogicalName != want {
+				t.Fatalf("%s physical lowered calls = %+v; want %v", test.owner, lowered, test.want)
+			}
 		}
 	}
 }

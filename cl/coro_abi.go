@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"go/ast"
+	"go/constant"
 	"go/token"
 	"go/types"
 	"strings"
@@ -30,6 +31,48 @@ import (
 	llssa "github.com/goplus/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
+
+const coroSyntheticSelectNoCaseMessage = "blocking select matched no case"
+
+// x/tools emits one unreachable panic block after every blocking select to
+// guard its synthetic case-index dispatch. Physical channel lowering proves
+// that a completed runtime decision is either a real state index or a
+// compiler-owned cancellation edge, so this block is an internal invariant
+// trap rather than a user panic requiring managed interface allocation.
+func coroSyntheticSelectNoCasePanic(instruction *ssa.Panic) bool {
+	if instruction == nil || instruction.Pos() != token.NoPos {
+		return false
+	}
+	boxed, ok := instruction.X.(*ssa.MakeInterface)
+	if !ok {
+		return false
+	}
+	value, ok := boxed.X.(*ssa.Const)
+	if !ok || value.Value == nil || value.Value.Kind() != constant.String ||
+		constant.StringVal(value.Value) != coroSyntheticSelectNoCaseMessage {
+		return false
+	}
+	for _, block := range instruction.Parent().Blocks {
+		for _, candidate := range block.Instrs {
+			if selected, ok := candidate.(*ssa.Select); ok && selected.Blocking {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func coroSyntheticSelectNoCaseBox(instruction *ssa.MakeInterface) bool {
+	if instruction == nil {
+		return false
+	}
+	refs := instruction.Referrers()
+	if refs == nil || len(*refs) != 1 {
+		return false
+	}
+	panicInstruction, ok := (*refs)[0].(*ssa.Panic)
+	return ok && panicInstruction.X == instruction && coroSyntheticSelectNoCasePanic(panicInstruction)
+}
 
 const (
 	// Version zero is intentionally experimental: the complete CoroHeader and
@@ -834,7 +877,6 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 		return fail("cannot audit pure SSA lowering: %v", err)
 	}
 
-	returns := 0
 	panics := 0
 	awaits := 0
 	parks := 0
@@ -849,6 +891,12 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 	}
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
+			if boxed, ok := instr.(*ssa.MakeInterface); ok && coroSyntheticSelectNoCaseBox(boxed) {
+				continue
+			}
+			if panicInstruction, ok := instr.(*ssa.Panic); ok && coroSyntheticSelectNoCasePanic(panicInstruction) {
+				continue
+			}
 			if handled, reason := pureSSA.validate(instr); handled {
 				if reason != "" {
 					return coroLeafInstructionError(fn, plan, instr, reason)
@@ -858,7 +906,6 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 			switch instr := instr.(type) {
 			case *ssa.DebugRef, *ssa.Jump:
 			case *ssa.Return:
-				returns++
 			case *ssa.Panic:
 				if !explicitPanic {
 					return coroLeafInstructionError(fn, plan, instr, "explicit panic requires the explicit-status panic ABI")
@@ -885,6 +932,24 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 					return coroLeafInstructionError(fn, plan, instr, "channel send type: "+err.Error())
 				}
 				parks++
+			case *ssa.Select:
+				if !channel {
+					return coroLeafInstructionError(fn, plan, instr, "channel select requires the channel scheduler capability")
+				}
+				for index, state := range instr.States {
+					if state == nil {
+						return coroLeafInstructionError(fn, plan, instr, fmt.Sprintf("channel select case %d is nil", index))
+					}
+					if state.Chan == nil {
+						return coroLeafInstructionError(fn, plan, instr, fmt.Sprintf("channel select case %d channel is nil", index))
+					}
+					if err := validateCoroPhysicalChannelType(state.Chan.Type()); err != nil {
+						return coroLeafInstructionError(fn, plan, instr, fmt.Sprintf("channel select case %d type: %v", index, err))
+					}
+				}
+				if instr.Blocking {
+					parks++
+				}
 			case *ssa.UnOp:
 				if instr.Op == token.ARROW {
 					if !channel {
@@ -960,9 +1025,9 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 			}
 		}
 	}
-	if returns == 0 {
-		return fail("requires at least one return instruction")
-	}
+	// A Go function may deliberately never return (for example select{} or an
+	// infinite scheduler-polled loop). Cancellation still reaches the compiler-
+	// owned completion block, so a source Return is not an ABI prerequisite.
 	if panics != 0 && !plan.Exec.Contains(coro.MayUnwind) {
 		return fail("explicit panic body lacks may-unwind execution classification: %s", plan.Exec)
 	}

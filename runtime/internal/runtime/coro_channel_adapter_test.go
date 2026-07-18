@@ -353,6 +353,182 @@ func TestCoroChannelAdapterPairCommitAndResume(t *testing.T) {
 			ch.sendq.first, ch.recvq.first, coroProgramChannelSourceV1State.Pending())
 	}
 
+	// One physical select shares a single claim across both queue nodes. A
+	// second physical coroutine sender commits the second case; both tasks must
+	// resume while the selector removes and recycles its losing first case.
+	selectG, runnable := coro.NextRunnable(p)
+	if !runnable || selectG == nil {
+		t.Fatalf("dequeue channel selector = (%p, %t)", selectG, runnable)
+	}
+	var selectFrame *coroChannelAdapterFrame
+	switch selectG {
+	case receiver.g:
+		selectFrame = receiver
+	case sender.g:
+		selectFrame = sender
+	default:
+		t.Fatalf("unexpected channel selector G %p", selectG)
+	}
+	selectAction := activateCoroChannelAdapterFrame(t, p, selectFrame)
+	selectChannels := [2]*Chan{new(Chan), new(Chan)}
+	for _, selectedChannel := range selectChannels {
+		selectedChannel.elemsize = int(unsafe.Sizeof(uint32(0)))
+		selectedChannel.mutex.Init(nil)
+	}
+	var firstSelectedValue, secondSelectedValue uint32
+	selectOps := []ChanOp{
+		{C: selectChannels[0], Val: unsafe.Pointer(&firstSelectedValue), Size: int32(unsafe.Sizeof(firstSelectedValue))},
+		{C: selectChannels[1], Val: unsafe.Pointer(&secondSelectedValue), Size: int32(unsafe.Sizeof(secondSelectedValue))},
+	}
+	var selectCases [2]CoroChanSelectCaseV1
+	var coroSelectState CoroChanSelectV1
+	selectFrame.header.SuspendReason = uint16(coro.SuspendPark)
+	selectFrame.header.Lifecycle = uint16(coro.FrameSuspended)
+	prepareCoroChanSelectV1(
+		unsafe.Pointer(selectFrame.g),
+		selectFrame.handle,
+		unsafe.Pointer(selectFrame.header),
+		unsafe.Pointer(&selectCases[0]),
+		unsafe.Pointer(&coroSelectState),
+		selectOps,
+	)
+	if parked, ok := coro.Resumed(p, selectFrame.g, selectAction); !ok || parked.Kind != coro.ActionPark {
+		t.Fatalf("commit channel select park = (%+v, %t)", parked, ok)
+	}
+	if selectChannels[0].recvq.first != &selectCases[0].waiter ||
+		selectChannels[1].recvq.first != &selectCases[1].waiter {
+		t.Fatalf("channel select waiters not published: first=%p second=%p",
+			selectChannels[0].recvq.first, selectChannels[1].recvq.first)
+	}
+	deferredG, deferredOK := coro.NextRunnable(p)
+	if !deferredOK || deferredG == nil || deferredG == selectFrame.g {
+		t.Fatalf("dequeue unrelated ready G before select completion = (%p, %t)", deferredG, deferredOK)
+	}
+	var directSender *coroChannelAdapterFrame
+	switch deferredG {
+	case receiver.g:
+		directSender = receiver
+	case sender.g:
+		directSender = sender
+	default:
+		t.Fatalf("unexpected direct select sender G %p", deferredG)
+	}
+	selectedValue := uint32(0xa5b6c7d8)
+	var directSendState CoroChanParkV1
+	directSendAction := activateCoroChannelAdapterFrame(t, p, directSender)
+	parkCoroChannelAdapterFrame(
+		t, p, directSender, directSendAction, selectChannels[1], unsafe.Pointer(&selectedValue), &directSendState, true,
+	)
+	pollCoroChannelAdapterExecutor(t, driver)
+	completed := map[*coro.G]bool{}
+	for len(completed) != 2 {
+		next, nextOK := coro.NextRunnable(p)
+		if !nextOK || next == nil || completed[next] {
+			t.Fatalf("dequeue select pair G = (%p, %t), completed=%v", next, nextOK, completed)
+		}
+		completed[next] = true
+		switch next {
+		case selectFrame.g:
+			selectAction, ok = coro.BeginRunG(p, selectFrame.g)
+			if !ok || selectAction.Kind != coro.ActionCheckResume {
+				t.Fatalf("begin completed channel selector = (%+v, %t)", selectAction, ok)
+			}
+			selectAction, ok = coro.Checked(p, selectFrame.g, selectAction, false)
+			if !ok || selectAction.Kind != coro.ActionResume {
+				t.Fatalf("activate completed channel selector = (%+v, %t)", selectAction, ok)
+			}
+			selectedIndex, selectedOK, selectStatus := CoroChanSelectResume(
+				unsafe.Pointer(selectFrame.g),
+				unsafe.Pointer(&selectCases[0]),
+				unsafe.Pointer(&coroSelectState),
+				selectOps...,
+			)
+			if selectedIndex != 1 || !selectedOK || selectStatus != coroChanResumeRecvOK ||
+				firstSelectedValue != 0 || secondSelectedValue != selectedValue {
+				t.Fatalf("channel select resume = index:%d ok:%t status:%d values:(%#x,%#x)",
+					selectedIndex, selectedOK, selectStatus, firstSelectedValue, secondSelectedValue)
+			}
+			selectFrame.header.SuspendReason = uint16(coro.SuspendNone)
+			selectFrame.header.Lifecycle = uint16(coro.FrameActive)
+			yieldCoroChannelAdapterFrame(t, p, selectFrame, selectAction)
+		case directSender.g:
+			directSendAction, directStatus := resumeCoroChannelAdapterFrame(t, p, directSender, &directSendState)
+			if directStatus != coroChanResumeSendOK {
+				t.Fatalf("direct select sender resume status = %d, want %d", directStatus, coroChanResumeSendOK)
+			}
+			yieldCoroChannelAdapterFrame(t, p, directSender, directSendAction)
+		default:
+			t.Fatalf("unexpected completed select pair G %p", next)
+		}
+	}
+	if selectChannels[0].recvq.first != nil || selectChannels[1].recvq.first != nil ||
+		coroProgramChannelSourceV1State.Pending() {
+		t.Fatalf("channel select retained queue/source state: first=%p second=%p pending=%t",
+			selectChannels[0].recvq.first, selectChannels[1].recvq.first,
+			coroProgramChannelSourceV1State.Pending())
+	}
+
+	// Reuse the selector immediately for a direct receive after its two source
+	// slots have been recycled. This is the native generated-code sequence when
+	// a selected case is followed by another blocking channel operation.
+	follow := new(Chan)
+	follow.elemsize = int(unsafe.Sizeof(uint32(0)))
+	follow.mutex.Init(nil)
+	next, nextOK := coro.NextRunnable(p)
+	if !nextOK || next == nil {
+		t.Fatalf("dequeue post-select sender = (%p, %t)", next, nextOK)
+	}
+	if next != directSender.g {
+		if next != selectFrame.g || !coro.Enqueue(p, next) {
+			t.Fatalf("rotate post-select ready queue from %p", next)
+		}
+		next, nextOK = coro.NextRunnable(p)
+	}
+	if !nextOK || next != directSender.g {
+		t.Fatalf("dequeue post-select direct sender = (%p, %t), want %p", next, nextOK, directSender.g)
+	}
+	followValue := uint32(0x10293847)
+	var followSendState, followRecvState CoroChanParkV1
+	followSendAction := activateCoroChannelAdapterFrame(t, p, directSender)
+	parkCoroChannelAdapterFrame(
+		t, p, directSender, followSendAction, follow, unsafe.Pointer(&followValue), &followSendState, true,
+	)
+	followRecvAction := dequeueCoroChannelAdapterFrame(t, p, selectFrame)
+	var followGot uint32
+	parkCoroChannelAdapterFrame(
+		t, p, selectFrame, followRecvAction, follow, unsafe.Pointer(&followGot), &followRecvState, false,
+	)
+	pollCoroChannelAdapterExecutor(t, driver)
+	followCompleted := map[*coro.G]bool{}
+	for len(followCompleted) != 2 {
+		next, nextOK = coro.NextRunnable(p)
+		if !nextOK || next == nil || followCompleted[next] {
+			t.Fatalf("dequeue post-select pair G = (%p, %t), completed=%v", next, nextOK, followCompleted)
+		}
+		followCompleted[next] = true
+		switch next {
+		case directSender.g:
+			followSendAction, status := resumeCoroChannelAdapterFrame(t, p, directSender, &followSendState)
+			if status != coroChanResumeSendOK {
+				t.Fatalf("post-select send status = %d, want %d", status, coroChanResumeSendOK)
+			}
+			yieldCoroChannelAdapterFrame(t, p, directSender, followSendAction)
+		case selectFrame.g:
+			followRecvAction, status := resumeCoroChannelAdapterFrame(t, p, selectFrame, &followRecvState)
+			if status != coroChanResumeRecvOK || followGot != followValue {
+				t.Fatalf("post-select receive = status:%d value:%#x, want status:%d value:%#x",
+					status, followGot, coroChanResumeRecvOK, followValue)
+			}
+			yieldCoroChannelAdapterFrame(t, p, selectFrame, followRecvAction)
+		default:
+			t.Fatalf("unexpected post-select pair G %p", next)
+		}
+	}
+	if follow.sendq.first != nil || follow.recvq.first != nil || coroProgramChannelSourceV1State.Pending() {
+		t.Fatalf("post-select pair retained queue/source state: send=%p recv=%p pending=%t",
+			follow.sendq.first, follow.recvq.first, coroProgramChannelSourceV1State.Pending())
+	}
+
 	// Claim contention can temporarily leave receivers queued while a sender
 	// uses an available buffer slot. Closing must deliver that buffered value
 	// before publishing the closed zero value to the next receiver.
@@ -401,5 +577,83 @@ func TestCoroChannelAdapterPairCommitAndResume(t *testing.T) {
 		buffered.sendq.first != nil || buffered.sendq.last != nil {
 		t.Fatalf("closed buffered channel retained data/waiters: count=%d recv=(%p,%p) send=(%p,%p)",
 			buffered.qcount, buffered.recvq.first, buffered.recvq.last, buffered.sendq.first, buffered.sendq.last)
+	}
+
+	// Task cancellation is a logical competitor of every physical case. It
+	// must win once, detach both hchan nodes, and return through the compiler's
+	// typed cancellation edge without exposing a selected value.
+	canceledG, runnable := coro.NextRunnable(p)
+	if !runnable || canceledG == nil {
+		t.Fatalf("dequeue channel selector for cancellation = (%p, %t)", canceledG, runnable)
+	}
+	var canceledFrame *coroChannelAdapterFrame
+	switch canceledG {
+	case receiver.g:
+		canceledFrame = receiver
+	case sender.g:
+		canceledFrame = sender
+	default:
+		t.Fatalf("unexpected canceled selector G %p", canceledG)
+	}
+	canceledAction := activateCoroChannelAdapterFrame(t, p, canceledFrame)
+	canceledChannels := [2]*Chan{new(Chan), new(Chan)}
+	var canceledValues [2]uint32
+	canceledOps := make([]ChanOp, len(canceledChannels))
+	for index, canceledChannel := range canceledChannels {
+		canceledChannel.elemsize = int(unsafe.Sizeof(uint32(0)))
+		canceledChannel.mutex.Init(nil)
+		canceledOps[index] = ChanOp{
+			C: canceledChannel, Val: unsafe.Pointer(&canceledValues[index]), Size: int32(unsafe.Sizeof(uint32(0))),
+		}
+	}
+	var canceledCases [2]CoroChanSelectCaseV1
+	var canceledState CoroChanSelectV1
+	canceledFrame.header.SuspendReason = uint16(coro.SuspendPark)
+	canceledFrame.header.Lifecycle = uint16(coro.FrameSuspended)
+	prepareCoroChanSelectV1(
+		unsafe.Pointer(canceledFrame.g),
+		canceledFrame.handle,
+		unsafe.Pointer(canceledFrame.header),
+		unsafe.Pointer(&canceledCases[0]),
+		unsafe.Pointer(&canceledState),
+		canceledOps,
+	)
+	if parked, ok := coro.Resumed(p, canceledFrame.g, canceledAction); !ok || parked.Kind != coro.ActionPark {
+		t.Fatalf("commit canceled channel select park = (%+v, %t)", parked, ok)
+	}
+	deferredCanceledG, deferredCanceledOK := coro.NextRunnable(p)
+	if !deferredCanceledOK || deferredCanceledG == nil || deferredCanceledG == canceledFrame.g {
+		t.Fatalf("dequeue unrelated G before select cancellation = (%p, %t)", deferredCanceledG, deferredCanceledOK)
+	}
+	if !coro.RequestTaskCancellation(p, canceledFrame.g, coro.TaskCancelAbort) {
+		t.Fatal("request channel select task cancellation")
+	}
+	pollCoroChannelAdapterExecutor(t, driver)
+	if next, ok := coro.NextRunnable(p); !ok || next != canceledFrame.g {
+		t.Fatalf("dequeue canceled channel selector = (%p, %t), want %p", next, ok, canceledFrame.g)
+	}
+	canceledAction, ok = coro.BeginRunG(p, canceledFrame.g)
+	if !ok || canceledAction.Kind != coro.ActionCheckResume {
+		t.Fatalf("begin canceled channel selector = (%+v, %t)", canceledAction, ok)
+	}
+	canceledAction, ok = coro.Checked(p, canceledFrame.g, canceledAction, false)
+	if !ok || canceledAction.Kind != coro.ActionResume {
+		t.Fatalf("activate canceled channel selector = (%+v, %t)", canceledAction, ok)
+	}
+	canceledIndex, canceledOK, canceledStatus := CoroChanSelectResume(
+		unsafe.Pointer(canceledFrame.g),
+		unsafe.Pointer(&canceledCases[0]),
+		unsafe.Pointer(&canceledState),
+		canceledOps...,
+	)
+	if canceledIndex != -1 || canceledOK || canceledStatus != coroChanResumeTaskAbort {
+		t.Fatalf("canceled channel select resume = index:%d ok:%t status:%d",
+			canceledIndex, canceledOK, canceledStatus)
+	}
+	if canceledChannels[0].recvq.first != nil || canceledChannels[1].recvq.first != nil ||
+		coroProgramChannelSourceV1State.Pending() {
+		t.Fatalf("canceled channel select retained queue/source state: first=%p second=%p pending=%t",
+			canceledChannels[0].recvq.first, canceledChannels[1].recvq.first,
+			coroProgramChannelSourceV1State.Pending())
 	}
 }

@@ -46,6 +46,34 @@ func RecvOK(ch chan uint32) (uint32, bool) {
 	value, ok := <-ch
 	return value, ok
 }
+
+func Select(first, second chan uint32, value uint32) (int, uint32, bool) {
+	select {
+	case first <- value:
+		return 0, 0, true
+	case received, ok := <-second:
+		return 1, received, ok
+	}
+}
+
+func TrySelectThenRecv(first, second chan uint32, value uint32) (int, uint32, bool) {
+	selected := -1
+	var received uint32
+	var ok bool
+	select {
+	case first <- value:
+		selected = 0
+	case received, ok = <-second:
+		selected = 1
+	default:
+	}
+	received += <-second
+	return selected, received, ok
+}
+
+func EmptySelect() {
+	select {}
+}
 `
 
 func TestCoroChannelNativeAndWasm32(t *testing.T) {
@@ -98,7 +126,13 @@ func TestCoroChannelNativeAndWasm32(t *testing.T) {
 					t.Fatalf("%s coroutine lacks nonblocking receive helper:\n%s", name, recv)
 				}
 			}
-			for _, forbidden := range []string{"runtime.ChanSend\"", "runtime.ChanRecv\"", "Future", "Promise", "Task"} {
+			selectBody := requireCoroPhysicalFunction(t, module, "foo.Select").String()
+			assertCoroSelectBody(t, selectBody)
+			emptySelectBody := requireCoroPhysicalFunction(t, module, "foo.EmptySelect").String()
+			assertCoroSelectBody(t, emptySelectBody)
+			trySelectBody := requireCoroPhysicalFunction(t, module, "foo.TrySelectThenRecv").String()
+			assertCoroTrySelectBody(t, trySelectBody)
+			for _, forbidden := range []string{"runtime.ChanSend\"", "runtime.ChanRecv\"", "runtime.Select\"", "Future", "Promise", "Task"} {
 				if strings.Contains(module.String(), forbidden) {
 					t.Fatalf("channel lowering retained forbidden abstraction %q:\n%s", forbidden, module.String())
 				}
@@ -110,6 +144,30 @@ func TestCoroChannelNativeAndWasm32(t *testing.T) {
 				if resume.IsNil() || !strings.Contains(resume.String(), "call i32 @"+coroChanResumeHookV1) {
 					t.Fatalf("CoroSplit lost channel resume dispatch in %s:\n%s", name, module.String())
 				}
+			}
+			selectResume := module.NamedFunction("foo.Select$coro.resume")
+			if selectResume.IsNil() || !strings.Contains(
+				selectResume.String(),
+				"github.com/goplus/llgo/runtime/internal/runtime.CoroChanSelectResume",
+			) {
+				t.Fatalf("CoroSplit lost channel select resume dispatch:\n%s", module.String())
+			}
+			emptySelectResume := module.NamedFunction("foo.EmptySelect$coro.resume")
+			if emptySelectResume.IsNil() || !strings.Contains(
+				emptySelectResume.String(),
+				"github.com/goplus/llgo/runtime/internal/runtime.CoroChanSelectResume",
+			) {
+				t.Fatalf("CoroSplit lost empty channel select cancellation dispatch:\n%s", module.String())
+			}
+			trySelectResume := module.NamedFunction("foo.TrySelectThenRecv$coro.resume")
+			if trySelectResume.IsNil() || strings.Count(
+				trySelectResume.String(),
+				"github.com/goplus/llgo/runtime/internal/runtime.CoroChanSelectTry",
+			) != 1 || strings.Contains(
+				trySelectResume.String(),
+				"github.com/goplus/llgo/runtime/internal/runtime.CoroChanSelectPark",
+			) {
+				t.Fatalf("CoroSplit changed nonblocking channel select into a physical park:\n%s", module.String())
 			}
 			for _, intrinsic := range []string{"llvm.coro.id", "llvm.coro.begin", "llvm.coro.suspend", "llvm.coro.end"} {
 				if hasLLVMCall(module.String(), intrinsic) {
@@ -126,12 +184,67 @@ func TestCoroChannelNativeAndWasm32(t *testing.T) {
 				coroChanRecvParkHookV1,
 				coroChanResumeHookV1,
 				coroChanSendClosedPanicHookV1,
+				"github.com/goplus/llgo/runtime/internal/runtime.CoroChanSelectTry",
+				"github.com/goplus/llgo/runtime/internal/runtime.CoroChanSelectPark",
+				"github.com/goplus/llgo/runtime/internal/runtime.CoroChanSelectResume",
 			} {
 				if len(object.Bytes()) == 0 || !bytes.Contains(object.Bytes(), []byte(symbol)) {
 					t.Fatalf("post-CoroSplit channel object lost ABI symbol %q", symbol)
 				}
 			}
 		})
+	}
+}
+
+func assertCoroSelectBody(t *testing.T, body string) {
+	t.Helper()
+	if got := strings.Count(body, "call i8 @llvm.coro.suspend"); got != 3 {
+		t.Fatalf("Select coro.suspend calls = %d, want initial + select + final:\n%s", got, body)
+	}
+	for _, symbol := range []string{
+		"github.com/goplus/llgo/runtime/internal/runtime.CoroChanSelectTry",
+		"github.com/goplus/llgo/runtime/internal/runtime.CoroChanSelectPark",
+		"github.com/goplus/llgo/runtime/internal/runtime.CoroChanSelectResume",
+	} {
+		if got := strings.Count(body, symbol); got != 1 {
+			t.Fatalf("Select references to %q = %d, want 1:\n%s", symbol, got, body)
+		}
+	}
+	for _, status := range []uint64{
+		coroChanResumeSendOK,
+		coroChanResumeRecvOK,
+		coroChanResumeRecvClosed,
+		coroChanResumeSendClosed,
+		coroChanResumeTaskAbort,
+		coroChanResumeShutdown,
+	} {
+		if !regexp.MustCompile(`(?m)^\s+i32 ` + strconv.FormatUint(status, 10) + `, label `).MatchString(body) {
+			t.Fatalf("Select resume dispatch lacks status %d:\n%s", status, body)
+		}
+	}
+	park := strings.Index(body, "runtime.CoroChanSelectPark")
+	if park < 0 {
+		t.Fatalf("Select does not publish its physical cases:\n%s", body)
+	}
+	suspend := strings.Index(body[park:], "call i8 @llvm.coro.suspend")
+	resume := strings.Index(body[park:], "runtime.CoroChanSelectResume")
+	if suspend < 0 || resume < 0 || suspend >= resume {
+		t.Fatalf("Select does not publish all cases before suspend and clean them after resume:\n%s", body)
+	}
+}
+
+func assertCoroTrySelectBody(t *testing.T, body string) {
+	t.Helper()
+	if got := strings.Count(body, "runtime.CoroChanSelectTry"); got != 1 {
+		t.Fatalf("TrySelectThenRecv select-try calls = %d, want 1:\n%s", got, body)
+	}
+	for _, forbidden := range []string{"runtime.CoroChanSelectPark", "runtime.CoroChanSelectResume"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("TrySelectThenRecv nonblocking select uses %q:\n%s", forbidden, body)
+		}
+	}
+	if got := strings.Count(body, "call i8 @llvm.coro.suspend"); got != 3 {
+		t.Fatalf("TrySelectThenRecv coro.suspend calls = %d, want initial + trailing receive + final:\n%s", got, body)
 	}
 }
 
@@ -160,9 +273,12 @@ func assertCoroChannelBody(t *testing.T, name, body, parkHook string, statuses [
 		}
 	}
 	hook := strings.Index(body, "call void @"+parkHook)
+	if hook < 0 {
+		t.Fatalf("%s does not publish its physical park:\n%s", name, body)
+	}
 	suspend := strings.Index(body[hook:], "call i8 @llvm.coro.suspend")
 	resume := strings.Index(body[hook:], "call i32 @"+coroChanResumeHookV1)
-	if hook < 0 || suspend < 0 || resume < 0 || suspend >= resume {
+	if suspend < 0 || resume < 0 || suspend >= resume {
 		t.Fatalf("%s does not publish park before suspend and dispatch after resume:\n%s", name, body)
 	}
 }
@@ -193,7 +309,10 @@ func compileCoroChannelFixture(t *testing.T, target *llssa.Target) (
 		prog.Dispose()
 		t.Fatal(err)
 	}
-	functions := []*ssa.Function{ssaPkg.Func("Send"), ssaPkg.Func("Recv"), ssaPkg.Func("RecvOK")}
+	functions := []*ssa.Function{
+		ssaPkg.Func("Send"), ssaPkg.Func("Recv"), ssaPkg.Func("RecvOK"),
+		ssaPkg.Func("Select"), ssaPkg.Func("TrySelectThenRecv"), ssaPkg.Func("EmptySelect"),
+	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
 	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelABIV0
@@ -253,5 +372,47 @@ func TestCoroChannelCompilationCapabilityFailsClosed(t *testing.T) {
 	}
 	if err := compilation.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "scheduler ABI") {
 		t.Fatalf("channel scheduler identity error = %v", err)
+	}
+}
+
+func TestCoroChannelPhysicalABIRejectsNilSelectChannel(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	prog, pkg, plan, functions := compileCoroChannelFixture(t, nil)
+	defer prog.Dispose()
+	module := pkg.Module()
+	defer module.Dispose()
+
+	var selectFn *ssa.Function
+	for _, fn := range functions {
+		if fn.Name() == "Select" {
+			selectFn = fn
+			break
+		}
+	}
+	if selectFn == nil {
+		t.Fatal("Select function not found")
+	}
+	var instruction *ssa.Select
+	for _, block := range selectFn.Blocks {
+		for _, candidate := range block.Instrs {
+			if candidate, ok := candidate.(*ssa.Select); ok {
+				instruction = candidate
+				break
+			}
+		}
+	}
+	if instruction == nil || len(instruction.States) == 0 || instruction.States[0] == nil {
+		t.Fatal("Select instruction has no concrete channel case")
+	}
+	instruction.States[0].Chan = nil
+	functionPlan, ok := plan.FunctionPlan(selectFn)
+	if !ok {
+		t.Fatal("Select function plan not found")
+	}
+	err := validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(
+		selectFn, functionPlan, plan, nil, true, true, false, false, "", true,
+	)
+	if err == nil || !strings.Contains(err.Error(), "channel select case 0 channel is nil") {
+		t.Fatalf("nil select channel validation error = %v", err)
 	}
 }
