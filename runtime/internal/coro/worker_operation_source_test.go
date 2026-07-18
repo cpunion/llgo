@@ -345,9 +345,11 @@ func TestWorkerOperationSourceDeferredPublicationStaysSticky(t *testing.T) {
 
 func TestWorkerOperationSourceSchedulerWaitRecordPath(t *testing.T) {
 	p := new(P)
+	waits := new(WaitRegistrationTable)
 	source := new(WorkerOperationSource)
-	if !BindWorkerOperationSource(source, p) {
-		t.Fatal("bind scheduler worker source")
+	sources := new(ExecutorSourceSet)
+	if !bindExecutorSourceSet(sources, p, ExecutorSourceCatalog{Waits: waits, Worker: source}) {
+		t.Fatal("bind scheduler worker source catalog")
 	}
 	park := beginTimerV2TestPark(t, p, "worker-source-wait-record", 1, 71)
 	id, ok := source.ReserveAndAttachWait(p, &park.task.g.park, park.ticket, park.wait, 19)
@@ -359,20 +361,12 @@ func TestWorkerOperationSourceSchedulerWaitRecordPath(t *testing.T) {
 	if source.Post(id, payload) != WorkerOperationPosted {
 		t.Fatal("post scheduler worker result")
 	}
-	if published, lost, ok := source.PublishPass(p); !ok || published != 1 || lost != 0 {
-		t.Fatalf("publish scheduler worker result = (%d, %d, %t)", published, lost, ok)
+	if scan, ok := sources.publishPass(p, 0, false); !ok || scan.worker != 1 ||
+		scan.workerLost != 0 || scan.completed != 1 {
+		t.Fatalf("publish scheduler worker result = (%+v, %t)", scan, ok)
 	}
-	batch, tail, resolution, ok := resolveAffectedWaitSets(p, nil)
-	if !ok || batch != park.wait || tail != park.wait ||
-		resolution != (CompletionResolution{WaitSets: 1, Completed: 1, Winners: 1}) {
-		t.Fatalf("resolve scheduler worker wait = (%p, %p, %+v, %t)", batch, tail, resolution, ok)
-	}
-	slot, _ := workerOperationSlotFor(source, id)
-	if source.ApplyOne(p, id, &slot.record) != OperationApplyDetached {
-		t.Fatal("apply scheduler worker result")
-	}
-	if promoted, ok := promoteResolvedWaitSets(p, batch); !ok || promoted != 1 {
-		t.Fatalf("promote scheduler worker wait = (%d, %t)", promoted, ok)
+	if promoted, visits, ok := sources.resolvePublishedEpoch(p); !ok || promoted != 1 || visits != 1 {
+		t.Fatalf("resolve scheduler worker wait = (%d, visits=%d, %t)", promoted, visits, ok)
 	}
 	if g, ok := NextRunnable(p); !ok || g != park.task.g {
 		t.Fatal("dequeue scheduler worker result")
@@ -384,8 +378,72 @@ func TestWorkerOperationSourceSchedulerWaitRecordPath(t *testing.T) {
 	}
 	finishWorkerOperations(t, source, p, []OperationID{id}, lease, payload)
 	finishWaitTestTask(t, p, park.task, action)
+	if !unbindExecutorSourceSet(sources, p) || !source.CanRelease() || !waits.CanRelease() {
+		t.Fatal("release scheduler worker source catalog")
+	}
+}
+
+func TestWorkerOperationSourceSubmittedCancellationAwaitsPhysicalCompletion(t *testing.T) {
+	p := new(P)
+	source := new(WorkerOperationSource)
+	if !BindWorkerOperationSource(source, p) {
+		t.Fatal("bind cancelable scheduler worker source")
+	}
+	park := beginTimerV2TestPark(t, p, "worker-source-cancel-await", 1, 73)
+	id, ok := source.ReserveAndAttachWait(p, &park.task.g.park, park.ticket, park.wait, 23)
+	if !ok || !source.MarkSubmitted(p, id) {
+		t.Fatal("reserve and submit scheduler worker operation")
+	}
+	commitTimerV2TestPark(t, p, park)
+	if !RequestWaitSetCancel(p, park.wait, ParkCancelOperation) {
+		t.Fatal("request submitted worker cancellation")
+	}
+	batch, tail, resolution, ok := resolveAffectedWaitSets(p, nil)
+	if !ok || batch != park.wait || tail != park.wait ||
+		resolution != (CompletionResolution{WaitSets: 1, Canceled: 1, Losers: 1}) {
+		t.Fatalf("resolve submitted worker cancellation = (%p, %p, %+v, %t)", batch, tail, resolution, ok)
+	}
+	slot, _ := workerOperationSlotFor(source, id)
+	if got := source.ApplyOne(p, id, &slot.record); got != OperationApplyAwaitExternalFact {
+		t.Fatalf("apply submitted worker cancellation = %d, want await-external", got)
+	}
+	if retry, await, ok := finishWaitSetApplyProgress(park.wait, false, true); !ok || retry || !await {
+		t.Fatalf("finish submitted worker await = (%t, %t, %t)", retry, await, ok)
+	}
+	if ParkReady(&park.task.g.park, park.ticket) {
+		t.Fatal("submitted worker cancellation promoted before physical completion")
+	}
+	payload := workerPayloadForTest(t, 10, 1000, 0, 0)
+	if source.Post(id, payload) != WorkerOperationPosted {
+		t.Fatal("post physically completed canceled worker")
+	}
+	if published, lost, ok := source.PublishPass(p); !ok || published != 0 || lost != 1 {
+		t.Fatalf("publish canceled worker completion = (%d, %d, %t)", published, lost, ok)
+	}
+	batch, tail, resolution, ok = resolveAffectedWaitSets(p, nil)
+	if !ok || batch != park.wait || tail != park.wait || resolution != (CompletionResolution{}) {
+		t.Fatalf("revisit physically complete cancellation = (%p, %p, %+v, %t)", batch, tail, resolution, ok)
+	}
+	if got := source.ApplyOne(p, id, &slot.record); got != OperationApplyDetached {
+		t.Fatalf("detach physically complete cancellation = %d", got)
+	}
+	if promoted, ok := promoteResolvedWaitSets(p, batch); !ok || promoted != 1 {
+		t.Fatalf("promote physically complete cancellation = (%d, %t)", promoted, ok)
+	}
+	if g, ok := NextRunnable(p); !ok || g != park.task.g {
+		t.Fatal("dequeue physically complete cancellation")
+	}
+	action := beginWaitTestResume(t, p, park.task)
+	outcome, caseID, lease, taskCancel, ok := TakeRunDecision(park.task.g, park.ticket)
+	if !ok || outcome != ParkOutcomeCanceled || caseID != 0 || lease.Valid() || taskCancel != TaskCancelNone {
+		t.Fatalf("take delayed worker cancellation = (%d, %d, %+v, %d, %t)", outcome, caseID, lease, taskCancel, ok)
+	}
+	if !source.ConfirmQuiesced(p, id) || !source.Recycle(p, id) {
+		t.Fatal("release physically complete canceled worker")
+	}
+	finishWaitTestTask(t, p, park.task, action)
 	if !UnbindWorkerOperationSource(source, p) || !source.CanRelease() {
-		t.Fatal("release scheduler worker source")
+		t.Fatal("release submitted cancellation worker source")
 	}
 }
 

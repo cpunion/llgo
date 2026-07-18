@@ -60,6 +60,10 @@ type workerOperationSlot struct {
 	record       OperationRecord
 	result       ScalarResultCell
 	nextAffected uint32
+	// submitted is owner-only. Once true, a non-cancellable backend may still
+	// publish after logical task cancellation, so ApplyOne must retain the
+	// ParkLink until a delivered mailbox proves physical completion.
+	submitted bool
 }
 
 // WorkerOperationSource is the allocation-free scheduler half of a bounded
@@ -86,7 +90,8 @@ func workerOperationSlotFor(source *WorkerOperationSource, id OperationID) (*wor
 func workerOperationReusableSlot(source *WorkerOperationSource, slot *workerOperationSlot, index uint32) bool {
 	if slot == nil || !producerSourceSlotReusable(&slot.producerSourceSlot) ||
 		preemptLoad(&slot.mailbox) != uint32(workerOperationMailboxEmpty) ||
-		slot.payload != (ScalarResultPayloadV1{}) || slot.result != (ScalarResultCell{}) || slot.nextAffected != 0 {
+		slot.payload != (ScalarResultPayloadV1{}) || slot.result != (ScalarResultCell{}) ||
+		slot.nextAffected != 0 || slot.submitted {
 		return false
 	}
 	generation := preemptLoad(&slot.generation)
@@ -179,6 +184,23 @@ func (source *WorkerOperationSource) ReserveAndAttachWait(
 	caseID uint32,
 ) (OperationID, bool) {
 	return source.reserveAndAttach(p, state, ticket, wait, caseID)
+}
+
+// MarkSubmitted closes the owner-side handoff from a reserved source slot to
+// a backend queue. Before this point a failed submission may be canceled and
+// recycled immediately. Afterwards logical cancellation is delayed at the
+// source apply boundary until Post has made physical completion durable.
+func (source *WorkerOperationSource) MarkSubmitted(p *P, id OperationID) bool {
+	slot, ok := workerOperationSlotFor(source, id)
+	if !ok || !validWorkerOperationOwner(source, p) || slot.submitted ||
+		preemptLoad(&slot.generation) != id.Generation ||
+		preemptLoad(&slot.state) != uint32(producerSourceActive) ||
+		preemptLoad(&slot.mailbox) != uint32(workerOperationMailboxEmpty) ||
+		!slot.record.Matches(id) || slot.record.phase != operationActive {
+		return false
+	}
+	slot.submitted = true
+	return true
 }
 
 // Post publishes only the first exact-generation result. Later producers are
@@ -286,6 +308,13 @@ func (source *WorkerOperationSource) publishSlot(p *P, index uint32) (published,
 		}
 		published = 1
 	case OperationCompletionLost:
+		// A non-cancellable submitted worker may have kept the resolved wait-set
+		// in AwaitExternal. Completion is the sticky fact that makes its source
+		// link detachable; requeue exactly that wait-set for the next apply pass.
+		if slot.submitted && slot.record.link.wait != nil &&
+			!MarkWaitSetAffected(p, slot.record.link.wait) {
+			return 0, 0, false
+		}
 		lost = 1
 	case OperationCompletionDeferred:
 		// A bounded resolver owns a frozen ParkState snapshot. Keep the exact
@@ -390,6 +419,21 @@ func (source *WorkerOperationSource) BeginClose(p *P, id OperationID) WorkerOper
 	return source.beginCloseSlot(p, id)
 }
 
+func requestWorkerPhysicalCancel(record *OperationRecord, id OperationID) bool {
+	if record == nil || !record.Matches(id) || record.phase != operationActive ||
+		record.disposition == OperationDispositionPending {
+		return false
+	}
+	// The common helper is normally called before logical resolution. Worker
+	// apply necessarily observes the already-frozen loser/canceled disposition,
+	// so record the same owner-only request after validating that exact state.
+	if record.cancelRequested {
+		return true
+	}
+	record.cancelRequested = true
+	return true
+}
+
 func (source *WorkerOperationSource) ApplyOne(p *P, id OperationID, record *OperationRecord) OperationApplyResult {
 	slot, ok := workerOperationSlotFor(source, id)
 	if !ok || !validWorkerOperationOwner(source, p) || preemptLoad(&slot.generation) != id.Generation ||
@@ -403,6 +447,14 @@ func (source *WorkerOperationSource) ApplyOne(p *P, id OperationID, record *Oper
 	disposition, terminal := OperationDispositionOf(&slot.record, id)
 	if !terminal || slot.record.link.park == nil || slot.record.link.operation != &slot.record ||
 		slot.record.link.ticket == (ParkTicket{}) {
+		return OperationApplyInvalid
+	}
+	mailbox := workerOperationMailbox(preemptLoad(&slot.mailbox))
+	if disposition != OperationDispositionWinner && slot.submitted &&
+		mailbox != workerOperationMailboxDelivered {
+		if requestWorkerPhysicalCancel(&slot.record, id) {
+			return OperationApplyAwaitExternalFact
+		}
 		return OperationApplyInvalid
 	}
 	closeResult := source.beginCloseSlot(p, id)
@@ -520,6 +572,7 @@ func (source *WorkerOperationSource) Recycle(p *P, id OperationID) bool {
 	}
 	slot.payload = ScalarResultPayloadV1{}
 	slot.nextAffected = 0
+	slot.submitted = false
 	preemptStore(&slot.mailbox, uint32(workerOperationMailboxEmpty))
 	return recycleProducerSourceSlot(&slot.producerSourceSlot)
 }

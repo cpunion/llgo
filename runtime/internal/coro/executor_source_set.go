@@ -44,6 +44,7 @@ type ExecutorSourceSet struct {
 	waits   *WaitRegistrationTable
 	timers  *TimerRegistrationTable
 	manual  *ManualOperationSource
+	worker  *WorkerOperationSource
 	channel *ChannelOperationSource
 	control *TaskControlSource
 }
@@ -56,6 +57,8 @@ type executorSourceScan struct {
 	timers      int
 	manual      int
 	manualLost  int
+	worker      int
+	workerLost  int
 	channel     int
 	channelLost int
 	control     int
@@ -80,6 +83,8 @@ func (scan *executorSourceScan) add(other executorSourceScan) {
 	scan.timers += other.timers
 	scan.manual += other.manual
 	scan.manualLost += other.manualLost
+	scan.worker += other.worker
+	scan.workerLost += other.workerLost
 	scan.channel += other.channel
 	scan.channelLost += other.channelLost
 	scan.control += other.control
@@ -102,6 +107,7 @@ func validExecutorSourceSet(sources *ExecutorSourceSet, p *P) bool {
 	}
 	return (sources.timers == nil || sources.timers.owner == p && sources.timers.route == sources.route) &&
 		(sources.manual == nil || sources.manual.owner == p && sources.manual.route == sources.route) &&
+		(sources.worker == nil || sources.worker.owner == p && sources.worker.route == sources.route) &&
 		(sources.channel == nil || sources.channel.owner == p && sources.channel.route == sources.route) &&
 		(sources.control == nil || sources.control.owner == p && sources.control.route == sources.route)
 }
@@ -114,6 +120,7 @@ type ExecutorSourceCatalog struct {
 	Waits   *WaitRegistrationTable
 	Timers  *TimerRegistrationTable
 	Manual  *ManualOperationSource
+	Worker  *WorkerOperationSource
 	Channel *ChannelOperationSource
 	Control *TaskControlSource
 }
@@ -137,7 +144,20 @@ func bindExecutorSourceSetAtRoute(sources *ExecutorSourceSet, p *P, route RouteI
 		_ = unbindRegistrationTable(catalog.Waits, p)
 		return false
 	}
+	if catalog.Worker != nil && !BindWorkerOperationSourceAtRoute(catalog.Worker, p, route) {
+		if catalog.Manual != nil {
+			_ = UnbindManualOperationSource(catalog.Manual, p)
+		}
+		if catalog.Timers != nil {
+			_ = unbindTimerRegistrationTable(catalog.Timers, p)
+		}
+		_ = unbindRegistrationTable(catalog.Waits, p)
+		return false
+	}
 	if catalog.Channel != nil && !BindChannelOperationSourceAtRoute(catalog.Channel, p, route) {
+		if catalog.Worker != nil {
+			_ = UnbindWorkerOperationSource(catalog.Worker, p)
+		}
 		if catalog.Manual != nil {
 			_ = UnbindManualOperationSource(catalog.Manual, p)
 		}
@@ -150,6 +170,9 @@ func bindExecutorSourceSetAtRoute(sources *ExecutorSourceSet, p *P, route RouteI
 	if catalog.Control != nil && !BindTaskControlSourceAtRoute(catalog.Control, p, route) {
 		if catalog.Channel != nil {
 			_ = UnbindChannelOperationSource(catalog.Channel, p)
+		}
+		if catalog.Worker != nil {
+			_ = UnbindWorkerOperationSource(catalog.Worker, p)
 		}
 		if catalog.Manual != nil {
 			_ = UnbindManualOperationSource(catalog.Manual, p)
@@ -166,6 +189,7 @@ func bindExecutorSourceSetAtRoute(sources *ExecutorSourceSet, p *P, route RouteI
 	sources.waits = catalog.Waits
 	sources.timers = catalog.Timers
 	sources.manual = catalog.Manual
+	sources.worker = catalog.Worker
 	sources.channel = catalog.Channel
 	sources.control = catalog.Control
 	return true
@@ -238,6 +262,15 @@ func (sources *ExecutorSourceSet) publishPass(p *P, now int64, withDeadline bool
 			return scan, false
 		}
 	}
+	if sources.worker != nil {
+		published, lost, workerOK := sources.worker.PublishPass(p)
+		scan.worker = int(published)
+		scan.workerLost = int(lost)
+		scan.completed += scan.worker + scan.workerLost
+		if !workerOK {
+			return scan, false
+		}
+	}
 	if sources.channel != nil {
 		if !sources.channel.beginPublishPass(p) {
 			return scan, false
@@ -287,6 +320,11 @@ func (sources *ExecutorSourceSet) applyOne(p *P, link *ParkLink) OperationApplyR
 			return OperationApplyInvalid
 		}
 		return sources.manual.ApplyOne(p, link.operation.id, link.operation)
+	case OperationSourceWorker:
+		if sources.worker == nil {
+			return OperationApplyInvalid
+		}
+		return sources.worker.ApplyOne(p, link.operation.id, link.operation)
 	case OperationSourceChannel:
 		if sources.channel == nil {
 			return OperationApplyInvalid
@@ -317,7 +355,7 @@ func (sources *ExecutorSourceSet) tryCommitReadyCandidate(request ParkCommitRequ
 			return ParkCommitAttempt{}, false
 		}
 		return sources.channel.TryCommit(request, owner)
-	case OperationSourceTimer, OperationSourceManual:
+	case OperationSourceTimer, OperationSourceManual, OperationSourceWorker:
 		return ParkCommitAttempt{}, false
 	default:
 		return ParkCommitAttempt{}, false
@@ -477,6 +515,7 @@ func (sources *ExecutorSourceSet) resolvePublishedEpoch(p *P) (promoted, applyVi
 func (sources *ExecutorSourceSet) pending(p *P) bool {
 	return validExecutorSourceSet(sources, p) &&
 		(p.affectedWaitHead != nil || sources.waits.Pending() || sources.manual != nil && sources.manual.Pending() ||
+			sources.worker != nil && sources.worker.Pending() ||
 			sources.channel != nil && sources.channel.Pending() ||
 			sources.control != nil && sources.control.Pending())
 }
@@ -492,6 +531,7 @@ func (sources *ExecutorSourceSet) empty(p *P) bool {
 	return validExecutorSourceSet(sources, p) && registrationTableEmpty(sources.waits, p) &&
 		(sources.timers == nil || timerRegistrationTableEmpty(sources.timers, p)) &&
 		(sources.manual == nil || manualOperationSourceEmpty(sources.manual, p)) &&
+		(sources.worker == nil || workerOperationSourceEmpty(sources.worker, p)) &&
 		(sources.channel == nil || channelOperationSourceEmpty(sources.channel, p)) &&
 		(sources.control == nil || taskControlSourceEmpty(sources.control, p))
 }
@@ -505,6 +545,7 @@ func (sources *ExecutorSourceSet) canBeginTerminalClose(p *P) bool {
 	return validExecutorSourceSet(sources, p) && registrationTableEmpty(sources.waits, p) &&
 		(sources.timers == nil || timerRegistrationTableEmpty(sources.timers, p)) &&
 		(sources.manual == nil || manualOperationSourceEmpty(sources.manual, p)) &&
+		(sources.worker == nil || workerOperationSourceEmpty(sources.worker, p)) &&
 		(sources.channel == nil || channelOperationSourceEmpty(sources.channel, p)) &&
 		(sources.control == nil || taskControlSourceCanBeginTerminalClose(sources.control, p))
 }
@@ -538,6 +579,7 @@ func (sources *ExecutorSourceSet) canFinishTerminalClose(p *P) bool {
 	return validExecutorSourceSet(sources, p) && registrationTableEmpty(sources.waits, p) &&
 		(sources.timers == nil || timerRegistrationTableEmpty(sources.timers, p)) &&
 		(sources.manual == nil || manualOperationSourceEmpty(sources.manual, p)) &&
+		(sources.worker == nil || workerOperationSourceEmpty(sources.worker, p)) &&
 		(sources.channel == nil || channelOperationSourceEmpty(sources.channel, p)) &&
 		(sources.control == nil || taskControlSourceCanFinishTerminalClose(sources.control, p))
 }
@@ -571,6 +613,15 @@ func (sources *ExecutorSourceSet) drainForClose(p *P) (scan executorSourceScan, 
 		scan.manualLost = int(lost)
 		scan.completed += scan.manual + scan.manualLost
 		if !manualOK {
+			return scan, false
+		}
+	}
+	if sources.worker != nil {
+		published, lost, workerOK := sources.worker.PublishPass(p)
+		scan.worker = int(published)
+		scan.workerLost = int(lost)
+		scan.completed += scan.worker + scan.workerLost
+		if !workerOK {
 			return scan, false
 		}
 	}
@@ -611,6 +662,9 @@ func unbindExecutorSourceSet(sources *ExecutorSourceSet, p *P) bool {
 		return false
 	}
 	if sources.channel != nil && !UnbindChannelOperationSource(sources.channel, p) {
+		return false
+	}
+	if sources.worker != nil && !UnbindWorkerOperationSource(sources.worker, p) {
 		return false
 	}
 	if sources.manual != nil && !UnbindManualOperationSource(sources.manual, p) {
