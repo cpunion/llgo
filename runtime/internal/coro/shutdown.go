@@ -224,6 +224,84 @@ func BeginCommandShutdown(p *P, main *G) bool {
 	}
 }
 
+// RequestCommandShutdownDrain publishes task-shutdown cancellation while the
+// executor and its typed event sources are still bound. A selected channel,
+// timer, or I/O result may retain frame-owned cleanup storage until the
+// compiler resume gate consumes it; closing the executor before that gate
+// would either leak the source slot or leave a backend queue pointing into a
+// destroyed coroutine frame.
+//
+// The caller remains the scheduler owner. Ready CheckResume continuations are
+// canceled here; already-prepared destroy continuations contain no user code
+// and are allowed to advance until their next resume gate. Parked V2 waits are
+// canceled through their ordinary affected-wait transaction, so the unified
+// source poll performs the same detach/apply/promotion sequence as an external
+// completion. No target callback or interface value is introduced.
+//
+// needed is true when at least one non-main task must cross this pre-close
+// drain. A false needed result proves that command shutdown can proceed to the
+// executor close transaction without running another task.
+func RequestCommandShutdownDrain(p *P, main *G) (needed, ok bool) {
+	if p == nil || main == nil || !ReclaimableG(main) || main.taskState != taskStorageStatic ||
+		preemptLoad(&p.executorMode) != executorModeBound || p.executor == nil ||
+		p.current != nil || p.inResume || p.action != (Action{}) ||
+		p.runDecision != (RunDecision{}) || p.runDecisionTaken || p.servicePreemptBudget != 0 ||
+		!validReadyQueue(p) || !validSchedulerWaitQueues(p) {
+		return false, false
+	}
+	// Preserve the existing allocation-free direct-destroy path when every
+	// remaining child is already at a source-independent shutdown boundary.
+	// Enter the pre-close runner only when some wait or delivered result still
+	// owns source-specific frame cleanup.
+	for g := p.readyHead; g != nil; g = g.nextReady {
+		if g == main {
+			return false, false
+		}
+		needed = needed || !validCancelableReadyG(g)
+	}
+	needed = needed || p.waitHead != nil || p.parkWaitHead != nil
+	if !needed {
+		return false, true
+	}
+	request := func(g *G, resumeGate bool) bool {
+		if g == nil || g == main {
+			return false
+		}
+		if !resumeGate {
+			return true
+		}
+		return RequestTaskCancellation(p, g, TaskCancelShutdown)
+	}
+	for g := p.readyHead; g != nil; g = g.nextReady {
+		switch g.runAction {
+		case ActionInvalid, ActionCheckResume:
+			if !request(g, true) {
+				return false, false
+			}
+		case ActionCheckDestroy, ActionPanicDestroy:
+			// The physical destroy itself cannot execute user code. Do not put a
+			// Requested token in front of it: BeginRunG deliberately blocks that
+			// combination until a compiler resume gate can own cleanup.
+			if !request(g, false) {
+				return false, false
+			}
+		default:
+			return false, false
+		}
+	}
+	for g := p.waitHead; g != nil; g = g.nextWait {
+		if !request(g, true) {
+			return false, false
+		}
+	}
+	for record := p.parkWaitHead; record != nil; record = record.activeNext {
+		if !request(record.g, true) {
+			return false, false
+		}
+	}
+	return needed, true
+}
+
 func prepareCancelFrame(p *P, g *G, frame *Frame) (Action, bool) {
 	if p == nil || g == nil || frame == nil || p.current != g || g.state != GCanceling ||
 		g.destroyTarget != nil || !validCancelFrame(frame, g) ||

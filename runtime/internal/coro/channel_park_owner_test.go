@@ -99,6 +99,91 @@ func TestSingleChannelParkOwnerTransactionAndFinish(t *testing.T) {
 	}
 }
 
+func TestCommandShutdownDrainConsumesCompletedChannelBeforeExecutorClose(t *testing.T) {
+	fixture := newChannelClaimCoreFixture(t, "channel-command-drain", []uint32{51}, true, 0)
+	var transaction ChannelExternalCommit
+	if result := BeginChannelExternalCommit(
+		&transaction,
+		fixture.source,
+		fixture.ids[0],
+		fixture.claim,
+	); result != ChannelExternalCommitBeginPrepared || !transaction.BeginEffect() || !transaction.Commit() {
+		t.Fatalf("commit command-drain channel endpoint = result:%d transaction:%+v", result, transaction)
+	}
+	requestChannelClaimCoreFixture(t, fixture)
+	if progress := pollChannelClaimCoreComplete(t, fixture); progress.Promoted != 1 ||
+		fixture.p.readyHead != fixture.task.g || channelOperationSourceEmpty(fixture.source, fixture.p) {
+		t.Fatalf("publish command-drain completion = promoted:%d ready:%p sourceEmpty:%t",
+			progress.Promoted, fixture.p.readyHead, channelOperationSourceEmpty(fixture.source, fixture.p))
+	}
+	if needed, ok := RequestCommandShutdownDrain(fixture.p, nil); needed || ok {
+		t.Fatalf("nil command main accepted = needed:%t ok:%t", needed, ok)
+	}
+	main := &G{magic: gMagic, state: GDead}
+	if needed, ok := RequestCommandShutdownDrain(fixture.p, main); !ok || !needed ||
+		fixture.task.g.park.taskCancelKind != TaskCancelShutdown ||
+		fixture.task.g.park.taskCancelPhase != taskCancelRequested {
+		t.Fatalf("request command source drain = needed:%t ok:%t cancel:(%d,%d)",
+			needed, ok, fixture.task.g.park.taskCancelKind, fixture.task.g.park.taskCancelPhase)
+	}
+	if needed, ok := RequestCommandShutdownDrain(fixture.p, main); !ok || !needed {
+		t.Fatalf("repeat command source drain = needed:%t ok:%t", needed, ok)
+	}
+	if BeginExecutorClose(fixture.driver) {
+		t.Fatal("executor closed before channel resume cleanup")
+	}
+	if g, ok := NextRunnable(fixture.p); !ok || g != fixture.task.g {
+		t.Fatal("dequeue command-drain channel task")
+	}
+	action := beginWaitTestResume(t, fixture.p, fixture.task)
+	outcome, caseID, lease, cancel, taken := TakeRunDecision(fixture.task.g, fixture.ticket)
+	if !taken || outcome != ParkOutcomeCanceled || caseID != 0 || !lease.Valid() || cancel != TaskCancelShutdown {
+		t.Fatalf("take command-drain decision = (%d,%d,%+v,%d,%t)", outcome, caseID, lease, cancel, taken)
+	}
+	if !FinishSingleChannelPark(
+		fixture.task.g,
+		fixture.source,
+		fixture.ids[0],
+		fixture.claim,
+		lease,
+		true,
+	) {
+		t.Fatal("finish command-drain channel cleanup")
+	}
+	fixture.task.frame.header.SuspendReason = uint16(SuspendFrameComplete)
+	fixture.task.frame.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PrepareComplete(fixture.task.g, fixture.task.handle, fixture.task.frame.header) {
+		t.Fatal("prepare command-drain task completion")
+	}
+	action, ok := Resumed(fixture.p, fixture.task.g, action)
+	if !ok || action.Kind != ActionCheckDestroy {
+		t.Fatalf("resume command-drain completion = (%+v,%t)", action, ok)
+	}
+	action, ok = Checked(fixture.p, fixture.task.g, action, true)
+	if !ok || action.Kind != ActionDestroy {
+		t.Fatalf("check command-drain destroy = (%+v,%t)", action, ok)
+	}
+	releaseTestFrame(t, fixture.task.g, fixture.task.frame)
+	receipt, ok := DestroyedBounded(fixture.p, fixture.task.g, action)
+	if !ok || receipt.Kind != ActionCommitDestroy || receipt.Handle != nil {
+		t.Fatalf("publish command-drain destroy receipt = (%+v,%t)", receipt, ok)
+	}
+	closeAction, ok := CommitDestroyedReceiptCompatibility(fixture.p, fixture.task.g, receipt)
+	if !ok || closeAction.Kind != ActionTerminalExecutorClose || closeAction.Handle != nil {
+		t.Fatalf("begin command-drain terminal close = (%+v,%t)", closeAction, ok)
+	}
+	closedG, complete, ok := ConfirmTerminalExecutorClose(fixture.driver)
+	if !ok || closedG != fixture.task.g || complete.Kind != ActionComplete || complete.Handle != nil {
+		t.Fatalf("confirm command-drain terminal close = (%p,%+v,%t)", closedG, complete, ok)
+	}
+	if !AcknowledgeTaskCancellation(fixture.task.g, TaskCancelShutdown) {
+		t.Fatal("acknowledge command-drain cancellation")
+	}
+	if !fixture.source.CanRelease() || !fixture.waits.CanRelease() || !fixture.registry.CanRelease() {
+		t.Fatal("command-drain channel cleanup retained stable source state")
+	}
+}
+
 func TestEmptyChannelParkOwnerSupportsTaskCancellation(t *testing.T) {
 	p := new(P)
 	task := newYieldingTestG(t, "empty-channel-owner")

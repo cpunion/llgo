@@ -129,6 +129,11 @@ func coroRunSlice(p *coroP, main *coroG, driver *coro.ExecutorDriver, budget uin
 			if step.G == nil || step.Action.Handle == nil {
 				return coroRunResultV1{}
 			}
+			if coroProgramLifecycleV1State == coroProgramMainReturnRequestedV1 &&
+				step.G != main && step.Action.Kind == coro.ActionCheckResume &&
+				!coro.RequestTaskCancellation(p, step.G, coro.TaskCancelShutdown) {
+				return coroRunResultV1{}
+			}
 			result.used++
 			result.dispatches++
 		case coro.ExecutorRunStepAction:
@@ -222,7 +227,15 @@ func coroFinishRunSliceCompatibility(
 		}
 		return result
 	case coroRunIdleV1:
-		if !coro.EnterExecutorRunCompatibility(driver) || !coro.HasWaiting(p) {
+		if !coro.EnterExecutorRunCompatibility(driver) {
+			return coroRunResultV1{}
+		}
+		if coroProgramLifecycleV1State == coroProgramMainReturnRequestedV1 && !coro.HasWaiting(p) {
+			result.stop = coroRunMainDoneV1
+			result.g = main
+			return result
+		}
+		if !coro.HasWaiting(p) {
 			return coroRunResultV1{}
 		}
 		sleep, deadline, hasDeadline, prepared := coroProgramPrepareExecutorSleepV1(driver)

@@ -321,17 +321,22 @@ func coroProgramFinishCommandV1() coroProgramDriveStatusV1 {
 
 func coroProgramConfirmTerminalJoinV1() coroProgramDriveStatusV1 {
 	g, action, ok := coro.ConfirmTerminalExecutorClose(&coroProgramExecutorDriverV1State)
-	if !ok || g != &coroProgramGV1State || !coroProgramExecutorRetiredV1() ||
+	if !ok || g == nil || !coroProgramExecutorRetiredV1() ||
 		!coroProgramClearContinuationV1(coroProgramContinuationTerminalJoinV1) {
 		return coroProgramFailV1()
 	}
 	switch action.Kind {
 	case coro.ActionComplete:
-		if action.Handle != nil || !coroReleaseCompletedTask(g) {
+		if action.Handle != nil ||
+			g != &coroProgramGV1State && coroProgramLifecycleV1State != coroProgramMainReturnRequestedV1 ||
+			!coroReleaseCompletedTask(g) {
 			return coroProgramFailV1()
 		}
 		return coroProgramFinishMainV1()
 	case coro.ActionPanicComplete:
+		if g != &coroProgramGV1State {
+			return coroProgramFailV1()
+		}
 		return coroProgramFinishPanicV1(g, action)
 	default:
 		return coroProgramFailV1()
@@ -400,6 +405,18 @@ func coroProgramFinishMainV1() coroProgramDriveStatusV1 {
 		if coro.TerminalG(&coroProgramPV1State, &coroProgramGV1State) {
 			coroProgramLifecycleV1State = coroProgramCompleteV1
 			return coroProgramDriveCompleteV1
+		}
+		if needed, ok := coro.RequestCommandShutdownDrain(
+			&coroProgramPV1State,
+			&coroProgramGV1State,
+		); !ok {
+			return coroProgramFailV1()
+		} else if needed {
+			// Event-source registrations must be consumed by their compiler
+			// resume gates before the target ingress is strongly joined. Re-enter
+			// the bounded runner; every CheckResume dispatch receives the sticky
+			// shutdown token before it can execute user code.
+			return coroProgramDriveAgainV1
 		}
 		if !coroProgramExecutorBoundV1State || !coroProgramBeginCommandCloseV1() {
 			return coroProgramFailV1()
