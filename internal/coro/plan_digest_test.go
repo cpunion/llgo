@@ -370,6 +370,73 @@ func root() { external() }
 	}
 }
 
+func TestCoroPlanDigestRecordsExactAssemblyNoSuspendCertificate(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "assembly_digest.go", `package coroid
+func assemblyLeaf() {}
+func root() { assemblyLeaf() }
+`)
+	leaf := packageFunction(t, pkg, "assemblyLeaf")
+	root := packageFunction(t, pkg, "root")
+	build := func(certificate string) *SSAPlan {
+		t.Helper()
+		config := planDigestSSAConfig()
+		config.ClassifyFunction = func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+			if fn != leaf {
+				return SSAFunctionPolicy{}, nil
+			}
+			return SSAFunctionPolicy{
+				IgnoreBody:                   true,
+				Exec:                         IRQUnsafe,
+				External:                     ExternalKnown,
+				OverrideExternal:             true,
+				AssemblyNoSuspendCertificate: certificate,
+			}, nil
+		}
+		plan, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: AsyncDemand}}, config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return plan
+	}
+
+	const firstCertificate = "llgo.coro.asm-nosuspend.test.v1:first"
+	first := build(firstCertificate)
+	second := build("llgo.coro.asm-nosuspend.test.v1:second")
+	if got, ok := first.AssemblyNoSuspendCertificate(leaf); !ok || got != firstCertificate {
+		t.Fatalf("assembly certificate = (%q, %t), want (%q, true)", got, ok, firstCertificate)
+	}
+	if _, ok := first.AssemblyNoSuspendCertificate(root); ok {
+		t.Fatal("ordinary root unexpectedly has an assembly certificate")
+	}
+	metadata := validPlanDigestMetadata()
+	firstDigest, err := first.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondDigest, err := second.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstDigest == secondDigest {
+		t.Fatal("distinct translated-assembly proofs share a plan digest")
+	}
+	document, err := first.canonicalPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafID, _ := first.FunctionID(leaf)
+	for _, function := range document.Functions {
+		if function.ID != leafID {
+			continue
+		}
+		if function.AssemblyNoSuspendCertificate != firstCertificate || !function.IgnoredBody {
+			t.Fatalf("assembly digest record = %+v", function)
+		}
+		return
+	}
+	t.Fatal("assembly leaf is absent from canonical plan digest")
+}
+
 func TestCoroPlanDigestCanonicalTargetsAndPlanMutations(t *testing.T) {
 	plan, _ := buildPlanDigestTestPlan(t, ssa.SanityCheckFunctions|ssa.InstantiateGenerics)
 	metadata := validPlanDigestMetadata()

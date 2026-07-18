@@ -31,7 +31,7 @@ import (
 // PlanDigestSchema is the independent canonical schema used for archive cache
 // identity. It is deliberately separate from SummarySchema: summaries remain
 // diagnostic snapshots, while this document covers every lowering plan site.
-const PlanDigestSchema = "llgo.coro.plan-digest.v8"
+const PlanDigestSchema = "llgo.coro.plan-digest.v9"
 
 // Current experimental ABI identities. Keeping these in the analysis package
 // gives build, cache, and lowering code one version source of truth.
@@ -135,21 +135,22 @@ type planDigestRoot struct {
 }
 
 type planDigestFunction struct {
-	ID                        FunctionID `json:"id"`
-	IgnoredBody               bool       `json:"ignored_body"`
-	ForeignNoBlockCertificate string     `json:"foreign_noblock_certificate,omitempty"`
-	DeclaredEffect            uint16     `json:"declared_effect"`
-	LocalEffect               uint16     `json:"local_effect"`
-	Effect                    uint16     `json:"effect"`
-	DeclaredExec              uint16     `json:"declared_exec"`
-	LocalExec                 uint16     `json:"local_exec"`
-	Exec                      uint16     `json:"exec"`
-	Demand                    uint8      `json:"demand"`
-	Emission                  uint8      `json:"emission"`
-	FuncRep                   uint8      `json:"func_rep"`
-	External                  uint8      `json:"external"`
-	Recursive                 bool       `json:"recursive"`
-	Primary                   uint8      `json:"primary"`
+	ID                           FunctionID `json:"id"`
+	IgnoredBody                  bool       `json:"ignored_body"`
+	ForeignNoBlockCertificate    string     `json:"foreign_noblock_certificate,omitempty"`
+	AssemblyNoSuspendCertificate string     `json:"assembly_nosuspend_certificate,omitempty"`
+	DeclaredEffect               uint16     `json:"declared_effect"`
+	LocalEffect                  uint16     `json:"local_effect"`
+	Effect                       uint16     `json:"effect"`
+	DeclaredExec                 uint16     `json:"declared_exec"`
+	LocalExec                    uint16     `json:"local_exec"`
+	Exec                         uint16     `json:"exec"`
+	Demand                       uint8      `json:"demand"`
+	Emission                     uint8      `json:"emission"`
+	FuncRep                      uint8      `json:"func_rep"`
+	External                     uint8      `json:"external"`
+	Recursive                    bool       `json:"recursive"`
+	Primary                      uint8      `json:"primary"`
 }
 
 type planDigestCall struct {
@@ -574,6 +575,9 @@ func (p *SSAPlan) canonicalDigestFunctions() ([]planDigestFunction, error) {
 		})
 		if certificate, ok := p.ForeignNoBlockCertificate(function.Function); ok {
 			ret[len(ret)-1].ForeignNoBlockCertificate = certificate
+		}
+		if certificate, ok := p.AssemblyNoSuspendCertificate(function.Function); ok {
+			ret[len(ret)-1].AssemblyNoSuspendCertificate = certificate
 		}
 	}
 	return ret, nil

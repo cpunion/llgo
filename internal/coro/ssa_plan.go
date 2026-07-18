@@ -80,6 +80,11 @@ type SSAFunctionPolicy struct {
 	// remain IRQUnsafe unless a separate proof exists; this certificate removes
 	// only BlockForeign/WaitForeign.
 	ForeignNoBlockCertificate string
+	// AssemblyNoSuspendCertificate is an exact frontend/build proof over one
+	// retained translated-assembly definition and its complete direct-call
+	// closure. It has the same no-suspend/IRQ-unsafe external summary as a
+	// certified C leaf, but remains a physical Go-ABI call and is never elided.
+	AssemblyNoSuspendCertificate string
 	// IgnoreBody states that the frontend does not emit this SSA body's Go
 	// instructions because the function is an external declaration in the
 	// frozen physical ABI. AnalyzeSSA excludes that body from value flow, calls,
@@ -274,19 +279,20 @@ type SSARootPlan struct {
 // SSAPlan is the compilation-scoped whole-program result. Its maps remain
 // private so consumers cannot reconstruct identities from display strings.
 type SSAPlan struct {
-	plan           *Plan
-	roots          []SSARootPlan
-	functions      []SSAFunctionPlan
-	byFunction     map[*ssa.Function]FunctionID
-	byID           map[FunctionID]*ssa.Function
-	ignoredBodies  map[*ssa.Function]struct{}
-	valuePlans     map[ssa.Value]SSAValuePlan
-	callPlans      map[ssa.CallInstruction]SSACallPlan
-	elidedCalls    map[ssa.CallInstruction]struct{}
-	rawAddressArgs map[ssaCallArgumentUse]struct{}
-	loweredCalls   map[*ssa.Function][]SSALoweredCall
-	foreignNoBlock map[*ssa.Function]string
-	functionIDs    FunctionIDConfig
+	plan              *Plan
+	roots             []SSARootPlan
+	functions         []SSAFunctionPlan
+	byFunction        map[*ssa.Function]FunctionID
+	byID              map[FunctionID]*ssa.Function
+	ignoredBodies     map[*ssa.Function]struct{}
+	valuePlans        map[ssa.Value]SSAValuePlan
+	callPlans         map[ssa.CallInstruction]SSACallPlan
+	elidedCalls       map[ssa.CallInstruction]struct{}
+	rawAddressArgs    map[ssaCallArgumentUse]struct{}
+	loweredCalls      map[*ssa.Function][]SSALoweredCall
+	foreignNoBlock    map[*ssa.Function]string
+	assemblyNoSuspend map[*ssa.Function]string
+	functionIDs       FunctionIDConfig
 }
 
 type ssaFunctionResolution struct {
@@ -436,6 +442,17 @@ func (p *SSAPlan) ForeignNoBlockCertificate(fn *ssa.Function) (string, bool) {
 		return "", false
 	}
 	certificate, ok := p.foreignNoBlock[fn]
+	return certificate, ok
+}
+
+// AssemblyNoSuspendCertificate returns the opaque proof attached to one exact
+// retained translated-assembly definition. The proof participates in the plan
+// digest and must not be reconstructed from a package or symbol name.
+func (p *SSAPlan) AssemblyNoSuspendCertificate(fn *ssa.Function) (string, bool) {
+	if p == nil || fn == nil {
+		return "", false
+	}
+	certificate, ok := p.assemblyNoSuspend[fn]
 	return certificate, ok
 }
 
@@ -688,6 +705,18 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 				return nil, fmt.Errorf("coro: classify SSA function %q: foreign noblock certificate requires an ignored external-known declaration with no suspend effect, exactly irq-unsafe execution, and no dispatch", fn.Name())
 			}
 		}
+		if certificate := trusted.AssemblyNoSuspendCertificate; certificate != "" {
+			if !utf8.ValidString(certificate) {
+				return nil, fmt.Errorf("coro: classify SSA function %q: assembly no-suspend certificate is not a valid UTF-8 identity", fn.Name())
+			}
+			if trusted.ForeignNoBlockCertificate != "" {
+				return nil, fmt.Errorf("coro: classify SSA function %q: assembly and foreign noblock certificates are mutually exclusive", fn.Name())
+			}
+			if !trusted.IgnoreBody || !trusted.OverrideExternal || trusted.External != ExternalKnown ||
+				trusted.Effect != NoSuspend || trusted.Exec != IRQUnsafe || trusted.NeedsDispatch {
+				return nil, fmt.Errorf("coro: classify SSA function %q: assembly no-suspend certificate requires an ignored external-known declaration with no suspend effect, exactly irq-unsafe execution, and no dispatch", fn.Name())
+			}
+		}
 		trustedPolicies[fn] = trusted
 	}
 	dynamicCandidates, err = filterSSADynamicCandidateSites(dynamicCandidates, bodyFunctionSet, canonicalizer)
@@ -782,6 +811,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		policy.Exec = policy.Exec.Join(trusted.Exec)
 		policy.NeedsDispatch = policy.NeedsDispatch || trusted.NeedsDispatch
 		policy.ForeignNoBlockCertificate = trusted.ForeignNoBlockCertificate
+		policy.AssemblyNoSuspendCertificate = trusted.AssemblyNoSuspendCertificate
 		if trusted.OverrideExternal {
 			policy.External = trusted.External
 			policy.OverrideExternal = true
@@ -942,23 +972,27 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		}
 	}
 	result := &SSAPlan{
-		plan:           base,
-		roots:          canonicalRoots,
-		functions:      make([]SSAFunctionPlan, 0, len(included)),
-		byFunction:     ids,
-		byID:           byID,
-		ignoredBodies:  ignoredBodies,
-		valuePlans:     valuePlans,
-		callPlans:      callPlans,
-		elidedCalls:    elidedCallSet,
-		rawAddressArgs: make(map[ssaCallArgumentUse]struct{}, len(rawFunctionAddressCallArguments)),
-		loweredCalls:   loweredCalls,
-		foreignNoBlock: make(map[*ssa.Function]string),
-		functionIDs:    config.FunctionIDs,
+		plan:              base,
+		roots:             canonicalRoots,
+		functions:         make([]SSAFunctionPlan, 0, len(included)),
+		byFunction:        ids,
+		byID:              byID,
+		ignoredBodies:     ignoredBodies,
+		valuePlans:        valuePlans,
+		callPlans:         callPlans,
+		elidedCalls:       elidedCallSet,
+		rawAddressArgs:    make(map[ssaCallArgumentUse]struct{}, len(rawFunctionAddressCallArguments)),
+		loweredCalls:      loweredCalls,
+		foreignNoBlock:    make(map[*ssa.Function]string),
+		assemblyNoSuspend: make(map[*ssa.Function]string),
+		functionIDs:       config.FunctionIDs,
 	}
 	for fn, policy := range policies {
 		if policy.ForeignNoBlockCertificate != "" {
 			result.foreignNoBlock[fn] = policy.ForeignNoBlockCertificate
+		}
+		if policy.AssemblyNoSuspendCertificate != "" {
+			result.assemblyNoSuspend[fn] = policy.AssemblyNoSuspendCertificate
 		}
 	}
 	for _, use := range rawFunctionAddressCallArguments {

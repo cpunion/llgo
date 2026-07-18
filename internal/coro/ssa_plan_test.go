@@ -1067,6 +1067,52 @@ func caller() { externalFallback(nil) }
 	}
 }
 
+func TestAnalyzeSSAAssemblyNoSuspendCertificateFailsClosed(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "assembly_certificate.go", `package coroid
+func assemblyLeaf() {}
+func root() { assemblyLeaf() }
+`)
+	leaf := packageFunction(t, pkg, "assemblyLeaf")
+	root := packageFunction(t, pkg, "root")
+	valid := SSAFunctionPolicy{
+		IgnoreBody:                   true,
+		Exec:                         IRQUnsafe,
+		External:                     ExternalKnown,
+		OverrideExternal:             true,
+		AssemblyNoSuspendCertificate: "llgo.coro.asm-nosuspend.test.v1:abc",
+	}
+	tests := []struct {
+		name   string
+		mutate func(*SSAFunctionPolicy)
+		want   string
+	}{
+		{"invalid UTF-8", func(policy *SSAFunctionPolicy) { policy.AssemblyNoSuspendCertificate = string([]byte{0xff}) }, "valid UTF-8"},
+		{"body not ignored", func(policy *SSAFunctionPolicy) { policy.IgnoreBody = false }, "requires an ignored external-known declaration"},
+		{"unknown foreign", func(policy *SSAFunctionPolicy) { policy.External = ExternalUnknownForeign }, "requires an ignored external-known declaration"},
+		{"suspending", func(policy *SSAFunctionPolicy) { policy.Effect = YieldOnly }, "requires an ignored external-known declaration"},
+		{"irq safe", func(policy *SSAFunctionPolicy) { policy.Exec = 0 }, "requires an ignored external-known declaration"},
+		{"dispatch", func(policy *SSAFunctionPolicy) { policy.NeedsDispatch = true }, "requires an ignored external-known declaration"},
+		{"foreign certificate", func(policy *SSAFunctionPolicy) { policy.ForeignNoBlockCertificate = "foreign" }, "mutually exclusive"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			policy := valid
+			test.mutate(&policy)
+			_, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: AsyncDemand}}, SSAConfig{
+				ClassifyFunction: func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+					if fn == leaf {
+						return policy, nil
+					}
+					return SSAFunctionPolicy{}, nil
+				},
+			})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("AnalyzeSSA error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestIgnoredBodyFiltersDynamicCandidatesBeforeTargetResolution(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "ignored_candidate_resolver.go", `package coroid
 func poison() {}
