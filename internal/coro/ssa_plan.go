@@ -176,6 +176,15 @@ type SSAConfig struct {
 	// frozen functions and does not enumerate the Program.
 	DynamicResolution DynamicResolution
 
+	// DynamicImplements supplies the frozen frontend's exact effective-type
+	// implementation relation for restricted CHA. It exists for emission
+	// universes whose patched Go types are not pointer-identical to the raw SSA
+	// invoke interface or method receiver types. A nil callback uses
+	// go/types.Implements. The callback must be pure and deterministic and is
+	// accepted only with EmissionUniverse; any callback error aborts analysis
+	// before a partial plan can escape.
+	DynamicImplements func(candidate types.Type, iface *types.Interface) (bool, error)
+
 	// Include filters the effective program (for example, after patch/skip
 	// resolution). A static edge to an excluded target becomes an unknown call.
 	Include func(*ssa.Function) (bool, error)
@@ -512,6 +521,9 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if err := config.DynamicResolution.validate(); err != nil {
 		return nil, err
 	}
+	if config.DynamicImplements != nil && universe == nil {
+		return nil, fmt.Errorf("coro: dynamic implements resolver requires an SSA emission universe")
+	}
 	maxPlain := config.MaxPlainInstructions
 	if maxPlain == 0 {
 		maxPlain = DefaultMaxPlainInstructions
@@ -554,7 +566,16 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		// available to order the included functions.
 		allFunctions = append([]*ssa.Function(nil), universe.functions...)
 		if config.DynamicResolution != DynamicUnknownOnly {
-			dynamicCandidates = restrictedSSACHACandidates(universe.functions)
+			implements := config.DynamicImplements
+			if implements == nil {
+				implements = func(candidate types.Type, iface *types.Interface) (bool, error) {
+					return types.Implements(candidate, iface), nil
+				}
+			}
+			dynamicCandidates, err = restrictedSSACHACandidatesWithDynamicImplements(universe.functions, implements)
+			if err != nil {
+				return nil, err
+			}
 		}
 	} else if config.DynamicResolution == DynamicUnknownOnly {
 		for fn := range ssautil.AllFunctions(prog) {

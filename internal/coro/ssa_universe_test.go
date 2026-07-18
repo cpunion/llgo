@@ -188,6 +188,81 @@ func use() { invoke(Concrete{}) }
 	}
 }
 
+func TestAnalyzeSSAEmissionUniverseDynamicImplementsUsesPatchedRelation(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "source.go", `package coroid
+var channel chan int
+type Interface interface {
+	Method()
+	RawOnlyMethod()
+}
+type Concrete struct{}
+func (Concrete) Method() { <-channel }
+func invoke(value Interface) { value.Method() }
+`)
+	invoke := packageFunction(t, pkg, "invoke")
+	methods := matchingFunctions(prog, func(fn *ssa.Function) bool {
+		return fn.Name() == "Method" && fn.Signature.Recv() != nil && fn.Object() != nil && fn.Synthetic == ""
+	})
+	if len(methods) != 1 {
+		t.Fatalf("declared Concrete.Method count = %d, want 1", len(methods))
+	}
+	method := methods[0]
+	call := onlyNonBuiltinCall(t, invoke)
+	if !call.Common().IsInvoke() {
+		t.Fatalf("invoke call = %s, want interface invoke", call)
+	}
+	iface, ok := call.Common().Value.Type().Underlying().(*types.Interface)
+	if !ok {
+		t.Fatalf("invoke receiver type = %T, want interface", call.Common().Value.Type().Underlying())
+	}
+	receiver := method.Signature.Recv().Type()
+	if types.Implements(receiver, iface) {
+		t.Fatalf("raw receiver %s unexpectedly implements raw interface %s", receiver, iface)
+	}
+
+	universe, err := NewSSAEmissionUniverse(prog, []*ssa.Function{invoke, method})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checks := 0
+	plan, err := AnalyzeSSA(prog, Roots{{Function: invoke, Demand: SyncDemand}}, SSAConfig{
+		EmissionUniverse:  universe,
+		DynamicResolution: DynamicCHAClosed,
+		DynamicImplements: func(candidate types.Type, dynamicInterface *types.Interface) (bool, error) {
+			checks++
+			if candidate != receiver || dynamicInterface != iface {
+				t.Fatalf("dynamic implements inputs = (%s, %s), want exact raw (%s, %s)", candidate, dynamicInterface, receiver, iface)
+			}
+			return true, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checks != 1 {
+		t.Fatalf("dynamic implements checks = %d, want 1", checks)
+	}
+	if got := functionPlanFor(t, plan, invoke); got.Effect.IsOpaque() || !got.Effect.Contains(MayPark) {
+		t.Fatalf("invoke effect = %s, want closed patched target with MayPark", got.Effect)
+	}
+	callPlan, ok := plan.CallPlan(call)
+	if !ok || callPlan.Open || len(callPlan.Targets) != 1 {
+		t.Fatalf("patched invoke call plan = %+v, %v; want one closed exact target", callPlan, ok)
+	}
+
+	_, err = AnalyzeSSA(prog, Roots{{Function: invoke, Demand: SyncDemand}}, SSAConfig{
+		EmissionUniverse:  universe,
+		DynamicResolution: DynamicCHAClosed,
+		DynamicImplements: func(types.Type, *types.Interface) (bool, error) {
+			return false, bytes.ErrTooLarge
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "restricted CHA match candidate") ||
+		!strings.Contains(err.Error(), method.String()) || !strings.Contains(err.Error(), bytes.ErrTooLarge.Error()) {
+		t.Fatalf("dynamic implements error = %v, want deterministic candidate context and resolver error", err)
+	}
+}
+
 func TestRestrictedSSACHAMemoizesSharedInterfaceMethod(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "source.go", `package coroid
 var channel chan int

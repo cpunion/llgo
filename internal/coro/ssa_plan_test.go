@@ -21,6 +21,7 @@ package coro
 import (
 	"bytes"
 	"fmt"
+	"go/types"
 	"strings"
 	"testing"
 
@@ -1416,6 +1417,14 @@ func TestAnalyzeSSAValidation(t *testing.T) {
 			roots:  Roots{{Function: root, Demand: SyncDemand}},
 			config: SSAConfig{DynamicResolution: DynamicResolution(99)},
 			want:   "invalid dynamic resolution",
+		},
+		{
+			name:  "dynamic implements without frozen universe",
+			roots: Roots{{Function: root, Demand: SyncDemand}},
+			config: SSAConfig{DynamicImplements: func(types.Type, *types.Interface) (bool, error) {
+				return true, nil
+			}},
+			want: "dynamic implements resolver requires an SSA emission universe",
 		},
 		{
 			name:  "excluded root",

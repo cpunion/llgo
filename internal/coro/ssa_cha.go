@@ -17,6 +17,7 @@
 package coro
 
 import (
+	"fmt"
 	"go/types"
 
 	"golang.org/x/tools/go/ssa"
@@ -34,6 +35,28 @@ func restrictedSSACHACandidatesWithImplements(
 	functions []*ssa.Function,
 	implements func(types.Type, *types.Interface) bool,
 ) map[ssa.CallInstruction]map[*ssa.Function]struct{} {
+	result, err := restrictedSSACHACandidatesWithDynamicImplements(
+		functions,
+		func(candidate types.Type, iface *types.Interface) (bool, error) {
+			return implements(candidate, iface), nil
+		},
+	)
+	if err != nil {
+		// The adapter above cannot return an error. Keep the bool-only helper for
+		// tests and legacy internal callers without weakening the production
+		// fail-closed path below.
+		panic(err)
+	}
+	return result
+}
+
+func restrictedSSACHACandidatesWithDynamicImplements(
+	functions []*ssa.Function,
+	implements func(types.Type, *types.Interface) (bool, error),
+) (map[ssa.CallInstruction]map[*ssa.Function]struct{}, error) {
+	if implements == nil {
+		return nil, fmt.Errorf("coro: restricted CHA has nil dynamic implements resolver")
+	}
 	var funcsBySignature typeutil.Map
 	methodsByID := make(map[string][]*ssa.Function)
 	for _, fn := range functions {
@@ -59,19 +82,27 @@ func restrictedSSACHACandidatesWithImplements(
 		id    string
 	}
 	methodsMemo := make(map[interfaceMethod][]*ssa.Function)
-	lookupMethods := func(iface *types.Interface, method *types.Func) []*ssa.Function {
+	lookupMethods := func(iface *types.Interface, method *types.Func) ([]*ssa.Function, error) {
 		key := interfaceMethod{iface: iface, id: method.Id()}
 		if candidates, ok := methodsMemo[key]; ok {
-			return candidates
+			return candidates, nil
 		}
 		var candidates []*ssa.Function
 		for _, candidate := range methodsByID[key.id] {
-			if implements(candidate.Signature.Recv().Type(), iface) {
+			receiver := candidate.Signature.Recv().Type()
+			matches, err := implements(receiver, iface)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"coro: restricted CHA match candidate %q receiver %q to interface %q method %q: %w",
+					candidate.String(), restrictedCHATypeString(receiver), restrictedCHATypeString(iface), key.id, err,
+				)
+			}
+			if matches {
 				candidates = append(candidates, candidate)
 			}
 		}
 		methodsMemo[key] = candidates
-		return candidates
+		return candidates, nil
 	}
 
 	result := make(map[ssa.CallInstruction]map[*ssa.Function]struct{})
@@ -92,7 +123,11 @@ func restrictedSSACHACandidatesWithImplements(
 					if !ok || common.Method == nil {
 						continue
 					}
-					candidates = lookupMethods(iface, common.Method)
+					var err error
+					candidates, err = lookupMethods(iface, common.Method)
+					if err != nil {
+						return nil, err
+					}
 				} else {
 					if _, builtin := common.Value.(*ssa.Builtin); builtin {
 						continue
@@ -110,5 +145,14 @@ func restrictedSSACHACandidatesWithImplements(
 			}
 		}
 	}
-	return result
+	return result, nil
+}
+
+func restrictedCHATypeString(typ types.Type) string {
+	return types.TypeString(typ, func(pkg *types.Package) string {
+		if pkg == nil {
+			return ""
+		}
+		return pkg.Path()
+	})
 }
