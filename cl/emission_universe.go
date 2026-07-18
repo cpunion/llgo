@@ -100,30 +100,31 @@ type EmissionUniverse struct {
 	byPath             map[string]*preparedEmissionPackage
 	pathDup            map[string]bool
 
-	functions           []*ssa.Function
-	required            map[*ssa.Function]none
-	aliases             map[*ssa.Function]*ssa.Function
-	fnOwners            map[*ssa.Function]*preparedEmissionPackage
-	fnStates            map[*ssa.Function]emissionFunctionState
-	functionKinds       map[emissionFunctionOwnerKey]int
-	intrinsicOps        map[emissionFunctionOwnerKey]int
-	finalKeys           map[emissionFunctionOwnerKey]string
-	physicalNames       map[emissionFunctionOwnerKey]string
-	linkOnceNames       map[*ssa.Function]string
-	callWraps           map[intrinsicWrapperKey]*ssa.Function
-	callWrapInfo        map[*ssa.Function]intrinsicWrapperKey
-	syntheticKeys       map[*ssa.Function]string
-	linkIdentities      map[*ssa.Function]string
-	excluded            map[*ssa.Function]none
-	materialized        map[*ssa.Function]none
-	useOwners           map[*ssa.Function]map[*preparedEmissionPackage]none
-	ownerStates         map[*ssa.Function]map[*preparedEmissionPackage]emissionFunctionState
-	materializedOwners  map[*ssa.Function]map[*preparedEmissionPackage]none
-	ownerStateErr       error
-	abiMethodReferences map[*ssa.Function]map[*ssa.Function]none
-	loweredCalls        map[*ssa.Function]map[string]coroLoweredCallTarget
-	normalReturnBlocks  map[*ssa.Function]map[*ssa.BasicBlock]none
-	foreignNoBlock      map[*ssa.Function]CoroForeignNoBlockCertificate
+	functions             []*ssa.Function
+	required              map[*ssa.Function]none
+	aliases               map[*ssa.Function]*ssa.Function
+	goLinknameDefinitions map[*ssa.Function]*ssa.Function
+	fnOwners              map[*ssa.Function]*preparedEmissionPackage
+	fnStates              map[*ssa.Function]emissionFunctionState
+	functionKinds         map[emissionFunctionOwnerKey]int
+	intrinsicOps          map[emissionFunctionOwnerKey]int
+	finalKeys             map[emissionFunctionOwnerKey]string
+	physicalNames         map[emissionFunctionOwnerKey]string
+	linkOnceNames         map[*ssa.Function]string
+	callWraps             map[intrinsicWrapperKey]*ssa.Function
+	callWrapInfo          map[*ssa.Function]intrinsicWrapperKey
+	syntheticKeys         map[*ssa.Function]string
+	linkIdentities        map[*ssa.Function]string
+	excluded              map[*ssa.Function]none
+	materialized          map[*ssa.Function]none
+	useOwners             map[*ssa.Function]map[*preparedEmissionPackage]none
+	ownerStates           map[*ssa.Function]map[*preparedEmissionPackage]emissionFunctionState
+	materializedOwners    map[*ssa.Function]map[*preparedEmissionPackage]none
+	ownerStateErr         error
+	abiMethodReferences   map[*ssa.Function]map[*ssa.Function]none
+	loweredCalls          map[*ssa.Function]map[string]coroLoweredCallTarget
+	normalReturnBlocks    map[*ssa.Function]map[*ssa.BasicBlock]none
+	foreignNoBlock        map[*ssa.Function]CoroForeignNoBlockCertificate
 
 	localGenericMu     sync.Mutex
 	localGenericTypes  map[*types.Named]emissionLocalGenericType
@@ -232,41 +233,42 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 	}
 	identities := make(map[string]*ssa.Package, len(inputs))
 	u := &EmissionUniverse{
-		prog:                prog,
-		patches:             patches,
-		completeRuntimeABI:  options.CompleteRuntimeABI,
-		enableCoroChannel:   options.EnableCoroChannel,
-		enableCoroWorker:    options.EnableCoroWorker,
-		packages:            make(map[*ssa.Package]*preparedEmissionPackage, len(inputs)),
-		byTypes:             make(map[*types.Package]*preparedEmissionPackage, len(inputs)*3),
-		typesDup:            make(map[*types.Package]bool),
-		byPath:              make(map[string]*preparedEmissionPackage, len(inputs)),
-		pathDup:             make(map[string]bool),
-		required:            make(map[*ssa.Function]none),
-		aliases:             make(map[*ssa.Function]*ssa.Function),
-		fnOwners:            make(map[*ssa.Function]*preparedEmissionPackage),
-		fnStates:            make(map[*ssa.Function]emissionFunctionState),
-		functionKinds:       make(map[emissionFunctionOwnerKey]int),
-		intrinsicOps:        make(map[emissionFunctionOwnerKey]int),
-		finalKeys:           make(map[emissionFunctionOwnerKey]string),
-		physicalNames:       make(map[emissionFunctionOwnerKey]string),
-		linkOnceNames:       make(map[*ssa.Function]string),
-		callWraps:           make(map[intrinsicWrapperKey]*ssa.Function),
-		callWrapInfo:        make(map[*ssa.Function]intrinsicWrapperKey),
-		syntheticKeys:       make(map[*ssa.Function]string),
-		abiMethodReferences: make(map[*ssa.Function]map[*ssa.Function]none),
-		loweredCalls:        make(map[*ssa.Function]map[string]coroLoweredCallTarget),
-		normalReturnBlocks:  make(map[*ssa.Function]map[*ssa.BasicBlock]none),
-		foreignNoBlock:      make(map[*ssa.Function]CoroForeignNoBlockCertificate),
-		linkIdentities:      make(map[*ssa.Function]string),
-		excluded:            make(map[*ssa.Function]none),
-		materialized:        make(map[*ssa.Function]none),
-		useOwners:           make(map[*ssa.Function]map[*preparedEmissionPackage]none),
-		ownerStates:         make(map[*ssa.Function]map[*preparedEmissionPackage]emissionFunctionState),
-		materializedOwners:  make(map[*ssa.Function]map[*preparedEmissionPackage]none),
-		localGenericTypes:   make(map[*types.Named]emissionLocalGenericType),
-		localGenericOwners:  make(map[*types.Named]*ssa.Function),
-		genericNamedTypes:   make(map[*types.Named]*types.Named),
+		prog:                  prog,
+		patches:               patches,
+		completeRuntimeABI:    options.CompleteRuntimeABI,
+		enableCoroChannel:     options.EnableCoroChannel,
+		enableCoroWorker:      options.EnableCoroWorker,
+		packages:              make(map[*ssa.Package]*preparedEmissionPackage, len(inputs)),
+		byTypes:               make(map[*types.Package]*preparedEmissionPackage, len(inputs)*3),
+		typesDup:              make(map[*types.Package]bool),
+		byPath:                make(map[string]*preparedEmissionPackage, len(inputs)),
+		pathDup:               make(map[string]bool),
+		required:              make(map[*ssa.Function]none),
+		aliases:               make(map[*ssa.Function]*ssa.Function),
+		goLinknameDefinitions: make(map[*ssa.Function]*ssa.Function),
+		fnOwners:              make(map[*ssa.Function]*preparedEmissionPackage),
+		fnStates:              make(map[*ssa.Function]emissionFunctionState),
+		functionKinds:         make(map[emissionFunctionOwnerKey]int),
+		intrinsicOps:          make(map[emissionFunctionOwnerKey]int),
+		finalKeys:             make(map[emissionFunctionOwnerKey]string),
+		physicalNames:         make(map[emissionFunctionOwnerKey]string),
+		linkOnceNames:         make(map[*ssa.Function]string),
+		callWraps:             make(map[intrinsicWrapperKey]*ssa.Function),
+		callWrapInfo:          make(map[*ssa.Function]intrinsicWrapperKey),
+		syntheticKeys:         make(map[*ssa.Function]string),
+		abiMethodReferences:   make(map[*ssa.Function]map[*ssa.Function]none),
+		loweredCalls:          make(map[*ssa.Function]map[string]coroLoweredCallTarget),
+		normalReturnBlocks:    make(map[*ssa.Function]map[*ssa.BasicBlock]none),
+		foreignNoBlock:        make(map[*ssa.Function]CoroForeignNoBlockCertificate),
+		linkIdentities:        make(map[*ssa.Function]string),
+		excluded:              make(map[*ssa.Function]none),
+		materialized:          make(map[*ssa.Function]none),
+		useOwners:             make(map[*ssa.Function]map[*preparedEmissionPackage]none),
+		ownerStates:           make(map[*ssa.Function]map[*preparedEmissionPackage]emissionFunctionState),
+		materializedOwners:    make(map[*ssa.Function]map[*preparedEmissionPackage]none),
+		localGenericTypes:     make(map[*types.Named]emissionLocalGenericType),
+		localGenericOwners:    make(map[*types.Named]*ssa.Function),
+		genericNamedTypes:     make(map[*types.Named]*types.Named),
 	}
 	for i, input := range inputs {
 		if input.SSA == nil || input.SSA.Prog == nil || input.SSA.Pkg == nil {
@@ -403,6 +405,9 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 				return nil, err
 			}
 		}
+	}
+	if err := u.aliasBodylessGoLinknameDeclarations(); err != nil {
+		return nil, err
 	}
 
 	if u.ownerStateErr != nil {
@@ -1103,7 +1108,7 @@ func (u *EmissionUniverse) CoroIntrinsicCallSiteSemantics(call ssa.CallInstructi
 	}
 }
 
-const coroWorkerMaxArgsV1 = 6
+const coroWorkerMaxArgsV1 = 9
 
 func validateCoroWorkerSyscallIntrinsicCallSite(call *ssa.Call) error {
 	if call == nil || call.Common() == nil || call.Common().IsInvoke() {
@@ -2286,6 +2291,305 @@ func (u *EmissionUniverse) replaceManagedWinner(prepared *preparedEmissionPackag
 	return nil
 }
 
+type emissionGoLinknameDeclaration struct {
+	function *ssa.Function
+	owner    *preparedEmissionPackage
+}
+
+type emissionGoLinknameGroup struct {
+	declarations []emissionGoLinknameDeclaration
+	definitions  map[*ssa.Function]none
+}
+
+// aliasBodylessGoLinknameDeclarations joins the two source-level views of one
+// emitted Go operation before body materialization. Standard-library packages
+// commonly carry a bodyless, one-argument //go:linkname declaration while the
+// LLGo runtime provides a differently named, bodyful function with a two-
+// argument directive. The only join key is the already classified final
+// managed key: frontend kind, final physical Go symbol, and structural ABI
+// signature. Source/display names are never used as a fallback.
+func (u *EmissionUniverse) aliasBodylessGoLinknameDeclarations() error {
+	packages := make([]*preparedEmissionPackage, 0, len(u.packages))
+	for _, prepared := range u.packages {
+		if prepared != nil {
+			packages = append(packages, prepared)
+		}
+	}
+	sort.SliceStable(packages, func(i, j int) bool {
+		if packages[i].order != packages[j].order {
+			return packages[i].order < packages[j].order
+		}
+		return packages[i].identity < packages[j].identity
+	})
+
+	// Only selected, required winners can be emitted definitions. Build that
+	// side first, including bodyful functions whose source name is unrelated to
+	// the final go:linkname symbol.
+	groups := make(map[string]*emissionGoLinknameGroup)
+	for _, prepared := range packages {
+		keys := make([]string, 0, len(prepared.winners))
+		for key := range prepared.winners {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			ftype, _, _, valid := splitManagedSymbolKey(key)
+			if !valid || ftype != goFunc {
+				continue
+			}
+			function := u.canonicalAlias(prepared.winners[key])
+			if function == nil {
+				return fmt.Errorf("prepare emission universe: managed Go winner for owner %q has cyclic canonical aliases", prepared.identity)
+			}
+			if functionNeedsLinkOnce(function) {
+				continue
+			}
+			ownerKey := emissionFunctionOwnerKey{function: function, owner: prepared}
+			if frozenKind, ok := u.functionKinds[ownerKey]; !ok || frozenKind != goFunc {
+				return fmt.Errorf("prepare emission universe: managed Go winner %q has inconsistent frontend kind for owner %q", function.Name(), prepared.identity)
+			}
+			if frozenKey, ok := u.finalKeys[ownerKey]; !ok || frozenKey != key {
+				return fmt.Errorf("prepare emission universe: managed Go winner %q has inconsistent final key for owner %q", function.Name(), prepared.identity)
+			}
+			if _, required := u.required[function]; !required {
+				return fmt.Errorf("prepare emission universe: managed Go winner %q for owner %q is not emitted", function.Name(), prepared.identity)
+			}
+
+			if len(function.Blocks) == 0 {
+				continue
+			}
+			group := groups[key]
+			if group == nil {
+				group = &emissionGoLinknameGroup{definitions: make(map[*ssa.Function]none)}
+				groups[key] = group
+			}
+			group.definitions[function] = none{}
+		}
+	}
+
+	// Declaration provenance comes from the attached AST directive, not from
+	// the mutable Linkname table. Scan metadata-only packages too: their unused
+	// declarations remain absent, while a later reached declaration can install
+	// the already frozen exact alias before materialization.
+	for _, prepared := range packages {
+		members := make([]string, 0, len(prepared.ssa.Members))
+		for name := range prepared.ssa.Members {
+			members = append(members, name)
+		}
+		sort.Strings(members)
+		for _, name := range members {
+			function, ok := prepared.ssa.Members[name].(*ssa.Function)
+			if !ok {
+				continue
+			}
+			candidate, err := bodylessGoLinknameDeclaration(function)
+			if err != nil {
+				return fmt.Errorf("prepare emission universe: %s: %w", emissionFunctionDiagnostic(function), err)
+			}
+			if !candidate || functionNeedsLinkOnce(function) {
+				continue
+			}
+			state, _ := u.functionProvenance(prepared, function)
+			key, managed, err := u.managedSymbolKey(prepared, function, state)
+			if err != nil {
+				return err
+			}
+			if !managed || managedKeyFunctionType(key) != goFunc {
+				continue
+			}
+			group := groups[key]
+			if group == nil {
+				group = &emissionGoLinknameGroup{definitions: make(map[*ssa.Function]none)}
+				groups[key] = group
+			}
+			group.declarations = append(group.declarations, emissionGoLinknameDeclaration{
+				function: function,
+				owner:    prepared,
+			})
+		}
+	}
+
+	keys := make([]string, 0, len(groups))
+	for key, group := range groups {
+		if len(group.declarations) != 0 {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	type aliasOperation struct {
+		key         string
+		declaration emissionGoLinknameDeclaration
+		definition  *ssa.Function
+	}
+	operations := make([]aliasOperation, 0)
+	for _, key := range keys {
+		group := groups[key]
+		definitions := make([]*ssa.Function, 0, len(group.definitions))
+		for function := range group.definitions {
+			definitions = append(definitions, function)
+		}
+		sort.SliceStable(definitions, func(i, j int) bool {
+			return emissionFunctionSortKey(definitions[i]) < emissionFunctionSortKey(definitions[j])
+		})
+		if len(definitions) > 1 {
+			_, symbol, _, _ := splitManagedSymbolKey(key)
+			diagnostics := make([]string, len(definitions))
+			for index, function := range definitions {
+				diagnostics[index] = emissionFunctionDiagnostic(function)
+			}
+			return fmt.Errorf(
+				"prepare emission universe: bodyless go:linkname symbol %q has multiple emitted Go definitions with the same exact structural signature: %s",
+				symbol, strings.Join(diagnostics, ", "),
+			)
+		}
+		if len(definitions) == 0 {
+			// An assembly implementation or a definition with a different Go
+			// signature remains an opaque declaration. Exact-key matching must
+			// not infer compatibility from the physical symbol alone.
+			continue
+		}
+		sort.SliceStable(group.declarations, func(i, j int) bool {
+			if group.declarations[i].owner.order != group.declarations[j].owner.order {
+				return group.declarations[i].owner.order < group.declarations[j].owner.order
+			}
+			return emissionFunctionSortKey(group.declarations[i].function) < emissionFunctionSortKey(group.declarations[j].function)
+		})
+		for _, declaration := range group.declarations {
+			operations = append(operations, aliasOperation{key: key, declaration: declaration, definition: definitions[0]})
+		}
+	}
+
+	// Freeze pending exact matches even for metadata-only declarations. Resolve
+	// remains false until such a declaration is actually reached and activated.
+	if u.goLinknameDefinitions == nil {
+		u.goLinknameDefinitions = make(map[*ssa.Function]*ssa.Function)
+	}
+	for _, operation := range operations {
+		if previous := u.goLinknameDefinitions[operation.declaration.function]; previous != nil && previous != operation.definition {
+			return fmt.Errorf("prepare emission universe: bodyless go:linkname declaration %q has conflicting exact definitions", operation.declaration.function.Name())
+		}
+		u.goLinknameDefinitions[operation.declaration.function] = operation.definition
+	}
+	for _, operation := range operations {
+		if _, required := u.required[operation.declaration.function]; !required {
+			continue
+		}
+		if err := u.activateBodylessGoLinknameAlias(operation.declaration.function); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (u *EmissionUniverse) activateBodylessGoLinknameAlias(declaration *ssa.Function) error {
+	definition := u.goLinknameDefinitions[declaration]
+	if definition == nil {
+		return nil
+	}
+	if declaration == definition {
+		return fmt.Errorf("prepare emission universe: bodyless go:linkname declaration %q aliases itself", declaration.Name())
+	}
+	if canonical := u.canonicalAlias(definition); canonical == nil || canonical != definition {
+		return fmt.Errorf("prepare emission universe: exact go:linkname definition %q is not canonical", definition.Name())
+	}
+	if _, required := u.required[definition]; !required {
+		return fmt.Errorf("prepare emission universe: exact go:linkname definition %q is not emitted", definition.Name())
+	}
+	if len(definition.Blocks) == 0 || functionNeedsLinkOnce(definition) {
+		return fmt.Errorf("prepare emission universe: exact go:linkname target %q is not a non-linkonce emitted definition", definition.Name())
+	}
+	if _, materialized := u.materialized[declaration]; materialized {
+		return fmt.Errorf("prepare emission universe: bodyless go:linkname declaration %q was materialized before exact aliasing", declaration.Name())
+	}
+	if len(u.materializedOwners[declaration]) != 0 || len(u.abiMethodReferences[declaration]) != 0 ||
+		len(u.loweredCalls[declaration]) != 0 || len(u.normalReturnBlocks[declaration]) != 0 {
+		return fmt.Errorf("prepare emission universe: bodyless go:linkname declaration %q has materialized owner metadata before exact aliasing", declaration.Name())
+	}
+
+	ownerSet := u.useOwners[declaration]
+	for owner := range ownerSet {
+		if owner == nil {
+			return fmt.Errorf("prepare emission universe: bodyless go:linkname declaration %q has a nil use owner", declaration.Name())
+		}
+		state, stateOK := u.ownerStates[declaration][owner]
+		ownerKey := emissionFunctionOwnerKey{function: declaration, owner: owner}
+		kind, kindOK := u.functionKinds[ownerKey]
+		key, keyOK := u.finalKeys[ownerKey]
+		if !stateOK || !kindOK || kind != goFunc || !keyOK || key == "" {
+			return fmt.Errorf("prepare emission universe: bodyless go:linkname declaration %q has incomplete frozen owner metadata for %q", declaration.Name(), owner.identity)
+		}
+		pendingKey, managed, err := u.managedSymbolKey(owner, declaration, state.state)
+		if err != nil || !managed || pendingKey != key {
+			return fmt.Errorf("prepare emission universe: bodyless go:linkname declaration %q changed its exact managed key for owner %q", declaration.Name(), owner.identity)
+		}
+		if winner := owner.winners[key]; winner != nil && winner != declaration && winner != definition {
+			return fmt.Errorf("prepare emission universe: bodyless go:linkname declaration %q has conflicting managed winner %q for owner %q", declaration.Name(), winner.Name(), owner.identity)
+		}
+	}
+
+	u.aliases[declaration] = definition
+	for alias, canonical := range u.aliases {
+		if canonical == declaration {
+			u.aliases[alias] = definition
+		}
+	}
+	for owner := range ownerSet {
+		ownerKey := emissionFunctionOwnerKey{function: declaration, owner: owner}
+		key := u.finalKeys[ownerKey]
+		if owner.winners[key] == declaration {
+			owner.winners[key] = definition
+			owner.fromPatch[definition] = owner.fromPatch[declaration]
+		}
+		delete(owner.fromPatch, declaration)
+		delete(u.functionKinds, ownerKey)
+		delete(u.finalKeys, ownerKey)
+		delete(u.physicalNames, ownerKey)
+		delete(u.intrinsicOps, ownerKey)
+	}
+	delete(u.required, declaration)
+	delete(u.useOwners, declaration)
+	delete(u.ownerStates, declaration)
+	delete(u.fnOwners, declaration)
+	delete(u.fnStates, declaration)
+	delete(u.excluded, declaration)
+	delete(u.foreignNoBlock, declaration)
+	delete(u.linkIdentities, declaration)
+	delete(u.linkOnceNames, declaration)
+	return nil
+}
+
+func bodylessGoLinknameDeclaration(function *ssa.Function) (bool, error) {
+	if function == nil || len(function.Blocks) != 0 || functionNeedsLinkOnce(function) {
+		return false, nil
+	}
+	if function.Pkg == nil || function.Parent() != nil || function.Signature == nil || function.Signature.Recv() != nil {
+		return false, nil
+	}
+	declaration, _ := function.Syntax().(*ast.FuncDecl)
+	if declaration == nil || declaration.Body != nil || declaration.Doc == nil || declaration.Recv != nil {
+		return false, nil
+	}
+	_, localName := astFuncName("", declaration)
+	found := false
+	for _, comment := range declaration.Doc.List {
+		if comment == nil {
+			continue
+		}
+		fields := strings.Fields(comment.Text)
+		if len(fields) == 0 || fields[0] != "//go:linkname" {
+			continue
+		}
+		if found {
+			return false, fmt.Errorf("duplicate attached //go:linkname directive")
+		}
+		found = true
+		if (len(fields) != 2 && len(fields) != 3) || fields[1] != localName {
+			return false, fmt.Errorf("invalid attached //go:linkname directive %q", comment.Text)
+		}
+	}
+	return found, nil
+}
+
 func (u *EmissionUniverse) aliasPackageMembers(prepared *preparedEmissionPackage, pkg *ssa.Package) error {
 	names := make([]string, 0, len(pkg.Members))
 	for name := range pkg.Members {
@@ -2723,6 +3027,11 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 }
 
 func (u *EmissionUniverse) addResolvedRequired(fn *ssa.Function, owner *preparedEmissionPackage, caller *ssa.Function, state emissionFunctionState) (*ssa.Function, error) {
+	if fn != nil && u.goLinknameDefinitions[fn] != nil {
+		if err := u.activateBodylessGoLinknameAlias(fn); err != nil {
+			return nil, err
+		}
+	}
 	fn = u.canonicalAlias(fn)
 	if fn == nil {
 		return nil, fmt.Errorf("prepare emission universe: reached function has cyclic canonical aliases")
