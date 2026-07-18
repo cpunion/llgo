@@ -57,7 +57,42 @@ func resolveCoroStaticAwait(plan *coro.SSAPlan, caller coro.FunctionPlan, call s
 	if err := validateCoroAwaitTarget(caller, targetPlan); err != nil {
 		return nil, coro.FunctionPlan{}, err
 	}
+	if target.Signature != nil && target.Signature.Recv() != nil {
+		if err := validateCoroStaticMethodCallOperands(call, target); err != nil {
+			return nil, coro.FunctionPlan{}, err
+		}
+	}
 	return target, targetPlan, nil
+}
+
+// validateCoroStaticMethodCallOperands freezes the x/tools receiver convention
+// at the exact call boundary. A declared receiver is target.Params[0] and the
+// same SSA value is common.Args[0]; bound method values, closures, invokes, and
+// synthetic receiver adapters do not satisfy this shape.
+func validateCoroStaticMethodCallOperands(call ssa.CallInstruction, target *ssa.Function) error {
+	if call == nil || call.Common() == nil || target == nil || target.Signature == nil || target.Signature.Recv() == nil {
+		return fmt.Errorf("static coroutine method requires an exact declared method target")
+	}
+	common := call.Common()
+	raw, exactValue := common.Value.(*ssa.Function)
+	if common.IsInvoke() || common.StaticCallee() == nil || !exactValue || raw != common.StaticCallee() {
+		return fmt.Errorf("static coroutine method requires an exact function operand, not an invoke or method value")
+	}
+	normalized := coroPhysicalNormalizeSourceSignature(target.Signature)
+	if normalized.Params().Len() != len(target.Params) || len(common.Args) != len(target.Params) {
+		return fmt.Errorf(
+			"static coroutine method receiver/argument shape mismatch: normalized=%d SSA-params=%d call-args=%d",
+			normalized.Params().Len(), len(target.Params), len(common.Args),
+		)
+	}
+	for index, parameter := range target.Params {
+		if parameter == nil || common.Args[index] == nil ||
+			!types.Identical(parameter.Type(), normalized.Params().At(index).Type()) ||
+			!types.Identical(common.Args[index].Type(), parameter.Type()) {
+			return fmt.Errorf("static coroutine method operand %d does not match the normalized receiver/parameter ABI", index)
+		}
+	}
+	return nil
 }
 
 func validateCoroAwaitTarget(caller, target coro.FunctionPlan) error {
@@ -134,6 +169,12 @@ func (p *context) compileCoroTargetAwait(b llssa.Builder, callee *ssa.Function, 
 		panic(fmt.Sprintf("coroutine child await: derive target %q ABI: %v", entry.plan.ID, err))
 	}
 	abi := newCoroPhysicalABI(p, entry, sourceSig)
+	if len(args) != sourceSig.Params().Len() {
+		panic(fmt.Sprintf(
+			"coroutine child await: target %q arguments=%d do not match normalized source parameters=%d",
+			entry.plan.ID, len(args), sourceSig.Params().Len(),
+		))
+	}
 	childFn, _, kind := p.compileFunction(callee)
 	if kind != goFunc {
 		panic(fmt.Sprintf("coroutine child await: target %q did not resolve to a Go entry", entry.plan.ID))

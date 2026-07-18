@@ -568,7 +568,12 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 	}
 	var physicalABI *coroPhysicalABI
 	if entry.physical && entry.plan.Emission == coro.EmitCoroutine {
-		abi := newCoroPhysicalABI(p, entry, sig)
+		// x/tools exposes a declared method receiver as fn.Params[0]. Normalize
+		// the callable source ABI before adding the two coroutine-owned hidden
+		// parameters so compileValue's sourceParamBase maps every SSA parameter
+		// to the same physical position.
+		sourceSig = coroPhysicalNormalizeSourceSignature(sig)
+		abi := newCoroPhysicalABI(p, entry, sourceSig)
 		physicalABI = &abi
 		sig = abi.physicalSig
 		hasCtx = false

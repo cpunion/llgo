@@ -184,6 +184,11 @@ type coroBodyContext struct {
 }
 
 func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *types.Signature) coroPhysicalABI {
+	// Declared methods use x/tools' receiver-as-Params[0] SSA convention. Keep
+	// one receiver-free callable signature everywhere below so the descriptor
+	// hash, ramp parameters, result slot, and child-await call all see the same
+	// physical source ABI.
+	sourceSig = coroPhysicalNormalizeSourceSignature(sourceSig)
 	version := coroPhysicalABIVersion
 	frameAllocHook := coroFrameAllocHook
 	frameFreeHook := coroFrameFreeHook
@@ -844,9 +849,6 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 	if fn.Recover != nil {
 		return fail("recover blocks require coroutine cleanup/unwind lowering")
 	}
-	if fn.Signature.Recv() != nil {
-		return fail("methods require descriptor and receiver ABI lowering")
-	}
 	if fn.Signature.Variadic() {
 		return fail("variadic coroutine ABI is not implemented")
 	}
@@ -863,13 +865,27 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 	if list := fn.TypeParams(); list != nil && list.Len() != 0 {
 		return fail("generic declarations are not materialized coroutine bodies")
 	}
+	if list := fn.Signature.RecvTypeParams(); list != nil && list.Len() != 0 {
+		return fail("generic receivers are not materialized coroutine bodies")
+	}
 	if list := fn.TypeArgs(); len(list) != 0 {
 		return fail("generic instances require a frozen instantiated ABI")
 	}
 	if (fn.Name() == "main" || strings.HasPrefix(fn.Name(), "init")) && !programEntry {
 		return fail("program roots require scheduler bootstrap lowering")
 	}
-	if err := validateCoroLeafPhysicalSignature(plan, fn.Signature); err != nil {
+	physicalSourceSig := coroPhysicalNormalizeSourceSignature(fn.Signature)
+	if universe != nil {
+		var signatureErr error
+		physicalSourceSig, signatureErr = universe.coroPhysicalSourceSignature(fn)
+		if signatureErr != nil {
+			return fail("derive effective source signature: %v", signatureErr)
+		}
+	}
+	if err := validateCoroPhysicalSSAParameterShape(plan, fn, physicalSourceSig); err != nil {
+		return err
+	}
+	if err := validateCoroLeafPhysicalSignature(plan, physicalSourceSig); err != nil {
 		return err
 	}
 	pureSSA, err := newCoroPhysicalPureSSAAudit(universe, fn, frameRetentionABI)
@@ -1220,9 +1236,6 @@ func validateCoroLeafPhysicalABI(fn *ssa.Function, plan coro.FunctionPlan) error
 	if len(fn.AnonFuncs) != 0 {
 		return fail("nested function literals require closure body lowering")
 	}
-	if fn.Signature.Recv() != nil {
-		return fail("methods require descriptor and receiver ABI lowering")
-	}
 	if fn.Signature.Variadic() {
 		return fail("variadic coroutine ABI is not implemented")
 	}
@@ -1238,6 +1251,9 @@ func validateCoroLeafPhysicalABI(fn *ssa.Function, plan coro.FunctionPlan) error
 	if list := fn.TypeParams(); list != nil && list.Len() != 0 {
 		return fail("generic declarations are not materialized coroutine bodies")
 	}
+	if list := fn.Signature.RecvTypeParams(); list != nil && list.Len() != 0 {
+		return fail("generic receivers are not materialized coroutine bodies")
+	}
 	if list := fn.TypeArgs(); len(list) != 0 {
 		return fail("generic instances require a frozen instantiated ABI")
 	}
@@ -1247,7 +1263,11 @@ func validateCoroLeafPhysicalABI(fn *ssa.Function, plan coro.FunctionPlan) error
 	if len(fn.Blocks) != 1 {
 		return fail("requires exactly one basic block, got %d", len(fn.Blocks))
 	}
-	if err := validateCoroLeafPhysicalSignature(plan, fn.Signature); err != nil {
+	physicalSourceSig := coroPhysicalNormalizeSourceSignature(fn.Signature)
+	if err := validateCoroPhysicalSSAParameterShape(plan, fn, physicalSourceSig); err != nil {
+		return err
+	}
+	if err := validateCoroLeafPhysicalSignature(plan, physicalSourceSig); err != nil {
 		return err
 	}
 
@@ -1292,7 +1312,43 @@ func (u *EmissionUniverse) coroPhysicalSourceSignature(fn *ssa.Function) (*types
 	if !ok {
 		return nil, fmt.Errorf("coroutine physical ABI: function %q: effective type is not a signature", fn.Name())
 	}
-	return sig, nil
+	if params := sig.RecvTypeParams(); params != nil && params.Len() != 0 {
+		return nil, fmt.Errorf("coroutine physical ABI: function %q: effective generic receiver has %d type parameters", fn.Name(), params.Len())
+	}
+	return coroPhysicalNormalizeSourceSignature(sig), nil
+}
+
+// coroPhysicalNormalizeSourceSignature maps a declared receiver to the exact
+// leading ordinary parameter used by x/tools SSA and LLGo's existing Go method
+// declaration ABI. It is idempotent: already receiver-free signatures pass
+// through unchanged.
+func coroPhysicalNormalizeSourceSignature(sig *types.Signature) *types.Signature {
+	if sig == nil || sig.Recv() == nil {
+		return sig
+	}
+	return llssa.FuncAddCtx(sig.Recv(), sig)
+}
+
+func validateCoroPhysicalSSAParameterShape(plan coro.FunctionPlan, fn *ssa.Function, effective *types.Signature) error {
+	fail := func(format string, args ...any) error {
+		return fmt.Errorf("coroutine physical ABI: function %q: %s", plan.ID, fmt.Sprintf(format, args...))
+	}
+	if fn == nil || fn.Signature == nil || effective == nil {
+		return fail("requires an SSA function and effective source signature")
+	}
+	source := coroPhysicalNormalizeSourceSignature(fn.Signature)
+	if source.Params().Len() != len(fn.Params) {
+		return fail("normalized source parameters=%d do not match SSA parameters=%d", source.Params().Len(), len(fn.Params))
+	}
+	if effective.Params().Len() != len(fn.Params) {
+		return fail("effective normalized parameters=%d do not match SSA parameters=%d", effective.Params().Len(), len(fn.Params))
+	}
+	for index, parameter := range fn.Params {
+		if parameter == nil || !types.Identical(parameter.Type(), source.Params().At(index).Type()) {
+			return fail("SSA parameter %d does not match normalized source parameter", index)
+		}
+	}
+	return nil
 }
 
 func validateCoroLeafPhysicalSignature(plan coro.FunctionPlan, sig *types.Signature) error {
@@ -1301,9 +1357,6 @@ func validateCoroLeafPhysicalSignature(plan coro.FunctionPlan, sig *types.Signat
 	}
 	if sig == nil {
 		return fail("requires a physical source signature")
-	}
-	if sig.Recv() != nil {
-		return fail("effective method receiver requires descriptor lowering")
 	}
 	if sig.Variadic() {
 		return fail("effective variadic coroutine ABI is not implemented")
@@ -1314,6 +1367,7 @@ func validateCoroLeafPhysicalSignature(plan coro.FunctionPlan, sig *types.Signat
 	if params := sig.RecvTypeParams(); params != nil && params.Len() != 0 {
 		return fail("effective generic receiver has %d type parameters", params.Len())
 	}
+	sig = coroPhysicalNormalizeSourceSignature(sig)
 	for i := 0; i < sig.Params().Len(); i++ {
 		if err := validateCoroPhysicalValueType(sig.Params().At(i).Type(), make(map[types.Type]bool)); err != nil {
 			return fail("parameter %d has unsupported type %s: %v", i, sig.Params().At(i).Type(), err)

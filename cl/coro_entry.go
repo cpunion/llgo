@@ -194,7 +194,15 @@ func (e plannedFunctionSymbol) checkSupported() error {
 		if !e.physical {
 			return fmt.Errorf("coroutine emission %q requires coroutine physical ABI lowering", e.plan.ID)
 		}
-		if err := validateCoroPhysicalFunctionValueABI(e.plan, e.function.Signature, e.plainDispatch); err != nil {
+		sourceSig := coroPhysicalNormalizeSourceSignature(e.function.Signature)
+		if e.emission != nil {
+			var err error
+			sourceSig, err = e.emission.coroPhysicalSourceSignature(e.function)
+			if err != nil {
+				return err
+			}
+		}
+		if err := validateCoroPhysicalFunctionValueABI(e.plan, sourceSig, e.plainDispatch); err != nil {
 			return err
 		}
 		return validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(
