@@ -181,50 +181,17 @@ func printany(i any) {
 }
 
 // printanyraw is the no-callback form used by the terminal legacy panic trace.
-// Keep the scalar cases aligned with printany, but deliberately do not assert
-// error or Stringer: either assertion would introduce an open managed invoke
-// into the one runtime path that cannot suspend or resume a child coroutine.
+// Deliberately avoid a type switch as well as error/Stringer assertions: the
+// former lowers through interface equality and may recursively inspect a
+// composite type. The raw descriptor printer is bounded by one concrete type
+// record and never invokes user code.
 func printanyraw(i any) {
-	switch v := i.(type) {
-	case nil:
+	e := efaceOf(&i)
+	if e._type == nil {
 		print("nil")
-	case bool:
-		print(v)
-	case int:
-		print(v)
-	case int8:
-		print(v)
-	case int16:
-		print(v)
-	case int32:
-		print(v)
-	case int64:
-		print(v)
-	case uint:
-		print(v)
-	case uint8:
-		print(v)
-	case uint16:
-		print(v)
-	case uint32:
-		print(v)
-	case uint64:
-		print(v)
-	case uintptr:
-		print(v)
-	case float32:
-		print(v)
-	case float64:
-		print(v)
-	case complex64:
-		print(v)
-	case complex128:
-		print(v)
-	case string:
-		print(v)
-	default:
-		printanycustomtype(i)
+		return
 	}
+	printanycustomtype(i)
 }
 
 func efaceOf(ep *any) *eface {
