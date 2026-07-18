@@ -1,0 +1,567 @@
+/*
+ * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package coro
+
+// WorkerOperationSourceCapacity bounds the scheduler-side source core. A
+// target worker queue or pool remains a separate adapter and may apply a
+// tighter admission limit without changing this lifecycle.
+const WorkerOperationSourceCapacity = 8
+
+type WorkerOperationPostResult uint8
+
+const (
+	WorkerOperationPostInvalid WorkerOperationPostResult = iota
+	WorkerOperationPosted
+	WorkerOperationPostDuplicate
+	WorkerOperationPostClosed
+	WorkerOperationPostStale
+)
+
+type WorkerOperationCloseResult uint8
+
+const (
+	WorkerOperationCloseInvalid WorkerOperationCloseResult = iota
+	WorkerOperationCloseStarted
+	WorkerOperationAlreadyClosing
+	WorkerOperationAlreadyQuiesced
+)
+
+type workerOperationMailbox uint32
+
+const (
+	workerOperationMailboxEmpty workerOperationMailbox = iota
+	workerOperationMailboxPosting
+	workerOperationMailboxPosted
+	workerOperationMailboxDraining
+	workerOperationMailboxDelivered
+)
+
+type workerOperationSlot struct {
+	// Producer-visible, pointer-free stable storage. Post writes payload before
+	// release-publishing Posted; owner P alone reads the suffix below it.
+	producerSourceSlot
+	mailbox uint32
+	payload ScalarResultPayloadV1
+
+	record       OperationRecord
+	result       ScalarResultCell
+	nextAffected uint32
+}
+
+// WorkerOperationSource is the allocation-free scheduler half of a bounded
+// asynchronous worker source. It owns no thread, queue, or platform cancel
+// mechanism. A backend receives only OperationID, publishes a pointer-free
+// result with Post, and requests executor service through the common doorbell.
+// Post is producer-concurrent; other mutating methods are owner-P-only.
+type WorkerOperationSource struct {
+	routedProducerSource
+	slots [WorkerOperationSourceCapacity]workerOperationSlot
+
+	affectedHead uint32
+	affectedTail uint32
+}
+
+func workerOperationSlotFor(source *WorkerOperationSource, id OperationID) (*workerOperationSlot, bool) {
+	if source == nil || !source.route.Valid() || !id.Valid() || id.Source() != OperationSourceWorker ||
+		id.Route() != source.route || id.LocalSlot() == 0 || id.LocalSlot() > WorkerOperationSourceCapacity {
+		return nil, false
+	}
+	return &source.slots[id.LocalSlot()-1], true
+}
+
+func workerOperationReusableSlot(source *WorkerOperationSource, slot *workerOperationSlot, index uint32) bool {
+	if slot == nil || !producerSourceSlotReusable(&slot.producerSourceSlot) ||
+		preemptLoad(&slot.mailbox) != uint32(workerOperationMailboxEmpty) ||
+		slot.payload != (ScalarResultPayloadV1{}) || slot.result != (ScalarResultCell{}) || slot.nextAffected != 0 {
+		return false
+	}
+	generation := preemptLoad(&slot.generation)
+	if generation == 0 {
+		return slot.record == (OperationRecord{})
+	}
+	if source == nil || !source.route.Valid() {
+		return false
+	}
+	id, ok := MakeOperationIDAtRoute(OperationSourceWorker, source.route, index+1, generation)
+	return ok && slot.record == (OperationRecord{id: id, phase: operationReusable})
+}
+
+func validWorkerOperationOwner(source *WorkerOperationSource, p *P) bool {
+	return source != nil && validRoutedProducerSource(&source.routedProducerSource, p)
+}
+
+func validWorkerOperationLiveSlot(source *WorkerOperationSource, p *P, index uint32) bool {
+	if !validWorkerOperationOwner(source, p) || index >= uint32(len(source.slots)) {
+		return false
+	}
+	slot := &source.slots[index]
+	state := producerSourceLifecycle(preemptLoad(&slot.state))
+	if state != producerSourceActive && state != producerSourceClosing && state != producerSourceQuiesced {
+		return false
+	}
+	generation := preemptLoad(&slot.generation)
+	id, ok := MakeOperationIDAtRoute(OperationSourceWorker, source.route, index+1, generation)
+	return ok && slot.record.Matches(id)
+}
+
+func (source *WorkerOperationSource) reserveAndAttach(
+	p *P,
+	state *ParkState,
+	ticket ParkTicket,
+	wait *WaitSetRecord,
+	caseID uint32,
+) (OperationID, bool) {
+	if !validWorkerOperationOwner(source, p) {
+		return OperationID{}, false
+	}
+	for index := range source.slots {
+		slot := &source.slots[index]
+		if !workerOperationReusableSlot(source, slot, uint32(index)) || preemptLoad(&slot.generation) == ^uint32(0) {
+			continue
+		}
+		generation, begun := beginProducerSourceSlot(&slot.producerSourceSlot)
+		if !begun {
+			return OperationID{}, false
+		}
+		id, ok := MakeOperationIDAtRoute(OperationSourceWorker, source.route, uint32(index)+1, generation)
+		if !ok || !PrepareOperationAtGeneration(&slot.record, id) {
+			return OperationID{}, false
+		}
+		attached := false
+		if wait == nil {
+			attached = AttachParkOperation(state, ticket, &slot.record, caseID)
+		} else {
+			attached = AttachParkWaitOperation(state, ticket, wait, &slot.record, caseID)
+		}
+		if !attached {
+			if !AbortReservedOperation(&slot.record, id) ||
+				!resetProducerSourceSlot(&slot.producerSourceSlot, generation) {
+				return OperationID{}, false
+			}
+			return OperationID{}, false
+		}
+		if !activateProducerSourceSlot(&slot.producerSourceSlot, generation) {
+			return OperationID{}, false
+		}
+		return id, true
+	}
+	return OperationID{}, false
+}
+
+func (source *WorkerOperationSource) ReserveAndAttach(
+	p *P,
+	state *ParkState,
+	ticket ParkTicket,
+	caseID uint32,
+) (OperationID, bool) {
+	return source.reserveAndAttach(p, state, ticket, nil, caseID)
+}
+
+func (source *WorkerOperationSource) ReserveAndAttachWait(
+	p *P,
+	state *ParkState,
+	ticket ParkTicket,
+	wait *WaitSetRecord,
+	caseID uint32,
+) (OperationID, bool) {
+	return source.reserveAndAttach(p, state, ticket, wait, caseID)
+}
+
+// Post publishes only the first exact-generation result. Later producers are
+// coalesced and cannot replace its scalar payload.
+func (source *WorkerOperationSource) Post(id OperationID, payload ScalarResultPayloadV1) WorkerOperationPostResult {
+	if !payload.Valid() {
+		return WorkerOperationPostInvalid
+	}
+	slot, ok := workerOperationSlotFor(source, id)
+	if !ok {
+		return WorkerOperationPostInvalid
+	}
+	switch acquireProducerSourceGeneration(&slot.producerSourceSlot, id.Generation) {
+	case producerSourceAcquireClosed:
+		return WorkerOperationPostClosed
+	case producerSourceAcquireStale:
+		return WorkerOperationPostStale
+	case producerSourceAcquired:
+	default:
+		return WorkerOperationPostInvalid
+	}
+	if preemptLoad(&slot.state) != uint32(producerSourceActive) {
+		producerAdmissionRelease(&slot.inflight)
+		return WorkerOperationPostClosed
+	}
+	for {
+		switch mailbox := workerOperationMailbox(preemptLoad(&slot.mailbox)); mailbox {
+		case workerOperationMailboxEmpty:
+			if !preemptCompareAndSwap(&slot.mailbox, uint32(mailbox), uint32(workerOperationMailboxPosting)) {
+				continue
+			}
+			slot.payload = payload
+			preemptStore(&slot.mailbox, uint32(workerOperationMailboxPosted))
+			preemptStore(&source.pending, 1)
+			producerAdmissionRelease(&slot.inflight)
+			return WorkerOperationPosted
+		case workerOperationMailboxPosting, workerOperationMailboxPosted,
+			workerOperationMailboxDraining, workerOperationMailboxDelivered:
+			producerAdmissionRelease(&slot.inflight)
+			return WorkerOperationPostDuplicate
+		default:
+			producerAdmissionRelease(&slot.inflight)
+			return WorkerOperationPostInvalid
+		}
+	}
+}
+
+func (source *WorkerOperationSource) Pending() bool {
+	return source != nil && routedProducerPending(&source.routedProducerSource)
+}
+
+func (source *WorkerOperationSource) RequestCancel(p *P, wait *WaitSetRecord) bool {
+	return validWorkerOperationOwner(source, p) && RequestWaitSetCancel(p, wait, ParkCancelOperation)
+}
+
+func (source *WorkerOperationSource) appendAffected(index uint32) bool {
+	oneBased := index + 1
+	if source.affectedHead == 0 {
+		if source.affectedTail != 0 {
+			return false
+		}
+		source.affectedHead, source.affectedTail = oneBased, oneBased
+		return true
+	}
+	if source.affectedTail == 0 || source.affectedTail > uint32(len(source.slots)) {
+		return false
+	}
+	tail := &source.slots[source.affectedTail-1]
+	if tail.nextAffected != 0 {
+		return false
+	}
+	tail.nextAffected = oneBased
+	source.affectedTail = oneBased
+	return true
+}
+
+func (source *WorkerOperationSource) beginPublishPass(p *P) bool {
+	return source != nil && beginRoutedProducerPass(&source.routedProducerSource, p)
+}
+
+func (source *WorkerOperationSource) publishSlot(p *P, index uint32) (published, lost uint32, ok bool) {
+	if !validWorkerOperationOwner(source, p) || index >= uint32(len(source.slots)) {
+		return 0, 0, false
+	}
+	slot := &source.slots[index]
+	mailbox := workerOperationMailbox(preemptLoad(&slot.mailbox))
+	if mailbox == workerOperationMailboxPosting || mailbox == workerOperationMailboxEmpty ||
+		mailbox == workerOperationMailboxDelivered {
+		return 0, 0, true
+	}
+	if mailbox != workerOperationMailboxPosted ||
+		!preemptCompareAndSwap(&slot.mailbox, uint32(workerOperationMailboxPosted), uint32(workerOperationMailboxDraining)) ||
+		!validWorkerOperationLiveSlot(source, p, index) || !slot.payload.Valid() {
+		return 0, 0, false
+	}
+	id := slot.record.id
+	switch result := PublishScalarOperationCompletion(&slot.result, &slot.record, id, slot.payload); result {
+	case OperationCompletionPublished:
+		if slot.record.link.wait != nil {
+			if !MarkWaitSetAffected(p, slot.record.link.wait) {
+				return 0, 0, false
+			}
+		} else if !source.appendAffected(index) {
+			return 0, 0, false
+		}
+		published = 1
+	case OperationCompletionLost:
+		lost = 1
+	case OperationCompletionDeferred:
+		// A bounded resolver owns a frozen ParkState snapshot. Keep the exact
+		// producer fact sticky for the next owner epoch; the scalar helper has
+		// already rolled back its temporary result cell.
+		if !preemptCompareAndSwap(&slot.mailbox, uint32(workerOperationMailboxDraining), uint32(workerOperationMailboxPosted)) {
+			return 0, 0, false
+		}
+		preemptStore(&source.pending, 1)
+		return 0, 0, true
+	default:
+		return 0, 0, false
+	}
+	preemptStore(&slot.mailbox, uint32(workerOperationMailboxDelivered))
+	return published, lost, true
+}
+
+func (source *WorkerOperationSource) PublishPass(p *P) (published, lost uint32, ok bool) {
+	if !source.beginPublishPass(p) {
+		return 0, 0, false
+	}
+	for index := range source.slots {
+		onePublished, oneLost, slotOK := source.publishSlot(p, uint32(index))
+		published += onePublished
+		lost += oneLost
+		if !slotOK {
+			return published, lost, false
+		}
+	}
+	return published, lost, true
+}
+
+func addWorkerOperationResolution(total *CompletionResolution, one CompletionResolution) {
+	total.WaitSets += one.WaitSets
+	total.Completed += one.Completed
+	total.Canceled += one.Canceled
+	total.Defaulted += one.Defaulted
+	total.Winners += one.Winners
+	total.Losers += one.Losers
+}
+
+func (source *WorkerOperationSource) ResolveAffectedPublishedEpoch(
+	p *P,
+) (total CompletionResolution, duplicates uint32, ok bool) {
+	if !validWorkerOperationOwner(source, p) {
+		return CompletionResolution{}, 0, false
+	}
+	for source.affectedHead != 0 {
+		if source.affectedHead > uint32(len(source.slots)) {
+			return total, duplicates, false
+		}
+		index := source.affectedHead - 1
+		slot := &source.slots[index]
+		if !validWorkerOperationLiveSlot(source, p, index) {
+			return total, duplicates, false
+		}
+		resolution, result := resolveAffectedOperationPublishedEpoch(&slot.record, slot.record.id)
+		if result == affectedOperationResolveInvalid {
+			return total, duplicates, false
+		}
+		source.affectedHead = slot.nextAffected
+		slot.nextAffected = 0
+		if source.affectedHead == 0 {
+			source.affectedTail = 0
+		}
+		switch result {
+		case affectedOperationResolved:
+			addWorkerOperationResolution(&total, resolution)
+		case affectedOperationAlreadyResolved:
+			duplicates++
+		}
+	}
+	return total, duplicates, source.affectedTail == 0
+}
+
+func (source *WorkerOperationSource) standaloneAffected(p *P) (affected, ok bool) {
+	if !validWorkerOperationOwner(source, p) || (source.affectedHead == 0) != (source.affectedTail == 0) {
+		return false, false
+	}
+	return source.affectedHead != 0, true
+}
+
+func (source *WorkerOperationSource) beginCloseSlot(p *P, id OperationID) WorkerOperationCloseResult {
+	slot, ok := workerOperationSlotFor(source, id)
+	if !ok || !validWorkerOperationOwner(source, p) || preemptLoad(&slot.generation) != id.Generation ||
+		!slot.record.Matches(id) {
+		return WorkerOperationCloseInvalid
+	}
+	switch beginProducerSourceClose(&slot.producerSourceSlot) {
+	case producerSourceCloseStarted:
+		return WorkerOperationCloseStarted
+	case producerSourceAlreadyClosing:
+		return WorkerOperationAlreadyClosing
+	case producerSourceAlreadyQuiesced:
+		return WorkerOperationAlreadyQuiesced
+	default:
+		return WorkerOperationCloseInvalid
+	}
+}
+
+func (source *WorkerOperationSource) BeginClose(p *P, id OperationID) WorkerOperationCloseResult {
+	return source.beginCloseSlot(p, id)
+}
+
+func (source *WorkerOperationSource) ApplyOne(p *P, id OperationID, record *OperationRecord) OperationApplyResult {
+	slot, ok := workerOperationSlotFor(source, id)
+	if !ok || !validWorkerOperationOwner(source, p) || preemptLoad(&slot.generation) != id.Generation ||
+		&slot.record != record || !slot.record.Matches(id) || slot.record.phase != operationActive {
+		return OperationApplyInvalid
+	}
+	state := producerSourceLifecycle(preemptLoad(&slot.state))
+	if state != producerSourceActive && state != producerSourceClosing && state != producerSourceQuiesced {
+		return OperationApplyInvalid
+	}
+	disposition, terminal := OperationDispositionOf(&slot.record, id)
+	if !terminal || slot.record.link.park == nil || slot.record.link.operation != &slot.record ||
+		slot.record.link.ticket == (ParkTicket{}) {
+		return OperationApplyInvalid
+	}
+	closeResult := source.beginCloseSlot(p, id)
+	if closeResult != WorkerOperationCloseStarted && closeResult != WorkerOperationAlreadyClosing &&
+		closeResult != WorkerOperationAlreadyQuiesced {
+		return OperationApplyInvalid
+	}
+	if disposition != OperationDispositionWinner && slot.record.resultState == operationResultOwned &&
+		!DiscardUnselectedScalarOperationResult(&slot.result, &slot.record, id) {
+		return OperationApplyInvalid
+	}
+	if !slot.record.resolutionApplied && !AcknowledgeOperationResolution(&slot.record, id, disposition) {
+		return OperationApplyInvalid
+	}
+	park, ticket, wait := slot.record.link.park, slot.record.link.ticket, slot.record.link.wait
+	detached := wait != nil && DetachParkWaitOperation(park, ticket, &slot.record, id) ||
+		wait == nil && DetachParkOperation(park, ticket, &slot.record, id)
+	if !detached {
+		return OperationApplyInvalid
+	}
+	return OperationApplyDetached
+}
+
+func (source *WorkerOperationSource) ApplyAndDetach(p *P) (applied, detached uint32, ok bool) {
+	if !validWorkerOperationOwner(source, p) || source.affectedHead != 0 || source.affectedTail != 0 {
+		return 0, 0, false
+	}
+	for index := range source.slots {
+		slot := &source.slots[index]
+		state := producerSourceLifecycle(preemptLoad(&slot.state))
+		if state == producerSourceFree {
+			if !workerOperationReusableSlot(source, slot, uint32(index)) {
+				return applied, detached, false
+			}
+			continue
+		}
+		if !validWorkerOperationLiveSlot(source, p, uint32(index)) {
+			return applied, detached, false
+		}
+		id := slot.record.id
+		if slot.record.phase == operationDetached {
+			if state != producerSourceClosing && state != producerSourceQuiesced {
+				return applied, detached, false
+			}
+			continue
+		}
+		_, terminal := OperationDispositionOf(&slot.record, id)
+		if !terminal {
+			continue
+		}
+		wasApplied := slot.record.resolutionApplied
+		if source.ApplyOne(p, id, &slot.record) != OperationApplyDetached {
+			return applied, detached, false
+		}
+		if !wasApplied {
+			applied++
+		}
+		detached++
+	}
+	return applied, detached, true
+}
+
+func (source *WorkerOperationSource) ConfirmQuiesced(p *P, id OperationID) bool {
+	slot, ok := workerOperationSlotFor(source, id)
+	mailbox := workerOperationMailbox(0)
+	if ok {
+		mailbox = workerOperationMailbox(preemptLoad(&slot.mailbox))
+	}
+	if !ok || !validWorkerOperationOwner(source, p) || preemptLoad(&slot.generation) != id.Generation ||
+		preemptLoad(&slot.state) != uint32(producerSourceClosing) ||
+		!producerSourceSlotQuiesced(&slot.producerSourceSlot) ||
+		(mailbox != workerOperationMailboxEmpty && mailbox != workerOperationMailboxDelivered) ||
+		!ConfirmOperationQuiesced(&slot.record, id) {
+		return false
+	}
+	return markProducerSourceQuiesced(&slot.producerSourceSlot)
+}
+
+func (source *WorkerOperationSource) TakeResult(
+	p *P,
+	lease OperationResultLease,
+	out *ScalarResultPayloadV1,
+) bool {
+	id, ok := lease.ID()
+	if !ok || !validWorkerOperationOwner(source, p) {
+		return false
+	}
+	slot, ok := workerOperationSlotFor(source, id)
+	return ok && preemptLoad(&slot.generation) == id.Generation &&
+		TakeScalarOperationResult(&slot.result, &slot.record, lease, out)
+}
+
+func (source *WorkerOperationSource) DiscardResult(p *P, lease OperationResultLease) bool {
+	id, ok := lease.ID()
+	if !ok || !validWorkerOperationOwner(source, p) {
+		return false
+	}
+	slot, ok := workerOperationSlotFor(source, id)
+	return ok && preemptLoad(&slot.generation) == id.Generation &&
+		DiscardScalarOperationResult(&slot.result, &slot.record, lease)
+}
+
+func (source *WorkerOperationSource) Recycle(p *P, id OperationID) bool {
+	slot, ok := workerOperationSlotFor(source, id)
+	if !ok || !validWorkerOperationOwner(source, p) || source.affectedHead != 0 || source.affectedTail != 0 ||
+		preemptLoad(&slot.generation) != id.Generation ||
+		preemptLoad(&slot.state) != uint32(producerSourceQuiesced) ||
+		!producerSourceSlotQuiesced(&slot.producerSourceSlot) || slot.result != (ScalarResultCell{}) {
+		return false
+	}
+	mailbox := workerOperationMailbox(preemptLoad(&slot.mailbox))
+	if (mailbox != workerOperationMailboxEmpty && mailbox != workerOperationMailboxDelivered) ||
+		!OperationCanRecycle(&slot.record, id) || !RecycleOperation(&slot.record, id) {
+		return false
+	}
+	slot.payload = ScalarResultPayloadV1{}
+	slot.nextAffected = 0
+	preemptStore(&slot.mailbox, uint32(workerOperationMailboxEmpty))
+	return recycleProducerSourceSlot(&slot.producerSourceSlot)
+}
+
+func workerOperationSourceEmpty(source *WorkerOperationSource, owner *P) bool {
+	if source == nil || !routedProducerHeaderEmpty(&source.routedProducerSource, owner) ||
+		source.affectedHead != 0 || source.affectedTail != 0 {
+		return false
+	}
+	for index := range source.slots {
+		if !workerOperationReusableSlot(source, &source.slots[index], uint32(index)) {
+			return false
+		}
+	}
+	return true
+}
+
+func BindWorkerOperationSourceAtRoute(source *WorkerOperationSource, p *P, route RouteID) bool {
+	if !workerOperationSourceEmpty(source, nil) {
+		return false
+	}
+	return bindRoutedProducerSource(&source.routedProducerSource, p, route)
+}
+
+func BindWorkerOperationSource(source *WorkerOperationSource, p *P) bool {
+	return BindWorkerOperationSourceAtRoute(source, p, RouteID(1))
+}
+
+func UnbindWorkerOperationSource(source *WorkerOperationSource, p *P) bool {
+	if p == nil || !workerOperationSourceEmpty(source, p) {
+		return false
+	}
+	return unbindRoutedProducerSource(&source.routedProducerSource, p)
+}
+
+func (source *WorkerOperationSource) CanRelease() bool {
+	return workerOperationSourceEmpty(source, nil)
+}
+
+func (source *WorkerOperationSource) Route() (RouteID, bool) {
+	if source == nil {
+		return 0, false
+	}
+	return routedProducerRoute(&source.routedProducerSource)
+}
