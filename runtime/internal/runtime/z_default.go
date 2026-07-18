@@ -19,9 +19,12 @@ func Rethrow(link *Defer) {
 	if ptr := excepKey.Get(); ptr != nil {
 		if link == nil {
 			TracePanic(*(*any)(ptr))
-			if PanicTraceback == nil || !PanicTraceback(2) {
-				debug.PrintStack(2)
-			}
+			// This is the terminal fallback of the legacy longjmp unwinder.
+			// A callback may be coroutine-capable and therefore cannot run after
+			// the last managed defer frame has already been abandoned. Keep the
+			// emergency trace bounded and synchronous; coroutine-aware panic
+			// cleanup owns richer Go traceback formatting before this point.
+			debug.PrintStack(2)
 			c.Free(ptr)
 			c.Exit(2)
 		} else {
