@@ -1416,27 +1416,30 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			// Preserve that exact path before the general raw-body dynamic-call
 			// rejection; open/invoke/method dispatch remains fail-closed.
 			callPlan, planned := p.compilation.CoroPlan.CallPlan(v)
-			if planned && callPlan.Transport == coro.RawCCodePointer {
-				common := v.Common()
-				if common == nil || common.StaticCallee() != nil || common.IsInvoke() || common.Method != nil ||
-					callPlan.Kind != coro.CallForeign || callPlan.Rep != coro.DirectPlain || !callPlan.Open ||
-					callPlan.Unresolved != coro.UnknownForeign || callPlan.SyncDispatch {
-					panic(fmt.Errorf("raw plain body %q has malformed raw C code-pointer call %q", p.goFn.Name(), v.String()))
+			handled := false
+			if planned {
+				switch {
+				case callPlan.Transport == coro.RawCCodePointer:
+					common := v.Common()
+					if common == nil || common.StaticCallee() != nil || common.IsInvoke() || common.Method != nil ||
+						callPlan.Kind != coro.CallForeign || callPlan.Rep != coro.DirectPlain || !callPlan.Open ||
+						callPlan.Unresolved != coro.UnknownForeign || callPlan.SyncDispatch {
+						panic(fmt.Errorf("raw plain body %q has malformed raw C code-pointer call %q", p.goFn.Name(), v.String()))
+					}
+					ret = p.call(b, llssa.Call, &v.Call)
+					handled = true
+				case callPlan.Rep == coro.Dispatch && !callPlan.SyncDispatch:
+					panic(fmt.Errorf("raw plain body %q contains non-synchronous descriptor call %q", p.goFn.Name(), v.String()))
+				case callPlan.SyncDispatch:
+					value, dispatched := p.tryCompileCoroPlainDispatchCall(b, v)
+					if !dispatched {
+						panic(fmt.Errorf("raw plain body %q lost its planned synchronous descriptor call %q", p.goFn.Name(), v.String()))
+					}
+					ret = value
+					handled = true
 				}
-				ret = p.call(b, llssa.Call, &v.Call)
-			} else if planned && callPlan.Rep == coro.Dispatch && !callPlan.SyncDispatch {
-				panic(fmt.Errorf("raw plain body %q contains non-synchronous descriptor call %q", p.goFn.Name(), v.String()))
 			}
-			if planned && callPlan.Transport == coro.RawCCodePointer {
-				// The exact raw call was emitted above using the ordinary typed C
-				// function-pointer path.
-			} else if planned && callPlan.SyncDispatch {
-				value, handled := p.tryCompileCoroPlainDispatchCall(b, v)
-				if !handled {
-					panic(fmt.Errorf("raw plain body %q lost its planned synchronous descriptor call %q", p.goFn.Name(), v.String()))
-				}
-				ret = value
-			} else {
+			if !handled {
 				common := v.Common()
 				if common == nil {
 					panic("raw plain body contains a call without CallCommon")
