@@ -1,4 +1,4 @@
-//go:build (llgo && llgo_coro) || coro_channel_owner_test
+//go:build !coro_channel_adapter_test && ((llgo && llgo_coro) || coro_channel_owner_test)
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.

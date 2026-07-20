@@ -74,6 +74,24 @@ func coroChannelTestMutexUnlock(unsafe.Pointer) int32 { return 0 }
 //go:linkname coroChannelTestCondSignal C.pthread_cond_signal
 func coroChannelTestCondSignal(unsafe.Pointer) int32 { return 0 }
 
+// The production coroutine runtime makes the obsolete pthread-backed channel
+// waiter fail closed. This source-island test still type-checks the shared
+// legacy allocation helpers, so provide their method surface locally without
+// importing pthread or weakening the production abort path. None of the
+// adapter tests performs a blocking channel wait through these objects.
+type channelWaitMutex struct{}
+type channelWaitCond struct{}
+
+func (*channelWaitMutex) Init(*struct{}) int32 { return 0 }
+func (*channelWaitMutex) Lock()                {}
+func (*channelWaitMutex) Unlock()              {}
+func (*channelWaitMutex) Destroy()             {}
+
+func (*channelWaitCond) Init(*struct{}) int32         { return 0 }
+func (*channelWaitCond) Wait(*channelWaitMutex) int32 { return 0 }
+func (*channelWaitCond) Signal() int32                { return 0 }
+func (*channelWaitCond) Destroy()                     {}
+
 var (
 	coroProgramChannelSourceV1State  coro.ChannelOperationSource
 	coroProgramExecutorRegistryState coro.ExecutorRegistry
