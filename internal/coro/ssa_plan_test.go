@@ -208,6 +208,55 @@ func launchSuspending() { go suspending() }
 	}
 }
 
+func TestSSAPlanResolvesContextFreeNestedSpawn(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "literal_spawn.go", `package coroid
+var sink int
+func launch(value int) {
+	go func(argument int) { sink = argument }(value)
+}
+`)
+	launch := packageFunction(t, pkg, "launch")
+	var spawn *ssa.Go
+	for _, block := range launch.Blocks {
+		for _, instruction := range block.Instrs {
+			if candidate, ok := instruction.(*ssa.Go); ok {
+				spawn = candidate
+			}
+		}
+	}
+	if spawn == nil {
+		t.Fatal("launch has no spawn")
+	}
+	target, direct := spawn.Common().Value.(*ssa.Function)
+	if !direct || target == nil || target.Parent() != launch || len(target.FreeVars) != 0 {
+		t.Fatalf("spawn operand = %#v, want exact context-free nested function", spawn.Common().Value)
+	}
+	plan, err := AnalyzeSSA(prog, Roots{
+		{Function: launch, Demand: AsyncDemand},
+		{Function: target, Demand: AsyncDemand},
+	}, SSAConfig{
+		MaxPlainInstructions: -1,
+		ClassifyFunction: func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+			if fn == launch || fn == target {
+				return SSAFunctionPolicy{Effect: YieldOnly}, nil
+			}
+			return SSAFunctionPolicy{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, targetPlan, err := plan.ResolveClosedStaticSpawn(spawn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != target || targetPlan.Emission != EmitCoroutine ||
+		targetPlan.Primary != PrimaryCoroutine || targetPlan.FuncRep != DirectCoro ||
+		targetPlan.Demand != AsyncDemand || !targetPlan.Effect.Contains(YieldOnly) {
+		t.Fatalf("resolved target/plan = %v / %+v", resolved, targetPlan)
+	}
+}
+
 func TestSSAPlanRootsCanonicalJoinedSortedAndDefensive(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "roots.go", `package coroid
 func original() {}
@@ -515,6 +564,68 @@ func outsideFrozenUniverse() {}
 	}
 }
 
+func TestAnalyzeSSASynchronousDemandReferenceIsExactSubsetAndRetainsPlainABI(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "sync_implicit_references.go", `package coroid
+
+var channel chan int
+
+func owner() { <-channel }
+func rawCallback(p *int) int { return *p }
+func ordinaryCallback(p *int) int { return *p }
+func outside() {}
+`)
+	owner := packageFunction(t, pkg, "owner")
+	raw := packageFunction(t, pkg, "rawCallback")
+	ordinary := packageFunction(t, pkg, "ordinaryCallback")
+	outside := packageFunction(t, pkg, "outside")
+	universe, err := NewSSAEmissionUniverse(prog, []*ssa.Function{owner, raw, ordinary})
+	if err != nil {
+		t.Fatal(err)
+	}
+	all := func(fn *ssa.Function) ([]*ssa.Function, error) {
+		if fn == owner {
+			return []*ssa.Function{raw, ordinary}, nil
+		}
+		return nil, nil
+	}
+	plan, err := AnalyzeSSA(prog, Roots{{Function: owner, Demand: SyncDemand}}, SSAConfig{
+		EmissionUniverse:         universe,
+		OutcomeMode:              OutcomeExplicitStatus,
+		ClassifyDemandReferences: all,
+		ClassifySyncDemandReferences: func(fn *ssa.Function) ([]*ssa.Function, error) {
+			if fn == owner {
+				return []*ssa.Function{raw}, nil
+			}
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawPlan := functionPlanFor(t, plan, raw)
+	if rawPlan.Demand != SyncDemand || rawPlan.Effect != NoSuspend || rawPlan.Emission != EmitPlain || rawPlan.Primary != PrimaryPlain {
+		t.Fatalf("raw synchronous callback plan = %+v; want one plain ABI body", rawPlan)
+	}
+	ordinaryPlan := functionPlanFor(t, plan, ordinary)
+	if ordinaryPlan.Demand != AsyncDemand || !ordinaryPlan.Effect.Contains(OutcomeStructured) || ordinaryPlan.Emission != EmitCoroutine {
+		t.Fatalf("ordinary callback plan = %+v; non-synchronous reference lost async outcome semantics", ordinaryPlan)
+	}
+
+	_, err = AnalyzeSSA(prog, Roots{{Function: owner, Demand: SyncDemand}}, SSAConfig{
+		EmissionUniverse:         universe,
+		ClassifyDemandReferences: all,
+		ClassifySyncDemandReferences: func(fn *ssa.Function) ([]*ssa.Function, error) {
+			if fn == owner {
+				return []*ssa.Function{outside}, nil
+			}
+			return nil, nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "is not an ordinary demand reference") {
+		t.Fatalf("non-subset synchronous reference error = %v", err)
+	}
+}
+
 func TestAnalyzeSSAClassifiedLoweredCallsPropagateEffectAndAreOwnerScoped(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "lowered_calls.go", `package coroid
 
@@ -683,6 +794,375 @@ func helper() {}
 	}
 }
 
+func TestAnalyzeSSARawPlainLoweredCallPropagatesOnlyRawDemand(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "lowered_raw_plain.go", `package coroid
+var channel chan int
+func owner() {}
+func helper() { <-channel }
+`)
+	owner := packageFunction(t, pkg, "owner")
+	helper := packageFunction(t, pkg, "helper")
+	universe, err := NewSSAEmissionUniverse(prog, []*ssa.Function{owner, helper})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := AnalyzeSSA(prog, Roots{{Function: owner, Demand: SyncDemand}}, SSAConfig{
+		EmissionUniverse: universe,
+		ClassifyLoweredCalls: func(fn *ssa.Function) ([]SSALoweredCall, error) {
+			if fn == owner {
+				return []SSALoweredCall{{LogicalName: "runtime.helper", Target: helper, RawPlain: true}}, nil
+			}
+			return nil, nil
+		},
+		MaxPlainInstructions: -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ownerPlan := functionPlanFor(t, plan, owner)
+	if ownerPlan.Effect != NoSuspend || ownerPlan.ManagedDemand != SyncDemand || ownerPlan.RawPlainDemand ||
+		ownerPlan.Emission != EmitPlain || ownerPlan.Primary != PrimaryPlain || ownerPlan.FuncRep != DirectPlain {
+		t.Fatalf("raw-plain lowered-call owner = %+v, want an unpolluted managed plain body", ownerPlan)
+	}
+	helperPlan := functionPlanFor(t, plan, helper)
+	if !helperPlan.Effect.Contains(MayPark) || helperPlan.ManagedDemand != NoDemand || !helperPlan.RawPlainDemand ||
+		!helperPlan.RawPlainOnly || helperPlan.Emission != EmitRawPlain || helperPlan.Primary != PrimaryPlain || helperPlan.FuncRep != DirectPlain {
+		t.Fatalf("raw-plain lowered-call target = %+v, want raw-only demand without managed propagation", helperPlan)
+	}
+
+	record, ok := plan.ResolveLoweredCallRecord(owner, "runtime.helper")
+	if !ok || record.LogicalName != "runtime.helper" || record.Target != helper || !record.RawPlain || record.UnwindOnly || record.ExplicitStatusElided {
+		t.Fatalf("ResolveLoweredCallRecord(runtime.helper) = %+v, %v", record, ok)
+	}
+	record.Target = owner
+	record.RawPlain = false
+	again, ok := plan.ResolveLoweredCallRecord(owner, "runtime.helper")
+	if !ok || again.Target != helper || !again.RawPlain {
+		t.Fatalf("mutating resolved record changed frozen plan: %+v, %v", again, ok)
+	}
+	if target, ok := plan.ResolveLoweredCall(owner, "runtime.helper"); !ok || target != helper {
+		t.Fatalf("compatibility target resolver = %v, %v", target, ok)
+	}
+	if _, ok := plan.ResolveLoweredCallRecord(owner, "runtime.missing"); ok {
+		t.Fatal("missing raw-plain lowered-call record unexpectedly resolved")
+	}
+}
+
+func TestAnalyzeSSAExplicitStatusOutcomeAwareLoweredCalls(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "lowered_explicit_outcome.go", `package coroid
+func owner() {}
+func direct() {}
+func unwind() {}
+func sourcePanicHelper() {}
+`)
+	owner := packageFunction(t, pkg, "owner")
+	direct := packageFunction(t, pkg, "direct")
+	unwind := packageFunction(t, pkg, "unwind")
+	sourcePanicHelper := packageFunction(t, pkg, "sourcePanicHelper")
+	universe, err := NewSSAEmissionUniverse(prog, []*ssa.Function{owner, direct, unwind, sourcePanicHelper})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := AnalyzeSSA(prog, Roots{{Function: owner, Demand: AsyncDemand}}, SSAConfig{
+		EmissionUniverse: universe,
+		OutcomeMode:      OutcomeExplicitStatus,
+		ClassifyLoweredCalls: func(fn *ssa.Function) ([]SSALoweredCall, error) {
+			if fn != owner {
+				return nil, nil
+			}
+			return []SSALoweredCall{
+				{LogicalName: "runtime.direct", Target: direct},
+				{LogicalName: "runtime.sourcePanic", Target: sourcePanicHelper, UnwindOnly: true, ExplicitStatusElided: true},
+				{LogicalName: "runtime.unwind", Target: unwind, UnwindOnly: true},
+			}, nil
+		},
+		MaxPlainInstructions: -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerPlan := functionPlanFor(t, plan, owner)
+	if ownerPlan.Demand != AsyncDemand || !ownerPlan.Effect.Contains(OutcomeStructured|AwaitStructured) ||
+		ownerPlan.Emission != EmitCoroutine || ownerPlan.Primary != PrimaryCoroutine || ownerPlan.FuncRep != DirectCoro {
+		t.Fatalf("ExplicitStatus owner plan = %+v", ownerPlan)
+	}
+	for _, target := range []*ssa.Function{direct, unwind} {
+		got := functionPlanFor(t, plan, target)
+		if got.Demand != AsyncDemand || got.Effect != OutcomeStructured || got.Emission != EmitCoroutine ||
+			got.Primary != PrimaryCoroutine || got.FuncRep != DirectCoro {
+			t.Fatalf("outcome-aware lowered target %s = %+v", target.Name(), got)
+		}
+	}
+	panicHelperPlan := functionPlanFor(t, plan, sourcePanicHelper)
+	if panicHelperPlan.Demand != NoDemand || panicHelperPlan.ManagedDemand != NoDemand || panicHelperPlan.RawPlainDemand || panicHelperPlan.Effect != NoSuspend ||
+		panicHelperPlan.Emission != EmitNone || panicHelperPlan.Primary != PrimaryPlain || panicHelperPlan.FuncRep != DirectPlain {
+		t.Fatalf("source-panic helper plan = %+v", panicHelperPlan)
+	}
+	if got := plan.LoweredCalls(owner); len(got) != 3 || !got[1].ExplicitStatusElided || !got[1].UnwindOnly {
+		t.Fatalf("frozen ExplicitStatus lowered calls = %+v", got)
+	}
+}
+
+func TestAnalyzeSSAExplicitStatusElidedLoweredCallRequiresUnwindOnly(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "lowered_explicit_outcome_invalid.go", `package coroid
+func owner() {}
+func helper() {}
+`)
+	owner := packageFunction(t, pkg, "owner")
+	helper := packageFunction(t, pkg, "helper")
+	universe, err := NewSSAEmissionUniverse(prog, []*ssa.Function{owner, helper})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = AnalyzeSSA(prog, Roots{{Function: owner, Demand: AsyncDemand}}, SSAConfig{
+		EmissionUniverse: universe,
+		OutcomeMode:      OutcomeExplicitStatus,
+		ClassifyLoweredCalls: func(fn *ssa.Function) ([]SSALoweredCall, error) {
+			if fn == owner {
+				return []SSALoweredCall{{LogicalName: "runtime.helper", Target: helper, ExplicitStatusElided: true}}, nil
+			}
+			return nil, nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "ExplicitStatus-elided but not unwind-only") {
+		t.Fatalf("invalid ExplicitStatus-elided lowered call error = %v", err)
+	}
+}
+
+func TestAnalyzeSSAExplicitStatusPreservesCertifiedSynchronousFunctionAddresses(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "explicit_sync_function_address.go", `package coroid
+type Direct func()
+func directTarget() {}
+func rawTarget() {}
+func consumeDirect(Direct) {}
+func consumeRaw(any) {}
+func owner() {
+	consumeDirect(Direct(directTarget))
+	consumeRaw(rawTarget)
+}
+`)
+	owner := packageFunction(t, pkg, "owner")
+	directTarget := packageFunction(t, pkg, "directTarget")
+	rawTarget := packageFunction(t, pkg, "rawTarget")
+	plan, err := AnalyzeSSA(prog, Roots{{Function: owner, Demand: AsyncDemand}}, SSAConfig{
+		OutcomeMode: OutcomeExplicitStatus,
+		ClassifyDirectPlainCallArgument: func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+			return caller == owner && call.Common().StaticCallee() == packageFunction(t, pkg, "consumeDirect") && argument == 0, nil
+		},
+		ClassifyRawFunctionAddressCallArgument: func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+			return caller == owner && call.Common().StaticCallee() == packageFunction(t, pkg, "consumeRaw") && argument == 0, nil
+		},
+		MaxPlainInstructions: -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := functionPlanFor(t, plan, owner); got.Demand != AsyncDemand || got.Emission != EmitCoroutine || !got.Effect.Contains(OutcomeStructured) {
+		t.Fatalf("ExplicitStatus owner = %+v", got)
+	}
+	if got := functionPlanFor(t, plan, directTarget); got.ManagedDemand != SyncDemand || got.RawPlainDemand || got.Emission != EmitPlain || got.RawPlainOnly {
+		t.Fatalf("certified managed synchronous target = %+v", got)
+	}
+	if got := functionPlanFor(t, plan, rawTarget); got.ManagedDemand != NoDemand || !got.RawPlainDemand || got.Emission != EmitRawPlain || !got.RawPlainOnly ||
+		got.Primary != PrimaryPlain || got.FuncRep != DirectPlain {
+		t.Fatalf("certified raw synchronous target = %+v", got)
+	}
+}
+
+func TestAnalyzeSSAConditionalManagedStoreDoesNotActivateDormantDispatch(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "raw_plain_closed_store.go", `package coroid
+var optional func()
+func target() {}
+func other() {}
+func publish() { optional = target }
+func callOptional() { optional() }
+func use() { publish(); callOptional() }
+`)
+	target := packageFunction(t, pkg, "target")
+	other := packageFunction(t, pkg, "other")
+	publish := packageFunction(t, pkg, "publish")
+	callOptional := packageFunction(t, pkg, "callOptional")
+	use := packageFunction(t, pkg, "use")
+	var publication *ssa.Store
+	for _, block := range publish.Blocks {
+		for _, instruction := range block.Instrs {
+			store, ok := instruction.(*ssa.Store)
+			if ok && store.Val == target {
+				publication = store
+			}
+		}
+	}
+	if publication == nil {
+		t.Fatal("publish has no direct target Store")
+	}
+	classifyStore := func(owner *ssa.Function, store *ssa.Store) (*ssa.Function, bool, error) {
+		if owner == publish && store == publication {
+			return target, true, nil
+		}
+		return nil, false, nil
+	}
+	dormant, err := AnalyzeSSA(prog, Roots{{Function: publish, Demand: AsyncDemand}}, SSAConfig{
+		MaxPlainInstructions:                     -1,
+		ClassifyConditionalManagedStoreReference: classifyStore,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := functionPlanFor(t, dormant, target)
+	if got.ManagedDemand != NoDemand || got.RawPlainDemand || got.RawPlainOnly ||
+		got.Emission != EmitNone || got.FuncRep != Dispatch || dormant.HasRawPlainVariant(target) {
+		t.Fatalf("dormant conditional Store target = %+v, variant=%t", got, dormant.HasRawPlainVariant(target))
+	}
+	if plannedTarget, ok := dormant.ConditionalManagedStoreTarget(publication); !ok || plannedTarget != target ||
+		!dormant.ElidesConditionalManagedStore(publication) {
+		t.Fatalf("dormant conditional Store target/elision = %v, %t/%t", plannedTarget, ok, dormant.ElidesConditionalManagedStore(publication))
+	}
+	if caller := functionPlanFor(t, dormant, callOptional); caller.Emission != EmitNone {
+		t.Fatalf("dormant global-slot caller = %+v, want EmitNone", caller)
+	}
+	valuePlan, planned := dormant.ValuePlan(target)
+	if !planned || len(valuePlan.Funcs) != 1 || valuePlan.Funcs[0].Rep != Dispatch {
+		t.Fatalf("closed Store value plan = %+v/%t, want retained Dispatch boundary", valuePlan, planned)
+	}
+
+	var dynamicCall ssa.CallInstruction
+	for _, block := range callOptional.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(ssa.CallInstruction)
+			if ok && call.Common() != nil && call.Common().StaticCallee() == nil {
+				dynamicCall = call
+			}
+		}
+	}
+	if dynamicCall == nil {
+		t.Fatal("callOptional has no dynamic call")
+	}
+	active, err := AnalyzeSSA(prog, Roots{{Function: use, Demand: AsyncDemand}}, SSAConfig{
+		MaxPlainInstructions:                     -1,
+		ClassifyConditionalManagedStoreReference: classifyStore,
+		ClassifyClosedDynamicCall: func(_ *ssa.Function, call ssa.CallInstruction) (SSAClosedDynamicCallCertificate, bool, error) {
+			if call == dynamicCall {
+				return SSAClosedDynamicCallCertificate{Targets: []*ssa.Function{target}, MayBeNil: true}, true, nil
+			}
+			return SSAClosedDynamicCallCertificate{}, false, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = functionPlanFor(t, active, target)
+	if got.ManagedDemand == NoDemand || got.RawPlainDemand || got.RawPlainOnly ||
+		got.Emission != EmitPlain || got.FuncRep != Dispatch {
+		t.Fatalf("active closed Store target = %+v", got)
+	}
+	if active.ElidesConditionalManagedStore(publication) {
+		t.Fatal("active conditional Store was incorrectly elided")
+	}
+
+	_, err = AnalyzeSSA(prog, Roots{{Function: publish, Demand: AsyncDemand}}, SSAConfig{
+		MaxPlainInstructions: -1,
+		ClassifyConditionalManagedStoreReference: func(owner *ssa.Function, store *ssa.Store) (*ssa.Function, bool, error) {
+			if owner == publish && store == publication {
+				return other, true, nil
+			}
+			return nil, false, nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not carry certified target") {
+		t.Fatalf("mismatched conditional Store target error = %v", err)
+	}
+}
+
+func TestAnalyzeSSAStaticCodeAddressObservationDoesNotDemandPlainEntry(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "static_code_address.go", `package coroid
+var channel chan int
+func codeTarget() { <-channel }
+func observePC(any) uintptr { return 0 }
+func owner() uintptr { return observePC(codeTarget) }
+`)
+	owner := packageFunction(t, pkg, "owner")
+	target := packageFunction(t, pkg, "codeTarget")
+	observer := packageFunction(t, pkg, "observePC")
+	var observedCall ssa.CallInstruction
+	for _, block := range owner.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(ssa.CallInstruction)
+			if ok && call.Common() != nil && call.Common().StaticCallee() == observer {
+				observedCall = call
+			}
+		}
+	}
+	if observedCall == nil {
+		t.Fatal("owner has no observePC call")
+	}
+	plan, err := AnalyzeSSA(prog, Roots{{Function: owner, Demand: AsyncDemand}}, SSAConfig{
+		ClassifyStaticCodeAddressCallArgument: func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+			return caller == owner && call == observedCall && argument == 0, nil
+		},
+		MaxPlainInstructions: -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.StaticCodeAddressArgument(observedCall, 0) || plan.RawFunctionAddressArgument(observedCall, 0) {
+		t.Fatal("code-address observation was not kept distinct from a raw invocation capability")
+	}
+	got := functionPlanFor(t, plan, target)
+	if got.Demand != AsyncDemand || got.Emission != EmitCoroutine || got.Primary != PrimaryCoroutine || got.FuncRep != DirectCoro {
+		t.Fatalf("observed suspending target = %+v; want one async direct coroutine entry", got)
+	}
+}
+
+func TestAnalyzeSSAStaticCodeAddressOnlyTargetDoesNotEnterManagedCHA(t *testing.T) {
+	for _, test := range []struct {
+		name                string
+		ordinaryPublication string
+		wantRep             FuncRep
+	}{
+		{name: "code address only", wantRep: DirectCoro},
+		{
+			name: "ordinary publication remains managed",
+			ordinaryPublication: `
+var published func()
+func publish() { published = codeTarget }
+`,
+			wantRep: Dispatch,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			prog, pkg := buildCoroTestSSA(t, "static_code_address_cha.go", `package coroid
+var channel chan int
+func codeTarget() { <-channel }
+func observePC(any) uintptr { return 0 }
+func owner() uintptr { return observePC(codeTarget) }
+func dormant(callback func()) { callback() }
+`+test.ordinaryPublication)
+			owner := packageFunction(t, pkg, "owner")
+			target := packageFunction(t, pkg, "codeTarget")
+			observer := packageFunction(t, pkg, "observePC")
+			observedCall := onlyNonBuiltinCall(t, owner)
+			plan, err := AnalyzeSSA(prog, Roots{{Function: owner, Demand: AsyncDemand}}, SSAConfig{
+				DynamicResolution: DynamicCHAOpen,
+				ClassifyStaticCodeAddressCallArgument: func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+					return caller == owner && call == observedCall && call.Common().StaticCallee() == observer && argument == 0, nil
+				},
+				MaxPlainInstructions: -1,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := functionPlanFor(t, plan, target)
+			if got.FuncRep != test.wantRep {
+				t.Fatalf("code-address target plan = %+v; want representation %s", got, test.wantRep)
+			}
+			if got.ManagedDemand != AsyncDemand || got.Primary != PrimaryCoroutine || got.Emission != EmitCoroutine {
+				t.Fatalf("code-address target plan = %+v; want one asynchronously retained coroutine primary", got)
+			}
+		})
+	}
+}
+
 func TestAnalyzeSSAClassifiedLoweredCallsFailClosed(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "lowered_calls_invalid.go", `package coroid
 func owner() {}
@@ -705,6 +1185,8 @@ func alias() {}
 		{name: "nil target", calls: []SSALoweredCall{{LogicalName: "runtime.nil"}}, want: "nil target"},
 		{name: "duplicate name", calls: []SSALoweredCall{{LogicalName: "runtime.same", Target: helper}, {LogicalName: "runtime.same", Target: helper}}, want: "duplicated"},
 		{name: "alias", calls: []SSALoweredCall{{LogicalName: "runtime.alias", Target: alias}}, want: "not the exact canonical function"},
+		{name: "raw plain unwind only", calls: []SSALoweredCall{{LogicalName: "runtime.raw", Target: helper, RawPlain: true, UnwindOnly: true}}, want: "both raw-plain and unwind-only"},
+		{name: "raw plain ExplicitStatus elided", calls: []SSALoweredCall{{LogicalName: "runtime.raw", Target: helper, RawPlain: true, ExplicitStatusElided: true}}, want: "both raw-plain and ExplicitStatus-elided"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -947,12 +1429,102 @@ func explicitPreempt() { for {} }
 	}
 	recursivePlan := functionPlanFor(t, plan, recursive)
 	if !recursivePlan.Recursive || !recursivePlan.Exec.Contains(NeedsPreempt) ||
-		!recursivePlan.Effect.Contains(YieldOnly) || recursivePlan.Emission != EmitCoroutine {
+		recursivePlan.TrustedBoundedRecursion || !recursivePlan.Effect.Contains(YieldOnly) || recursivePlan.Emission != EmitCoroutine {
 		t.Fatalf("recursive trusted plan = %+v, want recursion preemption preserved", recursivePlan)
 	}
 	explicit := functionPlanFor(t, plan, explicitPreempt)
 	if !explicit.Exec.Contains(NeedsPreempt) || !explicit.Effect.Contains(YieldOnly) || explicit.Emission != EmitCoroutine {
 		t.Fatalf("explicit trusted preemption plan = %+v, want declared preemption preserved", explicit)
+	}
+}
+
+func TestAnalyzeSSATrustedBoundedRecursionIsWholeSCCAndNarrow(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "trusted_bounded_recursion.go", `package coroid
+var channel chan int
+
+func completeA() { completeB() }
+func completeB() { completeA() }
+
+func partialA() { partialB() }
+func partialB() { partialA() }
+
+func scannerA(n int) {
+	for n > 0 { n-- }
+	scannerB(n)
+}
+func scannerB(n int) { scannerA(n) }
+
+func explicitA() { explicitB() }
+func explicitB() { explicitA() }
+
+func waitsA() { waitsB() }
+func waitsB() { <-channel; waitsA() }
+`)
+	functions := make(map[string]*ssa.Function)
+	for _, name := range []string{
+		"completeA", "completeB", "partialA", "partialB", "scannerA", "scannerB",
+		"explicitA", "explicitB", "waitsA", "waitsB",
+	} {
+		functions[name] = packageFunction(t, pkg, name)
+	}
+	roots := make(Roots, 0, 5)
+	for _, name := range []string{"completeA", "partialA", "scannerA", "explicitA", "waitsA"} {
+		roots = append(roots, Root{Function: functions[name], Demand: AsyncDemand})
+	}
+	plan, err := AnalyzeSSA(prog, roots, SSAConfig{
+		ClassifyFunction: func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+			switch fn.Name() {
+			case "partialB":
+				return SSAFunctionPolicy{}, nil
+			case "explicitA":
+				return SSAFunctionPolicy{TrustedBoundedRecursion: true, Exec: NeedsPreempt}, nil
+			case "completeA", "completeB", "partialA", "scannerA", "scannerB",
+				"explicitB", "waitsA", "waitsB":
+				return SSAFunctionPolicy{TrustedBoundedRecursion: true}, nil
+			default:
+				return SSAFunctionPolicy{}, nil
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"completeA", "completeB"} {
+		got := functionPlanFor(t, plan, functions[name])
+		if !got.Recursive || !got.TrustedBoundedRecursion || got.Effect != NoSuspend ||
+			got.Exec.Contains(NeedsPreempt) || got.Emission != EmitPlain {
+			t.Fatalf("%s plan = %+v, want complete certified SCC to remain plain", name, got)
+		}
+	}
+	for _, name := range []string{"partialA", "partialB"} {
+		got := functionPlanFor(t, plan, functions[name])
+		if !got.Recursive || got.TrustedBoundedRecursion || !got.LocalEffect.Contains(YieldOnly) ||
+			!got.LocalExec.Contains(NeedsPreempt) || got.Emission != EmitCoroutine {
+			t.Fatalf("%s plan = %+v, want partial SCC certification to fail closed", name, got)
+		}
+	}
+	scannerA := functionPlanFor(t, plan, functions["scannerA"])
+	scannerB := functionPlanFor(t, plan, functions["scannerB"])
+	if !scannerA.TrustedBoundedRecursion || !scannerA.LocalExec.Contains(NeedsPreempt) ||
+		!scannerA.LocalEffect.Contains(YieldOnly) || scannerA.Emission != EmitCoroutine {
+		t.Fatalf("scannerA plan = %+v, scanner preemption seed was cleared", scannerA)
+	}
+	if !scannerB.TrustedBoundedRecursion || scannerB.LocalExec.Contains(NeedsPreempt) ||
+		scannerB.LocalEffect.Contains(YieldOnly) || scannerB.Emission != EmitCoroutine {
+		t.Fatalf("scannerB plan = %+v, want only propagated scanner effect", scannerB)
+	}
+	explicitA := functionPlanFor(t, plan, functions["explicitA"])
+	if !explicitA.TrustedBoundedRecursion || !explicitA.DeclaredExec.Contains(NeedsPreempt) ||
+		!explicitA.LocalExec.Contains(NeedsPreempt) || !explicitA.LocalEffect.Contains(YieldOnly) ||
+		explicitA.Emission != EmitCoroutine {
+		t.Fatalf("explicitA plan = %+v, explicit NeedsPreempt was cleared", explicitA)
+	}
+	for _, name := range []string{"waitsA", "waitsB"} {
+		got := functionPlanFor(t, plan, functions[name])
+		if !got.TrustedBoundedRecursion || !got.Effect.Contains(MayPark) || got.Emission != EmitCoroutine {
+			t.Fatalf("%s plan = %+v, real suspend effect was cleared", name, got)
+		}
 	}
 }
 
@@ -1336,6 +1908,315 @@ func spawned(fn func()) { go fn() }
 	}
 }
 
+func TestAnalyzeSSAUnknownManagedDispatchCallPlans(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "managed_dispatch.go", `package coroid
+func direct(fn func()) { fn() }
+func deferred(fn func()) { defer fn() }
+func spawned(fn func()) { go fn() }
+`)
+	direct := packageFunction(t, pkg, "direct")
+	deferred := packageFunction(t, pkg, "deferred")
+	spawned := packageFunction(t, pkg, "spawned")
+
+	plan, err := AnalyzeSSA(prog, Roots{
+		{Function: direct, Demand: SyncDemand},
+		{Function: deferred, Demand: SyncDemand},
+		{Function: spawned, Demand: SyncDemand},
+	}, SSAConfig{
+		ClassifyUnknownCall: func(*ssa.Function, ssa.CallInstruction) (UnknownTarget, error) {
+			return UnknownManagedDispatch, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for fn, wantKind := range map[*ssa.Function]CallKind{
+		direct:   CallDirect,
+		deferred: CallDefer,
+		spawned:  CallSpawn,
+	} {
+		call := onlyNonBuiltinCall(t, fn)
+		callPlan, ok := plan.CallPlan(call)
+		if !ok {
+			t.Fatalf("%s has no CallPlan", fn.Name())
+		}
+		if callPlan.Kind != wantKind || callPlan.Rep != Dispatch || !callPlan.Open ||
+			callPlan.Unresolved != UnknownManagedDispatch || !callPlan.MayBeNil {
+			t.Fatalf("%s CallPlan = %+v, want open managed descriptor dispatch", fn.Name(), callPlan)
+		}
+		functionPlan := functionPlanFor(t, plan, fn)
+		if functionPlan.Exec.Contains(OpaqueExec | IRQUnsafe) {
+			t.Fatalf("%s execution plan is opaque or foreign: %+v", fn.Name(), functionPlan)
+		}
+		if wantKind == CallSpawn {
+			if functionPlan.Effect != NoSuspend || functionPlan.Emission != EmitPlain {
+				t.Fatalf("spawned managed descriptor polluted caller: %+v", functionPlan)
+			}
+		} else if functionPlan.Effect != AwaitStructured || functionPlan.Emission != EmitCoroutine {
+			t.Fatalf("%s plan = %+v, want structured-await coroutine", fn.Name(), functionPlan)
+		}
+	}
+}
+
+func TestAnalyzeSSAUnknownManagedInterfaceDispatchIsDistinctStructuredTransport(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "managed_interface_dispatch.go", `package coroid
+type matcher interface { As(any) bool }
+func invoke(value matcher, target any) bool { return value.As(target) }
+func dynamic(callback func()) { callback() }
+`)
+	invoke := packageFunction(t, pkg, "invoke")
+	dynamic := packageFunction(t, pkg, "dynamic")
+	interfaceCall := onlyNonBuiltinCall(t, invoke)
+	dynamicCall := onlyNonBuiltinCall(t, dynamic)
+
+	plan, err := AnalyzeSSA(prog, Roots{{Function: invoke, Demand: AsyncDemand}}, SSAConfig{
+		DynamicResolution:    DynamicUnknownOnly,
+		MaxPlainInstructions: -1,
+		ClassifyUnknownCall: func(_ *ssa.Function, call ssa.CallInstruction) (UnknownTarget, error) {
+			if call == interfaceCall {
+				return UnknownManagedInterfaceDispatch, nil
+			}
+			return UnknownManaged, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	callPlan, ok := plan.CallPlan(interfaceCall)
+	if !ok || callPlan.Kind != CallDirect || callPlan.Rep != Dispatch || !callPlan.Open ||
+		callPlan.Unresolved != UnknownManagedInterfaceDispatch || !callPlan.MayBeNil || len(callPlan.Targets) != 0 {
+		t.Fatalf("managed interface CallPlan = %+v, present=%t", callPlan, ok)
+	}
+	functionPlan := functionPlanFor(t, plan, invoke)
+	if functionPlan.LocalEffect != AwaitStructured || functionPlan.Effect != AwaitStructured ||
+		functionPlan.Exec.Contains(OpaqueExec|IRQUnsafe) {
+		t.Fatalf("managed interface owner = %+v, want exact structured await", functionPlan)
+	}
+
+	_, err = AnalyzeSSA(prog, Roots{{Function: invoke, Demand: AsyncDemand}}, SSAConfig{
+		ClassifyUnknownCall: func(*ssa.Function, ssa.CallInstruction) (UnknownTarget, error) {
+			return UnknownManagedDispatch, nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "distinct UnknownManagedInterfaceDispatch") {
+		t.Fatalf("function-value certificate on interface invoke error = %v", err)
+	}
+	_, err = AnalyzeSSA(prog, Roots{{Function: dynamic, Demand: AsyncDemand}}, SSAConfig{
+		ClassifyUnknownCall: func(_ *ssa.Function, call ssa.CallInstruction) (UnknownTarget, error) {
+			if call == dynamicCall {
+				return UnknownManagedInterfaceDispatch, nil
+			}
+			return UnknownManaged, nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "requires an ordinary interface invoke") {
+		t.Fatalf("interface certificate on function-value call error = %v", err)
+	}
+}
+
+func TestSSAPlanResolvesCapturedClosureManagedDispatchSpawn(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "managed_spawn.go", `package coroid
+var sink int
+func launch(value int) {
+	go func(delta int) { sink = value + delta }(value + 1)
+}
+`)
+	launch := packageFunction(t, pkg, "launch")
+	var spawn *ssa.Go
+	var target *ssa.Function
+	for _, block := range launch.Blocks {
+		for _, instruction := range block.Instrs {
+			candidate, ok := instruction.(*ssa.Go)
+			if !ok {
+				continue
+			}
+			spawn = candidate
+			closure, ok := candidate.Common().Value.(*ssa.MakeClosure)
+			if !ok {
+				t.Fatalf("captured spawn callee = %T, want *ssa.MakeClosure", candidate.Common().Value)
+			}
+			target, ok = closure.Fn.(*ssa.Function)
+			if !ok {
+				t.Fatalf("captured spawn target = %T, want *ssa.Function", closure.Fn)
+			}
+		}
+	}
+	if spawn == nil || target == nil {
+		t.Fatal("captured closure spawn is absent from SSA")
+	}
+
+	plan, err := AnalyzeSSA(prog, Roots{{Function: launch, Demand: AsyncDemand}}, SSAConfig{
+		MaxPlainInstructions: -1,
+		ClassifyFunction: func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+			if fn == launch || fn == target {
+				return SSAFunctionPolicy{Effect: YieldOnly}, nil
+			}
+			return SSAFunctionPolicy{}, nil
+		},
+		ClassifyUnknownCall: func(_ *ssa.Function, call ssa.CallInstruction) (UnknownTarget, error) {
+			if call == spawn {
+				return UnknownManagedDispatch, nil
+			}
+			return UnknownManaged, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	callPlan, err := plan.ResolveManagedDispatchSpawn(spawn)
+	if err != nil {
+		t.Fatalf("resolve captured managed descriptor spawn: %v", err)
+	}
+	if callPlan.Kind != CallSpawn || callPlan.Rep != Dispatch || callPlan.Open || len(callPlan.Targets) != 1 {
+		t.Fatalf("captured managed spawn CallPlan = %+v", callPlan)
+	}
+	targetPlan := functionPlanFor(t, plan, target)
+	if targetPlan.Emission != EmitCoroutine || targetPlan.Primary != PrimaryCoroutine ||
+		targetPlan.FuncRep != Dispatch || targetPlan.Demand != AsyncDemand || !targetPlan.Effect.Contains(YieldOnly) {
+		t.Fatalf("captured managed spawn target = %+v", targetPlan)
+	}
+
+	plainOnly, err := AnalyzeSSA(prog, Roots{{Function: launch, Demand: AsyncDemand}}, SSAConfig{
+		MaxPlainInstructions: -1,
+		ClassifyFunction: func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+			if fn == launch {
+				return SSAFunctionPolicy{Effect: YieldOnly}, nil
+			}
+			return SSAFunctionPolicy{}, nil
+		},
+		ClassifyUnknownCall: func(_ *ssa.Function, call ssa.CallInstruction) (UnknownTarget, error) {
+			if call == spawn {
+				return UnknownManagedDispatch, nil
+			}
+			return UnknownManaged, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plainOnly.ResolveManagedDispatchSpawn(spawn); err == nil ||
+		!strings.Contains(err.Error(), "not one demanded preemptible coroutine descriptor") {
+		t.Fatalf("plain-only descriptor spawn resolution = %v", err)
+	}
+}
+
+func TestSSAPlanResolvesCHAClosedManagedSpawnWithOpenValueSubset(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "managed_spawn_cha_closed.go", `package coroid
+func first() {}
+func second() {}
+func launch(fn func(), replace bool) {
+	if replace { fn = first }
+	go fn()
+}
+func seed() { launch(second, false) }
+`)
+	launch := packageFunction(t, pkg, "launch")
+	first := packageFunction(t, pkg, "first")
+	var spawn *ssa.Go
+	for _, block := range launch.Blocks {
+		for _, instruction := range block.Instrs {
+			if candidate, ok := instruction.(*ssa.Go); ok {
+				spawn = candidate
+			}
+		}
+	}
+	if spawn == nil {
+		t.Fatal("dynamic spawn is absent from SSA")
+	}
+
+	plan, err := AnalyzeSSA(prog, Roots{
+		{Function: launch, Demand: AsyncDemand},
+		// The same descriptor may also have a synchronous consumer. Spawn selects
+		// its coroutine primary; BothDemand must not invalidate that entry.
+		{Function: first, Demand: SyncDemand},
+	}, SSAConfig{
+		DynamicResolution:    DynamicCHAClosed,
+		MaxPlainInstructions: -1,
+		ClassifyFunction: func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+			if fn == launch || fn.Signature != nil && types.Identical(fn.Signature, spawn.Common().Signature()) {
+				return SSAFunctionPolicy{Effect: YieldOnly}, nil
+			}
+			return SSAFunctionPolicy{}, nil
+		},
+		ClassifyUnknownCall: func(_ *ssa.Function, call ssa.CallInstruction) (UnknownTarget, error) {
+			if call == spawn {
+				return UnknownManagedDispatch, nil
+			}
+			return UnknownManaged, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	callPlan, ok := plan.CallPlan(spawn)
+	if !ok || callPlan.Kind != CallSpawn || callPlan.Rep != Dispatch || callPlan.Open ||
+		!callPlan.MayBeNil || len(callPlan.Targets) < 2 {
+		t.Fatalf("CHA-closed spawn CallPlan = %+v, present=%t; want closed nullable multi-target Dispatch", callPlan, ok)
+	}
+	valuePlan, ok := plan.ValuePlan(spawn.Common().Value)
+	if !ok || len(valuePlan.Funcs) != 1 || valuePlan.Funcs[0].Rep != Dispatch ||
+		!valuePlan.Funcs[0].MayBeNil || len(valuePlan.Funcs[0].Targets) != 1 {
+		t.Fatalf("open callee ValuePlan = %+v, present=%t; want nullable one-target structural subset", valuePlan, ok)
+	}
+	firstID, ok := plan.FunctionID(first)
+	if !ok || valuePlan.Funcs[0].Targets[0] != firstID {
+		t.Fatalf("open callee structural targets = %v, want [%s]", valuePlan.Funcs[0].Targets, firstID)
+	}
+	if got := functionPlanFor(t, plan, first); got.Demand != BothDemand ||
+		got.Emission != EmitCoroutine || got.Primary != PrimaryCoroutine || got.FuncRep != Dispatch {
+		t.Fatalf("synchronously reused spawn descriptor = %+v, want BothDemand coroutine primary", got)
+	}
+	if _, err := plan.ResolveManagedDispatchSpawn(spawn); err != nil {
+		t.Fatalf("resolve CHA-closed managed spawn with a strict ValuePlan subset: %v", err)
+	}
+}
+
+func TestAnalyzeSSAClosedManagedDescriptorIsStructuredBoundary(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "closed_managed_dispatch.go", `package coroid
+var gate chan struct{}
+func plain() {}
+func asynchronous() { <-gate }
+func apply(fn func()) { fn() }
+func root(flag bool) {
+	fn := plain
+	if flag { fn = asynchronous }
+	apply(fn)
+}
+`)
+	apply := packageFunction(t, pkg, "apply")
+	root := packageFunction(t, pkg, "root")
+	asynchronous := packageFunction(t, pkg, "asynchronous")
+
+	plan, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: SyncDemand}}, SSAConfig{
+		DynamicResolution:    DynamicCHAClosed,
+		MaxPlainInstructions: -1,
+		ClassifyUnknownCall: func(_ *ssa.Function, call ssa.CallInstruction) (UnknownTarget, error) {
+			if call.Parent() == apply {
+				return UnknownManagedDispatch, nil
+			}
+			return UnknownManaged, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := onlyNonBuiltinCall(t, apply)
+	callPlan, ok := plan.CallPlan(call)
+	if !ok || callPlan.Rep != Dispatch || callPlan.Open || len(callPlan.Targets) != 2 {
+		t.Fatalf("closed managed CallPlan = %+v, present=%t", callPlan, ok)
+	}
+	applyPlan := functionPlanFor(t, plan, apply)
+	if applyPlan.LocalEffect != AwaitStructured || applyPlan.Effect != AwaitStructured || applyPlan.Exec.IsOpaque() {
+		t.Fatalf("closed managed caller = %+v, want isolated structured await", applyPlan)
+	}
+	asyncPlan := functionPlanFor(t, plan, asynchronous)
+	if !asyncPlan.Effect.Contains(MayPark) || asyncPlan.Demand == NoDemand {
+		t.Fatalf("descriptor target lost independent demand/effect = %+v", asyncPlan)
+	}
+}
+
 func TestAnalyzeSSAFrontendElidedStaticCall(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "elided.go", `package coroid
 func target() {}
@@ -1461,6 +2342,112 @@ func TestAnalyzeSSAValidation(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "invalid unknown target") {
 		t.Fatalf("invalid unknown target error = %v", err)
+	}
+}
+
+func TestAnalyzeSSARawPlainVariantKeepsCapturedBodyInternal(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "raw_plain_variant.go", `package coroid
+func root(seed int) int {
+	callback := func(value int) int { return seed + value }
+	return callback(2)
+}
+`)
+	root := packageFunction(t, pkg, "root")
+	if len(root.AnonFuncs) != 1 || len(root.AnonFuncs[0].FreeVars) != 1 {
+		t.Fatalf("captured closure shape = %+v", root.AnonFuncs)
+	}
+	captured := root.AnonFuncs[0]
+	plan, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: SyncDemand}}, SSAConfig{
+		MaxPlainInstructions: -1,
+		ClassifyFunction: func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+			switch fn {
+			case root:
+				return SSAFunctionPolicy{Effect: YieldOnly, RawPlainEntry: true}, nil
+			case captured:
+				return SSAFunctionPolicy{Effect: YieldOnly, RawPlainVariant: true}, nil
+			default:
+				return SSAFunctionPolicy{}, nil
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootPlan := functionPlanFor(t, plan, root)
+	if !rootPlan.RawPlainEntry || !plan.HasRawPlainVariant(root) || rootPlan.Emission != EmitCoroutine {
+		t.Fatalf("physical raw root plan = %+v, variant=%t", rootPlan, plan.HasRawPlainVariant(root))
+	}
+	capturedPlan := functionPlanFor(t, plan, captured)
+	if capturedPlan.RawPlainEntry || !plan.HasRawPlainVariant(captured) || capturedPlan.Emission != EmitCoroutine {
+		t.Fatalf("captured internal raw plan = %+v, variant=%t; want variant without address capability", capturedPlan, plan.HasRawPlainVariant(captured))
+	}
+
+	_, err = AnalyzeSSA(prog, Roots{{Function: root, Demand: SyncDemand}}, SSAConfig{
+		ClassifyFunction: func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+			if fn == captured {
+				return SSAFunctionPolicy{RawPlainEntry: true}, nil
+			}
+			return SSAFunctionPolicy{}, nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "RawPlainEntry requires a non-capturing body") {
+		t.Fatalf("captured raw address publication error = %v", err)
+	}
+}
+
+func TestAnalyzeSSARawPlainRootPropagatesThroughHelperToSchedulerWait(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "raw_plain_schedulerwait.go", `package coroid
+func schedulerwait() {}
+func helper() { schedulerwait() }
+func root() { helper() }
+`)
+	root := packageFunction(t, pkg, "root")
+	helper := packageFunction(t, pkg, "helper")
+	wait := packageFunction(t, pkg, "schedulerwait")
+	plan, err := AnalyzeSSA(prog, Roots{{Function: root, RawPlainDemand: true}}, SSAConfig{
+		MaxPlainInstructions: -1,
+		ClassifyFunction: func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+			if fn == wait {
+				return SSAFunctionPolicy{
+					Exec: BlockForeign | IRQUnsafe, External: ExternalUnknownForeign, OverrideExternal: true, IgnoreBody: true,
+					ForeignSchedulerWaitCertificate: "test.schedulerwait.v1",
+				}, nil
+			}
+			return SSAFunctionPolicy{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fn := range []*ssa.Function{root, helper} {
+		got := functionPlanFor(t, plan, fn)
+		if got.ManagedDemand != NoDemand || !got.RawPlainDemand || !got.RawPlainOnly || got.Emission != EmitRawPlain ||
+			got.Primary != PrimaryPlain || got.FuncRep != DirectPlain || !plan.HasRawPlainVariant(fn) {
+			t.Fatalf("raw SSA function %s = %+v, variant=%t", fn.Name(), got, plan.HasRawPlainVariant(fn))
+		}
+	}
+	waitPlan := functionPlanFor(t, plan, wait)
+	if waitPlan.ManagedDemand != NoDemand || !waitPlan.RawPlainDemand || waitPlan.Emission != EmitExternal ||
+		waitPlan.External != ExternalUnknownForeign || !waitPlan.Exec.Contains(BlockForeign|IRQUnsafe) {
+		t.Fatalf("schedulerwait SSA plan = %+v", waitPlan)
+	}
+}
+
+func TestAnalyzeSSAInterfaceEscapeFromRawOwnerRemainsManaged(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "raw_plain_interface_escape.go", `package coroid
+func target() {}
+func consume(any) {}
+func root() { consume(target) }
+`)
+	root := packageFunction(t, pkg, "root")
+	target := packageFunction(t, pkg, "target")
+	plan, err := AnalyzeSSA(prog, Roots{{Function: root, RawPlainDemand: true}}, SSAConfig{MaxPlainInstructions: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := functionPlanFor(t, plan, target)
+	if got.ManagedDemand == NoDemand || got.RawPlainDemand || got.RawPlainOnly || got.FuncRep != Dispatch || got.Emission != EmitPlain {
+		t.Fatalf("interface-escaped target = %+v", got)
 	}
 }
 

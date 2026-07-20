@@ -209,9 +209,12 @@ func buildCoroPanicNativeE2EUser(t *testing.T, prog llssa.Program, temp string) 
 	}
 	module := pkg.Module()
 	presplit := module.String()
-	if strings.Count(presplit, "@__llgo_coro_panic_prepare_v1") != 2 ||
-		!strings.Contains(presplit, "call void @__llgo_coro_panic_prepare_v1") {
-		t.Fatalf("compiled explicit panic has no unique prepare-hook call:\n%s", presplit)
+	// The child publishes the source panic and the awaiting parent republishes
+	// the consumed explicit-status payload into its own frame. Together with the
+	// declaration this produces three symbol references and exactly two calls.
+	if references, calls := strings.Count(presplit, "@__llgo_coro_panic_prepare_v1"),
+		strings.Count(presplit, "call void @__llgo_coro_panic_prepare_v1"); references != 3 || calls != 2 {
+		t.Fatalf("compiled explicit panic prepare-hook references/calls = %d/%d, want 3/2:\n%s", references, calls, presplit)
 	}
 	if strings.Contains(presplit, llssa.PkgRuntime+".Panic") {
 		t.Fatalf("compiled explicit panic retained the legacy runtime.Panic edge:\n%s", presplit)

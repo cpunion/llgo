@@ -81,7 +81,7 @@ func syscall_Getpagesize() int {
 //go:linkname syscall_Exit syscall.Exit
 //go:nosplit
 func syscall_Exit(code int) {
-	cliteos.Exit(c.Int(code))
+	c.Exit(c.Int(code))
 }
 
 //go:linkname syscall_runtime_BeforeFork syscall.runtime_BeforeFork

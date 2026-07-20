@@ -131,10 +131,43 @@ const maxAlloc = ^uintptr(0) >> 1
 
 type errorString string
 
+func (e errorString) Error() string { return string(e) }
+func (e errorString) RuntimeError() {}
+
+type plainError string
+
+func (e plainError) Error() string { return string(e) }
+func (e plainError) RuntimeError() {}
+
+type _type struct{}
+type interfacetype struct{}
+type itab struct {
+	inter *interfacetype
+	_type *_type
+}
+type iface struct {
+	tab  *itab
+	data unsafe.Pointer
+}
+
 type eface struct {
-	_type unsafe.Pointer
+	_type *_type
 	data  unsafe.Pointer
 }
+
+type PanicNilError struct {
+	_ [0]*PanicNilError
+}
+
+func (*PanicNilError) Error() string { return "panic called with nil argument" }
+func (*PanicNilError) RuntimeError() {}
+
+// The compiler emits this guard in the unused pointer wrappers for the value
+// receiver methods above. This closed island never invokes those wrappers, so
+// keep only the exact runtime-helper signature instead of importing z_error's
+// full legacy panic/string dependency graph.
+//go:linkname coroChannelNativeE2EPanicWrapNilPointer github.com/goplus/llgo/runtime/internal/runtime.PanicWrapNilPointer
+func coroChannelNativeE2EPanicWrapNilPointer(bool, string, string) {}
 
 //go:linkname AllocU C.malloc
 func AllocU(uintptr) unsafe.Pointer
@@ -542,6 +575,8 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_run_decision.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_sched.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_nil_fault.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_panic_payload.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor_driver_legacy.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_spawn.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_native_llgo.go"),
@@ -549,10 +584,18 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_wait_pipe_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan_coro.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan_lock_coro.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan_lock_coro_atomic_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan_wait_coro.go"),
 	}
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_run_decision.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_nil_fault.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_panic_payload.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "z_chan.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "z_chan_coro.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "z_chan_lock_coro.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "z_chan_lock_coro_atomic_llgo.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "z_chan_wait_coro.go")
 	files = materializeCoroChannelNativeE2ERuntimeIsland(t, files)
 	conf := NewDefaultConf(ModeGen)
 	conf.ForceRebuild = true
@@ -563,13 +606,12 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 	// path must reject this capability as forged.
 	conf.compilerBuildTags = []string{"llgo_coro", coroNativePipeBuildTag}
 	allowed := map[string]bool{
-		"command-line-arguments":                                     true,
-		"github.com/goplus/llgo/runtime/internal/clite/pthread/sync": true,
-		"github.com/goplus/llgo/runtime/internal/coro":               true,
-		"github.com/goplus/llgo/runtime/internal/coroalloc":          true,
-		"github.com/goplus/llgo/runtime/internal/corodoorbell":       true,
-		"github.com/goplus/llgo/runtime/internal/coroworker":         true,
-		"github.com/goplus/llgo/runtime/internal/runtime/math":       true,
+		"command-line-arguments":                               true,
+		"github.com/goplus/llgo/runtime/internal/coro":         true,
+		"github.com/goplus/llgo/runtime/internal/coroalloc":    true,
+		"github.com/goplus/llgo/runtime/internal/corodoorbell": true,
+		"github.com/goplus/llgo/runtime/internal/coroworker":   true,
+		"github.com/goplus/llgo/runtime/internal/runtime/math": true,
 	}
 	seen := make(map[string]bool, len(allowed))
 	var objects []string
@@ -606,9 +648,12 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 			t.Fatalf("production coroutine runtime island did not emit required module %q", id)
 		}
 	}
-	objects = append(objects, buildCoroNativeWorkerCallObject(t, temp))
-	if len(objects) != len(allowed)+1 {
-		t.Fatalf("production coroutine runtime island objects = %d, want exactly %d package objects plus one worker leaf", len(objects), len(allowed))
+	objects = append(objects,
+		buildCoroNativeWorkerCallObject(t, temp),
+		buildCoroNativeDoorbellObject(t, temp),
+	)
+	if len(objects) != len(allowed)+2 {
+		t.Fatalf("production coroutine runtime island objects = %d, want exactly %d package objects plus worker and doorbell leaves", len(objects), len(allowed))
 	}
 	return objects
 }
@@ -672,11 +717,17 @@ func assertCoroSpawnNativeE2ELinkedSymbols(t *testing.T, executable string) {
 		coroProgramRunSliceSymbolV2,
 		coroProgramContinueSliceSymbolV2,
 		coroNativePostWaitSymbolV1,
+		"__llgo_coro_doorbell_open_v1",
+		"__llgo_coro_doorbell_read_v1",
+		"__llgo_coro_doorbell_write_v1",
+		"__llgo_coro_doorbell_close_v1",
+		"__llgo_coro_doorbell_poll_one_v1",
 		"__llgo_coro_spawn_begin_v1",
 		"__llgo_coro_spawn_commit_v1",
 		"__llgo_coro_chan_send_park_v1",
 		"__llgo_coro_chan_recv_park_v1",
 		"__llgo_coro_chan_resume_v1",
+		"__llgo_coro_fault_prepare_v1",
 		"github.com/goplus/llgo/runtime/internal/coro.CommitSpawn",
 		"github.com/goplus/llgo/runtime/internal/coro.BeginChannelExternalCommit",
 		"github.com/goplus/llgo/runtime/internal/coro.BeginChannelExternalCommitPair",

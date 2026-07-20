@@ -110,6 +110,7 @@ func TestCoroDynamicDispatchV1LLVM19CapturedCoroAndDualEntries(t *testing.T) {
 
 	assertCoroDynamicDispatchGuards(t, ir, "dynamic_coro_call", true)
 	assertCoroDynamicDispatchGuards(t, ir, "dynamic_plain_call", false)
+	assertCoroDynamicDispatchProbeGuards(t, ir, "dynamic_has_coro")
 	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("verify dynamic coroutine dispatch module: %v\n%s", err, ir)
 	}
@@ -244,6 +245,16 @@ func newCoroDynamicDispatchTestFixture(t *testing.T) *coroDynamicDispatchTestFix
 	pcb.Return(value)
 	pcb.EndBuild()
 	pcb.Dispose()
+
+	probeCallerSig := coroPlainDispatchTestSignature(
+		[]types.Type{signature},
+		[]types.Type{types.Typ[types.Bool]},
+	)
+	probeCaller := pkg.NewFunc("dynamic_has_coro", probeCallerSig, InGo)
+	probeBuilder := probeCaller.MakeBody(1)
+	probeBuilder.Return(probeBuilder.CoroDispatchHasCoro(probeCaller.Param(0), callOptions))
+	probeBuilder.EndBuild()
+	probeBuilder.Dispose()
 	return fixture
 }
 
@@ -305,5 +316,46 @@ func assertCoroDynamicDispatchGuards(t *testing.T, ir, name string, coro bool) {
 	}
 	if !regexp.MustCompile(`call i32 %[^(]+\(ptr [^,]+, i32 `).MatchString(body) {
 		t.Fatalf("dynamic plain caller has no typed (env,args)->results call:\n%s", body)
+	}
+}
+
+func assertCoroDynamicDispatchProbeGuards(t *testing.T, ir, name string) {
+	t.Helper()
+	body := coroPlainDispatchIRFunction(ir, name)
+	if body == "" {
+		t.Fatalf("missing dynamic dispatch capability probe %q:\n%s", name, ir)
+	}
+	for _, guard := range []string{
+		"coro.dispatch.version.invalid",
+		"coro.dispatch.flags.unknown",
+		"coro.dispatch.flags.empty",
+		"coro.dispatch.plain.entry.mismatch",
+		"coro.dispatch.coro.entry.mismatch",
+		"coro.dispatch.nocapture.env.nonnull",
+		"coro.dispatch.hash.lo.invalid",
+		"coro.dispatch.hash.hi.invalid",
+		"coro.dispatch.result.size.invalid",
+		"coro.dispatch.result.align.invalid",
+	} {
+		if !strings.Contains(body, guard) {
+			t.Fatalf("dynamic capability probe %q lacks fail-closed guard %q:\n%s", name, guard, body)
+		}
+	}
+	if strings.Contains(body, "coro.dispatch.capability.missing") {
+		t.Fatalf("dynamic capability probe %q requires a specific capability:\n%s", name, body)
+	}
+	if got := strings.Count(body, "call void @llvm.trap()"); got != 1 {
+		t.Fatalf("dynamic capability probe %q trap sites = %d, want one combined descriptor trap:\n%s", name, got, body)
+	}
+	assertCall := strings.Index(body, "AssertNilDeref")
+	descriptorLoad := strings.Index(body, "load { i32, i32, i64, i64, ptr, ptr")
+	guardBranch := strings.LastIndex(body, "br i1 %coro.dispatch.invalid")
+	if assertCall < 0 || descriptorLoad < 0 || guardBranch < 0 ||
+		assertCall > descriptorLoad || descriptorLoad > guardBranch {
+		t.Fatalf("dynamic capability probe %q does not validate nil then descriptor before probing:\n%s", name, body)
+	}
+	if !regexp.MustCompile(`and i32 [^,]+, 2`).MatchString(body) ||
+		!regexp.MustCompile(`ret i1 %[^ ]+`).MatchString(body) {
+		t.Fatalf("dynamic capability probe %q does not return the HasCoro flag:\n%s", name, body)
 	}
 }

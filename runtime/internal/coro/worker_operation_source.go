@@ -16,10 +16,15 @@
 
 package coro
 
-// WorkerOperationSourceCapacity bounds the scheduler-side source core. A
-// target worker queue or pool remains a separate adapter and may apply a
-// tighter admission limit without changing this lifecycle.
-const WorkerOperationSourceCapacity = 8
+// WorkerOperationPageCapacity is the allocation-free granularity of the
+// target-neutral worker catalog. Every source includes one inline page; a
+// target may attach additional stable pages before binding the source.
+const WorkerOperationPageCapacity = 64
+
+// WorkerOperationSourceCapacity is the default capacity of an unconfigured
+// source. Keep this compatibility name for small, embedded, and bare-metal
+// profiles; it is not the capacity after ConfigureWorkerOperationPages.
+const WorkerOperationSourceCapacity = WorkerOperationPageCapacity
 
 type WorkerOperationPostResult uint8
 
@@ -66,6 +71,13 @@ type workerOperationSlot struct {
 	submitted bool
 }
 
+// WorkerOperationPage is target-provided stable storage. Its producer-visible
+// prefix is still reached only through the existing two-word OperationID; no
+// page pointer, Go pointer, or coroutine frame address crosses the worker ABI.
+type WorkerOperationPage struct {
+	slots [WorkerOperationPageCapacity]workerOperationSlot
+}
+
 // WorkerOperationSource is the allocation-free scheduler half of a bounded
 // asynchronous worker source. It owns no thread, queue, or platform cancel
 // mechanism. A backend receives only OperationID, publishes a pointer-free
@@ -73,18 +85,86 @@ type workerOperationSlot struct {
 // Post is producer-concurrent; other mutating methods are owner-P-only.
 type WorkerOperationSource struct {
 	routedProducerSource
-	slots [WorkerOperationSourceCapacity]workerOperationSlot
+	slots      [WorkerOperationPageCapacity]workerOperationSlot
+	extraPages []WorkerOperationPage
+	scanLimit  uint32
 
 	affectedHead uint32
 	affectedTail uint32
 }
 
-func workerOperationSlotFor(source *WorkerOperationSource, id OperationID) (*workerOperationSlot, bool) {
-	if source == nil || !source.route.Valid() || !id.Valid() || id.Source() != OperationSourceWorker ||
-		id.Route() != source.route || id.LocalSlot() == 0 || id.LocalSlot() > WorkerOperationSourceCapacity {
+// WorkerOperationConfiguredCapacity returns the exact linear slot and scan
+// capacity. Linear one-based slot identities remain encodable in the frozen
+// 15-bit OperationID local field.
+func WorkerOperationConfiguredCapacity(source *WorkerOperationSource) uint32 {
+	if source == nil {
+		return 0
+	}
+	return uint32(1+len(source.extraPages)) * WorkerOperationPageCapacity
+}
+
+func workerOperationScanLimit(source *WorkerOperationSource) (uint32, bool) {
+	if source == nil {
+		return 0, false
+	}
+	capacity := WorkerOperationConfiguredCapacity(source)
+	return source.scanLimit, validSourceScanLimit(source.scanLimit, capacity)
+}
+
+func workerOperationSlotAt(source *WorkerOperationSource, index uint32) (*workerOperationSlot, bool) {
+	if index >= WorkerOperationConfiguredCapacity(source) {
 		return nil, false
 	}
-	return &source.slots[id.LocalSlot()-1], true
+	if index < WorkerOperationPageCapacity {
+		return &source.slots[index], true
+	}
+	page := index/WorkerOperationPageCapacity - 1
+	offset := index % WorkerOperationPageCapacity
+	return &source.extraPages[page].slots[offset], true
+}
+
+// ConfigureWorkerOperationPages attaches stable allocation-free catalog pages
+// while the source is empty and unbound. Repeating an identical configuration
+// is harmless, and a source may monotonically expose more of the same backing
+// pool. Configured pages are frozen while bound so concurrent Post calls see a
+// stable slice header and producer prefix.
+func ConfigureWorkerOperationPages(source *WorkerOperationSource, pages []WorkerOperationPage) bool {
+	if source == nil || !routedProducerHeaderEmpty(&source.routedProducerSource, nil) ||
+		source.affectedHead != 0 || source.affectedTail != 0 ||
+		len(pages) > int(operationLocalMask/WorkerOperationPageCapacity)-1 {
+		return false
+	}
+	existing := len(source.extraPages)
+	if existing != 0 && (len(pages) < existing || len(pages) == 0 || &source.extraPages[0] != &pages[0]) {
+		return false
+	}
+	if len(pages) == existing {
+		return true
+	}
+	for index := uint32(0); index < WorkerOperationConfiguredCapacity(source); index++ {
+		slot, ok := workerOperationSlotAt(source, index)
+		if !ok || !workerOperationReusableSlot(source, slot, index) {
+			return false
+		}
+	}
+	for page := existing; page < len(pages); page++ {
+		for offset := range pages[page].slots {
+			index := uint32(page+1)*WorkerOperationPageCapacity + uint32(offset)
+			if !workerOperationReusableSlot(source, &pages[page].slots[offset], index) {
+				return false
+			}
+		}
+	}
+	source.extraPages = pages
+	return true
+}
+
+func workerOperationSlotFor(source *WorkerOperationSource, id OperationID) (*workerOperationSlot, bool) {
+	if source == nil || !source.route.Valid() || !id.Valid() || id.Source() != OperationSourceWorker ||
+		id.Route() != source.route || id.LocalSlot() == 0 || id.LocalSlot() > WorkerOperationConfiguredCapacity(source) {
+		return nil, false
+	}
+	return workerOperationSlotAt(source, id.LocalSlot()-1)
 }
 
 func workerOperationReusableSlot(source *WorkerOperationSource, slot *workerOperationSlot, index uint32) bool {
@@ -106,14 +186,18 @@ func workerOperationReusableSlot(source *WorkerOperationSource, slot *workerOper
 }
 
 func validWorkerOperationOwner(source *WorkerOperationSource, p *P) bool {
-	return source != nil && validRoutedProducerSource(&source.routedProducerSource, p)
+	_, scanOK := workerOperationScanLimit(source)
+	return scanOK && validRoutedProducerSource(&source.routedProducerSource, p)
 }
 
 func validWorkerOperationLiveSlot(source *WorkerOperationSource, p *P, index uint32) bool {
-	if !validWorkerOperationOwner(source, p) || index >= uint32(len(source.slots)) {
+	if !validWorkerOperationOwner(source, p) || index >= WorkerOperationConfiguredCapacity(source) {
 		return false
 	}
-	slot := &source.slots[index]
+	slot, ok := workerOperationSlotAt(source, index)
+	if !ok {
+		return false
+	}
 	state := producerSourceLifecycle(preemptLoad(&slot.state))
 	if state != producerSourceActive && state != producerSourceClosing && state != producerSourceQuiesced {
 		return false
@@ -133,16 +217,19 @@ func (source *WorkerOperationSource) reserveAndAttach(
 	if !validWorkerOperationOwner(source, p) {
 		return OperationID{}, false
 	}
-	for index := range source.slots {
-		slot := &source.slots[index]
-		if !workerOperationReusableSlot(source, slot, uint32(index)) || preemptLoad(&slot.generation) == ^uint32(0) {
+	for index := uint32(0); index < WorkerOperationConfiguredCapacity(source); index++ {
+		slot, slotOK := workerOperationSlotAt(source, index)
+		if !slotOK || !workerOperationReusableSlot(source, slot, index) || preemptLoad(&slot.generation) == ^uint32(0) {
 			continue
 		}
 		generation, begun := beginProducerSourceSlot(&slot.producerSourceSlot)
 		if !begun {
 			return OperationID{}, false
 		}
-		id, ok := MakeOperationIDAtRoute(OperationSourceWorker, source.route, uint32(index)+1, generation)
+		if !raiseSourceScanLimit(&source.scanLimit, index, WorkerOperationConfiguredCapacity(source)) {
+			return OperationID{}, false
+		}
+		id, ok := MakeOperationIDAtRoute(OperationSourceWorker, source.route, index+1, generation)
 		if !ok || !PrepareOperationAtGeneration(&slot.record, id) {
 			return OperationID{}, false
 		}
@@ -265,10 +352,13 @@ func (source *WorkerOperationSource) appendAffected(index uint32) bool {
 		source.affectedHead, source.affectedTail = oneBased, oneBased
 		return true
 	}
-	if source.affectedTail == 0 || source.affectedTail > uint32(len(source.slots)) {
+	if source.affectedTail == 0 || source.affectedTail > WorkerOperationConfiguredCapacity(source) {
 		return false
 	}
-	tail := &source.slots[source.affectedTail-1]
+	tail, ok := workerOperationSlotAt(source, source.affectedTail-1)
+	if !ok {
+		return false
+	}
 	if tail.nextAffected != 0 {
 		return false
 	}
@@ -282,10 +372,13 @@ func (source *WorkerOperationSource) beginPublishPass(p *P) bool {
 }
 
 func (source *WorkerOperationSource) publishSlot(p *P, index uint32) (published, lost uint32, ok bool) {
-	if !validWorkerOperationOwner(source, p) || index >= uint32(len(source.slots)) {
+	if !validWorkerOperationOwner(source, p) || index >= WorkerOperationConfiguredCapacity(source) {
 		return 0, 0, false
 	}
-	slot := &source.slots[index]
+	slot, slotOK := workerOperationSlotAt(source, index)
+	if !slotOK {
+		return 0, 0, false
+	}
 	mailbox := workerOperationMailbox(preemptLoad(&slot.mailbox))
 	if mailbox == workerOperationMailboxPosting || mailbox == workerOperationMailboxEmpty ||
 		mailbox == workerOperationMailboxDelivered {
@@ -336,8 +429,12 @@ func (source *WorkerOperationSource) PublishPass(p *P) (published, lost uint32, 
 	if !source.beginPublishPass(p) {
 		return 0, 0, false
 	}
-	for index := range source.slots {
-		onePublished, oneLost, slotOK := source.publishSlot(p, uint32(index))
+	limit, valid := workerOperationScanLimit(source)
+	if !valid {
+		return 0, 0, false
+	}
+	for index := uint32(0); index < limit; index++ {
+		onePublished, oneLost, slotOK := source.publishSlot(p, index)
 		published += onePublished
 		lost += oneLost
 		if !slotOK {
@@ -363,11 +460,14 @@ func (source *WorkerOperationSource) ResolveAffectedPublishedEpoch(
 		return CompletionResolution{}, 0, false
 	}
 	for source.affectedHead != 0 {
-		if source.affectedHead > uint32(len(source.slots)) {
+		if source.affectedHead > WorkerOperationConfiguredCapacity(source) {
 			return total, duplicates, false
 		}
 		index := source.affectedHead - 1
-		slot := &source.slots[index]
+		slot, slotOK := workerOperationSlotAt(source, index)
+		if !slotOK {
+			return total, duplicates, false
+		}
 		if !validWorkerOperationLiveSlot(source, p, index) {
 			return total, duplicates, false
 		}
@@ -482,16 +582,23 @@ func (source *WorkerOperationSource) ApplyAndDetach(p *P) (applied, detached uin
 	if !validWorkerOperationOwner(source, p) || source.affectedHead != 0 || source.affectedTail != 0 {
 		return 0, 0, false
 	}
-	for index := range source.slots {
-		slot := &source.slots[index]
+	limit, valid := workerOperationScanLimit(source)
+	if !valid {
+		return 0, 0, false
+	}
+	for index := uint32(0); index < limit; index++ {
+		slot, slotOK := workerOperationSlotAt(source, index)
+		if !slotOK {
+			return applied, detached, false
+		}
 		state := producerSourceLifecycle(preemptLoad(&slot.state))
 		if state == producerSourceFree {
-			if !workerOperationReusableSlot(source, slot, uint32(index)) {
+			if !workerOperationReusableSlot(source, slot, index) {
 				return applied, detached, false
 			}
 			continue
 		}
-		if !validWorkerOperationLiveSlot(source, p, uint32(index)) {
+		if !validWorkerOperationLiveSlot(source, p, index) {
 			return applied, detached, false
 		}
 		id := slot.record.id
@@ -582,8 +689,9 @@ func workerOperationSourceEmpty(source *WorkerOperationSource, owner *P) bool {
 		source.affectedHead != 0 || source.affectedTail != 0 {
 		return false
 	}
-	for index := range source.slots {
-		if !workerOperationReusableSlot(source, &source.slots[index], uint32(index)) {
+	for index := uint32(0); index < WorkerOperationConfiguredCapacity(source); index++ {
+		slot, ok := workerOperationSlotAt(source, index)
+		if !ok || !workerOperationReusableSlot(source, slot, index) {
 			return false
 		}
 	}
@@ -594,7 +702,11 @@ func BindWorkerOperationSourceAtRoute(source *WorkerOperationSource, p *P, route
 	if !workerOperationSourceEmpty(source, nil) {
 		return false
 	}
-	return bindRoutedProducerSource(&source.routedProducerSource, p, route)
+	if !bindRoutedProducerSource(&source.routedProducerSource, p, route) {
+		return false
+	}
+	source.scanLimit = 0
+	return true
 }
 
 func BindWorkerOperationSource(source *WorkerOperationSource, p *P) bool {
@@ -605,7 +717,11 @@ func UnbindWorkerOperationSource(source *WorkerOperationSource, p *P) bool {
 	if p == nil || !workerOperationSourceEmpty(source, p) {
 		return false
 	}
-	return unbindRoutedProducerSource(&source.routedProducerSource, p)
+	if !unbindRoutedProducerSource(&source.routedProducerSource, p) {
+		return false
+	}
+	source.scanLimit = 0
+	return true
 }
 
 func (source *WorkerOperationSource) CanRelease() bool {

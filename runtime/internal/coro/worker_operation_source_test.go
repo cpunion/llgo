@@ -461,3 +461,62 @@ func TestWorkerOperationSourceProducerPrefixIsAlignedPOD(t *testing.T) {
 			unsafe.Offsetof(workerOperationSlot{}.payload), unsafe.Offsetof(workerOperationSlot{}.record))
 	}
 }
+
+func TestWorkerOperationSourcePagedCatalogAdmitsAndDrainsOneThousand(t *testing.T) {
+	source := new(WorkerOperationSource)
+	var pages [15]WorkerOperationPage
+	if WorkerOperationConfiguredCapacity(source) != WorkerOperationPageCapacity ||
+		!ConfigureWorkerOperationPages(source, pages[:1]) ||
+		WorkerOperationConfiguredCapacity(source) != 2*WorkerOperationPageCapacity ||
+		!ConfigureWorkerOperationPages(source, pages[:]) ||
+		WorkerOperationConfiguredCapacity(source) != 16*WorkerOperationPageCapacity ||
+		!ConfigureWorkerOperationPages(source, pages[:]) {
+		t.Fatal("configure paged worker catalog")
+	}
+	p := new(P)
+	if !BindWorkerOperationSourceAtRoute(source, p, RouteID(7)) ||
+		ConfigureWorkerOperationPages(source, pages[:]) {
+		t.Fatal("bind must freeze worker page configuration")
+	}
+
+	const count = 1000
+	cases := make([]uint32, count)
+	for index := range cases {
+		cases[index] = uint32(index + 1)
+	}
+	state, ticket, ids := reserveWorkerWaitSet(t, source, p, 101, cases)
+	if ids[WorkerOperationPageCapacity].LocalSlot() != WorkerOperationPageCapacity+1 ||
+		ids[count-1].LocalSlot() != count {
+		t.Fatalf("paged worker IDs did not remain linear: page2=%+v last=%+v",
+			ids[WorkerOperationPageCapacity], ids[count-1])
+	}
+	payload := workerPayloadForTest(t, 11, 1000, 2000, 3000)
+	for index, id := range ids {
+		if !source.MarkSubmitted(p, id) || source.Post(id, payload) != WorkerOperationPosted {
+			t.Fatalf("submit and post paged worker operation %d: %+v", index, id)
+		}
+	}
+	if published, lost, ok := source.PublishPass(p); !ok || published != count || lost != 0 || source.Pending() {
+		t.Fatalf("publish paged worker operations = (%d, %d, %t), pending=%t",
+			published, lost, ok, source.Pending())
+	}
+	wantResolution := CompletionResolution{WaitSets: 1, Completed: 1, Winners: 1, Losers: count - 1}
+	if resolution, duplicates, ok := source.ResolveAffectedPublishedEpoch(p); !ok ||
+		resolution != wantResolution || duplicates != count-1 {
+		t.Fatalf("resolve paged worker operations = (%+v, %d, %t), want %+v",
+			resolution, duplicates, ok, wantResolution)
+	}
+	if applied, detached, ok := source.ApplyAndDetach(p); !ok || applied != count || detached != count ||
+		!ParkReady(state, ticket) {
+		t.Fatalf("apply paged worker operations = (%d, %d, %t)", applied, detached, ok)
+	}
+	outcome, caseID, lease, consumed := ConsumeParkSet(state, ticket)
+	if !consumed || outcome != ParkOutcomeCompleted || caseID == 0 || !lease.Valid() {
+		t.Fatalf("consume paged worker operations = (%d, %d, %+v, %t)", outcome, caseID, lease, consumed)
+	}
+	finishWorkerOperations(t, source, p, ids, lease, payload)
+	if !UnbindWorkerOperationSource(source, p) || !source.CanRelease() ||
+		!ConfigureWorkerOperationPages(source, pages[:]) {
+		t.Fatal("release paged worker catalog")
+	}
+}

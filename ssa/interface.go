@@ -284,6 +284,10 @@ func (b Builder) buildVal(typ Type, val llvm.Value, lvl int) Expr {
 //	t3 = typeassert,ok t2.(T)
 func (b Builder) TypeAssert(x Expr, assertedTyp Type, commaOk bool) Expr {
 	dbgInstrf("TypeAssert %v, %v, %v\n", x.impl, assertedTyp.raw.Type, commaOk)
+	logical := b.blk
+	if logical == nil {
+		panic("TypeAssert: no active logical block")
+	}
 	tx := b.faceAbiType(x)
 	tabi := b.abiType(assertedTyp.raw.Type)
 	var eq Expr
@@ -313,7 +317,11 @@ func (b Builder) TypeAssert(x Expr, assertedTyp Type, commaOk bool) Expr {
 		b.SetBlockEx(blks[2], AtEnd, false)
 		phi := b.Phi(t)
 		phi.AddIncoming(b, blks[:2], func(i int, blk BasicBlock) Expr {
-			b.SetBlockEx(blk, AtEnd, false)
+			// Runtime operations used to materialize the asserted value may be
+			// expanded into multiple physical blocks (notably a coroutine child
+			// await).  Make this branch the active logical block so its last field
+			// follows that expansion and Phi observes the real predecessor.
+			b.SetBlockEx(blk, AtEnd, true)
 			if i == 0 {
 				valTrue := aggregateValue(b.impl, t.ll, val().impl, prog.BoolVal(true).impl)
 				b.Jump(blks[2])
@@ -325,17 +333,20 @@ func (b Builder) TypeAssert(x Expr, assertedTyp Type, commaOk bool) Expr {
 			return Expr{valFalse, t}
 		})
 		b.SetBlockEx(blks[2], AtEnd, false)
-		b.blk.last = blks[2].last
+		b.blk = logical
+		logical.last = blks[2].last
 		return phi.Expr
 	}
 	blks := b.Func.MakeBlocks(2)
 	b.If(eq, blks[0], blks[1])
-	b.SetBlockEx(blks[1], AtEnd, false)
+	b.SetBlockEx(blks[1], AtEnd, true)
 	b.Call(b.Pkg.rtFunc("PanicTypeAssert"), tx, b.Str(assertedTyp.RawType().String()), b.Str(typeAssertMissingMethod(assertedTyp)))
 	b.Unreachable()
-	b.SetBlockEx(blks[0], AtEnd, false)
-	b.blk.last = blks[0].last
-	return val()
+	b.SetBlockEx(blks[0], AtEnd, true)
+	result := val()
+	b.blk = logical
+	logical.last = blks[0].last
+	return result
 }
 
 func typeAssertMissingMethod(assertedTyp Type) string {
@@ -382,6 +393,19 @@ func (b Builder) EfaceType(x Expr) Expr {
 	}
 	dbgInstrf("EfaceType %v\n", x.impl)
 	return Expr{llvm.CreateExtractValue(b.impl, x.impl, 0), b.Prog.AbiTypePtr()}
+}
+
+// InterfaceTypeWord returns the first pointer-sized word of any interface
+// value. For an empty interface this is the ABI type descriptor; for a
+// non-empty interface it is the itab. In both representations the interface is
+// nil exactly when this word is nil. Callers must not otherwise reinterpret an
+// itab as an ABI type descriptor.
+func (b Builder) InterfaceTypeWord(x Expr) Expr {
+	if _, ok := types.Unalias(x.raw.Type).Underlying().(*types.Interface); !ok {
+		panic("InterfaceTypeWord requires an interface value")
+	}
+	dbgInstrf("InterfaceTypeWord %v\n", x.impl)
+	return Expr{llvm.CreateExtractValue(b.impl, x.impl, 0), b.Prog.VoidPtr()}
 }
 
 func (b Builder) faceData(x llvm.Value) llvm.Value {

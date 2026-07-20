@@ -102,6 +102,16 @@ func TestCoroTimerOwnerOrAbortSourceABI(t *testing.T) {
 			}
 		})
 	}
+	for _, internal := range []string{
+		"//export __llgo_coro_timer_prepare_after_v1",
+		"//export __llgo_coro_timer_retire_completed_v1",
+		"//export __llgo_coro_timer_prepare_controlled_v1",
+		"//export __llgo_coro_timer_retire_controlled_v1",
+	} {
+		if strings.Contains(string(data), internal) {
+			t.Errorf("%s exports internal timer implementation %q; only compiler/linkname ABI adapters may cross the raw boundary", source, internal)
+		}
+	}
 }
 
 func coroTimerOwnerFailureIsSyntacticallyTerminal(function *ast.FuncDecl) bool {

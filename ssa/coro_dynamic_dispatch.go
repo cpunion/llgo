@@ -52,6 +52,11 @@ type CoroDispatchCallOptions struct {
 	Version uint32
 	ABIHash [16]byte
 	Result  Type
+	// DescriptorNonNil records that the frontend has already emitted its
+	// language-specific nil-call edge before entering descriptor validation.
+	// It suppresses only AssertNilDeref; every descriptor contract check below
+	// remains mandatory.
+	DescriptorNonNil bool
 }
 
 // NewCoroDispatchDescriptor defines one link-once eight-field descriptor. It
@@ -165,6 +170,29 @@ func (b Builder) CallCoroDispatchPlain(
 	return
 }
 
+// CoroDispatchHasCoro validates a dynamic descriptor's shared v1 contract and
+// reports whether it publishes a coroutine entry. Unlike the two dispatch
+// operations, this capability probe accepts any valid non-empty capability
+// set: in particular, a valid plain-only descriptor returns false instead of
+// trapping. Frontend lowering can use the result to choose between the plain
+// and coroutine paths without weakening descriptor validation.
+func (b Builder) CoroDispatchHasCoro(
+	fn Expr, opts CoroDispatchCallOptions,
+) Expr {
+	call := b.prepareCoroDispatchCall(fn, nil, opts, 0)
+	hasCoro := llvm.CreateAnd(
+		b.impl, call.flags.impl,
+		b.Prog.IntVal(uint64(CoroDispatchFlagHasCoro), b.Prog.Uint32()).impl,
+	)
+	return Expr{
+		impl: llvm.CreateICmp(
+			b.impl, llvm.IntNE, hasCoro,
+			b.Prog.IntVal(0, b.Prog.Uint32()).impl,
+		),
+		Type: b.Prog.Bool(),
+	}
+}
+
 // CallCoroDispatchCoro validates a dynamic descriptor and invokes its typed
 // coroutine entry. The returned handle is deliberately not awaited here;
 // frontend lowering owns child registration, suspension, and result loading.
@@ -189,6 +217,7 @@ func (b Builder) CallCoroDispatchCoro(
 type coroDispatchPreparedCall struct {
 	entry     Expr
 	env       Expr
+	flags     Expr
 	signature *types.Signature
 }
 
@@ -201,7 +230,7 @@ func (b Builder) prepareCoroDispatchCall(
 			opts.Version, CoroDispatchVersionV1,
 		))
 	}
-	if capability != CoroDispatchFlagHasPlain && capability != CoroDispatchFlagHasCoro {
+	if capability != 0 && capability != CoroDispatchFlagHasPlain && capability != CoroDispatchFlagHasCoro {
 		panic("ssa: coroutine dispatch call requires one known capability")
 	}
 	if fn.IsNil() || fn.kind != vkClosure {
@@ -214,7 +243,7 @@ func (b Builder) prepareCoroDispatchCall(
 	if err := validateCoroDispatchPhysicalSignature(sig); err != nil {
 		panic("ssa: coroutine dispatch call: " + err.Error())
 	}
-	if len(args) != sig.Params().Len() {
+	if capability != 0 && len(args) != sig.Params().Len() {
 		panic(fmt.Sprintf(
 			"ssa: coroutine dispatch call has %d arguments, want %d",
 			len(args), sig.Params().Len(),
@@ -226,7 +255,9 @@ func (b Builder) prepareCoroDispatchCall(
 	env := b.Field(fn, 1)
 	// Keep the ordinary recoverable Go nil-function call path. Descriptor
 	// validation begins only after AssertNilDeref returns on its non-nil edge.
-	b.AssertNilDeref(descriptorWord)
+	if !opts.DescriptorNonNil {
+		b.AssertNilDeref(descriptorWord)
+	}
 	descriptorPtr := Expr{descriptorWord.impl, b.Prog.Pointer(b.Prog.coroDispatchDescriptorType())}
 	descriptor := b.Load(descriptorPtr)
 	fields := make([]Expr, 8)
@@ -258,10 +289,12 @@ func (b Builder) prepareCoroDispatchCall(
 		b.Prog.IntVal(uint64(CoroDispatchCapabilityMaskV1), b.Prog.Uint32()).impl,
 	)
 	addInvalid("coro.dispatch.flags.empty", llvm.CreateICmp(b.impl, llvm.IntEQ, capabilities, zeroFlags))
-	required := llvm.CreateAnd(
-		b.impl, flags, b.Prog.IntVal(uint64(capability), b.Prog.Uint32()).impl,
-	)
-	addInvalid("coro.dispatch.capability.missing", llvm.CreateICmp(b.impl, llvm.IntEQ, required, zeroFlags))
+	if capability != 0 {
+		required := llvm.CreateAnd(
+			b.impl, flags, b.Prog.IntVal(uint64(capability), b.Prog.Uint32()).impl,
+		)
+		addInvalid("coro.dispatch.capability.missing", llvm.CreateICmp(b.impl, llvm.IntEQ, required, zeroFlags))
+	}
 
 	plainFlag := llvm.CreateICmp(
 		b.impl, llvm.IntNE,
@@ -307,11 +340,17 @@ func (b Builder) prepareCoroDispatchCall(
 	)
 	b.coroPlainDispatchTrapIf(invalid)
 
-	entryIndex := 4
-	if capability == CoroDispatchFlagHasCoro {
-		entryIndex = 5
+	prepared := coroDispatchPreparedCall{
+		env:       env,
+		flags:     fields[1],
+		signature: sig,
 	}
-	return coroDispatchPreparedCall{entry: fields[entryIndex], env: env, signature: sig}
+	if capability == CoroDispatchFlagHasPlain {
+		prepared.entry = fields[4]
+	} else if capability == CoroDispatchFlagHasCoro {
+		prepared.entry = fields[5]
+	}
+	return prepared
 }
 
 func (b Builder) requireCoroDispatchPointer(value Expr, role string) Expr {

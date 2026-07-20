@@ -97,16 +97,34 @@ func (p *context) validateCoroWorkerSyscallCodegen(args []ssa.Value, results *ty
 	}
 }
 
-// compileCoroWorkerSyscall lowers one source-style synchronous llgo.syscall
-// into the common ForeignWait operation recipe. Argument evaluation happens
-// before publication; the fixed pool receives only copied uintptr words and
-// the resume hook restores the ordinary three-result tuple.
-func (p *context) compileCoroWorkerSyscall(b llssa.Builder, args []ssa.Value, results *types.Tuple) llssa.Expr {
+type coroWorkerWordResultV1 struct {
+	r1    llssa.Expr
+	r2    llssa.Expr
+	errno llssa.Expr
+}
+
+// compileCoroWorkerWordCall is the one physical ForeignWait transaction used
+// by both llgo.syscall and exact ordinary C-call thunks. function always names
+// a uniform uintptr (...uintptr) thunk whose arity is len(args); typed foreign
+// declarations are never called through this ABI directly.
+func (p *context) compileCoroWorkerWordCall(
+	b llssa.Builder,
+	function llssa.Expr,
+	args []llssa.Expr,
+	keepaliveSlots []llssa.Expr,
+) coroWorkerWordResultV1 {
 	body := p.requireCoroWorkerBody(b)
-	p.validateCoroWorkerSyscallCodegen(args, results)
-	compiled := make([]llssa.Expr, len(args))
+	if function.IsNil() || len(args) > coroWorkerMaxArgsV1 {
+		panic("coroutine worker word call received an invalid function or argument count")
+	}
+	word := p.prog.Uintptr()
+	if !types.Identical(function.RawType(), word.RawType()) {
+		panic("coroutine worker word call function is not uintptr-shaped")
+	}
 	for index, argument := range args {
-		compiled[index] = p.compileValue(b, argument)
+		if argument.IsNil() || !types.Identical(argument.RawType(), word.RawType()) {
+			panic(fmt.Sprintf("coroutine worker word call argument %d is not uintptr-shaped", index))
+		}
 	}
 
 	state := b.Alloc(p.prog.RuntimeType("CoroWorkerParkV1"), false)
@@ -120,12 +138,12 @@ func (p *context) compileCoroWorkerSyscall(b llssa.Builder, args []ssa.Value, re
 		body.coro.Handle(),
 		b.Convert(b.Prog.VoidPtr(), body.header),
 		b.Convert(b.Prog.VoidPtr(), state),
-		compiled[0],
-		p.prog.IntVal(uint64(len(compiled)-1), p.prog.Uint32()),
+		function,
+		p.prog.IntVal(uint64(len(args)), p.prog.Uint32()),
 	)
 	for index := 0; index < coroWorkerMaxArgsV1; index++ {
-		if index+1 < len(compiled) {
-			physicalArgs = append(physicalArgs, compiled[index+1])
+		if index < len(args) {
+			physicalArgs = append(physicalArgs, args[index])
 		} else {
 			physicalArgs = append(physicalArgs, zero)
 		}
@@ -151,14 +169,100 @@ func (p *context) compileCoroWorkerSyscall(b llssa.Builder, args []ssa.Value, re
 				r2,
 				errno,
 			)
+			abort, shutdown := body.cancellationRunDecisionTargets(resume)
 			dispatch := resume.Switch(status, body.unsupportedRunDecision)
 			dispatch.Case(resume.Prog.IntVal(coroWorkerResumeSuccessV1, resume.Prog.Uint32()), normal)
-			dispatch.Case(resume.Prog.IntVal(coroWorkerResumeTaskAbortV1, resume.Prog.Uint32()), body.cancelRunDecision)
-			dispatch.Case(resume.Prog.IntVal(coroWorkerResumeShutdownV1, resume.Prog.Uint32()), body.cancelRunDecision)
+			dispatch.Case(resume.Prog.IntVal(coroWorkerResumeTaskAbortV1, resume.Prog.Uint32()), abort)
+			dispatch.Case(resume.Prog.IntVal(coroWorkerResumeShutdownV1, resume.Prog.Uint32()), shutdown)
 			dispatch.End(resume)
 		},
 	)
 	b.SetBlock(join)
 	body.activate(b)
-	return b.Aggregate(p.type_(results, llssa.InGo), b.Load(r1), b.Load(r2), b.Load(errno))
+	// The worker queue deliberately contains only copied uintptr words. Keep
+	// every independently proved typed owner live until the physical completion
+	// acknowledgement has selected this normal resume path; llvm.fake.use emits
+	// no machine code but forces CoroSplit to retain the values in the frame.
+	p.emitCoroKeepaliveSlots(b, keepaliveSlots)
+	return coroWorkerWordResultV1{r1: b.Load(r1), r2: b.Load(r2), errno: b.Load(errno)}
+}
+
+// compileCoroCallKeepaliveSlots spills the exact typed owners which the
+// frame-retention proof binds to one suspending call into ramp-entry slots.
+// Compiler-owned resume/cancellation dispatch can enter a continuation through
+// an edge on which the source SSA value does not dominate. Reloading the slot
+// in that continuation preserves both valid LLVM SSA and the typed owner until
+// the physical completion/retirement boundary.
+func (p *context) compileCoroCallKeepaliveSlots(b llssa.Builder, call *ssa.Call) []llssa.Expr {
+	if p == nil || p.currentCoro == nil || p.currentCoro.frameRetention == nil || call == nil {
+		return nil
+	}
+	sources := p.currentCoro.frameRetention.exactCallKeepaliveSources(call)
+	slots := make([]llssa.Expr, len(sources))
+	for index, source := range sources {
+		value := p.compileValue(b, source)
+		if coroFrameRetentionIntegerLike(source.Type()) {
+			// uintptr transports retain exact pointer provenance only under the
+			// selected non-moving conservative/no-GC profile. Re-type the copied
+			// word as a pointer in the compiler-owned keepalive slot so the frame
+			// carries an address-shaped root rather than an optimizer-only integer.
+			value = b.Convert(p.prog.VoidPtr(), value)
+		}
+		slots[index] = p.coroFrameAlloc(value.Type)
+		b.Store(slots[index], value)
+	}
+	return slots
+}
+
+func (p *context) emitCoroKeepaliveSlots(b llssa.Builder, slots []llssa.Expr) {
+	values := make([]llssa.Expr, len(slots))
+	for index, slot := range slots {
+		if slot.IsNil() {
+			panic("coroutine keepalive contains a nil frame slot")
+		}
+		values[index] = b.Load(slot)
+	}
+	b.KeepAlive(values...)
+}
+
+func (p *context) coroWorkerOrdinaryCall(common *ssa.CallCommon) *ssa.Call {
+	if p == nil || p.goFn == nil || common == nil {
+		return nil
+	}
+	for _, block := range p.goFn.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(*ssa.Call)
+			if ok && &call.Call == common {
+				return call
+			}
+		}
+	}
+	return nil
+}
+
+// compileCoroWorkerSyscall lowers one source-style synchronous llgo.syscall
+// family operation into the common ForeignWait recipe. All conventions share
+// one park/resume CFG; only the final errno predicate differs. Argument
+// evaluation happens before publication, and the fixed pool receives only
+// copied uintptr words.
+func (p *context) compileCoroWorkerSyscall(
+	b llssa.Builder,
+	call *ssa.CallCommon,
+	args []ssa.Value,
+	results *types.Tuple,
+	convention syscallFailureConvention,
+) llssa.Expr {
+	p.validateCoroWorkerSyscallCodegen(args, results)
+	direct := p.coroWorkerOrdinaryCall(call)
+	if err := validateCoroWorkerSyscallCall(p.compilation.CoroPlan, p.compilation.EmissionUniverse, direct); err != nil {
+		panic(fmt.Errorf("coroutine worker syscall lowering: %w", err))
+	}
+	compiled := make([]llssa.Expr, len(args))
+	for index, argument := range args {
+		compiled[index] = p.compileValue(b, argument)
+	}
+	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, direct)
+	result := p.compileCoroWorkerWordCall(b, compiled[0], compiled[1:], keepaliveSlots)
+	errnoValue := p.filterSyscallErrno(b, result.r1, result.errno, convention)
+	return b.Aggregate(p.type_(results, llssa.InGo), result.r1, result.r2, errnoValue)
 }

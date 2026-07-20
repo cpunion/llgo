@@ -41,3 +41,21 @@ func buildCoroNativeWorkerCallObject(t *testing.T, temp string) string {
 	}
 	return object
 }
+
+// buildCoroNativeDoorbellObject materializes the LLGoFiles leaf normally
+// owned by runtime/internal/corodoorbell. Source-island E2E tests emit package
+// LLVM modules themselves, so the ordinary package linker never gets a chance
+// to add this C object for them.
+func buildCoroNativeDoorbellObject(t *testing.T, temp string) string {
+	t.Helper()
+	clang, err := exec.LookPath("clang")
+	if err != nil {
+		t.Skip("clang is unavailable")
+	}
+	source := filepath.Join("..", "..", "runtime", "internal", "corodoorbell", "_wrap", "doorbell.c")
+	object := filepath.Join(temp, "coro-doorbell.o")
+	if output, err := exec.Command(clang, "-std=c11", "-O2", "-c", source, "-o", object).CombinedOutput(); err != nil {
+		t.Fatalf("compile native coroutine doorbell leaf: %v\n%s", err, output)
+	}
+	return object
+}

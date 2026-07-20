@@ -36,6 +36,7 @@ const (
 	legacyGo123SleepSource = "time_sleep_legacy_go123_llgo.go"
 	legacyTimerSource      = "time_llgo.go"
 	legacyGo123TimerSource = "time_llgo_go123.go"
+	coroGo123TimerSource   = "time_coro_go123_llgo.go"
 	timeSleepLinkname      = "//go:linkname timeSleep time.Sleep"
 )
 
@@ -80,7 +81,42 @@ func TestTimeSleepSourceSelection(t *testing.T) {
 	}
 }
 
-func TestTimeSleepWasSplitWithoutReplacingTimerTicker(t *testing.T) {
+func TestTimeTimerSourceSelection(t *testing.T) {
+	nativeTags := []string{"llgo", "llgo_coro", "llgo_coro_native_pipe", "llgo_coro_native_timer"}
+	tests := []struct {
+		name      string
+		goos      string
+		buildTags []string
+		want      string
+	}{
+		{name: "ordinary go1.23 or newer", goos: "linux", want: legacyGo123TimerSource},
+		{name: "full coroutine linux", goos: "linux", buildTags: nativeTags, want: coroGo123TimerSource},
+		{name: "full coroutine darwin", goos: "darwin", buildTags: nativeTags, want: coroGo123TimerSource},
+		{name: "missing pipe falls back", goos: "linux", buildTags: []string{"llgo", "llgo_coro", "llgo_coro_native_timer"}, want: legacyGo123TimerSource},
+		{name: "adapter test falls back", goos: "linux", buildTags: append(slices.Clone(nativeTags), "coro_runtime_adapter_test"), want: legacyGo123TimerSource},
+		{name: "unsupported os falls back", goos: "windows", buildTags: nativeTags, want: legacyGo123TimerSource},
+	}
+	files := []string{legacyGo123TimerSource, coroGo123TimerSource}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := build.Default
+			ctx.GOOS = test.goos
+			ctx.GOARCH = "amd64"
+			ctx.BuildTags = slices.Clone(test.buildTags)
+			for _, file := range files {
+				got, err := ctx.MatchFile(timeSleepSourceDir, file)
+				if err != nil {
+					t.Fatalf("MatchFile(%q): %v", file, err)
+				}
+				if got != (file == test.want) {
+					t.Errorf("MatchFile(%q) = %t, want %t", file, got, file == test.want)
+				}
+			}
+		})
+	}
+}
+
+func TestTimeSleepAndTimerImplementationsStayProfileLocal(t *testing.T) {
 	for _, file := range []string{legacyTimerSource, legacyGo123TimerSource} {
 		if names := sourceFunctionsNamed(t, file, "timeSleep", "timeSleepWake"); len(names) != 0 {
 			t.Errorf("%s still defines split Sleep functions: %v", file, names)
@@ -92,12 +128,160 @@ func TestTimeSleepWasSplitWithoutReplacingTimerTicker(t *testing.T) {
 			}
 		}
 	}
+	coroSource := readTimeSleepSource(t, coroGo123TimerSource)
+	for _, retained := range []string{"coroTimerManager", "llgoCoroTimerNewV1", "llgoCoroTimerStopV1", "llgoCoroTimerResetV1", "llgo.coroControlledTimerWait"} {
+		if !strings.Contains(coroSource, retained) {
+			t.Errorf("%s lacks controlled Timer/Ticker marker %q", coroGo123TimerSource, retained)
+		}
+	}
+	for _, forbidden := range []string{"libuv", "pthread", "runtimeTimer", "time.goFunc"} {
+		if strings.Contains(coroSource, forbidden) {
+			t.Errorf("%s retains forbidden legacy timer dependency %q", coroGo123TimerSource, forbidden)
+		}
+	}
+	for _, contract := range []string{
+		"//go:linkname llgoCoroTimerNewV1 runtime.llgoCoroTimerNewV1",
+		"func llgoCoroTimerNewV1(when, period int64, f func(any, uintptr, int64), arg any, cp unsafe.Pointer) unsafe.Pointer",
+		"//go:linkname llgoCoroTimerStopV1 runtime.llgoCoroTimerStopV1",
+		"func llgoCoroTimerStopV1(timer unsafe.Pointer) bool",
+		"//go:linkname llgoCoroTimerResetV1 runtime.llgoCoroTimerResetV1",
+		"func llgoCoroTimerResetV1(timer unsafe.Pointer, when, period int64) bool",
+		"func llgoCoroControlledTimerWaitV2(controller unsafe.Pointer, control *uint32, expected uint32, deadline int64) uint32",
+		"__llgo_coro_timer_cancel_controlled_v2",
+		"go coroTimerManager(t)",
+		"go coroRunTimerCallback(arg.(func()))",
+		"corort.MarkTimerChannel((*corort.Chan)(cp))",
+		"coroTimerLock(&state.sendLock)",
+		"coroTimerDrainChannel(state.channel)",
+		"coroTimerNextTickerDeadline(when, period, now)",
+	} {
+		if !strings.Contains(coroSource, contract) {
+			t.Errorf("%s lacks standard timer contract %q", coroGo123TimerSource, contract)
+		}
+	}
+	for _, obsolete := range []string{
+		"//go:linkname newTimer time.newTimer",
+		"//go:linkname stopTimer time.stopTimer",
+		"//go:linkname resetTimer time.resetTimer",
+		"llgo.coroPark",
+		"__llgo_coro_timer_prepare_controlled_or_abort_v1",
+		"__llgo_coro_timer_cancel_controlled_v1",
+		"__llgo_coro_timer_retire_controlled_or_abort_v1",
+	} {
+		if strings.Contains(coroSource, obsolete) {
+			t.Errorf("%s still claims standard-library physical symbol %q", coroGo123TimerSource, obsolete)
+		}
+	}
 
 	if names := sourceFunctionsNamed(t, legacySleepSource, "timeSleep", "timeSleepWake"); !slices.Equal(names, []string{"timeSleep", "timeSleepWake"}) {
 		t.Errorf("%s Sleep functions = %v", legacySleepSource, names)
 	}
 	if names := sourceFunctionsNamed(t, legacyGo123SleepSource, "timeSleep", "timeSleepWake"); !slices.Equal(names, []string{"timeSleep", "timeSleepWake"}) {
 		t.Errorf("%s Sleep functions = %v", legacyGo123SleepSource, names)
+	}
+}
+
+func TestControlledTimerOwnerUsesUnifiedTimerSource(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("internal", "runtime", "coro_timer_owner_llgo.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(data)
+	for _, contract := range []string{
+		"func __llgo_coro_timer_park_controlled_v2(",
+		"func __llgo_coro_timer_cancel_controlled_v2(",
+		"coro.PrepareCurrentExecutorControlledTimerPark(",
+		"coro.CancelExecutorControlledTimerV2(",
+	} {
+		if !strings.Contains(source, contract) {
+			t.Errorf("controlled timer owner lacks %q", contract)
+		}
+	}
+	for _, forbidden := range []string{
+		"libuv",
+		"pthread",
+		"go func",
+		"__llgo_coro_timer_prepare_controlled_or_abort_v1",
+		"__llgo_coro_timer_cancel_controlled_v1",
+		"__llgo_coro_timer_retire_controlled_or_abort_v1",
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Errorf("controlled timer owner contains forbidden driver behavior %q", forbidden)
+		}
+	}
+}
+
+func TestSleepTimerV2OwnerUsesExactCurrentSource(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("internal", "runtime", "coro_timer_owner_llgo.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(data)
+	for _, contract := range []string{
+		"type CoroTimerParkV2 struct {",
+		"func __llgo_coro_timer_park_v2(",
+		"func __llgo_coro_timer_resume_v2(",
+		"coro.CurrentExecutorTimerDriver(task)",
+		"coro.PrepareCurrentExecutorTimerPark(",
+		"coro.TakeRunDecision(task, state.ticket)",
+		"coro.FinishCurrentExecutorTimerPark(",
+		"coroTimerResumeTaskAbortV2",
+		"coroTimerResumeShutdownV2",
+	} {
+		if !strings.Contains(source, contract) {
+			t.Errorf("Sleep Timer V2 owner lacks %q", contract)
+		}
+	}
+	for _, forbidden := range []string{"libuv", "pthread", "go func"} {
+		if strings.Contains(source, forbidden) {
+			t.Errorf("Sleep Timer V2 owner contains forbidden driver behavior %q", forbidden)
+		}
+	}
+}
+
+func TestNativeTimerCapacityIsIndependentAndAdmitsStandardLibraryStress(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("internal", "runtime", "coro_executor_driver_timer_llgo.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(data)
+	for _, contract := range []string{
+		"coroNativeSourcePageCountV1   = 16",
+		"coroNativeTimerPageCountV1    = 64",
+		"coroNativeTimerCapacityV1     = coroNativeTimerPageCountV1 * coro.TimerRegistrationPageCapacity",
+		"coroProgramTimerExtraPagesV1State     [coroNativeTimerPageCountV1 - 1]coro.TimerRegistrationPage",
+		"coroProgramWaitExtraPagesV1State      [coroNativeSourcePageCountV1 - 1]coro.WaitRegistrationPage",
+		"coroProgramPollExtraPagesV1State      [coroNativeSourcePageCountV1 - 1]coro.PollOperationPage",
+		"coroProgramWorkerExtraPagesV1State    [coroNativeSourcePageCountV1 - 1]coro.WorkerOperationPage",
+		"coroProgramChannelExtraPagesV1State   [coroNativeSourcePageCountV1 - 1]coro.ChannelOperationPage",
+		"coroProgramKeyedWaitExtraPagesV1State [coroNativeSourcePageCountV1 - 1]coro.KeyedWaitPage",
+		"coro.TimerRegistrationConfiguredCapacity(&coroProgramTimerTableV1State) != coroNativeTimerCapacityV1",
+	} {
+		if !strings.Contains(source, contract) {
+			t.Errorf("native timer capacity source lacks %q", contract)
+		}
+	}
+	if strings.Contains(source, "coroNativeTimerCapacityV1     = coroNativeSourcePageCountV1") ||
+		strings.Contains(source, "coroProgramTimerExtraPagesV1State     [coroNativeSourcePageCountV1 - 1]") {
+		t.Error("native timer storage is still coupled to the 1024-entry common-source page count")
+	}
+}
+
+func TestTimerChannelHasPrivateSynchronousView(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("internal", "runtime", "z_chan.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(data)
+	for _, contract := range []string{
+		"timerSync bool",
+		"func MarkTimerChannel(p *Chan) bool",
+		"if !p.timerSync {",
+		"if p.timerSync {",
+	} {
+		if !strings.Contains(source, contract) {
+			t.Errorf("timer channel source lacks %q", contract)
+		}
 	}
 }
 

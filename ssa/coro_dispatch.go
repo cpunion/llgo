@@ -82,6 +82,10 @@ type CoroPlainDispatchCallOptions struct {
 	Flags   uint32
 	ABIHash [16]byte
 	Result  Type
+	// DescriptorNonNil records that the frontend has already emitted the
+	// source-language nil-call edge. It suppresses only AssertNilDeref; all
+	// descriptor ABI, capability, entry, result, and environment checks remain.
+	DescriptorNonNil bool
 }
 
 // NewCoroPlainDispatchDescriptor defines a link-once constant descriptor:
@@ -211,9 +215,12 @@ func (b Builder) CallCoroPlainDispatch(
 
 	descriptorWord := b.Field(fn, 0)
 	env := b.Field(fn, 1)
-	// Preserve Go's recoverable nil function-call semantics. AssertNilDeref
-	// returns only on the non-nil path, so the descriptor load below is safe.
-	b.AssertNilDeref(descriptorWord)
+	// Preserve Go's recoverable nil function-call semantics. A physical
+	// coroutine may already have emitted the same edge through its structured
+	// explicit-status fault ABI, which is the only accepted non-nil proof.
+	if !opts.DescriptorNonNil {
+		b.AssertNilDeref(descriptorWord)
+	}
 	envNonNil := llvm.CreateICmp(
 		b.impl, llvm.IntNE, env.impl, llvm.ConstNull(env.impl.Type()),
 	)

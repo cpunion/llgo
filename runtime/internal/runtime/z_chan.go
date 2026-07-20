@@ -20,22 +20,30 @@ import (
 	"unsafe"
 
 	c "github.com/goplus/llgo/runtime/internal/clite"
-	"github.com/goplus/llgo/runtime/internal/clite/pthread/sync"
 	"github.com/goplus/llgo/runtime/internal/runtime/math"
 )
 
 // -----------------------------------------------------------------------------
 
 type Chan struct {
-	mutex sync.Mutex
+	// mutex is a platform-selected channel-state gate. The ordinary runtime
+	// keeps the pthread implementation; llgo_coro replaces it with the
+	// single-executor-owner gate from z_chan_lock_coro.go so a managed LLVM
+	// coroutine can never block its physical thread while mutating hchan state.
+	mutex channelMutex
 
 	qcount   int
 	dataqsiz int
 	buf      unsafe.Pointer
 	elemsize int
 	closed   bool
-	recvx    int
-	sendx    int
+	// timerSync marks the private one-element storage used by the Go 1.23+
+	// synchronous timer-channel contract. Ordinary sends/receives still use
+	// that storage, while the observable len/cap builtins must both report 0.
+	// It is set once before time.NewTimer publishes the channel.
+	timerSync bool
+	recvx     int
+	sendx     int
 
 	sendq chanWaitq
 	recvq chanWaitq
@@ -59,8 +67,8 @@ type chanWaiter struct {
 	queued bool
 	status waitStatus
 
-	mutex sync.Mutex
-	cond  sync.Cond
+	mutex channelWaitMutex
+	cond  channelWaitCond
 
 	sel       *selectState
 	caseIndex int
@@ -73,8 +81,8 @@ type chanWaiter struct {
 }
 
 type selectState struct {
-	mutex sync.Mutex
-	cond  sync.Cond
+	mutex channelWaitMutex
+	cond  channelWaitCond
 
 	status waitStatus
 	chosen int
@@ -181,7 +189,9 @@ func ChanLen(p *Chan) (n int) {
 		return 0
 	}
 	p.mutex.Lock()
-	n = p.qcount
+	if !p.timerSync {
+		n = p.qcount
+	}
 	p.mutex.Unlock()
 	return
 }
@@ -190,7 +200,27 @@ func ChanCap(p *Chan) int {
 	if p == nil {
 		return 0
 	}
+	if p.timerSync {
+		return 0
+	}
 	return p.dataqsiz
+}
+
+// MarkTimerChannel enables the Go 1.23+ synchronous timer-channel view over
+// one private buffered slot. Marking is idempotent, but only a pristine
+// one-element channel may acquire this immutable property.
+func MarkTimerChannel(p *Chan) bool {
+	if p == nil {
+		return false
+	}
+	p.mutex.Lock()
+	ok := p.timerSync || p.dataqsiz == 1 && p.qcount == 0 && !p.closed &&
+		p.sendq.first == nil && p.sendq.last == nil && p.recvq.first == nil && p.recvq.last == nil
+	if ok {
+		p.timerSync = true
+	}
+	p.mutex.Unlock()
+	return ok
 }
 
 func panicSendOnClosedChan() {
@@ -522,14 +552,25 @@ func ChanRecv(p *Chan, v unsafe.Pointer, eltSize int) (recvOK bool) {
 	return w.status.recvOK()
 }
 
-func ChanClose(p *Chan) {
+const (
+	coroChanCloseOK uint32 = iota
+	coroChanCloseNil
+	coroChanCloseClosed
+)
+
+// CoroChanTryClose performs the complete owner-local close transaction without
+// raising a Go panic. The compiler maps the two ordinary language errors to
+// its explicit-status terminal path, so neither can unwind through a live LLVM
+// coroutine frame. Closing wakes receivers, senders, and select candidates via
+// the same channel operation source used by send/receive cancellation.
+func CoroChanTryClose(p *Chan) uint32 {
 	if p == nil {
-		panic("close of nil channel")
+		return coroChanCloseNil
 	}
 	p.mutex.Lock()
 	if p.closed {
 		p.mutex.Unlock()
-		panic("close of closed channel")
+		return coroChanCloseClosed
 	}
 	p.closed = true
 	// Claim contention can temporarily leave buffered data behind a queued
@@ -538,14 +579,28 @@ func ChanClose(p *Chan) {
 	if !reconcileBufferedChanLocked(p, false) {
 		p.mutex.Unlock()
 		coroRuntimeAbort("invalid coroutine buffered channel close reconciliation")
-		return
+		return coroChanCloseClosed
 	}
 	if !drainClosedChanWaitersLocked(p) {
 		p.mutex.Unlock()
 		coroRuntimeAbort("invalid coroutine channel close completion")
-		return
+		return coroChanCloseClosed
 	}
 	p.mutex.Unlock()
+	return coroChanCloseOK
+}
+
+func ChanClose(p *Chan) {
+	switch CoroChanTryClose(p) {
+	case coroChanCloseOK:
+		return
+	case coroChanCloseNil:
+		panic("close of nil channel")
+	case coroChanCloseClosed:
+		panic("close of closed channel")
+	default:
+		coroRuntimeAbort("invalid coroutine channel close result")
+	}
 }
 
 // drainClosedChanWaitersLocked publishes every currently claimable waiter.
@@ -588,8 +643,8 @@ func drainClosedChanWaitersLocked(p *Chan) bool {
 }
 
 func blockForever() {
-	var mutex sync.Mutex
-	var cond sync.Cond
+	var mutex channelWaitMutex
+	var cond channelWaitCond
 	mutex.Init(nil)
 	cond.Init(nil)
 	mutex.Lock()

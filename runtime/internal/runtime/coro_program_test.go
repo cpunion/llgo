@@ -26,6 +26,25 @@ import (
 	"github.com/goplus/llgo/runtime/internal/coro"
 )
 
+// The named runtime-adapter source island includes coro_panic_payload.go but
+// intentionally does not load the complete LLGo runtime package into the host
+// Go runtime. Supply only the current Go panic(nil) interface contract that
+// source consumes. These definitions are test-island scaffolding, not a
+// compatibility ABI.
+type _type struct{}
+
+type eface struct {
+	_type *_type
+	data  unsafe.Pointer
+}
+
+type PanicNilError struct {
+	_ [0]*PanicNilError
+}
+
+func (*PanicNilError) Error() string { return "panic called with nil argument" }
+func (*PanicNilError) RuntimeError() {}
+
 // The production scheduler calls three compiler-owned C ABI wrappers through
 // direct linknames. Test-only definitions of those exact symbols let this
 // package exercise the real runtime adapter without adding an injectable
@@ -231,6 +250,10 @@ type coroProgramTestDriverV1 struct {
 	waitRegistration            coro.WaitRegistrationHandle
 	waitRetired                 bool
 	waitRetireCalls             int
+	taskControlOnFirstResume    bool
+	taskControlToken            coroTaskControlTokenV1
+	taskControlInvalidPost      uint32
+	taskControlPost             uint32
 }
 
 var activeCoroProgramDriver *coroProgramTestDriverV1
@@ -256,6 +279,11 @@ func coroRuntimeAbort(message string) {
 // check real while avoiding a reference to the production physical free hook.
 // Spawn/task-storage tests live in runtime/internal/coro.
 func coroReleaseCompletedTask(g *coroG) bool {
+	if !coro.ReclaimableG(g) &&
+		!coro.AcknowledgeTaskCancellation(g, coro.TaskCancelAbort) &&
+		!coro.AcknowledgeTaskCancellation(g, coro.TaskCancelShutdown) {
+		return false
+	}
 	owned, ok := coro.TaskStorageOwned(g)
 	if !ok {
 		return false
@@ -401,6 +429,9 @@ func (driver *coroProgramTestDriverV1) resume(handle unsafe.Pointer) {
 	if driver.commandBootstrapDirectChild {
 		maxResumeCalls = 2
 	}
+	if driver.taskControlOnFirstResume {
+		maxResumeCalls = 2
+	}
 	if driver.resumeCalls > maxResumeCalls {
 		driver.t.Fatalf("coroutine resume calls = %d, max %d", driver.resumeCalls, maxResumeCalls)
 	}
@@ -410,7 +441,11 @@ func (driver *coroProgramTestDriverV1) resume(handle unsafe.Pointer) {
 	// transition hook; every resume shape in this fixture is a normal
 	// zero-ticket continuation.
 	outcome, caseID, taskKind, sourceSlot, generation, decisionOK := coro.TakeRunDecisionWords(frame.g, 0, 0)
-	if !decisionOK || outcome != 0 || caseID != 0 || taskKind != 0 || sourceSlot != 0 || generation != 0 {
+	wantTaskKind := uint32(coro.TaskCancelNone)
+	if driver.taskControlOnFirstResume && driver.resumeCalls == 2 {
+		wantTaskKind = uint32(coro.TaskCancelAbort)
+	}
+	if !decisionOK || outcome != 0 || caseID != 0 || taskKind != wantTaskKind || sourceSlot != 0 || generation != 0 {
 		driver.t.Fatalf("take simulated coroutine run decision = (%d, %d, %d, %d, %d, %t)",
 			outcome, caseID, taskKind, sourceSlot, generation, decisionOK)
 	}
@@ -452,6 +487,31 @@ func (driver *coroProgramTestDriverV1) resume(handle unsafe.Pointer) {
 		default:
 			driver.t.Fatalf("command bootstrap root resume calls = %d, want at most 2", driver.resumeCalls)
 		}
+	}
+	if driver.taskControlOnFirstResume && driver.resumeCalls == 1 {
+		token := &driver.taskControlToken
+		if !__llgo_coro_task_control_register_v1(
+			unsafe.Pointer(frame.g),
+			&token.SourceSlot,
+			&token.SourceGeneration,
+			&token.ExecutorSlot,
+			&token.ExecutorGeneration,
+		) {
+			driver.t.Fatal("register production task-control POD endpoint")
+		}
+		driver.taskControlInvalidPost = __llgo_coro_task_control_post_v1(
+			token.SourceSlot, token.SourceGeneration, token.ExecutorSlot, token.ExecutorGeneration, 99,
+		)
+		driver.taskControlPost = __llgo_coro_task_control_post_v1(
+			token.SourceSlot, token.SourceGeneration, token.ExecutorSlot, token.ExecutorGeneration,
+			uint32(coro.TaskCancelAbort),
+		)
+		frame.header.SuspendReason = uint16(coro.SuspendYield)
+		frame.header.Lifecycle = uint16(coro.FrameSuspended)
+		if !coro.PrepareYield(frame.g, handle, frame.header) {
+			driver.t.Fatal("yield after production task-control post")
+		}
+		return
 	}
 	if parkCount != 0 && driver.resumeCalls > 1 {
 		if outcome, ok := coro.WaitOutcomeOf(&driver.waitToken, driver.waitTicket); !ok || outcome != coro.WaitOutcomeCompleted {
@@ -630,6 +690,7 @@ func resetCoroProgramTestStateV1(t *testing.T) {
 	coroProgramExecutorRegistryV1State = coro.ExecutorRegistry{}
 	coroProgramWaitTableV1State = coro.WaitRegistrationTable{}
 	coroProgramChannelSourceV1State = coro.ChannelOperationSource{}
+	coroProgramTaskControlSourceV1State = coro.TaskControlSource{}
 	coroProgramExecutorDriverV1State = coro.ExecutorDriver{}
 	coroProgramExecutorHandleV1State = coro.ExecutorHandle{}
 	coroProgramExecutorBoundV1State = false
@@ -651,6 +712,7 @@ func resetCoroProgramTestStateV1(t *testing.T) {
 		coroProgramExecutorRegistryV1State = coro.ExecutorRegistry{}
 		coroProgramWaitTableV1State = coro.WaitRegistrationTable{}
 		coroProgramChannelSourceV1State = coro.ChannelOperationSource{}
+		coroProgramTaskControlSourceV1State = coro.TaskControlSource{}
 		coroProgramExecutorDriverV1State = coro.ExecutorDriver{}
 		coroProgramExecutorHandleV1State = coro.ExecutorHandle{}
 		coroProgramExecutorBoundV1State = false
@@ -696,6 +758,52 @@ func TestCoroProgramV1BeginRunAndDestroy(t *testing.T) {
 
 	if _, ok := coroProgramBeginV1(unsafe.Pointer(&manifest.manifest), factory); ok || coroProgramLifecycleV1State != coroProgramFailedV1 {
 		t.Fatalf("completed coroutine program was reusable: ok=%t lifecycle=%d", ok, coroProgramLifecycleV1State)
+	}
+	runtime.KeepAlive(frame.memory)
+	runtime.KeepAlive(manifest)
+}
+
+func TestCoroProgramTaskControlPODIngressCancelsRunningRoot(t *testing.T) {
+	resetCoroProgramTestStateV1(t)
+	manifest := newCoroProgramTestManifestV1()
+	factory := unsafe.Pointer(&manifest.factoryMarker)
+	gPointer, ok := coroProgramBeginV1(unsafe.Pointer(&manifest.manifest), factory)
+	if !ok {
+		t.Fatal("begin task-control production program")
+	}
+	frame := newCoroProgramTestFrameV1(t, &coroProgramGV1State)
+	driver := &coroProgramTestDriverV1{t: t, frame: frame, taskControlOnFirstResume: true}
+	activeCoroProgramDriver = driver
+	if status := coroProgramRunV1(gPointer, frame.handle); status != coroProgramDriveCompleteV1 {
+		t.Fatalf("run task-control production program = %d", status)
+	}
+	token := driver.taskControlToken
+	id := coro.OperationID{SourceSlot: token.SourceSlot, Generation: token.SourceGeneration}
+	invalidControl := coro.TaskControlPostResult(driver.taskControlInvalidPost & 0xff)
+	invalidExecutor := coro.ExecutorRequestResult(driver.taskControlInvalidPost >> 8 & 0xff)
+	postedControl := coro.TaskControlPostResult(driver.taskControlPost & 0xff)
+	postedExecutor := coro.ExecutorRequestResult(driver.taskControlPost >> 8 & 0xff)
+	if !id.Valid() || id.Source() != coro.OperationSourceControl ||
+		token.ExecutorSlot == 0 || token.ExecutorGeneration == 0 ||
+		invalidControl != coro.TaskControlPostInvalid || invalidExecutor != coro.ExecutorRequestInvalid ||
+		postedControl != coro.TaskControlPosted || postedExecutor != coro.ExecutorRequestPublished {
+		t.Fatalf("task-control POD ingress = token:%+v invalid:(%d,%d) post:(%d,%d)",
+			token, invalidControl, invalidExecutor, postedControl, postedExecutor)
+	}
+	if driver.resumeCalls != 2 || driver.destroyCalls != 1 || !driver.released ||
+		coroProgramExecutorBoundV1State || !coroProgramTaskControlSourceV1State.CanRelease() ||
+		!coroProgramExecutorRegistryV1State.CanRelease() {
+		t.Fatalf("task-control completion = resumes:%d destroy:%d released:%t bound:%t control:%t registry:%t",
+			driver.resumeCalls, driver.destroyCalls, driver.released, coroProgramExecutorBoundV1State,
+			coroProgramTaskControlSourceV1State.CanRelease(), coroProgramExecutorRegistryV1State.CanRelease())
+	}
+	late := __llgo_coro_task_control_post_v1(
+		token.SourceSlot, token.SourceGeneration, token.ExecutorSlot, token.ExecutorGeneration,
+		uint32(coro.TaskCancelShutdown),
+	)
+	if coro.TaskControlPostResult(late&0xff) != coro.TaskControlPostInvalid ||
+		coro.ExecutorRequestResult(late>>8&0xff) != coro.ExecutorRequestInvalid {
+		t.Fatalf("retired task-control token accepted = %#x", late)
 	}
 	runtime.KeepAlive(frame.memory)
 	runtime.KeepAlive(manifest)

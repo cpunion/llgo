@@ -105,12 +105,30 @@ func (k *ExternalKind) UnmarshalText(text []byte) error {
 // NeedsDispatch is set only after function-value flow proves that this value
 // crosses an open storage or dynamic call boundary.
 type FunctionSpec struct {
-	ID            FunctionID
-	Seed          Effect
-	Exec          ExecFlags
-	Demand        Demand
-	External      ExternalKind
-	NeedsDispatch bool
+	ID   FunctionID
+	Seed Effect
+	Exec ExecFlags
+	// Demand is the compatibility managed-demand seed. New producers should
+	// populate ManagedDemand explicitly; both fields are joined.
+	Demand Demand
+	// ManagedDemand is demand for the ordinary Go plain/coroutine entry model.
+	ManagedDemand Demand
+	// RawPlainDemand is exact reachability from a legacy-stack root or raw-only
+	// reference. RawPlainEntry also seeds this provenance.
+	RawPlainDemand bool
+	External       ExternalKind
+	// TrustedBoundedRecursion is a frontend proof that this function's
+	// recursion depth is bounded independently of scheduler preemption. It
+	// suppresses the automatic recursive-SCC preemption seed only when every
+	// member of the complete recursive SCC carries the same proof.
+	TrustedBoundedRecursion bool
+	NeedsDispatch           bool
+	// RawPlainEntry is an exact frontend ABI requirement for a legacy Go-ABI
+	// entry in addition to the managed primary. When the managed primary is
+	// already plain the raw entry aliases it; a coroutine primary requires a
+	// separately lowered plain body. This capability never changes the managed
+	// effect, execution, demand, or representation fixed points.
+	RawPlainEntry bool
 }
 
 // PrimaryKind is the single primary implementation selected for a function.
@@ -189,8 +207,15 @@ type FunctionPlan struct {
 	// not part of Effect.
 	Exec ExecFlags
 	// Demand is the entry-capability fixed point from hard-sync, managed, and
-	// spawn roots.
+	// spawn roots, plus SyncDemand when RawPlainDemand is true. It remains as a
+	// compatibility aggregate; lowering decisions must use the two explicit
+	// demand dimensions below.
 	Demand Demand
+	// ManagedDemand is the ordinary Go entry-capability fixed point.
+	ManagedDemand Demand
+	// RawPlainDemand records exact legacy-stack reachability independently of
+	// managed entry demand.
+	RawPlainDemand bool
 	// Emission is the one physical body required by this closed-world plan.
 	// NoDemand functions use EmitNone without changing their logical Primary,
 	// External, or FuncRep selection.
@@ -199,24 +224,48 @@ type FunctionPlan struct {
 	FuncRep   FuncRep
 	External  ExternalKind
 	Recursive bool
-	Primary   PrimaryKind
+	// TrustedBoundedRecursion records an effective whole-SCC proof. Recursive
+	// remains true; this bit only explains why recursion itself did not add
+	// YieldOnly/NeedsPreempt to the local plan.
+	TrustedBoundedRecursion bool
+	Primary                 PrimaryKind
+	// RawPlainOnly means this function is reached exclusively through exact raw
+	// provenance. Its single physical body is EmitRawPlain/PrimaryPlain and its
+	// function representation is DirectPlain even though Effect/Exec retain the
+	// unmodified managed analysis facts.
+	RawPlainOnly bool
+	// RawPlainEntry records that code generation must expose the exact legacy
+	// Go-ABI entry required by a frozen raw-address consumer. It is independent
+	// of Primary: EmitCoroutine therefore denotes a managed coroutine primary
+	// plus a separately lowered raw plain entry, not a weakened managed body.
+	RawPlainEntry bool
 }
 
 // bodyEmissionFor derives the physical body independently from logical
 // PrimaryKind and function-value representation. No-demand nodes materialize
 // no symbol; a demanded external node retains a declaration, while a demanded
 // owned body selects plain or coroutine lowering from its effect.
-func bodyEmissionFor(demand Demand, effect Effect, external ExternalKind) BodyEmission {
-	if demand == NoDemand {
+func bodyEmissionFor(managedDemand Demand, rawPlainDemand bool, effect Effect, external ExternalKind) BodyEmission {
+	if managedDemand == NoDemand && !rawPlainDemand {
 		return EmitNone
 	}
 	if external != Defined {
 		return EmitExternal
 	}
+	if managedDemand == NoDemand {
+		return EmitRawPlain
+	}
 	if effect.MaySuspend() {
 		return EmitCoroutine
 	}
 	return EmitPlain
+}
+
+func aggregateDemand(managed Demand, rawPlain bool) Demand {
+	if rawPlain {
+		return managed.Join(SyncDemand)
+	}
+	return managed
 }
 
 // Plan is an immutable, deterministically ordered collection of function

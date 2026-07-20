@@ -95,18 +95,23 @@ func PrepareEmptyChannelPark(
 
 // CanReserveChannelOperations is the allocation/preflight boundary for a
 // compiler park transaction. No ParkState field or producer-visible
-// generation changes until this check succeeds. The fixed C0 source uses a
-// bounded scan; the scalable catalog keeps this API and may grow stable pages
-// here before the no-fail preparation section begins.
+// generation changes until this check succeeds. The configured source uses a
+// bounded scan over stable pages attached before bind; configuration cannot
+// change inside the no-fail preparation section.
 func CanReserveChannelOperations(p *P, source *ChannelOperationSource, needed uint32) bool {
-	if !validChannelOperationOwner(source, p) || needed == 0 || needed > ChannelOperationSourceCapacity {
+	capacity := ChannelOperationConfiguredCapacity(source)
+	if !validChannelOperationOwner(source, p) || needed == 0 || needed > capacity {
 		return false
 	}
 	available := uint32(0)
-	for index := range source.slots {
-		if channelOperationReusableSlot(source, &source.slots[index], uint32(index)) &&
-			preemptLoad(&source.slots[index].generation) != ^uint32(0) &&
-			channelOperationExternalReservable(&source.slots[index]) {
+	for index := uint32(0); index < capacity; index++ {
+		slot, ok := channelOperationSlotAt(source, index)
+		if !ok {
+			return false
+		}
+		if channelOperationReusableSlot(source, slot, index) &&
+			preemptLoad(&slot.generation) != ^uint32(0) &&
+			channelOperationExternalReservable(slot) {
 			available++
 			if available == needed {
 				return true

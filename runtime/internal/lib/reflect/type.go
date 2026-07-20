@@ -309,7 +309,7 @@ func (t *rtype) Method(i int) (m Method) {
 	fv := &struct {
 		fn  unsafe.Pointer
 		env unsafe.Pointer
-	}{p.Tfn_, nil}
+	}{unsafe.Pointer(p.Tfn_), nil}
 	m.Func = Value{closureOf(mtfn), unsafe.Pointer(fv), fl | flagIndir}
 	m.Index = i
 	return m
@@ -1988,7 +1988,7 @@ func StructOf(fields []StructField) Type {
 						panic("reflect: embedded interface with unexported method(s) not implemented")
 					}
 
-					fnStub := clite.Func(embeddedIfaceMethStub)
+					fnStub := abi.Text(clite.Func(embeddedIfaceMethStub))
 					methods = append(methods, abi.Method{
 						Name_: m.Name(),
 						Mtyp_: m.Typ_,

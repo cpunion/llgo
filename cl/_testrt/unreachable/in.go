@@ -8,10 +8,24 @@ import (
 // CHECK-LABEL: define void @"{{.*}}/cl/_testrt/unreachable.foo"(){{.*}} {
 // CHECK-NEXT: _llgo_0:
 // CHECK-NEXT:   unreachable
+// CHECK-EMPTY:
+// CHECK-NEXT: _llgo_1:{{.*}}; No predecessors!
 // CHECK-NEXT:   ret void
 // CHECK-NEXT: }
 func foo() {
 	c.Unreachable()
+}
+
+// Keep a source Jump and merge Phi after the intrinsic. The unreachable
+// lowering must move that tail to a dead physical continuation instead of
+// either appending a second terminator or dropping the Phi predecessor.
+func unreachableMerge(cond bool, value int) int {
+	result := value
+	if cond {
+		c.Unreachable()
+		result = value + 1
+	}
+	return result
 }
 
 // CHECK-LABEL: define void @"{{.*}}/cl/_testrt/unreachable.main"(){{.*}} {

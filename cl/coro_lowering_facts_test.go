@@ -142,6 +142,186 @@ func TestCompilationBuildCoroLoweringFactsReportIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestCoroLoweringFactsRecordsConditionalManagedStoreDecision(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		liveTarget bool
+		wantRecipe coro.RecipeID
+	}{
+		{"dormant target", false, "cl.ssa.conditional-managed-store.elide.v0"},
+		{"live target", true, "cl.ssa.conditional-managed-store.publish.v0"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			testProgram := newCoroLoweringFactsEmissionTestProgram(ssa.SanityCheckFunctions | ssa.InstantiateGenerics)
+			runtimePackage := testProgram.addPackage(t, llssa.PkgRuntime, `package runtime
+func AllocZ(size uintptr) uintptr { return 0 }
+`)
+			callerPackage := testProgram.addPackage(t, "example.com/emission/conditional-store", `package conditionalstore
+var slot func()
+func Target() {}
+func Publish() { slot = Target }
+func Live() { Target() }
+`)
+			testProgram.ssa.Build()
+			publish := callerPackage.ssa.Func("Publish")
+			target := callerPackage.ssa.Func("Target")
+			var publication *ssa.Store
+			for _, block := range publish.Blocks {
+				for _, instruction := range block.Instrs {
+					if store, ok := instruction.(*ssa.Store); ok && store.Val == target {
+						publication = store
+					}
+				}
+			}
+			if publication == nil {
+				t.Fatal("Publish has no exact Target Store")
+			}
+			prog := newLLSSAProg(t)
+			t.Cleanup(prog.Dispose)
+			universe, err := PrepareEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
+				{SSA: runtimePackage.ssa, Files: []*ast.File{runtimePackage.file}, Identity: "runtime-variant"},
+				{SSA: callerPackage.ssa, Files: []*ast.File{callerPackage.file}, Identity: "caller-variant"},
+			}, EmissionUniverseOptions{CompleteRuntimeABI: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ssaUniverse, err := coro.NewSSAEmissionUniverse(testProgram.ssa, universe.Functions())
+			if err != nil {
+				t.Fatal(err)
+			}
+			functionIDs := universe.FunctionIDConfig()
+			functionIDs.CoroABI = coro.EntryResolutionABIV0
+			functionIDs.SchedulerABI = coro.SchedulerNoneABIV0
+			functionIDs.ArchiveReady = true
+			roots := coro.Roots{{Function: publish, Demand: coro.AsyncDemand}}
+			if test.liveTarget {
+				roots = append(roots, coro.Root{Function: callerPackage.ssa.Func("Live"), Demand: coro.AsyncDemand})
+			}
+			plan, err := coro.AnalyzeSSA(testProgram.ssa, roots, coro.SSAConfig{
+				FunctionIDs: functionIDs, EmissionUniverse: ssaUniverse, MaxPlainInstructions: -1,
+				ResolveFunction: func(function *ssa.Function) (*ssa.Function, bool, error) {
+					resolved, ok := universe.Resolve(function)
+					return resolved, ok, nil
+				},
+				ClassifyConditionalManagedStoreReference: func(owner *ssa.Function, store *ssa.Store) (*ssa.Function, bool, error) {
+					if owner == publish && store == publication {
+						return target, true, nil
+					}
+					return nil, false, nil
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			report, err := (&Compilation{CoroPlan: plan, EmissionUniverse: universe}).BuildCoroLoweringFactsReport()
+			if err != nil {
+				t.Fatal(err)
+			}
+			publishID, _ := plan.FunctionID(publish)
+			targetID, _ := plan.FunctionID(target)
+			facts := loweringFactsFunctionByID(t, report.Facts, publishID)
+			var matched []coro.LoweringFact
+			for _, fact := range facts.Sites {
+				if fact.Contract == "llgo.coro.conditional-managed-publication.v0" {
+					matched = append(matched, fact)
+				}
+			}
+			if len(matched) != 1 || matched[0].Recipe != test.wantRecipe || len(matched[0].FunctionUses) != 1 ||
+				len(matched[0].FunctionUses[0].Targets) != 1 || matched[0].FunctionUses[0].Targets[0] != targetID {
+				t.Fatalf("conditional Store lowering facts = %+v", matched)
+			}
+		})
+	}
+}
+
+func TestCoroLoweringFactsReportCriticalRegionContract(t *testing.T) {
+	testProgram := newCoroLoweringFactsEmissionTestProgram(ssa.SanityCheckFunctions | ssa.InstantiateGenerics)
+	testProgram.ssa.CreatePackage(types.Unsafe, nil, nil, true)
+	runtimePackage := testProgram.addPackage(t, llssa.PkgRuntime, `package runtime`)
+	callerPackage := testProgram.addPackage(t, "example.com/emission/loweringfacts-critical", `package critical
+import _ "unsafe"
+//go:linkname enter llgo.coroCriticalEnter
+func enter()
+//go:linkname exit llgo.coroCriticalExit
+func exit()
+var cell uint32
+func Root(value uint32) uint32 {
+	enter()
+	cell = value
+	value = cell
+	exit()
+	return value
+}`)
+	testProgram.ssa.Build()
+	prog := newLLSSAProg(t)
+	t.Cleanup(prog.Dispose)
+	universe, err := PrepareEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
+		{SSA: runtimePackage.ssa, Files: []*ast.File{runtimePackage.file}, Identity: "runtime-critical"},
+		{SSA: callerPackage.ssa, Files: []*ast.File{callerPackage.file}, Identity: "caller-critical"},
+	}, EmissionUniverseOptions{CompleteRuntimeABI: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := callerPackage.ssa.Func("Root")
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(testProgram.ssa, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+	functionIDs.ArchiveReady = true
+	plan, err := coro.AnalyzeSSA(testProgram.ssa, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+		FunctionIDs:          functionIDs,
+		EmissionUniverse:     ssaUniverse,
+		MaxPlainInstructions: -1,
+		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+			if fn == root {
+				return coro.SSAFunctionPolicy{Effect: coro.YieldOnly, Exec: coro.NeedsPreempt}, nil
+			}
+			return coro.SSAFunctionPolicy{}, nil
+		},
+		ClassifyElidedCall: func(_ *ssa.Function, call ssa.CallInstruction) (bool, error) {
+			callee := call.Common().StaticCallee()
+			if callee != nil && callee.Pkg != nil && callee.Pkg.Pkg.Path() == "unsafe" && callee.Name() == "init" {
+				return true, nil
+			}
+			semantics, intrinsic, err := universe.CoroIntrinsicCallSiteSemantics(call)
+			return intrinsic && semantics.ElidesManagedCall(), err
+		},
+		ClassifyLoweredCalls: universe.CoroLoweredCalls,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := (&Compilation{CoroPlan: plan, EmissionUniverse: universe}).BuildCoroLoweringFactsReport()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootID, ok := plan.FunctionID(root)
+	if !ok {
+		t.Fatal("critical lowering-facts Root has no FunctionID")
+	}
+	facts := loweringFactsFunctionByID(t, report.Facts, rootID)
+	found := map[coro.SiteRole]coro.LoweringFact{}
+	for _, fact := range facts.Sites {
+		if fact.Site.Source.Role == coro.RoleRegionBegin || fact.Site.Source.Role == coro.RoleRegionEnd {
+			found[fact.Site.Source.Role] = fact
+		}
+	}
+	begin, beginOK := found[coro.RoleRegionBegin]
+	end, endOK := found[coro.RoleRegionEnd]
+	if !beginOK || begin.Recipe != "cl.intrinsic.coro-critical-enter.v1" || begin.Effect != coro.NoSuspend ||
+		begin.Contract != "llgo.coro.critical-depth.v1" || !begin.Footprint.Contains(coro.FootprintBarrier) || begin.Footprint.Contains(coro.FootprintSuspend) {
+		t.Fatalf("critical begin fact = %+v, present=%t", begin, beginOK)
+	}
+	if !endOK || end.Recipe != "cl.intrinsic.coro-critical-exit.v1" || end.Effect != coro.YieldOnly ||
+		end.Contract != "llgo.coro.critical-depth.v1" ||
+		!end.Footprint.Contains(coro.FootprintBarrier|coro.FootprintSuspend) {
+		t.Fatalf("critical end fact = %+v, present=%t", end, endOK)
+	}
+}
+
 func TestCoroLoweringFactsReportFailsClosedWithoutFrozenInputs(t *testing.T) {
 	var nilCompilation *Compilation
 	if _, err := nilCompilation.BuildCoroLoweringFactsReport(); err == nil || !strings.Contains(err.Error(), "compilation") {

@@ -59,7 +59,7 @@ type coroInterfaceDispatchCandidate struct {
 // independent of SSA or map enumeration order. The source call signature is
 // receiver-free and shared by every candidate, so target-specific codegen must
 // not reconstruct it from a selected method body.
-func resolveCoroInterfaceDispatchPlan(plan *coro.SSAPlan, call *ssa.Call) (*coroInterfaceDispatchPlan, error) {
+func resolveCoroInterfaceDispatchPlan(plan *coro.SSAPlan, universe *EmissionUniverse, call *ssa.Call) (*coroInterfaceDispatchPlan, error) {
 	if plan == nil || call == nil || call.Common() == nil {
 		return nil, fmt.Errorf("coroutine interface dispatch requires an exact call and compilation plan")
 	}
@@ -69,6 +69,9 @@ func resolveCoroInterfaceDispatchPlan(plan *coro.SSAPlan, call *ssa.Call) (*coro
 	}
 	if call.Parent() == nil {
 		return nil, fmt.Errorf("coroutine interface dispatch requires an invoke owned by an SSA function")
+	}
+	if universe != nil && universe.ownerOf(call.Parent()) == nil {
+		return nil, fmt.Errorf("coroutine interface dispatch invoke owner is absent from the emission universe")
 	}
 	iface, ok := types.Unalias(common.Value.Type()).Underlying().(*types.Interface)
 	if !ok {
@@ -115,7 +118,9 @@ func resolveCoroInterfaceDispatchPlan(plan *coro.SSAPlan, call *ssa.Call) (*coro
 		if !found || targetPlan.ID != id {
 			return nil, fmt.Errorf("coroutine interface dispatch target %q has no exact function plan", id)
 		}
-		receiver, targetReceiver, methodEntry, err := validateCoroInterfaceDispatchCandidate(common, iface, sourceSignature, id, target, targetPlan)
+		receiver, targetReceiver, methodEntry, err := validateCoroInterfaceDispatchCandidate(
+			common, iface, sourceSignature, universe, call.Parent(), id, target, targetPlan,
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -162,6 +167,8 @@ func validateCoroInterfaceDispatchCandidate(
 	common *ssa.CallCommon,
 	iface *types.Interface,
 	sourceSignature *types.Signature,
+	universe *EmissionUniverse,
+	caller *ssa.Function,
 	id coro.FunctionID,
 	target *ssa.Function,
 	plan coro.FunctionPlan,
@@ -190,8 +197,12 @@ func validateCoroInterfaceDispatchCandidate(
 			return fail("plain candidate execution constraints %s require coroutine or open lowering", plan.Exec)
 		}
 	case plan.Emission == coro.EmitCoroutine && plan.Primary == coro.PrimaryCoroutine:
-		if plan.Demand != coro.AsyncDemand {
-			return fail("coroutine candidate demand is %s, want async", plan.Demand)
+		// A RawPlainEntry is an alternate physical entry for exact raw ABI
+		// consumers.  BothDemand therefore still has a managed coroutine
+		// primary, which is the only entry an ordinary interface invoke may
+		// select.
+		if !plan.Demand.Contains(coro.AsyncDemand) {
+			return fail("coroutine candidate demand is %s, want managed async", plan.Demand)
 		}
 		if !plan.Effect.MaySuspend() || plan.Effect.IsOpaque() {
 			return fail("coroutine candidate effect %s is not an exact suspend effect", plan.Effect)
@@ -214,7 +225,11 @@ func validateCoroInterfaceDispatchCandidate(
 	if target.Signature.Variadic() {
 		return fail("variadic methods are not implemented")
 	}
-	if directive := coroLeafABIDirective(target); directive != "" {
+	directive, err := coroRawABIDirective(target, universe)
+	if err != nil {
+		return fail("classify ABI directive: %v", err)
+	}
+	if directive != "" {
 		return fail("ABI directive %q requires an explicit boundary adapter", directive)
 	}
 	if params := target.TypeParams(); params != nil && params.Len() != 0 {
@@ -238,27 +253,36 @@ func validateCoroInterfaceDispatchCandidate(
 	if !ok || method == nil {
 		return fail("candidate has no exact method object")
 	}
-	if method.Id() != common.Method.Id() {
+	if method.Name() != common.Method.Name() || (universe == nil && method.Id() != common.Method.Id()) {
 		return fail("method ID %q does not match invoke method ID %q", method.Id(), common.Method.Id())
 	}
 	targetReceiver := recv.Type()
 	dynamicReceiver := targetReceiver
-	if !types.Implements(dynamicReceiver, iface) {
+	implements, implementsErr := coroInterfaceDispatchCandidateImplements(universe, dynamicReceiver, iface)
+	if implementsErr != nil {
+		return fail("prove receiver %s implements invoke interface %s: %v", dynamicReceiver, iface, implementsErr)
+	}
+	if !implements {
 		if _, pointer := types.Unalias(dynamicReceiver).Underlying().(*types.Pointer); pointer {
 			return fail("receiver %s does not implement invoke interface %s", dynamicReceiver, iface)
 		}
 		promoted := types.NewPointer(dynamicReceiver)
-		if !types.Implements(promoted, iface) {
-			return fail("receiver %s does not implement invoke interface %s; promoted receiver %s also does not implement it", dynamicReceiver, iface, promoted)
+		promotedImplements, promotedErr := coroInterfaceDispatchCandidateImplements(universe, promoted, iface)
+		if promotedErr != nil {
+			return fail("prove promoted receiver %s implements invoke interface %s: %v", promoted, iface, promotedErr)
+		}
+		if !promotedImplements {
+			return fail("receiver %s and promoted receiver %s do not implement invoke interface %s", dynamicReceiver, promoted, iface)
 		}
 		dynamicReceiver = promoted
 	}
-	selection := types.NewMethodSet(dynamicReceiver).Lookup(common.Method.Pkg(), common.Method.Name())
+	selection := types.NewMethodSet(dynamicReceiver).Lookup(method.Pkg(), method.Name())
 	if selection == nil {
 		return fail("dynamic receiver method set has no method %q", common.Method.Id())
 	}
 	selectedMethod, ok := selection.Obj().(*types.Func)
-	if !ok || selectedMethod == nil || selectedMethod.Id() != method.Id() || selectedMethod.Id() != common.Method.Id() {
+	if !ok || selectedMethod == nil || selectedMethod.Id() != method.Id() ||
+		(universe == nil && selectedMethod.Id() != common.Method.Id()) {
 		return fail("receiver method selection does not resolve exact method ID %q", method.Id())
 	}
 	methodEntry := target.Prog.MethodValue(selection)
@@ -269,14 +293,24 @@ func validateCoroInterfaceDispatchCandidate(
 	if entryReceiver == nil || !types.Identical(entryReceiver.Type(), dynamicReceiver) {
 		return fail("method entry receiver %v does not match dynamic receiver %s", entryReceiver, dynamicReceiver)
 	}
-	entrySignature := coroInterfaceDispatchCallableSignature(methodEntry.Signature)
-	if entrySignature == nil || !types.Identical(sourceSignature, coroInterfaceDispatchCanonicalSignature(entrySignature)) {
-		return fail("method entry signature %v does not match source call signature %v", entrySignature, sourceSignature)
+	entrySignature, err := coroInterfaceDispatchEffectiveCallableSignature(universe, methodEntry, methodEntry.Signature)
+	if err != nil {
+		return fail("derive effective method-entry signature: %v", err)
+	}
+	effectiveSourceSignature, err := coroInterfaceDispatchEffectiveCallableSignature(universe, caller, sourceSignature)
+	if err != nil {
+		return fail("derive effective source call signature: %v", err)
+	}
+	if entrySignature == nil || !coroInterfaceDispatchSignaturesIdentical(effectiveSourceSignature, entrySignature) {
+		return fail("effective method entry signature %v does not match source call signature %v", entrySignature, effectiveSourceSignature)
 	}
 
-	targetSignature := coroInterfaceDispatchCallableSignature(target.Signature)
-	if targetSignature == nil || !types.Identical(sourceSignature, coroInterfaceDispatchCanonicalSignature(targetSignature)) {
-		return fail("source call signature %v does not match receiver-free target signature %v", sourceSignature, targetSignature)
+	targetSignature, err := coroInterfaceDispatchEffectiveCallableSignature(universe, target, target.Signature)
+	if err != nil {
+		return fail("derive effective target signature: %v", err)
+	}
+	if targetSignature == nil || !coroInterfaceDispatchSignaturesIdentical(effectiveSourceSignature, coroInterfaceDispatchCanonicalSignature(targetSignature)) {
+		return fail("effective source call signature %v does not match receiver-free target signature %v", effectiveSourceSignature, targetSignature)
 	}
 	if len(target.Params) != target.Signature.Params().Len()+1 || target.Params[0] == nil || !types.Identical(target.Params[0].Type(), recv.Type()) {
 		return fail("SSA parameters do not contain the exact declared receiver")
@@ -288,6 +322,46 @@ func validateCoroInterfaceDispatchCandidate(
 		}
 	}
 	return dynamicReceiver, targetReceiver, methodEntry, nil
+}
+
+func coroInterfaceDispatchCandidateImplements(
+	universe *EmissionUniverse,
+	candidate types.Type,
+	iface *types.Interface,
+) (bool, error) {
+	if universe != nil {
+		return universe.CoroDynamicImplements(candidate, iface)
+	}
+	return types.Implements(candidate, iface), nil
+}
+
+func coroInterfaceDispatchEffectiveCallableSignature(
+	universe *EmissionUniverse,
+	caller *ssa.Function,
+	typ types.Type,
+) (*types.Signature, error) {
+	if typ == nil {
+		return nil, nil
+	}
+	if universe != nil {
+		if caller == nil {
+			return nil, fmt.Errorf("effective interface signature requires an SSA owner")
+		}
+		owner := universe.ownerOf(caller)
+		if owner == nil {
+			return nil, fmt.Errorf("function %q is absent from the emission universe", caller.Name())
+		}
+		typ = universe.effectiveType(owner, caller, typ)
+	}
+	signature, _ := types.Unalias(typ).(*types.Signature)
+	return coroInterfaceDispatchCanonicalSignature(coroInterfaceDispatchCallableSignature(signature)), nil
+}
+
+func coroInterfaceDispatchSignaturesIdentical(left, right *types.Signature) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return structuralEmissionABITypeKey(left) == structuralEmissionABITypeKey(right)
 }
 
 func coroInterfaceDispatchCallableSignature(signature *types.Signature) *types.Signature {

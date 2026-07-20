@@ -47,6 +47,14 @@ const (
 	coroProgramContinueSliceSymbolV2                            = "__llgo_coro_program_continue_slice_v2"
 	coroProgramMainReturnSymbolV1                               = "__llgo_coro_program_main_return_v1"
 	coroNativePostWaitSymbolV1                                  = "__llgo_coro_native_post_wait_v1"
+	coroNativeWorkerCompleteSymbolV1                            = "__llgo_coro_native_worker_complete_v1"
+	coroHostNextActionSymbolV1                                  = "__llgo_coro_host_next_action_v1"
+	coroHostProfileSymbolV1                                     = "__llgo_coro_host_profile_v1"
+	coroHostNextDeadlineSymbolV1                                = "__llgo_coro_host_next_deadline_v1"
+	coroHostPublishTimeSymbolV1                                 = "__llgo_coro_host_publish_time_v1"
+	coroHostAckCancelSymbolV1                                   = "__llgo_coro_host_ack_cancel_v1"
+	coroHostContinueSliceSymbolV1                               = "__llgo_coro_host_continue_slice_v1"
+	coroHostPostWaitSymbolV1                                    = "__llgo_coro_host_post_wait_v1"
 	coroWaitPrepareSymbolV1                                     = "__llgo_coro_wait_prepare_v1"
 	coroWaitRollbackSymbolV1                                    = "__llgo_coro_wait_rollback_v1"
 	coroWaitRetireCompletedSymbolV1                             = "__llgo_coro_wait_retire_completed_v1"
@@ -56,10 +64,24 @@ const (
 	coroTimerRetireCompletedSymbolV1                            = "__llgo_coro_timer_retire_completed_v1"
 	coroTimerPrepareAfterOrAbortSymbolV1                        = "__llgo_coro_timer_prepare_after_or_abort_v1"
 	coroTimerRetireCompletedOrAbortSymbolV1                     = "__llgo_coro_timer_retire_completed_or_abort_v1"
+	coroTimerParkSymbolV2                                       = "__llgo_coro_timer_park_v2"
+	coroTimerParkControlledSymbolV2                             = "__llgo_coro_timer_park_controlled_v2"
+	coroTimerResumeSymbolV2                                     = "__llgo_coro_timer_resume_v2"
+	coroTimerCancelControlledSymbolV2                           = "__llgo_coro_timer_cancel_controlled_v2"
+	coroPollParkSymbolV2                                        = "__llgo_coro_poll_park_v2"
+	coroPollResumeSymbolV2                                      = "__llgo_coro_poll_resume_v2"
+	coroPollUpdateDeadlineOrAbortSymbolV1                       = "__llgo_coro_poll_update_deadline_or_abort_v1"
+	coroPollPostClosingOrAbortSymbolV1                          = "__llgo_coro_poll_post_closing_or_abort_v1"
+	coroSemaphorePrepareOrAbortSymbolV1                         = "__llgo_coro_sema_prepare_or_abort_v1"
+	coroSemaphoreRetireCompletedOrAbortSymbolV1                 = "__llgo_coro_sema_retire_completed_or_abort_v1"
+	coroSemaphoreReleaseOrAbortSymbolV1                         = "__llgo_coro_sema_release_or_abort_v1"
+	coroNotifyPrepareOrAbortSymbolV1                            = "__llgo_coro_notify_prepare_or_abort_v1"
+	coroNotifyRetireCompletedOrAbortSymbolV1                    = "__llgo_coro_notify_retire_completed_or_abort_v1"
+	coroNotifyOneOrAbortSymbolV1                                = "__llgo_coro_notify_one_or_abort_v1"
+	coroNotifyAllOrAbortSymbolV1                                = "__llgo_coro_notify_all_or_abort_v1"
 	coroChanSendParkSymbolV1                                    = "__llgo_coro_chan_send_park_v1"
 	coroChanRecvParkSymbolV1                                    = "__llgo_coro_chan_recv_park_v1"
 	coroChanResumeSymbolV1                                      = "__llgo_coro_chan_resume_v1"
-	coroChanSendClosedPanicSymbolV1                             = "__llgo_coro_chan_send_closed_panic_v1"
 	coroWorkerParkSymbolV1                                      = "__llgo_coro_worker_park_v1"
 	coroWorkerResumeSymbolV1                                    = "__llgo_coro_worker_resume_v1"
 
@@ -81,11 +103,15 @@ const (
 	// must return an exact POD continuation tuple to the entry module.
 	coroProgramNativeRunBudgetV2 uint32 = 1024
 
-	coroProgramDriveCompleteV2 uint32 = 1
-	coroProgramDriveYieldedV2  uint32 = 3
+	coroProgramDriveCompleteV2  uint32 = 1
+	coroProgramDriveSuspendedV2 uint32 = 2
+	coroProgramDriveYieldedV2   uint32 = 3
 
 	coroProgramRunMoreV2          uint32 = 1 << 0
+	coroProgramRunBlockedV2       uint32 = 1 << 1
+	coroProgramRunHasDeadlineV2   uint32 = 1 << 2
 	coroProgramRunRequestInlineV2 uint32 = 1 << 3
+	coroProgramRunRequestQueuedV2 uint32 = 1 << 4
 )
 
 type coroProgramBootstrapStepV1 struct {
@@ -130,6 +156,9 @@ func validateCoroProgramBootstrapConfig(conf *Config) error {
 	}
 	if conf.EnableCoroWorker && !conf.EnableCoroProgramBootstrapRun {
 		return fmt.Errorf("enable coroutine worker lowering: runnable program bootstrap is required")
+	}
+	if conf.EnableCoroWorker && !nativeCoroWorkerRuntimeABI(conf) {
+		return fmt.Errorf("enable coroutine worker lowering: a native Darwin/Linux pthread worker adapter is required")
 	}
 	if !conf.EnableCoroProgramBootstrapABI {
 		return nil
@@ -765,6 +794,21 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 				"complete=" + strconv.FormatUint(uint64(coroProgramDriveCompleteV2), 10) + ":" +
 				"yielded=" + strconv.FormatUint(uint64(coroProgramDriveYieldedV2), 10) + ":" +
 				"inline-flags=" + strconv.FormatUint(uint64(coroProgramRunMoreV2|coroProgramRunRequestInlineV2), 10))
+		} else if hostCoroPullRuntimeABI(ctx.buildConf) {
+			write("driver=runtime-static-single-p-host-pull-v1:" +
+				coroProgramBeginSymbolV1 + ":" +
+				coroProgramRunSliceSymbolV2 + "(g:ptr,handle:ptr,budget:u32,out:*run-result-v2)->u32:" +
+				coroProgramContinueSliceSymbolV2 + "(executor-slot:u32,executor-generation:u32,epoch:u32,budget:u32,out:*run-result-v2)->u32:" +
+				"budget=" + strconv.FormatUint(uint64(coroProgramNativeRunBudgetV2), 10) + ":" +
+				"run-result-v2={flags:u32,used:u32,executor-slot:u32,executor-generation:u32,epoch:u32,deadline-lo:u32,deadline-hi:u32,reserved:u32}:" +
+				"complete=" + strconv.FormatUint(uint64(coroProgramDriveCompleteV2), 10) + ":" +
+				"suspended=" + strconv.FormatUint(uint64(coroProgramDriveSuspendedV2), 10) + ":" +
+				"yielded=" + strconv.FormatUint(uint64(coroProgramDriveYieldedV2), 10) + ":" +
+				"queued-flags=" + strconv.FormatUint(uint64(coroProgramRunMoreV2|coroProgramRunRequestQueuedV2), 10) + ":" +
+				"blocked-flags=" + strconv.FormatUint(uint64(coroProgramRunBlockedV2|coroProgramRunHasDeadlineV2), 10) + ":" +
+				"pull=" + coroHostNextActionSymbolV1 + ":" + coroHostProfileSymbolV1 + ":" +
+				coroHostNextDeadlineSymbolV1 + ":" + coroHostPublishTimeSymbolV1 + ":" +
+				coroHostAckCancelSymbolV1 + ":" + coroHostContinueSliceSymbolV1 + ":" + coroHostPostWaitSymbolV1)
 		} else {
 			write("driver=runtime-static-single-p-v1:" + coroProgramBeginSymbolV1 + ":" + coroProgramRunSymbolV1 + ":" + coroProgramContinueSymbolV1 + ":continue(epoch:u32)->void")
 		}
@@ -778,16 +822,32 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 			write("native-doorbell=pipe-poll-v1:" + coroNativePostWaitSymbolV1 + ":post(wait-slot:u32,wait-generation:u32,executor-slot:u32,executor-generation:u32)->u32")
 		}
 		if nativeCoroTimerRuntimeABI(ctx.buildConf) {
-			write("native-timer=monotonic-poll-deadline-v1:" +
-				coroTimerPrepareAfterOrAbortSymbolV1 + "(token:ptr,delay-ns:i64,ticket-out:*u32,timer-slot-out:*u32,timer-generation-out:*u32)->void;" +
-				coroTimerRetireCompletedOrAbortSymbolV1 + "(token:ptr,ticket:u32,timer-slot:u32,timer-generation:u32)->void")
+			write("native-timer=source-aware-park-v2:" +
+				coroTimerParkSymbolV2 + "(g:ptr,handle:ptr,header:ptr,state:ptr,delay-ns:i64)->void;" +
+				coroTimerParkControlledSymbolV2 + "(g:ptr,handle:ptr,header:ptr,state:ptr,controller:ptr,control:*u32,expected:u32,deadline-ns:i64)->void;" +
+				coroTimerResumeSymbolV2 + "(g:ptr,state:ptr)->u32;" +
+				coroTimerCancelControlledSymbolV2 + "(controller:ptr,expected:u32)->u32")
+			write("native-poll=source-aware-park-v2:" +
+				coroPollParkSymbolV2 + "(g:ptr,handle:ptr,header:ptr,state:ptr,fd:i32,interest:u32,deadline-ns:i64)->void;" +
+				coroPollResumeSymbolV2 + "(g:ptr,state:ptr)->u32;" +
+				coroPollUpdateDeadlineOrAbortSymbolV1 + "(fd:i32,interest:u32,deadline-ns:i64)->void;" +
+				coroPollPostClosingOrAbortSymbolV1 + "(fd:i32,interest:u32)->void")
+			write("semaphore-owner-v1=" +
+				coroSemaphorePrepareOrAbortSymbolV1 + "(token:ptr,addr:ptr,ticket-out:*u32,wait-slot-out:*u32,wait-generation-out:*u32)->void;" +
+				coroSemaphoreRetireCompletedOrAbortSymbolV1 + "(token:ptr,ticket:u32,wait-slot:u32,wait-generation:u32)->void;" +
+				coroSemaphoreReleaseOrAbortSymbolV1 + "(addr:ptr)->void")
+			write("notify-owner-v1=" +
+				coroNotifyPrepareOrAbortSymbolV1 + "(token:ptr,notify-addr:ptr,target:u32,ticket-out:*u32,wait-slot-out:*u32,wait-generation-out:*u32)->void;" +
+				coroNotifyRetireCompletedOrAbortSymbolV1 + "(token:ptr,ticket:u32,wait-slot:u32,wait-generation:u32)->void;" +
+				coroNotifyOneOrAbortSymbolV1 + "(notify-addr:ptr,wait-snapshot:u32)->void;" +
+				coroNotifyAllOrAbortSymbolV1 + "(notify-addr:ptr,wait-snapshot:u32)->void")
 		}
 		if ctx.buildConf.EnableCoroChannel {
 			write("channel-v1=" +
 				coroChanSendParkSymbolV1 + "(g:ptr,handle:ptr,header:ptr,channel:ptr,elem:ptr,state:ptr,size:uintptr)->void;" +
 				coroChanRecvParkSymbolV1 + "(g:ptr,handle:ptr,header:ptr,channel:ptr,elem:ptr,state:ptr,size:uintptr)->void;" +
 				coroChanResumeSymbolV1 + "(g:ptr,state:ptr)->u32;" +
-				coroChanSendClosedPanicSymbolV1 + "(g:ptr,handle:ptr,header:ptr)->void")
+				"send-closed-fault=__llgo_coro_fault_prepare_v1:kind=3")
 		}
 		if ctx.buildConf.EnableCoroWorker {
 			write("worker-v1=" +

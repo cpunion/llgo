@@ -19,7 +19,9 @@
 package cl
 
 import (
+	"bytes"
 	"go/ast"
+	"go/types"
 	"regexp"
 	"strings"
 	"testing"
@@ -30,6 +32,13 @@ import (
 	"github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/ssa"
 )
+
+func TestCoroFrameRetentionNilConstRecognizesUnsafePointer(t *testing.T) {
+	value := ssa.NewConst(nil, types.Typ[types.UnsafePointer])
+	if !coroFrameRetentionNilConst(value) {
+		t.Fatalf("unsafe.Pointer zero constant %v was not recognized as nil", value)
+	}
+}
 
 const coroFrameRetentionFixture = `package foo
 
@@ -56,6 +65,240 @@ func Root(delay int64) {
 	retire(unsafe.Pointer(&token), ticket, slot, generation)
 }
 `
+
+const coroSemaphoreFrameRetentionFixture = `package foo
+
+import "unsafe"
+
+type WaitToken struct { word uint32 }
+
+//llgo:coro noblock
+//go:linkname prepare C.__llgo_coro_sema_prepare_or_abort_v1
+func prepare(unsafe.Pointer, unsafe.Pointer, *uint32, *uint32, *uint32)
+
+//go:linkname park llgo.coroPark
+func park(*WaitToken, uint32)
+
+//llgo:coro noblock
+//go:linkname retire C.__llgo_coro_sema_retire_completed_or_abort_v1
+func retire(unsafe.Pointer, uint32, uint32, uint32)
+
+func Root(addr *uint32) uint32 {
+	if addr == nil {
+		return 0
+	}
+	var token WaitToken
+	var ticket, slot, generation uint32
+	prepare(unsafe.Pointer(&token), unsafe.Pointer(addr), &ticket, &slot, &generation)
+	park(&token, ticket)
+	retire(unsafe.Pointer(&token), ticket, slot, generation)
+	return *addr
+}
+`
+
+const coroNotifyFrameRetentionFixture = `package foo
+
+import "unsafe"
+
+type WaitToken struct { word uint32 }
+type Notify struct {
+	wait, notify uint32
+	lock uintptr
+	head, tail unsafe.Pointer
+}
+
+//llgo:coro noblock
+//go:linkname prepare C.__llgo_coro_notify_prepare_or_abort_v1
+func prepare(unsafe.Pointer, unsafe.Pointer, uint32, *uint32, *uint32, *uint32)
+
+//go:linkname park llgo.coroPark
+func park(*WaitToken, uint32)
+
+//llgo:coro noblock
+//go:linkname retire C.__llgo_coro_notify_retire_completed_or_abort_v1
+func retire(unsafe.Pointer, uint32, uint32, uint32)
+
+func Root(list *Notify, target uint32) uint32 {
+	if list == nil {
+		return 0
+	}
+	if int32(target-list.notify) < 0 {
+		return list.notify
+	}
+	var token WaitToken
+	var ticket, slot, generation uint32
+	prepare(unsafe.Pointer(&token), unsafe.Pointer(&list.notify), target, &ticket, &slot, &generation)
+	park(&token, ticket)
+	retire(unsafe.Pointer(&token), ticket, slot, generation)
+	return list.notify
+}
+`
+
+func TestCoroParkFrameRetentionContractTableIsSourceGeneric(t *testing.T) {
+	tests := []struct {
+		name            string
+		source          string
+		abi             string
+		wantAllocations int
+		wantRoles       int
+	}{
+		{name: "timer remains supported by park v2", source: coroFrameRetentionFixture, abi: CoroFrameRetentionParkABIV2, wantAllocations: 4, wantRoles: 3},
+		{name: "sync certificate supports timer transaction", source: strings.ReplaceAll(coroFrameRetentionFixture, "//llgo:coro noblock", "//llgo:coro sync"), abi: CoroFrameRetentionParkABIV2, wantAllocations: 4, wantRoles: 3},
+		{name: "semaphore is supported by park v2", source: coroSemaphoreFrameRetentionFixture, abi: CoroFrameRetentionParkABIV2, wantAllocations: 4, wantRoles: 3},
+		{name: "notify is supported by park v2", source: coroNotifyFrameRetentionFixture, abi: CoroFrameRetentionParkABIV2, wantAllocations: 4, wantRoles: 3},
+		{name: "timer v1 cannot authorize semaphore", source: coroSemaphoreFrameRetentionFixture, abi: CoroFrameRetentionTimerABIV1},
+		{name: "timer v1 cannot authorize notify", source: coroNotifyFrameRetentionFixture, abi: CoroFrameRetentionTimerABIV1},
+		{
+			name: "notify target type is exact",
+			source: strings.NewReplacer(
+				"func prepare(unsafe.Pointer, unsafe.Pointer, uint32, *uint32, *uint32, *uint32)",
+				"func prepare(unsafe.Pointer, unsafe.Pointer, int32, *uint32, *uint32, *uint32)",
+				"unsafe.Pointer(&list.notify), target, &ticket",
+				"unsafe.Pointer(&list.notify), int32(target), &ticket",
+			).Replace(coroNotifyFrameRetentionFixture),
+			abi: CoroFrameRetentionParkABIV2,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			prog, ssaPkg, _, _, proof := prepareCoroFrameRetentionProof(t, test.source, test.abi)
+			defer prog.Dispose()
+			if len(proof.allocations) != test.wantAllocations || len(proof.roles) != test.wantRoles {
+				var dump bytes.Buffer
+				ssa.WriteFunction(&dump, ssaPkg.Func("Root"))
+				t.Fatalf("proof = %d allocations/%d roles, want %d/%d\n%s",
+					len(proof.allocations), len(proof.roles), test.wantAllocations, test.wantRoles, dump.String())
+			}
+			for instruction := range proof.roles {
+				if proof.contracts[instruction] == "" {
+					t.Fatal("proved park role has no frozen source contract")
+				}
+			}
+		})
+	}
+}
+
+func TestCoroNotifyCurrentFrameRetentionLowersThroughGenericParkContract(t *testing.T) {
+	prog, ssaPkg, files, universe, proof := prepareCoroFrameRetentionProof(
+		t, coroNotifyFrameRetentionFixture, CoroFrameRetentionParkABIV2,
+	)
+	defer prog.Dispose()
+	if len(proof.allocations) != 4 || len(proof.roles) != 3 {
+		t.Fatalf("notify transaction proof = %d allocations/%d roles, want 4/3", len(proof.allocations), len(proof.roles))
+	}
+	root := ssaPkg.Func("Root")
+	rootedList := false
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(*ssa.Call)
+			if !ok || call.Common() == nil || call.Common().StaticCallee() == nil ||
+				call.Common().StaticCallee().Name() != "prepare" {
+				continue
+			}
+			for _, retained := range proof.exactCallKeepaliveRoots(call) {
+				rootedList = rootedList || retained == root.Params[0]
+			}
+		}
+	}
+	if !rootedList {
+		t.Fatal("notify prepare owner did not retain its typed notifyList root")
+	}
+	plan := analyzeCoroFrameRetentionFixture(t, ssaPkg, universe, root, 1)
+	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe, CoroFrameRetentionABI: CoroFrameRetentionParkABIV2}
+	enableCoroPreemptCompilation(compilation)
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{}, PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	body := requireCoroPhysicalFunction(t, module, "foo.Root").String()
+	prepare := strings.Index(body, "call void @"+coroNotifyPrepareOrAbortSymbolV1)
+	retire := strings.Index(body, "call void @"+coroNotifyRetireCompletedOrAbortSymbolV1)
+	if prepare < 0 || retire <= prepare || strings.Contains(body, "AllocZ") ||
+		!strings.Contains(body, "alloca %foo.WaitToken") || strings.Count(body, "alloca i32") < 3 {
+		t.Fatalf("generic notify transaction did not lower into the coroutine frame:\n%s", body)
+	}
+	span := body[prepare:retire]
+	if strings.Contains(span, "call i1 @"+coroPreemptPollHookV1) ||
+		strings.Contains(span, "call void @"+coroYieldPrepareHookV1) ||
+		strings.Count(span, "call void @"+coroParkPrepareHookV1) != 1 ||
+		strings.Count(span, "call i8 @llvm.coro.suspend") != 1 {
+		t.Fatalf("generic notify retained span has an unsafe suspension shape:\n%s", span)
+	}
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify generic notify transaction before CoroSplit: %v\n%s", err, module.String())
+	}
+	runCoroABITestPipeline(t, prog, module)
+	post := module.String()
+	if strings.Contains(post, "AllocZ") || !strings.Contains(post, coroNotifyPrepareOrAbortSymbolV1) ||
+		!strings.Contains(post, coroNotifyRetireCompletedOrAbortSymbolV1) || module.NamedFunction("foo.Root$coro.resume").IsNil() {
+		t.Fatalf("CoroSplit lost the generic notify frame transaction:\n%s", post)
+	}
+}
+
+func TestCoroSemaphoreCurrentFrameRetentionLowersThroughGenericParkContract(t *testing.T) {
+	prog, ssaPkg, files, universe, proof := prepareCoroFrameRetentionProof(
+		t, coroSemaphoreFrameRetentionFixture, CoroFrameRetentionParkABIV2,
+	)
+	defer prog.Dispose()
+	if len(proof.allocations) != 4 || len(proof.roles) != 3 {
+		t.Fatalf("semaphore transaction proof = %d allocations/%d roles, want 4/3", len(proof.allocations), len(proof.roles))
+	}
+	root := ssaPkg.Func("Root")
+	rootedAddr := false
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(*ssa.Call)
+			if !ok || call.Common() == nil || call.Common().StaticCallee() == nil ||
+				call.Common().StaticCallee().Name() != "prepare" {
+				continue
+			}
+			for _, retained := range proof.exactCallKeepaliveRoots(call) {
+				rootedAddr = rootedAddr || retained == root.Params[0]
+			}
+		}
+	}
+	if !rootedAddr {
+		t.Fatal("semaphore prepare owner did not retain its typed counter root")
+	}
+	plan := analyzeCoroFrameRetentionFixture(t, ssaPkg, universe, root, 1)
+	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe, CoroFrameRetentionABI: CoroFrameRetentionParkABIV2}
+	enableCoroPreemptCompilation(compilation)
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{}, PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	body := requireCoroPhysicalFunction(t, module, "foo.Root").String()
+	prepare := strings.Index(body, "call void @"+coroSemaphorePrepareOrAbortSymbolV1)
+	retire := strings.Index(body, "call void @"+coroSemaphoreRetireCompletedOrAbortSymbolV1)
+	if prepare < 0 || retire <= prepare || strings.Contains(body, "AllocZ") ||
+		!strings.Contains(body, "alloca %foo.WaitToken") || strings.Count(body, "alloca i32") < 3 {
+		t.Fatalf("generic semaphore transaction did not lower into the coroutine frame:\n%s", body)
+	}
+	span := body[prepare:retire]
+	if strings.Contains(span, "call i1 @"+coroPreemptPollHookV1) ||
+		strings.Contains(span, "call void @"+coroYieldPrepareHookV1) ||
+		strings.Count(span, "call void @"+coroParkPrepareHookV1) != 1 ||
+		strings.Count(span, "call i8 @llvm.coro.suspend") != 1 {
+		t.Fatalf("generic semaphore retained span has an unsafe suspension shape:\n%s", span)
+	}
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify generic semaphore transaction before CoroSplit: %v\n%s", err, module.String())
+	}
+	runCoroABITestPipeline(t, prog, module)
+	post := module.String()
+	if strings.Contains(post, "AllocZ") || !strings.Contains(post, coroSemaphorePrepareOrAbortSymbolV1) ||
+		!strings.Contains(post, coroSemaphoreRetireCompletedOrAbortSymbolV1) || module.NamedFunction("foo.Root$coro.resume").IsNil() {
+		t.Fatalf("CoroSplit lost the generic semaphore frame transaction:\n%s", post)
+	}
+}
 
 func TestCoroCurrentFrameRetentionProofIsExact(t *testing.T) {
 	tests := []struct {
@@ -398,7 +641,7 @@ func prepareCoroFrameRetentionProof(t *testing.T, source, abi string) (
 		prog.Dispose()
 		t.Fatal(err)
 	}
-	audit, err := newCoroPhysicalPureSSAAudit(universe, ssaPkg.Func("Root"), abi)
+	audit, err := newCoroPhysicalPureSSAAudit(universe, nil, ssaPkg.Func("Root"), abi)
 	if err != nil {
 		prog.Dispose()
 		t.Fatal(err)

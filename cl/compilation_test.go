@@ -196,6 +196,11 @@ func TestCompilationCoroABIIdentityValidation(t *testing.T) {
 	if err := frameRetention.validateCoroABIIdentity(false); err != nil {
 		t.Fatalf("complete frame-retention ABI identity: %v", err)
 	}
+	parkFrameRetention := newFrameRetention()
+	parkFrameRetention.CoroFrameRetentionABI = CoroFrameRetentionParkABIV2
+	if err := parkFrameRetention.validateCoroABIIdentity(false); err != nil {
+		t.Fatalf("complete generic park frame-retention ABI identity: %v", err)
+	}
 	withoutFrameBootstrap := newFrameRetention()
 	withoutFrameBootstrap.EnableCoroProgramBootstrapRun = false
 	if err := withoutFrameBootstrap.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "requires runnable PhysicalABIV1 program-bootstrap lowering") {
@@ -359,5 +364,48 @@ func F(value int) int { return value + 1 }
 	resolved := compile(true)
 	if resolved != baseline {
 		t.Fatal("plain-primary entry resolution changed emitted LLVM IR")
+	}
+}
+
+func TestReportOnlyCoroPlanDoesNotSelectSafeArrayEmission(t *testing.T) {
+	ssaPkg, _, files := buildGoSSAPkg(t, `
+package foo
+
+var values = [...]int{1, 2, 3, 4}
+func Sum() int {
+	total := 0
+	for index := range values { total += values[index] }
+	return total
+}
+`)
+	compile := func(reportOnly bool) string {
+		t.Helper()
+		prog := newLLSSAProg(t)
+		defer prog.Dispose()
+		var compilation *Compilation
+		if reportOnly {
+			universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// An intentionally empty report-only plan must not participate in
+			// physical lowering. In particular, recomputing a safe site outside
+			// this plan cannot trigger the active-plan consistency assertion.
+			compilation = &Compilation{CoroPlan: new(coro.SSAPlan), EmissionUniverse: universe}
+		}
+		pkg, _, err := NewPackageExWithEmbedOptions(
+			prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+			PackageOptions{Compilation: compilation},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pkg.String()
+	}
+
+	baseline := compile(false)
+	reportOnly := compile(true)
+	if reportOnly != baseline {
+		t.Fatal("report-only CoroPlan changed fixed-array LLVM emission")
 	}
 }

@@ -18,6 +18,88 @@ package coro
 
 import "unsafe"
 
+// CurrentExecutorWorkerDriver resolves the exact worker source owner during
+// the narrow compiler worker-hook window. Unlike CurrentExecutorDriver, this
+// entry deliberately requires the active frame to have already published its
+// SuspendPark/FrameSuspended header: the compiler calls the park hook after
+// that publication, and calls the resume cleanup hook before restoring the
+// header to FrameActive.
+//
+// The resume gate, G/P/action, physical handle/header, executor generation,
+// route, and worker-source owner must all agree. The returned driver is an
+// owner-thread capability only; it must not be retained across suspension or
+// placed in a worker job. The owner may use the returned executor handle for
+// bounded backend admission; a backend job retains only the OperationID
+// produced by PrepareCurrentExecutorWorkerPark and by-value scalar arguments.
+func CurrentExecutorWorkerDriver(g *G) (*ExecutorDriver, ExecutorHandle, RouteID, bool) {
+	driver, handle, route, ok := currentExecutorParkDriver(g)
+	if !ok || driver.sources.worker == nil || !validWorkerOperationOwner(driver.sources.worker, driver.p) ||
+		driver.sources.worker.route != route {
+		return nil, ExecutorHandle{}, 0, false
+	}
+	return driver, handle, route, true
+}
+
+func currentExecutorWorkerSource(
+	driver *ExecutorDriver,
+	g *G,
+) (*WorkerOperationSource, bool) {
+	if driver == nil || !ValidG(g) || g.active == nil {
+		return nil, false
+	}
+	current, _, _, ok := CurrentExecutorWorkerDriver(g)
+	if !ok || current != driver {
+		return nil, false
+	}
+	return driver.sources.worker, true
+}
+
+// PrepareCurrentExecutorWorkerPark is the route-exact owner entry. It selects
+// the worker catalog through the current G's P/driver binding rather than a
+// process-global source. Target fleet construction and completion routing are
+// separate adapter responsibilities.
+func PrepareCurrentExecutorWorkerPark(
+	driver *ExecutorDriver,
+	g *G,
+	handle unsafe.Pointer,
+	header *HeaderV1,
+	wait *WaitSetRecord,
+	caseID uint32,
+	seed uint32,
+) (ParkTicket, OperationID, bool) {
+	source, ok := currentExecutorWorkerSource(driver, g)
+	if !ok || handle == nil || header == nil || g.active == nil ||
+		g.active.handle != handle || g.active.header != header {
+		return ParkTicket{}, OperationID{}, false
+	}
+	return PrepareSingleWorkerPark(g, handle, header, source, wait, caseID, seed)
+}
+
+// CommitCurrentExecutorWorkerSubmission records the irreversible backend
+// handoff only against the worker source bound to g's current driver.
+func CommitCurrentExecutorWorkerSubmission(
+	driver *ExecutorDriver,
+	g *G,
+	id OperationID,
+) bool {
+	source, ok := currentExecutorWorkerSource(driver, g)
+	return ok && CommitWorkerSubmission(g, source, id)
+}
+
+// FinishCurrentExecutorWorkerPark strongly retires the exact current owner's
+// worker generation after completion or cancellation cleanup.
+func FinishCurrentExecutorWorkerPark(
+	driver *ExecutorDriver,
+	g *G,
+	id OperationID,
+	lease OperationResultLease,
+	discard bool,
+	out *ScalarResultPayloadV1,
+) bool {
+	source, ok := currentExecutorWorkerSource(driver, g)
+	return ok && FinishSingleWorkerPark(g, source, id, lease, discard, out)
+}
+
 // PrepareSingleWorkerPark installs one irreversible worker completion in the
 // current compiler-owned ParkState. The caller must still make the backend
 // submission durable and call CommitWorkerSubmission before executing

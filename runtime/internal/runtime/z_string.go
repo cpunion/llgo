@@ -38,6 +38,14 @@ type String struct {
 // StringCat concatenates two strings.
 func StringCat(a, b String) String {
 	n := a.len + b.len
+	// Both operands originate from Go strings and therefore have non-negative
+	// lengths. Keep the checks here nevertheless: besides rejecting a corrupt
+	// physical String, n < a.len detects signed-int addition overflow before it
+	// can be converted to the allocator's uintptr size. maxAlloc is the shared
+	// runtime allocation ceiling on both 32- and 64-bit targets.
+	if a.len < 0 || b.len < 0 || n < a.len || uintptr(n) > maxAlloc {
+		panic(errorString("string concatenation too long"))
+	}
 	dest := AllocU(uintptr(n))
 	c.Memcpy(dest, a.data, uintptr(a.len))
 	c.Memcpy(c.Advance(dest, a.len), b.data, uintptr(b.len))

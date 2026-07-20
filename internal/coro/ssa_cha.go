@@ -159,7 +159,29 @@ func restrictedSSACHACandidatesWithDynamicImplements(
 }
 
 func restrictedSSAAddressTakenFunctions(functions []*ssa.Function) map[*ssa.Function]bool {
+	return restrictedSSAAddressTakenFunctionsExcluding(functions, nil)
+}
+
+// restrictedSSAAddressTakenFunctionsExcluding is the managed scalar-function
+// publication inventory used by restricted CHA. An exact static-code-address
+// operand is not a Go function value: the frontend proved that its transient
+// MakeInterface has one structural address consumer and is never materialized.
+// Exclusion is occurrence-local; any other publication of the same function
+// still places it in the managed candidate set.
+func restrictedSSAAddressTakenFunctionsExcluding(
+	functions []*ssa.Function,
+	codeAddressUses []ssaCallArgumentUse,
+) map[*ssa.Function]bool {
 	result := make(map[*ssa.Function]bool)
+	codeAddressBoxes := make(map[*ssa.MakeInterface]struct{}, len(codeAddressUses))
+	for _, use := range codeAddressUses {
+		if use.call == nil || use.call.Common() == nil || use.argument < 0 || use.argument >= len(use.call.Common().Args) {
+			continue
+		}
+		if boxed, ok := use.call.Common().Args[use.argument].(*ssa.MakeInterface); ok {
+			codeAddressBoxes[boxed] = struct{}{}
+		}
+	}
 	operands := make([]*ssa.Value, 0, 8)
 	for _, owner := range functions {
 		if owner == nil {
@@ -167,6 +189,9 @@ func restrictedSSAAddressTakenFunctions(functions []*ssa.Function) map[*ssa.Func
 		}
 		for _, block := range owner.Blocks {
 			for _, instruction := range block.Instrs {
+				if _, debug := instruction.(*ssa.DebugRef); debug {
+					continue
+				}
 				operands = instruction.Operands(operands[:0])
 				for _, operand := range operands {
 					if operand == nil {
@@ -178,6 +203,11 @@ func restrictedSSAAddressTakenFunctions(functions []*ssa.Function) map[*ssa.Func
 					}
 					if call, ok := instruction.(ssa.CallInstruction); ok && operand == &call.Common().Value && call.Common().StaticCallee() == target {
 						continue
+					}
+					if boxed, ok := instruction.(*ssa.MakeInterface); ok && operand == &boxed.X {
+						if _, codeAddress := codeAddressBoxes[boxed]; codeAddress {
+							continue
+						}
 					}
 					result[target] = true
 				}

@@ -74,6 +74,35 @@ func coroSyntheticSelectNoCaseBox(instruction *ssa.MakeInterface) bool {
 	return ok && panicInstruction.X == instruction && coroSyntheticSelectNoCasePanic(panicInstruction)
 }
 
+// coroIndexOperationMayFault mirrors the plan-frozen choice made by
+// compileInstrOrValue. A safe fixed-array bound removes only the range fault;
+// an implicit pointer-to-array dereference can still produce the independent
+// nil fault unless the same emission-time predicates prove its base non-nil.
+func coroIndexOperationMayFault(plan *coro.SSAPlan, instruction ssa.Instruction) bool {
+	var base ssa.Value
+	switch operation := instruction.(type) {
+	case *ssa.Index:
+		base = operation.X
+	case *ssa.IndexAddr:
+		base = operation.X
+	default:
+		return false
+	}
+	if plan == nil {
+		return true
+	}
+	if _, safe := plan.ExactSafeFixedArrayIndex(instruction); !safe {
+		return true
+	}
+	if base == nil || base.Type() == nil {
+		return true
+	}
+	if _, pointer := types.Unalias(base.Type()).Underlying().(*types.Pointer); !pointer {
+		return false
+	}
+	return !emissionKnownNonNilArrayBase(base) && !ssaValueProvenNonNilAt(base, instruction)
+}
+
 const (
 	// Version zero is intentionally experimental: the complete CoroHeader and
 	// FrameDescriptor ABI is not frozen until scheduler/root lowering lands.
@@ -85,16 +114,20 @@ const (
 	coroPhysicalABIVersionV1      uint32 = 1
 	coroFrameAllocHookV1                 = "__llgo_coro_frame_alloc_v1"
 	coroFramePublishHookV1               = "__llgo_coro_frame_publish_v1"
-	coroAwaitPrepareHookV1               = "__llgo_coro_await_prepare_v1"
+	coroAwaitPrepareHookV1               = "__llgo_coro_await_prepare_v3"
+	coroAwaitConsumeHookV1               = "__llgo_coro_await_consume_v1"
 	coroPreemptPollHookV1                = "__llgo_coro_preempt_poll_v1"
 	coroYieldPrepareHookV1               = "__llgo_coro_yield_prepare_v1"
+	coroCriticalEnterHookV1              = "__llgo_coro_critical_enter_v1"
+	coroCriticalExitHookV1               = "__llgo_coro_critical_exit_v1"
 	coroParkPrepareHookV1                = "__llgo_coro_park_prepare_v1"
 	coroRunDecisionTakeHookV1            = "__llgo_coro_run_decision_take_v1"
 	coroRunDecisionTakeZeroHookV1        = "__llgo_coro_run_decision_take_zero_v1"
 	coroPanicPrepareHookV1               = "__llgo_coro_panic_prepare_v1"
+	coroRecoverTakeHookV1                = "__llgo_coro_recover_take_v1"
 	coroSpawnBeginHookV1                 = "__llgo_coro_spawn_begin_v1"
 	coroSpawnCommitHookV1                = "__llgo_coro_spawn_commit_v1"
-	coroCompletePrepareHookV1            = "__llgo_coro_complete_prepare_v1"
+	coroCompletePrepareHookV2            = "__llgo_coro_complete_prepare_v2"
 	coroFrameFreeHookV1                  = "__llgo_coro_frame_free_v1"
 	coroDescriptorPrefixV1               = "__llgo_coro_frame_descriptor_v1."
 )
@@ -143,12 +176,16 @@ type coroPhysicalABI struct {
 	frameFreeHook           string
 	framePublishHook        string
 	awaitPrepareHook        string
+	awaitConsumeHook        string
 	preemptPollHook         string
 	yieldPrepareHook        string
+	criticalEnterHook       string
+	criticalExitHook        string
 	parkPrepareHook         string
 	runDecisionTakeHook     string
 	runDecisionTakeZeroHook string
 	panicPrepareHook        string
+	recoverTakeHook         string
 	completePrepareHook     string
 	physicalSig             *types.Signature
 	resultSlotType          types.Type
@@ -169,19 +206,27 @@ type coroBodyContext struct {
 	finalSuspend           llssa.BasicBlock
 	preemptPoll            llssa.Expr
 	yieldPrepare           llssa.Expr
+	criticalEnter          llssa.Expr
+	criticalExit           llssa.Expr
 	parkPrepare            llssa.Expr
 	runDecisionTakeZero    llssa.Expr
 	runDecisionTrap        llssa.Expr
 	unsupportedRunDecision llssa.BasicBlock
 	cancelRunDecision      llssa.BasicBlock
+	abortRunDecision       llssa.BasicBlock
+	shutdownRunDecision    llssa.BasicBlock
 	panicPrepare           llssa.Expr
 	completePrepare        llssa.Expr
+	terminalStatus         llssa.Expr
 	nextState              uint32
 	terminalState          uint32
 	needsPreempt           bool
 	instructions           int
 	frameRetention         *coroFrameRetentionProof
 	frameRetaining         bool
+	critical               *coroCriticalProof
+	terminalResultAllocs   map[*ssa.Alloc]llssa.Expr
+	sourceBlockPollFresh   bool
 }
 
 func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *types.Signature) coroPhysicalABI {
@@ -196,12 +241,18 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 	descriptorPrefix := coroDescriptorPrefix
 	framePublishHook := ""
 	awaitPrepareHook := ""
+	awaitConsumeHook := ""
 	preemptPollHook := ""
 	yieldPrepareHook := ""
+	criticalEnterHook := ""
+	criticalExitHook := ""
 	parkPrepareHook := ""
 	runDecisionTakeHook := ""
 	runDecisionTakeZeroHook := ""
 	panicPrepareHook := ""
+	recoverTakeHook := ""
+	faultPrepareHook := ""
+	faultPayloadHook := ""
 	completePrepareHook := ""
 	if p.compilation != nil && p.compilation.EnableCoroChildAwait {
 		version = coroPhysicalABIVersionV1
@@ -210,15 +261,23 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		descriptorPrefix = coroDescriptorPrefixV1
 		framePublishHook = coroFramePublishHookV1
 		awaitPrepareHook = coroAwaitPrepareHookV1
+		awaitConsumeHook = coroAwaitConsumeHookV1
 		preemptPollHook = coroPreemptPollHookV1
 		yieldPrepareHook = coroYieldPrepareHookV1
 		parkPrepareHook = coroParkPrepareHookV1
 		runDecisionTakeHook = coroRunDecisionTakeHookV1
 		runDecisionTakeZeroHook = coroRunDecisionTakeZeroHookV1
-		completePrepareHook = coroCompletePrepareHookV1
+		completePrepareHook = coroCompletePrepareHookV2
+		if p.compilation.EnableCoroProgramBootstrapRun {
+			criticalEnterHook = coroCriticalEnterHookV1
+			criticalExitHook = coroCriticalExitHookV1
+		}
 	}
 	if p.compilation != nil && p.compilation.EnableCoroExplicitStatusPanicABI {
 		panicPrepareHook = coroPanicPrepareHookV1
+		recoverTakeHook = coroRecoverTakeHookV1
+		faultPrepareHook = coroFaultPrepareHookV1
+		faultPayloadHook = coroFaultPayloadHookV1
 	}
 	resultFields := make([]*types.Var, sourceSig.Results().Len())
 	for i := range resultFields {
@@ -266,15 +325,23 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		}
 	}
 	key := fmt.Sprintf(
-		"llgo-coro-physical-v%d\x00%s\x00coro=%s\x00scheduler=%s\x00panic=%s\x00func-rep=%s\x00resume-decision=%s\x00resume-decision-zero=%s\x00triple=%s\x00cpu=%s\x00features=%s\x00target-abi=%s\x00data-layout=%s\x00ptr=%d\x00sig=%s\x00result=%s",
+		"llgo-coro-physical-v%d\x00%s\x00coro=%s\x00scheduler=%s\x00panic=%s\x00panic-hook=%s\x00recover-take=%s\x00fault-hook=%s\x00fault-payload-hook=%s\x00func-rep=%s\x00await-prepare=%s\x00await-consume=%s\x00resume-decision=%s\x00resume-decision-zero=%s\x00critical-enter=%s\x00critical-exit=%s\x00triple=%s\x00cpu=%s\x00features=%s\x00target-abi=%s\x00data-layout=%s\x00ptr=%d\x00sig=%s\x00result=%s",
 		version,
 		entry.plan.ID,
 		coroABI,
 		schedulerABI,
 		panicABI,
+		panicPrepareHook,
+		recoverTakeHook,
+		faultPrepareHook,
+		faultPayloadHook,
 		funcRepABI,
+		awaitPrepareHook,
+		awaitConsumeHook,
 		runDecisionTakeHook,
 		runDecisionTakeZeroHook,
+		criticalEnterHook,
+		criticalExitHook,
 		target.Triple,
 		target.CPU,
 		target.Features,
@@ -295,12 +362,16 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		frameFreeHook:           frameFreeHook,
 		framePublishHook:        framePublishHook,
 		awaitPrepareHook:        awaitPrepareHook,
+		awaitConsumeHook:        awaitConsumeHook,
 		preemptPollHook:         preemptPollHook,
 		yieldPrepareHook:        yieldPrepareHook,
+		criticalEnterHook:       criticalEnterHook,
+		criticalExitHook:        criticalExitHook,
 		parkPrepareHook:         parkPrepareHook,
 		runDecisionTakeHook:     runDecisionTakeHook,
 		runDecisionTakeZeroHook: runDecisionTakeZeroHook,
 		panicPrepareHook:        panicPrepareHook,
+		recoverTakeHook:         recoverTakeHook,
 		completePrepareHook:     completePrepareHook,
 		physicalSig:             physicalSig,
 		resultSlotType:          resultSlotType,
@@ -322,7 +393,11 @@ func coroHeaderType(prog llssa.Program) llssa.Type {
 	)
 }
 
-func (p *context) beginCoroBody(b llssa.Builder, abi coroPhysicalABI) *coroBodyContext {
+func (p *context) beginCoroBody(
+	b llssa.Builder,
+	abi coroPhysicalABI,
+	terminalResultAllocations []*ssa.Alloc,
+) *coroBodyContext {
 	prog := p.prog
 	resultType := prog.Type(abi.resultSlotType, llssa.InGo)
 	descriptor := p.pkg.NewCoroFrameDescriptor(abi.descriptorName, llssa.CoroFrameDescriptorOptions{
@@ -371,17 +446,26 @@ func (p *context) beginCoroBody(b llssa.Builder, abi coroPhysicalABI) *coroBodyC
 		},
 	}
 	body := &coroBodyContext{
-		abi:        abi,
-		header:     header,
-		task:       task,
-		resultSlot: resultSlot,
-		nextState:  1,
+		abi:                  abi,
+		header:               header,
+		task:                 task,
+		resultSlot:           resultSlot,
+		nextState:            1,
+		terminalResultAllocs: make(map[*ssa.Alloc]llssa.Expr, len(terminalResultAllocations)),
+	}
+	if abi.version >= coroPhysicalABIVersionV1 {
+		// The cleanup base is frame-local rather than G-local: deferred code
+		// invoked while a task is canceling must still be able to make ordinary
+		// managed calls and receive their ordinary Return outcomes.
+		body.terminalStatus = b.AllocaT(prog.Uint32())
+		b.Store(body.terminalStatus, prog.IntVal(coroAwaitCompletionReturn, prog.Uint32()))
 	}
 	if abi.runDecisionTakeZeroHook != "" {
 		body.runDecisionTakeZero = p.pkg.NewFunc(
 			abi.runDecisionTakeZeroHook, coroRunDecisionTakeZeroSignature(), llssa.InC,
 		).Expr
-		if p.compilation != nil && (p.compilation.EnableCoroChannel || p.compilation.EnableCoroWorker) {
+		if p.compilation != nil && (p.compilation.EnableCoroChannel || p.compilation.EnableCoroWorker ||
+			p.compilation.CoroFrameRetentionABI == CoroFrameRetentionParkABIV2) {
 			body.unsupportedRunDecision = p.fn.MakeBlock()
 			body.runDecisionTrap = p.pkg.NewFunc(
 				"llvm.trap", types.NewSignatureType(nil, nil, nil, nil, nil, false), llssa.InC,
@@ -393,6 +477,12 @@ func (p *context) beginCoroBody(b llssa.Builder, abi coroPhysicalABI) *coroBodyC
 	}
 	if abi.yieldPrepareHook != "" {
 		body.yieldPrepare = p.pkg.NewFunc(abi.yieldPrepareHook, coroYieldPrepareSignature(), llssa.InC).Expr
+	}
+	if abi.criticalEnterHook != "" {
+		body.criticalEnter = p.pkg.NewFunc(abi.criticalEnterHook, coroCriticalEnterSignature(), llssa.InC).Expr
+	}
+	if abi.criticalExitHook != "" {
+		body.criticalExit = p.pkg.NewFunc(abi.criticalExitHook, coroCriticalExitSignature(), llssa.InC).Expr
 	}
 	if abi.parkPrepareHook != "" {
 		body.parkPrepare = p.pkg.NewFunc(abi.parkPrepareHook, coroParkPrepareSignature(), llssa.InC).Expr
@@ -413,6 +503,28 @@ func (p *context) beginCoroBody(b llssa.Builder, abi coroPhysicalABI) *coroBodyC
 			if abi.framePublishHook != "" {
 				publish := p.pkg.NewFunc(abi.framePublishHook, coroFramePublishSignature(), llssa.InC)
 				b.Call(publish.Expr, task, handle, b.Convert(prog.VoidPtr(), header), storage)
+			}
+			// A named result captured by a defer is an ordinary Go heap object,
+			// but x/tools reloads it from compiler-owned RunDefers continuations.
+			// Define only that structurally certified subset after frame/header
+			// publication and before the initial suspend. Its pointer then dominates
+			// every normal, cancellation, and cleanup continuation, and CoroSplit
+			// retains it exactly when live without changing heap identity.
+			for _, allocation := range terminalResultAllocations {
+				if allocation == nil || !allocation.Heap || allocation.Parent() != p.goFn ||
+					allocation.Block() == nil || allocation.Block().Index != 0 {
+					panic("coroutine terminal-result allocation lost its exact source-entry heap proof")
+				}
+				if _, duplicate := body.terminalResultAllocs[allocation]; duplicate {
+					panic("duplicate coroutine terminal-result allocation")
+				}
+				pointer, ok := types.Unalias(allocation.Type()).Underlying().(*types.Pointer)
+				if !ok {
+					panic("coroutine terminal-result allocation is not pointer typed")
+				}
+				value := b.Alloc(p.type_(pointer.Elem(), llssa.InGo), true)
+				body.terminalResultAllocs[allocation] = value
+				p.bvals[allocation] = value
 			}
 		},
 	}
@@ -474,8 +586,23 @@ func coroAwaitPrepareSignature() *types.Signature {
 		types.NewParam(token.NoPos, nil, "g", types.Typ[types.UnsafePointer]),
 		types.NewParam(token.NoPos, nil, "parent", types.Typ[types.UnsafePointer]),
 		types.NewParam(token.NoPos, nil, "child", types.Typ[types.UnsafePointer]),
+		types.NewParam(token.NoPos, nil, "recoverMode", types.Typ[types.Uint32]),
+		types.NewParam(token.NoPos, nil, "recoverType", types.Typ[types.UnsafePointer]),
+		types.NewParam(token.NoPos, nil, "recoverData", types.Typ[types.UnsafePointer]),
 	)
 	return types.NewSignatureType(nil, nil, nil, params, nil, false)
+}
+
+func coroAwaitConsumeSignature() *types.Signature {
+	pointer := types.Typ[types.UnsafePointer]
+	params := types.NewTuple(
+		types.NewParam(token.NoPos, nil, "g", pointer),
+		types.NewParam(token.NoPos, nil, "parent", pointer),
+		types.NewParam(token.NoPos, nil, "typeOut", pointer),
+		types.NewParam(token.NoPos, nil, "dataOut", pointer),
+	)
+	results := types.NewTuple(types.NewParam(token.NoPos, nil, "status", types.Typ[types.Uint32]))
+	return types.NewSignatureType(nil, nil, nil, params, results, false)
 }
 
 func coroCompletePrepareSignature() *types.Signature {
@@ -483,12 +610,18 @@ func coroCompletePrepareSignature() *types.Signature {
 		types.NewParam(token.NoPos, nil, "g", types.Typ[types.UnsafePointer]),
 		types.NewParam(token.NoPos, nil, "handle", types.Typ[types.UnsafePointer]),
 		types.NewParam(token.NoPos, nil, "header", types.Typ[types.UnsafePointer]),
+		types.NewParam(token.NoPos, nil, "status", types.Typ[types.Uint32]),
 	)
 	return types.NewSignatureType(nil, nil, nil, params, nil, false)
 }
 
 func coroYieldPrepareSignature() *types.Signature {
-	return coroCompletePrepareSignature()
+	params := types.NewTuple(
+		types.NewParam(token.NoPos, nil, "g", types.Typ[types.UnsafePointer]),
+		types.NewParam(token.NoPos, nil, "handle", types.Typ[types.UnsafePointer]),
+		types.NewParam(token.NoPos, nil, "header", types.Typ[types.UnsafePointer]),
+	)
+	return types.NewSignatureType(nil, nil, nil, params, nil, false)
 }
 
 func coroParkPrepareSignature() *types.Signature {
@@ -509,6 +642,17 @@ func coroRunDecisionTakeZeroSignature() *types.Signature {
 }
 
 func coroPreemptPollSignature() *types.Signature {
+	params := types.NewTuple(types.NewParam(token.NoPos, nil, "g", types.Typ[types.UnsafePointer]))
+	results := types.NewTuple(types.NewParam(token.NoPos, nil, "requested", types.Typ[types.Bool]))
+	return types.NewSignatureType(nil, nil, nil, params, results, false)
+}
+
+func coroCriticalEnterSignature() *types.Signature {
+	params := types.NewTuple(types.NewParam(token.NoPos, nil, "g", types.Typ[types.UnsafePointer]))
+	return types.NewSignatureType(nil, nil, nil, params, nil, false)
+}
+
+func coroCriticalExitSignature() *types.Signature {
 	params := types.NewTuple(types.NewParam(token.NoPos, nil, "g", types.Typ[types.UnsafePointer]))
 	results := types.NewTuple(types.NewParam(token.NoPos, nil, "requested", types.Typ[types.Bool]))
 	return types.NewSignatureType(nil, nil, nil, params, results, false)
@@ -547,18 +691,37 @@ func (c *coroBodyContext) activate(b llssa.Builder) {
 // zero-ticket decision and returns only None/Abort/Shutdown. No output address
 // exists for CoroSplit to retain in the stackless coroutine frame.
 func (c *coroBodyContext) dispatchZeroRunDecision(b llssa.Builder, normal llssa.BasicBlock) {
-	if c.abi.version < coroPhysicalABIVersionV1 || c.runDecisionTakeZero.IsNil() {
-		panic("coroutine resume requires PhysicalABIV1 zero-ticket run-decision hook")
-	}
-	zero := b.Prog.IntVal(0, b.Prog.Uint32())
-	taskKind := b.Call(c.runDecisionTakeZero, c.task)
 	if c.cancelRunDecision == nil {
 		c.cancelRunDecision = b.Func.MakeBlock()
 	}
+	c.dispatchZeroRunDecisionTo(b, normal, c.cancelRunDecision)
+}
+
+func (c *coroBodyContext) dispatchZeroRunDecisionTo(
+	b llssa.Builder, normal, canceled llssa.BasicBlock,
+) {
+	if c.abi.version < coroPhysicalABIVersionV1 || c.runDecisionTakeZero.IsNil() {
+		panic("coroutine resume requires PhysicalABIV1 zero-ticket run-decision hook")
+	}
+	if canceled == nil {
+		panic("coroutine resume decision has no cancellation destination")
+	}
+	if c.terminalStatus.IsNil() {
+		panic("coroutine resume cancellation requires frame-local terminal status")
+	}
+	zero := b.Prog.IntVal(0, b.Prog.Uint32())
+	taskKind := b.Call(c.runDecisionTakeZero, c.task)
 	// The runtime ABI validates the complete decision and aborts before return
 	// for every value other than None/Abort/Shutdown. Any nonzero value reaching
 	// generated IR is therefore an exact task-cancellation cleanup request.
-	b.If(b.BinOp(token.NEQ, taskKind, zero), c.cancelRunDecision, normal)
+	isCanceled := b.BinOp(token.NEQ, taskKind, zero)
+	// Runtime validation restricts nonzero taskKind to Abort=1/Shutdown=2;
+	// CompletionAbort/Shutdown are exactly those values plus two. Preserve the
+	// existing base on normal resumes so safepoints inside cleanup are masked.
+	mapped := b.BinOp(token.ADD, taskKind, b.Prog.IntVal(2, b.Prog.Uint32()))
+	current := b.Load(c.terminalStatus)
+	b.Store(c.terminalStatus, b.SelectValue(isCanceled, mapped, current))
+	b.If(isCanceled, canceled, normal)
 }
 
 func (c *coroBodyContext) bindCancellationCompletion(b llssa.Builder) {
@@ -569,7 +732,52 @@ func (c *coroBodyContext) bindCancellationCompletion(b llssa.Builder) {
 		panic("coroutine cancellation resume gate requires a completion block")
 	}
 	b.SetBlock(c.cancelRunDecision)
-	b.Jump(c.completion)
+	if c.cleanup == nil {
+		b.Jump(c.completion)
+	} else {
+		c.cleanup.enterCancellation(b)
+	}
+}
+
+// cancellationRunDecisionTargets adapts operation-specific resume statuses to
+// the same frame-local terminal base used by the scalar zero-ticket gate. The
+// operation resume hook has already consumed/discarded its result ownership;
+// these tiny blocks only retain Abort versus Shutdown before shared cleanup.
+func (c *coroBodyContext) cancellationRunDecisionTargets(
+	b llssa.Builder,
+) (abort, shutdown llssa.BasicBlock) {
+	if b.Func == nil || c.cancelRunDecision == nil || c.terminalStatus.IsNil() {
+		panic("coroutine operation cancellation requires a bound cleanup destination")
+	}
+	makeTarget := func(status uint64) llssa.BasicBlock {
+		target := b.Func.MakeBlock()
+		builder := b.Func.NewBuilder()
+		defer builder.Dispose()
+		builder.SetBlock(target)
+		builder.Store(c.terminalStatus, builder.Prog.IntVal(status, builder.Prog.Uint32()))
+		builder.Jump(c.cancelRunDecision)
+		return target
+	}
+	if c.abortRunDecision == nil {
+		c.abortRunDecision = makeTarget(coroAwaitCompletionAbort)
+	}
+	if c.shutdownRunDecision == nil {
+		c.shutdownRunDecision = makeTarget(coroAwaitCompletionShutdown)
+	}
+	return c.abortRunDecision, c.shutdownRunDecision
+}
+
+func (c *coroBodyContext) enterCancellation(b llssa.Builder, status uint64) {
+	if c.terminalStatus.IsNil() || c.completion == nil ||
+		(status != coroAwaitCompletionAbort && status != coroAwaitCompletionShutdown) {
+		panic("coroutine cancellation has an invalid terminal status")
+	}
+	b.Store(c.terminalStatus, b.Prog.IntVal(status, b.Prog.Uint32()))
+	if c.cleanup == nil {
+		b.Jump(c.completion)
+	} else {
+		c.cleanup.enterCancellation(b)
+	}
 }
 
 func (c *coroBodyContext) suspendForChild(b llssa.Builder) uint32 {
@@ -587,16 +795,40 @@ func (c *coroBodyContext) pollAndSuspendForPreempt(b llssa.Builder) uint32 {
 	if c.abi.version < coroPhysicalABIVersionV1 || c.preemptPoll.IsNil() || c.yieldPrepare.IsNil() {
 		panic("coroutine preemption requires PhysicalABIV1 poll and scheduler handoff hooks")
 	}
+	return c.suspendCurrentFrameIfYieldRequested(b, b.Call(c.preemptPoll, c.task))
+}
+
+// suspendCurrentFrameIfYieldRequested is the shared conditional runnable
+// handoff used by an ordinary poll and by the outermost critical-region exit.
+// The runtime has already consumed the exact request before requested=true is
+// returned; only the true edge publishes and suspends this physical frame.
+func (c *coroBodyContext) suspendCurrentFrameIfYieldRequested(b llssa.Builder, requested llssa.Expr) uint32 {
+	if c.abi.version < coroPhysicalABIVersionV1 || c.yieldPrepare.IsNil() {
+		panic("coroutine conditional preemption requires the PhysicalABIV1 scheduler handoff hook")
+	}
 	stateID := c.nextState
 	c.nextState++
 	c.instructions = 0
-	requested := b.Call(c.preemptPoll, c.task)
 	c.coro.SuspendCurrentBlockIf(requested, func(suspend llssa.Builder) {
 		c.publishState(suspend, coroSuspendYield, coroLifecycleSuspended, stateID)
 		suspend.Call(c.yieldPrepare, c.task, c.coro.Handle(), suspend.Convert(suspend.Prog.VoidPtr(), c.header))
 	})
 	// The false edge is already active. The CoroBuilder AfterResume callback
 	// consumes a decision only on the resumed true edge before this join.
+	c.activate(b)
+	return stateID
+}
+
+func (c *coroBodyContext) yieldCurrentFrame(b llssa.Builder) uint32 {
+	if c.abi.version < coroPhysicalABIVersionV1 || c.yieldPrepare.IsNil() {
+		panic("coroutine yield requires PhysicalABIV1 scheduler handoff hooks")
+	}
+	stateID := c.nextState
+	c.nextState++
+	c.instructions = 0
+	c.publishState(b, coroSuspendYield, coroLifecycleSuspended, stateID)
+	b.Call(c.yieldPrepare, c.task, c.coro.Handle(), b.Convert(b.Prog.VoidPtr(), c.header))
+	c.coro.SuspendCurrentBlock()
 	c.activate(b)
 	return stateID
 }
@@ -636,6 +868,16 @@ func (p *context) compileCoroPark(b llssa.Builder, args []llssa.Expr) {
 	p.currentCoro.parkCurrentFrame(b, args[0], args[1])
 }
 
+func (p *context) compileCoroYield(b llssa.Builder) {
+	if p.currentCoro == nil || p.compilation == nil || !p.compilation.EnableCoroChildAwait {
+		panic("llgo.coroYield requires an active PhysicalABIV1 coroutine body")
+	}
+	if b.Func != p.fn {
+		panic("llgo.coroYield requires the active coroutine function")
+	}
+	p.currentCoro.yieldCurrentFrame(b)
+}
+
 func (c *coroBodyContext) countInstructionAndMaybeYield(b llssa.Builder) {
 	if !c.needsPreempt {
 		return
@@ -661,7 +903,16 @@ func (c *coroBodyContext) complete(b llssa.Builder) {
 	}
 	c.publishState(b, coroSuspendFrameComplete, coroLifecycleFinalSuspended, c.terminalStateID())
 	if !c.completePrepare.IsNil() {
-		b.Call(c.completePrepare, c.task, c.coro.Handle(), b.Convert(b.Prog.VoidPtr(), c.header))
+		if c.terminalStatus.IsNil() {
+			panic("coroutine completion has no frame-local terminal status")
+		}
+		b.Call(
+			c.completePrepare,
+			c.task,
+			c.coro.Handle(),
+			b.Convert(b.Prog.VoidPtr(), c.header),
+			b.Load(c.terminalStatus),
+		)
 	}
 	b.Jump(c.finalSuspend)
 }
@@ -705,15 +956,25 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	oldCoro := p.currentCoro
 	oldSourceBlocks := p.coroSourceBlocks
 	p.sourceParamBase = 2
+	if len(fn.FreeVars) != 0 {
+		// Captured descriptor entries are (g,out,ctx,args...). The context is an
+		// explicit physical parameter rather than aFunction's legacy implicit
+		// closure parameter, so SSA source parameters begin after all three words.
+		p.sourceParamBase = 3
+	}
 	defer func() {
 		p.sourceParamBase = oldBase
 		p.currentCoro = oldCoro
 		p.coroSourceBlocks = oldSourceBlocks
 	}()
 
-	audit, err := newCoroPhysicalPureSSAAudit(p.emissionUniverse, fn, p.compilation.CoroFrameRetentionABI)
+	audit, err := newCoroPhysicalPureSSAAudit(p.emissionUniverse, p.compilation.CoroPlan, fn, p.compilation.CoroFrameRetentionABI)
 	if err != nil {
 		panic(fmt.Errorf("rebuild coroutine frame-retention proof: %w", err))
+	}
+	critical, err := proveCoroCriticalRegions(p.emissionUniverse, p.compilation.CoroPlan, audit)
+	if err != nil {
+		panic(fmt.Errorf("rebuild coroutine critical-region proof: %w", err))
 	}
 	frameRetention := audit.currentFrameRetentionProof()
 	cleanupPlan, err := prepareCoroStaticCleanupPlan(
@@ -726,8 +987,16 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 
 	b.SetBlock(p.fn.Block(0))
 	cleanup := p.beginCoroStaticCleanup(b, cleanupPlan)
-	physical := p.beginCoroBody(b, abi)
+	terminalResultAllocations := []*ssa.Alloc(nil)
+	if cleanupPlan != nil {
+		terminalResultAllocations = cleanupPlan.terminalResultAllocations
+	}
+	if !coroTerminalResultAllocationSetMatches(frameRetention, terminalResultAllocations) {
+		panic("coroutine cleanup plan and frame-retention proof disagree on terminal-result allocations")
+	}
+	physical := p.beginCoroBody(b, abi, terminalResultAllocations)
 	physical.frameRetention = frameRetention
+	physical.critical = critical
 	physical.cleanup = cleanup
 	if physical.cleanup != nil {
 		physical.cleanup.bindBlocks(p.fn)
@@ -762,7 +1031,16 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	i := 0
 	for {
 		block := fn.Blocks[i]
-		if physical.needsPreempt {
+		physical.sourceBlockPollFresh = false
+		entryDepth := uint32(0)
+		if physical.critical != nil {
+			var proven bool
+			entryDepth, proven = physical.critical.entryDepth[block]
+			if !proven {
+				panic("coroutine critical proof has no source-block entry depth")
+			}
+		}
+		if physical.needsPreempt && entryDepth == 0 {
 			physical.instructions = 0
 			// Every source block, including block zero, begins with a poll. A
 			// child initial suspend is a scheduler boundary but not necessarily
@@ -772,6 +1050,7 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 			// as ordinary CFG paths and block-zero backedges.
 			b.SetBlock(p.sourceBlock(i))
 			physical.pollAndSuspendForPreempt(b)
+			physical.sourceBlockPollFresh = true
 		}
 		doModInit := i == 1 && isInit
 		p.compileBlock(b, block, off[i], doModInit)
@@ -826,11 +1105,11 @@ func validateCoroPhysicalABIWithUniverseCapabilities(fn *ssa.Function, plan coro
 
 func validateCoroPhysicalABIWithUniverseCapabilitiesAndFrameRetention(fn *ssa.Function, plan coro.FunctionPlan, whole *coro.SSAPlan, universe *EmissionUniverse, childAwait, programRun, staticSpawn, explicitPanic bool, frameRetentionABI string) error {
 	return validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(
-		fn, plan, whole, universe, childAwait, programRun, staticSpawn, explicitPanic, frameRetentionABI, false,
+		fn, plan, whole, universe, childAwait, programRun, staticSpawn, explicitPanic, frameRetentionABI, false, false, false,
 	)
 }
 
-func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn *ssa.Function, plan coro.FunctionPlan, whole *coro.SSAPlan, universe *EmissionUniverse, childAwait, programRun, staticSpawn, explicitPanic bool, frameRetentionABI string, channel bool) error {
+func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn *ssa.Function, plan coro.FunctionPlan, whole *coro.SSAPlan, universe *EmissionUniverse, childAwait, programRun, staticSpawn, explicitPanic bool, frameRetentionABI string, channel, managedDispatch, rawMethodToken bool) error {
 	if !childAwait {
 		if explicitPanic {
 			return fmt.Errorf("coroutine physical ABI: function %q: explicit-status panic requires PhysicalABIV1 child-await lowering", plan.ID)
@@ -839,7 +1118,11 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 	}
 
 	fail := func(format string, args ...any) error {
-		return fmt.Errorf("coroutine physical ABI: function %q: %s", plan.ID, fmt.Sprintf(format, args...))
+		name := "<nil>"
+		if fn != nil {
+			name = fn.String()
+		}
+		return fmt.Errorf("coroutine physical ABI: function %q (%s): %s", plan.ID, name, fmt.Sprintf(format, args...))
 	}
 	if fn == nil || plan.External != coro.Defined || len(fn.Blocks) == 0 {
 		return fail("requires one defined SSA body")
@@ -847,20 +1130,33 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 	if emitShadowStackInstrumentation {
 		return fail("legacy thread-local shadow-stack instrumentation is incompatible with stackless coroutine suspension")
 	}
-	if plan.Emission != coro.EmitCoroutine || plan.FuncRep != coro.DirectCoro {
-		return fail("requires a direct coroutine emission, got emission=%s representation=%s", plan.Emission, plan.FuncRep)
+	managedDispatchTarget := managedDispatch && plan.FuncRep == coro.Dispatch &&
+		fn.Signature != nil && fn.Signature.Recv() == nil
+	rawMethodDispatchToken := rawMethodToken && plan.FuncRep == coro.Dispatch &&
+		fn.Signature != nil && fn.Signature.Recv() != nil
+	if plan.Emission != coro.EmitCoroutine ||
+		plan.FuncRep != coro.DirectCoro && !managedDispatchTarget && !rawMethodDispatchToken {
+		return fail("requires a direct coroutine or capability-certified Dispatch emission, got emission=%s representation=%s", plan.Emission, plan.FuncRep)
 	}
-	if plan.Demand != coro.AsyncDemand {
-		return fail("requires async-only demand until root and hard-sync adapters exist, got %s", plan.Demand)
+	if !plan.ManagedDemand.Contains(coro.AsyncDemand) {
+		return fail(
+			"requires managed async demand, got aggregate=%s managed=%s raw=%t raw-entry=%t",
+			plan.Demand, plan.ManagedDemand, plan.RawPlainDemand, plan.RawPlainEntry,
+		)
 	}
-	if plan.Recursive {
-		return fail("recursive coroutine lowering requires child frames and preemption polls")
-	}
+	rawVariant := whole != nil && whole.HasRawPlainVariant(fn)
+	// A recursive edge uses the same structured child-frame transaction as any
+	// other exact coroutine call. Recursive SCCs also carry NeedsPreempt, whose
+	// runnable-scheduler gate below guarantees bounded execution between polls.
+	// PhysicalABIV0 remains leaf-only and retains its separate rejection.
 	cleanupPlan, cleanupErr := prepareCoroStaticCleanupPlan(
 		fn, whole, universe, frameRetentionABI, explicitPanic,
 	)
 	if cleanupErr != nil {
 		return fail("static cleanup: %v", cleanupErr)
+	}
+	if err := validateCoroDynamicCleanupHelpers(cleanupPlan, whole); err != nil {
+		return fail("dynamic cleanup: %v", err)
 	}
 	if plan.Exec.Contains(coro.NeedsPreempt) && !programRun {
 		return fail("needs-preempt execution requires the runnable scheduler ABI")
@@ -876,11 +1172,8 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 	if unsupported := plan.Exec &^ allowedExec; unsupported != 0 {
 		return fail("execution flags %s require lowering outside the CFG physical ABI", unsupported)
 	}
-	if fn.Parent() != nil || len(fn.FreeVars) != 0 {
-		return fail("closures require the coroutine context ABI")
-	}
-	if len(fn.AnonFuncs) != 0 {
-		return fail("nested function literals require closure body lowering")
+	if len(fn.FreeVars) != 0 && !managedDispatchTarget && plan.FuncRep != coro.DirectCoro {
+		return fail("captured coroutine bodies require one exact direct or capability-certified descriptor context ABI")
 	}
 	if fn.Recover != nil && cleanupPlan == nil {
 		return fail("recover blocks require coroutine cleanup/unwind lowering")
@@ -890,58 +1183,108 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 			return fail("static cleanup recover block: %v", err)
 		}
 	}
-	if fn.Signature.Variadic() {
-		return fail("variadic coroutine ABI is not implemented")
+	directive, directiveErr := coroRawABIDirective(fn, universe)
+	if directiveErr != nil {
+		return fail("classify ABI directive: %v", directiveErr)
 	}
-	if directive := coroLeafABIDirective(fn); directive != "" {
+	if directive != "" && !(plan.RawPlainEntry && rawVariant) {
 		return fail("ABI directive %q requires a root or foreign adapter", directive)
 	}
 	if isCgoExternSymbol(fn) {
 		return fail("cgo entry requires a foreign adapter")
 	}
 	programEntry := programRun && isCoroProgramManagedEntry(fn)
-	if fn.Synthetic != "" && !(programEntry && fn.Name() == "init" && fn.Synthetic == "package initializer") {
+	genericInstance := coroMaterializedGenericCallable(fn)
+	boundMethodWrapper := false
+	if managedDispatchTarget && strings.HasPrefix(fn.Synthetic, "bound method wrapper for ") {
+		if err := validateCoroExactBoundMethodWrapper(fn); err != nil {
+			return fail("invalid bound method wrapper: %v", err)
+		}
+		boundMethodWrapper = true
+	}
+	methodExpressionThunk := false
+	if strings.HasPrefix(fn.Synthetic, "thunk for ") {
+		if err := validateCoroExactMethodExpressionThunk(fn); err != nil {
+			return fail("invalid method-expression thunk: %v", err)
+		}
+		methodExpressionThunk = true
+	}
+	methodTokenWrapper := rawMethodToken && fn.Signature != nil && fn.Signature.Recv() != nil &&
+		strings.Contains(fn.Synthetic, "wrapper for")
+	capturedRawVariant := rawVariant && len(fn.FreeVars) != 0
+	if fn.Synthetic != "" && !genericInstance && !boundMethodWrapper && !methodExpressionThunk && !methodTokenWrapper &&
+		!capturedRawVariant &&
+		!(programEntry && fn.Name() == "init" && fn.Synthetic == "package initializer") {
 		return fail("synthetic function %q is outside the leaf ABI", fn.Synthetic)
 	}
-	if list := fn.TypeParams(); list != nil && list.Len() != 0 {
+	if list := fn.TypeParams(); list != nil && list.Len() != 0 && !genericInstance {
 		return fail("generic declarations are not materialized coroutine bodies")
 	}
-	if list := fn.Signature.RecvTypeParams(); list != nil && list.Len() != 0 {
+	if list := fn.Signature.RecvTypeParams(); list != nil && list.Len() != 0 && !genericInstance {
 		return fail("generic receivers are not materialized coroutine bodies")
 	}
-	if list := fn.TypeArgs(); len(list) != 0 {
+	if list := fn.TypeArgs(); len(list) != 0 && !genericInstance {
 		return fail("generic instances require a frozen instantiated ABI")
 	}
-	if (fn.Name() == "main" || strings.HasPrefix(fn.Name(), "init")) && !programEntry {
+	if isCoroProgramManagedEntry(fn) && !programEntry {
 		return fail("program roots require scheduler bootstrap lowering")
 	}
 	physicalSourceSig := coroPhysicalNormalizeSourceSignature(fn.Signature)
 	if universe != nil {
 		var signatureErr error
-		physicalSourceSig, signatureErr = universe.coroPhysicalSourceSignature(fn)
+		physicalSourceSig, signatureErr = universe.coroPhysicalEntrySourceSignature(fn)
 		if signatureErr != nil {
 			return fail("derive effective source signature: %v", signatureErr)
 		}
 	}
-	if err := validateCoroPhysicalSSAParameterShape(plan, fn, physicalSourceSig); err != nil {
+	if err := validateCoroPhysicalSSAParameterShape(plan, fn, physicalSourceSig, universe); err != nil {
 		return err
 	}
 	if err := validateCoroLeafPhysicalSignature(plan, physicalSourceSig); err != nil {
 		return err
 	}
-	pureSSA, err := newCoroPhysicalPureSSAAudit(universe, fn, frameRetentionABI)
+	pureSSA, err := newCoroPhysicalPureSSAAudit(universe, whole, fn, frameRetentionABI)
 	if err != nil {
 		return fail("cannot audit pure SSA lowering: %v", err)
+	}
+	// Nullable FieldAddr values are accepted only under the target-wide
+	// explicit-status identity. Codegen then replaces the host signal/legacy
+	// AssertNilDeref behavior with a compiler-owned terminal coroutine edge.
+	pureSSA.allowImplicitNilFault = explicitPanic
+	pureSSA.allowExplicitRecover = explicitPanic
+	terminalResultAllocations := []*ssa.Alloc(nil)
+	if cleanupPlan != nil {
+		terminalResultAllocations = cleanupPlan.terminalResultAllocations
+	}
+	if !coroTerminalResultAllocationSetMatches(pureSSA.currentFrameRetentionProof(), terminalResultAllocations) {
+		return fail("static cleanup and frame-retention proofs disagree on terminal-result allocations")
+	}
+	critical, criticalErr := proveCoroCriticalRegions(universe, whole, pureSSA)
+	if criticalErr != nil {
+		return fail("critical region: %v", criticalErr)
+	}
+	if critical != nil && !programRun {
+		return fail("critical regions require the runnable scheduler ABI")
 	}
 
 	panics := 0
 	awaits := 0
 	parks := 0
+	foreignWaits := 0
+	yields := 0
 	spawns := 0
 	if cleanupPlan != nil {
 		for _, site := range cleanupPlan.sites {
-			if site.kind == coroStaticCleanupCoroutine {
+			switch site.kind {
+			case coroStaticCleanupCoroutine:
 				awaits++
+			case coroStaticCleanupDispatch:
+				if !managedDispatch {
+					return fail("managed descriptor defer requires the v1 descriptor dispatch capability")
+				}
+				if site.callPlan.Open || coroDispatchCallHasCoroutineTarget(whole, site.callPlan) {
+					awaits++
+				}
 			}
 		}
 	}
@@ -950,7 +1293,12 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 	for _, info := range infos {
 		hasCyclicBlock = hasCyclicBlock || info.InLoop
 	}
-	if hasCyclicBlock && !plan.Exec.Contains(coro.NeedsPreempt) {
+	// A RawPlainVariant with a cyclic body can lack NeedsPreempt only when the
+	// frontend's exact compiler-runtime island policy suppressed the scanner
+	// seed. Its raw execution is an intentionally atomic/bounded scheduler
+	// transaction; ordinary source callbacks are not given that policy and keep
+	// NeedsPreempt. The managed primary otherwise requires normal poll lowering.
+	if hasCyclicBlock && !plan.Exec.Contains(coro.NeedsPreempt) && !rawVariant {
 		return fail("cyclic CFG requires needs-preempt execution classification")
 	}
 	for _, block := range fn.Blocks {
@@ -964,6 +1312,23 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 			if handled, reason := pureSSA.validate(instr); handled {
 				if reason != "" {
 					return coroLeafInstructionError(fn, plan, instr, reason)
+				}
+				if field, ok := instr.(*ssa.FieldAddr); ok && pureSSA.fieldAddrRequiresImplicitNilFault(field) {
+					panics++
+				}
+				if explicitPanic && coroIndexOperationMayFault(whole, instr) {
+					panics++
+				}
+				if conversion, ok := instr.(*ssa.SliceToArrayPointer); ok && explicitPanic {
+					if length, exact := coroSliceToArrayPointerLen(conversion, pureSSA.typeOf); exact && length != 0 {
+						panics++
+					}
+				}
+				if call, ok := instr.(*ssa.Call); ok && explicitPanic && isWrapNilCheckCall(call) {
+					panics++
+				}
+				if call, ok := instr.(*ssa.Call); ok && explicitPanic && isCoroCloseBuiltinCall(call) {
+					panics++
 				}
 				continue
 			}
@@ -993,9 +1358,6 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 					return coroLeafInstructionError(fn, plan, instr, "potentially panicking or non-scalar binary operation")
 				}
 			case *ssa.Send:
-				if cleanupPlan != nil {
-					return coroLeafInstructionError(fn, plan, instr, "channel send panic outcomes require cleanup-aware channel lowering")
-				}
 				if !channel {
 					return coroLeafInstructionError(fn, plan, instr, "blocking channel send requires the channel scheduler capability")
 				}
@@ -1004,9 +1366,6 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 				}
 				parks++
 			case *ssa.Select:
-				if cleanupPlan != nil {
-					return coroLeafInstructionError(fn, plan, instr, "channel select outcomes require cleanup-aware channel lowering")
-				}
 				if !channel {
 					return coroLeafInstructionError(fn, plan, instr, "channel select requires the channel scheduler capability")
 				}
@@ -1026,9 +1385,6 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 				}
 			case *ssa.UnOp:
 				if instr.Op == token.ARROW {
-					if cleanupPlan != nil {
-						return coroLeafInstructionError(fn, plan, instr, "channel receive outcomes require cleanup-aware channel lowering")
-					}
 					if !channel {
 						return coroLeafInstructionError(fn, plan, instr, "blocking channel receive requires the channel scheduler capability")
 					}
@@ -1051,11 +1407,33 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 								return coroLeafInstructionError(fn, plan, instr, "invalid frozen intrinsic: "+err.Error())
 							}
 							if cleanupPlan != nil && (!intrinsic ||
-								(semantics != CoroIntrinsicCallInlineNoSuspend && semantics != CoroIntrinsicCallInlineSuspend)) {
+								(semantics != CoroIntrinsicCallInlineNoSuspend && semantics != CoroIntrinsicCallInlineSuspend &&
+									semantics != CoroIntrinsicCallInlineYield)) {
 								return coroLeafInstructionError(fn, plan, instr, "elided intrinsic has no cleanup-safe no-unwind contract")
 							}
-							if intrinsic && semantics.SuspendsCurrentFrame() {
+							if intrinsic && semantics == CoroIntrinsicCallInlineSuspend {
+								if opcode, exact, opcodeErr := universe.coroIntrinsicOpcode(rawCallee); opcodeErr != nil {
+									return coroLeafInstructionError(fn, plan, instr, "resolve frozen intrinsic opcode: "+opcodeErr.Error())
+								} else if exact && isLLGoSyscallIntrinsic(opcode) {
+									if err := validateCoroWorkerSyscallCall(whole, universe, instr); err != nil {
+										return coroLeafInstructionError(fn, plan, instr, "invalid worker llgo.syscall capability: "+err.Error())
+									}
+								}
 								parks++
+							} else if intrinsic && semantics == CoroIntrinsicCallInlineYield {
+								yields++
+							}
+							if opcode, exact, opcodeErr := universe.coroIntrinsicOpcode(rawCallee); opcodeErr != nil {
+								return coroLeafInstructionError(fn, plan, instr, "resolve frozen intrinsic opcode: "+opcodeErr.Error())
+							} else if intrinsic && exact {
+								if isLLGoSyscallIntrinsic(opcode) && semantics != CoroIntrinsicCallInlineSuspend {
+									return coroLeafInstructionError(fn, plan, instr,
+										"elided worker llgo.syscall has no frozen function-word capability")
+								}
+								if opcode == llgoAlloca {
+									return coroLeafInstructionError(fn, plan, instr,
+										"dynamic llgo.alloca is valid only in a no-suspend plain island; a physical coroutine requires an exact resume-local lifetime proof")
+								}
 							}
 						}
 					}
@@ -1065,24 +1443,83 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 					continue
 				}
 				if instr.Common().IsInvoke() {
-					if explicitPanic {
-						return coroLeafInstructionError(fn, plan, instr, "closed interface plain invoke requires the legacy panic ABI")
+					if !explicitPanic {
+						if _, invokeErr := resolveCoroClosedInterfacePlainCall(whole, instr); invokeErr == nil {
+							continue
+						}
 					}
-					if _, invokeErr := resolveCoroClosedInterfacePlainCall(whole, instr); invokeErr != nil {
+					if callPlan, found := whole.CallPlan(instr); found && callPlan.Open &&
+						callPlan.Unresolved == coro.UnknownManagedInterfaceDispatch {
+						if !managedDispatch {
+							return coroLeafInstructionError(fn, plan, instr,
+								"managed interface invoke requires the v1 descriptor dispatch capability")
+						}
+						if err := validateCoroManagedInterfaceDispatchCall(whole, universe, fn, instr, callPlan); err != nil {
+							return coroLeafInstructionError(fn, plan, instr, "invalid managed interface await: "+err.Error())
+						}
+						awaits++
+						continue
+					}
+					dispatch, invokeErr := resolveCoroInterfaceDispatchPlan(whole, universe, instr)
+					if invokeErr != nil || !coroInterfaceDispatchNeedsAwait(dispatch) {
+						if invokeErr == nil {
+							invokeErr = fmt.Errorf("closed interface dispatch has no coroutine target")
+						}
 						return coroLeafInstructionError(fn, plan, instr, "unsupported interface invoke: "+invokeErr.Error())
+					}
+					awaits++
+					continue
+				}
+				if callPlan, found := whole.CallPlan(instr); found && callPlan.Rep == coro.Dispatch &&
+					instr.Common().StaticCallee() == nil {
+					if callPlan.SyncDispatch {
+						if !managedDispatch {
+							return coroLeafInstructionError(fn, plan, instr, "synchronous descriptor call requires the v1 plain dispatch capability")
+						}
+						if err := validateCoroPlainDispatchCall(whole, fn, instr, callPlan, universe); err != nil {
+							return coroLeafInstructionError(fn, plan, instr, "invalid synchronous descriptor call: "+err.Error())
+						}
+						continue
+					}
+					if callPlan.Open && callPlan.Unresolved != coro.UnknownManagedDispatch {
+						return coroLeafInstructionError(fn, plan, instr, fmt.Sprintf(
+							"open descriptor call has uncertified execution domain %v", callPlan.Unresolved,
+						))
+					}
+					if !managedDispatch {
+						return coroLeafInstructionError(fn, plan, instr, "open managed descriptor call requires the v1 descriptor dispatch capability")
+					}
+					mayAwait := callPlan.Open || coroDispatchCallHasCoroutineTarget(whole, callPlan)
+					if err := validateCoroManagedDispatchCall(whole, fn, instr, callPlan, universe); err != nil {
+						return coroLeafInstructionError(fn, plan, instr, "invalid managed descriptor await: "+err.Error())
+					}
+					if mayAwait {
+						awaits++
 					}
 					continue
 				}
-				callee, calleePlan, err := resolveCoroStaticAwait(whole, plan, instr)
+				if _, recognized, foreignErr := validateCoroWorkerForeignCall(
+					whole, universe, instr, coroWorkerTargetPointerSize(universe),
+				); recognized {
+					if universe == nil || !universe.CoroWorkerEnabled() {
+						return coroLeafInstructionError(fn, plan, instr, "blocking foreign call requires the bounded worker capability")
+					}
+					if foreignErr != nil {
+						return coroLeafInstructionError(fn, plan, instr, "invalid bounded worker foreign call: "+foreignErr.Error())
+					}
+					foreignWaits++
+					continue
+				}
+				callee, calleePlan, err := resolveCoroStaticAwait(whole, plan, instr, universe)
 				if err == nil {
-					if cleanupPlan != nil {
-						if reason := validateCoroStaticCleanupNoUnwind(
-							whole, universe, callee, calleePlan, frameRetentionABI,
-						); reason != "" {
-							return coroLeafInstructionError(fn, plan, instr, "child await may bypass static cleanup: "+reason)
+					calleeSignature := coroPhysicalNormalizeSourceSignature(callee.Signature)
+					if universe != nil {
+						calleeSignature, err = universe.coroPhysicalSourceSignature(callee)
+						if err != nil {
+							return coroLeafInstructionError(fn, plan, instr, "child await signature: "+err.Error())
 						}
 					}
-					if err := validateCoroLeafPhysicalSignature(calleePlan, callee.Signature); err != nil {
+					if err := validateCoroLeafPhysicalSignature(calleePlan, calleeSignature); err != nil {
 						return coroLeafInstructionError(fn, plan, instr, "child await signature: "+err.Error())
 					}
 					awaits++
@@ -1090,6 +1527,16 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 				}
 				if explicitPanic {
 					if _, targetPlan, plainErr := resolveCoroStaticPlainCall(whole, instr); plainErr == nil {
+						// A direct plain call needs no hidden outcome slot when the
+						// whole-program SSA plan has proved that its exact target cannot
+						// initiate a Go unwind. resolveCoroStaticPlainCall already proves
+						// that the call is closed, non-suspending, and has one exact plain
+						// entry. Keep MayUnwind fail-closed: a merely synchronous function
+						// may still panic and therefore must use the managed explicit-status
+						// ABI rather than silently unwinding through this coroutine frame.
+						if !targetPlan.Exec.Contains(coro.MayUnwind) {
+							continue
+						}
 						return coroLeafInstructionError(fn, plan, instr, fmt.Sprintf(
 							"direct plain target %q (exec=%s) has no certified explicit-status hidden-outcome/unwind contract",
 							targetPlan.ID, targetPlan.Exec,
@@ -1106,15 +1553,38 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 				if !staticSpawn {
 					return coroLeafInstructionError(fn, plan, instr, "goroutine spawn requires the closed-static scheduler capability")
 				}
-				target, targetPlan, err := whole.ResolveClosedStaticSpawn(instr)
-				if err != nil {
-					return coroLeafInstructionError(fn, plan, instr, "unsupported closed static spawn: "+err.Error())
+				callPlan, found := whole.CallPlan(instr)
+				if !found {
+					return coroLeafInstructionError(fn, plan, instr, "goroutine spawn has no compilation CallPlan")
 				}
-				if err := validateCoroLeafPhysicalSignature(targetPlan, target.Signature); err != nil {
-					return coroLeafInstructionError(fn, plan, instr, "spawn target signature: "+err.Error())
-				}
-				if coroPhysicalSignatureContainsFunctionValue(target.Signature) {
-					return coroLeafInstructionError(fn, plan, instr, "spawn target function-valued parameters require a later canonical transport capability")
+				switch callPlan.Rep {
+				case coro.DirectCoro:
+					target, targetPlan, err := resolveCoroDirectStaticSpawn(whole, instr, managedDispatch)
+					if err != nil {
+						return coroLeafInstructionError(fn, plan, instr, "unsupported closed static spawn: "+err.Error())
+					}
+					targetSignature := coroPhysicalNormalizeSourceSignature(target.Signature)
+					if universe != nil {
+						targetSignature, err = universe.coroPhysicalSourceSignature(target)
+						if err != nil {
+							return coroLeafInstructionError(fn, plan, instr, "spawn target signature: "+err.Error())
+						}
+					}
+					if err := validateCoroLeafPhysicalSignature(targetPlan, targetSignature); err != nil {
+						return coroLeafInstructionError(fn, plan, instr, "spawn target signature: "+err.Error())
+					}
+				case coro.Dispatch:
+					if !managedDispatch {
+						return coroLeafInstructionError(fn, plan, instr, "managed descriptor spawn requires the v1 descriptor dispatch capability")
+					}
+					if _, err := whole.ResolveManagedDispatchSpawn(instr); err != nil {
+						return coroLeafInstructionError(fn, plan, instr, "unsupported managed descriptor spawn: "+err.Error())
+					}
+					if err := validateCoroManagedDispatchSignatureShape(instr.Common().Signature()); err != nil {
+						return coroLeafInstructionError(fn, plan, instr, "managed descriptor spawn signature: "+err.Error())
+					}
+				default:
+					return coroLeafInstructionError(fn, plan, instr, "goroutine spawn has unsupported representation "+callPlan.Rep.String())
 				}
 				spawns++
 			default:
@@ -1137,19 +1607,28 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 	if parks != 0 && !plan.Effect.Contains(coro.MayPark) {
 		return fail("structured-park body lacks may-park final effect: %s", plan.Effect)
 	}
+	if foreignWaits != 0 && !plan.Effect.Contains(coro.WaitForeign) {
+		return fail("bounded worker body lacks wait-foreign final effect: %s", plan.Effect)
+	}
+	if yields != 0 && (!plan.DeclaredEffect.Contains(coro.YieldOnly) || !plan.LocalEffect.Contains(coro.YieldOnly) || !plan.Effect.Contains(coro.YieldOnly)) {
+		return fail("structured-yield body lacks yield-only owner effect: declared=%s local=%s final=%s", plan.DeclaredEffect, plan.LocalEffect, plan.Effect)
+	}
 	if spawns != 0 && (!plan.DeclaredEffect.Contains(coro.YieldOnly) || !plan.LocalEffect.Contains(coro.YieldOnly) || !plan.Effect.Contains(coro.YieldOnly)) {
-		return fail("closed static spawn body lacks its exact yield-only owner seed: declared=%s local=%s final=%s", plan.DeclaredEffect, plan.LocalEffect, plan.Effect)
+		return fail("coroutine spawn body lacks its exact yield-only owner seed: declared=%s local=%s final=%s", plan.DeclaredEffect, plan.LocalEffect, plan.Effect)
 	}
 	if plan.DeclaredEffect.Contains(coro.MayPark) && parks == 0 {
 		return fail("declared may-park effect has no exact structured park intrinsic")
 	}
-	if unsupported := plan.Effect &^ (coro.YieldOnly | coro.AwaitStructured | coro.MayPark); unsupported != 0 {
+	// WaitForeign may be inherited from a structured child. An ordinary local
+	// foreign edge was counted and shape-checked above; the effect bit alone can
+	// never authorize a raw foreign call on this scheduler thread.
+	if unsupported := plan.Effect &^ (coro.YieldOnly | coro.AwaitStructured | coro.OutcomeStructured | coro.MayPark | coro.WaitForeign); unsupported != 0 {
 		return fail("child-await body has unsupported final effect %s", unsupported)
 	}
 	if unsupported := plan.DeclaredEffect &^ (coro.YieldOnly | coro.MayPark); unsupported != 0 {
 		return fail("child-await body has unsupported declared effect %s", unsupported)
 	}
-	if unsupported := plan.LocalEffect &^ (coro.YieldOnly | coro.MayPark); unsupported != 0 {
+	if unsupported := plan.LocalEffect &^ (coro.YieldOnly | coro.AwaitStructured | coro.OutcomeStructured | coro.MayPark); unsupported != 0 {
 		return fail("child-await body has unsupported local effect %s", unsupported)
 	}
 	return nil
@@ -1170,9 +1649,22 @@ func validateCoroExplicitStatusPanic(audit *coroPhysicalPureSSAAudit, instructio
 	if instruction == nil || instruction.X == nil {
 		return "explicit-status panic requires a non-nil operand"
 	}
+	if audit == nil {
+		return "explicit-status panic requires a prepared pure-SSA audit"
+	}
 	boxed, ok := instruction.X.(*ssa.MakeInterface)
-	if !ok || boxed.X == nil {
-		return "explicit-status panic requires one concrete MakeInterface operand"
+	if !ok {
+		target, interfaceValue := types.Unalias(audit.typeOf(instruction.X.Type())).Underlying().(*types.Interface)
+		if !interfaceValue || !target.Empty() {
+			return "explicit-status panic requires one empty-interface operand"
+		}
+		if reason := validateCoroExplicitStatusPanicInterfaceValue(audit, instruction.X, make(map[ssa.Value]bool)); reason != "" {
+			return "explicit-status panic interface payload is not frame-stable: " + reason
+		}
+		return ""
+	}
+	if boxed.X == nil {
+		return "explicit-status panic requires a complete concrete MakeInterface operand"
 	}
 	if boxed.Parent() != instruction.Parent() {
 		return "explicit-status panic MakeInterface belongs to a different SSA body"
@@ -1195,28 +1687,150 @@ func validateCoroExplicitStatusPanic(audit *coroPhysicalPureSSAAudit, instructio
 	if source == nil {
 		return "explicit-status panic MakeInterface has no concrete source type"
 	}
-	if _, ok := types.Unalias(source).Underlying().(*types.Pointer); !ok {
-		return "explicit-status panic currently requires one concrete pointer payload"
-	}
-	if audit == nil {
-		return "explicit-status panic requires a prepared pure-SSA audit"
-	}
 	if reason := audit.validateMakeInterface(boxed); reason != "" {
-		return "explicit-status panic MakeInterface is not pure: " + reason
+		return "explicit-status panic MakeInterface has no outcome-safe lowering: " + reason
+	}
+	// Non-direct interface representations live in the managed backing cell
+	// created by the exact MakeInterface helper. Under ExplicitStatus that helper
+	// is an awaited coroutine child, so the allocation has completed before its
+	// stable data word is published to the parent CompletionRecord.
+	if !emissionDirectIfaceType(source) {
+		return ""
 	}
 	if constant, ok := boxed.X.(*ssa.Const); ok && constant.Value == nil {
 		// A typed nil pointer still produces a non-nil interface type word and
 		// carries no frame-owned storage in its data word.
 		return ""
 	}
-	root, reason := audit.stableAddress(boxed.X, make(map[ssa.Value]bool))
-	if reason != "" || root != coroPhysicalAddressGlobal {
-		if reason == "" {
-			reason = "payload is not rooted in package-global storage"
+	switch types.Unalias(source).Underlying().(type) {
+	case *types.Map, *types.Chan:
+		// These direct interface words identify managed heap objects; publishing
+		// the word itself retains the object independently of the child frame.
+		return ""
+	case *types.Pointer:
+		// A frozen AllocZ result is a real managed-heap object, not storage
+		// owned by the LLVM frame. The scheduler publishes this exact data word
+		// into its parent CompletionRecord (or root PanicRecord) before destroying
+		// the frame, so the non-moving-conservative/no-GC root profile retains it
+		// just like a package-global pointer.
+		root, reason := audit.stableAddress(boxed.X, make(map[ssa.Value]bool))
+		if reason != "" || root != coroPhysicalAddressGlobal && root != coroPhysicalAddressManagedHeap {
+			if reason == "" {
+				reason = "payload is not rooted in package-global or managed-heap storage"
+			}
+			return "explicit-status panic data word may outlive its coroutine frame: " + reason
 		}
-		return "explicit-status panic data word may outlive its coroutine frame: " + reason
+		return ""
+	default:
+		// unsafe.Pointer, direct one-field wrappers, and function values can
+		// borrow frame-owned storage. They need a dedicated payload-lifetime
+		// certificate before the child may be destroyed.
+		return "explicit-status direct panic payload has no post-destroy lifetime proof"
 	}
-	return ""
+}
+
+// validateCoroExplicitStatusPanicInterfaceValue accepts an already-built
+// interface only when its two words can be copied without borrowing storage
+// that disappears before publication. For a typed load, the address therefore
+// needs to be stable only through the load itself: an interface value is the
+// type/data pair, and neither word points back at the interface cell. The pair
+// is copied immediately into parent-owned completion storage, whose current
+// nonmoving-conservative-or-none profile retains the dynamic data word after
+// the child frame is destroyed. Parameters and arbitrary dynamic producers
+// still stay fail-closed until they carry their own lifetime certificate.
+func validateCoroExplicitStatusPanicInterfaceValue(
+	audit *coroPhysicalPureSSAAudit,
+	value ssa.Value,
+	visiting map[ssa.Value]bool,
+) string {
+	if audit == nil || value == nil {
+		return "missing pure-SSA audit or interface value"
+	}
+	if visiting[value] {
+		return "cyclic interface value"
+	}
+	visiting[value] = true
+	defer delete(visiting, value)
+	if instruction, ok := value.(ssa.Instruction); ok && instruction.Parent() != audit.fn {
+		return "interface producer belongs to a different SSA body"
+	}
+	interfaceType, ok := types.Unalias(audit.typeOf(value.Type())).Underlying().(*types.Interface)
+	if !ok {
+		return "value is not an interface"
+	}
+	interfaceType.Complete()
+	switch value := value.(type) {
+	case *ssa.ChangeInterface:
+		if reason := audit.validateChangeInterface(value); reason != "" {
+			return "interface conversion has no outcome-safe lowering: " + reason
+		}
+		return validateCoroExplicitStatusPanicInterfaceValue(audit, value.X, visiting)
+	case *ssa.ChangeType:
+		if reason := audit.validateChangeType(value); reason != "" {
+			return "interface change-type has no pure lowering: " + reason
+		}
+		return validateCoroExplicitStatusPanicInterfaceValue(audit, value.X, visiting)
+	case *ssa.Phi:
+		if len(value.Edges) == 0 {
+			return "interface phi has no incoming values"
+		}
+		for _, edge := range value.Edges {
+			if reason := validateCoroExplicitStatusPanicInterfaceValue(audit, edge, visiting); reason != "" {
+				return "interface phi input: " + reason
+			}
+		}
+		return ""
+	case *ssa.UnOp:
+		if value.Op != token.MUL {
+			return "interface producer is not a typed load"
+		}
+		if reason := audit.validateUnOp(value); reason != "" {
+			return "interface load has no pure lowering: " + reason
+		}
+		root, reason := audit.stableAddressAt(value.X, value, make(map[ssa.Value]bool))
+		if reason != "" {
+			return "interface load address: " + reason
+		}
+		if root == coroPhysicalAddressInvalid {
+			return "interface load address has no stable root"
+		}
+		return ""
+	case *ssa.Call:
+		if builtin, ok := value.Call.Value.(*ssa.Builtin); ok && builtin.Name() == "recover" {
+			if reason := audit.validateBuiltin(value); reason != "" {
+				return "recover result has no explicit-status lowering: " + reason
+			}
+			// The direct deferred-child hook copied these words from the
+			// parent-owned CompletionRecord, which retains them until this child has
+			// published its terminal CompletionRecord and been destroyed. A
+			// repanic therefore transfers the same stable pair without borrowing
+			// child-frame storage.
+			return ""
+		}
+		if audit.plan == nil || audit.fn == nil {
+			return "interface call result requires a whole-program call plan"
+		}
+		callerPlan, planned := audit.plan.FunctionPlan(audit.fn)
+		if !planned {
+			return "interface call result owner has no function plan"
+		}
+		if _, _, err := resolveCoroStaticAwait(audit.plan, callerPlan, value, audit.universe); err == nil {
+			// The child writes its Go result into parent-owned result storage before
+			// the parent resumes and destroys the child. Go escape semantics keep
+			// any backing cell referenced by the returned interface alive; copying
+			// the two words into the panic completion record is therefore stable.
+			return ""
+		}
+		if _, targetPlan, err := resolveCoroStaticPlainCall(audit.plan, value); err == nil &&
+			targetPlan.External == coro.Defined && !targetPlan.Exec.Contains(coro.MayUnwind) {
+			// A bounded owned Go callee has completed normally on the same stack;
+			// its returned interface obeys the same language-level escape lifetime.
+			return ""
+		}
+		return "interface call result is not one exact managed child or non-unwinding owned plain call"
+	default:
+		return fmt.Sprintf("interface producer %T has no post-destroy lifetime proof", value)
+	}
 }
 
 func isCoroProgramManagedEntry(fn *ssa.Function) bool {
@@ -1230,28 +1844,313 @@ func isCoroProgramManagedEntry(fn *ssa.Function) bool {
 	return name == "main" && fn.Pkg != nil && fn.Pkg.Pkg != nil && fn.Pkg.Pkg.Name() == "main"
 }
 
+func coroMaterializedGenericInstance(fn *ssa.Function) bool {
+	if fn == nil || fn.Origin() == nil || fn.Origin() == fn || len(fn.TypeArgs()) == 0 ||
+		!hasGenericInstantiation(fn) || !coroGroundGenericTypeArgs(fn.TypeArgs()) {
+		return false
+	}
+	if parent := fn.Parent(); parent != nil {
+		// x/tools materializes a function literal inside each instantiated
+		// generic body. The child keeps the origin's TypeParams metadata, but its
+		// signature, parameters, free variables, and TypeArgs are concrete. Bind
+		// the exception to that exact parent/Origin/AnonFuncs graph; an arbitrary
+		// nested synthetic function cannot acquire a dispatch ABI merely by
+		// carrying TypeArgs.
+		if !coroMaterializedGenericInstance(parent) || fn.Synthetic != "" || fn.Object() != nil {
+			return false
+		}
+		if _, ok := fn.Syntax().(*ast.FuncLit); !ok {
+			return false
+		}
+		originParent := fn.Origin().Parent()
+		if originParent == nil || originParent != parent.Origin() {
+			return false
+		}
+		found := false
+		for _, child := range parent.AnonFuncs {
+			if child == fn {
+				if found {
+					return false
+				}
+				found = true
+			}
+		}
+		if !found || len(fn.TypeArgs()) != len(parent.TypeArgs()) {
+			return false
+		}
+		for index, argument := range fn.TypeArgs() {
+			if !types.Identical(argument, parent.TypeArgs()[index]) {
+				return false
+			}
+		}
+	} else if !strings.HasPrefix(fn.Synthetic, "instance of ") {
+		return false
+	}
+	// x/tools erases ordinary declaration type parameters from an instantiated
+	// callable signature. For an instantiated generic receiver method, and for
+	// its parentless method body only, it keeps the origin's RecvTypeParams
+	// metadata even though Recv and every physical parameter/result are already
+	// concrete. Judge materialization from that callable value shape, not from
+	// the stale declaration metadata alone.
+	if params := fn.Signature.TypeParams(); params != nil && params.Len() != 0 {
+		return false
+	}
+	if params := fn.Signature.RecvTypeParams(); params != nil && params.Len() != 0 &&
+		(fn.Parent() != nil || fn.Signature.Recv() == nil) {
+		return false
+	}
+	normalized := coroPhysicalNormalizeSourceSignature(fn.Signature)
+	if normalized == nil || normalized.Params().Len() != len(fn.Params) {
+		return false
+	}
+	for index, parameter := range fn.Params {
+		if parameter == nil || !types.Identical(parameter.Type(), normalized.Params().At(index).Type()) {
+			return false
+		}
+	}
+	for _, tuple := range []*types.Tuple{normalized.Params(), normalized.Results()} {
+		for index := 0; index < tuple.Len(); index++ {
+			if validateCoroPhysicalValueType(tuple.At(index).Type(), make(map[types.Type]bool)) != nil {
+				return false
+			}
+		}
+	}
+	for _, free := range fn.FreeVars {
+		if free == nil || coroTypeContainsUnresolvedTypeParam(free.Type(), make(map[types.Type]bool)) ||
+			validateCoroPhysicalValueType(free.Type(), make(map[types.Type]bool)) != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// coroMaterializedGenericCallable includes the one Pkg-nil method-set wrapper
+// shape that x/tools synthesizes when a pointer invokes an instantiated generic
+// value-receiver method. Such a wrapper has no Origin or TypeArgs of its own,
+// but its receiver, SSA parameters, and sole callee are fully concrete. Keep
+// this separate from ordinary generic instances so arbitrary synthetic bodies
+// cannot acquire a physical ABI from stale RecvTypeParams metadata.
+func coroMaterializedGenericCallable(fn *ssa.Function) bool {
+	return coroMaterializedGenericInstance(fn) || coroMaterializedGenericMethodWrapper(fn)
+}
+
+func coroMaterializedGenericMethodWrapper(fn *ssa.Function) bool {
+	if fn == nil || fn.Pkg != nil || fn.Parent() != nil || len(fn.FreeVars) != 0 ||
+		fn.Signature == nil || fn.Signature.Recv() == nil ||
+		!strings.HasPrefix(fn.Synthetic, "wrapper for ") || !hasGenericInstantiation(fn) ||
+		typeParamCount(fn.Signature.TypeParams()) != 0 ||
+		typeParamCount(fn.Signature.RecvTypeParams()) == 0 || len(fn.Blocks) != 1 {
+		return false
+	}
+	var nilCheck *ssa.Call
+	var receiverLoad *ssa.UnOp
+	var wrapperCall *ssa.Call
+	var callee *ssa.Function
+	for _, instruction := range fn.Blocks[0].Instrs {
+		switch instruction := instruction.(type) {
+		case *ssa.DebugRef, *ssa.Return:
+		case *ssa.Call:
+			if builtin, ok := instruction.Common().Value.(*ssa.Builtin); ok {
+				if nilCheck != nil || builtin.Name() != "ssa:wrapnilchk" || len(instruction.Common().Args) != 3 ||
+					instruction.Common().Args[0] != fn.Params[0] ||
+					!types.Identical(instruction.Type(), fn.Params[0].Type()) {
+					return false
+				}
+				nilCheck = instruction
+				continue
+			}
+			if wrapperCall != nil || instruction.Common() == nil || instruction.Common().IsInvoke() {
+				return false
+			}
+			callee = instruction.Common().StaticCallee()
+			if callee == nil {
+				return false
+			}
+			wrapperCall = instruction
+		case *ssa.UnOp:
+			if receiverLoad != nil || instruction.Op != token.MUL {
+				return false
+			}
+			receiverLoad = instruction
+		default:
+			return false
+		}
+	}
+	if nilCheck == nil || receiverLoad == nil || receiverLoad.X != nilCheck || wrapperCall == nil ||
+		callee == nil || !coroMaterializedGenericInstance(callee) ||
+		callee.Signature == nil || callee.Signature.Recv() == nil || len(wrapperCall.Common().Args) == 0 ||
+		wrapperCall.Common().Args[0] != receiverLoad {
+		return false
+	}
+	calleeOrigin := callee.Origin()
+	if calleeOrigin == nil || calleeOrigin.Name() != fn.Name() {
+		return false
+	}
+	wrapperReceiver, pointerReceiver := types.Unalias(fn.Signature.Recv().Type()).Underlying().(*types.Pointer)
+	if !pointerReceiver || !types.Identical(wrapperReceiver.Elem(), callee.Signature.Recv().Type()) ||
+		!types.Identical(receiverLoad.Type(), callee.Signature.Recv().Type()) {
+		return false
+	}
+	expectedSyntheticPrefix := "wrapper for func (" + callee.Signature.Recv().Type().String() + ")." + calleeOrigin.Name() + "("
+	if !strings.HasPrefix(fn.Synthetic, expectedSyntheticPrefix) {
+		return false
+	}
+	wrapperSig := coroPhysicalNormalizeSourceSignature(fn.Signature)
+	calleeSig := coroPhysicalNormalizeSourceSignature(callee.Signature)
+	if wrapperSig == nil || calleeSig == nil || wrapperSig.Params().Len() != len(fn.Params) ||
+		wrapperSig.Params().Len() != calleeSig.Params().Len() ||
+		wrapperSig.Results().Len() != calleeSig.Results().Len() {
+		return false
+	}
+	for index, parameter := range fn.Params {
+		if parameter == nil || !types.Identical(parameter.Type(), wrapperSig.Params().At(index).Type()) ||
+			(index != 0 && !types.Identical(wrapperSig.Params().At(index).Type(), calleeSig.Params().At(index).Type())) {
+			return false
+		}
+	}
+	for index := 0; index < wrapperSig.Results().Len(); index++ {
+		if !types.Identical(wrapperSig.Results().At(index).Type(), calleeSig.Results().At(index).Type()) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func coroGroundGenericTypeArgs(arguments []types.Type) bool {
+	if len(arguments) == 0 {
+		return false
+	}
+	for _, argument := range arguments {
+		if coroTypeContainsUnresolvedTypeParam(argument, make(map[types.Type]bool)) {
+			return false
+		}
+	}
+	return true
+}
+
+// coroTypeContainsUnresolvedTypeParam is deliberately deeper than the
+// physical-value validator: a pointer has a fixed transport width, but
+// *Box[T] is still not a materialized generic identity. This proof is used
+// only for instantiation identity and therefore follows referents and named
+// underlying types all the way to a TypeParam.
+func coroTypeContainsUnresolvedTypeParam(typ types.Type, visiting map[types.Type]bool) bool {
+	if typ == nil {
+		return true
+	}
+	typ = types.Unalias(typ)
+	if visiting[typ] {
+		return false
+	}
+	visiting[typ] = true
+	defer delete(visiting, typ)
+
+	switch value := typ.(type) {
+	case *types.TypeParam:
+		return true
+	case *types.Named:
+		if arguments := value.TypeArgs(); arguments != nil {
+			for index := 0; index < arguments.Len(); index++ {
+				if coroTypeContainsUnresolvedTypeParam(arguments.At(index), visiting) {
+					return true
+				}
+			}
+		}
+		return coroTypeContainsUnresolvedTypeParam(value.Underlying(), visiting)
+	case *types.Pointer:
+		return coroTypeContainsUnresolvedTypeParam(value.Elem(), visiting)
+	case *types.Array:
+		return coroTypeContainsUnresolvedTypeParam(value.Elem(), visiting)
+	case *types.Slice:
+		return coroTypeContainsUnresolvedTypeParam(value.Elem(), visiting)
+	case *types.Chan:
+		return coroTypeContainsUnresolvedTypeParam(value.Elem(), visiting)
+	case *types.Map:
+		return coroTypeContainsUnresolvedTypeParam(value.Key(), visiting) ||
+			coroTypeContainsUnresolvedTypeParam(value.Elem(), visiting)
+	case *types.Struct:
+		for index := 0; index < value.NumFields(); index++ {
+			if coroTypeContainsUnresolvedTypeParam(value.Field(index).Type(), visiting) {
+				return true
+			}
+		}
+	case *types.Signature:
+		if typeParamCount(value.TypeParams()) != 0 || typeParamCount(value.RecvTypeParams()) != 0 {
+			return true
+		}
+		if value.Recv() != nil && coroTypeContainsUnresolvedTypeParam(value.Recv().Type(), visiting) {
+			return true
+		}
+		for _, tuple := range []*types.Tuple{value.Params(), value.Results()} {
+			for index := 0; index < tuple.Len(); index++ {
+				if coroTypeContainsUnresolvedTypeParam(tuple.At(index).Type(), visiting) {
+					return true
+				}
+			}
+		}
+	case *types.Tuple:
+		for index := 0; index < value.Len(); index++ {
+			if coroTypeContainsUnresolvedTypeParam(value.At(index).Type(), visiting) {
+				return true
+			}
+		}
+	case *types.Interface:
+		value.Complete()
+		for index := 0; index < value.NumMethods(); index++ {
+			if coroTypeContainsUnresolvedTypeParam(value.Method(index).Type(), visiting) {
+				return true
+			}
+		}
+		for index := 0; index < value.NumEmbeddeds(); index++ {
+			if coroTypeContainsUnresolvedTypeParam(value.EmbeddedType(index), visiting) {
+				return true
+			}
+		}
+	case *types.Union:
+		for index := 0; index < value.Len(); index++ {
+			if coroTypeContainsUnresolvedTypeParam(value.Term(index).Type(), visiting) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // resolveCoroStaticPlainCall proves the synchronous island allowed inside a
 // runnable physical coroutine. The exact CallPlan must select either one
-// defined primary plain body or one frozen known external plain entry, and it
-// must be bounded and non-suspending. A missing/open/dynamic edge may not fall
-// back to the legacy source symbol.
+// defined primary plain body, one frozen known external plain entry, or one
+// exact TrustedInline invocation of a conservatively unknown foreign entry.
+// The last form is an edge capability: it suppresses BlockForeign only for
+// that call and never upgrades the target's default policy. A
+// missing/open/dynamic edge may not fall back to the legacy source symbol.
 func resolveCoroStaticPlainCall(plan *coro.SSAPlan, call ssa.CallInstruction) (*ssa.Function, coro.FunctionPlan, error) {
 	if plan == nil || call == nil || call.Common() == nil {
 		return nil, coro.FunctionPlan{}, fmt.Errorf("requires a compilation CallPlan")
 	}
 	common := call.Common()
-	if common.IsInvoke() || common.StaticCallee() == nil {
-		return nil, coro.FunctionPlan{}, fmt.Errorf("requires a static non-invoke call")
+	if common.IsInvoke() {
+		return nil, coro.FunctionPlan{}, fmt.Errorf("requires a non-invoke call")
 	}
 	callPlan, ok := plan.CallPlan(call)
 	if !ok {
 		return nil, coro.FunctionPlan{}, fmt.Errorf("call has no compilation CallPlan")
 	}
-	if callPlan.Kind != coro.CallDirect || callPlan.Rep != coro.DirectPlain || callPlan.Open || callPlan.MayBeNil || len(callPlan.Targets) != 1 {
+	trustedInline := callPlan.Kind == coro.CallTrustedInline
+	ordinaryDirect := callPlan.Kind == coro.CallDirect
+	if (!ordinaryDirect && !trustedInline) || callPlan.Rep != coro.DirectPlain || callPlan.Open || callPlan.MayBeNil || len(callPlan.Targets) != 1 {
 		return nil, coro.FunctionPlan{}, fmt.Errorf(
 			"requires one closed non-nil direct plain target, got kind=%v representation=%s open=%t may-be-nil=%t targets=%d",
 			callPlan.Kind, callPlan.Rep, callPlan.Open, callPlan.MayBeNil, len(callPlan.Targets),
 		)
+	}
+	if trustedInline {
+		if callPlan.InvocationPolicy != coro.InvocationTrustedInline || callPlan.InvocationContract == "" ||
+			callPlan.InvocationABI == "" || callPlan.InvocationCertificate == "" {
+			return nil, coro.FunctionPlan{}, fmt.Errorf("trusted-inline direct call has incomplete frozen invocation metadata")
+		}
+	} else if callPlan.InvocationPolicy != "" || callPlan.InvocationContract != "" ||
+		callPlan.InvocationABI != "" || callPlan.InvocationCertificate != "" {
+		return nil, coro.FunctionPlan{}, fmt.Errorf("ordinary direct call unexpectedly carries invocation capability metadata")
 	}
 	target, ok := plan.Function(callPlan.Targets[0])
 	if !ok || target == nil {
@@ -1261,14 +2160,76 @@ func resolveCoroStaticPlainCall(plan *coro.SSAPlan, call ssa.CallInstruction) (*
 	if !ok || targetPlan.ID != callPlan.Targets[0] {
 		return nil, coro.FunctionPlan{}, fmt.Errorf("direct plain target %q has no canonical function plan", callPlan.Targets[0])
 	}
+	if common.StaticCallee() == nil && (len(target.FreeVars) != 0 || target.Signature == nil || target.Signature.Recv() != nil) {
+		return nil, coro.FunctionPlan{}, fmt.Errorf("closed direct plain target requires a non-capturing non-method callable")
+	}
 	validBody := targetPlan.External == coro.Defined && targetPlan.Emission == coro.EmitPlain && targetPlan.Primary == coro.PrimaryPlain
 	validExternal := targetPlan.External == coro.ExternalKnown && targetPlan.Emission == coro.EmitExternal && targetPlan.Primary == coro.PrimaryExternal
-	unsupportedExec := targetPlan.Exec &^ (coro.MayUnwind | coro.IRQUnsafe)
-	if (!validBody && !validExternal) || targetPlan.FuncRep != coro.DirectPlain || targetPlan.Effect != coro.NoSuspend ||
+	validTrustedExternal := trustedInline && targetPlan.External == coro.ExternalUnknownForeign &&
+		targetPlan.Emission == coro.EmitExternal && targetPlan.Primary == coro.PrimaryExternal
+	effectiveExec := targetPlan.Exec
+	allowedExec := coro.MayUnwind | coro.IRQUnsafe
+	if trustedInline {
+		targetCertificate, certified := plan.CallableContractCertificate(target)
+		if !certified {
+			return nil, coro.FunctionPlan{}, fmt.Errorf("trusted-inline target has no frozen callable contract certificate")
+		}
+		if err := targetCertificate.Validate(); err != nil {
+			return nil, coro.FunctionPlan{}, fmt.Errorf("trusted-inline target has invalid callable contract certificate: %w", err)
+		}
+		if targetCertificate.Scope != coro.CallableContractScopeDeclaration || !targetCertificate.HasTrustedInlineContract {
+			return nil, coro.FunctionPlan{}, fmt.Errorf("trusted-inline target does not own one declaration refinement")
+		}
+		if callPlan.InvocationContract != targetCertificate.TrustedInlineContract.ID {
+			return nil, coro.FunctionPlan{}, fmt.Errorf(
+				"trusted-inline invocation contract %q is not owned by target %q (want %q)",
+				callPlan.InvocationContract, targetPlan.ID, targetCertificate.TrustedInlineContract.ID,
+			)
+		}
+		if callPlan.InvocationABI != targetCertificate.CallableABI {
+			return nil, coro.FunctionPlan{}, fmt.Errorf(
+				"trusted-inline invocation ABI %q differs from target %q ABI %q",
+				callPlan.InvocationABI, targetPlan.ID, targetCertificate.CallableABI,
+			)
+		}
+		if err := coro.ValidateTrustedInlineCallableContractRefinement(
+			targetCertificate.TrustedInlineContract, targetCertificate.Contract,
+		); err != nil {
+			return nil, coro.FunctionPlan{}, fmt.Errorf("trusted-inline target refinement is invalid: %w", err)
+		}
+		defaultExec := coro.CallableContractExecConstraints(targetCertificate.Contract)
+		selectedExec := coro.CallableContractExecConstraints(targetCertificate.TrustedInlineContract)
+		const contractExec = coro.ThreadAffine | coro.OpaqueExec
+		if unsupported := (defaultExec | selectedExec) &^ contractExec; unsupported != 0 {
+			return nil, coro.FunctionPlan{}, fmt.Errorf("trusted-inline target projected non-contract execution flags %s", unsupported)
+		}
+		if widening := selectedExec &^ defaultExec; widening != 0 {
+			return nil, coro.FunctionPlan{}, fmt.Errorf("trusted-inline selected execution projection widens default by %s", widening)
+		}
+		declared := targetPlan.DeclaredExec & contractExec
+		localLane := targetPlan.LocalExec & contractExec
+		finalLane := targetPlan.Exec & contractExec
+		if declared != defaultExec || localLane != defaultExec || finalLane != defaultExec {
+			return nil, coro.FunctionPlan{}, fmt.Errorf(
+				"trusted-inline target default contract execution projection is %s, lanes are declared=%s local=%s final=%s",
+				defaultExec, declared, localLane, finalLane,
+			)
+		}
+		// ProgressExecutorSafe removes this exact edge's default stack cut. The
+		// selected contract replaces only its own projected lane; IRQUnsafe,
+		// MayUnwind, and unrelated constraints remain in effectiveExec.
+		effectiveExec &^= coro.BlockForeign
+		effectiveExec &^= defaultExec
+		effectiveExec |= selectedExec
+	}
+	unsupportedExec := effectiveExec &^ allowedExec
+	directEntry := targetPlan.FuncRep == coro.DirectPlain ||
+		(common.StaticCallee() != nil && targetPlan.FuncRep == coro.Dispatch && validBody)
+	if (!validBody && !validExternal && !validTrustedExternal) || !directEntry || targetPlan.Effect != coro.NoSuspend ||
 		targetPlan.Demand == coro.NoDemand || unsupportedExec != 0 {
 		return nil, coro.FunctionPlan{}, fmt.Errorf(
-			"target %q is not one demanded defined-or-known-external bounded no-suspend direct plain entry (external=%s emission=%s primary=%s representation=%s effect=%s exec=%s demand=%s)",
-			targetPlan.ID, targetPlan.External, targetPlan.Emission, targetPlan.Primary, targetPlan.FuncRep, targetPlan.Effect, targetPlan.Exec, targetPlan.Demand,
+			"target %q is not one demanded defined, known-external, or exact trusted-inline foreign bounded no-suspend plain entry (external=%s emission=%s primary=%s representation=%s effect=%s exec=%s effective-exec=%s demand=%s)",
+			targetPlan.ID, targetPlan.External, targetPlan.Emission, targetPlan.Primary, targetPlan.FuncRep, targetPlan.Effect, targetPlan.Exec, effectiveExec, targetPlan.Demand,
 		)
 	}
 	return target, targetPlan, nil
@@ -1290,8 +2251,11 @@ func validateCoroLeafPhysicalABI(fn *ssa.Function, plan coro.FunctionPlan) error
 	if plan.Emission != coro.EmitCoroutine || plan.FuncRep != coro.DirectCoro {
 		return fail("requires a direct coroutine emission, got emission=%s representation=%s", plan.Emission, plan.FuncRep)
 	}
-	if plan.Demand != coro.AsyncDemand {
-		return fail("requires async-only demand until root and hard-sync adapters exist, got %s", plan.Demand)
+	if !plan.ManagedDemand.Contains(coro.AsyncDemand) {
+		return fail(
+			"requires managed async demand, got aggregate=%s managed=%s raw=%t raw-entry=%t",
+			plan.Demand, plan.ManagedDemand, plan.RawPlainDemand, plan.RawPlainEntry,
+		)
 	}
 	if plan.Recursive {
 		return fail("recursive coroutine lowering requires child frames and preemption polls")
@@ -1302,11 +2266,13 @@ func validateCoroLeafPhysicalABI(fn *ssa.Function, plan coro.FunctionPlan) error
 	if unsupported := plan.Exec &^ coro.MayUnwind; unsupported != 0 {
 		return fail("execution flags %s require lowering outside the leaf ABI", unsupported)
 	}
-	if fn.Parent() != nil || len(fn.FreeVars) != 0 {
+	if len(fn.FreeVars) != 0 {
 		return fail("closures require the coroutine context ABI")
 	}
-	if len(fn.AnonFuncs) != 0 {
-		return fail("nested function literals require closure body lowering")
+	for _, nested := range fn.AnonFuncs {
+		if nested != nil && len(nested.FreeVars) != 0 {
+			return fail("nested function literals require closure body lowering")
+		}
 	}
 	if fn.Signature.Variadic() {
 		return fail("variadic coroutine ABI is not implemented")
@@ -1317,26 +2283,27 @@ func validateCoroLeafPhysicalABI(fn *ssa.Function, plan coro.FunctionPlan) error
 	if isCgoExternSymbol(fn) {
 		return fail("cgo entry requires a foreign adapter")
 	}
-	if fn.Synthetic != "" {
+	genericInstance := coroMaterializedGenericCallable(fn)
+	if fn.Synthetic != "" && !genericInstance {
 		return fail("synthetic function %q is outside the leaf ABI", fn.Synthetic)
 	}
-	if list := fn.TypeParams(); list != nil && list.Len() != 0 {
+	if list := fn.TypeParams(); list != nil && list.Len() != 0 && !genericInstance {
 		return fail("generic declarations are not materialized coroutine bodies")
 	}
-	if list := fn.Signature.RecvTypeParams(); list != nil && list.Len() != 0 {
+	if list := fn.Signature.RecvTypeParams(); list != nil && list.Len() != 0 && !genericInstance {
 		return fail("generic receivers are not materialized coroutine bodies")
 	}
-	if list := fn.TypeArgs(); len(list) != 0 {
+	if list := fn.TypeArgs(); len(list) != 0 && !genericInstance {
 		return fail("generic instances require a frozen instantiated ABI")
 	}
-	if fn.Name() == "main" || strings.HasPrefix(fn.Name(), "init") {
+	if isCoroProgramManagedEntry(fn) {
 		return fail("program roots require scheduler bootstrap lowering")
 	}
 	if len(fn.Blocks) != 1 {
 		return fail("requires exactly one basic block, got %d", len(fn.Blocks))
 	}
 	physicalSourceSig := coroPhysicalNormalizeSourceSignature(fn.Signature)
-	if err := validateCoroPhysicalSSAParameterShape(plan, fn, physicalSourceSig); err != nil {
+	if err := validateCoroPhysicalSSAParameterShape(plan, fn, physicalSourceSig, nil); err != nil {
 		return err
 	}
 	if err := validateCoroLeafPhysicalSignature(plan, physicalSourceSig); err != nil {
@@ -1384,26 +2351,92 @@ func (u *EmissionUniverse) coroPhysicalSourceSignature(fn *ssa.Function) (*types
 	if !ok {
 		return nil, fmt.Errorf("coroutine physical ABI: function %q: effective type is not a signature", fn.Name())
 	}
-	if params := sig.RecvTypeParams(); params != nil && params.Len() != 0 {
-		return nil, fmt.Errorf("coroutine physical ABI: function %q: effective generic receiver has %d type parameters", fn.Name(), params.Len())
+	if receiver := fn.Signature.Recv(); receiver != nil {
+		effectiveReceiver := ctx.patchType(receiver.Type())
+		if !types.Identical(effectiveReceiver, sig.Recv().Type()) {
+			receiver = types.NewVar(receiver.Pos(), receiver.Pkg(), receiver.Name(), effectiveReceiver)
+			sig = types.NewSignatureType(
+				receiver,
+				coroPhysicalTypeParamSlice(sig.RecvTypeParams()),
+				coroPhysicalTypeParamSlice(sig.TypeParams()),
+				sig.Params(), sig.Results(), sig.Variadic(),
+			)
+		}
+	}
+	if params := sig.RecvTypeParams(); params != nil && params.Len() != 0 && !coroMaterializedGenericCallable(fn) {
+		pkgPath := "<nil>"
+		if fn.Pkg != nil && fn.Pkg.Pkg != nil {
+			pkgPath = fn.Pkg.Pkg.Path()
+		}
+		origin, originName := fn.Origin(), "<nil>"
+		if origin != nil {
+			originName = origin.String()
+		}
+		return nil, fmt.Errorf(
+			"coroutine physical ABI: function %q (%s, package=%q, synthetic=%q, origin=%s, type-args=%d): effective generic receiver has %d type parameters",
+			fn.Name(), fn.String(), pkgPath, fn.Synthetic, originName, len(fn.TypeArgs()), params.Len(),
+		)
 	}
 	return coroPhysicalNormalizeSourceSignature(sig), nil
 }
 
-// coroPhysicalNormalizeSourceSignature maps a declared receiver to the exact
-// leading ordinary parameter used by x/tools SSA and LLGo's existing Go method
-// declaration ABI. It is idempotent: already receiver-free signatures pass
-// through unchanged.
-func coroPhysicalNormalizeSourceSignature(sig *types.Signature) *types.Signature {
-	if sig == nil || sig.Recv() == nil {
-		return sig
+func coroPhysicalTypeParamSlice(list *types.TypeParamList) []*types.TypeParam {
+	if list == nil || list.Len() == 0 {
+		return nil
 	}
-	return llssa.FuncAddCtx(sig.Recv(), sig)
+	params := make([]*types.TypeParam, list.Len())
+	for index := range params {
+		params[index] = list.At(index)
+	}
+	return params
 }
 
-func validateCoroPhysicalSSAParameterShape(plan coro.FunctionPlan, fn *ssa.Function, effective *types.Signature) error {
+// coroPhysicalEntrySourceSignature adds the one typed closure environment that
+// belongs to a captured physical entry. It is deliberately separate from
+// coroPhysicalSourceSignature: source call sites and lowered helper markers see
+// only explicit Go parameters, while the descriptor thunk supplies this
+// compiler-owned context between (g,out) and those parameters.
+func (u *EmissionUniverse) coroPhysicalEntrySourceSignature(fn *ssa.Function) (*types.Signature, error) {
+	sig, err := u.coroPhysicalSourceSignature(fn)
+	if err != nil || fn == nil || len(fn.FreeVars) == 0 {
+		return sig, err
+	}
+	if fn.Signature == nil || fn.Signature.Recv() != nil {
+		return nil, fmt.Errorf("coroutine physical ABI: captured function %q must be a receiver-free closure body", fn.Name())
+	}
+	owner := u.ownerOf(fn)
+	if owner == nil || owner.pkgTypes == nil {
+		return nil, fmt.Errorf("coroutine physical ABI: captured function %q has no emission owner", fn.Name())
+	}
+	return llssa.FuncAddCtx(makeClosureCtx(owner.pkgTypes, fn.FreeVars), sig), nil
+}
+
+// coroPhysicalNormalizeSourceSignature maps a declared receiver to the exact
+// leading ordinary parameter used by x/tools SSA and LLGo's existing Go method
+// declaration ABI. It also clears the source-only variadic marker: x/tools SSA
+// has already packed a variadic call into its final []T argument, and every
+// LLVM coroutine entry/call transports that ordinary slice value. Thus no C
+// varargs convention or second coroutine ABI is involved. It is idempotent.
+func coroPhysicalNormalizeSourceSignature(sig *types.Signature) *types.Signature {
+	if sig == nil {
+		return sig
+	}
+	if sig.Recv() != nil {
+		sig = llssa.FuncAddCtx(sig.Recv(), sig)
+	}
+	if !sig.Variadic() {
+		return sig
+	}
+	return types.NewSignatureType(nil, nil, nil, sig.Params(), sig.Results(), false)
+}
+
+func validateCoroPhysicalSSAParameterShape(plan coro.FunctionPlan, fn *ssa.Function, effective *types.Signature, universe *EmissionUniverse) error {
 	fail := func(format string, args ...any) error {
-		return fmt.Errorf("coroutine physical ABI: function %q: %s", plan.ID, fmt.Sprintf(format, args...))
+		name := "<nil>"
+		if fn != nil {
+			name = fn.String()
+		}
+		return fmt.Errorf("coroutine physical ABI: function %q (%s): %s", plan.ID, name, fmt.Sprintf(format, args...))
 	}
 	if fn == nil || fn.Signature == nil || effective == nil {
 		return fail("requires an SSA function and effective source signature")
@@ -1412,15 +2445,121 @@ func validateCoroPhysicalSSAParameterShape(plan coro.FunctionPlan, fn *ssa.Funct
 	if source.Params().Len() != len(fn.Params) {
 		return fail("normalized source parameters=%d do not match SSA parameters=%d", source.Params().Len(), len(fn.Params))
 	}
-	if effective.Params().Len() != len(fn.Params) {
-		return fail("effective normalized parameters=%d do not match SSA parameters=%d", effective.Params().Len(), len(fn.Params))
+	offset := 0
+	if len(fn.FreeVars) != 0 {
+		offset = 1
+		if effective.Params().Len() == 0 || !coroPhysicalClosureContextMatches(fn, effective.Params().At(0).Type()) {
+			return fail("effective captured entry has no exact typed closure context")
+		}
+	}
+	if effective.Params().Len() != len(fn.Params)+offset {
+		return fail("effective entry parameters=%d do not match SSA parameters=%d plus hidden-context=%d", effective.Params().Len(), len(fn.Params), offset)
 	}
 	for index, parameter := range fn.Params {
 		if parameter == nil || !types.Identical(parameter.Type(), source.Params().At(index).Type()) {
-			return fail("SSA parameter %d does not match normalized source parameter", index)
+			return fail("SSA parameter %d type %v does not match normalized source parameter %v", index, parameterType(parameter), source.Params().At(index).Type())
+		}
+		effectiveType := effective.Params().At(index + offset).Type()
+		sourceType := source.Params().At(index).Type()
+		if !types.Identical(effectiveType, sourceType) &&
+			(universe == nil || coroPhysicalTransportTypeKey(universe, effectiveType) != coroPhysicalTransportTypeKey(universe, sourceType)) {
+			return fail("effective parameter %d type %v is not ABI-compatible with normalized source parameter %v", index, effectiveType, sourceType)
 		}
 	}
 	return nil
+}
+
+// coroPhysicalTransportTypeKey describes only the value transported by the
+// coroutine entry ABI. It deliberately erases pointee and logical descriptor
+// identity: LLVM opaque pointers do not carry a referent type, while LLGo's
+// map, channel, interface, and slice values each have one frozen aggregate
+// shape independent of their source element or method types. Function values
+// are different: an exact //llgo:type C function is one opaque code pointer,
+// whereas a managed Go function is a two-word descriptor. Inline arrays and
+// structs remain recursive and exact. This is used only after the emission
+// universe has proved an exact source -> canonical patch alias.
+func coroPhysicalTransportTypeKey(universe *EmissionUniverse, typ types.Type) string {
+	var key func(types.Type) string
+	key = func(typ types.Type) string {
+		typ = types.Unalias(typ)
+		if _, signature := typ.Underlying().(*types.Signature); signature {
+			transport, err := coroCallableLeafTransport(universe, typ)
+			if err == nil && transport == coro.RawCCodePointer {
+				// Raw C function values use the same one-word LLVM transport as
+				// every other opaque pointer. Keeping this physical equivalence is
+				// required for exact frontend patch aliases to pointer types.
+				return framedEmissionKey("opaque-pointer")
+			}
+			// Fail closed on absent/invalid raw-C metadata: only an exact
+			// frontend classification can select the one-word transport.
+			return framedEmissionKey("managed-function-descriptor")
+		}
+		switch value := typ.(type) {
+		case *types.Named:
+			return key(value.Underlying())
+		case *types.Basic:
+			if value.Kind() == types.UnsafePointer {
+				return framedEmissionKey("opaque-pointer")
+			}
+			return framedEmissionKey("basic", fmt.Sprint(int(value.Kind())))
+		case *types.Pointer:
+			return framedEmissionKey("opaque-pointer")
+		case *types.Map:
+			return framedEmissionKey("map")
+		case *types.Chan:
+			return framedEmissionKey("chan")
+		case *types.Interface:
+			return framedEmissionKey("interface")
+		case *types.Slice:
+			return framedEmissionKey("slice")
+		case *types.Array:
+			return framedEmissionKey("array", fmt.Sprint(value.Len()), key(value.Elem()))
+		case *types.Struct:
+			fields := make([]string, 0, value.NumFields()+1)
+			fields = append(fields, "struct")
+			for index := 0; index < value.NumFields(); index++ {
+				fields = append(fields, key(value.Field(index).Type()))
+			}
+			return framedEmissionKey(fields...)
+		case *types.Tuple:
+			fields := make([]string, 0, value.Len()+1)
+			fields = append(fields, "tuple")
+			for index := 0; index < value.Len(); index++ {
+				fields = append(fields, key(value.At(index).Type()))
+			}
+			return framedEmissionKey(fields...)
+		default:
+			return framedEmissionKey("unsupported", fmt.Sprintf("%T", typ))
+		}
+	}
+	return key(typ)
+}
+
+func parameterType(parameter *ssa.Parameter) types.Type {
+	if parameter == nil {
+		return nil
+	}
+	return parameter.Type()
+}
+
+func coroPhysicalClosureContextMatches(fn *ssa.Function, typ types.Type) bool {
+	if fn == nil || len(fn.FreeVars) == 0 || typ == nil {
+		return false
+	}
+	pointer, ok := types.Unalias(typ).Underlying().(*types.Pointer)
+	if !ok {
+		return false
+	}
+	fields, ok := types.Unalias(pointer.Elem()).Underlying().(*types.Struct)
+	if !ok || fields.NumFields() != len(fn.FreeVars) {
+		return false
+	}
+	for index, free := range fn.FreeVars {
+		if free == nil || !types.Identical(fields.Field(index).Type(), free.Type()) {
+			return false
+		}
+	}
+	return true
 }
 
 func validateCoroLeafPhysicalSignature(plan coro.FunctionPlan, sig *types.Signature) error {
@@ -1600,11 +2739,96 @@ func coroLeafABIDirective(fn *ssa.Function) string {
 	return ""
 }
 
-func validateCoroPhysicalConsumers(plan *coro.SSAPlan, childAwait bool) error {
-	return validateCoroPhysicalConsumersCapabilities(plan, childAwait, false)
+// coroRawABIDirective separates an exact source-level Go symbol alias or
+// visibility declaration from a physical ABI crossing. A bodyful
+// //go:linkname definition is managed when the prepared emission universe has
+// either activated an exact bodyless Go declaration -> definition alias for
+// the same final symbol and structural signature, retained such an exact
+// pending pair from an ordinary non-metadata input, or frozen a strict
+// visibility-only certificate for an unredirected two-field directive. In
+// each case every in-program Go call resolves to the managed primary
+// (including its $coro spelling), so publishing an unrelated legacy
+// RawPlainEntry would be both unnecessary and incorrect.
+//
+// All exports, cgo/wasm/custom links, malformed or duplicate go:linkname text,
+// and unpaired redirecting/two-argument go:linkname definitions remain
+// raw/unproven boundaries. This is deliberately fail-closed for assembly or
+// out-of-universe consumers.
+func coroRawABIDirective(fn *ssa.Function, universe *EmissionUniverse) (string, error) {
+	decl, _ := fn.Syntax().(*ast.FuncDecl)
+	if decl == nil || decl.Doc == nil {
+		return "", nil
+	}
+	managedDirective, exactManagedSyntax := attachedManagedGoLinknameDirective(decl)
+	managedDefinition := false
+	managedVisibility := false
+	if exactManagedSyntax {
+		var err error
+		managedDefinition, err = universe.exactManagedGoLinknameDefinition(fn)
+		if err != nil {
+			return "", err
+		}
+		_, managedVisibility, err = universe.coroGoLinknameVisibilityCertificate(fn)
+		if err != nil {
+			return "", err
+		}
+	}
+	for _, comment := range decl.Doc.List {
+		if comment == nil {
+			continue
+		}
+		text := strings.TrimSpace(comment.Text)
+		if text == "//go:linkname" || strings.HasPrefix(text, "//go:linkname ") {
+			if exactManagedSyntax && (managedDefinition || managedVisibility) && text == managedDirective {
+				continue
+			}
+			return text, nil
+		}
+		for _, prefix := range []string{
+			"//llgo:link", "// llgo:link", "//export", "//go:wasmexport", "//go:wasmimport",
+		} {
+			if text == prefix || strings.HasPrefix(text, prefix+" ") {
+				return text, nil
+			}
+		}
+		if strings.HasPrefix(text, "//go:cgo_") {
+			return text, nil
+		}
+	}
+	return "", nil
 }
 
-func validateCoroPhysicalConsumersCapabilities(plan *coro.SSAPlan, childAwait, staticSpawn bool) error {
+func attachedManagedGoLinknameDirective(decl *ast.FuncDecl) (string, bool) {
+	if decl == nil || decl.Body == nil || decl.Doc == nil || decl.Name == nil {
+		return "", false
+	}
+	_, localName := astFuncName("", decl)
+	var found string
+	for _, comment := range decl.Doc.List {
+		if comment == nil {
+			continue
+		}
+		fields := strings.Fields(comment.Text)
+		if len(fields) == 0 || fields[0] != "//go:linkname" {
+			continue
+		}
+		if found != "" || len(fields) != 2 && len(fields) != 3 || fields[1] != localName {
+			return "", false
+		}
+		found = strings.TrimSpace(comment.Text)
+	}
+	return found, found != ""
+}
+
+func validateCoroPhysicalConsumers(plan *coro.SSAPlan, childAwait bool) error {
+	return validateCoroPhysicalConsumersCapabilities(plan, nil, childAwait, false, false)
+}
+
+func validateCoroPhysicalConsumersCapabilities(
+	plan *coro.SSAPlan,
+	universe *EmissionUniverse,
+	childAwait, staticSpawn, managedDispatch bool,
+) error {
 	coroutineIDs := make(map[coro.FunctionID]struct{})
 	for _, function := range plan.Functions() {
 		if function.Plan.Emission == coro.EmitCoroutine {
@@ -1616,14 +2840,40 @@ func validateCoroPhysicalConsumersCapabilities(plan *coro.SSAPlan, childAwait, s
 			continue
 		}
 		fn := function.Function
+		unevaluated, _ := universe.frozenUnsafeSizeAlignUnevaluatedSSA(fn)
 		for _, block := range fn.Blocks {
 			for _, instr := range block.Instrs {
+				if _, omitted := unevaluated[instr]; omitted {
+					continue
+				}
+				if store, ok := instr.(*ssa.Store); ok && plan.ElidesConditionalManagedStore(store) {
+					// This occurrence is a frozen closed-cell publication whose
+					// target has no live consumer. Code generation omits it before
+					// resolving the otherwise non-emitted function operand.
+					continue
+				}
 				if spawn, ok := instr.(*ssa.Go); ok {
 					if !staticSpawn {
 						return coroLeafInstructionError(fn, function.Plan, instr, "goroutine spawn requires scheduler root lowering")
 					}
-					if _, _, err := plan.ResolveClosedStaticSpawn(spawn); err != nil {
-						return coroLeafInstructionError(fn, function.Plan, instr, "unsupported closed static spawn: "+err.Error())
+					callPlan, found := plan.CallPlan(spawn)
+					if !found {
+						return coroLeafInstructionError(fn, function.Plan, instr, "goroutine spawn has no compilation CallPlan")
+					}
+					switch callPlan.Rep {
+					case coro.DirectCoro:
+						if _, _, err := resolveCoroDirectStaticSpawn(plan, spawn, managedDispatch); err != nil {
+							return coroLeafInstructionError(fn, function.Plan, instr, "unsupported closed static spawn: "+err.Error())
+						}
+					case coro.Dispatch:
+						if !managedDispatch {
+							return coroLeafInstructionError(fn, function.Plan, instr, "managed descriptor spawn requires the v1 descriptor dispatch capability")
+						}
+						if _, err := plan.ResolveManagedDispatchSpawn(spawn); err != nil {
+							return coroLeafInstructionError(fn, function.Plan, instr, "unsupported managed descriptor spawn: "+err.Error())
+						}
+					default:
+						return coroLeafInstructionError(fn, function.Plan, instr, "goroutine spawn has unsupported representation "+callPlan.Rep.String())
 					}
 					continue
 				}
@@ -1641,13 +2891,42 @@ func validateCoroPhysicalConsumersCapabilities(plan *coro.SSAPlan, childAwait, s
 						}
 						if function.Plan.Emission == coro.EmitCoroutine && common.IsInvoke() {
 							if _, err := resolveCoroClosedInterfacePlainCall(plan, call); err != nil {
-								return coroLeafInstructionError(fn, function.Plan, instr, "unsupported interface invoke: "+err.Error())
+								if !childAwait {
+									return coroLeafInstructionError(fn, function.Plan, instr, "unsupported interface invoke: "+err.Error())
+								}
+								if callPlan, found := plan.CallPlan(call); found && callPlan.Open &&
+									callPlan.Unresolved == coro.UnknownManagedInterfaceDispatch {
+									if !managedDispatch {
+										return coroLeafInstructionError(fn, function.Plan, instr,
+											"managed interface invoke requires the v1 descriptor dispatch capability")
+									}
+									if err := validateCoroManagedInterfaceDispatchCall(plan, universe, fn, call, callPlan); err != nil {
+										return coroLeafInstructionError(fn, function.Plan, instr,
+											"invalid managed interface call: "+err.Error())
+									}
+									continue
+								}
+								direct, ordinary := call.(*ssa.Call)
+								if !ordinary {
+									return coroLeafInstructionError(fn, function.Plan, instr, "coroutine interface dispatch requires an ordinary call")
+								}
+								dispatch, awaitErr := resolveCoroInterfaceDispatchPlan(plan, universe, direct)
+								if awaitErr != nil || !coroInterfaceDispatchNeedsAwait(dispatch) {
+									if awaitErr == nil {
+										awaitErr = fmt.Errorf("closed interface dispatch has no coroutine target")
+									}
+									return coroLeafInstructionError(fn, function.Plan, instr, "unsupported interface invoke: "+awaitErr.Error())
+								}
 							}
 						}
 					}
 					callPlan, found := plan.CallPlan(call)
 					if !found {
 						return coroLeafInstructionError(fn, function.Plan, instr, "call has no compilation CallPlan")
+					}
+					if callPlan.Transport == coro.RawCCodePointer {
+						return coroLeafInstructionError(fn, function.Plan, instr,
+							"managed coroutine raw C code-pointer call requires an explicit event, worker, or trusted inline recipe")
 					}
 					hasCoroutineTarget := false
 					for _, target := range callPlan.Targets {
@@ -1662,15 +2941,73 @@ func validateCoroPhysicalConsumersCapabilities(plan *coro.SSAPlan, childAwait, s
 						if targetPlan.Emission == coro.EmitNone {
 							return coroLeafInstructionError(fn, function.Plan, instr, fmt.Sprintf("emitted body references non-emitted call target %q", target))
 						}
+						if targetPlan.Emission == coro.EmitRawPlain {
+							return coroLeafInstructionError(
+								fn, function.Plan, instr,
+								fmt.Sprintf("managed body calls raw-plain-only target %q without a managed entry", target),
+							)
+						}
 						if _, isCoroutine := coroutineIDs[target]; isCoroutine {
 							hasCoroutineTarget = true
 							break
 						}
 					}
+					if callPlan.Rep == coro.Dispatch && call.Common() != nil &&
+						call.Common().StaticCallee() == nil && !call.Common().IsInvoke() {
+						if deferred, cleanup := call.(*ssa.Defer); cleanup {
+							if !managedDispatch {
+								return coroLeafInstructionError(fn, function.Plan, instr, "managed descriptor defer requires the v1 descriptor dispatch capability")
+							}
+							if !childAwait || function.Plan.Emission != coro.EmitCoroutine {
+								return coroLeafInstructionError(fn, function.Plan, instr, "managed descriptor defer requires coroutine child-await lowering")
+							}
+							if err := validateCoroManagedDispatchDefer(plan, fn, deferred, callPlan, universe); err != nil {
+								return coroLeafInstructionError(fn, function.Plan, instr, "invalid managed descriptor defer: "+err.Error())
+							}
+							if _, _, kind, err := resolveCoroStaticCleanupTarget(plan, function.Plan, deferred, universe); err != nil || kind != coroStaticCleanupDispatch {
+								if err == nil {
+									err = fmt.Errorf("resolved cleanup kind is %d", kind)
+								}
+								return coroLeafInstructionError(fn, function.Plan, instr, "invalid managed descriptor cleanup plan: "+err.Error())
+							}
+							continue
+						}
+						if callPlan.SyncDispatch {
+							if !managedDispatch {
+								return coroLeafInstructionError(fn, function.Plan, instr, "synchronous descriptor call requires the v1 plain dispatch capability")
+							}
+							if err := validateCoroPlainDispatchCall(plan, fn, call, callPlan, universe); err != nil {
+								return coroLeafInstructionError(fn, function.Plan, instr, "invalid synchronous descriptor call: "+err.Error())
+							}
+							continue
+						}
+						if callPlan.Open && callPlan.Unresolved != coro.UnknownManagedDispatch {
+							return coroLeafInstructionError(fn, function.Plan, instr, fmt.Sprintf(
+								"open descriptor call has uncertified execution domain %v", callPlan.Unresolved,
+							))
+						}
+						if !managedDispatch {
+							return coroLeafInstructionError(fn, function.Plan, instr, "open managed descriptor call requires the v1 descriptor dispatch capability")
+						}
+						if !childAwait || function.Plan.Emission != coro.EmitCoroutine {
+							return coroLeafInstructionError(fn, function.Plan, instr, "open managed descriptor call requires coroutine child-await lowering")
+						}
+						if err := validateCoroManagedDispatchCall(plan, fn, call, callPlan, universe); err != nil {
+							return coroLeafInstructionError(fn, function.Plan, instr, "invalid managed descriptor call: "+err.Error())
+						}
+						continue
+					}
 					if hasCoroutineTarget {
+						if childAwait && function.Plan.Emission == coro.EmitCoroutine && call.Common() != nil && call.Common().IsInvoke() {
+							if direct, ok := call.(*ssa.Call); ok {
+								if dispatch, err := resolveCoroInterfaceDispatchPlan(plan, universe, direct); err == nil && coroInterfaceDispatchNeedsAwait(dispatch) {
+									continue
+								}
+							}
+						}
 						direct, ordinary := call.(*ssa.Call)
 						if childAwait && ordinary && function.Plan.Emission == coro.EmitCoroutine {
-							if _, _, err := resolveCoroStaticAwait(plan, function.Plan, direct); err == nil {
+							if _, _, err := resolveCoroStaticAwait(plan, function.Plan, direct, universe); err == nil {
 								// The static callee operand is represented by this exact
 								// CallPlan and is not an escaped function value.
 								continue
@@ -1678,7 +3015,7 @@ func validateCoroPhysicalConsumersCapabilities(plan *coro.SSAPlan, childAwait, s
 						}
 						deferred, cleanup := call.(*ssa.Defer)
 						if childAwait && cleanup && function.Plan.Emission == coro.EmitCoroutine {
-							if _, _, kind, err := resolveCoroStaticCleanupTarget(plan, function.Plan, deferred); err == nil && kind == coroStaticCleanupCoroutine {
+							if _, _, kind, err := resolveCoroStaticCleanupTarget(plan, function.Plan, deferred, universe); err == nil && kind == coroStaticCleanupCoroutine {
 								// The physical-body preflight separately proves the
 								// frame-resident record and child no-unwind contract.
 								continue
@@ -1700,6 +3037,26 @@ func validateCoroPhysicalConsumersCapabilities(plan *coro.SSAPlan, childAwait, s
 						return coroLeafInstructionError(fn, function.Plan, instr, fmt.Sprintf("emitted body references non-emitted function value %q", targetPlan.ID))
 					}
 					if planned && targetPlan.Emission == coro.EmitCoroutine {
+						if managedDispatch && targetPlan.FuncRep == coro.Dispatch {
+							// The universal descriptor producer converts this exact
+							// function reference. Value/consumer validation below owns
+							// the rest of the two-pointer transport proof.
+							continue
+						}
+						if closure, exactClosure := instr.(*ssa.MakeClosure); exactClosure && closure.Fn == target &&
+							childAwait && function.Plan.Emission == coro.EmitCoroutine && len(target.FreeVars) != 0 &&
+							targetPlan.Primary == coro.PrimaryCoroutine && targetPlan.FuncRep == coro.DirectCoro {
+							value, exactValue := plan.ValuePlan(closure)
+							if exactValue && len(value.Funcs) == 1 && len(value.Funcs[0].Path) == 0 &&
+								value.Funcs[0].Rep == coro.DirectCoro && !value.Funcs[0].MayBeNil &&
+								len(value.Funcs[0].Targets) == 1 && value.Funcs[0].Targets[0] == targetPlan.ID {
+								// compileValue retags the physical (g,out,ctx,args)
+								// entry solely as a canonical (ctx,args) closure carrier;
+								// the exact static await consumes its env word and never
+								// calls through that temporary code word.
+								continue
+							}
+						}
 						return coroLeafInstructionError(fn, function.Plan, instr, "coroutine function value requires physical representation conversion")
 					}
 				}
@@ -1707,6 +3064,23 @@ func validateCoroPhysicalConsumersCapabilities(plan *coro.SSAPlan, childAwait, s
 		}
 	}
 	return nil
+}
+
+func coroDispatchCallHasCoroutineTarget(plan *coro.SSAPlan, call coro.SSACallPlan) bool {
+	if plan == nil {
+		return false
+	}
+	for _, id := range call.Targets {
+		target, ok := plan.Function(id)
+		if !ok || target == nil {
+			continue
+		}
+		targetPlan, ok := plan.FunctionPlan(target)
+		if ok && targetPlan.Emission == coro.EmitCoroutine {
+			return true
+		}
+	}
+	return false
 }
 
 func coroLeafScalar(typ types.Type) bool {
@@ -1724,5 +3098,25 @@ func coroLeafInstructionError(fn *ssa.Function, plan coro.FunctionPlan, instr ss
 	if pos.IsValid() {
 		where = fmt.Sprintf("%s:%d:%d", pos.Filename, pos.Line, pos.Column)
 	}
-	return fmt.Errorf("coroutine physical ABI: function %q: %T at %s: %s", plan.ID, instr, where, reason)
+	name := "<nil>"
+	if fn != nil {
+		name = fn.String()
+	}
+	operation := coroInstructionOperation(instr)
+	return fmt.Errorf("coroutine physical ABI: function %q (%s): %T%s at %s: %s", plan.ID, name, instr, operation, where, reason)
+}
+
+func coroInstructionOperation(instr ssa.Instruction) (operation string) {
+	// Tests and validation adapters may construct partially attached SSA
+	// instructions. x/tools String methods assume both a complete parent and
+	// complete operands, so diagnostics must tolerate either being absent.
+	if instr == nil || instr.Block() == nil || instr.Block().Parent() == nil {
+		return ""
+	}
+	defer func() {
+		if recover() != nil {
+			operation = ""
+		}
+	}()
+	return fmt.Sprintf(" %q", instr.String())
 }

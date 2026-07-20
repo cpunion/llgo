@@ -1,5 +1,4 @@
-//go:build go1.23 && !baremetal
-// +build go1.23,!baremetal
+//go:build go1.23 && !baremetal && (!llgo || !llgo_coro || !llgo_coro_native_pipe || !llgo_coro_native_timer || (!darwin && !linux) || coro_runtime_adapter_test)
 
 package runtime
 
@@ -130,41 +129,6 @@ func dropTimerState(r *runtimeTimer) {
 	timerStateMu.Unlock()
 }
 
-func timerDebug() bool {
-	timerDebugOnce.Do(func() {
-		timerDebugEnabled = cliteos.Getenv(c.AllocaCStr("LLGO_TIMER_DEBUG")) != nil
-	})
-	return timerDebugEnabled
-}
-
-func timerDebugLoop(label string, loop *libuv.Loop) {
-	if !timerDebug() {
-		return
-	}
-	c.Fprintf(c.Stderr, c.Str("timer: %s=%p\n"), c.AllocaCStr(label), loop)
-}
-
-func timerDebugUint(label string, v uintptr) {
-	if !timerDebug() {
-		return
-	}
-	c.Fprintf(c.Stderr, c.Str("timer: %s=%u\n"), c.AllocaCStr(label), c.Uint(v))
-}
-
-func timerDebugInt(label string, v int) {
-	if !timerDebug() {
-		return
-	}
-	c.Fprintf(c.Stderr, c.Str("timer: %s=%d\n"), c.AllocaCStr(label), c.Int(v))
-}
-
-func timerDebugMsg(label string) {
-	if !timerDebug() {
-		return
-	}
-	c.Fprintf(c.Stderr, c.Str("timer: %s\n"), c.AllocaCStr(label))
-}
-
 func initTimerLoop() *libuv.Loop {
 	loop := libuv.LoopNew()
 	timerDebugLoop("LoopNew", loop)
@@ -222,7 +186,7 @@ func isAsyncTimerChan2() bool {
 				return false
 			}
 		}
-		c.Usleep(1)
+		coroSchedulerYield()
 	}
 }
 

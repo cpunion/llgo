@@ -53,7 +53,15 @@ type taskControlSlot struct {
 // returned and a final owner drain to have consumed any late request.
 type TaskControlSource struct {
 	routedProducerSource
-	slots [TaskControlSourceCapacity]taskControlSlot
+	slots     [TaskControlSourceCapacity]taskControlSlot
+	scanLimit uint32
+}
+
+func taskControlScanLimit(source *TaskControlSource) (uint32, bool) {
+	if source == nil {
+		return 0, false
+	}
+	return source.scanLimit, validSourceScanLimit(source.scanLimit, TaskControlSourceCapacity)
 }
 
 func taskControlSlotFor(source *TaskControlSource, id OperationID) (*taskControlSlot, bool) {
@@ -73,7 +81,8 @@ func taskControlReusableSlot(slot *taskControlSlot) bool {
 }
 
 func validTaskControlOwner(source *TaskControlSource, p *P) bool {
-	return source != nil && validRoutedProducerSource(&source.routedProducerSource, p)
+	_, scanOK := taskControlScanLimit(source)
+	return scanOK && validRoutedProducerSource(&source.routedProducerSource, p)
 }
 
 // registeredTaskControlDelivery proves that one exact endpoint still pins its
@@ -115,6 +124,9 @@ func RegisterTaskControl(source *TaskControlSource, p *P, task *G) (OperationID,
 		}
 		generation, begun := beginProducerSourceSlot(&slot.producerSourceSlot)
 		if !begun {
+			return OperationID{}, false
+		}
+		if !raiseSourceScanLimit(&source.scanLimit, uint32(index), TaskControlSourceCapacity) {
 			return OperationID{}, false
 		}
 		id, ok := MakeOperationIDAtRoute(OperationSourceControl, source.route, uint32(index)+1, generation)
@@ -272,8 +284,12 @@ func (source *TaskControlSource) publishPass(p *P, terminal *G) (delivered, disc
 	if !source.beginPublishPass(p) {
 		return 0, 0, false
 	}
-	for index := range source.slots {
-		oneDelivered, oneDiscarded, slotOK := source.publishSlot(p, terminal, uint32(index))
+	limit, valid := taskControlScanLimit(source)
+	if !valid {
+		return 0, 0, false
+	}
+	for index := uint32(0); index < limit; index++ {
+		oneDelivered, oneDiscarded, slotOK := source.publishSlot(p, terminal, index)
 		delivered += oneDelivered
 		discarded += oneDiscarded
 		if !slotOK {
@@ -503,7 +519,11 @@ func BindTaskControlSourceAtRoute(source *TaskControlSource, p *P, route RouteID
 	if !taskControlSourceEmpty(source, nil) {
 		return false
 	}
-	return bindRoutedProducerSource(&source.routedProducerSource, p, route)
+	if !bindRoutedProducerSource(&source.routedProducerSource, p, route) {
+		return false
+	}
+	source.scanLimit = 0
+	return true
 }
 
 // BindTaskControlSource is the explicit route-1 compatibility binding.
@@ -515,7 +535,11 @@ func UnbindTaskControlSource(source *TaskControlSource, p *P) bool {
 	if !taskControlSourceEmpty(source, p) {
 		return false
 	}
-	return unbindRoutedProducerSource(&source.routedProducerSource, p)
+	if !unbindRoutedProducerSource(&source.routedProducerSource, p) {
+		return false
+	}
+	source.scanLimit = 0
+	return true
 }
 
 func (source *TaskControlSource) CanRelease() bool {

@@ -3,13 +3,17 @@
 package runtime
 
 import (
-	"unsafe"
-
 	rtdebug "github.com/goplus/llgo/runtime/internal/runtime"
+	_ "unsafe"
 )
 
-//go:linkname c_framepointer C.llgo_framepointer
-func c_framepointer() unsafe.Pointer
+// c_fpCallers copies return PCs while its native frame and the complete chain
+// are still alive. It is same-thread and non-retaining; moving it to a worker
+// would inspect the worker's unrelated stack.
+//
+//llgo:coro sync
+//go:linkname c_fpCallers C.llgo_fp_callers
+func c_fpCallers(skip int, pc *uintptr, capacity int, textLow, textHigh uintptr) int
 
 func init() {
 	rtdebug.PanicTraceback = panicTraceback
@@ -80,9 +84,8 @@ func panicTraceback(skip int) bool {
 	return true
 }
 
-// maxFPStride bounds how far up the stack one frame may sit from the next.
-// A slot whose decoded parent is further away than any plausible frame is a
-// corrupt chain, not a giant frame; stop rather than walk off the stack.
+// maxFPStride is shared with the signal-fault snapshot walker. A decoded parent
+// further away than any plausible native frame is a corrupt chain.
 const maxFPStride = 1 << 20
 
 // fpCallers walks the frame-pointer chain and fills pc with return
@@ -106,40 +109,11 @@ func fpCallers(skip int, pc []uintptr) int {
 	// The walk bound needs the frame table's text range; make sure it is
 	// built (no-op when the prebuilt table was adopted at startup).
 	initRuntimeFuncPCFrames()
-	fp := uintptr(c_framepointer())
-	n := 0
-	// The helper's saved chain starts at our own frame; skip fpCallers
-	// itself so skip counting matches the caller's view.
-	skip++
-	const maxFrames = 4096
-	for i := 0; fp != 0 && n < len(pc) && i < maxFrames; i++ {
-		prev := *(*uintptr)(unsafe.Pointer(fp))
-		ret := *(*uintptr)(unsafe.Pointer(fp + unsafe.Sizeof(uintptr(0))))
-		if ret < minLegalPC {
-			break
-		}
-		// Beyond main the chain runs into libc frames without FP
-		// discipline; their slots decode as wild pcs that nearest-below
-		// symbolization would map to arbitrary functions. Bound the walk
-		// to the program's own text (Go tracebacks stop at runtime.main
-		// for the same reason).
-		if !prebuiltTextContains(ret) {
-			break
-		}
-		if skip > 0 {
-			skip--
-		} else {
-			pc[n] = ret
-			n++
-		}
-		// Stacks grow down, so the chain must strictly increase; bound the
-		// stride so a corrupt slot cannot walk off the stack.
-		if prev <= fp || prev-fp > maxFPStride || prev&(unsafe.Sizeof(uintptr(0))-1) != 0 {
-			break
-		}
-		fp = prev
+	textLow, textHigh, ok := prebuiltTextBounds()
+	if !ok {
+		return 0
 	}
-	return n
+	return c_fpCallers(skip, &pc[0], len(pc), textLow, textHigh)
 }
 
 // runtimeFPChain is emitted next to the funcinfo table (one per binary,

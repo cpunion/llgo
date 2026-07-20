@@ -163,6 +163,16 @@ func (g Global) InitNil() {
 	g.impl.SetInitializer(llvm.ConstNull(g.impl.GlobalValueType()))
 }
 
+// SetInternalLinkage makes this package global private to its emitted LLVM
+// module. Callers must prove that no separately linked input references the
+// physical symbol before using this operation.
+func (g Global) SetInternalLinkage() {
+	if g == nil || g.impl.IsNil() {
+		panic("ssa: internal linkage requires a materialized global")
+	}
+	g.impl.SetLinkage(llvm.InternalLinkage)
+}
+
 func (g Global) ReplaceAllUsesWith(v Expr) {
 	g.impl.ReplaceAllUsesWith(v.impl)
 }
@@ -252,6 +262,13 @@ func (p Package) NewFunc(name string, sig *types.Signature, bg Background) Funct
 // NewFuncEx creates a new function.
 func (p Package) NewFuncEx(name string, sig *types.Signature, bg Background, hasFreeVars bool, instantiated bool) Function {
 	if v, ok := p.fns[name]; ok {
+		// A cross-package ABI table can create a declaration before the exact
+		// generated/generic body is materialized in this module. Linkonce is a
+		// property of that final definition, so do not lose it merely because
+		// symbol discovery happened before body compilation.
+		if instantiated {
+			v.impl.SetLinkage(llvm.LinkOnceAnyLinkage)
+		}
 		return v
 	}
 	t := p.Prog.FuncDecl(sig, bg)

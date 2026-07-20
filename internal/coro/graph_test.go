@@ -103,12 +103,97 @@ func TestAnalyzeSelfRecursionAddsPreemptSeed(t *testing.T) {
 	}
 }
 
+func TestAnalyzeTrustedBoundedRecursionRequiresCompleteSCC(t *testing.T) {
+	build := func(complete bool) *Plan {
+		t.Helper()
+		g := NewGraph()
+		mustAddFunction(t, g, FunctionSpec{
+			ID: "a", Demand: AsyncDemand, TrustedBoundedRecursion: true,
+		})
+		mustAddFunction(t, g, FunctionSpec{
+			ID: "b", TrustedBoundedRecursion: complete,
+		})
+		mustAddCall(t, g, CallEdge{Caller: "a", Callee: "b", Kind: CallDirect})
+		mustAddCall(t, g, CallEdge{Caller: "b", Callee: "a", Kind: CallDirect})
+		plan, err := g.Analyze()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return plan
+	}
+
+	complete := build(true)
+	for _, id := range []FunctionID{"a", "b"} {
+		fn := mustLookup(t, complete, id)
+		if !fn.Recursive || !fn.TrustedBoundedRecursion || fn.Effect != NoSuspend ||
+			fn.Exec.Contains(NeedsPreempt) || fn.Primary != PrimaryPlain || fn.Emission != EmitPlain {
+			t.Fatalf("complete bounded SCC member %s = %+v, want recursive plain body without recursive preemption seed", id, fn)
+		}
+	}
+
+	partial := build(false)
+	for _, id := range []FunctionID{"a", "b"} {
+		fn := mustLookup(t, partial, id)
+		if !fn.Recursive || fn.TrustedBoundedRecursion || !fn.LocalEffect.Contains(YieldOnly) ||
+			!fn.LocalExec.Contains(NeedsPreempt) || fn.Primary != PrimaryCoroutine || fn.Emission != EmitCoroutine {
+			t.Fatalf("partial bounded SCC member %s = %+v, want ordinary fail-closed recursive plan", id, fn)
+		}
+	}
+}
+
+func TestAnalyzeTrustedBoundedRecursionPreservesDeclaredAndCalleeEffects(t *testing.T) {
+	tests := []struct {
+		name string
+		b    FunctionSpec
+	}{
+		{
+			name: "explicit preemption",
+			b:    FunctionSpec{ID: "b", Exec: NeedsPreempt, TrustedBoundedRecursion: true},
+		},
+		{
+			name: "real suspend",
+			b:    FunctionSpec{ID: "b", Seed: WaitHost, TrustedBoundedRecursion: true},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			g := NewGraph()
+			mustAddFunction(t, g, FunctionSpec{
+				ID: "a", Demand: AsyncDemand, TrustedBoundedRecursion: true,
+			})
+			mustAddFunction(t, g, test.b)
+			mustAddCall(t, g, CallEdge{Caller: "a", Callee: "b", Kind: CallDirect})
+			mustAddCall(t, g, CallEdge{Caller: "b", Callee: "a", Kind: CallDirect})
+			plan, err := g.Analyze()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, id := range []FunctionID{"a", "b"} {
+				fn := mustLookup(t, plan, id)
+				if !fn.Recursive || !fn.TrustedBoundedRecursion || !fn.Effect.MaySuspend() ||
+					fn.Primary != PrimaryCoroutine || fn.Emission != EmitCoroutine {
+					t.Fatalf("bounded SCC member %s = %+v, want preserved suspendable plan", id, fn)
+				}
+			}
+			b := mustLookup(t, plan, "b")
+			if test.b.Exec.Contains(NeedsPreempt) &&
+				(!b.LocalExec.Contains(NeedsPreempt) || !b.LocalEffect.Contains(YieldOnly)) {
+				t.Fatalf("explicit preemption was cleared: %+v", b)
+			}
+			if test.b.Seed.MaySuspend() && !b.LocalEffect.Contains(test.b.Seed) {
+				t.Fatalf("declared suspend effect was cleared: %+v", b)
+			}
+		})
+	}
+}
+
 func TestAnalyzeSpawnDoesNotTaintCaller(t *testing.T) {
 	g := NewGraph()
 	mustAddFunction(t, g, FunctionSpec{ID: "caller"})
 	mustAddFunction(t, g, FunctionSpec{ID: "worker", Seed: MayPark})
 	mustAddCall(t, g, CallEdge{Caller: "caller", Callee: "worker", Kind: CallSpawn})
 	mustAddUnknownCall(t, g, UnknownCall{Caller: "caller", Kind: CallSpawn, Target: UnknownManaged})
+	mustAddUnknownCall(t, g, UnknownCall{Caller: "caller", Kind: CallSpawn, Target: UnknownManagedDispatch})
 
 	plan, err := g.Analyze()
 	if err != nil {
@@ -187,9 +272,125 @@ func TestAnalyzeExternalAndUnknownPolicies(t *testing.T) {
 	}
 }
 
+func TestAnalyzeTrustedInlineSuppressesOnlyExactForeignWait(t *testing.T) {
+	g := NewGraph()
+	mustAddFunction(t, g, FunctionSpec{ID: "trusted-caller", Demand: SyncDemand})
+	mustAddFunction(t, g, FunctionSpec{ID: "affine-caller", Demand: SyncDemand})
+	mustAddFunction(t, g, FunctionSpec{ID: "auto-caller", Demand: SyncDemand})
+	mustAddFunction(t, g, FunctionSpec{
+		ID: "foreign", External: ExternalUnknownForeign, Exec: ThreadAffine | OpaqueExec | MayUnwind,
+	})
+	mustAddCall(t, g, CallEdge{
+		Caller: "trusted-caller", Callee: "foreign", Kind: CallTrustedInline,
+		DefaultContractExec: ThreadAffine | OpaqueExec,
+	})
+	mustAddCall(t, g, CallEdge{
+		Caller: "affine-caller", Callee: "foreign", Kind: CallTrustedInline,
+		DefaultContractExec: ThreadAffine | OpaqueExec, SelectedContractExec: ThreadAffine,
+	})
+	mustAddCall(t, g, CallEdge{Caller: "auto-caller", Callee: "foreign", Kind: CallForeign})
+
+	plan, err := g.Analyze()
+	if err != nil {
+		t.Fatal(err)
+	}
+	trusted := mustLookup(t, plan, "trusted-caller")
+	if trusted.Effect != NoSuspend || trusted.Exec != IRQUnsafe|MayUnwind || trusted.Primary != PrimaryPlain {
+		t.Fatalf("trusted-inline caller = %+v", trusted)
+	}
+	affine := mustLookup(t, plan, "affine-caller")
+	if affine.Effect != NoSuspend || affine.Exec != ThreadAffine|IRQUnsafe|MayUnwind || affine.Primary != PrimaryPlain {
+		t.Fatalf("affine trusted-inline caller = %+v", affine)
+	}
+	auto := mustLookup(t, plan, "auto-caller")
+	if !auto.Effect.Contains(WaitForeign) || auto.Exec != ThreadAffine|OpaqueExec|IRQUnsafe|MayUnwind || auto.Primary != PrimaryCoroutine {
+		t.Fatalf("auto caller = %+v", auto)
+	}
+	foreign := mustLookup(t, plan, "foreign")
+	if foreign.External != ExternalUnknownForeign || foreign.Demand != SyncDemand ||
+		foreign.Exec != BlockForeign|ThreadAffine|OpaqueExec|IRQUnsafe|MayUnwind {
+		t.Fatalf("foreign target = %+v", foreign)
+	}
+}
+
+func TestTrustedInlineCallEdgeContractExecFailsClosed(t *testing.T) {
+	tests := []struct {
+		name string
+		edge CallEdge
+		want string
+	}{
+		{
+			name: "ordinary edge carries projection",
+			edge: CallEdge{Caller: "caller", Callee: "foreign", Kind: CallDirect, DefaultContractExec: ThreadAffine},
+			want: "carries trusted-inline",
+		},
+		{
+			name: "non-contract IRQ flag",
+			edge: CallEdge{Caller: "caller", Callee: "foreign", Kind: CallTrustedInline, DefaultContractExec: IRQUnsafe},
+			want: "non-contract flags",
+		},
+		{
+			name: "non-contract unwind flag",
+			edge: CallEdge{Caller: "caller", Callee: "foreign", Kind: CallTrustedInline, DefaultContractExec: MayUnwind},
+			want: "non-contract flags",
+		},
+		{
+			name: "selected widening",
+			edge: CallEdge{Caller: "caller", Callee: "foreign", Kind: CallTrustedInline, SelectedContractExec: OpaqueExec},
+			want: "widens default",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			g := NewGraph()
+			if err := g.AddCall(test.edge); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("AddCall error = %v; want %q", err, test.want)
+			}
+		})
+	}
+
+	duplicate := NewGraph()
+	first := CallEdge{
+		Caller: "caller", Callee: "foreign", Kind: CallTrustedInline,
+		DefaultContractExec: ThreadAffine | OpaqueExec,
+	}
+	if err := duplicate.AddCall(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := duplicate.AddCall(first); err != nil {
+		t.Fatalf("identical duplicate edge rejected: %v", err)
+	}
+	conflict := first
+	conflict.SelectedContractExec = ThreadAffine
+	if err := duplicate.AddCall(conflict); err == nil || !strings.Contains(err.Error(), "conflicting duplicate") {
+		t.Fatalf("conflicting duplicate error = %v", err)
+	}
+
+	laneMismatch := NewGraph()
+	mustAddFunction(t, laneMismatch, FunctionSpec{ID: "caller", Demand: SyncDemand})
+	mustAddFunction(t, laneMismatch, FunctionSpec{ID: "foreign", External: ExternalUnknownForeign, Exec: ThreadAffine})
+	mustAddCall(t, laneMismatch, CallEdge{
+		Caller: "caller", Callee: "foreign", Kind: CallTrustedInline,
+		DefaultContractExec: ThreadAffine | OpaqueExec,
+	})
+	if _, err := laneMismatch.Analyze(); err == nil || !strings.Contains(err.Error(), "lanes are") {
+		t.Fatalf("target contract lane mismatch error = %v", err)
+	}
+
+	propagatedLane := NewGraph()
+	mustAddFunction(t, propagatedLane, FunctionSpec{ID: "caller", Demand: SyncDemand})
+	mustAddFunction(t, propagatedLane, FunctionSpec{ID: "foreign", External: ExternalUnknownForeign})
+	mustAddFunction(t, propagatedLane, FunctionSpec{ID: "independent-affine", Exec: ThreadAffine})
+	mustAddCall(t, propagatedLane, CallEdge{Caller: "caller", Callee: "foreign", Kind: CallTrustedInline})
+	mustAddCall(t, propagatedLane, CallEdge{Caller: "foreign", Callee: "independent-affine", Kind: CallDirect})
+	if _, err := propagatedLane.Analyze(); err == nil || !strings.Contains(err.Error(), "lanes are") {
+		t.Fatalf("independently propagated contract-shaped lane error = %v", err)
+	}
+}
+
 func TestAnalyzeUnknownCallMatrix(t *testing.T) {
 	for _, kind := range []CallKind{CallDirect, CallDefer, CallSpawn, CallForeign} {
-		for _, target := range []UnknownTarget{UnknownManaged, UnknownForeign} {
+		for _, target := range []UnknownTarget{UnknownManaged, UnknownForeign, UnknownManagedDispatch, UnknownManagedInterfaceDispatch} {
 			t.Run(kindName(kind)+"/"+unknownTargetName(target), func(t *testing.T) {
 				g := NewGraph()
 				mustAddFunction(t, g, FunctionSpec{ID: "caller"})
@@ -207,6 +408,10 @@ func TestAnalyzeUnknownCallMatrix(t *testing.T) {
 				case kind == CallForeign || target == UnknownForeign:
 					if caller.Effect != WaitForeign || !caller.Exec.Contains(IRQUnsafe) {
 						t.Fatalf("unknown foreign call plan = %+v", caller)
+					}
+				case target.managedDispatch():
+					if caller.Effect != AwaitStructured || caller.Exec.Contains(OpaqueExec|IRQUnsafe) {
+						t.Fatalf("unknown managed dispatch call plan = %+v", caller)
 					}
 				default:
 					if !caller.Effect.IsOpaque() || !caller.Exec.IsOpaque() {
@@ -246,6 +451,276 @@ func TestAnalyzeDemandAndFunctionRepresentation(t *testing.T) {
 	callback := mustLookup(t, plan, "callback")
 	if callback.Demand != BothDemand || callback.Emission != EmitCoroutine || callback.FuncRep != Dispatch || callback.Primary != PrimaryCoroutine {
 		t.Fatalf("dynamic callback plan = %+v", callback)
+	}
+}
+
+func TestAnalyzeExplicitStatusColorsOnlyAsyncMayUnwindBodies(t *testing.T) {
+	build := func(demand Demand, mode OutcomeMode) *Plan {
+		t.Helper()
+		g := NewGraph()
+		mustAddFunction(t, g, FunctionSpec{ID: "entry", Demand: demand, Exec: MayUnwind})
+		plan, err := g.AnalyzeWithConfig(GraphAnalysisConfig{OutcomeMode: mode})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return plan
+	}
+
+	for _, test := range []struct {
+		name   string
+		demand Demand
+		mode   OutcomeMode
+		want   BodyEmission
+	}{
+		{name: "legacy async", demand: AsyncDemand, mode: OutcomeLegacy, want: EmitPlain},
+		{name: "explicit sync", demand: SyncDemand, mode: OutcomeExplicitStatus, want: EmitPlain},
+		{name: "explicit async", demand: AsyncDemand, mode: OutcomeExplicitStatus, want: EmitCoroutine},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := mustLookup(t, build(test.demand, test.mode), "entry")
+			if got.Emission != test.want {
+				t.Fatalf("entry plan = %+v, want emission %s", got, test.want)
+			}
+			if test.want == EmitCoroutine {
+				if got.Effect != OutcomeStructured || got.Primary != PrimaryCoroutine || got.FuncRep != DirectCoro {
+					t.Fatalf("explicit async outcome plan = %+v", got)
+				}
+			} else if got.Effect != NoSuspend || got.Primary != PrimaryPlain || got.FuncRep != DirectPlain {
+				t.Fatalf("plain outcome plan = %+v", got)
+			}
+		})
+	}
+}
+
+func TestAnalyzeExplicitStatusColorsDirectAndUnwindChildren(t *testing.T) {
+	g := NewGraph()
+	for _, spec := range []FunctionSpec{
+		{ID: "entry", Demand: AsyncDemand, Exec: MayUnwind},
+		{ID: "direct", Exec: MayUnwind},
+		{ID: "unwind", Exec: MayUnwind},
+		{ID: "source-panic-helper", Exec: MayUnwind},
+	} {
+		mustAddFunction(t, g, spec)
+	}
+	mustAddCall(t, g, CallEdge{Caller: "entry", Callee: "direct", Kind: CallDirect})
+	mustAddCall(t, g, CallEdge{Caller: "entry", Callee: "unwind", Kind: CallUnwind})
+	mustAddCall(t, g, CallEdge{Caller: "entry", Callee: "source-panic-helper", Kind: CallExplicitStatusElided})
+
+	plan, err := g.AnalyzeWithConfig(GraphAnalysisConfig{OutcomeMode: OutcomeExplicitStatus})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := mustLookup(t, plan, "entry")
+	if entry.Effect != OutcomeStructured|AwaitStructured || entry.Emission != EmitCoroutine {
+		t.Fatalf("entry plan = %+v", entry)
+	}
+	for _, id := range []FunctionID{"direct", "unwind"} {
+		child := mustLookup(t, plan, id)
+		if child.Demand != AsyncDemand || child.Effect != OutcomeStructured || child.Emission != EmitCoroutine ||
+			child.Primary != PrimaryCoroutine || child.FuncRep != DirectCoro {
+			t.Fatalf("%s outcome child plan = %+v", id, child)
+		}
+	}
+	helper := mustLookup(t, plan, "source-panic-helper")
+	if helper.Demand != NoDemand || helper.ManagedDemand != NoDemand || helper.RawPlainDemand || helper.Effect != NoSuspend || helper.Emission != EmitNone ||
+		helper.Primary != PrimaryPlain || helper.FuncRep != DirectPlain {
+		t.Fatalf("ExplicitStatus-elided source-panic helper = %+v", helper)
+	}
+}
+
+func TestAnalyzeExplicitStatusPhysicalSyncRootColorsMayUnwindChild(t *testing.T) {
+	g := NewGraph()
+	mustAddFunction(t, g, FunctionSpec{ID: "entry", Demand: SyncDemand, Seed: MayPark, Exec: MayUnwind})
+	mustAddFunction(t, g, FunctionSpec{ID: "helper", Exec: MayUnwind})
+	mustAddCall(t, g, CallEdge{Caller: "entry", Callee: "helper", Kind: CallDirect})
+
+	plan, err := g.AnalyzeWithConfig(GraphAnalysisConfig{OutcomeMode: OutcomeExplicitStatus})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := mustLookup(t, plan, "entry")
+	if entry.Demand != SyncDemand || !entry.Effect.Contains(MayPark|OutcomeStructured|AwaitStructured) || entry.Emission != EmitCoroutine {
+		t.Fatalf("physical sync root plan = %+v", entry)
+	}
+	helper := mustLookup(t, plan, "helper")
+	if helper.Demand != AsyncDemand || helper.Effect != OutcomeStructured || helper.Emission != EmitCoroutine {
+		t.Fatalf("physical sync root helper plan = %+v", helper)
+	}
+}
+
+func TestAnalyzeRawPlainOnlyClosurePreservesManagedFacts(t *testing.T) {
+	g := NewGraph()
+	for _, spec := range []FunctionSpec{
+		{ID: "raw-root", RawPlainDemand: true, RawPlainEntry: true},
+		{ID: "panic-helper", Seed: WaitForeign, Exec: BlockForeign},
+		{ID: "schedulerwait", External: ExternalUnknownForeign},
+	} {
+		mustAddFunction(t, g, spec)
+	}
+	mustAddCall(t, g, CallEdge{Caller: "raw-root", Callee: "panic-helper", Kind: CallDirect})
+	mustAddCall(t, g, CallEdge{Caller: "panic-helper", Callee: "schedulerwait", Kind: CallForeign})
+
+	plan, err := g.Analyze()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []FunctionID{"raw-root", "panic-helper"} {
+		got := mustLookup(t, plan, id)
+		if got.ManagedDemand != NoDemand || !got.RawPlainDemand || !got.RawPlainOnly || got.Emission != EmitRawPlain ||
+			got.Primary != PrimaryPlain || got.FuncRep != DirectPlain || !got.Effect.MaySuspend() {
+			t.Fatalf("raw-only %s plan = %+v", id, got)
+		}
+	}
+	helper := mustLookup(t, plan, "panic-helper")
+	if !helper.Exec.Contains(BlockForeign) || helper.Effect != WaitForeign || helper.RawPlainEntry {
+		t.Fatalf("raw-only helper lost exact facts or gained address capability: %+v", helper)
+	}
+	wait := mustLookup(t, plan, "schedulerwait")
+	if wait.ManagedDemand != NoDemand || !wait.RawPlainDemand || wait.RawPlainOnly || wait.Emission != EmitExternal ||
+		wait.External != ExternalUnknownForeign || !wait.Exec.Contains(BlockForeign|IRQUnsafe) {
+		t.Fatalf("raw schedulerwait plan = %+v", wait)
+	}
+}
+
+func TestAnalyzeRawAndManagedDemandSelectsDualCoroutine(t *testing.T) {
+	g := NewGraph()
+	mustAddFunction(t, g, FunctionSpec{ID: "raw-root", RawPlainDemand: true})
+	mustAddFunction(t, g, FunctionSpec{ID: "managed-root", Demand: AsyncDemand})
+	mustAddFunction(t, g, FunctionSpec{ID: "helper", Seed: MayPark})
+	mustAddFunction(t, g, FunctionSpec{ID: "plain-helper"})
+	mustAddCall(t, g, CallEdge{Caller: "raw-root", Callee: "helper", Kind: CallDirect})
+	mustAddCall(t, g, CallEdge{Caller: "managed-root", Callee: "helper", Kind: CallDirect})
+	mustAddCall(t, g, CallEdge{Caller: "raw-root", Callee: "plain-helper", Kind: CallDirect})
+	mustAddCall(t, g, CallEdge{Caller: "managed-root", Callee: "plain-helper", Kind: CallDirect})
+
+	plan, err := g.Analyze()
+	if err != nil {
+		t.Fatal(err)
+	}
+	helper := mustLookup(t, plan, "helper")
+	if helper.ManagedDemand != AsyncDemand || !helper.RawPlainDemand || helper.Demand != BothDemand || helper.RawPlainOnly ||
+		helper.Emission != EmitCoroutine || helper.Primary != PrimaryCoroutine || helper.FuncRep != DirectCoro {
+		t.Fatalf("mixed helper plan = %+v", helper)
+	}
+	plain := mustLookup(t, plan, "plain-helper")
+	if plain.ManagedDemand != SyncDemand || !plain.RawPlainDemand || plain.RawPlainOnly || plain.Emission != EmitPlain ||
+		plain.Primary != PrimaryPlain || plain.FuncRep != DirectPlain {
+		t.Fatalf("mixed no-suspend helper plan = %+v", plain)
+	}
+}
+
+func TestAnalyzeRawReferenceCannotMakeOpenValueRawPlainOnly(t *testing.T) {
+	g := NewGraph()
+	mustAddFunction(t, g, FunctionSpec{ID: "raw-root", RawPlainDemand: true})
+	mustAddFunction(t, g, FunctionSpec{ID: "escaped", Seed: YieldOnly, NeedsDispatch: true})
+	mustAddReference(t, g, ReferenceEdge{Owner: "raw-root", Target: "escaped", RawPlain: true})
+
+	plan, err := g.Analyze()
+	if err != nil {
+		t.Fatal(err)
+	}
+	escaped := mustLookup(t, plan, "escaped")
+	if escaped.ManagedDemand != AsyncDemand || !escaped.RawPlainDemand || escaped.RawPlainOnly ||
+		escaped.Emission != EmitCoroutine || escaped.Primary != PrimaryCoroutine || escaped.FuncRep != Dispatch {
+		t.Fatalf("escaped raw reference plan = %+v", escaped)
+	}
+}
+
+func TestAnalyzeExplicitStatusElidedDemandFollowsPhysicalDomain(t *testing.T) {
+	g := NewGraph()
+	for _, spec := range []FunctionSpec{
+		{ID: "managed-coro", Demand: AsyncDemand, Exec: MayUnwind},
+		{ID: "managed-plain", Demand: SyncDemand},
+		{ID: "raw-owner", RawPlainDemand: true},
+		{ID: "elided"}, {ID: "plain-helper"}, {ID: "raw-helper"},
+	} {
+		mustAddFunction(t, g, spec)
+	}
+	mustAddCall(t, g, CallEdge{Caller: "managed-coro", Callee: "elided", Kind: CallExplicitStatusElided})
+	mustAddCall(t, g, CallEdge{Caller: "managed-plain", Callee: "plain-helper", Kind: CallExplicitStatusElided})
+	mustAddCall(t, g, CallEdge{Caller: "raw-owner", Callee: "raw-helper", Kind: CallExplicitStatusElided})
+
+	plan, err := g.AnalyzeWithConfig(GraphAnalysisConfig{OutcomeMode: OutcomeExplicitStatus})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := mustLookup(t, plan, "elided"); got.Demand != NoDemand || got.Emission != EmitNone {
+		t.Fatalf("physically elided managed helper = %+v", got)
+	}
+	if got := mustLookup(t, plan, "plain-helper"); got.ManagedDemand != SyncDemand || got.RawPlainDemand || got.Emission != EmitPlain {
+		t.Fatalf("plain managed helper = %+v", got)
+	}
+	if got := mustLookup(t, plan, "raw-helper"); got.ManagedDemand != NoDemand || !got.RawPlainDemand || !got.RawPlainOnly || got.Emission != EmitRawPlain {
+		t.Fatalf("raw legacy helper = %+v", got)
+	}
+}
+
+func TestAnalyzeExplicitStatusSyncOnlyReferenceRetainsPlainABI(t *testing.T) {
+	g := NewGraph()
+	mustAddFunction(t, g, FunctionSpec{ID: "entry", Demand: AsyncDemand, Exec: MayUnwind})
+	mustAddFunction(t, g, FunctionSpec{ID: "callback", Exec: MayUnwind})
+	mustAddReference(t, g, ReferenceEdge{Owner: "entry", Target: "callback", SyncOnly: true})
+
+	plan, err := g.AnalyzeWithConfig(GraphAnalysisConfig{OutcomeMode: OutcomeExplicitStatus})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := mustLookup(t, plan, "entry")
+	if entry.Effect != OutcomeStructured || entry.Emission != EmitCoroutine {
+		t.Fatalf("ExplicitStatus reference owner = %+v", entry)
+	}
+	callback := mustLookup(t, plan, "callback")
+	if callback.Demand != SyncDemand || callback.Effect != NoSuspend || callback.Emission != EmitPlain ||
+		callback.Primary != PrimaryPlain || callback.FuncRep != DirectPlain {
+		t.Fatalf("synchronous-only callback = %+v", callback)
+	}
+
+	// One ordinary publication in the same graph conservatively wins over the
+	// exact synchronous-only use.
+	mustAddReference(t, g, ReferenceEdge{Owner: "entry", Target: "callback"})
+	plan, err = g.AnalyzeWithConfig(GraphAnalysisConfig{OutcomeMode: OutcomeExplicitStatus})
+	if err != nil {
+		t.Fatal(err)
+	}
+	callback = mustLookup(t, plan, "callback")
+	if callback.Demand != BothDemand || callback.Effect != OutcomeStructured || callback.Emission != EmitCoroutine {
+		t.Fatalf("mixed callback references = %+v", callback)
+	}
+}
+
+func TestAnalyzeExplicitStatusEffectChangesDoNotDemandDormantOwners(t *testing.T) {
+	g := NewGraph()
+	for _, spec := range []FunctionSpec{
+		{ID: "live", Demand: AsyncDemand, Exec: MayUnwind},
+		{ID: "dead-call-owner"},
+		{ID: "dead-call-child"},
+		{ID: "dead-reference-owner"},
+		{ID: "dead-reference-child"},
+	} {
+		mustAddFunction(t, g, spec)
+	}
+
+	// ExplicitStatus adds OutcomeStructured to live after ordinary effect
+	// propagation has finished. Its reverse call and reference owners must not
+	// become demand work merely because that effect changed.
+	mustAddCall(t, g, CallEdge{Caller: "dead-call-owner", Callee: "live", Kind: CallDirect})
+	mustAddCall(t, g, CallEdge{Caller: "dead-call-owner", Callee: "dead-call-child", Kind: CallDirect})
+	mustAddReference(t, g, ReferenceEdge{Owner: "dead-reference-owner", Target: "live"})
+	mustAddReference(t, g, ReferenceEdge{Owner: "dead-reference-owner", Target: "dead-reference-child"})
+
+	plan, err := g.AnalyzeWithConfig(GraphAnalysisConfig{OutcomeMode: OutcomeExplicitStatus})
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := mustLookup(t, plan, "live")
+	if live.Demand != AsyncDemand || live.Effect != OutcomeStructured || live.Emission != EmitCoroutine {
+		t.Fatalf("live outcome plan = %+v", live)
+	}
+	for _, id := range []FunctionID{"dead-call-owner", "dead-call-child", "dead-reference-owner", "dead-reference-child"} {
+		got := mustLookup(t, plan, id)
+		if got.Demand != NoDemand || got.Emission != EmitNone {
+			t.Fatalf("dormant %s plan = %+v, want no demand and no emission", id, got)
+		}
 	}
 }
 
@@ -425,6 +900,10 @@ func TestAnalyzeLongReverseDependencyChain(t *testing.T) {
 }
 
 func TestAnalyzeValidation(t *testing.T) {
+	if _, err := NewGraph().AnalyzeWithConfig(GraphAnalysisConfig{OutcomeMode: OutcomeMode(255)}); err == nil ||
+		!strings.Contains(err.Error(), "invalid outcome mode") {
+		t.Fatalf("invalid outcome mode error = %v", err)
+	}
 	var zero Graph
 	if err := zero.AddFunction(FunctionSpec{ID: "caller"}); err != nil {
 		t.Fatalf("zero-value graph AddFunction: %v", err)
@@ -458,6 +937,22 @@ func TestAnalyzeValidation(t *testing.T) {
 	mustAddCall(t, foreignEdge, CallEdge{Caller: "caller", Callee: "bad-target", Kind: CallForeign})
 	if _, err := foreignEdge.Analyze(); err == nil {
 		t.Fatal("foreign edge to coroutine target unexpectedly accepted")
+	}
+
+	trustedInline := NewGraph()
+	mustAddFunction(t, trustedInline, FunctionSpec{ID: "caller"})
+	mustAddFunction(t, trustedInline, FunctionSpec{ID: "bad-target", External: ExternalKnown})
+	mustAddCall(t, trustedInline, CallEdge{Caller: "caller", Callee: "bad-target", Kind: CallTrustedInline})
+	if _, err := trustedInline.Analyze(); err == nil {
+		t.Fatal("trusted-inline edge to a globally known target unexpectedly accepted")
+	}
+
+	unknownTrustedInline := NewGraph()
+	mustAddFunction(t, unknownTrustedInline, FunctionSpec{ID: "caller"})
+	if err := unknownTrustedInline.AddUnknownCall(UnknownCall{
+		Caller: "caller", Kind: CallTrustedInline, Target: UnknownForeign,
+	}); err == nil {
+		t.Fatal("unknown trusted-inline call unexpectedly accepted")
 	}
 }
 
@@ -571,14 +1066,24 @@ func kindName(kind CallKind) string {
 		return "spawn"
 	case CallForeign:
 		return "foreign"
+	case CallTrustedInline:
+		return "trusted-inline"
 	default:
 		return "invalid"
 	}
 }
 
 func unknownTargetName(target UnknownTarget) string {
-	if target == UnknownManaged {
+	switch target {
+	case UnknownManaged:
 		return "managed"
+	case UnknownForeign:
+		return "foreign"
+	case UnknownManagedDispatch:
+		return "managed-dispatch"
+	case UnknownManagedInterfaceDispatch:
+		return "managed-interface-dispatch"
+	default:
+		return "invalid"
 	}
-	return "foreign"
 }

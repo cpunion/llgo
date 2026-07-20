@@ -643,7 +643,7 @@ func cachedFrameSymbol(pc uintptr) pcSymbol {
 
 func addrInfoSymbol(pc uintptr) pcSymbol {
 	var info clitedebug.Info
-	if clitedebug.Addrinfo(unsafe.Pointer(pc), &info) == 0 {
+	if clitedebug.Addrinfo(pc, &info) == 0 {
 		return cachedFrameSymbol(pc)
 	}
 	rawFn := safeGoString(info.Sname, "")
@@ -658,9 +658,9 @@ func addrInfoSymbol(pc uintptr) pcSymbol {
 	fn := publicFunctionName(rawFn)
 	sym := pcSymbol{
 		pc:       pc,
-		entry:    uintptr(info.Saddr),
+		entry:    info.Saddr,
 		function: fn,
-		ok:       fn != "" || info.Saddr != nil,
+		ok:       fn != "" || info.Saddr != 0,
 	}
 	applyFuncInfo(&sym, rawFn)
 	return sym
@@ -759,7 +759,7 @@ func initRuntimeFuncPCFramesSlow() {
 				return
 			}
 		}
-		c.Usleep(1)
+		coroSchedulerYield()
 	}
 }
 
@@ -784,12 +784,20 @@ func initRuntimeFuncPCFramesSlow() {
 // The tool sorts, deduplicates LTO inline copies against the symbol table,
 // and normalizes entries to true symbol starts, so adopting the table also
 // retires first-use sorting and the dlsym/stub fallbacks.
+type runtimePrebuiltHeader struct {
+	magic        uint64
+	linkSectAddr uint64
+	base         uint64
+	count        uint32
+	bucketCount  uint32
+}
+
 const runtimePrebuiltMagic = uint64(0x314254464F474C4C) // "LLGOFTB1" little-endian
 // "LLGOFTB2": the entry section holds only a 32-byte redirect whose third
 // word is the runtime address of the real blob, written into the (larger)
 // stub section when the table outgrew the entry section.
 const runtimePrebuiltRedirectMagic = uint64(0x324254464F474C4C)
-const runtimePrebuiltHeaderSize = 8 + 8 + 8 + 4 + 4
+const runtimePrebuiltHeaderSize = unsafe.Sizeof(runtimePrebuiltHeader{})
 
 type runtimePrebuiltFtabEntry struct {
 	entryOff  uint32
@@ -836,48 +844,75 @@ func prebuiltFrameIndexForEntry(pc uintptr) int {
 	return idx
 }
 
+// parsePrebuiltFuncPCTable is a synchronous plain island around the unsafe
+// table-address lifetime. It performs no allocation, call, or loop: every
+// pointer-to-uintptr conversion and reconstruction completes before returning
+// typed table pointers to the coroutine-capable adoption path.
+func parsePrebuiltFuncPCTable() (
+	uintptr, *runtimePrebuiltFtabEntry, uint32, *runtimePCFindBucket, uint32, bool,
+) {
+	entryStart := runtimeFuncInfoEntryStart
+	entryEnd := runtimeFuncInfoEntryEnd
+	if entryStart == nil || entryEnd == nil {
+		return 0, nil, 0, nil, 0, false
+	}
+	entryHeader := (*runtimePrebuiltHeader)(unsafe.Pointer(entryStart))
+	start := uintptr(unsafe.Pointer(entryHeader))
+	end := uintptr(unsafe.Pointer(entryEnd))
+	if end < start+runtimePrebuiltHeaderSize {
+		return 0, nil, 0, nil, 0, false
+	}
+	header := entryHeader
+	if entryHeader.magic == runtimePrebuiltRedirectMagic {
+		// Blob spilled into the stub section; the pointer slot is a live
+		// relocation, so it already holds the runtime address.
+		blob := uintptr(entryHeader.base)
+		stubStartPointer := runtimeFuncInfoStubSiteStart
+		stubEndPointer := runtimeFuncInfoStubSiteEnd
+		if blob == 0 || stubStartPointer == nil || stubEndPointer == nil {
+			return 0, nil, 0, nil, 0, false
+		}
+		stubStart := uintptr(unsafe.Pointer(stubStartPointer))
+		stubEnd := uintptr(unsafe.Pointer(stubEndPointer))
+		if blob != stubStart || stubEnd < stubStart+runtimePrebuiltHeaderSize {
+			return 0, nil, 0, nil, 0, false
+		}
+		header = (*runtimePrebuiltHeader)(unsafe.Pointer(stubStartPointer))
+		end = stubEnd
+	}
+	// Keep the merged typed pointer guard explicit. Besides documenting the
+	// dereference contract, this gives the generic no-unwind analysis one exact
+	// dominating non-nil SSA value without any symbol-specific exception.
+	if header == nil || header.magic != runtimePrebuiltMagic {
+		return 0, nil, 0, nil, 0, false
+	}
+	start = uintptr(unsafe.Pointer(header))
+	base := uintptr(header.base)
+	count := header.count
+	bucketCount := header.bucketCount
+	need := uintptr(runtimePrebuiltHeaderSize) + uintptr(count)*8 +
+		uintptr(bucketCount)*unsafe.Sizeof(runtimePCFindBucket{})
+	if count < 2 || end < start+need || uintptr(count) > runtimeFuncInfoCount*16+1 {
+		return 0, nil, 0, nil, 0, false
+	}
+	ftab := (*runtimePrebuiltFtabEntry)(unsafe.Pointer(start + runtimePrebuiltHeaderSize))
+	buckets := (*runtimePCFindBucket)(unsafe.Pointer(start + runtimePrebuiltHeaderSize + uintptr(count)*8))
+	return base, ftab, count, buckets, bucketCount, true
+}
+
 // adoptPrebuiltFuncPCTable installs a zero-copy view over the prebuilt table
 // if the entry section carries the magic header. Returns false to fall back
 // to first-use construction.
 func adoptPrebuiltFuncPCTable() bool {
-	if runtimeFuncInfoEntryStart == nil || runtimeFuncInfoEntryEnd == nil {
-		return false
-	}
-	start := uintptr(unsafe.Pointer(runtimeFuncInfoEntryStart))
-	end := uintptr(unsafe.Pointer(runtimeFuncInfoEntryEnd))
-	if end < start+runtimePrebuiltHeaderSize {
-		return false
-	}
-	if *(*uint64)(unsafe.Pointer(start)) == runtimePrebuiltRedirectMagic {
-		// Blob spilled into the stub section; the pointer slot is a live
-		// relocation, so it already holds the runtime address.
-		blob := uintptr(*(*uint64)(unsafe.Pointer(start + 16)))
-		if blob == 0 || runtimeFuncInfoStubSiteStart == nil || runtimeFuncInfoStubSiteEnd == nil {
-			return false
-		}
-		stubStart := uintptr(unsafe.Pointer(runtimeFuncInfoStubSiteStart))
-		stubEnd := uintptr(unsafe.Pointer(runtimeFuncInfoStubSiteEnd))
-		if blob != stubStart || stubEnd < stubStart {
-			return false
-		}
-		start, end = blob, stubEnd
-	}
-	if *(*uint64)(unsafe.Pointer(start)) != runtimePrebuiltMagic {
-		return false
-	}
-	base := uintptr(*(*uint64)(unsafe.Pointer(start + 16)))
-	count := *(*uint32)(unsafe.Pointer(start + 24))
-	bucketCount := *(*uint32)(unsafe.Pointer(start + 28))
-	need := uintptr(runtimePrebuiltHeaderSize) + uintptr(count)*8 +
-		uintptr(bucketCount)*unsafe.Sizeof(runtimePCFindBucket{})
-	if count < 2 || end < start+need || uintptr(count) > runtimeFuncInfoCount*16+1 {
+	base, ftab, count, buckets, bucketCount, ok := parsePrebuiltFuncPCTable()
+	if !ok {
 		return false
 	}
 	runtimePrebuiltBase = base
-	runtimePrebuiltFtab = unsafe.Slice((*runtimePrebuiltFtabEntry)(unsafe.Pointer(start+runtimePrebuiltHeaderSize)), count)
+	runtimePrebuiltFtab = unsafe.Slice(ftab, count)
 	runtimeFuncPCIndex = runtimePCFindIndex{
 		base:    base &^ (runtimePCFindBucketSize - 1),
-		buckets: unsafe.Slice((*runtimePCFindBucket)(unsafe.Pointer(start+runtimePrebuiltHeaderSize+uintptr(count)*8)), bucketCount),
+		buckets: unsafe.Slice(buckets, bucketCount),
 	}
 	runtimeFuncPCFramesPrebuilt = true
 	runtimeFuncPCFramesFromSites = true
@@ -923,7 +958,7 @@ func materializePrebuiltEntries() {
 			latomic.StoreUint32(&runtimePrebuiltEntriesOnce, 2)
 			return
 		default:
-			c.Usleep(1)
+			coroSchedulerYield()
 		}
 	}
 }
@@ -1000,22 +1035,23 @@ func initRuntimeFuncPCFramesOnce() {
 }
 
 func appendRuntimeFuncInfoEntryFrames(frames []runtimeFuncPCFrame, entries []uintptr) ([]runtimeFuncPCFrame, bool) {
-	if runtimeFuncInfoEntryStart == nil || runtimeFuncInfoEntryEnd == nil {
+	startPointer := runtimeFuncInfoEntryStart
+	endPointer := runtimeFuncInfoEntryEnd
+	if startPointer == nil || endPointer == nil {
 		return frames, false
 	}
-	start := uintptr(unsafe.Pointer(runtimeFuncInfoEntryStart))
-	end := uintptr(unsafe.Pointer(runtimeFuncInfoEntryEnd))
-	size := unsafe.Sizeof(*runtimeFuncInfoEntryStart)
-	if end <= start || size == 0 || (end-start)%size != 0 {
+	span, ok := staticSectionSpan(unsafe.Pointer(startPointer), unsafe.Pointer(endPointer))
+	size := unsafe.Sizeof(*startPointer)
+	if !ok || size == 0 || span%size != 0 {
 		return frames, false
 	}
-	nsite := (end - start) / size
+	nsite := span / size
 	if nsite > runtimeFuncInfoCount*16 || nsite > 1<<20 {
 		return frames, false
 	}
 	used := false
 	for i := uintptr(0); i < nsite; i++ {
-		site := (*runtimeFuncInfoEntryRecord)(unsafe.Pointer(start + i*size))
+		site := (*runtimeFuncInfoEntryRecord)(unsafe.Add(unsafe.Pointer(startPointer), i*size))
 		if site == nil || site.pc == 0 || site.symbolID == 0 {
 			continue
 		}
@@ -1036,22 +1072,23 @@ func appendRuntimeFuncInfoEntryFrames(frames []runtimeFuncPCFrame, entries []uin
 }
 
 func appendRuntimeFuncInfoStubSiteFrames(frames []runtimeFuncPCFrame) ([]runtimeFuncPCFrame, bool) {
-	if runtimeFuncInfoStubSiteStart == nil || runtimeFuncInfoStubSiteEnd == nil {
+	startPointer := runtimeFuncInfoStubSiteStart
+	endPointer := runtimeFuncInfoStubSiteEnd
+	if startPointer == nil || endPointer == nil {
 		return frames, false
 	}
-	start := uintptr(unsafe.Pointer(runtimeFuncInfoStubSiteStart))
-	end := uintptr(unsafe.Pointer(runtimeFuncInfoStubSiteEnd))
-	size := unsafe.Sizeof(*runtimeFuncInfoStubSiteStart)
-	if end <= start || size == 0 || (end-start)%size != 0 {
+	span, ok := staticSectionSpan(unsafe.Pointer(startPointer), unsafe.Pointer(endPointer))
+	size := unsafe.Sizeof(*startPointer)
+	if !ok || size == 0 || span%size != 0 {
 		return frames, false
 	}
-	nsite := (end - start) / size
+	nsite := span / size
 	if nsite > runtimeFuncInfoCount*16 || nsite > 1<<20 {
 		return frames, false
 	}
 	used := false
 	for i := uintptr(0); i < nsite; i++ {
-		site := (*runtimeFuncInfoStubSiteRecord)(unsafe.Pointer(start + i*size))
+		site := (*runtimeFuncInfoStubSiteRecord)(unsafe.Add(unsafe.Pointer(startPointer), i*size))
 		if site == nil || site.pc == 0 || site.symbolID == 0 {
 			continue
 		}
@@ -1353,17 +1390,17 @@ const coldFuncInfoEntryScanLimit = 4096
 // anchor nearest at-or-after pc within the warm path's entry slack (anchors
 // are emitted from LLVM IR and land after the backend prologue). It returns
 // the matched funcinfo index and delta, or (0, maxDelta) on miss.
-func coldFuncInfoScanRange(start, end, size, pc uintptr, bestDelta uintptr) (uint32, uintptr) {
-	if start == 0 || end <= start || size == 0 || (end-start)%size != 0 {
+func coldFuncInfoScanRange(start unsafe.Pointer, span, size, pc uintptr, bestDelta uintptr) (uint32, uintptr) {
+	if start == nil || span == 0 || size == 0 || span%size != 0 {
 		return 0, bestDelta
 	}
-	nsite := (end - start) / size
+	nsite := span / size
 	if nsite > coldFuncInfoEntryScanLimit || nsite > runtimeFuncInfoCount*16 {
 		return 0, bestDelta
 	}
 	bestIndex := uint32(0)
 	for i := uintptr(0); i < nsite; i++ {
-		site := (*runtimeFuncInfoEntryRecord)(unsafe.Pointer(start + i*size))
+		site := (*runtimeFuncInfoEntryRecord)(unsafe.Add(start, i*size))
 		if site.symbolID == 0 || site.pc < pc {
 			continue
 		}
@@ -1403,15 +1440,18 @@ func coldFuncPCLookupBudget() bool {
 // its bytes as site records — and does not need to: adopting the prebuilt
 // table is itself cheap.
 func prebuiltFuncPCTablePresent() bool {
-	if runtimeFuncInfoEntryStart == nil || runtimeFuncInfoEntryEnd == nil {
+	entryStart := runtimeFuncInfoEntryStart
+	entryEnd := runtimeFuncInfoEntryEnd
+	if entryStart == nil || entryEnd == nil {
 		return false
 	}
-	start := uintptr(unsafe.Pointer(runtimeFuncInfoEntryStart))
-	end := uintptr(unsafe.Pointer(runtimeFuncInfoEntryEnd))
-	if end < start+8 {
+	startPointer := unsafe.Pointer(entryStart)
+	endPointer := unsafe.Pointer(entryEnd)
+	span, ok := staticSectionSpan(startPointer, endPointer)
+	if !ok || span < 8 {
 		return false
 	}
-	m := *(*uint64)(unsafe.Pointer(start))
+	m := *(*uint64)(startPointer)
 	return m == runtimePrebuiltMagic || m == runtimePrebuiltRedirectMagic
 }
 
@@ -1442,31 +1482,34 @@ func init() {
 		}
 		const pageStep = 4096
 		sink := runtimeFuncInfoWarmSink
-		p := uintptr(base)
 		for off := uintptr(0); off < n; off += pageStep {
-			sink += *(*byte)(unsafe.Pointer(p + off))
+			sink += *(*byte)(unsafe.Add(base, off))
 		}
-		sink += *(*byte)(unsafe.Pointer(p + n - 1))
+		sink += *(*byte)(unsafe.Add(base, n-1))
 		runtimeFuncInfoWarmSink = sink
 	}
 	// The adopted blob may live in the entry section or (spilled) in the
 	// stub section; derive its range from the adopted views.
-	if n := len(runtimePrebuiltFtab); n > 0 {
-		touch(unsafe.Pointer(&runtimePrebuiltFtab[0]), uintptr(n)*8)
+	prebuiltFtab := runtimePrebuiltFtab
+	if n := len(prebuiltFtab); n > 0 {
+		touch(unsafe.Pointer(&prebuiltFtab[0]), uintptr(n)*8)
 	}
-	if n := len(runtimeFuncPCIndex.buckets); n > 0 {
-		touch(unsafe.Pointer(&runtimeFuncPCIndex.buckets[0]),
+	buckets := runtimeFuncPCIndex.buckets
+	if n := len(buckets); n > 0 {
+		touch(unsafe.Pointer(&buckets[0]),
 			uintptr(n)*unsafe.Sizeof(runtimePCFindBucket{}))
 	}
 	touch(unsafe.Pointer(runtimeFuncInfoTable),
 		runtimeFuncInfoCount*unsafe.Sizeof(runtimeFuncInfoRecord{}))
-	touch(unsafe.Pointer(runtimeFuncInfoStringOffsets),
-		runtimeFuncInfoStringCount*unsafe.Sizeof(uint32(0)))
-	if runtimeFuncInfoStrings != nil && runtimeFuncInfoStringCount > 0 {
-		last := uintptr(*(*uint32)(unsafe.Add(unsafe.Pointer(runtimeFuncInfoStringOffsets),
-			(runtimeFuncInfoStringCount-1)*unsafe.Sizeof(uint32(0)))))
-		lastStr := funcInfoCString(uint16(runtimeFuncInfoStringCount - 1))
-		touch(unsafe.Pointer(runtimeFuncInfoStrings), last+uintptr(cStringLen(lastStr))+1)
+	stringOffsets := runtimeFuncInfoStringOffsets
+	stringCount := runtimeFuncInfoStringCount
+	strings := runtimeFuncInfoStrings
+	touch(unsafe.Pointer(stringOffsets), stringCount*unsafe.Sizeof(uint32(0)))
+	if strings != nil && stringOffsets != nil && stringCount > 0 {
+		last := uintptr(*(*uint32)(unsafe.Add(unsafe.Pointer(stringOffsets),
+			(stringCount-1)*unsafe.Sizeof(uint32(0)))))
+		lastStr := funcInfoCString(uint16(stringCount - 1))
+		touch(unsafe.Pointer(strings), last+uintptr(cStringLen(lastStr))+1)
 	}
 	// The pcline table is on the Caller/CallersFrames path; building it
 	// here keeps the first user lookup at steady-state cost (the build cost
@@ -1494,17 +1537,21 @@ func coldFuncInfoEntryLookup(pc uintptr) (pcSymbol, bool) {
 	}
 	bestDelta := uintptr(runtimeFuncPCEntrySlack) + 1
 	bestIndex := uint32(0)
-	if runtimeFuncInfoEntryStart != nil && runtimeFuncInfoEntryEnd != nil {
+	entryStart := runtimeFuncInfoEntryStart
+	entryEnd := runtimeFuncInfoEntryEnd
+	if entryStart != nil && entryEnd != nil {
+		span, _ := staticSectionSpan(unsafe.Pointer(entryStart), unsafe.Pointer(entryEnd))
 		bestIndex, bestDelta = coldFuncInfoScanRange(
-			uintptr(unsafe.Pointer(runtimeFuncInfoEntryStart)),
-			uintptr(unsafe.Pointer(runtimeFuncInfoEntryEnd)),
-			unsafe.Sizeof(*runtimeFuncInfoEntryStart), pc, bestDelta)
+			unsafe.Pointer(entryStart), span,
+			unsafe.Sizeof(*entryStart), pc, bestDelta)
 	}
-	if bestDelta != 0 && runtimeFuncInfoStubSiteStart != nil && runtimeFuncInfoStubSiteEnd != nil {
+	stubStart := runtimeFuncInfoStubSiteStart
+	stubEnd := runtimeFuncInfoStubSiteEnd
+	if bestDelta != 0 && stubStart != nil && stubEnd != nil {
+		span, _ := staticSectionSpan(unsafe.Pointer(stubStart), unsafe.Pointer(stubEnd))
 		if idx, _ := coldFuncInfoScanRange(
-			uintptr(unsafe.Pointer(runtimeFuncInfoStubSiteStart)),
-			uintptr(unsafe.Pointer(runtimeFuncInfoStubSiteEnd)),
-			unsafe.Sizeof(*runtimeFuncInfoStubSiteStart), pc, bestDelta); idx != 0 {
+			unsafe.Pointer(stubStart), span,
+			unsafe.Sizeof(*stubStart), pc, bestDelta); idx != 0 {
 			bestIndex = idx
 		}
 	}
@@ -1629,15 +1676,30 @@ func initRuntimePCLineFramesSlow() {
 				return
 			}
 		}
-		c.Usleep(1)
+		coroSchedulerYield()
 	}
+}
+
+// staticSectionSpan is a synchronous plain island around linker section
+// address arithmetic. It performs no allocation, call, or loop, and both
+// pointer-to-uintptr values die before it returns an independent byte count.
+// Coroutine-capable callers retain their typed/unsafe base pointer and walk it
+// with unsafe.Add; they never reconstruct an address from the returned scalar.
+func staticSectionSpan(startPointer, endPointer unsafe.Pointer) (uintptr, bool) {
+	if startPointer == nil || endPointer == nil {
+		return 0, false
+	}
+	start := uintptr(startPointer)
+	end := uintptr(endPointer)
+	if end <= start {
+		return 0, false
+	}
+	return end - start, true
 }
 
 func initRuntimePCLineFramesOnce() {
 	if runtimePCLineTable == nil ||
 		runtimePCLineCount == 0 ||
-		runtimePCSiteStart == nil ||
-		runtimePCSiteEnd == nil ||
 		runtimeFuncInfoTable == nil ||
 		runtimeFuncInfoCount == 0 ||
 		runtimeFuncInfoStrings == nil ||
@@ -1647,13 +1709,17 @@ func initRuntimePCLineFramesOnce() {
 	if runtimePCLineCount > 1<<20 || runtimePCLineCount > runtimeFuncInfoCount*1024 {
 		return
 	}
-	start := uintptr(unsafe.Pointer(runtimePCSiteStart))
-	end := uintptr(unsafe.Pointer(runtimePCSiteEnd))
-	size := unsafe.Sizeof(*runtimePCSiteStart)
-	if end <= start || size == 0 || (end-start)%size != 0 {
+	startPointer := runtimePCSiteStart
+	endPointer := runtimePCSiteEnd
+	if startPointer == nil || endPointer == nil {
 		return
 	}
-	nsite := (end - start) / size
+	span, ok := staticSectionSpan(unsafe.Pointer(startPointer), unsafe.Pointer(endPointer))
+	size := unsafe.Sizeof(*startPointer)
+	if !ok || size == 0 || span%size != 0 {
+		return
+	}
+	nsite := span / size
 	if nsite > runtimePCLineCount*1024 || nsite > 1<<22 {
 		return
 	}
@@ -1672,7 +1738,7 @@ func initRuntimePCLineFramesOnce() {
 	funcCache := make([]pcLineFuncInfo, runtimeFuncInfoCount+1)
 	fileCache := make(map[uint32]string)
 	for i := uintptr(0); i < nsite; i++ {
-		site := (*runtimePCSiteRecord)(unsafe.Pointer(start + i*size))
+		site := (*runtimePCSiteRecord)(unsafe.Add(unsafe.Pointer(startPointer), i*size))
 		if site == nil || site.id == 0 || site.pc == 0 {
 			continue
 		}
@@ -2002,14 +2068,19 @@ func mergePCLineSymbol(base, line pcSymbol) pcSymbol {
 // frames get attributed to the next statement (a return address equals the
 // following anchor exactly).
 func prebuiltTextContains(pc uintptr) bool {
+	low, high, ok := prebuiltTextBounds()
+	return ok && pc >= low && pc < high
+}
+
+func prebuiltTextBounds() (low, high uintptr, ok bool) {
 	if n := len(runtimePrebuiltFtab); n > 0 {
-		return pc >= runtimePrebuiltBase && pc-runtimePrebuiltBase < uintptr(runtimePrebuiltFtab[n-1].entryOff)
+		return runtimePrebuiltBase, runtimePrebuiltBase + uintptr(runtimePrebuiltFtab[n-1].entryOff), true
 	}
 	if frames := runtimeFuncPCFrames; len(frames) > 0 {
 		const lastFuncSlack = 1 << 20
-		return pc >= frames[0].entry && pc < frames[len(frames)-1].entry+lastFuncSlack
+		return frames[0].entry, frames[len(frames)-1].entry + lastFuncSlack, true
 	}
-	return false
+	return 0, 0, false
 }
 
 // frameSymbolResultCache memoizes full symbolization results per pc. Deep

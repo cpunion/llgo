@@ -1,63 +1,66 @@
 package runtime
 
 import (
+	"sync/atomic"
 	"unsafe"
 
-	psync "github.com/goplus/llgo/runtime/internal/clite/pthread/sync"
-	latomic "github.com/goplus/llgo/runtime/internal/lib/sync/atomic"
-	llrt "github.com/goplus/llgo/runtime/internal/runtime"
-	_ "unsafe"
+	"github.com/goplus/llgo/runtime/internal/atomiccache"
 )
 
-type weakHandle struct {
-	key  uintptr
-	live uint32
-}
+type weakHandle = atomiccache.WeakHandle
 
-var weakState struct {
-	once psync.Once
-	mu   psync.Mutex
-	m    map[uintptr]*weakHandle
-}
-
-func initWeakState() {
-	weakState.mu.Init(nil)
-	weakState.m = make(map[uintptr]*weakHandle)
-}
+var weakState atomiccache.WeakTable
 
 func llgoRegisterWeakPointer(p unsafe.Pointer) unsafe.Pointer {
 	if p == nil {
 		return nil
 	}
-	weakState.once.Do(initWeakState)
 
-	key := uintptr(p)
-	weakState.mu.Lock()
-	if h := weakState.m[key]; h != nil {
-		weakState.mu.Unlock()
+	key := llgoWeakPointerKey(p)
+	candidate := &weakHandle{Key: key, Live: 1}
+	h, published := weakState.InternWeak(candidate)
+	if !published {
 		return unsafe.Pointer(h)
 	}
-	h := &weakHandle{key: key, live: 1}
-	weakState.m[key] = h
-	weakState.mu.Unlock()
 
-	llrt.AddCleanupPtr(p, func() {
-		latomic.StoreUint32(&h.live, 0)
-		weakState.mu.Lock()
-		if weakState.m[key] == h {
-			delete(weakState.m, key)
-		}
-		weakState.mu.Unlock()
+	addCleanupPtr(p, func() {
+		// BDWGC only queues this closure. The managed finalizer drain performs
+		// the tombstone store without a lock, allocation, or scheduler lookup.
+		atomic.StoreUint32(&h.Live, 0)
 	})
 	return unsafe.Pointer(h)
 }
 
 func llgoMakeStrongFromWeak(u unsafe.Pointer) unsafe.Pointer {
 	h := (*weakHandle)(u)
-	if h == nil || latomic.LoadUint32(&h.live) == 0 {
+	if h == nil {
 		return nil
 	}
-	return unsafe.Pointer(h.key)
+	if atomic.LoadUint32(&h.Live) == 0 {
+		weakState.PruneWeak(h.Key)
+		return nil
+	}
+	return llgoWeakKeyPointer(h.Key)
+}
+
+// llgoWeakPointerKey is the exact runtime boundary that hides a managed
+// pointer as the non-GC-visible identity stored by a weak handle. It must stay
+// a synchronous leaf: retaining p as a coroutine-frame keepalive after this
+// conversion would make the weak reference strong. Registration may suspend
+// only after this leaf has returned the deliberately untraced scalar key.
+func llgoWeakPointerKey(p unsafe.Pointer) uintptr {
+	return uintptr(p)
+}
+
+// llgoWeakKeyPointer is the exact runtime boundary that reconstructs a strong
+// pointer from the deliberately non-GC-visible address held by a live weak
+// handle. Keep this leaf separate from llgoMakeStrongFromWeak: the latter may
+// suspend while pruning a tombstone, so treating its hidden uintptr as normal
+// coroutine-frame pointer provenance would keep the referent alive and break
+// weak reachability. This leaf has no call, allocation, or backedge and the
+// returned pointer becomes an ordinary traced strong reference immediately.
+func llgoWeakKeyPointer(key uintptr) unsafe.Pointer {
+	return unsafe.Pointer(key)
 }
 
 //go:linkname weak_runtime_registerWeakPointer weak.runtime_registerWeakPointer

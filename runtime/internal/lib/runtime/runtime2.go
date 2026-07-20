@@ -4,10 +4,6 @@
 
 package runtime
 
-import (
-	psync "github.com/goplus/llgo/runtime/internal/clite/pthread/sync"
-)
-
 // Layout of in-memory per-function information prepared by linker
 // See https://golang.org/s/go12symtab.
 // Keep in sync with linker (../cmd/link/internal/ld/pcln.go:/pclntab)
@@ -91,8 +87,7 @@ type traceError string
 func (e traceError) Error() string { return string(e) }
 
 var (
-	traceInitOnce psync.Once
-	traceMu       psync.Mutex
+	traceMu runtimeMutex
 
 	traceCh         chan []byte
 	traceDoneCh     chan struct{}
@@ -101,9 +96,10 @@ var (
 )
 
 func ensureTraceInit() {
-	traceInitOnce.Do(func() {
-		traceMu.Init(nil)
-	})
+}
+
+func init() {
+	traceMu.Init(nil)
 }
 
 func StartTrace() error {

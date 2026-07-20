@@ -31,7 +31,7 @@ import (
 // PlanDigestSchema is the independent canonical schema used for archive cache
 // identity. It is deliberately separate from SummarySchema: summaries remain
 // diagnostic snapshots, while this document covers every lowering plan site.
-const PlanDigestSchema = "llgo.coro.plan-digest.v9"
+const PlanDigestSchema = "llgo.coro.plan-digest.v25"
 
 // Current experimental ABI identities. Keeping these in the analysis package
 // gives build, cache, and lowering code one version source of truth.
@@ -40,10 +40,10 @@ const (
 	PhysicalABIV0        = "llgo.coro.physical.v0"
 	PhysicalABIV1        = "llgo.coro.physical.v1"
 	SchedulerNoneABIV0   = "llgo.coro.scheduler.none.v0"
-	// SchedulerChildAwaitABIV0 identifies the first scheduler handoff contract:
-	// a coroutine parent may publish one initial-suspended static child and cut
-	// its stack, but only the scheduler may subsequently resume or destroy either
-	// frame. It deliberately does not claim spawn, park, preemption, or roots.
+	// SchedulerChildAwaitABIV0 identifies the child-frame ownership contract.
+	// Compiler PhysicalABIV1 bodies additionally name the versioned V2
+	// parent-owned outcome hooks in their physical descriptor hash; bootstrap
+	// factories retain the original V1 root-sequencing transaction.
 	SchedulerChildAwaitABIV0 = "llgo.coro.scheduler.child-await.v0"
 	// SchedulerProgramBootstrapABIV1 is the first compiler-owned stackless
 	// program root and static single-P prepare/adopt/run driver. It does not
@@ -82,10 +82,13 @@ const (
 	// complete identity for all three independently gated scheduler sources.
 	SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0 = "llgo.coro.scheduler.program-bootstrap.v2.channel.v0.worker.v0.closed-static-spawn.v0"
 	PanicLegacyABIV0                                             = "llgo.coro.panic.legacy.v0"
-	// PanicExplicitStatusABIV0 reserves the target-wide identity for the first
-	// compiler-carried panic outcome ABI. The identity is intentionally wired
-	// before its lowering and runtime protocol: selecting it must remain
-	// fail-closed until those semantics are implemented.
+	// PanicExplicitStatusABIV0 identifies compiler-carried panic outcomes. A
+	// managed child publishes into its parent's CompletionRecord; a root
+	// publishes into the task-local PanicRecord. Parent-frame direct-child scopes
+	// and frame-rooted owner-local records implement static/dynamic cleanup and
+	// direct recover without TLS; compiler-materialized implicit faults use the
+	// same recoverable payload overlay. Goexit, range-over-func cross-frame defer,
+	// and other unsupported language shapes remain independently fail-closed.
 	PanicExplicitStatusABIV0 = "llgo.coro.panic.explicit-status.v0"
 	FuncRepABIV0             = "llgo.coro.func-rep.v0"
 	// FuncRepABIV1 introduces an explicit descriptor/context representation for
@@ -97,6 +100,11 @@ const (
 	// prepare/park/retire transaction to retain pointer-free locals in the
 	// current LLVM coroutine frame instead of the managed heap.
 	FrameRetentionTimerABIV1 = "llgo.coro.frame-retention.timer.v1"
+	// FrameRetentionParkABIV2 generalizes the same exact current-frame proof
+	// to a frozen set of compiler/runtime-owned prepare/park/retire contracts.
+	// It initially contains timer.v1 and poll.v1; adding an event source extends
+	// the contract table instead of adding another lowering or lifetime proof.
+	FrameRetentionParkABIV2 = "llgo.coro.frame-retention.park.v2"
 )
 
 // PlanDigestMetadata contains every effective ABI and target input that may
@@ -118,58 +126,81 @@ type PlanDigestMetadata struct {
 }
 
 type planDigestDocument struct {
-	Schema           string                  `json:"schema"`
-	FunctionIDSchema string                  `json:"function_id_schema"`
-	Metadata         PlanDigestMetadata      `json:"metadata"`
-	Roots            []planDigestRoot        `json:"roots"`
-	Functions        []planDigestFunction    `json:"functions"`
-	Calls            []planDigestCall        `json:"calls"`
-	LoweredCalls     []planDigestLoweredCall `json:"lowered_calls"`
-	ElidedCalls      []planDigestElidedCall  `json:"elided_calls,omitempty"`
-	Values           []planDigestValue       `json:"values"`
+	Schema            string                       `json:"schema"`
+	FunctionIDSchema  string                       `json:"function_id_schema"`
+	Metadata          PlanDigestMetadata           `json:"metadata"`
+	Roots             []planDigestRoot             `json:"roots"`
+	Functions         []planDigestFunction         `json:"functions"`
+	Calls             []planDigestCall             `json:"calls"`
+	LoweredCalls      []planDigestLoweredCall      `json:"lowered_calls"`
+	ElidedCalls       []planDigestElidedCall       `json:"elided_calls,omitempty"`
+	ConditionalStores []planDigestConditionalStore `json:"conditional_managed_stores,omitempty"`
+	SafeArrayIndexes  []planDigestSafeArrayIndex   `json:"safe_fixed_array_indexes,omitempty"`
+	Values            []planDigestValue            `json:"values"`
 }
 
 type planDigestRoot struct {
-	Function FunctionID `json:"function"`
-	Demand   uint8      `json:"demand"`
+	Function       FunctionID `json:"function"`
+	Demand         uint8      `json:"demand"`
+	ManagedDemand  uint8      `json:"managed_demand"`
+	RawPlainDemand bool       `json:"raw_plain_demand"`
 }
 
 type planDigestFunction struct {
-	ID                           FunctionID `json:"id"`
-	IgnoredBody                  bool       `json:"ignored_body"`
-	ForeignNoBlockCertificate    string     `json:"foreign_noblock_certificate,omitempty"`
-	AssemblyNoSuspendCertificate string     `json:"assembly_nosuspend_certificate,omitempty"`
-	DeclaredEffect               uint16     `json:"declared_effect"`
-	LocalEffect                  uint16     `json:"local_effect"`
-	Effect                       uint16     `json:"effect"`
-	DeclaredExec                 uint16     `json:"declared_exec"`
-	LocalExec                    uint16     `json:"local_exec"`
-	Exec                         uint16     `json:"exec"`
-	Demand                       uint8      `json:"demand"`
-	Emission                     uint8      `json:"emission"`
-	FuncRep                      uint8      `json:"func_rep"`
-	External                     uint8      `json:"external"`
-	Recursive                    bool       `json:"recursive"`
-	Primary                      uint8      `json:"primary"`
+	ID                              FunctionID                   `json:"id"`
+	IgnoredBody                     bool                         `json:"ignored_body"`
+	CallableIdentityCertificate     *CallableIdentityCertificate `json:"callable_identity_certificate,omitempty"`
+	CallableContractCertificate     *CallableContractCertificate `json:"callable_contract_certificate,omitempty"`
+	ForeignNoBlockCertificate       string                       `json:"foreign_noblock_certificate,omitempty"`
+	ForeignSyncCertificate          string                       `json:"foreign_sync_certificate,omitempty"`
+	ForeignSchedulerWaitCertificate string                       `json:"foreign_schedulerwait_certificate,omitempty"`
+	ForeignWorkerCertificate        string                       `json:"foreign_worker_certificate,omitempty"`
+	AssemblyNoSuspendCertificate    string                       `json:"assembly_nosuspend_certificate,omitempty"`
+	DeclaredEffect                  uint16                       `json:"declared_effect"`
+	LocalEffect                     uint16                       `json:"local_effect"`
+	Effect                          uint16                       `json:"effect"`
+	DeclaredExec                    uint16                       `json:"declared_exec"`
+	LocalExec                       uint16                       `json:"local_exec"`
+	Exec                            uint16                       `json:"exec"`
+	Demand                          uint8                        `json:"demand"`
+	ManagedDemand                   uint8                        `json:"managed_demand"`
+	RawPlainDemand                  bool                         `json:"raw_plain_demand"`
+	Emission                        uint8                        `json:"emission"`
+	FuncRep                         uint8                        `json:"func_rep"`
+	External                        uint8                        `json:"external"`
+	Recursive                       bool                         `json:"recursive"`
+	TrustedBoundedRecursion         bool                         `json:"trusted_bounded_recursion"`
+	Primary                         uint8                        `json:"primary"`
+	RawPlainOnly                    bool                         `json:"raw_plain_only"`
+	RawPlainEntry                   bool                         `json:"raw_plain_entry"`
+	RawPlainVariant                 bool                         `json:"raw_plain_variant"`
 }
 
 type planDigestCall struct {
-	Function    FunctionID   `json:"function"`
-	Block       int          `json:"block"`
-	Instruction int          `json:"instruction"`
-	Kind        uint8        `json:"kind"`
-	Rep         uint8        `json:"rep"`
-	Targets     []FunctionID `json:"targets"`
-	Open        bool         `json:"open"`
-	Unresolved  uint8        `json:"unresolved"`
-	MayBeNil    bool         `json:"may_be_nil"`
+	Function              FunctionID       `json:"function"`
+	Block                 int              `json:"block"`
+	Instruction           int              `json:"instruction"`
+	Kind                  uint8            `json:"kind"`
+	Rep                   uint8            `json:"rep"`
+	Transport             uint8            `json:"transport"`
+	Targets               []FunctionID     `json:"targets"`
+	Open                  bool             `json:"open"`
+	Unresolved            uint8            `json:"unresolved"`
+	MayBeNil              bool             `json:"may_be_nil"`
+	SyncDispatch          bool             `json:"sync_dispatch"`
+	InvocationPolicy      InvocationPolicy `json:"invocation_policy,omitempty"`
+	InvocationContract    ContractID       `json:"invocation_contract,omitempty"`
+	InvocationABI         string           `json:"invocation_abi,omitempty"`
+	InvocationCertificate string           `json:"invocation_certificate,omitempty"`
 }
 
 type planDigestLoweredCall struct {
-	Owner       FunctionID `json:"owner"`
-	LogicalName string     `json:"logical_name"`
-	Target      FunctionID `json:"target"`
-	UnwindOnly  bool       `json:"unwind_only"`
+	Owner                FunctionID `json:"owner"`
+	LogicalName          string     `json:"logical_name"`
+	Target               FunctionID `json:"target"`
+	RawPlain             bool       `json:"raw_plain"`
+	UnwindOnly           bool       `json:"unwind_only"`
+	ExplicitStatusElided bool       `json:"explicit_status_elided"`
 }
 
 type planDigestElidedCall struct {
@@ -177,6 +208,22 @@ type planDigestElidedCall struct {
 	Block       int        `json:"block"`
 	Instruction int        `json:"instruction"`
 	Elided      bool       `json:"elided"`
+	Certificate string     `json:"certificate,omitempty"`
+}
+
+type planDigestConditionalStore struct {
+	Function    FunctionID `json:"function"`
+	Block       int        `json:"block"`
+	Instruction int        `json:"instruction"`
+	Target      FunctionID `json:"target"`
+	Elided      bool       `json:"elided"`
+}
+
+type planDigestSafeArrayIndex struct {
+	Function    FunctionID `json:"function"`
+	Block       int        `json:"block"`
+	Instruction int        `json:"instruction"`
+	Bound       int64      `json:"bound"`
 }
 
 type planDigestValue struct {
@@ -194,10 +241,11 @@ type planDigestValueSite struct {
 }
 
 type planDigestFuncLeaf struct {
-	Path     []planDigestPathStep `json:"path"`
-	Rep      uint8                `json:"rep"`
-	Targets  []FunctionID         `json:"targets"`
-	MayBeNil bool                 `json:"may_be_nil"`
+	Path      []planDigestPathStep `json:"path"`
+	Rep       uint8                `json:"rep"`
+	Transport uint8                `json:"transport"`
+	Targets   []FunctionID         `json:"targets"`
+	MayBeNil  bool                 `json:"may_be_nil"`
 }
 
 type planDigestPathStep struct {
@@ -264,18 +312,22 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 	}
 
 	document := planDigestDocument{
-		Schema:           PlanDigestSchema,
-		FunctionIDSchema: FunctionIDSchema,
-		Metadata:         metadata,
-		Roots:            roots,
-		Functions:        functions,
-		Calls:            make([]planDigestCall, 0, len(p.callPlans)),
-		LoweredCalls:     loweredCalls,
-		ElidedCalls:      make([]planDigestElidedCall, 0, len(p.elidedCalls)),
-		Values:           make([]planDigestValue, 0, len(p.valuePlans)),
+		Schema:            PlanDigestSchema,
+		FunctionIDSchema:  FunctionIDSchema,
+		Metadata:          metadata,
+		Roots:             roots,
+		Functions:         functions,
+		Calls:             make([]planDigestCall, 0, len(p.callPlans)),
+		LoweredCalls:      loweredCalls,
+		ElidedCalls:       make([]planDigestElidedCall, 0, len(p.elidedCalls)),
+		ConditionalStores: make([]planDigestConditionalStore, 0, len(p.conditionalStores)),
+		SafeArrayIndexes:  make([]planDigestSafeArrayIndex, 0, len(p.safeFixedArrayIndexes)),
+		Values:            make([]planDigestValue, 0, len(p.valuePlans)),
 	}
 	seenCalls := make(map[ssa.CallInstruction]struct{}, len(p.callPlans))
 	seenElidedCalls := make(map[ssa.CallInstruction]struct{}, len(p.elidedCalls))
+	seenConditionalStores := make(map[*ssa.Store]struct{}, len(p.conditionalStores))
+	seenSafeArrayIndexes := make(map[ssa.Instruction]struct{}, len(p.safeFixedArrayIndexes))
 	coveredValues := make(map[ssa.Value]struct{}, len(p.valuePlans))
 	for _, function := range p.functions {
 		fn := function.Function
@@ -326,6 +378,7 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 							seenElidedCalls[call] = struct{}{}
 							document.ElidedCalls = append(document.ElidedCalls, planDigestElidedCall{
 								Function: id, Block: blockIndex, Instruction: semanticIndex, Elided: true,
+								Certificate: p.elidedCallCertificates[call],
 							})
 						} else {
 							plan, ok := p.callPlans[call]
@@ -343,6 +396,51 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 							document.Calls = append(document.Calls, entry)
 						}
 					}
+				}
+				if store, ok := instruction.(*ssa.Store); ok {
+					if target, conditional := p.conditionalStores[store]; conditional {
+						if store.Parent() != fn || target == nil {
+							return planDigestDocument{}, fmt.Errorf("coro: conditional managed Store at function %q block %d instruction %d has no exact owner/target", id, blockIndex, semanticIndex)
+						}
+						exact, singleton := exactSSAContextFreeFunctionValue(store.Val)
+						if !singleton || exact != target {
+							return planDigestDocument{}, fmt.Errorf("coro: conditional managed Store at function %q block %d instruction %d no longer carries its exact target", id, blockIndex, semanticIndex)
+						}
+						targetID, planned := p.byFunction[target]
+						if !planned {
+							return planDigestDocument{}, fmt.Errorf("coro: conditional managed Store at function %q block %d instruction %d targets a function outside the plan", id, blockIndex, semanticIndex)
+						}
+						if _, duplicate := seenConditionalStores[store]; duplicate {
+							return planDigestDocument{}, fmt.Errorf("coro: duplicate conditional managed Store occurrence for function %q block %d instruction %d", id, blockIndex, semanticIndex)
+						}
+						seenConditionalStores[store] = struct{}{}
+						document.ConditionalStores = append(document.ConditionalStores, planDigestConditionalStore{
+							Function: id, Block: blockIndex, Instruction: semanticIndex,
+							Target: targetID, Elided: p.ElidesConditionalManagedStore(store),
+						})
+					}
+				}
+				if bound, safe := p.safeFixedArrayIndexes[instruction]; safe {
+					var base, index ssa.Value
+					switch operation := instruction.(type) {
+					case *ssa.Index:
+						base, index = operation.X, operation.Index
+					case *ssa.IndexAddr:
+						base, index = operation.X, operation.Index
+					default:
+						return planDigestDocument{}, fmt.Errorf("coro: safe fixed-array index at function %q block %d instruction %d has type %T", id, blockIndex, semanticIndex, instruction)
+					}
+					actualBound, _, fixed := ssaExactFixedArrayBound(base)
+					if !fixed || bound != actualBound || !ProveSSAExactSafeFixedArrayIndex(fn, index, bound, instruction) {
+						return planDigestDocument{}, fmt.Errorf("coro: safe fixed-array index at function %q block %d instruction %d no longer has its exact bound proof", id, blockIndex, semanticIndex)
+					}
+					if _, duplicate := seenSafeArrayIndexes[instruction]; duplicate {
+						return planDigestDocument{}, fmt.Errorf("coro: duplicate safe fixed-array index occurrence for function %q block %d instruction %d", id, blockIndex, semanticIndex)
+					}
+					seenSafeArrayIndexes[instruction] = struct{}{}
+					document.SafeArrayIndexes = append(document.SafeArrayIndexes, planDigestSafeArrayIndex{
+						Function: id, Block: blockIndex, Instruction: semanticIndex, Bound: bound,
+					})
 				}
 
 				operands = instruction.Operands(operands[:0])
@@ -369,8 +467,38 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 	if len(seenElidedCalls) != len(p.elidedCalls) {
 		return planDigestDocument{}, fmt.Errorf("coro: elided-call coverage mismatch: projected %d of %d calls", len(seenElidedCalls), len(p.elidedCalls))
 	}
+	if len(seenConditionalStores) != len(p.conditionalStores) {
+		return planDigestDocument{}, fmt.Errorf("coro: conditional managed Store coverage mismatch: projected %d of %d Stores", len(seenConditionalStores), len(p.conditionalStores))
+	}
+	if len(seenSafeArrayIndexes) != len(p.safeFixedArrayIndexes) {
+		return planDigestDocument{}, fmt.Errorf("coro: safe fixed-array index coverage mismatch: projected %d of %d indexes", len(seenSafeArrayIndexes), len(p.safeFixedArrayIndexes))
+	}
+	for call, certificate := range p.elidedCallCertificates {
+		if _, elided := seenElidedCalls[call]; !elided || certificate == "" {
+			return planDigestDocument{}, fmt.Errorf("coro: elided-call certificate has no exact nonempty elided call")
+		}
+	}
 	if len(coveredValues) != len(p.valuePlans) {
-		return planDigestDocument{}, fmt.Errorf("coro: SSAValuePlan coverage mismatch: projected %d of %d plans", len(coveredValues), len(p.valuePlans))
+		uncovered := make([]string, 0, len(p.valuePlans)-len(coveredValues))
+		for value := range p.valuePlans {
+			if _, covered := coveredValues[value]; covered {
+				continue
+			}
+			owner := "<package>"
+			if parent := value.Parent(); parent != nil {
+				if id, planned := p.byFunction[parent]; planned {
+					owner = string(id)
+				} else {
+					owner = parent.String()
+				}
+			}
+			uncovered = append(uncovered, fmt.Sprintf("%s: %T %q (%s)", owner, value, value.String(), value.Type()))
+		}
+		sort.Strings(uncovered)
+		return planDigestDocument{}, fmt.Errorf(
+			"coro: SSAValuePlan coverage mismatch: projected %d of %d plans; uncovered: %s",
+			len(coveredValues), len(p.valuePlans), strings.Join(uncovered, "; "),
+		)
 	}
 	return document, nil
 }
@@ -396,10 +524,12 @@ func (p *SSAPlan) canonicalDigestLoweredCalls() ([]planDigestLoweredCall, error)
 				return nil, fmt.Errorf("coro: lowered call %q in %q targets a function outside the plan", call.LogicalName, ownerID)
 			}
 			ret = append(ret, planDigestLoweredCall{
-				Owner:       ownerID,
-				LogicalName: call.LogicalName,
-				Target:      targetID,
-				UnwindOnly:  call.UnwindOnly,
+				Owner:                ownerID,
+				LogicalName:          call.LogicalName,
+				Target:               targetID,
+				RawPlain:             call.RawPlain,
+				UnwindOnly:           call.UnwindOnly,
+				ExplicitStatusElided: call.ExplicitStatusElided,
 			})
 		}
 	}
@@ -445,7 +575,7 @@ func (m PlanDigestMetadata) validate() error {
 	}
 	switch m.FrameRetentionABI {
 	case "":
-	case FrameRetentionTimerABIV1:
+	case FrameRetentionTimerABIV1, FrameRetentionParkABIV2:
 		if m.CoroABI != PhysicalABIV1 ||
 			(m.SchedulerABI != SchedulerProgramBootstrapABIV2 &&
 				m.SchedulerABI != SchedulerProgramBootstrapWorkerABIV0 &&
@@ -498,7 +628,13 @@ func (p *SSAPlan) canonicalDigestRoots() ([]planDigestRoot, error) {
 		if err := root.Demand.Validate(); err != nil {
 			return nil, fmt.Errorf("coro: validate SSA root plan %d demand: %w", index, err)
 		}
-		if root.Demand == NoDemand {
+		if err := root.ManagedDemand.Validate(); err != nil {
+			return nil, fmt.Errorf("coro: validate SSA root plan %d managed demand: %w", index, err)
+		}
+		if want := aggregateDemand(root.ManagedDemand, root.RawPlainDemand); root.Demand != want {
+			return nil, fmt.Errorf("coro: SSA root plan %d aggregate demand %s does not match managed=%s raw=%t", index, root.Demand, root.ManagedDemand, root.RawPlainDemand)
+		}
+		if root.ManagedDemand == NoDemand && !root.RawPlainDemand {
 			return nil, fmt.Errorf("coro: SSA root plan %d has no demand", index)
 		}
 		if index != 0 && previous >= root.ID {
@@ -515,10 +651,10 @@ func (p *SSAPlan) canonicalDigestRoots() ([]planDigestRoot, error) {
 		if !ok {
 			return nil, fmt.Errorf("coro: root %q is absent from the base plan", root.ID)
 		}
-		if !plan.Demand.Contains(root.Demand) {
-			return nil, fmt.Errorf("coro: root %q demand %s is not contained in function demand %s", root.ID, root.Demand, plan.Demand)
+		if !plan.ManagedDemand.Contains(root.ManagedDemand) || root.RawPlainDemand && !plan.RawPlainDemand {
+			return nil, fmt.Errorf("coro: root %q demand managed=%s raw=%t is not contained in function demand managed=%s raw=%t", root.ID, root.ManagedDemand, root.RawPlainDemand, plan.ManagedDemand, plan.RawPlainDemand)
 		}
-		ret = append(ret, planDigestRoot{Function: root.ID, Demand: uint8(root.Demand)})
+		ret = append(ret, planDigestRoot{Function: root.ID, Demand: uint8(root.Demand), ManagedDemand: uint8(root.ManagedDemand), RawPlainDemand: root.RawPlainDemand})
 	}
 	return ret, nil
 }
@@ -558,23 +694,57 @@ func (p *SSAPlan) canonicalDigestFunctions() ([]planDigestFunction, error) {
 			return nil, fmt.Errorf("coro: missing reverse function mapping for %q", plan.ID)
 		}
 		ret = append(ret, planDigestFunction{
-			ID:             plan.ID,
-			IgnoredBody:    p.IgnoresBody(function.Function),
-			DeclaredEffect: uint16(plan.DeclaredEffect),
-			LocalEffect:    uint16(plan.LocalEffect),
-			Effect:         uint16(plan.Effect),
-			DeclaredExec:   uint16(plan.DeclaredExec),
-			LocalExec:      uint16(plan.LocalExec),
-			Exec:           uint16(plan.Exec),
-			Demand:         uint8(plan.Demand),
-			Emission:       uint8(plan.Emission),
-			FuncRep:        uint8(plan.FuncRep),
-			External:       uint8(plan.External),
-			Recursive:      plan.Recursive,
-			Primary:        uint8(plan.Primary),
+			ID:                      plan.ID,
+			IgnoredBody:             p.IgnoresBody(function.Function),
+			DeclaredEffect:          uint16(plan.DeclaredEffect),
+			LocalEffect:             uint16(plan.LocalEffect),
+			Effect:                  uint16(plan.Effect),
+			DeclaredExec:            uint16(plan.DeclaredExec),
+			LocalExec:               uint16(plan.LocalExec),
+			Exec:                    uint16(plan.Exec),
+			Demand:                  uint8(plan.Demand),
+			ManagedDemand:           uint8(plan.ManagedDemand),
+			RawPlainDemand:          plan.RawPlainDemand,
+			Emission:                uint8(plan.Emission),
+			FuncRep:                 uint8(plan.FuncRep),
+			External:                uint8(plan.External),
+			Recursive:               plan.Recursive,
+			TrustedBoundedRecursion: plan.TrustedBoundedRecursion,
+			Primary:                 uint8(plan.Primary),
+			RawPlainOnly:            plan.RawPlainOnly,
+			RawPlainEntry:           plan.RawPlainEntry,
+			RawPlainVariant:         p.HasRawPlainVariant(function.Function),
 		})
 		if certificate, ok := p.ForeignNoBlockCertificate(function.Function); ok {
 			ret[len(ret)-1].ForeignNoBlockCertificate = certificate
+		}
+		if certificate, ok := p.CallableIdentityCertificate(function.Function); ok {
+			if err := certificate.Validate(); err != nil {
+				return nil, fmt.Errorf("coro: function %q has invalid callable identity certificate in plan digest: %w", plan.ID, err)
+			}
+			frozen := certificate
+			ret[len(ret)-1].CallableIdentityCertificate = &frozen
+		}
+		if certificate, ok := p.CallableContractCertificate(function.Function); ok {
+			if err := certificate.Validate(); err != nil {
+				return nil, fmt.Errorf("coro: function %q has invalid callable contract certificate in plan digest: %w", plan.ID, err)
+			}
+			frozen := certificate
+			ret[len(ret)-1].CallableContractCertificate = &frozen
+			if certificate.Scope == CallableContractScopeDeclaration && ret[len(ret)-1].CallableIdentityCertificate != nil {
+				if err := ValidateCallableContractIdentity(*ret[len(ret)-1].CallableIdentityCertificate, certificate); err != nil {
+					return nil, fmt.Errorf("coro: function %q callable identity/contract mismatch in plan digest: %w", plan.ID, err)
+				}
+			}
+		}
+		if certificate, ok := p.ForeignSyncCertificate(function.Function); ok {
+			ret[len(ret)-1].ForeignSyncCertificate = certificate
+		}
+		if certificate, ok := p.ForeignSchedulerWaitCertificate(function.Function); ok {
+			ret[len(ret)-1].ForeignSchedulerWaitCertificate = certificate
+		}
+		if certificate, ok := p.ForeignWorkerCertificate(function.Function); ok {
+			ret[len(ret)-1].ForeignWorkerCertificate = certificate
 		}
 		if certificate, ok := p.AssemblyNoSuspendCertificate(function.Function); ok {
 			ret[len(ret)-1].AssemblyNoSuspendCertificate = certificate
@@ -616,6 +786,12 @@ func validateDigestFunctionPlan(plan FunctionPlan) error {
 	if err := plan.Demand.Validate(); err != nil {
 		return err
 	}
+	if err := plan.ManagedDemand.Validate(); err != nil {
+		return err
+	}
+	if want := aggregateDemand(plan.ManagedDemand, plan.RawPlainDemand); plan.Demand != want {
+		return fmt.Errorf("coro: function %q aggregate demand %s does not match managed=%s raw=%t", plan.ID, plan.Demand, plan.ManagedDemand, plan.RawPlainDemand)
+	}
 	if err := plan.Emission.Validate(); err != nil {
 		return err
 	}
@@ -628,9 +804,21 @@ func validateDigestFunctionPlan(plan FunctionPlan) error {
 	if err := plan.Primary.validate(); err != nil {
 		return err
 	}
-	expectedEmission := bodyEmissionFor(plan.Demand, plan.Effect, plan.External)
+	if plan.TrustedBoundedRecursion && !plan.Recursive {
+		return fmt.Errorf("coro: non-recursive function %q has a trusted bounded-recursion proof", plan.ID)
+	}
+	expectedEmission := bodyEmissionFor(plan.ManagedDemand, plan.RawPlainDemand, plan.Effect, plan.External)
 	if plan.Emission != expectedEmission {
-		return fmt.Errorf("coro: function %q emission %s does not match demand %s, effect %s, and external kind %s (want %s)", plan.ID, plan.Emission, plan.Demand, plan.Effect, plan.External, expectedEmission)
+		return fmt.Errorf("coro: function %q emission %s does not match managed demand %s, raw demand %t, effect %s, and external kind %s (want %s)", plan.ID, plan.Emission, plan.ManagedDemand, plan.RawPlainDemand, plan.Effect, plan.External, expectedEmission)
+	}
+	if plan.RawPlainOnly != (plan.External == Defined && plan.RawPlainDemand && plan.ManagedDemand == NoDemand) {
+		return fmt.Errorf("coro: function %q has inconsistent raw-plain-only state", plan.ID)
+	}
+	if plan.RawPlainOnly && (plan.Emission != EmitRawPlain || plan.Primary != PrimaryPlain || plan.FuncRep != DirectPlain) {
+		return fmt.Errorf("coro: raw-plain-only function %q lacks raw/plain/direct physical selection", plan.ID)
+	}
+	if plan.RawPlainEntry && !plan.RawPlainDemand {
+		return fmt.Errorf("coro: function %q has a raw plain entry without raw demand", plan.ID)
 	}
 	return nil
 }
@@ -766,23 +954,64 @@ func (p *SSAPlan) canonicalDigestCall(id FunctionID, block, instruction int, cal
 	if err := plan.Rep.Validate(); err != nil {
 		return planDigestCall{}, err
 	}
+	if err := plan.Transport.Validate(); err != nil {
+		return planDigestCall{}, err
+	}
+	if plan.Transport == RawCCodePointer {
+		common := call.Common()
+		if common == nil || common.StaticCallee() != nil || common.IsInvoke() || common.Method != nil ||
+			plan.Kind != CallForeign || plan.Rep != DirectPlain || !plan.Open ||
+			plan.Unresolved != UnknownForeign || plan.SyncDispatch {
+			return planDigestCall{}, fmt.Errorf("coro: CallPlan at function %q block %d instruction %d has malformed raw C code-pointer transport", id, block, instruction)
+		}
+	}
 	if err := plan.Unresolved.validate(); err != nil {
 		return planDigestCall{}, err
+	}
+	switch plan.InvocationPolicy {
+	case "":
+		if plan.Kind == CallTrustedInline || plan.InvocationContract != "" || plan.InvocationABI != "" || plan.InvocationCertificate != "" {
+			return planDigestCall{}, fmt.Errorf("coro: CallPlan at function %q block %d instruction %d has incomplete invocation metadata", id, block, instruction)
+		}
+	case InvocationAuto, InvocationTrustedInline:
+		if err := plan.InvocationPolicy.Validate(); err != nil {
+			return planDigestCall{}, err
+		}
+		if plan.InvocationPolicy == InvocationTrustedInline && plan.Kind != CallTrustedInline {
+			return planDigestCall{}, fmt.Errorf("coro: trusted-inline CallPlan at function %q block %d instruction %d has call kind %d", id, block, instruction, plan.Kind)
+		}
+		if err := validateStableToken("invocation contract", string(plan.InvocationContract)); err != nil {
+			return planDigestCall{}, err
+		}
+		if err := validateStableToken("invocation ABI", plan.InvocationABI); err != nil {
+			return planDigestCall{}, err
+		}
+		if err := validateStableToken("invocation certificate", plan.InvocationCertificate); err != nil {
+			return planDigestCall{}, err
+		}
+	default:
+		return planDigestCall{}, fmt.Errorf("coro: CallPlan at function %q block %d instruction %d has invalid invocation policy %q", id, block, instruction, plan.InvocationPolicy)
 	}
 	targets, err := p.canonicalDigestTargets(plan.Targets)
 	if err != nil {
 		return planDigestCall{}, fmt.Errorf("coro: CallPlan at function %q block %d instruction %d: %w", id, block, instruction, err)
 	}
 	return planDigestCall{
-		Function:    id,
-		Block:       block,
-		Instruction: instruction,
-		Kind:        uint8(plan.Kind),
-		Rep:         uint8(plan.Rep),
-		Targets:     targets,
-		Open:        plan.Open,
-		Unresolved:  uint8(plan.Unresolved),
-		MayBeNil:    plan.MayBeNil,
+		Function:              id,
+		Block:                 block,
+		Instruction:           instruction,
+		Kind:                  uint8(plan.Kind),
+		Rep:                   uint8(plan.Rep),
+		Transport:             uint8(plan.Transport),
+		Targets:               targets,
+		Open:                  plan.Open,
+		Unresolved:            uint8(plan.Unresolved),
+		MayBeNil:              plan.MayBeNil,
+		SyncDispatch:          plan.SyncDispatch,
+		InvocationPolicy:      plan.InvocationPolicy,
+		InvocationContract:    plan.InvocationContract,
+		InvocationABI:         plan.InvocationABI,
+		InvocationCertificate: plan.InvocationCertificate,
 	}, nil
 }
 
@@ -804,6 +1033,12 @@ func (p *SSAPlan) canonicalDigestValue(value ssa.Value, plan SSAValuePlan, site 
 		if err := leaf.Rep.Validate(); err != nil {
 			return planDigestValue{}, err
 		}
+		if err := leaf.Transport.Validate(); err != nil {
+			return planDigestValue{}, err
+		}
+		if leaf.Transport == RawCCodePointer && leaf.Rep != DirectPlain {
+			return planDigestValue{}, fmt.Errorf("coro: SSAValuePlan at %s has raw C code-pointer transport with representation %s", formatDigestValueSite(site), leaf.Rep)
+		}
 		targets, err := p.canonicalDigestTargets(leaf.Targets)
 		if err != nil {
 			return planDigestValue{}, fmt.Errorf("coro: SSAValuePlan at %s: %w", formatDigestValueSite(site), err)
@@ -816,10 +1051,11 @@ func (p *SSAPlan) canonicalDigestValue(value ssa.Value, plan SSAValuePlan, site 
 			path[pathIndex] = planDigestPathStep{Kind: uint8(step.Kind), Index: step.Index}
 		}
 		ret.Funcs = append(ret.Funcs, planDigestFuncLeaf{
-			Path:     path,
-			Rep:      uint8(leaf.Rep),
-			Targets:  targets,
-			MayBeNil: leaf.MayBeNil,
+			Path:      path,
+			Rep:       uint8(leaf.Rep),
+			Transport: uint8(leaf.Transport),
+			Targets:   targets,
+			MayBeNil:  leaf.MayBeNil,
 		})
 	}
 	return ret, nil

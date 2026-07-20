@@ -84,7 +84,189 @@ func TestCoroClosedInterfacePlainInvokeKeepsItabAcrossCoroSplit(t *testing.T) {
 	}
 }
 
-func TestCoroClosedInterfacePlainInvokeFailsClosed(t *testing.T) {
+func TestCoroClosedInterfacePlainTargetMayAlsoHaveStaticCalls(t *testing.T) {
+	const source = `package foo
+var gate chan uint32
+type Value interface { Value() uint32 }
+type concrete uint32
+func (value concrete) Value() uint32 { return uint32(value) + 1 }
+func Root(value Value, direct concrete) uint32 {
+	<-gate
+	observed := direct.Value()
+	return observed + value.Value()
+}
+`
+	prog, pkg, _, _, _, _ := compileCoroClosedInterfacePlainFixture(t, source, coro.DynamicCHAClosed)
+	defer prog.Dispose()
+	module := pkg.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify interface target with static call: %v\n%s", err, module.String())
+	}
+	if ir := module.String(); strings.Contains(ir, coroPlainDispatchDescriptorPrefix) || strings.Contains(ir, coroPlainDispatchThunkPrefix) {
+		t.Fatalf("static method call incorrectly forced an interface target descriptor:\n%s", ir)
+	}
+}
+
+func TestCoroDormantInterfaceInvokeDoesNotTurnStaticMethodIntoFunctionValue(t *testing.T) {
+	const source = `package foo
+var gate chan struct{}
+type text interface { String() string }
+type concrete string
+func (value concrete) String() string { return string(value) }
+func dormant(value text) string { return value.String() }
+func Root(value concrete) string {
+	<-gate
+	return value.String()
+}
+`
+	ssaPkg, _, files := buildGoSSAPkg(t, source)
+	program := newLLSSAProg(t)
+	defer program.Dispose()
+	universe, plan, root, dormant, method, invoke := prepareCoroDormantInterfaceFixture(t, program, ssaPkg, files)
+
+	rootPlan, ok := plan.FunctionPlan(root)
+	if !ok || rootPlan.Emission != coro.EmitCoroutine {
+		t.Fatalf("Root plan = %+v, present=%t; want one emitted coroutine", rootPlan, ok)
+	}
+	dormantPlan, ok := plan.FunctionPlan(dormant)
+	if !ok || dormantPlan.Emission != coro.EmitNone {
+		t.Fatalf("dormant plan = %+v, present=%t; want EmitNone", dormantPlan, ok)
+	}
+	methodPlan, ok := plan.FunctionPlan(method)
+	if !ok || methodPlan.Emission != coro.EmitPlain || methodPlan.FuncRep != coro.Dispatch {
+		t.Fatalf("concrete.String plan = %+v, present=%t; want emitted plain Dispatch solely from dormant CHA", methodPlan, ok)
+	}
+	callPlan, ok := plan.CallPlan(invoke)
+	if !ok || callPlan.Open || callPlan.Rep != coro.Dispatch || !coroInterfaceTargetContains(callPlan.Targets, methodPlan.ID) {
+		t.Fatalf("dormant invoke CallPlan = %+v, present=%t; want closed Dispatch target %q", callPlan, ok, methodPlan.ID)
+	}
+
+	receivers, err := analyzeCoroClosedInterfacePlainPlan(plan, universe, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !receivers.acceptsTarget(method, methodPlan) {
+		t.Fatalf("dormant receiver proof did not freeze exact static method target %q", methodPlan.ID)
+	}
+	if err := validateCoroDynamicDispatchTarget(method, methodPlan); err == nil ||
+		!strings.Contains(err.Error(), "methods require receiver-aware dispatch lowering") {
+		t.Fatalf("receiver-free function-value validator accepted method target: %v", err)
+	}
+
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		program, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: coroClosedInterfacePlainCompilation(plan, universe)},
+	)
+	if err != nil {
+		t.Fatalf("compile static method with dormant interface CHA source: %v", err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify static method with dormant interface CHA source: %v\n%s", err, module.String())
+	}
+	if ir := module.String(); strings.Contains(ir, coroPlainDispatchDescriptorPrefix) || strings.Contains(ir, coroPlainDispatchThunkPrefix) {
+		t.Fatalf("dormant invoke incorrectly materialized a function-value descriptor:\n%s", ir)
+	}
+}
+
+func TestCoroDormantInterfaceTargetSupportsLiveFirstClassMethodExpression(t *testing.T) {
+	const source = `package foo
+var gate chan struct{}
+type text interface { String() string }
+type concrete string
+func (value concrete) String() string { return string(value) }
+func dormant(value text) string { return value.String() }
+func consume(func(concrete) string) {}
+func Root(value concrete) string {
+	<-gate
+	consume(concrete.String)
+	return value.String()
+}
+`
+	ssaPkg, _, files := buildGoSSAPkg(t, source)
+	program := newLLSSAProg(t)
+	defer program.Dispose()
+	universe, plan, _, _, _, _ := prepareCoroDormantInterfaceFixture(t, program, ssaPkg, files)
+
+	if _, err := analyzeCoroClosedInterfacePlainPlan(plan, universe, false, true); err != nil {
+		t.Fatalf("declared receiver body was confused with its first-class method-expression wrapper: %v", err)
+	}
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		program, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: coroClosedInterfacePlainCompilation(plan, universe)},
+	)
+	if err != nil {
+		t.Fatalf("compile live first-class method expression: %v", err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify live first-class method expression: %v\n%s", err, module.String())
+	}
+	if ir := module.String(); !strings.Contains(ir, coroPlainDispatchDescriptorPrefix) || !strings.Contains(ir, coroPlainDispatchThunkPrefix) {
+		t.Fatalf("live first-class method expression did not materialize its descriptor and entry thunk:\n%s", ir)
+	}
+}
+
+func prepareCoroDormantInterfaceFixture(
+	t *testing.T,
+	program llssa.Program,
+	ssaPkg *ssa.Package,
+	files []*ast.File,
+) (*EmissionUniverse, *coro.SSAPlan, *ssa.Function, *ssa.Function, *ssa.Function, *ssa.Call) {
+	t.Helper()
+	universe, err := PrepareEmissionUniverseWithOptions(
+		program, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}}, EmissionUniverseOptions{EnableCoroChannel: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := ssaPkg.Func("Root")
+	dormant := ssaPkg.Func("dormant")
+	var method *ssa.Function
+	for _, fn := range universe.Functions() {
+		if fn != nil && fn.Name() == "String" && fn.Signature != nil && fn.Signature.Recv() != nil {
+			method = fn
+			break
+		}
+	}
+	if root == nil || dormant == nil || method == nil {
+		t.Fatalf("fixture functions root=%v dormant=%v method=%v", root, dormant, method)
+	}
+	var invoke *ssa.Call
+	for _, block := range dormant.Blocks {
+		for _, instruction := range block.Instrs {
+			if call, ok := instruction.(*ssa.Call); ok && call.Common().IsInvoke() {
+				invoke = call
+			}
+		}
+	}
+	if invoke == nil {
+		t.Fatal("dormant interface invoke not found")
+	}
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelABIV0
+	functionIDs.ArchiveReady = true
+	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+		EmissionUniverse:     ssaUniverse,
+		FunctionIDs:          functionIDs,
+		DynamicResolution:    coro.DynamicCHAClosed,
+		MaxPlainInstructions: -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return universe, plan, root, dormant, method, invoke
+}
+
+func TestCoroClosedInterfacePlainInvokeCompatibility(t *testing.T) {
 	tests := []struct {
 		name       string
 		source     string
@@ -98,19 +280,24 @@ func TestCoroClosedInterfacePlainInvokeFailsClosed(t *testing.T) {
 			want:       "closed nonempty Dispatch CallPlan",
 		},
 		{
-			name: "suspending candidate",
+			name: "suspending target with method-expression consumer",
 			source: `package foo
 var gate chan uint32
 type Value interface { Value() uint32 }
-type concrete uint32
-func (value concrete) Value() uint32 { return <-gate }
-func Root(value Value) uint32 { <-gate; return value.Value() }
+type concrete struct{}
+func (value *concrete) Value() uint32 { return <-gate }
+func consume(func(*concrete) uint32) {}
+func Root(value Value) uint32 {
+	<-gate
+	consume((*concrete).Value)
+	return value.Value()
+}
 `,
 			resolution: coro.DynamicCHAClosed,
-			want:       "requires a demanded defined plain Dispatch body",
+			want:       "",
 		},
 		{
-			name: "other function value consumer",
+			name: "plain method-expression consumer",
 			source: `package foo
 var gate chan uint32
 type Value interface { Value() uint32 }
@@ -124,7 +311,7 @@ func Root(value Value) uint32 {
 }
 `,
 			resolution: coro.DynamicCHAClosed,
-			want:       "outside the plain dispatch ABI",
+			want:       "",
 		},
 	}
 	for _, test := range tests {
@@ -133,14 +320,63 @@ func Root(value Value) uint32 {
 			prog := newLLSSAProg(t)
 			defer prog.Dispose()
 			universe, plan, _, _, _ := prepareCoroClosedInterfacePlainPlan(t, prog, ssaPkg, files, test.resolution)
-			_, _, err := NewPackageExWithEmbedOptions(
+			pkg, _, err := NewPackageExWithEmbedOptions(
 				prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 				PackageOptions{Compilation: coroClosedInterfacePlainCompilation(plan, universe)},
 			)
+			if test.want == "" {
+				if err != nil {
+					t.Fatalf("compile exact method-expression consumer: %v", err)
+				}
+				module := pkg.Module()
+				defer module.Dispose()
+				if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+					t.Fatalf("verify exact method-expression consumer: %v\n%s", err, module.String())
+				}
+				if ir := module.String(); !strings.Contains(ir, coroPlainDispatchDescriptorPrefix) {
+					t.Fatalf("exact method-expression consumer did not materialize a descriptor:\n%s", ir)
+				}
+				return
+			}
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("compile error = %v, want substring %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestCoroRawABIPlainTargetRejectsThreadAffineMethod(t *testing.T) {
+	ssaPkg, _, files := buildGoSSAPkg(t, coroClosedInterfacePlainSource)
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	_, plan, _, method, _ := prepareCoroClosedInterfacePlainPlan(t, prog, ssaPkg, files, coro.DynamicCHAClosed)
+	methodPlan, ok := plan.FunctionPlan(method)
+	if !ok {
+		t.Fatal("concrete.Value has no function plan")
+	}
+	methodPlan.Exec |= coro.ThreadAffine
+	if err := validateCoroRawABIPlainTarget(method, methodPlan); err == nil || !strings.Contains(err.Error(), "thread-affine") {
+		t.Fatalf("thread-affine raw method error = %v; want fail-closed execution constraint", err)
+	}
+}
+
+func TestCoroRawABIPlainTargetAcceptsExternalMethodAddressOnly(t *testing.T) {
+	ssaPkg, _, files := buildGoSSAPkg(t, coroClosedInterfacePlainSource)
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	_, plan, _, method, _ := prepareCoroClosedInterfacePlainPlan(t, prog, ssaPkg, files, coro.DynamicCHAClosed)
+	methodPlan, ok := plan.FunctionPlan(method)
+	if !ok {
+		t.Fatal("concrete.Value has no function plan")
+	}
+	methodPlan.External = coro.ExternalUnknownForeign
+	methodPlan.Emission = coro.EmitExternal
+	methodPlan.Primary = coro.PrimaryExternal
+	methodPlan.FuncRep = coro.DirectPlain
+	methodPlan.Effect = coro.NoSuspend
+	methodPlan.Exec = coro.BlockForeign | coro.IRQUnsafe
+	if err := validateCoroRawABIPlainTarget(method, methodPlan); err != nil {
+		t.Fatalf("external raw method address rejected: %v", err)
 	}
 }
 

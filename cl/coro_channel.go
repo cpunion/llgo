@@ -26,10 +26,9 @@ import (
 )
 
 const (
-	coroChanSendParkHookV1        = "__llgo_coro_chan_send_park_v1"
-	coroChanRecvParkHookV1        = "__llgo_coro_chan_recv_park_v1"
-	coroChanResumeHookV1          = "__llgo_coro_chan_resume_v1"
-	coroChanSendClosedPanicHookV1 = "__llgo_coro_chan_send_closed_panic_v1"
+	coroChanSendParkHookV1 = "__llgo_coro_chan_send_park_v1"
+	coroChanRecvParkHookV1 = "__llgo_coro_chan_recv_park_v1"
+	coroChanResumeHookV1   = "__llgo_coro_chan_resume_v1"
 )
 
 const (
@@ -40,6 +39,20 @@ const (
 	coroChanResumeTaskAbort
 	coroChanResumeShutdown
 )
+
+const (
+	coroChanCloseOK uint64 = iota
+	coroChanCloseNil
+	coroChanCloseClosed
+)
+
+func isCoroCloseBuiltinCall(call *ssa.Call) bool {
+	if call == nil || call.Common() == nil {
+		return false
+	}
+	builtin, ok := call.Common().Value.(*ssa.Builtin)
+	return ok && builtin.Name() == "close"
+}
 
 func coroChanParkSignature() *types.Signature {
 	pointer := types.Typ[types.UnsafePointer]
@@ -63,16 +76,6 @@ func coroChanResumeSignature() *types.Signature {
 	)
 	results := types.NewTuple(types.NewParam(token.NoPos, nil, "status", types.Typ[types.Uint32]))
 	return types.NewSignatureType(nil, nil, nil, params, results, false)
-}
-
-func coroChanSendClosedPanicSignature() *types.Signature {
-	pointer := types.Typ[types.UnsafePointer]
-	params := types.NewTuple(
-		types.NewParam(token.NoPos, nil, "g", pointer),
-		types.NewParam(token.NoPos, nil, "handle", pointer),
-		types.NewParam(token.NoPos, nil, "header", pointer),
-	)
-	return types.NewSignatureType(nil, nil, nil, params, nil, false)
 }
 
 func (p *context) requireCoroChannelBody(b llssa.Builder) *coroBodyContext {
@@ -120,24 +123,17 @@ func (p *context) compileCoroChanSend(b llssa.Builder, channel, value llssa.Expr
 		func(resume llssa.Builder, normal llssa.BasicBlock) {
 			statusHook := p.pkg.NewFunc(coroChanResumeHookV1, coroChanResumeSignature(), llssa.InC)
 			status := resume.Call(statusHook.Expr, body.task, resume.Convert(resume.Prog.VoidPtr(), state))
+			abort, shutdown := body.cancellationRunDecisionTargets(resume)
 			dispatch := resume.Switch(status, body.unsupportedRunDecision)
 			dispatch.Case(resume.Prog.IntVal(coroChanResumeSendOK, resume.Prog.Uint32()), normal)
 			dispatch.Case(resume.Prog.IntVal(coroChanResumeSendClosed, resume.Prog.Uint32()), closed)
-			dispatch.Case(resume.Prog.IntVal(coroChanResumeTaskAbort, resume.Prog.Uint32()), body.cancelRunDecision)
-			dispatch.Case(resume.Prog.IntVal(coroChanResumeShutdown, resume.Prog.Uint32()), body.cancelRunDecision)
+			dispatch.Case(resume.Prog.IntVal(coroChanResumeTaskAbort, resume.Prog.Uint32()), abort)
+			dispatch.Case(resume.Prog.IntVal(coroChanResumeShutdown, resume.Prog.Uint32()), shutdown)
 			dispatch.End(resume)
 		},
 	)
-	b.SetBlock(closed)
-	body.publishState(b, coroSuspendPanic, coroLifecycleFinalSuspended, body.terminalStateID())
-	panicHook := p.pkg.NewFunc(coroChanSendClosedPanicHookV1, coroChanSendClosedPanicSignature(), llssa.InC)
-	b.Call(
-		panicHook.Expr,
-		body.task,
-		body.coro.Handle(),
-		b.Convert(b.Prog.VoidPtr(), body.header),
-	)
-	b.Jump(body.finalSuspend)
+	b.SetBlockEx(closed, llssa.AtEnd, false)
+	p.compileCoroTerminalFault(b, coroFaultChannelSendClosedV1)
 	b.SetBlock(join)
 	body.activate(b)
 }
@@ -180,30 +176,55 @@ func (p *context) compileCoroChanRecv(b llssa.Builder, instruction *ssa.UnOp, ch
 			resumedNormal = normal
 			statusHook := p.pkg.NewFunc(coroChanResumeHookV1, coroChanResumeSignature(), llssa.InC)
 			status := resume.Call(statusHook.Expr, body.task, resume.Convert(resume.Prog.VoidPtr(), state))
+			abort, shutdown := body.cancellationRunDecisionTargets(resume)
 			dispatch := resume.Switch(status, body.unsupportedRunDecision)
 			dispatch.Case(resume.Prog.IntVal(coroChanResumeRecvOK, resume.Prog.Uint32()), recvSuccess)
 			dispatch.Case(resume.Prog.IntVal(coroChanResumeRecvClosed, resume.Prog.Uint32()), recvClosed)
-			dispatch.Case(resume.Prog.IntVal(coroChanResumeTaskAbort, resume.Prog.Uint32()), body.cancelRunDecision)
-			dispatch.Case(resume.Prog.IntVal(coroChanResumeShutdown, resume.Prog.Uint32()), body.cancelRunDecision)
+			dispatch.Case(resume.Prog.IntVal(coroChanResumeTaskAbort, resume.Prog.Uint32()), abort)
+			dispatch.Case(resume.Prog.IntVal(coroChanResumeShutdown, resume.Prog.Uint32()), shutdown)
 			dispatch.End(resume)
 		},
 	)
 	if resumedNormal == nil {
 		panic("coroutine channel receive resume dispatch did not expose its physical continuation")
 	}
-	b.SetBlock(recvSuccess)
+	b.SetBlockEx(recvSuccess, llssa.AtEnd, false)
 	b.Store(recvOKSlot, b.Prog.BoolVal(true))
 	b.Jump(resumedNormal)
-	b.SetBlock(recvClosed)
+	b.SetBlockEx(recvClosed, llssa.AtEnd, false)
 	b.Store(recvOKSlot, b.Prog.BoolVal(false))
 	b.Jump(resumedNormal)
 	b.SetBlock(join)
 	body.activate(b)
-	value := b.Load(elem)
+	// elem is compiler-owned coroutine-frame storage allocated above. Its
+	// address is valid even when the channel element has size zero, so loading
+	// it must not synthesize a user nil-dereference helper that was never part
+	// of the frozen call graph.
+	value := b.LoadKnownNonNil(elem)
 	if !instruction.CommaOk {
 		return value
 	}
 	return b.Aggregate(p.type_(instruction.Type(), llssa.InGo), value, b.Load(recvOKSlot))
+}
+
+func (p *context) compileCoroChanClose(b llssa.Builder, channel llssa.Expr) {
+	body := p.requireCoroChannelBody(b)
+	status := b.CoroChanTryClose(channel)
+	nilChannel := b.Func.MakeBlock()
+	alreadyClosed := b.Func.MakeBlock()
+	normal := b.Func.MakeBlock()
+	dispatch := b.Switch(status, body.unsupportedRunDecision)
+	dispatch.Case(b.Prog.IntVal(coroChanCloseOK, b.Prog.Uint32()), normal)
+	dispatch.Case(b.Prog.IntVal(coroChanCloseNil, b.Prog.Uint32()), nilChannel)
+	dispatch.Case(b.Prog.IntVal(coroChanCloseClosed, b.Prog.Uint32()), alreadyClosed)
+	dispatch.End(b)
+
+	b.SetBlockEx(nilChannel, llssa.AtEnd, false)
+	p.compileCoroTerminalFault(b, coroFaultChannelCloseNilV1)
+	b.SetBlockEx(alreadyClosed, llssa.AtEnd, false)
+	p.compileCoroTerminalFault(b, coroFaultChannelCloseClosedV1)
+	b.SetBlockContinuation(normal)
+	body.activate(b)
 }
 
 func (p *context) compileCoroChanSelect(b llssa.Builder, states []*llssa.SelectState) llssa.Expr {
@@ -235,26 +256,19 @@ func (p *context) compileCoroChanSelect(b llssa.Builder, states []*llssa.SelectS
 			resume.Store(chosenSlot, resume.Extract(result, 0))
 			resume.Store(recvOKSlot, resume.Extract(result, 1))
 			status := resume.Extract(result, 2)
+			abort, shutdown := body.cancellationRunDecisionTargets(resume)
 			dispatch := resume.Switch(status, body.unsupportedRunDecision)
 			dispatch.Case(resume.Prog.IntVal(coroChanResumeSendOK, resume.Prog.Uint32()), normal)
 			dispatch.Case(resume.Prog.IntVal(coroChanResumeRecvOK, resume.Prog.Uint32()), normal)
 			dispatch.Case(resume.Prog.IntVal(coroChanResumeRecvClosed, resume.Prog.Uint32()), normal)
 			dispatch.Case(resume.Prog.IntVal(coroChanResumeSendClosed, resume.Prog.Uint32()), closed)
-			dispatch.Case(resume.Prog.IntVal(coroChanResumeTaskAbort, resume.Prog.Uint32()), body.cancelRunDecision)
-			dispatch.Case(resume.Prog.IntVal(coroChanResumeShutdown, resume.Prog.Uint32()), body.cancelRunDecision)
+			dispatch.Case(resume.Prog.IntVal(coroChanResumeTaskAbort, resume.Prog.Uint32()), abort)
+			dispatch.Case(resume.Prog.IntVal(coroChanResumeShutdown, resume.Prog.Uint32()), shutdown)
 			dispatch.End(resume)
 		},
 	)
-	b.SetBlock(closed)
-	body.publishState(b, coroSuspendPanic, coroLifecycleFinalSuspended, body.terminalStateID())
-	panicHook := p.pkg.NewFunc(coroChanSendClosedPanicHookV1, coroChanSendClosedPanicSignature(), llssa.InC)
-	b.Call(
-		panicHook.Expr,
-		body.task,
-		body.coro.Handle(),
-		b.Convert(b.Prog.VoidPtr(), body.header),
-	)
-	b.Jump(body.finalSuspend)
+	b.SetBlockEx(closed, llssa.AtEnd, false)
+	p.compileCoroTerminalFault(b, coroFaultChannelSendClosedV1)
 	b.SetBlock(join)
 	body.activate(b)
 	return b.CoroChanSelectResult(plan, b.Load(chosenSlot), b.Load(recvOKSlot))
@@ -267,17 +281,9 @@ func (p *context) compileCoroChanTrySelect(b llssa.Builder, states []*llssa.Sele
 	closed := b.Func.MakeBlock()
 	normal := b.Func.MakeBlock()
 	b.If(b.Extract(attempt, 3), closed, normal)
-	b.SetBlock(closed)
-	body.publishState(b, coroSuspendPanic, coroLifecycleFinalSuspended, body.terminalStateID())
-	panicHook := p.pkg.NewFunc(coroChanSendClosedPanicHookV1, coroChanSendClosedPanicSignature(), llssa.InC)
-	b.Call(
-		panicHook.Expr,
-		body.task,
-		body.coro.Handle(),
-		b.Convert(b.Prog.VoidPtr(), body.header),
-	)
-	b.Jump(body.finalSuspend)
-	b.SetBlock(normal)
+	b.SetBlockEx(closed, llssa.AtEnd, false)
+	p.compileCoroTerminalFault(b, coroFaultChannelSendClosedV1)
+	b.SetBlockContinuation(normal)
 	body.activate(b)
 	return b.CoroChanSelectResult(plan, b.Extract(attempt, 0), b.Extract(attempt, 1))
 }

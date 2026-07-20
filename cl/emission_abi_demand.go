@@ -217,6 +217,7 @@ func (u *EmissionUniverse) functionABIContext(fn *ssa.Function, owner *preparedE
 	if u == nil || u.goProg == nil || fn == nil || owner == nil {
 		return nil, fmt.Errorf("ABI type demand requires an emission universe, function, and exact owner")
 	}
+	unevaluated, _ := u.frozenUnsafeSizeAlignUnevaluatedSSA(fn)
 	return &context{
 		prog:                 u.prog,
 		goFn:                 fn,
@@ -228,6 +229,7 @@ func (u *EmissionUniverse) functionABIContext(fn *ssa.Function, owner *preparedE
 		loaded:               u.loadedPackages(),
 		linkOnceFns:          make(map[*ssa.Function]none),
 		methodNilDerefChecks: collectMethodNilDerefChecks(fn),
+		unevaluatedSSA:       unevaluated,
 		addrOfFieldAddrs:     collectAddrOfFieldSelectors(owner.files),
 		emissionUniverse:     u,
 	}, nil
@@ -249,6 +251,7 @@ func (u *EmissionUniverse) materializeABITypeDemand(fn *ssa.Function, owner *pre
 	}
 	return walkEmissionABITypeDemandEx(root, ctx.patchType, physicalMethodSignature, func(typ types.Type) error {
 		var references []*ssa.Function
+		var synchronous []*ssa.Function
 		if u.prog != nil {
 			for _, helper := range u.prog.ABITypeRuntimeFunctions(typ) {
 				target, available, err := u.materializeRuntimeHelperReference(fn, owner, state, helper)
@@ -257,6 +260,7 @@ func (u *EmissionUniverse) materializeABITypeDemand(fn *ssa.Function, owner *pre
 				}
 				if available {
 					references = append(references, target)
+					synchronous = append(synchronous, target)
 				}
 			}
 		}
@@ -271,7 +275,10 @@ func (u *EmissionUniverse) materializeABITypeDemand(fn *ssa.Function, owner *pre
 			}
 			references = append(references, methods...)
 		}
-		return u.recordABIMethodReferences(fn, references)
+		if err := u.recordABIMethodReferences(fn, references); err != nil {
+			return err
+		}
+		return u.recordABISyncReferences(fn, synchronous)
 	})
 }
 

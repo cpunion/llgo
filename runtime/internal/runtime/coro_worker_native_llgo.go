@@ -19,16 +19,18 @@
 package runtime
 
 import (
-	c "github.com/goplus/llgo/runtime/internal/clite"
 	"github.com/goplus/llgo/runtime/internal/clite/pthread"
-	psync "github.com/goplus/llgo/runtime/internal/clite/pthread/sync"
 	"github.com/goplus/llgo/runtime/internal/coro"
 	"github.com/goplus/llgo/runtime/internal/coroworker"
 )
 
 const (
 	coroNativeWorkerThreadCountV1 = 4
-	coroNativeWorkerQueueSizeV1   = coro.WorkerOperationSourceCapacity
+	// The physical pthread count stays small; this static ring holds logical
+	// pending work while those threads block in file and syscall operations.
+	// Production configures the Worker source to the same 16-page capacity.
+	coroNativeWorkerPageCountV1 = 16
+	coroNativeWorkerQueueSizeV1 = coroworker.QueueCapacity
 )
 
 type coroNativeWorkerJobV1 struct {
@@ -43,40 +45,38 @@ func (job coroNativeWorkerJobV1) valid() bool {
 		job.function != 0 && job.argc <= coroworker.MaxArgs
 }
 
+func coroNativeWorkerJobFromTransportV1(raw coroworker.Job) (coroNativeWorkerJobV1, bool) {
+	job := coroNativeWorkerJobV1{
+		id: coro.OperationID{
+			SourceSlot: raw.SourceSlot,
+			Generation: raw.Generation,
+		},
+		function: raw.Function,
+		argc:     raw.Argc,
+		args:     raw.Args,
+	}
+	return job, job.valid()
+}
+
 // coroNativeWorkerPoolV1 is the native target adapter, not another executor.
 // The single scheduler P is its only producer. Four fixed-stack workers drain
-// a bounded pointer-free ring and publish results into the one Worker source;
-// they never inspect a G, ParkState, WaitSetRecord, or LLVM coroutine handle.
+// a bounded C11 sequence ring and publish results into the one Worker source;
+// neither ring cells nor workers inspect a G, ParkState, WaitSetRecord, or LLVM
+// coroutine handle. No managed producer edge acquires a pthread mutex.
 type coroNativeWorkerPoolV1 struct {
-	mutex psync.Mutex
-	work  psync.Cond
-
 	threads [coroNativeWorkerThreadCountV1]pthread.Thread
-	queue   [coroNativeWorkerQueueSizeV1]coroNativeWorkerJobV1
 	handle  coro.ExecutorHandle
 
-	head        uint32
-	tail        uint32
-	count       uint32
-	running     uint32
-	created     uint32
-	started     bool
-	stopping    bool
-	reservation bool
+	created  uint32
+	started  bool
+	stopping bool
 }
 
 var coroNativeWorkerPoolV1State coroNativeWorkerPoolV1
 
 func coroNativeWorkerPoolCanReleaseV1() bool {
-	return coroNativeWorkerPoolV1State == (coroNativeWorkerPoolV1{})
-}
-
-func coroNativeWorkerAdvanceQueueIndexV1(index uint32) uint32 {
-	index++
-	if index == coroNativeWorkerQueueSizeV1 {
-		return 0
-	}
-	return index
+	return coroNativeWorkerPoolV1State == (coroNativeWorkerPoolV1{}) &&
+		coroworker.QueueCanRelease()
 }
 
 func coroNativeWorkerPoolJoinCreatedV1(state *coroNativeWorkerPoolV1) bool {
@@ -95,51 +95,48 @@ func coroNativeWorkerPoolJoinCreatedV1(state *coroNativeWorkerPoolV1) bool {
 	return ok
 }
 
-func coroNativeWorkerPoolResetV1(state *coroNativeWorkerPoolV1) {
-	state.work.Destroy()
-	state.mutex.Destroy()
+func coroNativeWorkerPoolResetAfterJoinV1(state *coroNativeWorkerPoolV1) bool {
+	if state == nil || state.created != 0 || !state.stopping ||
+		!coroworker.QueueDestroyAfterJoin() {
+		return false
+	}
 	*state = coroNativeWorkerPoolV1{}
+	return true
 }
 
-// coroNativeWorkerPoolStartV1 uses pthread.Create, whose selected runtime
-// implementation is GC_pthread_create for collecting builds and pthread_create
-// for nogc builds. Threads remain joinable and are strongly joined at target
-// close; none is created per G or per operation.
+// coroNativeWorkerPoolStartV1 uses the scheduler-owned coroworker.Create leaf.
+// Threads remain joinable and are strongly joined at target close; none is
+// created per G or per operation.
 func coroNativeWorkerPoolStartV1(handle coro.ExecutorHandle) bool {
 	state := &coroNativeWorkerPoolV1State
 	if !coroNativeWorkerPoolCanReleaseV1() || !coroProgramExecutorBoundV1State ||
 		handle != coroProgramExecutorHandleV1State || handle.Slot == 0 || handle.Generation == 0 {
 		return false
 	}
-	if state.mutex.Init(nil) != 0 {
-		*state = coroNativeWorkerPoolV1{}
-		return false
-	}
-	if state.work.Init(nil) != 0 {
-		state.mutex.Destroy()
+	if !coroworker.QueueInit() {
 		*state = coroNativeWorkerPoolV1{}
 		return false
 	}
 	state.handle = handle
 	state.started = true
 	for index := uint32(0); index < coroNativeWorkerThreadCountV1; index++ {
-		if pthread.Create(&state.threads[index], nil, coroNativeWorkerMainV1, nil) != 0 {
+		if coroworker.Create(&state.threads[index]) != 0 {
 			// pthread_create leaves its result slot undefined on failure.
 			state.threads[index] = nil
-			state.mutex.Lock()
-			state.stopping = true
-			broadcast := state.work.Broadcast() == 0
-			state.mutex.Unlock()
-			if !broadcast {
-				coroRuntimeAbort("native coroutine worker start broadcast failed")
+			if !coroworker.QueueStop(state.created) {
+				coroRuntimeAbort("native coroutine worker start stop failed")
 				return false
 			}
+			state.stopping = true
 			joined := coroNativeWorkerPoolJoinCreatedV1(state)
 			if !joined {
 				coroRuntimeAbort("native coroutine worker start join failed")
 				return false
 			}
-			coroNativeWorkerPoolResetV1(state)
+			if !coroNativeWorkerPoolResetAfterJoinV1(state) {
+				coroRuntimeAbort("native coroutine worker start destroy after join failed")
+				return false
+			}
 			return false
 		}
 		state.created++
@@ -148,34 +145,20 @@ func coroNativeWorkerPoolStartV1(handle coro.ExecutorHandle) bool {
 }
 
 // coroNativeWorkerPoolReserveV1 is the nonblocking queue-capacity preflight.
-// The single owner may retain at most one reservation while it prepares the
-// matching Worker ParkState. Consumers only remove jobs, so this capacity
-// cannot disappear before SubmitReserved commits it.
+// The single owner P reserves one exact sequence cell using lock-free atomics.
+// Consumers only release cells, so its capacity cannot disappear before the
+// matching SubmitReserved; a full ring is admission backpressure, never mutex
+// contention on the managed scheduler thread.
 func coroNativeWorkerPoolReserveV1(handle coro.ExecutorHandle) bool {
 	state := &coroNativeWorkerPoolV1State
-	if !state.started || state.handle != handle || state.mutex.TryLock() != 0 {
-		return false
-	}
-	ok := !state.stopping && !state.reservation && state.count < coroNativeWorkerQueueSizeV1
-	if ok {
-		state.reservation = true
-	}
-	state.mutex.Unlock()
-	return ok
+	return state.started && !state.stopping && state.handle == handle &&
+		coroworker.QueueReserve()
 }
 
 func coroNativeWorkerPoolCancelReservationV1(handle coro.ExecutorHandle) bool {
 	state := &coroNativeWorkerPoolV1State
-	if !state.started || state.handle != handle {
-		return false
-	}
-	state.mutex.Lock()
-	ok := !state.stopping && state.reservation
-	if ok {
-		state.reservation = false
-	}
-	state.mutex.Unlock()
-	return ok
+	return state.started && !state.stopping && state.handle == handle &&
+		coroworker.QueueCancelReservation()
 }
 
 // coroNativeWorkerPoolSubmitReservedV1 is called only after the core owner has
@@ -192,105 +175,55 @@ func coroNativeWorkerPoolSubmitReservedV1(
 	if args == nil {
 		return false
 	}
-	job := coroNativeWorkerJobV1{id: id, function: function, argc: argc, args: *args}
-	if !job.valid() {
+	job := coroworker.Job{
+		SourceSlot: id.SourceSlot,
+		Generation: id.Generation,
+		Function:   function,
+		Argc:       argc,
+		Args:       *args,
+	}
+	if _, valid := coroNativeWorkerJobFromTransportV1(job); !valid {
 		return false
 	}
 	state := &coroNativeWorkerPoolV1State
-	if !state.started || state.handle != handle {
-		return false
-	}
-	state.mutex.Lock()
-	if state.stopping || !state.reservation || state.count >= coroNativeWorkerQueueSizeV1 ||
-		state.queue[state.tail] != (coroNativeWorkerJobV1{}) {
-		state.mutex.Unlock()
-		return false
-	}
-	state.reservation = false
-	state.queue[state.tail] = job
-	state.tail = coroNativeWorkerAdvanceQueueIndexV1(state.tail)
-	state.count++
-	signaled := state.work.Signal() == 0
-	state.mutex.Unlock()
-	return signaled
+	return state.started && !state.stopping && state.handle == handle &&
+		coroworker.QueueSubmitReserved(&job)
 }
 
-func coroNativeWorkerTakeV1(state *coroNativeWorkerPoolV1) (coroNativeWorkerJobV1, bool) {
-	state.mutex.Lock()
-	for state.count == 0 && !state.stopping {
-		if state.work.Wait(&state.mutex) != 0 {
-			state.mutex.Unlock()
-			return coroNativeWorkerJobV1{}, false
-		}
-	}
-	if state.count == 0 {
-		state.mutex.Unlock()
-		return coroNativeWorkerJobV1{}, state.stopping
-	}
-	job := state.queue[state.head]
-	if !job.valid() {
-		state.mutex.Unlock()
-		return coroNativeWorkerJobV1{}, false
-	}
-	state.queue[state.head] = coroNativeWorkerJobV1{}
-	state.head = coroNativeWorkerAdvanceQueueIndexV1(state.head)
-	state.count--
-	state.running++
-	state.mutex.Unlock()
-	return job, true
-}
-
-func coroNativeWorkerFinishRunningV1(state *coroNativeWorkerPoolV1) bool {
-	state.mutex.Lock()
-	if state.running == 0 {
-		state.mutex.Unlock()
-		return false
-	}
-	state.running--
-	state.mutex.Unlock()
-	return true
-}
-
-func coroNativeWorkerCompleteV1(handle coro.ExecutorHandle, job coroNativeWorkerJobV1) bool {
-	var result coroworker.Result
-	if !job.valid() || !coroworker.Call(job.function, job.argc, &job.args, &result) {
-		return false
+// __llgo_coro_native_worker_complete_v1 is the only C-worker-to-Go edge. The
+// fixed native routine has already completed the blocking foreign call and
+// passes only the operation generation and scalar result words. It remains
+// valid while Stop drains committed jobs: handle/source state is retired only
+// after every worker has joined.
+//
+//export __llgo_coro_native_worker_complete_v1
+func __llgo_coro_native_worker_complete_v1(
+	sourceSlot, generation uint32,
+	r1, r2, errno uintptr,
+) uint32 {
+	state := &coroNativeWorkerPoolV1State
+	id := coro.OperationID{SourceSlot: sourceSlot, Generation: generation}
+	if !state.started || state.handle.Slot == 0 || state.handle.Generation == 0 ||
+		!id.Valid() || id.Source() != coro.OperationSourceWorker {
+		return 0
 	}
 	payload, ok := coro.MakeScalarResultPayloadV1(
 		coro.ScalarResultKindWords,
 		0,
 		3,
-		uint64(result.R1),
-		uint64(result.R2),
-		uint64(result.Errno),
+		uint64(r1),
+		uint64(r2),
+		uint64(errno),
 	)
-	if !ok || coroProgramWorkerSourceV1State.Post(job.id, payload) != coro.WorkerOperationPosted {
-		return false
+	if !ok || coroProgramWorkerSourceV1State.Post(id, payload) != coro.WorkerOperationPosted {
+		return 0
 	}
 	// Post is the durable fact. The common ingress/registry/doorbell tail is
 	// requested afterwards, and pool Stop joins across this entire window.
-	return coroTargetRequestExecutorV1(handle)
-}
-
-// coroNativeWorkerMainV1 is an ordinary fixed-stack pthread routine. Its
-// foreign call may block, but it is deliberately outside every LLVM coroutine
-// and must never be transformed into another scheduler continuation.
-func coroNativeWorkerMainV1(c.Pointer) c.Pointer {
-	state := &coroNativeWorkerPoolV1State
-	for {
-		job, ok := coroNativeWorkerTakeV1(state)
-		if !ok {
-			coroRuntimeAbort("native coroutine worker queue corruption")
-			return nil
-		}
-		if job == (coroNativeWorkerJobV1{}) {
-			return nil
-		}
-		if !coroNativeWorkerCompleteV1(state.handle, job) || !coroNativeWorkerFinishRunningV1(state) {
-			coroRuntimeAbort("native coroutine worker completion failed")
-			return nil
-		}
+	if !coroTargetRequestExecutorV1(state.handle) {
+		return 0
 	}
+	return 1
 }
 
 // coroNativeWorkerPoolStopV1 seals submission, wakes all idle workers, drains
@@ -301,42 +234,40 @@ func coroNativeWorkerPoolStopV1(handle coro.ExecutorHandle) bool {
 	if !state.started || state.handle != handle || state.created != coroNativeWorkerThreadCountV1 {
 		return false
 	}
-	state.mutex.Lock()
-	if state.stopping || state.reservation {
-		state.mutex.Unlock()
+	if state.stopping {
+		return false
+	}
+	if !coroworker.QueueStop(state.created) {
+		coroRuntimeAbort("native coroutine worker stop wake failed")
 		return false
 	}
 	state.stopping = true
-	broadcast := state.work.Broadcast() == 0
-	state.mutex.Unlock()
-	if !broadcast {
-		coroRuntimeAbort("native coroutine worker stop broadcast failed")
-		return false
-	}
 	joined := coroNativeWorkerPoolJoinCreatedV1(state)
 	if !joined {
 		coroRuntimeAbort("native coroutine worker stop join failed")
 		return false
 	}
-	clean := state.count == 0 && state.running == 0 && state.head == state.tail &&
-		!state.reservation
-	if !clean {
+	if !coroNativeWorkerPoolResetAfterJoinV1(state) {
+		coroRuntimeAbort("native coroutine worker stop destroy after join failed")
 		return false
 	}
-	coroNativeWorkerPoolResetV1(state)
 	return true
 }
 
 // coroProgramReserveNativeWorkerSubmissionV1 is the runtime-owner preflight
-// used before PrepareSingleWorkerPark changes the current frame's ParkState.
-func coroProgramReserveNativeWorkerSubmissionV1() bool {
-	return coroProgramExecutorBoundV1State &&
-		coroNativeWorkerPoolReserveV1(coroProgramExecutorHandleV1State)
+// used before PrepareCurrentExecutorWorkerPark changes the current frame's
+// ParkState. The pool transport is process-shared, but today's production
+// program adapter binds only one executor. Rejecting any other resolved handle
+// is intentional fail-closed behavior until the target installs a route
+// registry for completion delivery; it must not fall back to the global source.
+func coroProgramReserveNativeWorkerSubmissionV1(handle coro.ExecutorHandle) bool {
+	return coroProgramExecutorBoundV1State && handle == coroProgramExecutorHandleV1State &&
+		coroNativeWorkerPoolReserveV1(handle)
 }
 
-func coroProgramCancelNativeWorkerSubmissionV1() bool {
-	return coroProgramExecutorBoundV1State &&
-		coroNativeWorkerPoolCancelReservationV1(coroProgramExecutorHandleV1State)
+func coroProgramCancelNativeWorkerSubmissionV1(handle coro.ExecutorHandle) bool {
+	return coroProgramExecutorBoundV1State && handle == coroProgramExecutorHandleV1State &&
+		coroNativeWorkerPoolCancelReservationV1(handle)
 }
 
 // coroProgramCommitNativeWorkerSubmissionV1 closes the no-return handoff from
@@ -344,19 +275,22 @@ func coroProgramCancelNativeWorkerSubmissionV1() bool {
 // enqueue after MarkSubmitted would leave a retained frame with no future
 // physical fact and therefore aborts instead of returning to the caller.
 func coroProgramCommitNativeWorkerSubmissionV1(
-	g *coroG,
+	driver *coro.ExecutorDriver,
+	g *coro.G,
+	handle coro.ExecutorHandle,
 	id coro.OperationID,
 	function uintptr,
 	argc uint32,
 	args *[coroworker.MaxArgs]uintptr,
 ) bool {
-	if !coroProgramExecutorBoundV1State || g == nil || args == nil || function == 0 ||
+	if !coroProgramExecutorBoundV1State || handle != coroProgramExecutorHandleV1State ||
+		driver == nil || g == nil || args == nil || function == 0 ||
 		argc > coroworker.MaxArgs || !id.Valid() || id.Source() != coro.OperationSourceWorker ||
-		!coro.CommitWorkerSubmission(g, &coroProgramWorkerSourceV1State, id) {
+		!coro.CommitCurrentExecutorWorkerSubmission(driver, g, id) {
 		return false
 	}
 	if !coroNativeWorkerPoolSubmitReservedV1(
-		coroProgramExecutorHandleV1State,
+		handle,
 		id,
 		function,
 		argc,

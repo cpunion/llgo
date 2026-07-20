@@ -220,18 +220,21 @@ func NextExecutorRunStepAt(driver *ExecutorDriver, now int64) (ExecutorRunStep, 
 func completedExecutorRunAction(p *P, g *G, action Action) bool {
 	if p == nil || g == nil || action.Handle != nil || p.current != nil || p.inResume ||
 		p.action != (Action{}) || p.runDecision != (RunDecision{}) || p.runDecisionTaken ||
-		p.servicePreemptBudget != 0 || g.runP != nil || g.runAction != ActionInvalid {
+		p.servicePreemptBudget != 0 || g.runP != nil || g.runAction != ActionInvalid ||
+		g.transferState != runnableTransferGIdle {
 		return false
 	}
 	switch action.Kind {
 	case ActionYield:
-		return g.state == GRunnable && g.queued
+		return gPreemptEnabledAtDepthZero(g) && g.state == GRunnable && g.queued
 	case ActionPark:
-		return g.state == GWaiting && (g.waiting || g.active != nil && g.active.parkWait != nil)
+		return gPreemptEnabledAtDepthZero(g) && g.state == GWaiting &&
+			(g.waiting || g.active != nil && g.active.parkWait != nil)
 	case ActionComplete:
-		return g.state == GDead && !g.panicUnwind
+		return gPreemptStateAtDepthZero(g, preemptDisabled) && g.state == GDead && !g.panicUnwind
 	case ActionPanicComplete:
-		return g.state == GDead && publishedPanicRecord(&g.panicRecord)
+		return gPreemptStateAtDepthZero(g, preemptDisabled) && g.state == GDead &&
+			publishedPanicRecord(&g.panicRecord)
 	default:
 		return false
 	}

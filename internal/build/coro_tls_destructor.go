@@ -57,7 +57,7 @@ func proveCoroTLSDestructorClosedDynamicCalls(ctx *context) (map[ssa.CallInstruc
 	if ctx == nil || ctx.coroEmission == nil || ctx.coroSSAEmission == nil || ctx.prog == nil {
 		return result, nil
 	}
-	functions, err := coroTLSFrozenGoBodies(ctx)
+	functions, err := coroFrozenGoBodies(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -101,12 +101,12 @@ func proveCoroTLSDestructorClosedDynamicCalls(ctx *context) (map[ssa.CallInstruc
 	return result, nil
 }
 
-func coroTLSFrozenGoBodies(ctx *context) ([]*ssa.Function, error) {
+func coroFrozenGoBodies(ctx *context) ([]*ssa.Function, error) {
 	functions := make([]*ssa.Function, 0, len(ctx.coroSSAEmission.Functions()))
 	for _, fn := range ctx.coroSSAEmission.Functions() {
 		goBody, err := frozenGoEmittedBody(ctx.coroEmission, fn)
 		if err != nil {
-			return nil, fmt.Errorf("classify TLS field-flow body %q: %w", fn.Name(), err)
+			return nil, fmt.Errorf("classify frozen Go body %q: %w", fn.Name(), err)
 		}
 		if goBody {
 			functions = append(functions, fn)
@@ -255,6 +255,11 @@ func proveOneCoroTLSDestructorCallback(
 	if err := auditCoroTLSTrackedEscapes(ctx, functions, slotField, sourceField); err != nil {
 		return nil, coro.SSAClosedDynamicCallCertificate{}, true, err
 	}
+	// This exact field-flow proof is also the authority that the compiler-owned
+	// pthread destructor callback invokes the selected descriptor synchronously
+	// on its current stack. No function-name or target-effect inference grants
+	// this call-site protocol to other descriptor consumers.
+	certificate.SyncDispatch = true
 	return dynamicCall, certificate, true, nil
 }
 
@@ -505,6 +510,10 @@ func collectCoroTLSAllocatorTargets(
 					return coro.SSAClosedDynamicCallCertificate{}, fmt.Errorf("allocator destructor formal is reached through go/defer or a malformed call in %q", owner.Name())
 				}
 				callSites++
+				certificate.SyncOnlyCallArguments = append(certificate.SyncOnlyCallArguments, coro.SSASyncOnlyCallArgument{
+					Call:     call,
+					Argument: formalIndex,
+				})
 				actual := call.Common().Args[formalIndex]
 				if coroTLSNilFunctionValue(actual) {
 					continue
@@ -777,13 +786,16 @@ func coroTLSExactRootRangeHelper(ctx *context, fn *ssa.Function, slot types.Type
 
 func cloneCoroClosedDynamicCallCertificate(certificate coro.SSAClosedDynamicCallCertificate) coro.SSAClosedDynamicCallCertificate {
 	return coro.SSAClosedDynamicCallCertificate{
-		Targets:  append([]*ssa.Function(nil), certificate.Targets...),
-		MayBeNil: certificate.MayBeNil,
+		Targets:               append([]*ssa.Function(nil), certificate.Targets...),
+		MayBeNil:              certificate.MayBeNil,
+		SyncDispatch:          certificate.SyncDispatch,
+		SyncOnlyCallArguments: append([]coro.SSASyncOnlyCallArgument(nil), certificate.SyncOnlyCallArguments...),
 	}
 }
 
 func sameCoroClosedDynamicCallCertificate(left, right coro.SSAClosedDynamicCallCertificate) bool {
-	if left.MayBeNil != right.MayBeNil || len(left.Targets) != len(right.Targets) {
+	if left.MayBeNil != right.MayBeNil || left.SyncDispatch != right.SyncDispatch ||
+		len(left.Targets) != len(right.Targets) || len(left.SyncOnlyCallArguments) != len(right.SyncOnlyCallArguments) {
 		return false
 	}
 	for index := range left.Targets {
@@ -791,25 +803,42 @@ func sameCoroClosedDynamicCallCertificate(left, right coro.SSAClosedDynamicCallC
 			return false
 		}
 	}
+	for index := range left.SyncOnlyCallArguments {
+		if left.SyncOnlyCallArguments[index] != right.SyncOnlyCallArguments[index] {
+			return false
+		}
+	}
 	return true
 }
 
-func validateRequiredCoroClosedDynamicCalls(plan *coro.SSAPlan, certificates map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate) error {
-	if len(certificates) == 0 {
+func validateRequiredCoroClosedDynamicCalls(
+	plan *coro.SSAPlan,
+	certificates map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate,
+	globalSlots map[ssa.CallInstruction]coroGlobalFunctionSlotProof,
+) error {
+	if len(certificates) == 0 && len(globalSlots) == 0 {
 		return nil
 	}
 	if plan == nil {
-		return fmt.Errorf("compiler TLS closed dynamic call validation requires a coroutine plan")
+		return fmt.Errorf("compiler closed dynamic call validation requires a coroutine plan")
+	}
+	stores, err := collectCoroGlobalFunctionSlotStores(globalSlots)
+	if err != nil {
+		return fmt.Errorf("compiler conditional global function-slot Store validation: %w", err)
 	}
 	for call, certificate := range certificates {
 		callPlan, ok := plan.CallPlan(call)
-		if !ok || callPlan.Rep != coro.Dispatch || callPlan.Open || callPlan.MayBeNil != certificate.MayBeNil || len(callPlan.Targets) != len(certificate.Targets) {
-			return fmt.Errorf("compiler TLS destructor call in %q did not retain its exact closed Dispatch plan", call.Parent().Name())
+		if !ok || callPlan.Rep != coro.Dispatch || callPlan.Open || callPlan.SyncDispatch != certificate.SyncDispatch ||
+			callPlan.MayBeNil != certificate.MayBeNil || len(callPlan.Targets) != len(certificate.Targets) {
+			return fmt.Errorf("compiler closed dynamic call in %q did not retain its exact closed Dispatch plan", call.Parent().Name())
 		}
 		for index, target := range certificate.Targets {
 			id, ok := plan.FunctionID(target)
 			if !ok || callPlan.Targets[index] != id {
-				return fmt.Errorf("compiler TLS destructor call in %q lost target %q", call.Parent().Name(), target.Name())
+				return fmt.Errorf("compiler closed dynamic call in %q lost target %q", call.Parent().Name(), target.Name())
+			}
+			if !certificate.SyncDispatch {
+				continue
 			}
 			function, ok := plan.FunctionPlan(target)
 			if !ok || function.External != coro.Defined || function.Effect != coro.NoSuspend || function.Exec.Contains(coro.NeedsPreempt) ||
@@ -817,6 +846,58 @@ func validateRequiredCoroClosedDynamicCalls(plan *coro.SSAPlan, certificates map
 				return fmt.Errorf("compiler TLS destructor target %q is not a defined non-suspending descriptor-backed plain body (external=%s effect=%s exec=%s representation=%s primary=%s emission=%s)",
 					target.Name(), function.External, function.Effect, function.Exec, function.FuncRep, function.Primary, function.Emission)
 			}
+		}
+	}
+	for call, proof := range globalSlots {
+		certificate, certified := certificates[call]
+		if !certified || proof.call != call || proof.global == nil || proof.identityID == "" ||
+			proof.physicalSymbol == "" || len(proof.members) == 0 ||
+			!sameCoroClosedDynamicCallCertificate(certificate, proof.certificate) {
+			return fmt.Errorf("compiler global function-slot proof in %q lost its exact closed dynamic certificate", call.Parent().Name())
+		}
+		global, direct := coroDirectGlobalFunctionSlotLoad(call.Common().Value)
+		member := false
+		for _, candidate := range proof.members {
+			member = member || candidate == global
+		}
+		if !direct || !member {
+			return fmt.Errorf("compiler global function-slot proof in %q no longer names its exact package-level cell", call.Parent().Name())
+		}
+		for _, hazard := range proof.inactive {
+			if hazard.owner == nil {
+				return fmt.Errorf("compiler global function-slot proof for %q has a nil conditional owner", proof.physicalSymbol)
+			}
+			function, planned := plan.FunctionPlan(hazard.owner)
+			if !planned || function.Emission != coro.EmitNone {
+				return fmt.Errorf("compiler global function-slot proof for %q omitted an active writer/escape in %q: %s (emission=%s)",
+					proof.physicalSymbol, hazard.owner.Name(), hazard.reason, function.Emission)
+			}
+		}
+	}
+	for _, publication := range stores {
+		owner, ownerPlanned := plan.FunctionPlan(publication.owner)
+		if !ownerPlanned {
+			return fmt.Errorf("compiler conditional global function-slot Store owner %q is absent from the final plan", publication.owner.Name())
+		}
+		plannedTarget, certified := plan.ConditionalManagedStoreTarget(publication.store)
+		if !certified || plannedTarget != publication.target {
+			return fmt.Errorf("compiler conditional global function-slot Store in %q lost its exact target", publication.owner.Name())
+		}
+		target, targetPlanned := plan.FunctionPlan(publication.target)
+		value, valuePlanned := plan.ValuePlan(publication.target)
+		if !targetPlanned || target.External != coro.Defined ||
+			!valuePlanned || len(value.Funcs) != 1 || value.Funcs[0].Rep != coro.Dispatch {
+			return fmt.Errorf("compiler conditional global function-slot Store target %q lost its managed descriptor plan (owner=%s target=%+v value=%+v/%t)",
+				publication.target.Name(), owner.Emission, target, value, valuePlanned)
+		}
+		if target.ManagedDemand == coro.NoDemand {
+			if owner.Emission != coro.EmitNone && !plan.ElidesConditionalManagedStore(publication.store) {
+				return fmt.Errorf("compiler conditional global function-slot Store in %q did not retain its dormant-publication elision", publication.owner.Name())
+			}
+			continue
+		}
+		if plan.ElidesConditionalManagedStore(publication.store) {
+			return fmt.Errorf("compiler conditional global function-slot Store target %q is live without managed demand", publication.target.Name())
 		}
 	}
 	return nil

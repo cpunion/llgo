@@ -54,8 +54,8 @@ func root() unsafe.Pointer { return Func(target) }
 	}
 	target := ssaPkg.Func("target")
 	targetPlan, ok := plan.FunctionPlan(target)
-	if !ok || targetPlan.FuncRep != coro.DirectPlain {
-		t.Fatalf("raw-only funcAddr target plan = %+v, %v; want direct-plain without dispatch", targetPlan, ok)
+	if !ok || targetPlan.FuncRep != coro.DirectPlain || !targetPlan.RawPlainEntry || !plan.HasRawPlainVariant(target) {
+		t.Fatalf("raw-only funcAddr target plan = %+v, %v; want addressable direct-plain RawPlainEntry", targetPlan, ok)
 	}
 	valuePlan, ok := plan.ValuePlan(target)
 	if !ok || len(valuePlan.Funcs) != 1 || valuePlan.Funcs[0].Rep != coro.DirectPlain {
@@ -196,6 +196,7 @@ func analyzeCoroFuncAddrTest(t *testing.T, ssaPkg *ssa.Package, files []*ast.Fil
 		functionBackground:             emission.FunctionBackground,
 		intrinsicCallSemantics:         emission.CoroIntrinsicCallSiteSemantics,
 		rawFunctionAddressCallArgument: emission.CoroRawFunctionAddressCallArgument,
+		staticCodeAddressCallArgument:  emission.CoroStaticCodeAddressCallArgument,
 	}
 	functionIDs := emission.FunctionIDConfig()
 	functionIDs.CoroABI = coro.EntryResolutionABIV0

@@ -304,7 +304,12 @@ type InterfaceType struct {
 	Methods  []Imethod // sorted by hash
 }
 
-type Text = unsafe.Pointer // TODO(xsw): to be confirmed
+// Text is one program-lifetime code address stored in runtime type metadata.
+// Keep it distinct from unsafe.Pointer: the coroutine frontend may retain a
+// Text as an integer across suspension without treating it as a GC-managed
+// data pointer. Its underlying representation remains one native pointer so
+// the runtime metadata ABI and compiler-emitted method tables are unchanged.
+type Text unsafe.Pointer
 
 // Method on non-interface type
 type Method struct {

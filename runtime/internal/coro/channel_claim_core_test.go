@@ -49,12 +49,27 @@ func newChannelClaimCoreFixtureBeforeResume(
 	beforeResume func(*channelClaimCoreFixture),
 ) *channelClaimCoreFixture {
 	t.Helper()
+	return newChannelClaimCoreFixtureWithSourceBeforeResume(
+		t, name, caseIDs, withClaim, defaultCase, new(ChannelOperationSource), beforeResume,
+	)
+}
+
+func newChannelClaimCoreFixtureWithSourceBeforeResume(
+	t *testing.T,
+	name string,
+	caseIDs []uint32,
+	withClaim bool,
+	defaultCase uint32,
+	source *ChannelOperationSource,
+	beforeResume func(*channelClaimCoreFixture),
+) *channelClaimCoreFixture {
+	t.Helper()
 	fixture := &channelClaimCoreFixture{
 		p:        new(P),
 		driver:   new(ExecutorDriver),
 		registry: new(ExecutorRegistry),
 		waits:    new(WaitRegistrationTable),
-		source:   new(ChannelOperationSource),
+		source:   source,
 	}
 	fixture.handle = registerTestExecutor(t, fixture.registry)
 	if !BindExecutorSourceCatalog(fixture.driver, fixture.p, fixture.registry, fixture.handle, ExecutorSourceCatalog{
@@ -116,6 +131,77 @@ func newChannelClaimCoreFixtureBeforeResume(
 		t.Fatalf("commit channel claim-core park = (%+v, %t)", parked, resumed)
 	}
 	return fixture
+}
+
+func TestChannelOperationPagedCatalogSelectCompletesOneThousand(t *testing.T) {
+	const count = 1000
+	source := new(ChannelOperationSource)
+	var pages [15]ChannelOperationPage
+	if ChannelOperationConfiguredCapacity(source) != ChannelOperationPageCapacity ||
+		!ConfigureChannelOperationPages(source, pages[:1]) ||
+		ChannelOperationConfiguredCapacity(source) != 2*ChannelOperationPageCapacity ||
+		!ConfigureChannelOperationPages(source, pages[:]) ||
+		ChannelOperationConfiguredCapacity(source) != 16*ChannelOperationPageCapacity ||
+		!ConfigureChannelOperationPages(source, pages[:]) {
+		t.Fatal("configure paged channel catalog")
+	}
+	caseIDs := make([]uint32, count)
+	for index := range caseIDs {
+		caseIDs[index] = uint32(index + 1)
+	}
+	fixture := newChannelClaimCoreFixtureWithSourceBeforeResume(
+		t, "channel-paged-thousand", caseIDs, true, 0, source, nil,
+	)
+	if fixture.ids[ChannelOperationPageCapacity].LocalSlot() != ChannelOperationPageCapacity+1 ||
+		fixture.ids[count-1].LocalSlot() != count {
+		t.Fatalf("paged channel IDs did not remain linear: page2=%+v last=%+v",
+			fixture.ids[ChannelOperationPageCapacity], fixture.ids[count-1])
+	}
+	var replacement [15]ChannelOperationPage
+	if ConfigureChannelOperationPages(source, pages[:]) ||
+		ConfigureChannelOperationPages(source, replacement[:]) ||
+		ConfigureChannelOperationPages(source, pages[:14]) {
+		t.Fatal("bound paged channel catalog allowed reconfiguration")
+	}
+	for index, id := range fixture.ids {
+		if result := source.PostReady(id); result != ChannelOperationPosted {
+			t.Fatalf("post paged channel operation %d = %d", index, result)
+		}
+	}
+	requestChannelClaimCoreFixture(t, fixture)
+	progress := pollChannelClaimCoreComplete(t, fixture)
+	if progress.Completed != count || progress.ApplyVisits != count || progress.Promoted != 1 {
+		t.Fatalf("resolve paged channel operations = %+v", progress)
+	}
+	decision := takeChannelClaimCoreDecision(t, fixture)
+	if decision.outcome != ParkOutcomeCompleted || decision.caseID == 0 ||
+		!decision.lease.Valid() || decision.taskCancel != TaskCancelNone {
+		t.Fatalf("take paged channel decision = %+v", decision)
+	}
+	releaseChannelClaimCoreFixture(t, fixture, decision)
+	if !ConfigureChannelOperationPages(source, pages[:]) {
+		t.Fatal("released paged channel catalog was not reusable")
+	}
+}
+
+func TestChannelOperationConfiguredCapacityPreflightsSelectBeyondFourCases(t *testing.T) {
+	source := new(ChannelOperationSource)
+	var pages [15]ChannelOperationPage
+	if !ConfigureChannelOperationPages(source, pages[:]) {
+		t.Fatal("configure channel select capacity")
+	}
+	p := new(P)
+	if !BindChannelOperationSource(source, p) {
+		t.Fatal("bind configured channel source")
+	}
+	if !CanReserveChannelOperations(p, source, 5) ||
+		!CanReserveChannelOperations(p, source, 1000) ||
+		CanReserveChannelOperations(p, source, 1025) {
+		t.Fatalf("configured channel select preflight: capacity=%d", ChannelOperationConfiguredCapacity(source))
+	}
+	if !UnbindChannelOperationSource(source, p) || !source.CanRelease() {
+		t.Fatal("release configured channel source")
+	}
 }
 
 func requestChannelClaimCoreFixture(t *testing.T, fixture *channelClaimCoreFixture) {

@@ -46,6 +46,7 @@ func TestNativeCoroDoorbellRuntimeABISelection(t *testing.T) {
 		{name: "named-target", conf: &Config{Goos: "linux", Target: "rp2040", EnableCoroProgramBootstrapRun: true}},
 		{name: "baremetal-comma", conf: &Config{Goos: "linux", Tags: "nogc,baremetal,cortexm", EnableCoroProgramBootstrapRun: true}},
 		{name: "baremetal-space", conf: &Config{Goos: "linux", Tags: "nogc baremetal cortexm", EnableCoroProgramBootstrapRun: true}},
+		{name: "explicit-host", conf: &Config{Goos: "linux", Tags: "llgo_coro_host", EnableCoroProgramBootstrapRun: true}},
 		{name: "adapter-test", conf: &Config{Goos: "linux", Tags: "nogc,coro_runtime_adapter_test", EnableCoroProgramBootstrapRun: true}},
 		{name: "adapter-test-go-build-flags-equals", conf: &Config{Goos: "linux", GoBuildFlags: []string{"-tags=coro_runtime_adapter_test"}, EnableCoroProgramBootstrapRun: true}},
 		{name: "adapter-test-go-build-flags-pair", conf: &Config{Goos: "linux", GoBuildFlags: []string{"-tags", "coro_runtime_adapter_test"}, EnableCoroProgramBootstrapRun: true}},
@@ -57,6 +58,59 @@ func TestNativeCoroDoorbellRuntimeABISelection(t *testing.T) {
 				t.Fatalf("native coroutine doorbell selection = %t, want %t", got, test.want)
 			}
 		})
+	}
+}
+
+func TestHostCoroPullRuntimeABISelection(t *testing.T) {
+	tests := []struct {
+		name string
+		conf *Config
+		want bool
+	}{
+		{name: "nil"},
+		{name: "disabled-wasm", conf: &Config{Goos: "wasip1", Goarch: "wasm"}},
+		{name: "wasm-wasi", conf: &Config{Goos: "wasip1", Goarch: "wasm", EnableCoroProgramBootstrapRun: true}, want: true},
+		{name: "wasm-js", conf: &Config{Goos: "js", Goarch: "wasm", EnableCoroProgramBootstrapRun: true}, want: true},
+		{name: "wasm-unknown", conf: &Config{Goos: "unknown", Goarch: "wasm", EnableCoroProgramBootstrapRun: true}, want: true},
+		{name: "baremetal-config", conf: &Config{Goos: "linux", Goarch: "arm", Tags: "nogc,baremetal", EnableCoroProgramBootstrapRun: true}, want: true},
+		{name: "baremetal-resolved-target", conf: &Config{Goos: "linux", Goarch: "arm", Target: "rp2040", resolvedTargetBuildTags: []string{"rp2040", "baremetal"}, EnableCoroProgramBootstrapRun: true}, want: true},
+		{name: "explicit-embedded", conf: &Config{Goos: "linux", Goarch: "arm64", Tags: "llgo_coro_host", EnableCoroProgramBootstrapRun: true}, want: true},
+		{name: "explicit-embedded-go-flags", conf: &Config{Goos: "linux", Goarch: "arm64", GoBuildFlags: []string{"-tags=llgo_coro_host"}, EnableCoroProgramBootstrapRun: true}, want: true},
+		{name: "explicit-embedded-resolved-target", conf: &Config{Goos: "linux", Goarch: "arm64", Target: "board", resolvedTargetBuildTags: []string{"llgo_coro_host"}, EnableCoroProgramBootstrapRun: true}, want: true},
+		{name: "native-pipe", conf: &Config{Goos: "linux", Goarch: "amd64", EnableCoroProgramBootstrapRun: true}},
+		{name: "unsupported-windows", conf: &Config{Goos: "windows", Goarch: "amd64", EnableCoroProgramBootstrapRun: true}},
+		{name: "test-adapter-wasm", conf: &Config{Goos: "wasip1", Goarch: "wasm", Tags: "coro_runtime_adapter_test", EnableCoroProgramBootstrapRun: true}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := hostCoroPullRuntimeABI(test.conf); got != test.want {
+				t.Fatalf("host coroutine pull selection = %t, want %t", got, test.want)
+			}
+			if got := nativeCoroDoorbellRuntimeABI(test.conf); got && test.want {
+				t.Fatal("host-pull and native-pipe coroutine ABIs were both selected")
+			}
+		})
+	}
+}
+
+func TestValidateCoroHostPullEntryConfigRejectsPythonOwnership(t *testing.T) {
+	host := &Config{Goos: "wasip1", Goarch: "wasm", EnableCoroProgramBootstrapRun: true}
+	if err := validateCoroHostPullEntryConfig(host, false); err != nil {
+		t.Fatalf("host-pull entry without Python ownership: %v", err)
+	}
+	err := validateCoroHostPullEntryConfig(host, true)
+	if err == nil {
+		t.Fatal("host-pull entry accepted compiler-owned Python finalization")
+	}
+	for _, want := range []string{"host-pull", "Python", "Py_Finalize"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("host-pull Python error = %q, want %q", err, want)
+		}
+	}
+	if err := validateCoroHostPullEntryConfig(
+		&Config{Goos: "linux", Goarch: "amd64", EnableCoroProgramBootstrapRun: true}, true,
+	); err != nil {
+		t.Fatalf("native pipe entry unexpectedly rejected Python ownership: %v", err)
 	}
 }
 
@@ -402,16 +456,20 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 				}
 			}
 			functionPlan, ok := plan.FunctionPlan(function)
-			if !ok || functionPlan.Effect != coro.NoSuspend || functionPlan.Exec.Contains(coro.NeedsPreempt|coro.BlockForeign) {
+			if !ok || functionPlan.Exec.Contains(coro.NeedsPreempt) || !want.external && functionPlan.Exec.Contains(coro.BlockForeign) {
 				return nil, fmt.Errorf("native target function %s.%s plan = %+v, present=%t", want.path, want.name, functionPlan, ok)
 			}
 			if want.external {
-				if functionPlan.External != coro.ExternalKnown || functionPlan.Emission != coro.EmitExternal {
-					return nil, fmt.Errorf("native poll leaf plan = %+v, want exact known external", functionPlan)
+				if _, schedulerWait := plan.ForeignSchedulerWaitCertificate(function); !schedulerWait ||
+					functionPlan.External != coro.ExternalUnknownForeign || functionPlan.Emission != coro.EmitExternal ||
+					functionPlan.ManagedDemand != coro.NoDemand || !functionPlan.RawPlainDemand ||
+					!functionPlan.Exec.Contains(coro.BlockForeign|coro.IRQUnsafe) {
+					return nil, fmt.Errorf("native poll leaf plan = %+v, want exact raw schedulerwait external", functionPlan)
 				}
-			} else if functionPlan.External != coro.Defined || functionPlan.Emission != coro.EmitPlain ||
+			} else if functionPlan.External != coro.Defined || functionPlan.ManagedDemand != coro.NoDemand ||
+				!functionPlan.RawPlainDemand || !functionPlan.RawPlainOnly || functionPlan.Emission != coro.EmitRawPlain ||
 				functionPlan.Primary != coro.PrimaryPlain || functionPlan.FuncRep != coro.DirectPlain {
-				return nil, fmt.Errorf("native target body %s.%s plan = %+v, want direct plain", want.path, want.name, functionPlan)
+				return nil, fmt.Errorf("native target body %s.%s plan = %+v, want direct raw-only plain", want.path, want.name, functionPlan)
 			}
 		}
 		return nil, sentinel

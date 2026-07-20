@@ -5,6 +5,7 @@ package debug
 import (
 	"unsafe"
 
+	"github.com/goplus/llgo/runtime/abi"
 	c "github.com/goplus/llgo/runtime/internal/clite"
 )
 
@@ -14,22 +15,43 @@ const (
 
 type Info struct {
 	Fname *c.Char
-	Fbase c.Pointer
+	Fbase uintptr
 	Sname *c.Char
-	Saddr c.Pointer
+	Saddr uintptr
 }
 
 //go:linkname Address C.llgo_address
 func Address() unsafe.Pointer
 
+//llgo:coro noblock
 //go:linkname Addrinfo C.llgo_addrinfo
-func Addrinfo(addr unsafe.Pointer, info *Info) c.Int
+func Addrinfo(addr uintptr, info *Info) c.Int
 
+// Symbol searches only the process' already-loaded image. dlsym may take the
+// dynamic-loader lock, but this wrapper performs no application I/O, retains
+// no caller buffer, and returns on the calling thread.
+//
+//llgo:coro sync
 //go:linkname Symbol C.llgo_symbol
-func Symbol(name *c.Char) unsafe.Pointer
+func Symbol(name *c.Char) abi.Text
 
+type stacktraceFrame struct {
+	pc     abi.Text
+	offset uintptr
+	sp     unsafe.Pointer
+	name   *c.Char
+}
+
+// stacktrace synchronously snapshots native frame metadata into caller-owned
+// storage. The C walker retains nothing and invokes no Go callback, so an
+// ordinary Go callback may suspend safely only after this call returns.
+//
+//llgo:coro sync
 //go:linkname stacktrace C.llgo_stacktrace
-func stacktrace(skip c.Int, ctx unsafe.Pointer, fn func(ctx, pc, offset, sp unsafe.Pointer, name *c.Char) c.Int)
+func stacktrace(skip c.Int, frames *stacktraceFrame, capacity c.Int) c.Int
+
+//go:linkname printStack C.llgo_print_stack
+func printStack(skip c.Int)
 
 type Frame struct {
 	PC     uintptr
@@ -39,20 +61,32 @@ type Frame struct {
 }
 
 func StackTrace(skip int, fn func(fr *Frame) bool) {
-	stacktrace(c.Int(1+skip), unsafe.Pointer(&fn), func(ctx, pc, offset, sp unsafe.Pointer, name *c.Char) c.Int {
-		fn := *(*func(fr *Frame) bool)(ctx)
-		if !fn(&Frame{uintptr(pc), uintptr(offset), sp, c.GoString(name)}) {
-			return 0
+	const (
+		initialCapacity = 64
+		maximumCapacity = 16 * 1024
+	)
+	capacity := initialCapacity
+	var snapshot []stacktraceFrame
+	for {
+		snapshot = make([]stacktraceFrame, capacity)
+		count := int(stacktrace(c.Int(1+skip), &snapshot[0], c.Int(capacity)))
+		snapshot = snapshot[:count]
+		if count < capacity || capacity == maximumCapacity {
+			break
 		}
-		return 1
-	})
+		capacity *= 2
+	}
+	for i := range snapshot {
+		raw := &snapshot[i]
+		if !fn(&Frame{uintptr(raw.pc), raw.offset, raw.sp, c.GoString(raw.name)}) {
+			return
+		}
+	}
 }
 
 func PrintStack(skip int) {
-	StackTrace(skip+1, func(fr *Frame) bool {
-		var info Info
-		Addrinfo(unsafe.Pointer(fr.PC), &info)
-		c.Fprintf(c.Stderr, c.Str("[0x%08X %s+0x%x, SP = 0x%x]\n"), fr.PC, fr.Name, fr.Offset, fr.SP)
-		return true
-	})
+	// Failure diagnostics are reachable through the raw runtime ABI. Keep the
+	// entire walk/print callback in C so that path never constructs a managed Go
+	// function descriptor while the program is already unwinding.
+	printStack(c.Int(skip + 2))
 }

@@ -29,6 +29,11 @@ func TestPipeRetainsRingBeforePhysicalWait(t *testing.T) {
 	if !pipe.Open() {
 		t.Fatal("open retained pipe")
 	}
+	readFD, writeFD := pipe.readFD, pipe.writeFD
+	if !pipe.OwnsDescriptor(uintptr(readFD)) || !pipe.OwnsDescriptor(uintptr(writeFD)) ||
+		pipe.OwnsDescriptor(uintptr(readFD+writeFD+1)) {
+		t.Fatal("doorbell descriptor identity is not exact")
+	}
 	if !pipe.Ring() {
 		t.Fatal("ring before wait")
 	}
@@ -44,6 +49,9 @@ func TestPipeRetainsRingBeforePhysicalWait(t *testing.T) {
 	}
 	if !pipe.Close() || !pipe.Closed() {
 		t.Fatal("close retained pipe")
+	}
+	if pipe.OwnsDescriptor(uintptr(readFD)) || pipe.OwnsDescriptor(uintptr(writeFD)) {
+		t.Fatal("closed doorbell retained poll-server identity")
 	}
 }
 

@@ -96,6 +96,49 @@ func Allocate() *int { return new(int) }
 	}
 }
 
+func TestEmissionUniverseFreezesRawEqualityCallbacksAsSynchronousReferences(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	runtimePkg := testProg.addPackage(t, llssa.PkgRuntime, `package runtime
+func strequal(p, q *byte) bool { return false }
+func memequalptr(p, q *byte) bool { return false }
+func AllocU(size uintptr) *byte { return nil }
+`)
+	callerPkg := testProg.addPackage(t, "example.com/emission/rawsyncref", `package rawsyncref
+func Box(value string) any { return value }
+`)
+	testProg.ssa.Build()
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
+		{SSA: runtimePkg.ssa, Files: []*ast.File{runtimePkg.file}},
+		{SSA: callerPkg.ssa, Files: []*ast.File{callerPkg.file}},
+	}, EmissionUniverseOptions{CompleteRuntimeABI: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := callerPkg.ssa.Func("Box")
+	all, err := universe.CoroDemandReferences(owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	synchronous, err := universe.CoroSyncDemandReferences(owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := runtimePkg.ssa.Func("strequal")
+	contains := func(values []*ssa.Function, want *ssa.Function) bool {
+		for _, value := range values {
+			if value == want {
+				return true
+			}
+		}
+		return false
+	}
+	if target == nil || !contains(all, target) || !contains(synchronous, target) {
+		t.Fatalf("Box ABI references: all=%v synchronous=%v; want exact strequal in both", all, synchronous)
+	}
+}
+
 func TestEmissionUniverseCompleteRuntimeABIRequiresRuntimePackage(t *testing.T) {
 	testProg := newEmissionTestProgram()
 	callerPkg := testProg.addPackage(t, "example.com/emission/runtimeabimissing", `package runtimeabimissing
@@ -117,6 +160,7 @@ func TestEmissionUniverseCoroChannelRetainsPlainAndPhysicalHelpers(t *testing.T)
 	runtimePkg := testProg.addPackage(t, llssa.PkgRuntime, `package runtime
 func CoroChanTrySend(ch chan int, value *int, size int) bool { return false }
 func CoroChanTryRecv(ch chan int, value *int, size int) (bool, bool) { return false, false }
+func CoroChanTryClose(ch chan int) uint32 { return 0 }
 type ChanOp struct{}
 func CoroChanSelectTry(ops ...ChanOp) (int, bool, bool, bool) { return 0, false, false, false }
 func CoroChanSelectPark(ops ...ChanOp) {}
@@ -125,6 +169,7 @@ func ChanSend(ch chan int, value *int, size int) bool { return false }
 func ChanRecv(ch chan int, value *int, size int) bool { return false }
 func Select(ops ...ChanOp) (int, bool) { return 0, false }
 func TrySelect(ops ...ChanOp) (int, bool, bool) { return 0, false, false }
+func ChanClose(ch chan int) {}
 func AllocU(size uintptr) *byte { return nil }
 func Panic(value any) {}
 func strequal(left, right string) bool { return false }
@@ -139,6 +184,7 @@ func BlockingSelect(first, second chan int, value int) {
 func NonblockingSelect(first, second chan int, value int) {
 	select { case first <- value: case <-second: default: }
 }
+func Close(ch chan int) { close(ch) }
 `)
 	testProg.ssa.Build()
 	prog := newLLSSAProg(t)
@@ -156,8 +202,8 @@ func NonblockingSelect(first, second chan int, value int) {
 		required[fn] = true
 	}
 	for _, helper := range []string{
-		"CoroChanTrySend", "CoroChanTryRecv", "CoroChanSelectTry", "CoroChanSelectPark", "CoroChanSelectResume",
-		"ChanSend", "ChanRecv", "Select", "TrySelect",
+		"CoroChanTrySend", "CoroChanTryRecv", "CoroChanTryClose", "CoroChanSelectTry", "CoroChanSelectPark", "CoroChanSelectResume",
+		"ChanSend", "ChanRecv", "ChanClose", "Select", "TrySelect",
 	} {
 		if fn := runtimePkg.ssa.Func(helper); fn == nil || !required[fn] {
 			t.Fatalf("runtime helper %q was not retained for dual channel representations", helper)
@@ -171,6 +217,7 @@ func NonblockingSelect(first, second chan int, value int) {
 		{owner: "Recv", want: []string{"CoroChanTryRecv"}},
 		{owner: "BlockingSelect", want: []string{"CoroChanSelectPark", "CoroChanSelectResume", "CoroChanSelectTry"}},
 		{owner: "NonblockingSelect", want: []string{"CoroChanSelectTry"}},
+		{owner: "Close", want: []string{"CoroChanTryClose"}},
 	} {
 		lowered, err := universe.CoroLoweredCalls(callerPkg.ssa.Func(test.owner))
 		if err != nil {
@@ -183,6 +230,12 @@ func NonblockingSelect(first, second chan int, value int) {
 			if lowered[index].LogicalName != want {
 				t.Fatalf("%s physical lowered calls = %+v; want %v", test.owner, lowered, test.want)
 			}
+			if !lowered[index].RawPlain {
+				t.Fatalf("%s physical lowered call %q is managed; want compiler-owned raw/plain occurrence", test.owner, want)
+			}
 		}
+	}
+	if target, ok, err := universe.ResolveCoroPlainLoweredCall(callerPkg.ssa.Func("Close"), "ChanClose"); err != nil || !ok || target != runtimePkg.ssa.Func("ChanClose") {
+		t.Fatalf("Close plain lowered call = %v, %t, %v; want exact ChanClose", target, ok, err)
 	}
 }

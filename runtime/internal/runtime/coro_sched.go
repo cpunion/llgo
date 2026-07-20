@@ -24,13 +24,21 @@ import (
 
 // These compiler-owned C ABI wrappers are emitted in the program entry module.
 // They hide LLVM's post-CoroSplit handle layout from the Go runtime.
+// schedulerwait restricts them to a compiler-owned raw host-stack island, in
+// this case the scheduler owner. Resume may execute the coroutine until its
+// next suspend and therefore is neither a bounded foreign leaf nor an ordinary
+// synchronous runtime call. The other permitted island is a worker callback;
+// managed coroutine plans retain WaitForeign at such edges.
 
+//llgo:coro schedulerwait
 //go:linkname coroHandleDone C.__llgo_coro_done_v1
 func coroHandleDone(unsafe.Pointer) bool
 
+//llgo:coro schedulerwait
 //go:linkname coroHandleResume C.__llgo_coro_resume_v1
 func coroHandleResume(unsafe.Pointer)
 
+//llgo:coro schedulerwait
 //go:linkname coroHandleDestroy C.__llgo_coro_destroy_v1
 func coroHandleDestroy(unsafe.Pointer)
 
@@ -342,25 +350,5 @@ func coroCancelReady(p *coroP) bool {
 				break
 			}
 		}
-	}
-}
-
-// __llgo_coro_panic_prepare_v1 is the compiler-to-runtime terminal panic
-// handoff. The physical G is an explicit ABI argument: this boundary must
-// never discover scheduler ownership through TLS or a process-global current
-// G. A rejected once-only publication is a terminal ABI violation and aborts
-// immediately, so malformed cleanup/recover/Goexit/implicit-fault lowering
-// cannot resume ordinary execution on a poisoned G.
-//
-//export __llgo_coro_panic_prepare_v1
-func __llgo_coro_panic_prepare_v1(g, handle, header, typeWord, dataWord unsafe.Pointer) {
-	if !coro.PreparePanic(
-		(*coro.G)(g),
-		handle,
-		(*coro.HeaderV1)(header),
-		typeWord,
-		dataWord,
-	) {
-		coroRuntimeAbort("invalid coroutine panic handoff")
 	}
 }

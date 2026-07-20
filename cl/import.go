@@ -578,6 +578,39 @@ const (
 	// llgoCoroPark is a compiler-owned stack-cut operation. It is lowered only
 	// in the current physical coroutine frame and has no callable sync body.
 	llgoCoroPark = llgoInstrBase + 0x48
+	// llgoCoroYield is the scheduler-owned unconditional runnable handoff used
+	// by runtime.Gosched and bounded contention backoff loops.
+	llgoCoroYield = llgoInstrBase + 0x49
+	// llgoSyscall32 and llgoSyscallPtr share llgoSyscall's physical call and
+	// coroutine worker lowering. Their distinct opcodes freeze the libc failure
+	// convention into emission identity instead of guessing from a uintptr
+	// result after the call.
+	llgoSyscall32  = llgoInstrBase + 0x4a
+	llgoSyscallPtr = llgoInstrBase + 0x4b
+	// llgoCoroTimerSleep is the synchronous-source Sleep operation. The
+	// compiler owns its opaque TimerParkV2 frame storage and exact suspend /
+	// resume dispatch; no callable fallback body exists.
+	llgoCoroTimerSleep = llgoInstrBase + 0x4c
+	// llgoCoroPollWait is one synchronous-source fd-direction wait. The
+	// compiler owns its opaque PollParkV2 frame storage and returns only the
+	// exact Ready/Closing/Timeout status after source retirement.
+	llgoCoroPollWait = llgoInstrBase + 0x4d
+	// llgoAtomicLoadUnsafe and llgoAtomicStoreUnsafe lower the raw-address
+	// signatures used by internal/runtime/atomic.Loadp and StorepNoWB. They are
+	// deliberately separate from atomicLoad/atomicStore: unsafe.Pointer is the
+	// address in these APIs, not the pointee type.
+	llgoAtomicLoadUnsafe  = llgoInstrBase + 0x4e
+	llgoAtomicStoreUnsafe = llgoInstrBase + 0x4f
+	// llgoCoroCriticalEnter and llgoCoroCriticalExit are compiler-owned
+	// structured preemption-mask markers. They are valid only as exact direct
+	// func() calls in a statically balanced C0 region; neither declaration has
+	// a callable body or may be materialized as a first-class function value.
+	llgoCoroCriticalEnter = llgoInstrBase + 0x50
+	llgoCoroCriticalExit  = llgoInstrBase + 0x51
+	// llgoCoroControlledTimerWait is the synchronous-source standard Timer
+	// manager wait. The compiler owns its TimerParkV2 transaction and returns
+	// only Completed/OperationCanceled after exact source cleanup.
+	llgoCoroControlledTimerWait = llgoInstrBase + 0x52
 
 	llgoAtomicOpLast = llgoAtomicOpBase + int(llssa.OpUMin)
 )
@@ -621,13 +654,121 @@ func extractTrampolineCName(name string) string {
 	return base
 }
 
-var syncAtomicIntrinsicMap = map[string]string{
+var stdlibAtomicIntrinsicMap = map[string]string{
 	// In upstream sync/atomic, pointer helpers are declarations without
 	// per-arch TEXT stubs. Treat them as llgo intrinsics directly.
 	"sync/atomic.LoadPointer":           "atomicLoad",
 	"sync/atomic.StorePointer":          "atomicStore",
 	"sync/atomic.SwapPointer":           "atomicXchg",
 	"sync/atomic.CompareAndSwapPointer": "atomicCmpXchgOK",
+
+	// internal/runtime/atomic is the implementation surface used by the Go
+	// runtime and the Go 1.26 internal synchronization packages. Mapping these
+	// names is only a candidate inventory: stdlibAtomicIntrinsic additionally
+	// requires an exact bodyless upstream declaration and a target with a proven
+	// atomic lowering. In particular, it must preserve Go's bodyful wasm and
+	// LLGo's ARM baremetal single-threaded fallbacks. Acquire/release variants
+	// use the stronger seq-cst ordering currently provided by LLGo.
+	"internal/runtime/atomic.Load":            "atomicLoad",
+	"internal/runtime/atomic.Load8":           "atomicLoad",
+	"internal/runtime/atomic.Load64":          "atomicLoad",
+	"internal/runtime/atomic.LoadAcq":         "atomicLoad",
+	"internal/runtime/atomic.LoadAcq64":       "atomicLoad",
+	"internal/runtime/atomic.LoadAcquintptr":  "atomicLoad",
+	"internal/runtime/atomic.Loadint32":       "atomicLoad",
+	"internal/runtime/atomic.Loadint64":       "atomicLoad",
+	"internal/runtime/atomic.Loaduint":        "atomicLoad",
+	"internal/runtime/atomic.Loaduintptr":     "atomicLoad",
+	"internal/runtime/atomic.Loadp":           "atomicLoadUnsafe",
+	"internal/runtime/atomic.Store":           "atomicStore",
+	"internal/runtime/atomic.Store8":          "atomicStore",
+	"internal/runtime/atomic.Store64":         "atomicStore",
+	"internal/runtime/atomic.StoreRel":        "atomicStore",
+	"internal/runtime/atomic.StoreRel64":      "atomicStore",
+	"internal/runtime/atomic.StoreReluintptr": "atomicStore",
+	"internal/runtime/atomic.Storeint32":      "atomicStore",
+	"internal/runtime/atomic.Storeint64":      "atomicStore",
+	"internal/runtime/atomic.Storeuintptr":    "atomicStore",
+	"internal/runtime/atomic.StorepNoWB":      "atomicStoreUnsafe",
+	"internal/runtime/atomic.Cas":             "atomicCmpXchgOK",
+	"internal/runtime/atomic.Cas64":           "atomicCmpXchgOK",
+	"internal/runtime/atomic.CasRel":          "atomicCmpXchgOK",
+	"internal/runtime/atomic.Casint32":        "atomicCmpXchgOK",
+	"internal/runtime/atomic.Casint64":        "atomicCmpXchgOK",
+	"internal/runtime/atomic.Casp1":           "atomicCmpXchgOK",
+	"internal/runtime/atomic.Casuintptr":      "atomicCmpXchgOK",
+	"internal/runtime/atomic.Xadd":            "atomicAddReturnNew",
+	"internal/runtime/atomic.Xadd64":          "atomicAddReturnNew",
+	"internal/runtime/atomic.Xaddint32":       "atomicAddReturnNew",
+	"internal/runtime/atomic.Xaddint64":       "atomicAddReturnNew",
+	"internal/runtime/atomic.Xadduintptr":     "atomicAddReturnNew",
+	"internal/runtime/atomic.Xchg":            "atomicXchg",
+	"internal/runtime/atomic.Xchg8":           "atomicXchg",
+	"internal/runtime/atomic.Xchg64":          "atomicXchg",
+	"internal/runtime/atomic.Xchgint32":       "atomicXchg",
+	"internal/runtime/atomic.Xchgint64":       "atomicXchg",
+	"internal/runtime/atomic.Xchguintptr":     "atomicXchg",
+	"internal/runtime/atomic.And":             "atomicAnd",
+	"internal/runtime/atomic.And8":            "atomicAnd",
+	"internal/runtime/atomic.And32":           "atomicAnd",
+	"internal/runtime/atomic.And64":           "atomicAnd",
+	"internal/runtime/atomic.Anduintptr":      "atomicAnd",
+	"internal/runtime/atomic.Or":              "atomicOr",
+	"internal/runtime/atomic.Or8":             "atomicOr",
+	"internal/runtime/atomic.Or32":            "atomicOr",
+	"internal/runtime/atomic.Or64":            "atomicOr",
+	"internal/runtime/atomic.Oruintptr":       "atomicOr",
+}
+
+func stdlibAtomicIntrinsic(fn *ssa.Function, orgName string, target *llssa.Target, targetFeatures string) (string, bool) {
+	instr, ok := stdlibAtomicIntrinsicMap[orgName]
+	if !ok {
+		return "", false
+	}
+	if !strings.HasPrefix(orgName, "internal/runtime/atomic.") {
+		return instr, true
+	}
+	if !exactBodylessStdlibAtomicDecl(fn) || !targetAllowsStdlibAtomicIntrinsics(target, targetFeatures) {
+		return "", false
+	}
+	return instr, true
+}
+
+func exactBodylessStdlibAtomicDecl(fn *ssa.Function) bool {
+	if fn == nil || fn.Parent() != nil || fn.Signature == nil || fn.Signature.Recv() != nil {
+		return false
+	}
+	if params := fn.Signature.TypeParams(); params != nil && params.Len() != 0 {
+		return false
+	}
+	decl, ok := fn.Syntax().(*ast.FuncDecl)
+	return ok && decl.Body == nil && len(fn.Blocks) == 0
+}
+
+func targetAllowsStdlibAtomicIntrinsics(target *llssa.Target, targetFeatures string) bool {
+	if target == nil {
+		return true
+	}
+	if target.GOARCH == "wasm" {
+		return llvmTargetFeatureEnabled(targetFeatures, "atomics")
+	}
+	// Named targets include embedded and baremetal environments. Their Go
+	// source fallback remains authoritative until that target grows an explicit
+	// atomic capability contract rather than merely an LLVM instruction.
+	return target.Target == ""
+}
+
+func llvmTargetFeatureEnabled(features, name string) bool {
+	enabled := false
+	for _, feature := range strings.Split(features, ",") {
+		switch strings.TrimSpace(feature) {
+		case "+" + name:
+			enabled = true
+		case "-" + name:
+			enabled = false
+		}
+	}
+	return enabled
 }
 
 func (p *context) funcName(fn *ssa.Function) (*types.Package, string, int) {
@@ -684,7 +825,13 @@ func (p *context) funcName(fn *ssa.Function) (*types.Package, string, int) {
 	if orgName == "hash/maphash.escapeForHash" {
 		return nil, "skip", llgoInstr
 	}
-	if instr, ok := syncAtomicIntrinsicMap[orgName]; ok {
+	var target *llssa.Target
+	var targetFeatures string
+	if p.prog != nil {
+		target = p.prog.Target()
+		targetFeatures = p.prog.RequestedTargetSpec().Features
+	}
+	if instr, ok := stdlibAtomicIntrinsic(fn, orgName, target, targetFeatures); ok {
 		return nil, instr, llgoInstr
 	}
 	return pkg, funcName(pkg, fn, false), goFunc

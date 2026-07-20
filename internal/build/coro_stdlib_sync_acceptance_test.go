@@ -20,6 +20,7 @@ package build
 
 import (
 	stdcontext "context"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -42,6 +43,8 @@ type coroStdlibSyncFixture struct {
 	wantSource       []string
 	wantSchedulerABI string
 	wantGo           bool
+	wantChannel      bool
+	requireGoStmt    bool
 	args             func(*testing.T) []string
 	check            func(*testing.T, time.Duration)
 }
@@ -49,10 +52,15 @@ type coroStdlibSyncFixture struct {
 func coroStdlibSyncFixtures() []coroStdlibSyncFixture {
 	return []coroStdlibSyncFixture{
 		{
+			// P0 timer/park probe: one ordinary synchronous Sleep and no
+			// channel, callback, Stop/Reset, or multi-event select semantics.
+			// The coroutine time patch also replaces AfterFunc so it does not
+			// publish the unused legacy goFunc launcher into this plan.
 			name:             "time",
 			dir:              "./_testgo/coro_stdlib_time_sleep",
 			wantSource:       []string{"time.Sleep("},
-			wantSchedulerABI: coro.SchedulerProgramBootstrapWorkerABIV0,
+			wantSchedulerABI: coro.SchedulerProgramBootstrapWorkerClosedStaticSpawnABIV0,
+			wantGo:           true,
 			check: func(t *testing.T, elapsed time.Duration) {
 				t.Helper()
 				// The child sleeps for 200 ms. Keep enough margin for coarse host
@@ -63,21 +71,68 @@ func coroStdlibSyncFixtures() []coroStdlibSyncFixture {
 			},
 		},
 		{
+			// Kept as the later full Go 1.26 timer semantics gate. It is not
+			// part of the core-first P0 time,file,tcp probe set.
+			name: "timer",
+			dir:  "./_testgo/coro_stdlib_timer",
+			wantSource: []string{
+				"time.NewTimer(", ".Stop()", ".Reset(", "time.After(", "time.NewTicker(", "time.AfterFunc(",
+			},
+			wantSchedulerABI: coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
+			wantGo:           true,
+			wantChannel:      true,
+		},
+		{
+			// P0 regular-file worker probe: exactly one small blocking
+			// Write/Read round trip, without poll deadlines or slice growth.
+			// Go 1.26 sync.WaitGroup.Go remains a reflect-visible stdlib method,
+			// so the complete linked method closure also requires spawn support.
+			// os/io also retains io.Pipe's channel-close methods; their synchronous
+			// source surface requires the channel scheduler even though this narrow
+			// fixture performs only regular-file I/O.
 			name:             "file",
 			dir:              "./_testgo/coro_stdlib_file_rw",
-			wantSource:       []string{"os.OpenFile(", ".Write(", ".Read("},
-			wantSchedulerABI: coro.SchedulerProgramBootstrapWorkerABIV0,
+			wantSource:       []string{"os.OpenFile(", "[1]byte", ".Write(", ".Seek(", ".Read(", ".Close("},
+			wantSchedulerABI: coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
+			wantGo:           true,
+			wantChannel:      true,
 			args: func(t *testing.T) []string {
 				t.Helper()
 				return []string{filepath.Join(t.TempDir(), "roundtrip.txt")}
 			},
 		},
 		{
-			name:             "tcp",
-			dir:              "./_testgo/coro_stdlib_tcp_loopback",
-			wantSource:       []string{"net.ListenTCP(", "net.DialTCP(", ".AcceptTCP(", ".Write(", ".Read("},
+			// Core worker probe below os.File: generated fixed-target syscall
+			// wrappers keep synchronous Go call syntax while avoiding both the
+			// reflect-visible *os.File method table and the unsafe dynamic-trap
+			// RawSyscall surface. The higher-level file fixture remains the
+			// os/reflect compatibility gate.
+			name: "syscall-file",
+			dir:  "./_testgo/coro_stdlib_syscall_file_rw",
+			wantSource: []string{
+				"syscall.Open(", "syscall.Write(", "syscall.Seek(",
+				"syscall.Read(", "syscall.Close(", "syscall.Unlink(", "[1]byte",
+			},
+			wantSchedulerABI: coro.SchedulerProgramBootstrapWorkerClosedStaticSpawnABIV0,
+			wantGo:           true,
+		},
+		{
+			// P0 readiness/deadline probe: one top-level server G and one-byte
+			// TCP operations. The fixture does not spell a channel operation, but
+			// Go 1.26 net.(*netFD).connect itself uses a nonblocking channel select,
+			// so the complete standard-library implementation requires Channel in
+			// addition to Poll, Worker, and closed static spawn.
+			name: "tcp",
+			dir:  "./_testgo/coro_stdlib_tcp_loopback",
+			wantSource: []string{
+				"net.ListenTCP(", "net.DialTCP(", ".AcceptTCP(", "go serve()", "[1]byte",
+				".Write(", ".Read(", "time.Sleep(60 * time.Millisecond)", ".SetReadDeadline(",
+				"os.ErrDeadlineExceeded", "time.Time{}",
+			},
 			wantSchedulerABI: coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
 			wantGo:           true,
+			wantChannel:      true,
+			requireGoStmt:    true,
 		},
 	}
 }
@@ -90,18 +145,54 @@ func coroStdlibSyncAcceptanceConfig(fixture coroStdlibSyncFixture, output string
 	conf.EnableCoroPhysicalABI = true
 	conf.EnableCoroChildAwait = true
 	conf.EnableCoroPlainDispatch = true
+	// Ordinary stdlib code contains defer/panic boundaries (notably sync.Once).
+	// Managed child outcomes must therefore return through the parent's cleanup
+	// path instead of using legacy native-stack unwinding.
+	conf.EnableCoroExplicitStatusPanicABI = true
 	conf.EnableCoroProgramBootstrapABI = true
 	conf.EnableCoroProgramBootstrapRun = true
 	conf.EnableCoroClosedStaticSpawn = fixture.wantGo
-	conf.EnableCoroChannel = fixture.wantGo
+	conf.EnableCoroChannel = fixture.wantChannel
 	conf.EnableCoroWorker = true
 	conf.CoroPlanBuilder = func(input CoroPlanInput) (*coro.SSAPlan, error) {
-		return input.Analyze(nil, coro.SSAConfig{
+		plan, err := input.Analyze(nil, coro.SSAConfig{
 			DynamicResolution:    coro.DynamicCHAClosed,
 			MaxPlainInstructions: -1,
 		})
+		if err != nil {
+			return nil, err
+		}
+		if fixture.name == "time" || fixture.name == "timer" {
+			if err := validateCoroStdlibTimePlanHasNoLegacyGoFunc(plan); err != nil {
+				return nil, err
+			}
+		}
+		return plan, nil
 	}
 	return conf
+}
+
+// validateCoroStdlibTimePlanHasNoLegacyGoFunc binds the source-patch contract
+// to the whole-program plan. The coroutine timer manager launches the user
+// callback from newTimer's arg through its managed wrapper, so time.goFunc is
+// neither an executable callback nor a valid signature-wide spawn producer.
+func validateCoroStdlibTimePlanHasNoLegacyGoFunc(plan *coro.SSAPlan) error {
+	if plan == nil {
+		return fmt.Errorf("coroutine time acceptance has no compilation plan")
+	}
+	for _, function := range plan.Functions() {
+		fn := function.Function
+		if fn == nil || fn.Pkg == nil || fn.Pkg.Pkg == nil || fn.Pkg.Pkg.Path() != "time" || fn.Name() != "goFunc" {
+			continue
+		}
+		if function.Plan.Demand != coro.NoDemand || function.Plan.Emission != coro.EmitNone {
+			return fmt.Errorf(
+				"coroutine time plan retained unused legacy time.goFunc (demand=%s emission=%s effect=%s)",
+				function.Plan.Demand, function.Plan.Emission, function.Plan.Effect,
+			)
+		}
+	}
+	return nil
 }
 
 func TestCoroStdlibSyncAcceptanceConfiguration(t *testing.T) {
@@ -111,6 +202,9 @@ func TestCoroStdlibSyncAcceptanceConfiguration(t *testing.T) {
 			conf := coroStdlibSyncAcceptanceConfig(fixture, filepath.Join(t.TempDir(), "acceptance"))
 			if !conf.EnableCoroWorker {
 				t.Fatal("synchronous stdlib acceptance must enable the native worker capability")
+			}
+			if !conf.EnableCoroExplicitStatusPanicABI {
+				t.Fatal("synchronous stdlib acceptance must propagate child panic through parent cleanup")
 			}
 			if got := activeCoroSchedulerABIVersion(conf); got != fixture.wantSchedulerABI {
 				t.Fatalf("configured scheduler ABI = %q, want %q", got, fixture.wantSchedulerABI)
@@ -124,6 +218,9 @@ func assertCoroStdlibSyncRuntimeSelection(t *testing.T, fixture coroStdlibSyncFi
 	const runtimePackage = "github.com/goplus/llgo/runtime/internal/runtime"
 	required := map[string]bool{
 		"coro_executor_driver_timer_llgo.go": false,
+		"coro_notify_owner_llgo.go":          false,
+		"coro_poll_owner_llgo.go":            false,
+		"coro_sema_owner_llgo.go":            false,
 		"coro_target_native_llgo.go":         false,
 		"coro_target_wait_timer_llgo.go":     false,
 		"coro_timer_owner_llgo.go":           false,
@@ -137,6 +234,7 @@ func assertCoroStdlibSyncRuntimeSelection(t *testing.T, fixture coroStdlibSyncFi
 		"coro_target_wait_pipe_llgo.go":  false,
 	}
 	var runtimePkg Package
+	var stdlibRuntimePkg Package
 	var mainPkg Package
 	for _, pkg := range packages {
 		if pkg == nil {
@@ -144,6 +242,9 @@ func assertCoroStdlibSyncRuntimeSelection(t *testing.T, fixture coroStdlibSyncFi
 		}
 		if pkg.PkgPath == runtimePackage {
 			runtimePkg = pkg
+		}
+		if pkg.PkgPath == "runtime" {
+			stdlibRuntimePkg = pkg
 		}
 		if pkg.Name == "main" && mainPkg == nil {
 			mainPkg = pkg
@@ -169,6 +270,65 @@ func assertCoroStdlibSyncRuntimeSelection(t *testing.T, fixture coroStdlibSyncFi
 	for name, selected := range forbidden {
 		if selected {
 			t.Errorf("%s acceptance runtime selected incompatible %s", fixture.name, name)
+		}
+	}
+
+	// The ordinary stdlib-facing runtime package must use the coroutine poll
+	// and semaphore adapters. Merely retaining the owner-side symbols is not
+	// enough: selecting either legacy pthread adapter would hide a blocking
+	// native stack below the synchronous Go API.
+	if stdlibRuntimePkg == nil || stdlibRuntimePkg.AltPkg == nil {
+		t.Fatalf("%s acceptance runtime has no selected llgo runtime patch package", fixture.name)
+	}
+	altRequired := map[string]bool{
+		"notify_coro_llgo.go":        false,
+		"poll_linkname_coro_llgo.go": false,
+		"sema_coro_llgo.go":          false,
+		"signal_coro_llgo.go":        false,
+		"time_coro_go123_llgo.go":    false,
+	}
+	altForbidden := map[string]bool{
+		"notify_legacy_llgo.go": false,
+		"poll_linkname_llgo.go": false,
+		"sema_legacy_llgo.go":   false,
+		"signal_llgo.go":        false,
+		"time_llgo_go123.go":    false,
+	}
+	for _, path := range stdlibRuntimePkg.AltPkg.GoFiles {
+		name := filepath.Base(path)
+		if _, ok := altRequired[name]; ok {
+			altRequired[name] = true
+		}
+		if _, ok := altForbidden[name]; ok {
+			altForbidden[name] = true
+		}
+	}
+	for name, selected := range altRequired {
+		if !selected {
+			t.Errorf("%s acceptance stdlib runtime did not select %s", fixture.name, name)
+		}
+	}
+	for name, selected := range altForbidden {
+		if selected {
+			t.Errorf("%s acceptance stdlib runtime selected incompatible %s", fixture.name, name)
+		}
+	}
+
+	if fixture.name == "time" || fixture.name == "timer" {
+		const sleepPatch = "z_llgo_patch_sleep_coro_native_llgo.go"
+		selected := false
+		for _, pkg := range packages {
+			if pkg == nil || pkg.PkgPath != "time" {
+				continue
+			}
+			for _, path := range append(append([]string(nil), pkg.GoFiles...), pkg.CompiledGoFiles...) {
+				if filepath.Base(path) == sleepPatch {
+					selected = true
+				}
+			}
+		}
+		if !selected {
+			t.Errorf("time acceptance did not select %s", sleepPatch)
 		}
 	}
 
@@ -235,20 +395,21 @@ func TestCoroStdlibSyncAcceptanceFixtures(t *testing.T) {
 					t.Errorf("fixture imports implementation package %q", pathValue)
 				}
 			}
-			if fixture.wantGo && goStatements == 0 {
-				t.Error("TCP fixture has no concurrent server go statement")
+			if fixture.requireGoStmt && goStatements == 0 {
+				t.Errorf("%s fixture has no required go statement", fixture.name)
 			}
-			if !fixture.wantGo && goStatements != 0 {
+			if !fixture.requireGoStmt && goStatements != 0 {
 				t.Errorf("fixture has %d unexpected go statements", goStatements)
 			}
 		})
 	}
 }
 
-// TestCoroStdlibSyncAcceptance is deliberately opt-in until all three programs
-// compile, link, and run. Set LLGO_CORO_STDLIB_ACCEPTANCE=all, or a comma list
-// such as time,file,tcp. Once selected, a build/runtime failure is a real test
-// failure; this gate never converts a known implementation blocker into a pass.
+// TestCoroStdlibSyncAcceptance is deliberately opt-in until the P0 time,file,tcp
+// programs compile, link, and run. Use that exact comma list for the core-first
+// gate. The larger timer fixture remains explicitly selectable as a later Go
+// 1.26 semantics gate; "all" includes it. Once selected, a build/runtime failure
+// is a real test failure and is never converted into a known-failure pass.
 func TestCoroStdlibSyncAcceptance(t *testing.T) {
 	selected := parseCoroStdlibAcceptanceSelection(t)
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
@@ -262,6 +423,12 @@ func TestCoroStdlibSyncAcceptance(t *testing.T) {
 		}
 		t.Run(fixture.name, func(t *testing.T) {
 			bin := filepath.Join(t.TempDir(), "acceptance")
+			// A stable opt-in path lets a failed native acceptance executable be
+			// inspected with the platform debugger instead of disappearing with
+			// testing.T's temporary directory. Ordinary CI never sets it.
+			if diagnostic := strings.TrimSpace(os.Getenv("LLGO_CORO_STDLIB_OUTPUT")); diagnostic != "" {
+				bin = diagnostic
+			}
 			if runtime.GOOS == "windows" {
 				bin += ".exe"
 			}
@@ -302,9 +469,9 @@ func parseCoroStdlibAcceptanceSelection(t *testing.T) map[string]bool {
 	t.Helper()
 	raw := strings.TrimSpace(os.Getenv(coroStdlibAcceptanceEnv))
 	if raw == "" {
-		t.Skipf("set %s=all or a comma-separated subset of time,file,tcp", coroStdlibAcceptanceEnv)
+		t.Skipf("set %s=all or a comma-separated subset of time,timer,file,syscall-file,tcp", coroStdlibAcceptanceEnv)
 	}
-	known := map[string]bool{"time": true, "file": true, "tcp": true}
+	known := map[string]bool{"time": true, "timer": true, "file": true, "syscall-file": true, "tcp": true}
 	selected := make(map[string]bool, len(known))
 	for _, item := range strings.Split(raw, ",") {
 		item = strings.TrimSpace(item)
@@ -315,7 +482,7 @@ func parseCoroStdlibAcceptanceSelection(t *testing.T) map[string]bool {
 			continue
 		}
 		if !known[item] {
-			t.Fatalf("unknown %s selection %q; want all or time,file,tcp", coroStdlibAcceptanceEnv, item)
+			t.Fatalf("unknown %s selection %q; want all or time,timer,file,syscall-file,tcp", coroStdlibAcceptanceEnv, item)
 		}
 		selected[item] = true
 	}

@@ -122,15 +122,25 @@ type Key c.Uint
 //llgo:type C
 type KeyDestructor func(c.Pointer)
 
+// Create allocates process-local pthread TLS metadata. libc may serialize its
+// key table internally, but the call neither waits for application I/O nor
+// retains key/destructor arguments after return.
+//
+//llgo:coro sync
 // llgo:link (*Key).Create C.pthread_key_create
 func (key *Key) Create(destructor KeyDestructor) c.Int { return 0 }
 
 // llgo:link Key.Delete C.pthread_key_delete
 func (key Key) Delete() c.Int { return 0 }
 
+// TLS access is an executor-local lookup/update. It does not wait for an
+// external event or transfer control to the coroutine scheduler.
+//
+//llgo:coro noblock
 // llgo:link Key.Get C.pthread_getspecific
 func (key Key) Get() c.Pointer { return nil }
 
+//llgo:coro noblock
 // llgo:link Key.Set C.pthread_setspecific
 func (key Key) Set(value c.Pointer) c.Int { return __noop__() }
 

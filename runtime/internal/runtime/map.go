@@ -353,10 +353,11 @@ func makeBucketArray(t *maptype, b uint8, dirtyalloc unsafe.Pointer) (buckets un
 		// required to insert the median number of elements
 		// used with this value of b.
 		nbuckets += bucketShift(b - 4)
-		sz := t.Bucket.Size_ * nbuckets
+		bucketSize := t.Bucket.Size_
+		sz := bucketSize * nbuckets
 		up := roundupsize(sz)
-		if up != sz {
-			nbuckets = up / t.Bucket.Size_
+		if bucketSize != 0 && up != sz {
+			nbuckets = up / bucketSize
 		}
 	}
 

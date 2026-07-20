@@ -363,14 +363,32 @@ func (b Builder) WrapNilCheck(ptr, recvType, methodName Expr) Expr {
 
 // Load returns the value at the pointer ptr.
 func (b Builder) Load(ptr Expr) Expr {
+	return b.load(ptr, false)
+}
+
+// LoadKnownNonNil returns the value at ptr without emitting LLGo's implicit
+// nil-dereference helper.  The caller must already own the source-language nil
+// edge (for example through a coroutine explicit-status guard) or prove that
+// ptr is compiler-created non-nil storage.  This distinction matters for
+// zero-sized values, whose ordinary Load otherwise emits AssertNilDeref even
+// though no physical memory access remains.
+func (b Builder) LoadKnownNonNil(ptr Expr) Expr {
+	return b.load(ptr, true)
+}
+
+func (b Builder) load(ptr Expr, knownNonNil bool) Expr {
 	dbgInstrf("Load %v\n", ptr.impl)
 	if ptr.kind == vkPyVarRef {
 		return b.pyLoad(ptr)
 	}
-	b.assertStaticNilDeref(ptr)
+	if !knownNonNil {
+		b.assertStaticNilDeref(ptr)
+	}
 	telem := b.Prog.Elem(ptr.Type)
 	if b.Prog.SizeOf(telem) == 0 {
-		b.AssertNilDeref(ptr)
+		if !knownNonNil {
+			b.AssertNilDeref(ptr)
+		}
 		return b.Prog.Zero(telem)
 	}
 	return Expr{llvm.CreateLoad(b.impl, telem.ll, ptr.impl), telem}

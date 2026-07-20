@@ -88,8 +88,6 @@ const (
 	coroChanMatchRetry
 )
 
-var coroChanSendClosedPanicV1 any = "send on closed channel"
-
 const (
 	coroChanResumeInvalid uint32 = iota
 	coroChanResumeSendOK
@@ -1168,23 +1166,5 @@ func __llgo_coro_chan_resume_v1(g, storage unsafe.Pointer) uint32 {
 	default:
 		coroRuntimeAbort("invalid coroutine channel completion status")
 		return coroChanResumeInvalid
-	}
-}
-
-// __llgo_coro_chan_send_closed_panic_v1 converts the channel resume status
-// into the scheduler's terminal explicit-status transaction. The payload is a
-// package-global interface, so both words outlive frame destruction.
-//
-//export __llgo_coro_chan_send_closed_panic_v1
-func __llgo_coro_chan_send_closed_panic_v1(g, handle, header unsafe.Pointer) {
-	payload := *(*eface)(unsafe.Pointer(&coroChanSendClosedPanicV1))
-	if payload._type == nil || !coro.PreparePanic(
-		(*coro.G)(g),
-		handle,
-		(*coro.HeaderV1)(header),
-		unsafe.Pointer(payload._type),
-		payload.data,
-	) {
-		coroRuntimeAbort("invalid coroutine channel send-closed panic handoff")
 	}
 }

@@ -5,17 +5,9 @@ package runtime
 import (
 	_ "sync/atomic"
 	_ "unsafe"
-
-	psync "github.com/goplus/llgo/runtime/internal/clite/pthread/sync"
 )
 
 var poolCleanup func()
-var procPinOnce psync.Once
-var procPinMu psync.Mutex
-
-func initProcPinMu() {
-	procPinMu.Init(nil)
-}
 
 //go:linkname sync_runtime_registerPoolCleanup sync.runtime_registerPoolCleanup
 func sync_runtime_registerPoolCleanup(cleanup func()) {
@@ -24,14 +16,11 @@ func sync_runtime_registerPoolCleanup(cleanup func()) {
 
 //go:linkname sync_runtime_procPin sync.runtime_procPin
 func sync_runtime_procPin() int {
-	procPinOnce.Do(initProcPinMu)
-	procPinMu.Lock()
 	return 0
 }
 
 //go:linkname sync_runtime_procUnpin sync.runtime_procUnpin
 func sync_runtime_procUnpin() {
-	procPinMu.Unlock()
 }
 
 // sync/atomic.Value expects these package-local runtime hooks.

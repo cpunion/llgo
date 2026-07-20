@@ -85,6 +85,337 @@ func TestAnalyzeSSAClosedDynamicCallCertificates(t *testing.T) {
 	}
 }
 
+func TestAnalyzeSSAClosedDynamicDeferCertificate(t *testing.T) {
+	prog, pkg := buildClosedDynamicCallTestSSA(t)
+	owner := packageFunction(t, pkg, "deferDynamic")
+	target := packageFunction(t, pkg, "suspend")
+	deferred := onlyNonBuiltinCall(t, owner)
+	if _, ok := deferred.(*ssa.Defer); !ok {
+		t.Fatalf("deferDynamic call = %T, want *ssa.Defer", deferred)
+	}
+
+	plan, err := AnalyzeSSA(prog, Roots{{Function: owner, Demand: AsyncDemand}}, SSAConfig{
+		MaxPlainInstructions: -1,
+		OutcomeMode:          OutcomeExplicitStatus,
+		ClassifyUnknownCall: func(_ *ssa.Function, candidate ssa.CallInstruction) (UnknownTarget, error) {
+			if candidate == deferred {
+				return UnknownManagedDispatch, nil
+			}
+			return UnknownManaged, nil
+		},
+		ClassifyClosedDynamicCall: func(_ *ssa.Function, candidate ssa.CallInstruction) (SSAClosedDynamicCallCertificate, bool, error) {
+			if candidate != deferred {
+				return SSAClosedDynamicCallCertificate{}, false, nil
+			}
+			return SSAClosedDynamicCallCertificate{Targets: []*ssa.Function{target}}, true, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertClosedDynamicCall(t, plan, deferred, false, target)
+	callPlan, _ := plan.CallPlan(deferred)
+	ownerPlan := functionPlanFor(t, plan, owner)
+	targetPlan := functionPlanFor(t, plan, target)
+	if callPlan.Kind != CallDefer || callPlan.Transport != ManagedTransport ||
+		ownerPlan.Emission != EmitCoroutine || !ownerPlan.Exec.Contains(NeedsCleanupFrame) ||
+		!ownerPlan.Effect.Contains(AwaitStructured) || targetPlan.FuncRep != Dispatch || targetPlan.Emission != EmitCoroutine {
+		t.Fatalf("closed descriptor defer plans = call:%+v owner:%+v target:%+v", callPlan, ownerPlan, targetPlan)
+	}
+}
+
+func TestAnalyzeSSAClosedNilOnlyCallDoesNotInventManagedDispatch(t *testing.T) {
+	prog, pkg := buildClosedDynamicCallTestSSA(t)
+	owner := packageFunction(t, pkg, "nilOnly")
+	call := onlyNonBuiltinCall(t, owner)
+	classified := 0
+	plan, err := AnalyzeSSA(prog, Roots{{Function: owner, Demand: AsyncDemand}}, SSAConfig{
+		ClassifyUnknownCall: func(_ *ssa.Function, candidate ssa.CallInstruction) (UnknownTarget, error) {
+			if candidate == call {
+				classified++
+				return UnknownManagedDispatch, nil
+			}
+			return UnknownManaged, nil
+		},
+		ClassifyClosedDynamicCall: func(_ *ssa.Function, candidate ssa.CallInstruction) (SSAClosedDynamicCallCertificate, bool, error) {
+			if candidate != call {
+				return SSAClosedDynamicCallCertificate{}, false, nil
+			}
+			return SSAClosedDynamicCallCertificate{MayBeNil: true}, true, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if classified != 0 {
+		t.Fatalf("nil-only closed call requested %d nonexistent managed descriptor classifications", classified)
+	}
+	callPlan, ok := plan.CallPlan(call)
+	ownerPlan := functionPlanFor(t, plan, owner)
+	if !ok || callPlan.Open || callPlan.Rep != Dispatch || !callPlan.MayBeNil || len(callPlan.Targets) != 0 ||
+		ownerPlan.LocalEffect.Contains(AwaitStructured) || ownerPlan.LocalExec.IsOpaque() || ownerPlan.Exec.IsOpaque() {
+		t.Fatalf("nil-only closed plans = call:%+v/%t owner:%+v", callPlan, ok, ownerPlan)
+	}
+}
+
+func TestAnalyzeSSAClosedSyncDispatchIsExactAndDoesNotColorOwner(t *testing.T) {
+	prog, pkg := buildClosedDynamicCallTestSSA(t)
+	owner := packageFunction(t, pkg, "dynamicPlain")
+	target := packageFunction(t, pkg, "plain")
+	call := onlyNonBuiltinCall(t, owner)
+
+	analyze := func(syncDispatch bool) (*SSAPlan, error) {
+		return AnalyzeSSA(prog, Roots{{Function: owner, Demand: SyncDemand}}, SSAConfig{
+			MaxPlainInstructions: -1,
+			OutcomeMode:          OutcomeExplicitStatus,
+			ClassifyUnknownCall: func(_ *ssa.Function, candidate ssa.CallInstruction) (UnknownTarget, error) {
+				if candidate == call {
+					return UnknownManagedDispatch, nil
+				}
+				return UnknownManaged, nil
+			},
+			ClassifyClosedDynamicCall: func(_ *ssa.Function, candidate ssa.CallInstruction) (SSAClosedDynamicCallCertificate, bool, error) {
+				if candidate != call {
+					return SSAClosedDynamicCallCertificate{}, false, nil
+				}
+				return SSAClosedDynamicCallCertificate{
+					Targets:      []*ssa.Function{target},
+					MayBeNil:     true,
+					SyncDispatch: syncDispatch,
+				}, true, nil
+			},
+		})
+	}
+
+	syncPlan, err := analyze(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callPlan, ok := syncPlan.CallPlan(call)
+	if !ok || !callPlan.SyncDispatch || callPlan.Rep != Dispatch || callPlan.Open ||
+		callPlan.Unresolved != UnknownManaged || !callPlan.MayBeNil || len(callPlan.Targets) != 1 {
+		t.Fatalf("synchronous descriptor CallPlan = %+v, present=%t", callPlan, ok)
+	}
+	ownerPlan := functionPlanFor(t, syncPlan, owner)
+	if ownerPlan.LocalEffect != NoSuspend || ownerPlan.Effect != NoSuspend || ownerPlan.Demand != SyncDemand ||
+		ownerPlan.Primary != PrimaryPlain || ownerPlan.Emission != EmitPlain {
+		t.Fatalf("synchronous descriptor owner plan = %+v, want uncolored plain owner", ownerPlan)
+	}
+	targetPlan := functionPlanFor(t, syncPlan, target)
+	if targetPlan.Demand != SyncDemand || targetPlan.Effect != NoSuspend || targetPlan.FuncRep != Dispatch ||
+		targetPlan.Primary != PrimaryPlain || targetPlan.Emission != EmitPlain {
+		t.Fatalf("synchronous descriptor target plan = %+v, want sync-demanded descriptor-backed plain target", targetPlan)
+	}
+
+	managedPlan, err := analyze(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managedCall, ok := managedPlan.CallPlan(call)
+	if !ok || managedCall.SyncDispatch || managedCall.Rep != Dispatch || managedCall.Open {
+		t.Fatalf("ordinary managed descriptor CallPlan = %+v, present=%t", managedCall, ok)
+	}
+	managedOwner := functionPlanFor(t, managedPlan, owner)
+	if !managedOwner.LocalEffect.Contains(AwaitStructured) || !managedOwner.LocalEffect.Contains(OutcomeStructured) ||
+		managedOwner.Emission != EmitCoroutine {
+		t.Fatalf("ordinary managed descriptor owner plan = %+v, want conservative structured await/outcome", managedOwner)
+	}
+}
+
+func TestAnalyzeSSAClosedSyncDispatchAcceptsExactRawVariantOwners(t *testing.T) {
+	prog, pkg := buildClosedDynamicCallTestSSA(t)
+	owner := packageFunction(t, pkg, "dynamicPlain")
+	target := packageFunction(t, pkg, "plain")
+	call := onlyNonBuiltinCall(t, owner)
+
+	analyze := func(managed Demand, ownerEffect Effect) *SSAPlan {
+		t.Helper()
+		plan, err := AnalyzeSSA(prog, Roots{{
+			Function: owner, ManagedDemand: managed, RawPlainDemand: true,
+		}}, SSAConfig{
+			MaxPlainInstructions: -1,
+			OutcomeMode:          OutcomeExplicitStatus,
+			ClassifyFunction: func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+				if fn == owner {
+					return SSAFunctionPolicy{Effect: ownerEffect, RawPlainEntry: true}, nil
+				}
+				return SSAFunctionPolicy{}, nil
+			},
+			ClassifyUnknownCall: func(_ *ssa.Function, candidate ssa.CallInstruction) (UnknownTarget, error) {
+				if candidate == call {
+					return UnknownManagedDispatch, nil
+				}
+				return UnknownManaged, nil
+			},
+			ClassifyClosedDynamicCall: func(_ *ssa.Function, candidate ssa.CallInstruction) (SSAClosedDynamicCallCertificate, bool, error) {
+				if candidate != call {
+					return SSAClosedDynamicCallCertificate{}, false, nil
+				}
+				return SSAClosedDynamicCallCertificate{
+					Targets: []*ssa.Function{target}, MayBeNil: true, SyncDispatch: true,
+				}, true, nil
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return plan
+	}
+
+	rawOnly := analyze(NoDemand, NoSuspend)
+	rawOwner := functionPlanFor(t, rawOnly, owner)
+	if rawOwner.Emission != EmitRawPlain || !rawOwner.RawPlainOnly || rawOwner.ManagedDemand != NoDemand ||
+		!rawOwner.RawPlainDemand || !rawOnly.HasRawPlainVariant(owner) {
+		t.Fatalf("raw-only SyncDispatch owner plan = %+v, variant=%t", rawOwner, rawOnly.HasRawPlainVariant(owner))
+	}
+	rawCall, ok := rawOnly.CallPlan(call)
+	if !ok || !rawCall.SyncDispatch || rawCall.Open || rawCall.Rep != Dispatch || len(rawCall.Targets) != 1 {
+		t.Fatalf("raw-only SyncDispatch CallPlan = %+v, present=%t", rawCall, ok)
+	}
+	if got := functionPlanFor(t, rawOnly, target); got.Emission != EmitPlain || got.Effect != NoSuspend ||
+		got.FuncRep != Dispatch || got.ManagedDemand != SyncDemand || got.RawPlainDemand {
+		t.Fatalf("raw-only SyncDispatch target plan = %+v, want managed-sync EmitPlain descriptor", got)
+	}
+
+	mixed := analyze(AsyncDemand, YieldOnly)
+	mixedOwner := functionPlanFor(t, mixed, owner)
+	if mixedOwner.Emission != EmitCoroutine || mixedOwner.RawPlainOnly || mixedOwner.ManagedDemand != AsyncDemand ||
+		!mixedOwner.RawPlainDemand || !mixed.HasRawPlainVariant(owner) {
+		t.Fatalf("mixed SyncDispatch owner plan = %+v, variant=%t", mixedOwner, mixed.HasRawPlainVariant(owner))
+	}
+	if got := functionPlanFor(t, mixed, target); got.Emission != EmitPlain || got.Effect != NoSuspend ||
+		got.FuncRep != Dispatch || got.ManagedDemand != SyncDemand || got.RawPlainDemand {
+		t.Fatalf("mixed SyncDispatch target plan = %+v, want managed-sync EmitPlain descriptor", got)
+	}
+}
+
+func TestAnalyzeSSAClosedSyncDispatchRejectsSuspendingTarget(t *testing.T) {
+	prog, pkg := buildClosedDynamicCallTestSSA(t)
+	owner := packageFunction(t, pkg, "dynamicSuspend")
+	target := packageFunction(t, pkg, "suspend")
+	call := onlyNonBuiltinCall(t, owner)
+	_, err := AnalyzeSSA(prog, Roots{{Function: owner, Demand: SyncDemand}}, SSAConfig{
+		MaxPlainInstructions: -1,
+		ClassifyClosedDynamicCall: func(_ *ssa.Function, candidate ssa.CallInstruction) (SSAClosedDynamicCallCertificate, bool, error) {
+			if candidate != call {
+				return SSAClosedDynamicCallCertificate{}, false, nil
+			}
+			return SSAClosedDynamicCallCertificate{
+				Targets:      []*ssa.Function{target},
+				MayBeNil:     true,
+				SyncDispatch: true,
+			}, true, nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "not one defined non-suspending descriptor-backed plain primary") {
+		t.Fatalf("suspending synchronous descriptor target error = %v", err)
+	}
+}
+
+func TestAnalyzeSSAClosedSyncDispatchRejectsCoroutineOwner(t *testing.T) {
+	prog, pkg := buildClosedDynamicCallTestSSA(t)
+	owner := packageFunction(t, pkg, "dynamicPlain")
+	target := packageFunction(t, pkg, "plain")
+	call := onlyNonBuiltinCall(t, owner)
+	_, err := AnalyzeSSA(prog, Roots{{Function: owner, Demand: AsyncDemand}}, SSAConfig{
+		MaxPlainInstructions: -1,
+		OutcomeMode:          OutcomeExplicitStatus,
+		ClassifyClosedDynamicCall: func(_ *ssa.Function, candidate ssa.CallInstruction) (SSAClosedDynamicCallCertificate, bool, error) {
+			if candidate != call {
+				return SSAClosedDynamicCallCertificate{}, false, nil
+			}
+			return SSAClosedDynamicCallCertificate{
+				Targets:      []*ssa.Function{target},
+				MayBeNil:     true,
+				SyncDispatch: true,
+			}, true, nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "synchronous descriptor call owner") ||
+		!strings.Contains(err.Error(), "not one defined non-suspending plain primary") {
+		t.Fatalf("coroutine synchronous descriptor owner error = %v", err)
+	}
+}
+
+func TestAnalyzeSSAClosedSyncDispatchPublicationIsExact(t *testing.T) {
+	analyze := func(mixed bool) (*SSAPlan, *ssa.Function, error) {
+		extra := ""
+		if mixed {
+			extra = "escaped = plain"
+		}
+		prog, pkg := buildCoroTestSSA(t, "sync_publication.go", `package coroid
+func plain(int) {}
+func accept(func(int)) {}
+var escaped func(int)
+func publish() {
+	accept(plain)
+	`+extra+`
+}
+func dynamic(fn func(int)) { fn(1) }
+`)
+		owner := packageFunction(t, pkg, "dynamic")
+		target := packageFunction(t, pkg, "plain")
+		publicationOwner := packageFunction(t, pkg, "publish")
+		descriptorCall := onlyNonBuiltinCall(t, owner)
+		var publicationCall ssa.CallInstruction
+		for _, block := range publicationOwner.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(ssa.CallInstruction)
+				if ok && call.Common() != nil && call.Common().StaticCallee() != nil &&
+					call.Common().StaticCallee().Name() == "accept" {
+					publicationCall = call
+				}
+			}
+		}
+		if publicationCall == nil {
+			t.Fatalf("%s has no static accept call", publicationOwner)
+		}
+		plan, err := AnalyzeSSA(prog, Roots{
+			{Function: owner, Demand: SyncDemand},
+			{Function: publicationOwner, Demand: AsyncDemand},
+		}, SSAConfig{
+			MaxPlainInstructions: -1,
+			OutcomeMode:          OutcomeExplicitStatus,
+			ClassifyUnknownCall: func(_ *ssa.Function, call ssa.CallInstruction) (UnknownTarget, error) {
+				if call == descriptorCall {
+					return UnknownManagedDispatch, nil
+				}
+				return UnknownManaged, nil
+			},
+			ClassifyClosedDynamicCall: func(_ *ssa.Function, call ssa.CallInstruction) (SSAClosedDynamicCallCertificate, bool, error) {
+				if call != descriptorCall {
+					return SSAClosedDynamicCallCertificate{}, false, nil
+				}
+				return SSAClosedDynamicCallCertificate{
+					Targets:      []*ssa.Function{target},
+					MayBeNil:     true,
+					SyncDispatch: true,
+					SyncOnlyCallArguments: []SSASyncOnlyCallArgument{{
+						Call:     publicationCall,
+						Argument: 0,
+					}},
+				}, true, nil
+			},
+		})
+		return plan, target, err
+	}
+
+	syncPlan, target, err := analyze(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetPlan := functionPlanFor(t, syncPlan, target)
+	if targetPlan.Demand != SyncDemand || targetPlan.Effect != NoSuspend || targetPlan.FuncRep != Dispatch ||
+		targetPlan.Emission != EmitPlain {
+		t.Fatalf("exact synchronous publication target = %+v, want sync-demanded plain descriptor", targetPlan)
+	}
+
+	_, _, err = analyze(true)
+	if err == nil || !strings.Contains(err.Error(), "not one defined non-suspending descriptor-backed plain primary") {
+		t.Fatalf("mixed ordinary publication error = %v", err)
+	}
+}
+
 func TestAnalyzeSSAClosedDynamicCallCertificateRejectsInvalidProof(t *testing.T) {
 	prog, pkg := buildClosedDynamicCallTestSSA(t)
 	dynamicPlain := packageFunction(t, pkg, "dynamicPlain")
@@ -115,13 +446,13 @@ func TestAnalyzeSSAClosedDynamicCallCertificateRejectsInvalidProof(t *testing.T)
 			name:        "go",
 			caller:      packageFunction(t, pkg, "goDynamic"),
 			certificate: SSAClosedDynamicCallCertificate{MayBeNil: true},
-			want:        "ordinary *ssa.Call",
+			want:        "ordinary call or defer",
 		},
 		{
-			name:        "defer",
+			name:        "synchronous defer",
 			caller:      packageFunction(t, pkg, "deferDynamic"),
-			certificate: SSAClosedDynamicCallCertificate{MayBeNil: true},
-			want:        "ordinary *ssa.Call",
+			certificate: SSAClosedDynamicCallCertificate{MayBeNil: true, SyncDispatch: true},
+			want:        "cannot claim synchronous",
 		},
 		{
 			name:        "multiple targets",
@@ -194,6 +525,9 @@ func assertClosedDynamicCall(t *testing.T, plan *SSAPlan, call ssa.CallInstructi
 	}
 	if got.Rep != Dispatch || got.Open || got.MayBeNil != mayBeNil || len(got.Targets) != len(targets) {
 		t.Fatalf("certified call plan = %+v, want closed Dispatch nil=%t targets=%d", got, mayBeNil, len(targets))
+	}
+	if got.SyncDispatch {
+		t.Fatalf("ordinary closed dynamic call unexpectedly has synchronous-dispatch semantics: %+v", got)
 	}
 	for i, target := range targets {
 		id, ok := plan.FunctionID(target)

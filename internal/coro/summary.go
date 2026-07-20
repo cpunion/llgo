@@ -28,14 +28,14 @@ import (
 )
 
 // SummarySchema is the experimental wire schema for deterministic plan
-// snapshots. Version v1 is intentionally not an archive ABI: producer ABI
+// snapshots. Version v4 is intentionally not an archive ABI: producer ABI
 // summaries remain future work, and cache identity uses the separate
 // PlanDigestSchema.
-const SummarySchema = "llgo.coro.plan.v1"
+const SummarySchema = "llgo.coro.plan.v4"
 
 // SummaryMetadata identifies ABI and target properties that affect an
 // experimental plan snapshot. Empty fields are permitted during early
-// analysis. This v1 type must not be used as an archive compatibility record.
+// analysis. This v4 type must not be used as an archive compatibility record.
 type SummaryMetadata struct {
 	CoroABI      string `json:"coro_abi"`
 	SchedulerABI string `json:"scheduler_abi"`
@@ -45,24 +45,31 @@ type SummaryMetadata struct {
 
 // FunctionSummary is the stable, pointer-free form of FunctionPlan.
 type FunctionSummary struct {
-	ID             FunctionID   `json:"id"`
-	DeclaredEffect Effect       `json:"declared_effect"`
-	LocalEffect    Effect       `json:"local_effect"`
-	Effect         Effect       `json:"effect"`
-	DeclaredExec   ExecFlags    `json:"declared_exec"`
-	LocalExec      ExecFlags    `json:"local_exec"`
-	Exec           ExecFlags    `json:"exec"`
-	Demand         Demand       `json:"demand"`
-	Emission       BodyEmission `json:"emission"`
-	FuncRep        FuncRep      `json:"func_rep"`
-	External       ExternalKind `json:"external"`
-	Recursive      bool         `json:"recursive"`
-	Primary        PrimaryKind  `json:"primary"`
+	ID                      FunctionID   `json:"id"`
+	DeclaredEffect          Effect       `json:"declared_effect"`
+	LocalEffect             Effect       `json:"local_effect"`
+	Effect                  Effect       `json:"effect"`
+	DeclaredExec            ExecFlags    `json:"declared_exec"`
+	LocalExec               ExecFlags    `json:"local_exec"`
+	Exec                    ExecFlags    `json:"exec"`
+	Demand                  Demand       `json:"demand"`
+	ManagedDemand           Demand       `json:"managed_demand"`
+	RawPlainDemand          bool         `json:"raw_plain_demand"`
+	Emission                BodyEmission `json:"emission"`
+	FuncRep                 FuncRep      `json:"func_rep"`
+	External                ExternalKind `json:"external"`
+	Recursive               bool         `json:"recursive"`
+	TrustedBoundedRecursion bool         `json:"trusted_bounded_recursion"`
+	Primary                 PrimaryKind  `json:"primary"`
+	RawPlainOnly            bool         `json:"raw_plain_only"`
+	RawPlainEntry           bool         `json:"raw_plain_entry"`
 }
 
-// Summary is a stable v1 snapshot used to test plan determinism. It
-// intentionally contains no maps or pointer identities and is neither the
-// producer ABI summary nor the separate CoroPlanDigest wire format.
+// Summary is a stable v4 snapshot used to test the target-independent graph
+// plan. It intentionally contains no maps or pointer identities and is neither
+// the producer ABI summary nor the separate CoroPlanDigest wire format. Exact
+// whole-build SSA capabilities such as RawPlainVariant therefore live only in
+// SSAPlan and its physical CoroPlanDigest; they never cross an archive summary.
 type Summary struct {
 	Schema    string            `json:"schema"`
 	Metadata  SummaryMetadata   `json:"metadata"`
@@ -85,19 +92,24 @@ type summaryMetadataWire struct {
 }
 
 type functionSummaryWire struct {
-	ID             *FunctionID   `json:"id"`
-	DeclaredEffect *Effect       `json:"declared_effect"`
-	LocalEffect    *Effect       `json:"local_effect"`
-	Effect         *Effect       `json:"effect"`
-	DeclaredExec   *ExecFlags    `json:"declared_exec"`
-	LocalExec      *ExecFlags    `json:"local_exec"`
-	Exec           *ExecFlags    `json:"exec"`
-	Demand         *Demand       `json:"demand"`
-	Emission       *BodyEmission `json:"emission"`
-	FuncRep        *FuncRep      `json:"func_rep"`
-	External       *ExternalKind `json:"external"`
-	Recursive      *bool         `json:"recursive"`
-	Primary        *PrimaryKind  `json:"primary"`
+	ID                      *FunctionID   `json:"id"`
+	DeclaredEffect          *Effect       `json:"declared_effect"`
+	LocalEffect             *Effect       `json:"local_effect"`
+	Effect                  *Effect       `json:"effect"`
+	DeclaredExec            *ExecFlags    `json:"declared_exec"`
+	LocalExec               *ExecFlags    `json:"local_exec"`
+	Exec                    *ExecFlags    `json:"exec"`
+	Demand                  *Demand       `json:"demand"`
+	ManagedDemand           *Demand       `json:"managed_demand"`
+	RawPlainDemand          *bool         `json:"raw_plain_demand"`
+	Emission                *BodyEmission `json:"emission"`
+	FuncRep                 *FuncRep      `json:"func_rep"`
+	External                *ExternalKind `json:"external"`
+	Recursive               *bool         `json:"recursive"`
+	TrustedBoundedRecursion *bool         `json:"trusted_bounded_recursion"`
+	Primary                 *PrimaryKind  `json:"primary"`
+	RawPlainOnly            *bool         `json:"raw_plain_only"`
+	RawPlainEntry           *bool         `json:"raw_plain_entry"`
 }
 
 // Summary creates a stable summary of p.
@@ -113,19 +125,24 @@ func (p *Plan) Summary(metadata SummaryMetadata) Summary {
 	ret.Functions = make([]FunctionSummary, 0, len(p.functions))
 	for _, fn := range p.functions {
 		ret.Functions = append(ret.Functions, FunctionSummary{
-			ID:             fn.ID,
-			DeclaredEffect: fn.DeclaredEffect,
-			LocalEffect:    fn.LocalEffect,
-			Effect:         fn.Effect,
-			DeclaredExec:   fn.DeclaredExec,
-			LocalExec:      fn.LocalExec,
-			Exec:           fn.Exec,
-			Demand:         fn.Demand,
-			Emission:       fn.Emission,
-			FuncRep:        fn.FuncRep,
-			External:       fn.External,
-			Recursive:      fn.Recursive,
-			Primary:        fn.Primary,
+			ID:                      fn.ID,
+			DeclaredEffect:          fn.DeclaredEffect,
+			LocalEffect:             fn.LocalEffect,
+			Effect:                  fn.Effect,
+			DeclaredExec:            fn.DeclaredExec,
+			LocalExec:               fn.LocalExec,
+			Exec:                    fn.Exec,
+			Demand:                  fn.Demand,
+			ManagedDemand:           fn.ManagedDemand,
+			RawPlainDemand:          fn.RawPlainDemand,
+			Emission:                fn.Emission,
+			FuncRep:                 fn.FuncRep,
+			External:                fn.External,
+			Recursive:               fn.Recursive,
+			TrustedBoundedRecursion: fn.TrustedBoundedRecursion,
+			Primary:                 fn.Primary,
+			RawPlainOnly:            fn.RawPlainOnly,
+			RawPlainEntry:           fn.RawPlainEntry,
 		})
 	}
 	return ret
@@ -262,6 +279,12 @@ func (w functionSummaryWire) summary(index int) (FunctionSummary, error) {
 	if w.Demand == nil {
 		return missing("demand")
 	}
+	if w.ManagedDemand == nil {
+		return missing("managed_demand")
+	}
+	if w.RawPlainDemand == nil {
+		return missing("raw_plain_demand")
+	}
 	if w.Emission == nil {
 		return missing("emission")
 	}
@@ -274,23 +297,37 @@ func (w functionSummaryWire) summary(index int) (FunctionSummary, error) {
 	if w.Recursive == nil {
 		return missing("recursive")
 	}
+	if w.TrustedBoundedRecursion == nil {
+		return missing("trusted_bounded_recursion")
+	}
 	if w.Primary == nil {
 		return missing("primary")
 	}
+	if w.RawPlainOnly == nil {
+		return missing("raw_plain_only")
+	}
+	if w.RawPlainEntry == nil {
+		return missing("raw_plain_entry")
+	}
 	return FunctionSummary{
-		ID:             *w.ID,
-		DeclaredEffect: *w.DeclaredEffect,
-		LocalEffect:    *w.LocalEffect,
-		Effect:         *w.Effect,
-		DeclaredExec:   *w.DeclaredExec,
-		LocalExec:      *w.LocalExec,
-		Exec:           *w.Exec,
-		Demand:         *w.Demand,
-		Emission:       *w.Emission,
-		FuncRep:        *w.FuncRep,
-		External:       *w.External,
-		Recursive:      *w.Recursive,
-		Primary:        *w.Primary,
+		ID:                      *w.ID,
+		DeclaredEffect:          *w.DeclaredEffect,
+		LocalEffect:             *w.LocalEffect,
+		Effect:                  *w.Effect,
+		DeclaredExec:            *w.DeclaredExec,
+		LocalExec:               *w.LocalExec,
+		Exec:                    *w.Exec,
+		Demand:                  *w.Demand,
+		ManagedDemand:           *w.ManagedDemand,
+		RawPlainDemand:          *w.RawPlainDemand,
+		Emission:                *w.Emission,
+		FuncRep:                 *w.FuncRep,
+		External:                *w.External,
+		Recursive:               *w.Recursive,
+		TrustedBoundedRecursion: *w.TrustedBoundedRecursion,
+		Primary:                 *w.Primary,
+		RawPlainOnly:            *w.RawPlainOnly,
+		RawPlainEntry:           *w.RawPlainEntry,
 	}, nil
 }
 
@@ -463,13 +500,19 @@ func (s Summary) canonical() (Summary, error) {
 		if err := fn.Demand.Validate(); err != nil {
 			return Summary{}, fmt.Errorf("coro: function %q: %w", fn.ID, err)
 		}
+		if err := fn.ManagedDemand.Validate(); err != nil {
+			return Summary{}, fmt.Errorf("coro: function %q managed demand: %w", fn.ID, err)
+		}
+		if want := aggregateDemand(fn.ManagedDemand, fn.RawPlainDemand); fn.Demand != want {
+			return Summary{}, fmt.Errorf("coro: function %q aggregate demand %s does not match managed=%s raw=%t (want %s)", fn.ID, fn.Demand, fn.ManagedDemand, fn.RawPlainDemand, want)
+		}
 		if err := fn.Emission.Validate(); err != nil {
 			return Summary{}, fmt.Errorf("coro: function %q: %w", fn.ID, err)
 		}
 		if err := fn.FuncRep.Validate(); err != nil {
 			return Summary{}, fmt.Errorf("coro: function %q: %w", fn.ID, err)
 		}
-		if fn.FuncRep == DirectPlain && fn.Effect.MaySuspend() {
+		if fn.FuncRep == DirectPlain && fn.Effect.MaySuspend() && !fn.RawPlainOnly {
 			return Summary{}, fmt.Errorf("coro: suspendable function %q has direct-plain representation", fn.ID)
 		}
 		if fn.FuncRep == DirectCoro && !fn.Effect.MaySuspend() {
@@ -478,7 +521,7 @@ func (s Summary) canonical() (Summary, error) {
 		if err := fn.External.validate(); err != nil {
 			return Summary{}, fmt.Errorf("coro: function %q: %w", fn.ID, err)
 		}
-		expectedEmission := bodyEmissionFor(fn.Demand, fn.Effect, fn.External)
+		expectedEmission := bodyEmissionFor(fn.ManagedDemand, fn.RawPlainDemand, fn.Effect, fn.External)
 		if fn.Emission != expectedEmission {
 			return Summary{}, fmt.Errorf("coro: function %q emission %s does not match demand %s, effect %s, and external kind %s (want %s)", fn.ID, fn.Emission, fn.Demand, fn.Effect, fn.External, expectedEmission)
 		}
@@ -487,7 +530,7 @@ func (s Summary) canonical() (Summary, error) {
 		}
 		if fn.External == Defined {
 			expected := PrimaryPlain
-			if fn.Effect.MaySuspend() {
+			if fn.Effect.MaySuspend() && !fn.RawPlainOnly {
 				expected = PrimaryCoroutine
 			}
 			if fn.Primary != expected {
@@ -496,16 +539,31 @@ func (s Summary) canonical() (Summary, error) {
 		} else if fn.Primary != PrimaryExternal {
 			return Summary{}, fmt.Errorf("coro: external function %q has non-external primary %s", fn.ID, fn.Primary)
 		}
-		if fn.Recursive && !fn.LocalEffect.Contains(YieldOnly) {
+		if fn.RawPlainEntry && fn.External != Defined {
+			return Summary{}, fmt.Errorf("coro: external function %q has a raw plain entry", fn.ID)
+		}
+		if fn.RawPlainEntry && !fn.RawPlainDemand {
+			return Summary{}, fmt.Errorf("coro: function %q has a raw plain entry without raw demand", fn.ID)
+		}
+		if fn.RawPlainOnly != (fn.External == Defined && fn.RawPlainDemand && fn.ManagedDemand == NoDemand) {
+			return Summary{}, fmt.Errorf("coro: function %q has inconsistent raw-plain-only state", fn.ID)
+		}
+		if fn.RawPlainOnly && (fn.Emission != EmitRawPlain || fn.Primary != PrimaryPlain || fn.FuncRep != DirectPlain) {
+			return Summary{}, fmt.Errorf("coro: raw-plain-only function %q lacks raw/plain/direct physical selection", fn.ID)
+		}
+		if fn.TrustedBoundedRecursion && !fn.Recursive {
+			return Summary{}, fmt.Errorf("coro: non-recursive function %q has a trusted bounded-recursion proof", fn.ID)
+		}
+		if fn.Recursive && !fn.TrustedBoundedRecursion && !fn.LocalEffect.Contains(YieldOnly) {
 			return Summary{}, fmt.Errorf("coro: recursive function %q lacks yield-only seed", fn.ID)
 		}
-		if fn.Recursive && !fn.LocalExec.Contains(NeedsPreempt) {
+		if fn.Recursive && !fn.TrustedBoundedRecursion && !fn.LocalExec.Contains(NeedsPreempt) {
 			return Summary{}, fmt.Errorf("coro: recursive function %q lacks needs-preempt flag", fn.ID)
 		}
 		if fn.LocalExec.Contains(NeedsPreempt) && !fn.LocalEffect.Contains(YieldOnly) {
 			return Summary{}, fmt.Errorf("coro: preemptible function %q lacks yield-only seed", fn.ID)
 		}
-		if fn.LocalExec.Contains(BlockForeign) && fn.Effect.MaySuspend() {
+		if fn.LocalExec.Contains(BlockForeign) && fn.Effect.MaySuspend() && !fn.RawPlainOnly {
 			return Summary{}, fmt.Errorf("coro: blocking foreign function %q also has suspend effect %s", fn.ID, fn.Effect)
 		}
 		switch fn.External {

@@ -97,9 +97,17 @@ func (a *MutexAttr) SetType(typ MutexType) c.Int { return 0 }
 //go:linkname c_pthread_mutex_init C.pthread_mutex_init
 func c_pthread_mutex_init(m *Mutex, attr *MutexAttr) c.Int
 
+// Destroy releases caller-owned mutex metadata after its lifecycle is quiescent.
+// It does not wait for a future unlock; invalid live ownership is an API error.
+//
+//llgo:coro sync
 //go:linkname c_pthread_mutex_destroy C.pthread_mutex_destroy
 func c_pthread_mutex_destroy(m *Mutex) c.Int
 
+// Lock may wait for another native thread. It is legal only in an audited raw
+// host-stack closure; managed callers retain BlockForeign/WaitForeign.
+//
+//llgo:coro schedulerwait
 //go:linkname c_pthread_mutex_lock C.pthread_mutex_lock
 func c_pthread_mutex_lock(m *Mutex) c.Int
 
@@ -110,6 +118,9 @@ func c_pthread_mutex_lock(m *Mutex) c.Int
 //go:linkname c_pthread_mutex_unlock C.pthread_mutex_unlock
 func c_pthread_mutex_unlock(m *Mutex) c.Int
 
+// TryLock never waits for ownership.
+//
+//llgo:coro noblock
 //go:linkname c_pthread_mutex_trylock C.pthread_mutex_trylock
 func c_pthread_mutex_trylock(m *Mutex) c.Int
 
@@ -163,24 +174,31 @@ func (a *RWLockAttr) GetPShared(pshared *c.Int) c.Int { return 0 }
 
 // -----------------------------------------------------------------------------
 
+//llgo:coro sync
 //go:linkname c_pthread_rwlock_init C.pthread_rwlock_init
 func c_pthread_rwlock_init(rw *RWLock, attr *RWLockAttr) c.Int
 
+//llgo:coro sync
 //go:linkname c_pthread_rwlock_destroy C.pthread_rwlock_destroy
 func c_pthread_rwlock_destroy(rw *RWLock) c.Int
 
+//llgo:coro schedulerwait
 //go:linkname c_pthread_rwlock_rdlock C.pthread_rwlock_rdlock
 func c_pthread_rwlock_rdlock(rw *RWLock) c.Int
 
+//llgo:coro schedulerwait
 //go:linkname c_pthread_rwlock_wrlock C.pthread_rwlock_wrlock
 func c_pthread_rwlock_wrlock(rw *RWLock) c.Int
 
+//llgo:coro noblock
 //go:linkname c_pthread_rwlock_unlock C.pthread_rwlock_unlock
 func c_pthread_rwlock_unlock(rw *RWLock) c.Int
 
+//llgo:coro noblock
 //go:linkname c_pthread_rwlock_tryrdlock C.pthread_rwlock_tryrdlock
 func c_pthread_rwlock_tryrdlock(rw *RWLock) c.Int
 
+//llgo:coro noblock
 //go:linkname c_pthread_rwlock_trywrlock C.pthread_rwlock_trywrlock
 func c_pthread_rwlock_trywrlock(rw *RWLock) c.Int
 
@@ -191,8 +209,9 @@ type RWLock struct {
 	Unused [PthreadRWLockSize]c.Char
 }
 
-// llgo:link (*RWLock).Init C.pthread_rwlock_init
-func (rw *RWLock) Init(attr *RWLockAttr) c.Int { return 0 }
+func (rw *RWLock) Init(attr *RWLockAttr) c.Int {
+	return c_pthread_rwlock_init(rw, attr)
+}
 
 func (rw *RWLock) Destroy() {
 	c_pthread_rwlock_destroy(rw)
@@ -202,8 +221,9 @@ func (rw *RWLock) RLock() {
 	c_pthread_rwlock_rdlock(rw)
 }
 
-// llgo:link (*RWLock).TryRLock C.pthread_rwlock_tryrdlock
-func (rw *RWLock) TryRLock() c.Int { return 0 }
+func (rw *RWLock) TryRLock() c.Int {
+	return c_pthread_rwlock_tryrdlock(rw)
+}
 
 func (rw *RWLock) RUnlock() {
 	c_pthread_rwlock_unlock(rw)
@@ -213,8 +233,9 @@ func (rw *RWLock) Lock() {
 	c_pthread_rwlock_wrlock(rw)
 }
 
-// llgo:link (*RWLock).TryLock C.pthread_rwlock_trywrlock
-func (rw *RWLock) TryLock() c.Int { return 0 }
+func (rw *RWLock) TryLock() c.Int {
+	return c_pthread_rwlock_trywrlock(rw)
+}
 
 func (rw *RWLock) Unlock() {
 	c_pthread_rwlock_unlock(rw)
@@ -243,21 +264,32 @@ func (a *CondAttr) Destroy() {}
 
 // -----------------------------------------------------------------------------
 
+//llgo:coro sync
 //go:linkname c_pthread_cond_init C.pthread_cond_init
 func c_pthread_cond_init(c *Cond, attr *CondAttr) c.Int
 
+//llgo:coro sync
 //go:linkname c_pthread_cond_destroy C.pthread_cond_destroy
 func c_pthread_cond_destroy(c *Cond) c.Int
 
+// Signal and Broadcast publish wakeups but do not wait for a waiter to run.
+//
+//llgo:coro sync
 //go:linkname c_pthread_cond_signal C.pthread_cond_signal
 func c_pthread_cond_signal(c *Cond) c.Int
 
+//llgo:coro sync
 //go:linkname c_pthread_cond_broadcast C.pthread_cond_broadcast
 func c_pthread_cond_broadcast(c *Cond) c.Int
 
+// Wait and TimedWait deliberately wait for another thread or a deadline and
+// therefore remain blocking in every managed plan.
+//
+//llgo:coro schedulerwait
 //go:linkname c_pthread_cond_wait C.pthread_cond_wait
 func c_pthread_cond_wait(c *Cond, m *Mutex) c.Int
 
+//llgo:coro schedulerwait
 //go:linkname c_pthread_cond_timedwait C.pthread_cond_timedwait
 func c_pthread_cond_timedwait(c *Cond, m *Mutex, abstime *time.Timespec) c.Int
 

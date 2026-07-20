@@ -58,6 +58,7 @@ var altPkgs = map[string]altPkgSpec{
 	"internal/reflectlite":    {mode: altPkgReplace},
 	"internal/runtime/maps":   {mode: altPkgReplace},
 	"internal/runtime/sys":    {mode: altPkgAdditive},
+	"internal/syscall/unix":   {mode: altPkgAdditive},
 	"reflect":                 {mode: altPkgReplace},
 	"runtime":                 {mode: altPkgReplace},
 	"sync/atomic":             {mode: altPkgReplace},
@@ -84,6 +85,7 @@ func SourcePatchPkgPaths() []string {
 
 var sourcePatchPkgs = map[string]struct{}{
 	"crypto/internal/constanttime": {},
+	"internal/poll":                {},
 	"internal/sync":                {},
 	"iter":                         {},
 	"runtime/metrics":              {},

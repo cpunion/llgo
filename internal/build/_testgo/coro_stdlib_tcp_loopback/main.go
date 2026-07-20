@@ -1,69 +1,35 @@
 package main
 
 import (
+	"errors"
 	"net"
 	"os"
 	"time"
 )
 
-var (
-	listener *net.TCPListener
-	ready    = make(chan bool)
-	done     = make(chan int)
-)
-
-func readExact(conn *net.TCPConn, buf []byte) bool {
-	offset := 0
-	for offset < len(buf) {
-		n, err := conn.Read(buf[offset:])
-		if n > 0 {
-			offset += n
-		}
-		if err != nil || n == 0 {
-			return false
-		}
-	}
-	return true
-}
-
-func writeExact(conn *net.TCPConn, buf []byte) bool {
-	offset := 0
-	for offset < len(buf) {
-		n, err := conn.Write(buf[offset:])
-		if n > 0 {
-			offset += n
-		}
-		if err != nil || n == 0 {
-			return false
-		}
-	}
-	return true
-}
+var listener *net.TCPListener
 
 func serve() {
-	// The rendezvous and the delay in main make AcceptTCP reach its readiness
-	// wait before DialTCP. This is an acceptance gate for non-blocking scheduler
-	// progress, not merely a socket call that happened to be ready already.
-	ready <- true
 	conn, err := listener.AcceptTCP()
 	if err != nil {
-		done <- 20
 		return
 	}
-	payload := make([]byte, 4)
-	if !readExact(conn, payload) || string(payload) != "ping" {
-		done <- 21
+
+	var request [1]byte
+	if n, err := conn.Read(request[:]); err != nil || n != len(request) || request[0] != 'p' {
+		_ = conn.Close()
 		return
 	}
-	if !writeExact(conn, []byte("pong")) {
-		done <- 22
+
+	// The client's first Read must park until its 20 ms deadline expires. The
+	// same Read succeeds after the deadline is cleared and this reply is sent.
+	time.Sleep(60 * time.Millisecond)
+	reply := [1]byte{'q'}
+	if n, err := conn.Write(reply[:]); err != nil || n != len(reply) {
+		_ = conn.Close()
 		return
 	}
-	if err := conn.Close(); err != nil {
-		done <- 23
-		return
-	}
-	done <- 0
+	_ = conn.Close()
 }
 
 func main() {
@@ -74,8 +40,6 @@ func main() {
 	}
 	listener = ln
 	go serve()
-	<-ready
-	time.Sleep(25 * time.Millisecond)
 
 	local, ok := ln.Addr().(*net.TCPAddr)
 	if !ok {
@@ -85,20 +49,31 @@ func main() {
 	if err != nil {
 		os.Exit(32)
 	}
-	if !writeExact(conn, []byte("ping")) {
+
+	request := [1]byte{'p'}
+	if n, err := conn.Write(request[:]); err != nil || n != len(request) {
 		os.Exit(33)
 	}
-	payload := make([]byte, 4)
-	if !readExact(conn, payload) || string(payload) != "pong" {
+
+	if err := conn.SetReadDeadline(time.Now().Add(20 * time.Millisecond)); err != nil {
 		os.Exit(34)
 	}
-	if err := conn.Close(); err != nil {
+	var reply [1]byte
+	n, err := conn.Read(reply[:])
+	if n != 0 || !errors.Is(err, os.ErrDeadlineExceeded) {
 		os.Exit(35)
 	}
-	if code := <-done; code != 0 {
-		os.Exit(code)
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
+		os.Exit(36)
+	}
+	n, err = conn.Read(reply[:])
+	if err != nil || n != len(reply) || reply[0] != 'q' {
+		os.Exit(37)
+	}
+	if err := conn.Close(); err != nil {
+		os.Exit(38)
 	}
 	if err := ln.Close(); err != nil {
-		os.Exit(36)
+		os.Exit(39)
 	}
 }

@@ -19,9 +19,9 @@ package coro
 import "unsafe"
 
 // ExplicitStatus is a terminal completion published by compiler-generated
-// code. Version zero intentionally supports only an explicit panic. Normal
-// return continues to use PrepareComplete; Goexit and implicit faults require
-// distinct cleanup/producer protocols and are rejected.
+// code. Explicit panic now has two ownership paths: a child publishes into its
+// suspended parent's CompletionRecord, while a root publishes the task-local
+// PanicRecord. Goexit and implicit faults still require their own producers.
 type ExplicitStatus uint32
 
 const (
@@ -121,6 +121,12 @@ func PrepareExplicitStatus(
 ) bool {
 	if g == nil || !ValidG(g) || !resumeGateTaken(g) {
 		return false
+	}
+	// A managed child panic is not terminal for the logical G.  Reconcile it at
+	// the immediate call site so the parent can run defers/recover before any
+	// outcome is allowed to reach the next ancestor or the root reporter.
+	if frame := findFrame(g, handle); frame != nil && frame.parent != nil && hasAwaitCompletionTransaction(frame) {
+		return prepareChildPanic(g, frame, header, status, typeWord, dataWord)
 	}
 	record := &g.panicRecord
 	if !preemptCompareAndSwap(&record.status, uint32(ExplicitStatusNone), explicitStatusPublishing) {

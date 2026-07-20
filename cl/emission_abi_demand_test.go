@@ -1301,11 +1301,13 @@ func TestEmissionIntrinsicOperandPolicyCoversRegistry(t *testing.T) {
 	}
 	add(emissionIntrinsicNoValues,
 		"cstr", "pystr", "skip", "_cgoCheckPointer", "sigjmpbuf",
-		"deferData", "unreachable", "stackSave")
+		"deferData", "unreachable", "stackSave", "coroYield",
+		"coroCriticalEnter", "coroCriticalExit")
 	add(emissionIntrinsicRawAllValues, "syscall")
 	add(emissionIntrinsicCompileValues,
 		"boolToUint8", "atomicLoad", "atomicStore", "atomicCmpXchg",
-		"atomicCmpXchgOK", "atomicAddReturnNew", "coroPark", "atomicXchg", "atomicAdd",
+		"atomicCmpXchgOK", "atomicAddReturnNew", "atomicLoadUnsafe", "atomicStoreUnsafe",
+		"coroPark", "coroTimerSleep", "coroPollWait", "coroControlledTimerWait", "atomicXchg", "atomicAdd",
 		"atomicSub", "atomicAnd", "atomicNand", "atomicOr", "atomicXor",
 		"atomicMax", "atomicMin", "atomicUMax", "atomicUMin")
 	add(emissionIntrinsicFirstValue,
@@ -1317,8 +1319,9 @@ func TestEmissionIntrinsicOperandPolicyCoversRegistry(t *testing.T) {
 		"_Cfunc_GoBytes")
 	add(emissionIntrinsicFixedBeforeVArg, "pyList", "pyTuple")
 	add(emissionIntrinsicFuncAddr, "funcAddr")
-	add(emissionIntrinsicFuncPCABI0, "funcPCABI0")
+	add(emissionIntrinsicFuncPCABI0, "funcPCABI0", "funcPCABIInternal")
 	add(emissionIntrinsicAsm, "asm")
+	add(emissionIntrinsicRawAllValues, "syscall32", "syscallPtr")
 
 	for name, instruction := range llgoInstrs {
 		expected, ok := want[name]

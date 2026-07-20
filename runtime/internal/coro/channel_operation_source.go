@@ -18,10 +18,15 @@ package coro
 
 import "unsafe"
 
-// ChannelOperationSourceCapacity is intentionally small in the claim-core
-// slice. C1 replaces this fixed prototype capacity with the admitted stable
-// slot policy used by real hchan registrations without changing OperationID.
-const ChannelOperationSourceCapacity = 4
+// ChannelOperationPageCapacity is the allocation-free granularity of the
+// target-neutral channel/select catalog. Every source includes one inline
+// page; a target may attach additional stable pages before binding it.
+const ChannelOperationPageCapacity = 64
+
+// ChannelOperationSourceCapacity is the default capacity of an unconfigured
+// source. Keep this compatibility name for small, embedded, and bare-metal
+// profiles; it is not the capacity after ConfigureChannelOperationPages.
+const ChannelOperationSourceCapacity = ChannelOperationPageCapacity
 
 type channelOperationMailbox uint32
 
@@ -73,8 +78,15 @@ type channelOperationSlot struct {
 	claim  *SelectClaim
 }
 
-// ChannelOperationSource is the fixed C0 source/catalog skeleton. The atomic
-// slot prefix is producer-concurrent and stays at a stable address through
+// ChannelOperationPage is stable target-provided storage. Producer ingress
+// still resolves it exclusively through the existing two-word OperationID;
+// neither this page pointer nor a frame pointer crosses an ingress ABI.
+type ChannelOperationPage struct {
+	slots [ChannelOperationPageCapacity]channelOperationSlot
+}
+
+// ChannelOperationSource is the paged durable channel/select catalog. The
+// atomic slot prefix is producer-concurrent and stays at a stable address through
 // strong admission join. record and claim are owner-only suffix fields: claim
 // is a temporary pointer into direct-parking frame storage and is cleared by
 // Apply immediately after detach. Ordinary source producer shims retain only
@@ -85,24 +97,92 @@ type channelOperationSlot struct {
 // not this scalar protocol.
 type ChannelOperationSource struct {
 	routedProducerSource
-	slots [ChannelOperationSourceCapacity]channelOperationSlot
+	slots      [ChannelOperationPageCapacity]channelOperationSlot
+	extraPages []ChannelOperationPage
+	scanLimit  uint32
+}
+
+// ChannelOperationConfiguredCapacity returns the exact linear slot and scan
+// capacity. Linear one-based slots remain encodable in OperationID's frozen
+// 15-bit source-local field.
+func ChannelOperationConfiguredCapacity(source *ChannelOperationSource) uint32 {
+	if source == nil {
+		return 0
+	}
+	return uint32(1+len(source.extraPages)) * ChannelOperationPageCapacity
+}
+
+func channelOperationScanLimit(source *ChannelOperationSource) (uint32, bool) {
+	if source == nil {
+		return 0, false
+	}
+	capacity := ChannelOperationConfiguredCapacity(source)
+	return source.scanLimit, validSourceScanLimit(source.scanLimit, capacity)
+}
+
+func channelOperationSlotAt(source *ChannelOperationSource, index uint32) (*channelOperationSlot, bool) {
+	if index >= ChannelOperationConfiguredCapacity(source) {
+		return nil, false
+	}
+	if index < ChannelOperationPageCapacity {
+		return &source.slots[index], true
+	}
+	page := index/ChannelOperationPageCapacity - 1
+	offset := index % ChannelOperationPageCapacity
+	return &source.extraPages[page].slots[offset], true
+}
+
+// ConfigureChannelOperationPages attaches stable allocation-free catalog
+// pages while the source is empty and unbound. Repeating an identical
+// configuration is harmless, and an empty source may monotonically expose
+// more of the same backing pool. The slice header is frozen while bound, so
+// concurrent producer lookup always observes stable slot addresses.
+func ConfigureChannelOperationPages(source *ChannelOperationSource, pages []ChannelOperationPage) bool {
+	if source == nil || !routedProducerHeaderEmpty(&source.routedProducerSource, nil) ||
+		len(pages) > int(operationLocalMask/ChannelOperationPageCapacity)-1 {
+		return false
+	}
+	existing := len(source.extraPages)
+	if existing != 0 && (len(pages) < existing || len(pages) == 0 || &source.extraPages[0] != &pages[0]) {
+		return false
+	}
+	if len(pages) == existing {
+		return true
+	}
+	for index := uint32(0); index < ChannelOperationConfiguredCapacity(source); index++ {
+		slot, ok := channelOperationSlotAt(source, index)
+		if !ok || !channelOperationReusableSlot(source, slot, index) {
+			return false
+		}
+	}
+	for page := existing; page < len(pages); page++ {
+		for offset := range pages[page].slots {
+			index := uint32(page+1)*ChannelOperationPageCapacity + uint32(offset)
+			if !channelOperationReusableSlot(source, &pages[page].slots[offset], index) {
+				return false
+			}
+		}
+	}
+	source.extraPages = pages
+	return true
 }
 
 func channelOperationSlotFor(source *ChannelOperationSource, id OperationID) (*channelOperationSlot, bool) {
 	if source == nil || !source.route.Valid() || !id.Valid() || id.Source() != OperationSourceChannel ||
-		id.Route() != source.route || id.LocalSlot() == 0 || id.LocalSlot() > ChannelOperationSourceCapacity {
+		id.Route() != source.route || id.LocalSlot() == 0 || id.LocalSlot() > ChannelOperationConfiguredCapacity(source) {
 		return nil, false
 	}
-	return &source.slots[id.LocalSlot()-1], true
+	return channelOperationSlotAt(source, id.LocalSlot()-1)
 }
 
 func validChannelOperationOwner(source *ChannelOperationSource, p *P) bool {
-	return source != nil && p != nil && p.channelSource == source &&
+	_, scanOK := channelOperationScanLimit(source)
+	return scanOK && p != nil && p.channelSource == source &&
 		validRoutedProducerSource(&source.routedProducerSource, p)
 }
 
 func channelOperationReusableSlot(source *ChannelOperationSource, slot *channelOperationSlot, index uint32) bool {
-	if source == nil || slot == nil || index >= ChannelOperationSourceCapacity ||
+	if source == nil || slot == nil || index >= operationLocalMask ||
 		!producerSourceSlotReusable(&slot.producerSourceSlot) ||
 		preemptLoad(&slot.mailbox) != uint32(channelMailboxEmpty) ||
 		preemptLoad(&slot.physical) != uint32(channelPhysicalIdle) || preemptLoad(&slot.external) != 0 ||
@@ -142,8 +222,9 @@ func BindChannelOperationSourceAtRoute(source *ChannelOperationSource, p *P, rou
 	}
 	previousRoute := source.route
 	source.route = route
-	for index := range source.slots {
-		if !channelOperationReusableSlot(source, &source.slots[index], uint32(index)) {
+	for index := uint32(0); index < ChannelOperationConfiguredCapacity(source); index++ {
+		slot, ok := channelOperationSlotAt(source, index)
+		if !ok || !channelOperationReusableSlot(source, slot, index) {
 			source.route = previousRoute
 			return false
 		}
@@ -152,6 +233,7 @@ func BindChannelOperationSourceAtRoute(source *ChannelOperationSource, p *P, rou
 		source.route = previousRoute
 		return false
 	}
+	source.scanLimit = 0
 	p.channelSource = source
 	return true
 }
@@ -162,14 +244,14 @@ func BindChannelOperationSource(source *ChannelOperationSource, p *P) bool {
 
 // channelOperationCommitDomainCompatible binds every Channel case in one
 // preparing logical wait to the same frame-local SelectClaim, and prevents one
-// non-nil claim from being reused by another wait/ticket. The source has a
-// fixed four-slot C0 catalog, so this is constant work and runs before a new
-// slot generation becomes producer-visible. A nil/non-nil mix and two distinct
-// claims are both rejected. A claim-less local operation is valid only when it
-// is the ParkSet's sole candidate; a larger set needs one shared claim even if
-// only one case is Channel. Otherwise two peers could acquire independent
-// claims, or production discovery could encounter a multi-candidate Channel
-// set it cannot arbitrate, after the slots were already producer-visible.
+// non-nil claim from being reused by another wait/ticket. The bounded configured
+// catalog is scanned before a new slot generation becomes producer-visible. A
+// nil/non-nil mix and two distinct claims are both rejected. A claim-less local
+// operation is valid only when it is the ParkSet's sole candidate; a larger set
+// needs one shared claim even if only one case is Channel. Otherwise two peers
+// could acquire independent claims, or production discovery could encounter a
+// multi-candidate Channel set it cannot arbitrate, after the slots were already
+// producer-visible.
 func channelOperationCommitDomainCompatible(
 	source *ChannelOperationSource,
 	state *ParkState,
@@ -181,8 +263,15 @@ func channelOperationCommitDomainCompatible(
 		claim == nil && state.expected != 1 {
 		return false
 	}
-	for index := range source.slots {
-		slot := &source.slots[index]
+	limit, valid := channelOperationScanLimit(source)
+	if !valid {
+		return false
+	}
+	for index := uint32(0); index < limit; index++ {
+		slot, ok := channelOperationSlotAt(source, index)
+		if !ok {
+			return false
+		}
 		record := &slot.record
 		samePark := record.link.park == state
 		sameClaim := claim != nil && slot.claim == claim
@@ -211,9 +300,9 @@ func (source *ChannelOperationSource) ReserveAndAttachWait(
 		!channelOperationCommitDomainCompatible(source, state, ticket, wait, claim) {
 		return OperationID{}, false
 	}
-	for index := range source.slots {
-		slot := &source.slots[index]
-		if !channelOperationReusableSlot(source, slot, uint32(index)) || preemptLoad(&slot.generation) == ^uint32(0) ||
+	for index := uint32(0); index < ChannelOperationConfiguredCapacity(source); index++ {
+		slot, slotOK := channelOperationSlotAt(source, index)
+		if !slotOK || !channelOperationReusableSlot(source, slot, index) || preemptLoad(&slot.generation) == ^uint32(0) ||
 			claim != nil && !channelOperationExternalReservable(slot) {
 			continue
 		}
@@ -221,7 +310,10 @@ func (source *ChannelOperationSource) ReserveAndAttachWait(
 		if !begun {
 			return OperationID{}, false
 		}
-		id, ok := MakeOperationIDAtRoute(OperationSourceChannel, source.route, uint32(index)+1, generation)
+		if !raiseSourceScanLimit(&source.scanLimit, index, ChannelOperationConfiguredCapacity(source)) {
+			return OperationID{}, false
+		}
+		id, ok := MakeOperationIDAtRoute(OperationSourceChannel, source.route, index+1, generation)
 		if !ok || !PrepareOperationAtGeneration(&slot.record, id) {
 			_ = resetProducerSourceSlot(&slot.producerSourceSlot, generation)
 			return OperationID{}, false
@@ -1310,10 +1402,13 @@ func (source *ChannelOperationSource) publishDrainedSlot(
 }
 
 func (source *ChannelOperationSource) publishSlot(p *P, index uint32) (published, lost uint32, ok bool) {
-	if !validChannelOperationOwner(source, p) || index >= ChannelOperationSourceCapacity {
+	if !validChannelOperationOwner(source, p) || index >= ChannelOperationConfiguredCapacity(source) {
 		return 0, 0, false
 	}
-	slot := &source.slots[index]
+	slot, slotOK := channelOperationSlotAt(source, index)
+	if !slotOK {
+		return 0, 0, false
+	}
 	state := producerSourceLifecycle(preemptLoad(&slot.state))
 	if state != producerSourceActive && state != producerSourceClosing {
 		return 0, 0, state == producerSourceFree || state == producerSourceQuiesced
@@ -1526,8 +1621,13 @@ func (source *ChannelOperationSource) ResetSelectClaim(p *P, claim *SelectClaim)
 		selectClaimLoad(claim) != selectClaimClaimed {
 		return false
 	}
-	for index := range source.slots {
-		if source.slots[index].claim == claim {
+	limit, valid := channelOperationScanLimit(source)
+	if !valid {
+		return false
+	}
+	for index := uint32(0); index < limit; index++ {
+		slot, ok := channelOperationSlotAt(source, index)
+		if !ok || slot.claim == claim {
 			return false
 		}
 	}
@@ -1576,8 +1676,9 @@ func channelOperationSourceEmpty(source *ChannelOperationSource, owner *P) bool 
 	if source == nil || !routedProducerHeaderEmpty(&source.routedProducerSource, owner) {
 		return false
 	}
-	for index := range source.slots {
-		if !channelOperationReusableSlot(source, &source.slots[index], uint32(index)) {
+	for index := uint32(0); index < ChannelOperationConfiguredCapacity(source); index++ {
+		slot, ok := channelOperationSlotAt(source, index)
+		if !ok || !channelOperationReusableSlot(source, slot, index) {
 			return false
 		}
 	}
@@ -1592,6 +1693,7 @@ func UnbindChannelOperationSource(source *ChannelOperationSource, p *P) bool {
 		return false
 	}
 	p.channelSource = nil
+	source.scanLimit = 0
 	return true
 }
 

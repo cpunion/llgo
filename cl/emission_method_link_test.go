@@ -31,6 +31,8 @@ func TestEmissionUniverseActiveABIMethodTablesUseFrozenWrapperSymbols(t *testing
 	pkg := testProg.addPackage(t, "example.com/emission/methodlink", `package methodlink
 type Base struct{}
 func (Base) M() {}
+type hasM interface { M() }
+func dead(value hasM) { value.M() }
 func Value() any { return struct{ Base }{} }
 `)
 	testProg.ssa.Build()
@@ -61,10 +63,20 @@ func Value() any { return struct{ Base }{} }
 	if !foundPromoted {
 		t.Fatal("Value has no frozen promoted M method-table reference")
 	}
+	synchronous, err := universe.CoroSyncDemandReferences(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fn := range synchronous {
+		if wrapperKind(fn) == "promoted" && fn.Name() == "M" {
+			t.Fatalf("method-table target %v was misclassified as a synchronous raw callback", fn)
+		}
+	}
 	plan, err := coro.AnalyzeSSA(testProg.ssa, coro.Roots{{Function: value, Demand: coro.SyncDemand}}, coro.SSAConfig{
-		EmissionUniverse:         ssaUniverse,
-		FunctionIDs:              universe.FunctionIDConfig(),
-		ClassifyDemandReferences: universe.CoroDemandReferences,
+		EmissionUniverse:             ssaUniverse,
+		FunctionIDs:                  universe.FunctionIDConfig(),
+		ClassifyDemandReferences:     universe.CoroDemandReferences,
+		ClassifySyncDemandReferences: universe.CoroSyncDemandReferences,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -118,6 +130,122 @@ func Value() any { return struct{ Base }{} }
 	}
 	if found == 0 {
 		t.Fatal("test did not materialize an anonymous promoted wrapper")
+	}
+}
+
+func TestEmissionUniverseCrossPackageABIMethodTableUsesDeclaringWrapperSymbol(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	declaring := testProg.addPackage(t, "example.com/emission/methoddecl", `package methoddecl
+type Error string
+func (e Error) Error() string { return string(e) }
+`)
+	consumer := testProg.addPackage(t, "example.com/emission/methodconsumer", `package methodconsumer
+import "example.com/emission/methoddecl"
+func Value() any { return methoddecl.Error("value") }
+`)
+	testProg.ssa.Build()
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{
+		{SSA: declaring.ssa, Files: []*ast.File{declaring.file}},
+		{SSA: consumer.ssa, Files: []*ast.File{consumer.file}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	errorType := declaring.types.Scope().Lookup("Error").Type()
+	selection := testProg.ssa.MethodSets.MethodSet(types.NewPointer(errorType)).Lookup(declaring.types, "Error")
+	if selection == nil {
+		t.Fatal("pointer Error method selection is nil")
+	}
+	wrapper := testProg.ssa.MethodValue(selection)
+	wrapper, ok := universe.Resolve(wrapper)
+	if !ok || wrapper == nil || wrapperKind(wrapper) != "promoted" {
+		t.Fatalf("pointer Error wrapper = %v, %t; want frozen promoted wrapper", wrapper, ok)
+	}
+	declaringOwner := universe.packages[declaring.ssa]
+	consumerOwner := universe.packages[consumer.ssa]
+	physical := universe.physicalNames[emissionFunctionOwnerKey{function: wrapper, owner: declaringOwner}]
+	if physical == "" {
+		t.Fatal("declaring package did not freeze the pointer Error wrapper symbol")
+	}
+	if unexpected := universe.physicalNames[emissionFunctionOwnerKey{function: wrapper, owner: consumerOwner}]; unexpected != "" {
+		t.Fatalf("consumer unexpectedly owns wrapper symbol %q", unexpected)
+	}
+	ctx, err := universe.functionABIContext(wrapper, declaringOwner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, legacy, _ := ctx.funcName(wrapper)
+	if got, err := universe.physicalName(consumer.ssa, wrapper, legacy); err != nil || got != physical {
+		t.Fatalf("consumer wrapper symbol = %q, %v; want declaring symbol %q", got, err, physical)
+	}
+
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(testProg.ssa, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := consumer.ssa.Func("Value")
+	plan, err := coro.AnalyzeSSA(testProg.ssa, coro.Roots{{Function: value, Demand: coro.SyncDemand}}, coro.SSAConfig{
+		EmissionUniverse:             ssaUniverse,
+		FunctionIDs:                  universe.FunctionIDConfig(),
+		ClassifyDemandReferences:     universe.CoroDemandReferences,
+		ClassifySyncDemandReferences: universe.CoroSyncDemandReferences,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	compilation := &Compilation{
+		CoroPlan:                  plan,
+		EmissionUniverse:          universe,
+		EnableCoroEntryResolution: true,
+	}
+	compiled, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, consumer.ssa, []*ast.File{consumer.file}, nil,
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	declaration := compiled.FuncOf(physical)
+	if declaration == nil || !declaration.HasBody() {
+		t.Fatalf("consumer wrapper %q = %v; want a linkonce use-site definition", physical, declaration)
+	}
+	if legacy != physical && compiled.FuncOf(legacy) != nil {
+		t.Fatalf("consumer retained legacy wrapper declaration %q", legacy)
+	}
+	declared, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, declaring.ssa, []*ast.File{declaring.file}, nil,
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definitions := 0
+	if function := declared.FuncOf(physical); function != nil && function.HasBody() {
+		definitions++
+	}
+	if function := compiled.FuncOf(physical); function != nil && function.HasBody() {
+		definitions++
+	}
+	if definitions != 2 {
+		t.Fatalf("wrapper %q definition count across declaring/consumer modules = %d; want one coalescible definition per use site", physical, definitions)
+	}
+	for moduleName, ir := range map[string]string{
+		"declaring": declared.String(),
+		"consumer":  compiled.String(),
+	} {
+		linkOnceDefinition := false
+		for _, line := range strings.Split(ir, "\n") {
+			if strings.Contains(line, "define ") && strings.Contains(line, physical) && strings.Contains(line, "linkonce") {
+				linkOnceDefinition = true
+				break
+			}
+		}
+		if !linkOnceDefinition {
+			t.Fatalf("%s wrapper %q is not emitted with linkonce linkage", moduleName, physical)
+		}
 	}
 }
 
@@ -235,9 +363,10 @@ func Unreachable() any { return Dead{} }
 		t.Fatal(err)
 	}
 	plan, err := coro.AnalyzeSSA(testProg.ssa, coro.Roots{{Function: demanded, Demand: coro.SyncDemand}}, coro.SSAConfig{
-		EmissionUniverse:         ssaUniverse,
-		FunctionIDs:              universe.FunctionIDConfig(),
-		ClassifyDemandReferences: universe.CoroDemandReferences,
+		EmissionUniverse:             ssaUniverse,
+		FunctionIDs:                  universe.FunctionIDConfig(),
+		ClassifyDemandReferences:     universe.CoroDemandReferences,
+		ClassifySyncDemandReferences: universe.CoroSyncDemandReferences,
 	})
 	if err != nil {
 		t.Fatal(err)

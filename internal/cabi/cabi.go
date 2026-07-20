@@ -95,6 +95,12 @@ func (p *Transformer) SetSkipFuncs(names []string) {
 }
 
 func (p *Transformer) shouldSkipFunc(name string) bool {
+	// LLVM intrinsics describe IR operations, not source-language functions.
+	// In particular, coroutine intrinsics contain unsized token parameters;
+	// asking TargetData for their ABI size is invalid and traps in LLVM.
+	if strings.HasPrefix(name, "llvm.") {
+		return true
+	}
 	if name == "" || len(p.skipFns) == 0 {
 		return false
 	}

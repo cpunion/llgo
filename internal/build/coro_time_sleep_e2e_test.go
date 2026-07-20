@@ -28,6 +28,7 @@ import (
 	"go/types"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -44,14 +45,16 @@ const (
 	coroTimeSleepPrepareSymbolV1 = "__llgo_coro_timer_prepare_after_or_abort_v1"
 	coroTimeSleepRetireSymbolV1  = "__llgo_coro_timer_retire_completed_or_abort_v1"
 	coroTimeSleepParkHookV1      = "__llgo_coro_park_prepare_v1"
+	coroTimeSleepParkSymbolV2    = "__llgo_coro_timer_park_v2"
+	coroTimeSleepResumeSymbolV2  = "__llgo_coro_timer_resume_v2"
 	coroTimeSleepPreemptPollV1   = "__llgo_coro_preempt_poll_v1"
-	coroTimeSleepAwaitHookV1     = "__llgo_coro_await_prepare_v1"
+	coroTimeSleepAwaitHookV1     = "__llgo_coro_await_prepare_v3"
 )
 
 // TestCoroNativeTimeSleepProductionPlanAndCodegen starts from an ordinary
 // synchronous Go call to time.Sleep. It obtains the exact injected source from
 // the production GOROOT overlay, discovers MayPark from that body's
-// llgo.coroPark intrinsic, taints both callers without a test-supplied effect
+// llgo.coroTimerSleep intrinsic, taints both callers without a test-supplied effect
 // seed, and emits one stackless DirectCoro body at every level.
 //
 // A complete Do build currently stops before the plan builder because
@@ -96,6 +99,20 @@ func TestCoroNativeTimeSleepProductionPlanAndCodegen(t *testing.T) {
 	llssa.Initialize(llssa.InitAll)
 	prog := llssa.NewProgram(nil)
 	defer prog.Dispose()
+	prog.SetRuntime(func() *types.Package {
+		runtimePackage, err := importer.For("source", nil).Import(llssa.PkgRuntime)
+		if err != nil {
+			t.Fatal("load runtime failed:", err)
+		}
+		if runtimePackage.Scope().Lookup("CoroTimerParkV2") == nil {
+			name := types.NewTypeName(token.NoPos, runtimePackage, "CoroTimerParkV2", nil)
+			types.NewNamed(name, types.NewArray(types.Typ[types.Uintptr], 32), nil)
+			if previous := runtimePackage.Scope().Insert(name); previous != nil {
+				t.Fatalf("install Timer V2 test runtime type: duplicate %v", previous)
+			}
+		}
+		return runtimePackage
+	})
 	emission, err := cl.PrepareEmissionUniverse(prog, nil, []cl.EmissionPackage{
 		{SSA: timeSSA, Files: timeFiles, Identity: "time"},
 		{SSA: mainSSA, Files: mainFiles, Identity: "example.com/llgo-coro-time-sleep"},
@@ -117,9 +134,14 @@ func TestCoroNativeTimeSleepProductionPlanAndCodegen(t *testing.T) {
 		resolveFunction:                emission.Resolve,
 		functionBackground:             emission.FunctionBackground,
 		foreignNoBlock:                 emission.CoroForeignNoBlockCertificate,
+		foreignSync:                    emission.CoroForeignSyncCertificate,
+		foreignSchedulerWait:           emission.CoroForeignSchedulerWaitCertificate,
+		foreignWorker:                  emission.CoroForeignWorkerCertificate,
 		intrinsicCallSemantics:         emission.CoroIntrinsicCallSiteSemantics,
 		rawFunctionAddressCallArgument: emission.CoroRawFunctionAddressCallArgument,
+		staticCodeAddressCallArgument:  emission.CoroStaticCodeAddressCallArgument,
 		demandReferences:               emission.CoroDemandReferences,
+		syncDemandReferences:           emission.CoroSyncDemandReferences,
 		loweredCalls:                   emission.CoroLoweredCalls,
 	}
 	main := mainSSA.Func("main")
@@ -146,26 +168,15 @@ func TestCoroNativeTimeSleepProductionPlanAndCodegen(t *testing.T) {
 	if main == nil || sleepOnce == nil || sleepZero == nil || sleepNegative == nil || len(sleepOnce.Blocks) == 0 {
 		t.Fatal("synchronous fixture has no bodyful main/Sleep callers")
 	}
-	prepare, err := findCoroTimeSleepFunction(input.Program, "time", "llgoCoroSleepPrepareTimerAfterOrAbortV1")
+	intrinsic, err := findCoroTimeSleepFunction(input.Program, "time", "llgoCoroTimerSleep")
 	if err != nil {
 		t.Fatal(err)
 	}
-	park, err := findCoroTimeSleepFunction(input.Program, "time", "llgoCoroSleepParkV1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	retire, err := findCoroTimeSleepFunction(input.Program, "time", "llgoCoroSleepRetireCompletedTimerOrAbortV1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	prepareCall := findCoroNativeTimerE2EDirectCall(t, sleep, prepare)
-	parkCall := findCoroNativeTimerE2EDirectCall(t, sleep, park)
-	retireCall := findCoroNativeTimerE2EDirectCall(t, sleep, retire)
-	assertCoroNativeTimerE2ECriticalSpan(t, sleep, prepareCall, parkCall, retireCall)
-	assertCoroTimeSleepNonpositiveFastPath(t, sleep, prepareCall)
-	semantics, intrinsic, semanticsErr := emission.CoroIntrinsicCallSiteSemantics(parkCall)
-	if semanticsErr != nil || !intrinsic || !semantics.SuspendsCurrentFrame() || !plan.ElidesCall(parkCall) {
-		t.Fatalf("production time.Sleep park semantics = %v, intrinsic=%t, err=%v, elided=%t; want exact suspending intrinsic", semantics, intrinsic, semanticsErr, plan.ElidesCall(parkCall))
+	intrinsicCall := findCoroNativeTimerE2EDirectCall(t, sleep, intrinsic)
+	assertCoroTimeSleepNonpositiveFastPath(t, sleep, intrinsicCall)
+	semantics, isIntrinsic, semanticsErr := emission.CoroIntrinsicCallSiteSemantics(intrinsicCall)
+	if semanticsErr != nil || !isIntrinsic || !semantics.SuspendsCurrentFrame() || !plan.ElidesCall(intrinsicCall) {
+		t.Fatalf("production time.Sleep timer semantics = %v, intrinsic=%t, err=%v, elided=%t; want exact suspending intrinsic", semantics, isIntrinsic, semanticsErr, plan.ElidesCall(intrinsicCall))
 	}
 	if err := assertCoroTimeSleepFunctionPlan(plan, sleep, true, "time.Sleep"); err != nil {
 		t.Fatal(err)
@@ -232,7 +243,7 @@ func TestCoroNativeTimeSleepProductionPlanAndCodegen(t *testing.T) {
 		EnableCoroPhysicalABI:         true,
 		EnableCoroChildAwait:          true,
 		EnableCoroProgramBootstrapRun: true,
-		CoroFrameRetentionABI:         cl.CoroFrameRetentionTimerABIV1,
+		CoroFrameRetentionABI:         cl.CoroFrameRetentionParkABIV2,
 		CoroABI:                       coro.PhysicalABIV1,
 		SchedulerABI:                  coro.SchedulerProgramBootstrapABIV2,
 		PanicABI:                      coro.PanicLegacyABIV0,
@@ -269,7 +280,7 @@ func TestCoroNativeTimeSleepProductionPlanAndCodegen(t *testing.T) {
 			!sleepPhysical.IsNil(), !sleepOncePhysical.IsNil(), !sleepZeroPhysical.IsNil(), !sleepNegativePhysical.IsNil(), !mainPhysical.IsNil())
 	}
 	sleepIR := sleepPhysical.String()
-	assertCoroTimerRetainedFrameIR(t, "production time.Sleep", sleepIR, sleepPlan.Exec.Contains(coro.NeedsPreempt))
+	assertCoroTimerSleepV2FrameIR(t, "production time.Sleep", sleepIR, sleepPlan.Exec.Contains(coro.NeedsPreempt))
 	assertCoroTimeSleepAwaitsIR(t, "sleepOnce", sleepOncePhysical.String(), sleepSymbol)
 	assertCoroTimeSleepAwaitsIR(t, "sleepZero", sleepZeroPhysical.String(), sleepSymbol)
 	assertCoroTimeSleepAwaitsIR(t, "sleepNegative", sleepNegativePhysical.String(), sleepSymbol)
@@ -306,6 +317,8 @@ func buildCoroTimeSleepOverlaySSA(
 	supportFile := parse("coro_time_sleep_support.go", []byte(`package time
 type Duration int64
 const Nanosecond Duration = 1
+type Timer struct{}
+func when(Duration) int64
 `))
 	timeFiles := []*ast.File{patchFile, supportFile}
 	newInfo := func() *types.Info {
@@ -426,14 +439,14 @@ func findCoroTimeSleepDirectCall(owner, target *ssa.Function) (*ssa.Call, error)
 
 // The whole-program plan is intentionally value-insensitive, so Sleep(0) and
 // Sleep(-1) callers still use one DirectCoro child await. This CFG proof is
-// narrower: the nonpositive body returns before allocating a retained token or
-// entering the timer prepare/park path. Avoiding the caller-side coroutine
+// narrower: the nonpositive body returns before entering the dedicated timer
+// intrinsic. Avoiding the caller-side coroutine
 // handoff as required by Go's immediate-return behavior still needs a
 // conditional-effect or call-site fast-path ABI.
-func assertCoroTimeSleepNonpositiveFastPath(t *testing.T, sleep *ssa.Function, prepare *ssa.Call) {
+func assertCoroTimeSleepNonpositiveFastPath(t *testing.T, sleep *ssa.Function, intrinsic *ssa.Call) {
 	t.Helper()
-	if sleep == nil || len(sleep.Params) != 1 || len(sleep.Blocks) == 0 || prepare == nil {
-		t.Fatal("production time.Sleep fast-path proof requires one parameter, body, and prepare call")
+	if sleep == nil || len(sleep.Params) != 1 || len(sleep.Blocks) == 0 || intrinsic == nil {
+		t.Fatal("production time.Sleep fast-path proof requires one parameter, body, and timer intrinsic call")
 	}
 	entry := sleep.Blocks[0]
 	if len(entry.Instrs) == 0 || len(entry.Succs) != 2 {
@@ -455,9 +468,9 @@ func assertCoroTimeSleepNonpositiveFastPath(t *testing.T, sleep *ssa.Function, p
 		t.Fatalf("production time.Sleep guard = %s, want its exact duration parameter and zero", comparison)
 	}
 	fast, positive := entry.Succs[0], entry.Succs[1]
-	if coroTimeSleepBlockReachesInstruction(fast, prepare) || !coroTimeSleepBlockReachesInstruction(positive, prepare) {
-		t.Fatalf("production time.Sleep d<=0/positive prepare reachability = %t/%t, want false/true",
-			coroTimeSleepBlockReachesInstruction(fast, prepare), coroTimeSleepBlockReachesInstruction(positive, prepare))
+	if coroTimeSleepBlockReachesInstruction(fast, intrinsic) || !coroTimeSleepBlockReachesInstruction(positive, intrinsic) {
+		t.Fatalf("production time.Sleep d<=0/positive intrinsic reachability = %t/%t, want false/true",
+			coroTimeSleepBlockReachesInstruction(fast, intrinsic), coroTimeSleepBlockReachesInstruction(positive, intrinsic))
 	}
 	if len(fast.Instrs) == 0 {
 		t.Fatal("production time.Sleep d<=0 branch is empty")
@@ -471,6 +484,48 @@ func assertCoroTimeSleepNonpositiveFastPath(t *testing.T, sleep *ssa.Function, p
 				t.Fatalf("production time.Sleep d<=0 path allocates retained state before return: %s", alloc)
 			}
 		}
+	}
+}
+
+// assertCoroTimerSleepV2FrameIR checks the production source patch after its
+// single intrinsic has become the compiler-owned source-aware park recipe.
+// The opaque state must be a coroutine-frame local, with exactly one park /
+// suspend / resume sequence and no ordinary heap allocation or V1 token span.
+func assertCoroTimerSleepV2FrameIR(t *testing.T, label, body string, needsPreempt bool) {
+	t.Helper()
+	for _, forbidden := range []string{
+		"runtime.AllocZ",
+		coroTimeSleepPrepareSymbolV1,
+		coroTimeSleepRetireSymbolV1,
+		"llgo.coroTimerSleep",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("%s contains obsolete or escaping Timer storage %q:\n%s", label, forbidden, body)
+		}
+	}
+	park := strings.Index(body, "call void @"+coroTimeSleepParkSymbolV2)
+	resume := strings.Index(body, "call i32 @"+coroTimeSleepResumeSymbolV2)
+	if park < 0 || resume <= park || strings.Count(body, coroTimeSleepParkSymbolV2) != 1 ||
+		strings.Count(body, coroTimeSleepResumeSymbolV2) != 1 {
+		t.Fatalf("%s does not contain one ordered Timer V2 park/resume pair:\n%s", label, body)
+	}
+	span := body[park:resume]
+	if got := strings.Count(span, "@llvm.coro.suspend"); got != 1 {
+		t.Fatalf("%s Timer V2 park/resume span has %d suspends, want 1:\n%s", label, got, body)
+	}
+	if !regexp.MustCompile(
+		`(?s)store i16 4,.*store i16 3,.*call void @` + regexp.QuoteMeta(coroTimeSleepParkSymbolV2) +
+			`\(ptr [^,]+, ptr [^,]+, ptr [^,]+, ptr [^,]+, i64 [^)]+\)`,
+	).MatchString(body) {
+		t.Fatalf("%s does not publish SuspendPark before the exact Timer V2 park ABI:\n%s", label, body)
+	}
+	for _, forbidden := range []string{coroTimeSleepPreemptPollV1, coroTimeSleepAwaitHookV1, "__llgo_coro_yield_prepare_v1"} {
+		if strings.Contains(span, forbidden) {
+			t.Fatalf("%s Timer V2 park/resume span contains forbidden handoff %q:\n%s", label, forbidden, body)
+		}
+	}
+	if needsPreempt && !strings.Contains(body[:park], coroTimeSleepPreemptPollV1) {
+		t.Fatalf("%s has no preemption poll before its Timer V2 park:\n%s", label, body)
 	}
 }
 
@@ -532,7 +587,53 @@ func assertCoroTimerRetainedFrameIR(t *testing.T, label, body string, needsPreem
 	}
 	poll := strings.LastIndex(body[prepareBlockStart:prepare], coroTimeSleepPreemptPollV1)
 	if needsPreempt && poll < 0 {
-		t.Fatalf("%s has no preemption poll before retaining its frame token:\n%s", label, body)
+		prepareLabelStart := prepareBlockStart + 1
+		prepareLabelEnd := strings.IndexByte(body[prepareLabelStart:], ':')
+		if prepareBlockStart == 0 || prepareLabelEnd < 0 {
+			t.Fatalf("%s timer prepare has no named LLVM block:\n%s", label, body)
+		}
+		prepareLabel := body[prepareLabelStart : prepareLabelStart+prepareLabelEnd]
+		predecessorPoll := strings.LastIndex(body[:prepareBlockStart], coroTimeSleepPreemptPollV1)
+		pollBlockStart := -1
+		if predecessorPoll >= 0 {
+			pollBlockStart = strings.LastIndex(body[:predecessorPoll], "\n_llgo_")
+		}
+		if pollBlockStart < 0 {
+			t.Fatalf("%s has no preemption poll before retaining its frame token:\n%s", label, body)
+		}
+		pollBlockEnd := strings.Index(body[predecessorPoll:], "\n_llgo_")
+		if pollBlockEnd < 0 {
+			t.Fatalf("%s preemption poll block has no successor block boundary:\n%s", label, body)
+		}
+		pollBlock := body[pollBlockStart : predecessorPoll+pollBlockEnd]
+		var branch string
+		for _, line := range strings.Split(pollBlock, "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "br i1 ") {
+				branch = line
+			}
+		}
+		targets := strings.Split(branch, ", label %")
+		if len(targets) != 3 {
+			t.Fatalf("%s nearest preemption poll does not end in a binary LLVM branch: %q\n%s", label, branch, body)
+		}
+		trueLabel := strings.Fields(targets[1])
+		falseLabel := strings.Fields(targets[2])
+		if len(trueLabel) == 0 || len(falseLabel) == 0 || falseLabel[0] != prepareLabel {
+			t.Fatalf("%s nearest preemption poll false successor = %q, want timer prepare block %q: %q\n%s", label, falseLabel, prepareLabel, branch, body)
+		}
+		yieldBlockStart := strings.Index(body, "\n"+trueLabel[0]+":")
+		if yieldBlockStart < 0 {
+			t.Fatalf("%s preemption true successor %q has no LLVM block:\n%s", label, trueLabel[0], body)
+		}
+		yieldBlockEnd := strings.Index(body[yieldBlockStart+1:], "\n_llgo_")
+		if yieldBlockEnd < 0 {
+			yieldBlockEnd = len(body) - yieldBlockStart - 1
+		}
+		yieldBlock := body[yieldBlockStart : yieldBlockStart+1+yieldBlockEnd]
+		if !strings.Contains(yieldBlock, "__llgo_coro_yield_prepare_v1") {
+			t.Fatalf("%s preemption true successor %q does not prepare a yield:\n%s", label, trueLabel[0], body)
+		}
 	}
 	parkBlockEnd := strings.Index(body[prepare:], "\n\n")
 	if parkBlockEnd < 0 {

@@ -29,6 +29,7 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"maps"
 	"os"
 	"reflect"
 	"strings"
@@ -66,6 +67,7 @@ import (
 	_ "example.com/ordinary"
 )
 func target() {}
+func patchPublicInit() {}
 func calls(fn func()) {
 	target()
 	go target()
@@ -155,6 +157,95 @@ func calls(fn func()) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "builder cannot elide ordinary call") {
 		t.Fatalf("ordinary builder elision error = %v, want fail-closed rejection", err)
+	}
+
+	var ordinaryInitCall ssa.CallInstruction
+	for _, call := range initCalls {
+		callee := call.Common().StaticCallee()
+		if callee != nil && callee.Pkg != nil && callee.Pkg.Pkg != nil && callee.Pkg.Pkg.Path() == "example.com/ordinary" {
+			ordinaryInitCall = call
+			break
+		}
+	}
+	if ordinaryInitCall == nil {
+		t.Fatal("synthetic init has no exact ordinary-package initializer call")
+	}
+	const patchLogicalName = "$llgo.patch.public-init-v1:test"
+	patchPublicInit := ssaPkg.Func("patchPublicInit")
+	patchInput := input
+	patchInput.patchInitRedirect = func(call ssa.CallInstruction) (bool, error) {
+		return call == ordinaryInitCall, nil
+	}
+	patchInput.loweredCalls = func(owner *ssa.Function) ([]coro.SSALoweredCall, error) {
+		if owner != ssaPkg.Func("init") {
+			return nil, nil
+		}
+		return []coro.SSALoweredCall{{LogicalName: patchLogicalName, Target: patchPublicInit}}, nil
+	}
+	patchPlan, err := patchInput.Analyze(
+		coro.Roots{{Function: ssaPkg.Func("init"), Demand: coro.SyncDemand}},
+		coro.SSAConfig{MaxPlainInstructions: -1},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !patchPlan.ElidesCall(ordinaryInitCall) {
+		t.Fatal("exact patched original-init occurrence was not frontend-elided")
+	}
+	if _, exists := patchPlan.CallPlan(ordinaryInitCall); exists {
+		t.Fatal("frontend-elided patched original-init occurrence retained a source CallPlan")
+	}
+	record, exists := patchPlan.ResolveLoweredCallRecord(ssaPkg.Func("init"), patchLogicalName)
+	if !exists || record.Target != patchPublicInit || record.RawPlain || record.UnwindOnly || record.ExplicitStatusElided {
+		t.Fatalf("planned patch init lowered occurrence = %+v, %v; want ordinary public-init target", record, exists)
+	}
+}
+
+func TestCoroPlanInputFreezesElidedCallCertificateAndRejectsForgery(t *testing.T) {
+	ssaPkg, _ := buildCoroPlanTestPackage(t, "example.com/elidedcertificate", `package elidedcertificate
+func intrinsic()
+func root() { intrinsic() }
+`, nil)
+	root := ssaPkg.Func("root")
+	calls := coroPlanTestCalls(root)
+	if len(calls) != 1 {
+		t.Fatalf("root calls = %d, want one", len(calls))
+	}
+	exactCall := calls[0]
+	const frontendCertificate = "frontend-exact-worker-call-certificate"
+	input := CoroPlanInput{
+		Program: ssaPkg.Prog,
+		intrinsicCallSemantics: func(call ssa.CallInstruction) (cl.CoroIntrinsicCallSemantics, bool, error) {
+			if call == exactCall {
+				return cl.CoroIntrinsicCallInlineSuspend, true, nil
+			}
+			return cl.CoroIntrinsicCallUnsupported, false, nil
+		},
+		elidedCallCertificate: func(call ssa.CallInstruction) (string, bool, error) {
+			if call == exactCall {
+				return frontendCertificate, true, nil
+			}
+			return "", false, nil
+		},
+	}
+	plan, err := input.Analyze(coro.Roots{{Function: root, Demand: coro.SyncDemand}}, coro.SSAConfig{MaxPlainInstructions: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := plan.ElidedCallCertificate(exactCall); !ok || got != frontendCertificate {
+		t.Fatalf("planned elided-call certificate = %q, %t", got, ok)
+	}
+	_, err = input.Analyze(coro.Roots{{Function: root, Demand: coro.SyncDemand}}, coro.SSAConfig{
+		MaxPlainInstructions: -1,
+		ClassifyElidedCallCertificate: func(_ *ssa.Function, call ssa.CallInstruction) (string, error) {
+			if call == exactCall {
+				return "forged-worker-call-certificate", nil
+			}
+			return "", nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot forge an elided-call capability") {
+		t.Fatalf("forged elided-call certificate error = %v", err)
 	}
 }
 
@@ -424,6 +515,21 @@ func __llgo_coro_timer_prepare_after_or_abort_v1(token unsafe.Pointer, delay int
 func __llgo_coro_timer_retire_completed_or_abort_v1(token unsafe.Pointer, ticket, slot, generation uint32) {
 	__llgo_coro_timer_retire_completed_v1(token, ticket, slot, generation)
 }
+func __llgo_coro_timer_park_v2(g, handle, header, storage unsafe.Pointer, delay int64) {}
+func __llgo_coro_timer_park_controlled_v2(g, handle, header, storage, controller unsafe.Pointer, control *uint32, expected uint32, deadline int64) {}
+func __llgo_coro_timer_resume_v2(g, storage unsafe.Pointer) uint32 { return 1 }
+func __llgo_coro_timer_cancel_controlled_v2(controller unsafe.Pointer, expected uint32) uint32 { return 0 }
+func __llgo_coro_poll_park_v2(g, handle, header, storage unsafe.Pointer, fd int32, interest uint32, deadline int64) {}
+func __llgo_coro_poll_resume_v2(g, storage unsafe.Pointer) uint32 { return 1 }
+func __llgo_coro_poll_update_deadline_or_abort_v1(fd int32, interest uint32, deadline int64) {}
+func __llgo_coro_poll_post_closing_or_abort_v1(fd int32, interest uint32) {}
+func __llgo_coro_sema_prepare_or_abort_v1(token, addr unsafe.Pointer, ticket, slot, generation *uint32) {}
+func __llgo_coro_sema_retire_completed_or_abort_v1(token unsafe.Pointer, ticket, slot, generation uint32) {}
+func __llgo_coro_sema_release_or_abort_v1(addr unsafe.Pointer) {}
+func __llgo_coro_notify_prepare_or_abort_v1(token, notifyAddr unsafe.Pointer, target uint32, ticket, slot, generation *uint32) {}
+func __llgo_coro_notify_retire_completed_or_abort_v1(token unsafe.Pointer, ticket, slot, generation uint32) {}
+func __llgo_coro_notify_one_or_abort_v1(notifyAddr unsafe.Pointer, waitSnapshot uint32) {}
+func __llgo_coro_notify_all_or_abort_v1(notifyAddr unsafe.Pointer, waitSnapshot uint32) {}
 func __llgo_coro_frame_allocator_bootstrap_v1() {}
 func __llgo_coro_frame_alloc_v1() {}
 func __llgo_coro_frame_publish_v1() {}
@@ -439,8 +545,18 @@ func __llgo_coro_frame_free_v1() {}
 func __llgo_coro_chan_send_park_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uintptr) {}
 func __llgo_coro_chan_recv_park_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uintptr) {}
 func __llgo_coro_chan_resume_v1(unsafe.Pointer, unsafe.Pointer) uint32 { return 0 }
-func __llgo_coro_chan_send_closed_panic_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) {}
+type Chan struct{}
+type ChanOp struct{}
+func CoroChanTrySend(*Chan, unsafe.Pointer, int) bool { return false }
+func CoroChanTryRecv(*Chan, unsafe.Pointer, int) (bool, bool) { return false, false }
+func CoroChanTryClose(*Chan) uint32 { return 0 }
+func CoroChanSelectTry(...ChanOp) (int, bool, bool, bool) { return 0, false, false, false }
+func CoroChanSelectPark(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) {}
+func CoroChanSelectResume(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) (int, bool, uint32) { return 0, false, 0 }
 func __llgo_coro_panic_prepare_v1() {}
+func __llgo_coro_recover_take_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) {}
+func __llgo_coro_fault_payload_v1(uint32, unsafe.Pointer, unsafe.Pointer) {}
+func __llgo_coro_fault_prepare_v1() {}
 func __llgo_coro_spawn_begin_v1() {}
 func __llgo_coro_spawn_commit_v1() {}
 func __llgo_coro_program_main_return_v1() {}
@@ -574,7 +690,26 @@ func atomicExchange(*uint32, uint32) uint32
 			t.Fatalf("required root %d = %+v, want %s/%s", index, root, wantRoots[index], wantDemand)
 		}
 	}
-	for _, name := range []string{coroNativePostWaitSymbolV1, coroTimerPrepareAfterOrAbortSymbolV1, coroTimerRetireCompletedOrAbortSymbolV1} {
+	for _, name := range []string{
+		coroNativePostWaitSymbolV1,
+		coroTimerPrepareAfterOrAbortSymbolV1,
+		coroTimerRetireCompletedOrAbortSymbolV1,
+		coroTimerParkSymbolV2,
+		coroTimerParkControlledSymbolV2,
+		coroTimerResumeSymbolV2,
+		coroTimerCancelControlledSymbolV2,
+		coroPollParkSymbolV2,
+		coroPollResumeSymbolV2,
+		coroPollUpdateDeadlineOrAbortSymbolV1,
+		coroPollPostClosingOrAbortSymbolV1,
+		coroSemaphorePrepareOrAbortSymbolV1,
+		coroSemaphoreRetireCompletedOrAbortSymbolV1,
+		coroSemaphoreReleaseOrAbortSymbolV1,
+		coroNotifyPrepareOrAbortSymbolV1,
+		coroNotifyRetireCompletedOrAbortSymbolV1,
+		coroNotifyOneOrAbortSymbolV1,
+		coroNotifyAllOrAbortSymbolV1,
+	} {
 		if _, ok := requiredPlain[ssaPkg.Func(name)]; ok {
 			t.Fatalf("inactive native timer hook %q entered the required plain island", name)
 		}
@@ -603,8 +738,21 @@ func atomicExchange(*uint32, uint32) uint32
 		coroWaitRollbackSymbolV1,
 		coroWaitRetireCompletedSymbolV1,
 		coroNativePostWaitSymbolV1,
-		coroTimerPrepareAfterOrAbortSymbolV1,
-		coroTimerRetireCompletedOrAbortSymbolV1,
+		coroTimerParkSymbolV2,
+		coroTimerParkControlledSymbolV2,
+		coroTimerResumeSymbolV2,
+		coroTimerCancelControlledSymbolV2,
+		coroPollParkSymbolV2,
+		coroPollResumeSymbolV2,
+		coroPollUpdateDeadlineOrAbortSymbolV1,
+		coroPollPostClosingOrAbortSymbolV1,
+		coroSemaphorePrepareOrAbortSymbolV1,
+		coroSemaphoreRetireCompletedOrAbortSymbolV1,
+		coroSemaphoreReleaseOrAbortSymbolV1,
+		coroNotifyPrepareOrAbortSymbolV1,
+		coroNotifyRetireCompletedOrAbortSymbolV1,
+		coroNotifyOneOrAbortSymbolV1,
+		coroNotifyAllOrAbortSymbolV1,
 		"__llgo_coro_frame_alloc_v1",
 		"__llgo_coro_frame_publish_v1",
 		"__llgo_coro_await_prepare_v1",
@@ -656,55 +804,252 @@ func atomicExchange(*uint32, uint32) uint32
 	}
 	for _, name := range []string{
 		coroNativePostWaitSymbolV1,
-		coroTimerPrepareAfterOrAbortSymbolV1,
-		coroTimerRetireCompletedOrAbortSymbolV1,
-		coroTimerPrepareAfterSymbolV1,
-		coroTimerRetireCompletedSymbolV1,
+		coroTimerParkSymbolV2,
+		coroTimerParkControlledSymbolV2,
+		coroTimerResumeSymbolV2,
+		coroTimerCancelControlledSymbolV2,
+		coroPollParkSymbolV2,
+		coroPollResumeSymbolV2,
+		coroPollUpdateDeadlineOrAbortSymbolV1,
+		coroPollPostClosingOrAbortSymbolV1,
+		coroSemaphorePrepareOrAbortSymbolV1,
+		coroSemaphoreRetireCompletedOrAbortSymbolV1,
+		coroSemaphoreReleaseOrAbortSymbolV1,
+		coroNotifyPrepareOrAbortSymbolV1,
+		coroNotifyRetireCompletedOrAbortSymbolV1,
+		coroNotifyOneOrAbortSymbolV1,
+		coroNotifyAllOrAbortSymbolV1,
 	} {
 		if _, ok := timerPlain[ssaPkg.Func(name)]; !ok {
 			t.Fatalf("native timer hook %q is absent from the required plain island", name)
 		}
 	}
+	for _, obsolete := range []string{
+		coroTimerPrepareAfterOrAbortSymbolV1,
+		coroTimerRetireCompletedOrAbortSymbolV1,
+		coroTimerPrepareAfterSymbolV1,
+		coroTimerRetireCompletedSymbolV1,
+	} {
+		if _, ok := timerPlain[ssaPkg.Func(obsolete)]; ok {
+			t.Fatalf("ordinary Sleep V1 hook %q remains in the native timer runtime roots", obsolete)
+		}
+	}
 	if len(timerDirect) != 0 || len(timerClosed) != 0 {
 		t.Fatalf("native timer roots produced callback proofs: direct=%d dynamic=%d", len(timerDirect), len(timerClosed))
 	}
-	timerPrepareFn := ssaPkg.Func(coroTimerPrepareAfterOrAbortSymbolV1)
-	originalTimerPrepareSignature := timerPrepareFn.Signature
-	timerPrepareFn.Signature = types.NewSignatureType(nil, nil, nil,
+	timerParkFn := ssaPkg.Func(coroTimerParkSymbolV2)
+	originalTimerParkSignature := timerParkFn.Signature
+	timerParkFn.Signature = types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(
+			types.NewParam(token.NoPos, nil, "g", types.Typ[types.UnsafePointer]),
+			types.NewParam(token.NoPos, nil, "handle", types.Typ[types.UnsafePointer]),
+			types.NewParam(token.NoPos, nil, "header", types.Typ[types.UnsafePointer]),
+			types.NewParam(token.NoPos, nil, "storage", types.Typ[types.UnsafePointer]),
+			types.NewParam(token.NoPos, nil, "delay", types.Typ[types.Uint64]),
+		),
+		types.NewTuple(), false)
+	_, _, _, _, invalidTimerParkErr := requiredCoroProgramRuntimePlan(timerCtx)
+	timerParkFn.Signature = originalTimerParkSignature
+	if invalidTimerParkErr == nil || !strings.Contains(invalidTimerParkErr.Error(), "timer park V2 ABI") {
+		t.Fatalf("invalid Timer V2 park ABI error = %v", invalidTimerParkErr)
+	}
+	timerResumeFn := ssaPkg.Func(coroTimerResumeSymbolV2)
+	originalTimerResumeSignature := timerResumeFn.Signature
+	timerResumeFn.Signature = types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(
+			types.NewParam(token.NoPos, nil, "g", types.Typ[types.UnsafePointer]),
+			types.NewParam(token.NoPos, nil, "storage", types.Typ[types.UnsafePointer]),
+		),
+		types.NewTuple(types.NewParam(token.NoPos, nil, "status", types.Typ[types.Uint64])), false)
+	_, _, _, _, invalidTimerResumeErr := requiredCoroProgramRuntimePlan(timerCtx)
+	timerResumeFn.Signature = originalTimerResumeSignature
+	if invalidTimerResumeErr == nil || !strings.Contains(invalidTimerResumeErr.Error(), "timer resume V2 ABI") {
+		t.Fatalf("invalid Timer V2 resume ABI error = %v", invalidTimerResumeErr)
+	}
+	controlledParkFn := ssaPkg.Func(coroTimerParkControlledSymbolV2)
+	originalControlledParkSignature := controlledParkFn.Signature
+	controlledParkFn.Signature = types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(
+			types.NewParam(token.NoPos, nil, "g", types.Typ[types.UnsafePointer]),
+			types.NewParam(token.NoPos, nil, "handle", types.Typ[types.UnsafePointer]),
+			types.NewParam(token.NoPos, nil, "header", types.Typ[types.UnsafePointer]),
+			types.NewParam(token.NoPos, nil, "storage", types.Typ[types.UnsafePointer]),
+			types.NewParam(token.NoPos, nil, "controller", types.Typ[types.UnsafePointer]),
+			types.NewParam(token.NoPos, nil, "control", types.NewPointer(types.Typ[types.Uint64])),
+			types.NewParam(token.NoPos, nil, "expected", types.Typ[types.Uint32]),
+			types.NewParam(token.NoPos, nil, "deadline", types.Typ[types.Int64]),
+		), types.NewTuple(), false)
+	_, _, _, _, invalidControlledParkErr := requiredCoroProgramRuntimePlan(timerCtx)
+	controlledParkFn.Signature = originalControlledParkSignature
+	if invalidControlledParkErr == nil || !strings.Contains(invalidControlledParkErr.Error(), "controlled coroutine timer park V2 ABI") {
+		t.Fatalf("invalid controlled timer V2 park ABI error = %v", invalidControlledParkErr)
+	}
+	controlledCancelFn := ssaPkg.Func(coroTimerCancelControlledSymbolV2)
+	originalControlledCancelSignature := controlledCancelFn.Signature
+	controlledCancelFn.Signature = types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(
+			types.NewParam(token.NoPos, nil, "controller", types.Typ[types.UnsafePointer]),
+			types.NewParam(token.NoPos, nil, "expected", types.Typ[types.Uint32]),
+		), types.NewTuple(types.NewParam(token.NoPos, nil, "result", types.Typ[types.Bool])), false)
+	_, _, _, _, invalidControlledCancelErr := requiredCoroProgramRuntimePlan(timerCtx)
+	controlledCancelFn.Signature = originalControlledCancelSignature
+	if invalidControlledCancelErr == nil || !strings.Contains(invalidControlledCancelErr.Error(), "controlled coroutine timer cancel V2 ABI") {
+		t.Fatalf("invalid controlled timer V2 cancel ABI error = %v", invalidControlledCancelErr)
+	}
+	pollParkFn := ssaPkg.Func(coroPollParkSymbolV2)
+	originalPollParkSignature := pollParkFn.Signature
+	pollParkFn.Signature = types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(
+			types.NewParam(token.NoPos, nil, "g", types.Typ[types.UnsafePointer]),
+			types.NewParam(token.NoPos, nil, "handle", types.Typ[types.UnsafePointer]),
+			types.NewParam(token.NoPos, nil, "header", types.Typ[types.UnsafePointer]),
+			types.NewParam(token.NoPos, nil, "storage", types.Typ[types.UnsafePointer]),
+			types.NewParam(token.NoPos, nil, "fd", types.Typ[types.Uint32]),
+			types.NewParam(token.NoPos, nil, "interest", types.Typ[types.Uint32]),
+			types.NewParam(token.NoPos, nil, "deadline", types.Typ[types.Int64]),
+		), types.NewTuple(), false)
+	_, _, _, _, invalidPollParkErr := requiredCoroProgramRuntimePlan(timerCtx)
+	pollParkFn.Signature = originalPollParkSignature
+	if invalidPollParkErr == nil || !strings.Contains(invalidPollParkErr.Error(), "poll park V2 ABI") {
+		t.Fatalf("invalid Poll V2 park ABI error = %v", invalidPollParkErr)
+	}
+	pollResumeFn := ssaPkg.Func(coroPollResumeSymbolV2)
+	originalPollResumeSignature := pollResumeFn.Signature
+	pollResumeFn.Signature = types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(
+			types.NewParam(token.NoPos, nil, "g", types.Typ[types.UnsafePointer]),
+			types.NewParam(token.NoPos, nil, "storage", types.Typ[types.UnsafePointer]),
+		), types.NewTuple(types.NewParam(token.NoPos, nil, "result", types.Typ[types.Uint64])), false)
+	_, _, _, _, invalidPollResumeErr := requiredCoroProgramRuntimePlan(timerCtx)
+	pollResumeFn.Signature = originalPollResumeSignature
+	if invalidPollResumeErr == nil || !strings.Contains(invalidPollResumeErr.Error(), "poll resume V2 ABI") {
+		t.Fatalf("invalid Poll V2 resume ABI error = %v", invalidPollResumeErr)
+	}
+	pollUpdateFn := ssaPkg.Func(coroPollUpdateDeadlineOrAbortSymbolV1)
+	originalPollUpdateSignature := pollUpdateFn.Signature
+	pollUpdateFn.Signature = types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(
+			types.NewParam(token.NoPos, nil, "fd", types.Typ[types.Int32]),
+			types.NewParam(token.NoPos, nil, "interest", types.Typ[types.Uint32]),
+			types.NewParam(token.NoPos, nil, "deadline", types.Typ[types.Uint64]),
+		), types.NewTuple(), false)
+	_, _, _, _, invalidPollUpdateErr := requiredCoroProgramRuntimePlan(timerCtx)
+	pollUpdateFn.Signature = originalPollUpdateSignature
+	if invalidPollUpdateErr == nil || !strings.Contains(invalidPollUpdateErr.Error(), "poll update-deadline-or-abort ABI") {
+		t.Fatalf("invalid poll update deadline ABI error = %v", invalidPollUpdateErr)
+	}
+	pollPostFn := ssaPkg.Func(coroPollPostClosingOrAbortSymbolV1)
+	originalPollPostSignature := pollPostFn.Signature
+	pollPostFn.Signature = types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(
+			types.NewParam(token.NoPos, nil, "fd", types.Typ[types.Uint32]),
+			types.NewParam(token.NoPos, nil, "interest", types.Typ[types.Uint32]),
+		), types.NewTuple(), false)
+	_, _, _, _, invalidPollPostErr := requiredCoroProgramRuntimePlan(timerCtx)
+	pollPostFn.Signature = originalPollPostSignature
+	if invalidPollPostErr == nil || !strings.Contains(invalidPollPostErr.Error(), "poll post-closing-or-abort ABI") {
+		t.Fatalf("invalid poll post closing ABI error = %v", invalidPollPostErr)
+	}
+	semaphorePrepareFn := ssaPkg.Func(coroSemaphorePrepareOrAbortSymbolV1)
+	originalSemaphorePrepareSignature := semaphorePrepareFn.Signature
+	semaphorePrepareFn.Signature = types.NewSignatureType(nil, nil, nil,
 		types.NewTuple(
 			types.NewParam(token.NoPos, nil, "token", types.Typ[types.UnsafePointer]),
-			types.NewParam(token.NoPos, nil, "delay", types.Typ[types.Uint64]),
+			types.NewParam(token.NoPos, nil, "addr", types.Typ[types.UnsafePointer]),
+			types.NewParam(token.NoPos, nil, "ticket", types.NewPointer(types.Typ[types.Uint32])),
+			types.NewParam(token.NoPos, nil, "slot", types.NewPointer(types.Typ[types.Uint64])),
+			types.NewParam(token.NoPos, nil, "generation", types.NewPointer(types.Typ[types.Uint32])),
+		), types.NewTuple(), false)
+	_, _, _, _, invalidSemaphorePrepareErr := requiredCoroProgramRuntimePlan(timerCtx)
+	semaphorePrepareFn.Signature = originalSemaphorePrepareSignature
+	if invalidSemaphorePrepareErr == nil || !strings.Contains(invalidSemaphorePrepareErr.Error(), "semaphore prepare-or-abort ABI") {
+		t.Fatalf("invalid semaphore prepare ABI error = %v", invalidSemaphorePrepareErr)
+	}
+	semaphoreRetireFn := ssaPkg.Func(coroSemaphoreRetireCompletedOrAbortSymbolV1)
+	originalSemaphoreRetireSignature := semaphoreRetireFn.Signature
+	semaphoreRetireFn.Signature = types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(
+			types.NewParam(token.NoPos, nil, "token", types.Typ[types.UnsafePointer]),
+			types.NewParam(token.NoPos, nil, "ticket", types.Typ[types.Uint32]),
+			types.NewParam(token.NoPos, nil, "slot", types.Typ[types.Uint64]),
+			types.NewParam(token.NoPos, nil, "generation", types.Typ[types.Uint32]),
+		), types.NewTuple(), false)
+	_, _, _, _, invalidSemaphoreRetireErr := requiredCoroProgramRuntimePlan(timerCtx)
+	semaphoreRetireFn.Signature = originalSemaphoreRetireSignature
+	if invalidSemaphoreRetireErr == nil || !strings.Contains(invalidSemaphoreRetireErr.Error(), "semaphore retire-or-abort ABI") {
+		t.Fatalf("invalid semaphore retire ABI error = %v", invalidSemaphoreRetireErr)
+	}
+	semaphoreReleaseFn := ssaPkg.Func(coroSemaphoreReleaseOrAbortSymbolV1)
+	originalSemaphoreReleaseSignature := semaphoreReleaseFn.Signature
+	semaphoreReleaseFn.Signature = types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(types.NewParam(token.NoPos, nil, "key", types.Typ[types.Uint64])), types.NewTuple(), false)
+	_, _, _, _, invalidSemaphoreReleaseErr := requiredCoroProgramRuntimePlan(timerCtx)
+	semaphoreReleaseFn.Signature = originalSemaphoreReleaseSignature
+	if invalidSemaphoreReleaseErr == nil || !strings.Contains(invalidSemaphoreReleaseErr.Error(), "semaphore release-or-abort ABI") {
+		t.Fatalf("invalid semaphore release ABI error = %v", invalidSemaphoreReleaseErr)
+	}
+	notifyPrepareFn := ssaPkg.Func(coroNotifyPrepareOrAbortSymbolV1)
+	originalNotifyPrepareSignature := notifyPrepareFn.Signature
+	notifyPrepareFn.Signature = types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(
+			types.NewParam(token.NoPos, nil, "token", types.Typ[types.UnsafePointer]),
+			types.NewParam(token.NoPos, nil, "notifyAddr", types.Typ[types.UnsafePointer]),
+			types.NewParam(token.NoPos, nil, "target", types.Typ[types.Uint64]),
 			types.NewParam(token.NoPos, nil, "ticket", types.NewPointer(types.Typ[types.Uint32])),
 			types.NewParam(token.NoPos, nil, "slot", types.NewPointer(types.Typ[types.Uint32])),
 			types.NewParam(token.NoPos, nil, "generation", types.NewPointer(types.Typ[types.Uint32])),
-		),
-		types.NewTuple(), false)
-	_, _, _, _, invalidTimerPrepareErr := requiredCoroProgramRuntimePlan(timerCtx)
-	timerPrepareFn.Signature = originalTimerPrepareSignature
-	if invalidTimerPrepareErr == nil || !strings.Contains(invalidTimerPrepareErr.Error(), "timer prepare-or-abort ABI") {
-		t.Fatalf("invalid timer prepare ABI error = %v", invalidTimerPrepareErr)
+		), types.NewTuple(), false)
+	_, _, _, _, invalidNotifyPrepareErr := requiredCoroProgramRuntimePlan(timerCtx)
+	notifyPrepareFn.Signature = originalNotifyPrepareSignature
+	if invalidNotifyPrepareErr == nil || !strings.Contains(invalidNotifyPrepareErr.Error(), "notify prepare-or-abort ABI") {
+		t.Fatalf("invalid notify prepare ABI error = %v", invalidNotifyPrepareErr)
 	}
-	timerRetireFn := ssaPkg.Func(coroTimerRetireCompletedOrAbortSymbolV1)
-	originalTimerRetireSignature := timerRetireFn.Signature
-	timerRetireFn.Signature = types.NewSignatureType(nil, nil, nil,
+	notifyRetireFn := ssaPkg.Func(coroNotifyRetireCompletedOrAbortSymbolV1)
+	originalNotifyRetireSignature := notifyRetireFn.Signature
+	notifyRetireFn.Signature = types.NewSignatureType(nil, nil, nil,
 		types.NewTuple(
 			types.NewParam(token.NoPos, nil, "token", types.Typ[types.UnsafePointer]),
-			types.NewParam(token.NoPos, nil, "ticket", types.Typ[types.Uint64]),
-			types.NewParam(token.NoPos, nil, "slot", types.Typ[types.Uint32]),
+			types.NewParam(token.NoPos, nil, "ticket", types.Typ[types.Uint32]),
+			types.NewParam(token.NoPos, nil, "slot", types.Typ[types.Uint64]),
 			types.NewParam(token.NoPos, nil, "generation", types.Typ[types.Uint32]),
-		),
-		types.NewTuple(), false)
-	_, _, _, _, invalidTimerRetireErr := requiredCoroProgramRuntimePlan(timerCtx)
-	timerRetireFn.Signature = originalTimerRetireSignature
-	if invalidTimerRetireErr == nil || !strings.Contains(invalidTimerRetireErr.Error(), "timer retire-or-abort ABI") {
-		t.Fatalf("invalid timer retire ABI error = %v", invalidTimerRetireErr)
+		), types.NewTuple(), false)
+	_, _, _, _, invalidNotifyRetireErr := requiredCoroProgramRuntimePlan(timerCtx)
+	notifyRetireFn.Signature = originalNotifyRetireSignature
+	if invalidNotifyRetireErr == nil || !strings.Contains(invalidNotifyRetireErr.Error(), "notify retire-or-abort ABI") {
+		t.Fatalf("invalid notify retire ABI error = %v", invalidNotifyRetireErr)
+	}
+	for _, name := range []string{coroNotifyOneOrAbortSymbolV1, coroNotifyAllOrAbortSymbolV1} {
+		notifyFn := ssaPkg.Func(name)
+		original := notifyFn.Signature
+		notifyFn.Signature = types.NewSignatureType(nil, nil, nil,
+			types.NewTuple(
+				types.NewParam(token.NoPos, nil, "notifyAddr", types.Typ[types.UnsafePointer]),
+				types.NewParam(token.NoPos, nil, "waitSnapshot", types.Typ[types.Uint64]),
+			), types.NewTuple(), false)
+		_, _, _, _, invalidNotifyErr := requiredCoroProgramRuntimePlan(timerCtx)
+		notifyFn.Signature = original
+		if invalidNotifyErr == nil || !strings.Contains(invalidNotifyErr.Error(), "notify publication-or-abort ABI") {
+			t.Fatalf("invalid %s ABI error = %v", name, invalidNotifyErr)
+		}
 	}
 	panicHook := ssaPkg.Func("__llgo_coro_panic_prepare_v1")
-	if panicHook == nil {
-		t.Fatal("explicit-status panic prepare hook is absent from the runtime fixture")
+	recoverHook := ssaPkg.Func("__llgo_coro_recover_take_v1")
+	payloadHook := ssaPkg.Func("__llgo_coro_fault_payload_v1")
+	faultHook := ssaPkg.Func("__llgo_coro_fault_prepare_v1")
+	if panicHook == nil || recoverHook == nil || payloadHook == nil || faultHook == nil {
+		t.Fatal("explicit-status panic hooks are absent from the runtime fixture")
 	}
 	if _, ok := requiredPlain[panicHook]; ok {
 		t.Fatal("inactive explicit-status panic prepare hook entered the required plain island")
+	}
+	if _, ok := requiredPlain[recoverHook]; ok {
+		t.Fatal("inactive explicit-status recover take hook entered the required plain island")
+	}
+	if _, ok := requiredPlain[payloadHook]; ok {
+		t.Fatal("inactive explicit-status fault payload hook entered the required plain island")
+	}
+	if _, ok := requiredPlain[faultHook]; ok {
+		t.Fatal("inactive explicit-status fault hook entered the required plain island")
 	}
 	panicCtx := &context{
 		buildConf: &Config{
@@ -719,16 +1064,39 @@ func atomicExchange(*uint32, uint32) uint32
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(panicRoots) != len(wantRoots)+1 ||
-		panicRoots[len(panicRoots)-1].Function != panicHook ||
+	if len(panicRoots) != len(wantRoots)+4 ||
+		panicRoots[len(panicRoots)-4].Function != panicHook ||
+		panicRoots[len(panicRoots)-3].Function != recoverHook ||
+		panicRoots[len(panicRoots)-2].Function != payloadHook ||
+		panicRoots[len(panicRoots)-1].Function != faultHook ||
 		panicRoots[len(panicRoots)-1].Demand != coro.SyncDemand {
-		t.Fatalf("explicit-status runtime roots = %+v, want legacy roots plus exact panic prepare/sync", panicRoots)
+		t.Fatalf("explicit-status runtime roots = %+v, want legacy roots plus exact panic hooks/sync", panicRoots)
 	}
 	if _, ok := panicPlain[panicHook]; !ok {
 		t.Fatal("active explicit-status panic prepare hook is absent from the required plain island")
 	}
+	if _, ok := panicPlain[recoverHook]; !ok {
+		t.Fatal("active explicit-status recover take hook is absent from the required plain island")
+	}
+	if _, ok := panicPlain[payloadHook]; !ok {
+		t.Fatal("active explicit-status fault payload hook is absent from the required plain island")
+	}
+	if _, ok := panicPlain[faultHook]; !ok {
+		t.Fatal("active explicit-status fault hook is absent from the required plain island")
+	}
 	if len(panicDirect) != 0 || len(panicClosed) != 0 {
 		t.Fatalf("explicit-status panic hook produced callback proofs: direct=%d dynamic=%d", len(panicDirect), len(panicClosed))
+	}
+	originalPayloadSignature := payloadHook.Signature
+	payloadHook.Signature = types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(
+			types.NewParam(token.NoPos, nil, "kind", types.Typ[types.Uint32]),
+			types.NewParam(token.NoPos, nil, "typeOut", types.Typ[types.UnsafePointer]),
+		), types.NewTuple(), false)
+	_, _, _, _, invalidPayloadErr := requiredCoroProgramRuntimePlan(panicCtx)
+	payloadHook.Signature = originalPayloadSignature
+	if invalidPayloadErr == nil || !strings.Contains(invalidPayloadErr.Error(), "fault payload ABI") {
+		t.Fatalf("invalid fault payload ABI error = %v", invalidPayloadErr)
 	}
 	channelCtx := &context{
 		buildConf: &Config{
@@ -744,10 +1112,16 @@ func atomicExchange(*uint32, uint32) uint32
 		t.Fatal(err)
 	}
 	channelNames := []string{
+		"CoroChanTrySend",
+		"CoroChanTryRecv",
+		"CoroChanTryClose",
+		"CoroChanSelectTry",
+		"CoroChanSelectPark",
+		"CoroChanSelectResume",
 		coroChanSendParkSymbolV1,
 		coroChanRecvParkSymbolV1,
 		coroChanResumeSymbolV1,
-		coroChanSendClosedPanicSymbolV1,
+		"__llgo_coro_fault_prepare_v1",
 	}
 	if len(channelRoots) != len(wantRoots)+len(channelNames) {
 		t.Fatalf("channel runtime roots = %d, want %d", len(channelRoots), len(wantRoots)+len(channelNames))
@@ -845,6 +1219,7 @@ func atomicExchange(*uint32, uint32) uint32
 		intrinsicCallSemantics: emission.CoroIntrinsicCallSiteSemantics,
 		requiredRoots:          roots,
 		requiredPlain:          requiredPlain,
+		requiredHostPlain:      maps.Clone(requiredPlain),
 		requiredDirectPlain:    directPlain,
 		requiredClosedDynamic:  closedDynamic,
 	}
@@ -876,36 +1251,37 @@ func atomicExchange(*uint32, uint32) uint32
 		t.Fatal(err)
 	}
 	panicHookPlan, ok := panicPlan.FunctionPlan(panicHook)
-	if !ok || panicHookPlan.Emission != coro.EmitPlain || panicHookPlan.Demand != coro.SyncDemand ||
+	if !ok || panicHookPlan.Emission != coro.EmitRawPlain || panicHookPlan.Demand != coro.SyncDemand ||
+		panicHookPlan.ManagedDemand != coro.NoDemand || !panicHookPlan.RawPlainDemand || !panicHookPlan.RawPlainOnly ||
 		panicHookPlan.FuncRep != coro.DirectPlain || panicHookPlan.Effect.MaySuspend() ||
 		panicHookPlan.Exec.Contains(coro.NeedsPreempt) {
-		t.Fatalf("explicit-status panic prepare hook plan = %+v, want required sync direct-plain", panicHookPlan)
+		t.Fatalf("explicit-status panic prepare hook plan = %+v, want required raw-only direct-plain", panicHookPlan)
 	}
 	closurePlan, ok := plan.FunctionPlan(closureLoop)
-	if !ok || closurePlan.Exec.Contains(coro.NeedsPreempt) || closurePlan.Effect.MaySuspend() || closurePlan.Emission != coro.EmitPlain {
-		t.Fatalf("required closure loop plan = %+v, want one trusted plain body", closurePlan)
+	if !ok || closurePlan.Exec.Contains(coro.NeedsPreempt) || closurePlan.Emission != coro.EmitRawPlain || !closurePlan.RawPlainOnly {
+		t.Fatalf("required closure loop plan = %+v, want one trusted raw-only body", closurePlan)
 	}
 	pollPlan, ok := plan.FunctionPlan(ssaPkg.Func("__llgo_coro_preempt_poll_v1"))
-	if !ok || pollPlan.Effect.MaySuspend() || pollPlan.Exec.Contains(coro.NeedsPreempt) || pollPlan.Emission != coro.EmitPlain {
-		t.Fatalf("preempt poll plan = %+v, want one trusted plain atomic poll", pollPlan)
+	if !ok || pollPlan.Exec.Contains(coro.NeedsPreempt) || pollPlan.Emission != coro.EmitRawPlain || !pollPlan.RawPlainOnly {
+		t.Fatalf("preempt poll plan = %+v, want one trusted raw-only atomic poll", pollPlan)
 	}
 	parkHookPlan, ok := plan.FunctionPlan(ssaPkg.Func("__llgo_coro_park_prepare_v1"))
-	if !ok || parkHookPlan.Effect.MaySuspend() || parkHookPlan.Exec.Contains(coro.NeedsPreempt) ||
-		parkHookPlan.Emission != coro.EmitPlain || parkHookPlan.Demand != coro.SyncDemand ||
+	if !ok || parkHookPlan.Exec.Contains(coro.NeedsPreempt) ||
+		parkHookPlan.Emission != coro.EmitRawPlain || !parkHookPlan.RawPlainOnly || parkHookPlan.Demand != coro.SyncDemand ||
 		parkHookPlan.FuncRep != coro.DirectPlain {
-		t.Fatalf("park prepare hook plan = %+v, want one required sync direct-plain body", parkHookPlan)
+		t.Fatalf("park prepare hook plan = %+v, want one required raw-only direct-plain body", parkHookPlan)
 	}
 	runDecisionPlan, ok := plan.FunctionPlan(runDecisionFn)
-	if !ok || runDecisionPlan.Effect.MaySuspend() || runDecisionPlan.Exec.Contains(coro.NeedsPreempt) ||
-		runDecisionPlan.Emission != coro.EmitPlain || runDecisionPlan.Demand != coro.SyncDemand ||
+	if !ok || runDecisionPlan.Exec.Contains(coro.NeedsPreempt) ||
+		runDecisionPlan.Emission != coro.EmitRawPlain || !runDecisionPlan.RawPlainOnly || runDecisionPlan.Demand != coro.SyncDemand ||
 		runDecisionPlan.FuncRep != coro.DirectPlain {
-		t.Fatalf("run-decision hook plan = %+v, want one required sync direct-plain body", runDecisionPlan)
+		t.Fatalf("run-decision hook plan = %+v, want one required raw-only direct-plain body", runDecisionPlan)
 	}
 	runDecisionZeroPlan, ok := plan.FunctionPlan(runDecisionZeroFn)
-	if !ok || runDecisionZeroPlan.Effect.MaySuspend() || runDecisionZeroPlan.Exec.Contains(coro.NeedsPreempt) ||
-		runDecisionZeroPlan.Emission != coro.EmitPlain || runDecisionZeroPlan.Demand != coro.SyncDemand ||
+	if !ok || runDecisionZeroPlan.Exec.Contains(coro.NeedsPreempt) ||
+		runDecisionZeroPlan.Emission != coro.EmitRawPlain || !runDecisionZeroPlan.RawPlainOnly || runDecisionZeroPlan.Demand != coro.SyncDemand ||
 		runDecisionZeroPlan.FuncRep != coro.DirectPlain {
-		t.Fatalf("zero-ticket run-decision hook plan = %+v, want one required sync direct-plain body", runDecisionZeroPlan)
+		t.Fatalf("zero-ticket run-decision hook plan = %+v, want one required raw-only direct-plain body", runDecisionZeroPlan)
 	}
 	unrelatedPlan, ok := plan.FunctionPlan(unrelatedLoop)
 	if !ok || !unrelatedPlan.Exec.Contains(coro.NeedsPreempt) || !unrelatedPlan.Effect.Contains(coro.YieldOnly) || unrelatedPlan.Emission != coro.EmitCoroutine {
@@ -961,9 +1337,9 @@ func atomicExchange(*uint32, uint32) uint32
 		t.Fatalf("required plain ordinary-G IRQ-unsafe plan: %v", err)
 	}
 	irqClosure, ok := irqPlan.FunctionPlan(closureLoop)
-	if !ok || irqClosure.Emission != coro.EmitPlain || !irqClosure.Exec.Contains(coro.IRQUnsafe) ||
+	if !ok || irqClosure.Emission != coro.EmitRawPlain || !irqClosure.RawPlainOnly || !irqClosure.Exec.Contains(coro.IRQUnsafe) ||
 		irqClosure.Exec.Contains(coro.ThreadAffine|coro.BlockForeign|coro.OpaqueExec) {
-		t.Fatalf("required plain IRQ-unsafe closure plan = %+v, want exact ordinary-G plain implementation", irqClosure)
+		t.Fatalf("required plain IRQ-unsafe closure plan = %+v, want exact raw-only plain implementation", irqClosure)
 	}
 
 	conflicts := []struct {
@@ -1117,7 +1493,11 @@ var dynamic func()
 
 func installC(CCallback) {}
 func syncCallback() { for i := 0; i < 2; i++ {} }
+func managedCaller() { syncCallback() }
 func dynamicCallback() { dynamic() }
+func dynamicTargetA() {}
+func dynamicTargetB() {}
+func keepDynamicOpen() { dynamic = dynamicTargetA; dynamic = dynamicTargetB }
 func install() {
 	installC(CCallback(syncCallback))
 	installC(CCallback(dynamicCallback))
@@ -1144,17 +1524,32 @@ func install() {
 		t.Fatal(err)
 	}
 	callbackPlan, ok := plan.FunctionPlan(syncCallback)
-	if !ok || callbackPlan.Effect != coro.NoSuspend || callbackPlan.Exec.Contains(coro.NeedsPreempt) ||
-		callbackPlan.FuncRep != coro.DirectPlain || callbackPlan.Primary != coro.PrimaryPlain || callbackPlan.Emission != coro.EmitPlain {
-		t.Fatalf("sync C callback plan = %+v, want one non-suspending direct plain body", callbackPlan)
+	if !ok || callbackPlan.ManagedDemand != coro.NoDemand || !callbackPlan.RawPlainDemand || !callbackPlan.RawPlainOnly ||
+		!callbackPlan.RawPlainEntry || !plan.HasRawPlainVariant(syncCallback) ||
+		callbackPlan.FuncRep != coro.DirectPlain || callbackPlan.Primary != coro.PrimaryPlain || callbackPlan.Emission != coro.EmitRawPlain {
+		t.Fatalf("sync C callback plan = %+v, want one raw-only plain callback body", callbackPlan)
 	}
 	valuePlan, ok := plan.ValuePlan(use.call.Common().Args[use.argument])
 	if !ok || len(valuePlan.Funcs) != 1 || valuePlan.Funcs[0].Rep != coro.DirectPlain || valuePlan.Funcs[0].MayBeNil || len(valuePlan.Funcs[0].Targets) != 1 {
 		t.Fatalf("sync C callback value plan = %+v, present=%t", valuePlan, ok)
 	}
+
+	mixedConfig := coro.SSAConfig{MaxPlainInstructions: -1, FunctionIDs: fixture.functionIDs}
+	mixedPlan, err := fixture.input.Analyze(coro.Roots{{
+		Function: fixture.pkg.Func("managedCaller"), Demand: coro.AsyncDemand,
+	}}, mixedConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mixedCallback, ok := mixedPlan.FunctionPlan(syncCallback)
+	if !ok || mixedCallback.ManagedDemand == coro.NoDemand || !mixedCallback.RawPlainDemand || mixedCallback.RawPlainOnly ||
+		!mixedCallback.RawPlainEntry || !mixedPlan.HasRawPlainVariant(syncCallback) ||
+		mixedCallback.FuncRep != coro.DirectCoro || mixedCallback.Primary != coro.PrimaryCoroutine || mixedCallback.Emission != coro.EmitCoroutine {
+		t.Fatalf("managed/raw C callback plan = %+v, want managed coroutine primary plus exact raw callback variant", mixedCallback)
+	}
 	dynamicPlan, ok := plan.FunctionPlan(dynamicCallback)
-	if !ok || !dynamicPlan.Effect.IsOpaque() || dynamicPlan.FuncRep != coro.Dispatch {
-		t.Fatalf("dynamic C callback plan = %+v, want real Dispatch blocker", dynamicPlan)
+	if !ok || !dynamicPlan.Effect.IsOpaque() || dynamicPlan.FuncRep != coro.DirectCoro || dynamicPlan.RawPlainDemand {
+		t.Fatalf("dynamic C callback plan = %+v, want managed opaque blocker without a raw entry", dynamicPlan)
 	}
 
 	var dynamicUse ssa.CallInstruction
@@ -1180,6 +1575,67 @@ func install() {
 	})
 	if err == nil || !strings.Contains(err.Error(), "builder cannot authorize direct-plain ABI") {
 		t.Fatalf("unauthorized builder direct-plain error = %v", err)
+	}
+	_, err = fixture.analyze(coro.SSAConfig{
+		MaxPlainInstructions: -1,
+		ClassifyRawDirectPlainCallArgument: func(_ *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+			return call == dynamicUse && argument == 0, nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "builder cannot authorize raw direct-plain ABI") {
+		t.Fatalf("unauthorized builder raw direct-plain error = %v", err)
+	}
+}
+
+func TestRequiredCoroDirectPlainCallbackAdmitsRawCLeafAndElidedIntrinsic(t *testing.T) {
+	fixture := buildRequiredCoroRuntimeFixture(t, `
+//llgo:type C
+type CCallback func()
+
+//llgo:type C
+type InstallerCallback func(CCallback)
+
+func installC(InstallerCallback) {}
+
+//llgo:link inlineCString llgo.cstr
+func inlineCString(string) *byte
+
+func callback(previous CCallback) {
+	_ = inlineCString("finalizer")
+	if previous != nil {
+		previous()
+	}
+}
+
+func install() { installC(InstallerCallback(callback)) }
+`)
+	if len(fixture.directPlain) != 1 || fixture.directPlain[0].target != fixture.pkg.Func("callback") {
+		t.Fatalf("direct-plain callbacks = %+v, want callback", fixture.directPlain)
+	}
+	plan, err := fixture.analyze(coro.SSAConfig{MaxPlainInstructions: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	callback := fixture.pkg.Func("callback")
+	callbackPlan := functionPlanForBuildTest(t, plan, callback)
+	if callbackPlan.ManagedDemand != coro.NoDemand || !callbackPlan.RawPlainDemand || !callbackPlan.RawPlainOnly ||
+		!callbackPlan.RawPlainEntry || callbackPlan.Emission != coro.EmitRawPlain || callbackPlan.FuncRep != coro.DirectPlain {
+		t.Fatalf("callback plan = %+v, want one raw-only entry", callbackPlan)
+	}
+	var rawCall ssa.CallInstruction
+	for _, call := range coroPlanTestCalls(callback) {
+		if call.Common().StaticCallee() == nil {
+			rawCall = call
+			break
+		}
+	}
+	if rawCall == nil {
+		t.Fatal("callback has no raw C code-pointer call")
+	}
+	callPlan, ok := plan.CallPlan(rawCall)
+	if !ok || callPlan.Transport != coro.RawCCodePointer || callPlan.Rep != coro.DirectPlain ||
+		callPlan.Kind != coro.CallForeign || !callPlan.Open || callPlan.Unresolved != coro.UnknownForeign {
+		t.Fatalf("raw callback CallPlan = %+v, present=%t", callPlan, ok)
 	}
 }
 
@@ -1220,7 +1676,7 @@ func install() {
 }
 
 func TestRequiredCoroProgramRuntimePlanDirectPlainCFunctionArgumentFailsClosed(t *testing.T) {
-	t.Run("other boundary", func(t *testing.T) {
+	t.Run("raw C value may have another raw boundary", func(t *testing.T) {
 		fixture := buildRequiredCoroRuntimeFixture(t, `
 //llgo:type C
 type CCallback func()
@@ -1238,8 +1694,14 @@ func install() {
 		if len(fixture.directPlain) != 1 {
 			t.Fatalf("required direct-plain callbacks = %d, want 1", len(fixture.directPlain))
 		}
-		if _, err := fixture.analyze(coro.SSAConfig{MaxPlainInstructions: -1}); err == nil || !strings.Contains(err.Error(), "another canonical boundary") {
-			t.Fatalf("other-boundary error = %v", err)
+		plan, err := fixture.analyze(coro.SSAConfig{MaxPlainInstructions: -1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		callbackPlan := functionPlanForBuildTest(t, plan, fixture.pkg.Func("callback"))
+		if callbackPlan.ManagedDemand != coro.NoDemand || !callbackPlan.RawPlainDemand || !callbackPlan.RawPlainOnly ||
+			callbackPlan.Emission != coro.EmitRawPlain {
+			t.Fatalf("multi-boundary raw callback plan = %+v", callbackPlan)
 		}
 	})
 
@@ -1257,7 +1719,7 @@ func install() { installC(CCallback(callback)) }
 		if len(fixture.directPlain) != 1 {
 			t.Fatalf("required direct-plain callbacks = %d, want 1", len(fixture.directPlain))
 		}
-		if _, err := fixture.analyze(coro.SSAConfig{MaxPlainInstructions: -1}); err == nil || !strings.Contains(err.Error(), "not a defined closed singleton with one non-suspending plain body") {
+		if _, err := fixture.analyze(coro.SSAConfig{MaxPlainInstructions: -1}); err == nil || !strings.Contains(err.Error(), "real local suspend effect may-park") {
 			t.Fatalf("suspending callback error = %v", err)
 		}
 	})
@@ -1425,6 +1887,7 @@ type requiredCoroRuntimeFixture struct {
 	pkg           *ssa.Package
 	ctx           *context
 	input         CoroPlanInput
+	roots         coro.Roots
 	requiredPlain map[*ssa.Function]struct{}
 	directPlain   []requiredCoroDirectPlainCallArgument
 	closedDynamic map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate
@@ -1463,7 +1926,10 @@ func __llgo_coro_frame_free_v1() {}
 	t.Cleanup(prog.Dispose)
 	cl.ParsePkgSyntax(prog, ssaPkg.Pkg, files)
 	emission, err := cl.PrepareEmissionUniverse(prog, nil, []cl.EmissionPackage{{
-		SSA: ssaPkg, Files: files, Identity: llssa.PkgRuntime,
+		SSA:            ssaPkg,
+		Files:          files,
+		Identity:       llssa.PkgRuntime,
+		RawDataSymbols: cl.CoroRawDataSymbolProfile{Complete: true},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -1491,19 +1957,107 @@ func __llgo_coro_frame_free_v1() {}
 		pkg: ssaPkg,
 		ctx: ctx,
 		input: CoroPlanInput{
-			Program:               ssaPkg.Prog,
-			EmissionUniverse:      ssaEmission,
-			resolveFunction:       emission.Resolve,
-			functionBackground:    emission.FunctionBackground,
-			requiredRoots:         roots,
-			requiredPlain:         requiredPlain,
-			requiredDirectPlain:   directPlain,
-			requiredClosedDynamic: closedDynamic,
+			Program:                ssaPkg.Prog,
+			EmissionUniverse:       ssaEmission,
+			resolveFunction:        emission.Resolve,
+			functionBackground:     emission.FunctionBackground,
+			intrinsicCallSemantics: emission.CoroIntrinsicCallSiteSemantics,
+			rawCFunctionType: func(typ types.Type) (bool, error) {
+				if typ == nil {
+					return false, nil
+				}
+				if _, signature := types.Unalias(typ).Underlying().(*types.Signature); !signature {
+					return false, nil
+				}
+				return prog.TypeBackground(typ) == llssa.InC, nil
+			},
+			requiredRoots:               roots,
+			requiredPlain:               requiredPlain,
+			requiredDirectPlain:         directPlain,
+			requiredClosedDynamic:       closedDynamic,
+			requiredGlobalFunctionSlots: ctx.coroGlobalFunctionSlots,
 		},
+		roots:         roots,
 		requiredPlain: requiredPlain,
 		directPlain:   directPlain,
 		closedDynamic: closedDynamic,
 		functionIDs:   functionIDs,
+	}
+}
+
+func TestRequiredCoroProgramRuntimePlanCriticalRoots(t *testing.T) {
+	const physicalHooks = `
+func __llgo_coro_await_prepare_v3() {}
+func __llgo_coro_await_consume_v1() {}
+func __llgo_coro_complete_prepare_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32) {}
+`
+	const exact = physicalHooks + `
+func __llgo_coro_critical_enter_v1(unsafe.Pointer) {}
+func __llgo_coro_critical_exit_v1(unsafe.Pointer) bool { return false }
+func install() {}
+`
+	t.Run("exact runnable PhysicalABIV1 roots", func(t *testing.T) {
+		fixture := buildRequiredCoroRuntimeFixture(t, exact)
+		fixture.ctx.buildConf.EnableCoroPhysicalABI = true
+		roots, requiredPlain, _, _, err := requiredCoroProgramRuntimePlan(fixture.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"__llgo_coro_critical_enter_v1", "__llgo_coro_critical_exit_v1"} {
+			fn := fixture.pkg.Func(name)
+			found := false
+			for _, root := range roots {
+				if root.Function == fn && root.Demand.Join(root.ManagedDemand) == coro.SyncDemand && !root.RawPlainDemand {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("missing synchronous critical runtime root %q", name)
+			}
+			if _, required := requiredPlain[fn]; !required {
+				t.Fatalf("critical runtime root %q did not enter required plain closure", name)
+			}
+		}
+	})
+
+	for _, test := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "missing",
+			body: physicalHooks + `func install() {}`,
+			want: `critical_enter_v1" has no emitted Go body`,
+		},
+		{
+			name: "wrong enter parameter",
+			body: physicalHooks + `
+func __llgo_coro_critical_enter_v1(uintptr) {}
+func __llgo_coro_critical_exit_v1(unsafe.Pointer) bool { return false }
+func install() {}
+`,
+			want: "must have exact func(unsafe.Pointer) signature",
+		},
+		{
+			name: "wrong exit result",
+			body: physicalHooks + `
+func __llgo_coro_critical_enter_v1(unsafe.Pointer) {}
+func __llgo_coro_critical_exit_v1(unsafe.Pointer) uint32 { return 0 }
+func install() {}
+`,
+			want: "must have exact func(unsafe.Pointer) bool signature",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := buildRequiredCoroRuntimeFixture(t, test.body)
+			fixture.ctx.buildConf.EnableCoroPhysicalABI = true
+			_, _, _, _, err := requiredCoroProgramRuntimePlan(fixture.ctx)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("critical runtime root error = %v, want substring %q", err, test.want)
+			}
+		})
 	}
 }
 
@@ -1578,6 +2132,8 @@ func TestBuildCoroPlanInstallsArchiveDigest(t *testing.T) {
 		prog:    explicitProg,
 		buildConf: &Config{
 			EnableCoroEntryResolution:        true,
+			EnableCoroPhysicalABI:            true,
+			EnableCoroChildAwait:             true,
 			EnableCoroExplicitStatusPanicABI: true,
 			CoroPlanBuilder: func(input CoroPlanInput) (*coro.SSAPlan, error) {
 				return input.Analyze(coro.Roots{{Function: ssaPkg.Func("F"), Demand: coro.SyncDemand}}, coro.SSAConfig{
@@ -1586,13 +2142,13 @@ func TestBuildCoroPlanInstallsArchiveDigest(t *testing.T) {
 			},
 		},
 	}
-	if err := buildCoroPlan(explicitCtx, aPkg); err == nil ||
-		!strings.Contains(err.Error(), coro.PanicExplicitStatusABIV0) ||
-		!strings.Contains(err.Error(), "lowering and runtime semantics are not implemented") {
-		t.Fatalf("explicit-status panic ABI build error = %v", err)
+	if err := buildCoroPlan(explicitCtx, aPkg); err != nil {
+		t.Fatalf("build explicit-status panic ABI: %v", err)
 	}
-	if explicitCtx.coroPlan != nil || explicitCtx.clCompilation != nil || explicitCtx.coroPlanDigest != "" || explicitCtx.coroPlanMetadata.PanicABI != "" {
-		t.Fatalf("identity-only explicit-status panic build retained active state: plan=%v compilation=%v digest=%q metadata=%+v",
+	if explicitCtx.coroPlan == nil || explicitCtx.clCompilation == nil || explicitCtx.coroPlanDigest == "" ||
+		explicitCtx.coroPlanMetadata.PanicABI != coro.PanicExplicitStatusABIV0 ||
+		!explicitCtx.clCompilation.EnableCoroExplicitStatusPanicABI {
+		t.Fatalf("explicit-status panic build state: plan=%v compilation=%v digest=%q metadata=%+v",
 			explicitCtx.coroPlan, explicitCtx.clCompilation, explicitCtx.coroPlanDigest, explicitCtx.coroPlanMetadata)
 	}
 
@@ -1939,6 +2495,24 @@ func alias() {}
 	if got, ok := accepted.FunctionPlan(method); !ok || got.Demand != coro.SyncDemand {
 		t.Fatalf("accepted exact reference plan = %+v, present=%v", got, ok)
 	}
+
+	_, err = input.Analyze(roots, coro.SSAConfig{
+		ClassifyDemandReferences: func(fn *ssa.Function) ([]*ssa.Function, error) {
+			if fn == owner {
+				return []*ssa.Function{method, method2}, nil
+			}
+			return nil, nil
+		},
+		ClassifySyncDemandReferences: func(fn *ssa.Function) ([]*ssa.Function, error) {
+			if fn == owner {
+				return []*ssa.Function{method}, nil
+			}
+			return nil, nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "conflict with the frozen frontend raw-ABI references") {
+		t.Fatalf("builder-invented synchronous demand-reference error = %v", err)
+	}
 }
 
 func TestCoroPlanInputOwnsFrozenLoweredCalls(t *testing.T) {
@@ -2091,9 +2665,8 @@ func external()
 	if err := validateCoroUnwindOnlyLoweredCalls(plainPlan, coro.PanicLegacyABIV0); err != nil {
 		t.Fatalf("bounded plain unwind helper rejected: %v", err)
 	}
-	if err := validateCoroUnwindOnlyLoweredCalls(plainPlan, coro.PanicExplicitStatusABIV0); err == nil ||
-		!strings.Contains(err.Error(), "has no certified unwind-helper call contract") {
-		t.Fatalf("identity-only explicit-status unwind helper error = %v", err)
+	if err := validateCoroUnwindOnlyLoweredCalls(plainPlan, coro.PanicExplicitStatusABIV0); err != nil {
+		t.Fatalf("synchronous-only plain owner was rejected by explicit-status validation: %v", err)
 	}
 	if err := validateCoroUnwindOnlyLoweredCalls(plainPlan, coro.PanicLegacyABIV0); err != nil {
 		t.Fatalf("explicit-status rejection changed the legacy bounded-plain certificate: %v", err)
@@ -2114,6 +2687,71 @@ func external()
 	if err := validateCoroUnwindOnlyLoweredCalls(build(external), coro.PanicLegacyABIV0); err == nil ||
 		!strings.Contains(err.Error(), "is not a defined Go body") {
 		t.Fatalf("external unwind helper error = %v", err)
+	}
+}
+
+func TestValidateCoroUnwindOnlyLoweredCallsExplicitStatusAcceptsExactNoUnwindPlainTarget(t *testing.T) {
+	ssaPkg, _ := buildCoroPlanTestPackage(t, "example.com/unwindexplicitplain", `package unwindexplicitplain
+var channel chan int
+func owner() { <-channel }
+func safe(value int) bool { return value == 0 }
+func affine(value int) bool { return value == 0 }
+`, nil)
+	owner := ssaPkg.Func("owner")
+	safe := ssaPkg.Func("safe")
+	affine := ssaPkg.Func("affine")
+	universe, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, []*ssa.Function{owner, safe, affine})
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := func(target *ssa.Function) *coro.SSAPlan {
+		t.Helper()
+		plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: owner, Demand: coro.SyncDemand}}, coro.SSAConfig{
+			EmissionUniverse: universe,
+			OutcomeMode:      coro.OutcomeExplicitStatus,
+			ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+				if fn == affine {
+					return coro.SSAFunctionPolicy{Exec: coro.ThreadAffine}, nil
+				}
+				return coro.SSAFunctionPolicy{}, nil
+			},
+			ClassifyLoweredCalls: func(fn *ssa.Function) ([]coro.SSALoweredCall, error) {
+				if fn == owner {
+					return []coro.SSALoweredCall{{LogicalName: "runtime.Helper", Target: target, UnwindOnly: true}}, nil
+				}
+				return nil, nil
+			},
+			MaxPlainInstructions: -1,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return plan
+	}
+
+	safePlan := build(safe)
+	if got := functionPlanForBuildTest(t, safePlan, owner); got.Emission != coro.EmitCoroutine {
+		t.Fatalf("owner plan = %+v; want physical coroutine", got)
+	}
+	if got := functionPlanForBuildTest(t, safePlan, safe); got.Emission != coro.EmitPlain ||
+		got.Effect != coro.NoSuspend || got.Exec.Contains(coro.MayUnwind) {
+		t.Fatalf("safe helper plan = %+v; want exact no-unwind plain body", got)
+	}
+	if err := validateCoroUnwindOnlyLoweredCalls(safePlan, coro.PanicExplicitStatusABIV0); err != nil {
+		t.Fatalf("exact no-unwind plain helper rejected under ExplicitStatus: %v", err)
+	}
+
+	affinePlan := build(affine)
+	if got := functionPlanForBuildTest(t, affinePlan, owner); got.Emission != coro.EmitCoroutine {
+		t.Fatalf("thread-affine case owner plan = %+v; want physical coroutine", got)
+	}
+	if got := functionPlanForBuildTest(t, affinePlan, affine); got.Emission != coro.EmitPlain ||
+		!got.Exec.Contains(coro.ThreadAffine) || got.Exec.Contains(coro.MayUnwind) {
+		t.Fatalf("thread-affine helper plan = %+v; want no-unwind plain body with an incompatible execution constraint", got)
+	}
+	if err := validateCoroUnwindOnlyLoweredCalls(affinePlan, coro.PanicExplicitStatusABIV0); err == nil ||
+		!strings.Contains(err.Error(), "no exact ExplicitStatus coroutine child") {
+		t.Fatalf("thread-affine plain helper error = %v; want ExplicitStatus rejection", err)
 	}
 }
 

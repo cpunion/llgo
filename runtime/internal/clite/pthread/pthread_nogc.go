@@ -75,5 +75,10 @@ func Create(pthread *Thread, attr *Attr, routine RoutineFunc, arg c.Pointer) c.I
 //
 // See https://man7.org/linux/man-pages/man3/pthread_join.3.html
 //
+// Join waits for another native thread and is therefore legal only in an
+// audited compiler-owned raw host-stack closure. Managed callers keep their
+// foreign-wait effect.
+//
+//llgo:coro schedulerwait
 //go:linkname Join C.pthread_join
 func Join(thread Thread, retval *c.Pointer) c.Int

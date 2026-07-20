@@ -807,16 +807,21 @@ type aPackage struct {
 	cu         CompilationUnit
 	glbDbgVars map[Expr]bool
 
-	vars         map[string]Global
-	fns          map[string]Function
-	pyobjs       map[string]PyObjRef
-	pymods       map[string]Global
-	strs         map[string]llvm.Value
-	goStrs       map[string]llvm.Value
-	fnlink       func(string) string
-	methodlink   func(string, *types.Func, *types.Signature) string
-	runtimeCall  RuntimeCallResolver
-	runtimeFuncs map[Type]string
+	vars        map[string]Global
+	fns         map[string]Function
+	pyobjs      map[string]PyObjRef
+	pymods      map[string]Global
+	strs        map[string]llvm.Value
+	goStrs      map[string]llvm.Value
+	fnlink      func(string) string
+	methodlink  func(string, *types.Func, *types.Signature) string
+	methodToken func(string, *types.Func, *types.Signature) (Expr, bool)
+	// interfaceMethodDescriptor may replace one ABI Method.Ifn_ raw entry
+	// with a compiler-owned descriptor pointer. Tfn_ and every other raw
+	// address consumer deliberately remain on methodlink/fnlink.
+	interfaceMethodDescriptor func(string, *types.Func, *types.Signature) (Expr, bool)
+	runtimeCall               RuntimeCallResolver
+	runtimeFuncs              map[Type]string
 
 	iRoutine int
 
@@ -968,6 +973,21 @@ func (p Package) SetResolveLinkname(fn func(string) string) {
 // A nil resolver preserves the legacy SetResolveLinkname behavior.
 func (p Package) SetResolveMethodLinkname(fn func(string, *types.Func, *types.Signature) string) {
 	p.methodlink = fn
+}
+
+// SetResolveMethodToken installs the resolver for a Method.Tfn_ word used only
+// as a non-callable dispatch discriminator. Returning ok=true bypasses the
+// ordinary closure-context stub and stores the supplied exact code pointer.
+func (p Package) SetResolveMethodToken(fn func(string, *types.Func, *types.Signature) (Expr, bool)) {
+	p.methodToken = fn
+}
+
+// SetResolveInterfaceMethodDescriptor installs the narrowly-scoped resolver
+// for ABI Method.Ifn_ words. A successful result replaces only the interface
+// call entry; Method.Tfn_ and explicit raw function addresses keep their
+// ordinary callable ABI. ok=false preserves the legacy Ifn_ word.
+func (p Package) SetResolveInterfaceMethodDescriptor(fn func(string, *types.Func, *types.Signature) (Expr, bool)) {
+	p.interfaceMethodDescriptor = fn
 }
 
 // RuntimeCallResolver may replace a compiler-inserted runtime helper call.

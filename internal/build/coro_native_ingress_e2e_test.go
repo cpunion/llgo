@@ -514,12 +514,11 @@ func buildCoroNativeIngressE2ERuntimeIsland(t *testing.T, temp string) []string 
 	conf.Tags = "nogc"
 	conf.compilerBuildTags = []string{"llgo_coro", coroNativePipeBuildTag, coroNativeIngressTestBuildTag}
 	allowed := map[string]bool{
-		"command-line-arguments":                                     true,
-		"github.com/goplus/llgo/runtime/internal/clite/pthread/sync": true,
-		"github.com/goplus/llgo/runtime/internal/coro":               true,
-		"github.com/goplus/llgo/runtime/internal/coroalloc":          true,
-		"github.com/goplus/llgo/runtime/internal/corodoorbell":       true,
-		"github.com/goplus/llgo/runtime/internal/coroworker":         true,
+		"command-line-arguments":                               true,
+		"github.com/goplus/llgo/runtime/internal/coro":         true,
+		"github.com/goplus/llgo/runtime/internal/coroalloc":    true,
+		"github.com/goplus/llgo/runtime/internal/corodoorbell": true,
+		"github.com/goplus/llgo/runtime/internal/coroworker":   true,
 	}
 	seen := make(map[string]bool, len(allowed))
 	var objects []string
@@ -551,7 +550,13 @@ func buildCoroNativeIngressE2ERuntimeIsland(t *testing.T, temp string) []string 
 			t.Fatalf("native ingress runtime did not emit required module %q", id)
 		}
 	}
-	objects = append(objects, buildCoroNativeWorkerCallObject(t, temp))
+	// This source-island test emits package LLVM modules directly, so it must
+	// materialize both LLGoFiles C leaves that the ordinary package linker would
+	// otherwise add for coroworker and corodoorbell.
+	objects = append(objects,
+		buildCoroNativeWorkerCallObject(t, temp),
+		buildCoroNativeDoorbellObject(t, temp),
+	)
 	return objects
 }
 

@@ -1,4 +1,4 @@
-//go:build !baremetal
+//go:build !baremetal && (!llgo || !llgo_coro || !llgo_coro_native_pipe || !llgo_coro_native_timer || (!darwin && !linux) || coro_runtime_adapter_test)
 
 package runtime
 
@@ -48,7 +48,7 @@ func ensureSignalInit() {
 				return
 			}
 		}
-		c.Usleep(1)
+		coroSchedulerYield()
 	}
 }
 
@@ -186,6 +186,6 @@ func signalWaitUntilIdle() {
 		if empty {
 			return
 		}
-		c.Usleep(1)
+		coroSchedulerYield()
 	}
 }

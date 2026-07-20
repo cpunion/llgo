@@ -32,6 +32,11 @@ func coroRuntimeAbort(message string) {
 	_ = message
 	c.Fputs(c.Str("fatal error: invalid coroutine runtime state\n"), c.Stderr)
 	c.Exit(2)
+	// C.exit is declared through a bodyless C ABI and Go SSA cannot infer its
+	// noreturn attribute. Keep this source function structurally terminal even
+	// if a malformed platform shim were ever to return.
+	for {
+	}
 }
 
 //export __llgo_coro_frame_alloc_v1
@@ -68,6 +73,27 @@ func __llgo_coro_await_prepare_v1(g, parent, child unsafe.Pointer) {
 	}
 }
 
+//export __llgo_coro_await_prepare_v2
+func __llgo_coro_await_prepare_v2(g, parent, child unsafe.Pointer) {
+	if !coro.PrepareAwaitCompletion((*coro.G)(g), parent, child) {
+		coroRuntimeAbort("invalid coroutine child completion handoff")
+	}
+}
+
+//export __llgo_coro_await_consume_v1
+func __llgo_coro_await_consume_v1(g, parent, typeOut, dataOut unsafe.Pointer) uint32 {
+	if typeOut == nil || dataOut == nil {
+		coroRuntimeAbort("invalid coroutine child outcome output")
+	}
+	snapshot, ok := coro.ConsumeAwaitCompletion((*coro.G)(g), parent)
+	if !ok {
+		coroRuntimeAbort("invalid coroutine child outcome consume")
+	}
+	*(*unsafe.Pointer)(typeOut) = snapshot.TypeWord
+	*(*unsafe.Pointer)(dataOut) = snapshot.DataWord
+	return uint32(snapshot.Status)
+}
+
 //export __llgo_coro_preempt_poll_v1
 func __llgo_coro_preempt_poll_v1(g unsafe.Pointer) bool {
 	return coro.PollPreempt((*coro.G)(g))
@@ -97,6 +123,18 @@ func __llgo_coro_park_prepare_v1(g, handle, header, token unsafe.Pointer, ticket
 func __llgo_coro_complete_prepare_v1(g, handle, header unsafe.Pointer) {
 	if !coro.PrepareComplete((*coro.G)(g), handle, (*coro.HeaderV1)(header)) {
 		coroRuntimeAbort("invalid coroutine completion handoff")
+	}
+}
+
+// __llgo_coro_complete_prepare_v2 publishes the exact frame-local cleanup
+// base. Panic continues to use the payload-carrying panic transaction.
+//
+//export __llgo_coro_complete_prepare_v2
+func __llgo_coro_complete_prepare_v2(g, handle, header unsafe.Pointer, status uint32) {
+	if !coro.PrepareCompleteStatus(
+		(*coro.G)(g), handle, (*coro.HeaderV1)(header), coro.CompletionStatus(status),
+	) {
+		coroRuntimeAbort("invalid coroutine terminal completion handoff")
 	}
 }
 

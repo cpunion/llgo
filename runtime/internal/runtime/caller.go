@@ -17,8 +17,6 @@
 package runtime
 
 import (
-	"unsafe"
-
 	clitedebug "github.com/goplus/llgo/runtime/internal/clite/debug"
 	"github.com/goplus/llgo/runtime/internal/clite/tls"
 )
@@ -441,10 +439,10 @@ func sameSyntheticFrame(a, b CallerFrame) bool {
 
 func entryForPC(pc uintptr) uintptr {
 	var info clitedebug.Info
-	if clitedebug.Addrinfo(unsafe.Pointer(pc), &info) == 0 {
+	if clitedebug.Addrinfo(pc, &info) == 0 {
 		return 0
 	}
-	return uintptr(info.Saddr)
+	return info.Saddr
 }
 
 func normalizeRuntimeFuncName(name string) string {

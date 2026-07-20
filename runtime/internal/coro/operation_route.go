@@ -48,6 +48,7 @@ type operationRouteSlot struct {
 	executorRegistry *ExecutorRegistry
 	executor         ExecutorHandle
 	manual           *ManualOperationSource
+	worker           *WorkerOperationSource
 	channel          *ChannelOperationSource
 	control          *TaskControlSource
 }
@@ -99,7 +100,7 @@ func validOperationRouteBinding(slot *operationRouteSlot, route RouteID) bool {
 		return false
 	}
 	unbound := slot.executorRegistry == nil && slot.executor == (ExecutorHandle{}) && slot.manual == nil &&
-		slot.channel == nil && slot.control == nil
+		slot.worker == nil && slot.channel == nil && slot.control == nil
 	if unbound {
 		return true
 	}
@@ -113,8 +114,9 @@ func validOperationRouteBinding(slot *operationRouteSlot, route RouteID) bool {
 		preemptLoad(&gateSlot.inflight)&producerAdmissionClosed != 0 {
 		return false
 	}
-	return (slot.manual != nil || slot.channel != nil || slot.control != nil) &&
+	return (slot.manual != nil || slot.worker != nil || slot.channel != nil || slot.control != nil) &&
 		(slot.manual == nil || slot.manual.route == route) &&
+		(slot.worker == nil || slot.worker.route == route) &&
 		(slot.channel == nil || slot.channel.route == route) &&
 		(slot.control == nil || slot.control.route == route)
 }
@@ -130,7 +132,7 @@ func (registry *OperationRouteRegistry) Allocate() (RouteID, bool) {
 	slot := &registry.slots[index]
 	if preemptLoad(&slot.state) != uint32(operationRouteUnused) || preemptLoad(&slot.route) != 0 ||
 		preemptLoad(&slot.inflight) != 0 || slot.executorRegistry != nil || slot.executor != (ExecutorHandle{}) ||
-		slot.manual != nil || slot.channel != nil || slot.control != nil {
+		slot.manual != nil || slot.worker != nil || slot.channel != nil || slot.control != nil {
 		return 0, false
 	}
 	route := RouteID(index + 1)
@@ -144,7 +146,7 @@ func (registry *OperationRouteRegistry) Allocate() (RouteID, bool) {
 	return route, true
 }
 
-// Bind publishes one already-bound driver's Manual/Control catalog at its
+// Bind publishes one already-bound driver's routed producer catalog at its
 // exact route. Legacy Wait/Timer V1 handles are deliberately absent: their
 // platform ABI and registration tables remain unchanged in this slice.
 func (registry *OperationRouteRegistry) Bind(route RouteID, driver *ExecutorDriver) bool {
@@ -152,8 +154,9 @@ func (registry *OperationRouteRegistry) Bind(route RouteID, driver *ExecutorDriv
 	if !ok || preemptLoad(&slot.state) != uint32(operationRouteAllocated) ||
 		!operationRouteProducersQuiesced(slot) || !validExecutorDriver(driver) || driver.route != route ||
 		driver.sources.route != route || driver.registry == nil || !activeExecutorHandle(driver.registry, driver.handle) ||
-		(driver.sources.manual == nil && driver.sources.channel == nil && driver.sources.control == nil) ||
+		(driver.sources.manual == nil && driver.sources.worker == nil && driver.sources.channel == nil && driver.sources.control == nil) ||
 		driver.sources.manual != nil && driver.sources.manual.route != route ||
+		driver.sources.worker != nil && driver.sources.worker.route != route ||
 		driver.sources.channel != nil && driver.sources.channel.route != route ||
 		driver.sources.control != nil && driver.sources.control.route != route {
 		return false
@@ -161,12 +164,14 @@ func (registry *OperationRouteRegistry) Bind(route RouteID, driver *ExecutorDriv
 	slot.executorRegistry = driver.registry
 	slot.executor = driver.handle
 	slot.manual = driver.sources.manual
+	slot.worker = driver.sources.worker
 	slot.channel = driver.sources.channel
 	slot.control = driver.sources.control
 	if !producerAdmissionReopen(&slot.inflight) {
 		slot.executorRegistry = nil
 		slot.executor = ExecutorHandle{}
 		slot.manual = nil
+		slot.worker = nil
 		slot.channel = nil
 		slot.control = nil
 		return false
@@ -205,7 +210,8 @@ func (registry *OperationRouteRegistry) BeginClose(route RouteID) bool {
 
 // ConfirmQuiesced is the route-ingress strong-join boundary. Source shutdown
 // may begin only after this succeeds: an admitted route callback may still be
-// inside ManualOperationSource.Post or TaskControlSource.Post until then.
+// inside ManualOperationSource.Post, WorkerOperationSource.Post, or
+// TaskControlSource.Post until then.
 func (registry *OperationRouteRegistry) ConfirmQuiesced(route RouteID) bool {
 	slot, ok := operationRouteSlotFor(registry, route)
 	return ok && preemptLoad(&slot.state) == uint32(operationRouteClosing) &&
@@ -225,6 +231,7 @@ func (registry *OperationRouteRegistry) Retire(route RouteID) bool {
 	slot.executorRegistry = nil
 	slot.executor = ExecutorHandle{}
 	slot.manual = nil
+	slot.worker = nil
 	slot.channel = nil
 	slot.control = nil
 	preemptStore(&slot.state, uint32(operationRouteRetired))
@@ -246,14 +253,16 @@ func (registry *OperationRouteRegistry) AllRetired() bool {
 			if preemptLoad(&slot.route) != uint32(index+1) ||
 				preemptLoad(&slot.state) != uint32(operationRouteRetired) ||
 				!operationRouteProducersQuiesced(slot) || slot.executorRegistry != nil ||
-				slot.executor != (ExecutorHandle{}) || slot.manual != nil || slot.channel != nil || slot.control != nil {
+				slot.executor != (ExecutorHandle{}) || slot.manual != nil || slot.worker != nil ||
+				slot.channel != nil || slot.control != nil {
 				return false
 			}
 			continue
 		}
 		if preemptLoad(&slot.route) != 0 || preemptLoad(&slot.state) != uint32(operationRouteUnused) ||
 			preemptLoad(&slot.inflight) != 0 || slot.executorRegistry != nil ||
-			slot.executor != (ExecutorHandle{}) || slot.manual != nil || slot.channel != nil || slot.control != nil {
+			slot.executor != (ExecutorHandle{}) || slot.manual != nil || slot.worker != nil ||
+			slot.channel != nil || slot.control != nil {
 			return false
 		}
 	}
@@ -286,6 +295,21 @@ func mapManualOperationRouteResult(result ManualOperationPostResult) OperationRo
 	case ManualOperationPostClosed:
 		return OperationRoutePostSourceClosed
 	case ManualOperationPostStale:
+		return OperationRoutePostSourceStale
+	default:
+		return OperationRoutePostInvalid
+	}
+}
+
+func mapWorkerOperationRouteResult(result WorkerOperationPostResult) OperationRoutePostResult {
+	switch result {
+	case WorkerOperationPosted:
+		return OperationRoutePosted
+	case WorkerOperationPostDuplicate:
+		return OperationRoutePostCoalesced
+	case WorkerOperationPostClosed:
+		return OperationRoutePostSourceClosed
+	case WorkerOperationPostStale:
 		return OperationRoutePostSourceStale
 	default:
 		return OperationRoutePostInvalid
@@ -366,6 +390,51 @@ func (registry *OperationRouteRegistry) PostAndRequest(id OperationID, control T
 
 func (registry *OperationRouteRegistry) PostManualAndRequest(id OperationID) OperationRouteIngressResult {
 	return registry.PostAndRequest(id, TaskCancelNone)
+}
+
+// PostWorkerAndRequest routes one pointer-free worker completion to the exact
+// WorkerOperationSource and executor encoded by id.Route. The route admission
+// remains held across both the source's exact-generation scalar mailbox Post
+// and ExecutorRegistry.Request. WorkerOperationSource.Post retains its own
+// producer admission, so route retirement and source-slot retirement remain
+// separate strong-join boundaries.
+func (registry *OperationRouteRegistry) PostWorkerAndRequest(
+	id OperationID,
+	payload ScalarResultPayloadV1,
+) OperationRouteIngressResult {
+	result := OperationRouteIngressResult{Route: OperationRoutePostInvalid, Executor: ExecutorRequestInvalid}
+	if !id.Valid() || id.Source() != OperationSourceWorker || !payload.Valid() {
+		return result
+	}
+	slot, ok := operationRouteSlotFor(registry, id.Route())
+	if !ok {
+		result.Route = OperationRoutePostStale
+		return result
+	}
+	if !operationRouteAcquireProducer(slot) {
+		state := operationRouteLifecycle(preemptLoad(&slot.state))
+		if state == operationRouteClosing || state == operationRouteQuiesced || state == operationRouteRetired {
+			result.Route = OperationRoutePostClosed
+		} else {
+			result.Route = OperationRoutePostStale
+		}
+		return result
+	}
+	if preemptLoad(&slot.state) != uint32(operationRouteActive) || preemptLoad(&slot.route) != uint32(id.Route()) {
+		operationRouteReleaseProducer(slot)
+		result.Route = OperationRoutePostClosed
+		return result
+	}
+	if slot.worker == nil {
+		result.Route = OperationRoutePostInvalid
+	} else {
+		result.Route = mapWorkerOperationRouteResult(slot.worker.Post(id, payload))
+	}
+	if result.Route == OperationRoutePosted && slot.executorRegistry != nil {
+		result.Executor = slot.executorRegistry.Request(slot.executor)
+	}
+	operationRouteReleaseProducer(slot)
+	return result
 }
 
 func (registry *OperationRouteRegistry) PostTaskControlAndRequest(id OperationID, kind TaskCancelKind) OperationRouteIngressResult {

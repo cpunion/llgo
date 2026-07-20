@@ -1,14 +1,16 @@
 # LLGo Coroutine 语义标准化 IR 与统一 Lowering 设计
 
-状态：设计与代码审查结论，尚未开始本方案的编译器迁移
+状态：设计与代码审查结论；Phase A/B 的稀疏 LoweringFacts/CoroOverlay schema、canonical verifier 与 report-only 接入已开始落地，生产 emitter 切换尚未完成
 
-更新：2026-07-18
+更新：2026-07-20
 
 审查基线：`897d251f8`（`cpunion/llgo:llvm-coro`，已包含 Phase 35 / PR #42）
 
 关联总体设计：[`llvm-coro-runtime-design.md`](./llvm-coro-runtime-design.md)
 
 统一异步核心契约：[`coro-async-core-contract.md`](./coro-async-core-contract.md)
+
+Callable、调用点与 foreign boundary 契约：[`coro-callable-contract.md`](./coro-callable-contract.md)
 
 ## 1. 结论
 
@@ -61,7 +63,7 @@ ProgramModelBuilder fixed point
 - 只增加 post-plan overlay 能解决 physical CFG 拼装，但不能消除 hidden helper 和 effect 事实的重复提取，收益只有一半。
 - 重写 runtime 或 `internal/coro` 固定点不会解决上述问题，风险反而更大。
 - 新设计可以成为后续 defer/panic/recover、dynamic coroutine descriptor、syscall/IO、精确 GC metadata 和多平台 adapter 的公共编译器底座；但它本身不会自动补齐这些尚未实现的能力。
-- 当前代码仍是受限、可运行的 single-P vertical slice，不能结论为“完整 Go 标准库和所有平台已经基本都可落地”。窄IR未暴露直接矛盾，但panic/unwind、GC、tooling、cgo reentry、affinity和平台driver仍需原型证明，见第 9、11 节。
+- 当前代码仍是受限的 native Linux/Darwin single-P vertical slice，但普通Go 1.26标准库源码风格的`time.Sleep`、冻结timer语义、固定syscall文件回环、高层`os.File`回环和loopback TCP探针已全部compile-link-run通过。这仍不能结论为“完整Go标准库和所有平台已经基本都可落地”：panic/unwind全矩阵、timer GC/synctest、tooling、cgo reentry、affinity、multi-P和平台driver仍需原型或生产验证，见第9、11节及《统一异步核心契约》第9.1节。
 
 ## 2. 目标与非目标
 
@@ -592,14 +594,14 @@ type OperationRecipe struct {
 | 普通 direct call | 当前plain/coroutine subset可表示 | explicit-status下managed plain与MayUnwind plain edge未闭环；需第9.3节协议 |
 | 递归/SCC | overlay可表示，需原型证明 | 当前physical preflight拒绝recursive lowering；需frame/resource/poll闭环 |
 | `go f(args)` | 当前仅受限静态target slice | closure/method/dynamic descriptor、argument transport |
-| channel send/recv | 当前已有direct vertical slice | `hchan`已有动态容量；真正瓶颈是每P仅4个channel operation槽、GC和多P |
-| 多 case `select` | wait-set overlay适合表示 | 完整dynamic case、reflect.Select、四槽并发限制、P-neutral result packet |
-| timer/Sleep | 当前native受限slice可表示 | dynamic/sharded source、Timer/Ticker/AfterFunc、各平台clock/doorbell |
-| 文件/网络 | 统一operation模型可预留 | Poll/IO source、payload、registration/quiescence、platform backend |
-| `Syscall*` | 可经wrapper自动染色，需逐族contract | ForeignOp/worker或async backend、errno/result cell、取消/线程语义 |
+| channel send/recv | 当前已有direct vertical slice | channel operation 默认page为64槽，native profile为16页/1024槽；仍需typed payload GC、完整hchan接线和multi-P |
+| 多 case `select` | wait-set overlay适合表示 | native 1024-slot profile下的完整dynamic case、reflect.Select、uniform selection、typed result和P-neutral result packet |
+| timer/Sleep | native Sleep source/owner 与 Go 1.26 controlled-timer linkname 原型可表示 | 标准库 E2E 未通过；Timer channel 的 sync-visible `len/cap`、GC、`asynctimerchan`、synctest，dynamic/sharded source |
+| 文件/网络 | native Poll/Worker source、deadline/closing 和 scalar result 已接入统一 operation；冻结的regular-file与TCP标准库探针已native single-P E2E通过 | 探针之外的cancel/quiescence竞态、payload/GC、multi-P、完整net/resolver矩阵和其他platform backend尚未闭环 |
+| `Syscall*` | Linux/Darwin 固定 wrapper 可经 worker park 自动染色，仍需逐族 contract | 已有 bounded 4-thread/1024-job native worker 与 `{r1,r2,errno}` result cell；全 syscall family、cancel-before-start/背压、pointer GC lifetime 和 E2E 尚未完成 |
 | `RawSyscall*` | 不能统一“一律异步” | 逐ABI保留raw、signal-safe、locked-thread或不可重启语义；有contract才stack-cut/offload |
-| defer | overlay可预留，未实现 | 显式cleanup state、defer record、deferred coroutine await |
-| panic/recover | 可预留logical outcome，需关键原型 | 当前production explicit-status未闭环；需CompletionRecord、recover token和plain boundary |
+| defer | overlay可表示；当前有静态、无环cleanup子集 | 动态defer栈、完整控制流、递归/SCC和语言矩阵仍未闭环 |
+| panic/recover | logical outcome已有task-stop相邻原型 | `CompletionRecord`已覆盖`Return/Panic/Abort/Shutdown`与`ReturnRecovered`提交，但完整panic/recover、`Goexit`和plain/root boundary仍未闭环 |
 | Goexit | 可预留独立control kind | defer drain、parent/root传播 |
 | closure/method value | descriptor模型可预留 | 当前physical ABI仍拒绝多类closure/method；需capture lifetime与ABI hash |
 | interface/function value | value-flow方向可用，dynamic能力受限 | async descriptor、multi-target dispatch、nil check；当前dispatch subset很窄 |
@@ -618,7 +620,7 @@ type OperationRecipe struct {
 - 可挂起 defer/panic/recover/Goexit；
 - 完整动态 function descriptor、interface 和 reflect；
 - 精确 GC frame metadata；
-- syscall/netpoll/worker 与平台 operation source；
+- syscall/netpoll/worker 组件已有 native vertical slice，但仍需通过 `os`/`net` 标准库全链 E2E、容量/取消/GC 合同和 multi-P；
 - multi-P、P-neutral resume packet 和 affinity；
 - WASM/WASI/RTOS/baremetal production host adapter。
 
@@ -699,7 +701,7 @@ recursive plain SCC / unknown cost / overflow = unbounded
 
 这些状态看起来繁重，是因为 completion、cancel、selected result、late callback、shutdown 和 physical quiescence确实是相互独立的事实。把它们折叠成一个 `done` bool 会重新引入 use-after-free、lost wake 或重复消费。
 
-取消必须区分四层：`context`取消是库级值传播；operation cancel撤销一个外部注册；task abort是scheduler在安全点观察的cooperative stop；shutdown是executor/root生命周期。当前 `TaskCancel` 不是任意goroutine强杀，也不等同于context/operation cancel；当前compiler cancel gate还不能执行完整Go defer cleanup。终态必须声明观察safepoint、不可取消区、irreversible effect/result lease、defer drain和destroy barrier。没有这些协议时，只能称为受限cooperative abort，不能承诺任意执行取消。
+取消必须区分四层：`context`取消是库级值传播；operation cancel撤销一个外部注册；task abort是scheduler在安全点观察的cooperative stop；shutdown是executor/root生命周期。当前 `TaskCancel` 不是任意goroutine强杀，也不等同于context/operation cancel。compiler cancel gate现已对zero-ticket和Channel/Worker/Timer/Poll恢复保留精确`Abort/Shutdown`，进入当前静态、无环cleanup子集，并经parent-owned `CompletionRecord`跨child destroy逐层传播；这仍不能外推为动态defer、完整panic/recover或`Goexit`。终态必须继续声明观察safepoint、不可取消区、irreversible effect/result lease、defer drain和destroy barrier；没有这些协议时，不能承诺任意执行取消。
 
 ### 10.2 可进一步收敛的部分
 
@@ -707,7 +709,7 @@ recursive plain SCC / unknown cost / overflow = unbounded
 - `ExecutorSourceSet` 已有统一协议，但当前手写 `if source != nil` catalog。按既有设计应由 target profile生成静态 direct-call catalog，避免每加一个source手改executor，又不引入Go interface dispatch。
 - Primitive/hook ABI应由 versioned catalog统一生成 compiler declaration、runtime export、signature validation和digest identity。
 - 完整结构审计应保留在构造、debug、test和terminal边界；热路径只做已认证的O(1) header/local-link校验，继续遵守现有cost certificate方向。
-- fixed small source capacity适合prototype；当前wait/timer各64槽、channel/manual各4槽、task-control 8槽，timer按表扫描。native可以用paged/sharded catalog与heap，embedded/baremetal用显式静态容量和固定heap/ring。容量策略不应改变compiler IR。
+- fixed small source capacity适合prototype；target-neutral wait/timer/poll/worker/channel/keyed-wait 的默认 page 是64槽，当前 native Timer 独立配置64页即4096槽，其余 common source 配置16页即1024槽，worker 使用4个物理pthread与1024-job ring，task-control仍为8槽。timer/poll当前仍会扫描配置容量；后续native可用heap/ready index/sharded catalog，embedded/baremetal用显式静态容量和固定heap/ring。容量策略不应改变compiler IR。
 - source-specific payload处理应落在 source/operation adapter；compiler只理解slot ownership和reconciliation contract。
 
 ### 10.3 新 IR 与 runtime 的唯一接口
@@ -787,14 +789,14 @@ LLVM CoroSplit继续负责普通 SSA liveness和frame materialization。精确 G
 
 | 平台 | 核心模型判断 | 当前实现现实 |
 | --- | --- | --- |
-| Native Linux/Darwin | layout/ownership无已知冲突 | 已有single-P pipe/poll、monotonic timer、channel/select vertical slice和native runner；尚无完整netpoll、worker、多P、完整GC/cleanup |
+| Native Linux/Darwin | layout/ownership无已知冲突 | 已有single-P pipe doorbell/POSIX `poll`、monotonic timer、bounded worker、semaphore/notify、channel/select vertical slice和native runner；五个冻结标准库探针已E2E通过，但尚无程序级multi-P、完整GC/cleanup与GOROOT矩阵 |
 | 其他native OS | 尚未审查 | Windows/BSD/mobile production adapter、thread/IO/ABI均未验证 |
-| JS/WASM | layout/ownership无已知冲突，host边界待证 | 32-bit layout、pre/post-CoroSplit/object和test adapter有覆盖；production仍走无host-run能力的fail-closed fallback |
-| WASI | operation模型可提出映射，未验证 | poll_oneoff等production adapter未完成 |
-| RTOS/embedded | 静态执行模型候选，未验证 | 需要HAL clock/notification/ISR ingress、boundary driver和容量证明 |
-| baremetal | event-loop模型候选，未验证 | 需要main loop、IRQ mailbox、WFI/WFE、static/tinygc frame和production adapter |
+| JS/WASM | layout/ownership无已知冲突，可映射为1P host `RunSlice` | 32-bit layout、pre/post-CoroSplit/object和test adapter有覆盖；production queued run/timer/Promise/IO adapter未实现，仍走fail-closed fallback |
+| WASI | operation模型可映射，未验证 | pollable/poll_oneoff、filesystem/socket/clock production adapter未完成 |
+| RTOS/embedded | 静态执行模型可映射，未验证 | HAL clock/notification/ISR ingress、boundary driver和容量证明都未实现 |
+| baremetal | event-loop模型可映射，未验证 | main loop、IRQ mailbox、WFI/WFE、static/tinygc frame和production adapter都未实现 |
 
-架构不要求每G native stack、libuv或BDWGC，但这只是兼容候选，不是平台完成度。当前production target adapter实际只有llgo native Linux/Darwin；`coro_target_none.go` 对queued host run与retained wait采用fail-closed行为。缺少filesystem、process、socket或host async能力的平台仍按target capability决定可用package。
+架构不要求每G native stack、libuv、BDWGC或pthread，但这只是兼容候选，不是平台完成度。当前production target adapter实际只有llgo native Linux/Darwin single-P，其bounded blocking worker使用固定pthread pool；`coro_target_none.go` 对queued host run与retained wait采用fail-closed行为。缺少filesystem、process、socket或host async能力的平台仍按target capability决定可用package。LLVM支持范围只是19–22，不考虑19以下版本。
 
 ## 12. Cache、archive 与 summary
 
@@ -822,7 +824,20 @@ cache identity必须覆盖所有会改变物理IR的事实：
 
 最终 cache key 组合 schema 版本与两个 digest。target-configured helper 或 intrinsic 若会改变 semantic projection 和 layout projection，则同时进入两者，不能为了跨 target 复用而丢失事实。当前FunctionID本身包含coroutine/scheduler ABI与最终link identity；若需要跨target比较，必须另建不含这些字段的 `SourceFunctionKey`，并生成只含logical primitive/contract的诊断 projection，它不参与artifact复用。这样的拆分首先用于定位“计划变化”还是“物理布局变化”，不是承诺不同 target 必然共享 artifact。
 
-当前 `PlanDigestSchema` 是 v8。Phase B 应升级为 v9，只加入 canonical LoweringFacts/PrimitiveCatalog digest；Phase D overlay/storage真正存在后再升级v10，不能提前写空字段。每次升级都验证：任一fact mutation改变cache key、source compile与cache registration使用同一digest、旧schema只产生cache miss而不是被接受。详细JSON dump按诊断开关生成；cache key使用per-function canonical digest/Merkle汇总，避免把所有普通operand/type再次序列化进全局document。
+**历史基线说明**：本迁移方案最初成文时 `PlanDigestSchema` 为 v8，文中原定的v9/v10只是
+当时为LoweringFacts与overlay预计的相对里程碑，不再是当前版本路线。截至2026-07-20，代码中
+`PlanDigestSchema` 已是 `llgo.coro.plan-digest.v21`；其中已包含现有FunctionPlan/CallPlan事实、
+managed-required exact C declaration的total `CallableIdentityCertificate`、content-addressed
+`CallableContractCertificate` 和exact TrustedInline invocation certificate等后续已落地信息。
+identity inventory与execution policy保持正交：未标注/legacy declaration的content-addressed unknown
+behavior只进入facts/catalog，不额外改变其调度策略。v21本身不表示本文提议的LoweringFacts/PrimitiveCatalog、CoroOverlay或
+VirtualStoragePlan已实现。
+
+后续不预留空v22/v23字段，也不沿用历史v9/v10标号。只在某一层的canonical事实真正进入
+production plan/cache identity时，从届时当前schema递增一次。每次升级都验证：任一相关fact
+mutation改变cache key、source compile与cache registration使用同一digest、旧schema只产生
+cache miss而不是被接受。详细JSON dump按诊断开关生成；cache key使用per-function canonical
+digest/Merkle汇总，避免把所有普通operand/type再次序列化进全局document。
 
 长期若全局 digest 导致任意函数变化使所有 package cache 失效，可进一步拆成：
 
@@ -876,9 +891,13 @@ cl/coro_recipe_*.go        ordinary lowering recipe planning/emission pairs
 - 在现有 EmissionUniverse materialization中只为Lowered/Call/Intrinsic/Control、function-value、implicit panic和SuspendRegion等owner-scoped site生成稀疏facts；普通Pure span仅存range与recipe/footprint hash。
 - helper、intrinsic、panic、function use和frame-region proof全部进入稳定dump。
 - 先增加集中 `EmissionLedger`：编译source instruction前安装 `EmissionSiteID`，managed helper resolver、explicit coroutine feature、panic/suspend都通过统一record API；若LLSSA调用无法集中观测，则增加call/control observer。未接入observer的类别只能标为尚未覆盖，不能宣称全量精确比较。
-- 将 canonical LoweringFacts/PrimitiveCatalog digest接入 `SSAPlan.CoroPlanDigest`、`internal/build.buildCoroPlan`、`cl.Compilation`、fingerprint和manifest，升级schema v9。
+- 将 canonical LoweringFacts/PrimitiveCatalog digest接入 `SSAPlan.CoroPlanDigest`、
+  `internal/build.buildCoroPlan`、`cl.Compilation`、fingerprint和manifest；在事实真正进入
+  cache identity时从届时当前schema升级，不使用历史预留的v9号。
 
-验收：FunctionPlan、可执行LLVM CFG、runtime ABI和运行行为不变；cache/manifest digest与相关metadata按v9预期变化；已接入observer的预测/实际差异触发fail-closed拒绝；fact mutation/cache schema测试通过。
+验收：FunctionPlan、可执行LLVM CFG、runtime ABI和运行行为不变；cache/manifest digest与相关
+metadata按当次新schema预期变化；已接入observer的预测/实际差异触发fail-closed拒绝；
+fact mutation/cache schema测试通过。
 
 ### Phase C：analysis只消费facts
 
@@ -893,9 +912,11 @@ cl/coro_recipe_*.go        ordinary lowering recipe planning/emission pairs
 - 仅覆盖当前preflight已接受的函数。
 - 显式生成poll、await、park、channel/select、spawn、return/panic的control cut、continuation、outcome和virtual slot；不预展开physical blocks。
 - 新 verifier独立运行；生产仍使用旧emitter。
-- overlay/storage进入digest并升级schema v10；不为尚不存在的层提前放空字段。
+- overlay/storage真正进入digest时，再从届时当前schema升级；不为尚不存在的层
+  提前放空字段，不使用历史预留的v10号。
 
-验收：每个旧支持函数都能产生合法、稳定的overlay dump；旧拒绝用例继续拒绝；除v10 digest metadata外可执行LLVM CFG不变。
+验收：每个旧支持函数都能产生合法、稳定的overlay dump；旧拒绝用例继续拒绝；除当次
+digest schema/metadata变化外，可执行LLVM CFG不变。
 
 ### Phase E：双backend对照
 
@@ -1046,7 +1067,8 @@ Phase A先报告多次运行中位数和离散度；取得稳定噪声后，再�
 7. operation使用封闭protocol family和独立WaitSetRecipe，不允许任意hook列表演化为字节码。
 8. frame retention改成通用SuspendRegionContract，优先使用稳定OperationRecord。
 9. runtime source catalog由target profile生成direct calls，不使用interface，也不让每个source复制executor。
-10. LoweringFacts在schema v9进入digest/cache，overlay/storage在真正存在后以v10进入。
+10. LoweringFacts和overlay/storage只在真正存在并进入production cache identity时各升级一次
+    届时当前schema；历史v9/v10不再作为版本目标。
 11. 新旧backend按完整函数cohort切换，绝不在一个coroutine body内混拼CFG。
 12. hard-sync/host入口区分thin thunk与有状态BoundaryDriver；Go源码同步风格不强迫所有host ABI同步。
 13. panic/unwind采用logical outcome方向，但先以NoUnwind plain island和focused原型证明。
@@ -1061,7 +1083,8 @@ Phase A先报告多次运行中位数和离散度；取得稳定噪声后，再�
 - 在 `EmissionUniverse.materializeFunctionForOwner` 中生成owner-scoped facts，owner投影不同先以fail-closed方式拒绝；
 - 增加集中EmissionLedger observer，先覆盖managed helper、explicit coroutine feature、panic和suspend；
 - 让现有 lowered helper、intrinsic和frame retention路径读取或对照这些facts；
-- 将facts/catalog digest以schema v9接入build/cache/manifest；
+- 将facts/catalog digest接入build/cache/manifest，在具体字段落地时从届时当前
+  `PlanDigestSchema`升级；
 - 除预期schema/cache identity变化外，不改变FunctionPlan、LLVM CFG、runtime ABI和运行行为；
 - 用现有native/wasm/channel/select/timer测试证明零行为变化。
 

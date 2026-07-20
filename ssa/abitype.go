@@ -466,14 +466,44 @@ func (b Builder) abiUncommonMethods(t types.Type, mset *types.MethodSet) llvm.Va
 		name := b.Str(abiName).impl
 		mSig := m.Type().(*types.Signature)
 		var tfn, ifn llvm.Value
-		tfnFn := b.abiMethodFunc(anonymous, pkg, obj, mSig)
+		tfnName := b.abiMethodName(anonymous, pkg, obj, mSig)
 		tfnSig := funcType(prog, methodExprSignature(mSig)).(*types.Signature)
-		tfn = b.Pkg.closureWrapDecl(tfnFn.Expr, tfnSig).impl
-		ifn = tfnFn.impl
+		var tfnExpr Expr
+		if b.Pkg.methodToken != nil {
+			if token, ok := b.Pkg.methodToken(tfnName, obj, mSig); ok {
+				if token.IsNil() || token.impl.IsAFunction().IsNil() || token.impl.GlobalParent().C != b.Pkg.mod.C {
+					panic("ssa: method token resolver must return a function from the same package module")
+				}
+				tfn = token.impl
+				tfnExpr = token
+			}
+		}
+		if tfn.IsNil() {
+			tfnFn := b.Pkg.NewFunc(tfnName, mSig, InGo)
+			tfn = b.Pkg.closureWrapDecl(tfnFn.Expr, tfnSig).impl
+			tfnExpr = tfnFn.Expr
+		}
+		ifnExpr := tfnExpr
+		ifnName := tfnName
+		ifnSig := mSig
 		if _, ok := m.Recv().Underlying().(*types.Pointer); !ok {
 			pRecv := types.NewVar(token.NoPos, pkg, "", types.NewPointer(mSig.Recv().Type()))
 			pSig := types.NewSignature(pRecv, mSig.Params(), mSig.Results(), mSig.Variadic())
-			ifn = b.abiMethodFunc(anonymous, pkg, obj, pSig).impl
+			ifnSig = pSig
+			ifnFn := b.abiMethodFunc(anonymous, pkg, obj, ifnSig)
+			ifnExpr = ifnFn.Expr
+			ifnName = ifnFn.Name()
+		}
+		ifn = ifnExpr.impl
+		if b.Pkg.interfaceMethodDescriptor != nil {
+			if descriptor, ok := b.Pkg.interfaceMethodDescriptor(ifnName, obj, ifnSig); ok {
+				if descriptor.IsNil() || descriptor.impl.IsAConstant().IsNil() ||
+					descriptor.impl.Type().TypeKind() != llvm.PointerTypeKind ||
+					descriptor.impl.GlobalParent().C != b.Pkg.mod.C {
+					panic("ssa: interface method descriptor must be a non-nil pointer constant from the same package module")
+				}
+				ifn = descriptor.impl
+			}
 		}
 		var values []llvm.Value
 		values = append(values, name)
@@ -508,6 +538,10 @@ func methodExprSignature(sig *types.Signature) *types.Signature {
 }
 
 func (b Builder) abiMethodFunc(anonymous bool, mPkg *types.Package, method *types.Func, mSig *types.Signature) Function {
+	return b.Pkg.NewFunc(b.abiMethodName(anonymous, mPkg, method, mSig), mSig, InGo) // TODO(xsw): use rawType to speed up
+}
+
+func (b Builder) abiMethodName(anonymous bool, mPkg *types.Package, method *types.Func, mSig *types.Signature) string {
 	mName := method.Name()
 	var fullName string
 	if anonymous {
@@ -520,7 +554,7 @@ func (b Builder) abiMethodFunc(anonymous bool, mPkg *types.Package, method *type
 	} else if b.Pkg.fnlink != nil {
 		fullName = b.Pkg.fnlink(fullName)
 	}
-	return b.Pkg.NewFunc(fullName, mSig, InGo) // TODO(xsw): use rawType to speed up
+	return fullName
 }
 
 /*

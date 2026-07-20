@@ -40,6 +40,11 @@ type CoroPlanObserver func(pkg *ssa.Package, plan *coro.SSAPlan)
 // current LLVM coroutine frame can complete.
 const CoroFrameRetentionTimerABIV1 = coro.FrameRetentionTimerABIV1
 
+// CoroFrameRetentionParkABIV2 selects the extensible compiler/runtime-owned
+// prepare/park/retire contract table. TimerABIV1 remains accepted for cached
+// and focused timer-only inputs, while new runtime profiles use ParkABIV2.
+const CoroFrameRetentionParkABIV2 = coro.FrameRetentionParkABIV2
+
 // Compilation contains immutable inputs shared by every package compiled as
 // part of one frontend compilation. Pass it by pointer and do not copy it after
 // first use. A CoroPlan remains report-only unless EnableCoroEntryResolution is
@@ -93,8 +98,11 @@ type Compilation struct {
 	// is independently fingerprinted from child-await, spawn, and timer support.
 	EnableCoroChannel bool
 	// EnableCoroWorker enables the bounded ForeignWait operation recipe used by
-	// exact uintptr-only llgo.syscall sites. It requires the runnable scheduler;
-	// the blocking foreign call executes only on a fixed native worker pool.
+	// exact llgo.syscall sites with a frozen workeraddr target/dataflow
+	// certificate and exact //llgo:coro worker C declarations through typed
+	// word-transport thunks. It requires the runnable
+	// scheduler; the blocking foreign call executes only on a fixed native worker
+	// pool.
 	EnableCoroWorker bool
 	// CoroFrameRetentionABI selects one compiler/runtime-owned contract under
 	// which x/tools Heap Allocs may be re-proved as current LLVM coroutine-frame
@@ -112,6 +120,7 @@ type Compilation struct {
 	coroPreflight            sync.Once
 	coroPreflightErr         error
 	coroClosedInterfacePlain *coroClosedInterfacePlainPlan
+	coroManagedInterface     *coroManagedInterfaceDispatchPlan
 }
 
 func (c *Compilation) validateCoroCacheIdentity() error {
@@ -188,7 +197,7 @@ func (c *Compilation) validateCoroABIIdentity(required bool) error {
 	}
 	switch c.CoroFrameRetentionABI {
 	case "":
-	case CoroFrameRetentionTimerABIV1:
+	case CoroFrameRetentionTimerABIV1, CoroFrameRetentionParkABIV2:
 		if !c.EnableCoroEntryResolution || !c.EnableCoroPhysicalABI || !c.EnableCoroChildAwait || !c.EnableCoroProgramBootstrapRun {
 			return fmt.Errorf("coroutine frame-retention ABI %q requires runnable PhysicalABIV1 program-bootstrap lowering", c.CoroFrameRetentionABI)
 		}

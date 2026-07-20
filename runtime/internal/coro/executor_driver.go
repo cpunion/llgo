@@ -105,6 +105,113 @@ func validRunningExecutorOwner(driver *ExecutorDriver) bool {
 		g.pending.kind == pendingNone && g.waitToken == nil && g.waitTicket == 0
 }
 
+// CurrentExecutorDriver resolves the exact executor which owns g's currently
+// executing physical coroutine frame. It is a managed owner-call boundary,
+// not an arbitrary-G lookup API: the compiler resume prologue must already
+// have consumed the current run decision, and a runnable-transfer generation
+// must not be in flight.
+//
+// The returned driver is scheduler-owner-only and must not be retained across
+// suspension or passed to a producer. Foreign callbacks retain only the POD
+// handle/route identities returned beside it and resolve those through their
+// target route registry. This lookup deliberately uses g.runP and P.executor;
+// it performs no TLS lookup, global current-G lookup, P scan, or route scan.
+func CurrentExecutorDriver(g *G) (*ExecutorDriver, ExecutorHandle, RouteID, bool) {
+	if !ValidG(g) || g.transferState != runnableTransferGIdle || !resumeGateTaken(g) {
+		return nil, ExecutorHandle{}, 0, false
+	}
+	p := g.runP
+	driver := p.executor
+	if !validRunningExecutorOwner(driver) || driver.p != p || p.current != g ||
+		driver.handle.Slot == 0 || driver.handle.Generation == 0 || !driver.route.Valid() ||
+		driver.sources.route != driver.route {
+		return nil, ExecutorHandle{}, 0, false
+	}
+	slot, ok := executorSlot(driver.registry, driver.handle)
+	if !ok || preemptLoad(&slot.generation) != driver.handle.Generation ||
+		preemptLoad(&slot.state) != uint32(executorActive) {
+		return nil, ExecutorHandle{}, 0, false
+	}
+	return driver, driver.handle, driver.route, true
+}
+
+// currentExecutorParkDriver resolves the exact executor during the narrow
+// compiler park/resume-hook window. The active frame has already published
+// SuspendPark/FrameSuspended while the scheduler still owns the same
+// ActionResume episode. Typed adapters add only their closed source-owner
+// validation after this common proof.
+func currentExecutorParkDriver(g *G) (*ExecutorDriver, ExecutorHandle, RouteID, bool) {
+	if !ValidG(g) || g.transferState != runnableTransferGIdle || !resumeGateTaken(g) ||
+		g.runP == nil || g.active == nil || g.active.handle == nil || g.active.header == nil {
+		return nil, ExecutorHandle{}, 0, false
+	}
+	p := g.runP
+	driver := p.executor
+	handle := g.active.handle
+	header := g.active.header
+	if !validExecutorDriverForP(driver, p) || p.current != g || !p.inResume ||
+		!expectedAction(p, g, p.action, ActionResume) || p.action.Handle != handle ||
+		g.state != GRunning || g.active.state != FrameActive ||
+		g.active.handle != handle || g.active.header != header ||
+		header.G != unsafe.Pointer(g) || header.SuspendReason != uint16(SuspendPark) ||
+		header.Lifecycle != uint16(FrameSuspended) || !driver.route.Valid() ||
+		driver.handle.Slot == 0 || driver.handle.Generation == 0 {
+		return nil, ExecutorHandle{}, 0, false
+	}
+	slot, ok := executorSlot(driver.registry, driver.handle)
+	if !ok || preemptLoad(&slot.generation) != driver.handle.Generation ||
+		preemptLoad(&slot.state) != uint32(executorActive) {
+		return nil, ExecutorHandle{}, 0, false
+	}
+	return driver, driver.handle, driver.route, true
+}
+
+// RegisterCurrentExecutorTaskControl exports one generation-stable,
+// pointer-free cancellation endpoint for the task which is executing on this
+// exact driver. The returned OperationID is the only task identity a foreign
+// producer may retain. In particular, neither G, P, ExecutorDriver nor source
+// storage crosses the producer boundary.
+//
+// A future multi-P runtime may forward the ID's Route through an executor
+// route registry before moving the task. Keeping registration current-task
+// only prevents today's single-P ownership proof from becoming an accidental
+// arbitrary-G lookup API.
+func RegisterCurrentExecutorTaskControl(driver *ExecutorDriver, task *G) (OperationID, bool) {
+	if !validRunningExecutorOwner(driver) || driver.p.current != task || driver.sources.control == nil {
+		return OperationID{}, false
+	}
+	return RegisterTaskControl(driver.sources.control, driver.p, task)
+}
+
+// BeginCloseCurrentExecutorTaskControl seals one exact endpoint while its
+// task is executing on the owner P. A producer admitted before this call may
+// still finish Post; FinishCloseCurrentExecutorTaskControl therefore remains
+// a separate strong-join confirmation.
+func BeginCloseCurrentExecutorTaskControl(driver *ExecutorDriver, task *G, id OperationID) bool {
+	if !validRunningExecutorOwner(driver) || driver.p.current != task || driver.sources.control == nil {
+		return false
+	}
+	slot, ok := taskControlSlotFor(driver.sources.control, id)
+	registered, owned := registeredTaskControlDelivery(driver.sources.control, driver.p, slot, id)
+	return ok && owned && registered == task && BeginCloseTaskControl(driver.sources.control, driver.p, id)
+}
+
+// FinishCloseCurrentExecutorTaskControl consumes the caller's proof that all
+// users of the POD endpoint have stopped, then releases its task lease and
+// generation. It returns false without retiring the slot while an admitted
+// Post or an owner-side cancellation fact is still outstanding.
+func FinishCloseCurrentExecutorTaskControl(driver *ExecutorDriver, task *G, id OperationID) bool {
+	if !validRunningExecutorOwner(driver) || driver.p.current != task || driver.sources.control == nil {
+		return false
+	}
+	slot, ok := taskControlSlotFor(driver.sources.control, id)
+	registered, owned := registeredTaskControlDelivery(driver.sources.control, driver.p, slot, id)
+	if !ok || !owned || registered != task || !ConfirmTaskControlQuiesced(driver.sources.control, driver.p, id) {
+		return false
+	}
+	return RetireTaskControl(driver.sources.control, driver.p, id)
+}
+
 // PrepareExecutorWaitRegistration is the only production owner entry for
 // arming a platform wait. It is accepted solely from the currently resumed
 // frame on this exact executor; producer threads must use the POD post ABI.
@@ -165,6 +272,17 @@ func CancelExecutorTimerRegistration(driver *ExecutorDriver, timer TimerRegistra
 	return timers.Cancel(timer)
 }
 
+// CancelExecutorControlledTimerV2 publishes ordinary operation cancellation
+// for one exact standard-library logical generation. Cleanup remains owned by
+// the resumed manager's V2 ParkSet transaction.
+func CancelExecutorControlledTimerV2(driver *ExecutorDriver, controller uintptr, controlWord uint32) bool {
+	if !validRunningExecutorOwner(driver) {
+		return false
+	}
+	timers := driver.sources.timerTable()
+	return timers != nil && timers.CancelControlledV2(driver.p, controller, controlWord)
+}
+
 // RetireCompletedExecutorTimer validates and retires a consumed timer
 // completion from its resumed synchronous continuation.
 func RetireCompletedExecutorTimer(driver *ExecutorDriver, token *WaitToken, ticket WaitTicket, timer TimerRegistrationHandle) bool {
@@ -183,6 +301,213 @@ func RetireCanceledExecutorTimer(driver *ExecutorDriver, token *WaitToken, ticke
 	}
 	timers := driver.sources.timerTable()
 	return timers != nil && timers.RetireCanceledTimer(timer, token, ticket)
+}
+
+// PrepareExecutorPollOperation is the running-owner entry for one synchronous
+// internal/poll read or write wait. Snapshot-rebuilt reactors discover the
+// operation later; eager-registration reactors may arm before coroPark.
+func PrepareExecutorPollOperation(
+	driver *ExecutorDriver,
+	token *WaitToken,
+	fd int32,
+	interest PollInterest,
+	deadline int64,
+) (WaitTicket, PollOperationHandle, PollOperationPrepareResult) {
+	if !validRunningExecutorOwner(driver) {
+		return 0, PollOperationHandle{}, PollOperationPrepareInvalid
+	}
+	source := driver.sources.pollSource()
+	if source == nil {
+		return 0, PollOperationHandle{}, PollOperationPrepareInvalid
+	}
+	return PreparePollOperation(driver.p, source, token, fd, interest, deadline)
+}
+
+// RollbackExecutorPollOperation releases an operation whose target reactor
+// arm failed before the handle became externally observable.
+func RollbackExecutorPollOperation(
+	driver *ExecutorDriver,
+	token *WaitToken,
+	ticket WaitTicket,
+	handle PollOperationHandle,
+) bool {
+	if !validRunningExecutorOwner(driver) {
+		return false
+	}
+	source := driver.sources.pollSource()
+	return source != nil && source.RollbackPreparedPollOperation(driver.p, handle, token, ticket)
+}
+
+// CancelExecutorPollOperation is valid only after the target synchronously
+// removed the exact backend interest. The canceled outcome remains live until
+// its resumed continuation retires it.
+func CancelExecutorPollOperation(driver *ExecutorDriver, handle PollOperationHandle) WaitCancelResult {
+	if !validRunningExecutorOwner(driver) {
+		return WaitCancelInvalid
+	}
+	source := driver.sources.pollSource()
+	if source == nil {
+		return WaitCancelInvalid
+	}
+	return source.Cancel(driver.p, handle)
+}
+
+// UpdateExecutorPollDeadline changes the absolute monotonic deadline of one
+// still-active operation. Zero removes its deadline.
+func UpdateExecutorPollDeadline(driver *ExecutorDriver, handle PollOperationHandle, deadline int64) bool {
+	return UpdateExecutorPollDeadlineResult(driver, handle, deadline) == PollOperationUpdated
+}
+
+func UpdateExecutorPollDeadlineResult(driver *ExecutorDriver, handle PollOperationHandle, deadline int64) PollOperationUpdateResult {
+	if !validRunningExecutorOwner(driver) {
+		return PollOperationUpdateInvalid
+	}
+	source := driver.sources.pollSource()
+	if source == nil {
+		return PollOperationUpdateInvalid
+	}
+	return source.UpdateDeadlineResult(driver.p, handle, deadline)
+}
+
+// UpdateExecutorPollDeadlineExact dispatches a descriptor deadline update by
+// the same routed OperationID retained by the reactor. It accepts both frozen
+// poll protocols without probing one after the other on failure.
+func UpdateExecutorPollDeadlineExact(
+	driver *ExecutorDriver,
+	id OperationID,
+	deadline int64,
+) PollOperationUpdateResult {
+	if !validRunningExecutorOwner(driver) || deadline < 0 || !id.Valid() ||
+		id.Source() != OperationSourcePoll || id.Route() != driver.route {
+		return PollOperationUpdateInvalid
+	}
+	source := driver.sources.pollSource()
+	if source == nil || id.LocalSlot() == 0 || id.LocalSlot() > PollOperationConfiguredCapacity(source) {
+		return PollOperationUpdateInvalid
+	}
+	slot, ok := pollOperationSlotAt(source, id.LocalSlot()-1)
+	if !ok || slot.generation != id.Generation {
+		return PollOperationUpdateStale
+	}
+	switch slot.mode {
+	case pollOperationModeV1:
+		return source.UpdateDeadlineResult(driver.p, PollOperationHandle{
+			Slot: id.LocalSlot(), Generation: id.Generation,
+		}, deadline)
+	case pollOperationModeV2:
+		return source.UpdatePollOperationV2Deadline(driver.p, id, deadline)
+	default:
+		return PollOperationUpdateClosed
+	}
+}
+
+// RetireCompletedExecutorPollOperation returns the readiness, closing, or
+// timeout result after the matching synchronous continuation resumes.
+func RetireCompletedExecutorPollOperation(
+	driver *ExecutorDriver,
+	token *WaitToken,
+	ticket WaitTicket,
+	handle PollOperationHandle,
+) (PollOperationResult, bool) {
+	if !validRunningExecutorOwner(driver) {
+		return PollOperationResultInvalid, false
+	}
+	source := driver.sources.pollSource()
+	if source == nil {
+		return PollOperationResultInvalid, false
+	}
+	return source.RetireCompletedPollOperation(driver.p, handle, token, ticket)
+}
+
+func RetireCanceledExecutorPollOperation(
+	driver *ExecutorDriver,
+	token *WaitToken,
+	ticket WaitTicket,
+	handle PollOperationHandle,
+) bool {
+	if !validRunningExecutorOwner(driver) {
+		return false
+	}
+	source := driver.sources.pollSource()
+	return source != nil && source.RetireCanceledPollOperation(driver.p, handle, token, ticket)
+}
+
+// SnapshotExecutorPollOperation is the only target reactor view of the paged
+// poll catalog. It remains valid while the driver is active, preparing, or in
+// its retained sleep; the target never reads private source slots.
+func SnapshotExecutorPollOperation(
+	driver *ExecutorDriver,
+	index uint32,
+) (PollOperationSnapshot, bool, bool) {
+	if !validExecutorDriver(driver) {
+		return PollOperationSnapshot{}, false, false
+	}
+	source := driver.sources.pollSource()
+	if source == nil {
+		return PollOperationSnapshot{}, false, false
+	}
+	return source.SnapshotAt(driver.p, index)
+}
+
+// PostExecutorPollReady imports readiness after a target wait returned and
+// before WakeExecutorAt scans sources. The handle, rather than the fd, is the
+// backend identity so a reused descriptor cannot receive a stale event.
+func PostExecutorPollReady(driver *ExecutorDriver, handle PollOperationHandle) PollOperationPostResult {
+	if !validExecutorDriver(driver) {
+		return PollOperationPostInvalid
+	}
+	source := driver.sources.pollSource()
+	if source == nil {
+		return PollOperationPostInvalid
+	}
+	return source.PostReady(driver.p, handle)
+}
+
+func PostExecutorPollClosing(driver *ExecutorDriver, handle PollOperationHandle) PollOperationPostResult {
+	if !validExecutorDriver(driver) {
+		return PollOperationPostInvalid
+	}
+	source := driver.sources.pollSource()
+	if source == nil {
+		return PollOperationPostInvalid
+	}
+	return source.PostClosing(driver.p, handle)
+}
+
+// PostExecutorPollEvent imports one pointer-free exact-generation event from
+// the retained reactor. OperationID identifies both V1 and V2 physical slots;
+// the owner selects the already-frozen protocol mode only after validating the
+// driver route and shared generation. No fallback from one protocol to the
+// other is attempted on an invalid source invariant.
+func PostExecutorPollEvent(
+	driver *ExecutorDriver,
+	id OperationID,
+	result PollOperationResult,
+) PollOperationPostResult {
+	if !validExecutorDriver(driver) || !id.Valid() || id.Source() != OperationSourcePoll ||
+		id.Route() != driver.route ||
+		(result != PollOperationReady && result != PollOperationClosing) {
+		return PollOperationPostInvalid
+	}
+	source := driver.sources.pollSource()
+	if source == nil || source.owner != driver.p || source.route != driver.route ||
+		id.LocalSlot() == 0 || id.LocalSlot() > PollOperationConfiguredCapacity(source) {
+		return PollOperationPostInvalid
+	}
+	slot, ok := pollOperationSlotAt(source, id.LocalSlot()-1)
+	if !ok || slot.generation != id.Generation {
+		return PollOperationPostStale
+	}
+	switch slot.mode {
+	case pollOperationModeV1:
+		return source.post(driver.p, PollOperationHandle{
+			Slot: id.LocalSlot(), Generation: id.Generation,
+		}, result)
+	case pollOperationModeV2:
+		return source.PostPollOperationV2(id, result)
+	default:
+		return PollOperationPostClosed
+	}
 }
 
 func activeExecutorHandle(registry *ExecutorRegistry, handle ExecutorHandle) bool {
@@ -628,7 +953,7 @@ func ConfirmExecutorClose(driver *ExecutorDriver) bool {
 func terminalExecutorRootPending(p *P, g *G, kind ActionKind) bool {
 	if p == nil || g == nil || p.current != g || p.inResume ||
 		p.runDecision != (RunDecision{}) || p.runDecisionTaken ||
-		!ValidG(g) || g.runP != p || g.destroyTarget != nil || !g.destroyRoot ||
+		!ValidG(g) || !gPreemptDepthZero(g) || g.runP != p || g.destroyTarget != nil || !g.destroyRoot ||
 		g.active != nil || g.frames != nil ||
 		p.readyHead != nil || p.readyTail != nil || !emptySchedulerWaitQueues(p) ||
 		!validReadyQueue(p) || !validSchedulerWaitQueues(p) || preemptLoad(&p.schedule) != scheduleIdle {

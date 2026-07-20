@@ -47,7 +47,7 @@ type CoroWorkerParkV1 struct {
 
 func validCoroWorkerParkV1(state *CoroWorkerParkV1) bool {
 	return state != nil && state.magic == coroWorkerParkMagicV1 &&
-		state.ticket != (coro.ParkTicket{}) && state.operation.Valid() &&
+		state.ticket.Valid() && state.operation.Valid() &&
 		state.operation.Source() == coro.OperationSourceWorker
 }
 
@@ -75,25 +75,27 @@ func __llgo_coro_worker_park_v1(
 	a0, a1, a2, a3, a4, a5, a6, a7, a8 uintptr,
 ) {
 	state := (*CoroWorkerParkV1)(storage)
+	task := (*coro.G)(g)
+	driver, executor, _, current := coro.CurrentExecutorWorkerDriver(task)
 	if g == nil || handle == nil || header == nil || state == nil ||
 		*state != (CoroWorkerParkV1{}) || function == 0 || argc > coroworker.MaxArgs ||
-		!coroProgramReserveNativeWorkerSubmissionV1() {
+		!current || !coroProgramReserveNativeWorkerSubmissionV1(executor) {
 		coroWorkerAbortV1("invalid coroutine worker park ABI")
 		return
 	}
 
 	state.magic = coroWorkerParkMagicV1
-	ticket, operation, ok := coro.PrepareSingleWorkerPark(
-		(*coro.G)(g),
+	ticket, operation, ok := coro.PrepareCurrentExecutorWorkerPark(
+		driver,
+		task,
 		handle,
 		(*coro.HeaderV1)(header),
-		&coroProgramWorkerSourceV1State,
 		&state.wait,
 		1,
 		1,
 	)
 	if !ok {
-		canceled := coroProgramCancelNativeWorkerSubmissionV1()
+		canceled := coroProgramCancelNativeWorkerSubmissionV1(executor)
 		*state = CoroWorkerParkV1{}
 		if !canceled {
 			coroWorkerAbortV1("coroutine worker park reservation rollback failed")
@@ -105,7 +107,7 @@ func __llgo_coro_worker_park_v1(
 	state.ticket = ticket
 	state.operation = operation
 	args := [coroworker.MaxArgs]uintptr{a0, a1, a2, a3, a4, a5, a6, a7, a8}
-	if !coroProgramCommitNativeWorkerSubmissionV1((*coroG)(g), operation, function, argc, &args) {
+	if !coroProgramCommitNativeWorkerSubmissionV1(driver, task, executor, operation, function, argc, &args) {
 		coroWorkerAbortV1("cannot commit coroutine worker submission")
 	}
 }
@@ -133,6 +135,11 @@ func __llgo_coro_worker_resume_v1(
 		coroWorkerAbortV1("invalid coroutine worker run decision")
 		return 0
 	}
+	driver, _, _, current := coro.CurrentExecutorWorkerDriver(task)
+	if !current {
+		coroWorkerAbortV1("coroutine worker resume has no current executor owner")
+		return 0
+	}
 	discard := outcome == coro.ParkOutcomeCanceled
 	var payload coro.ScalarResultPayloadV1
 	if outcome == coro.ParkOutcomeCompleted {
@@ -149,9 +156,9 @@ func __llgo_coro_worker_resume_v1(
 	if !discard {
 		output = &payload
 	}
-	if !coro.FinishSingleWorkerPark(
+	if !coro.FinishCurrentExecutorWorkerPark(
+		driver,
 		task,
-		&coroProgramWorkerSourceV1State,
 		state.operation,
 		lease,
 		discard,

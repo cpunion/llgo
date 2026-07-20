@@ -369,24 +369,33 @@ func coroProgramBeginCommandCloseV1() bool {
 	}
 }
 
-func coroProgramBeginTargetCloseV1(kind coroProgramContinuationV1) coroProgramDriveStatusV1 {
+func coroProgramPublishTargetCloseV1(kind coroProgramContinuationV1) coroTargetDispatchResultV1 {
 	if !coroProgramExecutorBoundV1State {
-		return coroProgramFailV1()
+		return coroTargetDispatchInvalidV1
 	}
 	epoch, ok := coroProgramPublishContinuationV1(kind)
 	if !ok {
-		return coroProgramFailV1()
+		return coroTargetDispatchInvalidV1
 	}
-	switch coroTargetBeginExecutorCloseV1(coroProgramExecutorHandleV1State, epoch) {
+	return coroTargetBeginExecutorCloseV1(coroProgramExecutorHandleV1State, epoch)
+}
+
+func coroProgramBeginTerminalCloseV1() coroProgramDriveStatusV1 {
+	switch coroProgramPublishTargetCloseV1(coroProgramContinuationTerminalJoinV1) {
 	case coroTargetDispatchPendingV1:
 		return coroProgramDriveSuspendedV1
 	case coroTargetDispatchCompleteV1:
-		switch kind {
-		case coroProgramContinuationTerminalJoinV1:
-			return coroProgramConfirmTerminalJoinV1()
-		case coroProgramContinuationCommandJoinV1:
-			return coroProgramConfirmCommandJoinV1()
-		}
+		return coroProgramConfirmTerminalJoinV1()
+	}
+	return coroProgramFailV1()
+}
+
+func coroProgramBeginCommandTargetCloseV1() coroProgramDriveStatusV1 {
+	switch coroProgramPublishTargetCloseV1(coroProgramContinuationCommandJoinV1) {
+	case coroTargetDispatchPendingV1:
+		return coroProgramDriveSuspendedV1
+	case coroTargetDispatchCompleteV1:
+		return coroProgramConfirmCommandJoinV1()
 	}
 	return coroProgramFailV1()
 }
@@ -421,7 +430,7 @@ func coroProgramFinishMainV1() coroProgramDriveStatusV1 {
 		if !coroProgramExecutorBoundV1State || !coroProgramBeginCommandCloseV1() {
 			return coroProgramFailV1()
 		}
-		return coroProgramBeginTargetCloseV1(coroProgramContinuationCommandJoinV1)
+		return coroProgramBeginCommandTargetCloseV1()
 	default:
 		return coroProgramFailV1()
 	}
@@ -472,7 +481,7 @@ func coroProgramHandleRunResultV1(result coroRunResultV1) coroProgramDriveStatus
 		if !valid || driver != &coroProgramExecutorDriverV1State {
 			return coroProgramFailV1()
 		}
-		return coroProgramBeginTargetCloseV1(coroProgramContinuationTerminalJoinV1)
+		return coroProgramBeginTerminalCloseV1()
 	case coroRunPanicCompleteV1:
 		return coroProgramFinishPanicV1(result.g, result.action)
 	default:

@@ -18,7 +18,90 @@
 
 #if defined(__APPLE__) || defined(__linux__)
 
+#include <errno.h>
 #include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+uint32_t __llgo_runtime_poll_fd_stream_v1(int32_t fd)
+{
+    int saved_errno = errno;
+    int socket_type = 0;
+    socklen_t socket_type_size = (socklen_t)sizeof(socket_type);
+    int status = getsockopt(
+        (int)fd,
+        SOL_SOCKET,
+        SO_TYPE,
+        &socket_type,
+        &socket_type_size);
+    uint32_t result = status == 0 &&
+        socket_type_size == (socklen_t)sizeof(socket_type) &&
+        socket_type == SOCK_STREAM;
+    errno = saved_errno;
+    return result;
+}
+
+/*
+ * One bounded non-blocking I/O attempt with explicit errno transport.
+ *
+ * The Go owner admits these leaves only for a kernel-confirmed SOCK_STREAM.
+ * Each leaf clamps its own copy length to 64 KiB, and MSG_DONTWAIT applies to
+ * this one call, so the target-owned executor-safe contract remains true for
+ * every size and even when shared open-file-description flags are changed
+ * through dup or a raw descriptor callback. result occupies the low 32 bits
+ * and errno the high 32 bits. The wrapper restores incoming C errno: no
+ * executor-thread TLS state is observed after returning to Go.
+ */
+static uint64_t llgo_runtime_poll_pack_io_attempt_v1(ssize_t result, int error)
+{
+    uint32_t result_word = (uint32_t)(int32_t)result;
+    uint32_t error_word = result < 0 ? (uint32_t)error : 0;
+    return ((uint64_t)error_word << 32) | (uint64_t)result_word;
+}
+
+#define LLGO_RUNTIME_POLL_MAX_INLINE_ATTEMPT_V1 ((uintptr_t)64u << 10)
+
+static size_t llgo_runtime_poll_bounded_size_v1(uintptr_t size)
+{
+    if (size > LLGO_RUNTIME_POLL_MAX_INLINE_ATTEMPT_V1) {
+        size = LLGO_RUNTIME_POLL_MAX_INLINE_ATTEMPT_V1;
+    }
+    return (size_t)size;
+}
+
+uint64_t __llgo_runtime_poll_read_attempt_v1(
+    int32_t fd,
+    void *address,
+    uintptr_t size)
+{
+    int saved_errno = errno;
+    ssize_t result = recv(
+        (int)fd,
+        address,
+        llgo_runtime_poll_bounded_size_v1(size),
+        MSG_DONTWAIT);
+    int error = result < 0 ? errno : 0;
+    uint64_t packed = llgo_runtime_poll_pack_io_attempt_v1(result, error);
+    errno = saved_errno;
+    return packed;
+}
+
+uint64_t __llgo_runtime_poll_write_attempt_v1(
+    int32_t fd,
+    void *address,
+    uintptr_t size)
+{
+    int saved_errno = errno;
+    ssize_t result = send(
+        (int)fd,
+        address,
+        llgo_runtime_poll_bounded_size_v1(size),
+        MSG_DONTWAIT);
+    int error = result < 0 ? errno : 0;
+    uint64_t packed = llgo_runtime_poll_pack_io_attempt_v1(result, error);
+    errno = saved_errno;
+    return packed;
+}
 
 /*
  * Fixed scalar ABI for the llgo.syscall worker intrinsic.

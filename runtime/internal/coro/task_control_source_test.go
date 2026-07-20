@@ -806,3 +806,59 @@ func TestExecutorDriverControlSourceCancelsFrameLocalParkInPublishedEpoch(t *tes
 	}
 	runtime.KeepAlive(task.frame.memory)
 }
+
+func TestExecutorDriverCurrentTaskControlOwnerAPIIsGenerationSafe(t *testing.T) {
+	p := new(P)
+	driver := new(ExecutorDriver)
+	registry := new(ExecutorRegistry)
+	waits := new(WaitRegistrationTable)
+	control := new(TaskControlSource)
+	executor := registerTestExecutor(t, registry)
+	if !BindExecutorSourceCatalog(driver, p, registry, executor, ExecutorSourceCatalog{Waits: waits, Control: control}) {
+		t.Fatal("bind current-task control executor")
+	}
+	task := newYieldingTestG(t, "current-task-control")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue current-task control task")
+	}
+	if g, ok := NextRunnable(p); !ok || g != task.g {
+		t.Fatal("dequeue current-task control task")
+	}
+	action := beginWaitTestResume(t, p, task)
+	first, ok := RegisterCurrentExecutorTaskControl(driver, task.g)
+	if !ok || first.Source() != OperationSourceControl || first.Route() != driver.route || first.Generation != 1 {
+		t.Fatalf("register first current-task control = (%+v, %t)", first, ok)
+	}
+	if id, registered := RegisterCurrentExecutorTaskControl(driver, new(G)); registered || id != (OperationID{}) {
+		t.Fatalf("registered non-current task = (%+v, %t)", id, registered)
+	}
+	if !BeginCloseCurrentExecutorTaskControl(driver, task.g, first) ||
+		!FinishCloseCurrentExecutorTaskControl(driver, task.g, first) {
+		t.Fatal("close first current-task control endpoint")
+	}
+	second, ok := RegisterCurrentExecutorTaskControl(driver, task.g)
+	if !ok || second.SourceSlot != first.SourceSlot || second.Generation != first.Generation+1 {
+		t.Fatalf("register second current-task control = (%+v, %t), first=%+v", second, ok, first)
+	}
+	if BeginCloseCurrentExecutorTaskControl(driver, task.g, first) ||
+		FinishCloseCurrentExecutorTaskControl(driver, task.g, first) {
+		t.Fatal("stale current-task control generation was accepted")
+	}
+	if !BeginCloseCurrentExecutorTaskControl(driver, task.g, second) ||
+		!FinishCloseCurrentExecutorTaskControl(driver, task.g, second) {
+		t.Fatal("close second current-task control endpoint")
+	}
+	yieldRunningDriverTask(t, p, task, action)
+	closeTestExecutorDriver(t, driver)
+	if !control.CanRelease() || !waits.CanRelease() || !registry.CanRelease() {
+		t.Fatal("current-task control owner API retained executor state")
+	}
+	if g, ok := NextRunnable(p); !ok || g != task.g {
+		t.Fatal("dequeue current-task control cleanup task")
+	}
+	finishWaitTestTask(t, p, task, beginWaitTestResume(t, p, task))
+	if !TerminalG(p, task.g) {
+		t.Fatal("finish current-task control task")
+	}
+	runtime.KeepAlive(task.frame.memory)
+}

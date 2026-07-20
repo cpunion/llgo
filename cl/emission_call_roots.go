@@ -59,7 +59,8 @@ func emissionIntrinsicPolicy(instruction int) (emissionIntrinsicOperandPolicy, e
 	switch instruction {
 	case llgoCstr, llgoPyStr,
 		llgoSkip, llgoCgoCheckPointer,
-		llgoSigjmpbuf, llgoDeferData, llgoUnreachable, llgoStackSave:
+		llgoSigjmpbuf, llgoDeferData, llgoUnreachable, llgoStackSave,
+		llgoCoroYield, llgoCoroCriticalEnter, llgoCoroCriticalExit:
 		return emissionIntrinsicNoValues, nil
 
 	case llgoAdvance, llgoIndex,
@@ -83,12 +84,13 @@ func emissionIntrinsicPolicy(instruction int) (emissionIntrinsicOperandPolicy, e
 	case llgoAsm:
 		return emissionIntrinsicAsm, nil
 
-	case llgoSyscall:
+	case llgoSyscall, llgoSyscall32, llgoSyscallPtr:
 		return emissionIntrinsicRawAllValues, nil
 	case llgoBoolToUint8,
 		llgoAtomicLoad, llgoAtomicStore, llgoAtomicCmpXchg,
 		llgoAtomicCmpXchgOK, llgoAtomicAddReturnNew,
-		llgoCoroPark:
+		llgoAtomicLoadUnsafe, llgoAtomicStoreUnsafe,
+		llgoCoroPark, llgoCoroTimerSleep, llgoCoroPollWait, llgoCoroControlledTimerWait:
 		return emissionIntrinsicCompileValues, nil
 	default:
 		if instruction >= llgoAtomicOpBase && instruction <= llgoAtomicOpLast {

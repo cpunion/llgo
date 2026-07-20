@@ -2111,7 +2111,7 @@ func (v Value) CanConvert(t Type) bool {
 // memmove copies size bytes to dst from src. No write barriers are used.
 //
 //go:linkname memmove C.memmove
-func memmove(dst, src unsafe.Pointer, size uintptr)
+func memmove(dst, src unsafe.Pointer, size uintptr) unsafe.Pointer
 
 // typedmemmove copies a value of type t to dst from src.
 //

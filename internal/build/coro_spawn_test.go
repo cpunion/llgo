@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/goplus/llgo/cl"
 	"github.com/goplus/llgo/internal/coro"
 	"golang.org/x/tools/go/ssa"
 )
@@ -79,32 +80,227 @@ func launchSuspending() { go suspending() }
 	if !coroPlanContainsSpawn(plan) {
 		t.Fatal("emitted plan lost its spawn site")
 	}
-	if err := validateCoroClosedStaticSpawnRunGate(&Config{EnableCoroClosedStaticSpawn: true}, plan); err == nil || !strings.Contains(err.Error(), "runnable program bootstrap v2") {
+	if err := validateCoroClosedStaticSpawnRunGate(&Config{EnableCoroClosedStaticSpawn: true}, plan, ""); err == nil || !strings.Contains(err.Error(), "runnable program bootstrap v2") {
 		t.Fatalf("non-runnable spawn gate error = %v", err)
 	}
 	err = validateCoroClosedStaticSpawnRunGate(&Config{
 		EnableCoroClosedStaticSpawn:   true,
 		EnableCoroProgramBootstrapRun: true,
-	}, plan)
+	}, plan, "")
 	if err == nil || !strings.Contains(err.Error(), "may-park") || !strings.Contains(err.Error(), "main-return cancellation subset") {
 		t.Fatalf("runnable spawn gate error = %v", err)
 	}
 }
 
+func TestCoroPlanInputClosedStaticSpawnAcceptsContextFreeLiteral(t *testing.T) {
+	ssaPkg, _ := buildCoroPlanTestPackage(t, "example.com/literalspawn", `package literalspawn
+var sink int
+func launch(value int) {
+	go func(argument int) { sink = argument }(value)
+}
+`, nil)
+	launch := ssaPkg.Func("launch")
+	input := CoroPlanInput{Program: ssaPkg.Prog, enableClosedStaticSpawn: true}
+	plan, err := input.Analyze(
+		coro.Roots{{Function: launch, Demand: coro.AsyncDemand}},
+		coro.SSAConfig{MaxPlainInstructions: -1},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var spawn *ssa.Go
+	for _, call := range coroPlanTestCalls(launch) {
+		if candidate, ok := call.(*ssa.Go); ok {
+			spawn = candidate
+			break
+		}
+	}
+	if spawn == nil {
+		t.Fatal("launch has no spawn")
+	}
+	target, direct := spawn.Common().Value.(*ssa.Function)
+	if !direct || target == nil || target.Parent() != launch || len(target.FreeVars) != 0 {
+		t.Fatalf("spawn target = %#v, want exact context-free nested function", spawn.Common().Value)
+	}
+	resolved, targetPlan, err := plan.ResolveClosedStaticSpawn(spawn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != target || targetPlan.Emission != coro.EmitCoroutine ||
+		targetPlan.Primary != coro.PrimaryCoroutine || targetPlan.FuncRep != coro.DirectCoro ||
+		targetPlan.Demand != coro.AsyncDemand || !targetPlan.Effect.Contains(coro.YieldOnly) {
+		t.Fatalf("resolved target/plan = %v / %+v", resolved, targetPlan)
+	}
+}
+
+func TestCoroPlanInputManagedDescriptorSpawnSeedsCapturedTargetAndOpenValue(t *testing.T) {
+	ssaPkg, _ := buildCoroPlanTestPackage(t, "example.com/managedspawn", `package managedspawn
+var sink int
+func launchCaptured(value int) {
+	go func(delta int) { sink = value + delta }(value + 1)
+}
+func launchDynamic(fn func()) { go fn() }
+`, nil)
+	launchCaptured := ssaPkg.Func("launchCaptured")
+	launchDynamic := ssaPkg.Func("launchDynamic")
+	input := CoroPlanInput{
+		Program:                 ssaPkg.Prog,
+		enableClosedStaticSpawn: true,
+		enableManagedDispatch:   true,
+	}
+	plan, err := input.Analyze(coro.Roots{
+		{Function: launchCaptured, Demand: coro.AsyncDemand},
+		{Function: launchDynamic, Demand: coro.AsyncDemand},
+	}, coro.SSAConfig{MaxPlainInstructions: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, owner := range []*ssa.Function{launchCaptured, launchDynamic} {
+		var spawn *ssa.Go
+		for _, call := range coroPlanTestCalls(owner) {
+			if candidate, ok := call.(*ssa.Go); ok {
+				spawn = candidate
+				break
+			}
+		}
+		if spawn == nil {
+			t.Fatalf("%s: missing spawn", owner.Name())
+		}
+		callPlan, resolveErr := plan.ResolveManagedDispatchSpawn(spawn)
+		if resolveErr != nil {
+			t.Fatalf("%s: resolve managed descriptor spawn: %v", owner.Name(), resolveErr)
+		}
+		if callPlan.Kind != coro.CallSpawn || callPlan.Rep != coro.Dispatch {
+			t.Fatalf("%s spawn CallPlan = %+v", owner.Name(), callPlan)
+		}
+		if owner == launchCaptured {
+			if callPlan.Open || len(callPlan.Targets) != 1 {
+				t.Fatalf("captured spawn CallPlan = %+v", callPlan)
+			}
+			target, found := plan.Function(callPlan.Targets[0])
+			if !found || target == nil {
+				t.Fatalf("captured spawn target %q is absent", callPlan.Targets[0])
+			}
+			targetPlan, _ := plan.FunctionPlan(target)
+			if targetPlan.Emission != coro.EmitCoroutine || targetPlan.Primary != coro.PrimaryCoroutine ||
+				targetPlan.FuncRep != coro.Dispatch || targetPlan.Demand != coro.AsyncDemand ||
+				!targetPlan.Effect.Contains(coro.YieldOnly) {
+				t.Fatalf("captured spawn target = %+v", targetPlan)
+			}
+		} else if !callPlan.Open || callPlan.Unresolved != coro.UnknownManagedDispatch {
+			t.Fatalf("open function-value spawn CallPlan = %+v", callPlan)
+		}
+	}
+}
+
+func TestCoroPlanInputClosedStaticMethodSpawnUsesDescriptorArgument(t *testing.T) {
+	ssaPkg, _ := buildCoroPlanTestPackage(t, "example.com/methodspawn", `package methodspawn
+var sink int
+type worker int
+func (receiver worker) run(callback func(int), value int) {
+	sink = int(receiver) + value
+	_ = callback
+}
+func receiver(value int) worker { return worker(value + 1) }
+func argument(value int) int { return value + 2 }
+func launch(callback func(int), value int) {
+	go receiver(value).run(callback, argument(value))
+}
+`, nil)
+	launch := ssaPkg.Func("launch")
+	input := CoroPlanInput{
+		Program:                 ssaPkg.Prog,
+		enableClosedStaticSpawn: true,
+		enableManagedDispatch:   true,
+	}
+	plan, err := input.Analyze(
+		coro.Roots{{Function: launch, Demand: coro.AsyncDemand}},
+		coro.SSAConfig{MaxPlainInstructions: -1},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var spawn *ssa.Go
+	for _, call := range coroPlanTestCalls(launch) {
+		if candidate, ok := call.(*ssa.Go); ok {
+			spawn = candidate
+			break
+		}
+	}
+	if spawn == nil {
+		t.Fatal("launch has no method spawn")
+	}
+	target, targetPlan, err := resolveCoroDirectStaticSpawnPlan(plan, spawn)
+	if err != nil {
+		t.Fatalf("resolve method spawn: %v", err)
+	}
+	if target.Signature == nil || target.Signature.Recv() == nil {
+		t.Fatalf("spawn target %q is not a method", target.Name())
+	}
+	if targetPlan.Emission != coro.EmitCoroutine || targetPlan.Primary != coro.PrimaryCoroutine ||
+		targetPlan.FuncRep != coro.DirectCoro || targetPlan.Demand != coro.AsyncDemand ||
+		!targetPlan.Effect.Contains(coro.YieldOnly) {
+		t.Fatalf("method spawn target = %+v", targetPlan)
+	}
+	callPlan, found := plan.CallPlan(spawn)
+	if !found || callPlan.Kind != coro.CallSpawn || callPlan.Rep != coro.DirectCoro ||
+		callPlan.Open || callPlan.MayBeNil || len(callPlan.Targets) != 1 {
+		t.Fatalf("method spawn CallPlan = %+v, present=%t", callPlan, found)
+	}
+	if len(spawn.Common().Args) != 3 {
+		t.Fatalf("normalized method arguments = %d, want receiver+2 args", len(spawn.Common().Args))
+	}
+	callbackPlan, found := plan.ValuePlan(spawn.Common().Args[1])
+	if !found || len(callbackPlan.Funcs) != 1 || len(callbackPlan.Funcs[0].Path) != 0 ||
+		callbackPlan.Funcs[0].Rep != coro.Dispatch {
+		t.Fatalf("method callback ValuePlan = %+v, present=%t; want scalar Dispatch", callbackPlan, found)
+	}
+}
+
 func TestCoroClosedStaticSpawnRunGateEffectSubset(t *testing.T) {
 	tests := []struct {
-		name       string
-		effect     coro.Effect
-		wantOK     bool
-		wantDetail string
+		name          string
+		effect        coro.Effect
+		enableWorker  bool
+		enableChannel bool
+		frameABI      string
+		wantOK        bool
+		wantDetail    string
 	}{
 		{name: "yield", effect: coro.YieldOnly, wantOK: true},
 		{name: "structured await", effect: coro.YieldOnly | coro.AwaitStructured, wantOK: true},
 		{name: "missing yield", effect: coro.AwaitStructured, wantDetail: "await-structured"},
 		{name: "park", effect: coro.YieldOnly | coro.MayPark, wantDetail: "may-park"},
+		{
+			name:     "typed park has command drain",
+			effect:   coro.YieldOnly | coro.MayPark,
+			frameABI: cl.CoroFrameRetentionParkABIV2,
+			wantOK:   true,
+		},
+		{
+			name:         "worker capability does not prove park source",
+			effect:       coro.YieldOnly | coro.MayPark,
+			enableWorker: true,
+			wantDetail:   "may-park",
+		},
+		{
+			name:          "channel capability does not prove park source",
+			effect:        coro.YieldOnly | coro.MayPark,
+			enableChannel: true,
+			wantDetail:    "may-park",
+		},
 		{name: "platform wait", effect: coro.YieldOnly | coro.WaitPlatform, wantDetail: "wait-platform"},
 		{name: "host wait", effect: coro.YieldOnly | coro.WaitHost, wantDetail: "wait-host"},
 		{name: "foreign wait", effect: coro.YieldOnly | coro.WaitForeign, wantDetail: "wait-foreign"},
+		{
+			name:         "worker foreign wait has command drain",
+			effect:       coro.YieldOnly | coro.WaitForeign,
+			enableWorker: true,
+			wantOK:       true,
+		},
 		{name: "opaque", effect: coro.OpaqueSuspend, wantDetail: "opaque-suspend"},
 	}
 	for _, test := range tests {
@@ -133,7 +329,9 @@ func launch() { go target() }
 			err = validateCoroClosedStaticSpawnRunGate(&Config{
 				EnableCoroClosedStaticSpawn:   true,
 				EnableCoroProgramBootstrapRun: true,
-			}, plan)
+				EnableCoroWorker:              test.enableWorker,
+				EnableCoroChannel:             test.enableChannel,
+			}, plan, test.frameABI)
 			if test.wantOK {
 				if err != nil {
 					t.Fatalf("safe runnable spawn rejected: %v", err)
@@ -156,21 +354,12 @@ func TestCoroPlanInputClosedStaticSpawnFailsClosedOnUnsupportedShapes(t *testing
 		{
 			name:   "captured closure",
 			source: `package spawn; func launch(value int) { go func() { _ = value }() }`,
-			want:   "closures, methods, interfaces, and function values",
-		},
-		{
-			name: "method",
-			source: `package spawn
-type worker int
-func (worker) run() {}
-func launch(value worker) { go value.run() }
-`,
-			want: "non-method",
+			want:   "closures, interfaces, and function values",
 		},
 		{
 			name:   "dynamic function value",
 			source: `package spawn; func launch(fn func()) { go fn() }`,
-			want:   "closures, methods, interfaces, and function values",
+			want:   "closures, interfaces, and function values",
 		},
 		{
 			name:   "discarded result capability",

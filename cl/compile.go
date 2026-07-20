@@ -172,8 +172,11 @@ type context struct {
 	loaded               map[*types.Package]*pkgInfo // loaded packages
 	bvals                map[ssa.Value]llssa.Expr    // block values
 	methodNilDerefChecks map[*ssa.UnOp]none
+	patchOriginalInitIf  *ssa.If                     // exact synthetic guard whose successors are logically inverted
+	unevaluatedSSA       map[ssa.Instruction]none    // values used only by unsafe.Sizeof/Alignof
 	vargs                map[*ssa.Alloc][]llssa.Expr // varargs
 	funcs                map[*ssa.Function]llssa.Function
+	rawPlainFuncs        map[*ssa.Function]llssa.Function
 	linkOnceFns          map[*ssa.Function]none
 	stackDefers          map[*ssa.Function]bool
 	anonDefers           map[*ssa.Function]bool
@@ -185,6 +188,7 @@ type context struct {
 	pcLineSeq            uint64
 	sourceParamBase      int // hidden physical parameters before source params
 	currentCoro          *coroBodyContext
+	rawPlainBody         bool               // compiling the legacy ABI variant of a managed function
 	coroSourceBlocks     []llssa.BasicBlock // source SSA block index -> logical LLVM block
 	coroRootFactories    []coroRootFactoryRegistration
 	coroPlainDescriptors map[string]llssa.Expr
@@ -402,6 +406,15 @@ func (p *context) compileGlobal(pkg llssa.Package, gbl *ssa.Global) {
 	}
 	dbgInstrln("==> NewVar", name, typ)
 	g := pkg.NewVar(name, typ, llssa.Background(vtype))
+	if p.emissionUniverse != nil {
+		identity, certified, err := p.emissionUniverse.CoroGlobalPhysicalIdentity(gbl)
+		if err != nil {
+			panic(err)
+		}
+		if certified && identity.InternalLinkage {
+			g.SetInternalLinkage()
+		}
+	}
 	if p.tryEmbedGlobalInit(pkg, gbl, g, name) {
 		return
 	}
@@ -486,6 +499,9 @@ func (p *context) needsLinkOnce(f *ssa.Function) bool {
 		if _, ok := p.linkOnceFns[f]; ok {
 			return true
 		}
+		if p.emissionUniverse != nil && p.emissionUniverse.generatedWrapperDefinitionNeedsLinkOnce(f) {
+			return true
+		}
 		if hasGenericInstantiation(f) {
 			return true
 		}
@@ -530,7 +546,57 @@ func hasInstantiatedRecv(recv *types.Var) bool {
 
 func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Function, llssa.PyObjRef, int) {
 	entry := p.mustFunctionSymbol(f)
-	f = entry.function
+	if entry.planned && entry.plan.Emission == coro.EmitRawPlain {
+		// Eager package enumeration still materializes raw-only functions, but
+		// their first and only body must use legacy-stack lowering. Starting in
+		// managed mode here would manufacture the dead twin this plan excludes.
+		return p.compileFuncDeclVariant(pkg, entry.function, true)
+	}
+	fn, py, kind := p.compileFuncDeclVariant(pkg, f, false)
+	if entry.planned && entry.plan.Emission == coro.EmitCoroutine &&
+		p.compilation != nil && p.compilation.CoroPlan != nil &&
+		p.compilation.CoroPlan.HasRawPlainVariant(entry.function) {
+		// RawPlainEntry is only the public address/ABI capability. A raw closure
+		// helper may need a private legacy-stack twin without being an entry.
+		// Eagerly materialize every planned twin in its defining package so a
+		// raw caller compiled in another package never leaves an unresolved
+		// declaration behind.
+		p.compileFuncDeclVariant(pkg, entry.function, true)
+	}
+	return fn, py, kind
+}
+
+// compileFuncDeclVariant materializes either the managed primary or the exact
+// legacy Go-ABI body requested by RawPlainEntry. The SSA CFG is shared, but the
+// latter deliberately runs through ordinary native-stack lowering: no
+// coroutine frame, explicit-status outcome, await, or preemption poll is
+// emitted. Calls made while compiling that body are redirected by
+// compileFunction to the corresponding raw/plain target entry.
+func (p *context) compileFuncDeclVariant(pkg llssa.Package, f *ssa.Function, rawPlain bool) (llssa.Function, llssa.PyObjRef, int) {
+	var entry plannedFunctionSymbol
+	patchOriginal := f != nil && f.Name() == "init" && f.Signature != nil && f.Signature.Recv() == nil &&
+		p.state == pkgHasPatch && p.compilation != nil && p.compilation.EnableCoroEntryResolution
+	if patchOriginal {
+		entry = p.mustPatchOriginalInitFunctionSymbol(f)
+	} else {
+		entry = p.mustFunctionSymbol(f)
+	}
+	if rawPlain {
+		if patchOriginal {
+			entry = p.mustRawPlainFunctionSymbolFromEntry(entry, nil)
+		} else {
+			entry = p.mustRawPlainFunctionSymbol(f)
+		}
+	}
+	return p.compileFuncDeclVariantEntry(pkg, entry, rawPlain)
+}
+
+// compileFuncDeclVariantEntry materializes an already-resolved physical symbol
+// role. Ordinary definitions enter through compileFuncDeclVariant; the one
+// compiler-owned patch-original await passes its private role directly so a
+// second generic lookup cannot collapse it back to the public init symbol.
+func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFunctionSymbol, rawPlain bool) (llssa.Function, llssa.PyObjRef, int) {
+	f := entry.function
 	pkgTypes, name, ftype := entry.pkgTypes, entry.name, entry.ftype
 	if ftype != goFunc {
 		return nil, nil, ignoredFunc
@@ -545,12 +611,25 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 	}()
 	sourceSig := sig
 	state := p.state
+	if entry.patchOriginalInit {
+		state = pkgHasPatch
+	}
 	isInit := (f.Name() == "init" && sig.Recv() == nil)
-	if isInit && state == pkgHasPatch {
-		name = initFnNameOfHasPatch(name)
-		// TODO(xsw): pkg.init$guard has been set, change ssa.If to ssa.Jump
-		block := f.Blocks[0].Instrs[1].(*ssa.If).Block()
-		block.Succs[0], block.Succs[1] = block.Succs[1], block.Succs[0]
+	var patchOriginalInitIf *ssa.If
+	if isInit && (entry.patchOriginalInit || state == pkgHasPatch) {
+		// The explicit coroutine role already owns init$hasPatch. Legacy and
+		// report-only compilation retain the historical state-derived spelling.
+		if !entry.patchOriginalInit {
+			name = initFnNameOfHasPatch(name)
+		}
+		if len(f.Blocks) == 0 || len(f.Blocks[0].Instrs) < 2 {
+			panic("patch original initializer has no synthetic guard")
+		}
+		var ok bool
+		patchOriginalInitIf, ok = f.Blocks[0].Instrs[1].(*ssa.If)
+		if !ok || patchOriginalInitIf.Block() != f.Blocks[0] || len(f.Blocks[0].Succs) != 2 {
+			panic("patch original initializer has an invalid synthetic guard")
+		}
 	}
 
 	fn := pkg.FuncOf(name)
@@ -578,9 +657,11 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 		sig = abi.physicalSig
 		hasCtx = false
 	}
-	if fn == nil {
-		fn = pkg.NewFuncEx(name, sig, llssa.Background(ftype), hasCtx, p.needsLinkOnce(f))
-	}
+	// Always revisit an existing declaration when materializing its body.
+	// NewFuncEx promotes that declaration to linkonce when required; declarations
+	// themselves must retain external linkage because LLVM rejects a bodyless
+	// linkonce global.
+	fn = pkg.NewFuncEx(name, sig, llssa.Background(ftype), hasCtx, p.needsLinkOnce(f))
 	noInlineDirective := hasNoInlineDirective(f)
 	runtimeStackNoInline := needsRuntimeStackNoInline(pkgTypes, f)
 	pcLineNoInline := p.needsPCLineNoInline(f)
@@ -590,7 +671,11 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 	if noInlineDirective || runtimeStackNoInline || pcLineNoInline {
 		fn.DisableTailCalls()
 	}
-	p.funcs[f] = fn
+	if rawPlain {
+		p.rawPlainFuncs[f] = fn
+	} else {
+		p.funcs[f] = fn
+	}
 	if physicalABI != nil && entry.childAwait {
 		p.emitCoroRootFactory(pkg, entry, *physicalABI, sourceSig, fn)
 	}
@@ -605,7 +690,7 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 			pkg.EmitFuncInfo(fn.Name(), funcInfoDisplayName(pkgTypes, goName), pos.Filename, pos.Line, pos.Column)
 		}
 		var childInits []func()
-		if len(f.AnonFuncs) > 0 {
+		if !rawPlain && len(f.AnonFuncs) > 0 {
 			parentInits := p.inits
 			p.inits = nil
 			for _, af := range f.AnonFuncs {
@@ -633,13 +718,15 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 		dbgEnabled := enableDbg && (f == nil || f.Origin() == nil)
 		dbgSymsEnabled := enableDbgSyms && (f == nil || f.Origin() == nil)
 		p.inits = append(p.inits, func() {
-			oldFn, oldGoFn, oldMethodNilDerefChecks, oldCallerFrameMark := p.fn, p.goFn, p.methodNilDerefChecks, p.callerFrameMark
+			oldFn, oldGoFn, oldMethodNilDerefChecks, oldPatchOriginalInitIf, oldUnevaluatedSSA, oldCallerFrameMark, oldRawPlainBody := p.fn, p.goFn, p.methodNilDerefChecks, p.patchOriginalInitIf, p.unevaluatedSSA, p.callerFrameMark, p.rawPlainBody
 			p.fn = fn
 			p.goFn = f
+			p.patchOriginalInitIf = patchOriginalInitIf
+			p.rawPlainBody = rawPlain
 			p.callerFrameMark = llssa.Nil
 			p.state = state // restore pkgState when compiling funcBody
 			defer func() {
-				p.fn, p.goFn, p.methodNilDerefChecks, p.callerFrameMark = oldFn, oldGoFn, oldMethodNilDerefChecks, oldCallerFrameMark
+				p.fn, p.goFn, p.methodNilDerefChecks, p.patchOriginalInitIf, p.unevaluatedSSA, p.callerFrameMark, p.rawPlainBody = oldFn, oldGoFn, oldMethodNilDerefChecks, oldPatchOriginalInitIf, oldUnevaluatedSSA, oldCallerFrameMark, oldRawPlainBody
 			}()
 			p.phis = nil
 			if dbgSymsEnabled {
@@ -657,8 +744,25 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 			}
 			p.bvals = make(map[ssa.Value]llssa.Expr)
 			p.methodNilDerefChecks = collectMethodNilDerefChecks(f)
+			if p.emissionUniverse != nil {
+				var frozen bool
+				p.unevaluatedSSA, frozen = p.emissionUniverse.frozenUnsafeSizeAlignUnevaluatedSSA(f)
+				if !frozen {
+					panic(fmt.Sprintf("function %q has no frozen unsafe.Sizeof/Alignof lowering facts", f.String()))
+				}
+			} else {
+				// Legacy one-package compilation has no whole-program inventory.
+				p.unevaluatedSSA = collectUnsafeSizeAlignUnevaluatedSSA(f)
+			}
 			if physicalABI != nil {
 				p.compileCoroPhysicalBody(b, f, *physicalABI, isInit)
+				// Anonymous bodies are collected while the physical owner is
+				// declared, but their deferred initializers still have to run after
+				// the owner's symbols and frame recipe exist. Returning here without
+				// them leaves captured coroutine targets as empty LLVM declarations.
+				for _, childInit := range childInits {
+					childInit()
+				}
 				b.EndBuild()
 				return
 			}
@@ -909,6 +1013,9 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 	isCgoC2 := isCgoC2func(fnName)
 	isCgoCmacro := isCgoCmacro(fnName)
 	for i, instr := range instrs {
+		if _, skip := p.unevaluatedSSA[instr]; skip {
+			continue
+		}
 		if p.currentCoro != nil {
 			if _, debug := instr.(*ssa.DebugRef); debug {
 				p.compileInstr(b, instr)
@@ -918,6 +1025,19 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 			if p.currentCoro.frameRetention != nil {
 				role = p.currentCoro.frameRetention.roles[instr]
 			}
+			criticalRole := coroCriticalCallNone
+			criticalDepth := uint32(0)
+			if p.currentCoro.critical != nil {
+				var proven bool
+				criticalDepth, proven = p.currentCoro.critical.beforeDepth[instr]
+				if !proven {
+					panic("coroutine critical proof has no instruction input depth")
+				}
+				if call, ok := instr.(*ssa.Call); ok {
+					criticalRole = p.currentCoro.critical.roles[call]
+				}
+			}
+			outerCriticalEnter := criticalRole == coroCriticalCallEnter && criticalDepth == 0
 			switch role {
 			case coroFrameRetentionInstructionPrepare:
 				if p.currentCoro.frameRetaining {
@@ -937,15 +1057,22 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 					panic("coroutine frame-retention park/retire outside its critical span")
 				}
 			default:
-				if !p.currentCoro.frameRetaining {
+				if !p.currentCoro.frameRetaining && criticalDepth == 0 && !outerCriticalEnter {
 					p.currentCoro.countInstructionAndMaybeYield(b)
 				}
+			}
+			if !outerCriticalEnter {
+				p.currentCoro.sourceBlockPollFresh = false
 			}
 		}
 		if i == 1 && doModInit && p.state == pkgInPatch { // in patch package but no pkgFNoOldInit
 			initFnNameOld := initFnNameOfHasPatch(p.fn.Name())
-			fnOld := pkg.NewFunc(initFnNameOld, llssa.NoArgsNoRet, llssa.InC)
-			b.Call(fnOld.Expr)
+			if p.currentCoro != nil {
+				p.compileCoroPatchInitAwait(b)
+			} else {
+				fnOld := pkg.NewFunc(initFnNameOld, llssa.NoArgsNoRet, llssa.InC)
+				b.Call(fnOld.Expr)
+			}
 		}
 		if isCgoCfunc || isCgoC2 || isCgoCmacro {
 			switch instr := instr.(type) {
@@ -1236,10 +1363,16 @@ func (p *context) compilePhis(b llssa.Builder, block *ssa.BasicBlock) int {
 			rets := make([]llssa.Expr, n) // TODO(xsw): check to remove this
 			for i := 0; i < n; i++ {
 				iv := block.Instrs[i].(*ssa.Phi)
+				if _, skip := p.unevaluatedSSA[iv]; skip {
+					continue
+				}
 				rets[i] = p.compilePhi(b, iv)
 			}
 			for i := 0; i < n; i++ {
 				iv := block.Instrs[i].(*ssa.Phi)
+				if _, skip := p.unevaluatedSSA[iv]; skip {
+					continue
+				}
 				p.bvals[iv] = rets[i]
 			}
 			return n
@@ -1275,7 +1408,54 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 	}
 	switch v := iv.(type) {
 	case *ssa.Call:
-		if value, handled := p.tryCompileCoroPlainDispatchCall(b, v); handled {
+		if value, handled := p.tryCompileCoroPatchInitRedirect(b, v); handled {
+			ret = value
+		} else if p.rawPlainBody {
+			// A compiler-frozen closed SyncDispatch (currently the TLS destructor
+			// callback) has a complete singleton target and plain descriptor ABI.
+			// Preserve that exact path before the general raw-body dynamic-call
+			// rejection; open/invoke/method dispatch remains fail-closed.
+			callPlan, planned := p.compilation.CoroPlan.CallPlan(v)
+			if planned && callPlan.Transport == coro.RawCCodePointer {
+				common := v.Common()
+				if common == nil || common.StaticCallee() != nil || common.IsInvoke() || common.Method != nil ||
+					callPlan.Kind != coro.CallForeign || callPlan.Rep != coro.DirectPlain || !callPlan.Open ||
+					callPlan.Unresolved != coro.UnknownForeign || callPlan.SyncDispatch {
+					panic(fmt.Errorf("raw plain body %q has malformed raw C code-pointer call %q", p.goFn.Name(), v.String()))
+				}
+				ret = p.call(b, llssa.Call, &v.Call)
+			} else if planned && callPlan.Rep == coro.Dispatch && !callPlan.SyncDispatch {
+				panic(fmt.Errorf("raw plain body %q contains non-synchronous descriptor call %q", p.goFn.Name(), v.String()))
+			}
+			if planned && callPlan.Transport == coro.RawCCodePointer {
+				// The exact raw call was emitted above using the ordinary typed C
+				// function-pointer path.
+			} else if planned && callPlan.SyncDispatch {
+				value, handled := p.tryCompileCoroPlainDispatchCall(b, v)
+				if !handled {
+					panic(fmt.Errorf("raw plain body %q lost its planned synchronous descriptor call %q", p.goFn.Name(), v.String()))
+				}
+				ret = value
+			} else {
+				common := v.Common()
+				if common == nil {
+					panic("raw plain body contains a call without CallCommon")
+				}
+				if _, builtin := common.Value.(*ssa.Builtin); !builtin &&
+					(common.StaticCallee() == nil || common.IsInvoke() || common.Method != nil) {
+					panic(fmt.Errorf("raw plain body %q contains an unplanned dynamic call %q", p.goFn.Name(), v.String()))
+				}
+				ret = p.call(b, llssa.Call, &v.Call)
+			}
+		} else if value, handled := p.tryCompileCoroManagedInterfaceDispatch(b, v); handled {
+			ret = value
+		} else if value, handled := p.tryCompileCoroInterfaceDispatchAwait(b, v); handled {
+			ret = value
+		} else if value, handled := p.tryCompileCoroManagedDispatchAwait(b, v); handled {
+			ret = value
+		} else if value, handled := p.tryCompileCoroPlainDispatchCall(b, v); handled {
+			ret = value
+		} else if value, handled := p.tryCompileCoroWorkerForeignCall(b, v); handled {
 			ret = value
 		} else if value, handled := p.tryCompileCoroStaticAwait(b, v); handled {
 			ret = value
@@ -1286,6 +1466,10 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			b.DeferStackDrain()
 		}
 	case *ssa.BinOp:
+		if value, handled := p.tryCompileCoroInterfaceNilCompare(b, v); handled {
+			ret = value
+			break
+		}
 		if isUntypedNilConst(v.X) && isUntypedNilConst(v.Y) {
 			switch v.Op {
 			case token.EQL:
@@ -1301,10 +1485,14 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		}
 		x := p.compileValueAs(b, v.X, v.Y.Type())
 		y := p.compileValueAs(b, v.Y, v.X.Type())
-		ret = b.BinOp(v.Op, x, y)
+		if (v.Op == token.QUO || v.Op == token.REM) && ssaIntegerValueProvenNonZeroAt(v.Y, v) {
+			ret = b.BinOpWithNonZeroDivisor(v.Op, x, y)
+		} else {
+			ret = b.BinOp(v.Op, x, y)
+		}
 	case *ssa.UnOp:
 		if v.Op == token.MUL {
-			if _, ok := p.methodNilDerefChecks[v]; ok {
+			if _, ok := p.methodNilDerefChecks[v]; ok && !ssaValueProvenNonNilAt(v.X, v) {
 				return p.compileCheckedDeref(b, v)
 			}
 			if refs := v.Referrers(); refs != nil && len(*refs) == 0 {
@@ -1359,7 +1547,10 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		if v.Op != token.ARROW {
 			p.recordPanicLocation(b, v.Pos())
 		}
-		if shouldAssertDirectNilDeref(v) {
+		guardedDeref := v.Op == token.MUL && p.coroDerefRequiresImplicitNilFault(v)
+		if guardedDeref {
+			x = p.compileCoroImplicitNilDerefGuard(b, v, x)
+		} else if shouldAssertDirectNilDeref(v) && !ssaValueProvenNonNilAt(v.X, v) {
 			b.AssertNilDeref(x)
 		}
 		if v.Op == token.ARROW {
@@ -1371,6 +1562,14 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		} else {
 			if v.Op == token.MUL {
 				if t := p.type_(v.Type(), llssa.InGo); t.RawType() != nil && p.prog.SizeOf(t) == 0 {
+					if p.currentCoro != nil {
+						// The explicit-status guard above owns the nullable case;
+						// a proven non-nil source needs no memory access. Avoid
+						// Builder.UnOp's legacy native-stack nil helper and
+						// materialize the sole zero-sized value directly.
+						ret = p.prog.Zero(t)
+						break
+					}
 					p.assertNilDerefBase(b, v.X)
 				}
 				if isInterfaceCompareDeref(v) {
@@ -1386,6 +1585,10 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			ret = p.nilOf(t)
 			break
 		}
+		if value, handled := p.tryCompileCoroRawCChangeType(b, v); handled {
+			ret = value
+			break
+		}
 		x := p.compileValue(b, v.X)
 		ret = b.ChangeType(p.type_(t, llssa.InGo), x)
 	case *ssa.Convert:
@@ -1399,7 +1602,9 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 	case *ssa.FieldAddr:
 		x := p.compileValue(b, v.X)
 		p.recordPanicLocation(b, v.Pos())
-		if p.isAddressOfFieldAddr(v) {
+		if p.coroFieldAddrRequiresImplicitNilFault(v) {
+			x = p.compileCoroImplicitNilFieldAddrGuard(b, v, x)
+		} else if p.isAddressOfFieldAddr(v) && !ssaAddressValueProvenNonNilAt(v.X, v) {
 			b.AssertNilDeref(x)
 		}
 		ret = b.FieldAddr(x, v.Field)
@@ -1411,11 +1616,37 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		if p.skipSyntheticMakeSliceAlloc(v) {
 			return
 		}
+		if p.currentCoro != nil {
+			if value, selected := p.currentCoro.terminalResultAllocs[v]; selected {
+				if !v.Heap || v.Block() == nil || v.Block().Index != 0 {
+					panic("coroutine terminal-result allocation lost its source-entry heap identity")
+				}
+				ret = value
+				break
+			}
+		}
 		elem := p.type_(t.Elem(), llssa.InGo)
 		heap := v.Heap
+		if bitcast, exact := coro.ProveSSAExactScalarBitcast(v.Parent()); exact && bitcast.Allocation == v {
+			// The exact body stores the complete same-width scalar before its
+			// single reinterpreted load, so zero initialization is both unnecessary
+			// and would leave a misleading llvm.memset call in this call-free leaf.
+			if p.currentCoro != nil {
+				ret = p.coroFrameAlloca(elem)
+			} else {
+				ret = b.AllocaT(elem)
+			}
+			break
+		}
+		frameOwned := p.currentCoro != nil && !heap
 		if heap && p.currentCoro != nil && p.currentCoro.frameRetention != nil {
 			_, retained := p.currentCoro.frameRetention.allocations[v]
 			heap = !retained
+			frameOwned = retained
+		}
+		if frameOwned {
+			ret = p.coroFrameAlloc(elem)
+			break
 		}
 		ret = b.Alloc(elem, heap)
 	case *ssa.IndexAddr:
@@ -1426,12 +1657,29 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		x := p.compileValue(b, vx)
 		idx := p.compileValue(b, v.Index)
 		p.recordPanicLocation(b, v.Pos())
-		ret = b.IndexAddr(x, idx)
+		if p.frozenSafeFixedArrayIndex(v, v.X, v.Index) {
+			if _, pointer := types.Unalias(p.patchType(v.X.Type())).Underlying().(*types.Pointer); pointer &&
+				!emissionKnownNonNilArrayBase(v.X) && !ssaValueProvenNonNilAt(v.X, v) {
+				// Bounds safety says nothing about the implicit *array
+				// dereference. Keep its ordinary nil fault, routing it through
+				// the explicit outcome only in a physical coroutine body.
+				if p.currentCoro != nil && p.compilation != nil && p.compilation.EnableCoroExplicitStatusPanicABI {
+					x = p.compileCoroImplicitNilAccessGuard(b, x)
+				} else {
+					b.AssertNilDeref(x)
+				}
+			}
+			ret = b.IndexAddrUnchecked(x, idx)
+		} else if p.currentCoro != nil && p.compilation != nil && p.compilation.EnableCoroExplicitStatusPanicABI {
+			ret = p.compileCoroIndexAddrGuarded(b, v, x, idx)
+		} else {
+			ret = b.IndexAddr(x, idx)
+		}
 	case *ssa.Index:
 		x := p.compileValue(b, v.X)
 		idx := p.compileValue(b, v.Index)
 		p.recordPanicLocation(b, v.Pos())
-		ret = b.Index(x, idx, func() (addr llssa.Expr, zero bool) {
+		takeArrayAddr := func() (addr llssa.Expr, zero bool) {
 			switch n := v.X.(type) {
 			case *ssa.Const:
 				zero = true
@@ -1439,7 +1687,28 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 				addr = p.compileValue(b, n.X)
 			}
 			return
-		})
+		}
+		if p.frozenSafeFixedArrayIndex(v, v.X, v.Index) {
+			switch types.Unalias(p.patchType(v.X.Type())).Underlying().(type) {
+			case *types.Array:
+				ret = b.IndexUnchecked(x, idx, takeArrayAddr)
+			case *types.Pointer:
+				if !emissionKnownNonNilArrayBase(v.X) && !ssaValueProvenNonNilAt(v.X, v) {
+					if p.currentCoro != nil && p.compilation != nil && p.compilation.EnableCoroExplicitStatusPanicABI {
+						x = p.compileCoroImplicitNilAccessGuard(b, x)
+					} else {
+						b.AssertNilDeref(x)
+					}
+				}
+				ret = b.Load(b.IndexAddrUnchecked(x, idx))
+			default:
+				panic("safe fixed-array Index lost its frozen container shape")
+			}
+		} else if p.currentCoro != nil && p.compilation != nil && p.compilation.EnableCoroExplicitStatusPanicABI {
+			ret = p.compileCoroIndexGuarded(b, v, x, idx, takeArrayAddr)
+		} else {
+			ret = b.Index(x, idx, takeArrayAddr)
+		}
 	case *ssa.Lookup:
 		x := p.compileValue(b, v.X)
 		idx := p.compileValue(b, v.Index)
@@ -1465,7 +1734,11 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			max = p.compileValue(b, v.Max)
 		}
 		p.recordPanicLocation(b, v.Pos())
-		ret = b.Slice(x, low, high, max)
+		if p.currentCoro != nil && p.compilation != nil && p.compilation.EnableCoroExplicitStatusPanicABI {
+			ret = p.compileCoroSliceGuarded(b, v, x, low, high, max)
+		} else {
+			ret = b.Slice(x, low, high, max)
+		}
 		ret.Type = p.type_(v.Type(), llssa.InGo)
 	case *ssa.MakeInterface:
 		if p.currentCoro != nil && coroSyntheticSelectNoCaseBox(v) {
@@ -1519,9 +1792,11 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		}
 		ret = b.MakeMap(t, nReserve)
 	case *ssa.MakeClosure:
-		if value, handled := p.tryCompileCoroPlainDispatchClosure(b, v); handled {
-			ret = value
-			break
+		if !p.rawPlainBody {
+			if value, handled := p.tryCompileCoroPlainDispatchClosure(b, v); handled {
+				ret = value
+				break
+			}
 		}
 		var fn llssa.Expr
 		if target, ok := v.Fn.(*ssa.Function); ok && p.compilation != nil && p.compilation.EnableCoroEntryResolution {
@@ -1530,6 +1805,23 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			// descriptor-backed closure to Builder.MakeClosure would reinterpret
 			// the descriptor pointer as executable code.
 			fn = p.compileRawFunctionValue(target)
+			if !p.rawPlainBody && len(target.FreeVars) != 0 && p.compilation.CoroPlan != nil {
+				targetPlan, planned := p.compilation.CoroPlan.FunctionPlan(target)
+				if planned && targetPlan.Emission == coro.EmitCoroutine {
+					if p.emissionUniverse == nil {
+						panic("captured coroutine closure requires a prepared emission universe")
+					}
+					entrySig, err := p.emissionUniverse.coroPhysicalEntrySourceSignature(target)
+					if err != nil {
+						panic(fmt.Errorf("captured coroutine closure %q: %w", targetPlan.ID, err))
+					}
+					// MakeClosure owns only the canonical {code,env} allocation. Retag
+					// the managed (g,out,ctx,args) entry as an opaque (ctx,args)
+					// carrier; no call is emitted through this temporary code word.
+					carrierSig := p.prog.PhysicalFuncDecl(entrySig, llssa.InGo)
+					fn = b.ChangeType(p.prog.Type(carrierSig, llssa.InC), fn)
+				}
+			}
 		} else {
 			fn = p.compileValue(b, v.Fn)
 		}
@@ -1587,8 +1879,20 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 	case *ssa.SliceToArrayPointer:
 		t := p.type_(v.Type(), llssa.InGo)
 		x := p.compileValue(b, v.X)
+		length, exact := coroSliceToArrayPointerLen(v, p.patchType)
+		if exact && length == 0 {
+			// Go deliberately preserves the slice data word here: a nil slice
+			// converts to nil *[0]T, while an empty non-nil slice converts to a
+			// non-nil pointer. There is no length fault for N==0.
+			ret = b.SliceToArrayPointerUnchecked(x, t)
+			break
+		}
 		p.recordPanicLocation(b, v.Pos())
-		ret = b.SliceToArrayPointer(x, t)
+		if p.currentCoro != nil && p.compilation != nil && p.compilation.EnableCoroExplicitStatusPanicABI {
+			ret = p.compileCoroSliceToArrayPointer(b, v, x, t)
+		} else {
+			ret = b.SliceToArrayPointer(x, t)
+		}
 	default:
 		panic(fmt.Sprintf("compileInstrAndValue: unknown instr - %T\n", iv))
 	}
@@ -1686,6 +1990,13 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		if _, ok := p.staticInitStores[v]; ok {
 			return
 		}
+		if p.compilation != nil && p.compilation.CoroPlan != nil &&
+			p.compilation.CoroPlan.ElidesConditionalManagedStore(v) {
+			// Whole-program analysis proved this exact direct descriptor
+			// publication has no live reader or other target consumer. Avoid
+			// materializing a reference to the intentionally EmitNone target.
+			return
+		}
 		va := v.Addr
 		if va, ok := va.(*ssa.IndexAddr); ok {
 			if args, ok := p.isVArgs(va.X); ok { // varargs: this is a varargs store
@@ -1742,8 +2053,15 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 	case *ssa.If:
 		cond := p.compileValue(b, v.Cond)
 		succs := v.Block().Succs
-		thenb := p.sourceBlock(succs[0].Index)
-		elseb := p.sourceBlock(succs[1].Index)
+		thenIndex, elseIndex := 0, 1
+		if v == p.patchOriginalInitIf {
+			// The public patch initializer already claimed init$guard. Enter the
+			// original source body through the opposite guard edge without
+			// mutating the shared x/tools SSA CFG.
+			thenIndex, elseIndex = 1, 0
+		}
+		thenb := p.sourceBlock(succs[thenIndex].Index)
+		elseb := p.sourceBlock(succs[elseIndex].Index)
 		b.If(cond, thenb, elseb)
 	case *ssa.MapUpdate:
 		m := p.compileValue(b, v.Map)
@@ -1818,6 +2136,31 @@ func (p *context) getLocalVariable(b llssa.Builder, fn *ssa.Function, v *types.V
 }
 
 func (p *context) compileFunction(v *ssa.Function) (goFn llssa.Function, pyFn llssa.PyObjRef, kind int) {
+	if p.rawPlainBody {
+		return p.compileRawPlainFunction(v)
+	}
+	return p.compileManagedFunction(v)
+}
+
+func (p *context) compileManagedFunction(v *ssa.Function) (goFn llssa.Function, pyFn llssa.PyObjRef, kind int) {
+	if p.compilation != nil && p.compilation.EnableCoroEntryResolution &&
+		p.compilation.CoroPlan != nil && p.compilation.EmissionUniverse != nil {
+		canonical, ok := p.compilation.EmissionUniverse.Resolve(v)
+		if !ok || canonical == nil {
+			panic(fmt.Errorf("managed function resolution: function %q is absent from the prepared emission universe", v.Name()))
+		}
+		if plan, planned := p.compilation.CoroPlan.FunctionPlan(canonical); planned && plan.Emission == coro.EmitRawPlain {
+			owner := "<unknown>"
+			if p.goFn != nil {
+				owner = p.goFn.String()
+			}
+			panic(fmt.Errorf(
+				"managed function resolution: raw-plain-only function %q (%s) has no managed entry while compiling %s",
+				plan.ID, canonical.String(), owner,
+			))
+		}
+		v = canonical
+	}
 	// TODO(xsw) v.Pkg == nil: means auto generated function?
 	if v.Pkg == p.goPkg || v.Pkg == nil {
 		// function in this package
@@ -1827,6 +2170,90 @@ func (p *context) compileFunction(v *ssa.Function) (goFn llssa.Function, pyFn ll
 		}
 	}
 	return p.funcOf(v)
+}
+
+// compileFunctionEntry preserves a compiler-selected physical symbol role.
+// Generic entries continue through the ordinary resolver. The private
+// patch-original initializer must instead carry its already-frozen name into
+// both a same-package definition and a cross-package declaration.
+func (p *context) compileFunctionEntry(entry plannedFunctionSymbol) (goFn llssa.Function, pyFn llssa.PyObjRef, kind int) {
+	if !entry.patchOriginalInit {
+		return p.compileFunction(entry.function)
+	}
+	if p.rawPlainBody {
+		panic("managed patch-original initializer entry requested from a raw plain body")
+	}
+	if err := entry.checkSupported(); err != nil {
+		panic(err)
+	}
+	if entry.function.Pkg == p.goPkg || entry.function.Pkg == nil {
+		return p.compileFuncDeclVariantEntry(p.pkg, entry, false)
+	}
+	return p.funcOfEntry(entry)
+}
+
+func (p *context) compileRawPlainFunction(v *ssa.Function) (goFn llssa.Function, pyFn llssa.PyObjRef, kind int) {
+	if v == nil || p.compilation == nil || p.compilation.CoroPlan == nil || p.compilation.EmissionUniverse == nil {
+		panic("raw plain function resolution requires an exact function, emission universe, and coroutine plan")
+	}
+	canonical, ok := p.compilation.EmissionUniverse.Resolve(v)
+	if !ok || canonical == nil {
+		panic(fmt.Errorf("raw plain function resolution: function %q is absent from the prepared emission universe", v.Name()))
+	}
+	v = canonical
+	entry, err := p.resolveFunctionSymbol(v)
+	if err != nil {
+		panic(err)
+	}
+	if entry.ftype != goFunc {
+		// Frontend intrinsics such as internal/abi.FuncPCABI0 intentionally have
+		// no emitted Go body and therefore no raw-demand closure member. Preserve
+		// their ordinary instruction classification before consulting the Go-body
+		// emission plan, exactly as managed function resolution does.
+		return p.funcOfEntry(entry)
+	}
+	plan, planned := p.compilation.CoroPlan.FunctionPlan(v)
+	if !planned {
+		panic(fmt.Errorf("raw plain function resolution: function %q is absent from the compilation plan", v.Name()))
+	}
+	switch plan.Emission {
+	case coro.EmitPlain, coro.EmitExternal:
+		// A bounded plain primary or an independently classified external leaf
+		// already has the only physical ABI this raw caller needs.
+		return p.compileManagedFunction(v)
+	case coro.EmitRawPlain:
+		if !p.compilation.CoroPlan.HasRawPlainVariant(v) {
+			panic(fmt.Errorf("raw plain function resolution: raw-only function %q has no planned raw plain body", plan.ID))
+		}
+		if v.Pkg == p.goPkg || v.Pkg == nil {
+			return p.compileFuncDeclVariant(p.pkg, v, true)
+		}
+		return p.funcOfEntry(p.mustRawPlainFunctionSymbol(v))
+	case coro.EmitCoroutine:
+		// Continue below: a mixed suspendable target has a separately lowered
+		// raw body selected by the same frozen closure proof.
+	case coro.EmitNone:
+		caller := "<none>"
+		if p.goFn != nil {
+			caller = p.goFn.String()
+			if callerPlan, ok := p.compilation.CoroPlan.FunctionPlan(p.goFn); ok {
+				caller = fmt.Sprintf("%s [%s]", caller, callerPlan.ID)
+			}
+		}
+		panic(fmt.Errorf(
+			"raw plain function resolution: caller %s selected non-emitted target %s [%s] (synthetic=%q)",
+			caller, v.String(), plan.ID, v.Synthetic,
+		))
+	default:
+		panic(fmt.Errorf("raw plain function resolution: function %q has unsupported emission %s", plan.ID, plan.Emission))
+	}
+	if !p.compilation.CoroPlan.HasRawPlainVariant(v) {
+		panic(fmt.Errorf("raw plain function resolution: managed coroutine %q has no planned raw plain variant", plan.ID))
+	}
+	if v.Pkg == p.goPkg || v.Pkg == nil {
+		return p.compileFuncDeclVariant(p.pkg, v, true)
+	}
+	return p.funcOfEntry(p.mustRawPlainFunctionSymbol(v))
 }
 
 func (p *context) compileValue(b llssa.Builder, v ssa.Value) llssa.Expr {
@@ -1842,8 +2269,10 @@ func (p *context) compileValue(b llssa.Builder, v ssa.Value) llssa.Expr {
 			}
 		}
 	case *ssa.Function:
-		if value, handled := p.tryCompileCoroPlainDispatchFunctionValue(b, v); handled {
-			return value
+		if !p.rawPlainBody {
+			if value, handled := p.tryCompileCoroPlainDispatchFunctionValue(b, v); handled {
+				return value
+			}
 		}
 		return p.compileRawFunctionValue(v)
 	case *ssa.Global:
@@ -1868,6 +2297,15 @@ func (p *context) compileValue(b llssa.Builder, v ssa.Value) llssa.Expr {
 		fn := v.Parent()
 		for idx, freeVar := range fn.FreeVars {
 			if freeVar == v {
+				if p.currentCoro != nil && len(fn.FreeVars) != 0 {
+					// Physical captured coroutine entries expose their typed context
+					// explicitly at (g,out,ctx,...). Do not use Function.FreeVar:
+					// that legacy helper hard-codes implicit ctx at parameter zero,
+					// which is the G word in the coroutine ABI. Load per use so the
+					// value is dominated in every resumed block after CoroSplit.
+					ctx := b.Load(p.fn.PhysicalParam(2))
+					return b.Field(ctx, idx)
+				}
 				return p.fn.FreeVar(b, idx)
 			}
 		}
@@ -2090,6 +2528,9 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 		if err := opts.Compilation.preflightCoroPlan(); err != nil {
 			return nil, nil, err
 		}
+		if err := opts.Compilation.validateCoroWorkerCodegenProgram(prog); err != nil {
+			return nil, nil, err
+		}
 		if opts.CacheHit {
 			if err := opts.Compilation.validateCoroCacheIdentity(); err != nil {
 				return nil, nil, err
@@ -2140,6 +2581,7 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 		skips:            make(map[string]none),
 		vargs:            make(map[*ssa.Alloc][]llssa.Expr),
 		funcs:            make(map[*ssa.Function]llssa.Function),
+		rawPlainFuncs:    make(map[*ssa.Function]llssa.Function),
 		linkOnceFns:      make(map[*ssa.Function]none),
 		addrOfFieldAddrs: collectAddrOfFieldSelectors(files),
 		loaded: map[*types.Package]*pkgInfo{
@@ -2173,6 +2615,8 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 	ret.SetResolveLinkname(ctx.resolveLinkname)
 	if opts.Compilation != nil && opts.Compilation.EnableCoroEntryResolution {
 		ret.SetResolveMethodLinkname(ctx.resolveMethodLinkname)
+		ret.SetResolveMethodToken(ctx.resolveMethodToken)
+		ret.SetResolveInterfaceMethodDescriptor(ctx.resolveInterfaceMethodDescriptor)
 		ret.SetResolveRuntimeCall(ctx.resolveCoroLoweredRuntimeCall)
 	}
 
@@ -2735,35 +3179,40 @@ func (p *context) resolveLinkname(name string) string {
 // for method-table references and compileFuncDecl definitions. The ordinary
 // SetResolveLinkname path remains unchanged for report-only codegen.
 func (p *context) resolveMethodLinkname(_ string, method *types.Func, sig *types.Signature) string {
-	if method == nil || sig == nil || sig.Recv() == nil {
-		panic("coroutine method-link resolution requires a method and receiver signature")
+	if name, managed := p.resolveManagedInterfaceRawMethodSymbol(method, sig); managed {
+		return name
 	}
-	selection := p.goProg.MethodSets.MethodSet(sig.Recv().Type()).Lookup(method.Pkg(), method.Name())
-	if selection == nil {
-		panic(fmt.Errorf("coroutine method-link resolution: method %q is absent from receiver %s", method.Name(), sig.Recv().Type()))
-	}
-	fn := p.methodValue(selection)
-	if fn == nil {
-		panic(fmt.Errorf("coroutine method-link resolution: method %q has no SSA implementation", method.Name()))
-	}
+	fn := p.resolveInterfaceMethodSSA(method, sig)
 	return p.mustFunctionSymbol(fn).name
 }
 
 // checkCompileMethods ensures that methods referenced from ABI method tables
 // are available to the linker. Generic instances and anonymous structural
 // types are emitted in the current SSA package. Package-level non-generic
-// named types normally have source methods emitted by their defining package,
-// but promoted wrappers can be synthesized only when a use-site asks for a
-// method table, so emit those wrappers on demand.
+// named types have declared methods emitted while the defining package's type
+// members are compiled. Their generated wrappers are also materialized at each
+// ABI-table use site: package archives are compiled independently, so the
+// declaring package's plan cannot see every consumer demand. Deterministically
+// named generated wrappers are linkonce and may therefore be coalesced safely.
+// Active codegen uses the emission universe's declaration certificate instead
+// of relying on cloned go/types scope pointers.
 func (p *context) checkCompileMethods(pkg llssa.Package, typ types.Type) {
 	nt := typ
 retry:
 	switch t := types.Unalias(nt).(type) {
 	case *types.Named:
-		if t.TypeArgs() == nil {
+		if !hasTypeArgs(t) {
+			if universe := p.emissionUniverseForPatch(); universe != nil {
+				if _, packageNamed := universe.frozenPackageNamedType(t); packageNamed {
+					p.compileSyntheticMethods(pkg, typ)
+					return
+				}
+			}
 			obj := t.Obj()
-			// skip package-level type
-			if obj.Parent() == obj.Pkg().Scope() {
+			// Legacy/report-only builds have no frozen provenance. Retain their
+			// historical package-level test, while active builds above never depend
+			// on scope pointer equality after typepatch.Clone/Merge.
+			if obj != nil && obj.Pkg() != nil && obj.Parent() == obj.Pkg().Scope() {
 				p.compileSyntheticMethods(pkg, typ)
 				return
 			}

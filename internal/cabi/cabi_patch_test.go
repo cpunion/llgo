@@ -98,6 +98,9 @@ func TestDevLTOGlobalDCEFuncNoUnwindCreatesNounwindAttribute(t *testing.T) {
 func TestSetSkipFuncsAndShouldSkipCall(t *testing.T) {
 	tr := &Transformer{}
 	tr.SetSkipFuncs([]string{" foo ", "", "bar"})
+	if !tr.shouldSkipFunc("llvm.coro.alloc") {
+		t.Fatalf("shouldSkipFunc(llvm.coro.alloc) = false, want true")
+	}
 
 	if !tr.shouldSkipFunc("foo") {
 		t.Fatalf("shouldSkipFunc(foo) = false, want true")
@@ -137,6 +140,52 @@ func TestSetSkipFuncsAndShouldSkipCall(t *testing.T) {
 	b2.CreateRetVoid()
 	if tr.shouldSkipCall(indirectCall) {
 		t.Fatalf("shouldSkipCall(indirect call) = true, want false")
+	}
+}
+
+func TestTransformModuleSkipsLLVMCoroutineIntrinsics(t *testing.T) {
+	llvm.InitializeAllTargets()
+	llvm.InitializeAllTargetMCs()
+	llvm.InitializeAllTargetInfos()
+
+	const testIR = `
+declare token @llvm.coro.id(i32, ptr, ptr, ptr)
+declare i1 @llvm.coro.alloc(token)
+
+define i1 @owner(ptr %frame) {
+entry:
+  %id = call token @llvm.coro.id(i32 0, ptr %frame, ptr null, ptr null)
+  %alloc = call i1 @llvm.coro.alloc(token %id)
+  ret i1 %alloc
+}
+`
+	ctx := llvm.NewContext()
+	defer ctx.Dispose()
+	tmpfile := filepath.Join(t.TempDir(), "coro_intrinsics.ll")
+	if err := os.WriteFile(tmpfile, []byte(testIR), 0644); err != nil {
+		t.Fatalf("write test IR: %v", err)
+	}
+	buf, err := llvm.NewMemoryBufferFromFile(tmpfile)
+	if err != nil {
+		t.Fatalf("read test IR: %v", err)
+	}
+	mod, err := ctx.ParseIR(buf)
+	if err != nil {
+		t.Fatalf("parse test IR: %v", err)
+	}
+	defer mod.Dispose()
+
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	tr := NewTransformer(prog, "amd64-unknown-linux-gnu", "", ModeAllFunc, false)
+	tr.TransformModule("test", mod)
+	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify transformed module: %v\n%s", err, mod.String())
+	}
+	ir := mod.String()
+	if !strings.Contains(ir, "call token @llvm.coro.id") ||
+		!strings.Contains(ir, "call i1 @llvm.coro.alloc") {
+		t.Fatalf("coroutine intrinsic calls changed unexpectedly:\n%s", ir)
 	}
 }
 

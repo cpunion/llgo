@@ -42,3 +42,16 @@ func preemptCompareAndSwap(ptr *uint32, old, new uint32) bool {
 	_, swapped := atomic.CompareAndExchange(ptr, old, new)
 	return swapped
 }
+
+// The uint64 lease operations are deliberately target-selected alongside the
+// bounded atomic64 capability. Unsupported targets receive non-atomic
+// fail-closed stubs, so merely compiling this package cannot introduce a
+// hidden __atomic_*_8 lock fallback.
+
+func preemptLoadWord(ptr *uintptr) uintptr {
+	return atomic.Load(ptr)
+}
+
+func preemptStoreWord(ptr *uintptr, value uintptr) {
+	atomic.Store(ptr, value)
+}

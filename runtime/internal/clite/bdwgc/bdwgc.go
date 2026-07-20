@@ -24,24 +24,39 @@ import (
 
 const (
 	LLGoPackage = "link: $(pkg-config --libs bdw-gc); -lgc"
+	LLGoFiles   = "$(pkg-config --cflags bdw-gc): _wrap/coro_allocator.c"
 )
 
 // -----------------------------------------------------------------------------
 
+// Init completes collector initialization on the calling thread. It may take
+// collector/libc locks, but it neither waits for application I/O nor retains
+// caller-frame arguments after return.
+//
+//llgo:coro sync
 //go:linkname Init C.GC_init
 func Init()
 
 //go:linkname Malloc C.GC_malloc
 func Malloc(size uintptr) c.Pointer
 
-// MallocUncollectable allocates scanned memory that is not reclaimed until Free.
+// MallocUncollectable allocates scanned memory that is not reclaimed until
+// Free. Coroutine frames and task records use this explicit-root storage; the
+// call may participate in a GC pause but returns on the calling thread without
+// retaining a pointer into its caller's frame.
 //
+//llgo:coro sync
 //go:linkname MallocUncollectable C.GC_malloc_uncollectable
 func MallocUncollectable(size uintptr) c.Pointer
 
 //go:linkname Realloc C.GC_realloc
 func Realloc(ptr c.Pointer, size uintptr) c.Pointer
 
+// Free releases an explicitly owned collector allocation. It may take
+// collector-internal locks but cannot park through the LLGo scheduler or keep
+// using ptr after it returns.
+//
+//llgo:coro sync
 //go:linkname Free C.GC_free
 func Free(ptr c.Pointer)
 
@@ -50,12 +65,19 @@ func Free(ptr c.Pointer)
 // the same boundaries. This is typically used for TLS slots that store Go
 // pointers.
 //
+// Root-table registration returns synchronously and does not retain pointers
+// to the caller's coroutine frame. The collector may acquire internal locks;
+// sync does not promise lock-free or bounded-latency execution.
+//
+//llgo:coro sync
 //go:linkname AddRoots C.GC_add_roots
 func AddRoots(start, end c.Pointer)
 
 // RemoveRoots unregisters a region previously registered with AddRoots. The
-// start and end pointers must exactly match the earlier AddRoots call.
+// start and end pointers must exactly match the earlier AddRoots call. Like
+// AddRoots, it may acquire collector-internal locks but returns synchronously.
 //
+//llgo:coro sync
 //go:linkname RemoveRoots C.GC_remove_roots
 func RemoveRoots(start, end c.Pointer)
 
@@ -64,6 +86,15 @@ func RemoveRoots(start, end c.Pointer)
 //llgo:type C
 type FinalizerFunc func(c.Pointer, c.Pointer)
 
+// Registration may enter collector locks but returns synchronously on the
+// calling thread and does not invoke fn during this call. BDWGC retains fn and
+// cd for later finalization, so callers must give them collector-stable
+// lifetimes; oldFn and oldCd are only output slots for this registration call.
+// The synchronous capability is a scheduling contract, not a claim that the
+// operation is lock-free or that callback/client-data memory is borrowed only
+// until return.
+//
+//llgo:coro sync
 //go:linkname RegisterFinalizer C.GC_register_finalizer
 func RegisterFinalizer(
 	obj c.Pointer,

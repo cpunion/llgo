@@ -10,16 +10,16 @@ import (
 
 type Info struct {
 	Fname *c.Char
-	Fbase c.Pointer
+	Fbase uintptr
 	Sname *c.Char
-	Saddr c.Pointer
+	Saddr uintptr
 }
 
 func Address() unsafe.Pointer {
 	panic("not implemented")
 }
 
-func Addrinfo(addr unsafe.Pointer, info *Info) c.Int {
+func Addrinfo(addr uintptr, info *Info) c.Int {
 	panic("not implemented")
 }
 

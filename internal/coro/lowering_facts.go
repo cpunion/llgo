@@ -351,12 +351,13 @@ func (footprint BackendFootprint) validate() error {
 // ManagedEdge is one ordered, exact compiler-inserted managed helper edge.
 // Role+Ordinal preserves distinct subsites; repeated targets are not folded.
 type ManagedEdge struct {
-	Order       int        `json:"order"`
-	Role        SiteRole   `json:"role"`
-	Ordinal     int        `json:"ordinal"`
-	LogicalName string     `json:"logical_name"`
-	Target      FunctionID `json:"target"`
-	UnwindOnly  bool       `json:"unwind_only"`
+	Order                int        `json:"order"`
+	Role                 SiteRole   `json:"role"`
+	Ordinal              int        `json:"ordinal"`
+	LogicalName          string     `json:"logical_name"`
+	Target               FunctionID `json:"target"`
+	UnwindOnly           bool       `json:"unwind_only"`
+	ExplicitStatusElided bool       `json:"explicit_status_elided"`
 }
 
 // ImplicitPanicFact records one ordered implicit nil/bounds/divide/assertion
@@ -552,6 +553,9 @@ func verifyManagedEdges(edges []ManagedEdge) error {
 		}
 		if err := edge.Target.validate(); err != nil {
 			return fmt.Errorf("coro: managed helper %q: %w", edge.LogicalName, err)
+		}
+		if edge.ExplicitStatusElided && !edge.UnwindOnly {
+			return fmt.Errorf("coro: managed helper %q is ExplicitStatus-elided but not unwind-only", edge.LogicalName)
 		}
 	}
 	return nil

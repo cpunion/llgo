@@ -27,9 +27,18 @@ import (
 )
 
 const (
-	coroFuncPCABI0PackagePath = "internal/abi"
-	coroFuncPCABI0LocalName   = "FuncPCABI0"
+	coroFuncPCABI0PackagePath      = "internal/abi"
+	coroFuncPCABI0LocalName        = "FuncPCABI0"
+	coroFuncPCABIInternalLocalName = "FuncPCABIInternal"
+	coroFuncPCABIInternalIntrinsic = "funcPCABIInternal"
 )
+
+func coroFuncPCIntrinsicName(localName string) string {
+	if localName == coroFuncPCABIInternalLocalName {
+		return coroFuncPCABIInternalIntrinsic
+	}
+	return "funcPCABI0"
+}
 
 // aliasPatchedFuncPCABI0Declarations records the one intentional cross-kind
 // patch replacement used by Go's internal/abi package. The upstream package
@@ -67,100 +76,108 @@ func (u *EmissionUniverse) aliasPatchedFuncPCABI0Declarations() error {
 	}
 	operations := make([]operation, 0, len(packages))
 	for _, prepared := range packages {
-		original, _ := prepared.ssa.Members[coroFuncPCABI0LocalName].(*ssa.Function)
-		if !coroFuncPCABI0BodylessDeclaration(original) {
-			continue
-		}
-		intrinsic, _ := prepared.patch.Alt.Members[coroFuncPCABI0LocalName].(*ssa.Function)
-		if intrinsic == nil || intrinsic.Parent() != nil || intrinsic.Signature == nil || intrinsic.Signature.Recv() != nil ||
-			intrinsic.TypeParams() != nil || intrinsic.TypeArgs() != nil {
-			continue
-		}
-
-		originalOwnerKey := emissionFunctionOwnerKey{function: original, owner: prepared}
-		originalKind, originalKindOK := u.functionKinds[originalOwnerKey]
-		originalKey, originalKeyOK := u.finalKeys[originalOwnerKey]
-		originalKeyKind, originalSymbol, originalSignature, originalKeyValid := splitManagedSymbolKey(originalKey)
-		if !originalKindOK || originalKind != goFunc || !originalKeyOK || !originalKeyValid || originalKeyKind != goFunc ||
-			originalSymbol != coroFuncPCABI0PackagePath+"."+coroFuncPCABI0LocalName {
-			continue
-		}
-
-		intrinsicOwnerKey := emissionFunctionOwnerKey{function: intrinsic, owner: prepared}
-		intrinsicKind, intrinsicKindOK := u.functionKinds[intrinsicOwnerKey]
-		intrinsicOpcode, intrinsicOpcodeOK := u.intrinsicOps[intrinsicOwnerKey]
-		if !intrinsicKindOK || intrinsicKind != llgoInstr || !intrinsicOpcodeOK || intrinsicOpcode != llgoFuncPCABI0 ||
-			intrinsic.Signature == nil {
-			continue
-		}
-		intrinsicSignature := structuralEmissionABITypeKey(u.effectiveType(prepared, intrinsic, intrinsic.Signature))
-		if originalSignature != intrinsicSignature {
-			return fmt.Errorf(
-				"prepare emission universe: patched internal/abi.FuncPCABI0 declaration and alternate intrinsic have different structural ABI signatures",
-			)
-		}
-
-		// selectFunction normally canonicalizes duplicate intrinsic declarations
-		// by managed key. That is correct for ordinary intrinsic calls, but using
-		// such a winner here would make the patch bridge depend on an unrelated
-		// alternate source name. Require one exact same-signature declaration.
-		matches := make([]*ssa.Function, 0, 2)
-		for _, member := range prepared.patch.Alt.Members {
-			candidate, ok := member.(*ssa.Function)
-			if !ok || candidate.Parent() != nil {
+		for _, localName := range []string{coroFuncPCABI0LocalName, coroFuncPCABIInternalLocalName} {
+			original, _ := prepared.ssa.Members[localName].(*ssa.Function)
+			if !coroFuncPCBodylessDeclaration(original, localName) {
 				continue
 			}
-			candidateOwnerKey := emissionFunctionOwnerKey{function: candidate, owner: prepared}
-			candidateKind, kindOK := u.functionKinds[candidateOwnerKey]
-			candidateOpcode, opcodeOK := u.intrinsicOps[candidateOwnerKey]
-			candidateSignature := ""
-			if candidate.Signature != nil {
-				candidateSignature = structuralEmissionABITypeKey(u.effectiveType(prepared, candidate, candidate.Signature))
+			intrinsic, _ := prepared.patch.Alt.Members[localName].(*ssa.Function)
+			if intrinsic == nil || intrinsic.Parent() != nil || intrinsic.Signature == nil || intrinsic.Signature.Recv() != nil ||
+				intrinsic.TypeParams() != nil || intrinsic.TypeArgs() != nil {
+				continue
 			}
-			if kindOK && candidateKind == llgoInstr && opcodeOK && candidateOpcode == llgoFuncPCABI0 &&
-				candidateSignature == originalSignature {
-				matches = append(matches, candidate)
+
+			originalOwnerKey := emissionFunctionOwnerKey{function: original, owner: prepared}
+			originalKind, originalKindOK := u.functionKinds[originalOwnerKey]
+			originalKey, originalKeyOK := u.finalKeys[originalOwnerKey]
+			originalKeyKind, originalSymbol, originalSignature, originalKeyValid := splitManagedSymbolKey(originalKey)
+			if !originalKindOK || originalKind != goFunc || !originalKeyOK || !originalKeyValid || originalKeyKind != goFunc ||
+				originalSymbol != coroFuncPCABI0PackagePath+"."+localName {
+				continue
 			}
-		}
-		if len(matches) != 1 || matches[0] != intrinsic {
-			diagnostics := make([]string, len(matches))
-			for index, candidate := range matches {
-				diagnostics[index] = emissionFunctionDiagnostic(candidate)
+
+			intrinsicOwnerKey := emissionFunctionOwnerKey{function: intrinsic, owner: prepared}
+			intrinsicKind, intrinsicKindOK := u.functionKinds[intrinsicOwnerKey]
+			intrinsicOpcode, intrinsicOpcodeOK := u.intrinsicOps[intrinsicOwnerKey]
+			if !intrinsicKindOK || intrinsicKind != llgoInstr || !intrinsicOpcodeOK || intrinsicOpcode != llgoFuncPCABI0 ||
+				intrinsic.Signature == nil {
+				continue
 			}
-			sort.Strings(diagnostics)
-			return fmt.Errorf(
-				"prepare emission universe: patched internal/abi.FuncPCABI0 has ambiguous alternate intrinsic replacements: %s",
-				strings.Join(diagnostics, ", "),
-			)
+			intrinsicSignature := structuralEmissionABITypeKey(u.effectiveType(prepared, intrinsic, intrinsic.Signature))
+			if originalSignature != intrinsicSignature {
+				return fmt.Errorf(
+					"prepare emission universe: patched internal/abi.%s declaration and alternate intrinsic have different structural ABI signatures", localName,
+				)
+			}
+
+			// selectFunction normally canonicalizes duplicate intrinsic declarations
+			// by managed key. That is correct for ordinary intrinsic calls, but using
+			// such a winner here would make the patch bridge depend on an unrelated
+			// alternate source name. Require one exact same-signature declaration.
+			matches := make([]*ssa.Function, 0, 2)
+			for _, member := range prepared.patch.Alt.Members {
+				candidate, ok := member.(*ssa.Function)
+				if !ok || candidate.Parent() != nil {
+					continue
+				}
+				if candidate.Name() != localName &&
+					(candidate.Name() == coroFuncPCABI0LocalName || candidate.Name() == coroFuncPCABIInternalLocalName) {
+					// The two sanctioned source intrinsics intentionally share one
+					// opcode but own different frozen intrinsic symbols.
+					continue
+				}
+				candidateOwnerKey := emissionFunctionOwnerKey{function: candidate, owner: prepared}
+				candidateKind, kindOK := u.functionKinds[candidateOwnerKey]
+				candidateOpcode, opcodeOK := u.intrinsicOps[candidateOwnerKey]
+				candidateSignature := ""
+				if candidate.Signature != nil {
+					candidateSignature = structuralEmissionABITypeKey(u.effectiveType(prepared, candidate, candidate.Signature))
+				}
+				if kindOK && candidateKind == llgoInstr && opcodeOK && candidateOpcode == llgoFuncPCABI0 &&
+					candidateSignature == originalSignature {
+					matches = append(matches, candidate)
+				}
+			}
+			if len(matches) != 1 || matches[0] != intrinsic {
+				diagnostics := make([]string, len(matches))
+				for index, candidate := range matches {
+					diagnostics[index] = emissionFunctionDiagnostic(candidate)
+				}
+				sort.Strings(diagnostics)
+				return fmt.Errorf(
+					"prepare emission universe: patched internal/abi.%s has ambiguous alternate intrinsic replacements: %s",
+					localName, strings.Join(diagnostics, ", "),
+				)
+			}
+			if canonical := u.canonicalAlias(intrinsic); canonical == nil || canonical != intrinsic {
+				return fmt.Errorf("prepare emission universe: patched internal/abi.FuncPCABI0 alternate intrinsic is not canonical")
+			}
+			intrinsicKey, intrinsicKeyOK := u.finalKeys[intrinsicOwnerKey]
+			intrinsicKeyKind, intrinsicSymbol, frozenIntrinsicSignature, intrinsicKeyValid := splitManagedSymbolKey(intrinsicKey)
+			if !intrinsicKeyOK || !intrinsicKeyValid || intrinsicKeyKind != llgoInstr || intrinsicSymbol != coroFuncPCIntrinsicName(localName) ||
+				frozenIntrinsicSignature != intrinsicSignature {
+				return fmt.Errorf("prepare emission universe: patched internal/abi.FuncPCABI0 alternate intrinsic has inconsistent frozen managed-symbol metadata")
+			}
+			if canonical := u.canonicalAlias(original); canonical == nil || canonical != original {
+				return fmt.Errorf("prepare emission universe: patched internal/abi.FuncPCABI0 original declaration is not canonical before patch aliasing")
+			}
+			if _, required := u.required[original]; !required {
+				return fmt.Errorf("prepare emission universe: patched internal/abi.FuncPCABI0 original declaration is not selected")
+			}
+			if _, required := u.required[intrinsic]; !required {
+				return fmt.Errorf("prepare emission universe: patched internal/abi.FuncPCABI0 alternate intrinsic is not selected")
+			}
+			if winner := prepared.winners[originalKey]; winner != original {
+				return fmt.Errorf("prepare emission universe: patched internal/abi.FuncPCABI0 original declaration is not its exact managed winner")
+			}
+			if !prepared.fromPatch[intrinsic] || prepared.fromPatch[original] {
+				return fmt.Errorf("prepare emission universe: patched internal/abi.FuncPCABI0 has inconsistent original/alternate provenance")
+			}
+			if err := u.validatePatchedFuncPCABI0AliasLifecycle(prepared, original, intrinsic); err != nil {
+				return err
+			}
+			operations = append(operations, operation{owner: prepared, original: original, intrinsic: intrinsic, originalKey: originalKey})
 		}
-		if canonical := u.canonicalAlias(intrinsic); canonical == nil || canonical != intrinsic {
-			return fmt.Errorf("prepare emission universe: patched internal/abi.FuncPCABI0 alternate intrinsic is not canonical")
-		}
-		intrinsicKey, intrinsicKeyOK := u.finalKeys[intrinsicOwnerKey]
-		intrinsicKeyKind, intrinsicSymbol, frozenIntrinsicSignature, intrinsicKeyValid := splitManagedSymbolKey(intrinsicKey)
-		if !intrinsicKeyOK || !intrinsicKeyValid || intrinsicKeyKind != llgoInstr || intrinsicSymbol != "funcPCABI0" ||
-			frozenIntrinsicSignature != intrinsicSignature {
-			return fmt.Errorf("prepare emission universe: patched internal/abi.FuncPCABI0 alternate intrinsic has inconsistent frozen managed-symbol metadata")
-		}
-		if canonical := u.canonicalAlias(original); canonical == nil || canonical != original {
-			return fmt.Errorf("prepare emission universe: patched internal/abi.FuncPCABI0 original declaration is not canonical before patch aliasing")
-		}
-		if _, required := u.required[original]; !required {
-			return fmt.Errorf("prepare emission universe: patched internal/abi.FuncPCABI0 original declaration is not selected")
-		}
-		if _, required := u.required[intrinsic]; !required {
-			return fmt.Errorf("prepare emission universe: patched internal/abi.FuncPCABI0 alternate intrinsic is not selected")
-		}
-		if winner := prepared.winners[originalKey]; winner != original {
-			return fmt.Errorf("prepare emission universe: patched internal/abi.FuncPCABI0 original declaration is not its exact managed winner")
-		}
-		if !prepared.fromPatch[intrinsic] || prepared.fromPatch[original] {
-			return fmt.Errorf("prepare emission universe: patched internal/abi.FuncPCABI0 has inconsistent original/alternate provenance")
-		}
-		if err := u.validatePatchedFuncPCABI0AliasLifecycle(prepared, original, intrinsic); err != nil {
-			return err
-		}
-		operations = append(operations, operation{owner: prepared, original: original, intrinsic: intrinsic, originalKey: originalKey})
 	}
 
 	for _, operation := range operations {
@@ -189,25 +206,29 @@ func (u *EmissionUniverse) aliasPatchedFuncPCABI0Declarations() error {
 		delete(u.fnStates, original)
 		delete(u.excluded, original)
 		delete(u.foreignNoBlock, original)
+		delete(u.foreignSync, original)
+		delete(u.foreignSchedulerWait, original)
+		delete(u.foreignWorker, original)
 		delete(u.linkIdentities, original)
 		delete(u.linkOnceNames, original)
 	}
 	return nil
 }
 
-func coroFuncPCABI0BodylessDeclaration(function *ssa.Function) bool {
+func coroFuncPCBodylessDeclaration(function *ssa.Function, localName string) bool {
 	if function == nil || function.Pkg == nil || function.Parent() != nil || function.Signature == nil || function.Signature.Recv() != nil ||
 		function.TypeParams() != nil || function.TypeArgs() != nil || functionNeedsLinkOnce(function) || len(function.Blocks) != 0 {
 		return false
 	}
 	declaration, _ := function.Syntax().(*ast.FuncDecl)
 	return declaration != nil && declaration.Body == nil && declaration.Recv == nil && declaration.Name != nil &&
-		declaration.Name.Name == coroFuncPCABI0LocalName
+		declaration.Name.Name == localName
 }
 
 func (u *EmissionUniverse) validatePatchedFuncPCABI0AliasLifecycle(owner *preparedEmissionPackage, original, intrinsic *ssa.Function) error {
 	if _, materialized := u.materialized[original]; materialized || len(u.materializedOwners[original]) != 0 ||
-		len(u.abiMethodReferences[original]) != 0 || len(u.loweredCalls[original]) != 0 || len(u.normalReturnBlocks[original]) != 0 {
+		len(u.abiMethodReferences[original]) != 0 || len(u.abiSyncReferences[original]) != 0 ||
+		len(u.loweredCalls[original]) != 0 || len(u.plainLoweredCalls[original]) != 0 || len(u.normalReturnBlocks[original]) != 0 {
 		return fmt.Errorf("prepare emission universe: patched internal/abi.FuncPCABI0 original declaration was materialized before exact aliasing")
 	}
 	owners := u.useOwners[original]
@@ -303,19 +324,8 @@ func (u *EmissionUniverse) validateCoroFuncPCABI0Value(value ssa.Value) error {
 // whose transient MakeInterface must not by itself demand a dispatch wrapper.
 // Dynamic interface values remain ordinary ABI roots and return false.
 func coroFuncPCABI0RawStaticOperand(direct *ssa.Call) bool {
-	if direct == nil || direct.Common() == nil || len(direct.Common().Args) != 1 {
-		return false
-	}
-	boxed, ok := direct.Common().Args[0].(*ssa.MakeInterface)
-	if !ok {
-		return false
-	}
-	refs := boxed.Referrers()
-	if refs == nil || len(*refs) != 1 || (*refs)[0] != direct {
-		return false
-	}
-	target, ok := boxed.X.(*ssa.Function)
-	if !ok || target == nil || len(target.FreeVars) != 0 {
+	target, exact := coroFuncPCABI0ExactStaticOperand(direct)
+	if !exact {
 		return false
 	}
 	// funcPCABI0Value does not compile a Go function value for C trampolines;
@@ -324,4 +334,23 @@ func coroFuncPCABI0RawStaticOperand(direct *ssa.Call) bool {
 	// the coroutine analyzer, whose raw-address proof intentionally requires a
 	// canonical target in the emission universe.
 	return extractTrampolineCName(target.Name()) == ""
+}
+
+func coroFuncPCABI0ExactStaticOperand(direct *ssa.Call) (*ssa.Function, bool) {
+	if direct == nil || direct.Common() == nil || len(direct.Common().Args) != 1 {
+		return nil, false
+	}
+	boxed, ok := direct.Common().Args[0].(*ssa.MakeInterface)
+	if !ok {
+		return nil, false
+	}
+	refs := boxed.Referrers()
+	if refs == nil || len(*refs) != 1 || (*refs)[0] != direct {
+		return nil, false
+	}
+	target, ok := boxed.X.(*ssa.Function)
+	if !ok || target == nil || len(target.FreeVars) != 0 {
+		return nil, false
+	}
+	return target, true
 }

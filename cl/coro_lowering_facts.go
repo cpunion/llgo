@@ -171,6 +171,9 @@ func (u *EmissionUniverse) coroLoweringFunctionSites(plan *coro.SSAPlan, functio
 	sites := make([]coro.LoweringFact, 0)
 	for _, block := range function.Blocks {
 		for _, instruction := range block.Instrs {
+			if _, unevaluated := ctx.unevaluatedSSA[instruction]; unevaluated {
+				continue
+			}
 			if _, debug := instruction.(*ssa.DebugRef); debug {
 				continue
 			}
@@ -187,9 +190,15 @@ func (u *EmissionUniverse) coroLoweringFunctionSites(plan *coro.SSAPlan, functio
 }
 
 func (u *EmissionUniverse) coroInstructionLoweringFact(ctx *context, plan *coro.SSAPlan, function *ssa.Function, instance coro.EmissionInstanceID, instruction ssa.Instruction, loweredCalls map[string]coro.SSALoweredCall) (coro.LoweringFact, bool, error) {
+	siteRole := coro.RolePrimary
+	contract := coro.ContractID("")
+	barrier := false
 	helperNames := u.loweredRuntimeHelpers(ctx, instruction)
 	helpers := make([]coro.ManagedEdge, 0, len(helperNames))
-	for index, logicalName := range helperNames {
+	for _, logicalName := range helperNames {
+		if coroCompilerElidesImplicitFaultRuntimeHelper(instruction, logicalName) {
+			continue
+		}
 		planned, ok := loweredCalls[logicalName]
 		if !ok || planned.Target == nil {
 			return coro.LoweringFact{}, false, fmt.Errorf("instruction helper %q is absent from the frozen plan", logicalName)
@@ -199,21 +208,50 @@ func (u *EmissionUniverse) coroInstructionLoweringFact(ctx *context, plan *coro.
 			return coro.LoweringFact{}, false, fmt.Errorf("instruction helper %q target %q has no frozen FunctionID", logicalName, planned.Target.Name())
 		}
 		helpers = append(helpers, coro.ManagedEdge{
-			Order:       index,
-			Role:        coro.RoleHelper,
-			Ordinal:     index,
-			LogicalName: logicalName,
-			Target:      targetID,
-			UnwindOnly:  u.loweredCallUnwindOnly(function, instruction),
+			Order:                len(helpers),
+			Role:                 coro.RoleHelper,
+			Ordinal:              len(helpers),
+			LogicalName:          logicalName,
+			Target:               targetID,
+			UnwindOnly:           planned.UnwindOnly,
+			ExplicitStatusElided: planned.ExplicitStatusElided,
 		})
 	}
 
 	class, recipe, effect, exec, materialized := coroSourceInstructionFact(instruction)
-	if len(helpers) != 0 {
+	functionUses := []coro.FunctionValueFact{}
+	if store, ok := instruction.(*ssa.Store); ok {
+		if target, conditional := plan.ConditionalManagedStoreTarget(store); conditional {
+			if store.Parent() != function || target == nil {
+				return coro.LoweringFact{}, false, fmt.Errorf("conditional managed Store has no exact owner/target")
+			}
+			targetID, planned := plan.FunctionID(target)
+			if !planned {
+				return coro.LoweringFact{}, false, fmt.Errorf("conditional managed Store target %q has no frozen FunctionID", target.Name())
+			}
+			class = coro.OpLowered
+			recipe = coro.RecipeID("cl.ssa.conditional-managed-store.publish.v0")
+			if plan.ElidesConditionalManagedStore(store) {
+				recipe = coro.RecipeID("cl.ssa.conditional-managed-store.elide.v0")
+			}
+			materialized = true
+			contract = coro.ContractID("llgo.coro.conditional-managed-publication.v0")
+			functionUses = []coro.FunctionValueFact{{
+				Order: 0, Role: coro.RolePrimary, Ordinal: 0,
+				Targets: []coro.FunctionID{targetID}, Open: false, MayBeNil: false,
+			}}
+		}
+	}
+	implicitPanic := coroImplicitPanicFacts(helperNames)
+	if len(helpers) != 0 || len(implicitPanic) != 0 {
 		materialized = true
 		if recipe == "" {
 			class = coro.OpLowered
-			recipe = coro.RecipeID("cl.ssa.hidden-helpers.v0")
+			if len(helpers) == 0 {
+				recipe = coro.RecipeID("cl.ssa.implicit-fault-guard.v0")
+			} else {
+				recipe = coro.RecipeID("cl.ssa.hidden-helpers.v0")
+			}
 		}
 	}
 	if call, ok := instruction.(ssa.CallInstruction); ok && call.Common() != nil {
@@ -230,6 +268,26 @@ func (u *EmissionUniverse) coroInstructionLoweringFact(ctx *context, plan *coro.
 					materialized = true
 					class = coro.OpIntrinsic
 					recipe, effect = coroIntrinsicLoweringRecipe(semantics)
+					if direct, ok := instruction.(*ssa.Call); ok {
+						role, critical, criticalErr := u.coroCriticalCallSite(direct)
+						if criticalErr != nil {
+							return coro.LoweringFact{}, false, criticalErr
+						}
+						if critical {
+							barrier = true
+							contract = coro.ContractID("llgo.coro.critical-depth.v1")
+							switch role {
+							case coroCriticalCallEnter:
+								siteRole = coro.RoleRegionBegin
+								recipe = coro.RecipeID("cl.intrinsic.coro-critical-enter.v1")
+							case coroCriticalCallExit:
+								siteRole = coro.RoleRegionEnd
+								recipe = coro.RecipeID("cl.intrinsic.coro-critical-exit.v1")
+							default:
+								return coro.LoweringFact{}, false, fmt.Errorf("critical intrinsic has no exact region role")
+							}
+						}
+					}
 				}
 			}
 		}
@@ -238,7 +296,7 @@ func (u *EmissionUniverse) coroInstructionLoweringFact(ctx *context, plan *coro.
 		return coro.LoweringFact{}, false, nil
 	}
 
-	site, err := coro.NewInstructionEmissionSiteID(instance, instruction, coro.RolePrimary, 0)
+	site, err := coro.NewInstructionEmissionSiteID(instance, instruction, siteRole, 0)
 	if err != nil {
 		return coro.LoweringFact{}, false, err
 	}
@@ -249,10 +307,12 @@ func (u *EmissionUniverse) coroInstructionLoweringFact(ctx *context, plan *coro.
 	if effect.MaySuspend() {
 		footprint |= coro.FootprintSuspend
 	}
+	if barrier {
+		footprint |= coro.FootprintBarrier
+	}
 	if exec.Contains(coro.MayUnwind) {
 		footprint |= coro.FootprintUnwind
 	}
-	implicitPanic := coroImplicitPanicFacts(helperNames)
 	if len(implicitPanic) != 0 {
 		footprint |= coro.FootprintPanic
 	}
@@ -268,7 +328,8 @@ func (u *EmissionUniverse) coroInstructionLoweringFact(ctx *context, plan *coro.
 		Footprint:     footprint,
 		Helpers:       helpers,
 		ImplicitPanic: implicitPanic,
-		FunctionUses:  []coro.FunctionValueFact{},
+		FunctionUses:  functionUses,
+		Contract:      contract,
 	}, true, nil
 }
 
@@ -306,6 +367,8 @@ func coroIntrinsicLoweringRecipe(semantics CoroIntrinsicCallSemantics) (coro.Rec
 		return coro.RecipeID("cl.intrinsic.inline-with-helpers.v0"), coro.NoSuspend
 	case CoroIntrinsicCallInlineSuspend:
 		return coro.RecipeID("cl.intrinsic.inline-suspend.v0"), coro.MayPark
+	case CoroIntrinsicCallInlineYield:
+		return coro.RecipeID("cl.intrinsic.inline-yield.v0"), coro.YieldOnly
 	default:
 		return coro.RecipeID("cl.intrinsic.unsupported.v0"), coro.NoSuspend
 	}

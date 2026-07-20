@@ -211,6 +211,54 @@ func TestTimerRegistrationCapacityFailureRollsBackTicket(t *testing.T) {
 	}
 }
 
+func TestTimerRegistrationPagedCatalogAdmitsAndDrainsNativeFourThousandNinetySix(t *testing.T) {
+	const count = 64 * TimerRegistrationPageCapacity
+	table := new(TimerRegistrationTable)
+	var pages [63]TimerRegistrationPage
+	if !ConfigureTimerRegistrationPages(table, pages[:1]) ||
+		TimerRegistrationConfiguredCapacity(table) != 2*TimerRegistrationPageCapacity ||
+		!ConfigureTimerRegistrationPages(table, pages[:]) ||
+		TimerRegistrationConfiguredCapacity(table) != count {
+		t.Fatal("configure paged timer catalog")
+	}
+	// Rebinding a singleton target with the same pages must not invalidate
+	// generations or require allocation.
+	if !ConfigureTimerRegistrationPages(table, pages[:]) {
+		t.Fatal("repeat paged timer configuration")
+	}
+	p := new(P)
+	tokens := make([]WaitToken, count)
+	tickets := make([]WaitTicket, count)
+	handles := make([]TimerRegistrationHandle, count)
+	for index := range tokens {
+		ticket, handle, result := PrepareTimerRegistration(p, table, &tokens[index], int64(index+1))
+		if result != TimerRegistrationPrepared || !claimWait(&tokens[index], ticket) {
+			t.Fatalf("prepare paged timer %d = (%d, %+v, %d)", index, ticket, handle, result)
+		}
+		tickets[index], handles[index] = ticket, handle
+	}
+	if handles[count-1].Slot != count || handles[TimerRegistrationPageCapacity].Slot != TimerRegistrationPageCapacity+1 {
+		t.Fatalf("paged timer handles did not remain linear: page2=%+v last=%+v", handles[TimerRegistrationPageCapacity], handles[count-1])
+	}
+	var overflow WaitToken
+	if ticket, handle, result := PrepareTimerRegistration(p, table, &overflow, count+1); result != TimerRegistrationPrepareRejected ||
+		ticket != 0 || handle != (TimerRegistrationHandle{}) {
+		t.Fatalf("full native timer catalog overflow = (%d, %+v, %d)", ticket, handle, result)
+	}
+	if completed, _, hasDeadline, ok := table.DrainDue(count); !ok || completed != count || hasDeadline {
+		t.Fatalf("drain paged timers = (%d, %t, %t)", completed, hasDeadline, ok)
+	}
+	for index := range tokens {
+		if outcome, ok := consumeWait(&tokens[index], tickets[index]); !ok || outcome != WaitOutcomeCompleted ||
+			!table.RetireCompletedTimer(handles[index], &tokens[index], tickets[index]) {
+			t.Fatalf("retire paged timer %d", index)
+		}
+	}
+	if !table.CanRelease() {
+		t.Fatal("paged timer catalog retained state")
+	}
+}
+
 func TestTimerRegistrationGenerationRejectsABAHandle(t *testing.T) {
 	table := new(TimerRegistrationTable)
 	p := new(P)

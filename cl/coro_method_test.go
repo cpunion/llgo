@@ -163,7 +163,52 @@ func TestCoroStaticMethodReceiverABIPlainAndAwaitCoroSplit(t *testing.T) {
 	}
 }
 
-func TestCoroStaticMethodReceiverABIFailsClosed(t *testing.T) {
+func TestCoroPointerReceiverInterfaceAwaitCoroSplit(t *testing.T) {
+	const source = `package foo
+var gate chan uint32
+type Waiter interface { Wait() uint32 }
+type Counter struct{}
+func (*Counter) Wait() uint32 { return <-gate }
+func Root(waiter Waiter) uint32 { <-gate; return waiter.Wait() }
+`
+	prog, pkg, _, plan, ssaPkg, methods := compileCoroStaticMethodFixture(t, source, coro.DynamicCHAClosed)
+	defer prog.Dispose()
+	module := pkg.Module()
+	defer module.Dispose()
+
+	root := ssaPkg.Func("Root")
+	rootPlan, ok := plan.FunctionPlan(root)
+	if !ok || rootPlan.Emission != coro.EmitCoroutine || rootPlan.Primary != coro.PrimaryCoroutine ||
+		!rootPlan.Effect.Contains(coro.MayPark|coro.AwaitStructured) {
+		t.Fatalf("Root plan = %+v, present=%t; want parking interface-await coroutine", rootPlan, ok)
+	}
+	wait := methods["Wait"]
+	waitPlan, ok := plan.FunctionPlan(wait)
+	if wait == nil || !ok || waitPlan.Emission != coro.EmitCoroutine || waitPlan.Primary != coro.PrimaryCoroutine ||
+		waitPlan.FuncRep != coro.Dispatch {
+		t.Fatalf("Wait plan = %+v, present=%t; want coroutine Dispatch target", waitPlan, ok)
+	}
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify pointer-receiver interface await before CoroSplit: %v\n%s", err, module.String())
+	}
+	rootIR := requireCoroPhysicalFunction(t, module, "foo.Root").String()
+	waitName := funcName(ssaPkg.Pkg, wait, false) + coroPrimarySuffix
+	for _, required := range []string{waitName, "call void @" + coroAwaitPrepareHookV1} {
+		if !strings.Contains(rootIR, required) {
+			t.Fatalf("pointer-receiver interface await lacks %q:\n%s", required, rootIR)
+		}
+	}
+
+	runCoroABITestPipeline(t, prog, module)
+	if resume := module.NamedFunction("foo.Root$coro.resume"); resume.IsNil() {
+		t.Fatalf("CoroSplit did not create pointer-receiver interface await resume:\n%s", module.String())
+	}
+	if waitResume := module.NamedFunction(waitName + ".resume"); waitResume.IsNil() {
+		t.Fatalf("CoroSplit did not create pointer-receiver method resume %q:\n%s", waitName+".resume", module.String())
+	}
+}
+
+func TestCoroStaticMethodReceiverABICompatibility(t *testing.T) {
 	tests := []struct {
 		name       string
 		source     string
@@ -183,7 +228,7 @@ func Root(counter Counter) uint32 {
 }
 `,
 			resolution: coro.DynamicCHAClosed,
-			want:       "closures require the coroutine context ABI",
+			want:       "synthetic function \"bound method wrapper",
 		},
 		{
 			name: "dynamic suspending interface",
@@ -195,29 +240,18 @@ func (Counter) Wait() uint32 { return <-gate }
 func Root(waiter Waiter) uint32 { <-gate; return waiter.Wait() }
 `,
 			resolution: coro.DynamicCHAClosed,
-			want:       "requires a demanded defined plain Dispatch body",
+			want:       "terminal runtime helper PanicWrapNilPointer lacks an exact lowered-call fact",
 		},
 		{
 			name: "variadic method",
 			source: `package foo
 var gate chan uint32
 type Counter struct{}
-func (Counter) Wait(values ...uint32) uint32 { <-gate; return values[0] }
-func Root(counter Counter) uint32 { <-gate; return counter.Wait(1) }
+func (Counter) Wait(values ...uint32) uint32 { <-gate; return uint32(len(values)) }
+func Root(counter Counter) uint32 { <-gate; return counter.Wait(nil...) }
 `,
 			resolution: coro.DynamicCHAOpen,
-			want:       "variadic coroutine ABI",
-		},
-		{
-			name: "generic receiver",
-			source: `package foo
-var gate chan uint32
-type Counter[T any] struct{}
-func (Counter[T]) Wait() uint32 { return <-gate }
-func Root(counter Counter[uint32]) uint32 { <-gate; return counter.Wait() }
-`,
-			resolution: coro.DynamicCHAOpen,
-			want:       "generic",
+			want:       "",
 		},
 	}
 	for _, test := range tests {
@@ -225,12 +259,32 @@ func Root(counter Counter[uint32]) uint32 { <-gate; return counter.Wait() }
 			ssaPkg, _, files := buildGoSSAPkg(t, test.source)
 			prog := newLLSSAProg(t)
 			defer prog.Dispose()
-			universe, plan, _, err := prepareCoroStaticMethodPlan(prog, ssaPkg, files, test.resolution)
+			universe, plan, methods, err := prepareCoroStaticMethodPlan(prog, ssaPkg, files, test.resolution)
+			var pkg llssa.Package
 			if err == nil {
-				_, _, err = NewPackageExWithEmbedOptions(
+				pkg, _, err = NewPackageExWithEmbedOptions(
 					prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 					PackageOptions{Compilation: coroStaticMethodCompilation(plan, universe)},
 				)
+			}
+			if test.want == "" {
+				if err != nil {
+					t.Fatalf("compile supported static method ABI: %v", err)
+				}
+				method := methods["Wait"]
+				if method == nil || method.Signature == nil || !method.Signature.Variadic() {
+					t.Fatalf("variadic method fixture lost its source signature: %v", method)
+				}
+				effective, err := universe.coroPhysicalSourceSignature(method)
+				if err != nil || effective == nil || effective.Variadic() {
+					t.Fatalf("variadic method effective signature = %v, %v; want packed non-variadic slice ABI", effective, err)
+				}
+				module := pkg.Module()
+				defer module.Dispose()
+				if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+					t.Fatalf("verify supported variadic static method: %v\n%s", err, module.String())
+				}
+				return
 			}
 			if err == nil || !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(test.want)) {
 				t.Fatalf("compile error = %v, want substring %q", err, test.want)

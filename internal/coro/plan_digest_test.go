@@ -146,6 +146,361 @@ func TestCoroPlanDigestDeterministicCompleteAndDomainSeparated(t *testing.T) {
 	}
 }
 
+func TestCoroPlanDigestRecordsWholeBuildRawPlainVariant(t *testing.T) {
+	if PlanDigestSchema != "llgo.coro.plan-digest.v25" {
+		t.Fatalf("plan digest schema = %q, want exact safe fixed-array index schema v25", PlanDigestSchema)
+	}
+	prog, pkg := buildCoroTestSSA(t, "raw_variant_digest.go", `package coroid
+func root(seed int) int {
+	callback := func(value int) int { return seed + value }
+	return callback(1)
+}
+`)
+	root := packageFunction(t, pkg, "root")
+	captured := root.AnonFuncs[0]
+	build := func(withVariant bool) *SSAPlan {
+		t.Helper()
+		config := planDigestSSAConfig()
+		config.MaxPlainInstructions = -1
+		config.ClassifyFunction = func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+			if withVariant && fn == captured {
+				return SSAFunctionPolicy{RawPlainVariant: true}, nil
+			}
+			return SSAFunctionPolicy{}, nil
+		}
+		plan, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: SyncDemand}}, config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return plan
+	}
+	without := build(false)
+	with := build(true)
+	metadata := validPlanDigestMetadata()
+	withoutDigest, err := without.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withDigest, err := with.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withDigest == withoutDigest {
+		t.Fatal("raw plain variant capability is absent from CoroPlanDigest")
+	}
+	document, err := with.canonicalPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capturedID, ok := with.FunctionID(captured)
+	if !ok {
+		t.Fatal("captured function has no plan identity")
+	}
+	found := false
+	for _, function := range document.Functions {
+		if function.ID == capturedID {
+			found = function.RawPlainVariant && !function.RawPlainEntry
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("canonical digest did not record captured internal raw variant: %+v", document.Functions)
+	}
+}
+
+func TestCoroPlanDigestFreezesExactSafeFixedArrayIndexSites(t *testing.T) {
+	const source = `package coroid
+var values = [...]int{1, 2, 3, 4}
+func safe() int {
+	total := 0
+	for index := range values { total += values[index] }
+	return total
+}
+func unsafe(index int) int { return values[index] }
+`
+	build := func(mode ssa.BuilderMode) (*SSAPlan, *ssa.Package) {
+		t.Helper()
+		prog, pkg := buildCoroTestSSAWithMode(t, "safe_array_digest.go", source, mode)
+		plan, err := AnalyzeSSA(prog, Roots{
+			{Function: packageFunction(t, pkg, "safe"), Demand: SyncDemand},
+			{Function: packageFunction(t, pkg, "unsafe"), Demand: SyncDemand},
+		}, planDigestSSAConfig())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return plan, pkg
+	}
+
+	plain, pkg := build(ssa.SanityCheckFunctions | ssa.InstantiateGenerics)
+	debug, _ := build(ssa.SanityCheckFunctions | ssa.InstantiateGenerics | ssa.GlobalDebug)
+	metadata := validPlanDigestMetadata()
+	plainDigest, err := plain.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	debugDigest, err := debug.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if debugDigest != plainDigest {
+		t.Fatalf("DebugRef instructions changed safe fixed-array site identity:\nplain %s\ndebug %s", plainDigest, debugDigest)
+	}
+
+	document, err := plain.canonicalPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(document.SafeArrayIndexes) != len(plain.safeFixedArrayIndexes) || len(document.SafeArrayIndexes) == 0 {
+		t.Fatalf("safe fixed-array digest sites = %d, frozen facts = %d", len(document.SafeArrayIndexes), len(plain.safeFixedArrayIndexes))
+	}
+	safeFunction := packageFunction(t, pkg, "safe")
+	safeID, ok := plain.FunctionID(safeFunction)
+	if !ok {
+		t.Fatal("safe fixture has no function ID")
+	}
+	digestSafeSites := 0
+	for _, site := range document.SafeArrayIndexes {
+		if site.Function == safeID {
+			digestSafeSites++
+			if site.Bound != 4 {
+				t.Fatalf("safe function digest bound = %d, want 4", site.Bound)
+			}
+		}
+	}
+	if digestSafeSites != 1 {
+		t.Fatalf("safe function digest sites = %d, want 1; all=%+v", digestSafeSites, document.SafeArrayIndexes)
+	}
+	var safeSite ssa.Instruction
+	for instruction, bound := range plain.safeFixedArrayIndexes {
+		if instruction.Parent() != safeFunction {
+			continue
+		}
+		safeSite = instruction
+		if bound != 4 {
+			t.Fatalf("safe site bound = %d, want 4", bound)
+		}
+		if got, ok := plain.ExactSafeFixedArrayIndex(instruction); !ok || got != bound {
+			t.Fatalf("ExactSafeFixedArrayIndex = (%d, %t), want (%d, true)", got, ok, bound)
+		}
+	}
+	if safeSite == nil {
+		t.Fatal("safe fixture has no frozen index site")
+	}
+
+	delete(plain.safeFixedArrayIndexes, safeSite)
+	withoutSite, err := plain.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withoutSite == plainDigest {
+		t.Fatal("removing one safe fixed-array site did not change CoroPlanDigest")
+	}
+	plain.safeFixedArrayIndexes[safeSite] = 5
+	if _, err := plain.CoroPlanDigest(metadata); err == nil ||
+		!strings.Contains(err.Error(), "no longer has its exact bound proof") {
+		t.Fatalf("forged safe fixed-array bound digest error = %v", err)
+	}
+	plain.safeFixedArrayIndexes[safeSite] = 4
+
+	unsafeFunction := packageFunction(t, pkg, "unsafe")
+	var unsafeSite ssa.Instruction
+	for _, block := range unsafeFunction.Blocks {
+		for _, instruction := range block.Instrs {
+			switch instruction.(type) {
+			case *ssa.Index, *ssa.IndexAddr:
+				unsafeSite = instruction
+			}
+		}
+	}
+	if unsafeSite == nil {
+		t.Fatal("unsafe fixture has no index instruction")
+	}
+	plain.safeFixedArrayIndexes[unsafeSite] = 4
+	if _, err := plain.CoroPlanDigest(metadata); err == nil ||
+		!strings.Contains(err.Error(), "no longer has its exact bound proof") {
+		t.Fatalf("forged unsafe fixed-array site digest error = %v", err)
+	}
+}
+
+func TestCoroPlanDigestIncludesExactElidedCallCertificate(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "elided_call_certificate_digest.go", `package coroid
+func intrinsic()
+func root() { intrinsic() }
+`)
+	root := packageFunction(t, pkg, "root")
+	var exactCall ssa.CallInstruction
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			if call, ok := instruction.(ssa.CallInstruction); ok {
+				exactCall = call
+			}
+		}
+	}
+	if exactCall == nil {
+		t.Fatal("fixture has no exact call")
+	}
+	build := func(certificate string) *SSAPlan {
+		config := planDigestSSAConfig()
+		config.MaxPlainInstructions = -1
+		config.ClassifyElidedCall = func(_ *ssa.Function, call ssa.CallInstruction) (bool, error) {
+			return call == exactCall, nil
+		}
+		config.ClassifyElidedCallCertificate = func(_ *ssa.Function, call ssa.CallInstruction) (string, error) {
+			if call == exactCall {
+				return certificate, nil
+			}
+			return "", nil
+		}
+		plan, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: SyncDemand}}, config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return plan
+	}
+	first := build("worker-target-certificate-A")
+	second := build("worker-target-certificate-B")
+	metadata := validPlanDigestMetadata()
+	firstDigest, err := first.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondDigest, err := second.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstDigest == secondDigest {
+		t.Fatal("elided-call certificate is absent from CoroPlanDigest")
+	}
+	document, err := first.canonicalPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(document.ElidedCalls) != 1 || document.ElidedCalls[0].Certificate != "worker-target-certificate-A" {
+		t.Fatalf("canonical elided-call certificate = %+v", document.ElidedCalls)
+	}
+}
+
+func TestCoroPlanDigestRecordsConditionalManagedStoreOccurrence(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "conditional_store_digest.go", `package coroid
+var slot func()
+func target() {}
+func other() {}
+func publish() { slot = target }
+`)
+	publish := packageFunction(t, pkg, "publish")
+	target := packageFunction(t, pkg, "target")
+	other := packageFunction(t, pkg, "other")
+	var publication *ssa.Store
+	for _, block := range publish.Blocks {
+		for _, instruction := range block.Instrs {
+			if store, ok := instruction.(*ssa.Store); ok && store.Val == target {
+				publication = store
+			}
+		}
+	}
+	if publication == nil {
+		t.Fatal("publish has no exact target Store")
+	}
+	config := planDigestSSAConfig()
+	config.MaxPlainInstructions = -1
+	config.ClassifyConditionalManagedStoreReference = func(owner *ssa.Function, store *ssa.Store) (*ssa.Function, bool, error) {
+		if owner == publish && store == publication {
+			return target, true, nil
+		}
+		return nil, false, nil
+	}
+	plan, err := AnalyzeSSA(prog, Roots{{Function: publish, Demand: AsyncDemand}}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := plan.canonicalPlanDigest(validPlanDigestMetadata())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(document.ConditionalStores) != 1 || document.ConditionalStores[0].Target == "" ||
+		!document.ConditionalStores[0].Elided {
+		t.Fatalf("conditional Store digest facts = %+v", document.ConditionalStores)
+	}
+	baseline, err := plan.CoroPlanDigest(validPlanDigestMetadata())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stable, err := plan.CoroPlanDigest(validPlanDigestMetadata())
+	if err != nil || stable != baseline {
+		t.Fatalf("conditional Store digest is unstable: %q, %v, want %q", stable, err, baseline)
+	}
+	delete(plan.conditionalStores, publication)
+	withoutOccurrence, err := plan.CoroPlanDigest(validPlanDigestMetadata())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withoutOccurrence == baseline {
+		t.Fatal("removing conditional Store occurrence did not change digest")
+	}
+	plan.conditionalStores[publication] = other
+	if _, err := plan.CoroPlanDigest(validPlanDigestMetadata()); err == nil ||
+		!strings.Contains(err.Error(), "no longer carries its exact target") {
+		t.Fatalf("retargeted conditional Store digest error = %v", err)
+	}
+}
+
+func TestCoroPlanDigestSeparatesManagedAndRawPlainDemand(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "raw_plain_demand_digest.go", `package coroid
+func helper() {}
+func root() { helper() }
+`)
+	root := packageFunction(t, pkg, "root")
+	config := planDigestSSAConfig()
+	config.MaxPlainInstructions = -1
+	managed, err := AnalyzeSSA(prog, Roots{{Function: root, ManagedDemand: SyncDemand}}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := AnalyzeSSA(prog, Roots{{Function: root, RawPlainDemand: true}}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := validPlanDigestMetadata()
+	managedDigest, err := managed.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawDigest, err := raw.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if managedDigest == rawDigest {
+		t.Fatal("managed and raw-only entry provenance share a plan digest")
+	}
+	document, err := raw.canonicalPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Roots) != 1 || document.Roots[0].ManagedDemand != 0 || !document.Roots[0].RawPlainDemand {
+		t.Fatalf("raw digest roots = %+v", document.Roots)
+	}
+	want := make(map[FunctionID]bool)
+	for _, fn := range []*ssa.Function{root, packageFunction(t, pkg, "helper")} {
+		id, ok := raw.FunctionID(fn)
+		if !ok {
+			t.Fatalf("raw function %s has no ID", fn.Name())
+		}
+		want[id] = true
+	}
+	for _, function := range document.Functions {
+		if !want[function.ID] {
+			continue
+		}
+		if !function.RawPlainDemand || !function.RawPlainOnly || function.Emission != uint8(EmitRawPlain) {
+			t.Fatalf("raw digest function = %+v", function)
+		}
+		delete(want, function.ID)
+	}
+	if len(want) != 0 {
+		t.Fatalf("raw digest omitted functions %v", want)
+	}
+}
+
 func TestCoroPlanDigestFrameRetentionIdentityIsExactAndDomainSeparated(t *testing.T) {
 	prog, pkg := buildCoroTestSSAWithMode(
 		t, "frame_retention_digest.go", planDigestTestSource,
@@ -181,6 +536,15 @@ func TestCoroPlanDigestFrameRetentionIdentityIsExactAndDomainSeparated(t *testin
 	}
 	if document.Metadata.FrameRetentionABI != FrameRetentionTimerABIV1 {
 		t.Fatalf("canonical frame-retention ABI = %q, want %q", document.Metadata.FrameRetentionABI, FrameRetentionTimerABIV1)
+	}
+	parkMetadata := metadata
+	parkMetadata.FrameRetentionABI = FrameRetentionParkABIV2
+	parkRetention, err := plan.CoroPlanDigest(parkMetadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parkRetention == withRetention || parkRetention == withoutRetention {
+		t.Fatal("generic park frame-retention ABI is not independently domain-separated")
 	}
 
 	unknown := metadata
@@ -477,6 +841,16 @@ func TestCoroPlanDigestCanonicalTargetsAndPlanMutations(t *testing.T) {
 	if mutated == baseline {
 		t.Fatal("CallPlan mutation did not change digest")
 	}
+	reordered = originalCall
+	reordered.SyncDispatch = !reordered.SyncDispatch
+	plan.callPlans[multiTargetCall] = reordered
+	mutated, err = plan.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mutated == baseline {
+		t.Fatal("CallPlan SyncDispatch is absent from digest")
+	}
 	plan.callPlans[multiTargetCall] = originalCall
 
 	originalRoots := append([]SSARootPlan(nil), plan.roots...)
@@ -487,7 +861,10 @@ func TestCoroPlanDigestCanonicalTargetsAndPlanMutations(t *testing.T) {
 			isRoot = isRoot || root.ID == function.Plan.ID
 		}
 		if !isRoot && function.Plan.Demand != NoDemand {
-			addedRoot = SSARootPlan{Function: function.Function, ID: function.Plan.ID, Demand: function.Plan.Demand}
+			addedRoot = SSARootPlan{
+				Function: function.Function, ID: function.Plan.ID, Demand: function.Plan.Demand,
+				ManagedDemand: function.Plan.ManagedDemand, RawPlainDemand: function.Plan.RawPlainDemand,
+			}
 			break
 		}
 	}
@@ -556,6 +933,65 @@ func TestCoroPlanDigestCanonicalTargetsAndPlanMutations(t *testing.T) {
 	plan.plan.functions[0] = originalFunction
 	if restored, err := plan.CoroPlanDigest(metadata); err != nil || restored != baseline {
 		t.Fatalf("restored digest = %q, %v; want %q", restored, err, baseline)
+	}
+}
+
+func TestCoroPlanDigestIncludesTrustedBoundedRecursion(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "bounded_recursion_digest.go", `package coroid
+func recursive() { recursive() }
+`)
+	recursive := packageFunction(t, pkg, "recursive")
+	plan, err := AnalyzeSSA(prog, Roots{{Function: recursive, Demand: AsyncDemand}}, planDigestSSAConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := validPlanDigestMetadata()
+	baseline, err := plan.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	index := -1
+	for i := range plan.functions {
+		if plan.functions[i].Function == recursive {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		t.Fatal("recursive function is absent from plan")
+	}
+	original := plan.functions[index].Plan
+	if !original.Recursive || original.TrustedBoundedRecursion {
+		t.Fatalf("original recursive plan = %+v", original)
+	}
+	changed := original
+	changed.TrustedBoundedRecursion = true
+	plan.functions[index].Plan = changed
+	baseIndex := plan.plan.byID[changed.ID]
+	plan.plan.functions[baseIndex] = changed
+	mutated, err := plan.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mutated == baseline {
+		t.Fatal("TrustedBoundedRecursion is absent from CoroPlanDigest")
+	}
+	document, err := plan.canonicalPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, function := range document.Functions {
+		if function.ID == changed.ID {
+			found = true
+			if !function.TrustedBoundedRecursion {
+				t.Fatalf("bounded-recursion digest record = %+v", function)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("recursive function is absent from canonical digest")
 	}
 }
 
@@ -713,7 +1149,11 @@ func TestCoroPlanDigestFailsClosedOnCallAndValueCoverage(t *testing.T) {
 		mutate func()
 	}{
 		{"nil function", "nil function", func() { plan.roots[0].Function = nil }},
-		{"no demand", "has no demand", func() { plan.roots[0].Demand = NoDemand }},
+		{"no demand", "has no demand", func() {
+			plan.roots[0].Demand = NoDemand
+			plan.roots[0].ManagedDemand = NoDemand
+			plan.roots[0].RawPlainDemand = false
+		}},
 		{"invalid demand", "unknown demand bits", func() { plan.roots[0].Demand = Demand(1 << 7) }},
 		{"duplicate", "not in strict FunctionID order", func() { plan.roots = append(plan.roots, plan.roots[0]) }},
 		{"foreign function", "missing forward root mapping", func() { plan.roots[0].Function = other.roots[0].Function }},
@@ -914,6 +1354,14 @@ func second() {}
 		{LogicalName: "runtime.first", Target: first, UnwindOnly: true},
 		{LogicalName: "runtime.second", Target: second},
 	})
+	explicitStatusElided := build([]SSALoweredCall{
+		{LogicalName: "runtime.first", Target: first, UnwindOnly: true, ExplicitStatusElided: true},
+		{LogicalName: "runtime.second", Target: second},
+	})
+	rawPlain := build([]SSALoweredCall{
+		{LogicalName: "runtime.first", Target: first, RawPlain: true},
+		{LogicalName: "runtime.second", Target: second},
+	})
 	metadata := validPlanDigestMetadata()
 	baselineDigest, err := baseline.CoroPlanDigest(metadata)
 	if err != nil {
@@ -940,6 +1388,20 @@ func second() {}
 	if baselineDigest == unwindDigest {
 		t.Fatal("changing a lowered call to unwind-only did not change digest")
 	}
+	explicitStatusElidedDigest, err := explicitStatusElided.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unwindDigest == explicitStatusElidedDigest {
+		t.Fatal("marking an unwind-only lowered call ExplicitStatus-elided did not change digest")
+	}
+	rawPlainDigest, err := rawPlain.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baselineDigest == rawPlainDigest {
+		t.Fatal("marking a lowered-call occurrence raw-plain did not change digest")
+	}
 	document, err := baseline.canonicalPlanDigest(metadata)
 	if err != nil {
 		t.Fatal(err)
@@ -953,6 +1415,41 @@ func second() {}
 	}
 	if len(unwindDocument.LoweredCalls) != 2 || !unwindDocument.LoweredCalls[0].UnwindOnly || unwindDocument.LoweredCalls[1].UnwindOnly {
 		t.Fatalf("canonical unwind-only lowered calls = %+v", unwindDocument.LoweredCalls)
+	}
+	explicitStatusElidedDocument, err := explicitStatusElided.canonicalPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(explicitStatusElidedDocument.LoweredCalls) != 2 ||
+		!explicitStatusElidedDocument.LoweredCalls[0].ExplicitStatusElided ||
+		explicitStatusElidedDocument.LoweredCalls[1].ExplicitStatusElided {
+		t.Fatalf("canonical ExplicitStatus-elided lowered calls = %+v", explicitStatusElidedDocument.LoweredCalls)
+	}
+	rawPlainDocument, err := rawPlain.canonicalPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rawPlainDocument.LoweredCalls) != 2 || !rawPlainDocument.LoweredCalls[0].RawPlain || rawPlainDocument.LoweredCalls[1].RawPlain {
+		t.Fatalf("canonical raw-plain lowered calls = %+v", rawPlainDocument.LoweredCalls)
+	}
+
+	// Bind the occurrence fact directly, independently of the fixed-point plan
+	// changes that a freshly analyzed raw-plain reference also produces.
+	mutated := build([]SSALoweredCall{
+		{LogicalName: "runtime.first", Target: first},
+		{LogicalName: "runtime.second", Target: second},
+	})
+	beforeMutation, err := mutated.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutated.loweredCalls[root][0].RawPlain = true
+	afterMutation, err := mutated.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if beforeMutation == afterMutation {
+		t.Fatal("mutating only the frozen raw-plain lowered-call bit did not change digest")
 	}
 }
 
@@ -1098,6 +1595,40 @@ func root() {
 	}
 	if len(instructions) != 2 || instructions[0] == instructions[1] {
 		t.Fatalf("definition-less target operand sites = %v, want two distinct stable occurrences", instructions)
+	}
+}
+
+func TestCoroPlanDigestDoesNotPlanDeferredBuiltinCallee(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "deferred_builtin.go", `package coroid
+func root(ch chan struct{}) {
+	defer close(ch)
+}
+`)
+	root := packageFunction(t, pkg, "root")
+	plan, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: AsyncDemand}}, planDigestSSAConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var closeBuiltin *ssa.Builtin
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(ssa.CallInstruction)
+			if !ok {
+				continue
+			}
+			if builtin, ok := call.Common().Value.(*ssa.Builtin); ok && builtin.Name() == "close" {
+				closeBuiltin = builtin
+			}
+		}
+	}
+	if closeBuiltin == nil {
+		t.Fatal("fixture has no deferred close builtin")
+	}
+	if _, planned := plan.ValuePlan(closeBuiltin); planned {
+		t.Fatal("deferred builtin callee acquired a first-class function-value plan")
+	}
+	if _, err := plan.CoroPlanDigest(validPlanDigestMetadata()); err != nil {
+		t.Fatalf("digest deferred builtin call: %v", err)
 	}
 }
 

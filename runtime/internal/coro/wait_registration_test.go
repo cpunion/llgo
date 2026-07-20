@@ -377,6 +377,53 @@ func TestWaitRegistrationCapacityAndStaleGeneration(t *testing.T) {
 	}
 }
 
+func TestWaitRegistrationPagedCatalogAdmitsAndCompletesOneThousand(t *testing.T) {
+	const count = 1000
+	table := new(WaitRegistrationTable)
+	var pages [15]WaitRegistrationPage
+	if !ConfigureWaitRegistrationPages(table, pages[:1]) ||
+		WaitRegistrationConfiguredCapacity(table) != 2*WaitRegistrationPageCapacity ||
+		!ConfigureWaitRegistrationPages(table, pages[:]) ||
+		WaitRegistrationConfiguredCapacity(table) != 16*WaitRegistrationPageCapacity {
+		t.Fatal("configure paged wait catalog")
+	}
+	p := new(P)
+	tokens := make([]WaitToken, count)
+	tickets := make([]WaitTicket, count)
+	handles := make([]WaitRegistrationHandle, count)
+	for index := range tokens {
+		ticket, handle, result := PrepareWaitRegistration(p, table, &tokens[index])
+		if result != WaitRegistrationPrepared || !claimWait(&tokens[index], ticket) {
+			t.Fatalf("prepare paged wait %d = (%d, %+v, %d)", index, ticket, handle, result)
+		}
+		tickets[index], handles[index] = ticket, handle
+	}
+	if handles[WaitRegistrationPageCapacity].Slot != WaitRegistrationPageCapacity+1 || handles[count-1].Slot != count {
+		t.Fatalf("paged wait handles did not remain linear: page2=%+v last=%+v", handles[WaitRegistrationPageCapacity], handles[count-1])
+	}
+	var otherPages [16]WaitRegistrationPage
+	if ConfigureWaitRegistrationPages(table, otherPages[:]) || ConfigureWaitRegistrationPages(table, pages[:14]) {
+		t.Fatal("live paged wait catalog allowed replacement or shrink")
+	}
+	for index := range handles {
+		if result := table.Post(handles[index]); result != WaitRegistrationPosted {
+			t.Fatalf("post paged wait %d = %d", index, result)
+		}
+	}
+	if drained, ok := table.Drain(); !ok || drained != count || table.Pending() {
+		t.Fatalf("drain paged waits = (%d, %t), pending=%t", drained, ok, table.Pending())
+	}
+	for index := range tokens {
+		if outcome, ok := consumeWait(&tokens[index], tickets[index]); !ok || outcome != WaitOutcomeCompleted ||
+			!table.RetireCompletedWait(handles[index], &tokens[index], tickets[index]) {
+			t.Fatalf("retire paged wait %d", index)
+		}
+	}
+	if !table.CanRelease() || !ConfigureWaitRegistrationPages(table, pages[:]) {
+		t.Fatal("paged wait catalog did not return to reusable configured state")
+	}
+}
+
 func TestWaitRegistrationCancellationBeforeParkResumesOnce(t *testing.T) {
 	table := new(WaitRegistrationTable)
 	p := new(P)

@@ -20,8 +20,8 @@ import (
 	"unsafe"
 
 	"github.com/goplus/llgo/runtime/abi"
+	"github.com/goplus/llgo/runtime/internal/atomiccache"
 	c "github.com/goplus/llgo/runtime/internal/clite"
-	"github.com/goplus/llgo/runtime/internal/clite/pthread/sync"
 )
 
 type eface struct {
@@ -72,41 +72,18 @@ const (
 	itabHdrSize = unsafe.Sizeof(itab{}) - pointerSize
 )
 
-var itabTable struct {
-	mutex
-	entries []*Itab
-}
-
-func init() {
-	(*sync.Mutex)(&itabTable.mutex).Init(nil)
-}
-
-type mutex sync.Mutex
-
-func (m *mutex) Lock() {
-	(*sync.Mutex)(m).Lock()
-}
-
-func (m *mutex) Unlock() {
-	(*sync.Mutex)(m).Unlock()
-}
+var itabTable atomiccache.PairTable
 
 func findItab(inter *InterfaceType, typ *Type) *Itab {
-	itabTable.Lock()
-	for _, i := range itabTable.entries {
-		if i.inter == inter && i._type == typ {
-			itabTable.Unlock()
-			return i
-		}
-	}
-	itabTable.Unlock()
-	return nil
+	return (*Itab)(itabTable.Find(unsafe.Pointer(inter), unsafe.Pointer(typ)))
 }
 
-func addItab(i *Itab) {
-	itabTable.Lock()
-	itabTable.entries = append(itabTable.entries, i)
-	itabTable.Unlock()
+// addItab interns i and returns the canonical winner. Both the Itab and its
+// list node are fully constructed before the atomic publication. A failed CAS
+// means the complete new snapshot must be searched again: a racing publisher
+// may have installed the same (interface,type) pair.
+func addItab(i *Itab) *Itab {
+	return (*Itab)(itabTable.Intern(unsafe.Pointer(i.inter), unsafe.Pointer(i._type), unsafe.Pointer(i)))
 }
 
 // NewItab returns a new itab.
@@ -148,7 +125,7 @@ func NewItab(inter *InterfaceType, typ *Type) *Itab {
 		}
 	}
 	if ret.fun[0] != 0 {
-		addItab(ret)
+		return addItab(ret)
 	}
 	return ret
 }

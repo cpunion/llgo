@@ -114,6 +114,13 @@ type Frame struct {
 	owner  *G
 	handle unsafe.Pointer
 	header *HeaderV1
+	// completion is owned by this frame while it is suspended awaiting one
+	// direct child.  The child publishes a terminal outcome before it becomes
+	// destroy-pending; the parent consumes it only after the child allocation
+	// has been released and the parent is active again.  Keeping the record in
+	// scheduler metadata makes panic payload lifetime independent of the child
+	// LLVM frame and gives every managed call shape one reconciliation point.
+	completion CompletionRecord
 	// parkWait points to caller-owned storage only from PrepareParkSet until
 	// the matching V2 park is promoted. The record itself is spilled into the
 	// direct-parking LLVM coroutine frame; ordinary frames pay only this
@@ -264,7 +271,10 @@ func PublishFrame(g *G, handle unsafe.Pointer, header *HeaderV1, storage unsafe.
 // PrepareAwait records a parent-to-child handoff. It never resumes either
 // coroutine; only the runtime driver may perform handle operations requested
 // by the scheduler action protocol.
-func PrepareAwait(g *G, parentHandle, childHandle unsafe.Pointer) bool {
+func prepareAwait(
+	g *G, parentHandle, childHandle unsafe.Pointer, completion bool,
+	recoverType, recoverData unsafe.Pointer,
+) bool {
 	if !ValidG(g) || !resumeGateTaken(g) || g.pending.kind != pendingNone || g.spawnChild != nil ||
 		!releasableParkState(&g.park) {
 		return false
@@ -275,7 +285,8 @@ func PrepareAwait(g *G, parentHandle, childHandle unsafe.Pointer) bool {
 		parent.header == nil || child.header == nil || parent.state != FrameActive ||
 		child.state != FrameInitialSuspended || parent.header.SuspendReason != uint16(SuspendCall) ||
 		parent.header.Lifecycle != uint16(FrameSuspended) || child.header.Parent != parentHandle ||
-		child.parent != nil {
+		child.parent != nil || completion && !armAwaitCompletion(parent, child, recoverType, recoverData) ||
+		!completion && (recoverType != nil || recoverData != nil) {
 		return false
 	}
 	child.parent = parent
@@ -283,21 +294,75 @@ func PrepareAwait(g *G, parentHandle, childHandle unsafe.Pointer) bool {
 	return true
 }
 
-// PrepareComplete records a final-suspended frame. Destruction remains owned
-// by the scheduler and occurs only after the resume operation returns.
-func PrepareComplete(g *G, handle unsafe.Pointer, header *HeaderV1) bool {
+// PrepareAwait preserves the original V1 scheduler transaction. It is kept for
+// adapters and tests that intentionally have no child-outcome transport.
+func PrepareAwait(g *G, parentHandle, childHandle unsafe.Pointer) bool {
+	return prepareAwait(g, parentHandle, childHandle, false, nil, nil)
+}
+
+// PrepareAwaitCompletion is the V2 managed-call transaction. In addition to
+// linking the child it arms the parent-owned CompletionRecord that must be
+// published before the child is destroyed and consumed after parent resume.
+func PrepareAwaitCompletion(g *G, parentHandle, childHandle unsafe.Pointer) bool {
+	return prepareAwait(g, parentHandle, childHandle, true, nil, nil)
+}
+
+// PrepareAwaitCompletionRecover is the explicit-status defer transaction. A
+// normalized non-nil panic type arms recover for this exact direct child while
+// reusing the same CompletionRecord that will later publish Return, Recovered,
+// or a replacement Panic outcome.
+func PrepareAwaitCompletionRecover(
+	g *G, parentHandle, childHandle, typeWord, dataWord unsafe.Pointer,
+) bool {
+	if typeWord == nil {
+		return false
+	}
+	return prepareAwait(g, parentHandle, childHandle, true, typeWord, dataWord)
+}
+
+// PrepareCompleteStatus records a final-suspended frame and its exact cleanup
+// base. Destruction remains owned by the scheduler and occurs only after the
+// resume operation returns. Abort/Shutdown are admitted only after the task
+// cancellation token has entered cleanup, so a malformed compiler cannot
+// manufacture a terminal stop outcome.
+func PrepareCompleteStatus(g *G, handle unsafe.Pointer, header *HeaderV1, status CompletionStatus) bool {
 	if !ValidG(g) || !resumeGateTaken(g) || handle == nil || header == nil || g.pending.kind != pendingNone || g.spawnChild != nil ||
 		!releasableParkState(&g.park) || g.park.taskCancelPhase == taskCancelRequested {
+		return false
+	}
+	switch status {
+	case CompletionReturn:
+	case CompletionAbort:
+		if g.park.taskCancelPhase != taskCancelCleanup || g.park.taskCancelKind != TaskCancelAbort {
+			return false
+		}
+	case CompletionShutdown:
+		if g.park.taskCancelPhase != taskCancelCleanup || g.park.taskCancelKind != TaskCancelShutdown {
+			return false
+		}
+	default:
 		return false
 	}
 	frame := findFrame(g, handle)
 	if frame == nil || frame != g.active || frame.header != header || frame.state != FrameActive ||
 		header.SuspendReason != uint16(SuspendFrameComplete) ||
-		header.Lifecycle != uint16(FrameFinalSuspended) {
+		header.Lifecycle != uint16(FrameFinalSuspended) ||
+		(frame.parent != nil && awaitCompletionArmedForChild(frame) &&
+			!validAwaitCompletionPublisher(g, frame, status)) {
 		return false
+	}
+	if frame.parent != nil && awaitCompletionArmedForChild(frame) {
+		if !publishAwaitCompletion(frame.parent, status, nil, nil) {
+			return false
+		}
 	}
 	g.pending = pendingTransition{kind: pendingComplete, from: frame}
 	return true
+}
+
+// PrepareComplete preserves the normal-return V1 adapter contract.
+func PrepareComplete(g *G, handle unsafe.Pointer, header *HeaderV1) bool {
+	return PrepareCompleteStatus(g, handle, header, CompletionReturn)
 }
 
 // PrepareYield records that the active frame reached a cooperative or
@@ -402,7 +467,7 @@ func unlinkFrame(g *G, target *Frame) bool {
 // combined allocation. The adapter must clear/free the returned range and
 // must not dereference the Frame afterwards.
 func ReleaseFrame(g *G, storage unsafe.Pointer, size, align uintptr, descriptor unsafe.Pointer) (unsafe.Pointer, uintptr, bool) {
-	if !ValidG(g) || storage == nil {
+	if !ValidG(g) || !gPreemptEnabledAtDepthZero(g) || storage == nil {
 		return nil, 0, false
 	}
 	frame := FrameFromStorage(storage)

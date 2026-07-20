@@ -60,8 +60,7 @@ func validCancelableReadyG(g *G) bool {
 		g.taskState != taskStorageOwned || g.taskStorage != unsafe.Pointer(g) || g.taskSize != TaskStorageSize() {
 		return false
 	}
-	gate := preemptLoad(preemptAddress(g))
-	if gate != preemptIdle && gate != preemptRequested {
+	if !gPreemptEnabledAtDepthZero(g) {
 		return false
 	}
 
@@ -371,7 +370,8 @@ func NextCommandCancel(p *P) (*G, Action, bool) {
 // are destroyed deepest-to-root without coro.done and without resume.
 func CancelDestroyed(p *P, g *G, action Action) (Action, bool) {
 	if !expectedAction(p, g, action, ActionCancelDestroy) || p.inResume ||
-		preemptLoad(&p.schedule) != scheduleStopping || g.state != GCanceling || g.destroyTarget != nil {
+		preemptLoad(&p.schedule) != scheduleStopping || g.state != GCanceling || g.destroyTarget != nil ||
+		!gPreemptEnabledAtDepthZero(g) {
 		return Action{}, false
 	}
 	wasRoot := g.destroyRoot
@@ -382,7 +382,8 @@ func CancelDestroyed(p *P, g *G, action Action) (Action, bool) {
 		g.destroyRoot = false
 		return prepareCancelFrame(p, g, g.active)
 	}
-	if !wasRoot || g.frames != nil || g.runAction != ActionInvalid || g.taskControlLeases != 0 {
+	if !wasRoot || g.frames != nil || g.runAction != ActionInvalid ||
+		g.transferState != runnableTransferGIdle || g.taskControlLeases != 0 {
 		return Action{}, false
 	}
 	if g.panicUnwind {
@@ -400,9 +401,11 @@ func CancelDestroyed(p *P, g *G, action Action) (Action, bool) {
 	} else if !emptyPanicRecord(&g.panicRecord) {
 		return Action{}, false
 	}
+	if !disableGPreempt(g) {
+		return Action{}, false
+	}
 	g.destroyRoot = false
 	g.root = nil
-	preemptStore(preemptAddress(g), preemptDisabled)
 	g.state = GDead
 	g.runP = nil
 	p.current = nil

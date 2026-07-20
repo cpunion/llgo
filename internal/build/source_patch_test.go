@@ -134,20 +134,43 @@ func TestNativeCoroTimeSleepUsesSourcePatch(t *testing.T) {
 	patchText := string(patch)
 	for _, want := range []string{
 		"func Sleep(d Duration)",
-		"C.__llgo_coro_timer_prepare_after_or_abort_v1",
-		"llgo.coroPark",
-		"C.__llgo_coro_timer_retire_completed_or_abort_v1",
+		"llgo.coroTimerSleep",
+		"func llgoCoroTimerSleep(delay int64)",
+		"//go:linkname llgoCoroTimerNewV1 runtime.llgoCoroTimerNewV1",
+		"func llgoCoroTimerNewV1(when, period int64, f func(any, uintptr, int64), arg any, cp unsafe.Pointer) unsafe.Pointer",
+		"//go:linkname llgoCoroTimerStopV1 runtime.llgoCoroTimerStopV1",
+		"func llgoCoroTimerStopV1(timer unsafe.Pointer) bool",
+		"//go:linkname llgoCoroTimerResetV1 runtime.llgoCoroTimerResetV1",
+		"func llgoCoroTimerResetV1(timer unsafe.Pointer, when, period int64) bool",
+		"func newTimer(when, period int64, f func(any, uintptr, int64), arg any, cp unsafe.Pointer) *Timer",
+		"return (*Timer)(llgoCoroTimerNewV1(when, period, f, arg, cp))",
+		"func stopTimer(timer *Timer) bool",
+		"return llgoCoroTimerStopV1(unsafe.Pointer(timer))",
+		"func resetTimer(timer *Timer, when, period int64) bool",
+		"return llgoCoroTimerResetV1(unsafe.Pointer(timer), when, period)",
+		"func AfterFunc(d Duration, f func()) *Timer",
+		"return newTimer(when(d), 0, nil, f, nil)",
 	} {
 		if !strings.Contains(patchText, want) {
-			t.Fatalf("native coroutine time.Sleep patch does not contain %q", want)
+			t.Fatalf("native coroutine time patch does not contain %q", want)
 		}
 	}
-	if count := strings.Count(patchText, "//llgo:coro noblock"); count != 2 {
-		t.Fatalf("native coroutine time.Sleep patch noblock certificates = %d, want 2", count)
+	if count := strings.Count(patchText, "llgoCoroTimerSleep(int64(d))"); count != 1 {
+		t.Fatalf("native coroutine time.Sleep patch intrinsic calls = %d, want 1", count)
 	}
-	for _, forbidden := range []string{"libuv", "bdwgc", "pthread", "make(chan", "go func"} {
+	for _, obsolete := range []string{
+		"__llgo_coro_timer_prepare_after_or_abort_v1",
+		"__llgo_coro_timer_retire_completed_or_abort_v1",
+		"llgo.coroPark",
+		"//llgo:coro noblock",
+	} {
+		if strings.Contains(patchText, obsolete) {
+			t.Fatalf("native coroutine time.Sleep patch retained obsolete transaction %q", obsolete)
+		}
+	}
+	for _, forbidden := range []string{"libuv", "bdwgc", "pthread", "make(chan", "go func", "goFunc"} {
 		if strings.Contains(patchText, forbidden) {
-			t.Fatalf("native coroutine time.Sleep patch unexpectedly contains %q", forbidden)
+			t.Fatalf("native coroutine time patch unexpectedly contains %q", forbidden)
 		}
 	}
 
@@ -160,9 +183,16 @@ func TestNativeCoroTimeSleepUsesSourcePatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse filtered time/sleep.go: %v", err)
 	}
+	replaced := map[string]bool{
+		"Sleep":      true,
+		"AfterFunc":  true,
+		"newTimer":   true,
+		"stopTimer":  true,
+		"resetTimer": true,
+	}
 	for _, decl := range parsed.Decls {
-		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "Sleep" {
-			t.Fatal("filtered GOROOT time/sleep.go retained the original Sleep declaration")
+		if fn, ok := decl.(*ast.FuncDecl); ok && replaced[fn.Name.Name] {
+			t.Fatalf("filtered GOROOT time/sleep.go retained the original %s declaration", fn.Name.Name)
 		}
 	}
 }
@@ -212,6 +242,9 @@ func TestInternalRuntimeSysRemainsAltPkg(t *testing.T) {
 	}
 	if !llruntime.HasAdditiveAltPkg("internal/runtime/sys") {
 		t.Fatal("internal/runtime/sys should remain an additive alt package")
+	}
+	if !llruntime.HasAltPkg("internal/syscall/unix") || !llruntime.HasAdditiveAltPkg("internal/syscall/unix") {
+		t.Fatal("internal/syscall/unix coroutine capability declarations should use an additive alt package")
 	}
 }
 

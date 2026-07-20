@@ -24,7 +24,9 @@ import (
 	"testing"
 
 	"github.com/goplus/llgo/internal/coro"
+	"github.com/goplus/llgo/internal/goembed"
 	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -49,7 +51,7 @@ func TestResolveCoroInterfaceDispatchPlanUniqueAsyncWriter(t *testing.T) {
 	fixture := buildCoroInterfaceDispatchFixture(t, coroUniqueAsyncWriterSource, coro.DynamicCHAClosed)
 	defer fixture.program.Dispose()
 
-	resolved, err := resolveCoroInterfaceDispatchPlan(fixture.plan, fixture.invoke)
+	resolved, err := resolveCoroInterfaceDispatchPlan(fixture.plan, nil, fixture.invoke)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,13 +76,219 @@ func TestResolveCoroInterfaceDispatchPlanUniqueAsyncWriter(t *testing.T) {
 		t.Fatalf("async Writer.Write candidate = %+v", candidate)
 	}
 
-	again, err := resolveCoroInterfaceDispatchPlan(fixture.plan, fixture.invoke)
+	again, err := resolveCoroInterfaceDispatchPlan(fixture.plan, nil, fixture.invoke)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(again.candidates) != 1 || again.candidates[0].id != candidate.id || again.candidates[0].function != candidate.function ||
 		!types.Identical(again.sourceCallSignature, resolved.sourceCallSignature) {
 		t.Fatalf("repeated resolution is not stable: first=%+v again=%+v", resolved, again)
+	}
+}
+
+func TestCoroManagedOpenAnonymousInterfaceUsesUniversalMethodDescriptor(t *testing.T) {
+	const source = `package foo
+var gate chan struct{}
+type plainMatcher struct{}
+type asyncMatcher struct{}
+type promotedBase struct{}
+type deadPromotedMatcher struct{ promotedBase }
+func (plainMatcher) As(any) bool { return true }
+func (*asyncMatcher) As(any) bool { <-gate; return true }
+func (promotedBase) As(any) bool { return true }
+func keep(flag bool) interface{ As(any) bool } {
+	if flag { return plainMatcher{} }
+	return &asyncMatcher{}
+}
+func Root(value interface{ As(any) bool }, target any, flag bool) bool {
+	if flag {
+		_, _ = target.(*plainMatcher)
+		_, _ = target.(*asyncMatcher)
+	}
+	return value.As(target)
+}
+`
+	ssaPkg, _, files := buildGoSSAPkg(t, source)
+	program := newLLSSAProg(t)
+	defer program.Dispose()
+	universe, err := PrepareEmissionUniverseWithOptions(
+		program, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}},
+		EmissionUniverseOptions{EnableCoroChannel: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := ssaPkg.Func("Root")
+	invoke := coroInterfaceDispatchFindInvoke(t, root)
+	methodTargets := make(map[*ssa.Function]struct{})
+	for _, function := range universe.Functions() {
+		if function != nil && function.Name() == "As" && function.Signature != nil && function.Signature.Recv() != nil {
+			methodTargets[function] = struct{}{}
+		}
+	}
+	if len(methodTargets) < 2 {
+		t.Fatalf("managed interface fixture has %d As method entries, want at least two", len(methodTargets))
+	}
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelABIV0
+	functionIDs.ArchiveReady = true
+	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+		EmissionUniverse:     ssaUniverse,
+		FunctionIDs:          functionIDs,
+		DynamicResolution:    coro.DynamicCHAOpen,
+		MaxPlainInstructions: -1,
+		ClassifyUnknownCall: func(_ *ssa.Function, call ssa.CallInstruction) (coro.UnknownTarget, error) {
+			if call == invoke {
+				return coro.UnknownManagedInterfaceDispatch, nil
+			}
+			return coro.UnknownManaged, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	callPlan, ok := plan.CallPlan(invoke)
+	if !ok || callPlan.Rep != coro.Dispatch || !callPlan.Open ||
+		callPlan.Unresolved != coro.UnknownManagedInterfaceDispatch || len(callPlan.Targets) == 0 {
+		t.Fatalf("anonymous As invoke CallPlan = %+v, present=%t", callPlan, ok)
+	}
+	var deadPromoted *ssa.Function
+	for target := range methodTargets {
+		if strings.Contains(target.Synthetic, "wrapper") && strings.Contains(target.String(), "deadPromotedMatcher") {
+			deadPromoted = target
+			break
+		}
+	}
+	if deadPromoted == nil {
+		t.Fatal("managed interface fixture has no dead promoted method wrapper")
+	}
+	deadPlan, ok := plan.FunctionPlan(deadPromoted)
+	if !ok || !coroInterfaceTargetContains(callPlan.Targets, deadPlan.ID) {
+		t.Fatalf("dead promoted target plan = %+v, present=%t; open targets=%v", deadPlan, ok, callPlan.Targets)
+	}
+	materializedByTypeData := false
+	for _, owner := range plan.Functions() {
+		if owner.Function == nil || owner.Plan.Emission == coro.EmitNone {
+			continue
+		}
+		references, err := universe.CoroDemandReferences(owner.Function)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, target := range references {
+			materializedByTypeData = materializedByTypeData || target == deadPromoted
+		}
+	}
+	if materializedByTypeData {
+		t.Fatal("dead promoted wrapper unexpectedly has an ABI type-data owner")
+	}
+	managedMethods, err := analyzeCoroManagedInterfaceDispatchPlan(plan, universe, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !managedMethods.acceptsTarget(deadPromoted, deadPlan) {
+		t.Fatalf("managed method plan did not freeze exact dead promoted target %q", deadPlan.ID)
+	}
+	closedMethods, err := analyzeCoroClosedInterfacePlainPlan(plan, universe, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closedMethods.acceptsTarget(deadPromoted, deadPlan) {
+		t.Fatal("dead promoted target acquired an unrelated closed/raw method-token capability")
+	}
+	if err := validateCoroDynamicDispatchTarget(deadPromoted, deadPlan); err == nil ||
+		!strings.Contains(err.Error(), "methods require receiver-aware dispatch lowering") {
+		t.Fatalf("receiver-free function-value validator accepted managed method target: %v", err)
+	}
+	rootPlan, ok := plan.FunctionPlan(root)
+	if !ok || rootPlan.Emission != coro.EmitCoroutine || rootPlan.Effect.IsOpaque() ||
+		!rootPlan.Effect.Contains(coro.AwaitStructured) {
+		t.Fatalf("Root plan = %+v, present=%t", rootPlan, ok)
+	}
+
+	compilation := coroClosedInterfacePlainCompilation(plan, universe)
+	compilation.EnableCoroExplicitStatusPanicABI = true
+	compilation.PanicABI = coro.PanicExplicitStatusABIV0
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		program, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatalf("compile managed anonymous interface invoke: %v", err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify managed anonymous interface invoke: %v\n%s", err, module.String())
+	}
+	ir := module.String()
+	if !strings.Contains(ir, coroPlainDispatchDescriptorPrefix+"method.") ||
+		!strings.Contains(ir, coroPlainDispatchThunkPrefix+"method.") ||
+		!strings.Contains(ir, coroCoroDispatchThunkPrefix+"method.") {
+		t.Fatalf("plain/coroutine method capabilities were not materialized:\n%s", ir)
+	}
+	rootIR := requireCoroPhysicalFunction(t, module, "foo.Root").String()
+	if !strings.Contains(rootIR, "coro.dispatch.version.invalid") ||
+		!strings.Contains(rootIR, "coro.dispatch.flags.unknown") ||
+		!strings.Contains(rootIR, "call void @"+coroAwaitPrepareHookV1) {
+		t.Fatalf("open interface invoke did not enter validated descriptor child-await lowering:\n%s", rootIR)
+	}
+	if strings.Contains(rootIR, "call i1 %") && !strings.Contains(rootIR, "coro.dispatch") {
+		t.Fatalf("open interface invoke fell back to an unvalidated raw itab call:\n%s", rootIR)
+	}
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify managed anonymous interface invoke before split: %v\n%s", err, ir)
+	}
+}
+
+func TestValidateCoroManagedInterfaceDescriptorTargetSelectsCoroutinePrimaryWithRawAlternate(t *testing.T) {
+	fixture := buildCoroInterfaceDispatchFixture(t, coroUniqueAsyncWriterSource, coro.DynamicCHAClosed)
+	defer fixture.program.Dispose()
+	resolved, err := resolveCoroInterfaceDispatchPlan(fixture.plan, nil, fixture.invoke)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := resolved.candidates[0]
+	candidate.plan.Demand = coro.BothDemand
+	candidate.plan.RawPlainEntry = true
+	if err := validateCoroManagedInterfaceDescriptorTarget(
+		candidate.function, candidate.plan, nil, resolved.sourceCallSignature,
+	); err == nil || !strings.Contains(err.Error(), "prepared emission universe") {
+		// The nil universe must remain fail-closed after accepting the managed
+		// coroutine primary shape; in particular it must not reject BothDemand as
+		// a request to publish the raw alternate in the descriptor.
+		t.Fatalf("BothDemand/raw-alternate descriptor validation stopped at %v", err)
+	}
+}
+
+func TestValidateCoroInterfaceDispatchCandidateAcceptsManagedPrimaryWithRawAlternate(t *testing.T) {
+	fixture := buildCoroInterfaceDispatchFixture(t, coroUniqueAsyncWriterSource, coro.DynamicCHAClosed)
+	defer fixture.program.Dispose()
+
+	resolved, err := resolveCoroInterfaceDispatchPlan(fixture.plan, nil, fixture.invoke)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolved.candidates) != 1 {
+		t.Fatalf("candidates = %d, want one", len(resolved.candidates))
+	}
+	candidate := resolved.candidates[0]
+	candidate.plan.Demand = coro.BothDemand
+	candidate.plan.RawPlainEntry = true
+	receiver, targetReceiver, methodEntry, err := validateCoroInterfaceDispatchCandidate(
+		fixture.invoke.Common(), resolved.iface, resolved.sourceCallSignature, nil,
+		fixture.invoke.Parent(), candidate.id, candidate.function, candidate.plan,
+	)
+	if err != nil {
+		t.Fatalf("BothDemand managed interface candidate rejected: %v", err)
+	}
+	if !types.Identical(receiver, candidate.receiver) || !types.Identical(targetReceiver, candidate.targetReceiver) || methodEntry != candidate.methodEntry {
+		t.Fatalf("validated candidate changed: receiver=%s target=%s entry=%v", receiver, targetReceiver, methodEntry)
 	}
 }
 
@@ -101,7 +309,7 @@ func Root(writer Writer) (int, error) { return writer.Write([]byte("payload")) }
 	fixture := buildCoroInterfaceDispatchFixture(t, source, coro.DynamicCHAClosed)
 	defer fixture.program.Dispose()
 
-	resolved, err := resolveCoroInterfaceDispatchPlan(fixture.plan, fixture.invoke)
+	resolved, err := resolveCoroInterfaceDispatchPlan(fixture.plan, nil, fixture.invoke)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +357,7 @@ func Root(writer Writer) (int, error) { return writer.Write([]byte("payload")) }
 	fixture := buildCoroPointerPromotedInterfaceDispatchFixture(t, source)
 	defer fixture.program.Dispose()
 
-	resolved, err := resolveCoroInterfaceDispatchPlan(fixture.plan, fixture.invoke)
+	resolved, err := resolveCoroInterfaceDispatchPlan(fixture.plan, nil, fixture.invoke)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,14 +399,14 @@ func TestResolveCoroInterfaceDispatchPlanFailsClosed(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := resolveCoroInterfaceDispatchPlan(test.plan, test.call)
+			_, err := resolveCoroInterfaceDispatchPlan(test.plan, nil, test.call)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("error = %v, want substring %q", err, test.want)
 			}
 		})
 	}
 
-	resolved, err := resolveCoroInterfaceDispatchPlan(closed.plan, closed.invoke)
+	resolved, err := resolveCoroInterfaceDispatchPlan(closed.plan, nil, closed.invoke)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +415,7 @@ func TestResolveCoroInterfaceDispatchPlanFailsClosed(t *testing.T) {
 	recv := original.Recv()
 	badParam := types.NewVar(0, target.Pkg.Pkg, "buffer", types.Typ[types.Int])
 	target.Signature = types.NewSignatureType(recv, nil, nil, types.NewTuple(badParam), original.Results(), false)
-	_, err = resolveCoroInterfaceDispatchPlan(closed.plan, closed.invoke)
+	_, err = resolveCoroInterfaceDispatchPlan(closed.plan, nil, closed.invoke)
 	target.Signature = original
 	if err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("signature conflict error = %v", err)
@@ -215,7 +423,7 @@ func TestResolveCoroInterfaceDispatchPlanFailsClosed(t *testing.T) {
 
 	originalFreeVars := target.FreeVars
 	target.FreeVars = []*ssa.FreeVar{nil}
-	_, err = resolveCoroInterfaceDispatchPlan(closed.plan, closed.invoke)
+	_, err = resolveCoroInterfaceDispatchPlan(closed.plan, nil, closed.invoke)
 	target.FreeVars = originalFreeVars
 	if err == nil || !strings.Contains(err.Error(), "captured or nested methods") {
 		t.Fatalf("free-variable error = %v", err)
@@ -233,7 +441,7 @@ func TestResolveCoroInterfaceDispatchPlanFailsClosed(t *testing.T) {
 	}
 	genericRecv := types.NewVar(0, target.Pkg.Pkg, "writer", types.NewPointer(instantiated))
 	target.Signature = types.NewSignatureType(genericRecv, []*types.TypeParam{receiverTypeParam}, nil, original.Params(), original.Results(), false)
-	_, err = resolveCoroInterfaceDispatchPlan(closed.plan, closed.invoke)
+	_, err = resolveCoroInterfaceDispatchPlan(closed.plan, nil, closed.invoke)
 	target.Signature = original
 	if err == nil || !strings.Contains(err.Error(), "generic") {
 		t.Fatalf("generic receiver error = %v", err)
@@ -241,9 +449,9 @@ func TestResolveCoroInterfaceDispatchPlanFailsClosed(t *testing.T) {
 
 	badRecv := types.NewVar(0, target.Pkg.Pkg, "writer", types.Typ[types.Int])
 	target.Signature = types.NewSignatureType(badRecv, nil, nil, original.Params(), original.Results(), false)
-	_, err = resolveCoroInterfaceDispatchPlan(closed.plan, closed.invoke)
+	_, err = resolveCoroInterfaceDispatchPlan(closed.plan, nil, closed.invoke)
 	target.Signature = original
-	if err == nil || !strings.Contains(err.Error(), "does not implement invoke interface") {
+	if err == nil || !strings.Contains(err.Error(), "implement invoke interface") {
 		t.Fatalf("receiver conflict error = %v", err)
 	}
 }
@@ -281,7 +489,7 @@ func Root(writer Writer) int { return writer.Write(nil) }
 		t.Run(test.name, func(t *testing.T) {
 			fixture := buildCoroInterfaceDispatchFixture(t, test.source, coro.DynamicCHAClosed)
 			defer fixture.program.Dispose()
-			_, err := resolveCoroInterfaceDispatchPlan(fixture.plan, fixture.invoke)
+			_, err := resolveCoroInterfaceDispatchPlan(fixture.plan, nil, fixture.invoke)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("error = %v, want substring %q", err, test.want)
 			}

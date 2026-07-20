@@ -465,11 +465,105 @@ func F() int { return 2 }
 	if universe.finalIdentity(alt.ssa.Func("init")) == universe.finalIdentity(original.ssa.Func("init")) {
 		t.Fatal("patch/original init final identities collide")
 	}
+	const publicInit = "example.com/emission/p.init"
+	publicInitName, err := universe.physicalName(original.ssa, alt.ssa.Func("init"), publicInit)
+	if err != nil || publicInitName != publicInit {
+		t.Fatalf("patch public init physical name = %q, %v; want %s", publicInitName, err, publicInit)
+	}
+	originalInitName, err := universe.physicalName(original.ssa, original.ssa.Func("init"), publicInit)
+	if err != nil || originalInitName != publicInit {
+		t.Fatalf("ordinary original-init physical name = %q, %v; want public %s", originalInitName, err, publicInit)
+	}
+	hiddenInitName, err := universe.patchOriginalInitPhysicalName(original.ssa.Func("init"))
+	if err != nil || hiddenInitName != publicInit+"$hasPatch" {
+		t.Fatalf("private patch-original physical name = %q, %v; want %s$hasPatch", hiddenInitName, err, publicInit)
+	}
+	originalState, frozen, err := universe.frozenFunctionState(original.ssa, original.ssa.Func("init"))
+	if err != nil || !frozen || originalState.state != pkgHasPatch || originalState.fromPatch {
+		t.Fatalf("patch original init frozen state = %+v, %v, %v; want pkgHasPatch original", originalState, frozen, err)
+	}
+	entries, err := universe.CoroPatchInitEntries()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0] != alt.ssa.Func("init") {
+		t.Fatalf("patch init entries = %v; want exact alternate init", entries)
+	}
+	lowered, err := universe.CoroLoweredCalls(alt.ssa.Func("init"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundOriginalInit := false
+	for _, call := range lowered {
+		if call.LogicalName == coroPatchOriginalInitCall {
+			foundOriginalInit = call.Target == original.ssa.Func("init")
+		}
+	}
+	if !foundOriginalInit {
+		t.Fatalf("patch init lowered calls = %v; want exact original-init edge", lowered)
+	}
 
 	copyOfFunctions := universe.Functions()
 	copyOfFunctions[0] = nil
 	if universe.Functions()[0] == nil {
 		t.Fatal("Functions exposed mutable storage")
+	}
+}
+
+func TestEmissionUniversePatchInitRedirectsImportedOccurrenceToPublicInit(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	original := testProg.addPackage(t, "example.com/emission/redirected", `package redirected
+var Original = 1
+`)
+	alt := testProg.addPackage(t, abi.PatchPathPrefix+"example.com/emission/redirected", `package redirected
+var Patched = 2
+`)
+	importer := testProg.addPackage(t, "example.com/emission/importer", `package importer
+import _ "example.com/emission/redirected"
+var Ready = true
+`)
+	testProg.ssa.Build()
+
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, Patches{
+		"example.com/emission/redirected": {
+			Alt:   alt.ssa,
+			Types: typepatch.Clone(alt.types),
+		},
+	}, []EmissionPackage{
+		{SSA: original.ssa, Files: []*ast.File{original.file, alt.file}},
+		{SSA: importer.ssa, Files: []*ast.File{importer.file}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	owner := importer.ssa.Func("init")
+	originalInit := original.ssa.Func("init")
+	publicInit := alt.ssa.Func("init")
+	var occurrence *ssa.Call
+	for _, block := range owner.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(*ssa.Call)
+			if ok && call.Common().StaticCallee() == originalInit {
+				occurrence = call
+			}
+		}
+	}
+	if occurrence == nil {
+		t.Fatal("importer SSA has no exact call to the original package initializer")
+	}
+	logicalName, target, redirected, err := universe.CoroPatchInitRedirect(occurrence)
+	if err != nil || !redirected || logicalName == "" || target != publicInit {
+		t.Fatalf("patch init redirect = %q, %v, %v, %v; want exact public init", logicalName, target, redirected, err)
+	}
+	record, frozen, err := universe.ResolveCoroLoweredCallRecord(owner, logicalName)
+	if err != nil || !frozen || record.Target != publicInit || record.RawPlain || record.UnwindOnly || record.ExplicitStatusElided {
+		t.Fatalf("patch init lowered occurrence = %+v, %v, %v; want ordinary exact public-init call", record, frozen, err)
+	}
+	if _, _, redirected, err := universe.CoroPatchInitRedirect(nil); err == nil || redirected {
+		t.Fatalf("nil patch init occurrence = redirected %v, error %v; want fail closed", redirected, err)
 	}
 }
 
@@ -1080,6 +1174,9 @@ var Value any = struct{ sharedwrapperbase.Base }{}
 	}
 	if shared == nil {
 		t.Fatal("shared structural promoted wrapper is absent")
+	}
+	if !universe.generatedWrapperDefinitionNeedsLinkOnce(shared) {
+		t.Fatal("frozen Pkg-nil wrapper is not protected against cross-module materialization")
 	}
 	oneOwner, twoOwner := universe.packages[one.ssa], universe.packages[two.ssa]
 	if _, ok := universe.useOwners[shared][oneOwner]; !ok {

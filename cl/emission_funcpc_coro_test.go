@@ -21,6 +21,7 @@ package cl
 
 import (
 	"go/ast"
+	"go/types"
 	"strings"
 	"testing"
 
@@ -49,8 +50,11 @@ func Use() uintptr { return FuncPCABI0(target) }
 	if err != nil || !intrinsic || semantics != CoroIntrinsicCallInlineNoSuspend {
 		t.Fatalf("funcPCABI0 semantics = %v, %v, %v; want inline-no-suspend, true, nil", semantics, intrinsic, err)
 	}
-	if raw, err := universe.CoroRawFunctionAddressCallArgument(call, 0); err != nil || !raw {
-		t.Fatalf("funcPCABI0 raw operand = %v, %v; want true, nil", raw, err)
+	if raw, err := universe.CoroRawFunctionAddressCallArgument(call, 0); err != nil || raw {
+		t.Fatalf("funcPCABI0 raw invocation operand = %v, %v; want false, nil", raw, err)
+	}
+	if observed, err := universe.CoroStaticCodeAddressCallArgument(call, 0); err != nil || !observed {
+		t.Fatalf("funcPCABI0 code-address operand = %v, %v; want true, nil", observed, err)
 	}
 }
 
@@ -110,8 +114,106 @@ func Access() uintptr { return FuncPCABI0(libc_access_trampoline) }
 	if raw, err := universe.CoroRawFunctionAddressCallArgument(call, 0); err != nil || raw {
 		t.Fatalf("C trampoline managed raw operand = %v, %v; want false, nil", raw, err)
 	}
+	if observed, err := universe.CoroStaticCodeAddressCallArgument(call, 0); err != nil || !observed {
+		t.Fatalf("C trampoline static code-address operand = %v, %v; want true, nil", observed, err)
+	}
 	if universe.Contains(target) {
 		t.Fatal("compiler-generated C trampoline unexpectedly entered the managed emission universe")
+	}
+	audit, err := newCoroPhysicalPureSSAAudit(universe, nil, call.Parent(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handled, reason := audit.validate(boxed); !handled || reason != "" {
+		t.Fatalf("exact C trampoline MakeInterface physical audit = handled %t, reason %q", handled, reason)
+	}
+}
+
+func TestCoroPureFunctionAddressMakeInterfaceElisionRemainsExact(t *testing.T) {
+	tests := []struct {
+		name       string
+		source     string
+		wantReject bool
+	}{
+		{
+			name: "exact funcAddr operand",
+			source: `package exact
+import "unsafe"
+//llgo:link FuncAddr llgo.funcAddr
+func FuncAddr(fn any) unsafe.Pointer
+func target() {}
+func Use() unsafe.Pointer { return FuncAddr(target) }
+`,
+		},
+		{
+			name: "escaped function box",
+			source: `package escaped
+func target() {}
+func Use() any { return target }
+`,
+			wantReject: true,
+		},
+		{
+			name: "function box with intrinsic and escaping consumers",
+			source: `package multi
+//llgo:link FuncPCABI0 llgo.funcPCABI0
+func FuncPCABI0(fn any) uintptr
+func target() {}
+func Use() (uintptr, any) {
+	value := any(target)
+	return FuncPCABI0(value), value
+}
+`,
+			wantReject: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			testProg := newEmissionTestProgram()
+			// The funcAddr signature uses unsafe.Pointer. emissionTestProgram's
+			// type importer knows unsafe, but its SSA program intentionally starts
+			// empty, so register the import package before Build.
+			testProg.ssa.CreatePackage(types.Unsafe, nil, nil, true)
+			pkg := testProg.addPackage(t, "example.com/emission/"+strings.ReplaceAll(test.name, " ", "_"), test.source)
+			testProg.ssa.Build()
+			prog := newLLSSAProg(t)
+			defer prog.Dispose()
+			universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			use := pkg.ssa.Func("Use")
+			var boxed *ssa.MakeInterface
+			for _, block := range use.Blocks {
+				for _, instruction := range block.Instrs {
+					if candidate, ok := instruction.(*ssa.MakeInterface); ok {
+						if boxed != nil {
+							t.Fatal("fixture has more than one MakeInterface")
+						}
+						boxed = candidate
+					}
+				}
+			}
+			if boxed == nil {
+				t.Fatal("fixture has no MakeInterface")
+			}
+			audit, err := newCoroPhysicalPureSSAAudit(universe, nil, use, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			handled, reason := audit.validate(boxed)
+			if !handled {
+				t.Fatal("MakeInterface was not handled by pure SSA audit")
+			}
+			if test.wantReject {
+				if !strings.Contains(reason, "function-valued interface payload") &&
+					!strings.Contains(reason, "boxing a function value requires canonical dynamic-dispatch descriptor validation") {
+					t.Fatalf("escaping/multi-use function box rejection = %q", reason)
+				}
+			} else if reason != "" {
+				t.Fatalf("exact function-address operand rejected: %s", reason)
+			}
+		})
 	}
 }
 
@@ -156,6 +258,9 @@ func Use(fn any) uintptr { return FuncPCABI0(fn) }
 	}
 	if raw, err := universe.CoroRawFunctionAddressCallArgument(call, 0); err != nil || raw {
 		t.Fatalf("dynamic funcPCABI0 raw operand = %v, %v; want false, nil", raw, err)
+	}
+	if observed, err := universe.CoroStaticCodeAddressCallArgument(call, 0); err != nil || observed {
+		t.Fatalf("dynamic funcPCABI0 code-address operand = %v, %v; want false, nil", observed, err)
 	}
 }
 
@@ -243,8 +348,47 @@ func FuncPCABI0(fn any) uintptr
 	if err != nil || !intrinsic || semantics != CoroIntrinsicCallInlineNoSuspend {
 		t.Fatalf("patched FuncPCABI0 callsite semantics = %v, %v, %v; want inline-no-suspend, true, nil", semantics, intrinsic, err)
 	}
-	if raw, err := universe.CoroRawFunctionAddressCallArgument(call, 0); err != nil || !raw {
-		t.Fatalf("patched FuncPCABI0 raw operand = %v, %v; want true, nil", raw, err)
+	if raw, err := universe.CoroRawFunctionAddressCallArgument(call, 0); err != nil || raw {
+		t.Fatalf("patched FuncPCABI0 raw invocation operand = %v, %v; want false, nil", raw, err)
+	}
+	if observed, err := universe.CoroStaticCodeAddressCallArgument(call, 0); err != nil || !observed {
+		t.Fatalf("patched FuncPCABI0 code-address operand = %v, %v; want true, nil", observed, err)
+	}
+}
+
+func TestEmissionUniverseAliasesPatchedInternalABIFuncPCABIInternal(t *testing.T) {
+	universe, original, alternate, dispose, err := preparePatchedInternalABIFuncPCABI0Test(t, `package abi
+func FuncPCABI0(fn any) uintptr
+func FuncPCABIInternal(fn any) uintptr
+func target(value uint32) uint32 { return value }
+func Use() uintptr { return FuncPCABIInternal(target) }
+`, `package abi
+func FuncPCABI0(fn any) uintptr
+func FuncPCABIInternal(fn any) uintptr
+`, map[string]string{
+		coroFuncPCABI0LocalName:        "llgo.funcPCABI0",
+		coroFuncPCABIInternalLocalName: "llgo.funcPCABIInternal",
+	})
+	defer dispose()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	declaration := original.ssa.Func(coroFuncPCABIInternalLocalName)
+	intrinsicFn := alternate.ssa.Func(coroFuncPCABIInternalLocalName)
+	if resolved, ok := universe.Resolve(declaration); !ok || resolved != intrinsicFn {
+		t.Fatalf("Resolve(original internal/abi.FuncPCABIInternal) = %v, %v; want %v", resolved, ok, intrinsicFn)
+	}
+	semantics, intrinsic, err := universe.CoroIntrinsicSemantics(declaration)
+	if err != nil || !intrinsic || semantics != CoroIntrinsicCallInlineNoSuspend {
+		t.Fatalf("FuncPCABIInternal semantics = %v, %v, %v; want inline-no-suspend, true, nil", semantics, intrinsic, err)
+	}
+	call := allocaCStrTestCalls(original.ssa.Func("Use"))[0]
+	if raw, err := universe.CoroRawFunctionAddressCallArgument(call, 0); err != nil || raw {
+		t.Fatalf("FuncPCABIInternal raw invocation operand = %v, %v; want false, nil", raw, err)
+	}
+	if observed, err := universe.CoroStaticCodeAddressCallArgument(call, 0); err != nil || !observed {
+		t.Fatalf("FuncPCABIInternal code-address operand = %v, %v; want true, nil", observed, err)
 	}
 }
 

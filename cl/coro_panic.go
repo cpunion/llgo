@@ -25,18 +25,33 @@ import (
 
 // tryCompileCoroExplicitStatusPanic owns the terminal source instruction when
 // the compilation-wide ExplicitStatus identity is active. Preflight has
-// already proved that X is one pure, concrete empty-interface construction;
-// reaching this path with any other shape is a compiler-plan violation, never
-// permission to fall back to the legacy runtime.Panic call.
+// already proved that X is one empty-interface value whose type/data words
+// remain valid after this coroutine frame is destroyed; reaching this path
+// with any other shape is a compiler-plan violation, never permission to fall
+// back to the legacy runtime.Panic call.
 func (p *context) tryCompileCoroExplicitStatusPanic(b llssa.Builder, instruction *ssa.Panic) bool {
 	if p.compilation == nil || !p.compilation.EnableCoroExplicitStatusPanicABI {
 		return false
 	}
-	if instruction == nil || p.currentCoro == nil || b.Func != p.fn {
-		panic(fmt.Errorf("explicit-status panic escaped its exact physical coroutine body"))
+	// A RawPlainEntry/RawPlainVariant deliberately preserves the ordinary Go
+	// stack ABI, including legacy panic unwinding.  The compilation identity is
+	// shared with its managed twin, so the global explicit-status switch alone
+	// does not make this source instruction part of a physical coroutine body.
+	if p.rawPlainBody {
+		return false
 	}
-	if _, ok := instruction.X.(*ssa.MakeInterface); !ok {
-		panic(fmt.Errorf("explicit-status panic operand escaped its concrete MakeInterface preflight"))
+	if instruction == nil || p.currentCoro == nil || b.Func != p.fn {
+		goName, llvmName := "<nil>", "<nil>"
+		if p.goFn != nil {
+			goName = p.goFn.String()
+		}
+		if p.fn != nil {
+			llvmName = p.fn.Name()
+		}
+		panic(fmt.Errorf(
+			"explicit-status panic in %q (%s) escaped its exact physical coroutine body (active=%t builder-matches=%t)",
+			llvmName, goName, p.currentCoro != nil, b != nil && b.Func == p.fn,
+		))
 	}
 	value := p.compileValue(b, instruction.X)
 	typeWord := b.EfaceType(value)

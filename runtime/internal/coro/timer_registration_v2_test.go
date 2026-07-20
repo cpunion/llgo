@@ -254,6 +254,86 @@ func TestTimerRegistrationV2FutureDeadlineOnlyPublishesWhenDue(t *testing.T) {
 	finishTimerV2Test(t, p, sources, waits, timers, park, action)
 }
 
+func TestTimerRegistrationControlledV2ExactCancelAndRecycle(t *testing.T) {
+	p := new(P)
+	sources, waits, timers := bindTimerV2TestSources(t, p, nil)
+	park := beginTimerV2TestPark(t, p, "timer-v2-controlled-cancel", 1, 105)
+	controller := uintptr(0x1234)
+	control := uint32(7)
+	handle, attached := timers.ReserveAndAttachControlledTimerV2(
+		p,
+		&park.task.g.park,
+		park.ticket,
+		park.wait,
+		91,
+		100,
+		controller,
+		&control,
+		control,
+	)
+	if !attached || handle == (TimerRegistrationHandle{}) {
+		t.Fatal("reserve controlled timer V2")
+	}
+	commitTimerV2TestPark(t, p, park)
+	if timers.CancelControlledV2(p, controller+1, control) ||
+		timers.CancelControlledV2(p, controller, control+1) ||
+		!timers.CancelControlledV2(p, controller, control) {
+		t.Fatal("controlled Timer V2 cancel did not require the exact logical identity")
+	}
+	if scan, ok := sources.publishPass(p, 0, true); !ok || scan.timers != 0 || !scan.hasDeadline || scan.deadline != 100 {
+		t.Fatalf("publish controlled timer cancellation = (%+v, %t)", scan, ok)
+	}
+	if promoted, visits, ok := sources.resolvePublishedEpoch(p); !ok || promoted != 1 || visits != 1 {
+		t.Fatalf("resolve controlled timer cancellation = (%d, %d, %t)", promoted, visits, ok)
+	}
+	action, outcome, caseID, lease, taskCancel := resumeTimerV2TestPark(t, p, park)
+	if outcome != ParkOutcomeCanceled || caseID != 0 || lease != (OperationResultLease{}) ||
+		taskCancel != TaskCancelNone || !timers.RecycleTimerV2(p, handle) {
+		t.Fatalf("controlled timer cancellation decision = (%d, %d, %+v, %d)",
+			outcome, caseID, lease, taskCancel)
+	}
+	finishTimerV2Test(t, p, sources, waits, timers, park, action)
+}
+
+func TestTimerRegistrationControlledV2PrepareRecheckClosesPublicationRace(t *testing.T) {
+	p := new(P)
+	sources, waits, timers := bindTimerV2TestSources(t, p, nil)
+	park := beginTimerV2TestPark(t, p, "timer-v2-controlled-recheck", 1, 106)
+	controller := uintptr(0x5678)
+	control := uint32(12)
+	handle, attached := timers.ReserveAndAttachControlledTimerV2(
+		p,
+		&park.task.g.park,
+		park.ticket,
+		park.wait,
+		92,
+		100,
+		controller,
+		&control,
+		11,
+	)
+	if !attached || handle == (TimerRegistrationHandle{}) {
+		t.Fatal("reserve stale controlled timer V2")
+	}
+	if kind, ok := ParkCancelKindOf(&park.task.g.park, park.ticket); !ok || kind != ParkCancelOperation {
+		t.Fatalf("controlled timer prepare recheck cancel = (%d, %t)", kind, ok)
+	}
+	commitTimerV2TestPark(t, p, park)
+	if scan, ok := sources.publishPass(p, 0, true); !ok || scan.timers != 0 || !scan.hasDeadline || scan.deadline != 100 {
+		t.Fatalf("publish stale controlled timer = (%+v, %t)", scan, ok)
+	}
+	if promoted, visits, ok := sources.resolvePublishedEpoch(p); !ok || promoted != 1 || visits != 1 {
+		t.Fatalf("resolve stale controlled timer = (%d, %d, %t)", promoted, visits, ok)
+	}
+	action, outcome, caseID, lease, taskCancel := resumeTimerV2TestPark(t, p, park)
+	if outcome != ParkOutcomeCanceled || caseID != 0 || lease != (OperationResultLease{}) ||
+		taskCancel != TaskCancelNone || !timers.RecycleTimerV2(p, handle) {
+		t.Fatalf("stale controlled timer decision = (%d, %d, %+v, %d)",
+			outcome, caseID, lease, taskCancel)
+	}
+	finishTimerV2Test(t, p, sources, waits, timers, park, action)
+}
+
 func TestTimerRegistrationV2CompletionAgainstCancellationClasses(t *testing.T) {
 	tests := []struct {
 		name       string

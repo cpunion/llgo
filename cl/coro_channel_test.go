@@ -34,6 +34,10 @@ import (
 
 const coroChannelTestSource = `package foo
 
+var Sink uint32
+
+func Cleanup() { Sink++ }
+
 func Send(ch chan uint32, value uint32) {
 	ch <- value
 }
@@ -74,6 +78,19 @@ func TrySelectThenRecv(first, second chan uint32, value uint32) (int, uint32, bo
 func EmptySelect() {
 	select {}
 }
+
+func SendWithCleanup(ch chan uint32, value uint32) {
+	defer Cleanup()
+	ch <- value
+}
+
+func SelectWithCleanup(first, second chan uint32, value uint32) {
+	defer Cleanup()
+	select {
+	case first <- value:
+	case <-second:
+	}
+}
 `
 
 func TestCoroChannelNativeAndWasm32(t *testing.T) {
@@ -102,17 +119,23 @@ func TestCoroChannelNativeAndWasm32(t *testing.T) {
 				t.Fatalf("verify channel coroutine before CoroSplit: %v\n%s", err, module.String())
 			}
 
-			send := requireCoroPhysicalFunction(t, module, "foo.Send").String()
+			sendPhysical := requireCoroPhysicalFunction(t, module, "foo.Send")
+			send := sendPhysical.String()
+			assertCoroCancellationTerminalStatusPublication(t, sendPhysical)
 			assertCoroChannelBody(t, "Send", send, coroChanSendParkHookV1, []uint64{
 				coroChanResumeSendOK,
 				coroChanResumeSendClosed,
 				coroChanResumeTaskAbort,
 				coroChanResumeShutdown,
 			})
-			for _, symbol := range []string{"github.com/goplus/llgo/runtime/internal/runtime.CoroChanTrySend", coroChanSendClosedPanicHookV1} {
+			for _, symbol := range []string{"github.com/goplus/llgo/runtime/internal/runtime.CoroChanTrySend", coroFaultPrepareHookV1} {
 				if !strings.Contains(send, symbol) {
 					t.Fatalf("Send coroutine lacks %q:\n%s", symbol, send)
 				}
+			}
+			if hook := strings.Index(send, "call void @"+coroFaultPrepareHookV1); hook < 0 ||
+				!strings.Contains(send[hook:], "i32 3") {
+				t.Fatalf("Send coroutine did not select the send-closed fault kind:\n%s", send)
 			}
 			for _, name := range []string{"Recv", "RecvOK"} {
 				recv := requireCoroPhysicalFunction(t, module, "foo."+name).String()
@@ -132,6 +155,20 @@ func TestCoroChannelNativeAndWasm32(t *testing.T) {
 			assertCoroSelectBody(t, emptySelectBody)
 			trySelectBody := requireCoroPhysicalFunction(t, module, "foo.TrySelectThenRecv").String()
 			assertCoroTrySelectBody(t, trySelectBody)
+			for _, name := range []string{"SendWithCleanup", "SelectWithCleanup"} {
+				body := requireCoroPhysicalFunction(t, module, "foo."+name).String()
+				if !strings.Contains(body, "foo.Cleanup") || !strings.Contains(body, "switch i32") {
+					t.Fatalf("%s did not route terminal channel outcomes through the static cleanup drainer:\n%s", name, body)
+				}
+			}
+			for _, name := range []string{"SendWithCleanup", "SelectWithCleanup"} {
+				body := requireCoroPhysicalFunction(t, module, "foo."+name).String()
+				if strings.Count(body, "call void @"+coroFaultPayloadHookV1+"(i32 3") != 1 ||
+					!strings.Contains(body, "call void @"+coroPanicPrepareHookV1) ||
+					strings.Contains(body, "call void @"+coroFaultPrepareHookV1) {
+					t.Fatalf("%s did not materialize send-closed into the recoverable cleanup overlay:\n%s", name, body)
+				}
+			}
 			for _, forbidden := range []string{"runtime.ChanSend\"", "runtime.ChanRecv\"", "runtime.Select\"", "Future", "Promise", "Task"} {
 				if strings.Contains(module.String(), forbidden) {
 					t.Fatalf("channel lowering retained forbidden abstraction %q:\n%s", forbidden, module.String())
@@ -143,6 +180,9 @@ func TestCoroChannelNativeAndWasm32(t *testing.T) {
 				resume := module.NamedFunction(name + ".resume")
 				if resume.IsNil() || !strings.Contains(resume.String(), "call i32 @"+coroChanResumeHookV1) {
 					t.Fatalf("CoroSplit lost channel resume dispatch in %s:\n%s", name, module.String())
+				}
+				if name == "foo.Send$coro" {
+					assertCoroCancellationTerminalStatusPublication(t, resume)
 				}
 			}
 			selectResume := module.NamedFunction("foo.Select$coro.resume")
@@ -183,7 +223,8 @@ func TestCoroChannelNativeAndWasm32(t *testing.T) {
 				coroChanSendParkHookV1,
 				coroChanRecvParkHookV1,
 				coroChanResumeHookV1,
-				coroChanSendClosedPanicHookV1,
+				coroFaultPrepareHookV1,
+				coroFaultPayloadHookV1,
 				"github.com/goplus/llgo/runtime/internal/runtime.CoroChanSelectTry",
 				"github.com/goplus/llgo/runtime/internal/runtime.CoroChanSelectPark",
 				"github.com/goplus/llgo/runtime/internal/runtime.CoroChanSelectResume",
@@ -312,6 +353,7 @@ func compileCoroChannelFixture(t *testing.T, target *llssa.Target) (
 	functions := []*ssa.Function{
 		ssaPkg.Func("Send"), ssaPkg.Func("Recv"), ssaPkg.Func("RecvOK"),
 		ssaPkg.Func("Select"), ssaPkg.Func("TrySelectThenRecv"), ssaPkg.Func("EmptySelect"),
+		ssaPkg.Func("SendWithCleanup"), ssaPkg.Func("SelectWithCleanup"),
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
@@ -331,17 +373,18 @@ func compileCoroChannelFixture(t *testing.T, target *llssa.Target) (
 		t.Fatal(err)
 	}
 	compilation := &Compilation{
-		CoroPlan:                      plan,
-		EmissionUniverse:              universe,
-		EnableCoroEntryResolution:     true,
-		EnableCoroPhysicalABI:         true,
-		EnableCoroChildAwait:          true,
-		EnableCoroProgramBootstrapRun: true,
-		EnableCoroChannel:             true,
-		CoroABI:                       coro.PhysicalABIV1,
-		SchedulerABI:                  coro.SchedulerProgramBootstrapChannelABIV0,
-		PanicABI:                      coro.PanicLegacyABIV0,
-		FuncRepABI:                    coro.FuncRepABIV0,
+		CoroPlan:                         plan,
+		EmissionUniverse:                 universe,
+		EnableCoroEntryResolution:        true,
+		EnableCoroPhysicalABI:            true,
+		EnableCoroChildAwait:             true,
+		EnableCoroProgramBootstrapRun:    true,
+		EnableCoroChannel:                true,
+		EnableCoroExplicitStatusPanicABI: true,
+		CoroABI:                          coro.PhysicalABIV1,
+		SchedulerABI:                     coro.SchedulerProgramBootstrapChannelABIV0,
+		PanicABI:                         coro.PanicExplicitStatusABIV0,
+		FuncRepABI:                       coro.FuncRepABIV0,
 	}
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
@@ -410,7 +453,7 @@ func TestCoroChannelPhysicalABIRejectsNilSelectChannel(t *testing.T) {
 		t.Fatal("Select function plan not found")
 	}
 	err := validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(
-		selectFn, functionPlan, plan, nil, true, true, false, false, "", true,
+		selectFn, functionPlan, plan, nil, true, true, false, false, "", true, false, false,
 	)
 	if err == nil || !strings.Contains(err.Error(), "channel select case 0 channel is nil") {
 		t.Fatalf("nil select channel validation error = %v", err)
