@@ -1,4 +1,4 @@
-//go:build !llgo && darwin && !baremetal
+//go:build !llgo && linux && !baremetal
 
 package corodoorbell
 
@@ -8,11 +8,15 @@ import (
 )
 
 func nativePollSet(first *PollFD, count uint32, timeoutMS int32) (int, int32) {
-	result, _, errno := syscall.Syscall(
-		syscall.SYS_POLL,
+	timeout := syscall.NsecToTimespec(int64(timeoutMS) * deadlineNanosPerMilli)
+	result, _, errno := syscall.Syscall6(
+		syscall.SYS_PPOLL,
 		uintptr(unsafe.Pointer(first)),
 		uintptr(count),
-		uintptr(uint32(timeoutMS)),
+		uintptr(unsafe.Pointer(&timeout)),
+		0,
+		0,
+		0,
 	)
 	if errno != 0 {
 		return -1, int32(errno)
