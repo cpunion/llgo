@@ -246,6 +246,14 @@ func TestInternalRuntimeSysRemainsAltPkg(t *testing.T) {
 	if !llruntime.HasAltPkg("internal/syscall/unix") || !llruntime.HasAdditiveAltPkg("internal/syscall/unix") {
 		t.Fatal("internal/syscall/unix coroutine capability declarations should use an additive alt package")
 	}
+	if !llruntime.HasAltPkgForTarget("internal/syscall/unix", "darwin", "arm64") ||
+		!llruntime.HasAdditiveAltPkgForTarget("internal/syscall/unix", "darwin", "arm64") {
+		t.Fatal("internal/syscall/unix coroutine capability declarations should be enabled on Darwin")
+	}
+	if llruntime.HasAltPkgForTarget("internal/syscall/unix", "linux", "arm64") ||
+		llruntime.HasAdditiveAltPkgForTarget("internal/syscall/unix", "linux", "arm64") {
+		t.Fatal("Darwin-only internal/syscall/unix declarations should not enter Linux builds")
+	}
 }
 
 func TestApplySourcePatchForPkg_Cases(t *testing.T) {

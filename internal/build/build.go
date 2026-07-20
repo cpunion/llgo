@@ -2889,6 +2889,12 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	altPkgPaths := altPkgs(initial, conf, llssa.PkgRuntime)
 	altCfg := *cfg
 	altCfg.Dir = env.LLGoRuntimeDir()
+	// Alternate packages are compiler support inputs, not user test roots.
+	// Loading their test variants duplicates runtime packages in ModeTest and
+	// gives shared generic instances no exact emission-package identity. The
+	// initial graph above retains Tests/NeedForTest and still owns user tests.
+	altCfg.Tests = false
+	altCfg.Mode &^= packages.NeedForTest
 	altPkgs, err := packages.LoadEx(dedup, sizes, &altCfg, altPkgPaths...)
 	if err != nil {
 		return nil, err

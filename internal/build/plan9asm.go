@@ -236,7 +236,8 @@ func plan9asmSigsForPkg(ctx *context, pkgPath string) (map[string]struct{}, erro
 		plan9AsmSigCache.Store(key, sigs)
 		return sigs, nil
 	}
-	if hasAltPkgForTarget(ctx.buildConf, pkgPath) && !llruntime.HasAdditiveAltPkgForGOARCH(pkgPath, ctx.buildConf.Goarch) {
+	if hasAltPkgForTarget(ctx.buildConf, pkgPath) &&
+		!llruntime.HasAdditiveAltPkgForTarget(pkgPath, ctx.buildConf.Goos, ctx.buildConf.Goarch) {
 		plan9AsmSigCache.Store(key, sigs)
 		return sigs, nil
 	}
@@ -292,7 +293,8 @@ func plan9asmNoSuspendProofsForPkg(ctx *context, pkgPath string) (map[string]llp
 		return proofs
 	}
 	if !ctx.plan9asmEnabled(pkgPath) ||
-		hasAltPkgForTarget(ctx.buildConf, pkgPath) && !llruntime.HasAdditiveAltPkgForGOARCH(pkgPath, ctx.buildConf.Goarch) {
+		hasAltPkgForTarget(ctx.buildConf, pkgPath) &&
+			!llruntime.HasAdditiveAltPkgForTarget(pkgPath, ctx.buildConf.Goos, ctx.buildConf.Goarch) {
 		return store(), nil
 	}
 
@@ -417,10 +419,10 @@ func (ctx *context) plan9asmEnabled(pkgPath string) bool {
 }
 
 func hasAltPkgForTarget(conf *Config, pkgPath string) bool {
-	if conf == nil || !llruntime.HasAltPkgForGOARCH(pkgPath, conf.Goarch) {
+	if conf == nil || !llruntime.HasAltPkgForTarget(pkgPath, conf.Goos, conf.Goarch) {
 		return false
 	}
-	if llruntime.HasAdditiveAltPkgForGOARCH(pkgPath, conf.Goarch) {
+	if llruntime.HasAdditiveAltPkgForTarget(pkgPath, conf.Goos, conf.Goarch) {
 		return true
 	}
 	// When Plan9 asm translation is enabled, avoid also pulling in alt packages
@@ -454,7 +456,8 @@ func plan9asmEnabledByDefault(conf *Config, pkgPath string) bool {
 	if !archSupportsPlan9AsmDefaults(conf.Goarch) {
 		return false
 	}
-	return !llruntime.HasAltPkgForGOARCH(pkgPath, conf.Goarch) || llruntime.HasAdditiveAltPkgForGOARCH(pkgPath, conf.Goarch)
+	return !llruntime.HasAltPkgForTarget(pkgPath, conf.Goos, conf.Goarch) ||
+		llruntime.HasAdditiveAltPkgForTarget(pkgPath, conf.Goos, conf.Goarch)
 }
 
 func pkgSFiles(ctx *context, pkg *packages.Package) ([]string, error) {
