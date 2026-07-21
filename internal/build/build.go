@@ -175,11 +175,8 @@ type Config struct {
 	// BuildParallelism is the package-level concurrency requested by Go's -p
 	// build flag for llgo test. Zero uses the Go default, GOMAXPROCS.
 	BuildParallelism int
-	LinkOptions      LinkOptions
-	// OmitDWARFByDefault controls linked builds only when -w was not
-	// explicitly specified. Explicit -w and -w=false always win.
-	OmitDWARFByDefault bool
-	PCLNMode           PCLNMode
+	LinkOptions  LinkOptions
+	PCLNMode     PCLNMode
 	// PCLNModeSet marks PCLNMode as authoritative. Command flags set it for
 	// explicit requests; Do sets it after resolving the legacy environment
 	// default.
@@ -298,14 +295,13 @@ func NewDefaultConf(mode Mode) *Config {
 		goarch = runtime.GOARCH
 	}
 	conf := &Config{
-		Goos:               goos,
-		Goarch:             goarch,
-		BinPath:            bin,
-		Mode:               mode,
-		BuildMode:          BuildModeExe,
-		AbiMode:            cabi.ModeAllFunc,
-		OmitDWARFByDefault: mode != ModeGen,
-		PCLNMode:           PCLNEmbedded,
+		Goos:      goos,
+		Goarch:    goarch,
+		BinPath:   bin,
+		Mode:      mode,
+		BuildMode: BuildModeExe,
+		AbiMode:   cabi.ModeAllFunc,
+		PCLNMode:  PCLNEmbedded,
 	}
 	return conf
 }
