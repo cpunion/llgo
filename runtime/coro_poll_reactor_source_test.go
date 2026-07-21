@@ -70,7 +70,8 @@ func TestCoroNativeFleetPollReactorKeepsExactFixedOwnerPass(t *testing.T) {
 	for _, required := range []string{
 		"llgo_coro_native_fleet",
 		"[coroNativeFleetDomainCapacityV1]coroNativeFleetPollSetV1",
-		"coro.SnapshotExecutorPollOperation(&domain.driver, index)",
+		"poll, driver := domain.pollOwnerV1(), domain.driverOwnerV1()",
+		"coro.SnapshotExecutorPollOperation(driver, index)",
 		"domain.nextOwnerEpoch != wait.Epoch",
 		"domain.doorbell.ConsumeRetainedWake()",
 		"corodoorbell.DeadlinePollTimeout(now, wait.Deadline)",

@@ -93,16 +93,20 @@ func coroNativeFleetArmOwnerWaitV1(
 	}
 	storage.entries[0] = corodoorbell.PollFD{FD: doorbellFD, Events: corodoorbell.PollRead}
 	count := uint32(1)
-	configured := coro.PollOperationConfiguredCapacity(&domain.poll)
+	poll, driver := domain.pollOwnerV1(), domain.driverOwnerV1()
+	if poll == nil || driver == nil {
+		return coroNativeFleetArmedWaitV1{}, false
+	}
+	configured := coro.PollOperationConfiguredCapacity(poll)
 	if configured == 0 || configured > coroNativeFleetPollCapacityV1 {
 		return coroNativeFleetArmedWaitV1{}, false
 	}
-	scanLimit, scanOK := coro.PollOperationScanLimit(&domain.poll)
+	scanLimit, scanOK := coro.PollOperationScanLimit(poll)
 	if !scanOK || scanLimit > configured {
 		return coroNativeFleetArmedWaitV1{}, false
 	}
 	for index := uint32(0); index < scanLimit; index++ {
-		snapshot, active, snapshotOK := coro.SnapshotExecutorPollOperation(&domain.driver, index)
+		snapshot, active, snapshotOK := coro.SnapshotExecutorPollOperation(driver, index)
 		if !snapshotOK {
 			return coroNativeFleetArmedWaitV1{}, false
 		}

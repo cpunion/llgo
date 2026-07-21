@@ -786,3 +786,67 @@ func TestCoroNativeFleetStartFailureIsPermanentV1(t *testing.T) {
 		t.Fatal("failed native fleet was restartable")
 	}
 }
+
+func TestCoroNativeFleetAdoptsBoundProgramStorageV1(t *testing.T) {
+	var state coroNativeFleetStateV1
+	var programP coro.P
+	var programDriver coro.ExecutorDriver
+	var programRegistry coro.ExecutorRegistry
+	var programWaits coro.WaitRegistrationTable
+	var programTimers coro.TimerRegistrationTable
+	var programPoll coro.PollOperationSource
+	var programWorker coro.WorkerOperationSource
+	var programChannel coro.ChannelOperationSource
+	var programControl coro.TaskControlSource
+
+	executor, registered := programRegistry.Register()
+	if !registered || !coro.BindExecutorSourceCatalogAtRoute(
+		&programDriver,
+		&programP,
+		&programRegistry,
+		executor,
+		1,
+		coro.ExecutorSourceCatalog{
+			Waits:   &programWaits,
+			Timers:  &programTimers,
+			Poll:    &programPoll,
+			Worker:  &programWorker,
+			Channel: &programChannel,
+			Control: &programControl,
+		},
+	) {
+		t.Fatal("bind program-like executor before native fleet start")
+	}
+	owners := coroNativeFleetDomainOwnersV1{
+		p:      &programP,
+		driver: &programDriver,
+		sources: coro.ExecutorSourceCatalog{
+			Waits:   &programWaits,
+			Timers:  &programTimers,
+			Poll:    &programPoll,
+			Worker:  &programWorker,
+			Channel: &programChannel,
+			Control: &programControl,
+		},
+	}
+	if !coroNativeFleetStartDomainsV1(&state, &owners) {
+		t.Fatal("start native fleet around bound program executor")
+	}
+	program := &state.domains[0]
+	peer := &state.domains[1]
+	if !program.adopted || program.handle.Route != 1 || program.handle.Executor != executor ||
+		program.pOwnerV1() != &programP || program.driverOwnerV1() != &programDriver ||
+		program.pollOwnerV1() != &programPoll || program.workerOwnerV1() != &programWorker ||
+		peer.adopted || peer.handle.Route != 2 || peer.pOwnerV1() != &peer.p ||
+		peer.driverOwnerV1() != &peer.driver {
+		t.Fatalf("native adopted/owned domains = program:%+v peer:%+v", program.handle, peer.handle)
+	}
+	if !coroNativeFleetAbortActiveDomainV1(&state, peer) ||
+		!coroNativeFleetAbortActiveDomainV1(&state, program) {
+		t.Fatal("strongly retire adopted native fleet fixture")
+	}
+	if program.owners != (coroNativeFleetDomainOwnersV1{}) ||
+		!programRegistry.CanRelease() || !state.fleet.AllRetired() {
+		t.Fatal("adopted native fleet retained external program storage")
+	}
+}

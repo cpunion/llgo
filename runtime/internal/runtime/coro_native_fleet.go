@@ -72,7 +72,88 @@ type coroNativeFleetDomainV1 struct {
 	handle         coro.ExecutorFleetHandle
 	nextOwnerEpoch uint32
 	ownerEpoch     uint32
+	adopted        bool
+	owners         coroNativeFleetDomainOwnersV1
 	lifecycle      coroNativeFleetDomainLifecycleV1
+}
+
+// coroNativeFleetDomainOwnersV1 is populated only for a domain which adopts
+// already-bound program storage. Keeping the references in one suffix avoids
+// aliasing or copying the hundreds of existing program-global users. Owned
+// fleet domains keep this structure zero and use their inline fields.
+type coroNativeFleetDomainOwnersV1 struct {
+	p       *coro.P
+	driver  *coro.ExecutorDriver
+	sources coro.ExecutorSourceCatalog
+}
+
+func (domain *coroNativeFleetDomainV1) pOwnerV1() *coro.P {
+	if domain == nil {
+		return nil
+	}
+	if domain.adopted {
+		return domain.owners.p
+	}
+	return &domain.p
+}
+
+func (domain *coroNativeFleetDomainV1) driverOwnerV1() *coro.ExecutorDriver {
+	if domain == nil {
+		return nil
+	}
+	if domain.adopted {
+		return domain.owners.driver
+	}
+	return &domain.driver
+}
+
+func (domain *coroNativeFleetDomainV1) pollOwnerV1() *coro.PollOperationSource {
+	if domain == nil {
+		return nil
+	}
+	if domain.adopted {
+		return domain.owners.sources.Poll
+	}
+	return &domain.poll
+}
+
+func (domain *coroNativeFleetDomainV1) workerOwnerV1() *coro.WorkerOperationSource {
+	if domain == nil {
+		return nil
+	}
+	if domain.adopted {
+		return domain.owners.sources.Worker
+	}
+	return &domain.worker
+}
+
+func validCoroNativeFleetAdoptedOwnersV1(owners coroNativeFleetDomainOwnersV1) bool {
+	sources := owners.sources
+	return owners.p != nil && owners.driver != nil && sources.Waits != nil && sources.Timers != nil &&
+		sources.Poll != nil && sources.Manual == nil && sources.Worker != nil && sources.Channel != nil &&
+		sources.Control != nil
+}
+
+func coroNativeFleetAdoptedOwnersRetiredV1(domain *coroNativeFleetDomainV1) bool {
+	if domain == nil || !domain.adopted || !validCoroNativeFleetAdoptedOwnersV1(domain.owners) {
+		return false
+	}
+	owners := domain.owners
+	sources := owners.sources
+	return *owners.driver == (coro.ExecutorDriver{}) && sources.Waits.CanRelease() && sources.Timers.CanRelease() &&
+		sources.Poll.CanRelease() && sources.Worker.CanRelease() && sources.Channel.CanRelease() &&
+		sources.Control.CanRelease()
+}
+
+func coroNativeFleetReleaseAdoptedOwnersV1(domain *coroNativeFleetDomainV1) bool {
+	if domain == nil || !domain.adopted {
+		return domain != nil
+	}
+	if !coroNativeFleetAdoptedOwnersRetiredV1(domain) {
+		return false
+	}
+	domain.owners = coroNativeFleetDomainOwnersV1{}
+	return true
 }
 
 // coroNativeFleetStateV1 must remain target-global for the process lifetime.
@@ -89,83 +170,20 @@ var coroNativeFleetV1State coroNativeFleetStateV1
 func coroNativeFleetDomainCandidateV1(domain *coroNativeFleetDomainV1) bool {
 	return domain != nil && domain.lifecycle == coroNativeFleetDomainUnusedV1 &&
 		domain.handle == (coro.ExecutorFleetHandle{}) && domain.ownerEpoch == 0 &&
-		domain.nextOwnerEpoch == 0 && domain.driver == (coro.ExecutorDriver{}) &&
+		domain.nextOwnerEpoch == 0 && !domain.adopted && domain.owners == (coroNativeFleetDomainOwnersV1{}) &&
+		domain.driver == (coro.ExecutorDriver{}) &&
 		domain.waits.CanRelease() && domain.timers.CanRelease() && domain.poll.CanRelease() &&
 		domain.manual.CanRelease() &&
 		domain.worker.CanRelease() && domain.control.CanRelease() &&
 		domain.ingress.CanReleaseResources() && domain.admission.CanRecycle()
 }
 
-func coroNativeFleetRollbackBoundDomainV1(
+func coroNativeFleetActivateBoundDomainV1(
 	state *coroNativeFleetStateV1,
 	domain *coroNativeFleetDomainV1,
 	handle coro.ExecutorFleetHandle,
 ) bool {
 	if state == nil || domain == nil || !handle.Valid() {
-		return false
-	}
-	return coro.BeginExecutorFleetClose(&state.fleet, handle) &&
-		coro.ConfirmExecutorFleetRouteClose(&state.fleet, handle) &&
-		coro.BeginExecutorFleetDriverClose(&state.fleet, handle) &&
-		coro.ConfirmExecutorFleetClose(&state.fleet, handle)
-}
-
-// coroNativeFleetAbortActiveDomainV1 is startup rollback, not ordinary
-// reusable shutdown. The fleet lifecycle stays Failed and every consumed route
-// remains a permanent tombstone. Although handles are not published until the
-// complete two-domain start succeeds, the exported POD shim can be called with
-// guessed words, so rollback still performs the full target-ingress join.
-func coroNativeFleetAbortActiveDomainV1(
-	state *coroNativeFleetStateV1,
-	domain *coroNativeFleetDomainV1,
-) bool {
-	if state == nil || domain == nil || domain.lifecycle != coroNativeFleetDomainActiveV1 ||
-		!domain.handle.Valid() || domain.ownerEpoch != 0 ||
-		!coro.BeginExecutorFleetClose(&state.fleet, domain.handle) ||
-		!coro.ConfirmExecutorFleetRouteClose(&state.fleet, domain.handle) ||
-		!domain.ingress.Seal() {
-		return false
-	}
-	for !domain.ingress.Quiesced() {
-		if _, ok := domain.doorbell.WaitBounded(1); !ok {
-			return false
-		}
-	}
-	if !domain.doorbell.Close() || !domain.ingress.Retire() ||
-		!domain.admission.ResetExecutorAfterStrongJoin(
-			domain.handle.Executor.Slot,
-			domain.handle.Executor.Generation,
-		) || !coro.BeginExecutorFleetDriverClose(&state.fleet, domain.handle) ||
-		!coro.ConfirmExecutorFleetClose(&state.fleet, domain.handle) {
-		return false
-	}
-	domain.lifecycle = coroNativeFleetDomainFailedV1
-	return true
-}
-
-func coroNativeFleetBindDomainV1(state *coroNativeFleetStateV1, index uint32) bool {
-	if state == nil || index >= coroNativeFleetDomainCapacityV1 {
-		return false
-	}
-	domain := &state.domains[index]
-	if !coroNativeFleetDomainCandidateV1(domain) || !domain.doorbell.Open() {
-		return false
-	}
-	handle, ok := coro.BindExecutorFleet(
-		&state.fleet,
-		&domain.driver,
-		&domain.p,
-		coro.ExecutorSourceCatalog{
-			Waits:   &domain.waits,
-			Timers:  &domain.timers,
-			Poll:    &domain.poll,
-			Manual:  &domain.manual,
-			Worker:  &domain.worker,
-			Control: &domain.control,
-		},
-	)
-	if !ok {
-		_ = domain.doorbell.Close()
 		return false
 	}
 	// Publish the immutable callback-route identity before opening TargetIngress.
@@ -200,19 +218,121 @@ func coroNativeFleetBindDomainV1(state *coroNativeFleetStateV1, index uint32) bo
 	return true
 }
 
-// coroNativeFleetStartStateV1 consumes an exact-zero fleet. Monotonic route
-// allocation therefore freezes domain[0]/domain[1] as Route 1/Route 2. No
-// other adapter may pre-bind this private fleet; the production-island test
-// asserts the mapping before any OperationID is issued.
-func coroNativeFleetStartStateV1(state *coroNativeFleetStateV1) bool {
-	if state == nil {
+func coroNativeFleetRollbackBoundDomainV1(
+	state *coroNativeFleetStateV1,
+	domain *coroNativeFleetDomainV1,
+	handle coro.ExecutorFleetHandle,
+) bool {
+	if state == nil || domain == nil || !handle.Valid() {
 		return false
 	}
-	if state.lifecycle != coroNativeFleetUnusedV1 || !state.fleet.AllRetired() {
+	return coro.BeginExecutorFleetClose(&state.fleet, handle) &&
+		coro.ConfirmExecutorFleetRouteClose(&state.fleet, handle) &&
+		coro.BeginExecutorFleetDriverClose(&state.fleet, handle) &&
+		coro.ConfirmExecutorFleetClose(&state.fleet, handle) &&
+		coroNativeFleetReleaseAdoptedOwnersV1(domain)
+}
+
+// coroNativeFleetAbortActiveDomainV1 is startup rollback, not ordinary
+// reusable shutdown. The fleet lifecycle stays Failed and every consumed route
+// remains a permanent tombstone. Although handles are not published until the
+// complete two-domain start succeeds, the exported POD shim can be called with
+// guessed words, so rollback still performs the full target-ingress join.
+func coroNativeFleetAbortActiveDomainV1(
+	state *coroNativeFleetStateV1,
+	domain *coroNativeFleetDomainV1,
+) bool {
+	if state == nil || domain == nil || domain.lifecycle != coroNativeFleetDomainActiveV1 ||
+		!domain.handle.Valid() || domain.ownerEpoch != 0 ||
+		!coro.BeginExecutorFleetClose(&state.fleet, domain.handle) ||
+		!coro.ConfirmExecutorFleetRouteClose(&state.fleet, domain.handle) ||
+		!domain.ingress.Seal() {
+		return false
+	}
+	for !domain.ingress.Quiesced() {
+		if _, ok := domain.doorbell.WaitBounded(1); !ok {
+			return false
+		}
+	}
+	if !domain.doorbell.Close() || !domain.ingress.Retire() ||
+		!domain.admission.ResetExecutorAfterStrongJoin(
+			domain.handle.Executor.Slot,
+			domain.handle.Executor.Generation,
+		) || !coro.BeginExecutorFleetDriverClose(&state.fleet, domain.handle) ||
+		!coro.ConfirmExecutorFleetClose(&state.fleet, domain.handle) ||
+		!coroNativeFleetReleaseAdoptedOwnersV1(domain) {
+		return false
+	}
+	domain.lifecycle = coroNativeFleetDomainFailedV1
+	return true
+}
+
+func coroNativeFleetBindDomainV1(state *coroNativeFleetStateV1, index uint32) bool {
+	if state == nil || index >= coroNativeFleetDomainCapacityV1 {
+		return false
+	}
+	domain := &state.domains[index]
+	if !coroNativeFleetDomainCandidateV1(domain) || !domain.doorbell.Open() {
+		return false
+	}
+	handle, ok := coro.BindExecutorFleet(
+		&state.fleet,
+		&domain.driver,
+		&domain.p,
+		coro.ExecutorSourceCatalog{
+			Waits:   &domain.waits,
+			Timers:  &domain.timers,
+			Poll:    &domain.poll,
+			Manual:  &domain.manual,
+			Worker:  &domain.worker,
+			Control: &domain.control,
+		},
+	)
+	if !ok {
+		_ = domain.doorbell.Close()
+		return false
+	}
+	return coroNativeFleetActivateBoundDomainV1(state, domain, handle)
+}
+
+func coroNativeFleetAdoptDomainV1(
+	state *coroNativeFleetStateV1,
+	index uint32,
+	owners coroNativeFleetDomainOwnersV1,
+) bool {
+	if state == nil || index >= coroNativeFleetDomainCapacityV1 ||
+		!validCoroNativeFleetAdoptedOwnersV1(owners) {
+		return false
+	}
+	domain := &state.domains[index]
+	if !coroNativeFleetDomainCandidateV1(domain) || !domain.doorbell.Open() {
+		return false
+	}
+	handle, ok := coro.AdoptExecutorFleet(&state.fleet, owners.driver, owners.p)
+	if !ok {
+		_ = domain.doorbell.Close()
+		return false
+	}
+	domain.adopted = true
+	domain.owners = owners
+	return coroNativeFleetActivateBoundDomainV1(state, domain, handle)
+}
+
+func coroNativeFleetStartDomainsV1(
+	state *coroNativeFleetStateV1,
+	program *coroNativeFleetDomainOwnersV1,
+) bool {
+	if state == nil || state.lifecycle != coroNativeFleetUnusedV1 || !state.fleet.AllRetired() {
 		return false
 	}
 	for index := uint32(0); index < coroNativeFleetDomainCapacityV1; index++ {
-		if !coroNativeFleetBindDomainV1(state, index) {
+		started := false
+		if index == 0 && program != nil {
+			started = coroNativeFleetAdoptDomainV1(state, index, *program)
+		} else {
+			started = coroNativeFleetBindDomainV1(state, index)
+		}
+		if !started {
 			for previous := uint32(0); previous < index; previous++ {
 				if domain := &state.domains[previous]; domain.lifecycle == coroNativeFleetDomainActiveV1 &&
 					!coroNativeFleetAbortActiveDomainV1(state, domain) {
@@ -226,6 +346,14 @@ func coroNativeFleetStartStateV1(state *coroNativeFleetStateV1) bool {
 	}
 	state.lifecycle = coroNativeFleetActiveV1
 	return true
+}
+
+// coroNativeFleetStartStateV1 consumes an exact-zero fleet. Monotonic route
+// allocation therefore freezes domain[0]/domain[1] as Route 1/Route 2. No
+// other adapter may pre-bind this private fleet; the production-island test
+// asserts the mapping before any OperationID is issued.
+func coroNativeFleetStartStateV1(state *coroNativeFleetStateV1) bool {
+	return coroNativeFleetStartDomainsV1(state, nil)
 }
 
 // coroNativeFleetStartV1 binds exactly two independent native domains. It is
@@ -267,7 +395,11 @@ func coroNativeFleetWorkerTransportReadyV1() bool {
 	}
 	for index := uint32(0); index < coroNativeFleetDomainCapacityV1; index++ {
 		domain := &state.domains[index]
-		route, routeOK := domain.worker.Route()
+		worker := domain.workerOwnerV1()
+		if worker == nil {
+			return false
+		}
+		route, routeOK := worker.Route()
 		if domain.lifecycle != coroNativeFleetDomainActiveV1 || !domain.handle.Valid() ||
 			domain.handle.Route != index+1 || !routeOK || uint32(route) != domain.handle.Route {
 			return false
@@ -286,7 +418,11 @@ func coroNativeFleetWorkerSubmissionOwnerV1(handle coro.ExecutorHandle, route co
 		return false
 	}
 	domain := &coroNativeFleetV1State.domains[uint32(route)-1]
-	workerRoute, routeOK := domain.worker.Route()
+	worker := domain.workerOwnerV1()
+	if worker == nil {
+		return false
+	}
+	workerRoute, routeOK := worker.Route()
 	return coroNativeFleetV1State.lifecycle == coroNativeFleetActiveV1 &&
 		domain.lifecycle == coroNativeFleetDomainActiveV1 &&
 		domain.handle.Executor == handle && domain.handle.Route == uint32(route) &&
@@ -509,7 +645,11 @@ func coroNativeFleetDrainOwnerEpochV1(
 		budget == 0 || budget > coro.RunnableTransferMailboxCapacity {
 		return 0, false, false
 	}
-	return coroNativeFleetV1State.fleet.DrainPNeutralRunnables(handle, &domain.p, budget)
+	p := domain.pOwnerV1()
+	if p == nil {
+		return 0, false, false
+	}
+	return coroNativeFleetV1State.fleet.DrainPNeutralRunnables(handle, p, budget)
 }
 
 // coroNativeFleetPollOwnerEpochV1 reuses the existing unified source
@@ -527,7 +667,11 @@ func coroNativeFleetPollOwnerEpochV1(
 	if !valid || epoch == 0 || domain.ownerEpoch != epoch || now < 0 {
 		return 0, 0, false
 	}
-	waits, timers, promoted, pollOK := coro.PollExecutorAt(&domain.driver, now)
+	driver := domain.driverOwnerV1()
+	if driver == nil {
+		return 0, 0, false
+	}
+	waits, timers, promoted, pollOK := coro.PollExecutorAt(driver, now)
 	return waits + timers, promoted, pollOK
 }
 
@@ -550,7 +694,11 @@ func coroNativeFleetRunOwnerEpochV1(
 	if !valid || epoch == 0 || domain.ownerEpoch != epoch || now < 0 || budget == 0 {
 		return coroRunResultV1{}
 	}
-	return coroRunSliceAtV1(&domain.p, &domain.driver, now, budget)
+	p, driver := domain.pOwnerV1(), domain.driverOwnerV1()
+	if p == nil || driver == nil {
+		return coroRunResultV1{}
+	}
+	return coroRunSliceAtV1(p, driver, now, budget)
 }
 
 // coroNativeFleetCommitOwnerDestroyV1 settles an ordinary G's final-root
@@ -571,7 +719,11 @@ func coroNativeFleetCommitOwnerDestroyV1(
 	if !valid || epoch == 0 || domain.ownerEpoch != epoch || g == nil {
 		return coro.Action{}, false
 	}
-	result, ok := coro.CommitExecutorRunDomainDestroy(&domain.driver, g, receipt)
+	driver := domain.driverOwnerV1()
+	if driver == nil {
+		return coro.Action{}, false
+	}
+	result, ok := coro.CommitExecutorRunDomainDestroy(driver, g, receipt)
 	if !ok {
 		return coro.Action{}, false
 	}
@@ -590,8 +742,9 @@ func coroNativeFleetEnterOwnerCompatibilityV1(handle coro.ExecutorFleetHandle, e
 		handle,
 		coroNativeFleetDomainActiveV1,
 	)
-	return valid && epoch != 0 && domain.ownerEpoch == epoch &&
-		coro.EnterExecutorRunCompatibility(&domain.driver)
+	driver := domain.driverOwnerV1()
+	return valid && driver != nil && epoch != 0 && domain.ownerEpoch == epoch &&
+		coro.EnterExecutorRunCompatibility(driver)
 }
 
 // coroNativeFleetOwnerWaitPlanV1 is the pointer-free result of one exact
@@ -620,18 +773,19 @@ func coroNativeFleetPrepareOwnerWaitAtV1(
 		handle,
 		coroNativeFleetDomainActiveV1,
 	)
-	if !valid || epoch == 0 || domain.ownerEpoch != epoch || now < 0 || freshNow < now ||
-		!coro.EnterExecutorRunCompatibility(&domain.driver) {
+	driver := domain.driverOwnerV1()
+	if !valid || driver == nil || epoch == 0 || domain.ownerEpoch != epoch || now < 0 || freshNow < now ||
+		!coro.EnterExecutorRunCompatibility(driver) {
 		return coroNativeFleetOwnerWaitPlanV1{}, false
 	}
-	prepared, ok := coro.PrepareExecutorStandbyAt(&domain.driver, now)
+	prepared, ok := coro.PrepareExecutorStandbyAt(driver, now)
 	if !ok {
 		return coroNativeFleetOwnerWaitPlanV1{}, false
 	}
 	if !prepared {
 		return coroNativeFleetOwnerWaitPlanV1{}, true
 	}
-	sleep, deadline, hasDeadline, committed := coro.CommitExecutorSleepAt(&domain.driver, freshNow)
+	sleep, deadline, hasDeadline, committed := coro.CommitExecutorSleepAt(driver, freshNow)
 	if !committed {
 		return coroNativeFleetOwnerWaitPlanV1{}, false
 	}
@@ -672,7 +826,11 @@ func coroNativeFleetWakeOwnerAtV1(
 	if !valid || domain.ownerEpoch != epoch {
 		return 0, 0, 0, 0, false
 	}
-	waits, timers, promoted, ok = coro.WakeExecutorAt(&domain.driver, now)
+	driver := domain.driverOwnerV1()
+	if driver == nil {
+		return 0, 0, 0, 0, false
+	}
+	waits, timers, promoted, ok = coro.WakeExecutorAt(driver, now)
 	if !ok {
 		return 0, 0, 0, 0, false
 	}
@@ -774,6 +932,12 @@ func coroNativeFleetRetireDriverV1(handle coro.ExecutorFleetHandle) bool {
 		!coro.ConfirmExecutorFleetClose(&coroNativeFleetV1State.fleet, handle) {
 		return false
 	}
+	if domain.adopted {
+		if !coroNativeFleetReleaseAdoptedOwnersV1(domain) {
+			domain.lifecycle = coroNativeFleetDomainFailedV1
+			return false
+		}
+	}
 	domain.lifecycle = coroNativeFleetDomainRetiredV1
 	return true
 }
@@ -786,6 +950,7 @@ func coroNativeFleetAllRetiredV1() bool {
 	for index := range state.domains {
 		domain := &state.domains[index]
 		if domain.lifecycle != coroNativeFleetDomainRetiredV1 || domain.ownerEpoch != 0 ||
+			domain.owners != (coroNativeFleetDomainOwnersV1{}) ||
 			!domain.ingress.Retired() || !domain.doorbell.Closed() ||
 			!domain.admission.CanRelease() || domain.driver != (coro.ExecutorDriver{}) ||
 			!domain.waits.CanRelease() || !domain.timers.CanRelease() || !domain.poll.CanRelease() ||
