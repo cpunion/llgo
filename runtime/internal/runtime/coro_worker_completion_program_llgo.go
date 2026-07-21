@@ -20,6 +20,31 @@ package runtime
 
 import "github.com/goplus/llgo/runtime/internal/coro"
 
+// The target profile owns both completion delivery and submission authority.
+// Keeping these decisions in the same mutually exclusive file prevents the
+// default production island from acquiring a link-time dependency on fleet
+// storage that is not part of its explicit runtime source closure.
+func coroNativeWorkerDeliveryReadyV1(
+	delivery coroNativeWorkerDeliveryV1,
+	handle coro.ExecutorHandle,
+	route coro.RouteID,
+) bool {
+	workerRoute, routeOK := coroProgramWorkerSourceV1State.Route()
+	return delivery == coroNativeWorkerDeliveryProgramV1 &&
+		coroProgramExecutorBoundV1State && handle == coroProgramExecutorHandleV1State &&
+		handle.Slot != 0 && handle.Generation != 0 && routeOK && route == workerRoute
+}
+
+func coroNativeWorkerSubmissionOwnerProfileV1(
+	state *coroNativeWorkerPoolV1,
+	handle coro.ExecutorHandle,
+	route coro.RouteID,
+) bool {
+	return state != nil && state.delivery == coroNativeWorkerDeliveryProgramV1 &&
+		state.handle == handle && state.route == route &&
+		coroProgramExecutorBoundV1State && handle == coroProgramExecutorHandleV1State
+}
+
 // __llgo_coro_native_worker_complete_v1 is the only C-worker-to-Go edge in the
 // single-P compatibility profile. Fleet delivery selects a mutually exclusive
 // target file rather than a function pointer or reverse address lookup.

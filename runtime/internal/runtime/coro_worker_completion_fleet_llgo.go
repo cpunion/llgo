@@ -20,6 +20,26 @@ package runtime
 
 import "github.com/goplus/llgo/runtime/internal/coro"
 
+func coroNativeWorkerDeliveryReadyV1(
+	delivery coroNativeWorkerDeliveryV1,
+	handle coro.ExecutorHandle,
+	route coro.RouteID,
+) bool {
+	return delivery == coroNativeWorkerDeliveryFleetV1 &&
+		handle == (coro.ExecutorHandle{}) && route == 0 &&
+		coroNativeFleetWorkerTransportReadyV1()
+}
+
+func coroNativeWorkerSubmissionOwnerProfileV1(
+	state *coroNativeWorkerPoolV1,
+	handle coro.ExecutorHandle,
+	route coro.RouteID,
+) bool {
+	return state != nil && state.delivery == coroNativeWorkerDeliveryFleetV1 &&
+		state.handle == (coro.ExecutorHandle{}) && state.route == 0 &&
+		coroNativeFleetWorkerSubmissionOwnerV1(handle, route)
+}
+
 // __llgo_coro_native_worker_complete_v1 is the only C-worker-to-Go edge in the
 // fleet profile. The POD OperationID route selects the exact logical source,
 // request gate, and doorbell while one target-ingress lease protects their

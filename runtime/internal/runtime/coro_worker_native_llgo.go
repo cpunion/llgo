@@ -125,21 +125,8 @@ func coroNativeWorkerPoolStartDeliveryV1(
 	route coro.RouteID,
 ) bool {
 	state := &coroNativeWorkerPoolV1State
-	if !coroNativeWorkerPoolCanReleaseV1() {
-		return false
-	}
-	switch delivery {
-	case coroNativeWorkerDeliveryProgramV1:
-		workerRoute, routeOK := coroProgramWorkerSourceV1State.Route()
-		if !coroProgramExecutorBoundV1State || handle != coroProgramExecutorHandleV1State ||
-			handle.Slot == 0 || handle.Generation == 0 || !routeOK || route != workerRoute {
-			return false
-		}
-	case coroNativeWorkerDeliveryFleetV1:
-		if handle != (coro.ExecutorHandle{}) || route != 0 || !coroNativeFleetWorkerTransportReadyV1() {
-			return false
-		}
-	default:
+	if !coroNativeWorkerPoolCanReleaseV1() ||
+		!coroNativeWorkerDeliveryReadyV1(delivery, handle, route) {
 		return false
 	}
 	if !coroworker.QueueInit() {
@@ -177,7 +164,14 @@ func coroNativeWorkerPoolStartDeliveryV1(
 
 func coroNativeWorkerPoolStartV1(handle coro.ExecutorHandle) bool {
 	route, ok := coroProgramWorkerSourceV1State.Route()
-	return ok && coroNativeWorkerPoolStartDeliveryV1(coroNativeWorkerDeliveryProgramV1, handle, route)
+	// Worker is a compiler-selected capability. Programs whose source catalog
+	// does not bind it must not pay for four idle pthreads, but still require a
+	// pristine transport so a stale pool cannot be silently ignored.
+	if !ok {
+		return coroProgramWorkerSourceV1State.CanRelease() &&
+			coroNativeWorkerPoolCanReleaseV1()
+	}
+	return coroNativeWorkerPoolStartDeliveryV1(coroNativeWorkerDeliveryProgramV1, handle, route)
 }
 
 // coroNativeWorkerPoolStartFleetV1 starts the same physical pool for all
@@ -196,16 +190,7 @@ func coroNativeWorkerSubmissionOwnerV1(handle coro.ExecutorHandle, route coro.Ro
 	if !state.started || state.stopping || !route.Valid() {
 		return false
 	}
-	switch state.delivery {
-	case coroNativeWorkerDeliveryProgramV1:
-		return state.handle == handle && state.route == route &&
-			coroProgramExecutorBoundV1State && handle == coroProgramExecutorHandleV1State
-	case coroNativeWorkerDeliveryFleetV1:
-		return state.handle == (coro.ExecutorHandle{}) && state.route == 0 &&
-			coroNativeFleetWorkerSubmissionOwnerV1(handle, route)
-	default:
-		return false
-	}
+	return coroNativeWorkerSubmissionOwnerProfileV1(state, handle, route)
 }
 
 // coroNativeWorkerPoolReserveV1 is the nonblocking queue-capacity preflight.
@@ -284,6 +269,10 @@ func coroNativeWorkerPoolStopDeliveryV1(
 }
 
 func coroNativeWorkerPoolStopV1(handle coro.ExecutorHandle) bool {
+	if coroNativeWorkerPoolV1State == (coroNativeWorkerPoolV1{}) {
+		return coroProgramWorkerSourceV1State.CanRelease() &&
+			coroNativeWorkerPoolCanReleaseV1()
+	}
 	return coroNativeWorkerPoolStopDeliveryV1(coroNativeWorkerDeliveryProgramV1, handle)
 }
 
