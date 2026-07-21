@@ -162,6 +162,70 @@ func TestExecutorFleetRoutesTwoPCompletionsToExactExecutor(t *testing.T) {
 	}
 }
 
+func TestExecutorFleetRequestsCommittedChannelEndpointByExactRoute(t *testing.T) {
+	fleet := new(ExecutorFleet)
+	type fixture struct {
+		p       *P
+		driver  *ExecutorDriver
+		waits   *WaitRegistrationTable
+		channel *ChannelOperationSource
+		handle  ExecutorFleetHandle
+	}
+	bind := func() *fixture {
+		current := &fixture{
+			p: new(P), driver: new(ExecutorDriver), waits: new(WaitRegistrationTable),
+			channel: new(ChannelOperationSource),
+		}
+		var ok bool
+		current.handle, ok = BindExecutorFleet(fleet, current.driver, current.p, ExecutorSourceCatalog{
+			Waits: current.waits, Channel: current.channel,
+		})
+		if !ok {
+			t.Fatal("bind fleet channel route")
+		}
+		return current
+	}
+	first, second := bind(), bind()
+	firstID, firstOK := MakeOperationIDAtRoute(OperationSourceChannel, RouteID(first.handle.Route), 1, 1)
+	secondID, secondOK := MakeOperationIDAtRoute(OperationSourceChannel, RouteID(second.handle.Route), 1, 1)
+	if !firstOK || !secondOK || firstID.Route() == secondID.Route() {
+		t.Fatalf("make distinct channel route IDs = (%+v,%t) (%+v,%t)", firstID, firstOK, secondID, secondOK)
+	}
+	if result := fleet.RequestChannelExecutor(firstID); result != ExecutorRequestPublished ||
+		!fleet.executors.ObserveRequested(first.handle.Executor) ||
+		fleet.executors.ObserveRequested(second.handle.Executor) {
+		t.Fatalf("request first channel route = %d", result)
+	}
+	if _, _, ok := PollExecutor(first.driver); !ok {
+		t.Fatal("acknowledge first channel request")
+	}
+	if result := fleet.RequestChannelExecutor(secondID); result != ExecutorRequestPublished ||
+		!fleet.executors.ObserveRequested(second.handle.Executor) {
+		t.Fatalf("request second channel route = %d", result)
+	}
+	if _, _, ok := PollExecutor(second.driver); !ok {
+		t.Fatal("acknowledge second channel request")
+	}
+	manualID, made := MakeOperationIDAtRoute(OperationSourceManual, firstID.Route(), 1, 1)
+	if !made || fleet.RequestChannelExecutor(manualID) != ExecutorRequestInvalid {
+		t.Fatal("channel request accepted another source kind")
+	}
+	for _, current := range []*fixture{first, second} {
+		if !BeginExecutorFleetClose(fleet, current.handle) ||
+			!ConfirmExecutorFleetRouteClose(fleet, current.handle) ||
+			!BeginExecutorFleetDriverClose(fleet, current.handle) ||
+			!ConfirmExecutorFleetClose(fleet, current.handle) {
+			t.Fatalf("close fleet channel route %d", current.handle.Route)
+		}
+		if !current.channel.CanRelease() || !current.waits.CanRelease() {
+			t.Fatalf("fleet channel route %d retained source storage", current.handle.Route)
+		}
+	}
+	if fleet.RequestChannelExecutor(firstID) != ExecutorRequestClosed || !fleet.AllRetired() {
+		t.Fatal("retired fleet channel route accepted a wake")
+	}
+}
+
 func TestExecutorFleetAdoptsExistingProgramDomainBeforeOwnedPeer(t *testing.T) {
 	fleet := new(ExecutorFleet)
 	programP := new(P)

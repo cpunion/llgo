@@ -23,12 +23,13 @@ const (
 	channelOwnerGateHeld
 )
 
-// channelMutex is not a general-purpose mutex. All managed channel, select,
-// timer-channel, and close mutations execute on the one active coroutine P.
-// Consequently a legitimate acquisition is uncontended and completes with
-// one CAS. Contention means either a reentrant channel critical section or an
-// unaudited foreign-thread entry; waiting or spinning here would stop the sole
-// executor, so both conditions fail closed.
+// channelMutex is not a general-purpose blocking mutex. Channel, select,
+// timer-channel, and close mutations may execute concurrently on independent
+// fleet Ps, but every critical section is a required-plain no-suspend island.
+// An owner therefore releases the gate without depending on another managed
+// continuation running on the same physical thread. A compact atomic spin is
+// sufficient for the shared hchan metadata and keeps the primitive usable by
+// native, wasm, embedded, and bare-metal profiles without pthread/libuv state.
 //
 // The gate must never be held across llvm.coro.suspend. Compiler-owned channel
 // try/park/resume helpers are required-plain runtime islands, and the physical
@@ -50,8 +51,14 @@ func (m *channelMutex) Init(_ *struct{}) int32 {
 }
 
 func (m *channelMutex) Lock() {
-	if m == nil || !channelMutexCompareAndSwap(&m.state, channelOwnerGateIdle, channelOwnerGateHeld) {
-		coroRuntimeAbort("contended or reentrant coroutine channel owner gate")
+	if m == nil {
+		coroRuntimeAbort("lock nil coroutine channel owner gate")
+		return
+	}
+	for !channelMutexCompareAndSwap(&m.state, channelOwnerGateIdle, channelOwnerGateHeld) {
+		// The atomic retry is deliberately the only wait operation. The holder
+		// cannot suspend or call scheduler code, so progress never depends on
+		// waking a coroutine parked behind this gate.
 	}
 }
 

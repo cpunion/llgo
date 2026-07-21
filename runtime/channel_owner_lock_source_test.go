@@ -27,7 +27,7 @@ import (
 	"testing"
 )
 
-func TestCoroChannelStateUsesNonblockingOwnerGate(t *testing.T) {
+func TestCoroChannelStateUsesPortableNoSuspendGate(t *testing.T) {
 	channelSource, err := os.ReadFile("internal/runtime/z_chan.go")
 	if err != nil {
 		t.Fatal(err)
@@ -44,17 +44,19 @@ func TestCoroChannelStateUsesNonblockingOwnerGate(t *testing.T) {
 	ownerText := string(ownerSource)
 	for _, marker := range []string{
 		"//go:build (llgo && llgo_coro) || coro_channel_owner_test",
-		"one CAS",
+		"required-plain no-suspend island",
 		"must never be held across llvm.coro.suspend",
-		"channelMutexCompareAndSwap(&m.state, channelOwnerGateIdle, channelOwnerGateHeld)",
+		"for !channelMutexCompareAndSwap(&m.state, channelOwnerGateIdle, channelOwnerGateHeld)",
 		"channelMutexCompareAndSwap(&m.state, channelOwnerGateHeld, channelOwnerGateIdle)",
-		"contended or reentrant coroutine channel owner gate",
+		"atomic retry is deliberately the only wait operation",
 	} {
 		if !strings.Contains(ownerText, marker) {
 			t.Errorf("%s lacks owner-gate contract %q", ownerPath, marker)
 		}
 	}
-	for _, forbidden := range []string{"pthread", "schedulerwait", "time.Sleep", "coroSchedulerYield"} {
+	for _, forbidden := range []string{
+		"runtime/internal/clite/pthread", "schedulerwait", "time.Sleep", "coroSchedulerYield",
+	} {
 		if strings.Contains(ownerText, forbidden) {
 			t.Errorf("%s contains blocking/foreign owner-gate dependency %q", ownerPath, forbidden)
 		}
@@ -64,13 +66,17 @@ func TestCoroChannelStateUsesNonblockingOwnerGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	loops := 0
 	ast.Inspect(parsed, func(node ast.Node) bool {
 		switch node.(type) {
 		case *ast.ForStmt, *ast.RangeStmt:
-			t.Errorf("%s contains a loop in the owner gate", ownerPath)
+			loops++
 		}
 		return true
 	})
+	if loops != 1 {
+		t.Errorf("%s contains %d loops, want the one atomic acquisition retry", ownerPath, loops)
+	}
 
 	atomicSource, err := os.ReadFile("internal/runtime/z_chan_lock_coro_atomic_llgo.go")
 	if err != nil {

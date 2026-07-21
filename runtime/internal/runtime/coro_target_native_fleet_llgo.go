@@ -167,6 +167,24 @@ func coroTargetRequestExecutorV1(handle coro.ExecutorHandle) bool {
 	return accepted && ringOK && leaveOK
 }
 
+// coroTargetRequestChannelOperationV1 routes a typed hchan commit to the exact
+// logical executor encoded by its endpoint. The source fact is already durable
+// before entry; the fleet route lease spans registry lookup and request, and
+// the target rings only that route's physical doorbell when required.
+func coroTargetRequestChannelOperationV1(id coro.OperationID) bool {
+	if !id.Valid() || id.Source() != coro.OperationSourceChannel {
+		return false
+	}
+	domain, ok := coroNativeFleetActiveDomainForRouteV1(id.Route())
+	if !ok || domain.channelOwnerV1() == nil {
+		return false
+	}
+	result := coroNativeFleetV1State.fleet.RequestChannelExecutor(id)
+	accepted := result == coro.ExecutorRequestPublished ||
+		result == coro.ExecutorRequestCoalesced || result == coro.ExecutorRequestIdleWake
+	return accepted && (!coro.ExecutorRequestNeedsDoorbell(result) || domain.doorbell.Ring())
+}
+
 func coroTargetPostTaskControlV1(
 	id coro.OperationID,
 	kind coro.TaskCancelKind,

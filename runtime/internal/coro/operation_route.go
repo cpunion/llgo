@@ -532,3 +532,34 @@ func (registry *OperationRouteRegistry) PostPollAndRequest(
 func (registry *OperationRouteRegistry) PostTaskControlAndRequest(id OperationID, kind TaskCancelKind) OperationRouteIngressResult {
 	return registry.PostAndRequest(id, kind)
 }
+
+// RequestChannelExecutor requests the exact executor after the typed hchan
+// adapter has durably committed one Channel endpoint. Unlike PostAndRequest,
+// this method does not publish a source fact: the adapter's external commit
+// transaction already did so while holding the hchan lock and endpoint
+// admission. The route lease protects source/executor pointer lookup through
+// the request tail and makes close a strong join of that routing operation.
+func (registry *OperationRouteRegistry) RequestChannelExecutor(id OperationID) ExecutorRequestResult {
+	if !id.Valid() || id.Source() != OperationSourceChannel {
+		return ExecutorRequestInvalid
+	}
+	slot, ok := operationRouteSlotFor(registry, id.Route())
+	if !ok {
+		return ExecutorRequestStale
+	}
+	if !operationRouteAcquireProducer(slot) {
+		state := operationRouteLifecycle(preemptLoad(&slot.state))
+		if state == operationRouteClosing || state == operationRouteQuiesced || state == operationRouteRetired {
+			return ExecutorRequestClosed
+		}
+		return ExecutorRequestStale
+	}
+	result := ExecutorRequestInvalid
+	if preemptLoad(&slot.state) == uint32(operationRouteActive) &&
+		preemptLoad(&slot.route) == uint32(id.Route()) && slot.channel != nil &&
+		slot.executorRegistry != nil {
+		result = slot.executorRegistry.Request(slot.executor)
+	}
+	operationRouteReleaseProducer(slot)
+	return result
+}

@@ -18,6 +18,39 @@ package coro
 
 import "unsafe"
 
+// CurrentExecutorChannelDriver resolves the exact channel source owner during
+// the compiler's narrow SuspendPark/FrameSuspended transition window. Channel
+// queue nodes may later rendezvous across executor routes, but preparation and
+// resume cleanup are always owned by the current G's exact P/source pair.
+func CurrentExecutorChannelDriver(g *G) (*ExecutorDriver, ExecutorHandle, RouteID, bool) {
+	driver, handle, route, ok := currentExecutorParkDriver(g)
+	if !ok || driver.sources.channel == nil ||
+		!validChannelOperationOwner(driver.sources.channel, driver.p) ||
+		driver.sources.channel.route != route {
+		return nil, ExecutorHandle{}, 0, false
+	}
+	return driver, handle, route, true
+}
+
+// CurrentExecutorChannelParkOwner returns transient owner-only objects needed
+// by the typed hchan adapter to build a direct or multi-case park. None of the
+// returned pointers may cross suspension except the ChannelOperationSource
+// stored in the compiler-spilled endpoint itself. That source is stable for
+// the executor lifetime, while OperationID remains the producer/wake identity.
+func CurrentExecutorChannelParkOwner(
+	driver *ExecutorDriver,
+	g *G,
+) (*P, *ParkState, *ChannelOperationSource, bool) {
+	if driver == nil || !ValidG(g) {
+		return nil, nil, nil, false
+	}
+	current, _, _, ok := CurrentExecutorChannelDriver(g)
+	if !ok || current != driver || driver.p != g.runP {
+		return nil, nil, nil, false
+	}
+	return driver.p, &g.park, driver.sources.channel, true
+}
+
 // ActiveChannelParkOwner returns the scheduler-owner context used by the
 // trusted typed-channel adapter while a compiler resume gate is active. The
 // returned ParkState pointer is frame-independent G storage and must not be

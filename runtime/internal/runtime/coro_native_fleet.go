@@ -63,6 +63,7 @@ type coroNativeFleetDomainV1 struct {
 	poll    coro.PollOperationSource
 	manual  coro.ManualOperationSource
 	worker  coro.WorkerOperationSource
+	channel coro.ChannelOperationSource
 	control coro.TaskControlSource
 
 	ingress   coro.TargetIngress
@@ -127,6 +128,16 @@ func (domain *coroNativeFleetDomainV1) workerOwnerV1() *coro.WorkerOperationSour
 	return &domain.worker
 }
 
+func (domain *coroNativeFleetDomainV1) channelOwnerV1() *coro.ChannelOperationSource {
+	if domain == nil {
+		return nil
+	}
+	if domain.adopted {
+		return domain.owners.sources.Channel
+	}
+	return &domain.channel
+}
+
 func validCoroNativeFleetAdoptedOwnersV1(owners coroNativeFleetDomainOwnersV1) bool {
 	sources := owners.sources
 	return owners.p != nil && owners.driver != nil && sources.Waits != nil && sources.Timers != nil &&
@@ -174,7 +185,7 @@ func coroNativeFleetDomainCandidateV1(domain *coroNativeFleetDomainV1) bool {
 		domain.driver == (coro.ExecutorDriver{}) &&
 		domain.waits.CanRelease() && domain.timers.CanRelease() && domain.poll.CanRelease() &&
 		domain.manual.CanRelease() &&
-		domain.worker.CanRelease() && domain.control.CanRelease() &&
+		domain.worker.CanRelease() && domain.channel.CanRelease() && domain.control.CanRelease() &&
 		domain.ingress.CanReleaseResources() && domain.admission.CanRecycle()
 }
 
@@ -285,6 +296,7 @@ func coroNativeFleetBindDomainV1(state *coroNativeFleetStateV1, index uint32) bo
 			Poll:    &domain.poll,
 			Manual:  &domain.manual,
 			Worker:  &domain.worker,
+			Channel: &domain.channel,
 			Control: &domain.control,
 		},
 	)

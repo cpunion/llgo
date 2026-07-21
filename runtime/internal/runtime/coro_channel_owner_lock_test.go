@@ -18,7 +18,10 @@
 
 package runtime
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func expectCoroChannelOwnerGateAbort(t *testing.T, operation func()) {
 	t.Helper()
@@ -30,7 +33,7 @@ func expectCoroChannelOwnerGateAbort(t *testing.T, operation func()) {
 	operation()
 }
 
-func TestCoroChannelOwnerGateIsSingleAttemptAndFailClosed(t *testing.T) {
+func TestCoroChannelOwnerGateSerializesIndependentOwners(t *testing.T) {
 	var mutex channelMutex
 	if result := mutex.Init(nil); result != 0 || mutex.state != channelOwnerGateIdle {
 		t.Fatalf("initialize coroutine channel owner gate = (%d, %d)", result, mutex.state)
@@ -39,11 +42,33 @@ func TestCoroChannelOwnerGateIsSingleAttemptAndFailClosed(t *testing.T) {
 	if mutex.state != channelOwnerGateHeld {
 		t.Fatalf("locked coroutine channel owner gate = %d", mutex.state)
 	}
-	expectCoroChannelOwnerGateAbort(t, mutex.Lock)
-	if mutex.state != channelOwnerGateHeld {
-		t.Fatalf("reentrant acquisition changed coroutine channel owner gate = %d", mutex.state)
+	acquired := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		mutex.Lock()
+		close(acquired)
+		<-release
+		mutex.Unlock()
+		close(done)
+	}()
+	select {
+	case <-acquired:
+		t.Fatal("contending coroutine channel owner crossed held gate")
+	case <-time.After(10 * time.Millisecond):
 	}
 	mutex.Unlock()
+	select {
+	case <-acquired:
+	case <-time.After(time.Second):
+		t.Fatal("contending coroutine channel owner did not acquire released gate")
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("contending coroutine channel owner did not release gate")
+	}
 	if mutex.state != channelOwnerGateIdle {
 		t.Fatalf("released coroutine channel owner gate = %d", mutex.state)
 	}

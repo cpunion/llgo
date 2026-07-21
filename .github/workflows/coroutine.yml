@@ -75,6 +75,8 @@ jobs:
             ./internal/runtime/coro_executor.go \
             ./internal/runtime/coro_panic_payload.go \
             ./internal/runtime/coro_executor_driver_legacy.go \
+            ./internal/runtime/coro_ready_distribution_default.go \
+            ./internal/runtime/coro_target_executor_retired_default.go \
             ./internal/runtime/coro_target_test_adapter.go \
             ./internal/runtime/coro_program_test.go \
             -run '^TestCoroProgram' -count=1
@@ -96,12 +98,14 @@ jobs:
             ./internal/runtime/coro_executor.go \
             ./internal/runtime/coro_panic_payload.go \
             ./internal/runtime/coro_executor_driver_legacy.go \
+            ./internal/runtime/coro_ready_distribution_default.go \
+            ./internal/runtime/coro_target_executor_retired_default.go \
             ./internal/runtime/coro_target_test_adapter.go \
             ./internal/runtime/coro_program_test.go \
             -run '^TestCoroProgram' -count=1
           # Exercise the production typed hchan queue and exact coroutine
           # source transaction together. The host atomic shim exercises the
-          # single-P owner gate without pulling pthread into host or wasm.
+          # portable no-suspend channel gate without an OS mutex dependency.
           go test -race -shuffle=on -tags='coro_channel_adapter_test,coro_channel_owner_test' \
             ./internal/runtime/z_chan.go \
             ./internal/runtime/z_chan_coro.go \

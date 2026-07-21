@@ -492,6 +492,17 @@ func (fleet *ExecutorFleet) PostTaskControlAndRequest(id OperationID, kind TaskC
 	return fleet.routes.PostTaskControlAndRequest(id, kind)
 }
 
+// RequestChannelExecutor routes the wake half of an already committed typed
+// channel rendezvous. The Channel source fact is published by the hchan
+// transaction before this call; this method only resolves and requests the
+// executor encoded by the endpoint's OperationID route.
+func (fleet *ExecutorFleet) RequestChannelExecutor(id OperationID) ExecutorRequestResult {
+	if fleet == nil || fleet.magic != executorFleetMagic {
+		return ExecutorRequestInvalid
+	}
+	return fleet.routes.RequestChannelExecutor(id)
+}
+
 // BeginExecutorFleetClose first seals the route ingress. Source and executor
 // shutdown is intentionally unavailable until ConfirmExecutorFleetRouteClose
 // has strongly joined every admitted completion/request/transfer producer.

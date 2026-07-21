@@ -175,19 +175,126 @@ func Check() int32 {
 }
 `
 
+const coroNativeFleetChannelSelectE2ESource = `package main
+
+import _ "unsafe"
+
+var Data chan uint32
+var Never chan uint32
+var Ack chan uint32
+var Got uint32
+var MainThread uintptr
+var ChildThread uintptr
+
+//llgo:coro noblock
+//go:linkname threadID C.__llgo_coro_native_fleet_e2e_thread_id_v1
+func threadID() uintptr
+
+func Setup() {
+	Data = make(chan uint32)
+	Never = make(chan uint32)
+	Ack = make(chan uint32)
+	Got = 0
+	MainThread = threadID()
+	ChildThread = 0
+}
+
+func child() {
+	ChildThread = threadID()
+	select {
+	case Got = <-Data:
+	case Got = <-Never:
+	}
+	Ack <- 1
+}
+
+func main() {
+	go child()
+	Data <- 0xdecafbad
+	<-Ack
+}
+
+func Check() int32 {
+	if Got != 0xdecafbad {
+		return 47
+	}
+	if MainThread == 0 || ChildThread == 0 || MainThread == ChildThread {
+		return 48
+	}
+	return 0
+}
+`
+
+const coroNativeFleetChannelShutdownE2ESource = `package main
+
+import _ "unsafe"
+
+var NeverA chan uint32
+var NeverB chan uint32
+var ChildStage uint32
+var MainThread uintptr
+var ChildThread uintptr
+
+//llgo:coro noblock
+//go:linkname threadID C.__llgo_coro_native_fleet_e2e_thread_id_v1
+func threadID() uintptr
+
+func Setup() {
+	NeverA = make(chan uint32)
+	NeverB = make(chan uint32)
+	ChildStage = 0
+	MainThread = threadID()
+	ChildThread = 0
+}
+
+func child() {
+	ChildThread = threadID()
+	ChildStage = 1
+	select {
+	case <-NeverA:
+	case <-NeverB:
+	}
+	ChildStage = 2
+}
+
+func main() {
+	go child()
+	for ChildStage == 0 {
+	}
+}
+
+func Check() int32 {
+	if ChildStage != 1 {
+		return 57
+	}
+	if MainThread == 0 || ChildThread == 0 || MainThread == ChildThread {
+		return 58
+	}
+	return 0
+}
+`
+
 func TestCoroNativeFleetPhysicalPeerRunsDistributedChildE2E(t *testing.T) {
-	runCoroNativeFleetE2E(t, coroNativeFleetE2ESource, "distributed-child")
+	runCoroNativeFleetE2E(t, coroNativeFleetE2ESource, "distributed-child", false)
 }
 
 func TestCoroNativeFleetMainReturnCancelsPeerE2E(t *testing.T) {
-	runCoroNativeFleetE2E(t, coroNativeFleetShutdownE2ESource, "main-return-cancel")
+	runCoroNativeFleetE2E(t, coroNativeFleetShutdownE2ESource, "main-return-cancel", false)
 }
 
 func TestCoroNativeFleetPeerSpawnStaysOwnedE2E(t *testing.T) {
-	runCoroNativeFleetE2E(t, coroNativeFleetPeerSpawnE2ESource, "peer-spawn-owned")
+	runCoroNativeFleetE2E(t, coroNativeFleetPeerSpawnE2ESource, "peer-spawn-owned", false)
 }
 
-func runCoroNativeFleetE2E(t *testing.T, source, name string) {
+func TestCoroNativeFleetChannelSelectCrossRouteE2E(t *testing.T) {
+	runCoroNativeFleetE2E(t, coroNativeFleetChannelSelectE2ESource, "channel-select-cross-route", true)
+}
+
+func TestCoroNativeFleetShutdownCancelsPeerChannelSelectE2E(t *testing.T) {
+	runCoroNativeFleetE2E(t, coroNativeFleetChannelShutdownE2ESource, "channel-select-shutdown", true)
+}
+
+func runCoroNativeFleetE2E(t *testing.T, source, name string, enableChannel bool) {
 	t.Helper()
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("native coroutine fleet link smoke requires Darwin or Linux")
@@ -218,7 +325,7 @@ func runCoroNativeFleetE2E(t *testing.T, source, name string) {
 	defer prog.Dispose()
 
 	userObject, anchor, setupSymbol, checkSymbol := buildCoroSpawnNativeE2EUserSource(
-		t, prog, temp, source, false,
+		t, prog, temp, source, enableChannel,
 	)
 	entryObject := buildCoroSpawnNativeE2EEntry(t, prog, temp, anchor)
 	driverObject := buildCoroSpawnNativeE2EDriver(t, prog, temp, setupSymbol, checkSymbol)
@@ -274,6 +381,7 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_sched.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor_driver_timer_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_nil_fault.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_spawn.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_fleet.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_fleet_owner_llgo.go"),

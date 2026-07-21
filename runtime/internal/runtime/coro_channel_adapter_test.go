@@ -108,6 +108,11 @@ func coroTargetRequestExecutorV1(handle coro.ExecutorHandle) bool {
 		result == coro.ExecutorRequestIdleWake
 }
 
+func coroTargetRequestChannelOperationV1(id coro.OperationID) bool {
+	return id.Valid() && id.Source() == coro.OperationSourceChannel && id.Route() == coro.RouteID(1) &&
+		coroTargetRequestExecutorV1(coroProgramExecutorHandleV1State)
+}
+
 type coroChannelAdapterFrame struct {
 	g          *coro.G
 	handle     unsafe.Pointer
