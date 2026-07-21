@@ -594,10 +594,7 @@ func Build(inv Invocation) ([]Package, error) {
 
 	buildMode := ssaBuildMode
 	cabiOptimize := true
-	passOpt := true
-	if emitDebugInfo || mode == ModeGen {
-		passOpt = false
-	}
+	passOpt := shouldRunLLVMPasses(mode)
 	if emitDebugInfo {
 		buildMode |= ssa.GlobalDebug
 		cabiOptimize = false
@@ -605,6 +602,7 @@ func Build(inv Invocation) ([]Package, error) {
 	if !IsOptimizeEnabled() {
 		buildMode |= ssa.NaiveForm
 	}
+	prog.SetDebugInfoOptimized(passOpt && conf.OptLevel != optlevel.O0)
 	progSSA := ssa.NewProgram(initial[0].Fset, buildMode)
 	patches := make(cl.Patches, len(altPkgPaths))
 	altSSAPkgs(progSSA, patches, altPkgs[1:], conf, verbose)
@@ -2532,6 +2530,10 @@ func llvmPassPipeline(level optlevel.Level, ltoMode lto.Mode) string {
 	default:
 		return "default<" + level.Name() + ">"
 	}
+}
+
+func shouldRunLLVMPasses(mode Mode) bool {
+	return mode != ModeGen
 }
 
 func IsWasiThreadsEnabled() bool {
