@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	buildfuncinfo "github.com/goplus/llgo/internal/build/funcinfo"
+	"github.com/goplus/llgo/internal/crosscompile"
 	"github.com/goplus/llgo/internal/pclnmap"
 )
 
@@ -155,12 +156,13 @@ func TestNewDefaultConfMetadataDefaults(t *testing.T) {
 	if conf.PCLNModeSet {
 		t.Fatal("NewDefaultConf().PCLNModeSet = true, want unresolved legacy default")
 	}
-	if !conf.OmitDWARFByDefault {
-		t.Fatal("NewDefaultConf().OmitDWARFByDefault = false, want safe provisional-DWARF default")
+	target := crosscompile.Export{}
+	if !shouldEmitDebugInfo(conf, &target) {
+		t.Fatal("NewDefaultConf() omits DWARF, want cmd/link default")
 	}
 	genConf := NewDefaultConf(ModeGen)
-	if genConf.OmitDWARFByDefault {
-		t.Fatal("NewDefaultConf(ModeGen).OmitDWARFByDefault = true, want no linked-build policy")
+	if shouldEmitDebugInfo(genConf, &target) {
+		t.Fatal("NewDefaultConf(ModeGen) emits DWARF without an explicit request")
 	}
 }
 
