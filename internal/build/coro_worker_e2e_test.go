@@ -59,3 +59,20 @@ func buildCoroNativeDoorbellObject(t *testing.T, temp string) string {
 	}
 	return object
 }
+
+// buildCoroNativeFleetOwnerObject materializes the fixed pthread routine owned
+// by runtime/internal/corofleet. It has one static C-to-Go edge and accepts no
+// function pointer or coroutine identity from managed code.
+func buildCoroNativeFleetOwnerObject(t *testing.T, temp string) string {
+	t.Helper()
+	clang, err := exec.LookPath("clang")
+	if err != nil {
+		t.Skip("clang is unavailable")
+	}
+	source := filepath.Join("..", "..", "runtime", "internal", "corofleet", "_owner", "owner.c")
+	object := filepath.Join(temp, "coro-fleet-owner.o")
+	if output, err := exec.Command(clang, "-std=c11", "-O2", "-c", source, "-o", object).CombinedOutput(); err != nil {
+		t.Fatalf("compile native coroutine fleet owner leaf: %v\n%s", err, output)
+	}
+	return object
+}

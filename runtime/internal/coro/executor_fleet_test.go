@@ -232,6 +232,35 @@ func TestExecutorFleetAdoptsExistingProgramDomainBeforeOwnedPeer(t *testing.T) {
 	}
 }
 
+func TestExecutorFleetAdoptedProgramCanFinishAuthoritativeExternalClose(t *testing.T) {
+	fleet := new(ExecutorFleet)
+	p := new(P)
+	driver, registry, waits, manual, executor := bindTestExecutorDriverWithManual(t, p)
+	handle, adopted := AdoptExecutorFleet(fleet, driver, p)
+	if !adopted || handle.Executor != executor || handle.Route != 1 {
+		t.Fatalf("adopt external-close program = (%+v,%t)", handle, adopted)
+	}
+	if !BeginExecutorClose(driver) {
+		t.Fatal("begin authoritative adopted driver close")
+	}
+	if !BeginExecutorFleetClose(fleet, handle) {
+		t.Fatal("begin adopted fleet route close")
+	}
+	if !ConfirmExecutorFleetRouteClose(fleet, handle) {
+		t.Fatal("confirm adopted fleet route close")
+	}
+	if !BeginExecutorFleetExternalDriverClose(fleet, handle) {
+		t.Fatal("record authoritative adopted driver close")
+	}
+	if ConfirmExecutorFleetExternalClose(fleet, handle) {
+		t.Fatal("fleet confirmed adopted close before authoritative driver")
+	}
+	if !ConfirmExecutorClose(driver) || !ConfirmExecutorFleetExternalClose(fleet, handle) ||
+		!fleet.AllRetired() || !registry.CanRelease() || !waits.CanRelease() || !manual.CanRelease() {
+		t.Fatal("finish adopted authoritative external close")
+	}
+}
+
 func TestExecutorFleetBindsTimerAndRoutesPollSources(t *testing.T) {
 	t.Run("timer-owner-source", func(t *testing.T) {
 		fleet := new(ExecutorFleet)
@@ -420,6 +449,39 @@ func TestExecutorFleetTransferUsesRouteAdmissionAndRequiresEmptyMailbox(t *testi
 	// that task terminates or is migrated by a later scheduler policy.
 	if BeginExecutorFleetDriverClose(fleet, first.handle) {
 		t.Fatal("closed driver while imported runnable remained queued")
+	}
+}
+
+func TestExecutorFleetInitialReadyHeadDistributionDoesNotBounceYieldedWork(t *testing.T) {
+	fleet := new(ExecutorFleet)
+	initialTarget := bindExecutorFleetManualFixture(t, fleet)
+	yieldedTarget := bindExecutorFleetManualFixture(t, fleet)
+
+	initialSource := new(P)
+	initial := newYieldingTestG(t, "fleet-initial-distribution")
+	if !Enqueue(initialSource, initial.g) {
+		t.Fatal("enqueue initial distribution source")
+	}
+	id, request, published := fleet.PublishInitialReadyHeadAndRequest(initialTarget.handle, initialSource)
+	if !published || !id.Valid() || request != ExecutorRequestPublished ||
+		initialSource.readyHead != nil || initialSource.readyTail != nil {
+		t.Fatalf("publish initial ready head = (%+v,%d,%t), source=(%p,%p)",
+			id, request, published, initialSource.readyHead, initialSource.readyTail)
+	}
+
+	yieldedSource := new(P)
+	yielded := newYieldingTestG(t, "fleet-yielded-local-fallback")
+	yieldRunnableForTransfer(t, yieldedSource, yielded)
+	beforeHead, beforeTail := yieldedSource.readyHead, yieldedSource.readyTail
+	if yieldedID, yieldedRequest, yieldedPublished := fleet.PublishInitialReadyHeadAndRequest(
+		yieldedTarget.handle,
+		yieldedSource,
+	); yieldedPublished || yieldedID != (RunnableTransferID{}) ||
+		yieldedRequest != ExecutorRequestInvalid || yieldedSource.readyHead != beforeHead ||
+		yieldedSource.readyTail != beforeTail || !yielded.g.queued {
+		t.Fatalf("yielded distribution fallback = (%+v,%d,%t), source=(%p,%p) queued=%t",
+			yieldedID, yieldedRequest, yieldedPublished, yieldedSource.readyHead,
+			yieldedSource.readyTail, yielded.g.queued)
 	}
 }
 

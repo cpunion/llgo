@@ -636,6 +636,14 @@ func coroNativeFleetDrainOwnerEpochV1(
 	handle coro.ExecutorFleetHandle,
 	epoch, budget uint32,
 ) (moved uint32, more bool, ok bool) {
+	moved, more, status := coroNativeFleetTryDrainOwnerEpochV1(handle, epoch, budget)
+	return moved, more, status == coro.RunnableTransferDrainComplete
+}
+
+func coroNativeFleetTryDrainOwnerEpochV1(
+	handle coro.ExecutorFleetHandle,
+	epoch, budget uint32,
+) (moved uint32, more bool, status coro.RunnableTransferDrainStatus) {
 	domain, valid := coroNativeFleetDomainForHandleV1(
 		&coroNativeFleetV1State,
 		handle,
@@ -643,13 +651,13 @@ func coroNativeFleetDrainOwnerEpochV1(
 	)
 	if !valid || epoch == 0 || domain.ownerEpoch != epoch ||
 		budget == 0 || budget > coro.RunnableTransferMailboxCapacity {
-		return 0, false, false
+		return 0, false, coro.RunnableTransferDrainInvalid
 	}
 	p := domain.pOwnerV1()
 	if p == nil {
-		return 0, false, false
+		return 0, false, coro.RunnableTransferDrainInvalid
 	}
-	return coroNativeFleetV1State.fleet.DrainPNeutralRunnables(handle, p, budget)
+	return coroNativeFleetV1State.fleet.TryDrainPNeutralRunnables(handle, p, budget)
 }
 
 // coroNativeFleetPollOwnerEpochV1 reuses the existing unified source
@@ -784,6 +792,18 @@ func coroNativeFleetPrepareOwnerWaitAtV1(
 	}
 	if !prepared {
 		return coroNativeFleetOwnerWaitPlanV1{}, true
+	}
+	// Prepare may consume an advisory request which was published after the
+	// owner's pre-idle mailbox scan. Import again while the executor gate is
+	// IdleArmed and before CommitSleep: an already-published transfer becomes
+	// ready work, while any later publisher observes IdleArmed and must ring the
+	// route doorbell. This is the mailbox equivalent of the source-set B scan.
+	if _, _, status := coroNativeFleetTryDrainOwnerEpochV1(
+		handle,
+		epoch,
+		coro.RunnableTransferMailboxCapacity,
+	); status != coro.RunnableTransferDrainComplete && status != coro.RunnableTransferDrainContended {
+		return coroNativeFleetOwnerWaitPlanV1{}, false
 	}
 	sleep, deadline, hasDeadline, committed := coro.CommitExecutorSleepAt(driver, freshNow)
 	if !committed {
@@ -937,6 +957,38 @@ func coroNativeFleetRetireDriverV1(handle coro.ExecutorFleetHandle) bool {
 			domain.lifecycle = coroNativeFleetDomainFailedV1
 			return false
 		}
+	}
+	domain.lifecycle = coroNativeFleetDomainRetiredV1
+	return true
+}
+
+// coroNativeFleetBeginExternalDriverCloseV1 records that the adopted program
+// driver already sealed its authoritative request gate through command or
+// terminal close. Route ingress and target backend are nevertheless retired by
+// the fleet first; only the driver transition itself is delegated.
+func coroNativeFleetBeginExternalDriverCloseV1(handle coro.ExecutorFleetHandle) bool {
+	domain, ok := coroNativeFleetDomainForHandleV1(
+		&coroNativeFleetV1State,
+		handle,
+		coroNativeFleetDomainBackendRetiredV1,
+	)
+	return ok && domain.adopted &&
+		coro.BeginExecutorFleetExternalDriverClose(&coroNativeFleetV1State.fleet, handle)
+}
+
+// coroNativeFleetConfirmExternalDriverCloseV1 runs only after the authoritative
+// program Confirm call zeroed its driver and unbound every source. It clears
+// the fleet mailbox/pointer suffix, then releases the retained owner references.
+func coroNativeFleetConfirmExternalDriverCloseV1(handle coro.ExecutorFleetHandle) bool {
+	domain, ok := coroNativeFleetDomainForHandleV1(
+		&coroNativeFleetV1State,
+		handle,
+		coroNativeFleetDomainBackendRetiredV1,
+	)
+	if !ok || !domain.adopted ||
+		!coro.ConfirmExecutorFleetExternalClose(&coroNativeFleetV1State.fleet, handle) ||
+		!coroNativeFleetReleaseAdoptedOwnersV1(domain) {
+		return false
 	}
 	domain.lifecycle = coroNativeFleetDomainRetiredV1
 	return true

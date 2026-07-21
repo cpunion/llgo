@@ -905,12 +905,7 @@ func WakeExecutorAt(driver *ExecutorDriver, now int64) (waits, timers, promoted 
 	return scan.waits, scan.timers, scan.promoted, ok
 }
 
-// BeginExecutorClose seals a quiescent driver before physical backend
-// unregister/join. Runnable Gs may remain for command cancellation, but no
-// running or parked G and no live registration may still depend on the backend.
-// Terminal and command shutdown reject a bound driver, so callers must finish
-// this close before entering those state machines.
-func BeginExecutorClose(driver *ExecutorDriver) bool {
+func canBeginExecutorClose(driver *ExecutorDriver) bool {
 	if !validExecutorDriver(driver) || driver.state != executorDriverActive || !idleExecutorScheduler(driver.p) ||
 		driver.poll.phase != executorPollIdle || !emptyExecutorRunCursor(driver) || driver.terminalKind != ActionInvalid ||
 		!emptySchedulerWaitQueues(driver.p) ||
@@ -919,6 +914,18 @@ func BeginExecutorClose(driver *ExecutorDriver) bool {
 	}
 	schedule := preemptLoad(&driver.p.schedule)
 	if schedule != scheduleIdle && schedule != scheduleDisabled {
+		return false
+	}
+	return true
+}
+
+// BeginExecutorClose seals a quiescent driver before physical backend
+// unregister/join. Runnable Gs may remain for command cancellation, but no
+// running or parked G and no live registration may still depend on the backend.
+// Terminal and command shutdown reject a bound driver, so callers must finish
+// this close before entering those state machines.
+func BeginExecutorClose(driver *ExecutorDriver) bool {
+	if !canBeginExecutorClose(driver) {
 		return false
 	}
 	if !driver.registry.BeginClose(driver.handle) {

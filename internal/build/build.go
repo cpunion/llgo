@@ -3927,6 +3927,22 @@ func nativeCoroTimerRuntimeABI(conf *Config) bool {
 	return false
 }
 
+// nativeCoroFleetRuntimeABI is selected only through the compiler-owned tag
+// channel. GOOS/GOARCH and an externally supplied reserved tag are not enough:
+// the raw pthread entry must agree with the planner roots and runtime source
+// island in the same compiler invocation.
+func nativeCoroFleetRuntimeABI(conf *Config) bool {
+	if !nativeCoroTimerRuntimeABI(conf) || conf == nil {
+		return false
+	}
+	for _, tag := range conf.compilerBuildTags {
+		if tag == coroNativeFleetBuildTag {
+			return true
+		}
+	}
+	return false
+}
+
 // validatedCoroFrameRetentionABI selects a lowering identity only after the
 // caller has successfully closed and signature-validated the compiler-owned
 // runtime root plan. The redundant complete-universe check keeps incomplete
@@ -4152,6 +4168,13 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 	}
 	if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
 		names = append(names, coroNativePostWaitSymbolV1)
+	}
+	if nativeCoroFleetRuntimeABI(ctx.buildConf) {
+		// A fixed C pthread routine enters this exact Go body from a raw native
+		// stack. Its static closure owns the ordinary-domain reducer, bounded
+		// reactor wait, and LLVM resume/destroy wrappers; it must never acquire a
+		// managed entry or an independently suspended coroutine twin.
+		names = append(names, coroNativeFleetOwnerSymbolV1)
 	}
 	if hostCoroPullRuntimeABI(ctx.buildConf) {
 		names = append(names,
@@ -4384,6 +4407,15 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 				if !types.Identical(sig.Params().At(parameter).Type(), types.Typ[types.Uintptr]) {
 					return nil, nil, nil, nil, fmt.Errorf("coroutine native worker completion %q must have exact func(uint32, uint32, uintptr, uintptr, uintptr) uint32 signature", name)
 				}
+			}
+		}
+		if name == coroNativeFleetOwnerSymbolV1 {
+			sig := fn.Signature
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 0 ||
+				sig.Results().Len() != 1 ||
+				!types.Identical(sig.Results().At(0).Type(), types.Typ[types.Uint32]) ||
+				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf("coroutine native fleet owner %q must have exact func() uint32 signature", name)
 			}
 		}
 		if name == coroWaitPrepareSymbolV1 {

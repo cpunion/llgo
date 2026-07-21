@@ -145,6 +145,9 @@ func coroProgramExecutorRetiredV1() bool {
 		!coroProgramTaskControlSourceV1State.CanRelease() {
 		return false
 	}
+	if !coroTargetExecutorRetiredV1(coroProgramExecutorHandleV1State) {
+		return false
+	}
 	coroProgramExecutorBoundV1State = false
 	coroProgramExecutorHandleV1State = coro.ExecutorHandle{}
 	return true

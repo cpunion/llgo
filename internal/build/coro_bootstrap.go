@@ -48,6 +48,7 @@ const (
 	coroProgramMainReturnSymbolV1                               = "__llgo_coro_program_main_return_v1"
 	coroNativePostWaitSymbolV1                                  = "__llgo_coro_native_post_wait_v1"
 	coroNativeWorkerCompleteSymbolV1                            = "__llgo_coro_native_worker_complete_v1"
+	coroNativeFleetOwnerSymbolV1                                = "__llgo_coro_native_fleet_owner_v1"
 	coroHostNextActionSymbolV1                                  = "__llgo_coro_host_next_action_v1"
 	coroHostProfileSymbolV1                                     = "__llgo_coro_host_profile_v1"
 	coroHostNextDeadlineSymbolV1                                = "__llgo_coro_host_next_deadline_v1"

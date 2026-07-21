@@ -200,6 +200,14 @@ func coroReduceExecutorRunStepV1(
 		if !committed {
 			return false, false
 		}
+		// A resume commit is the first stable scheduler-stack boundary after a
+		// managed `go` statement publishes its initial child. Native fleet targets
+		// may opportunistically hand that exact ready head to another P here; all
+		// other targets compile this call to a no-op. Failure after an actual
+		// publication is fatal because the mailbox has become the child's sole root.
+		if !coroTargetAfterStableRunActionV1(p, driver) {
+			return false, false
+		}
 		result.used++
 		switch step.Action.Kind {
 		case coro.ActionCheckResume:

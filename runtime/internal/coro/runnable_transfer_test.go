@@ -442,6 +442,46 @@ func TestRunnableTransferConcurrentPublishImportNoLoss(t *testing.T) {
 	}
 }
 
+func TestRunnableTransferOwnerDrainReportsProducerContention(t *testing.T) {
+	target := new(P)
+	var mailbox RunnableTransferMailbox
+	if !BindRunnableTransferMailbox(&mailbox, target) {
+		t.Fatal("bind contended drain mailbox")
+	}
+	preemptStore(&mailbox.gate, runnableTransferGateHeld)
+	moved, more, status := TryDrainPNeutralRunnables(&mailbox, target, 1)
+	if moved != 0 || more || status != RunnableTransferDrainContended {
+		t.Fatalf("contended drain = (%d, %t, %d)", moved, more, status)
+	}
+	preemptStore(&mailbox.gate, runnableTransferGateIdle)
+	moved, more, status = TryDrainPNeutralRunnables(&mailbox, target, 1)
+	if moved != 0 || more || status != RunnableTransferDrainComplete {
+		t.Fatalf("released drain = (%d, %t, %d)", moved, more, status)
+	}
+}
+
+func TestRunnableTransferOwnerDrainDefersAcrossDispatchedAction(t *testing.T) {
+	target := new(P)
+	task := newYieldingTestG(t, "drain-dispatched-action")
+	var mailbox RunnableTransferMailbox
+	if !BindRunnableTransferMailbox(&mailbox, target) || !Enqueue(target, task.g) {
+		t.Fatal("prepare dispatched-action drain")
+	}
+	g, ok := NextRunnable(target)
+	if !ok || g != task.g {
+		t.Fatalf("dequeue dispatched-action task = (%p, %t)", g, ok)
+	}
+	action, ok := BeginRunG(target, g)
+	if !ok || action.Kind != ActionCheckResume || action.Handle != task.handle {
+		t.Fatalf("dispatch task = (%+v, %t)", action, ok)
+	}
+	moved, more, status := TryDrainPNeutralRunnables(&mailbox, target, 1)
+	if moved != 0 || more || status != RunnableTransferDrainOwnerUnstable {
+		t.Fatalf("dispatched-action drain = (%d, %t, %d)", moved, more, status)
+	}
+	runtime.KeepAlive(task.frame.memory)
+}
+
 func TestRunnableTransferGateContentionFailsImmediately(t *testing.T) {
 	source, target := new(P), new(P)
 	task := newYieldingTestG(t, "gate-contention")

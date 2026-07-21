@@ -107,13 +107,27 @@ func validOperationRouteBinding(slot *operationRouteSlot, route RouteID) bool {
 		return true
 	}
 	gateSlot, executorOK := executorSlot(slot.executorRegistry, slot.executor)
-	if !executorOK || preemptLoad(&gateSlot.generation) != slot.executor.Generation ||
-		preemptLoad(&gateSlot.state) != uint32(executorActive) {
+	if !executorOK || preemptLoad(&gateSlot.generation) != slot.executor.Generation {
 		return false
 	}
 	gate := preemptLoad(&gateSlot.gate)
-	if gate&^executorGateMask != 0 || gate&executorGateClosed != 0 ||
-		preemptLoad(&gateSlot.inflight)&producerAdmissionClosed != 0 {
+	inflight := preemptLoad(&gateSlot.inflight)
+	switch executorLifecycle(preemptLoad(&gateSlot.state)) {
+	case executorActive:
+		if gate&^executorGateMask != 0 || gate&executorGateClosed != 0 ||
+			inflight&producerAdmissionClosed != 0 {
+			return false
+		}
+	case executorClosing:
+		// An adopted program driver may have sealed its authoritative request
+		// gate before the fleet coordinator withdraws the additional route
+		// ingress. Route retirement needs only immutable binding identity and its
+		// own producer strong join; later target/program close joins and retires
+		// the executor producer domain itself.
+		if gate != executorGateClosed || inflight&producerAdmissionClosed == 0 {
+			return false
+		}
+	default:
 		return false
 	}
 	return (slot.timers != nil || slot.poll != nil || slot.manual != nil || slot.worker != nil ||

@@ -198,14 +198,17 @@ func executorFleetSlotFor(fleet *ExecutorFleet, handle ExecutorFleetHandle) (*ex
 	return slot, route, slot.handle == handle
 }
 
-func executorFleetActiveOwner(fleet *ExecutorFleet, handle ExecutorFleetHandle) (*executorFleetSlot, RouteID, bool) {
+func executorFleetRouteOwner(fleet *ExecutorFleet, handle ExecutorFleetHandle) (*executorFleetSlot, RouteID, bool) {
 	slot, route, ok := executorFleetSlotFor(fleet, handle)
 	routeSlot, routeOK := operationRouteSlotFor(&fleet.routes, route)
 	return slot, route, ok && preemptLoad(&slot.state) == uint32(executorFleetSlotActive) &&
-		slot.p != nil && slot.driver != nil && validExecutorDriverForP(slot.driver, slot.p) &&
+		slot.p != nil && slot.driver != nil && validExecutorDriver(slot.driver) && slot.driver.p == slot.p &&
 		slot.driver.registry != nil && slot.driver.handle == handle.Executor && slot.driver.route == route && routeOK &&
-		validOperationRouteBinding(routeSlot, route) && routeSlot.executorRegistry == slot.driver.registry &&
-		routeSlot.executor == handle.Executor
+		preemptLoad(&routeSlot.state) == uint32(operationRouteActive) &&
+		RouteID(preemptLoad(&routeSlot.route)) == route && routeSlot.executorRegistry == slot.driver.registry &&
+		routeSlot.executor == handle.Executor &&
+		(routeSlot.timers != nil || routeSlot.poll != nil || routeSlot.manual != nil || routeSlot.worker != nil ||
+			routeSlot.channel != nil || routeSlot.control != nil)
 }
 
 func retireAllocatedFleetRoute(routes *OperationRouteRegistry, route RouteID) bool {
@@ -403,6 +406,22 @@ func (fleet *ExecutorFleet) PublishPNeutralRunnableAndRequest(
 	return id, request, published
 }
 
+// PublishInitialReadyHeadAndRequest opportunistically moves only the exact
+// source ready-head when it is a never-run initial coroutine. It is called by
+// a source-P owner after a physical resume has completely committed, never by
+// a callback or from inside managed code. Ineligibility and mailbox contention
+// are ordinary local-execution fallback and leave the source queue untouched.
+func (fleet *ExecutorFleet) PublishInitialReadyHeadAndRequest(
+	handle ExecutorFleetHandle,
+	source *P,
+) (RunnableTransferID, ExecutorRequestResult, bool) {
+	if source == nil || !stableRunnableTransferP(source) || !validReadyQueue(source) ||
+		source.readyHead == nil || !initialPNeutralRunnable(source.readyHead, true) {
+		return RunnableTransferID{}, ExecutorRequestInvalid, false
+	}
+	return fleet.PublishPNeutralRunnableAndRequest(handle, source, source.readyHead)
+}
+
 // ImportPNeutralRunnable imports one exact FIFO transfer on its destination P.
 // It is owner-serialized and accepted while Active or RouteClosing, allowing a
 // sealed route to drain before its pointer suffix is retired.
@@ -423,15 +442,26 @@ func (fleet *ExecutorFleet) DrainPNeutralRunnables(
 	owner *P,
 	budget uint32,
 ) (uint32, bool, bool) {
+	moved, more, status := fleet.TryDrainPNeutralRunnables(handle, owner, budget)
+	return moved, more, status == RunnableTransferDrainComplete
+}
+
+// TryDrainPNeutralRunnables preserves the mailbox Try-gate contention result
+// for a physical scheduler owner. Route or ownership failures remain Invalid.
+func (fleet *ExecutorFleet) TryDrainPNeutralRunnables(
+	handle ExecutorFleetHandle,
+	owner *P,
+	budget uint32,
+) (uint32, bool, RunnableTransferDrainStatus) {
 	slot, _, ok := executorFleetSlotFor(fleet, handle)
 	if !ok || slot.p != owner {
-		return 0, false, false
+		return 0, false, RunnableTransferDrainInvalid
 	}
 	state := executorFleetSlotState(preemptLoad(&slot.state))
 	if state != executorFleetSlotActive && state != executorFleetSlotRouteClosing {
-		return 0, false, false
+		return 0, false, RunnableTransferDrainInvalid
 	}
-	return DrainPNeutralRunnables(&slot.mailbox, owner, budget)
+	return TryDrainPNeutralRunnables(&slot.mailbox, owner, budget)
 }
 
 func (fleet *ExecutorFleet) PostManualAndRequest(id OperationID) OperationRouteIngressResult {
@@ -466,11 +496,28 @@ func (fleet *ExecutorFleet) PostTaskControlAndRequest(id OperationID, kind TaskC
 // shutdown is intentionally unavailable until ConfirmExecutorFleetRouteClose
 // has strongly joined every admitted completion/request/transfer producer.
 func BeginExecutorFleetClose(fleet *ExecutorFleet, handle ExecutorFleetHandle) bool {
-	slot, route, ok := executorFleetActiveOwner(fleet, handle)
+	slot, route, ok := executorFleetRouteOwner(fleet, handle)
 	if !ok || !fleet.routes.BeginClose(route) {
 		return false
 	}
 	preemptStore(&slot.state, uint32(executorFleetSlotRouteClosing))
+	return true
+}
+
+// BeginExecutorFleetExternalDriverClose records that an adopted executor has
+// already entered its command or terminal close state through the authoritative
+// program driver. The route must still be strongly retired first; only the
+// executor-gate transition itself is external. Fleet-owned domains continue to
+// use BeginExecutorFleetDriverClose and cannot bypass its normal Begin call.
+func BeginExecutorFleetExternalDriverClose(fleet *ExecutorFleet, handle ExecutorFleetHandle) bool {
+	slot, _, ok := executorFleetSlotFor(fleet, handle)
+	if !ok || preemptLoad(&slot.state) != uint32(executorFleetSlotRouteRetired) ||
+		slot.driver == nil || slot.p == nil || !validExecutorDriver(slot.driver) ||
+		slot.driver.p != slot.p ||
+		(slot.driver.state != executorDriverClosing && slot.driver.state != executorDriverTerminalClosing) {
+		return false
+	}
+	preemptStore(&slot.state, uint32(executorFleetSlotExecutorClosing))
 	return true
 }
 
@@ -536,6 +583,31 @@ func ConfirmExecutorFleetClose(fleet *ExecutorFleet, handle ExecutorFleetHandle)
 	}
 	p, driver := slot.p, slot.driver
 	if !ConfirmExecutorClose(driver) || !resetEmptyFleetMailbox(&slot.mailbox, p) {
+		poisonExecutorFleetSlot(slot)
+		return false
+	}
+	slot.p = nil
+	slot.driver = nil
+	preemptStore(&slot.state, uint32(executorFleetSlotRetired))
+	return true
+}
+
+// ConfirmExecutorFleetExternalClose consumes the authoritative program
+// driver's already-completed ConfirmExecutorClose or
+// ConfirmTerminalExecutorClose. The driver and source catalog must be fully
+// zero/unbound before this call; the fleet then releases only its empty
+// transfer mailbox and pointer suffix, preserving the same route tombstone as
+// an ordinary fleet-owned close.
+func ConfirmExecutorFleetExternalClose(fleet *ExecutorFleet, handle ExecutorFleetHandle) bool {
+	slot, _, ok := executorFleetSlotFor(fleet, handle)
+	if !ok || preemptLoad(&slot.state) != uint32(executorFleetSlotExecutorClosing) ||
+		slot.driver == nil || slot.p == nil || *slot.driver != (ExecutorDriver{}) ||
+		slot.p.executor != nil || preemptLoad(&slot.p.executorMode) != executorModeUnbound ||
+		!emptyExecutorFleetMailbox(&slot.mailbox, slot.p) {
+		return false
+	}
+	p := slot.p
+	if !resetEmptyFleetMailbox(&slot.mailbox, p) {
 		poisonExecutorFleetSlot(slot)
 		return false
 	}

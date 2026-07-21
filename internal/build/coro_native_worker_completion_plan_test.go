@@ -127,6 +127,40 @@ func testProductionNativeWorkerCompletionPlan(t *testing.T, compilerTags []strin
 					workerPath, legacyName, legacyPlan.Demand)
 			}
 		}
+		if len(compilerTags) != 0 {
+			owner, err := findUniqueCoroWorkerPlanFunction(
+				input.Program, llssa.PkgRuntime, coroNativeFleetOwnerSymbolV1,
+			)
+			if err != nil {
+				return nil, err
+			}
+			if _, ok := input.requiredPlain[owner]; !ok {
+				return nil, fmt.Errorf("native fleet owner is outside the required raw scheduler-stack island")
+			}
+			ownerRoots := 0
+			for _, root := range input.requiredRoots {
+				if root.Function == owner {
+					ownerRoots++
+					if root.Demand != coro.SyncDemand {
+						return nil, fmt.Errorf("native fleet owner root demand = %s, want sync", root.Demand)
+					}
+				}
+			}
+			if ownerRoots != 1 {
+				return nil, fmt.Errorf("native fleet owner root count = %d, want 1", ownerRoots)
+			}
+			got, ok := plan.FunctionPlan(owner)
+			if !ok {
+				return nil, fmt.Errorf("native fleet owner has no function plan")
+			}
+			if got.Demand != coro.SyncDemand || got.ManagedDemand != coro.NoDemand ||
+				!got.RawPlainDemand || !got.RawPlainOnly || !got.RawPlainEntry ||
+				got.Emission != coro.EmitRawPlain || got.Primary != coro.PrimaryPlain ||
+				got.FuncRep != coro.DirectPlain || !plan.HasRawPlainVariant(owner) {
+				return nil, fmt.Errorf("native fleet owner plan = %+v, raw variant=%t; want one raw-only direct-plain scheduler entry",
+					got, plan.HasRawPlainVariant(owner))
+			}
+		}
 		return nil, verified
 	}
 

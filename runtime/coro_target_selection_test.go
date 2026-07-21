@@ -102,6 +102,67 @@ func TestCoroNativeTargetBuildSelection(t *testing.T) {
 	}
 }
 
+func TestCoroNativeFleetTargetBuildSelection(t *testing.T) {
+	const tags = "llgo,llgo_coro,llgo_coro_native_pipe,llgo_coro_native_timer,llgo_coro_native_fleet,nogc"
+	cmd := exec.Command("go", "list", "-json", "-tags="+tags, "./internal/runtime")
+	cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("go list native coroutine fleet target: %v\n%s", err, output)
+	}
+	var pkg struct {
+		GoFiles []string
+		Imports []string
+	}
+	if err := json.Unmarshal(output, &pkg); err != nil {
+		t.Fatal("decode native coroutine fleet target:", err)
+	}
+	for _, required := range []string{
+		"coro_target_native_fleet_llgo.go",
+		"coro_native_fleet_owner_llgo.go",
+		"coro_native_fleet_program_llgo.go",
+		"coro_native_fleet_reactor.go",
+		"coro_ready_distribution_fleet_llgo.go",
+		"coro_worker_completion_fleet_llgo.go",
+	} {
+		if !slices.Contains(pkg.GoFiles, required) {
+			t.Errorf("native fleet GoFiles lack %s: %v", required, pkg.GoFiles)
+		}
+	}
+	for _, forbidden := range []string{
+		"coro_target_native_llgo.go",
+		"coro_ready_distribution_default.go",
+		"coro_target_executor_retired_default.go",
+		"coro_worker_completion_program_llgo.go",
+		"coro_target_none.go",
+	} {
+		if slices.Contains(pkg.GoFiles, forbidden) {
+			t.Errorf("native fleet GoFiles unexpectedly contain %s: %v", forbidden, pkg.GoFiles)
+		}
+	}
+	if !slices.Contains(pkg.Imports, "github.com/goplus/llgo/runtime/internal/corofleet") {
+		t.Fatalf("native fleet runtime imports lack fixed pthread owner adapter: %v", pkg.Imports)
+	}
+
+	cmd = exec.Command("go", "list", "-json", "-tags="+tags, "./internal/corofleet")
+	cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0")
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("go list fixed coroutine fleet owner adapter: %v\n%s", err, output)
+	}
+	var owner struct {
+		GoFiles []string
+	}
+	if err := json.Unmarshal(output, &owner); err != nil {
+		t.Fatal("decode fixed coroutine fleet owner adapter:", err)
+	}
+	if !slices.Contains(owner.GoFiles, "call_llgo.go") ||
+		!slices.Contains(owner.GoFiles, "build_nogc_llgo.go") ||
+		slices.Contains(owner.GoFiles, "build_gc_llgo.go") {
+		t.Fatalf("fixed coroutine fleet owner GoFiles = %v", owner.GoFiles)
+	}
+}
+
 func TestCoroHostTargetCrossCompile(t *testing.T) {
 	tests := []struct {
 		name, goos, goarch, tags string

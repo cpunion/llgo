@@ -53,6 +53,21 @@ type RunnableTransferID struct {
 	Generation uint32
 }
 
+// RunnableTransferDrainStatus distinguishes ordinary owner/action deferral and
+// producer contention from a broken owner/mailbox invariant. The mailbox gate
+// is deliberately Try-only: a producer may be descheduled inside its bounded
+// publication transaction, so the scheduler owner must never spin or block
+// waiting for that producer.
+type RunnableTransferDrainStatus uint8
+
+const (
+	RunnableTransferDrainInvalid RunnableTransferDrainStatus = iota
+	RunnableTransferDrainOwnerUnstable
+	RunnableTransferDrainContended
+	RunnableTransferDrainCorrupt
+	RunnableTransferDrainComplete
+)
+
 // Valid reports whether id can name one mailbox slot generation.
 func (id RunnableTransferID) Valid() bool {
 	return id.Slot > 0 && id.Slot <= RunnableTransferMailboxCapacity && id.Generation != 0
@@ -154,6 +169,17 @@ func validRunnableTransferHeaderLocked(mailbox *RunnableTransferMailbox) bool {
 // source/result/control/panic/cancel/pin lease may follow the G to another P.
 func pNeutralRunnable(g *G, queued bool) bool {
 	return pNeutralRunnableHeader(g, queued) && pNeutralFrameChain(g)
+}
+
+// initialPNeutralRunnable is the work-sharing admission used immediately
+// after a stable resume commit. Restricting opportunistic distribution to a
+// never-run root gives spawned goroutines another P without bouncing ordinary
+// yielded continuations between otherwise idle domains.
+func initialPNeutralRunnable(g *G, queued bool) bool {
+	return pNeutralRunnable(g, queued) && g.active == g.root &&
+		g.active.state == FrameInitialSuspended &&
+		g.active.header.SuspendReason == uint16(SuspendNone) &&
+		g.active.header.Lifecycle == uint16(FrameInitialSuspended)
 }
 
 // pNeutralRunnableHeader is the O(1) revalidation performed after the mailbox
@@ -342,20 +368,30 @@ func ImportPNeutralRunnable(mailbox *RunnableTransferMailbox, owner *P, id Runna
 	return ok
 }
 
-// DrainPNeutralRunnables imports at most budget FIFO entries on the sole owner
-// P. budget is itself capped by the static mailbox capacity so every call has a
-// target-independent upper bound. more reports durable work left in slots.
-func DrainPNeutralRunnables(mailbox *RunnableTransferMailbox, owner *P, budget uint32) (moved uint32, more bool, ok bool) {
+// TryDrainPNeutralRunnables imports at most budget FIFO entries on the sole
+// owner P. budget is itself capped by the static mailbox capacity so every
+// successful transaction has a target-independent upper bound. Contended is
+// an ordinary retry result and never implies that mailbox metadata was read
+// without its gate; Complete is the only status for which more is meaningful.
+func TryDrainPNeutralRunnables(
+	mailbox *RunnableTransferMailbox,
+	owner *P,
+	budget uint32,
+) (moved uint32, more bool, status RunnableTransferDrainStatus) {
 	if mailbox == nil || mailbox.magic != runnableTransferMailboxMagic || mailbox.owner != owner || owner == nil ||
-		budget == 0 || budget > RunnableTransferMailboxCapacity ||
-		!stableRunnableTransferP(owner) || !validReadyQueue(owner) ||
-		!tryRunnableTransferGate(mailbox) {
-		return 0, false, false
+		budget == 0 || budget > RunnableTransferMailboxCapacity {
+		return 0, false, RunnableTransferDrainInvalid
+	}
+	if !stableRunnableTransferP(owner) || !validReadyQueue(owner) {
+		return 0, false, RunnableTransferDrainOwnerUnstable
+	}
+	if !tryRunnableTransferGate(mailbox) {
+		return 0, false, RunnableTransferDrainContended
 	}
 	if !validRunnableTransferHeaderLocked(mailbox) || owner != mailbox.owner ||
 		!stableRunnableTransferP(owner) {
 		releaseRunnableTransferGate(mailbox)
-		return 0, false, false
+		return 0, false, RunnableTransferDrainCorrupt
 	}
 	for moved < budget && mailbox.count != 0 {
 		slot := &mailbox.slots[mailbox.head]
@@ -363,11 +399,19 @@ func DrainPNeutralRunnables(mailbox *RunnableTransferMailbox, owner *P, budget u
 		if !importPNeutralRunnableLocked(mailbox, owner, id) {
 			more = mailbox.count != 0
 			releaseRunnableTransferGate(mailbox)
-			return moved, more, false
+			return moved, more, RunnableTransferDrainCorrupt
 		}
 		moved++
 	}
 	more = mailbox.count != 0
 	releaseRunnableTransferGate(mailbox)
-	return moved, more, true
+	return moved, more, RunnableTransferDrainComplete
+}
+
+// DrainPNeutralRunnables is the compatibility bool wrapper. New scheduler
+// owners should use TryDrainPNeutralRunnables so ordinary producer contention
+// cannot be mistaken for an invariant failure.
+func DrainPNeutralRunnables(mailbox *RunnableTransferMailbox, owner *P, budget uint32) (moved uint32, more bool, ok bool) {
+	moved, more, status := TryDrainPNeutralRunnables(mailbox, owner, budget)
+	return moved, more, status == RunnableTransferDrainComplete
 }
