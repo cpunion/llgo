@@ -566,6 +566,89 @@ func coroNativeFleetEnterOwnerCompatibilityV1(handle coro.ExecutorFleetHandle, e
 		coro.EnterExecutorRunCompatibility(&domain.driver)
 }
 
+// coroNativeFleetOwnerWaitPlanV1 is the pointer-free result of one exact
+// domain idle transaction. Armed means the driver committed its executor gate
+// and the owner epoch has already been released; the physical M may now block
+// until its doorbell, poll set, deadline, or coordinator stop wakes it.
+type coroNativeFleetOwnerWaitPlanV1 struct {
+	Deadline    int64
+	HasDeadline bool
+	Armed       bool
+}
+
+// coroNativeFleetPrepareOwnerWaitAtV1 crosses from the bounded reducer to the
+// common timer-aware idle transaction. Unlike command-main sleep, an ordinary
+// empty P may enter standby because a routed runnable transfer is itself a
+// future wake source. A racing fact leaves the epoch owned and returns
+// Armed=false; a committed sleep releases the epoch before returning.
+func coroNativeFleetPrepareOwnerWaitAtV1(
+	handle coro.ExecutorFleetHandle,
+	epoch uint32,
+	now, freshNow int64,
+) (coroNativeFleetOwnerWaitPlanV1, bool) {
+	domain, valid := coroNativeFleetDomainForHandleV1(
+		&coroNativeFleetV1State,
+		handle,
+		coroNativeFleetDomainActiveV1,
+	)
+	if !valid || epoch == 0 || domain.ownerEpoch != epoch || now < 0 || freshNow < now ||
+		!coro.EnterExecutorRunCompatibility(&domain.driver) {
+		return coroNativeFleetOwnerWaitPlanV1{}, false
+	}
+	prepared, ok := coro.PrepareExecutorStandbyAt(&domain.driver, now)
+	if !ok {
+		return coroNativeFleetOwnerWaitPlanV1{}, false
+	}
+	if !prepared {
+		return coroNativeFleetOwnerWaitPlanV1{}, true
+	}
+	sleep, deadline, hasDeadline, committed := coro.CommitExecutorSleepAt(&domain.driver, freshNow)
+	if !committed {
+		return coroNativeFleetOwnerWaitPlanV1{}, false
+	}
+	if !sleep {
+		return coroNativeFleetOwnerWaitPlanV1{}, true
+	}
+	plan := coroNativeFleetOwnerWaitPlanV1{
+		Deadline:    deadline,
+		HasDeadline: hasDeadline,
+		Armed:       true,
+	}
+	if !coroNativeFleetFinishOwnerEpochV1(handle, epoch) {
+		return coroNativeFleetOwnerWaitPlanV1{}, false
+	}
+	return plan, true
+}
+
+// coroNativeFleetWakeOwnerAtV1 reacquires the exact domain after its physical
+// wait returned and services every durable source at a fresh monotonic sample.
+// A spurious platform wake is legal and simply promotes zero tasks.
+func coroNativeFleetWakeOwnerAtV1(
+	handle coro.ExecutorFleetHandle,
+	now int64,
+) (epoch uint32, waits, timers, promoted int, ok bool) {
+	if now < 0 {
+		return 0, 0, 0, 0, false
+	}
+	epoch, acquired := coroNativeFleetBeginOwnerEpochV1(handle)
+	if !acquired {
+		return 0, 0, 0, 0, false
+	}
+	domain, valid := coroNativeFleetDomainForHandleV1(
+		&coroNativeFleetV1State,
+		handle,
+		coroNativeFleetDomainActiveV1,
+	)
+	if !valid || domain.ownerEpoch != epoch {
+		return 0, 0, 0, 0, false
+	}
+	waits, timers, promoted, ok = coro.WakeExecutorAt(&domain.driver, now)
+	if !ok {
+		return 0, 0, 0, 0, false
+	}
+	return epoch, waits, timers, promoted, true
+}
+
 func coroNativeFleetFinishOwnerEpochV1(handle coro.ExecutorFleetHandle, epoch uint32) bool {
 	domain, ok := coroNativeFleetDomainForHandleV1(
 		&coroNativeFleetV1State,

@@ -778,7 +778,11 @@ func PrepareExecutorSleep(driver *ExecutorDriver) (sleep bool, ok bool) {
 // idle-preparing state and requires the caller to take a fresh monotonic sample
 // and call CommitExecutorSleepAt. false,true means work won and the driver is
 // active. A failure never leaves a newly armed idle gate behind.
-func PrepareExecutorSleepAt(driver *ExecutorDriver, now int64) (prepared bool, ok bool) {
+func prepareExecutorSleepAt(
+	driver *ExecutorDriver,
+	now int64,
+	allowEmpty bool,
+) (prepared bool, ok bool) {
 	if !validExecutorDriver(driver) || !driver.sources.usesMonotonicTime() || driver.state != executorDriverActive ||
 		!emptyExecutorRunCursor(driver) || !idleExecutorScheduler(driver.p) || now < 0 {
 		return false, false
@@ -786,7 +790,7 @@ func PrepareExecutorSleepAt(driver *ExecutorDriver, now int64) (prepared bool, o
 	if _, ok = pollExecutorSourcesAt(driver, now, true); !ok {
 		return false, false
 	}
-	if driver.p.readyHead != nil || !HasWaiting(driver.p) {
+	if driver.p.readyHead != nil || !allowEmpty && !HasWaiting(driver.p) {
 		return false, true
 	}
 	if !driver.registry.ArmIdle(driver.handle) {
@@ -817,6 +821,20 @@ func PrepareExecutorSleepAt(driver *ExecutorDriver, now int64) (prepared bool, o
 	driver.hasPrepareNow = true
 	driver.state = executorDriverIdlePreparing
 	return true, true
+}
+
+func PrepareExecutorSleepAt(driver *ExecutorDriver, now int64) (prepared bool, ok bool) {
+	return prepareExecutorSleepAt(driver, now, false)
+}
+
+// PrepareExecutorStandbyAt is the ordinary fleet-domain counterpart to
+// PrepareExecutorSleepAt. An empty P has no command-main completion meaning:
+// it may arm the exact executor gate and wait for a routed transfer, source
+// completion, or shutdown request. The transaction otherwise uses the same
+// complete source scans and final CommitExecutorSleepAt proof; runnable work
+// or a racing request still wins without blocking.
+func PrepareExecutorStandbyAt(driver *ExecutorDriver, now int64) (prepared bool, ok bool) {
+	return prepareExecutorSleepAt(driver, now, true)
 }
 
 // CommitExecutorSleepAt finishes timer-aware retained-wait admission after the

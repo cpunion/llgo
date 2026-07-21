@@ -260,6 +260,27 @@ func TestCoroNativeFleetProductionIslandsV1(t *testing.T) {
 	}
 	first := &coroNativeFleetV1State.domains[0]
 	second := &coroNativeFleetV1State.domains[1]
+
+	// An empty secondary P is a valid standby executor: it has no command-main
+	// completion meaning and must remain wakeable for later routed transfers.
+	standbyEpoch, standbyOK := coroNativeFleetBeginOwnerEpochV1(secondHandle)
+	if !standbyOK {
+		t.Fatal("begin empty fleet standby owner")
+	}
+	standbyRun := coroNativeFleetRunOwnerEpochV1(secondHandle, standbyEpoch, 10, 8)
+	if standbyRun.stop != coroRunIdleV1 {
+		t.Fatalf("empty fleet standby run = %+v", standbyRun)
+	}
+	standby, standbyOK := coroNativeFleetPrepareOwnerWaitAtV1(secondHandle, standbyEpoch, 10, 11)
+	if !standbyOK || !standby.Armed || standby.HasDeadline || standby.Deadline != 0 || second.ownerEpoch != 0 {
+		t.Fatalf("empty fleet standby = (%+v, %t), owner=%d", standby, standbyOK, second.ownerEpoch)
+	}
+	wakeEpoch, waits, timers, promoted, wakeOK := coroNativeFleetWakeOwnerAtV1(secondHandle, 12)
+	if !wakeOK || wakeEpoch == 0 || waits != 0 || timers != 0 || promoted != 0 ||
+		!coroNativeFleetFinishOwnerEpochV1(secondHandle, wakeEpoch) {
+		t.Fatalf("spurious fleet standby wake = (%d, %d, %d, %d, %t)",
+			wakeEpoch, waits, timers, promoted, wakeOK)
+	}
 	firstFD, firstFDOK := first.doorbell.ReadFD()
 	secondFD, secondFDOK := second.doorbell.ReadFD()
 	if !firstFDOK || !secondFDOK || firstFD == secondFD {

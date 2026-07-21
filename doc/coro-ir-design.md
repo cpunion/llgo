@@ -796,7 +796,7 @@ LLVM CoroSplit继续负责普通 SSA liveness和frame materialization。精确 G
 | RTOS/embedded | 静态执行模型可映射，未验证 | HAL clock/notification/ISR ingress、boundary driver和容量证明都未实现 |
 | baremetal | event-loop模型可映射，未验证 | main loop、IRQ mailbox、WFI/WFE、static/tinygc frame和production adapter都未实现 |
 
-架构不要求每G native stack、libuv、BDWGC或pthread，但这只是兼容候选，不是平台完成度。当前production target adapter实际只有llgo native Linux/Darwin single-P，其bounded blocking worker使用固定pthread pool；`coro_target_none.go` 对queued host run与retained wait采用fail-closed行为。双native domain已与该single-P entry共用唯一物理run-step reducer，并可执行/迁移P-neutral yield任务，但尚未取代program entry或提供并行M owner。Worker也已保持单物理池并用每job的既有`OperationID.Route`支持fleet completion，不做函数地址反查；compiler-reserved profile将program/fleet回调静态分开，两者均已通过真实LLGo raw-plain plan验证。它尚未由program-level fleet coordinator启动，不改变当前single-P完成度结论。缺少filesystem、process、socket或host async能力的平台仍按target capability决定可用package。LLVM支持范围只是19–22，不考虑19以下版本。
+架构不要求每G native stack、libuv、BDWGC或pthread，但这只是兼容候选，不是平台完成度。当前production target adapter实际只有llgo native Linux/Darwin single-P，其bounded blocking worker使用固定pthread pool；`coro_target_none.go` 对queued host run与retained wait采用fail-closed行为。双native domain已与该single-P entry共用唯一物理run-step reducer，并可执行/迁移P-neutral yield任务；空domain还能经公共exact idle gate进入standby、释放owner epoch并由routed request唤醒，但尚未取代program entry或提供实际并行M/reactor wait循环。Worker也已保持单物理池并用每job的既有`OperationID.Route`支持fleet completion，不做函数地址反查；compiler-reserved profile将program/fleet回调静态分开，两者均已通过真实LLGo raw-plain plan验证。它尚未由program-level fleet coordinator启动，不改变当前single-P完成度结论。缺少filesystem、process、socket或host async能力的平台仍按target capability决定可用package。LLVM支持范围只是19–22，不考虑19以下版本。
 
 ## 12. Cache、archive 与 summary
 
