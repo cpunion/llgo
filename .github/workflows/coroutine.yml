@@ -69,6 +69,7 @@ jobs:
           # Compiler tests separately cover the LLVM/LLGo side; this is not a
           # cross-language linked smoke test.
           go test -race -shuffle=on -tags=coro_runtime_adapter_test \
+            ./internal/runtime/coro_run_slice.go \
             ./internal/runtime/coro_program.go \
             ./internal/runtime/coro_sched.go \
             ./internal/runtime/coro_executor.go \
@@ -81,12 +82,14 @@ jobs:
           # select only its real source plus its host test so LLGo runtime
           # symbols do not collide with the host Go runtime.
           go test -race -shuffle=on -tags=coro_native_fleet_test \
+            ./internal/runtime/coro_run_slice.go \
             ./internal/runtime/coro_native_fleet.go \
             ./internal/runtime/coro_native_fleet_test.go \
             -run '^TestCoroNativeFleet' -count=1
           GOOS=js GOARCH=wasm CGO_ENABLED=0 go test \
             -tags=coro_runtime_adapter_test \
             -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" \
+            ./internal/runtime/coro_run_slice.go \
             ./internal/runtime/coro_program.go \
             ./internal/runtime/coro_sched.go \
             ./internal/runtime/coro_executor.go \

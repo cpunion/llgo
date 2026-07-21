@@ -1,0 +1,277 @@
+/*
+ * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package runtime
+
+import (
+	"unsafe"
+
+	"github.com/goplus/llgo/runtime/internal/coro"
+)
+
+// These compiler-owned C ABI wrappers are emitted in the program entry module.
+// They hide LLVM's post-CoroSplit handle layout from the Go runtime.
+// schedulerwait restricts them to a compiler-owned raw host-stack island in
+// the exact executor owner. Resume may execute until the next suspension and
+// therefore is neither a bounded foreign leaf nor an ordinary synchronous
+// runtime call.
+
+//llgo:coro schedulerwait
+//go:linkname coroHandleDone C.__llgo_coro_done_v1
+func coroHandleDone(unsafe.Pointer) bool
+
+//llgo:coro schedulerwait
+//go:linkname coroHandleResume C.__llgo_coro_resume_v1
+func coroHandleResume(unsafe.Pointer)
+
+//llgo:coro schedulerwait
+//go:linkname coroHandleDestroy C.__llgo_coro_destroy_v1
+func coroHandleDestroy(unsafe.Pointer)
+
+type coroProgramLifecycleV1 uint8
+
+const (
+	coroProgramUnusedV1 coroProgramLifecycleV1 = iota
+	coroProgramBegunV1
+	coroProgramRunningV1
+	coroProgramMainReturnRequestedV1
+	coroProgramStoppingV1
+	coroProgramCompleteV1
+	coroProgramFailedV1
+)
+
+type coroRunStopV1 uint8
+
+const (
+	coroRunInvalidV1 coroRunStopV1 = iota
+	coroRunMainDoneV1
+	coroRunExecutorSleepV1
+	coroRunTerminalExecutorCloseV1
+	coroRunPanicCompleteV1
+	// The remaining stops are internal to the explicit compatibility loop or
+	// to an owner-driven fleet slice. The bounded reducer itself never prepares
+	// host sleep or crosses terminal close.
+	coroRunSliceBudgetV1
+	coroRunIdleV1
+	coroRunDestroyCommitV1
+	coroRunAgainV1
+)
+
+type coroRunResultV1 struct {
+	stop        coroRunStopV1
+	g           *coro.G
+	action      coro.Action
+	deadline    int64
+	hasDeadline bool
+	used        uint32
+	sources     uint32
+	dispatches  uint32
+	resumes     uint32
+	destroys    uint32
+}
+
+// coroRunPolicyV1 contains only command-root behavior. A nil/zero policy is an
+// ordinary executor domain: every completed G is reclaimed and no task is
+// interpreted as process main. Program mode retains a pointer to the live
+// lifecycle word because a resumed main frame may publish normal-main return
+// inside the physical resume being reduced.
+type coroRunPolicyV1 struct {
+	main      *coro.G
+	lifecycle *coroProgramLifecycleV1
+}
+
+func (policy coroRunPolicyV1) valid() bool {
+	return policy.main == nil && policy.lifecycle == nil || policy.main != nil && policy.lifecycle != nil
+}
+
+func (policy coroRunPolicyV1) commandState() (running, returnRequested, ok bool) {
+	if policy.main == nil && policy.lifecycle == nil {
+		return false, false, true
+	}
+	if policy.main == nil || policy.lifecycle == nil {
+		return false, false, false
+	}
+	switch *policy.lifecycle {
+	case coroProgramRunningV1:
+		return true, false, true
+	case coroProgramMainReturnRequestedV1:
+		return false, true, true
+	default:
+		return false, false, false
+	}
+}
+
+// coroRunPhysicalActionV1 is the indivisible runtime half of one runner action
+// reduction. Neither Checked's ActionResume/ActionDestroy nor a freed handle is
+// observable at a reducer return boundary.
+func coroRunPhysicalActionV1(p *coro.P, g *coro.G, action coro.Action) (coro.Action, bool) {
+	switch action.Kind {
+	case coro.ActionCheckResume:
+		next, ok := coro.Checked(p, g, action, coroHandleDone(action.Handle))
+		if !ok || next.Kind != coro.ActionResume || next.Handle != action.Handle {
+			return coro.Action{}, false
+		}
+		coroHandleResume(next.Handle)
+		return coro.Resumed(p, g, next)
+	case coro.ActionCheckDestroy:
+		next, ok := coro.Checked(p, g, action, coroHandleDone(action.Handle))
+		if !ok || next.Kind != coro.ActionDestroy || next.Handle != action.Handle {
+			return coro.Action{}, false
+		}
+		coroHandleDestroy(next.Handle)
+		return coro.DestroyedBounded(p, g, next)
+	case coro.ActionPanicDestroy:
+		coroHandleDestroy(action.Handle)
+		return coro.PanicDestroyedBounded(p, g, action)
+	default:
+		return coro.Action{}, false
+	}
+}
+
+// coroReduceExecutorRunStepV1 is the single physical scheduler reducer shared
+// by the process program and every fleet domain. It consumes exactly one step;
+// terminal reports a stable slice boundary, while ok=false invalidates the
+// whole caller result. Source selection and monotonic-clock ownership stay in
+// the thin outer loop for each target.
+func coroReduceExecutorRunStepV1(
+	p *coro.P,
+	driver *coro.ExecutorDriver,
+	policy coroRunPolicyV1,
+	step coro.ExecutorRunStep,
+	result *coroRunResultV1,
+) (terminal, ok bool) {
+	if p == nil || driver == nil || result == nil || !policy.valid() {
+		return false, false
+	}
+	_, returnRequested, stateOK := policy.commandState()
+	if !stateOK {
+		return false, false
+	}
+	switch step.Kind {
+	case coro.ExecutorRunStepSource:
+		result.used++
+		result.sources++
+		return false, true
+	case coro.ExecutorRunStepDispatch:
+		if step.G == nil || step.Action.Handle == nil {
+			return false, false
+		}
+		if returnRequested && step.G != policy.main && step.Action.Kind == coro.ActionCheckResume &&
+			!coro.RequestTaskCancellation(p, step.G, coro.TaskCancelShutdown) {
+			return false, false
+		}
+		result.used++
+		result.dispatches++
+		return false, true
+	case coro.ExecutorRunStepAction:
+		if step.G == nil || step.Action.Handle == nil {
+			return false, false
+		}
+		next, advanced := coroRunPhysicalActionV1(p, step.G, step.Action)
+		// The physical resume may have changed program lifecycle. Re-read the
+		// live policy before selecting the scheduler commit placement.
+		running, returnRequested, stateOK := policy.commandState()
+		if !stateOK {
+			return false, false
+		}
+		committed := false
+		if advanced && step.G == policy.main && returnRequested && next.Kind == coro.ActionCheckDestroy {
+			committed = coro.CommitExecutorRunCommandRootDestroy(driver, step.G, next)
+		} else if advanced && step.G == policy.main && running &&
+			coro.CommitExecutorRunCommandBootstrapDirectChildHandoff(driver, step.G, next) {
+			committed = true
+		} else if advanced {
+			committed = coro.CommitExecutorRunAction(driver, step.G, next)
+		}
+		if !committed {
+			return false, false
+		}
+		result.used++
+		switch step.Action.Kind {
+		case coro.ActionCheckResume:
+			result.resumes++
+		case coro.ActionCheckDestroy, coro.ActionPanicDestroy:
+			result.destroys++
+		}
+		switch next.Kind {
+		case coro.ActionCheckResume, coro.ActionCheckDestroy, coro.ActionPanicDestroy:
+			if step.G == policy.main && returnRequested && next.Kind == coro.ActionCheckResume {
+				return false, false
+			}
+		case coro.ActionYield, coro.ActionPark:
+			if step.G == policy.main && returnRequested {
+				return false, false
+			}
+		case coro.ActionComplete:
+			isMain := step.G == policy.main
+			if !coroReleaseCompletedTask(step.G) {
+				return false, false
+			}
+			if isMain {
+				result.stop, result.g = coroRunMainDoneV1, policy.main
+				return true, true
+			}
+		case coro.ActionPanicComplete:
+			result.stop, result.g, result.action = coroRunPanicCompleteV1, step.G, next
+			return true, true
+		case coro.ActionCommitDestroy:
+			result.stop, result.g, result.action = coroRunDestroyCommitV1, step.G, next
+			return true, true
+		default:
+			return false, false
+		}
+		return false, true
+	case coro.ExecutorRunStepDestroyCommit:
+		if step.G == nil || step.Action.Kind != coro.ActionCommitDestroy || step.Action.Handle != nil {
+			return false, false
+		}
+		result.stop, result.g, result.action = coroRunDestroyCommitV1, step.G, step.Action
+		return true, true
+	case coro.ExecutorRunStepIdle:
+		result.stop = coroRunIdleV1
+		return true, true
+	default:
+		return false, false
+	}
+}
+
+// coroRunSliceAtV1 advances one ordinary fleet domain using a host-owned,
+// explicit monotonic sample. The same sample may span the bounded call (as in
+// WASM/embedded host turns); a native owner supplies a fresh sample on its next
+// entry. Command-main placement is deliberately unavailable in this variant.
+func coroRunSliceAtV1(p *coro.P, driver *coro.ExecutorDriver, now int64, budget uint32) coroRunResultV1 {
+	if p == nil || driver == nil || now < 0 || budget == 0 {
+		return coroRunResultV1{}
+	}
+	result := coroRunResultV1{}
+	for result.used < budget {
+		step, nextOK := coro.NextExecutorRunStepAt(driver, now)
+		if !nextOK {
+			return coroRunResultV1{}
+		}
+		terminal, reduced := coroReduceExecutorRunStepV1(
+			p, driver, coroRunPolicyV1{}, step, &result,
+		)
+		if !reduced {
+			return coroRunResultV1{}
+		}
+		if terminal {
+			return result
+		}
+	}
+	result.stop = coroRunSliceBudgetV1
+	return result
+}

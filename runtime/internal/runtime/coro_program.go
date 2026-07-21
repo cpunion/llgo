@@ -23,18 +23,6 @@ import (
 	"github.com/goplus/llgo/runtime/internal/coroalloc"
 )
 
-type coroProgramLifecycleV1 uint8
-
-const (
-	coroProgramUnusedV1 coroProgramLifecycleV1 = iota
-	coroProgramBegunV1
-	coroProgramRunningV1
-	coroProgramMainReturnRequestedV1
-	coroProgramStoppingV1
-	coroProgramCompleteV1
-	coroProgramFailedV1
-)
-
 type coroProgramDriveStatusV1 uint8
 
 const (

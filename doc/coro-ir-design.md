@@ -796,7 +796,7 @@ LLVM CoroSplit继续负责普通 SSA liveness和frame materialization。精确 G
 | RTOS/embedded | 静态执行模型可映射，未验证 | HAL clock/notification/ISR ingress、boundary driver和容量证明都未实现 |
 | baremetal | event-loop模型可映射，未验证 | main loop、IRQ mailbox、WFI/WFE、static/tinygc frame和production adapter都未实现 |
 
-架构不要求每G native stack、libuv、BDWGC或pthread，但这只是兼容候选，不是平台完成度。当前production target adapter实际只有llgo native Linux/Darwin single-P，其bounded blocking worker使用固定pthread pool；`coro_target_none.go` 对queued host run与retained wait采用fail-closed行为。缺少filesystem、process、socket或host async能力的平台仍按target capability决定可用package。LLVM支持范围只是19–22，不考虑19以下版本。
+架构不要求每G native stack、libuv、BDWGC或pthread，但这只是兼容候选，不是平台完成度。当前production target adapter实际只有llgo native Linux/Darwin single-P，其bounded blocking worker使用固定pthread pool；`coro_target_none.go` 对queued host run与retained wait采用fail-closed行为。双native domain已与该single-P entry共用唯一物理run-step reducer，并可执行/迁移P-neutral yield任务，但尚未取代program entry或提供并行M owner。缺少filesystem、process、socket或host async能力的平台仍按target capability决定可用package。LLVM支持范围只是19–22，不考虑19以下版本。
 
 ## 12. Cache、archive 与 summary
 

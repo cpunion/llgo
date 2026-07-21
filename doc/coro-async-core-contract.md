@@ -331,7 +331,7 @@ Select winner决策是不可拆的原子工作单元，允许在声明的`MaxSel
 
 Running和Waiting G不可迁移，completion必须投递原owner；只有已经清除source-affine状态的Runnable G可在P间steal或通过global injection迁移，G被steal后从下一次operation开始才绑定新P。Pinned/ThreadAffine G使用固定M/P协议，不能退化成全局TLS猜测。
 
-当前phase-1 core已经实现固定8槽的owner-serialized `RunnableTransferMailbox`：只接受never-run root或普通`SuspendYield`且无runAction、wait/result/control/panic/cancel/spawn lease的P-neutral G；slot以generation和FIFO exact import持有唯一GC root。G复用既有对齐padding中的一字节`transferState`，Published期间关闭pointer-only preempt gate并拒绝普通`Enqueue`，因此不会被第三个P重复取得，且native/wasm32的G大小不变。该切片尚未提供producer-concurrent MPSC reservation、native多domain线程或current-route locator，不能据此声称native multi-P已经运行。
+当前phase-1 core已经实现固定8槽的owner-serialized `RunnableTransferMailbox`：只接受never-run root或普通`SuspendYield`且无runAction、wait/result/control/panic/cancel/spawn lease的P-neutral G；slot以generation和FIFO exact import持有唯一GC root。G复用既有对齐padding中的一字节`transferState`，Published期间关闭pointer-only preempt gate并拒绝普通`Enqueue`，因此不会被第三个P重复取得，且native/wasm32的G大小不变。两个native domain现已可导入这类G，并通过与program entry共用的唯一物理reducer完成`done -> resume -> PrepareYield -> scheduler commit`；这是可运行的多domain调度原型，但尚未提供producer-concurrent MPSC reservation、并行native M owner/current-route locator或程序级启动与停止协调，不能据此声称native multi-P已完成。
 
 当前`parkReady`仍持有原source的winner record/result lease，因此“进入ready queue”尚不等于“可偷”。多P开放前，原owner必须通过source-specific typed hook把winner payload和cleanup ownership物化到compiler提供的frame-local `ResumePacket/ResultCell`，结束winner lease，并让backend quiesce/recycle继续留在原route；随后发布的G才是P-neutral runnable。prompt task cancellation在新P上只选择消费packet或进入cleanup，不再回访原source。该物化完成前，带pending park result的G必须留在原P，不能以数据竞态换取work stealing。
 
@@ -409,7 +409,7 @@ worker queue满必须确定地失败或背压，shutdown在owner P之外join已�
 - 受控Timer manager的wait/Stop/Reset已迁移到compiler-owned Timer V2 typed recipe和exact `(controller, generation)` park/cancel/resume；旧controlled V1 prepare/park/cancel/retire ABI、build root和symbol-specific frame-retention特判已删除，exact cancel、prepare-publication race、winner lease和shutdown-before-deadline定向验证已通过。这些只证明transport/ownership core，不代表完整Go Timer语义已通过；
 - `internal/poll.runtime_pollWait`已改为compiler-owned Poll V2 typed park recipe；定向lowering、current-owner retained reactor、deadline/closing/cancel/shutdown与race验证已通过。WASM只验证了lowering/CoroSplit/module compile，没有host poll adapter运行证据；
 - production `TaskControl`端点已通过register/post/close、exact executor request、safepoint claim与terminal竞态测试；
-- allocation-free `ExecutorFleet`核心、route registry和P-neutral runnable transfer已通过core/race测试；native两个独立domain的production-island已跑通，同local/generation completion能按`OperationID.Route`精确进入各自mailbox和request gate；
+- allocation-free `ExecutorFleet`核心、route registry和P-neutral runnable transfer已通过core/race测试；native两个独立domain的production-island已跑通，同local/generation completion能按`OperationID.Route`精确进入各自mailbox和request gate，两个domain也已通过与程序single-P相同的物理reducer执行并迁移P-neutral yield任务；
 - managed heap allocation已在native和wasm32通过compile/CoroSplit、spill/reload、exact-root profile与zero-size sentinel测试；
 - coroutine string concatenation已收敛为对`runtime.StringCat`的精确structured-outcome lowering，overflow panic沿显式结果传播，native/wasm32 compile、CoroSplit与object emission已通过；
 - slice到array pointer/value转换的`N>0`长度失败已进入同一explicit-status fault/recover路径，`N==0`保持nil与empty-non-nil slice的原始data pointer语义。当前v1静态fault payload保持`panic`/`recover`和`runtime.Error`分类，但尚不携带源slice长度与目标array长度，因此错误文本未达到Go `boundsError`的逐值兼容；这属于后续parameterized fault ABI边界，不影响控制流语义。
@@ -417,6 +417,8 @@ worker queue满必须确定地失败或背压，shutdown在owner P之外join已�
 - Darwin已补齐`internal/cpu`两个sysctl bodyless声明的精确runtime bridge和C sync certificate；另外，一参数、不重定向的visibility-only `go:linkname`已冻结为独立证书，paired bodyless consumer只选择managed `$coro`入口，不生成raw plain body。
 
 这些是core-first证据，不是标准库兼容性证明。native compiler command entry已使用single-P V2固定循环；双domain `ExecutorFleet`目前仍是与它并存的production-island，尚未替换为程序multi-P entry。Timer catalog和Poll V2 callback现已纳入exact route：Timer由各domain owner的单调时钟扫描，不暴露producer callback；Poll的两字`OperationID`可在route admission内完成source publication、exact executor request、duplicate/stale分类和关闭强汇合。该结果尚未把native reactor snapshot/arm循环接到双domain，也没有完成route-aware worker submission、已park G的result物化/迁移与work stealing。target-neutral host-owned pull adapter已完成core/race与JS/WASM、WASIp1、baremetal、显式embedded交叉编译验证：`more`只发布later-turn action，idle只暴露POD executor/generation/epoch/deadline，alarm/notification取消后才可复用epoch，shutdown seal两个ingress并strong-join callback tail。compiler的host-target V2 entry也已完成：它只执行一次有界initial slice，保留host callback/reference roots，仅接受canonical `Complete`或executor slot/generation/epoch/flags/deadline均精确的`Yielded`/`Suspended` tuple，后两者detached返回host，不在entry内继续调度或递归re-entry。这仍只是embedding reactor ABI：普通JS/WASM或WASI `_start`没有外部reactor消费`next_action`、调用callback/continuation，因此不能称platform E2E。JS microtask/timeout pump、WASI reactor `poll_oneoff`、RTOS HAL与baremetal IRQ/WFI glue、完整cleanup/defer/recover/Goexit lowering以及precise/moving GC仍是明确缺口。
+
+最新的执行器收口又前进了一步：program single-P与fleet domain现已共用同一个物理run-step reducer，fleet外层只保留exact domain owner、显式单调时钟和budget，不再存在第二套resume/destroy/commit语义。这只把多domain的物理执行原型跑通；program main归属、分布式停止、并行M owner、reactor arm和route-aware worker仍是接入程序multi-P前的硬边界。
 
 #### 少量标准库能力探针政策
 
@@ -519,6 +521,8 @@ deadline 修改必须更新已 park operation，且 timeout 恢复后重新读�
 | WASI | 1P + pollable/poll_oneoff 或对应 preview API | compiler host-target V2 initial entry、retained callbacks、strict tuple与detached return已完成；外部reactor仍必须消费`next_action`，调用`poll_oneoff`/相应pollable，发布time/ack并调用continuation。普通command尚无该pump，fd/socket source glue也未接，不能称E2E |
 | RTOS/embedded | 静态 P/source catalog + notification/event queue + one-shot alarm + ISR POD ingress | compiler已选择仅一次initial slice且detached返回的host-target V2 entry，callback roots已保留；HAL notification/alarm、ISR source、持久reactor pump与capacity配置仍由embedding实现，不能称E2E |
 | baremetal | 1P main loop + IRQ ring + hardware alarm + WFI/WFE | host-target V2 initial entry、allocation-free notification/alarm profile、POD action与strong-join core可交叉编译，callback roots已保留；真实IRQ ring、hardware compare、WFI/WFE reactor/startup和GC集成未实现，不能称E2E |
+
+Native表中的双domain production-island现已用production reducer执行并迁移P-neutral yield任务；因为它还没有program entry、并行M owner和上述停止/reactor/worker协调，平台完成度结论不变。
 
 无栈 continuation 和 target-neutral operation core 不依赖 libuv、BDWGC 或 pthread；但当前 native worker adapter 确实使用固定 pthread pool，collector 集成也仍是 target profile 的独立责任。LLVM 支持基线只是 19–22，不考虑 LLVM 19 以下版本；每个支持版本都要分别验证 CoroSplit、frame layout/root metadata 和 module verification。
 

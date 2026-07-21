@@ -497,6 +497,41 @@ func coroNativeFleetPollOwnerEpochV1(
 	return waits + timers, promoted, pollOK
 }
 
+// coroNativeFleetRunOwnerEpochV1 executes the same physical reducer as the
+// process program, but with ordinary-domain policy and an explicit owner clock
+// sample. It neither settles a terminal executor close nor finishes the owner
+// epoch: the program-level fleet coordinator must handle both boundaries after
+// observing the returned stop.
+func coroNativeFleetRunOwnerEpochV1(
+	handle coro.ExecutorFleetHandle,
+	epoch uint32,
+	now int64,
+	budget uint32,
+) coroRunResultV1 {
+	domain, valid := coroNativeFleetDomainForHandleV1(
+		&coroNativeFleetV1State,
+		handle,
+		coroNativeFleetDomainActiveV1,
+	)
+	if !valid || epoch == 0 || domain.ownerEpoch != epoch || now < 0 || budget == 0 {
+		return coroRunResultV1{}
+	}
+	return coroRunSliceAtV1(&domain.p, &domain.driver, now, budget)
+}
+
+// coroNativeFleetEnterOwnerCompatibilityV1 clears only bounded-runner fairness
+// bookkeeping after the coordinator has proved this domain stable and is about
+// to cross an unbounded close/idle compatibility boundary.
+func coroNativeFleetEnterOwnerCompatibilityV1(handle coro.ExecutorFleetHandle, epoch uint32) bool {
+	domain, valid := coroNativeFleetDomainForHandleV1(
+		&coroNativeFleetV1State,
+		handle,
+		coroNativeFleetDomainActiveV1,
+	)
+	return valid && epoch != 0 && domain.ownerEpoch == epoch &&
+		coro.EnterExecutorRunCompatibility(&domain.driver)
+}
+
 func coroNativeFleetFinishOwnerEpochV1(handle coro.ExecutorFleetHandle, epoch uint32) bool {
 	domain, ok := coroNativeFleetDomainForHandleV1(
 		&coroNativeFleetV1State,

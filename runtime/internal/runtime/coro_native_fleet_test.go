@@ -29,11 +29,80 @@ import (
 )
 
 type coroNativeFleetTestTask struct {
-	g          *coro.G
-	handle     unsafe.Pointer
-	header     *coro.HeaderV1
-	descriptor *coro.FrameDescriptorV1
-	memory     []uintptr
+	g           *coro.G
+	handle      unsafe.Pointer
+	header      *coro.HeaderV1
+	descriptor  *coro.FrameDescriptorV1
+	memory      []uintptr
+	resumeCalls uint32
+	runFailure  string
+}
+
+var coroNativeFleetRunTestV1 struct {
+	sync.Mutex
+	tasks map[unsafe.Pointer]*coroNativeFleetTestTask
+}
+
+func findCoroNativeFleetRunTestTaskV1(handle unsafe.Pointer) *coroNativeFleetTestTask {
+	coroNativeFleetRunTestV1.Lock()
+	defer coroNativeFleetRunTestV1.Unlock()
+	return coroNativeFleetRunTestV1.tasks[handle]
+}
+
+func failCoroNativeFleetRunTestTaskV1(task *coroNativeFleetTestTask, message string) {
+	if task == nil {
+		return
+	}
+	coroNativeFleetRunTestV1.Lock()
+	if task.runFailure == "" {
+		task.runFailure = message
+	}
+	coroNativeFleetRunTestV1.Unlock()
+}
+
+// The isolated native-fleet test links the production reducer but not the
+// allocator-backed runtime task reclaimer. Its runner tasks are static.
+func coroReleaseCompletedTask(g *coro.G) bool {
+	return coro.ReclaimableG(g)
+}
+
+//go:linkname testCoroNativeFleetHandleDone C.__llgo_coro_done_v1
+func testCoroNativeFleetHandleDone(handle unsafe.Pointer) bool {
+	if findCoroNativeFleetRunTestTaskV1(handle) == nil {
+		panic("native fleet done wrapper received an unknown handle")
+	}
+	return false
+}
+
+//go:linkname testCoroNativeFleetHandleResume C.__llgo_coro_resume_v1
+func testCoroNativeFleetHandleResume(handle unsafe.Pointer) {
+	task := findCoroNativeFleetRunTestTaskV1(handle)
+	if task == nil {
+		panic("native fleet resume wrapper received an unknown handle")
+	}
+	outcome, caseID, lease, control, taken := coro.TakeRunDecision(task.g, coro.ParkTicket{})
+	if !taken || outcome != coro.ParkOutcomePending || caseID != 0 ||
+		lease != (coro.OperationResultLease{}) || control != coro.TaskCancelNone {
+		failCoroNativeFleetRunTestTaskV1(task, "invalid normal resume decision")
+		return
+	}
+	task.header.SuspendReason = uint16(coro.SuspendNone)
+	task.header.Lifecycle = uint16(coro.FrameActive)
+	task.header.SuspendReason = uint16(coro.SuspendYield)
+	task.header.Lifecycle = uint16(coro.FrameSuspended)
+	if !coro.PrepareYield(task.g, handle, task.header) {
+		failCoroNativeFleetRunTestTaskV1(task, "prepare yield failed")
+		return
+	}
+	coroNativeFleetRunTestV1.Lock()
+	task.resumeCalls++
+	coroNativeFleetRunTestV1.Unlock()
+}
+
+//go:linkname testCoroNativeFleetHandleDestroy C.__llgo_coro_destroy_v1
+func testCoroNativeFleetHandleDestroy(handle unsafe.Pointer) {
+	task := findCoroNativeFleetRunTestTaskV1(handle)
+	failCoroNativeFleetRunTestTaskV1(task, "yield-only fleet task was destroyed")
 }
 
 func newCoroNativeFleetTestTask(t *testing.T, source *coro.P) *coroNativeFleetTestTask {
@@ -339,11 +408,6 @@ func TestCoroNativeFleetProductionIslandsV1(t *testing.T) {
 		}
 	}
 	for index, domain := range [2]*coroNativeFleetDomainV1{first, second} {
-		if runnable, ok := coro.NextRunnableAt(&domain.p, 0); !ok || runnable != tasks[index].g {
-			t.Fatalf("fleet domain %d runnable = (%p, %t), want %p", index, runnable, ok, tasks[index].g)
-		} else if !coro.Enqueue(&domain.p, runnable) {
-			t.Fatalf("restore fleet domain %d runnable", index)
-		}
 		finishCoroNativeFleetManualV1(t, domain, manual[index])
 		finishCoroNativeFleetWorkerV1(t, domain, worker[index], payload[index])
 	}
@@ -353,9 +417,44 @@ func TestCoroNativeFleetProductionIslandsV1(t *testing.T) {
 	if !coro.BindRunnableTransferMailbox(&sinkMailbox, &sink) {
 		t.Fatal("bind fleet test sink mailbox")
 	}
-	for index, domain := range [2]*coroNativeFleetDomainV1{first, second} {
-		if _, ok := coro.PublishPNeutralRunnable(&sinkMailbox, &domain.p, tasks[index].g); !ok {
-			t.Fatalf("release fleet domain %d runnable", index)
+	coroNativeFleetRunTestV1.Lock()
+	coroNativeFleetRunTestV1.tasks = map[unsafe.Pointer]*coroNativeFleetTestTask{
+		tasks[0].handle: tasks[0],
+		tasks[1].handle: tasks[1],
+	}
+	coroNativeFleetRunTestV1.Unlock()
+	defer func() {
+		coroNativeFleetRunTestV1.Lock()
+		coroNativeFleetRunTestV1.tasks = nil
+		coroNativeFleetRunTestV1.Unlock()
+	}()
+	for index, handle := range [2]coro.ExecutorFleetHandle{firstHandle, secondHandle} {
+		domain := &coroNativeFleetV1State.domains[index]
+		published := false
+		for attempt := 0; attempt < 32 && !published; attempt++ {
+			epoch, beginOK := coroNativeFleetBeginOwnerEpochV1(handle)
+			if !beginOK {
+				t.Fatalf("begin fleet run owner %d attempt %d", index, attempt)
+			}
+			result := coroNativeFleetRunOwnerEpochV1(handle, epoch, 0, 8)
+			coroNativeFleetRunTestV1.Lock()
+			resumes, failure := tasks[index].resumeCalls, tasks[index].runFailure
+			coroNativeFleetRunTestV1.Unlock()
+			if failure != "" {
+				t.Fatalf("fleet run owner %d failed: %s", index, failure)
+			}
+			if resumes != 0 {
+				_, published = coro.PublishPNeutralRunnable(&sinkMailbox, &domain.p, tasks[index].g)
+			}
+			compatibilityOK := !published || coroNativeFleetEnterOwnerCompatibilityV1(handle, epoch)
+			finishOK := coroNativeFleetFinishOwnerEpochV1(handle, epoch)
+			if result.stop != coroRunSliceBudgetV1 || result.used != 8 || !compatibilityOK || !finishOK {
+				t.Fatalf("fleet run owner %d attempt %d = %+v compatibility:%t finish:%t",
+					index, attempt, result, compatibilityOK, finishOK)
+			}
+		}
+		if !published {
+			t.Fatalf("fleet run owner %d never reached a P-neutral yield", index)
 		}
 	}
 	if moved, more, ok := coro.DrainPNeutralRunnables(&sinkMailbox, &sink, 2); !ok || moved != 2 || more {
