@@ -30,8 +30,8 @@ import (
 )
 
 // LoweringFactsSchema identifies the pointer-free sparse lowering-fact wire
-// format. It is intentionally independent from PlanDigestSchema: integrating
-// this digest into the build cache is a separate, fail-closed migration step.
+// format. It remains independently versioned from PlanDigestSchema; the
+// production plan digest binds this exact schema and its canonical digest.
 const LoweringFactsSchema = "llgo.coro.lowering-facts.v0"
 
 // LoweringFactsDigestDomain separates lowering-fact hashes from source,
@@ -629,6 +629,13 @@ func verifyFunctionValueFacts(uses []FunctionValueFact) error {
 		}
 	}
 	return nil
+}
+
+// Canonical returns a verified, deeply copied ledger in deterministic order.
+// The result is suitable for installation as a compilation-scoped read-only
+// snapshot: it shares no mutable slices with facts.
+func (facts LoweringFacts) Canonical() (LoweringFacts, error) {
+	return facts.canonical()
 }
 
 // CanonicalJSON returns a compact deterministic dump. Function and site order,

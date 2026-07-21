@@ -1,6 +1,6 @@
 # LLGo Coroutine 语义标准化 IR 与统一 Lowering 设计
 
-状态：设计与代码审查结论；Phase A/B 的稀疏 LoweringFacts/CoroOverlay schema、canonical verifier 与 report-only 接入已开始落地，生产 emitter 切换尚未完成
+状态：设计与代码审查结论；Phase A 与 Phase B 的首个生产切片已落地：稀疏 LoweringFacts schema、canonical verifier、owner-scoped snapshot 及其 build/cache/manifest identity 已闭环；集中 emission observer、PrimitiveCatalog、CoroOverlay 与生产 emitter 切换尚未完成
 
 更新：2026-07-20
 
@@ -825,13 +825,15 @@ cache identity必须覆盖所有会改变物理IR的事实：
 最终 cache key 组合 schema 版本与两个 digest。target-configured helper 或 intrinsic 若会改变 semantic projection 和 layout projection，则同时进入两者，不能为了跨 target 复用而丢失事实。当前FunctionID本身包含coroutine/scheduler ABI与最终link identity；若需要跨target比较，必须另建不含这些字段的 `SourceFunctionKey`，并生成只含logical primitive/contract的诊断 projection，它不参与artifact复用。这样的拆分首先用于定位“计划变化”还是“物理布局变化”，不是承诺不同 target 必然共享 artifact。
 
 **历史基线说明**：本迁移方案最初成文时 `PlanDigestSchema` 为 v8，文中原定的v9/v10只是
-当时为LoweringFacts与overlay预计的相对里程碑，不再是当前版本路线。截至2026-07-20，代码中
-`PlanDigestSchema` 已是 `llgo.coro.plan-digest.v21`；其中已包含现有FunctionPlan/CallPlan事实、
+当时为LoweringFacts与overlay预计的相对里程碑，不再是当前版本路线。2026-07-22接入前代码中
+`PlanDigestSchema` 已是 `llgo.coro.plan-digest.v25`；其中已包含现有FunctionPlan/CallPlan事实、
 managed-required exact C declaration的total `CallableIdentityCertificate`、content-addressed
 `CallableContractCertificate` 和exact TrustedInline invocation certificate等后续已落地信息。
 identity inventory与execution policy保持正交：未标注/legacy declaration的content-addressed unknown
-behavior只进入facts/catalog，不额外改变其调度策略。v21本身不表示本文提议的LoweringFacts/PrimitiveCatalog、CoroOverlay或
-VirtualStoragePlan已实现。
+behavior只进入facts/catalog，不额外改变其调度策略。本轮把当前已覆盖的canonical LoweringFacts
+schema与digest接入production plan、Compilation、package fingerprint和manifest后，schema升级为
+`llgo.coro.plan-digest.v26`。v26仍不表示集中EmissionLedger observer、PrimitiveCatalog、CoroOverlay或
+VirtualStoragePlan已经实现。
 
 后续不预留空v22/v23字段，也不沿用历史v9/v10标号。只在某一层的canonical事实真正进入
 production plan/cache identity时，从届时当前schema递增一次。每次升级都验证：任一相关fact
@@ -1077,18 +1079,21 @@ Phase A先报告多次运行中位数和离散度；取得稳定噪声后，再�
 
 ## 18. 建议的下一步
 
-下一实施PR只做 Phase A/B 的最小可验收切片：
+Phase A 与 Phase B 的第一段已经完成：`internal/coro/lowering_facts.go`提供pointer-free site/instance
+identity、稀疏LoweringFacts、canonical dump/digest与verifier；`cl`从冻结的EmissionUniverse和SSAPlan
+生成owner-scoped snapshot；build在任何package codegen前把该snapshot装入`CoroPlanDigest v26`、
+`cl.Compilation`、package fingerprint与manifest，source/cache registration都会验证内容和digest一致。
 
-- 新增 `internal/coro/ir` 的provisional/frozen site ID、稀疏LoweringFacts、canonical semantic dump和verifier；
-- 在 `EmissionUniverse.materializeFunctionForOwner` 中生成owner-scoped facts，owner投影不同先以fail-closed方式拒绝；
+Phase B剩余工作按以下顺序推进：
+
 - 增加集中EmissionLedger observer，先覆盖managed helper、explicit coroutine feature、panic和suspend；
-- 让现有 lowered helper、intrinsic和frame retention路径读取或对照这些facts；
-- 将facts/catalog digest接入build/cache/manifest，在具体字段落地时从届时当前
-  `PlanDigestSchema`升级；
-- 除预期schema/cache identity变化外，不改变FunctionPlan、LLVM CFG、runtime ABI和运行行为；
-- 用现有native/wasm/channel/select/timer测试证明零行为变化。
+- 让现有lowered helper、intrinsic和frame retention路径读取或精确对照这些facts；
+- 为尚未接入observer的site显式记录coverage，而不是把当前稀疏snapshot宣称成全量emission证明；
+- 实现实际被使用的PrimitiveCatalog条目后再将其digest接入，不提前增加空schema字段；
+- 记录LoweringFacts对象数、bytes和compile wall基线，避免新事实层长期只增不减。
 
-这个切片能直接验证最关键的不确定性：当前普通 lowering能否稳定分解为 `Footprint/Plan -> Emit -> Verify`，以及owner-scoped sparse facts的内存/编译时间成本。通过后再进入CoroOverlay和新emitter。
+完成上述预测/实际闭环后进入Phase C，让analysis逐项只消费facts；再生成CoroOverlay并开始新旧backend
+对照。除预期schema/cache identity变化外，Phase B不改变FunctionPlan、LLVM CFG、runtime ABI和运行行为。
 
 ## 附录 A：关键代码定位
 

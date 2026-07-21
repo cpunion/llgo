@@ -25,10 +25,10 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
-// CoroLoweringFactsReport is a report-only snapshot built from one frozen
-// emission universe and its completed whole-program plan. Digest is diagnostic
-// in this migration slice: it does not yet participate in CoroPlanDigest or an
-// archive cache key.
+// CoroLoweringFactsReport is a canonical snapshot built from one frozen
+// emission universe and its completed whole-program plan. Active build-driver
+// compilations install its digest into CoroPlanDigest and every archive cache
+// identity; focused report-only callers may still build it independently.
 type CoroLoweringFactsReport struct {
 	Facts  coro.LoweringFacts
 	Digest string
@@ -41,6 +41,12 @@ func (c *Compilation) BuildCoroLoweringFactsReport() (CoroLoweringFactsReport, e
 	if c == nil {
 		return CoroLoweringFactsReport{}, fmt.Errorf("coroutine lowering facts require a compilation")
 	}
+	if c.CoroLoweringFacts.Schema != "" || c.CoroLoweringFactsDigest != "" {
+		if err := c.validateCoroLoweringFactsIdentity(); err != nil {
+			return CoroLoweringFactsReport{}, err
+		}
+		return CoroLoweringFactsReport{Facts: c.CoroLoweringFacts, Digest: c.CoroLoweringFactsDigest}, nil
+	}
 	if c.CoroPlan == nil {
 		return CoroLoweringFactsReport{}, fmt.Errorf("coroutine lowering facts require a frozen CoroPlan")
 	}
@@ -51,9 +57,9 @@ func (c *Compilation) BuildCoroLoweringFactsReport() (CoroLoweringFactsReport, e
 }
 
 // BuildCoroLoweringFactsReport scans only exact functions and owner contexts
-// already frozen in u. A complete runtime ABI is required because otherwise cl
-// deliberately retains legacy unresolved runtime markers and cannot attach an
-// exact FunctionID to every hidden managed helper.
+// already frozen in u. Incomplete runtime profiles are accepted for entry-only
+// or helper-free compilations; any materialized hidden helper that lacks an
+// exact frozen target still fails at its source site below.
 func (u *EmissionUniverse) BuildCoroLoweringFactsReport(plan *coro.SSAPlan) (CoroLoweringFactsReport, error) {
 	if u == nil {
 		return CoroLoweringFactsReport{}, fmt.Errorf("coroutine lowering facts require a frozen emission universe")
@@ -61,8 +67,8 @@ func (u *EmissionUniverse) BuildCoroLoweringFactsReport(plan *coro.SSAPlan) (Cor
 	if plan == nil {
 		return CoroLoweringFactsReport{}, fmt.Errorf("coroutine lowering facts require a frozen CoroPlan")
 	}
-	if !u.CompleteRuntimeABI() || u.prog == nil {
-		return CoroLoweringFactsReport{}, fmt.Errorf("coroutine lowering facts require a complete frozen runtime ABI")
+	if u.prog == nil {
+		return CoroLoweringFactsReport{}, fmt.Errorf("coroutine lowering facts require a frozen target program")
 	}
 	if err := u.ValidateCoroPlan(plan); err != nil {
 		return CoroLoweringFactsReport{}, fmt.Errorf("coroutine lowering facts validate plan coverage: %w", err)
@@ -101,14 +107,15 @@ func (u *EmissionUniverse) BuildCoroLoweringFactsReport(plan *coro.SSAPlan) (Cor
 	}
 
 	facts := coro.NewLoweringFacts(functions)
-	if err := facts.Verify(); err != nil {
+	canonical, err := facts.Canonical()
+	if err != nil {
 		return CoroLoweringFactsReport{}, fmt.Errorf("coroutine lowering facts verify frozen ledger: %w", err)
 	}
-	digest, err := facts.Digest()
+	digest, err := canonical.Digest()
 	if err != nil {
 		return CoroLoweringFactsReport{}, fmt.Errorf("coroutine lowering facts canonical digest: %w", err)
 	}
-	return CoroLoweringFactsReport{Facts: facts, Digest: digest}, nil
+	return CoroLoweringFactsReport{Facts: canonical, Digest: digest}, nil
 }
 
 func (u *EmissionUniverse) coroLoweringFactsInstanceID(function *ssa.Function, functionID coro.FunctionID, owner *preparedEmissionPackage) (coro.EmissionInstanceID, error) {

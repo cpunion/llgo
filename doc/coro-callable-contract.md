@@ -2,7 +2,7 @@
 
 状态：设计与实现收敛契约
 
-更新：2026-07-20
+更新：2026-07-22
 
 关联文档：
 
@@ -925,7 +925,7 @@ SSA / declaration metadata
 ## 18. 迁移步骤
 
 迁移不以长期兼容旧prototype为目标，但必须区分生产接线、可运行基础设施和
-report-only原型。截至2026-07-20，迁移顺序和状态如下：
+report-only原型。截至2026-07-22，迁移顺序和状态如下：
 
 1. **通用contract schema与冻结（已落地）**：精确解析 `//llgo:coro contract foreign.v1`，
    区分declaration/wrapper scope，显式表达progress/affinity/reentry/memory。`foreign.v1`
@@ -936,7 +936,7 @@ report-only原型。截至2026-07-20，迁移顺序和状态如下：
    canonical/link identity、callable/typed ABI、physical symbol/ABI、origin和evidence；generic
    contract只是同一identity上的可选behavior certificate。identity和contract通过
    `CoroPlanInput -> SSAFunctionPolicy -> SSAPlan -> CoroPlanDigest` 传递，当前
-   `PlanDigestSchema` 为 `llgo.coro.plan-digest.v21`。同一physical `(symbol, ABI)`可以对应多个
+   `PlanDigestSchema` 当前为 `llgo.coro.plan-digest.v26`。同一physical `(symbol, ABI)`可以对应多个
    exact DeclarationRef；不同declaration的ABI差异不会触发无关的全局冲突。显式generic contract
    必须与其identity certificate逐字段匹配；builder伪造、替换或漏传frontend certificate均失败关闭。
    identity本身不改变execution policy，wrapper metadata也不会屏蔽Go body分析。
@@ -949,7 +949,7 @@ report-only原型。截至2026-07-20，迁移顺序和状态如下：
    certificate可冻结conservative Default和可选executor-safe refinement；graph/SSA只接受
    target已经拥有、ABI完全一致的refinement。EmissionUniverse只为executor-safe小wrapper中的
    ordinary static `*ssa.Call`生成certificate，绑定caller/target certificate、精确SSA坐标、
-   target identity、contract与ABI；CallPlan/v21 digest和physical resolver再次校验closed
+   target identity、contract与ABI；CallPlan/current digest和physical resolver再次校验closed
    `DirectPlain`唯一foreign target。graph从target certificate派生Default/selected两个execution
    projection，只替换`ThreadAffine|OpaqueExec`契约lane，不能消除`IRQUnsafe`、`MayUnwind`或其他
    非契约约束；target自身的保守plan保持不变。physical resolver再次核对target确实拥有所选
@@ -993,7 +993,7 @@ report-only原型。截至2026-07-20，迁移顺序和状态如下：
 - contract parser、四维behavior digest、content-addressed ID、freeze identity/ABI与冲突检查；
 - build不能伪造或替换frontend certificate，declaration/wrapper的SSA语义投影；
 - total callable identity、generic callable certificate和exact TrustedInline invocation进入
-  `PlanDigestSchema v21`，事实变化会改变digest；
+  当前 `PlanDigestSchema v26`，事实变化会改变digest；
 - TrustedInline的closed static call、foreign target和physical resolver正/负例；
 - producer-forward shadow的direct/private-carrier、条件incoming inventory及
   arithmetic/open/escape/unannotated拒绝用例。
@@ -1055,7 +1055,7 @@ contract，compile-only不能替代production platform E2E。
 
 ## 20. 当前实现状态与差距
 
-截至2026-07-20，可准确归类为以下三层。
+截至2026-07-22，可准确归类为以下三层。
 
 **已进入生产路径**：
 
@@ -1064,7 +1064,7 @@ contract，compile-only不能替代production platform E2E。
   content-addressed generic contract；两类不可变certificate都绑定function/link identity、
   callable/typed ABI和physical C symbol/ABI，contract另绑定scope与behavior；
 - EmissionUniverse freeze、`internal/build`分类、SSAFunctionPolicy/SSAPlan与
-  `PlanDigestSchema v21` 的端到端传递；
+  当前 `PlanDigestSchema v26` 的端到端传递；
 - declaration的progress/affinity/reentry/memory保守投影、wrapper全body分析，以及与
   `noblock/sync/schedulerwait/worker/workeraddr`和assembly certificate的冲突拒绝；
 - `CallableContractFacts`/CallableFact/InvocationFact的pointer-free模型、canonical verifier/digest。
@@ -1072,7 +1072,7 @@ contract，compile-only不能替代production platform E2E。
   declaration的content-addressed unknown behavior，并覆盖target-owned refinement、exact site、
   closed join和open unknown Auto；这一catalog仍未成为生产archive和所有consumer的唯一输入。
 - target-ownedDefault/TrustedInline双contract、executor-safe小wrapper的exact static call producer、
-  SSA `CallTrustedInline`/CallPlan/v21 digest和physical direct-call resolver的生产闭环；它只授权
+  SSA `CallTrustedInline`/CallPlan/current digest和physical direct-call resolver的生产闭环；它只授权
   exact edge，允许保守Default的`ThreadAffine|OpaqueExec`在该edge被selected projection替换，
   同时保留`IRQUnsafe`/`MayUnwind`等非契约约束；wrapper body仍被分析，错target/contract/ABI、
   projection lane不一致和缺refinement均失败关闭。

@@ -113,40 +113,43 @@ func (s *envSection) empty() bool {
 }
 
 type commonSection struct {
-	AbiMode               string       `yaml:"ABI_MODE,omitempty"`
-	BuildTags             []string     `yaml:"BUILD_TAGS,omitempty"`
-	Target                string       `yaml:"TARGET,omitempty"`
-	RuntimeGC             string       `yaml:"RUNTIME_GC,omitempty"`
-	LLVMCPU               string       `yaml:"LLVM_CPU,omitempty"`
-	LLVMFeatures          string       `yaml:"LLVM_FEATURES,omitempty"`
-	TargetABI             string       `yaml:"TARGET_ABI,omitempty"`
-	CoroPlanDigest        string       `yaml:"CORO_PLAN_DIGEST,omitempty"`
-	CoroABI               string       `yaml:"CORO_ABI,omitempty"`
-	CoroSchedulerABI      string       `yaml:"CORO_SCHEDULER_ABI,omitempty"`
-	CoroPanicABI          string       `yaml:"CORO_PANIC_ABI,omitempty"`
-	CoroFuncRepABI        string       `yaml:"CORO_FUNC_REP_ABI,omitempty"`
-	CoroFrameRetentionABI string       `yaml:"CORO_FRAME_RETENTION_ABI,omitempty"`
-	CoroTargetTriple      string       `yaml:"CORO_TARGET_TRIPLE,omitempty"`
-	CoroTargetCPU         string       `yaml:"CORO_TARGET_CPU,omitempty"`
-	CoroTargetFeatures    string       `yaml:"CORO_TARGET_FEATURES,omitempty"`
-	CoroTargetABI         string       `yaml:"CORO_TARGET_ABI,omitempty"`
-	CoroPointerBits       int          `yaml:"CORO_POINTER_BITS,omitempty"`
-	CoroEndianness        string       `yaml:"CORO_ENDIANNESS,omitempty"`
-	CoroDataLayout        string       `yaml:"CORO_DATA_LAYOUT,omitempty"`
-	GoGlobalDCE           bool         `yaml:"GO_GLOBAL_DCE,omitempty"`
-	CC                    string       `yaml:"CC,omitempty"`
-	CCFlags               []string     `yaml:"CCFLAGS,omitempty"`
-	CFlags                []string     `yaml:"CFLAGS,omitempty"`
-	LDFlags               []string     `yaml:"LDFLAGS,omitempty"`
-	Linker                string       `yaml:"LINKER,omitempty"`
-	ExtraFiles            []fileDigest `yaml:"EXTRA_FILES,omitempty"`
+	AbiMode                 string       `yaml:"ABI_MODE,omitempty"`
+	BuildTags               []string     `yaml:"BUILD_TAGS,omitempty"`
+	Target                  string       `yaml:"TARGET,omitempty"`
+	RuntimeGC               string       `yaml:"RUNTIME_GC,omitempty"`
+	LLVMCPU                 string       `yaml:"LLVM_CPU,omitempty"`
+	LLVMFeatures            string       `yaml:"LLVM_FEATURES,omitempty"`
+	TargetABI               string       `yaml:"TARGET_ABI,omitempty"`
+	CoroPlanDigest          string       `yaml:"CORO_PLAN_DIGEST,omitempty"`
+	CoroABI                 string       `yaml:"CORO_ABI,omitempty"`
+	CoroSchedulerABI        string       `yaml:"CORO_SCHEDULER_ABI,omitempty"`
+	CoroPanicABI            string       `yaml:"CORO_PANIC_ABI,omitempty"`
+	CoroFuncRepABI          string       `yaml:"CORO_FUNC_REP_ABI,omitempty"`
+	CoroFrameRetentionABI   string       `yaml:"CORO_FRAME_RETENTION_ABI,omitempty"`
+	CoroLoweringFactsSchema string       `yaml:"CORO_LOWERING_FACTS_SCHEMA,omitempty"`
+	CoroLoweringFactsDigest string       `yaml:"CORO_LOWERING_FACTS_DIGEST,omitempty"`
+	CoroTargetTriple        string       `yaml:"CORO_TARGET_TRIPLE,omitempty"`
+	CoroTargetCPU           string       `yaml:"CORO_TARGET_CPU,omitempty"`
+	CoroTargetFeatures      string       `yaml:"CORO_TARGET_FEATURES,omitempty"`
+	CoroTargetABI           string       `yaml:"CORO_TARGET_ABI,omitempty"`
+	CoroPointerBits         int          `yaml:"CORO_POINTER_BITS,omitempty"`
+	CoroEndianness          string       `yaml:"CORO_ENDIANNESS,omitempty"`
+	CoroDataLayout          string       `yaml:"CORO_DATA_LAYOUT,omitempty"`
+	GoGlobalDCE             bool         `yaml:"GO_GLOBAL_DCE,omitempty"`
+	CC                      string       `yaml:"CC,omitempty"`
+	CCFlags                 []string     `yaml:"CCFLAGS,omitempty"`
+	CFlags                  []string     `yaml:"CFLAGS,omitempty"`
+	LDFlags                 []string     `yaml:"LDFLAGS,omitempty"`
+	Linker                  string       `yaml:"LINKER,omitempty"`
+	ExtraFiles              []fileDigest `yaml:"EXTRA_FILES,omitempty"`
 }
 
 func (s *commonSection) empty() bool {
 	return s.AbiMode == "" && len(s.BuildTags) == 0 && s.Target == "" && s.RuntimeGC == "" && s.LLVMCPU == "" &&
 		s.LLVMFeatures == "" && s.TargetABI == "" &&
 		s.CoroPlanDigest == "" && s.CoroABI == "" && s.CoroSchedulerABI == "" && s.CoroPanicABI == "" &&
-		s.CoroFuncRepABI == "" && s.CoroFrameRetentionABI == "" && s.CoroTargetTriple == "" && s.CoroTargetCPU == "" &&
+		s.CoroFuncRepABI == "" && s.CoroFrameRetentionABI == "" && s.CoroLoweringFactsSchema == "" &&
+		s.CoroLoweringFactsDigest == "" && s.CoroTargetTriple == "" && s.CoroTargetCPU == "" &&
 		s.CoroTargetFeatures == "" && s.CoroTargetABI == "" && s.CoroPointerBits == 0 &&
 		s.CoroEndianness == "" && s.CoroDataLayout == "" &&
 		!s.GoGlobalDCE && s.CC == "" && len(s.CCFlags) == 0 && len(s.CFlags) == 0 && len(s.LDFlags) == 0 &&

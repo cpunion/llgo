@@ -388,6 +388,7 @@ func root(value *int) { _ = Advance(value, 1) }
 			metadata := coro.PlanDigestMetadata{
 				CoroABI: coro.EntryResolutionABIV0, SchedulerABI: coro.SchedulerNoneABIV0,
 				PanicABI: coro.PanicLegacyABIV0, FuncRepABI: coro.FuncRepABIV0,
+				LoweringFactsSchema: coro.LoweringFactsSchema, LoweringFactsDigest: strings.Repeat("0", sha256.Size*2),
 				TargetTriple: "x86_64-unknown-linux-gnu", PointerBits: 64,
 				Endianness: "little", DataLayout: "e-p:64:64",
 			}
@@ -477,6 +478,7 @@ func root(token *WaitToken, ticket WaitTicket) uint32 {
 	metadata := coro.PlanDigestMetadata{
 		CoroABI: coro.PhysicalABIV1, SchedulerABI: coro.SchedulerChildAwaitABIV0,
 		PanicABI: coro.PanicLegacyABIV0, FuncRepABI: coro.FuncRepABIV0,
+		LoweringFactsSchema: coro.LoweringFactsSchema, LoweringFactsDigest: strings.Repeat("0", sha256.Size*2),
 		TargetTriple: "x86_64-unknown-linux-gnu", PointerBits: 64,
 		Endianness: "little", DataLayout: "e-p:64:64",
 	}
@@ -1308,6 +1310,7 @@ func atomicExchange(*uint32, uint32) uint32
 	metadata := coro.PlanDigestMetadata{
 		CoroABI: coro.PhysicalABIV1, SchedulerABI: coro.SchedulerProgramBootstrapABIV2,
 		PanicABI: coro.PanicLegacyABIV0, FuncRepABI: coro.FuncRepABIV0,
+		LoweringFactsSchema: coro.LoweringFactsSchema, LoweringFactsDigest: strings.Repeat("0", sha256.Size*2),
 		TargetTriple: "x86_64-unknown-linux-gnu", PointerBits: 64,
 		Endianness: "little", DataLayout: "e-p:64:64",
 	}
@@ -2111,6 +2114,17 @@ func TestBuildCoroPlanInstallsArchiveDigest(t *testing.T) {
 	if ctx.clCompilation == nil || ctx.clCompilation.CoroPlanDigest != ctx.coroPlanDigest {
 		t.Fatalf("compilation digest = %+v, want %q", ctx.clCompilation, ctx.coroPlanDigest)
 	}
+	if ctx.coroLoweringFacts.Schema != coro.LoweringFactsSchema ||
+		ctx.coroLoweringFactsDigest == "" ||
+		ctx.coroPlanMetadata.LoweringFactsSchema != ctx.coroLoweringFacts.Schema ||
+		ctx.coroPlanMetadata.LoweringFactsDigest != ctx.coroLoweringFactsDigest ||
+		ctx.clCompilation.CoroLoweringFactsDigest != ctx.coroLoweringFactsDigest {
+		t.Fatalf("installed lowering facts: schema=%q digest=%q metadata=%+v compilation=%+v",
+			ctx.coroLoweringFacts.Schema, ctx.coroLoweringFactsDigest, ctx.coroPlanMetadata, ctx.clCompilation)
+	}
+	if digest, err := ctx.coroLoweringFacts.Digest(); err != nil || digest != ctx.coroLoweringFactsDigest {
+		t.Fatalf("installed lowering-facts digest = %q, %v; want %q", digest, err, ctx.coroLoweringFactsDigest)
+	}
 	if ctx.coroPlanMetadata.CoroABI != coro.EntryResolutionABIV0 ||
 		ctx.coroPlanMetadata.SchedulerABI != coro.SchedulerNoneABIV0 ||
 		ctx.coroPlanMetadata.TargetTriple != prog.TargetSpec().Triple {
@@ -2121,7 +2135,10 @@ func TestBuildCoroPlanInstallsArchiveDigest(t *testing.T) {
 	}
 	manifest := newManifestBuilder()
 	ctx.collectCommonInputs(manifest)
-	if manifest.common.CoroPlanDigest != ctx.coroPlanDigest || manifest.common.CoroDataLayout != prog.DataLayout() {
+	if manifest.common.CoroPlanDigest != ctx.coroPlanDigest ||
+		manifest.common.CoroLoweringFactsSchema != coro.LoweringFactsSchema ||
+		manifest.common.CoroLoweringFactsDigest != ctx.coroLoweringFactsDigest ||
+		manifest.common.CoroDataLayout != prog.DataLayout() {
 		t.Fatalf("manifest coroutine inputs = %+v", manifest.common)
 	}
 
@@ -2227,19 +2244,26 @@ func Leaf(value uint32) uint32 { return value + 1 }
 		if err != nil {
 			t.Fatal(err)
 		}
+		factsReport, err := universe.BuildCoroLoweringFactsReport(plan)
+		if err != nil {
+			t.Fatal(err)
+		}
+		compilation := &cl.Compilation{
+			CoroPlan:                  plan,
+			EnableCoroEntryResolution: true,
+			EnableCoroPhysicalABI:     true,
+			CoroPlanDigest:            strings.Repeat("0", 64),
+			CoroLoweringFacts:         factsReport.Facts,
+			CoroLoweringFactsDigest:   factsReport.Digest,
+			CoroABI:                   coro.PhysicalABIV0,
+			SchedulerABI:              coro.SchedulerNoneABIV0,
+			PanicABI:                  coro.PanicLegacyABIV0,
+			FuncRepABI:                coro.FuncRepABIV0,
+			EmissionUniverse:          universe,
+		}
 		lpkg, _, err := cl.NewPackageExWithEmbedOptions(prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{}, cl.PackageOptions{
-			Compilation: &cl.Compilation{
-				CoroPlan:                  plan,
-				EnableCoroEntryResolution: true,
-				EnableCoroPhysicalABI:     true,
-				CoroPlanDigest:            strings.Repeat("0", 64),
-				CoroABI:                   coro.PhysicalABIV0,
-				SchedulerABI:              coro.SchedulerNoneABIV0,
-				PanicABI:                  coro.PanicLegacyABIV0,
-				FuncRepABI:                coro.FuncRepABIV0,
-				EmissionUniverse:          universe,
-			},
-			CacheHit: cacheHit,
+			Compilation: compilation,
+			CacheHit:    cacheHit,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -3193,18 +3217,28 @@ func TestCoroEntryResolutionUsesPlanMatchedPackageCache(t *testing.T) {
 	}
 
 	const pkgPath = "example.com/coro-cache"
+	loweringFacts, err := coro.NewLoweringFacts(nil).Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	loweringFactsDigest, err := loweringFacts.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
 	metadata := coro.PlanDigestMetadata{
-		CoroABI:        coro.EntryResolutionABIV0,
-		SchedulerABI:   coro.SchedulerNoneABIV0,
-		PanicABI:       coro.PanicLegacyABIV0,
-		FuncRepABI:     coro.FuncRepABIV0,
-		TargetTriple:   "x86_64-unknown-linux-gnu",
-		TargetCPU:      "x86-64",
-		TargetFeatures: "+sse2",
-		TargetABI:      "gnu",
-		PointerBits:    64,
-		Endianness:     "little",
-		DataLayout:     "e-p:64:64",
+		CoroABI:             coro.EntryResolutionABIV0,
+		SchedulerABI:        coro.SchedulerNoneABIV0,
+		PanicABI:            coro.PanicLegacyABIV0,
+		FuncRepABI:          coro.FuncRepABIV0,
+		LoweringFactsSchema: coro.LoweringFactsSchema,
+		LoweringFactsDigest: loweringFactsDigest,
+		TargetTriple:        "x86_64-unknown-linux-gnu",
+		TargetCPU:           "x86-64",
+		TargetFeatures:      "+sse2",
+		TargetABI:           "gnu",
+		PointerBits:         64,
+		Endianness:          "little",
+		DataLayout:          "e-p:64:64",
 	}
 	newContext := func(digest string) *context {
 		plan := &coro.SSAPlan{}
@@ -3213,6 +3247,8 @@ func TestCoroEntryResolutionUsesPlanMatchedPackageCache(t *testing.T) {
 			CoroPlan:                  plan,
 			EnableCoroEntryResolution: true,
 			CoroPlanDigest:            digest,
+			CoroLoweringFacts:         loweringFacts,
+			CoroLoweringFactsDigest:   loweringFactsDigest,
 			CoroABI:                   metadata.CoroABI,
 			SchedulerABI:              metadata.SchedulerABI,
 			PanicABI:                  metadata.PanicABI,
@@ -3225,11 +3261,13 @@ func TestCoroEntryResolutionUsesPlanMatchedPackageCache(t *testing.T) {
 				Goarch:                    "amd64",
 				EnableCoroEntryResolution: true,
 			},
-			coroPlan:         plan,
-			coroEmission:     emission,
-			coroPlanDigest:   digest,
-			coroPlanMetadata: metadata,
-			clCompilation:    compilation,
+			coroPlan:                plan,
+			coroEmission:            emission,
+			coroPlanDigest:          digest,
+			coroPlanMetadata:        metadata,
+			coroLoweringFacts:       loweringFacts,
+			coroLoweringFactsDigest: loweringFactsDigest,
+			clCompilation:           compilation,
 		}
 	}
 	manifest := func(ctx *context, path string) (string, string) {

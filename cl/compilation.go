@@ -59,11 +59,13 @@ type Compilation struct {
 	// after whole-program analysis and participate in every package archive
 	// fingerprint. They are required before an active compilation may register
 	// a cache hit.
-	CoroPlanDigest string
-	CoroABI        string
-	SchedulerABI   string
-	PanicABI       string
-	FuncRepABI     string
+	CoroPlanDigest          string
+	CoroLoweringFacts       coro.LoweringFacts
+	CoroLoweringFactsDigest string
+	CoroABI                 string
+	SchedulerABI            string
+	PanicABI                string
+	FuncRepABI              string
 	// EnableCoroExplicitStatusPanicABI selects the target-wide explicit-status
 	// panic identity. The first lowering slice accepts only exact cleanup-free
 	// physical coroutine bodies whose explicit panic payload can outlive frame
@@ -119,6 +121,8 @@ type Compilation struct {
 
 	coroPreflight            sync.Once
 	coroPreflightErr         error
+	coroFactsValidation      sync.Once
+	coroFactsValidationErr   error
 	coroClosedInterfacePlain *coroClosedInterfacePlainPlan
 	coroManagedInterface     *coroManagedInterfaceDispatchPlan
 }
@@ -131,7 +135,36 @@ func (c *Compilation) validateCoroCacheIdentity() error {
 	if err != nil || len(decoded) != 32 || hex.EncodeToString(decoded) != c.CoroPlanDigest {
 		return fmt.Errorf("coroutine cache registration requires a canonical SHA-256 CoroPlanDigest")
 	}
+	if err := c.validateCoroLoweringFactsIdentity(); err != nil {
+		return err
+	}
 	return c.validateCoroABIIdentity(true)
+}
+
+func (c *Compilation) validateCoroLoweringFactsIdentity() error {
+	if c == nil {
+		return fmt.Errorf("coroutine lowering-facts validation requires a compilation")
+	}
+	c.coroFactsValidation.Do(func() {
+		if c.CoroLoweringFacts.Schema != coro.LoweringFactsSchema {
+			c.coroFactsValidationErr = fmt.Errorf("coroutine cache registration lowering-facts schema %q, want %q", c.CoroLoweringFacts.Schema, coro.LoweringFactsSchema)
+			return
+		}
+		decoded, err := hex.DecodeString(c.CoroLoweringFactsDigest)
+		if err != nil || len(decoded) != 32 || hex.EncodeToString(decoded) != c.CoroLoweringFactsDigest {
+			c.coroFactsValidationErr = fmt.Errorf("coroutine cache registration requires a canonical SHA-256 lowering-facts digest")
+			return
+		}
+		digest, err := c.CoroLoweringFacts.Digest()
+		if err != nil {
+			c.coroFactsValidationErr = fmt.Errorf("coroutine cache registration validates lowering facts: %w", err)
+			return
+		}
+		if digest != c.CoroLoweringFactsDigest {
+			c.coroFactsValidationErr = fmt.Errorf("coroutine cache registration lowering-facts digest mismatch: have %q, want %q", digest, c.CoroLoweringFactsDigest)
+		}
+	})
+	return c.coroFactsValidationErr
 }
 
 func (c *Compilation) validateCoroABIIdentity(required bool) error {

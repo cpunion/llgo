@@ -1327,6 +1327,7 @@ func TestCoroRootPackageAnchorV1StableAcrossCacheRegistration(t *testing.T) {
 			EmissionUniverse: universe,
 		}
 		enableCoroChildAwaitCompilation(compilation)
+		installCoroLoweringFactsForTest(t, compilation)
 		pkg, _, err := NewPackageExWithEmbedOptions(
 			prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 			PackageOptions{Compilation: compilation, CacheHit: cacheHit},
@@ -1865,20 +1866,22 @@ func Leaf(value uint32) uint32 { return value + 1 }
 			t.Fatal(err)
 		}
 		observerCalls := 0
+		compilation := &Compilation{
+			CoroPlan:                  plan,
+			CoroPlanObserver:          func(*ssa.Package, *coro.SSAPlan) { observerCalls++ },
+			EnableCoroEntryResolution: true,
+			EnableCoroPhysicalABI:     true,
+			CoroPlanDigest:            strings.Repeat("0", 64),
+			CoroABI:                   coro.PhysicalABIV0,
+			SchedulerABI:              coro.SchedulerNoneABIV0,
+			PanicABI:                  coro.PanicLegacyABIV0,
+			FuncRepABI:                coro.FuncRepABIV0,
+			EmissionUniverse:          universe,
+		}
+		installCoroLoweringFactsForTest(t, compilation)
 		pkg, _, err := NewPackageExWithEmbedOptions(prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{}, PackageOptions{
-			Compilation: &Compilation{
-				CoroPlan:                  plan,
-				CoroPlanObserver:          func(*ssa.Package, *coro.SSAPlan) { observerCalls++ },
-				EnableCoroEntryResolution: true,
-				EnableCoroPhysicalABI:     true,
-				CoroPlanDigest:            strings.Repeat("0", 64),
-				CoroABI:                   coro.PhysicalABIV0,
-				SchedulerABI:              coro.SchedulerNoneABIV0,
-				PanicABI:                  coro.PanicLegacyABIV0,
-				FuncRepABI:                coro.FuncRepABIV0,
-				EmissionUniverse:          universe,
-			},
-			CacheHit: cacheHit,
+			Compilation: compilation,
+			CacheHit:    cacheHit,
 		})
 		if err != nil {
 			t.Fatal(err)

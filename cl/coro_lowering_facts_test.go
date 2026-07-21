@@ -343,7 +343,7 @@ func TestCoroLoweringFactsReportFailsClosedWithoutFrozenInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := incomplete.BuildCoroLoweringFactsReport(complete.CoroPlan); err == nil || !strings.Contains(err.Error(), "complete frozen runtime ABI") {
+	if _, err := incomplete.BuildCoroLoweringFactsReport(complete.CoroPlan); err == nil || !strings.Contains(err.Error(), "validate plan coverage") {
 		t.Fatalf("incomplete universe error = %v", err)
 	}
 }

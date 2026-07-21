@@ -300,6 +300,12 @@ func F() int { return 42 }
 		FuncRepABI:                coro.FuncRepABIV0,
 		EmissionUniverse:          universe,
 	}
+	installCoroLoweringFactsForTest(t, compilation)
+	mismatchedFacts := *compilation
+	mismatchedFacts.CoroLoweringFactsDigest = strings.Repeat("f", 64)
+	if err := mismatchedFacts.validateCoroCacheIdentity(); err == nil || !strings.Contains(err.Error(), "lowering-facts digest mismatch") {
+		t.Fatalf("mismatched lowering-facts cache identity error = %v", err)
+	}
 	pkg, _, err := NewPackageExWithEmbedOptions(prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{}, PackageOptions{
 		Compilation: compilation,
 		CacheHit:    true,
@@ -313,6 +319,19 @@ func F() int { return 42 }
 	if observerCalls != 0 {
 		t.Fatalf("cache registration observer calls = %d, want 0", observerCalls)
 	}
+}
+
+func installCoroLoweringFactsForTest(t *testing.T, compilation *Compilation) {
+	t.Helper()
+	if compilation == nil || compilation.CoroPlan == nil || compilation.EmissionUniverse == nil {
+		t.Fatal("test lowering facts require a complete compilation plan and emission universe")
+	}
+	report, err := compilation.EmissionUniverse.BuildCoroLoweringFactsReport(compilation.CoroPlan)
+	if err != nil {
+		t.Fatalf("build test lowering facts: %v", err)
+	}
+	compilation.CoroLoweringFacts = report.Facts
+	compilation.CoroLoweringFactsDigest = report.Digest
 }
 
 func TestCoroEntryResolutionPlainPrimaryPreservesIR(t *testing.T) {

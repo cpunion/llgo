@@ -186,6 +186,7 @@ func Use(value string) *int8 { return AllocaCStr(value) }
 	metadata := coro.PlanDigestMetadata{
 		CoroABI: coro.EntryResolutionABIV0, SchedulerABI: coro.SchedulerNoneABIV0,
 		PanicABI: coro.PanicLegacyABIV0, FuncRepABI: coro.FuncRepABIV0,
+		LoweringFactsSchema: coro.LoweringFactsSchema, LoweringFactsDigest: strings.Repeat("0", 64),
 		TargetTriple: "x86_64-unknown-linux-gnu", PointerBits: 64,
 		Endianness: "little", DataLayout: "e-p:64:64",
 	}

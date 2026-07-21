@@ -31,7 +31,7 @@ import (
 // PlanDigestSchema is the independent canonical schema used for archive cache
 // identity. It is deliberately separate from SummarySchema: summaries remain
 // diagnostic snapshots, while this document covers every lowering plan site.
-const PlanDigestSchema = "llgo.coro.plan-digest.v25"
+const PlanDigestSchema = "llgo.coro.plan-digest.v26"
 
 // Current experimental ABI identities. Keeping these in the analysis package
 // gives build, cache, and lowering code one version source of truth.
@@ -111,18 +111,20 @@ const (
 // affect coroutine lowering. TargetABI, TargetCPU, and TargetFeatures use the
 // empty string for the target's canonical default.
 type PlanDigestMetadata struct {
-	CoroABI           string `json:"coro_abi"`
-	SchedulerABI      string `json:"scheduler_abi"`
-	PanicABI          string `json:"panic_abi"`
-	FuncRepABI        string `json:"func_rep_abi"`
-	FrameRetentionABI string `json:"frame_retention_abi,omitempty"`
-	TargetTriple      string `json:"target_triple"`
-	TargetCPU         string `json:"target_cpu"`
-	TargetFeatures    string `json:"target_features"`
-	TargetABI         string `json:"target_abi"`
-	PointerBits       int    `json:"pointer_bits"`
-	Endianness        string `json:"endianness"`
-	DataLayout        string `json:"data_layout"`
+	CoroABI             string `json:"coro_abi"`
+	SchedulerABI        string `json:"scheduler_abi"`
+	PanicABI            string `json:"panic_abi"`
+	FuncRepABI          string `json:"func_rep_abi"`
+	FrameRetentionABI   string `json:"frame_retention_abi,omitempty"`
+	LoweringFactsSchema string `json:"lowering_facts_schema"`
+	LoweringFactsDigest string `json:"lowering_facts_digest"`
+	TargetTriple        string `json:"target_triple"`
+	TargetCPU           string `json:"target_cpu"`
+	TargetFeatures      string `json:"target_features"`
+	TargetABI           string `json:"target_abi"`
+	PointerBits         int    `json:"pointer_bits"`
+	Endianness          string `json:"endianness"`
+	DataLayout          string `json:"data_layout"`
 }
 
 type planDigestDocument struct {
@@ -572,6 +574,13 @@ func (m PlanDigestMetadata) validate() error {
 		if err := validatePlanDigestText(field.name, field.value, true); err != nil {
 			return err
 		}
+	}
+	if m.LoweringFactsSchema != LoweringFactsSchema {
+		return fmt.Errorf("coro: plan digest lowering-facts schema %q, want %q", m.LoweringFactsSchema, LoweringFactsSchema)
+	}
+	decodedFacts, err := hex.DecodeString(m.LoweringFactsDigest)
+	if err != nil || len(decodedFacts) != sha256.Size || hex.EncodeToString(decodedFacts) != m.LoweringFactsDigest {
+		return fmt.Errorf("coro: plan digest lowering-facts digest is not a canonical SHA-256 digest")
 	}
 	switch m.FrameRetentionABI {
 	case "":

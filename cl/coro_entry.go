@@ -384,6 +384,12 @@ func (c *Compilation) preflightCoroPlan() error {
 			c.coroPreflightErr = err
 			return
 		}
+		if c.CoroLoweringFacts.Schema != "" || c.CoroLoweringFactsDigest != "" {
+			if err := c.validateCoroLoweringFactsIdentity(); err != nil {
+				c.coroPreflightErr = err
+				return
+			}
+		}
 		if c.CoroPlan == nil {
 			c.coroPreflightErr = fmt.Errorf("coroutine entry resolution requires a compilation CoroPlan")
 			return

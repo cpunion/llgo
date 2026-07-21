@@ -760,6 +760,8 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 		return [16]byte{}, fmt.Errorf("coroutine program bootstrap hash metadata: %w", err)
 	}
 	metadata.FrameRetentionABI = ctx.coroPlanMetadata.FrameRetentionABI
+	metadata.LoweringFactsSchema = ctx.coroPlanMetadata.LoweringFactsSchema
+	metadata.LoweringFactsDigest = ctx.coroPlanMetadata.LoweringFactsDigest
 	target := ctx.prog.TargetSpec()
 	h := sha256.New()
 	write := func(value string) {
@@ -865,6 +867,8 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 	write(metadata.PanicABI)
 	write(metadata.FuncRepABI)
 	write(metadata.FrameRetentionABI)
+	write(metadata.LoweringFactsSchema)
+	write(metadata.LoweringFactsDigest)
 	write(target.Triple)
 	write(target.CPU)
 	write(target.Features)

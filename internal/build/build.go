@@ -3374,12 +3374,25 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	}
 	var metadata coro.PlanDigestMetadata
 	var digest string
+	var loweringFacts coro.LoweringFacts
+	var loweringFactsDigest string
 	if ctx.buildConf.EnableCoroEntryResolution {
+		if ctx.coroEmission == nil {
+			return fmt.Errorf("build coroutine lowering facts: missing frozen emission universe")
+		}
+		factsReport, factsErr := ctx.coroEmission.BuildCoroLoweringFactsReport(plan)
+		if factsErr != nil {
+			return fmt.Errorf("build coroutine lowering facts: %w", factsErr)
+		}
+		loweringFacts = factsReport.Facts
+		loweringFactsDigest = factsReport.Digest
 		metadata, err = buildCoroPlanDigestMetadata(ctx)
 		if err != nil {
 			return fmt.Errorf("build coroutine plan digest metadata: %w", err)
 		}
 		metadata.FrameRetentionABI = frameRetentionABI
+		metadata.LoweringFactsSchema = loweringFacts.Schema
+		metadata.LoweringFactsDigest = loweringFactsDigest
 		digest, err = plan.CoroPlanDigest(metadata)
 		if err != nil {
 			return fmt.Errorf("build coroutine plan digest: %w", err)
@@ -3388,6 +3401,8 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	ctx.coroPlan = plan
 	ctx.coroPlanDigest = digest
 	ctx.coroPlanMetadata = metadata
+	ctx.coroLoweringFacts = loweringFacts
+	ctx.coroLoweringFactsDigest = loweringFactsDigest
 	ctx.clCompilation = &cl.Compilation{
 		CoroPlan:                         plan,
 		CoroPlanObserver:                 ctx.buildConf.CoroPlanObserver,
@@ -3402,6 +3417,8 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		EnableCoroWorker:                 ctx.buildConf.EnableCoroWorker,
 		CoroFrameRetentionABI:            frameRetentionABI,
 		CoroPlanDigest:                   digest,
+		CoroLoweringFacts:                loweringFacts,
+		CoroLoweringFactsDigest:          loweringFactsDigest,
 		CoroABI:                          metadata.CoroABI,
 		SchedulerABI:                     metadata.SchedulerABI,
 		PanicABI:                         metadata.PanicABI,
@@ -3414,6 +3431,8 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 			ctx.coroPlan = nil
 			ctx.coroPlanDigest = ""
 			ctx.coroPlanMetadata = coro.PlanDigestMetadata{}
+			ctx.coroLoweringFacts = coro.LoweringFacts{}
+			ctx.coroLoweringFactsDigest = ""
 			ctx.clCompilation = nil
 			ctx.coroProgramBootstraps = nil
 			return fmt.Errorf("prepare coroutine program bootstrap before codegen: %w", err)
@@ -3425,6 +3444,8 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 			ctx.coroPlan = nil
 			ctx.coroPlanDigest = ""
 			ctx.coroPlanMetadata = coro.PlanDigestMetadata{}
+			ctx.coroLoweringFacts = coro.LoweringFacts{}
+			ctx.coroLoweringFactsDigest = ""
 			ctx.clCompilation = nil
 			ctx.coroProgramBootstraps = nil
 			return fmt.Errorf("validate coroutine unwind-only lowered calls before codegen: %w", err)
@@ -5030,17 +5051,19 @@ func buildCoroPlanDigestMetadata(ctx *context) (coro.PlanDigestMetadata, error) 
 		return coro.PlanDigestMetadata{}, fmt.Errorf("unsupported LLVM byte order")
 	}
 	return coro.PlanDigestMetadata{
-		CoroABI:        activeCoroABIVersion(ctx.buildConf),
-		SchedulerABI:   activeCoroSchedulerABIVersion(ctx.buildConf),
-		PanicABI:       activeCoroPanicABIVersion(ctx.buildConf),
-		FuncRepABI:     activeCoroFuncRepABIVersion(ctx.buildConf),
-		TargetTriple:   target.Triple,
-		TargetCPU:      target.CPU,
-		TargetFeatures: target.Features,
-		TargetABI:      target.TargetABI,
-		PointerBits:    ctx.prog.PointerSize() * 8,
-		Endianness:     endianness,
-		DataLayout:     ctx.prog.DataLayout(),
+		CoroABI:             activeCoroABIVersion(ctx.buildConf),
+		SchedulerABI:        activeCoroSchedulerABIVersion(ctx.buildConf),
+		PanicABI:            activeCoroPanicABIVersion(ctx.buildConf),
+		FuncRepABI:          activeCoroFuncRepABIVersion(ctx.buildConf),
+		LoweringFactsSchema: ctx.coroLoweringFacts.Schema,
+		LoweringFactsDigest: ctx.coroLoweringFactsDigest,
+		TargetTriple:        target.Triple,
+		TargetCPU:           target.CPU,
+		TargetFeatures:      target.Features,
+		TargetABI:           target.TargetABI,
+		PointerBits:         ctx.prog.PointerSize() * 8,
+		Endianness:          endianness,
+		DataLayout:          ctx.prog.DataLayout(),
 	}, nil
 }
 
@@ -5280,6 +5303,8 @@ type context struct {
 	coroTLSDestructorFixturePkg string
 	coroPlanDigest              string
 	coroPlanMetadata            coro.PlanDigestMetadata
+	coroLoweringFacts           coro.LoweringFacts
+	coroLoweringFactsDigest     string
 	// Frozen immediately after whole-program analysis, before package codegen.
 	// linkMainPkg only consumes these exact per-entry-package tables.
 	coroProgramBootstraps map[string]*coroProgramBootstrapV1

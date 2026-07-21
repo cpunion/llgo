@@ -36,17 +36,19 @@ import (
 
 func TestCoroutinePlanInputsAffectFingerprint(t *testing.T) {
 	base := coro.PlanDigestMetadata{
-		CoroABI:        coro.PhysicalABIV0,
-		SchedulerABI:   coro.SchedulerNoneABIV0,
-		PanicABI:       coro.PanicLegacyABIV0,
-		FuncRepABI:     coro.FuncRepABIV0,
-		TargetTriple:   "x86_64-unknown-linux-gnu",
-		TargetCPU:      "x86-64",
-		TargetFeatures: "+sse2",
-		TargetABI:      "gnu",
-		PointerBits:    64,
-		Endianness:     "little",
-		DataLayout:     "e-p:64:64",
+		CoroABI:             coro.PhysicalABIV0,
+		SchedulerABI:        coro.SchedulerNoneABIV0,
+		PanicABI:            coro.PanicLegacyABIV0,
+		FuncRepABI:          coro.FuncRepABIV0,
+		LoweringFactsSchema: coro.LoweringFactsSchema,
+		LoweringFactsDigest: strings.Repeat("0", 64),
+		TargetTriple:        "x86_64-unknown-linux-gnu",
+		TargetCPU:           "x86-64",
+		TargetFeatures:      "+sse2",
+		TargetABI:           "gnu",
+		PointerBits:         64,
+		Endianness:          "little",
+		DataLayout:          "e-p:64:64",
 	}
 	fingerprint := func(digest string, metadata coro.PlanDigestMetadata) string {
 		t.Helper()
@@ -102,6 +104,7 @@ func TestCoroutinePlanInputsAffectFingerprint(t *testing.T) {
 		{"scheduler ABI", func(m *coro.PlanDigestMetadata) { m.SchedulerABI += ".next" }},
 		{"panic ABI", func(m *coro.PlanDigestMetadata) { m.PanicABI += ".next" }},
 		{"func rep ABI", func(m *coro.PlanDigestMetadata) { m.FuncRepABI += ".next" }},
+		{"lowering facts", func(m *coro.PlanDigestMetadata) { m.LoweringFactsDigest = strings.Repeat("1", 64) }},
 		{"triple", func(m *coro.PlanDigestMetadata) { m.TargetTriple = "wasm32-unknown-unknown" }},
 		{"CPU", func(m *coro.PlanDigestMetadata) { m.TargetCPU = "generic" }},
 		{"features", func(m *coro.PlanDigestMetadata) { m.TargetFeatures = "" }},

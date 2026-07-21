@@ -147,8 +147,8 @@ func TestCoroPlanDigestDeterministicCompleteAndDomainSeparated(t *testing.T) {
 }
 
 func TestCoroPlanDigestRecordsWholeBuildRawPlainVariant(t *testing.T) {
-	if PlanDigestSchema != "llgo.coro.plan-digest.v25" {
-		t.Fatalf("plan digest schema = %q, want exact safe fixed-array index schema v25", PlanDigestSchema)
+	if PlanDigestSchema != "llgo.coro.plan-digest.v26" {
+		t.Fatalf("plan digest schema = %q, want lowering-facts-bound schema v26", PlanDigestSchema)
 	}
 	prog, pkg := buildCoroTestSSA(t, "raw_variant_digest.go", `package coroid
 func root(seed int) int {
@@ -1204,6 +1204,9 @@ func TestCoroPlanDigestMetadataValidation(t *testing.T) {
 		{"mismatched scheduler ABI", func(m *PlanDigestMetadata) { m.SchedulerABI = "llgo.coro.scheduler.other.v0" }, "does not match FunctionID ABI"},
 		{"empty panic ABI", func(m *PlanDigestMetadata) { m.PanicABI = "" }, "panic ABI is empty"},
 		{"empty func rep ABI", func(m *PlanDigestMetadata) { m.FuncRepABI = "" }, "function representation ABI is empty"},
+		{"wrong lowering-facts schema", func(m *PlanDigestMetadata) { m.LoweringFactsSchema += ".other" }, "lowering-facts schema"},
+		{"empty lowering-facts digest", func(m *PlanDigestMetadata) { m.LoweringFactsDigest = "" }, "lowering-facts digest"},
+		{"invalid lowering-facts digest", func(m *PlanDigestMetadata) { m.LoweringFactsDigest = strings.Repeat("g", sha256.Size*2) }, "lowering-facts digest"},
 		{"empty triple", func(m *PlanDigestMetadata) { m.TargetTriple = "" }, "target triple is empty"},
 		{"invalid CPU UTF-8", func(m *PlanDigestMetadata) { m.TargetCPU = string([]byte{0xff}) }, "target CPU is not valid UTF-8"},
 		{"NUL feature", func(m *PlanDigestMetadata) { m.TargetFeatures = "+simd\x00-bad" }, "target features contains NUL"},
@@ -1250,6 +1253,7 @@ func TestCoroPlanDigestMetadataMutationsChangeDigest(t *testing.T) {
 	}{
 		{"panic ABI", func(m *PlanDigestMetadata) { m.PanicABI += ".changed" }},
 		{"func rep ABI", func(m *PlanDigestMetadata) { m.FuncRepABI += ".changed" }},
+		{"lowering facts", func(m *PlanDigestMetadata) { m.LoweringFactsDigest = strings.Repeat("1", sha256.Size*2) }},
 		{"triple", func(m *PlanDigestMetadata) { m.TargetTriple = "wasm32-unknown-unknown" }},
 		{"CPU", func(m *PlanDigestMetadata) { m.TargetCPU = "generic" }},
 		{"features", func(m *PlanDigestMetadata) { m.TargetFeatures += ",+atomics" }},
@@ -1665,16 +1669,18 @@ func planDigestSSAConfig() SSAConfig {
 
 func validPlanDigestMetadata() PlanDigestMetadata {
 	return PlanDigestMetadata{
-		CoroABI:        PhysicalABIV0,
-		SchedulerABI:   SchedulerNoneABIV0,
-		PanicABI:       PanicLegacyABIV0,
-		FuncRepABI:     FuncRepABIV0,
-		TargetTriple:   "x86_64-unknown-linux-gnu",
-		TargetCPU:      "",
-		TargetFeatures: "+sse2,-avx",
-		TargetABI:      "",
-		PointerBits:    64,
-		Endianness:     "little",
-		DataLayout:     "e-m:e-p:64:64-i64:64-n8:16:32:64-S128",
+		CoroABI:             PhysicalABIV0,
+		SchedulerABI:        SchedulerNoneABIV0,
+		PanicABI:            PanicLegacyABIV0,
+		FuncRepABI:          FuncRepABIV0,
+		LoweringFactsSchema: LoweringFactsSchema,
+		LoweringFactsDigest: strings.Repeat("0", sha256.Size*2),
+		TargetTriple:        "x86_64-unknown-linux-gnu",
+		TargetCPU:           "",
+		TargetFeatures:      "+sse2,-avx",
+		TargetABI:           "",
+		PointerBits:         64,
+		Endianness:          "little",
+		DataLayout:          "e-m:e-p:64:64-i64:64-n8:16:32:64-S128",
 	}
 }
