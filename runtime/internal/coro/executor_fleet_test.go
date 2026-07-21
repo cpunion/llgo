@@ -162,6 +162,76 @@ func TestExecutorFleetRoutesTwoPCompletionsToExactExecutor(t *testing.T) {
 	}
 }
 
+func TestExecutorFleetAdoptsExistingProgramDomainBeforeOwnedPeer(t *testing.T) {
+	fleet := new(ExecutorFleet)
+	programP := new(P)
+	programDriver := new(ExecutorDriver)
+	programRegistry := new(ExecutorRegistry)
+	programWaits := new(WaitRegistrationTable)
+	programManual := new(ManualOperationSource)
+	programExecutor := registerTestExecutor(t, programRegistry)
+	if !BindExecutorSourceCatalogAtRoute(
+		programDriver,
+		programP,
+		programRegistry,
+		programExecutor,
+		1,
+		ExecutorSourceCatalog{Waits: programWaits, Manual: programManual},
+	) {
+		t.Fatal("bind existing program executor")
+	}
+	queued := newYieldingTestG(t, "adopted-program-ready")
+	if !Enqueue(programP, queued.g) {
+		t.Fatal("enqueue existing program root before fleet adoption")
+	}
+	programHandle, adopted := AdoptExecutorFleet(fleet, programDriver, programP)
+	if !adopted || programHandle.Route != 1 || programHandle.Executor != programExecutor ||
+		programDriver.registry != programRegistry {
+		t.Fatalf("adopt existing program domain = (%+v, %t)", programHandle, adopted)
+	}
+	peer := bindExecutorFleetManualFixture(t, fleet)
+	if peer.handle.Route != 2 || peer.driver.registry != &fleet.executors ||
+		peer.driver.registry == programDriver.registry {
+		t.Fatalf("owned peer after adopted program = %+v", peer.handle)
+	}
+
+	state, ticket, ids := reserveManualWaitSet(t, programManual, programP, 721, []uint32{1})
+	posted := fleet.PostManualAndRequest(ids[0])
+	if posted.Route != OperationRoutePosted || posted.Executor != ExecutorRequestPublished ||
+		!programRegistry.ObserveRequested(programExecutor) || fleet.executors.ObserveRequested(peer.handle.Executor) {
+		t.Fatalf("adopted program route post = %+v", posted)
+	}
+	programFixture := &executorFleetManualFixture{
+		p: programP, driver: programDriver, waits: programWaits, manual: programManual, handle: programHandle,
+	}
+	settleExecutorFleetManual(t, programFixture, state, ticket, ids)
+	sink := new(P)
+	mailbox := new(RunnableTransferMailbox)
+	if !BindRunnableTransferMailbox(mailbox, sink) {
+		t.Fatal("bind adopted program cleanup mailbox")
+	}
+	transfer, published := PublishPNeutralRunnable(mailbox, programP, queued.g)
+	if !published || !transfer.Valid() {
+		t.Fatalf("publish adopted program ready task = (%+v, %t)", transfer, published)
+	}
+	if moved, more, drainOK := DrainPNeutralRunnables(mailbox, sink, 1); !drainOK || moved != 1 || more {
+		t.Fatalf("drain adopted program ready task = (%d, %t, %t)", moved, more, drainOK)
+	}
+	if runnable, nextOK := NextRunnable(sink); !nextOK || runnable != queued.g {
+		t.Fatalf("adopted program cleanup task = (%p, %t)", runnable, nextOK)
+	}
+	action := beginWaitTestResume(t, sink, queued)
+	finishWaitTestTask(t, sink, queued, action)
+	if !TerminalG(sink, queued.g) {
+		t.Fatal("adopted program ready task retained scheduler state")
+	}
+	closeExecutorFleetFixture(t, fleet, programFixture)
+	closeExecutorFleetFixture(t, fleet, peer)
+	if !programRegistry.CanRelease() || !fleet.AllRetired() {
+		t.Fatal("adopted program or owned peer retained executor resources")
+	}
+}
+
 func TestExecutorFleetBindsTimerAndRoutesPollSources(t *testing.T) {
 	t.Run("timer-owner-source", func(t *testing.T) {
 		fleet := new(ExecutorFleet)

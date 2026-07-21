@@ -85,9 +85,10 @@ type executorFleetSlot struct {
 const executorFleetMagic uint32 = 0x45584631 // "EXF1"
 
 // ExecutorFleet is the allocation-free target owner for multiple independent
-// P/driver/source islands. One shared ExecutorRegistry supplies exact request
-// generations, while one monotonically allocated OperationRouteRegistry maps
-// every producer OperationID to the matching source catalog and request gate.
+// P/driver/source islands. Fleet-owned domains use the embedded
+// ExecutorRegistry; an adopted program-main domain retains its existing
+// registry. One monotonically allocated OperationRouteRegistry maps every
+// producer OperationID to the matching source catalog and exact request gate.
 //
 // The fleet and all P/driver/catalog storage must remain at stable addresses
 // from first BindExecutorFleet through AllRetired. Owner lifecycle methods are
@@ -199,9 +200,12 @@ func executorFleetSlotFor(fleet *ExecutorFleet, handle ExecutorFleetHandle) (*ex
 
 func executorFleetActiveOwner(fleet *ExecutorFleet, handle ExecutorFleetHandle) (*executorFleetSlot, RouteID, bool) {
 	slot, route, ok := executorFleetSlotFor(fleet, handle)
+	routeSlot, routeOK := operationRouteSlotFor(&fleet.routes, route)
 	return slot, route, ok && preemptLoad(&slot.state) == uint32(executorFleetSlotActive) &&
 		slot.p != nil && slot.driver != nil && validExecutorDriverForP(slot.driver, slot.p) &&
-		slot.driver.registry == &fleet.executors && slot.driver.handle == handle.Executor && slot.driver.route == route
+		slot.driver.registry != nil && slot.driver.handle == handle.Executor && slot.driver.route == route && routeOK &&
+		validOperationRouteBinding(routeSlot, route) && routeSlot.executorRegistry == slot.driver.registry &&
+		routeSlot.executor == handle.Executor
 }
 
 func retireAllocatedFleetRoute(routes *OperationRouteRegistry, route RouteID) bool {
@@ -316,6 +320,58 @@ func BindExecutorFleet(
 	return slot.handle, true
 }
 
+// AdoptExecutorFleet publishes an already-bound route-matching executor as
+// the next fleet domain. This is the program-main migration boundary: existing
+// static P/driver/source storage and its executor registry remain authoritative
+// while the fleet adds only exact route ingress and a P-neutral transfer
+// mailbox. Later fleet-owned domains may still use BindExecutorFleet and its
+// private registry. No driver/source pointer is copied or rebound.
+func AdoptExecutorFleet(
+	fleet *ExecutorFleet,
+	driver *ExecutorDriver,
+	p *P,
+) (ExecutorFleetHandle, bool) {
+	route, slot, ok := nextExecutorFleetRoute(fleet)
+	if !ok || !validExecutorDriverForP(driver, p) || driver.registry == nil ||
+		driver.route != route || driver.sources.route != route ||
+		driver.poll.phase != executorPollIdle || !emptyExecutorRunCursor(driver) ||
+		!idleExecutorScheduler(p) || !activeExecutorHandle(driver.registry, driver.handle) {
+		return ExecutorFleetHandle{}, false
+	}
+	if fleet.magic == 0 {
+		fleet.magic = executorFleetMagic
+	}
+	allocated, ok := fleet.routes.Allocate()
+	if !ok || allocated != route {
+		return ExecutorFleetHandle{}, false
+	}
+	slot.handle = ExecutorFleetHandle{Route: uint32(route), Executor: driver.handle}
+	slot.p = p
+	slot.driver = driver
+	preemptStore(&slot.state, uint32(executorFleetSlotBinding))
+	if !BindRunnableTransferMailbox(&slot.mailbox, p) {
+		if !retireAllocatedFleetRoute(&fleet.routes, route) {
+			poisonExecutorFleetSlot(slot)
+			return ExecutorFleetHandle{}, false
+		}
+		slot.p, slot.driver = nil, nil
+		preemptStore(&slot.state, uint32(executorFleetSlotRetired))
+		return ExecutorFleetHandle{}, false
+	}
+	if !fleet.routes.Bind(route, driver) {
+		mailboxOK := resetEmptyFleetMailbox(&slot.mailbox, p)
+		if !retireAllocatedFleetRoute(&fleet.routes, route) || !mailboxOK {
+			poisonExecutorFleetSlot(slot)
+			return ExecutorFleetHandle{}, false
+		}
+		slot.p, slot.driver = nil, nil
+		preemptStore(&slot.state, uint32(executorFleetSlotRetired))
+		return ExecutorFleetHandle{}, false
+	}
+	preemptStore(&slot.state, uint32(executorFleetSlotActive))
+	return slot.handle, true
+}
+
 // PublishPNeutralRunnableAndRequest moves one P-neutral runnable into the
 // exact destination route's bounded mailbox, then requests only that route's
 // executor. The route producer lease spans both steps, so route close strongly
@@ -340,8 +396,8 @@ func (fleet *ExecutorFleet) PublishPNeutralRunnableAndRequest(
 	}
 	id, published := PublishPNeutralRunnable(&slot.mailbox, source, g)
 	request := ExecutorRequestInvalid
-	if published {
-		request = fleet.executors.Request(handle.Executor)
+	if published && slot.driver != nil && slot.driver.registry != nil {
+		request = slot.driver.registry.Request(handle.Executor)
 	}
 	operationRouteReleaseProducer(routeSlot)
 	return id, request, published
