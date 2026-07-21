@@ -266,8 +266,8 @@ func TestAtomicMetadataRetryLoopsRemainLockFreeAndPreemptible(t *testing.T) {
 		"func prune(bucket *unsafe.Pointer)",
 		"func (table *WeakTable) PruneWeak",
 		"func (table *WeakTable) InternWeak",
-		"atomic.CompareAndSwapPointer(link, raw, next)",
-		"atomic.CompareAndSwapPointer(bucket, head, unsafe.Pointer(candidate))",
+		"compareAndSwapPointer(link, raw, next)",
+		"compareAndSwapPointer(bucket, head, unsafe.Pointer(candidate))",
 	} {
 		if !strings.Contains(source, required) {
 			t.Errorf("%s lacks preemptible lock-free retry marker %q", atomicCacheCore, required)

@@ -25,7 +25,7 @@ import (
 )
 
 func TestCoroLLVMHandleControlIsSchedulerOwnerRawHostStackOnly(t *testing.T) {
-	const path = "internal/runtime/coro_sched.go"
+	const path = "internal/runtime/coro_run_slice.go"
 	source, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)

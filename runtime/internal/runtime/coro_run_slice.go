@@ -24,10 +24,11 @@ import (
 
 // These compiler-owned C ABI wrappers are emitted in the program entry module.
 // They hide LLVM's post-CoroSplit handle layout from the Go runtime.
-// schedulerwait restricts them to a compiler-owned raw host-stack island in
-// the exact executor owner. Resume may execute until the next suspension and
-// therefore is neither a bounded foreign leaf nor an ordinary synchronous
-// runtime call.
+// schedulerwait restricts them to a compiler-owned raw host-stack island, in
+// this case the scheduler owner. Resume may execute the coroutine until its
+// next suspend and therefore is neither a bounded foreign leaf nor an ordinary
+// synchronous runtime call. The other permitted island is a worker callback;
+// managed coroutine plans retain WaitForeign at such edges.
 
 //llgo:coro schedulerwait
 //go:linkname coroHandleDone C.__llgo_coro_done_v1
