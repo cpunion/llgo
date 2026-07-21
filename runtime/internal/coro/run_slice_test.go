@@ -913,5 +913,16 @@ func TestExecutorRunDestroyReceiptIsStableAndHandleFree(t *testing.T) {
 	if !ok || second != first {
 		t.Fatalf("repeated stable receipt = (%+v, %t), first %+v", second, ok, first)
 	}
+	completed, ok := CommitExecutorRunDomainDestroy(driver, task.g, receipt)
+	if !ok || completed.Kind != ActionComplete || completed.Handle != nil ||
+		p.current != nil || p.action != (Action{}) || task.g.state != GDead ||
+		task.g.runP != nil || driver.state != executorDriverActive {
+		t.Fatalf("ordinary domain destroy commit = (%+v, %t), current=%p action=%+v state=%d runP=%p driver=%d",
+			completed, ok, p.current, p.action, task.g.state, task.g.runP, driver.state)
+	}
+	if !EnterExecutorRunCompatibility(driver) {
+		t.Fatal("enter executor compatibility after ordinary domain completion")
+	}
+	closeTestExecutorDriver(t, driver)
 	runtime.KeepAlive(task.frame.memory)
 }

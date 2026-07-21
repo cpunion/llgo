@@ -19,6 +19,7 @@
 package runtime
 
 import (
+	"os"
 	stdruntime "runtime"
 	"sync"
 	"testing"
@@ -33,9 +34,27 @@ type coroNativeFleetTestTask struct {
 	handle      unsafe.Pointer
 	header      *coro.HeaderV1
 	descriptor  *coro.FrameDescriptorV1
+	storage     unsafe.Pointer
+	raw         unsafe.Pointer
+	frameSize   uintptr
+	frameAlign  uintptr
+	allocation  uintptr
 	memory      []uintptr
 	resumeCalls uint32
 	runFailure  string
+	complete    bool
+	destroyed   bool
+
+	pollMode      bool
+	pollFD        int32
+	pollDriver    *coro.ExecutorDriver
+	pollWait      coro.WaitSetRecord
+	pollTicket    coro.ParkTicket
+	pollHandle    coro.PollOperationHandle
+	pollOperation coro.OperationID
+	pollExecutor  coro.ExecutorHandle
+	pollPrepared  bool
+	pollFinished  bool
 }
 
 var coroNativeFleetRunTestV1 struct {
@@ -68,10 +87,11 @@ func coroReleaseCompletedTask(g *coro.G) bool {
 
 //go:linkname testCoroNativeFleetHandleDone C.__llgo_coro_done_v1
 func testCoroNativeFleetHandleDone(handle unsafe.Pointer) bool {
-	if findCoroNativeFleetRunTestTaskV1(handle) == nil {
+	task := findCoroNativeFleetRunTestTaskV1(handle)
+	if task == nil {
 		panic("native fleet done wrapper received an unknown handle")
 	}
-	return false
+	return task.complete
 }
 
 //go:linkname testCoroNativeFleetHandleResume C.__llgo_coro_resume_v1
@@ -80,7 +100,80 @@ func testCoroNativeFleetHandleResume(handle unsafe.Pointer) {
 	if task == nil {
 		panic("native fleet resume wrapper received an unknown handle")
 	}
-	outcome, caseID, lease, control, taken := coro.TakeRunDecision(task.g, coro.ParkTicket{})
+	expected := coro.ParkTicket{}
+	if task.pollPrepared && !task.pollFinished {
+		expected = task.pollTicket
+	}
+	outcome, caseID, lease, control, taken := coro.TakeRunDecision(task.g, expected)
+	if task.pollMode {
+		switch {
+		case !task.pollPrepared:
+			if !taken || outcome != coro.ParkOutcomePending || caseID != 0 ||
+				lease != (coro.OperationResultLease{}) || control != coro.TaskCancelNone {
+				failCoroNativeFleetRunTestTaskV1(task, "invalid initial poll resume decision")
+				return
+			}
+			task.header.SuspendReason = uint16(coro.SuspendNone)
+			task.header.Lifecycle = uint16(coro.FrameActive)
+			task.header.SuspendReason = uint16(coro.SuspendPark)
+			task.header.Lifecycle = uint16(coro.FrameSuspended)
+			ticket, poll, operation, executor, ok := coro.PrepareCurrentExecutorPollPark(
+				task.pollDriver,
+				task.g,
+				handle,
+				task.header,
+				&task.pollWait,
+				1,
+				901,
+				task.pollFD,
+				coro.PollInterestRead,
+				0,
+			)
+			if !ok {
+				failCoroNativeFleetRunTestTaskV1(task, "prepare routed poll park failed")
+				return
+			}
+			task.pollTicket = ticket
+			task.pollHandle = poll
+			task.pollOperation = operation
+			task.pollExecutor = executor
+			task.pollPrepared = true
+			task.resumeCalls++
+			return
+		case !task.pollFinished:
+			if !taken || outcome != coro.ParkOutcomeCompleted || caseID != 1 ||
+				!lease.Valid() || control != coro.TaskCancelNone {
+				failCoroNativeFleetRunTestTaskV1(task, "invalid completed poll resume decision")
+				return
+			}
+			result, ok := coro.FinishCurrentExecutorPollPark(
+				task.pollDriver,
+				task.g,
+				task.pollExecutor,
+				task.pollHandle,
+				task.pollOperation,
+				lease,
+				false,
+			)
+			if !ok || result != coro.PollOperationReady {
+				failCoroNativeFleetRunTestTaskV1(task, "finish routed poll park failed")
+				return
+			}
+			task.pollFinished = true
+			task.header.SuspendReason = uint16(coro.SuspendFrameComplete)
+			task.header.Lifecycle = uint16(coro.FrameFinalSuspended)
+			if !coro.PrepareComplete(task.g, handle, task.header) {
+				failCoroNativeFleetRunTestTaskV1(task, "prepare routed poll completion failed")
+				return
+			}
+			task.complete = true
+			task.resumeCalls++
+			return
+		default:
+			failCoroNativeFleetRunTestTaskV1(task, "completed poll task resumed again")
+			return
+		}
+	}
 	if !taken || outcome != coro.ParkOutcomePending || caseID != 0 ||
 		lease != (coro.OperationResultLease{}) || control != coro.TaskCancelNone {
 		failCoroNativeFleetRunTestTaskV1(task, "invalid normal resume decision")
@@ -102,6 +195,21 @@ func testCoroNativeFleetHandleResume(handle unsafe.Pointer) {
 //go:linkname testCoroNativeFleetHandleDestroy C.__llgo_coro_destroy_v1
 func testCoroNativeFleetHandleDestroy(handle unsafe.Pointer) {
 	task := findCoroNativeFleetRunTestTaskV1(handle)
+	if task != nil && task.complete {
+		raw, total, ok := coro.ReleaseFrame(
+			task.g,
+			task.storage,
+			task.frameSize,
+			task.frameAlign,
+			unsafe.Pointer(task.descriptor),
+		)
+		if !ok || raw != task.raw || total != task.allocation {
+			failCoroNativeFleetRunTestTaskV1(task, "release completed routed poll frame failed")
+			return
+		}
+		task.destroyed = true
+		return
+	}
 	failCoroNativeFleetRunTestTaskV1(task, "yield-only fleet task was destroyed")
 }
 
@@ -111,22 +219,31 @@ func newCoroNativeFleetTestTask(t *testing.T, source *coro.P) *coroNativeFleetTe
 		g:          new(coro.G),
 		handle:     unsafe.Pointer(new(byte)),
 		descriptor: &coro.FrameDescriptorV1{Version: 1, ResultAlign: 1},
+		frameSize:  64,
 	}
 	if !coro.InitG(task.g) {
 		t.Fatal("initialize fleet transfer task")
 	}
-	const frameSize = uintptr(64)
-	align := unsafe.Alignof(uintptr(0))
-	total, ok := coro.FrameAllocationSize(frameSize, align)
+	task.frameAlign = unsafe.Alignof(uintptr(0))
+	total, ok := coro.FrameAllocationSize(task.frameSize, task.frameAlign)
 	if !ok {
 		t.Fatal("compute fleet transfer frame allocation")
 	}
+	task.allocation = total
 	task.memory = make([]uintptr, (total+unsafe.Sizeof(uintptr(0))-1)/unsafe.Sizeof(uintptr(0)))
-	raw := unsafe.Pointer(&task.memory[0])
-	storage, ok := coro.RegisterFrame(task.g, raw, total, frameSize, align, unsafe.Pointer(task.descriptor))
+	task.raw = unsafe.Pointer(&task.memory[0])
+	storage, ok := coro.RegisterFrame(
+		task.g,
+		task.raw,
+		total,
+		task.frameSize,
+		task.frameAlign,
+		unsafe.Pointer(task.descriptor),
+	)
 	if !ok {
 		t.Fatal("register fleet transfer frame")
 	}
+	task.storage = storage
 	task.header = &coro.HeaderV1{
 		G:          unsafe.Pointer(task.g),
 		Descriptor: unsafe.Pointer(task.descriptor),
@@ -260,6 +377,14 @@ func TestCoroNativeFleetProductionIslandsV1(t *testing.T) {
 	}
 	first := &coroNativeFleetV1State.domains[0]
 	second := &coroNativeFleetV1State.domains[1]
+	coroNativeFleetRunTestV1.Lock()
+	coroNativeFleetRunTestV1.tasks = make(map[unsafe.Pointer]*coroNativeFleetTestTask)
+	coroNativeFleetRunTestV1.Unlock()
+	defer func() {
+		coroNativeFleetRunTestV1.Lock()
+		coroNativeFleetRunTestV1.tasks = nil
+		coroNativeFleetRunTestV1.Unlock()
+	}()
 
 	// An empty secondary P is a valid standby executor: it has no command-main
 	// completion meaning and must remain wakeable for later routed transfers.
@@ -272,7 +397,8 @@ func TestCoroNativeFleetProductionIslandsV1(t *testing.T) {
 		t.Fatalf("empty fleet standby run = %+v", standbyRun)
 	}
 	standby, standbyOK := coroNativeFleetPrepareOwnerWaitAtV1(secondHandle, standbyEpoch, 10, 11)
-	if !standbyOK || !standby.Armed || standby.HasDeadline || standby.Deadline != 0 || second.ownerEpoch != 0 {
+	if !standbyOK || !standby.Armed || standby.Epoch != standbyEpoch ||
+		standby.HasDeadline || standby.Deadline != 0 || second.ownerEpoch != 0 {
 		t.Fatalf("empty fleet standby = (%+v, %t), owner=%d", standby, standbyOK, second.ownerEpoch)
 	}
 	wakeEpoch, waits, timers, promoted, wakeOK := coroNativeFleetWakeOwnerAtV1(secondHandle, 12)
@@ -280,6 +406,93 @@ func TestCoroNativeFleetProductionIslandsV1(t *testing.T) {
 		!coroNativeFleetFinishOwnerEpochV1(secondHandle, wakeEpoch) {
 		t.Fatalf("spurious fleet standby wake = (%d, %d, %d, %d, %t)",
 			wakeEpoch, waits, timers, promoted, wakeOK)
+	}
+
+	// Drive one real retained fd wait through the ordinary-domain reducer,
+	// fixed poll set, route-aware ingress, exact wake transaction, and typed
+	// Poll V2 result cleanup. No helper goroutine owns scheduler state.
+	reader, writer, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		t.Fatal(pipeErr)
+	}
+	defer reader.Close()
+	defer writer.Close()
+	if reader.Fd() > uintptr(^uint32(0)>>1) {
+		t.Fatal("fleet poll test descriptor exceeds int32")
+	}
+	pollTask := newCoroNativeFleetTestTask(t, &second.p)
+	pollTask.pollMode = true
+	pollTask.pollFD = int32(reader.Fd())
+	pollTask.pollDriver = &second.driver
+	coroNativeFleetRunTestV1.Lock()
+	coroNativeFleetRunTestV1.tasks[pollTask.handle] = pollTask
+	coroNativeFleetRunTestV1.Unlock()
+	pollEpoch, pollOwnerOK := coroNativeFleetBeginOwnerEpochV1(secondHandle)
+	if !pollOwnerOK {
+		t.Fatal("begin routed poll owner")
+	}
+	pollIdle := false
+	for attempt := 0; attempt < 64; attempt++ {
+		result := coroNativeFleetRunOwnerEpochV1(secondHandle, pollEpoch, 20, 8)
+		if result.stop == coroRunIdleV1 {
+			pollIdle = true
+			break
+		}
+		if result.stop != coroRunSliceBudgetV1 {
+			t.Fatalf("routed poll park attempt %d = %+v", attempt, result)
+		}
+	}
+	if !pollIdle || !pollTask.pollPrepared || pollTask.pollFinished || pollTask.resumeCalls != 1 ||
+		pollTask.runFailure != "" || pollTask.pollOperation.Route() != coro.RouteID(secondHandle.Route) {
+		t.Fatalf("routed poll did not reach idle park: idle=%t task=%+v", pollIdle, pollTask)
+	}
+	pollPlan, pollPlanOK := coroNativeFleetPrepareOwnerWaitAtV1(secondHandle, pollEpoch, 21, 22)
+	if !pollPlanOK || !pollPlan.Armed || pollPlan.Epoch != pollEpoch || pollPlan.HasDeadline ||
+		pollPlan.Deadline != 0 || second.ownerEpoch != 0 {
+		t.Fatalf("prepare routed poll retained wait = (%+v, %t), owner=%d", pollPlan, pollPlanOK, second.ownerEpoch)
+	}
+	armedPoll, armedPollOK := coroNativeFleetArmOwnerWaitV1(secondHandle, pollPlan)
+	if !armedPollOK || armedPoll.Handle != secondHandle || armedPoll.Epoch != pollEpoch ||
+		armedPoll.Count != 2 || armedPoll.HasDeadline || armedPoll.Deadline != 0 {
+		t.Fatalf("arm routed poll set = (%+v, %t)", armedPoll, armedPollOK)
+	}
+	if written, err := writer.Write([]byte{1}); err != nil || written != 1 {
+		t.Fatalf("publish routed poll readiness = (%d, %v)", written, err)
+	}
+	if pass := coroNativeFleetWaitOwnerPassAtV1(armedPoll, 23); pass != coroNativeFleetWaitPassWakeV1 {
+		t.Fatalf("routed poll physical wait = %d", pass)
+	}
+	pollEpoch, waits, timers, promoted, pollWakeOK := coroNativeFleetWakeOwnerAtV1(secondHandle, 24)
+	if !pollWakeOK || pollEpoch == 0 || waits != 0 || timers != 0 || promoted != 1 {
+		t.Fatalf("wake routed poll owner = (%d, %d, %d, %d, %t)",
+			pollEpoch, waits, timers, promoted, pollWakeOK)
+	}
+	pollComplete := false
+	for attempt := 0; attempt < 64; attempt++ {
+		result := coroNativeFleetRunOwnerEpochV1(secondHandle, pollEpoch, 25, 8)
+		switch result.stop {
+		case coroRunSliceBudgetV1:
+			continue
+		case coroRunDestroyCommitV1:
+			completed, committed := coroNativeFleetCommitOwnerDestroyV1(
+				secondHandle, pollEpoch, result.g, result.action,
+			)
+			if !committed || completed.Kind != coro.ActionComplete || completed.Handle != nil {
+				t.Fatalf("commit routed poll task completion = (%+v, %t)", completed, committed)
+			}
+			pollComplete = true
+		default:
+			t.Fatalf("routed poll completion attempt %d = %+v", attempt, result)
+		}
+		if pollComplete {
+			break
+		}
+	}
+	if !pollComplete || !pollTask.pollFinished || !pollTask.complete || !pollTask.destroyed ||
+		pollTask.resumeCalls != 2 || pollTask.runFailure != "" ||
+		!coroNativeFleetEnterOwnerCompatibilityV1(secondHandle, pollEpoch) ||
+		!coroNativeFleetFinishOwnerEpochV1(secondHandle, pollEpoch) {
+		t.Fatalf("routed poll task did not finish cleanly: complete=%t task=%+v", pollComplete, pollTask)
 	}
 	firstFD, firstFDOK := first.doorbell.ReadFD()
 	secondFD, secondFDOK := second.doorbell.ReadFD()
@@ -380,7 +593,7 @@ func TestCoroNativeFleetProductionIslandsV1(t *testing.T) {
 		t.Fatalf("unregistered fleet control completion = %+v", result)
 	}
 	timerID, timerOK := coro.MakeOperationIDAtRoute(coro.OperationSourceTimer, 1, 1, 1)
-	pollID, pollOK := coro.MakeOperationIDAtRoute(coro.OperationSourcePoll, 2, 1, 1)
+	pollID, pollOK := coro.MakeOperationIDAtRoute(coro.OperationSourcePoll, 2, 2, 1)
 	if !timerOK || !pollOK ||
 		coroNativeFleetPostV1(
 			timerID,
@@ -450,16 +663,9 @@ func TestCoroNativeFleetProductionIslandsV1(t *testing.T) {
 		t.Fatal("bind fleet test sink mailbox")
 	}
 	coroNativeFleetRunTestV1.Lock()
-	coroNativeFleetRunTestV1.tasks = map[unsafe.Pointer]*coroNativeFleetTestTask{
-		tasks[0].handle: tasks[0],
-		tasks[1].handle: tasks[1],
-	}
+	coroNativeFleetRunTestV1.tasks[tasks[0].handle] = tasks[0]
+	coroNativeFleetRunTestV1.tasks[tasks[1].handle] = tasks[1]
 	coroNativeFleetRunTestV1.Unlock()
-	defer func() {
-		coroNativeFleetRunTestV1.Lock()
-		coroNativeFleetRunTestV1.tasks = nil
-		coroNativeFleetRunTestV1.Unlock()
-	}()
 	for index, handle := range [2]coro.ExecutorFleetHandle{firstHandle, secondHandle} {
 		domain := &coroNativeFleetV1State.domains[index]
 		published := false

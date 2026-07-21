@@ -553,6 +553,34 @@ func coroNativeFleetRunOwnerEpochV1(
 	return coroRunSliceAtV1(&domain.p, &domain.driver, now, budget)
 }
 
+// coroNativeFleetCommitOwnerDestroyV1 settles an ordinary G's final-root
+// receipt without interpreting an empty P as process termination. Unhandled
+// panic remains explicit in the returned action for the program coordinator;
+// normal completion releases only the G and leaves the domain active.
+func coroNativeFleetCommitOwnerDestroyV1(
+	handle coro.ExecutorFleetHandle,
+	epoch uint32,
+	g *coro.G,
+	receipt coro.Action,
+) (coro.Action, bool) {
+	domain, valid := coroNativeFleetDomainForHandleV1(
+		&coroNativeFleetV1State,
+		handle,
+		coroNativeFleetDomainActiveV1,
+	)
+	if !valid || epoch == 0 || domain.ownerEpoch != epoch || g == nil {
+		return coro.Action{}, false
+	}
+	result, ok := coro.CommitExecutorRunDomainDestroy(&domain.driver, g, receipt)
+	if !ok {
+		return coro.Action{}, false
+	}
+	if result.Kind == coro.ActionComplete && !coroReleaseCompletedTask(g) {
+		return coro.Action{}, false
+	}
+	return result, result.Kind == coro.ActionComplete || result.Kind == coro.ActionPanicComplete
+}
+
 // coroNativeFleetEnterOwnerCompatibilityV1 clears only bounded-runner fairness
 // bookkeeping after the coordinator has proved this domain stable and is about
 // to cross an unbounded close/idle compatibility boundary.
@@ -571,6 +599,7 @@ func coroNativeFleetEnterOwnerCompatibilityV1(handle coro.ExecutorFleetHandle, e
 // and the owner epoch has already been released; the physical M may now block
 // until its doorbell, poll set, deadline, or coordinator stop wakes it.
 type coroNativeFleetOwnerWaitPlanV1 struct {
+	Epoch       uint32
 	Deadline    int64
 	HasDeadline bool
 	Armed       bool
@@ -610,6 +639,7 @@ func coroNativeFleetPrepareOwnerWaitAtV1(
 		return coroNativeFleetOwnerWaitPlanV1{}, true
 	}
 	plan := coroNativeFleetOwnerWaitPlanV1{
+		Epoch:       epoch,
 		Deadline:    deadline,
 		HasDeadline: hasDeadline,
 		Armed:       true,

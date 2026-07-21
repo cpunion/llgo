@@ -59,3 +59,40 @@ func TestCoroNativePollReactorSharesExecutorWait(t *testing.T) {
 		}
 	}
 }
+
+func TestCoroNativeFleetPollReactorKeepsExactFixedOwnerPass(t *testing.T) {
+	const source = "internal/runtime/coro_native_fleet_reactor.go"
+	data, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(data)
+	for _, required := range []string{
+		"llgo_coro_native_fleet",
+		"[coroNativeFleetDomainCapacityV1]coroNativeFleetPollSetV1",
+		"coro.SnapshotExecutorPollOperation(&domain.driver, index)",
+		"domain.nextOwnerEpoch != wait.Epoch",
+		"domain.doorbell.ConsumeRetainedWake()",
+		"corodoorbell.DeadlinePollTimeout(now, wait.Deadline)",
+		"corodoorbell.WaitPollSet(&storage.entries[0], wait.Count, timeoutMS)",
+		"coroNativeFleetPostPollV1(storage.operations[entry-1], coro.PollOperationReady)",
+		"coroNativeFleetWaitPassRetryV1",
+		"coroNativeFleetWaitPassWakeV1",
+	} {
+		if !strings.Contains(body, required) {
+			t.Errorf("%s lacks fixed fleet-reactor marker %q", source, required)
+		}
+	}
+	for _, forbidden := range []string{
+		"pthread",
+		"coroworker",
+		"libuv",
+		"go func(",
+		"make(",
+		"map[",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("%s contains dynamic/per-wait mechanism %q", source, forbidden)
+		}
+	}
+}

@@ -284,6 +284,46 @@ func CommitExecutorRunAction(driver *ExecutorDriver, g *G, next Action) bool {
 	return commitExecutorRunAction(driver, g, next, executorRunQueueTail)
 }
 
+// CommitExecutorRunDomainDestroy settles the handle-free final-root receipt
+// of one ordinary long-lived executor domain. An empty command executor uses
+// CommitDestroyedReceiptCompatibility to begin process-terminal close; an
+// ordinary fleet P instead completes only this G and keeps its exact executor
+// gate active for future routed work.
+func CommitExecutorRunDomainDestroy(driver *ExecutorDriver, g *G, receipt Action) (Action, bool) {
+	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
+		driver.run.issued != ActionInvalid || !validDestroyCommitReceipt(driver.p, g, receipt) ||
+		driver.p.executor != driver || preemptLoad(&driver.p.executorMode) != executorModeBound ||
+		driver.p.readyHead != nil || driver.p.readyTail != nil || !emptySchedulerWaitQueues(driver.p) {
+		return Action{}, false
+	}
+	p := driver.p
+	schedule := preemptLoad(&p.schedule)
+	if schedule != scheduleIdle && schedule != scheduleRequested || !disableGPreempt(g) {
+		return Action{}, false
+	}
+	panicking := g.state == GPanicking
+	if panicking {
+		if !g.panicUnwind || !publishedPanicRecord(&g.panicRecord) {
+			return Action{}, false
+		}
+	} else if g.state != GDispatching || g.panicUnwind || !emptyPanicRecord(&g.panicRecord) {
+		return Action{}, false
+	}
+	g.destroyRoot = false
+	if panicking {
+		g.panicUnwind = false
+	}
+	g.state = GDead
+	g.runP = nil
+	p.current = nil
+	p.servicePreemptBudget = 0
+	p.action = Action{}
+	if panicking {
+		return Action{Kind: ActionPanicComplete}, true
+	}
+	return Action{Kind: ActionComplete}, true
+}
+
 // CommitExecutorRunCommandBootstrapDirectChildHandoff retains the frozen
 // command-bootstrap G at the ready head while one direct CoroRoot step is
 // destroyed and the exact bootstrap-root continuation is resumed. This covers
