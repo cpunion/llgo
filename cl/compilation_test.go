@@ -301,8 +301,11 @@ func F() int { return 42 }
 		EmissionUniverse:          universe,
 	}
 	installCoroLoweringFactsForTest(t, compilation)
-	mismatchedFacts := *compilation
-	mismatchedFacts.CoroLoweringFactsDigest = strings.Repeat("f", 64)
+	mismatchedFacts := &Compilation{
+		CoroPlanDigest:          compilation.CoroPlanDigest,
+		CoroLoweringFacts:       compilation.CoroLoweringFacts,
+		CoroLoweringFactsDigest: strings.Repeat("f", 64),
+	}
 	if err := mismatchedFacts.validateCoroCacheIdentity(); err == nil || !strings.Contains(err.Error(), "lowering-facts digest mismatch") {
 		t.Fatalf("mismatched lowering-facts cache identity error = %v", err)
 	}
