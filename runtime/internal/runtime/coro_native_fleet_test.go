@@ -255,6 +255,9 @@ func TestCoroNativeFleetProductionIslandsV1(t *testing.T) {
 		firstHandle.Executor == secondHandle.Executor {
 		t.Fatalf("native fleet handles = (%+v, %t), (%+v, %t)", firstHandle, firstOK, secondHandle, secondOK)
 	}
+	if !coroNativeFleetWorkerTransportReadyV1() {
+		t.Fatal("native fleet worker transport preflight rejected bound routes")
+	}
 	first := &coroNativeFleetV1State.domains[0]
 	second := &coroNativeFleetV1State.domains[1]
 	firstFD, firstFDOK := first.doorbell.ReadFD()
@@ -371,13 +374,14 @@ func TestCoroNativeFleetProductionIslandsV1(t *testing.T) {
 	}
 
 	type ownerResult struct {
-		index                 int
-		moved                 uint32
-		more                  bool
-		drained, promoted     int
-		beginOK, drainOK      bool
-		sourceOK              bool
-		pollOK, ownerFinishOK bool
+		index                              int
+		moved                              uint32
+		more                               bool
+		drained, promoted                  int
+		beginOK, drainOK                   bool
+		sourceOK                           bool
+		workerOwnerOK, wrongWorkerRejected bool
+		pollOK, ownerFinishOK              bool
 	}
 	owners := make(chan ownerResult, 2)
 	var ownerGroup sync.WaitGroup
@@ -389,6 +393,12 @@ func TestCoroNativeFleetProductionIslandsV1(t *testing.T) {
 			epoch, ok := coroNativeFleetBeginOwnerEpochV1(handle)
 			result.beginOK = ok
 			if ok {
+				route := coro.RouteID(handle.Route)
+				result.workerOwnerOK = coroNativeFleetWorkerSubmissionOwnerV1(handle.Executor, route)
+				result.wrongWorkerRejected = !coroNativeFleetWorkerSubmissionOwnerV1(
+					handle.Executor,
+					coro.RouteID(handle.Route%uint32(coroNativeFleetDomainCapacityV1)+1),
+				)
 				result.moved, result.more, result.drainOK = coroNativeFleetDrainOwnerEpochV1(handle, epoch, 1)
 				result.sourceOK = settleCoroNativeFleetStandaloneSourcesV1(
 					&coroNativeFleetV1State.domains[index],
@@ -402,7 +412,8 @@ func TestCoroNativeFleetProductionIslandsV1(t *testing.T) {
 	ownerGroup.Wait()
 	close(owners)
 	for result := range owners {
-		if !result.beginOK || !result.drainOK || result.moved != 1 || result.more || !result.sourceOK ||
+		if !result.beginOK || !result.workerOwnerOK || !result.wrongWorkerRejected ||
+			!result.drainOK || result.moved != 1 || result.more || !result.sourceOK ||
 			!result.pollOK || result.drained != 0 || result.promoted != 0 || !result.ownerFinishOK {
 			t.Fatalf("fleet owner %d = %+v", result.index, result)
 		}
@@ -520,6 +531,10 @@ func TestCoroNativeFleetProductionIslandsV1(t *testing.T) {
 	}
 	if !coroNativeFleetAllRetiredV1() {
 		t.Fatal("native production fleet retained resources")
+	}
+	if coroNativeFleetWorkerTransportReadyV1() ||
+		coroNativeFleetWorkerSubmissionOwnerV1(firstHandle.Executor, coro.RouteID(firstHandle.Route)) {
+		t.Fatal("retired native fleet retained worker transport authority")
 	}
 	for _, task := range tasks {
 		_ = task.header

@@ -52,11 +52,9 @@ const (
 )
 
 // coroNativeFleetDomainV1 is one statically addressed production ownership
-// island. P, driver, every source, callback admission, and doorbell are
-// Worker is completion-side only in this slice. The existing coroworker queue
-// is a process singleton which retains one ExecutorHandle; duplicating it here
-// would create a second scheduler/backend policy. A later change must make its
-// POD job transport route-aware before fleet submission is enabled.
+// island. P, driver, every logical source, callback admission, and doorbell
+// stay route-local. The fixed physical coroworker pool is process-shared: its
+// POD jobs carry OperationID routes and never become part of this domain.
 type coroNativeFleetDomainV1 struct {
 	p       coro.P
 	driver  coro.ExecutorDriver
@@ -259,6 +257,42 @@ func coroNativeFleetHandleV1(index uint32) (coro.ExecutorFleetHandle, bool) {
 	return domain.handle, domain.lifecycle == coroNativeFleetDomainActiveV1 && domain.handle.Valid()
 }
 
+// coroNativeFleetWorkerTransportReadyV1 is the process-shared worker-pool
+// startup preflight. The pool remains one physical backend; every logical job
+// carries the exact route of one already-bound WorkerOperationSource.
+func coroNativeFleetWorkerTransportReadyV1() bool {
+	state := &coroNativeFleetV1State
+	if state.lifecycle != coroNativeFleetActiveV1 {
+		return false
+	}
+	for index := uint32(0); index < coroNativeFleetDomainCapacityV1; index++ {
+		domain := &state.domains[index]
+		route, routeOK := domain.worker.Route()
+		if domain.lifecycle != coroNativeFleetDomainActiveV1 || !domain.handle.Valid() ||
+			domain.handle.Route != index+1 || !routeOK || uint32(route) != domain.handle.Route {
+			return false
+		}
+	}
+	return true
+}
+
+// coroNativeFleetWorkerSubmissionOwnerV1 validates the transient owner-side
+// queue reservation capability after CurrentExecutorWorkerDriver has proved
+// the active managed resume. It reads only route-lifetime-immutable fields, so
+// different M owners may validate their domains concurrently. The durable
+// worker job keeps only its OperationID and scalar call words.
+func coroNativeFleetWorkerSubmissionOwnerV1(handle coro.ExecutorHandle, route coro.RouteID) bool {
+	if !route.Valid() || uint32(route) > coroNativeFleetDomainCapacityV1 {
+		return false
+	}
+	domain := &coroNativeFleetV1State.domains[uint32(route)-1]
+	workerRoute, routeOK := domain.worker.Route()
+	return coroNativeFleetV1State.lifecycle == coroNativeFleetActiveV1 &&
+		domain.lifecycle == coroNativeFleetDomainActiveV1 &&
+		domain.handle.Executor == handle && domain.handle.Route == uint32(route) &&
+		routeOK && workerRoute == route
+}
+
 func coroNativeFleetInvalidIngressV1() coro.OperationRouteIngressResult {
 	return coro.OperationRouteIngressResult{
 		Route:    coro.OperationRoutePostInvalid,
@@ -383,8 +417,8 @@ func __llgo_coro_native_fleet_post_manual_v1(sourceSlot, generation uint32) uint
 }
 
 // __llgo_coro_native_fleet_post_worker_v1 routes a completed worker job by its
-// two-word OperationID. The scalar payload is POD and contains no owner
-// identity. Submission remains disabled until coroworker.Queue is fleet-aware.
+// two-word OperationID. The scalar payload is POD and contains no pointer owner
+// identity; route is the complete logical destination identity.
 //
 //export __llgo_coro_native_fleet_post_worker_v1
 func __llgo_coro_native_fleet_post_worker_v1(

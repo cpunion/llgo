@@ -30,8 +30,10 @@ const (
 
 // Job is the exact Go view of llgo_coro_worker_job_v1. It is copied by value
 // into the native C11 ring and deliberately contains no G, coroutine handle,
-// ParkState, WaitSetRecord, or typed Go pointer. Args are opaque syscall words;
-// the parked compiler frame owns the corresponding retention lifetime.
+// ParkState, WaitSetRecord, or typed Go pointer. SourceSlot includes the exact
+// executor route, so one process-shared pool can serve multiple P domains.
+// Args are opaque syscall words; the parked compiler frame owns the
+// corresponding retention lifetime.
 type Job struct {
 	SourceSlot uint32
 	Generation uint32

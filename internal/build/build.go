@@ -3091,6 +3091,7 @@ func targetGCBuildTags(gc string) ([]string, error) {
 const (
 	coroNativePipeBuildTag        = "llgo_coro_native_pipe"
 	coroNativeTimerBuildTag       = "llgo_coro_native_timer"
+	coroNativeFleetBuildTag       = "llgo_coro_native_fleet"
 	coroNativeIngressTestBuildTag = "llgo_coro_native_ingress_test"
 )
 
@@ -3159,7 +3160,7 @@ func effectiveBuildTags(conf *Config, export crosscompile.Export) (string, error
 func rejectCompilerReservedBuildTags(source string, tags []string) error {
 	for _, tag := range tags {
 		switch tag {
-		case coroNativePipeBuildTag, coroNativeTimerBuildTag, coroNativeIngressTestBuildTag:
+		case coroNativePipeBuildTag, coroNativeTimerBuildTag, coroNativeFleetBuildTag, coroNativeIngressTestBuildTag:
 			return fmt.Errorf("build tag %q from %s is a compiler-reserved capability and cannot be supplied externally", tag, source)
 		}
 	}

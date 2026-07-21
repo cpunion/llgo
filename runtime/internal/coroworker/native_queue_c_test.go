@@ -73,10 +73,15 @@ static void *consume(void *unused) {
             return NULL;
         }
         if (status != LLGO_CORO_WORKER_QUEUE_TAKE_JOB_V1 ||
-            job.source_slot != UINT32_C(0x51000001) ||
             job.generation == 0 || job.generation > generation_count ||
             job.function != 1 || job.argc != LLGO_CORO_WORKER_MAX_ARGS_V1) {
             return (void *)(uintptr_t)1;
+        }
+        /* OperationSourceWorker=5, route=1/2, local slot=1. */
+        uint32_t want_source_slot = UINT32_C(0x05000001) |
+            ((job.generation & 1) != 0 ? UINT32_C(1) : UINT32_C(2)) << 15;
+        if (job.source_slot != want_source_slot) {
+            return (void *)(uintptr_t)4;
         }
         uint32_t index = job.generation - 1;
         for (uint32_t arg = 0; arg < LLGO_CORO_WORKER_MAX_ARGS_V1; ++arg) {
@@ -94,7 +99,8 @@ static void *consume(void *unused) {
 static int submit(uint32_t generation) {
     struct llgo_coro_worker_job_v1 job;
     memset(&job, 0, sizeof(job));
-    job.source_slot = UINT32_C(0x51000001);
+    job.source_slot = UINT32_C(0x05000001) |
+        ((generation & 1) != 0 ? UINT32_C(1) : UINT32_C(2)) << 15;
     job.generation = generation;
     job.function = 1;
     job.argc = LLGO_CORO_WORKER_MAX_ARGS_V1;

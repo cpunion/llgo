@@ -58,14 +58,26 @@ func coroNativeWorkerJobFromTransportV1(raw coroworker.Job) (coroNativeWorkerJob
 	return job, job.valid()
 }
 
+type coroNativeWorkerDeliveryV1 uint8
+
+const (
+	coroNativeWorkerDeliveryUnusedV1 coroNativeWorkerDeliveryV1 = iota
+	coroNativeWorkerDeliveryProgramV1
+	coroNativeWorkerDeliveryFleetV1
+)
+
 // coroNativeWorkerPoolV1 is the native target adapter, not another executor.
-// The single scheduler P is its only producer. Four fixed-stack workers drain
-// a bounded C11 sequence ring and publish results into the one Worker source;
-// neither ring cells nor workers inspect a G, ParkState, WaitSetRecord, or LLVM
-// coroutine handle. No managed producer edge acquires a pthread mutex.
+// Exact scheduler owners share one short lock-free queue reservation; the
+// winner submits or cancels it without suspension. Four fixed-stack workers
+// drain the bounded C11 sequence ring, and each job's existing OperationID
+// route selects its Worker source on completion. Neither ring cells nor
+// workers inspect a G, ParkState, WaitSetRecord, or LLVM coroutine handle. No
+// managed producer edge acquires a pthread mutex.
 type coroNativeWorkerPoolV1 struct {
-	threads [coroNativeWorkerThreadCountV1]pthread.Thread
-	handle  coro.ExecutorHandle
+	threads  [coroNativeWorkerThreadCountV1]pthread.Thread
+	delivery coroNativeWorkerDeliveryV1
+	handle   coro.ExecutorHandle
+	route    coro.RouteID
 
 	created  uint32
 	started  bool
@@ -104,20 +116,39 @@ func coroNativeWorkerPoolResetAfterJoinV1(state *coroNativeWorkerPoolV1) bool {
 	return true
 }
 
-// coroNativeWorkerPoolStartV1 uses the scheduler-owned coroworker.Create leaf.
-// Threads remain joinable and are strongly joined at target close; none is
-// created per G or per operation.
-func coroNativeWorkerPoolStartV1(handle coro.ExecutorHandle) bool {
+// coroNativeWorkerPoolStartDeliveryV1 uses the scheduler-owned
+// coroworker.Create leaf. Threads remain joinable and are strongly joined at
+// target close; none is created per G, operation, executor, or route.
+func coroNativeWorkerPoolStartDeliveryV1(
+	delivery coroNativeWorkerDeliveryV1,
+	handle coro.ExecutorHandle,
+	route coro.RouteID,
+) bool {
 	state := &coroNativeWorkerPoolV1State
-	if !coroNativeWorkerPoolCanReleaseV1() || !coroProgramExecutorBoundV1State ||
-		handle != coroProgramExecutorHandleV1State || handle.Slot == 0 || handle.Generation == 0 {
+	if !coroNativeWorkerPoolCanReleaseV1() {
+		return false
+	}
+	switch delivery {
+	case coroNativeWorkerDeliveryProgramV1:
+		workerRoute, routeOK := coroProgramWorkerSourceV1State.Route()
+		if !coroProgramExecutorBoundV1State || handle != coroProgramExecutorHandleV1State ||
+			handle.Slot == 0 || handle.Generation == 0 || !routeOK || route != workerRoute {
+			return false
+		}
+	case coroNativeWorkerDeliveryFleetV1:
+		if handle != (coro.ExecutorHandle{}) || route != 0 || !coroNativeFleetWorkerTransportReadyV1() {
+			return false
+		}
+	default:
 		return false
 	}
 	if !coroworker.QueueInit() {
 		*state = coroNativeWorkerPoolV1{}
 		return false
 	}
+	state.delivery = delivery
 	state.handle = handle
+	state.route = route
 	state.started = true
 	for index := uint32(0); index < coroNativeWorkerThreadCountV1; index++ {
 		if coroworker.Create(&state.threads[index]) != 0 {
@@ -144,21 +175,50 @@ func coroNativeWorkerPoolStartV1(handle coro.ExecutorHandle) bool {
 	return true
 }
 
-// coroNativeWorkerPoolReserveV1 is the nonblocking queue-capacity preflight.
-// The single owner P reserves one exact sequence cell using lock-free atomics.
-// Consumers only release cells, so its capacity cannot disappear before the
-// matching SubmitReserved; a full ring is admission backpressure, never mutex
-// contention on the managed scheduler thread.
-func coroNativeWorkerPoolReserveV1(handle coro.ExecutorHandle) bool {
-	state := &coroNativeWorkerPoolV1State
-	return state.started && !state.stopping && state.handle == handle &&
-		coroworker.QueueReserve()
+func coroNativeWorkerPoolStartV1(handle coro.ExecutorHandle) bool {
+	route, ok := coroProgramWorkerSourceV1State.Route()
+	return ok && coroNativeWorkerPoolStartDeliveryV1(coroNativeWorkerDeliveryProgramV1, handle, route)
 }
 
-func coroNativeWorkerPoolCancelReservationV1(handle coro.ExecutorHandle) bool {
+// coroNativeWorkerPoolStartFleetV1 starts the same physical pool for all
+// already-bound fleet routes. It deliberately retains no executor handle: the
+// exact destination is encoded by every submitted OperationID.
+func coroNativeWorkerPoolStartFleetV1() bool {
+	return coroNativeWorkerPoolStartDeliveryV1(
+		coroNativeWorkerDeliveryFleetV1,
+		coro.ExecutorHandle{},
+		0,
+	)
+}
+
+func coroNativeWorkerSubmissionOwnerV1(handle coro.ExecutorHandle, route coro.RouteID) bool {
 	state := &coroNativeWorkerPoolV1State
-	return state.started && !state.stopping && state.handle == handle &&
-		coroworker.QueueCancelReservation()
+	if !state.started || state.stopping || !route.Valid() {
+		return false
+	}
+	switch state.delivery {
+	case coroNativeWorkerDeliveryProgramV1:
+		return state.handle == handle && state.route == route &&
+			coroProgramExecutorBoundV1State && handle == coroProgramExecutorHandleV1State
+	case coroNativeWorkerDeliveryFleetV1:
+		return state.handle == (coro.ExecutorHandle{}) && state.route == 0 &&
+			coroNativeFleetWorkerSubmissionOwnerV1(handle, route)
+	default:
+		return false
+	}
+}
+
+// coroNativeWorkerPoolReserveV1 is the nonblocking queue-capacity preflight.
+// Multiple exact P owners may contend on the one lock-free reservation word;
+// only its winner owns the sequence cell and must submit or cancel before
+// leaving the compiler-enforced no-suspend hook. Consumers only release cells,
+// so capacity cannot disappear before the matching SubmitReserved.
+func coroNativeWorkerPoolReserveV1(handle coro.ExecutorHandle, route coro.RouteID) bool {
+	return coroNativeWorkerSubmissionOwnerV1(handle, route) && coroworker.QueueReserve()
+}
+
+func coroNativeWorkerPoolCancelReservationV1(handle coro.ExecutorHandle, route coro.RouteID) bool {
+	return coroNativeWorkerSubmissionOwnerV1(handle, route) && coroworker.QueueCancelReservation()
 }
 
 // coroNativeWorkerPoolSubmitReservedV1 is called only after the core owner has
@@ -167,6 +227,7 @@ func coroNativeWorkerPoolCancelReservationV1(handle coro.ExecutorHandle) bool {
 // not ordinary backpressure.
 func coroNativeWorkerPoolSubmitReservedV1(
 	handle coro.ExecutorHandle,
+	route coro.RouteID,
 	id coro.OperationID,
 	function uintptr,
 	argc uint32,
@@ -185,53 +246,21 @@ func coroNativeWorkerPoolSubmitReservedV1(
 	if _, valid := coroNativeWorkerJobFromTransportV1(job); !valid {
 		return false
 	}
-	state := &coroNativeWorkerPoolV1State
-	return state.started && !state.stopping && state.handle == handle &&
+	return id.Route() == route && coroNativeWorkerSubmissionOwnerV1(handle, route) &&
 		coroworker.QueueSubmitReserved(&job)
 }
 
-// __llgo_coro_native_worker_complete_v1 is the only C-worker-to-Go edge. The
-// fixed native routine has already completed the blocking foreign call and
-// passes only the operation generation and scalar result words. It remains
-// valid while Stop drains committed jobs: handle/source state is retired only
-// after every worker has joined.
-//
-//export __llgo_coro_native_worker_complete_v1
-func __llgo_coro_native_worker_complete_v1(
-	sourceSlot, generation uint32,
-	r1, r2, errno uintptr,
-) uint32 {
+// coroNativeWorkerPoolStopDeliveryV1 seals submission, wakes all idle workers,
+// drains any already committed jobs, and joins every GC-registered/native
+// pthread. It returns only when no worker can still touch any source or target
+// ingress selected by this pool mode.
+func coroNativeWorkerPoolStopDeliveryV1(
+	delivery coroNativeWorkerDeliveryV1,
+	handle coro.ExecutorHandle,
+) bool {
 	state := &coroNativeWorkerPoolV1State
-	id := coro.OperationID{SourceSlot: sourceSlot, Generation: generation}
-	if !state.started || state.handle.Slot == 0 || state.handle.Generation == 0 ||
-		!id.Valid() || id.Source() != coro.OperationSourceWorker {
-		return 0
-	}
-	payload, ok := coro.MakeScalarResultPayloadV1(
-		coro.ScalarResultKindWords,
-		0,
-		3,
-		uint64(r1),
-		uint64(r2),
-		uint64(errno),
-	)
-	if !ok || coroProgramWorkerSourceV1State.Post(id, payload) != coro.WorkerOperationPosted {
-		return 0
-	}
-	// Post is the durable fact. The common ingress/registry/doorbell tail is
-	// requested afterwards, and pool Stop joins across this entire window.
-	if !coroTargetRequestExecutorV1(state.handle) {
-		return 0
-	}
-	return 1
-}
-
-// coroNativeWorkerPoolStopV1 seals submission, wakes all idle workers, drains
-// any already committed jobs, and joins every GC-registered/native pthread.
-// It returns only when no worker can still touch the source or target ingress.
-func coroNativeWorkerPoolStopV1(handle coro.ExecutorHandle) bool {
-	state := &coroNativeWorkerPoolV1State
-	if !state.started || state.handle != handle || state.created != coroNativeWorkerThreadCountV1 {
+	if !state.started || state.delivery != delivery || state.handle != handle ||
+		state.created != coroNativeWorkerThreadCountV1 {
 		return false
 	}
 	if state.stopping {
@@ -254,43 +283,55 @@ func coroNativeWorkerPoolStopV1(handle coro.ExecutorHandle) bool {
 	return true
 }
 
-// coroProgramReserveNativeWorkerSubmissionV1 is the runtime-owner preflight
-// used before PrepareCurrentExecutorWorkerPark changes the current frame's
-// ParkState. The pool transport is process-shared, but today's production
-// program adapter binds only one executor. Rejecting any other resolved handle
-// is intentional fail-closed behavior until the target installs a route
-// registry for completion delivery; it must not fall back to the global source.
-func coroProgramReserveNativeWorkerSubmissionV1(handle coro.ExecutorHandle) bool {
-	return coroProgramExecutorBoundV1State && handle == coroProgramExecutorHandleV1State &&
-		coroNativeWorkerPoolReserveV1(handle)
+func coroNativeWorkerPoolStopV1(handle coro.ExecutorHandle) bool {
+	return coroNativeWorkerPoolStopDeliveryV1(coroNativeWorkerDeliveryProgramV1, handle)
 }
 
-func coroProgramCancelNativeWorkerSubmissionV1(handle coro.ExecutorHandle) bool {
-	return coroProgramExecutorBoundV1State && handle == coroProgramExecutorHandleV1State &&
-		coroNativeWorkerPoolCancelReservationV1(handle)
+// coroNativeWorkerPoolStopFleetV1 must run while every fleet route and target
+// ingress is still active. The join covers all queued route completions; only
+// after it returns may the coordinator begin route close.
+func coroNativeWorkerPoolStopFleetV1() bool {
+	return coroNativeWorkerPoolStopDeliveryV1(
+		coroNativeWorkerDeliveryFleetV1,
+		coro.ExecutorHandle{},
+	)
 }
 
-// coroProgramCommitNativeWorkerSubmissionV1 closes the no-return handoff from
+// coroReserveNativeWorkerSubmissionV1 is the runtime-owner preflight used
+// before PrepareCurrentExecutorWorkerPark changes the current frame's
+// ParkState. Program and fleet owners use the same bounded physical queue; the
+// exact current executor plus route authorizes one lock-free reservation.
+func coroReserveNativeWorkerSubmissionV1(handle coro.ExecutorHandle, route coro.RouteID) bool {
+	return coroNativeWorkerPoolReserveV1(handle, route)
+}
+
+func coroCancelNativeWorkerSubmissionV1(handle coro.ExecutorHandle, route coro.RouteID) bool {
+	return coroNativeWorkerPoolCancelReservationV1(handle, route)
+}
+
+// coroCommitNativeWorkerSubmissionV1 closes the no-return handoff from
 // the core Worker park owner into the pre-reserved native queue. A failure to
 // enqueue after MarkSubmitted would leave a retained frame with no future
 // physical fact and therefore aborts instead of returning to the caller.
-func coroProgramCommitNativeWorkerSubmissionV1(
+func coroCommitNativeWorkerSubmissionV1(
 	driver *coro.ExecutorDriver,
 	g *coro.G,
 	handle coro.ExecutorHandle,
+	route coro.RouteID,
 	id coro.OperationID,
 	function uintptr,
 	argc uint32,
 	args *[coroworker.MaxArgs]uintptr,
 ) bool {
-	if !coroProgramExecutorBoundV1State || handle != coroProgramExecutorHandleV1State ||
-		driver == nil || g == nil || args == nil || function == 0 ||
-		argc > coroworker.MaxArgs || !id.Valid() || id.Source() != coro.OperationSourceWorker ||
+	if driver == nil || g == nil || args == nil || function == 0 ||
+		argc > coroworker.MaxArgs || !id.Valid() || id.Source() != coro.OperationSourceWorker || id.Route() != route ||
+		!coroNativeWorkerSubmissionOwnerV1(handle, route) ||
 		!coro.CommitCurrentExecutorWorkerSubmission(driver, g, id) {
 		return false
 	}
 	if !coroNativeWorkerPoolSubmitReservedV1(
 		handle,
+		route,
 		id,
 		function,
 		argc,

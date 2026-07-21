@@ -57,9 +57,10 @@ func QueueInit() bool
 //go:linkname QueueCanRelease C.__llgo_coro_worker_queue_can_release_v1
 func QueueCanRelease() bool
 
-// QueueReserve owns the next free sequence slot without publishing it. The
-// caller is the single owner P, all participating atomics were proved lock-free
-// by QueueInit, and no OS wait or callback is reachable from this leaf.
+// QueueReserve owns the next free sequence slot without publishing it. Exact P
+// owners may contend on one process-wide reservation word; all participating
+// atomics were proved lock-free by QueueInit, and the winner submits or cancels
+// inside a no-suspend hook. No OS wait or callback is reachable from this leaf.
 //
 //llgo:coro noblock
 //go:linkname QueueReserve C.__llgo_coro_worker_queue_reserve_v1

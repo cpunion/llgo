@@ -29,7 +29,16 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
-func TestProductionNativeWorkerCompletionHasOnePlainEntry(t *testing.T) {
+func TestProductionNativeWorkerCompletionHasOneRawPlainEntry(t *testing.T) {
+	testProductionNativeWorkerCompletionPlan(t, nil)
+}
+
+func TestProductionNativeFleetWorkerCompletionHasOneRawPlainEntry(t *testing.T) {
+	testProductionNativeWorkerCompletionPlan(t, []string{coroNativeFleetBuildTag})
+}
+
+func testProductionNativeWorkerCompletionPlan(t *testing.T, compilerTags []string) {
+	t.Helper()
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("native coroutine worker plan requires Darwin or Linux")
 	}
@@ -44,6 +53,7 @@ func TestProductionNativeWorkerCompletionHasOnePlainEntry(t *testing.T) {
 	conf.EnableCoroProgramBootstrapABI = true
 	conf.EnableCoroProgramBootstrapRun = true
 	conf.EnableCoroWorker = true
+	conf.compilerBuildTags = append(conf.compilerBuildTags, compilerTags...)
 	conf.CoroPlanBuilder = func(input CoroPlanInput) (*coro.SSAPlan, error) {
 		plan, err := input.Analyze(nil, coro.SSAConfig{
 			DynamicResolution:    coro.DynamicCHAClosed,
@@ -80,13 +90,17 @@ func TestProductionNativeWorkerCompletionHasOnePlainEntry(t *testing.T) {
 		if !ok {
 			return nil, fmt.Errorf("native worker completion has no function plan")
 		}
-		if got.Demand != coro.SyncDemand || got.Effect != coro.NoSuspend ||
-			got.Emission != coro.EmitPlain || got.Primary != coro.PrimaryPlain ||
-			got.FuncRep != coro.DirectPlain {
-			return nil, fmt.Errorf("native worker completion plan = %+v, want sync/no-suspend/plain/direct-plain", got)
-		}
-		if got.RawPlainEntry || plan.HasRawPlainVariant(completion) {
-			return nil, fmt.Errorf("native worker completion acquired a redundant raw plain entry or variant: plan=%+v variant=%t",
+		// The physical C worker calls this entry from its raw host stack. The
+		// preliminary required root remains SyncDemand for liveness, then the
+		// raw-ABI closure moves that exact crossing to one raw-only plain body.
+		// It must never acquire an independent managed entry or a coroutine.
+		if got.Demand != coro.SyncDemand || got.ManagedDemand != coro.NoDemand ||
+			!got.RawPlainDemand || !got.RawPlainOnly || !got.RawPlainEntry ||
+			got.Effect != coro.NoSuspend || got.Exec.Contains(coro.BlockForeign) ||
+			got.Exec.Contains(coro.NeedsPreempt) || got.Emission != coro.EmitRawPlain ||
+			got.Primary != coro.PrimaryPlain || got.FuncRep != coro.DirectPlain ||
+			!plan.HasRawPlainVariant(completion) {
+			return nil, fmt.Errorf("native worker completion plan = %+v, raw variant=%t; want one raw-only no-suspend direct-plain entry",
 				got, plan.HasRawPlainVariant(completion))
 		}
 

@@ -76,10 +76,10 @@ func __llgo_coro_worker_park_v1(
 ) {
 	state := (*CoroWorkerParkV1)(storage)
 	task := (*coro.G)(g)
-	driver, executor, _, current := coro.CurrentExecutorWorkerDriver(task)
+	driver, executor, route, current := coro.CurrentExecutorWorkerDriver(task)
 	if g == nil || handle == nil || header == nil || state == nil ||
 		*state != (CoroWorkerParkV1{}) || function == 0 || argc > coroworker.MaxArgs ||
-		!current || !coroProgramReserveNativeWorkerSubmissionV1(executor) {
+		!current || !coroReserveNativeWorkerSubmissionV1(executor, route) {
 		coroWorkerAbortV1("invalid coroutine worker park ABI")
 		return
 	}
@@ -95,7 +95,7 @@ func __llgo_coro_worker_park_v1(
 		1,
 	)
 	if !ok {
-		canceled := coroProgramCancelNativeWorkerSubmissionV1(executor)
+		canceled := coroCancelNativeWorkerSubmissionV1(executor, route)
 		*state = CoroWorkerParkV1{}
 		if !canceled {
 			coroWorkerAbortV1("coroutine worker park reservation rollback failed")
@@ -107,7 +107,9 @@ func __llgo_coro_worker_park_v1(
 	state.ticket = ticket
 	state.operation = operation
 	args := [coroworker.MaxArgs]uintptr{a0, a1, a2, a3, a4, a5, a6, a7, a8}
-	if !coroProgramCommitNativeWorkerSubmissionV1(driver, task, executor, operation, function, argc, &args) {
+	if !coroCommitNativeWorkerSubmissionV1(
+		driver, task, executor, route, operation, function, argc, &args,
+	) {
 		coroWorkerAbortV1("cannot commit coroutine worker submission")
 	}
 }

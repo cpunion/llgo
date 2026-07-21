@@ -33,20 +33,22 @@ import (
 )
 
 const (
-	runtimePollGoSource           = "internal/lib/runtime/poll_linkname_llgo.go"
-	runtimeCoroPollGoSource       = "internal/lib/runtime/poll_linkname_coro_llgo.go"
-	runtimePollCSource            = "internal/lib/runtime/_wrap/poll.c"
-	runtimeCoroChannelSource      = "internal/coro/channel_operation_source.go"
-	runtimeCoroWorkerSource       = "internal/coro/worker_operation_source.go"
-	runtimeCoroNativeWorkerSource = "internal/runtime/coro_worker_native_llgo.go"
-	runtimeCoroWorkerOwnerSource  = "internal/runtime/coro_worker_owner_llgo.go"
-	runtimeCoroNativeDriverSource = "internal/runtime/coro_executor_driver_timer_llgo.go"
-	runtimeCoroWorkerCallSource   = "internal/coroworker/call_llgo.go"
-	runtimeCoroWorkerCSource      = "internal/coroworker/_worker/worker.c"
-	runtimeCoroWorkerHeaderSource = "internal/coroworker/_worker/worker.h"
-	runtimePthreadSyncSource      = "internal/clite/pthread/sync/sync.go"
-	runtimePthreadGCSource        = "internal/clite/pthread/pthread_gc.go"
-	runtimePthreadNoGCSource      = "internal/clite/pthread/pthread_nogc.go"
+	runtimePollGoSource                      = "internal/lib/runtime/poll_linkname_llgo.go"
+	runtimeCoroPollGoSource                  = "internal/lib/runtime/poll_linkname_coro_llgo.go"
+	runtimePollCSource                       = "internal/lib/runtime/_wrap/poll.c"
+	runtimeCoroChannelSource                 = "internal/coro/channel_operation_source.go"
+	runtimeCoroWorkerSource                  = "internal/coro/worker_operation_source.go"
+	runtimeCoroNativeWorkerSource            = "internal/runtime/coro_worker_native_llgo.go"
+	runtimeCoroWorkerProgramCompletionSource = "internal/runtime/coro_worker_completion_program_llgo.go"
+	runtimeCoroWorkerFleetCompletionSource   = "internal/runtime/coro_worker_completion_fleet_llgo.go"
+	runtimeCoroWorkerOwnerSource             = "internal/runtime/coro_worker_owner_llgo.go"
+	runtimeCoroNativeDriverSource            = "internal/runtime/coro_executor_driver_timer_llgo.go"
+	runtimeCoroWorkerCallSource              = "internal/coroworker/call_llgo.go"
+	runtimeCoroWorkerCSource                 = "internal/coroworker/_worker/worker.c"
+	runtimeCoroWorkerHeaderSource            = "internal/coroworker/_worker/worker.h"
+	runtimePthreadSyncSource                 = "internal/clite/pthread/sync/sync.go"
+	runtimePthreadGCSource                   = "internal/clite/pthread/pthread_gc.go"
+	runtimePthreadNoGCSource                 = "internal/clite/pthread/pthread_nogc.go"
 )
 
 func TestRuntimeCoroChannelCapacityUsesPagedLogicalSource(t *testing.T) {
@@ -101,10 +103,40 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 		"bounded C11 sequence ring",
 		"coroworker.QueueReserve()",
 		"coroworker.QueueSubmitReserved(&job)",
-		"//export __llgo_coro_native_worker_complete_v1",
+		"coroNativeWorkerDeliveryFleetV1",
+		"func coroNativeWorkerPoolStartFleetV1() bool",
 	} {
 		if !strings.Contains(native, required) {
 			t.Errorf("%s lacks bounded native worker marker %q", runtimeCoroNativeWorkerSource, required)
+		}
+	}
+	programCompletion := readRuntimePollFile(t, runtimeCoroWorkerProgramCompletionSource)
+	for _, required := range []string{
+		"!llgo_coro_native_fleet",
+		"//export __llgo_coro_native_worker_complete_v1",
+		"state.delivery != coroNativeWorkerDeliveryProgramV1",
+		"coroProgramWorkerSourceV1State.Post(id, payload)",
+		"coroTargetRequestExecutorV1(state.handle)",
+	} {
+		if !strings.Contains(programCompletion, required) {
+			t.Errorf("%s lacks static program worker completion marker %q", runtimeCoroWorkerProgramCompletionSource, required)
+		}
+	}
+	fleetCompletion := readRuntimePollFile(t, runtimeCoroWorkerFleetCompletionSource)
+	for _, required := range []string{
+		"llgo_coro_native_fleet",
+		"//export __llgo_coro_native_worker_complete_v1",
+		"state.delivery != coroNativeWorkerDeliveryFleetV1",
+		"coroNativeFleetPostWorkerV1(id, payload)",
+		"result.Route != coro.OperationRoutePosted || !accepted",
+	} {
+		if !strings.Contains(fleetCompletion, required) {
+			t.Errorf("%s lacks static fleet worker completion marker %q", runtimeCoroWorkerFleetCompletionSource, required)
+		}
+	}
+	for _, forbidden := range []string{"unsafe.Pointer", "reflect", "runtimeDarwinFuncPCABI0", "map[uintptr]"} {
+		if strings.Contains(fleetCompletion, forbidden) {
+			t.Errorf("%s retained reverse worker routing marker %q", runtimeCoroWorkerFleetCompletionSource, forbidden)
 		}
 	}
 	reserveStart := strings.Index(native, "func coroNativeWorkerPoolReserveV1(")
@@ -130,10 +162,10 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 		}
 	}
 	for _, required := range []string{
-		"func coroProgramReserveNativeWorkerSubmissionV1(handle coro.ExecutorHandle) bool",
-		"handle == coroProgramExecutorHandleV1State",
+		"func coroReserveNativeWorkerSubmissionV1(handle coro.ExecutorHandle, route coro.RouteID) bool",
+		"coroNativeWorkerSubmissionOwnerV1(handle, route)",
 		"coro.CommitCurrentExecutorWorkerSubmission(driver, g, id)",
-		"intentional fail-closed behavior until the target installs a route",
+		"id.Route() != route",
 	} {
 		if !strings.Contains(native, required) {
 			t.Errorf("%s lacks current-owner worker boundary %q", runtimeCoroNativeWorkerSource, required)
@@ -145,7 +177,7 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 		"coro.CurrentExecutorWorkerDriver(task)",
 		"coro.PrepareCurrentExecutorWorkerPark(",
 		"coro.FinishCurrentExecutorWorkerPark(",
-		"coroProgramReserveNativeWorkerSubmissionV1(executor)",
+		"coroReserveNativeWorkerSubmissionV1(executor, route)",
 	} {
 		if !strings.Contains(owner, required) {
 			t.Errorf("%s lacks current-owner worker marker %q", runtimeCoroWorkerOwnerSource, required)
@@ -153,8 +185,9 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 	}
 	for _, forbidden := range []string{
 		"&coroProgramWorkerSourceV1State",
-		"coroProgramReserveNativeWorkerSubmissionV1()",
-		"coroProgramCancelNativeWorkerSubmissionV1()",
+		"coroProgramReserveNativeWorkerSubmissionV1",
+		"coroProgramCancelNativeWorkerSubmissionV1",
+		"coroProgramCommitNativeWorkerSubmissionV1",
 	} {
 		if strings.Contains(owner, forbidden) {
 			t.Errorf("%s retained singleton owner selection %q", runtimeCoroWorkerOwnerSource, forbidden)
@@ -169,7 +202,7 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 		"//llgo:coro noblock\n//go:linkname QueueCancelReservation C.__llgo_coro_worker_queue_cancel_reservation_v1",
 		"//llgo:coro noblock\n//go:linkname QueueSubmitReserved C.__llgo_coro_worker_queue_submit_reserved_v1",
 		"//llgo:coro sync\n//go:linkname QueueStop C.__llgo_coro_worker_queue_stop_v1",
-		"all participating atomics were proved lock-free",
+		"atomics were proved lock-free",
 		"semaphore_signal never wait for worker",
 		"C adapter owns the fixed routine",
 	} {

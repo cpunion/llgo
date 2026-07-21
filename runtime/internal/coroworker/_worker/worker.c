@@ -111,10 +111,12 @@ struct llgo_coro_worker_queue_slot_v1 {
 };
 
 /*
- * There is exactly one native coroutine executor in one process. The owner P
- * is the only producer and reservation holder; fixed raw pthreads are the
- * consumers. Sequence numbers make each slot independently reusable, so no
- * consumer and producer ever contend on a mutex or retain a G/frame identity.
+ * There is exactly one physical coroutine worker pool in one process. Exact P
+ * owners contend on the lock-free reservation bit; its winner publishes or
+ * cancels before leaving the no-suspend hook. Fixed raw pthreads are the
+ * consumers, and each job's source_slot carries its executor route. Sequence
+ * numbers make each slot independently reusable, so no consumer and producer
+ * ever contend on a mutex or retain a G/frame identity.
  */
 struct llgo_coro_worker_queue_v1 {
     _Atomic bool initialized;
