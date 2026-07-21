@@ -289,9 +289,16 @@ func TestCoroNativeFleetProductionIslandsV1(t *testing.T) {
 	timerID, timerOK := coro.MakeOperationIDAtRoute(coro.OperationSourceTimer, 1, 1, 1)
 	pollID, pollOK := coro.MakeOperationIDAtRoute(coro.OperationSourcePoll, 2, 1, 1)
 	if !timerOK || !pollOK ||
-		coroNativeFleetPostV1(timerID, coro.ScalarResultPayloadV1{}, coro.TaskCancelNone) != coroNativeFleetInvalidIngressV1() ||
-		coroNativeFleetPostV1(pollID, coro.ScalarResultPayloadV1{}, coro.TaskCancelNone) != coroNativeFleetInvalidIngressV1() {
-		t.Fatal("native fleet accepted timer/poll before route support")
+		coroNativeFleetPostV1(
+			timerID,
+			coro.ScalarResultPayloadV1{},
+			coro.TaskCancelNone,
+			coro.PollOperationResultInvalid,
+		) != coroNativeFleetInvalidIngressV1() {
+		t.Fatal("native fleet exposed timer as a producer callback")
+	}
+	if result := coroNativeFleetPostPollV1(pollID, coro.PollOperationReady); result.Route != coro.OperationRoutePostSourceStale || result.Executor != coro.ExecutorRequestInvalid {
+		t.Fatalf("unregistered routed fleet poll completion = %+v", result)
 	}
 
 	type ownerResult struct {
@@ -317,7 +324,7 @@ func TestCoroNativeFleetProductionIslandsV1(t *testing.T) {
 				result.sourceOK = settleCoroNativeFleetStandaloneSourcesV1(
 					&coroNativeFleetV1State.domains[index],
 				)
-				result.drained, result.promoted, result.pollOK = coroNativeFleetPollOwnerEpochV1(handle, epoch)
+				result.drained, result.promoted, result.pollOK = coroNativeFleetPollOwnerEpochV1(handle, epoch, 0)
 				result.ownerFinishOK = coroNativeFleetFinishOwnerEpochV1(handle, epoch)
 			}
 			owners <- result
@@ -332,7 +339,7 @@ func TestCoroNativeFleetProductionIslandsV1(t *testing.T) {
 		}
 	}
 	for index, domain := range [2]*coroNativeFleetDomainV1{first, second} {
-		if runnable, ok := coro.NextRunnable(&domain.p); !ok || runnable != tasks[index].g {
+		if runnable, ok := coro.NextRunnableAt(&domain.p, 0); !ok || runnable != tasks[index].g {
 			t.Fatalf("fleet domain %d runnable = (%p, %t), want %p", index, runnable, ok, tasks[index].g)
 		} else if !coro.Enqueue(&domain.p, runnable) {
 			t.Fatalf("restore fleet domain %d runnable", index)

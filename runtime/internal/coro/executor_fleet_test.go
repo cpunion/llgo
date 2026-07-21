@@ -162,6 +162,123 @@ func TestExecutorFleetRoutesTwoPCompletionsToExactExecutor(t *testing.T) {
 	}
 }
 
+func TestExecutorFleetBindsTimerAndRoutesPollSources(t *testing.T) {
+	t.Run("timer-owner-source", func(t *testing.T) {
+		fleet := new(ExecutorFleet)
+		p, driver := new(P), new(ExecutorDriver)
+		waits, timers := new(WaitRegistrationTable), new(TimerRegistrationTable)
+		handle, ok := BindExecutorFleet(fleet, driver, p, ExecutorSourceCatalog{
+			Waits: waits, Timers: timers,
+		})
+		if !ok || handle.Route != 1 {
+			t.Fatalf("bind timer fleet route = (%+v, %t)", handle, ok)
+		}
+		if route, routeOK := timers.Route(); !routeOK || route != RouteID(handle.Route) {
+			t.Fatalf("timer fleet source route = (%d, %t), want %d", route, routeOK, handle.Route)
+		}
+		if !BeginExecutorFleetClose(fleet, handle) || !ConfirmExecutorFleetRouteClose(fleet, handle) ||
+			!BeginExecutorFleetDriverClose(fleet, handle) || !ConfirmExecutorFleetClose(fleet, handle) ||
+			!fleet.AllRetired() || !waits.CanRelease() || !timers.CanRelease() {
+			t.Fatal("timer fleet route retained source or executor state")
+		}
+	})
+
+	t.Run("poll-producer-route", func(t *testing.T) {
+		fleet := new(ExecutorFleet)
+		p, driver := new(P), new(ExecutorDriver)
+		waits, poll := new(WaitRegistrationTable), new(PollOperationSource)
+		handle, ok := BindExecutorFleet(fleet, driver, p, ExecutorSourceCatalog{
+			Waits: waits, Poll: poll,
+		})
+		if !ok || handle.Route != 1 {
+			t.Fatalf("bind poll fleet route = (%+v, %t)", handle, ok)
+		}
+
+		task := newYieldingTestG(t, "fleet-routed-poll")
+		peer := newYieldingTestG(t, "fleet-routed-poll-peer")
+		if !Enqueue(p, task.g) || !Enqueue(p, peer.g) {
+			t.Fatal("enqueue routed poll tasks")
+		}
+		if runnable, nextOK := NextRunnableAt(p, 0); !nextOK || runnable != task.g {
+			t.Fatalf("dequeue routed poll task = (%p, %t)", runnable, nextOK)
+		}
+		action := beginWaitTestResume(t, p, task)
+		ticket, ok := BeginParkSet(&task.g.park, 1, 811)
+		wait := new(WaitSetRecord)
+		if !ok || !PrepareWaitSetRecord(wait, task.g, ticket) {
+			t.Fatal("begin routed poll park set")
+		}
+		pollHandle, id, ok := poll.ReserveAndAttachPollOperationV2(
+			p, &task.g.park, ticket, wait, 17, 42, PollInterestRead, 0,
+		)
+		if !ok || id.Route() != RouteID(handle.Route) || !SealParkSet(&task.g.park, ticket) {
+			t.Fatalf("reserve routed poll operation = (%+v, %+v, %t)", pollHandle, id, ok)
+		}
+		task.frame.header.SuspendReason = uint16(SuspendPark)
+		task.frame.header.Lifecycle = uint16(FrameSuspended)
+		if !PrepareParkSet(task.g, task.handle, task.frame.header, ticket, wait) {
+			t.Fatal("prepare routed poll scheduler park")
+		}
+		parked, resumed := Resumed(p, task.g, action)
+		if !resumed || parked.Kind != ActionPark {
+			t.Fatalf("commit routed poll park = (%+v, %t)", parked, resumed)
+		}
+		posted := fleet.PostPollAndRequest(id, PollOperationReady)
+		duplicate := fleet.PostPollAndRequest(id, PollOperationClosing)
+		if posted.Route != OperationRoutePosted || posted.Executor != ExecutorRequestPublished ||
+			duplicate.Route != OperationRoutePostCoalesced || duplicate.Executor != ExecutorRequestInvalid {
+			t.Fatalf("routed poll posts = first %+v duplicate %+v", posted, duplicate)
+		}
+		if !BeginExecutorFleetClose(fleet, handle) || !ConfirmExecutorFleetRouteClose(fleet, handle) {
+			t.Fatal("strong-close routed poll producer ingress")
+		}
+		if late := fleet.PostPollAndRequest(id, PollOperationReady); late.Route != OperationRoutePostClosed {
+			t.Fatalf("closed poll route accepted late result: %+v", late)
+		}
+		if waitsDone, timersDone, promoted, pollOK := PollExecutorAt(driver, 0); !pollOK || waitsDone != 0 || timersDone != 0 || promoted != 1 {
+			t.Fatalf("service routed poll = (%d, %d, %d, %t)", waitsDone, timersDone, promoted, pollOK)
+		}
+		if runnable, nextOK := NextRunnableAt(p, 0); !nextOK || runnable != peer.g || !Enqueue(p, peer.g) {
+			t.Fatalf("rotate routed poll peer = (%p, %t)", runnable, nextOK)
+		}
+		if runnable, nextOK := NextRunnableAt(p, 0); !nextOK || runnable != task.g {
+			t.Fatalf("dequeue completed routed poll task = (%p, %t)", runnable, nextOK)
+		}
+		action = beginWaitTestResume(t, p, task)
+		outcome, caseID, lease, taskCancel, consumed := TakeRunDecision(task.g, ticket)
+		result, taken := poll.TakePollOperationV2Result(p, pollHandle, lease)
+		if !consumed || outcome != ParkOutcomeCompleted || caseID != 17 || taskCancel != TaskCancelNone ||
+			!taken || result != PollOperationReady || !poll.RecyclePollOperationV2(p, pollHandle) {
+			t.Fatalf("consume routed poll = outcome:%d case:%d result:%d taken:%t consumed:%t cancel:%d lease:%+v",
+				outcome, caseID, result, taken, consumed, taskCancel, lease)
+		}
+		finishWaitTestTask(t, p, task, action)
+		var sink P
+		var mailbox RunnableTransferMailbox
+		if !BindRunnableTransferMailbox(&mailbox, &sink) {
+			t.Fatal("bind routed poll cleanup mailbox")
+		}
+		if id, published := PublishPNeutralRunnable(&mailbox, p, peer.g); !published || !id.Valid() {
+			t.Fatalf("publish routed poll peer cleanup = (%+v, %t)", id, published)
+		}
+		if moved, more, drainOK := DrainPNeutralRunnables(&mailbox, &sink, 1); !drainOK || moved != 1 || more {
+			t.Fatalf("drain routed poll peer cleanup = (%d, %t, %t)", moved, more, drainOK)
+		}
+		if !BeginExecutorFleetDriverClose(fleet, handle) || !ConfirmExecutorFleetClose(fleet, handle) ||
+			!fleet.AllRetired() || !waits.CanRelease() || !poll.CanRelease() {
+			t.Fatal("poll fleet route retained source or executor state")
+		}
+		if runnable, nextOK := NextRunnable(&sink); !nextOK || runnable != peer.g {
+			t.Fatalf("dequeue routed poll cleanup peer = (%p, %t)", runnable, nextOK)
+		}
+		peerAction := beginWaitTestResume(t, &sink, peer)
+		finishWaitTestTask(t, &sink, peer, peerAction)
+		if !TerminalG(&sink, peer.g) {
+			t.Fatal("routed poll cleanup peer retained scheduler state")
+		}
+	})
+}
+
 func TestExecutorFleetCloseStrongJoinsRouteIngressBeforeDriver(t *testing.T) {
 	fleet := new(ExecutorFleet)
 	fixture := bindExecutorFleetManualFixture(t, fleet)
@@ -340,35 +457,6 @@ func TestExecutorFleetBindPreflightAndLifetimeCapacity(t *testing.T) {
 		Waits: new(WaitRegistrationTable),
 	}); ok || handle != (ExecutorFleetHandle{}) || fleet.routes.next != nextBefore {
 		t.Fatal("wait-only catalog consumed a fleet route")
-	}
-
-	// Timer/Poll source identities are route-aware, but the current route
-	// registry has no producer dispatch entry for either. Fleet Bind must reject
-	// them before it consumes a route or executor generation, even when a Manual
-	// source would otherwise make the catalog route-bindable.
-	{
-		p, driver := new(P), new(ExecutorDriver)
-		waits, manual, timers := new(WaitRegistrationTable), new(ManualOperationSource), new(TimerRegistrationTable)
-		beforeExecutors := fleet.executors.slots
-		if handle, ok := BindExecutorFleet(fleet, driver, p, ExecutorSourceCatalog{
-			Waits: waits, Timers: timers, Manual: manual,
-		}); ok || handle != (ExecutorFleetHandle{}) || fleet.routes.next != nextBefore ||
-			fleet.executors.slots != beforeExecutors || *driver != (ExecutorDriver{}) ||
-			p.executor != nil || !waits.CanRelease() || !manual.CanRelease() || !timers.CanRelease() {
-			t.Fatal("timer catalog entered fleet bind transaction")
-		}
-	}
-	{
-		p, driver := new(P), new(ExecutorDriver)
-		waits, manual, poll := new(WaitRegistrationTable), new(ManualOperationSource), new(PollOperationSource)
-		beforeExecutors := fleet.executors.slots
-		if handle, ok := BindExecutorFleet(fleet, driver, p, ExecutorSourceCatalog{
-			Waits: waits, Poll: poll, Manual: manual,
-		}); ok || handle != (ExecutorFleetHandle{}) || fleet.routes.next != nextBefore ||
-			fleet.executors.slots != beforeExecutors || *driver != (ExecutorDriver{}) ||
-			p.executor != nil || !waits.CanRelease() || !manual.CanRelease() || !poll.CanRelease() {
-			t.Fatal("poll catalog entered fleet bind transaction")
-		}
 	}
 
 	oldHandle := first.handle

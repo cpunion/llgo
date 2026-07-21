@@ -53,10 +53,6 @@ const (
 
 // coroNativeFleetDomainV1 is one statically addressed production ownership
 // island. P, driver, every source, callback admission, and doorbell are
-// independent. The first cut intentionally excludes Timer and Poll: their
-// target callbacks do not yet route through OperationRouteRegistry, and
-// ExecutorFleet rejects either source before consuming a route.
-//
 // Worker is completion-side only in this slice. The existing coroworker queue
 // is a process singleton which retains one ExecutorHandle; duplicating it here
 // would create a second scheduler/backend policy. A later change must make its
@@ -65,6 +61,8 @@ type coroNativeFleetDomainV1 struct {
 	p       coro.P
 	driver  coro.ExecutorDriver
 	waits   coro.WaitRegistrationTable
+	timers  coro.TimerRegistrationTable
+	poll    coro.PollOperationSource
 	manual  coro.ManualOperationSource
 	worker  coro.WorkerOperationSource
 	control coro.TaskControlSource
@@ -94,7 +92,8 @@ func coroNativeFleetDomainCandidateV1(domain *coroNativeFleetDomainV1) bool {
 	return domain != nil && domain.lifecycle == coroNativeFleetDomainUnusedV1 &&
 		domain.handle == (coro.ExecutorFleetHandle{}) && domain.ownerEpoch == 0 &&
 		domain.nextOwnerEpoch == 0 && domain.driver == (coro.ExecutorDriver{}) &&
-		domain.waits.CanRelease() && domain.manual.CanRelease() &&
+		domain.waits.CanRelease() && domain.timers.CanRelease() && domain.poll.CanRelease() &&
+		domain.manual.CanRelease() &&
 		domain.worker.CanRelease() && domain.control.CanRelease() &&
 		domain.ingress.CanReleaseResources() && domain.admission.CanRecycle()
 }
@@ -160,6 +159,8 @@ func coroNativeFleetBindDomainV1(state *coroNativeFleetStateV1, index uint32) bo
 		&domain.p,
 		coro.ExecutorSourceCatalog{
 			Waits:   &domain.waits,
+			Timers:  &domain.timers,
+			Poll:    &domain.poll,
 			Manual:  &domain.manual,
 			Worker:  &domain.worker,
 			Control: &domain.control,
@@ -274,6 +275,7 @@ func coroNativeFleetPostV1(
 	id coro.OperationID,
 	payload coro.ScalarResultPayloadV1,
 	control coro.TaskCancelKind,
+	pollResult coro.PollOperationResult,
 ) coro.OperationRouteIngressResult {
 	if !id.Valid() || id.Route() == 0 || uint32(id.Route()) > coroNativeFleetDomainCapacityV1 {
 		return coroNativeFleetInvalidIngressV1()
@@ -295,27 +297,36 @@ func coroNativeFleetPostV1(
 	var result coro.OperationRouteIngressResult
 	switch id.Source() {
 	case coro.OperationSourceManual:
-		if payload != (coro.ScalarResultPayloadV1{}) || control != coro.TaskCancelNone {
+		if payload != (coro.ScalarResultPayloadV1{}) || control != coro.TaskCancelNone ||
+			pollResult != coro.PollOperationResultInvalid {
 			_, _ = domain.ingress.Leave()
 			return coroNativeFleetInvalidIngressV1()
 		}
 		result = coroNativeFleetV1State.fleet.PostManualAndRequest(id)
 	case coro.OperationSourceWorker:
-		if !payload.Valid() || control != coro.TaskCancelNone {
+		if !payload.Valid() || control != coro.TaskCancelNone || pollResult != coro.PollOperationResultInvalid {
 			_, _ = domain.ingress.Leave()
 			return coroNativeFleetInvalidIngressV1()
 		}
 		result = coroNativeFleetV1State.fleet.PostWorkerAndRequest(id, payload)
+	case coro.OperationSourcePoll:
+		if payload != (coro.ScalarResultPayloadV1{}) || control != coro.TaskCancelNone ||
+			(pollResult != coro.PollOperationReady && pollResult != coro.PollOperationClosing) {
+			_, _ = domain.ingress.Leave()
+			return coroNativeFleetInvalidIngressV1()
+		}
+		result = coroNativeFleetV1State.fleet.PostPollAndRequest(id, pollResult)
 	case coro.OperationSourceControl:
 		if payload != (coro.ScalarResultPayloadV1{}) ||
-			control != coro.TaskCancelAbort && control != coro.TaskCancelShutdown {
+			(control != coro.TaskCancelAbort && control != coro.TaskCancelShutdown) ||
+			pollResult != coro.PollOperationResultInvalid {
 			_, _ = domain.ingress.Leave()
 			return coroNativeFleetInvalidIngressV1()
 		}
 		result = coroNativeFleetV1State.fleet.PostTaskControlAndRequest(id, control)
 	default:
-		// Timer and Poll remain deliberately unsupported, including syntactically
-		// valid routed IDs. There is no fallback to a legacy global source.
+		// Timer has no producer callback: each owner discovers expiry from its
+		// monotonic clock. Unknown source kinds never fall back to a legacy global.
 		_, _ = domain.ingress.Leave()
 		return coroNativeFleetInvalidIngressV1()
 	}
@@ -335,15 +346,26 @@ func coroNativeFleetPostV1(
 }
 
 func coroNativeFleetPostManualV1(id coro.OperationID) coro.OperationRouteIngressResult {
-	return coroNativeFleetPostV1(id, coro.ScalarResultPayloadV1{}, coro.TaskCancelNone)
+	return coroNativeFleetPostV1(
+		id, coro.ScalarResultPayloadV1{}, coro.TaskCancelNone, coro.PollOperationResultInvalid,
+	)
 }
 
 func coroNativeFleetPostWorkerV1(id coro.OperationID, payload coro.ScalarResultPayloadV1) coro.OperationRouteIngressResult {
-	return coroNativeFleetPostV1(id, payload, coro.TaskCancelNone)
+	return coroNativeFleetPostV1(id, payload, coro.TaskCancelNone, coro.PollOperationResultInvalid)
+}
+
+func coroNativeFleetPostPollV1(
+	id coro.OperationID,
+	result coro.PollOperationResult,
+) coro.OperationRouteIngressResult {
+	return coroNativeFleetPostV1(id, coro.ScalarResultPayloadV1{}, coro.TaskCancelNone, result)
 }
 
 func coroNativeFleetPostTaskControlV1(id coro.OperationID, kind coro.TaskCancelKind) coro.OperationRouteIngressResult {
-	return coroNativeFleetPostV1(id, coro.ScalarResultPayloadV1{}, kind)
+	return coroNativeFleetPostV1(
+		id, coro.ScalarResultPayloadV1{}, kind, coro.PollOperationResultInvalid,
+	)
 }
 
 func packCoroNativeFleetIngressV1(result coro.OperationRouteIngressResult) uint32 {
@@ -382,6 +404,17 @@ func __llgo_coro_native_fleet_post_worker_v1(
 	}
 	id := coro.OperationID{SourceSlot: sourceSlot, Generation: generation}
 	return packCoroNativeFleetIngressV1(coroNativeFleetPostWorkerV1(id, payload))
+}
+
+// __llgo_coro_native_fleet_post_poll_v1 is the route-aware native reactor
+// ingress. result accepts only PollOperationReady or PollOperationClosing.
+//
+//export __llgo_coro_native_fleet_post_poll_v1
+func __llgo_coro_native_fleet_post_poll_v1(sourceSlot, generation, result uint32) uint32 {
+	id := coro.OperationID{SourceSlot: sourceSlot, Generation: generation}
+	return packCoroNativeFleetIngressV1(
+		coroNativeFleetPostPollV1(id, coro.PollOperationResult(result)),
+	)
 }
 
 // __llgo_coro_native_fleet_post_control_v1 routes task cancellation without
@@ -450,16 +483,18 @@ func coroNativeFleetDrainOwnerEpochV1(
 func coroNativeFleetPollOwnerEpochV1(
 	handle coro.ExecutorFleetHandle,
 	epoch uint32,
+	now int64,
 ) (drained, promoted int, ok bool) {
 	domain, valid := coroNativeFleetDomainForHandleV1(
 		&coroNativeFleetV1State,
 		handle,
 		coroNativeFleetDomainActiveV1,
 	)
-	if !valid || epoch == 0 || domain.ownerEpoch != epoch {
+	if !valid || epoch == 0 || domain.ownerEpoch != epoch || now < 0 {
 		return 0, 0, false
 	}
-	return coro.PollExecutor(&domain.driver)
+	waits, timers, promoted, pollOK := coro.PollExecutorAt(&domain.driver, now)
+	return waits + timers, promoted, pollOK
 }
 
 func coroNativeFleetFinishOwnerEpochV1(handle coro.ExecutorFleetHandle, epoch uint32) bool {
@@ -571,7 +606,8 @@ func coroNativeFleetAllRetiredV1() bool {
 		if domain.lifecycle != coroNativeFleetDomainRetiredV1 || domain.ownerEpoch != 0 ||
 			!domain.ingress.Retired() || !domain.doorbell.Closed() ||
 			!domain.admission.CanRelease() || domain.driver != (coro.ExecutorDriver{}) ||
-			!domain.waits.CanRelease() || !domain.manual.CanRelease() ||
+			!domain.waits.CanRelease() || !domain.timers.CanRelease() || !domain.poll.CanRelease() ||
+			!domain.manual.CanRelease() ||
 			!domain.worker.CanRelease() || !domain.control.CanRelease() {
 			return false
 		}

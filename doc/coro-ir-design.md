@@ -789,7 +789,7 @@ LLVM CoroSplit继续负责普通 SSA liveness和frame materialization。精确 G
 
 | 平台 | 核心模型判断 | 当前实现现实 |
 | --- | --- | --- |
-| Native Linux/Darwin | layout/ownership无已知冲突 | 已有single-P pipe doorbell/POSIX `poll`、monotonic timer、bounded worker、semaphore/notify、channel/select vertical slice和native runner；五个冻结标准库探针已E2E通过，但尚无程序级multi-P、完整GC/cleanup与GOROOT矩阵 |
+| Native Linux/Darwin | layout/ownership无已知冲突 | 已有single-P pipe doorbell/POSIX `poll`、monotonic timer、bounded worker、semaphore/notify、channel/select vertical slice和native runner；fleet Timer/Poll exact route及Poll callback ingress已闭环，五个冻结标准库探针已E2E通过，但尚无程序级multi-P、双domain reactor arm、完整GC/cleanup与GOROOT矩阵 |
 | 其他native OS | 尚未审查 | Windows/BSD/mobile production adapter、thread/IO/ABI均未验证 |
 | JS/WASM | layout/ownership无已知冲突，可映射为1P host `RunSlice` | 32-bit layout、pre/post-CoroSplit/object和test adapter有覆盖；production queued run/timer/Promise/IO adapter未实现，仍走fail-closed fallback |
 | WASI | operation模型可映射，未验证 | pollable/poll_oneoff、filesystem/socket/clock production adapter未完成 |

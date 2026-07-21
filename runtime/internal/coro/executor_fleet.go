@@ -157,12 +157,12 @@ func executorFleetCatalogCandidate(catalog ExecutorSourceCatalog, p *P, route Ro
 	if p == nil || !route.Valid() || !registrationTableEmpty(catalog.Waits, nil) {
 		return false
 	}
-	// Timer and Poll already carry route-aware V2 IDs, but the current shared
-	// OperationRouteRegistry deliberately has no Timer/Poll pointer or producer
-	// dispatch entry. Reject the complete catalog before allocation rather than
-	// binding a source which external completion cannot reach. Their later fleet
-	// cutover is a registry extension, not a Bind rollback path.
-	if catalog.Timers != nil || catalog.Poll != nil {
+	if catalog.Timers != nil && (!timerRegistrationTableEmpty(catalog.Timers, nil) ||
+		catalog.Timers.route != 0 && catalog.Timers.route != route) {
+		return false
+	}
+	if catalog.Poll != nil && (!pollOperationSourceEmpty(catalog.Poll, nil) ||
+		catalog.Poll.route != 0 && catalog.Poll.route != route) {
 		return false
 	}
 	if catalog.Manual != nil && (!manualOperationSourceEmpty(catalog.Manual, nil) ||
@@ -181,11 +181,11 @@ func executorFleetCatalogCandidate(catalog ExecutorSourceCatalog, p *P, route Ro
 		catalog.Control.route != 0 && catalog.Control.route != route) {
 		return false
 	}
-	// OperationRouteRegistry currently publishes only pointer-free V2 sources.
-	// Waits is mandatory driver infrastructure but does not by itself provide a
-	// routed producer catalog.
-	return catalog.Manual != nil || catalog.Worker != nil ||
-		catalog.Channel != nil || catalog.Control != nil
+	// OperationRouteRegistry publishes pointer-free V2 producer sources and
+	// retains owner-driven Timer identity. Waits is mandatory driver
+	// infrastructure but does not by itself provide a routed source catalog.
+	return catalog.Timers != nil || catalog.Poll != nil || catalog.Manual != nil ||
+		catalog.Worker != nil || catalog.Channel != nil || catalog.Control != nil
 }
 
 func executorFleetSlotFor(fleet *ExecutorFleet, handle ExecutorFleetHandle) (*executorFleetSlot, RouteID, bool) {
@@ -390,6 +390,13 @@ func (fleet *ExecutorFleet) PostWorkerAndRequest(id OperationID, payload ScalarR
 		return OperationRouteIngressResult{Route: OperationRoutePostInvalid, Executor: ExecutorRequestInvalid}
 	}
 	return fleet.routes.PostWorkerAndRequest(id, payload)
+}
+
+func (fleet *ExecutorFleet) PostPollAndRequest(id OperationID, result PollOperationResult) OperationRouteIngressResult {
+	if fleet == nil || fleet.magic != executorFleetMagic {
+		return OperationRouteIngressResult{Route: OperationRoutePostInvalid, Executor: ExecutorRequestInvalid}
+	}
+	return fleet.routes.PostPollAndRequest(id, result)
 }
 
 func (fleet *ExecutorFleet) PostTaskControlAndRequest(id OperationID, kind TaskCancelKind) OperationRouteIngressResult {
