@@ -138,15 +138,28 @@ func (b Builder) Longjmp(jb, retval Expr) {
 
 func (p Function) deferInitBuilder(from Builder) (b Builder, next BasicBlock) {
 	b = p.NewBuilder()
-	if p.diFunc != nil {
-		loc := from.impl.GetCurrentDebugLocation()
-		if !loc.Scope.IsNil() {
-			b.impl.SetCurrentDebugLocation(loc.Line, loc.Col, loc.Scope, loc.InlinedAt)
-		}
-	}
+	b.setDeferDebugLocation(from.deferDebugLocation())
 	next = b.setBlockMoveLast(p.blks[0])
 	p.blks[0].last = next.last
 	return
+}
+
+func (b Builder) deferDebugLocation() llvm.DebugLoc {
+	if b.Func.diFunc == nil {
+		return llvm.DebugLoc{}
+	}
+	return b.impl.GetCurrentDebugLocation()
+}
+
+func (b Builder) setDeferDebugLocation(loc llvm.DebugLoc) {
+	if !loc.Scope.IsNil() {
+		b.impl.SetCurrentDebugLocation(loc.Line, loc.Col, loc.Scope, loc.InlinedAt)
+	}
+}
+
+type deferStmt struct {
+	loc  llvm.DebugLoc
+	emit func(bits Expr)
 }
 
 type aDefer struct {
@@ -164,7 +177,7 @@ type aDefer struct {
 	// walking defers in reverse order in endDefer).
 	loopDrainerGenerated bool
 	loopCases            []loopDeferCase
-	stmts                []func(bits Expr)
+	stmts                []deferStmt
 }
 
 // loopDeferCase represents a defer statement inside a loop.
@@ -176,6 +189,7 @@ type loopDeferCase struct {
 	fn        Expr
 	args      []Expr
 	buildCall func(Builder, Expr, ...Expr) Expr
+	loc       llvm.DebugLoc
 }
 
 const (
@@ -352,7 +366,7 @@ func (b Builder) Defer(kind DoAction, fn Expr, buildCall func(Builder, Expr, ...
 	}
 	typ := b.saveDeferArgs(self, kind, id, fn, args)
 	if kind == DeferInLoop {
-		loopCase := loopDeferCase{id: id, typ: typ, fn: fn, args: args, buildCall: buildCall}
+		loopCase := loopDeferCase{id: id, typ: typ, fn: fn, args: args, buildCall: buildCall, loc: b.deferDebugLocation()}
 		self.loopCases = append(self.loopCases, loopCase)
 	}
 	b.appendDeferStmt(self, kind, typ, buildCall, fn, args, nextbit)
@@ -378,6 +392,7 @@ func (b Builder) DeferTo(owner Function, stack Expr, fn Expr, buildCall func(Bui
 		fn:        fn,
 		args:      args,
 		buildCall: buildCall,
+		loc:       b.deferDebugLocation(),
 	}
 	if self == nil {
 		owner.pendingLoopCases = append(owner.pendingLoopCases, loopCase)
@@ -387,7 +402,7 @@ func (b Builder) DeferTo(owner Function, stack Expr, fn Expr, buildCall func(Bui
 }
 
 func (b Builder) appendDeferStmt(self *aDefer, kind DoAction, typ Type, buildCall func(Builder, Expr, ...Expr) Expr, fn Expr, args []Expr, nextbit Expr) {
-	self.stmts = append(self.stmts, func(bits Expr) {
+	self.stmts = append(self.stmts, deferStmt{loc: b.deferDebugLocation(), emit: func(bits Expr) {
 		switch kind {
 		case DeferInCond:
 			// Leaving a run of loop defers; allow the next loop-defer statement
@@ -407,13 +422,13 @@ func (b Builder) appendDeferStmt(self *aDefer, kind DoAction, typ Type, buildCal
 		case DeferInLoop:
 			b.loopDeferDrainer(self)
 		}
-	})
+	}})
 }
 
 func (b Builder) appendLoopDeferDrainer(self *aDefer) {
-	self.stmts = append(self.stmts, func(Expr) {
+	self.stmts = append(self.stmts, deferStmt{loc: b.deferDebugLocation(), emit: func(Expr) {
 		b.loopDeferDrainer(self)
-	})
+	}})
 }
 
 func (b Builder) loopDeferDrainer(self *aDefer) {
@@ -462,6 +477,7 @@ func (b Builder) loopDeferDrainer(self *aDefer) {
 		b.If(match, caseBlks[i], nextBlk)
 
 		b.SetBlockEx(caseBlks[i], AtEnd, true)
+		b.setDeferDebugLocation(c.loc)
 		b.Store(self.rethPtr, drainEntryAddr)
 		b.callDefer(self, c.typ, c.buildCall, c.fn, c.args)
 		b.Jump(condBlk)
@@ -590,9 +606,11 @@ func (p Function) endDefer(b Builder) {
 
 	for i := n - 1; i >= 0; i-- {
 		rethNext := rethsNext[i]
+		stmt := stmts[i]
 		b.SetBlockEx(rethsNext[i+1], AtEnd, true)
+		b.setDeferDebugLocation(stmt.loc)
 		b.Store(rethPtr, rethNext.Addr())
-		stmts[i](b.Load(bitsPtr))
+		stmt.emit(b.Load(bitsPtr))
 		if i != 0 {
 			b.Jump(rethNext)
 		}

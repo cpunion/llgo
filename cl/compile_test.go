@@ -222,13 +222,22 @@ func TestRunAndTestFromTestlto(t *testing.T) {
 	cltest.RunAndTestFromDir(t, "", "./_testlto", ignore, cltest.WithRunConfig(conf))
 }
 
-func TestRunAndTestFromTestltoDWARF(t *testing.T) {
+func runTestltoDWARF(t *testing.T, test string) {
+	t.Helper()
 	t.Setenv("LLGO_BUILD_CACHE", "off")
 	conf := build.NewDefaultConf(build.ModeRun)
 	conf.LTO = lto.Full
 	conf.LinkOptions.DWARF = build.DWARFPreserve
-	cltest.RunAndTestFromDir(t, "reflectmk_runtime", "./_testlto", nil,
+	cltest.RunAndTestFromDir(t, test, "./_testlto", nil,
 		cltest.WithRunConfig(conf), cltest.WithIRCheck(false))
+}
+
+func TestRunAndTestFromTestltoDWARF(t *testing.T) {
+	runTestltoDWARF(t, "reflectmk_runtime")
+}
+
+func TestRunAndTestFromTestltoDeferDWARF(t *testing.T) {
+	runTestltoDWARF(t, "defer_dwarf")
 }
 
 var testltoSymbolChecks = []string{
