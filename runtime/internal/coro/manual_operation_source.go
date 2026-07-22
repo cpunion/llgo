@@ -16,11 +16,15 @@
 
 package coro
 
-// ManualOperationSourceCapacity is deliberately small: this source is the
-// allocation-free third-source/reference implementation, not the target I/O
-// catalog. A target may copy the same slot protocol into a larger generated
-// source without changing OperationRecord or ParkState.
-const ManualOperationSourceCapacity = 4
+// ManualOperationPageCapacity matches the other paged operation catalogs. The
+// inline page keeps small/embedded executors allocation-free; native targets
+// may attach stable extra pages without changing OperationID or ParkState.
+const ManualOperationPageCapacity = 64
+
+// ManualOperationSourceCapacity is the inline capacity retained for source
+// compatibility. Configured capacity may be larger when extra pages are
+// attached before bind.
+const ManualOperationSourceCapacity = ManualOperationPageCapacity
 
 type ManualOperationPostResult uint8
 
@@ -64,6 +68,12 @@ type manualOperationSlot struct {
 	nextAffected uint32
 }
 
+// ManualOperationPage is stable owner storage. It may be statically allocated
+// by a target and attached only while the source is empty and unbound.
+type ManualOperationPage struct {
+	slots [ManualOperationPageCapacity]manualOperationSlot
+}
+
 // ManualOperationSource is a fixed-capacity, one-shot completion source. It is
 // a concrete reference for the four source phases: mailbox publish, affected
 // wait-set resolution after a published epoch, logical apply/detach, and physical
@@ -78,17 +88,47 @@ type manualOperationSlot struct {
 type ManualOperationSource struct {
 	routedProducerSource
 	slots [ManualOperationSourceCapacity]manualOperationSlot
+	// extraPages and scanLimit are owner-only. Producer ingress resolves an
+	// exact slot from OperationID while an admission lease prevents reuse.
+	extraPages []ManualOperationPage
+	scanLimit  uint32
 
 	affectedHead uint32
 	affectedTail uint32
 }
 
-func manualOperationSlotFor(source *ManualOperationSource, id OperationID) (*manualOperationSlot, bool) {
-	if source == nil || !source.route.Valid() || !id.Valid() || id.Source() != OperationSourceManual ||
-		id.Route() != source.route || id.LocalSlot() == 0 || id.LocalSlot() > ManualOperationSourceCapacity {
+func ManualOperationConfiguredCapacity(source *ManualOperationSource) uint32 {
+	if source == nil {
+		return 0
+	}
+	return uint32(1+len(source.extraPages)) * ManualOperationPageCapacity
+}
+
+func manualOperationSlotAt(source *ManualOperationSource, index uint32) (*manualOperationSlot, bool) {
+	if source == nil || index >= ManualOperationConfiguredCapacity(source) {
 		return nil, false
 	}
-	return &source.slots[id.LocalSlot()-1], true
+	if index < ManualOperationPageCapacity {
+		return &source.slots[index], true
+	}
+	page := index/ManualOperationPageCapacity - 1
+	offset := index % ManualOperationPageCapacity
+	return &source.extraPages[page].slots[offset], true
+}
+
+func ManualOperationScanLimit(source *ManualOperationSource) (uint32, bool) {
+	if source == nil || source.scanLimit > ManualOperationConfiguredCapacity(source) {
+		return 0, false
+	}
+	return source.scanLimit, true
+}
+
+func manualOperationSlotFor(source *ManualOperationSource, id OperationID) (*manualOperationSlot, bool) {
+	if source == nil || !source.route.Valid() || !id.Valid() || id.Source() != OperationSourceManual ||
+		id.Route() != source.route || id.LocalSlot() == 0 || id.LocalSlot() > ManualOperationConfiguredCapacity(source) {
+		return nil, false
+	}
+	return manualOperationSlotAt(source, id.LocalSlot()-1)
 }
 
 func manualOperationReusableSlot(source *ManualOperationSource, slot *manualOperationSlot, index uint32) bool {
@@ -107,15 +147,47 @@ func manualOperationReusableSlot(source *ManualOperationSource, slot *manualOper
 	return ok && slot.record == (OperationRecord{id: id, phase: operationReusable})
 }
 
+// ConfigureManualOperationPages attaches stable target-owned pages before the
+// source is bound. Configuration is monotonic and idempotent for the same
+// backing array, matching the timer/poll/worker catalog lifecycle.
+func ConfigureManualOperationPages(source *ManualOperationSource, pages []ManualOperationPage) bool {
+	if source == nil || len(pages) > int(operationLocalMask/ManualOperationPageCapacity)-1 {
+		return false
+	}
+	existing := len(source.extraPages)
+	if existing != 0 && (len(pages) < existing || len(pages) == 0 || &source.extraPages[0] != &pages[0]) {
+		return false
+	}
+	if len(pages) == existing {
+		return true
+	}
+	if source.route.Valid() || source.owner != nil || source.pending != 0 || source.scanLimit != 0 ||
+		source.affectedHead != 0 || source.affectedTail != 0 {
+		return false
+	}
+	for page := existing; page < len(pages); page++ {
+		for offset := range pages[page].slots {
+			if pages[page].slots[offset] != (manualOperationSlot{}) {
+				return false
+			}
+		}
+	}
+	source.extraPages = pages
+	return true
+}
+
 func validManualOperationOwner(source *ManualOperationSource, p *P) bool {
 	return source != nil && validRoutedProducerSource(&source.routedProducerSource, p)
 }
 
 func validManualOperationLiveSlot(source *ManualOperationSource, p *P, index uint32) bool {
-	if !validManualOperationOwner(source, p) || index >= uint32(len(source.slots)) {
+	if !validManualOperationOwner(source, p) || index >= ManualOperationConfiguredCapacity(source) {
 		return false
 	}
-	slot := &source.slots[index]
+	slot, ok := manualOperationSlotAt(source, index)
+	if !ok {
+		return false
+	}
 	state := producerSourceLifecycle(preemptLoad(&slot.state))
 	if state != producerSourceActive && state != producerSourceClosing && state != producerSourceQuiesced {
 		return false
@@ -133,16 +205,19 @@ func (source *ManualOperationSource) reserveAndAttach(p *P, state *ParkState, ti
 	if !validManualOperationOwner(source, p) {
 		return OperationID{}, false
 	}
-	for index := range source.slots {
-		slot := &source.slots[index]
-		if !manualOperationReusableSlot(source, slot, uint32(index)) || preemptLoad(&slot.generation) == ^uint32(0) {
+	for index := uint32(0); index < ManualOperationConfiguredCapacity(source); index++ {
+		slot, slotOK := manualOperationSlotAt(source, index)
+		if !slotOK {
+			return OperationID{}, false
+		}
+		if !manualOperationReusableSlot(source, slot, index) || preemptLoad(&slot.generation) == ^uint32(0) {
 			continue
 		}
 		generation, begun := beginProducerSourceSlot(&slot.producerSourceSlot)
 		if !begun {
 			return OperationID{}, false
 		}
-		id, ok := MakeOperationIDAtRoute(OperationSourceManual, source.route, uint32(index)+1, generation)
+		id, ok := MakeOperationIDAtRoute(OperationSourceManual, source.route, index+1, generation)
 		if !ok || !PrepareOperationAtGeneration(&slot.record, id) {
 			return OperationID{}, false
 		}
@@ -161,6 +236,9 @@ func (source *ManualOperationSource) reserveAndAttach(p *P, state *ParkState, ti
 		}
 		if !activateProducerSourceSlot(&slot.producerSourceSlot, generation) {
 			return OperationID{}, false
+		}
+		if index+1 > source.scanLimit {
+			source.scanLimit = index + 1
 		}
 		return id, true
 	}
@@ -241,10 +319,13 @@ func (source *ManualOperationSource) appendAffected(index uint32) bool {
 		source.affectedHead, source.affectedTail = oneBased, oneBased
 		return true
 	}
-	if source.affectedTail == 0 || source.affectedTail > uint32(len(source.slots)) {
+	if source.affectedTail == 0 || source.affectedTail > ManualOperationConfiguredCapacity(source) {
 		return false
 	}
-	tail := &source.slots[source.affectedTail-1]
+	tail, ok := manualOperationSlotAt(source, source.affectedTail-1)
+	if !ok {
+		return false
+	}
 	if tail.nextAffected != 0 {
 		return false
 	}
@@ -265,10 +346,13 @@ func (source *ManualOperationSource) beginPublishPass(p *P) bool {
 // an earlier cursor position stays sticky with pending set for the next epoch;
 // it cannot hold the current catalog pass open.
 func (source *ManualOperationSource) publishSlot(p *P, index uint32) (published, lost uint32, ok bool) {
-	if !validManualOperationOwner(source, p) || index >= uint32(len(source.slots)) {
+	if !validManualOperationOwner(source, p) || index >= source.scanLimit {
 		return 0, 0, false
 	}
-	slot := &source.slots[index]
+	slot, slotOK := manualOperationSlotAt(source, index)
+	if !slotOK {
+		return 0, 0, false
+	}
 	mailbox := manualOperationMailbox(preemptLoad(&slot.mailbox))
 	if mailbox == manualOperationMailboxPosting || mailbox == manualOperationMailboxEmpty || mailbox == manualOperationMailboxDelivered {
 		return 0, 0, true
@@ -302,8 +386,12 @@ func (source *ManualOperationSource) PublishPass(p *P) (published, lost uint32, 
 	if !source.beginPublishPass(p) {
 		return 0, 0, false
 	}
-	for index := range source.slots {
-		onePublished, oneLost, slotOK := source.publishSlot(p, uint32(index))
+	limit, valid := ManualOperationScanLimit(source)
+	if !valid {
+		return 0, 0, false
+	}
+	for index := uint32(0); index < limit; index++ {
+		onePublished, oneLost, slotOK := source.publishSlot(p, index)
 		published += onePublished
 		lost += oneLost
 		if !slotOK {
@@ -330,11 +418,14 @@ func (source *ManualOperationSource) ResolveAffectedPublishedEpoch(p *P) (total 
 		return CompletionResolution{}, 0, false
 	}
 	for source.affectedHead != 0 {
-		if source.affectedHead > uint32(len(source.slots)) {
+		if source.affectedHead > ManualOperationConfiguredCapacity(source) {
 			return total, duplicates, false
 		}
 		index := source.affectedHead - 1
-		slot := &source.slots[index]
+		slot, slotOK := manualOperationSlotAt(source, index)
+		if !slotOK {
+			return total, duplicates, false
+		}
 		if !validManualOperationLiveSlot(source, p, index) {
 			return total, duplicates, false
 		}
@@ -443,16 +534,23 @@ func (source *ManualOperationSource) ApplyAndDetach(p *P) (applied, detached uin
 	if !validManualOperationOwner(source, p) || source.affectedHead != 0 || source.affectedTail != 0 {
 		return 0, 0, false
 	}
-	for index := range source.slots {
-		slot := &source.slots[index]
+	limit, valid := ManualOperationScanLimit(source)
+	if !valid {
+		return 0, 0, false
+	}
+	for index := uint32(0); index < limit; index++ {
+		slot, slotOK := manualOperationSlotAt(source, index)
+		if !slotOK {
+			return applied, detached, false
+		}
 		state := producerSourceLifecycle(preemptLoad(&slot.state))
 		if state == producerSourceFree {
-			if !manualOperationReusableSlot(source, slot, uint32(index)) {
+			if !manualOperationReusableSlot(source, slot, index) {
 				return applied, detached, false
 			}
 			continue
 		}
-		if !validManualOperationLiveSlot(source, p, uint32(index)) {
+		if !validManualOperationLiveSlot(source, p, index) {
 			return applied, detached, false
 		}
 		id := slot.record.id
@@ -534,16 +632,32 @@ func (source *ManualOperationSource) Recycle(p *P, id OperationID) bool {
 	}
 	slot.nextAffected = 0
 	preemptStore(&slot.mailbox, uint32(manualOperationMailboxEmpty))
-	return recycleProducerSourceSlot(&slot.producerSourceSlot)
+	if !recycleProducerSourceSlot(&slot.producerSourceSlot) {
+		return false
+	}
+	if id.LocalSlot() == source.scanLimit {
+		for source.scanLimit != 0 {
+			last, ok := manualOperationSlotAt(source, source.scanLimit-1)
+			if !ok {
+				return false
+			}
+			if producerSourceLifecycle(preemptLoad(&last.state)) != producerSourceFree {
+				break
+			}
+			source.scanLimit--
+		}
+	}
+	return true
 }
 
 func manualOperationSourceEmpty(source *ManualOperationSource, owner *P) bool {
 	if source == nil || !routedProducerHeaderEmpty(&source.routedProducerSource, owner) ||
-		source.affectedHead != 0 || source.affectedTail != 0 {
+		source.scanLimit != 0 || source.affectedHead != 0 || source.affectedTail != 0 {
 		return false
 	}
-	for index := range source.slots {
-		if !manualOperationReusableSlot(source, &source.slots[index], uint32(index)) {
+	for index := uint32(0); index < ManualOperationConfiguredCapacity(source); index++ {
+		slot, ok := manualOperationSlotAt(source, index)
+		if !ok || !manualOperationReusableSlot(source, slot, index) {
 			return false
 		}
 	}

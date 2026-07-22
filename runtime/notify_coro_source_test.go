@@ -50,14 +50,15 @@ func TestRuntimeNotifyListSelectsEventDrivenCoroImplementation(t *testing.T) {
 
 	coroSource := readRuntimePollFile(t, runtimeNotifyCoroSource)
 	for _, marker := range []string{
-		"C.__llgo_coro_notify_prepare_or_abort_v1",
-		"C.__llgo_coro_notify_retire_completed_or_abort_v1",
-		"C.__llgo_coro_notify_one_or_abort_v1",
-		"C.__llgo_coro_notify_all_or_abort_v1",
-		"//go:linkname llgoCoroNotifyParkV1 llgo.coroPark",
+		"C.__llgo_coro_notify_prepare_or_abort_v2",
+		"C.__llgo_coro_notify_one_or_abort_v2",
+		"C.__llgo_coro_notify_all_or_abort_v2",
+		"progress=executor-safe affinity=caller-thread reentry=none memory=borrow-until-return",
+		"//go:linkname llgoCoroNotifySuspendV2 llgo.coroPark",
 		"notifyListTicketLess(target, latomic.LoadUint32(&l.notify))",
 		"unsafe.Pointer(&l.notify)",
-		"llgoCoroNotifyParkV1(&token, ticket)",
+		"llgoCoroNotifyPrepareOrAbortV2(unsafe.Pointer(&state), unsafe.Pointer(&l.notify), target)",
+		"llgoCoroNotifySuspendV2(&state, 0)",
 	} {
 		if !strings.Contains(coroSource, marker) {
 			t.Errorf("%s lacks event-driven notify marker %q", runtimeNotifyCoroSource, marker)
@@ -123,7 +124,7 @@ func assertRuntimeNotifyExactRetentionSpan(t *testing.T, path, source string) {
 	if function == nil || function.Body == nil {
 		t.Fatalf("%s lacks notifyListWait", path)
 	}
-	prepare, park, retire := -1, -1, -1
+	prepare, park := -1, -1
 	for index, statement := range function.Body.List {
 		ast.Inspect(statement, func(node ast.Node) bool {
 			call, ok := node.(*ast.CallExpr)
@@ -135,22 +136,20 @@ func assertRuntimeNotifyExactRetentionSpan(t *testing.T, path, source string) {
 				return true
 			}
 			switch identifier.Name {
-			case "llgoCoroNotifyPrepareOrAbortV1":
+			case "llgoCoroNotifyPrepareOrAbortV2":
 				prepare = index
-			case "llgoCoroNotifyParkV1":
+			case "llgoCoroNotifySuspendV2":
 				park = index
-			case "llgoCoroNotifyRetireCompletedOrAbortV1":
-				retire = index
 			}
 			return true
 		})
 	}
-	if prepare < 0 || park != prepare+1 || retire != park+1 {
-		t.Fatalf("notify prepare/park/retire are not an exact adjacent span: %d/%d/%d", prepare, park, retire)
+	if prepare < 0 || park != prepare+1 {
+		t.Fatalf("notify prepare/park are not an exact adjacent span: %d/%d", prepare, park)
 	}
 }
 
-func TestCoroNotifyOwnerFailStopABIAndTicketTransactions(t *testing.T) {
+func TestCoroNotifyOwnerV2FailStopABIAndKeyedTransactions(t *testing.T) {
 	const ownerPath = "internal/runtime/coro_notify_owner_llgo.go"
 	source := readRuntimePollFile(t, ownerPath)
 	file, err := parser.ParseFile(token.NewFileSet(), ownerPath, source, parser.ParseComments)
@@ -167,10 +166,9 @@ func TestCoroNotifyOwnerFailStopABIAndTicketTransactions(t *testing.T) {
 		name   string
 		params []string
 	}{
-		{name: "__llgo_coro_notify_prepare_or_abort_v1", params: []string{"unsafe.Pointer", "unsafe.Pointer", "uint32", "*uint32", "*uint32", "*uint32"}},
-		{name: "__llgo_coro_notify_retire_completed_or_abort_v1", params: []string{"unsafe.Pointer", "uint32", "uint32", "uint32"}},
-		{name: "__llgo_coro_notify_one_or_abort_v1", params: []string{"unsafe.Pointer", "uint32"}},
-		{name: "__llgo_coro_notify_all_or_abort_v1", params: []string{"unsafe.Pointer", "uint32"}},
+		{name: "__llgo_coro_notify_prepare_or_abort_v2", params: []string{"unsafe.Pointer", "unsafe.Pointer", "uint32"}},
+		{name: "__llgo_coro_notify_one_or_abort_v2", params: []string{"unsafe.Pointer", "uint32"}},
+		{name: "__llgo_coro_notify_all_or_abort_v2", params: []string{"unsafe.Pointer", "uint32"}},
 	}
 	for _, test := range tests {
 		function := functions[test.name]
@@ -188,26 +186,26 @@ func TestCoroNotifyOwnerFailStopABIAndTicketTransactions(t *testing.T) {
 		}
 	}
 	for _, marker := range []string{
-		"coro.PrepareExecutorNotifyWait(",
-		"coro.KeyedWaitTicketLess(target, catomic.Load((*uint32)(notifyAddr)))",
-		"coro.PostPreparedExecutorNotifyWait(",
-		"coro.RetireCompletedExecutorNotifyWait(",
-		"catomic.Store((*uint32)(notifyAddr), current+1)",
-		"coro.PostExecutorNotifyWaitOne(",
-		"catomic.Store((*uint32)(notifyAddr), waitSnapshot)",
-		"coro.PostExecutorNotifyWaitAll(",
-		"coroTargetRequestExecutorV1(",
+		"coroPrepareKeyedStateV2(",
+		"coroKeyedParkNotifyV2",
+		"catomic.Store(notify, current+1)",
+		"coroKeyedPostOneV2(",
+		"catomic.Store(notify, waitSnapshot)",
 	} {
 		if !strings.Contains(source, marker) {
 			t.Errorf("%s lacks notify transaction marker %q", ownerPath, marker)
 		}
 	}
-	for _, internal := range []string{
-		"//export __llgo_coro_notify_prepare_v1",
-		"//export __llgo_coro_notify_retire_completed_v1",
+	for _, obsolete := range []string{
+		"__llgo_coro_notify_prepare_or_abort_v1",
+		"__llgo_coro_notify_retire_completed_or_abort_v1",
+		"__llgo_coro_notify_one_or_abort_v1",
+		"__llgo_coro_notify_all_or_abort_v1",
+		"PrepareExecutorNotifyWait",
+		"RetireCompletedExecutorNotifyWait",
 	} {
-		if strings.Contains(source, internal) {
-			t.Errorf("%s exports internal notify implementation %q; only fail-stop ABI adapters may cross the raw boundary", ownerPath, internal)
+		if strings.Contains(source, obsolete) {
+			t.Errorf("%s retains obsolete notify path %q", ownerPath, obsolete)
 		}
 	}
 	for _, forbidden := range []string{"pthread", "psync.", ".Cond", "notifyMap", "runtime.Gosched"} {

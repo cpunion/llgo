@@ -204,7 +204,7 @@ func TestSchedulerOnlyReadyCommitFailsClosedAndRestoresAffectedSnapshot(t *testi
 
 func TestExecutorBudgetOneBoundsCandidateWorkAndPreservesABFairness(t *testing.T) {
 	p := new(P)
-	driver, registry, _, manual, handle := bindTestExecutorDriverWithManual(t, p)
+	driver, registry, manual, handle := bindTestExecutorDriverWithManual(t, p)
 	task := newYieldingTestG(t, "bounded-resolution-driver")
 	if !Enqueue(p, task.g) {
 		t.Fatal("enqueue bounded driver task")
@@ -322,7 +322,7 @@ func TestExecutorBudgetOneBoundsCandidateWorkAndPreservesABFairness(t *testing.T
 
 func TestPublishedEpochAwaitExternalStaysOffWorkQueueUntilNewFact(t *testing.T) {
 	p := new(P)
-	driver, registry, _, manual, handle := bindTestExecutorDriverWithManual(t, p)
+	driver, registry, manual, handle := bindTestExecutorDriverWithManual(t, p)
 	task := newYieldingTestG(t, "bounded-resolution-external")
 	if !Enqueue(p, task.g) {
 		t.Fatal("enqueue external-wait task")

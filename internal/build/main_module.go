@@ -88,8 +88,10 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 		return mainAPkg
 	}
 
-	managedBootstrapV2 := ctx.buildConf.coroProgramBootstrapActive() && cfg.coroBootstrap != nil &&
-		cfg.coroBootstrap.abiVersion() == coroProgramBootstrapVersionV2
+	managedBootstrapV2 := ctx.buildConf.coroProgramBootstrapActive()
+	if managedBootstrapV2 && (cfg.coroBootstrap == nil || cfg.coroBootstrap.Version != coroProgramBootstrapVersionV2) {
+		panic("stackless coroutine entry requires the unique V2 startup table")
+	}
 	var runtimeStub llssa.Function
 	if !managedBootstrapV2 {
 		// Legacy entry modes retain the historical optional public-runtime hook.
@@ -125,8 +127,7 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 			return filterAbiSymbol(cfg.abiInit, sym)
 		})
 	}
-	if ctx.buildConf.coroProgramBootstrapActive() && cfg.coroBootstrap != nil &&
-		cfg.coroBootstrap.abiVersion() == coroProgramBootstrapVersionV2 {
+	if managedBootstrapV2 {
 		// The v2 table always contains the compiler ABI-init stage. Profiles with
 		// no selected ABI symbols still define the exact target as a bounded no-op
 		// so the five-stage program never relies on an optional external symbol.
@@ -152,7 +153,6 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 	var coroContinue llssa.Function
 	var coroRunSliceV2 llssa.Function
 	var coroContinueSliceV2 llssa.Function
-	var coroNativePostWait llssa.Function
 	var coroHostPullCallbacks []retainedCoroCallbackV1
 	var coroAllocatorBootstrap llssa.Function
 	if ctx.buildConf.coroProgramBootstrapActive() {
@@ -164,7 +164,6 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 		if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
 			coroRunSliceV2 = declareCoroProgramRunSliceV2(mainPkg)
 			coroContinueSliceV2 = declareCoroProgramContinueSliceV2(mainPkg)
-			coroNativePostWait = declareCoroNativePostWaitV1(mainPkg)
 		} else if hostCoroPullRuntimeABI(ctx.buildConf) {
 			coroRunSliceV2 = declareCoroProgramRunSliceV2(mainPkg)
 			coroContinueSliceV2 = declareCoroProgramContinueSliceV2(mainPkg)
@@ -175,6 +174,10 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 		}
 	}
 
+	bootstrapVersion := uint32(0)
+	if cfg.coroBootstrap != nil {
+		bootstrapVersion = cfg.coroBootstrap.Version
+	}
 	entryFn := defineEntryFunction(ctx, mainPkg, argcVar, argvVar, argvValueType, entryFunctions{
 		runtimeStub:            runtimeStub,
 		mainInit:               mainInit,
@@ -191,13 +194,10 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 		coroRunSliceV2:         coroRunSliceV2,
 		coroContinueSliceV2:    coroContinueSliceV2,
 		coroHostPull:           hostCoroPullRuntimeABI(ctx.buildConf),
-		coroBootstrapVersion:   cfg.coroBootstrap.abiVersion(),
+		coroBootstrapVersion:   bootstrapVersion,
 	})
 	if coroContinue != nil {
 		retainCoroProgramContinueV1(mainPkg, entryFn, coroContinue)
-	}
-	if coroNativePostWait != nil {
-		retainCoroNativePostWaitV1(mainPkg, entryFn, coroNativePostWait)
 	}
 	for _, callback := range coroHostPullCallbacks {
 		retainCoroCallbackV1(mainPkg, entryFn, callback.function, callback.symbol, callback.reference, callback.description)
@@ -242,7 +242,6 @@ func emitCoroControlWrappers(ctx *context, pkg llssa.Package) {
 
 const (
 	coroProgramManifestSymbolV1         = "__llgo_coro_program_manifest_v1"
-	coroProgramBootstrapSymbolV1        = "__llgo_coro_program_bootstrap_v1"
 	coroProgramBootstrapSymbolV2        = "__llgo_coro_program_bootstrap_v2"
 	coroFrameAllocatorBootstrapSymbolV1 = "__llgo_coro_frame_allocator_bootstrap_v1"
 )
@@ -281,76 +280,54 @@ func emitCoroProgramManifest(ctx *context, pkg llssa.Package, cfg *genConfig) co
 		if cfg.coroBootstrap == nil {
 			panic("coroutine program bootstrap ABI enabled without a validated startup table")
 		}
+		if cfg.coroBootstrap.Version != coroProgramBootstrapVersionV2 {
+			panic("coroutine manifest accepts only the V2 startup table")
+		}
 		steps := make([]llssa.CoroProgramStep, len(cfg.coroBootstrap.Steps))
-		version := cfg.coroBootstrap.abiVersion()
-		if version == coroProgramBootstrapVersionV2 {
-			targets := make([]coroProgramBootstrapFactoryTargetV2, len(cfg.coroBootstrap.Steps))
-			for i, step := range cfg.coroBootstrap.Steps {
-				var tableTarget llssa.Expr
-				switch step.Kind {
-				case coroProgramStepDirectPlainV1:
-					plain := declareNoArgFunc(pkg, step.Target)
-					if step.FunctionID == coroProgramPublicRuntimeNoopIDV2 {
-						if step.Role != coroProgramStepRolePublicRuntimeInitV2 || step.Target != coroProgramPublicRuntimeNoopSymbolV2 {
-							panic("coroutine program bootstrap v2 public-runtime no-op has noncanonical identity")
-						}
-						if !plain.HasBody() {
-							body := plain.MakeBody(1)
-							body.Return()
-						}
+		targets := make([]coroProgramBootstrapFactoryTargetV2, len(cfg.coroBootstrap.Steps))
+		for i, step := range cfg.coroBootstrap.Steps {
+			var tableTarget llssa.Expr
+			switch step.Kind {
+			case coroProgramStepDirectPlainV1:
+				plain := declareNoArgFunc(pkg, step.Target)
+				if step.FunctionID == coroProgramPublicRuntimeNoopIDV2 {
+					if step.Role != coroProgramStepRolePublicRuntimeInitV2 || step.Target != coroProgramPublicRuntimeNoopSymbolV2 {
+						panic("coroutine program bootstrap v2 public-runtime no-op has noncanonical identity")
 					}
-					targets[i].Plain = plain
-					tableTarget = plain.Expr
-				case coroProgramStepCoroRootV1:
-					anchor := anchorByName[step.CatalogTarget]
-					if anchor.IsNil() {
-						panic(fmt.Sprintf("coroutine program bootstrap v2 step %d has unlinked catalog anchor %q", i, step.CatalogTarget))
+					if !plain.HasBody() {
+						body := plain.MakeBody(1)
+						body.Return()
 					}
-					targets[i].Anchor = anchor
-					tableTarget = anchor
-				default:
-					panic(fmt.Sprintf("coroutine program bootstrap v2 step %d has invalid kind %d", i, step.Kind))
 				}
-				steps[i] = llssa.CoroProgramStep{
-					Kind: llssa.CoroProgramStepKind(step.Kind), Flags: step.Role,
-					Target: tableTarget, Aux: step.Aux,
+				targets[i].Plain = plain
+				tableTarget = plain.Expr
+			case coroProgramStepCoroRootV1:
+				anchor := anchorByName[step.CatalogTarget]
+				if anchor.IsNil() {
+					panic(fmt.Sprintf("coroutine program bootstrap v2 step %d has unlinked catalog anchor %q", i, step.CatalogTarget))
 				}
+				targets[i].Anchor = anchor
+				tableTarget = anchor
+			default:
+				panic(fmt.Sprintf("coroutine program bootstrap v2 step %d has invalid kind %d", i, step.Kind))
 			}
-			if ctx.buildConf.coroProgramBootstrapActive() {
-				factory = emitCoroProgramBootstrapFactoryV2(
-					pkg, cfg.coroBootstrap, targets, cfg.coroManifestHash,
-					ctx.buildConf.coroClosedStaticSpawnActive(),
-				)
+			steps[i] = llssa.CoroProgramStep{
+				Kind: llssa.CoroProgramStepKind(step.Kind), Flags: step.Role,
+				Target: tableTarget, Aux: step.Aux,
 			}
-		} else {
-			targets := make([]llssa.Function, len(cfg.coroBootstrap.Steps))
-			for i, step := range cfg.coroBootstrap.Steps {
-				target := declareNoArgFunc(pkg, step.Target)
-				targets[i] = target
-				steps[i] = llssa.CoroProgramStep{
-					Kind: llssa.CoroProgramStepKind(step.Kind), Flags: step.Role,
-					Target: target.Expr, Aux: step.Aux,
-				}
-			}
-			if ctx.buildConf.coroProgramBootstrapActive() {
-				if len(targets) != 2 {
-					panic("coroutine program bootstrap v1 runtime requires exactly two static targets")
-				}
-				factory = emitCoroProgramBootstrapFactoryV1(
-					pkg, cfg.coroBootstrap, [2]llssa.Function{targets[0], targets[1]}, cfg.coroManifestHash,
-				)
-			}
+		}
+		if ctx.buildConf.coroProgramBootstrapActive() {
+			factory = emitCoroProgramBootstrapFactoryV2(
+				pkg, cfg.coroBootstrap, targets, cfg.coroManifestHash,
+				ctx.buildConf.coroClosedStaticSpawnActive(),
+			)
 		}
 		var factoryExpr llssa.Expr
 		if factory != nil {
 			factoryExpr = factory.Expr
 		}
-		bootstrapSymbol := coroProgramBootstrapSymbolV1
-		if version == coroProgramBootstrapVersionV2 {
-			bootstrapSymbol = coroProgramBootstrapSymbolV2
-		}
-		bootstrap = pkg.NewCoroProgramBootstrap(bootstrapSymbol, llssa.CoroProgramBootstrapOptions{
-			Version: version,
+		bootstrap = pkg.NewCoroProgramBootstrap(coroProgramBootstrapSymbolV2, llssa.CoroProgramBootstrapOptions{
+			Version: coroProgramBootstrapVersionV2,
 			// The runtime validates one program ABI identity across the manifest
 			// and startup table. StepHash is an input to this final manifest hash,
 			// not a second externally visible ABI identity.
@@ -851,14 +828,6 @@ func declareCoroProgramContinueV1(pkg llssa.Package) llssa.Function {
 	), llssa.InC)
 }
 
-func declareCoroNativePostWaitV1(pkg llssa.Package) llssa.Function {
-	word := types.Typ[types.Uint32]
-	return pkg.NewFunc(coroNativePostWaitSymbolV1, newSignature(
-		[]types.Type{word, word, word, word},
-		[]types.Type{word},
-	), llssa.InC)
-}
-
 type retainedCoroCallbackV1 struct {
 	function    llssa.Function
 	symbol      string
@@ -893,21 +862,17 @@ func declareCoroHostPullCallbacksV1(pkg llssa.Package) []retainedCoroCallbackV1 
 		declare(coroHostContinueSliceSymbolV1,
 			[]types.Type{word, word, word, word, word, word, word, resultPointer}, []types.Type{word},
 			coroHostContinueSliceReferenceSymbolV1, "coroutine host continue-slice callback"),
-		declare(coroHostPostWaitSymbolV1, []types.Type{word, word, word, word}, []types.Type{word},
-			coroHostPostWaitReferenceSymbolV1, "coroutine host post-wait callback"),
 	}
 }
 
 const (
 	coroProgramContinueReferenceSymbolV1   = "__llgo_coro_program_continue_reference_v1"
-	coroNativePostWaitReferenceSymbolV1    = "__llgo_coro_native_post_wait_reference_v1"
 	coroHostNextActionReferenceSymbolV1    = "__llgo_coro_host_next_action_reference_v1"
 	coroHostProfileReferenceSymbolV1       = "__llgo_coro_host_profile_reference_v1"
 	coroHostNextDeadlineReferenceSymbolV1  = "__llgo_coro_host_next_deadline_reference_v1"
 	coroHostPublishTimeReferenceSymbolV1   = "__llgo_coro_host_publish_time_reference_v1"
 	coroHostAckCancelReferenceSymbolV1     = "__llgo_coro_host_ack_cancel_reference_v1"
 	coroHostContinueSliceReferenceSymbolV1 = "__llgo_coro_host_continue_slice_reference_v1"
-	coroHostPostWaitReferenceSymbolV1      = "__llgo_coro_host_post_wait_reference_v1"
 )
 
 // retainCoroProgramContinueV1 gives the target callback ABI a live relocation
@@ -921,16 +886,6 @@ const (
 func retainCoroProgramContinueV1(pkg llssa.Package, entry, continuation llssa.Function) {
 	retainCoroCallbackV1(pkg, entry, continuation, coroProgramContinueSymbolV1,
 		coroProgramContinueReferenceSymbolV1, "coroutine program continuation")
-}
-
-// retainCoroNativePostWaitV1 keeps the producer completion ingress in the
-// final image. The callback is invoked by native operation sources rather than
-// by entry control flow, so it needs the same archive-extraction edge as the
-// asynchronous program continuation even though this first native executor
-// completes BeginWait synchronously.
-func retainCoroNativePostWaitV1(pkg llssa.Package, entry, callback llssa.Function) {
-	retainCoroCallbackV1(pkg, entry, callback, coroNativePostWaitSymbolV1,
-		coroNativePostWaitReferenceSymbolV1, "native coroutine post-wait callback")
 }
 
 func retainCoroCallbackV1(pkg llssa.Package, entry, callbackDeclaration llssa.Function, callbackSymbol, referenceSymbol, description string) {

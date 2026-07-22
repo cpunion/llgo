@@ -80,15 +80,6 @@ type PollOperationSnapshot struct {
 	Interest PollInterest
 }
 
-type PollOperationPrepareResult uint8
-
-const (
-	PollOperationPrepareInvalid PollOperationPrepareResult = iota
-	PollOperationPrepared
-	PollOperationPrepareRejected
-	PollOperationPreparePoisoned
-)
-
 // PollOperationPostResult classifies owner-side import of a readiness event.
 // The first native slice has no reactor callback thread: target wait returns on
 // the executor owner and imports an exact handle before WakeExecutorAt scans
@@ -119,22 +110,8 @@ const (
 	pollOperationFree pollOperationState = iota
 	pollOperationInitializing
 	pollOperationActive
-	pollOperationPosted
 	pollOperationDelivered
 	pollOperationCanceled
-)
-
-// pollOperationMode keeps the V1 WaitToken protocol physically distinct from
-// the V2 OperationRecord protocol. Both use the same authoritative physical
-// generation and fd/interest/deadline metadata, but V2 declares
-// ReadyThenTryCommit and attaches its record to a WaitSetRecord. Neither mode
-// may reinterpret the other's live generation.
-type pollOperationMode uint8
-
-const (
-	pollOperationModeNone pollOperationMode = iota
-	pollOperationModeV1
-	pollOperationModeV2
 )
 
 type pollOperationMailbox uint32
@@ -149,28 +126,20 @@ const (
 
 type pollOperationSlot struct {
 	state      pollOperationState
-	mode       pollOperationMode
 	interest   PollInterest
-	result     PollOperationResult
 	generation uint32
 	p          *P
-	token      *WaitToken
-	ticket     WaitTicket
 	fd         int32
 	deadline   int64
 
-	// v2Producer is a producer-admission header for the exact V2 generation.
-	// Its generation is aligned to the shared physical generation below rather
-	// than advanced independently: alternating V1/V2 use must never reopen an
-	// old fd event. A reactor producer touches only this header, mailbox and
+	// v2Producer is a producer-admission header for the exact generation. A
+	// reactor producer touches only this header, mailbox and
 	// scalar result; every Go pointer remains owner-P-only.
 	v2Producer producerSourceSlot
 	v2Mailbox  uint32
 	v2Result   PollOperationResult
 
-	// record is owner-only stable storage reserved for the V2 select/cancel
-	// path. V1 advances the same physical generation while leaving either exact
-	// zero or canonical reusable V2 residue here, just like TimerRegistration.
+	// record is owner-only stable storage for the select/cancel path.
 	record OperationRecord
 }
 
@@ -184,9 +153,9 @@ type PollOperationPage struct {
 // PollOperationSource is the target-neutral scheduler half of a shared native
 // fd readiness reactor. It owns no epoll/kqueue descriptor and performs no
 // syscall. The executor owner serializes every pointer-bearing field and
-// reactor snapshot. A V2 producer concurrently touches only its atomic
+// reactor snapshot. A producer concurrently touches only its atomic
 // admission/mailbox prefix and scalar result; the current retained native poll
-// still imports Ready/Closing on the owner thread. No G, WaitToken, or LLVM
+// still imports Ready/Closing on the owner thread. No G, Go pointer, or LLVM
 // coroutine handle crosses the target boundary.
 //
 // deadline is an absolute monotonic nanosecond value; zero means no deadline.
@@ -298,43 +267,17 @@ func validPollOperationRecordResidue(source *PollOperationSource, slot *pollOper
 }
 
 func reusablePollOperationSlot(source *PollOperationSource, slot *pollOperationSlot, index uint32) bool {
-	return slot != nil && slot.state == pollOperationFree && slot.mode == pollOperationModeNone &&
-		slot.interest == PollInterestInvalid && slot.result == PollOperationResultInvalid &&
-		slot.p == nil && slot.token == nil && slot.ticket == 0 && slot.fd == 0 && slot.deadline == 0 &&
+	return slot != nil && slot.state == pollOperationFree &&
+		slot.interest == PollInterestInvalid && slot.p == nil && slot.fd == 0 && slot.deadline == 0 &&
 		producerSourceSlotReusable(&slot.v2Producer) &&
 		preemptLoad(&slot.v2Mailbox) == uint32(pollOperationMailboxEmpty) &&
 		slot.v2Result == PollOperationResultInvalid &&
 		validPollOperationRecordResidue(source, slot, index)
 }
 
-func validLivePollOperationV1(source *PollOperationSource, slot *pollOperationSlot, owner *P, index uint32) bool {
-	if source == nil || slot == nil || slot.mode != pollOperationModeV1 || slot.generation == 0 ||
-		slot.p == nil || owner != nil && slot.p != owner || slot.token == nil || !validWaitTicket(slot.ticket) ||
-		slot.fd < 0 || !validPollInterest(slot.interest) || slot.deadline < 0 ||
-		!producerSourceSlotReusable(&slot.v2Producer) ||
-		preemptLoad(&slot.v2Mailbox) != uint32(pollOperationMailboxEmpty) ||
-		slot.v2Result != PollOperationResultInvalid ||
-		!validPollOperationRecordResidue(source, slot, index) {
-		return false
-	}
-	switch slot.state {
-	case pollOperationActive:
-		return slot.result == PollOperationResultInvalid
-	case pollOperationPosted:
-		return slot.result == PollOperationReady || slot.result == PollOperationClosing
-	case pollOperationDelivered:
-		return slot.result == PollOperationReady || slot.result == PollOperationClosing ||
-			slot.result == PollOperationTimeout
-	case pollOperationCanceled:
-		return slot.result == PollOperationResultInvalid
-	default:
-		return false
-	}
-}
-
-func validLivePollOperationV2(source *PollOperationSource, slot *pollOperationSlot, owner *P, index uint32) bool {
-	if source == nil || slot == nil || slot.mode != pollOperationModeV2 || slot.generation == 0 ||
-		slot.p == nil || owner != nil && slot.p != owner || slot.token != nil || slot.ticket != 0 ||
+func validLivePollOperation(source *PollOperationSource, slot *pollOperationSlot, owner *P, index uint32) bool {
+	if source == nil || slot == nil || slot.generation == 0 ||
+		slot.p == nil || owner != nil && slot.p != owner ||
 		slot.fd < 0 || !validPollInterest(slot.interest) || slot.deadline < 0 {
 		return false
 	}
@@ -376,93 +319,8 @@ func validLivePollOperationV2(source *PollOperationSource, slot *pollOperationSl
 	}
 }
 
-func validLivePollOperation(source *PollOperationSource, slot *pollOperationSlot, owner *P, index uint32) bool {
-	switch slot.mode {
-	case pollOperationModeV1:
-		return validLivePollOperationV1(source, slot, owner, index)
-	case pollOperationModeV2:
-		return validLivePollOperationV2(source, slot, owner, index)
-	default:
-		return false
-	}
-}
-
 func pollOperationSourceOwner(source *PollOperationSource, p *P) bool {
 	return source != nil && p != nil && source.owner == p && source.route.Valid()
-}
-
-// PreparePollOperation arms one WaitToken and reserves one exact physical poll
-// generation. A snapshot-rebuilt backend needs no separate arm; an eager
-// backend may arm this generation before coroPark and use rollback if that arm
-// fails before the operation becomes externally reachable.
-func PreparePollOperation(
-	p *P,
-	source *PollOperationSource,
-	token *WaitToken,
-	fd int32,
-	interest PollInterest,
-	deadline int64,
-) (WaitTicket, PollOperationHandle, PollOperationPrepareResult) {
-	ticket, ok := ArmWait(token)
-	if !ok {
-		return 0, PollOperationHandle{}, PollOperationPrepareInvalid
-	}
-	handle, ok := source.Register(p, token, ticket, fd, interest, deadline)
-	if !ok {
-		if !rollbackArmedWait(token, ticket) {
-			return 0, PollOperationHandle{}, PollOperationPreparePoisoned
-		}
-		return 0, PollOperationHandle{}, PollOperationPrepareRejected
-	}
-	return ticket, handle, PollOperationPrepared
-}
-
-// Register reserves one V1 source slot for an already armed token. The native
-// reactor is deliberately outside this owner-only method.
-func (source *PollOperationSource) Register(
-	p *P,
-	token *WaitToken,
-	ticket WaitTicket,
-	fd int32,
-	interest PollInterest,
-	deadline int64,
-) (PollOperationHandle, bool) {
-	if !pollOperationSourceOwner(source, p) || token == nil || !validWaitTicket(ticket) || fd < 0 ||
-		!validPollInterest(interest) || deadline < 0 {
-		return PollOperationHandle{}, false
-	}
-	word := preemptLoad(&token.word)
-	if waitGeneration(word) != uint32(ticket) || waitWordState(word) != waitArmed {
-		return PollOperationHandle{}, false
-	}
-	schedule := preemptLoad(&p.schedule)
-	if schedule != scheduleIdle && schedule != scheduleRequested {
-		return PollOperationHandle{}, false
-	}
-	for index := uint32(0); index < PollOperationConfiguredCapacity(source); index++ {
-		slot, slotOK := pollOperationSlotAt(source, index)
-		if !slotOK || slot.generation == ^uint32(0) || !reusablePollOperationSlot(source, slot, index) {
-			continue
-		}
-		slot.state = pollOperationInitializing
-		if !raiseSourceScanLimit(&source.scanLimit, index, PollOperationConfiguredCapacity(source)) {
-			return PollOperationHandle{}, false
-		}
-		slot.generation++
-		if slot.generation == 0 {
-			return PollOperationHandle{}, false
-		}
-		slot.mode = pollOperationModeV1
-		slot.interest = interest
-		slot.p = p
-		slot.token = token
-		slot.ticket = ticket
-		slot.fd = fd
-		slot.deadline = deadline
-		slot.state = pollOperationActive
-		return PollOperationHandle{Slot: index + 1, Generation: slot.generation}, true
-	}
-	return PollOperationHandle{}, false
 }
 
 // CanReservePollOperationV2 is the allocation-free owner preflight used by a
@@ -550,7 +408,6 @@ func (source *PollOperationSource) ReserveAndAttachPollOperationV2(
 			slot.state = pollOperationFree
 			return PollOperationHandle{}, OperationID{}, false
 		}
-		slot.mode = pollOperationModeV2
 		slot.interest = interest
 		slot.p = p
 		slot.fd = fd
@@ -617,55 +474,6 @@ func (source *PollOperationSource) PostPollOperationV2(id OperationID, result Po
 	}
 }
 
-func (source *PollOperationSource) post(
-	p *P,
-	handle PollOperationHandle,
-	result PollOperationResult,
-) PollOperationPostResult {
-	slot, ok := pollOperationSlotFor(source, handle)
-	if !ok || !pollOperationSourceOwner(source, p) {
-		return PollOperationPostInvalid
-	}
-	if slot.generation != handle.Generation {
-		return PollOperationPostStale
-	}
-	if slot.state == pollOperationFree {
-		return PollOperationPostClosed
-	}
-	if !validLivePollOperationV1(source, slot, source.owner, handle.Slot-1) {
-		return PollOperationPostInvalid
-	}
-	switch slot.state {
-	case pollOperationActive:
-		if result != PollOperationReady && result != PollOperationClosing {
-			return PollOperationPostInvalid
-		}
-		slot.result = result
-		slot.state = pollOperationPosted
-		preemptStore(&source.pending, 1)
-		return PollOperationPosted
-	case pollOperationPosted, pollOperationDelivered:
-		return PollOperationPostDuplicate
-	case pollOperationCanceled:
-		return PollOperationPostClosed
-	default:
-		return PollOperationPostInvalid
-	}
-}
-
-// PostReady imports one exact owner-thread kernel readiness result. The target
-// must already have consumed or disabled that one-shot backend interest.
-func (source *PollOperationSource) PostReady(p *P, handle PollOperationHandle) PollOperationPostResult {
-	return source.post(p, handle, PollOperationReady)
-}
-
-// PostClosing imports close/unblock after the target synchronously disarmed the
-// exact kernel interest. The resumed synchronous API observes Closing rather
-// than scheduler cancellation.
-func (source *PollOperationSource) PostClosing(p *P, handle PollOperationHandle) PollOperationPostResult {
-	return source.post(p, handle, PollOperationClosing)
-}
-
 func (source *PollOperationSource) Pending() bool {
 	return source != nil && preemptLoad(&source.pending) != 0
 }
@@ -696,8 +504,7 @@ func (source *PollOperationSource) SnapshotAt(
 		if !idOK {
 			return PollOperationSnapshot{}, false, false
 		}
-		if slot.mode == pollOperationModeV2 &&
-			pollOperationMailbox(preemptLoad(&slot.v2Mailbox)) != pollOperationMailboxEmpty {
+		if pollOperationMailbox(preemptLoad(&slot.v2Mailbox)) != pollOperationMailboxEmpty {
 			return PollOperationSnapshot{}, false, true
 		}
 		return PollOperationSnapshot{
@@ -707,43 +514,11 @@ func (source *PollOperationSource) SnapshotAt(
 			FD:       slot.fd,
 			Interest: slot.interest,
 		}, true, true
-	case pollOperationPosted, pollOperationDelivered, pollOperationCanceled:
+	case pollOperationDelivered, pollOperationCanceled:
 		return PollOperationSnapshot{}, false, validLivePollOperation(source, slot, p, index)
 	default:
 		return PollOperationSnapshot{}, false, false
 	}
-}
-
-// UpdateDeadline changes one still-active wait. A posted readiness/close or a
-// delivered timeout is immutable; runtime_pollWait handles a concurrent
-// deadline reset after delivery by retiring this generation and re-registering
-// if the descriptor's current deadline is no longer expired.
-func (source *PollOperationSource) UpdateDeadline(p *P, handle PollOperationHandle, deadline int64) bool {
-	return source.UpdateDeadlineResult(p, handle, deadline) == PollOperationUpdated
-}
-
-func (source *PollOperationSource) UpdateDeadlineResult(p *P, handle PollOperationHandle, deadline int64) PollOperationUpdateResult {
-	slot, ok := pollOperationSlotFor(source, handle)
-	if !ok || deadline < 0 || !pollOperationSourceOwner(source, p) {
-		return PollOperationUpdateInvalid
-	}
-	if slot.generation != handle.Generation {
-		return PollOperationUpdateStale
-	}
-	if slot.state == pollOperationFree {
-		return PollOperationUpdateClosed
-	}
-	if !validLivePollOperationV1(source, slot, source.owner, handle.Slot-1) {
-		return PollOperationUpdateInvalid
-	}
-	if slot.state != pollOperationActive {
-		return PollOperationUpdateClosed
-	}
-	slot.deadline = deadline
-	// Force the owner through a fresh source/deadline scan before its next
-	// retained sleep even when the new deadline is in the future or removed.
-	preemptStore(&source.pending, 1)
-	return PollOperationUpdated
 }
 
 // UpdatePollOperationV2Deadline changes one still-reactor-active exact V2
@@ -767,11 +542,11 @@ func (source *PollOperationSource) UpdatePollOperationV2Deadline(
 	if slot.generation != id.Generation {
 		return PollOperationUpdateStale
 	}
-	if slot.mode == pollOperationModeNone || slot.state == pollOperationFree {
+	if slot.state == pollOperationFree {
 		return PollOperationUpdateClosed
 	}
-	if slot.mode != pollOperationModeV2 || slot.state != pollOperationActive ||
-		!validLivePollOperationV2(source, slot, p, id.LocalSlot()-1) ||
+	if slot.state != pollOperationActive ||
+		!validLivePollOperation(source, slot, p, id.LocalSlot()-1) ||
 		preemptLoad(&slot.v2Producer.state) != uint32(producerSourceActive) ||
 		pollOperationMailbox(preemptLoad(&slot.v2Mailbox)) != pollOperationMailboxEmpty {
 		return PollOperationUpdateClosed
@@ -794,7 +569,7 @@ func (source *PollOperationSource) publishPollOperationV2(
 	slot *pollOperationSlot,
 	index uint32,
 ) (published bool, ok bool) {
-	if !validLivePollOperationV2(source, slot, owner, index) ||
+	if !validLivePollOperation(source, slot, owner, index) ||
 		pollOperationMailbox(preemptLoad(&slot.v2Mailbox)) != pollOperationMailboxDraining {
 		return false, false
 	}
@@ -832,7 +607,7 @@ func (source *PollOperationSource) retryQuiescedPollOperationV2(
 	slot *pollOperationSlot,
 	index uint32,
 ) (bool, bool) {
-	if !validLivePollOperationV2(source, slot, owner, index) {
+	if !validLivePollOperation(source, slot, owner, index) {
 		return false, false
 	}
 	lifecycle := producerSourceLifecycle(preemptLoad(&slot.v2Producer.state))
@@ -867,104 +642,83 @@ func (source *PollOperationSource) drainSlotFor(
 		if !validLivePollOperation(source, slot, owner, index) {
 			return 0, 0, false, false
 		}
-		if slot.mode == pollOperationModeV2 {
-			switch mailbox := pollOperationMailbox(preemptLoad(&slot.v2Mailbox)); mailbox {
-			case pollOperationMailboxPosting:
+		switch mailbox := pollOperationMailbox(preemptLoad(&slot.v2Mailbox)); mailbox {
+		case pollOperationMailboxPosting:
+			preemptStore(&source.pending, 1)
+			if slot.deadline > 0 {
+				return 0, slot.deadline, true, true
+			}
+			return 0, 0, false, true
+		case pollOperationMailboxPosted:
+			if !preemptCompareAndSwap(&slot.v2Mailbox, uint32(mailbox), uint32(pollOperationMailboxDraining)) {
 				preemptStore(&source.pending, 1)
-				if slot.deadline > 0 {
-					return 0, slot.deadline, true, true
-				}
 				return 0, 0, false, true
-			case pollOperationMailboxPosted:
+			}
+			// Readiness and the absolute deadline are facts from independent
+			// producers. Once the owner observes both in the same source pass,
+			// the deadline is authoritative; otherwise a delayed route can let
+			// data that arrived after expiry win merely because another P ran
+			// first. Closing remains authoritative over timeout and is handled
+			// unchanged by the synchronous continuation.
+			if slot.v2Result == PollOperationReady && slot.deadline > 0 && slot.deadline <= now {
+				slot.v2Result = PollOperationTimeout
+			}
+			published, publishOK := source.publishPollOperationV2(owner, slot, index)
+			if !publishOK {
+				return 0, 0, false, false
+			}
+			if published {
+				return 1, 0, false, true
+			}
+		case pollOperationMailboxEmpty:
+			if slot.deadline > 0 && slot.deadline <= now {
 				if !preemptCompareAndSwap(&slot.v2Mailbox, uint32(mailbox), uint32(pollOperationMailboxDraining)) {
 					preemptStore(&source.pending, 1)
 					return 0, 0, false, true
 				}
-				// Readiness and the absolute deadline are facts from independent
-				// producers. Once the owner observes both in the same source pass,
-				// the deadline is authoritative; otherwise a delayed route can let
-				// data that arrived after expiry win merely because another P ran
-				// first. Closing remains authoritative over timeout and is handled
-				// unchanged by the synchronous continuation.
-				if slot.v2Result == PollOperationReady && slot.deadline > 0 && slot.deadline <= now {
-					slot.v2Result = PollOperationTimeout
-				}
+				slot.v2Result = PollOperationTimeout
 				published, publishOK := source.publishPollOperationV2(owner, slot, index)
-				if !publishOK {
+				if !publishOK || !published {
 					return 0, 0, false, false
 				}
-				if published {
-					return 1, 0, false, true
-				}
-			case pollOperationMailboxEmpty:
-				if slot.deadline > 0 && slot.deadline <= now {
-					if !preemptCompareAndSwap(&slot.v2Mailbox, uint32(mailbox), uint32(pollOperationMailboxDraining)) {
-						preemptStore(&source.pending, 1)
-						return 0, 0, false, true
-					}
-					slot.v2Result = PollOperationTimeout
-					published, publishOK := source.publishPollOperationV2(owner, slot, index)
-					if !publishOK || !published {
-						return 0, 0, false, false
-					}
-					return 1, 0, false, true
-				}
-				if slot.deadline > 0 {
-					return 0, slot.deadline, true, true
-				}
-				return 0, 0, false, true
-			case pollOperationMailboxDraining, pollOperationMailboxDelivered:
-				return 0, 0, false, false
-			default:
-				return 0, 0, false, false
+				return 1, 0, false, true
+			}
+			if slot.deadline > 0 {
+				return 0, slot.deadline, true, true
 			}
 			return 0, 0, false, true
-		}
-		if slot.deadline > 0 && slot.deadline <= now {
-			if !CompleteWait(slot.token, slot.ticket) {
-				return 0, 0, false, false
-			}
-			slot.result = PollOperationTimeout
-			slot.state = pollOperationDelivered
-			return 1, 0, false, true
-		}
-		if slot.deadline > 0 {
-			return 0, slot.deadline, true, true
-		}
-	case pollOperationPosted:
-		if !validLivePollOperationV1(source, slot, owner, index) || !CompleteWait(slot.token, slot.ticket) {
+		case pollOperationMailboxDraining, pollOperationMailboxDelivered:
+			return 0, 0, false, false
+		default:
 			return 0, 0, false, false
 		}
-		slot.state = pollOperationDelivered
-		return 1, 0, false, true
+		return 0, 0, false, true
 	case pollOperationDelivered, pollOperationCanceled:
 		if !validLivePollOperation(source, slot, owner, index) {
 			return 0, 0, false, false
 		}
-		if slot.mode == pollOperationModeV2 {
-			mailbox := pollOperationMailbox(preemptLoad(&slot.v2Mailbox))
-			if mailbox == pollOperationMailboxPosted {
-				if !preemptCompareAndSwap(&slot.v2Mailbox, uint32(mailbox), uint32(pollOperationMailboxDraining)) {
-					preemptStore(&source.pending, 1)
-					return 0, 0, false, true
-				}
-				published, publishOK := source.publishPollOperationV2(owner, slot, index)
-				if !publishOK {
-					return 0, 0, false, false
-				}
-				if published {
-					return 1, 0, false, true
-				}
-			}
-			if mailbox == pollOperationMailboxPosting {
+		mailbox := pollOperationMailbox(preemptLoad(&slot.v2Mailbox))
+		if mailbox == pollOperationMailboxPosted {
+			if !preemptCompareAndSwap(&slot.v2Mailbox, uint32(mailbox), uint32(pollOperationMailboxDraining)) {
 				preemptStore(&source.pending, 1)
 				return 0, 0, false, true
 			}
-			if retried, retryOK := source.retryQuiescedPollOperationV2(owner, slot, index); !retryOK {
+			published, publishOK := source.publishPollOperationV2(owner, slot, index)
+			if !publishOK {
 				return 0, 0, false, false
-			} else if retried {
+			}
+			if published {
 				return 1, 0, false, true
 			}
+		}
+		if mailbox == pollOperationMailboxPosting {
+			preemptStore(&source.pending, 1)
+			return 0, 0, false, true
+		}
+		if retried, retryOK := source.retryQuiescedPollOperationV2(owner, slot, index); !retryOK {
+			return 0, 0, false, false
+		} else if retried {
+			return 1, 0, false, true
 		}
 	default:
 		return 0, 0, false, false
@@ -1018,7 +772,7 @@ func (source *PollOperationSource) nextDeadlineFor(owner *P) (deadline int64, ha
 			if slot.deadline > 0 && (!hasDeadline || slot.deadline < deadline) {
 				deadline, hasDeadline = slot.deadline, true
 			}
-		case pollOperationPosted, pollOperationDelivered, pollOperationCanceled:
+		case pollOperationDelivered, pollOperationCanceled:
 			if !validLivePollOperation(source, slot, owner, index) {
 				return 0, false, false
 			}
@@ -1048,7 +802,7 @@ func (source *PollOperationSource) TryCommitPollOperationV2(request ParkCommitRe
 	}
 	slot, slotOK := pollOperationSlotAt(source, id.LocalSlot()-1)
 	if !slotOK || slot.generation != id.Generation || &slot.record != request.record ||
-		!validLivePollOperationV2(source, slot, source.owner, id.LocalSlot()-1) ||
+		!validLivePollOperation(source, slot, source.owner, id.LocalSlot()-1) ||
 		slot.state != pollOperationDelivered ||
 		pollOperationMailbox(preemptLoad(&slot.v2Mailbox)) != pollOperationMailboxDelivered {
 		return ParkCommitAttempt{}, false
@@ -1093,7 +847,7 @@ func (source *PollOperationSource) ApplyPollOperationV2One(
 	}
 	slot, ok := pollOperationSlotAt(source, id.LocalSlot()-1)
 	if !ok || slot.generation != id.Generation || &slot.record != record ||
-		!validLivePollOperationV2(source, slot, p, id.LocalSlot()-1) || slot.record.phase != operationActive {
+		!validLivePollOperation(source, slot, p, id.LocalSlot()-1) || slot.record.phase != operationActive {
 		return OperationApplyInvalid
 	}
 	disposition, terminal := OperationDispositionOf(&slot.record, id)
@@ -1156,8 +910,8 @@ func (source *PollOperationSource) releasePollOperationV2Result(
 	slot, ok := pollOperationSlotFor(source, handle)
 	id, idOK := pollOperationIDFor(source, handle.Slot-1, handle.Generation)
 	if !ok || !idOK || !pollOperationSourceOwner(source, p) || slot.generation != handle.Generation ||
-		slot.mode != pollOperationModeV2 || slot.state != pollOperationDelivered || slot.record.id != id ||
-		!validLivePollOperationV2(source, slot, p, handle.Slot-1) ||
+		slot.state != pollOperationDelivered || slot.record.id != id ||
+		!validLivePollOperation(source, slot, p, handle.Slot-1) ||
 		slot.record.disposition != OperationDispositionWinner ||
 		pollOperationMailbox(preemptLoad(&slot.v2Mailbox)) != pollOperationMailboxDelivered {
 		return PollOperationResultInvalid, false
@@ -1195,19 +949,15 @@ func (source *PollOperationSource) RecyclePollOperationV2(p *P, handle PollOpera
 	slot, ok := pollOperationSlotFor(source, handle)
 	id, idOK := pollOperationIDFor(source, handle.Slot-1, handle.Generation)
 	if !ok || !idOK || !pollOperationSourceOwner(source, p) || slot.generation != handle.Generation ||
-		slot.mode != pollOperationModeV2 ||
 		(slot.state != pollOperationDelivered && slot.state != pollOperationCanceled) ||
-		!validLivePollOperationV2(source, slot, p, handle.Slot-1) ||
+		!validLivePollOperation(source, slot, p, handle.Slot-1) ||
 		preemptLoad(&slot.v2Producer.state) != uint32(producerSourceQuiesced) ||
 		!producerSourceSlotQuiesced(&slot.v2Producer) ||
 		!OperationCanRecycle(&slot.record, id) || !RecycleOperation(&slot.record, id) {
 		return false
 	}
 	slot.interest = PollInterestInvalid
-	slot.result = PollOperationResultInvalid
 	slot.p = nil
-	slot.token = nil
-	slot.ticket = 0
 	slot.fd = 0
 	slot.deadline = 0
 	slot.v2Result = PollOperationResultInvalid
@@ -1215,133 +965,8 @@ func (source *PollOperationSource) RecyclePollOperationV2(p *P, handle PollOpera
 	if !recycleProducerSourceSlot(&slot.v2Producer) {
 		return false
 	}
-	slot.mode = pollOperationModeNone
 	slot.state = pollOperationFree
 	return true
-}
-
-// Cancel publishes V1 scheduler cancellation only after the target has proved
-// that the corresponding kernel interest is synchronously disarmed. Close and
-// deadline paths use PostClosing and the deadline scan instead, preserving the
-// standard internal/poll result codes.
-func (source *PollOperationSource) Cancel(p *P, handle PollOperationHandle) WaitCancelResult {
-	slot, ok := pollOperationSlotFor(source, handle)
-	if !ok || !pollOperationSourceOwner(source, p) || slot.generation != handle.Generation ||
-		!validLivePollOperationV1(source, slot, source.owner, handle.Slot-1) {
-		return WaitCancelInvalid
-	}
-	switch slot.state {
-	case pollOperationActive, pollOperationPosted:
-		result := publishWaitCancellation(slot.token, slot.ticket)
-		switch result {
-		case WaitCancelWon, WaitCancelAlreadyCanceled:
-			slot.state = pollOperationCanceled
-			slot.result = PollOperationResultInvalid
-			preemptStore(&source.pending, 1)
-		case WaitCancelCompletionWon:
-			slot.state = pollOperationDelivered
-		default:
-			return WaitCancelInvalid
-		}
-		return result
-	case pollOperationDelivered:
-		return WaitCancelCompletionWon
-	case pollOperationCanceled:
-		return WaitCancelAlreadyCanceled
-	default:
-		return WaitCancelInvalid
-	}
-}
-
-func (source *PollOperationSource) RollbackPreparedPollOperation(
-	p *P,
-	handle PollOperationHandle,
-	token *WaitToken,
-	ticket WaitTicket,
-) bool {
-	slot, ok := pollOperationSlotFor(source, handle)
-	if !ok || token == nil || !validWaitTicket(ticket) || slot.generation != handle.Generation ||
-		slot.state != pollOperationActive || slot.token != token || slot.ticket != ticket ||
-		source.Cancel(p, handle) != WaitCancelWon || !consumeUnclaimedCanceledWait(token, ticket) {
-		return false
-	}
-	return source.retire(p, handle)
-}
-
-func (source *PollOperationSource) retire(p *P, handle PollOperationHandle) bool {
-	slot, ok := pollOperationSlotFor(source, handle)
-	if !ok || !pollOperationSourceOwner(source, p) || slot.generation != handle.Generation ||
-		!validLivePollOperationV1(source, slot, source.owner, handle.Slot-1) {
-		return false
-	}
-	want := WaitOutcomeInvalid
-	switch slot.state {
-	case pollOperationDelivered:
-		want = WaitOutcomeCompleted
-	case pollOperationCanceled:
-		want = WaitOutcomeCanceled
-	default:
-		return false
-	}
-	outcome, consumed := consumedWait(slot.token, slot.ticket)
-	if !consumed || outcome != want {
-		return false
-	}
-	slot.state = pollOperationFree
-	slot.mode = pollOperationModeNone
-	slot.interest = PollInterestInvalid
-	slot.result = PollOperationResultInvalid
-	slot.p = nil
-	slot.token = nil
-	slot.ticket = 0
-	slot.fd = 0
-	slot.deadline = 0
-	allFree := true
-	for index := uint32(0); index < PollOperationConfiguredCapacity(source); index++ {
-		slot, slotOK := pollOperationSlotAt(source, index)
-		if !slotOK || !reusablePollOperationSlot(source, slot, index) {
-			allFree = false
-			break
-		}
-	}
-	if allFree {
-		preemptStore(&source.pending, 0)
-	}
-	return true
-}
-
-// RetireCompletedPollOperation returns the exact source result only after the
-// scheduler consumed the completed WaitToken generation and the slot no longer
-// retains the coroutine-frame token.
-func (source *PollOperationSource) RetireCompletedPollOperation(
-	p *P,
-	handle PollOperationHandle,
-	token *WaitToken,
-	ticket WaitTicket,
-) (PollOperationResult, bool) {
-	slot, ok := pollOperationSlotFor(source, handle)
-	if !ok || !pollOperationSourceOwner(source, p) || token == nil || !validWaitTicket(ticket) || slot.generation != handle.Generation ||
-		slot.mode != pollOperationModeV1 || slot.state != pollOperationDelivered ||
-		slot.token != token || slot.ticket != ticket {
-		return PollOperationResultInvalid, false
-	}
-	result := slot.result
-	if result == PollOperationResultInvalid || !source.retire(p, handle) {
-		return PollOperationResultInvalid, false
-	}
-	return result, true
-}
-
-func (source *PollOperationSource) RetireCanceledPollOperation(
-	p *P,
-	handle PollOperationHandle,
-	token *WaitToken,
-	ticket WaitTicket,
-) bool {
-	slot, ok := pollOperationSlotFor(source, handle)
-	return ok && pollOperationSourceOwner(source, p) && token != nil && validWaitTicket(ticket) && slot.generation == handle.Generation &&
-		slot.mode == pollOperationModeV1 && slot.state == pollOperationCanceled &&
-		slot.token == token && slot.ticket == ticket && source.retire(p, handle)
 }
 
 func pollOperationSourceEmpty(source *PollOperationSource, owner *P) bool {

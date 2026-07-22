@@ -25,7 +25,6 @@ type timerParkOwnerFixture struct {
 	p         *P
 	driver    *ExecutorDriver
 	registry  *ExecutorRegistry
-	waits     *WaitRegistrationTable
 	timers    *TimerRegistrationTable
 	task      *yieldingTestG
 	action    Action
@@ -61,7 +60,7 @@ func newTimerParkOwnerFixtureWithControl(
 ) *timerParkOwnerFixture {
 	t.Helper()
 	fixture := &timerParkOwnerFixture{p: new(P), task: newYieldingTestG(t, name)}
-	fixture.driver, fixture.registry, fixture.waits, fixture.timers, _ = bindTestExecutorDriverWithTimers(t, fixture.p)
+	fixture.driver, fixture.registry, fixture.timers, _ = bindTestExecutorDriverWithTimers(t, fixture.p)
 	if !Enqueue(fixture.p, fixture.task.g) {
 		t.Fatalf("enqueue %s", name)
 	}
@@ -162,7 +161,7 @@ func (fixture *timerParkOwnerFixture) finishShutdown(t *testing.T) {
 		t.Fatalf("confirm Timer V2 shutdown terminal close = (%p, %+v, %t)", closed, terminal, ok)
 	}
 	if !AcknowledgeTaskCancellation(fixture.task.g, TaskCancelShutdown) ||
-		!fixture.waits.CanRelease() || !fixture.timers.CanRelease() || !fixture.registry.CanRelease() {
+		!fixture.timers.CanRelease() || !fixture.registry.CanRelease() {
 		t.Fatal("Timer V2 shutdown cleanup retained task or source state")
 	}
 	runtime.KeepAlive(fixture.task.frame.memory)
@@ -196,7 +195,7 @@ func (fixture *timerParkOwnerFixture) yieldCloseAndFinish(t *testing.T) {
 	yieldRunningDriverTask(t, fixture.p, fixture.task, fixture.action)
 	closeTestExecutorDriver(t, fixture.driver)
 	finishReadyDriverTasks(t, fixture.p, map[*G]*yieldingTestG{fixture.task.g: fixture.task})
-	if !TerminalG(fixture.p, fixture.task.g) || !fixture.waits.CanRelease() ||
+	if !TerminalG(fixture.p, fixture.task.g) ||
 		!fixture.timers.CanRelease() || !fixture.registry.CanRelease() {
 		t.Fatalf("%s Timer V2 owner retained terminal state", fixture.task.name)
 	}
@@ -205,8 +204,8 @@ func (fixture *timerParkOwnerFixture) yieldCloseAndFinish(t *testing.T) {
 
 func TestCurrentExecutorTimerParkDueResumeRetiresExactSource(t *testing.T) {
 	fixture := newTimerParkOwnerFixture(t, "timer-current-owner-due", 50)
-	if waits, timers, promoted, ok := PollExecutorAt(fixture.driver, 50); !ok || waits != 0 || timers != 1 || promoted != 1 {
-		t.Fatalf("publish current-owner timer deadline = (%d, %d, %d, %t)", waits, timers, promoted, ok)
+	if timers, promoted, ok := PollExecutorAt(fixture.driver, 50); !ok || timers != 1 || promoted != 1 {
+		t.Fatalf("publish current-owner timer deadline = (%d, %d, %t)", timers, promoted, ok)
 	}
 	if BeginExecutorClose(fixture.driver) {
 		t.Fatal("closed Timer V2 owner before winner lease retirement")
@@ -221,8 +220,8 @@ func TestCurrentExecutorTimerParkDueResumeRetiresExactSource(t *testing.T) {
 
 func TestCommandShutdownDrainResumesTimerCleanupBeforeExecutorClose(t *testing.T) {
 	fixture := newTimerParkOwnerFixture(t, "timer-current-owner-shutdown", 70)
-	if waits, timers, promoted, ok := PollExecutorAt(fixture.driver, 70); !ok || waits != 0 || timers != 1 || promoted != 1 {
-		t.Fatalf("publish shutdown timer winner = (%d, %d, %d, %t)", waits, timers, promoted, ok)
+	if timers, promoted, ok := PollExecutorAt(fixture.driver, 70); !ok || timers != 1 || promoted != 1 {
+		t.Fatalf("publish shutdown timer winner = (%d, %d, %t)", timers, promoted, ok)
 	}
 	main := &G{magic: gMagic, state: GDead}
 	if needed, ok := RequestCommandShutdownDrain(fixture.p, main); !ok || !needed ||

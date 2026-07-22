@@ -1,4 +1,4 @@
-//go:build llgo && llgo_coro && llgo_coro_native_pipe && llgo_coro_native_ingress_test && (darwin || linux) && !baremetal
+//go:build llgo && llgo_coro && llgo_coro_native_pipe && llgo_coro_native_timer && (darwin || linux) && !baremetal && !coro_runtime_adapter_test
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -16,15 +16,12 @@
  * limitations under the License.
  */
 
-package corodoorbell
+package runtime
 
-import _ "unsafe"
+import "github.com/goplus/llgo/runtime/internal/coro"
 
-const nativeBeforePollHookEnabled = true
-
-//go:linkname nativeIngressBeforePoll C.__llgo_coro_native_ingress_before_poll_v1
-func nativeIngressBeforePoll() uint32
-
-func nativeBeforePollHook() bool {
-	return nativeIngressBeforePoll() == 1
+func coroTargetPostKeyedOperationV2(id coro.OperationID) bool {
+	result := coroNativeFleetPostManualV1(id)
+	return result.Route == coro.OperationRoutePosted &&
+		(result.Executor == coro.ExecutorRequestPublished || result.Executor == coro.ExecutorRequestCoalesced)
 }

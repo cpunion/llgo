@@ -141,7 +141,6 @@ func validActiveParkStateHeader(state *ParkState, ticket ParkTicket) bool {
 func validActiveWaitSetRecordFast(p *P, record *WaitSetRecord) bool {
 	if p == nil || record == nil || record.state != waitSetRecordActive || !validParkTicket(record.ticket) ||
 		record.g == nil || !ValidG(record.g) || record.g.state != GWaiting || !record.g.waiting ||
-		record.g.waitToken != nil || record.g.waitTicket != 0 || record.g.nextWait != nil ||
 		record.g.queued || record.g.nextReady != nil || record.g.runP != nil ||
 		record.g.transferState != runnableTransferGIdle || record.g.active == nil ||
 		record.g.active.parkWait != record || !validActiveParkStateHeader(&record.g.park, record.ticket) {
@@ -282,7 +281,7 @@ func RequestWaitSetCancel(p *P, record *WaitSetRecord, kind ParkCancelKind) bool
 func activateWaitSetRecord(p *P, g *G, record *WaitSetRecord) bool {
 	if !validParkWaitQueueHeader(p) || !validAffectedWaitQueueHeader(p) ||
 		!validCommittedWaitSetRecord(record, g, g.active) || g.state != GWaiting || g.waiting ||
-		g.nextWait != nil || g.waitToken != nil || g.waitTicket != 0 || g.queued || g.nextReady != nil || g.runP != nil ||
+		g.queued || g.nextReady != nil || g.runP != nil ||
 		!validParkState(&g.park) || g.park.phase != parkParked {
 		return false
 	}

@@ -68,7 +68,6 @@ func TestCoroNativeFleetPollReactorKeepsExactFixedOwnerPass(t *testing.T) {
 	}
 	body := string(data)
 	for _, required := range []string{
-		"llgo_coro_native_fleet",
 		"[coroNativeFleetDomainCapacityV1]coroNativeFleetPollSetV1",
 		"poll, driver := domain.pollOwnerV1(), domain.driverOwnerV1()",
 		"coro.SnapshotExecutorPollOperation(driver, index)",
@@ -85,6 +84,7 @@ func TestCoroNativeFleetPollReactorKeepsExactFixedOwnerPass(t *testing.T) {
 		}
 	}
 	for _, forbidden := range []string{
+		"llgo_coro_native_fleet",
 		"pthread",
 		"coroworker",
 		"libuv",

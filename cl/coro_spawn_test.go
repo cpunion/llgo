@@ -561,7 +561,6 @@ func compileCoroStaticSpawnTransportFixture(t *testing.T, target *llssa.Target) 
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
 	compilation.CoroProfile = CoroProfileStackless
-	compilation.CoroProfile = CoroProfileStackless
 	compilation.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	compilation.FuncRepABI = coro.FuncRepABIV1
 	pkg, _, err := NewPackageExWithEmbedOptions(
@@ -635,7 +634,6 @@ func compileCoroClosedStaticMethodSpawnFixture(t *testing.T, target *llssa.Targe
 	}
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
-	compilation.CoroProfile = CoroProfileStackless
 	compilation.CoroProfile = CoroProfileStackless
 	compilation.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	compilation.FuncRepABI = coro.FuncRepABIV1
@@ -741,8 +739,6 @@ func compileCoroManagedDispatchSpawnFixture(t *testing.T, target *llssa.Target) 
 	}
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
-	compilation.CoroProfile = CoroProfileStackless
-	compilation.CoroProfile = CoroProfileStackless
 	compilation.CoroProfile = CoroProfileStackless
 	compilation.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0

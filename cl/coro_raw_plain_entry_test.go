@@ -707,7 +707,6 @@ func Parent(seed *Box, value int) int { return Dual(seed, value) }
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
 	compilation.CoroProfile = CoroProfileStackless
-	compilation.CoroProfile = CoroProfileStackless
 	compilation.FuncRepABI = coro.FuncRepABIV1
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
 	pkg, _, err := NewPackageExWithEmbedOptions(

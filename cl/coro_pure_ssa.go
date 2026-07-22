@@ -188,9 +188,6 @@ func (a *coroPhysicalPureSSAAudit) validate(instr ssa.Instruction) (handled bool
 		if _, builtin := instr.Call.Value.(*ssa.Builtin); builtin {
 			return true, a.validateBuiltin(instr)
 		}
-		if recognized, reason := a.validateFrameRetentionOwnerCall(instr); recognized && reason != "" {
-			return true, reason
-		}
 	}
 	return false, ""
 }
@@ -306,33 +303,6 @@ func coroPhysicalConstantReachableBlocks(fn *ssa.Function) map[*ssa.BasicBlock]b
 		}
 	}
 	return reachable
-}
-
-func (a *coroPhysicalPureSSAAudit) validateFrameRetentionOwnerCall(call *ssa.Call) (bool, string) {
-	if a == nil || len(coroFrameRetentionContracts(a.frameRetentionABI)) == 0 || a.universe == nil || call == nil {
-		return false, ""
-	}
-	kind, contract, recognized := a.universe.coroFrameRetentionOwnerCallSite(call)
-	if !recognized || !coroFrameRetentionContractEnabled(a.frameRetentionABI, contract) {
-		return false, ""
-	}
-	want := coroFrameRetentionInstructionNone
-	switch kind {
-	case coroFrameRetentionCallPrepare:
-		want = coroFrameRetentionInstructionPrepare
-	case coroFrameRetentionCallRetire:
-		want = coroFrameRetentionInstructionRetire
-	default:
-		return true, "exact frame-retention owner call has an unknown compiler role"
-	}
-	proof := a.currentFrameRetentionProof()
-	if proof == nil || proof.roles[call] != want || proof.contracts[call] != contract.id {
-		return true, "exact frame-retention owner call is outside a certified prepare/park/retire transaction"
-	}
-	// A certified owner call still passes through the ordinary CallPlan/direct-
-	// plain validation below. The retention proof changes pointer lifetime and
-	// poll placement only; it does not manufacture a callable edge.
-	return true, ""
 }
 
 func (a *coroPhysicalPureSSAAudit) validateAlloc(alloc *ssa.Alloc) string {
@@ -454,18 +424,32 @@ func (a *coroPhysicalPureSSAAudit) validateFieldAddr(field *ssa.FieldAddr) strin
 	return a.requireNoRuntimeHelpersExcept(field, "AssertNilDeref")
 }
 
-func (a *coroPhysicalPureSSAAudit) fieldAddrRequiresImplicitNilFault(field *ssa.FieldAddr) bool {
+func (a *coroPhysicalPureSSAAudit) fieldAddrRequiresImplicitNilFault(field *ssa.FieldAddr) (bool, string) {
 	if a == nil || field == nil {
-		return false
+		return false, ""
 	}
+	helpers, reason := a.plannedRuntimeHelpers(field)
+	if reason != "" {
+		return false, reason
+	}
+	for _, helper := range helpers {
+		if helper == "AssertNilDeref" {
+			// The frozen logical SitePlan is the lowering input. A stronger frame
+			// proof may later justify a dedicated proved-non-null recipe, but it
+			// cannot silently turn an expected helper into ordinary codegen.
+			return true, ""
+		}
+	}
+	// A value field load is represented as FieldAddr followed by UnOp. Its
+	// logical helper belongs to the load, while the physical FieldAddr recipe
+	// must still own the earlier base-pointer guard so no GEP is formed from a
+	// nil address. Preserve that frame-proof projection in addition to the
+	// direct helper-owned address-of case above.
 	if ssaAddressValueProvenNonNilAt(field.X, field) {
-		return false
-	}
-	if len(a.reachableBlocks) != 0 && !a.reachableBlocks[field.Block()] {
-		return false
+		return false, ""
 	}
 	proof := a.currentFrameRetentionProof()
-	return proof != nil && proof.requiresImplicitNilFault(field, field)
+	return proof != nil && proof.requiresImplicitNilFault(field, field), ""
 }
 
 func (a *coroPhysicalPureSSAAudit) derefRequiresImplicitNilFault(deref *ssa.UnOp) bool {
@@ -781,7 +765,7 @@ func (a *coroPhysicalPureSSAAudit) validateMakeInterface(box *ssa.MakeInterface)
 	if unop, ok := box.X.(*ssa.UnOp); ok && unop.Op == token.MUL &&
 		(a.ctx.isLargeNonPointerValue(physical) || a.ctx.isZeroSizedValue(physical)) {
 		needsAlloc = true
-		needsNilCheck = true
+		needsNilCheck = !isKnownNonNilAddr(unop.X) && !ssaValueProvenNonNilAt(unop.X, box)
 		needsTypedMove = true
 	}
 
@@ -1788,6 +1772,16 @@ func (a *coroPhysicalPureSSAAudit) validateUnOp(op *ssa.UnOp) string {
 	// load and then materializes the zero value without touching memory. The
 	// legacy AssertNilDeref inventory entry is therefore compiler-elided by the
 	// independently validated frame-retention/fault proof below.
+	if a.allowImplicitNilFault {
+		proof := a.currentFrameRetentionProof()
+		if proof != nil && proof.requiresImplicitNilFault(op.X, op) {
+			// Value-receiver calls use AssertNilDerefPtr on the native stack so
+			// the checked pointer remains available to the subsequent load. The
+			// physical coroutine recipe preserves that same base value across its
+			// explicit-status branch and therefore elides either helper spelling.
+			return a.requireOnlyCompilerElidedRuntimeHelpers(op, "AssertNilDeref", "AssertNilDerefPtr")
+		}
+	}
 	return a.requireNoRuntimeHelpersExcept(op, "AssertNilDeref", "AssertNilDerefPtr")
 }
 
@@ -1837,7 +1831,7 @@ func (a *coroPhysicalPureSSAAudit) coroBarrierFreeGlobalStoreProfile() bool {
 		return false
 	}
 	switch a.frameRetentionABI {
-	case CoroFrameRetentionTimerABIV1, CoroFrameRetentionParkABIV2:
+	case CoroFrameRetentionParkABIV2:
 		// These are the only active identities backed by the frozen
 		// physical-v1.nonmoving-conservative-or-none root profile. A future
 		// precise or moving collector must use a new identity and remains

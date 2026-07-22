@@ -1,4 +1,4 @@
-//go:build (darwin || linux) && !baremetal && !(llgo && llgo_coro && llgo_coro_native_pipe && llgo_coro_native_ingress_test)
+//go:build (darwin || linux) && !baremetal
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.

@@ -246,6 +246,97 @@ func Root(value interface{ As(any) bool }, target any, flag bool) bool {
 	}
 }
 
+func TestCoroRawPlainTypeDataPublishesManagedMethodPrimary(t *testing.T) {
+	const source = `package foo
+var gate chan struct{}
+type Writer interface { Write() int }
+type writer struct{}
+func (writer) Write() int { <-gate; return 1 }
+func ManagedRoot(value Writer) int { return value.Write() }
+func RawRoot() any { return writer{} }
+`
+	ssaPkg, _, files := buildGoSSAPkg(t, source)
+	program := newLLSSAProg(t)
+	defer program.Dispose()
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
+		program, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}},
+		EmissionUniverseOptions{CoroProfile: CoroProfileStackless},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	managedRoot, rawRoot := ssaPkg.Func("ManagedRoot"), ssaPkg.Func("RawRoot")
+	invoke := coroInterfaceDispatchFindInvoke(t, managedRoot)
+	var method *ssa.Function
+	for _, function := range universe.Functions() {
+		if function != nil && function.Name() == "Write" && function.Signature != nil && function.Signature.Recv() != nil {
+			method = function
+			break
+		}
+	}
+	if method == nil {
+		t.Fatal("writer.Write is absent from the emission universe")
+	}
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	functionIDs.ArchiveReady = true
+	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{
+		{Function: managedRoot, Demand: coro.AsyncDemand},
+		{Function: rawRoot, RawPlainDemand: true},
+	}, coro.SSAConfig{
+		EmissionUniverse:     ssaUniverse,
+		FunctionIDs:          functionIDs,
+		DynamicResolution:    coro.DynamicCHAClosed,
+		MaxPlainInstructions: -1,
+		OutcomeMode:          coro.OutcomeExplicitStatus,
+		ClassifyFunction: func(function *ssa.Function) (coro.SSAFunctionPolicy, error) {
+			if function == rawRoot {
+				return coro.SSAFunctionPolicy{RawPlainEntry: true}, nil
+			}
+			return coro.SSAFunctionPolicy{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	callPlan, ok := plan.CallPlan(invoke)
+	if !ok || callPlan.Rep != coro.Dispatch || len(callPlan.Targets) == 0 {
+		t.Fatalf("managed invoke plan = %+v, present=%t", callPlan, ok)
+	}
+	methodPlan, ok := plan.FunctionPlan(method)
+	if !ok || methodPlan.Emission != coro.EmitCoroutine || plan.HasRawPlainVariant(method) {
+		t.Fatalf("writer.Write plan = %+v, present=%t raw-variant=%t", methodPlan, ok, plan.HasRawPlainVariant(method))
+	}
+
+	compilation := coroClosedInterfacePlainCompilation(plan, universe)
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		program, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatalf("compile raw type-data producer: %v", err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify raw type-data producer: %v\n%s", err, module.String())
+	}
+	ir := module.String()
+	if !strings.Contains(ir, coroPlainDispatchDescriptorPrefix+"method.") ||
+		!strings.Contains(ir, "foo.writer.Write$coro") {
+		t.Fatalf("raw type data did not publish the managed method primary:\n%s", ir)
+	}
+	if !strings.Contains(ir, "define linkonce ptr @"+coroCoroDispatchThunkPrefix+"method.") ||
+		!strings.Contains(ir, "define linkonce i64 @"+coroManagedInterfaceRawTrapPrefix) {
+		t.Fatalf("cross-package method capability helpers are not coalescible:\n%s", ir)
+	}
+}
+
 func TestValidateCoroManagedInterfaceDescriptorTargetSelectsCoroutinePrimaryWithRawAlternate(t *testing.T) {
 	fixture := buildCoroInterfaceDispatchFixture(t, coroUniqueAsyncWriterSource, coro.DynamicCHAClosed)
 	defer fixture.program.Dispose()
@@ -256,13 +347,18 @@ func TestValidateCoroManagedInterfaceDescriptorTargetSelectsCoroutinePrimaryWith
 	candidate := resolved.candidates[0]
 	candidate.plan.Demand = coro.BothDemand
 	candidate.plan.RawPlainEntry = true
-	if err := validateCoroManagedInterfaceDescriptorTarget(
-		candidate.function, candidate.plan, nil, resolved.sourceCallSignature,
-	); err == nil || !strings.Contains(err.Error(), "prepared emission universe") {
-		// The nil universe must remain fail-closed after accepting the managed
-		// coroutine primary shape; in particular it must not reject BothDemand as
-		// a request to publish the raw alternate in the descriptor.
-		t.Fatalf("BothDemand/raw-alternate descriptor validation stopped at %v", err)
+	for _, rep := range []coro.FuncRep{coro.Dispatch, coro.DirectCoro} {
+		plan := candidate.plan
+		plan.FuncRep = rep
+		if err := validateCoroManagedInterfaceDescriptorTarget(
+			candidate.function, plan, nil, resolved.sourceCallSignature,
+		); err == nil || !strings.Contains(err.Error(), "prepared emission universe") {
+			// The nil universe must remain fail-closed after accepting the managed
+			// coroutine primary shape. A receiver-aware ABI method descriptor may
+			// wrap DirectCoro without creating a receiver-free function descriptor
+			// or a second body.
+			t.Fatalf("%s BothDemand/raw-alternate descriptor validation stopped at %v", rep, err)
+		}
 	}
 }
 

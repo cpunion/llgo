@@ -251,8 +251,7 @@ func coroProgramBeginOwnedV1(manifest, expectedFactory unsafe.Pointer) (unsafe.P
 	}
 	programManifest := (*coro.ProgramManifestV1)(manifest)
 	_, v2Code := coro.ValidateRunnableProgramV2(programManifest, expectedFactory)
-	_, v1Code := coro.ValidateRunnableDirectProgramV1(programManifest, expectedFactory)
-	if v2Code != coro.ProgramValidationOKV2 && v1Code != coro.ProgramValidationOKV1 {
+	if v2Code != coro.ProgramValidationOKV2 {
 		coroProgramLifecycleV1State = coroProgramFailedV1
 		return nil, false
 	}

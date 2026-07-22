@@ -369,7 +369,7 @@ Running和Waiting G不可迁移，completion必须投递原owner；只有已经�
 
 ### 8.1 Timer
 
-当前公共timer core使用scheduler-owned、绑定期间容量冻结的固定分页`TimerRegistrationTable`：每页64个slot，按target profile在bind前附加稳定page，并以有界线性scan发现deadline。slot保留generation、V1/V2模式隔离、operation record和result lease生命周期。dynamic/sharded heap是语义稳定后的容量/性能升级，不是当前已落地事实。平台仍只实现monotonic clock、arm earliest deadline和executor wake；`Sleep`、Timer、Ticker、AfterFunc和deadline应复用这一source契约。
+当前公共timer core使用scheduler-owned、绑定期间容量冻结的固定分页`TimerRegistrationTable`：每页64个slot，按target profile在bind前附加稳定page，并以有界线性scan发现deadline。slot只保留当前typed operation、generation、operation record和result lease生命周期；旧Timer模式及跨模式generation兼容分支已经删除。dynamic/sharded heap是语义稳定后的容量/性能升级，不是当前已落地事实。平台仍只实现monotonic clock、arm earliest deadline和executor wake；`Sleep`、Timer、Ticker、AfterFunc和deadline应复用这一source契约。
 
 ### 8.2 网络和可poll fd
 
@@ -425,9 +425,9 @@ Worker transport的route-aware核心现已完成：仍只有一个进程级固�
 
 #### 少量标准库能力探针政策
 
-核心契约完成后，只保留少量、固定且使用普通Go源码的标准库程序作为能力探针。最小纵向门使用`time.Sleep`验证timer/park/deadline，使用标准库固定导出的`syscall.Open/Write/Seek/Read/Close/Unlink`封装完成一字节文件回环，验证bounded worker/syscall/result ownership；完整`time.Timer`验证controlled Timer V2上的Go timer基本语义，高层`os.File`验证interface/defer与regular-file worker封装，loopback TCP验证readiness/deadline/close-cancel链路。2026-07-22的同一双owner fleet acceptance已把五项全部fresh compile-link-run通过：总计1102.23s，`time` 246.60s、`timer` 375.42s、`file` 134.39s、`syscall-file` 109.01s、`tcp` 236.80s；TCP另有8路共10,000次压力证据。首个失败点必须归纳为缺失的通用compiler、runtime core、source或target adapter契约并在该层修复；不得添加按库名、函数名或fixture匹配的特例opcode/lowering，也不得绕过统一executor/event模型。
+核心契约完成后，只保留少量、固定且使用普通Go源码的标准库程序作为能力探针。最小纵向门使用`time.Sleep`验证timer/park/deadline，使用标准库固定导出的`syscall.Open/Write/Seek/Read/Close/Unlink`封装完成一字节文件回环，验证bounded worker/syscall/result ownership；完整`time.Timer`验证controlled Timer V2上的Go timer基本语义，高层`os.File`验证interface/defer与regular-file worker封装，loopback TCP验证readiness/deadline/close-cancel链路。2026-07-22最终hard-cutover在同一双owner fleet上把五项全部fresh compile-link-run通过：`time` 60.54s、`timer` 84.02s、`syscall-file` 56.49s、`file` 78.39s、`tcp` 114.62s（并行执行，时间仅作诊断）；TCP另有8路共10,000次压力证据。首个失败点必须归纳为缺失的通用compiler、runtime core、source或target adapter契约并在该层修复；不得添加按库名、函数名或fixture匹配的特例opcode/lowering，也不得绕过统一executor/event模型。
 
-`LLGO_CORO_STDLIB_ACCEPTANCE`的`time`、`syscall-file`、`file`、`tcp`和完整`timer`程序已冻结上述源码约束，且 host Go 参考运行可以通过。五项较早的LLGo fresh compile-link-run均为绿色；2026-07-22的fleet checkpoint对`tcp`重新完成完整编译、native链接和loopback运行（327.30s），随后8路并发执行共10,000次全部成功。它们只证明各自冻结的垂直用例，不等于完整`time`、`os`、`syscall`、`net`或GOROOT兼容。
+`LLGO_CORO_STDLIB_ACCEPTANCE`的`time`、`syscall-file`、`file`、`tcp`和完整`timer`程序已冻结上述源码约束，且 host Go 参考运行可以通过；最终hard-cutover复验五项均为绿色。较早的fleet checkpoint还对TCP完成8路并发共10,000次执行。它们只证明各自冻结的垂直用例，不等于完整`time`、`os`、`syscall`、`net`或GOROOT兼容。
 
 | 验收程序 | 冻结的可观察语义 | 当前证据与缺口 |
 | --- | --- | --- |
@@ -549,7 +549,7 @@ full-native Darwin/Linux 的 signal adapter 已改为 C `sigaction` + nonblockin
 - Effect、Exec、Demand、FuncRep和Primary已经分开。
 - 固定点能把 `llgo.coroPark` 的MayPark沿静态普通调用自动传播。
 - 静态 DirectCoro child await、typed result slot和LLVM frame handoff是通用路径。
-- runtime已有统一逻辑WaitToken/ticket状态机、G wait queue、executor request gate和doorbell防丢唤醒基础。
+- runtime已有统一`ParkState/OperationID/WaitSetRecord`状态机、executor request gate和doorbell防丢唤醒基础；旧G logical wait queue已经删除。
 - 每个函数只选择一个primary body；普通静态路径不生成完整双版本。
 
 以下是Phase 22 head当时尚未达到核心完成条件的部分；其中已变化的项目同时标出当前head边界：
@@ -559,7 +559,7 @@ full-native Darwin/Linux 的 signal adapter 已改为 C `sigaction` + nonblockin
 - Phase 22的physical coroutine lowering仍是pure-SSA子集。当前head已覆盖method/closure/generic的多个管理路径、常用builtin、slice/aggregate、implicit fault和指针provenance；但完整variadic/recursive/defer/recover/Goexit/cleanup、所有runtime helper和全部Go语言矩阵仍fail closed或待验收。
 - suspended frame没有精确GC root map和write barrier contract。
 - Phase 22的Sleep frame retention曾按timer符号和SSA形状硬编码；当前Sleep、controlled Timer manager wait和Poll wait已分别收敛为compiler-owned Timer/Poll V2 typed recipe与opaque frame storage。controlled Timer V1专用ABI和frame-retention contract已删除；`Timer`/`Ticker`/`AfterFunc`虽已走V2 transport/core，仍不得由此外推完整time语义。
-- Phase 23已将ExecutorDriver的bind/publish/pending/deadline/empty/close/unbind收口到静态`ExecutorSourceSet`，并把source fact publication与logical resolution分开：active Poll固定执行有界epoch A并立即resolve/promote、ack request、再无条件执行同构epoch B，B后不等待pending/request静默；`IdleArmed` final scan发现事实则先离开idle再重跑完整transaction。Wait、Timer、Poll、Worker、Channel和TaskControl现在各自维护binding-local单调`scanLimit`，routine epoch只扫描曾分配的active prefix，成功unbind后清零；Configure、close、empty、CanRelease和unbind仍审计完整configured capacity。空多页目录的事务从native默认配置的16403 reductions降为3；真实Sleep/Timer二进制指令量分别下降98.39%/98.33%，语义验收保持通过。固定容量的`ManualOperationSource`仍扫描64槽；V1/V2共享同一物理slot generation且typed API互相隔离，winner lease未Take/Discard前不能recycle。legacy WaitRegistration仍在publish中立即`CompleteWait`，是下一项source迁移。
+- Phase 23及最终hard cutover已将ExecutorDriver的bind/publish/pending/deadline/empty/close/unbind收口到静态`ExecutorSourceSet`，并把source fact publication与logical resolution分开：active Poll固定执行有界epoch A并立即resolve/promote、ack request、再无条件执行同构epoch B，B后不等待pending/request静默；`IdleArmed` final scan发现事实则先离开idle再重跑完整transaction。Timer、Poll、Manual、Worker、Channel和TaskControl各自维护binding-local单调`scanLimit`，routine epoch只扫描曾分配的active prefix，成功unbind后清零；Configure、close、empty、CanRelease和unbind仍审计完整configured capacity。空多页目录的事务从native默认配置的16403 reductions降为3；真实Sleep/Timer二进制指令量分别下降98.39%/98.33%，语义验收保持通过。旧logical wait source和Timer/Poll双模式已经删除；winner lease未Take/Discard前仍不能recycle。
 - Phase 23已将每个G run slice的scheduler service budget与active timer解耦；host-owned pull adapter现已把WASM/embedded的`RunSlice` more/blocked/deadline转换为非递归POD action并对callback generation/epoch作精确校验，compiler host-target V2 initial entry、retained callbacks与strict detached tuple边界也已完成；外部reactor tick/sysmon请求和post-optimization safepoint上界证明仍未完成。
 - Phase 23已实现V2 `OperationID/OperationRecord`和G-owned `ParkState`核心：支持多source完整sticky snapshot、与publish/source顺序无关的唯一事件winner、普通取消与task/shutdown abort竞态、败者resolution-ack/detach barrier、物理quiesce/recycle分离、结果lease、准备失败清理以及不回绕的双`u32`logical ticket。固定`CompletionSink` fact数组已经删除，owner直接扫描operation sticky facts；`ParkState`已内嵌到稳定G。该阶段首先覆盖Manual与Timer这类`IrreversibleCompletion`多事件等待；后续Phase 26/27补上`ReadyThenTryCommit/Reservable` core，Phase 32 C0再补无payload Channel claim/`TryCommit`，但legacy Wait迁移、typed hchan和Go select完整接线仍未完成。
 - 执行取消已收敛为G内嵌的`Abort/Shutdown` sticky kind和`Requested/CleanupClaimed` phase；owner P可把请求映射到当前或下一次ParkState，shutdown可覆盖同一完整snapshot中的operation completion，late cancel通过每P瞬态`RunDecision` gate抑制selected continuation但保留winner result lease。固定容量`TaskControlSource`已经作为第四种source接入统一published-epoch catalog：只为显式host/export handle分配generation端点，并以占用G现有对齐空洞的owner-only lease计数阻止task storage早回收。`Goexit`已从远程task cancel kind移出。

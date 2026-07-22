@@ -79,25 +79,6 @@ func pQueueContainsReady(p *P, target *G) bool {
 	return false
 }
 
-func pQueueContainsWaiter(p *P, target *G) bool {
-	if p == nil || target == nil {
-		return false
-	}
-	for slow, fast := p.waitHead, p.waitHead; fast != nil && fast.nextWait != nil; {
-		slow = slow.nextWait
-		fast = fast.nextWait.nextWait
-		if slow == fast {
-			return false
-		}
-	}
-	for g := p.waitHead; g != nil; g = g.nextWait {
-		if g == target {
-			return true
-		}
-	}
-	return false
-}
-
 // pOwnsTaskCancellation proves scheduler ownership for the public arbitrary-G
 // APIs without adding a permanent P pointer or external handle to every G.
 // Those APIs retain a full queue audit: cancellation is rare, so a scan is
@@ -112,19 +93,8 @@ func pOwnsTaskCancellation(p *P, g *G) bool {
 	case GRunning, GDispatching:
 		return p.current == g && g.runP == p
 	case GWaiting:
-		if !g.waiting {
-			return false
-		}
-		if g.waitToken != nil {
-			return pQueueContainsWaiter(p, g)
-		}
-		if g.active != nil && g.active.parkWait != nil {
-			return validActiveWaitSetRecordFast(p, g.active.parkWait)
-		}
-		// Pure ParkState tests may model scheduler ownership with the legacy
-		// list while omitting frame metadata. Production V2 parks always take
-		// the record path above.
-		return pQueueContainsWaiter(p, g)
+		return g.waiting && g.active != nil && g.active.parkWait != nil &&
+			validActiveWaitSetRecordFast(p, g.active.parkWait)
 	default:
 		return false
 	}
@@ -276,10 +246,9 @@ func validRegisteredRunnableParkHeader(state *ParkState) bool {
 
 // pOwnsRegisteredTaskCancellation is the O(1) local ownership predicate used
 // only after a TaskControlSource has proved an exact registered endpoint. The
-// endpoint's owner and taskControlLeases pin the task to this P in the current
-// single-P runtime, so Runnable and legacy Waiting need not walk unrelated
-// queue links. V2 Waiting has an exact frame-local record and therefore keeps
-// its stronger constant-time neighbour/link validation.
+// endpoint's owner and taskControlLeases pin the task to this P. Waiting has an
+// exact frame-local record and therefore keeps constant-time neighbour/link
+// validation.
 //
 // This predicate is not a public arbitrary-G ownership query. Multi-P task
 // migration must transfer or forward the registered control lease locator
@@ -294,26 +263,19 @@ func pOwnsRegisteredTaskCancellation(p *P, g *G) bool {
 	}
 	switch g.state {
 	case GRunnable:
-		return g.queued && !g.waiting && g.nextWait == nil &&
-			g.waitToken == nil && g.waitTicket == 0 && g.runP == nil &&
+		return g.queued && !g.waiting && g.runP == nil &&
 			validRegisteredRunnableParkHeader(&g.park) &&
 			g.spawnChild == nil && g.spawnParent == nil && g.spawnP == nil &&
 			(g.active == nil || g.active.parkWait == nil) &&
 			p.readyHead != nil && p.readyTail != nil
 	case GRunning, GDispatching:
 		return p.current == g && g.runP == p && !g.queued && g.nextReady == nil &&
-			!g.waiting && g.nextWait == nil && g.waitToken == nil && g.waitTicket == 0 &&
+			!g.waiting &&
 			validRegisteredRunningParkHeader(&g.park)
 	case GWaiting:
 		if !g.waiting || g.queued || g.nextReady != nil || g.runP != nil ||
 			g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil {
 			return false
-		}
-		if g.waitToken != nil {
-			return g.nextWait != g && g.waitTicket != 0 && validClaimedWait(g.waitToken, g.waitTicket) &&
-				validRegisteredReleasableParkHeader(&g.park) && g.park.taskCancelKind == TaskCancelNone &&
-				(g.active == nil || g.active.parkWait == nil) &&
-				p.waitHead != nil && p.waitTail != nil
 		}
 		return g.active != nil && g.active.parkWait != nil &&
 			validActiveWaitSetRecordFast(p, g.active.parkWait) && validRegisteredActiveParkHeader(&g.park)
@@ -379,7 +341,7 @@ func requestTaskCancellationOwned(p *P, g *G, kind TaskCancelKind, proof taskCan
 		return false
 	}
 	var wait *WaitSetRecord
-	if g.state == GWaiting && g.waitToken == nil && g.active != nil && g.active.parkWait != nil {
+	if g.state == GWaiting && g.active != nil && g.active.parkWait != nil {
 		wait = g.active.parkWait
 		if g.park.resolving || g.park.winnerRecord != nil ||
 			proof == taskCancellationProofRegistered && !validRegisteredActiveParkHeader(&g.park) ||
@@ -500,10 +462,9 @@ func AcknowledgeTaskCancellation(g *G, kind TaskCancelKind) bool {
 		g.state != GDead || !gPreemptStateAtDepthZero(g, preemptDisabled) ||
 		g.runAction != ActionInvalid || g.transferState != runnableTransferGIdle ||
 		g.root != nil || g.active != nil || g.frames != nil || g.runP != nil ||
-		g.nextReady != nil || g.queued || g.nextWait != nil || g.waiting ||
-		g.waitToken != nil || g.waitTicket != 0 ||
+		g.nextReady != nil || g.queued || g.waiting ||
 		g.pending.kind != pendingNone || g.pending.from != nil || g.pending.target != nil ||
-		g.pending.wait != nil || g.pending.ticket != 0 || g.destroyTarget != nil || g.destroyRoot ||
+		g.destroyTarget != nil || g.destroyRoot ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
 		!releasableParkState(&g.park) {
 		return false

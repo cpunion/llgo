@@ -23,6 +23,7 @@ import (
 	"strings"
 	"testing"
 
+	llssa "github.com/goplus/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -367,6 +368,41 @@ func Call(value *Value) { value.Method() }
 	}
 	if !found {
 		t.Fatal("value-receiver lowering omitted AssertNilDerefPtr")
+	}
+}
+
+func TestLoweredRuntimeHelpersOmitProvenGlobalZeroSizeInterfaceNilCheck(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/loweredglobalbox", `package loweredglobalbox
+type Empty struct{}
+var Global Empty
+func Box() any { return Global }
+`)
+	testProg.ssa.Build()
+	universe, owner := newEmissionABIDemandTestUniverse(testProg, pkg)
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	universe.prog = prog
+	fn := pkg.ssa.Func("Box")
+	ctx, err := universe.functionABIContext(fn, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var helpers []string
+	for _, block := range fn.Blocks {
+		for _, instruction := range block.Instrs {
+			if _, ok := instruction.(*ssa.MakeInterface); ok {
+				helpers = universe.loweredRuntimeHelpers(ctx, instruction)
+			}
+		}
+	}
+	for _, want := range []string{"AllocU", "Typedmemmove"} {
+		if !stringSliceContains(helpers, want) {
+			t.Fatalf("global zero-sized interface helpers = %v; want %s", helpers, want)
+		}
+	}
+	if stringSliceContains(helpers, "AssertNilDeref") {
+		t.Fatalf("global zero-sized interface helpers retained proven-dead nil check: %v", helpers)
 	}
 }
 

@@ -91,7 +91,8 @@ const (
 	coroYieldPrepareHookV1               = "__llgo_coro_yield_prepare_v1"
 	coroCriticalEnterHookV1              = "__llgo_coro_critical_enter_v1"
 	coroCriticalExitHookV1               = "__llgo_coro_critical_exit_v1"
-	coroParkPrepareHookV1                = "__llgo_coro_park_prepare_v1"
+	coroKeyedParkHookV2                  = "__llgo_coro_keyed_park_v2"
+	coroKeyedResumeHookV2                = "__llgo_coro_keyed_resume_v2"
 	coroRunDecisionTakeHookV1            = "__llgo_coro_run_decision_take_v1"
 	coroRunDecisionTakeZeroHookV1        = "__llgo_coro_run_decision_take_zero_v1"
 	coroPanicPrepareHookV1               = "__llgo_coro_panic_prepare_v1"
@@ -101,6 +102,12 @@ const (
 	coroCompletePrepareHookV2            = "__llgo_coro_complete_prepare_v2"
 	coroFrameFreeHookV1                  = "__llgo_coro_frame_free_v1"
 	coroDescriptorPrefixV1               = "__llgo_coro_frame_descriptor_v1."
+)
+
+const (
+	coroKeyedResumeSuccessV2 uint64 = iota + 1
+	coroKeyedResumeTaskAbortV2
+	coroKeyedResumeShutdownV2
 )
 
 const (
@@ -152,7 +159,6 @@ type coroPhysicalABI struct {
 	yieldPrepareHook        string
 	criticalEnterHook       string
 	criticalExitHook        string
-	parkPrepareHook         string
 	runDecisionTakeHook     string
 	runDecisionTakeZeroHook string
 	panicPrepareHook        string
@@ -179,7 +185,6 @@ type coroBodyContext struct {
 	yieldPrepare           llssa.Expr
 	criticalEnter          llssa.Expr
 	criticalExit           llssa.Expr
-	parkPrepare            llssa.Expr
 	runDecisionTakeZero    llssa.Expr
 	runDecisionTrap        llssa.Expr
 	unsupportedRunDecision llssa.BasicBlock
@@ -194,7 +199,6 @@ type coroBodyContext struct {
 	needsPreempt           bool
 	instructions           int
 	frameRetention         *coroFrameRetentionProof
-	frameRetaining         bool
 	critical               *coroCriticalProof
 	terminalResultAllocs   map[*ssa.Alloc]llssa.Expr
 	sourceBlockPollFresh   bool
@@ -217,7 +221,6 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 	yieldPrepareHook := ""
 	criticalEnterHook := ""
 	criticalExitHook := ""
-	parkPrepareHook := ""
 	runDecisionTakeHook := ""
 	runDecisionTakeZeroHook := ""
 	panicPrepareHook := ""
@@ -235,7 +238,6 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		awaitConsumeHook = coroAwaitConsumeHookV1
 		preemptPollHook = coroPreemptPollHookV1
 		yieldPrepareHook = coroYieldPrepareHookV1
-		parkPrepareHook = coroParkPrepareHookV1
 		runDecisionTakeHook = coroRunDecisionTakeHookV1
 		runDecisionTakeZeroHook = coroRunDecisionTakeZeroHookV1
 		completePrepareHook = coroCompletePrepareHookV2
@@ -338,7 +340,6 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		yieldPrepareHook:        yieldPrepareHook,
 		criticalEnterHook:       criticalEnterHook,
 		criticalExitHook:        criticalExitHook,
-		parkPrepareHook:         parkPrepareHook,
 		runDecisionTakeHook:     runDecisionTakeHook,
 		runDecisionTakeZeroHook: runDecisionTakeZeroHook,
 		panicPrepareHook:        panicPrepareHook,
@@ -454,9 +455,6 @@ func (p *context) beginCoroBody(
 	}
 	if abi.criticalExitHook != "" {
 		body.criticalExit = p.pkg.NewFunc(abi.criticalExitHook, coroCriticalExitSignature(), llssa.InC).Expr
-	}
-	if abi.parkPrepareHook != "" {
-		body.parkPrepare = p.pkg.NewFunc(abi.parkPrepareHook, coroParkPrepareSignature(), llssa.InC).Expr
 	}
 	if abi.panicPrepareHook != "" {
 		body.panicPrepare = p.pkg.NewFunc(abi.panicPrepareHook, coroPanicPrepareSignature(), llssa.InC).Expr
@@ -599,15 +597,23 @@ func coroYieldPrepareSignature() *types.Signature {
 	return types.NewSignatureType(nil, nil, nil, params, nil, false)
 }
 
-func coroParkPrepareSignature() *types.Signature {
+func coroKeyedParkSignatureV2() *types.Signature {
 	params := types.NewTuple(
 		types.NewParam(token.NoPos, nil, "g", types.Typ[types.UnsafePointer]),
 		types.NewParam(token.NoPos, nil, "handle", types.Typ[types.UnsafePointer]),
 		types.NewParam(token.NoPos, nil, "header", types.Typ[types.UnsafePointer]),
-		types.NewParam(token.NoPos, nil, "token", types.Typ[types.UnsafePointer]),
-		types.NewParam(token.NoPos, nil, "ticket", types.Typ[types.Uint32]),
+		types.NewParam(token.NoPos, nil, "state", types.Typ[types.UnsafePointer]),
 	)
 	return types.NewSignatureType(nil, nil, nil, params, nil, false)
+}
+
+func coroKeyedResumeSignatureV2() *types.Signature {
+	params := types.NewTuple(
+		types.NewParam(token.NoPos, nil, "g", types.Typ[types.UnsafePointer]),
+		types.NewParam(token.NoPos, nil, "state", types.Typ[types.UnsafePointer]),
+	)
+	results := types.NewTuple(types.NewParam(token.NoPos, nil, "status", types.Typ[types.Uint32]))
+	return types.NewSignatureType(nil, nil, nil, params, results, false)
 }
 
 func coroRunDecisionTakeZeroSignature() *types.Signature {
@@ -808,40 +814,32 @@ func (c *coroBodyContext) yieldCurrentFrame(b llssa.Builder) uint32 {
 	return stateID
 }
 
-// parkCurrentFrame is the exact stack-cut primitive used by future channel,
-// timer, syscall, and platform adapters. The suspend must remain here in the
-// caller's physical coroutine body; a normal synchronous helper cannot retain
-// the caller's native activation across llvm.coro.suspend.
-func (c *coroBodyContext) parkCurrentFrame(b llssa.Builder, token, ticket llssa.Expr) uint32 {
-	if c.abi.version < coroPhysicalABIVersionV1 || c.parkPrepare.IsNil() {
-		panic("coroutine park requires PhysicalABIV1 scheduler handoff hook")
-	}
-	stateID := c.nextState
-	c.nextState++
-	c.instructions = 0
-	c.publishState(b, coroSuspendPark, coroLifecycleSuspended, stateID)
-	b.Call(
-		c.parkPrepare,
-		c.task,
-		c.coro.Handle(),
-		b.Convert(b.Prog.VoidPtr(), c.header),
-		b.Convert(b.Prog.VoidPtr(), token),
-		b.Convert(b.Prog.Uint32(), ticket),
-	)
-	c.coro.SuspendCurrentBlock()
-	c.activate(b)
-	return stateID
-}
-
 func (p *context) compileCoroPark(b llssa.Builder, args []llssa.Expr) {
-	body := p.coroBody()
-	if body == nil || p.compilation == nil || !p.compilation.CoroChildAwaitActive() {
-		panic("llgo.coroPark requires an active PhysicalABIV1 coroutine body")
-	}
+	body := p.requireCoroParkV2Body(b, "keyed wait")
 	if b.Func != p.fn || len(args) != 2 {
-		panic("llgo.coroPark requires exactly (token, ticket) in the active coroutine function")
+		panic("llgo.coroPark requires exactly (state, reserved) in the active coroutine function")
 	}
-	body.parkCurrentFrame(b, args[0], args[1])
+	state := b.Convert(b.Prog.VoidPtr(), args[0])
+	body.emitCoroParkOperation(p, b, coroParkOperation{
+		shouldSuspend: b.Prog.BoolVal(true),
+		park: func(suspend llssa.Builder) {
+			park := p.pkg.NewFunc(coroKeyedParkHookV2, coroKeyedParkSignatureV2(), llssa.InC)
+			suspend.Call(
+				park.Expr,
+				body.task,
+				body.coro.Handle(),
+				suspend.Convert(suspend.Prog.VoidPtr(), body.header),
+				state,
+			)
+		},
+		resume: func(resume llssa.Builder) llssa.Expr {
+			resumeHook := p.pkg.NewFunc(coroKeyedResumeHookV2, coroKeyedResumeSignatureV2(), llssa.InC)
+			return resume.Call(resumeHook.Expr, body.task, state)
+		},
+		normal:   []uint64{coroKeyedResumeSuccessV2},
+		abort:    coroKeyedResumeTaskAbortV2,
+		shutdown: coroKeyedResumeShutdownV2,
+	})
 }
 
 func (p *context) compileCoroYield(b llssa.Builder) {
@@ -940,7 +938,7 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	if p.emissionUniverse == nil || p.emissionUniverse.coroProgramIR == nil {
 		panic("coroutine physical body has no ProgramIR")
 	}
-	physicalPlan, err := p.emissionUniverse.coroProgramIR.physicalFunctionPlan(fn, p.emissionOwner)
+	physicalPlan, err := (emissionCanonicalIndex{universe: p.emissionUniverse}).physicalFunctionPlanForEmission(fn, p.emissionOwner)
 	if err != nil {
 		panic(fmt.Errorf("load frozen coroutine physical plan: %w", err))
 	}
@@ -1027,10 +1025,6 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	for _, phi := range p.phis {
 		phi()
 	}
-	if physical.frameRetaining {
-		panic("coroutine frame-retention critical span escaped its certified source block")
-	}
-
 	b.SetBlock(physical.completion)
 	if physical.cleanup == nil {
 		physical.complete(b)
@@ -2326,11 +2320,24 @@ func (u *EmissionUniverse) coroPhysicalSourceSignature(fn *ssa.Function) (*types
 	if receiver := fn.Signature.Recv(); receiver != nil {
 		effectiveReceiver := ctx.patchType(receiver.Type())
 		if !types.Identical(effectiveReceiver, sig.Recv().Type()) {
+			materialized := coroMaterializedGenericCallable(fn)
+			if !materialized && (typeParamCount(sig.RecvTypeParams()) != 0 || typeParamCount(sig.TypeParams()) != 0) {
+				return nil, fmt.Errorf(
+					"coroutine physical ABI: function %q requires receiver patching before its generic declaration is materialized",
+					fn.Name(),
+				)
+			}
 			receiver = types.NewVar(receiver.Pos(), receiver.Pkg(), receiver.Name(), effectiveReceiver)
+			// A concrete x/tools receiver instance may retain the origin's
+			// RecvTypeParams list even though every callable type is ground. Those
+			// TypeParam objects are already bound to sig and cannot legally be
+			// rebound into a second go/types Signature. They are source metadata,
+			// not part of the physical receiver-first ABI, so the reconstructed
+			// concrete signature deliberately clears both parameter lists.
 			sig = types.NewSignatureType(
 				receiver,
-				coroPhysicalTypeParamSlice(sig.RecvTypeParams()),
-				coroPhysicalTypeParamSlice(sig.TypeParams()),
+				nil,
+				nil,
 				sig.Params(), sig.Results(), sig.Variadic(),
 			)
 		}
@@ -2350,17 +2357,6 @@ func (u *EmissionUniverse) coroPhysicalSourceSignature(fn *ssa.Function) (*types
 		)
 	}
 	return coroPhysicalNormalizeSourceSignature(sig), nil
-}
-
-func coroPhysicalTypeParamSlice(list *types.TypeParamList) []*types.TypeParam {
-	if list == nil || list.Len() == 0 {
-		return nil
-	}
-	params := make([]*types.TypeParam, list.Len())
-	for index := range params {
-		params[index] = list.At(index)
-	}
-	return params
 }
 
 // coroPhysicalEntrySourceSignature adds the one typed closure environment that

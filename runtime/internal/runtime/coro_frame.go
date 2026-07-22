@@ -106,19 +106,6 @@ func __llgo_coro_yield_prepare_v1(g, handle, header unsafe.Pointer) {
 	}
 }
 
-//export __llgo_coro_park_prepare_v1
-func __llgo_coro_park_prepare_v1(g, handle, header, token unsafe.Pointer, ticket uint32) {
-	if !coro.PreparePark(
-		(*coro.G)(g),
-		handle,
-		(*coro.HeaderV1)(header),
-		(*coro.WaitToken)(token),
-		coro.WaitTicket(ticket),
-	) {
-		coroRuntimeAbort("invalid coroutine park handoff")
-	}
-}
-
 //export __llgo_coro_complete_prepare_v1
 func __llgo_coro_complete_prepare_v1(g, handle, header unsafe.Pointer) {
 	if !coro.PrepareComplete((*coro.G)(g), handle, (*coro.HeaderV1)(header)) {

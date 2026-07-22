@@ -793,6 +793,18 @@ func newCoroPlainDispatchABI(p *context, signature *types.Signature) (coroPlainD
 	if !ok {
 		return coroPlainDispatchABI{}, fmt.Errorf("patched dispatch signature is %T", p.patchType(signature))
 	}
+	return newCoroPlainDispatchEffectiveABI(p, patched)
+}
+
+// newCoroPlainDispatchEffectiveABI consumes a signature which has already
+// crossed the current emission owner's type-patch boundary. ABI method-table
+// materialization obtains exactly that signature while resolving the Ifn_
+// word; patching it a second time can rebuild an interface result graph and
+// give the descriptor a different digest from its dynamic call site.
+func newCoroPlainDispatchEffectiveABI(p *context, patched *types.Signature) (coroPlainDispatchABI, error) {
+	if p == nil || p.prog == nil || patched == nil {
+		return coroPlainDispatchABI{}, fmt.Errorf("coroutine plain dispatch effective ABI requires a program and signature")
+	}
 	patched = canonicalCoroPlainDispatchSignature(patched)
 	physical := p.prog.PhysicalFuncDecl(patched, llssa.InGo)
 	resultFields := make([]*types.Var, physical.Results().Len())
@@ -908,6 +920,15 @@ func appendCoroPlainDispatchTypeLayout(builder *strings.Builder, prog llssa.Prog
 	defer delete(visiting, typ)
 	switch value := typ.(type) {
 	case *types.Named:
+		if _, referenceHeader := types.Unalias(value.Underlying()).(*types.Interface); referenceHeader {
+			// A named interface's package/name identity, physical size, and
+			// alignment above completely determine its call transport. Its method
+			// graph is metadata, not inline data layout. Recursing into it would
+			// make the ABI digest depend on whether equivalent package type graphs
+			// share the same go/types object pointers at a recursive receiver edge.
+			writeDispatchHashField(builder, path+".named-interface", "two-word-header")
+			return nil
+		}
 		return appendCoroPlainDispatchTypeLayout(builder, prog, path+".underlying", value.Underlying(), qualified, visiting)
 	case *types.Pointer:
 		writeDispatchHashField(builder, path+".pointer", "opaque")
@@ -933,11 +954,22 @@ func appendCoroPlainDispatchTypeLayout(builder *strings.Builder, prog llssa.Prog
 	return nil
 }
 
-func (p *context) tryCompileCoroPlainDispatchFunctionValue(b llssa.Builder, value *ssa.Function) (llssa.Expr, bool) {
-	if p.compilation == nil || p.compilation.CoroPlan == nil {
-		return llssa.Expr{}, false
+// coroPlainDispatchValuePlan is the one codegen lookup boundary for a
+// dynamically callable value. Preflight owns validation of the complete plan;
+// emission only observes the exact immutable ValuePlan through this helper.
+func (p *context) coroPlainDispatchValuePlan(value ssa.Value) (coro.SSAValuePlan, bool) {
+	if p == nil || p.compilation == nil || !p.compilation.CoroPlainDispatchActive() {
+		return coro.SSAValuePlan{}, false
 	}
-	valuePlan, found := p.compilation.CoroPlan.ValuePlan(value)
+	plan := p.compilation.CoroPlan
+	if plan == nil {
+		return coro.SSAValuePlan{}, false
+	}
+	return plan.ValuePlan(value)
+}
+
+func (p *context) tryCompileCoroPlainDispatchFunctionValue(b llssa.Builder, value *ssa.Function) (llssa.Expr, bool) {
+	valuePlan, found := p.coroPlainDispatchValuePlan(value)
 	if !found || len(valuePlan.Funcs) != 1 || len(valuePlan.Funcs[0].Path) != 0 || valuePlan.Funcs[0].Rep != coro.Dispatch {
 		return llssa.Expr{}, false
 	}
@@ -948,10 +980,7 @@ func (p *context) tryCompileCoroPlainDispatchFunctionValue(b llssa.Builder, valu
 }
 
 func (p *context) tryCompileCoroPlainDispatchClosure(b llssa.Builder, closure *ssa.MakeClosure) (llssa.Expr, bool) {
-	if p.compilation == nil || p.compilation.CoroPlan == nil {
-		return llssa.Expr{}, false
-	}
-	valuePlan, found := p.compilation.CoroPlan.ValuePlan(closure)
+	valuePlan, found := p.coroPlainDispatchValuePlan(closure)
 	if !found || len(valuePlan.Funcs) != 1 || len(valuePlan.Funcs[0].Path) != 0 || valuePlan.Funcs[0].Rep != coro.Dispatch {
 		return llssa.Expr{}, false
 	}
@@ -1104,10 +1133,12 @@ func (p *context) newCoroDynamicDispatchEntryThunk(
 	default:
 		panic(fmt.Errorf("coroutine dynamic dispatch ABI: thunk %q has unsupported emission %s", name, emission))
 	}
-	thunk := p.pkg.FuncOf(name)
-	if thunk == nil {
-		thunk = p.pkg.NewFunc(name, thunkSig, llssa.InC)
-	} else if !types.Identical(thunk.RawType(), thunkSig) {
+	// A deterministic descriptor can be emitted by several package archives.
+	// Its content-addressed entry thunk must use matching coalescible linkage;
+	// otherwise identical ABI type-data consumers become duplicate definitions
+	// at the final link.
+	thunk := p.pkg.NewFuncEx(name, thunkSig, llssa.InC, false, true)
+	if !types.Identical(thunk.RawType(), thunkSig) {
 		panic(fmt.Errorf("coroutine dynamic dispatch ABI: thunk %q conflicts with an existing signature", name))
 	}
 	if thunk.HasBody() {

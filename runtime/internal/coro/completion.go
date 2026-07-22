@@ -210,9 +210,9 @@ func prepareChildPanic(
 		header.G != unsafe.Pointer(g) || header.SuspendReason != uint16(SuspendPanic) ||
 		header.Lifecycle != uint16(FrameFinalSuspended) ||
 		g.state != GRunning || g.runP == nil || g.pending.kind != pendingNone ||
-		g.pending.from != nil || g.pending.target != nil || g.pending.wait != nil || g.pending.ticket != 0 ||
+		g.pending.from != nil || g.pending.target != nil ||
 		g.destroyTarget != nil || g.destroyRoot || g.queued || g.nextReady != nil ||
-		g.waitToken != nil || g.waitTicket != 0 || g.nextWait != nil || g.waiting ||
+		g.waiting ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
 		!releasableParkState(&g.park) || g.park.taskCancelPhase == taskCancelRequested ||
 		g.panicUnwind || !emptyPanicRecord(&g.panicRecord) ||

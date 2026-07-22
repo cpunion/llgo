@@ -23,7 +23,7 @@ import (
 	"unsafe"
 )
 
-const wantSchedulerGSize = 168 + (unsafe.Sizeof(uintptr(0))/4-1)*120
+const wantSchedulerGSize = 144 + (unsafe.Sizeof(uintptr(0))/4-1)*96
 
 var (
 	_ [wantSchedulerGSize - unsafe.Sizeof(G{})]byte
@@ -430,50 +430,6 @@ func TestTaskControlSourceFinalDrainDeliversAdmittedLatePost(t *testing.T) {
 	finishTaskCancelFixture(t, p, g, TaskCancelAbort)
 }
 
-func TestTaskControlSourceRejectedDeliveryRestoresDurableFact(t *testing.T) {
-	p, g := newReadyTaskCancelFixture(t)
-	var source TaskControlSource
-	if !BindTaskControlSource(&source, p) {
-		t.Fatal("bind task control source")
-	}
-	id, ok := RegisterTaskControl(&source, p, g)
-	if !ok || dequeue(p) != g {
-		t.Fatal("register control before legacy wait")
-	}
-	// Task cancellation intentionally has no legacy-wait bridge. Until every
-	// production park is V2, a failed owner delivery must retain the exact
-	// request instead of turning this migration boundary into silent loss.
-	attachWaitingTaskCancelFixture(p, g)
-	if result := source.Post(id, TaskCancelAbort); result != TaskControlPosted {
-		t.Fatalf("post legacy-wait task cancellation = %d", result)
-	}
-	if delivered, discarded, published := source.PublishPass(p); published || delivered != 0 || discarded != 0 {
-		t.Fatalf("legacy-wait publish unexpectedly succeeded = (%d, %d, %t)", delivered, discarded, published)
-	}
-	slot, valid := taskControlSlotFor(&source, id)
-	if !valid || TaskCancelKind(preemptLoad(&slot.request)) != TaskCancelAbort || !source.Pending() ||
-		g.park.taskCancelKind != TaskCancelNone || g.park.taskCancelPhase != taskCancelIdle {
-		t.Fatal("rejected owner delivery did not restore the durable request")
-	}
-
-	detachWaitingTaskCancelFixture(p, g)
-	g.state = GRunnable
-	if !Enqueue(p, g) {
-		t.Fatal("restore runnable owner after legacy wait")
-	}
-	if delivered, discarded, published := source.PublishPass(p); !published || delivered != 1 || discarded != 0 || source.Pending() {
-		t.Fatalf("retry restored task cancellation = (%d, %d, %t), pending=%t", delivered, discarded, published, source.Pending())
-	}
-	closeTaskControlFixture(t, &source, p, id)
-	if !UnbindTaskControlSource(&source, p) {
-		t.Fatal("unbind restored control source")
-	}
-	if kind, claimed := ClaimTaskCancellation(p, g); !claimed || kind != TaskCancelAbort {
-		t.Fatalf("claim restored cancellation = (%d, %t)", kind, claimed)
-	}
-	finishTaskCancelFixture(t, p, g, TaskCancelAbort)
-}
-
 func TestTaskControlSourceConcurrentPostsCoalesceWithoutLoss(t *testing.T) {
 	p, g := newReadyTaskCancelFixture(t)
 	var source TaskControlSource
@@ -625,10 +581,9 @@ func TestExecutorDriverTerminalCloseJoinsActiveTaskControls(t *testing.T) {
 	p := new(P)
 	driver := new(ExecutorDriver)
 	registry := new(ExecutorRegistry)
-	waits := new(WaitRegistrationTable)
 	control := new(TaskControlSource)
 	executor := registerTestExecutor(t, registry)
-	if !BindExecutorSourceCatalog(driver, p, registry, executor, ExecutorSourceCatalog{Waits: waits, Control: control}) {
+	if !BindExecutorSourceCatalog(driver, p, registry, executor, ExecutorSourceCatalog{Control: control}) {
 		t.Fatal("bind terminal control-source executor")
 	}
 	task := newYieldingTestG(t, "driver-terminal-control")
@@ -730,7 +685,7 @@ func TestExecutorDriverTerminalCloseJoinsActiveTaskControls(t *testing.T) {
 			completed, terminal, confirmed, TerminalG(p, task.g), task.g.taskControlLeases,
 			task.g.park.taskCancelKind, task.g.park.taskCancelPhase)
 	}
-	if *driver != (ExecutorDriver{}) || !control.CanRelease() || !waits.CanRelease() || !registry.CanRelease() {
+	if *driver != (ExecutorDriver{}) || !control.CanRelease() || !registry.CanRelease() {
 		t.Fatal("terminal control close retained stable ingress storage")
 	}
 	if repeated, repeatedAction, repeatedOK := ConfirmTerminalExecutorClose(driver); repeatedOK || repeated != nil || repeatedAction != (Action{}) {
@@ -743,10 +698,9 @@ func TestExecutorDriverControlSourceCancelsFrameLocalParkInPublishedEpoch(t *tes
 	p := new(P)
 	driver := new(ExecutorDriver)
 	registry := new(ExecutorRegistry)
-	waits := new(WaitRegistrationTable)
 	control := new(TaskControlSource)
 	executor := registerTestExecutor(t, registry)
-	if !BindExecutorSourceCatalog(driver, p, registry, executor, ExecutorSourceCatalog{Waits: waits, Control: control}) {
+	if !BindExecutorSourceCatalog(driver, p, registry, executor, ExecutorSourceCatalog{Control: control}) {
 		t.Fatal("bind control-source executor")
 	}
 	task := newYieldingTestG(t, "driver-control")
@@ -794,7 +748,7 @@ func TestExecutorDriverControlSourceCancelsFrameLocalParkInPublishedEpoch(t *tes
 	closeTaskControlFixture(t, control, p, controlID)
 	yieldRunningDriverTask(t, p, task, action)
 	closeTestExecutorDriver(t, driver)
-	if !control.CanRelease() || !waits.CanRelease() || !registry.CanRelease() {
+	if !control.CanRelease() || !registry.CanRelease() {
 		t.Fatal("control-source executor retained ingress state")
 	}
 	if g, ok := NextRunnable(p); !ok || g != task.g {
@@ -811,10 +765,9 @@ func TestExecutorDriverCurrentTaskControlOwnerAPIIsGenerationSafe(t *testing.T) 
 	p := new(P)
 	driver := new(ExecutorDriver)
 	registry := new(ExecutorRegistry)
-	waits := new(WaitRegistrationTable)
 	control := new(TaskControlSource)
 	executor := registerTestExecutor(t, registry)
-	if !BindExecutorSourceCatalog(driver, p, registry, executor, ExecutorSourceCatalog{Waits: waits, Control: control}) {
+	if !BindExecutorSourceCatalog(driver, p, registry, executor, ExecutorSourceCatalog{Control: control}) {
 		t.Fatal("bind current-task control executor")
 	}
 	task := newYieldingTestG(t, "current-task-control")
@@ -850,7 +803,7 @@ func TestExecutorDriverCurrentTaskControlOwnerAPIIsGenerationSafe(t *testing.T) 
 	}
 	yieldRunningDriverTask(t, p, task, action)
 	closeTestExecutorDriver(t, driver)
-	if !control.CanRelease() || !waits.CanRelease() || !registry.CanRelease() {
+	if !control.CanRelease() || !registry.CanRelease() {
 		t.Fatal("current-task control owner API retained executor state")
 	}
 	if g, ok := NextRunnable(p); !ok || g != task.g {

@@ -1233,7 +1233,11 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 			return nil, fmt.Errorf("coro: identify SSA function %q: %w", fn.Name(), err)
 		}
 		if previous, exists := byID[id]; exists && previous != fn {
-			return nil, fmt.Errorf("coro: FunctionID collision between %q and %q", previous.Name(), fn.Name())
+			return nil, fmt.Errorf(
+				"coro: FunctionID collision between %q (%s; synthetic=%q; signature=%s) and %q (%s; synthetic=%q; signature=%s)",
+				previous.Name(), rawSSAFunctionKey(previous), previous.Synthetic, previous.Signature,
+				fn.Name(), rawSSAFunctionKey(fn), fn.Synthetic, fn.Signature,
+			)
 		}
 		ids[fn] = id
 		byID[id] = fn

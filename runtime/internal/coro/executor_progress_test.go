@@ -23,24 +23,28 @@ import (
 	"unsafe"
 )
 
+const wantExecutorPollProgressSize = 60 + (unsafe.Sizeof(uintptr(0))/4-1)*4
+
 var (
-	_ [64 - unsafe.Sizeof(ExecutorPollProgress{})]byte
-	_ [unsafe.Sizeof(ExecutorPollProgress{}) - 64]byte
+	_ [wantExecutorPollProgressSize - unsafe.Sizeof(ExecutorPollProgress{})]byte
+	_ [unsafe.Sizeof(ExecutorPollProgress{}) - wantExecutorPollProgressSize]byte
 )
 
 func TestExecutorPollProgressPODLayout(t *testing.T) {
 	if alignment := unsafe.Alignof(ExecutorPollProgress{}); alignment != 4 && alignment != 8 {
 		t.Fatalf("executor progress alignment = %d, want natural uint32/int64 alignment", alignment)
 	}
+	deadlineOffset := uintptr(44 + (unsafe.Sizeof(uintptr(0))/4-1)*4)
+	epochOffset := deadlineOffset + 8
 	if unsafe.Offsetof(ExecutorPollProgress{}.Used) != 0 ||
-		unsafe.Offsetof(ExecutorPollProgress{}.NextDeadline) != 48 ||
-		unsafe.Offsetof(ExecutorPollProgress{}.Epochs) != 56 ||
-		unsafe.Offsetof(ExecutorPollProgress{}.Complete) != 57 ||
-		unsafe.Offsetof(ExecutorPollProgress{}.More) != 58 ||
-		unsafe.Offsetof(ExecutorPollProgress{}.Blocked) != 59 ||
-		unsafe.Offsetof(ExecutorPollProgress{}.HasDeadline) != 60 ||
-		unsafe.Offsetof(ExecutorPollProgress{}.AtomicResolve) != 61 ||
-		unsafe.Offsetof(ExecutorPollProgress{}.Overshot) != 62 {
+		unsafe.Offsetof(ExecutorPollProgress{}.NextDeadline) != deadlineOffset ||
+		unsafe.Offsetof(ExecutorPollProgress{}.Epochs) != epochOffset ||
+		unsafe.Offsetof(ExecutorPollProgress{}.Complete) != epochOffset+1 ||
+		unsafe.Offsetof(ExecutorPollProgress{}.More) != epochOffset+2 ||
+		unsafe.Offsetof(ExecutorPollProgress{}.Blocked) != epochOffset+3 ||
+		unsafe.Offsetof(ExecutorPollProgress{}.HasDeadline) != epochOffset+4 ||
+		unsafe.Offsetof(ExecutorPollProgress{}.AtomicResolve) != epochOffset+5 ||
+		unsafe.Offsetof(ExecutorPollProgress{}.Overshot) != epochOffset+6 {
 		t.Fatalf("executor progress layout offsets changed: %+v", ExecutorPollProgress{})
 	}
 	typeOf := reflect.TypeOf(ExecutorPollProgress{})
@@ -54,7 +58,7 @@ func TestExecutorPollProgressPODLayout(t *testing.T) {
 }
 
 func TestExecutorPollEpochBPreservesAExternalBlockOnly(t *testing.T) {
-	sources := &ExecutorSourceSet{waits: &WaitRegistrationTable{scanLimit: 1}}
+	sources := &ExecutorSourceSet{}
 	transaction := executorPollTransaction{
 		now:           17,
 		phase:         executorPollAcknowledge,
@@ -66,8 +70,8 @@ func TestExecutorPollEpochBPreservesAExternalBlockOnly(t *testing.T) {
 	if !beginExecutorPollEpoch(&transaction, sources, executorPollEpochBPublish) {
 		t.Fatal("begin B publish epoch")
 	}
-	if transaction.retryBudget || !transaction.awaitExternal || !transaction.resampleNow ||
-		transaction.phase != executorPollEpochBPublish || transaction.source != executorCatalogWaits || transaction.cursor != 0 {
+	if transaction.retryBudget || !transaction.awaitExternal || transaction.resampleNow ||
+		transaction.phase != executorPollEpochBPublish || transaction.source != executorCatalogDone || transaction.cursor != 0 {
 		t.Fatalf("A-only external block across B transition = %+v", transaction)
 	}
 }
@@ -76,18 +80,17 @@ func TestMinExecutorPollBudgetCountsActiveProductionCatalog(t *testing.T) {
 	p := new(P)
 	driver := new(ExecutorDriver)
 	registry := new(ExecutorRegistry)
-	waits := new(WaitRegistrationTable)
 	timers := new(TimerRegistrationTable)
 	manual := new(ManualOperationSource)
 	channel := new(ChannelOperationSource)
 	control := new(TaskControlSource)
 	handle := registerTestExecutor(t, registry)
 	if !BindExecutorSourceCatalog(driver, p, registry, handle, ExecutorSourceCatalog{
-		Waits: waits, Timers: timers, Manual: manual, Channel: channel, Control: control,
+		Timers: timers, Manual: manual, Channel: channel, Control: control,
 	}) {
 		t.Fatal("bind complete production catalog")
 	}
-	want := uint32(2*(ManualOperationSourceCapacity+1) + 1)
+	want := uint32(3)
 	if budget, ok := MinExecutorPollBudget(driver); !ok || budget != want {
 		t.Fatalf("complete catalog minimum = (%d, %t), want %d", budget, ok, want)
 	}
@@ -102,23 +105,20 @@ func TestExecutorPollProgressSkipsConfiguredUnallocatedTails(t *testing.T) {
 	p := new(P)
 	driver := new(ExecutorDriver)
 	registry := new(ExecutorRegistry)
-	waits := new(WaitRegistrationTable)
 	timers := new(TimerRegistrationTable)
 	poll := new(PollOperationSource)
 	worker := new(WorkerOperationSource)
-	var waitPages [15]WaitRegistrationPage
 	var timerPages [15]TimerRegistrationPage
 	var pollPages [15]PollOperationPage
 	var workerPages [15]WorkerOperationPage
-	if !ConfigureWaitRegistrationPages(waits, waitPages[:]) ||
-		!ConfigureTimerRegistrationPages(timers, timerPages[:]) ||
+	if !ConfigureTimerRegistrationPages(timers, timerPages[:]) ||
 		!ConfigurePollOperationPages(poll, pollPages[:]) ||
 		!ConfigureWorkerOperationPages(worker, workerPages[:]) {
 		t.Fatal("configure paged progress catalog")
 	}
 	handle := registerTestExecutor(t, registry)
 	if !BindExecutorSourceCatalog(driver, p, registry, handle, ExecutorSourceCatalog{
-		Waits: waits, Timers: timers, Poll: poll, Worker: worker,
+		Timers: timers, Poll: poll, Worker: worker,
 	}) {
 		t.Fatal("bind paged progress catalog")
 	}
@@ -136,82 +136,9 @@ func TestExecutorPollProgressSkipsConfiguredUnallocatedTails(t *testing.T) {
 	}
 }
 
-func TestExecutorPollProgressKeepsHighWaterAfterLowTimerRecycle(t *testing.T) {
-	const highSlot = 65
-	p := new(P)
-	driver := new(ExecutorDriver)
-	registry := new(ExecutorRegistry)
-	waits := new(WaitRegistrationTable)
-	timers := new(TimerRegistrationTable)
-	var pages [15]TimerRegistrationPage
-	if !ConfigureTimerRegistrationPages(timers, pages[:]) {
-		t.Fatal("configure high-water timer catalog")
-	}
-	handle := registerTestExecutor(t, registry)
-	if !BindExecutorSourceCatalog(driver, p, registry, handle, ExecutorSourceCatalog{Waits: waits, Timers: timers}) {
-		t.Fatal("bind high-water timer catalog")
-	}
-
-	var tokens [highSlot]WaitToken
-	var tickets [highSlot]WaitTicket
-	var handles [highSlot]TimerRegistrationHandle
-	for index := range tokens {
-		ticket, ok := ArmWait(&tokens[index])
-		if !ok {
-			t.Fatalf("arm timer %d", index)
-		}
-		deadline := int64(1_000)
-		if index == highSlot-1 {
-			deadline = 10
-		}
-		registered, ok := timers.Register(p, &tokens[index], ticket, deadline)
-		if !ok {
-			t.Fatalf("register timer %d", index)
-		}
-		tickets[index], handles[index] = ticket, registered
-	}
-	if handles[highSlot-1].Slot != highSlot {
-		t.Fatalf("highest timer slot = %d, want %d", handles[highSlot-1].Slot, highSlot)
-	}
-	for index := 0; index < highSlot-1; index++ {
-		if result := timers.Cancel(handles[index]); result != WaitCancelWon {
-			t.Fatalf("cancel low timer %d = %d", index, result)
-		}
-		consumeRegisteredOutcome(t, &tokens[index], tickets[index], WaitOutcomeCanceled)
-		if !timers.Retire(handles[index]) {
-			t.Fatalf("retire low timer %d", index)
-		}
-	}
-
-	limit, limitOK := timerRegistrationScanLimit(timers)
-	wantBudget := uint32(2*(highSlot+1) + 1)
-	if !limitOK || limit != highSlot {
-		t.Fatalf("timer high-water after low recycle = (%d, %t), want %d", limit, limitOK, highSlot)
-	}
-	if budget, ok := MinExecutorPollBudget(driver); !ok || budget != wantBudget {
-		t.Fatalf("high-water timer budget = (%d, %t), want %d", budget, ok, wantBudget)
-	}
-	progress, ok := PollExecutorSliceAt(driver, 10, wantBudget)
-	if !ok || !progress.Complete || progress.Used != wantBudget || progress.Timers != 1 ||
-		progress.Completed != 1 || progress.HasDeadline || progress.Epochs != 2 {
-		t.Fatalf("high-water timer poll = (%+v, %t)", progress, ok)
-	}
-	consumeRegisteredOutcome(t, &tokens[highSlot-1], tickets[highSlot-1], WaitOutcomeCompleted)
-	if !timers.Retire(handles[highSlot-1]) {
-		t.Fatal("retire highest timer")
-	}
-	if budget, ok := MinExecutorPollBudget(driver); !ok || budget != wantBudget {
-		t.Fatalf("binding-local high-water shrank after final recycle = (%d, %t), want %d", budget, ok, wantBudget)
-	}
-	closeTestExecutorDriver(t, driver)
-	if limit, ok := timerRegistrationScanLimit(timers); !ok || limit != 0 {
-		t.Fatalf("timer high-water after unbind = (%d, %t), want zero", limit, ok)
-	}
-}
-
 func TestExecutorPollSliceBudgetOneCompletesExactAcknowledgeTransaction(t *testing.T) {
 	p := new(P)
-	driver, registry, _, handle := bindTestExecutorDriver(t, p)
+	driver, registry, handle := bindTestExecutorDriver(t, p)
 	wantBudget := uint32(3)
 	if budget, ok := MinExecutorPollBudget(driver); !ok || budget != wantBudget {
 		t.Fatalf("minimum wait-only poll budget = (%d, %t), want %d", budget, ok, wantBudget)
@@ -259,150 +186,13 @@ func TestExecutorPollSliceBudgetOneCompletesExactAcknowledgeTransaction(t *testi
 	closeTestExecutorDriver(t, driver)
 }
 
-func TestExecutorPollSliceDoesNotResolveBeforeCompleteEpochA(t *testing.T) {
-	p := new(P)
-	driver, registry, waits, handle := bindTestExecutorDriver(t, p)
-	task := newYieldingTestG(t, "bounded-A")
-	if !Enqueue(p, task.g) {
-		t.Fatal("enqueue bounded-A task")
-	}
-	_, _, wait := parkRegisteredDriverTask(t, p, waits, task)
-	if result := waits.Post(wait); result != WaitRegistrationPosted {
-		t.Fatalf("post bounded-A wait = %d", result)
-	}
-	if result := registry.Request(handle); result != ExecutorRequestPublished {
-		t.Fatalf("request bounded-A poll = %d", result)
-	}
-
-	progress, ok := PollExecutorSlice(driver, 1)
-	if !ok || progress.Complete || !progress.More || progress.AtomicResolve || progress.Waits != 1 || progress.Promoted != 0 ||
-		p.readyHead != nil || !HasWaiting(p) || !registry.ObserveRequested(handle) {
-		t.Fatalf("A publication boundary = (%+v, %t), ready=%p waiting=%t requested=%t",
-			progress, ok, p.readyHead, HasWaiting(p), registry.ObserveRequested(handle))
-	}
-	progress, ok = PollExecutorSlice(driver, 1)
-	if !ok || progress.Complete || progress.AtomicResolve || progress.Promoted != 1 || p.readyHead != task.g || HasWaiting(p) ||
-		!registry.ObserveRequested(handle) {
-		t.Fatalf("A resolution boundary = (%+v, %t), ready=%p waiting=%t requested=%t",
-			progress, ok, p.readyHead, HasWaiting(p), registry.ObserveRequested(handle))
-	}
-	progress, ok = PollExecutorSlice(driver, 1)
-	if !ok || progress.Complete || registry.ObserveRequested(handle) || driver.poll.phase != executorPollEpochBPublish {
-		t.Fatalf("ack boundary = (%+v, %t), poll=%+v requested=%t",
-			progress, ok, driver.poll, registry.ObserveRequested(handle))
-	}
-	progress, ok = PollExecutorSlice(driver, 2)
-	if !ok || !progress.Complete || !progress.More || progress.Blocked || progress.Epochs != 2 || progress.Promoted != 1 {
-		t.Fatalf("B completion boundary = (%+v, %t)", progress, ok)
-	}
-
-	retireCompletedRegistration(t, waits, wait)
-	closeTestExecutorDriver(t, driver)
-	finishReadyDriverTasks(t, p, map[*G]*yieldingTestG{task.g: task})
-	if !TerminalG(p, task.g) {
-		t.Fatal("bounded-A task retained scheduler state")
-	}
-	runtime.KeepAlive(task.frame.memory)
-}
-
-func TestExecutorPollSliceBlockedWaitDoesNotRequestBusyRetry(t *testing.T) {
-	p := new(P)
-	driver, registry, waits, handle := bindTestExecutorDriver(t, p)
-	task := newYieldingTestG(t, "bounded-blocked")
-	if !Enqueue(p, task.g) {
-		t.Fatal("enqueue blocked task")
-	}
-	_, _, wait := parkRegisteredDriverTask(t, p, waits, task)
-	budget, ok := MinExecutorPollBudget(driver)
-	if !ok {
-		t.Fatal("minimum blocked poll budget")
-	}
-	progress, ok := PollExecutorSlice(driver, budget)
-	if !ok || !progress.Complete || progress.More || !progress.Blocked || progress.Completed != 0 ||
-		!HasWaiting(p) || driver.poll != (executorPollTransaction{}) {
-		t.Fatalf("blocked poll = (%+v, %t), waiting=%t poll=%+v", progress, ok, HasWaiting(p), driver.poll)
-	}
-	if result := PostWaitAndRequest(waits, wait, registry, handle); result.Wait != WaitRegistrationPosted ||
-		result.Executor != ExecutorRequestPublished {
-		t.Fatalf("wake blocked poll = %+v", result)
-	}
-	progress, ok = PollExecutorSlice(driver, budget)
-	if !ok || !progress.Complete || !progress.More || progress.Blocked || progress.Promoted != 1 {
-		t.Fatalf("woken blocked poll = (%+v, %t)", progress, ok)
-	}
-	retireCompletedRegistration(t, waits, wait)
-	closeTestExecutorDriver(t, driver)
-	finishReadyDriverTasks(t, p, map[*G]*yieldingTestG{task.g: task})
-	runtime.KeepAlive(task.frame.memory)
-}
-
-func TestExecutorPollSliceFreezesTimerSampleAcrossHostEntries(t *testing.T) {
-	p := new(P)
-	driver, _, _, timers, _ := bindTestExecutorDriverWithTimers(t, p)
-	firstToken, firstTicket := new(WaitToken), WaitTicket(0)
-	secondToken, secondTicket := new(WaitToken), WaitTicket(0)
-	var ok bool
-	if firstTicket, ok = ArmWait(firstToken); !ok {
-		t.Fatal("arm first bounded timer")
-	}
-	first, registered := timers.Register(p, firstToken, firstTicket, 10)
-	if !registered {
-		t.Fatal("register first bounded timer")
-	}
-	if secondTicket, ok = ArmWait(secondToken); !ok {
-		t.Fatal("arm second bounded timer")
-	}
-	second, registered := timers.Register(p, secondToken, secondTicket, 20)
-	if !registered {
-		t.Fatal("register second bounded timer")
-	}
-	budget, ok := MinExecutorPollBudget(driver)
-	if !ok {
-		t.Fatal("minimum timer poll budget")
-	}
-
-	// Visit wait slots and timer slot zero at now=15, then yield. Slot one must
-	// not observe a newer timestamp inside the same A/ack/B transaction.
-	progress, ok := PollExecutorSliceAt(driver, 15, 1)
-	if !ok || progress.Complete || progress.Timers != 1 || driver.poll.now != 15 || driver.poll.cursor != 1 {
-		t.Fatalf("partial timed poll = (%+v, %t), state=%+v", progress, ok, driver.poll)
-	}
-	progress, ok = PollExecutorSliceAt(driver, 25, 1)
-	if !ok || progress.Complete || driver.poll.now != 15 || driver.poll.source != executorCatalogDone ||
-		driver.poll.cursor != 0 || progress.Timers != 1 {
-		t.Fatalf("later sample changed frozen A epoch = (%+v, %t), state=%+v", progress, ok, driver.poll)
-	}
-	// Finish the rest of A and its acknowledgement exactly. Since B has not
-	// visited a source slot yet, the next host entry may freeze a newer sample
-	// for B without mixing timestamps within either epoch.
-	remainingAAndAck := uint32(2)
-	progress, ok = PollExecutorSliceAt(driver, 99, remainingAAndAck)
-	if !ok || progress.Complete || !driver.poll.resampleNow || driver.poll.phase != executorPollEpochBPublish {
-		t.Fatalf("timed A/ack boundary = (%+v, %t), state=%+v", progress, ok, driver.poll)
-	}
-	progress, ok = PollExecutorSliceAt(driver, 25, budget)
-	if !ok || !progress.Complete || progress.Timers != 2 || progress.HasDeadline {
-		t.Fatalf("fresh B timed epoch = (%+v, %t)", progress, ok)
-	}
-	consumeRegisteredOutcome(t, firstToken, firstTicket, WaitOutcomeCompleted)
-	if !timers.Retire(first) {
-		t.Fatal("retire first bounded timer")
-	}
-	consumeRegisteredOutcome(t, secondToken, secondTicket, WaitOutcomeCompleted)
-	if !timers.Retire(second) {
-		t.Fatal("retire second bounded timer")
-	}
-	closeTestExecutorDriver(t, driver)
-}
-
 func TestExecutorPollSliceHotControlSourceCannotExtendCatalogPass(t *testing.T) {
 	p := new(P)
 	driver := new(ExecutorDriver)
 	registry := new(ExecutorRegistry)
-	waits := new(WaitRegistrationTable)
 	control := new(TaskControlSource)
 	handle := registerTestExecutor(t, registry)
-	if !BindExecutorSourceCatalog(driver, p, registry, handle, ExecutorSourceCatalog{Waits: waits, Control: control}) {
+	if !BindExecutorSourceCatalog(driver, p, registry, handle, ExecutorSourceCatalog{Control: control}) {
 		t.Fatal("bind hot control source")
 	}
 	task := newYieldingTestG(t, "hot-control")

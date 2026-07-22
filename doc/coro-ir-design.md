@@ -1,10 +1,10 @@
 # LLGo Coroutine 语义标准化 IR 与统一 Lowering 设计
 
-状态：2026-07-22架构复审结论；可运行纵向基线已冻结，暂停新增能力。hidden runtime helper、intrinsic/call-elision、physical proof/implicit-fault、physical emission session/ordinary-compiler isolation、single-event Park protocol、channel/WaitSet Park envelope、ordinary semantic recipe/local Effect-Exec、await/spawn physical control choice、channel/select physical operation choice以及panic/outcome/cleanup choice十个封闭cohort已完成硬切换。其他LoweringFacts仍主要是report/cache identity，尚未成为production lowering的唯一事实源。在完成单一ProgramIR、单一emitter及runtime hard cutover前，不继续叠加语言或平台功能
+状态：2026-07-22架构硬切换收口。hidden runtime helper、intrinsic/call-elision、physical proof/implicit-fault、physical emission session/ordinary-compiler isolation、single-event Park protocol、channel/WaitSet Park envelope、ordinary semantic recipe/local Effect-Exec、await/spawn physical control choice、channel/select physical operation choice、panic/outcome/cleanup choice以及remaining call/value/worker choice的封闭cohort已经切换；Phase R的唯一native target、唯一logical Park、统一source dispatcher和单一profile也已完成。其他LoweringFacts仍主要是report/cache identity，whole-function emitter仍在迁移，因此本状态表示“旧runtime并行轨道已物理删除”，不表示完整语言、GC或平台能力已经完成
 
 更新：2026-07-22
 
-当前硬切换基线：`d940fb3dd`（`cpunion/llgo:llvm-coro`，已合并 PR #44）
+集成基线：`bc6f40e6f`（`cpunion/llgo:llvm-coro`）；本轮在其上完成Phase R最终cohort
 
 关联总体设计：[`llvm-coro-runtime-design.md`](./llvm-coro-runtime-design.md)
 
@@ -66,7 +66,7 @@ ProgramModelBuilder fixed point
 - 只增加 post-plan overlay 能解决 physical CFG 拼装，但不能消除 hidden helper 和 effect 事实的重复提取，收益只有一半。
 - 重写 runtime 或 `internal/coro` 固定点不会解决上述问题，风险反而更大。
 - 新设计可以成为后续 defer/panic/recover、dynamic coroutine descriptor、syscall/IO、精确 GC metadata 和多平台 adapter 的公共编译器底座；但它本身不会自动补齐这些尚未实现的能力。
-- 当前代码已从native single-P vertical slice推进到受限的Linux/Darwin双owner fleet：command M与peer pthread M各自驱动一个P/source shard，使用exact route、route-local poll/timer/doorbell和共享bounded worker；loopback TCP已在该profile fresh compile-link-run并完成10,000次压力。普通Go 1.26标准库源码风格的`time.Sleep`、冻结timer语义、固定syscall文件回环、高层`os.File`回环和loopback TCP又在同一fleet acceptance中全部通过；整组耗时1102.23s，各项依次为246.60s、375.42s、134.39s、109.01s、236.80s。这不能结论为“完整Go标准库和所有平台已经基本都可落地”：panic/unwind全矩阵、timer GC/synctest、tooling、cgo reentry、precise GC、动态P/affinity、parked-result迁移和其他平台driver仍需实现或生产验证，见第9、11节及《统一异步核心契约》第9.1节。
+- 当前代码已从native single-P vertical slice推进到受限的Linux/Darwin双owner fleet：command M与peer pthread M各自驱动一个P/source shard，使用exact route、route-local poll/timer/doorbell和共享bounded worker；loopback TCP已在该profile fresh compile-link-run并完成10,000次压力。普通Go 1.26标准库源码风格的`time.Sleep`、冻结timer语义、固定syscall文件回环、高层`os.File`回环和loopback TCP又在同一fleet acceptance中全部通过；最终hard-cutover复验的五个独立fresh compile-link-run分别为60.54s、84.02s、56.49s、78.39s和114.62s（并行执行，时间仅作诊断）。这不能结论为“完整Go标准库和所有平台已经基本都可落地”：panic/unwind全矩阵、timer GC/synctest、tooling、cgo reentry、precise GC、动态P/affinity、parked-result迁移和其他平台driver仍需实现或生产验证，见第9、11节及《统一异步核心契约》第9.1节。
 
 ## 2. 目标与非目标
 
@@ -205,7 +205,7 @@ Phase 35 修复过 direct receive resume status 跳回 logical block 首部、�
 
 ### 3.8 代码量事实
 
-相对当前PR基线`897d251f8`，2026-07-22 worktree共有64个提交、530个tracked变更文件，约
+以下是Phase R开始前、相对PR基线`897d251f8`的2026-07-22审计快照：worktree共有64个提交、530个tracked变更文件，约
 `+114,214/-3,946`，另有3个共191行的新runtime文件。测试约`+53,432/-464`，文档约
 `+2,475/-33`；排除测试和文档后，production约`+58,498/-3,449`，净增加约55,049行。
 
@@ -216,22 +216,22 @@ Phase 35 修复过 direct receive resume status 跳回 logical block 首部、�
 | `internal/build` | 4,468 | whole-program、cache、registry和bootstrap；11个阶段性能力开关放大组合面 |
 | `ssa` | 1,059 | 可复用LLVM coroutine builder、descriptor和metadata，非主要臃肿来源 |
 | runtime core | 8,064 | operation/select/cancel/quiescence多数为必要并发语义 |
-| runtime/platform adapter | 10,963 | V1/V2 logical wait、single-P/fleet和手写source catalog存在明显迁移重复 |
+| runtime/platform adapter | 10,963 | 当时V1/V2 logical wait、single-P/fleet和手写source catalog存在明显迁移重复 |
 | 其他 | 210 | 非主要项 |
 
 测试占新增行约47%，说明PR显示的总行数不能直接等同于runtime重量；但约55k净production增量仍然过大，不能用测试充分性解释。`cl/coro_pure_ssa.go`、`cl/coro_frame_retention.go`、`cl/coro_abi.go`和分散feature lowerer是统一planner/emitter最可能替换或显著缩小的区域；runtime的operation状态机不会因compiler IR自动消失。
 
 ### 3.9 2026-07-22耦合审计与停止线
 
-当前实现已越过“只是原型代码多”的范围，存在可量化的横向耦合：
+Phase R开始前实现已越过“只是原型代码多”的范围，存在可量化的横向耦合；本轮硬切换后的状态如下：
 
-- 旧`currentCoro`和六个可独立安装的physical emission字段已从production归零；`compile.go`与`instr.go`不再读取完整physical body。但协程专用lowerer仍在24个文件中保留47处`coroBody()`能力访问，尚未收敛成最终单一emitter。
-- `CoroPlan/EmissionUniverse`直接读取已由精确gate从412降到392处，但距离窄的function/site plan消费边界仍有明显差距。
-- `EnableCoro*`阶段开关的精确引用已从330降到316处；合法组合仍主要靠分散gate维持。
-- `ExecutorSourceSet`一个文件约767行，对7类source有153个typed field/case引用，bind失败回滚、scan、apply、deadline、empty、terminal close和unbind均手写展开。
-- native single-P与fleet选择/全局状态涉及29个production runtime文件、362处引用；fleet route 1通过“收养”旧program P/driver/source进入新模型，而不是由唯一fleet profile直接创建domain 0。
-- `WaitToken/WaitRegistration`逻辑队列与`ParkState/OperationID`同时存在；Timer和Poll还各自维护V1/V2 mode及共享generation兼容规则。
-- 当前`LoweringFacts`已经canonical化并进入cache identity，但production analysis/preflight/emitter几乎不消费它；`CoroOverlay`只有schema/verifier，没有production planner/emitter调用。继续直接实现Overlay会先增加第三条解释路径。
+- 旧`currentCoro`production访问为零；协程专用lowerer的body capability访问已降到40处并由精确AST gate限定，whole-function emitter尚未完成，因此这里仍是compiler下一阶段的主要债务。
+- `CoroPlan/EmissionUniverse`直接权威读取的精确预算为364，已经由各replacement cohort持续下降，但距离窄的function/site plan消费边界仍有差距。
+- production `EnableCoro*`阶段开关为零；只保留`None/Stackless`单一profile选择，target能力由profile和冻结catalog派生。
+- `ExecutorSourceSet`是唯一静态direct-call source dispatcher；bind/scan/apply/deadline/close/unbind只存在一套事务。各source只保留payload、physical commit/cancel和quiescence实现。
+- native production只创建fleet domain，不再收养旧program domain；single-P/fleet互斥build tag及两套路由、completion、ready-distribution实现已删除。
+- production logical wait只使用`ParkState/OperationID/WaitSetRecord`；旧wait queue、Timer/Poll双mode、semaphore/notify专用logical wait及旧program bootstrap接受路径均已删除。
+- `LoweringFacts`已经canonical化并进入cache identity，多个physical decision也已成为production authority；仍未迁移的facts及whole-function CFG不能通过增加第三条report-only路径推进。
 
 这形成三条明确停止线：
 
@@ -736,7 +736,7 @@ recursive plain SCC / unknown cost / overflow = unbounded
 
 ### 10.2 可进一步收敛的部分
 
-- `WaitToken/WaitRegistration` 与 V2 `ParkState/OperationID` 当前并存，但 `WaitRegistration` 仍承担 ExecutorDriver 的平台 wait/idle ingress，不能把所有带 V1 名字的机制统一视为 legacy。先建立 symbol/caller/replacement matrix，只有某条 producer、timer/wait 或 whole-episode compatibility path 已有逐项替代且无调用者后才删除。
+- logical wait已硬切到`ParkState/OperationID/WaitSetRecord`；平台idle ingress只保留POD request/doorbell和source mailbox，不再拥有第二份G wait状态。带版本后缀但仍属于当前物理ABI的结构不能按名字删除，任何替换仍须先完成symbol/caller/replacement matrix。
 - `ExecutorSourceSet` 已有统一协议，但当前手写 `if source != nil` catalog。按既有设计应由 target profile生成静态 direct-call catalog，避免每加一个source手改executor，又不引入Go interface dispatch。
 - Primitive/hook ABI应由 versioned catalog统一生成 compiler declaration、runtime export、signature validation和digest identity。
 - 完整结构审计应保留在构造、debug、test和terminal边界；热路径只做已认证的O(1) header/local-link校验，继续遵守现有cost certificate方向。
@@ -1014,7 +1014,7 @@ pure instruction emitter冒充完成：
 - source emission ledger要求上述每个非ordinary physical recipe精确上报一次。漏发、错recipe、重复发射、
   未sealed plan或codegen缺plan均立即失败；负向测试覆盖事务污染、重复commit、缺失projection以及recipe
   missing/mismatch。
-- architecture gate锁定builder=2、freeze=1、commit=1、lookup=2、recipe selection=7、recipe observation=7和
+- architecture gate锁定builder=2、freeze=1、commit=1、lookup=1、recipe selection=10、recipe observation=14和
   nil/bounds guard observation=10，
   并分别锁定精确文件集合；codegen proof rebuild和legacy physical selector均为0，没有回弹余量。
 
@@ -1201,9 +1201,9 @@ WaitSet reconciliation或whole-function CFG已经由单一emitter拥有。后续
 - 全部`TestCoro*`覆盖native/wasm32的await、interface、worker、timer、poll、allocation、panic与channel路径；
   observer负向测试继续证明漏消费、错recipe或重复消费会在编译期失败。
 
-该完成标记覆盖当前已知source call/value/storage的最终physical选择，不表示whole-function CFG或runtime legacy
-WaitToken/fleet分支已经删除。下一阶段必须直接完成统一function emitter与runtime Phase R硬切换，不再新增
-feature-local selector。
+该完成标记覆盖当前已知source call/value/storage的最终physical选择，不表示whole-function CFG已经统一。
+runtime旧logical wait/fleet分支随后已由Phase R删除；compiler下一阶段必须继续完成统一function emitter，不得
+重新引入feature-local selector。
 
 ### Phase C：analysis只消费facts
 
@@ -1264,7 +1264,7 @@ Phase B–F严格保持plan、runtime ABI和可观察行为不变；Phase G才�
 
 ### Phase R：runtime hard cutover（新增功能前必须完成）
 
-Phase R与compiler cohort可独立提交，但四个gate全部通过前不进入Phase G：
+Phase R与compiler cohort可独立提交，但四个gate全部通过前不进入Phase G。2026-07-22最终cohort已完成四项：
 
 1. **唯一native target**：native coroutine command直接创建fleet domain 0；删除program-state adoption、single-P target、default/fleet poll route、worker completion和ready distribution双实现。domain数量仍可先固定为2，但storage/lifecycle只存在一套。
 2. **唯一logical wait**：semaphore、notify、Sleep及剩余legacy park全部迁到`ParkState/OperationID`；删除G/P中的legacy WaitToken queue、Timer/Poll V1 mode和跨V1/V2 generation兼容分支。若平台idle ingress仍需要小型registration，必须是只持POD ID的物理mailbox，不能再次拥有逻辑G wait状态。
@@ -1272,6 +1272,8 @@ Phase R与compiler cohort可独立提交，但四个gate全部通过前不进入
 4. **唯一profile**：production只保留一个coroutine enable/profile选择；PhysicalABI、ChildAwait、Bootstrap、Channel、Worker、NativeFleet等阶段开关不再组成配置笛卡尔积。target capability由冻结profile/catalog派生，测试特例留在test-only builder。
 
 runtime hard cutover不删除`OperationRecord/ParkState/WaitSetRecord/result lease/cancel/detach/quiescence/producer admission`。这些是正确性的正交事实，不是legacy层。
+
+硬切换额外删除了两阶段旧program bootstrap/factory的runtime与compiler接受路径；production只发射并验证当前五阶段bootstrap descriptor。`coro_hard_cutover_gate_test.go`对旧logical wait、阶段开关、旧Timer/Poll/sema/notify ABI以及旧bootstrap符号实行零容忍，`coro_architecture_gate_test.go`同时把`legacyWait/nativeFork/stagedFeatureGate/fleetBuildFiles`精确冻结为零。后续若需要ABI演进，应新增完整版本提案并一次迁移，不能恢复隐式双轨。
 
 ### 14.1 不可回退的架构gate
 
@@ -1351,9 +1353,9 @@ gate应解析Go AST/build constraints或检查冻结catalog，不依赖容易被
 
 ### 16.3 target矩阵
 
-当前feature PR必跑层按现有 `coroutine.yml`：Ubuntu 22.04；Go 1.24.2上的LLVM 19/20/21/22和Go 1.26.5上的LLVM 19；host runtime core `-race -shuffle`、JS/WASM test adapter、native timer/time.Sleep focused E2E、arm/riscv/WASM/baremetal compile/link检查。双backend阶段把快速structural/verify矩阵与LLVM 19完整E2E拆开，避免五个矩阵重复重runtime而超过当前15分钟job预算。
+当前feature PR必跑层按现有 `coroutine.yml`：Ubuntu 22.04；Go 1.26.5上的LLVM 19/20/21/22 compatibility矩阵，并在LLVM 19单独运行integration与targets lane；host runtime core `-race -shuffle`、JS/WASM test adapter、native timer/time.Sleep focused E2E、arm/riscv/WASM/baremetal compile/link检查。快速structural/verify矩阵与LLVM 19完整E2E保持拆分，避免四个compatibility job重复重runtime而超过20分钟job预算。
 
-upstream cutover gate再要求：新增macOS native执行；恢复当前workflow注释中暂时关闭的full Go与cache workflow；验证native arm64/riscv64等cross compile、wasm32实际production adapter、baremetal/embedded无host依赖，以及目标支持的nogc/BDWGC/tinygc profile。未落地production adapter的平台不能用compile-only冒充运行兼容。
+upstream cutover gate再要求：macOS native执行；upstream `main` PR同时触发full Go、cache、LLGo与target workflow，focused coroutine workflow也明确接受`main`；验证native arm64/riscv64等cross compile、wasm32实际production adapter、baremetal/embedded无host依赖，以及目标支持的nogc/BDWGC/tinygc profile。未落地production adapter的平台不能用compile-only冒充运行兼容。
 
 ### 16.4 编译性能
 
@@ -1418,21 +1420,22 @@ channel/WaitSet Park envelope、ordinary semantic recipe/local Effect-Exec、awa
 channel/select physical operation choice、panic/outcome/cleanup choice及remaining call/value/worker choice cohort已完成production切换，但其余facts仍未替换production classifier/emitter；继续直接
 增加完整Overlay仍会扩大双轨。后续严格按replacement cohort推进：
 
-1. 先提交当前双owner fleet可运行基线及五项fresh E2E结果，不再混入新能力。
+1. 先提交当前双owner fleet、单一Park/source/profile硬切换及五项fresh E2E结果，不再混入新能力。
 2. architecture gate test已经冻结当前债务的精确AST/build-constraint快照；每个cohort必须在删除旧路径的
    同一提交下调数字和白名单，禁止留下可反弹额度，也禁止新增`EnableCoro*`、raw-SSA classifier、
    single-P/fleet分支和logical WaitToken consumer。
 3. hidden helper、intrinsic/call-elision、physical proof/implicit-fault、emission session、single-event Park、
    channel/WaitSet Park envelope、ordinary semantic recipe/local Effect-Exec、await/spawn physical control
    choice、channel/select physical operation choice、panic/outcome/cleanup choice及remaining call/value/worker
-   choice cohort已按上述gate完成；下一步迁移whole-function emitter和WaitSet runtime表示，不能重新引入raw SSA helper、
+   choice cohort已按上述gate完成；下一步只迁移whole-function emitter，runtime WaitSet/Park表示已经收口，不能重新引入raw SSA helper、
    intrinsic、local body scanner、feature-local control selector、fault selector或codegen proof rebuild。
 4. 每个完整function cohort由统一emitter接管后立即删除旧CFG拼装，最终清除普通compiler中的physical
    feature分支；不得把B.11统一call dispatcher误当成whole-function emitter已经完成。
-5. 并行完成runtime Phase R：fleet唯一target、Park/Operation唯一logical wait、统一source dispatcher和
-   单一profile；每一项都以旧production符号为零作为完成条件。
-6. 运行runtime race、LLVM 19–22、native/wasm32结构验证和五项fresh stdlib E2E。只有全部architecture
-   gate通过，才恢复P-neutral result、dynamic P、GC、panic/Goexit和平台adapter等功能开发。
+5. runtime Phase R已经完成：fleet唯一target、Park/Operation唯一logical wait、统一source dispatcher和
+   单一profile均以旧production符号为零，并由hard-cutover gate持续约束。
+6. 本轮合并门运行runtime race、LLVM 19–22、native/wasm32结构验证和五项fresh stdlib E2E。后续compiler
+   whole-function emitter仍按完整replacement cohort推进；P-neutral result、dynamic P、GC、panic/Goexit和更多平台adapter
+   属于功能阶段，不能借机恢复旧runtime轨道。
 
 迁移过程可以用独立test invocation比较旧/新输出，但production永远只有一个被选择的consumer；临时双轨
 不得跨cohort保留，也不得以feature flag形式进入下一阶段。最终目标不是“文档中有新架构”，而是旧架构

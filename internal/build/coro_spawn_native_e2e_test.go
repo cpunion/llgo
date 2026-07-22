@@ -735,7 +735,6 @@ func assertCoroSpawnNativeE2ELinkedSymbols(t *testing.T, executable string) {
 	for _, required := range []string{
 		coroProgramRunSliceSymbolV2,
 		coroProgramContinueSliceSymbolV2,
-		coroNativePostWaitSymbolV1,
 		"__llgo_coro_doorbell_open_v1",
 		"__llgo_coro_doorbell_read_v1",
 		"__llgo_coro_doorbell_write_v1",

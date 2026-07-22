@@ -142,19 +142,9 @@ func coroStdlibSyncAcceptanceConfig(fixture coroStdlibSyncFixture, output string
 	conf.OutFile = output
 	conf.ForceRebuild = true
 	conf.CoroProfile = CoroProfileStackless
-	conf.CoroProfile = CoroProfileStackless
-	conf.CoroProfile = CoroProfileStackless
-	conf.CoroProfile = CoroProfileStackless
 	// Ordinary stdlib code contains defer/panic boundaries (notably sync.Once).
 	// Managed child outcomes must therefore return through the parent's cleanup
-	// path instead of using legacy native-stack unwinding.
-	conf.CoroProfile = CoroProfileStackless
-	conf.CoroProfile = CoroProfileStackless
-	conf.CoroProfile = CoroProfileStackless
-	conf.CoroProfile = CoroProfileStackless
-	conf.CoroProfile = CoroProfileStackless
-	conf.CoroProfile = CoroProfileStackless
-	conf.CoroProfile = CoroProfileStackless
+	// path through the single stackless profile.
 	conf.CoroPlanBuilder = func(input CoroPlanInput) (*coro.SSAPlan, error) {
 		plan, err := input.Analyze(nil, coro.SSAConfig{
 			DynamicResolution:    coro.DynamicCHAClosed,

@@ -36,17 +36,27 @@ func newReadyTaskCancelFixture(t *testing.T) (*P, *G) {
 }
 
 func attachWaitingTaskCancelFixture(p *P, g *G) {
+	record := &WaitSetRecord{g: g, ticket: g.park.ticket, state: waitSetRecordActive}
+	frame := &Frame{owner: g, parkWait: record}
 	g.state = GWaiting
 	g.waiting = true
-	p.waitHead = g
-	p.waitTail = g
+	g.active = frame
+	p.parkWaitHead = record
+	p.parkWaitTail = record
 }
 
 func detachWaitingTaskCancelFixture(p *P, g *G) {
-	p.waitHead = nil
-	p.waitTail = nil
+	record := g.active.parkWait
+	p.parkWaitHead = nil
+	p.parkWaitTail = nil
+	if p.affectedWaitHead == record {
+		p.affectedWaitHead = nil
+		p.affectedWaitTail = nil
+	}
+	g.active.parkWait = nil
+	g.active = nil
+	*record = WaitSetRecord{}
 	g.waiting = false
-	g.nextWait = nil
 }
 
 func resumeTaskCancelFixture(t *testing.T, p *P, g *G) {
@@ -209,10 +219,10 @@ func TestLateTaskCancellationSuppressesReadyWinnerAndKeepsLease(t *testing.T) {
 		!DetachParkOperation(&g.park, ticket, &record, id) || !ParkReady(&g.park, ticket) {
 		t.Fatal("detach late-cancel winner")
 	}
+	resumeTaskCancelFixture(t, p, g)
 	if !RequestTaskCancellation(p, g, TaskCancelAbort) {
 		t.Fatal("request task abort after winner became ready")
 	}
-	resumeTaskCancelFixture(t, p, g)
 	outcome, caseID, lease, task, consumed := ConsumeTaskParkSet(p, g, ticket)
 	if !consumed || outcome != ParkOutcomeCanceled || caseID != 0 || !lease.Valid() || task != TaskCancelAbort {
 		t.Fatalf("consume late-canceled winner = (%d, %d, %+v, %d, %t)", outcome, caseID, lease, task, consumed)
@@ -265,19 +275,6 @@ func TestTaskCancellationCleanupDoesNotReenterOrCancelCleanupPark(t *testing.T) 
 		t.Fatalf("consume cleanup park = (%d, %d, %+v, %d, %t)", outcome, caseID, lease, task, consumed)
 	}
 	finishTaskCancelFixture(t, p, g, TaskCancelAbort)
-}
-
-func TestTaskCancellationRejectsLegacyWaitWithoutPartialMutation(t *testing.T) {
-	p := new(P)
-	g := new(G)
-	if !InitG(g) {
-		t.Fatal("initialize legacy waiting G")
-	}
-	attachWaitingTaskCancelFixture(p, g)
-	if RequestTaskCancellation(p, g, TaskCancelAbort) || g.park.taskCancelKind != TaskCancelNone ||
-		g.park.taskCancelPhase != taskCancelIdle || g.park.phase != parkIdle {
-		t.Fatal("partially canceled legacy wait without V2 park")
-	}
 }
 
 func TestTaskCancellationRejectsCyclicOwnerQueue(t *testing.T) {

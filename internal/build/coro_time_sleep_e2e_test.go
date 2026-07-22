@@ -42,13 +42,10 @@ import (
 )
 
 const (
-	coroTimeSleepPrepareSymbolV1 = "__llgo_coro_timer_prepare_after_or_abort_v1"
-	coroTimeSleepRetireSymbolV1  = "__llgo_coro_timer_retire_completed_or_abort_v1"
-	coroTimeSleepParkHookV1      = "__llgo_coro_park_prepare_v1"
-	coroTimeSleepParkSymbolV2    = "__llgo_coro_timer_park_v2"
-	coroTimeSleepResumeSymbolV2  = "__llgo_coro_timer_resume_v2"
-	coroTimeSleepPreemptPollV1   = "__llgo_coro_preempt_poll_v1"
-	coroTimeSleepAwaitHookV1     = "__llgo_coro_await_prepare_v3"
+	coroTimeSleepParkSymbolV2   = "__llgo_coro_timer_park_v2"
+	coroTimeSleepResumeSymbolV2 = "__llgo_coro_timer_resume_v2"
+	coroTimeSleepPreemptPollV1  = "__llgo_coro_preempt_poll_v1"
+	coroTimeSleepAwaitHookV1    = "__llgo_coro_await_prepare_v3"
 )
 
 // TestCoroNativeTimeSleepProductionPlanAndCodegen starts from an ordinary
@@ -112,10 +109,10 @@ func TestCoroNativeTimeSleepProductionPlanAndCodegen(t *testing.T) {
 		}
 		return runtimePackage
 	})
-	emission, err := cl.PrepareEmissionUniverse(prog, nil, []cl.EmissionPackage{
+	emission, err := cl.PrepareEmissionUniverseWithOptions(prog, nil, []cl.EmissionPackage{
 		{SSA: timeSSA, Files: timeFiles, Identity: "time"},
 		{SSA: mainSSA, Files: mainFiles, Identity: "example.com/llgo-coro-time-sleep"},
-	})
+	}, cl.EmissionUniverseOptions{CoroProfile: cl.CoroProfileStackless})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +168,10 @@ func TestCoroNativeTimeSleepProductionPlanAndCodegen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	intrinsicCall := findCoroNativeTimerE2EDirectCall(t, sleep, intrinsic)
+	intrinsicCall, err := findCoroTimeSleepDirectCall(sleep, intrinsic)
+	if err != nil {
+		t.Fatal(err)
+	}
 	assertCoroTimeSleepNonpositiveFastPath(t, sleep, intrinsicCall)
 	semantics, isIntrinsic, semanticsErr := coroIntrinsicCallSiteSemanticsForTest(emission, intrinsicCall)
 	if semanticsErr != nil || !isIntrinsic || !semantics.SuspendsCurrentFrame() || !plan.ElidesCall(intrinsicCall) {
@@ -491,8 +491,8 @@ func assertCoroTimerSleepV2FrameIR(t *testing.T, label, body string, needsPreemp
 	t.Helper()
 	for _, forbidden := range []string{
 		"runtime.AllocZ",
-		coroTimeSleepPrepareSymbolV1,
-		coroTimeSleepRetireSymbolV1,
+		"__llgo_coro_timer_prepare_after_or_abort_v1",
+		"__llgo_coro_timer_retire_completed_or_abort_v1",
 		"llgo.coroTimerSleep",
 	} {
 		if strings.Contains(body, forbidden) {
@@ -559,103 +559,6 @@ func assertCoroTimeSleepDirectCoroCall(plan *coro.SSAPlan, call ssa.CallInstruct
 		return fmt.Errorf("%s production CallPlan = %+v, present=%t; want one closed DirectCoro target %q", label, got, ok, targetID)
 	}
 	return nil
-}
-
-// assertCoroTimerRetainedFrameIR checks the exact pre-transform LLVM body. A
-// retained timer token must stay in the LLVM coroutine frame, not escape
-// through the ordinary Go heap allocator. The only suspension after the
-// fail-stop prepare and before its matching retire is the one park handoff.
-// A function which independently needs preemption must poll before entering
-// the transaction; no function may poll or yield while the token is retained.
-func assertCoroTimerRetainedFrameIR(t *testing.T, label, body string, needsPreempt bool) {
-	t.Helper()
-	if strings.Contains(body, "runtime.AllocZ") {
-		t.Fatalf("%s retained token escaped through runtime.AllocZ:\n%s", label, body)
-	}
-	prepare := strings.Index(body, coroTimeSleepPrepareSymbolV1)
-	retire := strings.Index(body, coroTimeSleepRetireSymbolV1)
-	if prepare < 0 || retire <= prepare || strings.Count(body, coroTimeSleepPrepareSymbolV1) != 1 || strings.Count(body, coroTimeSleepRetireSymbolV1) != 1 {
-		t.Fatalf("%s does not contain one ordered prepare/retire pair:\n%s", label, body)
-	}
-	prepareBlockStart := strings.LastIndex(body[:prepare], "\n_llgo_")
-	if prepareBlockStart < 0 {
-		prepareBlockStart = 0
-	}
-	poll := strings.LastIndex(body[prepareBlockStart:prepare], coroTimeSleepPreemptPollV1)
-	if needsPreempt && poll < 0 {
-		prepareLabelStart := prepareBlockStart + 1
-		prepareLabelEnd := strings.IndexByte(body[prepareLabelStart:], ':')
-		if prepareBlockStart == 0 || prepareLabelEnd < 0 {
-			t.Fatalf("%s timer prepare has no named LLVM block:\n%s", label, body)
-		}
-		prepareLabel := body[prepareLabelStart : prepareLabelStart+prepareLabelEnd]
-		predecessorPoll := strings.LastIndex(body[:prepareBlockStart], coroTimeSleepPreemptPollV1)
-		pollBlockStart := -1
-		if predecessorPoll >= 0 {
-			pollBlockStart = strings.LastIndex(body[:predecessorPoll], "\n_llgo_")
-		}
-		if pollBlockStart < 0 {
-			t.Fatalf("%s has no preemption poll before retaining its frame token:\n%s", label, body)
-		}
-		pollBlockEnd := strings.Index(body[predecessorPoll:], "\n_llgo_")
-		if pollBlockEnd < 0 {
-			t.Fatalf("%s preemption poll block has no successor block boundary:\n%s", label, body)
-		}
-		pollBlock := body[pollBlockStart : predecessorPoll+pollBlockEnd]
-		var branch string
-		for _, line := range strings.Split(pollBlock, "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "br i1 ") {
-				branch = line
-			}
-		}
-		targets := strings.Split(branch, ", label %")
-		if len(targets) != 3 {
-			t.Fatalf("%s nearest preemption poll does not end in a binary LLVM branch: %q\n%s", label, branch, body)
-		}
-		trueLabel := strings.Fields(targets[1])
-		falseLabel := strings.Fields(targets[2])
-		if len(trueLabel) == 0 || len(falseLabel) == 0 || falseLabel[0] != prepareLabel {
-			t.Fatalf("%s nearest preemption poll false successor = %q, want timer prepare block %q: %q\n%s", label, falseLabel, prepareLabel, branch, body)
-		}
-		yieldBlockStart := strings.Index(body, "\n"+trueLabel[0]+":")
-		if yieldBlockStart < 0 {
-			t.Fatalf("%s preemption true successor %q has no LLVM block:\n%s", label, trueLabel[0], body)
-		}
-		yieldBlockEnd := strings.Index(body[yieldBlockStart+1:], "\n_llgo_")
-		if yieldBlockEnd < 0 {
-			yieldBlockEnd = len(body) - yieldBlockStart - 1
-		}
-		yieldBlock := body[yieldBlockStart : yieldBlockStart+1+yieldBlockEnd]
-		if !strings.Contains(yieldBlock, "__llgo_coro_yield_prepare_v1") {
-			t.Fatalf("%s preemption true successor %q does not prepare a yield:\n%s", label, trueLabel[0], body)
-		}
-	}
-	parkBlockEnd := strings.Index(body[prepare:], "\n\n")
-	if parkBlockEnd < 0 {
-		t.Fatalf("%s prepare block has no LLVM block boundary:\n%s", label, body)
-	}
-	parkBlock := body[prepare : prepare+parkBlockEnd]
-	park := strings.Index(parkBlock, coroTimeSleepParkHookV1)
-	suspend := strings.Index(parkBlock, "@llvm.coro.suspend")
-	parkCount := strings.Count(parkBlock, coroTimeSleepParkHookV1)
-	suspendCount := strings.Count(parkBlock, "@llvm.coro.suspend")
-	if park < 0 || suspend <= park || parkCount != 1 || suspendCount != 1 {
-		t.Fatalf("%s retained-frame span is not exactly one park suspension (park=%d suspend=%d park-count=%d suspend-count=%d):\n%s", label, park, suspend, parkCount, suspendCount, body)
-	}
-	resumeBlockStart := strings.LastIndex(body[:retire], "\n_llgo_")
-	if resumeBlockStart < 0 {
-		t.Fatalf("%s retire has no LLVM resume block:\n%s", label, body)
-	}
-	resumePrefix := body[resumeBlockStart:retire]
-	if strings.Contains(resumePrefix, "@llvm.coro.suspend") {
-		t.Fatalf("%s resume-to-retire span contains a second suspension:\n%s", label, body)
-	}
-	for _, forbidden := range []string{coroTimeSleepPreemptPollV1, coroTimeSleepAwaitHookV1, "__llgo_coro_yield_prepare_v1"} {
-		if strings.Contains(parkBlock, forbidden) || strings.Contains(resumePrefix, forbidden) {
-			t.Fatalf("%s retained-frame span contains forbidden handoff %q:\n%s", label, forbidden, body)
-		}
-	}
 }
 
 func assertCoroTimeSleepAwaitsIR(t *testing.T, label, body string, childSymbols ...string) {

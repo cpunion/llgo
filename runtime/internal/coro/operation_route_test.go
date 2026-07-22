@@ -27,7 +27,6 @@ type routeManualFixture struct {
 	p        *P
 	driver   *ExecutorDriver
 	registry *ExecutorRegistry
-	waits    *WaitRegistrationTable
 	manual   *ManualOperationSource
 	handle   ExecutorHandle
 	route    RouteID
@@ -37,7 +36,6 @@ type routeWorkerFixture struct {
 	p        *P
 	driver   *ExecutorDriver
 	registry *ExecutorRegistry
-	waits    *WaitRegistrationTable
 	worker   *WorkerOperationSource
 	handle   ExecutorHandle
 	route    RouteID
@@ -49,13 +47,12 @@ func bindRouteManualFixture(t *testing.T, route RouteID) *routeManualFixture {
 		p:        new(P),
 		driver:   new(ExecutorDriver),
 		registry: new(ExecutorRegistry),
-		waits:    new(WaitRegistrationTable),
 		manual:   new(ManualOperationSource),
 		route:    route,
 	}
 	fixture.handle = registerTestExecutor(t, fixture.registry)
 	if !BindExecutorSourceCatalogAtRoute(fixture.driver, fixture.p, fixture.registry, fixture.handle, route,
-		ExecutorSourceCatalog{Waits: fixture.waits, Manual: fixture.manual}) {
+		ExecutorSourceCatalog{Manual: fixture.manual}) {
 		t.Fatal("bind route-aware manual driver")
 	}
 	return fixture
@@ -71,13 +68,12 @@ func bindRouteWorkerFixture(
 		p:        new(P),
 		driver:   new(ExecutorDriver),
 		registry: registry,
-		waits:    new(WaitRegistrationTable),
 		worker:   new(WorkerOperationSource),
 		route:    route,
 	}
 	fixture.handle = registerTestExecutor(t, registry)
 	if !BindExecutorSourceCatalogAtRoute(fixture.driver, fixture.p, registry, fixture.handle, route,
-		ExecutorSourceCatalog{Waits: fixture.waits, Worker: fixture.worker}) {
+		ExecutorSourceCatalog{Worker: fixture.worker}) {
 		t.Fatal("bind route-aware worker driver")
 	}
 	return fixture
@@ -398,11 +394,10 @@ func TestOperationRouteControlUsesBoundExecutor(t *testing.T) {
 	p := new(P)
 	driver := new(ExecutorDriver)
 	executors := new(ExecutorRegistry)
-	waits := new(WaitRegistrationTable)
 	control := new(TaskControlSource)
 	executor := registerTestExecutor(t, executors)
 	if !BindExecutorSourceCatalogAtRoute(driver, p, executors, executor, route,
-		ExecutorSourceCatalog{Waits: waits, Control: control}) || !routes.Bind(route, driver) {
+		ExecutorSourceCatalog{Control: control}) || !routes.Bind(route, driver) {
 		t.Fatal("bind routed control driver")
 	}
 	g := new(G)
@@ -536,14 +531,13 @@ func TestRouteAwareSourceBindingRejectsIdentityChange(t *testing.T) {
 	}
 	driver := new(ExecutorDriver)
 	executors := new(ExecutorRegistry)
-	waits := new(WaitRegistrationTable)
 	executor := registerTestExecutor(t, executors)
 	if BindExecutorSourceCatalogAtRoute(driver, p, executors, executor, 1,
-		ExecutorSourceCatalog{Waits: waits, Manual: manual}) || *driver != (ExecutorDriver{}) || !waits.CanRelease() {
+		ExecutorSourceCatalog{Manual: manual}) || *driver != (ExecutorDriver{}) {
 		t.Fatal("changed a source's persistent route identity")
 	}
 	if !BindExecutorSourceCatalogAtRoute(driver, p, executors, executor, 2,
-		ExecutorSourceCatalog{Waits: waits, Manual: manual}) {
+		ExecutorSourceCatalog{Manual: manual}) {
 		t.Fatal("rebind source at its established route")
 	}
 	closeTestExecutorDriver(t, driver)

@@ -52,7 +52,6 @@ type coroProgramTestTargetStateV1 struct {
 	reentrantWrongRunResult        coroProgramRunResultV2
 	reenterLegacyRunBeforeReturn   bool
 	reentrantLegacyRunStatus       coroProgramDriveStatusV1
-	completeWaitBeforeBeginReturn  bool
 	waitBeginDepth                 uint32
 	maxWaitBeginDepth              uint32
 	completeCloseBeforeBeginReturn bool
@@ -182,22 +181,6 @@ func coroTargetBeginExecutorWaitV1(handle coro.ExecutorHandle, epoch uint32, dea
 	defer func() { state.waitBeginDepth-- }()
 	state.waitCalls++
 	state.waitEpoch = epoch
-	if state.completeWaitBeforeBeginReturn {
-		if activeCoroProgramDriver == nil {
-			return coroTargetDispatchInvalidV1
-		}
-		posted := coro.PostWaitAndRequest(
-			&coroProgramWaitTableV1State,
-			activeCoroProgramDriver.waitRegistration,
-			&coroProgramExecutorRegistryV1State,
-			handle,
-		)
-		if posted.Wait != coro.WaitRegistrationPosted || posted.Executor != coro.ExecutorRequestIdleWake {
-			return coroTargetDispatchInvalidV1
-		}
-		state.waitEpoch = 0
-		return coroTargetDispatchCompleteV1
-	}
 	return coroTargetDispatchPendingV1
 }
 

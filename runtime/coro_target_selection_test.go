@@ -68,7 +68,8 @@ func TestCoroNativeTargetBuildSelection(t *testing.T) {
 			if err := json.Unmarshal(output, &pkg); err != nil {
 				t.Fatalf("decode coroutine target package: %v", err)
 			}
-			native := slices.Contains(pkg.GoFiles, "coro_target_native_llgo.go")
+			native := slices.Contains(pkg.GoFiles, "coro_target_native_llgo.go") ||
+				slices.Contains(pkg.GoFiles, "coro_target_native_fleet_llgo.go")
 			timer := slices.Contains(pkg.GoFiles, "coro_executor_driver_timer_llgo.go") &&
 				slices.Contains(pkg.GoFiles, "coro_target_wait_timer_llgo.go") &&
 				slices.Contains(pkg.GoFiles, "coro_timer_owner_llgo.go")

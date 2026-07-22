@@ -80,9 +80,6 @@ func launchSuspending() { go suspending() }
 	if !coroPlanContainsSpawn(plan) {
 		t.Fatal("emitted plan lost its spawn site")
 	}
-	if err := validateCoroClosedStaticSpawnRunGate(&Config{CoroProfile: CoroProfileStackless}, plan, ""); err == nil || !strings.Contains(err.Error(), "runnable program bootstrap v2") {
-		t.Fatalf("non-runnable spawn gate error = %v", err)
-	}
 	err = validateCoroClosedStaticSpawnRunGate(&Config{CoroProfile: CoroProfileStackless}, plan, "")
 	if err == nil || !strings.Contains(err.Error(), "may-park") || !strings.Contains(err.Error(), "main-return cancellation subset") {
 		t.Fatalf("runnable spawn gate error = %v", err)
@@ -323,7 +320,11 @@ func launch() { go target() }
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = validateCoroClosedStaticSpawnRunGate(&Config{CoroProfile: CoroProfileStackless}, plan, test.frameABI)
+			conf := &Config{CoroProfile: CoroProfileStackless}
+			if test.enableWorker {
+				conf.Goos, conf.Goarch = "linux", "amd64"
+			}
+			err = validateCoroClosedStaticSpawnRunGate(conf, plan, test.frameABI)
 			if test.wantOK {
 				if err != nil {
 					t.Fatalf("safe runnable spawn rejected: %v", err)
@@ -366,40 +367,6 @@ func TestCoroPlanInputClosedStaticSpawnFailsClosedOnUnsupportedShapes(t *testing
 			_, err := input.Analyze(coro.Roots{{Function: ssaPkg.Func("launch"), Demand: coro.AsyncDemand}}, coro.SSAConfig{MaxPlainInstructions: -1})
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("error = %v, want substring %q", err, test.want)
-			}
-		})
-	}
-}
-
-func TestBuildCoroPlanClosedStaticSpawnCapabilityDependencies(t *testing.T) {
-	tests := []struct {
-		name string
-		conf *Config
-		want string
-	}{
-		{
-			name: "runnable bootstrap",
-			conf: &Config{CoroProfile: CoroProfileStackless},
-			want: "runnable program bootstrap v2 is required",
-		},
-		{
-			name: "bootstrap ABI",
-			conf: &Config{CoroProfile: CoroProfileStackless},
-			want: "program bootstrap ABI is required",
-		},
-		{
-			name: "child await",
-			conf: &Config{
-				BuildMode: BuildModeExe, CoroProfile: CoroProfileStackless,
-			},
-			want: "coroutine child await is required",
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			err := buildCoroPlan(&context{buildConf: test.conf})
-			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("dependency error = %v, want %q", err, test.want)
 			}
 		})
 	}

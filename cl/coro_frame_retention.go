@@ -26,112 +26,13 @@ import (
 	"strconv"
 
 	"github.com/goplus/llgo/internal/coro"
-	llssa "github.com/goplus/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
-)
-
-const (
-	coroTimerPrepareAfterOrAbortSymbolV1        = "__llgo_coro_timer_prepare_after_or_abort_v1"
-	coroTimerRetireCompletedOrAbortSymbolV1     = "__llgo_coro_timer_retire_completed_or_abort_v1"
-	coroSemaphorePrepareOrAbortSymbolV1         = "__llgo_coro_sema_prepare_or_abort_v1"
-	coroSemaphoreRetireCompletedOrAbortSymbolV1 = "__llgo_coro_sema_retire_completed_or_abort_v1"
-	coroNotifyPrepareOrAbortSymbolV1            = "__llgo_coro_notify_prepare_or_abort_v1"
-	coroNotifyRetireCompletedOrAbortSymbolV1    = "__llgo_coro_notify_retire_completed_or_abort_v1"
-)
-
-type coroFrameRetentionContractKind uint8
-
-const (
-	coroFrameRetentionContractInvalid coroFrameRetentionContractKind = iota
-	coroFrameRetentionContractTimerV1
-	coroFrameRetentionContractSemaphoreV1
-	coroFrameRetentionContractNotifyV1
-)
-
-// coroFrameRetentionContract is the only extension point for current-frame
-// park transactions. The proof below is source-agnostic: a contract freezes
-// the two physical symbols, their exact signatures, the first of three
-// prepare output pointers, and the matching retire identity positions. No
-// event source gets a separate allocation, liveness, critical-span, or coro
-// lowering implementation.
-type coroFrameRetentionContract struct {
-	kind                coroFrameRetentionContractKind
-	id                  string
-	prepareSymbol       string
-	retireSymbol        string
-	prepareOutputStart  int
-	retireIdentityStart int
-	retireParameters    int
-	retireResults       int
-}
-
-var (
-	coroTimerFrameRetentionContractV1 = coroFrameRetentionContract{
-		kind: coroFrameRetentionContractTimerV1, id: "timer.v1",
-		prepareSymbol:       coroTimerPrepareAfterOrAbortSymbolV1,
-		retireSymbol:        coroTimerRetireCompletedOrAbortSymbolV1,
-		prepareOutputStart:  2,
-		retireIdentityStart: 1,
-		retireParameters:    4,
-	}
-	coroSemaphoreFrameRetentionContractV1 = coroFrameRetentionContract{
-		kind: coroFrameRetentionContractSemaphoreV1, id: "semaphore.v1",
-		prepareSymbol:       coroSemaphorePrepareOrAbortSymbolV1,
-		retireSymbol:        coroSemaphoreRetireCompletedOrAbortSymbolV1,
-		prepareOutputStart:  2,
-		retireIdentityStart: 1,
-		retireParameters:    4,
-	}
-	coroNotifyFrameRetentionContractV1 = coroFrameRetentionContract{
-		kind: coroFrameRetentionContractNotifyV1, id: "notify.v1",
-		prepareSymbol:       coroNotifyPrepareOrAbortSymbolV1,
-		retireSymbol:        coroNotifyRetireCompletedOrAbortSymbolV1,
-		prepareOutputStart:  3,
-		retireIdentityStart: 1,
-		retireParameters:    4,
-	}
-)
-
-func coroFrameRetentionContracts(abi string) []*coroFrameRetentionContract {
-	switch abi {
-	case CoroFrameRetentionTimerABIV1:
-		return []*coroFrameRetentionContract{&coroTimerFrameRetentionContractV1}
-	case CoroFrameRetentionParkABIV2:
-		return []*coroFrameRetentionContract{
-			&coroTimerFrameRetentionContractV1,
-			&coroSemaphoreFrameRetentionContractV1,
-			&coroNotifyFrameRetentionContractV1,
-		}
-	default:
-		return nil
-	}
-}
-
-func coroFrameRetentionContractEnabled(abi string, candidate *coroFrameRetentionContract) bool {
-	if candidate == nil {
-		return false
-	}
-	for _, contract := range coroFrameRetentionContracts(abi) {
-		if contract == candidate {
-			return true
-		}
-	}
-	return false
-}
-
-type coroFrameRetentionInstructionRole uint8
-
-const (
-	coroFrameRetentionInstructionNone coroFrameRetentionInstructionRole = iota
-	coroFrameRetentionInstructionPrepare
-	coroFrameRetentionInstructionPark
-	coroFrameRetentionInstructionRetire
 )
 
 // coroFrameRetentionProof is derived twice from the same immutable SSA and
 // frozen emission universe: preflight uses it to accept selected x/tools Heap
 // Allocs, and codegen uses it to lower those exact Allocs into the LLVM
-// coroutine frame and to suppress ordinary preemption inside the transaction.
+// coroutine frame.
 // The maps are never exposed outside cl and are immutable after construction.
 type coroFrameRetentionProof struct {
 	// allocations are the exact park-transaction cells reclassified from an
@@ -148,9 +49,6 @@ type coroFrameRetentionProof struct {
 	// continuations have a dominating pointer without moving ordinary heap
 	// allocations out of their source blocks.
 	terminalResultAllocations map[*ssa.Alloc]struct{}
-	roles                     map[ssa.Instruction]coroFrameRetentionInstructionRole
-	contracts                 map[ssa.Instruction]string
-
 	// exactRoots, stableAddresses, uintptrValues, and callKeepalives are a
 	// capability proof, not a tracing-GC root map. They name the exact SSA
 	// values that LLVM may retain in a PhysicalABIV1 coroutine frame under a
@@ -357,30 +255,6 @@ func (p *coroFrameRetentionProof) provesTraceableUintptr(value ssa.Value) bool {
 	return ok
 }
 
-type coroFrameRetentionTransaction struct {
-	contract     *coroFrameRetentionContract
-	prepare      *ssa.Call
-	park         *ssa.Call
-	retire       *ssa.Call
-	token        *ssa.Alloc
-	ticket       *ssa.Alloc
-	slot         *ssa.Alloc
-	gen          *ssa.Alloc
-	parkTicket   *ssa.UnOp
-	retireTicket *ssa.UnOp
-	retireSlot   *ssa.UnOp
-	retireGen    *ssa.UnOp
-}
-
-type coroFrameRetentionCallKind uint8
-
-const (
-	coroFrameRetentionCallNone coroFrameRetentionCallKind = iota
-	coroFrameRetentionCallPrepare
-	coroFrameRetentionCallPark
-	coroFrameRetentionCallRetire
-)
-
 func (a *coroPhysicalPureSSAAudit) frameRetainsAllocation(alloc *ssa.Alloc) bool {
 	proof := a.currentFrameRetentionProof()
 	if proof == nil {
@@ -415,8 +289,6 @@ func (a *coroPhysicalPureSSAAudit) proveCurrentFrameRetention() *coroFrameRetent
 		allocations:               make(map[*ssa.Alloc]struct{}),
 		managedHeapAllocations:    make(map[*ssa.Alloc]coroFrameRetentionManagedHeapAllocation),
 		terminalResultAllocations: make(map[*ssa.Alloc]struct{}),
-		roles:                     make(map[ssa.Instruction]coroFrameRetentionInstructionRole),
-		contracts:                 make(map[ssa.Instruction]string),
 		exactRoots:                make(map[ssa.Value]coroFrameRetentionExactRoot),
 		stableAddresses:           make(map[coroFrameRetentionAddressUse]coroFrameRetentionAddressFact),
 		uintptrValues:             make(map[ssa.Value]coroFrameRetentionUintptrFact),
@@ -425,7 +297,7 @@ func (a *coroPhysicalPureSSAAudit) proveCurrentFrameRetention() *coroFrameRetent
 	if a.universe == nil || a.ctx == nil || a.fn == nil || emitShadowStackInstrumentation {
 		return proof
 	}
-	if len(coroFrameRetentionContracts(a.frameRetentionABI)) != 0 {
+	if a.frameRetentionABI == CoroFrameRetentionParkABIV2 {
 		a.proveParkFrameRetention(proof)
 	}
 	a.proveManagedHeapAllocations(proof)
@@ -444,62 +316,127 @@ func (a *coroPhysicalPureSSAAudit) proveCurrentFrameRetention() *coroFrameRetent
 }
 
 func (a *coroPhysicalPureSSAAudit) proveParkFrameRetention(proof *coroFrameRetentionProof) {
-	if a == nil || proof == nil {
+	if a == nil || proof == nil || a.universe == nil || a.fn == nil {
 		return
 	}
-	var prepares []*ssa.Call
+	type candidate struct {
+		allocation *ssa.Alloc
+		prepare    *ssa.Call
+		park       *ssa.Call
+	}
+	var candidates []candidate
 	for _, block := range a.fn.Blocks {
 		for _, instruction := range block.Instrs {
 			call, ok := instruction.(*ssa.Call)
 			if !ok {
 				continue
 			}
-			kind, _, ok := a.classifyFrameRetentionCall(call)
-			if ok && kind == coroFrameRetentionCallPrepare {
-				prepares = append(prepares, call)
+			semantics, intrinsic, err := coroIntrinsicCallSiteSemantics(a.universe, call)
+			if err != nil || !intrinsic || semantics != CoroIntrinsicCallInlineSuspend ||
+				call.Common() == nil || len(call.Common().Args) != 2 {
+				continue
+			}
+			allocation := coroFrameRetentionDirectAllocRoot(call.Common().Args[0], make(map[ssa.Value]bool))
+			if allocation == nil || allocation.Parent() != a.fn || !allocation.Heap ||
+				a.ctx.skipSyntheticMakeSliceAlloc(allocation) || isEmissionVargsAlloc(a.ctx, allocation) {
+				continue
+			}
+			pointer, pointerOK := types.Unalias(a.typeOf(allocation.Type())).Underlying().(*types.Pointer)
+			if !pointerOK || coroTypeContainsGCPointer(pointer.Elem(), make(map[types.Type]bool)) {
+				continue
+			}
+			prepare, ok := a.coroParkBorrowPrepare(allocation, call)
+			if !ok || !coroFrameRetentionAddressUsesMatch(
+				allocation,
+				map[*ssa.Call]int{prepare: 0, call: 0},
+				nil,
+			) {
+				continue
+			}
+			candidates = append(candidates, candidate{allocation: allocation, prepare: prepare, park: call})
+		}
+	}
+	allocationUses := make(map[*ssa.Alloc]int)
+	callUses := make(map[*ssa.Call]int)
+	for _, candidate := range candidates {
+		allocationUses[candidate.allocation]++
+		callUses[candidate.prepare]++
+		callUses[candidate.park]++
+	}
+	for _, candidate := range candidates {
+		if allocationUses[candidate.allocation] != 1 || callUses[candidate.prepare] != 1 || callUses[candidate.park] != 1 {
+			continue
+		}
+		proof.allocations[candidate.allocation] = struct{}{}
+	}
+}
+
+// coroParkBorrowPrepare selects the sole call which initializes one opaque
+// park state before llgo.coroPark. The callable certificate, rather than a C
+// symbol allow-list, proves that the call is executor-safe and borrows the
+// state only until it returns. This is the extension boundary for every keyed
+// event source: adding a source does not change compiler code.
+func (a *coroPhysicalPureSSAAudit) coroParkBorrowPrepare(allocation *ssa.Alloc, park *ssa.Call) (*ssa.Call, bool) {
+	if a == nil || a.universe == nil || allocation == nil || park == nil ||
+		allocation.Parent() != a.fn || park.Parent() != a.fn || park.Block() == nil {
+		return nil, false
+	}
+	aliases := map[ssa.Value]bool{allocation: true}
+	queue := []ssa.Value{allocation}
+	for head := 0; head < len(queue); head++ {
+		value := queue[head]
+		refs := value.Referrers()
+		if refs == nil {
+			return nil, false
+		}
+		for _, reference := range *refs {
+			var alias ssa.Value
+			switch instruction := reference.(type) {
+			case *ssa.ChangeType:
+				if instruction.X == value && coroFrameRetentionPointerLike(instruction.Type()) && coroFrameRetentionPointerLike(value.Type()) {
+					alias = instruction
+				}
+			case *ssa.Convert:
+				if instruction.X == value && coroFrameRetentionPointerLike(instruction.Type()) && coroFrameRetentionPointerLike(value.Type()) {
+					alias = instruction
+				}
+			}
+			if alias != nil && !aliases[alias] {
+				aliases[alias] = true
+				queue = append(queue, alias)
 			}
 		}
 	}
 
-	transactions := make([]coroFrameRetentionTransaction, 0, len(prepares))
-	allocationUses := make(map[*ssa.Alloc]int)
-	callUses := make(map[*ssa.Call]int)
-	for _, prepare := range prepares {
-		transaction, ok := a.proveFrameRetentionTransaction(prepare)
-		if !ok {
-			continue
+	var prepare *ssa.Call
+	for alias := range aliases {
+		refs := alias.Referrers()
+		if refs == nil {
+			return nil, false
 		}
-		transactions = append(transactions, transaction)
-		allocations := []*ssa.Alloc{transaction.token, transaction.ticket, transaction.slot, transaction.gen}
-		for _, alloc := range allocations {
-			allocationUses[alloc]++
-		}
-		for _, call := range []*ssa.Call{transaction.prepare, transaction.park, transaction.retire} {
-			callUses[call]++
+		for _, reference := range *refs {
+			call, ok := reference.(*ssa.Call)
+			if !ok || call == park {
+				continue
+			}
+			if prepare != nil && prepare != call || call.Common() == nil || call.Common().IsInvoke() ||
+				len(call.Common().Args) == 0 || call.Common().Args[0] != alias || call.Block() != park.Block() ||
+				coroFrameRetentionInstructionIndex(call) >= coroFrameRetentionInstructionIndex(park) {
+				return nil, false
+			}
+			callee := a.universe.canonicalAlias(call.Common().StaticCallee())
+			certificate, certified := a.universe.callableContracts[callee]
+			if callee == nil || !certified || certificate.Scope != coro.CallableContractScopeDeclaration ||
+				certificate.Contract.Progress != coro.ProgressExecutorSafe ||
+				certificate.Contract.Reentry != coro.ReentryNone ||
+				certificate.Contract.Memory != coro.MemoryBorrowUntilReturn ||
+				(certificate.Contract.Affinity != coro.AffinityCallerThread && certificate.Contract.Affinity != coro.AffinityAnyThread) {
+				return nil, false
+			}
+			prepare = call
 		}
 	}
-	for _, transaction := range transactions {
-		allocations := []*ssa.Alloc{transaction.token, transaction.ticket, transaction.slot, transaction.gen}
-		unique := true
-		for _, alloc := range allocations {
-			unique = unique && allocationUses[alloc] == 1
-		}
-		for _, call := range []*ssa.Call{transaction.prepare, transaction.park, transaction.retire} {
-			unique = unique && callUses[call] == 1
-		}
-		if !unique {
-			continue
-		}
-		for _, alloc := range allocations {
-			proof.allocations[alloc] = struct{}{}
-		}
-		proof.roles[transaction.prepare] = coroFrameRetentionInstructionPrepare
-		proof.roles[transaction.park] = coroFrameRetentionInstructionPark
-		proof.roles[transaction.retire] = coroFrameRetentionInstructionRetire
-		proof.contracts[transaction.prepare] = transaction.contract.id
-		proof.contracts[transaction.park] = transaction.contract.id
-		proof.contracts[transaction.retire] = transaction.contract.id
-	}
+	return prepare, prepare != nil
 }
 
 // proveManagedHeapAllocations freezes the exact ordinary Go heap allocations
@@ -1352,11 +1289,18 @@ func (b *coroFrameRetentionRootBuilder) boundedCallKind(call *ssa.Call) (coroFra
 	if call == nil || call.Common() == nil || call.Common().IsInvoke() || call.Parent() != b.audit.fn {
 		return coroFrameRetentionCallInvalidV1, false
 	}
-	// The exact, selected prepare owner is also a bounded lifetime edge: typed
-	// pointer arguments such as a semaphore counter remain rooted in the
-	// current coroutine frame while the owner publishes its scalar key.
-	if kind, _, exact := b.audit.classifyFrameRetentionCall(call); exact && kind == coroFrameRetentionCallPrepare {
-		return coroFrameRetentionCallParkOwnerV1, true
+	// A generic park prepare is a bounded lifetime edge only when the immutable
+	// proof selected its first argument as frame-owned opaque state. The proof
+	// has already joined the exact call with its borrow-until-return callable
+	// certificate; no event-source symbol is recovered here.
+	if len(call.Common().Args) != 0 {
+		allocation := coroFrameRetentionDirectAllocRoot(call.Common().Args[0], make(map[ssa.Value]bool))
+		if _, retained := b.proof.allocations[allocation]; retained {
+			semantics, intrinsic, err := coroIntrinsicCallSiteSemantics(b.audit.universe, call)
+			if err == nil && (!intrinsic || semantics != CoroIntrinsicCallInlineSuspend) {
+				return coroFrameRetentionCallParkOwnerV1, true
+			}
+		}
 	}
 	if b.audit.universe.CoroWorkerEnabled() {
 		semantics, intrinsic, err := coroIntrinsicCallSiteSemantics(b.audit.universe, call)
@@ -2093,315 +2037,8 @@ func coroFrameRetentionRootDigest(a *coroPhysicalPureSSAAudit, proof *coroFrameR
 	for _, allocation := range allocationKeys {
 		fields = append(fields, framedEmissionKey("park-allocation", valueID(allocation)))
 	}
-	roleKeys := make([]ssa.Instruction, 0, len(proof.roles))
-	for instruction := range proof.roles {
-		roleKeys = append(roleKeys, instruction)
-	}
-	sort.Slice(roleKeys, func(i, j int) bool { return builder.instrOrder[roleKeys[i]] < builder.instrOrder[roleKeys[j]] })
-	for _, instruction := range roleKeys {
-		fields = append(fields, framedEmissionKey(
-			"park-role", instructionID(instruction), strconv.Itoa(int(proof.roles[instruction])), proof.contracts[instruction],
-		))
-	}
 	sum := sha256.Sum256([]byte(framedEmissionKey(fields...)))
 	return hex.EncodeToString(sum[:])
-}
-
-func (a *coroPhysicalPureSSAAudit) proveFrameRetentionTransaction(prepare *ssa.Call) (coroFrameRetentionTransaction, bool) {
-	transaction := coroFrameRetentionTransaction{prepare: prepare}
-	kind, contract, classified := a.classifyFrameRetentionCall(prepare)
-	if prepare == nil || prepare.Parent() != a.fn || prepare.Common() == nil ||
-		!classified || kind != coroFrameRetentionCallPrepare || contract == nil ||
-		len(prepare.Common().Args) != contract.prepareOutputStart+3 {
-		return transaction, false
-	}
-	transaction.contract = contract
-	transaction.token = coroFrameRetentionDirectAllocRoot(prepare.Common().Args[0], make(map[ssa.Value]bool))
-	transaction.ticket = coroFrameRetentionDirectAllocRoot(prepare.Common().Args[contract.prepareOutputStart], make(map[ssa.Value]bool))
-	transaction.slot = coroFrameRetentionDirectAllocRoot(prepare.Common().Args[contract.prepareOutputStart+1], make(map[ssa.Value]bool))
-	transaction.gen = coroFrameRetentionDirectAllocRoot(prepare.Common().Args[contract.prepareOutputStart+2], make(map[ssa.Value]bool))
-	allocations := []*ssa.Alloc{transaction.token, transaction.ticket, transaction.slot, transaction.gen}
-	seen := make(map[*ssa.Alloc]bool, len(allocations))
-	for index, alloc := range allocations {
-		if alloc == nil || alloc.Parent() != a.fn || !alloc.Heap || seen[alloc] ||
-			a.ctx.skipSyntheticMakeSliceAlloc(alloc) || isEmissionVargsAlloc(a.ctx, alloc) {
-			return transaction, false
-		}
-		seen[alloc] = true
-		if index == 0 {
-			if !a.exactWaitTokenFrameShape(alloc) {
-				return transaction, false
-			}
-		} else if !coroFrameRetentionExactUint32Alloc(a, alloc) {
-			return transaction, false
-		}
-	}
-
-	for _, block := range a.fn.Blocks {
-		for _, instruction := range block.Instrs {
-			call, ok := instruction.(*ssa.Call)
-			if !ok {
-				continue
-			}
-			kind, candidateContract, classified := a.classifyFrameRetentionCall(call)
-			if !classified || kind == coroFrameRetentionCallPrepare {
-				continue
-			}
-			common := call.Common()
-			if common == nil || len(common.Args) == 0 ||
-				coroFrameRetentionDirectAllocRoot(common.Args[0], make(map[ssa.Value]bool)) != transaction.token {
-				continue
-			}
-			switch kind {
-			case coroFrameRetentionCallPark:
-				if transaction.park != nil || len(common.Args) != 2 {
-					return transaction, false
-				}
-				transaction.parkTicket = coroFrameRetentionScalarLoadFrom(common.Args[1], transaction.ticket)
-				if transaction.parkTicket == nil {
-					return transaction, false
-				}
-				transaction.park = call
-			case coroFrameRetentionCallRetire:
-				if transaction.retire != nil || candidateContract != contract || len(common.Args) != contract.retireParameters {
-					return transaction, false
-				}
-				identity := contract.retireIdentityStart
-				transaction.retireTicket = coroFrameRetentionScalarLoadFrom(common.Args[identity], transaction.ticket)
-				transaction.retireSlot = coroFrameRetentionScalarLoadFrom(common.Args[identity+1], transaction.slot)
-				transaction.retireGen = coroFrameRetentionScalarLoadFrom(common.Args[identity+2], transaction.gen)
-				if transaction.retireTicket == nil || transaction.retireSlot == nil || transaction.retireGen == nil {
-					return transaction, false
-				}
-				transaction.retire = call
-			}
-		}
-	}
-	if transaction.park == nil || transaction.retire == nil ||
-		prepare.Block() != transaction.park.Block() || prepare.Block() != transaction.retire.Block() {
-		return transaction, false
-	}
-	identity := contract.retireIdentityStart
-	if !coroFrameRetentionScalarUsesMatch(transaction.parkTicket, transaction.park, 1) ||
-		!coroFrameRetentionScalarUsesMatch(transaction.retireTicket, transaction.retire, identity) ||
-		!coroFrameRetentionScalarUsesMatch(transaction.retireSlot, transaction.retire, identity+1) ||
-		!coroFrameRetentionScalarUsesMatch(transaction.retireGen, transaction.retire, identity+2) {
-		return transaction, false
-	}
-	prepareIndex := coroFrameRetentionInstructionIndex(prepare)
-	parkIndex := coroFrameRetentionInstructionIndex(transaction.park)
-	retireIndex := coroFrameRetentionInstructionIndex(transaction.retire)
-	if prepareIndex < 0 || parkIndex <= prepareIndex || retireIndex <= parkIndex ||
-		!a.frameRetentionSpanIsPure(prepare.Block(), prepareIndex+1, parkIndex, transaction) ||
-		!a.frameRetentionSpanIsPure(prepare.Block(), parkIndex+1, retireIndex, transaction) {
-		return transaction, false
-	}
-
-	allowedTokenCalls := map[*ssa.Call]int{prepare: 0, transaction.park: 0, transaction.retire: 0}
-	if !coroFrameRetentionAddressUsesMatch(transaction.token, allowedTokenCalls, nil) {
-		return transaction, false
-	}
-	outputLoads := [][]*ssa.UnOp{
-		{transaction.parkTicket, transaction.retireTicket},
-		{transaction.retireSlot},
-		{transaction.retireGen},
-	}
-	for index, alloc := range []*ssa.Alloc{transaction.ticket, transaction.slot, transaction.gen} {
-		allowedLoads := make(map[*ssa.UnOp]struct{}, len(outputLoads[index]))
-		for _, load := range outputLoads[index] {
-			allowedLoads[load] = struct{}{}
-		}
-		if !coroFrameRetentionAddressUsesMatch(alloc, map[*ssa.Call]int{prepare: index + contract.prepareOutputStart}, allowedLoads) {
-			return transaction, false
-		}
-	}
-	return transaction, true
-}
-
-func (a *coroPhysicalPureSSAAudit) exactWaitTokenFrameShape(alloc *ssa.Alloc) bool {
-	if alloc == nil {
-		return false
-	}
-	pointer, ok := types.Unalias(a.typeOf(alloc.Type())).Underlying().(*types.Pointer)
-	if !ok || coroTypeContainsGCPointer(pointer.Elem(), make(map[types.Type]bool)) {
-		return false
-	}
-	structure, ok := types.Unalias(pointer.Elem()).Underlying().(*types.Struct)
-	if !ok || structure.NumFields() != 1 || !coroFrameRetentionExactBasic(structure.Field(0).Type(), types.Uint32) {
-		return false
-	}
-	physical := a.ctx.type_(pointer.Elem(), llssa.InGo)
-	return a.ctx.prog.SizeOf(physical) == 4 && a.ctx.prog.AlignOf(physical) == 4 && a.ctx.prog.OffsetOf(physical, 0) == 0
-}
-
-func coroFrameRetentionExactUint32Alloc(a *coroPhysicalPureSSAAudit, alloc *ssa.Alloc) bool {
-	if a == nil || alloc == nil {
-		return false
-	}
-	pointer, ok := types.Unalias(a.typeOf(alloc.Type())).Underlying().(*types.Pointer)
-	return ok && coroFrameRetentionExactBasic(pointer.Elem(), types.Uint32) &&
-		!coroTypeContainsGCPointer(pointer.Elem(), make(map[types.Type]bool))
-}
-
-func (a *coroPhysicalPureSSAAudit) classifyFrameRetentionCall(call *ssa.Call) (coroFrameRetentionCallKind, *coroFrameRetentionContract, bool) {
-	if call == nil || call.Common() == nil || call.Common().IsInvoke() || call.Parent() != a.fn {
-		return coroFrameRetentionCallNone, nil, false
-	}
-	semantics, intrinsic, err := coroIntrinsicCallSiteSemantics(a.universe, call)
-	if err == nil && intrinsic && semantics == CoroIntrinsicCallInlineSuspend {
-		return coroFrameRetentionCallPark, nil, true
-	}
-	callee := call.Common().StaticCallee()
-	if callee == nil {
-		return coroFrameRetentionCallNone, nil, false
-	}
-	kind, contract, ok := a.universe.coroFrameRetentionOwnerCallSite(call)
-	if !ok || !coroFrameRetentionContractEnabled(a.frameRetentionABI, contract) {
-		return coroFrameRetentionCallNone, nil, false
-	}
-	switch kind {
-	case coroFrameRetentionCallPrepare:
-		return coroFrameRetentionCallPrepare, contract, true
-	case coroFrameRetentionCallRetire:
-		return coroFrameRetentionCallRetire, contract, true
-	}
-	return coroFrameRetentionCallNone, nil, false
-}
-
-// coroFrameRetentionOwnerCallSite is producer-side derivation from the
-// immutable metadata that created an exact noblock or sync certificate. External
-// certificate consumers must compare IDs and may not infer capability from the
-// diagnostic PhysicalSymbol/ABISignature fields. This method instead reopens
-// the private frozen final key and certificate maps inside EmissionUniverse,
-// then validates the exact direct SSA call before returning one of the two
-// compiler-owned retention semantics. schedulerwait is intentionally excluded:
-// a frame-retention transaction cannot span a physical external-event wait.
-func (u *EmissionUniverse) coroFrameRetentionOwnerCallSite(call *ssa.Call) (coroFrameRetentionCallKind, *coroFrameRetentionContract, bool) {
-	if u == nil || call == nil || call.Common() == nil || call.Common().IsInvoke() {
-		return coroFrameRetentionCallNone, nil, false
-	}
-	callee := call.Common().StaticCallee()
-	if callee == nil {
-		return coroFrameRetentionCallNone, nil, false
-	}
-	canonical := u.canonicalAlias(callee)
-	if canonical == nil {
-		return coroFrameRetentionCallNone, nil, false
-	}
-	certificateID := ""
-	physicalSymbol := ""
-	abiSignature := ""
-	if certificate, certified := u.foreignNoBlock[canonical]; certified {
-		certificateID = certificate.ID
-		physicalSymbol = certificate.PhysicalSymbol
-		abiSignature = certificate.ABISignature
-	} else if certificate, certified := u.foreignSync[canonical]; certified {
-		certificateID = certificate.ID
-		physicalSymbol = certificate.PhysicalSymbol
-		abiSignature = certificate.ABISignature
-	}
-	if certificateID == "" {
-		return coroFrameRetentionCallNone, nil, false
-	}
-	var frozen coroForeignPhysicalABI
-	haveFrozen := false
-	for _, owner := range u.sortedUseOwners(canonical) {
-		key := u.finalKeys[emissionFunctionOwnerKey{function: canonical, owner: owner}]
-		background, symbol, signature, ok := splitManagedSymbolKey(key)
-		if !ok || background != cFunc {
-			continue
-		}
-		candidate := coroForeignPhysicalABI{symbol: symbol, signature: signature}
-		if haveFrozen && candidate != frozen {
-			return coroFrameRetentionCallNone, nil, false
-		}
-		frozen, haveFrozen = candidate, true
-	}
-	if !haveFrozen || frozen.symbol != physicalSymbol || frozen.signature != abiSignature {
-		return coroFrameRetentionCallNone, nil, false
-	}
-	for _, contract := range []*coroFrameRetentionContract{
-		&coroTimerFrameRetentionContractV1,
-		&coroSemaphoreFrameRetentionContractV1,
-		&coroNotifyFrameRetentionContractV1,
-	} {
-		switch frozen.symbol {
-		case contract.prepareSymbol:
-			if coroFrameRetentionPrepareSignature(contract, call.Common().Signature()) {
-				return coroFrameRetentionCallPrepare, contract, true
-			}
-		case contract.retireSymbol:
-			if coroFrameRetentionRetireSignature(contract, call.Common().Signature()) {
-				return coroFrameRetentionCallRetire, contract, true
-			}
-		}
-	}
-	return coroFrameRetentionCallNone, nil, false
-}
-
-func coroFrameRetentionPrepareSignature(contract *coroFrameRetentionContract, signature *types.Signature) bool {
-	if contract == nil || !coroFrameRetentionBaseSignature(signature, contract.prepareOutputStart+3, 0) ||
-		!coroFrameRetentionExactBasic(signature.Params().At(0).Type(), types.UnsafePointer) {
-		return false
-	}
-	switch contract.kind {
-	case coroFrameRetentionContractTimerV1:
-		if contract.prepareOutputStart != 2 || !coroFrameRetentionExactBasic(signature.Params().At(1).Type(), types.Int64) {
-			return false
-		}
-	case coroFrameRetentionContractSemaphoreV1:
-		if contract.prepareOutputStart != 2 || !coroFrameRetentionExactBasic(signature.Params().At(1).Type(), types.UnsafePointer) {
-			return false
-		}
-	case coroFrameRetentionContractNotifyV1:
-		if contract.prepareOutputStart != 3 ||
-			!coroFrameRetentionExactBasic(signature.Params().At(1).Type(), types.UnsafePointer) ||
-			!coroFrameRetentionExactBasic(signature.Params().At(2).Type(), types.Uint32) {
-			return false
-		}
-	default:
-		return false
-	}
-	for index := contract.prepareOutputStart; index < contract.prepareOutputStart+3; index++ {
-		if !types.Identical(types.Unalias(signature.Params().At(index).Type()), types.NewPointer(types.Typ[types.Uint32])) {
-			return false
-		}
-	}
-	return true
-}
-
-func coroFrameRetentionRetireSignature(contract *coroFrameRetentionContract, signature *types.Signature) bool {
-	if contract == nil || !coroFrameRetentionBaseSignature(signature, contract.retireParameters, contract.retireResults) ||
-		!coroFrameRetentionExactBasic(signature.Params().At(0).Type(), types.UnsafePointer) {
-		return false
-	}
-	for index := contract.retireIdentityStart; index < contract.retireParameters; index++ {
-		if !coroFrameRetentionExactBasic(signature.Params().At(index).Type(), types.Uint32) {
-			return false
-		}
-	}
-	if contract.retireResults == 1 && !coroFrameRetentionExactBasic(signature.Results().At(0).Type(), types.Uint32) {
-		return false
-	}
-	return true
-}
-
-func coroFrameRetentionBaseSignature(signature *types.Signature, parameters, results int) bool {
-	resultCount := 0
-	if signature != nil && signature.Results() != nil {
-		resultCount = signature.Results().Len()
-	}
-	return signature != nil && signature.Recv() == nil && !signature.Variadic() &&
-		coroFrameRetentionTypeParamLen(signature.TypeParams()) == 0 && coroFrameRetentionTypeParamLen(signature.RecvTypeParams()) == 0 &&
-		signature.Params() != nil && signature.Params().Len() == parameters &&
-		resultCount == results
-}
-
-func coroFrameRetentionTypeParamLen(list *types.TypeParamList) int {
-	if list == nil {
-		return 0
-	}
-	return list.Len()
 }
 
 func coroFrameRetentionPointerLike(typ types.Type) bool {
@@ -2411,10 +2048,6 @@ func coroFrameRetentionPointerLike(typ types.Type) bool {
 	}
 	basic, ok := underlying.(*types.Basic)
 	return ok && basic.Kind() == types.UnsafePointer
-}
-
-func coroFrameRetentionExactBasic(typ types.Type, kind types.BasicKind) bool {
-	return types.Identical(types.Unalias(typ), types.Typ[kind])
 }
 
 func coroFrameRetentionDirectAllocRoot(value ssa.Value, visiting map[ssa.Value]bool) *ssa.Alloc {
@@ -2438,39 +2071,6 @@ func coroFrameRetentionDirectAllocRoot(value ssa.Value, visiting map[ssa.Value]b
 	return nil
 }
 
-func coroFrameRetentionScalarLoadFrom(value ssa.Value, alloc *ssa.Alloc) *ssa.UnOp {
-	load, ok := value.(*ssa.UnOp)
-	if !ok || load.Op != token.MUL || coroFrameRetentionDirectAllocRoot(load.X, make(map[ssa.Value]bool)) != alloc {
-		return nil
-	}
-	return load
-}
-
-func coroFrameRetentionScalarUsesMatch(load *ssa.UnOp, allowed *ssa.Call, argument int) bool {
-	if load == nil || allowed == nil || allowed.Common() == nil || argument < 0 || argument >= len(allowed.Common().Args) ||
-		allowed.Common().Args[argument] != load {
-		return false
-	}
-	refs := load.Referrers()
-	if refs == nil {
-		return false
-	}
-	seen := false
-	for _, reference := range *refs {
-		switch reference := reference.(type) {
-		case *ssa.DebugRef:
-		case *ssa.Call:
-			if reference != allowed || seen {
-				return false
-			}
-			seen = true
-		default:
-			return false
-		}
-	}
-	return seen
-}
-
 func coroFrameRetentionInstructionIndex(instruction ssa.Instruction) int {
 	if instruction == nil || instruction.Block() == nil {
 		return -1
@@ -2481,62 +2081,6 @@ func coroFrameRetentionInstructionIndex(instruction ssa.Instruction) int {
 		}
 	}
 	return -1
-}
-
-func (a *coroPhysicalPureSSAAudit) frameRetentionSpanIsPure(block *ssa.BasicBlock, begin, end int, transaction coroFrameRetentionTransaction) bool {
-	if block == nil || begin < 0 || end < begin || end > len(block.Instrs) {
-		return false
-	}
-	outputs := map[*ssa.Alloc]bool{transaction.ticket: true, transaction.slot: true, transaction.gen: true}
-	all := map[*ssa.Alloc]bool{
-		transaction.token: true, transaction.ticket: true, transaction.slot: true, transaction.gen: true,
-	}
-	for _, instruction := range block.Instrs[begin:end] {
-		switch instruction := instruction.(type) {
-		case *ssa.DebugRef:
-		case *ssa.UnOp:
-			origin := coroFrameRetentionScalarLoadOrigin(instruction, make(map[ssa.Value]bool))
-			if instruction.Op != token.MUL || !outputs[origin] {
-				return false
-			}
-		case *ssa.ChangeType:
-			if !coroFrameRetentionAllowedPointerConversion(instruction.X, instruction, all) {
-				return false
-			}
-		case *ssa.Convert:
-			if !coroFrameRetentionAllowedPointerConversion(instruction.X, instruction, all) {
-				return false
-			}
-		default:
-			return false
-		}
-	}
-	return true
-}
-
-func coroFrameRetentionAllowedPointerConversion(source ssa.Value, result ssa.Value, all map[*ssa.Alloc]bool) bool {
-	if source == nil || result == nil {
-		return false
-	}
-	if coroFrameRetentionPointerLike(source.Type()) && coroFrameRetentionPointerLike(result.Type()) {
-		return all[coroFrameRetentionDirectAllocRoot(result, make(map[ssa.Value]bool))]
-	}
-	return false
-}
-
-func coroFrameRetentionScalarLoadOrigin(value ssa.Value, visiting map[ssa.Value]bool) *ssa.Alloc {
-	if value == nil || visiting[value] {
-		return nil
-	}
-	visiting[value] = true
-	defer delete(visiting, value)
-	switch value := value.(type) {
-	case *ssa.UnOp:
-		if value.Op == token.MUL {
-			return coroFrameRetentionDirectAllocRoot(value.X, make(map[ssa.Value]bool))
-		}
-	}
-	return nil
 }
 
 func coroFrameRetentionAddressUsesMatch(alloc *ssa.Alloc, allowedCalls map[*ssa.Call]int, allowedLoads map[*ssa.UnOp]struct{}) bool {

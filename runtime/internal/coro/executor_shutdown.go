@@ -54,11 +54,6 @@ func RequestExecutorShutdownDrain(driver *ExecutorDriver) (needed, ok bool) {
 			return false, false
 		}
 	}
-	for g := p.waitHead; g != nil; g = g.nextWait {
-		if !request(g, true) {
-			return false, false
-		}
-	}
 	for record := p.parkWaitHead; record != nil; record = record.activeNext {
 		if record.g == nil || !request(record.g, true) {
 			return false, false

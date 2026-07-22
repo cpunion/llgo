@@ -510,6 +510,85 @@ func F() int { return 2 }
 	}
 }
 
+func TestEmissionUniversePatchCanonicalizesGenericMethodInstances(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	const originalPath = "example.com/emission/genericpatch"
+	original := testProg.addPackage(t, originalPath, `package genericpatch
+type Handle[T any] struct { value T }
+func (h Handle[T]) Value() T { return h.value }
+`)
+	alt := testProg.addPackage(t, abi.PatchPathPrefix+originalPath, `package genericpatch
+//llgo:skipall
+type PatchControl struct{}
+type Handle[T any] struct { value T }
+func (h Handle[T]) Value() T { return h.value }
+`)
+	caller := testProg.addPackage(t, "example.com/emission/genericpatchcaller", `package genericpatchcaller
+import "example.com/emission/genericpatch"
+func Use(h genericpatch.Handle[int]) int { return h.Value() }
+func Box(h genericpatch.Handle[int]) interface{ Value() int } { return h }
+`)
+	testProg.ssa.Build()
+
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, Patches{
+		originalPath: {Alt: alt.ssa, Types: typepatch.Clone(alt.types)},
+	}, []EmissionPackage{
+		{SSA: original.ssa, Files: []*ast.File{original.file, alt.file}},
+		{SSA: caller.ssa, Files: []*ast.File{caller.file}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var instances []*ssa.Function
+	for _, fn := range universe.Functions() {
+		if origin := fn.Origin(); origin != nil && origin.Name() == "Value" && len(fn.TypeArgs()) == 1 {
+			instances = append(instances, fn)
+		}
+	}
+	if len(instances) != 1 {
+		var diagnostics []string
+		for _, fn := range instances {
+			origin, _ := universe.Resolve(fn.Origin())
+			diagnostics = append(diagnostics, fmt.Sprintf(
+				"%s origin=%s canonical-origin=%v identity=%s",
+				emissionFunctionDiagnostic(fn), emissionFunctionDiagnostic(fn.Origin()), origin, universe.finalIdentity(fn),
+			))
+		}
+		t.Fatalf("canonical generic Value[int] instances = %d, want 1: %v", len(instances), diagnostics)
+	}
+	if instances[0].Origin() == original.ssa.Prog.MethodValue(
+		original.ssa.Prog.MethodSets.MethodSet(original.types.Scope().Lookup("Handle").Type()).At(0),
+	) {
+		t.Fatal("canonical generic method instance retained the skipped original origin")
+	}
+	var raw *ssa.Function
+	for _, block := range caller.ssa.Func("Use").Blocks {
+		for _, instruction := range block.Instrs {
+			if call, ok := instruction.(*ssa.Call); ok && call.Common().StaticCallee() != nil {
+				raw = call.Common().StaticCallee()
+			}
+		}
+	}
+	canonical, ok := universe.Resolve(raw)
+	if raw == nil || !ok || canonical != instances[0] || canonical == raw {
+		t.Fatalf("generic method call alias = raw %v canonical %v exact %t; want distinct patch instance", raw, canonical, ok)
+	}
+	rawSignature, err := universe.coroPhysicalSourceSignature(raw)
+	if err != nil {
+		t.Fatalf("raw generic patch source signature: %v", err)
+	}
+	canonicalSignature, err := universe.coroPhysicalSourceSignature(canonical)
+	if err != nil {
+		t.Fatalf("canonical generic patch source signature: %v", err)
+	}
+	if !coroInterfaceDispatchSignaturesIdentical(rawSignature, canonicalSignature) {
+		t.Fatalf("generic patch source signatures differ: raw %s canonical %s", rawSignature, canonicalSignature)
+	}
+}
+
 func TestEmissionUniversePatchInitRedirectsImportedOccurrenceToPublicInit(t *testing.T) {
 	testProg := newEmissionTestProgram()
 	original := testProg.addPackage(t, "example.com/emission/redirected", `package redirected

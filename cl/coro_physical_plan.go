@@ -255,6 +255,58 @@ func (plan coroPhysicalInstructionPlan) mayFault() bool {
 		plan.recipe == coroPhysicalInstructionBuiltinNilGuard
 }
 
+// elidesRuntimeHelper reports whether this frozen physical recipe replaces one
+// logical LLSSA helper with compiler-owned structured control flow. Emission
+// must use this projection rather than reclassifying the raw SSA instruction:
+// the helper inventory remains part of effect/closure planning, while the
+// selected recipe is the sole authority for whether a call is physically
+// emitted in the live coroutine frame.
+func (plan coroPhysicalInstructionPlan) elidesRuntimeHelper(helper string) bool {
+	switch plan.recipe {
+	case coroPhysicalInstructionFieldAddr, coroPhysicalInstructionDeref:
+		if helper == "AssertNilDeref" || helper == "AssertNilDerefPtr" {
+			return true
+		}
+	case coroPhysicalInstructionIndexAddr, coroPhysicalInstructionIndex:
+		if helper == "CheckIndexRange" || helper == "AssertNilDeref" || helper == "AssertNilDerefPtr" {
+			return true
+		}
+	case coroPhysicalInstructionSlice:
+		if helper == "StringSlice2" || helper == "NewSlice2" || helper == "NewSlice3Bounds" ||
+			helper == "AssertNilDeref" {
+			return true
+		}
+	case coroPhysicalInstructionSliceToArrayPointer:
+		if helper == "PanicSliceConvert" {
+			return true
+		}
+	case coroPhysicalInstructionBuiltinNilGuard:
+		if helper == "PanicWrapNilPointer" {
+			return true
+		}
+	case coroPhysicalInstructionUnsafeString, coroPhysicalInstructionUnsafeSlice:
+		if helper == "AssertRuntimeError" {
+			return true
+		}
+	case coroPhysicalInstructionInterfaceNilCompare:
+		if helper == "EfaceEqual" || helper == "IfaceType" {
+			return true
+		}
+	case coroPhysicalInstructionFrameAllocation:
+		if helper == "AllocZ" {
+			return true
+		}
+	}
+	switch plan.outcome {
+	case coroPhysicalOutcomePanic:
+		return helper == "Panic"
+	case coroPhysicalOutcomeRecover:
+		return helper == "Recover"
+	default:
+		return false
+	}
+}
+
 // coroPhysicalFunctionPlan is the post-analysis physical projection of one
 // exact function emission. It owns every proof and per-instruction choice used
 // after preflight. The pointed-to proofs are built to completion before this
@@ -399,6 +451,58 @@ func (ir *coroProgramIR) physicalFunctionPlan(function *ssa.Function, owner *pre
 	return plan, nil
 }
 
+// physicalFunctionPlanForEmission resolves the frozen definition projection
+// used by one physical emission. Ordinary functions require the exact current
+// package owner. A syntax-free generated wrapper is the sole exception: ABI
+// method tables may materialize its linkonce body from another package, so the
+// already-validated shared symbol may borrow the corresponding frozen plan.
+func (index emissionCanonicalIndex) physicalFunctionPlanForEmission(
+	function *ssa.Function,
+	requestedOwner *preparedEmissionPackage,
+) (*coroPhysicalFunctionPlan, error) {
+	u := index.universe
+	if u == nil || u.coroProgramIR == nil || !u.coroProgramIR.physicalPlansSealed {
+		return nil, fmt.Errorf("coroutine physical plans are not sealed")
+	}
+	if function == nil || requestedOwner == nil {
+		return nil, fmt.Errorf("physical emission plan lookup requires one exact function and requested owner")
+	}
+	function = u.canonicalAlias(function)
+	if function == nil {
+		return nil, fmt.Errorf("physical emission plan lookup found cyclic function aliases")
+	}
+	if plan := u.coroProgramIR.physicalPlans[emissionFunctionOwnerKey{
+		function: function,
+		owner:    requestedOwner,
+	}]; plan != nil {
+		return plan, nil
+	}
+	if !isEmissionGeneratedWrapper(function) {
+		return nil, fmt.Errorf("function %q owner %q has no frozen physical plan", function.Name(), requestedOwner.identity)
+	}
+
+	shared, available := index.sharedGeneratedWrapperPhysicalName(function)
+	if shared == "" {
+		return nil, fmt.Errorf(
+			"generated wrapper %q owner %q has no unambiguous frozen physical symbol; frozen owners: %v",
+			function.Name(), requestedOwner.identity, available,
+		)
+	}
+	for _, owner := range u.sortedUseOwners(function) {
+		key := emissionFunctionOwnerKey{function: function, owner: owner}
+		if u.physicalNames[key] != shared {
+			continue
+		}
+		if plan := u.coroProgramIR.physicalPlans[key]; plan != nil {
+			return plan, nil
+		}
+	}
+	return nil, fmt.Errorf(
+		"generated wrapper %q shared physical symbol %q has no corresponding frozen physical plan; frozen owners: %v",
+		function.Name(), shared, available,
+	)
+}
+
 func planCoroPhysicalInstruction(
 	audit *coroPhysicalPureSSAAudit,
 	owner *preparedEmissionPackage,
@@ -435,7 +539,11 @@ func planCoroPhysicalInstruction(
 			result.recipe = coroPhysicalInstructionFrameAllocation
 		}
 	case *ssa.FieldAddr:
-		if audit.fieldAddrRequiresImplicitNilFault(instruction) {
+		requiresGuard, reason := audit.fieldAddrRequiresImplicitNilFault(instruction)
+		if reason != "" {
+			return result, fmt.Errorf("FieldAddr frozen helper plan: %s", reason)
+		}
+		if requiresGuard {
 			result.recipe = coroPhysicalInstructionFieldAddr
 			result.nilGuard = true
 		}

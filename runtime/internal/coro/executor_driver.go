@@ -19,14 +19,14 @@ package coro
 import "unsafe"
 
 // ExecutorDriver is the target-neutral single-P bridge between a stable
-// ExecutorRegistry gate and a scheduler-owned durable source set. It is
-// never retained by a platform callback: the platform ABI remains the two POD
-// handles carried by PostWaitAndRequest.
+// ExecutorRegistry gate and a scheduler-owned durable source set. It is never
+// retained by a platform callback: producers publish into a source and wake the
+// executor through its stable POD handle.
 //
 // Every method is scheduler-owner-only. The driver, P, registry, and table must
 // remain at stable addresses from BindExecutor through ConfirmExecutorClose.
 // A real target surrounds a successful PrepareExecutorSleep with its retained
-// wait and calls WakeExecutor after a real or spurious wake.
+// source poll and calls WakeExecutor after a real or spurious wake.
 //
 // This first driver deliberately owns exactly one P and one statically
 // assembled ExecutorSourceSet. Targets with deadline sources must use the
@@ -102,7 +102,7 @@ func validRunningExecutorOwner(driver *ExecutorDriver) bool {
 		g.active.header.G == unsafe.Pointer(g) &&
 		g.active.header.SuspendReason == uint16(SuspendNone) &&
 		g.active.header.Lifecycle == uint16(FrameActive) &&
-		g.pending.kind == pendingNone && g.waitToken == nil && g.waitTicket == 0
+		g.pending.kind == pendingNone
 }
 
 // CurrentExecutorDriver resolves the exact executor which owns g's currently
@@ -212,66 +212,6 @@ func FinishCloseCurrentExecutorTaskControl(driver *ExecutorDriver, task *G, id O
 	return RetireTaskControl(driver.sources.control, driver.p, id)
 }
 
-// PrepareExecutorWaitRegistration is the only production owner entry for
-// arming a platform wait. It is accepted solely from the currently resumed
-// frame on this exact executor; producer threads must use the POD post ABI.
-func PrepareExecutorWaitRegistration(driver *ExecutorDriver, token *WaitToken) (WaitTicket, WaitRegistrationHandle, WaitRegistrationPrepareResult) {
-	if !validRunningExecutorOwner(driver) {
-		return 0, WaitRegistrationHandle{}, WaitRegistrationPrepareInvalid
-	}
-	return PrepareWaitRegistration(driver.p, driver.sources.waitTable(), token)
-}
-
-// RollbackExecutorWaitRegistration is owner-only and valid before coroPark
-// when external submission never made the POD handle callback-reachable.
-func RollbackExecutorWaitRegistration(driver *ExecutorDriver, token *WaitToken, ticket WaitTicket, wait WaitRegistrationHandle) bool {
-	return validRunningExecutorOwner(driver) && driver.sources.waitTable().RollbackPreparedWait(wait, token, ticket)
-}
-
-// RetireCompletedExecutorWait is owner-only and valid after the matching park
-// resumed and the external source was strongly joined or unregistered.
-func RetireCompletedExecutorWait(driver *ExecutorDriver, token *WaitToken, ticket WaitTicket, wait WaitRegistrationHandle) bool {
-	return validRunningExecutorOwner(driver) && driver.sources.waitTable().RetireCompletedWait(wait, token, ticket)
-}
-
-// PrepareExecutorTimerRegistration is the only production owner entry for an
-// absolute monotonic one-shot timer. It is valid only for a timer-bound driver
-// while its exact frame is running.
-func PrepareExecutorTimerRegistration(driver *ExecutorDriver, token *WaitToken, deadline int64) (WaitTicket, TimerRegistrationHandle, TimerRegistrationPrepareResult) {
-	if !validRunningExecutorOwner(driver) {
-		return 0, TimerRegistrationHandle{}, TimerRegistrationPrepareInvalid
-	}
-	timers := driver.sources.timerTable()
-	if timers == nil {
-		return 0, TimerRegistrationHandle{}, TimerRegistrationPrepareInvalid
-	}
-	return PrepareTimerRegistration(driver.p, timers, token, deadline)
-}
-
-// RollbackExecutorTimerRegistration releases a timer that was prepared by the
-// running owner but was never made visible to coroPark.
-func RollbackExecutorTimerRegistration(driver *ExecutorDriver, token *WaitToken, ticket WaitTicket, timer TimerRegistrationHandle) bool {
-	if !validRunningExecutorOwner(driver) {
-		return false
-	}
-	timers := driver.sources.timerTable()
-	return timers != nil && timers.RollbackPreparedTimer(timer, token, ticket)
-}
-
-// CancelExecutorTimerRegistration publishes cancellation from the exact
-// running owner. The matching terminal outcome must still be consumed before
-// the timer can be retired.
-func CancelExecutorTimerRegistration(driver *ExecutorDriver, timer TimerRegistrationHandle) WaitCancelResult {
-	if !validRunningExecutorOwner(driver) {
-		return WaitCancelInvalid
-	}
-	timers := driver.sources.timerTable()
-	if timers == nil {
-		return WaitCancelInvalid
-	}
-	return timers.Cancel(timer)
-}
-
 // CancelExecutorControlledTimerV2 publishes ordinary operation cancellation
 // for one exact standard-library logical generation. Cleanup remains owned by
 // the resumed manager's V2 ParkSet transaction.
@@ -281,92 +221,6 @@ func CancelExecutorControlledTimerV2(driver *ExecutorDriver, controller uintptr,
 	}
 	timers := driver.sources.timerTable()
 	return timers != nil && timers.CancelControlledV2(driver.p, controller, controlWord)
-}
-
-// RetireCompletedExecutorTimer validates and retires a consumed timer
-// completion from its resumed synchronous continuation.
-func RetireCompletedExecutorTimer(driver *ExecutorDriver, token *WaitToken, ticket WaitTicket, timer TimerRegistrationHandle) bool {
-	if !validRunningExecutorOwner(driver) {
-		return false
-	}
-	timers := driver.sources.timerTable()
-	return timers != nil && timers.RetireCompletedTimer(timer, token, ticket)
-}
-
-// RetireCanceledExecutorTimer validates and retires a consumed timer
-// cancellation from its resumed synchronous continuation.
-func RetireCanceledExecutorTimer(driver *ExecutorDriver, token *WaitToken, ticket WaitTicket, timer TimerRegistrationHandle) bool {
-	if !validRunningExecutorOwner(driver) {
-		return false
-	}
-	timers := driver.sources.timerTable()
-	return timers != nil && timers.RetireCanceledTimer(timer, token, ticket)
-}
-
-// PrepareExecutorPollOperation is the running-owner entry for one synchronous
-// internal/poll read or write wait. Snapshot-rebuilt reactors discover the
-// operation later; eager-registration reactors may arm before coroPark.
-func PrepareExecutorPollOperation(
-	driver *ExecutorDriver,
-	token *WaitToken,
-	fd int32,
-	interest PollInterest,
-	deadline int64,
-) (WaitTicket, PollOperationHandle, PollOperationPrepareResult) {
-	if !validRunningExecutorOwner(driver) {
-		return 0, PollOperationHandle{}, PollOperationPrepareInvalid
-	}
-	source := driver.sources.pollSource()
-	if source == nil {
-		return 0, PollOperationHandle{}, PollOperationPrepareInvalid
-	}
-	return PreparePollOperation(driver.p, source, token, fd, interest, deadline)
-}
-
-// RollbackExecutorPollOperation releases an operation whose target reactor
-// arm failed before the handle became externally observable.
-func RollbackExecutorPollOperation(
-	driver *ExecutorDriver,
-	token *WaitToken,
-	ticket WaitTicket,
-	handle PollOperationHandle,
-) bool {
-	if !validRunningExecutorOwner(driver) {
-		return false
-	}
-	source := driver.sources.pollSource()
-	return source != nil && source.RollbackPreparedPollOperation(driver.p, handle, token, ticket)
-}
-
-// CancelExecutorPollOperation is valid only after the target synchronously
-// removed the exact backend interest. The canceled outcome remains live until
-// its resumed continuation retires it.
-func CancelExecutorPollOperation(driver *ExecutorDriver, handle PollOperationHandle) WaitCancelResult {
-	if !validRunningExecutorOwner(driver) {
-		return WaitCancelInvalid
-	}
-	source := driver.sources.pollSource()
-	if source == nil {
-		return WaitCancelInvalid
-	}
-	return source.Cancel(driver.p, handle)
-}
-
-// UpdateExecutorPollDeadline changes the absolute monotonic deadline of one
-// still-active operation. Zero removes its deadline.
-func UpdateExecutorPollDeadline(driver *ExecutorDriver, handle PollOperationHandle, deadline int64) bool {
-	return UpdateExecutorPollDeadlineResult(driver, handle, deadline) == PollOperationUpdated
-}
-
-func UpdateExecutorPollDeadlineResult(driver *ExecutorDriver, handle PollOperationHandle, deadline int64) PollOperationUpdateResult {
-	if !validRunningExecutorOwner(driver) {
-		return PollOperationUpdateInvalid
-	}
-	source := driver.sources.pollSource()
-	if source == nil {
-		return PollOperationUpdateInvalid
-	}
-	return source.UpdateDeadlineResult(driver.p, handle, deadline)
 }
 
 // UpdateExecutorPollDeadlineExact dispatches a descriptor deadline update by
@@ -389,47 +243,7 @@ func UpdateExecutorPollDeadlineExact(
 	if !ok || slot.generation != id.Generation {
 		return PollOperationUpdateStale
 	}
-	switch slot.mode {
-	case pollOperationModeV1:
-		return source.UpdateDeadlineResult(driver.p, PollOperationHandle{
-			Slot: id.LocalSlot(), Generation: id.Generation,
-		}, deadline)
-	case pollOperationModeV2:
-		return source.UpdatePollOperationV2Deadline(driver.p, id, deadline)
-	default:
-		return PollOperationUpdateClosed
-	}
-}
-
-// RetireCompletedExecutorPollOperation returns the readiness, closing, or
-// timeout result after the matching synchronous continuation resumes.
-func RetireCompletedExecutorPollOperation(
-	driver *ExecutorDriver,
-	token *WaitToken,
-	ticket WaitTicket,
-	handle PollOperationHandle,
-) (PollOperationResult, bool) {
-	if !validRunningExecutorOwner(driver) {
-		return PollOperationResultInvalid, false
-	}
-	source := driver.sources.pollSource()
-	if source == nil {
-		return PollOperationResultInvalid, false
-	}
-	return source.RetireCompletedPollOperation(driver.p, handle, token, ticket)
-}
-
-func RetireCanceledExecutorPollOperation(
-	driver *ExecutorDriver,
-	token *WaitToken,
-	ticket WaitTicket,
-	handle PollOperationHandle,
-) bool {
-	if !validRunningExecutorOwner(driver) {
-		return false
-	}
-	source := driver.sources.pollSource()
-	return source != nil && source.RetireCanceledPollOperation(driver.p, handle, token, ticket)
+	return source.UpdatePollOperationV2Deadline(driver.p, id, deadline)
 }
 
 // SnapshotExecutorPollOperation is the only target reactor view of the paged
@@ -447,31 +261,6 @@ func SnapshotExecutorPollOperation(
 		return PollOperationSnapshot{}, false, false
 	}
 	return source.SnapshotAt(driver.p, index)
-}
-
-// PostExecutorPollReady imports readiness after a target wait returned and
-// before WakeExecutorAt scans sources. The handle, rather than the fd, is the
-// backend identity so a reused descriptor cannot receive a stale event.
-func PostExecutorPollReady(driver *ExecutorDriver, handle PollOperationHandle) PollOperationPostResult {
-	if !validExecutorDriver(driver) {
-		return PollOperationPostInvalid
-	}
-	source := driver.sources.pollSource()
-	if source == nil {
-		return PollOperationPostInvalid
-	}
-	return source.PostReady(driver.p, handle)
-}
-
-func PostExecutorPollClosing(driver *ExecutorDriver, handle PollOperationHandle) PollOperationPostResult {
-	if !validExecutorDriver(driver) {
-		return PollOperationPostInvalid
-	}
-	source := driver.sources.pollSource()
-	if source == nil {
-		return PollOperationPostInvalid
-	}
-	return source.PostClosing(driver.p, handle)
 }
 
 // PostExecutorPollEvent imports one pointer-free exact-generation event from
@@ -498,16 +287,7 @@ func PostExecutorPollEvent(
 	if !ok || slot.generation != id.Generation {
 		return PollOperationPostStale
 	}
-	switch slot.mode {
-	case pollOperationModeV1:
-		return source.post(driver.p, PollOperationHandle{
-			Slot: id.LocalSlot(), Generation: id.Generation,
-		}, result)
-	case pollOperationModeV2:
-		return source.PostPollOperationV2(id, result)
-	default:
-		return PollOperationPostClosed
-	}
+	return source.PostPollOperationV2(id, result)
 }
 
 func activeExecutorHandle(registry *ExecutorRegistry, handle ExecutorHandle) bool {
@@ -520,7 +300,7 @@ func activeExecutorHandle(registry *ExecutorRegistry, handle ExecutorHandle) boo
 func idleExecutorScheduler(p *P) bool {
 	return p != nil && p.current == nil && !p.inResume && p.action.Kind == ActionInvalid && p.action.Handle == nil &&
 		p.runDecision == (RunDecision{}) && !p.runDecisionTaken && p.servicePreemptBudget == 0 &&
-		validReadyQueueHeader(p) && validWaitQueueHeader(p) && validParkWaitQueueHeader(p) && validAffectedWaitQueueHeader(p)
+		validReadyQueueHeader(p) && validParkWaitQueueHeader(p) && validAffectedWaitQueueHeader(p)
 }
 
 // BindExecutor attaches a newly registered exact-zero executor gate and an
@@ -558,29 +338,7 @@ func bindExecutor(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, hand
 	return bindExecutorAtRoute(driver, p, registry, handle, RouteID(1), catalog)
 }
 
-func BindExecutor(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, waits *WaitRegistrationTable) bool {
-	return bindExecutor(driver, p, registry, handle, ExecutorSourceCatalog{Waits: waits})
-}
-
-func BindExecutorAtRoute(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, route RouteID, waits *WaitRegistrationTable) bool {
-	return bindExecutorAtRoute(driver, p, registry, handle, route, ExecutorSourceCatalog{Waits: waits})
-}
-
-// BindExecutorWithTimers preserves the timer-aware V1 binding ABI while
-// assembling one durable source set. A deadline-capable set accepts only the
-// explicit At poll/sleep/wake APIs, so omitting a monotonic timestamp fails
-// closed instead of silently delaying expiry.
-func BindExecutorWithTimers(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, waits *WaitRegistrationTable, timers *TimerRegistrationTable) bool {
-	return timers != nil && bindExecutor(driver, p, registry, handle, ExecutorSourceCatalog{Waits: waits, Timers: timers})
-}
-
-func BindExecutorWithTimersAtRoute(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, route RouteID, waits *WaitRegistrationTable, timers *TimerRegistrationTable) bool {
-	return timers != nil && bindExecutorAtRoute(driver, p, registry, handle, route, ExecutorSourceCatalog{Waits: waits, Timers: timers})
-}
-
-// BindExecutorSourceCatalog binds a frozen direct-call source catalog. It is
-// the extensible entry point; the V1 helpers above retain their exact source
-// subsets without creating timer/manual/host API combinations.
+// BindExecutorSourceCatalog binds the frozen direct-call source catalog.
 func BindExecutorSourceCatalog(driver *ExecutorDriver, p *P, registry *ExecutorRegistry, handle ExecutorHandle, catalog ExecutorSourceCatalog) bool {
 	return bindExecutor(driver, p, registry, handle, catalog)
 }
@@ -672,14 +430,13 @@ func PollExecutor(driver *ExecutorDriver) (drained, promoted int, ok bool) {
 }
 
 // PollExecutorAt services the complete deadline-capable source set with one
-// explicit monotonic sample. Its wait/timer component counts are retained for
-// the V1 adapter ABI; scheduling decisions use the aggregate scan.
-func PollExecutorAt(driver *ExecutorDriver, now int64) (waits, timers, promoted int, ok bool) {
+// explicit monotonic sample.
+func PollExecutorAt(driver *ExecutorDriver, now int64) (timers, promoted int, ok bool) {
 	if driver == nil || !driver.sources.usesMonotonicTime() {
-		return 0, 0, 0, false
+		return 0, 0, false
 	}
 	scan, ok := pollExecutorSourcesAt(driver, now, true)
-	return scan.waits, scan.timers, scan.promoted, ok
+	return scan.timers, scan.promoted, ok
 }
 
 // NextExecutorTimerDeadline exposes the scheduler owner's current earliest
@@ -896,13 +653,13 @@ func WakeExecutor(driver *ExecutorDriver) (drained, promoted int, ok bool) {
 
 // WakeExecutorAt leaves a committed timer-aware retained wait and services both
 // source set using the target's fresh post-wake monotonic sample.
-func WakeExecutorAt(driver *ExecutorDriver, now int64) (waits, timers, promoted int, ok bool) {
+func WakeExecutorAt(driver *ExecutorDriver, now int64) (timers, promoted int, ok bool) {
 	if !validExecutorDriver(driver) || !driver.sources.usesMonotonicTime() || driver.state != executorDriverSleeping ||
 		!emptyExecutorRunCursor(driver) || !idleExecutorScheduler(driver.p) || now < 0 {
-		return 0, 0, 0, false
+		return 0, 0, false
 	}
 	scan, ok := leaveExecutorIdleAndPollAt(driver, now)
-	return scan.waits, scan.timers, scan.promoted, ok
+	return scan.timers, scan.promoted, ok
 }
 
 func canBeginExecutorClose(driver *ExecutorDriver) bool {

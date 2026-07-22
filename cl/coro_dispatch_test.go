@@ -19,6 +19,8 @@
 package cl
 
 import (
+	"go/token"
+	"go/types"
 	"strings"
 	"testing"
 
@@ -27,6 +29,43 @@ import (
 	"github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/ssa"
 )
+
+func TestCoroDispatchNamedInterfaceLayoutIgnoresEquivalentMethodGraphIdentity(t *testing.T) {
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	newType := func(shadowReceiver bool) *types.Named {
+		pkg := types.NewPackage("internal/reflectlite", "reflectlite")
+		name := types.NewTypeName(token.NoPos, pkg, "Type", nil)
+		named := types.NewNamed(name, types.NewInterfaceType(nil, nil).Complete(), nil)
+		if previous := pkg.Scope().Insert(name); previous != nil {
+			t.Fatalf("insert package Type = %v", previous)
+		}
+		receiverType := types.Type(named)
+		if shadowReceiver {
+			shadowName := types.NewTypeName(token.NoPos, pkg, "Type", nil)
+			receiverType = types.NewNamed(shadowName, types.NewInterfaceType(nil, nil).Complete(), nil)
+		}
+		methodSignature := types.NewSignatureType(
+			types.NewVar(token.NoPos, pkg, "recv", receiverType), nil, nil,
+			types.NewTuple(),
+			types.NewTuple(types.NewVar(token.NoPos, pkg, "", named)),
+			false,
+		)
+		method := types.NewFunc(token.NoPos, pkg, "Elem", methodSignature)
+		named.SetUnderlying(types.NewInterfaceType([]*types.Func{method}, nil).Complete())
+		return named
+	}
+	var shared, structurallyEqual strings.Builder
+	if err := appendCoroPlainDispatchTypeLayout(&shared, prog, "result", newType(false), nil, make(map[types.Type]bool)); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendCoroPlainDispatchTypeLayout(&structurallyEqual, prog, "result", newType(true), nil, make(map[types.Type]bool)); err != nil {
+		t.Fatal(err)
+	}
+	if shared.String() != structurallyEqual.String() {
+		t.Fatalf("named interface layout depends on recursive method object identity:\n%s\n!=\n%s", shared.String(), structurallyEqual.String())
+	}
+}
 
 func TestCoroPlainDispatchCompilesClosedSingletonFunctionValue(t *testing.T) {
 	const source = `package foo

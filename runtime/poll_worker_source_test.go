@@ -68,11 +68,11 @@ func TestRuntimeCoroChannelCapacityUsesPagedLogicalSource(t *testing.T) {
 
 	driver := readRuntimePollFile(t, runtimeCoroNativeDriverSource)
 	for _, required := range []string{
-		"coroNativeChannelCapacityV1   = coroNativeSourcePageCountV1 * coro.ChannelOperationPageCapacity",
+		"coroNativeChannelCapacityV1 = coroNativeSourcePageCountV1 * coro.ChannelOperationPageCapacity",
 		"coroProgramChannelExtraPagesV1State",
 		"coro.ConfigureChannelOperationPages(&coroProgramChannelSourceV1State",
 		"coro.ChannelOperationConfiguredCapacity(&coroProgramChannelSourceV1State) != coroNativeChannelCapacityV1",
-		"coroNativeChannelCapacityV1 != coroNativeWaitCapacityV1",
+		"coroNativeChannelCapacityV1 != coroNativeSourcePageCountV1*coro.ManualOperationPageCapacity",
 	} {
 		if !strings.Contains(driver, required) {
 			t.Errorf("%s lacks native channel capacity marker %q", runtimeCoroNativeDriverSource, required)
@@ -112,7 +112,7 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 	}
 	programCompletion := readRuntimePollFile(t, runtimeCoroWorkerProgramCompletionSource)
 	for _, required := range []string{
-		"!llgo_coro_native_fleet",
+		"!llgo_coro_native_timer",
 		"//export __llgo_coro_native_worker_complete_v1",
 		"state.delivery != coroNativeWorkerDeliveryProgramV1",
 		"coroProgramWorkerSourceV1State.Post(id, payload)",
@@ -124,7 +124,7 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 	}
 	fleetCompletion := readRuntimePollFile(t, runtimeCoroWorkerFleetCompletionSource)
 	for _, required := range []string{
-		"llgo_coro_native_fleet",
+		"llgo_coro_native_timer",
 		"//export __llgo_coro_native_worker_complete_v1",
 		"state.delivery != coroNativeWorkerDeliveryFleetV1",
 		"coroNativeFleetPostWorkerV1(id, payload)",
@@ -134,7 +134,7 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 			t.Errorf("%s lacks static fleet worker completion marker %q", runtimeCoroWorkerFleetCompletionSource, required)
 		}
 	}
-	for _, forbidden := range []string{"unsafe.Pointer", "reflect", "runtimeDarwinFuncPCABI0", "map[uintptr]"} {
+	for _, forbidden := range []string{"llgo_coro_native_fleet", "unsafe.Pointer", "reflect", "runtimeDarwinFuncPCABI0", "map[uintptr]"} {
 		if strings.Contains(fleetCompletion, forbidden) {
 			t.Errorf("%s retained reverse worker routing marker %q", runtimeCoroWorkerFleetCompletionSource, forbidden)
 		}
@@ -257,7 +257,7 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 
 	driver := readRuntimePollFile(t, runtimeCoroNativeDriverSource)
 	for _, required := range []string{
-		"coroNativeWorkerCapacityV1    = coroNativeSourcePageCountV1 * coro.WorkerOperationPageCapacity",
+		"coroNativeWorkerCapacityV1  = coroNativeSourcePageCountV1 * coro.WorkerOperationPageCapacity",
 		"coroProgramWorkerExtraPagesV1State",
 		"coro.ConfigureWorkerOperationPages(&coroProgramWorkerSourceV1State",
 		"coro.WorkerOperationConfiguredCapacity(&coroProgramWorkerSourceV1State) != coroNativeWorkerCapacityV1",

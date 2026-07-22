@@ -96,14 +96,8 @@ const (
 	// supports only one no-capture, non-suspending plain body; unsupported value
 	// shapes and call capabilities remain fail-closed.
 	FuncRepABIV1 = "llgo.coro.func-rep.v1"
-	// FrameRetentionTimerABIV1 authorizes one exact fail-stop native timer
-	// prepare/park/retire transaction to retain pointer-free locals in the
-	// current LLVM coroutine frame instead of the managed heap.
-	FrameRetentionTimerABIV1 = "llgo.coro.frame-retention.timer.v1"
-	// FrameRetentionParkABIV2 generalizes the same exact current-frame proof
-	// to a frozen set of compiler/runtime-owned prepare/park/retire contracts.
-	// It initially contains timer.v1 and poll.v1; adding an event source extends
-	// the contract table instead of adding another lowering or lifetime proof.
+	// FrameRetentionParkABIV2 identifies the sole generic Park state lifetime
+	// proof. Source-specific symbols are deliberately absent from this ABI.
 	FrameRetentionParkABIV2 = "llgo.coro.frame-retention.park.v2"
 )
 
@@ -584,7 +578,7 @@ func (m PlanDigestMetadata) validate() error {
 	}
 	switch m.FrameRetentionABI {
 	case "":
-	case FrameRetentionTimerABIV1, FrameRetentionParkABIV2:
+	case FrameRetentionParkABIV2:
 		if m.CoroABI != PhysicalABIV1 ||
 			(m.SchedulerABI != SchedulerProgramBootstrapABIV2 &&
 				m.SchedulerABI != SchedulerProgramBootstrapWorkerABIV0 &&

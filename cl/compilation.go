@@ -32,17 +32,10 @@ import (
 // the build cache. Observers must treat both arguments as read-only.
 type CoroPlanObserver func(pkg *ssa.Package, plan *coro.SSAPlan)
 
-// CoroFrameRetentionTimerABIV1 names the one current-frame pointer-retention
-// contract implemented by the native scheduler timer owner. It is deliberately
-// separate from //llgo:coro noblock: a nonblocking C call may still retain any
-// pointer passed to it. This identity authorizes cl to prove only the exact
-// prepare/park/retire transaction whose retained pointer dies before the
-// current LLVM coroutine frame can complete.
-const CoroFrameRetentionTimerABIV1 = coro.FrameRetentionTimerABIV1
-
-// CoroFrameRetentionParkABIV2 selects the extensible compiler/runtime-owned
-// prepare/park/retire contract table. TimerABIV1 remains accepted for cached
-// and focused timer-only inputs, while new runtime profiles use ParkABIV2.
+// CoroFrameRetentionParkABIV2 is the sole stackless frame-retention identity.
+// A generic llgo.coroPark state is frame-owned only when its exact prepare call
+// has a frozen executor-safe, borrow-until-return callable contract. Event
+// source symbols never participate in this compiler profile.
 const CoroFrameRetentionParkABIV2 = coro.FrameRetentionParkABIV2
 
 const (
@@ -220,7 +213,7 @@ func (c *Compilation) validateStacklessCoroABIIdentity(required bool) error {
 		wantScheduler = coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0
 	}
 	switch c.CoroFrameRetentionABI {
-	case "", CoroFrameRetentionTimerABIV1, CoroFrameRetentionParkABIV2:
+	case "", CoroFrameRetentionParkABIV2:
 	default:
 		return fmt.Errorf("unknown coroutine frame-retention ABI %q", c.CoroFrameRetentionABI)
 	}

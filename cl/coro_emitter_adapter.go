@@ -38,10 +38,6 @@ func (p *context) compileCoroInstructionPrologue(b llssa.Builder, instr ssa.Inst
 		p.compileInstr(b, instr)
 		return true
 	}
-	role := coroFrameRetentionInstructionNone
-	if body.frameRetention != nil {
-		role = body.frameRetention.roles[instr]
-	}
 	criticalRole := coroCriticalCallNone
 	criticalDepth := uint32(0)
 	if body.critical != nil {
@@ -55,43 +51,13 @@ func (p *context) compileCoroInstructionPrologue(b llssa.Builder, instr ssa.Inst
 		}
 	}
 	outerCriticalEnter := criticalRole == coroCriticalCallEnter && criticalDepth == 0
-	switch role {
-	case coroFrameRetentionInstructionPrepare:
-		if body.frameRetaining {
-			panic("nested coroutine frame-retention critical span")
-		}
-		// A retained frame pointer must never exist while an ordinary
-		// preemption handoff can make this G independently runnable. Poll
-		// immediately before the fail-stop prepare, then suppress budget polls
-		// until the exact fail-stop retire has returned.
-		if body.needsPreempt {
-			body.pollAndSuspendForPreempt(b)
-		}
-		body.instructions = 0
-		body.frameRetaining = true
-	case coroFrameRetentionInstructionPark, coroFrameRetentionInstructionRetire:
-		if !body.frameRetaining {
-			panic("coroutine frame-retention park/retire outside its critical span")
-		}
-	default:
-		if !body.frameRetaining && criticalDepth == 0 && !outerCriticalEnter {
-			body.countInstructionAndMaybeYield(b)
-		}
+	if criticalDepth == 0 && !outerCriticalEnter {
+		body.countInstructionAndMaybeYield(b)
 	}
 	if !outerCriticalEnter {
 		body.sourceBlockPollFresh = false
 	}
 	return false
-}
-
-func (p *context) compileCoroInstructionEpilogue(instr ssa.Instruction) {
-	body := p.coroBody()
-	if body == nil || body.frameRetention == nil ||
-		body.frameRetention.roles[instr] != coroFrameRetentionInstructionRetire {
-		return
-	}
-	body.frameRetaining = false
-	body.instructions = 0
 }
 
 func (p *context) compileCoroPatchInitAtBlock(b llssa.Builder) bool {

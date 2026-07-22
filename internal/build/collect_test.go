@@ -80,7 +80,7 @@ func TestCoroutinePlanInputsAffectFingerprint(t *testing.T) {
 	frameBase.CoroABI = coro.PhysicalABIV1
 	frameBase.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
 	frameRetention := frameBase
-	frameRetention.FrameRetentionABI = coro.FrameRetentionTimerABIV1
+	frameRetention.FrameRetentionABI = coro.FrameRetentionParkABIV2
 	if got, without := fingerprint(strings.Repeat("1", 64), frameRetention), fingerprint(strings.Repeat("1", 64), frameBase); got == without {
 		t.Fatal("frame-retention ABI did not domain-separate the package fingerprint")
 	}
@@ -90,8 +90,8 @@ func TestCoroutinePlanInputsAffectFingerprint(t *testing.T) {
 		coroPlanDigest:   strings.Repeat("1", 64),
 		coroPlanMetadata: frameRetention,
 	}).collectCommonInputs(frameRetentionManifest)
-	if got := frameRetentionManifest.common.CoroFrameRetentionABI; got != coro.FrameRetentionTimerABIV1 {
-		t.Fatalf("manifest frame-retention ABI = %q, want %q", got, coro.FrameRetentionTimerABIV1)
+	if got := frameRetentionManifest.common.CoroFrameRetentionABI; got != coro.FrameRetentionParkABIV2 {
+		t.Fatalf("manifest frame-retention ABI = %q, want %q", got, coro.FrameRetentionParkABIV2)
 	}
 	if got := fingerprint(strings.Repeat("2", 64), base); got == baseline {
 		t.Fatal("CoroPlanDigest did not affect the package fingerprint")

@@ -79,11 +79,12 @@ func F() int { return 42 }
 func TestCompilationCoroABIIdentityValidation(t *testing.T) {
 	current := func() *Compilation {
 		return &Compilation{
-			CoroProfile:  CoroProfileStackless,
-			CoroABI:      coro.PhysicalABIV1,
-			SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
-			PanicABI:     coro.PanicExplicitStatusABIV0,
-			FuncRepABI:   coro.FuncRepABIV1,
+			CoroProfile:           CoroProfileStackless,
+			CoroABI:               coro.PhysicalABIV1,
+			SchedulerABI:          coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+			PanicABI:              coro.PanicExplicitStatusABIV0,
+			FuncRepABI:            coro.FuncRepABIV1,
+			CoroFrameRetentionABI: CoroFrameRetentionParkABIV2,
 		}
 	}
 	if err := current().validateCoroABIIdentity(false); err != nil {
@@ -121,7 +122,7 @@ func TestCompilationCoroABIIdentityValidation(t *testing.T) {
 		t.Fatalf("inactive empty identity: %v", err)
 	}
 
-	for _, retention := range []string{"", CoroFrameRetentionTimerABIV1, CoroFrameRetentionParkABIV2} {
+	for _, retention := range []string{"", CoroFrameRetentionParkABIV2} {
 		compilation := current()
 		compilation.CoroFrameRetentionABI = retention
 		if err := compilation.validateCoroABIIdentity(false); err != nil {

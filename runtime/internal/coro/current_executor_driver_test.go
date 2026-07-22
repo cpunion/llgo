@@ -24,7 +24,6 @@ import (
 type currentExecutorDriverFixture struct {
 	p      *P
 	driver *ExecutorDriver
-	waits  *WaitRegistrationTable
 	handle ExecutorHandle
 	route  RouteID
 	task   *yieldingTestG
@@ -41,12 +40,13 @@ func bindCurrentExecutorDriverFixture(
 	fixture := &currentExecutorDriverFixture{
 		p:      new(P),
 		driver: new(ExecutorDriver),
-		waits:  new(WaitRegistrationTable),
 		route:  route,
 		task:   newYieldingTestG(t, name),
 	}
 	fixture.handle = registerTestExecutor(t, registry)
-	if !BindExecutorAtRoute(fixture.driver, fixture.p, registry, fixture.handle, route, fixture.waits) {
+	if !BindExecutorSourceCatalogAtRoute(
+		fixture.driver, fixture.p, registry, fixture.handle, route, ExecutorSourceCatalog{},
+	) {
 		t.Fatalf("bind current-executor fixture %q at route %d", name, route)
 	}
 	if !Enqueue(fixture.p, fixture.task.g) {
@@ -159,7 +159,7 @@ func TestCurrentExecutorDriverResolvesExactOwnerAcrossTwoP(t *testing.T) {
 	finishReadyDriverTasks(t, first.p, map[*G]*yieldingTestG{first.task.g: first.task})
 	finishReadyDriverTasks(t, second.p, map[*G]*yieldingTestG{second.task.g: second.task})
 	if !TerminalG(first.p, first.task.g) || !TerminalG(second.p, second.task.g) ||
-		!first.waits.CanRelease() || !second.waits.CanRelease() || !registry.CanRelease() {
+		!registry.CanRelease() {
 		t.Fatal("two-P current-executor fixture retained terminal state")
 	}
 	runtime.KeepAlive(first.task.frame.memory)

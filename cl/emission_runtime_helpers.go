@@ -878,13 +878,20 @@ func (u *EmissionUniverse) makeInterfaceRuntimeHelpers(ctx *context, makeInterfa
 	// representation and the large/zero dereference rules depend only on the
 	// patched Go type and target pointer size; materializing an LLSSA type here
 	// would incorrectly require runtime.String and other runtime ABI types.
-	physical := ctx.patchType(makeInterface.X.Type())
+	// Builder.MakeInterface consumes the Go-to-raw physical payload, not the
+	// patched source shape. In particular, every Go func value becomes the
+	// two-word closure aggregate before the direct-interface decision. Looking
+	// only at the source *types.Signature would incorrectly classify it as one
+	// direct pointer and omit the AllocU call that code generation emits.
+	physical := u.physicalFunctionABIType(ctx, makeInterface.X.Type())
 	if !emissionDirectIfaceType(physical) {
 		add("AllocU")
 	}
 	if unop, ok := makeInterface.X.(*ssa.UnOp); ok && unop.Op == token.MUL &&
 		emissionLargeOrZeroInterfaceDeref(physical, ctx.prog.PointerSize()) {
-		add("AssertNilDeref")
+		if !isKnownNonNilAddr(unop.X) && !ssaValueProvenNonNilAt(unop.X, makeInterface) {
+			add("AssertNilDeref")
+		}
 		// MakeInterfaceFromPtr uses the indirect representation for both large
 		// and zero-sized values and therefore always copies through AllocU.
 		add("AllocU", "Typedmemmove")

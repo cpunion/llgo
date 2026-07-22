@@ -166,7 +166,7 @@ type EmissionUniverse struct {
 	plainLoweredCalls     map[*ssa.Function]map[string]*ssa.Function
 	coroProgramIR         *coroProgramIR
 	patchInitEntries      []*ssa.Function
-	patchInitRedirects    map[ssa.CallInstruction]coroPatchInitRedirect
+	patchInitRedirects    coroPatchInitRedirectIndex
 	normalReturnBlocks    map[*ssa.Function]map[*ssa.BasicBlock]none
 	// unsafeSizeAlignUnevaluated freezes the exact source SSA instructions
 	// erased by unsafe.Sizeof/Alignof lowering.  Inventory, coroutine lowering
@@ -194,6 +194,16 @@ type EmissionUniverse struct {
 	localGenericTypes  map[*types.Named]emissionLocalGenericType
 	localGenericOwners map[*types.Named]*ssa.Function
 	genericNamedTypes  map[*types.Named]*types.Named
+}
+
+// emissionCanonicalIndex is the single cross-owner canonicalization boundary
+// for a prepared emission universe. It owns the exceptional equivalence rules
+// that cannot be answered by one exact package owner: patched generic
+// instances and syntax-free generated wrappers. Keeping those rules behind one
+// index prevents selection, physical naming, and physical-plan lookup from
+// growing independent notions of canonical identity.
+type emissionCanonicalIndex struct {
+	universe *EmissionUniverse
 }
 
 func llgoRuntimeABIPackagePath() string {
@@ -296,6 +306,28 @@ type coroLoweredCallTarget struct {
 type coroPatchInitRedirect struct {
 	logicalName string
 	target      *ssa.Function
+}
+
+// coroPatchInitRedirectIndex is mutable builder scratch until ProgramIR freezes
+// every exact call-site replacement. Recording and retargeting stay inside the
+// index so callers cannot create a second patch-redirection storage protocol.
+type coroPatchInitRedirectIndex map[ssa.CallInstruction]coroPatchInitRedirect
+
+func (index coroPatchInitRedirectIndex) record(call ssa.CallInstruction, redirect coroPatchInitRedirect) bool {
+	if previous, exists := index[call]; exists && previous != redirect {
+		return false
+	}
+	index[call] = redirect
+	return true
+}
+
+func (index coroPatchInitRedirectIndex) retarget(original, replacement *ssa.Function) {
+	for site, redirect := range index {
+		if redirect.target == original {
+			redirect.target = replacement
+			index[site] = redirect
+		}
+	}
 }
 
 // CoroIntrinsicCallSemantics is the frozen physical call-edge behavior of an
@@ -503,7 +535,7 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		loweredCalls:               make(map[*ssa.Function]map[string]coroLoweredCallTarget),
 		plainLoweredCalls:          make(map[*ssa.Function]map[string]*ssa.Function),
 		coroProgramIR:              newCoroProgramIR(),
-		patchInitRedirects:         make(map[ssa.CallInstruction]coroPatchInitRedirect),
+		patchInitRedirects:         make(coroPatchInitRedirectIndex),
 		normalReturnBlocks:         make(map[*ssa.Function]map[*ssa.BasicBlock]none),
 		unsafeSizeAlignUnevaluated: make(map[*ssa.Function]map[ssa.Instruction]none),
 		foreignNoBlock:             make(map[*ssa.Function]CoroForeignNoBlockCertificate),
@@ -703,6 +735,10 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 
 	u.functions = filterRequiredFunctions(u.functions, u.required)
 	for {
+		if err := (emissionCanonicalIndex{universe: u}).canonicalizePatchedGenericInstances(); err != nil {
+			return nil, err
+		}
+		u.functions = filterRequiredFunctions(u.functions, u.required)
 		progress := false
 		functions := stableUniqueFunctions(append([]*ssa.Function(nil), u.functions...))
 		sort.SliceStable(functions, func(i, j int) bool {
@@ -905,10 +941,9 @@ func (u *EmissionUniverse) freezeCoroPatchInitEntries() error {
 					strconv.Itoa(semanticOrdinal),
 				)
 				redirect.logicalName = logicalName
-				if previous, exists := u.patchInitRedirects[call]; exists && previous != redirect {
+				if !u.patchInitRedirects.record(call, redirect) {
 					return fmt.Errorf("prepare emission universe: patched initializer call in %q has conflicting replacements", owner.Name())
 				}
-				u.patchInitRedirects[call] = redirect
 				if err := u.recordCoroLoweredCall(owner, logicalName, redirect.target); err != nil {
 					return fmt.Errorf("prepare emission universe: patched initializer replacement in %q: %w", owner.Name(), err)
 				}
@@ -2601,21 +2636,7 @@ func (u *EmissionUniverse) physicalName(ownerSSA *ssa.Package, fn *ssa.Function,
 		// but the wrapper body and physical symbol belong to the declaring
 		// package. Reuse that already-frozen symbol only when every definition
 		// owner agrees; owner-dependent wrappers must still fail closed.
-		var shared string
-		for _, candidate := range u.sortedUseOwners(fn) {
-			name := u.physicalNames[emissionFunctionOwnerKey{function: fn, owner: candidate}]
-			if name == "" {
-				continue
-			}
-			if shared == "" {
-				shared = name
-				continue
-			}
-			if shared != name {
-				shared = ""
-				break
-			}
-		}
+		shared, available := (emissionCanonicalIndex{universe: u}).sharedGeneratedWrapperPhysicalName(fn)
 		if shared != "" {
 			return shared, nil
 		}
@@ -2623,17 +2644,42 @@ func (u *EmissionUniverse) physicalName(ownerSSA *ssa.Package, fn *ssa.Function,
 		if owner != nil {
 			ownerName = owner.identity
 		}
-		available := make([]string, 0, len(u.useOwners[fn]))
-		for _, candidate := range u.sortedUseOwners(fn) {
-			available = append(available, fmt.Sprintf("%s=%q", candidate.identity,
-				u.physicalNames[emissionFunctionOwnerKey{function: fn, owner: candidate}]))
-		}
 		return "", fmt.Errorf(
 			"coroutine entry resolution: generated wrapper %q (%q, %s) has no frozen physical symbol for owner %q; frozen owners: %v",
 			fn.Name(), fn.Synthetic, structuralEmissionTypeKey(fn.Signature), ownerName, available,
 		)
 	}
 	return legacy, nil
+}
+
+// sharedGeneratedWrapperPhysicalName returns the one coalescible physical
+// symbol frozen for a syntax-free wrapper. Cross-package ABI method tables may
+// materialize that wrapper from a package which does not own its definition,
+// but they may reuse it only when every definition owner agrees on the symbol.
+// The same projection is consumed by physical-plan selection so naming and
+// lowering can never choose different owners for one emitted body.
+func (index emissionCanonicalIndex) sharedGeneratedWrapperPhysicalName(fn *ssa.Function) (string, []string) {
+	u := index.universe
+	if u == nil || !isEmissionGeneratedWrapper(fn) {
+		return "", nil
+	}
+	var shared string
+	available := make([]string, 0, len(u.useOwners[fn]))
+	for _, candidate := range u.sortedUseOwners(fn) {
+		name := u.physicalNames[emissionFunctionOwnerKey{function: fn, owner: candidate}]
+		available = append(available, fmt.Sprintf("%s=%q", candidate.identity, name))
+		if name == "" {
+			continue
+		}
+		if shared == "" {
+			shared = name
+			continue
+		}
+		if shared != name {
+			return "", available
+		}
+	}
+	return shared, available
 }
 
 // patchOriginalInitPhysicalName returns the private symbol role owned by the
@@ -3119,6 +3165,32 @@ func (u *EmissionUniverse) selectFunction(prepared *preparedEmissionPackage, fn 
 					// bodies, so one final kind/name/signature is one exact symbol.
 					canonical = winner
 					u.aliases[fn] = winner
+				case (emissionCanonicalIndex{universe: u}).samePatchedGenericInstanceOrigin(prepared, winner, fn):
+					// x/tools caches instances per generic origin. A patched generic
+					// declaration and its skipped original therefore produce distinct
+					// *ssa.Function values for the same final instantiated symbol. Carry
+					// the already-frozen origin alias through to the instance and keep
+					// only the instance of the canonical (patch) origin. The managed
+					// key equality above proves that arguments and callable ABI agree;
+					// this branch never coalesces unrelated generic declarations.
+					patchOwner := u.ownerOf(winner.Origin())
+					_, winnerCanonical := u.functionProvenance(patchOwner, winner.Origin())
+					_, incomingCanonical := u.functionProvenance(patchOwner, fn.Origin())
+					switch {
+					case incomingCanonical && !winnerCanonical:
+						if err := u.replaceManagedWinner(prepared, key, winner, fn); err != nil {
+							return err
+						}
+						canonical = fn
+					case winnerCanonical && !incomingCanonical:
+						canonical = winner
+						u.aliases[fn] = winner
+					default:
+						return fmt.Errorf(
+							"prepare emission universe: package %q has ambiguous generic instances of one canonical origin between %s and %s",
+							prepared.identity, emissionFunctionDiagnostic(winner), emissionFunctionDiagnostic(fn),
+						)
+					}
 				case u.samePromotedWrapperLinkIdentity(prepared, winner, fn):
 					// Existing cl codegen merges these on the same LLVM symbol: local,
 					// structurally identical, or generic promoted wrappers may be synthesized more than once, but
@@ -3167,6 +3239,230 @@ func (u *EmissionUniverse) selectFunction(prepared *preparedEmissionPackage, fn 
 		u.fnStates[fn] = emissionFunctionState{state: state, fromPatch: fromPatch}
 	}
 	u.addRequired(canonical, prepared)
+	return nil
+}
+
+// samePatchedGenericInstanceOrigin reports only the relationship established
+// by patch declaration selection: two concrete instances have distinct raw
+// origins, exactly one origin has patch provenance, and both declarations
+// select the same normalized managed symbol. Callable ABI and instantiated
+// argument equality are checked by the instance managed-symbol key before this
+// predicate is used.
+func (index emissionCanonicalIndex) samePatchedGenericInstanceOrigin(prepared *preparedEmissionPackage, left, right *ssa.Function) bool {
+	u := index.universe
+	if u == nil || prepared == nil || left == nil || right == nil || left == right ||
+		left.Origin() == nil || right.Origin() == nil ||
+		left.Origin() == right.Origin() || len(left.TypeArgs()) == 0 || len(right.TypeArgs()) == 0 {
+		return false
+	}
+	patchOwner := u.ownerOf(left.Origin())
+	if patchOwner == nil || !patchOwner.hasPatch || patchOwner != u.ownerOf(right.Origin()) {
+		return false
+	}
+	leftState, leftPatch := u.functionProvenance(patchOwner, left.Origin())
+	rightState, rightPatch := u.functionProvenance(patchOwner, right.Origin())
+	if leftPatch == rightPatch {
+		return false
+	}
+	leftKey, leftManaged, leftErr := u.managedSymbolKey(patchOwner, left.Origin(), leftState)
+	rightKey, rightManaged, rightErr := u.managedSymbolKey(patchOwner, right.Origin(), rightState)
+	return leftErr == nil && rightErr == nil && leftManaged && rightManaged && leftKey == rightKey
+}
+
+// canonicalizePatchedGenericInstances extends declaration replacement to the
+// concrete functions cached independently by x/tools for each generic origin.
+// It runs before every materialization wave: callers may discover an original
+// instance while ABI type demand discovers the patch instance in the same
+// wave, but neither body is compiled before this pass selects the patch body.
+// The key contains the normalized origin and concrete managed ABI under the
+// patch owner, so unrelated generics and different type arguments never meet.
+func (index emissionCanonicalIndex) canonicalizePatchedGenericInstances() error {
+	u := index.universe
+	if u == nil {
+		return nil
+	}
+	type instanceGroupKey struct {
+		owner    *preparedEmissionPackage
+		origin   string
+		instance string
+	}
+	type instanceGroup struct {
+		key      instanceGroupKey
+		patched  []*ssa.Function
+		original []*ssa.Function
+	}
+	groups := make(map[instanceGroupKey]*instanceGroup)
+	ordered := make([]*instanceGroup, 0)
+	for _, fn := range stableUniqueFunctions(append([]*ssa.Function(nil), u.functions...)) {
+		if _, required := u.required[fn]; !required || fn == nil || fn.Origin() == nil || len(fn.TypeArgs()) == 0 {
+			continue
+		}
+		origin := fn.Origin()
+		owner := u.ownerOf(origin)
+		if owner == nil || !owner.hasPatch {
+			continue
+		}
+		state, fromPatch := u.functionProvenance(owner, origin)
+		originKey, originManaged, err := u.managedSymbolKey(owner, origin, state)
+		if err != nil {
+			return fmt.Errorf("prepare emission universe: identify generic origin %q for patch canonicalization: %w", origin.Name(), err)
+		}
+		instanceKey, instanceManaged, err := u.managedSymbolKey(owner, fn, state)
+		if err != nil {
+			return fmt.Errorf("prepare emission universe: identify generic instance %q for patch canonicalization: %w", fn.Name(), err)
+		}
+		if !originManaged || !instanceManaged || managedKeyFunctionType(originKey) != goFunc || managedKeyFunctionType(instanceKey) != goFunc {
+			continue
+		}
+		key := instanceGroupKey{owner: owner, origin: originKey, instance: instanceKey}
+		group := groups[key]
+		if group == nil {
+			group = &instanceGroup{key: key}
+			groups[key] = group
+			ordered = append(ordered, group)
+		}
+		if fromPatch {
+			group.patched = append(group.patched, fn)
+		} else {
+			group.original = append(group.original, fn)
+		}
+	}
+	for _, group := range ordered {
+		if len(group.patched) == 0 || len(group.original) == 0 {
+			continue
+		}
+		if len(group.patched) != 1 {
+			return fmt.Errorf(
+				"prepare emission universe: patch owner %q has %d exact patch instances for one generic managed ABI",
+				group.key.owner.identity, len(group.patched),
+			)
+		}
+		replacement := group.patched[0]
+		for _, original := range group.original {
+			if err := index.aliasUnmaterializedPatchedGenericInstance(original, replacement); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (index emissionCanonicalIndex) aliasUnmaterializedPatchedGenericInstance(original, replacement *ssa.Function) error {
+	u := index.universe
+	if u == nil || original == nil || replacement == nil || original == replacement {
+		return fmt.Errorf("prepare emission universe: invalid patched generic instance alias")
+	}
+	if _, materialized := u.materialized[original]; materialized {
+		return fmt.Errorf(
+			"prepare emission universe: original generic instance %s was materialized before patch instance %s",
+			emissionFunctionDiagnostic(original), emissionFunctionDiagnostic(replacement),
+		)
+	}
+	if canonical := u.canonicalAlias(replacement); canonical == nil || canonical != replacement {
+		return fmt.Errorf("prepare emission universe: patch generic instance %q is not exact canonical", replacement.Name())
+	}
+
+	if u.useOwners[replacement] == nil {
+		u.useOwners[replacement] = make(map[*preparedEmissionPackage]none)
+	}
+	if u.ownerStates[replacement] == nil {
+		u.ownerStates[replacement] = make(map[*preparedEmissionPackage]emissionFunctionState)
+	}
+	for owner := range u.useOwners[original] {
+		if owner == nil {
+			return fmt.Errorf("prepare emission universe: original generic instance %q has a nil use owner", original.Name())
+		}
+		state, ok := u.ownerStates[original][owner]
+		if !ok {
+			return fmt.Errorf("prepare emission universe: original generic instance %q has no provenance for owner %q", original.Name(), owner.identity)
+		}
+		if previous, exists := u.ownerStates[replacement][owner]; exists {
+			merged, err := mergeEmissionOwnerState(replacement, owner, previous, state)
+			if err != nil {
+				return err
+			}
+			state = merged
+		}
+		u.useOwners[replacement][owner] = none{}
+		u.ownerStates[replacement][owner] = state
+		oldKey := emissionFunctionOwnerKey{function: original, owner: owner}
+		newKey := emissionFunctionOwnerKey{function: replacement, owner: owner}
+		if kind, exists := u.functionKinds[oldKey]; exists {
+			if previous, frozen := u.functionKinds[newKey]; frozen && previous != kind {
+				return fmt.Errorf("prepare emission universe: patched generic instance %q has conflicting frontend kinds for owner %q", replacement.Name(), owner.identity)
+			}
+			u.functionKinds[newKey] = kind
+		}
+		if finalKey, exists := u.finalKeys[oldKey]; exists {
+			if previous, frozen := u.finalKeys[newKey]; frozen && previous != finalKey {
+				return fmt.Errorf("prepare emission universe: patched generic instance %q has conflicting managed ABI for owner %q", replacement.Name(), owner.identity)
+			}
+			u.finalKeys[newKey] = finalKey
+		}
+		if opcode, exists := u.intrinsicOps[oldKey]; exists {
+			if previous, frozen := u.intrinsicOps[newKey]; frozen && previous != opcode {
+				return fmt.Errorf("prepare emission universe: patched generic instance %q has conflicting intrinsic opcode for owner %q", replacement.Name(), owner.identity)
+			}
+			u.intrinsicOps[newKey] = opcode
+		}
+		if physical, exists := u.physicalNames[oldKey]; exists {
+			if previous, frozen := u.physicalNames[newKey]; frozen && previous != physical {
+				return fmt.Errorf("prepare emission universe: patched generic instance %q has conflicting physical name for owner %q", replacement.Name(), owner.identity)
+			}
+			u.physicalNames[newKey] = physical
+		}
+		delete(u.functionKinds, oldKey)
+		delete(u.finalKeys, oldKey)
+		delete(u.intrinsicOps, oldKey)
+		delete(u.physicalNames, oldKey)
+	}
+
+	u.aliases[original] = replacement
+	for alias, canonical := range u.aliases {
+		if canonical == original {
+			u.aliases[alias] = replacement
+		}
+	}
+	for _, prepared := range u.packages {
+		for key, winner := range prepared.winners {
+			if winner == original {
+				prepared.winners[key] = replacement
+			}
+		}
+	}
+	retarget := func(records map[*ssa.Function]map[*ssa.Function]none) {
+		for _, targets := range records {
+			if _, exists := targets[original]; exists {
+				delete(targets, original)
+				targets[replacement] = none{}
+			}
+		}
+	}
+	retarget(u.abiMethodReferences)
+	retarget(u.abiSyncReferences)
+	for _, calls := range u.loweredCalls {
+		for name, call := range calls {
+			if call.target == original {
+				call.target = replacement
+				calls[name] = call
+			}
+		}
+	}
+	for _, calls := range u.plainLoweredCalls {
+		for name, target := range calls {
+			if target == original {
+				calls[name] = replacement
+			}
+		}
+	}
+	u.patchInitRedirects.retarget(original, replacement)
+
+	delete(u.required, original)
+	u.required[replacement] = none{}
+	delete(u.useOwners, original)
+	delete(u.ownerStates, original)
+	delete(u.fnOwners, original)
+	delete(u.fnStates, original)
 	return nil
 }
 

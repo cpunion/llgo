@@ -243,33 +243,3 @@ func __llgo_coro_host_continue_slice_v1(
 	}
 	return status
 }
-
-// __llgo_coro_host_post_wait_v1 is the generic host/IRQ completion ingress.
-// The caller retains only four identity words, publishes the durable wait
-// before requesting the executor, then consumes NextAction if IdleWake won.
-//
-//export __llgo_coro_host_post_wait_v1
-func __llgo_coro_host_post_wait_v1(waitSlot, waitGeneration, executorSlot, executorGeneration uint32) uint32 {
-	wait := coro.WaitRegistrationHandle{Slot: waitSlot, Generation: waitGeneration}
-	executor := coro.ExecutorHandle{Slot: executorSlot, Generation: executorGeneration}
-	closed := coro.WaitExecutorPostResult{Wait: coro.WaitRegistrationPostClosed, Executor: coro.ExecutorRequestClosed}
-	if !coroHostTargetV1State.EnterProducer(executor) {
-		return uint32(closed.Wait) | uint32(closed.Executor)<<8
-	}
-	if executor != coroProgramExecutorHandleV1State {
-		_ = coroHostTargetV1State.LeaveProducer()
-		return uint32(closed.Wait) | uint32(closed.Executor)<<8
-	}
-	result := coro.PostWaitAndRequest(
-		&coroProgramWaitTableV1State,
-		wait,
-		&coroProgramExecutorRegistryV1State,
-		executor,
-	)
-	wakeOK := !coro.ExecutorRequestNeedsDoorbell(result.Executor) || coroHostTargetV1State.RequestWake(executor)
-	leaveOK := coroHostTargetV1State.LeaveProducer()
-	if !wakeOK || !leaveOK {
-		result = coro.WaitExecutorPostResult{Wait: coro.WaitRegistrationPostInvalid, Executor: coro.ExecutorRequestInvalid}
-	}
-	return uint32(result.Wait) | uint32(result.Executor)<<8
-}

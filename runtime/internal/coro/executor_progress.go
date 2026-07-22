@@ -29,7 +29,6 @@ package coro
 type ExecutorPollProgress struct {
 	Used          uint32
 	Completed     uint32
-	Waits         uint32
 	Timers        uint32
 	Manual        uint32
 	ManualLost    uint32
@@ -63,8 +62,7 @@ const (
 type executorCatalogSource uint8
 
 const (
-	executorCatalogWaits executorCatalogSource = iota
-	executorCatalogTimers
+	executorCatalogTimers executorCatalogSource = iota
 	executorCatalogPoll
 	executorCatalogManual
 	executorCatalogWorker
@@ -104,8 +102,6 @@ func executorCatalogScanLimit(sources *ExecutorSourceSet, source executorCatalog
 		return 0, false
 	}
 	switch source {
-	case executorCatalogWaits:
-		return waitRegistrationScanLimit(sources.waits)
 	case executorCatalogTimers:
 		if sources.timers == nil {
 			return 0, true
@@ -120,7 +116,7 @@ func executorCatalogScanLimit(sources *ExecutorSourceSet, source executorCatalog
 		if sources.manual == nil {
 			return 0, true
 		}
-		return ManualOperationSourceCapacity, true
+		return ManualOperationScanLimit(sources.manual)
 	case executorCatalogWorker:
 		if sources.worker == nil {
 			return 0, true
@@ -144,7 +140,7 @@ func executorCatalogScanLimit(sources *ExecutorSourceSet, source executorCatalog
 }
 
 func firstExecutorCatalogSource(sources *ExecutorSourceSet) (executorCatalogSource, bool) {
-	for source := executorCatalogWaits; source < executorCatalogDone; source++ {
+	for source := executorCatalogTimers; source < executorCatalogDone; source++ {
 		limit, ok := executorCatalogScanLimit(sources, source)
 		if !ok {
 			return executorCatalogDone, false
@@ -242,11 +238,11 @@ func beginExecutorPollEpoch(transaction *executorPollTransaction, sources *Execu
 // acknowledgement between A and B. Configured-but-never-allocated tail slots
 // remain covered by full-capacity structural audits, not routine service.
 func executorMinPollBudget(sources *ExecutorSourceSet) (uint32, bool) {
-	if sources == nil || sources.waits == nil {
+	if sources == nil {
 		return 0, false
 	}
 	epoch := uint32(1) // common resolve
-	for source := executorCatalogWaits; source < executorCatalogDone; source++ {
+	for source := executorCatalogTimers; source < executorCatalogDone; source++ {
 		limit, ok := executorCatalogScanLimit(sources, source)
 		if !ok {
 			return 0, false
@@ -295,20 +291,6 @@ func publishExecutorCatalogEntry(driver *ExecutorDriver) bool {
 		return false
 	}
 	switch transaction.source {
-	case executorCatalogWaits:
-		if index == 0 && !sources.waits.beginDrainPass(p) {
-			return false
-		}
-		completed, ok := sources.waits.drainSlot(p, index)
-		transaction.total.waits += completed
-		transaction.total.completed += completed
-		if !ok {
-			return false
-		}
-		transaction.cursor++
-		if uint32(transaction.cursor) == limit && !transaction.advanceCatalogSource(sources) {
-			return false
-		}
 	case executorCatalogTimers:
 		completed, deadline, hasDeadline, ok := sources.timers.drainDueSlotFor(p, transaction.now, index)
 		transaction.total.timers += completed
@@ -407,7 +389,7 @@ func publishExecutorCatalogEntry(driver *ExecutorDriver) bool {
 }
 
 func executorProgressFromScan(scan executorSourceScan, used, budget uint32, complete, more, blocked bool) (ExecutorPollProgress, bool) {
-	if scan.completed < 0 || scan.waits < 0 || scan.timers < 0 || scan.poll < 0 || scan.manual < 0 || scan.manualLost < 0 ||
+	if scan.completed < 0 || scan.timers < 0 || scan.poll < 0 || scan.manual < 0 || scan.manualLost < 0 ||
 		scan.worker < 0 || scan.workerLost < 0 ||
 		scan.channel < 0 || scan.channelLost < 0 ||
 		scan.control < 0 || scan.controlLate < 0 || scan.applyVisits < 0 || scan.promoted < 0 ||
@@ -417,7 +399,6 @@ func executorProgressFromScan(scan executorSourceScan, used, budget uint32, comp
 	return ExecutorPollProgress{
 		Used:          used,
 		Completed:     uint32(scan.completed),
-		Waits:         uint32(scan.waits),
 		Timers:        uint32(scan.timers),
 		Manual:        uint32(scan.manual),
 		ManualLost:    uint32(scan.manualLost),

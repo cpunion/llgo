@@ -87,35 +87,35 @@ func TestCoroParkCurrentFrameNativeAndWasm32(t *testing.T) {
 				t.Fatalf("structured park leaked an ordinary sync helper call:\n%s", body)
 			}
 			stateAndHook := regexp.MustCompile(
-				`(?s)store i16 4,.*store i16 3,.*store i32 1,.*call void @` + regexp.QuoteMeta(coroParkPrepareHookV1) +
-					`\(ptr [^,]+, ptr [^,]+, ptr [^,]+, ptr [^,]+, i32 [^)]+\)`,
+				`(?s)store i16 4,.*store i16 3,.*store i32 1,.*call void @` + regexp.QuoteMeta(coroKeyedParkHookV2) +
+					`\(ptr [^,]+, ptr [^,]+, ptr [^,]+, ptr [^)]+\)`,
 			)
 			if !stateAndHook.MatchString(body) {
 				t.Fatalf("Root does not publish Park/Suspended/stateID=1 before the exact v1 hook:\n%s", body)
 			}
-			hook := strings.Index(body, "call void @"+coroParkPrepareHookV1)
+			hook := strings.Index(body, "call void @"+coroKeyedParkHookV2)
 			parkSuspendRelative := strings.Index(body[hook:], "call i8 @llvm.coro.suspend")
 			if hook < 0 || parkSuspendRelative < 0 {
 				t.Fatalf("Root has no park hook followed by a caller-frame suspend:\n%s", body)
 			}
 			parkSuspend := hook + parkSuspendRelative
-			decisionRelative := strings.Index(body[parkSuspend:], "call i32 @"+coroRunDecisionTakeZeroHookV1)
-			if decisionRelative < 0 {
-				t.Fatalf("Root does not take its run decision after park resume:\n%s", body)
+			resumeRelative := strings.Index(body[parkSuspend:], "call i32 @"+coroKeyedResumeHookV2)
+			if resumeRelative < 0 {
+				t.Fatalf("Root does not consume its keyed decision after park resume:\n%s", body)
 			}
-			decision := parkSuspend + decisionRelative
-			activate := regexp.MustCompile(`(?s)store i16 0,.*store i16 2,`).FindStringIndex(body[decision:])
+			activate := regexp.MustCompile(`(?s)store i16 0,.*store i16 2,`).FindStringIndex(body)
 			if activate == nil {
 				t.Fatalf("Root does not reactivate its exact frame after resume:\n%s", body)
 			}
-			assertCoroScalarRunDecisionCalls(t, "Root park", body, 2)
+			assertCoroScalarRunDecisionCalls(t, "Root park", body, 1)
 
 			runCoroABITestPipeline(t, prog, module)
 			resume := module.NamedFunction("foo.Root$coro.resume")
-			if resume.IsNil() || !strings.Contains(resume.String(), "call void @"+coroParkPrepareHookV1) {
+			if resume.IsNil() || !strings.Contains(resume.String(), "call void @"+coroKeyedParkHookV2) ||
+				!strings.Contains(resume.String(), "call i32 @"+coroKeyedResumeHookV2) {
 				t.Fatalf("CoroSplit lost the park handoff in Root.resume:\n%s", module.String())
 			}
-			assertCoroRunDecisionResumeOnly(t, module, "foo.Root$coro", 2)
+			assertCoroRunDecisionResumeOnly(t, module, "foo.Root$coro", 1)
 			for _, intrinsic := range []string{"llvm.coro.id", "llvm.coro.begin", "llvm.coro.suspend", "llvm.coro.end"} {
 				if hasLLVMCall(module.String(), intrinsic) {
 					t.Fatalf("post-split park module still calls %s:\n%s", intrinsic, module.String())
@@ -126,8 +126,9 @@ func TestCoroParkCurrentFrameNativeAndWasm32(t *testing.T) {
 				t.Fatalf("emit post-CoroSplit park object: %v\n%s", err, module.String())
 			}
 			defer object.Dispose()
-			if len(object.Bytes()) == 0 || !bytes.Contains(object.Bytes(), []byte(coroParkPrepareHookV1)) {
-				t.Fatalf("post-CoroSplit object lost unresolved park ABI symbol %q", coroParkPrepareHookV1)
+			if len(object.Bytes()) == 0 || !bytes.Contains(object.Bytes(), []byte(coroKeyedParkHookV2)) ||
+				!bytes.Contains(object.Bytes(), []byte(coroKeyedResumeHookV2)) {
+				t.Fatalf("post-CoroSplit object lost unresolved keyed Park V2 ABI symbols")
 			}
 			if !bytes.Contains(object.Bytes(), []byte(coroRunDecisionTakeZeroHookV1)) {
 				t.Fatalf("post-CoroSplit object lost unresolved run-decision ABI symbol %q", coroRunDecisionTakeZeroHookV1)
@@ -266,7 +267,10 @@ func compileCoroParkFixture(t *testing.T, target *llssa.Target) (
 		prog.Dispose()
 		t.Fatal(err)
 	}
-	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+	compilation := &Compilation{
+		CoroPlan: plan, EmissionUniverse: universe,
+		CoroFrameRetentionABI: CoroFrameRetentionParkABIV2,
+	}
 	enableCoroChildAwaitCompilation(compilation)
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},

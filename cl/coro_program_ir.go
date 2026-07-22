@@ -173,7 +173,14 @@ func (ir *coroProgramIR) sitePlan(ctx *context, instruction ssa.Instruction) (co
 	if ir == nil || ctx == nil || ctx.emissionOwner == nil || instruction == nil || instruction.Parent() == nil {
 		return coroEmissionSitePlan{}, fmt.Errorf("coroutine site plan lookup requires an exact program IR, owner context, and source instruction")
 	}
-	key := emissionFunctionOwnerKey{function: instruction.Parent(), owner: ctx.emissionOwner}
+	owner := ctx.emissionOwner
+	if physical := ctx.coroEmissionPlan(); physical != nil {
+		if physical.function != instruction.Parent() || physical.owner == nil {
+			return coroEmissionSitePlan{}, fmt.Errorf("coroutine physical emission plan does not own the requested source instruction")
+		}
+		owner = physical.owner
+	}
+	key := emissionFunctionOwnerKey{function: instruction.Parent(), owner: owner}
 	if _, frozen := ir.siteOwners[key]; !frozen {
 		return coroEmissionSitePlan{}, fmt.Errorf("coroutine source instruction has no frozen site-plan owner")
 	}

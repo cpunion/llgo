@@ -351,10 +351,9 @@ func TestWorkerOperationSourceDeferredPublicationStaysSticky(t *testing.T) {
 
 func TestWorkerOperationSourceSchedulerWaitRecordPath(t *testing.T) {
 	p := new(P)
-	waits := new(WaitRegistrationTable)
 	source := new(WorkerOperationSource)
 	sources := new(ExecutorSourceSet)
-	if !bindExecutorSourceSet(sources, p, ExecutorSourceCatalog{Waits: waits, Worker: source}) {
+	if !bindExecutorSourceSet(sources, p, ExecutorSourceCatalog{Worker: source}) {
 		t.Fatal("bind scheduler worker source catalog")
 	}
 	park := beginTimerV2TestPark(t, p, "worker-source-wait-record", 1, 71)
@@ -384,7 +383,7 @@ func TestWorkerOperationSourceSchedulerWaitRecordPath(t *testing.T) {
 	}
 	finishWorkerOperations(t, source, p, []OperationID{id}, lease, payload)
 	finishWaitTestTask(t, p, park.task, action)
-	if !unbindExecutorSourceSet(sources, p) || !source.CanRelease() || !waits.CanRelease() {
+	if !unbindExecutorSourceSet(sources, p) || !source.CanRelease() {
 		t.Fatal("release scheduler worker source catalog")
 	}
 }

@@ -20,7 +20,7 @@ import "testing"
 
 func TestExecutorShutdownDrainEmptyDomainIsCloseReady(t *testing.T) {
 	p := new(P)
-	driver, _, _, _, _ := bindTestExecutorDriverWithManual(t, p)
+	driver, _, _, _ := bindTestExecutorDriverWithManual(t, p)
 	if needed, ok := RequestExecutorShutdownDrain(driver); !ok || needed {
 		t.Fatalf("empty executor shutdown drain = (%t,%t)", needed, ok)
 	}
@@ -31,7 +31,7 @@ func TestExecutorShutdownDrainEmptyDomainIsCloseReady(t *testing.T) {
 
 func TestExecutorShutdownDrainRequestsEveryReadyTask(t *testing.T) {
 	p := new(P)
-	driver, _, _, _, _ := bindTestExecutorDriverWithManual(t, p)
+	driver, _, _, _ := bindTestExecutorDriverWithManual(t, p)
 	first := newYieldingTestG(t, "executor-shutdown-first")
 	second := newYieldingTestG(t, "executor-shutdown-second")
 	if !Enqueue(p, first.g) || !Enqueue(p, second.g) {

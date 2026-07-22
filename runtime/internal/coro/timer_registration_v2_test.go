@@ -82,25 +82,24 @@ func resumeTimerV2TestPark(t *testing.T, p *P, park *timerV2TestPark) (Action, P
 	return action, outcome, caseID, lease, taskCancel
 }
 
-func bindTimerV2TestSources(t *testing.T, p *P, manual *ManualOperationSource) (*ExecutorSourceSet, *WaitRegistrationTable, *TimerRegistrationTable) {
+func bindTimerV2TestSources(t *testing.T, p *P, manual *ManualOperationSource) (*ExecutorSourceSet, *TimerRegistrationTable) {
 	return bindTimerV2TestSourcesAtRoute(t, p, RouteID(1), manual)
 }
 
-func bindTimerV2TestSourcesAtRoute(t *testing.T, p *P, route RouteID, manual *ManualOperationSource) (*ExecutorSourceSet, *WaitRegistrationTable, *TimerRegistrationTable) {
+func bindTimerV2TestSourcesAtRoute(t *testing.T, p *P, route RouteID, manual *ManualOperationSource) (*ExecutorSourceSet, *TimerRegistrationTable) {
 	t.Helper()
 	sources := new(ExecutorSourceSet)
-	waits := new(WaitRegistrationTable)
 	timers := new(TimerRegistrationTable)
-	if !bindExecutorSourceSetAtRoute(sources, p, route, ExecutorSourceCatalog{Waits: waits, Timers: timers, Manual: manual}) {
+	if !bindExecutorSourceSetAtRoute(sources, p, route, ExecutorSourceCatalog{Timers: timers, Manual: manual}) {
 		t.Fatal("bind timer V2 source set")
 	}
-	return sources, waits, timers
+	return sources, timers
 }
 
-func finishTimerV2Test(t *testing.T, p *P, sources *ExecutorSourceSet, waits *WaitRegistrationTable, timers *TimerRegistrationTable, park *timerV2TestPark, action Action) {
+func finishTimerV2Test(t *testing.T, p *P, sources *ExecutorSourceSet, timers *TimerRegistrationTable, park *timerV2TestPark, action Action) {
 	t.Helper()
 	finishWaitTestTask(t, p, park.task, action)
-	if !unbindExecutorSourceSet(sources, p) || !waits.CanRelease() || !timers.CanRelease() {
+	if !unbindExecutorSourceSet(sources, p) || !timers.CanRelease() {
 		t.Fatal("release timer V2 source set")
 	}
 }
@@ -135,16 +134,7 @@ func TestPrepareOperationAtGenerationSkipsLegacyPhysicalGenerations(t *testing.T
 
 func TestTimerRegistrationV2DueEpochDetachLeaseAndUnrelatedSlot(t *testing.T) {
 	p := new(P)
-	sources, waits, timers := bindTimerV2TestSources(t, p, nil)
-
-	// Keep a legacy timer live in another slot. The resolved V2 ApplyOne must
-	// neither reinterpret nor mutate this unrelated generation.
-	unrelatedToken, unrelatedTicket, unrelated := prepareTestTimer(t, timers, p, 1000)
-	if !claimWait(unrelatedToken, unrelatedTicket) {
-		t.Fatal("claim unrelated legacy timer")
-	}
-	unrelatedSlot, _ := timerRegistrationSlotFor(timers, unrelated)
-	unrelatedBefore := *unrelatedSlot
+	sources, timers := bindTimerV2TestSources(t, p, nil)
 
 	park := beginTimerV2TestPark(t, p, "timer-v2-due", 1, 101)
 	staleTicket := park.ticket
@@ -172,9 +162,8 @@ func TestTimerRegistrationV2DueEpochDetachLeaseAndUnrelatedSlot(t *testing.T) {
 	// park. The first owner scan occurs only after park commit; the initial
 	// affected visit plus sticky completion must preserve this early expiry.
 	handle, attached := timers.ReserveAndAttachTimerV2(p, &park.task.g.park, park.ticket, park.wait, 77, 0)
-	if !attached || handle == (TimerRegistrationHandle{}) || timers.Cancel(handle) != WaitCancelInvalid ||
-		timers.Retire(handle) {
-		t.Fatal("reserve or V1/V2 mode isolation for due timer")
+	if !attached || handle == (TimerRegistrationHandle{}) {
+		t.Fatal("reserve due timer")
 	}
 	if handle.Slot != failedSlot || handle.Generation != failedGeneration+1 {
 		t.Fatal("timer V2 did not reuse the rolled-back slot with a newer shared generation")
@@ -182,7 +171,7 @@ func TestTimerRegistrationV2DueEpochDetachLeaseAndUnrelatedSlot(t *testing.T) {
 	commitTimerV2TestPark(t, p, park)
 
 	scan, ok := sources.publishPass(p, 0, true)
-	if !ok || scan.timers != 1 || scan.completed != 1 || !scan.hasDeadline || scan.deadline != 1000 {
+	if !ok || scan.timers != 1 || scan.completed != 1 || scan.hasDeadline || scan.deadline != 0 {
 		t.Fatalf("publish due timer V2 = (%+v, %t)", scan, ok)
 	}
 	dueSlot, _ := timerRegistrationSlotFor(timers, handle)
@@ -192,9 +181,6 @@ func TestTimerRegistrationV2DueEpochDetachLeaseAndUnrelatedSlot(t *testing.T) {
 	}
 	if promoted, visits, resolved := sources.resolvePublishedEpoch(p); !resolved || promoted != 1 || visits != 1 {
 		t.Fatalf("resolve due timer V2 = (%d, %d, %t)", promoted, visits, resolved)
-	}
-	if *unrelatedSlot != unrelatedBefore {
-		t.Fatal("resolved timer V2 batch mutated unrelated legacy slot")
 	}
 	if duplicate, _, _, duplicateOK := timers.drainDueFor(p, 0); !duplicateOK || duplicate != 0 {
 		t.Fatalf("duplicate due drain = (%d, %t)", duplicate, duplicateOK)
@@ -214,19 +200,12 @@ func TestTimerRegistrationV2DueEpochDetachLeaseAndUnrelatedSlot(t *testing.T) {
 		t.Fatal("timer V2 winner lease/recycle barrier")
 	}
 
-	if result := timers.Cancel(unrelated); result != WaitCancelWon {
-		t.Fatalf("cancel unrelated legacy timer = %d", result)
-	}
-	if outcome, consumed := consumeWait(unrelatedToken, unrelatedTicket); !consumed || outcome != WaitOutcomeCanceled ||
-		!timers.RetireCanceledTimer(unrelated, unrelatedToken, unrelatedTicket) {
-		t.Fatal("retire unrelated legacy timer")
-	}
-	finishTimerV2Test(t, p, sources, waits, timers, park, action)
+	finishTimerV2Test(t, p, sources, timers, park, action)
 }
 
 func TestTimerRegistrationV2FutureDeadlineOnlyPublishesWhenDue(t *testing.T) {
 	p := new(P)
-	sources, waits, timers := bindTimerV2TestSources(t, p, nil)
+	sources, timers := bindTimerV2TestSources(t, p, nil)
 	park := beginTimerV2TestPark(t, p, "timer-v2-future", 1, 103)
 	handle, attached := timers.ReserveAndAttachTimerV2(p, &park.task.g.park, park.ticket, park.wait, 88, 50)
 	if !attached {
@@ -251,12 +230,12 @@ func TestTimerRegistrationV2FutureDeadlineOnlyPublishesWhenDue(t *testing.T) {
 		!timers.DiscardTimerV2Result(p, handle, lease) || !timers.RecycleTimerV2(p, handle) {
 		t.Fatal("consume future timer V2")
 	}
-	finishTimerV2Test(t, p, sources, waits, timers, park, action)
+	finishTimerV2Test(t, p, sources, timers, park, action)
 }
 
 func TestTimerRegistrationControlledV2ExactCancelAndRecycle(t *testing.T) {
 	p := new(P)
-	sources, waits, timers := bindTimerV2TestSources(t, p, nil)
+	sources, timers := bindTimerV2TestSources(t, p, nil)
 	park := beginTimerV2TestPark(t, p, "timer-v2-controlled-cancel", 1, 105)
 	controller := uintptr(0x1234)
 	control := uint32(7)
@@ -292,12 +271,12 @@ func TestTimerRegistrationControlledV2ExactCancelAndRecycle(t *testing.T) {
 		t.Fatalf("controlled timer cancellation decision = (%d, %d, %+v, %d)",
 			outcome, caseID, lease, taskCancel)
 	}
-	finishTimerV2Test(t, p, sources, waits, timers, park, action)
+	finishTimerV2Test(t, p, sources, timers, park, action)
 }
 
 func TestTimerRegistrationControlledV2PrepareRecheckClosesPublicationRace(t *testing.T) {
 	p := new(P)
-	sources, waits, timers := bindTimerV2TestSources(t, p, nil)
+	sources, timers := bindTimerV2TestSources(t, p, nil)
 	park := beginTimerV2TestPark(t, p, "timer-v2-controlled-recheck", 1, 106)
 	controller := uintptr(0x5678)
 	control := uint32(12)
@@ -331,7 +310,7 @@ func TestTimerRegistrationControlledV2PrepareRecheckClosesPublicationRace(t *tes
 		t.Fatalf("stale controlled timer decision = (%d, %d, %+v, %d)",
 			outcome, caseID, lease, taskCancel)
 	}
-	finishTimerV2Test(t, p, sources, waits, timers, park, action)
+	finishTimerV2Test(t, p, sources, timers, park, action)
 }
 
 func TestTimerRegistrationV2CompletionAgainstCancellationClasses(t *testing.T) {
@@ -347,7 +326,7 @@ func TestTimerRegistrationV2CompletionAgainstCancellationClasses(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			p := new(P)
-			sources, waits, timers := bindTimerV2TestSources(t, p, nil)
+			sources, timers := bindTimerV2TestSources(t, p, nil)
 			park := beginTimerV2TestPark(t, p, "timer-v2-cancel-"+test.name, 1, 107)
 			handle, attached := timers.ReserveAndAttachTimerV2(p, &park.task.g.park, park.ticket, park.wait, 99, 0)
 			if !attached {
@@ -381,7 +360,7 @@ func TestTimerRegistrationV2CompletionAgainstCancellationClasses(t *testing.T) {
 			if !timers.RecycleTimerV2(p, handle) {
 				t.Fatal("recycle cancellation timer V2")
 			}
-			finishTimerV2Test(t, p, sources, waits, timers, park, action)
+			finishTimerV2Test(t, p, sources, timers, park, action)
 			if test.taskCancel != TaskCancelNone && !AcknowledgeTaskCancellation(park.task.g, test.taskCancel) {
 				t.Fatal("acknowledge terminal task cancellation")
 			}
@@ -391,7 +370,7 @@ func TestTimerRegistrationV2CompletionAgainstCancellationClasses(t *testing.T) {
 
 func TestTimerRegistrationV2LateTaskCancellationDiscardsWinnerLease(t *testing.T) {
 	p := new(P)
-	sources, waits, timers := bindTimerV2TestSources(t, p, nil)
+	sources, timers := bindTimerV2TestSources(t, p, nil)
 	park := beginTimerV2TestPark(t, p, "timer-v2-late-task-cancel", 1, 108)
 	handle, attached := timers.ReserveAndAttachTimerV2(p, &park.task.g.park, park.ticket, park.wait, 100, 0)
 	if !attached {
@@ -413,7 +392,7 @@ func TestTimerRegistrationV2LateTaskCancellationDiscardsWinnerLease(t *testing.T
 		!timers.RecycleTimerV2(p, handle) {
 		t.Fatalf("late-cancel timer decision/lease = (%d, %d, %+v, %d)", outcome, caseID, lease, taskCancel)
 	}
-	finishTimerV2Test(t, p, sources, waits, timers, park, action)
+	finishTimerV2Test(t, p, sources, timers, park, action)
 	if !AcknowledgeTaskCancellation(park.task.g, TaskCancelAbort) {
 		t.Fatal("acknowledge late timer task cancellation")
 	}
@@ -422,7 +401,7 @@ func TestTimerRegistrationV2LateTaskCancellationDiscardsWinnerLease(t *testing.T
 func TestTimerRegistrationV2MixedManualSelectIsIndependentOfSourceOrder(t *testing.T) {
 	p := new(P)
 	manual := new(ManualOperationSource)
-	sources, waits, timers := bindTimerV2TestSources(t, p, manual)
+	sources, timers := bindTimerV2TestSources(t, p, manual)
 	park := beginTimerV2TestPark(t, p, "timer-v2-mixed", 2, 109)
 
 	// Choose case IDs so the manual source has the lower logical rank even
@@ -456,86 +435,8 @@ func TestTimerRegistrationV2MixedManualSelectIsIndependentOfSourceOrder(t *testi
 		t.Fatal("release mixed source operations")
 	}
 	finishWaitTestTask(t, p, park.task, action)
-	if !unbindExecutorSourceSet(sources, p) || !waits.CanRelease() || !timers.CanRelease() || !manual.CanRelease() {
+	if !unbindExecutorSourceSet(sources, p) || !timers.CanRelease() || !manual.CanRelease() {
 		t.Fatal("release mixed source set")
-	}
-}
-
-func TestTimerRegistrationAlternatesV1AndV2OnOnePhysicalGeneration(t *testing.T) {
-	p := new(P)
-	sources, waits, timers := bindTimerV2TestSourcesAtRoute(t, p, RouteID(2), nil)
-
-	v1Token, v1Ticket, v1 := prepareTestTimer(t, timers, p, 10)
-	if !claimWait(v1Token, v1Ticket) {
-		t.Fatal("claim first alternating V1 timer")
-	}
-	if count, _, _, ok := timers.drainDueFor(p, 10); !ok || count != 1 {
-		t.Fatal("complete first alternating V1 timer")
-	}
-	if outcome, ok := consumeWait(v1Token, v1Ticket); !ok || outcome != WaitOutcomeCompleted ||
-		!timers.RetireCompletedTimer(v1, v1Token, v1Ticket) {
-		t.Fatal("retire first alternating V1 timer")
-	}
-
-	park := beginTimerV2TestPark(t, p, "timer-v2-alternating", 1, 113)
-	v2, attached := timers.ReserveAndAttachTimerV2(p, &park.task.g.park, park.ticket, park.wait, 1, 100)
-	v2ID, v2IDOK := timerRegistrationIDForHandle(timers, v2)
-	if !attached || !v2IDOK || v2ID.Route() != RouteID(2) || v2ID.LocalSlot() != v2.Slot ||
-		v2.Slot != v1.Slot || v2.Generation != v1.Generation+1 {
-		t.Fatalf("first alternating V2 identity = %+v after %+v", v2, v1)
-	}
-	commitTimerV2TestPark(t, p, park)
-	if !timers.RequestTimerV2Cancel(p, park.wait) {
-		t.Fatal("cancel alternating V2 timer")
-	}
-	if scan, ok := sources.publishPass(p, 0, true); !ok || scan.timers != 0 {
-		t.Fatalf("publish alternating V2 cancellation = (%+v, %t)", scan, ok)
-	}
-	if promoted, visits, ok := sources.resolvePublishedEpoch(p); !ok || promoted != 1 || visits != 1 {
-		t.Fatalf("resolve alternating V2 cancellation = (%d, %d, %t)", promoted, visits, ok)
-	}
-	action, outcome, _, lease, _ := resumeTimerV2TestPark(t, p, park)
-	if outcome != ParkOutcomeCanceled || lease != (OperationResultLease{}) || !timers.RecycleTimerV2(p, v2) {
-		t.Fatal("recycle alternating V2 timer")
-	}
-	v1bToken, v1bTicket, v1b := prepareTestTimer(t, timers, p, 200)
-	if v1b.Slot != v2.Slot || v1b.Generation != v2.Generation+1 || timers.RecycleTimerV2(p, v2) {
-		t.Fatalf("second alternating V1 identity = %+v after %+v", v1b, v2)
-	}
-	if !claimWait(v1bToken, v1bTicket) || timers.Cancel(v1b) != WaitCancelWon {
-		t.Fatal("cancel second alternating V1 timer")
-	}
-	if outcome, ok := consumeWait(v1bToken, v1bTicket); !ok || outcome != WaitOutcomeCanceled ||
-		!timers.RetireCanceledTimer(v1b, v1bToken, v1bTicket) {
-		t.Fatal("retire second alternating V1 timer")
-	}
-
-	park2 := rebeginTimerV2TestPark(t, park.task, action, 1, 127)
-	v2b, attached := timers.ReserveAndAttachTimerV2(p, &park2.task.g.park, park2.ticket, park2.wait, 2, 300)
-	v2bID, v2bIDOK := timerRegistrationIDForHandle(timers, v2b)
-	if !attached || !v2bIDOK || v2bID.Route() != RouteID(2) || v2bID.LocalSlot() != v2b.Slot ||
-		v2b.Slot != v1b.Slot || v2b.Generation != v1b.Generation+1 {
-		t.Fatalf("second alternating V2 identity = %+v after %+v", v2b, v1b)
-	}
-	commitTimerV2TestPark(t, p, park2)
-	if !timers.RequestTimerV2Cancel(p, park2.wait) {
-		t.Fatal("cancel second alternating V2 timer")
-	}
-	if scan, ok := sources.publishPass(p, 0, true); !ok || scan.timers != 0 {
-		t.Fatalf("publish second alternating V2 cancellation = (%+v, %t)", scan, ok)
-	}
-	if promoted, visits, ok := sources.resolvePublishedEpoch(p); !ok || promoted != 1 || visits != 1 {
-		t.Fatalf("resolve second alternating V2 cancellation = (%d, %d, %t)", promoted, visits, ok)
-	}
-	action, outcome, _, lease, _ = resumeTimerV2TestPark(t, p, park2)
-	if outcome != ParkOutcomeCanceled || lease != (OperationResultLease{}) || timers.RecycleTimerV2(p, v2) ||
-		!timers.RecycleTimerV2(p, v2b) {
-		t.Fatal("recycle second alternating V2 timer or reject stale first identity")
-	}
-	finishWaitTestTask(t, p, park2.task, action)
-
-	if !unbindExecutorSourceSet(sources, p) || !waits.CanRelease() || !timers.CanRelease() {
-		t.Fatal("release alternating timer source set")
 	}
 }
 
@@ -543,7 +444,6 @@ func TestTimerRegistrationV2RouteIdentityLeaseIsolationAndPersistentBinding(t *t
 	type routedTimer struct {
 		p       *P
 		sources *ExecutorSourceSet
-		waits   *WaitRegistrationTable
 		timers  *TimerRegistrationTable
 		park    *timerV2TestPark
 		action  Action
@@ -554,7 +454,7 @@ func TestTimerRegistrationV2RouteIdentityLeaseIsolationAndPersistentBinding(t *t
 	complete := func(route RouteID, name string, seed, caseID uint32) *routedTimer {
 		t.Helper()
 		result := &routedTimer{p: new(P)}
-		result.sources, result.waits, result.timers = bindTimerV2TestSourcesAtRoute(t, result.p, route, nil)
+		result.sources, result.timers = bindTimerV2TestSourcesAtRoute(t, result.p, route, nil)
 		if got, ok := result.timers.Route(); !ok || got != route {
 			t.Fatalf("timer route binding = (%d, %t), want %d", got, ok, route)
 		}
@@ -603,8 +503,8 @@ func TestTimerRegistrationV2RouteIdentityLeaseIsolationAndPersistentBinding(t *t
 		!route2.timers.RecycleTimerV2(route2.p, route2.handle) {
 		t.Fatal("release exact routed timer leases")
 	}
-	finishTimerV2Test(t, route1.p, route1.sources, route1.waits, route1.timers, route1.park, route1.action)
-	finishTimerV2Test(t, route2.p, route2.sources, route2.waits, route2.timers, route2.park, route2.action)
+	finishTimerV2Test(t, route1.p, route1.sources, route1.timers, route1.park, route1.action)
+	finishTimerV2Test(t, route2.p, route2.sources, route2.timers, route2.park, route2.action)
 
 	if bindTimerRegistrationTable(route2.timers, route2.p) ||
 		bindTimerRegistrationTableAtRoute(route2.timers, route2.p, RouteID(3)) {

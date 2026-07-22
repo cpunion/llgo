@@ -172,10 +172,6 @@ func TestCoroPollOwnerFailStopABIAndCatalogSource(t *testing.T) {
 		}
 	}
 	for path, markers := range map[string][]string{
-		"internal/runtime/coro_poll_route_default_llgo.go": {
-			"coro.PostExecutorPollEvent(",
-			"coroTargetRequestExecutorV1(",
-		},
 		"internal/runtime/coro_poll_route_native_fleet_llgo.go": {
 			"coroNativeFleetPostPollV1(",
 			"retains its route lease across exact source publication",
@@ -199,10 +195,10 @@ func TestCoroPollOwnerFailStopABIAndCatalogSource(t *testing.T) {
 		t.Fatal("global poll source is not covered by bind and release invariants")
 	}
 
-	target := readRuntimePollFile(t, "internal/runtime/coro_target_native_llgo.go")
+	target := readRuntimePollFile(t, "internal/runtime/coro_target_native_fleet_llgo.go")
 	for _, marker := range []string{
 		"func CoroNativePollServerDescriptorV1(fd uintptr) bool",
-		"coroNativeTargetV1State.doorbell.OwnsDescriptor(fd)",
+		"coroNativeFleetV1State.domains[index].doorbell.OwnsDescriptor(fd)",
 	} {
 		if !strings.Contains(target, marker) {
 			t.Errorf("native target lacks exact shared-doorbell identity marker %q", marker)

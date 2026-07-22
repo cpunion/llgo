@@ -20,8 +20,7 @@ package coro
 // half of one source publication epoch. Source catalog publication freezes the
 // sticky operation snapshot before this state starts. Each call to
 // resolvePublishedEpochStep then performs at most one candidate scan, one
-// candidate ApplyOne, one wait-set state transition, one promotion, or one
-// legacy-G visit.
+// candidate ApplyOne, one wait-set state transition, or one promotion.
 type publishedEpochResolvePhase uint8
 
 const (
@@ -31,7 +30,6 @@ const (
 	publishedEpochResolveApply
 	publishedEpochResolveFinish
 	publishedEpochResolvePromote
-	publishedEpochResolveLegacy
 )
 
 // publishedEpochResolveCursor is embedded in ExecutorDriver's poll
@@ -43,21 +41,19 @@ const (
 // No interface, function value, allocation, or target pointer crosses this
 // boundary. source dispatch remains the direct switch in ExecutorSourceSet.
 type publishedEpochResolveCursor struct {
-	wait           *WaitSetRecord
-	nextWait       *WaitSetRecord
-	batchTail      *WaitSetRecord
-	link           *ParkLink
-	legacyPrevious *G
-	legacy         *G
-	claim          *SelectClaim
-	forced         *OperationRecord
-	park           parkResolutionCursor
-	phase          publishedEpochResolvePhase
-	waitRetry      bool
-	waitAwait      bool
-	hasChannel     bool
-	claimOwned     bool
-	_              [3]byte
+	wait       *WaitSetRecord
+	nextWait   *WaitSetRecord
+	batchTail  *WaitSetRecord
+	link       *ParkLink
+	claim      *SelectClaim
+	forced     *OperationRecord
+	park       parkResolutionCursor
+	phase      publishedEpochResolvePhase
+	waitRetry  bool
+	waitAwait  bool
+	hasChannel bool
+	claimOwned bool
+	_          [3]byte
 }
 
 type publishedEpochResolveStep struct {
@@ -77,7 +73,6 @@ func validPublishedEpochResolvingWait(p *P, wait *WaitSetRecord) bool {
 	if p == nil || wait == nil || wait.state != waitSetRecordActive ||
 		(wait.work != waitSetWorkResolving && wait.work != waitSetWorkResolvingDirty) ||
 		wait.g == nil || !ValidG(wait.g) || wait.g.state != GWaiting || !wait.g.waiting ||
-		wait.g.waitToken != nil || wait.g.waitTicket != 0 || wait.g.nextWait != nil ||
 		wait.g.queued || wait.g.nextReady != nil || wait.g.runP != nil || wait.g.active == nil ||
 		wait.g.active.parkWait != wait || wait.ticket != wait.g.park.ticket || !wait.g.park.resolving {
 		return false
@@ -102,15 +97,9 @@ func validPublishedEpochResolveCursor(cursor *publishedEpochResolveCursor, p *P)
 	if cursor.phase == publishedEpochResolveIdle {
 		return *cursor == (publishedEpochResolveCursor{})
 	}
-	if cursor.phase == publishedEpochResolveLegacy {
-		return cursor.wait == nil && cursor.nextWait == nil && cursor.batchTail == nil && cursor.link == nil &&
-			cursor.park == (parkResolutionCursor{}) &&
-			!cursor.waitRetry && !cursor.waitAwait && cursor.legacy != nil
-	}
 	if cursor.phase < publishedEpochResolveDiscover || cursor.phase > publishedEpochResolvePromote ||
 		cursor.wait == nil || cursor.wait.g == nil || cursor.wait.state != waitSetRecordActive ||
-		cursor.wait.ticket != cursor.wait.g.park.ticket || cursor.batchTail == nil || cursor.batchTail.workNext != nil ||
-		cursor.legacyPrevious != nil || cursor.legacy != nil {
+		cursor.wait.ticket != cursor.wait.g.park.ticket || cursor.batchTail == nil || cursor.batchTail.workNext != nil {
 		return false
 	}
 	if cursor.nextWait != cursor.wait.workNext {
@@ -203,7 +192,7 @@ func completePublishedEpochCursor(cursor *publishedEpochResolveCursor, step *pub
 
 func initializePublishedEpochResolution(sources *ExecutorSourceSet, p *P, cursor *publishedEpochResolveCursor, step *publishedEpochResolveStep) bool {
 	if cursor == nil || *cursor != (publishedEpochResolveCursor{}) || p == nil ||
-		!validParkWaitQueueHeader(p) || !validAffectedWaitQueueHeader(p) || !validWaitQueueHeader(p) {
+		!validParkWaitQueueHeader(p) || !validAffectedWaitQueueHeader(p) {
 		return false
 	}
 	if sources != nil {
@@ -230,11 +219,7 @@ func initializePublishedEpochResolution(sources *ExecutorSourceSet, p *P, cursor
 		p.affectedWaitHead, p.affectedWaitTail = nil, nil
 		return true
 	}
-	cursor.phase = publishedEpochResolveLegacy
-	cursor.legacy = p.waitHead
-	if cursor.legacy == nil {
-		completePublishedEpochCursor(cursor, step)
-	}
+	completePublishedEpochCursor(cursor, step)
 	return true
 }
 
@@ -278,11 +263,7 @@ func advancePublishedEpochWaitAfterCleared(sources *ExecutorSourceSet, cursor *p
 		return validActiveWaitSetRecordFast(p, next) && startPublishedEpochWait(sources, cursor, next)
 	}
 	cursor.batchTail = nil
-	cursor.phase = publishedEpochResolveLegacy
-	cursor.legacy = p.waitHead
-	if cursor.legacy == nil {
-		completePublishedEpochCursor(cursor, step)
-	}
+	completePublishedEpochCursor(cursor, step)
 	return true
 }
 
@@ -586,63 +567,12 @@ func resolvePublishedEpochPromoteStep(sources *ExecutorSourceSet, p *P, cursor *
 	return advancePublishedEpochWaitAfterCleared(sources, cursor, p, step)
 }
 
-func resolvePublishedEpochLegacyStep(p *P, cursor *publishedEpochResolveCursor, step *publishedEpochResolveStep) bool {
-	g := cursor.legacy
-	if g == nil || !ValidG(g) || g.state != GWaiting || !g.waiting || g.queued || g.nextReady != nil ||
-		g.runP != nil || g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil || !validLegacyWaitingG(g) {
-		return false
-	}
-	next := g.nextWait
-	ready := false
-	word := preemptLoad(&g.waitToken.word)
-	if waitGeneration(word) != uint32(g.waitTicket) {
-		return false
-	}
-	switch waitWordState(word) {
-	case waitParked:
-	case waitParkedReady, waitParkedCanceled:
-		if _, consumed := consumeWait(g.waitToken, g.waitTicket); !consumed {
-			return false
-		}
-		ready = true
-	default:
-		return false
-	}
-	if ready {
-		if cursor.legacyPrevious == nil {
-			p.waitHead = next
-		} else {
-			cursor.legacyPrevious.nextWait = next
-		}
-		if p.waitTail == g {
-			p.waitTail = cursor.legacyPrevious
-		}
-		g.nextWait = nil
-		g.waiting = false
-		g.waitToken = nil
-		g.waitTicket = 0
-		g.state = GRunnable
-		if !Enqueue(p, g) {
-			return false
-		}
-		step.promoted = 1
-	} else {
-		cursor.legacyPrevious = g
-	}
-	cursor.legacy = next
-	if next == nil {
-		completePublishedEpochCursor(cursor, step)
-	}
-	return true
-}
-
 // resolvePublishedEpochStep advances exactly one explicitly charged common
 // resolution action. Passing nil sources selects the scheduler-only path used
-// by unbound PollReady: terminal V2 links remain attached and are requeued for
-// their explicit owner-side detach, while legacy waits still advance one G per
-// call.
+// by unbound PollReady: terminal links remain attached and are requeued for
+// their explicit owner-side detach.
 func resolvePublishedEpochStep(sources *ExecutorSourceSet, p *P, cursor *publishedEpochResolveCursor) (step publishedEpochResolveStep, ok bool) {
-	if cursor == nil || p == nil || !validReadyQueueHeader(p) || !validWaitQueueHeader(p) ||
+	if cursor == nil || p == nil || !validReadyQueueHeader(p) ||
 		!validParkWaitQueueHeader(p) || !validAffectedWaitQueueHeader(p) {
 		return publishedEpochResolveStep{}, false
 	}
@@ -668,8 +598,6 @@ func resolvePublishedEpochStep(sources *ExecutorSourceSet, p *P, cursor *publish
 		ok = resolvePublishedEpochFinishStep(cursor, &step)
 	case publishedEpochResolvePromote:
 		ok = resolvePublishedEpochPromoteStep(sources, p, cursor, &step)
-	case publishedEpochResolveLegacy:
-		ok = resolvePublishedEpochLegacyStep(p, cursor, &step)
 	default:
 		ok = false
 	}

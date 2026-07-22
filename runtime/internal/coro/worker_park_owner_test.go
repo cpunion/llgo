@@ -22,10 +22,9 @@ func TestWorkerParkOwnerPrepareCompleteAndFinish(t *testing.T) {
 	p := new(P)
 	driver := new(ExecutorDriver)
 	registry := new(ExecutorRegistry)
-	waits := new(WaitRegistrationTable)
 	workers := new(WorkerOperationSource)
 	executor := registerTestExecutor(t, registry)
-	if !BindExecutorSourceCatalog(driver, p, registry, executor, ExecutorSourceCatalog{Waits: waits, Worker: workers}) {
+	if !BindExecutorSourceCatalog(driver, p, registry, executor, ExecutorSourceCatalog{Worker: workers}) {
 		t.Fatal("bind worker owner catalog")
 	}
 	task := newYieldingTestG(t, "worker-owner")
@@ -107,7 +106,7 @@ func TestWorkerParkOwnerPrepareCompleteAndFinish(t *testing.T) {
 	if !ok || closed != task.g || terminal.Kind != ActionComplete || terminal.Handle != nil {
 		t.Fatalf("confirm worker owner terminal close = (%p, %+v, %t)", closed, terminal, ok)
 	}
-	if !workers.CanRelease() || !waits.CanRelease() || !registry.CanRelease() {
+	if !workers.CanRelease() || !registry.CanRelease() {
 		t.Fatal("release worker owner catalog")
 	}
 }
@@ -116,10 +115,9 @@ func TestCommandShutdownDrainAwaitsSubmittedWorkerCompletion(t *testing.T) {
 	p := new(P)
 	driver := new(ExecutorDriver)
 	registry := new(ExecutorRegistry)
-	waits := new(WaitRegistrationTable)
 	workers := new(WorkerOperationSource)
 	executor := registerTestExecutor(t, registry)
-	if !BindExecutorSourceCatalog(driver, p, registry, executor, ExecutorSourceCatalog{Waits: waits, Worker: workers}) {
+	if !BindExecutorSourceCatalog(driver, p, registry, executor, ExecutorSourceCatalog{Worker: workers}) {
 		t.Fatal("bind command-drain worker catalog")
 	}
 	task := newYieldingTestG(t, "worker-command-drain")
@@ -208,7 +206,7 @@ func TestCommandShutdownDrainAwaitsSubmittedWorkerCompletion(t *testing.T) {
 	if !AcknowledgeTaskCancellation(task.g, TaskCancelShutdown) {
 		t.Fatal("acknowledge command-drain worker cancellation")
 	}
-	if !workers.CanRelease() || !waits.CanRelease() || !registry.CanRelease() {
+	if !workers.CanRelease() || !registry.CanRelease() {
 		t.Fatal("command-drain worker cleanup retained stable source state")
 	}
 }
@@ -216,7 +214,6 @@ func TestCommandShutdownDrainAwaitsSubmittedWorkerCompletion(t *testing.T) {
 type currentWorkerOwnerFixture struct {
 	p         *P
 	driver    *ExecutorDriver
-	waits     *WaitRegistrationTable
 	workers   *WorkerOperationSource
 	handle    ExecutorHandle
 	route     RouteID
@@ -237,7 +234,6 @@ func bindCurrentWorkerOwnerFixture(
 	fixture := &currentWorkerOwnerFixture{
 		p:       new(P),
 		driver:  new(ExecutorDriver),
-		waits:   new(WaitRegistrationTable),
 		workers: new(WorkerOperationSource),
 		route:   route,
 		task:    newYieldingTestG(t, name),
@@ -249,7 +245,7 @@ func bindCurrentWorkerOwnerFixture(
 		registry,
 		fixture.handle,
 		route,
-		ExecutorSourceCatalog{Waits: fixture.waits, Worker: fixture.workers},
+		ExecutorSourceCatalog{Worker: fixture.workers},
 	) {
 		t.Fatalf("bind current worker owner %q", name)
 	}
@@ -442,7 +438,7 @@ func TestCurrentExecutorWorkerOwnerIsExactAcrossTwoP(t *testing.T) {
 	finishCurrentWorkerOwnerFixture(t, first, second.driver, payload1)
 	finishCurrentWorkerOwnerFixture(t, second, first.driver, payload2)
 	if !first.workers.CanRelease() || !second.workers.CanRelease() ||
-		!first.waits.CanRelease() || !second.waits.CanRelease() || !registry.CanRelease() {
+		!registry.CanRelease() {
 		t.Fatal("two-P current worker owner retained source or executor state")
 	}
 }

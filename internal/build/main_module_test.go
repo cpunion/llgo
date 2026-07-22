@@ -106,18 +106,6 @@ func TestGenMainModuleCoroControlWrappersBuildModes(t *testing.T) {
 			target:    &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"},
 			entry:     "define hidden i32 @__main_argc_argv(",
 		},
-		{
-			name:      "C archive",
-			buildMode: BuildModeCArchive,
-			goos:      "linux",
-			goarch:    "amd64",
-		},
-		{
-			name:      "C shared library",
-			buildMode: BuildModeCShared,
-			goos:      "linux",
-			goarch:    "amd64",
-		},
 	}
 
 	for _, test := range tests {
@@ -132,9 +120,19 @@ func TestGenMainModuleCoroControlWrappersBuildModes(t *testing.T) {
 					Goarch:    test.goarch, CoroProfile: CoroProfileStackless,
 				},
 			}
+			bootstrap := &coroProgramBootstrapV1{
+				Version: coroProgramBootstrapVersionV2,
+				Steps: []coroProgramBootstrapStepV1{
+					{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleRuntimeInitV2, FunctionID: "runtime-init", Target: llssa.PkgRuntime + ".init"},
+					{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleABIInitV2, FunctionID: "abi-init", Target: "init$abitypes"},
+					{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRolePublicRuntimeInitV2, FunctionID: coroProgramPublicRuntimeNoopIDV2, Target: coroProgramPublicRuntimeNoopSymbolV2},
+					{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRolePackageInitV2, FunctionID: "package-init", Target: "example.com/foo.init"},
+					{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleMainV2, FunctionID: "main", Target: "example.com/foo.main"},
+				},
+			}
 			mod := genMainModule(ctx, llssa.PkgRuntime,
 				&packages.Package{PkgPath: "example.com/foo", ExportFile: "foo.a"},
-				&genConfig{})
+				&genConfig{coroBootstrap: bootstrap})
 			ir := mod.LPkg.String()
 			for _, want := range []string{
 				"define void @__llgo_coro_resume_v1(ptr",
@@ -150,9 +148,6 @@ func TestGenMainModuleCoroControlWrappersBuildModes(t *testing.T) {
 			}
 			if test.entry != "" && !strings.Contains(ir, test.entry) {
 				t.Fatalf("entry module IR missing %q:\n%s", test.entry, ir)
-			}
-			if test.buildMode != BuildModeExe && strings.Contains(ir, "define i32 @main(") {
-				t.Fatalf("library mode should not emit main function:\n%s", ir)
 			}
 		})
 	}
@@ -176,179 +171,6 @@ func TestGenMainModuleCoroControlWrappersDisabled(t *testing.T) {
 		&genConfig{})
 	if strings.Contains(mod.LPkg.String(), "__llgo_coro_") {
 		t.Fatalf("disabled child-await mode emitted coroutine control ABI:\n%s", mod.LPkg.String())
-	}
-}
-
-func TestGenMainModuleCoroProgramManifest(t *testing.T) {
-	llvm.InitializeAllTargets()
-	t.Setenv(llgoStdioNobuf, "")
-	prog := llssa.NewProgram(nil)
-	defer prog.Dispose()
-	ctx := &context{
-		prog: prog,
-		buildConf: &Config{
-			BuildMode: BuildModeCArchive,
-			Goos:      "linux",
-			Goarch:    "amd64", CoroProfile: CoroProfileStackless,
-		},
-	}
-	a := coroRootPackageAnchorPrefixV1 + "11111111111111111111111111111111"
-	b := coroRootPackageAnchorPrefixV1 + "22222222222222222222222222222222"
-	var hash [16]byte
-	for i := range hash {
-		hash[i] = byte(i + 1)
-	}
-	entry := genMainModule(ctx, llssa.PkgRuntime,
-		&packages.Package{PkgPath: "example.com/foo", ExportFile: "foo.a"},
-		&genConfig{coroRootAnchors: []string{a, b}, coroManifestHash: hash})
-	ir := entry.LPkg.String()
-	for _, want := range []string{
-		"@" + a + " = external hidden constant",
-		"@" + b + " = external hidden constant",
-		"@" + coroProgramManifestSymbolV1 + ".packages = internal unnamed_addr constant [2 x ptr] [ptr @" + a + ", ptr @" + b + "]",
-		"@" + coroProgramManifestSymbolV1 + " = hidden constant",
-		"i32 1, i32 0, i64 72623859790382856, i64 651345242494996240, i64 2",
-		"ptr @" + coroProgramManifestSymbolV1 + ".packages, ptr null",
-		"@llvm.used = appending global [1 x ptr] [ptr @" + coroProgramManifestSymbolV1 + "]",
-	} {
-		if !strings.Contains(ir, want) {
-			t.Fatalf("coroutine program manifest missing %q:\n%s", want, ir)
-		}
-	}
-	if got := entry.LPkg.CoroProgramManifest(); got != coroProgramManifestSymbolV1 {
-		t.Fatalf("program manifest symbol = %q, want %q", got, coroProgramManifestSymbolV1)
-	}
-}
-
-func TestGenMainModuleEmptyCoroProgramManifest(t *testing.T) {
-	llvm.InitializeAllTargets()
-	t.Setenv(llgoStdioNobuf, "")
-	prog := llssa.NewProgram(&llssa.Target{GOOS: "wasip1", GOARCH: "wasm"})
-	defer prog.Dispose()
-	ctx := &context{
-		prog: prog,
-		buildConf: &Config{
-			BuildMode: BuildModeExe,
-			Goos:      "wasip1",
-			Goarch:    "wasm", CoroProfile: CoroProfileStackless,
-		},
-	}
-	entry := genMainModule(ctx, llssa.PkgRuntime,
-		&packages.Package{PkgPath: "example.com/empty", ExportFile: "empty.a"},
-		&genConfig{})
-	ir := entry.LPkg.String()
-	if strings.Contains(ir, coroProgramManifestSymbolV1+".packages") {
-		t.Fatalf("empty coroutine catalog emitted a zero-length package array:\n%s", ir)
-	}
-	manifestLine := ""
-	for _, line := range strings.Split(ir, "\n") {
-		if strings.HasPrefix(line, "@"+coroProgramManifestSymbolV1+" =") {
-			manifestLine = line
-			break
-		}
-	}
-	if manifestLine == "" || !strings.Contains(manifestLine, "i32 0, ptr null, ptr null") {
-		t.Fatalf("empty wasm coroutine manifest does not contain count=0/packages=null/bootstrap=null: %s\n%s", manifestLine, ir)
-	}
-	if strings.Contains(ir, coroProgramBootstrapSymbolV1) {
-		t.Fatalf("bootstrap gate disabled but bootstrap symbol was emitted:\n%s", ir)
-	}
-}
-
-func TestGenMainModuleCoroProgramBootstrapNativeAndWasm(t *testing.T) {
-	llvm.InitializeAllTargets()
-	t.Setenv(llgoStdioNobuf, "")
-	tests := []struct {
-		name      string
-		target    *llssa.Target
-		goos      string
-		goarch    string
-		uintptrIR string
-		entryIR   string
-	}{
-		{
-			name:      "native",
-			goos:      "linux",
-			goarch:    "amd64",
-			uintptrIR: "i64",
-			entryIR:   "define i32 @main(",
-		},
-		{
-			name:      "wasm",
-			target:    &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"},
-			goos:      "wasip1",
-			goarch:    "wasm",
-			uintptrIR: "i32",
-			entryIR:   "define hidden i32 @__main_argc_argv(",
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			prog := llssa.NewProgram(test.target)
-			defer prog.Dispose()
-			ctx := &context{
-				prog: prog,
-				buildConf: &Config{
-					BuildMode: BuildModeExe,
-					Goos:      test.goos,
-					Goarch:    test.goarch, CoroProfile: CoroProfileStackless,
-				},
-			}
-			var programHash [16]byte
-			for i := range programHash {
-				programHash[i] = byte(i + 1)
-			}
-			entry := genMainModule(ctx, llssa.PkgRuntime,
-				&packages.Package{ID: "example.com/foo", PkgPath: "example.com/foo", ExportFile: "foo.a"},
-				&genConfig{
-					coroManifestHash: programHash,
-					coroBootstrap: &coroProgramBootstrapV1{Steps: []coroProgramBootstrapStepV1{
-						{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleInitV1, FunctionID: "init-id", Target: "example.com/foo.init"},
-						{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleMainV1, FunctionID: "main-id", Target: "example.com/foo.main"},
-					}},
-				})
-			ir := entry.LPkg.String()
-			if !strings.Contains(ir, test.entryIR) {
-				t.Fatalf("bootstrap entry module missing %q:\n%s", test.entryIR, ir)
-			}
-			stepsLine := irLineWithPrefix(ir, "@"+coroProgramBootstrapSymbolV1+".steps =")
-			bootstrapLine := irLineWithPrefix(ir, "@"+coroProgramBootstrapSymbolV1+" =")
-			manifestLine := irLineWithPrefix(ir, "@"+coroProgramManifestSymbolV1+" =")
-			if stepsLine == "" || bootstrapLine == "" || manifestLine == "" {
-				t.Fatalf("missing bootstrap/manifest globals:\n%s", ir)
-			}
-			for _, want := range []string{
-				"i32 1, i32 1, ptr @\"example.com/foo.init\", " + test.uintptrIR + " 0",
-				"i32 1, i32 2, ptr @\"example.com/foo.main\", " + test.uintptrIR + " 0",
-			} {
-				if !strings.Contains(stepsLine, want) {
-					t.Fatalf("startup table missing %q: %s", want, stepsLine)
-				}
-			}
-			hashWords := "i64 72623859790382856, i64 651345242494996240"
-			if !strings.Contains(bootstrapLine, hashWords) || !strings.Contains(manifestLine, hashWords) {
-				t.Fatalf("manifest/bootstrap ABI hashes differ:\nbootstrap: %s\nmanifest: %s", bootstrapLine, manifestLine)
-			}
-			if !strings.Contains(bootstrapLine, test.uintptrIR+" 2, ptr @"+coroProgramBootstrapSymbolV1+".steps, ptr null") {
-				t.Fatalf("bootstrap count/steps/factory are not 2/non-null/null: %s", bootstrapLine)
-			}
-			if !strings.Contains(manifestLine, "ptr @"+coroProgramBootstrapSymbolV1) {
-				t.Fatalf("manifest bootstrap pointer is null: %s", manifestLine)
-			}
-			if got := entry.LPkg.CoroProgramBootstrap(); got != coroProgramBootstrapSymbolV1 {
-				t.Fatalf("program bootstrap symbol = %q, want %q", got, coroProgramBootstrapSymbolV1)
-			}
-			if function := entry.LPkg.Module().NamedFunction(coroProgramContinueSymbolV1); !function.IsNil() {
-				t.Fatalf("descriptor-only bootstrap declared runnable continuation ABI:\n%s", ir)
-			}
-			if reference := entry.LPkg.Module().NamedGlobal(coroProgramContinueReferenceSymbolV1); !reference.IsNil() {
-				t.Fatalf("descriptor-only bootstrap retained runnable continuation ABI:\n%s", ir)
-			}
-			assertInOrder(t, ir,
-				"call void @\"example.com/foo.init\"()",
-				"call void @\"example.com/foo.main\"()",
-			)
-		})
 	}
 }
 
@@ -470,15 +292,11 @@ func TestGenMainModuleCoroProgramBootstrapV2MixedNativeAndWasm(t *testing.T) {
 			mod := entry.LPkg.Module()
 			if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
 				assertCoroProgramNativeSliceV2(t, mod, test.entryName)
-				assertCoroNativePostWaitRetention(t, mod, test.entryName)
 			} else if hostCoroPullRuntimeABI(ctx.buildConf) {
 				assertCoroProgramHostSliceV2(t, mod, test.entryName)
 				assertCoroHostPullRetentionV1(t, mod, test.entryName)
 			} else {
 				assertCoroProgramContinueRetention(t, mod, test.entryName)
-				if callback := mod.NamedFunction(coroNativePostWaitSymbolV1); !callback.IsNil() {
-					t.Fatalf("non-native entry declared native post-wait callback:\n%s", ir)
-				}
 			}
 			publicRuntimeInit := mod.NamedFunction("runtime.init")
 			if publicRuntimeInit.IsNil() || !publicRuntimeInit.IsDeclaration() {
@@ -557,7 +375,7 @@ func TestGenMainModuleCoroProgramBootstrapV2MixedNativeAndWasm(t *testing.T) {
 	}
 }
 
-func TestGenMainModuleCoroProgramBootstrapV2DefinesOnlyOwnedPublicRuntimeNoop(t *testing.T) {
+func TestGenMainModuleCoroProgramBootstrapV2DefinesOwnedPublicRuntimeNoop(t *testing.T) {
 	llvm.InitializeAllTargets()
 	t.Setenv(llgoStdioNobuf, "")
 	prog := llssa.NewProgram(nil)
@@ -594,149 +412,11 @@ func TestGenMainModuleCoroProgramBootstrapV2DefinesOnlyOwnedPublicRuntimeNoop(t 
 	if function := module.NamedFunction("syscall.init"); !function.IsNil() {
 		t.Fatalf("managed V2 entry retained a weak syscall.init interception body:\n%s", module.String())
 	}
-	if function := module.NamedFunction(coroProgramMainReturnSymbolV1); !function.IsNil() {
-		t.Fatalf("V2 bootstrap without closed-static spawn declared main-return cancellation:\n%s", module.String())
+	if function := module.NamedFunction(coroProgramMainReturnSymbolV1); function.IsNil() || !function.IsDeclaration() {
+		t.Fatalf("unique stackless bootstrap did not declare main-return cancellation:\n%s", module.String())
 	}
 	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("verify absent-public-runtime v2 module: %v\n%s", err, module.String())
-	}
-}
-
-func TestGenMainModuleCoroProgramBootstrapRuntimeSwitch(t *testing.T) {
-	llvm.InitializeAllTargets()
-	t.Setenv(llgoStdioNobuf, "")
-	prog := llssa.NewProgram(nil)
-	defer prog.Dispose()
-	ctx := &context{
-		prog: prog,
-		buildConf: &Config{
-			BuildMode: BuildModeExe,
-			Goos:      "linux",
-			Goarch:    "amd64", CoroProfile: CoroProfileStackless,
-		},
-	}
-	var programHash [16]byte
-	for i := range programHash {
-		programHash[i] = byte(i + 1)
-	}
-	entry := genMainModule(ctx, llssa.PkgRuntime,
-		&packages.Package{ID: "example.com/foo", PkgPath: "example.com/foo", ExportFile: "foo.a"},
-		&genConfig{
-			rtInit:           true,
-			pyInit:           true,
-			coroManifestHash: programHash,
-			coroBootstrap: &coroProgramBootstrapV1{Steps: []coroProgramBootstrapStepV1{
-				{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleInitV1, FunctionID: "init-id", Target: "example.com/foo.init"},
-				{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleMainV1, FunctionID: "main-id", Target: "example.com/foo.main"},
-			}},
-		})
-	ir := entry.LPkg.String()
-	bootstrapLine := irLineWithPrefix(ir, "@"+coroProgramBootstrapSymbolV1+" =")
-	if !strings.Contains(bootstrapLine, "ptr @"+coroProgramBootstrapFactorySymbolV1) {
-		t.Fatalf("runnable bootstrap does not publish its factory: %s\n%s", bootstrapLine, ir)
-	}
-	factory := entry.LPkg.Module().NamedFunction(coroProgramBootstrapFactorySymbolV1)
-	if factory.IsNil() || factory.IsDeclaration() {
-		t.Fatalf("compiler-owned bootstrap factory is missing:\n%s", ir)
-	}
-	assertInOrder(t, factory.String(),
-		"call void @\"example.com/foo.init\"()",
-		"call void @\"example.com/foo.main\"()",
-		"call void @"+coroProgramCompletePrepareHookV1,
-	)
-	entryBody := entry.LPkg.Module().NamedFunction("main").String()
-	assertCoroProgramNativeSliceV2(t, entry.LPkg.Module(), "main")
-	assertCoroNativePostWaitRetention(t, entry.LPkg.Module(), "main")
-	if strings.Contains(entryBody, "call void @\"example.com/foo.init\"()") || strings.Contains(entryBody, "call void @\"example.com/foo.main\"()") {
-		t.Fatalf("platform entry retained legacy direct init/main calls:\n%s", entryBody)
-	}
-	if got := strings.Count(entryBody, "call void @"+coroFrameAllocatorBootstrapSymbolV1+"()"); got != 1 {
-		t.Fatalf("platform entry allocator bootstrap calls = %d, want exactly one:\n%s", got, entryBody)
-	}
-	assertInOrder(t, entryBody,
-		"call void @"+coroFrameAllocatorBootstrapSymbolV1+"()",
-		"call void @Py_Initialize()",
-		"call void @\""+llssa.PkgRuntime+".init\"()",
-		"call void @runtime.init()",
-		"call ptr @"+coroProgramBeginSymbolV1,
-		"call ptr @"+coroProgramBootstrapFactorySymbolV1,
-		"call i32 @"+coroProgramRunSliceSymbolV2,
-		"call void @Py_Finalize()",
-	)
-	if strings.Contains(entryBody, "call ptr %") {
-		t.Fatalf("platform entry introduced indirect factory dispatch:\n%s", entryBody)
-	}
-}
-
-func TestGenMainModuleCoroProgramBootstrapRuntimeAfterCoroPasses(t *testing.T) {
-	llvm.InitializeAllTargets()
-	t.Setenv(llgoStdioNobuf, "")
-	tests := []struct {
-		name   string
-		target *llssa.Target
-		goos   string
-		goarch string
-	}{
-		{name: "native", goos: "linux", goarch: "amd64"},
-		{name: "wasm", target: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}, goos: "wasip1", goarch: "wasm"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			prog := llssa.NewProgram(test.target)
-			defer prog.Dispose()
-			ctx := &context{
-				prog: prog,
-				buildConf: &Config{
-					BuildMode: BuildModeExe,
-					Goos:      test.goos,
-					Goarch:    test.goarch, CoroProfile: CoroProfileStackless,
-				},
-			}
-			entry := genMainModule(ctx, llssa.PkgRuntime,
-				&packages.Package{ID: "example.com/foo", PkgPath: "example.com/foo", ExportFile: "foo.a"},
-				&genConfig{coroBootstrap: &coroProgramBootstrapV1{Steps: []coroProgramBootstrapStepV1{
-					{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleInitV1, FunctionID: "init-id", Target: "example.com/foo.init"},
-					{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleMainV1, FunctionID: "main-id", Target: "example.com/foo.main"},
-				}}})
-			if err := lowerCoroControlWrappers(ctx, entry.LPkg); err != nil {
-				t.Fatalf("lower production entry coroutine: %v\n%s", err, entry.LPkg.String())
-			}
-			mod := entry.LPkg.Module()
-			post := mod.String()
-			entryName := func() string {
-				if isWasmTarget(test.goos) {
-					return "__main_argc_argv"
-				}
-				return "main"
-			}()
-			if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
-				assertCoroProgramNativeSliceV2(t, mod, entryName)
-				assertCoroNativePostWaitRetention(t, mod, "main")
-			} else if hostCoroPullRuntimeABI(ctx.buildConf) {
-				assertCoroProgramHostSliceV2(t, mod, entryName)
-				assertCoroHostPullRetentionV1(t, mod, entryName)
-			} else {
-				assertCoroProgramContinueRetention(t, mod, entryName)
-				if callback := mod.NamedFunction(coroNativePostWaitSymbolV1); !callback.IsNil() {
-					t.Fatalf("non-native lowered entry declared native post-wait callback:\n%s", post)
-				}
-			}
-			for _, suffix := range []string{".resume", ".destroy"} {
-				if mod.NamedFunction(coroProgramBootstrapFactorySymbolV1 + suffix).IsNil() {
-					t.Fatalf("entry CoroSplit did not create factory%s:\n%s", suffix, post)
-				}
-			}
-			for _, intrinsic := range []string{"llvm.coro.id", "llvm.coro.begin", "llvm.coro.suspend", "llvm.coro.resume", "llvm.coro.done", "llvm.coro.destroy"} {
-				if regexp.MustCompile(`call [^\n]*@` + regexp.QuoteMeta(intrinsic) + `\b`).MatchString(post) {
-					t.Fatalf("lowered production entry still references %s:\n%s", intrinsic, post)
-				}
-			}
-			object, err := prog.TargetMachine().EmitToMemoryBuffer(mod, llvm.ObjectFile)
-			if err != nil {
-				t.Fatalf("emit production entry object: %v\n%s", err, post)
-			}
-			object.Dispose()
-		})
 	}
 }
 
@@ -888,7 +568,6 @@ func assertCoroHostPullRetentionV1(t *testing.T, module llvm.Module, entryName s
 		{coroHostPublishTimeSymbolV1, coroHostPublishTimeReferenceSymbolV1, "i1 (i32, i32)"},
 		{coroHostAckCancelSymbolV1, coroHostAckCancelReferenceSymbolV1, "i1 (i32, i32, i32, i32)"},
 		{coroHostContinueSliceSymbolV1, coroHostContinueSliceReferenceSymbolV1, "i32 (i32, i32, i32, i32, i32, i32, i32, ptr)"},
-		{coroHostPostWaitSymbolV1, coroHostPostWaitReferenceSymbolV1, "i32 (i32, i32, i32, i32)"},
 	}
 	entry := module.NamedFunction(entryName)
 	if entry.IsNil() || entry.IsDeclaration() {
@@ -911,9 +590,6 @@ func assertCoroHostPullRetentionV1(t *testing.T, module llvm.Module, entryName s
 		if regexp.MustCompile(`call [^\n]*@` + regexp.QuoteMeta(want.symbol) + `\(`).MatchString(body) {
 			t.Fatalf("program entry invoked host callback %q during startup:\n%s", want.symbol, body)
 		}
-	}
-	if callback := module.NamedFunction(coroNativePostWaitSymbolV1); !callback.IsNil() {
-		t.Fatalf("host-pull entry declared native pipe callback:\n%s", module.String())
 	}
 }
 
@@ -947,30 +623,6 @@ func assertCoroProgramContinueRetention(t *testing.T, module llvm.Module, entryN
 	}
 }
 
-func assertCoroNativePostWaitRetention(t *testing.T, module llvm.Module, entryName string) {
-	t.Helper()
-	callback := module.NamedFunction(coroNativePostWaitSymbolV1)
-	if callback.IsNil() || !callback.IsDeclaration() || callback.GlobalValueType().String() != "i32 (i32, i32, i32, i32)" {
-		t.Fatalf("native post-wait declaration is not i32(i32,i32,i32,i32): %v\n%s", callback, module.String())
-	}
-	anchor := module.NamedGlobal(coroNativePostWaitReferenceSymbolV1)
-	if anchor.IsNil() || !anchor.IsGlobalConstant() || anchor.Linkage() != llvm.InternalLinkage ||
-		anchor.Initializer().IsNil() || anchor.Initializer().C != callback.C {
-		t.Fatalf("native post-wait reference does not retain the exact callback: %v\n%s", anchor, module.String())
-	}
-	entry := module.NamedFunction(entryName)
-	if entry.IsNil() || entry.IsDeclaration() {
-		t.Fatalf("native post-wait retention entry %q is missing: %s", entryName, module.String())
-	}
-	body := entry.String()
-	if got := strings.Count(body, "load volatile ptr, ptr @"+coroNativePostWaitReferenceSymbolV1); got != 1 {
-		t.Fatalf("program entry native-post-wait-reference volatile loads = %d, want 1:\n%s", got, body)
-	}
-	if strings.Contains(body, "call i32 @"+coroNativePostWaitSymbolV1) {
-		t.Fatalf("program entry invoked native post-wait callback during startup:\n%s", body)
-	}
-}
-
 func irLineWithPrefix(ir, prefix string) string {
 	for _, line := range strings.Split(ir, "\n") {
 		if strings.HasPrefix(line, prefix) {
@@ -988,14 +640,24 @@ func TestGenMainModuleCoroControlWrappersAfterCoroPasses(t *testing.T) {
 	ctx := &context{
 		prog: prog,
 		buildConf: &Config{
-			BuildMode: BuildModeCArchive,
+			BuildMode: BuildModeExe,
 			Goos:      "linux",
 			Goarch:    "amd64", CoroProfile: CoroProfileStackless,
 		},
 	}
+	bootstrap := &coroProgramBootstrapV1{
+		Version: coroProgramBootstrapVersionV2,
+		Steps: []coroProgramBootstrapStepV1{
+			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleRuntimeInitV2, FunctionID: "runtime-init", Target: llssa.PkgRuntime + ".init"},
+			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleABIInitV2, FunctionID: "abi-init", Target: "init$abitypes"},
+			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRolePublicRuntimeInitV2, FunctionID: coroProgramPublicRuntimeNoopIDV2, Target: coroProgramPublicRuntimeNoopSymbolV2},
+			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRolePackageInitV2, FunctionID: "package-init", Target: "example.com/foo.init"},
+			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleMainV2, FunctionID: "main", Target: "example.com/foo.main"},
+		},
+	}
 	entry := genMainModule(ctx, llssa.PkgRuntime,
 		&packages.Package{PkgPath: "example.com/foo", ExportFile: "foo.a"},
-		&genConfig{})
+		&genConfig{coroBootstrap: bootstrap})
 	mod := entry.LPkg.Module()
 	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("verify coroutine control wrappers before passes: %v\n%s", err, mod.String())

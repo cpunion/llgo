@@ -136,28 +136,6 @@ func TestResumeGateRejectsCompilerHooksBeforeAnySideEffect(t *testing.T) {
 		assertResumeGateStillUnchecked(t, fixture)
 	})
 
-	t.Run("park", func(t *testing.T) {
-		fixture := newUncheckedResumeGateFixture(t, "gate-park")
-		token := new(WaitToken)
-		ticket, ok := ArmWait(token)
-		if !ok {
-			t.Fatal("arm unchecked-resume wait token")
-		}
-		fixture.task.frame.header.SuspendReason = uint16(SuspendPark)
-		fixture.task.frame.header.Lifecycle = uint16(FrameSuspended)
-		beforeWord := preemptLoad(&token.word)
-		beforePending := fixture.task.g.pending
-		if PreparePark(fixture.task.g, fixture.task.handle, fixture.task.frame.header, token, ticket) {
-			t.Fatal("park accepted before resume gate take")
-		}
-		if preemptLoad(&token.word) != beforeWord || waitWordState(beforeWord) != waitArmed ||
-			waitGeneration(beforeWord) != uint32(ticket) ||
-			fixture.task.g.pending != beforePending {
-			t.Fatal("rejected park claimed its token or mutated pending state")
-		}
-		assertResumeGateStillUnchecked(t, fixture)
-	})
-
 	t.Run("park-set", func(t *testing.T) {
 		fixture := newUncheckedResumeGateFixture(t, "gate-park-set")
 		ticket, ok := BeginParkSet(&fixture.task.g.park, 0, 73)

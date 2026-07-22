@@ -146,7 +146,7 @@ func TestCoroPollWaitCurrentFrameNativeAndWasm32(t *testing.T) {
 			for _, forbidden := range []string{
 				"@foo.wait", "@llgo.coroPollWait", "runtime.AllocZ",
 				"__llgo_coro_poll_prepare_or_abort_v1", "__llgo_coro_poll_retire_completed_or_abort_v1",
-				coroParkPrepareHookV1,
+				"__llgo_coro_park_prepare_v1",
 			} {
 				if strings.Contains(body, forbidden) {
 					t.Fatalf("Poll V2 lowering retained forbidden V1 call/allocation %q:\n%s", forbidden, body)

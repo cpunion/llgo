@@ -3067,9 +3067,8 @@ func targetGCBuildTags(gc string) ([]string, error) {
 }
 
 const (
-	coroNativePipeBuildTag        = "llgo_coro_native_pipe"
-	coroNativeTimerBuildTag       = "llgo_coro_native_timer"
-	coroNativeIngressTestBuildTag = "llgo_coro_native_ingress_test"
+	coroNativePipeBuildTag  = "llgo_coro_native_pipe"
+	coroNativeTimerBuildTag = "llgo_coro_native_timer"
 )
 
 // effectiveBuildTags is the single build-tag assembly boundary used by Do.
@@ -3137,7 +3136,7 @@ func effectiveBuildTags(conf *Config, export crosscompile.Export) (string, error
 func rejectCompilerReservedBuildTags(source string, tags []string) error {
 	for _, tag := range tags {
 		switch tag {
-		case coroNativePipeBuildTag, coroNativeTimerBuildTag, coroNativeIngressTestBuildTag:
+		case coroNativePipeBuildTag, coroNativeTimerBuildTag:
 			return fmt.Errorf("build tag %q from %s is a compiler-reserved capability and cannot be supplied externally", tag, source)
 		}
 	}
@@ -3968,8 +3967,7 @@ func validCoroHostActionPointerV1(typ types.Type) bool {
 func validateCoroHostPullRuntimeFunctionV1(name string, fn *ssa.Function) (bool, error) {
 	switch name {
 	case coroHostNextActionSymbolV1, coroHostProfileSymbolV1, coroHostNextDeadlineSymbolV1,
-		coroHostPublishTimeSymbolV1, coroHostAckCancelSymbolV1, coroHostContinueSliceSymbolV1,
-		coroHostPostWaitSymbolV1:
+		coroHostPublishTimeSymbolV1, coroHostAckCancelSymbolV1, coroHostContinueSliceSymbolV1:
 	default:
 		return false, nil
 	}
@@ -4030,11 +4028,6 @@ func validateCoroHostPullRuntimeFunctionV1(name string, fn *ssa.Function) (bool,
 			return true, nil
 		}
 		return true, fmt.Errorf("coroutine host continue-slice ABI %q must have exact func(7 x uint32, *{8 x uint32}) uint32 signature", name)
-	case coroHostPostWaitSymbolV1:
-		if allUint32Params(4) && oneResult(uint32Type) {
-			return true, nil
-		}
-		return true, fmt.Errorf("coroutine host post-wait ABI %q must have exact func(uint32, uint32, uint32, uint32) uint32 signature", name)
 	default:
 		panic("unreachable host-pull runtime ABI validator")
 	}
@@ -4103,11 +4096,6 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 		} else {
 			names = append(names, coroProgramRunSymbolV1, coroProgramContinueSymbolV1)
 		}
-		names = append(names,
-			coroWaitPrepareSymbolV1,
-			coroWaitRollbackSymbolV1,
-			coroWaitRetireCompletedSymbolV1,
-		)
 	}
 	if ctx.buildConf.coroWorkerActive() {
 		names = append(names, coroWorkerParkSymbolV1, coroWorkerResumeSymbolV1)
@@ -4119,9 +4107,6 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			// managed coroutine twin.
 			names = append(names, coroNativeWorkerCompleteSymbolV1)
 		}
-	}
-	if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
-		names = append(names, coroNativePostWaitSymbolV1)
 	}
 	if nativeCoroFleetRuntimeABI(ctx.buildConf) {
 		// A fixed C pthread routine enters this exact Go body from a raw native
@@ -4138,7 +4123,6 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			coroHostPublishTimeSymbolV1,
 			coroHostAckCancelSymbolV1,
 			coroHostContinueSliceSymbolV1,
-			coroHostPostWaitSymbolV1,
 		)
 	}
 	if nativeCoroTimerRuntimeABI(ctx.buildConf) {
@@ -4151,13 +4135,13 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			coroPollResumeSymbolV2,
 			coroPollUpdateDeadlineOrAbortSymbolV1,
 			coroPollPostClosingOrAbortSymbolV1,
-			coroSemaphorePrepareOrAbortSymbolV1,
-			coroSemaphoreRetireCompletedOrAbortSymbolV1,
-			coroSemaphoreReleaseOrAbortSymbolV1,
-			coroNotifyPrepareOrAbortSymbolV1,
-			coroNotifyRetireCompletedOrAbortSymbolV1,
-			coroNotifyOneOrAbortSymbolV1,
-			coroNotifyAllOrAbortSymbolV1,
+			coroKeyedParkSymbolV2,
+			coroKeyedResumeSymbolV2,
+			coroSemaphorePrepareOrAbortSymbolV2,
+			coroSemaphoreReleaseOrAbortSymbolV2,
+			coroNotifyPrepareOrAbortSymbolV2,
+			coroNotifyOneOrAbortSymbolV2,
+			coroNotifyAllOrAbortSymbolV2,
 		)
 	}
 	if ctx.buildConf.coroProgramBootstrapActive() {
@@ -4167,7 +4151,6 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			"__llgo_coro_await_prepare_v1",
 			"__llgo_coro_preempt_poll_v1",
 			"__llgo_coro_yield_prepare_v1",
-			"__llgo_coro_park_prepare_v1",
 			coroRunDecisionTakeSymbolV1,
 			coroRunDecisionTakeZeroSymbolV1,
 			"__llgo_coro_complete_prepare_v1",
@@ -4335,19 +4318,6 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 				}
 			}
 		}
-		if name == coroNativePostWaitSymbolV1 {
-			sig := fn.Signature
-			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 4 || sig.Results().Len() != 1 ||
-				!types.Identical(sig.Results().At(0).Type(), types.Typ[types.Uint32]) ||
-				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
-				return nil, nil, nil, nil, fmt.Errorf("coroutine native post-wait ABI %q must have exact func(uint32, uint32, uint32, uint32) uint32 signature", name)
-			}
-			for parameter := 0; parameter < sig.Params().Len(); parameter++ {
-				if !types.Identical(sig.Params().At(parameter).Type(), types.Typ[types.Uint32]) {
-					return nil, nil, nil, nil, fmt.Errorf("coroutine native post-wait ABI %q must have exact func(uint32, uint32, uint32, uint32) uint32 signature", name)
-				}
-			}
-		}
 		if name == coroNativeWorkerCompleteSymbolV1 {
 			sig := fn.Signature
 			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 5 || sig.Results().Len() != 1 ||
@@ -4370,35 +4340,6 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 				!types.Identical(sig.Results().At(0).Type(), types.Typ[types.Uint32]) ||
 				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
 				return nil, nil, nil, nil, fmt.Errorf("coroutine native fleet owner %q must have exact func() uint32 signature", name)
-			}
-		}
-		if name == coroWaitPrepareSymbolV1 {
-			sig := fn.Signature
-			uint32Pointer := types.NewPointer(types.Typ[types.Uint32])
-			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 6 || sig.Results().Len() != 1 ||
-				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
-				!types.Identical(sig.Results().At(0).Type(), types.Typ[types.Bool]) ||
-				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
-				return nil, nil, nil, nil, fmt.Errorf("coroutine wait prepare ABI %q must have exact func(unsafe.Pointer, *uint32, *uint32, *uint32, *uint32, *uint32) bool signature", name)
-			}
-			for parameter := 1; parameter < sig.Params().Len(); parameter++ {
-				if !types.Identical(sig.Params().At(parameter).Type(), uint32Pointer) {
-					return nil, nil, nil, nil, fmt.Errorf("coroutine wait prepare ABI %q must have exact func(unsafe.Pointer, *uint32, *uint32, *uint32, *uint32, *uint32) bool signature", name)
-				}
-			}
-		}
-		if name == coroWaitRollbackSymbolV1 || name == coroWaitRetireCompletedSymbolV1 {
-			sig := fn.Signature
-			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 4 || sig.Results().Len() != 1 ||
-				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
-				!types.Identical(sig.Results().At(0).Type(), types.Typ[types.Bool]) ||
-				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
-				return nil, nil, nil, nil, fmt.Errorf("coroutine wait owner ABI %q must have exact func(unsafe.Pointer, uint32, uint32, uint32) bool signature", name)
-			}
-			for parameter := 1; parameter < sig.Params().Len(); parameter++ {
-				if !types.Identical(sig.Params().At(parameter).Type(), types.Typ[types.Uint32]) {
-					return nil, nil, nil, nil, fmt.Errorf("coroutine wait owner ABI %q must have exact func(unsafe.Pointer, uint32, uint32, uint32) bool signature", name)
-				}
 			}
 		}
 		if name == coroTimerParkSymbolV2 {
@@ -4493,78 +4434,62 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 				return nil, nil, nil, nil, fmt.Errorf("coroutine poll post-closing-or-abort ABI %q must have exact func(uintptr, uint32) signature", name)
 			}
 		}
-		if name == coroSemaphorePrepareOrAbortSymbolV1 {
+		if name == coroKeyedParkSymbolV2 {
 			sig := fn.Signature
-			uint32Pointer := types.NewPointer(types.Typ[types.Uint32])
-			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 5 || sig.Results().Len() != 0 ||
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 4 || sig.Results().Len() != 0 ||
+				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf("coroutine keyed park V2 ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) signature", name)
+			}
+			for parameter := 0; parameter < sig.Params().Len(); parameter++ {
+				if !types.Identical(sig.Params().At(parameter).Type(), types.Typ[types.UnsafePointer]) {
+					return nil, nil, nil, nil, fmt.Errorf("coroutine keyed park V2 ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) signature", name)
+				}
+			}
+		}
+		if name == coroKeyedResumeSymbolV2 {
+			sig := fn.Signature
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 2 || sig.Results().Len() != 1 ||
+				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Params().At(1).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Results().At(0).Type(), types.Typ[types.Uint32]) ||
+				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf("coroutine keyed resume V2 ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer) uint32 signature", name)
+			}
+		}
+		if name == coroSemaphorePrepareOrAbortSymbolV2 {
+			sig := fn.Signature
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 2 || sig.Results().Len() != 0 ||
 				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
 				!types.Identical(sig.Params().At(1).Type(), types.Typ[types.UnsafePointer]) ||
 				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
-				return nil, nil, nil, nil, fmt.Errorf("coroutine semaphore prepare-or-abort ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer, *uint32, *uint32, *uint32) signature", name)
-			}
-			for parameter := 2; parameter < sig.Params().Len(); parameter++ {
-				if !types.Identical(sig.Params().At(parameter).Type(), uint32Pointer) {
-					return nil, nil, nil, nil, fmt.Errorf("coroutine semaphore prepare-or-abort ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer, *uint32, *uint32, *uint32) signature", name)
-				}
+				return nil, nil, nil, nil, fmt.Errorf("coroutine semaphore prepare V2 ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer) signature", name)
 			}
 		}
-		if name == coroSemaphoreRetireCompletedOrAbortSymbolV1 {
-			sig := fn.Signature
-			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 4 || sig.Results().Len() != 0 ||
-				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
-				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
-				return nil, nil, nil, nil, fmt.Errorf("coroutine semaphore retire-or-abort ABI %q must have exact func(unsafe.Pointer, uint32, uint32, uint32) signature", name)
-			}
-			for parameter := 1; parameter < sig.Params().Len(); parameter++ {
-				if !types.Identical(sig.Params().At(parameter).Type(), types.Typ[types.Uint32]) {
-					return nil, nil, nil, nil, fmt.Errorf("coroutine semaphore retire-or-abort ABI %q must have exact func(unsafe.Pointer, uint32, uint32, uint32) signature", name)
-				}
-			}
-		}
-		if name == coroSemaphoreReleaseOrAbortSymbolV1 {
+		if name == coroSemaphoreReleaseOrAbortSymbolV2 {
 			sig := fn.Signature
 			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 1 || sig.Results().Len() != 0 ||
 				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
 				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
-				return nil, nil, nil, nil, fmt.Errorf("coroutine semaphore release-or-abort ABI %q must have exact func(unsafe.Pointer) signature", name)
+				return nil, nil, nil, nil, fmt.Errorf("coroutine semaphore release V2 ABI %q must have exact func(unsafe.Pointer) signature", name)
 			}
 		}
-		if name == coroNotifyPrepareOrAbortSymbolV1 {
+		if name == coroNotifyPrepareOrAbortSymbolV2 {
 			sig := fn.Signature
-			uint32Pointer := types.NewPointer(types.Typ[types.Uint32])
-			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 6 || sig.Results().Len() != 0 ||
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 3 || sig.Results().Len() != 0 ||
 				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
 				!types.Identical(sig.Params().At(1).Type(), types.Typ[types.UnsafePointer]) ||
 				!types.Identical(sig.Params().At(2).Type(), types.Typ[types.Uint32]) ||
 				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
-				return nil, nil, nil, nil, fmt.Errorf("coroutine notify prepare-or-abort ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer, uint32, *uint32, *uint32, *uint32) signature", name)
-			}
-			for parameter := 3; parameter < sig.Params().Len(); parameter++ {
-				if !types.Identical(sig.Params().At(parameter).Type(), uint32Pointer) {
-					return nil, nil, nil, nil, fmt.Errorf("coroutine notify prepare-or-abort ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer, uint32, *uint32, *uint32, *uint32) signature", name)
-				}
+				return nil, nil, nil, nil, fmt.Errorf("coroutine notify prepare V2 ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer, uint32) signature", name)
 			}
 		}
-		if name == coroNotifyRetireCompletedOrAbortSymbolV1 {
-			sig := fn.Signature
-			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 4 || sig.Results().Len() != 0 ||
-				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
-				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
-				return nil, nil, nil, nil, fmt.Errorf("coroutine notify retire-or-abort ABI %q must have exact func(unsafe.Pointer, uint32, uint32, uint32) signature", name)
-			}
-			for parameter := 1; parameter < sig.Params().Len(); parameter++ {
-				if !types.Identical(sig.Params().At(parameter).Type(), types.Typ[types.Uint32]) {
-					return nil, nil, nil, nil, fmt.Errorf("coroutine notify retire-or-abort ABI %q must have exact func(unsafe.Pointer, uint32, uint32, uint32) signature", name)
-				}
-			}
-		}
-		if name == coroNotifyOneOrAbortSymbolV1 || name == coroNotifyAllOrAbortSymbolV1 {
+		if name == coroNotifyOneOrAbortSymbolV2 || name == coroNotifyAllOrAbortSymbolV2 {
 			sig := fn.Signature
 			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 2 || sig.Results().Len() != 0 ||
 				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
 				!types.Identical(sig.Params().At(1).Type(), types.Typ[types.Uint32]) ||
 				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
-				return nil, nil, nil, nil, fmt.Errorf("coroutine notify publication-or-abort ABI %q must have exact func(unsafe.Pointer, uint32) signature", name)
+				return nil, nil, nil, nil, fmt.Errorf("coroutine notify publication V2 ABI %q must have exact func(unsafe.Pointer, uint32) signature", name)
 			}
 		}
 		if name == coroRunDecisionTakeSymbolV1 {

@@ -154,9 +154,9 @@ func TestCoroExplicitPanicNativeNoStdlibRuntimeE2E(t *testing.T) {
 func buildCoroPanicNativeE2EUser(t *testing.T, prog llssa.Program, temp string) (object, anchor string) {
 	t.Helper()
 	ssaPkg, files := buildCoroPlanTestPackage(t, coroPanicNativeE2EPackage, coroPanicNativeE2ESource, nil)
-	universe, err := cl.PrepareEmissionUniverse(prog, nil, []cl.EmissionPackage{{
+	universe, err := cl.PrepareEmissionUniverseWithOptions(prog, nil, []cl.EmissionPackage{{
 		SSA: ssaPkg, Files: files, Identity: coroPanicNativeE2EPackage,
-	}})
+	}}, cl.EmissionUniverseOptions{CoroProfile: cl.CoroProfileStackless})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -512,7 +512,6 @@ func assertCoroPanicNativeE2ELinkedSymbols(t *testing.T, executable string) {
 	for _, required := range []string{
 		"__llgo_coro_panic_prepare_v1",
 		coroProgramContinueSliceSymbolV2,
-		coroNativePostWaitSymbolV1,
 		coroPanicNativeE2ERunReport,
 		"command-line-arguments.coroProgramRunSliceV2",
 		coroPanicNativeE2EDestroyObserve,

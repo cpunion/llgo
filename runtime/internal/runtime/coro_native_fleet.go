@@ -29,6 +29,11 @@ import (
 // claim about the eventual GOMAXPROCS/default-P count.
 const coroNativeFleetDomainCapacityV1 = 2
 
+// Manual operations back route-aware owner events such as semaphore and
+// notify wakeups. Keep their native reservation aligned with the other
+// 16-page source catalogs without making the core/embedded source allocate.
+const coroNativeManualPageCountV2 = 16
+
 type coroNativeFleetLifecycleV1 uint8
 
 const (
@@ -56,15 +61,15 @@ const (
 // stay route-local. The fixed physical coroworker pool is process-shared: its
 // POD jobs carry OperationID routes and never become part of this domain.
 type coroNativeFleetDomainV1 struct {
-	p       coro.P
-	driver  coro.ExecutorDriver
-	waits   coro.WaitRegistrationTable
-	timers  coro.TimerRegistrationTable
-	poll    coro.PollOperationSource
-	manual  coro.ManualOperationSource
-	worker  coro.WorkerOperationSource
-	channel coro.ChannelOperationSource
-	control coro.TaskControlSource
+	p           coro.P
+	driver      coro.ExecutorDriver
+	timers      coro.TimerRegistrationTable
+	poll        coro.PollOperationSource
+	manual      coro.ManualOperationSource
+	manualPages [coroNativeManualPageCountV2 - 1]coro.ManualOperationPage
+	worker      coro.WorkerOperationSource
+	channel     coro.ChannelOperationSource
+	control     coro.TaskControlSource
 
 	ingress   coro.TargetIngress
 	doorbell  corodoorbell.Pipe
@@ -144,8 +149,8 @@ func (domain *coroNativeFleetDomainV1) channelOwnerV1() *coro.ChannelOperationSo
 
 func validCoroNativeFleetAdoptedOwnersV1(owners coroNativeFleetDomainOwnersV1) bool {
 	sources := owners.sources
-	return owners.p != nil && owners.driver != nil && sources.Waits != nil && sources.Timers != nil &&
-		sources.Poll != nil && sources.Manual == nil && sources.Worker != nil && sources.Channel != nil &&
+	return owners.p != nil && owners.driver != nil && sources.Timers != nil &&
+		sources.Poll != nil && sources.Manual != nil && sources.Worker != nil && sources.Channel != nil &&
 		sources.Control != nil
 }
 
@@ -155,8 +160,8 @@ func coroNativeFleetAdoptedOwnersRetiredV1(domain *coroNativeFleetDomainV1) bool
 	}
 	owners := domain.owners
 	sources := owners.sources
-	return *owners.driver == (coro.ExecutorDriver{}) && sources.Waits.CanRelease() && sources.Timers.CanRelease() &&
-		sources.Poll.CanRelease() && sources.Worker.CanRelease() && sources.Channel.CanRelease() &&
+	return *owners.driver == (coro.ExecutorDriver{}) && sources.Timers.CanRelease() &&
+		sources.Poll.CanRelease() && sources.Manual.CanRelease() && sources.Worker.CanRelease() && sources.Channel.CanRelease() &&
 		sources.Control.CanRelease()
 }
 
@@ -188,7 +193,7 @@ func coroNativeFleetDomainCandidateV1(domain *coroNativeFleetDomainV1) bool {
 		domain.nextOwnerEpoch == 0 && domain.readySpawn == nil && !domain.adopted &&
 		domain.owners == (coroNativeFleetDomainOwnersV1{}) &&
 		domain.driver == (coro.ExecutorDriver{}) &&
-		domain.waits.CanRelease() && domain.timers.CanRelease() && domain.poll.CanRelease() &&
+		domain.timers.CanRelease() && domain.poll.CanRelease() &&
 		domain.manual.CanRelease() &&
 		domain.worker.CanRelease() && domain.channel.CanRelease() && domain.control.CanRelease() &&
 		domain.ingress.CanReleaseResources() && domain.admission.CanRecycle()
@@ -288,7 +293,9 @@ func coroNativeFleetBindDomainV1(state *coroNativeFleetStateV1, index uint32) bo
 		return false
 	}
 	domain := &state.domains[index]
-	if !coroNativeFleetDomainCandidateV1(domain) || !domain.doorbell.Open() {
+	if !coroNativeFleetDomainCandidateV1(domain) ||
+		!coro.ConfigureManualOperationPages(&domain.manual, domain.manualPages[:]) ||
+		!domain.doorbell.Open() {
 		return false
 	}
 	handle, ok := coro.BindExecutorFleet(
@@ -296,7 +303,6 @@ func coroNativeFleetBindDomainV1(state *coroNativeFleetStateV1, index uint32) bo
 		&domain.driver,
 		&domain.p,
 		coro.ExecutorSourceCatalog{
-			Waits:   &domain.waits,
 			Timers:  &domain.timers,
 			Poll:    &domain.poll,
 			Manual:  &domain.manual,
@@ -696,8 +702,8 @@ func coroNativeFleetPollOwnerEpochV1(
 	if driver == nil {
 		return 0, 0, false
 	}
-	waits, timers, promoted, pollOK := coro.PollExecutorAt(driver, now)
-	return waits + timers, promoted, pollOK
+	timers, promoted, pollOK := coro.PollExecutorAt(driver, now)
+	return timers, promoted, pollOK
 }
 
 // coroNativeFleetRunOwnerEpochV1 executes the same physical reducer as the
@@ -847,13 +853,13 @@ func coroNativeFleetPrepareOwnerWaitAtV1(
 func coroNativeFleetWakeOwnerAtV1(
 	handle coro.ExecutorFleetHandle,
 	now int64,
-) (epoch uint32, waits, timers, promoted int, ok bool) {
+) (epoch uint32, timers, promoted int, ok bool) {
 	if now < 0 {
-		return 0, 0, 0, 0, false
+		return 0, 0, 0, false
 	}
 	epoch, acquired := coroNativeFleetBeginOwnerEpochV1(handle)
 	if !acquired {
-		return 0, 0, 0, 0, false
+		return 0, 0, 0, false
 	}
 	domain, valid := coroNativeFleetDomainForHandleV1(
 		&coroNativeFleetV1State,
@@ -861,17 +867,17 @@ func coroNativeFleetWakeOwnerAtV1(
 		coroNativeFleetDomainActiveV1,
 	)
 	if !valid || domain.ownerEpoch != epoch {
-		return 0, 0, 0, 0, false
+		return 0, 0, 0, false
 	}
 	driver := domain.driverOwnerV1()
 	if driver == nil {
-		return 0, 0, 0, 0, false
+		return 0, 0, 0, false
 	}
-	waits, timers, promoted, ok = coro.WakeExecutorAt(driver, now)
+	timers, promoted, ok = coro.WakeExecutorAt(driver, now)
 	if !ok {
-		return 0, 0, 0, 0, false
+		return 0, 0, 0, false
 	}
-	return epoch, waits, timers, promoted, true
+	return epoch, timers, promoted, true
 }
 
 func coroNativeFleetFinishOwnerEpochV1(handle coro.ExecutorFleetHandle, epoch uint32) bool {
@@ -1023,7 +1029,7 @@ func coroNativeFleetAllRetiredV1() bool {
 			domain.owners != (coroNativeFleetDomainOwnersV1{}) ||
 			!domain.ingress.Retired() || !domain.doorbell.Closed() ||
 			!domain.admission.CanRelease() || domain.driver != (coro.ExecutorDriver{}) ||
-			!domain.waits.CanRelease() || !domain.timers.CanRelease() || !domain.poll.CanRelease() ||
+			!domain.timers.CanRelease() || !domain.poll.CanRelease() ||
 			!domain.manual.CanRelease() ||
 			!domain.worker.CanRelease() || !domain.channel.CanRelease() || !domain.control.CanRelease() {
 			return false

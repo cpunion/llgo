@@ -56,9 +56,9 @@ func coroSpawnCommitV1(parentPointer, childPointer, handle unsafe.Pointer) bool 
 }
 
 // coroReleaseCompletedTask performs the physical half of spawned-G
-// retirement. A platform producer may retain only a POD wait registration
-// handle, never a child G pointer. The stable registration table owns any
-// P/WaitToken references until it is quiesced and retired.
+// retirement. A platform producer may retain only a POD operation handle, never
+// a child G pointer. The durable source owns that handle until it is quiesced
+// and retired.
 func coroReleaseCompletedTask(g *coroG) bool {
 	// A compiler resume gate turns task cancellation into ordinary terminal
 	// frame completion after source-specific park cleanup. The cancellation

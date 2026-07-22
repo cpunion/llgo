@@ -27,7 +27,6 @@ import "unsafe"
 // unmapped address supplied by untrusted native memory.
 const (
 	ProgramManifestVersionV1   uint32 = 1
-	ProgramBootstrapVersionV1  uint32 = 1
 	ProgramBootstrapVersionV2  uint32 = 2
 	RootPackageAnchorVersionV1 uint32 = 1
 	RootFactoryVersionV1       uint32 = 1
@@ -50,11 +49,6 @@ type ProgramStepKindV2 = ProgramStepKindV1
 const (
 	ProgramStepDirectPlainV2 ProgramStepKindV2 = ProgramStepDirectPlainV1
 	ProgramStepCoroRootV2    ProgramStepKindV2 = ProgramStepCoroRootV1
-)
-
-const (
-	ProgramStepFlagInitV1 uint32 = 1 << iota
-	ProgramStepFlagMainV1
 )
 
 // Version-two roles describe the complete heterogeneous startup sequence.
@@ -81,9 +75,8 @@ type ProgramManifestV1 struct {
 	Bootstrap    unsafe.Pointer
 }
 
-// ProgramBootstrapV1 describes the complete, ordered startup program. Factory
-// is allowed to be nil only while validating a static Phase13-A descriptor;
-// runnable validation rejects it.
+// ProgramBootstrapV1 is the pointer-size-neutral physical startup-table layout.
+// The stackless runtime accepts only ProgramBootstrapVersionV2.
 type ProgramBootstrapV1 struct {
 	Version   uint32
 	Flags     uint32
@@ -134,28 +127,13 @@ type RootFactoryDescriptorV1 struct {
 	ResultAlign  uintptr
 }
 
-// ProgramValidationCodeV1 is an allocation-free integer result code. It does
-// not implement error because this target-neutral layer must not introduce an
-// interface, formatting, or allocation dependency.
+// ProgramValidationCodeV1 is the allocation-free result of validating the
+// shared physical package/descriptor catalog. The V1 suffix describes that
+// retained layout, not an accepted version-one startup program.
 type ProgramValidationCodeV1 uint32
 
 const (
 	ProgramValidationOKV1 ProgramValidationCodeV1 = iota
-	ProgramValidationNilManifestV1
-	ProgramValidationManifestAddressV1
-	ProgramValidationManifestVersionV1
-	ProgramValidationManifestFlagsV1
-	ProgramValidationPackageCountPointerV1
-	ProgramValidationPackageTableAddressV1
-	ProgramValidationNilBootstrapV1
-	ProgramValidationBootstrapAddressV1
-	ProgramValidationBootstrapVersionV1
-	ProgramValidationBootstrapFlagsV1
-	ProgramValidationBootstrapHashV1
-	ProgramValidationStepCountV1
-	ProgramValidationStepCountPointerV1
-	ProgramValidationStepTableAddressV1
-	ProgramValidationBootstrapFactoryV1
 	ProgramValidationNilPackageAnchorV1
 	ProgramValidationPackageAnchorAddressV1
 	ProgramValidationDuplicatePackageAnchorV1
@@ -172,42 +150,7 @@ const (
 	ProgramValidationRootDescriptorFactoryV1
 	ProgramValidationRootStartupLayoutV1
 	ProgramValidationRootResultLayoutV1
-	ProgramValidationStepInitFlagsV1
-	ProgramValidationStepMainFlagsV1
-	ProgramValidationStepKindV1
-	ProgramValidationStepTargetV1
-	ProgramValidationStepAuxV1
-	ProgramValidationStepAnchorV1
-	ProgramValidationStepDescriptorIndexV1
-	ProgramValidationStepPayloadV1
-	ProgramValidationInvalidViewV1
-	ProgramValidationStepIndexV1
-	ProgramValidationBootstrapFactoryIdentityV1
-	ProgramValidationRunnableStepKindV1
 )
-
-// ResolvedProgramStepV1 is a data-only action. Exactly one representation is
-// populated: Plain for DirectPlain, or Descriptor and Factory for CoroRoot.
-type ResolvedProgramStepV1 struct {
-	Kind       ProgramStepKindV1
-	Flags      uint32
-	Plain      unsafe.Pointer
-	Descriptor *RootFactoryDescriptorV1
-	Factory    unsafe.Pointer
-}
-
-const validatedProgramMagicV1 uint32 = 0x42535431 // "BST1"
-
-// ProgramViewV1 is opaque despite being a public hand-off type: callers can
-// only obtain a valid value from validation and cannot construct or mutate its
-// private contents. Copying the two resolved actions also prevents later table
-// mutation from changing an already validated startup plan.
-type ProgramViewV1 struct {
-	magic   uint32
-	factory unsafe.Pointer
-	init    ResolvedProgramStepV1
-	main    ResolvedProgramStepV1
-}
 
 type programArrayStateV1 uint8
 
@@ -396,195 +339,6 @@ func findProgramPackageV1(manifest *ProgramManifestV1, target unsafe.Pointer) *R
 		}
 	}
 	return nil
-}
-
-func resolveValidatedProgramStepV1(
-	manifest *ProgramManifestV1, step *ProgramStepV1, expectedFlags uint32,
-) (ResolvedProgramStepV1, ProgramValidationCodeV1) {
-	if step.Flags != expectedFlags {
-		if expectedFlags == ProgramStepFlagInitV1 {
-			return ResolvedProgramStepV1{}, ProgramValidationStepInitFlagsV1
-		}
-		return ResolvedProgramStepV1{}, ProgramValidationStepMainFlagsV1
-	}
-	if step.Target == nil {
-		return ResolvedProgramStepV1{}, ProgramValidationStepTargetV1
-	}
-	switch ProgramStepKindV1(step.Kind) {
-	case ProgramStepDirectPlainV1:
-		if step.Aux != 0 {
-			return ResolvedProgramStepV1{}, ProgramValidationStepAuxV1
-		}
-		return ResolvedProgramStepV1{
-			Kind:  ProgramStepDirectPlainV1,
-			Flags: step.Flags,
-			Plain: step.Target,
-		}, ProgramValidationOKV1
-	case ProgramStepCoroRootV1:
-		anchor := findProgramPackageV1(manifest, step.Target)
-		if anchor == nil {
-			return ResolvedProgramStepV1{}, ProgramValidationStepAnchorV1
-		}
-		if step.Aux >= anchor.Count {
-			return ResolvedProgramStepV1{}, ProgramValidationStepDescriptorIndexV1
-		}
-		descriptor := rootDescriptorAtV1(anchor, step.Aux)
-		if descriptor.StartupSize != 0 || descriptor.StartupAlign != 1 ||
-			descriptor.ResultSize != 0 || descriptor.ResultAlign != 1 {
-			return ResolvedProgramStepV1{}, ProgramValidationStepPayloadV1
-		}
-		return ResolvedProgramStepV1{
-			Kind:       ProgramStepCoroRootV1,
-			Flags:      step.Flags,
-			Descriptor: descriptor,
-			Factory:    descriptor.Factory,
-		}, ProgramValidationOKV1
-	default:
-		return ResolvedProgramStepV1{}, ProgramValidationStepKindV1
-	}
-}
-
-func validateProgramV1(manifest *ProgramManifestV1, requireFactory bool) (ProgramViewV1, ProgramValidationCodeV1) {
-	if manifest == nil {
-		return ProgramViewV1{}, ProgramValidationNilManifestV1
-	}
-	if !checkedProgramObjectV1(unsafe.Pointer(manifest), unsafe.Sizeof(ProgramManifestV1{}), unsafe.Alignof(ProgramManifestV1{})) {
-		return ProgramViewV1{}, ProgramValidationManifestAddressV1
-	}
-	if manifest.Version != ProgramManifestVersionV1 {
-		return ProgramViewV1{}, ProgramValidationManifestVersionV1
-	}
-	if manifest.Flags != 0 {
-		return ProgramViewV1{}, ProgramValidationManifestFlagsV1
-	}
-	switch checkedProgramArrayV1(
-		manifest.Packages,
-		manifest.PackageCount,
-		unsafe.Sizeof(unsafe.Pointer(nil)),
-		unsafe.Alignof(unsafe.Pointer(nil)),
-	) {
-	case programArrayCountPointerV1:
-		return ProgramViewV1{}, ProgramValidationPackageCountPointerV1
-	case programArrayAddressV1:
-		return ProgramViewV1{}, ProgramValidationPackageTableAddressV1
-	}
-	if manifest.Bootstrap == nil {
-		return ProgramViewV1{}, ProgramValidationNilBootstrapV1
-	}
-	if !checkedProgramObjectV1(manifest.Bootstrap, unsafe.Sizeof(ProgramBootstrapV1{}), unsafe.Alignof(ProgramBootstrapV1{})) {
-		return ProgramViewV1{}, ProgramValidationBootstrapAddressV1
-	}
-	bootstrap := (*ProgramBootstrapV1)(manifest.Bootstrap)
-	if bootstrap.Version != ProgramBootstrapVersionV1 {
-		return ProgramViewV1{}, ProgramValidationBootstrapVersionV1
-	}
-	if bootstrap.Flags != 0 {
-		return ProgramViewV1{}, ProgramValidationBootstrapFlagsV1
-	}
-	if bootstrap.HashLo != manifest.HashLo || bootstrap.HashHi != manifest.HashHi {
-		return ProgramViewV1{}, ProgramValidationBootstrapHashV1
-	}
-	if bootstrap.StepCount != 2 {
-		return ProgramViewV1{}, ProgramValidationStepCountV1
-	}
-	switch checkedProgramArrayV1(
-		bootstrap.Steps,
-		bootstrap.StepCount,
-		unsafe.Sizeof(ProgramStepV1{}),
-		unsafe.Alignof(ProgramStepV1{}),
-	) {
-	case programArrayCountPointerV1:
-		return ProgramViewV1{}, ProgramValidationStepCountPointerV1
-	case programArrayAddressV1:
-		return ProgramViewV1{}, ProgramValidationStepTableAddressV1
-	}
-	if catalogError := validateProgramCatalogV1(manifest); catalogError != ProgramValidationOKV1 {
-		return ProgramViewV1{}, catalogError
-	}
-	init, initError := resolveValidatedProgramStepV1(
-		manifest,
-		programStepAtV1(bootstrap.Steps, 0),
-		ProgramStepFlagInitV1,
-	)
-	if initError != ProgramValidationOKV1 {
-		return ProgramViewV1{}, initError
-	}
-	main, mainError := resolveValidatedProgramStepV1(
-		manifest,
-		programStepAtV1(bootstrap.Steps, 1),
-		ProgramStepFlagMainV1,
-	)
-	if mainError != ProgramValidationOKV1 {
-		return ProgramViewV1{}, mainError
-	}
-	if requireFactory && bootstrap.Factory == nil {
-		return ProgramViewV1{}, ProgramValidationBootstrapFactoryV1
-	}
-	return ProgramViewV1{
-		magic:   validatedProgramMagicV1,
-		factory: bootstrap.Factory,
-		init:    init,
-		main:    main,
-	}, ProgramValidationOKV1
-}
-
-// ValidateProgramDescriptorV1 validates the complete manifest, package
-// catalog, descriptor catalog, and exact Init -> Main step program. It allows a
-// nil bootstrap factory so the compiler can publish a Phase13-A static
-// descriptor before the production entry switches to the coroutine driver.
-func ValidateProgramDescriptorV1(manifest *ProgramManifestV1) (ProgramViewV1, ProgramValidationCodeV1) {
-	return validateProgramV1(manifest, false)
-}
-
-// ValidateProgramV1 validates a runnable program and therefore also requires
-// a non-nil bootstrap coroutine factory.
-func ValidateProgramV1(manifest *ProgramManifestV1) (ProgramViewV1, ProgramValidationCodeV1) {
-	return validateProgramV1(manifest, true)
-}
-
-// ValidateRunnableProgramV1 is the explicit spelling used by runtime startup.
-func ValidateRunnableProgramV1(manifest *ProgramManifestV1) (ProgramViewV1, ProgramValidationCodeV1) {
-	return validateProgramV1(manifest, true)
-}
-
-// ValidateRunnableDirectProgramV1 validates the first production bootstrap
-// boundary. In addition to the complete manifest checks performed by
-// ValidateRunnableProgramV1, it binds the descriptor to the exact factory the
-// compiler will call directly and accepts only the fixed DirectPlain
-// Init -> Main program supported by that factory.
-//
-// This function compares factory pointers as data. It never invokes the
-// bootstrap factory or either program step.
-func ValidateRunnableDirectProgramV1(
-	manifest *ProgramManifestV1, expectedFactory unsafe.Pointer,
-) (ProgramViewV1, ProgramValidationCodeV1) {
-	program, code := validateProgramV1(manifest, true)
-	if code != ProgramValidationOKV1 {
-		return ProgramViewV1{}, code
-	}
-	if expectedFactory == nil || program.factory != expectedFactory {
-		return ProgramViewV1{}, ProgramValidationBootstrapFactoryIdentityV1
-	}
-	if program.init.Kind != ProgramStepDirectPlainV1 || program.main.Kind != ProgramStepDirectPlainV1 {
-		return ProgramViewV1{}, ProgramValidationRunnableStepKindV1
-	}
-	return program, ProgramValidationOKV1
-}
-
-// ResolveProgramStepV1 returns one action from an opaque validated view. It
-// never calls the plain target or coroutine factory.
-func ResolveProgramStepV1(program ProgramViewV1, index uintptr) (ResolvedProgramStepV1, ProgramValidationCodeV1) {
-	if program.magic != validatedProgramMagicV1 {
-		return ResolvedProgramStepV1{}, ProgramValidationInvalidViewV1
-	}
-	switch index {
-	case 0:
-		return program.init, ProgramValidationOKV1
-	case 1:
-		return program.main, ProgramValidationOKV1
-	default:
-		return ResolvedProgramStepV1{}, ProgramValidationStepIndexV1
-	}
 }
 
 // ProgramValidationCodeV2 is the allocation-free result of validating the

@@ -75,11 +75,19 @@ func (p *context) beginCoroSiteEmissionMode(instruction ssa.Instruction, placeme
 		}
 		helpers = plan.managedRuntimeHelpersAt(placement)
 	}
+	physical := coroPhysicalInstructionPlan{}
+	hasPhysical := false
+	if physicalPlan := p.coroEmissionPlan(); placement == coroRuntimeHelperAtSource && physicalPlan != nil {
+		var err error
+		physical, err = physicalPlan.instructionPlan(instruction)
+		if err != nil {
+			panic(fmt.Errorf("coroutine emission site %q: %w", instruction.String(), err))
+		}
+		hasPhysical = true
+	}
 	filtered := helpers[:0]
 	for _, helper := range helpers {
-		if coroCompilerElidesImplicitFaultRuntimeHelper(instruction, helper) ||
-			(p.coroEmissionExplicitStatus() &&
-				coroLoweredCallExplicitStatusElided(instruction, helper)) {
+		if hasPhysical && physical.elidesRuntimeHelper(helper) {
 			continue
 		}
 		filtered = append(filtered, helper)
@@ -91,11 +99,7 @@ func (p *context) beginCoroSiteEmissionMode(instruction ssa.Instruction, placeme
 		seen:              make(map[string]none, len(helpers)),
 		observeFrozenSite: p.emissionUniverse.CompleteRuntimeABI(),
 	}
-	if physicalPlan := p.coroEmissionPlan(); placement == coroRuntimeHelperAtSource && physicalPlan != nil {
-		physical, err := physicalPlan.instructionPlan(instruction)
-		if err != nil {
-			panic(fmt.Errorf("coroutine emission site %q: %w", instruction.String(), err))
-		}
+	if hasPhysical {
 		observer.expectedPhysical = physical
 		observer.hasExpectedPhysical = true
 		observer.seenPhysical = physical.recipe == coroPhysicalInstructionOrdinary
@@ -125,9 +129,17 @@ func (p *context) beginCoroSiteEmissionMode(instruction ssa.Instruction, placeme
 			panic(recovered)
 		}
 		if missing := observer.missing(); len(missing) != 0 {
+			function := "<unknown>"
+			if instruction.Parent() != nil {
+				function = instruction.Parent().String()
+			}
+			physical := "none"
+			if observer.hasExpectedPhysical {
+				physical = observer.expectedPhysical.recipe.String()
+			}
 			panic(fmt.Errorf(
-				"coroutine emission site %q omitted frozen runtime helper(s) %s",
-				instruction.String(), strings.Join(missing, ", "),
+				"coroutine emission site %q in %q with physical recipe %s omitted frozen runtime helper(s) %s",
+				instruction.String(), function, physical, strings.Join(missing, ", "),
 			))
 		}
 		if observer.expectedIntrinsic && !observer.seenIntrinsic {

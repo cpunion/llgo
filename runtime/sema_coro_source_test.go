@@ -37,16 +37,15 @@ const (
 func TestRuntimeSemaphoreSelectsEventDrivenCoroImplementation(t *testing.T) {
 	coroSource := readRuntimePollFile(t, runtimeSemaphoreCoroSource)
 	for _, marker := range []string{
-		"C.__llgo_coro_sema_prepare_or_abort_v1",
-		"C.__llgo_coro_sema_retire_completed_or_abort_v1",
-		"C.__llgo_coro_sema_release_or_abort_v1",
-		"//go:linkname llgoCoroSemaphoreParkV1 llgo.coroPark",
-		"llgoCoroSemaphorePrepareOrAbortV1(",
+		"C.__llgo_coro_sema_prepare_or_abort_v2",
+		"C.__llgo_coro_sema_release_or_abort_v2",
+		"progress=executor-safe affinity=caller-thread reentry=none memory=borrow-until-return",
+		"//go:linkname llgoCoroSemaphoreSuspendV2 llgo.coroPark",
+		"llgoCoroSemaphorePrepareOrAbortV2(",
 		"unsafe.Pointer(addr)",
-		"llgoCoroSemaphoreParkV1(&token, ticket)",
-		"llgoCoroSemaphoreRetireCompletedOrAbortV1(",
+		"llgoCoroSemaphoreSuspendV2(&state, 0)",
 		"latomic.CompareAndSwapUint32(addr, value, value-1)",
-		"llgoCoroSemaphoreReleaseOrAbortV1(unsafe.Pointer(addr))",
+		"llgoCoroSemaphoreReleaseOrAbortV2(unsafe.Pointer(addr))",
 	} {
 		if !strings.Contains(coroSource, marker) {
 			t.Errorf("%s lacks event-driven semaphore marker %q", runtimeSemaphoreCoroSource, marker)
@@ -125,7 +124,7 @@ func assertRuntimeSemaphoreExactRetentionSpan(t *testing.T, path, source string)
 	if !ok || loop.Body == nil {
 		t.Fatalf("%s semaAcquire does not retry token CAS after wake", path)
 	}
-	prepare, park, retire := -1, -1, -1
+	prepare, park := -1, -1
 	for index, statement := range loop.Body.List {
 		ast.Inspect(statement, func(node ast.Node) bool {
 			call, ok := node.(*ast.CallExpr)
@@ -137,22 +136,20 @@ func assertRuntimeSemaphoreExactRetentionSpan(t *testing.T, path, source string)
 				return true
 			}
 			switch identifier.Name {
-			case "llgoCoroSemaphorePrepareOrAbortV1":
+			case "llgoCoroSemaphorePrepareOrAbortV2":
 				prepare = index
-			case "llgoCoroSemaphoreParkV1":
+			case "llgoCoroSemaphoreSuspendV2":
 				park = index
-			case "llgoCoroSemaphoreRetireCompletedOrAbortV1":
-				retire = index
 			}
 			return true
 		})
 	}
-	if prepare < 0 || park != prepare+1 || retire != park+1 {
-		t.Fatalf("semaphore prepare/park/retire are not an exact adjacent span: %d/%d/%d", prepare, park, retire)
+	if prepare < 0 || park != prepare+1 {
+		t.Fatalf("semaphore prepare/park are not an exact adjacent span: %d/%d", prepare, park)
 	}
 }
 
-func TestCoroSemaphoreOwnerFailStopABIAndCommonWaitSource(t *testing.T) {
+func TestCoroSemaphoreOwnerV2FailStopABIAndKeyedSource(t *testing.T) {
 	const ownerPath = "internal/runtime/coro_sema_owner_llgo.go"
 	source := readRuntimePollFile(t, ownerPath)
 	file, err := parser.ParseFile(token.NewFileSet(), ownerPath, source, parser.ParseComments)
@@ -172,16 +169,16 @@ func TestCoroSemaphoreOwnerFailStopABIAndCommonWaitSource(t *testing.T) {
 		exportLine string
 	}{
 		{
-			name:       "__llgo_coro_sema_prepare_or_abort_v1",
-			params:     []string{"unsafe.Pointer", "unsafe.Pointer", "*uint32", "*uint32", "*uint32"},
-			delegates:  "__llgo_coro_sema_prepare_v1",
-			exportLine: "//export __llgo_coro_sema_prepare_or_abort_v1",
+			name:       "__llgo_coro_sema_prepare_or_abort_v2",
+			params:     []string{"unsafe.Pointer", "unsafe.Pointer"},
+			delegates:  "coroPrepareKeyedStateV2",
+			exportLine: "//export __llgo_coro_sema_prepare_or_abort_v2",
 		},
 		{
-			name:       "__llgo_coro_sema_retire_completed_or_abort_v1",
-			params:     []string{"unsafe.Pointer", "uint32", "uint32", "uint32"},
-			delegates:  "__llgo_coro_sema_retire_completed_v1",
-			exportLine: "//export __llgo_coro_sema_retire_completed_or_abort_v1",
+			name:       "__llgo_coro_sema_release_or_abort_v2",
+			params:     []string{"unsafe.Pointer"},
+			delegates:  "coroKeyedPostOneV2",
+			exportLine: "//export __llgo_coro_sema_release_or_abort_v2",
 		},
 	}
 	for _, test := range tests {
@@ -204,47 +201,32 @@ func TestCoroSemaphoreOwnerFailStopABIAndCommonWaitSource(t *testing.T) {
 			}
 			body := coroTimerOwnerNodeText(t, function.Body)
 			if !strings.Contains(doc, test.exportLine) || !strings.Contains(body, test.delegates+"(") ||
-				!strings.Contains(body, "coroRuntimeAbort(") || !pollOwnerContainsTerminalLoop(function.Body) {
+				!strings.Contains(body, "coroKeyedAbortV2(") {
 				t.Fatalf("%s is not an exact fail-stop owner adapter:\n%s", test.name, body)
 			}
 		})
 	}
 	for _, marker := range []string{
-		"coro.PrepareExecutorSemaphoreWait(",
-		"catomic.Load((*uint32)(addr)) != 0",
-		"coro.PostPreparedExecutorSemaphoreWait(",
-		"coro.RetireCompletedExecutorSemaphoreWait(",
-		"coro.PostExecutorSemaphoreWait(",
-		"key := uintptr(addr)",
-		"coroTargetRequestExecutorV1(",
-		"//export __llgo_coro_sema_release_or_abort_v1",
+		"coroPrepareKeyedStateV2(",
+		"coroKeyedParkSemaphoreV2",
+		"coroKeyedPostOneV2(",
+		"NoWaiter is ordinary",
+		"//export __llgo_coro_sema_release_or_abort_v2",
 	} {
 		if !strings.Contains(source, marker) {
 			t.Errorf("%s lacks owner/common-source marker %q", ownerPath, marker)
 		}
 	}
-	for _, internal := range []string{
-		"//export __llgo_coro_sema_prepare_v1",
-		"//export __llgo_coro_sema_retire_completed_v1",
+	for _, obsolete := range []string{
+		"__llgo_coro_sema_prepare_or_abort_v1",
+		"__llgo_coro_sema_retire_completed_or_abort_v1",
+		"__llgo_coro_sema_release_or_abort_v1",
+		"PrepareExecutorSemaphoreWait",
+		"RetireCompletedExecutorSemaphoreWait",
 	} {
-		if strings.Contains(source, internal) {
-			t.Errorf("%s exports internal semaphore implementation %q; only fail-stop ABI adapters may cross the raw boundary", ownerPath, internal)
+		if strings.Contains(source, obsolete) {
+			t.Errorf("%s retains obsolete semaphore path %q", ownerPath, obsolete)
 		}
-	}
-	prepareStart := strings.Index(source, "func __llgo_coro_sema_prepare_v1(")
-	if prepareStart < 0 {
-		t.Fatal("semaphore owner lacks prepare body")
-	}
-	prepareEnd := strings.Index(source[prepareStart:], "\n}\n")
-	if prepareEnd < 0 {
-		t.Fatal("semaphore owner lacks bounded prepare body")
-	}
-	prepareBody := source[prepareStart : prepareStart+prepareEnd]
-	publication := strings.Index(prepareBody, "*generation = handle.Generation")
-	recheck := strings.Index(prepareBody, "catomic.Load((*uint32)(addr)) != 0")
-	repair := strings.Index(prepareBody, "coro.PostPreparedExecutorSemaphoreWait(")
-	if publication < 0 || recheck <= publication || repair <= recheck {
-		t.Fatalf("semaphore release-before-prepare repair is not publication -> counter recheck -> exact post:\n%s", prepareBody)
 	}
 	for _, forbidden := range []string{"pthread", "psync.", ".Cond", "runtime.Gosched"} {
 		if strings.Contains(source, forbidden) {

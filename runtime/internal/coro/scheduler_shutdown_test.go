@@ -535,46 +535,6 @@ func TestCommandShutdownCancelsMultipleChildrenFIFO(t *testing.T) {
 	keepCommandShutdownFixtureAlive(fixture)
 }
 
-func TestCommandShutdownRejectsWaitWithoutPartialMutation(t *testing.T) {
-	fixture := newCommandShutdownFixture(t)
-	child := fixture.spawn(t)
-	yieldSpawnTestG(t, fixture.p, fixture.main.g, fixture.main.frame, fixture.mainAction)
-	if got, ok := NextRunnable(fixture.p); !ok || got != child.g {
-		t.Fatal("dequeue child before park")
-	}
-	action := beginSpawnTestChildResume(t, fixture.p, child.g, child.frame)
-	token := new(WaitToken)
-	ticket, ok := ArmWait(token)
-	if !ok {
-		t.Fatal("arm shutdown-rejection wait")
-	}
-	child.frame.header.SuspendReason = uint16(SuspendPark)
-	child.frame.header.Lifecycle = uint16(FrameSuspended)
-	if !PreparePark(child.g, child.handle, child.frame.header, token, ticket) {
-		t.Fatal("prepare shutdown-rejection park")
-	}
-	if action, ok = Resumed(fixture.p, child.g, action); !ok || action.Kind != ActionPark {
-		t.Fatal("commit shutdown-rejection park")
-	}
-	if got, ok := NextRunnable(fixture.p); !ok || got != fixture.main.g {
-		t.Fatal("dequeue main beside parked child")
-	}
-	fixture.mainAction = beginSpawnTestResume(t, fixture.p, fixture.main)
-	fixture.completeMain(t)
-	beforeSchedule := preemptLoad(&fixture.p.schedule)
-	beforeWord := preemptLoad(&token.word)
-	beforeHead := fixture.p.waitHead
-	if BeginCommandShutdown(fixture.p, fixture.main.g) {
-		t.Fatal("shutdown accepted parked child")
-	}
-	if preemptLoad(&fixture.p.schedule) != beforeSchedule || preemptLoad(&token.word) != beforeWord ||
-		fixture.p.waitHead != beforeHead || fixture.p.waitTail != child.g || child.g.state != GWaiting ||
-		child.g.destroyTarget != nil || child.g.frames == nil {
-		t.Fatal("rejected wait shutdown partially mutated scheduler state")
-	}
-	keepCommandShutdownFixtureAlive(fixture)
-}
-
 func TestCommandShutdownAcceptsIdleOrRequestedGateAndRejectsBusyP(t *testing.T) {
 	for _, requested := range []bool{false, true} {
 		t.Run(map[bool]string{false: "idle", true: "requested"}[requested], func(t *testing.T) {

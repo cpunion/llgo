@@ -159,24 +159,7 @@ func testProductionNativeWorkerCompletionPlan(t *testing.T) {
 }
 
 func TestNativeWorkerCompletionRootRequiresNativeWorkerCapability(t *testing.T) {
-	t.Run("native worker disabled", func(t *testing.T) {
-		fixture := buildRequiredCoroRuntimeFixture(t, `
-type coroProgramRunResultV2 struct { Flags, Used, ExecutorSlot, ExecutorGeneration, Epoch, DeadlineLo, DeadlineHi, Reserved uint32 }
-func __llgo_coro_program_run_slice_v2(unsafe.Pointer, unsafe.Pointer, uint32, *coroProgramRunResultV2) uint32 { return 0 }
-func __llgo_coro_program_continue_slice_v2(uint32, uint32, uint32, uint32, *coroProgramRunResultV2) uint32 { return 0 }
-func __llgo_coro_native_post_wait_v1(uint32, uint32, uint32, uint32) uint32 { return 0 }
-func __llgo_coro_native_worker_complete_v1(uint32, uint32, uintptr, uintptr, uintptr) uint32 { return 1 }
-func install() {}
-`)
-		fixture.ctx.buildConf = &Config{
-			BuildMode: BuildModeExe,
-			Goos:      "linux",
-			Goarch:    "386", CoroProfile: CoroProfileStackless,
-		}
-		assertCoroWorkerCompletionExcluded(t, fixture, false)
-	})
-
-	t.Run("host pull with worker enabled", func(t *testing.T) {
+	t.Run("host pull without a worker adapter", func(t *testing.T) {
 		fixture := buildRequiredCoroRuntimeFixture(t, `
 type coroProgramRunResultV2 struct { Flags, Used, ExecutorSlot, ExecutorGeneration, Epoch, DeadlineLo, DeadlineHi, Reserved uint32 }
 type hostActionV1 struct { Kind, ExecutorSlot, ExecutorGeneration, Epoch, DeadlineLo, DeadlineHi, Reserved0, Reserved1 uint32 }
@@ -188,9 +171,6 @@ func __llgo_coro_host_next_deadline_v1(*hostActionV1) bool { return false }
 func __llgo_coro_host_publish_time_v1(uint32, uint32) bool { return false }
 func __llgo_coro_host_ack_cancel_v1(uint32, uint32, uint32, uint32) bool { return false }
 func __llgo_coro_host_continue_slice_v1(uint32, uint32, uint32, uint32, uint32, uint32, uint32, *coroProgramRunResultV2) uint32 { return 0 }
-func __llgo_coro_host_post_wait_v1(uint32, uint32, uint32, uint32) uint32 { return 0 }
-func __llgo_coro_worker_park_v1() {}
-func __llgo_coro_worker_resume_v1() {}
 func __llgo_coro_native_worker_complete_v1(uint32, uint32, uintptr, uintptr, uintptr) uint32 { return 1 }
 func install() {}
 `)
@@ -199,11 +179,11 @@ func install() {}
 			Goos:      "wasip1",
 			Goarch:    "wasm", CoroProfile: CoroProfileStackless,
 		}
-		assertCoroWorkerCompletionExcluded(t, fixture, true)
+		assertCoroWorkerCompletionExcluded(t, fixture)
 	})
 }
 
-func assertCoroWorkerCompletionExcluded(t *testing.T, fixture requiredCoroRuntimeFixture, wantWorkerHooks bool) {
+func assertCoroWorkerCompletionExcluded(t *testing.T, fixture requiredCoroRuntimeFixture) {
 	t.Helper()
 	roots, requiredPlain, directPlain, closedDynamic, err := requiredCoroProgramRuntimePlan(fixture.ctx)
 	if err != nil {
@@ -225,10 +205,7 @@ func assertCoroWorkerCompletionExcluded(t *testing.T, fixture requiredCoroRuntim
 			workerHooks++
 		}
 	}
-	if wantWorkerHooks && workerHooks != 2 {
-		t.Fatalf("host worker hook roots = %d, want 2", workerHooks)
-	}
-	if !wantWorkerHooks && workerHooks != 0 {
+	if workerHooks != 0 {
 		t.Fatalf("worker-disabled hook roots = %d, want 0", workerHooks)
 	}
 

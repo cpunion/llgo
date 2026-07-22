@@ -25,7 +25,6 @@ import (
 type executorFleetManualFixture struct {
 	p      *P
 	driver *ExecutorDriver
-	waits  *WaitRegistrationTable
 	manual *ManualOperationSource
 	handle ExecutorFleetHandle
 }
@@ -35,12 +34,11 @@ func bindExecutorFleetManualFixture(t *testing.T, fleet *ExecutorFleet) *executo
 	fixture := &executorFleetManualFixture{
 		p:      new(P),
 		driver: new(ExecutorDriver),
-		waits:  new(WaitRegistrationTable),
 		manual: new(ManualOperationSource),
 	}
 	var ok bool
 	fixture.handle, ok = BindExecutorFleet(fleet, fixture.driver, fixture.p, ExecutorSourceCatalog{
-		Waits: fixture.waits, Manual: fixture.manual,
+		Manual: fixture.manual,
 	})
 	if !ok {
 		t.Fatal("bind executor fleet manual fixture")
@@ -56,7 +54,7 @@ func closeExecutorFleetFixture(t *testing.T, fleet *ExecutorFleet, fixture *exec
 		!ConfirmExecutorFleetClose(fleet, fixture.handle) {
 		t.Fatalf("close executor fleet route %d", fixture.handle.Route)
 	}
-	if *fixture.driver != (ExecutorDriver{}) || !fixture.waits.CanRelease() || !fixture.manual.CanRelease() ||
+	if *fixture.driver != (ExecutorDriver{}) || !fixture.manual.CanRelease() ||
 		fixture.p.executor != nil || preemptLoad(&fixture.p.executorMode) != executorModeUnbound {
 		t.Fatalf("fleet close retained route %d resources", fixture.handle.Route)
 	}
@@ -167,18 +165,17 @@ func TestExecutorFleetRequestsCommittedChannelEndpointByExactRoute(t *testing.T)
 	type fixture struct {
 		p       *P
 		driver  *ExecutorDriver
-		waits   *WaitRegistrationTable
 		channel *ChannelOperationSource
 		handle  ExecutorFleetHandle
 	}
 	bind := func() *fixture {
 		current := &fixture{
-			p: new(P), driver: new(ExecutorDriver), waits: new(WaitRegistrationTable),
+			p: new(P), driver: new(ExecutorDriver),
 			channel: new(ChannelOperationSource),
 		}
 		var ok bool
 		current.handle, ok = BindExecutorFleet(fleet, current.driver, current.p, ExecutorSourceCatalog{
-			Waits: current.waits, Channel: current.channel,
+			Channel: current.channel,
 		})
 		if !ok {
 			t.Fatal("bind fleet channel route")
@@ -217,7 +214,7 @@ func TestExecutorFleetRequestsCommittedChannelEndpointByExactRoute(t *testing.T)
 			!ConfirmExecutorFleetClose(fleet, current.handle) {
 			t.Fatalf("close fleet channel route %d", current.handle.Route)
 		}
-		if !current.channel.CanRelease() || !current.waits.CanRelease() {
+		if !current.channel.CanRelease() {
 			t.Fatalf("fleet channel route %d retained source storage", current.handle.Route)
 		}
 	}
@@ -231,7 +228,6 @@ func TestExecutorFleetAdoptsExistingProgramDomainBeforeOwnedPeer(t *testing.T) {
 	programP := new(P)
 	programDriver := new(ExecutorDriver)
 	programRegistry := new(ExecutorRegistry)
-	programWaits := new(WaitRegistrationTable)
 	programManual := new(ManualOperationSource)
 	programExecutor := registerTestExecutor(t, programRegistry)
 	if !BindExecutorSourceCatalogAtRoute(
@@ -240,7 +236,7 @@ func TestExecutorFleetAdoptsExistingProgramDomainBeforeOwnedPeer(t *testing.T) {
 		programRegistry,
 		programExecutor,
 		1,
-		ExecutorSourceCatalog{Waits: programWaits, Manual: programManual},
+		ExecutorSourceCatalog{Manual: programManual},
 	) {
 		t.Fatal("bind existing program executor")
 	}
@@ -266,7 +262,7 @@ func TestExecutorFleetAdoptsExistingProgramDomainBeforeOwnedPeer(t *testing.T) {
 		t.Fatalf("adopted program route post = %+v", posted)
 	}
 	programFixture := &executorFleetManualFixture{
-		p: programP, driver: programDriver, waits: programWaits, manual: programManual, handle: programHandle,
+		p: programP, driver: programDriver, manual: programManual, handle: programHandle,
 	}
 	settleExecutorFleetManual(t, programFixture, state, ticket, ids)
 	sink := new(P)
@@ -299,7 +295,7 @@ func TestExecutorFleetAdoptsExistingProgramDomainBeforeOwnedPeer(t *testing.T) {
 func TestExecutorFleetAdoptedProgramCanFinishAuthoritativeExternalClose(t *testing.T) {
 	fleet := new(ExecutorFleet)
 	p := new(P)
-	driver, registry, waits, manual, executor := bindTestExecutorDriverWithManual(t, p)
+	driver, registry, manual, executor := bindTestExecutorDriverWithManual(t, p)
 	handle, adopted := AdoptExecutorFleet(fleet, driver, p)
 	if !adopted || handle.Executor != executor || handle.Route != 1 {
 		t.Fatalf("adopt external-close program = (%+v,%t)", handle, adopted)
@@ -320,7 +316,7 @@ func TestExecutorFleetAdoptedProgramCanFinishAuthoritativeExternalClose(t *testi
 		t.Fatal("fleet confirmed adopted close before authoritative driver")
 	}
 	if !ConfirmExecutorClose(driver) || !ConfirmExecutorFleetExternalClose(fleet, handle) ||
-		!fleet.AllRetired() || !registry.CanRelease() || !waits.CanRelease() || !manual.CanRelease() {
+		!fleet.AllRetired() || !registry.CanRelease() || !manual.CanRelease() {
 		t.Fatal("finish adopted authoritative external close")
 	}
 }
@@ -329,9 +325,9 @@ func TestExecutorFleetBindsTimerAndRoutesPollSources(t *testing.T) {
 	t.Run("timer-owner-source", func(t *testing.T) {
 		fleet := new(ExecutorFleet)
 		p, driver := new(P), new(ExecutorDriver)
-		waits, timers := new(WaitRegistrationTable), new(TimerRegistrationTable)
+		timers := new(TimerRegistrationTable)
 		handle, ok := BindExecutorFleet(fleet, driver, p, ExecutorSourceCatalog{
-			Waits: waits, Timers: timers,
+			Timers: timers,
 		})
 		if !ok || handle.Route != 1 {
 			t.Fatalf("bind timer fleet route = (%+v, %t)", handle, ok)
@@ -341,7 +337,7 @@ func TestExecutorFleetBindsTimerAndRoutesPollSources(t *testing.T) {
 		}
 		if !BeginExecutorFleetClose(fleet, handle) || !ConfirmExecutorFleetRouteClose(fleet, handle) ||
 			!BeginExecutorFleetDriverClose(fleet, handle) || !ConfirmExecutorFleetClose(fleet, handle) ||
-			!fleet.AllRetired() || !waits.CanRelease() || !timers.CanRelease() {
+			!fleet.AllRetired() || !timers.CanRelease() {
 			t.Fatal("timer fleet route retained source or executor state")
 		}
 	})
@@ -349,9 +345,9 @@ func TestExecutorFleetBindsTimerAndRoutesPollSources(t *testing.T) {
 	t.Run("poll-producer-route", func(t *testing.T) {
 		fleet := new(ExecutorFleet)
 		p, driver := new(P), new(ExecutorDriver)
-		waits, poll := new(WaitRegistrationTable), new(PollOperationSource)
+		poll := new(PollOperationSource)
 		handle, ok := BindExecutorFleet(fleet, driver, p, ExecutorSourceCatalog{
-			Waits: waits, Poll: poll,
+			Poll: poll,
 		})
 		if !ok || handle.Route != 1 {
 			t.Fatalf("bind poll fleet route = (%+v, %t)", handle, ok)
@@ -398,8 +394,8 @@ func TestExecutorFleetBindsTimerAndRoutesPollSources(t *testing.T) {
 		if late := fleet.PostPollAndRequest(id, PollOperationReady); late.Route != OperationRoutePostClosed {
 			t.Fatalf("closed poll route accepted late result: %+v", late)
 		}
-		if waitsDone, timersDone, promoted, pollOK := PollExecutorAt(driver, 0); !pollOK || waitsDone != 0 || timersDone != 0 || promoted != 1 {
-			t.Fatalf("service routed poll = (%d, %d, %d, %t)", waitsDone, timersDone, promoted, pollOK)
+		if timersDone, promoted, pollOK := PollExecutorAt(driver, 0); !pollOK || timersDone != 0 || promoted != 1 {
+			t.Fatalf("service routed poll = (%d, %d, %t)", timersDone, promoted, pollOK)
 		}
 		if runnable, nextOK := NextRunnableAt(p, 0); !nextOK || runnable != peer.g || !Enqueue(p, peer.g) {
 			t.Fatalf("rotate routed poll peer = (%p, %t)", runnable, nextOK)
@@ -428,7 +424,7 @@ func TestExecutorFleetBindsTimerAndRoutesPollSources(t *testing.T) {
 			t.Fatalf("drain routed poll peer cleanup = (%d, %t, %t)", moved, more, drainOK)
 		}
 		if !BeginExecutorFleetDriverClose(fleet, handle) || !ConfirmExecutorFleetClose(fleet, handle) ||
-			!fleet.AllRetired() || !waits.CanRelease() || !poll.CanRelease() {
+			!fleet.AllRetired() || !poll.CanRelease() {
 			t.Fatal("poll fleet route retained source or executor state")
 		}
 		if runnable, nextOK := NextRunnable(&sink); !nextOK || runnable != peer.g {
@@ -616,7 +612,7 @@ func TestExecutorFleetBindPreflightAndLifetimeCapacity(t *testing.T) {
 	first := bindExecutorFleetManualFixture(t, fleet)
 	nextBefore := fleet.routes.next
 	if handle, ok := BindExecutorFleet(fleet, first.driver, first.p, ExecutorSourceCatalog{
-		Waits: first.waits, Manual: first.manual,
+		Manual: first.manual,
 	}); ok || handle != (ExecutorFleetHandle{}) || fleet.routes.next != nextBefore {
 		t.Fatalf("duplicate fleet bind mutated route allocation = (%+v, %t), next=%d", handle, ok, fleet.routes.next)
 	}
@@ -624,15 +620,14 @@ func TestExecutorFleetBindPreflightAndLifetimeCapacity(t *testing.T) {
 	foreignRegistry := new(ExecutorRegistry)
 	foreignP := new(P)
 	foreignDriver := new(ExecutorDriver)
-	foreignWaits := new(WaitRegistrationTable)
 	foreignManual := new(ManualOperationSource)
 	foreignExecutor := registerTestExecutor(t, foreignRegistry)
 	if !BindExecutorSourceCatalogAtRoute(foreignDriver, foreignP, foreignRegistry, foreignExecutor, 1,
-		ExecutorSourceCatalog{Waits: foreignWaits, Manual: foreignManual}) {
+		ExecutorSourceCatalog{Manual: foreignManual}) {
 		t.Fatal("bind foreign-registry driver")
 	}
 	if handle, ok := BindExecutorFleet(fleet, foreignDriver, foreignP, ExecutorSourceCatalog{
-		Waits: foreignWaits, Manual: foreignManual,
+		Manual: foreignManual,
 	}); ok || handle != (ExecutorFleetHandle{}) || fleet.routes.next != nextBefore {
 		t.Fatal("fleet adopted a driver from a foreign executor registry")
 	}
@@ -645,13 +640,11 @@ func TestExecutorFleetBindPreflightAndLifetimeCapacity(t *testing.T) {
 		t.Fatal("establish wrong-route source identity")
 	}
 	if handle, ok := BindExecutorFleet(fleet, new(ExecutorDriver), new(P), ExecutorSourceCatalog{
-		Waits: new(WaitRegistrationTable), Manual: wrongRouteSource,
+		Manual: wrongRouteSource,
 	}); ok || handle != (ExecutorFleetHandle{}) || fleet.routes.next != nextBefore || !wrongRouteSource.CanRelease() {
 		t.Fatal("wrong-route catalog entered fleet bind transaction")
 	}
-	if handle, ok := BindExecutorFleet(fleet, new(ExecutorDriver), new(P), ExecutorSourceCatalog{
-		Waits: new(WaitRegistrationTable),
-	}); ok || handle != (ExecutorFleetHandle{}) || fleet.routes.next != nextBefore {
+	if handle, ok := BindExecutorFleet(fleet, new(ExecutorDriver), new(P), ExecutorSourceCatalog{}); ok || handle != (ExecutorFleetHandle{}) || fleet.routes.next != nextBefore {
 		t.Fatal("wait-only catalog consumed a fleet route")
 	}
 
@@ -672,7 +665,7 @@ func TestExecutorFleetBindPreflightAndLifetimeCapacity(t *testing.T) {
 		closeExecutorFleetFixture(t, fleet, fixture)
 	}
 	if handle, ok := BindExecutorFleet(fleet, new(ExecutorDriver), new(P), ExecutorSourceCatalog{
-		Waits: new(WaitRegistrationTable), Manual: new(ManualOperationSource),
+		Manual: new(ManualOperationSource),
 	}); ok || handle != (ExecutorFleetHandle{}) || fleet.routes.next != ExecutorFleetCapacity {
 		t.Fatalf("fleet lifetime capacity exhaustion = (%+v, %t), next=%d", handle, ok, fleet.routes.next)
 	}

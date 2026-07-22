@@ -21,7 +21,6 @@ package build
 
 import (
 	"go/ast"
-	"go/importer"
 	"go/parser"
 	"go/token"
 	"go/types"
@@ -34,148 +33,7 @@ import (
 	"github.com/goplus/llgo/internal/packages"
 	llssa "github.com/goplus/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
-	"golang.org/x/tools/go/ssa/ssautil"
 )
-
-type coroBootstrapTestPlan struct {
-	rootDemand map[string]coro.Demand
-	policy     map[string]coro.SSAFunctionPolicy
-}
-
-func TestSelectCoroProgramBootstrapV1ExactInitMain(t *testing.T) {
-	ctx, pkg := newCoroBootstrapTestContext(t, nil, coroBootstrapTestPlan{
-		rootDemand: map[string]coro.Demand{"init": coro.AsyncDemand, "main": coro.AsyncDemand},
-	})
-	bootstrap := ctx.coroProgramBootstraps[pkg.ID]
-	if bootstrap == nil || len(bootstrap.Steps) != 2 {
-		t.Fatalf("bootstrap = %+v, want two steps", bootstrap)
-	}
-	for i, want := range []struct {
-		role   uint32
-		target string
-	}{
-		{coroProgramStepRoleInitV1, "example.com/bootstrap.init"},
-		{coroProgramStepRoleMainV1, "example.com/bootstrap.main"},
-	} {
-		got := bootstrap.Steps[i]
-		if got.Kind != coroProgramStepDirectPlainV1 || got.Role != want.role || got.Target != want.target || got.FunctionID == "" || got.Aux != 0 {
-			t.Fatalf("step %d = %+v, want kind=%d role=%d target=%q nonempty ID aux=0", i, got, coroProgramStepDirectPlainV1, want.role, want.target)
-		}
-	}
-
-	// The package-pointer cache is preferred, but the exact ID fallback is part
-	// of linkMainPkg's package-instance compatibility contract.
-	aPkg := ctx.pkgs[pkg]
-	delete(ctx.pkgs, pkg)
-	ctx.pkgByID[pkg.ID] = aPkg
-	again, err := selectCoroProgramBootstrapV1(ctx, pkg)
-	if err != nil {
-		t.Fatalf("pkgByID fallback: %v", err)
-	}
-	if again.StepHash != bootstrap.StepHash || len(again.Steps) != len(bootstrap.Steps) {
-		t.Fatalf("pkgByID fallback changed bootstrap: %+v != %+v", again, bootstrap)
-	}
-}
-
-func TestSelectCoroProgramBootstrapV1RejectsUnsafeEntries(t *testing.T) {
-	tests := []struct {
-		name string
-		plan coroBootstrapTestPlan
-		want string
-	}{
-		{
-			name: "missing explicit main root",
-			plan: coroBootstrapTestPlan{rootDemand: map[string]coro.Demand{"init": coro.AsyncDemand}},
-			want: "main: target is not an explicit plan root",
-		},
-		{
-			name: "sync main root",
-			plan: coroBootstrapTestPlan{rootDemand: map[string]coro.Demand{"init": coro.AsyncDemand, "main": coro.SyncDemand}},
-			want: "main: explicit root demand is sync, want async capability",
-		},
-		{
-			name: "suspending main root",
-			plan: coroBootstrapTestPlan{
-				rootDemand: map[string]coro.Demand{"init": coro.AsyncDemand, "main": coro.AsyncDemand},
-				policy:     map[string]coro.SSAFunctionPolicy{"main": {Effect: coro.MayPark}},
-			},
-			want: "main: target",
-		},
-		{
-			name: "preemptible main root",
-			plan: coroBootstrapTestPlan{
-				rootDemand: map[string]coro.Demand{"init": coro.AsyncDemand, "main": coro.AsyncDemand},
-				policy:     map[string]coro.SSAFunctionPolicy{"main": {Exec: coro.NeedsPreempt}},
-			},
-			want: "main: target",
-		},
-		{
-			name: "dynamic main representation",
-			plan: coroBootstrapTestPlan{
-				rootDemand: map[string]coro.Demand{"init": coro.AsyncDemand, "main": coro.AsyncDemand},
-				policy:     map[string]coro.SSAFunctionPolicy{"main": {NeedsDispatch: true}},
-			},
-			want: "main: target",
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			_, _, err := buildCoroBootstrapTestContext(t, nil, test.plan)
-			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("pre-codegen preparation error = %v, want %q", err, test.want)
-			}
-		})
-	}
-}
-
-func TestSelectCoroProgramBootstrapV1AcceptsBothDemandPlainBody(t *testing.T) {
-	ctx, pkg := newCoroBootstrapTestContext(t, nil, coroBootstrapTestPlan{
-		rootDemand: map[string]coro.Demand{"init": coro.BothDemand, "main": coro.BothDemand},
-	})
-	if bootstrap := ctx.coroProgramBootstraps[pkg.ID]; bootstrap == nil || len(bootstrap.Steps) != 2 {
-		t.Fatalf("both-demand plain bootstrap = %+v, want two steps", bootstrap)
-	}
-}
-
-func TestSelectCoroProgramBootstrapRuntimeAcceptsLocalUnwindAndRejectsThreadAffinity(t *testing.T) {
-	ctx, pkg := newCoroBootstrapTestContext(t, nil, coroBootstrapTestPlan{
-		rootDemand: map[string]coro.Demand{"init": coro.AsyncDemand, "main": coro.AsyncDemand},
-	})
-	ctx.buildConf.CoroProfile = CoroProfileStackless
-	if _, err := selectCoroProgramBootstrapV1(ctx, pkg); err != nil {
-		t.Fatalf("production bootstrap rejected conservative local MayUnwind: %v", err)
-	}
-	// Rebuild through the real analyzer with an unsupported trusted bit.
-	ctx, pkg = newCoroBootstrapTestContext(t, nil, coroBootstrapTestPlan{
-		rootDemand: map[string]coro.Demand{"init": coro.AsyncDemand, "main": coro.AsyncDemand},
-		policy:     map[string]coro.SSAFunctionPolicy{"main": {Exec: coro.ThreadAffine}},
-	})
-	ctx.buildConf.CoroProfile = CoroProfileStackless
-	if _, err := selectCoroProgramBootstrapV1(ctx, pkg); err == nil || !strings.Contains(err.Error(), "unsupported execution constraints") {
-		t.Fatalf("production bootstrap error = %v, want thread-affinity rejection", err)
-	}
-}
-
-func TestSelectCoroProgramBootstrapV1RejectsMissingExactPackage(t *testing.T) {
-	ctx, pkg := newCoroBootstrapTestContext(t, nil, coroBootstrapTestPlan{
-		rootDemand: map[string]coro.Demand{"init": coro.AsyncDemand, "main": coro.AsyncDemand},
-	})
-	delete(ctx.pkgs, pkg)
-	delete(ctx.pkgByID, pkg.ID)
-	if _, err := selectCoroProgramBootstrapV1(ctx, pkg); err == nil || !strings.Contains(err.Error(), "has no exact SSA package") {
-		t.Fatalf("select error = %v, want exact-package rejection", err)
-	}
-}
-
-func TestSelectCoroProgramBootstrapV1RejectsPatchedInitSymbol(t *testing.T) {
-	ctx, pkg := newCoroBootstrapTestContext(t, nil, coroBootstrapTestPlan{
-		rootDemand: map[string]coro.Demand{"init": coro.AsyncDemand, "main": coro.AsyncDemand},
-	})
-	ctx.patches[pkg.PkgPath] = cl.Patch{}
-	if _, err := selectCoroProgramBootstrapV1(ctx, pkg); err == nil || !strings.Contains(err.Error(), "does not use the strict legacy init symbol") {
-		t.Fatalf("select error = %v, want patched-init physical-symbol rejection", err)
-	}
-}
 
 func TestSelectCoroProgramBootstrapV2ExactMixedFiveStageProgram(t *testing.T) {
 	fixture := newCoroBootstrapV2TestContext(t)
@@ -194,6 +52,7 @@ func TestSelectCoroProgramBootstrapV2ExactMixedFiveStageProgram(t *testing.T) {
 	runtimeIndex := expectedCoroBootstrapV2DescriptorIndex(t, fixture.ctx.coroPlan, fixture.runtimeInit)
 	publicRuntimeIndex := expectedCoroBootstrapV2DescriptorIndex(t, fixture.ctx.coroPlan, fixture.publicRuntimeInit)
 	mainInitIndex := expectedCoroBootstrapV2DescriptorIndex(t, fixture.ctx.coroPlan, fixture.mainInit)
+	mainIndex := expectedCoroBootstrapV2DescriptorIndex(t, fixture.ctx.coroPlan, fixture.mainMain)
 	wants := []struct {
 		kind   uint32
 		role   uint32
@@ -218,8 +77,8 @@ func TestSelectCoroProgramBootstrapV2ExactMixedFiveStageProgram(t *testing.T) {
 			target: fixture.mainPackage.PkgPath + ".init$coro", owner: fixture.mainPackage.PkgPath, aux: mainInitIndex,
 		},
 		{
-			kind: coroProgramStepDirectPlainV1, role: coroProgramStepRoleMainV2,
-			target: fixture.mainPackage.PkgPath + ".main",
+			kind: coroProgramStepCoroRootV1, role: coroProgramStepRoleMainV2,
+			target: fixture.mainPackage.PkgPath + ".main$coro", owner: fixture.mainPackage.PkgPath, aux: mainIndex,
 		},
 	}
 	for index, want := range wants {
@@ -239,7 +98,7 @@ func TestSelectCoroProgramBootstrapV2ExactMixedFiveStageProgram(t *testing.T) {
 		{name: "runtime init", fn: fixture.runtimeInit, kind: coroProgramStepCoroRootV1},
 		{name: "public runtime init", fn: fixture.publicRuntimeInit, kind: coroProgramStepCoroRootV1},
 		{name: "main package init", fn: fixture.mainInit, kind: coroProgramStepCoroRootV1},
-		{name: "main", fn: fixture.mainMain, kind: coroProgramStepDirectPlainV1},
+		{name: "main", fn: fixture.mainMain, kind: coroProgramStepCoroRootV1},
 	} {
 		plan, ok := fixture.ctx.coroPlan.FunctionPlan(check.fn)
 		if !ok {
@@ -278,7 +137,7 @@ func TestSelectCoroProgramBootstrapV2UsesOwnedNoopWhenPublicRuntimeIsAbsent(t *t
 	}
 }
 
-func TestSelectCoroProgramBootstrapV2AllowsIRQUnsafeOnOrdinaryG(t *testing.T) {
+func TestSelectCoroProgramBootstrapV2AllowsIRQUnsafeManagedRoot(t *testing.T) {
 	fixture := newCoroBootstrapV2TestContext(t)
 	step, err := selectCoroProgramManagedStepV2(
 		fixture.ctx,
@@ -292,11 +151,11 @@ func TestSelectCoroProgramBootstrapV2AllowsIRQUnsafeOnOrdinaryG(t *testing.T) {
 		t.Fatal(err)
 	}
 	plan, ok := fixture.ctx.coroPlan.FunctionPlan(fixture.irqRuntimeRoot)
-	if !ok || plan.Effect != coro.NoSuspend || !plan.Exec.Contains(coro.IRQUnsafe) || plan.Exec.Contains(coro.ThreadAffine) {
+	if !ok || !plan.Effect.Contains(coro.OutcomeStructured) || !plan.Exec.Contains(coro.IRQUnsafe) || plan.Exec.Contains(coro.ThreadAffine) {
 		t.Fatalf("IRQ-unsafe fixture plan = %+v, present=%t", plan, ok)
 	}
-	if step.Kind != coroProgramStepDirectPlainV1 || step.Target != llssa.PkgRuntime+".irqRuntimeRoot" || step.Owner != "" {
-		t.Fatalf("IRQ-unsafe ordinary-G step = %+v, want direct plain", step)
+	if step.Kind != coroProgramStepCoroRootV1 || step.Target != llssa.PkgRuntime+".irqRuntimeRoot$coro" || step.Owner != llssa.PkgRuntime {
+		t.Fatalf("IRQ-unsafe managed-root step = %+v, want coroutine root", step)
 	}
 }
 
@@ -453,99 +312,6 @@ func TestCoroProgramManifestHashV1CoversV2OwnerAnchorBinding(t *testing.T) {
 	}
 	if firstHash == secondHash {
 		t.Fatalf("final manifest hash ignored owner-to-CatalogTarget binding: %x", firstHash)
-	}
-}
-
-func TestCoroProgramBootstrapHashV1StableAndStepComplete(t *testing.T) {
-	ctx, pkg := newCoroBootstrapTestContext(t, nil, coroBootstrapTestPlan{
-		rootDemand: map[string]coro.Demand{"init": coro.AsyncDemand, "main": coro.AsyncDemand},
-	})
-	bootstrap := ctx.coroProgramBootstraps[pkg.ID]
-	again, err := coroProgramBootstrapHashV1(ctx, bootstrap.Steps)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if again != bootstrap.StepHash {
-		t.Fatalf("bootstrap hash is unstable: %x != %x", again, bootstrap.StepHash)
-	}
-
-	mutations := []struct {
-		name   string
-		mutate func([]coroProgramBootstrapStepV1)
-	}{
-		{"order", func(steps []coroProgramBootstrapStepV1) { steps[0], steps[1] = steps[1], steps[0] }},
-		{"kind", func(steps []coroProgramBootstrapStepV1) { steps[0].Kind = coroProgramStepCoroRootV1 }},
-		{"role", func(steps []coroProgramBootstrapStepV1) { steps[0].Role = coroProgramStepRoleMainV1 }},
-		{"function ID", func(steps []coroProgramBootstrapStepV1) { steps[0].FunctionID += ".changed" }},
-		{"target", func(steps []coroProgramBootstrapStepV1) { steps[0].Target += ".changed" }},
-		{"aux", func(steps []coroProgramBootstrapStepV1) { steps[0].Aux = 1 }},
-	}
-	for _, mutation := range mutations {
-		t.Run(mutation.name, func(t *testing.T) {
-			steps := append([]coroProgramBootstrapStepV1(nil), bootstrap.Steps...)
-			mutation.mutate(steps)
-			changed, err := coroProgramBootstrapHashV1(ctx, steps)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if changed == bootstrap.StepHash {
-				t.Fatalf("bootstrap hash ignored %s", mutation.name)
-			}
-		})
-	}
-
-	originalDigest := ctx.coroPlanDigest
-	ctx.coroPlanDigest = strings.Repeat("1", len(originalDigest))
-	changedPlan, err := coroProgramBootstrapHashV1(ctx, bootstrap.Steps)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if changedPlan == bootstrap.StepHash {
-		t.Fatal("bootstrap hash ignored the canonical plan digest")
-	}
-	ctx.coroPlanDigest = originalDigest
-	ctx.buildConf.CoroProfile = CoroProfileStackless
-	changedDriver, err := coroProgramBootstrapHashV1(ctx, bootstrap.Steps)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if changedDriver == bootstrap.StepHash {
-		t.Fatal("bootstrap hash ignored factory/driver activation")
-	}
-	ctx.buildConf.Goos = "wasip1"
-	ctx.buildConf.Goarch = "wasm"
-	hostPullDriver, err := coroProgramBootstrapHashV1(ctx, bootstrap.Steps)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if hostPullDriver == changedDriver || hostPullDriver == bootstrap.StepHash {
-		t.Fatal("bootstrap hash ignored the host-owned V2 pull reactor ABI")
-	}
-	hostPullAgain, err := coroProgramBootstrapHashV1(ctx, bootstrap.Steps)
-	if err != nil || hostPullAgain != hostPullDriver {
-		t.Fatalf("host-pull bootstrap hash is unstable: %x, %v, want %x", hostPullAgain, err, hostPullDriver)
-	}
-	ctx.buildConf.Goos = "linux"
-	ctx.buildConf.Goarch = "386"
-	withoutNativeTimer, err := coroProgramBootstrapHashV1(ctx, bootstrap.Steps)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx.buildConf.Goarch = "amd64"
-	withNativeTimer, err := coroProgramBootstrapHashV1(ctx, bootstrap.Steps)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if withNativeTimer == withoutNativeTimer {
-		t.Fatal("bootstrap hash ignored native monotonic timer owner ABI")
-	}
-	ctx.buildConf.Goarch = "386"
-	afterCapabilityMismatch, err := coroProgramBootstrapHashV1(ctx, bootstrap.Steps)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if afterCapabilityMismatch != withoutNativeTimer || afterCapabilityMismatch == withNativeTimer {
-		t.Fatalf("native timer capability mismatch did not select a distinct stable hash: timer=%x no-timer=%x after=%x", withNativeTimer, withoutNativeTimer, afterCapabilityMismatch)
 	}
 }
 
@@ -741,72 +507,4 @@ func coroBootstrapV2LinkedPackage(pkgPath, anchor string) Package {
 		Package:          &packages.Package{ID: pkgPath, PkgPath: pkgPath},
 		CoroRootAnchorV1: anchor,
 	}
-}
-
-func newCoroBootstrapTestContext(t *testing.T, target *llssa.Target, spec coroBootstrapTestPlan) (*context, *packages.Package) {
-	t.Helper()
-	ctx, pkg, err := buildCoroBootstrapTestContext(t, target, spec)
-	if err != nil {
-		t.Fatalf("buildCoroPlan: %v", err)
-	}
-	return ctx, pkg
-}
-
-func buildCoroBootstrapTestContext(t *testing.T, target *llssa.Target, spec coroBootstrapTestPlan) (*context, *packages.Package, error) {
-	t.Helper()
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "main.go", `package main; func main() {}`, parser.ParseComments)
-	if err != nil {
-		t.Fatal(err)
-	}
-	files := []*ast.File{file}
-	ssaPkg, _, err := ssautil.BuildPackage(
-		&types.Config{Importer: importer.Default()},
-		fset,
-		types.NewPackage("example.com/bootstrap", "main"),
-		files,
-		ssa.SanityCheckFunctions|ssa.InstantiateGenerics,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pkg := &packages.Package{
-		ID:      "example.com/bootstrap",
-		PkgPath: "example.com/bootstrap",
-		Name:    "main",
-		Types:   ssaPkg.Pkg,
-		Syntax:  files,
-	}
-	aPkg := &aPackage{Package: pkg, SSA: ssaPkg}
-	prog := llssa.NewProgram(target)
-	t.Cleanup(prog.Dispose)
-	conf := &Config{
-		BuildMode: BuildModeExe, CoroProfile: CoroProfileStackless,
-	}
-	conf.CoroPlanBuilder = func(input CoroPlanInput) (*coro.SSAPlan, error) {
-		roots := make(coro.Roots, 0, len(spec.rootDemand))
-		for _, name := range []string{"init", "main"} {
-			if demand := spec.rootDemand[name]; demand != coro.NoDemand {
-				roots = append(roots, coro.Root{Function: ssaPkg.Func(name), Demand: demand})
-			}
-		}
-		return input.Analyze(roots, coro.SSAConfig{
-			MaxPlainInstructions: -1,
-			ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
-				return spec.policy[fn.Name()], nil
-			},
-		})
-	}
-	ctx := &context{
-		progSSA:   ssaPkg.Prog,
-		prog:      prog,
-		patches:   make(cl.Patches),
-		initial:   []*packages.Package{pkg},
-		pkgs:      map[*packages.Package]Package{pkg: aPkg},
-		pkgByID:   map[string]Package{pkg.ID: aPkg},
-		mode:      ModeBuild,
-		buildConf: conf,
-	}
-	err = buildCoroPlan(ctx, aPkg)
-	return ctx, pkg, err
 }

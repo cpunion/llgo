@@ -423,10 +423,11 @@ func (p *context) resolveManagedInterfaceRawMethodSymbol(
 	}
 	key := sha256.Sum256([]byte(string(entry.plan.ID) + "\x00" + structuralEmissionABITypeKey(patched)))
 	name := coroManagedInterfaceRawTrapPrefix + hex.EncodeToString(key[:16])
-	stub := p.pkg.FuncOf(name)
-	if stub == nil {
-		stub = p.pkg.NewFunc(name, patched, llssa.InGo)
-	}
+	// ABI method tables for one concrete type may be materialized in several
+	// package archives. The content-addressed trap is therefore a coalescible
+	// definition, just like its descriptor, rather than a package-owned strong
+	// symbol.
+	stub := p.pkg.NewFuncEx(name, patched, llssa.InGo, false, true)
 	if !stub.HasBody() {
 		body := stub.MakeBody(1)
 		trap := p.pkg.NewFunc(
@@ -453,11 +454,19 @@ func (p *context) emitCoroManagedInterfaceMethodDescriptor(
 	); err != nil {
 		return llssa.Nil, err
 	}
-	abi, err := newCoroPlainDispatchABI(p, logicalSignature)
+	// interfaceEntrySignature was already patched by
+	// resolveInterfaceMethodDescriptor. Keep this exact effective signature as
+	// the descriptor/thunk ABI instead of rebuilding its interface graph again.
+	abi, err := newCoroPlainDispatchEffectiveABI(p, logicalSignature)
 	if err != nil {
 		return llssa.Nil, fmt.Errorf("managed interface descriptor target %q: %w", entry.plan.ID, err)
 	}
-	physical, py, kind := p.compileFunction(entry.function)
+	// A method descriptor always publishes the managed primary selected by its
+	// frozen FunctionPlan.  ABI type data may be materialized while the current
+	// owner is a separately emitted raw-plain body; inheriting rawPlainBody here
+	// would incorrectly ask the descriptor target for a legacy variant which it
+	// neither needs nor is required to have.
+	physical, py, kind := p.compileManagedFunction(entry.function)
 	if kind != goFunc || physical == nil || py != nil {
 		return llssa.Nil, fmt.Errorf("managed interface descriptor target %q did not compile as one Go function", entry.plan.ID)
 	}
@@ -522,8 +531,8 @@ func validateCoroManagedInterfaceDescriptorTarget(
 	if target == nil || target.Signature == nil || target.Signature.Recv() == nil || len(target.Blocks) == 0 || len(target.FreeVars) != 0 {
 		return fail("requires one defined non-capturing receiver body")
 	}
-	if functionPlan.External != coro.Defined || functionPlan.FuncRep != coro.Dispatch || functionPlan.Demand == coro.NoDemand {
-		return fail("requires a demanded defined Dispatch body, got external=%s representation=%s demand=%s",
+	if functionPlan.External != coro.Defined || functionPlan.Demand == coro.NoDemand {
+		return fail("requires a demanded defined body, got external=%s representation=%s demand=%s",
 			functionPlan.External, functionPlan.FuncRep, functionPlan.Demand)
 	}
 	if functionPlan.Effect.IsOpaque() || functionPlan.Exec.IsOpaque() ||
@@ -533,15 +542,27 @@ func validateCoroManagedInterfaceDescriptorTarget(
 	}
 	switch functionPlan.Emission {
 	case coro.EmitPlain:
+		// The receiver-aware method descriptor is an ABI-type use, not a
+		// receiver-free Go function value. A method which has no other dynamic
+		// consumer therefore keeps DirectPlain while this exact Ifn_ word gains a
+		// descriptor thunk; a real function-value/invoke consumer is independently
+		// frozen as Dispatch by SSA analysis.
+		if functionPlan.FuncRep != coro.DirectPlain && functionPlan.FuncRep != coro.Dispatch {
+			return fail("plain capability has incompatible representation %s", functionPlan.FuncRep)
+		}
 		if functionPlan.Primary != coro.PrimaryPlain || functionPlan.Effect != coro.NoSuspend ||
 			functionPlan.Exec.Contains(coro.NeedsPreempt) {
 			return fail("plain capability is not exact bounded no-suspend, got primary=%s effect=%s exec=%s",
 				functionPlan.Primary, functionPlan.Effect, functionPlan.Exec)
 		}
 	case coro.EmitCoroutine:
-		// BothDemand/RawPlainEntry still publishes only the managed coroutine
-		// primary. The raw alternate remains reachable solely through its exact
-		// legacy address consumers.
+		// DirectCoro is valid for the same reason: the ABI method descriptor wraps
+		// the one coroutine primary and does not manufacture a second body.
+		// BothDemand/RawPlainEntry still publishes only that managed primary; the
+		// raw alternate remains reachable solely through its exact raw consumers.
+		if functionPlan.FuncRep != coro.DirectCoro && functionPlan.FuncRep != coro.Dispatch {
+			return fail("coroutine capability has incompatible representation %s", functionPlan.FuncRep)
+		}
 		if functionPlan.Primary != coro.PrimaryCoroutine || !functionPlan.Demand.Contains(coro.AsyncDemand) ||
 			!functionPlan.Effect.MaySuspend() {
 			return fail("coroutine capability has primary=%s demand=%s effect=%s",

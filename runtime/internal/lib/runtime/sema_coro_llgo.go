@@ -24,26 +24,23 @@ import (
 	latomic "github.com/goplus/llgo/runtime/internal/lib/sync/atomic"
 )
 
-// llgoCoroSemaphoreWaitTokenV1 is retained only by the current stackless
-// coroutine frame and the scheduler's common wait table.
-type llgoCoroSemaphoreWaitTokenV1 struct {
-	word uint32
+// llgoCoroSemaphoreParkV2 is opaque compiler-spilled ParkState/source storage.
+// Sixteen pointer words cover the runtime layout on both 32- and 64-bit
+// targets without exposing scheduler pointers to the standard library.
+type llgoCoroSemaphoreParkV2 struct {
+	words [16]uintptr
 }
 
-//llgo:coro noblock
-//go:linkname llgoCoroSemaphorePrepareOrAbortV1 C.__llgo_coro_sema_prepare_or_abort_v1
-func llgoCoroSemaphorePrepareOrAbortV1(token, addr unsafe.Pointer, ticket, slot, generation *uint32)
+//llgo:coro contract foreign.v1 scope=declaration progress=executor-safe affinity=caller-thread reentry=none memory=borrow-until-return
+//go:linkname llgoCoroSemaphorePrepareOrAbortV2 C.__llgo_coro_sema_prepare_or_abort_v2
+func llgoCoroSemaphorePrepareOrAbortV2(state, addr unsafe.Pointer)
 
 //llgo:coro noblock
-//go:linkname llgoCoroSemaphoreRetireCompletedOrAbortV1 C.__llgo_coro_sema_retire_completed_or_abort_v1
-func llgoCoroSemaphoreRetireCompletedOrAbortV1(token unsafe.Pointer, ticket, slot, generation uint32)
+//go:linkname llgoCoroSemaphoreReleaseOrAbortV2 C.__llgo_coro_sema_release_or_abort_v2
+func llgoCoroSemaphoreReleaseOrAbortV2(addr unsafe.Pointer)
 
-//llgo:coro noblock
-//go:linkname llgoCoroSemaphoreReleaseOrAbortV1 C.__llgo_coro_sema_release_or_abort_v1
-func llgoCoroSemaphoreReleaseOrAbortV1(addr unsafe.Pointer)
-
-//go:linkname llgoCoroSemaphoreParkV1 llgo.coroPark
-func llgoCoroSemaphoreParkV1(token *llgoCoroSemaphoreWaitTokenV1, ticket uint32)
+//go:linkname llgoCoroSemaphoreSuspendV2 llgo.coroPark
+func llgoCoroSemaphoreSuspendV2(state *llgoCoroSemaphoreParkV2, reserved uint32)
 
 // semaAcquire keeps the standard synchronous Go contract. A failed fast-path
 // CAS publishes the address-keyed wait and parks the stackless current frame;
@@ -56,26 +53,13 @@ func semaAcquire(addr *uint32) {
 			return
 		}
 
-		var token llgoCoroSemaphoreWaitTokenV1
-		var ticket, slot, generation uint32
-		llgoCoroSemaphorePrepareOrAbortV1(
-			unsafe.Pointer(&token),
-			unsafe.Pointer(addr),
-			&ticket,
-			&slot,
-			&generation,
-		)
-		llgoCoroSemaphoreParkV1(&token, ticket)
-		llgoCoroSemaphoreRetireCompletedOrAbortV1(
-			unsafe.Pointer(&token),
-			ticket,
-			slot,
-			generation,
-		)
+		var state llgoCoroSemaphoreParkV2
+		llgoCoroSemaphorePrepareOrAbortV2(unsafe.Pointer(&state), unsafe.Pointer(addr))
+		llgoCoroSemaphoreSuspendV2(&state, 0)
 	}
 }
 
 func semaRelease(addr *uint32) {
 	latomic.AddUint32(addr, 1)
-	llgoCoroSemaphoreReleaseOrAbortV1(unsafe.Pointer(addr))
+	llgoCoroSemaphoreReleaseOrAbortV2(unsafe.Pointer(addr))
 }

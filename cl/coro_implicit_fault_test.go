@@ -69,6 +69,10 @@ func ArrayAt(values Array4, index int) uint32 { return [4]uint32(values)[index] 
 func SliceAt(values []uint32, index int) uint32 { return values[index] }
 
 func PointerEqual(first, second *Box) bool { return first == second }
+
+type ValueReceiver struct { Value uint32 }
+func (value ValueReceiver) Touch() { Sink += value.Value }
+func ValueReceiverCall(value *ValueReceiver) { value.Touch() }
 `
 
 func TestCoroImplicitNilFieldAddrNativeAndWasm32(t *testing.T) {
@@ -89,7 +93,7 @@ func TestCoroImplicitNilFieldAddrNativeAndWasm32(t *testing.T) {
 			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
 				t.Fatalf("verify implicit nil fault before CoroSplit: %v\n%s", err, module.String())
 			}
-			for _, name := range []string{"Nullable", "EmptyLoad", "WithCleanup"} {
+			for _, name := range []string{"Nullable", "EmptyLoad", "WithCleanup", "ValueReceiverCall"} {
 				function := functions[name]
 				functionPlan, ok := plan.FunctionPlan(function)
 				if !ok || functionPlan.Emission != coro.EmitCoroutine || !functionPlan.Exec.Contains(coro.MayUnwind) {
@@ -138,7 +142,7 @@ func TestCoroImplicitNilFieldAddrNativeAndWasm32(t *testing.T) {
 			}
 
 			runCoroABITestPipeline(t, prog, module)
-			for _, name := range []string{"Nullable", "EmptyLoad", "WithCleanup"} {
+			for _, name := range []string{"Nullable", "EmptyLoad", "WithCleanup", "ValueReceiverCall"} {
 				resume := module.NamedFunction("foo." + name + "$coro.resume")
 				wantPrepare, wantPayload := 1, 0
 				if name == "WithCleanup" {
@@ -325,17 +329,18 @@ func compileCoroImplicitNilFaultFixture(
 		t.Fatal(err)
 	}
 	functions := map[string]*ssa.Function{
-		"Nullable":         ssaPkg.Func("Nullable"),
-		"EmptyLoad":        ssaPkg.Func("EmptyLoad"),
-		"Guarded":          ssaPkg.Func("Guarded"),
-		"WithCleanup":      ssaPkg.Func("WithCleanup"),
-		"RecoverFault":     ssaPkg.Func("RecoverFault"),
-		"WithRecover":      ssaPkg.Func("WithRecover"),
-		"StringAt":         ssaPkg.Func("StringAt"),
-		"ConstantStringAt": ssaPkg.Func("ConstantStringAt"),
-		"ArrayAt":          ssaPkg.Func("ArrayAt"),
-		"SliceAt":          ssaPkg.Func("SliceAt"),
-		"PointerEqual":     ssaPkg.Func("PointerEqual"),
+		"Nullable":          ssaPkg.Func("Nullable"),
+		"EmptyLoad":         ssaPkg.Func("EmptyLoad"),
+		"Guarded":           ssaPkg.Func("Guarded"),
+		"WithCleanup":       ssaPkg.Func("WithCleanup"),
+		"RecoverFault":      ssaPkg.Func("RecoverFault"),
+		"WithRecover":       ssaPkg.Func("WithRecover"),
+		"StringAt":          ssaPkg.Func("StringAt"),
+		"ConstantStringAt":  ssaPkg.Func("ConstantStringAt"),
+		"ArrayAt":           ssaPkg.Func("ArrayAt"),
+		"SliceAt":           ssaPkg.Func("SliceAt"),
+		"PointerEqual":      ssaPkg.Func("PointerEqual"),
+		"ValueReceiverCall": ssaPkg.Func("ValueReceiverCall"),
 	}
 	roots := make(coro.Roots, 0, len(functions))
 	for _, function := range functions {

@@ -30,7 +30,7 @@ import (
 	"testing"
 )
 
-func TestCoroTimerOwnerOrAbortSourceABI(t *testing.T) {
+func TestCoroTimerOwnerV2SourceABI(t *testing.T) {
 	const source = "internal/runtime/coro_timer_owner_llgo.go"
 	data, err := os.ReadFile(source)
 	if err != nil {
@@ -42,26 +42,39 @@ func TestCoroTimerOwnerOrAbortSourceABI(t *testing.T) {
 	}
 
 	tests := []struct {
-		name       string
-		params     []string
-		delegates  string
-		exportLine string
+		name      string
+		params    []string
+		result    string
+		delegates string
+		failStop  bool
 	}{
 		{
-			name: "__llgo_coro_timer_prepare_after_or_abort_v1",
-			params: []string{
-				"unsafe.Pointer", "int64", "*uint32", "*uint32", "*uint32",
-			},
-			delegates:  "__llgo_coro_timer_prepare_after_v1",
-			exportLine: "//export __llgo_coro_timer_prepare_after_or_abort_v1",
+			name:      "__llgo_coro_timer_park_v2",
+			params:    []string{"unsafe.Pointer", "unsafe.Pointer", "unsafe.Pointer", "unsafe.Pointer", "int64"},
+			delegates: "coro.PrepareCurrentExecutorTimerPark",
+			failStop:  true,
 		},
 		{
-			name: "__llgo_coro_timer_retire_completed_or_abort_v1",
+			name: "__llgo_coro_timer_park_controlled_v2",
 			params: []string{
-				"unsafe.Pointer", "uint32", "uint32", "uint32",
+				"unsafe.Pointer", "unsafe.Pointer", "unsafe.Pointer", "unsafe.Pointer",
+				"unsafe.Pointer", "*uint32", "uint32", "int64",
 			},
-			delegates:  "__llgo_coro_timer_retire_completed_v1",
-			exportLine: "//export __llgo_coro_timer_retire_completed_or_abort_v1",
+			delegates: "coro.PrepareCurrentExecutorControlledTimerPark",
+			failStop:  true,
+		},
+		{
+			name:      "__llgo_coro_timer_resume_v2",
+			params:    []string{"unsafe.Pointer", "unsafe.Pointer"},
+			result:    "uint32",
+			delegates: "coro.FinishCurrentExecutorTimerPark",
+			failStop:  true,
+		},
+		{
+			name:      "__llgo_coro_timer_cancel_controlled_v2",
+			params:    []string{"unsafe.Pointer", "uint32"},
+			result:    "uint32",
+			delegates: "coro.CancelExecutorControlledTimerV2",
 		},
 	}
 
@@ -77,53 +90,41 @@ func TestCoroTimerOwnerOrAbortSourceABI(t *testing.T) {
 			if function == nil {
 				t.Fatalf("missing compiler-certified timer owner %q", test.name)
 			}
-			if function.Type.Results != nil && len(function.Type.Results.List) != 0 {
-				t.Fatalf("%s returns a result; want fail-stop void ABI", test.name)
-			}
 			if got := coroTimerOwnerParameterTypes(t, function); !slices.Equal(got, test.params) {
 				t.Fatalf("%s parameter types = %v, want %v", test.name, got, test.params)
 			}
-			doc := ""
-			if function.Doc != nil {
-				doc = function.Doc.Text()
-				for _, comment := range function.Doc.List {
-					doc += "\n" + comment.Text
+			gotResult := ""
+			if function.Type.Results != nil && len(function.Type.Results.List) != 0 {
+				if len(function.Type.Results.List) != 1 {
+					t.Fatalf("%s result count = %d", test.name, len(function.Type.Results.List))
 				}
+				gotResult = coroTimerOwnerNodeText(t, function.Type.Results.List[0].Type)
 			}
-			if !strings.Contains(doc, test.exportLine) {
-				t.Fatalf("%s lacks exact C export %q", test.name, test.exportLine)
+			if gotResult != test.result {
+				t.Fatalf("%s result = %q, want %q", test.name, gotResult, test.result)
+			}
+			if function.Doc == nil || !strings.Contains(string(data), "//export "+test.name) {
+				t.Fatalf("%s lacks exact C export", test.name)
 			}
 			body := coroTimerOwnerNodeText(t, function.Body)
-			if !strings.Contains(body, "!"+test.delegates+"(") || !strings.Contains(body, "coroRuntimeAbort(") {
-				t.Fatalf("%s body is not a bool-owner delegation with terminal failure:\n%s", test.name, body)
+			if !strings.Contains(body, test.delegates+"(") {
+				t.Fatalf("%s does not delegate to %s:\n%s", test.name, test.delegates, body)
 			}
-			if !coroTimerOwnerFailureIsSyntacticallyTerminal(function) {
-				t.Fatalf("%s failure branch can return after coroRuntimeAbort:\n%s", test.name, body)
+			if test.failStop && !strings.Contains(body, "coroTimerAbortV2(") {
+				t.Fatalf("%s does not fail-stop malformed ownership:\n%s", test.name, body)
 			}
 		})
 	}
-	for _, internal := range []string{
-		"//export __llgo_coro_timer_prepare_after_v1",
-		"//export __llgo_coro_timer_retire_completed_v1",
-		"//export __llgo_coro_timer_prepare_controlled_v1",
-		"//export __llgo_coro_timer_retire_controlled_v1",
+	for _, obsolete := range []string{
+		"__llgo_coro_timer_prepare_after_v1",
+		"__llgo_coro_timer_retire_completed_v1",
+		"__llgo_coro_timer_prepare_after_or_abort_v1",
+		"__llgo_coro_timer_retire_completed_or_abort_v1",
 	} {
-		if strings.Contains(string(data), internal) {
-			t.Errorf("%s exports internal timer implementation %q; only compiler/linkname ABI adapters may cross the raw boundary", source, internal)
+		if strings.Contains(string(data), obsolete) {
+			t.Errorf("%s retains obsolete timer ABI %q", source, obsolete)
 		}
 	}
-}
-
-func coroTimerOwnerFailureIsSyntacticallyTerminal(function *ast.FuncDecl) bool {
-	if function == nil || function.Body == nil || len(function.Body.List) != 1 {
-		return false
-	}
-	conditional, ok := function.Body.List[0].(*ast.IfStmt)
-	if !ok || conditional.Else != nil || conditional.Body == nil || len(conditional.Body.List) < 2 {
-		return false
-	}
-	loop, ok := conditional.Body.List[len(conditional.Body.List)-1].(*ast.ForStmt)
-	return ok && loop.Init == nil && loop.Cond == nil && loop.Post == nil && loop.Body != nil && len(loop.Body.List) == 0
 }
 
 func coroTimerOwnerParameterTypes(t *testing.T, function *ast.FuncDecl) []string {

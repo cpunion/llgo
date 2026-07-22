@@ -1060,7 +1060,6 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 		} else {
 			p.compileInstr(b, instr)
 		}
-		p.compileCoroInstructionEpilogue(instr)
 	}
 	// is cgo cfunc but not return yet, some funcs has multiple blocks
 	if (isCgoCfunc || isCgoC2 || isCgoCmacro) && !cgoReturned {
@@ -1447,9 +1446,26 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			ret = b.BinOp(v.Op, x, y)
 		}
 	case *ssa.UnOp:
+		physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(v)
 		if v.Op == token.MUL {
 			if _, ok := p.methodNilDerefChecks[v]; ok && !ssaValueProvenNonNilAt(v.X, v) {
-				return p.compileCheckedDeref(b, v)
+				if physicalPlanned && p.coroUsesExplicitStatusFaults() {
+					switch physicalInstruction.recipe {
+					case coroPhysicalInstructionDeref:
+						// The physical dereference recipe below preserves the same base
+						// pointer with an explicit-status guard. AssertNilDerefPtr is the
+						// native-stack spelling of that operation and must not escape into
+						// this stackless coroutine body.
+					case coroPhysicalInstructionOrdinary:
+						// A non-elided SitePlan retains the managed checked-pointer helper;
+						// its frozen lowered-call fact is observed by compileCheckedDeref.
+						return p.compileCheckedDeref(b, v)
+					default:
+						panic(fmt.Sprintf("value-receiver dereference selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
+					}
+				} else {
+					return p.compileCheckedDeref(b, v)
+				}
 			}
 			if refs := v.Referrers(); refs != nil && len(*refs) == 0 {
 				if t := p.type_(v.Type(), llssa.InGo); t.RawType() != nil {
@@ -1503,7 +1519,6 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		if v.Op != token.ARROW {
 			p.recordPanicLocation(b, v.Pos())
 		}
-		physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(v)
 		guardedDeref := physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionDeref
 		if guardedDeref {
 			p.observeCoroPhysicalInstruction(v, coroPhysicalInstructionDeref)
@@ -2613,6 +2628,13 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 		ctx.emissionOwner = prepared
 	}
 	ctx.observeCoroPlan()
+	if ctx.compilation != nil && !ctx.compilation.CoroProfileActive() {
+		// A report-only plan is delivered exactly once above and must be
+		// unreachable from every code-generation decision. Clearing the context
+		// capability here provides one boundary instead of relying on every
+		// lowering helper to remember an inactive-profile check.
+		ctx.compilation = nil
+	}
 	if embedMap != nil {
 		ctx.embedMap = *embedMap
 	} else {

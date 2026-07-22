@@ -246,23 +246,22 @@ func TestNativeTimerCapacityIsIndependentAndAdmitsStandardLibraryStress(t *testi
 	}
 	source := string(data)
 	for _, contract := range []string{
-		"coroNativeSourcePageCountV1   = 16",
-		"coroNativeTimerPageCountV1    = 64",
-		"coroNativeTimerCapacityV1     = coroNativeTimerPageCountV1 * coro.TimerRegistrationPageCapacity",
-		"coroProgramTimerExtraPagesV1State     [coroNativeTimerPageCountV1 - 1]coro.TimerRegistrationPage",
-		"coroProgramWaitExtraPagesV1State      [coroNativeSourcePageCountV1 - 1]coro.WaitRegistrationPage",
-		"coroProgramPollExtraPagesV1State      [coroNativeSourcePageCountV1 - 1]coro.PollOperationPage",
-		"coroProgramWorkerExtraPagesV1State    [coroNativeSourcePageCountV1 - 1]coro.WorkerOperationPage",
-		"coroProgramChannelExtraPagesV1State   [coroNativeSourcePageCountV1 - 1]coro.ChannelOperationPage",
-		"coroProgramKeyedWaitExtraPagesV1State [coroNativeSourcePageCountV1 - 1]coro.KeyedWaitPage",
+		"coroNativeSourcePageCountV1 = 16",
+		"coroNativeTimerPageCountV1  = 64",
+		"coroNativeTimerCapacityV1   = coroNativeTimerPageCountV1 * coro.TimerRegistrationPageCapacity",
+		"coroProgramTimerExtraPagesV1State   [coroNativeTimerPageCountV1 - 1]coro.TimerRegistrationPage",
+		"coroProgramPollExtraPagesV1State    [coroNativeSourcePageCountV1 - 1]coro.PollOperationPage",
+		"coroProgramManualExtraPagesV2State  [coroNativeManualPageCountV2 - 1]coro.ManualOperationPage",
+		"coroProgramWorkerExtraPagesV1State  [coroNativeSourcePageCountV1 - 1]coro.WorkerOperationPage",
+		"coroProgramChannelExtraPagesV1State [coroNativeSourcePageCountV1 - 1]coro.ChannelOperationPage",
 		"coro.TimerRegistrationConfiguredCapacity(&coroProgramTimerTableV1State) != coroNativeTimerCapacityV1",
 	} {
 		if !strings.Contains(source, contract) {
 			t.Errorf("native timer capacity source lacks %q", contract)
 		}
 	}
-	if strings.Contains(source, "coroNativeTimerCapacityV1     = coroNativeSourcePageCountV1") ||
-		strings.Contains(source, "coroProgramTimerExtraPagesV1State     [coroNativeSourcePageCountV1 - 1]") {
+	if strings.Contains(source, "coroNativeTimerCapacityV1 = coroNativeSourcePageCountV1") ||
+		strings.Contains(source, "coroProgramTimerExtraPagesV1State [coroNativeSourcePageCountV1 - 1]") {
 		t.Error("native timer storage is still coupled to the 1024-entry common-source page count")
 	}
 }

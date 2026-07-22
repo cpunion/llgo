@@ -138,7 +138,7 @@ func queueRunnerPanicDestroy(t *testing.T, driver *ExecutorDriver, task *yieldin
 
 func TestExecutorRunBudgetOneStableProgressAndFIFO(t *testing.T) {
 	p := new(P)
-	driver, _, _, _ := bindTestExecutorDriver(t, p)
+	driver, _, _ := bindTestExecutorDriver(t, p)
 	a := newYieldingTestG(t, "runner-a")
 	b := newYieldingTestG(t, "runner-b")
 	if !Enqueue(p, a.g) || !Enqueue(p, b.g) {
@@ -174,7 +174,7 @@ func TestExecutorRunBudgetOneStableProgressAndFIFO(t *testing.T) {
 
 func TestExecutorRunCommandBootstrapDirectChildHandoffPrecedesTwoPeers(t *testing.T) {
 	p := new(P)
-	driver, _, _, _ := bindTestExecutorDriver(t, p)
+	driver, _, _ := bindTestExecutorDriver(t, p)
 	command := new(G)
 	if !InitG(command) {
 		t.Fatal("initialize command bootstrap G")
@@ -279,7 +279,7 @@ func TestExecutorRunCommandBootstrapDirectChildHandoffPrecedesTwoPeers(t *testin
 
 func TestExecutorRunCommandBootstrapDirectChildHandoffKeepsNestedChildFIFO(t *testing.T) {
 	p := new(P)
-	driver, _, _, _ := bindTestExecutorDriver(t, p)
+	driver, _, _ := bindTestExecutorDriver(t, p)
 	command := new(G)
 	if !InitG(command) {
 		t.Fatal("initialize nested command G")
@@ -434,7 +434,7 @@ func TestPauseExecutorRunActionFailureIsAtomic(t *testing.T) {
 
 func TestExecutorRunDispatchFailureRestoresReadyHead(t *testing.T) {
 	p := new(P)
-	driver, _, _, _ := bindTestExecutorDriver(t, p)
+	driver, _, _ := bindTestExecutorDriver(t, p)
 	a := newYieldingTestG(t, "dispatch-atomic-a")
 	b := newYieldingTestG(t, "dispatch-atomic-b")
 	if !Enqueue(p, a.g) || !Enqueue(p, b.g) {
@@ -458,7 +458,7 @@ func TestExecutorRunDispatchFailureRestoresReadyHead(t *testing.T) {
 
 func TestExecutorRunStartedEpochPrecedesReadyAndHotSourceAlternates(t *testing.T) {
 	p := new(P)
-	driver, registry, _, handle := bindTestExecutorDriver(t, p)
+	driver, registry, handle := bindTestExecutorDriver(t, p)
 	task := newYieldingTestG(t, "source-fair")
 	if !Enqueue(p, task.g) || registry.Request(handle) != ExecutorRequestPublished {
 		t.Fatal("prepare hot source runner")
@@ -504,7 +504,7 @@ func TestExecutorRunStartedEpochPrecedesReadyAndHotSourceAlternates(t *testing.T
 
 func TestExecutorRunCursorRejectsImplicitLegacySwitch(t *testing.T) {
 	p := new(P)
-	driver, registry, _, handle := bindTestExecutorDriver(t, p)
+	driver, registry, handle := bindTestExecutorDriver(t, p)
 	task := newYieldingTestG(t, "legacy-switch")
 	if !Enqueue(p, task.g) || registry.Request(handle) != ExecutorRequestPublished {
 		t.Fatal("prepare legacy switch")
@@ -551,9 +551,9 @@ func TestExecutorRunCursorRejectsExportedPollSlice(t *testing.T) {
 			var registry *ExecutorRegistry
 			var handle ExecutorHandle
 			if timed {
-				driver, registry, _, _, handle = bindTestExecutorDriverWithTimers(t, p)
+				driver, registry, _, handle = bindTestExecutorDriverWithTimers(t, p)
 			} else {
-				driver, registry, _, handle = bindTestExecutorDriver(t, p)
+				driver, registry, handle = bindTestExecutorDriver(t, p)
 			}
 			task := newYieldingTestG(t, "poll-slice-cursor")
 			if !Enqueue(p, task.g) || registry.Request(handle) != ExecutorRequestPublished {
@@ -629,10 +629,9 @@ func TestExecutorRunTaskControlBlocksQueuedDestroy(t *testing.T) {
 			p := new(P)
 			driver := new(ExecutorDriver)
 			registry := new(ExecutorRegistry)
-			waits := new(WaitRegistrationTable)
 			control := new(TaskControlSource)
 			handle := registerTestExecutor(t, registry)
-			if !BindExecutorSourceCatalog(driver, p, registry, handle, ExecutorSourceCatalog{Waits: waits, Control: control}) {
+			if !BindExecutorSourceCatalog(driver, p, registry, handle, ExecutorSourceCatalog{Control: control}) {
 				t.Fatal("bind runner task-control source")
 			}
 			task := newYieldingTestG(t, "late-source-cancel")
@@ -701,7 +700,7 @@ func TestExecutorRunTaskControlBlocksQueuedDestroy(t *testing.T) {
 
 func TestExecutorRunOwnerCancellationBlocksCheckedDestroy(t *testing.T) {
 	p := new(P)
-	driver, _, _, _ := bindTestExecutorDriver(t, p)
+	driver, _, _ := bindTestExecutorDriver(t, p)
 	task := newYieldingTestG(t, "late-owner-cancel")
 	if !Enqueue(p, task.g) {
 		t.Fatal("enqueue late owner cancellation task")
@@ -728,7 +727,7 @@ func TestExecutorRunOwnerCancellationBlocksCheckedDestroy(t *testing.T) {
 
 func TestExecutorRunRejectsCancellationAfterDestroyIssued(t *testing.T) {
 	p := new(P)
-	driver, _, _, _ := bindTestExecutorDriver(t, p)
+	driver, _, _ := bindTestExecutorDriver(t, p)
 	task := newYieldingTestG(t, "issued-destroy-cancel")
 	if !Enqueue(p, task.g) {
 		t.Fatal("enqueue issued destroy cancellation task")
@@ -748,7 +747,7 @@ func TestExecutorRunRejectsCancellationAfterDestroyIssued(t *testing.T) {
 
 func TestExecutorRunPanicDestroyHasNoLateOwnerInjectionPoint(t *testing.T) {
 	p := new(P)
-	driver, _, _, _ := bindTestExecutorDriver(t, p)
+	driver, _, _ := bindTestExecutorDriver(t, p)
 	task := newYieldingTestG(t, "panic-destroy-owner-cancel")
 	if !Enqueue(p, task.g) {
 		t.Fatal("enqueue panic destroy owner cancellation task")
@@ -770,7 +769,7 @@ func TestExecutorRunPanicDestroyHasNoLateOwnerInjectionPoint(t *testing.T) {
 func TestExecutorRun2048SynchronousAwaitsAreIterative(t *testing.T) {
 	const resumeCount = 2048
 	p := new(P)
-	driver, _, _, _ := bindTestExecutorDriver(t, p)
+	driver, _, _ := bindTestExecutorDriver(t, p)
 	g := new(G)
 	if !InitG(g) {
 		t.Fatal("initialize deep runner G")
@@ -846,7 +845,7 @@ func TestExecutorRun2048SynchronousAwaitsAreIterative(t *testing.T) {
 
 func TestExecutorRunDestroyReceiptIsStableAndHandleFree(t *testing.T) {
 	p := new(P)
-	driver, _, _, _ := bindTestExecutorDriver(t, p)
+	driver, _, _ := bindTestExecutorDriver(t, p)
 	task := newYieldingTestG(t, "destroy-receipt")
 	if !Enqueue(p, task.g) {
 		t.Fatal("enqueue destroy receipt task")

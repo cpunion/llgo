@@ -196,7 +196,7 @@ func pNeutralRunnableHeader(g *G, queued bool) bool {
 		!gPreemptStateAtDepthZero(g, wantPreempt) ||
 		g.taskControlLeases != 0 || g.runAction != ActionInvalid ||
 		g.pending != (pendingTransition{}) || g.destroyTarget != nil || g.destroyRoot ||
-		g.waitToken != nil || g.waitTicket != 0 || g.nextWait != nil || g.waiting || g.runP != nil ||
+		g.waiting || g.runP != nil ||
 		g.park != (ParkState{}) || g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
 		!validLiveTaskStorage(g) || !emptyPanicRecord(&g.panicRecord) || g.panicUnwind {
 		return false

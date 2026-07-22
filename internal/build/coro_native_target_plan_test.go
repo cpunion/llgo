@@ -238,19 +238,6 @@ func TestEffectiveBuildTagsSelectsUniqueNativeFleet(t *testing.T) {
 	}
 }
 
-func TestEffectiveBuildTagsRejectsForgedNativeIngressTestCapability(t *testing.T) {
-	conf := &Config{Tags: "nogc," + coroNativeIngressTestBuildTag}
-	_, err := effectiveBuildTags(conf, crosscompile.Export{})
-	if err == nil {
-		t.Fatal("forged native ingress test capability was accepted")
-	}
-	for _, want := range []string{coroNativeIngressTestBuildTag, "Config.Tags", "compiler-reserved capability"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error = %q, want %q", err, want)
-		}
-	}
-}
-
 func TestEffectiveBuildTagsRejectsForgedNativeTimerCapability(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -406,11 +393,6 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 	conf := NewDefaultConf(ModeGen)
 	conf.ForceRebuild = true
 	conf.CoroProfile = CoroProfileStackless
-	conf.CoroProfile = CoroProfileStackless
-	conf.CoroProfile = CoroProfileStackless
-	conf.CoroProfile = CoroProfileStackless
-	conf.CoroProfile = CoroProfileStackless
-	conf.CoroProfile = CoroProfileStackless
 	conf.CoroPlanBuilder = func(input CoroPlanInput) (*coro.SSAPlan, error) {
 		plan, err := input.Analyze(nil, coro.SSAConfig{MaxPlainInstructions: -1})
 		if err != nil {
@@ -448,10 +430,13 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 			{path: runtimePath, name: "coroTargetExecutorStartV1"},
 			{path: runtimePath, name: "coroTargetBeginExecutorWaitV1"},
 			{path: runtimePath, name: "coroTargetBeginExecutorCloseV1"},
-			{path: runtimePath, name: coroNativePostWaitSymbolV1},
-			{path: runtimePath, name: coroWaitPrepareSymbolV1},
-			{path: runtimePath, name: coroWaitRollbackSymbolV1},
-			{path: runtimePath, name: coroWaitRetireCompletedSymbolV1},
+			{path: runtimePath, name: coroKeyedParkSymbolV2},
+			{path: runtimePath, name: coroKeyedResumeSymbolV2},
+			{path: runtimePath, name: coroSemaphorePrepareOrAbortSymbolV2},
+			{path: runtimePath, name: coroSemaphoreReleaseOrAbortSymbolV2},
+			{path: runtimePath, name: coroNotifyPrepareOrAbortSymbolV2},
+			{path: runtimePath, name: coroNotifyOneOrAbortSymbolV2},
+			{path: runtimePath, name: coroNotifyAllOrAbortSymbolV2},
 			{path: doorbellPath, name: "nativePipeOpen"},
 			{path: doorbellPath, name: "nativePipeRead"},
 			{path: doorbellPath, name: "nativePipeWrite"},

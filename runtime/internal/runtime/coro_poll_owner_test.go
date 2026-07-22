@@ -32,7 +32,6 @@ import (
 var (
 	coroProgramPV1State                coro.P
 	coroProgramExecutorRegistryV1State coro.ExecutorRegistry
-	coroProgramWaitTableV1State        coro.WaitRegistrationTable
 	coroProgramPollSourceV1State       coro.PollOperationSource
 	coroProgramExecutorDriverV1State   coro.ExecutorDriver
 	coroProgramExecutorHandleV1State   coro.ExecutorHandle
@@ -243,7 +242,7 @@ func finishCoroPollOwnerTestRun(t *testing.T, frame *coroPollOwnerTestFrame, act
 		t.Fatal("close poll owner executor")
 	}
 	if coroProgramExecutorDriverV1State != (coro.ExecutorDriver{}) ||
-		!coroProgramExecutorRegistryV1State.CanRelease() || !coroProgramWaitTableV1State.CanRelease() ||
+		!coroProgramExecutorRegistryV1State.CanRelease() ||
 		!coroProgramPollSourceV1State.CanRelease() {
 		t.Fatal("closed poll owner executor retained core resources")
 	}
@@ -276,7 +275,6 @@ func finishCoroPollOwnerTestRun(t *testing.T, frame *coroPollOwnerTestFrame, act
 	runtime.KeepAlive(frame.memory)
 	coroProgramPV1State = coro.P{}
 	coroProgramExecutorRegistryV1State = coro.ExecutorRegistry{}
-	coroProgramWaitTableV1State = coro.WaitRegistrationTable{}
 	coroProgramPollSourceV1State = coro.PollOperationSource{}
 	coroPollOwnerTestDescriptorState.operation = coro.OperationID{}
 	coroPollOwnerTestDescriptorState.interest = coro.PollInterestInvalid
@@ -287,7 +285,7 @@ func finishCoroPollOwnerTestRun(t *testing.T, frame *coroPollOwnerTestFrame, act
 func TestCoroPollOwnerV2ParkEventResumeAndRecycle(t *testing.T) {
 	if coroProgramExecutorBoundV1State || coroProgramExecutorHandleV1State != (coro.ExecutorHandle{}) ||
 		coroProgramExecutorDriverV1State != (coro.ExecutorDriver{}) ||
-		!coroProgramExecutorRegistryV1State.CanRelease() || !coroProgramWaitTableV1State.CanRelease() ||
+		!coroProgramExecutorRegistryV1State.CanRelease() ||
 		!coroProgramPollSourceV1State.CanRelease() {
 		t.Fatal("Poll V2 owner globals are not initially releasable")
 	}
@@ -297,7 +295,7 @@ func TestCoroPollOwnerV2ParkEventResumeAndRecycle(t *testing.T) {
 		&coroProgramPV1State,
 		&coroProgramExecutorRegistryV1State,
 		executor,
-		coro.ExecutorSourceCatalog{Waits: &coroProgramWaitTableV1State, Poll: &coroProgramPollSourceV1State},
+		coro.ExecutorSourceCatalog{Poll: &coroProgramPollSourceV1State},
 	) {
 		t.Fatal("bind Poll V2 owner executor")
 	}
@@ -344,9 +342,9 @@ func TestCoroPollOwnerV2ParkEventResumeAndRecycle(t *testing.T) {
 		coroPollOwnerTestDescriptorContext,
 		uint32(coro.PollInterestRead),
 	)
-	if waits, timers, promoted, ok := coro.PollExecutorAt(&coroProgramExecutorDriverV1State, 0); !ok ||
-		waits != 0 || timers != 0 || promoted != 1 {
-		t.Fatalf("scan Poll V2 ABI readiness = (%d, %d, %d, %t)", waits, timers, promoted, ok)
+	if timers, promoted, ok := coro.PollExecutorAt(&coroProgramExecutorDriverV1State, 0); !ok ||
+		timers != 0 || promoted != 1 {
+		t.Fatalf("scan Poll V2 ABI readiness = (%d, %d, %t)", timers, promoted, ok)
 	}
 	if next, ok := coro.NextRunnableAt(&coroProgramPV1State, 0); !ok || next != frame.g {
 		t.Fatalf("dequeue Poll V2 resumed G = (%p, %t)", next, ok)

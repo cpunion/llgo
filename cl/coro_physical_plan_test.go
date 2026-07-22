@@ -27,6 +27,37 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
+func TestCoroPhysicalPlanRuntimeHelperElisionIsRecipeOwned(t *testing.T) {
+	tests := []struct {
+		name   string
+		plan   coroPhysicalInstructionPlan
+		helper string
+		want   bool
+	}{
+		{name: "ordinary keeps helper", helper: "NewSlice2"},
+		{name: "slice two index", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionSlice}, helper: "NewSlice2", want: true},
+		{name: "slice three index", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionSlice}, helper: "NewSlice3Bounds", want: true},
+		{name: "slice keeps unrelated", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionSlice}, helper: "AllocU"},
+		{name: "index range", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionIndex}, helper: "CheckIndexRange", want: true},
+		{name: "deref nil", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionDeref}, helper: "AssertNilDeref", want: true},
+		{name: "slice conversion", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionSliceToArrayPointer}, helper: "PanicSliceConvert", want: true},
+		{name: "wrapper nil", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionBuiltinNilGuard}, helper: "PanicWrapNilPointer", want: true},
+		{name: "unsafe slice", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionUnsafeSlice}, helper: "AssertRuntimeError", want: true},
+		{name: "interface nil", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionInterfaceNilCompare}, helper: "EfaceEqual", want: true},
+		{name: "frame allocation", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionFrameAllocation}, helper: "AllocZ", want: true},
+		{name: "frame allocation keeps unrelated", plan: coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionFrameAllocation}, helper: "AllocU"},
+		{name: "panic outcome", plan: coroPhysicalInstructionPlan{outcome: coroPhysicalOutcomePanic}, helper: "Panic", want: true},
+		{name: "recover outcome", plan: coroPhysicalInstructionPlan{outcome: coroPhysicalOutcomeRecover}, helper: "Recover", want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.plan.elidesRuntimeHelper(test.helper); got != test.want {
+				t.Fatalf("elidesRuntimeHelper(%q) = %t, want %t", test.helper, got, test.want)
+			}
+		})
+	}
+}
+
 func TestCoroPhysicalPlanStageIsAtomicExactAndSingleCommit(t *testing.T) {
 	ssaPkg, _, _ := buildGoSSAPkg(t, `package foo
 func Root(value int) int { return value + 1 }
@@ -74,6 +105,101 @@ func Root(value int) int { return value + 1 }
 	}
 	if err := ir.commitPhysicalFunctionPlans(stage, expected); err == nil || !strings.Contains(err.Error(), "committed more than once") {
 		t.Fatalf("second physical commit = %v", err)
+	}
+}
+
+func TestCoroPhysicalEmissionGeneratedWrapperBorrowsSharedFrozenOwner(t *testing.T) {
+	ssaPkg, _, _ := buildGoSSAPkg(t, `package foo
+func Root(value int) int { return value + 1 }
+`)
+	wrapper := ssaPkg.Func("Root")
+	wrapper.Pkg = nil
+	wrapper.Synthetic = "wrapper for test"
+	instruction := wrapper.Blocks[0].Instrs[0]
+	declaring := &preparedEmissionPackage{identity: "declaring"}
+	consumer := &preparedEmissionPackage{identity: "consumer"}
+	physical := &coroPhysicalFunctionPlan{
+		function: wrapper,
+		owner:    declaring,
+	}
+	key := emissionFunctionOwnerKey{function: wrapper, owner: declaring}
+	ir := newCoroProgramIR()
+	ir.physicalPlans = map[emissionFunctionOwnerKey]*coroPhysicalFunctionPlan{key: physical}
+	ir.physicalPlansSealed = true
+	ir.siteOwners[key] = none{}
+	ir.sitePlans[key] = map[ssa.Instruction]coroEmissionSitePlan{
+		instruction: {},
+	}
+	universe := &EmissionUniverse{
+		aliases:       make(map[*ssa.Function]*ssa.Function),
+		physicalNames: map[emissionFunctionOwnerKey]string{key: "shared.wrapper"},
+		useOwners: map[*ssa.Function]map[*preparedEmissionPackage]none{
+			wrapper: {declaring: {}},
+		},
+		coroProgramIR: ir,
+	}
+
+	loaded, err := (emissionCanonicalIndex{universe: universe}).physicalFunctionPlanForEmission(wrapper, consumer)
+	if err != nil || loaded != physical {
+		t.Fatalf("cross-owner wrapper physical plan = %p, %v; want %p", loaded, err, physical)
+	}
+	ctx := &context{
+		emissionOwner: consumer,
+		coroEmission: &coroPhysicalEmissionSession{
+			phase: coroPhysicalEmissionPrologue,
+			plan:  loaded,
+		},
+	}
+	if _, err := ir.sitePlan(ctx, instruction); err != nil {
+		t.Fatalf("physical-session SitePlan lookup = %v", err)
+	}
+
+	ordinary := *wrapper
+	ordinary.Synthetic = ""
+	if _, err := (emissionCanonicalIndex{universe: universe}).physicalFunctionPlanForEmission(&ordinary, consumer); err == nil ||
+		!strings.Contains(err.Error(), "has no frozen physical plan") {
+		t.Fatalf("ordinary cross-owner lookup = %v", err)
+	}
+}
+
+func TestCoroPhysicalFieldAddrRecipeCoversConstantUnreachableCodegen(t *testing.T) {
+	ssaPkg, _, _ := buildGoSSAPkg(t, `package foo
+type Box struct { Value int }
+func Address(box *Box) *int { return &box.Value }
+`)
+	function := ssaPkg.Func("Address")
+	var field *ssa.FieldAddr
+	for _, block := range function.Blocks {
+		for _, instruction := range block.Instrs {
+			if candidate, ok := instruction.(*ssa.FieldAddr); ok {
+				field = candidate
+			}
+		}
+	}
+	if field == nil {
+		t.Fatal("fixture has no FieldAddr")
+	}
+	owner := &preparedEmissionPackage{identity: "foo"}
+	key := emissionFunctionOwnerKey{function: function, owner: owner}
+	ir := newCoroProgramIR()
+	ir.siteOwners[key] = none{}
+	ir.sitePlans[key] = map[ssa.Instruction]coroEmissionSitePlan{
+		field: {
+			managedRuntimeHelpers: []coroPlannedRuntimeHelper{{
+				name:      "AssertNilDeref",
+				placement: coroRuntimeHelperAtSource,
+			}},
+		},
+	}
+	audit := &coroPhysicalPureSSAAudit{
+		universe:        &EmissionUniverse{coroProgramIR: ir},
+		ctx:             &context{emissionOwner: owner},
+		fn:              function,
+		reachableBlocks: map[*ssa.BasicBlock]bool{field.Block(): false},
+	}
+	guard, reason := audit.fieldAddrRequiresImplicitNilFault(field)
+	if reason != "" || !guard {
+		t.Fatalf("constant-unreachable FieldAddr guard = %t, %q; want true", guard, reason)
 	}
 }
 

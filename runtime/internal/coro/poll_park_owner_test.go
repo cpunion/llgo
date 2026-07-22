@@ -25,7 +25,6 @@ type pollParkOwnerFixture struct {
 	p         *P
 	driver    *ExecutorDriver
 	registry  *ExecutorRegistry
-	waits     *WaitRegistrationTable
 	poll      *PollOperationSource
 	task      *yieldingTestG
 	action    Action
@@ -42,7 +41,6 @@ func newPollParkOwnerFixture(t *testing.T, name string, deadline int64) *pollPar
 		p:        new(P),
 		driver:   new(ExecutorDriver),
 		registry: new(ExecutorRegistry),
-		waits:    new(WaitRegistrationTable),
 		poll:     new(PollOperationSource),
 		task:     newYieldingTestG(t, name),
 	}
@@ -53,7 +51,7 @@ func newPollParkOwnerFixture(t *testing.T, name string, deadline int64) *pollPar
 		fixture.registry,
 		registered,
 		RouteID(7),
-		ExecutorSourceCatalog{Waits: fixture.waits, Poll: fixture.poll},
+		ExecutorSourceCatalog{Poll: fixture.poll},
 	) {
 		t.Fatalf("bind %s poll owner", name)
 	}
@@ -150,7 +148,7 @@ func (fixture *pollParkOwnerFixture) yieldCloseAndFinish(t *testing.T) {
 	yieldRunningDriverTask(t, fixture.p, fixture.task, fixture.action)
 	closeTestExecutorDriver(t, fixture.driver)
 	finishReadyDriverTasks(t, fixture.p, map[*G]*yieldingTestG{fixture.task.g: fixture.task})
-	if !TerminalG(fixture.p, fixture.task.g) || !fixture.waits.CanRelease() ||
+	if !TerminalG(fixture.p, fixture.task.g) ||
 		!fixture.poll.CanRelease() || !fixture.registry.CanRelease() {
 		t.Fatalf("%s Poll V2 owner retained terminal state", fixture.task.name)
 	}
@@ -186,9 +184,9 @@ func TestCurrentExecutorPollParkEventTimeoutAndClosing(t *testing.T) {
 				PostExecutorPollEvent(fixture.driver, fixture.operation, test.event) != PollOperationPosted {
 				t.Fatal("post retained poll event")
 			}
-			if waits, timers, promoted, ok := PollExecutorAt(fixture.driver, test.now); !ok ||
-				waits != 0 || timers != 0 || promoted != 1 {
-				t.Fatalf("poll retained event = (%d, %d, %d, %t)", waits, timers, promoted, ok)
+			if timers, promoted, ok := PollExecutorAt(fixture.driver, test.now); !ok ||
+				timers != 0 || promoted != 1 {
+				t.Fatalf("poll retained event = (%d, %d, %t)", timers, promoted, ok)
 			}
 			if BeginExecutorClose(fixture.driver) {
 				t.Fatal("closed Poll V2 owner before winner lease retirement")
@@ -215,10 +213,10 @@ func TestCommandShutdownDrainAwaitsAdmittedPollV2Producer(t *testing.T) {
 	if needed, ok := RequestCommandShutdownDrain(fixture.p, main); !ok || !needed {
 		t.Fatalf("request Poll V2 command shutdown = (%t, %t)", needed, ok)
 	}
-	if waits, timers, promoted, ok := PollExecutorAt(fixture.driver, 0); !ok ||
-		waits != 0 || timers != 0 || promoted != 0 || fixture.wait.work != waitSetWorkAwaitingExternal {
-		t.Fatalf("shutdown must await poll producer = (%d, %d, %d, %t), work=%d",
-			waits, timers, promoted, ok, fixture.wait.work)
+	if timers, promoted, ok := PollExecutorAt(fixture.driver, 0); !ok ||
+		timers != 0 || promoted != 0 || fixture.wait.work != waitSetWorkAwaitingExternal {
+		t.Fatalf("shutdown must await poll producer = (%d, %d, %t), work=%d",
+			timers, promoted, ok, fixture.wait.work)
 	}
 	if BeginExecutorClose(fixture.driver) {
 		t.Fatal("closed executor while Poll V2 producer admission remained live")
@@ -234,9 +232,9 @@ func TestCommandShutdownDrainAwaitsAdmittedPollV2Producer(t *testing.T) {
 	preemptStore(&slot.v2Mailbox, uint32(pollOperationMailboxPosted))
 	preemptStore(&fixture.poll.pending, 1)
 	producerAdmissionRelease(&slot.v2Producer.inflight)
-	if waits, timers, promoted, ok := PollExecutorAt(fixture.driver, 0); !ok ||
-		waits != 0 || timers != 0 || promoted != 1 {
-		t.Fatalf("finish retained poll shutdown fact = (%d, %d, %d, %t)", waits, timers, promoted, ok)
+	if timers, promoted, ok := PollExecutorAt(fixture.driver, 0); !ok ||
+		timers != 0 || promoted != 1 {
+		t.Fatalf("finish retained poll shutdown fact = (%d, %d, %t)", timers, promoted, ok)
 	}
 	outcome, caseID, lease, cancel := fixture.beginResume(t, 0)
 	if outcome != ParkOutcomeCanceled || caseID != 0 || lease.Valid() || cancel != TaskCancelShutdown {
@@ -269,7 +267,7 @@ func TestCommandShutdownDrainAwaitsAdmittedPollV2Producer(t *testing.T) {
 		t.Fatalf("confirm Poll V2 shutdown terminal close = (%p, %+v, %t)", closed, terminal, ok)
 	}
 	if !AcknowledgeTaskCancellation(fixture.task.g, TaskCancelShutdown) ||
-		!fixture.waits.CanRelease() || !fixture.poll.CanRelease() || !fixture.registry.CanRelease() {
+		!fixture.poll.CanRelease() || !fixture.registry.CanRelease() {
 		t.Fatal("Poll V2 shutdown cleanup retained task or source state")
 	}
 	runtime.KeepAlive(fixture.task.frame.memory)

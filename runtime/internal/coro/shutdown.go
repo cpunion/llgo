@@ -50,11 +50,9 @@ func validCancelFrame(frame *Frame, g *G) bool {
 // target exactly once. Parked/opaque states are rejected before command
 // shutdown changes P.schedule.
 func validCancelableReadyG(g *G) bool {
-	if !ValidG(g) || g.state != GRunnable || !g.queued || g.waiting || g.waitToken != nil ||
-		g.waitTicket != 0 || g.nextWait != nil || g.runP != nil || g.root == nil ||
+	if !ValidG(g) || g.state != GRunnable || !g.queued || g.waiting || g.runP != nil || g.root == nil ||
 		!releasableParkState(&g.park) || g.park.taskCancelKind != TaskCancelNone ||
 		g.pending.kind != pendingNone || g.pending.from != nil || g.pending.target != nil ||
-		g.pending.wait != nil || g.pending.ticket != 0 ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
 		g.taskControlLeases != 0 ||
 		g.taskState != taskStorageOwned || g.taskStorage != unsafe.Pointer(g) || g.taskSize != TaskStorageSize() {
@@ -258,7 +256,7 @@ func RequestCommandShutdownDrain(p *P, main *G) (needed, ok bool) {
 		}
 		needed = needed || !validCancelableReadyG(g)
 	}
-	needed = needed || p.waitHead != nil || p.parkWaitHead != nil
+	needed = needed || p.parkWaitHead != nil
 	if !needed {
 		return false, true
 	}
@@ -285,11 +283,6 @@ func RequestCommandShutdownDrain(p *P, main *G) (needed, ok bool) {
 				return false, false
 			}
 		default:
-			return false, false
-		}
-	}
-	for g := p.waitHead; g != nil; g = g.nextWait {
-		if !request(g, true) {
 			return false, false
 		}
 	}

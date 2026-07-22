@@ -26,7 +26,6 @@ type channelClaimCoreFixture struct {
 	p        *P
 	driver   *ExecutorDriver
 	registry *ExecutorRegistry
-	waits    *WaitRegistrationTable
 	source   *ChannelOperationSource
 	handle   ExecutorHandle
 	task     *yieldingTestG
@@ -68,12 +67,11 @@ func newChannelClaimCoreFixtureWithSourceBeforeResume(
 		p:        new(P),
 		driver:   new(ExecutorDriver),
 		registry: new(ExecutorRegistry),
-		waits:    new(WaitRegistrationTable),
 		source:   source,
 	}
 	fixture.handle = registerTestExecutor(t, fixture.registry)
 	if !BindExecutorSourceCatalog(fixture.driver, fixture.p, fixture.registry, fixture.handle, ExecutorSourceCatalog{
-		Waits: fixture.waits, Channel: fixture.source,
+		Channel: fixture.source,
 	}) {
 		t.Fatal("bind channel claim-core executor")
 	}
@@ -271,7 +269,7 @@ func releaseChannelClaimCoreFixture(t *testing.T, fixture *channelClaimCoreFixtu
 	yieldRunningDriverTask(t, fixture.p, fixture.task, decision.action)
 	closeTestExecutorDriver(t, fixture.driver)
 	finishReadyDriverTasks(t, fixture.p, map[*G]*yieldingTestG{fixture.task.g: fixture.task})
-	if !fixture.source.CanRelease() || !fixture.waits.CanRelease() || !fixture.registry.CanRelease() {
+	if !fixture.source.CanRelease() || !fixture.registry.CanRelease() {
 		t.Fatal("channel claim-core cleanup retained stable state")
 	}
 	runtime.KeepAlive(fixture.task.frame.memory)

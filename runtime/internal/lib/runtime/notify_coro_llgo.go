@@ -24,30 +24,24 @@ import (
 	latomic "github.com/goplus/llgo/runtime/internal/lib/sync/atomic"
 )
 
-// llgoCoroNotifyWaitTokenV1 is retained only by the current stackless frame
-// and the scheduler's common WaitRegistrationTable.
-type llgoCoroNotifyWaitTokenV1 struct {
-	word uint32
+type llgoCoroNotifyParkV2 struct {
+	words [16]uintptr
 }
 
-//llgo:coro noblock
-//go:linkname llgoCoroNotifyPrepareOrAbortV1 C.__llgo_coro_notify_prepare_or_abort_v1
-func llgoCoroNotifyPrepareOrAbortV1(token, notifyAddr unsafe.Pointer, target uint32, ticket, slot, generation *uint32)
+//llgo:coro contract foreign.v1 scope=declaration progress=executor-safe affinity=caller-thread reentry=none memory=borrow-until-return
+//go:linkname llgoCoroNotifyPrepareOrAbortV2 C.__llgo_coro_notify_prepare_or_abort_v2
+func llgoCoroNotifyPrepareOrAbortV2(state, notifyAddr unsafe.Pointer, target uint32)
 
 //llgo:coro noblock
-//go:linkname llgoCoroNotifyRetireCompletedOrAbortV1 C.__llgo_coro_notify_retire_completed_or_abort_v1
-func llgoCoroNotifyRetireCompletedOrAbortV1(token unsafe.Pointer, ticket, slot, generation uint32)
+//go:linkname llgoCoroNotifyOneOrAbortV2 C.__llgo_coro_notify_one_or_abort_v2
+func llgoCoroNotifyOneOrAbortV2(notifyAddr unsafe.Pointer, waitSnapshot uint32)
 
 //llgo:coro noblock
-//go:linkname llgoCoroNotifyOneOrAbortV1 C.__llgo_coro_notify_one_or_abort_v1
-func llgoCoroNotifyOneOrAbortV1(notifyAddr unsafe.Pointer, waitSnapshot uint32)
+//go:linkname llgoCoroNotifyAllOrAbortV2 C.__llgo_coro_notify_all_or_abort_v2
+func llgoCoroNotifyAllOrAbortV2(notifyAddr unsafe.Pointer, waitSnapshot uint32)
 
-//llgo:coro noblock
-//go:linkname llgoCoroNotifyAllOrAbortV1 C.__llgo_coro_notify_all_or_abort_v1
-func llgoCoroNotifyAllOrAbortV1(notifyAddr unsafe.Pointer, waitSnapshot uint32)
-
-//go:linkname llgoCoroNotifyParkV1 llgo.coroPark
-func llgoCoroNotifyParkV1(token *llgoCoroNotifyWaitTokenV1, ticket uint32)
+//go:linkname llgoCoroNotifySuspendV2 llgo.coroPark
+func llgoCoroNotifySuspendV2(state *llgoCoroNotifyParkV2, reserved uint32)
 
 //go:linkname sync_runtime_notifyListWait sync.runtime_notifyListWait
 func sync_runtime_notifyListWait(l *notifyList, target uint32) {
@@ -58,23 +52,14 @@ func sync_runtime_notifyListWait(l *notifyList, target uint32) {
 		return
 	}
 
-	var token llgoCoroNotifyWaitTokenV1
-	var ticket, slot, generation uint32
-	llgoCoroNotifyPrepareOrAbortV1(
-		unsafe.Pointer(&token),
-		unsafe.Pointer(&l.notify),
-		target,
-		&ticket,
-		&slot,
-		&generation,
-	)
-	llgoCoroNotifyParkV1(&token, ticket)
-	llgoCoroNotifyRetireCompletedOrAbortV1(unsafe.Pointer(&token), ticket, slot, generation)
+	var state llgoCoroNotifyParkV2
+	llgoCoroNotifyPrepareOrAbortV2(unsafe.Pointer(&state), unsafe.Pointer(&l.notify), target)
+	llgoCoroNotifySuspendV2(&state, 0)
 }
 
 //go:linkname sync_runtime_notifyListNotifyOne sync.runtime_notifyListNotifyOne
 func sync_runtime_notifyListNotifyOne(l *notifyList) {
-	llgoCoroNotifyOneOrAbortV1(
+	llgoCoroNotifyOneOrAbortV2(
 		unsafe.Pointer(&l.notify),
 		latomic.LoadUint32(&l.wait),
 	)
@@ -82,7 +67,7 @@ func sync_runtime_notifyListNotifyOne(l *notifyList) {
 
 //go:linkname sync_runtime_notifyListNotifyAll sync.runtime_notifyListNotifyAll
 func sync_runtime_notifyListNotifyAll(l *notifyList) {
-	llgoCoroNotifyAllOrAbortV1(
+	llgoCoroNotifyAllOrAbortV2(
 		unsafe.Pointer(&l.notify),
 		latomic.LoadUint32(&l.wait),
 	)

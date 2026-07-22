@@ -57,7 +57,7 @@ func TestCoroProgramManifestHashV1StableAndComplete(t *testing.T) {
 		prog: prog,
 		buildConf: &Config{
 			Goos:   "linux",
-			Goarch: "amd64", CoroProfile: CoroProfileStackless,
+			Goarch: "amd64",
 		},
 	}
 	a := coroRootPackageAnchorPrefixV1 + "11111111111111111111111111111111"
@@ -96,7 +96,7 @@ func TestCoroProgramManifestHashV1StableAndComplete(t *testing.T) {
 	if withNilBootstrap != first {
 		t.Fatal("nil bootstrap changed the legacy manifest hash")
 	}
-	bootstrapA := &coroProgramBootstrapV1{}
+	bootstrapA := &coroProgramBootstrapV1{Version: coroProgramBootstrapVersionV2}
 	bootstrapA.StepHash[0] = 1
 	withBootstrap, err := coroProgramManifestHashV1(ctx, []string{a, b}, bootstrapA)
 	if err != nil {
@@ -105,7 +105,7 @@ func TestCoroProgramManifestHashV1StableAndComplete(t *testing.T) {
 	if withBootstrap == first {
 		t.Fatal("manifest hash ignored bootstrap presence")
 	}
-	bootstrapB := &coroProgramBootstrapV1{StepHash: bootstrapA.StepHash}
+	bootstrapB := &coroProgramBootstrapV1{Version: coroProgramBootstrapVersionV2, StepHash: bootstrapA.StepHash}
 	bootstrapB.StepHash[15] = 1
 	changedBootstrap, err := coroProgramManifestHashV1(ctx, []string{a, b}, bootstrapB)
 	if err != nil {

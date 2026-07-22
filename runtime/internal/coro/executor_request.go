@@ -373,21 +373,3 @@ func (registry *ExecutorRegistry) CanRelease() bool {
 	}
 	return true
 }
-
-// WaitExecutorPostResult exposes both halves of the platform ingress model.
-// A target shim resolves stable registry/table instances internally; its ABI
-// still carries only the two POD handles.
-type WaitExecutorPostResult struct {
-	Wait     WaitRegistrationPostResult
-	Executor ExecutorRequestResult
-}
-
-// PostWaitAndRequest publishes the durable wait slot before requesting its
-// executor. It never drains, touches P/G, or invokes an LLVM coroutine action.
-func PostWaitAndRequest(table *WaitRegistrationTable, wait WaitRegistrationHandle, registry *ExecutorRegistry, executor ExecutorHandle) WaitExecutorPostResult {
-	result := WaitExecutorPostResult{Wait: table.Post(wait), Executor: ExecutorRequestInvalid}
-	if result.Wait == WaitRegistrationPosted {
-		result.Executor = registry.Request(executor)
-	}
-	return result
-}

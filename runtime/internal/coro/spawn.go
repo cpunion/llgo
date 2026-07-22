@@ -75,9 +75,8 @@ func runningSpawnContext(parent *G) (*P, bool) {
 		parent.active.header.SuspendReason != uint16(SuspendNone) ||
 		parent.active.header.Lifecycle != uint16(FrameActive) ||
 		parent.pending.kind != pendingNone || parent.pending.from != nil || parent.pending.target != nil ||
-		parent.pending.wait != nil || parent.pending.ticket != 0 ||
 		parent.destroyTarget != nil || parent.destroyRoot || parent.queued || parent.nextReady != nil ||
-		parent.waitToken != nil || parent.waitTicket != 0 || parent.nextWait != nil || parent.waiting ||
+		parent.waiting ||
 		!releasableParkState(&parent.park) ||
 		parent.spawnParent != nil || parent.spawnP != nil ||
 		parent.transferState != runnableTransferGIdle || !validLiveTaskStorage(parent) {
@@ -157,9 +156,8 @@ func CommitSpawn(parent, child *G, handle unsafe.Pointer) bool {
 	if !ok || handle == nil || parent.spawnChild != child || child == nil ||
 		!ValidG(child) || child.state != GNew || child.root != nil || child.active != nil ||
 		child.pending.kind != pendingNone || child.pending.from != nil || child.pending.target != nil ||
-		child.pending.wait != nil || child.pending.ticket != 0 ||
 		child.destroyTarget != nil || child.destroyRoot || child.nextReady != nil || child.queued ||
-		child.waitToken != nil || child.waitTicket != 0 || child.nextWait != nil || child.waiting || child.runP != nil ||
+		child.waiting || child.runP != nil ||
 		child.spawnChild != nil || child.spawnParent != parent || child.spawnP != p ||
 		child.transferState != runnableTransferGIdle ||
 		child.taskState != taskStorageOwned || child.taskStorage != unsafe.Pointer(child) ||
@@ -205,8 +203,7 @@ func RollbackSpawn(parent, child *G) (unsafe.Pointer, uintptr, bool) {
 		child.spawnParent != parent || child.spawnP != p || child.spawnChild != nil ||
 		child.state != GNew || child.root != nil || child.active != nil || child.frames != nil ||
 		child.pending.kind != pendingNone || child.destroyTarget != nil || child.destroyRoot ||
-		child.nextReady != nil || child.queued || child.waitToken != nil || child.waitTicket != 0 ||
-		child.nextWait != nil || child.waiting || child.runP != nil ||
+		child.nextReady != nil || child.queued || child.waiting || child.runP != nil ||
 		!releasableParkState(&child.park) || child.park.taskCancelKind != TaskCancelNone ||
 		child.transferState != runnableTransferGIdle ||
 		child.taskState != taskStorageOwned || child.taskStorage != unsafe.Pointer(child) ||
@@ -237,9 +234,8 @@ func ReclaimableG(g *G) bool {
 		g.taskControlLeases == 0 && g.runAction == ActionInvalid && g.transferState == runnableTransferGIdle &&
 		g.root == nil && g.active == nil && g.frames == nil &&
 		g.pending.kind == pendingNone && g.pending.from == nil && g.pending.target == nil &&
-		g.pending.wait == nil && g.pending.ticket == 0 &&
 		g.destroyTarget == nil && !g.destroyRoot && g.nextReady == nil && !g.queued &&
-		g.waitToken == nil && g.waitTicket == 0 && g.nextWait == nil && !g.waiting && g.runP == nil &&
+		!g.waiting && g.runP == nil &&
 		releasableParkState(&g.park) && g.park.taskCancelKind == TaskCancelNone &&
 		g.spawnChild == nil && g.spawnParent == nil && g.spawnP == nil && validLiveTaskStorage(g) &&
 		emptyPanicRecord(&g.panicRecord) && !g.panicUnwind
@@ -265,7 +261,7 @@ func TaskStorageOwned(g *G) (owned bool, ok bool) {
 // ReleaseTaskStorage transfers one terminal spawned G allocation back to the
 // runtime adapter. It marks the transfer before returning; the caller must not
 // dereference g after clearing/freeing raw. External completion producers own
-// only POD registration handles; the stable table retains P/WaitToken state
+// only POD source identities; the stable catalogs retain scheduler state
 // until quiescence and must never retain this child after task retirement.
 func ReleaseTaskStorage(g *G) (raw unsafe.Pointer, size uintptr, ok bool) {
 	owned, valid := TaskStorageOwned(g)

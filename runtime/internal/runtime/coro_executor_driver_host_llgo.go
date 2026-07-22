@@ -21,13 +21,13 @@ package runtime
 import "github.com/goplus/llgo/runtime/internal/coro"
 
 // The host profile deliberately keeps the inline fixed-capacity pages. This is
-// deterministic for embedded/baremetal and requires no allocator. Wait,
-// timer, channel, and task-control are the capabilities currently wired into
+// deterministic for embedded/baremetal and requires no allocator. Timer,
+// channel, and task-control are the capabilities currently wired into
 // the host ingress. Poll and worker sources stay absent and therefore fail
 // closed instead of pretending that a JS, WASI, RTOS, or IRQ backend exists.
-func coroProgramBindExecutorDriverV1(driver *coro.ExecutorDriver, p *coroP, registry *coro.ExecutorRegistry, handle coro.ExecutorHandle, waits *coro.WaitRegistrationTable) bool {
+func coroProgramBindExecutorDriverV1(driver *coro.ExecutorDriver, p *coroP, registry *coro.ExecutorRegistry, handle coro.ExecutorHandle) bool {
 	return coro.BindExecutorSourceCatalog(driver, p, registry, handle, coro.ExecutorSourceCatalog{
-		Waits: waits, Timers: &coroProgramTimerTableV1State, Channel: &coroProgramChannelSourceV1State,
+		Timers: &coroProgramTimerTableV1State, Channel: &coroProgramChannelSourceV1State,
 		Control: &coroProgramTaskControlSourceV1State,
 	})
 }
@@ -60,7 +60,7 @@ func coroProgramPollExecutorV1(driver *coro.ExecutorDriver) bool {
 	if !clockOK {
 		return false
 	}
-	_, _, _, ok := coro.PollExecutorAt(driver, now)
+	_, _, ok := coro.PollExecutorAt(driver, now)
 	return ok
 }
 
@@ -69,6 +69,6 @@ func coroProgramWakeExecutorV1(driver *coro.ExecutorDriver) bool {
 	if !clockOK {
 		return false
 	}
-	_, _, _, ok := coro.WakeExecutorAt(driver, now)
+	_, _, ok := coro.WakeExecutorAt(driver, now)
 	return ok
 }

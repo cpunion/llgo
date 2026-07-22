@@ -29,9 +29,9 @@ func coroNativeFleetStartProgramV1() bool {
 		p:      &coroProgramPV1State,
 		driver: &coroProgramExecutorDriverV1State,
 		sources: coro.ExecutorSourceCatalog{
-			Waits:   &coroProgramWaitTableV1State,
 			Timers:  &coroProgramTimerTableV1State,
 			Poll:    &coroProgramPollSourceV1State,
+			Manual:  &coroProgramManualSourceV2State,
 			Worker:  &coroProgramWorkerSourceV1State,
 			Channel: &coroProgramChannelSourceV1State,
 			Control: &coroProgramTaskControlSourceV1State,

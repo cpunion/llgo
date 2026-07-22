@@ -1,3 +1,5 @@
+//go:build (coro_sema_owner_test || coro_notify_owner_test) && (!llgo || !llgo_coro)
+
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
  *
@@ -16,17 +18,11 @@
 
 package runtime
 
-import (
-	_ "unsafe"
+import "github.com/goplus/llgo/runtime/internal/coro"
 
-	"github.com/goplus/llgo/runtime/internal/coro"
-)
-
-// coroPark is the compiler-owned source spelling for an exact current-frame
-// park. It intentionally has no ordinary Go body: cl lowers a direct call in
-// the caller's physical coroutine to publish/prepare/suspend/activate. Future
-// channel, timer, syscall, and platform adapters may call this declaration
-// while preserving their synchronous Go source signatures.
-//
-//go:linkname coroPark llgo.coroPark
-func coroPark(token *coro.WaitToken, ticket coro.WaitTicket)
+func coroTargetPostKeyedOperationV2(id coro.OperationID) bool {
+	posted := coroProgramManualSourceV2State.Post(id)
+	requested := coroProgramExecutorRegistryV1State.Request(coroProgramExecutorHandleV1State)
+	return posted == coro.ManualOperationPosted &&
+		(requested == coro.ExecutorRequestPublished || requested == coro.ExecutorRequestCoalesced)
+}

@@ -130,10 +130,9 @@ type ParkLink struct {
 
 // ParkState is intended to be embedded in stable G storage. One G owns at
 // most one live logical wait-set. expected/attached make early completion,
-// N-way select, cancellation, and the detach-to-ready barrier explicit rather
-// than relying on a coroutine-frame WaitToken pointer. During detaching,
-// attached itself is the remaining barrier count; a duplicate counter would
-// add state without carrying independent information.
+// N-way select, cancellation, and the detach-to-ready barrier explicit. During
+// detaching, attached itself is the remaining barrier count; a duplicate
+// counter would add state without carrying independent information.
 //
 // seed is phase-overlaid without changing the cross-target layout: Preparing
 // uses it to assign immutable candidate ranks; Seal sorts the intrusive list

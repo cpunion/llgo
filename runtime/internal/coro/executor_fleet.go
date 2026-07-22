@@ -155,7 +155,7 @@ func executorFleetDriverCandidate(driver *ExecutorDriver, p *P) bool {
 }
 
 func executorFleetCatalogCandidate(catalog ExecutorSourceCatalog, p *P, route RouteID) bool {
-	if p == nil || !route.Valid() || !registrationTableEmpty(catalog.Waits, nil) {
+	if p == nil || !route.Valid() {
 		return false
 	}
 	if catalog.Timers != nil && (!timerRegistrationTableEmpty(catalog.Timers, nil) ||

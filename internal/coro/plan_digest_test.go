@@ -522,7 +522,7 @@ func TestCoroPlanDigestFrameRetentionIdentityIsExactAndDomainSeparated(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	metadata.FrameRetentionABI = FrameRetentionTimerABIV1
+	metadata.FrameRetentionABI = FrameRetentionParkABIV2
 	withRetention, err := plan.CoroPlanDigest(metadata)
 	if err != nil {
 		t.Fatal(err)
@@ -534,19 +534,9 @@ func TestCoroPlanDigestFrameRetentionIdentityIsExactAndDomainSeparated(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if document.Metadata.FrameRetentionABI != FrameRetentionTimerABIV1 {
-		t.Fatalf("canonical frame-retention ABI = %q, want %q", document.Metadata.FrameRetentionABI, FrameRetentionTimerABIV1)
+	if document.Metadata.FrameRetentionABI != FrameRetentionParkABIV2 {
+		t.Fatalf("canonical frame-retention ABI = %q, want %q", document.Metadata.FrameRetentionABI, FrameRetentionParkABIV2)
 	}
-	parkMetadata := metadata
-	parkMetadata.FrameRetentionABI = FrameRetentionParkABIV2
-	parkRetention, err := plan.CoroPlanDigest(parkMetadata)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if parkRetention == withRetention || parkRetention == withoutRetention {
-		t.Fatal("generic park frame-retention ABI is not independently domain-separated")
-	}
-
 	unknown := metadata
 	unknown.FrameRetentionABI += ".unknown"
 	if _, err := plan.CoroPlanDigest(unknown); err == nil || !strings.Contains(err.Error(), "unknown frame-retention ABI") {
@@ -585,7 +575,7 @@ func TestCoroPlanDigestAcceptsChannelSchedulerIdentities(t *testing.T) {
 			metadata := validPlanDigestMetadata()
 			metadata.CoroABI = PhysicalABIV1
 			metadata.SchedulerABI = schedulerABI
-			metadata.FrameRetentionABI = FrameRetentionTimerABIV1
+			metadata.FrameRetentionABI = FrameRetentionParkABIV2
 			if _, err := plan.CoroPlanDigest(metadata); err != nil {
 				t.Fatalf("channel scheduler digest: %v", err)
 			}

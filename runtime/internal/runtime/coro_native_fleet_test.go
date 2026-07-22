@@ -401,11 +401,11 @@ func TestCoroNativeFleetProductionIslandsV1(t *testing.T) {
 		standby.HasDeadline || standby.Deadline != 0 || second.ownerEpoch != 0 {
 		t.Fatalf("empty fleet standby = (%+v, %t), owner=%d", standby, standbyOK, second.ownerEpoch)
 	}
-	wakeEpoch, waits, timers, promoted, wakeOK := coroNativeFleetWakeOwnerAtV1(secondHandle, 12)
-	if !wakeOK || wakeEpoch == 0 || waits != 0 || timers != 0 || promoted != 0 ||
+	wakeEpoch, timers, promoted, wakeOK := coroNativeFleetWakeOwnerAtV1(secondHandle, 12)
+	if !wakeOK || wakeEpoch == 0 || timers != 0 || promoted != 0 ||
 		!coroNativeFleetFinishOwnerEpochV1(secondHandle, wakeEpoch) {
-		t.Fatalf("spurious fleet standby wake = (%d, %d, %d, %d, %t)",
-			wakeEpoch, waits, timers, promoted, wakeOK)
+		t.Fatalf("spurious fleet standby wake = (%d, %d, %d, %t)",
+			wakeEpoch, timers, promoted, wakeOK)
 	}
 
 	// Drive one real retained fd wait through the ordinary-domain reducer,
@@ -462,10 +462,10 @@ func TestCoroNativeFleetProductionIslandsV1(t *testing.T) {
 	if pass := coroNativeFleetWaitOwnerPassAtV1(armedPoll, 23); pass != coroNativeFleetWaitPassWakeV1 {
 		t.Fatalf("routed poll physical wait = %d", pass)
 	}
-	pollEpoch, waits, timers, promoted, pollWakeOK := coroNativeFleetWakeOwnerAtV1(secondHandle, 24)
-	if !pollWakeOK || pollEpoch == 0 || waits != 0 || timers != 0 || promoted != 1 {
-		t.Fatalf("wake routed poll owner = (%d, %d, %d, %d, %t)",
-			pollEpoch, waits, timers, promoted, pollWakeOK)
+	pollEpoch, timers, promoted, pollWakeOK := coroNativeFleetWakeOwnerAtV1(secondHandle, 24)
+	if !pollWakeOK || pollEpoch == 0 || timers != 0 || promoted != 1 {
+		t.Fatalf("wake routed poll owner = (%d, %d, %d, %t)",
+			pollEpoch, timers, promoted, pollWakeOK)
 	}
 	pollComplete := false
 	for attempt := 0; attempt < 64; attempt++ {
@@ -792,9 +792,9 @@ func TestCoroNativeFleetAdoptsBoundProgramStorageV1(t *testing.T) {
 	var programP coro.P
 	var programDriver coro.ExecutorDriver
 	var programRegistry coro.ExecutorRegistry
-	var programWaits coro.WaitRegistrationTable
 	var programTimers coro.TimerRegistrationTable
 	var programPoll coro.PollOperationSource
+	var programManual coro.ManualOperationSource
 	var programWorker coro.WorkerOperationSource
 	var programChannel coro.ChannelOperationSource
 	var programControl coro.TaskControlSource
@@ -807,9 +807,9 @@ func TestCoroNativeFleetAdoptsBoundProgramStorageV1(t *testing.T) {
 		executor,
 		1,
 		coro.ExecutorSourceCatalog{
-			Waits:   &programWaits,
 			Timers:  &programTimers,
 			Poll:    &programPoll,
+			Manual:  &programManual,
 			Worker:  &programWorker,
 			Channel: &programChannel,
 			Control: &programControl,
@@ -821,9 +821,9 @@ func TestCoroNativeFleetAdoptsBoundProgramStorageV1(t *testing.T) {
 		p:      &programP,
 		driver: &programDriver,
 		sources: coro.ExecutorSourceCatalog{
-			Waits:   &programWaits,
 			Timers:  &programTimers,
 			Poll:    &programPoll,
+			Manual:  &programManual,
 			Worker:  &programWorker,
 			Channel: &programChannel,
 			Control: &programControl,

@@ -3,6 +3,7 @@ name: Coroutine
 on:
   pull_request:
     branches:
+      - main
       - llvm-coro
       - "coro/**"
 
@@ -41,8 +42,8 @@ jobs:
         with:
           go-version: ${{ matrix.go }}
 
-      # Temporary while the stackless-coroutine slices are integrated. Restore
-      # the full Go workflow, including macOS, before the upstream merge.
+      # This focused LLVM/runtime matrix complements the regular upstream Go,
+      # cache, LLGo and target workflows, including their macOS lanes.
       - name: Test coroutine analysis
         if: matrix.lane == 'integration'
         run: go test -race -shuffle=on ./internal/coro
@@ -61,7 +62,7 @@ jobs:
             ./internal/runtime/coro_run_decision.go \
             ./internal/runtime/coro_run_decision_test.go \
             -run '^Test(CoroRunDecisionOutputModeV1|NormalCoroRunDecisionWordsV1|CoroRunDecisionWrapperRejectsMalformedNormalOnlyMode)$' -count=1
-          go test . -run '^(TestCoroNativeTargetBuildSelection|TestCoroTimerOwnerOrAbortSourceABI|TestTimeSleep)' -count=1
+          go test . -run '^(TestCoroNativeTargetBuildSelection|TestCoroTimerOwnerV2SourceABI|TestTimeSleep)' -count=1
           # The complete LLGo runtime package intentionally owns symbols that
           # collide with the host Go runtime. Use the real production adapter
           # sources plus test-only definitions of the compiler-owned C wrappers
@@ -125,6 +126,16 @@ jobs:
             ./internal/runtime/coro_channel_adapter_test.go \
             ./internal/runtime/coro_channel_owner_lock_test.go \
             -run '^TestCoroChannelAdapter' -count=1
+          # Semaphore and notify waits share one POD-only keyed registry. Race
+          # the exact production registry source to lock FIFO selection,
+          # generation reuse, cancellation, and single-owner posting.
+          go test -race -shuffle=on -tags=coro_sema_owner_test \
+            ./internal/runtime/z_chan_lock_coro.go \
+            ./internal/runtime/z_chan_lock_coro_atomic_host.go \
+            ./internal/runtime/coro_keyed_park.go \
+            ./internal/runtime/coro_keyed_post_test.go \
+            ./internal/runtime/coro_keyed_registry_test.go \
+            -run '^TestCoroKeyed' -count=1
           go test ./internal/corotimer -run '^TestDeadlineAfter$' -count=1
 
       - name: Link named freestanding WebAssembly targets
@@ -168,15 +179,11 @@ jobs:
         if: matrix.lane == 'integration'
         # Keep the focused workflow exhaustive for the build-side coroutine
         # contract. This includes park effect seeding, frozen foreign noblock
-        # certificates, IRQUnsafe handling, the exact legacy PanicABI stop, and
+        # certificates, IRQUnsafe handling, the explicit-status panic stop, and
         # the native linked static-spawn scheduler-island execution smoke. The
         # timer checks have their own LLVM 19-22 steps below, so do not run them
         # twice in the LLVM 19 job.
-        run: go test ./internal/build -run 'Coro|Coroutine' -skip '^TestCoroNative(TimerNoGCProductionE2E|TimeSleepProductionPlanAndCodegen)$' -timeout=10m -count=1
-
-      - name: Run linked native coroutine timer E2E
-        if: matrix.lane == 'compat'
-        run: go test -tags='${{ matrix.tags }}' -v ./internal/build -run '^TestCoroNativeTimerNoGCProductionE2E$' -timeout=10m -count=1
+        run: go test ./internal/build -run 'Coro|Coroutine' -skip '^TestCoroNativeTimeSleepProductionPlanAndCodegen$' -timeout=10m -count=1
 
       - name: Verify production time.Sleep coroutine plan
         if: matrix.lane == 'compat'

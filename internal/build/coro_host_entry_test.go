@@ -34,20 +34,14 @@ func __llgo_coro_host_next_deadline_v1(*hostActionV1) bool { return false }
 func __llgo_coro_host_publish_time_v1(uint32, uint32) bool { return false }
 func __llgo_coro_host_ack_cancel_v1(uint32, uint32, uint32, uint32) bool { return false }
 func __llgo_coro_host_continue_slice_v1(uint32, uint32, uint32, uint32, uint32, uint32, uint32, *coroProgramRunResultV2) uint32 { return 0 }
-func __llgo_coro_host_post_wait_v1(uint32, uint32, uint32, uint32) uint32 { return 0 }
-func __llgo_coro_wait_prepare_v1(unsafe.Pointer, *uint32, *uint32, *uint32, *uint32, *uint32) bool { return false }
-func __llgo_coro_wait_rollback_v1(unsafe.Pointer, uint32, uint32, uint32) bool { return false }
-func __llgo_coro_wait_retire_completed_v1(unsafe.Pointer, uint32, uint32, uint32) bool { return false }
 func __llgo_coro_frame_allocator_bootstrap_v1() {}
 func __llgo_coro_frame_alloc_v1() {}
 func __llgo_coro_frame_publish_v1() {}
 func __llgo_coro_await_prepare_v1() {}
-func __llgo_coro_await_prepare_v2() {}
-func __llgo_coro_await_prepare_v3() {}
-func __llgo_coro_await_consume_v1() {}
+func __llgo_coro_await_prepare_v3(g, parent, child unsafe.Pointer, mode uint32, typeWord, dataWord unsafe.Pointer) {}
+func __llgo_coro_await_consume_v1(g, parent, typeOut, dataOut unsafe.Pointer) uint32 { return 0 }
 func __llgo_coro_preempt_poll_v1() bool { return false }
 func __llgo_coro_yield_prepare_v1() {}
-func __llgo_coro_park_prepare_v1() {}
 func __llgo_coro_run_decision_take_v1(unsafe.Pointer, uint32, uint32, *uint32, *uint32, *uint32, *uint32, *uint32) {}
 func __llgo_coro_run_decision_take_zero_v1(unsafe.Pointer) uint32 { return 0 }
 func __llgo_coro_complete_prepare_v1() {}
@@ -55,6 +49,24 @@ func __llgo_coro_complete_prepare_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Poin
 func __llgo_coro_critical_enter_v1(unsafe.Pointer) {}
 func __llgo_coro_critical_exit_v1(unsafe.Pointer) bool { return false }
 func __llgo_coro_frame_free_v1() {}
+func __llgo_coro_chan_send_park_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uintptr) {}
+func __llgo_coro_chan_recv_park_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uintptr) {}
+func __llgo_coro_chan_resume_v1(unsafe.Pointer, unsafe.Pointer) uint32 { return 0 }
+type Chan struct{}
+type ChanOp struct{}
+func CoroChanTrySend(*Chan, unsafe.Pointer, int) bool { return false }
+func CoroChanTryRecv(*Chan, unsafe.Pointer, int) (bool, bool) { return false, false }
+func CoroChanTryClose(*Chan) uint32 { return 0 }
+func CoroChanSelectTry(...ChanOp) (int, bool, bool, bool) { return 0, false, false, false }
+func CoroChanSelectPark(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) {}
+func CoroChanSelectResume(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) (int, bool, uint32) { return 0, false, 0 }
+func __llgo_coro_fault_prepare_v1() {}
+func __llgo_coro_panic_prepare_v1() {}
+func __llgo_coro_recover_take_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) {}
+func __llgo_coro_fault_payload_v1(uint32, unsafe.Pointer, unsafe.Pointer) {}
+func __llgo_coro_spawn_begin_v1() {}
+func __llgo_coro_spawn_commit_v1() {}
+func __llgo_coro_program_main_return_v1() {}
 `, nil)
 	prog := llssa.NewProgram(&llssa.Target{GOOS: "wasip1", GOARCH: "wasm"})
 	defer prog.Dispose()
@@ -91,22 +103,17 @@ func __llgo_coro_frame_free_v1() {}
 		coroProgramBeginSymbolV1,
 		coroProgramRunSliceSymbolV2,
 		coroProgramContinueSliceSymbolV2,
-		coroWaitPrepareSymbolV1,
-		coroWaitRollbackSymbolV1,
-		coroWaitRetireCompletedSymbolV1,
 		coroHostNextActionSymbolV1,
 		coroHostProfileSymbolV1,
 		coroHostNextDeadlineSymbolV1,
 		coroHostPublishTimeSymbolV1,
 		coroHostAckCancelSymbolV1,
 		coroHostContinueSliceSymbolV1,
-		coroHostPostWaitSymbolV1,
 		"__llgo_coro_frame_alloc_v1",
 		"__llgo_coro_frame_publish_v1",
 		"__llgo_coro_await_prepare_v1",
 		"__llgo_coro_preempt_poll_v1",
 		"__llgo_coro_yield_prepare_v1",
-		"__llgo_coro_park_prepare_v1",
 		coroRunDecisionTakeSymbolV1,
 		coroRunDecisionTakeZeroSymbolV1,
 		"__llgo_coro_complete_prepare_v1",
@@ -116,6 +123,22 @@ func __llgo_coro_frame_free_v1() {}
 		"__llgo_coro_complete_prepare_v2",
 		"__llgo_coro_critical_enter_v1",
 		"__llgo_coro_critical_exit_v1",
+		"CoroChanTrySend",
+		"CoroChanTryRecv",
+		"CoroChanTryClose",
+		"CoroChanSelectTry",
+		"CoroChanSelectPark",
+		"CoroChanSelectResume",
+		coroChanSendParkSymbolV1,
+		coroChanRecvParkSymbolV1,
+		coroChanResumeSymbolV1,
+		"__llgo_coro_fault_prepare_v1",
+		"__llgo_coro_panic_prepare_v1",
+		"__llgo_coro_recover_take_v1",
+		"__llgo_coro_fault_payload_v1",
+		"__llgo_coro_spawn_begin_v1",
+		"__llgo_coro_spawn_commit_v1",
+		coroProgramMainReturnSymbolV1,
 	}
 	if len(roots) != len(wantRoots) {
 		t.Fatalf("host-pull runtime roots = %d, want %d", len(roots), len(wantRoots))
@@ -132,7 +155,7 @@ func __llgo_coro_frame_free_v1() {}
 			t.Fatalf("host-pull root %q is absent from the trusted plain island", wantRoots[index])
 		}
 	}
-	for _, legacy := range []string{coroProgramRunSymbolV1, coroProgramContinueSymbolV1, coroNativePostWaitSymbolV1} {
+	for _, legacy := range []string{coroProgramRunSymbolV1, coroProgramContinueSymbolV1} {
 		if fn := ssaPkg.Func(legacy); fn != nil {
 			if _, ok := requiredPlain[fn]; ok {
 				t.Fatalf("host-pull plan retained incompatible runtime root %q", legacy)

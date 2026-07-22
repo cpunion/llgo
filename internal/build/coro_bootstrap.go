@@ -32,11 +32,8 @@ import (
 )
 
 const (
-	coroProgramBootstrapVersionV1               uint32          = 1
 	coroProgramBootstrapVersionV2               uint32          = 2
-	coroProgramBootstrapFactorySymbolV1                         = "__llgo_coro_program_bootstrap_factory_v1"
 	coroProgramBootstrapFactorySymbolV2                         = "__llgo_coro_program_bootstrap_factory_v2"
-	coroProgramBootstrapFrameDescriptorPrefixV1                 = "__llgo_coro_program_bootstrap_frame_descriptor_v1."
 	coroProgramBootstrapFrameDescriptorPrefixV2                 = "__llgo_coro_program_bootstrap_frame_descriptor_v2."
 	coroProgramPublicRuntimeNoopSymbolV2                        = "__llgo_coro_public_runtime_init_noop_v2"
 	coroProgramPublicRuntimeNoopIDV2            coro.FunctionID = "llgo.bootstrap.v2.public-runtime-init.noop"
@@ -46,7 +43,6 @@ const (
 	coroProgramRunSliceSymbolV2                                 = "__llgo_coro_program_run_slice_v2"
 	coroProgramContinueSliceSymbolV2                            = "__llgo_coro_program_continue_slice_v2"
 	coroProgramMainReturnSymbolV1                               = "__llgo_coro_program_main_return_v1"
-	coroNativePostWaitSymbolV1                                  = "__llgo_coro_native_post_wait_v1"
 	coroNativeWorkerCompleteSymbolV1                            = "__llgo_coro_native_worker_complete_v1"
 	coroNativeFleetOwnerSymbolV1                                = "__llgo_coro_native_fleet_owner_v1"
 	coroHostNextActionSymbolV1                                  = "__llgo_coro_host_next_action_v1"
@@ -55,16 +51,8 @@ const (
 	coroHostPublishTimeSymbolV1                                 = "__llgo_coro_host_publish_time_v1"
 	coroHostAckCancelSymbolV1                                   = "__llgo_coro_host_ack_cancel_v1"
 	coroHostContinueSliceSymbolV1                               = "__llgo_coro_host_continue_slice_v1"
-	coroHostPostWaitSymbolV1                                    = "__llgo_coro_host_post_wait_v1"
-	coroWaitPrepareSymbolV1                                     = "__llgo_coro_wait_prepare_v1"
-	coroWaitRollbackSymbolV1                                    = "__llgo_coro_wait_rollback_v1"
-	coroWaitRetireCompletedSymbolV1                             = "__llgo_coro_wait_retire_completed_v1"
 	coroRunDecisionTakeSymbolV1                                 = "__llgo_coro_run_decision_take_v1"
 	coroRunDecisionTakeZeroSymbolV1                             = "__llgo_coro_run_decision_take_zero_v1"
-	coroTimerPrepareAfterSymbolV1                               = "__llgo_coro_timer_prepare_after_v1"
-	coroTimerRetireCompletedSymbolV1                            = "__llgo_coro_timer_retire_completed_v1"
-	coroTimerPrepareAfterOrAbortSymbolV1                        = "__llgo_coro_timer_prepare_after_or_abort_v1"
-	coroTimerRetireCompletedOrAbortSymbolV1                     = "__llgo_coro_timer_retire_completed_or_abort_v1"
 	coroTimerParkSymbolV2                                       = "__llgo_coro_timer_park_v2"
 	coroTimerParkControlledSymbolV2                             = "__llgo_coro_timer_park_controlled_v2"
 	coroTimerResumeSymbolV2                                     = "__llgo_coro_timer_resume_v2"
@@ -73,13 +61,13 @@ const (
 	coroPollResumeSymbolV2                                      = "__llgo_coro_poll_resume_v2"
 	coroPollUpdateDeadlineOrAbortSymbolV1                       = "__llgo_coro_poll_update_deadline_or_abort_v1"
 	coroPollPostClosingOrAbortSymbolV1                          = "__llgo_coro_poll_post_closing_or_abort_v1"
-	coroSemaphorePrepareOrAbortSymbolV1                         = "__llgo_coro_sema_prepare_or_abort_v1"
-	coroSemaphoreRetireCompletedOrAbortSymbolV1                 = "__llgo_coro_sema_retire_completed_or_abort_v1"
-	coroSemaphoreReleaseOrAbortSymbolV1                         = "__llgo_coro_sema_release_or_abort_v1"
-	coroNotifyPrepareOrAbortSymbolV1                            = "__llgo_coro_notify_prepare_or_abort_v1"
-	coroNotifyRetireCompletedOrAbortSymbolV1                    = "__llgo_coro_notify_retire_completed_or_abort_v1"
-	coroNotifyOneOrAbortSymbolV1                                = "__llgo_coro_notify_one_or_abort_v1"
-	coroNotifyAllOrAbortSymbolV1                                = "__llgo_coro_notify_all_or_abort_v1"
+	coroKeyedParkSymbolV2                                       = "__llgo_coro_keyed_park_v2"
+	coroKeyedResumeSymbolV2                                     = "__llgo_coro_keyed_resume_v2"
+	coroSemaphorePrepareOrAbortSymbolV2                         = "__llgo_coro_sema_prepare_or_abort_v2"
+	coroSemaphoreReleaseOrAbortSymbolV2                         = "__llgo_coro_sema_release_or_abort_v2"
+	coroNotifyPrepareOrAbortSymbolV2                            = "__llgo_coro_notify_prepare_or_abort_v2"
+	coroNotifyOneOrAbortSymbolV2                                = "__llgo_coro_notify_one_or_abort_v2"
+	coroNotifyAllOrAbortSymbolV2                                = "__llgo_coro_notify_all_or_abort_v2"
 	coroChanSendParkSymbolV1                                    = "__llgo_coro_chan_send_park_v1"
 	coroChanRecvParkSymbolV1                                    = "__llgo_coro_chan_recv_park_v1"
 	coroChanResumeSymbolV1                                      = "__llgo_coro_chan_resume_v1"
@@ -88,11 +76,8 @@ const (
 
 	// Step kinds and semantic roles are part of the cross-target bootstrap ABI.
 	// Keep these numeric values synchronized with ssa and runtime/internal/coro.
-	coroProgramStepDirectPlainV1 uint32 = 1
-	coroProgramStepCoroRootV1    uint32 = 2
-	coroProgramStepRoleInitV1    uint32 = 1
-	coroProgramStepRoleMainV1    uint32 = 2
-
+	coroProgramStepDirectPlainV1           uint32 = 1
+	coroProgramStepCoroRootV1              uint32 = 2
 	coroProgramStepRoleRuntimeInitV2       uint32 = 1
 	coroProgramStepRoleABIInitV2           uint32 = 2
 	coroProgramStepRolePublicRuntimeInitV2 uint32 = 4
@@ -133,13 +118,6 @@ type coroProgramBootstrapV1 struct {
 	Version  uint32
 	StepHash [16]byte
 	Steps    []coroProgramBootstrapStepV1
-}
-
-func (b *coroProgramBootstrapV1) abiVersion() uint32 {
-	if b == nil || b.Version == 0 {
-		return coroProgramBootstrapVersionV1
-	}
-	return b.Version
 }
 
 func validateCoroProgramBootstrapConfig(conf *Config) error {
@@ -199,13 +177,7 @@ func prepareCoroProgramBootstrapsV1(ctx *context) (map[string]*coroProgramBootst
 		if _, exists := bootstraps[pkg.ID]; exists {
 			return nil, fmt.Errorf("duplicate linked main package ID %q", pkg.ID)
 		}
-		var bootstrap *coroProgramBootstrapV1
-		var err error
-		if ctx.buildConf.coroProgramBootstrapActive() {
-			bootstrap, err = selectCoroProgramBootstrapV2(ctx, pkg)
-		} else {
-			bootstrap, err = selectCoroProgramBootstrapV1(ctx, pkg)
-		}
+		bootstrap, err := selectCoroProgramBootstrapV2(ctx, pkg)
 		if err != nil {
 			return nil, fmt.Errorf("package %q: %w", pkg.ID, err)
 		}
@@ -215,59 +187,6 @@ func prepareCoroProgramBootstrapsV1(ctx *context) (map[string]*coroProgramBootst
 		return nil, fmt.Errorf("no linked main package is available for the executable startup table")
 	}
 	return bootstraps, nil
-}
-
-// selectCoroProgramBootstrapV1 constructs the semantic [Init, Main] table from
-// the exact SSA package selected by the linker. The current frontend gives
-// these two top-level plain functions the physical names pkg.PkgPath+".init"
-// and pkg.PkgPath+".main". We verify every premise of that mapping here and do
-// not scan emitted LLVM modules or guess a replacement symbol.
-func selectCoroProgramBootstrapV1(ctx *context, pkg *packages.Package) (*coroProgramBootstrapV1, error) {
-	if ctx == nil || ctx.buildConf == nil || !ctx.buildConf.coroProgramBootstrapABIActive() {
-		return nil, nil
-	}
-	if err := validateCoroProgramBootstrapConfig(ctx.buildConf); err != nil {
-		return nil, err
-	}
-	if pkg == nil {
-		return nil, fmt.Errorf("coroutine program bootstrap: missing linked main package")
-	}
-	if ctx.prog == nil || ctx.coroEmission == nil || ctx.coroPlan == nil {
-		return nil, fmt.Errorf("coroutine program bootstrap: LLVM program, frozen emission universe, and plan are required")
-	}
-	aPkg := ctx.pkgs[pkg]
-	if aPkg == nil {
-		aPkg = ctx.pkgByID[pkg.ID]
-	}
-	if aPkg == nil || aPkg.Package == nil || aPkg.SSA == nil || aPkg.SSA.Pkg == nil {
-		return nil, fmt.Errorf("coroutine program bootstrap: linked main package %q has no exact SSA package", pkg.ID)
-	}
-	if aPkg.ID != pkg.ID || aPkg.PkgPath != pkg.PkgPath {
-		return nil, fmt.Errorf("coroutine program bootstrap: selected SSA package %q/%q does not match linked main package %q/%q", aPkg.ID, aPkg.PkgPath, pkg.ID, pkg.PkgPath)
-	}
-	if got := llssa.PathOf(aPkg.SSA.Pkg); got != pkg.PkgPath {
-		return nil, fmt.Errorf("coroutine program bootstrap: selected SSA package path %q does not match linked path %q", got, pkg.PkgPath)
-	}
-
-	steps := make([]coroProgramBootstrapStepV1, 0, 2)
-	for _, spec := range []struct {
-		name string
-		role uint32
-	}{
-		{name: "init", role: coroProgramStepRoleInitV1},
-		{name: "main", role: coroProgramStepRoleMainV1},
-	} {
-		step, err := selectCoroProgramPlainStepV1(ctx, aPkg, spec.name, spec.role)
-		if err != nil {
-			return nil, err
-		}
-		steps = append(steps, step)
-	}
-	hash, err := coroProgramBootstrapHashV1(ctx, steps)
-	if err != nil {
-		return nil, err
-	}
-	return &coroProgramBootstrapV1{StepHash: hash, Steps: steps}, nil
 }
 
 // selectCoroProgramBootstrapV2 freezes the managed five-stage startup program:
@@ -627,8 +546,11 @@ func coroProgramRootDescriptorIndexV2(plan *coro.SSAPlan, target *ssa.Function) 
 // pre-codegen semantic table and hash remain immutable; the final manifest hash
 // additionally covers the complete sorted anchor catalog.
 func bindCoroProgramBootstrapV2(bootstrap *coroProgramBootstrapV1, linked []Package) (*coroProgramBootstrapV1, error) {
-	if bootstrap == nil || bootstrap.abiVersion() != coroProgramBootstrapVersionV2 {
-		return bootstrap, nil
+	if bootstrap == nil {
+		return nil, nil
+	}
+	if bootstrap.Version != coroProgramBootstrapVersionV2 {
+		return nil, fmt.Errorf("coroutine program bootstrap version %d is not the unique V2 startup model", bootstrap.Version)
 	}
 	anchors := make(map[string]string)
 	for _, pkg := range linked {
@@ -665,96 +587,11 @@ func bindCoroProgramBootstrapV2(bootstrap *coroProgramBootstrapV1, linked []Pack
 	return &bound, nil
 }
 
-func selectCoroProgramPlainStepV1(ctx *context, aPkg *aPackage, name string, role uint32) (coroProgramBootstrapStepV1, error) {
-	want := aPkg.PkgPath + "." + name
-	if name == "init" {
-		if _, patched := ctx.patches[aPkg.PkgPath]; patched {
-			return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap init: patched package %q does not use the strict legacy init symbol %q", aPkg.PkgPath, want)
-		}
-	}
-	original := aPkg.SSA.Func(name)
-	if original == nil {
-		return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: exact SSA function is missing", name)
-	}
-	fn, ok := ctx.coroEmission.Resolve(original)
-	if !ok || fn == nil {
-		return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: function is absent from the frozen emission universe", name)
-	}
-	if fn != original || fn.Pkg != aPkg.SSA || fn.Parent() != nil || fn.Name() != name || fn.Origin() != nil || len(fn.TypeArgs()) != 0 {
-		return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: frozen target is not the exact top-level main-package function", name)
-	}
-	if fn.Pkg.Pkg == nil || llssa.PathOf(fn.Pkg.Pkg) != aPkg.PkgPath {
-		return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: frozen target belongs to another package", name)
-	}
-	if link, exists := ctx.prog.Linkname(want); exists && link != want {
-		return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: physical symbol is redirected from %q to %q", name, want, link)
-	}
-
-	sig := fn.Signature
-	if sig == nil || sig.Recv() != nil || sig.Params().Len() != 0 || sig.Results().Len() != 0 || sig.Variadic() || typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
-		return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: target must have the exact func() signature", name)
-	}
-	goBody, err := frozenGoEmittedBody(ctx.coroEmission, fn)
-	if err != nil {
-		return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: classify frozen target: %w", name, err)
-	}
-	if !goBody {
-		return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: target has no owned body", name)
-	}
-
-	rootID := coro.FunctionID("")
-	rootDemand := coro.NoDemand
-	for _, root := range ctx.coroPlan.Roots() {
-		if root.Function == fn {
-			if rootID != "" {
-				return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: duplicate explicit plan roots", name)
-			}
-			rootID, rootDemand = root.ID, root.Demand
-		}
-	}
-	if rootID == "" {
-		return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: target is not an explicit plan root", name)
-	}
-	if !rootDemand.Contains(coro.AsyncDemand) {
-		return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: explicit root demand is %s, want async capability", name, rootDemand)
-	}
-	plan, ok := ctx.coroPlan.FunctionPlan(fn)
-	if !ok || plan.ID != rootID {
-		return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: exact function plan is missing or does not match its root", name)
-	}
-	if !plan.Demand.Contains(coro.AsyncDemand) || plan.External != coro.Defined || plan.Emission != coro.EmitPlain || plan.FuncRep != coro.DirectPlain || plan.Primary != coro.PrimaryPlain || plan.Effect != coro.NoSuspend || plan.Exec.Contains(coro.NeedsPreempt) {
-		return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: target %q is not a defined async-demand plain direct non-suspending root without preemption (demand=%s external=%s emission=%s rep=%s primary=%s effect=%s exec=%s)",
-			name, plan.ID, plan.Demand, plan.External, plan.Emission, plan.FuncRep, plan.Primary, plan.Effect, plan.Exec)
-	}
-	// init/main execute as one bounded plain activation inside the bootstrap
-	// resume episode. Legacy defer/recover therefore remains local to that
-	// activation, and an unrecovered panic terminates through the existing panic
-	// path without requiring a suspended-parent transport. Every other execution
-	// constraint remains fail-closed until its scheduler protocol exists.
-	if ctx.buildConf.coroProgramBootstrapActive() {
-		const supported = coro.MayUnwind | coro.NeedsCleanupFrame
-		if unsupported := plan.Exec &^ supported; unsupported != 0 {
-			return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap runtime %s: function %q target %q has unsupported execution constraints %s (complete=%s)", name, fn.String(), plan.ID, unsupported, plan.Exec)
-		}
-	}
-	return coroProgramBootstrapStepV1{
-		Kind:       coroProgramStepDirectPlainV1,
-		Role:       role,
-		FunctionID: plan.ID,
-		Target:     want,
-		Aux:        0,
-	}, nil
-}
-
 func typeParamLen(list *types.TypeParamList) int {
 	if list == nil {
 		return 0
 	}
 	return list.Len()
-}
-
-func coroProgramBootstrapHashV1(ctx *context, steps []coroProgramBootstrapStepV1) ([16]byte, error) {
-	return coroProgramBootstrapHash(ctx, coroProgramBootstrapVersionV1, steps)
 }
 
 func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramBootstrapStepV1) ([16]byte, error) {
@@ -780,7 +617,7 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 		h.Write(length[:])
 		h.Write([]byte(value))
 	}
-	if version != coroProgramBootstrapVersionV1 && version != coroProgramBootstrapVersionV2 {
+	if version != coroProgramBootstrapVersionV2 {
 		return [16]byte{}, fmt.Errorf("coroutine program bootstrap hash has unsupported version %d", version)
 	}
 	write("llgo.coro.program-bootstrap.v" + strconv.FormatUint(uint64(version), 10))
@@ -791,11 +628,7 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 	write("direct-plain=" + strconv.FormatUint(uint64(coroProgramStepDirectPlainV1), 10))
 	write("coro-root=" + strconv.FormatUint(uint64(coroProgramStepCoroRootV1), 10))
 	if ctx.buildConf.coroProgramBootstrapActive() {
-		factory := coroProgramBootstrapFactorySymbolV1
-		if version == coroProgramBootstrapVersionV2 {
-			factory = coroProgramBootstrapFactorySymbolV2
-		}
-		write("factory=compiler-static-mixed-v" + strconv.FormatUint(uint64(version), 10) + ":" + factory)
+		write("factory=compiler-static-mixed-v2:" + coroProgramBootstrapFactorySymbolV2)
 		if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
 			write("driver=runtime-static-single-p-native-v2:" +
 				coroProgramBeginSymbolV1 + ":" +
@@ -820,18 +653,14 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 				"blocked-flags=" + strconv.FormatUint(uint64(coroProgramRunBlockedV2|coroProgramRunHasDeadlineV2), 10) + ":" +
 				"pull=" + coroHostNextActionSymbolV1 + ":" + coroHostProfileSymbolV1 + ":" +
 				coroHostNextDeadlineSymbolV1 + ":" + coroHostPublishTimeSymbolV1 + ":" +
-				coroHostAckCancelSymbolV1 + ":" + coroHostContinueSliceSymbolV1 + ":" + coroHostPostWaitSymbolV1)
+				coroHostAckCancelSymbolV1 + ":" + coroHostContinueSliceSymbolV1)
 		} else {
 			write("driver=runtime-static-single-p-v1:" + coroProgramBeginSymbolV1 + ":" + coroProgramRunSymbolV1 + ":" + coroProgramContinueSymbolV1 + ":continue(epoch:u32)->void")
 		}
 		write("resume-decision-v1=" + coroRunDecisionTakeSymbolV1 + "(g:ptr,expected-epoch:u32,expected-generation:u32,outcome:*u32,case:*u32,task-kind:*u32,operation-source-slot:*u32,operation-generation:*u32)->void")
 		write("resume-decision-zero-v1=" + coroRunDecisionTakeZeroSymbolV1 + "(g:ptr)->u32")
-		write("wait-owner-v1=" +
-			coroWaitPrepareSymbolV1 + "(token:ptr,ticket-out:*u32,wait-slot-out:*u32,wait-generation-out:*u32,executor-slot-out:*u32,executor-generation-out:*u32)->bool;" +
-			coroWaitRollbackSymbolV1 + "(token:ptr,ticket:u32,wait-slot:u32,wait-generation:u32)->bool;" +
-			coroWaitRetireCompletedSymbolV1 + "(token:ptr,ticket:u32,wait-slot:u32,wait-generation:u32)->bool")
 		if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
-			write("native-doorbell=pipe-poll-v1:" + coroNativePostWaitSymbolV1 + ":post(wait-slot:u32,wait-generation:u32,executor-slot:u32,executor-generation:u32)->u32")
+			write("native-doorbell=pipe-poll-operation-id-v2")
 		}
 		if nativeCoroTimerRuntimeABI(ctx.buildConf) {
 			write("native-timer=source-aware-park-v2:" +
@@ -844,15 +673,16 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 				coroPollResumeSymbolV2 + "(g:ptr,state:ptr)->u32;" +
 				coroPollUpdateDeadlineOrAbortSymbolV1 + "(context:uintptr,interest:u32,deadline-ns:i64)->void;" +
 				coroPollPostClosingOrAbortSymbolV1 + "(context:uintptr,interest:u32)->void")
-			write("semaphore-owner-v1=" +
-				coroSemaphorePrepareOrAbortSymbolV1 + "(token:ptr,addr:ptr,ticket-out:*u32,wait-slot-out:*u32,wait-generation-out:*u32)->void;" +
-				coroSemaphoreRetireCompletedOrAbortSymbolV1 + "(token:ptr,ticket:u32,wait-slot:u32,wait-generation:u32)->void;" +
-				coroSemaphoreReleaseOrAbortSymbolV1 + "(addr:ptr)->void")
-			write("notify-owner-v1=" +
-				coroNotifyPrepareOrAbortSymbolV1 + "(token:ptr,notify-addr:ptr,target:u32,ticket-out:*u32,wait-slot-out:*u32,wait-generation-out:*u32)->void;" +
-				coroNotifyRetireCompletedOrAbortSymbolV1 + "(token:ptr,ticket:u32,wait-slot:u32,wait-generation:u32)->void;" +
-				coroNotifyOneOrAbortSymbolV1 + "(notify-addr:ptr,wait-snapshot:u32)->void;" +
-				coroNotifyAllOrAbortSymbolV1 + "(notify-addr:ptr,wait-snapshot:u32)->void")
+			write("keyed-park-v2=" +
+				coroKeyedParkSymbolV2 + "(g:ptr,handle:ptr,header:ptr,state:ptr)->void;" +
+				coroKeyedResumeSymbolV2 + "(g:ptr,state:ptr)->u32")
+			write("semaphore-owner-v2=" +
+				coroSemaphorePrepareOrAbortSymbolV2 + "(state:ptr,addr:ptr)->void;" +
+				coroSemaphoreReleaseOrAbortSymbolV2 + "(addr:ptr)->void")
+			write("notify-owner-v2=" +
+				coroNotifyPrepareOrAbortSymbolV2 + "(state:ptr,notify-addr:ptr,target:u32)->void;" +
+				coroNotifyOneOrAbortSymbolV2 + "(notify-addr:ptr,wait-snapshot:u32)->void;" +
+				coroNotifyAllOrAbortSymbolV2 + "(notify-addr:ptr,wait-snapshot:u32)->void")
 		}
 		if ctx.buildConf.coroChannelActive() {
 			write("channel-v1=" +

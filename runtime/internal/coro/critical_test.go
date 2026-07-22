@@ -75,7 +75,7 @@ func TestCriticalDepthNestingPreservesAndConsumesStickyRequests(t *testing.T) {
 
 func TestCriticalPollDoesNotConsumeBoundExecutorRequest(t *testing.T) {
 	p := new(P)
-	_, registry, _, executor := bindTestExecutorDriver(t, p)
+	_, registry, executor := bindTestExecutorDriver(t, p)
 	task := newYieldingTestG(t, "critical-executor")
 	action, ok := BeginRunG(p, task.g)
 	if !ok {
@@ -239,15 +239,6 @@ func TestCriticalDepthRejectsSuspendTransferAndTerminalPaths(t *testing.T) {
 	task.frame.header.Lifecycle = uint16(FrameFinalSuspended)
 	if PrepareComplete(task.g, task.handle, task.frame.header) || task.g.pending != (pendingTransition{}) {
 		t.Fatal("critical region admitted completion")
-	}
-	token := new(WaitToken)
-	ticket, armed := ArmWait(token)
-	beforeToken := preemptLoad(&token.word)
-	task.frame.header.SuspendReason = uint16(SuspendPark)
-	task.frame.header.Lifecycle = uint16(FrameSuspended)
-	if !armed || PreparePark(task.g, task.handle, task.frame.header, token, ticket) ||
-		preemptLoad(&token.word) != beforeToken || task.g.pending != (pendingTransition{}) {
-		t.Fatal("critical region admitted park or consumed its wait token")
 	}
 	task.frame.header.SuspendReason = uint16(SuspendPanic)
 	task.frame.header.Lifecycle = uint16(FrameFinalSuspended)

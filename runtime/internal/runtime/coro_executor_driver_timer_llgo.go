@@ -23,55 +23,49 @@ import (
 	"github.com/goplus/llgo/runtime/internal/coroclock"
 )
 
-// Native keeps the target-neutral 64-slot page granularity. Common wait, poll,
-// worker, channel, and keyed-wait sources reserve 1024 simultaneous entries.
+// Native keeps the target-neutral 64-slot page granularity. Poll, manual,
+// worker, and channel sources reserve 1024 simultaneous entries.
 // Timers have an independent 4096-entry reservation because ordinary Go code
 // can create substantially more live Timer/Ticker values than blocking file or
 // synchronization operations. Embedded and bare-metal profiles do not compile
 // this file and retain the inline page unless they provide their own storage.
 const (
-	coroNativeSourcePageCountV1   = 16
-	coroNativeTimerPageCountV1    = 64
-	coroNativeWaitCapacityV1      = coroNativeSourcePageCountV1 * coro.WaitRegistrationPageCapacity
-	coroNativeTimerCapacityV1     = coroNativeTimerPageCountV1 * coro.TimerRegistrationPageCapacity
-	coroNativePollCapacityV1      = coroNativeSourcePageCountV1 * coro.PollOperationPageCapacity
-	coroNativeWorkerCapacityV1    = coroNativeSourcePageCountV1 * coro.WorkerOperationPageCapacity
-	coroNativeChannelCapacityV1   = coroNativeSourcePageCountV1 * coro.ChannelOperationPageCapacity
-	coroNativeKeyedWaitCapacityV1 = coroNativeSourcePageCountV1 * coro.KeyedWaitPageCapacity
+	coroNativeSourcePageCountV1 = 16
+	coroNativeTimerPageCountV1  = 64
+	coroNativeTimerCapacityV1   = coroNativeTimerPageCountV1 * coro.TimerRegistrationPageCapacity
+	coroNativePollCapacityV1    = coroNativeSourcePageCountV1 * coro.PollOperationPageCapacity
+	coroNativeWorkerCapacityV1  = coroNativeSourcePageCountV1 * coro.WorkerOperationPageCapacity
+	coroNativeChannelCapacityV1 = coroNativeSourcePageCountV1 * coro.ChannelOperationPageCapacity
 )
 
 var (
-	coroProgramWaitExtraPagesV1State      [coroNativeSourcePageCountV1 - 1]coro.WaitRegistrationPage
-	coroProgramTimerExtraPagesV1State     [coroNativeTimerPageCountV1 - 1]coro.TimerRegistrationPage
-	coroProgramPollExtraPagesV1State      [coroNativeSourcePageCountV1 - 1]coro.PollOperationPage
-	coroProgramWorkerExtraPagesV1State    [coroNativeSourcePageCountV1 - 1]coro.WorkerOperationPage
-	coroProgramChannelExtraPagesV1State   [coroNativeSourcePageCountV1 - 1]coro.ChannelOperationPage
-	coroProgramKeyedWaitExtraPagesV1State [coroNativeSourcePageCountV1 - 1]coro.KeyedWaitPage
+	coroProgramTimerExtraPagesV1State   [coroNativeTimerPageCountV1 - 1]coro.TimerRegistrationPage
+	coroProgramPollExtraPagesV1State    [coroNativeSourcePageCountV1 - 1]coro.PollOperationPage
+	coroProgramManualExtraPagesV2State  [coroNativeManualPageCountV2 - 1]coro.ManualOperationPage
+	coroProgramWorkerExtraPagesV1State  [coroNativeSourcePageCountV1 - 1]coro.WorkerOperationPage
+	coroProgramChannelExtraPagesV1State [coroNativeSourcePageCountV1 - 1]coro.ChannelOperationPage
 )
 
-func coroProgramBindExecutorDriverV1(driver *coro.ExecutorDriver, p *coroP, registry *coro.ExecutorRegistry, handle coro.ExecutorHandle, waits *coro.WaitRegistrationTable) bool {
-	if !coro.ConfigureWaitRegistrationPages(waits, coroProgramWaitExtraPagesV1State[:]) ||
-		!coro.ConfigureTimerRegistrationPages(&coroProgramTimerTableV1State, coroProgramTimerExtraPagesV1State[:]) ||
+func coroProgramBindExecutorDriverV1(driver *coro.ExecutorDriver, p *coroP, registry *coro.ExecutorRegistry, handle coro.ExecutorHandle) bool {
+	if !coro.ConfigureTimerRegistrationPages(&coroProgramTimerTableV1State, coroProgramTimerExtraPagesV1State[:]) ||
 		!coro.ConfigurePollOperationPages(&coroProgramPollSourceV1State, coroProgramPollExtraPagesV1State[:]) ||
+		!coro.ConfigureManualOperationPages(&coroProgramManualSourceV2State, coroProgramManualExtraPagesV2State[:]) ||
 		!coro.ConfigureWorkerOperationPages(&coroProgramWorkerSourceV1State, coroProgramWorkerExtraPagesV1State[:]) ||
 		!coro.ConfigureChannelOperationPages(&coroProgramChannelSourceV1State, coroProgramChannelExtraPagesV1State[:]) ||
-		!coro.ConfigureKeyedWaitPages(&coroProgramKeyedWaitCatalogV1State, coroProgramKeyedWaitExtraPagesV1State[:]) ||
-		coro.WaitRegistrationConfiguredCapacity(waits) != coroNativeWaitCapacityV1 ||
 		coro.TimerRegistrationConfiguredCapacity(&coroProgramTimerTableV1State) != coroNativeTimerCapacityV1 ||
 		coro.PollOperationConfiguredCapacity(&coroProgramPollSourceV1State) != coroNativePollCapacityV1 ||
+		coro.ManualOperationConfiguredCapacity(&coroProgramManualSourceV2State) != coroNativeSourcePageCountV1*coro.ManualOperationPageCapacity ||
 		coro.WorkerOperationConfiguredCapacity(&coroProgramWorkerSourceV1State) != coroNativeWorkerCapacityV1 ||
 		coro.ChannelOperationConfiguredCapacity(&coroProgramChannelSourceV1State) != coroNativeChannelCapacityV1 ||
-		coro.KeyedWaitConfiguredCapacity(&coroProgramKeyedWaitCatalogV1State) != coroNativeKeyedWaitCapacityV1 ||
-		coroNativeKeyedWaitCapacityV1 != coroNativeWaitCapacityV1 ||
-		coroNativeWorkerCapacityV1 != coroNativeWaitCapacityV1 ||
-		coroNativeChannelCapacityV1 != coroNativeWaitCapacityV1 ||
+		coroNativeWorkerCapacityV1 != coroNativeSourcePageCountV1*coro.ManualOperationPageCapacity ||
+		coroNativeChannelCapacityV1 != coroNativeSourcePageCountV1*coro.ManualOperationPageCapacity ||
 		coroNativeWorkerQueueSizeV1 != coroNativeWorkerCapacityV1 {
 		return false
 	}
 	return coro.BindExecutorSourceCatalog(driver, p, registry, handle, coro.ExecutorSourceCatalog{
-		Waits:   waits,
 		Timers:  &coroProgramTimerTableV1State,
 		Poll:    &coroProgramPollSourceV1State,
+		Manual:  &coroProgramManualSourceV2State,
 		Worker:  &coroProgramWorkerSourceV1State,
 		Channel: &coroProgramChannelSourceV1State,
 		Control: &coroProgramTaskControlSourceV1State,
@@ -110,7 +104,7 @@ func coroProgramPollExecutorV1(driver *coro.ExecutorDriver) bool {
 	if !clockOK {
 		return false
 	}
-	_, _, _, ok := coro.PollExecutorAt(driver, now)
+	_, _, ok := coro.PollExecutorAt(driver, now)
 	return ok
 }
 
@@ -119,6 +113,6 @@ func coroProgramWakeExecutorV1(driver *coro.ExecutorDriver) bool {
 	if !clockOK {
 		return false
 	}
-	_, _, _, ok := coro.WakeExecutorAt(driver, now)
+	_, _, ok := coro.WakeExecutorAt(driver, now)
 	return ok
 }

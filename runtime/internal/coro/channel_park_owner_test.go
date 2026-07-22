@@ -23,7 +23,6 @@ func TestCurrentExecutorChannelOwnerResolvesExactRouteAcrossTwoP(t *testing.T) {
 	type fixture struct {
 		p      *P
 		driver *ExecutorDriver
-		waits  *WaitRegistrationTable
 		source *ChannelOperationSource
 		handle ExecutorHandle
 		route  RouteID
@@ -31,8 +30,8 @@ func TestCurrentExecutorChannelOwnerResolvesExactRouteAcrossTwoP(t *testing.T) {
 		action Action
 	}
 	fixtures := []*fixture{
-		{p: new(P), driver: new(ExecutorDriver), waits: new(WaitRegistrationTable), source: new(ChannelOperationSource), route: 3, task: newYieldingTestG(t, "channel-route-3")},
-		{p: new(P), driver: new(ExecutorDriver), waits: new(WaitRegistrationTable), source: new(ChannelOperationSource), route: 7, task: newYieldingTestG(t, "channel-route-7")},
+		{p: new(P), driver: new(ExecutorDriver), source: new(ChannelOperationSource), route: 3, task: newYieldingTestG(t, "channel-route-3")},
+		{p: new(P), driver: new(ExecutorDriver), source: new(ChannelOperationSource), route: 7, task: newYieldingTestG(t, "channel-route-7")},
 	}
 	for _, current := range fixtures {
 		current.handle = registerTestExecutor(t, registry)
@@ -42,7 +41,7 @@ func TestCurrentExecutorChannelOwnerResolvesExactRouteAcrossTwoP(t *testing.T) {
 			registry,
 			current.handle,
 			current.route,
-			ExecutorSourceCatalog{Waits: current.waits, Channel: current.source},
+			ExecutorSourceCatalog{Channel: current.source},
 		) || !Enqueue(current.p, current.task.g) {
 			t.Fatalf("bind/enqueue channel route %d", current.route)
 		}
@@ -69,7 +68,7 @@ func TestCurrentExecutorChannelOwnerResolvesExactRouteAcrossTwoP(t *testing.T) {
 		yieldRunningDriverTask(t, current.p, current.task, current.action)
 		closeTestExecutorDriver(t, current.driver)
 		finishReadyDriverTasks(t, current.p, map[*G]*yieldingTestG{current.task.g: current.task})
-		if !current.source.CanRelease() || !current.waits.CanRelease() {
+		if !current.source.CanRelease() {
 			t.Fatalf("channel route %d retained source storage", current.route)
 		}
 	}
@@ -82,11 +81,10 @@ func TestSingleChannelParkOwnerTransactionAndFinish(t *testing.T) {
 	p := new(P)
 	driver := new(ExecutorDriver)
 	registry := new(ExecutorRegistry)
-	waits := new(WaitRegistrationTable)
 	source := new(ChannelOperationSource)
 	handle := registerTestExecutor(t, registry)
 	if !BindExecutorSourceCatalog(driver, p, registry, handle, ExecutorSourceCatalog{
-		Waits: waits, Channel: source,
+		Channel: source,
 	}) {
 		t.Fatal("bind single-channel owner executor")
 	}
@@ -154,7 +152,7 @@ func TestSingleChannelParkOwnerTransactionAndFinish(t *testing.T) {
 	yieldRunningDriverTask(t, p, task, action)
 	closeTestExecutorDriver(t, driver)
 	finishReadyDriverTasks(t, p, map[*G]*yieldingTestG{task.g: task})
-	if !source.CanRelease() || !waits.CanRelease() || !registry.CanRelease() {
+	if !source.CanRelease() || !registry.CanRelease() {
 		t.Fatal("single-channel owner cleanup retained stable state")
 	}
 }
@@ -239,7 +237,7 @@ func TestCommandShutdownDrainConsumesCompletedChannelBeforeExecutorClose(t *test
 	if !AcknowledgeTaskCancellation(fixture.task.g, TaskCancelShutdown) {
 		t.Fatal("acknowledge command-drain cancellation")
 	}
-	if !fixture.source.CanRelease() || !fixture.waits.CanRelease() || !fixture.registry.CanRelease() {
+	if !fixture.source.CanRelease() || !fixture.registry.CanRelease() {
 		t.Fatal("command-drain channel cleanup retained stable source state")
 	}
 }

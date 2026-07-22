@@ -273,14 +273,13 @@ func pollCoroChannelAdapterExecutor(t *testing.T, driver *coro.ExecutorDriver) {
 func TestCoroChannelAdapterPairCommitAndResume(t *testing.T) {
 	p := new(coro.P)
 	driver := new(coro.ExecutorDriver)
-	waits := new(coro.WaitRegistrationTable)
 	handle, ok := coroProgramExecutorRegistryState.Register()
 	if !ok || !coro.BindExecutorSourceCatalog(
 		driver,
 		p,
 		&coroProgramExecutorRegistryState,
 		handle,
-		coro.ExecutorSourceCatalog{Waits: waits, Channel: &coroProgramChannelSourceV1State},
+		coro.ExecutorSourceCatalog{Channel: &coroProgramChannelSourceV1State},
 	) {
 		t.Fatal("bind channel adapter executor")
 	}

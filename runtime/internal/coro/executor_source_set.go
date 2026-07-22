@@ -41,7 +41,6 @@ type ExecutorSourceSet struct {
 	magic   uint32
 	owner   *P
 	route   RouteID
-	waits   *WaitRegistrationTable
 	timers  *TimerRegistrationTable
 	poll    *PollOperationSource
 	manual  *ManualOperationSource
@@ -54,7 +53,6 @@ const executorSourceSetMagic uint32 = 0x53524331 // "SRC1"
 
 type executorSourceScan struct {
 	completed   int
-	waits       int
 	timers      int
 	poll        int
 	manual      int
@@ -81,7 +79,6 @@ type executorSourceScan struct {
 func (scan *executorSourceScan) add(other executorSourceScan) {
 	scan.epochs += other.epochs
 	scan.completed += other.completed
-	scan.waits += other.waits
 	scan.timers += other.timers
 	scan.poll += other.poll
 	scan.manual += other.manual
@@ -103,31 +100,29 @@ func (scan *executorSourceScan) add(other executorSourceScan) {
 
 func validExecutorSourceSet(sources *ExecutorSourceSet, p *P) bool {
 	if sources == nil || sources.magic != executorSourceSetMagic || p == nil || sources.owner != p ||
-		!sources.route.Valid() || sources.waits == nil || sources.waits.owner != p ||
+		!sources.route.Valid() ||
 		(sources.channel == nil) != (p.channelSource == nil) ||
 		sources.channel != nil && p.channelSource != sources.channel {
 		return false
 	}
-	_, waitsScanOK := waitRegistrationScanLimit(sources.waits)
 	_, timerScanOK := timerRegistrationScanLimit(sources.timers)
 	_, pollScanOK := PollOperationScanLimit(sources.poll)
+	_, manualScanOK := ManualOperationScanLimit(sources.manual)
 	_, workerScanOK := workerOperationScanLimit(sources.worker)
 	_, channelScanOK := channelOperationScanLimit(sources.channel)
 	_, controlScanOK := taskControlScanLimit(sources.control)
-	return waitsScanOK && (sources.timers == nil || timerScanOK && sources.timers.owner == p && sources.timers.route == sources.route) &&
+	return (sources.timers == nil || timerScanOK && sources.timers.owner == p && sources.timers.route == sources.route) &&
 		(sources.poll == nil || pollScanOK && sources.poll.owner == p && sources.poll.route == sources.route) &&
-		(sources.manual == nil || sources.manual.owner == p && sources.manual.route == sources.route) &&
+		(sources.manual == nil || manualScanOK && sources.manual.owner == p && sources.manual.route == sources.route) &&
 		(sources.worker == nil || workerScanOK && sources.worker.owner == p && sources.worker.route == sources.route) &&
 		(sources.channel == nil || channelScanOK && sources.channel.owner == p && sources.channel.route == sources.route) &&
 		(sources.control == nil || controlScanOK && sources.control.owner == p && sources.control.route == sources.route)
 }
 
 // ExecutorSourceCatalog is the frozen direct-call source catalog for one
-// executor. Waits remains mandatory during the V1 migration; every additional
-// source is optional and extends the common transaction without adding another
-// scheduler driver or interface dispatch layer.
+// executor. Every source is optional; an empty catalog is valid for portable
+// yield/await-only targets.
 type ExecutorSourceCatalog struct {
-	Waits   *WaitRegistrationTable
 	Timers  *TimerRegistrationTable
 	Poll    *PollOperationSource
 	Manual  *ManualOperationSource
@@ -140,19 +135,16 @@ type ExecutorSourceCatalog struct {
 // transaction. A later-source failure rolls back earlier empty bindings and
 // leaves the source set exact-zero.
 func bindExecutorSourceSetAtRoute(sources *ExecutorSourceSet, p *P, route RouteID, catalog ExecutorSourceCatalog) bool {
-	if sources == nil || *sources != (ExecutorSourceSet{}) || p == nil || !route.Valid() || catalog.Waits == nil ||
-		p.channelSource != nil || !bindRegistrationTable(catalog.Waits, p) {
+	if sources == nil || *sources != (ExecutorSourceSet{}) || p == nil || !route.Valid() || p.channelSource != nil {
 		return false
 	}
 	if catalog.Timers != nil && !bindTimerRegistrationTableAtRoute(catalog.Timers, p, route) {
-		_ = unbindRegistrationTable(catalog.Waits, p)
 		return false
 	}
 	if catalog.Poll != nil && !BindPollOperationSourceAtRoute(catalog.Poll, p, route) {
 		if catalog.Timers != nil {
 			_ = unbindTimerRegistrationTable(catalog.Timers, p)
 		}
-		_ = unbindRegistrationTable(catalog.Waits, p)
 		return false
 	}
 	if catalog.Manual != nil && !BindManualOperationSourceAtRoute(catalog.Manual, p, route) {
@@ -162,7 +154,6 @@ func bindExecutorSourceSetAtRoute(sources *ExecutorSourceSet, p *P, route RouteI
 		if catalog.Timers != nil {
 			_ = unbindTimerRegistrationTable(catalog.Timers, p)
 		}
-		_ = unbindRegistrationTable(catalog.Waits, p)
 		return false
 	}
 	if catalog.Worker != nil && !BindWorkerOperationSourceAtRoute(catalog.Worker, p, route) {
@@ -175,7 +166,6 @@ func bindExecutorSourceSetAtRoute(sources *ExecutorSourceSet, p *P, route RouteI
 		if catalog.Timers != nil {
 			_ = unbindTimerRegistrationTable(catalog.Timers, p)
 		}
-		_ = unbindRegistrationTable(catalog.Waits, p)
 		return false
 	}
 	if catalog.Channel != nil && !BindChannelOperationSourceAtRoute(catalog.Channel, p, route) {
@@ -191,7 +181,6 @@ func bindExecutorSourceSetAtRoute(sources *ExecutorSourceSet, p *P, route RouteI
 		if catalog.Timers != nil {
 			_ = unbindTimerRegistrationTable(catalog.Timers, p)
 		}
-		_ = unbindRegistrationTable(catalog.Waits, p)
 		return false
 	}
 	if catalog.Control != nil && !BindTaskControlSourceAtRoute(catalog.Control, p, route) {
@@ -210,13 +199,11 @@ func bindExecutorSourceSetAtRoute(sources *ExecutorSourceSet, p *P, route RouteI
 		if catalog.Timers != nil {
 			_ = unbindTimerRegistrationTable(catalog.Timers, p)
 		}
-		_ = unbindRegistrationTable(catalog.Waits, p)
 		return false
 	}
 	sources.magic = executorSourceSetMagic
 	sources.owner = p
 	sources.route = route
-	sources.waits = catalog.Waits
 	sources.timers = catalog.Timers
 	sources.poll = catalog.Poll
 	sources.manual = catalog.Manual
@@ -247,13 +234,6 @@ func (sources *ExecutorSourceSet) acceptsScan(p *P, now int64, withDeadline bool
 		withDeadline == sources.usesMonotonicTime() && (!withDeadline || now >= 0)
 }
 
-func (sources *ExecutorSourceSet) waitTable() *WaitRegistrationTable {
-	if sources == nil {
-		return nil
-	}
-	return sources.waits
-}
-
 func (sources *ExecutorSourceSet) timerTable() *TimerRegistrationTable {
 	if sources == nil {
 		return nil
@@ -278,11 +258,6 @@ func (sources *ExecutorSourceSet) pollSource() *PollOperationSource {
 func (sources *ExecutorSourceSet) publishPass(p *P, now int64, withDeadline bool) (scan executorSourceScan, ok bool) {
 	if !sources.acceptsScan(p, now, withDeadline) {
 		return executorSourceScan{}, false
-	}
-	scan.waits, ok = sources.waits.drainFor(p)
-	scan.completed += scan.waits
-	if !ok {
-		return scan, false
 	}
 	if sources.timers != nil {
 		scan.timers, scan.deadline, scan.hasDeadline, ok = sources.timers.drainDueFor(p, now)
@@ -577,7 +552,7 @@ func (sources *ExecutorSourceSet) resolvePublishedEpoch(p *P) (promoted, applyVi
 // deadline; future deadlines are not pending runnable work.
 func (sources *ExecutorSourceSet) pending(p *P) bool {
 	return validExecutorSourceSet(sources, p) &&
-		(p.affectedWaitHead != nil || sources.waits.Pending() || sources.poll != nil && sources.poll.Pending() ||
+		(p.affectedWaitHead != nil || sources.poll != nil && sources.poll.Pending() ||
 			sources.manual != nil && sources.manual.Pending() ||
 			sources.worker != nil && sources.worker.Pending() ||
 			sources.channel != nil && sources.channel.Pending() ||
@@ -608,7 +583,7 @@ func (sources *ExecutorSourceSet) nextDeadline(p *P) (deadline int64, hasDeadlin
 }
 
 func (sources *ExecutorSourceSet) empty(p *P) bool {
-	return validExecutorSourceSet(sources, p) && registrationTableEmpty(sources.waits, p) &&
+	return validExecutorSourceSet(sources, p) &&
 		(sources.timers == nil || timerRegistrationTableEmpty(sources.timers, p)) &&
 		(sources.poll == nil || pollOperationSourceEmpty(sources.poll, p)) &&
 		(sources.manual == nil || manualOperationSourceEmpty(sources.manual, p)) &&
@@ -623,7 +598,7 @@ func (sources *ExecutorSourceSet) empty(p *P) bool {
 // operation-producing source must already be empty; the terminal-close action
 // then owns sealing and retiring the remaining control endpoints.
 func (sources *ExecutorSourceSet) canBeginTerminalClose(p *P) bool {
-	return validExecutorSourceSet(sources, p) && registrationTableEmpty(sources.waits, p) &&
+	return validExecutorSourceSet(sources, p) &&
 		(sources.timers == nil || timerRegistrationTableEmpty(sources.timers, p)) &&
 		(sources.poll == nil || pollOperationSourceEmpty(sources.poll, p)) &&
 		(sources.manual == nil || manualOperationSourceEmpty(sources.manual, p)) &&
@@ -658,7 +633,7 @@ func (sources *ExecutorSourceSet) publishTerminalPass(p *P, terminal *G) (scan e
 }
 
 func (sources *ExecutorSourceSet) canFinishTerminalClose(p *P) bool {
-	return validExecutorSourceSet(sources, p) && registrationTableEmpty(sources.waits, p) &&
+	return validExecutorSourceSet(sources, p) &&
 		(sources.timers == nil || timerRegistrationTableEmpty(sources.timers, p)) &&
 		(sources.poll == nil || pollOperationSourceEmpty(sources.poll, p)) &&
 		(sources.manual == nil || manualOperationSourceEmpty(sources.manual, p)) &&
@@ -684,11 +659,6 @@ func (sources *ExecutorSourceSet) finishTerminalClose(p *P) bool {
 func (sources *ExecutorSourceSet) drainForClose(p *P) (scan executorSourceScan, ok bool) {
 	if !validExecutorSourceSet(sources, p) {
 		return executorSourceScan{}, false
-	}
-	scan.waits, ok = sources.waits.drainFor(p)
-	scan.completed = scan.waits
-	if !ok {
-		return scan, false
 	}
 	if sources.manual != nil {
 		published, lost, manualOK := sources.manual.PublishPass(p)
@@ -757,9 +727,6 @@ func unbindExecutorSourceSet(sources *ExecutorSourceSet, p *P) bool {
 		return false
 	}
 	if sources.timers != nil && !unbindTimerRegistrationTable(sources.timers, p) {
-		return false
-	}
-	if !unbindRegistrationTable(sources.waits, p) {
 		return false
 	}
 	*sources = ExecutorSourceSet{}

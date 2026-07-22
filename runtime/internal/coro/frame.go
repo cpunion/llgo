@@ -93,7 +93,6 @@ const (
 	pendingAwait
 	pendingComplete
 	pendingYield
-	pendingPark
 	pendingParkSet
 	pendingPanic
 )
@@ -102,8 +101,6 @@ type pendingTransition struct {
 	kind   pendingKind
 	from   *Frame
 	target *Frame
-	wait   *WaitToken
-	ticket WaitTicket
 }
 
 // Frame is scheduler-owned metadata. It lives at the beginning of the same
@@ -384,33 +381,6 @@ func PrepareYield(g *G, handle unsafe.Pointer, header *HeaderV1) bool {
 	return true
 }
 
-// PreparePark records an exact external/platform completion wait. The token
-// must be armed before the operation is submitted, so completion may safely
-// race before, during, or after this call without losing a wakeup. As with all
-// coroutine hooks, the transition is committed only after llvm.coro.resume
-// returns to Resumed on the scheduler stack.
-func PreparePark(g *G, handle unsafe.Pointer, header *HeaderV1, token *WaitToken, ticket WaitTicket) bool {
-	if !ValidG(g) || !resumeGateTaken(g) || handle == nil || header == nil || g.pending.kind != pendingNone || g.spawnChild != nil ||
-		g.waitToken != nil || g.waitTicket != 0 || g.waiting || g.nextWait != nil ||
-		!releasableParkState(&g.park) || g.park.taskCancelKind != TaskCancelNone {
-		return false
-	}
-	frame := findFrame(g, handle)
-	if frame == nil || frame != g.active || frame.header != header || frame.state != FrameActive ||
-		header.SuspendReason != uint16(SuspendPark) ||
-		header.Lifecycle != uint16(FrameSuspended) {
-		return false
-	}
-	// Claim only after every scheduler-owned field has been validated. Once the
-	// CAS succeeds, assigning the pending transition cannot fail, so a rejected
-	// PreparePark never strands a claimed token.
-	if !claimWait(token, ticket) {
-		return false
-	}
-	g.pending = pendingTransition{kind: pendingPark, from: frame, wait: token, ticket: ticket}
-	return true
-}
-
 // PrepareParkSet records a V2 multi-source park. Every candidate operation is
 // already attached and producer-visible; CommitParkSet is the exact owner-P
 // claim that makes the logical ticket eligible for SourceSet resolution.
@@ -418,7 +388,7 @@ func PreparePark(g *G, handle unsafe.Pointer, header *HeaderV1, token *WaitToken
 // callback receives G, ParkState, or an LLVM handle.
 func PrepareParkSet(g *G, handle unsafe.Pointer, header *HeaderV1, ticket ParkTicket, record *WaitSetRecord) bool {
 	if !ValidG(g) || !resumeGateTaken(g) || handle == nil || header == nil || g.pending.kind != pendingNone || g.spawnChild != nil ||
-		g.waitToken != nil || g.waitTicket != 0 || g.waiting || g.nextWait != nil ||
+		g.waiting ||
 		!validParkState(&g.park) || g.park.phase != parkSealed || ticket != g.park.ticket ||
 		!validPreparingWaitSetRecord(record, &g.park, ticket) {
 		return false

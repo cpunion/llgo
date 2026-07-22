@@ -31,12 +31,11 @@ import (
 func TestUnifiedTimerPollChannelWaitSet(t *testing.T) {
 	p := new(P)
 	sources := new(ExecutorSourceSet)
-	waits := new(WaitRegistrationTable)
 	timers := new(TimerRegistrationTable)
 	poll := new(PollOperationSource)
 	channel := new(ChannelOperationSource)
 	if !bindExecutorSourceSetAtRoute(sources, p, RouteID(7), ExecutorSourceCatalog{
-		Waits: waits, Timers: timers, Poll: poll, Channel: channel,
+		Timers: timers, Poll: poll, Channel: channel,
 	}) {
 		t.Fatal("bind unified timer/poll/channel source set")
 	}
@@ -143,7 +142,7 @@ func TestUnifiedTimerPollChannelWaitSet(t *testing.T) {
 		!channel.Recycle(p, secondChannelID) {
 		t.Fatalf("finish canceled unified wait-set = (%d, %d, %+v, %d)", outcome, selectedCase, lease, taskCancel)
 	}
-	if !unbindExecutorSourceSet(sources, p) || !waits.CanRelease() || !timers.CanRelease() ||
+	if !unbindExecutorSourceSet(sources, p) || !timers.CanRelease() ||
 		!poll.CanRelease() || !channel.CanRelease() {
 		t.Fatal("unbind unified wait-set source catalog")
 	}

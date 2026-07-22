@@ -18,12 +18,9 @@
 
 package build
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
-func TestCoroWorkerRequiresNativeRuntimeAdapter(t *testing.T) {
+func TestCoroWorkerCapabilityMatchesNativeRuntimeAdapter(t *testing.T) {
 	base := Config{
 		BuildMode: BuildModeExe,
 		Goos:      "linux",
@@ -31,6 +28,9 @@ func TestCoroWorkerRequiresNativeRuntimeAdapter(t *testing.T) {
 	}
 	if err := validateCoroProgramBootstrapConfig(&base); err != nil {
 		t.Fatalf("native worker adapter rejected: %v", err)
+	}
+	if !base.coroWorkerActive() {
+		t.Fatal("native stackless profile did not select its worker adapter")
 	}
 
 	for _, test := range []struct {
@@ -46,15 +46,17 @@ func TestCoroWorkerRequiresNativeRuntimeAdapter(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			conf := base
 			test.mutate(&conf)
-			err := validateCoroProgramBootstrapConfig(&conf)
-			if err == nil || !strings.Contains(err.Error(), "native Darwin/Linux pthread worker adapter") {
-				t.Fatalf("target gate error = %v", err)
+			if conf.coroWorkerActive() {
+				t.Fatal("target without a native worker adapter advertised worker capability")
+			}
+			if err := validateCoroProgramBootstrapConfig(&conf); err != nil {
+				t.Fatalf("portable stackless target was rejected: %v", err)
 			}
 		})
 	}
 }
 
-func TestCoroNativeFleetRequiresCompleteNativeRuntime(t *testing.T) {
+func TestCoroNativeFleetCapabilityMatchesCompleteNativeRuntime(t *testing.T) {
 	base := Config{
 		BuildMode: BuildModeExe,
 		Goos:      "linux",
@@ -63,28 +65,29 @@ func TestCoroNativeFleetRequiresCompleteNativeRuntime(t *testing.T) {
 	if err := validateCoroProgramBootstrapConfig(&base); err != nil {
 		t.Fatalf("native fleet rejected: %v", err)
 	}
+	if !base.coroNativeFleetActive() {
+		t.Fatal("native stackless profile did not select its executor fleet")
+	}
 
 	for _, test := range []struct {
 		name string
-		want string
 		set  func(*Config)
 	}{
-		{name: "program", want: "runnable program bootstrap", set: func(conf *Config) {
+		{name: "profile disabled", set: func(conf *Config) {
 			conf.CoroProfile = CoroProfileNone
 		}},
-		{name: "worker", want: "bounded native worker capability", set: func(conf *Config) {
-			conf.CoroProfile = CoroProfileNone
-		}},
-		{name: "32-bit", want: "64-bit native Darwin/Linux timer reactor", set: func(conf *Config) {
+		{name: "32-bit", set: func(conf *Config) {
 			conf.Goarch = "arm"
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			conf := base
 			test.set(&conf)
-			err := validateCoroProgramBootstrapConfig(&conf)
-			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("native fleet target gate error = %v, want %q", err, test.want)
+			if conf.coroNativeFleetActive() {
+				t.Fatal("target without the complete native reactor advertised fleet capability")
+			}
+			if err := validateCoroProgramBootstrapConfig(&conf); err != nil {
+				t.Fatalf("non-fleet stackless configuration was rejected: %v", err)
 			}
 		})
 	}
