@@ -305,7 +305,7 @@ func (t *rtype) Method(i int) (m Method) {
 	}
 	mt := FuncOf(in, out, ft.Variadic())
 	m.Type = mt
-	m.Func = methodFuncValue(&mt.(*rtype).t, p.Tfn_, fl)
+	m.Func = methodFuncValue(&mt.(*rtype).t, unsafe.Pointer(p.Tfn_), fl)
 	m.Index = i
 	return m
 }

@@ -4,7 +4,6 @@ package runtime
 
 import (
 	c "github.com/goplus/llgo/runtime/internal/clite"
-	"github.com/goplus/llgo/runtime/internal/clite/debug"
 	"github.com/goplus/llgo/runtime/internal/clite/pthread"
 )
 
@@ -19,12 +18,7 @@ func Rethrow(link *Defer) {
 	if ptr := excepKey.Get(); ptr != nil {
 		if link == nil {
 			TracePanic(*(*any)(ptr))
-			// This is the terminal fallback of the legacy longjmp unwinder.
-			// A callback may be coroutine-capable and therefore cannot run after
-			// the last managed defer frame has already been abandoned. Keep the
-			// emergency trace bounded and synchronous; coroutine-aware panic
-			// cleanup owns richer Go traceback formatting before this point.
-			debug.PrintStack(2)
+			traceTerminalPanic(2)
 			c.Free(ptr)
 			c.Exit(2)
 		} else {

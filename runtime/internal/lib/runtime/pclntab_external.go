@@ -115,7 +115,7 @@ func ensureRuntimePCLN() bool {
 
 func loadExternalPCLN() bool {
 	var info clitedebug.Info
-	if clitedebug.Addrinfo(clitedebug.Address(), &info) == 0 || info.Fbase == nil {
+	if clitedebug.Addrinfo(uintptr(clitedebug.Address()), &info) == 0 || info.Fbase == 0 {
 		return false
 	}
 	path := externalPCLNExecutablePath()
