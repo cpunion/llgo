@@ -198,18 +198,15 @@ func (p *context) tryCompileCoroStaticAwait(b llssa.Builder, call *ssa.Call) (ll
 	if p.funcKind(call.Call.Value) == fnIgnore {
 		return llssa.Nil, false
 	}
-	callPlan, ok := p.compilation.CoroPlan.CallPlan(call)
-	if !ok || callPlan.Rep != coro.DirectCoro {
+	instructionPlan, planned := p.plannedCoroPhysicalControl(call)
+	if !planned || instructionPlan.control != coroPhysicalControlDirectAwait {
 		return llssa.Nil, false
 	}
-	callerPlan, ok := p.compilation.CoroPlan.FunctionPlan(p.goFn)
-	if !ok {
-		panic("coroutine child await: current function has no compilation plan")
+	callee := instructionPlan.controlTarget
+	if callee == nil || instructionPlan.controlTargetID == "" {
+		panic("coroutine child await has an incomplete frozen physical control recipe")
 	}
-	callee, _, err := resolveCoroStaticAwait(p.compilation.CoroPlan, callerPlan, call, p.compilation.EmissionUniverse)
-	if err != nil {
-		panic(fmt.Sprintf("coroutine child await: function %q: %v", callerPlan.ID, err))
-	}
+	p.observeCoroPhysicalControl(call, coroPhysicalControlDirectAwait)
 
 	p.recordCallerLocationForCall(b, &call.Call)
 	p.emitPCLineLabel(b, call.Pos())

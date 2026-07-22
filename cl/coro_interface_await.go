@@ -54,14 +54,15 @@ func (p *context) tryCompileCoroInterfaceDispatchAwait(b llssa.Builder, call *ss
 		!p.compilation.EnableCoroChildAwait || call == nil || call.Common() == nil || !call.Common().IsInvoke() {
 		return llssa.Nil, false
 	}
-	dispatch, err := resolveCoroInterfaceDispatchPlan(p.compilation.CoroPlan, p.compilation.EmissionUniverse, call)
-	if err != nil || !coroInterfaceDispatchNeedsAwait(dispatch) {
+	instructionPlan, planned := p.plannedCoroPhysicalControl(call)
+	if !planned || instructionPlan.control != coroPhysicalControlClosedInterfaceAwait {
 		return llssa.Nil, false
 	}
-	caller, ok := p.compilation.CoroPlan.FunctionPlan(p.goFn)
-	if !ok || caller.Emission != coro.EmitCoroutine || caller.Primary != coro.PrimaryCoroutine {
-		panic("coroutine interface dispatch: current function is not one planned coroutine primary")
+	dispatch := instructionPlan.controlInterface
+	if dispatch == nil || !coroInterfaceDispatchNeedsAwait(dispatch) {
+		panic("coroutine interface dispatch has an incomplete frozen physical control recipe")
 	}
+	p.observeCoroPhysicalControl(call, coroPhysicalControlClosedInterfaceAwait)
 
 	p.recordCallerLocationForCall(b, &call.Call)
 	p.emitPCLineLabel(b, call.Pos())

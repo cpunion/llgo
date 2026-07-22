@@ -76,18 +76,74 @@ const (
 	coroPhysicalContainerArrayPointer
 )
 
+// coroPhysicalControlRecipe is the frozen coroutine control operation selected
+// for one source instruction. It is deliberately orthogonal to the value/fault
+// recipe above: an awaited call can still carry an implicit guard plan, while
+// ordinary calls and values keep the zero control recipe.
+type coroPhysicalControlRecipe uint8
+
+const (
+	coroPhysicalControlNone coroPhysicalControlRecipe = iota
+	coroPhysicalControlDirectAwait
+	coroPhysicalControlDispatchAwait
+	coroPhysicalControlClosedInterfaceAwait
+	coroPhysicalControlManagedInterfaceAwait
+	coroPhysicalControlPlainDispatch
+	coroPhysicalControlDirectSpawn
+	coroPhysicalControlDispatchSpawn
+)
+
+func (recipe coroPhysicalControlRecipe) String() string {
+	switch recipe {
+	case coroPhysicalControlNone:
+		return "none"
+	case coroPhysicalControlDirectAwait:
+		return "direct-await"
+	case coroPhysicalControlDispatchAwait:
+		return "dispatch-await"
+	case coroPhysicalControlClosedInterfaceAwait:
+		return "closed-interface-await"
+	case coroPhysicalControlManagedInterfaceAwait:
+		return "managed-interface-await"
+	case coroPhysicalControlPlainDispatch:
+		return "plain-dispatch"
+	case coroPhysicalControlDirectSpawn:
+		return "direct-spawn"
+	case coroPhysicalControlDispatchSpawn:
+		return "dispatch-spawn"
+	default:
+		return fmt.Sprintf("physical-control-recipe(%d)", uint8(recipe))
+	}
+}
+
+type coroPhysicalLoweringCapabilities struct {
+	childAwait       bool
+	staticSpawn      bool
+	managedDispatch  bool
+	explicitPanic    bool
+	interfacePlain   *coroClosedInterfacePlainPlan
+	managedInterface *coroManagedInterfaceDispatchPlan
+}
+
 // coroPhysicalInstructionPlan contains only information that changes emitted
 // control flow. container and bound make the guarded Index/Slice recipes
 // target-independent; nilGuard and boundsGuard are independent because a
 // frozen safe array index removes only the range edge, never a nullable
 // pointer-to-array dereference.
 type coroPhysicalInstructionPlan struct {
-	semantic    coroSemanticInstructionPlan
-	recipe      coroPhysicalInstructionRecipe
-	container   coroPhysicalContainerKind
-	bound       int64
-	nilGuard    bool
-	boundsGuard bool
+	semantic           coroSemanticInstructionPlan
+	recipe             coroPhysicalInstructionRecipe
+	control            coroPhysicalControlRecipe
+	controlTarget      *ssa.Function
+	controlTargetID    coro.FunctionID
+	controlInterface   *coroInterfaceDispatchPlan
+	controlSignature   *types.Signature
+	controlFailure     string
+	controlFailureHard bool
+	container          coroPhysicalContainerKind
+	bound              int64
+	nilGuard           bool
+	boundsGuard        bool
 }
 
 func (plan coroPhysicalInstructionPlan) mayFault() bool {
@@ -117,6 +173,7 @@ func prepareCoroPhysicalFunctionPlan(
 	cleanup *coroStaticCleanupPlan,
 	critical *coroCriticalProof,
 	explicitPanic bool,
+	capabilities coroPhysicalLoweringCapabilities,
 ) (*coroPhysicalFunctionPlan, error) {
 	if audit == nil || audit.fn == nil {
 		return nil, fmt.Errorf("physical function planning requires one exact pure-SSA audit")
@@ -131,7 +188,7 @@ func prepareCoroPhysicalFunctionPlan(
 	}
 	for _, block := range audit.fn.Blocks {
 		for _, instruction := range block.Instrs {
-			instructionPlan, err := planCoroPhysicalInstruction(audit, owner, whole, instruction, explicitPanic)
+			instructionPlan, err := planCoroPhysicalInstruction(audit, owner, whole, instruction, explicitPanic, capabilities)
 			if err != nil {
 				return nil, fmt.Errorf("block %d instruction %T: %w", block.Index, instruction, err)
 			}
@@ -238,6 +295,7 @@ func planCoroPhysicalInstruction(
 	whole *coro.SSAPlan,
 	instruction ssa.Instruction,
 	explicitPanic bool,
+	capabilities coroPhysicalLoweringCapabilities,
 ) (coroPhysicalInstructionPlan, error) {
 	result := coroPhysicalInstructionPlan{recipe: coroPhysicalInstructionOrdinary}
 	if audit == nil || instruction == nil || instruction.Parent() != audit.fn {
@@ -251,6 +309,7 @@ func planCoroPhysicalInstruction(
 		return result, fmt.Errorf("load semantic instruction recipe: %w", err)
 	}
 	result.semantic = semantic
+	planCoroPhysicalControlInstruction(audit, whole, instruction, capabilities, &result)
 	switch instruction := instruction.(type) {
 	case *ssa.FieldAddr:
 		if audit.fieldAddrRequiresImplicitNilFault(instruction) {
@@ -337,6 +396,182 @@ func planCoroPhysicalInstruction(
 		}
 	}
 	return result, nil
+}
+
+// planCoroPhysicalControlInstruction is the sole post-analysis selector for
+// direct child-await and source goroutine-spawn control recipes. It records a
+// non-hard await mismatch so the validator can still consider the established
+// direct-plain path; once an await target was recognized, ABI failures are hard
+// and cannot silently fall back. Every spawn mismatch is hard because a source
+// Go instruction has no ordinary synchronous lowering.
+func planCoroPhysicalControlInstruction(
+	audit *coroPhysicalPureSSAAudit,
+	whole *coro.SSAPlan,
+	instruction ssa.Instruction,
+	capabilities coroPhysicalLoweringCapabilities,
+	result *coroPhysicalInstructionPlan,
+) {
+	if audit == nil || result == nil || instruction == nil || instruction.Parent() != audit.fn {
+		panic("physical control planning requires one exact instruction plan")
+	}
+	switch instruction := instruction.(type) {
+	case *ssa.Call:
+		if !capabilities.childAwait || whole == nil {
+			return
+		}
+		common := instruction.Common()
+		callPlan, callPlanned := whole.CallPlan(instruction)
+		if common != nil && common.IsInvoke() {
+			result.controlFailureHard = true
+			if capabilities.managedInterface.acceptsCall(instruction) {
+				if !callPlanned || callPlan.Rep != coro.Dispatch {
+					result.controlFailure = "managed interface descriptor call lost its frozen Dispatch CallPlan"
+					return
+				}
+				if callPlan.Open {
+					if err := validateCoroManagedInterfaceDispatchCall(
+						whole, audit.universe, audit.fn, instruction, callPlan,
+					); err != nil {
+						result.controlFailure = "invalid managed interface await: " + err.Error()
+						return
+					}
+				}
+				signature, err := coroInterfaceDispatchSourceSignature(common)
+				if err != nil {
+					result.controlFailure = "managed interface await signature: " + err.Error()
+					return
+				}
+				result.control = coroPhysicalControlManagedInterfaceAwait
+				result.controlSignature = signature
+				return
+			}
+			if !capabilities.explicitPanic {
+				if _, err := resolveCoroClosedInterfacePlainCall(whole, instruction); err == nil {
+					result.controlFailureHard = false
+					return
+				}
+			}
+			if capabilities.interfacePlain.acceptsCall(instruction) {
+				result.controlFailureHard = false
+				return
+			}
+			dispatch, err := resolveCoroInterfaceDispatchPlan(whole, audit.universe, instruction)
+			if err != nil {
+				result.controlFailure = "unsupported interface invoke: " + err.Error()
+				return
+			}
+			if !coroInterfaceDispatchNeedsAwait(dispatch) {
+				result.controlFailure = "unsupported interface invoke: closed interface dispatch has no coroutine target"
+				return
+			}
+			result.control = coroPhysicalControlClosedInterfaceAwait
+			result.controlInterface = dispatch
+			return
+		}
+		if callPlanned && callPlan.Rep == coro.Dispatch && common != nil && common.StaticCallee() == nil {
+			result.controlFailureHard = true
+			if !capabilities.managedDispatch {
+				result.controlFailure = "managed descriptor call requires the v1 descriptor dispatch capability"
+				return
+			}
+			if callPlan.SyncDispatch {
+				if err := validateCoroPlainDispatchCall(whole, audit.fn, instruction, callPlan, audit.universe); err != nil {
+					result.controlFailure = "invalid synchronous descriptor call: " + err.Error()
+					return
+				}
+				result.control = coroPhysicalControlPlainDispatch
+				return
+			}
+			if err := validateCoroManagedDispatchCall(whole, audit.fn, instruction, callPlan, audit.universe); err != nil {
+				result.controlFailure = "invalid managed descriptor await: " + err.Error()
+				return
+			}
+			if err := validateCoroManagedDispatchAwaitShape(whole, audit.fn, instruction, callPlan); err != nil {
+				result.controlFailure = "invalid managed descriptor await: " + err.Error()
+				return
+			}
+			result.control = coroPhysicalControlDispatchAwait
+			return
+		}
+		callerPlan, found := whole.FunctionPlan(audit.fn)
+		if !found {
+			result.controlFailure = "current function has no compilation plan"
+			return
+		}
+		callee, targetPlan, err := resolveCoroStaticAwait(whole, callerPlan, instruction, audit.universe)
+		if err != nil {
+			result.controlFailure = err.Error()
+			return
+		}
+		calleeSignature := coroPhysicalNormalizeSourceSignature(callee.Signature)
+		if audit.universe != nil {
+			calleeSignature, err = audit.universe.coroPhysicalSourceSignature(callee)
+		}
+		if err == nil {
+			err = validateCoroLeafPhysicalSignature(targetPlan, calleeSignature)
+		}
+		if err != nil {
+			result.controlFailure = "child await signature: " + err.Error()
+			result.controlFailureHard = true
+			return
+		}
+		result.control = coroPhysicalControlDirectAwait
+		result.controlTarget = callee
+		result.controlTargetID = targetPlan.ID
+	case *ssa.Go:
+		result.controlFailureHard = true
+		if !capabilities.staticSpawn {
+			result.controlFailure = "goroutine spawn requires the closed-static scheduler capability"
+			return
+		}
+		if whole == nil {
+			result.controlFailure = "goroutine spawn requires one compilation plan"
+			return
+		}
+		callPlan, found := whole.CallPlan(instruction)
+		if !found {
+			result.controlFailure = "goroutine spawn has no compilation CallPlan"
+			return
+		}
+		switch callPlan.Rep {
+		case coro.DirectCoro:
+			target, targetPlan, err := resolveCoroDirectStaticSpawn(whole, instruction, capabilities.managedDispatch)
+			if err != nil {
+				result.controlFailure = "unsupported closed static spawn: " + err.Error()
+				return
+			}
+			targetSignature := coroPhysicalNormalizeSourceSignature(target.Signature)
+			if audit.universe != nil {
+				targetSignature, err = audit.universe.coroPhysicalSourceSignature(target)
+			}
+			if err == nil {
+				err = validateCoroLeafPhysicalSignature(targetPlan, targetSignature)
+			}
+			if err != nil {
+				result.controlFailure = "spawn target signature: " + err.Error()
+				return
+			}
+			result.control = coroPhysicalControlDirectSpawn
+			result.controlTarget = target
+			result.controlTargetID = targetPlan.ID
+		case coro.Dispatch:
+			if !capabilities.managedDispatch {
+				result.controlFailure = "managed descriptor spawn requires the v1 descriptor dispatch capability"
+				return
+			}
+			if _, err := whole.ResolveManagedDispatchSpawn(instruction); err != nil {
+				result.controlFailure = "unsupported managed descriptor spawn: " + err.Error()
+				return
+			}
+			if err := validateCoroManagedDispatchSignatureShape(instruction.Common().Signature()); err != nil {
+				result.controlFailure = "managed descriptor spawn signature: " + err.Error()
+				return
+			}
+			result.control = coroPhysicalControlDispatchSpawn
+		default:
+			result.controlFailure = "goroutine spawn has unsupported representation " + callPlan.Rep.String()
+		}
+	}
 }
 
 func coroPhysicalContainerPlan(audit *coroPhysicalPureSSAAudit, value ssa.Value) (coroPhysicalContainerKind, int64, error) {

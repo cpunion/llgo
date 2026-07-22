@@ -1079,7 +1079,7 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesAndFrameRetention(fn *ssa.Fu
 func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn *ssa.Function, plan coro.FunctionPlan, whole *coro.SSAPlan, universe *EmissionUniverse, childAwait, programRun, staticSpawn, explicitPanic bool, frameRetentionABI string, channel, managedDispatch, rawMethodToken bool) error {
 	return validateCoroPhysicalABIForOwner(
 		fn, plan, whole, universe, nil, childAwait, programRun, staticSpawn, explicitPanic,
-		frameRetentionABI, channel, managedDispatch, rawMethodToken, nil,
+		frameRetentionABI, channel, managedDispatch, rawMethodToken, nil, nil, nil,
 	)
 }
 
@@ -1092,6 +1092,8 @@ func validateCoroPhysicalABIForOwner(
 	childAwait, programRun, staticSpawn, explicitPanic bool,
 	frameRetentionABI string,
 	channel, managedDispatch, rawMethodToken bool,
+	interfacePlain *coroClosedInterfacePlainPlan,
+	managedInterface *coroManagedInterfaceDispatchPlan,
 	accept func(*coroPhysicalFunctionPlan) error,
 ) error {
 	if !childAwait {
@@ -1112,7 +1114,9 @@ func validateCoroPhysicalABIForOwner(
 		if err != nil {
 			return fmt.Errorf("coroutine physical ABI: function %q: leaf critical region: %w", plan.ID, err)
 		}
-		physical, err := prepareCoroPhysicalFunctionPlan(audit, owner, whole, nil, critical, false)
+		physical, err := prepareCoroPhysicalFunctionPlan(
+			audit, owner, whole, nil, critical, false, coroPhysicalLoweringCapabilities{},
+		)
 		if err != nil {
 			return fmt.Errorf("coroutine physical ABI: function %q: leaf physical plan: %w", plan.ID, err)
 		}
@@ -1270,6 +1274,14 @@ func validateCoroPhysicalABIForOwner(
 	}
 	physical, physicalErr := prepareCoroPhysicalFunctionPlan(
 		pureSSA, owner, whole, cleanupPlan, critical, explicitPanic,
+		coroPhysicalLoweringCapabilities{
+			childAwait:       childAwait,
+			staticSpawn:      staticSpawn,
+			managedDispatch:  managedDispatch,
+			explicitPanic:    explicitPanic,
+			interfacePlain:   interfacePlain,
+			managedInterface: managedInterface,
+		},
 	)
 	if physicalErr != nil {
 		return fail("cannot freeze physical instruction plan: %v", physicalErr)
@@ -1397,6 +1409,10 @@ func validateCoroPhysicalABIForOwner(
 					return coroLeafInstructionError(fn, plan, instr, "unsupported unary operation")
 				}
 			case *ssa.Call:
+				instructionPlan, frozen := physical.instructions[instr]
+				if !frozen {
+					return coroLeafInstructionError(fn, plan, instr, "instruction is absent from the frozen physical plan")
+				}
 				if whole != nil && whole.ElidesCall(instr) {
 					if universe != nil {
 						frozen, found, err := universe.coroProgramIR.callSitePlan(instr)
@@ -1443,60 +1459,30 @@ func validateCoroPhysicalABIForOwner(
 					continue
 				}
 				if instr.Common().IsInvoke() {
-					if !explicitPanic {
-						if _, invokeErr := resolveCoroClosedInterfacePlainCall(whole, instr); invokeErr == nil {
-							continue
-						}
-					}
-					if callPlan, found := whole.CallPlan(instr); found && callPlan.Open &&
-						callPlan.Unresolved == coro.UnknownManagedInterfaceDispatch {
-						if !managedDispatch {
-							return coroLeafInstructionError(fn, plan, instr,
-								"managed interface invoke requires the v1 descriptor dispatch capability")
-						}
-						if err := validateCoroManagedInterfaceDispatchCall(whole, universe, fn, instr, callPlan); err != nil {
-							return coroLeafInstructionError(fn, plan, instr, "invalid managed interface await: "+err.Error())
-						}
+					switch instructionPlan.control {
+					case coroPhysicalControlClosedInterfaceAwait, coroPhysicalControlManagedInterfaceAwait:
 						awaits++
 						continue
-					}
-					dispatch, invokeErr := resolveCoroInterfaceDispatchPlan(whole, universe, instr)
-					if invokeErr != nil || !coroInterfaceDispatchNeedsAwait(dispatch) {
-						if invokeErr == nil {
-							invokeErr = fmt.Errorf("closed interface dispatch has no coroutine target")
+					case coroPhysicalControlNone:
+						if instructionPlan.controlFailureHard {
+							return coroLeafInstructionError(fn, plan, instr, instructionPlan.controlFailure)
 						}
-						return coroLeafInstructionError(fn, plan, instr, "unsupported interface invoke: "+invokeErr.Error())
+						continue
+					default:
+						return coroLeafInstructionError(fn, plan, instr,
+							"interface invoke has mismatched frozen control recipe "+instructionPlan.control.String())
 					}
+				}
+				switch instructionPlan.control {
+				case coroPhysicalControlPlainDispatch:
+					continue
+				case coroPhysicalControlDispatchAwait:
 					awaits++
 					continue
-				}
-				if callPlan, found := whole.CallPlan(instr); found && callPlan.Rep == coro.Dispatch &&
-					instr.Common().StaticCallee() == nil {
-					if callPlan.SyncDispatch {
-						if !managedDispatch {
-							return coroLeafInstructionError(fn, plan, instr, "synchronous descriptor call requires the v1 plain dispatch capability")
-						}
-						if err := validateCoroPlainDispatchCall(whole, fn, instr, callPlan, universe); err != nil {
-							return coroLeafInstructionError(fn, plan, instr, "invalid synchronous descriptor call: "+err.Error())
-						}
-						continue
+				default:
+					if instructionPlan.controlFailureHard {
+						return coroLeafInstructionError(fn, plan, instr, instructionPlan.controlFailure)
 					}
-					if callPlan.Open && callPlan.Unresolved != coro.UnknownManagedDispatch {
-						return coroLeafInstructionError(fn, plan, instr, fmt.Sprintf(
-							"open descriptor call has uncertified execution domain %v", callPlan.Unresolved,
-						))
-					}
-					if !managedDispatch {
-						return coroLeafInstructionError(fn, plan, instr, "open managed descriptor call requires the v1 descriptor dispatch capability")
-					}
-					mayAwait := callPlan.Open || coroDispatchCallHasCoroutineTarget(whole, callPlan)
-					if err := validateCoroManagedDispatchCall(whole, fn, instr, callPlan, universe); err != nil {
-						return coroLeafInstructionError(fn, plan, instr, "invalid managed descriptor await: "+err.Error())
-					}
-					if mayAwait {
-						awaits++
-					}
-					continue
 				}
 				if _, recognized, foreignErr := validateCoroWorkerForeignCall(
 					whole, universe, instr, coroWorkerTargetPointerSize(universe),
@@ -1510,20 +1496,12 @@ func validateCoroPhysicalABIForOwner(
 					foreignWaits++
 					continue
 				}
-				callee, calleePlan, err := resolveCoroStaticAwait(whole, plan, instr, universe)
-				if err == nil {
-					calleeSignature := coroPhysicalNormalizeSourceSignature(callee.Signature)
-					if universe != nil {
-						calleeSignature, err = universe.coroPhysicalSourceSignature(callee)
-						if err != nil {
-							return coroLeafInstructionError(fn, plan, instr, "child await signature: "+err.Error())
-						}
-					}
-					if err := validateCoroLeafPhysicalSignature(calleePlan, calleeSignature); err != nil {
-						return coroLeafInstructionError(fn, plan, instr, "child await signature: "+err.Error())
-					}
+				if instructionPlan.control == coroPhysicalControlDirectAwait {
 					awaits++
 					continue
+				}
+				if instructionPlan.controlFailureHard {
+					return coroLeafInstructionError(fn, plan, instr, instructionPlan.controlFailure)
 				}
 				if explicitPanic {
 					if _, targetPlan, plainErr := resolveCoroStaticPlainCall(whole, instr); plainErr == nil {
@@ -1544,47 +1522,22 @@ func validateCoroPhysicalABIForOwner(
 					}
 				}
 				if !programRun {
-					return coroLeafInstructionError(fn, plan, instr, "unsupported child await: "+err.Error())
+					return coroLeafInstructionError(fn, plan, instr, "unsupported child await: "+instructionPlan.controlFailure)
 				}
 				if _, _, plainErr := resolveCoroStaticPlainCall(whole, instr); plainErr != nil {
-					return coroLeafInstructionError(fn, plan, instr, "unsupported call: child await: "+err.Error()+"; direct plain: "+plainErr.Error())
+					return coroLeafInstructionError(fn, plan, instr, "unsupported call: child await: "+instructionPlan.controlFailure+"; direct plain: "+plainErr.Error())
 				}
 			case *ssa.Go:
-				if !staticSpawn {
-					return coroLeafInstructionError(fn, plan, instr, "goroutine spawn requires the closed-static scheduler capability")
+				instructionPlan, frozen := physical.instructions[instr]
+				if !frozen {
+					return coroLeafInstructionError(fn, plan, instr, "instruction is absent from the frozen physical plan")
 				}
-				callPlan, found := whole.CallPlan(instr)
-				if !found {
-					return coroLeafInstructionError(fn, plan, instr, "goroutine spawn has no compilation CallPlan")
-				}
-				switch callPlan.Rep {
-				case coro.DirectCoro:
-					target, targetPlan, err := resolveCoroDirectStaticSpawn(whole, instr, managedDispatch)
-					if err != nil {
-						return coroLeafInstructionError(fn, plan, instr, "unsupported closed static spawn: "+err.Error())
-					}
-					targetSignature := coroPhysicalNormalizeSourceSignature(target.Signature)
-					if universe != nil {
-						targetSignature, err = universe.coroPhysicalSourceSignature(target)
-						if err != nil {
-							return coroLeafInstructionError(fn, plan, instr, "spawn target signature: "+err.Error())
-						}
-					}
-					if err := validateCoroLeafPhysicalSignature(targetPlan, targetSignature); err != nil {
-						return coroLeafInstructionError(fn, plan, instr, "spawn target signature: "+err.Error())
-					}
-				case coro.Dispatch:
-					if !managedDispatch {
-						return coroLeafInstructionError(fn, plan, instr, "managed descriptor spawn requires the v1 descriptor dispatch capability")
-					}
-					if _, err := whole.ResolveManagedDispatchSpawn(instr); err != nil {
-						return coroLeafInstructionError(fn, plan, instr, "unsupported managed descriptor spawn: "+err.Error())
-					}
-					if err := validateCoroManagedDispatchSignatureShape(instr.Common().Signature()); err != nil {
-						return coroLeafInstructionError(fn, plan, instr, "managed descriptor spawn signature: "+err.Error())
-					}
+				switch instructionPlan.control {
+				case coroPhysicalControlDirectSpawn, coroPhysicalControlDispatchSpawn:
+				case coroPhysicalControlNone:
+					return coroLeafInstructionError(fn, plan, instr, instructionPlan.controlFailure)
 				default:
-					return coroLeafInstructionError(fn, plan, instr, "goroutine spawn has unsupported representation "+callPlan.Rep.String())
+					return coroLeafInstructionError(fn, plan, instr, "goroutine spawn has mismatched frozen control recipe "+instructionPlan.control.String())
 				}
 				spawns++
 			default:

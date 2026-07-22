@@ -267,24 +267,44 @@ func (p *context) tryCompileCoroManagedInterfaceDispatch(
 ) (llssa.Expr, bool) {
 	if p.compilation == nil || p.compilation.CoroPlan == nil ||
 		!p.compilation.EnableCoroPlainDispatch || call == nil || call.Common() == nil ||
-		!p.compilation.coroManagedInterface.acceptsCall(call) {
+		p.compilation.coroManagedInterface == nil {
 		return llssa.Nil, false
 	}
-	callPlan, found := p.compilation.CoroPlan.CallPlan(call)
-	if !found || callPlan.Rep != coro.Dispatch {
-		panic("managed interface descriptor call lost its frozen Dispatch CallPlan")
-	}
 	common := call.Common()
-	if callPlan.Open {
-		if err := validateCoroManagedInterfaceDispatchCall(
-			p.compilation.CoroPlan, p.compilation.EmissionUniverse, p.goFn, call, callPlan,
-		); err != nil {
+	physical := p.coroBody() != nil
+	var callPlan coro.SSACallPlan
+	var signature *types.Signature
+	if physical {
+		instructionPlan, planned := p.plannedCoroPhysicalControl(call)
+		if !planned || instructionPlan.control != coroPhysicalControlManagedInterfaceAwait {
+			return llssa.Nil, false
+		}
+		if instructionPlan.controlSignature == nil {
+			panic("managed interface await has an incomplete frozen physical control recipe")
+		}
+		signature = instructionPlan.controlSignature
+		p.observeCoroPhysicalControl(call, coroPhysicalControlManagedInterfaceAwait)
+	} else {
+		if !p.compilation.coroManagedInterface.acceptsCall(call) {
+			return llssa.Nil, false
+		}
+		var found bool
+		callPlan, found = p.compilation.CoroPlan.CallPlan(call)
+		if !found || callPlan.Rep != coro.Dispatch {
+			panic("managed interface descriptor call lost its frozen Dispatch CallPlan")
+		}
+		if callPlan.Open {
+			if err := validateCoroManagedInterfaceDispatchCall(
+				p.compilation.CoroPlan, p.compilation.EmissionUniverse, p.goFn, call, callPlan,
+			); err != nil {
+				panic(err)
+			}
+		}
+		var err error
+		signature, err = coroInterfaceDispatchSourceSignature(common)
+		if err != nil {
 			panic(err)
 		}
-	}
-	signature, err := coroInterfaceDispatchSourceSignature(common)
-	if err != nil {
-		panic(err)
 	}
 	p.recordCallerLocationForCall(b, &call.Call)
 	p.emitPCLineLabel(b, call.Pos())
@@ -294,7 +314,7 @@ func (p *context) tryCompileCoroManagedInterfaceDispatch(
 	intf := p.compileValue(b, common.Value)
 	method := b.Imethod(intf, common.Method)
 	args := p.compileValues(b, call.Call.Args, fnNormal)
-	if p.coroBody() != nil {
+	if physical {
 		keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
 		return p.compileCoroManagedDispatchAwaitValue(b, method, args, signature, keepaliveSlots), true
 	}

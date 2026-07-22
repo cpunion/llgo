@@ -41,6 +41,7 @@ type coroSiteEmissionObserver struct {
 	hasExpectedPhysical        bool
 	seenSemantic               bool
 	seenPhysical               bool
+	seenPhysicalControl        bool
 	seenPhysicalNilGuard       bool
 	seenPhysicalBoundsGuard    bool
 	observeFrozenSite          bool
@@ -96,6 +97,7 @@ func (p *context) beginCoroSiteEmissionMode(instruction ssa.Instruction, placeme
 		observer.expectedPhysical = physical
 		observer.hasExpectedPhysical = true
 		observer.seenPhysical = physical.recipe == coroPhysicalInstructionOrdinary
+		observer.seenPhysicalControl = physical.control == coroPhysicalControlNone
 	}
 	if plan.hasCallPlan {
 		if plan.callPlan.failure != "" {
@@ -146,6 +148,12 @@ func (p *context) beginCoroSiteEmissionMode(instruction ssa.Instruction, placeme
 			panic(fmt.Errorf(
 				"coroutine emission site %q omitted frozen physical recipe %s",
 				instruction.String(), observer.expectedPhysical.recipe,
+			))
+		}
+		if observer.hasExpectedPhysical && !observer.seenPhysicalControl {
+			panic(fmt.Errorf(
+				"coroutine emission site %q omitted frozen physical control recipe %s",
+				instruction.String(), observer.expectedPhysical.control,
 			))
 		}
 		if observer.hasExpectedPhysical && observer.expectedPhysical.nilGuard != observer.seenPhysicalNilGuard {
@@ -215,6 +223,17 @@ func (p *context) plannedCoroPhysicalInstruction(instruction ssa.Instruction) (c
 	return current.expectedPhysical, true
 }
 
+func (p *context) plannedCoroPhysicalControl(instruction ssa.Instruction) (coroPhysicalInstructionPlan, bool) {
+	if p == nil || p.coroEmissionPlan() == nil {
+		return coroPhysicalInstructionPlan{}, false
+	}
+	current := p.coroEmissionSite()
+	if current == nil || !current.hasExpectedPhysical || current.instruction != instruction {
+		panic("coroutine physical control selection has no exact source SitePlan")
+	}
+	return current.expectedPhysical, true
+}
+
 func (p *context) observeCoroPhysicalInstruction(instruction ssa.Instruction, actual coroPhysicalInstructionRecipe) {
 	current := p.coroEmissionSite()
 	if current == nil || !current.hasExpectedPhysical || current.instruction != instruction {
@@ -231,6 +250,24 @@ func (p *context) observeCoroPhysicalInstruction(instruction ssa.Instruction, ac
 		panic(fmt.Errorf("coroutine emission site %q emitted its physical recipe more than once", instruction.String()))
 	}
 	observer.seenPhysical = true
+}
+
+func (p *context) observeCoroPhysicalControl(instruction ssa.Instruction, actual coroPhysicalControlRecipe) {
+	current := p.coroEmissionSite()
+	if current == nil || !current.hasExpectedPhysical || current.instruction != instruction {
+		panic("coroutine physical control emission has no exact source SitePlan")
+	}
+	observer := current
+	if actual == coroPhysicalControlNone || observer.expectedPhysical.control != actual {
+		panic(fmt.Errorf(
+			"coroutine emission site %q emitted physical control recipe %s, frozen SitePlan requires %s",
+			instruction.String(), actual, observer.expectedPhysical.control,
+		))
+	}
+	if observer.seenPhysicalControl {
+		panic(fmt.Errorf("coroutine emission site %q emitted its physical control recipe more than once", instruction.String()))
+	}
+	observer.seenPhysicalControl = true
 }
 
 func (p *context) observeCoroCallElision(actual CoroCallElisionKind) {

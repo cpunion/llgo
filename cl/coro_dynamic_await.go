@@ -36,14 +36,11 @@ func (p *context) tryCompileCoroManagedDispatchAwait(b llssa.Builder, call *ssa.
 		!p.compilation.EnableCoroChildAwait || !p.compilation.EnableCoroPlainDispatch || call == nil {
 		return llssa.Nil, false
 	}
-	callPlan, found := p.compilation.CoroPlan.CallPlan(call)
-	if !found || callPlan.Rep != coro.Dispatch || callPlan.Transport != coro.ManagedTransport || callPlan.SyncDispatch || call.Common() == nil ||
-		call.Common().StaticCallee() != nil || call.Common().IsInvoke() {
+	instructionPlan, planned := p.plannedCoroPhysicalControl(call)
+	if !planned || instructionPlan.control != coroPhysicalControlDispatchAwait {
 		return llssa.Nil, false
 	}
-	if err := validateCoroManagedDispatchAwaitShape(p.compilation.CoroPlan, p.goFn, call, callPlan); err != nil {
-		panic(err)
-	}
+	p.observeCoroPhysicalControl(call, coroPhysicalControlDispatchAwait)
 
 	p.recordCallerLocationForCall(b, &call.Call)
 	p.emitPCLineLabel(b, call.Pos())

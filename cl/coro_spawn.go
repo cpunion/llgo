@@ -197,21 +197,25 @@ func (p *context) tryCompileCoroClosedStaticSpawn(b llssa.Builder, spawn *ssa.Go
 	if body == nil || p.compilation.CoroPlan == nil || b.Func != p.fn {
 		panic("closed static spawn requires an active planned physical coroutine body")
 	}
-	callPlan, found := p.compilation.CoroPlan.CallPlan(spawn)
-	if !found {
-		caller, _ := p.compilation.CoroPlan.FunctionPlan(p.goFn)
-		panic(fmt.Sprintf("coroutine spawn: function %q has no compilation CallPlan", caller.ID))
+	instructionPlan, planned := p.plannedCoroPhysicalControl(spawn)
+	if !planned {
+		panic("coroutine spawn has no frozen physical instruction plan")
 	}
-	if callPlan.Rep == coro.Dispatch {
+	switch instructionPlan.control {
+	case coroPhysicalControlDispatchSpawn:
+		p.observeCoroPhysicalControl(spawn, coroPhysicalControlDispatchSpawn)
 		p.compileCoroManagedDispatchSpawn(b, spawn)
 		return true
+	case coroPhysicalControlDirectSpawn:
+		p.observeCoroPhysicalControl(spawn, coroPhysicalControlDirectSpawn)
+	case coroPhysicalControlNone:
+		return false
+	default:
+		panic(fmt.Sprintf("coroutine spawn has mismatched frozen physical control recipe %s", instructionPlan.control))
 	}
-	target, targetPlan, err := resolveCoroDirectStaticSpawn(
-		p.compilation.CoroPlan, spawn, p.compilation.EnableCoroPlainDispatch,
-	)
-	if err != nil {
-		caller, _ := p.compilation.CoroPlan.FunctionPlan(p.goFn)
-		panic(fmt.Sprintf("closed static spawn: function %q: %v", caller.ID, err))
+	target := instructionPlan.controlTarget
+	if target == nil || instructionPlan.controlTargetID == "" {
+		panic("closed static spawn has an incomplete frozen physical control recipe")
 	}
 
 	p.recordCallerLocationForCall(b, &spawn.Call)
@@ -230,10 +234,10 @@ func (p *context) tryCompileCoroClosedStaticSpawn(b llssa.Builder, spawn *ssa.Go
 
 	root, _, kind := p.compileFunction(target)
 	if kind != goFunc {
-		panic(fmt.Sprintf("closed static spawn: target %q did not resolve to a Go coroutine entry", targetPlan.ID))
+		panic(fmt.Sprintf("closed static spawn: target %q did not resolve to a Go coroutine entry", instructionPlan.controlTargetID))
 	}
 	if root == nil {
-		panic(fmt.Sprintf("closed static spawn: target %q has no physical root", targetPlan.ID))
+		panic(fmt.Sprintf("closed static spawn: target %q has no physical root", instructionPlan.controlTargetID))
 	}
 	handle := b.Call(root.Expr, physicalArgs...)
 	commit := p.pkg.NewFunc(coroSpawnCommitHookV1, coroSpawnCommitSignature(), llssa.InC)
@@ -255,15 +259,6 @@ func (p *context) compileCoroManagedDispatchSpawn(b llssa.Builder, spawn *ssa.Go
 	if body == nil {
 		panic("managed dispatch spawn requires an active physical coroutine body")
 	}
-	callPlan, err := p.compilation.CoroPlan.ResolveManagedDispatchSpawn(spawn)
-	if err != nil {
-		caller, _ := p.compilation.CoroPlan.FunctionPlan(p.goFn)
-		panic(fmt.Sprintf("managed descriptor spawn: function %q: %v", caller.ID, err))
-	}
-	if callPlan.Rep != coro.Dispatch {
-		panic("managed descriptor spawn requires Dispatch representation")
-	}
-
 	p.recordCallerLocationForCall(b, &spawn.Call)
 	p.emitPCLineLabel(b, spawn.Pos())
 	// Preserve Go's evaluation order at the scheduler transaction boundary:

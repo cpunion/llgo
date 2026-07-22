@@ -141,6 +141,34 @@ func Root(value int) int { return value + 1 }
 		ctx.observeCoroPhysicalInstruction(instruction, coroPhysicalInstructionDeref)
 		ctx.observeCoroPhysicalNilGuard(instruction)
 	}()
+
+	physical.instructions[instruction] = coroPhysicalInstructionPlan{
+		semantic: coroSemanticInstructionPlan{recipe: coro.RecipeID("test.control.v0")},
+		control:  coroPhysicalControlDirectAwait,
+	}
+	missingControl := captureCoroSitePlanPanic(func() {
+		finish := ctx.beginCoroSiteEmission(instruction)
+		defer finish()
+		ctx.observeCoroSemanticInstruction(instruction)
+	})
+	if !strings.Contains(missingControl, "omitted frozen physical control recipe direct-await") {
+		t.Fatalf("missing physical control observation = %q", missingControl)
+	}
+	mismatchedControl := captureCoroSitePlanPanic(func() {
+		finish := ctx.beginCoroSiteEmission(instruction)
+		defer finish()
+		ctx.observeCoroSemanticInstruction(instruction)
+		ctx.observeCoroPhysicalControl(instruction, coroPhysicalControlDispatchSpawn)
+	})
+	if !strings.Contains(mismatchedControl, "emitted physical control recipe dispatch-spawn, frozen SitePlan requires direct-await") {
+		t.Fatalf("mismatched physical control observation = %q", mismatchedControl)
+	}
+	func() {
+		finish := ctx.beginCoroSiteEmission(instruction)
+		defer finish()
+		ctx.observeCoroSemanticInstruction(instruction)
+		ctx.observeCoroPhysicalControl(instruction, coroPhysicalControlDirectAwait)
+	}()
 }
 
 func TestCoroPhysicalCodegenRejectsMissingCommittedPlan(t *testing.T) {

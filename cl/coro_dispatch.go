@@ -1178,20 +1178,29 @@ func (p *context) tryCompileCoroPlainDispatchCall(b llssa.Builder, call *ssa.Cal
 	if p.compilation == nil || !p.compilation.EnableCoroPlainDispatch || p.compilation.CoroPlan == nil || call == nil {
 		return llssa.Expr{}, false
 	}
-	callPlan, found := p.compilation.CoroPlan.CallPlan(call)
-	if !found || callPlan.Rep != coro.Dispatch {
-		return llssa.Expr{}, false
-	}
-	if callPlan.Transport != coro.ManagedTransport {
-		panic(fmt.Errorf("coroutine dynamic dispatch ABI: call %q has Dispatch representation with non-managed transport %s", call.String(), callPlan.Transport))
-	}
-	if p.compilation.coroClosedInterfacePlain.acceptsCall(call) {
-		// Preserve the ordinary LLGo itab invoke. The closed candidate proof is
-		// a scheduling constraint, not a second function-value representation.
-		return llssa.Expr{}, false
-	}
-	if err := validateCoroPlainDispatchCall(p.compilation.CoroPlan, call.Parent(), call, callPlan, p.compilation.EmissionUniverse); err != nil {
-		panic(err)
+	physical := p.coroBody() != nil
+	if physical {
+		instructionPlan, planned := p.plannedCoroPhysicalControl(call)
+		if !planned || instructionPlan.control != coroPhysicalControlPlainDispatch {
+			return llssa.Expr{}, false
+		}
+		p.observeCoroPhysicalControl(call, coroPhysicalControlPlainDispatch)
+	} else {
+		callPlan, found := p.compilation.CoroPlan.CallPlan(call)
+		if !found || callPlan.Rep != coro.Dispatch {
+			return llssa.Expr{}, false
+		}
+		if callPlan.Transport != coro.ManagedTransport {
+			panic(fmt.Errorf("coroutine dynamic dispatch ABI: call %q has Dispatch representation with non-managed transport %s", call.String(), callPlan.Transport))
+		}
+		if p.compilation.coroClosedInterfacePlain.acceptsCall(call) {
+			// Preserve the ordinary LLGo itab invoke. The closed candidate proof is
+			// a scheduling constraint, not a second function-value representation.
+			return llssa.Expr{}, false
+		}
+		if err := validateCoroPlainDispatchCall(p.compilation.CoroPlan, call.Parent(), call, callPlan, p.compilation.EmissionUniverse); err != nil {
+			panic(err)
+		}
 	}
 	p.recordCallerLocationForCall(b, &call.Call)
 	p.emitPCLineLabel(b, call.Pos())
@@ -1212,7 +1221,7 @@ func (p *context) tryCompileCoroPlainDispatchCall(b llssa.Builder, call *ssa.Cal
 	// physical coroutine, own that edge through the explicit-status fault ABI
 	// so this compiler-generated descriptor operation cannot introduce a
 	// hidden runtime.AssertNilDeref dependency after emission closure.
-	if p.coroBody() != nil {
+	if physical {
 		p.compileCoroImplicitNilAccessGuard(b, b.Field(fn, 0))
 		opts.DescriptorNonNil = true
 	}

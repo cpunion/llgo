@@ -90,14 +90,17 @@ type coroArchitectureDebtBudget struct {
 	localBodyFactAuthority    int
 	semanticRecipePlan        int
 	semanticRecipeObservation int
+	controlPlan               int
+	controlSelect             int
+	controlObserve            int
 }
 
 var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
 	// Filled from the 2026-07-22 executable fleet checkpoint. These values may
 	// only decrease; see TestCoroArchitectureDebtIsMonotonic.
 	currentCoro:               0,
-	planAuthority:             392,
-	stagedFeatureGate:         316,
+	planAuthority:             377,
+	stagedFeatureGate:         315,
 	legacyWait:                72,
 	nativeFork:                378,
 	fleetBuildFiles:           13,
@@ -147,6 +150,9 @@ var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
 	localBodyFactAuthority:    2,
 	semanticRecipePlan:        3,
 	semanticRecipeObservation: 2,
+	controlPlan:               2,
+	controlSelect:             7,
+	controlObserve:            8,
 }
 
 var allowedCurrentCoroFiles = map[string]bool{}
@@ -393,6 +399,30 @@ var allowedSemanticRecipeObservationFiles = map[string]bool{
 	"cl/coro_site_plan.go": true,
 }
 
+var allowedPhysicalControlPlanFiles = map[string]bool{
+	"cl/coro_physical_plan.go": true,
+}
+
+var allowedPhysicalControlSelectionFiles = map[string]bool{
+	"cl/coro_await.go":             true,
+	"cl/coro_dispatch.go":          true,
+	"cl/coro_dynamic_await.go":     true,
+	"cl/coro_interface_await.go":   true,
+	"cl/coro_managed_interface.go": true,
+	"cl/coro_site_plan.go":         true,
+	"cl/coro_spawn.go":             true,
+}
+
+var allowedPhysicalControlObservationFiles = map[string]bool{
+	"cl/coro_await.go":             true,
+	"cl/coro_dispatch.go":          true,
+	"cl/coro_dynamic_await.go":     true,
+	"cl/coro_interface_await.go":   true,
+	"cl/coro_managed_interface.go": true,
+	"cl/coro_site_plan.go":         true,
+	"cl/coro_spawn.go":             true,
+}
+
 var allowedCoroParkOperationFields = map[string]bool{
 	"shouldSuspend": true,
 	"park":          true,
@@ -453,6 +483,9 @@ type coroArchitectureDebtInventory struct {
 	localBodyFactAuthorityFiles    map[string]bool
 	semanticRecipePlanFiles        map[string]bool
 	semanticRecipeObservationFiles map[string]bool
+	controlPlanFiles               map[string]bool
+	controlSelectFiles             map[string]bool
+	controlObserveFiles            map[string]bool
 	parkProtocolFields             map[string]bool
 	parkFaultRouteFields           map[string]bool
 }
@@ -520,6 +553,9 @@ func TestCoroArchitectureDebtIsMonotonic(t *testing.T) {
 	check("ProgramIR local-body fact authority", inventory.localBodyFactAuthority, budget.localBodyFactAuthority)
 	check("semantic recipe planner boundary", inventory.semanticRecipePlan, budget.semanticRecipePlan)
 	check("semantic recipe observation", inventory.semanticRecipeObservation, budget.semanticRecipeObservation)
+	check("physical control recipe planner", inventory.controlPlan, budget.controlPlan)
+	check("physical control recipe selection", inventory.controlSelect, budget.controlSelect)
+	check("physical control recipe observation", inventory.controlObserve, budget.controlObserve)
 
 	checkExactCoroArchitectureSet(t, "currentCoro production files", inventory.currentCoroFiles, allowedCurrentCoroFiles)
 	checkExactCoroArchitectureSet(t, "staged coroutine feature names", inventory.featureNames, allowedStagedCoroFeatureNames)
@@ -564,6 +600,9 @@ func TestCoroArchitectureDebtIsMonotonic(t *testing.T) {
 	checkExactCoroArchitectureSet(t, "ProgramIR local-body fact authority files", inventory.localBodyFactAuthorityFiles, allowedLocalBodyFactAuthorityFiles)
 	checkExactCoroArchitectureSet(t, "semantic recipe planner files", inventory.semanticRecipePlanFiles, allowedSemanticRecipePlanFiles)
 	checkExactCoroArchitectureSet(t, "semantic recipe observation files", inventory.semanticRecipeObservationFiles, allowedSemanticRecipeObservationFiles)
+	checkExactCoroArchitectureSet(t, "physical control recipe planner files", inventory.controlPlanFiles, allowedPhysicalControlPlanFiles)
+	checkExactCoroArchitectureSet(t, "physical control recipe selection files", inventory.controlSelectFiles, allowedPhysicalControlSelectionFiles)
+	checkExactCoroArchitectureSet(t, "physical control recipe observation files", inventory.controlObserveFiles, allowedPhysicalControlObservationFiles)
 	checkExactCoroArchitectureSet(t, "Park protocol fields", inventory.parkProtocolFields, allowedCoroParkOperationFields)
 	checkExactCoroArchitectureSet(t, "Park fault-route fields", inventory.parkFaultRouteFields, allowedCoroParkFaultRouteFields)
 }
@@ -622,6 +661,9 @@ func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitecture
 		localBodyFactAuthorityFiles:    make(map[string]bool),
 		semanticRecipePlanFiles:        make(map[string]bool),
 		semanticRecipeObservationFiles: make(map[string]bool),
+		controlPlanFiles:               make(map[string]bool),
+		controlSelectFiles:             make(map[string]bool),
+		controlObserveFiles:            make(map[string]bool),
 		parkProtocolFields:             make(map[string]bool),
 		parkFaultRouteFields:           make(map[string]bool),
 	}
@@ -797,6 +839,15 @@ func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitecture
 					case "observeCoroSemanticInstruction":
 						inventory.semanticRecipeObservation++
 						inventory.semanticRecipeObservationFiles[rel] = true
+					case "planCoroPhysicalControlInstruction":
+						inventory.controlPlan++
+						inventory.controlPlanFiles[rel] = true
+					case "plannedCoroPhysicalControl":
+						inventory.controlSelect++
+						inventory.controlSelectFiles[rel] = true
+					case "observeCoroPhysicalControl":
+						inventory.controlObserve++
+						inventory.controlObserveFiles[rel] = true
 					case "currentCoro":
 						inventory.currentCoro++
 						inventory.currentCoroFiles[rel] = true

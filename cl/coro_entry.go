@@ -344,7 +344,7 @@ func (e plannedFunctionSymbol) checkSupportedWithPhysicalPlan(accept func(*coroP
 		return validateCoroPhysicalABIForOwner(
 			e.function, e.plan, e.coroPlan, e.emission, e.physicalOwner, e.childAwait, e.programRun,
 			e.staticSpawn, e.explicitPanic, e.frameRetentionABI, e.channel, e.plainDispatch, rawMethodToken,
-			accept,
+			e.interfacePlain, e.managedInterface, accept,
 		)
 	}
 	if e.plan.Emission == coro.EmitExternal && e.plan.FuncRep == coro.DirectCoro {
