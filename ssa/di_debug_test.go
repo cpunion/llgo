@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/goplus/gogen/packages"
 	"github.com/goplus/llgo/internal/optlevel"
 	"github.com/xgo-dev/llvm"
 )
@@ -210,6 +211,88 @@ func f() {}
 	pkg.FinalizeDebug()
 	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("defer debug metadata is invalid: %v\n%s", err, pkg.Module().String())
+	}
+}
+
+func TestDeferredCallsKeepDebugLocations(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "defer.go", `package p
+func cleanup(int) {}
+func f() {
+	defer cleanup(1)
+	defer cleanup(2)
+}
+`, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	typesPkg, err := (&types.Config{}).Check("example.com/p", fset, []*ast.File{file}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prog := NewProgram(&Target{OptLevel: optlevel.O0})
+	defer prog.Dispose()
+	prog.TypeSizes(types.SizesFor("gc", runtime.GOARCH))
+	imp := packages.NewImporter(fset)
+	prog.SetRuntime(func() *types.Package {
+		pkg, err := imp.Import(PkgRuntime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pkg
+	})
+	pkg := prog.NewPackage("p", "example.com/p")
+	pkg.InitDebug("p", "example.com/p", fset)
+
+	cleanupObject := typesPkg.Scope().Lookup("cleanup").(*types.Func)
+	cleanup := pkg.NewFunc("example.com/p.cleanup", cleanupObject.Type().(*types.Signature), InGo)
+	cleanupBuilder := cleanup.MakeBody(1)
+	defer cleanupBuilder.Dispose()
+	cleanupBuilder.Return()
+	cleanupBuilder.EndBuild()
+
+	decl := file.Decls[1].(*ast.FuncDecl)
+	object := typesPkg.Scope().Lookup("f").(*types.Func)
+	fn := pkg.NewFunc("example.com/p.f", object.Type().(*types.Signature), InGo)
+	b := fn.MakeBody(1)
+	defer b.Dispose()
+	bodyPos := fset.Position(decl.Body.Lbrace)
+	b.DebugFunction(fn, object.Scope(), fset.Position(object.Pos()), bodyPos)
+	recoverBlock := fn.MakeBlock()
+	fn.SetRecover(recoverBlock)
+	b.SetBlock(recoverBlock).Return()
+	b.SetBlock(fn.Block(0))
+
+	firstDefer := decl.Body.List[0].(*ast.DeferStmt)
+	b.DISetCurrentDebugLocation(fn, fset.Position(firstDefer.Defer))
+	b.Defer(DeferAlways, cleanup.Expr, Builder.Call, prog.Val(1))
+	secondDefer := decl.Body.List[1].(*ast.DeferStmt)
+	b.DISetCurrentDebugLocation(fn, fset.Position(secondDefer.Defer))
+	b.Defer(DeferInLoop, cleanup.Expr, Builder.Call, prog.Val(2))
+	b.RunDefers()
+	b.Return()
+	b.EndBuild()
+	pkg.FinalizeDebug()
+
+	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("defer debug metadata is invalid: %v\n%s", err, pkg.Module().String())
+	}
+	ir := pkg.Module().String()
+	for _, target := range []string{"FreeDeferNode", "SetThreadDefer", "example.com/p.cleanup"} {
+		found := false
+		for _, line := range strings.Split(ir, "\n") {
+			if !strings.Contains(line, " call ") || !strings.Contains(line, target) {
+				continue
+			}
+			found = true
+			if !strings.Contains(line, "!dbg !") {
+				t.Errorf("call to %s is missing a debug location: %s", target, line)
+			}
+		}
+		if !found {
+			t.Errorf("no call to %s found in IR", target)
+		}
 	}
 }
 
