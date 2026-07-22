@@ -140,8 +140,11 @@ func (p *Pool) pinSlow() (*poolLocal, int) {
 		p.local = &handle
 	})
 	handle := p.local
-	l := &poolLocal{}
-	handle.Set(l)
+	l := handle.Get()
+	if l == nil {
+		l = &poolLocal{}
+		handle.Set(l)
+	}
 	return l, 0
 }
 
