@@ -232,6 +232,7 @@ func (u *EmissionUniverse) functionABIContext(fn *ssa.Function, owner *preparedE
 		unevaluatedSSA:       unevaluated,
 		addrOfFieldAddrs:     collectAddrOfFieldSelectors(owner.files),
 		emissionUniverse:     u,
+		emissionOwner:        owner,
 	}, nil
 }
 

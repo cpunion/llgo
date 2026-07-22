@@ -1,6 +1,6 @@
 # LLGo Coroutine 语义标准化 IR 与统一 Lowering 设计
 
-状态：2026-07-22架构复审结论；可运行纵向基线已冻结，暂停新增能力。现有LoweringFacts只完成report/cache identity，尚未成为production lowering的唯一事实源；在完成单一ProgramIR、单一emitter及runtime hard cutover前，不继续叠加语言或平台功能
+状态：2026-07-22架构复审结论；可运行纵向基线已冻结，暂停新增能力。hidden runtime helper cohort已切换到单一ProgramIR SitePlan；其他LoweringFacts仍主要是report/cache identity，尚未成为production lowering的唯一事实源。在完成单一ProgramIR、单一emitter及runtime hard cutover前，不继续叠加语言或平台功能
 
 更新：2026-07-22
 
@@ -938,6 +938,28 @@ cl/coro_recipe_*.go        ordinary lowering recipe planning/emission pairs
 验收：FunctionPlan、可执行LLVM CFG、runtime ABI和运行行为不变；cache/manifest只绑定统一
 ProgramIR identity；已迁移cohort不存在第二个consumer事实源。仅生成report或比较日志不算通过。
 
+#### Phase B.1：hidden runtime helper cohort（已完成）
+
+2026-07-22已完成第一条production replacement cohort，而不是保留双轨比较：
+
+- `EmissionUniverse`在owner-scoped materialization期间建立唯一`coroProgramIR`，每条有效SSA
+  instruction只由`classifyCoroRuntimeHelpers`/`classifyPlainRuntimeHelpers`分类一次；raw classifier仅允许
+  存在于`cl/emission_runtime_helpers.go`的builder边界。
+- closure扩展、LoweringFacts、physical preflight与pure-SSA audit都读取冻结SitePlan；production中的旧
+  `loweredRuntimeHelpers`和`plainRepresentationRuntimeHelpers`consumer已删除，静态gate要求其数量恒为0。
+- managed helper同时冻结source、prologue或cleanup物理placement。named-result `AllocZ`与动态defer
+  `FreeDeferNode`不再依靠codegen后反推或临时抵消表；每个动态defer的`AllocU`/`FreeDeferNode`位置在
+  ProgramIR构建期确定。
+- `compileInstr`安装source emission ledger；prologue和cleanup使用显式relocated ledger；统一runtime
+  helper resolver以及动态cleanup的直接调用都必须上报实际helper。计划外发射、计划内漏发射和缺少
+  frozen owner均立即失败。
+- architecture gate精确锁定raw planner数量/文件、旧consumer为0、source/relocated ledger入口以及
+  helper observation调用点；这些值没有可供旧路径反弹的上限余量。
+
+该完成标记只覆盖hidden runtime helper集合和它们当前三种物理placement，不代表intrinsic、panic、
+suspend、frame lifetime或统一emitter已经迁移。下一cohort必须继续以“新权威接管、旧判断删除、负向
+测试、静态gate”四项同时完成作为验收条件。
+
 ### Phase C：analysis只消费facts
 
 - 先替换 `ClassifyLoweredCalls`、`ClassifyElidedCall`、intrinsic和local effect输入。
@@ -1141,17 +1163,17 @@ identity、稀疏LoweringFacts、canonical dump/digest与verifier；`cl`从冻�
 生成owner-scoped snapshot；build在任何package codegen前把该snapshot装入`CoroPlanDigest v26`、
 `cl.Compilation`、package fingerprint与manifest，source/cache registration都会验证内容和digest一致。
 
-2026-07-22复审把这一定义为“已建立观测点”，而不是已完成架构层。它目前增加了代码和cache
-identity，却没有替换production classifier/emitter；继续在其上增加完整Overlay会扩大双轨。后续严格按
-replacement cohort推进：
+2026-07-22复审最初把LoweringFacts定义为“已建立观测点”，而不是已完成架构层。随后hidden runtime
+helper cohort已完成第一次production切换，但其余facts仍未替换production classifier/emitter；继续直接
+增加完整Overlay仍会扩大双轨。后续严格按replacement cohort推进：
 
 1. 先提交当前双owner fleet可运行基线及五项fresh E2E结果，不再混入新能力。
 2. architecture gate test已经冻结当前债务的精确AST/build-constraint快照；每个cohort必须在删除旧路径的
    同一提交下调数字和白名单，禁止留下可反弹额度，也禁止新增`EnableCoro*`、raw-SSA classifier、
    single-P/fleet分支和logical WaitToken consumer。
-3. 从hidden helper/intrinsic cohort开始，让ProgramModelBuilder缓存的SitePlan同时服务closure、analysis、
-   preflight和emission observer；切换production consumer并删除该cohort旧判断。
-4. 依次迁移pure instruction、implicit fault、await/spawn、park/channel/select、panic/cleanup；每个完整
+3. hidden helper cohort已按上述gate完成；下一步单独迁移intrinsic及其elision/footprint，不能重新引入
+   raw SSA helper consumer。
+4. 随后依次迁移pure instruction、implicit fault、await/spawn、park/channel/select、panic/cleanup；每个完整
    function cohort由统一emitter接管后立即删除旧CFG拼装，最终清除普通compiler中的`currentCoro`分支。
 5. 并行完成runtime Phase R：fleet唯一target、Park/Operation唯一logical wait、统一source dispatcher和
    单一profile；每一项都以旧production符号为零作为完成条件。
@@ -1166,7 +1188,8 @@ replacement cohort推进：
 
 - emission closure：`cl.PrepareEmissionUniverseWithOptions`、`EmissionUniverse.materializeFunctionForOwner`
 - provisional owner key：`cl.emissionFunctionOwnerKey`
-- hidden helper：`EmissionUniverse.materializeLoweredRuntimeHelpers`、`EmissionUniverse.loweredRuntimeHelpers`
+- hidden helper builder：`EmissionUniverse.materializeLoweredRuntimeHelpers`、`EmissionUniverse.classifyCoroRuntimeHelpers`
+- hidden helper authority/ledger：`coroProgramIR.sitePlan`、`context.beginCoroSiteEmission`、`context.observeCoroSiteRuntimeHelper`
 - global plan：`internal/coro.AnalyzeSSA`
 - function value flow：`internal/coro.analyzeSSAFunctionFlow`
 - physical preflight：`cl.validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel`

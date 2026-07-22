@@ -200,7 +200,10 @@ func (u *EmissionUniverse) coroInstructionLoweringFact(ctx *context, plan *coro.
 	siteRole := coro.RolePrimary
 	contract := coro.ContractID("")
 	barrier := false
-	helperNames := u.loweredRuntimeHelpers(ctx, instruction)
+	helperNames, err := u.coroProgramIR.plannedRuntimeHelpers(ctx, instruction)
+	if err != nil {
+		return coro.LoweringFact{}, false, fmt.Errorf("load frozen site helper plan: %w", err)
+	}
 	helpers := make([]coro.ManagedEdge, 0, len(helperNames))
 	for _, logicalName := range helperNames {
 		if coroCompilerElidesImplicitFaultRuntimeHelper(instruction, logicalName) {

@@ -171,6 +171,7 @@ type EmissionUniverse struct {
 	abiSyncReferences     map[*ssa.Function]map[*ssa.Function]none
 	loweredCalls          map[*ssa.Function]map[string]coroLoweredCallTarget
 	plainLoweredCalls     map[*ssa.Function]map[string]*ssa.Function
+	coroProgramIR         *coroProgramIR
 	patchInitEntries      []*ssa.Function
 	patchInitRedirects    map[ssa.CallInstruction]coroPatchInitRedirect
 	normalReturnBlocks    map[*ssa.Function]map[*ssa.BasicBlock]none
@@ -385,6 +386,31 @@ type emissionFunctionOwnerKey struct {
 	owner    *preparedEmissionPackage
 }
 
+type coroRuntimeHelperPlacement uint8
+
+const (
+	coroRuntimeHelperAtSource coroRuntimeHelperPlacement = iota
+	coroRuntimeHelperAtPrologue
+	coroRuntimeHelperAtCleanup
+)
+
+type coroPlannedRuntimeHelper struct {
+	name      string
+	placement coroRuntimeHelperPlacement
+}
+
+// coroEmissionSitePlan is the first production slice of CoroProgramIR. It is
+// frozen while the emission closure is still open, before whole-program
+// analysis, and is the only authority for compiler-inserted runtime calls at
+// one exact owner/source site. Managed helpers also freeze their physical
+// placement: ordinary source lowering, the coroutine prologue, or the cleanup
+// drainer. The slices are sorted and immutable after the owner has been
+// materialized.
+type coroEmissionSitePlan struct {
+	managedRuntimeHelpers []coroPlannedRuntimeHelper
+	plainRuntimeHelpers   []string
+}
+
 type emissionFunctionState struct {
 	state     pkgState
 	fromPatch bool
@@ -445,6 +471,7 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		abiSyncReferences:          make(map[*ssa.Function]map[*ssa.Function]none),
 		loweredCalls:               make(map[*ssa.Function]map[string]coroLoweredCallTarget),
 		plainLoweredCalls:          make(map[*ssa.Function]map[string]*ssa.Function),
+		coroProgramIR:              newCoroProgramIR(),
 		patchInitRedirects:         make(map[ssa.CallInstruction]coroPatchInitRedirect),
 		normalReturnBlocks:         make(map[*ssa.Function]map[*ssa.BasicBlock]none),
 		unsafeSizeAlignUnevaluated: make(map[*ssa.Function]map[ssa.Instruction]none),
@@ -4517,14 +4544,21 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 				}
 			}
 		}
+		if err := u.coroProgramIR.freezeSiteOwner(fn, owner); err != nil {
+			return fmt.Errorf("prepare emission universe: cgo function %q: %w", fn.Name(), err)
+		}
 		return u.materializeABITypeDemandsOfFunction(fn, owner, emissionState)
+	}
+	functionShape, err := prepareCoroEmissionFunctionShape(fn)
+	if err != nil {
+		return fmt.Errorf("prepare emission universe: function %q SitePlan shape: %w", fn.Name(), err)
 	}
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
 			if _, unevaluated := ctx.unevaluatedSSA[instr]; unevaluated {
 				continue
 			}
-			if err := u.materializeLoweredRuntimeHelpers(ctx, fn, owner, emissionState, instr); err != nil {
+			if err := u.materializeLoweredRuntimeHelpers(ctx, fn, owner, emissionState, functionShape, instr); err != nil {
 				return err
 			}
 			if call, ok := instr.(ssa.CallInstruction); ok {
@@ -4561,6 +4595,9 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 				}
 			}
 		}
+	}
+	if err := u.coroProgramIR.freezeSiteOwner(fn, owner); err != nil {
+		return fmt.Errorf("prepare emission universe: function %q: %w", fn.Name(), err)
 	}
 	return u.materializeABITypeDemandsOfFunction(fn, owner, emissionState)
 }

@@ -335,11 +335,8 @@ func validateCoroManagedCleanupPlainTargets(
 	return nil
 }
 
-// coroDeferRequiresDynamicCleanup is shared by universe preparation and the
-// cleanup planner. Compiler-generated allocation/release edges are frozen only
-// for a source defer that belongs to a cyclic CFG block; one such occurrence
-// authorizes the single per-owner AllocU/FreeDeferNode identities used by every
-// record in that owner.
+// coroDeferRequiresDynamicCleanup identifies the source occurrence that makes
+// the whole owner use the heterogeneous cleanup chain.
 func coroDeferRequiresDynamicCleanup(instruction *ssa.Defer) bool {
 	if instruction == nil || instruction.Parent() == nil || instruction.Block() == nil {
 		return false
@@ -347,6 +344,29 @@ func coroDeferRequiresDynamicCleanup(instruction *ssa.Defer) bool {
 	infos := blocks.Infos(instruction.Parent().Blocks)
 	index := instruction.Block().Index
 	return index >= 0 && index < len(infos) && infos[index].InLoop
+}
+
+// coroFunctionRequiresDynamicCleanup computes the owner-wide lowering choice
+// once for ProgramIR construction. If one defer can execute repeatedly, every
+// defer in the owner uses the same chain so registration order remains exact;
+// consequently every source defer receives its own AllocU/FreeDeferNode
+// physical placement in SitePlan.
+func coroFunctionRequiresDynamicCleanup(fn *ssa.Function) bool {
+	if fn == nil || len(fn.Blocks) == 0 {
+		return false
+	}
+	infos := blocks.Infos(fn.Blocks)
+	for _, block := range fn.Blocks {
+		if block == nil || block.Index < 0 || block.Index >= len(infos) || !infos[block.Index].InLoop {
+			continue
+		}
+		for _, instruction := range block.Instrs {
+			if _, deferred := instruction.(*ssa.Defer); deferred {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func validateCoroDynamicCleanupHelpers(plan *coroStaticCleanupPlan, whole *coro.SSAPlan) error {
@@ -958,6 +978,7 @@ func (s *coroStaticCleanupState) pushDynamic(
 	if allocator == nil || kind != goFunc {
 		panic("dynamic coroutine cleanup AllocU target did not resolve to a Go entry")
 	}
+	p.observeCoroSiteRuntimeHelper("AllocU")
 	raw := b.Call(allocator.Expr, llssa.SizeOf(p.prog, site.nodeType))
 	node := b.Convert(p.prog.Pointer(site.nodeType), raw)
 	b.Store(b.FieldAddr(node, 0), b.Load(s.dynamicHead))
@@ -1194,7 +1215,7 @@ func (s *coroStaticCleanupState) emitDynamic(p *context, b llssa.Builder) {
 		for argument := range site.args {
 			b.Store(site.args[argument], b.Load(b.FieldAddr(node, site.argsField+argument)))
 		}
-		s.releaseDynamicRecord(p, b, record)
+		s.releaseDynamicRecord(p, b, site, record)
 		args := make([]llssa.Expr, len(site.args))
 		for argument := range args {
 			args[argument] = b.Load(site.args[argument])
@@ -1209,11 +1230,17 @@ func (s *coroStaticCleanupState) emitDynamic(p *context, b llssa.Builder) {
 	s.emitCompletionDispatch(p, b)
 }
 
-func (s *coroStaticCleanupState) releaseDynamicRecord(p *context, b llssa.Builder, record llssa.Expr) {
+func (s *coroStaticCleanupState) releaseDynamicRecord(p *context, b llssa.Builder, site *coroStaticCleanupSiteState, record llssa.Expr) {
+	if site == nil || site.plan == nil || site.plan.instruction == nil {
+		panic("dynamic coroutine cleanup release has no exact source SitePlan")
+	}
+	finishSite := p.beginCoroRelocatedSiteEmission(site.plan.instruction, coroRuntimeHelperAtCleanup)
+	defer finishSite()
 	releaser, _, kind := p.compileFunction(s.dynamicFree)
 	if releaser == nil || kind != goFunc {
 		panic("dynamic coroutine cleanup FreeDeferNode target did not resolve to a Go entry")
 	}
+	p.observeCoroSiteRuntimeHelper("FreeDeferNode")
 	b.Call(releaser.Expr, record)
 }
 

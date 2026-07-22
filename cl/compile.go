@@ -184,10 +184,14 @@ type context struct {
 	runtimeCallerFuncs   map[*ssa.Function]bool
 	compilation          *Compilation
 	emissionUniverse     *EmissionUniverse
+	emissionOwner        *preparedEmissionPackage
 	cacheRegistration    bool // cached archive: skip observers; emitted IR is transient
 	pcLineSeq            uint64
 	sourceParamBase      int // hidden physical parameters before source params
 	currentCoro          *coroBodyContext
+	currentCoroSite      *coroSiteEmissionObserver
+	coroPhysicalEmission bool
+	coroExplicitStatus   bool
 	rawPlainBody         bool               // compiling the legacy ABI variant of a managed function
 	coroSourceBlocks     []llssa.BasicBlock // source SSA block index -> logical LLVM block
 	coroRootFactories    []coroRootFactoryRegistration
@@ -1976,6 +1980,8 @@ func (p *context) getDebugLocScope(v *ssa.Function, pos token.Pos) *types.Scope 
 }
 
 func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
+	finishSite := p.beginCoroSiteEmission(instr)
+	defer finishSite()
 	if iv, ok := instr.(instrOrValue); ok {
 		p.compileInstrOrValue(b, iv, false)
 		return
@@ -2601,6 +2607,7 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 	}
 	if opts.Compilation != nil && opts.Compilation.EnableCoroEntryResolution {
 		ctx.emissionUniverse = opts.Compilation.EmissionUniverse
+		ctx.emissionOwner = prepared
 	}
 	ctx.observeCoroPlan()
 	if embedMap != nil {

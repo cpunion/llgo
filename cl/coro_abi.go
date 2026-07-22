@@ -522,7 +522,11 @@ func (p *context) beginCoroBody(
 				if !ok {
 					panic("coroutine terminal-result allocation is not pointer typed")
 				}
-				value := b.Alloc(p.type_(pointer.Elem(), llssa.InGo), true)
+				value := func() llssa.Expr {
+					finishSite := p.beginCoroRelocatedSiteEmission(allocation, coroRuntimeHelperAtPrologue)
+					defer finishSite()
+					return b.Alloc(p.type_(pointer.Elem(), llssa.InGo), true)
+				}()
 				body.terminalResultAllocs[allocation] = value
 				p.bvals[allocation] = value
 			}
@@ -955,6 +959,8 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	oldBase := p.sourceParamBase
 	oldCoro := p.currentCoro
 	oldSourceBlocks := p.coroSourceBlocks
+	oldPhysicalEmission := p.coroPhysicalEmission
+	oldExplicitStatus := p.coroExplicitStatus
 	p.sourceParamBase = 2
 	if len(fn.FreeVars) != 0 {
 		// Captured descriptor entries are (g,out,ctx,args...). The context is an
@@ -966,6 +972,8 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 		p.sourceParamBase = oldBase
 		p.currentCoro = oldCoro
 		p.coroSourceBlocks = oldSourceBlocks
+		p.coroPhysicalEmission = oldPhysicalEmission
+		p.coroExplicitStatus = oldExplicitStatus
 	}()
 
 	audit, err := newCoroPhysicalPureSSAAudit(p.emissionUniverse, p.compilation.CoroPlan, fn, p.compilation.CoroFrameRetentionABI)
@@ -994,6 +1002,8 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	if !coroTerminalResultAllocationSetMatches(frameRetention, terminalResultAllocations) {
 		panic("coroutine cleanup plan and frame-retention proof disagree on terminal-result allocations")
 	}
+	p.coroPhysicalEmission = true
+	p.coroExplicitStatus = abi.panicPrepareHook != ""
 	physical := p.beginCoroBody(b, abi, terminalResultAllocations)
 	physical.frameRetention = frameRetention
 	physical.critical = critical

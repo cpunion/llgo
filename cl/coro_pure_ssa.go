@@ -388,7 +388,10 @@ func (a *coroPhysicalPureSSAAudit) managedHeapAllocationCapability(alloc *ssa.Al
 		return fact, "allocation element has unsupported physical type: " + err.Error()
 	}
 	physical := a.ctx.type_(pointer.Elem(), llssa.InGo)
-	helpers := a.universe.loweredRuntimeHelpers(a.ctx, alloc)
+	helpers, helperReason := a.plannedRuntimeHelpers(alloc)
+	if helperReason != "" {
+		return fact, helperReason
+	}
 	if a.ctx.prog.SizeOf(physical) == 0 {
 		if len(helpers) != 0 {
 			return fact, "zero-sized module-sentinel allocation unexpectedly lowers through " + strings.Join(helpers, ", ")
@@ -2566,6 +2569,17 @@ func (a *coroPhysicalPureSSAAudit) provenCoroPhysicalAddressRoot(value ssa.Value
 	return coroPhysicalAddressInvalid, false
 }
 
+func (a *coroPhysicalPureSSAAudit) plannedRuntimeHelpers(instr ssa.Instruction) ([]string, string) {
+	if a == nil || a.ctx == nil || a.universe == nil || instr == nil {
+		return nil, "runtime helper validation requires an exact frozen site plan"
+	}
+	helpers, err := a.universe.coroProgramIR.plannedRuntimeHelpers(a.ctx, instr)
+	if err != nil {
+		return nil, "load frozen runtime helper site plan: " + err.Error()
+	}
+	return helpers, ""
+}
+
 func (a *coroPhysicalPureSSAAudit) requireNoRuntimeHelpers(instr ssa.Instruction) string {
 	return a.requireNoRuntimeHelpersExcept(instr)
 }
@@ -2586,8 +2600,12 @@ func (a *coroPhysicalPureSSAAudit) requireOnlyCompilerElidedRuntimeHelpers(
 	for _, helper := range allowed {
 		allowedSet[helper] = struct{}{}
 	}
+	helpers, reason := a.plannedRuntimeHelpers(instr)
+	if reason != "" {
+		return reason
+	}
 	var unexpected []string
-	for _, helper := range a.universe.loweredRuntimeHelpers(a.ctx, instr) {
+	for _, helper := range helpers {
 		if _, ok := allowedSet[helper]; !ok {
 			unexpected = append(unexpected, helper)
 		}
@@ -2609,7 +2627,10 @@ func (a *coroPhysicalPureSSAAudit) requireFrozenCoroSafeRuntimeHelpers(instr ssa
 	if a == nil || a.ctx == nil || a.universe == nil || a.plan == nil || a.fn == nil {
 		return "runtime helper capability validation requires a frozen emission universe"
 	}
-	helpers := a.universe.loweredRuntimeHelpers(a.ctx, instr)
+	helpers, reason := a.plannedRuntimeHelpers(instr)
+	if reason != "" {
+		return reason
+	}
 	if len(helpers) == 0 {
 		return "runtime helper capability validation found no lowered helper"
 	}
@@ -2637,7 +2658,10 @@ func (a *coroPhysicalPureSSAAudit) requireFrozenExactRuntimeHelper(instr ssa.Ins
 	if reason := a.requireFrozenCoroSafeRuntimeHelpers(instr, helper); reason != "" {
 		return reason
 	}
-	helpers := a.universe.loweredRuntimeHelpers(a.ctx, instr)
+	helpers, reason := a.plannedRuntimeHelpers(instr)
+	if reason != "" {
+		return reason
+	}
 	if len(helpers) != 1 || helpers[0] != helper {
 		return "operation does not lower through exactly one " + helper + " helper"
 	}
@@ -2664,7 +2688,10 @@ func (a *coroPhysicalPureSSAAudit) requireFrozenOutcomeRuntimeHelper(instr ssa.I
 	if reason := a.requireFrozenCoroSafeRuntimeHelpers(instr, helper); reason != "" {
 		return reason
 	}
-	helpers := a.universe.loweredRuntimeHelpers(a.ctx, instr)
+	helpers, reason := a.plannedRuntimeHelpers(instr)
+	if reason != "" {
+		return reason
+	}
 	if len(helpers) != 1 || helpers[0] != helper {
 		return "operation does not lower through exactly one " + helper + " helper"
 	}
@@ -2698,9 +2725,11 @@ func (a *coroPhysicalPureSSAAudit) requireFrozenStructuredRuntimeHelpers(instr s
 	if a == nil || a.ctx == nil || a.universe == nil {
 		return "structured runtime helper validation requires a frozen emission universe"
 	}
-	return a.requireFrozenStructuredRuntimeHelperInventory(
-		instr, a.universe.loweredRuntimeHelpers(a.ctx, instr), expected...,
-	)
+	helpers, reason := a.plannedRuntimeHelpers(instr)
+	if reason != "" {
+		return reason
+	}
+	return a.requireFrozenStructuredRuntimeHelperInventory(instr, helpers, expected...)
 }
 
 // requireFrozenTypeAssertRuntimeHelpers corrects the logical helper scan with
@@ -2710,7 +2739,11 @@ func (a *coroPhysicalPureSSAAudit) requireFrozenStructuredRuntimeHelpers(instr s
 func (a *coroPhysicalPureSSAAudit) requireFrozenTypeAssertRuntimeHelpers(assertion *ssa.TypeAssert, expected ...string) string {
 	var helpers []string
 	if a != nil && a.ctx != nil && a.universe != nil {
-		helpers = a.universe.loweredRuntimeHelpers(a.ctx, assertion)
+		var reason string
+		helpers, reason = a.plannedRuntimeHelpers(assertion)
+		if reason != "" {
+			return reason
+		}
 		if !coroTypeAssertUsesManagedClosure(a.ctx, assertion) {
 			filtered := helpers[:0]
 			for _, helper := range helpers {
@@ -2807,7 +2840,10 @@ func (a *coroPhysicalPureSSAAudit) requireFrozenTerminalRuntimeHelpers(instr ssa
 	if a == nil || a.ctx == nil || a.universe == nil || a.plan == nil || a.fn == nil {
 		return "terminal runtime helper validation requires a frozen emission universe"
 	}
-	helpers := a.universe.loweredRuntimeHelpers(a.ctx, instr)
+	helpers, reason := a.plannedRuntimeHelpers(instr)
+	if reason != "" {
+		return reason
+	}
 	if len(helpers) == 0 {
 		return "terminal runtime helper validation found no lowered helper"
 	}
@@ -2846,7 +2882,10 @@ func (a *coroPhysicalPureSSAAudit) requireNoRuntimeHelpersExcept(instr ssa.Instr
 	if a == nil || a.ctx == nil || a.universe == nil {
 		return ""
 	}
-	helpers := a.universe.loweredRuntimeHelpers(a.ctx, instr)
+	helpers, reason := a.plannedRuntimeHelpers(instr)
+	if reason != "" {
+		return reason
+	}
 	if len(helpers) == 0 {
 		return ""
 	}

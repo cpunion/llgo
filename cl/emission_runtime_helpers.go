@@ -33,8 +33,60 @@ import (
 // explicitly complete runtime ABI is required. Report-only/unit-test
 // universes retain legacy symbol resolution and intentionally freeze no such
 // edges; whole-program active builds enable the contract and fail closed.
-func (u *EmissionUniverse) materializeLoweredRuntimeHelpers(ctx *context, ownerFn *ssa.Function, ownerPkg *preparedEmissionPackage, state emissionFunctionState, instr ssa.Instruction) error {
-	if u == nil || !u.completeRuntimeABI {
+type coroEmissionFunctionShape struct {
+	dynamicCleanup           bool
+	terminalResultAllocation map[*ssa.Alloc]none
+}
+
+func prepareCoroEmissionFunctionShape(fn *ssa.Function) (coroEmissionFunctionShape, error) {
+	shape := coroEmissionFunctionShape{
+		dynamicCleanup:           coroFunctionRequiresDynamicCleanup(fn),
+		terminalResultAllocation: make(map[*ssa.Alloc]none),
+	}
+	allocations, err := coroStaticTerminalReconstructionAllocations(fn)
+	if err != nil {
+		return coroEmissionFunctionShape{}, err
+	}
+	for _, allocation := range allocations {
+		shape.terminalResultAllocation[allocation] = none{}
+	}
+	return shape, nil
+}
+
+func (shape coroEmissionFunctionShape) helperPlacement(instr ssa.Instruction, helper string) coroRuntimeHelperPlacement {
+	if allocation, ok := instr.(*ssa.Alloc); ok && helper == "AllocZ" {
+		if _, relocated := shape.terminalResultAllocation[allocation]; relocated {
+			return coroRuntimeHelperAtPrologue
+		}
+	}
+	if _, deferred := instr.(*ssa.Defer); deferred && shape.dynamicCleanup && helper == "FreeDeferNode" {
+		return coroRuntimeHelperAtCleanup
+	}
+	return coroRuntimeHelperAtSource
+}
+
+func (u *EmissionUniverse) materializeLoweredRuntimeHelpers(ctx *context, ownerFn *ssa.Function, ownerPkg *preparedEmissionPackage, state emissionFunctionState, shape coroEmissionFunctionShape, instr ssa.Instruction) error {
+	if u == nil {
+		return nil
+	}
+	if ctx == nil || ownerFn == nil || ownerPkg == nil || instr == nil || instr.Parent() != ownerFn || u.coroProgramIR == nil {
+		return fmt.Errorf("prepare emission universe: runtime helper SitePlan requires one exact builder, owner, context, and source instruction")
+	}
+	sitePlan := coroEmissionSitePlan{}
+	if u.prog != nil {
+		managed := u.classifyCoroRuntimeHelpers(ctx, shape, instr)
+		for _, helper := range managed {
+			sitePlan.managedRuntimeHelpers = append(sitePlan.managedRuntimeHelpers, coroPlannedRuntimeHelper{
+				name:      helper,
+				placement: shape.helperPlacement(instr, helper),
+			})
+		}
+		sitePlan.plainRuntimeHelpers = u.classifyPlainRuntimeHelpers(ctx, instr, managed)
+	}
+	if err := u.coroProgramIR.freezeSite(ownerFn, ownerPkg, instr, sitePlan); err != nil {
+		return fmt.Errorf("prepare emission universe: function %q site plan: %w", ownerFn.Name(), err)
+	}
+	if !u.completeRuntimeABI {
 		return nil
 	}
 	if u.prog == nil {
@@ -47,7 +99,8 @@ func (u *EmissionUniverse) materializeLoweredRuntimeHelpers(ctx *context, ownerF
 	if u.pathDup[llssa.PkgRuntime] {
 		return fmt.Errorf("prepare emission universe: runtime helper resolution has ambiguous package path %q", llssa.PkgRuntime)
 	}
-	for _, helper := range u.loweredRuntimeHelpers(ctx, instr) {
+	for _, plannedHelper := range sitePlan.managedRuntimeHelpers {
+		helper := plannedHelper.name
 		if coroCompilerElidesImplicitFaultRuntimeHelper(instr, helper) {
 			// The physical Index/IndexAddr recipe emits a current-frame terminal
 			// guard before its unchecked access.  The legacy-stack representation
@@ -93,7 +146,14 @@ func (u *EmissionUniverse) materializeLoweredRuntimeHelpers(ctx *context, ownerF
 	// still lowers to the synchronous ChanSend/ChanRecv helper. Retain that
 	// helper without recording a second physical lowered-call edge: the source
 	// channel instruction already contributes MayPark to coroutine analysis.
-	for _, helper := range u.plainRepresentationRuntimeHelpers(ctx, instr) {
+	managed := make(map[string]none, len(sitePlan.managedRuntimeHelpers))
+	for _, helper := range sitePlan.managedRuntimeHelpers {
+		managed[helper.name] = none{}
+	}
+	for _, helper := range sitePlan.plainRuntimeHelpers {
+		if _, shared := managed[helper]; shared && !coroCompilerElidesImplicitFaultRuntimeHelper(instr, helper) {
+			continue
+		}
 		target := runtimePkg.ssa.Func(helper)
 		if target == nil {
 			return fmt.Errorf("prepare emission universe: function %q lowers its plain representation to missing runtime helper %q", ownerFn.Name(), helper)
@@ -163,7 +223,7 @@ func coroCompilerElidesImplicitFaultRuntimeHelper(instr ssa.Instruction, helper 
 	}
 }
 
-func (u *EmissionUniverse) plainRepresentationRuntimeHelpers(ctx *context, instr ssa.Instruction) []string {
+func (u *EmissionUniverse) classifyPlainRuntimeHelpers(ctx *context, instr ssa.Instruction, managed []string) []string {
 	if u == nil {
 		return nil
 	}
@@ -173,6 +233,11 @@ func (u *EmissionUniverse) plainRepresentationRuntimeHelpers(ctx *context, instr
 			if name != "" {
 				set[name] = struct{}{}
 			}
+		}
+	}
+	for _, helper := range managed {
+		if !coroCompilerRawPlainLoweredRuntimeHelper(u, helper) {
+			add(helper)
 		}
 	}
 	if u.enableCoroChannel {
@@ -202,11 +267,6 @@ func (u *EmissionUniverse) plainRepresentationRuntimeHelpers(ctx *context, instr
 		// plain implementation needs a recoverable nil-call check. Its physical
 		// coroutine implementation owns the equivalent explicit-status edge.
 		add("AssertNilDeref")
-	}
-	for _, helper := range u.loweredRuntimeHelpers(ctx, instr) {
-		if coroCompilerElidesImplicitFaultRuntimeHelper(instr, helper) {
-			add(helper)
-		}
 	}
 	// The physical select lowering turns x/tools' unreachable no-case panic
 	// into a trap. A dual plain representation still emits the original box and
@@ -295,7 +355,10 @@ func (u *EmissionUniverse) materializeRuntimeHelperReference(ownerFn *ssa.Functi
 	return canonical, true, nil
 }
 
-func (u *EmissionUniverse) loweredRuntimeHelpers(ctx *context, instr ssa.Instruction) []string {
+// classifyCoroRuntimeHelpers is the sole raw-SSA helper classifier. Only the
+// ProgramModelBuilder path above may call it; analysis, preflight and emission
+// consume the frozen coroEmissionSitePlan instead.
+func (u *EmissionUniverse) classifyCoroRuntimeHelpers(ctx *context, shape coroEmissionFunctionShape, instr ssa.Instruction) []string {
 	set := make(map[string]struct{})
 	add := func(names ...string) {
 		for _, name := range names {
@@ -341,7 +404,7 @@ func (u *EmissionUniverse) loweredRuntimeHelpers(ctx *context, instr ssa.Instruc
 			}
 		}
 	case *ssa.Defer:
-		if coroDeferRequiresDynamicCleanup(v) {
+		if shape.dynamicCleanup {
 			add("AllocU", "FreeDeferNode")
 		}
 	case *ssa.FieldAddr:

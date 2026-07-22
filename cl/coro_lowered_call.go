@@ -45,6 +45,7 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 	if b.Func != p.fn {
 		panic(fmt.Errorf("coroutine lowered runtime call %q in %q escaped into another LLVM function", helper, p.goFn.Name()))
 	}
+	p.observeCoroSiteRuntimeHelper(helper)
 
 	frozenCall, ok, err := p.emissionUniverse.ResolveCoroLoweredCallRecord(p.goFn, helper)
 	if err != nil {

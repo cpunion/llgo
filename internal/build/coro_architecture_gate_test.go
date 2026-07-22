@@ -44,6 +44,11 @@ type coroArchitectureDebtBudget struct {
 	legacyWait        int
 	nativeFork        int
 	fleetBuildFiles   int
+	rawHelperPlan     int
+	legacyHelperScan  int
+	siteEmissionEntry int
+	relocatedEntry    int
+	helperObservation int
 }
 
 var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
@@ -55,6 +60,11 @@ var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
 	legacyWait:        72,
 	nativeFork:        378,
 	fleetBuildFiles:   13,
+	rawHelperPlan:     4,
+	legacyHelperScan:  0,
+	siteEmissionEntry: 1,
+	relocatedEntry:    2,
+	helperObservation: 3,
 }
 
 var allowedCurrentCoroFiles = map[string]bool{
@@ -103,11 +113,33 @@ var allowedExecutorSourceCatalogFields = map[string]bool{
 	"Worker": true, "Channel": true, "Control": true,
 }
 
+var allowedRawHelperPlanFiles = map[string]bool{
+	"cl/emission_runtime_helpers.go": true,
+}
+
+var allowedSiteEmissionEntryFiles = map[string]bool{
+	"cl/compile.go": true,
+}
+
+var allowedRelocatedEntryFiles = map[string]bool{
+	"cl/coro_abi.go":   true,
+	"cl/coro_defer.go": true,
+}
+
+var allowedHelperObservationFiles = map[string]bool{
+	"cl/coro_lowered_call.go": true,
+	"cl/coro_defer.go":        true,
+}
+
 type coroArchitectureDebtInventory struct {
 	coroArchitectureDebtBudget
 	currentCoroFiles map[string]bool
 	featureNames     map[string]bool
 	sourceFields     map[string]bool
+	rawHelperFiles   map[string]bool
+	siteEntryFiles   map[string]bool
+	relocatedFiles   map[string]bool
+	observationFiles map[string]bool
 }
 
 func TestCoroArchitectureDebtIsMonotonic(t *testing.T) {
@@ -127,10 +159,19 @@ func TestCoroArchitectureDebtIsMonotonic(t *testing.T) {
 	check("legacy WaitToken", inventory.legacyWait, budget.legacyWait)
 	check("single-P/fleet fork", inventory.nativeFork, budget.nativeFork)
 	check("fleet build-constraint files", inventory.fleetBuildFiles, budget.fleetBuildFiles)
+	check("raw helper planner boundary", inventory.rawHelperPlan, budget.rawHelperPlan)
+	check("legacy downstream helper scan", inventory.legacyHelperScan, budget.legacyHelperScan)
+	check("physical SitePlan emission entry", inventory.siteEmissionEntry, budget.siteEmissionEntry)
+	check("relocated SitePlan emission entry", inventory.relocatedEntry, budget.relocatedEntry)
+	check("runtime helper SitePlan observation", inventory.helperObservation, budget.helperObservation)
 
 	checkExactCoroArchitectureSet(t, "currentCoro production files", inventory.currentCoroFiles, allowedCurrentCoroFiles)
 	checkExactCoroArchitectureSet(t, "staged coroutine feature names", inventory.featureNames, allowedStagedCoroFeatureNames)
 	checkExactCoroArchitectureSet(t, "ExecutorSourceCatalog fields", inventory.sourceFields, allowedExecutorSourceCatalogFields)
+	checkExactCoroArchitectureSet(t, "raw helper planner production files", inventory.rawHelperFiles, allowedRawHelperPlanFiles)
+	checkExactCoroArchitectureSet(t, "physical SitePlan emission entry files", inventory.siteEntryFiles, allowedSiteEmissionEntryFiles)
+	checkExactCoroArchitectureSet(t, "relocated SitePlan emission entry files", inventory.relocatedFiles, allowedRelocatedEntryFiles)
+	checkExactCoroArchitectureSet(t, "runtime helper SitePlan observation files", inventory.observationFiles, allowedHelperObservationFiles)
 }
 
 func checkExactCoroArchitectureSet(t *testing.T, name string, got, want map[string]bool) {
@@ -147,6 +188,10 @@ func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitecture
 		currentCoroFiles: make(map[string]bool),
 		featureNames:     make(map[string]bool),
 		sourceFields:     make(map[string]bool),
+		rawHelperFiles:   make(map[string]bool),
+		siteEntryFiles:   make(map[string]bool),
+		relocatedFiles:   make(map[string]bool),
+		observationFiles: make(map[string]bool),
 	}
 	roots := []string{"cl", "internal/coro", "internal/build", "ssa", "runtime/internal/coro", "runtime/internal/runtime"}
 	for _, root := range roots {
@@ -172,6 +217,22 @@ func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitecture
 			}
 			ast.Inspect(file, func(node ast.Node) bool {
 				switch node := node.(type) {
+				case *ast.CallExpr:
+					selector, ok := node.Fun.(*ast.SelectorExpr)
+					if !ok {
+						break
+					}
+					switch selector.Sel.Name {
+					case "beginCoroSiteEmission":
+						inventory.siteEmissionEntry++
+						inventory.siteEntryFiles[rel] = true
+					case "beginCoroRelocatedSiteEmission":
+						inventory.relocatedEntry++
+						inventory.relocatedFiles[rel] = true
+					case "observeCoroSiteRuntimeHelper":
+						inventory.helperObservation++
+						inventory.observationFiles[rel] = true
+					}
 				case *ast.Ident:
 					name := node.Name
 					switch name {
@@ -182,6 +243,11 @@ func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitecture
 						inventory.planAuthority++
 					case "WaitToken":
 						inventory.legacyWait++
+					case "classifyCoroRuntimeHelpers", "classifyPlainRuntimeHelpers":
+						inventory.rawHelperPlan++
+						inventory.rawHelperFiles[rel] = true
+					case "loweredRuntimeHelpers", "plainRepresentationRuntimeHelpers", "coroRelocatedHelpers":
+						inventory.legacyHelperScan++
 					case "timerRegistrationModeV1", "pollOperationModeV1", "coroNativeTargetV1State":
 						inventory.nativeFork++
 					default:
