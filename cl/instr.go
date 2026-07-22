@@ -2108,10 +2108,7 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 		fn := cv.Name()
 		if fn == "ssa:wrapnilchk" {
 			ptr := p.compileValue(b, args[0])
-			var sourceCall *ssa.Call
-			if p.currentCoroSite != nil {
-				sourceCall, _ = p.currentCoroSite.instruction.(*ssa.Call)
-			}
+			sourceCall := p.coroCurrentSourceCall()
 			physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(sourceCall)
 			if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionBuiltinNilGuard {
 				// A value-method wrapper's nil check is a language-level panic edge,
@@ -2146,23 +2143,19 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 			// so would evaluate retained x/tools SSA such as *(*T)(nil).
 			ret = p.compileUnsafeSizeAlignBuiltin(fn, args[0])
 			return
-		} else if fn == "recover" && act == llssa.Call && p.currentCoro != nil &&
-			p.compilation != nil && p.compilation.EnableCoroExplicitStatusPanicABI {
+		} else if fn == "recover" && act == llssa.Call && p.coroExplicitStatusLoweringEnabled() {
 			ret = p.compileCoroRecover(b, call)
 			return
-		} else if fn == "close" && len(args) == 1 && act == llssa.Call && p.currentCoro != nil &&
-			p.compilation != nil && p.compilation.EnableCoroChannel &&
-			p.compilation.EnableCoroExplicitStatusPanicABI {
+		} else if fn == "close" && len(args) == 1 && act == llssa.Call &&
+			p.coroChannelLoweringEnabled() && p.coroExplicitStatusLoweringEnabled() {
 			channel := p.compileValue(b, args[0])
 			p.compileCoroChanClose(b, channel)
 			return
-		} else if fn == "String" && len(args) == 2 && act == llssa.Call && p.currentCoro != nil &&
-			p.compilation != nil && p.compilation.EnableCoroExplicitStatusPanicABI {
+		} else if fn == "String" && len(args) == 2 && act == llssa.Call && p.coroExplicitStatusLoweringEnabled() {
 			compiled := p.compileValues(b, args, kind)
 			ret = p.compileCoroUnsafeString(b, call, compiled[0], compiled[1])
 			return
-		} else if fn == "Slice" && len(args) == 2 && act == llssa.Call && p.currentCoro != nil &&
-			p.compilation != nil && p.compilation.EnableCoroExplicitStatusPanicABI {
+		} else if fn == "Slice" && len(args) == 2 && act == llssa.Call && p.coroExplicitStatusLoweringEnabled() {
 			// unsafe.Slice remains a generic SSA builtin. Only its outcome
 			// mechanism changes here: evaluate ptr and len in source order, then
 			// publish language faults without unwinding through the LLVM frame.
@@ -2254,7 +2247,7 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 			if !ok {
 				panic("unknown coroutine llgo.syscall failure convention")
 			}
-			managedWorker := p.currentCoro != nil && p.compilation != nil && p.compilation.EnableCoroWorker
+			managedWorker := p.coroWorkerLoweringEnabled()
 			if semantics, planned := p.plannedCoroIntrinsicCall(ftype); planned {
 				managedWorker = semantics == CoroIntrinsicCallInlineSuspend
 			}

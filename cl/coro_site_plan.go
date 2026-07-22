@@ -58,7 +58,7 @@ func (p *context) beginCoroRelocatedSiteEmission(instruction ssa.Instruction, pl
 
 func (p *context) beginCoroSiteEmissionMode(instruction ssa.Instruction, placement coroRuntimeHelperPlacement) func() {
 	if p == nil || instruction == nil || p.compilation == nil || p.emissionUniverse == nil ||
-		!p.coroPhysicalEmission || p.rawPlainBody {
+		!p.hasCoroPhysicalEmission() || p.rawPlainBody {
 		return func() {}
 	}
 	plan := coroEmissionSitePlan{}
@@ -74,7 +74,7 @@ func (p *context) beginCoroSiteEmissionMode(instruction ssa.Instruction, placeme
 	filtered := helpers[:0]
 	for _, helper := range helpers {
 		if coroCompilerElidesImplicitFaultRuntimeHelper(instruction, helper) ||
-			(p.coroExplicitStatus &&
+			(p.coroEmissionExplicitStatus() &&
 				coroLoweredCallExplicitStatusElided(instruction, helper)) {
 			continue
 		}
@@ -87,8 +87,8 @@ func (p *context) beginCoroSiteEmissionMode(instruction ssa.Instruction, placeme
 		seen:              make(map[string]none, len(helpers)),
 		observeFrozenSite: p.emissionUniverse.CompleteRuntimeABI(),
 	}
-	if placement == coroRuntimeHelperAtSource && p.coroPhysicalPlan != nil {
-		physical, err := p.coroPhysicalPlan.instructionPlan(instruction)
+	if physicalPlan := p.coroEmissionPlan(); placement == coroRuntimeHelperAtSource && physicalPlan != nil {
+		physical, err := physicalPlan.instructionPlan(instruction)
 		if err != nil {
 			panic(fmt.Errorf("coroutine emission site %q: %w", instruction.String(), err))
 		}
@@ -109,11 +109,11 @@ func (p *context) beginCoroSiteEmissionMode(instruction ssa.Instruction, placeme
 	for _, helper := range helpers {
 		observer.expected[helper] = none{}
 	}
-	previous := p.currentCoroSite
-	p.currentCoroSite = observer
+	previous := p.coroEmissionSite()
+	p.setCoroEmissionSite(observer)
 	return func() {
 		recovered := recover()
-		p.currentCoroSite = previous
+		p.setCoroEmissionSite(previous)
 		if recovered != nil {
 			panic(recovered)
 		}
@@ -165,11 +165,11 @@ func (p *context) observeCoroPhysicalBoundsGuard(instruction ssa.Instruction) {
 }
 
 func (p *context) observeCoroPhysicalGuard(instruction ssa.Instruction, nilGuard bool) {
-	if p == nil || p.currentCoroSite == nil || !p.currentCoroSite.hasExpectedPhysical ||
-		p.currentCoroSite.instruction != instruction {
+	current := p.coroEmissionSite()
+	if current == nil || !current.hasExpectedPhysical || current.instruction != instruction {
 		panic("coroutine physical guard emission has no exact source SitePlan")
 	}
-	observer := p.currentCoroSite
+	observer := current
 	expected, seen, name := observer.expectedPhysical.boundsGuard, &observer.seenPhysicalBoundsGuard, "bounds"
 	if nilGuard {
 		expected, seen, name = observer.expectedPhysical.nilGuard, &observer.seenPhysicalNilGuard, "nil"
@@ -184,22 +184,22 @@ func (p *context) observeCoroPhysicalGuard(instruction ssa.Instruction, nilGuard
 }
 
 func (p *context) plannedCoroPhysicalInstruction(instruction ssa.Instruction) (coroPhysicalInstructionPlan, bool) {
-	if p == nil || p.coroPhysicalPlan == nil {
+	if p == nil || p.coroEmissionPlan() == nil {
 		return coroPhysicalInstructionPlan{}, false
 	}
-	if p.currentCoroSite == nil || !p.currentCoroSite.hasExpectedPhysical ||
-		p.currentCoroSite.instruction != instruction {
+	current := p.coroEmissionSite()
+	if current == nil || !current.hasExpectedPhysical || current.instruction != instruction {
 		panic("coroutine physical recipe selection has no exact source SitePlan")
 	}
-	return p.currentCoroSite.expectedPhysical, true
+	return current.expectedPhysical, true
 }
 
 func (p *context) observeCoroPhysicalInstruction(instruction ssa.Instruction, actual coroPhysicalInstructionRecipe) {
-	if p == nil || p.currentCoroSite == nil || !p.currentCoroSite.hasExpectedPhysical ||
-		p.currentCoroSite.instruction != instruction {
+	current := p.coroEmissionSite()
+	if current == nil || !current.hasExpectedPhysical || current.instruction != instruction {
 		panic("coroutine physical recipe emission has no exact source SitePlan")
 	}
-	observer := p.currentCoroSite
+	observer := current
 	if observer.expectedPhysical.recipe != actual {
 		panic(fmt.Errorf(
 			"coroutine emission site %q emitted physical recipe %s, frozen SitePlan requires %s",
@@ -213,10 +213,10 @@ func (p *context) observeCoroPhysicalInstruction(instruction ssa.Instruction, ac
 }
 
 func (p *context) observeCoroCallElision(actual CoroCallElisionKind) {
-	if p == nil || p.currentCoroSite == nil || !p.currentCoroSite.observeFrozenSite {
+	observer := p.coroEmissionSite()
+	if observer == nil || !observer.observeFrozenSite {
 		return
 	}
-	observer := p.currentCoroSite
 	if observer.expectedElision == CoroCallNotElided || observer.expectedElision != actual {
 		panic(fmt.Errorf(
 			"coroutine emission site %q emitted call elision %d, frozen SitePlan requires %d",
@@ -230,25 +230,27 @@ func (p *context) observeCoroCallElision(actual CoroCallElisionKind) {
 }
 
 func (p *context) plannedCoroCallElision() (CoroCallElisionKind, bool) {
-	if p == nil || p.currentCoroSite == nil || !p.currentCoroSite.observeFrozenSite {
+	observer := p.coroEmissionSite()
+	if observer == nil || !observer.observeFrozenSite {
 		return CoroCallNotElided, false
 	}
-	return p.currentCoroSite.expectedElision, true
+	return observer.expectedElision, true
 }
 
 func (p *context) plannedCoroIntrinsicCall(opcode int) (CoroIntrinsicCallSemantics, bool) {
-	if p == nil || p.currentCoroSite == nil || !p.currentCoroSite.observeFrozenSite || !p.currentCoroSite.expectedIntrinsic ||
-		p.currentCoroSite.expectedIntrinsicOpcode != opcode {
+	observer := p.coroEmissionSite()
+	if observer == nil || !observer.observeFrozenSite || !observer.expectedIntrinsic ||
+		observer.expectedIntrinsicOpcode != opcode {
 		return CoroIntrinsicCallUnsupported, false
 	}
-	return p.currentCoroSite.expectedIntrinsicSemantics, true
+	return observer.expectedIntrinsicSemantics, true
 }
 
 func (p *context) observeCoroIntrinsicCallEmission(opcode int, actual CoroIntrinsicCallSemantics) {
-	if p == nil || p.currentCoroSite == nil || !p.currentCoroSite.observeFrozenSite || !isLLGoIntrinsicInstructionOpcode(opcode) {
+	observer := p.coroEmissionSite()
+	if observer == nil || !observer.observeFrozenSite || !isLLGoIntrinsicInstructionOpcode(opcode) {
 		return
 	}
-	observer := p.currentCoroSite
 	if !observer.expectedIntrinsic {
 		panic(fmt.Errorf(
 			"coroutine emission site %q emitted an intrinsic recipe absent from its frozen SitePlan",
@@ -284,10 +286,10 @@ func isLLGoIntrinsicInstructionOpcode(opcode int) bool {
 }
 
 func (p *context) observeCoroSiteRuntimeHelper(helper string) {
-	if p == nil || p.currentCoroSite == nil || !p.currentCoroSite.observeFrozenSite {
+	observer := p.coroEmissionSite()
+	if observer == nil || !observer.observeFrozenSite {
 		return
 	}
-	observer := p.currentCoroSite
 	if _, expected := observer.expected[helper]; !expected {
 		panic(fmt.Errorf(
 			"coroutine emission site %q emitted runtime helper %q absent from its frozen SitePlan",

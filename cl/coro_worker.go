@@ -67,14 +67,15 @@ func coroWorkerResumeSignature() *types.Signature {
 }
 
 func (p *context) requireCoroWorkerBody(b llssa.Builder) *coroBodyContext {
-	if p.currentCoro == nil || p.compilation == nil || !p.compilation.EnableCoroWorker || b.Func != p.fn {
+	body := p.coroBody()
+	if body == nil || p.compilation == nil || !p.compilation.EnableCoroWorker || b.Func != p.fn {
 		panic("coroutine worker lowering requires an active planned physical coroutine body")
 	}
-	if p.currentCoro.abi.version < coroPhysicalABIVersionV1 || p.currentCoro.completion == nil ||
-		p.currentCoro.finalSuspend == nil || p.currentCoro.unsupportedRunDecision == nil {
+	if body.abi.version < coroPhysicalABIVersionV1 || body.completion == nil ||
+		body.finalSuspend == nil || body.unsupportedRunDecision == nil {
 		panic("coroutine worker lowering requires the complete PhysicalABIV1 scheduler ABI")
 	}
-	return p.currentCoro
+	return body
 }
 
 func (p *context) validateCoroWorkerSyscallCodegen(args []ssa.Value, results *types.Tuple) {
@@ -194,10 +195,11 @@ func (p *context) compileCoroWorkerWordCall(
 // in that continuation preserves both valid LLVM SSA and the typed owner until
 // the physical completion/retirement boundary.
 func (p *context) compileCoroCallKeepaliveSlots(b llssa.Builder, call *ssa.Call) []llssa.Expr {
-	if p == nil || p.currentCoro == nil || p.currentCoro.frameRetention == nil || call == nil {
+	body := p.coroBody()
+	if body == nil || body.frameRetention == nil || call == nil {
 		return nil
 	}
-	sources := p.currentCoro.frameRetention.exactCallKeepaliveSources(call)
+	sources := body.frameRetention.exactCallKeepaliveSources(call)
 	slots := make([]llssa.Expr, len(sources))
 	for index, source := range sources {
 		value := p.compileValue(b, source)

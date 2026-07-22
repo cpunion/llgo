@@ -834,23 +834,25 @@ func (c *coroBodyContext) parkCurrentFrame(b llssa.Builder, token, ticket llssa.
 }
 
 func (p *context) compileCoroPark(b llssa.Builder, args []llssa.Expr) {
-	if p.currentCoro == nil || p.compilation == nil || !p.compilation.EnableCoroChildAwait {
+	body := p.coroBody()
+	if body == nil || p.compilation == nil || !p.compilation.EnableCoroChildAwait {
 		panic("llgo.coroPark requires an active PhysicalABIV1 coroutine body")
 	}
 	if b.Func != p.fn || len(args) != 2 {
 		panic("llgo.coroPark requires exactly (token, ticket) in the active coroutine function")
 	}
-	p.currentCoro.parkCurrentFrame(b, args[0], args[1])
+	body.parkCurrentFrame(b, args[0], args[1])
 }
 
 func (p *context) compileCoroYield(b llssa.Builder) {
-	if p.currentCoro == nil || p.compilation == nil || !p.compilation.EnableCoroChildAwait {
+	body := p.coroBody()
+	if body == nil || p.compilation == nil || !p.compilation.EnableCoroChildAwait {
 		panic("llgo.coroYield requires an active PhysicalABIV1 coroutine body")
 	}
 	if b.Func != p.fn {
 		panic("llgo.coroYield requires the active coroutine function")
 	}
-	p.currentCoro.yieldCurrentFrame(b)
+	body.yieldCurrentFrame(b)
 }
 
 func (c *coroBodyContext) countInstructionAndMaybeYield(b llssa.Builder) {
@@ -927,27 +929,13 @@ func (p *context) storeCoroLeafResult(b llssa.Builder, abi coroPhysicalABI, resu
 }
 
 func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi coroPhysicalABI, isInit bool) {
-	oldBase := p.sourceParamBase
-	oldCoro := p.currentCoro
-	oldSourceBlocks := p.coroSourceBlocks
-	oldPhysicalPlan := p.coroPhysicalPlan
-	oldPhysicalEmission := p.coroPhysicalEmission
-	oldExplicitStatus := p.coroExplicitStatus
-	p.sourceParamBase = 2
+	sourceParamBase := 2
 	if len(fn.FreeVars) != 0 {
 		// Captured descriptor entries are (g,out,ctx,args...). The context is an
 		// explicit physical parameter rather than aFunction's legacy implicit
 		// closure parameter, so SSA source parameters begin after all three words.
-		p.sourceParamBase = 3
+		sourceParamBase = 3
 	}
-	defer func() {
-		p.sourceParamBase = oldBase
-		p.currentCoro = oldCoro
-		p.coroSourceBlocks = oldSourceBlocks
-		p.coroPhysicalPlan = oldPhysicalPlan
-		p.coroPhysicalEmission = oldPhysicalEmission
-		p.coroExplicitStatus = oldExplicitStatus
-	}()
 
 	if p.emissionUniverse == nil || p.emissionUniverse.coroProgramIR == nil {
 		panic("coroutine physical body has no ProgramIR")
@@ -959,7 +947,10 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	frameRetention := physicalPlan.frameRetention
 	critical := physicalPlan.critical
 	cleanupPlan := physicalPlan.cleanup
-	p.coroPhysicalPlan = physicalPlan
+	emission, finishEmission := p.beginCoroPhysicalEmission(
+		physicalPlan, sourceParamBase, abi.panicPrepareHook != "",
+	)
+	defer finishEmission()
 
 	b.SetBlock(p.fn.Block(0))
 	cleanup := p.beginCoroStaticCleanup(b, cleanupPlan)
@@ -970,8 +961,6 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	if !coroTerminalResultAllocationSetMatches(frameRetention, terminalResultAllocations) {
 		panic("coroutine cleanup plan and frame-retention proof disagree on terminal-result allocations")
 	}
-	p.coroPhysicalEmission = true
-	p.coroExplicitStatus = abi.panicPrepareHook != ""
 	physical := p.beginCoroBody(b, abi, terminalResultAllocations)
 	physical.frameRetention = frameRetention
 	physical.critical = critical
@@ -979,7 +968,6 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	if physical.cleanup != nil {
 		physical.cleanup.bindBlocks(p.fn)
 	}
-	p.currentCoro = physical
 
 	// Create source blocks after BeginCoro's canonical ramp/suspend blocks so
 	// presplit IR remains in execution order for LLVM diagnostics and ABI tests.
@@ -987,10 +975,10 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	for i := range sourceBlocks {
 		sourceBlocks[i] = p.fn.MakeBlock()
 	}
-	p.coroSourceBlocks = sourceBlocks
 	physical.completion = p.fn.MakeBlock()
 	physical.finalSuspend = p.fn.MakeBlock()
 	physical.bindCancellationCompletion(b)
+	emission.bindCoroPhysicalBody(physical, sourceBlocks)
 	b.SetBlock(physical.coro.InitialResumeBlock())
 	physical.activate(b)
 	b.Jump(sourceBlocks[0])
@@ -1060,6 +1048,7 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	}
 	b.SetBlock(physical.finalSuspend)
 	physical.finish(b)
+	emission.completeCoroPhysicalBody(physical)
 }
 
 func validateCoroPhysicalABI(fn *ssa.Function, plan coro.FunctionPlan, whole *coro.SSAPlan, childAwait, programRun bool) error {

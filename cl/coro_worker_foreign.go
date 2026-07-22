@@ -361,7 +361,7 @@ func (p *context) coroWorkerForeignThunk(shape coroWorkerForeignCallShape, targe
 }
 
 func (p *context) tryCompileCoroWorkerForeignCall(b llssa.Builder, call *ssa.Call) (llssa.Expr, bool) {
-	if p == nil || p.currentCoro == nil || p.compilation == nil || !p.compilation.EnableCoroWorker ||
+	if p == nil || p.coroBody() == nil || p.compilation == nil || !p.compilation.EnableCoroWorker ||
 		p.compilation.CoroPlan == nil || p.compilation.EmissionUniverse == nil || call == nil {
 		return llssa.Expr{}, false
 	}

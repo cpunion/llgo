@@ -194,7 +194,7 @@ func TestCoroIntrinsicEmissionObserverFailsClosed(t *testing.T) {
 				t.Fatal(err)
 			}
 			ctx.compilation = &Compilation{CoroPlan: plan, EmissionUniverse: universe}
-			ctx.coroPhysicalEmission = true
+			ctx.coroEmission = &coroPhysicalEmissionSession{phase: coroPhysicalEmissionPrologue}
 			message := captureCoroSitePlanPanic(func() { test.run(ctx) })
 			if !strings.Contains(message, test.want) {
 				t.Fatalf("observer panic = %q, want %q", message, test.want)

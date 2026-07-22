@@ -142,7 +142,7 @@ func TestCoroSitePlanEmissionObserverRejectsUnexpectedAndMissing(t *testing.T) {
 				t.Fatal(err)
 			}
 			ctx.compilation = &Compilation{CoroPlan: fixture.plan, EmissionUniverse: fixture.universe}
-			ctx.coroPhysicalEmission = true
+			ctx.coroEmission = &coroPhysicalEmissionSession{phase: coroPhysicalEmissionPrologue}
 			message := captureCoroSitePlanPanic(func() { test.run(ctx, fixture.concats[0]) })
 			if !strings.Contains(message, test.want) {
 				t.Fatalf("observer panic = %q, want %q", message, test.want)

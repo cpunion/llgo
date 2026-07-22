@@ -38,7 +38,7 @@ func (c *coroBodyContext) criticalCallDepth(common *ssa.CallCommon) (coroCritica
 }
 
 func (p *context) compileCoroCriticalEnter(b llssa.Builder, common *ssa.CallCommon) {
-	body := p.currentCoro
+	body := p.coroBody()
 	if body == nil || b.Func != p.fn || body.criticalEnter.IsNil() {
 		panic("llgo.coroCriticalEnter requires an active critical-capable coroutine body")
 	}
@@ -59,7 +59,7 @@ func (p *context) compileCoroCriticalEnter(b llssa.Builder, common *ssa.CallComm
 }
 
 func (p *context) compileCoroCriticalExit(b llssa.Builder, common *ssa.CallCommon) {
-	body := p.currentCoro
+	body := p.coroBody()
 	if body == nil || b.Func != p.fn || body.criticalExit.IsNil() {
 		panic("llgo.coroCriticalExit requires an active critical-capable coroutine body")
 	}

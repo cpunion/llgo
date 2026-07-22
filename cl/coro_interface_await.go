@@ -50,7 +50,7 @@ func coroInterfaceDispatchNeedsAwait(dispatch *coroInterfaceDispatchPlan) bool {
 // itab emission stores that descriptor directly, the candidate chain reduces
 // to one validated descriptor entry load without changing scheduler semantics.
 func (p *context) tryCompileCoroInterfaceDispatchAwait(b llssa.Builder, call *ssa.Call) (llssa.Expr, bool) {
-	if p.currentCoro == nil || p.compilation == nil || p.compilation.CoroPlan == nil ||
+	if p.coroBody() == nil || p.compilation == nil || p.compilation.CoroPlan == nil ||
 		!p.compilation.EnableCoroChildAwait || call == nil || call.Common() == nil || !call.Common().IsInvoke() {
 		return llssa.Nil, false
 	}

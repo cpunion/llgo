@@ -74,11 +74,12 @@ func (p *context) compileCoroImplicitNilFieldAddrGuard(
 	field *ssa.FieldAddr,
 	base llssa.Expr,
 ) llssa.Expr {
-	if p == nil || p.currentCoro == nil || field == nil || field.X == nil || b == nil || b.Func != p.fn {
+	body := p.coroBody()
+	if body == nil || field == nil || field.X == nil || b == nil || b.Func != p.fn {
 		panic("implicit nil FieldAddr guard escaped its physical coroutine body")
 	}
 	if p.compilation == nil || !p.compilation.EnableCoroExplicitStatusPanicABI ||
-		p.currentCoro.abi.version < coroPhysicalABIVersionV1 {
+		body.abi.version < coroPhysicalABIVersionV1 {
 		panic("implicit nil FieldAddr guard requires the PhysicalABIV1 explicit-status panic ABI")
 	}
 	if _, ok := types.Unalias(field.X.Type()).Underlying().(*types.Pointer); !ok {
@@ -96,7 +97,7 @@ func (p *context) compileCoroImplicitNilDerefGuard(
 	deref *ssa.UnOp,
 	base llssa.Expr,
 ) llssa.Expr {
-	if p == nil || p.currentCoro == nil || deref == nil || deref.Op != token.MUL || deref.X == nil ||
+	if p == nil || p.coroBody() == nil || deref == nil || deref.Op != token.MUL || deref.X == nil ||
 		b == nil || b.Func != p.fn {
 		panic("implicit nil typed-load guard escaped its physical coroutine body")
 	}
@@ -107,11 +108,12 @@ func (p *context) compileCoroImplicitNilDerefGuard(
 }
 
 func (p *context) compileCoroImplicitNilAccessGuard(b llssa.Builder, base llssa.Expr) llssa.Expr {
-	if p == nil || p.currentCoro == nil || b == nil || b.Func != p.fn {
+	body := p.coroBody()
+	if body == nil || b == nil || b.Func != p.fn {
 		panic("implicit nil access guard escaped its physical coroutine body")
 	}
 	if p.compilation == nil || !p.compilation.EnableCoroExplicitStatusPanicABI ||
-		p.currentCoro.abi.version < coroPhysicalABIVersionV1 {
+		body.abi.version < coroPhysicalABIVersionV1 {
 		panic("implicit nil access guard requires the PhysicalABIV1 explicit-status panic ABI")
 	}
 
@@ -136,7 +138,8 @@ func (p *context) compileCoroIndexAddrPlanned(
 	base, index llssa.Expr,
 	plan coroPhysicalInstructionPlan,
 ) llssa.Expr {
-	if p == nil || p.currentCoro == nil || operation == nil || operation.X == nil ||
+	body := p.coroBody()
+	if body == nil || operation == nil || operation.X == nil ||
 		b == nil || b.Func != p.fn {
 		panic("structured coroutine IndexAddr escaped its physical body")
 	}
@@ -188,7 +191,7 @@ func (p *context) compileCoroIndexPlanned(
 	takeArrayAddr func() (addr llssa.Expr, zero bool),
 	plan coroPhysicalInstructionPlan,
 ) llssa.Expr {
-	if p == nil || p.currentCoro == nil || operation == nil || operation.X == nil ||
+	if p == nil || p.coroBody() == nil || operation == nil || operation.X == nil ||
 		operation.Index == nil || b == nil || b.Func != p.fn {
 		panic("structured coroutine Index escaped its physical body")
 	}
@@ -245,12 +248,13 @@ func (p *context) compileCoroSlicePlanned(
 	base, low, high, max llssa.Expr,
 	plan coroPhysicalInstructionPlan,
 ) llssa.Expr {
-	if p == nil || p.currentCoro == nil || operation == nil || operation.X == nil ||
+	body := p.coroBody()
+	if body == nil || operation == nil || operation.X == nil ||
 		b == nil || b.Func != p.fn {
 		panic("structured coroutine Slice escaped its physical body")
 	}
 	if p.compilation == nil || !p.compilation.EnableCoroExplicitStatusPanicABI ||
-		p.currentCoro.abi.version < coroPhysicalABIVersionV1 {
+		body.abi.version < coroPhysicalABIVersionV1 {
 		panic("structured coroutine Slice requires the PhysicalABIV1 explicit-status panic ABI")
 	}
 	if plan.recipe != coroPhysicalInstructionSlice || !plan.boundsGuard {
@@ -296,7 +300,7 @@ func (p *context) compileCoroSlicePlanned(
 }
 
 func (p *context) compileCoroFaultConditionGuard(b llssa.Builder, condition llssa.Expr, kind uint32) {
-	if p == nil || p.currentCoro == nil || b == nil || b.Func != p.fn || condition.IsNil() {
+	if p == nil || p.coroBody() == nil || b == nil || b.Func != p.fn || condition.IsNil() {
 		panic("structured coroutine fault guard escaped its physical body")
 	}
 	fault := b.Func.MakeBlock()
@@ -317,13 +321,14 @@ func (p *context) compileCoroFaultConditionGuard(b llssa.Builder, condition llss
 // body without cleanup publishes immediately. The call never returns to the
 // source continuation.
 func (p *context) compileCoroTerminalFault(b llssa.Builder, kind uint32) {
-	if p == nil || p.currentCoro == nil || b == nil || b.Func != p.fn {
+	body := p.coroBody()
+	if body == nil || b == nil || b.Func != p.fn {
 		panic("coroutine terminal fault escaped its physical body")
 	}
-	if cleanup := p.currentCoro.cleanup; cleanup != nil {
+	if cleanup := body.cleanup; cleanup != nil {
 		cleanup.enterFault(p, b, kind)
 	} else {
-		p.currentCoro.implicitFault(p, b, kind)
+		body.implicitFault(p, b, kind)
 	}
 }
 
@@ -353,9 +358,10 @@ func (c *coroBodyContext) implicitFault(p *context, b llssa.Builder, kind uint32
 func (p *context) materializeCoroFaultPayload(
 	b llssa.Builder, kind uint32,
 ) (typeWord, dataWord llssa.Expr) {
-	if p == nil || p.currentCoro == nil || b == nil || b.Func != p.fn ||
+	body := p.coroBody()
+	if body == nil || b == nil || b.Func != p.fn ||
 		p.compilation == nil || !p.compilation.EnableCoroExplicitStatusPanicABI ||
-		p.currentCoro.abi.version < coroPhysicalABIVersionV1 {
+		body.abi.version < coroPhysicalABIVersionV1 {
 		panic("coroutine fault payload materialization requires an explicit-status PhysicalABIV1 body")
 	}
 	typeSlot := p.coroFrameAlloca(p.prog.VoidPtr())
@@ -377,7 +383,7 @@ func (p *context) materializeCoroFaultPayload(
 // retained as the base; if no direct deferred child recovers the payload, the
 // shared cleanup panic block publishes it through panic_prepare_v1.
 func (s *coroStaticCleanupState) enterFault(p *context, b llssa.Builder, kind uint32) {
-	if s == nil || p == nil || p.currentCoro == nil || b == nil {
+	if s == nil || p == nil || p.coroBody() == nil || b == nil {
 		panic("implicit nil fault cleanup has no active coroutine state")
 	}
 	typeWord, dataWord := p.materializeCoroFaultPayload(b, kind)
@@ -389,7 +395,7 @@ func (s *coroStaticCleanupState) enterFault(p *context, b llssa.Builder, kind ui
 // become at-most-once; preserve its existing normal/RunDefers/cancel base while
 // replacing any older panic with the newer implicit fault.
 func (s *coroStaticCleanupState) replaceFault(p *context, b llssa.Builder, kind uint32) {
-	if s == nil || p == nil || p.currentCoro == nil || b == nil {
+	if s == nil || p == nil || p.coroBody() == nil || b == nil {
 		panic("implicit cleanup fault has no active coroutine state")
 	}
 	typeWord, dataWord := p.materializeCoroFaultPayload(b, kind)

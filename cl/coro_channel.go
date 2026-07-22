@@ -79,14 +79,15 @@ func coroChanResumeSignature() *types.Signature {
 }
 
 func (p *context) requireCoroChannelBody(b llssa.Builder) *coroBodyContext {
-	if p.currentCoro == nil || p.compilation == nil || !p.compilation.EnableCoroChannel || b.Func != p.fn {
+	body := p.coroBody()
+	if body == nil || p.compilation == nil || !p.compilation.EnableCoroChannel || b.Func != p.fn {
 		panic("coroutine channel lowering requires an active planned physical coroutine body")
 	}
-	if p.currentCoro.abi.version < coroPhysicalABIVersionV1 || p.currentCoro.completion == nil ||
-		p.currentCoro.finalSuspend == nil || p.currentCoro.unsupportedRunDecision == nil {
+	if body.abi.version < coroPhysicalABIVersionV1 || body.completion == nil ||
+		body.finalSuspend == nil || body.unsupportedRunDecision == nil {
 		panic("coroutine channel lowering requires the complete PhysicalABIV1 scheduler ABI")
 	}
-	return p.currentCoro
+	return body
 }
 
 func (p *context) newCoroChannelStorage(b llssa.Builder, elemType llssa.Type) (elem, state llssa.Expr) {

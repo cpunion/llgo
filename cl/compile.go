@@ -187,14 +187,8 @@ type context struct {
 	emissionOwner        *preparedEmissionPackage
 	cacheRegistration    bool // cached archive: skip observers; emitted IR is transient
 	pcLineSeq            uint64
-	sourceParamBase      int // hidden physical parameters before source params
-	currentCoro          *coroBodyContext
-	currentCoroSite      *coroSiteEmissionObserver
-	coroPhysicalPlan     *coroPhysicalFunctionPlan
-	coroPhysicalEmission bool
-	coroExplicitStatus   bool
-	rawPlainBody         bool               // compiling the legacy ABI variant of a managed function
-	coroSourceBlocks     []llssa.BasicBlock // source SSA block index -> logical LLVM block
+	coroEmission         *coroPhysicalEmissionSession
+	rawPlainBody         bool // compiling the legacy ABI variant of a managed function
 	coroRootFactories    []coroRootFactoryRegistration
 	coroPlainDescriptors map[string]llssa.Expr
 
@@ -968,11 +962,8 @@ func (p *context) debugParams(b llssa.Builder, f *ssa.Function) {
 // Function.Block mapping. A physical coroutine has a dedicated ramp and
 // internal suspend blocks, so its source CFG uses an explicit stable map.
 func (p *context) sourceBlock(index int) llssa.BasicBlock {
-	if len(p.coroSourceBlocks) != 0 {
-		if index < 0 || index >= len(p.coroSourceBlocks) {
-			panic(fmt.Sprintf("source basic block index %d is outside coroutine map of length %d", index, len(p.coroSourceBlocks)))
-		}
-		return p.coroSourceBlocks[index]
+	if block, ok := p.coroEmissionSourceBlock(index); ok {
+		return block
 	}
 	return p.fn.Block(index)
 }
@@ -1021,60 +1012,12 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 		if _, skip := p.unevaluatedSSA[instr]; skip {
 			continue
 		}
-		if p.currentCoro != nil {
-			if _, debug := instr.(*ssa.DebugRef); debug {
-				p.compileInstr(b, instr)
-				continue
-			}
-			role := coroFrameRetentionInstructionNone
-			if p.currentCoro.frameRetention != nil {
-				role = p.currentCoro.frameRetention.roles[instr]
-			}
-			criticalRole := coroCriticalCallNone
-			criticalDepth := uint32(0)
-			if p.currentCoro.critical != nil {
-				var proven bool
-				criticalDepth, proven = p.currentCoro.critical.beforeDepth[instr]
-				if !proven {
-					panic("coroutine critical proof has no instruction input depth")
-				}
-				if call, ok := instr.(*ssa.Call); ok {
-					criticalRole = p.currentCoro.critical.roles[call]
-				}
-			}
-			outerCriticalEnter := criticalRole == coroCriticalCallEnter && criticalDepth == 0
-			switch role {
-			case coroFrameRetentionInstructionPrepare:
-				if p.currentCoro.frameRetaining {
-					panic("nested coroutine frame-retention critical span")
-				}
-				// A retained frame pointer must never exist while an ordinary
-				// preemption handoff can make this G independently runnable. Poll
-				// immediately before the fail-stop prepare, then suppress budget
-				// polls until the exact fail-stop retire has returned.
-				if p.currentCoro.needsPreempt {
-					p.currentCoro.pollAndSuspendForPreempt(b)
-				}
-				p.currentCoro.instructions = 0
-				p.currentCoro.frameRetaining = true
-			case coroFrameRetentionInstructionPark, coroFrameRetentionInstructionRetire:
-				if !p.currentCoro.frameRetaining {
-					panic("coroutine frame-retention park/retire outside its critical span")
-				}
-			default:
-				if !p.currentCoro.frameRetaining && criticalDepth == 0 && !outerCriticalEnter {
-					p.currentCoro.countInstructionAndMaybeYield(b)
-				}
-			}
-			if !outerCriticalEnter {
-				p.currentCoro.sourceBlockPollFresh = false
-			}
+		if p.compileCoroInstructionPrologue(b, instr) {
+			continue
 		}
 		if i == 1 && doModInit && p.state == pkgInPatch { // in patch package but no pkgFNoOldInit
 			initFnNameOld := initFnNameOfHasPatch(p.fn.Name())
-			if p.currentCoro != nil {
-				p.compileCoroPatchInitAwait(b)
-			} else {
+			if !p.compileCoroPatchInitAtBlock(b) {
 				fnOld := pkg.NewFunc(initFnNameOld, llssa.NoArgsNoRet, llssa.InC)
 				b.Call(fnOld.Expr)
 			}
@@ -1117,11 +1060,7 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 		} else {
 			p.compileInstr(b, instr)
 		}
-		if p.currentCoro != nil && p.currentCoro.frameRetention != nil &&
-			p.currentCoro.frameRetention.roles[instr] == coroFrameRetentionInstructionRetire {
-			p.currentCoro.frameRetaining = false
-			p.currentCoro.instructions = 0
-		}
+		p.compileCoroInstructionEpilogue(instr)
 	}
 	// is cgo cfunc but not return yet, some funcs has multiple blocks
 	if (isCgoCfunc || isCgoC2 || isCgoCmacro) && !cgoReturned {
@@ -1563,11 +1502,11 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			x = p.compileCoroImplicitNilDerefGuard(b, v, x)
 		} else if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary {
 			panic(fmt.Sprintf("typed load selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
-		} else if (!physicalPlanned || !p.coroExplicitStatus) && shouldAssertDirectNilDeref(v) && !ssaValueProvenNonNilAt(v.X, v) {
+		} else if (!physicalPlanned || !p.coroUsesExplicitStatusFaults()) && shouldAssertDirectNilDeref(v) && !ssaValueProvenNonNilAt(v.X, v) {
 			b.AssertNilDeref(x)
 		}
 		if v.Op == token.ARROW {
-			if p.currentCoro != nil && p.compilation != nil && p.compilation.EnableCoroChannel {
+			if p.coroChannelLoweringEnabled() {
 				ret = p.compileCoroChanRecv(b, v, x)
 			} else {
 				ret = b.Recv(x, v.CommaOk)
@@ -1575,7 +1514,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		} else {
 			if v.Op == token.MUL {
 				if t := p.type_(v.Type(), llssa.InGo); t.RawType() != nil && p.prog.SizeOf(t) == 0 {
-					if p.currentCoro != nil {
+					if p.hasCoroPhysicalBody() {
 						// The explicit-status guard above owns the nullable case;
 						// a proven non-nil source needs no memory access. Avoid
 						// Builder.UnOp's legacy native-stack nil helper and
@@ -1622,7 +1561,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			x = p.compileCoroImplicitNilFieldAddrGuard(b, v, x)
 		} else if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary {
 			panic(fmt.Sprintf("FieldAddr selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
-		} else if (!physicalPlanned || !p.coroExplicitStatus) && p.isAddressOfFieldAddr(v) && !ssaAddressValueProvenNonNilAt(v.X, v) {
+		} else if (!physicalPlanned || !p.coroUsesExplicitStatusFaults()) && p.isAddressOfFieldAddr(v) && !ssaAddressValueProvenNonNilAt(v.X, v) {
 			b.AssertNilDeref(x)
 		}
 		ret = b.FieldAddr(x, v.Field)
@@ -1634,36 +1573,19 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		if p.skipSyntheticMakeSliceAlloc(v) {
 			return
 		}
-		if p.currentCoro != nil {
-			if value, selected := p.currentCoro.terminalResultAllocs[v]; selected {
-				if !v.Heap || v.Block() == nil || v.Block().Index != 0 {
-					panic("coroutine terminal-result allocation lost its source-entry heap identity")
-				}
-				ret = value
-				break
-			}
-		}
 		elem := p.type_(t.Elem(), llssa.InGo)
 		heap := v.Heap
-		if bitcast, exact := coro.ProveSSAExactScalarBitcast(v.Parent()); exact && bitcast.Allocation == v {
+		bitcast, exactBitcast := coro.ProveSSAExactScalarBitcast(v.Parent())
+		exactBitcast = exactBitcast && bitcast.Allocation == v
+		if value, handled := p.tryCompileCoroAllocation(b, v, elem, exactBitcast); handled {
+			ret = value
+			break
+		}
+		if exactBitcast {
 			// The exact body stores the complete same-width scalar before its
 			// single reinterpreted load, so zero initialization is both unnecessary
 			// and would leave a misleading llvm.memset call in this call-free leaf.
-			if p.currentCoro != nil {
-				ret = p.coroFrameAlloca(elem)
-			} else {
-				ret = b.AllocaT(elem)
-			}
-			break
-		}
-		frameOwned := p.currentCoro != nil && !heap
-		if heap && p.currentCoro != nil && p.currentCoro.frameRetention != nil {
-			_, retained := p.currentCoro.frameRetention.allocations[v]
-			heap = !retained
-			frameOwned = retained
-		}
-		if frameOwned {
-			ret = p.coroFrameAlloc(elem)
+			ret = b.AllocaT(elem)
 			break
 		}
 		ret = b.Alloc(elem, heap)
@@ -1763,7 +1685,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		}
 		ret.Type = p.type_(v.Type(), llssa.InGo)
 	case *ssa.MakeInterface:
-		if p.currentCoro != nil && coroSyntheticSelectNoCaseBox(v) {
+		if p.coroSyntheticSelectNoCaseInterface(v) {
 			ret = p.prog.Nil(p.type_(v.Type(), llssa.InGo))
 			break
 		}
@@ -1889,7 +1811,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 				states[i].Value = p.compileValue(b, s.Send)
 			}
 		}
-		if p.currentCoro != nil && p.compilation != nil && p.compilation.EnableCoroChannel {
+		if p.coroChannelLoweringEnabled() {
 			if v.Blocking {
 				ret = p.compileCoroChanSelect(b, states)
 			} else {
@@ -2075,12 +1997,7 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		if p.shouldTrackCallerFrames() {
 			p.popCallerLocationFrame(b)
 		}
-		if p.currentCoro != nil {
-			if p.currentCoro.completion == nil {
-				panic("coroutine return has no completion block")
-			}
-			p.storeCoroLeafResult(b, p.currentCoro.abi, p.currentCoro.resultSlot, results)
-			b.Jump(p.currentCoro.completion)
+		if p.tryCompileCoroReturn(b, results) {
 			return
 		}
 		b.Return(results...)
@@ -2104,8 +2021,7 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		p.recordPanicLocation(b, v.Pos())
 		b.MapUpdate(m, key, val)
 	case *ssa.Defer:
-		if p.currentCoro != nil && p.currentCoro.cleanup != nil {
-			p.currentCoro.cleanup.register(p, b, v)
+		if p.tryCompileCoroDefer(b, v) {
 			return
 		}
 		if v.DeferStack != nil {
@@ -2119,18 +2035,13 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		}
 		p.call(b, llssa.Go, &v.Call)
 	case *ssa.RunDefers:
-		if p.currentCoro != nil && p.currentCoro.cleanup != nil {
-			p.currentCoro.cleanup.runDefers(b, v)
+		if p.tryCompileCoroRunDefers(b, v) {
 			return
 		}
 		p.recordPanicLocation(b, v.Pos())
 		b.RunDefers()
 	case *ssa.Panic:
-		if p.currentCoro != nil && coroSyntheticSelectNoCasePanic(v) {
-			if p.currentCoro.unsupportedRunDecision == nil {
-				panic("coroutine select invariant panic requires a fail-closed trap block")
-			}
-			b.Jump(p.currentCoro.unsupportedRunDecision)
+		if p.tryCompileCoroSyntheticSelectPanic(b, v) {
 			return
 		}
 		if p.tryCompileCoroExplicitStatusPanic(b, v) {
@@ -2143,7 +2054,7 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		ch := p.compileValue(b, v.Chan)
 		x := p.compileValue(b, v.X)
 		p.recordPanicLocation(b, v.Pos())
-		if p.currentCoro != nil && p.compilation != nil && p.compilation.EnableCoroChannel {
+		if p.coroChannelLoweringEnabled() {
 			p.compileCoroChanSend(b, ch, x)
 		} else {
 			b.Send(ch, x)
@@ -2299,7 +2210,7 @@ func (p *context) compileValue(b llssa.Builder, v ssa.Value) llssa.Expr {
 		fn := v.Parent()
 		for idx, param := range fn.Params {
 			if param == v {
-				return b.Param(idx + p.sourceParamBase)
+				return b.Param(idx + p.coroEmissionSourceParamBase())
 			}
 		}
 	case *ssa.Function:
@@ -2331,14 +2242,8 @@ func (p *context) compileValue(b llssa.Builder, v ssa.Value) llssa.Expr {
 		fn := v.Parent()
 		for idx, freeVar := range fn.FreeVars {
 			if freeVar == v {
-				if p.currentCoro != nil && len(fn.FreeVars) != 0 {
-					// Physical captured coroutine entries expose their typed context
-					// explicitly at (g,out,ctx,...). Do not use Function.FreeVar:
-					// that legacy helper hard-codes implicit ctx at parameter zero,
-					// which is the G word in the coroutine ABI. Load per use so the
-					// value is dominated in every resumed block after CoroSplit.
-					ctx := b.Load(p.fn.PhysicalParam(2))
-					return b.Field(ctx, idx)
+				if value, handled := p.tryCompileCoroFreeVar(b, fn, idx); handled {
+					return value
 				}
 				return p.fn.FreeVar(b, idx)
 			}

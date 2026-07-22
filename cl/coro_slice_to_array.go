@@ -95,11 +95,12 @@ func (p *context) compileCoroSliceToArrayPointer(
 	typ llssa.Type,
 	plan coroPhysicalInstructionPlan,
 ) llssa.Expr {
-	if p == nil || p.currentCoro == nil || conversion == nil || b == nil || b.Func != p.fn {
+	body := p.coroBody()
+	if body == nil || conversion == nil || b == nil || b.Func != p.fn {
 		panic("structured slice-to-array-pointer conversion escaped its physical coroutine body")
 	}
 	if p.compilation == nil || !p.compilation.EnableCoroExplicitStatusPanicABI ||
-		p.currentCoro.abi.version < coroPhysicalABIVersionV1 {
+		body.abi.version < coroPhysicalABIVersionV1 {
 		panic("slice-to-array-pointer fault requires the PhysicalABIV1 explicit-status panic ABI")
 	}
 	if plan.recipe != coroPhysicalInstructionSliceToArrayPointer || plan.bound < 0 ||

@@ -193,7 +193,8 @@ func (p *context) tryCompileCoroClosedStaticSpawn(b llssa.Builder, spawn *ssa.Go
 	if p.compilation == nil || !p.compilation.EnableCoroClosedStaticSpawn || spawn == nil {
 		return false
 	}
-	if p.currentCoro == nil || p.compilation.CoroPlan == nil || b.Func != p.fn {
+	body := p.coroBody()
+	if body == nil || p.compilation.CoroPlan == nil || b.Func != p.fn {
 		panic("closed static spawn requires an active planned physical coroutine body")
 	}
 	callPlan, found := p.compilation.CoroPlan.CallPlan(spawn)
@@ -219,7 +220,7 @@ func (p *context) tryCompileCoroClosedStaticSpawn(b llssa.Builder, spawn *ssa.Go
 	// every exact operand here, in source order, before the begin transaction.
 	args := p.compileValues(b, spawn.Call.Args, fnNormal)
 
-	parent := p.currentCoro.task
+	parent := body.task
 	begin := p.pkg.NewFunc(coroSpawnBeginHookV1, coroSpawnBeginSignature(), llssa.InC)
 	childG := b.Call(begin.Expr, parent)
 	null := p.prog.Nil(p.prog.VoidPtr())
@@ -237,7 +238,7 @@ func (p *context) tryCompileCoroClosedStaticSpawn(b llssa.Builder, spawn *ssa.Go
 	handle := b.Call(root.Expr, physicalArgs...)
 	commit := p.pkg.NewFunc(coroSpawnCommitHookV1, coroSpawnCommitSignature(), llssa.InC)
 	b.Call(commit.Expr, parent, childG, handle)
-	p.currentCoro.pollAndSuspendForPreempt(b)
+	body.pollAndSuspendForPreempt(b)
 	return true
 }
 
@@ -250,6 +251,10 @@ func (p *context) tryCompileCoroClosedStaticSpawn(b llssa.Builder, spawn *ssa.Go
 // and HasCoro checks; plain-only or corrupt values never fall back to a native
 // callback, TLS, or a synchronous adapter.
 func (p *context) compileCoroManagedDispatchSpawn(b llssa.Builder, spawn *ssa.Go) {
+	body := p.coroBody()
+	if body == nil {
+		panic("managed dispatch spawn requires an active physical coroutine body")
+	}
 	callPlan, err := p.compilation.CoroPlan.ResolveManagedDispatchSpawn(spawn)
 	if err != nil {
 		caller, _ := p.compilation.CoroPlan.FunctionPlan(p.goFn)
@@ -283,12 +288,12 @@ func (p *context) compileCoroManagedDispatchSpawn(b llssa.Builder, spawn *ssa.Go
 	p.compileCoroImplicitNilAccessGuard(b, b.Field(fn, 0))
 	opts.DescriptorNonNil = true
 
-	parent := p.currentCoro.task
+	parent := body.task
 	begin := p.pkg.NewFunc(coroSpawnBeginHookV1, coroSpawnBeginSignature(), llssa.InC)
 	childG := b.Call(begin.Expr, parent)
 	null := p.prog.Nil(p.prog.VoidPtr())
 	handle := b.CallCoroDispatchCoro(fn, childG, null, args, opts)
 	commit := p.pkg.NewFunc(coroSpawnCommitHookV1, coroSpawnCommitSignature(), llssa.InC)
 	b.Call(commit.Expr, parent, childG, handle)
-	p.currentCoro.pollAndSuspendForPreempt(b)
+	body.pollAndSuspendForPreempt(b)
 }

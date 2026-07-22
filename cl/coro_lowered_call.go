@@ -54,7 +54,7 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 	target := frozenCall.Target
 	rawPlainOccurrence := ok && frozenCall.RawPlain
 	plainOnly := false
-	if !ok && p.currentCoro == nil {
+	if !ok && p.coroBody() == nil {
 		target, ok, err = p.emissionUniverse.ResolveCoroPlainLoweredCall(p.goFn, helper)
 		if err != nil {
 			panic(fmt.Errorf("coroutine plain lowered runtime call %q in %q: %w", helper, p.goFn.Name(), err))

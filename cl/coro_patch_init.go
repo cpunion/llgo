@@ -95,7 +95,7 @@ func (p *context) tryCompileCoroPatchInitRedirect(b llssa.Builder, call *ssa.Cal
 		}
 		b.Call(fn.Expr)
 	case coro.EmitCoroutine:
-		if p.currentCoro == nil {
+		if p.coroBody() == nil {
 			panic("coroutine patch initializer replacement escaped into a plain owner")
 		}
 		if result := p.compileCoroTargetAwait(b, target, nil); !result.IsNil() {

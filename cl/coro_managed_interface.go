@@ -294,7 +294,7 @@ func (p *context) tryCompileCoroManagedInterfaceDispatch(
 	intf := p.compileValue(b, common.Value)
 	method := b.Imethod(intf, common.Method)
 	args := p.compileValues(b, call.Call.Args, fnNormal)
-	if p.currentCoro != nil {
+	if p.coroBody() != nil {
 		keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
 		return p.compileCoroManagedDispatchAwaitValue(b, method, args, signature, keepaliveSlots), true
 	}

@@ -92,10 +92,12 @@ func Root(value int) int { return value + 1 }
 		},
 	}
 	ctx := &context{
-		compilation:          &Compilation{},
-		emissionUniverse:     &EmissionUniverse{coroProgramIR: newCoroProgramIR()},
-		coroPhysicalEmission: true,
-		coroPhysicalPlan:     physical,
+		compilation:      &Compilation{},
+		emissionUniverse: &EmissionUniverse{coroProgramIR: newCoroProgramIR()},
+		coroEmission: &coroPhysicalEmissionSession{
+			phase: coroPhysicalEmissionPrologue,
+			plan:  physical,
+		},
 	}
 
 	missing := captureCoroSitePlanPanic(func() { ctx.beginCoroSiteEmission(instruction)() })

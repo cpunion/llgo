@@ -75,14 +75,22 @@ type coroArchitectureDebtBudget struct {
 	physicalCodegenRebuild    int
 	physicalProofBuilderCall  int
 	legacyPhysicalSelector    int
+	legacySplitEmissionState  int
+	emissionSessionAccess     int
+	bodyCapabilityAccess      int
+	emissionSessionBegin      int
+	emissionBodyBind          int
+	emissionBodyComplete      int
+	legacyContextState        int
+	contextSessionField       int
 }
 
 var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
 	// Filled from the 2026-07-22 executable fleet checkpoint. These values may
 	// only decrease; see TestCoroArchitectureDebtIsMonotonic.
-	currentCoro:               173,
+	currentCoro:               0,
 	planAuthority:             392,
-	stagedFeatureGate:         322,
+	stagedFeatureGate:         316,
 	legacyWait:                72,
 	nativeFork:                378,
 	fleetBuildFiles:           13,
@@ -117,10 +125,24 @@ var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
 	physicalCodegenRebuild:    0,
 	physicalProofBuilderCall:  8,
 	legacyPhysicalSelector:    0,
+	legacySplitEmissionState:  0,
+	emissionSessionAccess:     22,
+	bodyCapabilityAccess:      47,
+	emissionSessionBegin:      1,
+	emissionBodyBind:          1,
+	emissionBodyComplete:      1,
+	legacyContextState:        0,
+	contextSessionField:       1,
 }
 
-var allowedCurrentCoroFiles = map[string]bool{
-	"cl/compile.go":                true,
+var allowedCurrentCoroFiles = map[string]bool{}
+
+var allowedEmissionSessionAccessFiles = map[string]bool{
+	"cl/compile.go":               true,
+	"cl/coro_emission_session.go": true,
+}
+
+var allowedCoroBodyCapabilityFiles = map[string]bool{
 	"cl/coro_abi.go":               true,
 	"cl/coro_await.go":             true,
 	"cl/coro_channel.go":           true,
@@ -128,6 +150,8 @@ var allowedCurrentCoroFiles = map[string]bool{
 	"cl/coro_defer.go":             true,
 	"cl/coro_dispatch.go":          true,
 	"cl/coro_dynamic_await.go":     true,
+	"cl/coro_emission_session.go":  true,
+	"cl/coro_emitter_adapter.go":   true,
 	"cl/coro_implicit_fault.go":    true,
 	"cl/coro_interface_await.go":   true,
 	"cl/coro_lowered_call.go":      true,
@@ -143,7 +167,16 @@ var allowedCurrentCoroFiles = map[string]bool{
 	"cl/coro_unsafe_string.go":     true,
 	"cl/coro_worker.go":            true,
 	"cl/coro_worker_foreign.go":    true,
-	"cl/instr.go":                  true,
+}
+
+var allowedPhysicalEmissionSessionFields = map[string]bool{
+	"phase":           true,
+	"plan":            true,
+	"body":            true,
+	"site":            true,
+	"sourceBlocks":    true,
+	"sourceParamBase": true,
+	"explicitStatus":  true,
 }
 
 var allowedStagedCoroFeatureNames = map[string]bool{
@@ -337,6 +370,9 @@ type coroArchitectureDebtInventory struct {
 	physicalCodegenRebuildFiles    map[string]bool
 	physicalProofBuilderCallFiles  map[string]bool
 	legacyPhysicalSelectorFiles    map[string]bool
+	emissionSessionAccessFiles     map[string]bool
+	bodyCapabilityAccessFiles      map[string]bool
+	emissionSessionFields          map[string]bool
 }
 
 func TestCoroArchitectureDebtIsMonotonic(t *testing.T) {
@@ -387,6 +423,14 @@ func TestCoroArchitectureDebtIsMonotonic(t *testing.T) {
 	check("physical codegen proof rebuild", inventory.physicalCodegenRebuild, budget.physicalCodegenRebuild)
 	check("physical proof builder call", inventory.physicalProofBuilderCall, budget.physicalProofBuilderCall)
 	check("legacy physical fault selector", inventory.legacyPhysicalSelector, budget.legacyPhysicalSelector)
+	check("legacy split physical-emission state", inventory.legacySplitEmissionState, budget.legacySplitEmissionState)
+	check("physical emission session field access", inventory.emissionSessionAccess, budget.emissionSessionAccess)
+	check("physical body capability access", inventory.bodyCapabilityAccess, budget.bodyCapabilityAccess)
+	check("physical emission session begin", inventory.emissionSessionBegin, budget.emissionSessionBegin)
+	check("physical body bind", inventory.emissionBodyBind, budget.emissionBodyBind)
+	check("physical body completion", inventory.emissionBodyComplete, budget.emissionBodyComplete)
+	check("legacy context physical-emission fields", inventory.legacyContextState, budget.legacyContextState)
+	check("context physical-emission session field", inventory.contextSessionField, budget.contextSessionField)
 
 	checkExactCoroArchitectureSet(t, "currentCoro production files", inventory.currentCoroFiles, allowedCurrentCoroFiles)
 	checkExactCoroArchitectureSet(t, "staged coroutine feature names", inventory.featureNames, allowedStagedCoroFeatureNames)
@@ -420,6 +464,9 @@ func TestCoroArchitectureDebtIsMonotonic(t *testing.T) {
 	checkExactCoroArchitectureSet(t, "physical codegen proof rebuild files", inventory.physicalCodegenRebuildFiles, allowedPhysicalCodegenRebuildFiles)
 	checkExactCoroArchitectureSet(t, "physical proof builder call files", inventory.physicalProofBuilderCallFiles, allowedPhysicalProofBuilderCallFiles)
 	checkExactCoroArchitectureSet(t, "legacy physical fault selector files", inventory.legacyPhysicalSelectorFiles, allowedLegacyPhysicalSelectorFiles)
+	checkExactCoroArchitectureSet(t, "physical emission session field access files", inventory.emissionSessionAccessFiles, allowedEmissionSessionAccessFiles)
+	checkExactCoroArchitectureSet(t, "physical body capability access files", inventory.bodyCapabilityAccessFiles, allowedCoroBodyCapabilityFiles)
+	checkExactCoroArchitectureSet(t, "physical emission session fields", inventory.emissionSessionFields, allowedPhysicalEmissionSessionFields)
 }
 
 func checkExactCoroArchitectureSet(t *testing.T, name string, got, want map[string]bool) {
@@ -465,6 +512,9 @@ func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitecture
 		physicalCodegenRebuildFiles:    make(map[string]bool),
 		physicalProofBuilderCallFiles:  make(map[string]bool),
 		legacyPhysicalSelectorFiles:    make(map[string]bool),
+		emissionSessionAccessFiles:     make(map[string]bool),
+		bodyCapabilityAccessFiles:      make(map[string]bool),
+		emissionSessionFields:          make(map[string]bool),
 	}
 	roots := []string{"cl", "internal/coro", "internal/build", "ssa", "runtime/internal/coro", "runtime/internal/runtime"}
 	for _, root := range roots {
@@ -564,6 +614,12 @@ func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitecture
 					case "observeCoroPhysicalNilGuard", "observeCoroPhysicalBoundsGuard":
 						inventory.physicalGuardObservation++
 						inventory.physicalGuardObservationFiles[rel] = true
+					case "beginCoroPhysicalEmission":
+						inventory.emissionSessionBegin++
+					case "bindCoroPhysicalBody":
+						inventory.emissionBodyBind++
+					case "completeCoroPhysicalBody":
+						inventory.emissionBodyComplete++
 					case "type_":
 						if rel == "cl/emission_runtime_helpers.go" {
 							inventory.rawHelperPhysicalType++
@@ -576,6 +632,17 @@ func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitecture
 					case "currentCoro":
 						inventory.currentCoro++
 						inventory.currentCoroFiles[rel] = true
+					case "currentCoroSite", "coroPhysicalPlan", "coroPhysicalEmission",
+						"coroExplicitStatus", "coroSourceBlocks":
+						inventory.legacySplitEmissionState++
+					case "coroEmission":
+						if strings.HasPrefix(rel, "cl/") {
+							inventory.emissionSessionAccess++
+							inventory.emissionSessionAccessFiles[rel] = true
+						}
+					case "coroBody":
+						inventory.bodyCapabilityAccess++
+						inventory.bodyCapabilityAccessFiles[rel] = true
 					case "CoroPlan":
 						inventory.planAuthority++
 					case "EmissionUniverse":
@@ -642,12 +709,28 @@ func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitecture
 						}
 					}
 				case *ast.TypeSpec:
-					if node.Name.Name == "ExecutorSourceCatalog" {
-						if structure, ok := node.Type.(*ast.StructType); ok {
-							for _, field := range structure.Fields.List {
-								for _, name := range field.Names {
-									inventory.sourceFields[name.Name] = true
+					structure, ok := node.Type.(*ast.StructType)
+					if !ok {
+						break
+					}
+					for _, field := range structure.Fields.List {
+						for _, name := range field.Names {
+							switch node.Name.Name {
+							case "ExecutorSourceCatalog":
+								inventory.sourceFields[name.Name] = true
+							case "context":
+								if rel != "cl/compile.go" {
+									continue
 								}
+								switch name.Name {
+								case "currentCoro", "currentCoroSite", "coroPhysicalPlan", "coroPhysicalEmission",
+									"coroExplicitStatus", "coroSourceBlocks", "sourceParamBase":
+									inventory.legacyContextState++
+								case "coroEmission":
+									inventory.contextSessionField++
+								}
+							case "coroPhysicalEmissionSession":
+								inventory.emissionSessionFields[name.Name] = true
 							}
 						}
 					}

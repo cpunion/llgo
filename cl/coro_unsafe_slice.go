@@ -80,9 +80,10 @@ func (p *context) compileCoroUnsafeSlice(
 	call *ssa.CallCommon,
 	pointerValue, lengthValue llssa.Expr,
 ) llssa.Expr {
-	if p == nil || p.currentCoro == nil || b == nil || b.Func != p.fn || call == nil ||
+	body := p.coroBody()
+	if body == nil || b == nil || b.Func != p.fn || call == nil ||
 		p.compilation == nil || !p.compilation.EnableCoroExplicitStatusPanicABI ||
-		p.currentCoro.abi.version < coroPhysicalABIVersionV1 {
+		body.abi.version < coroPhysicalABIVersionV1 {
 		panic("unsafe.Slice coroutine lowering requires the PhysicalABIV1 explicit-status ABI")
 	}
 	results := call.Signature().Results()

@@ -1,6 +1,6 @@
 # LLGo Coroutine 语义标准化 IR 与统一 Lowering 设计
 
-状态：2026-07-22架构复审结论；可运行纵向基线已冻结，暂停新增能力。hidden runtime helper、intrinsic/call-elision以及physical proof/implicit-fault三个cohort已切换到单一ProgramIR SitePlan；其他LoweringFacts仍主要是report/cache identity，尚未成为production lowering的唯一事实源。在完成单一ProgramIR、单一emitter及runtime hard cutover前，不继续叠加语言或平台功能
+状态：2026-07-22架构复审结论；可运行纵向基线已冻结，暂停新增能力。hidden runtime helper、intrinsic/call-elision以及physical proof/implicit-fault三个cohort已切换到单一ProgramIR SitePlan；physical emission session/ordinary-compiler isolation也已完成硬切换。其他LoweringFacts仍主要是report/cache identity，尚未成为production lowering的唯一事实源。在完成单一ProgramIR、单一emitter及runtime hard cutover前，不继续叠加语言或平台功能
 
 更新：2026-07-22
 
@@ -225,9 +225,9 @@ Phase 35 修复过 direct receive resume status 跳回 logical block 首部、�
 
 当前实现已越过“只是原型代码多”的范围，存在可量化的横向耦合：
 
-- `currentCoro`仍出现在24个production compiler文件、173处；coroutine physical context尚未退出普通instruction emitter。
+- 旧`currentCoro`和六个可独立安装的physical emission字段已从production归零；`compile.go`与`instr.go`不再读取完整physical body。但协程专用lowerer仍在24个文件中保留47处`coroBody()`能力访问，尚未收敛成最终单一emitter。
 - `CoroPlan/EmissionUniverse`直接读取已由精确gate从412降到392处，但距离窄的function/site plan消费边界仍有明显差距。
-- `EnableCoro*`阶段开关的精确引用已从330降到322处；合法组合仍主要靠分散gate维持。
+- `EnableCoro*`阶段开关的精确引用已从330降到316处；合法组合仍主要靠分散gate维持。
 - `ExecutorSourceSet`一个文件约767行，对7类source有153个typed field/case引用，bind失败回滚、scan、apply、deadline、empty、terminal close和unbind均手写展开。
 - native single-P与fleet选择/全局状态涉及29个production runtime文件、362处引用；fleet route 1通过“收养”旧program P/driver/source进入新模型，而不是由唯一fleet profile直接创建domain 0。
 - `WaitToken/WaitRegistration`逻辑队列与`ParkState/OperationID`同时存在；Timer和Poll还各自维护V1/V2 mode及共享generation兼容规则。
@@ -1021,6 +1021,32 @@ pure instruction emitter冒充完成：
 该完成标记不包含普通pure instruction的统一LLVM recipe、await/spawn/park/channel/select、panic/outcome、
 continuation overlay、virtual storage或单一emitter。后续迁移必须扩展同一个physical plan，不能另建overlay
 权威或恢复codegen现场判断。
+
+#### Phase B.4：physical emission session与ordinary compiler isolation（已完成）
+
+2026-07-22已完成第四条production replacement cohort；其闭合边界是“一个physical body的临时编译状态
+生命周期，以及普通SSA emitter对该状态的访问权”，不把协程专用feature lowerer尚存的body访问冒充
+单一emitter完成：
+
+- `context`原有`currentCoro/currentCoroSite/coroPhysicalPlan/coroPhysicalEmission/
+  coroExplicitStatus/coroSourceBlocks/sourceParamBase`不再作为可独立安装的字段；plan、body、nested SitePlan
+  observer、source-block projection、hidden parameter base和explicit-status capability由唯一
+  `coroPhysicalEmissionSession`共同拥有。
+- session只有`prologue -> body -> complete`三阶段。prologue可供CoroBuilder初始化回调消费冻结plan，但完整
+  body不可见；body与source-block projection必须一次性bind；正常关闭必须已经complete且没有活动SitePlan。
+  panic关闭先清除context中的session再原样传播失败，不遗留半安装状态；同一context禁止嵌套physical emission。
+- `compileCoroPhysicalBody`是production唯一session begin、body bind和body complete入口，三者各恰好一次。
+  `compile.go`与`instr.go`只通过`coro_emitter_adapter.go`中的语义操作处理instruction boundary、allocation、
+  return、defer、synthetic select panic、channel和builtin capability，不再取得`coroBodyContext`。
+- 单元测试覆盖完整commit、重复bind、嵌套session、未完成关闭和panic清理；静态架构gate锁定旧
+  `currentCoro`为0、其余旧split字段为0、begin/bind/complete各1、session字段只能位于context声明与
+  session实现、session结构只能保留上述七个正交字段，同时精确禁止普通emitter重新调用`coroBody()`。
+- 该切换还将`EnableCoro*`散布引用由322降至316；重复feature gate只能继续减少，不能借适配器回弹。
+
+该完成标记仅覆盖session原子性和ordinary compiler isolation。协程专用lowerer仍有47处`coroBody()`
+能力访问，分布在24个production文件；下一阶段必须按await/control、terminal/cleanup、operation等完整职责
+域迁入统一emitter，并在每一cohort中同时清零旧访问文件/入口。只把访问器换名或把全部字段透传到一个
+generic facade不算完成。
 
 ### Phase C：analysis只消费facts
 

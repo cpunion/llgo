@@ -189,7 +189,7 @@ func validateCoroAwaitTarget(caller, target coro.FunctionPlan) error {
 // this function never resumes or destroys a handle. Those operations belong to
 // the scheduler after the parent's resume episode has returned.
 func (p *context) tryCompileCoroStaticAwait(b llssa.Builder, call *ssa.Call) (llssa.Expr, bool) {
-	if p.currentCoro == nil || p.compilation == nil || p.compilation.CoroPlan == nil || !p.compilation.EnableCoroChildAwait || call == nil {
+	if !p.hasCoroPhysicalBody() || p.compilation == nil || p.compilation.CoroPlan == nil || !p.compilation.EnableCoroChildAwait || call == nil {
 		return llssa.Nil, false
 	}
 	// Keep the ordinary call lowerer's frontend-elided package-init rule ahead
@@ -252,7 +252,8 @@ func (p *context) compileCoroTargetAwaitWithContext(
 func (p *context) compileCoroCleanupTargetAwait(
 	b llssa.Builder, callee *ssa.Function, args []llssa.Expr, cleanup *coroStaticCleanupState,
 ) llssa.Expr {
-	if cleanup == nil || p.currentCoro == nil || p.currentCoro.cleanup != cleanup {
+	body := p.coroBody()
+	if cleanup == nil || body == nil || body.cleanup != cleanup {
 		panic("coroutine cleanup await requires the active static cleanup drainer")
 	}
 	return p.compileCoroTargetAwaitWithContextAndRecovery(b, callee, llssa.Nil, args, cleanup, nil)
@@ -277,7 +278,8 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecovery(
 	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr,
 ) llssa.Expr {
 	callee := entry.function
-	if p.currentCoro == nil || p.compilation == nil || p.compilation.CoroPlan == nil || !p.compilation.EnableCoroChildAwait {
+	body := p.coroBody()
+	if body == nil || p.compilation == nil || p.compilation.CoroPlan == nil || !p.compilation.EnableCoroChildAwait {
 		panic("coroutine child await requires an active physical coroutine body")
 	}
 	if b.Func != p.fn {
@@ -333,7 +335,7 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecovery(
 	resultSlot := p.coroFrameAlloca(resultType)
 	callArgs := make([]llssa.Expr, 0, len(physicalArgs)+2)
 	callArgs = append(callArgs,
-		p.currentCoro.task,
+		body.task,
 		b.Convert(p.prog.VoidPtr(), resultSlot),
 	)
 	callArgs = append(callArgs, physicalArgs...)
@@ -357,7 +359,7 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecovery(
 // this edge therefore uses the same scheduler-owned child transaction as an
 // ordinary static synchronous-style call.
 func (p *context) compileCoroPatchInitAwait(b llssa.Builder) {
-	if p.currentCoro == nil || b == nil || b.Func != p.fn ||
+	if !p.hasCoroPhysicalBody() || b == nil || b.Func != p.fn ||
 		p.compilation == nil || !p.compilation.EnableCoroChildAwait {
 		panic("coroutine patch initializer await requires an active physical body")
 	}
@@ -389,7 +391,7 @@ func (p *context) compileCoroPatchInitAwait(b llssa.Builder) {
 // block executes only in the pre-suspend activation and does not dominate the
 // generated resume function after coroutine splitting.
 func (p *context) coroFrameAlloca(typ llssa.Type) llssa.Expr {
-	if p.currentCoro == nil || p.fn == nil || typ == nil {
+	if !p.hasCoroPhysicalBody() || p.fn == nil || typ == nil {
 		panic("coroutine frame alloca requires an active physical body and type")
 	}
 	entry := p.fn.Block(0)
@@ -408,7 +410,7 @@ func (p *context) coroFrameAlloca(typ llssa.Type) llssa.Expr {
 // such compiler-owned entries while still leaving CoroSplit to retain only
 // values that are actually live across a suspension.
 func (p *context) coroFrameAlloc(typ llssa.Type) llssa.Expr {
-	if p.currentCoro == nil || p.fn == nil || typ == nil {
+	if !p.hasCoroPhysicalBody() || p.fn == nil || typ == nil {
 		panic("coroutine frame allocation requires an active physical body and type")
 	}
 	entry := p.fn.Block(0)
@@ -438,43 +440,44 @@ func (p *context) awaitCoroChildWithRecovery(
 	b llssa.Builder, child, resultSlot llssa.Expr, results *types.Tuple,
 	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr,
 ) llssa.Expr {
-	if p.currentCoro == nil || p.compilation == nil || !p.compilation.EnableCoroChildAwait {
+	body := p.coroBody()
+	if body == nil || p.compilation == nil || !p.compilation.EnableCoroChildAwait {
 		panic("coroutine child await requires an active PhysicalABIV1 body")
 	}
 	if b.Func != p.fn || child.IsNil() || resultSlot.IsNil() {
 		panic("coroutine child await requires a child handle and result slot in the active function")
 	}
 	childHeader := b.CoroPromise(child, coroHeaderType(p.prog))
-	b.Store(b.FieldAddr(childHeader, coroHeaderParent), p.currentCoro.coro.Handle())
+	b.Store(b.FieldAddr(childHeader, coroHeaderParent), body.coro.Handle())
 	recoverMode := p.prog.IntVal(coroAwaitRecoverNone, p.prog.Uint32())
 	recoverType := p.prog.Nil(p.prog.VoidPtr())
 	recoverData := p.prog.Nil(p.prog.VoidPtr())
 	if cleanup != nil {
 		recoverMode, recoverType, recoverData = cleanup.recoverAwaitArguments(p, b)
 	}
-	p.currentCoro.suspendForChild(b)
+	body.suspendForChild(b)
 
-	if p.currentCoro.abi.awaitPrepareHook == "" {
+	if body.abi.awaitPrepareHook == "" {
 		panic("coroutine child await has no scheduler handoff hook")
 	}
-	publish := p.pkg.NewFunc(p.currentCoro.abi.awaitPrepareHook, coroAwaitPrepareSignature(), llssa.InC)
+	publish := p.pkg.NewFunc(body.abi.awaitPrepareHook, coroAwaitPrepareSignature(), llssa.InC)
 	b.Call(
 		publish.Expr,
-		p.currentCoro.task,
-		p.currentCoro.coro.Handle(),
+		body.task,
+		body.coro.Handle(),
 		child,
 		recoverMode,
 		recoverType,
 		recoverData,
 	)
-	if p.currentCoro.abi.awaitConsumeHook == "" {
+	if body.abi.awaitConsumeHook == "" {
 		panic("coroutine child await has no outcome consume hook")
 	}
 	typeWord := p.coroFrameAlloca(p.prog.VoidPtr())
 	dataWord := p.coroFrameAlloca(p.prog.VoidPtr())
 	b.Store(typeWord, p.prog.Nil(p.prog.VoidPtr()))
 	b.Store(dataWord, p.prog.Nil(p.prog.VoidPtr()))
-	consume := p.pkg.NewFunc(p.currentCoro.abi.awaitConsumeHook, coroAwaitConsumeSignature(), llssa.InC)
+	consume := p.pkg.NewFunc(body.abi.awaitConsumeHook, coroAwaitConsumeSignature(), llssa.InC)
 
 	// A task-cancellation decision is taken before the site's ordinary resumed
 	// continuation. Give child-await a per-site gate so cancellation still
@@ -484,23 +487,23 @@ func (p *context) awaitCoroChildWithRecovery(
 	// the base while reconciling a concurrent deferred-child recovery/panic as
 	// the overlay. This preserves both cancellation and Go panic ordering.
 	canceled := p.fn.MakeBlock()
-	p.currentCoro.coro.SuspendCurrentBlockWithResumeDispatch(func(gate llssa.Builder, normal llssa.BasicBlock) {
-		p.currentCoro.dispatchZeroRunDecisionTo(gate, normal, canceled)
+	body.coro.SuspendCurrentBlockWithResumeDispatch(func(gate llssa.Builder, normal llssa.BasicBlock) {
+		body.dispatchZeroRunDecisionTo(gate, normal, canceled)
 	})
-	p.currentCoro.activate(b)
+	body.activate(b)
 	cancelBuilder := p.fn.NewBuilder()
 	cancelBuilder.SetBlock(canceled)
-	p.currentCoro.activate(cancelBuilder)
+	body.activate(cancelBuilder)
 	cancelStatus := cancelBuilder.Call(
 		consume.Expr,
-		p.currentCoro.task,
-		p.currentCoro.coro.Handle(),
+		body.task,
+		body.coro.Handle(),
 		cancelBuilder.Convert(p.prog.VoidPtr(), typeWord),
 		cancelBuilder.Convert(p.prog.VoidPtr(), dataWord),
 	)
 	p.emitCoroKeepaliveSlots(cancelBuilder, keepaliveSlots)
-	if ownerCleanup := p.currentCoro.cleanup; ownerCleanup == nil {
-		cancelBuilder.Jump(p.currentCoro.completion)
+	if ownerCleanup := body.cleanup; ownerCleanup == nil {
+		cancelBuilder.Jump(body.completion)
 	} else {
 		ownerCleanup.setCancellationBase(cancelBuilder)
 		returnedCancel := p.fn.MakeBlock()
@@ -551,8 +554,8 @@ func (p *context) awaitCoroChildWithRecovery(
 	// results or allowing another child transaction to start.
 	status := b.Call(
 		consume.Expr,
-		p.currentCoro.task,
-		p.currentCoro.coro.Handle(),
+		body.task,
+		body.coro.Handle(),
 		b.Convert(p.prog.VoidPtr(), typeWord),
 		b.Convert(p.prog.VoidPtr(), dataWord),
 	)
@@ -575,23 +578,23 @@ func (p *context) awaitCoroChildWithRecovery(
 	dispatch.End(b)
 
 	b.SetBlockEx(panicked, llssa.AtEnd, false)
-	if p.currentCoro.panicPrepare.IsNil() {
+	if body.panicPrepare.IsNil() {
 		// A compilation without the ExplicitStatus identity cannot produce a
 		// managed child panic. Treat an injected/corrupt status as unreachable
 		// instead of falling back to legacy stack unwinding.
 		b.Unreachable()
-	} else if p.currentCoro.cleanup == nil {
-		p.currentCoro.panic(b, b.Load(typeWord), b.Load(dataWord))
+	} else if body.cleanup == nil {
+		body.panic(b, b.Load(typeWord), b.Load(dataWord))
 	} else if cleanup != nil {
 		cleanup.replacePanic(b, b.Load(typeWord), b.Load(dataWord))
 	} else {
-		p.currentCoro.cleanup.enterPanic(b, b.Load(typeWord), b.Load(dataWord))
+		body.cleanup.enterPanic(b, b.Load(typeWord), b.Load(dataWord))
 	}
 
 	b.SetBlockEx(aborted, llssa.AtEnd, false)
-	p.currentCoro.enterCancellation(b, coroAwaitCompletionAbort)
+	body.enterCancellation(b, coroAwaitCompletionAbort)
 	b.SetBlockEx(shutdown, llssa.AtEnd, false)
-	p.currentCoro.enterCancellation(b, coroAwaitCompletionShutdown)
+	body.enterCancellation(b, coroAwaitCompletionShutdown)
 
 	b.SetBlockEx(invalid, llssa.AtEnd, false)
 	b.Unreachable()

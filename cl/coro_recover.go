@@ -32,7 +32,7 @@ import (
 func (p *context) tryCompileCoroInterfaceNilCompare(
 	b llssa.Builder, operation *ssa.BinOp,
 ) (llssa.Expr, bool) {
-	if p.currentCoro == nil || operation == nil ||
+	if !p.hasCoroPhysicalBody() || operation == nil ||
 		(operation.Op != token.EQL && operation.Op != token.NEQ) {
 		return llssa.Nil, false
 	}
@@ -59,8 +59,9 @@ func (p *context) tryCompileCoroInterfaceNilCompare(
 // the retained panic pair or two nil words. Constructing the empty interface
 // directly keeps this operation allocation-free on every target.
 func (p *context) compileCoroRecover(b llssa.Builder, call *ssa.CallCommon) llssa.Expr {
-	if p.currentCoro == nil || p.compilation == nil || !p.compilation.EnableCoroExplicitStatusPanicABI ||
-		b.Func != p.fn || call == nil || len(call.Args) != 0 || p.currentCoro.abi.recoverTakeHook == "" {
+	body := p.coroBody()
+	if body == nil || p.compilation == nil || !p.compilation.EnableCoroExplicitStatusPanicABI ||
+		b.Func != p.fn || call == nil || len(call.Args) != 0 || body.abi.recoverTakeHook == "" {
 		panic("coroutine recover requires an exact explicit-status physical call")
 	}
 	result := call.Signature().Results()
@@ -77,11 +78,11 @@ func (p *context) compileCoroRecover(b llssa.Builder, call *ssa.CallCommon) llss
 	dataWord := p.coroFrameAlloca(p.prog.VoidPtr())
 	b.Store(typeWord, p.prog.Nil(p.prog.VoidPtr()))
 	b.Store(dataWord, p.prog.Nil(p.prog.VoidPtr()))
-	take := p.pkg.NewFunc(p.currentCoro.abi.recoverTakeHook, coroRecoverTakeSignature(), llssa.InC)
+	take := p.pkg.NewFunc(body.abi.recoverTakeHook, coroRecoverTakeSignature(), llssa.InC)
 	b.Call(
 		take.Expr,
-		p.currentCoro.task,
-		p.currentCoro.coro.Handle(),
+		body.task,
+		body.coro.Handle(),
 		b.Convert(p.prog.VoidPtr(), typeWord),
 		b.Convert(p.prog.VoidPtr(), dataWord),
 	)

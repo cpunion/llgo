@@ -1074,7 +1074,7 @@ func (s *coroStaticCleanupState) setPanicOverlay(b llssa.Builder, typeWord, data
 func (s *coroStaticCleanupState) recoverAwaitArguments(
 	p *context, b llssa.Builder,
 ) (mode, typeWord, dataWord llssa.Expr) {
-	if s == nil || p == nil || p.currentCoro == nil {
+	if s == nil || p == nil || p.coroBody() == nil {
 		panic("coroutine cleanup recovery arguments require an active drainer")
 	}
 	active := b.Load(s.panicActive)

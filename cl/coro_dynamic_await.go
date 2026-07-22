@@ -32,7 +32,7 @@ import (
 // bounded plain targets execute inline, while coroutine targets enter the
 // same scheduler-owned child transaction as an exact static await.
 func (p *context) tryCompileCoroManagedDispatchAwait(b llssa.Builder, call *ssa.Call) (llssa.Expr, bool) {
-	if p.currentCoro == nil || p.compilation == nil || p.compilation.CoroPlan == nil ||
+	if !p.hasCoroPhysicalBody() || p.compilation == nil || p.compilation.CoroPlan == nil ||
 		!p.compilation.EnableCoroChildAwait || !p.compilation.EnableCoroPlainDispatch || call == nil {
 		return llssa.Nil, false
 	}
@@ -85,6 +85,10 @@ func (p *context) compileCoroManagedDispatchAwaitValueWithRecovery(
 	b llssa.Builder, fn llssa.Expr, args []llssa.Expr, signature *types.Signature,
 	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr,
 ) llssa.Expr {
+	body := p.coroBody()
+	if body == nil {
+		panic("managed dispatch await requires an active physical coroutine body")
+	}
 	abi, err := newCoroPlainDispatchABI(p, signature)
 	if err != nil {
 		panic(fmt.Errorf("coroutine managed dispatch await: %w", err))
@@ -127,7 +131,7 @@ func (p *context) compileCoroManagedDispatchAwaitValueWithRecovery(
 	b.SetBlockEx(coroutineBlock, llssa.AtEnd, false)
 	child := b.CallCoroDispatchCoro(
 		fn,
-		p.currentCoro.task,
+		body.task,
 		b.Convert(p.prog.VoidPtr(), resultSlot),
 		args,
 		opts,

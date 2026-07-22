@@ -1212,7 +1212,7 @@ func (p *context) tryCompileCoroPlainDispatchCall(b llssa.Builder, call *ssa.Cal
 	// physical coroutine, own that edge through the explicit-status fault ABI
 	// so this compiler-generated descriptor operation cannot introduce a
 	// hidden runtime.AssertNilDeref dependency after emission closure.
-	if p.currentCoro != nil {
+	if p.coroBody() != nil {
 		p.compileCoroImplicitNilAccessGuard(b, b.Field(fn, 0))
 		opts.DescriptorNonNil = true
 	}

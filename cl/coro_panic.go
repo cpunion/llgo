@@ -40,7 +40,8 @@ func (p *context) tryCompileCoroExplicitStatusPanic(b llssa.Builder, instruction
 	if p.rawPlainBody {
 		return false
 	}
-	if instruction == nil || p.currentCoro == nil || b.Func != p.fn {
+	body := p.coroBody()
+	if instruction == nil || body == nil || b == nil || b.Func != p.fn {
 		goName, llvmName := "<nil>", "<nil>"
 		if p.goFn != nil {
 			goName = p.goFn.String()
@@ -50,16 +51,16 @@ func (p *context) tryCompileCoroExplicitStatusPanic(b llssa.Builder, instruction
 		}
 		panic(fmt.Errorf(
 			"explicit-status panic in %q (%s) escaped its exact physical coroutine body (active=%t builder-matches=%t)",
-			llvmName, goName, p.currentCoro != nil, b != nil && b.Func == p.fn,
+			llvmName, goName, body != nil, b != nil && b.Func == p.fn,
 		))
 	}
 	value := p.compileValue(b, instruction.X)
 	typeWord := b.EfaceType(value)
 	dataWord := b.InterfaceData(value)
-	if p.currentCoro.cleanup == nil {
-		p.currentCoro.panic(b, typeWord, dataWord)
+	if body.cleanup == nil {
+		body.panic(b, typeWord, dataWord)
 	} else {
-		p.currentCoro.cleanup.enterPanic(b, typeWord, dataWord)
+		body.cleanup.enterPanic(b, typeWord, dataWord)
 	}
 	return true
 }
