@@ -6,9 +6,6 @@ on:
       - "**"
       - "!dependabot/**"
       - "!xgopilot/**"
-      # Temporary: coroutine changes are validated by the pull request run.
-      - "!llvm-coro"
-      - "!coro/**"
   pull_request:
     branches: ["**"]
 
