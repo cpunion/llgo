@@ -1,6 +1,6 @@
 # LLGo Coroutine 语义标准化 IR 与统一 Lowering 设计
 
-状态：2026-07-22架构复审结论；可运行纵向基线已冻结，暂停新增能力。hidden runtime helper、intrinsic/call-elision、physical proof/implicit-fault、physical emission session/ordinary-compiler isolation、single-event Park protocol、channel/WaitSet Park envelope、ordinary semantic recipe/local Effect-Exec以及await/spawn physical control choice八个封闭cohort已完成硬切换。其他LoweringFacts仍主要是report/cache identity，尚未成为production lowering的唯一事实源。在完成单一ProgramIR、单一emitter及runtime hard cutover前，不继续叠加语言或平台功能
+状态：2026-07-22架构复审结论；可运行纵向基线已冻结，暂停新增能力。hidden runtime helper、intrinsic/call-elision、physical proof/implicit-fault、physical emission session/ordinary-compiler isolation、single-event Park protocol、channel/WaitSet Park envelope、ordinary semantic recipe/local Effect-Exec、await/spawn physical control choice以及channel/select physical operation choice九个封闭cohort已完成硬切换。其他LoweringFacts仍主要是report/cache identity，尚未成为production lowering的唯一事实源。在完成单一ProgramIR、单一emitter及runtime hard cutover前，不继续叠加语言或平台功能
 
 更新：2026-07-22
 
@@ -1146,11 +1146,30 @@ lowering；它本身不表示await/spawn、panic/outcome或whole-function unifie
 WaitSet reconciliation或whole-function CFG已经由单一emitter拥有。后续必须把这些protocol region继续冻结进
 同一FunctionIR，不能让feature emitter重新读取CallPlan来派生另一条control choice。
 
+#### Phase B.9：channel/select physical operation choice（已完成）
+
+- 同一`coroPhysicalInstructionPlan`新增与value/fault、control正交的operation recipe，封闭覆盖send、receive、
+  close、blocking select Park及try-select。唯一`planCoroPhysicalOperationInstruction`在physical-plan stage验证
+  channel capability、精确channel type及select state，并冻结blocking/try选择；ordinary instruction保持零recipe。
+- physical preflight只读取冻结operation recipe统计Park和panic，不再重复读取`EnableCoroChannel`、channel type、
+  select states或`Select.Blocking`。source codegen只经`plannedCoroPhysicalOperation`选择，并通过
+  `observeCoroPhysicalOperation`精确上报；漏报、错recipe及重复上报均在source site关闭时失败。
+- `coroChannelLoweringEnabled`已删除，channel emitter不再回读阶段开关。实际send/receive/select挂起仍复用
+  B.5/B.6的唯一`emitCoroParkOperation`模板；本cohort没有复制Park CFG，也没有改写runtime的WaitSet result
+  lease、loser detach、cancel或quiescence状态机。
+- architecture gate锁定operation planner恰好2个标识出现、selection 5处、observation 6处及精确文件集合；
+  `EnableCoro*`production引用由315降至313。production净增175行，属于单一配方与ledger替换，而不是第二套
+  channel backend。channel native/wasm32、zero-sized channel、capability fail-closed及observer负向测试已覆盖。
+
+该完成标记只覆盖source channel/select的最终物理操作选择。WaitSet runtime reconciliation及跨source取消仍是
+现有统一runtime core的权威实现；后续若迁移其表示，必须在同一cohort删除对应legacy WaitToken consumer。
+
 ### Phase C：analysis只消费facts
 
 - hidden lowered helper、`ClassifyElidedCall`、intrinsic site/local effect及physical implicit-fault选择已由
   Phase B.1/B.2/B.3替换；ordinary instruction recipe及local effect/exec输入已由Phase B.7替换，source
-  await/spawn control choice已由Phase B.8替换；继续迁移WaitSet、panic/outcome及剩余call/value-flow classification。
+  await/spawn control choice已由Phase B.8替换，channel/select operation choice已由Phase B.9替换；继续迁移
+  panic/outcome、WaitSet runtime表示及剩余call/value-flow classification。
 - 再逐步替换call/value-flow扫描的重复classification；必要的数据流pass仍保留。
 - report-only计算跨plain调用闭包的MaxAtomicCost，记录与当前instruction budget的差异，但不改变NeedsPreempt、primary或poll。
 
@@ -1346,14 +1365,15 @@ Phase A先报告多次运行中位数和离散度；取得稳定噪声后，再�
 
 ## 18. 建议的下一步
 
-Phase A 与 Phase B 的八个replacement cohort已经完成：`internal/coro/lowering_facts.go`提供pointer-free site/instance
+Phase A 与 Phase B 的九个replacement cohort已经完成：`internal/coro/lowering_facts.go`提供pointer-free site/instance
 identity、稀疏LoweringFacts、canonical dump/digest与verifier；`cl`从冻结的EmissionUniverse和SSAPlan
 生成owner-scoped snapshot；build在任何package codegen前把该snapshot装入`CoroPlanDigest v26`、
 `cl.Compilation`、package fingerprint与manifest，source/cache registration都会验证内容和digest一致。
 
 2026-07-22复审最初把LoweringFacts定义为“已建立观测点”，而不是已完成架构层。随后hidden runtime
 helper、intrinsic/call-elision、physical proof/implicit-fault、physical emission session、single-event Park及
-channel/WaitSet Park envelope、ordinary semantic recipe/local Effect-Exec及await/spawn physical control choice cohort已完成production切换，但其余facts仍未替换production classifier/emitter；继续直接
+channel/WaitSet Park envelope、ordinary semantic recipe/local Effect-Exec、await/spawn physical control choice及
+channel/select physical operation choice cohort已完成production切换，但其余facts仍未替换production classifier/emitter；继续直接
 增加完整Overlay仍会扩大双轨。后续严格按replacement cohort推进：
 
 1. 先提交当前双owner fleet可运行基线及五项fresh E2E结果，不再混入新能力。
@@ -1361,8 +1381,9 @@ channel/WaitSet Park envelope、ordinary semantic recipe/local Effect-Exec及awa
    同一提交下调数字和白名单，禁止留下可反弹额度，也禁止新增`EnableCoro*`、raw-SSA classifier、
    single-P/fleet分支和logical WaitToken consumer。
 3. hidden helper、intrinsic/call-elision、physical proof/implicit-fault、emission session、single-event Park、
-   channel/WaitSet Park envelope、ordinary semantic recipe/local Effect-Exec及await/spawn physical control
-   choice cohort已按上述gate完成；下一步迁移WaitSet级channel/select，不能重新引入raw SSA helper、
+   channel/WaitSet Park envelope、ordinary semantic recipe/local Effect-Exec、await/spawn physical control
+   choice及channel/select physical operation choice cohort已按上述gate完成；下一步迁移panic/outcome和
+   WaitSet runtime表示，不能重新引入raw SSA helper、
    intrinsic、local body scanner、feature-local control selector、fault selector或codegen proof rebuild。
 4. 随后迁移panic/outcome；每个完整
    function cohort由统一emitter接管后立即删除旧CFG拼装，最终清除普通compiler中的`currentCoro`分支。

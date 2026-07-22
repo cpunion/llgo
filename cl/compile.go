@@ -1506,10 +1506,14 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			b.AssertNilDeref(x)
 		}
 		if v.Op == token.ARROW {
-			if p.coroChannelLoweringEnabled() {
+			operation, operationPlanned := p.plannedCoroPhysicalOperation(v)
+			if operationPlanned && operation.operation == coroPhysicalOperationChannelReceive {
+				p.observeCoroPhysicalOperation(v, coroPhysicalOperationChannelReceive)
 				ret = p.compileCoroChanRecv(b, v, x)
-			} else {
+			} else if !operationPlanned || operation.operation == coroPhysicalOperationNone {
 				ret = b.Recv(x, v.CommaOk)
+			} else {
+				panic(fmt.Sprintf("channel receive selected incompatible frozen physical operation recipe %s", operation.operation))
 			}
 		} else {
 			if v.Op == token.MUL {
@@ -1811,14 +1815,20 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 				states[i].Value = p.compileValue(b, s.Send)
 			}
 		}
-		if p.coroChannelLoweringEnabled() {
-			if v.Blocking {
-				ret = p.compileCoroChanSelect(b, states)
-			} else {
-				ret = p.compileCoroChanTrySelect(b, states)
-			}
-		} else {
+		operation, operationPlanned := p.plannedCoroPhysicalOperation(v)
+		if !operationPlanned || operation.operation == coroPhysicalOperationNone {
 			ret = b.Select(states, v.Blocking)
+			break
+		}
+		switch operation.operation {
+		case coroPhysicalOperationChannelSelectPark:
+			p.observeCoroPhysicalOperation(v, coroPhysicalOperationChannelSelectPark)
+			ret = p.compileCoroChanSelect(b, states)
+		case coroPhysicalOperationChannelSelectTry:
+			p.observeCoroPhysicalOperation(v, coroPhysicalOperationChannelSelectTry)
+			ret = p.compileCoroChanTrySelect(b, states)
+		default:
+			panic(fmt.Sprintf("channel select selected incompatible frozen physical operation recipe %s", operation.operation))
 		}
 	case *ssa.SliceToArrayPointer:
 		t := p.type_(v.Type(), llssa.InGo)
@@ -2055,10 +2065,14 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		ch := p.compileValue(b, v.Chan)
 		x := p.compileValue(b, v.X)
 		p.recordPanicLocation(b, v.Pos())
-		if p.coroChannelLoweringEnabled() {
+		operation, operationPlanned := p.plannedCoroPhysicalOperation(v)
+		if operationPlanned && operation.operation == coroPhysicalOperationChannelSend {
+			p.observeCoroPhysicalOperation(v, coroPhysicalOperationChannelSend)
 			p.compileCoroChanSend(b, ch, x)
-		} else {
+		} else if !operationPlanned || operation.operation == coroPhysicalOperationNone {
 			b.Send(ch, x)
+		} else {
+			panic(fmt.Sprintf("channel send selected incompatible frozen physical operation recipe %s", operation.operation))
 		}
 	case *ssa.DebugRef:
 		if enableDbgSyms && v.Parent().Origin() == nil {

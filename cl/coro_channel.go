@@ -80,7 +80,7 @@ func coroChanResumeSignature() *types.Signature {
 
 func (p *context) requireCoroChannelBody(b llssa.Builder) *coroBodyContext {
 	body := p.coroBody()
-	if body == nil || p.compilation == nil || !p.compilation.EnableCoroChannel || b.Func != p.fn {
+	if body == nil || b.Func != p.fn {
 		panic("coroutine channel lowering requires an active planned physical coroutine body")
 	}
 	if body.abi.version < coroPhysicalABIVersionV1 || body.completion == nil ||

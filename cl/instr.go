@@ -2146,11 +2146,21 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 		} else if fn == "recover" && act == llssa.Call && p.coroExplicitStatusLoweringEnabled() {
 			ret = p.compileCoroRecover(b, call)
 			return
-		} else if fn == "close" && len(args) == 1 && act == llssa.Call &&
-			p.coroChannelLoweringEnabled() && p.coroExplicitStatusLoweringEnabled() {
-			channel := p.compileValue(b, args[0])
-			p.compileCoroChanClose(b, channel)
-			return
+		} else if fn == "close" && len(args) == 1 && act == llssa.Call {
+			sourceCall := p.coroCurrentSourceCall()
+			operation, operationPlanned := p.plannedCoroPhysicalOperation(sourceCall)
+			if operationPlanned && operation.operation == coroPhysicalOperationChannelClose {
+				if !p.coroExplicitStatusLoweringEnabled() {
+					panic("frozen coroutine channel close requires explicit-status lowering")
+				}
+				p.observeCoroPhysicalOperation(sourceCall, coroPhysicalOperationChannelClose)
+				channel := p.compileValue(b, args[0])
+				p.compileCoroChanClose(b, channel)
+				return
+			}
+			if operationPlanned && operation.operation != coroPhysicalOperationNone {
+				panic(fmt.Sprintf("channel close selected incompatible frozen physical operation recipe %s", operation.operation))
+			}
 		} else if fn == "String" && len(args) == 2 && act == llssa.Call && p.coroExplicitStatusLoweringEnabled() {
 			compiled := p.compileValues(b, args, kind)
 			ret = p.compileCoroUnsafeString(b, call, compiled[0], compiled[1])

@@ -100,10 +100,6 @@ func (p *context) compileCoroPatchInitAtBlock(b llssa.Builder) bool {
 	return true
 }
 
-func (p *context) coroChannelLoweringEnabled() bool {
-	return p.hasCoroPhysicalBody() && p.compilation != nil && p.compilation.EnableCoroChannel
-}
-
 func (p *context) coroExplicitStatusLoweringEnabled() bool {
 	return p.hasCoroPhysicalBody() && p.compilation != nil && p.compilation.EnableCoroExplicitStatusPanicABI
 }

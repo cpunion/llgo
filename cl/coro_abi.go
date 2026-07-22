@@ -1279,6 +1279,7 @@ func validateCoroPhysicalABIForOwner(
 			staticSpawn:      staticSpawn,
 			managedDispatch:  managedDispatch,
 			explicitPanic:    explicitPanic,
+			channel:          channel,
 			interfacePlain:   interfacePlain,
 			managedInterface: managedInterface,
 		},
@@ -1338,7 +1339,14 @@ func validateCoroPhysicalABIForOwner(
 				} else if instructionPlan.mayFault() {
 					panics++
 				}
-				if call, ok := instr.(*ssa.Call); ok && explicitPanic && isCoroCloseBuiltinCall(call) {
+				if call, ok := instr.(*ssa.Call); ok && isCoroCloseBuiltinCall(call) {
+					instructionPlan := physical.instructions[instr]
+					if instructionPlan.operation != coroPhysicalOperationChannelClose {
+						if instructionPlan.operationFailure != "" {
+							return coroLeafInstructionError(fn, plan, instr, instructionPlan.operationFailure)
+						}
+						return coroLeafInstructionError(fn, plan, instr, "channel close has no frozen operation recipe")
+					}
 					panics++
 				}
 				continue
@@ -1369,38 +1377,34 @@ func validateCoroPhysicalABIForOwner(
 					return coroLeafInstructionError(fn, plan, instr, "potentially panicking or non-scalar binary operation")
 				}
 			case *ssa.Send:
-				if !channel {
-					return coroLeafInstructionError(fn, plan, instr, "blocking channel send requires the channel scheduler capability")
-				}
-				if err := validateCoroPhysicalChannelType(instr.Chan.Type()); err != nil {
-					return coroLeafInstructionError(fn, plan, instr, "channel send type: "+err.Error())
+				instructionPlan, frozen := physical.instructions[instr]
+				if !frozen || instructionPlan.operation != coroPhysicalOperationChannelSend {
+					if frozen && instructionPlan.operationFailure != "" {
+						return coroLeafInstructionError(fn, plan, instr, instructionPlan.operationFailure)
+					}
+					return coroLeafInstructionError(fn, plan, instr, "channel send has no frozen operation recipe")
 				}
 				parks++
 			case *ssa.Select:
-				if !channel {
-					return coroLeafInstructionError(fn, plan, instr, "channel select requires the channel scheduler capability")
+				instructionPlan, frozen := physical.instructions[instr]
+				if !frozen || instructionPlan.operation != coroPhysicalOperationChannelSelectPark &&
+					instructionPlan.operation != coroPhysicalOperationChannelSelectTry {
+					if frozen && instructionPlan.operationFailure != "" {
+						return coroLeafInstructionError(fn, plan, instr, instructionPlan.operationFailure)
+					}
+					return coroLeafInstructionError(fn, plan, instr, "channel select has no frozen operation recipe")
 				}
-				for index, state := range instr.States {
-					if state == nil {
-						return coroLeafInstructionError(fn, plan, instr, fmt.Sprintf("channel select case %d is nil", index))
-					}
-					if state.Chan == nil {
-						return coroLeafInstructionError(fn, plan, instr, fmt.Sprintf("channel select case %d channel is nil", index))
-					}
-					if err := validateCoroPhysicalChannelType(state.Chan.Type()); err != nil {
-						return coroLeafInstructionError(fn, plan, instr, fmt.Sprintf("channel select case %d type: %v", index, err))
-					}
-				}
-				if instr.Blocking {
+				if instructionPlan.operation == coroPhysicalOperationChannelSelectPark {
 					parks++
 				}
 			case *ssa.UnOp:
 				if instr.Op == token.ARROW {
-					if !channel {
-						return coroLeafInstructionError(fn, plan, instr, "blocking channel receive requires the channel scheduler capability")
-					}
-					if err := validateCoroPhysicalChannelType(instr.X.Type()); err != nil {
-						return coroLeafInstructionError(fn, plan, instr, "channel receive type: "+err.Error())
+					instructionPlan, frozen := physical.instructions[instr]
+					if !frozen || instructionPlan.operation != coroPhysicalOperationChannelReceive {
+						if frozen && instructionPlan.operationFailure != "" {
+							return coroLeafInstructionError(fn, plan, instr, instructionPlan.operationFailure)
+						}
+						return coroLeafInstructionError(fn, plan, instr, "channel receive has no frozen operation recipe")
 					}
 					parks++
 					continue

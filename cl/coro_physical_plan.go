@@ -116,11 +116,42 @@ func (recipe coroPhysicalControlRecipe) String() string {
 	}
 }
 
+type coroPhysicalOperationRecipe uint8
+
+const (
+	coroPhysicalOperationNone coroPhysicalOperationRecipe = iota
+	coroPhysicalOperationChannelSend
+	coroPhysicalOperationChannelReceive
+	coroPhysicalOperationChannelClose
+	coroPhysicalOperationChannelSelectPark
+	coroPhysicalOperationChannelSelectTry
+)
+
+func (recipe coroPhysicalOperationRecipe) String() string {
+	switch recipe {
+	case coroPhysicalOperationNone:
+		return "none"
+	case coroPhysicalOperationChannelSend:
+		return "channel-send"
+	case coroPhysicalOperationChannelReceive:
+		return "channel-receive"
+	case coroPhysicalOperationChannelClose:
+		return "channel-close"
+	case coroPhysicalOperationChannelSelectPark:
+		return "channel-select-park"
+	case coroPhysicalOperationChannelSelectTry:
+		return "channel-select-try"
+	default:
+		return fmt.Sprintf("physical-operation-recipe(%d)", uint8(recipe))
+	}
+}
+
 type coroPhysicalLoweringCapabilities struct {
 	childAwait       bool
 	staticSpawn      bool
 	managedDispatch  bool
 	explicitPanic    bool
+	channel          bool
 	interfacePlain   *coroClosedInterfacePlainPlan
 	managedInterface *coroManagedInterfaceDispatchPlan
 }
@@ -140,6 +171,8 @@ type coroPhysicalInstructionPlan struct {
 	controlSignature   *types.Signature
 	controlFailure     string
 	controlFailureHard bool
+	operation          coroPhysicalOperationRecipe
+	operationFailure   string
 	container          coroPhysicalContainerKind
 	bound              int64
 	nilGuard           bool
@@ -310,6 +343,7 @@ func planCoroPhysicalInstruction(
 	}
 	result.semantic = semantic
 	planCoroPhysicalControlInstruction(audit, whole, instruction, capabilities, &result)
+	planCoroPhysicalOperationInstruction(audit, instruction, capabilities, &result)
 	switch instruction := instruction.(type) {
 	case *ssa.FieldAddr:
 		if audit.fieldAddrRequiresImplicitNilFault(instruction) {
@@ -396,6 +430,86 @@ func planCoroPhysicalInstruction(
 		}
 	}
 	return result, nil
+}
+
+func planCoroPhysicalOperationInstruction(
+	audit *coroPhysicalPureSSAAudit,
+	instruction ssa.Instruction,
+	capabilities coroPhysicalLoweringCapabilities,
+	result *coroPhysicalInstructionPlan,
+) {
+	if audit == nil || result == nil || instruction == nil || instruction.Parent() != audit.fn {
+		panic("physical operation planning requires one exact instruction plan")
+	}
+	failChannel := func(operation string) bool {
+		if capabilities.channel {
+			return false
+		}
+		result.operationFailure = operation + " requires the channel scheduler capability"
+		return true
+	}
+	switch instruction := instruction.(type) {
+	case *ssa.Send:
+		if failChannel("channel send") {
+			return
+		}
+		if err := validateCoroPhysicalChannelType(instruction.Chan.Type()); err != nil {
+			result.operationFailure = "channel send type: " + err.Error()
+			return
+		}
+		result.operation = coroPhysicalOperationChannelSend
+	case *ssa.UnOp:
+		if instruction.Op != token.ARROW {
+			return
+		}
+		if failChannel("channel receive") {
+			return
+		}
+		if err := validateCoroPhysicalChannelType(instruction.X.Type()); err != nil {
+			result.operationFailure = "channel receive type: " + err.Error()
+			return
+		}
+		result.operation = coroPhysicalOperationChannelReceive
+	case *ssa.Select:
+		if failChannel("channel select") {
+			return
+		}
+		for index, state := range instruction.States {
+			if state == nil {
+				result.operationFailure = fmt.Sprintf("channel select case %d is nil", index)
+				return
+			}
+			if state.Chan == nil {
+				result.operationFailure = fmt.Sprintf("channel select case %d channel is nil", index)
+				return
+			}
+			if err := validateCoroPhysicalChannelType(state.Chan.Type()); err != nil {
+				result.operationFailure = fmt.Sprintf("channel select case %d type: %v", index, err)
+				return
+			}
+		}
+		if instruction.Blocking {
+			result.operation = coroPhysicalOperationChannelSelectPark
+		} else {
+			result.operation = coroPhysicalOperationChannelSelectTry
+		}
+	case *ssa.Call:
+		if !isCoroCloseBuiltinCall(instruction) {
+			return
+		}
+		if failChannel("channel close") {
+			return
+		}
+		if len(instruction.Common().Args) != 1 {
+			result.operationFailure = "channel close requires one exact channel operand"
+			return
+		}
+		if err := validateCoroPhysicalChannelType(instruction.Common().Args[0].Type()); err != nil {
+			result.operationFailure = "channel close type: " + err.Error()
+			return
+		}
+		result.operation = coroPhysicalOperationChannelClose
+	}
 }
 
 // planCoroPhysicalControlInstruction is the sole post-analysis selector for
