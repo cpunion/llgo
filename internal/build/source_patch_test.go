@@ -256,7 +256,7 @@ func TestInternalRuntimeSysRemainsAltPkg(t *testing.T) {
 	}
 }
 
-func TestDarwinPreGo126CompatibilityFiles(t *testing.T) {
+func TestDarwinCompatibilityFiles(t *testing.T) {
 	runtimeDir := filepath.Join("..", "..", "runtime", "internal", "lib")
 	syscallDir := filepath.Join(runtimeDir, "syscall")
 	for _, version := range []string{"go1.24", "go1.25"} {
@@ -276,16 +276,6 @@ func TestDarwinPreGo126CompatibilityFiles(t *testing.T) {
 		if !matched {
 			t.Errorf("internal/syscall/unix compatibility placeholder is excluded for %s", version)
 		}
-		matched, err = buildCtx.MatchFile(
-			syscallDir,
-			"runtime_fcntl_darwin_pre_go126.go",
-		)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !matched {
-			t.Errorf("runtime fcntl compatibility bridge is excluded for %s", version)
-		}
 		matched, err = buildCtx.MatchFile(syscallDir, "syscall_darwin.go")
 		if err != nil {
 			t.Fatal(err)
@@ -303,7 +293,6 @@ func TestDarwinPreGo126CompatibilityFiles(t *testing.T) {
 	}
 	for dir, name := range map[string]string{
 		filepath.Join(runtimeDir, "internal", "syscall", "unix"): "compat_darwin_pre_go126.go",
-		syscallDir: "runtime_fcntl_darwin_pre_go126.go",
 	} {
 		matched, err := go126.MatchFile(dir, name)
 		if err != nil {

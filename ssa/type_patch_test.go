@@ -37,6 +37,53 @@ func TestFieldOutOfRangePanicsWithTypeString(t *testing.T) {
 	_ = p.Field(typ, 1)
 }
 
+func TestDerivedTypesApplyCurrentPatch(t *testing.T) {
+	prog := NewProgram(nil)
+	defer prog.Dispose()
+
+	pkg := types.NewPackage("example.com/p", "p")
+	original := types.NewNamed(
+		types.NewTypeName(token.NoPos, pkg, "local", nil),
+		types.NewStruct(nil, nil),
+		nil,
+	)
+	canonical := types.NewNamed(
+		types.NewTypeName(token.NoPos, pkg, "local[int]", nil),
+		types.NewStruct(nil, nil),
+		nil,
+	)
+
+	// Materialize the opaque containers before installing the patch, exactly as
+	// closure environments can do before an instantiated generic body is emitted.
+	channel := &aType{raw: rawType{Type: types.NewChan(types.SendRecv, original)}}
+	pointer := &aType{raw: rawType{Type: types.NewPointer(original)}}
+	array := &aType{raw: rawType{Type: types.NewArray(original, 1)}}
+	structure := &aType{raw: rawType{Type: types.NewStruct([]*types.Var{
+		types.NewField(token.NoPos, pkg, "value", original, false),
+	}, nil)}}
+
+	prog.SetPatch(func(typ types.Type) types.Type {
+		if typ == original {
+			return canonical
+		}
+		return typ
+	})
+
+	for name, got := range map[string]Type{
+		"channel element": prog.Elem(channel),
+		"pointer element": prog.Elem(pointer),
+		"array index":     prog.Index(array),
+		"struct field":    prog.Field(structure, 0),
+	} {
+		if got.RawType() != canonical {
+			t.Fatalf("%s raw type = %v, want canonical %v", name, got.RawType(), canonical)
+		}
+		if !strings.Contains(got.ll.String(), `%"example.com/p.local[int]"`) {
+			t.Fatalf("%s LLVM type = %s, want canonical named type", name, got.ll)
+		}
+	}
+}
+
 func TestTypeStringWithPkgAndIsPkgScope(t *testing.T) {
 	obj := types.NewTypeName(token.NoPos, nil, "Local", nil)
 	local := types.NewNamed(obj, types.Typ[types.Int], nil)

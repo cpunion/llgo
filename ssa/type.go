@@ -236,11 +236,16 @@ func (p Program) Elem(typ Type) Type {
 	elem := typ.raw.Type.Underlying().(interface {
 		Elem() types.Type
 	}).Elem()
-	return p.rawType(elem)
+	// A container can have been materialized before the frontend installed (or
+	// changed) its package-local type patch. This matters for instantiated local
+	// named types: channels and pointers use opaque LLVM pointers, so creating
+	// the container does not otherwise force its element through the patch.
+	// Normalize every derived type at the point where it becomes an LLVM value.
+	return p.rawType(p.patch(elem))
 }
 
 func (p Program) Index(typ Type) Type {
-	return p.rawType(indexType(typ.raw.Type))
+	return p.rawType(p.patch(indexType(typ.raw.Type)))
 }
 
 func (p Program) Field(typ Type, i int) Type {
@@ -264,7 +269,7 @@ func (p Program) Field(typ Type, i int) Type {
 		}
 		fld = st.Field(i)
 	}
-	return p.rawType(fld.Type())
+	return p.rawType(p.patch(fld.Type()))
 }
 
 func typeStringWithPkg(t types.Type) string {

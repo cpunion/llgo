@@ -69,7 +69,7 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 	argvVar := mainPkg.NewVarEx("__llgo_argv", prog.Pointer(argvValueType))
 	argvVar.InitNil()
 	emitFuncInfoTable(ctx, mainPkg, cfg.funcInfo, cfg.pcLineInfo, cfg.funcInfoStubs)
-	emitCoroControlWrappers(ctx, mainPkg)
+	emitCoroControlWrappers(ctx, mainPkg, cfg.rtInit)
 	coroEntry := emitCoroProgramManifest(ctx, mainPkg, cfg)
 
 	exportFile := pkg.ExportFile
@@ -216,9 +216,11 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 // emitCoroControlWrappers defines the compiler-owned handle control boundary
 // used by the v1 scheduler. Keeping the LLVM coroutine intrinsics in the entry
 // module gives every build mode one fixed C ABI without exposing LLVM's handle
-// representation to the runtime.
-func emitCoroControlWrappers(ctx *context, pkg llssa.Package) {
-	if !ctx.buildConf.coroChildAwaitActive() {
+// representation to the runtime. The unified runtime contains scheduler calls
+// to this boundary even when an ordinary library build has no coroutine root,
+// so a runtime-linked c-shared/c-archive output owns the definitions too.
+func emitCoroControlWrappers(ctx *context, pkg llssa.Package, runtimeLinked bool) {
+	if !runtimeLinked && (ctx == nil || ctx.buildConf == nil || !ctx.buildConf.coroChildAwaitActive()) {
 		return
 	}
 
@@ -354,13 +356,30 @@ func emitCoroProgramManifest(ctx *context, pkg llssa.Package, cfg *genConfig) co
 // their definitions makes the requirement independent of optimization level,
 // LTO mode, or whether clang participates in the final codegen path.
 func lowerCoroControlWrappers(ctx *context, pkg llssa.Package) error {
-	if ctx == nil || ctx.buildConf == nil || !ctx.buildConf.coroChildAwaitActive() {
-		return nil
-	}
-	if pkg == nil || ctx.prog == nil {
-		return fmt.Errorf("coroutine control lowering requires an entry module and program")
+	if pkg == nil {
+		return fmt.Errorf("coroutine control lowering requires an entry module")
 	}
 	mod := pkg.Module()
+	present := 0
+	for _, name := range []string{
+		"__llgo_coro_resume_v1",
+		"__llgo_coro_done_v1",
+		"__llgo_coro_destroy_v1",
+	} {
+		fn := mod.NamedFunction(name)
+		if !fn.IsNil() && !fn.IsDeclaration() {
+			present++
+		}
+	}
+	if present == 0 {
+		return nil
+	}
+	if present != 3 {
+		return fmt.Errorf("coroutine control lowering requires all three compiler-owned wrappers (found %d)", present)
+	}
+	if ctx == nil || ctx.prog == nil {
+		return fmt.Errorf("coroutine control lowering requires an entry module and program")
+	}
 	mod.SetDataLayout(ctx.prog.DataLayout())
 	mod.SetTarget(ctx.prog.TargetSpec().Triple)
 	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {

@@ -289,21 +289,3 @@ func llgoErrnoWord(result, errno uintptr) stdsyscall.Errno {
 	}
 	return 0
 }
-
-// llgoRuntimeFcntl is the typed, fixed-target bridge used by runtime's poll
-// descriptor setup. Keeping FuncPCABI0 and llgo.syscall32 in this package
-// avoids publishing another same-symbol intrinsic declaration into runtime's
-// alternate package, where linkname alias selection would erase the fixed
-// target provenance before coroutine analysis.
-func llgoRuntimeFcntl(fd, cmd, arg int32) (result, errno int32) {
-	r1, _, errnoWord := llgoSyscall3Int32(
-		llgoDarwinFuncPCABI0(libc_fcntl_trampoline),
-		uintptr(int64(fd)),
-		uintptr(int64(cmd)),
-		uintptr(int64(arg)),
-	)
-	if uint32(r1) == ^uint32(0) {
-		return -1, int32(errnoWord)
-	}
-	return int32(r1), 0
-}

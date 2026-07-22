@@ -475,6 +475,8 @@ func TestDarwinRuntimeEnvironmentUsesFixedWorkerABI(t *testing.T) {
 		"uintptr(unsafe.Pointer(name))",
 		"without recovering policy from the emitted address",
 		"irreversible worker completion",
+		"//llgo:coro sync\n//go:linkname runtimeDarwinFcntl C.llgo_fcntl",
+		"cliteos.Errno()",
 	} {
 		if !strings.Contains(string(source), required) {
 			t.Errorf("%s lacks fixed environment worker marker %q", path, required)
@@ -483,10 +485,18 @@ func TestDarwinRuntimeEnvironmentUsesFixedWorkerABI(t *testing.T) {
 	for _, forbidden := range []string{
 		"runtimeDarwinFuncPCABI0(cliteos.Setenv)",
 		"runtimeDarwinFuncPCABI0(cliteos.Unsetenv)",
+		"syscall.llgoRuntimeFcntl",
 	} {
 		if strings.Contains(string(source), forbidden) {
 			t.Errorf("%s still derives worker authority from typed C declaration %q", path, forbidden)
 		}
+	}
+	errnoSource, err := os.ReadFile("internal/clite/os/os.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(errnoSource), "//llgo:coro noblock\n//go:linkname Errno C.cliteErrno") {
+		t.Error("the runtime-owned Darwin fcntl bridge cannot read TLS errno without a no-suspend certificate")
 	}
 }
 

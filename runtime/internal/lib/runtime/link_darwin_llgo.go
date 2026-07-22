@@ -4,6 +4,7 @@ package runtime
 
 import (
 	c "github.com/goplus/llgo/runtime/internal/clite"
+	cliteos "github.com/goplus/llgo/runtime/internal/clite/os"
 	"unsafe"
 )
 
@@ -41,8 +42,15 @@ func libc_setenv_trampoline()
 //go:linkname libc_unsetenv_trampoline C.unsetenv
 func libc_unsetenv_trampoline()
 
-//go:linkname runtimeDarwinFcntl syscall.llgoRuntimeFcntl
-func runtimeDarwinFcntl(fd, cmd, arg int32) (result, errno int32)
+// runtimeDarwinFcntl is used only for the runtime's F_GETFL/F_SETFL and
+// F_GETFD/F_SETFD descriptor metadata operations. Those commands do not wait
+// for descriptor readiness or application I/O, so they must stay on the owner
+// thread with the immediately following TLS errno read. General syscall.fcntl
+// calls retain their independent worker capability.
+//
+//llgo:coro sync
+//go:linkname runtimeDarwinFcntl C.llgo_fcntl
+func runtimeDarwinFcntl(fd, cmd, arg uintptr) uintptr
 
 // os.Executable (darwin) expects runtime to populate os.executablePath.
 // Upstream Go runtime sets this during startup; llgo sets it from argv[0],
@@ -149,5 +157,13 @@ func syscall_runtime_BeforeExec() {}
 func syscall_runtime_AfterExec() {}
 
 func fcntl(fd int32, cmd int32, arg int32) (int32, int32) {
-	return runtimeDarwinFcntl(fd, cmd, arg)
+	result := runtimeDarwinFcntl(
+		uintptr(int64(fd)),
+		uintptr(int64(cmd)),
+		uintptr(int64(arg)),
+	)
+	if uint32(result) == ^uint32(0) {
+		return -1, int32(cliteos.Errno())
+	}
+	return int32(result), 0
 }

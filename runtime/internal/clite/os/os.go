@@ -54,6 +54,10 @@ type (
 	StatT = syscall.Stat_t
 )
 
+// Errno reads the current thread's libc errno slot. It must remain adjacent to
+// the foreign call whose failure it describes and cannot enter the scheduler.
+//
+//llgo:coro noblock
 //go:linkname Errno C.cliteErrno
 func Errno() c.Int
 

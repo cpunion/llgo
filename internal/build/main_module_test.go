@@ -210,6 +210,45 @@ func TestGenMainModuleCoroControlWrappersDisabled(t *testing.T) {
 	}
 }
 
+func TestGenMainModuleRuntimeLinkedLibraryOwnsCoroControlWrappers(t *testing.T) {
+	llvm.InitializeAllTargets()
+	t.Setenv(llgoStdioNobuf, "")
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	ctx := &context{
+		prog: prog,
+		buildConf: &Config{
+			BuildMode: BuildModeCShared,
+			Goos:      "linux",
+			Goarch:    "amd64",
+			// Deliberately leave CoroProfile disabled. The unified runtime still
+			// references its compiler-owned handle boundary in library modes.
+		},
+	}
+	entry := genMainModule(ctx, llssa.PkgRuntime,
+		&packages.Package{PkgPath: "example.com/library", ExportFile: "library.a"},
+		&genConfig{rtInit: true})
+	for _, name := range []string{
+		"__llgo_coro_resume_v1",
+		"__llgo_coro_done_v1",
+		"__llgo_coro_destroy_v1",
+	} {
+		fn := entry.LPkg.Module().NamedFunction(name)
+		if fn.IsNil() || fn.IsDeclaration() {
+			t.Fatalf("runtime-linked library is missing compiler-owned wrapper %s:\n%s", name, entry.LPkg.String())
+		}
+	}
+	if err := lowerCoroControlWrappers(ctx, entry.LPkg); err != nil {
+		t.Fatalf("lower runtime-linked library wrappers: %v\n%s", err, entry.LPkg.String())
+	}
+	post := entry.LPkg.String()
+	for _, intrinsic := range []string{"llvm.coro.resume", "llvm.coro.done", "llvm.coro.destroy"} {
+		if strings.Contains(post, "call ") && strings.Contains(post, "@"+intrinsic) {
+			t.Fatalf("runtime-linked library retained %s after lowering:\n%s", intrinsic, post)
+		}
+	}
+}
+
 func TestGenMainModuleCoroProgramBootstrapV2MixedNativeAndWasm(t *testing.T) {
 	llvm.InitializeAllTargets()
 	t.Setenv(llgoStdioNobuf, "")
