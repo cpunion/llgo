@@ -944,14 +944,16 @@ type SelectState struct {
 }
 
 // CoroSelect is compiler-owned storage for one blocking channel select in a
-// physical LLVM coroutine body. ChanOp values, queue candidates, and shared
-// runtime state are all typed allocas whose addresses cross the suspend and
-// are therefore retained by CoroSplit in the stackless frame.
+// physical LLVM coroutine body. payloads and opsStorage retain the exact
+// allocation identities, rather than only aggregate values containing their
+// addresses: LLVM CoroSplit must see a direct post-suspend use of every backing
+// alloca before it can move that storage into the stackless frame.
 type CoroSelect struct {
 	fn         Function
 	states     []*SelectState
 	ops        []Expr
-	opsSlice   Expr
+	payloads   []Expr
+	opsStorage Expr
 	candidates Expr
 	storage    Expr
 }
@@ -960,38 +962,81 @@ type CoroSelect struct {
 // operand exactly once. The caller may first use CoroChanSelectTry, then pass
 // the same plan to CoroChanSelectPark and CoroChanSelectResume.
 func (b Builder) NewCoroSelect(states []*SelectState) *CoroSelect {
-	if b == nil || b.Func == nil {
+	return b.newCoroSelect(b, states)
+}
+
+// NewCoroSelectInFrame is the blocking-select form. frame must insert static
+// allocas in the physical coroutine entry block, while b initializes their
+// contents at the select's actual execution point. Keeping allocation and
+// initialization separate makes loop reuse correct and prevents an hchan
+// waiter from retaining a resume-local physical stack address.
+func (b Builder) NewCoroSelectInFrame(frame Builder, states []*SelectState) *CoroSelect {
+	if frame == nil || frame.Func != b.Func {
+		panic("ssa: coroutine select frame builder belongs to another function")
+	}
+	return b.newCoroSelect(frame, states)
+}
+
+func (b Builder) newCoroSelect(storageBuilder Builder, states []*SelectState) *CoroSelect {
+	if b == nil || b.Func == nil || storageBuilder == nil || storageBuilder.Func != b.Func {
 		panic("ssa: coroutine select requires an active function builder")
 	}
 	ops := make([]Expr, len(states))
+	payloads := make([]Expr, len(states))
 	for index, state := range states {
 		if state == nil || state.Chan.IsNil() {
 			panic("ssa: coroutine select requires complete channel states")
 		}
-		ops[index] = b.chanOp(state)
+		var payload Expr
+		if state.Send {
+			payload = storageBuilder.AllocaT(state.Value.Type)
+			b.Store(payload, state.Value)
+		} else {
+			elem := b.Prog.Elem(state.Chan.Type)
+			payload = storageBuilder.AllocaT(elem)
+			// A static select instruction may execute repeatedly in a loop. Reset
+			// unselected receive results on every logical execution, not merely
+			// once when the coroutine frame is created.
+			b.Store(payload, b.Prog.Zero(elem))
+		}
+		payloads[index] = payload
+		ops[index] = b.chanOpWithPayload(state, payload)
+	}
+	opType := b.Prog.rtType("ChanOp")
+	opsStorage := storageBuilder.ArrayAlloca(opType, b.Prog.Val(len(states)))
+	for index, op := range ops {
+		b.Store(b.Advance(opsStorage, b.Prog.Val(index)), op)
 	}
 	return &CoroSelect{
 		fn:         b.Func,
 		states:     states,
 		ops:        ops,
-		opsSlice:   b.selectOpsSlice(lastParamType(b.Prog, b.Pkg.rtFunc("CoroChanSelectTry")), ops),
-		candidates: b.ArrayAlloca(b.Prog.rtType("CoroChanSelectCaseV1"), b.Prog.Val(len(states))),
-		storage:    b.Alloc(b.Prog.rtType("CoroChanSelectV1"), false),
+		payloads:   payloads,
+		opsStorage: opsStorage,
+		candidates: storageBuilder.ArrayAlloca(b.Prog.rtType("CoroChanSelectCaseV1"), b.Prog.Val(len(states))),
+		storage:    storageBuilder.Alloc(b.Prog.rtType("CoroChanSelectV1"), false),
 	}
 }
 
 func (b Builder) requireCoroSelect(plan *CoroSelect) {
 	if b == nil || plan == nil || plan.fn == nil || plan.fn != b.Func || len(plan.states) != len(plan.ops) ||
-		plan.opsSlice.IsNil() || plan.candidates.IsNil() || plan.storage.IsNil() {
+		len(plan.payloads) != len(plan.ops) || plan.opsStorage.IsNil() ||
+		plan.candidates.IsNil() || plan.storage.IsNil() {
 		panic("ssa: invalid coroutine select plan")
 	}
+}
+
+func (b Builder) coroSelectOpsSlice(plan *CoroSelect) Expr {
+	b.requireCoroSelect(plan)
+	n := llvm.ConstInt(b.Prog.tyInt(), uint64(len(plan.ops)), false)
+	return b.unsafeSlice(plan.opsStorage, n, n)
 }
 
 // CoroChanSelectTry performs the randomized, nonblocking, non-panicking first
 // pass. It returns the runtime tuple (index, recvOK, tryOK, sendClosed).
 func (b Builder) CoroChanSelectTry(plan *CoroSelect) Expr {
 	b.requireCoroSelect(plan)
-	return b.Call(b.Pkg.rtFunc("CoroChanSelectTry"), plan.opsSlice)
+	return b.Call(b.Pkg.rtFunc("CoroChanSelectTry"), b.coroSelectOpsSlice(plan))
 }
 
 // CoroChanSelectPark installs all physical cases at the compiler's exact
@@ -1006,7 +1051,7 @@ func (b Builder) CoroChanSelectPark(plan *CoroSelect, g, handle, header Expr) {
 		header,
 		b.Convert(void, plan.candidates),
 		b.Convert(void, plan.storage),
-		plan.opsSlice,
+		b.coroSelectOpsSlice(plan),
 	)
 }
 
@@ -1014,13 +1059,19 @@ func (b Builder) CoroChanSelectPark(plan *CoroSelect, g, handle, header Expr) {
 // (index, recvOK, typedStatus).
 func (b Builder) CoroChanSelectResume(plan *CoroSelect, g Expr) Expr {
 	b.requireCoroSelect(plan)
+	// Runtime queue nodes retain every send and receive payload address across
+	// the physical suspend. Receive payloads are also loaded below, but send
+	// payloads otherwise have no direct resumed SSA use; keep all allocation
+	// identities live until CoroSplit has placed them in the coroutine frame.
+	// RemoveKeepAliveCallsAfterCoroSplit erases these optimizer-only uses.
+	b.KeepAlive(plan.payloads...)
 	void := b.Prog.VoidPtr()
 	return b.Call(
 		b.Pkg.rtFunc("CoroChanSelectResume"),
 		g,
 		b.Convert(void, plan.candidates),
 		b.Convert(void, plan.storage),
-		plan.opsSlice,
+		b.coroSelectOpsSlice(plan),
 	)
 }
 
@@ -1036,10 +1087,11 @@ func (b Builder) CoroChanSelectResult(plan *CoroSelect, chosen, recvOK Expr) Exp
 		}
 		etyp := b.Prog.Elem(state.Chan.Type)
 		typs = append(typs, etyp)
-		// chanOp stored this address from the compiler-owned receive alloca in
-		// NewCoroSelect. It cannot be nil, including for a zero-sized element;
-		// avoid inventing an AssertNilDeref runtime edge after planning.
-		value := b.LoadKnownNonNil(Expr{b.impl.CreateExtractValue(plan.ops[index].impl, 1, ""), b.Prog.Pointer(etyp)})
+		// Load the original allocation identity directly. Extracting the same
+		// address from a pre-suspend ChanOp aggregate is semantically equivalent,
+		// but hides the backing alloca from CoroSplit's frame-liveness analysis.
+		// The compiler-owned slot cannot be nil, including for zero-sized values.
+		value := b.LoadKnownNonNil(plan.payloads[index])
 		results = append(results, value.impl)
 	}
 	return b.aggregateValue(b.Prog.Struct(typs...), results...)
@@ -1151,6 +1203,31 @@ func (b Builder) chanOp(s *SelectState) Expr {
 	send := prog.BoolVal(s.Send)
 	typ := b.Prog.rtType("ChanOp")
 	return b.aggregateValue(typ, s.Chan.impl, val.impl, size.impl, send.impl)
+}
+
+func (b Builder) chanOpWithPayload(s *SelectState, payload Expr) Expr {
+	if s == nil || payload.IsNil() {
+		panic("ssa: channel operation requires compiler-owned payload storage")
+	}
+	prog := b.Prog
+	var elem Type
+	if s.Send {
+		elem = s.Value.Type
+	} else {
+		elem = prog.Elem(s.Chan.Type)
+	}
+	if !types.Identical(payload.Type.RawType(), prog.Pointer(elem).RawType()) {
+		panic("ssa: channel operation payload type mismatch")
+	}
+	value := Expr{payload.impl, prog.VoidPtr()}
+	size := prog.IntVal(prog.SizeOf(elem), prog.Int32())
+	return b.aggregateValue(
+		prog.rtType("ChanOp"),
+		s.Chan.impl,
+		value.impl,
+		size.impl,
+		prog.BoolVal(s.Send).impl,
+	)
 }
 
 // -----------------------------------------------------------------------------

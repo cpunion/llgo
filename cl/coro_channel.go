@@ -90,8 +90,15 @@ func (p *context) requireCoroChannelBody(b llssa.Builder) *coroBodyContext {
 }
 
 func (p *context) newCoroChannelStorage(b llssa.Builder, elemType llssa.Type) (elem, state llssa.Expr) {
-	elem = b.Alloc(elemType, false)
-	state = b.Alloc(p.prog.RuntimeType("CoroChanParkV1"), false)
+	// These addresses may be published to hchan immediately before suspend.
+	// Allocate them in the physical ramp entry so no waiter can retain a
+	// resume-local M stack address. Reset at the logical operation point because
+	// the same static channel instruction may execute repeatedly in a loop.
+	elem = p.coroFrameAlloca(elemType)
+	stateType := p.prog.RuntimeType("CoroChanParkV1")
+	state = p.coroFrameAlloca(stateType)
+	b.Store(elem, b.Prog.Zero(elemType))
+	b.Store(state, b.Prog.Zero(stateType))
 	return
 }
 
@@ -148,7 +155,7 @@ func (p *context) compileCoroChanRecv(b llssa.Builder, instruction *ssa.UnOp, ch
 	result := b.CoroChanTryRecv(channel, elem)
 	recvOK := b.Extract(result, 0)
 	tryOK := b.Extract(result, 1)
-	recvOKSlot := b.Alloc(p.prog.Bool(), false)
+	recvOKSlot := p.coroFrameAlloca(p.prog.Bool())
 	b.Store(recvOKSlot, recvOK)
 	recvSuccess := b.Func.MakeBlock()
 	recvClosed := b.Func.MakeBlock()
@@ -229,10 +236,13 @@ func (p *context) compileCoroChanClose(b llssa.Builder, channel llssa.Expr) {
 
 func (p *context) compileCoroChanSelect(b llssa.Builder, states []*llssa.SelectState) llssa.Expr {
 	body := p.requireCoroChannelBody(b)
-	plan := b.NewCoroSelect(states)
+	frame := p.fn.NewBuilder()
+	defer frame.Dispose()
+	frame.SetBlockEx(p.fn.Block(0), llssa.AtStart, true)
+	plan := b.NewCoroSelectInFrame(frame, states)
 	attempt := b.CoroChanSelectTry(plan)
-	chosenSlot := b.Alloc(b.Prog.Int(), false)
-	recvOKSlot := b.Alloc(b.Prog.Bool(), false)
+	chosenSlot := p.coroFrameAlloca(b.Prog.Int())
+	recvOKSlot := p.coroFrameAlloca(b.Prog.Bool())
 	b.Store(chosenSlot, b.Extract(attempt, 0))
 	b.Store(recvOKSlot, b.Extract(attempt, 1))
 	tryOK := b.Extract(attempt, 2)

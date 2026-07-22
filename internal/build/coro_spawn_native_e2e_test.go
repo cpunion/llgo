@@ -794,6 +794,7 @@ func runCoroSpawnNativeE2EPasses(t *testing.T, prog llssa.Program, module llvm.M
 	if err := module.RunPasses(pipeline, prog.TargetMachine(), options); err != nil {
 		t.Fatalf("run E2E %s: %v\n%s", pipeline, err, module.String())
 	}
+	llssa.RemoveKeepAliveCallsAfterCoroSplit(module)
 	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("verify E2E coroutine module after CoroSplit: %v\n%s", err, module.String())
 	}

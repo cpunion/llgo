@@ -434,10 +434,10 @@ func TestChannelExternalCommitPairOrderingFailuresAndCommit(t *testing.T) {
 	preemptStore(&b.claim.state, selectClaimClaimed)
 	if failedResult := beginChannelExternalCommitPair(
 		&failed, a.source, a.ids[0], a.claim, b.source, b.ids[0], b.claim,
-	); failedResult != channelExternalCommitPairBeginClaimContended || failed != (channelExternalCommitPair{}) ||
+	); failedResult != channelExternalCommitPairBeginClaimResolved || failed != (channelExternalCommitPair{}) ||
 		selectClaimLoad(a.claim) != selectClaimOpen || selectClaimLoad(b.claim) != selectClaimClaimed ||
 		preemptLoad(&slotA.inflight) != 0 || preemptLoad(&slotB.inflight) != 0 {
-		t.Fatalf("pair claim contention = (%+v,%d), claims=(%d,%d) inflight=(%#x,%#x)",
+		t.Fatalf("pair terminal claim classification = (%+v,%d), claims=(%d,%d) inflight=(%#x,%#x)",
 			failed, failedResult, selectClaimLoad(a.claim), selectClaimLoad(b.claim),
 			preemptLoad(&slotA.inflight), preemptLoad(&slotB.inflight))
 	}

@@ -210,6 +210,10 @@ func classifyCoroChanSingleBegin(result coro.ChannelExternalCommitBeginResult) c
 		// Apply may already have sealed a canceled/losing endpoint. Its queue
 		// node is stale and can be dropped; resume cleanup owns the generation.
 		return coroChanMatchDiscarded
+	case coro.ChannelExternalCommitBeginClaimResolved:
+		// Another case already owns the logical select. Admission still pinned
+		// this queue node long enough to classify it as stale.
+		return coroChanMatchDiscarded
 	case coro.ChannelExternalCommitBeginClaimContended:
 		return coroChanMatchRetry
 	default:
@@ -223,6 +227,8 @@ func classifyCoroChanPairBegin(result coro.ChannelExternalCommitPairBeginResult)
 		return coroChanMatchCommitted
 	case coro.ChannelExternalCommitPairBeginFirstAdmissionFailed,
 		coro.ChannelExternalCommitPairBeginSecondAdmissionFailed:
+		return coroChanMatchDiscarded
+	case coro.ChannelExternalCommitPairBeginClaimResolved:
 		return coroChanMatchDiscarded
 	case coro.ChannelExternalCommitPairBeginClaimContended:
 		return coroChanMatchRetry
@@ -250,15 +256,24 @@ func commitCoroRecvWaiterLocked(w *chanWaiter, src unsafe.Pointer, eltSize int, 
 		return coroChanMatchInvalid
 	}
 	var transaction coro.ChannelExternalCommit
-	result := coro.BeginChannelExternalCommit(
-		&transaction,
-		w.coro.source,
-		w.coro.id,
-		w.coro.claim,
-	)
-	classified := classifyCoroChanSingleBegin(result)
-	if classified != coroChanMatchCommitted {
-		return classified
+	for {
+		result := coro.BeginChannelExternalCommit(
+			&transaction,
+			w.coro.source,
+			w.coro.id,
+			w.coro.claim,
+		)
+		classified := classifyCoroChanSingleBegin(result)
+		if classified == coroChanMatchRetry {
+			// Acquiring/Committing is a no-suspend claim critical section. Its
+			// holder never waits for hchan, so retrying under the already-held
+			// channel gate cannot form a lock cycle or strand a rendezvous.
+			continue
+		}
+		if classified != coroChanMatchCommitted {
+			return classified
+		}
+		break
 	}
 	if !transaction.BeginEffect() {
 		return coroChanMatchInvalid
@@ -281,15 +296,21 @@ func commitCoroSendWaiterLocked(w *chanWaiter, dst unsafe.Pointer, eltSize int, 
 		return coroChanMatchInvalid
 	}
 	var transaction coro.ChannelExternalCommit
-	result := coro.BeginChannelExternalCommit(
-		&transaction,
-		w.coro.source,
-		w.coro.id,
-		w.coro.claim,
-	)
-	classified := classifyCoroChanSingleBegin(result)
-	if classified != coroChanMatchCommitted {
-		return classified
+	for {
+		result := coro.BeginChannelExternalCommit(
+			&transaction,
+			w.coro.source,
+			w.coro.id,
+			w.coro.claim,
+		)
+		classified := classifyCoroChanSingleBegin(result)
+		if classified == coroChanMatchRetry {
+			continue
+		}
+		if classified != coroChanMatchCommitted {
+			return classified
+		}
+		break
 	}
 	if !transaction.BeginEffect() {
 		return coroChanMatchInvalid
@@ -313,18 +334,24 @@ func commitCoroPairLocked(send, recv *chanWaiter, eltSize int) coroChanMatchResu
 		return coroChanMatchInvalid
 	}
 	var transaction coro.ChannelExternalCommitPair
-	result := coro.BeginChannelExternalCommitPair(
-		&transaction,
-		send.coro.source,
-		send.coro.id,
-		send.coro.claim,
-		recv.coro.source,
-		recv.coro.id,
-		recv.coro.claim,
-	)
-	classified := classifyCoroChanPairBegin(result)
-	if classified != coroChanMatchCommitted {
-		return classified
+	for {
+		result := coro.BeginChannelExternalCommitPair(
+			&transaction,
+			send.coro.source,
+			send.coro.id,
+			send.coro.claim,
+			recv.coro.source,
+			recv.coro.id,
+			recv.coro.claim,
+		)
+		classified := classifyCoroChanPairBegin(result)
+		if classified == coroChanMatchRetry {
+			continue
+		}
+		if classified != coroChanMatchCommitted {
+			return classified
+		}
+		break
 	}
 	if !transaction.BeginEffect() {
 		return coroChanMatchInvalid
@@ -343,12 +370,17 @@ func beginCurrentCoroChannelCommit(waiter *chanWaiter, transaction *coro.Channel
 		*transaction != (coro.ChannelExternalCommit{}) {
 		return coroChanMatchInvalid
 	}
-	return classifyCoroChanSingleBegin(coro.BeginChannelExternalCommit(
-		transaction,
-		waiter.coro.source,
-		waiter.coro.id,
-		waiter.coro.claim,
-	))
+	for {
+		classified := classifyCoroChanSingleBegin(coro.BeginChannelExternalCommit(
+			transaction,
+			waiter.coro.source,
+			waiter.coro.id,
+			waiter.coro.claim,
+		))
+		if classified != coroChanMatchRetry {
+			return classified
+		}
+	}
 }
 
 func finishCurrentCoroChannelCommit(

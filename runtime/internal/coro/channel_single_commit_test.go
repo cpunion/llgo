@@ -112,6 +112,15 @@ func TestChannelExternalCommitSingleFailureIsAtomic(t *testing.T) {
 	if !selectClaimOwnerReleasePending(fixture.claim) {
 		t.Fatal("release owner claim")
 	}
+	preemptStore(&fixture.claim.state, selectClaimClaimed)
+	if result := BeginChannelExternalCommit(
+		&transaction, fixture.source, fixture.ids[0], fixture.claim,
+	); result != ChannelExternalCommitBeginClaimResolved || transaction != (ChannelExternalCommit{}) ||
+		preemptLoad(&slot.inflight) != 0 || selectClaimLoad(fixture.claim) != selectClaimClaimed {
+		t.Fatalf("single terminal claim = result:%d transaction:%+v inflight:%#x claim:%d",
+			result, transaction, preemptLoad(&slot.inflight), selectClaimLoad(fixture.claim))
+	}
+	preemptStore(&fixture.claim.state, selectClaimOpen)
 
 	slot.record.phase = operationDetached
 	if result := BeginChannelExternalCommit(&transaction, fixture.source, fixture.ids[0], fixture.claim); result != ChannelExternalCommitBeginInvariantFailure {

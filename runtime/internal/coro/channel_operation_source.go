@@ -703,6 +703,7 @@ const (
 	channelExternalCommitPairBeginSecondAdmissionFailed
 	channelExternalCommitPairBeginClaimMismatch
 	channelExternalCommitPairBeginClaimContended
+	channelExternalCommitPairBeginClaimResolved
 	channelExternalCommitPairBeginInvariantFailure
 )
 
@@ -886,7 +887,20 @@ func beginChannelExternalCommitPair(
 		return channelExternalCommitPairBeginInvariantFailure
 	}
 	if !acquired {
+		claimAState := selectClaimLoad(claimA)
+		claimBState := selectClaimLoad(claimB)
 		if !releaseChannelExternalCommitPairWithoutEffect(pair) {
+			return channelExternalCommitPairBeginInvariantFailure
+		}
+		if claimAState == selectClaimClaimed || claimBState == selectClaimClaimed {
+			// A terminal claim means another case already won this logical select.
+			// The queue node is stale and must be discarded, never retried.
+			return channelExternalCommitPairBeginClaimResolved
+		}
+		if (claimAState != selectClaimOpen && claimAState != selectClaimAcquiring &&
+			claimAState != selectClaimCommitting) ||
+			(claimBState != selectClaimOpen && claimBState != selectClaimAcquiring &&
+				claimBState != selectClaimCommitting) {
 			return channelExternalCommitPairBeginInvariantFailure
 		}
 		return channelExternalCommitPairBeginClaimContended
@@ -985,7 +999,12 @@ const (
 	ChannelExternalCommitPairBeginFirstAdmissionFailed
 	ChannelExternalCommitPairBeginSecondAdmissionFailed
 	ChannelExternalCommitPairBeginClaimMismatch
+	// ClaimContended is transient: another physical owner is inside the
+	// no-suspend claim transition, so an hchan matcher may retry in place.
 	ChannelExternalCommitPairBeginClaimContended
+	// ClaimResolved is terminal: another select case already won, so every
+	// queue node belonging to this pair is stale and must be discarded.
+	ChannelExternalCommitPairBeginClaimResolved
 	ChannelExternalCommitPairBeginInvariantFailure
 )
 
@@ -1020,6 +1039,8 @@ func BeginChannelExternalCommitPair(
 		return ChannelExternalCommitPairBeginClaimMismatch
 	case channelExternalCommitPairBeginClaimContended:
 		return ChannelExternalCommitPairBeginClaimContended
+	case channelExternalCommitPairBeginClaimResolved:
+		return ChannelExternalCommitPairBeginClaimResolved
 	case channelExternalCommitPairBeginInvariantFailure:
 		return ChannelExternalCommitPairBeginInvariantFailure
 	default:
@@ -1070,7 +1091,12 @@ const (
 	ChannelExternalCommitBeginPrepared
 	ChannelExternalCommitBeginAdmissionFailed
 	ChannelExternalCommitBeginClaimMismatch
+	// ClaimContended is transient and may be retried while the hchan gate is
+	// held because the claim transition never suspends or waits for that gate.
 	ChannelExternalCommitBeginClaimContended
+	// ClaimResolved is terminal and identifies a stale queue node whose logical
+	// select has already committed another case.
+	ChannelExternalCommitBeginClaimResolved
 	ChannelExternalCommitBeginInvariantFailure
 )
 
@@ -1119,11 +1145,16 @@ func BeginChannelExternalCommit(
 	}
 	switch state := selectClaimOwnerAcquire(claim); state {
 	case selectClaimOpen:
-	case selectClaimAcquiring, selectClaimCommitting, selectClaimClaimed, selectClaimContended:
+	case selectClaimAcquiring, selectClaimCommitting, selectClaimContended:
 		if !releaseChannelExternalCommitWithoutClaim(out) {
 			return ChannelExternalCommitBeginInvariantFailure
 		}
 		return ChannelExternalCommitBeginClaimContended
+	case selectClaimClaimed:
+		if !releaseChannelExternalCommitWithoutClaim(out) {
+			return ChannelExternalCommitBeginInvariantFailure
+		}
+		return ChannelExternalCommitBeginClaimResolved
 	default:
 		out.phase = channelExternalCommitPairBroken
 		return ChannelExternalCommitBeginInvariantFailure

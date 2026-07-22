@@ -192,6 +192,15 @@ func TestCoroChannelNativeAndWasm32(t *testing.T) {
 			) {
 				t.Fatalf("CoroSplit lost channel select resume dispatch:\n%s", module.String())
 			}
+			// Both the send and receive payload addresses must be direct frame
+			// fields at the resumed keepalive point. Before this regression was
+			// fixed, the send slot and select descriptor array were physical M-stack
+			// allocas whose addresses escaped through the hchan queue.
+			if !regexp.MustCompile(
+				`@llvm\.fake\.use\(ptr %[^,\n]*reload\.addr[^,\n]*, ptr %[^)\n]*reload\.addr`,
+			).MatchString(selectResume.String()) {
+				t.Fatalf("CoroSplit did not retain every select payload in its frame:\n%s", selectResume.String())
+			}
 			emptySelectResume := module.NamedFunction("foo.EmptySelect$coro.resume")
 			if emptySelectResume.IsNil() || !strings.Contains(
 				emptySelectResume.String(),
@@ -213,6 +222,10 @@ func TestCoroChannelNativeAndWasm32(t *testing.T) {
 				if hasLLVMCall(module.String(), intrinsic) {
 					t.Fatalf("post-split channel module still calls %s:\n%s", intrinsic, module.String())
 				}
+			}
+			if removed := llssa.RemoveKeepAliveCallsAfterCoroSplit(module); removed == 0 ||
+				strings.Contains(selectResume.String(), "@llvm.fake.use") {
+				t.Fatalf("post-split channel payload keepalive cleanup = %d:\n%s", removed, selectResume.String())
 			}
 			object, err := prog.TargetMachine().EmitToMemoryBuffer(module, llvm.ObjectFile)
 			if err != nil {
