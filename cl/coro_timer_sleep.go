@@ -100,13 +100,9 @@ func (p *context) compileCoroTimerSleep(b llssa.Builder, args []ssa.Value) {
 	delay := p.compileValue(b, args[0])
 	state := b.Alloc(p.prog.RuntimeType("CoroTimerParkV2"), false)
 
-	join := body.coro.SuspendCurrentBlockIfWithResumeDispatch(
-		b.Prog.BoolVal(true),
-		func(suspend llssa.Builder) {
-			stateID := body.nextState
-			body.nextState++
-			body.instructions = 0
-			body.publishState(suspend, coroSuspendPark, coroLifecycleSuspended, stateID)
+	body.emitCoroParkOperation(b, coroParkOperation{
+		shouldSuspend: b.Prog.BoolVal(true),
+		park: func(suspend llssa.Builder) {
 			park := p.pkg.NewFunc(coroTimerParkHookV2, coroTimerParkSignatureV2(), llssa.InC)
 			suspend.Call(
 				park.Expr,
@@ -117,23 +113,18 @@ func (p *context) compileCoroTimerSleep(b llssa.Builder, args []ssa.Value) {
 				delay,
 			)
 		},
-		func(resume llssa.Builder, normal llssa.BasicBlock) {
+		resume: func(resume llssa.Builder) llssa.Expr {
 			resumeHook := p.pkg.NewFunc(coroTimerResumeHookV2, coroTimerResumeSignatureV2(), llssa.InC)
-			status := resume.Call(
+			return resume.Call(
 				resumeHook.Expr,
 				body.task,
 				resume.Convert(resume.Prog.VoidPtr(), state),
 			)
-			abort, shutdown := body.cancellationRunDecisionTargets(resume)
-			dispatch := resume.Switch(status, body.unsupportedRunDecision)
-			dispatch.Case(resume.Prog.IntVal(coroTimerResumeSuccessV2, resume.Prog.Uint32()), normal)
-			dispatch.Case(resume.Prog.IntVal(coroTimerResumeTaskAbortV2, resume.Prog.Uint32()), abort)
-			dispatch.Case(resume.Prog.IntVal(coroTimerResumeShutdownV2, resume.Prog.Uint32()), shutdown)
-			dispatch.End(resume)
 		},
-	)
-	b.SetBlock(join)
-	body.activate(b)
+		normal:   []uint64{coroTimerResumeSuccessV2},
+		abort:    coroTimerResumeTaskAbortV2,
+		shutdown: coroTimerResumeShutdownV2,
+	})
 }
 
 // compileCoroControlledTimerWait lowers the standard Timer manager's
@@ -153,13 +144,9 @@ func (p *context) compileCoroControlledTimerWait(b llssa.Builder, args []ssa.Val
 	state := b.Alloc(p.prog.RuntimeType("CoroTimerParkV2"), false)
 	result := b.Alloc(p.prog.Uint32(), false)
 
-	join := body.coro.SuspendCurrentBlockIfWithResumeDispatch(
-		b.Prog.BoolVal(true),
-		func(suspend llssa.Builder) {
-			stateID := body.nextState
-			body.nextState++
-			body.instructions = 0
-			body.publishState(suspend, coroSuspendPark, coroLifecycleSuspended, stateID)
+	body.emitCoroParkOperation(b, coroParkOperation{
+		shouldSuspend: b.Prog.BoolVal(true),
+		park: func(suspend llssa.Builder) {
 			park := p.pkg.NewFunc(coroControlledTimerParkHookV2, coroControlledTimerParkSignatureV2(), llssa.InC)
 			suspend.Call(
 				park.Expr,
@@ -173,7 +160,7 @@ func (p *context) compileCoroControlledTimerWait(b llssa.Builder, args []ssa.Val
 				deadline,
 			)
 		},
-		func(resume llssa.Builder, normal llssa.BasicBlock) {
+		resume: func(resume llssa.Builder) llssa.Expr {
 			resumeHook := p.pkg.NewFunc(coroTimerResumeHookV2, coroTimerResumeSignatureV2(), llssa.InC)
 			status := resume.Call(
 				resumeHook.Expr,
@@ -181,17 +168,15 @@ func (p *context) compileCoroControlledTimerWait(b llssa.Builder, args []ssa.Val
 				resume.Convert(resume.Prog.VoidPtr(), state),
 			)
 			resume.Store(result, status)
-			abort, shutdown := body.cancellationRunDecisionTargets(resume)
-			dispatch := resume.Switch(status, body.unsupportedRunDecision)
-			dispatch.Case(resume.Prog.IntVal(coroTimerResumeSuccessV2, resume.Prog.Uint32()), normal)
-			dispatch.Case(resume.Prog.IntVal(coroTimerResumeOperationCanceledV2, resume.Prog.Uint32()), normal)
-			dispatch.Case(resume.Prog.IntVal(coroTimerResumeTaskAbortV2, resume.Prog.Uint32()), abort)
-			dispatch.Case(resume.Prog.IntVal(coroTimerResumeShutdownV2, resume.Prog.Uint32()), shutdown)
-			dispatch.End(resume)
+			return status
 		},
-	)
-	b.SetBlock(join)
-	body.activate(b)
+		normal: []uint64{
+			coroTimerResumeSuccessV2,
+			coroTimerResumeOperationCanceledV2,
+		},
+		abort:    coroTimerResumeTaskAbortV2,
+		shutdown: coroTimerResumeShutdownV2,
+	})
 	// The timer table deliberately owns only a scalar controller key. This
 	// post-resume use makes the address-shaped owner and its interior control
 	// pointer live across llvm.coro.suspend until source retirement completes.

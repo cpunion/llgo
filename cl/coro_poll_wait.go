@@ -94,13 +94,9 @@ func (p *context) compileCoroPollWait(b llssa.Builder, args []ssa.Value) llssa.E
 	state := b.Alloc(p.prog.RuntimeType("CoroPollParkV2"), false)
 	result := b.Alloc(p.prog.Uint32(), false)
 
-	join := body.coro.SuspendCurrentBlockIfWithResumeDispatch(
-		b.Prog.BoolVal(true),
-		func(suspend llssa.Builder) {
-			stateID := body.nextState
-			body.nextState++
-			body.instructions = 0
-			body.publishState(suspend, coroSuspendPark, coroLifecycleSuspended, stateID)
+	body.emitCoroParkOperation(b, coroParkOperation{
+		shouldSuspend: b.Prog.BoolVal(true),
+		park: func(suspend llssa.Builder) {
 			park := p.pkg.NewFunc(coroPollParkHookV2, coroPollParkSignatureV2(), llssa.InC)
 			suspend.Call(
 				park.Expr,
@@ -114,7 +110,7 @@ func (p *context) compileCoroPollWait(b llssa.Builder, args []ssa.Value) llssa.E
 				deadline,
 			)
 		},
-		func(resume llssa.Builder, normal llssa.BasicBlock) {
+		resume: func(resume llssa.Builder) llssa.Expr {
 			resumeHook := p.pkg.NewFunc(coroPollResumeHookV2, coroPollResumeSignatureV2(), llssa.InC)
 			status := resume.Call(
 				resumeHook.Expr,
@@ -122,17 +118,15 @@ func (p *context) compileCoroPollWait(b llssa.Builder, args []ssa.Value) llssa.E
 				resume.Convert(resume.Prog.VoidPtr(), state),
 			)
 			resume.Store(result, status)
-			abort, shutdown := body.cancellationRunDecisionTargets(resume)
-			dispatch := resume.Switch(status, body.unsupportedRunDecision)
-			dispatch.Case(resume.Prog.IntVal(coroPollResumeReadyV2, resume.Prog.Uint32()), normal)
-			dispatch.Case(resume.Prog.IntVal(coroPollResumeClosingV2, resume.Prog.Uint32()), normal)
-			dispatch.Case(resume.Prog.IntVal(coroPollResumeTimeoutV2, resume.Prog.Uint32()), normal)
-			dispatch.Case(resume.Prog.IntVal(coroPollResumeTaskAbortV2, resume.Prog.Uint32()), abort)
-			dispatch.Case(resume.Prog.IntVal(coroPollResumeShutdownV2, resume.Prog.Uint32()), shutdown)
-			dispatch.End(resume)
+			return status
 		},
-	)
-	b.SetBlock(join)
-	body.activate(b)
+		normal: []uint64{
+			coroPollResumeReadyV2,
+			coroPollResumeClosingV2,
+			coroPollResumeTimeoutV2,
+		},
+		abort:    coroPollResumeTaskAbortV2,
+		shutdown: coroPollResumeShutdownV2,
+	})
 	return b.Load(result)
 }

@@ -1,6 +1,6 @@
 # LLGo Coroutine 语义标准化 IR 与统一 Lowering 设计
 
-状态：2026-07-22架构复审结论；可运行纵向基线已冻结，暂停新增能力。hidden runtime helper、intrinsic/call-elision以及physical proof/implicit-fault三个cohort已切换到单一ProgramIR SitePlan；physical emission session/ordinary-compiler isolation也已完成硬切换。其他LoweringFacts仍主要是report/cache identity，尚未成为production lowering的唯一事实源。在完成单一ProgramIR、单一emitter及runtime hard cutover前，不继续叠加语言或平台功能
+状态：2026-07-22架构复审结论；可运行纵向基线已冻结，暂停新增能力。hidden runtime helper、intrinsic/call-elision、physical proof/implicit-fault、physical emission session/ordinary-compiler isolation以及single-event Park protocol五个封闭cohort已完成硬切换。其他LoweringFacts仍主要是report/cache identity，尚未成为production lowering的唯一事实源。在完成单一ProgramIR、单一emitter及runtime hard cutover前，不继续叠加语言或平台功能
 
 更新：2026-07-22
 
@@ -1048,6 +1048,30 @@ continuation overlay、virtual storage或单一emitter。后续迁移必须扩�
 域迁入统一emitter，并在每一cohort中同时清零旧访问文件/入口。只把访问器换名或把全部字段透传到一个
 generic facade不算完成。
 
+#### Phase B.5：single-event Park protocol（已完成）
+
+2026-07-22已完成第五条production replacement cohort；其精确边界是timer Sleep、controlled timer wait、
+poll wait和bounded worker wait四个单事件等待点，不把channel/select的多候选winner reconciliation冒充成
+相同协议：
+
+- 唯一`emitCoroParkOperation`模板拥有state ID分配、instruction budget复位、Park/Suspended发布、一次
+  suspend/resume continuation、normal/abort/shutdown fail-closed分派以及join后的body activation。feature lowerer
+  只能绑定typed park hook、resume hook、封闭status vocabulary和各自payload/liveness处理。
+- status vocabulary在发射前验证：normal集合不能为空且不能重复，abort不得与normal重合，shutdown不得与
+  normal或abort重合；resume hook缺少status同样立即失败。status描述保留现有`uint64`常量表示，物化LLVM
+  switch时显式使用现有`uint32`runtime ABI，不引入ABI变化。
+- timer、controlled timer、poll和worker的旧CFG拼装已同时删除；不存在保留在feature flag后的第二条
+  production路径。controller/control和worker owner的跨suspend KeepAlive仍留在对应feature lowerer，因为
+  它们是typed lifetime事实而不是通用Park协议步骤。
+- architecture gate要求低层`suspend`模板入口恰好1处、模板调用恰好4处且只能来自上述3个feature文件；
+  这些文件直接调用`suspend/publish/cancellation-target/activate`四类旧协议步骤必须恒为0。模板结构精确
+  锁定为`shouldSuspend/park/resume/normal/abort/shutdown`六个字段，禁止以后通过增加任意hook重新扩张为
+  隐式字节码。
+
+该完成标记不覆盖channel/select：它们需要一个WaitSet级协议统一完成candidate registration、winner claim、
+loser detach、closed-send panic、cancel和result reconciliation，不能拆成多个独立Park。也不表示所有await、
+panic/outcome或runtime legacy wait已经迁移；这些必须各自形成同样有旧路径归零gate的封闭cohort。
+
 ### Phase C：analysis只消费facts
 
 - hidden lowered helper、`ClassifyElidedCall`、intrinsic site/local effect及physical implicit-fault选择已由
@@ -1247,23 +1271,25 @@ Phase A先报告多次运行中位数和离散度；取得稳定噪声后，再�
 
 ## 18. 建议的下一步
 
-Phase A 与 Phase B 的前三个replacement cohort已经完成：`internal/coro/lowering_facts.go`提供pointer-free site/instance
+Phase A 与 Phase B 的五个replacement cohort已经完成：`internal/coro/lowering_facts.go`提供pointer-free site/instance
 identity、稀疏LoweringFacts、canonical dump/digest与verifier；`cl`从冻结的EmissionUniverse和SSAPlan
 生成owner-scoped snapshot；build在任何package codegen前把该snapshot装入`CoroPlanDigest v26`、
 `cl.Compilation`、package fingerprint与manifest，source/cache registration都会验证内容和digest一致。
 
 2026-07-22复审最初把LoweringFacts定义为“已建立观测点”，而不是已完成架构层。随后hidden runtime
-helper、intrinsic/call-elision以及physical proof/implicit-fault cohort已完成production切换，但其余facts仍未替换production classifier/emitter；继续直接
+helper、intrinsic/call-elision、physical proof/implicit-fault、physical emission session及single-event Park
+protocol cohort已完成production切换，但其余facts仍未替换production classifier/emitter；继续直接
 增加完整Overlay仍会扩大双轨。后续严格按replacement cohort推进：
 
 1. 先提交当前双owner fleet可运行基线及五项fresh E2E结果，不再混入新能力。
 2. architecture gate test已经冻结当前债务的精确AST/build-constraint快照；每个cohort必须在删除旧路径的
    同一提交下调数字和白名单，禁止留下可反弹额度，也禁止新增`EnableCoro*`、raw-SSA classifier、
    single-P/fleet分支和logical WaitToken consumer。
-3. hidden helper、intrinsic/call-elision及physical proof/implicit-fault cohort已按上述gate完成；下一步把
+3. hidden helper、intrinsic/call-elision、physical proof/implicit-fault、emission session及single-event Park
+   cohort已按上述gate完成；下一步把
    ordinary pure instruction recipe与其local effect/exec作为封闭cohort迁移，不能重新引入raw SSA helper、
    intrinsic、fault selector或codegen proof rebuild。
-4. 随后依次迁移await/spawn、park/channel/select、panic/outcome；每个完整
+4. 随后依次迁移await/spawn、WaitSet级channel/select、panic/outcome；每个完整
    function cohort由统一emitter接管后立即删除旧CFG拼装，最终清除普通compiler中的`currentCoro`分支。
 5. 并行完成runtime Phase R：fleet唯一target、Park/Operation唯一logical wait、统一source dispatcher和
    单一profile；每一项都以旧production符号为零作为完成条件。

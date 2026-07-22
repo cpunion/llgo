@@ -150,19 +150,15 @@ func (p *context) compileCoroWorkerWordCall(
 		}
 	}
 
-	join := body.coro.SuspendCurrentBlockIfWithResumeDispatch(
-		b.Prog.BoolVal(true),
-		func(suspend llssa.Builder) {
-			stateID := body.nextState
-			body.nextState++
-			body.instructions = 0
-			body.publishState(suspend, coroSuspendPark, coroLifecycleSuspended, stateID)
+	body.emitCoroParkOperation(b, coroParkOperation{
+		shouldSuspend: b.Prog.BoolVal(true),
+		park: func(suspend llssa.Builder) {
 			park := p.pkg.NewFunc(coroWorkerParkHookV1, coroWorkerParkSignature(), llssa.InC)
 			suspend.Call(park.Expr, physicalArgs...)
 		},
-		func(resume llssa.Builder, normal llssa.BasicBlock) {
+		resume: func(resume llssa.Builder) llssa.Expr {
 			resumeHook := p.pkg.NewFunc(coroWorkerResumeHookV1, coroWorkerResumeSignature(), llssa.InC)
-			status := resume.Call(
+			return resume.Call(
 				resumeHook.Expr,
 				body.task,
 				resume.Convert(resume.Prog.VoidPtr(), state),
@@ -170,16 +166,11 @@ func (p *context) compileCoroWorkerWordCall(
 				r2,
 				errno,
 			)
-			abort, shutdown := body.cancellationRunDecisionTargets(resume)
-			dispatch := resume.Switch(status, body.unsupportedRunDecision)
-			dispatch.Case(resume.Prog.IntVal(coroWorkerResumeSuccessV1, resume.Prog.Uint32()), normal)
-			dispatch.Case(resume.Prog.IntVal(coroWorkerResumeTaskAbortV1, resume.Prog.Uint32()), abort)
-			dispatch.Case(resume.Prog.IntVal(coroWorkerResumeShutdownV1, resume.Prog.Uint32()), shutdown)
-			dispatch.End(resume)
 		},
-	)
-	b.SetBlock(join)
-	body.activate(b)
+		normal:   []uint64{coroWorkerResumeSuccessV1},
+		abort:    coroWorkerResumeTaskAbortV1,
+		shutdown: coroWorkerResumeShutdownV1,
+	})
 	// The worker queue deliberately contains only copied uintptr words. Keep
 	// every independently proved typed owner live until the physical completion
 	// acknowledgement has selected this normal resume path; llvm.fake.use emits
