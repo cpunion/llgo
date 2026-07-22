@@ -256,6 +256,72 @@ func TestInternalRuntimeSysRemainsAltPkg(t *testing.T) {
 	}
 }
 
+func TestDarwinPreGo126CompatibilityFiles(t *testing.T) {
+	runtimeDir := filepath.Join("..", "..", "runtime", "internal", "lib")
+	syscallDir := filepath.Join(runtimeDir, "syscall")
+	for _, version := range []string{"go1.24", "go1.25"} {
+		buildCtx, err := newSourcePatchMatchContext("", sourcePatchBuildContext{
+			goos: "darwin", goarch: "arm64", goversion: version,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		matched, err := buildCtx.MatchFile(
+			filepath.Join(runtimeDir, "internal", "syscall", "unix"),
+			"compat_darwin_pre_go126.go",
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !matched {
+			t.Errorf("internal/syscall/unix compatibility placeholder is excluded for %s", version)
+		}
+		matched, err = buildCtx.MatchFile(
+			syscallDir,
+			"runtime_fcntl_darwin_pre_go126.go",
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !matched {
+			t.Errorf("runtime fcntl compatibility bridge is excluded for %s", version)
+		}
+		matched, err = buildCtx.MatchFile(syscallDir, "syscall_darwin.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !matched {
+			t.Errorf("Darwin public syscall bridge is excluded for %s", version)
+		}
+	}
+
+	go126, err := newSourcePatchMatchContext("", sourcePatchBuildContext{
+		goos: "darwin", goarch: "arm64", goversion: "go1.26",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for dir, name := range map[string]string{
+		filepath.Join(runtimeDir, "internal", "syscall", "unix"): "compat_darwin_pre_go126.go",
+		syscallDir: "runtime_fcntl_darwin_pre_go126.go",
+	} {
+		matched, err := go126.MatchFile(dir, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if matched {
+			t.Errorf("pre-Go 1.26 compatibility file %s unexpectedly selected for Go 1.26", name)
+		}
+	}
+	matched, err := go126.MatchFile(syscallDir, "syscall_darwin.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !matched {
+		t.Error("Darwin public syscall bridge is excluded for Go 1.26")
+	}
+}
+
 func TestApplySourcePatchForPkg_Cases(t *testing.T) {
 	for _, caseName := range []string{
 		"default-override",

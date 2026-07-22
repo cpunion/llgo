@@ -1,4 +1,4 @@
-//go:build darwin && go1.26
+//go:build darwin
 
 package syscall
 

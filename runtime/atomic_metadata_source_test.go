@@ -28,10 +28,11 @@ import (
 )
 
 const (
-	itabCacheSource = "internal/runtime/z_face.go"
-	weakCacheSource = "internal/lib/runtime/weak_llgo.go"
-	atomicCacheCore = "internal/atomiccache/cache.go"
-	atomicCacheLLGo = "internal/atomiccache/atomic_llgo.go"
+	itabCacheSource        = "internal/runtime/z_face.go"
+	weakCacheSource        = "internal/lib/runtime/weak_llgo.go"
+	atomicCacheCore        = "internal/atomiccache/cache.go"
+	atomicCacheLLGo        = "internal/atomiccache/atomic_llgo.go"
+	atomicCacheESP32C3LLGo = "internal/atomiccache/atomic_esp32c3_llgo.go"
 )
 
 func readAtomicMetadataSource(t *testing.T, path string) string {
@@ -91,13 +92,30 @@ func TestItabCacheUsesCanonicalLockFreePublication(t *testing.T) {
 	}
 	llgoAtomic := readAtomicMetadataSource(t, atomicCacheLLGo)
 	for _, required := range []string{
-		"//go:build llgo",
+		"//go:build llgo && !esp32c3",
 		`catomic "github.com/goplus/llgo/runtime/internal/clite/sync/atomic"`,
 		"catomic.Load(address)",
 		"catomic.CompareAndExchange(address, old, new)",
 	} {
 		if !strings.Contains(llgoAtomic, required) {
 			t.Errorf("%s lacks LLGo intrinsic-backed atomic marker %q", atomicCacheLLGo, required)
+		}
+	}
+
+	esp32c3Atomic := readAtomicMetadataSource(t, atomicCacheESP32C3LLGo)
+	for _, required := range []string{
+		"//go:build llgo && esp32c3",
+		"return *address",
+		"if *address != old",
+		"*address = new",
+	} {
+		if !strings.Contains(esp32c3Atomic, required) {
+			t.Errorf("%s lacks serialized managed-cache marker %q", atomicCacheESP32C3LLGo, required)
+		}
+	}
+	for _, forbidden := range []string{"catomic", `"sync/atomic"`, "__atomic_"} {
+		if strings.Contains(esp32c3Atomic, forbidden) {
+			t.Errorf("%s retains unsupported ESP32-C3 atomic marker %q", atomicCacheESP32C3LLGo, forbidden)
 		}
 	}
 }

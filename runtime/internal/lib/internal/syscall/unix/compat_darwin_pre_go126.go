@@ -1,4 +1,4 @@
-//go:build llgo && !esp32c3
+//go:build darwin && !go1.26
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -16,23 +16,8 @@
  * limitations under the License.
  */
 
-package atomiccache
-
-import (
-	"unsafe"
-
-	catomic "github.com/goplus/llgo/runtime/internal/clite/sync/atomic"
-)
-
-func loadPointer(address *unsafe.Pointer) unsafe.Pointer {
-	return catomic.Load(address)
-}
-
-func compareAndSwapPointer(address *unsafe.Pointer, old, new unsafe.Pointer) bool {
-	_, swapped := catomic.CompareAndExchange(address, old, new)
-	return swapped
-}
-
-func loadUint32(address *uint32) uint32 {
-	return catomic.Load(address)
-}
+// Package unix keeps the additive alternate package loadable before Go 1.26.
+// The worker-address declarations in this directory describe APIs introduced
+// by the Go 1.26 standard library, so earlier toolchains intentionally add no
+// declarations to their original internal/syscall/unix package.
+package unix

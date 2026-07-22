@@ -215,9 +215,27 @@ for target in "${targets_to_build[@]}"; do
 		continue
 	fi
 
-	output=$(../../../dev/llgo.sh build -target $target -o hello.elf "./$test_dir" 2>&1)
-	if [ $? -eq 0 ]; then
-		echo ✅ $target `file hello.elf`
+	# The named wasm target is the Emscripten environment, not the freestanding
+	# wasm-unknown or WASI target. Keep target resolution honest and report a
+	# missing optional SDK as a capability warning; dedicated WebAssembly jobs
+	# exercise the toolchain-independent wasm targets.
+	if [[ "$target" == "wasm" ]] && ! command -v emcc >/dev/null 2>&1; then
+		echo ⚠️ $target "(Emscripten SDK is not installed; wasm-unknown and WASI are tested separately)"
+		warned_targets+=("$target")
+		continue
+	fi
+
+	if output=$(../../../dev/llgo.sh build -target "$target" -o hello.elf "./$test_dir" 2>&1); then
+		artifact=hello.elf
+		if [[ "$target" == "wasm" ]]; then
+			artifact=hello.elf.wasm
+		fi
+		if [ ! -f "$artifact" ]; then
+			echo ❌ "$target (build succeeded without expected artifact $artifact)"
+			failed_targets+=("$target")
+			continue
+		fi
+		echo ✅ "$target $(file "$artifact")"
 		successful_targets+=("$target")
 	else
 		# Check if output contains warning messages
