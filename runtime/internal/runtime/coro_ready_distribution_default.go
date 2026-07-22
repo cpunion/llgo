@@ -23,3 +23,16 @@ import "github.com/goplus/llgo/runtime/internal/coro"
 func coroTargetAfterStableRunActionV1(*coro.P, *coro.ExecutorDriver) bool {
 	return true
 }
+
+func coroTargetRecordReadySpawnV1(*coro.G, *coro.G) bool {
+	return true
+}
+
+func coroTargetDrainProgramTransfersV1(*coro.P, *coro.ExecutorDriver) (bool, bool) {
+	return false, true
+}
+
+func coroTargetBeforeProgramRunSliceV1(p *coro.P, driver *coro.ExecutorDriver) bool {
+	_, ok := coroTargetDrainProgramTransfersV1(p, driver)
+	return ok
+}

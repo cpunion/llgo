@@ -73,9 +73,13 @@ type coroNativeFleetDomainV1 struct {
 	handle         coro.ExecutorFleetHandle
 	nextOwnerEpoch uint32
 	ownerEpoch     uint32
-	adopted        bool
-	owners         coroNativeFleetDomainOwnersV1
-	lifecycle      coroNativeFleetDomainLifecycleV1
+	// readySpawn is an owner-local, one-shot work-sharing hint. It names only
+	// the first child committed by the current physical resume; imported initial
+	// tasks never acquire it and therefore cannot bounce between idle routes.
+	readySpawn *coro.G
+	adopted    bool
+	owners     coroNativeFleetDomainOwnersV1
+	lifecycle  coroNativeFleetDomainLifecycleV1
 }
 
 // coroNativeFleetDomainOwnersV1 is populated only for a domain which adopts
@@ -181,7 +185,8 @@ var coroNativeFleetV1State coroNativeFleetStateV1
 func coroNativeFleetDomainCandidateV1(domain *coroNativeFleetDomainV1) bool {
 	return domain != nil && domain.lifecycle == coroNativeFleetDomainUnusedV1 &&
 		domain.handle == (coro.ExecutorFleetHandle{}) && domain.ownerEpoch == 0 &&
-		domain.nextOwnerEpoch == 0 && !domain.adopted && domain.owners == (coroNativeFleetDomainOwnersV1{}) &&
+		domain.nextOwnerEpoch == 0 && domain.readySpawn == nil && !domain.adopted &&
+		domain.owners == (coroNativeFleetDomainOwnersV1{}) &&
 		domain.driver == (coro.ExecutorDriver{}) &&
 		domain.waits.CanRelease() && domain.timers.CanRelease() && domain.poll.CanRelease() &&
 		domain.manual.CanRelease() &&
@@ -901,7 +906,8 @@ func coroNativeFleetBeginRouteCloseV1(handle coro.ExecutorFleetHandle) bool {
 		handle,
 		coroNativeFleetDomainActiveV1,
 	)
-	if !ok || domain.ownerEpoch != 0 || !coro.BeginExecutorFleetClose(&coroNativeFleetV1State.fleet, handle) {
+	if !ok || domain.ownerEpoch != 0 || domain.readySpawn != nil ||
+		!coro.BeginExecutorFleetClose(&coroNativeFleetV1State.fleet, handle) {
 		return false
 	}
 	domain.lifecycle = coroNativeFleetDomainRouteClosingV1
@@ -1013,13 +1019,13 @@ func coroNativeFleetAllRetiredV1() bool {
 	}
 	for index := range state.domains {
 		domain := &state.domains[index]
-		if domain.lifecycle != coroNativeFleetDomainRetiredV1 || domain.ownerEpoch != 0 ||
+		if domain.lifecycle != coroNativeFleetDomainRetiredV1 || domain.ownerEpoch != 0 || domain.readySpawn != nil ||
 			domain.owners != (coroNativeFleetDomainOwnersV1{}) ||
 			!domain.ingress.Retired() || !domain.doorbell.Closed() ||
 			!domain.admission.CanRelease() || domain.driver != (coro.ExecutorDriver{}) ||
 			!domain.waits.CanRelease() || !domain.timers.CanRelease() || !domain.poll.CanRelease() ||
 			!domain.manual.CanRelease() ||
-			!domain.worker.CanRelease() || !domain.control.CanRelease() {
+			!domain.worker.CanRelease() || !domain.channel.CanRelease() || !domain.control.CanRelease() {
 			return false
 		}
 	}

@@ -37,6 +37,7 @@ const coroNativeFleetE2ESource = `package main
 import _ "unsafe"
 
 var ChildStage uint32
+var ChildPasses uint32
 var MainStage uint32
 var MainThread uintptr
 var ChildThread uintptr
@@ -47,13 +48,22 @@ func threadID() uintptr
 
 func Setup() {
 	ChildStage = 0
+	ChildPasses = 0
 	MainStage = 0
 	MainThread = threadID()
 	ChildThread = 0
 }
 
 func child() {
-	ChildThread = threadID()
+	thread := threadID()
+	if thread == MainThread {
+		go child()
+		return
+	}
+	ChildThread = thread
+	for ChildPasses < 700000 {
+		ChildPasses++
+	}
 	ChildStage = 0x1234abcd
 }
 
@@ -66,7 +76,7 @@ func main() {
 }
 
 func Check() int32 {
-	if ChildStage != 0x1234abcd || MainStage != 2 {
+	if ChildStage != 0x1234abcd || ChildPasses != 700000 || MainStage != 2 {
 		return 17
 	}
 	if MainThread == 0 || ChildThread == 0 || MainThread == ChildThread {
@@ -97,7 +107,12 @@ func Setup() {
 }
 
 func child() {
-	ChildThread = threadID()
+	thread := threadID()
+	if thread == MainThread {
+		go child()
+		return
+	}
+	ChildThread = thread
 	ChildStage = 1
 	for {
 	}
@@ -145,12 +160,22 @@ func Setup() {
 }
 
 func grandchild() {
-	GrandchildThread = threadID()
+	thread := threadID()
+	if thread != MainThread {
+		go grandchild()
+		return
+	}
+	GrandchildThread = thread
 	GrandchildStage = 1
 }
 
 func child() {
-	ChildThread = threadID()
+	thread := threadID()
+	if thread == MainThread {
+		go child()
+		return
+	}
+	ChildThread = thread
 	go grandchild()
 	for GrandchildStage == 0 {
 	}
@@ -168,7 +193,7 @@ func Check() int32 {
 		return 37
 	}
 	if MainThread == 0 || ChildThread == 0 || GrandchildThread == 0 ||
-		MainThread == ChildThread || ChildThread != GrandchildThread {
+		MainThread == ChildThread || MainThread != GrandchildThread {
 		return 38
 	}
 	return 0
@@ -200,7 +225,12 @@ func Setup() {
 }
 
 func child() {
-	ChildThread = threadID()
+	thread := threadID()
+	if thread == MainThread {
+		go child()
+		return
+	}
+	ChildThread = thread
 	select {
 	case Got = <-Data:
 	case Got = <-Never:
@@ -248,7 +278,12 @@ func Setup() {
 }
 
 func child() {
-	ChildThread = threadID()
+	thread := threadID()
+	if thread == MainThread {
+		go child()
+		return
+	}
+	ChildThread = thread
 	ChildStage = 1
 	select {
 	case <-NeverA:
@@ -282,8 +317,8 @@ func TestCoroNativeFleetMainReturnCancelsPeerE2E(t *testing.T) {
 	runCoroNativeFleetE2E(t, coroNativeFleetShutdownE2ESource, "main-return-cancel", false)
 }
 
-func TestCoroNativeFleetPeerSpawnStaysOwnedE2E(t *testing.T) {
-	runCoroNativeFleetE2E(t, coroNativeFleetPeerSpawnE2ESource, "peer-spawn-owned", false)
+func TestCoroNativeFleetPeerSpawnReturnsToProgramE2E(t *testing.T) {
+	runCoroNativeFleetE2E(t, coroNativeFleetPeerSpawnE2ESource, "peer-spawn-program", false)
 }
 
 func TestCoroNativeFleetChannelSelectCrossRouteE2E(t *testing.T) {

@@ -167,6 +167,153 @@ func coroNativeFleetPhysicalOwnerShutdownReadyV1(handle coro.ExecutorFleetHandle
 	return coro.ExecutorShutdownDrained(domain.driverOwnerV1())
 }
 
+// coroNativeFleetRunPhysicalOwnerPassV1 owns exactly one outer scheduler
+// iteration. Keep this as a separate physical call frame: LLVM currently
+// materializes aggregate result slots at their lexical call site, and an
+// aggregate-return call directly inside an unbounded loop would otherwise
+// lower to a dynamic alloca on every backedge. Returning between passes makes
+// those bounded scratch slots reclaimable without increasing the pthread stack.
+func coroNativeFleetRunPhysicalOwnerPassV1(
+	handle coro.ExecutorFleetHandle,
+	epoch *uint32,
+	done *bool,
+) bool {
+	if epoch == nil || *epoch == 0 || done == nil {
+		return coroNativeFleetPhysicalOwnerFailV1("native fleet peer epoch invalid")
+	}
+	*done = false
+	_, _, drainStatus := coroNativeFleetTryDrainOwnerEpochV1(
+		handle,
+		*epoch,
+		coro.RunnableTransferMailboxCapacity,
+	)
+	switch drainStatus {
+	case coro.RunnableTransferDrainOwnerUnstable:
+		// A bounded slice may end after Dispatch and before its indivisible
+		// physical Action. Resume the reducer immediately; if this was not a
+		// valid pending action, its exact driver validation fails closed.
+	case coro.RunnableTransferDrainContended:
+		return true
+	case coro.RunnableTransferDrainComplete:
+	case coro.RunnableTransferDrainCorrupt:
+		return coroNativeFleetPhysicalOwnerFailV1("native fleet peer mailbox corrupt")
+	case coro.RunnableTransferDrainInvalid:
+		return coroNativeFleetPhysicalOwnerFailV1("native fleet peer mailbox drain failed")
+	}
+	if coroNativeFleetPhysicalOwnerStoppingV1(handle) {
+		if _, retry := coroNativeFleetPhysicalOwnerBeginShutdownV1(handle, *epoch); !retry {
+			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer shutdown publication failed")
+		}
+	}
+	now, clockOK := coroNativeFleetPhysicalOwnerClockV1()
+	if !clockOK {
+		return coroNativeFleetPhysicalOwnerFailV1("native fleet peer monotonic clock failed")
+	}
+	result := coroNativeFleetRunOwnerEpochV1(handle, *epoch, now, coroNativeFleetRunBudgetV1)
+	switch result.stop {
+	case coroRunSliceBudgetV1, coroRunAgainV1:
+		return true
+	case coroRunDestroyCommitV1:
+		completed, committed := coroNativeFleetCommitOwnerDestroyV1(
+			handle,
+			*epoch,
+			result.g,
+			result.action,
+		)
+		if !committed || completed.Kind == coro.ActionPanicComplete {
+			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer destroy commit failed")
+		}
+		return true
+	case coroRunIdleV1:
+		// Mailbox publication precedes the advisory executor request. The run
+		// slice may acknowledge that request after its entry-time mailbox drain
+		// and then report idle. Recheck the mailbox before ArmIdle so the
+		// request-to-sleep window is closed by either this import, the driver's
+		// final request scan, or a later IdleWake doorbell.
+		moved, more, finalDrainStatus := coroNativeFleetTryDrainOwnerEpochV1(
+			handle,
+			*epoch,
+			coro.RunnableTransferMailboxCapacity,
+		)
+		switch finalDrainStatus {
+		case coro.RunnableTransferDrainContended:
+			return true
+		case coro.RunnableTransferDrainComplete:
+		case coro.RunnableTransferDrainOwnerUnstable:
+			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer final mailbox owner unstable")
+		case coro.RunnableTransferDrainCorrupt:
+			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer final mailbox corrupt")
+		case coro.RunnableTransferDrainInvalid:
+			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer final mailbox drain failed")
+		}
+		if moved != 0 || more {
+			return true
+		}
+		if coroNativeFleetPhysicalOwnerStoppingV1(handle) &&
+			!coroNativeFleetPhysicalOwnerV1State.shutdown {
+			// A previous budget boundary may have landed inside a source
+			// transaction. Idle proves that transaction is now complete; retry
+			// the one-time shutdown publication before arming another wait.
+			return true
+		}
+		if coroNativeFleetPhysicalOwnerStoppingV1(handle) &&
+			coroNativeFleetPhysicalOwnerShutdownReadyV1(handle) {
+			if !coroNativeFleetFinishOwnerEpochV1(handle, *epoch) {
+				return coroNativeFleetPhysicalOwnerFailV1("native fleet peer finish epoch failed")
+			}
+			*done = true
+			return true
+		}
+		freshNow, freshClockOK := coroNativeFleetPhysicalOwnerClockV1()
+		if !freshClockOK {
+			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer wait clock failed")
+		}
+		plan, prepared := coroNativeFleetPrepareOwnerWaitAtV1(
+			handle,
+			*epoch,
+			now,
+			freshNow,
+		)
+		if !prepared {
+			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer wait prepare failed")
+		}
+		if !plan.Armed {
+			return true
+		}
+		wait, armed := coroNativeFleetArmOwnerWaitV1(handle, plan)
+		if !armed {
+			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer reactor arm failed")
+		}
+		for {
+			waitNow, waitClockOK := coroNativeFleetPhysicalOwnerClockV1()
+			if !waitClockOK {
+				return coroNativeFleetPhysicalOwnerFailV1("native fleet peer reactor clock failed")
+			}
+			switch coroNativeFleetWaitOwnerPassAtV1(wait, waitNow) {
+			case coroNativeFleetWaitPassRetryV1:
+				continue
+			case coroNativeFleetWaitPassWakeV1:
+				wakeNow, wakeClockOK := coroNativeFleetPhysicalOwnerClockV1()
+				if !wakeClockOK {
+					return coroNativeFleetPhysicalOwnerFailV1("native fleet peer wake clock failed")
+				}
+				next, _, _, _, wakeOK := coroNativeFleetWakeOwnerAtV1(handle, wakeNow)
+				if !wakeOK {
+					return coroNativeFleetPhysicalOwnerFailV1("native fleet peer wake transition failed")
+				}
+				*epoch = next
+				return true
+			default:
+				return coroNativeFleetPhysicalOwnerFailV1("native fleet peer reactor wait failed")
+			}
+		}
+	case coroRunPanicCompleteV1:
+		return coroNativeFleetPhysicalOwnerFailV1("native fleet peer task panic")
+	default:
+		return coroNativeFleetPhysicalOwnerFailV1("native fleet peer run slice failed")
+	}
+}
+
 // coroNativeFleetRunPhysicalOwnerV1 is the complete ordinary-domain M loop.
 // It shares the common reducer and logical driver with every target profile;
 // this layer owns only clock sampling, mailbox import, physical poll, and the
@@ -181,131 +328,13 @@ func coroNativeFleetRunPhysicalOwnerV1(handle coro.ExecutorFleetHandle) bool {
 	if !ok {
 		return coroNativeFleetPhysicalOwnerFailV1("native fleet peer begin epoch failed")
 	}
+	done := false
 	for {
-		_, _, drainStatus := coroNativeFleetTryDrainOwnerEpochV1(
-			handle,
-			epoch,
-			coro.RunnableTransferMailboxCapacity,
-		)
-		switch drainStatus {
-		case coro.RunnableTransferDrainOwnerUnstable:
-			// A bounded slice may end after Dispatch and before its indivisible
-			// physical Action. Resume the reducer immediately; if this was not a
-			// valid pending action, its exact driver validation fails closed.
-		case coro.RunnableTransferDrainContended:
-			continue
-		case coro.RunnableTransferDrainComplete:
-		case coro.RunnableTransferDrainCorrupt:
-			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer mailbox corrupt")
-		case coro.RunnableTransferDrainInvalid:
-			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer mailbox drain failed")
+		if !coroNativeFleetRunPhysicalOwnerPassV1(handle, &epoch, &done) {
+			return false
 		}
-		if coroNativeFleetPhysicalOwnerStoppingV1(handle) {
-			if _, retry := coroNativeFleetPhysicalOwnerBeginShutdownV1(handle, epoch); !retry {
-				return coroNativeFleetPhysicalOwnerFailV1("native fleet peer shutdown publication failed")
-			}
-		}
-		now, clockOK := coroNativeFleetPhysicalOwnerClockV1()
-		if !clockOK {
-			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer monotonic clock failed")
-		}
-		result := coroNativeFleetRunOwnerEpochV1(handle, epoch, now, coroNativeFleetRunBudgetV1)
-		switch result.stop {
-		case coroRunSliceBudgetV1, coroRunAgainV1:
-			continue
-		case coroRunDestroyCommitV1:
-			completed, committed := coroNativeFleetCommitOwnerDestroyV1(
-				handle,
-				epoch,
-				result.g,
-				result.action,
-			)
-			if !committed || completed.Kind == coro.ActionPanicComplete {
-				return coroNativeFleetPhysicalOwnerFailV1("native fleet peer destroy commit failed")
-			}
-			continue
-		case coroRunIdleV1:
-			// Mailbox publication precedes the advisory executor request. The run
-			// slice may acknowledge that request after its entry-time mailbox drain
-			// and then report idle. Recheck the mailbox before ArmIdle so the
-			// request-to-sleep window is closed by either this import, the driver's
-			// final request scan, or a later IdleWake doorbell.
-			moved, more, finalDrainStatus := coroNativeFleetTryDrainOwnerEpochV1(
-				handle,
-				epoch,
-				coro.RunnableTransferMailboxCapacity,
-			)
-			switch finalDrainStatus {
-			case coro.RunnableTransferDrainContended:
-				continue
-			case coro.RunnableTransferDrainComplete:
-			case coro.RunnableTransferDrainOwnerUnstable:
-				return coroNativeFleetPhysicalOwnerFailV1("native fleet peer final mailbox owner unstable")
-			case coro.RunnableTransferDrainCorrupt:
-				return coroNativeFleetPhysicalOwnerFailV1("native fleet peer final mailbox corrupt")
-			case coro.RunnableTransferDrainInvalid:
-				return coroNativeFleetPhysicalOwnerFailV1("native fleet peer final mailbox drain failed")
-			}
-			if moved != 0 || more {
-				continue
-			}
-			if coroNativeFleetPhysicalOwnerStoppingV1(handle) &&
-				!coroNativeFleetPhysicalOwnerV1State.shutdown {
-				// A previous budget boundary may have landed inside a source
-				// transaction. Idle proves that transaction is now complete; retry
-				// the one-time shutdown publication before arming another wait.
-				continue
-			}
-			if coroNativeFleetPhysicalOwnerStoppingV1(handle) &&
-				coroNativeFleetPhysicalOwnerShutdownReadyV1(handle) {
-				return coroNativeFleetFinishOwnerEpochV1(handle, epoch)
-			}
-			freshNow, freshClockOK := coroNativeFleetPhysicalOwnerClockV1()
-			if !freshClockOK {
-				return coroNativeFleetPhysicalOwnerFailV1("native fleet peer wait clock failed")
-			}
-			plan, prepared := coroNativeFleetPrepareOwnerWaitAtV1(
-				handle,
-				epoch,
-				now,
-				freshNow,
-			)
-			if !prepared {
-				return coroNativeFleetPhysicalOwnerFailV1("native fleet peer wait prepare failed")
-			}
-			if !plan.Armed {
-				continue
-			}
-			wait, armed := coroNativeFleetArmOwnerWaitV1(handle, plan)
-			if !armed {
-				return coroNativeFleetPhysicalOwnerFailV1("native fleet peer reactor arm failed")
-			}
-			for {
-				waitNow, waitClockOK := coroNativeFleetPhysicalOwnerClockV1()
-				if !waitClockOK {
-					return coroNativeFleetPhysicalOwnerFailV1("native fleet peer reactor clock failed")
-				}
-				switch coroNativeFleetWaitOwnerPassAtV1(wait, waitNow) {
-				case coroNativeFleetWaitPassRetryV1:
-					continue
-				case coroNativeFleetWaitPassWakeV1:
-					wakeNow, wakeClockOK := coroNativeFleetPhysicalOwnerClockV1()
-					if !wakeClockOK {
-						return coroNativeFleetPhysicalOwnerFailV1("native fleet peer wake clock failed")
-					}
-					epoch, _, _, _, ok = coroNativeFleetWakeOwnerAtV1(handle, wakeNow)
-					if !ok {
-						return coroNativeFleetPhysicalOwnerFailV1("native fleet peer wake transition failed")
-					}
-				default:
-					return coroNativeFleetPhysicalOwnerFailV1("native fleet peer reactor wait failed")
-				}
-				break
-			}
-		case coroRunPanicCompleteV1:
-			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer task panic")
-		default:
-			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer run slice failed")
+		if done {
+			return true
 		}
 	}
 }

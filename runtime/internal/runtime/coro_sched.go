@@ -47,6 +47,9 @@ func coroRunSlice(p *coroP, main *coroG, driver *coro.ExecutorDriver, budget uin
 	if p == nil || main == nil || driver == nil || budget == 0 {
 		return coroRunResultV1{}
 	}
+	if !coroTargetBeforeProgramRunSliceV1(p, driver) {
+		return coroRunResultV1{}
+	}
 	result := coroRunResultV1{}
 	for result.used < budget {
 		step, ok := coroProgramNextRunStepV1(driver)
@@ -94,6 +97,14 @@ func coroFinishRunSliceCompatibility(
 	case coroRunIdleV1:
 		if !coro.EnterExecutorRunCompatibility(driver) {
 			return coroRunResultV1{}
+		}
+		more, drained := coroTargetDrainProgramTransfersV1(p, driver)
+		if !drained {
+			return coroRunResultV1{}
+		}
+		if more {
+			result.stop = coroRunAgainV1
+			return result
 		}
 		if coroProgramLifecycleV1State == coroProgramMainReturnRequestedV1 && !coro.HasWaiting(p) {
 			result.stop = coroRunMainDoneV1

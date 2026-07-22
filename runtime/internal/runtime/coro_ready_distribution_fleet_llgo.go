@@ -20,6 +20,26 @@ package runtime
 
 import "github.com/goplus/llgo/runtime/internal/coro"
 
+// coroTargetRecordReadySpawnV1 records causal provenance, not permanent task
+// affinity. Only a child committed by this exact running owner can become the
+// next opportunistic transfer candidate. A second spawn in the same physical
+// resume remains local; this keeps the hint O(1) and never makes `go` fail
+// merely because a distribution slot is already occupied.
+func coroTargetRecordReadySpawnV1(parent, child *coro.G) bool {
+	driver, handle, route, ok := coro.CurrentExecutorDriver(parent)
+	if !ok || child == nil || !route.Valid() {
+		return false
+	}
+	domain, valid := coroNativeFleetActiveDomainForRouteV1(route)
+	if !valid || domain.driverOwnerV1() != driver || domain.handle.Executor != handle {
+		return false
+	}
+	if domain.readySpawn == nil {
+		domain.readySpawn = child
+	}
+	return true
+}
+
 // coroTargetAfterStableRunActionV1 is owner-to-owner work distribution, not a
 // producer callback. The two domains and their P/driver identities are frozen
 // before either physical M starts, and the program coordinator joins both Ms
@@ -30,37 +50,39 @@ func coroTargetAfterStableRunActionV1(source *coro.P, driver *coro.ExecutorDrive
 	if state.lifecycle != coroNativeFleetActiveV1 || source == nil || driver == nil {
 		return false
 	}
-	if coroNativeFleetPhysicalOwnerV1State.stop.Quiesced() {
-		// Fleet shutdown is a one-way ownership barrier. No continuation may be
-		// transferred after the program coordinator has requested peer drain.
-		return true
-	}
 	sourceIndex := uint32(coroNativeFleetDomainCapacityV1)
+	var sourceDomain *coroNativeFleetDomainV1
 	for index := uint32(0); index < coroNativeFleetDomainCapacityV1; index++ {
 		domain := &state.domains[index]
 		if domain.lifecycle == coroNativeFleetDomainActiveV1 &&
 			domain.pOwnerV1() == source && domain.driverOwnerV1() == driver {
 			sourceIndex = index
+			sourceDomain = domain
 			break
 		}
 	}
-	if sourceIndex >= coroNativeFleetDomainCapacityV1 {
+	if sourceIndex >= coroNativeFleetDomainCapacityV1 || sourceDomain == nil {
 		return false
 	}
-	if sourceIndex != 0 {
-		// The adopted program P still runs through the legacy program-owned
-		// compatibility loop and does not yet acquire a fleet owner epoch or drain
-		// route 1's transfer mailbox. Keep peer-created children local until that
-		// loop is migrated; publishing them back would strand their sole ownership
-		// root during program close.
+	candidate := sourceDomain.readySpawn
+	sourceDomain.readySpawn = nil
+	if candidate == nil {
 		return true
 	}
-	targetIndex := coroNativeFleetPeerIndexV1
+	if coroNativeFleetPhysicalOwnerV1State.stop.Quiesced() {
+		// Fleet shutdown is a one-way ownership barrier. No continuation may be
+		// transferred after the program coordinator has requested peer drain.
+		return true
+	}
+	targetIndex := uint32(0)
+	if sourceIndex == 0 {
+		targetIndex = coroNativeFleetPeerIndexV1
+	}
 	target := &state.domains[targetIndex]
 	if target.lifecycle != coroNativeFleetDomainActiveV1 || !target.handle.Valid() {
 		return false
 	}
-	_, request, published := state.fleet.PublishInitialReadyHeadAndRequest(target.handle, source)
+	_, request, published := state.fleet.PublishPNeutralRunnableAndRequest(target.handle, source, candidate)
 	if !published {
 		// No initial head, a contended bounded mailbox, or a full mailbox simply
 		// retains ordinary FIFO execution on the current P.
@@ -72,4 +94,44 @@ func coroTargetAfterStableRunActionV1(source *coro.P, driver *coro.ExecutorDrive
 		return false
 	}
 	return !coro.ExecutorRequestNeedsDoorbell(request) || target.doorbell.Ring()
+}
+
+// coroTargetDrainProgramTransfersV1 imports the adopted route-1 mailbox while
+// the program's existing DriveAdmission owns its P. A separate fleet owner
+// epoch would duplicate that serialization and conflict with the host ABI.
+// Contention or a bounded reducer's pending physical action is ordinary
+// retryable work; corrupt identity is the only failure.
+func coroTargetDrainProgramTransfersV1(p *coro.P, driver *coro.ExecutorDriver) (more, ok bool) {
+	state := &coroNativeFleetV1State
+	target := &coroNativeFleetTargetV1State
+	if state.lifecycle != coroNativeFleetActiveV1 ||
+		target.lifecycle != coroNativeFleetTargetActiveV1 || !target.program.Valid() {
+		return false, false
+	}
+	domain, valid := coroNativeFleetDomainForHandleV1(
+		state,
+		target.program,
+		coroNativeFleetDomainActiveV1,
+	)
+	if !valid || domain.pOwnerV1() != p || domain.driverOwnerV1() != driver {
+		return false, false
+	}
+	moved, pending, status := state.fleet.TryDrainPNeutralRunnables(
+		target.program,
+		p,
+		coro.RunnableTransferMailboxCapacity,
+	)
+	switch status {
+	case coro.RunnableTransferDrainComplete:
+		return moved != 0 || pending, true
+	case coro.RunnableTransferDrainOwnerUnstable, coro.RunnableTransferDrainContended:
+		return true, true
+	default:
+		return false, false
+	}
+}
+
+func coroTargetBeforeProgramRunSliceV1(p *coro.P, driver *coro.ExecutorDriver) bool {
+	_, ok := coroTargetDrainProgramTransfersV1(p, driver)
+	return ok
 }
