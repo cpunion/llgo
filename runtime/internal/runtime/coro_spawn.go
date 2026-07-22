@@ -51,7 +51,8 @@ func coroSpawnBeginV1(parentPointer unsafe.Pointer) (unsafe.Pointer, bool) {
 }
 
 func coroSpawnCommitV1(parentPointer, childPointer, handle unsafe.Pointer) bool {
-	return coro.CommitSpawn((*coroG)(parentPointer), (*coroG)(childPointer), handle)
+	parent, child := (*coroG)(parentPointer), (*coroG)(childPointer)
+	return coro.CommitSpawn(parent, child, handle) && coroTargetRecordReadySpawnV1(parent, child)
 }
 
 // coroReleaseCompletedTask performs the physical half of spawned-G

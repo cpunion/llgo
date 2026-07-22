@@ -770,6 +770,38 @@ func TestExecutorDriverTimerSleepUsesFreshFinalAndWakeSamples(t *testing.T) {
 	runtime.KeepAlive(task.frame.memory)
 }
 
+func TestExecutorDriverEmptyFleetStandbyAndRoutedWake(t *testing.T) {
+	p := new(P)
+	driver, registry, waits, _, executor := bindTestExecutorDriverWithTimers(t, p)
+	if HasWaiting(p) || p.readyHead != nil {
+		t.Fatal("new fleet domain is not empty")
+	}
+	if prepared, ok := PrepareExecutorSleepAt(driver, 10); !ok || prepared {
+		t.Fatalf("command-style empty sleep = (%t, %t), want active refusal", prepared, ok)
+	}
+	if prepared, ok := PrepareExecutorStandbyAt(driver, 10); !ok || !prepared ||
+		driver.state != executorDriverIdlePreparing {
+		t.Fatalf("prepare empty fleet standby = (%t, %t), state=%d", prepared, ok, driver.state)
+	}
+	if sleep, deadline, has, ok := CommitExecutorSleepAt(driver, 11); !ok || !sleep ||
+		has || deadline != 0 || driver.state != executorDriverSleeping {
+		t.Fatalf("commit empty fleet standby = (%t, %d, %t, %t), state=%d", sleep, deadline, has, ok, driver.state)
+	}
+	if request := registry.Request(executor); request != ExecutorRequestIdleWake ||
+		!ExecutorRequestNeedsDoorbell(request) {
+		t.Fatalf("routed empty-domain request = %d", request)
+	}
+	if waitCount, timerCount, promoted, ok := WakeExecutorAt(driver, 12); !ok ||
+		waitCount != 0 || timerCount != 0 || promoted != 0 || driver.state != executorDriverActive {
+		t.Fatalf("wake empty fleet standby = (%d, %d, %d, %t), state=%d",
+			waitCount, timerCount, promoted, ok, driver.state)
+	}
+	closeTestExecutorDriver(t, driver)
+	if !registry.CanRelease() || !waits.CanRelease() {
+		t.Fatal("empty fleet standby retained executor resources")
+	}
+}
+
 func TestExecutorDriverTimerDueBeforeIdleArmRefusesSleep(t *testing.T) {
 	p := new(P)
 	driver, _, _, timers, _ := bindTestExecutorDriverWithTimers(t, p)

@@ -12,17 +12,19 @@ concurrency:
 
 jobs:
   test:
+    name: ${{ matrix.check }}
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { llvm: 19, go: "1.24.2", tags: "llvm19" }
-          - { llvm: 20, go: "1.24.2", tags: "llvm20" }
-          - { llvm: 21, go: "1.24.2", tags: "llvm21" }
-          - { llvm: 22, go: "1.24.2", tags: "llvm22" }
-          - { llvm: 19, go: "1.26.5", tags: "llvm19" }
+          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "compat", check: "test (19, 1.26.5, llvm19)" }
+          - { llvm: 20, go: "1.26.5", tags: "llvm20", lane: "compat", check: "test (20, 1.26.5, llvm20)" }
+          - { llvm: 21, go: "1.26.5", tags: "llvm21", lane: "compat", check: "test (21, 1.26.5, llvm21)" }
+          - { llvm: 22, go: "1.26.5", tags: "llvm22", lane: "compat", check: "test (22, 1.26.5, llvm22)" }
+          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "integration", check: "test integration (19, 1.26.5, llvm19)" }
+          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "targets", check: "test targets (19, 1.26.5, llvm19)" }
     steps:
       - uses: actions/checkout@v7
 
@@ -42,10 +44,11 @@ jobs:
       # Temporary while the stackless-coroutine slices are integrated. Restore
       # the full Go workflow, including macOS, before the upstream merge.
       - name: Test coroutine analysis
-        if: matrix.llvm == 19
+        if: matrix.lane == 'integration'
         run: go test -race -shuffle=on ./internal/coro
 
       - name: Test target-neutral coroutine runtime core
+        if: matrix.lane == 'compat'
         run: |
           cd runtime
           go test -race -shuffle=on ./internal/coroalloc -count=1
@@ -66,42 +69,66 @@ jobs:
           # Compiler tests separately cover the LLVM/LLGo side; this is not a
           # cross-language linked smoke test.
           go test -race -shuffle=on -tags=coro_runtime_adapter_test \
+            ./internal/runtime/coro_run_slice.go \
             ./internal/runtime/coro_program.go \
             ./internal/runtime/coro_sched.go \
             ./internal/runtime/coro_executor.go \
+            ./internal/runtime/coro_panic_payload.go \
             ./internal/runtime/coro_executor_driver_legacy.go \
+            ./internal/runtime/coro_ready_distribution_default.go \
+            ./internal/runtime/coro_target_executor_retired_default.go \
             ./internal/runtime/coro_target_test_adapter.go \
             ./internal/runtime/coro_program_test.go \
             -run '^TestCoroProgram' -count=1
+          # The native fleet is a deliberately isolated production adapter:
+          # select only its real source plus its host test so LLGo runtime
+          # symbols do not collide with the host Go runtime.
+          go test -race -shuffle=on -tags=coro_native_fleet_test \
+            ./internal/runtime/coro_run_slice.go \
+            ./internal/runtime/coro_ready_distribution_default.go \
+            ./internal/runtime/coro_native_fleet.go \
+            ./internal/runtime/coro_native_fleet_reactor.go \
+            ./internal/runtime/coro_native_fleet_test.go \
+            -run '^TestCoroNativeFleet' -count=1
           GOOS=js GOARCH=wasm CGO_ENABLED=0 go test \
             -tags=coro_runtime_adapter_test \
             -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" \
+            ./internal/runtime/coro_run_slice.go \
             ./internal/runtime/coro_program.go \
             ./internal/runtime/coro_sched.go \
             ./internal/runtime/coro_executor.go \
+            ./internal/runtime/coro_panic_payload.go \
             ./internal/runtime/coro_executor_driver_legacy.go \
+            ./internal/runtime/coro_ready_distribution_default.go \
+            ./internal/runtime/coro_target_executor_retired_default.go \
             ./internal/runtime/coro_target_test_adapter.go \
             ./internal/runtime/coro_program_test.go \
             -run '^TestCoroProgram' -count=1
           # Exercise the production typed hchan queue and exact coroutine
-          # source transaction together. Test-only C/pthread symbols keep this
-          # a dependency-free named source island on both host and wasm.
-          go test -race -shuffle=on -tags=coro_channel_adapter_test \
+          # source transaction together. The host atomic shim exercises the
+          # portable no-suspend channel gate without an OS mutex dependency.
+          go test -race -shuffle=on -tags='coro_channel_adapter_test,coro_channel_owner_test' \
             ./internal/runtime/z_chan.go \
             ./internal/runtime/z_chan_coro.go \
+            ./internal/runtime/z_chan_lock_coro.go \
+            ./internal/runtime/z_chan_lock_coro_atomic_host.go \
             ./internal/runtime/coro_channel_adapter_test.go \
+            ./internal/runtime/coro_channel_owner_lock_test.go \
             -run '^TestCoroChannelAdapter' -count=1
           GOOS=js GOARCH=wasm CGO_ENABLED=0 go test \
-            -tags=coro_channel_adapter_test \
+            -tags='coro_channel_adapter_test,coro_channel_owner_test' \
             -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" \
             ./internal/runtime/z_chan.go \
             ./internal/runtime/z_chan_coro.go \
+            ./internal/runtime/z_chan_lock_coro.go \
+            ./internal/runtime/z_chan_lock_coro_atomic_host.go \
             ./internal/runtime/coro_channel_adapter_test.go \
+            ./internal/runtime/coro_channel_owner_lock_test.go \
             -run '^TestCoroChannelAdapter' -count=1
           go test ./internal/corotimer -run '^TestDeadlineAfter$' -count=1
 
       - name: Link named freestanding WebAssembly targets
-        if: matrix.llvm == 19 && matrix.go == '1.24.2'
+        if: matrix.lane == 'targets'
         env:
           LLGO_WASM_TARGET_SMOKE: "1"
         run: |
@@ -126,7 +153,7 @@ jobs:
           done
 
       - name: Compile coroutine runtime adapter across targets
-        if: matrix.llvm == 19
+        if: matrix.lane == 'targets'
         run: |
           cd runtime
           GOOS=js GOARCH=wasm CGO_ENABLED=0 go test -c -o /tmp/coro-js-wasm.test ./internal/runtime
@@ -138,7 +165,7 @@ jobs:
           GOOS=linux GOARCH=arm CGO_ENABLED=0 go test -c -tags='baremetal cortexm' -o /tmp/coro-cortexm-baremetal.test ./internal/runtime
 
       - name: Test coroutine build integration
-        if: matrix.llvm == 19
+        if: matrix.lane == 'integration'
         # Keep the focused workflow exhaustive for the build-side coroutine
         # contract. This includes park effect seeding, frozen foreign noblock
         # certificates, IRQUnsafe handling, the exact legacy PanicABI stop, and
@@ -148,14 +175,15 @@ jobs:
         run: go test ./internal/build -run 'Coro|Coroutine' -skip '^TestCoroNative(TimerNoGCProductionE2E|TimeSleepProductionPlanAndCodegen)$' -timeout=10m -count=1
 
       - name: Run linked native coroutine timer E2E
-        if: matrix.go == '1.24.2'
+        if: matrix.lane == 'compat'
         run: go test -tags='${{ matrix.tags }}' -v ./internal/build -run '^TestCoroNativeTimerNoGCProductionE2E$' -timeout=10m -count=1
 
       - name: Verify production time.Sleep coroutine plan
+        if: matrix.lane == 'compat'
         run: go test -tags='${{ matrix.tags }}' -v ./internal/build -run '^TestCoroNativeTimeSleepProductionPlanAndCodegen$' -timeout=10m -count=1
 
       - name: Test coroutine compiler integration
-        if: matrix.llvm == 19
+        if: matrix.lane == 'integration'
         run: |
           go test -race ./cl/ssawrap -count=1
           go test -race ./cl -run '^Test(CompilationCoroPlanObservationAndCacheRegistration|CoroEntryResolutionPlainPrimaryPreservesIR|ResolveFunctionSymbolUsesPrimaryAndExactPlan|CoroEntryRejectsUnsupportedBeforeCreatingSymbol|CoroEntryResolutionPreflightRejectsWholePlanBeforeCodegen|CoroEntryResolutionPreflightRejectsMissingPlanAndCache|Emission.*)$' -count=1
@@ -164,32 +192,37 @@ jobs:
           go test ./cl -run '^TestRunAndTestFromTestgo/print$' -count=1
 
       - name: Test structured LLVM coroutine builder
+        if: matrix.lane == 'compat'
         run: go test -tags='${{ matrix.tags }}' -v ./ssa -run '^TestCoro' -count=1
 
       - name: Test canonical coroutine plan digest and cache identity
+        if: matrix.lane == 'compat'
         run: |
           go test -tags='${{ matrix.tags }}' ./internal/coro -run '^TestCoroPlanDigest' -count=1
           go test -tags='${{ matrix.tags }}' ./internal/build -run '^Test(BuildCoroPlanInstallsArchiveDigest|CoroutinePlanInputsAffectFingerprint|CoroEntryResolutionUsesPlanMatchedPackageCache|CoroPlanDigestMetadataUsesEffectiveLLVMTarget|CoroPhysicalABICacheRegistrationPreservesCollectedFuncInfo)$' -count=1
           go test -tags='${{ matrix.tags }}' ./cl -run '^Test(CompilationCoroABIIdentityValidation|CoroEntryResolutionCacheRegistrationWithDigest|CoroPhysicalABICacheRegistrationPreservesPhysicalMetadata)$' -count=1
 
       - name: Test coroutine physical ABI and function dispatch lowering
+        if: matrix.lane == 'compat'
         # Run every compiler test whose name is part of the coroutine contract;
         # in particular this covers pure SSA aggregates/PHI and caller-frame
         # park lowering on native64 and wasm32 before and after CoroSplit.
         run: go test -tags='${{ matrix.tags }}' -v ./cl -run '^Test(Coro|EmissionUniverse(ActiveABIMethodTablesUseFrozenWrapperSymbols|ABIMethodDemandReferencesAreExactRecursiveAndOwnerScoped))' -count=1
 
       - name: Test coroutine TLS function dispatch proof
+        if: matrix.lane == 'compat'
         run: go test -tags='${{ matrix.tags }}' -v ./internal/build -run '^TestCoroTLS' -count=1
 
       - name: Test coroutine registry and control integration
+        if: matrix.lane == 'compat'
         run: go test -tags='${{ matrix.tags }}' -v ./internal/build -run '^Test(CollectLinkedCoroRootAnchors|ActiveCoroABIVersions|BuildCoroPlanErrors|CoroProgramManifest.*|CoroProgramBootstrap.*|SelectCoroProgramBootstrap.*|GenMainModule.*Coro.*)$' -count=1
 
       - name: Test LLVM 22 tool configuration
-        if: matrix.llvm == 22
+        if: matrix.lane == 'compat' && matrix.llvm == 22
         run: go test -tags=llvm22 ./xtool/env/llvm ./internal/xtool/llvm
 
       - name: Test resolved LLVM target configuration
-        if: matrix.llvm == 19
+        if: matrix.lane == 'targets'
         run: |
           go test ./internal/xtool/llvm -run '^TestGetTarget(Spec|Triple)$' -count=1
           go test ./internal/crosscompile -run '^Test(UseTarget|UseExportsResolvedLLVMConfig|ResolvedLLVMTargetSpecWASIThreads)$' -count=1
@@ -198,11 +231,11 @@ jobs:
           go test ./internal/build -run '^Test(NewLLSSATargetUsesResolvedLLVMConfig|LLVMCPUAndFeaturesAffectBuildFingerprint|DefaultTargetKeepsLegacyCacheIdentity|NonDefaultLLVMFeaturesEnterCacheIdentity|ResolvedTargetCompatibilityAudit)$' -count=1
 
       - name: Check llgo-tag build
-        if: matrix.llvm == 19
+        if: matrix.lane == 'integration'
         run: go test -tags=llgo ./internal/coro
 
       - name: Vet coroutine analysis
-        if: matrix.llvm == 19
+        if: matrix.lane == 'integration'
         run: |
           go vet ./internal/coro ./internal/build ./cl/ssawrap ./internal/xtool/llvm ./internal/crosscompile ./internal/cabi
           # The runtime package has pre-existing unsafe.Pointer findings.

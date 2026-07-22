@@ -1,0 +1,683 @@
+/*
+ * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package coro
+
+import (
+	"sync"
+	"testing"
+	"unsafe"
+)
+
+type executorFleetManualFixture struct {
+	p      *P
+	driver *ExecutorDriver
+	waits  *WaitRegistrationTable
+	manual *ManualOperationSource
+	handle ExecutorFleetHandle
+}
+
+func bindExecutorFleetManualFixture(t *testing.T, fleet *ExecutorFleet) *executorFleetManualFixture {
+	t.Helper()
+	fixture := &executorFleetManualFixture{
+		p:      new(P),
+		driver: new(ExecutorDriver),
+		waits:  new(WaitRegistrationTable),
+		manual: new(ManualOperationSource),
+	}
+	var ok bool
+	fixture.handle, ok = BindExecutorFleet(fleet, fixture.driver, fixture.p, ExecutorSourceCatalog{
+		Waits: fixture.waits, Manual: fixture.manual,
+	})
+	if !ok {
+		t.Fatal("bind executor fleet manual fixture")
+	}
+	return fixture
+}
+
+func closeExecutorFleetFixture(t *testing.T, fleet *ExecutorFleet, fixture *executorFleetManualFixture) {
+	t.Helper()
+	if !BeginExecutorFleetClose(fleet, fixture.handle) ||
+		!ConfirmExecutorFleetRouteClose(fleet, fixture.handle) ||
+		!BeginExecutorFleetDriverClose(fleet, fixture.handle) ||
+		!ConfirmExecutorFleetClose(fleet, fixture.handle) {
+		t.Fatalf("close executor fleet route %d", fixture.handle.Route)
+	}
+	if *fixture.driver != (ExecutorDriver{}) || !fixture.waits.CanRelease() || !fixture.manual.CanRelease() ||
+		fixture.p.executor != nil || preemptLoad(&fixture.p.executorMode) != executorModeUnbound {
+		t.Fatalf("fleet close retained route %d resources", fixture.handle.Route)
+	}
+}
+
+func settleExecutorFleetManual(
+	t *testing.T,
+	fixture *executorFleetManualFixture,
+	state *ParkState,
+	ticket ParkTicket,
+	ids []OperationID,
+) {
+	t.Helper()
+	published, lost, ok := fixture.manual.PublishPass(fixture.p)
+	if !ok || published != 1 || lost != 0 {
+		t.Fatalf("publish fleet manual = (%d, %d, %t)", published, lost, ok)
+	}
+	want := CompletionResolution{WaitSets: 1, Completed: 1, Winners: 1}
+	if resolution, duplicates, ok := fixture.manual.ResolveAffectedPublishedEpoch(fixture.p); !ok || resolution != want || duplicates != 0 {
+		t.Fatalf("resolve fleet manual = (%+v, %d, %t), want %+v", resolution, duplicates, ok, want)
+	}
+	if applied, detached, ok := fixture.manual.ApplyAndDetach(fixture.p); !ok || applied != 1 || detached != 1 {
+		t.Fatalf("apply fleet manual = (%d, %d, %t)", applied, detached, ok)
+	}
+	outcome, _, lease, consumed := ConsumeParkSet(state, ticket)
+	if !consumed || outcome != ParkOutcomeCompleted {
+		t.Fatalf("consume fleet manual = (%d, %+v, %t)", outcome, lease, consumed)
+	}
+	finishManualOperations(t, fixture.manual, fixture.p, ids, lease)
+	if _, _, ok := PollExecutor(fixture.driver); !ok {
+		t.Fatal("acknowledge fleet executor request")
+	}
+}
+
+func TestExecutorFleetHandleIsThreeWordPOD(t *testing.T) {
+	if unsafe.Sizeof(ExecutorFleetHandle{}) != 12 || unsafe.Alignof(ExecutorFleetHandle{}) != 4 ||
+		unsafe.Offsetof(ExecutorFleetHandle{}.Executor) != 4 {
+		t.Fatalf("fleet handle layout = size %d align %d executor %d",
+			unsafe.Sizeof(ExecutorFleetHandle{}), unsafe.Alignof(ExecutorFleetHandle{}),
+			unsafe.Offsetof(ExecutorFleetHandle{}.Executor))
+	}
+	if !(ExecutorFleetHandle{Route: 1, Executor: ExecutorHandle{Slot: 1, Generation: 1}}).Valid() ||
+		(ExecutorFleetHandle{Route: 0, Executor: ExecutorHandle{Slot: 1, Generation: 1}}).Valid() ||
+		(ExecutorFleetHandle{Route: 1, Executor: ExecutorHandle{Slot: 0, Generation: 1}}).Valid() {
+		t.Fatal("fleet handle validity accepted a malformed identity")
+	}
+}
+
+func TestExecutorFleetRoutesTwoPCompletionsToExactExecutor(t *testing.T) {
+	fleet := new(ExecutorFleet)
+	if !fleet.AllRetired() {
+		t.Fatal("zero fleet is not resource-empty")
+	}
+	first := bindExecutorFleetManualFixture(t, fleet)
+	second := bindExecutorFleetManualFixture(t, fleet)
+	if first.p == second.p || first.driver == second.driver || first.handle.Route != 1 || second.handle.Route != 2 ||
+		first.handle.Executor == second.handle.Executor {
+		t.Fatalf("two-P fleet identities = %+v %+v", first.handle, second.handle)
+	}
+
+	state1, ticket1, ids1 := reserveManualWaitSet(t, first.manual, first.p, 701, []uint32{1})
+	state2, ticket2, ids2 := reserveManualWaitSet(t, second.manual, second.p, 702, []uint32{1})
+	id1, id2 := ids1[0], ids2[0]
+	if id1.Route() != 1 || id2.Route() != 2 || id1.LocalSlot() != id2.LocalSlot() ||
+		id1.Generation != id2.Generation || id1 == id2 {
+		t.Fatalf("two-P operation identities alias: %+v %+v", id1, id2)
+	}
+	if result := second.manual.Post(id1); result != ManualOperationPostInvalid || second.manual.Pending() {
+		t.Fatalf("wrong route reached second source = %d", result)
+	}
+	posted1 := fleet.PostManualAndRequest(id1)
+	if posted1.Route != OperationRoutePosted || posted1.Executor != ExecutorRequestPublished ||
+		!fleet.executors.ObserveRequested(first.handle.Executor) ||
+		fleet.executors.ObserveRequested(second.handle.Executor) || !first.manual.Pending() || second.manual.Pending() {
+		t.Fatalf("first route crossed fleet owners: %+v", posted1)
+	}
+	if duplicate := fleet.PostManualAndRequest(id1); duplicate.Route != OperationRoutePostCoalesced ||
+		duplicate.Executor != ExecutorRequestInvalid {
+		t.Fatalf("duplicate first route = %+v", duplicate)
+	}
+	stale := id1
+	stale.Generation++
+	if result := fleet.PostManualAndRequest(stale); result.Route != OperationRoutePostSourceStale ||
+		result.Executor != ExecutorRequestInvalid {
+		t.Fatalf("stale first route = %+v", result)
+	}
+	posted2 := fleet.PostManualAndRequest(id2)
+	if posted2.Route != OperationRoutePosted || posted2.Executor != ExecutorRequestPublished ||
+		!fleet.executors.ObserveRequested(second.handle.Executor) || !second.manual.Pending() {
+		t.Fatalf("second route completion = %+v", posted2)
+	}
+
+	settleExecutorFleetManual(t, first, state1, ticket1, ids1)
+	settleExecutorFleetManual(t, second, state2, ticket2, ids2)
+	closeExecutorFleetFixture(t, fleet, first)
+	closeExecutorFleetFixture(t, fleet, second)
+	if late := fleet.PostManualAndRequest(id1); late.Route != OperationRoutePostClosed ||
+		late.Executor != ExecutorRequestInvalid {
+		t.Fatalf("retired route accepted late completion: %+v", late)
+	}
+	if !fleet.AllRetired() {
+		t.Fatal("two-P fleet retained resources")
+	}
+}
+
+func TestExecutorFleetRequestsCommittedChannelEndpointByExactRoute(t *testing.T) {
+	fleet := new(ExecutorFleet)
+	type fixture struct {
+		p       *P
+		driver  *ExecutorDriver
+		waits   *WaitRegistrationTable
+		channel *ChannelOperationSource
+		handle  ExecutorFleetHandle
+	}
+	bind := func() *fixture {
+		current := &fixture{
+			p: new(P), driver: new(ExecutorDriver), waits: new(WaitRegistrationTable),
+			channel: new(ChannelOperationSource),
+		}
+		var ok bool
+		current.handle, ok = BindExecutorFleet(fleet, current.driver, current.p, ExecutorSourceCatalog{
+			Waits: current.waits, Channel: current.channel,
+		})
+		if !ok {
+			t.Fatal("bind fleet channel route")
+		}
+		return current
+	}
+	first, second := bind(), bind()
+	firstID, firstOK := MakeOperationIDAtRoute(OperationSourceChannel, RouteID(first.handle.Route), 1, 1)
+	secondID, secondOK := MakeOperationIDAtRoute(OperationSourceChannel, RouteID(second.handle.Route), 1, 1)
+	if !firstOK || !secondOK || firstID.Route() == secondID.Route() {
+		t.Fatalf("make distinct channel route IDs = (%+v,%t) (%+v,%t)", firstID, firstOK, secondID, secondOK)
+	}
+	if result := fleet.RequestChannelExecutor(firstID); result != ExecutorRequestPublished ||
+		!fleet.executors.ObserveRequested(first.handle.Executor) ||
+		fleet.executors.ObserveRequested(second.handle.Executor) {
+		t.Fatalf("request first channel route = %d", result)
+	}
+	if _, _, ok := PollExecutor(first.driver); !ok {
+		t.Fatal("acknowledge first channel request")
+	}
+	if result := fleet.RequestChannelExecutor(secondID); result != ExecutorRequestPublished ||
+		!fleet.executors.ObserveRequested(second.handle.Executor) {
+		t.Fatalf("request second channel route = %d", result)
+	}
+	if _, _, ok := PollExecutor(second.driver); !ok {
+		t.Fatal("acknowledge second channel request")
+	}
+	manualID, made := MakeOperationIDAtRoute(OperationSourceManual, firstID.Route(), 1, 1)
+	if !made || fleet.RequestChannelExecutor(manualID) != ExecutorRequestInvalid {
+		t.Fatal("channel request accepted another source kind")
+	}
+	for _, current := range []*fixture{first, second} {
+		if !BeginExecutorFleetClose(fleet, current.handle) ||
+			!ConfirmExecutorFleetRouteClose(fleet, current.handle) ||
+			!BeginExecutorFleetDriverClose(fleet, current.handle) ||
+			!ConfirmExecutorFleetClose(fleet, current.handle) {
+			t.Fatalf("close fleet channel route %d", current.handle.Route)
+		}
+		if !current.channel.CanRelease() || !current.waits.CanRelease() {
+			t.Fatalf("fleet channel route %d retained source storage", current.handle.Route)
+		}
+	}
+	if fleet.RequestChannelExecutor(firstID) != ExecutorRequestClosed || !fleet.AllRetired() {
+		t.Fatal("retired fleet channel route accepted a wake")
+	}
+}
+
+func TestExecutorFleetAdoptsExistingProgramDomainBeforeOwnedPeer(t *testing.T) {
+	fleet := new(ExecutorFleet)
+	programP := new(P)
+	programDriver := new(ExecutorDriver)
+	programRegistry := new(ExecutorRegistry)
+	programWaits := new(WaitRegistrationTable)
+	programManual := new(ManualOperationSource)
+	programExecutor := registerTestExecutor(t, programRegistry)
+	if !BindExecutorSourceCatalogAtRoute(
+		programDriver,
+		programP,
+		programRegistry,
+		programExecutor,
+		1,
+		ExecutorSourceCatalog{Waits: programWaits, Manual: programManual},
+	) {
+		t.Fatal("bind existing program executor")
+	}
+	queued := newYieldingTestG(t, "adopted-program-ready")
+	if !Enqueue(programP, queued.g) {
+		t.Fatal("enqueue existing program root before fleet adoption")
+	}
+	programHandle, adopted := AdoptExecutorFleet(fleet, programDriver, programP)
+	if !adopted || programHandle.Route != 1 || programHandle.Executor != programExecutor ||
+		programDriver.registry != programRegistry {
+		t.Fatalf("adopt existing program domain = (%+v, %t)", programHandle, adopted)
+	}
+	peer := bindExecutorFleetManualFixture(t, fleet)
+	if peer.handle.Route != 2 || peer.driver.registry != &fleet.executors ||
+		peer.driver.registry == programDriver.registry {
+		t.Fatalf("owned peer after adopted program = %+v", peer.handle)
+	}
+
+	state, ticket, ids := reserveManualWaitSet(t, programManual, programP, 721, []uint32{1})
+	posted := fleet.PostManualAndRequest(ids[0])
+	if posted.Route != OperationRoutePosted || posted.Executor != ExecutorRequestPublished ||
+		!programRegistry.ObserveRequested(programExecutor) || fleet.executors.ObserveRequested(peer.handle.Executor) {
+		t.Fatalf("adopted program route post = %+v", posted)
+	}
+	programFixture := &executorFleetManualFixture{
+		p: programP, driver: programDriver, waits: programWaits, manual: programManual, handle: programHandle,
+	}
+	settleExecutorFleetManual(t, programFixture, state, ticket, ids)
+	sink := new(P)
+	mailbox := new(RunnableTransferMailbox)
+	if !BindRunnableTransferMailbox(mailbox, sink) {
+		t.Fatal("bind adopted program cleanup mailbox")
+	}
+	transfer, published := PublishPNeutralRunnable(mailbox, programP, queued.g)
+	if !published || !transfer.Valid() {
+		t.Fatalf("publish adopted program ready task = (%+v, %t)", transfer, published)
+	}
+	if moved, more, drainOK := DrainPNeutralRunnables(mailbox, sink, 1); !drainOK || moved != 1 || more {
+		t.Fatalf("drain adopted program ready task = (%d, %t, %t)", moved, more, drainOK)
+	}
+	if runnable, nextOK := NextRunnable(sink); !nextOK || runnable != queued.g {
+		t.Fatalf("adopted program cleanup task = (%p, %t)", runnable, nextOK)
+	}
+	action := beginWaitTestResume(t, sink, queued)
+	finishWaitTestTask(t, sink, queued, action)
+	if !TerminalG(sink, queued.g) {
+		t.Fatal("adopted program ready task retained scheduler state")
+	}
+	closeExecutorFleetFixture(t, fleet, programFixture)
+	closeExecutorFleetFixture(t, fleet, peer)
+	if !programRegistry.CanRelease() || !fleet.AllRetired() {
+		t.Fatal("adopted program or owned peer retained executor resources")
+	}
+}
+
+func TestExecutorFleetAdoptedProgramCanFinishAuthoritativeExternalClose(t *testing.T) {
+	fleet := new(ExecutorFleet)
+	p := new(P)
+	driver, registry, waits, manual, executor := bindTestExecutorDriverWithManual(t, p)
+	handle, adopted := AdoptExecutorFleet(fleet, driver, p)
+	if !adopted || handle.Executor != executor || handle.Route != 1 {
+		t.Fatalf("adopt external-close program = (%+v,%t)", handle, adopted)
+	}
+	if !BeginExecutorClose(driver) {
+		t.Fatal("begin authoritative adopted driver close")
+	}
+	if !BeginExecutorFleetClose(fleet, handle) {
+		t.Fatal("begin adopted fleet route close")
+	}
+	if !ConfirmExecutorFleetRouteClose(fleet, handle) {
+		t.Fatal("confirm adopted fleet route close")
+	}
+	if !BeginExecutorFleetExternalDriverClose(fleet, handle) {
+		t.Fatal("record authoritative adopted driver close")
+	}
+	if ConfirmExecutorFleetExternalClose(fleet, handle) {
+		t.Fatal("fleet confirmed adopted close before authoritative driver")
+	}
+	if !ConfirmExecutorClose(driver) || !ConfirmExecutorFleetExternalClose(fleet, handle) ||
+		!fleet.AllRetired() || !registry.CanRelease() || !waits.CanRelease() || !manual.CanRelease() {
+		t.Fatal("finish adopted authoritative external close")
+	}
+}
+
+func TestExecutorFleetBindsTimerAndRoutesPollSources(t *testing.T) {
+	t.Run("timer-owner-source", func(t *testing.T) {
+		fleet := new(ExecutorFleet)
+		p, driver := new(P), new(ExecutorDriver)
+		waits, timers := new(WaitRegistrationTable), new(TimerRegistrationTable)
+		handle, ok := BindExecutorFleet(fleet, driver, p, ExecutorSourceCatalog{
+			Waits: waits, Timers: timers,
+		})
+		if !ok || handle.Route != 1 {
+			t.Fatalf("bind timer fleet route = (%+v, %t)", handle, ok)
+		}
+		if route, routeOK := timers.Route(); !routeOK || route != RouteID(handle.Route) {
+			t.Fatalf("timer fleet source route = (%d, %t), want %d", route, routeOK, handle.Route)
+		}
+		if !BeginExecutorFleetClose(fleet, handle) || !ConfirmExecutorFleetRouteClose(fleet, handle) ||
+			!BeginExecutorFleetDriverClose(fleet, handle) || !ConfirmExecutorFleetClose(fleet, handle) ||
+			!fleet.AllRetired() || !waits.CanRelease() || !timers.CanRelease() {
+			t.Fatal("timer fleet route retained source or executor state")
+		}
+	})
+
+	t.Run("poll-producer-route", func(t *testing.T) {
+		fleet := new(ExecutorFleet)
+		p, driver := new(P), new(ExecutorDriver)
+		waits, poll := new(WaitRegistrationTable), new(PollOperationSource)
+		handle, ok := BindExecutorFleet(fleet, driver, p, ExecutorSourceCatalog{
+			Waits: waits, Poll: poll,
+		})
+		if !ok || handle.Route != 1 {
+			t.Fatalf("bind poll fleet route = (%+v, %t)", handle, ok)
+		}
+
+		task := newYieldingTestG(t, "fleet-routed-poll")
+		peer := newYieldingTestG(t, "fleet-routed-poll-peer")
+		if !Enqueue(p, task.g) || !Enqueue(p, peer.g) {
+			t.Fatal("enqueue routed poll tasks")
+		}
+		if runnable, nextOK := NextRunnableAt(p, 0); !nextOK || runnable != task.g {
+			t.Fatalf("dequeue routed poll task = (%p, %t)", runnable, nextOK)
+		}
+		action := beginWaitTestResume(t, p, task)
+		ticket, ok := BeginParkSet(&task.g.park, 1, 811)
+		wait := new(WaitSetRecord)
+		if !ok || !PrepareWaitSetRecord(wait, task.g, ticket) {
+			t.Fatal("begin routed poll park set")
+		}
+		pollHandle, id, ok := poll.ReserveAndAttachPollOperationV2(
+			p, &task.g.park, ticket, wait, 17, 42, PollInterestRead, 0,
+		)
+		if !ok || id.Route() != RouteID(handle.Route) || !SealParkSet(&task.g.park, ticket) {
+			t.Fatalf("reserve routed poll operation = (%+v, %+v, %t)", pollHandle, id, ok)
+		}
+		task.frame.header.SuspendReason = uint16(SuspendPark)
+		task.frame.header.Lifecycle = uint16(FrameSuspended)
+		if !PrepareParkSet(task.g, task.handle, task.frame.header, ticket, wait) {
+			t.Fatal("prepare routed poll scheduler park")
+		}
+		parked, resumed := Resumed(p, task.g, action)
+		if !resumed || parked.Kind != ActionPark {
+			t.Fatalf("commit routed poll park = (%+v, %t)", parked, resumed)
+		}
+		posted := fleet.PostPollAndRequest(id, PollOperationReady)
+		duplicate := fleet.PostPollAndRequest(id, PollOperationClosing)
+		if posted.Route != OperationRoutePosted || posted.Executor != ExecutorRequestPublished ||
+			duplicate.Route != OperationRoutePostCoalesced || duplicate.Executor != ExecutorRequestInvalid {
+			t.Fatalf("routed poll posts = first %+v duplicate %+v", posted, duplicate)
+		}
+		if !BeginExecutorFleetClose(fleet, handle) || !ConfirmExecutorFleetRouteClose(fleet, handle) {
+			t.Fatal("strong-close routed poll producer ingress")
+		}
+		if late := fleet.PostPollAndRequest(id, PollOperationReady); late.Route != OperationRoutePostClosed {
+			t.Fatalf("closed poll route accepted late result: %+v", late)
+		}
+		if waitsDone, timersDone, promoted, pollOK := PollExecutorAt(driver, 0); !pollOK || waitsDone != 0 || timersDone != 0 || promoted != 1 {
+			t.Fatalf("service routed poll = (%d, %d, %d, %t)", waitsDone, timersDone, promoted, pollOK)
+		}
+		if runnable, nextOK := NextRunnableAt(p, 0); !nextOK || runnable != peer.g || !Enqueue(p, peer.g) {
+			t.Fatalf("rotate routed poll peer = (%p, %t)", runnable, nextOK)
+		}
+		if runnable, nextOK := NextRunnableAt(p, 0); !nextOK || runnable != task.g {
+			t.Fatalf("dequeue completed routed poll task = (%p, %t)", runnable, nextOK)
+		}
+		action = beginWaitTestResume(t, p, task)
+		outcome, caseID, lease, taskCancel, consumed := TakeRunDecision(task.g, ticket)
+		result, taken := poll.TakePollOperationV2Result(p, pollHandle, lease)
+		if !consumed || outcome != ParkOutcomeCompleted || caseID != 17 || taskCancel != TaskCancelNone ||
+			!taken || result != PollOperationReady || !poll.RecyclePollOperationV2(p, pollHandle) {
+			t.Fatalf("consume routed poll = outcome:%d case:%d result:%d taken:%t consumed:%t cancel:%d lease:%+v",
+				outcome, caseID, result, taken, consumed, taskCancel, lease)
+		}
+		finishWaitTestTask(t, p, task, action)
+		var sink P
+		var mailbox RunnableTransferMailbox
+		if !BindRunnableTransferMailbox(&mailbox, &sink) {
+			t.Fatal("bind routed poll cleanup mailbox")
+		}
+		if id, published := PublishPNeutralRunnable(&mailbox, p, peer.g); !published || !id.Valid() {
+			t.Fatalf("publish routed poll peer cleanup = (%+v, %t)", id, published)
+		}
+		if moved, more, drainOK := DrainPNeutralRunnables(&mailbox, &sink, 1); !drainOK || moved != 1 || more {
+			t.Fatalf("drain routed poll peer cleanup = (%d, %t, %t)", moved, more, drainOK)
+		}
+		if !BeginExecutorFleetDriverClose(fleet, handle) || !ConfirmExecutorFleetClose(fleet, handle) ||
+			!fleet.AllRetired() || !waits.CanRelease() || !poll.CanRelease() {
+			t.Fatal("poll fleet route retained source or executor state")
+		}
+		if runnable, nextOK := NextRunnable(&sink); !nextOK || runnable != peer.g {
+			t.Fatalf("dequeue routed poll cleanup peer = (%p, %t)", runnable, nextOK)
+		}
+		peerAction := beginWaitTestResume(t, &sink, peer)
+		finishWaitTestTask(t, &sink, peer, peerAction)
+		if !TerminalG(&sink, peer.g) {
+			t.Fatal("routed poll cleanup peer retained scheduler state")
+		}
+	})
+}
+
+func TestExecutorFleetCloseStrongJoinsRouteIngressBeforeDriver(t *testing.T) {
+	fleet := new(ExecutorFleet)
+	fixture := bindExecutorFleetManualFixture(t, fleet)
+	route := RouteID(fixture.handle.Route)
+	routeSlot, ok := operationRouteSlotFor(&fleet.routes, route)
+	if !ok || !operationRouteAcquireProducer(routeSlot) {
+		t.Fatal("hold fleet route producer tail")
+	}
+	if !BeginExecutorFleetClose(fleet, fixture.handle) {
+		t.Fatal("begin fleet route close")
+	}
+	if ConfirmExecutorFleetRouteClose(fleet, fixture.handle) ||
+		BeginExecutorFleetDriverClose(fleet, fixture.handle) {
+		t.Fatal("fleet retired source/driver before route ingress strong join")
+	}
+	operationRouteReleaseProducer(routeSlot)
+	if !ConfirmExecutorFleetRouteClose(fleet, fixture.handle) ||
+		!BeginExecutorFleetDriverClose(fleet, fixture.handle) ||
+		!ConfirmExecutorFleetClose(fleet, fixture.handle) || !fleet.AllRetired() {
+		t.Fatal("finish fleet close after route ingress join")
+	}
+}
+
+func TestExecutorFleetTransferUsesRouteAdmissionAndRequiresEmptyMailbox(t *testing.T) {
+	fleet := new(ExecutorFleet)
+	first := bindExecutorFleetManualFixture(t, fleet)
+	second := bindExecutorFleetManualFixture(t, fleet)
+	source := new(P)
+	task := newYieldingTestG(t, "fleet-transfer")
+	if !Enqueue(source, task.g) {
+		t.Fatal("enqueue fleet transfer source")
+	}
+	id, request, ok := fleet.PublishPNeutralRunnableAndRequest(first.handle, source, task.g)
+	if !ok || !id.Valid() || request != ExecutorRequestPublished || source.readyHead != nil ||
+		!fleet.executors.ObserveRequested(first.handle.Executor) ||
+		fleet.executors.ObserveRequested(second.handle.Executor) {
+		t.Fatalf("publish fleet transfer = (%+v, %d, %t)", id, request, ok)
+	}
+	if fleet.ImportPNeutralRunnable(second.handle, second.p, id) || second.p.readyHead != nil {
+		t.Fatal("wrong fleet route imported transfer")
+	}
+	staleSource := new(P)
+	staleTask := newYieldingTestG(t, "fleet-transfer-stale")
+	if !Enqueue(staleSource, staleTask.g) {
+		t.Fatal("enqueue stale fleet transfer source")
+	}
+	stale := first.handle
+	stale.Executor.Generation++
+	if staleID, staleRequest, staleOK := fleet.PublishPNeutralRunnableAndRequest(stale, staleSource, staleTask.g); staleOK || staleID != (RunnableTransferID{}) || staleRequest != ExecutorRequestStale ||
+		staleSource.readyHead != staleTask.g || !staleTask.g.queued {
+		t.Fatalf("stale fleet transfer mutated source = (%+v, %d, %t)", staleID, staleRequest, staleOK)
+	}
+	if !BeginExecutorFleetClose(fleet, first.handle) {
+		t.Fatal("seal fleet transfer route")
+	}
+	if ConfirmExecutorFleetRouteClose(fleet, first.handle) {
+		t.Fatal("retired fleet route with a durable transferred runnable")
+	}
+	if !fleet.ImportPNeutralRunnable(first.handle, first.p, id) || first.p.readyHead != task.g ||
+		fleet.ImportPNeutralRunnable(first.handle, first.p, id) {
+		t.Fatal("drain exact fleet transfer during route close")
+	}
+	if !ConfirmExecutorFleetRouteClose(fleet, first.handle) {
+		t.Fatal("retire drained fleet transfer route")
+	}
+
+	// This test intentionally stops at RouteRetired: the imported runnable is
+	// now ordinary owner-P work, so the driver correctly refuses shutdown until
+	// that task terminates or is migrated by a later scheduler policy.
+	if BeginExecutorFleetDriverClose(fleet, first.handle) {
+		t.Fatal("closed driver while imported runnable remained queued")
+	}
+}
+
+func TestExecutorFleetInitialReadyHeadDistributionDoesNotBounceYieldedWork(t *testing.T) {
+	fleet := new(ExecutorFleet)
+	initialTarget := bindExecutorFleetManualFixture(t, fleet)
+	yieldedTarget := bindExecutorFleetManualFixture(t, fleet)
+
+	initialSource := new(P)
+	initial := newYieldingTestG(t, "fleet-initial-distribution")
+	if !Enqueue(initialSource, initial.g) {
+		t.Fatal("enqueue initial distribution source")
+	}
+	id, request, published := fleet.PublishInitialReadyHeadAndRequest(initialTarget.handle, initialSource)
+	if !published || !id.Valid() || request != ExecutorRequestPublished ||
+		initialSource.readyHead != nil || initialSource.readyTail != nil {
+		t.Fatalf("publish initial ready head = (%+v,%d,%t), source=(%p,%p)",
+			id, request, published, initialSource.readyHead, initialSource.readyTail)
+	}
+
+	yieldedSource := new(P)
+	yielded := newYieldingTestG(t, "fleet-yielded-local-fallback")
+	yieldRunnableForTransfer(t, yieldedSource, yielded)
+	beforeHead, beforeTail := yieldedSource.readyHead, yieldedSource.readyTail
+	if yieldedID, yieldedRequest, yieldedPublished := fleet.PublishInitialReadyHeadAndRequest(
+		yieldedTarget.handle,
+		yieldedSource,
+	); yieldedPublished || yieldedID != (RunnableTransferID{}) ||
+		yieldedRequest != ExecutorRequestInvalid || yieldedSource.readyHead != beforeHead ||
+		yieldedSource.readyTail != beforeTail || !yielded.g.queued {
+		t.Fatalf("yielded distribution fallback = (%+v,%d,%t), source=(%p,%p) queued=%t",
+			yieldedID, yieldedRequest, yieldedPublished, yieldedSource.readyHead,
+			yieldedSource.readyTail, yielded.g.queued)
+	}
+}
+
+func TestExecutorFleetConcurrentCompletionAndCloseFailClosed(t *testing.T) {
+	fleet := new(ExecutorFleet)
+	fixture := bindExecutorFleetManualFixture(t, fleet)
+	state, ticket, ids := reserveManualWaitSet(t, fixture.manual, fixture.p, 703, []uint32{1})
+	id := ids[0]
+
+	const producers = 32
+	start := make(chan struct{})
+	results := make(chan OperationRoutePostResult, producers)
+	var group sync.WaitGroup
+	group.Add(producers)
+	for index := 0; index < producers; index++ {
+		go func() {
+			defer group.Done()
+			<-start
+			results <- fleet.PostManualAndRequest(id).Route
+		}()
+	}
+	close(start)
+	if !BeginExecutorFleetClose(fleet, fixture.handle) {
+		t.Fatal("begin concurrent fleet close")
+	}
+	group.Wait()
+	close(results)
+	posted := false
+	for result := range results {
+		switch result {
+		case OperationRoutePosted:
+			posted = true
+		case OperationRoutePostCoalesced, OperationRoutePostClosed:
+		default:
+			t.Fatalf("concurrent fleet completion = %d", result)
+		}
+	}
+	if !ConfirmExecutorFleetRouteClose(fleet, fixture.handle) {
+		t.Fatal("strong-join concurrent fleet route")
+	}
+	if posted {
+		settleExecutorFleetManual(t, fixture, state, ticket, ids)
+	} else {
+		if !RequestParkCancel(state, ticket, ParkCancelOperation) {
+			t.Fatal("cancel never-posted fleet operation")
+		}
+		if resolution, ok := ResolveParkSnapshot(state, ticket); !ok ||
+			resolution != (CompletionResolution{WaitSets: 1, Canceled: 1, Losers: 1}) {
+			t.Fatalf("resolve never-posted fleet operation = (%+v, %t)", resolution, ok)
+		}
+		if applied, detached, ok := fixture.manual.ApplyAndDetach(fixture.p); !ok || applied != 1 || detached != 1 {
+			t.Fatalf("detach never-posted fleet operation = (%d, %d, %t)", applied, detached, ok)
+		}
+		outcome, _, lease, consumed := ConsumeParkSet(state, ticket)
+		if !consumed || outcome != ParkOutcomeCanceled || lease != (OperationResultLease{}) {
+			t.Fatalf("consume never-posted fleet operation = (%d, %+v, %t)", outcome, lease, consumed)
+		}
+		finishManualOperations(t, fixture.manual, fixture.p, ids, lease)
+	}
+	if !BeginExecutorFleetDriverClose(fleet, fixture.handle) ||
+		!ConfirmExecutorFleetClose(fleet, fixture.handle) || !fleet.AllRetired() {
+		t.Fatal("finish concurrent fleet close")
+	}
+}
+
+func TestExecutorFleetBindPreflightAndLifetimeCapacity(t *testing.T) {
+	fleet := new(ExecutorFleet)
+	first := bindExecutorFleetManualFixture(t, fleet)
+	nextBefore := fleet.routes.next
+	if handle, ok := BindExecutorFleet(fleet, first.driver, first.p, ExecutorSourceCatalog{
+		Waits: first.waits, Manual: first.manual,
+	}); ok || handle != (ExecutorFleetHandle{}) || fleet.routes.next != nextBefore {
+		t.Fatalf("duplicate fleet bind mutated route allocation = (%+v, %t), next=%d", handle, ok, fleet.routes.next)
+	}
+
+	foreignRegistry := new(ExecutorRegistry)
+	foreignP := new(P)
+	foreignDriver := new(ExecutorDriver)
+	foreignWaits := new(WaitRegistrationTable)
+	foreignManual := new(ManualOperationSource)
+	foreignExecutor := registerTestExecutor(t, foreignRegistry)
+	if !BindExecutorSourceCatalogAtRoute(foreignDriver, foreignP, foreignRegistry, foreignExecutor, 1,
+		ExecutorSourceCatalog{Waits: foreignWaits, Manual: foreignManual}) {
+		t.Fatal("bind foreign-registry driver")
+	}
+	if handle, ok := BindExecutorFleet(fleet, foreignDriver, foreignP, ExecutorSourceCatalog{
+		Waits: foreignWaits, Manual: foreignManual,
+	}); ok || handle != (ExecutorFleetHandle{}) || fleet.routes.next != nextBefore {
+		t.Fatal("fleet adopted a driver from a foreign executor registry")
+	}
+	closeTestExecutorDriver(t, foreignDriver)
+
+	wrongRouteP := new(P)
+	wrongRouteSource := new(ManualOperationSource)
+	if !BindManualOperationSourceAtRoute(wrongRouteSource, wrongRouteP, 7) ||
+		!UnbindManualOperationSource(wrongRouteSource, wrongRouteP) {
+		t.Fatal("establish wrong-route source identity")
+	}
+	if handle, ok := BindExecutorFleet(fleet, new(ExecutorDriver), new(P), ExecutorSourceCatalog{
+		Waits: new(WaitRegistrationTable), Manual: wrongRouteSource,
+	}); ok || handle != (ExecutorFleetHandle{}) || fleet.routes.next != nextBefore || !wrongRouteSource.CanRelease() {
+		t.Fatal("wrong-route catalog entered fleet bind transaction")
+	}
+	if handle, ok := BindExecutorFleet(fleet, new(ExecutorDriver), new(P), ExecutorSourceCatalog{
+		Waits: new(WaitRegistrationTable),
+	}); ok || handle != (ExecutorFleetHandle{}) || fleet.routes.next != nextBefore {
+		t.Fatal("wait-only catalog consumed a fleet route")
+	}
+
+	oldHandle := first.handle
+	closeExecutorFleetFixture(t, fleet, first)
+	var previousExecutor = oldHandle.Executor
+	for route := uint32(2); route <= ExecutorFleetCapacity; route++ {
+		fixture := bindExecutorFleetManualFixture(t, fleet)
+		if fixture.handle.Route != route || fixture.handle.Executor.Slot != previousExecutor.Slot ||
+			fixture.handle.Executor.Generation <= previousExecutor.Generation {
+			t.Fatalf("fleet route/executor generation %d = %+v after %+v", route, fixture.handle, previousExecutor)
+		}
+		if result := fleet.executors.Request(previousExecutor); result != ExecutorRequestStale &&
+			result != ExecutorRequestClosed {
+			t.Fatalf("old executor generation %d request = %d", route, result)
+		}
+		previousExecutor = fixture.handle.Executor
+		closeExecutorFleetFixture(t, fleet, fixture)
+	}
+	if handle, ok := BindExecutorFleet(fleet, new(ExecutorDriver), new(P), ExecutorSourceCatalog{
+		Waits: new(WaitRegistrationTable), Manual: new(ManualOperationSource),
+	}); ok || handle != (ExecutorFleetHandle{}) || fleet.routes.next != ExecutorFleetCapacity {
+		t.Fatalf("fleet lifetime capacity exhaustion = (%+v, %t), next=%d", handle, ok, fleet.routes.next)
+	}
+	late := fleet.PostManualAndRequest(OperationID{})
+	if !fleet.AllRetired() || late.Route != OperationRoutePostInvalid {
+		t.Fatal("exhausted fleet retained resources or accepted invalid ingress")
+	}
+}

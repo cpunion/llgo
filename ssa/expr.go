@@ -308,6 +308,62 @@ func (b Builder) InlineAsmFull(instruction, constraints string, retType Type, ex
 	return Expr{b.impl.CreateCall(ftype, asm, vals, ""), retType}
 }
 
+// KeepAlive introduces an optimizer-visible use of each value without
+// generating target instructions. In particular, placing this use after an
+// LLVM coroutine suspend makes CoroSplit retain the value in the coroutine
+// frame until that resumed point. Callers must still prove why the value owns
+// the required lifetime; KeepAlive provides only the physical liveness edge.
+func (b Builder) KeepAlive(values ...Expr) {
+	if len(values) == 0 {
+		return
+	}
+	args := make([]llvm.Value, len(values))
+	for index, value := range values {
+		if value.IsNil() {
+			panic("ssa: KeepAlive received a nil value")
+		}
+		args[index] = value.impl
+	}
+	// LLVM 19's C API does not expose llvm.fake.use through
+	// LLVMLookupIntrinsicID even though the intrinsic is part of the IR and
+	// verifier. Declare its canonical variadic form directly so the same code
+	// works on LLVM 19--22.
+	fnType := llvm.FunctionType(b.Prog.tyVoid(), nil, true)
+	fn := b.Pkg.mod.NamedFunction("llvm.fake.use")
+	if fn.IsNil() {
+		fn = llvm.AddFunction(b.Pkg.mod, "llvm.fake.use", fnType)
+	}
+	if call := llvm.CreateCall(b.impl, fnType, fn, args); call.IsNil() {
+		panic(fmt.Sprintf("ssa: LLVM %s rejected llvm.fake.use intrinsic signature", llvm.Version))
+	}
+}
+
+// RemoveKeepAliveCallsAfterCoroSplit erases the optimizer-only liveness uses
+// after LLVM has materialized coroutine frames. LLVM 19 accepts llvm.fake.use
+// in IR and CoroSplit honors it, but its target pipeline can otherwise emit an
+// unresolved external call at O0. The declaration may remain: with every call
+// removed it contributes no object-file reference.
+//
+// Calling this before CoroSplit would destroy the liveness edge that KeepAlive
+// exists to provide; production callers therefore invoke it only immediately
+// after the coroutine/default optimization pipeline.
+func RemoveKeepAliveCallsAfterCoroSplit(module llvm.Module) int {
+	removed := 0
+	for fn := module.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
+		for block := fn.FirstBasicBlock(); !block.IsNil(); block = llvm.NextBasicBlock(block) {
+			for instruction := block.FirstInstruction(); !instruction.IsNil(); {
+				next := llvm.NextInstruction(instruction)
+				if instruction.InstructionOpcode() == llvm.Call && instruction.CalledValue().Name() == "llvm.fake.use" {
+					instruction.EraseFromParentAsInstruction()
+					removed++
+				}
+				instruction = next
+			}
+		}
+	}
+	return removed
+}
+
 // GoString returns a Go string
 func (b Builder) GoString(v Expr) Expr {
 	fn := b.Pkg.rtFunc("GoString")
@@ -364,6 +420,66 @@ func (b Builder) checkedUnsafeSlice(data, size Expr) Expr {
 	elemSize := prog.SizeOf(prog.Elem(data.Type))
 	b.checkUnsafeBuiltinBounds("unsafe.Slice", data, size, elemSize)
 	return b.unsafeSlice(data, size.impl, size.impl)
+}
+
+// UnsafeSliceGuardConditions computes the target-width conditions needed by
+// unsafe.Slice without emitting a runtime call or constructing the slice
+// header. The returned conditions are ordered: preLenFault must be handled
+// before nilFault, and nilFault before spanLenFault. Only after all three
+// conditions are false may length be used as the slice length and capacity.
+//
+// Keeping the arithmetic here makes the pointer-width rules independent of a
+// particular frontend outcome mechanism. In particular, physical coroutine
+// lowering can publish an explicit panic status while an ordinary lowering can
+// use runtime panic helpers. The source length is round-tripped through target
+// int before any truncating conversion is accepted, which is required for a
+// wide integer operand on 32-bit targets.
+func (b Builder) UnsafeSliceGuardConditions(
+	data, size Expr,
+	elemSize uint64,
+) (length, preLenFault, nilFault, spanLenFault Expr) {
+	prog := b.Prog
+	length = b.FitIntSize(size)
+	doesNotFit := prog.BoolVal(false)
+	if prog.SizeOf(size.Type) != prog.SizeOf(prog.Int()) {
+		roundTrip := b.Convert(size.Type, length)
+		doesNotFit = b.BinOp(token.NEQ, roundTrip, size)
+	}
+	zeroInt := prog.IntVal(0, prog.Int())
+	isNegative := b.BinOp(token.LSS, length, zeroInt)
+	preLenFault = b.BinOp(token.OR, doesNotFit, isNegative)
+
+	isNil := b.BinOp(token.EQL, data, prog.Nil(data.Type))
+	nonZero := b.BinOp(token.NEQ, length, zeroInt)
+	if elemSize == 0 {
+		nilFault = b.BinOp(token.AND, isNil, nonZero)
+		spanLenFault = prog.BoolVal(false)
+		return
+	}
+
+	uintptrType := prog.Uintptr()
+	uintptrLength := b.Convert(uintptrType, length)
+	maxAddress := ^uint64(0)
+	if bits := uint(prog.PointerSize() * 8); bits < 64 {
+		maxAddress = (uint64(1) << bits) - 1
+	}
+	tooLarge := b.BinOp(
+		token.GTR,
+		uintptrLength,
+		prog.IntVal(maxAddress/elemSize, uintptrType),
+	)
+	byteSize := uintptrLength
+	if elemSize != 1 {
+		byteSize = b.BinOp(token.MUL, uintptrLength, prog.IntVal(elemSize, uintptrType))
+	}
+	address := b.Convert(uintptrType, data)
+	negativeAddress := b.BinOp(token.SUB, prog.IntVal(0, uintptrType), address)
+	wrapsAddressSpace := b.BinOp(token.GTR, byteSize, negativeAddress)
+	invalidSpan := b.BinOp(token.OR, tooLarge, wrapsAddressSpace)
+	nilFault = b.BinOp(token.AND, invalidSpan, isNil)
+	isNonNil := b.BinOp(token.NEQ, data, prog.Nil(data.Type))
+	spanLenFault = b.BinOp(token.AND, invalidSpan, isNonNil)
+	return
 }
 
 func (b Builder) checkUnsafeBuiltinBounds(name string, data, size Expr, elemSize uint64) {
@@ -509,6 +625,18 @@ func isPredOp(op token.Token) bool {
 // AND OR XOR SHL SHR AND_NOT   & | ^ << >> &^
 // EQL NEQ LSS LEQ GTR GEQ      == != < <= > >=
 func (b Builder) BinOp(op token.Token, x, y Expr) Expr {
+	return b.binOp(op, x, y, false)
+}
+
+// BinOpWithNonZeroDivisor emits an integer division or remainder for which the
+// caller has already proved that y is non-zero at this instruction. It keeps
+// the ordinary Go signed-overflow lowering, but omits the otherwise redundant
+// AssertDivideByZero edge. Calls with any other operator retain BinOp semantics.
+func (b Builder) BinOpWithNonZeroDivisor(op token.Token, x, y Expr) Expr {
+	return b.binOp(op, x, y, true)
+}
+
+func (b Builder) binOp(op token.Token, x, y Expr, divisorProvenNonZero bool) Expr {
 	dbgInstrf("BinOp %d, %v, %v\n", op, x.impl, y.impl)
 	switch {
 	case isMathOp(op): // op: + - * / %
@@ -557,7 +685,7 @@ func (b Builder) BinOp(op token.Token, x, y Expr) Expr {
 				// lowering below when both guards are needed.
 				var safeY llvm.Value
 				if (op == token.QUO || op == token.REM) && (kind == vkSigned || kind == vkUnsigned) {
-					needsCheck := true
+					needsCheck := !divisorProvenNonZero
 					if rv := y.impl.IsAConstantInt(); !rv.IsNil() {
 						needsCheck = rv.ZExtValue() == 0
 					}
@@ -1476,14 +1604,25 @@ func (b Builder) SelectValue(cond Expr, a Expr, bExpr Expr) Expr {
 //
 //	t1 = slice to array pointer *[4]byte <- []byte (t0)
 func (b Builder) SliceToArrayPointer(x Expr, typ Type) (ret Expr) {
-	ret.Type = typ
-	max := b.Prog.IntVal(uint64(typ.RawType().Underlying().(*types.Pointer).Elem().Underlying().(*types.Array).Len()), b.Prog.Int())
+	length := typ.RawType().Underlying().(*types.Pointer).Elem().Underlying().(*types.Array).Len()
+	if length == 0 {
+		return b.SliceToArrayPointerUnchecked(x, typ)
+	}
+	max := b.Prog.IntVal(uint64(length), b.Prog.Int())
 	failed := Expr{llvm.CreateICmp(b.impl, llvm.IntSLT, b.SliceLen(x).impl, max.impl), b.Prog.Bool()}
 	b.IfThen(failed, func() {
 		b.InlineCall(b.Pkg.rtFunc("PanicSliceConvert"), max, b.SliceLen(x))
 	})
-	ret.impl = b.SliceData(x).impl
-	return
+	return b.SliceToArrayPointerUnchecked(x, typ)
+}
+
+// SliceToArrayPointerUnchecked emits only the representation-preserving slice
+// data projection. The caller must either prove len(x) >= len(*typ), or emit a
+// terminal Go slice-conversion fault before reaching this operation. In
+// particular, the projection deliberately preserves a nil data pointer for a
+// nil slice converted to *[0]T.
+func (b Builder) SliceToArrayPointerUnchecked(x Expr, typ Type) Expr {
+	return Expr{impl: b.SliceData(x).impl, Type: typ}
 }
 
 // A Builtin represents a specific use of a built-in function, e.g. len.

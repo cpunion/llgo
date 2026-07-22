@@ -5,19 +5,20 @@ package build
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/goplus/llgo/internal/coro"
+	llssa "github.com/goplus/llgo/ssa"
+	"golang.org/x/tools/go/ssa"
 )
 
 // This is an integration regression for the real runtime closure, not a probe.
-// It keeps the legacy ABI fail-closed at the first user-code-capable terminal
-// panic edge. If Rethrow's terminal-unhandled branch is later split behind a
-// different panic ABI adapter, this expected chain must be deliberately
-// replaced by the new adapter's certificate test.
-func TestRealRuntimeLegacyPanicPlainCertificateStopsAtDynamicError(t *testing.T) {
-	sentinel := errors.New("legacy panic blocker verified")
+// The terminal legacy panic path deliberately uses printanyraw: tracing an
+// already-unhandled panic must not dynamically invoke Error or String after
+// the native unwinder has abandoned the managed path. Consequently the whole
+// Panic -> Rethrow -> TracePanic chain is now a certifiable plain island.
+func TestRealRuntimeLegacyPanicPlainCertificateAcceptsRawTerminalTrace(t *testing.T) {
+	sentinel := errors.New("legacy raw panic trace verified")
 	conf := NewDefaultConf(ModeGen)
 	conf.ForceRebuild = true
 	conf.EnableCoroEntryResolution = true
@@ -31,29 +32,37 @@ func TestRealRuntimeLegacyPanicPlainCertificateStopsAtDynamicError(t *testing.T)
 		if err != nil {
 			return nil, err
 		}
-		err = validateCoroUnwindOnlyLoweredCalls(plan, coro.PanicLegacyABIV0)
-		if err == nil {
-			return nil, fmt.Errorf("real runtime legacy panic closure unexpectedly received a plain certificate")
+		if err := validateCoroUnwindOnlyLoweredCalls(plan, coro.PanicLegacyABIV0); err != nil {
+			return nil, fmt.Errorf("real runtime raw terminal panic trace is not a plain certificate: %w", err)
 		}
-		message := err.Error()
-		cursor := 0
-		for _, part := range []string{
-			"runtime.Panic[",
-			"runtime.Rethrow[",
-			"runtime.TracePanic[",
-			"runtime.printany[",
-			"dynamic invoke Error",
-		} {
-			index := strings.Index(message[cursor:], part)
-			if index < 0 {
-				return nil, fmt.Errorf("real runtime legacy panic blocker %q lacks ordered path component %q", message, part)
+		functions := make(map[string]*ssa.Function)
+		for _, name := range []string{"Panic", "Rethrow", "TracePanic", "printanyraw", "printany"} {
+			function, findErr := findUniqueCoroWorkerPlanFunction(input.Program, llssa.PkgRuntime, name)
+			if findErr != nil {
+				return nil, findErr
 			}
-			cursor += index + len(part)
+			functions[name] = function
+		}
+		direct := func(owner, target string) bool {
+			for _, call := range coroPlanTestCalls(functions[owner]) {
+				if call.Common() != nil && call.Common().StaticCallee() == functions[target] {
+					return true
+				}
+			}
+			return false
+		}
+		for _, edge := range [][2]string{{"Panic", "Rethrow"}, {"Rethrow", "TracePanic"}, {"TracePanic", "printanyraw"}} {
+			if !direct(edge[0], edge[1]) {
+				return nil, fmt.Errorf("real runtime raw terminal panic trace lacks direct %s -> %s edge", edge[0], edge[1])
+			}
+		}
+		if direct("TracePanic", "printany") {
+			return nil, fmt.Errorf("real runtime terminal TracePanic still calls callback-capable printany")
 		}
 		return nil, sentinel
 	}
 	_, err := Do([]string{"../../cl/_testgo/print"}, conf)
 	if !errors.Is(err, sentinel) {
-		t.Fatalf("Do error = %v, want verified legacy panic blocker", err)
+		t.Fatalf("Do error = %v, want verified raw terminal panic trace", err)
 	}
 }

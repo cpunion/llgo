@@ -31,3 +31,23 @@ func preemptStore(ptr *uint32, value uint32) {
 func preemptCompareAndSwap(ptr *uint32, old, new uint32) bool {
 	return atomic.CompareAndSwapUint32(ptr, old, new)
 }
+
+func preemptLoad64(ptr *uint64) uint64 {
+	return atomic.LoadUint64(ptr)
+}
+
+func preemptStore64(ptr *uint64, value uint64) {
+	atomic.StoreUint64(ptr, value)
+}
+
+func preemptCompareAndSwap64(ptr *uint64, old, new uint64) bool {
+	return atomic.CompareAndSwapUint64(ptr, old, new)
+}
+
+func preemptLoadWord(ptr *uintptr) uintptr {
+	return atomic.LoadUintptr(ptr)
+}
+
+func preemptStoreWord(ptr *uintptr, value uintptr) {
+	atomic.StoreUintptr(ptr, value)
+}

@@ -9,6 +9,7 @@ func Breakpoint() {
 }
 
 func Gosched() {
+	coroSchedulerYield()
 }
 
 func NumCgoCall() int64 {

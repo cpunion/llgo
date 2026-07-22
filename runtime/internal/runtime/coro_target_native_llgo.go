@@ -1,4 +1,4 @@
-//go:build llgo && llgo_coro && llgo_coro_native_pipe && (darwin || linux) && !baremetal && !coro_runtime_adapter_test
+//go:build llgo && llgo_coro && llgo_coro_native_pipe && (darwin || linux) && !baremetal && !coro_runtime_adapter_test && !llgo_coro_native_fleet
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -52,9 +52,17 @@ func coroTargetConsumeExecutorRunV2(handle coro.ExecutorHandle, epoch uint32) bo
 
 var coroNativeTargetV1State coroNativeTargetStateV1
 
+// CoroNativePollServerDescriptorV1 exposes only the stable identity of the
+// shared native executor doorbell to the standard-library runtime poll shim.
+// It does not expose either descriptor for I/O or transfer target ownership.
+func CoroNativePollServerDescriptorV1(fd uintptr) bool {
+	return coroNativeTargetV1State.doorbell.OwnsDescriptor(fd)
+}
+
 func coroTargetExecutorStartV1(handle coro.ExecutorHandle) bool {
 	state := &coroNativeTargetV1State
 	if state.started || state.handle != (coro.ExecutorHandle{}) || !state.ingress.CanReleaseResources() ||
+		!coroNativeWorkerPoolCanReleaseV1() ||
 		handle != coroProgramExecutorHandleV1State || handle.Slot == 0 || handle.Generation == 0 ||
 		!state.doorbell.Open() {
 		return false
@@ -66,6 +74,17 @@ func coroTargetExecutorStartV1(handle coro.ExecutorHandle) bool {
 		return false
 	}
 	state.started = true
+	if !coroNativeWorkerPoolStartV1(handle) {
+		state.started = false
+		sealed := state.ingress.Seal()
+		retired := sealed && state.ingress.Retire()
+		closed := state.doorbell.Close()
+		state.handle = coro.ExecutorHandle{}
+		if !retired || !closed {
+			coroRuntimeAbort("native coroutine target start rollback failed")
+		}
+		return false
+	}
 	return true
 }
 
@@ -112,9 +131,46 @@ func coroTargetRequestExecutorV1(handle coro.ExecutorHandle) bool {
 	return accepted && ringOK && leaveOK
 }
 
+// coroTargetPostTaskControlV1 is the native foreign-producer transaction. The
+// target ingress lease starts before the stable TaskControlSource is touched
+// and ends only after the exact executor request and optional doorbell byte.
+// Terminal close therefore joins the otherwise-dangerous Post -> Request ->
+// Ring window without allowing a producer to retain any Go pointer.
+func coroTargetPostTaskControlV1(id coro.OperationID, kind coro.TaskCancelKind, executor coro.ExecutorHandle) coro.TaskControlExecutorPostResult {
+	invalid := coro.TaskControlExecutorPostResult{
+		Control:  coro.TaskControlPostInvalid,
+		Executor: coro.ExecutorRequestInvalid,
+	}
+	state := &coroNativeTargetV1State
+	if !state.ingress.Enter() {
+		return invalid
+	}
+	if !state.started || state.handle != executor || executor != coroProgramExecutorHandleV1State {
+		_, _ = state.ingress.Leave()
+		return invalid
+	}
+	result := coro.PostTaskControlAndRequest(
+		&coroProgramTaskControlSourceV1State,
+		id,
+		kind,
+		&coroProgramExecutorRegistryV1State,
+		executor,
+	)
+	ringOK := true
+	if coro.ExecutorRequestNeedsDoorbell(result.Executor) {
+		ringOK = state.doorbell.Ring()
+	}
+	_, leaveOK := state.ingress.Leave()
+	if !ringOK || !leaveOK {
+		return invalid
+	}
+	return result
+}
+
 func coroTargetBeginExecutorCloseV1(handle coro.ExecutorHandle, epoch uint32) coroTargetDispatchResultV1 {
 	state := &coroNativeTargetV1State
-	if !state.started || state.handle != handle || epoch == 0 || state.waitEpoch != 0 || state.runEpoch != 0 || !state.ingress.Seal() {
+	if !state.started || state.handle != handle || epoch == 0 || state.waitEpoch != 0 || state.runEpoch != 0 ||
+		!coroNativeWorkerPoolStopV1(handle) || !state.ingress.Seal() {
 		return coroTargetDispatchInvalidV1
 	}
 

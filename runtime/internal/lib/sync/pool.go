@@ -52,8 +52,8 @@ import (
 type Pool struct {
 	noCopy noCopy
 
-	local     unsafe.Pointer // local fixed-size per-P pool, actual type is [P]poolLocal
-	localSize uintptr        // size of the local array
+	local     *tls.Handle[*poolLocal]
+	localSize uintptr // size of the local array
 
 	victim     unsafe.Pointer // local from previous cycle
 	victimSize uintptr        // size of victims array
@@ -127,29 +127,19 @@ func (p *Pool) pin() (*poolLocal, int) {
 		panic("nil Pool")
 	}
 
-	if ptr := atomic.LoadPointer(&p.local); ptr != nil {
-		handle := (*tls.Handle[*poolLocal])(ptr)
-		l := handle.Get()
-		if l == nil {
-			l = &poolLocal{}
-			handle.Set(l)
-		}
-		return l, 0
-	}
-
 	return p.pinSlow()
 }
 
 func (p *Pool) pinSlow() (*poolLocal, int) {
 	p.once.Do(func() {
-		handle := tls.Alloc[*poolLocal](func(head **poolLocal) {
-			if head != nil {
-				atomic.StorePointer(&p.victim, unsafe.Pointer(*head))
-			}
-		})
-		atomic.StorePointer(&p.local, unsafe.Pointer(&handle))
+		// Pool permits cached values to disappear at any time. Let pthread TLS
+		// drop this thread's local cache on exit instead of installing a captured
+		// Go closure as a foreign-thread destructor. A later thread lazily creates
+		// its own local value through the same process-wide TLS key.
+		handle := tls.Alloc[*poolLocal](nil)
+		p.local = &handle
 	})
-	handle := (*tls.Handle[*poolLocal])(p.local)
+	handle := p.local
 	l := &poolLocal{}
 	handle.Set(l)
 	return l, 0

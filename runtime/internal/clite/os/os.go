@@ -109,6 +109,12 @@ func Chroot(path *c.Char) c.Int
 //go:linkname Environ environ
 var Environ **c.Char
 
+// Getenv is a same-thread libc metadata lookup. It may take libc's internal
+// environment lock, but it neither waits for application I/O/events nor
+// retains the name argument after return. The returned pointer remains owned
+// by libc and callers copy it before any environment mutation.
+//
+//llgo:coro sync
 //go:linkname Getenv C.getenv
 func Getenv(name *c.Char) *c.Char
 
@@ -171,7 +177,7 @@ func Close(fd c.Int) c.Int
 func Read(fd c.Int, buf c.Pointer, count uintptr) int
 
 //go:linkname Write C.write
-func Write(fd c.Int, buf c.Pointer, count uintptr) int
+func Write(fd c.Int, buf c.Pointer, count uintptr) c.SsizeT
 
 //go:linkname Pread C.pread
 func Pread(fd c.Int, buf c.Pointer, count uintptr, offset OffT) int
@@ -288,6 +294,13 @@ func Sysctl(
 	oldp c.Pointer, oldlenp *uintptr,
 	newp c.Pointer, newlen uintptr) c.Int
 
+// Sysctlbyname is a same-thread Darwin kernel metadata query. It may pass
+// through libc or kernel locks, but it neither retains the caller's frame nor
+// waits for application I/O or an external readiness event. Runtime startup
+// therefore uses the exact synchronous foreign-call capability instead of a
+// worker/event transaction.
+//
+//llgo:coro sync
 //go:linkname Sysctlbyname C.sysctlbyname
 func Sysctlbyname(
 	name *c.Char, oldp c.Pointer, oldlenp *uintptr,

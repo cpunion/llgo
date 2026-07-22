@@ -62,9 +62,11 @@ func validRunDecision(decision RunDecision) bool {
 		(decision.task != TaskCancelNone && decision.lease.Valid() && decision.lease.ticket == decision.ticket))
 }
 
-// resumeGateTaken proves that compiler-generated code consumed exactly the
-// current P/G resume decision before it can publish another transition.
-func resumeGateTaken(g *G) bool {
+// resumeGateStructurallyTaken proves that compiler-generated code consumed
+// exactly the current P/G resume decision. Critical enter/exit use this shape
+// at any nested depth; every ordinary coroutine transition goes through
+// resumeGateTaken and is therefore rejected while preemption is masked.
+func resumeGateStructurallyTaken(g *G) bool {
 	if !ValidG(g) || g.runP == nil {
 		return false
 	}
@@ -74,12 +76,20 @@ func resumeGateTaken(g *G) bool {
 		p.runDecision == (RunDecision{}) && p.runDecisionTaken
 }
 
+// resumeGateTaken is the suspension-capable compiler hook gate. A non-zero
+// critical depth may not await, yield, park, complete, panic, spawn, or publish
+// source state that can lead to suspension.
+func resumeGateTaken(g *G) bool {
+	return resumeGateStructurallyTaken(g) && gPreemptEnabledAtDepthZero(g)
+}
+
 // prepareRunDecision is the scheduler's last gate before llvm.coro.resume.
 // It runs after the complete SourceSet snapshot and while P exclusively owns
 // G. A ready park is consumed here, not in a producer callback or PollReady.
 func prepareRunDecision(p *P, g *G) bool {
 	if p == nil || !ValidG(g) || p.current != g || g.runP != p || g.state != GRunning ||
-		p.runDecision != (RunDecision{}) || p.runDecisionTaken || !validParkState(&g.park) {
+		p.runDecision != (RunDecision{}) || p.runDecisionTaken || !gPreemptEnabledAtDepthZero(g) ||
+		!validParkState(&g.park) {
 		return false
 	}
 	decision := RunDecision{}

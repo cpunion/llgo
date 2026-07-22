@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/goplus/llgo/internal/coro"
 	"github.com/goplus/llgo/internal/env"
 	"github.com/goplus/llgo/internal/packages"
 	intllvm "github.com/goplus/llgo/internal/xtool/llvm"
@@ -123,6 +124,8 @@ func (c *context) collectCommonInputs(m *manifestBuilder) {
 		m.common.CoroPanicABI = metadata.PanicABI
 		m.common.CoroFuncRepABI = metadata.FuncRepABI
 		m.common.CoroFrameRetentionABI = metadata.FrameRetentionABI
+		m.common.CoroLoweringFactsSchema = metadata.LoweringFactsSchema
+		m.common.CoroLoweringFactsDigest = metadata.LoweringFactsDigest
 		m.common.CoroTargetTriple = metadata.TargetTriple
 		m.common.CoroTargetCPU = metadata.TargetCPU
 		m.common.CoroTargetFeatures = metadata.TargetFeatures
@@ -382,15 +385,21 @@ func (c *context) canUsePackageCache() bool {
 		c.clCompilation.EnableCoroClosedStaticSpawn == c.buildConf.EnableCoroClosedStaticSpawn &&
 		c.clCompilation.EnableCoroProgramBootstrapRun == c.buildConf.EnableCoroProgramBootstrapRun &&
 		c.clCompilation.EnableCoroChannel == c.buildConf.EnableCoroChannel &&
+		c.clCompilation.EnableCoroWorker == c.buildConf.EnableCoroWorker &&
 		c.clCompilation.CoroABI == metadata.CoroABI &&
 		c.clCompilation.SchedulerABI == metadata.SchedulerABI &&
 		c.clCompilation.PanicABI == metadata.PanicABI &&
 		c.clCompilation.FuncRepABI == metadata.FuncRepABI &&
 		c.clCompilation.CoroFrameRetentionABI == metadata.FrameRetentionABI &&
+		c.clCompilation.CoroLoweringFacts.Schema == metadata.LoweringFactsSchema &&
+		c.clCompilation.CoroLoweringFactsDigest == metadata.LoweringFactsDigest &&
+		c.coroLoweringFacts.Schema == metadata.LoweringFactsSchema &&
+		c.coroLoweringFactsDigest == metadata.LoweringFactsDigest &&
 		metadata.CoroABI == activeCoroABIVersion(c.buildConf) &&
 		metadata.SchedulerABI == activeCoroSchedulerABIVersion(c.buildConf) &&
 		metadata.PanicABI == activeCoroPanicABIVersion(c.buildConf) &&
 		metadata.FuncRepABI == activeCoroFuncRepABIVersion(c.buildConf) &&
+		metadata.LoweringFactsSchema == coro.LoweringFactsSchema && metadata.LoweringFactsDigest != "" &&
 		metadata.TargetTriple != "" && metadata.PointerBits > 0 &&
 		(metadata.Endianness == "little" || metadata.Endianness == "big") &&
 		metadata.DataLayout != ""

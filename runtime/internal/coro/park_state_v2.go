@@ -34,6 +34,15 @@ func validParkTicket(ticket ParkTicket) bool {
 	return ticket.generation != 0
 }
 
+// Valid reports whether ticket identifies one live park generation. ParkTicket
+// is deliberately opaque outside this package; adapters must use this semantic
+// predicate instead of comparing its current physical fields with a zero
+// struct. The latter needlessly exposes an internal layout and may lower as an
+// aggregate comparison in a stackless coroutine body.
+func (ticket ParkTicket) Valid() bool {
+	return validParkTicket(ticket)
+}
+
 func nextParkTicket(previous ParkTicket) (ParkTicket, bool) {
 	if previous == (ParkTicket{}) {
 		return ParkTicket{generation: 1}, true

@@ -33,6 +33,16 @@ type routeManualFixture struct {
 	route    RouteID
 }
 
+type routeWorkerFixture struct {
+	p        *P
+	driver   *ExecutorDriver
+	registry *ExecutorRegistry
+	waits    *WaitRegistrationTable
+	worker   *WorkerOperationSource
+	handle   ExecutorHandle
+	route    RouteID
+}
+
 func bindRouteManualFixture(t *testing.T, route RouteID) *routeManualFixture {
 	t.Helper()
 	fixture := &routeManualFixture{
@@ -47,6 +57,28 @@ func bindRouteManualFixture(t *testing.T, route RouteID) *routeManualFixture {
 	if !BindExecutorSourceCatalogAtRoute(fixture.driver, fixture.p, fixture.registry, fixture.handle, route,
 		ExecutorSourceCatalog{Waits: fixture.waits, Manual: fixture.manual}) {
 		t.Fatal("bind route-aware manual driver")
+	}
+	return fixture
+}
+
+func bindRouteWorkerFixture(
+	t *testing.T,
+	registry *ExecutorRegistry,
+	route RouteID,
+) *routeWorkerFixture {
+	t.Helper()
+	fixture := &routeWorkerFixture{
+		p:        new(P),
+		driver:   new(ExecutorDriver),
+		registry: registry,
+		waits:    new(WaitRegistrationTable),
+		worker:   new(WorkerOperationSource),
+		route:    route,
+	}
+	fixture.handle = registerTestExecutor(t, registry)
+	if !BindExecutorSourceCatalogAtRoute(fixture.driver, fixture.p, registry, fixture.handle, route,
+		ExecutorSourceCatalog{Waits: fixture.waits, Worker: fixture.worker}) {
+		t.Fatal("bind route-aware worker driver")
 	}
 	return fixture
 }
@@ -88,6 +120,39 @@ func settleRouteManualFixture(t *testing.T, fixture *routeManualFixture, state *
 	finishManualOperations(t, fixture.manual, fixture.p, ids, lease)
 	if _, _, ok := PollExecutor(fixture.driver); !ok {
 		t.Fatal("acknowledge routed executor request")
+	}
+	closeTestExecutorDriver(t, fixture.driver)
+}
+
+func settleRouteWorkerFixture(
+	t *testing.T,
+	fixture *routeWorkerFixture,
+	state *ParkState,
+	ticket ParkTicket,
+	id OperationID,
+	want ScalarResultPayloadV1,
+) {
+	t.Helper()
+	if published, lost, ok := fixture.worker.PublishPass(fixture.p); !ok || published != 1 || lost != 0 {
+		t.Fatalf("publish routed worker = (%d, %d, %t)", published, lost, ok)
+	}
+	wantResolution := CompletionResolution{WaitSets: 1, Completed: 1, Winners: 1}
+	if resolution, duplicates, ok := fixture.worker.ResolveAffectedPublishedEpoch(fixture.p); !ok ||
+		resolution != wantResolution || duplicates != 0 {
+		t.Fatalf("resolve routed worker = (%+v, %d, %t), want %+v", resolution, duplicates, ok, wantResolution)
+	}
+	if applied, detached, ok := fixture.worker.ApplyAndDetach(fixture.p); !ok || applied != 1 || detached != 1 ||
+		!ParkReady(state, ticket) {
+		t.Fatalf("apply routed worker = (%d, %d, %t), ready=%t", applied, detached, ok, ParkReady(state, ticket))
+	}
+	outcome, caseID, lease, consumed := ConsumeParkSet(state, ticket)
+	leaseID, leaseOK := lease.ID()
+	if !consumed || outcome != ParkOutcomeCompleted || caseID != 1 || !leaseOK || leaseID != id {
+		t.Fatalf("consume routed worker = (%d, %d, %+v, %t)", outcome, caseID, lease, consumed)
+	}
+	finishWorkerOperations(t, fixture.worker, fixture.p, []OperationID{id}, lease, want)
+	if _, _, ok := PollExecutor(fixture.driver); !ok {
+		t.Fatal("acknowledge routed worker executor request")
 	}
 	closeTestExecutorDriver(t, fixture.driver)
 }
@@ -192,6 +257,136 @@ func TestOperationRoutesKeepTwoPLocalIdentityDisjoint(t *testing.T) {
 	}
 	settleRouteManualFixture(t, first, state1, ticket1, ids1)
 	settleRouteManualFixture(t, second, state2, ticket2, ids2)
+}
+
+func TestOperationRouteWorkerSharedRegistryKeepsPayloadAndExecutorExact(t *testing.T) {
+	routes := new(OperationRouteRegistry)
+	route1, ok1 := routes.Allocate()
+	route2, ok2 := routes.Allocate()
+	if !ok1 || !ok2 || route1 != 1 || route2 != 2 {
+		t.Fatalf("allocate worker routes = (%d, %t), (%d, %t)", route1, ok1, route2, ok2)
+	}
+	executors := new(ExecutorRegistry)
+	first := bindRouteWorkerFixture(t, executors, route1)
+	second := bindRouteWorkerFixture(t, executors, route2)
+	if !routes.Bind(route1, first.driver) || !routes.Bind(route2, second.driver) {
+		t.Fatal("bind routed worker catalogs")
+	}
+	state1, ticket1, ids1 := reserveWorkerWaitSet(t, first.worker, first.p, 151, []uint32{1})
+	state2, ticket2, ids2 := reserveWorkerWaitSet(t, second.worker, second.p, 152, []uint32{1})
+	id1, id2 := ids1[0], ids2[0]
+	if id1.Source() != OperationSourceWorker || id2.Source() != OperationSourceWorker ||
+		id1.LocalSlot() != 1 || id2.LocalSlot() != 1 || id1.Generation != 1 || id2.Generation != 1 ||
+		id1.Route() != route1 || id2.Route() != route2 || id1 == id2 ||
+		!first.worker.MarkSubmitted(first.p, id1) || !second.worker.MarkSubmitted(second.p, id2) {
+		t.Fatalf("two routed worker identities alias or failed submission: %+v %+v", id1, id2)
+	}
+	payload1 := workerPayloadForTest(t, 1, 0x1111222233334444, 0x5555666677778888)
+	payload2 := workerPayloadForTest(t, 2, 0x9999aaaabbbbcccc, 0xddddeeeeffff0000, 0x1020304050607080)
+	if invalid := routes.PostWorkerAndRequest(id1, ScalarResultPayloadV1{}); invalid != (OperationRouteIngressResult{
+		Route: OperationRoutePostInvalid, Executor: ExecutorRequestInvalid,
+	}) || first.worker.Pending() {
+		t.Fatalf("invalid routed worker payload = %+v, pending=%t", invalid, first.worker.Pending())
+	}
+	wrongSource, made := MakeOperationIDAtRoute(OperationSourceManual, route1, 1, 1)
+	if !made || routes.PostWorkerAndRequest(wrongSource, payload1).Route != OperationRoutePostInvalid {
+		t.Fatal("routed worker accepted a non-worker ID")
+	}
+	unknown, made := MakeOperationIDAtRoute(OperationSourceWorker, 3, 1, 1)
+	if !made || routes.PostWorkerAndRequest(unknown, payload1).Route != OperationRoutePostStale {
+		t.Fatal("routed worker accepted an unallocated route")
+	}
+
+	posted1 := routes.PostWorkerAndRequest(id1, payload1)
+	if posted1.Route != OperationRoutePosted || posted1.Executor != ExecutorRequestPublished ||
+		!first.worker.Pending() || second.worker.Pending() ||
+		!executors.ObserveRequested(first.handle) || executors.ObserveRequested(second.handle) {
+		t.Fatalf("route-1 worker post crossed source or executor: %+v", posted1)
+	}
+	if duplicate := routes.PostWorkerAndRequest(id1, payload2); duplicate.Route != OperationRoutePostCoalesced ||
+		duplicate.Executor != ExecutorRequestInvalid {
+		t.Fatalf("duplicate routed worker post = %+v", duplicate)
+	}
+	stale := id1
+	stale.Generation++
+	if result := routes.PostWorkerAndRequest(stale, payload2); result.Route != OperationRoutePostSourceStale ||
+		result.Executor != ExecutorRequestInvalid {
+		t.Fatalf("stale routed worker generation = %+v", result)
+	}
+	if first.worker.BeginClose(first.p, id1) != WorkerOperationCloseStarted {
+		t.Fatal("begin routed worker source close")
+	}
+	if sourceClosed := routes.PostWorkerAndRequest(id1, payload2); sourceClosed.Route != OperationRoutePostSourceClosed || sourceClosed.Executor != ExecutorRequestInvalid {
+		t.Fatalf("closed routed worker source = %+v", sourceClosed)
+	}
+	posted2 := routes.PostWorkerAndRequest(id2, payload2)
+	if posted2.Route != OperationRoutePosted || posted2.Executor != ExecutorRequestPublished ||
+		!second.worker.Pending() || !executors.ObserveRequested(second.handle) {
+		t.Fatalf("route-2 worker post = %+v", posted2)
+	}
+
+	closeOperationRouteFixture(t, routes, route1)
+	closeOperationRouteFixture(t, routes, route2)
+	if late := routes.PostWorkerAndRequest(id1, payload1); late.Route != OperationRoutePostClosed ||
+		late.Executor != ExecutorRequestInvalid {
+		t.Fatalf("retired worker route late post = %+v", late)
+	}
+	if !routes.AllRetired() {
+		t.Fatal("worker route registry retained a live binding")
+	}
+	settleRouteWorkerFixture(t, first, state1, ticket1, id1, payload1)
+	settleRouteWorkerFixture(t, second, state2, ticket2, id2, payload2)
+}
+
+func TestOperationRouteWorkerStrongJoinCoversPostRequestTail(t *testing.T) {
+	routes := new(OperationRouteRegistry)
+	route, ok := routes.Allocate()
+	if !ok {
+		t.Fatal("allocate strong-join worker route")
+	}
+	executors := new(ExecutorRegistry)
+	fixture := bindRouteWorkerFixture(t, executors, route)
+	if !routes.Bind(route, fixture.driver) {
+		t.Fatal("bind strong-join worker route")
+	}
+	state, ticket, ids := reserveWorkerWaitSet(t, fixture.worker, fixture.p, 153, []uint32{1})
+	id := ids[0]
+	payload := workerPayloadForTest(t, 3, 7, 8, 9)
+	if !fixture.worker.MarkSubmitted(fixture.p, id) {
+		t.Fatal("mark strong-join worker submitted")
+	}
+	slot, found := operationRouteSlotFor(routes, route)
+	if !found {
+		t.Fatal("find strong-join route slot")
+	}
+	posted := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan bool, 1)
+	go func() {
+		if !operationRouteAcquireProducer(slot) {
+			close(posted)
+			done <- false
+			return
+		}
+		postOK := fixture.worker.Post(id, payload) == WorkerOperationPosted
+		requestOK := executors.Request(fixture.handle) == ExecutorRequestPublished
+		close(posted)
+		<-release
+		operationRouteReleaseProducer(slot)
+		done <- postOK && requestOK
+	}()
+	<-posted
+	if !routes.BeginClose(route) {
+		t.Fatal("begin strong-join worker route close")
+	}
+	if routes.ConfirmQuiesced(route) {
+		t.Fatal("worker route quiesced while Post -> Request tail remained admitted")
+	}
+	close(release)
+	if !<-done || !routes.ConfirmQuiesced(route) || !routes.Retire(route) {
+		t.Fatal("finish strong-join worker route")
+	}
+	settleRouteWorkerFixture(t, fixture, state, ticket, id, payload)
 }
 
 func TestOperationRouteControlUsesBoundExecutor(t *testing.T) {

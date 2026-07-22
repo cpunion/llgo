@@ -153,6 +153,7 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 	var coroRunSliceV2 llssa.Function
 	var coroContinueSliceV2 llssa.Function
 	var coroNativePostWait llssa.Function
+	var coroHostPullCallbacks []retainedCoroCallbackV1
 	var coroAllocatorBootstrap llssa.Function
 	if ctx.buildConf.EnableCoroProgramBootstrapRun {
 		if coroEntry.manifest.IsNil() || coroEntry.factory == nil {
@@ -164,6 +165,10 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 			coroRunSliceV2 = declareCoroProgramRunSliceV2(mainPkg)
 			coroContinueSliceV2 = declareCoroProgramContinueSliceV2(mainPkg)
 			coroNativePostWait = declareCoroNativePostWaitV1(mainPkg)
+		} else if hostCoroPullRuntimeABI(ctx.buildConf) {
+			coroRunSliceV2 = declareCoroProgramRunSliceV2(mainPkg)
+			coroContinueSliceV2 = declareCoroProgramContinueSliceV2(mainPkg)
+			coroHostPullCallbacks = declareCoroHostPullCallbacksV1(mainPkg)
 		} else {
 			coroRun = declareCoroProgramRunV1(mainPkg)
 			coroContinue = declareCoroProgramContinueV1(mainPkg)
@@ -185,6 +190,7 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 		coroRun:                coroRun,
 		coroRunSliceV2:         coroRunSliceV2,
 		coroContinueSliceV2:    coroContinueSliceV2,
+		coroHostPull:           hostCoroPullRuntimeABI(ctx.buildConf),
 		coroBootstrapVersion:   cfg.coroBootstrap.abiVersion(),
 	})
 	if coroContinue != nil {
@@ -192,6 +198,9 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 	}
 	if coroNativePostWait != nil {
 		retainCoroNativePostWaitV1(mainPkg, entryFn, coroNativePostWait)
+	}
+	for _, callback := range coroHostPullCallbacks {
+		retainCoroCallbackV1(mainPkg, entryFn, callback.function, callback.symbol, callback.reference, callback.description)
 	}
 
 	if needStart(ctx) {
@@ -382,6 +391,7 @@ func lowerCoroControlWrappers(ctx *context, pkg llssa.Package) error {
 	if err := mod.RunPasses("default<O0>", ctx.prog.TargetMachine(), options); err != nil {
 		return fmt.Errorf("lower coroutine control wrappers: %w", err)
 	}
+	llssa.RemoveKeepAliveCallsAfterCoroSplit(mod)
 	if err := llvm.VerifyModule(mod, llvm.ReturnStatusAction); err != nil {
 		return fmt.Errorf("verify coroutine control wrappers after lowering: %w", err)
 	}
@@ -440,6 +450,7 @@ type entryFunctions struct {
 	coroRun                llssa.Function
 	coroRunSliceV2         llssa.Function
 	coroContinueSliceV2    llssa.Function
+	coroHostPull           bool
 	coroBootstrapVersion   uint32
 }
 
@@ -485,10 +496,10 @@ func defineEntryFunction(ctx *context, pkg llssa.Package, argcVar, argvVar llssa
 		b.Call(fns.runtimeStub.Expr)
 	}
 	if fns.coroFactory != nil {
-		nativeSliceV2 := fns.coroRunSliceV2 != nil && fns.coroContinueSliceV2 != nil
+		sliceV2 := fns.coroRunSliceV2 != nil && fns.coroContinueSliceV2 != nil
 		legacyRunV1 := fns.coroRun != nil && fns.coroRunSliceV2 == nil && fns.coroContinueSliceV2 == nil
 		if fns.coroManifest.IsNil() || fns.coroAllocatorBootstrap == nil || fns.coroBegin == nil ||
-			(!nativeSliceV2 && !legacyRunV1) {
+			(!sliceV2 && !legacyRunV1) || fns.coroHostPull && !sliceV2 {
 			panic("coroutine program entry requires allocator bootstrap, manifest, begin, factory, and run")
 		}
 		null := prog.Nil(prog.VoidPtr())
@@ -496,7 +507,9 @@ func defineEntryFunction(ctx *context, pkg llssa.Package, argcVar, argvVar llssa
 		factory := b.Convert(prog.VoidPtr(), fns.coroFactory.Expr)
 		g := b.Call(fns.coroBegin.Expr, manifest, factory)
 		handle := b.Call(fns.coroFactory.Expr, g, null, null)
-		if nativeSliceV2 {
+		if fns.coroHostPull {
+			b = emitCoroHostInitialSliceV2(b, pkg, g, handle, fns.coroRunSliceV2)
+		} else if sliceV2 {
 			b = emitCoroNativeRunLoopV2(b, pkg, g, handle, fns.coroRunSliceV2, fns.coroContinueSliceV2)
 		} else {
 			b.Call(fns.coroRun.Expr, g, handle)
@@ -563,12 +576,158 @@ func declareCoroProgramContinueSliceV2(pkg llssa.Package) llssa.Function {
 	), llssa.InC)
 }
 
+// emitCoroHostInitialSliceV2 performs exactly one bounded startup activation
+// for an embedding-owned reactor. Complete rejoins the ordinary platform
+// return path. Yielded and Suspended transfer only POD obligations to the host
+// adapter and return from the entry immediately; the embedding later consumes
+// NextAction and invokes the host continuation wrapper. No continuation call or
+// scheduler recursion exists in this entry. Panic, Invalid, Repost, Ignored,
+// and malformed result tuples abort at the compiler/runtime trust boundary.
+func emitCoroHostInitialSliceV2(
+	b llssa.Builder,
+	pkg llssa.Package,
+	g, handle llssa.Expr,
+	run llssa.Function,
+) llssa.Builder {
+	if b == nil || pkg == nil || run == nil {
+		panic("host coroutine initial slice requires entry builder and exact slice ABI")
+	}
+	prog := pkg.Prog
+	word := prog.Uint32()
+	zero := prog.Zero(word)
+	budget := prog.IntVal(uint64(coroProgramNativeRunBudgetV2), word)
+	result := b.AllocaT(coroProgramRunResultTypeV2(prog))
+	status := b.Call(run.Expr, g, handle, budget, result)
+
+	blocks := b.Func.MakeBlocks(9)
+	completeCheckBlock := blocks[0]
+	yieldedStatusBlock := blocks[1]
+	yieldedCheckBlock := blocks[2]
+	suspendedStatusBlock := blocks[3]
+	suspendedCheckBlock := blocks[4]
+	deadlineCheckBlock := blocks[5]
+	detachedBlock := blocks[6]
+	completeBlock := blocks[7]
+	failBlock := blocks[8]
+	b.If(
+		b.BinOp(token.EQL, status, prog.IntVal(uint64(coroProgramDriveCompleteV2), word)),
+		completeCheckBlock,
+		yieldedStatusBlock,
+	)
+
+	and := func(left, right llssa.Expr) llssa.Expr {
+		return b.BinOp(token.AND, left, right)
+	}
+	or := func(left, right llssa.Expr) llssa.Expr {
+		return b.BinOp(token.OR, left, right)
+	}
+	equalField := func(index int, value llssa.Expr) llssa.Expr {
+		return b.BinOp(token.EQL, b.Load(b.FieldAddr(result, index)), value)
+	}
+	nonzeroField := func(index int) llssa.Expr {
+		return b.BinOp(token.NEQ, b.Load(b.FieldAddr(result, index)), zero)
+	}
+	boundedUsed := func() llssa.Expr {
+		return b.BinOp(token.LEQ, b.Load(b.FieldAddr(result, coroProgramRunResultUsedV2)), budget)
+	}
+	exactTuple := func(valid llssa.Expr) llssa.Expr {
+		valid = and(valid, boundedUsed())
+		for _, index := range []int{
+			coroProgramRunResultExecutorSlotV2,
+			coroProgramRunResultExecutorGenerationV2,
+			coroProgramRunResultEpochV2,
+		} {
+			valid = and(valid, nonzeroField(index))
+		}
+		return and(valid, equalField(coroProgramRunResultReservedV2, zero))
+	}
+
+	b.SetBlock(completeCheckBlock)
+	validComplete := and(equalField(coroProgramRunResultFlagsV2, zero), boundedUsed())
+	for _, index := range []int{
+		coroProgramRunResultExecutorSlotV2,
+		coroProgramRunResultExecutorGenerationV2,
+		coroProgramRunResultEpochV2,
+		coroProgramRunResultDeadlineLoV2,
+		coroProgramRunResultDeadlineHiV2,
+		coroProgramRunResultReservedV2,
+	} {
+		validComplete = and(validComplete, equalField(index, zero))
+	}
+	b.If(validComplete, completeBlock, failBlock)
+
+	b.SetBlock(yieldedStatusBlock)
+	b.If(
+		b.BinOp(token.EQL, status, prog.IntVal(uint64(coroProgramDriveYieldedV2), word)),
+		yieldedCheckBlock,
+		suspendedStatusBlock,
+	)
+
+	b.SetBlock(yieldedCheckBlock)
+	validYielded := exactTuple(equalField(
+		coroProgramRunResultFlagsV2,
+		prog.IntVal(uint64(coroProgramRunMoreV2|coroProgramRunRequestQueuedV2), word),
+	))
+	validYielded = and(validYielded, equalField(coroProgramRunResultDeadlineLoV2, zero))
+	validYielded = and(validYielded, equalField(coroProgramRunResultDeadlineHiV2, zero))
+	b.If(validYielded, detachedBlock, failBlock)
+
+	b.SetBlock(suspendedStatusBlock)
+	b.If(
+		b.BinOp(token.EQL, status, prog.IntVal(uint64(coroProgramDriveSuspendedV2), word)),
+		suspendedCheckBlock,
+		failBlock,
+	)
+
+	b.SetBlock(suspendedCheckBlock)
+	flags := b.Load(b.FieldAddr(result, coroProgramRunResultFlagsV2))
+	allowedSuspendedFlags := prog.IntVal(uint64(coroProgramRunBlockedV2|coroProgramRunHasDeadlineV2), word)
+	validSuspended := exactTuple(b.BinOp(
+		token.EQL,
+		b.BinOp(token.AND, flags, allowedSuspendedFlags),
+		flags,
+	))
+	validSuspended = and(validSuspended, b.BinOp(
+		token.NEQ,
+		b.BinOp(token.AND, flags, prog.IntVal(uint64(coroProgramRunBlockedV2), word)),
+		zero,
+	))
+	b.If(validSuspended, deadlineCheckBlock, failBlock)
+
+	b.SetBlock(deadlineCheckBlock)
+	hasDeadline := b.BinOp(
+		token.NEQ,
+		b.BinOp(token.AND, flags, prog.IntVal(uint64(coroProgramRunHasDeadlineV2), word)),
+		zero,
+	)
+	zeroDeadline := and(
+		equalField(coroProgramRunResultDeadlineLoV2, zero),
+		equalField(coroProgramRunResultDeadlineHiV2, zero),
+	)
+	b.If(or(hasDeadline, zeroDeadline), detachedBlock, failBlock)
+
+	b.SetBlock(detachedBlock)
+	// Production configuration rejects Python ownership for host-pull entries.
+	// Keeping this as a direct return also ensures a hand-built module can never
+	// run Py_Finalize while the managed program remains suspended.
+	b.Return(prog.IntVal(0, prog.Int32()))
+
+	b.SetBlock(failBlock)
+	abort := declareNoArgFunc(pkg, "abort")
+	b.Call(abort.Expr)
+	b.Unreachable()
+
+	return b.SetBlock(completeBlock)
+}
+
 // emitCoroNativeRunLoopV2 is the native pipe target's fixed machine-stack
 // host loop. Each runtime call owns at most one bounded scheduler slice. The
 // only legal re-entry is an exact Yielded/More/Inline tuple, and it happens
 // after the public ABI call has returned, so target requestRun cannot recurse
-// through the scheduler stack. Queued, blocked, stale, panic, or malformed
-// results fail closed at this native-only boundary.
+// through the scheduler stack. Used counts only certified RunSlice reductions;
+// it may be zero when target compatibility or fleet-transfer bookkeeping asks
+// for an immediate retry without consuming one. Queued, blocked, stale, panic,
+// or malformed results fail closed at this native-only boundary.
 func emitCoroNativeRunLoopV2(
 	b llssa.Builder,
 	pkg llssa.Package,
@@ -643,7 +802,6 @@ func emitCoroNativeRunLoopV2(
 		prog.IntVal(uint64(coroProgramRunMoreV2|coroProgramRunRequestInlineV2), word),
 	))
 	used := b.Load(b.FieldAddr(result, coroProgramRunResultUsedV2))
-	validYielded = and(validYielded, b.BinOp(token.NEQ, used, zero))
 	validYielded = and(validYielded, b.BinOp(token.LEQ, used, budget))
 	for _, index := range []int{
 		coroProgramRunResultExecutorSlotV2,
@@ -701,9 +859,55 @@ func declareCoroNativePostWaitV1(pkg llssa.Package) llssa.Function {
 	), llssa.InC)
 }
 
+type retainedCoroCallbackV1 struct {
+	function    llssa.Function
+	symbol      string
+	reference   string
+	description string
+}
+
+func declareCoroHostPullCallbacksV1(pkg llssa.Package) []retainedCoroCallbackV1 {
+	pointer := types.Typ[types.UnsafePointer]
+	word := types.Typ[types.Uint32]
+	boolean := types.Typ[types.Bool]
+	resultPointer := types.NewPointer(coroProgramRunResultTypeV2(pkg.Prog).RawType())
+	declare := func(symbol string, params []types.Type, results []types.Type, reference, description string) retainedCoroCallbackV1 {
+		return retainedCoroCallbackV1{
+			function:    pkg.NewFunc(symbol, newSignature(params, results), llssa.InC),
+			symbol:      symbol,
+			reference:   reference,
+			description: description,
+		}
+	}
+	return []retainedCoroCallbackV1{
+		declare(coroHostNextActionSymbolV1, []types.Type{pointer}, []types.Type{word},
+			coroHostNextActionReferenceSymbolV1, "coroutine host next-action callback"),
+		declare(coroHostProfileSymbolV1, nil, []types.Type{word},
+			coroHostProfileReferenceSymbolV1, "coroutine host profile callback"),
+		declare(coroHostNextDeadlineSymbolV1, []types.Type{pointer}, []types.Type{boolean},
+			coroHostNextDeadlineReferenceSymbolV1, "coroutine host next-deadline callback"),
+		declare(coroHostPublishTimeSymbolV1, []types.Type{word, word}, []types.Type{boolean},
+			coroHostPublishTimeReferenceSymbolV1, "coroutine host publish-time callback"),
+		declare(coroHostAckCancelSymbolV1, []types.Type{word, word, word, word}, []types.Type{boolean},
+			coroHostAckCancelReferenceSymbolV1, "coroutine host cancel-ack callback"),
+		declare(coroHostContinueSliceSymbolV1,
+			[]types.Type{word, word, word, word, word, word, word, resultPointer}, []types.Type{word},
+			coroHostContinueSliceReferenceSymbolV1, "coroutine host continue-slice callback"),
+		declare(coroHostPostWaitSymbolV1, []types.Type{word, word, word, word}, []types.Type{word},
+			coroHostPostWaitReferenceSymbolV1, "coroutine host post-wait callback"),
+	}
+}
+
 const (
-	coroProgramContinueReferenceSymbolV1 = "__llgo_coro_program_continue_reference_v1"
-	coroNativePostWaitReferenceSymbolV1  = "__llgo_coro_native_post_wait_reference_v1"
+	coroProgramContinueReferenceSymbolV1   = "__llgo_coro_program_continue_reference_v1"
+	coroNativePostWaitReferenceSymbolV1    = "__llgo_coro_native_post_wait_reference_v1"
+	coroHostNextActionReferenceSymbolV1    = "__llgo_coro_host_next_action_reference_v1"
+	coroHostProfileReferenceSymbolV1       = "__llgo_coro_host_profile_reference_v1"
+	coroHostNextDeadlineReferenceSymbolV1  = "__llgo_coro_host_next_deadline_reference_v1"
+	coroHostPublishTimeReferenceSymbolV1   = "__llgo_coro_host_publish_time_reference_v1"
+	coroHostAckCancelReferenceSymbolV1     = "__llgo_coro_host_ack_cancel_reference_v1"
+	coroHostContinueSliceReferenceSymbolV1 = "__llgo_coro_host_continue_slice_reference_v1"
+	coroHostPostWaitReferenceSymbolV1      = "__llgo_coro_host_post_wait_reference_v1"
 )
 
 // retainCoroProgramContinueV1 gives the target callback ABI a live relocation

@@ -230,3 +230,24 @@ func coroTargetRequestExecutorV1(handle coro.ExecutorHandle) bool {
 	return result == coro.ExecutorRequestPublished || result == coro.ExecutorRequestCoalesced ||
 		result == coro.ExecutorRequestIdleWake
 }
+
+func coroTargetPostTaskControlV1(id coro.OperationID, kind coro.TaskCancelKind, executor coro.ExecutorHandle) coro.TaskControlExecutorPostResult {
+	state := &coroProgramTestTargetV1State
+	if !state.started || state.handle != executor || executor != coroProgramExecutorHandleV1State {
+		return coro.TaskControlExecutorPostResult{
+			Control:  coro.TaskControlPostInvalid,
+			Executor: coro.ExecutorRequestInvalid,
+		}
+	}
+	result := coro.PostTaskControlAndRequest(
+		&coroProgramTaskControlSourceV1State,
+		id,
+		kind,
+		&coroProgramExecutorRegistryV1State,
+		executor,
+	)
+	if result.Executor == coro.ExecutorRequestIdleWake {
+		state.wakeReady = true
+	}
+	return result
+}

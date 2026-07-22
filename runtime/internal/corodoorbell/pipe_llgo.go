@@ -19,77 +19,76 @@
 package corodoorbell
 
 import (
-	"unsafe"
+	_ "unsafe"
 
-	c "github.com/goplus/llgo/runtime/internal/clite"
-	cliteos "github.com/goplus/llgo/runtime/internal/clite/os"
 	catomic "github.com/goplus/llgo/runtime/internal/clite/sync/atomic"
 	csyscall "github.com/goplus/llgo/runtime/internal/clite/syscall"
 )
 
+const (
+	// Keep the coroutine doorbell's contextual libc capability in this package.
+	// The C leaf validates bounded shapes before it touches a descriptor;
+	// generic clite/os Pipe, Read, Write, Poll, and Close remain uncertified.
+	LLGoFiles   = "_wrap/doorbell.c"
+	LLGoPackage = "link"
+)
+
 type nativePollFD struct {
-	fd      c.Int
+	fd      int32
 	events  int16
 	revents int16
 }
 
-func nativeFcntl(fd c.Int, get, set, flag c.Int) bool {
-	for {
-		current := cliteos.Fcntl(fd, get)
-		if current < 0 {
-			if int(nativeErrno()) == int(csyscall.EINTR) {
-				continue
-			}
-			return false
-		}
-		for {
-			if cliteos.Fcntl(fd, set, current|flag) >= 0 {
-				return true
-			}
-			if int(nativeErrno()) != int(csyscall.EINTR) {
-				return false
-			}
-		}
-	}
+// nativeCDoorbellOpen is a fixed startup leaf. A successful return proves that
+// both descriptors are O_NONBLOCK and FD_CLOEXEC before Go can publish them.
+// Its C implementation has bounded EINTR retries and closes partial state.
+//
+//llgo:coro noblock
+//go:linkname nativeCDoorbellOpen C.__llgo_coro_doorbell_open_v1
+func nativeCDoorbellOpen(fds *[2]int32) int32
+
+// nativeCDoorbellRead performs at most one <=64-byte read from the private
+// nonblocking read end. The C leaf rejects every wider request.
+//
+//llgo:coro noblock
+//go:linkname nativeCDoorbellRead C.__llgo_coro_doorbell_read_v1
+func nativeCDoorbellRead(fd int32, buffer *byte, size uintptr) uint64
+
+// nativeCDoorbellWrite performs exactly one one-byte write to the private
+// nonblocking write end. EAGAIN is returned to the retained-wake protocol.
+//
+//llgo:coro noblock
+//go:linkname nativeCDoorbellWrite C.__llgo_coro_doorbell_write_v1
+func nativeCDoorbellWrite(fd int32, buffer *byte, size uintptr) uint64
+
+// nativeCDoorbellClose closes only a descriptor whose ownership has already
+// been sealed and removed from the published Pipe. It never retries close.
+//
+//llgo:coro noblock
+//go:linkname nativeCDoorbellClose C.__llgo_coro_doorbell_close_v1
+func nativeCDoorbellClose(fd int32) int32
+
+// A packed result keeps errno capture inside the same exact C leaf. The low
+// word is a signed syscall result and the high word is zero or positive errno.
+func unpackNativeDoorbellResult(packed uint64) (int, int32) {
+	return int(int32(uint32(packed))), int32(uint32(packed >> 32))
 }
 
 func nativePipeOpen() ([2]int32, bool) {
 	result := [2]int32{invalidFD, invalidFD}
-	var fds [2]c.Int
-	for {
-		if cliteos.Pipe(&fds) == 0 {
-			break
-		}
-		if int(nativeErrno()) != int(csyscall.EINTR) {
-			return result, false
-		}
-	}
-	ok := nativeFcntl(fds[0], c.Int(csyscall.F_GETFD), c.Int(csyscall.F_SETFD), c.Int(csyscall.FD_CLOEXEC)) &&
-		nativeFcntl(fds[1], c.Int(csyscall.F_GETFD), c.Int(csyscall.F_SETFD), c.Int(csyscall.FD_CLOEXEC)) &&
-		nativeFcntl(fds[0], c.Int(csyscall.F_GETFL), c.Int(csyscall.F_SETFL), c.Int(csyscall.O_NONBLOCK)) &&
-		nativeFcntl(fds[1], c.Int(csyscall.F_GETFL), c.Int(csyscall.F_SETFL), c.Int(csyscall.O_NONBLOCK))
-	if !ok {
-		_ = cliteos.Close(fds[0])
-		_ = cliteos.Close(fds[1])
+	var fds [2]int32
+	if nativeCDoorbellOpen(&fds) == 0 {
 		return result, false
 	}
-	return [2]int32{int32(fds[0]), int32(fds[1])}, true
+	return fds, true
 }
 
 func nativePipeRead(fd int32, buffer *byte, size uintptr) (int, int32) {
-	result := cliteos.Read(c.Int(fd), unsafe.Pointer(buffer), size)
-	if result < 0 {
-		return result, nativeErrno()
-	}
-	return result, 0
+	return unpackNativeDoorbellResult(nativeCDoorbellRead(fd, buffer, size))
 }
 
 func nativePipeWrite(fd int32, buffer *byte, size uintptr) (int, int32) {
-	result := cliteos.Write(c.Int(fd), unsafe.Pointer(buffer), size)
-	if result < 0 {
-		return result, nativeErrno()
-	}
-	return result, 0
+	return unpackNativeDoorbellResult(nativeCDoorbellWrite(fd, buffer, size))
 }
 
 func nativePipePollForWait(fd int32, timeoutMS int32) (int, int16, int32) {
@@ -97,7 +96,7 @@ func nativePipePollForWait(fd int32, timeoutMS int32) (int, int16, int32) {
 }
 
 func nativePipeClose(fd int32) bool {
-	return cliteos.Close(c.Int(fd)) == 0
+	return nativeCDoorbellClose(fd) != 0
 }
 
 func nativeErrInterrupted(errno int32) bool {

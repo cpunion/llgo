@@ -16,11 +16,15 @@
 
 package coro
 
-// WaitRegistrationCapacity is the number of one-shot platform waits in one
-// fixed registration table. Static-memory profiles may provision multiple
-// stable tables; registration never allocates or silently overwrites a live
-// slot when capacity is exhausted.
-const WaitRegistrationCapacity = 64
+// WaitRegistrationPageCapacity is the allocation-free granularity of the
+// common producer-facing wait registry. Every table includes one inline page;
+// a target may attach more stable pages before binding it.
+const WaitRegistrationPageCapacity = 64
+
+// WaitRegistrationCapacity is the default capacity of an unconfigured table.
+// It remains the fixed capacity of small/embedded profiles which do not attach
+// extra pages.
+const WaitRegistrationCapacity = WaitRegistrationPageCapacity
 
 // WaitRegistrationHandle is the complete producer-facing ABI. Slot is
 // one-based so the all-zero value is invalid. Platform code may retain and
@@ -104,8 +108,16 @@ type waitRegistrationSlot struct {
 	ticket WaitTicket
 }
 
-// WaitRegistrationTable is a fixed, allocation-free registry and one-shot
-// mailbox set. It must live at a stable address until every platform backend
+// WaitRegistrationPage is stable target-provided storage. Its atomic slot
+// prefix remains producer-visible only through the existing two-word handle;
+// neither this page pointer nor its scheduler suffix crosses an ingress ABI.
+type WaitRegistrationPage struct {
+	slots [WaitRegistrationPageCapacity]waitRegistrationSlot
+}
+
+// WaitRegistrationTable is a paged, allocation-free registry and one-shot
+// mailbox set. Its configured pages are frozen while bound. It must live at a
+// stable address until every platform backend
 // has acknowledged unregister and every slot is retired; it must not be copied
 // after first use. A target ingress shim resolves its stable executor/table ID
 // and calls Post with only the POD handle supplied to the platform operation.
@@ -121,11 +133,81 @@ type waitRegistrationSlot struct {
 // acknowledgement is delivered to that owner; it never calls ConfirmQuiesced
 // directly from a callback/ISR stack.
 type WaitRegistrationTable struct {
-	pending uint32
-	slots   [WaitRegistrationCapacity]waitRegistrationSlot
+	pending    uint32
+	scanLimit  uint32
+	slots      [WaitRegistrationPageCapacity]waitRegistrationSlot
+	extraPages []WaitRegistrationPage
 	// owner is scheduler-only and is never read by Post. A non-nil owner binds
 	// every future registration to one target-neutral single-P driver.
 	owner *P
+}
+
+// WaitRegistrationConfiguredCapacity returns the exact linear handle and scan
+// capacity. Configuration is capped to the common 15-bit source-local domain,
+// which also keeps ExecutorDriver's uint16 progress cursor exact.
+func WaitRegistrationConfiguredCapacity(table *WaitRegistrationTable) uint32 {
+	if table == nil {
+		return 0
+	}
+	return uint32(1+len(table.extraPages)) * WaitRegistrationPageCapacity
+}
+
+func waitRegistrationScanLimit(table *WaitRegistrationTable) (uint32, bool) {
+	if table == nil {
+		return 0, false
+	}
+	capacity := WaitRegistrationConfiguredCapacity(table)
+	return table.scanLimit, validSourceScanLimit(table.scanLimit, capacity)
+}
+
+func waitRegistrationSlotAt(table *WaitRegistrationTable, index uint32) (*waitRegistrationSlot, bool) {
+	if index >= WaitRegistrationConfiguredCapacity(table) {
+		return nil, false
+	}
+	if index < WaitRegistrationPageCapacity {
+		return &table.slots[index], true
+	}
+	page := index/WaitRegistrationPageCapacity - 1
+	offset := index % WaitRegistrationPageCapacity
+	return &table.extraPages[page].slots[offset], true
+}
+
+func reusableWaitRegistrationSlot(slot *waitRegistrationSlot) bool {
+	return slot != nil && producerSourceSlotReusable(&slot.producerSourceSlot) &&
+		slot.p == nil && slot.token == nil && slot.ticket == 0
+}
+
+// ConfigureWaitRegistrationPages attaches stable pages while the table is
+// empty and unbound. Repeating an identical configuration is harmless; an
+// empty table may monotonically expose more of the same backing pool. Post may
+// safely read the frozen slice header concurrently after bind.
+func ConfigureWaitRegistrationPages(table *WaitRegistrationTable, pages []WaitRegistrationPage) bool {
+	if table == nil || table.owner != nil || preemptLoad(&table.pending) != 0 ||
+		len(pages) > int(operationLocalMask/WaitRegistrationPageCapacity)-1 {
+		return false
+	}
+	existing := len(table.extraPages)
+	if existing != 0 && (len(pages) < existing || len(pages) == 0 || &table.extraPages[0] != &pages[0]) {
+		return false
+	}
+	if len(pages) == existing {
+		return true
+	}
+	for index := uint32(0); index < WaitRegistrationConfiguredCapacity(table); index++ {
+		slot, ok := waitRegistrationSlotAt(table, index)
+		if !ok || !reusableWaitRegistrationSlot(slot) {
+			return false
+		}
+	}
+	for page := existing; page < len(pages); page++ {
+		for offset := range pages[page].slots {
+			if !reusableWaitRegistrationSlot(&pages[page].slots[offset]) {
+				return false
+			}
+		}
+	}
+	table.extraPages = pages
+	return true
 }
 
 // PrepareWaitRegistration arms token and publishes the matching stable table
@@ -153,10 +235,10 @@ func PrepareWaitRegistration(p *P, table *WaitRegistrationTable, token *WaitToke
 }
 
 func registrationSlot(table *WaitRegistrationTable, handle WaitRegistrationHandle) (*waitRegistrationSlot, bool) {
-	if table == nil || handle.Slot == 0 || handle.Slot > WaitRegistrationCapacity || handle.Generation == 0 {
+	if table == nil || handle.Slot == 0 || handle.Generation == 0 {
 		return nil, false
 	}
-	return &table.slots[handle.Slot-1], true
+	return waitRegistrationSlotAt(table, handle.Slot-1)
 }
 
 // Register reserves one slot for an armed token. It is scheduler-thread-only
@@ -175,14 +257,20 @@ func (table *WaitRegistrationTable) Register(p *P, token *WaitToken, ticket Wait
 	if schedule != scheduleIdle && schedule != scheduleRequested {
 		return WaitRegistrationHandle{}, false
 	}
-	for index := range table.slots {
-		slot := &table.slots[index]
+	for index := uint32(0); index < WaitRegistrationConfiguredCapacity(table); index++ {
+		slot, slotOK := waitRegistrationSlotAt(table, index)
+		if !slotOK {
+			return WaitRegistrationHandle{}, false
+		}
 		if !producerSourceSlotReusable(&slot.producerSourceSlot) || preemptLoad(&slot.generation) == ^uint32(0) {
 			continue
 		}
 		generation, begun := beginProducerSourceSlot(&slot.producerSourceSlot)
 		if !begun {
 			continue
+		}
+		if !raiseSourceScanLimit(&table.scanLimit, index, WaitRegistrationConfiguredCapacity(table)) {
+			return WaitRegistrationHandle{}, false
 		}
 		slot.p = p
 		slot.token = token
@@ -192,7 +280,7 @@ func (table *WaitRegistrationTable) Register(p *P, token *WaitToken, ticket Wait
 			// owner corrupted either the lifecycle or sealed admission word.
 			return WaitRegistrationHandle{}, false
 		}
-		return WaitRegistrationHandle{Slot: uint32(index) + 1, Generation: generation}, true
+		return WaitRegistrationHandle{Slot: index + 1, Generation: generation}, true
 	}
 	return WaitRegistrationHandle{}, false
 }
@@ -285,10 +373,13 @@ func (table *WaitRegistrationTable) beginDrainPass(owner *P) bool {
 // cursor, never a producer ABI. Keeping this operation O(1) lets the common
 // executor charge every real catalog entry to its reduction budget.
 func (table *WaitRegistrationTable) drainSlot(owner *P, index uint32) (int, bool) {
-	if table == nil || table.owner != owner || index >= uint32(len(table.slots)) {
+	if table == nil || table.owner != owner || index >= WaitRegistrationConfiguredCapacity(table) {
 		return 0, false
 	}
-	slot := &table.slots[index]
+	slot, slotOK := waitRegistrationSlotAt(table, index)
+	if !slotOK {
+		return 0, false
+	}
 	if waitRegistrationState(preemptLoad(&slot.state)) != waitRegistrationPosted {
 		return 0, true
 	}
@@ -312,9 +403,13 @@ func (table *WaitRegistrationTable) drain(owner *P) (int, bool) {
 	if !table.beginDrainPass(owner) {
 		return 0, false
 	}
+	limit, valid := waitRegistrationScanLimit(table)
+	if !valid {
+		return 0, false
+	}
 	drained := 0
-	for index := range table.slots {
-		one, ok := table.drainSlot(owner, uint32(index))
+	for index := uint32(0); index < limit; index++ {
+		one, ok := table.drainSlot(owner, index)
 		drained += one
 		if !ok {
 			return drained, false
@@ -482,10 +577,9 @@ func registrationTableEmpty(table *WaitRegistrationTable, owner *P) bool {
 	if table == nil || table.owner != owner || preemptLoad(&table.pending) != 0 {
 		return false
 	}
-	for index := range table.slots {
-		slot := &table.slots[index]
-		if !producerSourceSlotReusable(&slot.producerSourceSlot) ||
-			slot.p != nil || slot.token != nil || slot.ticket != 0 {
+	for index := uint32(0); index < WaitRegistrationConfiguredCapacity(table); index++ {
+		slot, slotOK := waitRegistrationSlotAt(table, index)
+		if !slotOK || !reusableWaitRegistrationSlot(slot) {
 			return false
 		}
 	}
@@ -496,6 +590,7 @@ func bindRegistrationTable(table *WaitRegistrationTable, p *P) bool {
 	if p == nil || !registrationTableEmpty(table, nil) {
 		return false
 	}
+	table.scanLimit = 0
 	table.owner = p
 	return true
 }
@@ -505,6 +600,7 @@ func unbindRegistrationTable(table *WaitRegistrationTable, p *P) bool {
 		return false
 	}
 	table.owner = nil
+	table.scanLimit = 0
 	return true
 }
 

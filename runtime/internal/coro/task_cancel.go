@@ -289,8 +289,7 @@ func pOwnsRegisteredTaskCancellation(p *P, g *G) bool {
 	if p == nil || !ValidG(g) || g.taskControlLeases == 0 {
 		return false
 	}
-	gate := preemptLoad(preemptAddress(g))
-	if gate != preemptIdle && gate != preemptRequested {
+	if !gPreemptEnabled(g) {
 		return false
 	}
 	switch g.state {
@@ -460,7 +459,7 @@ func TaskCancellationOf(p *P, g *G) (TaskCancelKind, bool) {
 func ClaimTaskCancellation(p *P, g *G) (TaskCancelKind, bool) {
 	if !pOwnsTaskCancellation(p, g) ||
 		(g.state != GRunnable && g.state != GRunning && g.state != GDispatching) ||
-		g.runAction != ActionInvalid ||
+		g.runAction != ActionInvalid || !gPreemptEnabledAtDepthZero(g) ||
 		g.park.taskCancelPhase != taskCancelRequested || !validTaskCancelKind(g.park.taskCancelKind) {
 		return TaskCancelNone, false
 	}
@@ -498,8 +497,8 @@ func ConsumeTaskParkSet(
 func AcknowledgeTaskCancellation(g *G, kind TaskCancelKind) bool {
 	if !ValidG(g) || !validTaskCancelKind(kind) || g.park.taskCancelKind != kind ||
 		g.park.taskCancelPhase != taskCancelCleanup ||
-		g.state != GDead || preemptLoad(preemptAddress(g)) != preemptDisabled ||
-		g.runAction != ActionInvalid ||
+		g.state != GDead || !gPreemptStateAtDepthZero(g, preemptDisabled) ||
+		g.runAction != ActionInvalid || g.transferState != runnableTransferGIdle ||
 		g.root != nil || g.active != nil || g.frames != nil || g.runP != nil ||
 		g.nextReady != nil || g.queued || g.nextWait != nil || g.waiting ||
 		g.waitToken != nil || g.waitTicket != 0 ||

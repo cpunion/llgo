@@ -58,7 +58,7 @@ func TestCoroParkCurrentFrameNativeAndWasm32(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			prog, pkg, plan, root, parkCall := compileCoroParkFixture(t, test.target)
+			prog, pkg, plan, _, root, parkCall := compileCoroParkFixture(t, test.target)
 			defer prog.Dispose()
 			module := pkg.Module()
 			defer module.Dispose()
@@ -136,8 +136,75 @@ func TestCoroParkCurrentFrameNativeAndWasm32(t *testing.T) {
 	}
 }
 
+func TestCoroIntrinsicEmissionObserverFailsClosed(t *testing.T) {
+	prog, pkg, plan, universe, root, parkCall := compileCoroParkFixture(t, nil)
+	defer prog.Dispose()
+	defer pkg.Module().Dispose()
+	owners := universe.sortedUseOwners(root)
+	if len(owners) != 1 {
+		t.Fatalf("Root owners = %d, want 1", len(owners))
+	}
+	// The fixture intentionally uses an isolated/report universe for compact
+	// LLVM tests. Enable only the already-frozen ledger lookup below; no further
+	// helper resolution or code generation occurs after this point.
+	universe.completeRuntimeABI = true
+	for _, test := range []struct {
+		name string
+		run  func(*context)
+		want string
+	}{
+		{
+			name: "mismatched recipe",
+			run: func(ctx *context) {
+				finish := ctx.beginCoroSiteEmission(parkCall)
+				defer finish()
+				ctx.observeCoroIntrinsicCallEmission(llgoCoroPark, CoroIntrinsicCallInlineNoSuspend)
+			},
+			want: "emitted intrinsic recipe 1, frozen SitePlan requires 3",
+		},
+		{
+			name: "mismatched opcode",
+			run: func(ctx *context) {
+				finish := ctx.beginCoroSiteEmission(parkCall)
+				defer finish()
+				ctx.observeCoroIntrinsicCallEmission(llgoCoroYield, CoroIntrinsicCallInlineSuspend)
+			},
+			want: "emitted intrinsic opcode",
+		},
+		{
+			name: "missing recipe",
+			run: func(ctx *context) {
+				ctx.beginCoroSiteEmission(parkCall)()
+			},
+			want: "omitted frozen intrinsic recipe 3",
+		},
+		{
+			name: "mismatched elision",
+			run: func(ctx *context) {
+				finish := ctx.beginCoroSiteEmission(parkCall)
+				defer finish()
+				ctx.observeCoroCallElision(CoroCallElidedNoInit)
+			},
+			want: "emitted call elision 1, frozen SitePlan requires 3",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, err := universe.functionABIContext(root, owners[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx.compilation = &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+			ctx.coroEmission = &coroPhysicalEmissionSession{phase: coroPhysicalEmissionPrologue}
+			message := captureCoroSitePlanPanic(func() { test.run(ctx) })
+			if !strings.Contains(message, test.want) {
+				t.Fatalf("observer panic = %q, want %q", message, test.want)
+			}
+		})
+	}
+}
+
 func compileCoroParkFixture(t *testing.T, target *llssa.Target) (
-	llssa.Program, llssa.Package, *coro.SSAPlan, *ssa.Function, *ssa.Call,
+	llssa.Program, llssa.Package, *coro.SSAPlan, *EmissionUniverse, *ssa.Function, *ssa.Call,
 ) {
 	t.Helper()
 	ssaPkg, _, files := buildGoSSAPkg(t, coroParkTestSource)
@@ -209,5 +276,5 @@ func compileCoroParkFixture(t *testing.T, target *llssa.Target) (
 		prog.Dispose()
 		t.Fatal(err)
 	}
-	return prog, pkg, plan, root, parkCall
+	return prog, pkg, plan, universe, root, parkCall
 }

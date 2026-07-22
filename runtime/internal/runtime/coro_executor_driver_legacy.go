@@ -1,4 +1,4 @@
-//go:build coro_runtime_adapter_test || !(llgo && llgo_coro && llgo_coro_native_pipe && llgo_coro_native_timer && (darwin || linux) && !baremetal)
+//go:build coro_runtime_adapter_test || (!(llgo && llgo_coro && llgo_coro_native_pipe && llgo_coro_native_timer && (darwin || linux) && !baremetal) && !(llgo && llgo_coro && (wasm || baremetal || llgo_coro_host) && !(llgo_coro_native_pipe && (darwin || linux) && !baremetal)))
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -22,7 +22,7 @@ import "github.com/goplus/llgo/runtime/internal/coro"
 
 func coroProgramBindExecutorDriverV1(driver *coro.ExecutorDriver, p *coroP, registry *coro.ExecutorRegistry, handle coro.ExecutorHandle, waits *coro.WaitRegistrationTable) bool {
 	return coro.BindExecutorSourceCatalog(driver, p, registry, handle, coro.ExecutorSourceCatalog{
-		Waits: waits, Channel: &coroProgramChannelSourceV1State,
+		Waits: waits, Channel: &coroProgramChannelSourceV1State, Control: &coroProgramTaskControlSourceV1State,
 	})
 }
 

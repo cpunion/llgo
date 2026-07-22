@@ -255,6 +255,62 @@ func (r *FuncRep) UnmarshalText(text []byte) error {
 	return nil
 }
 
+// FuncTransport is the physical carrier used by one function-valued SSA leaf
+// or call operand. It is deliberately independent from FuncRep: DirectPlain
+// says which entry is invoked, while RawCCodePointer says that the source type
+// carries only that entry address and has no managed closure environment or
+// coroutine descriptor word.
+//
+// ManagedTransport is the zero value so existing plans retain their canonical
+// meaning. RawCCodePointer is selected only from frozen frontend type metadata
+// (for example //llgo:type C), never from target names or runtime inspection.
+type FuncTransport uint8
+
+const (
+	ManagedTransport FuncTransport = iota
+	RawCCodePointer
+)
+
+func (t FuncTransport) Validate() error {
+	if t > RawCCodePointer {
+		return fmt.Errorf("coro: invalid function transport %d", uint8(t))
+	}
+	return nil
+}
+
+func (t FuncTransport) String() string {
+	switch t {
+	case ManagedTransport:
+		return "managed"
+	case RawCCodePointer:
+		return "raw-c-code-pointer"
+	default:
+		return fmt.Sprintf("func-transport(%d)", uint8(t))
+	}
+}
+
+func (t FuncTransport) MarshalText() ([]byte, error) {
+	if err := t.Validate(); err != nil {
+		return nil, err
+	}
+	return []byte(t.String()), nil
+}
+
+func (t *FuncTransport) UnmarshalText(text []byte) error {
+	if t == nil {
+		return fmt.Errorf("coro: cannot unmarshal function transport into nil receiver")
+	}
+	switch strings.TrimSpace(string(text)) {
+	case "managed":
+		*t = ManagedTransport
+	case "raw-c-code-pointer":
+		*t = RawCCodePointer
+	default:
+		return fmt.Errorf("coro: unknown function transport %q", text)
+	}
+	return nil
+}
+
 // BodyEmission is the physical body selected for the current closed-world
 // plan. It is deliberately distinct from Demand, FuncRep, and PrimaryKind:
 // Demand records required entry capabilities, FuncRep records the value ABI,
@@ -269,11 +325,16 @@ const (
 	EmitPlain
 	EmitCoroutine
 	EmitExternal
+	// EmitRawPlain selects the one legacy-stack body for a defined function
+	// reached exclusively through an exact raw-plain provenance. Its managed
+	// Effect and Exec facts are deliberately retained for diagnostics and for a
+	// later mixed-demand fixed point; they do not describe this physical body.
+	EmitRawPlain
 )
 
 // Validate reports whether e names a defined physical-emission choice.
 func (e BodyEmission) Validate() error {
-	if e > EmitExternal {
+	if e > EmitRawPlain {
 		return fmt.Errorf("coro: invalid body emission %d", uint8(e))
 	}
 	return nil
@@ -289,6 +350,8 @@ func (e BodyEmission) String() string {
 		return "coroutine"
 	case EmitExternal:
 		return "external"
+	case EmitRawPlain:
+		return "raw-plain"
 	default:
 		return fmt.Sprintf("body-emission(%d)", uint8(e))
 	}
@@ -316,6 +379,8 @@ func (e *BodyEmission) UnmarshalText(text []byte) error {
 		*e = EmitCoroutine
 	case "external":
 		*e = EmitExternal
+	case "raw-plain":
+		*e = EmitRawPlain
 	default:
 		return fmt.Errorf("coro: unknown body emission %q", text)
 	}

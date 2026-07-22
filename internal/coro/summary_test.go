@@ -90,6 +90,9 @@ func TestSummaryStableAcrossInsertionOrder(t *testing.T) {
 	if !strings.Contains(string(aData), `"emission":"none"`) || !strings.Contains(string(aData), `"emission":"external"`) {
 		t.Fatalf("summary does not encode body emission: %s", aData)
 	}
+	if !strings.Contains(string(aData), `"trusted_bounded_recursion":false`) {
+		t.Fatalf("summary does not encode bounded-recursion proof state: %s", aData)
+	}
 
 	parsed, err := ParseSummary(aData)
 	if err != nil {
@@ -116,25 +119,25 @@ func TestEmptySummaryRoundTrip(t *testing.T) {
 }
 
 func TestSummaryRejectsIncompatibleOrInvalidInput(t *testing.T) {
-	if _, err := ParseSummary([]byte(`{"schema":"llgo.coro.plan.v2","metadata":{},"functions":[]}`)); err == nil {
+	if _, err := ParseSummary([]byte(`{"schema":"llgo.coro.plan.v3","metadata":{},"functions":[]}`)); err == nil {
 		t.Fatal("newer schema unexpectedly accepted")
 	}
-	if _, err := ParseSummary([]byte(`{"schema":"llgo.coro.plan.v0","metadata":{},"functions":[]}`)); err == nil {
+	if _, err := ParseSummary([]byte(`{"schema":"llgo.coro.plan.v1","metadata":{},"functions":[]}`)); err == nil {
 		t.Fatal("older schema unexpectedly accepted")
 	}
-	if _, err := ParseSummary([]byte(`{"schema":"llgo.coro.plan.v1","metadata":{},"functions":[],"future":true}`)); err == nil {
+	if _, err := ParseSummary([]byte(`{"schema":"llgo.coro.plan.v2","metadata":{},"functions":[],"future":true}`)); err == nil {
 		t.Fatal("unknown summary field unexpectedly accepted")
 	}
-	if _, err := ParseSummary([]byte(`{"schema":"llgo.coro.plan.v1","schema":"llgo.coro.plan.v1","metadata":{"coro_abi":"","scheduler_abi":"","panic_abi":"","target_triple":""},"functions":[]}`)); err == nil {
+	if _, err := ParseSummary([]byte(`{"schema":"llgo.coro.plan.v2","schema":"llgo.coro.plan.v2","metadata":{"coro_abi":"","scheduler_abi":"","panic_abi":"","target_triple":""},"functions":[]}`)); err == nil {
 		t.Fatal("duplicate JSON key unexpectedly accepted")
 	}
-	if _, err := ParseSummary([]byte(`{"schema":"llgo.coro.plan.v1","metadata":{"coro_abi":"","scheduler_abi":"","panic_abi":"","target_triple":""},"functions":[{"id":"f"}]}`)); err == nil {
+	if _, err := ParseSummary([]byte(`{"schema":"llgo.coro.plan.v2","metadata":{"coro_abi":"","scheduler_abi":"","panic_abi":"","target_triple":""},"functions":[{"id":"f"}]}`)); err == nil {
 		t.Fatal("truncated function summary unexpectedly accepted")
 	}
-	if _, err := ParseSummary([]byte(`{"schema":"bad","Schema":"llgo.coro.plan.v1","metadata":{"coro_abi":"","scheduler_abi":"","panic_abi":"","target_triple":""},"functions":[]}`)); err == nil {
+	if _, err := ParseSummary([]byte(`{"schema":"bad","Schema":"llgo.coro.plan.v2","metadata":{"coro_abi":"","scheduler_abi":"","panic_abi":"","target_triple":""},"functions":[]}`)); err == nil {
 		t.Fatal("non-canonical JSON key unexpectedly accepted")
 	}
-	invalidUTF8 := []byte(`{"schema":"llgo.coro.plan.v1","metadata":{"coro_abi":"`)
+	invalidUTF8 := []byte(`{"schema":"llgo.coro.plan.v2","metadata":{"coro_abi":"`)
 	invalidUTF8 = append(invalidUTF8, 0xff)
 	invalidUTF8 = append(invalidUTF8, []byte(`","scheduler_abi":"","panic_abi":"","target_triple":""},"functions":[]}`)...)
 	if _, err := ParseSummary(invalidUTF8); err == nil {
@@ -166,14 +169,15 @@ func TestSummaryRejectsIncompatibleOrInvalidInput(t *testing.T) {
 	unknownManaged := Summary{
 		Schema: SummarySchema,
 		Functions: []FunctionSummary{{
-			ID:          "managed",
-			LocalEffect: OpaqueSuspend,
-			Effect:      OpaqueSuspend,
-			Demand:      AsyncDemand,
-			Emission:    EmitExternal,
-			FuncRep:     DirectCoro,
-			External:    ExternalUnknownManaged,
-			Primary:     PrimaryExternal,
+			ID:            "managed",
+			LocalEffect:   OpaqueSuspend,
+			Effect:        OpaqueSuspend,
+			Demand:        AsyncDemand,
+			ManagedDemand: AsyncDemand,
+			Emission:      EmitExternal,
+			FuncRep:       DirectCoro,
+			External:      ExternalUnknownManaged,
+			Primary:       PrimaryExternal,
 		}},
 	}
 	if _, err := unknownManaged.MarshalStable(); err == nil {
@@ -183,12 +187,13 @@ func TestSummaryRejectsIncompatibleOrInvalidInput(t *testing.T) {
 	unknownForeign := Summary{
 		Schema: SummarySchema,
 		Functions: []FunctionSummary{{
-			ID:       "foreign",
-			Demand:   SyncDemand,
-			Emission: EmitExternal,
-			FuncRep:  DirectPlain,
-			External: ExternalUnknownForeign,
-			Primary:  PrimaryExternal,
+			ID:            "foreign",
+			Demand:        SyncDemand,
+			ManagedDemand: SyncDemand,
+			Emission:      EmitExternal,
+			FuncRep:       DirectPlain,
+			External:      ExternalUnknownForeign,
+			Primary:       PrimaryExternal,
 		}},
 	}
 	if _, err := unknownForeign.MarshalStable(); err == nil {
@@ -211,11 +216,12 @@ func TestSummaryRejectsIncompatibleOrInvalidInput(t *testing.T) {
 	invalidEmission := Summary{
 		Schema: SummarySchema,
 		Functions: []FunctionSummary{{
-			ID:       "live",
-			Demand:   SyncDemand,
-			Emission: EmitNone,
-			FuncRep:  DirectPlain,
-			Primary:  PrimaryPlain,
+			ID:            "live",
+			Demand:        SyncDemand,
+			ManagedDemand: SyncDemand,
+			Emission:      EmitNone,
+			FuncRep:       DirectPlain,
+			Primary:       PrimaryPlain,
 		}},
 	}
 	if _, err := invalidEmission.MarshalStable(); err == nil || !strings.Contains(err.Error(), "emission none does not match") {
@@ -224,6 +230,25 @@ func TestSummaryRejectsIncompatibleOrInvalidInput(t *testing.T) {
 	invalidEmission.Functions[0].Emission = BodyEmission(255)
 	if _, err := invalidEmission.MarshalStable(); err == nil || !strings.Contains(err.Error(), "invalid body emission") {
 		t.Fatalf("invalid body emission error = %v", err)
+	}
+
+	invalidBoundedRecursion := Summary{
+		Schema: SummarySchema,
+		Functions: []FunctionSummary{{
+			ID:                      "not-recursive",
+			TrustedBoundedRecursion: true,
+			FuncRep:                 DirectPlain,
+			Primary:                 PrimaryPlain,
+		}},
+	}
+	if _, err := invalidBoundedRecursion.MarshalStable(); err == nil || !strings.Contains(err.Error(), "non-recursive") {
+		t.Fatalf("invalid bounded-recursion proof error = %v", err)
+	}
+	validBoundedRecursion := invalidBoundedRecursion
+	validBoundedRecursion.Functions = append([]FunctionSummary(nil), invalidBoundedRecursion.Functions...)
+	validBoundedRecursion.Functions[0].Recursive = true
+	if _, err := validBoundedRecursion.MarshalStable(); err != nil {
+		t.Fatalf("bounded recursive plain summary: %v", err)
 	}
 }
 
@@ -246,7 +271,7 @@ func FuzzParseSummary(f *testing.F) {
 	}
 	f.Add(valid)
 	f.Add([]byte(`{}`))
-	f.Add([]byte(`{"schema":"llgo.coro.plan.v1","schema":"duplicate"}`))
+	f.Add([]byte(`{"schema":"llgo.coro.plan.v2","schema":"duplicate"}`))
 	f.Add([]byte{0xff})
 
 	f.Fuzz(func(t *testing.T, data []byte) {

@@ -1,4 +1,4 @@
-//go:build !coro_runtime_adapter_test && !(llgo && llgo_coro && llgo_coro_native_pipe && (darwin || linux) && !baremetal)
+//go:build !coro_runtime_adapter_test && !(llgo && llgo_coro && llgo_coro_native_pipe && (darwin || linux) && !baremetal) && !(llgo && llgo_coro && (wasm || baremetal || llgo_coro_host) && !(llgo_coro_native_pipe && (darwin || linux) && !baremetal))
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -60,4 +60,13 @@ func coroTargetPollExecutorWakeV1(coro.ExecutorHandle, uint32) coroTargetDispatc
 func coroTargetRequestExecutorV1(handle coro.ExecutorHandle) bool {
 	result := coroProgramExecutorRegistryV1State.Request(handle)
 	return result == coro.ExecutorRequestPublished || result == coro.ExecutorRequestCoalesced
+}
+
+func coroTargetPostTaskControlV1(coro.OperationID, coro.TaskCancelKind, coro.ExecutorHandle) coro.TaskControlExecutorPostResult {
+	// No host-run/doorbell capability exists on this fallback. Do not accept a
+	// cancellation fact which the target cannot guarantee it will service.
+	return coro.TaskControlExecutorPostResult{
+		Control:  coro.TaskControlPostInvalid,
+		Executor: coro.ExecutorRequestInvalid,
+	}
 }

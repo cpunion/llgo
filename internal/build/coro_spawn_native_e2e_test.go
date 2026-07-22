@@ -131,10 +131,43 @@ const maxAlloc = ^uintptr(0) >> 1
 
 type errorString string
 
+func (e errorString) Error() string { return string(e) }
+func (e errorString) RuntimeError() {}
+
+type plainError string
+
+func (e plainError) Error() string { return string(e) }
+func (e plainError) RuntimeError() {}
+
+type _type struct{}
+type interfacetype struct{}
+type itab struct {
+	inter *interfacetype
+	_type *_type
+}
+type iface struct {
+	tab  *itab
+	data unsafe.Pointer
+}
+
 type eface struct {
-	_type unsafe.Pointer
+	_type *_type
 	data  unsafe.Pointer
 }
+
+type PanicNilError struct {
+	_ [0]*PanicNilError
+}
+
+func (*PanicNilError) Error() string { return "panic called with nil argument" }
+func (*PanicNilError) RuntimeError() {}
+
+// The compiler emits this guard in the unused pointer wrappers for the value
+// receiver methods above. This closed island never invokes those wrappers, so
+// keep only the exact runtime-helper signature instead of importing z_error's
+// full legacy panic/string dependency graph.
+//go:linkname coroChannelNativeE2EPanicWrapNilPointer github.com/goplus/llgo/runtime/internal/runtime.PanicWrapNilPointer
+func coroChannelNativeE2EPanicWrapNilPointer(bool, string, string) {}
 
 //go:linkname AllocU C.malloc
 func AllocU(uintptr) unsafe.Pointer
@@ -218,11 +251,20 @@ func TestCoroChannelAndClosedStaticSpawnNativeNoStdlibRuntimeE2E(t *testing.T) {
 }
 
 func buildCoroSpawnNativeE2EUser(t *testing.T, prog llssa.Program, temp string) (object, anchor, setupSymbol, checkSymbol string) {
+	return buildCoroSpawnNativeE2EUserSource(t, prog, temp, coroSpawnNativeE2ESource, true)
+}
+
+func buildCoroSpawnNativeE2EUserSource(
+	t *testing.T,
+	prog llssa.Program,
+	temp, source string,
+	enableChannel bool,
+) (object, anchor, setupSymbol, checkSymbol string) {
 	t.Helper()
-	ssaPkg, files := buildCoroPlanTestPackage(t, coroSpawnNativeE2EPackage, coroSpawnNativeE2ESource, nil)
+	ssaPkg, files := buildCoroPlanTestPackage(t, coroSpawnNativeE2EPackage, source, nil)
 	universe, err := cl.PrepareEmissionUniverseWithOptions(prog, nil, []cl.EmissionPackage{{
 		SSA: ssaPkg, Files: files, Identity: coroSpawnNativeE2EPackage,
-	}}, cl.EmissionUniverseOptions{EnableCoroChannel: true})
+	}}, cl.EmissionUniverseOptions{EnableCoroChannel: enableChannel})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,10 +273,16 @@ func buildCoroSpawnNativeE2EUser(t *testing.T, prog llssa.Program, temp string) 
 		t.Fatal(err)
 	}
 	mainFn, childFn := ssaPkg.Func("main"), ssaPkg.Func("child")
+	grandchildFn := ssaPkg.Func("grandchild")
 	setupFn, checkFn := ssaPkg.Func("Setup"), ssaPkg.Func("Check")
+	threadIDFn := ssaPkg.Func("threadID")
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	schedulerABI := coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0
+	if enableChannel {
+		schedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	}
+	functionIDs.SchedulerABI = schedulerABI
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{
 		{Function: mainFn, Demand: coro.AsyncDemand},
@@ -246,8 +294,14 @@ func buildCoroSpawnNativeE2EUser(t *testing.T, prog llssa.Program, temp string) 
 		MaxPlainInstructions: -1,
 		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
 			switch fn {
-			case mainFn, childFn:
+			case mainFn, childFn, grandchildFn:
 				return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+			case threadIDFn:
+				return coro.SSAFunctionPolicy{
+					Effect: coro.NoSuspend, Exec: coro.IRQUnsafe,
+					IgnoreBody: true, External: coro.ExternalKnown, OverrideExternal: true,
+					ForeignNoBlockCertificate: "llgo.coro.foreign-noblock.test.v1:thread-id",
+				}, nil
 			default:
 				return coro.SSAFunctionPolicy{}, nil
 			}
@@ -261,11 +315,11 @@ func buildCoroSpawnNativeE2EUser(t *testing.T, prog llssa.Program, temp string) 
 		EnableCoroEntryResolution:     true,
 		EnableCoroPhysicalABI:         true,
 		EnableCoroChildAwait:          true,
-		EnableCoroChannel:             true,
+		EnableCoroChannel:             enableChannel,
 		EnableCoroClosedStaticSpawn:   true,
 		EnableCoroProgramBootstrapRun: true,
 		CoroABI:                       coro.PhysicalABIV1,
-		SchedulerABI:                  coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+		SchedulerABI:                  schedulerABI,
 		PanicABI:                      coro.PanicLegacyABIV0,
 		FuncRepABI:                    coro.FuncRepABIV0,
 		EmissionUniverse:              universe,
@@ -540,18 +594,39 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_frame.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_program.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_run_decision.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_run_slice.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_sched.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_channel_request_default.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_ready_distribution_default.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_executor_retired_default.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_nil_fault.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_panic_payload.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor_driver_legacy.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_spawn.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_native_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_worker_native_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_worker_completion_program_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_wait_pipe_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan_coro.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan_lock_coro.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan_lock_coro_atomic_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan_wait_coro.go"),
 	}
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_run_decision.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_run_slice.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_channel_request_default.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_ready_distribution_default.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_target_executor_retired_default.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_worker_completion_program_llgo.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_nil_fault.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_panic_payload.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "z_chan.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "z_chan_coro.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "z_chan_lock_coro.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "z_chan_lock_coro_atomic_llgo.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "z_chan_wait_coro.go")
 	files = materializeCoroChannelNativeE2ERuntimeIsland(t, files)
 	conf := NewDefaultConf(ModeGen)
 	conf.ForceRebuild = true
@@ -562,12 +637,12 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 	// path must reject this capability as forged.
 	conf.compilerBuildTags = []string{"llgo_coro", coroNativePipeBuildTag}
 	allowed := map[string]bool{
-		"command-line-arguments":                                     true,
-		"github.com/goplus/llgo/runtime/internal/clite/pthread/sync": true,
-		"github.com/goplus/llgo/runtime/internal/coro":               true,
-		"github.com/goplus/llgo/runtime/internal/coroalloc":          true,
-		"github.com/goplus/llgo/runtime/internal/corodoorbell":       true,
-		"github.com/goplus/llgo/runtime/internal/runtime/math":       true,
+		"command-line-arguments":                               true,
+		"github.com/goplus/llgo/runtime/internal/coro":         true,
+		"github.com/goplus/llgo/runtime/internal/coroalloc":    true,
+		"github.com/goplus/llgo/runtime/internal/corodoorbell": true,
+		"github.com/goplus/llgo/runtime/internal/coroworker":   true,
+		"github.com/goplus/llgo/runtime/internal/runtime/math": true,
 	}
 	seen := make(map[string]bool, len(allowed))
 	var objects []string
@@ -604,8 +679,12 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 			t.Fatalf("production coroutine runtime island did not emit required module %q", id)
 		}
 	}
-	if len(objects) != len(allowed) {
-		t.Fatalf("production coroutine runtime island objects = %d, want exactly %d", len(objects), len(allowed))
+	objects = append(objects,
+		buildCoroNativeWorkerCallObject(t, temp),
+		buildCoroNativeDoorbellObject(t, temp),
+	)
+	if len(objects) != len(allowed)+2 {
+		t.Fatalf("production coroutine runtime island objects = %d, want exactly %d package objects plus worker and doorbell leaves", len(objects), len(allowed))
 	}
 	return objects
 }
@@ -669,11 +748,17 @@ func assertCoroSpawnNativeE2ELinkedSymbols(t *testing.T, executable string) {
 		coroProgramRunSliceSymbolV2,
 		coroProgramContinueSliceSymbolV2,
 		coroNativePostWaitSymbolV1,
+		"__llgo_coro_doorbell_open_v1",
+		"__llgo_coro_doorbell_read_v1",
+		"__llgo_coro_doorbell_write_v1",
+		"__llgo_coro_doorbell_close_v1",
+		"__llgo_coro_doorbell_poll_one_v1",
 		"__llgo_coro_spawn_begin_v1",
 		"__llgo_coro_spawn_commit_v1",
 		"__llgo_coro_chan_send_park_v1",
 		"__llgo_coro_chan_recv_park_v1",
 		"__llgo_coro_chan_resume_v1",
+		"__llgo_coro_fault_prepare_v1",
 		"github.com/goplus/llgo/runtime/internal/coro.CommitSpawn",
 		"github.com/goplus/llgo/runtime/internal/coro.BeginChannelExternalCommit",
 		"github.com/goplus/llgo/runtime/internal/coro.BeginChannelExternalCommitPair",
@@ -709,6 +794,7 @@ func runCoroSpawnNativeE2EPasses(t *testing.T, prog llssa.Program, module llvm.M
 	if err := module.RunPasses(pipeline, prog.TargetMachine(), options); err != nil {
 		t.Fatalf("run E2E %s: %v\n%s", pipeline, err, module.String())
 	}
+	llssa.RemoveKeepAliveCallsAfterCoroSplit(module)
 	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("verify E2E coroutine module after CoroSplit: %v\n%s", err, module.String())
 	}

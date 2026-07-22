@@ -332,6 +332,127 @@ func openUse(callback CCallback) { sink(callback) }
 	}
 }
 
+func TestAnalyzeSSARawDirectPlainCallArgumentHasIndependentDemandProvenance(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "raw_direct_plain_argument.go", `package coroid
+
+type CCallback func()
+
+var channel chan int
+
+func sink(CCallback) {}
+func rawTarget() { <-channel }
+func rawOwner() { sink(rawTarget) }
+func managedOwner() { rawTarget() }
+
+func boxedTarget() {}
+func boxedOwner() {
+	callback := CCallback(boxedTarget)
+	sink(callback)
+	_ = any(callback)
+}
+
+func openOwner(callback CCallback) { sink(callback) }
+`)
+	sink := packageFunction(t, pkg, "sink")
+	rawOwner := packageFunction(t, pkg, "rawOwner")
+	rawTarget := packageFunction(t, pkg, "rawTarget")
+	rawCall := onlyNonBuiltinCall(t, rawOwner)
+	classifyRaw := func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+		return caller == rawOwner && call.Common().StaticCallee() == sink && argument == 0, nil
+	}
+	classifyRawType := func(typ types.Type) (bool, error) {
+		named, ok := types.Unalias(typ).(*types.Named)
+		return ok && named.Obj() != nil && named.Obj().Name() == "CCallback", nil
+	}
+
+	plan, err := AnalyzeSSA(prog, Roots{{Function: rawOwner, Demand: AsyncDemand}}, SSAConfig{
+		ClassifyRawDirectPlainCallArgument: classifyRaw,
+		ClassifyRawCFunctionType:           classifyRawType,
+		MaxPlainInstructions:               -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := functionPlanFor(t, plan, rawTarget); got.ManagedDemand != NoDemand || !got.RawPlainDemand ||
+		!got.RawPlainOnly || got.Emission != EmitRawPlain || got.Primary != PrimaryPlain || got.FuncRep != DirectPlain {
+		t.Fatalf("raw-only callback plan = %+v, want one raw plain body and no managed entry", got)
+	}
+	if !plan.HasRawPlainVariant(rawTarget) {
+		t.Fatal("raw-only callback has no exact raw plain variant")
+	}
+	valuePlan, ok := plan.ValuePlan(rawCall.Common().Args[0])
+	if !ok || len(valuePlan.Funcs) != 1 || valuePlan.Funcs[0].Rep != DirectPlain ||
+		valuePlan.Funcs[0].Transport != RawCCodePointer ||
+		valuePlan.Funcs[0].MayBeNil || len(valuePlan.Funcs[0].Targets) != 1 {
+		t.Fatalf("raw callback value plan = %+v, present=%t", valuePlan, ok)
+	}
+
+	managedOwner := packageFunction(t, pkg, "managedOwner")
+	plan, err = AnalyzeSSA(prog, Roots{
+		{Function: rawOwner, Demand: AsyncDemand},
+		{Function: managedOwner, Demand: AsyncDemand},
+	}, SSAConfig{
+		ClassifyRawDirectPlainCallArgument: classifyRaw,
+		ClassifyRawCFunctionType:           classifyRawType,
+		MaxPlainInstructions:               -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := functionPlanFor(t, plan, rawTarget); got.ManagedDemand == NoDemand || !got.RawPlainDemand ||
+		got.RawPlainOnly || got.Emission != EmitCoroutine || got.Primary != PrimaryCoroutine || got.FuncRep != DirectCoro {
+		t.Fatalf("mixed managed/raw callback plan = %+v, want managed coroutine primary plus raw variant", got)
+	}
+	if !plan.HasRawPlainVariant(rawTarget) {
+		t.Fatal("mixed managed/raw callback lost its raw plain variant")
+	}
+
+	if _, err := AnalyzeSSA(prog, Roots{{Function: rawOwner, Demand: AsyncDemand}}, SSAConfig{
+		ClassifyDirectPlainCallArgument:    classifyRaw,
+		ClassifyRawDirectPlainCallArgument: classifyRaw,
+		ClassifyRawCFunctionType:           classifyRawType,
+		MaxPlainInstructions:               -1,
+	}); err == nil || !strings.Contains(err.Error(), "both managed and raw direct-plain") {
+		t.Fatalf("dual-classification error = %v", err)
+	}
+
+	boxedOwner := packageFunction(t, pkg, "boxedOwner")
+	boxedPlan, err := AnalyzeSSA(prog, Roots{{Function: boxedOwner, Demand: AsyncDemand}}, SSAConfig{
+		ClassifyRawDirectPlainCallArgument: func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+			return caller == boxedOwner && call.Common().StaticCallee() == sink && argument == 0, nil
+		},
+		ClassifyRawCFunctionType: classifyRawType,
+		MaxPlainInstructions:     -1,
+	})
+	if err != nil {
+		t.Fatalf("boxed raw callback: %v", err)
+	}
+	if got := functionPlanFor(t, boxedPlan, packageFunction(t, pkg, "boxedTarget")); got.ManagedDemand != NoDemand || !got.RawPlainDemand || !got.RawPlainOnly {
+		t.Fatalf("boxed raw callback target = %+v, want raw-only demand", got)
+	}
+
+	for _, test := range []struct {
+		owner string
+		want  string
+	}{
+		{owner: "openOwner", want: "unknown=true"},
+	} {
+		t.Run(test.owner, func(t *testing.T) {
+			owner := packageFunction(t, pkg, test.owner)
+			_, err := AnalyzeSSA(prog, Roots{{Function: owner, Demand: AsyncDemand}}, SSAConfig{
+				ClassifyRawDirectPlainCallArgument: func(caller *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+					return caller == owner && call.Common().StaticCallee() == sink && argument == 0, nil
+				},
+				ClassifyRawCFunctionType: classifyRawType,
+				MaxPlainInstructions:     -1,
+			})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("AnalyzeSSA error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestAnalyzeSSADynamicForeignCallPlan(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "foreign_dynamic.go", `package coroid
 var channel chan int
@@ -402,6 +523,81 @@ func seed(flag bool) {
 	}
 	if got := functionPlanFor(t, plan, packageFunction(t, pkg, "knownCoro")); got.Demand != AsyncDemand || got.FuncRep != Dispatch {
 		t.Fatalf("known managed subset plan = %+v", got)
+	}
+}
+
+func TestAnalyzeSSARawCFunctionTransportIsTypeDirected(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "raw_c_transport.go", `package coroid
+
+type CFunc func(int) int
+
+type Mixed struct {
+	Raw CFunc
+	Managed func(int) int
+}
+
+func invokeRaw(fn CFunc) int { return fn(1) }
+func invokeManaged(fn func(int) int) int { return fn(1) }
+func carryMixed(value Mixed) Mixed { return value }
+`)
+	invokeRaw := packageFunction(t, pkg, "invokeRaw")
+	invokeManaged := packageFunction(t, pkg, "invokeManaged")
+	carryMixed := packageFunction(t, pkg, "carryMixed")
+
+	plan, err := AnalyzeSSA(prog, Roots{
+		{Function: invokeRaw, Demand: AsyncDemand},
+		{Function: invokeManaged, Demand: AsyncDemand},
+		{Function: carryMixed, Demand: AsyncDemand},
+	}, SSAConfig{
+		ClassifyUnknownCall: func(*ssa.Function, ssa.CallInstruction) (UnknownTarget, error) {
+			return UnknownForeign, nil
+		},
+		ClassifyRawCFunctionType: func(typ types.Type) (bool, error) {
+			named, ok := types.Unalias(typ).(*types.Named)
+			return ok && named.Obj() != nil && named.Obj().Pkg() != nil &&
+				named.Obj().Pkg().Path() == "example.test/coroid" && named.Obj().Name() == "CFunc", nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rawCall := onlyNonBuiltinCall(t, invokeRaw)
+	rawCallPlan, ok := plan.CallPlan(rawCall)
+	if !ok || rawCallPlan.Kind != CallForeign || rawCallPlan.Rep != DirectPlain ||
+		rawCallPlan.Transport != RawCCodePointer || !rawCallPlan.Open ||
+		rawCallPlan.Unresolved != UnknownForeign || !rawCallPlan.MayBeNil {
+		t.Fatalf("raw C dynamic CallPlan = %+v, present=%t", rawCallPlan, ok)
+	}
+	rawValuePlan, ok := plan.ValuePlan(rawCall.Common().Value)
+	if !ok || len(rawValuePlan.Funcs) != 1 || rawValuePlan.Funcs[0].Rep != DirectPlain ||
+		rawValuePlan.Funcs[0].Transport != RawCCodePointer || !rawValuePlan.Funcs[0].MayBeNil {
+		t.Fatalf("raw C callee ValuePlan = %+v, present=%t", rawValuePlan, ok)
+	}
+
+	managedCall := onlyNonBuiltinCall(t, invokeManaged)
+	managedCallPlan, ok := plan.CallPlan(managedCall)
+	if !ok || managedCallPlan.Kind != CallForeign || managedCallPlan.Rep != Dispatch ||
+		managedCallPlan.Transport != ManagedTransport || !managedCallPlan.Open ||
+		managedCallPlan.Unresolved != UnknownForeign || !managedCallPlan.MayBeNil {
+		t.Fatalf("managed dynamic CallPlan = %+v, present=%t", managedCallPlan, ok)
+	}
+	managedValuePlan, ok := plan.ValuePlan(managedCall.Common().Value)
+	if !ok || len(managedValuePlan.Funcs) != 1 || managedValuePlan.Funcs[0].Rep != Dispatch ||
+		managedValuePlan.Funcs[0].Transport != ManagedTransport || !managedValuePlan.Funcs[0].MayBeNil {
+		t.Fatalf("managed callee ValuePlan = %+v, present=%t", managedValuePlan, ok)
+	}
+
+	mixedPlan, ok := plan.ValuePlan(carryMixed.Params[0])
+	if !ok || len(mixedPlan.Funcs) != 2 {
+		t.Fatalf("mixed aggregate ValuePlan = %+v, present=%t", mixedPlan, ok)
+	}
+	wantMixed := []FuncRepLeaf{
+		{Path: []FuncPathStep{{Kind: FuncPathStructField, Index: 0}}, Rep: DirectPlain, Transport: RawCCodePointer, MayBeNil: true},
+		{Path: []FuncPathStep{{Kind: FuncPathStructField, Index: 1}}, Rep: Dispatch, Transport: ManagedTransport, MayBeNil: true},
+	}
+	if !reflect.DeepEqual(mixedPlan.Funcs, FuncRepMap(wantMixed)) {
+		t.Fatalf("mixed aggregate leaves = %+v, want %+v", mixedPlan.Funcs, wantMixed)
 	}
 }
 

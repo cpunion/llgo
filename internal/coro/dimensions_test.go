@@ -69,6 +69,19 @@ func TestDemandFuncRepAndBodyEmissionText(t *testing.T) {
 			t.Fatalf("function representation round trip = %s, want %s", parsed, rep)
 		}
 	}
+	for _, transport := range []FuncTransport{ManagedTransport, RawCCodePointer} {
+		text, err := transport.MarshalText()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var parsed FuncTransport
+		if err := parsed.UnmarshalText(text); err != nil {
+			t.Fatal(err)
+		}
+		if parsed != transport {
+			t.Fatalf("function transport round trip = %s, want %s", parsed, transport)
+		}
+	}
 	for _, emission := range []BodyEmission{EmitNone, EmitPlain, EmitCoroutine, EmitExternal} {
 		text, err := emission.MarshalText()
 		if err != nil {
@@ -84,6 +97,9 @@ func TestDemandFuncRepAndBodyEmissionText(t *testing.T) {
 	}
 	if err := (BodyEmission(255)).Validate(); err == nil {
 		t.Fatal("invalid body emission unexpectedly accepted")
+	}
+	if err := (FuncTransport(255)).Validate(); err == nil {
+		t.Fatal("invalid function transport unexpectedly accepted")
 	}
 }
 
@@ -114,6 +130,19 @@ func TestDemandAndFuncRepTextWhitespace(t *testing.T) {
 		}
 		if got != want {
 			t.Fatalf("FuncRep.UnmarshalText(%q) = %s, want %s", text, got, want)
+		}
+	}
+
+	for text, want := range map[string]FuncTransport{
+		"  managed\n":           ManagedTransport,
+		"\traw-c-code-pointer ": RawCCodePointer,
+	} {
+		var got FuncTransport
+		if err := got.UnmarshalText([]byte(text)); err != nil {
+			t.Fatalf("FuncTransport.UnmarshalText(%q): %v", text, err)
+		}
+		if got != want {
+			t.Fatalf("FuncTransport.UnmarshalText(%q) = %s, want %s", text, got, want)
 		}
 	}
 

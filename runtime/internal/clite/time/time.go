@@ -126,6 +126,10 @@ type Timespec struct {
 	Nsec c.Long // and nanoseconds
 }
 
+// ClockGettime reads one fixed-size kernel clock value. It does not wait for
+// an external event or invoke a callback; IRQUnsafe is retained.
+//
+//llgo:coro noblock
 //go:linkname ClockGettime C.clock_gettime
 func ClockGettime(clkId ClockidT, tp *Timespec) c.Int
 

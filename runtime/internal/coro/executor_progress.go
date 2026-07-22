@@ -33,6 +33,8 @@ type ExecutorPollProgress struct {
 	Timers        uint32
 	Manual        uint32
 	ManualLost    uint32
+	Worker        uint32
+	WorkerLost    uint32
 	Control       uint32
 	ControlLate   uint32
 	ApplyVisits   uint32
@@ -63,7 +65,9 @@ type executorCatalogSource uint8
 const (
 	executorCatalogWaits executorCatalogSource = iota
 	executorCatalogTimers
+	executorCatalogPoll
 	executorCatalogManual
+	executorCatalogWorker
 	executorCatalogChannel
 	executorCatalogControl
 	executorCatalogDone
@@ -77,9 +81,12 @@ const (
 // entry ends exactly after acknowledgement, epoch B may capture a fresh sample
 // from the next entry before it visits its first source slot.
 type executorPollTransaction struct {
-	total         executorSourceScan
-	now           int64
-	deadline      int64
+	total    executorSourceScan
+	now      int64
+	deadline int64
+	// cursor covers one configured source's linear 15-bit OperationID slot
+	// namespace. Paged sources are capped at 32704 slots, so uint16 remains
+	// sufficient without changing the public ExecutorPollProgress POD.
 	cursor        uint16
 	phase         executorPollPhase
 	source        executorCatalogSource
@@ -90,6 +97,63 @@ type executorPollTransaction struct {
 	resampleNow   bool
 	_             [2]byte
 	resolve       publishedEpochResolveCursor
+}
+
+func executorCatalogScanLimit(sources *ExecutorSourceSet, source executorCatalogSource) (uint32, bool) {
+	if sources == nil {
+		return 0, false
+	}
+	switch source {
+	case executorCatalogWaits:
+		return waitRegistrationScanLimit(sources.waits)
+	case executorCatalogTimers:
+		if sources.timers == nil {
+			return 0, true
+		}
+		return timerRegistrationScanLimit(sources.timers)
+	case executorCatalogPoll:
+		if sources.poll == nil {
+			return 0, true
+		}
+		return PollOperationScanLimit(sources.poll)
+	case executorCatalogManual:
+		if sources.manual == nil {
+			return 0, true
+		}
+		return ManualOperationSourceCapacity, true
+	case executorCatalogWorker:
+		if sources.worker == nil {
+			return 0, true
+		}
+		return workerOperationScanLimit(sources.worker)
+	case executorCatalogChannel:
+		if sources.channel == nil {
+			return 0, true
+		}
+		return channelOperationScanLimit(sources.channel)
+	case executorCatalogControl:
+		if sources.control == nil {
+			return 0, true
+		}
+		return taskControlScanLimit(sources.control)
+	case executorCatalogDone:
+		return 0, true
+	default:
+		return 0, false
+	}
+}
+
+func firstExecutorCatalogSource(sources *ExecutorSourceSet) (executorCatalogSource, bool) {
+	for source := executorCatalogWaits; source < executorCatalogDone; source++ {
+		limit, ok := executorCatalogScanLimit(sources, source)
+		if !ok {
+			return executorCatalogDone, false
+		}
+		if limit != 0 {
+			return source, true
+		}
+	}
+	return executorCatalogDone, true
 }
 
 func validExecutorPollTransaction(transaction *executorPollTransaction, sources *ExecutorSourceSet) bool {
@@ -104,9 +168,12 @@ func validExecutorPollTransaction(transaction *executorPollTransaction, sources 
 		!transaction.withDeadline && transaction.now != 0 || transaction.source > executorCatalogDone {
 		return false
 	}
-	if transaction.resampleNow && (!transaction.withDeadline || transaction.phase != executorPollEpochBPublish ||
-		transaction.source != executorCatalogWaits || transaction.cursor != 0) {
-		return false
+	if transaction.resampleNow {
+		first, firstOK := firstExecutorCatalogSource(sources)
+		if !firstOK || !transaction.withDeadline || transaction.phase != executorPollEpochBPublish ||
+			first == executorCatalogDone || transaction.source != first || transaction.cursor != 0 {
+			return false
+		}
 	}
 	if transaction.total.epochs > 1 || transaction.phase <= executorPollEpochAResolve && transaction.total.epochs != 0 ||
 		transaction.phase == executorPollAcknowledge && transaction.total.epochs != 1 ||
@@ -117,21 +184,14 @@ func validExecutorPollTransaction(transaction *executorPollTransaction, sources 
 		if transaction.resolve != (publishedEpochResolveCursor{}) {
 			return false
 		}
-		switch transaction.source {
-		case executorCatalogWaits:
-			return transaction.cursor < WaitRegistrationCapacity
-		case executorCatalogTimers:
-			return sources.timers != nil && transaction.cursor < TimerRegistrationCapacity
-		case executorCatalogManual:
-			return sources.manual != nil && transaction.cursor < ManualOperationSourceCapacity
-		case executorCatalogChannel:
-			return sources.channel != nil && transaction.cursor < ChannelOperationSourceCapacity
-		case executorCatalogControl:
-			return sources.control != nil && transaction.cursor < TaskControlSourceCapacity
-		case executorCatalogDone:
+		limit, limitOK := executorCatalogScanLimit(sources, transaction.source)
+		if !limitOK {
+			return false
+		}
+		if transaction.source == executorCatalogDone {
 			return transaction.cursor == 0
 		}
-		return false
+		return limit != 0 && uint32(transaction.cursor) < limit
 	}
 	if transaction.source != executorCatalogDone || transaction.cursor != 0 {
 		return false
@@ -148,16 +208,24 @@ func beginExecutorPollTransaction(driver *ExecutorDriver, now int64, withDeadlin
 		!driver.sources.acceptsScan(driver.p, now, withDeadline) {
 		return false
 	}
+	first, firstOK := firstExecutorCatalogSource(&driver.sources)
+	if !firstOK {
+		return false
+	}
 	driver.poll.phase = executorPollEpochAPublish
-	driver.poll.source = executorCatalogWaits
+	driver.poll.source = first
 	driver.poll.now = now
 	driver.poll.withDeadline = withDeadline
 	return true
 }
 
-func beginExecutorPollEpoch(transaction *executorPollTransaction, phase executorPollPhase) {
+func beginExecutorPollEpoch(transaction *executorPollTransaction, sources *ExecutorSourceSet, phase executorPollPhase) bool {
+	first, firstOK := firstExecutorCatalogSource(sources)
+	if transaction == nil || !firstOK {
+		return false
+	}
 	transaction.phase = phase
-	transaction.source = executorCatalogWaits
+	transaction.source = first
 	transaction.cursor = 0
 	transaction.deadline = 0
 	transaction.hasDeadline = false
@@ -165,29 +233,25 @@ func beginExecutorPollEpoch(transaction *executorPollTransaction, phase executor
 	transaction.resolve = publishedEpochResolveCursor{}
 	// AwaitExternal is transaction-sticky: unlike a budget retry, epoch B does
 	// not itself satisfy a physical acknowledgement missing in epoch A.
-	transaction.resampleNow = transaction.withDeadline
+	transaction.resampleNow = transaction.withDeadline && first != executorCatalogDone
+	return true
 }
 
-// executorMinPollBudget counts every actual fixed-catalog slot plus one common
-// resolve action per epoch and the single request acknowledgement between A
-// and B. Optional sources therefore still contribute their full production
-// capacity; no monolithic source scan is hidden behind a one-unit budget.
+// executorMinPollBudget counts every slot in each binding-local active prefix,
+// plus one common resolve action per epoch and the single request
+// acknowledgement between A and B. Configured-but-never-allocated tail slots
+// remain covered by full-capacity structural audits, not routine service.
 func executorMinPollBudget(sources *ExecutorSourceSet) (uint32, bool) {
 	if sources == nil || sources.waits == nil {
 		return 0, false
 	}
-	epoch := uint32(WaitRegistrationCapacity + 1) // wait slots + resolve
-	if sources.timers != nil {
-		epoch += TimerRegistrationCapacity
-	}
-	if sources.manual != nil {
-		epoch += ManualOperationSourceCapacity
-	}
-	if sources.channel != nil {
-		epoch += ChannelOperationSourceCapacity
-	}
-	if sources.control != nil {
-		epoch += TaskControlSourceCapacity
+	epoch := uint32(1) // common resolve
+	for source := executorCatalogWaits; source < executorCatalogDone; source++ {
+		limit, ok := executorCatalogScanLimit(sources, source)
+		if !ok {
+			return 0, false
+		}
+		epoch += limit
 	}
 	return epoch*2 + 1, true // A + acknowledge + B
 }
@@ -203,33 +267,19 @@ func MinExecutorPollBudget(driver *ExecutorDriver) (uint32, bool) {
 	return executorMinPollBudget(&driver.sources)
 }
 
-func (transaction *executorPollTransaction) advanceCatalogSource(sources *ExecutorSourceSet) {
+func (transaction *executorPollTransaction) advanceCatalogSource(sources *ExecutorSourceSet) bool {
 	transaction.cursor = 0
-	for {
+	for transaction.source < executorCatalogDone {
 		transaction.source++
-		switch transaction.source {
-		case executorCatalogTimers:
-			if sources.timers != nil {
-				return
-			}
-		case executorCatalogManual:
-			if sources.manual != nil {
-				return
-			}
-		case executorCatalogChannel:
-			if sources.channel != nil {
-				return
-			}
-		case executorCatalogControl:
-			if sources.control != nil {
-				return
-			}
-		case executorCatalogDone:
-			return
-		default:
-			return
+		limit, ok := executorCatalogScanLimit(sources, transaction.source)
+		if !ok {
+			return false
+		}
+		if limit != 0 {
+			return true
 		}
 	}
+	return transaction.source == executorCatalogDone
 }
 
 // publishExecutorCatalogEntry visits one real source slot and advances the
@@ -240,6 +290,10 @@ func (transaction *executorPollTransaction) advanceCatalogSource(sources *Execut
 func publishExecutorCatalogEntry(driver *ExecutorDriver) bool {
 	transaction, sources, p := &driver.poll, &driver.sources, driver.p
 	index := uint32(transaction.cursor)
+	limit, limitOK := executorCatalogScanLimit(sources, transaction.source)
+	if !limitOK || limit == 0 || index >= limit {
+		return false
+	}
 	switch transaction.source {
 	case executorCatalogWaits:
 		if index == 0 && !sources.waits.beginDrainPass(p) {
@@ -252,8 +306,8 @@ func publishExecutorCatalogEntry(driver *ExecutorDriver) bool {
 			return false
 		}
 		transaction.cursor++
-		if transaction.cursor == WaitRegistrationCapacity {
-			transaction.advanceCatalogSource(sources)
+		if uint32(transaction.cursor) == limit && !transaction.advanceCatalogSource(sources) {
+			return false
 		}
 	case executorCatalogTimers:
 		completed, deadline, hasDeadline, ok := sources.timers.drainDueSlotFor(p, transaction.now, index)
@@ -266,8 +320,25 @@ func publishExecutorCatalogEntry(driver *ExecutorDriver) bool {
 			transaction.deadline, transaction.hasDeadline = deadline, true
 		}
 		transaction.cursor++
-		if transaction.cursor == TimerRegistrationCapacity {
-			transaction.advanceCatalogSource(sources)
+		if uint32(transaction.cursor) == limit && !transaction.advanceCatalogSource(sources) {
+			return false
+		}
+	case executorCatalogPoll:
+		if index == 0 && !sources.poll.beginDrainPass(p) {
+			return false
+		}
+		completed, deadline, hasDeadline, ok := sources.poll.drainSlotFor(p, transaction.now, index)
+		transaction.total.poll += completed
+		transaction.total.completed += completed
+		if !ok {
+			return false
+		}
+		if hasDeadline && (!transaction.hasDeadline || deadline < transaction.deadline) {
+			transaction.deadline, transaction.hasDeadline = deadline, true
+		}
+		transaction.cursor++
+		if uint32(transaction.cursor) == limit && !transaction.advanceCatalogSource(sources) {
+			return false
 		}
 	case executorCatalogManual:
 		if index == 0 && !sources.manual.beginPublishPass(p) {
@@ -281,8 +352,23 @@ func publishExecutorCatalogEntry(driver *ExecutorDriver) bool {
 			return false
 		}
 		transaction.cursor++
-		if transaction.cursor == ManualOperationSourceCapacity {
-			transaction.advanceCatalogSource(sources)
+		if uint32(transaction.cursor) == limit && !transaction.advanceCatalogSource(sources) {
+			return false
+		}
+	case executorCatalogWorker:
+		if index == 0 && !sources.worker.beginPublishPass(p) {
+			return false
+		}
+		published, lost, ok := sources.worker.publishSlot(p, index)
+		transaction.total.worker += int(published)
+		transaction.total.workerLost += int(lost)
+		transaction.total.completed += int(published + lost)
+		if !ok {
+			return false
+		}
+		transaction.cursor++
+		if uint32(transaction.cursor) == limit && !transaction.advanceCatalogSource(sources) {
+			return false
 		}
 	case executorCatalogChannel:
 		if index == 0 && !sources.channel.beginPublishPass(p) {
@@ -296,8 +382,8 @@ func publishExecutorCatalogEntry(driver *ExecutorDriver) bool {
 			return false
 		}
 		transaction.cursor++
-		if transaction.cursor == ChannelOperationSourceCapacity {
-			transaction.advanceCatalogSource(sources)
+		if uint32(transaction.cursor) == limit && !transaction.advanceCatalogSource(sources) {
+			return false
 		}
 	case executorCatalogControl:
 		if index == 0 && !sources.control.beginPublishPass(p) {
@@ -311,8 +397,8 @@ func publishExecutorCatalogEntry(driver *ExecutorDriver) bool {
 			return false
 		}
 		transaction.cursor++
-		if transaction.cursor == TaskControlSourceCapacity {
-			transaction.advanceCatalogSource(sources)
+		if uint32(transaction.cursor) == limit && !transaction.advanceCatalogSource(sources) {
+			return false
 		}
 	default:
 		return false
@@ -321,7 +407,8 @@ func publishExecutorCatalogEntry(driver *ExecutorDriver) bool {
 }
 
 func executorProgressFromScan(scan executorSourceScan, used, budget uint32, complete, more, blocked bool) (ExecutorPollProgress, bool) {
-	if scan.completed < 0 || scan.waits < 0 || scan.timers < 0 || scan.manual < 0 || scan.manualLost < 0 ||
+	if scan.completed < 0 || scan.waits < 0 || scan.timers < 0 || scan.poll < 0 || scan.manual < 0 || scan.manualLost < 0 ||
+		scan.worker < 0 || scan.workerLost < 0 ||
 		scan.channel < 0 || scan.channelLost < 0 ||
 		scan.control < 0 || scan.controlLate < 0 || scan.applyVisits < 0 || scan.promoted < 0 ||
 		used > budget || more && blocked {
@@ -334,6 +421,8 @@ func executorProgressFromScan(scan executorSourceScan, used, budget uint32, comp
 		Timers:        uint32(scan.timers),
 		Manual:        uint32(scan.manual),
 		ManualLost:    uint32(scan.manualLost),
+		Worker:        uint32(scan.worker),
+		WorkerLost:    uint32(scan.workerLost),
 		Control:       uint32(scan.control),
 		ControlLate:   uint32(scan.controlLate),
 		ApplyVisits:   uint32(scan.applyVisits),
@@ -430,7 +519,9 @@ func pollExecutorSliceAt(driver *ExecutorDriver, now int64, withDeadline bool, b
 				return transaction.total, ExecutorPollProgress{}, false
 			}
 			used++
-			beginExecutorPollEpoch(transaction, executorPollEpochBPublish)
+			if !beginExecutorPollEpoch(transaction, &driver.sources, executorPollEpochBPublish) {
+				return transaction.total, ExecutorPollProgress{}, false
+			}
 		default:
 			return transaction.total, ExecutorPollProgress{}, false
 		}

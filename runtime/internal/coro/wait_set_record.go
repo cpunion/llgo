@@ -142,7 +142,8 @@ func validActiveWaitSetRecordFast(p *P, record *WaitSetRecord) bool {
 	if p == nil || record == nil || record.state != waitSetRecordActive || !validParkTicket(record.ticket) ||
 		record.g == nil || !ValidG(record.g) || record.g.state != GWaiting || !record.g.waiting ||
 		record.g.waitToken != nil || record.g.waitTicket != 0 || record.g.nextWait != nil ||
-		record.g.queued || record.g.nextReady != nil || record.g.runP != nil || record.g.active == nil ||
+		record.g.queued || record.g.nextReady != nil || record.g.runP != nil ||
+		record.g.transferState != runnableTransferGIdle || record.g.active == nil ||
 		record.g.active.parkWait != record || !validActiveParkStateHeader(&record.g.park, record.ticket) {
 		return false
 	}

@@ -66,6 +66,32 @@ func (pipe *Pipe) ReadFD() (int32, bool) {
 	return pipe.readFD, true
 }
 
+// OwnsDescriptor reports whether fd is either end of this runtime-owned
+// doorbell. The descriptors are published before Open sets open and remain
+// stable for the target lifetime; Close clears open before invalidating them.
+// This is the native poll-server identity used by internal/poll diagnostics.
+func (pipe *Pipe) OwnsDescriptor(fd uintptr) bool {
+	if pipe == nil || nativeAtomicLoad(&pipe.open) != 1 || pipe.readFD < 0 || pipe.writeFD < 0 {
+		return false
+	}
+	return fd == uintptr(pipe.readFD) || fd == uintptr(pipe.writeFD)
+}
+
+// ConsumeRetainedWake is the owner-side pre-poll latch check used when the
+// doorbell shares one physical poll set with fd readiness. A producer racing
+// the clear either leaves a byte or republishes pending, preserving the same
+// CommitSleep-to-poll guarantee as WaitBounded.
+func (pipe *Pipe) ConsumeRetainedWake() (pending, ok bool) {
+	if pipe == nil || nativeAtomicLoad(&pipe.open) != 1 || pipe.readFD < 0 {
+		return false, false
+	}
+	if nativeAtomicExchange(&pipe.pending, 0) == 0 {
+		return false, true
+	}
+	drained := pipe.Drain()
+	return drained, drained
+}
+
 // Ring is the only producer-concurrent Pipe operation. It latches the wake
 // before attempting the nonblocking write. A byte is retained across the
 // CommitSleep-to-poll window. EAGAIN/EWOULDBLOCK is success because a full pipe
@@ -148,7 +174,8 @@ func (pipe *Pipe) Wait() bool {
 // before Seal; it never assumes that such a producer owes the closing executor
 // a pipe byte.
 func (pipe *Pipe) WaitBounded(timeoutMS int32) (woke, ok bool) {
-	if pipe == nil || nativeAtomicLoad(&pipe.open) != 1 || pipe.readFD < 0 || timeoutMS < 0 {
+	if pipe == nil || nativeAtomicLoad(&pipe.open) != 1 || pipe.readFD < 0 ||
+		timeoutMS < 0 || timeoutMS > physicalPollMaxMS {
 		return false, false
 	}
 	if nativeAtomicExchange(&pipe.pending, 0) != 0 {
@@ -188,7 +215,8 @@ func (pipe *Pipe) WaitBounded(timeoutMS int32) (woke, ok bool) {
 // timeout. The retained pending check and drain are repeated on every call, so
 // handing EINTR back to that owner does not open a lost-wake window.
 func (pipe *Pipe) waitBoundedInterruptible(timeoutMS int32) (woke, ok bool) {
-	if pipe == nil || nativeAtomicLoad(&pipe.open) != 1 || pipe.readFD < 0 || timeoutMS < 0 {
+	if pipe == nil || nativeAtomicLoad(&pipe.open) != 1 || pipe.readFD < 0 ||
+		timeoutMS < 0 || timeoutMS > physicalPollMaxMS {
 		return false, false
 	}
 	if nativeAtomicExchange(&pipe.pending, 0) != 0 {

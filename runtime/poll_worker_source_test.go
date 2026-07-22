@@ -1,0 +1,811 @@
+//go:build !llgo
+
+/*
+ * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package runtime
+
+import (
+	"go/ast"
+	"go/build"
+	"go/parser"
+	"go/token"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"slices"
+	"strings"
+	"testing"
+)
+
+const (
+	runtimePollGoSource                      = "internal/lib/runtime/poll_linkname_llgo.go"
+	runtimeCoroPollGoSource                  = "internal/lib/runtime/poll_linkname_coro_llgo.go"
+	runtimePollCSource                       = "internal/lib/runtime/_wrap/poll.c"
+	runtimeCoroChannelSource                 = "internal/coro/channel_operation_source.go"
+	runtimeCoroWorkerSource                  = "internal/coro/worker_operation_source.go"
+	runtimeCoroNativeWorkerSource            = "internal/runtime/coro_worker_native_llgo.go"
+	runtimeCoroWorkerProgramCompletionSource = "internal/runtime/coro_worker_completion_program_llgo.go"
+	runtimeCoroWorkerFleetCompletionSource   = "internal/runtime/coro_worker_completion_fleet_llgo.go"
+	runtimeCoroWorkerOwnerSource             = "internal/runtime/coro_worker_owner_llgo.go"
+	runtimeCoroNativeDriverSource            = "internal/runtime/coro_executor_driver_timer_llgo.go"
+	runtimeCoroWorkerCallSource              = "internal/coroworker/call_llgo.go"
+	runtimeCoroWorkerCSource                 = "internal/coroworker/_worker/worker.c"
+	runtimeCoroWorkerHeaderSource            = "internal/coroworker/_worker/worker.h"
+	runtimePthreadSyncSource                 = "internal/clite/pthread/sync/sync.go"
+	runtimePthreadGCSource                   = "internal/clite/pthread/pthread_gc.go"
+	runtimePthreadNoGCSource                 = "internal/clite/pthread/pthread_nogc.go"
+)
+
+func TestRuntimeCoroChannelCapacityUsesPagedLogicalSource(t *testing.T) {
+	core := readRuntimePollFile(t, runtimeCoroChannelSource)
+	for _, required := range []string{
+		"const ChannelOperationPageCapacity = 64",
+		"const ChannelOperationSourceCapacity = ChannelOperationPageCapacity",
+		"extraPages []ChannelOperationPage",
+		"func ConfigureChannelOperationPages(",
+		"func ChannelOperationConfiguredCapacity(",
+		"ChannelOperationConfiguredCapacity(source)",
+	} {
+		if !strings.Contains(core, required) {
+			t.Errorf("%s lacks paged channel marker %q", runtimeCoroChannelSource, required)
+		}
+	}
+
+	driver := readRuntimePollFile(t, runtimeCoroNativeDriverSource)
+	for _, required := range []string{
+		"coroNativeChannelCapacityV1   = coroNativeSourcePageCountV1 * coro.ChannelOperationPageCapacity",
+		"coroProgramChannelExtraPagesV1State",
+		"coro.ConfigureChannelOperationPages(&coroProgramChannelSourceV1State",
+		"coro.ChannelOperationConfiguredCapacity(&coroProgramChannelSourceV1State) != coroNativeChannelCapacityV1",
+		"coroNativeChannelCapacityV1 != coroNativeWaitCapacityV1",
+	} {
+		if !strings.Contains(driver, required) {
+			t.Errorf("%s lacks native channel capacity marker %q", runtimeCoroNativeDriverSource, required)
+		}
+	}
+}
+
+func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *testing.T) {
+	core := readRuntimePollFile(t, runtimeCoroWorkerSource)
+	for _, required := range []string{
+		"const WorkerOperationPageCapacity = 64",
+		"const WorkerOperationSourceCapacity = WorkerOperationPageCapacity",
+		"extraPages []WorkerOperationPage",
+		"func ConfigureWorkerOperationPages(",
+		"func WorkerOperationConfiguredCapacity(",
+		"WorkerOperationConfiguredCapacity(source)",
+	} {
+		if !strings.Contains(core, required) {
+			t.Errorf("%s lacks paged worker marker %q", runtimeCoroWorkerSource, required)
+		}
+	}
+
+	native := readRuntimePollFile(t, runtimeCoroNativeWorkerSource)
+	for _, required := range []string{
+		"coroNativeWorkerThreadCountV1 = 4",
+		"coroNativeWorkerPageCountV1 = 16",
+		"coroNativeWorkerQueueSizeV1 = coroworker.QueueCapacity",
+		"bounded C11 sequence ring",
+		"coroworker.QueueReserve(&reservation)",
+		"coroworker.QueueSubmitReserved(reservation, &job)",
+		"coroNativeWorkerDeliveryFleetV1",
+		"func coroNativeWorkerPoolStartFleetV1() bool",
+	} {
+		if !strings.Contains(native, required) {
+			t.Errorf("%s lacks bounded native worker marker %q", runtimeCoroNativeWorkerSource, required)
+		}
+	}
+	programCompletion := readRuntimePollFile(t, runtimeCoroWorkerProgramCompletionSource)
+	for _, required := range []string{
+		"!llgo_coro_native_fleet",
+		"//export __llgo_coro_native_worker_complete_v1",
+		"state.delivery != coroNativeWorkerDeliveryProgramV1",
+		"coroProgramWorkerSourceV1State.Post(id, payload)",
+		"coroTargetRequestExecutorV1(state.handle)",
+	} {
+		if !strings.Contains(programCompletion, required) {
+			t.Errorf("%s lacks static program worker completion marker %q", runtimeCoroWorkerProgramCompletionSource, required)
+		}
+	}
+	fleetCompletion := readRuntimePollFile(t, runtimeCoroWorkerFleetCompletionSource)
+	for _, required := range []string{
+		"llgo_coro_native_fleet",
+		"//export __llgo_coro_native_worker_complete_v1",
+		"state.delivery != coroNativeWorkerDeliveryFleetV1",
+		"coroNativeFleetPostWorkerV1(id, payload)",
+		"result.Route != coro.OperationRoutePosted || !accepted",
+	} {
+		if !strings.Contains(fleetCompletion, required) {
+			t.Errorf("%s lacks static fleet worker completion marker %q", runtimeCoroWorkerFleetCompletionSource, required)
+		}
+	}
+	for _, forbidden := range []string{"unsafe.Pointer", "reflect", "runtimeDarwinFuncPCABI0", "map[uintptr]"} {
+		if strings.Contains(fleetCompletion, forbidden) {
+			t.Errorf("%s retained reverse worker routing marker %q", runtimeCoroWorkerFleetCompletionSource, forbidden)
+		}
+	}
+	reserveStart := strings.Index(native, "func coroNativeWorkerPoolReserveV1(")
+	if reserveStart < 0 {
+		t.Fatal("native worker source lacks reservation function")
+	}
+	reserveEnd := strings.Index(native[reserveStart:], "func coroNativeWorkerPoolCancelReservationV1(")
+	if reserveEnd < 0 {
+		t.Fatal("native worker source lacks exact reservation functions")
+	}
+	reserve := native[reserveStart : reserveStart+reserveEnd]
+	for _, forbidden := range []string{"mutex", "Mutex", "TryLock", "schedulerwait"} {
+		if strings.Contains(reserve, forbidden) {
+			t.Fatalf("native worker reservation contains managed blocking edge %q:\n%s", forbidden, reserve)
+		}
+	}
+	if !strings.Contains(reserve, "coroworker.QueueReserve(&reservation)") {
+		t.Fatalf("native worker reservation bypasses the C11 capacity preflight:\n%s", reserve)
+	}
+	for _, forbidden := range []string{"psync", "state.mutex", "state.work", "pthread.Mutex", "pthread.Cond"} {
+		if strings.Contains(native, forbidden) {
+			t.Errorf("%s retains worker ingress pthread synchronization %q", runtimeCoroNativeWorkerSource, forbidden)
+		}
+	}
+	for _, required := range []string{
+		"func coroReserveNativeWorkerSubmissionV1(",
+		"coroNativeWorkerSubmissionOwnerV1(handle, route)",
+		"coro.CommitCurrentExecutorWorkerSubmission(driver, g, id)",
+		"id.Route() != route",
+	} {
+		if !strings.Contains(native, required) {
+			t.Errorf("%s lacks current-owner worker boundary %q", runtimeCoroNativeWorkerSource, required)
+		}
+	}
+
+	owner := readRuntimePollFile(t, runtimeCoroWorkerOwnerSource)
+	for _, required := range []string{
+		"coro.CurrentExecutorWorkerDriver(task)",
+		"coro.PrepareCurrentExecutorWorkerPark(",
+		"coro.FinishCurrentExecutorWorkerPark(",
+		"coroReserveNativeWorkerSubmissionV1(executor, route)",
+		"ConsumeParkSet then deliberately returns Canceled with the winner lease",
+	} {
+		if !strings.Contains(owner, required) {
+			t.Errorf("%s lacks current-owner worker marker %q", runtimeCoroWorkerOwnerSource, required)
+		}
+	}
+	for _, forbidden := range []string{
+		"&coroProgramWorkerSourceV1State",
+		"coroProgramReserveNativeWorkerSubmissionV1",
+		"coroProgramCancelNativeWorkerSubmissionV1",
+		"coroProgramCommitNativeWorkerSubmissionV1",
+	} {
+		if strings.Contains(owner, forbidden) {
+			t.Errorf("%s retained singleton owner selection %q", runtimeCoroWorkerOwnerSource, forbidden)
+		}
+	}
+
+	declaration := readRuntimePollFile(t, runtimeCoroWorkerCallSource)
+	for _, required := range []string{
+		"//llgo:coro sync\n//go:linkname QueueInit C.__llgo_coro_worker_queue_init_v1",
+		"//llgo:coro sync\n//go:linkname QueueCanRelease C.__llgo_coro_worker_queue_can_release_v1",
+		"//llgo:coro noblock\n//go:linkname QueueReserve C.__llgo_coro_worker_queue_reserve_v1",
+		"//llgo:coro noblock\n//go:linkname QueueCancelReservation C.__llgo_coro_worker_queue_cancel_reservation_v1",
+		"//llgo:coro noblock\n//go:linkname QueueSubmitReserved C.__llgo_coro_worker_queue_submit_reserved_v1",
+		"//llgo:coro sync\n//go:linkname QueueStop C.__llgo_coro_worker_queue_stop_v1",
+		"lock-free by QueueInit",
+		"semaphore_signal never wait for worker",
+		"C adapter owns the fixed routine",
+	} {
+		if !strings.Contains(declaration, required) {
+			t.Errorf("%s lacks lock-free worker transport contract %q", runtimeCoroWorkerCallSource, required)
+		}
+	}
+	for _, name := range []string{"QueueReserve", "QueueCancelReservation", "QueueSubmitReserved"} {
+		for _, capability := range []string{"sync", "schedulerwait"} {
+			if strings.Contains(declaration, "//llgo:coro "+capability+"\n//go:linkname "+name+" ") {
+				t.Errorf("managed worker ingress %s acquired incorrect %s capability", name, capability)
+			}
+		}
+	}
+
+	cSource := readRuntimePollFile(t, runtimeCoroWorkerCSource)
+	for _, required := range []string{
+		"_Atomic size_t sequence;",
+		"_Atomic uint32_t producer_state;",
+		"_Atomic size_t enqueue_position;",
+		"atomic_is_lock_free(&queue->enqueue_position)",
+		"atomic_store_explicit(&slot->sequence, reservation + 1, memory_order_release);",
+		"llgo_coro_worker_job_canceled_v1",
+		"sem_post(wake)",
+		"semaphore_signal(*wake)",
+		"__llgo_coro_worker_queue_wait_take_v1",
+		"static void *llgo_coro_worker_main_v1(void *unused)",
+		"__llgo_coro_native_worker_complete_v1(",
+	} {
+		if !strings.Contains(cSource, required) {
+			t.Errorf("%s lacks C11 worker transport marker %q", runtimeCoroWorkerCSource, required)
+		}
+	}
+	for _, forbidden := range []string{"pthread_mutex_lock", "pthread_cond_wait", "pthread_cond_signal"} {
+		if strings.Contains(cSource, forbidden) {
+			t.Errorf("%s retains pthread queue synchronization %q", runtimeCoroWorkerCSource, forbidden)
+		}
+	}
+	header := readRuntimePollFile(t, runtimeCoroWorkerHeaderSource)
+	for _, required := range []string{
+		"LLGO_CORO_WORKER_THREAD_COUNT_V1 = 4",
+		"LLGO_CORO_WORKER_QUEUE_CAPACITY_V1 = 1024",
+		"struct llgo_coro_worker_job_v1",
+		"uint32_t source_slot;",
+		"uintptr_t args[LLGO_CORO_WORKER_MAX_ARGS_V1];",
+	} {
+		if !strings.Contains(header, required) {
+			t.Errorf("%s lacks POD queue ABI marker %q", runtimeCoroWorkerHeaderSource, required)
+		}
+	}
+
+	driver := readRuntimePollFile(t, runtimeCoroNativeDriverSource)
+	for _, required := range []string{
+		"coroNativeWorkerCapacityV1    = coroNativeSourcePageCountV1 * coro.WorkerOperationPageCapacity",
+		"coroProgramWorkerExtraPagesV1State",
+		"coro.ConfigureWorkerOperationPages(&coroProgramWorkerSourceV1State",
+		"coro.WorkerOperationConfiguredCapacity(&coroProgramWorkerSourceV1State) != coroNativeWorkerCapacityV1",
+		"coroNativeWorkerQueueSizeV1 != coroNativeWorkerCapacityV1",
+	} {
+		if !strings.Contains(driver, required) {
+			t.Errorf("%s lacks native worker capacity marker %q", runtimeCoroNativeDriverSource, required)
+		}
+	}
+}
+
+func TestRuntimeCoroWorkerKeepsPthreadCreationCertificateOwnerScoped(t *testing.T) {
+	native := readRuntimePollFile(t, runtimeCoroNativeWorkerSource)
+	if !strings.Contains(native, "coroworker.Create(&state.threads[index])") {
+		t.Fatalf("%s does not use the scheduler-owned worker creation leaf", runtimeCoroNativeWorkerSource)
+	}
+	if strings.Contains(native, "pthread.Create(") {
+		t.Fatalf("%s bypasses the scheduler-owned worker creation leaf", runtimeCoroNativeWorkerSource)
+	}
+
+	declaration := readRuntimePollFile(t, runtimeCoroWorkerCallSource)
+	for _, required := range []string{
+		"//llgo:coro sync\n//go:linkname Create C.__llgo_coro_worker_create_v1",
+		"func Create(thread *pthread.Thread) c.Int",
+		"No arbitrary Go callback address is accepted",
+		"records same-thread return without promising lock-free or bounded",
+	} {
+		if !strings.Contains(declaration, required) {
+			t.Errorf("%s lacks exact worker creation contract %q", runtimeCoroWorkerCallSource, required)
+		}
+	}
+	wrapper := readRuntimePollFile(t, runtimeCoroWorkerCSource)
+	for _, required := range []string{
+		"int __llgo_coro_worker_create_v1(",
+		"#if defined(LLGO_CORO_WORKER_BDWGC)",
+		"return GC_pthread_create(thread, NULL, routine, NULL);",
+		"return pthread_create(thread, NULL, routine, NULL);",
+		"return llgo_coro_worker_thread_create_v1(thread, llgo_coro_worker_main_v1);",
+	} {
+		if !strings.Contains(wrapper, required) {
+			t.Errorf("%s lacks exact worker creation implementation %q", runtimeCoroWorkerCSource, required)
+		}
+	}
+
+	// The general API accepts arbitrary callbacks and therefore never inherits
+	// the scheduler-owned declaration's exact certificate.
+	for _, path := range []string{runtimePthreadGCSource, runtimePthreadNoGCSource} {
+		text := readRuntimePollFile(t, path)
+		if strings.Contains(text, "//llgo:coro noblock\n//go:linkname Create ") {
+			t.Fatalf("general pthread.Create in %s acquired a coroutine noblock certificate", path)
+		}
+		if !strings.Contains(text, "//llgo:coro schedulerwait\n//go:linkname Join ") {
+			t.Fatalf("blocking pthread.Join in %s lacks its raw-host schedulerwait capability", path)
+		}
+		for _, capability := range []string{"sync", "noblock"} {
+			if strings.Contains(text, "//llgo:coro "+capability+"\n//go:linkname Create ") {
+				t.Fatalf("general pthread.Create in %s acquired a coroutine %s capability", path, capability)
+			}
+			if strings.Contains(text, "//llgo:coro "+capability+"\n//go:linkname Join ") {
+				t.Fatalf("blocking pthread.Join in %s acquired incorrect %s capability", path, capability)
+			}
+		}
+		if strings.Contains(text, "//llgo:coro schedulerwait\n//go:linkname Create ") {
+			t.Fatalf("general pthread.Create in %s acquired a raw-host wait capability", path)
+		}
+	}
+	if strings.Contains(declaration, "//llgo:coro noblock\n//go:linkname Create ") ||
+		strings.Contains(declaration, "//llgo:coro schedulerwait\n//go:linkname Create ") {
+		t.Fatal("scheduler-owned worker creation has a stronger or scheduler-only capability")
+	}
+}
+
+func TestRuntimeCoroWorkerBlockingCallStaysInRawHostStackIsland(t *testing.T) {
+	declaration := readRuntimePollFile(t, runtimeCoroWorkerCallSource)
+	for _, forbidden := range []string{"func Call(", "func QueueWaitTake("} {
+		if strings.Contains(declaration, forbidden) {
+			t.Errorf("%s exposes blocking worker operation %q to managed Go", runtimeCoroWorkerCallSource, forbidden)
+		}
+	}
+	cSource := readRuntimePollFile(t, runtimeCoroWorkerCSource)
+	for _, required := range []string{
+		"This is the complete blocking worker island",
+		"__llgo_coro_worker_queue_wait_take_v1(&job)",
+		"__llgo_coro_worker_call_v1(",
+		"__llgo_coro_native_worker_complete_v1(",
+	} {
+		if !strings.Contains(cSource, required) {
+			t.Errorf("%s lacks fixed native-stack worker step %q", runtimeCoroWorkerCSource, required)
+		}
+	}
+}
+
+func TestRuntimePthreadPrimitivesKeepPhysicalWaitSemantics(t *testing.T) {
+	text := readRuntimePollFile(t, runtimePthreadSyncSource)
+	for _, symbol := range []string{
+		"c_pthread_mutex_lock",
+		"c_pthread_rwlock_rdlock",
+		"c_pthread_rwlock_wrlock",
+		"c_pthread_cond_wait",
+		"c_pthread_cond_timedwait",
+	} {
+		if !strings.Contains(text, "//llgo:coro schedulerwait\n//go:linkname "+symbol+" ") {
+			t.Errorf("blocking pthread primitive %s lacks schedulerwait", symbol)
+		}
+		for _, capability := range []string{"noblock", "sync"} {
+			marker := "//llgo:coro " + capability + "\n//go:linkname " + symbol + " "
+			if strings.Contains(text, marker) {
+				t.Errorf("blocking pthread primitive %s acquired incorrect %s capability", symbol, capability)
+			}
+		}
+	}
+	for _, symbol := range []string{
+		"c_pthread_mutex_destroy",
+		"c_pthread_rwlock_init",
+		"c_pthread_rwlock_destroy",
+		"c_pthread_cond_init",
+		"c_pthread_cond_destroy",
+		"c_pthread_cond_signal",
+		"c_pthread_cond_broadcast",
+	} {
+		if !strings.Contains(text, "//llgo:coro sync\n//go:linkname "+symbol+" ") {
+			t.Errorf("synchronous pthread primitive %s lacks sync", symbol)
+		}
+		for _, capability := range []string{"noblock", "schedulerwait"} {
+			if strings.Contains(text, "//llgo:coro "+capability+"\n//go:linkname "+symbol+" ") {
+				t.Errorf("synchronous pthread primitive %s acquired incorrect %s capability", symbol, capability)
+			}
+		}
+	}
+}
+
+func TestRuntimeCoroWorkerDestroyCapabilityIsAfterJoinScoped(t *testing.T) {
+	native := readRuntimePollFile(t, runtimeCoroNativeWorkerSource)
+	for _, required := range []string{
+		"func coroNativeWorkerPoolResetAfterJoinV1(state *coroNativeWorkerPoolV1) bool",
+		"state.created != 0 || !state.stopping",
+		"coroworker.QueueDestroyAfterJoin()",
+		"joined := coroNativeWorkerPoolJoinCreatedV1(state)",
+	} {
+		if !strings.Contains(native, required) {
+			t.Errorf("%s lacks after-join destroy invariant %q", runtimeCoroNativeWorkerSource, required)
+		}
+	}
+	if got := strings.Count(native, "coroworker.QueueDestroyAfterJoin()"); got != 1 {
+		t.Fatalf("private worker queue destroy uses = %d, want exactly 1", got)
+	}
+	for _, forbidden := range []string{"state.work.Destroy()", "state.mutex.Destroy()", "pthread_cond_destroy", "pthread_mutex_destroy"} {
+		if strings.Contains(native, forbidden) {
+			t.Fatalf("worker pool bypasses C queue after-join lifecycle with %q", forbidden)
+		}
+	}
+
+	declaration := readRuntimePollFile(t, runtimeCoroWorkerCallSource)
+	for _, required := range []string{
+		"//llgo:coro sync\n//go:linkname QueueDestroyAfterJoin C.__llgo_coro_worker_queue_destroy_after_join_v1",
+		"func QueueDestroyAfterJoin() bool",
+		"The caller must have joined every worker",
+		"verifies that every published position was consumed",
+		"performs no wait",
+	} {
+		if !strings.Contains(declaration, required) {
+			t.Errorf("%s lacks after-join destroy contract %q", runtimeCoroWorkerCallSource, required)
+		}
+	}
+	for _, capability := range []string{"noblock", "schedulerwait"} {
+		if strings.Contains(declaration, "//llgo:coro "+capability+"\n//go:linkname QueueDestroyAfterJoin ") {
+			t.Errorf("after-join worker destroy acquired incorrect %s capability", capability)
+		}
+	}
+
+	wrapper := readRuntimePollFile(t, runtimeCoroWorkerCSource)
+	for _, required := range []string{
+		"bool __llgo_coro_worker_queue_destroy_after_join_v1(void)",
+		"queue->enqueue_position",
+		"queue->dequeue_position",
+		"llgo_coro_worker_wake_destroy_v1(&queue->wake)",
+		"atomic_store_explicit(&queue->initialized, false, memory_order_release)",
+	} {
+		if !strings.Contains(wrapper, required) {
+			t.Errorf("%s lacks after-join destroy implementation %q", runtimeCoroWorkerCSource, required)
+		}
+	}
+}
+
+func TestRuntimePollWaitSeparatesLegacyWorkerAndCoroutineOwnerABI(t *testing.T) {
+	goSource := readRuntimePollFile(t, runtimePollGoSource)
+	for _, required := range []string{
+		"coro_runtime_adapter_test || !(llgo && llgo_coro && llgo_coro_native_pipe && llgo_coro_native_timer)",
+		"//go:linkname pollFuncPCABI0 llgo.funcPCABI0",
+		"//go:linkname pollSyscall llgo.syscall",
+		"//go:linkname pollWaitFixedV1 C.__llgo_runtime_poll_wait_v1",
+		"pollFuncPCABI0(pollWaitFixedV1)",
+		"uintptr(uint32(timeout))",
+		"n, errno := runtimePollWaitFixedV1(&fds[0], 2, timeout)",
+		"if int(errno) == int(csyscall.EINTR)",
+		"With the worker capability disabled, llgo.syscall keeps its legacy direct",
+	} {
+		if !strings.Contains(goSource, required) {
+			t.Errorf("%s lacks fixed worker ABI marker %q", runtimePollGoSource, required)
+		}
+	}
+	for _, forbidden := range []string{
+		"//go:linkname c_poll C.poll",
+		"cliteos.Errno()",
+	} {
+		if strings.Contains(goSource, forbidden) {
+			t.Errorf("%s retains executor-thread poll/TLS errno path %q", runtimePollGoSource, forbidden)
+		}
+	}
+
+	coroSource := readRuntimePollFile(t, runtimeCoroPollGoSource)
+	for _, required := range []string{
+		"llgo && llgo_coro && llgo_coro_native_pipe && llgo_coro_native_timer",
+		"//go:linkname llgoCoroPollWaitV2 llgo.coroPollWait",
+		"func llgoCoroPollWaitV2(ctx uintptr, fd int32, interest uint32, deadline int64) uint32",
+		"C.__llgo_coro_poll_update_deadline_or_abort_v1",
+		"C.__llgo_coro_poll_post_closing_or_abort_v1",
+		"return llgoCoroPollWaitV2(ctx, fd, interest, deadline)",
+		"func pollCoroPrepareWaitV2(ctx uintptr, mode int)",
+		"func pollCoroFinishWaitV2(ctx uintptr, mode int, result uint32)",
+		"pollCoroWaitOneV2(ctx, fd, interest, deadline)",
+		"llgoCoroPollUpdateDeadlineOrAbortV1(ctx, coroPollInterestReadV2, deadline)",
+		"llgoCoroPollPostClosingOrAbortV1(ctx, coroPollInterestReadV2)",
+		"reset-after-expiry rule",
+		"result, statErrno := coroPollFstat(fd, &info)",
+		"uint32(result) == ^uint32(0)",
+		"case uint32(csyscall.S_IFSOCK):",
+		"return true, pollCoroFDStreamLeafV1(fd), 0",
+		"case uint32(csyscall.S_IFIFO), uint32(csyscall.S_IFCHR):",
+		"return true, false, 0",
+		"return false, false, int(csyscall.EOPNOTSUPP)",
+		"llrt.CoroNativePollServerDescriptorV1(fd)",
+		"keep their Go blocking style without a Future/Await API or one worker thread",
+	} {
+		if !strings.Contains(coroSource, required) {
+			t.Errorf("%s lacks coroutine poll marker %q", runtimeCoroPollGoSource, required)
+		}
+	}
+	for path, trampoline := range map[string]string{
+		"internal/lib/runtime/poll_fstat_linux_coro_llgo.go":  "//llgo:coro workeraddr 3\n//go:linkname libc_fstat_trampoline C.fstat",
+		"internal/lib/runtime/poll_fstat_darwin_coro_llgo.go": "//llgo:coro workeraddr 3\n//go:linkname libc_fstat64_trampoline C.fstat64",
+	} {
+		statSource := readRuntimePollFile(t, path)
+		syscallMarker := "//go:linkname coroPollFstatSyscall3 llgo.syscall32"
+		if strings.Contains(path, "darwin") {
+			syscallMarker = "runtimeDarwinSyscall3Int32("
+		}
+		for _, marker := range []string{
+			trampoline,
+			syscallMarker,
+			"func coroPollFstat(fd int32, info *cliteos.StatT) (result, errno uintptr)",
+		} {
+			if !strings.Contains(statSource, marker) {
+				t.Errorf("%s lacks fixed coroutine Fstat errno transport %q", path, marker)
+			}
+		}
+	}
+	for _, forbidden := range []string{
+		"pollSyscall",
+		"runtimePollWaitFixedV1",
+		"pthread_create",
+		"coroworker",
+		"type Future",
+		"func Await",
+		"llgoCoroPollWaitTokenV1",
+		"llgoCoroPollPrepareOrAbortV1",
+		"llgoCoroPollRetireCompletedOrAbortV1",
+		"llgoCoroPollParkV1",
+		"llgo.coroPark",
+		"cliteos.Errno()",
+	} {
+		if strings.Contains(coroSource, forbidden) {
+			t.Errorf("%s retains per-wait worker/public async path %q", runtimeCoroPollGoSource, forbidden)
+		}
+	}
+	assertRuntimePollTypedParkRecipe(t, runtimeCoroPollGoSource, coroSource)
+	assertRuntimePollTimeoutPrefersClosing(t, coroSource)
+
+	cSource := readRuntimePollFile(t, runtimePollCSource)
+	for _, required := range []string{
+		"uintptr_t __llgo_runtime_poll_wait_v1(",
+		"nfds_t nfds = (nfds_t)nfds_word;",
+		"int timeout = (int)(int32_t)(uint32_t)timeout_word;",
+		"int result = poll(fds, nfds, timeout);",
+		"return UINTPTR_MAX;",
+	} {
+		if !strings.Contains(cSource, required) {
+			t.Errorf("%s lacks fixed poll wrapper marker %q", runtimePollCSource, required)
+		}
+	}
+	// These two exact expressions freeze the -1 contract without executing an
+	// unbounded wait: Go publishes 0xffffffff and C restores int32(-1) before
+	// widening to the platform's int.
+	if !strings.Contains(goSource, "uintptr(uint32(timeout))") ||
+		!strings.Contains(cSource, "(int)(int32_t)(uint32_t)timeout_word") {
+		t.Fatal("poll timeout -1 low-32-bit round trip is not explicit at both ABI ends")
+	}
+
+	manifest := readRuntimePollFile(t, "internal/lib/runtime/runtime_default.go")
+	if !strings.Contains(manifest, "_wrap/poll.c") {
+		t.Fatal("non-baremetal runtime C manifest does not include the fixed poll wrapper")
+	}
+}
+
+func TestRuntimePollSourceSelectionUsesCompleteNativeCapability(t *testing.T) {
+	native := []string{"llgo", "llgo_coro", "llgo_coro_native_pipe", "llgo_coro_native_timer"}
+	tests := []struct {
+		name      string
+		goos      string
+		goarch    string
+		buildTags []string
+		legacy    bool
+		coro      bool
+	}{
+		{name: "ordinary linux", goos: "linux", legacy: true},
+		{name: "ordinary darwin", goos: "darwin", legacy: true},
+		{name: "coro tag alone falls back", goos: "linux", buildTags: []string{"llgo", "llgo_coro"}, legacy: true},
+		{name: "missing pipe falls back", goos: "linux", buildTags: []string{"llgo", "llgo_coro", "llgo_coro_native_timer"}, legacy: true},
+		{name: "missing timer falls back", goos: "linux", buildTags: []string{"llgo", "llgo_coro", "llgo_coro_native_pipe"}, legacy: true},
+		{name: "complete linux capability", goos: "linux", buildTags: native, coro: true},
+		{name: "complete linux arm64 capability", goos: "linux", goarch: "arm64", buildTags: native, coro: true},
+		{name: "complete darwin capability", goos: "darwin", buildTags: native, coro: true},
+		{name: "complete darwin arm64 capability", goos: "darwin", goarch: "arm64", buildTags: native, coro: true},
+		{name: "adapter selects legacy", goos: "linux", buildTags: append(slices.Clone(native), "coro_runtime_adapter_test"), legacy: true},
+		{name: "baremetal owns poll elsewhere", goos: "linux", buildTags: append(slices.Clone(native), "baremetal")},
+		{name: "unsupported windows", goos: "windows", buildTags: native},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := build.Default
+			ctx.GOOS = test.goos
+			ctx.GOARCH = test.goarch
+			if ctx.GOARCH == "" {
+				ctx.GOARCH = "amd64"
+			}
+			ctx.BuildTags = slices.Clone(test.buildTags)
+			for file, want := range map[string]bool{
+				filepath.Base(runtimePollGoSource):     test.legacy,
+				filepath.Base(runtimeCoroPollGoSource): test.coro,
+			} {
+				got, err := ctx.MatchFile(filepath.Dir(runtimePollGoSource), file)
+				if err != nil {
+					t.Fatalf("MatchFile(%q): %v", file, err)
+				}
+				if got != want {
+					t.Errorf("MatchFile(%q) = %t, want %t", file, got, want)
+				}
+			}
+		})
+	}
+}
+
+func assertRuntimePollTimeoutPrefersClosing(t *testing.T, source string) {
+	t.Helper()
+	start := strings.Index(source, "case coroPollResultTimeoutV2:")
+	if start < 0 {
+		t.Fatal("coroutine poll finish lacks timeout branch")
+	}
+	end := strings.Index(source[start:], "default:")
+	if end < 0 {
+		t.Fatal("coroutine poll timeout branch lacks following default")
+	}
+	branch := source[start : start+end]
+	closing := strings.Index(branch, "pollDescClosing(state)")
+	deadline := strings.Index(branch, "current := pollDeadline(ctx, mode)")
+	if closing < 0 || deadline < 0 || closing > deadline {
+		t.Fatalf("timeout completion does not give closing priority:\n%s", branch)
+	}
+}
+
+func assertRuntimePollTypedParkRecipe(t *testing.T, path, source string) {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), path, source, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var function *ast.FuncDecl
+	for _, declaration := range file.Decls {
+		candidate, ok := declaration.(*ast.FuncDecl)
+		if ok && candidate.Name.Name == "pollCoroWaitOneV2" {
+			function = candidate
+			break
+		}
+	}
+	if function == nil || function.Body == nil || len(function.Body.List) != 1 {
+		t.Fatalf("%s pollCoroWaitOneV2 is not one exact typed intrinsic return", path)
+	}
+	ret, ok := function.Body.List[0].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 1 {
+		t.Fatal("poll typed park recipe is not one exact return")
+	}
+	call, ok := ret.Results[0].(*ast.CallExpr)
+	if !ok || len(call.Args) != 4 {
+		t.Fatal("poll typed park recipe does not call the exact four-argument intrinsic")
+	}
+	identifier, ok := call.Fun.(*ast.Ident)
+	if !ok || identifier.Name != "llgoCoroPollWaitV2" {
+		t.Fatal("poll typed park recipe does not call llgoCoroPollWaitV2")
+	}
+	for index, want := range []string{"ctx", "fd", "interest", "deadline"} {
+		argument, ok := call.Args[index].(*ast.Ident)
+		if !ok || argument.Name != want {
+			t.Fatalf("poll typed park argument %d is not exact scalar %s", index, want)
+		}
+	}
+	functionText := coroTimerOwnerNodeText(t, function)
+	forbidden := map[string]bool{
+		"llgoPollDesc": false,
+		"token":        false,
+		"ticket":       false,
+		"slot":         false,
+		"generation":   false,
+	}
+	ast.Inspect(function, func(node ast.Node) bool {
+		identifier, ok := node.(*ast.Ident)
+		if ok {
+			if _, exists := forbidden[identifier.Name]; exists {
+				forbidden[identifier.Name] = true
+			}
+		}
+		return true
+	})
+	for name, found := range forbidden {
+		if found {
+			t.Fatalf("poll typed park recipe retains forbidden %s provenance:\n%s", name, functionText)
+		}
+	}
+}
+
+func TestRuntimePollFixedCWrapper(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skipf("poll wrapper is POSIX-only on %s", runtime.GOOS)
+	}
+	cc, err := exec.LookPath("cc")
+	if err != nil {
+		t.Skip("host C compiler is unavailable")
+	}
+	dir := t.TempDir()
+	testSource := filepath.Join(dir, "poll_wrapper_test.c")
+	program := `
+#include <errno.h>
+#include <poll.h>
+#include <stdint.h>
+#include <unistd.h>
+
+uintptr_t __llgo_runtime_poll_wait_v1(uintptr_t, uintptr_t, uintptr_t);
+uintptr_t __llgo_runtime_poll_desc_alloc_v1(int32_t, uint32_t);
+void __llgo_runtime_poll_desc_free_v1(uintptr_t);
+uint64_t __llgo_runtime_poll_desc_state_v1(uintptr_t);
+int64_t __llgo_runtime_poll_desc_deadline_v1(uintptr_t, int32_t);
+void __llgo_runtime_poll_desc_set_deadline_v1(uintptr_t, int32_t, int64_t);
+uint64_t __llgo_runtime_poll_desc_mark_closing_v1(uintptr_t);
+uint64_t __llgo_runtime_poll_desc_load_operation_v1(uintptr_t, uint32_t);
+uint32_t __llgo_runtime_poll_desc_publish_operation_v1(
+    uintptr_t, uint32_t, uint32_t, uint32_t);
+uint32_t __llgo_runtime_poll_desc_clear_operation_v1(
+    uintptr_t, uint32_t, uint32_t, uint32_t);
+
+int main(void) {
+    int pipefd[2];
+    if (pipe(pipefd) != 0) {
+        return 10;
+    }
+    struct pollfd fd = { .fd = pipefd[0], .events = POLLIN, .revents = 0 };
+    if (__llgo_runtime_poll_wait_v1((uintptr_t)&fd, 1, 0) != 0) {
+        return 11;
+    }
+    const char byte = 'x';
+    if (write(pipefd[1], &byte, 1) != 1) {
+        return 12;
+    }
+    fd.revents = 0;
+    if (__llgo_runtime_poll_wait_v1((uintptr_t)&fd, 1, UINT32_MAX) != 1 ||
+        (fd.revents & POLLIN) == 0) {
+        return 13;
+    }
+    errno = 0;
+    if (__llgo_runtime_poll_wait_v1(0, 1, 0) != UINTPTR_MAX || errno == 0) {
+        return 14;
+    }
+    if (close(pipefd[0]) != 0 || close(pipefd[1]) != 0) {
+        return 15;
+    }
+    uintptr_t context = __llgo_runtime_poll_desc_alloc_v1(23, 1);
+    if (context == 0 || (uint32_t)__llgo_runtime_poll_desc_state_v1(context) != 23) {
+        return 16;
+    }
+    __llgo_runtime_poll_desc_set_deadline_v1(context, 'r', 1234);
+    if (__llgo_runtime_poll_desc_deadline_v1(context, 'r') != 1234) {
+        return 17;
+    }
+    const uint32_t source_slot = 0x01010001;
+    const uint32_t generation = 9;
+    const uint64_t operation =
+        ((uint64_t)generation << 32) | (uint64_t)source_slot;
+    if (__llgo_runtime_poll_desc_publish_operation_v1(
+            context, 1, source_slot, generation) != 1 ||
+        __llgo_runtime_poll_desc_load_operation_v1(context, 1) != operation ||
+        __llgo_runtime_poll_desc_publish_operation_v1(
+            context, 1, source_slot, generation) != 0) {
+        return 18;
+    }
+    if (__llgo_runtime_poll_desc_clear_operation_v1(
+            context, 1, source_slot, generation + 1) != 0 ||
+        __llgo_runtime_poll_desc_clear_operation_v1(
+            context, 1, source_slot, generation) != 1 ||
+        __llgo_runtime_poll_desc_load_operation_v1(context, 1) != 0) {
+        return 19;
+    }
+    if ((__llgo_runtime_poll_desc_mark_closing_v1(context) &
+            (UINT64_C(1) << 32)) != 0 ||
+        __llgo_runtime_poll_desc_publish_operation_v1(
+            context, 2, source_slot, generation) != 3) {
+        return 20;
+    }
+    if ((__llgo_runtime_poll_desc_mark_closing_v1(context) &
+            (UINT64_C(1) << 32)) == 0 ||
+        __llgo_runtime_poll_desc_clear_operation_v1(
+            context, 2, source_slot, generation) != 1) {
+        return 21;
+    }
+    __llgo_runtime_poll_desc_free_v1(context);
+    return 0;
+}
+`
+	if err := os.WriteFile(testSource, []byte(program), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wrapper, err := filepath.Abs(runtimePollCSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable := filepath.Join(dir, "poll_wrapper_test")
+	compile := exec.Command(cc, "-std=c11", "-Wall", "-Wextra", "-Werror", wrapper, testSource, "-o", executable)
+	if output, err := compile.CombinedOutput(); err != nil {
+		t.Fatalf("compile fixed poll wrapper: %v\n%s", err, output)
+	}
+	run := exec.Command(executable)
+	if output, err := run.CombinedOutput(); err != nil {
+		t.Fatalf("run fixed poll wrapper: %v\n%s", err, output)
+	}
+}
+
+func readRuntimePollFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(data)
+}

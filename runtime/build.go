@@ -11,18 +11,19 @@ const (
 
 type altPkgSpec struct {
 	mode    altPkgMode
+	gooses  map[string]struct{}
 	goarchs map[string]struct{}
 }
 
-func (s altPkgSpec) enabledFor(goarch string) bool {
-	return len(s.goarchs) == 0 || hasGoarch(s.goarchs, goarch)
+func (s altPkgSpec) enabledFor(goos, goarch string) bool {
+	return targetEnabled(s.gooses, goos) && targetEnabled(s.goarchs, goarch)
 }
 
-func hasGoarch(goarchs map[string]struct{}, goarch string) bool {
-	if goarchs == nil {
-		return false
+func targetEnabled(values map[string]struct{}, value string) bool {
+	if len(values) == 0 {
+		return true
 	}
-	_, ok := goarchs[goarch]
+	_, ok := values[value]
 	return ok
 }
 
@@ -38,18 +39,18 @@ func HasAltPkg(path string) (b bool) {
 	return
 }
 
-func HasAltPkgForGOARCH(path, goarch string) bool {
+func HasAltPkgForTarget(path, goos, goarch string) bool {
 	spec, ok := altPkgs[path]
-	return ok && spec.enabledFor(goarch)
+	return ok && spec.enabledFor(goos, goarch)
 }
 
 func HasAdditiveAltPkg(path string) bool {
 	return altPkgs[path].mode == altPkgAdditive
 }
 
-func HasAdditiveAltPkgForGOARCH(path, goarch string) bool {
+func HasAdditiveAltPkgForTarget(path, goos, goarch string) bool {
 	spec, ok := altPkgs[path]
-	return ok && spec.mode == altPkgAdditive && spec.enabledFor(goarch)
+	return ok && spec.mode == altPkgAdditive && spec.enabledFor(goos, goarch)
 }
 
 var altPkgs = map[string]altPkgSpec{
@@ -58,6 +59,7 @@ var altPkgs = map[string]altPkgSpec{
 	"internal/reflectlite":    {mode: altPkgReplace},
 	"internal/runtime/maps":   {mode: altPkgReplace},
 	"internal/runtime/sys":    {mode: altPkgAdditive},
+	"internal/syscall/unix":   {mode: altPkgAdditive, gooses: map[string]struct{}{"darwin": {}}},
 	"reflect":                 {mode: altPkgReplace},
 	"runtime":                 {mode: altPkgReplace},
 	"sync/atomic":             {mode: altPkgReplace},
@@ -84,6 +86,7 @@ func SourcePatchPkgPaths() []string {
 
 var sourcePatchPkgs = map[string]struct{}{
 	"crypto/internal/constanttime": {},
+	"internal/poll":                {},
 	"internal/sync":                {},
 	"iter":                         {},
 	"runtime/metrics":              {},

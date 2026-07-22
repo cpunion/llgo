@@ -86,7 +86,7 @@ func Root() int { return Apply(Target, 41) }
 			if call != dynamicCall {
 				return coro.SSAClosedDynamicCallCertificate{}, false, nil
 			}
-			return coro.SSAClosedDynamicCallCertificate{Targets: []*ssa.Function{target}, MayBeNil: true}, true, nil
+			return coro.SSAClosedDynamicCallCertificate{Targets: []*ssa.Function{target}, MayBeNil: true, SyncDispatch: true}, true, nil
 		},
 	})
 	if err != nil {
@@ -97,8 +97,9 @@ func Root() int { return Apply(Target, 41) }
 		t.Fatalf("Target plan = %+v, present=%t; want one descriptor-backed plain body", targetPlan, ok)
 	}
 	callPlan, ok := plan.CallPlan(dynamicCall)
-	if !ok || callPlan.Rep != coro.Dispatch || callPlan.Open || !callPlan.MayBeNil || len(callPlan.Targets) != 1 || callPlan.Targets[0] != targetPlan.ID {
-		t.Fatalf("Apply dynamic CallPlan = %+v, present=%t; want closed nullable singleton Dispatch", callPlan, ok)
+	if !ok || callPlan.Rep != coro.Dispatch || callPlan.Open || !callPlan.SyncDispatch || !callPlan.MayBeNil ||
+		len(callPlan.Targets) != 1 || callPlan.Targets[0] != targetPlan.ID {
+		t.Fatalf("Apply dynamic CallPlan = %+v, present=%t; want closed synchronous nullable singleton Dispatch", callPlan, ok)
 	}
 
 	compiled, _, err := NewPackageExWithEmbedOptions(
@@ -165,7 +166,7 @@ func TestCoroPlainDispatchGateAndTargetShapeFailClosed(t *testing.T) {
 		{"multiple results", "func Bad() (int, int) { return 1, 2 }", "multiple results"},
 		{"aggregate parameter", "func Bad(value string) { _ = value }", "not a supported scalar"},
 		{"variadic", "func Bad(values ...int) { _ = values }", "variadic"},
-		{"nested function", "func Bad(value func()) { _ = value }", "nested function type"},
+		{"nested function", "func Bad(value func()) { _ = value }", "not a supported scalar"},
 	}
 	for _, test := range badSignatures {
 		t.Run(test.name, func(t *testing.T) {

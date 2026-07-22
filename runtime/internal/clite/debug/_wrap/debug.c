@@ -7,15 +7,17 @@
 
 #include <dlfcn.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <stdint.h>
+#include <stdio.h>
 
 void *llgo_address() {
     return __builtin_return_address(0);
 }
 
-int llgo_addrinfo(void *addr, Dl_info *info) {
+int llgo_addrinfo(uintptr_t addr, Dl_info *info) {
     int saved_errno = errno;
-    int ret = dladdr(addr, info);
+    int ret = dladdr((void *)addr, info);
     errno = saved_errno;
     return ret;
 }
@@ -27,7 +29,16 @@ void *llgo_symbol(char *name) {
     return ret;
 }
 
-void llgo_stacktrace(int skip, void *ctx, int (*fn)(void *ctx, void *pc, void *offset, void *sp, char *name)) {
+typedef struct {
+    void *pc;
+    uintptr_t offset;
+    void *sp;
+    char *name;
+} llgo_stacktrace_frame;
+
+typedef int (*llgo_stacktrace_visitor)(void *ctx, void *pc, uintptr_t offset, void *sp, char *name);
+
+static void llgo_walk_stack(int skip, void *ctx, llgo_stacktrace_visitor fn) {
     /* Frame-pointer chain walk. LLGo compiles every Go function with
      * "frame-pointer"="non-leaf", so [fp] is the previous frame pointer and
      * [fp+1] the return address on both arm64 and x86-64. This replaces the
@@ -55,7 +66,7 @@ void llgo_stacktrace(int skip, void *ctx, int (*fn)(void *ctx, void *pc, void *o
                 name = info.dli_sname;
                 offset = pc - (uintptr_t)info.dli_saddr;
             }
-            if (fn(ctx, (void *)pc, (void *)offset, (void *)fp, (char *)name) == 0)
+            if (fn(ctx, (void *)pc, offset, (void *)fp, (char *)name) == 0)
                 break;
         }
         depth++;
@@ -64,4 +75,42 @@ void llgo_stacktrace(int skip, void *ctx, int (*fn)(void *ctx, void *pc, void *o
         fp = prev;
     }
     errno = saved_errno;
+}
+
+typedef struct {
+    llgo_stacktrace_frame *frames;
+    int capacity;
+    int count;
+} llgo_stacktrace_capture;
+
+static int llgo_capture_stack_frame(void *ctx, void *pc, uintptr_t offset, void *sp, char *name) {
+    llgo_stacktrace_capture *capture = (llgo_stacktrace_capture *)ctx;
+    if (capture->count >= capture->capacity)
+        return 0;
+    llgo_stacktrace_frame *frame = &capture->frames[capture->count++];
+    frame->pc = pc;
+    frame->offset = offset;
+    frame->sp = sp;
+    frame->name = name;
+    return capture->count < capture->capacity;
+}
+
+int llgo_stacktrace(int skip, llgo_stacktrace_frame *frames, int capacity) {
+    if (!frames || capacity <= 0)
+        return 0;
+    llgo_stacktrace_capture capture = {frames, capacity, 0};
+    llgo_walk_stack(skip, &capture, llgo_capture_stack_frame);
+    return capture.count;
+}
+
+static int llgo_print_stack_frame(void *ctx, void *pc, uintptr_t offset, void *sp, char *name) {
+    (void)ctx;
+    fprintf(stderr, "[0x%08" PRIXPTR " %s+0x%" PRIxPTR ", SP = 0x%" PRIxPTR "]\n",
+            (uintptr_t)pc, name, offset, (uintptr_t)sp);
+    return 1;
+}
+
+void llgo_print_stack(int skip) {
+    /* Account for this C adapter in addition to the caller-selected frames. */
+    llgo_walk_stack(skip + 1, NULL, llgo_print_stack_frame);
 }

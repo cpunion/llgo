@@ -20,6 +20,18 @@ package corodoorbell
 
 const deadlineNanosPerMilli int64 = 1_000_000
 
+// PollFaultContainmentMilliseconds bounds one physical owner wait so a failed
+// doorbell write or backend fault is eventually rechecked without changing
+// the logical timer or readiness deadline.
+const PollFaultContainmentMilliseconds int32 = physicalPollMaxMS
+
+// DeadlinePollTimeout exposes the one shared absolute-to-relative conversion
+// to the target poll-set owner. A timeout is rounded up and fault-containment
+// bounded, so it is never itself proof that deadline has elapsed.
+func DeadlinePollTimeout(now, deadline int64) (timeoutMS int32, reached, ok bool) {
+	return deadlinePollTimeout(now, deadline)
+}
+
 // deadlinePollTimeout converts one absolute monotonic deadline into a bounded
 // poll timeout. Rounding is upward, so an ordinary timeout can never be
 // mistaken for proof that a sub-millisecond deadline has already elapsed.

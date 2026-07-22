@@ -5,72 +5,12 @@ package runtime
 import (
 	"unsafe"
 
-	psync "github.com/goplus/llgo/runtime/internal/clite/pthread/sync"
 	latomic "github.com/goplus/llgo/runtime/internal/lib/sync/atomic"
 )
 
-// Minimal semaphore + notify list support for stdlib sync on llgo/darwin.
-
-type semaState struct {
-	mu      psync.Mutex
-	cond    psync.Cond
-	waiters uint32
-}
-
-var semaOnce psync.Once
-var semaMu psync.Mutex
-var semaMap map[uintptr]*semaState
-
-func initSemaMap() {
-	semaMu.Init(nil)
-	semaMap = make(map[uintptr]*semaState)
-}
-
-func getSemaState(addr *uint32) *semaState {
-	semaOnce.Do(initSemaMap)
-	key := uintptr(unsafe.Pointer(addr))
-	semaMu.Lock()
-	st := semaMap[key]
-	if st == nil {
-		st = &semaState{}
-		st.mu.Init(nil)
-		st.cond.Init(nil)
-		semaMap[key] = st
-	}
-	semaMu.Unlock()
-	return st
-}
-
-func semaAcquire(addr *uint32) {
-	for {
-		v := latomic.LoadUint32(addr)
-		if v != 0 && latomic.CompareAndSwapUint32(addr, v, v-1) {
-			return
-		}
-		st := getSemaState(addr)
-		st.mu.Lock()
-		for {
-			v = latomic.LoadUint32(addr)
-			if v != 0 && latomic.CompareAndSwapUint32(addr, v, v-1) {
-				st.mu.Unlock()
-				return
-			}
-			st.waiters++
-			st.cond.Wait(&st.mu)
-			st.waiters--
-		}
-	}
-}
-
-func semaRelease(addr *uint32) {
-	latomic.AddUint32(addr, 1)
-	st := getSemaState(addr)
-	st.mu.Lock()
-	if st.waiters != 0 {
-		st.cond.Signal()
-	}
-	st.mu.Unlock()
-}
+// Standard-library semaphore entry points dispatch to a capability-selected
+// legacy or event-driven implementation. notifyList uses the same split while
+// retaining the standard runtime ABI and ticket layout below.
 
 // sync_runtime_Semacquire should be an internal detail, but is linknamed.
 //
@@ -179,68 +119,15 @@ type notifyList struct {
 	tail   unsafe.Pointer
 }
 
-type notifyState struct {
-	mu   psync.Mutex
-	cond psync.Cond
-}
-
-var notifyOnce psync.Once
-var notifyMu psync.Mutex
-var notifyMap map[uintptr]*notifyState
-
-func initNotifyMap() {
-	notifyMu.Init(nil)
-	notifyMap = make(map[uintptr]*notifyState)
-}
-
-func getNotifyState(l *notifyList) *notifyState {
-	notifyOnce.Do(initNotifyMap)
-	key := uintptr(unsafe.Pointer(l))
-	notifyMu.Lock()
-	st := notifyMap[key]
-	if st == nil {
-		st = &notifyState{}
-		st.mu.Init(nil)
-		st.cond.Init(nil)
-		notifyMap[key] = st
-	}
-	notifyMu.Unlock()
-	return st
+// notifyListTicketLess is valid while the unwrapped distance is below 2^31,
+// matching the standard Go runtime notifyList invariant.
+func notifyListTicketLess(a, b uint32) bool {
+	return int32(a-b) < 0
 }
 
 //go:linkname sync_runtime_notifyListAdd sync.runtime_notifyListAdd
 func sync_runtime_notifyListAdd(l *notifyList) uint32 {
 	return latomic.AddUint32(&l.wait, 1) - 1
-}
-
-//go:linkname sync_runtime_notifyListWait sync.runtime_notifyListWait
-func sync_runtime_notifyListWait(l *notifyList, t uint32) {
-	st := getNotifyState(l)
-	st.mu.Lock()
-	for latomic.LoadUint32(&l.notify) == t {
-		st.cond.Wait(&st.mu)
-	}
-	st.mu.Unlock()
-}
-
-//go:linkname sync_runtime_notifyListNotifyAll sync.runtime_notifyListNotifyAll
-func sync_runtime_notifyListNotifyAll(l *notifyList) {
-	st := getNotifyState(l)
-	st.mu.Lock()
-	latomic.StoreUint32(&l.notify, latomic.LoadUint32(&l.wait))
-	st.cond.Broadcast()
-	st.mu.Unlock()
-}
-
-//go:linkname sync_runtime_notifyListNotifyOne sync.runtime_notifyListNotifyOne
-func sync_runtime_notifyListNotifyOne(l *notifyList) {
-	st := getNotifyState(l)
-	st.mu.Lock()
-	if latomic.LoadUint32(&l.notify) != latomic.LoadUint32(&l.wait) {
-		latomic.AddUint32(&l.notify, 1)
-		st.cond.Signal()
-	}
-	st.mu.Unlock()
 }
 
 //go:linkname sync_runtime_notifyListCheck sync.runtime_notifyListCheck

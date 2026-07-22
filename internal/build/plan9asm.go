@@ -168,6 +168,12 @@ type plan9AsmSigCacheKey struct {
 
 var plan9AsmSigCache sync.Map // key: plan9AsmSigCacheKey, value: map[string]struct{}
 
+// plan9AsmNoSuspendCache freezes proofs over the same target-selected,
+// post-cabi LLVM modules that compilePkgSFiles later emits. A signature alone
+// never enters this cache: functions with any unproved opcode or call boundary
+// remain ordinary opaque assembly declarations.
+var plan9AsmNoSuspendCache sync.Map // key: plan9AsmSigCacheKey, value: map[string]llplan9asm.NoSuspendLeafProof
+
 func archSupportsPlan9AsmDefaults(goarch string) bool {
 	return goarch == "arm64" || goarch == "amd64"
 }
@@ -230,7 +236,8 @@ func plan9asmSigsForPkg(ctx *context, pkgPath string) (map[string]struct{}, erro
 		plan9AsmSigCache.Store(key, sigs)
 		return sigs, nil
 	}
-	if hasAltPkgForTarget(ctx.buildConf, pkgPath) && !llruntime.HasAdditiveAltPkgForGOARCH(pkgPath, ctx.buildConf.Goarch) {
+	if hasAltPkgForTarget(ctx.buildConf, pkgPath) &&
+		!llruntime.HasAdditiveAltPkgForTarget(pkgPath, ctx.buildConf.Goos, ctx.buildConf.Goarch) {
 		plan9AsmSigCache.Store(key, sigs)
 		return sigs, nil
 	}
@@ -269,6 +276,88 @@ func plan9asmSigsForPkg(ctx *context, pkgPath string) (map[string]struct{}, erro
 	}
 	plan9AsmSigCache.Store(key, sigs)
 	return sigs, nil
+}
+
+func plan9asmNoSuspendProofsForPkg(ctx *context, pkgPath string) (map[string]llplan9asm.NoSuspendLeafProof, error) {
+	if ctx == nil || pkgPath == "" {
+		return nil, nil
+	}
+	key := plan9AsmSigCacheKey{ctx: ctx, pkgPath: pkgPath}
+	if value, ok := plan9AsmNoSuspendCache.Load(key); ok {
+		return value.(map[string]llplan9asm.NoSuspendLeafProof), nil
+	}
+
+	proofs := make(map[string]llplan9asm.NoSuspendLeafProof)
+	store := func() map[string]llplan9asm.NoSuspendLeafProof {
+		plan9AsmNoSuspendCache.Store(key, proofs)
+		return proofs
+	}
+	if !ctx.plan9asmEnabled(pkgPath) ||
+		hasAltPkgForTarget(ctx.buildConf, pkgPath) &&
+			!llruntime.HasAdditiveAltPkgForTarget(pkgPath, ctx.buildConf.Goos, ctx.buildConf.Goarch) {
+		return store(), nil
+	}
+
+	var pkg *packages.Package
+	for candidate := range ctx.pkgs {
+		if candidate != nil && candidate.PkgPath == pkgPath {
+			pkg = candidate
+			break
+		}
+	}
+	if pkg == nil {
+		return store(), nil
+	}
+	sfiles, err := pkgSFiles(ctx, pkg)
+	if err != nil {
+		return nil, err
+	}
+	skipDarwinDynimportTrampolines := shouldCheckDarwinDynimportTrampolineAsm(ctx, pkg)
+	for _, sfile := range sfiles {
+		src, err := llplan9asm.ReadFileWithOverlay(ctx.conf.Overlay, sfile)
+		if err != nil {
+			return nil, fmt.Errorf("%s: read %s: %w", pkg.PkgPath, sfile, err)
+		}
+		if shouldSkipDarwinDynimportTrampolineAsm(skipDarwinDynimportTrampolines, sfile, src) {
+			continue
+		}
+		translation, err := llplan9asm.TranslateSourceModuleForPkg(pkg, sfile, src, ctx.buildConf.Goos, ctx.buildConf.Goarch)
+		if err != nil {
+			if strings.Contains(err.Error(), "no TEXT directive found") {
+				continue
+			}
+			return nil, fmt.Errorf("%s: translate %s for coroutine assembly proof: %w", pkg.PkgPath, sfile, err)
+		}
+		if pkg.PkgPath != "runtime" {
+			ctx.cTransformer.TransformModule(pkg.PkgPath, translation.Module)
+		}
+		for _, function := range translation.Functions {
+			proof, proofErr := llplan9asm.ProveNoSuspendLeaf(translation, function.ResolvedSymbol)
+			if proofErr != nil {
+				continue
+			}
+			if previous, exists := proofs[function.ResolvedSymbol]; exists && !samePlan9AsmNoSuspendProof(previous, proof) {
+				translation.Module.Dispose()
+				return nil, fmt.Errorf("%s: symbol %q has conflicting coroutine assembly proofs across selected files", pkg.PkgPath, function.ResolvedSymbol)
+			}
+			proofs[function.ResolvedSymbol] = proof
+		}
+		translation.Module.Dispose()
+	}
+	return store(), nil
+}
+
+func samePlan9AsmNoSuspendProof(left, right llplan9asm.NoSuspendLeafProof) bool {
+	if left.Symbol != right.Symbol || left.Signature != right.Signature || left.ClosureSHA256 != right.ClosureSHA256 ||
+		len(left.CallClosure) != len(right.CallClosure) {
+		return false
+	}
+	for index := range left.CallClosure {
+		if left.CallClosure[index] != right.CallClosure[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func cabiSkipFuncsForPlan9Asm(ctx *context, pkgPath string, mod gllvm.Module) []string {
@@ -330,10 +419,10 @@ func (ctx *context) plan9asmEnabled(pkgPath string) bool {
 }
 
 func hasAltPkgForTarget(conf *Config, pkgPath string) bool {
-	if conf == nil || !llruntime.HasAltPkgForGOARCH(pkgPath, conf.Goarch) {
+	if conf == nil || !llruntime.HasAltPkgForTarget(pkgPath, conf.Goos, conf.Goarch) {
 		return false
 	}
-	if llruntime.HasAdditiveAltPkgForGOARCH(pkgPath, conf.Goarch) {
+	if llruntime.HasAdditiveAltPkgForTarget(pkgPath, conf.Goos, conf.Goarch) {
 		return true
 	}
 	// When Plan9 asm translation is enabled, avoid also pulling in alt packages
@@ -367,7 +456,8 @@ func plan9asmEnabledByDefault(conf *Config, pkgPath string) bool {
 	if !archSupportsPlan9AsmDefaults(conf.Goarch) {
 		return false
 	}
-	return !llruntime.HasAltPkgForGOARCH(pkgPath, conf.Goarch) || llruntime.HasAdditiveAltPkgForGOARCH(pkgPath, conf.Goarch)
+	return !llruntime.HasAltPkgForTarget(pkgPath, conf.Goos, conf.Goarch) ||
+		llruntime.HasAdditiveAltPkgForTarget(pkgPath, conf.Goos, conf.Goarch)
 }
 
 func pkgSFiles(ctx *context, pkg *packages.Package) ([]string, error) {

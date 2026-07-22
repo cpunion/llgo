@@ -4,20 +4,12 @@ package runtime
 
 import (
 	_ "unsafe"
-
-	"github.com/goplus/llgo/runtime/internal/clite/pthread/sync"
 )
 
-var (
-	uniqueMapCleanup     chan struct{}
-	uniqueMapCleanupOnce sync.Once
-)
+var uniqueMapCleanup = make(chan struct{}, 1)
 
 //go:linkname unique_runtime_registerUniqueMapCleanup unique.runtime_registerUniqueMapCleanup
 func unique_runtime_registerUniqueMapCleanup(f func()) {
-	uniqueMapCleanupOnce.Do(func() {
-		uniqueMapCleanup = make(chan struct{}, 1)
-	})
 	// Start the goroutine in the runtime so it's counted as a system goroutine.
 	go func(cleanup func()) {
 		for {

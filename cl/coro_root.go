@@ -77,45 +77,124 @@ func validateCoroRootEntries(plan *coro.SSAPlan) error {
 		if !ok || function.ID != root.ID {
 			return fmt.Errorf("coroutine root factory %q has no canonical function plan", root.ID)
 		}
-		if function.External != coro.Defined || !function.Demand.Contains(root.Demand) {
+		if function.External != coro.Defined ||
+			!function.ManagedDemand.Contains(root.ManagedDemand) ||
+			root.RawPlainDemand && !function.RawPlainDemand {
 			return fmt.Errorf(
-				"coroutine root %q requires a defined body whose demand contains the explicit root (external=%s emission=%s representation=%s demand=%s root-demand=%s)",
-				root.ID, function.External, function.Emission, function.FuncRep, function.Demand, root.Demand,
+				"coroutine root %q requires a defined body whose demand contains the explicit root (external=%s emission=%s representation=%s managed=%s raw=%t root-managed=%s root-raw=%t)",
+				root.ID, function.External, function.Emission, function.FuncRep,
+				function.ManagedDemand, function.RawPlainDemand, root.ManagedDemand, root.RawPlainDemand,
 			)
+		}
+		if root.Function.Parent() != nil || len(root.Function.FreeVars) != 0 {
+			return fmt.Errorf("coroutine root %q must be a top-level non-capturing entry; captured environments are supplied only by dynamic descriptors", root.ID)
+		}
+		if root.RawPlainDemand {
+			if err := validatePlannedRawPlainEntry(root.Function, function); err != nil {
+				return fmt.Errorf("coroutine raw root %q: %w", root.ID, err)
+			}
 		}
 		switch function.Emission {
 		case coro.EmitPlain:
 			// AsyncDemand describes an entry context, not a requirement to clone
-			// or coroutine-lower a body that cannot suspend. A direct plain root
-			// is invoked inside a scheduler-owned bootstrap coroutine and needs no
-			// per-function root factory or package-anchor descriptor.
-			if function.FuncRep != coro.DirectPlain {
+			// or coroutine-lower a body that cannot suspend. A plain root is invoked
+			// through its plain primary inside a scheduler-owned bootstrap coroutine
+			// and needs no per-function root factory.  Independent first-class uses
+			// may still require a Dispatch descriptor for that same single body.
+			if function.FuncRep != coro.DirectPlain && function.FuncRep != coro.Dispatch {
 				return fmt.Errorf(
-					"plain coroutine root %q requires direct-plain representation, got %s",
+					"plain coroutine root %q requires a plain-primary representation, got %s",
 					root.ID, function.FuncRep,
 				)
 			}
 		case coro.EmitCoroutine:
-			if root.Demand != coro.AsyncDemand || function.Demand != coro.AsyncDemand {
+			if root.ManagedDemand.Contains(coro.SyncDemand) && !function.RawPlainEntry {
 				return fmt.Errorf(
-					"coroutine root factory %q requires explicit and total async-only demand, got root=%s total=%s",
-					root.ID, root.Demand, function.Demand,
+					"coroutine root %q (%s) has synchronous demand without a planned raw plain entry, got root=%s total=%s (managed dimensions); suspending edges: %s",
+					root.ID, root.Function.String(), root.ManagedDemand, function.ManagedDemand, coroRootSuspendingEdges(plan, root.Function),
 				)
 			}
-			if function.FuncRep != coro.DirectCoro {
+			if root.ManagedDemand.Contains(coro.AsyncDemand) && !function.ManagedDemand.Contains(coro.AsyncDemand) {
+				return fmt.Errorf("coroutine root factory %q has async root demand absent from managed demand %s", root.ID, function.ManagedDemand)
+			}
+			if root.ManagedDemand.Contains(coro.AsyncDemand) && function.FuncRep != coro.DirectCoro {
 				return fmt.Errorf(
 					"coroutine root factory %q requires direct-coro representation, got %s",
 					root.ID, function.FuncRep,
 				)
 			}
+		case coro.EmitRawPlain:
+			if !root.RawPlainDemand || root.ManagedDemand != coro.NoDemand || !function.RawPlainOnly {
+				return fmt.Errorf(
+					"raw-only coroutine root %q has incompatible root/plan dimensions (root-managed=%s root-raw=%t raw-only=%t)",
+					root.ID, root.ManagedDemand, root.RawPlainDemand, function.RawPlainOnly,
+				)
+			}
 		default:
 			return fmt.Errorf(
-				"coroutine root %q requires a plain or coroutine body, got emission %s",
+				"coroutine root %q requires a plain, raw-plain, or coroutine body, got emission %s",
 				root.ID, function.Emission,
 			)
 		}
 	}
 	return nil
+}
+
+func coroRootSuspendingEdges(plan *coro.SSAPlan, fn *ssa.Function) string {
+	type pending struct {
+		function *ssa.Function
+		path     string
+	}
+	var leaves []string
+	queue := []pending{{function: fn}}
+	seen := make(map[*ssa.Function]bool)
+	for len(queue) != 0 && len(seen) < 256 {
+		item := queue[0]
+		queue = queue[1:]
+		if item.function == nil || seen[item.function] {
+			continue
+		}
+		seen[item.function] = true
+		children := 0
+		for _, block := range item.function.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(ssa.CallInstruction)
+				if !ok {
+					continue
+				}
+				callPlan, ok := plan.CallPlan(call)
+				if !ok {
+					continue
+				}
+				for _, id := range callPlan.Targets {
+					target, found := plan.Function(id)
+					targetPlan, planned := plan.FunctionPlan(target)
+					if found && planned && targetPlan.Effect.MaySuspend() {
+						path := item.path + " -> " + target.String()
+						children++
+						queue = append(queue, pending{function: target, path: path})
+					}
+				}
+			}
+		}
+		for _, lowered := range plan.LoweredCalls(item.function) {
+			targetPlan, planned := plan.FunctionPlan(lowered.Target)
+			if lowered.Target != nil && planned && targetPlan.Effect.MaySuspend() {
+				path := item.path + " -> lowered:" + lowered.Target.String()
+				children++
+				queue = append(queue, pending{function: lowered.Target, path: path})
+			}
+		}
+		if children == 0 && item.function != fn {
+			functionPlan, _ := plan.FunctionPlan(item.function)
+			leaves = append(leaves, item.path+"["+functionPlan.Effect.String()+"]")
+		}
+	}
+	if len(leaves) == 0 {
+		return "<body-local or policy effect>"
+	}
+	sort.Strings(leaves)
+	return strings.Join(leaves, ", ")
 }
 
 // emitCoroRootFactory emits a typed, non-coroutine factory only for an
@@ -130,8 +209,13 @@ func (p *context) emitCoroRootFactory(pkg llssa.Package, entry plannedFunctionSy
 	if !ok {
 		return
 	}
-	if root.Demand != coro.AsyncDemand || entry.plan.ID != root.ID {
-		panic(fmt.Sprintf("coroutine root factory: unsupported root %q demand %s", root.ID, root.Demand))
+	if !root.ManagedDemand.Contains(coro.AsyncDemand) {
+		// An explicit synchronous raw-address root is satisfied by the separately
+		// emitted legacy entry and needs no scheduler bootstrap factory.
+		return
+	}
+	if entry.plan.ID != root.ID {
+		panic(fmt.Sprintf("coroutine root factory: unsupported root %q managed demand %s", root.ID, root.ManagedDemand))
 	}
 
 	fields := make([]*types.Var, sourceSig.Params().Len())

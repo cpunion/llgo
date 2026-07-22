@@ -37,8 +37,13 @@ jobs:
             pushd "$dir" >/dev/null
             # gofmt won't traverse directories that start with '_' or 'testdata',
             # so mirror dev/local_ci.sh and scan every Go file explicitly.
+            # pthread.go intentionally keeps c2go's spaced `// llgo:link`
+            # directive adjacent to `//llgo:coro`; gofmt splits that single
+            # FuncDecl doc group and changes the compiler-visible contract.
             fmt_output="$(
-              find . -name '*.go' -type f ! -name 'xgo_autogen.go' -print0 \
+              find . -name '*.go' -type f ! -name 'xgo_autogen.go' \
+                ! -path './runtime/internal/clite/pthread/pthread.go' \
+                ! -path './internal/clite/pthread/pthread.go' -print0 \
                 | xargs -0 gofmt -l \
                 | sed 's|^\\./||' \
                 || true

@@ -18,6 +18,66 @@ package coro
 
 import "testing"
 
+func TestCurrentExecutorChannelOwnerResolvesExactRouteAcrossTwoP(t *testing.T) {
+	registry := new(ExecutorRegistry)
+	type fixture struct {
+		p      *P
+		driver *ExecutorDriver
+		waits  *WaitRegistrationTable
+		source *ChannelOperationSource
+		handle ExecutorHandle
+		route  RouteID
+		task   *yieldingTestG
+		action Action
+	}
+	fixtures := []*fixture{
+		{p: new(P), driver: new(ExecutorDriver), waits: new(WaitRegistrationTable), source: new(ChannelOperationSource), route: 3, task: newYieldingTestG(t, "channel-route-3")},
+		{p: new(P), driver: new(ExecutorDriver), waits: new(WaitRegistrationTable), source: new(ChannelOperationSource), route: 7, task: newYieldingTestG(t, "channel-route-7")},
+	}
+	for _, current := range fixtures {
+		current.handle = registerTestExecutor(t, registry)
+		if !BindExecutorSourceCatalogAtRoute(
+			current.driver,
+			current.p,
+			registry,
+			current.handle,
+			current.route,
+			ExecutorSourceCatalog{Waits: current.waits, Channel: current.source},
+		) || !Enqueue(current.p, current.task.g) {
+			t.Fatalf("bind/enqueue channel route %d", current.route)
+		}
+		if next, ok := NextRunnable(current.p); !ok || next != current.task.g {
+			t.Fatalf("dequeue channel route %d", current.route)
+		}
+		current.action = beginWaitTestResume(t, current.p, current.task)
+		current.task.frame.header.SuspendReason = uint16(SuspendPark)
+		current.task.frame.header.Lifecycle = uint16(FrameSuspended)
+		driver, handle, route, ok := CurrentExecutorChannelDriver(current.task.g)
+		p, park, source, ownerOK := CurrentExecutorChannelParkOwner(driver, current.task.g)
+		if !ok || !ownerOK || driver != current.driver || handle != current.handle || route != current.route ||
+			p != current.p || park != &current.task.g.park || source != current.source {
+			t.Fatalf("resolve channel route %d = driver:%p handle:%+v route:%d p:%p park:%p source:%p ok:(%t,%t)",
+				current.route, driver, handle, route, p, park, source, ok, ownerOK)
+		}
+	}
+	if fixtures[0].source == fixtures[1].source || fixtures[0].handle == fixtures[1].handle {
+		t.Fatal("channel route fixtures alias physical ownership")
+	}
+	for _, current := range fixtures {
+		current.task.frame.header.SuspendReason = uint16(SuspendNone)
+		current.task.frame.header.Lifecycle = uint16(FrameActive)
+		yieldRunningDriverTask(t, current.p, current.task, current.action)
+		closeTestExecutorDriver(t, current.driver)
+		finishReadyDriverTasks(t, current.p, map[*G]*yieldingTestG{current.task.g: current.task})
+		if !current.source.CanRelease() || !current.waits.CanRelease() {
+			t.Fatalf("channel route %d retained source storage", current.route)
+		}
+	}
+	if !registry.CanRelease() {
+		t.Fatal("channel route owner test retained executor registry")
+	}
+}
+
 func TestSingleChannelParkOwnerTransactionAndFinish(t *testing.T) {
 	p := new(P)
 	driver := new(ExecutorDriver)

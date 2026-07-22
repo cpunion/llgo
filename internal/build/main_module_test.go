@@ -484,6 +484,9 @@ func TestGenMainModuleCoroProgramBootstrapV2MixedNativeAndWasm(t *testing.T) {
 			if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
 				assertCoroProgramNativeSliceV2(t, mod, test.entryName)
 				assertCoroNativePostWaitRetention(t, mod, test.entryName)
+			} else if hostCoroPullRuntimeABI(ctx.buildConf) {
+				assertCoroProgramHostSliceV2(t, mod, test.entryName)
+				assertCoroHostPullRetentionV1(t, mod, test.entryName)
 			} else {
 				assertCoroProgramContinueRetention(t, mod, test.entryName)
 				if callback := mod.NamedFunction(coroNativePostWaitSymbolV1); !callback.IsNil() {
@@ -530,7 +533,7 @@ func TestGenMainModuleCoroProgramBootstrapV2MixedNativeAndWasm(t *testing.T) {
 				}
 			}
 			driverCall := "call void @" + coroProgramRunSymbolV1
-			if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
+			if nativeCoroDoorbellRuntimeABI(ctx.buildConf) || hostCoroPullRuntimeABI(ctx.buildConf) {
 				driverCall = "call i32 @" + coroProgramRunSliceSymbolV2
 			}
 			assertInOrder(t, entryBody,
@@ -737,6 +740,9 @@ func TestGenMainModuleCoroProgramBootstrapRuntimeAfterCoroPasses(t *testing.T) {
 			if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
 				assertCoroProgramNativeSliceV2(t, mod, entryName)
 				assertCoroNativePostWaitRetention(t, mod, "main")
+			} else if hostCoroPullRuntimeABI(ctx.buildConf) {
+				assertCoroProgramHostSliceV2(t, mod, entryName)
+				assertCoroHostPullRetentionV1(t, mod, entryName)
 			} else {
 				assertCoroProgramContinueRetention(t, mod, entryName)
 				if callback := mod.NamedFunction(coroNativePostWaitSymbolV1); !callback.IsNil() {
@@ -815,6 +821,127 @@ func assertCoroProgramNativeSliceV2(t *testing.T, module llvm.Module, entryName 
 		if !regexp.MustCompile(pattern).MatchString(body) {
 			t.Fatalf("native V2 entry has no exact %s check %q:\n%s", label, pattern, body)
 		}
+	}
+	// Used counts only certified reductions. Fleet-transfer and compatibility
+	// bookkeeping may legitimately request another inline pass with zero Used;
+	// every budget-checked Used SSA value must therefore remain zero-admissible.
+	boundedUses := regexp.MustCompile(`icmp ule i32 ([^,\n]+), 1024`).FindAllStringSubmatch(body, -1)
+	if len(boundedUses) < 2 {
+		t.Fatalf("native V2 entry has %d bounded Used checks, want complete and yielded:\n%s", len(boundedUses), body)
+	}
+	for _, match := range boundedUses {
+		if strings.Contains(body, "icmp ne i32 "+match[1]+", 0") {
+			t.Fatalf("native V2 entry rejects zero certified reductions for %s:\n%s", match[1], body)
+		}
+	}
+}
+
+func assertCoroProgramHostSliceV2(t *testing.T, module llvm.Module, entryName string) {
+	t.Helper()
+	run := module.NamedFunction(coroProgramRunSliceSymbolV2)
+	if run.IsNil() || !run.IsDeclaration() || run.GlobalValueType().String() != "i32 (ptr, ptr, i32, ptr)" {
+		t.Fatalf("host program run-slice declaration has the wrong ABI: %v\n%s", run, module.String())
+	}
+	continueRun := module.NamedFunction(coroProgramContinueSliceSymbolV2)
+	// The entry never invokes ContinueSlice directly. Before cleanup it is an
+	// exact declaration; after CoroSplit/global cleanup it may be removed from
+	// this module because the retained runtime host wrapper owns that edge.
+	if !continueRun.IsNil() && (!continueRun.IsDeclaration() || continueRun.GlobalValueType().String() != "i32 (i32, i32, i32, i32, ptr)") {
+		t.Fatalf("host program continue-slice declaration has the wrong ABI: %v\n%s", continueRun, module.String())
+	}
+	if legacy := module.NamedFunction(coroProgramRunSymbolV1); !legacy.IsNil() {
+		t.Fatalf("host V2 entry retained the legacy whole-program run ABI: %v\n%s", legacy, module.String())
+	}
+	if legacy := module.NamedFunction(coroProgramContinueSymbolV1); !legacy.IsNil() {
+		t.Fatalf("host V2 entry retained the legacy callback ABI: %v\n%s", legacy, module.String())
+	}
+	if anchor := module.NamedGlobal(coroProgramContinueReferenceSymbolV1); !anchor.IsNil() {
+		t.Fatalf("host V2 entry retained the legacy callback anchor: %v\n%s", anchor, module.String())
+	}
+	entry := module.NamedFunction(entryName)
+	if entry.IsNil() || entry.IsDeclaration() {
+		t.Fatalf("host V2 program entry %q is missing: %s", entryName, module.String())
+	}
+	body := entry.String()
+	for _, want := range []string{
+		"alloca { i32, i32, i32, i32, i32, i32, i32, i32 }",
+		"call i32 @" + coroProgramRunSliceSymbolV2 + "(ptr",
+		"i32 " + strconv.FormatUint(uint64(coroProgramNativeRunBudgetV2), 10),
+		"icmp eq i32",
+		"icmp ule i32",
+		"call void @abort()",
+		"unreachable",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("host V2 program entry missing %q:\n%s", want, body)
+		}
+	}
+	if got := strings.Count(body, "call i32 @"+coroProgramRunSliceSymbolV2); got != 1 {
+		t.Fatalf("host V2 initial run calls = %d, want exactly one bounded activation:\n%s", got, body)
+	}
+	if strings.Contains(body, "call i32 @"+coroProgramContinueSliceSymbolV2) {
+		t.Fatalf("host V2 entry recursively drove a continuation instead of returning to the embedding:\n%s", body)
+	}
+	for label, pattern := range map[string]string{
+		"complete status":  `icmp eq i32 [^,\n]+, 1`,
+		"suspended status": `icmp eq i32 [^,\n]+, 2`,
+		"yielded status":   `icmp eq i32 [^,\n]+, 3`,
+		"queued flags":     `icmp eq i32 [^,\n]+, 17`,
+		"blocked mask":     `and i32 [^,\n]+, 6`,
+		"bounded used":     `icmp ule i32 [^,\n]+, 1024`,
+	} {
+		if !regexp.MustCompile(pattern).MatchString(body) {
+			t.Fatalf("host V2 entry has no exact %s check %q:\n%s", label, pattern, body)
+		}
+	}
+	// Complete owns the ordinary return path. Both async states share a second
+	// direct return, so a hand-built module with Python declarations cannot run
+	// Py_Finalize while scheduler work remains host-owned.
+	if got := strings.Count(body, "ret i32 0"); got != 2 {
+		t.Fatalf("host V2 entry return paths = %d, want complete and detached returns:\n%s", got, body)
+	}
+	if strings.Count(body, "call void @Py_Finalize()") > 1 {
+		t.Fatalf("host V2 entry duplicated Py_Finalize across detached paths:\n%s", body)
+	}
+}
+
+func assertCoroHostPullRetentionV1(t *testing.T, module llvm.Module, entryName string) {
+	t.Helper()
+	wants := []struct {
+		symbol, reference, functionType string
+	}{
+		{coroHostNextActionSymbolV1, coroHostNextActionReferenceSymbolV1, "i32 (ptr)"},
+		{coroHostProfileSymbolV1, coroHostProfileReferenceSymbolV1, "i32 ()"},
+		{coroHostNextDeadlineSymbolV1, coroHostNextDeadlineReferenceSymbolV1, "i1 (ptr)"},
+		{coroHostPublishTimeSymbolV1, coroHostPublishTimeReferenceSymbolV1, "i1 (i32, i32)"},
+		{coroHostAckCancelSymbolV1, coroHostAckCancelReferenceSymbolV1, "i1 (i32, i32, i32, i32)"},
+		{coroHostContinueSliceSymbolV1, coroHostContinueSliceReferenceSymbolV1, "i32 (i32, i32, i32, i32, i32, i32, i32, ptr)"},
+		{coroHostPostWaitSymbolV1, coroHostPostWaitReferenceSymbolV1, "i32 (i32, i32, i32, i32)"},
+	}
+	entry := module.NamedFunction(entryName)
+	if entry.IsNil() || entry.IsDeclaration() {
+		t.Fatalf("host-pull retention entry %q is missing: %s", entryName, module.String())
+	}
+	body := entry.String()
+	for _, want := range wants {
+		callback := module.NamedFunction(want.symbol)
+		if callback.IsNil() || !callback.IsDeclaration() || callback.GlobalValueType().String() != want.functionType {
+			t.Fatalf("host-pull callback %q has wrong declaration %v, want %s:\n%s", want.symbol, callback, want.functionType, module.String())
+		}
+		anchor := module.NamedGlobal(want.reference)
+		if anchor.IsNil() || !anchor.IsGlobalConstant() || anchor.Linkage() != llvm.InternalLinkage ||
+			anchor.Initializer().IsNil() || anchor.Initializer().C != callback.C {
+			t.Fatalf("host-pull reference %q does not retain exact callback %q: %v\n%s", want.reference, want.symbol, anchor, module.String())
+		}
+		if got := strings.Count(body, "load volatile ptr, ptr @"+want.reference); got != 1 {
+			t.Fatalf("host-pull reference %q volatile loads = %d, want 1:\n%s", want.reference, got, body)
+		}
+		if regexp.MustCompile(`call [^\n]*@` + regexp.QuoteMeta(want.symbol) + `\(`).MatchString(body) {
+			t.Fatalf("program entry invoked host callback %q during startup:\n%s", want.symbol, body)
+		}
+	}
+	if callback := module.NamedFunction(coroNativePostWaitSymbolV1); !callback.IsNil() {
+		t.Fatalf("host-pull entry declared native pipe callback:\n%s", module.String())
 	}
 }
 

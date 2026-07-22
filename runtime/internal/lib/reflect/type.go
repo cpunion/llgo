@@ -309,7 +309,7 @@ func (t *rtype) Method(i int) (m Method) {
 	fv := &struct {
 		fn  unsafe.Pointer
 		env unsafe.Pointer
-	}{p.Tfn_, nil}
+	}{unsafe.Pointer(p.Tfn_), nil}
 	m.Func = Value{closureOf(mtfn), unsafe.Pointer(fv), fl | flagIndir}
 	m.Index = i
 	return m
@@ -1810,12 +1810,12 @@ func ArrayOf(length int, elem Type) Type {
 	esize := etyp.Size()
 
 	array.Equal = nil
-	if eequal := etyp.Equal; eequal != nil {
+	if etyp.Equal != nil {
 		array.Equal = func(p, q unsafe.Pointer) bool {
 			for i := 0; i < length; i++ {
 				pi := arrayAt(p, i, esize, "i < length")
 				qi := arrayAt(q, i, esize, "i < length")
-				if !eequal(pi, qi) {
+				if !typeequal(etyp, pi, qi) {
 					return false
 				}
 
@@ -1988,7 +1988,7 @@ func StructOf(fields []StructField) Type {
 						panic("reflect: embedded interface with unexported method(s) not implemented")
 					}
 
-					fnStub := clite.Func(embeddedIfaceMethStub)
+					fnStub := abi.Text(clite.Func(embeddedIfaceMethStub))
 					methods = append(methods, abi.Method{
 						Name_: m.Name(),
 						Mtyp_: m.Typ_,
@@ -2240,9 +2240,12 @@ func StructOf(fields []StructField) Type {
 	if comparable {
 		typ.Equal = func(p, q unsafe.Pointer) bool {
 			for _, ft := range typ.Fields {
+				if ft.Name_ == "_" {
+					continue
+				}
 				pi := add(p, ft.Offset, "&x.field safe")
 				qi := add(q, ft.Offset, "&x.field safe")
-				if !ft.Typ.Equal(pi, qi) {
+				if !typeequal(ft.Typ, pi, qi) {
 					return false
 				}
 			}

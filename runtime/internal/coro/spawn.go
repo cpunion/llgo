@@ -79,7 +79,8 @@ func runningSpawnContext(parent *G) (*P, bool) {
 		parent.destroyTarget != nil || parent.destroyRoot || parent.queued || parent.nextReady != nil ||
 		parent.waitToken != nil || parent.waitTicket != 0 || parent.nextWait != nil || parent.waiting ||
 		!releasableParkState(&parent.park) ||
-		parent.spawnParent != nil || parent.spawnP != nil || !validLiveTaskStorage(parent) {
+		parent.spawnParent != nil || parent.spawnP != nil ||
+		parent.transferState != runnableTransferGIdle || !validLiveTaskStorage(parent) {
 		return nil, false
 	}
 	p := parent.runP
@@ -160,8 +161,9 @@ func CommitSpawn(parent, child *G, handle unsafe.Pointer) bool {
 		child.destroyTarget != nil || child.destroyRoot || child.nextReady != nil || child.queued ||
 		child.waitToken != nil || child.waitTicket != 0 || child.nextWait != nil || child.waiting || child.runP != nil ||
 		child.spawnChild != nil || child.spawnParent != parent || child.spawnP != p ||
+		child.transferState != runnableTransferGIdle ||
 		child.taskState != taskStorageOwned || child.taskStorage != unsafe.Pointer(child) ||
-		child.taskSize != TaskStorageSize() || preemptLoad(preemptAddress(child)) != preemptIdle {
+		child.taskSize != TaskStorageSize() || !gPreemptStateAtDepthZero(child, preemptIdle) {
 		return false
 	}
 	root, ok := validZeroResultSpawnRoot(child, handle)
@@ -206,8 +208,12 @@ func RollbackSpawn(parent, child *G) (unsafe.Pointer, uintptr, bool) {
 		child.nextReady != nil || child.queued || child.waitToken != nil || child.waitTicket != 0 ||
 		child.nextWait != nil || child.waiting || child.runP != nil ||
 		!releasableParkState(&child.park) || child.park.taskCancelKind != TaskCancelNone ||
+		child.transferState != runnableTransferGIdle ||
 		child.taskState != taskStorageOwned || child.taskStorage != unsafe.Pointer(child) ||
-		child.taskSize != TaskStorageSize() || preemptLoad(preemptAddress(child)) != preemptIdle {
+		child.taskSize != TaskStorageSize() || !gPreemptStateAtDepthZero(child, preemptIdle) {
+		return nil, 0, false
+	}
+	if !disableGPreempt(child) {
 		return nil, 0, false
 	}
 	raw, size := child.taskStorage, child.taskSize
@@ -217,7 +223,6 @@ func RollbackSpawn(parent, child *G) (unsafe.Pointer, uintptr, bool) {
 	child.taskStorage = nil
 	child.taskSize = 0
 	child.taskState = taskStorageReleased
-	preemptStore(preemptAddress(child), preemptDisabled)
 	child.state = GDead
 	return raw, size, true
 }
@@ -228,8 +233,8 @@ func RollbackSpawn(parent, child *G) (unsafe.Pointer, uintptr, bool) {
 // taskStorageReleased: exactly one caller may observe a task as reclaimable and
 // transfer its allocation.
 func ReclaimableG(g *G) bool {
-	return ValidG(g) && preemptLoad(preemptAddress(g)) == preemptDisabled && g.state == GDead &&
-		g.taskControlLeases == 0 && g.runAction == ActionInvalid &&
+	return ValidG(g) && gPreemptStateAtDepthZero(g, preemptDisabled) && g.state == GDead &&
+		g.taskControlLeases == 0 && g.runAction == ActionInvalid && g.transferState == runnableTransferGIdle &&
 		g.root == nil && g.active == nil && g.frames == nil &&
 		g.pending.kind == pendingNone && g.pending.from == nil && g.pending.target == nil &&
 		g.pending.wait == nil && g.pending.ticket == 0 &&
@@ -278,5 +283,5 @@ func ReleaseTaskStorage(g *G) (raw unsafe.Pointer, size uintptr, ok bool) {
 // main may safely return: TerminalG must still prove that no ready or parked G
 // survives.
 func DeadG(g *G) bool {
-	return ValidG(g) && g.state == GDead
+	return ValidG(g) && gPreemptStateAtDepthZero(g, preemptDisabled) && g.state == GDead
 }

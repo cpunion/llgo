@@ -3,15 +3,15 @@ package runtime
 import (
 	_ "unsafe"
 
-	c "github.com/goplus/llgo/runtime/internal/clite"
 	"github.com/goplus/llgo/runtime/internal/runtime/math"
 )
 
+//llgo:coro noblock
 //go:linkname c_rand C.rand
-func c_rand() c.Int
+func c_rand() uint32
 
 func fastrand() uint32 {
-	return uint32(c_rand())
+	return c_rand()
 }
 
 func rand() uint64 {

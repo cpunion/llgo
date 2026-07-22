@@ -40,6 +40,11 @@ type CoroPlanObserver func(pkg *ssa.Package, plan *coro.SSAPlan)
 // current LLVM coroutine frame can complete.
 const CoroFrameRetentionTimerABIV1 = coro.FrameRetentionTimerABIV1
 
+// CoroFrameRetentionParkABIV2 selects the extensible compiler/runtime-owned
+// prepare/park/retire contract table. TimerABIV1 remains accepted for cached
+// and focused timer-only inputs, while new runtime profiles use ParkABIV2.
+const CoroFrameRetentionParkABIV2 = coro.FrameRetentionParkABIV2
+
 // Compilation contains immutable inputs shared by every package compiled as
 // part of one frontend compilation. Pass it by pointer and do not copy it after
 // first use. A CoroPlan remains report-only unless EnableCoroEntryResolution is
@@ -54,11 +59,13 @@ type Compilation struct {
 	// after whole-program analysis and participate in every package archive
 	// fingerprint. They are required before an active compilation may register
 	// a cache hit.
-	CoroPlanDigest string
-	CoroABI        string
-	SchedulerABI   string
-	PanicABI       string
-	FuncRepABI     string
+	CoroPlanDigest          string
+	CoroLoweringFacts       coro.LoweringFacts
+	CoroLoweringFactsDigest string
+	CoroABI                 string
+	SchedulerABI            string
+	PanicABI                string
+	FuncRepABI              string
 	// EnableCoroExplicitStatusPanicABI selects the target-wide explicit-status
 	// panic identity. The first lowering slice accepts only exact cleanup-free
 	// physical coroutine bodies whose explicit panic payload can outlive frame
@@ -92,6 +99,13 @@ type Compilation struct {
 	// on the runnable scheduler. It requires PhysicalABIV1 program bootstrap and
 	// is independently fingerprinted from child-await, spawn, and timer support.
 	EnableCoroChannel bool
+	// EnableCoroWorker enables the bounded ForeignWait operation recipe used by
+	// exact llgo.syscall sites with a frozen workeraddr target/dataflow
+	// certificate and exact //llgo:coro worker C declarations through typed
+	// word-transport thunks. It requires the runnable
+	// scheduler; the blocking foreign call executes only on a fixed native worker
+	// pool.
+	EnableCoroWorker bool
 	// CoroFrameRetentionABI selects one compiler/runtime-owned contract under
 	// which x/tools Heap Allocs may be re-proved as current LLVM coroutine-frame
 	// storage. The zero value preserves the ordinary managed-allocation rule.
@@ -105,8 +119,12 @@ type Compilation struct {
 	// before any package enters LLVM codegen.
 	EmissionUniverse *EmissionUniverse
 
-	coroPreflight    sync.Once
-	coroPreflightErr error
+	coroPreflight            sync.Once
+	coroPreflightErr         error
+	coroFactsValidation      sync.Once
+	coroFactsValidationErr   error
+	coroClosedInterfacePlain *coroClosedInterfacePlainPlan
+	coroManagedInterface     *coroManagedInterfaceDispatchPlan
 }
 
 func (c *Compilation) validateCoroCacheIdentity() error {
@@ -117,7 +135,36 @@ func (c *Compilation) validateCoroCacheIdentity() error {
 	if err != nil || len(decoded) != 32 || hex.EncodeToString(decoded) != c.CoroPlanDigest {
 		return fmt.Errorf("coroutine cache registration requires a canonical SHA-256 CoroPlanDigest")
 	}
+	if err := c.validateCoroLoweringFactsIdentity(); err != nil {
+		return err
+	}
 	return c.validateCoroABIIdentity(true)
+}
+
+func (c *Compilation) validateCoroLoweringFactsIdentity() error {
+	if c == nil {
+		return fmt.Errorf("coroutine lowering-facts validation requires a compilation")
+	}
+	c.coroFactsValidation.Do(func() {
+		if c.CoroLoweringFacts.Schema != coro.LoweringFactsSchema {
+			c.coroFactsValidationErr = fmt.Errorf("coroutine cache registration lowering-facts schema %q, want %q", c.CoroLoweringFacts.Schema, coro.LoweringFactsSchema)
+			return
+		}
+		decoded, err := hex.DecodeString(c.CoroLoweringFactsDigest)
+		if err != nil || len(decoded) != 32 || hex.EncodeToString(decoded) != c.CoroLoweringFactsDigest {
+			c.coroFactsValidationErr = fmt.Errorf("coroutine cache registration requires a canonical SHA-256 lowering-facts digest")
+			return
+		}
+		digest, err := c.CoroLoweringFacts.Digest()
+		if err != nil {
+			c.coroFactsValidationErr = fmt.Errorf("coroutine cache registration validates lowering facts: %w", err)
+			return
+		}
+		if digest != c.CoroLoweringFactsDigest {
+			c.coroFactsValidationErr = fmt.Errorf("coroutine cache registration lowering-facts digest mismatch: have %q, want %q", digest, c.CoroLoweringFactsDigest)
+		}
+	})
+	return c.coroFactsValidationErr
 }
 
 func (c *Compilation) validateCoroABIIdentity(required bool) error {
@@ -141,6 +188,16 @@ func (c *Compilation) validateCoroABIIdentity(required bool) error {
 		}
 		wantSchedulerABI = coro.SchedulerProgramBootstrapChannelABIV0
 	}
+	if c.EnableCoroWorker {
+		if !c.EnableCoroChildAwait || !c.EnableCoroProgramBootstrapRun {
+			return fmt.Errorf("coroutine worker lowering requires runnable PhysicalABIV1 program-bootstrap lowering")
+		}
+		if c.EnableCoroChannel {
+			wantSchedulerABI = coro.SchedulerProgramBootstrapChannelWorkerABIV0
+		} else {
+			wantSchedulerABI = coro.SchedulerProgramBootstrapWorkerABIV0
+		}
+	}
 	if c.EnableCoroClosedStaticSpawn {
 		if !c.EnableCoroChildAwait {
 			return fmt.Errorf("coroutine closed static spawn requires child-await lowering")
@@ -148,8 +205,12 @@ func (c *Compilation) validateCoroABIIdentity(required bool) error {
 		if !c.EnableCoroProgramBootstrapRun {
 			return fmt.Errorf("coroutine closed static spawn requires the runnable program-bootstrap v2 scheduler")
 		}
-		if c.EnableCoroChannel {
+		if c.EnableCoroChannel && c.EnableCoroWorker {
+			wantSchedulerABI = coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0
+		} else if c.EnableCoroChannel {
 			wantSchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+		} else if c.EnableCoroWorker {
+			wantSchedulerABI = coro.SchedulerProgramBootstrapWorkerClosedStaticSpawnABIV0
 		} else {
 			wantSchedulerABI = coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0
 		}
@@ -157,7 +218,7 @@ func (c *Compilation) validateCoroABIIdentity(required bool) error {
 		if !c.EnableCoroChildAwait {
 			return fmt.Errorf("coroutine program bootstrap runtime requires child-await lowering")
 		}
-		if !c.EnableCoroChannel {
+		if !c.EnableCoroChannel && !c.EnableCoroWorker {
 			wantSchedulerABI = coro.SchedulerProgramBootstrapABIV2
 		}
 	}
@@ -169,7 +230,7 @@ func (c *Compilation) validateCoroABIIdentity(required bool) error {
 	}
 	switch c.CoroFrameRetentionABI {
 	case "":
-	case CoroFrameRetentionTimerABIV1:
+	case CoroFrameRetentionTimerABIV1, CoroFrameRetentionParkABIV2:
 		if !c.EnableCoroEntryResolution || !c.EnableCoroPhysicalABI || !c.EnableCoroChildAwait || !c.EnableCoroProgramBootstrapRun {
 			return fmt.Errorf("coroutine frame-retention ABI %q requires runnable PhysicalABIV1 program-bootstrap lowering", c.CoroFrameRetentionABI)
 		}

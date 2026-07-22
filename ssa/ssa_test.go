@@ -290,6 +290,25 @@ func TestFuncInfoMetadataDoesNotBlockGlobalDCE(t *testing.T) {
 	testFuncInfoMetadataDoesNotBlockGlobalDCE(t)
 }
 
+func TestNewFuncExPromotesExistingDeclarationToLinkOnce(t *testing.T) {
+	prog := NewProgram(nil)
+	defer prog.Dispose()
+	pkg := prog.NewPackage("main", "main")
+	sig := types.NewSignatureType(nil, nil, nil, nil, nil, false)
+
+	declaration := pkg.NewFuncEx("main.generated", sig, InGo, false, false)
+	if got := declaration.impl.Linkage(); got != llvm.ExternalLinkage {
+		t.Fatalf("initial linkage = %v, want external", got)
+	}
+	definition := pkg.NewFuncEx("main.generated", sig, InGo, false, true)
+	if definition != declaration {
+		t.Fatal("repeated NewFuncEx did not reuse the declaration")
+	}
+	if got := definition.impl.Linkage(); got != llvm.LinkOnceAnyLinkage {
+		t.Fatalf("materialized linkage = %v, want linkonce", got)
+	}
+}
+
 func testFuncInfoMetadataDoesNotBlockGlobalDCE(t *testing.T) {
 	t.Helper()
 
@@ -621,6 +640,27 @@ func TestDevLTOGlobalDCEFakeUseValueInlineAsm(t *testing.T) {
 	}
 	if !strings.Contains(ir, "ptr @Target") {
 		t.Fatalf("missing inline asm operand:\n%s", ir)
+	}
+}
+
+func TestKeepAliveUsesLLVMFakeUse(t *testing.T) {
+	prog := NewProgram(nil)
+	defer prog.Dispose()
+	pkg := prog.NewPackage("main", "main")
+	sig := types.NewSignatureType(nil, nil, nil, nil, nil, false)
+	target := pkg.NewFunc("Target", sig, InGo)
+	fn := pkg.NewFunc("Use", sig, InGo)
+	b := fn.MakeBody(1)
+	b.KeepAlive(target.Expr, prog.IntVal(7, prog.Uintptr()))
+	b.Return()
+
+	module := pkg.Module()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify llvm.fake.use module: %v\n%s", err, module.String())
+	}
+	ir := module.String()
+	if !strings.Contains(ir, "call void (...) @llvm.fake.use(ptr @Target, i64 7)") {
+		t.Fatalf("missing typed llvm.fake.use operands:\n%s", ir)
 	}
 }
 

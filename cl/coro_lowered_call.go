@@ -45,17 +45,32 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 	if b.Func != p.fn {
 		panic(fmt.Errorf("coroutine lowered runtime call %q in %q escaped into another LLVM function", helper, p.goFn.Name()))
 	}
+	p.observeCoroSiteRuntimeHelper(helper)
 
-	target, ok, err := p.emissionUniverse.ResolveCoroLoweredCall(p.goFn, helper)
+	frozenCall, ok, err := p.emissionUniverse.ResolveCoroLoweredCallRecord(p.goFn, helper)
 	if err != nil {
 		panic(fmt.Errorf("coroutine lowered runtime call %q in %q: %w", helper, p.goFn.Name(), err))
+	}
+	target := frozenCall.Target
+	rawPlainOccurrence := ok && frozenCall.RawPlain
+	plainOnly := false
+	if !ok && p.coroBody() == nil {
+		target, ok, err = p.emissionUniverse.ResolveCoroPlainLoweredCall(p.goFn, helper)
+		if err != nil {
+			panic(fmt.Errorf("coroutine plain lowered runtime call %q in %q: %w", helper, p.goFn.Name(), err))
+		}
+		plainOnly = ok
 	}
 	if !ok || target == nil {
 		panic(fmt.Errorf("coroutine lowered runtime call %q in %q is absent from the frozen emission universe", helper, p.goFn.Name()))
 	}
-	plannedTarget, planned := p.compilation.CoroPlan.ResolveLoweredCall(p.goFn, helper)
-	if !planned || plannedTarget != target {
-		panic(fmt.Errorf("coroutine lowered runtime call %q in %q disagrees between the frozen emission universe and SSA plan", helper, p.goFn.Name()))
+	if !plainOnly {
+		plannedCall, planned := p.compilation.CoroPlan.ResolveLoweredCallRecord(p.goFn, helper)
+		if !planned || plannedCall.Target != target || plannedCall.RawPlain != rawPlainOccurrence ||
+			plannedCall.UnwindOnly != frozenCall.UnwindOnly ||
+			plannedCall.ExplicitStatusElided != frozenCall.ExplicitStatusElided {
+			panic(fmt.Errorf("coroutine lowered runtime call %q in %q disagrees between the frozen emission universe and SSA plan", helper, p.goFn.Name()))
+		}
 	}
 	targetPlan, planned := p.compilation.CoroPlan.FunctionPlan(target)
 	if !planned {
@@ -66,8 +81,45 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 		panic(fmt.Errorf("coroutine lowered runtime call %q in %q: derive target %q signature: %w", helper, p.goFn.Name(), targetPlan.ID, err))
 	}
 	markerSig, ok := types.Unalias(marker.RawType()).(*types.Signature)
-	if !ok || !types.Identical(markerSig, sourceSig) {
-		panic(fmt.Errorf("coroutine lowered runtime call %q in %q target %q has a different effective source signature", helper, p.goFn.Name(), targetPlan.ID))
+	if !ok {
+		panic(fmt.Errorf(
+			"coroutine lowered runtime call %q in %q target %q marker has non-signature type %T (%v)",
+			helper, p.goFn.Name(), targetPlan.ID, types.Unalias(marker.RawType()), marker.RawType(),
+		))
+	}
+	// x/tools SSA has already packed a variadic invocation into the final
+	// slice argument. The frozen physical source signature deliberately clears
+	// that source-only flag, so compare the compiler-created rtFunc marker in
+	// the same normalized domain. This does not relax named-type identity or
+	// any transported parameter/result type.
+	markerSig = coroPhysicalNormalizeSourceSignature(markerSig)
+	if !types.Identical(markerSig, sourceSig) {
+		panic(fmt.Errorf(
+			"coroutine lowered runtime call %q in %q target %q has a different effective source signature: marker=%s target=%s",
+			helper, p.goFn.Name(), targetPlan.ID,
+			types.TypeString(markerSig, types.RelativeTo(nil)),
+			types.TypeString(sourceSig, types.RelativeTo(nil)),
+		))
+	}
+	if plainOnly || rawPlainOccurrence {
+		if !targetPlan.RawPlainDemand || !p.compilation.CoroPlan.HasRawPlainVariant(target) {
+			panic(fmt.Errorf("coroutine raw/plain lowered runtime call %q in %q targets %q without an exact raw-plain variant", helper, p.goFn.Name(), targetPlan.ID))
+		}
+		fn, _, kind := p.compileRawPlainFunction(target)
+		if fn == nil || kind != goFunc && kind != cFunc {
+			panic(fmt.Errorf("coroutine raw/plain lowered runtime call %q in %q target %q did not resolve to a raw-callable Go/C entry", helper, p.goFn.Name(), targetPlan.ID))
+		}
+		return b.Call(fn.Expr, args...), true
+	}
+	if p.rawPlainBody {
+		if targetPlan.Emission == coro.EmitCoroutine && !p.compilation.CoroPlan.HasRawPlainVariant(target) {
+			panic(fmt.Errorf("coroutine lowered runtime call %q in raw plain body %q targets managed coroutine %q without a raw plain variant", helper, p.goFn.Name(), targetPlan.ID))
+		}
+		fn, _, kind := p.compileRawPlainFunction(target)
+		if fn == nil || kind != goFunc && kind != cFunc {
+			panic(fmt.Errorf("coroutine lowered runtime call %q in raw plain body %q target %q did not resolve to a raw-callable Go/C entry", helper, p.goFn.Name(), targetPlan.ID))
+		}
+		return b.Call(fn.Expr, args...), true
 	}
 
 	switch targetPlan.Emission {
@@ -81,10 +133,12 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 		}
 		return b.Call(fn.Expr, args...), true
 	case coro.EmitCoroutine:
-		if targetPlan.Exec&coro.MayUnwind != 0 {
-			panic(fmt.Errorf("coroutine lowered runtime call %q in %q target %q may unwind, but child-frame panic propagation is not implemented", helper, p.goFn.Name(), targetPlan.ID))
-		}
 		return p.compileCoroTargetAwait(b, target, args), true
+	case coro.EmitRawPlain:
+		panic(fmt.Errorf(
+			"coroutine lowered runtime call %q in managed body %q targets raw-plain-only function %q without a managed entry",
+			helper, p.goFn.Name(), targetPlan.ID,
+		))
 	case coro.EmitNone:
 		panic(fmt.Errorf("coroutine lowered runtime call %q in %q targets non-emitted function %q", helper, p.goFn.Name(), targetPlan.ID))
 	case coro.EmitExternal:

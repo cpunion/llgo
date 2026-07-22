@@ -4,7 +4,6 @@ import (
 	"unsafe"
 
 	"github.com/goplus/llgo/runtime/abi"
-	"github.com/goplus/llgo/runtime/internal/runtime"
 )
 
 type eface struct {
@@ -36,7 +35,7 @@ func AddCleanup[T, S any](ptr *T, cleanup func(S), arg S) Cleanup {
 	fn := func() {
 		cleanup(arg)
 	}
-	_ = runtime.AddCleanupPtr(unsafe.Pointer(ptr), fn)
+	_ = addCleanupPtr(unsafe.Pointer(ptr), fn)
 	return Cleanup{}
 }
 

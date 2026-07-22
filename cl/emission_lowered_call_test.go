@@ -124,19 +124,24 @@ func Owner(ok bool) int {
 	if !universe.loweredCallUnwindOnly(owner, panicInstr) {
 		t.Fatal("panic-only CFG block was not classified unwind-only")
 	}
+	if !coroLoweredCallExplicitStatusElided(panicInstr, "Panic") ||
+		coroLoweredCallExplicitStatusElided(panicInstr, "AllocU") ||
+		coroLoweredCallExplicitStatusElided(returnInstr, "Panic") {
+		t.Fatal("explicit-status elision was not bound to the exact source Panic recipe")
+	}
 	if universe.loweredCallUnwindOnly(owner, returnInstr) {
 		t.Fatal("normal Return block was classified unwind-only")
 	}
-	if err := universe.recordCoroLoweredCallSite(owner, "runtime.Helper", helper, true); err != nil {
+	if err := universe.recordCoroLoweredCallSite(owner, "runtime.Helper", helper, true, true, false); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := universe.CoroLoweredCalls(owner); err != nil || len(got) != 1 || !got[0].UnwindOnly {
+	if got, err := universe.CoroLoweredCalls(owner); err != nil || len(got) != 1 || !got[0].UnwindOnly || !got[0].ExplicitStatusElided {
 		t.Fatalf("unwind-only call = %+v, err=%v", got, err)
 	}
-	if err := universe.recordCoroLoweredCallSite(owner, "runtime.Helper", helper, false); err != nil {
+	if err := universe.recordCoroLoweredCallSite(owner, "runtime.Helper", helper, false, false, false); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := universe.CoroLoweredCalls(owner); err != nil || len(got) != 1 || got[0].UnwindOnly {
+	if got, err := universe.CoroLoweredCalls(owner); err != nil || len(got) != 1 || got[0].UnwindOnly || got[0].ExplicitStatusElided {
 		t.Fatalf("mixed-site call = %+v, err=%v; normal-return-reachable site must win", got, err)
 	}
 }
@@ -176,42 +181,124 @@ func Use(m map[int]int, key int, value I) {
 	}
 }
 
+func TestLoweredRuntimeHelpersIncludeDynamicFunctionNilEdge(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/dynamicnil", `package dynamicnil
+func Apply(callback func(int) int, value int) int { return callback(value) }
+`)
+	testProg.ssa.Build()
+	universe, owner := newEmissionABIDemandTestUniverse(testProg, pkg)
+	fn := pkg.ssa.Func("Apply")
+	ctx, err := universe.functionABIContext(fn, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, block := range fn.Blocks {
+		for _, instruction := range block.Instrs {
+			for _, helper := range universe.plainRepresentationRuntimeHelpers(ctx, instruction) {
+				if helper == "AssertNilDeref" {
+					return
+				}
+			}
+		}
+	}
+	t.Fatal("dynamic function call lowering omitted AssertNilDeref")
+}
+
 func TestLoweredRuntimeHelpersMatchStaticIndexFastPath(t *testing.T) {
 	testProg := newEmissionTestProgram()
 	pkg := testProg.addPackage(t, "example.com/emission/loweredindex", `package loweredindex
+type Bucket struct { Size uintptr; Objects uint64 }
+var Buckets = [...]Bucket{{16, 0}, {32, 0}, {64, 0}, {128, 0}}
 func StaticArray(value [4]int) int { return value[1] }
 func DynamicArray(value [4]int, index int) int { return value[index] }
 func StaticPointer(value *[4]int) int { return value[1] }
 func StaticSlice(value []int) int { return value[1] }
+func RangeArray(value [4]int) int {
+	total := 0
+	for index := range value { total += value[index] }
+	return total
+}
+func RangeValue(value [4]int) int {
+	total := 0
+	for _, element := range value { total += element }
+	return total
+}
+func GuardedPointer(value *[4]int, index uint) int {
+	if value != nil && index < uint(len(value)) { return value[index] }
+	return 0
+}
+func NilPointer(value *[4]int) int { return value[0] }
+func WrongBound(value [4]int, index uint) int {
+	if index < 5 { return value[index] }
+	return 0
+}
+func GuardedSlice(value []int, index uint) int {
+	if index < 4 { return value[index] }
+	return 0
+}
+func GuardedString(value string, index uint) byte {
+	if index < 4 { return value[index] }
+	return 0
+}
+func RangeFieldAddress(size uintptr) *uint64 {
+	for index := range Buckets {
+		bucket := &Buckets[index]
+		if bucket.Size == size { return &bucket.Objects }
+	}
+	return nil
+}
+func NullableFieldAddress(bucket *Bucket) *uint64 { return &bucket.Objects }
+func GuardedFieldAddress(bucket *Bucket) *uint64 {
+	if bucket != nil { return &bucket.Objects }
+	return nil
+}
 `)
 	testProg.ssa.Build()
 	universe, owner := newEmissionABIDemandTestUniverse(testProg, pkg)
 	for _, test := range []struct {
 		name      string
 		wantRange bool
+		wantNil   bool
 	}{
 		{name: "StaticArray"},
 		{name: "DynamicArray", wantRange: true},
-		{name: "StaticPointer"},
+		{name: "StaticPointer", wantNil: true},
 		{name: "StaticSlice", wantRange: true},
+		{name: "RangeArray"},
+		{name: "RangeValue"},
+		{name: "GuardedPointer"},
+		{name: "NilPointer", wantNil: true},
+		{name: "WrongBound", wantRange: true},
+		{name: "GuardedSlice", wantRange: true},
+		{name: "GuardedString", wantRange: true},
+		{name: "RangeFieldAddress"},
+		{name: "NullableFieldAddress", wantNil: true},
+		{name: "GuardedFieldAddress"},
 	} {
 		fn := pkg.ssa.Func(test.name)
 		ctx, err := universe.functionABIContext(fn, owner)
 		if err != nil {
 			t.Fatal(err)
 		}
-		hasRange := false
+		hasRange, hasNil := false, false
 		for _, block := range fn.Blocks {
 			for _, instruction := range block.Instrs {
 				for _, helper := range universe.loweredRuntimeHelpers(ctx, instruction) {
-					if helper == "CheckIndexRange" {
+					switch helper {
+					case "CheckIndexRange":
 						hasRange = true
+					case "AssertNilDeref":
+						hasNil = true
 					}
 				}
 			}
 		}
 		if hasRange != test.wantRange {
 			t.Errorf("%s CheckIndexRange edge = %v, want %v", test.name, hasRange, test.wantRange)
+		}
+		if hasNil != test.wantNil {
+			t.Errorf("%s AssertNilDeref edge = %v, want %v", test.name, hasNil, test.wantNil)
 		}
 	}
 }
@@ -280,6 +367,35 @@ func Call(value *Value) { value.Method() }
 	}
 	if !found {
 		t.Fatal("value-receiver lowering omitted AssertNilDerefPtr")
+	}
+}
+
+func TestLoweredRuntimeHelpersIncludeNestedValueReceiverNilChecks(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/lowerednestedreceiver", `package lowerednestedreceiver
+type Value struct { N int }
+func (Value) Method() {}
+func Call(value **Value) { (*value).Method() }
+`)
+	testProg.ssa.Build()
+	universe, owner := newEmissionABIDemandTestUniverse(testProg, pkg)
+	fn := pkg.ssa.Func("Call")
+	ctx, err := universe.functionABIContext(fn, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := make(map[string]bool)
+	for _, block := range fn.Blocks {
+		for _, instruction := range block.Instrs {
+			for _, helper := range universe.loweredRuntimeHelpers(ctx, instruction) {
+				found[helper] = true
+			}
+		}
+	}
+	for _, helper := range []string{"AssertNilDeref", "AssertNilDerefPtr"} {
+		if !found[helper] {
+			t.Errorf("nested value-receiver lowering helpers %v omit %q", found, helper)
+		}
 	}
 }
 

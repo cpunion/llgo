@@ -395,7 +395,7 @@ func TestInstrHelperEdges(t *testing.T) {
 		ctx.funcPCABI0Value(nil, fakeSSAValue{typ: types.Typ[types.Int]})
 	})
 	mustPanic(t, "syscall missing arguments", func() {
-		ctx.syscallIntrinsic(nil, nil, nil)
+		ctx.syscallIntrinsic(nil, nil, nil, syscallFailureWord)
 	})
 
 	variadicSig := ctx.syscallFnSig(2)

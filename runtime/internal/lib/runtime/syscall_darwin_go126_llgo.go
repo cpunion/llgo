@@ -4,16 +4,16 @@ package runtime
 
 import _ "unsafe"
 
-//go:linkname llgo_syscall5f64 llgo.syscall
+//go:linkname llgo_syscall5f64 llgo.syscall32
 func llgo_syscall5f64(fn, a1, a2, a3, a4, a5 uintptr, f1 float64) (r1, r2, err uintptr)
 
-//go:linkname llgo_rawSyscall llgo.syscall
+//go:linkname llgo_rawSyscall llgo.syscall32
 func llgo_rawSyscall(fn, a1, a2, a3 uintptr) (r1, r2, err uintptr)
 
-//go:linkname llgo_rawSyscall6 llgo.syscall
+//go:linkname llgo_rawSyscall6 llgo.syscall32
 func llgo_rawSyscall6(fn, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2, err uintptr)
 
-//go:linkname llgo_rawSyscall9 llgo.syscall
+//go:linkname llgo_rawSyscall9 llgo.syscall32
 func llgo_rawSyscall9(fn, a1, a2, a3, a4, a5, a6, a7, a8, a9 uintptr) (r1, r2, err uintptr)
 
 // Go 1.26 moves errno normalization into syscall/syscall_darwin.go wrappers

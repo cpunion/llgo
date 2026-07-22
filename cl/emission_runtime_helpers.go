@@ -23,6 +23,7 @@ import (
 	"go/types"
 	"sort"
 
+	"github.com/goplus/llgo/internal/coro"
 	llssa "github.com/goplus/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
@@ -32,8 +33,60 @@ import (
 // explicitly complete runtime ABI is required. Report-only/unit-test
 // universes retain legacy symbol resolution and intentionally freeze no such
 // edges; whole-program active builds enable the contract and fail closed.
-func (u *EmissionUniverse) materializeLoweredRuntimeHelpers(ctx *context, ownerFn *ssa.Function, ownerPkg *preparedEmissionPackage, state emissionFunctionState, instr ssa.Instruction) error {
-	if u == nil || !u.completeRuntimeABI {
+type coroEmissionFunctionShape struct {
+	dynamicCleanup           bool
+	terminalResultAllocation map[*ssa.Alloc]none
+}
+
+func prepareCoroEmissionFunctionShape(fn *ssa.Function) (coroEmissionFunctionShape, error) {
+	shape := coroEmissionFunctionShape{
+		dynamicCleanup:           coroFunctionRequiresDynamicCleanup(fn),
+		terminalResultAllocation: make(map[*ssa.Alloc]none),
+	}
+	allocations, err := coroStaticTerminalReconstructionAllocations(fn)
+	if err != nil {
+		return coroEmissionFunctionShape{}, err
+	}
+	for _, allocation := range allocations {
+		shape.terminalResultAllocation[allocation] = none{}
+	}
+	return shape, nil
+}
+
+func (shape coroEmissionFunctionShape) helperPlacement(instr ssa.Instruction, helper string) coroRuntimeHelperPlacement {
+	if allocation, ok := instr.(*ssa.Alloc); ok && helper == "AllocZ" {
+		if _, relocated := shape.terminalResultAllocation[allocation]; relocated {
+			return coroRuntimeHelperAtPrologue
+		}
+	}
+	if _, deferred := instr.(*ssa.Defer); deferred && shape.dynamicCleanup && helper == "FreeDeferNode" {
+		return coroRuntimeHelperAtCleanup
+	}
+	return coroRuntimeHelperAtSource
+}
+
+func (u *EmissionUniverse) materializeLoweredRuntimeHelpers(ctx *context, ownerFn *ssa.Function, ownerPkg *preparedEmissionPackage, state emissionFunctionState, shape coroEmissionFunctionShape, instr ssa.Instruction) error {
+	if u == nil {
+		return nil
+	}
+	if ctx == nil || ownerFn == nil || ownerPkg == nil || instr == nil || instr.Parent() != ownerFn || u.coroProgramIR == nil {
+		return fmt.Errorf("prepare emission universe: runtime helper SitePlan requires one exact builder, owner, context, and source instruction")
+	}
+	sitePlan := coroEmissionSitePlan{}
+	if u.prog != nil {
+		managed := u.classifyCoroRuntimeHelpers(ctx, shape, instr)
+		for _, helper := range managed {
+			sitePlan.managedRuntimeHelpers = append(sitePlan.managedRuntimeHelpers, coroPlannedRuntimeHelper{
+				name:      helper,
+				placement: shape.helperPlacement(instr, helper),
+			})
+		}
+		sitePlan.plainRuntimeHelpers = u.classifyPlainRuntimeHelpers(ctx, instr, managed)
+	}
+	if err := u.coroProgramIR.freezeSite(ownerFn, ownerPkg, instr, sitePlan); err != nil {
+		return fmt.Errorf("prepare emission universe: function %q site plan: %w", ownerFn.Name(), err)
+	}
+	if !u.completeRuntimeABI {
 		return nil
 	}
 	if u.prog == nil {
@@ -46,7 +99,15 @@ func (u *EmissionUniverse) materializeLoweredRuntimeHelpers(ctx *context, ownerF
 	if u.pathDup[llssa.PkgRuntime] {
 		return fmt.Errorf("prepare emission universe: runtime helper resolution has ambiguous package path %q", llssa.PkgRuntime)
 	}
-	for _, helper := range u.loweredRuntimeHelpers(ctx, instr) {
+	for _, plannedHelper := range sitePlan.managedRuntimeHelpers {
+		helper := plannedHelper.name
+		if coroCompilerElidesImplicitFaultRuntimeHelper(instr, helper) {
+			// The physical Index/IndexAddr recipe emits a current-frame terminal
+			// guard before its unchecked access.  The legacy-stack representation
+			// is retained separately below; importing this helper as a managed
+			// child would manufacture an await on the successful access path.
+			continue
+		}
 		target := runtimePkg.ssa.Func(helper)
 		if target == nil {
 			return fmt.Errorf("prepare emission universe: function %q lowers to missing runtime helper %q", ownerFn.Name(), helper)
@@ -55,7 +116,27 @@ func (u *EmissionUniverse) materializeLoweredRuntimeHelpers(ctx *context, ownerF
 		if err != nil {
 			return fmt.Errorf("prepare emission universe: function %q runtime helper %q: %w", ownerFn.Name(), helper, err)
 		}
-		if err := u.recordCoroLoweredCallSite(ownerFn, helper, canonical, u.loweredCallUnwindOnly(ownerFn, instr)); err != nil {
+		if coroCompilerRawPlainLoweredRuntimeHelper(u, helper) {
+			if err := u.recordCoroRawPlainLoweredCall(ownerFn, helper, canonical); err != nil {
+				return err
+			}
+			// The exact raw occurrence is an executable code reference, not a
+			// managed call edge. Feed it through the existing frozen raw-demand
+			// projection so the closure builder must prove every reachable leaf.
+			if err := u.recordABIMethodReferences(ownerFn, []*ssa.Function{canonical}); err != nil {
+				return err
+			}
+			if err := u.recordABISyncReferences(ownerFn, []*ssa.Function{canonical}); err != nil {
+				return err
+			}
+			continue
+		}
+		unwindOnly := u.loweredCallUnwindOnly(ownerFn, instr)
+		if err := u.recordCoroLoweredCallSite(
+			ownerFn, helper, canonical, unwindOnly,
+			unwindOnly && coroLoweredCallExplicitStatusElided(instr, helper),
+			false,
+		); err != nil {
 			return err
 		}
 	}
@@ -65,19 +146,84 @@ func (u *EmissionUniverse) materializeLoweredRuntimeHelpers(ctx *context, ownerF
 	// still lowers to the synchronous ChanSend/ChanRecv helper. Retain that
 	// helper without recording a second physical lowered-call edge: the source
 	// channel instruction already contributes MayPark to coroutine analysis.
-	for _, helper := range u.plainRepresentationRuntimeHelpers(ctx, instr) {
+	managed := make(map[string]none, len(sitePlan.managedRuntimeHelpers))
+	for _, helper := range sitePlan.managedRuntimeHelpers {
+		managed[helper.name] = none{}
+	}
+	for _, helper := range sitePlan.plainRuntimeHelpers {
+		if _, shared := managed[helper]; shared && !coroCompilerElidesImplicitFaultRuntimeHelper(instr, helper) {
+			continue
+		}
 		target := runtimePkg.ssa.Func(helper)
 		if target == nil {
 			return fmt.Errorf("prepare emission universe: function %q lowers its plain representation to missing runtime helper %q", ownerFn.Name(), helper)
 		}
-		if _, err := u.addResolvedRequired(target, ownerPkg, ownerFn, state); err != nil {
+		canonical, err := u.addResolvedRequired(target, ownerPkg, ownerFn, state)
+		if err != nil {
 			return fmt.Errorf("prepare emission universe: function %q plain-representation runtime helper %q: %w", ownerFn.Name(), helper, err)
+		}
+		if err := u.recordCoroPlainLoweredCall(ownerFn, helper, canonical); err != nil {
+			return err
+		}
+		// This helper is called only by the legacy-stack representation. Feed
+		// it through the existing exact synchronous-reference classifier so the
+		// second fixed point gives its closure RawPlainDemand without leaking
+		// its effects into the managed physical body.
+		if err := u.recordABIMethodReferences(ownerFn, []*ssa.Function{canonical}); err != nil {
+			return err
+		}
+		if err := u.recordABISyncReferences(ownerFn, []*ssa.Function{canonical}); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-func (u *EmissionUniverse) plainRepresentationRuntimeHelpers(ctx *context, instr ssa.Instruction) []string {
+// coroCompilerRawPlainLoweredRuntimeHelper classifies the typed channel
+// primitives whose call occurrences are owned completely by coroutine
+// lowering. They execute as bounded try/park/resume transactions on the
+// current executor stack. In particular park is between state publication and
+// llvm.coro.suspend, and resume is inside a terminating resume gate, so neither
+// occurrence may grow a managed child-await edge. The exact target is still
+// frozen per owner by recordCoroRawPlainLoweredCall and its complete raw
+// closure is validated by the whole-program plan.
+func coroCompilerRawPlainLoweredRuntimeHelper(u *EmissionUniverse, helper string) bool {
+	if u == nil || !u.enableCoroChannel {
+		return false
+	}
+	switch helper {
+	case "CoroChanTrySend", "CoroChanTryRecv", "CoroChanTryClose",
+		"CoroChanSelectTry", "CoroChanSelectPark", "CoroChanSelectResume":
+		return true
+	default:
+		return false
+	}
+}
+
+// coroLoweredCallExplicitStatusElided identifies an exact frontend recipe,
+// not a runtime symbol-name exception.  compileInstr owns a non-synthetic
+// source Panic in a physical ExplicitStatus body and publishes its already
+// evaluated interface words directly; a plain primary still emits the frozen
+// runtime.Panic helper, so the helper remains in the universe and plan.
+func coroLoweredCallExplicitStatusElided(instr ssa.Instruction, helper string) bool {
+	panicInstruction, ok := instr.(*ssa.Panic)
+	return ok && !coroSyntheticSelectNoCasePanic(panicInstruction) && helper == "Panic"
+}
+
+// coroCompilerElidesImplicitFaultRuntimeHelper identifies the exact source
+// recipes whose physical coroutine lowering owns the nil/bounds branch in the
+// current frame.  It is intentionally instruction-shaped: the same runtime
+// helper name emitted by any other lowering remains an ordinary managed edge.
+func coroCompilerElidesImplicitFaultRuntimeHelper(instr ssa.Instruction, helper string) bool {
+	switch instr.(type) {
+	case *ssa.Index, *ssa.IndexAddr:
+		return helper == "CheckIndexRange" || helper == "AssertNilDeref"
+	default:
+		return false
+	}
+}
+
+func (u *EmissionUniverse) classifyPlainRuntimeHelpers(ctx *context, instr ssa.Instruction, managed []string) []string {
 	if u == nil {
 		return nil
 	}
@@ -87,6 +233,11 @@ func (u *EmissionUniverse) plainRepresentationRuntimeHelpers(ctx *context, instr
 			if name != "" {
 				set[name] = struct{}{}
 			}
+		}
+	}
+	for _, helper := range managed {
+		if !coroCompilerRawPlainLoweredRuntimeHelper(u, helper) {
+			add(helper)
 		}
 	}
 	if u.enableCoroChannel {
@@ -103,7 +254,19 @@ func (u *EmissionUniverse) plainRepresentationRuntimeHelpers(ctx *context, instr
 			} else {
 				add("TrySelect")
 			}
+		case *ssa.Call:
+			if builtin, ok := instruction.Common().Value.(*ssa.Builtin); ok && builtin.Name() == "close" {
+				add("ChanClose")
+			}
 		}
+	}
+	if call, ok := instr.(*ssa.Call); ok && !call.Call.IsInvoke() &&
+		call.Call.StaticCallee() == nil && !emissionCallIsBuiltin(&call.Call) {
+		// The representation choice is made after this universe freezes. Every
+		// real dynamic function call may therefore become a descriptor load whose
+		// plain implementation needs a recoverable nil-call check. Its physical
+		// coroutine implementation owns the equivalent explicit-status edge.
+		add("AssertNilDeref")
 	}
 	// The physical select lowering turns x/tools' unreachable no-case panic
 	// into a trap. A dual plain representation still emits the original box and
@@ -192,7 +355,10 @@ func (u *EmissionUniverse) materializeRuntimeHelperReference(ownerFn *ssa.Functi
 	return canonical, true, nil
 }
 
-func (u *EmissionUniverse) loweredRuntimeHelpers(ctx *context, instr ssa.Instruction) []string {
+// classifyCoroRuntimeHelpers is the sole raw-SSA helper classifier. Only the
+// ProgramModelBuilder path above may call it; analysis, preflight and emission
+// consume the frozen coroEmissionSitePlan instead.
+func (u *EmissionUniverse) classifyCoroRuntimeHelpers(ctx *context, shape coroEmissionFunctionShape, instr ssa.Instruction) []string {
 	set := make(map[string]struct{})
 	add := func(names ...string) {
 		for _, name := range names {
@@ -217,27 +383,35 @@ func (u *EmissionUniverse) loweredRuntimeHelpers(ctx *context, instr ssa.Instruc
 			if _, checkedReceiver := ctx.methodNilDerefChecks[v]; checkedReceiver {
 				// compileCheckedDeref preserves the checked pointer through the
 				// value-receiver call and therefore uses the pointer-returning ABI.
-				add("AssertNilDerefPtr")
-			} else if shouldAssertDirectNilDeref(v) {
+				if !ssaValueProvenNonNilAt(v.X, v) {
+					emissionCheckedDerefBaseRuntimeHelpers(v.X, add)
+					add("AssertNilDerefPtr")
+				}
+			} else if shouldAssertDirectNilDeref(v) && !ssaValueProvenNonNilAt(v.X, v) {
 				add("AssertNilDeref")
 			}
 		}
 	case *ssa.Convert:
 		u.convertRuntimeHelpers(ctx, v, add)
 	case *ssa.Alloc:
-		if v.Heap && !ctx.skipSyntheticMakeSliceAlloc(v) && !isEmissionVargsAlloc(ctx, v) {
+		bitcast, scalarBitcast := coro.ProveSSAExactScalarBitcast(v.Parent())
+		scalarBitcast = scalarBitcast && bitcast.Allocation == v
+		if v.Heap && !scalarBitcast && !ctx.skipSyntheticMakeSliceAlloc(v) && !isEmissionVargsAlloc(ctx, v) {
 			elem := types.Unalias(v.Type()).(*types.Pointer).Elem()
-			physical := ctx.type_(elem, llssa.InGo)
-			if u.prog.SizeOf(physical) != 0 {
+			if !emissionZeroSizedType(ctx.patchType(elem), ctx.prog.PointerSize()) {
 				add("AllocZ")
 			}
 		}
+	case *ssa.Defer:
+		if shape.dynamicCleanup {
+			add("AllocU", "FreeDeferNode")
+		}
 	case *ssa.FieldAddr:
-		if ctx.isAddressOfFieldAddr(v) {
+		if ctx.isAddressOfFieldAddr(v) && !ssaAddressValueProvenNonNilAt(v.X, v) {
 			add("AssertNilDeref")
 		}
 	case *ssa.Index:
-		if emissionIndexNeedsRangeCheck(ctx, v.X, v.Index) {
+		if emissionIndexNeedsRangeCheck(ctx, v.X, v.Index, v) {
 			add("CheckIndexRange")
 		}
 	case *ssa.IndexAddr:
@@ -246,10 +420,12 @@ func (u *EmissionUniverse) loweredRuntimeHelpers(ctx *context, instr ssa.Instruc
 		if emissionIsVargsAlloc(ctx, v.X) {
 			break
 		}
-		if emissionIndexNeedsRangeCheck(ctx, v.X, v.Index) {
+		safeBounds := !emissionIndexNeedsRangeCheck(ctx, v.X, v.Index, v)
+		if !safeBounds {
 			add("CheckIndexRange")
 		}
-		if _, pointer := types.Unalias(ctx.patchType(v.X.Type())).Underlying().(*types.Pointer); pointer && !emissionKnownNonNilArrayBase(v.X) {
+		if _, pointer := types.Unalias(ctx.patchType(v.X.Type())).Underlying().(*types.Pointer); pointer &&
+			!emissionKnownNonNilArrayBase(v.X) && !(safeBounds && ssaValueProvenNonNilAt(v.X, v)) {
 			add("AssertNilDeref")
 		}
 	case *ssa.Slice:
@@ -339,7 +515,9 @@ func (u *EmissionUniverse) loweredRuntimeHelpers(ctx *context, instr ssa.Instruc
 			add("TrySelect")
 		}
 	case *ssa.SliceToArrayPointer:
-		add("PanicSliceConvert")
+		if length, exact := coroSliceToArrayPointerLen(v, ctx.patchType); !exact || length != 0 {
+			add("PanicSliceConvert")
+		}
 	case *ssa.MapUpdate:
 		// Builder.MapUpdate uses the same mapKeyPtr lowering as Lookup.
 		add("AllocU", "MapAssign")
@@ -398,6 +576,39 @@ func (u *EmissionUniverse) loweredRuntimeHelpers(ctx *context, instr ssa.Instruc
 	}
 	sort.Strings(ret)
 	return ret
+}
+
+// emissionCheckedDerefBaseRuntimeHelpers mirrors emitNilDerefBaseCheck. A
+// value-receiver check may first traverse a retained * or field-address chain
+// before NilDerefCheck validates the final receiver pointer. Those nested
+// checks are emitted while compiling the outer UnOp, so recording only the
+// pointer-returning helper leaves the owner-scoped AssertNilDeref edge hidden
+// from both managed and raw/plain emission planning.
+func emissionCheckedDerefBaseRuntimeHelpers(addr ssa.Value, add func(...string)) {
+	switch addr := addr.(type) {
+	case *ssa.UnOp:
+		if addr.Op != token.MUL || isKnownNonNilAddr(addr.X) || isWrapNilCheckCall(addr.X) {
+			return
+		}
+		emissionCheckedDerefBaseRuntimeHelpers(addr.X, add)
+		add("AssertNilDeref")
+	case *ssa.FieldAddr:
+		if isKnownNonNilAddr(addr.X) || isWrapNilCheckCall(addr.X) {
+			return
+		}
+		emissionCheckedDerefBaseRuntimeHelpers(addr.X, add)
+		if isPointerGoType(addr.X.Type()) {
+			add("AssertNilDeref")
+		}
+	}
+}
+
+func emissionCallIsBuiltin(call *ssa.CallCommon) bool {
+	if call == nil {
+		return false
+	}
+	_, ok := call.Value.(*ssa.Builtin)
+	return ok
 }
 
 // emissionStringIntrinsicHelper mirrors context.string, compileVArg, and
@@ -474,35 +685,30 @@ func emissionStringIntrinsicHelper(ctx *context, call *ssa.Call) (string, error)
 // emissionIndexNeedsRangeCheck mirrors ssa.Builder.checkRange for the source
 // operands available before LLVM construction. Slice and string lengths are
 // dynamic, while arrays and pointers to arrays have a frozen constant bound.
-func emissionIndexNeedsRangeCheck(ctx *context, collection, index ssa.Value) bool {
-	if ctx == nil || collection == nil || index == nil {
+func emissionIndexNeedsRangeCheck(ctx *context, collection, index ssa.Value, use ssa.Instruction) bool {
+	if ctx == nil || collection == nil || index == nil || use == nil || use.Parent() == nil {
 		return true
 	}
-	var bound int64 = -1
+	bound, fixed := emissionFixedArrayBound(ctx, collection)
+	if !fixed {
+		return true
+	}
+	return !coro.ProveSSAExactSafeFixedArrayIndex(use.Parent(), index, bound, use)
+}
+
+func emissionFixedArrayBound(ctx *context, collection ssa.Value) (int64, bool) {
+	if ctx == nil || collection == nil || collection.Type() == nil {
+		return 0, false
+	}
 	switch typ := types.Unalias(ctx.patchType(collection.Type())).Underlying().(type) {
 	case *types.Array:
-		bound = typ.Len()
+		return typ.Len(), true
 	case *types.Pointer:
 		if array, ok := types.Unalias(typ.Elem()).Underlying().(*types.Array); ok {
-			bound = array.Len()
+			return array.Len(), true
 		}
 	}
-	constantIndex, ok := index.(*ssa.Const)
-	if !ok || constantIndex.Value == nil {
-		return true
-	}
-	basic, ok := types.Unalias(index.Type()).Underlying().(*types.Basic)
-	if !ok || basic.Info()&types.IsInteger == 0 {
-		return true
-	}
-	if basic.Info()&types.IsUnsigned == 0 && constant.Sign(constantIndex.Value) < 0 {
-		return true
-	}
-	if bound < 0 {
-		return true
-	}
-	value, exact := constant.Uint64Val(constantIndex.Value)
-	return !exact || value >= uint64(bound)
+	return 0, false
 }
 
 // emissionKnownNonNilArrayBase deliberately matches the narrow LLVM-side
@@ -547,7 +753,7 @@ func (u *EmissionUniverse) binOpRuntimeHelpers(ctx *context, op *ssa.BinOp, add 
 		case typ.Info()&types.IsComplex != 0 && op.Op == token.QUO:
 			add("Complex128Div")
 		case typ.Info()&types.IsInteger != 0 && (op.Op == token.QUO || op.Op == token.REM):
-			if !constantIntegerKnownNonZero(op.Y) {
+			if !ssaIntegerValueProvenNonZeroAt(op.Y, op) {
 				add("AssertDivideByZero")
 			}
 		}
@@ -667,16 +873,52 @@ func (u *EmissionUniverse) makeInterfaceRuntimeHelpers(ctx *context, makeInterfa
 	if interfaceIsNonEmpty(ctx.patchType(makeInterface.Type())) {
 		add("NewItab")
 	}
-	physical := ctx.type_(makeInterface.X.Type(), llssa.InGo)
-	if !emissionDirectIfaceType(physical.RawType()) {
+	// Helper planning must remain valid for report/identity universes whose
+	// LLSSA program intentionally has no runtime package. The interface data
+	// representation and the large/zero dereference rules depend only on the
+	// patched Go type and target pointer size; materializing an LLSSA type here
+	// would incorrectly require runtime.String and other runtime ABI types.
+	physical := ctx.patchType(makeInterface.X.Type())
+	if !emissionDirectIfaceType(physical) {
 		add("AllocU")
 	}
-	if unop, ok := makeInterface.X.(*ssa.UnOp); ok && unop.Op == token.MUL && (ctx.isLargeNonPointerValue(physical) || ctx.isZeroSizedValue(physical)) {
+	if unop, ok := makeInterface.X.(*ssa.UnOp); ok && unop.Op == token.MUL &&
+		emissionLargeOrZeroInterfaceDeref(physical, ctx.prog.PointerSize()) {
 		add("AssertNilDeref")
 		// MakeInterfaceFromPtr uses the indirect representation for both large
 		// and zero-sized values and therefore always copies through AllocU.
 		add("AllocU", "Typedmemmove")
 	}
+}
+
+func emissionLargeOrZeroInterfaceDeref(typ types.Type, pointerSize int) bool {
+	raw := types.Unalias(typ)
+	if raw == nil {
+		return false
+	}
+	if _, pointer := raw.Underlying().(*types.Pointer); pointer {
+		return false
+	}
+	word := int64(pointerSize)
+	if word <= 0 {
+		return false
+	}
+	size := emissionTargetTypeSize(raw, word)
+	return size == 0 || size > maxDirectDerefSize
+}
+
+func emissionZeroSizedType(typ types.Type, pointerSize int) bool {
+	if typ == nil || pointerSize <= 0 {
+		return false
+	}
+	return emissionTargetTypeSize(types.Unalias(typ), int64(pointerSize)) == 0
+}
+
+func emissionTargetTypeSize(typ types.Type, word int64) int64 {
+	if typ == nil || word <= 0 {
+		return -1
+	}
+	return (&types.StdSizes{WordSize: word, MaxAlign: word}).Sizeof(typ)
 }
 
 func emissionDirectIfaceType(typ types.Type) bool {
@@ -753,7 +995,11 @@ func (u *EmissionUniverse) builtinRuntimeHelpers(ctx *context, call *ssa.CallCom
 	case "copy":
 		add("SliceCopy")
 	case "close":
-		add("ChanClose")
+		if u.enableCoroChannel {
+			add("CoroChanTryClose")
+		} else {
+			add("ChanClose")
+		}
 	case "recover":
 		add("Recover")
 	case "panic":
@@ -768,6 +1014,12 @@ func (u *EmissionUniverse) builtinRuntimeHelpers(ctx *context, call *ssa.CallCom
 				add("MapClear")
 			case *types.Slice:
 				add("SliceClear")
+			}
+		}
+	case "min", "max":
+		if len(args) > 1 {
+			if basic, ok := types.Unalias(ctx.patchType(args[0].Type())).Underlying().(*types.Basic); ok && basic.Kind() == types.String {
+				add("StringLess")
 			}
 		}
 	case "print", "println":

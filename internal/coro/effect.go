@@ -40,13 +40,22 @@ const (
 	WaitHost
 	WaitForeign
 	opaqueSuspendBit
+	// OutcomeStructured means that a managed invocation can complete through
+	// the explicit Return/Panic outcome protocol. It is demand-sensitive: the
+	// graph adds it only to a MayUnwind body that must execute in a coroutine
+	// context. Keeping it separate from AwaitStructured distinguishes a body's
+	// own terminal outcome transport from awaiting one of its children.
+	//
+	// This bit deliberately follows opaqueSuspendBit so every pre-existing
+	// effect keeps its experimental wire value.
+	OutcomeStructured
 )
 
 const (
 	// NoSuspend is the bottom of the effect lattice.
 	NoSuspend Effect = 0
 
-	knownSuspendEffects = YieldOnly | AwaitStructured | MayPark | WaitPlatform | WaitHost | WaitForeign
+	knownSuspendEffects = YieldOnly | AwaitStructured | OutcomeStructured | MayPark | WaitPlatform | WaitHost | WaitForeign
 	validEffectBits     = knownSuspendEffects | opaqueSuspendBit
 
 	// OpaqueSuspend is the top of the effect lattice. It is used when an open
@@ -60,6 +69,7 @@ var effectNames = [...]struct {
 }{
 	{YieldOnly, "yield-only"},
 	{AwaitStructured, "await-structured"},
+	{OutcomeStructured, "outcome-structured"},
 	{MayPark, "may-park"},
 	{WaitPlatform, "wait-platform"},
 	{WaitHost, "wait-host"},

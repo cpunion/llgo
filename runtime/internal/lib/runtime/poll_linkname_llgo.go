@@ -1,4 +1,4 @@
-//go:build (darwin || linux) && !baremetal
+//go:build (darwin || linux) && !baremetal && (coro_runtime_adapter_test || !(llgo && llgo_coro && llgo_coro_native_pipe && llgo_coro_native_timer))
 
 package runtime
 
@@ -42,8 +42,33 @@ type pollfd struct {
 	revents int16
 }
 
-//go:linkname c_poll C.poll
-func c_poll(fds *pollfd, nfds uintptr, timeout c.Int) c.Int
+//go:linkname pollFuncPCABI0 llgo.funcPCABI0
+func pollFuncPCABI0(fn any) uintptr
+
+//go:linkname pollSyscall llgo.syscall
+func pollSyscall(fn, a1, a2, a3 uintptr) (r1, r2, errno uintptr)
+
+//go:linkname pollWaitFixedV1 C.__llgo_runtime_poll_wait_v1
+func pollWaitFixedV1(fds, nfds, timeout uintptr) uintptr
+
+// runtimePollWaitFixedV1 is the only potentially blocking leaf in the minimal
+// poller. The fixed C wrapper makes the native nfds_t/int ABI uintptr-shaped,
+// so an enabled coroutine worker lowering can suspend this exact synchronous
+// call without retaining Go pointers or consulting worker-thread TLS later.
+// With the worker capability disabled, llgo.syscall keeps its legacy direct
+// synchronous lowering and therefore preserves the feature-off path.
+func runtimePollWaitFixedV1(fds *pollfd, nfds uintptr, timeout c.Int) (c.Int, uintptr) {
+	r1, _, errno := pollSyscall(
+		pollFuncPCABI0(pollWaitFixedV1),
+		uintptr(unsafe.Pointer(fds)),
+		nfds,
+		uintptr(uint32(timeout)),
+	)
+	if r1 == ^uintptr(0) {
+		return -1, errno
+	}
+	return c.Int(r1), 0
+}
 
 type llgoPollDesc struct {
 	fd c.Int
@@ -241,9 +266,8 @@ func poll_runtime_pollWait(ctx uintptr, mode int) int {
 		fds[0] = pollfd{fd: pd.fd, events: ev}
 		fds[1] = pollfd{fd: wakeR, events: pollIn}
 
-		n := c_poll(&fds[0], 2, timeout)
+		n, errno := runtimePollWaitFixedV1(&fds[0], 2, timeout)
 		if n < 0 {
-			errno := cliteos.Errno()
 			if int(errno) == int(csyscall.EINTR) {
 				continue
 			}

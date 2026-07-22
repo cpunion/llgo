@@ -33,6 +33,8 @@ func (e errorString) Error() string {
 
 type plainError string
 
+func (e plainError) RuntimeError() {}
+
 func (e plainError) Error() string {
 	return string(e)
 }
@@ -178,6 +180,20 @@ func printany(i any) {
 	default:
 		printanycustomtype(i)
 	}
+}
+
+// printanyraw is the no-callback form used by the terminal legacy panic trace.
+// Deliberately avoid a type switch as well as error/Stringer assertions: the
+// former lowers through interface equality and may recursively inspect a
+// composite type. The raw descriptor printer is bounded by one concrete type
+// record and never invokes user code.
+func printanyraw(i any) {
+	e := efaceOf(&i)
+	if e._type == nil {
+		print("nil")
+		return
+	}
+	printanycustomtype(i)
 }
 
 func efaceOf(ep *any) *eface {

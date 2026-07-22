@@ -16,10 +16,15 @@
 
 package coro
 
-// TimerRegistrationCapacity is the number of one-shot monotonic timers in one
-// fixed table. Registration is allocation-free and fails transactionally when
-// every slot is live.
-const TimerRegistrationCapacity = 64
+// TimerRegistrationPageCapacity is the allocation-free granularity of the
+// target-neutral timer catalog. Every table includes one inline page; a target
+// may attach additional stable pages before binding the table.
+const TimerRegistrationPageCapacity = 64
+
+// TimerRegistrationCapacity is the default capacity of an unconfigured table.
+// Keep this compatibility name for small and embedded profiles; it is not the
+// capacity of a table after ConfigureTimerRegistrationPages succeeds.
+const TimerRegistrationCapacity = TimerRegistrationPageCapacity
 
 // TimerRegistrationHandle identifies one exact timer slot generation. It is
 // scheduler-owned in the first single-executor backend: no platform thread or
@@ -71,16 +76,33 @@ type timerRegistrationSlot struct {
 	ticket     WaitTicket
 	deadline   int64
 
+	// A controlled V2 timer may be invalidated by another running G through a
+	// stable logical identity. controller is an opaque, non-owning key (the
+	// parked manager G retains the Go object); controlWord is that object's
+	// exact logical generation. Both are zero for V1 and ordinary Sleep.
+	controller  uintptr
+	controlWord uint32
+
 	// Owner-P-only V2 suffix. Timers have no external producer, so the stable
 	// OperationRecord itself is the only additional physical-source state.
 	record OperationRecord
 }
 
-// TimerRegistrationTable is a fixed-capacity durable source for one-shot
-// absolute monotonic deadlines. All methods are scheduler-owner-only and must
-// be serialized. Unlike WaitRegistrationTable, this source has no producer
-// admission path: the single executor discovers expiry by scanning at a fresh
-// monotonic timestamp and bounds its retained-doorbell poll by NextDeadline.
+// TimerRegistrationPage is stable storage supplied by a target profile. Its
+// fields are intentionally private: only the owner-side catalog may interpret
+// a page, while native, WASM, embedded, and bare-metal runtimes may choose the
+// number of statically reserved pages without changing a handle or callback
+// ABI. Attaching a page performs no allocation.
+type TimerRegistrationPage struct {
+	slots [TimerRegistrationPageCapacity]timerRegistrationSlot
+}
+
+// TimerRegistrationTable is a paged durable source for one-shot absolute
+// monotonic deadlines. Its configured pages are frozen while bound. All methods
+// are scheduler-owner-only and must be serialized. Unlike
+// WaitRegistrationTable, this source has no producer admission path: the single
+// executor discovers expiry by scanning at a fresh monotonic timestamp and
+// bounds its retained-doorbell poll by NextDeadline.
 //
 // An Active slot is the source of truth even when its deadline passes between
 // the scheduler's final scan and CommitSleep. The target must use the returned
@@ -94,9 +116,77 @@ type timerRegistrationSlot struct {
 // Both modes retain the shared physical generation until typed recycle clears
 // owner pointers, and neither mode may invoke the other's terminal API.
 type TimerRegistrationTable struct {
-	slots [TimerRegistrationCapacity]timerRegistrationSlot
-	owner *P
-	route RouteID
+	slots      [TimerRegistrationPageCapacity]timerRegistrationSlot
+	extraPages []TimerRegistrationPage
+	owner      *P
+	route      RouteID
+	scanLimit  uint32
+}
+
+// TimerRegistrationConfiguredCapacity returns the exact number of addressable
+// slots in table. The linear one-based slot remains directly encodable in the
+// frozen 15-bit OperationID local field.
+func TimerRegistrationConfiguredCapacity(table *TimerRegistrationTable) uint32 {
+	if table == nil {
+		return 0
+	}
+	return uint32(1+len(table.extraPages)) * TimerRegistrationPageCapacity
+}
+
+func timerRegistrationScanLimit(table *TimerRegistrationTable) (uint32, bool) {
+	if table == nil {
+		return 0, false
+	}
+	capacity := TimerRegistrationConfiguredCapacity(table)
+	return table.scanLimit, validSourceScanLimit(table.scanLimit, capacity)
+}
+
+func timerRegistrationSlotAt(table *TimerRegistrationTable, index uint32) (*timerRegistrationSlot, bool) {
+	capacity := TimerRegistrationConfiguredCapacity(table)
+	if index >= capacity {
+		return nil, false
+	}
+	if index < TimerRegistrationPageCapacity {
+		return &table.slots[index], true
+	}
+	page := index/TimerRegistrationPageCapacity - 1
+	offset := index % TimerRegistrationPageCapacity
+	return &table.extraPages[page].slots[offset], true
+}
+
+// ConfigureTimerRegistrationPages attaches stable allocation-free catalog
+// storage before the table is bound. The slice header is scheduler-owned; no
+// page pointer crosses a target callback boundary. Repeating the exact same
+// configuration is idempotent so a native runtime may bind, unbind, and bind
+// its singleton executor again. An empty unbound table may monotonically expose
+// more pages from the same backing pool; configured pages are never detached.
+func ConfigureTimerRegistrationPages(table *TimerRegistrationTable, pages []TimerRegistrationPage) bool {
+	if table == nil || table.owner != nil || len(pages) > int(operationLocalMask/TimerRegistrationPageCapacity)-1 {
+		return false
+	}
+	existing := len(table.extraPages)
+	if existing != 0 && (len(pages) < existing || len(pages) == 0 || &table.extraPages[0] != &pages[0]) {
+		return false
+	}
+	if len(pages) == existing {
+		return true
+	}
+	for index := uint32(0); index < TimerRegistrationConfiguredCapacity(table); index++ {
+		slot, ok := timerRegistrationSlotAt(table, index)
+		if !ok || !reusableTimerRegistrationSlot(slot, table.route, index) {
+			return false
+		}
+	}
+	for page := existing; page < len(pages); page++ {
+		for offset := range pages[page].slots {
+			index := uint32(page+1)*TimerRegistrationPageCapacity + uint32(offset)
+			if !reusableTimerRegistrationSlot(&pages[page].slots[offset], table.route, index) {
+				return false
+			}
+		}
+	}
+	table.extraPages = pages
+	return true
 }
 
 // PrepareTimerRegistration arms token and publishes an absolute monotonic
@@ -119,10 +209,10 @@ func PrepareTimerRegistration(p *P, table *TimerRegistrationTable, token *WaitTo
 }
 
 func timerRegistrationSlotFor(table *TimerRegistrationTable, handle TimerRegistrationHandle) (*timerRegistrationSlot, bool) {
-	if table == nil || handle.Slot == 0 || handle.Slot > TimerRegistrationCapacity || handle.Generation == 0 {
+	if table == nil || handle.Slot == 0 || handle.Generation == 0 {
 		return nil, false
 	}
-	return &table.slots[handle.Slot-1], true
+	return timerRegistrationSlotAt(table, handle.Slot-1)
 }
 
 func validTimerRegistrationHeader(slot *timerRegistrationSlot, owner *P) bool {
@@ -145,7 +235,13 @@ func validTimerRegistrationRecordResidue(slot *timerRegistrationSlot, route Rout
 
 func validLiveTimerRegistrationV1(slot *timerRegistrationSlot, owner *P, route RouteID, index uint32) bool {
 	return validTimerRegistrationHeader(slot, owner) && slot.mode == timerRegistrationModeV1 &&
-		slot.token != nil && validWaitTicket(slot.ticket) && validTimerRegistrationRecordResidue(slot, route, index)
+		slot.token != nil && validWaitTicket(slot.ticket) &&
+		slot.controller == 0 && slot.controlWord == 0 &&
+		validTimerRegistrationRecordResidue(slot, route, index)
+}
+
+func validTimerRegistrationController(controller uintptr, controlWord uint32) bool {
+	return controller == 0 && controlWord == 0 || controller != 0 && controlWord != 0
 }
 
 func timerRegistrationOperationID(route RouteID, index uint32, generation uint32) (OperationID, bool) {
@@ -161,7 +257,7 @@ func timerRegistrationIDForHandle(table *TimerRegistrationTable, handle TimerReg
 
 func validLiveTimerRegistrationV2(slot *timerRegistrationSlot, owner *P, route RouteID, index uint32) bool {
 	if !validTimerRegistrationHeader(slot, owner) || slot.mode != timerRegistrationModeV2 ||
-		slot.token != nil || slot.ticket != 0 {
+		slot.token != nil || slot.ticket != 0 || !validTimerRegistrationController(slot.controller, slot.controlWord) {
 		return false
 	}
 	id, ok := timerRegistrationOperationID(route, index, slot.generation)
@@ -181,7 +277,8 @@ func validLiveTimerRegistration(slot *timerRegistrationSlot, owner *P, route Rou
 
 func reusableTimerRegistrationSlot(slot *timerRegistrationSlot, route RouteID, index uint32) bool {
 	if slot == nil || slot.state != timerRegistrationFree || slot.mode != timerRegistrationModeNone ||
-		slot.p != nil || slot.token != nil || slot.ticket != 0 || slot.deadline != 0 {
+		slot.p != nil || slot.token != nil || slot.ticket != 0 || slot.deadline != 0 ||
+		slot.controller != 0 || slot.controlWord != 0 {
 		return false
 	}
 	return validTimerRegistrationRecordResidue(slot, route, index)
@@ -203,12 +300,15 @@ func (table *TimerRegistrationTable) Register(p *P, token *WaitToken, ticket Wai
 	if schedule != scheduleIdle && schedule != scheduleRequested {
 		return TimerRegistrationHandle{}, false
 	}
-	for index := range table.slots {
-		slot := &table.slots[index]
-		if slot.generation == ^uint32(0) || !reusableTimerRegistrationSlot(slot, table.route, uint32(index)) {
+	for index := uint32(0); index < TimerRegistrationConfiguredCapacity(table); index++ {
+		slot, slotOK := timerRegistrationSlotAt(table, index)
+		if !slotOK || slot.generation == ^uint32(0) || !reusableTimerRegistrationSlot(slot, table.route, index) {
 			continue
 		}
 		slot.state = timerRegistrationInitializing
+		if !raiseSourceScanLimit(&table.scanLimit, index, TimerRegistrationConfiguredCapacity(table)) {
+			return TimerRegistrationHandle{}, false
+		}
 		slot.generation++
 		if slot.generation == 0 {
 			// Generation exhaustion was checked before publication. Keep this
@@ -221,7 +321,7 @@ func (table *TimerRegistrationTable) Register(p *P, token *WaitToken, ticket Wai
 		slot.ticket = ticket
 		slot.deadline = deadline
 		slot.state = timerRegistrationActive
-		return TimerRegistrationHandle{Slot: uint32(index) + 1, Generation: slot.generation}, true
+		return TimerRegistrationHandle{Slot: index + 1, Generation: slot.generation}, true
 	}
 	return TimerRegistrationHandle{}, false
 }
@@ -232,17 +332,32 @@ func (table *TimerRegistrationTable) Register(p *P, token *WaitToken, ticket Wai
 // V2 uses of the same slot. A failed preparation consumes no published timer;
 // if a V2 generation was prepared before attachment failed, it is retained as
 // reusable residue so no copied identity can alias a later reservation.
-func (table *TimerRegistrationTable) ReserveAndAttachTimerV2(p *P, state *ParkState, ticket ParkTicket, wait *WaitSetRecord, caseID uint32, deadline int64) (TimerRegistrationHandle, bool) {
+func (table *TimerRegistrationTable) reserveAndAttachTimerV2(
+	p *P,
+	state *ParkState,
+	ticket ParkTicket,
+	wait *WaitSetRecord,
+	caseID uint32,
+	deadline int64,
+	controller uintptr,
+	controlWord uint32,
+) (TimerRegistrationHandle, bool) {
 	if table == nil || p == nil || table.owner != p || !table.route.Valid() || state == nil || wait == nil || deadline < 0 {
 		return TimerRegistrationHandle{}, false
 	}
-	for index := range table.slots {
-		slot := &table.slots[index]
-		if slot.generation == ^uint32(0) || !reusableTimerRegistrationSlot(slot, table.route, uint32(index)) {
+	if !validTimerRegistrationController(controller, controlWord) {
+		return TimerRegistrationHandle{}, false
+	}
+	for index := uint32(0); index < TimerRegistrationConfiguredCapacity(table); index++ {
+		slot, slotOK := timerRegistrationSlotAt(table, index)
+		if !slotOK || slot.generation == ^uint32(0) || !reusableTimerRegistrationSlot(slot, table.route, index) {
 			continue
 		}
 		slot.state = timerRegistrationInitializing
-		desired, idOK := timerRegistrationOperationID(table.route, uint32(index), slot.generation+1)
+		if !raiseSourceScanLimit(&table.scanLimit, index, TimerRegistrationConfiguredCapacity(table)) {
+			return TimerRegistrationHandle{}, false
+		}
+		desired, idOK := timerRegistrationOperationID(table.route, index, slot.generation+1)
 		if !idOK || !PrepareOperationAtGeneration(&slot.record, desired) {
 			slot.state = timerRegistrationFree
 			continue
@@ -260,10 +375,58 @@ func (table *TimerRegistrationTable) ReserveAndAttachTimerV2(p *P, state *ParkSt
 		slot.mode = timerRegistrationModeV2
 		slot.p = p
 		slot.deadline = deadline
+		slot.controller = controller
+		slot.controlWord = controlWord
 		slot.state = timerRegistrationActive
-		return TimerRegistrationHandle{Slot: uint32(index) + 1, Generation: desired.Generation}, true
+		return TimerRegistrationHandle{Slot: index + 1, Generation: desired.Generation}, true
 	}
 	return TimerRegistrationHandle{}, false
+}
+
+func (table *TimerRegistrationTable) ReserveAndAttachTimerV2(
+	p *P,
+	state *ParkState,
+	ticket ParkTicket,
+	wait *WaitSetRecord,
+	caseID uint32,
+	deadline int64,
+) (TimerRegistrationHandle, bool) {
+	return table.reserveAndAttachTimerV2(p, state, ticket, wait, caseID, deadline, 0, 0)
+}
+
+// ReserveAndAttachControlledTimerV2 installs one V2 timer with the exact
+// logical generation used by time.Timer Stop/Reset. controller is a non-owning
+// scalar key; the parked manager frame keeps the object alive. The atomic
+// control recheck closes the change-before-publication race by publishing an
+// ordinary operation cancellation on the still-preparing ParkState. The
+// initial affected visit after park commit performs the normal detach path.
+func (table *TimerRegistrationTable) ReserveAndAttachControlledTimerV2(
+	p *P,
+	state *ParkState,
+	ticket ParkTicket,
+	wait *WaitSetRecord,
+	caseID uint32,
+	deadline int64,
+	controller uintptr,
+	control *uint32,
+	expected uint32,
+) (TimerRegistrationHandle, bool) {
+	if controller == 0 || control == nil || expected == 0 {
+		return TimerRegistrationHandle{}, false
+	}
+	handle, ok := table.reserveAndAttachTimerV2(
+		p, state, ticket, wait, caseID, deadline, controller, expected,
+	)
+	if !ok {
+		return TimerRegistrationHandle{}, false
+	}
+	if preemptLoad(control) != expected && !RequestParkCancel(state, ticket, ParkCancelOperation) {
+		// Every input and the complete preparing ParkState were validated before
+		// reservation. Failure here is corruption, so retain the physical
+		// generation fail-closed instead of pretending the attach rolled back.
+		return handle, false
+	}
+	return handle, true
 }
 
 // NextDeadline returns the earliest active absolute monotonic deadline. The
@@ -280,22 +443,29 @@ func (table *TimerRegistrationTable) nextDeadlineFor(owner *P) (deadline int64, 
 	if table == nil || table.owner != owner {
 		return 0, false, false
 	}
-	for index := range table.slots {
-		slot := &table.slots[index]
+	limit, valid := timerRegistrationScanLimit(table)
+	if !valid {
+		return 0, false, false
+	}
+	for index := uint32(0); index < limit; index++ {
+		slot, slotOK := timerRegistrationSlotAt(table, index)
+		if !slotOK {
+			return 0, false, false
+		}
 		switch slot.state {
 		case timerRegistrationFree:
-			if !reusableTimerRegistrationSlot(slot, table.route, uint32(index)) {
+			if !reusableTimerRegistrationSlot(slot, table.route, index) {
 				return 0, false, false
 			}
 		case timerRegistrationActive:
-			if !validLiveTimerRegistration(slot, owner, table.route, uint32(index)) {
+			if !validLiveTimerRegistration(slot, owner, table.route, index) {
 				return 0, false, false
 			}
 			if !hasDeadline || slot.deadline < deadline {
 				deadline, hasDeadline = slot.deadline, true
 			}
 		case timerRegistrationDelivered, timerRegistrationCanceled:
-			if !validLiveTimerRegistration(slot, owner, table.route, uint32(index)) {
+			if !validLiveTimerRegistration(slot, owner, table.route, index) {
 				return 0, false, false
 			}
 		default:
@@ -326,10 +496,13 @@ func (table *TimerRegistrationTable) DrainDue(now int64) (completed int, deadlin
 // fixed now sample from its first entry through resolution, matching the
 // legacy all-slot DrainDue semantics even when the host yields between slots.
 func (table *TimerRegistrationTable) drainDueSlotFor(owner *P, now int64, index uint32) (completed int, deadline int64, hasDeadline, ok bool) {
-	if table == nil || table.owner != owner || now < 0 || index >= uint32(len(table.slots)) {
+	if table == nil || table.owner != owner || now < 0 || index >= TimerRegistrationConfiguredCapacity(table) {
 		return 0, 0, false, false
 	}
-	slot := &table.slots[index]
+	slot, slotOK := timerRegistrationSlotAt(table, index)
+	if !slotOK {
+		return 0, 0, false, false
+	}
 	switch slot.state {
 	case timerRegistrationFree:
 		if !reusableTimerRegistrationSlot(slot, table.route, index) {
@@ -377,8 +550,12 @@ func (table *TimerRegistrationTable) drainDueFor(owner *P, now int64) (completed
 	if table == nil || table.owner != owner || now < 0 {
 		return 0, 0, false, false
 	}
-	for index := range table.slots {
-		one, next, hasNext, slotOK := table.drainDueSlotFor(owner, now, uint32(index))
+	limit, valid := timerRegistrationScanLimit(table)
+	if !valid {
+		return 0, 0, false, false
+	}
+	for index := uint32(0); index < limit; index++ {
+		one, next, hasNext, slotOK := table.drainDueSlotFor(owner, now, index)
 		completed += one
 		if !slotOK {
 			return completed, 0, false, false
@@ -422,6 +599,36 @@ func (table *TimerRegistrationTable) Cancel(handle TimerRegistrationHandle) Wait
 	}
 }
 
+// CancelControlledV2 publishes operation cancellation for one exact logical
+// Timer generation. It first audits the complete catalog so a duplicated
+// controller identity cannot partially cancel one of two corrupt slots. A
+// completion that is already detached needs no wake: the manager's subsequent
+// control-word check suppresses that stale generation after its ready resume.
+func (table *TimerRegistrationTable) CancelControlledV2(p *P, controller uintptr, controlWord uint32) bool {
+	if table == nil || p == nil || table.owner != p || controller == 0 || controlWord == 0 {
+		return false
+	}
+	var selected *timerRegistrationSlot
+	var wait *WaitSetRecord
+	for index := uint32(0); index < TimerRegistrationConfiguredCapacity(table); index++ {
+		slot, ok := timerRegistrationSlotAt(table, index)
+		if !ok {
+			return false
+		}
+		if slot.mode != timerRegistrationModeV2 || slot.controller != controller || slot.controlWord != controlWord {
+			continue
+		}
+		if selected != nil || !validLiveTimerRegistrationV2(slot, p, table.route, index) ||
+			slot.state != timerRegistrationActive && slot.state != timerRegistrationDelivered ||
+			slot.record.link.wait == nil {
+			return false
+		}
+		selected = slot
+		wait = slot.record.link.wait
+	}
+	return selected != nil && RequestWaitSetCancel(p, wait, ParkCancelOperation)
+}
+
 // RollbackPreparedTimer releases a timer that has not yet been claimed by a G.
 // It publishes and consumes cancellation, then retires the exact generation.
 func (table *TimerRegistrationTable) RollbackPreparedTimer(handle TimerRegistrationHandle, token *WaitToken, ticket WaitTicket) bool {
@@ -461,6 +668,8 @@ func (table *TimerRegistrationTable) Retire(handle TimerRegistrationHandle) bool
 	slot.token = nil
 	slot.ticket = 0
 	slot.deadline = 0
+	slot.controller = 0
+	slot.controlWord = 0
 	slot.state = timerRegistrationFree
 	return true
 }
@@ -498,11 +707,14 @@ func (table *TimerRegistrationTable) RequestTimerV2Cancel(p *P, wait *WaitSetRec
 // quiescence.
 func (table *TimerRegistrationTable) ApplyTimerV2One(p *P, id OperationID, record *OperationRecord) OperationApplyResult {
 	if table == nil || table.owner != p || id.Source() != OperationSourceTimer || id.Route() != table.route ||
-		id.LocalSlot() == 0 || id.LocalSlot() > TimerRegistrationCapacity {
+		id.LocalSlot() == 0 || id.LocalSlot() > TimerRegistrationConfiguredCapacity(table) {
 		return OperationApplyInvalid
 	}
 	index := id.LocalSlot() - 1
-	slot := &table.slots[index]
+	slot, slotOK := timerRegistrationSlotAt(table, index)
+	if !slotOK {
+		return OperationApplyInvalid
+	}
 	if slot.generation != id.Generation || slot.mode != timerRegistrationModeV2 || &slot.record != record ||
 		!validLiveTimerRegistrationV2(slot, p, table.route, index) || slot.record.phase != operationActive {
 		return OperationApplyInvalid
@@ -592,6 +804,8 @@ func (table *TimerRegistrationTable) RecycleTimerV2(p *P, handle TimerRegistrati
 	slot.token = nil
 	slot.ticket = 0
 	slot.deadline = 0
+	slot.controller = 0
+	slot.controlWord = 0
 	return true
 }
 
@@ -599,9 +813,9 @@ func timerRegistrationTableEmpty(table *TimerRegistrationTable, owner *P) bool {
 	if table == nil || table.owner != owner {
 		return false
 	}
-	for index := range table.slots {
-		slot := &table.slots[index]
-		if !reusableTimerRegistrationSlot(slot, table.route, uint32(index)) {
+	for index := uint32(0); index < TimerRegistrationConfiguredCapacity(table); index++ {
+		slot, slotOK := timerRegistrationSlotAt(table, index)
+		if !slotOK || !reusableTimerRegistrationSlot(slot, table.route, index) {
 			return false
 		}
 	}
@@ -614,6 +828,7 @@ func bindTimerRegistrationTableAtRoute(table *TimerRegistrationTable, p *P, rout
 		return false
 	}
 	table.route = route
+	table.scanLimit = 0
 	table.owner = p
 	return true
 }
@@ -629,6 +844,7 @@ func unbindTimerRegistrationTable(table *TimerRegistrationTable, p *P) bool {
 		return false
 	}
 	table.owner = nil
+	table.scanLimit = 0
 	return true
 }
 

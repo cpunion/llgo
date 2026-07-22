@@ -91,6 +91,24 @@ func (b Builder) SetBlock(blk BasicBlock) Builder {
 	return b
 }
 
+// SetBlockContinuation moves the physical insertion point to continuation
+// while preserving the current logical block. The continuation becomes that
+// logical block's physical tail, so later branches and PHI incoming edges use
+// the actual final predecessor after compiler-owned CFG expansion.
+func (b Builder) SetBlockContinuation(continuation BasicBlock) Builder {
+	logical := b.blk
+	if logical == nil {
+		panic("SetBlockContinuation: no active logical block")
+	}
+	if b.Func != continuation.fn || b.Func != logical.fn {
+		panic("mismatched function")
+	}
+	b.SetBlockEx(continuation, AtEnd, false)
+	logical.last = continuation.last
+	b.blk = logical
+	return b
+}
+
 func (b Builder) setBlockMoveLast(blk BasicBlock) (next BasicBlock) {
 	blkLast := blk.last
 	last := blkLast.LastInstruction()

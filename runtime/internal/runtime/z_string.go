@@ -38,6 +38,14 @@ type String struct {
 // StringCat concatenates two strings.
 func StringCat(a, b String) String {
 	n := a.len + b.len
+	// Both operands originate from Go strings and therefore have non-negative
+	// lengths. Keep the checks here nevertheless: besides rejecting a corrupt
+	// physical String, n < a.len detects signed-int addition overflow before it
+	// can be converted to the allocator's uintptr size. maxAlloc is the shared
+	// runtime allocation ceiling on both 32- and 64-bit targets.
+	if a.len < 0 || b.len < 0 || n < a.len || uintptr(n) > maxAlloc {
+		panic(errorString("string concatenation too long"))
+	}
 	dest := AllocU(uintptr(n))
 	c.Memcpy(dest, a.data, uintptr(a.len))
 	c.Memcpy(c.Advance(dest, a.len), b.data, uintptr(b.len))
@@ -195,14 +203,10 @@ func StringEqual(x, y String) bool {
 	if x.len != y.len {
 		return false
 	}
-	if x.data != y.data {
-		for i := 0; i < x.len; i++ {
-			if *(*byte)(c.Advance(x.data, i)) != *(*byte)(c.Advance(y.data, i)) {
-				return false
-			}
-		}
+	if x.len == 0 || x.data == y.data {
+		return true
 	}
-	return true
+	return c.Memcmp(x.data, y.data, uintptr(x.len)) == 0
 }
 
 func StringLess(x, y String) bool {
@@ -210,12 +214,11 @@ func StringLess(x, y String) bool {
 	if n > y.len {
 		n = y.len
 	}
-	for i := 0; i < n; i++ {
-		ix := *(*byte)(c.Advance(x.data, i))
-		iy := *(*byte)(c.Advance(y.data, i))
-		if ix < iy {
+	if n != 0 && x.data != y.data {
+		switch comparison := c.Memcmp(x.data, y.data, uintptr(n)); {
+		case comparison < 0:
 			return true
-		} else if ix > iy {
+		case comparison > 0:
 			return false
 		}
 	}

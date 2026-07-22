@@ -1,4 +1,4 @@
-//go:build !baremetal && !wasm
+//go:build !baremetal && !wasm && (!llgo || !llgo_coro || !llgo_coro_native_pipe || !llgo_coro_native_timer || (!darwin && !linux) || coro_runtime_adapter_test)
 
 package runtime
 

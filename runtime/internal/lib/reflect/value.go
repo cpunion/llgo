@@ -962,10 +962,9 @@ func (v Value) IsZero() bool {
 			if v.flag&flagIndir == 0 {
 				return v.ptr == nil
 			}
-			// v.ptr doesn't escape, as Equal functions are compiler generated
-			// and never escape. The escape analysis doesn't know, as it is a
-			// function pointer call.
-			return v.typ().Equal(noescape(v.ptr), unsafe.Pointer(&zeroVal[0]))
+			// typeequal only reads its arguments. Keep the existing noescape
+			// lifetime contract used by the Equal ABI callback.
+			return typeequal(v.typ(), noescape(v.ptr), unsafe.Pointer(&zeroVal[0]))
 		}
 
 		n := v.Len()
@@ -986,11 +985,15 @@ func (v Value) IsZero() bool {
 				return v.ptr == nil
 			}
 			// See noescape justification above.
-			return v.typ().Equal(noescape(v.ptr), unsafe.Pointer(&zeroVal[0]))
+			return typeequal(v.typ(), noescape(v.ptr), unsafe.Pointer(&zeroVal[0]))
 		}
 
-		n := v.NumField()
+		tt := (*structType)(unsafe.Pointer(v.typ()))
+		n := len(tt.Fields)
 		for i := 0; i < n; i++ {
+			if tt.Fields[i].Name_ == "_" {
+				continue
+			}
 			if !v.Field(i).IsZero() {
 				return false
 			}
@@ -2108,7 +2111,7 @@ func (v Value) CanConvert(t Type) bool {
 // memmove copies size bytes to dst from src. No write barriers are used.
 //
 //go:linkname memmove C.memmove
-func memmove(dst, src unsafe.Pointer, size uintptr)
+func memmove(dst, src unsafe.Pointer, size uintptr) unsafe.Pointer
 
 // typedmemmove copies a value of type t to dst from src.
 //
@@ -3406,6 +3409,9 @@ func mapclear(t *abi.Type, m unsafe.Pointer)
 
 //go:linkname typehash github.com/goplus/llgo/runtime/internal/runtime.typehash
 func typehash(t *abi.Type, p unsafe.Pointer, h uintptr) uintptr
+
+//go:linkname typeequal github.com/goplus/llgo/runtime/internal/runtime.typeequal
+func typeequal(t *abi.Type, p, q unsafe.Pointer) bool
 
 //go:linkname makechan github.com/goplus/llgo/runtime/internal/runtime.NewChan
 func makechan(eltSize, cap int) unsafe.Pointer

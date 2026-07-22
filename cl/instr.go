@@ -355,7 +355,19 @@ func (p *context) funcAddr(b llssa.Builder, args []ssa.Value) llssa.Expr {
 		if fn, ok := args[0].(*ssa.MakeInterface); ok {
 			switch f := fn.X.(type) {
 			case *ssa.Function:
-				if aFn, _, _ := p.compileFunction(f); aFn != nil {
+				compile := p.compileFunction
+				if p.compilation != nil && p.compilation.EnableCoroEntryResolution {
+					entry := p.mustFunctionSymbol(f)
+					if err := validatePlannedRawPlainEntry(entry.function, entry.plan); err != nil {
+						panic(fmt.Errorf("funcAddr raw function publication: %w", err))
+					}
+					// funcAddr publishes a legacy Go-ABI code pointer. A mixed
+					// coroutine therefore selects its separately proven base body;
+					// a raw-only function selects its sole body. It must never expose
+					// the managed $coro ramp as a native callback.
+					compile = p.compileRawPlainFunction
+				}
+				if aFn, _, _ := compile(f); aFn != nil {
 					return aFn.Expr
 				}
 			default:
@@ -440,25 +452,89 @@ func (p *context) syscallFnSigFixed(paramTypes []types.Type) *types.Signature {
 var errnoSig = types.NewSignatureType(nil, nil, nil, nil,
 	types.NewTuple(types.NewVar(token.NoPos, nil, "", types.Typ[types.Int32])), false)
 
-// syscallErrno returns errno (as uintptr) if r1 is -1, otherwise 0.
-// This matches the common libc syscall convention used by our llgo.syscall
-// intrinsic lowering.
-func (p *context) syscallErrno(b llssa.Builder, r1 llssa.Expr) llssa.Expr {
+type syscallFailureConvention uint8
+
+const (
+	syscallFailureWord syscallFailureConvention = iota
+	syscallFailureInt32
+	syscallFailureNull
+)
+
+func syscallFailureConventionForIntrinsic(opcode int) (syscallFailureConvention, bool) {
+	switch opcode {
+	case llgoSyscall:
+		return syscallFailureWord, true
+	case llgoSyscall32:
+		return syscallFailureInt32, true
+	case llgoSyscallPtr:
+		return syscallFailureNull, true
+	default:
+		return 0, false
+	}
+}
+
+func isLLGoSyscallIntrinsic(opcode int) bool {
+	_, ok := syscallFailureConventionForIntrinsic(opcode)
+	return ok
+}
+
+// syscallFailed returns the exact libc failure predicate selected by the
+// source intrinsic. It must not infer an int32 return from UINT32_MAX alone:
+// word-returning calls such as lseek may legitimately produce that value on a
+// 64-bit target, while pointer-returning calls fail with NULL.
+func (p *context) syscallFailed(b llssa.Builder, r1 llssa.Expr, convention syscallFailureConvention) llssa.Expr {
 	uptr := p.type_(types.Typ[types.Uintptr], llssa.InGo)
-	minus1 := p.prog.IntVal(^uint64(0), uptr)
-	cond := b.BinOp(token.EQL, r1, minus1)
-	errnoFn := b.Pkg.NewFunc("cliteErrno", errnoSig, llssa.InC)
-	errno := b.Call(errnoFn.Expr)
-	errno = b.Convert(uptr, errno)
-	zero := p.prog.Zero(uptr)
+	switch convention {
+	case syscallFailureWord:
+		minus1 := p.prog.IntVal(^uint64(0), uptr)
+		return b.BinOp(token.EQL, r1, minus1)
+	case syscallFailureInt32:
+		u32 := p.type_(types.Typ[types.Uint32], llssa.InGo)
+		low := b.Convert(u32, r1)
+		minus1 := p.prog.IntVal(uint64(^uint32(0)), u32)
+		return b.BinOp(token.EQL, low, minus1)
+	case syscallFailureNull:
+		return b.BinOp(token.EQL, r1, p.prog.Zero(uptr))
+	default:
+		panic("unknown llgo.syscall failure convention")
+	}
+}
+
+func (p *context) filterSyscallErrno(
+	b llssa.Builder,
+	r1, errno llssa.Expr,
+	convention syscallFailureConvention,
+) llssa.Expr {
+	cond := p.syscallFailed(b, r1, convention)
+	zero := p.prog.Zero(p.type_(types.Typ[types.Uintptr], llssa.InGo))
 	return b.SelectValue(cond, errno, zero)
 }
 
-// syscallIntrinsic implements the llgo.syscall intrinsic for libc-based syscalls.
-// The first argument is treated as a function pointer, called with the remaining
-// arguments, and it returns a (r1, r2, errno) tuple. r2 is always 0 and errno is
-// set iff r1 == -1.
-func (p *context) syscallIntrinsic(b llssa.Builder, args []ssa.Value, results *types.Tuple) llssa.Expr {
+// syscallErrno captures the current-thread errno immediately after a direct
+// libc call and applies the same explicit convention as worker resumption.
+func (p *context) syscallErrno(
+	b llssa.Builder,
+	r1 llssa.Expr,
+	convention syscallFailureConvention,
+) llssa.Expr {
+	cond := p.syscallFailed(b, r1, convention)
+	errnoFn := b.Pkg.NewFunc("cliteErrno", errnoSig, llssa.InC)
+	errno := b.Call(errnoFn.Expr)
+	errno = b.Convert(p.type_(types.Typ[types.Uintptr], llssa.InGo), errno)
+	zero := p.prog.Zero(p.type_(types.Typ[types.Uintptr], llssa.InGo))
+	return b.SelectValue(cond, errno, zero)
+}
+
+// syscallIntrinsic implements the llgo.syscall family for libc-based syscalls.
+// The first argument is treated as a function pointer, called with the
+// remaining arguments, and it returns a (r1, r2, errno) tuple. r2 is always 0
+// and errno is filtered by the intrinsic's frozen word/int32/NULL convention.
+func (p *context) syscallIntrinsic(
+	b llssa.Builder,
+	args []ssa.Value,
+	results *types.Tuple,
+	convention syscallFailureConvention,
+) llssa.Expr {
 	if len(args) < 1 {
 		panic("syscall: missing arguments")
 	}
@@ -477,7 +553,7 @@ func (p *context) syscallIntrinsic(b llssa.Builder, args []ssa.Value, results *t
 	r1 := b.Call(fnPtr, callArgs...)
 	uptr := p.type_(types.Typ[types.Uintptr], llssa.InGo)
 	r2 := p.prog.Zero(uptr)
-	err := p.syscallErrno(b, r1)
+	err := p.syscallErrno(b, r1, convention)
 	tuple := p.type_(results, llssa.InGo)
 	return b.Aggregate(tuple, r1, r2, err)
 }
@@ -500,11 +576,15 @@ var darwinTrampolineCNameAmd64Map = map[string]string{
 }
 
 func (p *context) remapTrampolineCName(name string) string {
-	if p.prog.Target().GOOS == "darwin" {
+	return remapTrampolineCNameForTarget(p.prog.Target(), name)
+}
+
+func remapTrampolineCNameForTarget(target *llssa.Target, name string) string {
+	if target != nil && target.GOOS == "darwin" {
 		if v, ok := darwinTrampolineCNameMap[name]; ok {
 			return v
 		}
-		if p.prog.Target().GOARCH == "amd64" {
+		if target.GOARCH == "amd64" {
 			if v, ok := darwinTrampolineCNameAmd64Map[name]; ok {
 				return v
 			}
@@ -558,6 +638,22 @@ func (p *context) atomicStore(b llssa.Builder, args []llssa.Expr) llssa.Expr {
 	panic("atomicStore(addr *T, val T) T: invalid arguments")
 }
 
+func (p *context) atomicLoadUnsafe(b llssa.Builder, args []llssa.Expr) llssa.Expr {
+	if len(args) == 1 {
+		addr := b.PtrCast(b.Prog.Pointer(b.Prog.VoidPtr()), args[0])
+		return b.Load(addr).SetOrdering(llssa.OrderingSeqConsistent)
+	}
+	panic("atomicLoadUnsafe(addr unsafe.Pointer) unsafe.Pointer: invalid arguments")
+}
+
+func (p *context) atomicStoreUnsafe(b llssa.Builder, args []llssa.Expr) llssa.Expr {
+	if len(args) == 2 {
+		addr := b.PtrCast(b.Prog.Pointer(b.Prog.VoidPtr()), args[0])
+		return b.Store(addr, args[1]).SetOrdering(llssa.OrderingSeqConsistent)
+	}
+	panic("atomicStoreUnsafe(addr unsafe.Pointer, val unsafe.Pointer): invalid arguments")
+}
+
 func (p *context) atomicCmpXchg(b llssa.Builder, args []llssa.Expr) llssa.Expr {
 	if len(args) == 3 {
 		addr := args[0]
@@ -586,35 +682,46 @@ func (p *context) boolToUint8(b llssa.Builder, args []llssa.Expr) llssa.Expr {
 // -----------------------------------------------------------------------------
 
 var llgoInstrs = map[string]int{
-	"cstr":        llgoCstr,
-	"advance":     llgoAdvance,
-	"index":       llgoIndex,
-	"alloca":      llgoAlloca,
-	"allocCStr":   llgoAllocCStr,
-	"allocaCStr":  llgoAllocaCStr,
-	"allocaCStrs": llgoAllocaCStrs,
-	"string":      llgoString,
-	"stringData":  llgoStringData,
-	"funcAddr":    llgoFuncAddr,
-	"funcPCABI0":  llgoFuncPCABI0,
-	"skip":        llgoSkip,
-	"syscall":     llgoSyscall,
-	"boolToUint8": llgoBoolToUint8,
-	"coroPark":    llgoCoroPark,
-	"pystr":       llgoPyStr,
-	"pyList":      llgoPyList,
-	"pyTuple":     llgoPyTuple,
-	"sigjmpbuf":   llgoSigjmpbuf,
-	"sigsetjmp":   llgoSigsetjmp,
-	"siglongjmp":  llgoSiglongjmp,
-	"deferData":   llgoDeferData,
-	"unreachable": llgoUnreachable,
+	"cstr":                    llgoCstr,
+	"advance":                 llgoAdvance,
+	"index":                   llgoIndex,
+	"alloca":                  llgoAlloca,
+	"allocCStr":               llgoAllocCStr,
+	"allocaCStr":              llgoAllocaCStr,
+	"allocaCStrs":             llgoAllocaCStrs,
+	"string":                  llgoString,
+	"stringData":              llgoStringData,
+	"funcAddr":                llgoFuncAddr,
+	"funcPCABI0":              llgoFuncPCABI0,
+	"funcPCABIInternal":       llgoFuncPCABI0,
+	"skip":                    llgoSkip,
+	"syscall":                 llgoSyscall,
+	"syscall32":               llgoSyscall32,
+	"syscallPtr":              llgoSyscallPtr,
+	"boolToUint8":             llgoBoolToUint8,
+	"coroPark":                llgoCoroPark,
+	"coroYield":               llgoCoroYield,
+	"coroTimerSleep":          llgoCoroTimerSleep,
+	"coroPollWait":            llgoCoroPollWait,
+	"coroControlledTimerWait": llgoCoroControlledTimerWait,
+	"coroCriticalEnter":       llgoCoroCriticalEnter,
+	"coroCriticalExit":        llgoCoroCriticalExit,
+	"pystr":                   llgoPyStr,
+	"pyList":                  llgoPyList,
+	"pyTuple":                 llgoPyTuple,
+	"sigjmpbuf":               llgoSigjmpbuf,
+	"sigsetjmp":               llgoSigsetjmp,
+	"siglongjmp":              llgoSiglongjmp,
+	"deferData":               llgoDeferData,
+	"unreachable":             llgoUnreachable,
 
 	"atomicLoad":         llgoAtomicLoad,
 	"atomicStore":        llgoAtomicStore,
 	"atomicCmpXchg":      llgoAtomicCmpXchg,
 	"atomicCmpXchgOK":    llgoAtomicCmpXchgOK,
 	"atomicAddReturnNew": llgoAtomicAddReturnNew,
+	"atomicLoadUnsafe":   llgoAtomicLoadUnsafe,
+	"atomicStoreUnsafe":  llgoAtomicStoreUnsafe,
 
 	"atomicXchg": int(llgoAtomicXchg),
 	"atomicAdd":  int(llgoAtomicAdd),
@@ -645,7 +752,11 @@ var llgoInstrs = map[string]int{
 // or returns nil and set ftype = llgoCstr, llgoAlloca, llgoUnreachable, etc.
 func (p *context) funcOf(fn *ssa.Function) (aFn llssa.Function, pyFn llssa.PyObjRef, ftype int) {
 	entry := p.mustFunctionSymbol(fn)
-	fn = entry.function
+	return p.funcOfEntry(entry)
+}
+
+func (p *context) funcOfEntry(entry plannedFunctionSymbol) (aFn llssa.Function, pyFn llssa.PyObjRef, ftype int) {
+	fn := entry.function
 	pkgTypes, name, ftype := entry.pkgTypes, entry.name, entry.ftype
 	switch ftype {
 	case pyFunc:
@@ -673,7 +784,11 @@ func (p *context) funcOf(fn *ssa.Function) (aFn llssa.Function, pyFn llssa.PyObj
 				abi := newCoroPhysicalABI(p, entry, sig)
 				sig = abi.physicalSig
 			}
-			aFn = pkg.NewFuncEx(name, sig, llssa.Background(ftype), false, p.needsLinkOnce(fn))
+			// Cross-package references are declarations, including references to
+			// generated/generic linkonce definitions. LLVM requires declarations to
+			// keep external linkage; compileFuncDeclVariantEntry promotes the symbol
+			// if this module later materializes the body.
+			aFn = pkg.NewFuncEx(name, sig, llssa.Background(ftype), false, false)
 			if disableInline {
 				aFn.Inline(llssa.NoInline)
 			}
@@ -1787,7 +1902,11 @@ func (p *context) deferStackOwner(fn *ssa.Function) llssa.Function {
 	if fn == nil {
 		return nil
 	}
-	if owner := p.funcs[fn]; owner != nil {
+	owners := p.funcs
+	if p.rawPlainBody {
+		owners = p.rawPlainFuncs
+	}
+	if owner := owners[fn]; owner != nil {
 		return owner
 	}
 	owner, _, kind := p.compileFunction(fn)
@@ -1973,8 +2092,13 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 		b.EmitReflectTypeMethodCheckedLoad(ret, reflectCheck)
 		return
 	}
+	if elision, planned := p.plannedCoroCallElision(); planned && elision == CoroCallElidedNoInit {
+		p.observeCoroCallElision(CoroCallElidedNoInit)
+		return
+	}
 	kind := p.funcKind(cv)
 	if kind == fnIgnore {
+		p.observeCoroCallElision(CoroCallElidedNoInit)
 		return
 	}
 	args := call.Args
@@ -1984,6 +2108,21 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 		fn := cv.Name()
 		if fn == "ssa:wrapnilchk" {
 			ptr := p.compileValue(b, args[0])
+			sourceCall := p.coroCurrentSourceCall()
+			physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(sourceCall)
+			if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionBuiltinNilGuard {
+				// A value-method wrapper's nil check is a language-level panic edge,
+				// not a call that may unwind the native stack through a live LLVM
+				// coroutine frame. ExplicitStatus owns the branch and returns the
+				// original pointer on its non-nil continuation.
+				p.observeCoroPhysicalInstruction(sourceCall, coroPhysicalInstructionBuiltinNilGuard)
+				p.observeCoroPhysicalNilGuard(sourceCall)
+				ret = p.compileCoroImplicitNilAccessGuard(b, ptr)
+				return
+			}
+			if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary {
+				panic(fmt.Sprintf("ssa:wrapnilchk selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
+			}
 			recvType := p.compileValue(b, args[1])
 			methodName := p.compileValue(b, args[2])
 			ret = b.WrapNilCheck(ptr, recvType, methodName)
@@ -1998,6 +2137,31 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 				ret = offset
 				return
 			}
+		} else if (fn == "Sizeof" || fn == "Alignof") && len(args) == 1 && act == llssa.Call {
+			// Both builtins inspect only the Go type of their operand. In
+			// particular, do not send the argument through compileValues: doing
+			// so would evaluate retained x/tools SSA such as *(*T)(nil).
+			ret = p.compileUnsafeSizeAlignBuiltin(fn, args[0])
+			return
+		} else if fn == "recover" && act == llssa.Call && p.coroExplicitStatusLoweringEnabled() {
+			ret = p.compileCoroRecover(b, call)
+			return
+		} else if fn == "close" && len(args) == 1 && act == llssa.Call &&
+			p.coroChannelLoweringEnabled() && p.coroExplicitStatusLoweringEnabled() {
+			channel := p.compileValue(b, args[0])
+			p.compileCoroChanClose(b, channel)
+			return
+		} else if fn == "String" && len(args) == 2 && act == llssa.Call && p.coroExplicitStatusLoweringEnabled() {
+			compiled := p.compileValues(b, args, kind)
+			ret = p.compileCoroUnsafeString(b, call, compiled[0], compiled[1])
+			return
+		} else if fn == "Slice" && len(args) == 2 && act == llssa.Call && p.coroExplicitStatusLoweringEnabled() {
+			// unsafe.Slice remains a generic SSA builtin. Only its outcome
+			// mechanism changes here: evaluate ptr and len in source order, then
+			// publish language faults without unwinding through the LLVM frame.
+			compiled := p.compileValues(b, args, kind)
+			ret = p.compileCoroUnsafeSlice(b, call, compiled[0], compiled[1])
+			return
 		}
 		args := p.compileValues(b, args, kind)
 		ret = p.emitDo(b, act, ds, llssa.Builtin(fn), llssa.Builder.Call, args...)
@@ -2078,8 +2242,25 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 			if results := call.Signature().Results(); results.Len() != 0 {
 				ret = p.zeroResult(results)
 			}
-		case llgoSyscall:
-			ret = p.syscallIntrinsic(b, args, call.Signature().Results())
+		case llgoSyscall, llgoSyscall32, llgoSyscallPtr:
+			convention, ok := syscallFailureConventionForIntrinsic(ftype)
+			if !ok {
+				panic("unknown coroutine llgo.syscall failure convention")
+			}
+			managedWorker := p.coroWorkerLoweringEnabled()
+			if semantics, planned := p.plannedCoroIntrinsicCall(ftype); planned {
+				managedWorker = semantics == CoroIntrinsicCallInlineSuspend
+			}
+			if managedWorker {
+				if act != llssa.Call || ds != nil {
+					panic("coroutine llgo.syscall requires an exact direct call")
+				}
+				ret = p.compileCoroWorkerSyscall(b, call, args, call.Signature().Results(), convention)
+				p.observeCoroIntrinsicCallEmission(ftype, CoroIntrinsicCallInlineSuspend)
+			} else {
+				ret = p.syscallIntrinsic(b, args, call.Signature().Results(), convention)
+				p.observeCoroIntrinsicCallEmission(ftype, CoroIntrinsicCallUnsupported)
+			}
 		case llgoBoolToUint8:
 			args := p.compileValues(b, args, kind)
 			ret = b.Do(act, llssa.Nil, func(b llssa.Builder, _ llssa.Expr, args ...llssa.Expr) llssa.Expr {
@@ -2091,8 +2272,44 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 			}
 			args := p.compileValues(b, args, kind)
 			p.compileCoroPark(b, args)
+		case llgoCoroYield:
+			if act != llssa.Call || ds != nil || len(args) != 0 {
+				panic("llgo.coroYield requires an exact direct zero-argument call")
+			}
+			p.compileCoroYield(b)
+		case llgoCoroTimerSleep:
+			if act != llssa.Call || ds != nil {
+				panic("llgo.coroTimerSleep requires an exact direct call")
+			}
+			p.compileCoroTimerSleep(b, args)
+		case llgoCoroPollWait:
+			if act != llssa.Call || ds != nil {
+				panic("llgo.coroPollWait requires an exact direct call")
+			}
+			ret = p.compileCoroPollWait(b, args)
+		case llgoCoroControlledTimerWait:
+			if act != llssa.Call || ds != nil {
+				panic("llgo.coroControlledTimerWait requires an exact direct call")
+			}
+			ret = p.compileCoroControlledTimerWait(b, args)
+		case llgoCoroCriticalEnter:
+			if act != llssa.Call || ds != nil || len(args) != 0 {
+				panic("llgo.coroCriticalEnter requires an exact direct zero-argument call")
+			}
+			p.compileCoroCriticalEnter(b, call)
+		case llgoCoroCriticalExit:
+			if act != llssa.Call || ds != nil || len(args) != 0 {
+				panic("llgo.coroCriticalExit requires an exact direct zero-argument call")
+			}
+			p.compileCoroCriticalExit(b, call)
 		case llgoUnreachable: // func unreachable()
 			b.Unreachable()
+			// x/tools models this compiler intrinsic as an ordinary call, so the
+			// source block can still contain a Return or Jump after it. Keep that
+			// structurally unreachable tail in a separate physical block: emitting
+			// it after llvm.unreachable would put two terminators in one block,
+			// while dropping it outright can invalidate successor PHI edges.
+			b.SetBlockContinuation(p.fn.MakeBlock())
 		case llgoAtomicLoad:
 			args := p.compileValues(b, args, kind)
 			ret = p.emitDo(b, act, ds, llssa.Nil, func(b llssa.Builder, _ llssa.Expr, args ...llssa.Expr) llssa.Expr {
@@ -2102,6 +2319,16 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 			args := p.compileValues(b, args, kind)
 			p.emitDo(b, act, ds, llssa.Nil, func(b llssa.Builder, _ llssa.Expr, args ...llssa.Expr) llssa.Expr {
 				return p.atomicStore(b, args)
+			}, args...)
+		case llgoAtomicLoadUnsafe:
+			args := p.compileValues(b, args, kind)
+			ret = p.emitDo(b, act, ds, llssa.Nil, func(b llssa.Builder, _ llssa.Expr, args ...llssa.Expr) llssa.Expr {
+				return p.atomicLoadUnsafe(b, args)
+			}, args...)
+		case llgoAtomicStoreUnsafe:
+			args := p.compileValues(b, args, kind)
+			p.emitDo(b, act, ds, llssa.Nil, func(b llssa.Builder, _ llssa.Expr, args ...llssa.Expr) llssa.Expr {
+				return p.atomicStoreUnsafe(b, args)
 			}, args...)
 		case llgoAtomicCmpXchg:
 			args := p.compileValues(b, args, kind)
@@ -2116,7 +2343,9 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 		case llgoAtomicAddReturnNew:
 			args := p.compileValues(b, args, kind)
 			ret = p.emitDo(b, act, ds, llssa.Nil, func(b llssa.Builder, _ llssa.Expr, args ...llssa.Expr) llssa.Expr {
-				return b.BinOp(token.ADD, p.atomic(b, llssa.OpAdd, args), args[1])
+				old := p.atomic(b, llssa.OpAdd, args)
+				delta := b.ChangeType(old.Type, args[1])
+				return b.BinOp(token.ADD, old, delta)
 			}, args...)
 		default:
 			if ftype >= llgoAtomicOpBase && ftype <= llgoAtomicOpLast {
@@ -2128,9 +2357,22 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 				log.Panicf("unknown ftype: %d for %s", ftype, cv.Name())
 			}
 		}
+		if !isLLGoSyscallIntrinsic(ftype) {
+			// Record the recipe only after the selected lowering completed. This
+			// keeps the SitePlan ledger tied to actual emission rather than merely
+			// observing the opcode before the switch.
+			p.observeCoroIntrinsicCallEmission(ftype, coroIntrinsicCallSemantics(ftype))
+		}
 	default:
+		rawC := p.prog.TypeBackground(cv.Type()) == llssa.InC
+		if rawC {
+			p.inCFunc = true
+		}
 		fn := p.compileValue(b, cv)
 		args := p.compileValues(b, args, kind)
+		if rawC {
+			p.inCFunc = false
+		}
 		ret = p.emitDo(b, act, ds, fn, llssa.Builder.Call, args...)
 	}
 	return

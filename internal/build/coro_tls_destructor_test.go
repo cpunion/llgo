@@ -42,12 +42,35 @@ func TestCoroTLSDestructorClosedDynamicCallProof(t *testing.T) {
 	var dynamicCall ssa.CallInstruction
 	for call, certificate := range fixture.closedDynamic {
 		dynamicCall = call
-		if call.Parent() != slotDestructor || !certificate.MayBeNil || len(certificate.Targets) != 1 || certificate.Targets[0] != callback {
+		if call.Parent() != slotDestructor || !certificate.MayBeNil || !certificate.SyncDispatch ||
+			len(certificate.Targets) != 1 || certificate.Targets[0] != callback {
 			t.Fatalf("TLS certificate = call:%v parent:%v certificate:%+v", call, call.Parent(), certificate)
+		}
+		if len(certificate.SyncOnlyCallArguments) != 1 {
+			t.Fatalf("TLS synchronous publications = %+v, want one allocator argument", certificate.SyncOnlyCallArguments)
+		}
+		publication := certificate.SyncOnlyCallArguments[0]
+		if publication.Call == nil || publication.Call.Common() == nil || publication.Argument < 0 ||
+			publication.Argument >= len(publication.Call.Common().Args) {
+			t.Fatalf("TLS synchronous publication = %+v, want one exact call argument", publication)
+		}
+		publishedTarget, exact := exactCoroStaticFunctionValue(fixture.ctx, publication.Call.Common().Args[publication.Argument])
+		if !exact || publishedTarget != callback {
+			t.Fatalf("TLS synchronous publication target = %v, exact=%t; want %v", publishedTarget, exact, callback)
 		}
 	}
 	if use := fixture.directPlain[0]; use.target != slotDestructor {
 		t.Fatalf("TLS direct-plain target = %v, want slotDestructor", use.target)
+	}
+	foundRoot := false
+	for _, root := range fixture.roots {
+		if root.Function == slotDestructor && root.ManagedDemand == coro.NoDemand && root.RawPlainDemand {
+			foundRoot = true
+			break
+		}
+	}
+	if !foundRoot {
+		t.Fatal("slotDestructor raw ABI entry was not retained as a raw-provenance root")
 	}
 	if _, required := fixture.requiredPlain[slotDestructor]; !required {
 		t.Fatal("slotDestructor did not enter the exact scheduler-stack callback island")
@@ -61,7 +84,7 @@ func TestCoroTLSDestructorClosedDynamicCallProof(t *testing.T) {
 		t.Fatal(err)
 	}
 	callPlan, ok := plan.CallPlan(dynamicCall)
-	if !ok || callPlan.Rep != coro.Dispatch || callPlan.Open || !callPlan.MayBeNil || len(callPlan.Targets) != 1 {
+	if !ok || callPlan.Rep != coro.Dispatch || callPlan.Open || !callPlan.SyncDispatch || !callPlan.MayBeNil || len(callPlan.Targets) != 1 {
 		t.Fatalf("TLS dynamic CallPlan = %+v, present=%t", callPlan, ok)
 	}
 	callbackPlan := functionPlanForBuildTest(t, plan, callback)
@@ -71,8 +94,29 @@ func TestCoroTLSDestructorClosedDynamicCallProof(t *testing.T) {
 	}
 	destructorPlan := functionPlanForBuildTest(t, plan, slotDestructor)
 	if destructorPlan.Effect != coro.NoSuspend || destructorPlan.Exec.Contains(coro.NeedsPreempt) ||
-		destructorPlan.FuncRep != coro.DirectPlain || destructorPlan.Emission != coro.EmitPlain {
-		t.Fatalf("slotDestructor plan = %+v, want exact direct-plain C callback", destructorPlan)
+		destructorPlan.ManagedDemand != coro.NoDemand || !destructorPlan.RawPlainDemand || !destructorPlan.RawPlainOnly ||
+		destructorPlan.FuncRep != coro.DirectPlain || destructorPlan.Emission != coro.EmitRawPlain {
+		t.Fatalf("slotDestructor plan = %+v, want one exact raw-only C callback body", destructorPlan)
+	}
+
+	explicitFixture := fixture
+	explicitFixture.input.outcomeMode = coro.OutcomeExplicitStatus
+	explicitPlan, err := explicitFixture.analyze(coro.SSAConfig{
+		MaxPlainInstructions: -1,
+		OutcomeMode:          coro.OutcomeExplicitStatus,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	explicitCall, ok := explicitPlan.CallPlan(dynamicCall)
+	if !ok || !explicitCall.SyncDispatch || explicitCall.Open || explicitCall.Rep != coro.Dispatch {
+		t.Fatalf("explicit-status TLS CallPlan = %+v, present=%t", explicitCall, ok)
+	}
+	explicitDestructor := functionPlanForBuildTest(t, explicitPlan, slotDestructor)
+	if explicitDestructor.LocalEffect != coro.NoSuspend || explicitDestructor.Effect != coro.NoSuspend ||
+		explicitDestructor.Emission != coro.EmitRawPlain || !explicitDestructor.RawPlainOnly ||
+		explicitDestructor.Primary != coro.PrimaryPlain {
+		t.Fatalf("explicit-status slotDestructor plan = %+v, want uncolored raw-only plain callback", explicitDestructor)
 	}
 
 	_, err = fixture.analyze(coro.SSAConfig{
@@ -115,8 +159,17 @@ func install() {
 	var dynamicCall ssa.CallInstruction
 	for call, certificate := range fixture.closedDynamic {
 		dynamicCall = call
-		if !certificate.MayBeNil || len(certificate.Targets) != 0 {
+		if !certificate.MayBeNil || !certificate.SyncDispatch || len(certificate.Targets) != 0 {
 			t.Fatalf("nil-only TLS certificate = %+v", certificate)
+		}
+		if len(certificate.SyncOnlyCallArguments) != 1 {
+			t.Fatalf("nil-only TLS synchronous publications = %+v, want one allocator argument", certificate.SyncOnlyCallArguments)
+		}
+		publication := certificate.SyncOnlyCallArguments[0]
+		if publication.Call == nil || publication.Call.Common() == nil || publication.Argument < 0 ||
+			publication.Argument >= len(publication.Call.Common().Args) ||
+			!coroTLSNilFunctionValue(publication.Call.Common().Args[publication.Argument]) {
+			t.Fatalf("nil-only TLS synchronous publication = %+v, want exact nil allocator argument", publication)
 		}
 	}
 	plan, err := fixture.analyze(coro.SSAConfig{MaxPlainInstructions: -1})
@@ -124,7 +177,7 @@ func install() {
 		t.Fatal(err)
 	}
 	callPlan, ok := plan.CallPlan(dynamicCall)
-	if !ok || callPlan.Rep != coro.Dispatch || callPlan.Open || !callPlan.MayBeNil || len(callPlan.Targets) != 0 {
+	if !ok || callPlan.Rep != coro.Dispatch || callPlan.Open || !callPlan.SyncDispatch || !callPlan.MayBeNil || len(callPlan.Targets) != 0 {
 		t.Fatalf("nil-only TLS CallPlan = %+v, present=%t", callPlan, ok)
 	}
 	if got := functionPlanForBuildTest(t, plan, fixture.pkg.Func("slotDestructor")); got.Effect != coro.NoSuspend || got.FuncRep != coro.DirectPlain {
@@ -289,7 +342,9 @@ func TestCoroTLSDestructorTargetMustRemainAtomic(t *testing.T) {
 			fixture := buildRequiredCoroRuntimeFixture(t, coroTLSRuntimeFixtureSource(test.callback))
 			_, err := fixture.analyze(coro.SSAConfig{MaxPlainInstructions: -1})
 			if err == nil || (!strings.Contains(err.Error(), "non-suspending plain body") &&
-				!strings.Contains(err.Error(), "non-suspending descriptor-backed plain body")) {
+				!strings.Contains(err.Error(), "non-suspending descriptor-backed plain body") &&
+				!strings.Contains(err.Error(), "non-suspending plain primary") &&
+				!strings.Contains(err.Error(), "non-suspending descriptor-backed plain primary")) {
 				t.Fatalf("non-atomic TLS destructor error = %v", err)
 			}
 		})
@@ -337,8 +392,9 @@ func slotDestructor(dst *slot) {
 	}
 	callbackPlan := functionPlanForBuildTest(t, plan, slotDestructor)
 	if callbackPlan.External != coro.Defined || callbackPlan.Effect != coro.NoSuspend || callbackPlan.Exec.Contains(coro.NeedsPreempt) ||
-		callbackPlan.FuncRep != coro.DirectPlain || callbackPlan.Primary != coro.PrimaryPlain || callbackPlan.Emission != coro.EmitPlain {
-		t.Fatalf("TLS callback plan = %+v, want post-plan validated direct plain", callbackPlan)
+		callbackPlan.ManagedDemand != coro.NoDemand || !callbackPlan.RawPlainDemand || !callbackPlan.RawPlainOnly ||
+		callbackPlan.FuncRep != coro.DirectPlain || callbackPlan.Primary != coro.PrimaryPlain || callbackPlan.Emission != coro.EmitRawPlain {
+		t.Fatalf("TLS callback plan = %+v, want one post-plan validated raw-only plain body", callbackPlan)
 	}
 	leafPlan := functionPlanForBuildTest(t, plan, tlsCLeaf)
 	if !plan.IgnoresBody(tlsCLeaf) || leafPlan.External != coro.ExternalKnown || leafPlan.Effect != coro.NoSuspend ||

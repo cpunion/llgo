@@ -22,51 +22,10 @@ import (
 	"github.com/goplus/llgo/runtime/internal/coro"
 )
 
-// These compiler-owned C ABI wrappers are emitted in the program entry module.
-// They hide LLVM's post-CoroSplit handle layout from the Go runtime.
-
-//go:linkname coroHandleDone C.__llgo_coro_done_v1
-func coroHandleDone(unsafe.Pointer) bool
-
-//go:linkname coroHandleResume C.__llgo_coro_resume_v1
-func coroHandleResume(unsafe.Pointer)
-
-//go:linkname coroHandleDestroy C.__llgo_coro_destroy_v1
-func coroHandleDestroy(unsafe.Pointer)
-
 // Keep the runtime-facing names local while the target-neutral implementation
 // remains independently testable.
 type coroG = coro.G
 type coroP = coro.P
-
-type coroRunStopV1 uint8
-
-const (
-	coroRunInvalidV1 coroRunStopV1 = iota
-	coroRunMainDoneV1
-	coroRunExecutorSleepV1
-	coroRunTerminalExecutorCloseV1
-	coroRunPanicCompleteV1
-	// The remaining stops are internal to the explicit compatibility loop.
-	// coroRunSlice itself never prepares host sleep or crosses terminal close.
-	coroRunSliceBudgetV1
-	coroRunIdleV1
-	coroRunDestroyCommitV1
-	coroRunAgainV1
-)
-
-type coroRunResultV1 struct {
-	stop        coroRunStopV1
-	g           *coroG
-	action      coro.Action
-	deadline    int64
-	hasDeadline bool
-	used        uint32
-	sources     uint32
-	dispatches  uint32
-	resumes     uint32
-	destroys    uint32
-}
 
 func coroInitG(g *coroG) bool {
 	return coro.InitG(g)
@@ -80,33 +39,6 @@ func coroEnqueue(p *coroP, g *coroG) bool {
 	return coro.Enqueue(p, g)
 }
 
-// coroRunPhysicalActionV1 is the indivisible runtime half of one runner action
-// reduction. Neither Checked's ActionResume/ActionDestroy nor a freed handle is
-// observable at a RunSlice return boundary.
-func coroRunPhysicalActionV1(p *coroP, g *coroG, action coro.Action) (coro.Action, bool) {
-	switch action.Kind {
-	case coro.ActionCheckResume:
-		next, ok := coro.Checked(p, g, action, coroHandleDone(action.Handle))
-		if !ok || next.Kind != coro.ActionResume || next.Handle != action.Handle {
-			return coro.Action{}, false
-		}
-		coroHandleResume(next.Handle)
-		return coro.Resumed(p, g, next)
-	case coro.ActionCheckDestroy:
-		next, ok := coro.Checked(p, g, action, coroHandleDone(action.Handle))
-		if !ok || next.Kind != coro.ActionDestroy || next.Handle != action.Handle {
-			return coro.Action{}, false
-		}
-		coroHandleDestroy(next.Handle)
-		return coro.DestroyedBounded(p, g, next)
-	case coro.ActionPanicDestroy:
-		coroHandleDestroy(action.Handle)
-		return coro.PanicDestroyedBounded(p, g, action)
-	default:
-		return coro.Action{}, false
-	}
-}
-
 // coroRunSlice advances at most budget reductions. Source service, dequeue,
 // and each complete physical resume/destroy are charged separately. Idle host
 // preparation, terminal close, command shutdown, and cost certification are
@@ -115,91 +47,27 @@ func coroRunSlice(p *coroP, main *coroG, driver *coro.ExecutorDriver, budget uin
 	if p == nil || main == nil || driver == nil || budget == 0 {
 		return coroRunResultV1{}
 	}
+	if !coroTargetBeforeProgramRunSliceV1(p, driver) {
+		return coroRunResultV1{}
+	}
 	result := coroRunResultV1{}
 	for result.used < budget {
 		step, ok := coroProgramNextRunStepV1(driver)
 		if !ok {
 			return coroRunResultV1{}
 		}
-		switch step.Kind {
-		case coro.ExecutorRunStepSource:
-			result.used++
-			result.sources++
-		case coro.ExecutorRunStepDispatch:
-			if step.G == nil || step.Action.Handle == nil {
-				return coroRunResultV1{}
-			}
-			if coroProgramLifecycleV1State == coroProgramMainReturnRequestedV1 &&
-				step.G != main && step.Action.Kind == coro.ActionCheckResume &&
-				!coro.RequestTaskCancellation(p, step.G, coro.TaskCancelShutdown) {
-				return coroRunResultV1{}
-			}
-			result.used++
-			result.dispatches++
-		case coro.ExecutorRunStepAction:
-			if step.G == nil || step.Action.Handle == nil {
-				return coroRunResultV1{}
-			}
-			next, advanced := coroRunPhysicalActionV1(p, step.G, step.Action)
-			committed := false
-			if advanced && step.G == main && coroProgramLifecycleV1State == coroProgramMainReturnRequestedV1 &&
-				next.Kind == coro.ActionCheckDestroy {
-				committed = coro.CommitExecutorRunCommandRootDestroy(driver, step.G, next)
-			} else if advanced && step.G == main && coroProgramLifecycleV1State == coroProgramRunningV1 &&
-				coro.CommitExecutorRunCommandBootstrapDirectChildHandoff(driver, step.G, next) {
-				committed = true
-			} else if advanced {
-				committed = coro.CommitExecutorRunAction(driver, step.G, next)
-			}
-			if !committed {
-				return coroRunResultV1{}
-			}
-			result.used++
-			switch step.Action.Kind {
-			case coro.ActionCheckResume:
-				result.resumes++
-			case coro.ActionCheckDestroy, coro.ActionPanicDestroy:
-				result.destroys++
-			}
-			switch next.Kind {
-			case coro.ActionCheckResume, coro.ActionCheckDestroy, coro.ActionPanicDestroy:
-				if step.G == main && coroProgramLifecycleV1State == coroProgramMainReturnRequestedV1 &&
-					next.Kind == coro.ActionCheckResume {
-					return coroRunResultV1{}
-				}
-			case coro.ActionYield, coro.ActionPark:
-				if step.G == main && coroProgramLifecycleV1State == coroProgramMainReturnRequestedV1 {
-					return coroRunResultV1{}
-				}
-			case coro.ActionComplete:
-				isMain := step.G == main
-				if !coroReleaseCompletedTask(step.G) {
-					return coroRunResultV1{}
-				}
-				if isMain {
-					result.stop, result.g = coroRunMainDoneV1, main
-					return result
-				}
-			case coro.ActionPanicComplete:
-				result.stop, result.g, result.action = coroRunPanicCompleteV1, step.G, next
-				return result
-			case coro.ActionCommitDestroy:
-				result.stop, result.g, result.action = coroRunDestroyCommitV1, step.G, next
-				return result
-			default:
-				return coroRunResultV1{}
-			}
-		case coro.ExecutorRunStepDestroyCommit:
-			if step.G == nil || step.Action.Kind != coro.ActionCommitDestroy || step.Action.Handle != nil {
-				return coroRunResultV1{}
-			}
-			result.stop, result.g, result.action = coroRunDestroyCommitV1, step.G, step.Action
-			return result
-		case coro.ExecutorRunStepIdle:
-			result.stop = coroRunIdleV1
-			return result
-		default:
+		terminal, reduced := coroReduceExecutorRunStepV1(
+			p,
+			driver,
+			coroRunPolicyV1{main: main, lifecycle: &coroProgramLifecycleV1State},
+			step,
+			&result,
+		)
+		if !reduced {
 			return coroRunResultV1{}
+		}
+		if terminal {
+			return result
 		}
 	}
 	result.stop = coroRunSliceBudgetV1
@@ -229,6 +97,14 @@ func coroFinishRunSliceCompatibility(
 	case coroRunIdleV1:
 		if !coro.EnterExecutorRunCompatibility(driver) {
 			return coroRunResultV1{}
+		}
+		more, drained := coroTargetDrainProgramTransfersV1(p, driver)
+		if !drained {
+			return coroRunResultV1{}
+		}
+		if more {
+			result.stop = coroRunAgainV1
+			return result
 		}
 		if coroProgramLifecycleV1State == coroProgramMainReturnRequestedV1 && !coro.HasWaiting(p) {
 			result.stop = coroRunMainDoneV1
@@ -342,25 +218,5 @@ func coroCancelReady(p *coroP) bool {
 				break
 			}
 		}
-	}
-}
-
-// __llgo_coro_panic_prepare_v1 is the compiler-to-runtime terminal panic
-// handoff. The physical G is an explicit ABI argument: this boundary must
-// never discover scheduler ownership through TLS or a process-global current
-// G. A rejected once-only publication is a terminal ABI violation and aborts
-// immediately, so malformed cleanup/recover/Goexit/implicit-fault lowering
-// cannot resume ordinary execution on a poisoned G.
-//
-//export __llgo_coro_panic_prepare_v1
-func __llgo_coro_panic_prepare_v1(g, handle, header, typeWord, dataWord unsafe.Pointer) {
-	if !coro.PreparePanic(
-		(*coro.G)(g),
-		handle,
-		(*coro.HeaderV1)(header),
-		typeWord,
-		dataWord,
-	) {
-		coroRuntimeAbort("invalid coroutine panic handoff")
 	}
 }

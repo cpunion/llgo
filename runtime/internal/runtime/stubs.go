@@ -12,9 +12,14 @@ import (
 	"github.com/goplus/llgo/runtime/internal/runtime/math"
 )
 
+// rand and srand mutate only libc's process-local PRNG state. They do not
+// perform I/O, wait for a host event, or call back into Go.
+//
+//llgo:coro noblock
 //go:linkname fastrand C.rand
 func fastrand() uint32
 
+//llgo:coro noblock
 //go:linkname srand C.srand
 func srand(uint32)
 
@@ -117,11 +122,11 @@ func memclrNoHeapPointers(ptr unsafe.Pointer, n uintptr) {
 }
 
 func fatal(s string) {
-	print("fatal error: ", s, "\n")
+	coroRuntimeAbort(s)
 }
 
 func throw(s string) {
-	print("fatal error: ", s, "\n")
+	coroRuntimeAbort(s)
 }
 
 func atomicOr8(ptr *uint8, v uint8) uint8 {

@@ -98,65 +98,93 @@ func AllocaCStrs(strs []string, endWithNil bool) **Char
 // llgo:link AllocaNew llgo.allocaNew
 func AllocaNew[T any]() *T { return nil }
 
+// The libc allocator family may take internal allocator locks, but each call
+// completes on the calling thread without waiting for application I/O or
+// retaining caller-frame arguments.
+//
+//llgo:coro sync
 //go:linkname Malloc C.malloc
 func Malloc(size uintptr) Pointer
 
+//llgo:coro sync
 //go:linkname Calloc C.calloc
 func Calloc(num uintptr, size uintptr) Pointer
 
+//llgo:coro sync
 //go:linkname Free C.free
 func Free(ptr Pointer)
 
+//llgo:coro sync
 //go:linkname Realloc C.realloc
 func Realloc(ptr Pointer, size uintptr) Pointer
 
+//llgo:coro noblock
 //go:linkname Memcpy C.memcpy
 func Memcpy(dst, src Pointer, n uintptr) Pointer
 
+//llgo:coro noblock
 //go:linkname Memmove C.memmove
 func Memmove(dst, src Pointer, n uintptr) Pointer
 
+//llgo:coro noblock
 //go:linkname Memset C.memset
 func Memset(s Pointer, c Int, n uintptr) Pointer
 
+//llgo:coro noblock
 //go:linkname Memchr C.memchr
 func Memchr(s Pointer, c Int, n uintptr) Pointer
 
+//llgo:coro noblock
 //go:linkname Memcmp C.memcmp
 func Memcmp(s1, s2 Pointer, n uintptr) Int
 
 // -----------------------------------------------------------------------------
 
+// The following libc memory/string primitives inspect or update only the
+// caller-provided memory. They neither wait for an external event nor enter the
+// coroutine scheduler, so legacy raw ABI closures may call them synchronously.
+//
+//llgo:coro noblock
 //go:linkname Strlen C.strlen
 func Strlen(s *Char) uintptr
 
+//llgo:coro noblock
 //go:linkname Strcpy C.strcpy
 func Strcpy(dst, src *Char) *Char
 
+//llgo:coro noblock
 //go:linkname Strncpy C.strncpy
 func Strncpy(dst, src *Char, n uintptr) *Char
 
+//llgo:coro noblock
 //go:linkname Strcat C.strcat
 func Strcat(dst, src *Char) *Char
 
+//llgo:coro noblock
 //go:linkname Strncat C.strncat
 func Strncat(dst, src *Char, n uintptr) *Char
 
+//llgo:coro noblock
 //go:linkname Strcmp C.strcmp
 func Strcmp(s1, s2 *Char) Int
 
+//llgo:coro noblock
 //go:linkname Strncmp C.strncmp
 func Strncmp(s1, s2 *Char, n uintptr) Int
 
+//llgo:coro noblock
 //go:linkname Strchr C.strchr
 func Strchr(s *Char, c Int) *Char
 
+//llgo:coro noblock
 //go:linkname Strrchr C.strrchr
 func Strrchr(s *Char, c Int) *Char
 
+//llgo:coro noblock
 //go:linkname Strstr C.strstr
 func Strstr(s1, s2 *Char) *Char
 
+//llgo:coro sync
 //go:linkname Strdup C.strdup
 func Strdup(s *Char) *Char
 
@@ -208,6 +236,7 @@ func Unreachable()
 
 // -----------------------------------------------------------------------------
 
+//llgo:coro noblock
 //go:linkname Exit C.exit
 func Exit(Int)
 

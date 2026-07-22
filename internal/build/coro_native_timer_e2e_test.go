@@ -45,12 +45,15 @@ const (
 	coroNativeTimerE2EMarker                    = "LLGO_CORO_NATIVE_TIMER_E2E_OK\n"
 	coroNativeTimerPrepareAfterOrAbortE2ESymbol = "__llgo_coro_timer_prepare_after_or_abort_v1"
 	coroNativeTimerRetireOrAbortE2ESymbol       = "__llgo_coro_timer_retire_completed_or_abort_v1"
+	coroNativeTimerAtomicLoadE2ESymbol          = "__llgo_coro_native_timer_e2e_atomic_load_v1"
+	coroNativeTimerAtomicStoreE2ESymbol         = "__llgo_coro_native_timer_e2e_atomic_store_v1"
 )
 
-// The fixture deliberately has one synchronous-style main body. It neither
-// creates a goroutine nor supplies an async duplicate. The llgo.coroPark
-// intrinsic makes this exact body a physical LLVM coroutine, while the timer
-// owner ABI retains only the token generation and fixed-table identity.
+// The fixture keeps ordinary synchronous-style source and supplies no async
+// duplicate or explicit yield. Main owns the timer transaction while one
+// spawned CPU-hot task remains runnable until that timer has resumed main. The
+// only way the program can terminate is therefore compiler-inserted safepoint
+// preemption followed by the production executor's periodic timer-source scan.
 const coroNativeTimerE2ESource = `package main
 
 import "unsafe"
@@ -62,6 +65,10 @@ const delayNanos int64 = 30000000
 var Stage uint32
 var Result int32
 var ElapsedNanos int64
+var Stop uint32
+var HotStarted uint32
+var HotDone uint32
+var HotIterations uint32
 
 //llgo:coro noblock
 //llgo:link monotonicNow C.__llgo_coro_native_timer_e2e_now_v1
@@ -78,22 +85,49 @@ func park(*WaitToken, uint32)
 //llgo:link retireCompletedOrAbort C.__llgo_coro_timer_retire_completed_or_abort_v1
 func retireCompletedOrAbort(unsafe.Pointer, uint32, uint32, uint32)
 
+//llgo:coro noblock
+//llgo:link atomicLoad C.__llgo_coro_native_timer_e2e_atomic_load_v1
+func atomicLoad(*uint32) uint32
+
+//llgo:coro noblock
+//llgo:link atomicStore C.__llgo_coro_native_timer_e2e_atomic_store_v1
+func atomicStore(*uint32, uint32)
+
+func hot() {
+	atomicStore(&HotStarted, 1)
+	for atomicLoad(&Stop) == 0 {
+		HotIterations++
+	}
+	atomicStore(&HotDone, 1)
+}
+
 func main() {
 	var token WaitToken
 	var ticket uint32
 	var timerSlot uint32
 	var timerGeneration uint32
 
+	go hot()
+	for atomicLoad(&HotStarted) == 0 {
+	}
+	Stage = 1
 	beginNanos := monotonicNow()
 	if beginNanos < 0 {
+		atomicStore(&Stop, 1)
+		for atomicLoad(&HotDone) == 0 {
+		}
 		Result = 21
 		return
 	}
 	prepareAfterOrAbort(unsafe.Pointer(&token), delayNanos, &ticket, &timerSlot, &timerGeneration)
 	park(&token, ticket)
 	retireCompletedOrAbort(unsafe.Pointer(&token), ticket, timerSlot, timerGeneration)
-	Stage = 3
+	Stage = 2
 	endNanos := monotonicNow()
+	atomicStore(&Stop, 1)
+	for atomicLoad(&HotDone) == 0 {
+	}
+	Stage = 3
 	if endNanos < beginNanos {
 		Result = 24
 		return
@@ -109,13 +143,18 @@ func Check() int32 {
 	if Result != 0 { return Result }
 	if Stage != 3 { return 31 }
 	if ElapsedNanos < delayNanos { return 32 }
+	if HotStarted != 1 { return 33 }
+	if Stop != 1 { return 34 }
+	if HotDone != 1 { return 35 }
+	if HotIterations == 0 { return 36 }
 	return 0
 }
 `
 
-// This C boundary supplies only a monotonic observation for the black-box
-// elapsed-time assertion, an inert before-poll test hook, and the final marker.
-// It has no pthread, callback, producer, timer, or scheduler responsibility.
+// This C boundary supplies only a monotonic observation, two scalar atomics for
+// a race-free cross-task liveness handshake, an inert before-poll test hook, and
+// the final marker. It has no pthread, callback, producer, timer, or scheduler
+// responsibility.
 const coroNativeTimerE2ECSource = `
 #if !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
 #define _POSIX_C_SOURCE 200809L
@@ -149,6 +188,14 @@ int64_t __llgo_coro_native_timer_e2e_now_v1(void) {
 	uint64_t now = (uint64_t)value.tv_sec * 1000000000ULL + (uint64_t)value.tv_nsec;
 	return now > INT64_MAX ? -1 : (int64_t)now;
 #endif
+}
+
+uint32_t __llgo_coro_native_timer_e2e_atomic_load_v1(const uint32_t *value) {
+	return __atomic_load_n(value, __ATOMIC_SEQ_CST);
+}
+
+void __llgo_coro_native_timer_e2e_atomic_store_v1(uint32_t *value, uint32_t next) {
+	__atomic_store_n(value, next, __ATOMIC_SEQ_CST);
 }
 
 uint32_t __llgo_coro_native_ingress_before_poll_v1(void) {
@@ -248,10 +295,11 @@ func buildCoroNativeTimerE2EUser(t *testing.T, prog llssa.Program, temp string) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	mainFn, checkFn := ssaPkg.Func("main"), ssaPkg.Func("Check")
+	mainFn, hotFn, checkFn := ssaPkg.Func("main"), ssaPkg.Func("hot"), ssaPkg.Func("Check")
 	prepareFn := ssaPkg.Func("prepareAfterOrAbort")
 	parkFn := ssaPkg.Func("park")
 	retireFn := ssaPkg.Func("retireCompletedOrAbort")
+	spawn := findCoroNativeTimerE2ESpawn(t, mainFn, hotFn)
 	prepareCall := findCoroNativeTimerE2EDirectCall(t, mainFn, prepareFn)
 	parkCall := findCoroNativeTimerE2EDirectCall(t, mainFn, parkFn)
 	retireCall := findCoroNativeTimerE2EDirectCall(t, mainFn, retireFn)
@@ -266,9 +314,14 @@ func buildCoroNativeTimerE2EUser(t *testing.T, prog llssa.Program, temp string) 
 		resolveFunction:                universe.Resolve,
 		functionBackground:             universe.FunctionBackground,
 		foreignNoBlock:                 universe.CoroForeignNoBlockCertificate,
-		intrinsicCallSemantics:         universe.CoroIntrinsicCallSiteSemantics,
+		foreignSync:                    universe.CoroForeignSyncCertificate,
+		foreignSchedulerWait:           universe.CoroForeignSchedulerWaitCertificate,
+		foreignWorker:                  universe.CoroForeignWorkerCertificate,
+		callSitePlan:                   universe.CoroCallSitePlan,
 		rawFunctionAddressCallArgument: universe.CoroRawFunctionAddressCallArgument,
+		staticCodeAddressCallArgument:  universe.CoroStaticCodeAddressCallArgument,
 		demandReferences:               universe.CoroDemandReferences,
+		syncDemandReferences:           universe.CoroSyncDemandReferences,
 		loweredCalls:                   universe.CoroLoweredCalls,
 		enableClosedStaticSpawn:        true,
 	}
@@ -286,8 +339,22 @@ func buildCoroNativeTimerE2EUser(t *testing.T, prog llssa.Program, temp string) 
 	mainPlan, ok := plan.FunctionPlan(mainFn)
 	if !ok || mainPlan.Emission != coro.EmitCoroutine || mainPlan.Primary != coro.PrimaryCoroutine ||
 		mainPlan.FuncRep != coro.DirectCoro || !mainPlan.DeclaredEffect.Contains(coro.MayPark) ||
-		!mainPlan.LocalEffect.Contains(coro.MayPark) || !mainPlan.Effect.Contains(coro.MayPark) {
-		t.Fatalf("native timer main plan = %+v, present=%t; want one direct coroutine body", mainPlan, ok)
+		!mainPlan.LocalEffect.Contains(coro.MayPark) || !mainPlan.Effect.Contains(coro.MayPark) ||
+		!mainPlan.Effect.Contains(coro.YieldOnly) || !mainPlan.Exec.Contains(coro.NeedsPreempt) {
+		t.Fatalf("native timer main plan = %+v, present=%t; want one preemptible direct timer coroutine", mainPlan, ok)
+	}
+	resolvedHot, resolvedHotPlan, resolveErr := plan.ResolveClosedStaticSpawn(spawn)
+	if resolveErr != nil || resolvedHot != hotFn || resolvedHotPlan.Emission != coro.EmitCoroutine ||
+		resolvedHotPlan.Primary != coro.PrimaryCoroutine || resolvedHotPlan.FuncRep != coro.DirectCoro ||
+		resolvedHotPlan.Demand != coro.AsyncDemand || !resolvedHotPlan.Effect.Contains(coro.YieldOnly) ||
+		!resolvedHotPlan.Exec.Contains(coro.NeedsPreempt) {
+		t.Fatalf("native timer hot spawn = target:%v plan:%+v err:%v; want one preemptible closed static child", resolvedHot, resolvedHotPlan, resolveErr)
+	}
+	if err := validateCoroClosedStaticSpawnRunGate(&Config{
+		EnableCoroClosedStaticSpawn:   true,
+		EnableCoroProgramBootstrapRun: true,
+	}, plan, ""); err != nil {
+		t.Fatalf("native timer hot spawn is outside the production run gate: %v", err)
 	}
 	semantics, intrinsic, semanticsErr := universe.CoroIntrinsicCallSiteSemantics(parkCall)
 	if semanticsErr != nil || !intrinsic || !semantics.SuspendsCurrentFrame() || !plan.ElidesCall(parkCall) {
@@ -320,10 +387,12 @@ func buildCoroNativeTimerE2EUser(t *testing.T, prog llssa.Program, temp string) 
 	}
 	module := pkg.Module()
 	mainPhysical := module.NamedFunction(coroNativeTimerE2EPackage + ".main$coro")
-	if mainPhysical.IsNil() || mainPhysical.IsDeclaration() {
-		t.Fatalf("compiled native timer user module has no physical main coroutine:\n%s", module.String())
+	hotPhysical := module.NamedFunction(coroNativeTimerE2EPackage + ".hot$coro")
+	if mainPhysical.IsNil() || mainPhysical.IsDeclaration() || hotPhysical.IsNil() || hotPhysical.IsDeclaration() {
+		t.Fatalf("compiled native timer user module has no physical main/hot coroutine:\n%s", module.String())
 	}
 	assertCoroTimerRetainedFrameIR(t, "native timer E2E main", mainPhysical.String(), mainPlan.Exec.Contains(coro.NeedsPreempt))
+	assertCoroNativeTimerE2EHotIR(t, hotPhysical.String())
 	runCoroSpawnNativeE2EPasses(t, prog, module)
 	ir := module.String()
 	match := regexp.MustCompile(`@"?(__llgo_coro_root_package_v1\.[0-9a-f]{32})"?\s*=`).FindStringSubmatch(ir)
@@ -394,6 +463,7 @@ func buildCoroNativeTimerE2EEntry(t *testing.T, prog llssa.Program, temp, anchor
 	if err := lowerCoroControlWrappers(ctx, entry.LPkg); err != nil {
 		t.Fatal(err)
 	}
+	assertCoroNativeTimerE2EEntryRunLoop(t, entryMain.String())
 	return emitCoroSpawnNativeE2EObject(t, prog, entry.LPkg.Module(), filepath.Join(temp, "timer-entry.o"))
 }
 
@@ -462,16 +532,25 @@ func buildCoroNativeTimerE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_frame.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_program.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_run_decision.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_run_slice.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_sched.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_ready_distribution_default.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_executor_retired_default.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor_driver_timer_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_spawn.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_native_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_worker_native_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_worker_completion_program_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_wait_timer_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_timer_owner_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_ingress_test_llgo.go"),
 	}
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_run_decision.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_run_slice.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_ready_distribution_default.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_target_executor_retired_default.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_worker_completion_program_llgo.go")
 	conf := NewDefaultConf(ModeGen)
 	conf.ForceRebuild = true
 	conf.Tags = "nogc"
@@ -488,6 +567,7 @@ func buildCoroNativeTimerE2ERuntimeIsland(t *testing.T, temp string) []string {
 		"github.com/goplus/llgo/runtime/internal/coroclock":    true,
 		"github.com/goplus/llgo/runtime/internal/corodoorbell": true,
 		"github.com/goplus/llgo/runtime/internal/corotimer":    true,
+		"github.com/goplus/llgo/runtime/internal/coroworker":   true,
 	}
 	seen := make(map[string]bool, len(allowed))
 	var objects []string
@@ -519,8 +599,12 @@ func buildCoroNativeTimerE2ERuntimeIsland(t *testing.T, temp string) []string {
 			t.Fatalf("native timer runtime did not emit required module %q", id)
 		}
 	}
-	if len(objects) != len(allowed) {
-		t.Fatalf("native timer runtime objects = %d, want exactly %d", len(objects), len(allowed))
+	objects = append(objects,
+		buildCoroNativeWorkerCallObject(t, temp),
+		buildCoroNativeDoorbellObject(t, temp),
+	)
+	if len(objects) != len(allowed)+2 {
+		t.Fatalf("native timer runtime objects = %d, want exactly %d package objects plus worker and doorbell leaves", len(objects), len(allowed))
 	}
 	return objects
 }
@@ -565,8 +649,13 @@ func assertCoroNativeTimerE2ELinkedSymbols(t *testing.T, executable string) {
 		coroProgramContinueSliceSymbolV2,
 		coroNativeTimerPrepareAfterOrAbortE2ESymbol,
 		coroNativeTimerRetireOrAbortE2ESymbol,
+		coroNativeTimerAtomicLoadE2ESymbol,
+		coroNativeTimerAtomicStoreE2ESymbol,
+		"github.com/goplus/llgo/runtime/internal/coro.NextExecutorRunStepAt",
+		"github.com/goplus/llgo/runtime/internal/coro.PollPreempt",
+		"github.com/goplus/llgo/runtime/internal/coro.PrepareYield",
 		"github.com/goplus/llgo/runtime/internal/coro.RetireCompletedExecutorTimer",
-		"github.com/goplus/llgo/runtime/internal/corodoorbell.(*Pipe).WaitDeadline",
+		"github.com/goplus/llgo/runtime/internal/corodoorbell.WaitPollSet",
 	} {
 		if !coroNativeTimerE2ENMHasSymbol(symbols, required) {
 			t.Fatalf("native timer executable is missing %q:\n%s", required, symbols)
@@ -607,9 +696,69 @@ func coroNativeTimerE2ENMHasSymbol(output, want string) bool {
 
 func assertCoroNativeTimerE2ENoLegacyDependencies(t *testing.T, label, symbols string) {
 	t.Helper()
-	for _, forbidden := range []string{"uv_", "GC_", "pthread_"} {
+	for _, forbidden := range []string{"uv_", "GC_"} {
 		if strings.Contains(symbols, forbidden) {
 			t.Fatalf("native timer %s unexpectedly depends on %q:\n%s", label, forbidden, symbols)
+		}
+	}
+}
+
+func findCoroNativeTimerE2ESpawn(t *testing.T, owner, target *ssa.Function) *ssa.Go {
+	t.Helper()
+	if owner == nil || target == nil {
+		t.Fatal("native timer hot spawn requires exact owner and target")
+	}
+	var found *ssa.Go
+	for _, block := range owner.Blocks {
+		for _, instruction := range block.Instrs {
+			spawn, ok := instruction.(*ssa.Go)
+			if !ok || spawn.Common() == nil || spawn.Common().StaticCallee() != target {
+				continue
+			}
+			if found != nil {
+				t.Fatalf("native timer main has duplicate static spawns of %s", target.Name())
+			}
+			found = spawn
+		}
+	}
+	if found == nil {
+		t.Fatalf("native timer main has no static spawn of %s", target.Name())
+	}
+	return found
+}
+
+func assertCoroNativeTimerE2EHotIR(t *testing.T, body string) {
+	t.Helper()
+	if strings.Contains(coroNativeTimerE2ESource, "llgo.coroYield") {
+		t.Fatal("native timer hot-loop fixture contains an explicit coroutine yield")
+	}
+	for _, required := range []string{
+		"__llgo_coro_preempt_poll_v1",
+		"__llgo_coro_yield_prepare_v1",
+		"@llvm.coro.suspend",
+		coroNativeTimerAtomicLoadE2ESymbol,
+		coroNativeTimerAtomicStoreE2ESymbol,
+	} {
+		if !strings.Contains(body, required) {
+			t.Fatalf("native timer hot coroutine has no compiler preemption component %q:\n%s", required, body)
+		}
+	}
+	for _, forbidden := range []string{
+		coroNativeTimerPrepareAfterOrAbortE2ESymbol,
+		coroNativeTimerRetireOrAbortE2ESymbol,
+		"__llgo_coro_park_prepare_v1",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("native timer CPU-hot coroutine unexpectedly contains blocking component %q:\n%s", forbidden, body)
+		}
+	}
+}
+
+func assertCoroNativeTimerE2EEntryRunLoop(t *testing.T, body string) {
+	t.Helper()
+	for _, symbol := range []string{coroProgramRunSliceSymbolV2, coroProgramContinueSliceSymbolV2} {
+		if count := strings.Count(body, symbol); count != 1 {
+			t.Fatalf("native timer entry references production runner %q %d times, want exactly one:\n%s", symbol, count, body)
 		}
 	}
 }

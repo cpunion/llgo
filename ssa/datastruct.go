@@ -18,6 +18,7 @@ package ssa
 
 import (
 	"fmt"
+	"go/token"
 	"go/types"
 
 	"github.com/xgo-dev/llvm"
@@ -147,14 +148,15 @@ func (b Builder) IndexAddr(x, idx Expr) Expr {
 	dbgInstrf("IndexAddr %v, %v\n", x.impl, idx.impl)
 	prog := b.Prog
 	telem := prog.Index(x.Type)
-	pt := prog.Pointer(telem)
+	ptr := x
 	switch t := x.raw.Type.Underlying().(type) {
 	case *types.Slice:
-		ptr := b.SliceData(x)
+		// Keep the ordinary lowering order stable: materialize the slice data
+		// word before its length and bounds predicate. Structured coroutine
+		// lowering calls IndexAddrUnchecked only after its explicit fault edge.
+		ptr = b.SliceData(x)
 		max := b.SliceLen(x)
 		idx = b.checkIndex(idx, max)
-		indices := []llvm.Value{idx.impl}
-		return Expr{llvm.CreateInBoundsGEP(b.impl, telem.ll, ptr.impl, indices), pt}
 	case *types.Pointer:
 		ar := t.Elem().Underlying().(*types.Array)
 		max := prog.IntVal(uint64(ar.Len()), prog.Int())
@@ -163,8 +165,28 @@ func (b Builder) IndexAddr(x, idx Expr) Expr {
 			b.AssertNilDeref(x)
 		}
 	}
+	return b.indexAddrUnchecked(telem, ptr, idx)
+}
+
+// IndexAddrUnchecked emits only the element address calculation. The caller
+// must already have established Go's bounds rule and, for *array, the non-nil
+// base rule. Structured coroutine lowering uses this after routing a failed
+// check through its explicit-status outcome instead of a native-stack panic.
+func (b Builder) IndexAddrUnchecked(x, idx Expr) Expr {
+	prog := b.Prog
+	telem := prog.Index(x.Type)
+	ptr := x
+	if _, slice := x.raw.Type.Underlying().(*types.Slice); slice {
+		ptr = b.SliceData(x)
+	}
+	return b.indexAddrUnchecked(telem, ptr, idx)
+}
+
+func (b Builder) indexAddrUnchecked(telem Type, ptr, idx Expr) Expr {
+	pt := b.Prog.Pointer(telem)
+	idx = b.normalizeIndex(idx)
 	indices := []llvm.Value{idx.impl}
-	return Expr{llvm.CreateInBoundsGEP(b.impl, telem.ll, x.impl, indices), pt}
+	return Expr{llvm.CreateInBoundsGEP(b.impl, telem.ll, ptr.impl, indices), pt}
 }
 
 func isKnownNonNilArrayBase(v llvm.Value) bool {
@@ -244,10 +266,19 @@ func (b Builder) boundsArg(idx Expr) (Expr, bool) {
 
 // check index >= 0 && index < max and size to uint
 func (b Builder) checkIndex(idx Expr, max Expr) Expr {
+	idx, check := b.IndexBounds(idx, max)
+	if !check.IsNil() {
+		boundsIdx, signed := b.boundsArg(idx)
+		b.InlineCall(b.Pkg.rtFunc("CheckIndexRange"), check, boundsIdx, b.Prog.BoolVal(signed), max)
+	}
+	return idx
+}
+
+// IndexBounds returns a target-width index and the exact predicate that is
+// true when the Go index operation is out of range. It emits no panic helper.
+func (b Builder) IndexBounds(idx Expr, max Expr) (Expr, Expr) {
 	prog := b.Prog
-	// check range
 	checkMin, checkMax := checkRange(idx, max)
-	// fit size
 	signed := idx.kind == vkSigned
 	var typ Type
 	if signed {
@@ -277,9 +308,19 @@ func (b Builder) checkIndex(idx Expr, max Expr) Expr {
 			check = Expr{b.impl.CreateOr(r.impl, check.impl, ""), prog.Bool()}
 		}
 	}
-	if !check.IsNil() {
-		boundsIdx, _ := b.boundsArg(idx)
-		b.InlineCall(b.Pkg.rtFunc("CheckIndexRange"), check, boundsIdx, prog.BoolVal(signed), max)
+	return idx, check
+}
+
+func (b Builder) normalizeIndex(idx Expr) Expr {
+	prog := b.Prog
+	typ := prog.Uint()
+	if idx.kind == vkSigned {
+		typ = prog.Int()
+	}
+	if prog.SizeOf(idx.Type) != prog.SizeOf(typ) {
+		srcType := idx.Type
+		idx.Type = typ
+		idx.impl = castUintptr(b, idx.impl, srcType, typ)
 	}
 	return idx
 }
@@ -312,14 +353,43 @@ func (b Builder) Index(x, idx Expr, takeAddr func() (addr Expr, zero bool)) Expr
 		max = prog.IntVal(uint64(t.Len()), prog.Int())
 	}
 	idx = b.checkIndex(idx, max)
+	return b.indexUnchecked(x, idx, telem, ptr, zero)
+}
+
+// IndexUnchecked emits an array/string element load without a bounds helper.
+// The caller must first branch on IndexBounds.
+func (b Builder) IndexUnchecked(x, idx Expr, takeAddr func() (addr Expr, zero bool)) Expr {
+	dbgInstrf("IndexUnchecked %v, %v\n", x.impl, idx.impl)
+	prog := b.Prog
+	var telem Type
+	var ptr Expr
+	var zero bool
+	switch t := x.raw.Type.Underlying().(type) {
+	case *types.Basic:
+		if t.Kind() != types.String {
+			panic(fmt.Errorf("invalid operation: cannot index %v", t))
+		}
+		telem = prog.rawType(types.Typ[types.Byte])
+		ptr = b.StringData(x)
+	case *types.Array:
+		telem = prog.Index(x.Type)
+		ptr, zero = takeAddr()
+	default:
+		panic(fmt.Errorf("invalid unchecked index base %v", x.raw.Type))
+	}
+	idx = b.normalizeIndex(idx)
+	return b.indexUnchecked(x, idx, telem, ptr, zero)
+}
+
+func (b Builder) indexUnchecked(x, idx Expr, telem Type, ptr Expr, zero bool) Expr {
 	if zero {
-		return prog.Zero(telem)
+		return b.Prog.Zero(telem)
 	}
 	if ptr.IsNil() {
 		ptr = b.Alloc(x.Type, false)
 		b.impl.CreateStore(x.impl, ptr.impl)
 	}
-	pt := prog.Pointer(telem)
+	pt := b.Prog.Pointer(telem)
 	indices := []llvm.Value{idx.impl}
 	buf := Expr{llvm.CreateInBoundsGEP(b.impl, telem.ll, ptr.impl, indices), pt}
 	return b.Load(buf)
@@ -437,6 +507,122 @@ func (b Builder) Slice(x, low, high, max Expr) (ret Expr) {
 		prog.BoolVal(upperIsLen),
 	).impl
 	return
+}
+
+// SliceBounds returns target-width low/high/max values and the exact predicate
+// that is true when a two- or three-index Go slice expression is out of range.
+// The caller supplies the already selected upper limit: len for strings and
+// pointer-to-array values, cap for slices. A nil max selects the two-index
+// rules. This emits no panic helper.
+func (b Builder) SliceBounds(low, high, max, limit Expr) (nlow, nhigh, nmax, outOfRange Expr) {
+	if low.IsNil() || high.IsNil() || limit.IsNil() {
+		panic("SliceBounds requires explicit low, high, and limit values")
+	}
+
+	low64, lowSigned := b.boundsArg(low)
+	high64, highSigned := b.boundsArg(high)
+	limit64, _ := b.boundsArg(limit)
+	if max.IsNil() {
+		outOfRange = b.sliceBoundAbove(high64, highSigned, limit64)
+		outOfRange = b.orBool(outOfRange, b.sliceBoundAbove(low64, lowSigned, high64))
+	} else {
+		max64, maxSigned := b.boundsArg(max)
+		outOfRange = b.sliceBoundAbove(max64, maxSigned, limit64)
+		outOfRange = b.orBool(outOfRange, b.sliceBoundAbove(high64, highSigned, max64))
+		outOfRange = b.orBool(outOfRange, b.sliceBoundAbove(low64, lowSigned, high64))
+		nmax = b.FitIntSize(max64)
+	}
+	nlow = b.FitIntSize(low64)
+	nhigh = b.FitIntSize(high64)
+	return
+}
+
+// sliceBoundAbove implements the inclusive slice-bound relation
+//
+//	value < 0 || value > upper
+//
+// while preserving the signedness and width of the original Go integer until
+// after the check. upper is an already widened non-negative len/cap or a bound
+// whose own validity is checked by the caller.
+func (b Builder) sliceBoundAbove(value Expr, signed bool, upper Expr) Expr {
+	var out Expr
+	if signed {
+		zero := llvm.ConstInt(value.ll, 0, false)
+		out = Expr{llvm.CreateICmp(b.impl, llvm.IntSLT, value.impl, zero), b.Prog.Bool()}
+	}
+	above := Expr{llvm.CreateICmp(b.impl, llvm.IntUGT, value.impl, upper.impl), b.Prog.Bool()}
+	return b.orBool(out, above)
+}
+
+func (b Builder) orBool(first, second Expr) Expr {
+	if first.IsNil() {
+		return second
+	}
+	if second.IsNil() {
+		return first
+	}
+	return Expr{b.impl.CreateOr(first.impl, second.impl, ""), b.Prog.Bool()}
+}
+
+// SliceUnchecked constructs the result of a validated Go slice expression.
+// low/high/max must be target-width values returned by SliceBounds; max is nil
+// for a two-index expression. No runtime helper or bounds branch is emitted.
+func (b Builder) SliceUnchecked(x, low, high, max Expr) (ret Expr) {
+	if x.IsNil() || low.IsNil() || high.IsNil() {
+		panic("SliceUnchecked requires an exact base, low, and high")
+	}
+	length := b.BinOp(token.SUB, high, low)
+	switch typ := x.raw.Type.Underlying().(type) {
+	case *types.Basic:
+		if typ.Kind() != types.String || !max.IsNil() {
+			panic("SliceUnchecked basic base must be a two-index string")
+		}
+		base := b.StringData(x)
+		advanced := b.sliceDataAt(base, b.Prog.Byte(), low)
+		hasSuffix := b.BinOp(token.LSS, low, b.StringLen(x))
+		data := b.SelectValue(hasSuffix, advanced, base)
+		ret = b.unsafeString(data.impl, length.impl)
+		ret.Type = x.Type
+		return
+	case *types.Slice:
+		capacityEnd := max
+		if capacityEnd.IsNil() {
+			capacityEnd = b.SliceCap(x)
+		}
+		capacity := b.BinOp(token.SUB, capacityEnd, low)
+		base := b.SliceData(x)
+		elem := b.Prog.rawType(typ.Elem())
+		advanced := b.sliceDataAt(base, elem, low)
+		nonemptyCapacity := b.BinOp(token.NEQ, capacity, b.Prog.IntVal(0, b.Prog.Int()))
+		data := b.SelectValue(nonemptyCapacity, advanced, base)
+		ret = b.unsafeSlice(data, length.impl, capacity.impl)
+		ret.Type = x.Type
+		return
+	case *types.Pointer:
+		array, ok := typ.Elem().Underlying().(*types.Array)
+		if !ok {
+			panic("SliceUnchecked pointer base is not an array")
+		}
+		capacityEnd := max
+		if capacityEnd.IsNil() {
+			capacityEnd = b.Prog.IntVal(uint64(array.Len()), b.Prog.Int())
+		}
+		capacity := b.BinOp(token.SUB, capacityEnd, low)
+		elem := b.Prog.rawType(array.Elem())
+		advanced := b.sliceDataAt(x, elem, low)
+		nonemptyCapacity := b.BinOp(token.NEQ, capacity, b.Prog.IntVal(0, b.Prog.Int()))
+		data := b.SelectValue(nonemptyCapacity, advanced, x)
+		ret = b.unsafeSlice(data, length.impl, capacity.impl)
+		return
+	default:
+		panic(fmt.Sprintf("SliceUnchecked has unsupported base %T", typ))
+	}
+}
+
+func (b Builder) sliceDataAt(base Expr, elem Type, index Expr) Expr {
+	index = b.normalizeIndex(index)
+	ptr := llvm.CreateGEP(b.impl, elem.ll, base.impl, []llvm.Value{index.impl})
+	return Expr{ptr, b.Prog.Pointer(elem)}
 }
 
 // SliceLit creates a new slice with the specified elements.
@@ -743,6 +929,14 @@ func (b Builder) CoroChanTryRecv(ch, elem Expr) Expr {
 	return b.InlineCall(b.Pkg.rtFunc("CoroChanTryRecv"), ch, elem, eltSize)
 }
 
+// CoroChanTryClose performs one complete non-panicking channel-close
+// transaction. Its scalar result distinguishes success, nil channel, and an
+// already closed channel; physical coroutine lowering owns the two language
+// panic outcomes through its explicit-status ABI.
+func (b Builder) CoroChanTryClose(ch Expr) Expr {
+	return b.InlineCall(b.Pkg.rtFunc("CoroChanTryClose"), ch)
+}
+
 type SelectState struct {
 	Chan  Expr // channel to use (for send or receive)
 	Value Expr // value to send (for send)
@@ -750,14 +944,16 @@ type SelectState struct {
 }
 
 // CoroSelect is compiler-owned storage for one blocking channel select in a
-// physical LLVM coroutine body. ChanOp values, queue candidates, and shared
-// runtime state are all typed allocas whose addresses cross the suspend and
-// are therefore retained by CoroSplit in the stackless frame.
+// physical LLVM coroutine body. payloads and opsStorage retain the exact
+// allocation identities, rather than only aggregate values containing their
+// addresses: LLVM CoroSplit must see a direct post-suspend use of every backing
+// alloca before it can move that storage into the stackless frame.
 type CoroSelect struct {
 	fn         Function
 	states     []*SelectState
 	ops        []Expr
-	opsSlice   Expr
+	payloads   []Expr
+	opsStorage Expr
 	candidates Expr
 	storage    Expr
 }
@@ -766,38 +962,81 @@ type CoroSelect struct {
 // operand exactly once. The caller may first use CoroChanSelectTry, then pass
 // the same plan to CoroChanSelectPark and CoroChanSelectResume.
 func (b Builder) NewCoroSelect(states []*SelectState) *CoroSelect {
-	if b == nil || b.Func == nil {
+	return b.newCoroSelect(b, states)
+}
+
+// NewCoroSelectInFrame is the blocking-select form. frame must insert static
+// allocas in the physical coroutine entry block, while b initializes their
+// contents at the select's actual execution point. Keeping allocation and
+// initialization separate makes loop reuse correct and prevents an hchan
+// waiter from retaining a resume-local physical stack address.
+func (b Builder) NewCoroSelectInFrame(frame Builder, states []*SelectState) *CoroSelect {
+	if frame == nil || frame.Func != b.Func {
+		panic("ssa: coroutine select frame builder belongs to another function")
+	}
+	return b.newCoroSelect(frame, states)
+}
+
+func (b Builder) newCoroSelect(storageBuilder Builder, states []*SelectState) *CoroSelect {
+	if b == nil || b.Func == nil || storageBuilder == nil || storageBuilder.Func != b.Func {
 		panic("ssa: coroutine select requires an active function builder")
 	}
 	ops := make([]Expr, len(states))
+	payloads := make([]Expr, len(states))
 	for index, state := range states {
 		if state == nil || state.Chan.IsNil() {
 			panic("ssa: coroutine select requires complete channel states")
 		}
-		ops[index] = b.chanOp(state)
+		var payload Expr
+		if state.Send {
+			payload = storageBuilder.AllocaT(state.Value.Type)
+			b.Store(payload, state.Value)
+		} else {
+			elem := b.Prog.Elem(state.Chan.Type)
+			payload = storageBuilder.AllocaT(elem)
+			// A static select instruction may execute repeatedly in a loop. Reset
+			// unselected receive results on every logical execution, not merely
+			// once when the coroutine frame is created.
+			b.Store(payload, b.Prog.Zero(elem))
+		}
+		payloads[index] = payload
+		ops[index] = b.chanOpWithPayload(state, payload)
+	}
+	opType := b.Prog.rtType("ChanOp")
+	opsStorage := storageBuilder.ArrayAlloca(opType, b.Prog.Val(len(states)))
+	for index, op := range ops {
+		b.Store(b.Advance(opsStorage, b.Prog.Val(index)), op)
 	}
 	return &CoroSelect{
 		fn:         b.Func,
 		states:     states,
 		ops:        ops,
-		opsSlice:   b.selectOpsSlice(lastParamType(b.Prog, b.Pkg.rtFunc("CoroChanSelectTry")), ops),
-		candidates: b.ArrayAlloca(b.Prog.rtType("CoroChanSelectCaseV1"), b.Prog.Val(len(states))),
-		storage:    b.Alloc(b.Prog.rtType("CoroChanSelectV1"), false),
+		payloads:   payloads,
+		opsStorage: opsStorage,
+		candidates: storageBuilder.ArrayAlloca(b.Prog.rtType("CoroChanSelectCaseV1"), b.Prog.Val(len(states))),
+		storage:    storageBuilder.Alloc(b.Prog.rtType("CoroChanSelectV1"), false),
 	}
 }
 
 func (b Builder) requireCoroSelect(plan *CoroSelect) {
 	if b == nil || plan == nil || plan.fn == nil || plan.fn != b.Func || len(plan.states) != len(plan.ops) ||
-		plan.opsSlice.IsNil() || plan.candidates.IsNil() || plan.storage.IsNil() {
+		len(plan.payloads) != len(plan.ops) || plan.opsStorage.IsNil() ||
+		plan.candidates.IsNil() || plan.storage.IsNil() {
 		panic("ssa: invalid coroutine select plan")
 	}
+}
+
+func (b Builder) coroSelectOpsSlice(plan *CoroSelect) Expr {
+	b.requireCoroSelect(plan)
+	n := llvm.ConstInt(b.Prog.tyInt(), uint64(len(plan.ops)), false)
+	return b.unsafeSlice(plan.opsStorage, n, n)
 }
 
 // CoroChanSelectTry performs the randomized, nonblocking, non-panicking first
 // pass. It returns the runtime tuple (index, recvOK, tryOK, sendClosed).
 func (b Builder) CoroChanSelectTry(plan *CoroSelect) Expr {
 	b.requireCoroSelect(plan)
-	return b.Call(b.Pkg.rtFunc("CoroChanSelectTry"), plan.opsSlice)
+	return b.Call(b.Pkg.rtFunc("CoroChanSelectTry"), b.coroSelectOpsSlice(plan))
 }
 
 // CoroChanSelectPark installs all physical cases at the compiler's exact
@@ -812,7 +1051,7 @@ func (b Builder) CoroChanSelectPark(plan *CoroSelect, g, handle, header Expr) {
 		header,
 		b.Convert(void, plan.candidates),
 		b.Convert(void, plan.storage),
-		plan.opsSlice,
+		b.coroSelectOpsSlice(plan),
 	)
 }
 
@@ -820,13 +1059,19 @@ func (b Builder) CoroChanSelectPark(plan *CoroSelect, g, handle, header Expr) {
 // (index, recvOK, typedStatus).
 func (b Builder) CoroChanSelectResume(plan *CoroSelect, g Expr) Expr {
 	b.requireCoroSelect(plan)
+	// Runtime queue nodes retain every send and receive payload address across
+	// the physical suspend. Receive payloads are also loaded below, but send
+	// payloads otherwise have no direct resumed SSA use; keep all allocation
+	// identities live until CoroSplit has placed them in the coroutine frame.
+	// RemoveKeepAliveCallsAfterCoroSplit erases these optimizer-only uses.
+	b.KeepAlive(plan.payloads...)
 	void := b.Prog.VoidPtr()
 	return b.Call(
 		b.Pkg.rtFunc("CoroChanSelectResume"),
 		g,
 		b.Convert(void, plan.candidates),
 		b.Convert(void, plan.storage),
-		plan.opsSlice,
+		b.coroSelectOpsSlice(plan),
 	)
 }
 
@@ -842,7 +1087,11 @@ func (b Builder) CoroChanSelectResult(plan *CoroSelect, chosen, recvOK Expr) Exp
 		}
 		etyp := b.Prog.Elem(state.Chan.Type)
 		typs = append(typs, etyp)
-		value := b.Load(Expr{b.impl.CreateExtractValue(plan.ops[index].impl, 1, ""), b.Prog.Pointer(etyp)})
+		// Load the original allocation identity directly. Extracting the same
+		// address from a pre-suspend ChanOp aggregate is semantically equivalent,
+		// but hides the backing alloca from CoroSplit's frame-liveness analysis.
+		// The compiler-owned slot cannot be nil, including for zero-sized values.
+		value := b.LoadKnownNonNil(plan.payloads[index])
 		results = append(results, value.impl)
 	}
 	return b.aggregateValue(b.Prog.Struct(typs...), results...)
@@ -954,6 +1203,31 @@ func (b Builder) chanOp(s *SelectState) Expr {
 	send := prog.BoolVal(s.Send)
 	typ := b.Prog.rtType("ChanOp")
 	return b.aggregateValue(typ, s.Chan.impl, val.impl, size.impl, send.impl)
+}
+
+func (b Builder) chanOpWithPayload(s *SelectState, payload Expr) Expr {
+	if s == nil || payload.IsNil() {
+		panic("ssa: channel operation requires compiler-owned payload storage")
+	}
+	prog := b.Prog
+	var elem Type
+	if s.Send {
+		elem = s.Value.Type
+	} else {
+		elem = prog.Elem(s.Chan.Type)
+	}
+	if !types.Identical(payload.Type.RawType(), prog.Pointer(elem).RawType()) {
+		panic("ssa: channel operation payload type mismatch")
+	}
+	value := Expr{payload.impl, prog.VoidPtr()}
+	size := prog.IntVal(prog.SizeOf(elem), prog.Int32())
+	return b.aggregateValue(
+		prog.rtType("ChanOp"),
+		s.Chan.impl,
+		value.impl,
+		size.impl,
+		prog.BoolVal(s.Send).impl,
+	)
 }
 
 // -----------------------------------------------------------------------------

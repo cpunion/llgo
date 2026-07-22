@@ -512,6 +512,19 @@ func TestCoroProgramBootstrapHashV1StableAndStepComplete(t *testing.T) {
 	if changedDriver == bootstrap.StepHash {
 		t.Fatal("bootstrap hash ignored factory/driver activation")
 	}
+	ctx.buildConf.Goos = "wasip1"
+	ctx.buildConf.Goarch = "wasm"
+	hostPullDriver, err := coroProgramBootstrapHashV1(ctx, bootstrap.Steps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hostPullDriver == changedDriver || hostPullDriver == bootstrap.StepHash {
+		t.Fatal("bootstrap hash ignored the host-owned V2 pull reactor ABI")
+	}
+	hostPullAgain, err := coroProgramBootstrapHashV1(ctx, bootstrap.Steps)
+	if err != nil || hostPullAgain != hostPullDriver {
+		t.Fatalf("host-pull bootstrap hash is unstable: %x, %v, want %x", hostPullAgain, err, hostPullDriver)
+	}
 	ctx.buildConf.Goos = "linux"
 	ctx.buildConf.Goarch = "386"
 	withoutNativeTimer, err := coroProgramBootstrapHashV1(ctx, bootstrap.Steps)

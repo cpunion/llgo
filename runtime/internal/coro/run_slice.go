@@ -220,18 +220,21 @@ func NextExecutorRunStepAt(driver *ExecutorDriver, now int64) (ExecutorRunStep, 
 func completedExecutorRunAction(p *P, g *G, action Action) bool {
 	if p == nil || g == nil || action.Handle != nil || p.current != nil || p.inResume ||
 		p.action != (Action{}) || p.runDecision != (RunDecision{}) || p.runDecisionTaken ||
-		p.servicePreemptBudget != 0 || g.runP != nil || g.runAction != ActionInvalid {
+		p.servicePreemptBudget != 0 || g.runP != nil || g.runAction != ActionInvalid ||
+		g.transferState != runnableTransferGIdle {
 		return false
 	}
 	switch action.Kind {
 	case ActionYield:
-		return g.state == GRunnable && g.queued
+		return gPreemptEnabledAtDepthZero(g) && g.state == GRunnable && g.queued
 	case ActionPark:
-		return g.state == GWaiting && (g.waiting || g.active != nil && g.active.parkWait != nil)
+		return gPreemptEnabledAtDepthZero(g) && g.state == GWaiting &&
+			(g.waiting || g.active != nil && g.active.parkWait != nil)
 	case ActionComplete:
-		return g.state == GDead && !g.panicUnwind
+		return gPreemptStateAtDepthZero(g, preemptDisabled) && g.state == GDead && !g.panicUnwind
 	case ActionPanicComplete:
-		return g.state == GDead && publishedPanicRecord(&g.panicRecord)
+		return gPreemptStateAtDepthZero(g, preemptDisabled) && g.state == GDead &&
+			publishedPanicRecord(&g.panicRecord)
 	default:
 		return false
 	}
@@ -279,6 +282,46 @@ func commitExecutorRunAction(driver *ExecutorDriver, g *G, next Action, placemen
 // ordering for every live continuation.
 func CommitExecutorRunAction(driver *ExecutorDriver, g *G, next Action) bool {
 	return commitExecutorRunAction(driver, g, next, executorRunQueueTail)
+}
+
+// CommitExecutorRunDomainDestroy settles the handle-free final-root receipt
+// of one ordinary long-lived executor domain. An empty command executor uses
+// CommitDestroyedReceiptCompatibility to begin process-terminal close; an
+// ordinary fleet P instead completes only this G and keeps its exact executor
+// gate active for future routed work.
+func CommitExecutorRunDomainDestroy(driver *ExecutorDriver, g *G, receipt Action) (Action, bool) {
+	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
+		driver.run.issued != ActionInvalid || !validDestroyCommitReceipt(driver.p, g, receipt) ||
+		driver.p.executor != driver || preemptLoad(&driver.p.executorMode) != executorModeBound ||
+		driver.p.readyHead != nil || driver.p.readyTail != nil || !emptySchedulerWaitQueues(driver.p) {
+		return Action{}, false
+	}
+	p := driver.p
+	schedule := preemptLoad(&p.schedule)
+	if schedule != scheduleIdle && schedule != scheduleRequested || !disableGPreempt(g) {
+		return Action{}, false
+	}
+	panicking := g.state == GPanicking
+	if panicking {
+		if !g.panicUnwind || !publishedPanicRecord(&g.panicRecord) {
+			return Action{}, false
+		}
+	} else if g.state != GDispatching || g.panicUnwind || !emptyPanicRecord(&g.panicRecord) {
+		return Action{}, false
+	}
+	g.destroyRoot = false
+	if panicking {
+		g.panicUnwind = false
+	}
+	g.state = GDead
+	g.runP = nil
+	p.current = nil
+	p.servicePreemptBudget = 0
+	p.action = Action{}
+	if panicking {
+		return Action{Kind: ActionPanicComplete}, true
+	}
+	return Action{Kind: ActionComplete}, true
 }
 
 // CommitExecutorRunCommandBootstrapDirectChildHandoff retains the frozen
