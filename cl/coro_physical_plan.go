@@ -41,6 +41,9 @@ const (
 	coroPhysicalInstructionSlice
 	coroPhysicalInstructionSliceToArrayPointer
 	coroPhysicalInstructionBuiltinNilGuard
+	coroPhysicalInstructionSyntheticSelectNoCaseBox
+	coroPhysicalInstructionUnsafeString
+	coroPhysicalInstructionUnsafeSlice
 )
 
 func (recipe coroPhysicalInstructionRecipe) String() string {
@@ -61,6 +64,12 @@ func (recipe coroPhysicalInstructionRecipe) String() string {
 		return "slice-to-array-pointer"
 	case coroPhysicalInstructionBuiltinNilGuard:
 		return "builtin-nil-guard"
+	case coroPhysicalInstructionSyntheticSelectNoCaseBox:
+		return "synthetic-select-no-case-box"
+	case coroPhysicalInstructionUnsafeString:
+		return "unsafe-string"
+	case coroPhysicalInstructionUnsafeSlice:
+		return "unsafe-slice"
 	default:
 		return fmt.Sprintf("physical-recipe(%d)", uint8(recipe))
 	}
@@ -146,6 +155,43 @@ func (recipe coroPhysicalOperationRecipe) String() string {
 	}
 }
 
+// coroPhysicalOutcomeRecipe freezes source instructions that enter or inspect
+// the Go completion/cleanup protocol. It is orthogonal to value/fault,
+// call/spawn control, and blocking operation recipes: no outcome site may be
+// rediscovered from a compilation-wide feature flag during emission.
+type coroPhysicalOutcomeRecipe uint8
+
+const (
+	coroPhysicalOutcomeNone coroPhysicalOutcomeRecipe = iota
+	coroPhysicalOutcomeReturn
+	coroPhysicalOutcomeDeferRegister
+	coroPhysicalOutcomeRunDefers
+	coroPhysicalOutcomePanic
+	coroPhysicalOutcomeRecover
+	coroPhysicalOutcomeSyntheticSelectTrap
+)
+
+func (recipe coroPhysicalOutcomeRecipe) String() string {
+	switch recipe {
+	case coroPhysicalOutcomeNone:
+		return "none"
+	case coroPhysicalOutcomeReturn:
+		return "return"
+	case coroPhysicalOutcomeDeferRegister:
+		return "defer-register"
+	case coroPhysicalOutcomeRunDefers:
+		return "run-defers"
+	case coroPhysicalOutcomePanic:
+		return "panic"
+	case coroPhysicalOutcomeRecover:
+		return "recover"
+	case coroPhysicalOutcomeSyntheticSelectTrap:
+		return "synthetic-select-trap"
+	default:
+		return fmt.Sprintf("physical-outcome-recipe(%d)", uint8(recipe))
+	}
+}
+
 type coroPhysicalLoweringCapabilities struct {
 	childAwait       bool
 	staticSpawn      bool
@@ -173,6 +219,8 @@ type coroPhysicalInstructionPlan struct {
 	controlFailureHard bool
 	operation          coroPhysicalOperationRecipe
 	operationFailure   string
+	outcome            coroPhysicalOutcomeRecipe
+	outcomeFailure     string
 	container          coroPhysicalContainerKind
 	bound              int64
 	nilGuard           bool
@@ -221,7 +269,7 @@ func prepareCoroPhysicalFunctionPlan(
 	}
 	for _, block := range audit.fn.Blocks {
 		for _, instruction := range block.Instrs {
-			instructionPlan, err := planCoroPhysicalInstruction(audit, owner, whole, instruction, explicitPanic, capabilities)
+			instructionPlan, err := planCoroPhysicalInstruction(audit, owner, whole, cleanup, instruction, explicitPanic, capabilities)
 			if err != nil {
 				return nil, fmt.Errorf("block %d instruction %T: %w", block.Index, instruction, err)
 			}
@@ -326,6 +374,7 @@ func planCoroPhysicalInstruction(
 	audit *coroPhysicalPureSSAAudit,
 	owner *preparedEmissionPackage,
 	whole *coro.SSAPlan,
+	cleanup *coroStaticCleanupPlan,
 	instruction ssa.Instruction,
 	explicitPanic bool,
 	capabilities coroPhysicalLoweringCapabilities,
@@ -344,6 +393,7 @@ func planCoroPhysicalInstruction(
 	result.semantic = semantic
 	planCoroPhysicalControlInstruction(audit, whole, instruction, capabilities, &result)
 	planCoroPhysicalOperationInstruction(audit, instruction, capabilities, &result)
+	planCoroPhysicalOutcomeInstruction(audit, cleanup, instruction, capabilities, &result)
 	switch instruction := instruction.(type) {
 	case *ssa.FieldAddr:
 		if audit.fieldAddrRequiresImplicitNilFault(instruction) {
@@ -428,8 +478,83 @@ func planCoroPhysicalInstruction(
 			result.recipe = coroPhysicalInstructionBuiltinNilGuard
 			result.nilGuard = true
 		}
+		if builtin, ok := instruction.Common().Value.(*ssa.Builtin); ok && explicitPanic {
+			switch builtin.Name() {
+			case "String":
+				result.recipe = coroPhysicalInstructionUnsafeString
+			case "Slice":
+				result.recipe = coroPhysicalInstructionUnsafeSlice
+			}
+		}
+	case *ssa.MakeInterface:
+		if coroSyntheticSelectNoCaseBox(instruction) {
+			result.recipe = coroPhysicalInstructionSyntheticSelectNoCaseBox
+		}
 	}
 	return result, nil
+}
+
+func planCoroPhysicalOutcomeInstruction(
+	audit *coroPhysicalPureSSAAudit,
+	cleanup *coroStaticCleanupPlan,
+	instruction ssa.Instruction,
+	capabilities coroPhysicalLoweringCapabilities,
+	result *coroPhysicalInstructionPlan,
+) {
+	if audit == nil || result == nil || instruction == nil || instruction.Parent() != audit.fn {
+		panic("physical outcome planning requires one exact instruction plan")
+	}
+	switch instruction := instruction.(type) {
+	case *ssa.Return:
+		result.outcome = coroPhysicalOutcomeReturn
+	case *ssa.Defer:
+		if !coroPhysicalCleanupContainsDefer(cleanup, instruction) {
+			result.outcomeFailure = "defer registration is absent from the frozen cleanup plan"
+			return
+		}
+		result.outcome = coroPhysicalOutcomeDeferRegister
+	case *ssa.RunDefers:
+		if cleanup == nil || len(cleanup.sites) == 0 {
+			result.outcomeFailure = "RunDefers has no frozen cleanup plan"
+			return
+		}
+		result.outcome = coroPhysicalOutcomeRunDefers
+	case *ssa.Panic:
+		if coroSyntheticSelectNoCasePanic(instruction) {
+			result.outcome = coroPhysicalOutcomeSyntheticSelectTrap
+			return
+		}
+		if !capabilities.explicitPanic {
+			result.outcomeFailure = "explicit panic requires the explicit-status panic ABI"
+			return
+		}
+		if reason := validateCoroExplicitStatusPanic(audit, instruction); reason != "" {
+			result.outcomeFailure = reason
+			return
+		}
+		result.outcome = coroPhysicalOutcomePanic
+	case *ssa.Call:
+		if !isCoroRecoverBuiltinCall(instruction) {
+			return
+		}
+		if !capabilities.explicitPanic {
+			result.outcomeFailure = "recover builtin requires the explicit-status panic ABI"
+			return
+		}
+		result.outcome = coroPhysicalOutcomeRecover
+	}
+}
+
+func coroPhysicalCleanupContainsDefer(cleanup *coroStaticCleanupPlan, instruction *ssa.Defer) bool {
+	if cleanup == nil || instruction == nil {
+		return false
+	}
+	for _, site := range cleanup.sites {
+		if site != nil && site.instruction == instruction {
+			return true
+		}
+	}
+	return false
 }
 
 func planCoroPhysicalOperationInstruction(

@@ -100,10 +100,6 @@ func (p *context) compileCoroPatchInitAtBlock(b llssa.Builder) bool {
 	return true
 }
 
-func (p *context) coroExplicitStatusLoweringEnabled() bool {
-	return p.hasCoroPhysicalBody() && p.compilation != nil && p.compilation.EnableCoroExplicitStatusPanicABI
-}
-
 func (p *context) coroWorkerLoweringEnabled() bool {
 	return p.hasCoroPhysicalBody() && p.compilation != nil && p.compilation.EnableCoroWorker
 }
@@ -147,51 +143,43 @@ func (p *context) tryCompileCoroAllocation(
 	return llssa.Expr{}, false
 }
 
-func (p *context) coroSyntheticSelectNoCaseInterface(box *ssa.MakeInterface) bool {
-	return p.hasCoroPhysicalBody() && coroSyntheticSelectNoCaseBox(box)
-}
-
-func (p *context) tryCompileCoroReturn(b llssa.Builder, results []llssa.Expr) bool {
+func (p *context) compileCoroReturn(b llssa.Builder, results []llssa.Expr) {
 	body := p.coroBody()
 	if body == nil {
-		return false
+		panic("coroutine return escaped its planned physical body")
 	}
 	if body.completion == nil {
 		panic("coroutine return has no completion block")
 	}
 	p.storeCoroLeafResult(b, body.abi, body.resultSlot, results)
 	b.Jump(body.completion)
-	return true
 }
 
-func (p *context) tryCompileCoroDefer(b llssa.Builder, instruction *ssa.Defer) bool {
+func (p *context) compileCoroDefer(b llssa.Builder, instruction *ssa.Defer) {
 	body := p.coroBody()
 	if body == nil || body.cleanup == nil {
-		return false
+		panic("coroutine defer escaped its frozen cleanup plan")
 	}
 	body.cleanup.register(p, b, instruction)
-	return true
 }
 
-func (p *context) tryCompileCoroRunDefers(b llssa.Builder, instruction *ssa.RunDefers) bool {
+func (p *context) compileCoroRunDefers(b llssa.Builder, instruction *ssa.RunDefers) {
 	body := p.coroBody()
 	if body == nil || body.cleanup == nil {
-		return false
+		panic("coroutine RunDefers escaped its frozen cleanup plan")
 	}
 	body.cleanup.runDefers(b, instruction)
-	return true
 }
 
-func (p *context) tryCompileCoroSyntheticSelectPanic(b llssa.Builder, instruction *ssa.Panic) bool {
+func (p *context) compileCoroSyntheticSelectPanic(b llssa.Builder, instruction *ssa.Panic) {
 	body := p.coroBody()
-	if body == nil || !coroSyntheticSelectNoCasePanic(instruction) {
-		return false
+	if body == nil || instruction == nil {
+		panic("coroutine select invariant trap escaped its planned physical body")
 	}
 	if body.unsupportedRunDecision == nil {
 		panic("coroutine select invariant panic requires a fail-closed trap block")
 	}
 	b.Jump(body.unsupportedRunDecision)
-	return true
 }
 
 func (p *context) tryCompileCoroFreeVar(b llssa.Builder, fn *ssa.Function, index int) (llssa.Expr, bool) {

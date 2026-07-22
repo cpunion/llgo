@@ -24,6 +24,14 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
+func isCoroRecoverBuiltinCall(call *ssa.Call) bool {
+	if call == nil || call.Common() == nil {
+		return false
+	}
+	builtin, ok := call.Common().Value.(*ssa.Builtin)
+	return ok && builtin.Name() == "recover"
+}
+
 // tryCompileCoroInterfaceNilCompare replaces helper-backed empty-interface
 // equality with the Go representation rule needed by recover: an interface is
 // nil exactly when its dynamic type word is nil. Comparing only that word is
@@ -60,7 +68,7 @@ func (p *context) tryCompileCoroInterfaceNilCompare(
 // directly keeps this operation allocation-free on every target.
 func (p *context) compileCoroRecover(b llssa.Builder, call *ssa.CallCommon) llssa.Expr {
 	body := p.coroBody()
-	if body == nil || p.compilation == nil || !p.compilation.EnableCoroExplicitStatusPanicABI ||
+	if body == nil || !p.coroEmissionExplicitStatus() ||
 		b.Func != p.fn || call == nil || len(call.Args) != 0 || body.abi.recoverTakeHook == "" {
 		panic("coroutine recover requires an exact explicit-status physical call")
 	}

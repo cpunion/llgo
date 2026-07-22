@@ -23,25 +23,15 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
-// tryCompileCoroExplicitStatusPanic owns the terminal source instruction when
-// the compilation-wide ExplicitStatus identity is active. Preflight has
+// compileCoroExplicitStatusPanic owns a terminal source instruction selected
+// by the frozen physical outcome recipe. Preflight has
 // already proved that X is one empty-interface value whose type/data words
 // remain valid after this coroutine frame is destroyed; reaching this path
 // with any other shape is a compiler-plan violation, never permission to fall
 // back to the legacy runtime.Panic call.
-func (p *context) tryCompileCoroExplicitStatusPanic(b llssa.Builder, instruction *ssa.Panic) bool {
-	if p.compilation == nil || !p.compilation.EnableCoroExplicitStatusPanicABI {
-		return false
-	}
-	// A RawPlainEntry/RawPlainVariant deliberately preserves the ordinary Go
-	// stack ABI, including legacy panic unwinding.  The compilation identity is
-	// shared with its managed twin, so the global explicit-status switch alone
-	// does not make this source instruction part of a physical coroutine body.
-	if p.rawPlainBody {
-		return false
-	}
+func (p *context) compileCoroExplicitStatusPanic(b llssa.Builder, instruction *ssa.Panic) {
 	body := p.coroBody()
-	if instruction == nil || body == nil || b == nil || b.Func != p.fn {
+	if instruction == nil || body == nil || !p.coroEmissionExplicitStatus() || b == nil || b.Func != p.fn {
 		goName, llvmName := "<nil>", "<nil>"
 		if p.goFn != nil {
 			goName = p.goFn.String()
@@ -62,5 +52,4 @@ func (p *context) tryCompileCoroExplicitStatusPanic(b llssa.Builder, instruction
 	} else {
 		body.cleanup.enterPanic(b, typeWord, dataWord)
 	}
-	return true
 }

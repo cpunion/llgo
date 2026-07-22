@@ -77,7 +77,7 @@ func (p *context) compileCoroUnsafeString(
 ) llssa.Expr {
 	body := p.coroBody()
 	if body == nil || b == nil || b.Func != p.fn || call == nil ||
-		p.compilation == nil || !p.compilation.EnableCoroExplicitStatusPanicABI ||
+		!p.coroEmissionExplicitStatus() ||
 		body.abi.version < coroPhysicalABIVersionV1 {
 		panic("unsafe.String coroutine lowering requires the PhysicalABIV1 explicit-status ABI")
 	}

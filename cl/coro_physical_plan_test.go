@@ -197,6 +197,34 @@ func Root(value int) int { return value + 1 }
 		ctx.observeCoroSemanticInstruction(instruction)
 		ctx.observeCoroPhysicalOperation(instruction, coroPhysicalOperationChannelSelectPark)
 	}()
+
+	physical.instructions[instruction] = coroPhysicalInstructionPlan{
+		semantic: coroSemanticInstructionPlan{recipe: coro.RecipeID("test.outcome.v0")},
+		outcome:  coroPhysicalOutcomePanic,
+	}
+	missingOutcome := captureCoroSitePlanPanic(func() {
+		finish := ctx.beginCoroSiteEmission(instruction)
+		defer finish()
+		ctx.observeCoroSemanticInstruction(instruction)
+	})
+	if !strings.Contains(missingOutcome, "omitted frozen physical outcome recipe panic") {
+		t.Fatalf("missing physical outcome observation = %q", missingOutcome)
+	}
+	mismatchedOutcome := captureCoroSitePlanPanic(func() {
+		finish := ctx.beginCoroSiteEmission(instruction)
+		defer finish()
+		ctx.observeCoroSemanticInstruction(instruction)
+		ctx.observeCoroPhysicalOutcome(instruction, coroPhysicalOutcomeReturn)
+	})
+	if !strings.Contains(mismatchedOutcome, "emitted physical outcome recipe return, frozen SitePlan requires panic") {
+		t.Fatalf("mismatched physical outcome observation = %q", mismatchedOutcome)
+	}
+	func() {
+		finish := ctx.beginCoroSiteEmission(instruction)
+		defer finish()
+		ctx.observeCoroSemanticInstruction(instruction)
+		ctx.observeCoroPhysicalOutcome(instruction, coroPhysicalOutcomePanic)
+	}()
 }
 
 func TestCoroPhysicalCodegenRejectsMissingCommittedPlan(t *testing.T) {

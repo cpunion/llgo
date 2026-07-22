@@ -96,6 +96,9 @@ type coroArchitectureDebtBudget struct {
 	operationPlan             int
 	operationSelect           int
 	operationObserve          int
+	outcomePlan               int
+	outcomeSelect             int
+	outcomeObserve            int
 }
 
 var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
@@ -103,7 +106,7 @@ var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
 	// only decrease; see TestCoroArchitectureDebtIsMonotonic.
 	currentCoro:               0,
 	planAuthority:             377,
-	stagedFeatureGate:         313,
+	stagedFeatureGate:         303,
 	legacyWait:                72,
 	nativeFork:                378,
 	fleetBuildFiles:           13,
@@ -132,8 +135,8 @@ var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
 	physicalPlanFreeze:        1,
 	physicalPlanCommit:        1,
 	physicalPlanLookup:        2,
-	physicalRecipeSelection:   7,
-	physicalRecipeObservation: 7,
+	physicalRecipeSelection:   8,
+	physicalRecipeObservation: 10,
 	physicalGuardObservation:  10,
 	physicalCodegenRebuild:    0,
 	physicalProofBuilderCall:  8,
@@ -159,6 +162,9 @@ var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
 	operationPlan:             2,
 	operationSelect:           5,
 	operationObserve:          6,
+	outcomePlan:               2,
+	outcomeSelect:             6,
+	outcomeObserve:            6,
 }
 
 var allowedCurrentCoroFiles = map[string]bool{}
@@ -445,6 +451,22 @@ var allowedPhysicalOperationObservationFiles = map[string]bool{
 	"cl/instr.go":          true,
 }
 
+var allowedPhysicalOutcomePlanFiles = map[string]bool{
+	"cl/coro_physical_plan.go": true,
+}
+
+var allowedPhysicalOutcomeSelectionFiles = map[string]bool{
+	"cl/compile.go":        true,
+	"cl/coro_site_plan.go": true,
+	"cl/instr.go":          true,
+}
+
+var allowedPhysicalOutcomeObservationFiles = map[string]bool{
+	"cl/compile.go":        true,
+	"cl/coro_site_plan.go": true,
+	"cl/instr.go":          true,
+}
+
 var allowedCoroParkOperationFields = map[string]bool{
 	"shouldSuspend": true,
 	"park":          true,
@@ -511,6 +533,9 @@ type coroArchitectureDebtInventory struct {
 	operationPlanFiles             map[string]bool
 	operationSelectFiles           map[string]bool
 	operationObserveFiles          map[string]bool
+	outcomePlanFiles               map[string]bool
+	outcomeSelectFiles             map[string]bool
+	outcomeObserveFiles            map[string]bool
 	parkProtocolFields             map[string]bool
 	parkFaultRouteFields           map[string]bool
 }
@@ -584,6 +609,9 @@ func TestCoroArchitectureDebtIsMonotonic(t *testing.T) {
 	check("physical operation recipe planner", inventory.operationPlan, budget.operationPlan)
 	check("physical operation recipe selection", inventory.operationSelect, budget.operationSelect)
 	check("physical operation recipe observation", inventory.operationObserve, budget.operationObserve)
+	check("physical outcome recipe planner", inventory.outcomePlan, budget.outcomePlan)
+	check("physical outcome recipe selection", inventory.outcomeSelect, budget.outcomeSelect)
+	check("physical outcome recipe observation", inventory.outcomeObserve, budget.outcomeObserve)
 
 	checkExactCoroArchitectureSet(t, "currentCoro production files", inventory.currentCoroFiles, allowedCurrentCoroFiles)
 	checkExactCoroArchitectureSet(t, "staged coroutine feature names", inventory.featureNames, allowedStagedCoroFeatureNames)
@@ -634,6 +662,9 @@ func TestCoroArchitectureDebtIsMonotonic(t *testing.T) {
 	checkExactCoroArchitectureSet(t, "physical operation recipe planner files", inventory.operationPlanFiles, allowedPhysicalOperationPlanFiles)
 	checkExactCoroArchitectureSet(t, "physical operation recipe selection files", inventory.operationSelectFiles, allowedPhysicalOperationSelectionFiles)
 	checkExactCoroArchitectureSet(t, "physical operation recipe observation files", inventory.operationObserveFiles, allowedPhysicalOperationObservationFiles)
+	checkExactCoroArchitectureSet(t, "physical outcome recipe planner files", inventory.outcomePlanFiles, allowedPhysicalOutcomePlanFiles)
+	checkExactCoroArchitectureSet(t, "physical outcome recipe selection files", inventory.outcomeSelectFiles, allowedPhysicalOutcomeSelectionFiles)
+	checkExactCoroArchitectureSet(t, "physical outcome recipe observation files", inventory.outcomeObserveFiles, allowedPhysicalOutcomeObservationFiles)
 	checkExactCoroArchitectureSet(t, "Park protocol fields", inventory.parkProtocolFields, allowedCoroParkOperationFields)
 	checkExactCoroArchitectureSet(t, "Park fault-route fields", inventory.parkFaultRouteFields, allowedCoroParkFaultRouteFields)
 }
@@ -698,6 +729,9 @@ func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitecture
 		operationPlanFiles:             make(map[string]bool),
 		operationSelectFiles:           make(map[string]bool),
 		operationObserveFiles:          make(map[string]bool),
+		outcomePlanFiles:               make(map[string]bool),
+		outcomeSelectFiles:             make(map[string]bool),
+		outcomeObserveFiles:            make(map[string]bool),
 		parkProtocolFields:             make(map[string]bool),
 		parkFaultRouteFields:           make(map[string]bool),
 	}
@@ -891,6 +925,15 @@ func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitecture
 					case "observeCoroPhysicalOperation":
 						inventory.operationObserve++
 						inventory.operationObserveFiles[rel] = true
+					case "planCoroPhysicalOutcomeInstruction":
+						inventory.outcomePlan++
+						inventory.outcomePlanFiles[rel] = true
+					case "plannedCoroPhysicalOutcome":
+						inventory.outcomeSelect++
+						inventory.outcomeSelectFiles[rel] = true
+					case "observeCoroPhysicalOutcome":
+						inventory.outcomeObserve++
+						inventory.outcomeObserveFiles[rel] = true
 					case "currentCoro":
 						inventory.currentCoro++
 						inventory.currentCoroFiles[rel] = true

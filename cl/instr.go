@@ -2106,10 +2106,10 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 	switch cv := cv.(type) {
 	case *ssa.Builtin:
 		fn := cv.Name()
+		sourceCall := p.coroCurrentSourceCall()
+		physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(sourceCall)
 		if fn == "ssa:wrapnilchk" {
 			ptr := p.compileValue(b, args[0])
-			sourceCall := p.coroCurrentSourceCall()
-			physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(sourceCall)
 			if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionBuiltinNilGuard {
 				// A value-method wrapper's nil check is a language-level panic edge,
 				// not a call that may unwind the native stack through a live LLVM
@@ -2143,14 +2143,22 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 			// so would evaluate retained x/tools SSA such as *(*T)(nil).
 			ret = p.compileUnsafeSizeAlignBuiltin(fn, args[0])
 			return
-		} else if fn == "recover" && act == llssa.Call && p.coroExplicitStatusLoweringEnabled() {
-			ret = p.compileCoroRecover(b, call)
-			return
+		} else if fn == "recover" && act == llssa.Call {
+			sourceCall := p.coroCurrentSourceCall()
+			outcome, outcomePlanned := p.plannedCoroPhysicalOutcome(sourceCall)
+			if outcomePlanned {
+				if outcome.outcome != coroPhysicalOutcomeRecover {
+					panic(fmt.Sprintf("recover selected incompatible frozen physical outcome recipe %s", outcome.outcome))
+				}
+				p.observeCoroPhysicalOutcome(sourceCall, coroPhysicalOutcomeRecover)
+				ret = p.compileCoroRecover(b, call)
+				return
+			}
 		} else if fn == "close" && len(args) == 1 && act == llssa.Call {
 			sourceCall := p.coroCurrentSourceCall()
 			operation, operationPlanned := p.plannedCoroPhysicalOperation(sourceCall)
 			if operationPlanned && operation.operation == coroPhysicalOperationChannelClose {
-				if !p.coroExplicitStatusLoweringEnabled() {
+				if !p.coroEmissionExplicitStatus() {
 					panic("frozen coroutine channel close requires explicit-status lowering")
 				}
 				p.observeCoroPhysicalOperation(sourceCall, coroPhysicalOperationChannelClose)
@@ -2161,14 +2169,18 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 			if operationPlanned && operation.operation != coroPhysicalOperationNone {
 				panic(fmt.Sprintf("channel close selected incompatible frozen physical operation recipe %s", operation.operation))
 			}
-		} else if fn == "String" && len(args) == 2 && act == llssa.Call && p.coroExplicitStatusLoweringEnabled() {
+		} else if fn == "String" && len(args) == 2 && act == llssa.Call &&
+			physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionUnsafeString {
+			p.observeCoroPhysicalInstruction(sourceCall, coroPhysicalInstructionUnsafeString)
 			compiled := p.compileValues(b, args, kind)
 			ret = p.compileCoroUnsafeString(b, call, compiled[0], compiled[1])
 			return
-		} else if fn == "Slice" && len(args) == 2 && act == llssa.Call && p.coroExplicitStatusLoweringEnabled() {
+		} else if fn == "Slice" && len(args) == 2 && act == llssa.Call &&
+			physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionUnsafeSlice {
 			// unsafe.Slice remains a generic SSA builtin. Only its outcome
 			// mechanism changes here: evaluate ptr and len in source order, then
 			// publish language faults without unwinding through the LLVM frame.
+			p.observeCoroPhysicalInstruction(sourceCall, coroPhysicalInstructionUnsafeSlice)
 			compiled := p.compileValues(b, args, kind)
 			ret = p.compileCoroUnsafeSlice(b, call, compiled[0], compiled[1])
 			return

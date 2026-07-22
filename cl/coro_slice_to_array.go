@@ -99,7 +99,7 @@ func (p *context) compileCoroSliceToArrayPointer(
 	if body == nil || conversion == nil || b == nil || b.Func != p.fn {
 		panic("structured slice-to-array-pointer conversion escaped its physical coroutine body")
 	}
-	if p.compilation == nil || !p.compilation.EnableCoroExplicitStatusPanicABI ||
+	if !p.coroEmissionExplicitStatus() ||
 		body.abi.version < coroPhysicalABIVersionV1 {
 		panic("slice-to-array-pointer fault requires the PhysicalABIV1 explicit-status panic ABI")
 	}

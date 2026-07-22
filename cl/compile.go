@@ -1689,9 +1689,14 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		}
 		ret.Type = p.type_(v.Type(), llssa.InGo)
 	case *ssa.MakeInterface:
-		if p.coroSyntheticSelectNoCaseInterface(v) {
+		physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(v)
+		if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionSyntheticSelectNoCaseBox {
+			p.observeCoroPhysicalInstruction(v, coroPhysicalInstructionSyntheticSelectNoCaseBox)
 			ret = p.prog.Nil(p.type_(v.Type(), llssa.InGo))
 			break
+		}
+		if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary {
+			panic(fmt.Sprintf("MakeInterface selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
 		}
 		if refs := *v.Referrers(); len(refs) == 1 {
 			switch ref := refs[0].(type) {
@@ -2008,7 +2013,13 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		if p.shouldTrackCallerFrames() {
 			p.popCallerLocationFrame(b)
 		}
-		if p.tryCompileCoroReturn(b, results) {
+		outcome, outcomePlanned := p.plannedCoroPhysicalOutcome(v)
+		if outcomePlanned {
+			if outcome.outcome != coroPhysicalOutcomeReturn {
+				panic(fmt.Sprintf("return selected incompatible frozen physical outcome recipe %s", outcome.outcome))
+			}
+			p.observeCoroPhysicalOutcome(v, coroPhysicalOutcomeReturn)
+			p.compileCoroReturn(b, results)
 			return
 		}
 		b.Return(results...)
@@ -2032,7 +2043,13 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		p.recordPanicLocation(b, v.Pos())
 		b.MapUpdate(m, key, val)
 	case *ssa.Defer:
-		if p.tryCompileCoroDefer(b, v) {
+		outcome, outcomePlanned := p.plannedCoroPhysicalOutcome(v)
+		if outcomePlanned {
+			if outcome.outcome != coroPhysicalOutcomeDeferRegister {
+				panic(fmt.Sprintf("defer selected incompatible frozen physical outcome recipe %s", outcome.outcome))
+			}
+			p.observeCoroPhysicalOutcome(v, coroPhysicalOutcomeDeferRegister)
+			p.compileCoroDefer(b, v)
 			return
 		}
 		if v.DeferStack != nil {
@@ -2046,16 +2063,29 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		}
 		p.call(b, llssa.Go, &v.Call)
 	case *ssa.RunDefers:
-		if p.tryCompileCoroRunDefers(b, v) {
+		outcome, outcomePlanned := p.plannedCoroPhysicalOutcome(v)
+		if outcomePlanned {
+			if outcome.outcome != coroPhysicalOutcomeRunDefers {
+				panic(fmt.Sprintf("RunDefers selected incompatible frozen physical outcome recipe %s", outcome.outcome))
+			}
+			p.observeCoroPhysicalOutcome(v, coroPhysicalOutcomeRunDefers)
+			p.compileCoroRunDefers(b, v)
 			return
 		}
 		p.recordPanicLocation(b, v.Pos())
 		b.RunDefers()
 	case *ssa.Panic:
-		if p.tryCompileCoroSyntheticSelectPanic(b, v) {
-			return
-		}
-		if p.tryCompileCoroExplicitStatusPanic(b, v) {
+		outcome, outcomePlanned := p.plannedCoroPhysicalOutcome(v)
+		if outcomePlanned {
+			p.observeCoroPhysicalOutcome(v, outcome.outcome)
+			switch outcome.outcome {
+			case coroPhysicalOutcomeSyntheticSelectTrap:
+				p.compileCoroSyntheticSelectPanic(b, v)
+			case coroPhysicalOutcomePanic:
+				p.compileCoroExplicitStatusPanic(b, v)
+			default:
+				panic(fmt.Sprintf("panic selected incompatible frozen physical outcome recipe %s", outcome.outcome))
+			}
 			return
 		}
 		arg := p.compileValue(b, v.X)

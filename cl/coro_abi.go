@@ -1324,19 +1324,22 @@ func validateCoroPhysicalABIForOwner(
 	}
 	for _, block := range fn.Blocks {
 		for _, instr := range block.Instrs {
-			if boxed, ok := instr.(*ssa.MakeInterface); ok && coroSyntheticSelectNoCaseBox(boxed) {
-				continue
+			instructionPlan, frozen := physical.instructions[instr]
+			if !frozen {
+				return coroLeafInstructionError(fn, plan, instr, "instruction is absent from the frozen physical plan")
 			}
-			if panicInstruction, ok := instr.(*ssa.Panic); ok && coroSyntheticSelectNoCasePanic(panicInstruction) {
+			if instructionPlan.outcomeFailure != "" {
+				return coroLeafInstructionError(fn, plan, instr, instructionPlan.outcomeFailure)
+			}
+			if instructionPlan.recipe == coroPhysicalInstructionSyntheticSelectNoCaseBox ||
+				instructionPlan.outcome == coroPhysicalOutcomeSyntheticSelectTrap {
 				continue
 			}
 			if handled, reason := pureSSA.validate(instr); handled {
 				if reason != "" {
 					return coroLeafInstructionError(fn, plan, instr, reason)
 				}
-				if instructionPlan, ok := physical.instructions[instr]; !ok {
-					return coroLeafInstructionError(fn, plan, instr, "instruction is absent from the frozen physical plan")
-				} else if instructionPlan.mayFault() {
+				if instructionPlan.mayFault() {
 					panics++
 				}
 				if call, ok := instr.(*ssa.Call); ok && isCoroCloseBuiltinCall(call) {
@@ -1349,21 +1352,29 @@ func validateCoroPhysicalABIForOwner(
 					}
 					panics++
 				}
+				if call, ok := instr.(*ssa.Call); ok && isCoroRecoverBuiltinCall(call) &&
+					instructionPlan.outcome != coroPhysicalOutcomeRecover {
+					return coroLeafInstructionError(fn, plan, instr, "recover builtin has no frozen outcome recipe")
+				}
 				continue
 			}
 			switch instr := instr.(type) {
 			case *ssa.DebugRef, *ssa.Jump:
 			case *ssa.Return:
+				if instructionPlan.outcome != coroPhysicalOutcomeReturn {
+					return coroLeafInstructionError(fn, plan, instr, "return has no frozen outcome recipe")
+				}
 			case *ssa.Defer, *ssa.RunDefers:
-				if cleanupPlan == nil {
-					return coroLeafInstructionError(fn, plan, instr, "defer instruction has no certified static cleanup plan")
+				want := coroPhysicalOutcomeDeferRegister
+				if _, run := instr.(*ssa.RunDefers); run {
+					want = coroPhysicalOutcomeRunDefers
+				}
+				if instructionPlan.outcome != want {
+					return coroLeafInstructionError(fn, plan, instr, "defer instruction has no frozen cleanup outcome recipe")
 				}
 			case *ssa.Panic:
-				if !explicitPanic {
-					return coroLeafInstructionError(fn, plan, instr, "explicit panic requires the explicit-status panic ABI")
-				}
-				if reason := validateCoroExplicitStatusPanic(pureSSA, instr); reason != "" {
-					return coroLeafInstructionError(fn, plan, instr, reason)
+				if instructionPlan.outcome != coroPhysicalOutcomePanic {
+					return coroLeafInstructionError(fn, plan, instr, "panic has no frozen outcome recipe")
 				}
 				panics++
 			case *ssa.If:

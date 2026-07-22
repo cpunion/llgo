@@ -79,7 +79,7 @@ func (p *context) compileCoroImplicitNilFieldAddrGuard(
 	if body == nil || field == nil || field.X == nil || b == nil || b.Func != p.fn {
 		panic("implicit nil FieldAddr guard escaped its physical coroutine body")
 	}
-	if p.compilation == nil || !p.compilation.EnableCoroExplicitStatusPanicABI ||
+	if !p.coroEmissionExplicitStatus() ||
 		body.abi.version < coroPhysicalABIVersionV1 {
 		panic("implicit nil FieldAddr guard requires the PhysicalABIV1 explicit-status panic ABI")
 	}
@@ -113,7 +113,7 @@ func (p *context) compileCoroImplicitNilAccessGuard(b llssa.Builder, base llssa.
 	if body == nil || b == nil || b.Func != p.fn {
 		panic("implicit nil access guard escaped its physical coroutine body")
 	}
-	if p.compilation == nil || !p.compilation.EnableCoroExplicitStatusPanicABI ||
+	if !p.coroEmissionExplicitStatus() ||
 		body.abi.version < coroPhysicalABIVersionV1 {
 		panic("implicit nil access guard requires the PhysicalABIV1 explicit-status panic ABI")
 	}
@@ -254,7 +254,7 @@ func (p *context) compileCoroSlicePlanned(
 		b == nil || b.Func != p.fn {
 		panic("structured coroutine Slice escaped its physical body")
 	}
-	if p.compilation == nil || !p.compilation.EnableCoroExplicitStatusPanicABI ||
+	if !p.coroEmissionExplicitStatus() ||
 		body.abi.version < coroPhysicalABIVersionV1 {
 		panic("structured coroutine Slice requires the PhysicalABIV1 explicit-status panic ABI")
 	}
@@ -361,7 +361,7 @@ func (p *context) materializeCoroFaultPayload(
 ) (typeWord, dataWord llssa.Expr) {
 	body := p.coroBody()
 	if body == nil || b == nil || b.Func != p.fn ||
-		p.compilation == nil || !p.compilation.EnableCoroExplicitStatusPanicABI ||
+		!p.coroEmissionExplicitStatus() ||
 		body.abi.version < coroPhysicalABIVersionV1 {
 		panic("coroutine fault payload materialization requires an explicit-status PhysicalABIV1 body")
 	}
