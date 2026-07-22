@@ -176,6 +176,7 @@ func TestDeferInitBuilderInheritsDebugLocation(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "defer.go", `package p
 func f() {}
+func child() {}
 `, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -207,6 +208,32 @@ func f() {}
 		t.Fatalf("defer debug location = %+v, want %s:%d:%d", loc, bodyPos.Filename, bodyPos.Line, bodyPos.Column)
 	}
 	deferBuilder.Jump(next)
+
+	childDecl := file.Decls[1].(*ast.FuncDecl)
+	childObject := typesPkg.Scope().Lookup("child").(*types.Func)
+	child := pkg.NewFunc("example.com/p.child", childObject.Type().(*types.Signature), InGo)
+	childBuilder := child.MakeBody(1)
+	defer childBuilder.Dispose()
+	childPos := fset.Position(childDecl.Body.Lbrace)
+	childBuilder.DebugFunction(child, childObject.Scope(), fset.Position(childObject.Pos()), childPos)
+	childBuilder.DISetCurrentDebugLocation(child, childPos)
+	childBuilder.Return()
+
+	sameLoc := childBuilder.deferDebugLocationFor(child)
+	if sameLoc.Scope != child.diFunc.ll {
+		t.Fatal("same-function defer location changed scope")
+	}
+	ownerLoc := childBuilder.deferDebugLocationFor(fn)
+	if ownerLoc.Line != uint(childPos.Line) || ownerLoc.Col != uint(childPos.Column) || ownerLoc.Scope != fn.diFunc.ll || !ownerLoc.InlinedAt.IsNil() {
+		t.Fatalf("cross-function defer location = %+v, want owner scope at %s:%d:%d", ownerLoc, childPos.Filename, childPos.Line, childPos.Column)
+	}
+	plain := pkg.NewFunc("example.com/p.plain", NoArgsNoRet, InGo)
+	plainBuilder := plain.MakeBody(1)
+	defer plainBuilder.Dispose()
+	plainBuilder.Return()
+	if loc := childBuilder.deferDebugLocationFor(plain); !loc.Scope.IsNil() {
+		t.Fatalf("defer location for non-debug owner has scope %+v", loc.Scope)
+	}
 
 	pkg.FinalizeDebug()
 	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {

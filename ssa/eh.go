@@ -151,6 +151,19 @@ func (b Builder) deferDebugLocation() llvm.DebugLoc {
 	return b.impl.GetCurrentDebugLocation()
 }
 
+func (b Builder) deferDebugLocationFor(owner Function) llvm.DebugLoc {
+	loc := b.deferDebugLocation()
+	if b.Func == owner || loc.Scope.IsNil() {
+		return loc
+	}
+	if owner.diFunc == nil {
+		return llvm.DebugLoc{}
+	}
+	loc.Scope = owner.diFunc.ll
+	loc.InlinedAt = llvm.Metadata{}
+	return loc
+}
+
 func (b Builder) setDeferDebugLocation(loc llvm.DebugLoc) {
 	if !loc.Scope.IsNil() {
 		b.impl.SetCurrentDebugLocation(loc.Line, loc.Col, loc.Scope, loc.InlinedAt)
@@ -406,7 +419,7 @@ func (b Builder) DeferTo(owner Function, stack Expr, fn Expr, buildCall func(Bui
 		fn:        fn,
 		args:      args,
 		buildCall: buildCall,
-		loc:       b.deferDebugLocation(),
+		loc:       b.deferDebugLocationFor(owner),
 	}
 	if self == nil {
 		owner.pendingLoopCases = append(owner.pendingLoopCases, loopCase)
