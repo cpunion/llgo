@@ -39,6 +39,7 @@ type coroSiteEmissionObserver struct {
 	seenElision                bool
 	expectedPhysical           coroPhysicalInstructionPlan
 	hasExpectedPhysical        bool
+	seenSemantic               bool
 	seenPhysical               bool
 	seenPhysicalNilGuard       bool
 	seenPhysicalBoundsGuard    bool
@@ -135,6 +136,12 @@ func (p *context) beginCoroSiteEmissionMode(instruction ssa.Instruction, placeme
 				instruction.String(), observer.expectedElision,
 			))
 		}
+		if observer.hasExpectedPhysical && !observer.seenSemantic {
+			panic(fmt.Errorf(
+				"coroutine emission site %q omitted frozen semantic recipe %s",
+				instruction.String(), observer.expectedPhysical.semantic.recipe,
+			))
+		}
 		if observer.hasExpectedPhysical && !observer.seenPhysical {
 			panic(fmt.Errorf(
 				"coroutine emission site %q omitted frozen physical recipe %s",
@@ -154,6 +161,20 @@ func (p *context) beginCoroSiteEmissionMode(instruction ssa.Instruction, placeme
 			))
 		}
 	}
+}
+
+func (p *context) observeCoroSemanticInstruction(instruction ssa.Instruction) {
+	observer := p.coroEmissionSite()
+	if observer == nil {
+		return
+	}
+	if !observer.hasExpectedPhysical || observer.instruction != instruction || observer.expectedPhysical.semantic.recipe == "" {
+		panic("coroutine semantic recipe emission has no exact physical SitePlan")
+	}
+	if observer.seenSemantic {
+		panic(fmt.Errorf("coroutine emission site %q emitted its semantic recipe more than once", instruction.String()))
+	}
+	observer.seenSemantic = true
 }
 
 func (p *context) observeCoroPhysicalNilGuard(instruction ssa.Instruction) {

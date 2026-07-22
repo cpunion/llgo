@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/goplus/llgo/internal/coro"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -220,10 +221,31 @@ func (u *EmissionUniverse) CoroCallSitePlan(call ssa.CallInstruction) (CoroCallS
 	return frozen.plan, true, nil
 }
 
-// CoroIntrinsicCallSiteSemantics is the compatibility projection of the
-// frozen call SitePlan. It performs no opcode or operand classification.
-func (u *EmissionUniverse) CoroIntrinsicCallSiteSemantics(call ssa.CallInstruction) (CoroIntrinsicCallSemantics, bool, error) {
-	plan, found, err := u.CoroCallSitePlan(call)
+// CoroLocalBodyFacts returns the ProgramIR-owned local semantic projection for
+// one exact canonical function. Production whole-program analysis consumes
+// this callback instead of rescanning raw SSA for Effect/Exec facts.
+func (u *EmissionUniverse) CoroLocalBodyFacts(function *ssa.Function) (coro.SSAFunctionBodyFacts, error) {
+	if u == nil || u.coroProgramIR == nil {
+		return coro.SSAFunctionBodyFacts{}, fmt.Errorf("coroutine local body facts require a prepared ProgramIR")
+	}
+	canonical, frozen := u.Resolve(function)
+	if !frozen || canonical == nil || canonical != function {
+		return coro.SSAFunctionBodyFacts{}, fmt.Errorf("coroutine local body facts require one exact canonical function")
+	}
+	return u.coroProgramIR.functionLocalBodyFacts(function)
+}
+
+type coroCallSitePlanReader interface {
+	CoroCallSitePlan(ssa.CallInstruction) (CoroCallSitePlan, bool, error)
+}
+
+// coroIntrinsicCallSiteSemantics is the package-local compatibility projection
+// of the frozen call SitePlan. It performs no opcode or operand classification.
+func coroIntrinsicCallSiteSemantics(reader coroCallSitePlanReader, call ssa.CallInstruction) (CoroIntrinsicCallSemantics, bool, error) {
+	if reader == nil {
+		return CoroIntrinsicCallUnsupported, false, fmt.Errorf("coroutine intrinsic projection requires a call SitePlan reader")
+	}
+	plan, found, err := reader.CoroCallSitePlan(call)
 	if err != nil {
 		return plan.IntrinsicSemantics, plan.Intrinsic, err
 	}

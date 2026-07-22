@@ -137,6 +137,7 @@ type CoroPlanInput struct {
 
 	resolveFunction                func(*ssa.Function) (*ssa.Function, bool)
 	augmentFunctionIDs             func(coro.FunctionIDConfig) coro.FunctionIDConfig
+	localBodyFacts                 func(*ssa.Function) (coro.SSAFunctionBodyFacts, error)
 	functionBackground             func(*ssa.Function) (llssa.Background, bool, error)
 	rawCFunctionType               func(types.Type) (bool, error)
 	foreignNoBlock                 func(*ssa.Function) (cl.CoroForeignNoBlockCertificate, bool, error)
@@ -337,6 +338,12 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 	// merely subtracting MayPark from the aggregate plan would also hide a real
 	// channel/select park or a builder-supplied effect.
 	rawPlainBasePolicyEffects := make(map[*ssa.Function]coro.Effect)
+	if config.ClassifyLocalBody != nil {
+		return nil, fmt.Errorf("build coroutine plan: builder cannot override frozen ProgramIR local body facts")
+	}
+	if in.localBodyFacts != nil {
+		config.ClassifyLocalBody = in.localBodyFacts
+	}
 	if config.ClassifyConditionalManagedStoreReference != nil {
 		// A Go global function cell is a managed descriptor publication. Raw
 		// provenance belongs to exact invocation occurrences owned by the frontend
@@ -3285,6 +3292,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	if ctx.coroEmission != nil {
 		input.EmissionUniverse = ctx.coroSSAEmission
 		input.resolveFunction = ctx.coroEmission.Resolve
+		input.localBodyFacts = ctx.coroEmission.CoroLocalBodyFacts
 		input.functionBackground = ctx.coroEmission.FunctionBackground
 		input.rawCFunctionType = func(typ types.Type) (bool, error) {
 			if typ == nil {
@@ -4710,10 +4718,11 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 				if !ok || callee == nil {
 					continue
 				}
-				semantics, intrinsic, err := ctx.coroEmission.CoroIntrinsicCallSiteSemantics(call)
+				callSite, found, err := ctx.coroEmission.CoroCallSitePlan(call)
 				if err != nil {
 					return nil, nil, nil, nil, fmt.Errorf("classify compiler runtime ABI intrinsic %q in %q: %w", callee.Name(), fn.Name(), err)
 				}
+				semantics, intrinsic := callSite.IntrinsicSemantics, found && callSite.Intrinsic
 				if intrinsic && semantics.ElidesManagedCall() {
 					// cl emits no call to the intrinsic declaration itself. Any
 					// managed calls inserted by the operation were queued above
@@ -4964,10 +4973,11 @@ func provenCoroDirectPlainStaticClosure(ctx *context, target *ssa.Function, clos
 				if _, direct := call.(*ssa.Call); !direct {
 					return nil, false, nil
 				}
-				semantics, intrinsic, err := ctx.coroEmission.CoroIntrinsicCallSiteSemantics(call)
+				callSite, found, err := ctx.coroEmission.CoroCallSitePlan(call)
 				if err != nil {
 					return nil, false, fmt.Errorf("classify direct-plain callback intrinsic %q in %q: %w", call.String(), function.Name(), err)
 				}
+				semantics, intrinsic := callSite.IntrinsicSemantics, found && callSite.Intrinsic
 				if intrinsic && semantics.ElidesManagedCall() {
 					// The frontend emits the exact intrinsic operation inline;
 					// its declaration/fallback SSA body is not a callable edge.

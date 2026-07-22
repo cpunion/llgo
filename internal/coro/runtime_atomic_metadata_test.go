@@ -103,7 +103,11 @@ func TestRuntimeAtomicMetadataLoopsArePreemptibleWithoutOwnedLocks(t *testing.T)
 		if !hasBackedge {
 			t.Errorf("atomic metadata function %s lost its expected retry/traversal backedge", function)
 		}
-		_, exec := scanSSAFunctionBody(function, -1)
+		facts := scanSSAFunctionBody(function)
+		exec := facts.Exec
+		if facts.HasCycle {
+			exec = exec.Join(NeedsPreempt)
+		}
 		if !exec.Contains(NeedsPreempt) {
 			t.Errorf("atomic metadata function %s backedge is no longer classified preemptible: %s", function, exec)
 		}

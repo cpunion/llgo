@@ -18,7 +18,6 @@ package cl
 
 import (
 	"fmt"
-	"go/token"
 	"strconv"
 
 	"github.com/goplus/llgo/internal/coro"
@@ -228,7 +227,11 @@ func (u *EmissionUniverse) coroInstructionLoweringFact(ctx *context, plan *coro.
 		})
 	}
 
-	class, recipe, effect, exec, materialized := coroSourceInstructionFact(instruction)
+	semantic, err := u.coroProgramIR.semanticInstructionPlan(function, ctx.emissionOwner, instruction)
+	if err != nil {
+		return coro.LoweringFact{}, false, fmt.Errorf("load frozen semantic SitePlan: %w", err)
+	}
+	class, recipe, effect, exec, materialized := semantic.class, semantic.recipe, semantic.effect, semantic.exec, semantic.materialized
 	functionUses := []coro.FunctionValueFact{}
 	if store, ok := instruction.(*ssa.Store); ok {
 		if target, conditional := plan.ConditionalManagedStoreTarget(store); conditional {
@@ -255,7 +258,7 @@ func (u *EmissionUniverse) coroInstructionLoweringFact(ctx *context, plan *coro.
 	implicitPanic := coroImplicitPanicFacts(helperNames)
 	if len(helpers) != 0 || len(implicitPanic) != 0 {
 		materialized = true
-		if recipe == "" {
+		if !semantic.materialized {
 			class = coro.OpLowered
 			if len(helpers) == 0 {
 				recipe = coro.RecipeID("cl.ssa.implicit-fault-guard.v0")
@@ -267,7 +270,7 @@ func (u *EmissionUniverse) coroInstructionLoweringFact(ctx *context, plan *coro.
 	if call, ok := instruction.(ssa.CallInstruction); ok && call.Common() != nil {
 		if callee := call.Common().StaticCallee(); callee != nil {
 			if _, frozen := u.Resolve(callee); frozen {
-				semantics, intrinsic, err := u.CoroIntrinsicCallSiteSemantics(call)
+				semantics, intrinsic, err := coroIntrinsicCallSiteSemantics(u, call)
 				if err != nil {
 					return coro.LoweringFact{}, false, err
 				}
@@ -341,32 +344,6 @@ func (u *EmissionUniverse) coroInstructionLoweringFact(ctx *context, plan *coro.
 		FunctionUses:  functionUses,
 		Contract:      contract,
 	}, true, nil
-}
-
-func coroSourceInstructionFact(instruction ssa.Instruction) (class coro.OpClass, recipe coro.RecipeID, effect coro.Effect, exec coro.ExecFlags, materialized bool) {
-	switch instruction := instruction.(type) {
-	case *ssa.Send:
-		return coro.OpChannel, coro.RecipeID("cl.ssa.channel-send.v0"), coro.MayPark, 0, true
-	case *ssa.UnOp:
-		if instruction.Op == token.ARROW {
-			return coro.OpChannel, coro.RecipeID("cl.ssa.channel-recv.v0"), coro.MayPark, 0, true
-		}
-	case *ssa.Select:
-		effect := coro.NoSuspend
-		if instruction.Blocking {
-			effect = coro.MayPark
-		}
-		return coro.OpSelect, coro.RecipeID("cl.ssa.select.v0"), effect, 0, true
-	case *ssa.Go:
-		return coro.OpSpawn, coro.RecipeID("cl.ssa.spawn.v0"), coro.NoSuspend, 0, true
-	case *ssa.Defer:
-		return coro.OpControl, coro.RecipeID("cl.ssa.defer.v0"), coro.NoSuspend, coro.NeedsCleanupFrame, true
-	case *ssa.RunDefers:
-		return coro.OpControl, coro.RecipeID("cl.ssa.run-defers.v0"), coro.NoSuspend, coro.NeedsCleanupFrame, true
-	case *ssa.Panic:
-		return coro.OpControl, coro.RecipeID("cl.ssa.panic.v0"), coro.NoSuspend, coro.MayUnwind, true
-	}
-	return "", "", coro.NoSuspend, 0, false
 }
 
 func coroIntrinsicLoweringRecipe(semantics CoroIntrinsicCallSemantics) (coro.RecipeID, coro.Effect) {

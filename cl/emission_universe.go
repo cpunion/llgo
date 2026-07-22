@@ -4476,6 +4476,19 @@ func (u *EmissionUniverse) materializeFunction(fn *ssa.Function) (bool, error) {
 
 func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *preparedEmissionPackage, emissionState emissionFunctionState) error {
 	u.freezeUnsafeSizeAlignUnevaluatedSSA(fn)
+	// Freeze local source semantics for every required body before classifying
+	// its physical frontend kind. Intrinsic and foreign declarations can retain
+	// SSA stub bodies that participate in whole-program policy analysis even
+	// though codegen does not emit those instructions. ProgramIR must therefore
+	// own their local facts as well; falling back to an analysis-time raw scan
+	// would reopen a second semantic authority.
+	for _, block := range fn.Blocks {
+		for _, instruction := range block.Instrs {
+			if err := u.coroProgramIR.freezeSemanticInstruction(fn, owner, instruction); err != nil {
+				return fmt.Errorf("prepare emission universe: function %q semantic SitePlan: %w", fn.Name(), err)
+			}
+		}
+	}
 	ctx, err := u.functionABIContext(fn, owner)
 	if err != nil {
 		return err
@@ -4484,6 +4497,9 @@ func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *
 	if ftype != goFunc {
 		// compileFuncDecl retains the declaration/symbol classification but
 		// returns before compiling anonymous children, operands, or ABI roots.
+		if err := u.coroProgramIR.freezeSiteOwner(fn, owner); err != nil {
+			return fmt.Errorf("prepare emission universe: non-Go function %q: %w", fn.Name(), err)
+		}
 		return nil
 	}
 	if err := u.registerFunctionLocalGenericTypes(fn, owner); err != nil {

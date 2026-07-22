@@ -204,8 +204,8 @@ func Use(value string) *int8 { return AllocaCStr(value) }
 	}
 
 	delete(universe.loweredCalls[owner], "CStrCopy")
-	if _, intrinsic, err := universe.CoroIntrinsicCallSiteSemantics(call); err == nil || !intrinsic || !strings.Contains(err.Error(), "no exact frozen CStrCopy lowered call") {
-		t.Fatalf("AllocaCStr missing-helper semantics = _, %v, %v; want fail-closed frozen-edge error", intrinsic, err)
+	if semantics, intrinsic, err := universe.CoroIntrinsicCallSiteSemantics(call); err != nil || !intrinsic || semantics != CoroIntrinsicCallInlineWithLoweredCalls {
+		t.Fatalf("AllocaCStr frozen semantics after scratch mutation = %v, %v, %v", semantics, intrinsic, err)
 	}
 }
 

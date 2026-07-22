@@ -86,6 +86,10 @@ type coroArchitectureDebtBudget struct {
 	parkProtocolTemplate      int
 	parkProtocolEmission      int
 	legacyParkProtocolStep    int
+	rawLocalBodyScan          int
+	localBodyFactAuthority    int
+	semanticRecipePlan        int
+	semanticRecipeObservation int
 }
 
 var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
@@ -139,6 +143,10 @@ var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
 	parkProtocolTemplate:      1,
 	parkProtocolEmission:      7,
 	legacyParkProtocolStep:    0,
+	rawLocalBodyScan:          2,
+	localBodyFactAuthority:    2,
+	semanticRecipePlan:        3,
+	semanticRecipeObservation: 2,
 }
 
 var allowedCurrentCoroFiles = map[string]bool{}
@@ -365,6 +373,26 @@ var migratedParkProtocolFunctions = map[string]bool{
 
 var allowedLegacyParkProtocolStepFiles = map[string]bool{}
 
+var allowedRawLocalBodyScanFiles = map[string]bool{
+	"internal/coro/ssa_plan.go": true,
+}
+
+var allowedLocalBodyFactAuthorityFiles = map[string]bool{
+	"cl/coro_call_site_plan.go": true,
+	"internal/build/build.go":   true,
+}
+
+var allowedSemanticRecipePlanFiles = map[string]bool{
+	"cl/coro_physical_plan.go": true,
+	"cl/coro_program_ir.go":    true,
+	"cl/coro_semantic_plan.go": true,
+}
+
+var allowedSemanticRecipeObservationFiles = map[string]bool{
+	"cl/compile.go":        true,
+	"cl/coro_site_plan.go": true,
+}
+
 var allowedCoroParkOperationFields = map[string]bool{
 	"shouldSuspend": true,
 	"park":          true,
@@ -421,6 +449,10 @@ type coroArchitectureDebtInventory struct {
 	parkProtocolEmissionFiles      map[string]bool
 	parkProtocolEmissionFunctions  map[string]bool
 	legacyParkProtocolStepFiles    map[string]bool
+	rawLocalBodyScanFiles          map[string]bool
+	localBodyFactAuthorityFiles    map[string]bool
+	semanticRecipePlanFiles        map[string]bool
+	semanticRecipeObservationFiles map[string]bool
 	parkProtocolFields             map[string]bool
 	parkFaultRouteFields           map[string]bool
 }
@@ -484,6 +516,10 @@ func TestCoroArchitectureDebtIsMonotonic(t *testing.T) {
 	check("Park protocol template", inventory.parkProtocolTemplate, budget.parkProtocolTemplate)
 	check("Park protocol emission", inventory.parkProtocolEmission, budget.parkProtocolEmission)
 	check("legacy Park protocol steps/state", inventory.legacyParkProtocolStep, budget.legacyParkProtocolStep)
+	check("raw local-body scanner boundary", inventory.rawLocalBodyScan, budget.rawLocalBodyScan)
+	check("ProgramIR local-body fact authority", inventory.localBodyFactAuthority, budget.localBodyFactAuthority)
+	check("semantic recipe planner boundary", inventory.semanticRecipePlan, budget.semanticRecipePlan)
+	check("semantic recipe observation", inventory.semanticRecipeObservation, budget.semanticRecipeObservation)
 
 	checkExactCoroArchitectureSet(t, "currentCoro production files", inventory.currentCoroFiles, allowedCurrentCoroFiles)
 	checkExactCoroArchitectureSet(t, "staged coroutine feature names", inventory.featureNames, allowedStagedCoroFeatureNames)
@@ -524,6 +560,10 @@ func TestCoroArchitectureDebtIsMonotonic(t *testing.T) {
 	checkExactCoroArchitectureSet(t, "Park protocol emission files", inventory.parkProtocolEmissionFiles, migratedParkProtocolFiles)
 	checkExactCoroArchitectureSet(t, "Park protocol emission functions", inventory.parkProtocolEmissionFunctions, migratedParkProtocolFunctions)
 	checkExactCoroArchitectureSet(t, "legacy Park protocol step files", inventory.legacyParkProtocolStepFiles, allowedLegacyParkProtocolStepFiles)
+	checkExactCoroArchitectureSet(t, "raw local-body scanner files", inventory.rawLocalBodyScanFiles, allowedRawLocalBodyScanFiles)
+	checkExactCoroArchitectureSet(t, "ProgramIR local-body fact authority files", inventory.localBodyFactAuthorityFiles, allowedLocalBodyFactAuthorityFiles)
+	checkExactCoroArchitectureSet(t, "semantic recipe planner files", inventory.semanticRecipePlanFiles, allowedSemanticRecipePlanFiles)
+	checkExactCoroArchitectureSet(t, "semantic recipe observation files", inventory.semanticRecipeObservationFiles, allowedSemanticRecipeObservationFiles)
 	checkExactCoroArchitectureSet(t, "Park protocol fields", inventory.parkProtocolFields, allowedCoroParkOperationFields)
 	checkExactCoroArchitectureSet(t, "Park fault-route fields", inventory.parkFaultRouteFields, allowedCoroParkFaultRouteFields)
 }
@@ -578,6 +618,10 @@ func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitecture
 		parkProtocolEmissionFiles:      make(map[string]bool),
 		parkProtocolEmissionFunctions:  make(map[string]bool),
 		legacyParkProtocolStepFiles:    make(map[string]bool),
+		rawLocalBodyScanFiles:          make(map[string]bool),
+		localBodyFactAuthorityFiles:    make(map[string]bool),
+		semanticRecipePlanFiles:        make(map[string]bool),
+		semanticRecipeObservationFiles: make(map[string]bool),
 		parkProtocolFields:             make(map[string]bool),
 		parkFaultRouteFields:           make(map[string]bool),
 	}
@@ -741,6 +785,18 @@ func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitecture
 						}
 					}
 					switch name {
+					case "scanSSAFunctionBody":
+						inventory.rawLocalBodyScan++
+						inventory.rawLocalBodyScanFiles[rel] = true
+					case "CoroLocalBodyFacts":
+						inventory.localBodyFactAuthority++
+						inventory.localBodyFactAuthorityFiles[rel] = true
+					case "planCoroSemanticInstruction":
+						inventory.semanticRecipePlan++
+						inventory.semanticRecipePlanFiles[rel] = true
+					case "observeCoroSemanticInstruction":
+						inventory.semanticRecipeObservation++
+						inventory.semanticRecipeObservationFiles[rel] = true
 					case "currentCoro":
 						inventory.currentCoro++
 						inventory.currentCoroFiles[rel] = true

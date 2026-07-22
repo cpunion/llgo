@@ -1359,7 +1359,7 @@ func (b *coroFrameRetentionRootBuilder) boundedCallKind(call *ssa.Call) (coroFra
 		return coroFrameRetentionCallParkOwnerV1, true
 	}
 	if b.audit.universe.CoroWorkerEnabled() {
-		semantics, intrinsic, err := b.audit.universe.CoroIntrinsicCallSiteSemantics(call)
+		semantics, intrinsic, err := coroIntrinsicCallSiteSemantics(b.audit.universe, call)
 		if err == nil && intrinsic && semantics == CoroIntrinsicCallInlineSuspend {
 			workerCertified := false
 			if b.audit.plan == nil {
@@ -2247,7 +2247,7 @@ func (a *coroPhysicalPureSSAAudit) classifyFrameRetentionCall(call *ssa.Call) (c
 	if call == nil || call.Common() == nil || call.Common().IsInvoke() || call.Parent() != a.fn {
 		return coroFrameRetentionCallNone, nil, false
 	}
-	semantics, intrinsic, err := a.universe.CoroIntrinsicCallSiteSemantics(call)
+	semantics, intrinsic, err := coroIntrinsicCallSiteSemantics(a.universe, call)
 	if err == nil && intrinsic && semantics == CoroIntrinsicCallInlineSuspend {
 		return coroFrameRetentionCallPark, nil, true
 	}

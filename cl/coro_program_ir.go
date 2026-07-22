@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/goplus/llgo/internal/coro"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -29,6 +30,8 @@ import (
 type coroProgramIR struct {
 	sitePlans           map[emissionFunctionOwnerKey]map[ssa.Instruction]coroEmissionSitePlan
 	siteOwners          map[emissionFunctionOwnerKey]none
+	semanticPlans       map[emissionFunctionOwnerKey]map[ssa.Instruction]coroSemanticInstructionPlan
+	localBodyFacts      map[*ssa.Function]coro.SSAFunctionBodyFacts
 	callPlans           map[ssa.CallInstruction]coroFrozenCallSitePlan
 	callsFrozen         bool
 	physicalPlans       map[emissionFunctionOwnerKey]*coroPhysicalFunctionPlan
@@ -37,11 +40,44 @@ type coroProgramIR struct {
 
 func newCoroProgramIR() *coroProgramIR {
 	return &coroProgramIR{
-		sitePlans:     make(map[emissionFunctionOwnerKey]map[ssa.Instruction]coroEmissionSitePlan),
-		siteOwners:    make(map[emissionFunctionOwnerKey]none),
-		callPlans:     make(map[ssa.CallInstruction]coroFrozenCallSitePlan),
-		physicalPlans: make(map[emissionFunctionOwnerKey]*coroPhysicalFunctionPlan),
+		sitePlans:      make(map[emissionFunctionOwnerKey]map[ssa.Instruction]coroEmissionSitePlan),
+		siteOwners:     make(map[emissionFunctionOwnerKey]none),
+		semanticPlans:  make(map[emissionFunctionOwnerKey]map[ssa.Instruction]coroSemanticInstructionPlan),
+		localBodyFacts: make(map[*ssa.Function]coro.SSAFunctionBodyFacts),
+		callPlans:      make(map[ssa.CallInstruction]coroFrozenCallSitePlan),
+		physicalPlans:  make(map[emissionFunctionOwnerKey]*coroPhysicalFunctionPlan),
 	}
+}
+
+func (ir *coroProgramIR) freezeSemanticInstruction(
+	function *ssa.Function,
+	owner *preparedEmissionPackage,
+	instruction ssa.Instruction,
+) error {
+	if ir == nil || function == nil || owner == nil || instruction == nil || instruction.Parent() != function {
+		return fmt.Errorf("semantic SitePlan requires one exact program IR, owner, and source instruction")
+	}
+	key := emissionFunctionOwnerKey{function: function, owner: owner}
+	if _, sealed := ir.siteOwners[key]; sealed {
+		return fmt.Errorf("semantic SitePlan for function %q owner %q was added after owner freeze", function.Name(), owner.identity)
+	}
+	plan, err := planCoroSemanticInstruction(instruction)
+	if err != nil {
+		return err
+	}
+	byInstruction := ir.semanticPlans[key]
+	if byInstruction == nil {
+		byInstruction = make(map[ssa.Instruction]coroSemanticInstructionPlan)
+		ir.semanticPlans[key] = byInstruction
+	}
+	if previous, exists := byInstruction[instruction]; exists {
+		if previous != plan {
+			return fmt.Errorf("source instruction acquired conflicting semantic recipes")
+		}
+		return nil
+	}
+	byInstruction[instruction] = plan
+	return nil
 }
 
 func (ir *coroProgramIR) freezeSite(function *ssa.Function, owner *preparedEmissionPackage, instruction ssa.Instruction, plan coroEmissionSitePlan) error {
@@ -75,8 +111,62 @@ func (ir *coroProgramIR) freezeSiteOwner(function *ssa.Function, owner *prepared
 	if _, frozen := ir.siteOwners[key]; frozen {
 		return fmt.Errorf("coroutine site plan owner %q was frozen more than once", function.Name())
 	}
+	semantic := ir.semanticPlans[key]
+	facts := coro.SSAFunctionBodyFacts{Effect: coro.NoSuspend}
+	if function.Blocks != nil {
+		facts.Exec = coro.MayUnwind
+	}
+	for _, block := range function.Blocks {
+		for _, instruction := range block.Instrs {
+			plan, ok := semantic[instruction]
+			if !ok {
+				return fmt.Errorf("coroutine semantic SitePlan owner %q omitted source instruction %q", function.Name(), instruction.String())
+			}
+			facts.Effect = facts.Effect.Join(plan.effect)
+			facts.Exec = facts.Exec.Join(plan.exec)
+			if !plan.debug {
+				facts.InstructionCount++
+			}
+		}
+	}
+	facts.Effect = facts.Effect.Normalize()
+	facts.HasCycle = coroSemanticCFGHasCycle(function.Blocks)
+	if previous, exists := ir.localBodyFacts[function]; exists && previous != facts {
+		return fmt.Errorf("function %q acquired owner-dependent local semantic facts", function.Name())
+	}
+	ir.localBodyFacts[function] = facts
 	ir.siteOwners[key] = none{}
 	return nil
+}
+
+func (ir *coroProgramIR) semanticInstructionPlan(
+	function *ssa.Function,
+	owner *preparedEmissionPackage,
+	instruction ssa.Instruction,
+) (coroSemanticInstructionPlan, error) {
+	if ir == nil || function == nil || owner == nil || instruction == nil || instruction.Parent() != function {
+		return coroSemanticInstructionPlan{}, fmt.Errorf("semantic SitePlan lookup requires one exact function owner and source instruction")
+	}
+	key := emissionFunctionOwnerKey{function: function, owner: owner}
+	if _, frozen := ir.siteOwners[key]; !frozen {
+		return coroSemanticInstructionPlan{}, fmt.Errorf("semantic SitePlan owner is not frozen")
+	}
+	plan, ok := ir.semanticPlans[key][instruction]
+	if !ok {
+		return coroSemanticInstructionPlan{}, fmt.Errorf("source instruction %q has no frozen semantic recipe", instruction.String())
+	}
+	return plan, nil
+}
+
+func (ir *coroProgramIR) functionLocalBodyFacts(function *ssa.Function) (coro.SSAFunctionBodyFacts, error) {
+	if ir == nil || function == nil {
+		return coro.SSAFunctionBodyFacts{}, fmt.Errorf("local body facts require one exact function")
+	}
+	facts, ok := ir.localBodyFacts[function]
+	if !ok {
+		return coro.SSAFunctionBodyFacts{}, fmt.Errorf("function %q has no frozen local body facts", function.Name())
+	}
+	return facts, nil
 }
 
 func (ir *coroProgramIR) sitePlan(ctx *context, instruction ssa.Instruction) (coroEmissionSitePlan, error) {

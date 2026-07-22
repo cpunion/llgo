@@ -338,7 +338,7 @@ func buildCoroNativeIngressE2EUser(t *testing.T, prog llssa.Program, temp string
 			}
 		},
 		ClassifyElidedCall: func(_ *ssa.Function, call ssa.CallInstruction) (bool, error) {
-			semantics, intrinsic, err := universe.CoroIntrinsicCallSiteSemantics(call)
+			semantics, intrinsic, err := coroIntrinsicCallSiteSemanticsForTest(universe, call)
 			return intrinsic && semantics.ElidesManagedCall(), err
 		},
 	})

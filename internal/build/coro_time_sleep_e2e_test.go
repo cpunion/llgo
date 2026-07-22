@@ -174,7 +174,7 @@ func TestCoroNativeTimeSleepProductionPlanAndCodegen(t *testing.T) {
 	}
 	intrinsicCall := findCoroNativeTimerE2EDirectCall(t, sleep, intrinsic)
 	assertCoroTimeSleepNonpositiveFastPath(t, sleep, intrinsicCall)
-	semantics, isIntrinsic, semanticsErr := emission.CoroIntrinsicCallSiteSemantics(intrinsicCall)
+	semantics, isIntrinsic, semanticsErr := coroIntrinsicCallSiteSemanticsForTest(emission, intrinsicCall)
 	if semanticsErr != nil || !isIntrinsic || !semantics.SuspendsCurrentFrame() || !plan.ElidesCall(intrinsicCall) {
 		t.Fatalf("production time.Sleep timer semantics = %v, intrinsic=%t, err=%v, elided=%t; want exact suspending intrinsic", semantics, isIntrinsic, semanticsErr, plan.ElidesCall(intrinsicCall))
 	}

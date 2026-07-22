@@ -356,7 +356,7 @@ func buildCoroNativeTimerE2EUser(t *testing.T, prog llssa.Program, temp string) 
 	}, plan, ""); err != nil {
 		t.Fatalf("native timer hot spawn is outside the production run gate: %v", err)
 	}
-	semantics, intrinsic, semanticsErr := universe.CoroIntrinsicCallSiteSemantics(parkCall)
+	semantics, intrinsic, semanticsErr := coroIntrinsicCallSiteSemanticsForTest(universe, parkCall)
 	if semanticsErr != nil || !intrinsic || !semantics.SuspendsCurrentFrame() || !plan.ElidesCall(parkCall) {
 		t.Fatalf("native timer main park semantics = %v, intrinsic=%t, err=%v, elided=%t; want one production-classified suspend", semantics, intrinsic, semanticsErr, plan.ElidesCall(parkCall))
 	}

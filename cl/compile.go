@@ -1929,6 +1929,7 @@ func (p *context) getDebugLocScope(v *ssa.Function, pos token.Pos) *types.Scope 
 func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 	finishSite := p.beginCoroSiteEmission(instr)
 	defer finishSite()
+	p.observeCoroSemanticInstruction(instr)
 	if iv, ok := instr.(instrOrValue); ok {
 		p.compileInstrOrValue(b, iv, false)
 		return

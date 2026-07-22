@@ -952,7 +952,7 @@ func (a *coroPhysicalPureSSAAudit) validateCompilerElidedFunctionInterface(box *
 	if !ok || call.Parent() != a.fn || call.Common() == nil || len(call.Common().Args) != 1 || call.Common().Args[0] != box {
 		return "compiler-elided function interface is not the sole argument of its owning direct call"
 	}
-	semantics, intrinsic, err := a.universe.CoroIntrinsicCallSiteSemantics(call)
+	semantics, intrinsic, err := coroIntrinsicCallSiteSemantics(a.universe, call)
 	if err != nil {
 		return "compiler-elided function address intrinsic: " + err.Error()
 	}

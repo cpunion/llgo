@@ -381,8 +381,9 @@ func AllocZ(size uintptr) uintptr { return 0 }
 	functionIDs.SchedulerABI = coro.SchedulerNoneABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(testProgram.ssa, coro.Roots{{Function: owner, Demand: coro.AsyncDemand}}, coro.SSAConfig{
-		FunctionIDs:      functionIDs,
-		EmissionUniverse: ssaUniverse,
+		FunctionIDs:       functionIDs,
+		EmissionUniverse:  ssaUniverse,
+		ClassifyLocalBody: universe.CoroLocalBodyFacts,
 		ResolveFunction: func(function *ssa.Function) (*ssa.Function, bool, error) {
 			resolved, ok := universe.Resolve(function)
 			return resolved, ok, nil

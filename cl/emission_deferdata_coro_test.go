@@ -77,8 +77,8 @@ func Use() unsafe.Pointer { return DeferData() }
 	}
 
 	delete(universe.loweredCalls[owner], "GetThreadDefer")
-	if _, intrinsic, err := universe.CoroIntrinsicCallSiteSemantics(call); err == nil || !intrinsic || !strings.Contains(err.Error(), "no exact frozen GetThreadDefer lowered call") {
-		t.Fatalf("deferData missing-helper semantics = _, %v, %v; want fail-closed frozen-edge error", intrinsic, err)
+	if semantics, intrinsic, err := universe.CoroIntrinsicCallSiteSemantics(call); err != nil || !intrinsic || semantics != CoroIntrinsicCallInlineWithLoweredCalls {
+		t.Fatalf("deferData frozen semantics after scratch mutation = %v, %v, %v", semantics, intrinsic, err)
 	}
 }
 

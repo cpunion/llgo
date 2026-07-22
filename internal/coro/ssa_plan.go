@@ -322,6 +322,14 @@ type SSAConfig struct {
 	// This is an early heuristic, not the final cross-call MaxAtomicCost proof.
 	MaxPlainInstructions int
 
+	// ClassifyLocalBody supplies the immutable frontend-owned semantic recipe
+	// projection for one defined body. Active LLGo builds install this callback
+	// from CoroProgramIR so analysis does not rescan raw SSA to rediscover local
+	// channel, cleanup, panic, instruction-budget, or CFG-cycle facts. A nil
+	// callback preserves the standalone analyzer used by internal unit tests and
+	// third-party report tooling.
+	ClassifyLocalBody func(*ssa.Function) (SSAFunctionBodyFacts, error)
+
 	// DynamicResolution defaults to DynamicUnknownOnly. AnalyzeSSA's function
 	// enumeration may lazily materialize method wrappers in legacy whole-Program
 	// mode. With EmissionUniverse, CHA candidate discovery examines only the
@@ -507,6 +515,33 @@ type SSAConfig struct {
 	// classifier is called only for owned, non-ignored bodies and its result is
 	// copied, validated, and sorted before it becomes part of the immutable plan.
 	ClassifyLoweredCalls func(owner *ssa.Function) ([]SSALoweredCall, error)
+}
+
+// SSAFunctionBodyFacts is the local, non-call-propagated body projection
+// frozen by the frontend ProgramIR builder. InstructionCount excludes debug
+// instructions. HasCycle records only source CFG topology; AnalyzeSSA applies
+// the configured preemption budget after loading these facts.
+type SSAFunctionBodyFacts struct {
+	Effect           Effect
+	Exec             ExecFlags
+	InstructionCount int
+	HasCycle         bool
+}
+
+func (facts SSAFunctionBodyFacts) validate() error {
+	if err := facts.Effect.Validate(); err != nil {
+		return fmt.Errorf("local body effect: %w", err)
+	}
+	if facts.Effect != facts.Effect.Normalize() {
+		return fmt.Errorf("local body effect %s is not normalized", facts.Effect)
+	}
+	if err := facts.Exec.Validate(); err != nil {
+		return fmt.Errorf("local body execution flags: %w", err)
+	}
+	if facts.InstructionCount < 0 {
+		return fmt.Errorf("local body instruction count is negative")
+	}
+	return nil
 }
 
 // SSAFunctionPlan binds an immutable FunctionPlan back to its SSA function.
@@ -1335,7 +1370,23 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 			}
 			trusted := trustedPolicies[fn]
 			if _, ignored := ignoredBodies[fn]; !ignored {
-				bodyEffect, bodyExec := scanSSAFunctionBody(fn, maxPlain)
+				bodyFacts := SSAFunctionBodyFacts{}
+				if config.ClassifyLocalBody != nil {
+					var bodyErr error
+					bodyFacts, bodyErr = config.ClassifyLocalBody(fn)
+					if bodyErr != nil {
+						return nil, fmt.Errorf("coro: classify local SSA body %q: %w", fn.Name(), bodyErr)
+					}
+				} else {
+					bodyFacts = scanSSAFunctionBody(fn)
+				}
+				if err := bodyFacts.validate(); err != nil {
+					return nil, fmt.Errorf("coro: local SSA body %q: %w", fn.Name(), err)
+				}
+				bodyEffect, bodyExec := bodyFacts.Effect, bodyFacts.Exec
+				if bodyFacts.HasCycle || maxPlain >= 0 && bodyFacts.InstructionCount > maxPlain {
+					bodyExec = bodyExec.Join(NeedsPreempt)
+				}
 				if exactNoUnwind[fn] {
 					bodyExec &^= MayUnwind
 				}
@@ -2964,9 +3015,9 @@ func isUninstantiatedGeneric(fn *ssa.Function) bool {
 	return params != nil && params.Len() != 0 && len(fn.TypeArgs()) == 0
 }
 
-func scanSSAFunctionBody(fn *ssa.Function, maxPlain int) (Effect, ExecFlags) {
+func scanSSAFunctionBody(fn *ssa.Function) SSAFunctionBodyFacts {
 	if fn == nil || fn.Blocks == nil {
-		return NoSuspend, 0
+		return SSAFunctionBodyFacts{Effect: NoSuspend}
 	}
 	effect := NoSuspend
 	// SSA operations may panic implicitly (bounds, nil dereference, division,
@@ -3003,10 +3054,12 @@ func scanSSAFunctionBody(fn *ssa.Function, maxPlain int) (Effect, ExecFlags) {
 			}
 		}
 	}
-	if cfgHasCycle(fn.Blocks) || maxPlain >= 0 && instructions > maxPlain {
-		exec = exec.Join(NeedsPreempt)
+	return SSAFunctionBodyFacts{
+		Effect:           effect.Normalize(),
+		Exec:             exec,
+		InstructionCount: instructions,
+		HasCycle:         cfgHasCycle(fn.Blocks),
 	}
-	return effect, exec
 }
 
 func cfgHasCycle(blocks []*ssa.BasicBlock) bool {

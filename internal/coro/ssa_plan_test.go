@@ -117,6 +117,38 @@ func send(ch chan int) { ch <- 1 }
 	}
 }
 
+func TestAnalyzeSSAConsumesFrozenLocalBodyFactsWithoutRawRescan(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "source.go", `package coroid
+func root(ch chan int) {
+	for {
+		ch <- 1
+	}
+}
+`)
+	root := packageFunction(t, pkg, "root")
+	classifications := 0
+	plan, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: SyncDemand}}, SSAConfig{
+		MaxPlainInstructions: 1,
+		ClassifyLocalBody: func(function *ssa.Function) (SSAFunctionBodyFacts, error) {
+			if function != root {
+				return SSAFunctionBodyFacts{Effect: NoSuspend, Exec: MayUnwind}, nil
+			}
+			classifications++
+			return SSAFunctionBodyFacts{Effect: NoSuspend, Exec: MayUnwind}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if classifications == 0 {
+		t.Fatal("local body facts callback was not consumed")
+	}
+	got := functionPlanFor(t, plan, root)
+	if got.LocalEffect != NoSuspend || got.LocalExec.Contains(NeedsPreempt) {
+		t.Fatalf("raw send/loop semantics leaked past frozen local facts: effect=%s exec=%s", got.LocalEffect, got.LocalExec)
+	}
+}
+
 func TestSSAPlanResolvesOnlyClosedStaticSpawnAndKeepsOnePreemptibleTargetPrimary(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "spawn.go", `package coroid
 var ch chan int

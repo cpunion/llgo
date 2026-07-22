@@ -88,7 +88,11 @@ func Root(value int) int { return value + 1 }
 		function: root,
 		owner:    owner,
 		instructions: map[ssa.Instruction]coroPhysicalInstructionPlan{
-			instruction: {recipe: coroPhysicalInstructionDeref, nilGuard: true},
+			instruction: {
+				semantic: coroSemanticInstructionPlan{recipe: coro.RecipeID("test.semantic.v0")},
+				recipe:   coroPhysicalInstructionDeref,
+				nilGuard: true,
+			},
 		},
 	}
 	ctx := &context{
@@ -100,13 +104,22 @@ func Root(value int) int { return value + 1 }
 		},
 	}
 
-	missing := captureCoroSitePlanPanic(func() { ctx.beginCoroSiteEmission(instruction)() })
+	missingSemantic := captureCoroSitePlanPanic(func() { ctx.beginCoroSiteEmission(instruction)() })
+	if !strings.Contains(missingSemantic, "omitted frozen semantic recipe test.semantic.v0") {
+		t.Fatalf("missing semantic observation = %q", missingSemantic)
+	}
+	missing := captureCoroSitePlanPanic(func() {
+		finish := ctx.beginCoroSiteEmission(instruction)
+		defer finish()
+		ctx.observeCoroSemanticInstruction(instruction)
+	})
 	if !strings.Contains(missing, "omitted frozen physical recipe deref") {
 		t.Fatalf("missing physical observation = %q", missing)
 	}
 	mismatch := captureCoroSitePlanPanic(func() {
 		finish := ctx.beginCoroSiteEmission(instruction)
 		defer finish()
+		ctx.observeCoroSemanticInstruction(instruction)
 		ctx.observeCoroPhysicalInstruction(instruction, coroPhysicalInstructionIndex)
 	})
 	if !strings.Contains(mismatch, "emitted physical recipe index, frozen SitePlan requires deref") {
@@ -115,6 +128,7 @@ func Root(value int) int { return value + 1 }
 	missingGuard := captureCoroSitePlanPanic(func() {
 		finish := ctx.beginCoroSiteEmission(instruction)
 		defer finish()
+		ctx.observeCoroSemanticInstruction(instruction)
 		ctx.observeCoroPhysicalInstruction(instruction, coroPhysicalInstructionDeref)
 	})
 	if !strings.Contains(missingGuard, "physical nil-guard emission=false, frozen SitePlan requires true") {
@@ -123,6 +137,7 @@ func Root(value int) int { return value + 1 }
 	func() {
 		finish := ctx.beginCoroSiteEmission(instruction)
 		defer finish()
+		ctx.observeCoroSemanticInstruction(instruction)
 		ctx.observeCoroPhysicalInstruction(instruction, coroPhysicalInstructionDeref)
 		ctx.observeCoroPhysicalNilGuard(instruction)
 	}()

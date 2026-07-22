@@ -82,6 +82,7 @@ const (
 // frozen safe array index removes only the range edge, never a nullable
 // pointer-to-array dereference.
 type coroPhysicalInstructionPlan struct {
+	semantic    coroSemanticInstructionPlan
 	recipe      coroPhysicalInstructionRecipe
 	container   coroPhysicalContainerKind
 	bound       int64
@@ -130,7 +131,7 @@ func prepareCoroPhysicalFunctionPlan(
 	}
 	for _, block := range audit.fn.Blocks {
 		for _, instruction := range block.Instrs {
-			instructionPlan, err := planCoroPhysicalInstruction(audit, whole, instruction, explicitPanic)
+			instructionPlan, err := planCoroPhysicalInstruction(audit, owner, whole, instruction, explicitPanic)
 			if err != nil {
 				return nil, fmt.Errorf("block %d instruction %T: %w", block.Index, instruction, err)
 			}
@@ -233,6 +234,7 @@ func (ir *coroProgramIR) physicalFunctionPlan(function *ssa.Function, owner *pre
 
 func planCoroPhysicalInstruction(
 	audit *coroPhysicalPureSSAAudit,
+	owner *preparedEmissionPackage,
 	whole *coro.SSAPlan,
 	instruction ssa.Instruction,
 	explicitPanic bool,
@@ -241,6 +243,14 @@ func planCoroPhysicalInstruction(
 	if audit == nil || instruction == nil || instruction.Parent() != audit.fn {
 		return result, fmt.Errorf("physical instruction planning requires one exact audit and source instruction")
 	}
+	semantic, err := planCoroSemanticInstruction(instruction)
+	if audit.universe != nil && audit.universe.coroProgramIR != nil && owner != nil {
+		semantic, err = audit.universe.coroProgramIR.semanticInstructionPlan(audit.fn, owner, instruction)
+	}
+	if err != nil {
+		return result, fmt.Errorf("load semantic instruction recipe: %w", err)
+	}
+	result.semantic = semantic
 	switch instruction := instruction.(type) {
 	case *ssa.FieldAddr:
 		if audit.fieldAddrRequiresImplicitNilFault(instruction) {

@@ -390,7 +390,7 @@ func root(value *int) { _ = Advance(value, 1) }
 				t.Fatalf("root intrinsic calls = %d, want one", len(calls))
 			}
 			call := calls[0]
-			if semantics, intrinsic, err := emission.CoroIntrinsicCallSiteSemantics(call); err != nil || !intrinsic || semantics != cl.CoroIntrinsicCallInlineNoSuspend {
+			if semantics, intrinsic, err := coroIntrinsicCallSiteSemanticsForTest(emission, call); err != nil || !intrinsic || semantics != cl.CoroIntrinsicCallInlineNoSuspend {
 				t.Fatalf("alias intrinsic site semantics = %v, %v, %v; want inline-no-suspend, true, nil", semantics, intrinsic, err)
 			}
 			if !plan.ElidesCall(call) {
@@ -452,7 +452,7 @@ func root(token *WaitToken, ticket WaitTicket) uint32 {
 		t.Fatalf("root calls = %d, want one exact park site", len(calls))
 	}
 	parkCall := calls[0]
-	semantics, intrinsic, err := emission.CoroIntrinsicCallSiteSemantics(parkCall)
+	semantics, intrinsic, err := coroIntrinsicCallSiteSemanticsForTest(emission, parkCall)
 	if err != nil || !intrinsic || semantics != cl.CoroIntrinsicCallInlineSuspend || !semantics.SuspendsCurrentFrame() {
 		t.Fatalf("park semantics = %v, %v, %v; want inline-suspend, true, nil", semantics, intrinsic, err)
 	}

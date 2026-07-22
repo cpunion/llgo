@@ -738,7 +738,7 @@ func validateCoroStaticCleanupNoUnwind(
 				if whole == nil || !whole.ElidesCall(instruction) || universe == nil {
 					return fmt.Sprintf("block %d has an ordinary managed call", block.Index)
 				}
-				semantics, intrinsic, err := universe.CoroIntrinsicCallSiteSemantics(instruction)
+				semantics, intrinsic, err := coroIntrinsicCallSiteSemantics(universe, instruction)
 				if err != nil {
 					return fmt.Sprintf("block %d intrinsic: %v", block.Index, err)
 				}

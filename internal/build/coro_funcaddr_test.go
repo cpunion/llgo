@@ -42,7 +42,7 @@ func root() unsafe.Pointer { return Func(target) }
 	if err != nil {
 		t.Fatal(err)
 	}
-	semantics, intrinsic, err := emission.CoroIntrinsicCallSiteSemantics(call)
+	semantics, intrinsic, err := coroIntrinsicCallSiteSemanticsForTest(emission, call)
 	if err != nil || !intrinsic || semantics != cl.CoroIntrinsicCallInlineNoSuspend {
 		t.Fatalf("funcAddr semantics = %v, %v, %v; want inline-no-suspend, true, nil", semantics, intrinsic, err)
 	}
