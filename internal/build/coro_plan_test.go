@@ -521,10 +521,10 @@ func __llgo_coro_timer_park_v2(g, handle, header, storage unsafe.Pointer, delay 
 func __llgo_coro_timer_park_controlled_v2(g, handle, header, storage, controller unsafe.Pointer, control *uint32, expected uint32, deadline int64) {}
 func __llgo_coro_timer_resume_v2(g, storage unsafe.Pointer) uint32 { return 1 }
 func __llgo_coro_timer_cancel_controlled_v2(controller unsafe.Pointer, expected uint32) uint32 { return 0 }
-func __llgo_coro_poll_park_v2(g, handle, header, storage unsafe.Pointer, fd int32, interest uint32, deadline int64) {}
+func __llgo_coro_poll_park_v2(g, handle, header, storage unsafe.Pointer, context uintptr, fd int32, interest uint32, deadline int64) {}
 func __llgo_coro_poll_resume_v2(g, storage unsafe.Pointer) uint32 { return 1 }
-func __llgo_coro_poll_update_deadline_or_abort_v1(fd int32, interest uint32, deadline int64) {}
-func __llgo_coro_poll_post_closing_or_abort_v1(fd int32, interest uint32) {}
+func __llgo_coro_poll_update_deadline_or_abort_v1(context uintptr, interest uint32, deadline int64) {}
+func __llgo_coro_poll_post_closing_or_abort_v1(context uintptr, interest uint32) {}
 func __llgo_coro_sema_prepare_or_abort_v1(token, addr unsafe.Pointer, ticket, slot, generation *uint32) {}
 func __llgo_coro_sema_retire_completed_or_abort_v1(token unsafe.Pointer, ticket, slot, generation uint32) {}
 func __llgo_coro_sema_release_or_abort_v1(addr unsafe.Pointer) {}
@@ -906,6 +906,7 @@ func atomicExchange(*uint32, uint32) uint32
 			types.NewParam(token.NoPos, nil, "handle", types.Typ[types.UnsafePointer]),
 			types.NewParam(token.NoPos, nil, "header", types.Typ[types.UnsafePointer]),
 			types.NewParam(token.NoPos, nil, "storage", types.Typ[types.UnsafePointer]),
+			types.NewParam(token.NoPos, nil, "context", types.Typ[types.Uintptr]),
 			types.NewParam(token.NoPos, nil, "fd", types.Typ[types.Uint32]),
 			types.NewParam(token.NoPos, nil, "interest", types.Typ[types.Uint32]),
 			types.NewParam(token.NoPos, nil, "deadline", types.Typ[types.Int64]),
@@ -931,7 +932,7 @@ func atomicExchange(*uint32, uint32) uint32
 	originalPollUpdateSignature := pollUpdateFn.Signature
 	pollUpdateFn.Signature = types.NewSignatureType(nil, nil, nil,
 		types.NewTuple(
-			types.NewParam(token.NoPos, nil, "fd", types.Typ[types.Int32]),
+			types.NewParam(token.NoPos, nil, "context", types.Typ[types.Uintptr]),
 			types.NewParam(token.NoPos, nil, "interest", types.Typ[types.Uint32]),
 			types.NewParam(token.NoPos, nil, "deadline", types.Typ[types.Uint64]),
 		), types.NewTuple(), false)

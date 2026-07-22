@@ -822,6 +822,18 @@ func assertCoroProgramNativeSliceV2(t *testing.T, module llvm.Module, entryName 
 			t.Fatalf("native V2 entry has no exact %s check %q:\n%s", label, pattern, body)
 		}
 	}
+	// Used counts only certified reductions. Fleet-transfer and compatibility
+	// bookkeeping may legitimately request another inline pass with zero Used;
+	// every budget-checked Used SSA value must therefore remain zero-admissible.
+	boundedUses := regexp.MustCompile(`icmp ule i32 ([^,\n]+), 1024`).FindAllStringSubmatch(body, -1)
+	if len(boundedUses) < 2 {
+		t.Fatalf("native V2 entry has %d bounded Used checks, want complete and yielded:\n%s", len(boundedUses), body)
+	}
+	for _, match := range boundedUses {
+		if strings.Contains(body, "icmp ne i32 "+match[1]+", 0") {
+			t.Fatalf("native V2 entry rejects zero certified reductions for %s:\n%s", match[1], body)
+		}
+	}
 }
 
 func assertCoroProgramHostSliceV2(t *testing.T, module llvm.Module, entryName string) {

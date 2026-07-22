@@ -33,11 +33,35 @@ type finalizerEntry struct {
 	stop    int32
 }
 
+// finalizerRegistryGate is a scheduler-aware managed-owner lock. Its holder
+// may be preempted while a map helper or synchronous collector registration is
+// running; a contender therefore yields its stackless frame instead of
+// blocking the physical executor. Raw collector callbacks never enter it.
+type finalizerRegistryGate struct {
+	state uint32
+}
+
+func (gate *finalizerRegistryGate) Lock() {
+	for {
+		_, acquired := atomic.CompareAndExchange(&gate.state, uint32(0), uint32(1))
+		if acquired {
+			return
+		}
+		coroSchedulerYield()
+	}
+}
+
+func (gate *finalizerRegistryGate) Unlock() {
+	if _, released := atomic.CompareAndExchange(&gate.state, uint32(1), uint32(0)); !released {
+		throw("runtime: invalid finalizer registry gate release")
+	}
+}
+
 var finalizerState struct {
-	// m is managed-owner state. Raw collector callbacks never inspect or
-	// mutate it; multi-executor registry serialization remains a separate
-	// scheduler-lock concern from the callback ingress queue below.
-	m map[uintptr]*finalizerEntry
+	// registry serializes m in managed code. Raw collector callbacks never
+	// inspect either field; their ingress queue remains independent below.
+	registry finalizerRegistryGate
+	m        map[uintptr]*finalizerEntry
 
 	// queueHead is the producer end of an intrusive MPSC queue. queueTail is
 	// owned by the one managed runFinalizers consumer. The permanent stub lets
@@ -78,27 +102,30 @@ func SetFinalizer(obj any, finalizer any) {
 
 	key := hideFinalizerPtr(objPtr)
 
+	finalizerFace := (*eface)(unsafe.Pointer(&finalizer))
+	var entry *finalizerEntry
+	if finalizerFace._type != nil {
+		ft := finalizerFuncType(finalizerFace._type)
+		if ft == nil {
+			throw("runtime.SetFinalizer: second argument is " + finalizerFace._type.String() + ", not a function")
+		}
+		if len(ft.In) != 1 || ft.In[0] != objFace._type {
+			throw("runtime.SetFinalizer: cannot pass " + objFace._type.String() + " to finalizer " + finalizerFace._type.String())
+		}
+		entry = &finalizerEntry{fn: finalizer, key: key, tracked: true}
+	}
+
+	finalizerState.registry.Lock()
 	if old := finalizerState.m[key]; old != nil {
 		atomic.Store(&old.stop, 1)
 		delete(finalizerState.m, key)
 		restoreFinalizer(objPtr, old)
 	}
-
-	finalizerFace := (*eface)(unsafe.Pointer(&finalizer))
-	if finalizerFace._type == nil {
-		return
+	if entry != nil {
+		registerFinalizerEntry(objPtr, entry)
+		finalizerState.m[key] = entry
 	}
-	ft := finalizerFuncType(finalizerFace._type)
-	if ft == nil {
-		throw("runtime.SetFinalizer: second argument is " + finalizerFace._type.String() + ", not a function")
-	}
-	if len(ft.In) != 1 || ft.In[0] != objFace._type {
-		throw("runtime.SetFinalizer: cannot pass " + objFace._type.String() + " to finalizer " + finalizerFace._type.String())
-	}
-	entry := &finalizerEntry{fn: finalizer, key: key, tracked: true}
-	registerFinalizerEntry(objPtr, entry)
-
-	finalizerState.m[key] = entry
+	finalizerState.registry.Unlock()
 }
 
 func registerFinalizerEntry(ptr unsafe.Pointer, entry *finalizerEntry) {
@@ -254,8 +281,12 @@ func runFinalizers() {
 			return
 		}
 		atomic.Store(&entry.next, unsafe.Pointer(nil))
-		if entry.tracked && finalizerState.m[entry.key] == entry {
-			delete(finalizerState.m, entry.key)
+		if entry.tracked {
+			finalizerState.registry.Lock()
+			if finalizerState.m[entry.key] == entry {
+				delete(finalizerState.m, entry.key)
+			}
+			finalizerState.registry.Unlock()
 		}
 
 		if atomic.Load(&entry.stop) != 1 {

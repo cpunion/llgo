@@ -19,6 +19,7 @@
 
 #include <pthread.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 enum {
@@ -54,9 +55,10 @@ int __llgo_coro_worker_create_v1(pthread_t *thread);
 
 bool __llgo_coro_worker_queue_init_v1(void);
 bool __llgo_coro_worker_queue_can_release_v1(void);
-bool __llgo_coro_worker_queue_reserve_v1(void);
-bool __llgo_coro_worker_queue_cancel_reservation_v1(void);
+bool __llgo_coro_worker_queue_reserve_v1(size_t *reservation);
+bool __llgo_coro_worker_queue_cancel_reservation_v1(size_t reservation);
 bool __llgo_coro_worker_queue_submit_reserved_v1(
+    size_t reservation,
     const struct llgo_coro_worker_job_v1 *job);
 uint32_t __llgo_coro_worker_queue_wait_take_v1(
     struct llgo_coro_worker_job_v1 *job);

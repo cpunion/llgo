@@ -280,6 +280,12 @@ func TestWorkerOperationSourceLateAdmittedLoserRequiresDrain(t *testing.T) {
 	slot.payload = payload
 	preemptStore(&slot.mailbox, uint32(workerOperationMailboxPosted))
 	preemptStore(&source.pending, 1)
+	if published, lost, ok := source.PublishPass(p); !ok || published != 0 || lost != 0 ||
+		!source.Pending() || preemptLoad(&slot.state) != uint32(producerSourceClosing) ||
+		preemptLoad(&slot.mailbox) != uint32(workerOperationMailboxPosted) {
+		t.Fatalf("worker source exposed admitted producer = (%d, %d, %t), pending=%t state=%d mailbox=%d",
+			published, lost, ok, source.Pending(), preemptLoad(&slot.state), preemptLoad(&slot.mailbox))
+	}
 	if !producerAdmissionReleaseChecked(&slot.inflight) {
 		t.Fatal("release late worker producer")
 	}

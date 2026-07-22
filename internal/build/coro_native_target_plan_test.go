@@ -229,6 +229,32 @@ func TestEffectiveBuildTagsRejectsForgedNativeFleetCapability(t *testing.T) {
 	}
 }
 
+func TestEffectiveBuildTagsSelectsConfiguredNativeFleet(t *testing.T) {
+	conf := &Config{
+		Goos:                          "linux",
+		Goarch:                        "amd64",
+		EnableCoroProgramBootstrapRun: true,
+		EnableCoroNativeFleet:         true,
+	}
+	tags, err := effectiveBuildTags(conf, crosscompile.Export{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(strings.Split(tags, ","), coroNativeFleetBuildTag) ||
+		!nativeCoroFleetRuntimeABI(conf) {
+		t.Fatalf("configured native fleet tags/runtime = %q/%t", tags, nativeCoroFleetRuntimeABI(conf))
+	}
+	conf.EnableCoroNativeFleet = false
+	tags, err = effectiveBuildTags(conf, crosscompile.Export{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(strings.Split(tags, ","), coroNativeFleetBuildTag) ||
+		nativeCoroFleetRuntimeABI(conf) {
+		t.Fatalf("disabled native fleet tags/runtime = %q/%t", tags, nativeCoroFleetRuntimeABI(conf))
+	}
+}
+
 func TestEffectiveBuildTagsRejectsForgedNativeIngressTestCapability(t *testing.T) {
 	conf := &Config{Tags: "nogc," + coroNativeIngressTestBuildTag}
 	_, err := effectiveBuildTags(conf, crosscompile.Export{})

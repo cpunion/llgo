@@ -880,6 +880,15 @@ func (source *PollOperationSource) drainSlotFor(
 					preemptStore(&source.pending, 1)
 					return 0, 0, false, true
 				}
+				// Readiness and the absolute deadline are facts from independent
+				// producers. Once the owner observes both in the same source pass,
+				// the deadline is authoritative; otherwise a delayed route can let
+				// data that arrived after expiry win merely because another P ran
+				// first. Closing remains authoritative over timeout and is handled
+				// unchanged by the synchronous continuation.
+				if slot.v2Result == PollOperationReady && slot.deadline > 0 && slot.deadline <= now {
+					slot.v2Result = PollOperationTimeout
+				}
 				published, publishOK := source.publishPollOperationV2(owner, slot, index)
 				if !publishOK {
 					return 0, 0, false, false

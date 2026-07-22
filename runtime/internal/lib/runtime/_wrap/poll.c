@@ -20,8 +20,233 @@
 
 #include <errno.h>
 #include <poll.h>
+#include <stdatomic.h>
+#include <stdlib.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+/*
+ * Opaque scalar-only state behind internal/poll's uintptr context ABI.
+ *
+ * Keeping the allocation and all address reconstruction in C means an LLVM
+ * coroutine frame never carries an untraceable Go pointer. Descriptors are
+ * independent, so concurrent opens/closes need no shared catalog lock and
+ * have no fixed table capacity. internal/poll frees a context only after its
+ * FD reference count reaches zero.
+ */
+struct llgo_runtime_poll_desc_v1 {
+    int32_t fd;
+    _Atomic uint32_t closing;
+    _Atomic int64_t read_deadline;
+    _Atomic int64_t write_deadline;
+    _Atomic uint64_t read_operation;
+    _Atomic uint64_t write_operation;
+    uint32_t inline_stream;
+};
+
+#define LLGO_RUNTIME_POLL_DESC_CLOSING_V1 (UINT64_C(1) << 32)
+#define LLGO_RUNTIME_POLL_DESC_INLINE_STREAM_V1 (UINT64_C(1) << 33)
+
+static uint64_t llgo_runtime_poll_desc_pack_state_v1(
+    const struct llgo_runtime_poll_desc_v1 *desc,
+    uint32_t closing)
+{
+    uint64_t state = (uint64_t)(uint32_t)desc->fd;
+    if (closing != 0) {
+        state |= LLGO_RUNTIME_POLL_DESC_CLOSING_V1;
+    }
+    if (desc->inline_stream != 0) {
+        state |= LLGO_RUNTIME_POLL_DESC_INLINE_STREAM_V1;
+    }
+    return state;
+}
+
+uintptr_t __llgo_runtime_poll_desc_alloc_v1(
+    int32_t fd,
+    uint32_t inline_stream)
+{
+    int saved_errno = errno;
+    struct llgo_runtime_poll_desc_v1 *desc =
+        calloc(1, sizeof(struct llgo_runtime_poll_desc_v1));
+    if (desc != NULL) {
+        desc->fd = fd;
+        atomic_init(&desc->closing, 0);
+        atomic_init(&desc->read_deadline, 0);
+        atomic_init(&desc->write_deadline, 0);
+        atomic_init(&desc->read_operation, 0);
+        atomic_init(&desc->write_operation, 0);
+        desc->inline_stream = inline_stream != 0;
+    }
+    errno = saved_errno;
+    return (uintptr_t)desc;
+}
+
+void __llgo_runtime_poll_desc_free_v1(uintptr_t context)
+{
+    int saved_errno = errno;
+    free((void *)context);
+    errno = saved_errno;
+}
+
+uint64_t __llgo_runtime_poll_desc_state_v1(uintptr_t context)
+{
+    const struct llgo_runtime_poll_desc_v1 *desc =
+        (const struct llgo_runtime_poll_desc_v1 *)context;
+    if (desc == NULL) {
+        return LLGO_RUNTIME_POLL_DESC_CLOSING_V1;
+    }
+    return llgo_runtime_poll_desc_pack_state_v1(
+        desc,
+        atomic_load_explicit(&desc->closing, memory_order_acquire));
+}
+
+int64_t __llgo_runtime_poll_desc_deadline_v1(
+    uintptr_t context,
+    int32_t mode)
+{
+    const struct llgo_runtime_poll_desc_v1 *desc =
+        (const struct llgo_runtime_poll_desc_v1 *)context;
+    if (desc == NULL) {
+        return 0;
+    }
+    if (mode == 'r') {
+        return atomic_load_explicit(&desc->read_deadline, memory_order_seq_cst);
+    }
+    if (mode == 'w') {
+        return atomic_load_explicit(&desc->write_deadline, memory_order_seq_cst);
+    }
+    int64_t read_deadline =
+        atomic_load_explicit(&desc->read_deadline, memory_order_seq_cst);
+    int64_t write_deadline =
+        atomic_load_explicit(&desc->write_deadline, memory_order_seq_cst);
+    if (read_deadline == 0) {
+        return write_deadline;
+    }
+    if (write_deadline == 0 || read_deadline < write_deadline) {
+        return read_deadline;
+    }
+    return write_deadline;
+}
+
+void __llgo_runtime_poll_desc_set_deadline_v1(
+    uintptr_t context,
+    int32_t mode,
+    int64_t deadline)
+{
+    struct llgo_runtime_poll_desc_v1 *desc =
+        (struct llgo_runtime_poll_desc_v1 *)context;
+    if (desc == NULL) {
+        return;
+    }
+    if (mode == 'r' || mode == 'r' + 'w') {
+        atomic_store_explicit(
+            &desc->read_deadline, deadline, memory_order_seq_cst);
+    }
+    if (mode == 'w' || mode == 'r' + 'w') {
+        atomic_store_explicit(
+            &desc->write_deadline, deadline, memory_order_seq_cst);
+    }
+}
+
+uint64_t __llgo_runtime_poll_desc_mark_closing_v1(uintptr_t context)
+{
+    struct llgo_runtime_poll_desc_v1 *desc =
+        (struct llgo_runtime_poll_desc_v1 *)context;
+    if (desc == NULL) {
+        return LLGO_RUNTIME_POLL_DESC_CLOSING_V1;
+    }
+    uint32_t previous = atomic_exchange_explicit(
+        &desc->closing, 1, memory_order_seq_cst);
+    return llgo_runtime_poll_desc_pack_state_v1(desc, previous);
+}
+
+static _Atomic uint64_t *llgo_runtime_poll_desc_operation_v1(
+    struct llgo_runtime_poll_desc_v1 *desc,
+    uint32_t interest)
+{
+    if (desc == NULL) {
+        return NULL;
+    }
+    if (interest == 1) {
+        return &desc->read_operation;
+    }
+    if (interest == 2) {
+        return &desc->write_operation;
+    }
+    return NULL;
+}
+
+uint64_t __llgo_runtime_poll_desc_load_operation_v1(
+    uintptr_t context,
+    uint32_t interest)
+{
+    struct llgo_runtime_poll_desc_v1 *desc =
+        (struct llgo_runtime_poll_desc_v1 *)context;
+    _Atomic uint64_t *operation =
+        llgo_runtime_poll_desc_operation_v1(desc, interest);
+    if (operation == NULL) {
+        return 0;
+    }
+    return atomic_load_explicit(operation, memory_order_seq_cst);
+}
+
+/*
+ * Publish one exact, route-bearing OperationID for this fd direction.
+ * Bit zero reports successful publication and bit one is the closing state
+ * observed after publication. The seq_cst publish/closing handshake prevents
+ * a concurrent unblock and park from both observing the other's old value.
+ */
+uint32_t __llgo_runtime_poll_desc_publish_operation_v1(
+    uintptr_t context,
+    uint32_t interest,
+    uint32_t source_slot,
+    uint32_t generation)
+{
+    struct llgo_runtime_poll_desc_v1 *desc =
+        (struct llgo_runtime_poll_desc_v1 *)context;
+    _Atomic uint64_t *operation =
+        llgo_runtime_poll_desc_operation_v1(desc, interest);
+    if (operation == NULL || source_slot == 0 || generation == 0) {
+        return 0;
+    }
+    uint64_t desired =
+        ((uint64_t)generation << 32) | (uint64_t)source_slot;
+    uint64_t expected = 0;
+    if (!atomic_compare_exchange_strong_explicit(
+            operation,
+            &expected,
+            desired,
+            memory_order_seq_cst,
+            memory_order_seq_cst)) {
+        return 0;
+    }
+    uint32_t closing =
+        atomic_load_explicit(&desc->closing, memory_order_seq_cst);
+    return UINT32_C(1) | ((closing != 0) ? UINT32_C(2) : UINT32_C(0));
+}
+
+uint32_t __llgo_runtime_poll_desc_clear_operation_v1(
+    uintptr_t context,
+    uint32_t interest,
+    uint32_t source_slot,
+    uint32_t generation)
+{
+    struct llgo_runtime_poll_desc_v1 *desc =
+        (struct llgo_runtime_poll_desc_v1 *)context;
+    _Atomic uint64_t *operation =
+        llgo_runtime_poll_desc_operation_v1(desc, interest);
+    if (operation == NULL || source_slot == 0 || generation == 0) {
+        return 0;
+    }
+    uint64_t expected =
+        ((uint64_t)generation << 32) | (uint64_t)source_slot;
+    return atomic_compare_exchange_strong_explicit(
+        operation,
+        &expected,
+        0,
+        memory_order_seq_cst,
+        memory_order_seq_cst);
+}
 
 uint32_t __llgo_runtime_poll_fd_stream_v1(int32_t fd)
 {

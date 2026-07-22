@@ -40,6 +40,9 @@ const (
 // address, wait, G, frame header, or executor/source pointer.
 type CoroPollParkV2 struct {
 	magic     uint32
+	context   uintptr
+	interest  coro.PollInterest
+	deadline  int64
 	wait      coro.WaitSetRecord
 	ticket    coro.ParkTicket
 	poll      coro.PollOperationHandle
@@ -49,6 +52,8 @@ type CoroPollParkV2 struct {
 
 func validCoroPollParkV2(state *CoroPollParkV2) bool {
 	return state != nil && state.magic == coroPollParkMagicV2 && state.ticket.Valid() &&
+		state.context != 0 &&
+		(state.interest == coro.PollInterestRead || state.interest == coro.PollInterestWrite) &&
 		state.poll.Valid() && state.operation.Valid() &&
 		state.operation.Source() == coro.OperationSourcePoll &&
 		state.operation.LocalSlot() == state.poll.Slot &&
@@ -70,12 +75,16 @@ func coroPollAbortV2(message string) {
 //export __llgo_coro_poll_park_v2
 func __llgo_coro_poll_park_v2(
 	g, handle, header, storage unsafe.Pointer,
+	context uintptr,
 	fd int32,
 	interest uint32,
 	deadline int64,
 ) {
 	state := (*CoroPollParkV2)(storage)
-	if g == nil || handle == nil || header == nil || state == nil || *state != (CoroPollParkV2{}) {
+	pollInterest := coro.PollInterest(interest)
+	if g == nil || handle == nil || header == nil || state == nil || context == 0 ||
+		(pollInterest != coro.PollInterestRead && pollInterest != coro.PollInterestWrite) ||
+		*state != (CoroPollParkV2{}) {
 		coroPollAbortV2("invalid coroutine Poll V2 park ABI")
 		return
 	}
@@ -94,7 +103,7 @@ func __llgo_coro_poll_park_v2(
 		1,
 		1,
 		fd,
-		coro.PollInterest(interest),
+		pollInterest,
 		deadline,
 	)
 	if !prepared || executor != wantExecutor || operation.Route() != wantRoute {
@@ -102,10 +111,38 @@ func __llgo_coro_poll_park_v2(
 		return
 	}
 	state.magic = coroPollParkMagicV2
+	state.context = context
+	state.interest = pollInterest
+	state.deadline = deadline
 	state.ticket = ticket
 	state.poll = poll
 	state.operation = operation
 	state.executor = executor
+	closing, published := coroPollDescPublishOperationV1(context, pollInterest, operation)
+	if !published {
+		coroPollAbortV2("cannot publish coroutine Poll V2 descriptor operation")
+		return
+	}
+	if closing {
+		result := coroProgramPostPollEventV2(operation, coro.PollOperationClosing)
+		if result != coro.PollOperationPosted && result != coro.PollOperationPostDuplicate {
+			coroPollAbortV2("cannot post coroutine Poll V2 closing handshake")
+			return
+		}
+		return
+	}
+	currentDeadline, deadlineOK := coroPollDescDeadlineV1(context, pollInterest)
+	if !deadlineOK {
+		coroPollAbortV2("cannot reload coroutine Poll V2 descriptor deadline")
+		return
+	}
+	if currentDeadline != deadline {
+		result := coroProgramPostPollEventV2(operation, coro.PollOperationReady)
+		if result != coro.PollOperationPosted && result != coro.PollOperationPostDuplicate {
+			coroPollAbortV2("cannot post coroutine Poll V2 deadline handshake")
+			return
+		}
+	}
 }
 
 // __llgo_coro_poll_resume_v2 consumes the exact decision and releases the
@@ -157,15 +194,14 @@ func __llgo_coro_poll_resume_v2(g, storage unsafe.Pointer) uint32 {
 		coroPollAbortV2("cannot retire coroutine Poll V2 source")
 		return 0
 	}
+	if !coroPollDescClearOperationV1(state.context, state.interest, state.operation) {
+		coroPollAbortV2("cannot clear coroutine Poll V2 descriptor operation")
+		return 0
+	}
 	if outcome == coro.ParkOutcomeCompleted {
-		switch result {
-		case coro.PollOperationReady:
-			status = coroPollResumeReadyV2
-		case coro.PollOperationClosing:
-			status = coroPollResumeClosingV2
-		case coro.PollOperationTimeout:
-			status = coroPollResumeTimeoutV2
-		default:
+		var mapped bool
+		status, mapped = coroPollResumeStatusV2(state, result)
+		if !mapped {
 			coroPollAbortV2("invalid coroutine Poll V2 result")
 			return 0
 		}
@@ -174,103 +210,101 @@ func __llgo_coro_poll_resume_v2(g, storage unsafe.Pointer) uint32 {
 	return status
 }
 
-// __llgo_coro_poll_post_event_v2 is the singleton retained-reactor owner-return
-// import ABI. Its input is exactly one POD OperationID plus a scalar status.
-// It is not a foreign-thread ingress: this first implementation reads the
-// statically retained driver/handle and is called only after the single
-// executor's target wait returns on its owner. A future callback or multi-P
-// reactor must instead resolve a route through a stable ingress registry and
-// retain one lease across both source publication and executor request.
-//
-// The owner-return path rings the current executor doorbell only after durable
-// exact-generation posting; a wrong route, stale generation, or inactive
-// executor fails closed.
+// coroPollResumeStatusV2 distinguishes a real readiness result from the
+// Ready wake used by runtime_pollSetDeadline to make an owner re-register.
+// Comparing the descriptor's current scalar deadline with the value retained
+// in the coroutine frame closes the cross-P update race without sharing Go
+// pointers or adding another producer mailbox kind. Timeout is the existing
+// runtime_pollWait recheck path: it returns a timeout only when the current
+// descriptor deadline is still expired, otherwise it retries registration.
+func coroPollResumeStatusV2(state *CoroPollParkV2, result coro.PollOperationResult) (uint32, bool) {
+	if state == nil {
+		return 0, false
+	}
+	switch result {
+	case coro.PollOperationReady:
+		currentDeadline, ok := coroPollDescDeadlineV1(state.context, state.interest)
+		if !ok {
+			return 0, false
+		}
+		if currentDeadline != state.deadline {
+			return coroPollResumeTimeoutV2, true
+		}
+		return coroPollResumeReadyV2, true
+	case coro.PollOperationClosing:
+		return coroPollResumeClosingV2, true
+	case coro.PollOperationTimeout:
+		return coroPollResumeTimeoutV2, true
+	default:
+		return 0, false
+	}
+}
+
+// coroProgramPostPollEventV2 is the common exact-operation ingress. A fleet
+// OperationID is routed through the strong-joined target registry; the legacy
+// single-P target retains its direct owner-return path. In either profile the
+// durable source result is published before its exact executor is requested.
+func coroProgramPostPollEventV2(
+	id coro.OperationID,
+	status coro.PollOperationResult,
+) coro.PollOperationPostResult {
+	if !id.Valid() || id.Source() != coro.OperationSourcePoll ||
+		(status != coro.PollOperationReady && status != coro.PollOperationClosing) {
+		return coro.PollOperationPostInvalid
+	}
+	return coroTargetPostPollOperationV2(id, status)
+}
+
+// __llgo_coro_poll_post_event_v2 imports one POD OperationID plus a scalar
+// status. It is used both by retained reactors and descriptor close/deadline
+// handshakes; route is the complete destination identity in a native fleet.
 //
 //export __llgo_coro_poll_post_event_v2
 func __llgo_coro_poll_post_event_v2(sourceSlot, generation, status uint32) uint32 {
-	if !coroProgramExecutorBoundV1State || coroProgramExecutorHandleV1State == (coro.ExecutorHandle{}) {
-		return uint32(coro.PollOperationPostInvalid)
-	}
 	id := coro.OperationID{SourceSlot: sourceSlot, Generation: generation}
-	result := coro.PostExecutorPollEvent(
-		&coroProgramExecutorDriverV1State,
-		id,
-		coro.PollOperationResult(status),
-	)
-	if result == coro.PollOperationPosted && !coroTargetRequestExecutorV1(coroProgramExecutorHandleV1State) {
-		return uint32(coro.PollOperationPostInvalid)
-	}
-	return uint32(result)
+	return uint32(coroProgramPostPollEventV2(id, coro.PollOperationResult(status)))
 }
 
-func coroProgramFindActivePollSnapshotV2(fd int32, interest coro.PollInterest) (coro.PollOperationSnapshot, bool, bool) {
-	if !coroProgramExecutorBoundV1State || fd < 0 ||
-		(interest != coro.PollInterestRead && interest != coro.PollInterestWrite) {
-		return coro.PollOperationSnapshot{}, false, false
-	}
-	var found coro.PollOperationSnapshot
-	scanLimit, scanOK := coro.PollOperationScanLimit(&coroProgramPollSourceV1State)
-	if !scanOK {
-		return coro.PollOperationSnapshot{}, false, false
-	}
-	for index := uint32(0); index < scanLimit; index++ {
-		snapshot, active, ok := coro.SnapshotExecutorPollOperation(&coroProgramExecutorDriverV1State, index)
-		if !ok {
-			return coro.PollOperationSnapshot{}, false, false
-		}
-		if !active || snapshot.FD != fd || snapshot.Interest != interest {
-			continue
-		}
-		if found.ID.Valid() {
-			return coro.PollOperationSnapshot{}, false, false
-		}
-		found = snapshot
-	}
-	return found, found.ID.Valid(), true
-}
-
-func coroProgramUpdatePollDeadlineV1(fd int32, interest coro.PollInterest, deadline int64) coro.PollOperationUpdateResult {
-	snapshot, found, ok := coroProgramFindActivePollSnapshotV2(fd, interest)
+func coroProgramUpdatePollDeadlineV1(context uintptr, interest coro.PollInterest, deadline int64) coro.PollOperationUpdateResult {
+	operation, ok := coroPollDescLoadOperationV1(context, interest)
 	if !ok {
 		return coro.PollOperationUpdateInvalid
 	}
-	if !found {
+	if !operation.Valid() {
 		return coro.PollOperationUpdateClosed
 	}
-	result := coro.UpdateExecutorPollDeadlineExact(&coroProgramExecutorDriverV1State, snapshot.ID, deadline)
-	if result == coro.PollOperationUpdated && !coroTargetRequestExecutorV1(coroProgramExecutorHandleV1State) {
+	_ = deadline
+	switch coroProgramPostPollEventV2(operation, coro.PollOperationReady) {
+	case coro.PollOperationPosted, coro.PollOperationPostDuplicate:
+		return coro.PollOperationUpdated
+	case coro.PollOperationPostClosed:
+		return coro.PollOperationUpdateClosed
+	case coro.PollOperationPostStale:
+		return coro.PollOperationUpdateStale
+	default:
 		return coro.PollOperationUpdateInvalid
 	}
-	return result
 }
 
-func coroProgramPostPollClosingV1(fd int32, interest coro.PollInterest) coro.PollOperationPostResult {
-	snapshot, found, ok := coroProgramFindActivePollSnapshotV2(fd, interest)
+func coroProgramPostPollClosingV1(context uintptr, interest coro.PollInterest) coro.PollOperationPostResult {
+	operation, ok := coroPollDescLoadOperationV1(context, interest)
 	if !ok {
 		return coro.PollOperationPostInvalid
 	}
-	if !found {
+	if !operation.Valid() {
 		return coro.PollOperationPostClosed
 	}
-	result := coro.PostExecutorPollEvent(
-		&coroProgramExecutorDriverV1State,
-		snapshot.ID,
-		coro.PollOperationClosing,
-	)
-	if result == coro.PollOperationPosted && !coroTargetRequestExecutorV1(coroProgramExecutorHandleV1State) {
-		return coro.PollOperationPostInvalid
-	}
-	return result
+	return coroProgramPostPollEventV2(operation, coro.PollOperationClosing)
 }
 
 //export __llgo_coro_poll_update_deadline_or_abort_v1
-func __llgo_coro_poll_update_deadline_or_abort_v1(fd int32, interest uint32, deadline int64) {
+func __llgo_coro_poll_update_deadline_or_abort_v1(context uintptr, interest uint32, deadline int64) {
 	switch coroProgramUpdatePollDeadlineV1(
-		fd,
+		context,
 		coro.PollInterest(interest),
 		deadline,
 	) {
-	case coro.PollOperationUpdated, coro.PollOperationUpdateClosed:
+	case coro.PollOperationUpdated, coro.PollOperationUpdateClosed, coro.PollOperationUpdateStale:
 		return
 	default:
 		coroRuntimeAbort("coroutine poll deadline update failed")
@@ -280,9 +314,10 @@ func __llgo_coro_poll_update_deadline_or_abort_v1(fd int32, interest uint32, dea
 }
 
 //export __llgo_coro_poll_post_closing_or_abort_v1
-func __llgo_coro_poll_post_closing_or_abort_v1(fd int32, interest uint32) {
-	switch coroProgramPostPollClosingV1(fd, coro.PollInterest(interest)) {
-	case coro.PollOperationPosted, coro.PollOperationPostDuplicate, coro.PollOperationPostClosed:
+func __llgo_coro_poll_post_closing_or_abort_v1(context uintptr, interest uint32) {
+	switch coroProgramPostPollClosingV1(context, coro.PollInterest(interest)) {
+	case coro.PollOperationPosted, coro.PollOperationPostDuplicate,
+		coro.PollOperationPostClosed, coro.PollOperationPostStale:
 		return
 	default:
 		coroRuntimeAbort("coroutine poll closing post failed")

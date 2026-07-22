@@ -18,6 +18,25 @@ package coro
 
 import "unsafe"
 
+// WorkerParkFinishResult identifies the exact owner-side retirement phase.
+// The operation is fail-stop once ConfirmQuiesced succeeds, so a boolean would
+// hide whether a rare invariant failure preceded or followed that boundary.
+type WorkerParkFinishResult uint8
+
+const (
+	WorkerParkFinishInvalid WorkerParkFinishResult = iota
+	WorkerParkFinishComplete
+	WorkerParkFinishContextInvalid
+	WorkerParkFinishLeaseInvalid
+	WorkerParkFinishNotQuiesced
+	WorkerParkFinishResultReleaseFailed
+	WorkerParkFinishRecycleFailed
+)
+
+func (result WorkerParkFinishResult) Finished() bool {
+	return result == WorkerParkFinishComplete
+}
+
 // CurrentExecutorWorkerDriver resolves the exact worker source owner during
 // the narrow compiler worker-hook window. Unlike CurrentExecutorDriver, this
 // entry deliberately requires the active frame to have already published its
@@ -95,9 +114,12 @@ func FinishCurrentExecutorWorkerPark(
 	lease OperationResultLease,
 	discard bool,
 	out *ScalarResultPayloadV1,
-) bool {
+) WorkerParkFinishResult {
 	source, ok := currentExecutorWorkerSource(driver, g)
-	return ok && FinishSingleWorkerPark(g, source, id, lease, discard, out)
+	if !ok {
+		return WorkerParkFinishContextInvalid
+	}
+	return FinishSingleWorkerPark(g, source, id, lease, discard, out)
 }
 
 // PrepareSingleWorkerPark installs one irreversible worker completion in the
@@ -149,20 +171,20 @@ func FinishSingleWorkerPark(
 	lease OperationResultLease,
 	discard bool,
 	out *ScalarResultPayloadV1,
-) bool {
+) WorkerParkFinishResult {
 	if !ValidG(g) || !resumeGateTaken(g) || g.runP == nil || source == nil || !id.Valid() ||
 		!validWorkerOperationOwner(source, g.runP) || discard && out != nil || !discard && lease.Valid() && out == nil {
-		return false
+		return WorkerParkFinishContextInvalid
 	}
 	if lease.Valid() {
 		leaseID, ok := lease.ID()
 		if !ok || leaseID != id {
-			return false
+			return WorkerParkFinishLeaseInvalid
 		}
 	}
 	p := g.runP
 	if !source.ConfirmQuiesced(p, id) {
-		return false
+		return WorkerParkFinishNotQuiesced
 	}
 	if lease.Valid() {
 		var released bool
@@ -172,10 +194,13 @@ func FinishSingleWorkerPark(
 			released = source.TakeResult(p, lease, out)
 		}
 		if !released {
-			return false
+			return WorkerParkFinishResultReleaseFailed
 		}
 	} else if out != nil {
-		return false
+		return WorkerParkFinishLeaseInvalid
 	}
-	return source.Recycle(p, id)
+	if !source.Recycle(p, id) {
+		return WorkerParkFinishRecycleFailed
+	}
+	return WorkerParkFinishComplete
 }

@@ -45,6 +45,7 @@ func coroPollParkSignatureV2() *types.Signature {
 		types.NewParam(token.NoPos, nil, "handle", pointer),
 		types.NewParam(token.NoPos, nil, "header", pointer),
 		types.NewParam(token.NoPos, nil, "state", pointer),
+		types.NewParam(token.NoPos, nil, "context", types.Typ[types.Uintptr]),
 		types.NewParam(token.NoPos, nil, "fd", types.Typ[types.Int32]),
 		types.NewParam(token.NoPos, nil, "interest", types.Typ[types.Uint32]),
 		types.NewParam(token.NoPos, nil, "deadline", types.Typ[types.Int64]),
@@ -82,12 +83,13 @@ func (p *context) requireCoroPollWaitBody(b llssa.Builder) *coroBodyContext {
 // stackless coroutine frame.
 func (p *context) compileCoroPollWait(b llssa.Builder, args []ssa.Value) llssa.Expr {
 	body := p.requireCoroPollWaitBody(b)
-	if len(args) != 3 {
-		panic("llgo.coroPollWait requires exactly (int32, uint32, int64) arguments")
+	if len(args) != 4 {
+		panic("llgo.coroPollWait requires exactly (uintptr, int32, uint32, int64) arguments")
 	}
-	fd := p.compileValue(b, args[0])
-	interest := p.compileValue(b, args[1])
-	deadline := p.compileValue(b, args[2])
+	context := p.compileValue(b, args[0])
+	fd := p.compileValue(b, args[1])
+	interest := p.compileValue(b, args[2])
+	deadline := p.compileValue(b, args[3])
 	state := b.Alloc(p.prog.RuntimeType("CoroPollParkV2"), false)
 	result := b.Alloc(p.prog.Uint32(), false)
 
@@ -105,6 +107,7 @@ func (p *context) compileCoroPollWait(b llssa.Builder, args []ssa.Value) llssa.E
 				body.coro.Handle(),
 				suspend.Convert(suspend.Prog.VoidPtr(), body.header),
 				suspend.Convert(suspend.Prog.VoidPtr(), state),
+				context,
 				fd,
 				interest,
 				deadline,

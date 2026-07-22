@@ -23,6 +23,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -93,6 +94,82 @@ func TestMfinalRegistrationPublishesPreviousChainAtomically(t *testing.T) {
 	if !addressedEntryField(register.Args[3], "prevFn") ||
 		!addressedEntryField(register.Args[4], "prevCb") {
 		t.Fatal("BDWGC previous-finalizer outputs are not written directly into entry")
+	}
+}
+
+func mfinalCallCount(node ast.Node, path string) int {
+	count := 0
+	ast.Inspect(node, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if mfinalSelectorPath(call.Fun) == path {
+			count++
+		}
+		return true
+	})
+	return count
+}
+
+func mfinalSelectorPath(expr ast.Expr) string {
+	switch value := expr.(type) {
+	case *ast.Ident:
+		return value.Name
+	case *ast.SelectorExpr:
+		prefix := mfinalSelectorPath(value.X)
+		if prefix == "" {
+			return value.Sel.Name
+		}
+		return prefix + "." + value.Sel.Name
+	default:
+		return ""
+	}
+}
+
+func TestMfinalManagedRegistryUsesSchedulerAwareGate(t *testing.T) {
+	file := parseMfinalQueueSource(t)
+	lock := mfinalSourceFunc(t, file, "Lock")
+	unlock := mfinalSourceFunc(t, file, "Unlock")
+	set := mfinalSourceFunc(t, file, "SetFinalizer")
+	drain := mfinalSourceFunc(t, file, "runFinalizers")
+	callback := mfinalSourceFunc(t, file, "setFinalizerCallback")
+
+	loops := 0
+	ast.Inspect(lock.Body, func(node ast.Node) bool {
+		if _, ok := node.(*ast.ForStmt); ok {
+			loops++
+		}
+		return true
+	})
+	if loops != 1 ||
+		mfinalCallCount(lock.Body, "atomic.CompareAndExchange") != 1 ||
+		mfinalCallCount(lock.Body, "coroSchedulerYield") != 1 {
+		t.Fatal("finalizer registry gate must CAS once per retry and yield the stackless contender")
+	}
+	if mfinalCallCount(unlock.Body, "atomic.CompareAndExchange") != 1 ||
+		mfinalCallCount(unlock.Body, "throw") != 1 {
+		t.Fatal("finalizer registry gate release is not one checked CAS")
+	}
+	for name, fn := range map[string]*ast.FuncDecl{"SetFinalizer": set, "runFinalizers": drain} {
+		if mfinalCallCount(fn.Body, "finalizerState.registry.Lock") != 1 ||
+			mfinalCallCount(fn.Body, "finalizerState.registry.Unlock") != 1 {
+			t.Fatalf("%s does not own exactly one finalizer registry transaction", name)
+		}
+	}
+	if mfinalCallCount(callback.Body, "finalizerState.registry.Lock") != 0 ||
+		mfinalCallCount(callback.Body, "finalizerState.registry.Unlock") != 0 {
+		t.Fatal("raw collector callback enters the managed finalizer registry gate")
+	}
+
+	source, err := os.ReadFile(mfinalQueueSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	if strings.Count(text, "finalizerState.m[") != 3 ||
+		strings.Count(text, "delete(finalizerState.m") != 2 {
+		t.Fatal("finalizer registry map gained an unaudited access path")
 	}
 }
 

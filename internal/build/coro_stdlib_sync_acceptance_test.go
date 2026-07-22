@@ -154,6 +154,7 @@ func coroStdlibSyncAcceptanceConfig(fixture coroStdlibSyncFixture, output string
 	conf.EnableCoroClosedStaticSpawn = fixture.wantGo
 	conf.EnableCoroChannel = fixture.wantChannel
 	conf.EnableCoroWorker = true
+	conf.EnableCoroNativeFleet = true
 	conf.CoroPlanBuilder = func(input CoroPlanInput) (*coro.SSAPlan, error) {
 		plan, err := input.Analyze(nil, coro.SSAConfig{
 			DynamicResolution:    coro.DynamicCHAClosed,
@@ -203,6 +204,9 @@ func TestCoroStdlibSyncAcceptanceConfiguration(t *testing.T) {
 			if !conf.EnableCoroWorker {
 				t.Fatal("synchronous stdlib acceptance must enable the native worker capability")
 			}
+			if !conf.EnableCoroNativeFleet {
+				t.Fatal("synchronous stdlib acceptance must exercise the native multi-owner fleet")
+			}
 			if !conf.EnableCoroExplicitStatusPanicABI {
 				t.Fatal("synchronous stdlib acceptance must propagate child panic through parent cleanup")
 			}
@@ -217,21 +221,33 @@ func assertCoroStdlibSyncRuntimeSelection(t *testing.T, fixture coroStdlibSyncFi
 	t.Helper()
 	const runtimePackage = "github.com/goplus/llgo/runtime/internal/runtime"
 	required := map[string]bool{
-		"coro_executor_driver_timer_llgo.go": false,
-		"coro_notify_owner_llgo.go":          false,
-		"coro_poll_owner_llgo.go":            false,
-		"coro_sema_owner_llgo.go":            false,
-		"coro_target_native_llgo.go":         false,
-		"coro_target_wait_timer_llgo.go":     false,
-		"coro_timer_owner_llgo.go":           false,
-		"coro_worker_native_llgo.go":         false,
-		"coro_worker_owner_llgo.go":          false,
+		"coro_executor_driver_timer_llgo.go":    false,
+		"coro_native_fleet.go":                  false,
+		"coro_native_fleet_owner_llgo.go":       false,
+		"coro_native_fleet_program_llgo.go":     false,
+		"coro_native_fleet_reactor.go":          false,
+		"coro_notify_owner_llgo.go":             false,
+		"coro_poll_descriptor_llgo.go":          false,
+		"coro_poll_owner_llgo.go":               false,
+		"coro_poll_route_native_fleet_llgo.go":  false,
+		"coro_ready_distribution_fleet_llgo.go": false,
+		"coro_sema_owner_llgo.go":               false,
+		"coro_target_native_fleet_llgo.go":      false,
+		"coro_target_wait_timer_llgo.go":        false,
+		"coro_timer_owner_llgo.go":              false,
+		"coro_worker_completion_fleet_llgo.go":  false,
+		"coro_worker_native_llgo.go":            false,
+		"coro_worker_owner_llgo.go":             false,
 	}
 	forbidden := map[string]bool{
-		"coro_executor_driver_legacy.go": false,
-		"coro_target_none.go":            false,
-		"coro_target_test_adapter.go":    false,
-		"coro_target_wait_pipe_llgo.go":  false,
+		"coro_executor_driver_legacy.go":         false,
+		"coro_poll_route_default_llgo.go":        false,
+		"coro_ready_distribution_default.go":     false,
+		"coro_target_native_llgo.go":             false,
+		"coro_target_none.go":                    false,
+		"coro_target_test_adapter.go":            false,
+		"coro_target_wait_pipe_llgo.go":          false,
+		"coro_worker_completion_program_llgo.go": false,
 	}
 	var runtimePkg Package
 	var stdlibRuntimePkg Package

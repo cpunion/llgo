@@ -28,6 +28,12 @@ const (
 	QueueTakeStop
 )
 
+// QueueReservation is the exact monotonically increasing C11 ring position
+// owned by one producer. Zero is a valid first reservation; validity is carried
+// by QueueReserve's boolean result and the token must be consumed exactly once
+// by QueueSubmitReserved or QueueCancelReservation.
+type QueueReservation uintptr
+
 // Job is the exact Go view of llgo_coro_worker_job_v1. It is copied by value
 // into the native C11 ring and deliberately contains no G, coroutine handle,
 // ParkState, WaitSetRecord, or typed Go pointer. SourceSlot includes the exact

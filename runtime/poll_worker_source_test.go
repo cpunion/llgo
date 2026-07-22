@@ -101,8 +101,8 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 		"coroNativeWorkerPageCountV1 = 16",
 		"coroNativeWorkerQueueSizeV1 = coroworker.QueueCapacity",
 		"bounded C11 sequence ring",
-		"coroworker.QueueReserve()",
-		"coroworker.QueueSubmitReserved(&job)",
+		"coroworker.QueueReserve(&reservation)",
+		"coroworker.QueueSubmitReserved(reservation, &job)",
 		"coroNativeWorkerDeliveryFleetV1",
 		"func coroNativeWorkerPoolStartFleetV1() bool",
 	} {
@@ -153,7 +153,7 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 			t.Fatalf("native worker reservation contains managed blocking edge %q:\n%s", forbidden, reserve)
 		}
 	}
-	if !strings.Contains(reserve, "coroworker.QueueReserve()") {
+	if !strings.Contains(reserve, "coroworker.QueueReserve(&reservation)") {
 		t.Fatalf("native worker reservation bypasses the C11 capacity preflight:\n%s", reserve)
 	}
 	for _, forbidden := range []string{"psync", "state.mutex", "state.work", "pthread.Mutex", "pthread.Cond"} {
@@ -162,7 +162,7 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 		}
 	}
 	for _, required := range []string{
-		"func coroReserveNativeWorkerSubmissionV1(handle coro.ExecutorHandle, route coro.RouteID) bool",
+		"func coroReserveNativeWorkerSubmissionV1(",
 		"coroNativeWorkerSubmissionOwnerV1(handle, route)",
 		"coro.CommitCurrentExecutorWorkerSubmission(driver, g, id)",
 		"id.Route() != route",
@@ -178,6 +178,7 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 		"coro.PrepareCurrentExecutorWorkerPark(",
 		"coro.FinishCurrentExecutorWorkerPark(",
 		"coroReserveNativeWorkerSubmissionV1(executor, route)",
+		"ConsumeParkSet then deliberately returns Canceled with the winner lease",
 	} {
 		if !strings.Contains(owner, required) {
 			t.Errorf("%s lacks current-owner worker marker %q", runtimeCoroWorkerOwnerSource, required)
@@ -202,7 +203,7 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 		"//llgo:coro noblock\n//go:linkname QueueCancelReservation C.__llgo_coro_worker_queue_cancel_reservation_v1",
 		"//llgo:coro noblock\n//go:linkname QueueSubmitReserved C.__llgo_coro_worker_queue_submit_reserved_v1",
 		"//llgo:coro sync\n//go:linkname QueueStop C.__llgo_coro_worker_queue_stop_v1",
-		"atomics were proved lock-free",
+		"lock-free by QueueInit",
 		"semaphore_signal never wait for worker",
 		"C adapter owns the fixed routine",
 	} {
@@ -221,9 +222,11 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 	cSource := readRuntimePollFile(t, runtimeCoroWorkerCSource)
 	for _, required := range []string{
 		"_Atomic size_t sequence;",
+		"_Atomic uint32_t producer_state;",
 		"_Atomic size_t enqueue_position;",
 		"atomic_is_lock_free(&queue->enqueue_position)",
-		"atomic_store_explicit(&slot->sequence, position + 1, memory_order_release);",
+		"atomic_store_explicit(&slot->sequence, reservation + 1, memory_order_release);",
+		"llgo_coro_worker_job_canceled_v1",
 		"sem_post(wake)",
 		"semaphore_signal(*wake)",
 		"__llgo_coro_worker_queue_wait_take_v1",
@@ -469,15 +472,15 @@ func TestRuntimePollWaitSeparatesLegacyWorkerAndCoroutineOwnerABI(t *testing.T) 
 	for _, required := range []string{
 		"llgo && llgo_coro && llgo_coro_native_pipe && llgo_coro_native_timer",
 		"//go:linkname llgoCoroPollWaitV2 llgo.coroPollWait",
-		"func llgoCoroPollWaitV2(fd int32, interest uint32, deadline int64) uint32",
+		"func llgoCoroPollWaitV2(ctx uintptr, fd int32, interest uint32, deadline int64) uint32",
 		"C.__llgo_coro_poll_update_deadline_or_abort_v1",
 		"C.__llgo_coro_poll_post_closing_or_abort_v1",
-		"return llgoCoroPollWaitV2(fd, interest, deadline)",
+		"return llgoCoroPollWaitV2(ctx, fd, interest, deadline)",
 		"func pollCoroPrepareWaitV2(ctx uintptr, mode int)",
 		"func pollCoroFinishWaitV2(ctx uintptr, mode int, result uint32)",
-		"pollCoroWaitOneV2(fd, interest, deadline)",
-		"llgoCoroPollUpdateDeadlineOrAbortV1(pd.fd, coroPollInterestReadV2, deadline)",
-		"llgoCoroPollPostClosingOrAbortV1(pd.fd, coroPollInterestReadV2)",
+		"pollCoroWaitOneV2(ctx, fd, interest, deadline)",
+		"llgoCoroPollUpdateDeadlineOrAbortV1(ctx, coroPollInterestReadV2, deadline)",
+		"llgoCoroPollPostClosingOrAbortV1(ctx, coroPollInterestReadV2)",
 		"reset-after-expiry rule",
 		"result, statErrno := coroPollFstat(fd, &info)",
 		"uint32(result) == ^uint32(0)",
@@ -487,7 +490,7 @@ func TestRuntimePollWaitSeparatesLegacyWorkerAndCoroutineOwnerABI(t *testing.T) 
 		"return true, false, 0",
 		"return false, false, int(csyscall.EOPNOTSUPP)",
 		"llrt.CoroNativePollServerDescriptorV1(fd)",
-		"without a Future/Await API or one worker thread per wait",
+		"keep their Go blocking style without a Future/Await API or one worker thread",
 	} {
 		if !strings.Contains(coroSource, required) {
 			t.Errorf("%s lacks coroutine poll marker %q", runtimeCoroPollGoSource, required)
@@ -618,8 +621,8 @@ func assertRuntimePollTimeoutPrefersClosing(t *testing.T, source string) {
 		t.Fatal("coroutine poll timeout branch lacks following default")
 	}
 	branch := source[start : start+end]
-	closing := strings.Index(branch, "latomic.LoadUint32(&pd.closing)")
-	deadline := strings.Index(branch, "current := pollDeadline(pd, mode)")
+	closing := strings.Index(branch, "pollDescClosing(state)")
+	deadline := strings.Index(branch, "current := pollDeadline(ctx, mode)")
 	if closing < 0 || deadline < 0 || closing > deadline {
 		t.Fatalf("timeout completion does not give closing priority:\n%s", branch)
 	}
@@ -647,14 +650,14 @@ func assertRuntimePollTypedParkRecipe(t *testing.T, path, source string) {
 		t.Fatal("poll typed park recipe is not one exact return")
 	}
 	call, ok := ret.Results[0].(*ast.CallExpr)
-	if !ok || len(call.Args) != 3 {
-		t.Fatal("poll typed park recipe does not call the exact three-argument intrinsic")
+	if !ok || len(call.Args) != 4 {
+		t.Fatal("poll typed park recipe does not call the exact four-argument intrinsic")
 	}
 	identifier, ok := call.Fun.(*ast.Ident)
 	if !ok || identifier.Name != "llgoCoroPollWaitV2" {
 		t.Fatal("poll typed park recipe does not call llgoCoroPollWaitV2")
 	}
-	for index, want := range []string{"fd", "interest", "deadline"} {
+	for index, want := range []string{"ctx", "fd", "interest", "deadline"} {
 		argument, ok := call.Args[index].(*ast.Ident)
 		if !ok || argument.Name != want {
 			t.Fatalf("poll typed park argument %d is not exact scalar %s", index, want)
@@ -662,8 +665,6 @@ func assertRuntimePollTypedParkRecipe(t *testing.T, path, source string) {
 	}
 	functionText := coroTimerOwnerNodeText(t, function)
 	forbidden := map[string]bool{
-		"ctx":          false,
-		"uintptr":      false,
 		"llgoPollDesc": false,
 		"token":        false,
 		"ticket":       false,
@@ -703,6 +704,17 @@ func TestRuntimePollFixedCWrapper(t *testing.T) {
 #include <unistd.h>
 
 uintptr_t __llgo_runtime_poll_wait_v1(uintptr_t, uintptr_t, uintptr_t);
+uintptr_t __llgo_runtime_poll_desc_alloc_v1(int32_t, uint32_t);
+void __llgo_runtime_poll_desc_free_v1(uintptr_t);
+uint64_t __llgo_runtime_poll_desc_state_v1(uintptr_t);
+int64_t __llgo_runtime_poll_desc_deadline_v1(uintptr_t, int32_t);
+void __llgo_runtime_poll_desc_set_deadline_v1(uintptr_t, int32_t, int64_t);
+uint64_t __llgo_runtime_poll_desc_mark_closing_v1(uintptr_t);
+uint64_t __llgo_runtime_poll_desc_load_operation_v1(uintptr_t, uint32_t);
+uint32_t __llgo_runtime_poll_desc_publish_operation_v1(
+    uintptr_t, uint32_t, uint32_t, uint32_t);
+uint32_t __llgo_runtime_poll_desc_clear_operation_v1(
+    uintptr_t, uint32_t, uint32_t, uint32_t);
 
 int main(void) {
     int pipefd[2];
@@ -729,6 +741,45 @@ int main(void) {
     if (close(pipefd[0]) != 0 || close(pipefd[1]) != 0) {
         return 15;
     }
+    uintptr_t context = __llgo_runtime_poll_desc_alloc_v1(23, 1);
+    if (context == 0 || (uint32_t)__llgo_runtime_poll_desc_state_v1(context) != 23) {
+        return 16;
+    }
+    __llgo_runtime_poll_desc_set_deadline_v1(context, 'r', 1234);
+    if (__llgo_runtime_poll_desc_deadline_v1(context, 'r') != 1234) {
+        return 17;
+    }
+    const uint32_t source_slot = 0x01010001;
+    const uint32_t generation = 9;
+    const uint64_t operation =
+        ((uint64_t)generation << 32) | (uint64_t)source_slot;
+    if (__llgo_runtime_poll_desc_publish_operation_v1(
+            context, 1, source_slot, generation) != 1 ||
+        __llgo_runtime_poll_desc_load_operation_v1(context, 1) != operation ||
+        __llgo_runtime_poll_desc_publish_operation_v1(
+            context, 1, source_slot, generation) != 0) {
+        return 18;
+    }
+    if (__llgo_runtime_poll_desc_clear_operation_v1(
+            context, 1, source_slot, generation + 1) != 0 ||
+        __llgo_runtime_poll_desc_clear_operation_v1(
+            context, 1, source_slot, generation) != 1 ||
+        __llgo_runtime_poll_desc_load_operation_v1(context, 1) != 0) {
+        return 19;
+    }
+    if ((__llgo_runtime_poll_desc_mark_closing_v1(context) &
+            (UINT64_C(1) << 32)) != 0 ||
+        __llgo_runtime_poll_desc_publish_operation_v1(
+            context, 2, source_slot, generation) != 3) {
+        return 20;
+    }
+    if ((__llgo_runtime_poll_desc_mark_closing_v1(context) &
+            (UINT64_C(1) << 32)) == 0 ||
+        __llgo_runtime_poll_desc_clear_operation_v1(
+            context, 2, source_slot, generation) != 1) {
+        return 21;
+    }
+    __llgo_runtime_poll_desc_free_v1(context);
     return 0;
 }
 `

@@ -2349,24 +2349,25 @@ func validateCoroControlledTimerWaitIntrinsicCallSite(call *ssa.Call) error {
 }
 
 func validateCoroPollWaitIntrinsicCallSite(call *ssa.Call) error {
-	if call == nil || call.Common() == nil || call.Common().IsInvoke() || len(call.Common().Args) != 3 {
-		return fmt.Errorf("llgo.coroPollWait requires an exact direct three-argument call")
+	const shape = "func(uintptr, int32, uint32, int64) uint32"
+	if call == nil || call.Common() == nil || call.Common().IsInvoke() || len(call.Common().Args) != 4 {
+		return fmt.Errorf("llgo.coroPollWait requires an exact direct four-argument call")
 	}
 	common := call.Common()
 	signature := common.Signature()
 	if signature == nil || signature.Recv() != nil || signature.Variadic() ||
-		signature.Params() == nil || signature.Params().Len() != 3 ||
+		signature.Params() == nil || signature.Params().Len() != 4 ||
 		signature.Results() == nil || signature.Results().Len() != 1 {
-		return fmt.Errorf("llgo.coroPollWait call %q requires the exact func(int32, uint32, int64) uint32 shape", call.String())
+		return fmt.Errorf("llgo.coroPollWait call %q requires the exact %s shape", call.String(), shape)
 	}
 	basicKind := func(typ types.Type, kind types.BasicKind) bool {
 		basic, ok := types.Unalias(typ).Underlying().(*types.Basic)
 		return ok && basic.Kind() == kind
 	}
-	want := []types.BasicKind{types.Int32, types.Uint32, types.Int64}
+	want := []types.BasicKind{types.Uintptr, types.Int32, types.Uint32, types.Int64}
 	for index, kind := range want {
 		if !basicKind(common.Args[index].Type(), kind) || !basicKind(signature.Params().At(index).Type(), kind) {
-			return fmt.Errorf("llgo.coroPollWait call %q requires the exact func(int32, uint32, int64) uint32 shape", call.String())
+			return fmt.Errorf("llgo.coroPollWait call %q requires the exact %s shape", call.String(), shape)
 		}
 	}
 	if !basicKind(signature.Results().At(0).Type(), types.Uint32) ||

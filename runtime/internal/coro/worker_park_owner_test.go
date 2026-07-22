@@ -82,7 +82,7 @@ func TestWorkerParkOwnerPrepareCompleteAndFinish(t *testing.T) {
 		t.Fatalf("take worker owner decision = (%d, %d, %+v, %d, %t)", outcome, caseID, lease, taskCancel, ok)
 	}
 	var got ScalarResultPayloadV1
-	if !FinishCurrentExecutorWorkerPark(driver, task.g, id, lease, false, &got) || got != payload {
+	if result := FinishCurrentExecutorWorkerPark(driver, task.g, id, lease, false, &got); !result.Finished() || got != payload {
 		t.Fatalf("finish worker owner result = %+v, want %+v", got, payload)
 	}
 	task.frame.header.SuspendReason = uint16(SuspendFrameComplete)
@@ -176,7 +176,7 @@ func TestCommandShutdownDrainAwaitsSubmittedWorkerCompletion(t *testing.T) {
 		t.Fatalf("take command-drain worker decision = (%d,%d,%+v,%d,%t)",
 			outcome, caseID, lease, cancel, taken)
 	}
-	if !FinishCurrentExecutorWorkerPark(driver, task.g, id, lease, true, nil) {
+	if result := FinishCurrentExecutorWorkerPark(driver, task.g, id, lease, true, nil); !result.Finished() {
 		t.Fatal("finish command-drain worker cleanup")
 	}
 	task.frame.header.SuspendReason = uint16(SuspendFrameComplete)
@@ -325,11 +325,11 @@ func finishCurrentWorkerOwnerFixture(
 			fixture.task.name, outcome, caseID, lease, cancel, ok)
 	}
 	var got ScalarResultPayloadV1
-	if FinishCurrentExecutorWorkerPark(wrong, fixture.task.g, fixture.operation, lease, false, &got) ||
+	if FinishCurrentExecutorWorkerPark(wrong, fixture.task.g, fixture.operation, lease, false, &got).Finished() ||
 		got != (ScalarResultPayloadV1{}) {
 		t.Fatalf("wrong owner consumed current worker result %s: %+v", fixture.task.name, got)
 	}
-	if !FinishCurrentExecutorWorkerPark(fixture.driver, fixture.task.g, fixture.operation, lease, false, &got) || got != want {
+	if result := FinishCurrentExecutorWorkerPark(fixture.driver, fixture.task.g, fixture.operation, lease, false, &got); !result.Finished() || got != want {
 		t.Fatalf("finish current worker owner %s = %+v, want %+v", fixture.task.name, got, want)
 	}
 	fixture.task.frame.header.SuspendReason = uint16(SuspendFrameComplete)

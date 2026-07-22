@@ -155,11 +155,20 @@ func validateCoroProgramBootstrapConfig(conf *Config) error {
 	if conf.EnableCoroChannel && !conf.EnableCoroProgramBootstrapRun {
 		return fmt.Errorf("enable coroutine channel lowering: runnable program bootstrap is required")
 	}
+	if conf.EnableCoroNativeFleet && !conf.EnableCoroProgramBootstrapRun {
+		return fmt.Errorf("enable native coroutine fleet: runnable program bootstrap is required")
+	}
+	if conf.EnableCoroNativeFleet && !conf.EnableCoroWorker {
+		return fmt.Errorf("enable native coroutine fleet: bounded native worker capability is required")
+	}
 	if conf.EnableCoroWorker && !conf.EnableCoroProgramBootstrapRun {
 		return fmt.Errorf("enable coroutine worker lowering: runnable program bootstrap is required")
 	}
 	if conf.EnableCoroWorker && !nativeCoroWorkerRuntimeABI(conf) {
 		return fmt.Errorf("enable coroutine worker lowering: a native Darwin/Linux pthread worker adapter is required")
+	}
+	if conf.EnableCoroNativeFleet && !nativeCoroTimerRuntimeABI(conf) {
+		return fmt.Errorf("enable native coroutine fleet: a 64-bit native Darwin/Linux timer reactor is required")
 	}
 	if !conf.EnableCoroProgramBootstrapABI {
 		return nil
@@ -831,10 +840,10 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 				coroTimerResumeSymbolV2 + "(g:ptr,state:ptr)->u32;" +
 				coroTimerCancelControlledSymbolV2 + "(controller:ptr,expected:u32)->u32")
 			write("native-poll=source-aware-park-v2:" +
-				coroPollParkSymbolV2 + "(g:ptr,handle:ptr,header:ptr,state:ptr,fd:i32,interest:u32,deadline-ns:i64)->void;" +
+				coroPollParkSymbolV2 + "(g:ptr,handle:ptr,header:ptr,state:ptr,context:uintptr,fd:i32,interest:u32,deadline-ns:i64)->void;" +
 				coroPollResumeSymbolV2 + "(g:ptr,state:ptr)->u32;" +
-				coroPollUpdateDeadlineOrAbortSymbolV1 + "(fd:i32,interest:u32,deadline-ns:i64)->void;" +
-				coroPollPostClosingOrAbortSymbolV1 + "(fd:i32,interest:u32)->void")
+				coroPollUpdateDeadlineOrAbortSymbolV1 + "(context:uintptr,interest:u32,deadline-ns:i64)->void;" +
+				coroPollPostClosingOrAbortSymbolV1 + "(context:uintptr,interest:u32)->void")
 			write("semaphore-owner-v1=" +
 				coroSemaphorePrepareOrAbortSymbolV1 + "(token:ptr,addr:ptr,ticket-out:*u32,wait-slot-out:*u32,wait-generation-out:*u32)->void;" +
 				coroSemaphoreRetireCompletedOrAbortSymbolV1 + "(token:ptr,ticket:u32,wait-slot:u32,wait-generation:u32)->void;" +

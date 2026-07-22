@@ -21,6 +21,7 @@ package runtime
 import (
 	"unsafe"
 
+	c "github.com/goplus/llgo/runtime/internal/clite"
 	"github.com/goplus/llgo/runtime/internal/coro"
 	"github.com/goplus/llgo/runtime/internal/coroworker"
 )
@@ -56,7 +57,17 @@ func validCoroWorkerResultWordsV1(state unsafe.Pointer, r1, r2, errno *uintptr) 
 		r1 != r2 && r1 != errno && r2 != errno
 }
 
-func coroWorkerAbortV1(message string) {
+// coroWorkerAbortV1 emits one allocation-free phase byte before the common
+// terminal diagnostic. Worker cleanup is an exact multi-stage ownership
+// transaction, and reducing every invariant violation to the same exit made a
+// rare scheduler/producer race impossible to distinguish in production. The
+// phase byte has no success-path cost and remains stable for crash triage:
+// P/Q/R/S/T are park admission; A/B/C/D/E/F/G/H are resume ABI, decision,
+// owner, completed/canceled tuple, finish, payload, and scalar validation.
+func coroWorkerAbortV1(phase byte, message string) {
+	c.Fputs(c.Str("coroutine worker abort phase "), c.Stderr)
+	c.Fputc(c.Int(phase), c.Stderr)
+	c.Fputc(c.Int('\n'), c.Stderr)
 	coroRuntimeAbort(message)
 	for {
 	}
@@ -79,8 +90,13 @@ func __llgo_coro_worker_park_v1(
 	driver, executor, route, current := coro.CurrentExecutorWorkerDriver(task)
 	if g == nil || handle == nil || header == nil || state == nil ||
 		*state != (CoroWorkerParkV1{}) || function == 0 || argc > coroworker.MaxArgs ||
-		!current || !coroReserveNativeWorkerSubmissionV1(executor, route) {
-		coroWorkerAbortV1("invalid coroutine worker park ABI")
+		!current {
+		coroWorkerAbortV1('P', "invalid coroutine worker park ABI")
+		return
+	}
+	reservation, reserved := coroReserveNativeWorkerSubmissionV1(executor, route)
+	if !reserved {
+		coroWorkerAbortV1('Q', "coroutine worker queue capacity unavailable")
 		return
 	}
 
@@ -95,22 +111,22 @@ func __llgo_coro_worker_park_v1(
 		1,
 	)
 	if !ok {
-		canceled := coroCancelNativeWorkerSubmissionV1(executor, route)
+		canceled := coroCancelNativeWorkerSubmissionV1(executor, route, reservation)
 		*state = CoroWorkerParkV1{}
 		if !canceled {
-			coroWorkerAbortV1("coroutine worker park reservation rollback failed")
+			coroWorkerAbortV1('R', "coroutine worker park reservation rollback failed")
 			return
 		}
-		coroWorkerAbortV1("cannot prepare coroutine worker park")
+		coroWorkerAbortV1('S', "cannot prepare coroutine worker park")
 		return
 	}
 	state.ticket = ticket
 	state.operation = operation
 	args := [coroworker.MaxArgs]uintptr{a0, a1, a2, a3, a4, a5, a6, a7, a8}
 	if !coroCommitNativeWorkerSubmissionV1(
-		driver, task, executor, route, operation, function, argc, &args,
+		driver, task, executor, route, reservation, operation, function, argc, &args,
 	) {
-		coroWorkerAbortV1("cannot commit coroutine worker submission")
+		coroWorkerAbortV1('T', "cannot commit coroutine worker submission")
 	}
 }
 
@@ -126,7 +142,7 @@ func __llgo_coro_worker_resume_v1(
 	state := (*CoroWorkerParkV1)(storage)
 	if g == nil || !validCoroWorkerParkV1(state) ||
 		!validCoroWorkerResultWordsV1(storage, r1, r2, errno) {
-		coroWorkerAbortV1("invalid coroutine worker resume ABI")
+		coroWorkerAbortV1('A', "invalid coroutine worker resume ABI")
 		return 0
 	}
 	*r1, *r2, *errno = 0, 0, 0
@@ -134,39 +150,48 @@ func __llgo_coro_worker_resume_v1(
 	task := (*coro.G)(g)
 	outcome, caseID, lease, cancel, ok := coro.TakeRunDecision(task, state.ticket)
 	if !ok {
-		coroWorkerAbortV1("invalid coroutine worker run decision")
+		coroWorkerAbortV1('B', "invalid coroutine worker run decision")
 		return 0
 	}
 	driver, _, _, current := coro.CurrentExecutorWorkerDriver(task)
 	if !current {
-		coroWorkerAbortV1("coroutine worker resume has no current executor owner")
+		coroWorkerAbortV1('C', "coroutine worker resume has no current executor owner")
 		return 0
 	}
 	discard := outcome == coro.ParkOutcomeCanceled
 	var payload coro.ScalarResultPayloadV1
 	if outcome == coro.ParkOutcomeCompleted {
 		if caseID != 1 || cancel != coro.TaskCancelNone || !lease.Valid() {
-			coroWorkerAbortV1("invalid completed coroutine worker decision")
+			coroWorkerAbortV1('D', "invalid completed coroutine worker decision")
 			return 0
 		}
-	} else if !discard || caseID != 0 || lease.Valid() ||
+	} else if !discard || caseID != 0 ||
 		cancel != coro.TaskCancelAbort && cancel != coro.TaskCancelShutdown {
-		coroWorkerAbortV1("invalid canceled coroutine worker decision")
+		coroWorkerAbortV1('E', "invalid canceled coroutine worker decision")
 		return 0
 	}
+	// A task stop may arrive after worker completion already won and detached.
+	// ConsumeParkSet then deliberately returns Canceled with the winner lease:
+	// cleanup must discard that payload before recycling the exact generation.
 	var output *coro.ScalarResultPayloadV1
 	if !discard {
 		output = &payload
 	}
-	if !coro.FinishCurrentExecutorWorkerPark(
+	finish := coro.FinishCurrentExecutorWorkerPark(
 		driver,
 		task,
 		state.operation,
 		lease,
 		discard,
 		output,
-	) {
-		coroWorkerAbortV1("cannot finish coroutine worker park")
+	)
+	if !finish.Finished() {
+		// Finish result digits are stable: 2=context, 3=lease,
+		// 4=quiescence, 5=result release, and 6=recycle.
+		c.Fputs(c.Str("coroutine worker finish result "), c.Stderr)
+		c.Fputc(c.Int(byte('0')+byte(finish)), c.Stderr)
+		c.Fputc(c.Int('\n'), c.Stderr)
+		coroWorkerAbortV1('F', "cannot finish coroutine worker park")
 		return 0
 	}
 	*state = CoroWorkerParkV1{}
@@ -177,14 +202,14 @@ func __llgo_coro_worker_resume_v1(
 		return coroWorkerResumeTaskAbortV1
 	}
 	if payload.Kind() != coro.ScalarResultKindWords || payload.Count() != 3 {
-		coroWorkerAbortV1("invalid coroutine worker result payload")
+		coroWorkerAbortV1('G', "invalid coroutine worker result payload")
 		return 0
 	}
 	values := [3]*uintptr{r1, r2, errno}
 	for index, output := range values {
 		value, scalarOK := payload.Scalar(uint8(index))
 		if !scalarOK || uint64(uintptr(value)) != value {
-			coroWorkerAbortV1("coroutine worker result does not fit uintptr")
+			coroWorkerAbortV1('H', "coroutine worker result does not fit uintptr")
 			return 0
 		}
 		*output = uintptr(value)

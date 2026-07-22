@@ -724,8 +724,10 @@ func emitCoroHostInitialSliceV2(
 // host loop. Each runtime call owns at most one bounded scheduler slice. The
 // only legal re-entry is an exact Yielded/More/Inline tuple, and it happens
 // after the public ABI call has returned, so target requestRun cannot recurse
-// through the scheduler stack. Queued, blocked, stale, panic, or malformed
-// results fail closed at this native-only boundary.
+// through the scheduler stack. Used counts only certified RunSlice reductions;
+// it may be zero when target compatibility or fleet-transfer bookkeeping asks
+// for an immediate retry without consuming one. Queued, blocked, stale, panic,
+// or malformed results fail closed at this native-only boundary.
 func emitCoroNativeRunLoopV2(
 	b llssa.Builder,
 	pkg llssa.Package,
@@ -800,7 +802,6 @@ func emitCoroNativeRunLoopV2(
 		prog.IntVal(uint64(coroProgramRunMoreV2|coroProgramRunRequestInlineV2), word),
 	))
 	used := b.Load(b.FieldAddr(result, coroProgramRunResultUsedV2))
-	validYielded = and(validYielded, b.BinOp(token.NEQ, used, zero))
 	validYielded = and(validYielded, b.BinOp(token.LEQ, used, budget))
 	for _, index := range []int{
 		coroProgramRunResultExecutorSlotV2,

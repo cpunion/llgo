@@ -62,13 +62,13 @@ func TestCoroPollOwnerFailStopABIAndCatalogSource(t *testing.T) {
 	}{
 		{
 			name:      "__llgo_coro_poll_update_deadline_or_abort_v1",
-			params:    []string{"int32", "uint32", "int64"},
+			params:    []string{"uintptr", "uint32", "int64"},
 			delegates: "coroProgramUpdatePollDeadlineV1",
 			failStop:  true,
 		},
 		{
 			name:      "__llgo_coro_poll_post_closing_or_abort_v1",
-			params:    []string{"int32", "uint32"},
+			params:    []string{"uintptr", "uint32"},
 			delegates: "coroProgramPostPollClosingV1",
 			failStop:  true,
 		},
@@ -76,7 +76,7 @@ func TestCoroPollOwnerFailStopABIAndCatalogSource(t *testing.T) {
 			name: "__llgo_coro_poll_park_v2",
 			params: []string{
 				"unsafe.Pointer", "unsafe.Pointer", "unsafe.Pointer", "unsafe.Pointer",
-				"int32", "uint32", "int64",
+				"uintptr", "int32", "uint32", "int64",
 			},
 			delegates: "coro.PrepareCurrentExecutorPollPark",
 			failStop:  true,
@@ -92,7 +92,7 @@ func TestCoroPollOwnerFailStopABIAndCatalogSource(t *testing.T) {
 			name:      "__llgo_coro_poll_post_event_v2",
 			params:    []string{"uint32", "uint32", "uint32"},
 			result:    "uint32",
-			delegates: "coro.PostExecutorPollEvent",
+			delegates: "coroProgramPostPollEventV2",
 		},
 	}
 	for _, test := range tests {
@@ -137,14 +137,15 @@ func TestCoroPollOwnerFailStopABIAndCatalogSource(t *testing.T) {
 
 	ownerText := string(data)
 	for _, marker := range []string{
-		"coro.UpdateExecutorPollDeadlineExact(",
-		"coro.PostExecutorPollEvent(",
-		"coroTargetRequestExecutorV1(",
+		"coroTargetPostPollOperationV2(",
 		"coro.CurrentExecutorPollDriver(",
 		"coro.PrepareCurrentExecutorPollPark(",
 		"coro.FinishCurrentExecutorPollPark(",
-		"It is not a foreign-thread ingress",
-		"retain one lease across both source publication and executor request",
+		"coroPollDescPublishOperationV1(",
+		"coroPollDescClearOperationV1(",
+		"coroPollDescLoadOperationV1(",
+		"coroPollDescDeadlineV1(",
+		"route is the complete destination identity",
 		"//export __llgo_coro_poll_park_v2",
 		"//export __llgo_coro_poll_resume_v2",
 		"//export __llgo_coro_poll_post_event_v2",
@@ -162,9 +163,29 @@ func TestCoroPollOwnerFailStopABIAndCatalogSource(t *testing.T) {
 		"__llgo_coro_poll_retire_completed_or_abort_v1",
 		"coro.PrepareExecutorPollOperation(",
 		"coro.RetireCompletedExecutorPollOperation(",
+		"coroProgramFindActivePollSnapshotV2(",
+		"coro.SnapshotExecutorPollOperation(",
+		"coro.UpdateExecutorPollDeadlineExact(",
 	} {
 		if strings.Contains(ownerText, obsolete) {
 			t.Errorf("%s retains obsolete Poll V1 wait ABI %q", ownerSource, obsolete)
+		}
+	}
+	for path, markers := range map[string][]string{
+		"internal/runtime/coro_poll_route_default_llgo.go": {
+			"coro.PostExecutorPollEvent(",
+			"coroTargetRequestExecutorV1(",
+		},
+		"internal/runtime/coro_poll_route_native_fleet_llgo.go": {
+			"coroNativeFleetPostPollV1(",
+			"retains its route lease across exact source publication",
+		},
+	} {
+		routeSource := readRuntimePollFile(t, path)
+		for _, marker := range markers {
+			if !strings.Contains(routeSource, marker) {
+				t.Errorf("%s lacks exact poll route marker %q", path, marker)
+			}
 		}
 	}
 
@@ -189,26 +210,77 @@ func TestCoroPollOwnerFailStopABIAndCatalogSource(t *testing.T) {
 	}
 }
 
-func TestCoroPollDescriptorUsesOpaqueHandleAndTypedRoot(t *testing.T) {
+func TestCoroPollDescriptorUsesOpaqueScalarOwner(t *testing.T) {
 	const sourcePath = "internal/lib/runtime/poll_linkname_coro_llgo.go"
 	source := readRuntimePollFile(t, sourcePath)
 	for _, marker := range []string{
-		"pollDescRoots map[uintptr]*llgoPollDesc",
-		"pollDescNext++",
-		"func pollRootGet(ctx uintptr) *llgoPollDesc",
-		"pd := pollDescRoots[ctx]",
-		"The catalog remains the typed lifetime root",
+		"//llgo:coro sync\n//go:linkname llgoCoroPollDescAllocV1 C.__llgo_runtime_poll_desc_alloc_v1",
+		"//llgo:coro sync\n//go:linkname llgoCoroPollDescFreeV1 C.__llgo_runtime_poll_desc_free_v1",
+		"//llgo:coro noblock\n//go:linkname llgoCoroPollDescStateV1 C.__llgo_runtime_poll_desc_state_v1",
+		"//llgo:coro noblock\n//go:linkname llgoCoroPollDescDeadlineV1 C.__llgo_runtime_poll_desc_deadline_v1",
+		"//llgo:coro noblock\n//go:linkname llgoCoroPollDescSetDeadlineV1 C.__llgo_runtime_poll_desc_set_deadline_v1",
+		"//llgo:coro noblock\n//go:linkname llgoCoroPollDescMarkClosingV1 C.__llgo_runtime_poll_desc_mark_closing_v1",
+		"one opaque uintptr handle",
+		"FD reference count delays Free",
+		"llgoCoroPollWaitV2(ctx uintptr, fd int32, interest uint32, deadline int64)",
+		"llgoCoroPollUpdateDeadlineOrAbortV1(ctx uintptr, interest uint32, deadline int64)",
+		"llgoCoroPollPostClosingOrAbortV1(ctx uintptr, interest uint32)",
 	} {
 		if !strings.Contains(source, marker) {
-			t.Errorf("%s lacks opaque-handle root marker %q", sourcePath, marker)
+			t.Errorf("%s lacks explicit scalar context marker %q", sourcePath, marker)
 		}
 	}
 	for _, forbidden := range []string{
-		"uintptr(unsafe.Pointer(pd))",
-		"(*llgoPollDesc)(unsafe.Pointer(ctx))",
+		"pollDescRoots map[",
+		"make(map[uintptr]*llgoPollDesc)",
+		"delete(pollDescRoots",
+		"unsafe.Pointer(ctx)",
+		"uintptr(unsafe.Pointer",
 	} {
 		if strings.Contains(source, forbidden) {
-			t.Errorf("%s reconstructs a poll descriptor through unrooted address word %q", sourcePath, forbidden)
+			t.Errorf("%s retains a Go pointer/catalog path %q", sourcePath, forbidden)
+		}
+	}
+
+	const ownerPath = "internal/lib/runtime/_wrap/poll.c"
+	owner, err := os.ReadFile(ownerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerSource := string(owner)
+	for _, marker := range []string{
+		"struct llgo_runtime_poll_desc_v1",
+		"_Atomic uint32_t closing",
+		"_Atomic int64_t read_deadline",
+		"_Atomic uint64_t read_operation",
+		"_Atomic uint64_t write_operation",
+		"uintptr_t __llgo_runtime_poll_desc_alloc_v1(",
+		"void __llgo_runtime_poll_desc_free_v1(uintptr_t context)",
+		"__llgo_runtime_poll_desc_load_operation_v1(",
+		"__llgo_runtime_poll_desc_publish_operation_v1(",
+		"__llgo_runtime_poll_desc_clear_operation_v1(",
+		"atomic_exchange_explicit(",
+		"memory_order_seq_cst",
+		"have no fixed table capacity",
+	} {
+		if !strings.Contains(ownerSource, marker) {
+			t.Errorf("%s lacks opaque descriptor owner marker %q", ownerPath, marker)
+		}
+	}
+
+	const adapterPath = "internal/runtime/coro_poll_descriptor_llgo.go"
+	adapter := readRuntimePollFile(t, adapterPath)
+	for _, marker := range []string{
+		"C.__llgo_runtime_poll_desc_publish_operation_v1",
+		"C.__llgo_runtime_poll_desc_clear_operation_v1",
+		"C.__llgo_runtime_poll_desc_load_operation_v1",
+		"func coroPollDescPublishOperationV1(",
+		"func coroPollDescClearOperationV1(",
+		"func coroPollDescLoadOperationV1(",
+		"func coroPollDescDeadlineV1(",
+	} {
+		if !strings.Contains(adapter, marker) {
+			t.Errorf("%s lacks exact descriptor operation adapter %q", adapterPath, marker)
 		}
 	}
 }

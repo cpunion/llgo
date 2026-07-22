@@ -384,12 +384,35 @@ func (source *WorkerOperationSource) publishSlot(p *P, index uint32) (published,
 		mailbox == workerOperationMailboxDelivered {
 		return 0, 0, true
 	}
-	if mailbox != workerOperationMailboxPosted ||
-		!preemptCompareAndSwap(&slot.mailbox, uint32(workerOperationMailboxPosted), uint32(workerOperationMailboxDraining)) ||
-		!validWorkerOperationLiveSlot(source, p, index) || !slot.payload.Valid() {
+	if mailbox != workerOperationMailboxPosted || !validWorkerOperationLiveSlot(source, p, index) ||
+		!slot.payload.Valid() {
 		return 0, 0, false
 	}
 	id := slot.record.id
+	// Posted is durable before the producer releases its admission. An executor
+	// already running on another M may observe that fact before the callback
+	// reaches its release-and-request tail. Seal the one-shot generation now and
+	// do not publish a resumable ParkState winner until every admitted Post has
+	// left; otherwise the resumed wrapper can race the final producer release.
+	switch closeResult := source.beginCloseSlot(p, id); closeResult {
+	case WorkerOperationCloseStarted, WorkerOperationAlreadyClosing, WorkerOperationAlreadyQuiesced:
+	default:
+		return 0, 0, false
+	}
+	if !producerSourceSlotQuiesced(&slot.producerSourceSlot) {
+		// The route callback requests the exact executor only after Post returns.
+		// Keep the source hint sticky as well so an owner which is already running
+		// retries without depending on that later advisory request.
+		preemptStore(&source.pending, 1)
+		return 0, 0, true
+	}
+	if !preemptCompareAndSwap(
+		&slot.mailbox,
+		uint32(workerOperationMailboxPosted),
+		uint32(workerOperationMailboxDraining),
+	) {
+		return 0, 0, false
+	}
 	switch result := PublishScalarOperationCompletion(&slot.result, &slot.record, id, slot.payload); result {
 	case OperationCompletionPublished:
 		if slot.record.link.wait != nil {

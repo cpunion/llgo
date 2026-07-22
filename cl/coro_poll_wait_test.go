@@ -41,10 +41,10 @@ const coroPollWaitTestSource = `package foo
 import _ "unsafe"
 
 //go:linkname wait llgo.coroPollWait
-func wait(fd int32, interest uint32, deadline int64) uint32
+func wait(context uintptr, fd int32, interest uint32, deadline int64) uint32
 
-func Root(fd int32, interest uint32, deadline int64) uint32 {
-	return wait(fd, interest, deadline)
+func Root(context uintptr, fd int32, interest uint32, deadline int64) uint32 {
+	return wait(context, fd, interest, deadline)
 }
 `
 
@@ -57,24 +57,24 @@ func TestCoroPollWaitIntrinsicRejectsNonCanonicalShape(t *testing.T) {
 			name: "fd",
 			source: `package pollwaitbadfd
 //llgo:link Wait llgo.coroPollWait
-func Wait(uint32, uint32, int64) uint32
-func Use(fd uint32, interest uint32, deadline int64) uint32 { return Wait(fd, interest, deadline) }
+func Wait(uintptr, uint32, uint32, int64) uint32
+func Use(context uintptr, fd uint32, interest uint32, deadline int64) uint32 { return Wait(context, fd, interest, deadline) }
 `,
 		},
 		{
 			name: "result",
 			source: `package pollwaitbadresult
 //llgo:link Wait llgo.coroPollWait
-func Wait(int32, uint32, int64) uint64
-func Use(fd int32, interest uint32, deadline int64) uint64 { return Wait(fd, interest, deadline) }
+func Wait(uintptr, int32, uint32, int64) uint64
+func Use(context uintptr, fd int32, interest uint32, deadline int64) uint64 { return Wait(context, fd, interest, deadline) }
 `,
 		},
 		{
 			name: "arity",
 			source: `package pollwaitbadarity
 //llgo:link Wait llgo.coroPollWait
-func Wait(int32, uint32) uint32
-func Use(fd int32, interest uint32) uint32 { return Wait(fd, interest) }
+func Wait(uintptr, int32, uint32) uint32
+func Use(context uintptr, fd int32, interest uint32) uint32 { return Wait(context, fd, interest) }
 `,
 		},
 	} {
@@ -154,7 +154,7 @@ func TestCoroPollWaitCurrentFrameNativeAndWasm32(t *testing.T) {
 			}
 			stateAndPark := regexp.MustCompile(
 				`(?s)store i16 4,.*store i16 3,.*store i32 1,.*call void @` + regexp.QuoteMeta(coroPollParkHookV2) +
-					`\(ptr [^,]+, ptr [^,]+, ptr [^,]+, ptr [^,]+, i32 [^,]+, i32 [^,]+, i64 [^)]+\)`,
+					`\(ptr [^,]+, ptr [^,]+, ptr [^,]+, ptr [^,]+, i(?:32|64) [^,]+, i32 [^,]+, i32 [^,]+, i64 [^)]+\)`,
 			)
 			if !stateAndPark.MatchString(body) {
 				t.Fatalf("Root does not publish Park/Suspended/stateID=1 before Poll V2 park:\n%s", body)

@@ -44,11 +44,13 @@ func TestNativeQueueC11CapacityConcurrentWrapAndStop(t *testing.T) {
 
 enum {
     worker_count = 4,
-    generation_count = 4 * LLGO_CORO_WORKER_QUEUE_CAPACITY_V1,
+    producer_count = 4,
+    generation_count = 8 * LLGO_CORO_WORKER_QUEUE_CAPACITY_V1,
 };
 
 static _Atomic uint32_t seen[generation_count];
 static _Atomic uint32_t completed;
+static _Atomic uint32_t next_generation;
 
 uint32_t __llgo_coro_native_worker_complete_v1(
     uint32_t source_slot,
@@ -96,7 +98,7 @@ static void *consume(void *unused) {
     }
 }
 
-static int submit(uint32_t generation) {
+static int submit(size_t reservation, uint32_t generation) {
     struct llgo_coro_worker_job_v1 job;
     memset(&job, 0, sizeof(job));
     job.source_slot = UINT32_C(0x05000001) |
@@ -107,7 +109,34 @@ static int submit(uint32_t generation) {
     for (uint32_t arg = 0; arg < LLGO_CORO_WORKER_MAX_ARGS_V1; ++arg) {
         job.args[arg] = ((uintptr_t)generation << 8) + arg;
     }
-    return __llgo_coro_worker_queue_submit_reserved_v1(&job) ? 0 : 1;
+    return __llgo_coro_worker_queue_submit_reserved_v1(reservation, &job) ? 0 : 1;
+}
+
+static void *produce(void *unused) {
+    (void)unused;
+    for (;;) {
+        uint32_t generation = atomic_fetch_add_explicit(
+            &next_generation, 1, memory_order_relaxed);
+        if (generation > generation_count) {
+            return NULL;
+        }
+        size_t reservation;
+        while (!__llgo_coro_worker_queue_reserve_v1(&reservation)) {
+            sched_yield();
+        }
+        /* Exercise rollback after later producers can already own positions. */
+        if ((generation & 31) == 0) {
+            if (!__llgo_coro_worker_queue_cancel_reservation_v1(reservation)) {
+                return (void *)(uintptr_t)5;
+            }
+            while (!__llgo_coro_worker_queue_reserve_v1(&reservation)) {
+                sched_yield();
+            }
+        }
+        if (submit(reservation, generation) != 0) {
+            return (void *)(uintptr_t)6;
+        }
+    }
 }
 
 int main(void) {
@@ -116,21 +145,27 @@ int main(void) {
         __llgo_coro_worker_queue_can_release_v1()) {
         return 10;
     }
-    if (!__llgo_coro_worker_queue_reserve_v1() ||
-        !__llgo_coro_worker_queue_cancel_reservation_v1() ||
-        __llgo_coro_worker_queue_cancel_reservation_v1()) {
+    size_t reservation;
+    if (__llgo_coro_worker_queue_reserve_v1(NULL)) {
         return 11;
     }
 
-    for (uint32_t generation = 1;
-         generation <= LLGO_CORO_WORKER_QUEUE_CAPACITY_V1;
-         ++generation) {
-        if (!__llgo_coro_worker_queue_reserve_v1() || submit(generation) != 0) {
+    size_t initial[LLGO_CORO_WORKER_QUEUE_CAPACITY_V1];
+    for (size_t index = 0; index < LLGO_CORO_WORKER_QUEUE_CAPACITY_V1; ++index) {
+        if (!__llgo_coro_worker_queue_reserve_v1(&initial[index])) {
             return 12;
         }
     }
-    if (__llgo_coro_worker_queue_reserve_v1()) {
+    if (__llgo_coro_worker_queue_reserve_v1(&reservation)) {
         return 13;
+    }
+    /* Publish out of order to prove reservation identity is per producer. */
+    for (uint32_t generation = LLGO_CORO_WORKER_QUEUE_CAPACITY_V1;
+         generation != 0;
+         --generation) {
+        if (submit(initial[generation - 1], generation) != 0) {
+            return 12;
+        }
     }
 
     pthread_t workers[worker_count];
@@ -139,14 +174,20 @@ int main(void) {
             return 14;
         }
     }
-    for (uint32_t generation = LLGO_CORO_WORKER_QUEUE_CAPACITY_V1 + 1;
-         generation <= generation_count;
-         ++generation) {
-        while (!__llgo_coro_worker_queue_reserve_v1()) {
-            sched_yield();
-        }
-        if (submit(generation) != 0) {
+    atomic_store_explicit(
+        &next_generation,
+        LLGO_CORO_WORKER_QUEUE_CAPACITY_V1 + 1,
+        memory_order_relaxed);
+    pthread_t producers[producer_count];
+    for (uint32_t index = 0; index < producer_count; ++index) {
+        if (pthread_create(&producers[index], NULL, produce, NULL) != 0) {
             return 15;
+        }
+    }
+    for (uint32_t index = 0; index < producer_count; ++index) {
+        void *result = NULL;
+        if (pthread_join(producers[index], &result) != 0 || result != NULL) {
+            return 22;
         }
     }
     if (!__llgo_coro_worker_queue_stop_v1(worker_count)) {
@@ -172,12 +213,20 @@ int main(void) {
     }
 
     /* Stop must reject an unpublished reservation and restart must be clean. */
+    pthread_t cleanup_worker;
     if (!__llgo_coro_worker_queue_init_v1() ||
-        !__llgo_coro_worker_queue_reserve_v1() ||
-        __llgo_coro_worker_queue_stop_v1(0) ||
-        !__llgo_coro_worker_queue_cancel_reservation_v1() ||
-        !__llgo_coro_worker_queue_stop_v1(0) ||
-        !__llgo_coro_worker_queue_destroy_after_join_v1() ||
+        pthread_create(&cleanup_worker, NULL, consume, NULL) != 0 ||
+        !__llgo_coro_worker_queue_reserve_v1(&reservation) ||
+        __llgo_coro_worker_queue_stop_v1(1) ||
+        !__llgo_coro_worker_queue_cancel_reservation_v1(reservation) ||
+        !__llgo_coro_worker_queue_stop_v1(1)) {
+        return 21;
+    }
+    void *cleanup_result = NULL;
+    if (pthread_join(cleanup_worker, &cleanup_result) != 0 || cleanup_result != NULL) {
+        return 23;
+    }
+    if (!__llgo_coro_worker_queue_destroy_after_join_v1() ||
         !__llgo_coro_worker_queue_can_release_v1()) {
         return 21;
     }

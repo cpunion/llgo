@@ -67,8 +67,8 @@ const (
 )
 
 // coroNativeWorkerPoolV1 is the native target adapter, not another executor.
-// Exact scheduler owners share one short lock-free queue reservation; the
-// winner submits or cancels it without suspension. Four fixed-stack workers
+// Exact scheduler owners reserve independent lock-free queue cells and submit
+// or cancel them without suspension. Four fixed-stack workers
 // drain the bounded C11 sequence ring, and each job's existing OperationID
 // route selects its Worker source on completion. Neither ring cells nor
 // workers inspect a G, ParkState, WaitSetRecord, or LLVM coroutine handle. No
@@ -194,16 +194,28 @@ func coroNativeWorkerSubmissionOwnerV1(handle coro.ExecutorHandle, route coro.Ro
 }
 
 // coroNativeWorkerPoolReserveV1 is the nonblocking queue-capacity preflight.
-// Multiple exact P owners may contend on the one lock-free reservation word;
-// only its winner owns the sequence cell and must submit or cancel before
-// leaving the compiler-enforced no-suspend hook. Consumers only release cells,
-// so capacity cannot disappear before the matching SubmitReserved.
-func coroNativeWorkerPoolReserveV1(handle coro.ExecutorHandle, route coro.RouteID) bool {
-	return coroNativeWorkerSubmissionOwnerV1(handle, route) && coroworker.QueueReserve()
+// Multiple exact P owners can own different sequence cells concurrently. Each
+// token must be submitted or canceled before leaving the compiler-enforced
+// no-suspend hook; consumers cannot revoke an owned cell.
+func coroNativeWorkerPoolReserveV1(
+	handle coro.ExecutorHandle,
+	route coro.RouteID,
+) (coroworker.QueueReservation, bool) {
+	if !coroNativeWorkerSubmissionOwnerV1(handle, route) {
+		return 0, false
+	}
+	var reservation coroworker.QueueReservation
+	reserved := coroworker.QueueReserve(&reservation)
+	return reservation, reserved
 }
 
-func coroNativeWorkerPoolCancelReservationV1(handle coro.ExecutorHandle, route coro.RouteID) bool {
-	return coroNativeWorkerSubmissionOwnerV1(handle, route) && coroworker.QueueCancelReservation()
+func coroNativeWorkerPoolCancelReservationV1(
+	handle coro.ExecutorHandle,
+	route coro.RouteID,
+	reservation coroworker.QueueReservation,
+) bool {
+	return coroNativeWorkerSubmissionOwnerV1(handle, route) &&
+		coroworker.QueueCancelReservation(reservation)
 }
 
 // coroNativeWorkerPoolSubmitReservedV1 is called only after the core owner has
@@ -213,6 +225,7 @@ func coroNativeWorkerPoolCancelReservationV1(handle coro.ExecutorHandle, route c
 func coroNativeWorkerPoolSubmitReservedV1(
 	handle coro.ExecutorHandle,
 	route coro.RouteID,
+	reservation coroworker.QueueReservation,
 	id coro.OperationID,
 	function uintptr,
 	argc uint32,
@@ -232,7 +245,7 @@ func coroNativeWorkerPoolSubmitReservedV1(
 		return false
 	}
 	return id.Route() == route && coroNativeWorkerSubmissionOwnerV1(handle, route) &&
-		coroworker.QueueSubmitReserved(&job)
+		coroworker.QueueSubmitReserved(reservation, &job)
 }
 
 // coroNativeWorkerPoolStopDeliveryV1 seals submission, wakes all idle workers,
@@ -290,12 +303,19 @@ func coroNativeWorkerPoolStopFleetV1() bool {
 // before PrepareCurrentExecutorWorkerPark changes the current frame's
 // ParkState. Program and fleet owners use the same bounded physical queue; the
 // exact current executor plus route authorizes one lock-free reservation.
-func coroReserveNativeWorkerSubmissionV1(handle coro.ExecutorHandle, route coro.RouteID) bool {
+func coroReserveNativeWorkerSubmissionV1(
+	handle coro.ExecutorHandle,
+	route coro.RouteID,
+) (coroworker.QueueReservation, bool) {
 	return coroNativeWorkerPoolReserveV1(handle, route)
 }
 
-func coroCancelNativeWorkerSubmissionV1(handle coro.ExecutorHandle, route coro.RouteID) bool {
-	return coroNativeWorkerPoolCancelReservationV1(handle, route)
+func coroCancelNativeWorkerSubmissionV1(
+	handle coro.ExecutorHandle,
+	route coro.RouteID,
+	reservation coroworker.QueueReservation,
+) bool {
+	return coroNativeWorkerPoolCancelReservationV1(handle, route, reservation)
 }
 
 // coroCommitNativeWorkerSubmissionV1 closes the no-return handoff from
@@ -307,6 +327,7 @@ func coroCommitNativeWorkerSubmissionV1(
 	g *coro.G,
 	handle coro.ExecutorHandle,
 	route coro.RouteID,
+	reservation coroworker.QueueReservation,
 	id coro.OperationID,
 	function uintptr,
 	argc uint32,
@@ -321,6 +342,7 @@ func coroCommitNativeWorkerSubmissionV1(
 	if !coroNativeWorkerPoolSubmitReservedV1(
 		handle,
 		route,
+		reservation,
 		id,
 		function,
 		argc,

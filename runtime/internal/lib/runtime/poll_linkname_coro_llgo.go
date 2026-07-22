@@ -7,7 +7,6 @@ import (
 
 	cliteos "github.com/goplus/llgo/runtime/internal/clite/os"
 	csyscall "github.com/goplus/llgo/runtime/internal/clite/syscall"
-	latomic "github.com/goplus/llgo/runtime/internal/lib/sync/atomic"
 	llrt "github.com/goplus/llgo/runtime/internal/runtime"
 )
 
@@ -28,69 +27,56 @@ const (
 	coroPollResultTimeoutV2 uint32 = 3
 )
 
-type llgoPollDesc struct {
-	fd           int32
-	closing      uint32
-	rd           int64
-	wd           int64
-	inlineStream bool
+const (
+	coroPollDescClosingV1      uint64 = 1 << 32
+	coroPollDescInlineStreamV1 uint64 = 1 << 33
+)
+
+// The descriptor owner is an explicitly allocated C object containing scalar
+// state only. Go sees one opaque uintptr handle and never converts it to a Go
+// pointer, so unrelated descriptors need neither a shared map nor a lock. The
+// internal/poll FD reference count delays Free until every operation returns.
+
+//llgo:coro sync
+//go:linkname llgoCoroPollDescAllocV1 C.__llgo_runtime_poll_desc_alloc_v1
+func llgoCoroPollDescAllocV1(fd int32, inlineStream uint32) uintptr
+
+//llgo:coro sync
+//go:linkname llgoCoroPollDescFreeV1 C.__llgo_runtime_poll_desc_free_v1
+func llgoCoroPollDescFreeV1(ctx uintptr)
+
+//llgo:coro noblock
+//go:linkname llgoCoroPollDescStateV1 C.__llgo_runtime_poll_desc_state_v1
+func llgoCoroPollDescStateV1(ctx uintptr) uint64
+
+//llgo:coro noblock
+//go:linkname llgoCoroPollDescDeadlineV1 C.__llgo_runtime_poll_desc_deadline_v1
+func llgoCoroPollDescDeadlineV1(ctx uintptr, mode int32) int64
+
+//llgo:coro noblock
+//go:linkname llgoCoroPollDescSetDeadlineV1 C.__llgo_runtime_poll_desc_set_deadline_v1
+func llgoCoroPollDescSetDeadlineV1(ctx uintptr, mode int32, deadline int64)
+
+// llgoCoroPollDescMarkClosingV1 atomically sets closing and returns a state
+// word containing its previous value, so exactly one unblock posts wakeups.
+//
+//llgo:coro noblock
+//go:linkname llgoCoroPollDescMarkClosingV1 C.__llgo_runtime_poll_desc_mark_closing_v1
+func llgoCoroPollDescMarkClosingV1(ctx uintptr) uint64
+
+func pollDescFD(state uint64) int32 {
+	return int32(uint32(state))
 }
 
-var pollDescRoots map[uintptr]*llgoPollDesc
-var pollDescNext uintptr
-
-func init() {
-	pollDescRoots = make(map[uintptr]*llgoPollDesc)
+func pollDescClosing(state uint64) bool {
+	return state&coroPollDescClosingV1 != 0
 }
 
-func pollRootAdd(pd *llgoPollDesc) uintptr {
-	if pd == nil {
-		return 0
-	}
-	pollDescNext++
-	ctx := pollDescNext
-	if ctx == 0 || pollDescRoots[ctx] != nil {
-		return 0
-	}
-	pollDescRoots[ctx] = pd
-	return ctx
-}
-
-func pollRootGet(ctx uintptr) *llgoPollDesc {
+func pollDeadline(ctx uintptr, mode int) int64 {
 	if ctx == 0 {
-		return nil
-	}
-	pd := pollDescRoots[ctx]
-	return pd
-}
-
-func pollRootDel(ctx uintptr) {
-	if ctx == 0 {
-		return
-	}
-	delete(pollDescRoots, ctx)
-}
-
-func pollDeadline(pd *llgoPollDesc, mode int) int64 {
-	if pd == nil {
 		return 0
 	}
-	switch mode {
-	case 'r':
-		return latomic.LoadInt64(&pd.rd)
-	case 'w':
-		return latomic.LoadInt64(&pd.wd)
-	default:
-		rd := latomic.LoadInt64(&pd.rd)
-		wd := latomic.LoadInt64(&pd.wd)
-		if rd == 0 {
-			return wd
-		}
-		if wd == 0 || rd < wd {
-			return rd
-		}
-		return wd
-	}
+	return llgoCoroPollDescDeadlineV1(ctx, int32(mode))
 }
 
 func pollInterest(mode int) (uint32, bool) {
@@ -157,15 +143,15 @@ func pollFDReadinessCapable(fd int32) (readiness bool, inlineAttempt bool, errno
 }
 
 //go:linkname llgoCoroPollWaitV2 llgo.coroPollWait
-func llgoCoroPollWaitV2(fd int32, interest uint32, deadline int64) uint32
+func llgoCoroPollWaitV2(ctx uintptr, fd int32, interest uint32, deadline int64) uint32
 
 //llgo:coro noblock
 //go:linkname llgoCoroPollUpdateDeadlineOrAbortV1 C.__llgo_coro_poll_update_deadline_or_abort_v1
-func llgoCoroPollUpdateDeadlineOrAbortV1(fd int32, interest uint32, deadline int64)
+func llgoCoroPollUpdateDeadlineOrAbortV1(ctx uintptr, interest uint32, deadline int64)
 
 //llgo:coro noblock
 //go:linkname llgoCoroPollPostClosingOrAbortV1 C.__llgo_coro_poll_post_closing_or_abort_v1
-func llgoCoroPollPostClosingOrAbortV1(fd int32, interest uint32)
+func llgoCoroPollPostClosingOrAbortV1(ctx uintptr, interest uint32)
 
 //llgo:coro contract foreign.v1 progress=executor-safe affinity=any-thread reentry=none memory=by-value
 //go:linkname llgoCoroPollFDStreamV1 C.__llgo_runtime_poll_fd_stream_v1
@@ -188,8 +174,11 @@ func poll_runtime_pollOpen(fd uintptr) (uintptr, int) {
 	if !capable {
 		return 0, errno
 	}
-	pd := &llgoPollDesc{fd: int32(fd), inlineStream: inlineAttempt}
-	ctx := pollRootAdd(pd)
+	var inlineStream uint32
+	if inlineAttempt {
+		inlineStream = 1
+	}
+	ctx := llgoCoroPollDescAllocV1(int32(fd), inlineStream)
 	if ctx == 0 {
 		return 0, int(csyscall.ENOMEM)
 	}
@@ -198,15 +187,14 @@ func poll_runtime_pollOpen(fd uintptr) (uintptr, int) {
 
 //go:linkname poll_runtime_pollClose internal/poll.runtime_pollClose
 func poll_runtime_pollClose(ctx uintptr) {
-	pd := pollRootGet(ctx)
-	if pd == nil {
+	if ctx == 0 {
 		return
 	}
-	if latomic.LoadUint32(&pd.closing) == 0 {
+	if !pollDescClosing(llgoCoroPollDescStateV1(ctx)) {
 		throw("runtime: close coroutine polldesc without completed unblock")
 		return
 	}
-	pollRootDel(ctx)
+	llgoCoroPollDescFreeV1(ctx)
 }
 
 //llgo:coro contract foreign.v1 progress=executor-safe affinity=any-thread reentry=none memory=borrow-until-return
@@ -239,47 +227,42 @@ func pollCoroWriteAttemptV1(
 	return result, errno, true
 }
 
-func pollCoroAttemptEligible(pd *llgoPollDesc, ctx uintptr, fd int, size int) bool {
-	if pd == nil || !pd.inlineStream || ctx == 0 || fd < 0 ||
-		uintptr(fd) > uintptr(^uint32(0)>>1) || int32(fd) != pd.fd ||
-		size < 0 ||
-		latomic.LoadUint32(&pd.closing) != 0 {
+func pollCoroAttemptEligible(ctx uintptr, fd int, size int) bool {
+	if ctx == 0 || fd < 0 || uintptr(fd) > uintptr(^uint32(0)>>1) || size < 0 {
 		return false
 	}
-	return true
+	state := llgoCoroPollDescStateV1(ctx)
+	return state&coroPollDescInlineStreamV1 != 0 &&
+		!pollDescClosing(state) && int32(fd) == pollDescFD(state)
 }
 
 //go:linkname poll_runtime_pollReadAttempt internal/poll.runtime_pollReadAttempt
 func poll_runtime_pollReadAttempt(ctx uintptr, fd int, address unsafe.Pointer, size int) (int, int, bool) {
-	pd := pollRootGet(ctx)
-	if !pollCoroAttemptEligible(pd, ctx, fd, size) {
+	if !pollCoroAttemptEligible(ctx, fd, size) {
 		return 0, 0, false
 	}
-	return pollCoroReadAttemptV1(pd.fd, address, uintptr(size))
+	return pollCoroReadAttemptV1(int32(fd), address, uintptr(size))
 }
 
 //go:linkname poll_runtime_pollWriteAttempt internal/poll.runtime_pollWriteAttempt
 func poll_runtime_pollWriteAttempt(ctx uintptr, fd int, address unsafe.Pointer, size int) (int, int, bool) {
-	pd := pollRootGet(ctx)
-	if !pollCoroAttemptEligible(pd, ctx, fd, size) {
+	if !pollCoroAttemptEligible(ctx, fd, size) {
 		return 0, 0, false
 	}
-	return pollCoroWriteAttemptV1(pd.fd, address, uintptr(size))
+	return pollCoroWriteAttemptV1(int32(fd), address, uintptr(size))
 }
 
 // pollCoroWaitOneV2 is one compiler-owned typed park recipe. Source code hands
 // it only the copied scalar descriptor identity and receives one exact
 // Ready/Closing/Timeout result after the runtime has retired the source lease.
-func pollCoroWaitOneV2(fd int32, interest uint32, deadline int64) uint32 {
-	return llgoCoroPollWaitV2(fd, interest, deadline)
+func pollCoroWaitOneV2(ctx uintptr, fd int32, interest uint32, deadline int64) uint32 {
+	return llgoCoroPollWaitV2(ctx, fd, interest, deadline)
 }
 
-// pollCoroPrepareWaitV2 resolves the stable scalar descriptor handle through
-// the typed root catalog before suspension, then returns the complete scalar
-// snapshot.
+// pollCoroPrepareWaitV2 resolves the stable scalar descriptor handle before
+// suspension, then returns the complete scalar snapshot.
 func pollCoroPrepareWaitV2(ctx uintptr, mode int) (fd int32, interest uint32, deadline int64, status int) {
-	pd := pollRootGet(ctx)
-	if pd == nil {
+	if ctx == 0 {
 		return 0, 0, 0, pollErrNotPollable
 	}
 	var ok bool
@@ -287,26 +270,27 @@ func pollCoroPrepareWaitV2(ctx uintptr, mode int) (fd int32, interest uint32, de
 	if !ok {
 		return 0, 0, 0, pollErrNotPollable
 	}
-	if latomic.LoadUint32(&pd.closing) != 0 {
+	state := llgoCoroPollDescStateV1(ctx)
+	if pollDescClosing(state) {
 		return 0, 0, 0, pollErrClosing
 	}
-	deadline = pollDeadline(pd, mode)
+	deadline = pollDeadline(ctx, mode)
 	if pollDeadlineExpired(deadline) {
 		return 0, 0, 0, pollErrTimeout
 	}
-	return pd.fd, interest, deadline, pollNoError
+	return pollDescFD(state), interest, deadline, pollNoError
 }
 
-// pollCoroFinishWaitV2 performs a fresh post-resume catalog lookup. No pointer
+// pollCoroFinishWaitV2 performs a fresh post-resume context lookup. No pointer
 // loaded here can be live across pollCoroWaitOneV2's suspension.
 func pollCoroFinishWaitV2(ctx uintptr, mode int, result uint32) (status int, retry bool) {
-	pd := pollRootGet(ctx)
-	if pd == nil {
+	if ctx == 0 {
 		return pollErrNotPollable, false
 	}
+	state := llgoCoroPollDescStateV1(ctx)
 	switch result {
 	case coroPollResultReadyV2:
-		if latomic.LoadUint32(&pd.closing) != 0 {
+		if pollDescClosing(state) {
 			return pollErrClosing, false
 		}
 		return pollNoError, false
@@ -316,13 +300,13 @@ func pollCoroFinishWaitV2(ctx uintptr, mode int, result uint32) (status int, ret
 		// Close wins over a concurrently delivered timeout, matching Go's
 		// pollDesc semantics and preventing a closed descriptor from being
 		// surfaced as an ordinary deadline expiry.
-		if latomic.LoadUint32(&pd.closing) != 0 {
+		if pollDescClosing(state) {
 			return pollErrClosing, false
 		}
 		// Match Go netpoll's reset-after-expiry rule: a timeout delivered
 		// before this waiter runs is stale if its direction now has no
 		// deadline or a later future deadline.
-		current := pollDeadline(pd, mode)
+		current := pollDeadline(ctx, mode)
 		if current == 0 || !pollDeadlineExpired(current) {
 			return pollNoError, true
 		}
@@ -334,9 +318,10 @@ func pollCoroFinishWaitV2(ctx uintptr, mode int, result uint32) (status int, ret
 }
 
 // runtime_pollWait retains only the scalar ctx handle across
-// pollCoroWaitOneV2. The catalog remains the typed lifetime root. Callers
-// throughout internal/poll and the standard library keep their Go blocking
-// style without a Future/Await API or one worker thread per wait.
+// pollCoroWaitOneV2. Callers throughout internal/poll and the standard library
+// keep their Go blocking style without a Future/Await API or one worker thread
+// per wait. internal/poll retains the context allocation until every such wait
+// has returned.
 //
 //go:linkname poll_runtime_pollWait internal/poll.runtime_pollWait
 func poll_runtime_pollWait(ctx uintptr, mode int) int {
@@ -345,7 +330,7 @@ func poll_runtime_pollWait(ctx uintptr, mode int) int {
 		if status != pollNoError {
 			return status
 		}
-		status, retry := pollCoroFinishWaitV2(ctx, mode, pollCoroWaitOneV2(fd, interest, deadline))
+		status, retry := pollCoroFinishWaitV2(ctx, mode, pollCoroWaitOneV2(ctx, fd, interest, deadline))
 		if !retry {
 			return status
 		}
@@ -359,17 +344,16 @@ func poll_runtime_pollWaitCanceled(uintptr, int) {
 
 //go:linkname poll_runtime_pollReset internal/poll.runtime_pollReset
 func poll_runtime_pollReset(ctx uintptr, mode int) int {
-	pd := pollRootGet(ctx)
-	if pd == nil {
+	if ctx == 0 {
 		return pollErrNotPollable
 	}
 	if _, ok := pollInterest(mode); !ok {
 		return pollErrNotPollable
 	}
-	if latomic.LoadUint32(&pd.closing) != 0 {
+	if pollDescClosing(llgoCoroPollDescStateV1(ctx)) {
 		return pollErrClosing
 	}
-	if pollDeadlineExpired(pollDeadline(pd, mode)) {
+	if pollDeadlineExpired(pollDeadline(ctx, mode)) {
 		return pollErrTimeout
 	}
 	return pollNoError
@@ -377,41 +361,37 @@ func poll_runtime_pollReset(ctx uintptr, mode int) int {
 
 //go:linkname poll_runtime_pollSetDeadline internal/poll.runtime_pollSetDeadline
 func poll_runtime_pollSetDeadline(ctx uintptr, delay int64, mode int) {
-	pd := pollRootGet(ctx)
-	if pd == nil {
+	if ctx == 0 {
 		return
 	}
-	if latomic.LoadUint32(&pd.closing) != 0 {
+	state := llgoCoroPollDescStateV1(ctx)
+	if pollDescClosing(state) {
 		return
 	}
 	deadline := pollAbsoluteDeadline(delay)
+	llgoCoroPollDescSetDeadlineV1(ctx, int32(mode), deadline)
 	switch mode {
 	case 'r':
-		latomic.StoreInt64(&pd.rd, deadline)
-		llgoCoroPollUpdateDeadlineOrAbortV1(pd.fd, coroPollInterestReadV2, deadline)
+		llgoCoroPollUpdateDeadlineOrAbortV1(ctx, coroPollInterestReadV2, deadline)
 	case 'w':
-		latomic.StoreInt64(&pd.wd, deadline)
-		llgoCoroPollUpdateDeadlineOrAbortV1(pd.fd, coroPollInterestWriteV2, deadline)
+		llgoCoroPollUpdateDeadlineOrAbortV1(ctx, coroPollInterestWriteV2, deadline)
 	case 'r' + 'w':
-		latomic.StoreInt64(&pd.rd, deadline)
-		latomic.StoreInt64(&pd.wd, deadline)
-		llgoCoroPollUpdateDeadlineOrAbortV1(pd.fd, coroPollInterestReadV2, deadline)
-		llgoCoroPollUpdateDeadlineOrAbortV1(pd.fd, coroPollInterestWriteV2, deadline)
+		llgoCoroPollUpdateDeadlineOrAbortV1(ctx, coroPollInterestReadV2, deadline)
+		llgoCoroPollUpdateDeadlineOrAbortV1(ctx, coroPollInterestWriteV2, deadline)
 	}
 }
 
 //go:linkname poll_runtime_pollUnblock internal/poll.runtime_pollUnblock
 func poll_runtime_pollUnblock(ctx uintptr) {
-	pd := pollRootGet(ctx)
-	if pd == nil {
+	if ctx == 0 {
 		return
 	}
-	if latomic.LoadUint32(&pd.closing) != 0 {
+	state := llgoCoroPollDescMarkClosingV1(ctx)
+	if pollDescClosing(state) {
 		return
 	}
-	latomic.StoreUint32(&pd.closing, 1)
-	llgoCoroPollPostClosingOrAbortV1(pd.fd, coroPollInterestReadV2)
-	llgoCoroPollPostClosingOrAbortV1(pd.fd, coroPollInterestWriteV2)
+	llgoCoroPollPostClosingOrAbortV1(ctx, coroPollInterestReadV2)
+	llgoCoroPollPostClosingOrAbortV1(ctx, coroPollInterestWriteV2)
 }
 
 //go:linkname poll_runtime_isPollServerDescriptor internal/poll.runtime_isPollServerDescriptor

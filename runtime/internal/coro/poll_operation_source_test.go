@@ -686,6 +686,48 @@ func TestPollOperationV2DeadlinePublishesTimeoutResult(t *testing.T) {
 	finishPollV2Test(t, p, sources, waits, poll, park, action)
 }
 
+func TestPollOperationV2DeadlineOrdersQueuedReadiness(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		now  int64
+		want PollOperationResult
+	}{
+		{name: "readiness-before-deadline", now: 49, want: PollOperationReady},
+		{name: "deadline-before-delayed-readiness", now: 50, want: PollOperationTimeout},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			p := new(P)
+			sources, waits, poll := bindPollV2TestSources(t, p, RouteID(7), nil)
+			park := beginTimerV2TestPark(t, p, "poll-v2-readiness-deadline-order", 1, 214)
+			handle, id, reserved := poll.ReserveAndAttachPollOperationV2(
+				p, &park.task.g.park, park.ticket, park.wait, 66, 66, PollInterestRead, 50,
+			)
+			if !reserved || !handle.Valid() || !id.Valid() {
+				t.Fatal("reserve readiness/deadline poll V2")
+			}
+			commitTimerV2TestPark(t, p, park)
+			if event := poll.PostPollOperationV2(id, PollOperationReady); event != PollOperationPosted {
+				t.Fatalf("post queued readiness = %d", event)
+			}
+			if scan, ok := sources.publishPass(p, test.now, true); !ok || scan.poll != 1 ||
+				scan.completed != 1 || scan.hasDeadline {
+				t.Fatalf("publish queued readiness at %d = (%+v, %t)", test.now, scan, ok)
+			}
+			if promoted, visits, ok := sources.resolvePublishedEpoch(p); !ok || promoted != 1 || visits != 1 {
+				t.Fatalf("resolve queued readiness at %d = (%d, %d, %t)", test.now, promoted, visits, ok)
+			}
+			action, outcome, caseID, lease, taskCancel := resumeTimerV2TestPark(t, p, park)
+			result, taken := poll.TakePollOperationV2Result(p, handle, lease)
+			if outcome != ParkOutcomeCompleted || caseID != 66 || taskCancel != TaskCancelNone ||
+				!taken || result != test.want || !poll.RecyclePollOperationV2(p, handle) {
+				t.Fatalf("queued readiness at %d = (%d, %d, %d, %t, %d), want result %d",
+					test.now, outcome, caseID, result, taken, taskCancel, test.want)
+			}
+			finishPollV2Test(t, p, sources, waits, poll, park, action)
+		})
+	}
+}
+
 func TestPollOperationV2ActiveDeadlineUpdateAndExactClosingWake(t *testing.T) {
 	p := new(P)
 	sources, waits, poll := bindPollV2TestSources(t, p, RouteID(7), nil)

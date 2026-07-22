@@ -39,6 +39,66 @@ var (
 	coroProgramExecutorBoundV1State    bool
 )
 
+const coroPollOwnerTestDescriptorContext uintptr = 1
+
+var coroPollOwnerTestDescriptorState struct {
+	operation coro.OperationID
+	interest  coro.PollInterest
+	deadline  int64
+	closing   bool
+}
+
+func coroPollDescPublishOperationV1(
+	context uintptr,
+	interest coro.PollInterest,
+	operation coro.OperationID,
+) (bool, bool) {
+	state := &coroPollOwnerTestDescriptorState
+	if context != coroPollOwnerTestDescriptorContext || state.operation.Valid() ||
+		!operation.Valid() || operation.Source() != coro.OperationSourcePoll ||
+		(interest != coro.PollInterestRead && interest != coro.PollInterestWrite) {
+		return false, false
+	}
+	state.operation = operation
+	state.interest = interest
+	return state.closing, true
+}
+
+func coroPollDescClearOperationV1(
+	context uintptr,
+	interest coro.PollInterest,
+	operation coro.OperationID,
+) bool {
+	state := &coroPollOwnerTestDescriptorState
+	if context != coroPollOwnerTestDescriptorContext || state.interest != interest ||
+		state.operation != operation {
+		return false
+	}
+	state.operation = coro.OperationID{}
+	state.interest = coro.PollInterestInvalid
+	return true
+}
+
+func coroPollDescLoadOperationV1(context uintptr, interest coro.PollInterest) (coro.OperationID, bool) {
+	state := &coroPollOwnerTestDescriptorState
+	if context != coroPollOwnerTestDescriptorContext ||
+		(interest != coro.PollInterestRead && interest != coro.PollInterestWrite) {
+		return coro.OperationID{}, false
+	}
+	if state.operation.Valid() && state.interest != interest {
+		return coro.OperationID{}, true
+	}
+	return state.operation, true
+}
+
+func coroPollDescDeadlineV1(context uintptr, interest coro.PollInterest) (int64, bool) {
+	if context != coroPollOwnerTestDescriptorContext ||
+		(interest != coro.PollInterestRead && interest != coro.PollInterestWrite) {
+		return 0, false
+	}
+	return coroPollOwnerTestDescriptorState.deadline, true
+}
+
 func coroTargetRequestExecutorV1(handle coro.ExecutorHandle) bool {
 	if !coroProgramExecutorBoundV1State || handle != coroProgramExecutorHandleV1State {
 		return false
@@ -48,7 +108,52 @@ func coroTargetRequestExecutorV1(handle coro.ExecutorHandle) bool {
 		result == coro.ExecutorRequestIdleWake
 }
 
+func coroTargetPostPollOperationV2(
+	id coro.OperationID,
+	status coro.PollOperationResult,
+) coro.PollOperationPostResult {
+	if !coroProgramExecutorBoundV1State || coroProgramExecutorHandleV1State == (coro.ExecutorHandle{}) {
+		return coro.PollOperationPostInvalid
+	}
+	result := coro.PostExecutorPollEvent(&coroProgramExecutorDriverV1State, id, status)
+	if result == coro.PollOperationPosted && !coroTargetRequestExecutorV1(coroProgramExecutorHandleV1State) {
+		return coro.PollOperationPostInvalid
+	}
+	return result
+}
+
 func coroRuntimeAbort(message string) { panic(message) }
+
+func TestCoroPollResumeStatusV2DeadlineHandshake(t *testing.T) {
+	state := CoroPollParkV2{
+		context:  coroPollOwnerTestDescriptorContext,
+		interest: coro.PollInterestRead,
+		deadline: 50,
+	}
+	for _, test := range []struct {
+		name     string
+		current  int64
+		result   coro.PollOperationResult
+		want     uint32
+		wantOkay bool
+	}{
+		{name: "unchanged-readiness", current: 50, result: coro.PollOperationReady, want: coroPollResumeReadyV2, wantOkay: true},
+		{name: "changed-deadline-recheck", current: 75, result: coro.PollOperationReady, want: coroPollResumeTimeoutV2, wantOkay: true},
+		{name: "removed-deadline-recheck", current: 0, result: coro.PollOperationReady, want: coroPollResumeTimeoutV2, wantOkay: true},
+		{name: "closing", current: 75, result: coro.PollOperationClosing, want: coroPollResumeClosingV2, wantOkay: true},
+		{name: "timeout", current: 75, result: coro.PollOperationTimeout, want: coroPollResumeTimeoutV2, wantOkay: true},
+		{name: "invalid", current: 50, result: coro.PollOperationResultInvalid},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			coroPollOwnerTestDescriptorState.deadline = test.current
+			got, ok := coroPollResumeStatusV2(&state, test.result)
+			if got != test.want || ok != test.wantOkay {
+				t.Fatalf("resume status = (%d, %t), want (%d, %t)", got, ok, test.want, test.wantOkay)
+			}
+		})
+	}
+	coroPollOwnerTestDescriptorState.deadline = 0
+}
 
 type coroPollOwnerTestFrame struct {
 	g          *coro.G
@@ -173,6 +278,10 @@ func finishCoroPollOwnerTestRun(t *testing.T, frame *coroPollOwnerTestFrame, act
 	coroProgramExecutorRegistryV1State = coro.ExecutorRegistry{}
 	coroProgramWaitTableV1State = coro.WaitRegistrationTable{}
 	coroProgramPollSourceV1State = coro.PollOperationSource{}
+	coroPollOwnerTestDescriptorState.operation = coro.OperationID{}
+	coroPollOwnerTestDescriptorState.interest = coro.PollInterestInvalid
+	coroPollOwnerTestDescriptorState.deadline = 0
+	coroPollOwnerTestDescriptorState.closing = false
 }
 
 func TestCoroPollOwnerV2ParkEventResumeAndRecycle(t *testing.T) {
@@ -208,6 +317,7 @@ func TestCoroPollOwnerV2ParkEventResumeAndRecycle(t *testing.T) {
 		frame.handle,
 		unsafe.Pointer(frame.header),
 		unsafe.Pointer(&state),
+		coroPollOwnerTestDescriptorContext,
 		17,
 		uint32(coro.PollInterestRead),
 		0,
@@ -216,6 +326,10 @@ func TestCoroPollOwnerV2ParkEventResumeAndRecycle(t *testing.T) {
 		t.Fatalf("invalid prepared Poll V2 ABI state: %+v", state)
 	}
 	operation := state.operation
+	if coroPollOwnerTestDescriptorState.operation != operation ||
+		coroPollOwnerTestDescriptorState.interest != coro.PollInterestRead {
+		t.Fatalf("Poll V2 descriptor did not retain exact operation: %+v", coroPollOwnerTestDescriptorState)
+	}
 	if parked, ok := coro.Resumed(&coroProgramPV1State, frame.g, action); !ok || parked.Kind != coro.ActionPark {
 		t.Fatalf("commit Poll V2 owner park = (%+v, %t)", parked, ok)
 	}
@@ -226,13 +340,10 @@ func TestCoroPollOwnerV2ParkEventResumeAndRecycle(t *testing.T) {
 	)); result == coro.PollOperationPosted {
 		t.Fatal("Poll V2 owner-return import accepted stale generation")
 	}
-	if result := coro.PollOperationPostResult(__llgo_coro_poll_post_event_v2(
-		operation.SourceSlot,
-		operation.Generation,
-		uint32(coro.PollOperationReady),
-	)); result != coro.PollOperationPosted {
-		t.Fatalf("post Poll V2 ABI readiness = %d", result)
-	}
+	__llgo_coro_poll_post_closing_or_abort_v1(
+		coroPollOwnerTestDescriptorContext,
+		uint32(coro.PollInterestRead),
+	)
 	if waits, timers, promoted, ok := coro.PollExecutorAt(&coroProgramExecutorDriverV1State, 0); !ok ||
 		waits != 0 || timers != 0 || promoted != 1 {
 		t.Fatalf("scan Poll V2 ABI readiness = (%d, %d, %d, %t)", waits, timers, promoted, ok)
@@ -250,8 +361,11 @@ func TestCoroPollOwnerV2ParkEventResumeAndRecycle(t *testing.T) {
 	}
 	frame.header.SuspendReason = uint16(coro.SuspendPark)
 	frame.header.Lifecycle = uint16(coro.FrameSuspended)
-	if status := __llgo_coro_poll_resume_v2(unsafe.Pointer(frame.g), unsafe.Pointer(&state)); status != coroPollResumeReadyV2 || state != (CoroPollParkV2{}) {
+	if status := __llgo_coro_poll_resume_v2(unsafe.Pointer(frame.g), unsafe.Pointer(&state)); status != coroPollResumeClosingV2 || state != (CoroPollParkV2{}) {
 		t.Fatalf("resume Poll V2 ABI = (%d, %+v)", status, state)
+	}
+	if coroPollOwnerTestDescriptorState.operation.Valid() {
+		t.Fatalf("Poll V2 resume retained descriptor operation: %+v", coroPollOwnerTestDescriptorState)
 	}
 	frame.header.SuspendReason = uint16(coro.SuspendNone)
 	frame.header.Lifecycle = uint16(coro.FrameActive)

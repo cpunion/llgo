@@ -57,20 +57,21 @@ func QueueInit() bool
 //go:linkname QueueCanRelease C.__llgo_coro_worker_queue_can_release_v1
 func QueueCanRelease() bool
 
-// QueueReserve owns the next free sequence slot without publishing it. Exact P
-// owners may contend on one process-wide reservation word; all participating
-// atomics were proved lock-free by QueueInit, and the winner submits or cancels
-// inside a no-suspend hook. No OS wait or callback is reachable from this leaf.
+// QueueReserve owns one independent sequence slot without publishing it. Exact
+// P owners may reserve concurrently; all participating atomics were proved
+// lock-free by QueueInit, and each token is submitted or canceled inside its
+// no-suspend hook. No OS wait or callback is reachable from this leaf.
 //
 //llgo:coro noblock
 //go:linkname QueueReserve C.__llgo_coro_worker_queue_reserve_v1
-func QueueReserve() bool
+func QueueReserve(reservation *QueueReservation) bool
 
-// QueueCancelReservation rolls back the only unpublished owner reservation.
+// QueueCancelReservation publishes an internal tombstone for one unpublished
+// token. Consumers retire it without exposing an invalid worker job.
 //
 //llgo:coro noblock
 //go:linkname QueueCancelReservation C.__llgo_coro_worker_queue_cancel_reservation_v1
-func QueueCancelReservation() bool
+func QueueCancelReservation(reservation QueueReservation) bool
 
 // QueueSubmitReserved release-publishes one POD job and emits one platform
 // semaphore signal. sem_post and Mach semaphore_signal never wait for worker
@@ -78,7 +79,7 @@ func QueueCancelReservation() bool
 //
 //llgo:coro noblock
 //go:linkname QueueSubmitReserved C.__llgo_coro_worker_queue_submit_reserved_v1
-func QueueSubmitReserved(job *Job) bool
+func QueueSubmitReserved(reservation QueueReservation, job *Job) bool
 
 // QueueStop seals producer ingress and emits one terminal wake per raw worker.
 // It neither drains nor joins workers, but its platform signals may enter libc

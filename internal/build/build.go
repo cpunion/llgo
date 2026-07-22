@@ -2641,8 +2641,14 @@ type Config struct {
 	// sites and certified worker-safe C declarations. Source code keeps the
 	// ordinary synchronous syscall/file/network calling style.
 	EnableCoroWorker bool
-	CoroPlanBuilder  CoroPlanBuilder
-	CoroPlanObserver CoroPlanObserver
+	// EnableCoroNativeFleet selects the native multi-owner scheduler adapter.
+	// It is a compiler/runtime ABI choice, not a user build tag: the compiler
+	// owns the llgo_coro_native_fleet tag, retains the raw pthread owner entry,
+	// and freezes both choices into the same build identity. The first production
+	// profile requires the native timer/reactor and bounded worker capabilities.
+	EnableCoroNativeFleet bool
+	CoroPlanBuilder       CoroPlanBuilder
+	CoroPlanObserver      CoroPlanObserver
 
 	// compilerBuildTags is a compiler-owned channel for isolated runtime-island
 	// builds that deliberately do not enable the complete program-bootstrap
@@ -3143,6 +3149,9 @@ func effectiveBuildTags(conf *Config, export crosscompile.Export) (string, error
 			// 32-bit pipe backend from silently selecting an unverified libc
 			// timespec/time64 layout.
 			tags = append(tags, coroNativeTimerBuildTag)
+			if conf.EnableCoroNativeFleet {
+				tags = append(tags, coroNativeFleetBuildTag)
+			}
 		}
 	}
 	tags = append(tags, conf.compilerBuildTags...)
@@ -3927,13 +3936,16 @@ func nativeCoroTimerRuntimeABI(conf *Config) bool {
 	return false
 }
 
-// nativeCoroFleetRuntimeABI is selected only through the compiler-owned tag
-// channel. GOOS/GOARCH and an externally supplied reserved tag are not enough:
-// the raw pthread entry must agree with the planner roots and runtime source
-// island in the same compiler invocation.
+// nativeCoroFleetRuntimeABI is selected by an explicit compiler configuration
+// or the private isolated-runtime test channel. GOOS/GOARCH and an externally
+// supplied reserved tag are not enough: the raw pthread entry must agree with
+// the planner roots and runtime source island in the same compiler invocation.
 func nativeCoroFleetRuntimeABI(conf *Config) bool {
 	if !nativeCoroTimerRuntimeABI(conf) || conf == nil {
 		return false
+	}
+	if conf.EnableCoroNativeFleet {
+		return true
 	}
 	for _, tag := range conf.compilerBuildTags {
 		if tag == coroNativeFleetBuildTag {
@@ -4497,16 +4509,17 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 		}
 		if name == coroPollParkSymbolV2 {
 			sig := fn.Signature
-			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 7 || sig.Results().Len() != 0 ||
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 8 || sig.Results().Len() != 0 ||
 				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
 				!types.Identical(sig.Params().At(1).Type(), types.Typ[types.UnsafePointer]) ||
 				!types.Identical(sig.Params().At(2).Type(), types.Typ[types.UnsafePointer]) ||
 				!types.Identical(sig.Params().At(3).Type(), types.Typ[types.UnsafePointer]) ||
-				!types.Identical(sig.Params().At(4).Type(), types.Typ[types.Int32]) ||
-				!types.Identical(sig.Params().At(5).Type(), types.Typ[types.Uint32]) ||
-				!types.Identical(sig.Params().At(6).Type(), types.Typ[types.Int64]) ||
+				!types.Identical(sig.Params().At(4).Type(), types.Typ[types.Uintptr]) ||
+				!types.Identical(sig.Params().At(5).Type(), types.Typ[types.Int32]) ||
+				!types.Identical(sig.Params().At(6).Type(), types.Typ[types.Uint32]) ||
+				!types.Identical(sig.Params().At(7).Type(), types.Typ[types.Int64]) ||
 				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
-				return nil, nil, nil, nil, fmt.Errorf("coroutine poll park V2 ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, int32, uint32, int64) signature", name)
+				return nil, nil, nil, nil, fmt.Errorf("coroutine poll park V2 ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uintptr, int32, uint32, int64) signature", name)
 			}
 		}
 		if name == coroPollResumeSymbolV2 {
@@ -4522,20 +4535,20 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 		if name == coroPollUpdateDeadlineOrAbortSymbolV1 {
 			sig := fn.Signature
 			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 3 || sig.Results().Len() != 0 ||
-				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.Int32]) ||
+				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.Uintptr]) ||
 				!types.Identical(sig.Params().At(1).Type(), types.Typ[types.Uint32]) ||
 				!types.Identical(sig.Params().At(2).Type(), types.Typ[types.Int64]) ||
 				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
-				return nil, nil, nil, nil, fmt.Errorf("coroutine poll update-deadline-or-abort ABI %q must have exact func(int32, uint32, int64) signature", name)
+				return nil, nil, nil, nil, fmt.Errorf("coroutine poll update-deadline-or-abort ABI %q must have exact func(uintptr, uint32, int64) signature", name)
 			}
 		}
 		if name == coroPollPostClosingOrAbortSymbolV1 {
 			sig := fn.Signature
 			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 2 || sig.Results().Len() != 0 ||
-				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.Int32]) ||
+				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.Uintptr]) ||
 				!types.Identical(sig.Params().At(1).Type(), types.Typ[types.Uint32]) ||
 				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
-				return nil, nil, nil, nil, fmt.Errorf("coroutine poll post-closing-or-abort ABI %q must have exact func(int32, uint32) signature", name)
+				return nil, nil, nil, nil, fmt.Errorf("coroutine poll post-closing-or-abort ABI %q must have exact func(uintptr, uint32) signature", name)
 			}
 		}
 		if name == coroSemaphorePrepareOrAbortSymbolV1 {

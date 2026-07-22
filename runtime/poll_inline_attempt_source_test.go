@@ -37,11 +37,11 @@ const runtimeCoroPollInlinePatchSource = "_patch/internal/poll/fd_unix_coro_nati
 func TestRuntimeCoroPollInlineAttemptContractAndLifetimeSource(t *testing.T) {
 	runtimeSource := readRuntimePollFile(t, runtimeCoroPollGoSource)
 	for _, marker := range []string{
-		"inlineStream bool",
+		"coroPollDescInlineStreamV1 uint64 = 1 << 33",
 		"return true, pollCoroFDStreamLeafV1(fd), 0",
 		"case uint32(csyscall.S_IFIFO), uint32(csyscall.S_IFCHR):",
 		"return true, false, 0",
-		"pd := &llgoPollDesc{fd: int32(fd), inlineStream: inlineAttempt}",
+		"ctx := llgoCoroPollDescAllocV1(int32(fd), inlineStream)",
 		"progress=executor-safe affinity=any-thread reentry=none memory=by-value",
 		"progress=executor-safe affinity=any-thread reentry=none memory=borrow-until-return",
 		"C.__llgo_runtime_poll_fd_stream_v1",
@@ -51,10 +51,11 @@ func TestRuntimeCoroPollInlineAttemptContractAndLifetimeSource(t *testing.T) {
 		"func pollCoroReadAttemptV1(",
 		"func pollCoroWriteAttemptV1(",
 		"return result, errno, true",
-		"!pd.inlineStream",
+		"state&coroPollDescInlineStreamV1 != 0",
 		"uintptr(fd) > uintptr(^uint32(0)>>1)",
-		"return pollCoroReadAttemptV1(pd.fd, address, uintptr(size))",
-		"return pollCoroWriteAttemptV1(pd.fd, address, uintptr(size))",
+		"int32(fd) == pollDescFD(state)",
+		"return pollCoroReadAttemptV1(int32(fd), address, uintptr(size))",
+		"return pollCoroWriteAttemptV1(int32(fd), address, uintptr(size))",
 		"sequenced-packet, and raw sockets retain read/write on the worker path",
 	} {
 		if !strings.Contains(runtimeSource, marker) {
