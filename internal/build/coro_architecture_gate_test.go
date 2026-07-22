@@ -38,33 +38,65 @@ import (
 // stagedFeatureGate; currentCoro is confined to the unified emitter and
 // planAuthority to the ProgramIR builder.
 type coroArchitectureDebtBudget struct {
-	currentCoro       int
-	planAuthority     int
-	stagedFeatureGate int
-	legacyWait        int
-	nativeFork        int
-	fleetBuildFiles   int
-	rawHelperPlan     int
-	legacyHelperScan  int
-	siteEmissionEntry int
-	relocatedEntry    int
-	helperObservation int
+	currentCoro               int
+	planAuthority             int
+	stagedFeatureGate         int
+	legacyWait                int
+	nativeFork                int
+	fleetBuildFiles           int
+	rawHelperPlan             int
+	rawHelperPhysicalType     int
+	legacyHelperScan          int
+	siteEmissionEntry         int
+	relocatedEntry            int
+	helperObservation         int
+	programIRBuilderAuthority int
+	rawNoInitPlan             int
+	rawIntrinsicPlan          int
+	rawIntrinsicOpcode        int
+	rawIntrinsicShape         int
+	rawWorkerCertificateStore int
+	rawWorkerGraphStore       int
+	rawPatchRedirectStore     int
+	patchRedirectLookup       int
+	legacyIntrinsicInput      int
+	callSiteFreeze            int
+	intrinsicObservation      int
+	elisionObservation        int
+	elisionSelection          int
+	intrinsicSelection        int
 }
 
 var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
 	// Filled from the 2026-07-22 executable fleet checkpoint. These values may
 	// only decrease; see TestCoroArchitectureDebtIsMonotonic.
-	currentCoro:       187,
-	planAuthority:     412,
-	stagedFeatureGate: 330,
-	legacyWait:        72,
-	nativeFork:        378,
-	fleetBuildFiles:   13,
-	rawHelperPlan:     4,
-	legacyHelperScan:  0,
-	siteEmissionEntry: 1,
-	relocatedEntry:    2,
-	helperObservation: 3,
+	currentCoro:               187,
+	planAuthority:             412,
+	stagedFeatureGate:         330,
+	legacyWait:                72,
+	nativeFork:                378,
+	fleetBuildFiles:           13,
+	rawHelperPlan:             4,
+	rawHelperPhysicalType:     0,
+	legacyHelperScan:          0,
+	siteEmissionEntry:         1,
+	relocatedEntry:            2,
+	helperObservation:         3,
+	programIRBuilderAuthority: 3,
+	rawNoInitPlan:             2,
+	rawIntrinsicPlan:          2,
+	rawIntrinsicOpcode:        7,
+	rawIntrinsicShape:         20,
+	rawWorkerCertificateStore: 5,
+	rawWorkerGraphStore:       10,
+	rawPatchRedirectStore:     6,
+	patchRedirectLookup:       3,
+	legacyIntrinsicInput:      0,
+	callSiteFreeze:            1,
+	intrinsicObservation:      3,
+	elisionObservation:        4,
+	elisionSelection:          2,
+	intrinsicSelection:        2,
 }
 
 var allowedCurrentCoroFiles = map[string]bool{
@@ -117,6 +149,8 @@ var allowedRawHelperPlanFiles = map[string]bool{
 	"cl/emission_runtime_helpers.go": true,
 }
 
+var allowedRawHelperPhysicalTypeFiles = map[string]bool{}
+
 var allowedSiteEmissionEntryFiles = map[string]bool{
 	"cl/compile.go": true,
 }
@@ -131,15 +165,104 @@ var allowedHelperObservationFiles = map[string]bool{
 	"cl/coro_defer.go":        true,
 }
 
+var allowedProgramIRBuilderAuthorityFiles = map[string]bool{
+	"cl/coro_call_site_plan.go": true,
+}
+
+var allowedRawIntrinsicPlanFiles = map[string]bool{
+	"cl/coro_call_site_plan.go": true,
+	"cl/emission_universe.go":   true,
+}
+
+var allowedRawNoInitPlanFiles = map[string]bool{
+	"cl/coro_call_site_plan.go": true,
+	"cl/import.go":              true,
+}
+
+var allowedRawIntrinsicOpcodeFiles = map[string]bool{
+	"cl/coro_call_site_plan.go":            true,
+	"cl/coro_callable_shadow.go":           true,
+	"cl/coro_worker_syscall_capability.go": true,
+	"cl/emission_universe.go":              true,
+}
+
+var allowedRawIntrinsicShapeFiles = map[string]bool{
+	"cl/coro_callable_shadow.go":           true,
+	"cl/coro_worker_syscall_capability.go": true,
+	"cl/emission_universe.go":              true,
+}
+
+var allowedRawWorkerCertificateStoreFiles = map[string]bool{
+	"cl/coro_call_site_plan.go":            true,
+	"cl/coro_worker_syscall_capability.go": true,
+	"cl/emission_universe.go":              true,
+}
+
+var allowedRawWorkerGraphStoreFiles = map[string]bool{
+	"cl/coro_call_site_plan.go":            true,
+	"cl/coro_worker_syscall_capability.go": true,
+	"cl/emission_universe.go":              true,
+}
+
+var allowedPatchRedirectLookupFiles = map[string]bool{
+	"cl/coro_call_site_plan.go": true,
+	"cl/coro_patch_init.go":     true,
+	"cl/emission_universe.go":   true,
+}
+
+var allowedRawPatchRedirectStoreFiles = map[string]bool{
+	"cl/coro_call_site_plan.go": true,
+	"cl/emission_universe.go":   true,
+}
+
+var allowedCallSiteFreezeFiles = map[string]bool{
+	"cl/emission_universe.go": true,
+}
+
+var allowedIntrinsicObservationFiles = map[string]bool{
+	"cl/instr.go": true,
+}
+
+var allowedElisionObservationFiles = map[string]bool{
+	"cl/coro_patch_init.go": true,
+	"cl/coro_site_plan.go":  true,
+	"cl/instr.go":           true,
+}
+
+var allowedElisionSelectionFiles = map[string]bool{
+	"cl/coro_site_plan.go": true,
+	"cl/instr.go":          true,
+}
+
+var allowedIntrinsicSelectionFiles = map[string]bool{
+	"cl/coro_site_plan.go": true,
+	"cl/instr.go":          true,
+}
+
 type coroArchitectureDebtInventory struct {
 	coroArchitectureDebtBudget
-	currentCoroFiles map[string]bool
-	featureNames     map[string]bool
-	sourceFields     map[string]bool
-	rawHelperFiles   map[string]bool
-	siteEntryFiles   map[string]bool
-	relocatedFiles   map[string]bool
-	observationFiles map[string]bool
+	currentCoroFiles               map[string]bool
+	featureNames                   map[string]bool
+	sourceFields                   map[string]bool
+	rawHelperFiles                 map[string]bool
+	rawHelperPhysicalTypeFiles     map[string]bool
+	siteEntryFiles                 map[string]bool
+	relocatedFiles                 map[string]bool
+	observationFiles               map[string]bool
+	programIRBuilderAuthorityFiles map[string]bool
+	rawNoInitFiles                 map[string]bool
+	rawIntrinsicFiles              map[string]bool
+	rawIntrinsicOpcodeFiles        map[string]bool
+	rawIntrinsicShapeFiles         map[string]bool
+	rawWorkerCertificateStoreFiles map[string]bool
+	rawWorkerGraphStoreFiles       map[string]bool
+	rawPatchRedirectStoreFiles     map[string]bool
+	patchRedirectLookupFiles       map[string]bool
+	callSiteFreezeFiles            map[string]bool
+	intrinsicObservationFiles      map[string]bool
+	elisionObservationFiles        map[string]bool
+	elisionSelectionFiles          map[string]bool
+	intrinsicSelectionFiles        map[string]bool
 }
 
 func TestCoroArchitectureDebtIsMonotonic(t *testing.T) {
@@ -160,18 +283,49 @@ func TestCoroArchitectureDebtIsMonotonic(t *testing.T) {
 	check("single-P/fleet fork", inventory.nativeFork, budget.nativeFork)
 	check("fleet build-constraint files", inventory.fleetBuildFiles, budget.fleetBuildFiles)
 	check("raw helper planner boundary", inventory.rawHelperPlan, budget.rawHelperPlan)
+	check("raw helper physical-type dependency", inventory.rawHelperPhysicalType, budget.rawHelperPhysicalType)
 	check("legacy downstream helper scan", inventory.legacyHelperScan, budget.legacyHelperScan)
 	check("physical SitePlan emission entry", inventory.siteEmissionEntry, budget.siteEmissionEntry)
 	check("relocated SitePlan emission entry", inventory.relocatedEntry, budget.relocatedEntry)
 	check("runtime helper SitePlan observation", inventory.helperObservation, budget.helperObservation)
+	check("ProgramIR builder authority", inventory.programIRBuilderAuthority, budget.programIRBuilderAuthority)
+	check("raw no-init planner boundary", inventory.rawNoInitPlan, budget.rawNoInitPlan)
+	check("raw intrinsic planner boundary", inventory.rawIntrinsicPlan, budget.rawIntrinsicPlan)
+	check("raw intrinsic opcode boundary", inventory.rawIntrinsicOpcode, budget.rawIntrinsicOpcode)
+	check("raw intrinsic shape boundary", inventory.rawIntrinsicShape, budget.rawIntrinsicShape)
+	check("raw worker certificate storage boundary", inventory.rawWorkerCertificateStore, budget.rawWorkerCertificateStore)
+	check("raw worker graph storage boundary", inventory.rawWorkerGraphStore, budget.rawWorkerGraphStore)
+	check("raw patch redirect storage boundary", inventory.rawPatchRedirectStore, budget.rawPatchRedirectStore)
+	check("patch redirect lookup boundary", inventory.patchRedirectLookup, budget.patchRedirectLookup)
+	check("legacy intrinsic/elision inputs", inventory.legacyIntrinsicInput, budget.legacyIntrinsicInput)
+	check("call SitePlan freeze entry", inventory.callSiteFreeze, budget.callSiteFreeze)
+	check("intrinsic emission observation", inventory.intrinsicObservation, budget.intrinsicObservation)
+	check("call elision observation", inventory.elisionObservation, budget.elisionObservation)
+	check("call elision selection", inventory.elisionSelection, budget.elisionSelection)
+	check("intrinsic recipe selection", inventory.intrinsicSelection, budget.intrinsicSelection)
 
 	checkExactCoroArchitectureSet(t, "currentCoro production files", inventory.currentCoroFiles, allowedCurrentCoroFiles)
 	checkExactCoroArchitectureSet(t, "staged coroutine feature names", inventory.featureNames, allowedStagedCoroFeatureNames)
 	checkExactCoroArchitectureSet(t, "ExecutorSourceCatalog fields", inventory.sourceFields, allowedExecutorSourceCatalogFields)
 	checkExactCoroArchitectureSet(t, "raw helper planner production files", inventory.rawHelperFiles, allowedRawHelperPlanFiles)
+	checkExactCoroArchitectureSet(t, "raw helper physical-type dependency files", inventory.rawHelperPhysicalTypeFiles, allowedRawHelperPhysicalTypeFiles)
 	checkExactCoroArchitectureSet(t, "physical SitePlan emission entry files", inventory.siteEntryFiles, allowedSiteEmissionEntryFiles)
 	checkExactCoroArchitectureSet(t, "relocated SitePlan emission entry files", inventory.relocatedFiles, allowedRelocatedEntryFiles)
 	checkExactCoroArchitectureSet(t, "runtime helper SitePlan observation files", inventory.observationFiles, allowedHelperObservationFiles)
+	checkExactCoroArchitectureSet(t, "ProgramIR builder authority files", inventory.programIRBuilderAuthorityFiles, allowedProgramIRBuilderAuthorityFiles)
+	checkExactCoroArchitectureSet(t, "raw no-init planner production files", inventory.rawNoInitFiles, allowedRawNoInitPlanFiles)
+	checkExactCoroArchitectureSet(t, "raw intrinsic planner production files", inventory.rawIntrinsicFiles, allowedRawIntrinsicPlanFiles)
+	checkExactCoroArchitectureSet(t, "raw intrinsic opcode production files", inventory.rawIntrinsicOpcodeFiles, allowedRawIntrinsicOpcodeFiles)
+	checkExactCoroArchitectureSet(t, "raw intrinsic shape production files", inventory.rawIntrinsicShapeFiles, allowedRawIntrinsicShapeFiles)
+	checkExactCoroArchitectureSet(t, "raw worker certificate storage files", inventory.rawWorkerCertificateStoreFiles, allowedRawWorkerCertificateStoreFiles)
+	checkExactCoroArchitectureSet(t, "raw worker graph storage files", inventory.rawWorkerGraphStoreFiles, allowedRawWorkerGraphStoreFiles)
+	checkExactCoroArchitectureSet(t, "raw patch redirect storage files", inventory.rawPatchRedirectStoreFiles, allowedRawPatchRedirectStoreFiles)
+	checkExactCoroArchitectureSet(t, "patch redirect lookup production files", inventory.patchRedirectLookupFiles, allowedPatchRedirectLookupFiles)
+	checkExactCoroArchitectureSet(t, "call SitePlan freeze files", inventory.callSiteFreezeFiles, allowedCallSiteFreezeFiles)
+	checkExactCoroArchitectureSet(t, "intrinsic emission observation files", inventory.intrinsicObservationFiles, allowedIntrinsicObservationFiles)
+	checkExactCoroArchitectureSet(t, "call elision observation files", inventory.elisionObservationFiles, allowedElisionObservationFiles)
+	checkExactCoroArchitectureSet(t, "call elision selection files", inventory.elisionSelectionFiles, allowedElisionSelectionFiles)
+	checkExactCoroArchitectureSet(t, "intrinsic recipe selection files", inventory.intrinsicSelectionFiles, allowedIntrinsicSelectionFiles)
 }
 
 func checkExactCoroArchitectureSet(t *testing.T, name string, got, want map[string]bool) {
@@ -185,13 +339,28 @@ func checkExactCoroArchitectureSet(t *testing.T, name string, got, want map[stri
 func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitectureDebtInventory {
 	t.Helper()
 	inventory := coroArchitectureDebtInventory{
-		currentCoroFiles: make(map[string]bool),
-		featureNames:     make(map[string]bool),
-		sourceFields:     make(map[string]bool),
-		rawHelperFiles:   make(map[string]bool),
-		siteEntryFiles:   make(map[string]bool),
-		relocatedFiles:   make(map[string]bool),
-		observationFiles: make(map[string]bool),
+		currentCoroFiles:               make(map[string]bool),
+		featureNames:                   make(map[string]bool),
+		sourceFields:                   make(map[string]bool),
+		rawHelperFiles:                 make(map[string]bool),
+		rawHelperPhysicalTypeFiles:     make(map[string]bool),
+		siteEntryFiles:                 make(map[string]bool),
+		relocatedFiles:                 make(map[string]bool),
+		observationFiles:               make(map[string]bool),
+		programIRBuilderAuthorityFiles: make(map[string]bool),
+		rawNoInitFiles:                 make(map[string]bool),
+		rawIntrinsicFiles:              make(map[string]bool),
+		rawIntrinsicOpcodeFiles:        make(map[string]bool),
+		rawIntrinsicShapeFiles:         make(map[string]bool),
+		rawWorkerCertificateStoreFiles: make(map[string]bool),
+		rawWorkerGraphStoreFiles:       make(map[string]bool),
+		rawPatchRedirectStoreFiles:     make(map[string]bool),
+		patchRedirectLookupFiles:       make(map[string]bool),
+		callSiteFreezeFiles:            make(map[string]bool),
+		intrinsicObservationFiles:      make(map[string]bool),
+		elisionObservationFiles:        make(map[string]bool),
+		elisionSelectionFiles:          make(map[string]bool),
+		intrinsicSelectionFiles:        make(map[string]bool),
 	}
 	roots := []string{"cl", "internal/coro", "internal/build", "ssa", "runtime/internal/coro", "runtime/internal/runtime"}
 	for _, root := range roots {
@@ -232,6 +401,20 @@ func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitecture
 					case "observeCoroSiteRuntimeHelper":
 						inventory.helperObservation++
 						inventory.observationFiles[rel] = true
+					case "freezeCallSites":
+						inventory.callSiteFreeze++
+						inventory.callSiteFreezeFiles[rel] = true
+					case "observeCoroIntrinsicCallEmission":
+						inventory.intrinsicObservation++
+						inventory.intrinsicObservationFiles[rel] = true
+					case "observeCoroCallElision":
+						inventory.elisionObservation++
+						inventory.elisionObservationFiles[rel] = true
+					case "type_":
+						if rel == "cl/emission_runtime_helpers.go" {
+							inventory.rawHelperPhysicalType++
+							inventory.rawHelperPhysicalTypeFiles[rel] = true
+						}
 					}
 				case *ast.Ident:
 					name := node.Name
@@ -239,8 +422,15 @@ func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitecture
 					case "currentCoro":
 						inventory.currentCoro++
 						inventory.currentCoroFiles[rel] = true
-					case "CoroPlan", "EmissionUniverse":
+					case "CoroPlan":
 						inventory.planAuthority++
+					case "EmissionUniverse":
+						if allowedProgramIRBuilderAuthorityFiles[rel] {
+							inventory.programIRBuilderAuthority++
+							inventory.programIRBuilderAuthorityFiles[rel] = true
+						} else {
+							inventory.planAuthority++
+						}
 					case "WaitToken":
 						inventory.legacyWait++
 					case "classifyCoroRuntimeHelpers", "classifyPlainRuntimeHelpers":
@@ -248,9 +438,42 @@ func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitecture
 						inventory.rawHelperFiles[rel] = true
 					case "loweredRuntimeHelpers", "plainRepresentationRuntimeHelpers", "coroRelocatedHelpers":
 						inventory.legacyHelperScan++
+					case "classifyCoroIntrinsicCallSite":
+						inventory.rawIntrinsicPlan++
+						inventory.rawIntrinsicFiles[rel] = true
+					case "FrontendElidesNoInitCall":
+						inventory.rawNoInitPlan++
+						inventory.rawNoInitFiles[rel] = true
+					case "coroIntrinsicOpcode":
+						inventory.rawIntrinsicOpcode++
+						inventory.rawIntrinsicOpcodeFiles[rel] = true
+					case "workerSyscalls":
+						inventory.rawWorkerCertificateStore++
+						inventory.rawWorkerCertificateStoreFiles[rel] = true
+					case "workerSyscallOwners", "workerSyscallIncoming":
+						inventory.rawWorkerGraphStore++
+						inventory.rawWorkerGraphStoreFiles[rel] = true
+					case "patchInitRedirects":
+						inventory.rawPatchRedirectStore++
+						inventory.rawPatchRedirectStoreFiles[rel] = true
+					case "CoroPatchInitRedirect":
+						inventory.patchRedirectLookup++
+						inventory.patchRedirectLookupFiles[rel] = true
+					case "plannedCoroCallElision":
+						inventory.elisionSelection++
+						inventory.elisionSelectionFiles[rel] = true
+					case "plannedCoroIntrinsicCall":
+						inventory.intrinsicSelection++
+						inventory.intrinsicSelectionFiles[rel] = true
+					case "intrinsicCallSemantics", "patchInitRedirect", "elidedCallCertificate":
+						inventory.legacyIntrinsicInput++
 					case "timerRegistrationModeV1", "pollOperationModeV1", "coroNativeTargetV1State":
 						inventory.nativeFork++
 					default:
+						if strings.HasPrefix(name, "validateCoro") && strings.HasSuffix(name, "IntrinsicCallSite") {
+							inventory.rawIntrinsicShape++
+							inventory.rawIntrinsicShapeFiles[rel] = true
+						}
 						if strings.HasPrefix(name, "EnableCoro") {
 							inventory.stagedFeatureGate++
 							inventory.featureNames[name] = true

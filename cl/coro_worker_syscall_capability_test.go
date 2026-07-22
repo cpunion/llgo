@@ -195,7 +195,7 @@ func TestCoroWorkerSyscallConditionalIncomingPlanNarrowing(t *testing.T) {
 	if err != nil || !certified || certificate.ID == "" {
 		t.Fatalf("conditional carrier certificate = %+v, %t, %v", certificate, certified, err)
 	}
-	incoming := universe.workerSyscallIncoming[call]
+	incoming := frozenCoroWorkerIncomingForTest(t, universe, call)
 	if len(incoming) != 2 || !incoming[0].certified && !incoming[1].certified || incoming[0].certified && incoming[1].certified {
 		t.Fatalf("conditional incoming inventory = %+v; want one certified and one fail-closed edge", incoming)
 	}
@@ -326,7 +326,7 @@ func libc_getrlimit_trampoline()
 	if err != nil || !certified || certificate.StaticTargetCount != 1 {
 		t.Fatalf("patched getrlimit carrier certificate = %+v, %t, %v", certificate, certified, err)
 	}
-	incoming := universe.workerSyscallIncoming[call]
+	incoming := frozenCoroWorkerIncomingForTest(t, universe, call)
 	if len(incoming) != 2 || incoming[0].certified == incoming[1].certified {
 		t.Fatalf("patched getrlimit/fork incoming inventory = %+v; want one certified target and one fail-closed target", incoming)
 	}
@@ -455,12 +455,24 @@ func SIX_TARGET()
 					t.Fatalf("%s certificate = %+v, %t, %v", carrier, certificate, certified, err)
 				}
 			}
-			incoming := universe.workerSyscallIncoming[exactWorkerSyscallCall(t, universe, original.ssa.Func("syscall"))]
+			incoming := frozenCoroWorkerIncomingForTest(t, universe, exactWorkerSyscallCall(t, universe, original.ssa.Func("syscall")))
 			if len(incoming) != 2 || incoming[0].certified == incoming[1].certified {
 				t.Fatalf("stat/fork incoming inventory = %+v; want one exact certificate and one fail-closed edge", incoming)
 			}
 		})
 	}
+}
+
+func frozenCoroWorkerIncomingForTest(t *testing.T, universe *EmissionUniverse, call *ssa.Call) []coroWorkerSyscallIncomingEdge {
+	t.Helper()
+	if universe == nil || universe.coroProgramIR == nil {
+		t.Fatal("worker incoming fixture has no ProgramIR")
+	}
+	frozen, found, err := universe.coroProgramIR.callSitePlan(call)
+	if err != nil || !found {
+		t.Fatalf("worker incoming SitePlan = found %t, error %v", found, err)
+	}
+	return frozen.workerIncoming
 }
 
 func TestCoroWorkerAddressOnlyDeclarationDoesNotCollideWithTypedPhysicalABI(t *testing.T) {

@@ -44,6 +44,10 @@ import (
 	"golang.org/x/tools/go/ssa/ssautil"
 )
 
+func frontendElidesNoInitCall(call ssa.CallInstruction) bool {
+	return cl.FrontendElidesNoInitCall(call)
+}
+
 func TestCoroPlanInputElidesOnlyFrontendNoInitCalls(t *testing.T) {
 	newImport := func(path, kind string) *types.Package {
 		pkg := types.NewPackage(path, path[strings.LastIndex(path, "/")+1:])
@@ -112,7 +116,14 @@ func calls(fn func()) {
 		}
 	}
 
-	input := CoroPlanInput{Program: ssaPkg.Prog}
+	baseCallSitePlan := func(call ssa.CallInstruction) (cl.CoroCallSitePlan, bool, error) {
+		plan := cl.CoroCallSitePlan{}
+		if frontendElidesNoInitCall(call) {
+			plan.Elision = cl.CoroCallElidedNoInit
+		}
+		return plan, true, nil
+	}
+	input := CoroPlanInput{Program: ssaPkg.Prog, callSitePlan: baseCallSitePlan}
 	plan, err := input.Analyze(coro.Roots{
 		{Function: ssaPkg.Func("init"), Demand: coro.SyncDemand},
 		{Function: ssaPkg.Func("calls"), Demand: coro.SyncDemand},
@@ -173,8 +184,12 @@ func calls(fn func()) {
 	const patchLogicalName = "$llgo.patch.public-init-v1:test"
 	patchPublicInit := ssaPkg.Func("patchPublicInit")
 	patchInput := input
-	patchInput.patchInitRedirect = func(call ssa.CallInstruction) (bool, error) {
-		return call == ordinaryInitCall, nil
+	patchInput.callSitePlan = func(call ssa.CallInstruction) (cl.CoroCallSitePlan, bool, error) {
+		plan, frozen, err := baseCallSitePlan(call)
+		if call == ordinaryInitCall {
+			plan.Elision = cl.CoroCallElidedPatchRedirect
+		}
+		return plan, frozen, err
 	}
 	patchInput.loweredCalls = func(owner *ssa.Function) ([]coro.SSALoweredCall, error) {
 		if owner != ssaPkg.Func("init") {
@@ -215,17 +230,16 @@ func root() { intrinsic() }
 	const frontendCertificate = "frontend-exact-worker-call-certificate"
 	input := CoroPlanInput{
 		Program: ssaPkg.Prog,
-		intrinsicCallSemantics: func(call ssa.CallInstruction) (cl.CoroIntrinsicCallSemantics, bool, error) {
+		callSitePlan: func(call ssa.CallInstruction) (cl.CoroCallSitePlan, bool, error) {
 			if call == exactCall {
-				return cl.CoroIntrinsicCallInlineSuspend, true, nil
+				return cl.CoroCallSitePlan{
+					IntrinsicSemantics: cl.CoroIntrinsicCallInlineSuspend,
+					Intrinsic:          true,
+					Elision:            cl.CoroCallElidedIntrinsic,
+					ElisionCertificate: frontendCertificate,
+				}, true, nil
 			}
-			return cl.CoroIntrinsicCallUnsupported, false, nil
-		},
-		elidedCallCertificate: func(call ssa.CallInstruction) (string, bool, error) {
-			if call == exactCall {
-				return frontendCertificate, true, nil
-			}
-			return "", false, nil
+			return cl.CoroCallSitePlan{}, false, nil
 		},
 	}
 	plan, err := input.Analyze(coro.Roots{{Function: root, Demand: coro.SyncDemand}}, coro.SSAConfig{MaxPlainInstructions: -1})
@@ -345,11 +359,11 @@ func root(value *int) { _ = Advance(value, 1) }
 				t.Fatal(err)
 			}
 			input := CoroPlanInput{
-				Program:                ssaPkg.Prog,
-				EmissionUniverse:       ssaEmission,
-				resolveFunction:        emission.Resolve,
-				functionBackground:     emission.FunctionBackground,
-				intrinsicCallSemantics: emission.CoroIntrinsicCallSiteSemantics,
+				Program:            ssaPkg.Prog,
+				EmissionUniverse:   ssaEmission,
+				resolveFunction:    emission.Resolve,
+				functionBackground: emission.FunctionBackground,
+				callSitePlan:       emission.CoroCallSitePlan,
 			}
 			functionIDs := emission.FunctionIDConfig()
 			functionIDs.CoroABI = coro.EntryResolutionABIV0
@@ -443,11 +457,11 @@ func root(token *WaitToken, ticket WaitTicket) uint32 {
 		t.Fatalf("park semantics = %v, %v, %v; want inline-suspend, true, nil", semantics, intrinsic, err)
 	}
 	input := CoroPlanInput{
-		Program:                ssaPkg.Prog,
-		EmissionUniverse:       ssaEmission,
-		resolveFunction:        emission.Resolve,
-		functionBackground:     emission.FunctionBackground,
-		intrinsicCallSemantics: emission.CoroIntrinsicCallSiteSemantics,
+		Program:            ssaPkg.Prog,
+		EmissionUniverse:   ssaEmission,
+		resolveFunction:    emission.Resolve,
+		functionBackground: emission.FunctionBackground,
+		callSitePlan:       emission.CoroCallSitePlan,
 	}
 	functionIDs := emission.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
@@ -1215,16 +1229,16 @@ func atomicExchange(*uint32, uint32) uint32
 	}
 
 	input := CoroPlanInput{
-		Program:                ssaPkg.Prog,
-		EmissionUniverse:       ssaEmission,
-		resolveFunction:        emission.Resolve,
-		functionBackground:     emission.FunctionBackground,
-		intrinsicCallSemantics: emission.CoroIntrinsicCallSiteSemantics,
-		requiredRoots:          roots,
-		requiredPlain:          requiredPlain,
-		requiredHostPlain:      maps.Clone(requiredPlain),
-		requiredDirectPlain:    directPlain,
-		requiredClosedDynamic:  closedDynamic,
+		Program:               ssaPkg.Prog,
+		EmissionUniverse:      ssaEmission,
+		resolveFunction:       emission.Resolve,
+		functionBackground:    emission.FunctionBackground,
+		callSitePlan:          emission.CoroCallSitePlan,
+		requiredRoots:         roots,
+		requiredPlain:         requiredPlain,
+		requiredHostPlain:     maps.Clone(requiredPlain),
+		requiredDirectPlain:   directPlain,
+		requiredClosedDynamic: closedDynamic,
 	}
 	functionIDs := emission.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
@@ -1961,11 +1975,11 @@ func __llgo_coro_frame_free_v1() {}
 		pkg: ssaPkg,
 		ctx: ctx,
 		input: CoroPlanInput{
-			Program:                ssaPkg.Prog,
-			EmissionUniverse:       ssaEmission,
-			resolveFunction:        emission.Resolve,
-			functionBackground:     emission.FunctionBackground,
-			intrinsicCallSemantics: emission.CoroIntrinsicCallSiteSemantics,
+			Program:            ssaPkg.Prog,
+			EmissionUniverse:   ssaEmission,
+			resolveFunction:    emission.Resolve,
+			functionBackground: emission.FunctionBackground,
+			callSitePlan:       emission.CoroCallSitePlan,
 			rawCFunctionType: func(typ types.Type) (bool, error) {
 				if typ == nil {
 					return false, nil

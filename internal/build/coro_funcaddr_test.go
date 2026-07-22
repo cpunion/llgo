@@ -194,7 +194,7 @@ func analyzeCoroFuncAddrTest(t *testing.T, ssaPkg *ssa.Package, files []*ast.Fil
 		EmissionUniverse:               ssaEmission,
 		resolveFunction:                emission.Resolve,
 		functionBackground:             emission.FunctionBackground,
-		intrinsicCallSemantics:         emission.CoroIntrinsicCallSiteSemantics,
+		callSitePlan:                   emission.CoroCallSitePlan,
 		rawFunctionAddressCallArgument: emission.CoroRawFunctionAddressCallArgument,
 		staticCodeAddressCallArgument:  emission.CoroStaticCodeAddressCallArgument,
 	}

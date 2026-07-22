@@ -91,7 +91,7 @@ func TestProductionCoroPollInlineAttemptDefaultPlanAndPhysicalIR(t *testing.T) {
 		foreignSync:                    emission.CoroForeignSyncCertificate,
 		foreignSchedulerWait:           emission.CoroForeignSchedulerWaitCertificate,
 		foreignWorker:                  emission.CoroForeignWorkerCertificate,
-		intrinsicCallSemantics:         emission.CoroIntrinsicCallSiteSemantics,
+		callSitePlan:                   emission.CoroCallSitePlan,
 		rawFunctionAddressCallArgument: emission.CoroRawFunctionAddressCallArgument,
 		staticCodeAddressCallArgument:  emission.CoroStaticCodeAddressCallArgument,
 		callableIdentity:               emission.CoroCallableIdentityCertificate,

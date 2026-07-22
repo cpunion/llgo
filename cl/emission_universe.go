@@ -399,6 +399,42 @@ type coroPlannedRuntimeHelper struct {
 	placement coroRuntimeHelperPlacement
 }
 
+type CoroCallElisionKind uint8
+
+const (
+	CoroCallNotElided CoroCallElisionKind = iota
+	CoroCallElidedNoInit
+	CoroCallElidedPatchRedirect
+	CoroCallElidedIntrinsic
+)
+
+// CoroCallSitePlan is the immutable ProgramIR projection for one exact SSA
+// call occurrence. Intrinsic semantics, frontend call elision, and the
+// optional capability attached to that elision are decided together so
+// analysis and codegen cannot reconstruct different call edges.
+type CoroCallSitePlan struct {
+	IntrinsicSemantics CoroIntrinsicCallSemantics
+	Intrinsic          bool
+	Elision            CoroCallElisionKind
+	ElisionCertificate string
+}
+
+func (p CoroCallSitePlan) ElidesCall() bool {
+	return p.Elision != CoroCallNotElided
+}
+
+type coroFrozenCallSitePlan struct {
+	plan              CoroCallSitePlan
+	failure           string
+	opcode            int
+	workerCertificate CoroWorkerSyscallCertificate
+	workerCertified   bool
+	workerOwners      map[*ssa.Function]none
+	workerIncoming    []coroWorkerSyscallIncomingEdge
+	patchRedirect     coroPatchInitRedirect
+	patchAttempted    bool
+}
+
 // coroEmissionSitePlan is the first production slice of CoroProgramIR. It is
 // frozen while the emission closure is still open, before whole-program
 // analysis, and is the only authority for compiler-inserted runtime calls at
@@ -409,6 +445,8 @@ type coroPlannedRuntimeHelper struct {
 type coroEmissionSitePlan struct {
 	managedRuntimeHelpers []coroPlannedRuntimeHelper
 	plainRuntimeHelpers   []string
+	callPlan              coroFrozenCallSitePlan
+	hasCallPlan           bool
 }
 
 type emissionFunctionState struct {
@@ -731,6 +769,9 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 	if err := u.freezeCoroAssemblyNoSuspendCertificates(); err != nil {
 		return nil, err
 	}
+	if err := u.coroProgramIR.freezeCallSites(u); err != nil {
+		return nil, fmt.Errorf("prepare emission universe: freeze coroutine call SitePlans: %w", err)
+	}
 	return u, nil
 }
 
@@ -894,9 +935,27 @@ func (u *EmissionUniverse) CoroPatchInitRedirect(call ssa.CallInstruction) (logi
 	if call == nil || call.Parent() == nil {
 		return "", nil, false, fmt.Errorf("coroutine patch initializer redirect requires an exact call occurrence")
 	}
-	redirect, ok := u.patchInitRedirects[call]
-	if !ok {
-		return "", nil, false, nil
+	var redirect coroPatchInitRedirect
+	if u.coroProgramIR != nil && u.coroProgramIR.callsFrozen {
+		frozen, found, lookupErr := u.coroProgramIR.callSitePlan(call)
+		if lookupErr != nil || !found {
+			return "", nil, false, lookupErr
+		}
+		if frozen.plan.Elision != CoroCallElidedPatchRedirect {
+			if frozen.patchAttempted && frozen.failure != "" {
+				return "", nil, false, fmt.Errorf("%s", frozen.failure)
+			}
+			return "", nil, false, nil
+		}
+		if frozen.failure != "" {
+			return "", nil, false, fmt.Errorf("%s", frozen.failure)
+		}
+		redirect = frozen.patchRedirect
+	} else {
+		redirect, ok = u.patchInitRedirects[call]
+		if !ok {
+			return "", nil, false, nil
+		}
 	}
 	if redirect.logicalName == "" || redirect.target == nil {
 		return "", nil, false, fmt.Errorf("coroutine patch initializer redirect in %q has incomplete frozen metadata", call.Parent().Name())
@@ -1525,23 +1584,31 @@ func (u *EmissionUniverse) CoroIntrinsicSemantics(fn *ssa.Function) (semantics C
 	return coroIntrinsicCallSemantics(opcode), true, nil
 }
 
-// CoroIntrinsicCallSiteSemantics reports the frozen physical semantics of one
-// exact SSA call site. A function-level intrinsic opcode is insufficient proof
-// that a particular source operation can be elided: opcode-specific lowering
-// preconditions are checked here against the same SSA arguments consumed by
-// cl. Invalid intrinsic sites fail closed instead of being disguised as an
-// ordinary managed call and reaching a later lowering panic.
-func (u *EmissionUniverse) CoroIntrinsicCallSiteSemantics(call ssa.CallInstruction) (semantics CoroIntrinsicCallSemantics, intrinsic bool, err error) {
+// classifyCoroIntrinsicCallSite is the sole raw-SSA intrinsic recipe planner.
+// ProgramIR invokes it once per owner/call after helper closure and frontend
+// certificates are frozen. Every production consumer uses CoroCallSitePlan or
+// CoroIntrinsicCallSiteSemantics, both immutable lookups.
+func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
+	ctx *context,
+	sitePlan coroEmissionSitePlan,
+	call ssa.CallInstruction,
+	opcode int,
+	intrinsic bool,
+	workerCertificate CoroWorkerSyscallCertificate,
+	workerCertified bool,
+) (semantics CoroIntrinsicCallSemantics, exact bool, err error) {
 	if call == nil || call.Common() == nil {
 		return CoroIntrinsicCallUnsupported, false, fmt.Errorf("emission universe intrinsic call semantics: nil SSA call")
+	}
+	if ctx == nil || ctx.goFn != call.Parent() || ctx.emissionOwner == nil {
+		return CoroIntrinsicCallUnsupported, false, fmt.Errorf("emission universe intrinsic call semantics: missing exact owner context")
 	}
 	callee := call.Common().StaticCallee()
 	if callee == nil {
 		return CoroIntrinsicCallUnsupported, false, nil
 	}
-	opcode, intrinsic, err := u.coroIntrinsicOpcode(callee)
-	if err != nil || !intrinsic {
-		return CoroIntrinsicCallUnsupported, intrinsic, err
+	if !intrinsic {
+		return CoroIntrinsicCallUnsupported, false, nil
 	}
 	if isLLGoSyscallIntrinsic(opcode) && u.enableCoroWorker {
 		direct, ok := call.(*ssa.Call)
@@ -1550,19 +1617,11 @@ func (u *EmissionUniverse) CoroIntrinsicCallSiteSemantics(call ssa.CallInstructi
 				"emission universe intrinsic call semantics: worker llgo.syscall must be an exact direct call",
 			)
 		}
-		if err := validateCoroWorkerSyscallIntrinsicCallSite(direct); err != nil {
-			// The llgo.syscall family also owns wider and typed synchronous
-			// intrinsic families (for example Darwin's float64 forms). They
-			// remain valid plain lowering sites, but are not worker operations.
-			// If one becomes reachable from a coroutine, the physical ABI
-			// validator rejects its retained conservative call edge.
-			return CoroIntrinsicCallUnsupported, true, nil
-		}
-		if certificate, certified, certificateErr := u.CoroWorkerSyscallCertificate(direct); certificateErr != nil {
-			return CoroIntrinsicCallUnsupported, true, certificateErr
-		} else if !certified || certificate.ID == "" {
-			// Shape alone is never worker authority. Keep an uncertified site as
-			// the legacy synchronous intrinsic; a coroutine reaching it fails
+		if !workerCertified || workerCertificate.ID == "" {
+			// The certificate builder is the sole authority for the exact worker
+			// call shape and producer-forward function-word proof. Wider or typed
+			// synchronous syscall forms deliberately remain unsupported here; a
+			// coroutine reaching one retains its conservative call edge and fails
 			// physical preflight instead of submitting an arbitrary uintptr.
 			return CoroIntrinsicCallUnsupported, true, nil
 		}
@@ -1731,13 +1790,7 @@ func (u *EmissionUniverse) CoroIntrinsicCallSiteSemantics(call ssa.CallInstructi
 			// intrinsic declaration in that mode.
 			return CoroIntrinsicCallUnsupported, true, nil
 		}
-		helper, frozen, helperErr := u.ResolveCoroLoweredCall(direct.Parent(), "CStrCopy")
-		if helperErr != nil {
-			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
-				"emission universe intrinsic call semantics: llgo.allocaCStr call %q resolve frozen CStrCopy helper: %w", direct.String(), helperErr,
-			)
-		}
-		if !frozen || helper == nil {
+		if !sitePlan.hasManagedRuntimeHelper("CStrCopy") {
 			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
 				"emission universe intrinsic call semantics: llgo.allocaCStr call %q has no exact frozen CStrCopy lowered call", direct.String(),
 			)
@@ -1770,31 +1823,13 @@ func (u *EmissionUniverse) CoroIntrinsicCallSiteSemantics(call ssa.CallInstructi
 		if !u.CompleteRuntimeABI() {
 			return CoroIntrinsicCallUnsupported, true, nil
 		}
-		helper, frozen, helperErr := u.ResolveCoroLoweredCall(direct.Parent(), "GetThreadDefer")
-		if helperErr != nil {
-			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
-				"emission universe intrinsic call semantics: llgo.deferData call %q resolve frozen GetThreadDefer helper: %w", direct.String(), helperErr,
-			)
-		}
-		if !frozen || helper == nil {
+		if !sitePlan.hasManagedRuntimeHelper("GetThreadDefer") {
 			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
 				"emission universe intrinsic call semantics: llgo.deferData call %q has no exact frozen GetThreadDefer lowered call", direct.String(),
 			)
 		}
 		return CoroIntrinsicCallInlineWithLoweredCalls, true, nil
 	case llgoString:
-		owner := u.ownerOf(direct.Parent())
-		if owner == nil {
-			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
-				"emission universe intrinsic call semantics: llgo.string call %q has no exact frozen owner", direct.String(),
-			)
-		}
-		ctx, ctxErr := u.functionABIContext(direct.Parent(), owner)
-		if ctxErr != nil {
-			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
-				"emission universe intrinsic call semantics: llgo.string call %q build exact lowering context: %w", direct.String(), ctxErr,
-			)
-		}
 		helperName, helperShapeErr := emissionStringIntrinsicHelper(ctx, direct)
 		if helperShapeErr != nil {
 			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
@@ -1804,13 +1839,7 @@ func (u *EmissionUniverse) CoroIntrinsicCallSiteSemantics(call ssa.CallInstructi
 		if !u.CompleteRuntimeABI() {
 			return CoroIntrinsicCallUnsupported, true, nil
 		}
-		helper, frozen, helperErr := u.ResolveCoroLoweredCall(direct.Parent(), helperName)
-		if helperErr != nil {
-			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
-				"emission universe intrinsic call semantics: llgo.string call %q resolve frozen %s helper: %w", direct.String(), helperName, helperErr,
-			)
-		}
-		if !frozen || helper == nil {
+		if !sitePlan.hasManagedRuntimeHelper(helperName) {
 			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
 				"emission universe intrinsic call semantics: llgo.string call %q has no exact frozen %s lowered call", direct.String(), helperName,
 			)
@@ -1837,13 +1866,7 @@ func (u *EmissionUniverse) CoroIntrinsicCallSiteSemantics(call ssa.CallInstructi
 		if opcode == llgoSiglongjmp {
 			helperName = "Siglongjmp"
 		}
-		helper, frozen, helperErr := u.ResolveCoroLoweredCall(direct.Parent(), helperName)
-		if helperErr != nil {
-			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
-				"emission universe intrinsic call semantics: legacy %s call %q resolve frozen runtime helper: %w", helperName, direct.String(), helperErr,
-			)
-		}
-		if !frozen || helper == nil {
+		if !sitePlan.hasManagedRuntimeHelper(helperName) {
 			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
 				"emission universe intrinsic call semantics: legacy %s call %q has no exact frozen lowered call", helperName, direct.String(),
 			)
@@ -1954,20 +1977,15 @@ func (u *EmissionUniverse) CoroRawFunctionAddressCallArgument(call ssa.CallInstr
 	if call == nil || call.Common() == nil || argument < 0 || argument >= len(call.Common().Args) {
 		return false, nil
 	}
-	callee := call.Common().StaticCallee()
-	if callee == nil {
+	frozen, found, err := u.coroProgramIR.callSitePlan(call)
+	if err != nil || !found {
+		return false, err
+	}
+	if frozen.failure != "" {
+		return false, fmt.Errorf("%s", frozen.failure)
+	}
+	if !frozen.plan.Intrinsic || frozen.opcode != llgoFuncAddr {
 		return false, nil
-	}
-	opcode, intrinsic, err := u.coroIntrinsicOpcode(callee)
-	if err != nil || !intrinsic || opcode != llgoFuncAddr {
-		return false, err
-	}
-	direct, ok := call.(*ssa.Call)
-	if !ok || direct.Common() == nil || direct.Common().IsInvoke() {
-		return false, fmt.Errorf("emission universe raw function address: llgo.funcAddr must be an exact direct call")
-	}
-	if _, _, err := u.validateCoroFuncAddrCallSite(direct); err != nil {
-		return false, err
 	}
 	return argument == 0, nil
 }
@@ -1981,23 +1999,22 @@ func (u *EmissionUniverse) CoroStaticCodeAddressCallArgument(call ssa.CallInstru
 	if call == nil || call.Common() == nil || argument < 0 || argument >= len(call.Common().Args) {
 		return false, nil
 	}
-	callee := call.Common().StaticCallee()
-	if callee == nil {
+	frozen, found, err := u.coroProgramIR.callSitePlan(call)
+	if err != nil || !found {
+		return false, err
+	}
+	if frozen.failure != "" {
+		return false, fmt.Errorf("%s", frozen.failure)
+	}
+	if !frozen.plan.Intrinsic || frozen.opcode != llgoFuncPCABI0 {
 		return false, nil
-	}
-	opcode, intrinsic, err := u.coroIntrinsicOpcode(callee)
-	if err != nil || !intrinsic || opcode != llgoFuncPCABI0 {
-		return false, err
-	}
-	direct, ok := call.(*ssa.Call)
-	if !ok || direct.Common() == nil || direct.Common().IsInvoke() {
-		return false, fmt.Errorf("emission universe static code address: llgo.funcPCABI0 must be an exact direct call")
-	}
-	if err := u.validateCoroFuncPCABI0CallSite(direct); err != nil {
-		return false, err
 	}
 	if argument != 0 {
 		return false, nil
+	}
+	direct, ok := call.(*ssa.Call)
+	if !ok {
+		return false, fmt.Errorf("frozen llgo.funcPCABI0 SitePlan is not an exact direct call")
 	}
 	// Every exact static operand is consumed as an address by funcPCABI0.  In
 	// particular, a compiler-recognized libc_*_trampoline never materializes a
@@ -2230,41 +2247,31 @@ func validateCoroCriticalIntrinsicCallSite(call *ssa.Call) error {
 	return nil
 }
 
-// coroCriticalCallSite classifies one exact direct marker from the frozen
-// emission universe. A non-marker intrinsic returns (none, false, nil).
+// coroCriticalCallSite projects the already-frozen intrinsic recipe. A
+// non-marker intrinsic returns (none, false, nil); it never revalidates raw
+// operands or reconstructs an opcode from the callee.
 func (u *EmissionUniverse) coroCriticalCallSite(call *ssa.Call) (coroCriticalCallRole, bool, error) {
 	if call == nil || call.Common() == nil {
 		return coroCriticalCallNone, false, fmt.Errorf("coroutine critical call-site classification requires an SSA call")
 	}
-	callee := call.Common().StaticCallee()
-	if callee == nil {
-		return coroCriticalCallNone, false, nil
-	}
-	// Compiler-synthesized package initializers may retain direct calls which
-	// the frozen frontend has already classified as completely elided (for
-	// example unsafe.init). Such a declaration has no physical function in the
-	// emission universe and therefore cannot be one of the universe-owned
-	// critical intrinsics. Keep the generic intrinsic query fail-closed for all
-	// callers which require membership, but do not turn an unrelated absent
-	// declaration into a critical-region proof failure.
-	if canonical, frozen := u.Resolve(callee); !frozen || canonical == nil {
-		return coroCriticalCallNone, false, nil
-	}
-	opcode, intrinsic, err := u.coroIntrinsicOpcode(callee)
-	if err != nil || !intrinsic {
+	frozen, found, err := u.coroProgramIR.callSitePlan(call)
+	if err != nil || !found {
 		return coroCriticalCallNone, false, err
 	}
+	if frozen.failure != "" {
+		return coroCriticalCallNone, frozen.plan.Intrinsic, fmt.Errorf("%s", frozen.failure)
+	}
+	if !frozen.plan.Intrinsic {
+		return coroCriticalCallNone, false, nil
+	}
 	var role coroCriticalCallRole
-	switch opcode {
+	switch frozen.opcode {
 	case llgoCoroCriticalEnter:
 		role = coroCriticalCallEnter
 	case llgoCoroCriticalExit:
 		role = coroCriticalCallExit
 	default:
 		return coroCriticalCallNone, false, nil
-	}
-	if err := validateCoroCriticalIntrinsicCallSite(call); err != nil {
-		return coroCriticalCallNone, true, err
 	}
 	return role, true, nil
 }

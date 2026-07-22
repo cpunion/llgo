@@ -398,8 +398,7 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(ctx *context, shape coroEm
 		scalarBitcast = scalarBitcast && bitcast.Allocation == v
 		if v.Heap && !scalarBitcast && !ctx.skipSyntheticMakeSliceAlloc(v) && !isEmissionVargsAlloc(ctx, v) {
 			elem := types.Unalias(v.Type()).(*types.Pointer).Elem()
-			physical := ctx.type_(elem, llssa.InGo)
-			if u.prog.SizeOf(physical) != 0 {
+			if !emissionZeroSizedType(ctx.patchType(elem), ctx.prog.PointerSize()) {
 				add("AllocZ")
 			}
 		}
@@ -874,16 +873,52 @@ func (u *EmissionUniverse) makeInterfaceRuntimeHelpers(ctx *context, makeInterfa
 	if interfaceIsNonEmpty(ctx.patchType(makeInterface.Type())) {
 		add("NewItab")
 	}
-	physical := ctx.type_(makeInterface.X.Type(), llssa.InGo)
-	if !emissionDirectIfaceType(physical.RawType()) {
+	// Helper planning must remain valid for report/identity universes whose
+	// LLSSA program intentionally has no runtime package. The interface data
+	// representation and the large/zero dereference rules depend only on the
+	// patched Go type and target pointer size; materializing an LLSSA type here
+	// would incorrectly require runtime.String and other runtime ABI types.
+	physical := ctx.patchType(makeInterface.X.Type())
+	if !emissionDirectIfaceType(physical) {
 		add("AllocU")
 	}
-	if unop, ok := makeInterface.X.(*ssa.UnOp); ok && unop.Op == token.MUL && (ctx.isLargeNonPointerValue(physical) || ctx.isZeroSizedValue(physical)) {
+	if unop, ok := makeInterface.X.(*ssa.UnOp); ok && unop.Op == token.MUL &&
+		emissionLargeOrZeroInterfaceDeref(physical, ctx.prog.PointerSize()) {
 		add("AssertNilDeref")
 		// MakeInterfaceFromPtr uses the indirect representation for both large
 		// and zero-sized values and therefore always copies through AllocU.
 		add("AllocU", "Typedmemmove")
 	}
+}
+
+func emissionLargeOrZeroInterfaceDeref(typ types.Type, pointerSize int) bool {
+	raw := types.Unalias(typ)
+	if raw == nil {
+		return false
+	}
+	if _, pointer := raw.Underlying().(*types.Pointer); pointer {
+		return false
+	}
+	word := int64(pointerSize)
+	if word <= 0 {
+		return false
+	}
+	size := emissionTargetTypeSize(raw, word)
+	return size == 0 || size > maxDirectDerefSize
+}
+
+func emissionZeroSizedType(typ types.Type, pointerSize int) bool {
+	if typ == nil || pointerSize <= 0 {
+		return false
+	}
+	return emissionTargetTypeSize(types.Unalias(typ), int64(pointerSize)) == 0
+}
+
+func emissionTargetTypeSize(typ types.Type, word int64) int64 {
+	if typ == nil || word <= 0 {
+		return -1
+	}
+	return (&types.StdSizes{WordSize: word, MaxAlign: word}).Sizeof(typ)
 }
 
 func emissionDirectIfaceType(typ types.Type) bool {

@@ -1410,40 +1410,41 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 			case *ssa.Call:
 				if whole != nil && whole.ElidesCall(instr) {
 					if universe != nil {
-						rawCallee := instr.Call.StaticCallee()
-						if _, frozen := universe.Resolve(rawCallee); rawCallee != nil && frozen {
-							semantics, intrinsic, err := universe.CoroIntrinsicCallSiteSemantics(instr)
-							if err != nil {
-								return coroLeafInstructionError(fn, plan, instr, "invalid frozen intrinsic: "+err.Error())
+						frozen, found, err := universe.coroProgramIR.callSitePlan(instr)
+						if err != nil || !found {
+							if err == nil {
+								err = fmt.Errorf("call is absent from the frozen ProgramIR")
 							}
-							if cleanupPlan != nil && (!intrinsic ||
-								(semantics != CoroIntrinsicCallInlineNoSuspend && semantics != CoroIntrinsicCallInlineSuspend &&
-									semantics != CoroIntrinsicCallInlineYield)) {
-								return coroLeafInstructionError(fn, plan, instr, "elided intrinsic has no cleanup-safe no-unwind contract")
+							return coroLeafInstructionError(fn, plan, instr, err.Error())
+						}
+						if frozen.failure != "" {
+							return coroLeafInstructionError(fn, plan, instr, "invalid frozen intrinsic: "+frozen.failure)
+						}
+						callPlan := frozen.plan
+						semantics, intrinsic := callPlan.IntrinsicSemantics, callPlan.Intrinsic
+						if cleanupPlan != nil && callPlan.Elision != CoroCallElidedNoInit && (!intrinsic ||
+							(semantics != CoroIntrinsicCallInlineNoSuspend && semantics != CoroIntrinsicCallInlineSuspend &&
+								semantics != CoroIntrinsicCallInlineYield)) {
+							return coroLeafInstructionError(fn, plan, instr, "elided intrinsic has no cleanup-safe no-unwind contract")
+						}
+						if intrinsic && semantics == CoroIntrinsicCallInlineSuspend {
+							if isLLGoSyscallIntrinsic(frozen.opcode) {
+								if err := validateCoroWorkerSyscallCall(whole, universe, instr); err != nil {
+									return coroLeafInstructionError(fn, plan, instr, "invalid worker llgo.syscall capability: "+err.Error())
+								}
 							}
-							if intrinsic && semantics == CoroIntrinsicCallInlineSuspend {
-								if opcode, exact, opcodeErr := universe.coroIntrinsicOpcode(rawCallee); opcodeErr != nil {
-									return coroLeafInstructionError(fn, plan, instr, "resolve frozen intrinsic opcode: "+opcodeErr.Error())
-								} else if exact && isLLGoSyscallIntrinsic(opcode) {
-									if err := validateCoroWorkerSyscallCall(whole, universe, instr); err != nil {
-										return coroLeafInstructionError(fn, plan, instr, "invalid worker llgo.syscall capability: "+err.Error())
-									}
-								}
-								parks++
-							} else if intrinsic && semantics == CoroIntrinsicCallInlineYield {
-								yields++
+							parks++
+						} else if intrinsic && semantics == CoroIntrinsicCallInlineYield {
+							yields++
+						}
+						if intrinsic {
+							if isLLGoSyscallIntrinsic(frozen.opcode) && semantics != CoroIntrinsicCallInlineSuspend {
+								return coroLeafInstructionError(fn, plan, instr,
+									"elided worker llgo.syscall has no frozen function-word capability")
 							}
-							if opcode, exact, opcodeErr := universe.coroIntrinsicOpcode(rawCallee); opcodeErr != nil {
-								return coroLeafInstructionError(fn, plan, instr, "resolve frozen intrinsic opcode: "+opcodeErr.Error())
-							} else if intrinsic && exact {
-								if isLLGoSyscallIntrinsic(opcode) && semantics != CoroIntrinsicCallInlineSuspend {
-									return coroLeafInstructionError(fn, plan, instr,
-										"elided worker llgo.syscall has no frozen function-word capability")
-								}
-								if opcode == llgoAlloca {
-									return coroLeafInstructionError(fn, plan, instr,
-										"dynamic llgo.alloca is valid only in a no-suspend plain island; a physical coroutine requires an exact resume-local lifetime proof")
-								}
+							if frozen.opcode == llgoAlloca {
+								return coroLeafInstructionError(fn, plan, instr,
+									"dynamic llgo.alloca is valid only in a no-suspend plain island; a physical coroutine requires an exact resume-local lifetime proof")
 							}
 						}
 					}

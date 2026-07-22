@@ -27,14 +27,17 @@ import (
 // global summaries, physical control and storage projections to this same
 // object rather than creating independently-versioned lowering documents.
 type coroProgramIR struct {
-	sitePlans  map[emissionFunctionOwnerKey]map[ssa.Instruction]coroEmissionSitePlan
-	siteOwners map[emissionFunctionOwnerKey]none
+	sitePlans   map[emissionFunctionOwnerKey]map[ssa.Instruction]coroEmissionSitePlan
+	siteOwners  map[emissionFunctionOwnerKey]none
+	callPlans   map[ssa.CallInstruction]coroFrozenCallSitePlan
+	callsFrozen bool
 }
 
 func newCoroProgramIR() *coroProgramIR {
 	return &coroProgramIR{
 		sitePlans:  make(map[emissionFunctionOwnerKey]map[ssa.Instruction]coroEmissionSitePlan),
 		siteOwners: make(map[emissionFunctionOwnerKey]none),
+		callPlans:  make(map[ssa.CallInstruction]coroFrozenCallSitePlan),
 	}
 }
 
@@ -96,6 +99,17 @@ func (ir *coroProgramIR) plannedRuntimeHelpers(ctx *context, instruction ssa.Ins
 	return helpers, nil
 }
 
+func (ir *coroProgramIR) callSitePlan(call ssa.CallInstruction) (coroFrozenCallSitePlan, bool, error) {
+	if ir == nil || !ir.callsFrozen {
+		return coroFrozenCallSitePlan{}, false, fmt.Errorf("coroutine call SitePlan is not frozen")
+	}
+	if call == nil || call.Common() == nil || call.Parent() == nil {
+		return coroFrozenCallSitePlan{}, false, fmt.Errorf("coroutine call SitePlan lookup requires an exact SSA call")
+	}
+	plan, ok := ir.callPlans[call]
+	return plan, ok, nil
+}
+
 func (plan coroEmissionSitePlan) managedRuntimeHelperNames() []string {
 	helpers := make([]string, len(plan.managedRuntimeHelpers))
 	for index, helper := range plan.managedRuntimeHelpers {
@@ -114,6 +128,15 @@ func (plan coroEmissionSitePlan) managedRuntimeHelpersAt(placement coroRuntimeHe
 	return helpers
 }
 
+func (plan coroEmissionSitePlan) hasManagedRuntimeHelper(name string) bool {
+	for _, helper := range plan.managedRuntimeHelpers {
+		if helper.name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func cloneCoroEmissionSitePlan(plan coroEmissionSitePlan) coroEmissionSitePlan {
 	plan.managedRuntimeHelpers = append([]coroPlannedRuntimeHelper(nil), plan.managedRuntimeHelpers...)
 	plan.plainRuntimeHelpers = append([]string(nil), plan.plainRuntimeHelpers...)
@@ -122,5 +145,6 @@ func cloneCoroEmissionSitePlan(plan coroEmissionSitePlan) coroEmissionSitePlan {
 
 func sameCoroEmissionSitePlan(first, second coroEmissionSitePlan) bool {
 	return slices.Equal(first.managedRuntimeHelpers, second.managedRuntimeHelpers) &&
-		slices.Equal(first.plainRuntimeHelpers, second.plainRuntimeHelpers)
+		slices.Equal(first.plainRuntimeHelpers, second.plainRuntimeHelpers) &&
+		first.hasCallPlan == second.hasCallPlan && sameCoroFrozenCallSitePlan(first.callPlan, second.callPlan)
 }

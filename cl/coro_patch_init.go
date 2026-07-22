@@ -28,7 +28,7 @@ import (
 // original package initializer with the exact public initializer selected by
 // package patching. Analysis sees the same physical edge through the owner's
 // frozen lowered-call occurrence.
-func (p *context) tryCompileCoroPatchInitRedirect(b llssa.Builder, call *ssa.Call) (llssa.Expr, bool) {
+func (p *context) tryCompileCoroPatchInitRedirect(b llssa.Builder, call *ssa.Call) (result llssa.Expr, handled bool) {
 	if p.compilation == nil || !p.compilation.EnableCoroEntryResolution || p.emissionUniverse == nil || call == nil {
 		return llssa.Nil, false
 	}
@@ -39,6 +39,11 @@ func (p *context) tryCompileCoroPatchInitRedirect(b llssa.Builder, call *ssa.Cal
 	if !redirected {
 		return llssa.Nil, false
 	}
+	defer func() {
+		if handled {
+			p.observeCoroCallElision(CoroCallElidedPatchRedirect)
+		}
+	}()
 	if p.goFn == nil || call.Parent() != p.goFn || p.compilation.CoroPlan == nil || b.Func != p.fn {
 		panic("coroutine patch initializer replacement requires its exact active owner and SSA plan")
 	}

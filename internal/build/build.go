@@ -148,9 +148,7 @@ type CoroPlanInput struct {
 	trustedInlineCall              func(*ssa.Function, ssa.CallInstruction) (coro.SSATrustedInlineCallCertificate, bool, error)
 	assemblyNoSuspend              func(*ssa.Function) (string, bool, error)
 	dynamicImplements              func(types.Type, *types.Interface) (bool, error)
-	intrinsicCallSemantics         func(ssa.CallInstruction) (cl.CoroIntrinsicCallSemantics, bool, error)
-	patchInitRedirect              func(ssa.CallInstruction) (bool, error)
-	elidedCallCertificate          func(ssa.CallInstruction) (string, bool, error)
+	callSitePlan                   func(ssa.CallInstruction) (cl.CoroCallSitePlan, bool, error)
 	rawFunctionAddressCallArgument func(ssa.CallInstruction, int) (bool, error)
 	staticCodeAddressCallArgument  func(ssa.CallInstruction, int) (bool, error)
 	demandReferences               func(*ssa.Function) ([]*ssa.Function, error)
@@ -712,7 +710,7 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 	// physical effect from the same frozen call-site semantics used to elide the
 	// declaration, so synchronous source callers are transparently coroutine
 	// primary bodies and the plan digest records both the owner effect and site.
-	if in.intrinsicCallSemantics != nil {
+	if in.callSitePlan != nil {
 		classify := config.ClassifyFunction
 		config.ClassifyFunction = func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
 			var policy coro.SSAFunctionPolicy
@@ -730,22 +728,12 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 					if !ok {
 						continue
 					}
-					rawCallee := call.Common().StaticCallee()
-					if rawCallee == nil {
-						continue
-					}
-					if _, frozen := in.ResolveFunction(rawCallee); !frozen {
-						// Frontend-elided noinit declarations (notably unsafe.init)
-						// are intentionally outside the frozen emission universe and
-						// carry no structured intrinsic effect.
-						continue
-					}
-					semantics, intrinsic, err := in.intrinsicCallSemantics(call)
+					callSite, frozen, err := in.callSitePlan(call)
 					if err != nil {
 						return coro.SSAFunctionPolicy{}, fmt.Errorf("classify frozen intrinsic effect in %q: %w", fn.Name(), err)
 					}
-					if intrinsic && semantics.SuspendsCurrentFrame() {
-						policy.Effect = policy.Effect.Join(semantics.CurrentFrameEffect())
+					if frozen && callSite.Intrinsic && callSite.IntrinsicSemantics.SuspendsCurrentFrame() {
+						policy.Effect = policy.Effect.Join(callSite.IntrinsicSemantics.CurrentFrameEffect())
 					}
 				}
 			}
@@ -927,55 +915,53 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 	}
 	classifyElided := config.ClassifyElidedCall
 	config.ClassifyElidedCall = func(caller *ssa.Function, call ssa.CallInstruction) (bool, error) {
-		patchRedirect := false
-		if in.patchInitRedirect != nil {
-			var err error
-			patchRedirect, err = in.patchInitRedirect(call)
-			if err != nil {
-				return false, fmt.Errorf("classify frozen patch initializer replacement in %q: %w", caller.Name(), err)
-			}
-		}
-		frontendElided := frontendElidesNoInitCall(call) || patchRedirect
-		if !frontendElided && in.intrinsicCallSemantics != nil {
-			semantics, intrinsic, err := in.intrinsicCallSemantics(call)
-			if err != nil {
-				return false, fmt.Errorf("classify frozen intrinsic call in %q: %w", caller.Name(), err)
-			}
-			frontendElided = intrinsic && semantics.ElidesManagedCall()
-		}
+		requested := false
 		if classifyElided != nil {
-			requested, err := classifyElided(caller, call)
+			var err error
+			requested, err = classifyElided(caller, call)
 			if err != nil {
 				return false, err
 			}
-			if requested && !frontendElided {
-				return false, fmt.Errorf("builder cannot elide ordinary call in %q; only calls omitted by the build frontend may be elided", caller.Name())
-			}
 		}
-		return frontendElided, nil
+		if in.callSitePlan == nil {
+			return requested, nil
+		}
+		frontend, frozen, err := in.callSitePlan(call)
+		if err != nil {
+			return false, fmt.Errorf("read frozen call SitePlan in %q: %w", caller.Name(), err)
+		}
+		if !frozen {
+			return false, fmt.Errorf("call %q in %q is absent from the frozen ProgramIR", call.String(), caller.Name())
+		}
+		if requested && !frontend.ElidesCall() {
+			return false, fmt.Errorf("builder cannot elide ordinary call in %q; only calls omitted by the build frontend may be elided", caller.Name())
+		}
+		return frontend.ElidesCall(), nil
 	}
 	classifyElidedCertificate := config.ClassifyElidedCallCertificate
 	config.ClassifyElidedCallCertificate = func(caller *ssa.Function, call ssa.CallInstruction) (string, error) {
-		frontendCertificate := ""
-		if in.elidedCallCertificate != nil {
-			certificate, certified, err := in.elidedCallCertificate(call)
-			if err != nil {
-				return "", fmt.Errorf("classify frozen elided-call certificate in %q: %w", caller.Name(), err)
-			}
-			if certified {
-				frontendCertificate = certificate
-			}
-		}
+		requested := ""
 		if classifyElidedCertificate != nil {
-			requested, err := classifyElidedCertificate(caller, call)
+			var err error
+			requested, err = classifyElidedCertificate(caller, call)
 			if err != nil {
 				return "", err
 			}
-			if requested != "" && requested != frontendCertificate {
-				return "", fmt.Errorf("builder cannot forge an elided-call capability in %q", caller.Name())
-			}
 		}
-		return frontendCertificate, nil
+		if in.callSitePlan == nil {
+			return requested, nil
+		}
+		frontend, frozen, err := in.callSitePlan(call)
+		if err != nil {
+			return "", fmt.Errorf("read frozen elided-call SitePlan in %q: %w", caller.Name(), err)
+		}
+		if !frozen {
+			return "", fmt.Errorf("elided call %q in %q is absent from the frozen ProgramIR", call.String(), caller.Name())
+		}
+		if requested != "" && requested != frontend.ElisionCertificate {
+			return "", fmt.Errorf("builder cannot forge an elided-call capability in %q", caller.Name())
+		}
+		return frontend.ElisionCertificate, nil
 	}
 	if in.rawFunctionAddressCallArgument != nil || config.ClassifyRawFunctionAddressCallArgument != nil {
 		classifyRawAddress := config.ClassifyRawFunctionAddressCallArgument
@@ -1664,28 +1650,23 @@ func (in CoroPlanInput) liveCoroRawABIPlainClosure(
 		}
 		for _, block := range fn.Blocks {
 			for _, instruction := range block.Instrs {
-				if direct, ok := instruction.(*ssa.Call); ok && in.intrinsicCallSemantics != nil {
-					semantics, intrinsic, err := in.intrinsicCallSemantics(direct)
+				if direct, ok := instruction.(*ssa.Call); ok && in.callSitePlan != nil {
+					callSite, frozen, err := in.callSitePlan(direct)
 					if err != nil {
 						return nil, fmt.Errorf("classify raw-plain intrinsic in %q: %w", fn.Name(), err)
 					}
-					if intrinsic && semantics.SuspendsCurrentFrame() {
-						certificate := ""
-						certified := false
-						if in.elidedCallCertificate != nil {
-							certificate, certified, err = in.elidedCallCertificate(direct)
-							if err != nil {
-								return nil, fmt.Errorf("classify raw-plain intrinsic certificate in %q: %w", fn.Name(), err)
-							}
-						}
-						if semantics == cl.CoroIntrinsicCallInlineSuspend && certified && certificate != "" {
+					if !frozen {
+						return nil, fmt.Errorf("raw-plain call %q in %q is absent from the frozen ProgramIR", direct.String(), fn.Name())
+					}
+					if callSite.Intrinsic && callSite.IntrinsicSemantics.SuspendsCurrentFrame() {
+						if callSite.IntrinsicSemantics == cl.CoroIntrinsicCallInlineSuspend && callSite.ElisionCertificate != "" {
 							// The only frontend certificate currently exposed here is
 							// the exact worker-syscall call-site certificate. Its managed
 							// body parks, while rawPlainBody deliberately selects the
 							// ordinary synchronous intrinsic lowering.
-							closure.rawSyncIntrinsics[direct] = certificate
+							closure.rawSyncIntrinsics[direct] = callSite.ElisionCertificate
 						} else {
-							closure.nonRawLocalEffects[fn] = closure.nonRawLocalEffects[fn].Join(semantics.CurrentFrameEffect())
+							closure.nonRawLocalEffects[fn] = closure.nonRawLocalEffects[fn].Join(callSite.IntrinsicSemantics.CurrentFrameEffect())
 						}
 					}
 				}
@@ -2463,14 +2444,6 @@ func sameExactCoroLoweredCalls(left, right []coro.SSALoweredCall) bool {
 		delete(byName, call.LogicalName)
 	}
 	return len(byName) == 0
-}
-
-// frontendElidesNoInitCall mirrors cl.context.funcKind: the frontend emits no
-// call for the synthetic zero-argument init of a noinit/decl package. Treating
-// this as an unresolved managed call would invent an OpaqueSuspend edge that
-// cannot exist in the generated program.
-func frontendElidesNoInitCall(call ssa.CallInstruction) bool {
-	return cl.FrontendElidesNoInitCall(call)
 }
 
 func validateRequiredCoroDirectPlainCallArguments(plan *coro.SSAPlan, uses []requiredCoroDirectPlainCallArgument) error {
@@ -3334,15 +3307,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 			certificate, ok, err := ctx.coroEmission.CoroAssemblyNoSuspendCertificate(fn)
 			return certificate.ID, ok, err
 		}
-		input.intrinsicCallSemantics = ctx.coroEmission.CoroIntrinsicCallSiteSemantics
-		input.patchInitRedirect = func(call ssa.CallInstruction) (bool, error) {
-			_, _, ok, err := ctx.coroEmission.CoroPatchInitRedirect(call)
-			return ok, err
-		}
-		input.elidedCallCertificate = func(call ssa.CallInstruction) (string, bool, error) {
-			certificate, ok, err := ctx.coroEmission.CoroWorkerSyscallCertificate(call)
-			return certificate.ID, ok, err
-		}
+		input.callSitePlan = ctx.coroEmission.CoroCallSitePlan
 		input.rawFunctionAddressCallArgument = ctx.coroEmission.CoroRawFunctionAddressCallArgument
 		input.staticCodeAddressCallArgument = ctx.coroEmission.CoroStaticCodeAddressCallArgument
 		input.demandReferences = ctx.coroEmission.CoroDemandReferences

@@ -2092,8 +2092,13 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 		b.EmitReflectTypeMethodCheckedLoad(ret, reflectCheck)
 		return
 	}
+	if elision, planned := p.plannedCoroCallElision(); planned && elision == CoroCallElidedNoInit {
+		p.observeCoroCallElision(CoroCallElidedNoInit)
+		return
+	}
 	kind := p.funcKind(cv)
 	if kind == fnIgnore {
+		p.observeCoroCallElision(CoroCallElidedNoInit)
 		return
 	}
 	args := call.Args
@@ -2239,13 +2244,19 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 			if !ok {
 				panic("unknown coroutine llgo.syscall failure convention")
 			}
-			if p.currentCoro != nil && p.compilation != nil && p.compilation.EnableCoroWorker {
+			managedWorker := p.currentCoro != nil && p.compilation != nil && p.compilation.EnableCoroWorker
+			if semantics, planned := p.plannedCoroIntrinsicCall(ftype); planned {
+				managedWorker = semantics == CoroIntrinsicCallInlineSuspend
+			}
+			if managedWorker {
 				if act != llssa.Call || ds != nil {
 					panic("coroutine llgo.syscall requires an exact direct call")
 				}
 				ret = p.compileCoroWorkerSyscall(b, call, args, call.Signature().Results(), convention)
+				p.observeCoroIntrinsicCallEmission(ftype, CoroIntrinsicCallInlineSuspend)
 			} else {
 				ret = p.syscallIntrinsic(b, args, call.Signature().Results(), convention)
+				p.observeCoroIntrinsicCallEmission(ftype, CoroIntrinsicCallUnsupported)
 			}
 		case llgoBoolToUint8:
 			args := p.compileValues(b, args, kind)
@@ -2342,6 +2353,12 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 			} else {
 				log.Panicf("unknown ftype: %d for %s", ftype, cv.Name())
 			}
+		}
+		if !isLLGoSyscallIntrinsic(ftype) {
+			// Record the recipe only after the selected lowering completed. This
+			// keeps the SitePlan ledger tied to actual emission rather than merely
+			// observing the opcode before the switch.
+			p.observeCoroIntrinsicCallEmission(ftype, coroIntrinsicCallSemantics(ftype))
 		}
 	default:
 		rawC := p.prog.TypeBackground(cv.Type()) == llssa.InC

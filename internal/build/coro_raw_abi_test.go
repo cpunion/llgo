@@ -321,17 +321,20 @@ func RawUncertified() { Intrinsic(3) }
 				}
 				return nil, nil
 			},
-			intrinsicCallSemantics: func(call ssa.CallInstruction) (cl.CoroIntrinsicCallSemantics, bool, error) {
+			callSitePlan: func(call ssa.CallInstruction) (cl.CoroCallSitePlan, bool, error) {
 				if call != nil && call.Common() != nil && call.Common().StaticCallee() == intrinsic {
-					return cl.CoroIntrinsicCallInlineSuspend, true, nil
+					certificate := ""
+					if call.Parent() != rawUncertified {
+						certificate = "worker-exact"
+					}
+					return cl.CoroCallSitePlan{
+						IntrinsicSemantics: cl.CoroIntrinsicCallInlineSuspend,
+						Intrinsic:          true,
+						Elision:            cl.CoroCallElidedIntrinsic,
+						ElisionCertificate: certificate,
+					}, true, nil
 				}
-				return cl.CoroIntrinsicCallUnsupported, false, nil
-			},
-			elidedCallCertificate: func(call ssa.CallInstruction) (string, bool, error) {
-				if call != nil && call.Parent() != rawUncertified && call.Common().StaticCallee() == intrinsic {
-					return "worker-exact", true, nil
-				}
-				return "", false, nil
+				return cl.CoroCallSitePlan{}, false, nil
 			},
 		}
 		return input.Analyze(coro.Roots{{Function: owner, Demand: coro.SyncDemand}}, coro.SSAConfig{

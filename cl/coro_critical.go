@@ -309,19 +309,21 @@ func validateCoroCriticalInstruction(
 		if role := proof.roles[call]; role == coroCriticalCallEnter || role == coroCriticalCallExit {
 			return nil
 		}
-		callee := call.Common().StaticCallee()
-		opcode, intrinsic, err := universe.coroIntrinsicOpcode(callee)
-		if err != nil {
+		frozen, found, err := universe.coroProgramIR.callSitePlan(call)
+		if err != nil || !found {
+			if err == nil {
+				err = fmt.Errorf("call is absent from the frozen ProgramIR")
+			}
 			return err
 		}
-		if !intrinsic || !isCoroAtomicIntrinsic(opcode) || !plan.ElidesCall(call) {
+		if frozen.failure != "" {
+			return fmt.Errorf("invalid frozen intrinsic: %s", frozen.failure)
+		}
+		if !frozen.plan.Intrinsic || !isCoroAtomicIntrinsic(frozen.opcode) ||
+			!frozen.plan.ElidesCall() || !plan.ElidesCall(call) {
 			return fmt.Errorf("ordinary or non-atomic call is forbidden while preemption is masked")
 		}
-		semantics, exact, err := universe.CoroIntrinsicCallSiteSemantics(call)
-		if err != nil || !exact || semantics != CoroIntrinsicCallInlineNoSuspend {
-			if err != nil {
-				return fmt.Errorf("invalid critical atomic intrinsic: %w", err)
-			}
+		if frozen.plan.IntrinsicSemantics != CoroIntrinsicCallInlineNoSuspend {
 			return fmt.Errorf("critical atomic intrinsic lacks exact inline no-suspend semantics")
 		}
 		return nil

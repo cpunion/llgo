@@ -1,6 +1,6 @@
 # LLGo Coroutine 语义标准化 IR 与统一 Lowering 设计
 
-状态：2026-07-22架构复审结论；可运行纵向基线已冻结，暂停新增能力。hidden runtime helper cohort已切换到单一ProgramIR SitePlan；其他LoweringFacts仍主要是report/cache identity，尚未成为production lowering的唯一事实源。在完成单一ProgramIR、单一emitter及runtime hard cutover前，不继续叠加语言或平台功能
+状态：2026-07-22架构复审结论；可运行纵向基线已冻结，暂停新增能力。hidden runtime helper与intrinsic/call-elision两个cohort已切换到单一ProgramIR SitePlan；其他LoweringFacts仍主要是report/cache identity，尚未成为production lowering的唯一事实源。在完成单一ProgramIR、单一emitter及runtime hard cutover前，不继续叠加语言或平台功能
 
 更新：2026-07-22
 
@@ -955,14 +955,47 @@ ProgramIR identity；已迁移cohort不存在第二个consumer事实源。仅生
   frozen owner均立即失败。
 - architecture gate精确锁定raw planner数量/文件、旧consumer为0、source/relocated ledger入口以及
   helper observation调用点；这些值没有可供旧路径反弹的上限余量。
+- raw helper planner不再通过`context.type_`物化LLSSA runtime类型；interface/heap zero-size判断只读取
+  patched Go type与target pointer size，因此report/identity universe无需伪造runtime package。静态gate
+  要求`cl/emission_runtime_helpers.go`中的physical-type dependency恒为0，原integration崩溃夹具已回归。
 
-该完成标记只覆盖hidden runtime helper集合和它们当前三种物理placement，不代表intrinsic、panic、
-suspend、frame lifetime或统一emitter已经迁移。下一cohort必须继续以“新权威接管、旧判断删除、负向
-测试、静态gate”四项同时完成作为验收条件。
+该完成标记只覆盖hidden runtime helper集合和它们当前三种物理placement，不代表panic、suspend、
+frame lifetime或统一emitter已经迁移。下一cohort必须继续以“新权威接管、旧判断删除、负向测试、
+静态gate”四项同时完成作为验收条件。
+
+#### Phase B.2：intrinsic与call-elision cohort（已完成）
+
+2026-07-22已完成第二条production replacement cohort：
+
+- `coroProgramIR.freezeCallSites`在helper closure、patch redirect、physical identity及worker capability全部
+  冻结之后，对每个owner-scoped call occurrence执行唯一一次raw分类，并把intrinsic语义、private opcode、
+  no-init/patch/intrinsic三类互斥elision以及可选certificate写入同一个SitePlan。`CoroCallSitePlan`只保留
+  `Elision`枚举，不再同时保存可矛盾的`Elided bool`。
+- build analysis的intrinsic local effect、`ClassifyElidedCall`、elision certificate及raw-plain intrinsic closure
+  全部读取同一个`callSitePlan` projection；旧`intrinsicCallSemantics`、`patchInitRedirect`和
+  `elidedCallCertificate` production输入已删除并由静态gate要求恒为0。build不再先用callee membership
+  特判no-init或重新解释raw SSA。
+- physical ABI preflight、critical-region proof、raw/static function-address用途以及现有pure/frame/defer
+  consumer只读取冻结call SitePlan；`CoroIntrinsicCallSiteSemantics`保留为纯projection兼容入口，不再
+  执行opcode或operand分类。
+- worker syscall的完整certificate、owner set和incoming edge proof也被复制进冻结call SitePlan；旧
+  `workerSyscalls/workerSyscallOwners/workerSyscallIncoming`只在builder窗口可写可读，并在ProgramIR freeze
+  成功后立即置空。patch redirect payload同样进入SitePlan，旧`patchInitRedirects` builder scratch随后置空。
+  production validation、pointer-result proof、patch emission和测试查询均从ProgramIR读取。
+- source emission ledger要求实际no-init、patch redirect及intrinsic replacement分别上报精确elision；
+  intrinsic还必须上报实际opcode与recipe。physical no-init和worker选择直接读取冻结SitePlan，旧前端判断
+  只作为非coroutine/incomplete-universe兼容路径。计划外、类型不符、重复或漏发均fail closed。负向测试
+  覆盖opcode/recipe不匹配、recipe缺失及elision类型不匹配。
+- architecture gate以精确数量和精确文件集合锁定raw no-init分类、intrinsic planner/opcode/shape、worker
+  builder scratch、patch redirect lookup、freeze入口和三类actual-emission observation；没有增长余量。
+
+该完成标记只覆盖call occurrence的intrinsic/elision/capability事实及其现有consumer，不代表pure
+instruction、implicit fault、panic/outcome、control overlay、frame storage或统一emitter已经迁移。
 
 ### Phase C：analysis只消费facts
 
-- 先替换 `ClassifyLoweredCalls`、`ClassifyElidedCall`、intrinsic和local effect输入。
+- hidden lowered helper、`ClassifyElidedCall`及intrinsic site/local effect输入已由Phase B.1/B.2替换；继续
+  迁移pure instruction、implicit fault及其local effect/exec输入。
 - 再逐步替换call/value-flow扫描的重复classification；必要的数据流pass仍保留。
 - report-only计算跨plain调用闭包的MaxAtomicCost，记录与当前instruction budget的差异，但不改变NeedsPreempt、primary或poll。
 
@@ -1158,22 +1191,22 @@ Phase A先报告多次运行中位数和离散度；取得稳定噪声后，再�
 
 ## 18. 建议的下一步
 
-Phase A 与 Phase B 的第一段已经完成：`internal/coro/lowering_facts.go`提供pointer-free site/instance
+Phase A 与 Phase B 的前两个replacement cohort已经完成：`internal/coro/lowering_facts.go`提供pointer-free site/instance
 identity、稀疏LoweringFacts、canonical dump/digest与verifier；`cl`从冻结的EmissionUniverse和SSAPlan
 生成owner-scoped snapshot；build在任何package codegen前把该snapshot装入`CoroPlanDigest v26`、
 `cl.Compilation`、package fingerprint与manifest，source/cache registration都会验证内容和digest一致。
 
 2026-07-22复审最初把LoweringFacts定义为“已建立观测点”，而不是已完成架构层。随后hidden runtime
-helper cohort已完成第一次production切换，但其余facts仍未替换production classifier/emitter；继续直接
+helper及intrinsic/call-elision cohort已完成production切换，但其余facts仍未替换production classifier/emitter；继续直接
 增加完整Overlay仍会扩大双轨。后续严格按replacement cohort推进：
 
 1. 先提交当前双owner fleet可运行基线及五项fresh E2E结果，不再混入新能力。
 2. architecture gate test已经冻结当前债务的精确AST/build-constraint快照；每个cohort必须在删除旧路径的
    同一提交下调数字和白名单，禁止留下可反弹额度，也禁止新增`EnableCoro*`、raw-SSA classifier、
    single-P/fleet分支和logical WaitToken consumer。
-3. hidden helper cohort已按上述gate完成；下一步单独迁移intrinsic及其elision/footprint，不能重新引入
-   raw SSA helper consumer。
-4. 随后依次迁移pure instruction、implicit fault、await/spawn、park/channel/select、panic/cleanup；每个完整
+3. hidden helper及intrinsic/call-elision cohort已按上述gate完成；下一步把pure instruction与implicit
+   fault作为一个封闭cohort迁移，不能重新引入raw SSA helper、intrinsic或elision consumer。
+4. 随后依次迁移await/spawn、park/channel/select、panic/cleanup；每个完整
    function cohort由统一emitter接管后立即删除旧CFG拼装，最终清除普通compiler中的`currentCoro`分支。
 5. 并行完成runtime Phase R：fleet唯一target、Park/Operation唯一logical wait、统一source dispatcher和
    单一profile；每一项都以旧production符号为零作为完成条件。
@@ -1190,6 +1223,8 @@ helper cohort已完成第一次production切换，但其余facts仍未替换prod
 - provisional owner key：`cl.emissionFunctionOwnerKey`
 - hidden helper builder：`EmissionUniverse.materializeLoweredRuntimeHelpers`、`EmissionUniverse.classifyCoroRuntimeHelpers`
 - hidden helper authority/ledger：`coroProgramIR.sitePlan`、`context.beginCoroSiteEmission`、`context.observeCoroSiteRuntimeHelper`
+- call-site builder/authority：`coroProgramIR.freezeCallSites`、`EmissionUniverse.CoroCallSitePlan`
+- call-site emission ledger：`context.observeCoroCallElision`、`context.observeCoroIntrinsicCallEmission`
 - global plan：`internal/coro.AnalyzeSSA`
 - function value flow：`internal/coro.analyzeSSAFunctionFlow`
 - physical preflight：`cl.validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel`

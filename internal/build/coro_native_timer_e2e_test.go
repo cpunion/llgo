@@ -317,7 +317,7 @@ func buildCoroNativeTimerE2EUser(t *testing.T, prog llssa.Program, temp string) 
 		foreignSync:                    universe.CoroForeignSyncCertificate,
 		foreignSchedulerWait:           universe.CoroForeignSchedulerWaitCertificate,
 		foreignWorker:                  universe.CoroForeignWorkerCertificate,
-		intrinsicCallSemantics:         universe.CoroIntrinsicCallSiteSemantics,
+		callSitePlan:                   universe.CoroCallSitePlan,
 		rawFunctionAddressCallArgument: universe.CoroRawFunctionAddressCallArgument,
 		staticCodeAddressCallArgument:  universe.CoroStaticCodeAddressCallArgument,
 		demandReferences:               universe.CoroDemandReferences,

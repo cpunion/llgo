@@ -665,23 +665,26 @@ func coroWorkerSyscallInstructionSite(call *ssa.Call) (int, int) {
 	return -1, -1
 }
 
-// CoroWorkerSyscallCertificate returns the immutable exact-call certificate.
-// Absence is an ordinary synchronous llgo.syscall site, never worker authority.
+// CoroWorkerSyscallCertificate returns the immutable exact-call certificate
+// from ProgramIR. Absence is an ordinary synchronous llgo.syscall site, never
+// worker authority.
 func (u *EmissionUniverse) CoroWorkerSyscallCertificate(
 	call ssa.CallInstruction,
 ) (certificate CoroWorkerSyscallCertificate, certified bool, err error) {
-	if u == nil {
-		return certificate, false, fmt.Errorf("coroutine worker syscall certificate: nil emission universe")
+	if u == nil || u.coroProgramIR == nil {
+		return certificate, false, fmt.Errorf("coroutine worker syscall certificate: emission universe has no ProgramIR")
 	}
-	direct, ok := call.(*ssa.Call)
-	if !ok || direct == nil || direct.Common() == nil || direct.Common().IsInvoke() {
+	frozen, found, err := u.coroProgramIR.callSitePlan(call)
+	if err != nil || !found {
+		return certificate, false, err
+	}
+	if !isLLGoSyscallIntrinsic(frozen.opcode) {
 		return certificate, false, nil
 	}
-	if parent := direct.Parent(); parent == nil || u.canonicalAlias(parent) != parent {
-		return certificate, false, nil
+	if frozen.failure != "" {
+		return certificate, false, fmt.Errorf("%s", frozen.failure)
 	}
-	certificate, certified = u.workerSyscalls[direct]
-	return certificate, certified, nil
+	return frozen.workerCertificate, frozen.workerCertified, nil
 }
 
 // validateCoroWorkerSyscallCall is the final plan/universe join used by both
@@ -691,18 +694,25 @@ func validateCoroWorkerSyscallCall(plan *coro.SSAPlan, universe *EmissionUnivers
 	if plan == nil || universe == nil || call == nil {
 		return fmt.Errorf("worker llgo.syscall requires an exact plan, emission universe, and direct call")
 	}
-	certificate, certified, err := universe.CoroWorkerSyscallCertificate(call)
-	if err != nil {
+	frozen, found, err := universe.coroProgramIR.callSitePlan(call)
+	if err != nil || !found {
+		if err == nil {
+			err = fmt.Errorf("worker llgo.syscall call is absent from ProgramIR")
+		}
 		return err
 	}
-	if !certified || certificate.ID == "" {
+	if frozen.failure != "" {
+		return fmt.Errorf("worker llgo.syscall has an invalid frozen SitePlan: %s", frozen.failure)
+	}
+	certificate := frozen.workerCertificate
+	if !frozen.workerCertified || certificate.ID == "" {
 		return fmt.Errorf("worker llgo.syscall function word has no frozen static target capability")
 	}
 	plannedCertificate, planned := plan.ElidedCallCertificate(call)
 	if !planned || plannedCertificate != certificate.ID || !plan.ElidesCall(call) {
 		return fmt.Errorf("worker llgo.syscall exact call certificate disagrees with the frozen SSA plan")
 	}
-	owners := universe.workerSyscallOwners[call]
+	owners := frozen.workerOwners
 	for _, root := range plan.Roots() {
 		if _, parameterEntry := owners[root.Function]; parameterEntry {
 			return fmt.Errorf("worker llgo.syscall parameter owner %q is an externally established entry", root.ID)
@@ -719,7 +729,7 @@ func validateCoroWorkerSyscallCall(plan *coro.SSAPlan, universe *EmissionUnivers
 			return fmt.Errorf("worker llgo.syscall parameter owner %q has no closed direct managed plan", owner.Name())
 		}
 	}
-	for _, edge := range universe.workerSyscallIncoming[call] {
+	for _, edge := range frozen.workerIncoming {
 		if edge.call == nil || edge.call.Parent() == nil || edge.carrier == nil || edge.stableIdentity == "" {
 			return fmt.Errorf("worker llgo.syscall has an incomplete frozen static incoming edge")
 		}
@@ -819,12 +829,15 @@ func validateCoroWorkerProjectedForeignPointerResult(
 	}
 
 	matches := 0
-	for workerCall := range universe.workerSyscalls {
+	for workerCall, workerSite := range universe.coroProgramIR.callPlans {
+		if !workerSite.workerCertified {
+			continue
+		}
 		direct, ok := workerCall.(*ssa.Call)
 		if !ok || direct == nil {
 			continue
 		}
-		for _, edge := range universe.workerSyscallIncoming[direct] {
+		for _, edge := range workerSite.workerIncoming {
 			if edge.call != call || edge.carrier != carrier ||
 				edge.parameter != projection.functionParameter ||
 				edge.resultProjectionID != projection.id {
