@@ -22,63 +22,94 @@ import (
 	llssa "github.com/goplus/llgo/ssa"
 )
 
-// coroParkOperation is the target-neutral compiler protocol shared by one
-// timer, poll, or bounded-worker wait. Feature lowerers bind only their park
-// hook, resume hook, and finite status vocabulary; the emitter owns the state
-// transition, cancellation targets, fail-closed default, and continuation.
-// Multi-candidate channel/select winner reconciliation is deliberately a
-// separate protocol and must not be represented as several independent parks.
+// coroParkFaultRoute maps one source-specific resume status to the canonical
+// terminal-fault path. Keeping the route semantic prevents feature lowerers
+// from injecting arbitrary physical dispatch callbacks into the envelope.
+type coroParkFaultRoute struct {
+	status uint64
+	kind   uint32
+}
+
+// coroParkOperation is the target-neutral compiler envelope shared by one
+// timer, poll, worker, channel, or WaitSet park. Feature lowerers bind only
+// their typed park/resume hooks, finite status vocabulary, and terminal fault
+// outcomes; the emitter owns the state transition, cancellation targets,
+// fail-closed default, and joined continuation.
+// Multi-candidate channel/select winner reconciliation remains one typed
+// WaitSet transaction inside these hooks and is never represented as several
+// independent parks.
 type coroParkOperation struct {
 	shouldSuspend llssa.Expr
 	park          func(llssa.Builder)
 	resume        func(llssa.Builder) llssa.Expr
 	normal        []uint64
+	faults        []coroParkFaultRoute
 	abort         uint64
 	shutdown      uint64
 }
 
 const maxCoroParkResumeStatus = uint64(^uint32(0))
 
-func validateCoroParkOperationStatuses(normal []uint64, abort, shutdown uint64) error {
+func validateCoroParkOperationStatuses(
+	normal []uint64,
+	faults []coroParkFaultRoute,
+	abort, shutdown uint64,
+) error {
 	if len(normal) == 0 {
 		return fmt.Errorf("coroutine park operation has no normal resume status")
 	}
-	seen := make(map[uint64]struct{}, len(normal)+2)
-	for _, status := range normal {
+	seen := make(map[uint64]string, len(normal)+len(faults)+2)
+	add := func(kind string, status uint64) error {
 		if status > maxCoroParkResumeStatus {
-			return fmt.Errorf("coroutine park normal resume status %d does not fit the uint32 runtime ABI", status)
+			return fmt.Errorf("coroutine park %s resume status %d does not fit the uint32 runtime ABI", kind, status)
 		}
-		if _, duplicate := seen[status]; duplicate {
-			return fmt.Errorf("coroutine park operation repeats resume status %d", status)
+		if previous, duplicate := seen[status]; duplicate {
+			return fmt.Errorf("coroutine park %s resume status %d duplicates %s status", kind, status, previous)
 		}
-		seen[status] = struct{}{}
+		seen[status] = kind
+		return nil
 	}
-	if abort > maxCoroParkResumeStatus {
-		return fmt.Errorf("coroutine park abort status %d does not fit the uint32 runtime ABI", abort)
+	for _, status := range normal {
+		if err := add("normal", status); err != nil {
+			return err
+		}
 	}
-	if _, collision := seen[abort]; collision {
-		return fmt.Errorf("coroutine park abort status %d is also normal", abort)
+	for index, route := range faults {
+		if route.kind == 0 || route.kind >= coroFaultLimitV1 {
+			return fmt.Errorf("coroutine park fault resume route %d has invalid fault kind %d", index, route.kind)
+		}
+		if err := add("fault", route.status); err != nil {
+			return err
+		}
 	}
-	seen[abort] = struct{}{}
-	if shutdown > maxCoroParkResumeStatus {
-		return fmt.Errorf("coroutine park shutdown status %d does not fit the uint32 runtime ABI", shutdown)
+	if err := add("abort", abort); err != nil {
+		return err
 	}
-	if _, collision := seen[shutdown]; collision {
-		return fmt.Errorf("coroutine park shutdown status %d is not distinct", shutdown)
+	if err := add("shutdown", shutdown); err != nil {
+		return err
 	}
 	return nil
 }
 
-func (c *coroBodyContext) emitCoroParkOperation(b llssa.Builder, operation coroParkOperation) {
-	if c == nil || b == nil || c.coro == nil || c.unsupportedRunDecision == nil ||
+func (c *coroBodyContext) emitCoroParkOperation(p *context, b llssa.Builder, operation coroParkOperation) {
+	if c == nil || p == nil || b == nil || b.Func != p.fn || c.coro == nil || c.unsupportedRunDecision == nil ||
 		operation.shouldSuspend.IsNil() || operation.park == nil || operation.resume == nil {
 		panic("coroutine park operation requires a complete physical emitter and protocol")
 	}
-	if err := validateCoroParkOperationStatuses(operation.normal, operation.abort, operation.shutdown); err != nil {
+	if err := validateCoroParkOperationStatuses(
+		operation.normal,
+		operation.faults,
+		operation.abort,
+		operation.shutdown,
+	); err != nil {
 		panic(err)
 	}
 	if operation.shouldSuspend.Type != b.Prog.Bool() {
 		panic("coroutine park suspend predicate must be bool")
+	}
+	faultTargets := make([]llssa.BasicBlock, len(operation.faults))
+	for index := range faultTargets {
+		faultTargets[index] = b.Func.MakeBlock()
 	}
 	join := c.coro.SuspendCurrentBlockIfWithResumeDispatch(
 		operation.shouldSuspend,
@@ -102,11 +133,18 @@ func (c *coroBodyContext) emitCoroParkOperation(b llssa.Builder, operation coroP
 			for _, value := range operation.normal {
 				dispatch.Case(resume.Prog.IntVal(value, resume.Prog.Uint32()), normal)
 			}
+			for index, route := range operation.faults {
+				dispatch.Case(resume.Prog.IntVal(route.status, resume.Prog.Uint32()), faultTargets[index])
+			}
 			dispatch.Case(resume.Prog.IntVal(operation.abort, resume.Prog.Uint32()), abort)
 			dispatch.Case(resume.Prog.IntVal(operation.shutdown, resume.Prog.Uint32()), shutdown)
 			dispatch.End(resume)
 		},
 	)
+	for index, target := range faultTargets {
+		b.SetBlockEx(target, llssa.AtEnd, false)
+		p.compileCoroTerminalFault(b, operation.faults[index].kind)
+	}
 	b.SetBlock(join)
 	c.activate(b)
 }

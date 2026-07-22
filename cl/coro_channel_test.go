@@ -315,11 +315,24 @@ func assertCoroChannelBody(t *testing.T, name, body, parkHook string, statuses [
 	if !strings.Contains(body, "switch i32") {
 		t.Fatalf("%s has no exact typed resume-status dispatch:\n%s", name, body)
 	}
-	dispatch := regexp.MustCompile(
-		`(?s)call i32 @` + regexp.QuoteMeta(coroChanResumeHookV1) + `\([^\n]+\)\n\s+switch i32 [^\[]+\[(.*?)\]`,
-	).FindStringSubmatch(body)
+	statusCall := regexp.MustCompile(
+		`(?m)^\s+(%[-A-Za-z0-9._]+) = call i32 @` + regexp.QuoteMeta(coroChanResumeHookV1) + `\([^\n]+\)\s*$`,
+	).FindStringSubmatchIndex(body)
+	if len(statusCall) != 4 {
+		t.Fatalf("%s has no unique channel resume status value:\n%s", name, body)
+	}
+	status := body[statusCall[2]:statusCall[3]]
+	afterCall := body[statusCall[1]:]
+	dispatchPattern := regexp.MustCompile(
+		`(?s)switch i32 ` + regexp.QuoteMeta(status) + `,?\s+[^\[]+\[(.*?)\]`,
+	)
+	dispatch := dispatchPattern.FindStringSubmatch(afterCall)
 	if len(dispatch) != 2 {
-		t.Fatalf("%s has no isolated channel resume switch:\n%s", name, body)
+		t.Fatalf("%s has no channel resume switch for status %s:\n%s", name, status, body)
+	}
+	between := afterCall[:strings.Index(afterCall, dispatch[0])]
+	if regexp.MustCompile(`(?m)^\s*(br|switch|ret|unreachable)\b`).MatchString(between) {
+		t.Fatalf("%s branches before dispatching channel resume status %s:\n%s", name, status, between)
 	}
 	for _, status := range statuses {
 		if !regexp.MustCompile(`(?m)^\s+i32 ` + strconv.FormatUint(status, 10) + `, label `).MatchString(dispatch[1]) {

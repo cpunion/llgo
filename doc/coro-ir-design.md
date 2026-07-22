@@ -1,6 +1,6 @@
 # LLGo Coroutine 语义标准化 IR 与统一 Lowering 设计
 
-状态：2026-07-22架构复审结论；可运行纵向基线已冻结，暂停新增能力。hidden runtime helper、intrinsic/call-elision、physical proof/implicit-fault、physical emission session/ordinary-compiler isolation以及single-event Park protocol五个封闭cohort已完成硬切换。其他LoweringFacts仍主要是report/cache identity，尚未成为production lowering的唯一事实源。在完成单一ProgramIR、单一emitter及runtime hard cutover前，不继续叠加语言或平台功能
+状态：2026-07-22架构复审结论；可运行纵向基线已冻结，暂停新增能力。hidden runtime helper、intrinsic/call-elision、physical proof/implicit-fault、physical emission session/ordinary-compiler isolation、single-event Park protocol以及channel/WaitSet Park envelope六个封闭cohort已完成硬切换。其他LoweringFacts仍主要是report/cache identity，尚未成为production lowering的唯一事实源。在完成单一ProgramIR、单一emitter及runtime hard cutover前，不继续叠加语言或平台功能
 
 更新：2026-07-22
 
@@ -1063,14 +1063,40 @@ poll wait和bounded worker wait四个单事件等待点，不把channel/select�
 - timer、controlled timer、poll和worker的旧CFG拼装已同时删除；不存在保留在feature flag后的第二条
   production路径。controller/control和worker owner的跨suspend KeepAlive仍留在对应feature lowerer，因为
   它们是typed lifetime事实而不是通用Park协议步骤。
-- architecture gate要求低层`suspend`模板入口恰好1处、模板调用恰好4处且只能来自上述3个feature文件；
+- architecture gate在B.5边界要求低层`suspend`模板入口恰好1处、模板调用恰好4处且只能来自上述3个feature文件；
   这些文件直接调用`suspend/publish/cancellation-target/activate`四类旧协议步骤必须恒为0。模板结构精确
-  锁定为`shouldSuspend/park/resume/normal/abort/shutdown`六个字段，禁止以后通过增加任意hook重新扩张为
-  隐式字节码。
+  锁定为`shouldSuspend/park/resume/normal/abort/shutdown`六个字段；下面B.6只通过同一gate受控增加声明式
+  fault route，仍禁止通过增加任意hook扩张为隐式字节码。
 
 该完成标记不覆盖channel/select：它们需要一个WaitSet级协议统一完成candidate registration、winner claim、
 loser detach、closed-send panic、cancel和result reconciliation，不能拆成多个独立Park。也不表示所有await、
 panic/outcome或runtime legacy wait已经迁移；这些必须各自形成同样有旧路径归零gate的封闭cohort。
+
+#### Phase B.6：channel/WaitSet Park envelope（已完成）
+
+2026-07-22已完成第六条production replacement cohort。B.5排除的是channel/select内部多候选对账；本cohort
+只统一它们外层“一次逻辑等待对应一次physical suspend”的envelope，两者不能混淆：
+
+- blocking send、blocking receive和blocking select全部改用同一个`emitCoroParkOperation`。各自仍由typed
+  channel helper完成single-channel或WaitSet的candidate registration、commit、winner/loser detach和result
+  lease；通用emitter看不到候选数组，也不会把select拆成多个Park。
+- Park recipe新增的唯一扩展是声明式`coroParkFaultRoute{status, kind}`。emitter为每条route创建canonical
+  terminal-fault continuation并调用统一fault lowering，然后恢复joined continuation；feature不能提供任意
+  target或CFG callback。send-on-closed及select closed-send因此继续经过相同defer/panic cleanup路径。
+- receive的`recvOK`在resume hook后按同一个status SSA值作直线投影，两个成功status仍由统一switch进入normal
+  continuation。结构测试验证hook返回值与switch operand identity一致，并禁止二者之间出现branch、第二个
+  switch、return或unreachable，不能以“允许中间指令”为由弱化exact-ticket dispatch。
+- architecture gate现在要求全production的conditional suspend入口恰好1处、Park recipe恰好7个且分别位于
+  精确的7个函数/4个feature文件；这些文件直接访问state ID/budget/park-state字段或直接调用publish/cancel
+  protocol必须为0，7个已迁移函数直接activate也必须为0。非阻塞close/try-select不是Park，保留各自normal
+  continuation activation，不被错误计入。
+- recipe结构被精确锁定为`shouldSuspend/park/resume/normal/faults/abort/shutdown`七个字段，fault route只能
+  有`status/kind`两个字段；status集合、`uint32`ABI范围、fault kind以及normal/fault/abort/shutdown互斥都在
+  发射前fail closed。
+
+该完成标记覆盖现有7个physical Park envelope，不代表WaitSet内部逻辑已成为ProgramIR OperationRecipe，也
+不删除runtime的WaitSetRecord、result lease、cancel/detach/quiescence事实。下一cohort若迁移这些逻辑，必须
+以typed recipe/verifier替换现有builder事实，不能把候选状态机复制进compiler generic emitter。
 
 ### Phase C：analysis只消费facts
 
@@ -1271,22 +1297,22 @@ Phase A先报告多次运行中位数和离散度；取得稳定噪声后，再�
 
 ## 18. 建议的下一步
 
-Phase A 与 Phase B 的五个replacement cohort已经完成：`internal/coro/lowering_facts.go`提供pointer-free site/instance
+Phase A 与 Phase B 的六个replacement cohort已经完成：`internal/coro/lowering_facts.go`提供pointer-free site/instance
 identity、稀疏LoweringFacts、canonical dump/digest与verifier；`cl`从冻结的EmissionUniverse和SSAPlan
 生成owner-scoped snapshot；build在任何package codegen前把该snapshot装入`CoroPlanDigest v26`、
 `cl.Compilation`、package fingerprint与manifest，source/cache registration都会验证内容和digest一致。
 
 2026-07-22复审最初把LoweringFacts定义为“已建立观测点”，而不是已完成架构层。随后hidden runtime
-helper、intrinsic/call-elision、physical proof/implicit-fault、physical emission session及single-event Park
-protocol cohort已完成production切换，但其余facts仍未替换production classifier/emitter；继续直接
+helper、intrinsic/call-elision、physical proof/implicit-fault、physical emission session、single-event Park及
+channel/WaitSet Park envelope cohort已完成production切换，但其余facts仍未替换production classifier/emitter；继续直接
 增加完整Overlay仍会扩大双轨。后续严格按replacement cohort推进：
 
 1. 先提交当前双owner fleet可运行基线及五项fresh E2E结果，不再混入新能力。
 2. architecture gate test已经冻结当前债务的精确AST/build-constraint快照；每个cohort必须在删除旧路径的
    同一提交下调数字和白名单，禁止留下可反弹额度，也禁止新增`EnableCoro*`、raw-SSA classifier、
    single-P/fleet分支和logical WaitToken consumer。
-3. hidden helper、intrinsic/call-elision、physical proof/implicit-fault、emission session及single-event Park
-   cohort已按上述gate完成；下一步把
+3. hidden helper、intrinsic/call-elision、physical proof/implicit-fault、emission session、single-event Park及
+   channel/WaitSet Park envelope cohort已按上述gate完成；下一步把
    ordinary pure instruction recipe与其local effect/exec作为封闭cohort迁移，不能重新引入raw SSA helper、
    intrinsic、fault selector或codegen proof rebuild。
 4. 随后依次迁移await/spawn、WaitSet级channel/select、panic/outcome；每个完整

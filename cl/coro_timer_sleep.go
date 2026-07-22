@@ -100,7 +100,7 @@ func (p *context) compileCoroTimerSleep(b llssa.Builder, args []ssa.Value) {
 	delay := p.compileValue(b, args[0])
 	state := b.Alloc(p.prog.RuntimeType("CoroTimerParkV2"), false)
 
-	body.emitCoroParkOperation(b, coroParkOperation{
+	body.emitCoroParkOperation(p, b, coroParkOperation{
 		shouldSuspend: b.Prog.BoolVal(true),
 		park: func(suspend llssa.Builder) {
 			park := p.pkg.NewFunc(coroTimerParkHookV2, coroTimerParkSignatureV2(), llssa.InC)
@@ -144,7 +144,7 @@ func (p *context) compileCoroControlledTimerWait(b llssa.Builder, args []ssa.Val
 	state := b.Alloc(p.prog.RuntimeType("CoroTimerParkV2"), false)
 	result := b.Alloc(p.prog.Uint32(), false)
 
-	body.emitCoroParkOperation(b, coroParkOperation{
+	body.emitCoroParkOperation(p, b, coroParkOperation{
 		shouldSuspend: b.Prog.BoolVal(true),
 		park: func(suspend llssa.Builder) {
 			park := p.pkg.NewFunc(coroControlledTimerParkHookV2, coroControlledTimerParkSignatureV2(), llssa.InC)

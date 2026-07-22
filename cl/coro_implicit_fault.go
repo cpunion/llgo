@@ -41,6 +41,7 @@ const (
 	coroFaultUnsafeStringLenV1
 	coroFaultUnsafeStringNilV1
 	coroFaultSliceConvertV1
+	coroFaultLimitV1
 )
 
 func coroFaultPrepareSignature() *types.Signature {

@@ -150,7 +150,7 @@ func (p *context) compileCoroWorkerWordCall(
 		}
 	}
 
-	body.emitCoroParkOperation(b, coroParkOperation{
+	body.emitCoroParkOperation(p, b, coroParkOperation{
 		shouldSuspend: b.Prog.BoolVal(true),
 		park: func(suspend llssa.Builder) {
 			park := p.pkg.NewFunc(coroWorkerParkHookV1, coroWorkerParkSignature(), llssa.InC)

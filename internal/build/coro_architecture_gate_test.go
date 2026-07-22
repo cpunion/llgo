@@ -137,7 +137,7 @@ var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
 	legacyContextState:        0,
 	contextSessionField:       1,
 	parkProtocolTemplate:      1,
-	parkProtocolEmission:      4,
+	parkProtocolEmission:      7,
 	legacyParkProtocolStep:    0,
 }
 
@@ -346,10 +346,21 @@ var allowedParkProtocolTemplateFiles = map[string]bool{
 	"cl/coro_park_emitter.go": true,
 }
 
-var migratedSingleEventParkFiles = map[string]bool{
+var migratedParkProtocolFiles = map[string]bool{
+	"cl/coro_channel.go":     true,
 	"cl/coro_poll_wait.go":   true,
 	"cl/coro_timer_sleep.go": true,
 	"cl/coro_worker.go":      true,
+}
+
+var migratedParkProtocolFunctions = map[string]bool{
+	"compileCoroChanRecv":            true,
+	"compileCoroChanSelect":          true,
+	"compileCoroChanSend":            true,
+	"compileCoroControlledTimerWait": true,
+	"compileCoroPollWait":            true,
+	"compileCoroTimerSleep":          true,
+	"compileCoroWorkerWordCall":      true,
 }
 
 var allowedLegacyParkProtocolStepFiles = map[string]bool{}
@@ -359,8 +370,14 @@ var allowedCoroParkOperationFields = map[string]bool{
 	"park":          true,
 	"resume":        true,
 	"normal":        true,
+	"faults":        true,
 	"abort":         true,
 	"shutdown":      true,
+}
+
+var allowedCoroParkFaultRouteFields = map[string]bool{
+	"status": true,
+	"kind":   true,
 }
 
 type coroArchitectureDebtInventory struct {
@@ -402,8 +419,10 @@ type coroArchitectureDebtInventory struct {
 	emissionSessionFields          map[string]bool
 	parkProtocolTemplateFiles      map[string]bool
 	parkProtocolEmissionFiles      map[string]bool
+	parkProtocolEmissionFunctions  map[string]bool
 	legacyParkProtocolStepFiles    map[string]bool
 	parkProtocolFields             map[string]bool
+	parkFaultRouteFields           map[string]bool
 }
 
 func TestCoroArchitectureDebtIsMonotonic(t *testing.T) {
@@ -462,9 +481,9 @@ func TestCoroArchitectureDebtIsMonotonic(t *testing.T) {
 	check("physical body completion", inventory.emissionBodyComplete, budget.emissionBodyComplete)
 	check("legacy context physical-emission fields", inventory.legacyContextState, budget.legacyContextState)
 	check("context physical-emission session field", inventory.contextSessionField, budget.contextSessionField)
-	check("single-event Park protocol template", inventory.parkProtocolTemplate, budget.parkProtocolTemplate)
-	check("single-event Park protocol emission", inventory.parkProtocolEmission, budget.parkProtocolEmission)
-	check("legacy single-event Park protocol steps/state", inventory.legacyParkProtocolStep, budget.legacyParkProtocolStep)
+	check("Park protocol template", inventory.parkProtocolTemplate, budget.parkProtocolTemplate)
+	check("Park protocol emission", inventory.parkProtocolEmission, budget.parkProtocolEmission)
+	check("legacy Park protocol steps/state", inventory.legacyParkProtocolStep, budget.legacyParkProtocolStep)
 
 	checkExactCoroArchitectureSet(t, "currentCoro production files", inventory.currentCoroFiles, allowedCurrentCoroFiles)
 	checkExactCoroArchitectureSet(t, "staged coroutine feature names", inventory.featureNames, allowedStagedCoroFeatureNames)
@@ -501,10 +520,12 @@ func TestCoroArchitectureDebtIsMonotonic(t *testing.T) {
 	checkExactCoroArchitectureSet(t, "physical emission session field access files", inventory.emissionSessionAccessFiles, allowedEmissionSessionAccessFiles)
 	checkExactCoroArchitectureSet(t, "physical body capability access files", inventory.bodyCapabilityAccessFiles, allowedCoroBodyCapabilityFiles)
 	checkExactCoroArchitectureSet(t, "physical emission session fields", inventory.emissionSessionFields, allowedPhysicalEmissionSessionFields)
-	checkExactCoroArchitectureSet(t, "single-event Park protocol template files", inventory.parkProtocolTemplateFiles, allowedParkProtocolTemplateFiles)
-	checkExactCoroArchitectureSet(t, "single-event Park protocol emission files", inventory.parkProtocolEmissionFiles, migratedSingleEventParkFiles)
-	checkExactCoroArchitectureSet(t, "legacy single-event Park protocol step files", inventory.legacyParkProtocolStepFiles, allowedLegacyParkProtocolStepFiles)
-	checkExactCoroArchitectureSet(t, "single-event Park protocol fields", inventory.parkProtocolFields, allowedCoroParkOperationFields)
+	checkExactCoroArchitectureSet(t, "Park protocol template files", inventory.parkProtocolTemplateFiles, allowedParkProtocolTemplateFiles)
+	checkExactCoroArchitectureSet(t, "Park protocol emission files", inventory.parkProtocolEmissionFiles, migratedParkProtocolFiles)
+	checkExactCoroArchitectureSet(t, "Park protocol emission functions", inventory.parkProtocolEmissionFunctions, migratedParkProtocolFunctions)
+	checkExactCoroArchitectureSet(t, "legacy Park protocol step files", inventory.legacyParkProtocolStepFiles, allowedLegacyParkProtocolStepFiles)
+	checkExactCoroArchitectureSet(t, "Park protocol fields", inventory.parkProtocolFields, allowedCoroParkOperationFields)
+	checkExactCoroArchitectureSet(t, "Park fault-route fields", inventory.parkFaultRouteFields, allowedCoroParkFaultRouteFields)
 }
 
 func checkExactCoroArchitectureSet(t *testing.T, name string, got, want map[string]bool) {
@@ -555,8 +576,10 @@ func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitecture
 		emissionSessionFields:          make(map[string]bool),
 		parkProtocolTemplateFiles:      make(map[string]bool),
 		parkProtocolEmissionFiles:      make(map[string]bool),
+		parkProtocolEmissionFunctions:  make(map[string]bool),
 		legacyParkProtocolStepFiles:    make(map[string]bool),
 		parkProtocolFields:             make(map[string]bool),
+		parkFaultRouteFields:           make(map[string]bool),
 	}
 	roots := []string{"cl", "internal/coro", "internal/build", "ssa", "runtime/internal/coro", "runtime/internal/runtime"}
 	for _, root := range roots {
@@ -580,12 +603,31 @@ func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitecture
 			if hasCoroNativeFleetBuildConstraint(file) {
 				inventory.fleetBuildFiles++
 			}
+			type functionSpan struct {
+				name       string
+				start, end token.Pos
+			}
+			var functionSpans []functionSpan
 			var physicalBodyStart, physicalBodyEnd token.Pos
 			for _, declaration := range file.Decls {
 				function, ok := declaration.(*ast.FuncDecl)
-				if ok && function.Name.Name == "compileCoroPhysicalBody" && function.Body != nil {
+				if !ok || function.Body == nil {
+					continue
+				}
+				functionSpans = append(functionSpans, functionSpan{
+					name: function.Name.Name, start: function.Body.Pos(), end: function.Body.End(),
+				})
+				if function.Name.Name == "compileCoroPhysicalBody" {
 					physicalBodyStart, physicalBodyEnd = function.Body.Pos(), function.Body.End()
 				}
+			}
+			enclosingFunction := func(node ast.Node) string {
+				for _, span := range functionSpans {
+					if node.Pos() >= span.start && node.End() <= span.end {
+						return span.name
+					}
+				}
+				return "<outside-function>"
 			}
 			ast.Inspect(file, func(node ast.Node) bool {
 				switch node := node.(type) {
@@ -600,17 +642,22 @@ func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitecture
 					if callName == "emitCoroParkOperation" {
 						inventory.parkProtocolEmission++
 						inventory.parkProtocolEmissionFiles[rel] = true
+						inventory.parkProtocolEmissionFunctions[enclosingFunction(node)] = true
 					}
-					if rel == "cl/coro_park_emitter.go" && callName == "SuspendCurrentBlockIfWithResumeDispatch" {
+					if callName == "SuspendCurrentBlockIfWithResumeDispatch" {
 						inventory.parkProtocolTemplate++
 						inventory.parkProtocolTemplateFiles[rel] = true
 					}
-					if migratedSingleEventParkFiles[rel] {
+					if migratedParkProtocolFiles[rel] {
 						switch callName {
-						case "SuspendCurrentBlockIfWithResumeDispatch", "publishState",
-							"cancellationRunDecisionTargets", "activate":
+						case "publishState", "cancellationRunDecisionTargets":
 							inventory.legacyParkProtocolStep++
 							inventory.legacyParkProtocolStepFiles[rel] = true
+						case "activate":
+							if migratedParkProtocolFunctions[enclosingFunction(node)] {
+								inventory.legacyParkProtocolStep++
+								inventory.legacyParkProtocolStepFiles[rel] = true
+							}
 						}
 					}
 					if physicalBodyStart.IsValid() && node.Pos() >= physicalBodyStart && node.End() <= physicalBodyEnd {
@@ -686,7 +733,7 @@ func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitecture
 					}
 				case *ast.Ident:
 					name := node.Name
-					if migratedSingleEventParkFiles[rel] {
+					if migratedParkProtocolFiles[rel] {
 						switch name {
 						case "nextState", "instructions", "coroSuspendPark", "coroLifecycleSuspended":
 							inventory.legacyParkProtocolStep++
@@ -798,6 +845,8 @@ func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitecture
 								inventory.emissionSessionFields[name.Name] = true
 							case "coroParkOperation":
 								inventory.parkProtocolFields[name.Name] = true
+							case "coroParkFaultRoute":
+								inventory.parkFaultRouteFields[name.Name] = true
 							}
 						}
 					}
