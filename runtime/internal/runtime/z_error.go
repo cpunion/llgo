@@ -185,13 +185,26 @@ func printany(i any) {
 // printanyraw is the no-callback form used by the terminal legacy panic trace.
 // Deliberately avoid a type switch as well as error/Stringer assertions: the
 // former lowers through interface equality and may recursively inspect a
-// composite type. The raw descriptor printer is bounded by one concrete type
-// record and never invokes user code.
+// composite type. Preserve Go's spelling for the exact builtin string and the
+// runtime's string-backed errors using only descriptor/kind inspection; every
+// other value remains on the bounded raw descriptor path and never invokes
+// user code.
 func printanyraw(i any) {
 	e := efaceOf(&i)
 	if e._type == nil {
 		print("nil")
 		return
+	}
+	if e._type.Kind() == abi.String {
+		text := *(*string)(e.data)
+		switch e._type {
+		case abi.TypeOf(""), abi.TypeOf(plainError("")), abi.TypeOf(typeAssertionErrorString("")):
+			print(text)
+			return
+		case abi.TypeOf(errorString("")):
+			print("runtime error: ", text)
+			return
+		}
 	}
 	printanycustomtype(i)
 }
