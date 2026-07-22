@@ -15,7 +15,10 @@ concurrency:
 
 jobs:
   llgo:
-    timeout-minutes: 30
+    # The empty and defer probes compile the complete embedded target catalog
+    # sequentially. Coroutine planning makes the combined lane exceed the old
+    # 30-minute budget on hosted runners even while targets keep succeeding.
+    timeout-minutes: 45
     strategy:
       matrix:
         os:
