@@ -319,7 +319,10 @@ chmod +x "$out"
 		t.Fatal(err)
 	}
 	ws := caseWorkspace{rootDir: dir, workDir: dir}
-	_, _, exitCode, _, elapsed, err := runGeneratedProgram(ws, tool, os.Environ(), "generated.go", "fake", time.Second, 50*time.Millisecond)
+	// The build helper is intentionally trivial, but process startup can be
+	// heavily delayed on a loaded CI host. Keep that setup budget independent
+	// from the 50ms generated-program timeout this test actually verifies.
+	_, _, exitCode, _, elapsed, err := runGeneratedProgram(ws, tool, os.Environ(), "generated.go", "fake", 30*time.Second, 50*time.Millisecond)
 	if err == nil {
 		t.Fatal("expected timeout")
 	}
@@ -554,18 +557,517 @@ var _ = missing // ERROR "undefined: missing"
 	}
 }
 
+func TestCheckExpectedErrorsNormalizesLexicalDiagnostics(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "case.go")
+	src := `package p
+var _ = 0 // ERROR "newline in string"
+var _ = 0 // ERROR "newline in rune literal"
+var _ = 0 // ERROR "string not terminated"
+var _ = 0 // ERROR "invalid character .* in identifier"
+var _ = 0 // ERROR "identifier cannot begin with digit"
+var _ = 0 // ERROR "oct|char"
+var _ = 0 // ERROR "hexadecimal literal has no digits"
+var _ = 0 // ERROR "empty rune literal"
+var _ = 0 // ERROR "mantissa requires a 'p' exponent"
+`
+	if err := os.WriteFile(file, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output := strings.Join([]string{
+		file + ":2: string literal not terminated",
+		file + ":2: invalid import path (invalid syntax)",
+		file + ":2: malformed constant: \"",
+		file + ":3: rune literal not terminated",
+		file + ":3: malformed constant: '",
+		file + ":4: raw string literal not terminated",
+		file + ":4: expected '}', found 'EOF'",
+		file + ":4: malformed constant: `",
+		file + ":5: invalid character U+229B '⊛' in identifier",
+		file + ":5: expected type, found 'ILLEGAL'",
+		file + ":5: illegal character U+229B '⊛'",
+		file + ":6: identifier cannot begin with digit U+06F6 '۶'",
+		file + ":6: expected 'IDENT', found 'ILLEGAL'",
+		file + ":6: illegal character U+06F6 '۶'",
+		file + ":7: invalid character '\\'' in octal escape",
+		file + ":7: malformed constant: '\\0'",
+		file + ":8: hexadecimal literal has no digits",
+		file + ":8: malformed constant: 0x",
+		file + ":9: empty rune literal or unescaped '",
+		file + ":9: syntax error: unexpected literal after top level declaration",
+		file + ":9: illegal rune literal",
+		file + ":10: hexadecimal mantissa requires a 'p' exponent",
+		file + ":10: 0x1.0 (untyped float constant 1) is not used",
+	}, "\n")
+	if err := checkExpectedErrors(output, file, "case.go"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCheckExpectedErrorsKeepsUnrelatedDiagnostics(t *testing.T) {
+	tests := []struct {
+		name   string
+		src    string
+		output func(string) string
+	}{
+		{
+			name: "same line non-recovery",
+			src:  "package p\nvar _ = 0 // ERROR \"unknown escape\"\n",
+			output: func(file string) string {
+				return file + ":2: unknown escape\n" + file + ":2: undefined: still_reported\n"
+			},
+		},
+		{
+			name: "different line recovery",
+			src:  "package p\nvar _ = 0 // ERROR \"unknown escape\"\nvar _ = 0\n",
+			output: func(file string) string {
+				return file + ":2: unknown escape\n" + file + ":3: malformed constant: 0x\n"
+			},
+		},
+		{
+			name: "unscoped invalid character",
+			src:  "package p\nvar _ = 0 // ERROR \"invalid character U\\+003F\"\n",
+			output: func(file string) string {
+				return file + ":2: invalid character U+003F '?'\n" +
+					file + ":2: expected 'IDENT', found 'ILLEGAL'\n" +
+					file + ":2: illegal character U+003F '?'\n"
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file := filepath.Join(t.TempDir(), "case.go")
+			if err := os.WriteFile(file, []byte(tt.src), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			err := checkExpectedErrors(tt.output(file), file, "case.go")
+			if err == nil || !strings.Contains(err.Error(), "unmatched errors") {
+				t.Fatalf("err=%v, want unmatched errors", err)
+			}
+		})
+	}
+}
+
+func TestCheckExpectedErrorsDiscardsExactParserPair(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "case.go")
+	src := "package p\nfunc f() {\n\tif a := 10 { // ERROR \"cannot use a := 10 as value\"\n\t}\n}\n"
+	if err := os.WriteFile(file, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	primary := file + ":3: syntax error: cannot use a := 10 as value"
+	secondary := file + ":3: expected boolean expression, found assignment (missing parentheses around composite literal?)"
+	if err := checkExpectedErrors(primary+"\n"+secondary, file, "case.go"); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkExpectedErrors(primary+"\n"+secondary+"\n"+file+":4: undefined: extra", file, "case.go"); err == nil || !strings.Contains(err.Error(), "undefined: extra") {
+		t.Fatalf("err=%v, want unrelated diagnostic to remain", err)
+	}
+	for _, nearMatch := range []string{
+		"syntax error: cannot use a := 10 as value.",
+		"syntax error: cannot use d := 10 as value",
+	} {
+		if got := parserRecoverySecondaries(nearMatch); got != nil {
+			t.Fatalf("near-match %q activated parser recovery: %v", nearMatch, got)
+		}
+	}
+}
+
+func TestCheckExpectedErrorsScopesImportAlias(t *testing.T) {
+	tests := []struct {
+		name, src string
+		wantOK    bool
+	}{
+		{"parenthesized import", "package p\nimport (\n\t\"io\", // ERROR \"unexpected comma\"\n)\n", true},
+		{"outside import", "package p\n\nvar _ = 0 // ERROR \"unexpected comma\"\n", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file := filepath.Join(t.TempDir(), "case.go")
+			if err := os.WriteFile(file, []byte(tt.src), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			err := checkExpectedErrors(file+":3: expected ';', found ','", file, "case.go")
+			if tt.wantOK && err != nil || !tt.wantOK && (err == nil || !strings.Contains(err.Error(), "no match")) {
+				t.Fatalf("err=%v, wantOK=%v", err, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestDiscardPairedParserDiagnosticsIsExactMultiset(t *testing.T) {
+	dir := t.TempDir()
+	fileA := filepath.Join(dir, "a", "case.go")
+	fileB := filepath.Join(dir, "b", "case.go")
+	resolver := newDiagnosticPathResolver([]diagnosticSource{
+		{full: fileA, short: "a.go"}, {full: fileB, short: "b.go"},
+	})
+	secondary := "expected boolean expression, found assignment (missing parentheses around composite literal?)"
+	exact := fileA + ":2: " + secondary
+	wrongLine := fileA + ":3: " + secondary
+	wrongFile := fileB + ":2: " + secondary
+	similar := exact + " extra"
+	pairs := []parserRecoveryPair{{
+		file: canonicalDiagnosticPath(fileA), line: 2, secondaries: []string{secondary},
+	}}
+	got := discardPairedParserDiagnostics([]string{exact, exact, wrongLine, wrongFile, similar}, resolver, pairs)
+	want := []string{exact, wrongLine, wrongFile, similar}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("discardPairedParserDiagnostics()=%v, want %v", got, want)
+	}
+}
+
 func TestPreferSpecificDiagnostics(t *testing.T) {
 	got := preferSpecificDiagnostics([]string{
 		"case.go:18:16: requires go1.22 or later (file declares go1.21)",
 		"/tmp/case.go:18: requires go1.22 or later",
 		"case.go:19: a different error",
+		"/tmp/left/case.go:20: same text",
+		"/tmp/right/case.go:20: same text",
 	})
 	want := []string{
 		"case.go:18:16: requires go1.22 or later (file declares go1.21)",
 		"case.go:19: a different error",
+		"/tmp/left/case.go:20: same text",
+		"/tmp/right/case.go:20: same text",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("preferSpecificDiagnostics()=%v, want %v", got, want)
+	}
+}
+
+func TestNormalizeCompilerDiagnosticMessage(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "continue", in: "continue not in for statement", want: "continue is not in a loop"},
+		{name: "break", in: "break not in for, switch, or select statement", want: "break is not in a loop, switch, or select"},
+		{name: "range count", in: "expected at most 2 expressions", want: "range clause permits at most two iteration variables"},
+		{name: "type switch", in: "invalid syntax tree: incorrect form of type switch guard", want: "invalid variable name in type switch guard"},
+		{
+			name: "non-canonical import",
+			in:   `non-canonical import path "unicode//utf8": should be "unicode/utf8"`,
+			want: `non-canonical import path "unicode//utf8" (should be "unicode/utf8")`,
+		},
+		{
+			name: "unexported struct field",
+			in:   "cannot refer to unexported field doneChan in struct literal of type f1.Foo",
+			want: "cannot refer to unexported field 'doneChan' in struct literal of type f1.Foo",
+		},
+		{
+			name: "unknown struct field",
+			in:   "unknown field DoneChan in struct literal of type f1.Foo, but does have unexported doneChan",
+			want: "unknown field 'DoneChan' in struct literal of type f1.Foo (but does have unexported doneChan)",
+		},
+		{
+			name: "unexported selector",
+			in:   "f.doneChan undefined (cannot refer to unexported field doneChan)",
+			want: "f.doneChan undefined (cannot refer to unexported field or method doneChan)",
+		},
+		{
+			name: "nearby selector",
+			in:   "f.name undefined (type f1.Foo has no field or method name, but does have field Name)",
+			want: "f.name undefined (type f1.Foo has no field or method name, but does have Name)",
+		},
+		{name: "initialization", in: "initialization cycle for a", want: "initialization cycle for a"},
+		{name: "goto position", in: "goto L jumps over variable declaration at line 43", want: "goto jumps over declaration"},
+		{name: "unused label", in: "label L declared and not used", want: "label L defined and not used"},
+		{name: "duplicate label", in: "label L already declared", want: "label L already defined"},
+		{name: "missing label", in: "label L not declared", want: "label L not defined"},
+		{
+			name: "assignment type",
+			in:   "cannot use complex(1, 2) (value of type complex128) as int value in variable declaration",
+			want: "cannot use complex(1, 2) (value of type complex128) as type int in variable declaration",
+		},
+		{name: "different range count", in: "expected at most 3 expressions", want: "expected at most 3 expressions"},
+		{name: "goto without position", in: "goto L jumps over variable declaration", want: "goto L jumps over variable declaration"},
+		{name: "non-declaration assignment", in: "cannot use x as int value in argument", want: "cannot use x as int value in argument"},
+		{name: "invalid import quote", in: `non-canonical import path "\x": should be "good"`, want: `non-canonical import path "\x": should be "good"`},
+		{name: "non-struct field", in: "unknown field value in map literal", want: "unknown field value in map literal"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeCompilerDiagnosticMessage(tt.in); got != tt.want {
+				t.Fatalf("normalizeCompilerDiagnosticMessage(%q)=%q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCheckExpectedErrorsFiltersDeterministicSecondaryDiagnostics(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		output string
+	}{
+		{
+			name: "initialization summary",
+			source: `package p
+var a = b // ERROR "a refers to b\n.*b refers to a|initialization loop"
+var b = a
+`,
+			output: "case.go:2: initialization cycle for a\ncase.go:2: a refers to b\n\tcase.go:3: b refers to a\n",
+		},
+		{
+			name: "unused invalid label",
+			source: `package p
+func f() {
+L:
+	break L // ERROR "invalid break label L"
+}
+`,
+			output: "case.go:4: invalid break label L\ncase.go:3: label L declared and not used\n",
+		},
+		{
+			name: "invalid type expression",
+			source: `package p
+var _ = Missing // ERROR "undefined: Missing"
+`,
+			output: "case.go:2: undefined: Missing\ncase.go:2: Missing (type) is not an expression\n",
+		},
+		{
+			name: "inferred array after parenthesized type",
+			source: `package p
+var _ = ([...]int){} // ERROR "parenthesize"
+`,
+			output: "case.go:2: cannot parenthesize type in composite literal\ncase.go:2: invalid use of [...] array (outside a composite literal)\n",
+		},
+		{
+			name: "channel range arity",
+			source: `package p
+var _ = 0 // ERROR "range over .* permits only one iteration variable"
+`,
+			output: "case.go:2: range over ch (variable of type chan int) permits only one iteration variable\ncase.go:2: expected at most 2 expressions\n",
+		},
+		{
+			name: "recursive type summary",
+			source: `package p
+type I interface{} // ERROR "invalid recursive type I\n\tcase.go:2:.*I refers to I"
+`,
+			output: "case.go:2: invalid recursive type I\ncase.go:2: invalid recursive type I\n\tcase.go:2: I refers to I\n",
+		},
+		{
+			name: "error limit",
+			source: `package p
+var _ = a // ERROR "undefined: a" "too many errors"
+var _ = b
+`,
+			output: "case.go:2: undefined: a\ncase.go:2: too many errors\ncase.go:3: undefined: b\n",
+		},
+		{
+			name: "unused names in invalid go statement",
+			source: `package p
+import "fmt"
+func f() {
+	go func() { fmt.Println() } // ERROR "must be function call"
+}
+`,
+			output: "case.go:4: expression in go must be function call\ncase.go:2: \"fmt\" imported and not used\n",
+		},
+		{
+			name: "unused local in invalid go statement",
+			source: `package p
+func f() {
+	var i int
+	go func() { _ = i } // ERROR "must be function call"
+}
+`,
+			output: "case.go:4: expression in go must be function call\ncase.go:3: declared and not used: i\n",
+		},
+		{
+			name: "contextual integer shift",
+			source: `package p
+var x int
+var _ = missing // ERROR "undefined: missing"
+func f(s uint) {
+	x = (1. << s) << (1 << s)
+}
+`,
+			output: "case.go:3: undefined: missing\ncase.go:5: invalid operation: shifted operand (1. << s) (untyped float value) must be integer\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file := filepath.Join(t.TempDir(), "case.go")
+			if err := os.WriteFile(file, []byte(tt.source), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := checkExpectedErrors(tt.output, file, "case.go"); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestCheckExpectedErrorsKeepsUnrelatedTypeDiagnostics(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		output string
+	}{
+		{
+			name: "unrelated",
+			source: `package p
+var _ = missing // ERROR "undefined: missing"
+var _ = other
+`,
+			output: "case.go:2: undefined: missing\ncase.go:3: unrelated diagnostic\n",
+		},
+		{
+			name: "unused import not referenced by primary",
+			source: `package p
+import "math"
+func f() {
+	go func() { fmt.Println() } // ERROR "must be function call"
+}
+`,
+			output: "case.go:4: expression in go must be function call\ncase.go:2: \"math\" imported and not used\n",
+		},
+		{
+			name: "same label in different functions",
+			source: `package p
+func first() {
+L:
+	break L // ERROR "invalid break label L"
+}
+func second() {
+L:
+}
+`,
+			output: "case.go:4: invalid break label L\ncase.go:7: label L declared and not used\n",
+		},
+		{
+			name: "same local name in different functions",
+			source: `package p
+var i int
+func first() {
+	go func() { _ = i } // ERROR "must be function call"
+}
+func second() {
+	var i int
+}
+`,
+			output: "case.go:4: expression in go must be function call\ncase.go:7: declared and not used: i\n",
+		},
+		{
+			name: "shift without integer context",
+			source: `package p
+var x float64
+var _ = missing // ERROR "undefined: missing"
+func f(s uint) {
+	x = (1. << s) << (1 << s)
+}
+`,
+			output: "case.go:3: undefined: missing\ncase.go:5: invalid operation: shifted operand (1. << s) (untyped float value) must be integer\n",
+		},
+		{
+			name: "shift with integer in different function",
+			source: `package p
+var _ = missing // ERROR "undefined: missing"
+func first() {
+	var x int
+	_ = x
+}
+func second(s uint) {
+	x = (1. << s) << (1 << s)
+}
+`,
+			output: "case.go:2: undefined: missing\ncase.go:8: invalid operation: shifted operand (1. << s) (untyped float value) must be integer\n",
+		},
+		{
+			name: "shift with integer in sibling block",
+			source: `package p
+var _ = missing // ERROR "undefined: missing"
+func f(s uint) {
+	{
+		var x int
+		_ = x
+	}
+	x = (1. << s) << (1 << s)
+}
+`,
+			output: "case.go:2: undefined: missing\ncase.go:8: invalid operation: shifted operand (1. << s) (untyped float value) must be integer\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file := filepath.Join(t.TempDir(), "case.go")
+			if err := os.WriteFile(file, []byte(tt.source), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			err := checkExpectedErrors(tt.output, file, "case.go")
+			if err == nil || !strings.Contains(err.Error(), "unmatched errors") {
+				t.Fatalf("err=%v, want unmatched error", err)
+			}
+		})
+	}
+}
+
+func TestCheckExpectedErrorsSeparatesSameBasenameSources(t *testing.T) {
+	root := t.TempDir()
+	leftDir := filepath.Join(root, "left")
+	rightDir := filepath.Join(root, "right")
+	if err := os.MkdirAll(leftDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rightDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	left := filepath.Join(leftDir, "case.go")
+	right := filepath.Join(rightDir, "case.go")
+	if err := os.WriteFile(left, []byte("package p\nvar _ = left // ERROR \"undefined: left\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(right, []byte("package p\nvar _ = right // ERROR \"undefined: right\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output := left + ":2: undefined: left\n" + right + ":2: undefined: right\n"
+	err := checkExpectedErrorsForFiles(output, []diagnosticSource{
+		{full: left, short: "left/case.go"},
+		{full: right, short: "right/case.go"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSecondaryDiagnosticsDoNotCrossSameBasenameSources(t *testing.T) {
+	root := t.TempDir()
+	left := filepath.Join(root, "left", "case.go")
+	right := filepath.Join(root, "right", "case.go")
+	for _, file := range []string{left, right} {
+		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	leftSource := `package p
+func first() {
+L:
+	break L // ERROR "invalid break label L"
+}
+`
+	rightSource := `package p
+func second() {
+L:
+	_ = 0
+}
+var _ = missing // ERROR "undefined: missing"
+`
+	if err := os.WriteFile(left, []byte(leftSource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(right, []byte(rightSource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output := left + ":4: invalid break label L\n" +
+		right + ":6: undefined: missing\n" +
+		right + ":3: label L declared and not used\n"
+	err := checkExpectedErrorsForFiles(output, []diagnosticSource{
+		{full: left, short: "left/case.go"},
+		{full: right, short: "right/case.go"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "right/case.go:3") {
+		t.Fatalf("err=%v, want unmatched right/case.go diagnostic", err)
 	}
 }
 
@@ -631,8 +1133,8 @@ func TestRunOutputCaseGeneratesWithBaselineGoOnly(t *testing.T) {
 		FileName:  "case.go",
 		Directive: "runoutput",
 	}
-	opts := directiveOptions{Timeout: 5 * time.Second}
-	if err := runOutputCase(t, repoRoot, goroot, goTool, llgoTool, tc, opts, 5*time.Second); err != nil {
+	opts := directiveOptions{Timeout: 30 * time.Second}
+	if err := runOutputCase(t, repoRoot, goroot, goTool, llgoTool, tc, opts, 30*time.Second); err != nil {
 		t.Fatal(err)
 	}
 

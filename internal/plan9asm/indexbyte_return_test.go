@@ -49,6 +49,10 @@ func TestPlan9AsmIndexByteStringReturnAndNoSuspendProof(t *testing.T) {
 	pkg := pkgs[0]
 
 	sfile := filepath.Join(goroot, "src", "internal", "bytealg", "indexbyte_arm64.s")
+	source, err := os.ReadFile(sfile)
+	if err != nil {
+		t.Fatal(err)
+	}
 	tr, err := TranslateFileForPkgWithOptions(pkg, sfile, runtime.GOOS, "arm64", nil, TranslateOptions{AnnotateSource: true})
 	if err != nil {
 		t.Fatal(err)
@@ -57,21 +61,26 @@ func TestPlan9AsmIndexByteStringReturnAndNoSuspendProof(t *testing.T) {
 	if body == "" {
 		t.Fatalf("IndexByteString function not found in translated IR")
 	}
-	if strings.Contains(body, `call void @"internal/bytealg.indexbytebody"`) {
+	if containsTextSymbol(string(source), "indexbytebody<>") {
+		if !strings.Contains(body, `call void @"internal/bytealg.indexbytebody"`) {
+			t.Fatalf("expected helper call in IndexByteString:\n%s", body)
+		}
 		if !strings.Contains(body, "ptrtoint ptr %fp_ret_0 to i64") {
 			t.Fatalf("expected helper result slot address setup in IndexByteString:\n%s", body)
 		}
 		if !strings.Contains(body, "load i64, ptr %fp_ret_0") {
 			t.Fatalf("expected helper result slot load in IndexByteString:\n%s", body)
 		}
+	} else {
+		// Go 1.26 inlines indexbytebody into the ABIInternal entry point and
+		// returns the result in R0, so there is no helper result slot to inspect.
+		if !strings.Contains(body, "load i64, ptr %reg_R0") || !strings.Contains(body, "ret i64 %") {
+			t.Fatalf("expected direct R0 result return in IndexByteString:\n%s", body)
+		}
 	}
 
-	src, err := os.ReadFile(sfile)
-	if err != nil {
-		t.Fatal(err)
-	}
 	moduleTranslation, err := TranslateSourceModuleForPkgWithOptions(
-		pkg, sfile, src, runtime.GOOS, "arm64", TranslateOptions{AnnotateSource: true},
+		pkg, sfile, source, runtime.GOOS, "arm64", TranslateOptions{AnnotateSource: true},
 	)
 	if err != nil {
 		t.Fatal(err)

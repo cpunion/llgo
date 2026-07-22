@@ -43,6 +43,23 @@ func Identity[T any](v T) T { return v }
 		compareToolCompileResult(t, dir, args, true, "")
 	})
 
+	t.Run("SSA check seed", func(t *testing.T) {
+		tests := []struct {
+			name string
+			flag string
+		}{
+			{name: "default", flag: "-d=ssa/check/seed"},
+			{name: "explicit", flag: "-d=ssa/check/seed=1"},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				dir := t.TempDir()
+				writeToolCompileSource(t, dir, "valid.go", "package compat\n\nfunc F() {}\n")
+				compareToolCompileResult(t, dir, []string{tt.flag, "-o=compat.o", "valid.go"}, true, "")
+			})
+		}
+	})
+
 	t.Run("language version", func(t *testing.T) {
 		dir := t.TempDir()
 		writeToolCompileSource(t, dir, "generic.go", `package compat
@@ -89,6 +106,47 @@ var _ = missing
 	})
 }
 
+func TestToolCompileFrontendDiagnosticNormalization(t *testing.T) {
+	t.Run("absolute import", func(t *testing.T) {
+		dir := t.TempDir()
+		writeToolCompileSource(t, dir, "invalid.go", "package compat\nimport _ \"/foo\"\n")
+		writeToolCompileSource(t, dir, "importcfg", "")
+		compareToolCompileResult(t, dir, []string{
+			"-C", "-e", "-importcfg=importcfg", "-o=invalid.o", "invalid.go",
+		}, false, "import path cannot be absolute path")
+	})
+
+	t.Run("embed local var", func(t *testing.T) {
+		dir := t.TempDir()
+		writeToolCompileStdlibImportCfg(t, dir)
+		writeToolCompileSource(t, dir, "x.txt", "x")
+		writeToolCompileSource(t, dir, "invalid.go", `package compat
+import _ "embed"
+func f() {
+	//go:embed x.txt // ERROR
+	var x string
+	_ = x
+}`)
+		compareToolCompileResult(t, dir, []string{
+			"-C", "-e", "-importcfg=importcfg", "-o=invalid.o", "invalid.go",
+		}, false, "go:embed cannot apply to var inside func")
+	})
+
+	t.Run("embed language version", func(t *testing.T) {
+		dir := t.TempDir()
+		writeToolCompileStdlibImportCfg(t, dir)
+		writeToolCompileSource(t, dir, "x.txt", "x")
+		writeToolCompileSource(t, dir, "invalid.go", `package compat
+import _ "embed"
+//go:embed x.txt // ERROR
+var x string`)
+		compareToolCompileResult(t, dir, []string{
+			"-C", "-e", "-lang=go1.15", "-importcfg=importcfg", "-o=invalid.o", "invalid.go",
+		}, false, "go:embed requires go1.16 or later")
+	})
+
+}
+
 func compareToolCompileResult(t *testing.T, dir string, args []string, wantSuccess bool, wantText string) (goOutput, llgoOutput string) {
 	t.Helper()
 
@@ -122,4 +180,15 @@ func writeToolCompileSource(t *testing.T, dir, name, content string) {
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func writeToolCompileStdlibImportCfg(t *testing.T, dir string) {
+	t.Helper()
+	cmd := exec.Command("go", "list", "-export", "-f", "{{if .Export}}packagefile {{.ImportPath}}={{.Export}}{{end}}", "std")
+	cmd.Env = append(os.Environ(), "GOENV=off", "GOFLAGS=")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("list stdlib export files: %v\n%s", err, output)
+	}
+	writeToolCompileSource(t, dir, "importcfg", string(output))
 }

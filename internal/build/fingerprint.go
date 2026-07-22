@@ -136,6 +136,8 @@ type commonSection struct {
 	CoroEndianness          string       `yaml:"CORO_ENDIANNESS,omitempty"`
 	CoroDataLayout          string       `yaml:"CORO_DATA_LAYOUT,omitempty"`
 	GoGlobalDCE             bool         `yaml:"GO_GLOBAL_DCE,omitempty"`
+	EmitDWARF               bool         `yaml:"EMIT_DWARF,omitempty"`
+	PCLNMode                string       `yaml:"PCLN_MODE,omitempty"`
 	CC                      string       `yaml:"CC,omitempty"`
 	CCFlags                 []string     `yaml:"CCFLAGS,omitempty"`
 	CFlags                  []string     `yaml:"CFLAGS,omitempty"`
@@ -152,7 +154,7 @@ func (s *commonSection) empty() bool {
 		s.CoroLoweringFactsDigest == "" && s.CoroTargetTriple == "" && s.CoroTargetCPU == "" &&
 		s.CoroTargetFeatures == "" && s.CoroTargetABI == "" && s.CoroPointerBits == 0 &&
 		s.CoroEndianness == "" && s.CoroDataLayout == "" &&
-		!s.GoGlobalDCE && s.CC == "" && len(s.CCFlags) == 0 && len(s.CFlags) == 0 && len(s.LDFlags) == 0 &&
+		!s.GoGlobalDCE && !s.EmitDWARF && s.PCLNMode == "" && s.CC == "" && len(s.CCFlags) == 0 && len(s.CFlags) == 0 && len(s.LDFlags) == 0 &&
 		s.Linker == "" && len(s.ExtraFiles) == 0
 }
 

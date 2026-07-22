@@ -26,6 +26,7 @@ import (
 	"unsafe"
 
 	"github.com/goplus/llgo/internal/env"
+	"github.com/goplus/llgo/internal/optlevel"
 	"github.com/goplus/llgo/ssa/abi"
 	"github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/types/typeutil"
@@ -226,6 +227,7 @@ type aProgram struct {
 
 	paramObjPtr_ *types.Var
 	linkname     map[string]string     // pkgPath.nameInPkg => linkname
+	noInterface  map[string]none       // pkgPath.T.method or pkgPath.(*T).method
 	abiSymbol    map[string]*AbiSymbol // abi symbol name => AbiSymbol
 
 	ptrSize int
@@ -241,6 +243,7 @@ type aProgram struct {
 
 	enableFuncInfoMetadata bool
 	enableFuncInfoSites    bool
+	debugInfoOptimized     bool
 }
 
 type AbiSymbol struct {
@@ -327,7 +330,8 @@ func NewProgram(target *Target) Program {
 		ctx: ctx, gocvt: newGoTypes(),
 		target: target, requestedSpec: requestedSpec, spec: spec, td: td, tm: tm, is32Bits: is32Bits,
 		ptrSize: td.PointerSize(), named: make(map[string]Type), fnnamed: make(map[string]int),
-		linkname: make(map[string]string), abiSymbol: make(map[string]*AbiSymbol),
+		linkname: make(map[string]string), noInterface: make(map[string]none), abiSymbol: make(map[string]*AbiSymbol),
+		debugInfoOptimized: target.effectiveOptLevel() != optlevel.O0,
 	}
 	prog.abi.Init(uintptr(prog.ptrSize), (*goProgram)(unsafe.Pointer(prog)))
 	programCreated = true
@@ -391,6 +395,22 @@ func (p Program) SetPthreadStackSize(size uint64) {
 
 func (p Program) EnableLTOPluginMarkers(enable bool) {
 	p.enableLTOPluginMarker = enable
+}
+
+func (p Program) SetNoInterfaceMethod(fullName string) {
+	p.noInterface[fullName] = none{}
+}
+
+func (p Program) isNoInterfaceMethod(fn *types.Func) bool {
+	if fn == nil {
+		return false
+	}
+	sig, ok := fn.Type().(*types.Signature)
+	if !ok || sig.Recv() == nil {
+		return false
+	}
+	_, ok = p.noInterface[FuncName(fn.Pkg(), fn.Name(), sig.Recv(), true)]
+	return ok
 }
 
 // SetRuntime sets the runtime.
@@ -1017,6 +1037,14 @@ func (p Package) AfterInit(b Builder, ret BasicBlock) {
 func (p Package) InitDebug(name, pkgPath string, positioner Positioner) {
 	p.di = newDIBuilder(p.Prog, p, positioner)
 	p.cu = p.di.createCompileUnit(name, pkgPath)
+}
+
+// FinalizeDebug resolves temporary debug metadata and releases the package's
+// DI builder. No debug records may be added after this call.
+func (p Package) FinalizeDebug() {
+	if p.di != nil {
+		p.di.finalize()
+	}
 }
 
 func (p Package) createGlobalStr(v string) (ret llvm.Value) {
