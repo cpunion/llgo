@@ -1,8 +1,8 @@
 # LLGo Coroutine 语义标准化 IR 与统一 Lowering 设计
 
-状态：设计与代码审查结论；Phase A 与 Phase B 的首个生产切片已落地：稀疏 LoweringFacts schema、canonical verifier、owner-scoped snapshot 及其 build/cache/manifest identity 已闭环；集中 emission observer、PrimitiveCatalog、CoroOverlay 与生产 emitter 切换尚未完成
+状态：2026-07-22架构复审结论；可运行纵向基线已冻结，暂停新增能力。现有LoweringFacts只完成report/cache identity，尚未成为production lowering的唯一事实源；在完成单一ProgramIR、单一emitter及runtime hard cutover前，不继续叠加语言或平台功能
 
-更新：2026-07-20
+更新：2026-07-22
 
 审查基线：`897d251f8`（`cpunion/llgo:llvm-coro`，已包含 Phase 35 / PR #42）
 
@@ -14,12 +14,12 @@ Callable、调用点与 foreign boundary 契约：[`coro-callable-contract.md`](
 
 ## 1. 结论
 
-方案可行，但不应实现成“在现有全局计划之后，再复制一份完整 Go SSA”。推荐采用两个构建时点、四层窄职责数据，而不是两份可执行 IR：稀疏 `LoweringFacts ledger`、现有 `SSAPlan`、引用原 Go SSA 的 `CoroOverlay` 与 target-configured `VirtualStoragePlan`。
+方案可行，但不应实现成“在现有全局计划之后，再复制一份完整 Go SSA”。语义上仍需要稀疏site facts、现有全局fixed point、physical control overlay和target storage plan四种视图；实现上它们必须由同一个`ProgramModelBuilder`产生并冻结为一个`CoroProgramIR`，共享identity、索引、verifier和cache digest，而不是四份独立版本化、各自canonical化的长期文档。
 
-1. 在 emission closure 构建期间，同时生成稀疏 `LoweringFacts ledger`。它冻结有效 Go SSA site 的求值约束、隐藏 runtime helper、调用边、panic/unwind、函数值用途、intrinsic、backend footprint 和地址生命周期事实，但不复制 Phi、普通 value/result、terminator 或完整 CFG。
+1. 在 emission closure 构建期间，为每个owner-scoped function instance生成一次稀疏`SitePlan`。它冻结有效 Go SSA site 的求值约束、隐藏runtime helper、调用边、panic/unwind、函数值用途、intrinsic、backend footprint和地址生命周期事实，但不复制Phi、普通value/result、terminator或完整CFG；当前`LoweringFacts`wire projection可作为迁移输入，不再继续扩成第二套IR。
 2. 继续复用现有 `Effect / Exec / Demand / FuncRep / FunctionPlan / CallPlan` 固定点；这些分析的分层是正确的，不应重写。
-3. 固定点完成后，把 `LoweringFacts + SSAPlan` 收敛成 `CoroOverlay + VirtualStoragePlan`。普通连续区间只引用原 SSA span；overlay只显式表示 control cut、唯一 continuation、outcome、source-edge mapping 和显式跨层 slot，不预展开标准协议的 LLVM blocks。
-4. 由一个 coroutine emitter 按封闭的 protocol template 从 overlay 生成 LLSSA/LLVM IR，继续复用现有 `ssa.CoroBuilder` 和 LLVM `CoroSplit`。
+3. 固定点完成后，在同一function model上冻结physical fields：普通连续区间只引用原SSA span；control plan只显式表示control cut、唯一continuation、outcome、source-edge mapping和显式跨层slot，不预展开标准协议的LLVM blocks。`CoroOverlay`可保留为诊断视图，但不拥有第二套site identity或独立cache schema。
+4. 由一个coroutine emitter只读取冻结的`CoroProgramIR`，按封闭protocol template生成LLSSA/LLVM IR，继续复用现有`ssa.CoroBuilder`和LLVM `CoroSplit`；emitter不得重新分类raw SSA、发现hidden helper或重建frame proof。
 5. 普通 `NoSuspend` 函数在迁移期继续走现有 plain compiler；新 IR 不是第二套通用编译器。
 
 最重要的代码审查修正是：不能采用简单的
@@ -40,14 +40,17 @@ ProgramModelBuilder fixed point
   - discover calls/helpers/children/type demands
   - add newly reached instances and repeat
         |
-        +--> frozen EmissionUniverse
-        +--> frozen LoweringFacts ledger
+        +--> provisional site plans + frozen EmissionUniverse
                     |
                     v
-              existing SSAPlan
+              existing SSAPlan fixed point
                     |
                     v
-         CoroOverlay + VirtualStoragePlan
+         freeze one CoroProgramIR
+         - site semantic plans
+         - function/call/value summaries
+         - control regions/continuations/outcomes
+         - target virtual storage
                     |
                     v
           verifier -> LLVM emitter
@@ -63,7 +66,7 @@ ProgramModelBuilder fixed point
 - 只增加 post-plan overlay 能解决 physical CFG 拼装，但不能消除 hidden helper 和 effect 事实的重复提取，收益只有一半。
 - 重写 runtime 或 `internal/coro` 固定点不会解决上述问题，风险反而更大。
 - 新设计可以成为后续 defer/panic/recover、dynamic coroutine descriptor、syscall/IO、精确 GC metadata 和多平台 adapter 的公共编译器底座；但它本身不会自动补齐这些尚未实现的能力。
-- 当前代码仍是受限的 native Linux/Darwin single-P vertical slice，但普通Go 1.26标准库源码风格的`time.Sleep`、冻结timer语义、固定syscall文件回环、高层`os.File`回环和loopback TCP探针已全部compile-link-run通过。这仍不能结论为“完整Go标准库和所有平台已经基本都可落地”：panic/unwind全矩阵、timer GC/synctest、tooling、cgo reentry、affinity、multi-P和平台driver仍需原型或生产验证，见第9、11节及《统一异步核心契约》第9.1节。
+- 当前代码已从native single-P vertical slice推进到受限的Linux/Darwin双owner fleet：command M与peer pthread M各自驱动一个P/source shard，使用exact route、route-local poll/timer/doorbell和共享bounded worker；loopback TCP已在该profile fresh compile-link-run并完成10,000次压力。普通Go 1.26标准库源码风格的`time.Sleep`、冻结timer语义、固定syscall文件回环、高层`os.File`回环和loopback TCP又在同一fleet acceptance中全部通过；整组耗时1102.23s，各项依次为246.60s、375.42s、134.39s、109.01s、236.80s。这不能结论为“完整Go标准库和所有平台已经基本都可落地”：panic/unwind全矩阵、timer GC/synctest、tooling、cgo reentry、precise GC、动态P/affinity、parked-result迁移和其他平台driver仍需实现或生产验证，见第9、11节及《统一异步核心契约》第9.1节。
 
 ## 2. 目标与非目标
 
@@ -202,17 +205,41 @@ Phase 35 修复过 direct receive resume status 跳回 logical block 首部、�
 
 ### 3.8 代码量事实
 
-相对 merge-base `2c9d1897`，当前基线的相关 production physical diff 约为：
+相对当前PR基线`897d251f8`，2026-07-22 worktree共有64个提交、530个tracked变更文件，约
+`+114,214/-3,946`，另有3个共191行的新runtime文件。测试约`+53,432/-464`，文档约
+`+2,475/-33`；排除测试和文档后，production约`+58,498/-3,449`，净增加约55,049行。
 
-| 模块 | 净新增行 | 判断 |
+| 模块 | production净新增行 | 判断 |
 | --- | ---: | --- |
-| `internal/coro` | 6,753 | 大部分是应保留的全局分析、identity 和 digest |
-| `cl` | 11,547 | 包含主要的重复 frontend/lowering 边界 |
-| `ssa` | 2,361 | 大部分是可复用 LLVM coroutine builder、descriptor 和 metadata |
-| `internal/build` | 约 5,000 | 大部分是 whole-program、cache、registry 和 bootstrap 集成 |
-| `runtime` | 22,356 | scheduler/operation/source/platform 实现，不会因 compiler IR 自动消失 |
+| `cl` | 23,146 | 最大的可收敛热点；同一SSA语义在closure、preflight、proof和emission重复解释 |
+| `internal/coro` | 7,139 | fixed point、identity和并发无关的分析大多应保留；多个独立wire schema可合并 |
+| `internal/build` | 4,468 | whole-program、cache、registry和bootstrap；11个阶段性能力开关放大组合面 |
+| `ssa` | 1,059 | 可复用LLVM coroutine builder、descriptor和metadata，非主要臃肿来源 |
+| runtime core | 8,064 | operation/select/cancel/quiescence多数为必要并发语义 |
+| runtime/platform adapter | 10,963 | V1/V2 logical wait、single-P/fleet和手写source catalog存在明显迁移重复 |
+| 其他 | 210 | 非主要项 |
 
-直接的 coroutine ABI/pure-SSA/frame-retention/channel/await/spawn/panic lowering 文件约 3,549 行。这是新 emitter 最可能替换或显著缩小的区域；不能据此承诺删除全部 `cl`、runtime 或 analysis 增量。
+测试占新增行约47%，说明PR显示的总行数不能直接等同于runtime重量；但约55k净production增量仍然过大，不能用测试充分性解释。`cl/coro_pure_ssa.go`、`cl/coro_frame_retention.go`、`cl/coro_abi.go`和分散feature lowerer是统一planner/emitter最可能替换或显著缩小的区域；runtime的operation状态机不会因compiler IR自动消失。
+
+### 3.9 2026-07-22耦合审计与停止线
+
+当前实现已越过“只是原型代码多”的范围，存在可量化的横向耦合：
+
+- `currentCoro`出现在24个production compiler文件、171处；coroutine physical context已经渗入普通instruction emitter。
+- `CoroPlan/EmissionUniverse`被42个production compiler文件直接读取、412处；没有窄的function/site plan消费边界。
+- 11个`EnableCoro*`阶段开关在30个production文件出现297次；合法组合靠分散gate维持。
+- `ExecutorSourceSet`一个文件约767行，对7类source有153个typed field/case引用，bind失败回滚、scan、apply、deadline、empty、terminal close和unbind均手写展开。
+- native single-P与fleet选择/全局状态涉及29个production runtime文件、362处引用；fleet route 1通过“收养”旧program P/driver/source进入新模型，而不是由唯一fleet profile直接创建domain 0。
+- `WaitToken/WaitRegistration`逻辑队列与`ParkState/OperationID`同时存在；Timer和Poll还各自维护V1/V2 mode及共享generation兼容规则。
+- 当前`LoweringFacts`已经canonical化并进入cache identity，但production analysis/preflight/emitter几乎不消费它；`CoroOverlay`只有schema/verifier，没有production planner/emitter调用。继续直接实现Overlay会先增加第三条解释路径。
+
+这形成三条明确停止线：
+
+1. 在site plan成为helper discovery、analysis、preflight和emission的唯一事实源前，不新增Go语言lowering。
+2. 在native fleet成为唯一native coroutine target、旧logical wait迁到Park/Operation前，不增加动态P、steal或新event source。
+3. 新抽象必须在同一迁移cohort删除旧consumer；不再接受“先report-only覆盖全量、以后再切换”的长期双轨。
+
+需要保留的复杂度也同样明确：`OperationRecord`、`ParkState`、`WaitSetRecord`、result lease、cancel/detach/quiescence、producer admission和A/ack/B防丢唤醒分别表示独立并发事实。没有linearizability证据时，不能为了行数把它们折叠为一个`done`位或让producer直接持有G/P/frame指针。
 
 ## 4. 方案比较
 
@@ -221,16 +248,18 @@ Phase 35 修复过 direct receive resume status 跳回 logical block 首部、�
 | 维持当前 raw SSA 直接 lowering | 无迁移成本；已能运行受限原型 | 每个新特性继续扩展 preflight、helper 预测和 CFG 分支；长期一致性成本高 | 只适合作为迁移参照 |
 | 只增加 side-table facts | 改动最小；可先消除 helper/effect 重复判断 | physical continuation、outcome、slot 和 cleanup 仍散落在 emitter | 推荐作为第一迁移阶段，不是终态 |
 | 只在 `SSAPlan` 后增加 `CoroOverlay` | 能统一 suspend CFG 和 emitter；迁移较直接 | EmissionUniverse/helper closure 和 AnalyzeSSA 仍需重新解释 raw SSA | 有价值但收益不完整 |
-| 稀疏 `LoweringFacts -> SSAPlan -> CoroOverlay` | 单一 semantic fact source；全局分析和 physical lowering 各有清晰输入；为后续 Go control semantics 预留统一位置 | 峰值代码量增加；需处理 owner instance 和 cache schema | 推荐方案 |
+| 单一`CoroProgramIR`内的`SitePlan -> SSAPlan summary -> PhysicalPlan` | 一个builder、identity、verifier和digest；阶段职责仍清楚；可直接成为emitter唯一输入 | 必须按cohort替换旧consumer，不能长期只做report | 推荐终态 |
 | 把 x/tools SSA 改造成 async SSA/CPS | 所有 continuation 都在一层 | 侵入上游 SSA；普通优化、debug、generic 和现有 compiler 全受影响；迁移风险最高 | 不推荐 |
 | 新建完整通用 SSA/MIR | 理论上最整齐，可做自有优化 | 重复 Go SSA 的类型、值、内存、debug 和普通 codegen；远超当前问题规模 | 不推荐 |
 | 在 LLVM IR pass 中识别调用并插 suspend | 接近 CoroSplit，frontend 改动看似少 | 已丢失 Go 求值顺序、function-value flow、panic/defer、source CFG 和 runtime ownership；跨包 effect 太晚 | 不可作为语义方案 |
 | Go 源码到源码 async 改写 | 容易观察生成代码 | 会改变 API/函数类型/标准库调用风格，且无法自然保存 Go panic/defer/reflect ABI | 不符合目标 |
 
-推荐方案不是“越多 IR 越好”，而是只在 raw Go SSA 和 LLVM builder 之间增加目前缺失的两类事实：
+推荐方案不是“越多 IR 越好”，而是只在raw Go SSA和LLVM builder之间增加目前缺失的两类视图，并把它们冻结在同一个program artifact中：
 
-- lowering 之前就必须全局可见的稀疏事实清单 `LoweringFacts ledger`；
-- fixed point 之后才能确定的 coroutine 控制覆盖层 `CoroOverlay` 与显式 `VirtualStoragePlan`。
+- lowering之前就必须全局可见的稀疏`SitePlan`；
+- fixed point之后才能确定的coroutine `PhysicalPlan`与显式`VirtualStoragePlan`。
+
+现有`LoweringFacts`和`CoroOverlay`类型是迁移原型，可以作为这两个view的字段来源；它们不再各自演化独立schema、digest和consumer。下一版cache identity只绑定一个`CoroProgramIR`schema/digest。
 
 ## 5. 推荐总体架构
 
@@ -239,12 +268,12 @@ Phase 35 修复过 direct receive resume status 跳回 logical block 首部、�
 ```text
 Layer 0  Go SSA / AST directives / patch packages / target layout
 Layer 1  ProgramModelBuilder + PrimitiveCatalog
-         -> EmissionUniverse + LoweringFacts ledger
+         -> provisional FunctionModel/SitePlan + EmissionUniverse
 Layer 2  existing global analysis
-         -> SSAPlan (Effect/Exec/Demand/FuncRep/CallPlan)
+         -> Function/Call/Value summary (复用SSAPlan算法)
 Layer 3  CoroPlanner
-         -> CoroOverlay + target VirtualStoragePlan
-Layer 4  CoroVerifier
+         -> FunctionModel.Physical + target VirtualStoragePlan
+Layer 4  freeze one CoroProgramIR + CoroVerifier
 Layer 5  LLSSA emitter
          -> existing CoroBuilder / descriptor builders
 Layer 6  LLVM CoroSplit and target codegen
@@ -258,6 +287,8 @@ Layer 7  runtime scheduler / operation / source / target adapter
 - Layer 3 不重新扫描 raw SSA 来发现 helper；它只把已冻结事实和 plan 组合成 physical control。
 - Layer 5 不新增 hidden managed call、suspend edge 或 cleanup outcome；发现缺失事实即报 verifier/compiler error。
 - runtime 不理解 Go SSA 或 FunctionPlan；它只实现 versioned physical ABI。
+
+这些是builder内部阶段，不是四个长期可独立缺失的production组件。freeze成功后，package compiler只接收一个只读`CoroProgramIR`和当前function的`FunctionIR`；缺任何site/region/storage decision即失败。诊断JSON是该对象的projection，不能反过来成为另一份运行时真相。
 
 ### 5.2 target-neutral 与 target-configured
 
@@ -594,13 +625,13 @@ type OperationRecipe struct {
 | 普通 direct call | 当前plain/coroutine subset可表示 | explicit-status下managed plain与MayUnwind plain edge未闭环；需第9.3节协议 |
 | 递归/SCC | overlay可表示，需原型证明 | 当前physical preflight拒绝recursive lowering；需frame/resource/poll闭环 |
 | `go f(args)` | 当前仅受限静态target slice | closure/method/dynamic descriptor、argument transport |
-| channel send/recv | 当前已有direct vertical slice | channel operation 默认page为64槽，native profile为16页/1024槽；仍需typed payload GC、完整hchan接线和multi-P |
+| channel send/recv | typed hchan与route-aware operation已有direct vertical slice | channel operation 默认page为64槽，native profile为16页/1024槽；仍需typed payload precise-GC、完整语言/race矩阵和parked-result跨P物化 |
 | 多 case `select` | wait-set overlay适合表示 | native 1024-slot profile下的完整dynamic case、reflect.Select、uniform selection、typed result和P-neutral result packet |
-| timer/Sleep | native Sleep source/owner 与 Go 1.26 controlled-timer linkname 原型可表示 | 标准库 E2E 未通过；Timer channel 的 sync-visible `len/cap`、GC、`asynctimerchan`、synctest，dynamic/sharded source |
-| 文件/网络 | native Poll/Worker source、deadline/closing 和 scalar result 已接入统一 operation；冻结的regular-file与TCP标准库探针已native single-P E2E通过 | 探针之外的cancel/quiescence竞态、payload/GC、multi-P、完整net/resolver矩阵和其他platform backend尚未闭环 |
+| timer/Sleep | native Sleep source/owner 与 Go 1.26 controlled-timer linkname 已接入 | 冻结标准库E2E已通过；Timer channel完整lazy语义、GC、`asynctimerchan`、synctest、完整race矩阵和dynamic/sharded source仍待完成 |
+| 文件/网络 | native Poll/Worker source、deadline/closing 和 scalar result 已接入统一 operation；冻结regular-file探针已有E2E，TCP已在双owner fleet E2E/压力通过 | 探针之外的cancel/quiescence矩阵、payload/precise GC、parked-result迁移、完整net/resolver矩阵和其他platform backend尚未闭环 |
 | `Syscall*` | Linux/Darwin 固定 wrapper 可经 worker park 自动染色，仍需逐族 contract | 已有 bounded 4-thread/1024-job native worker 与 `{r1,r2,errno}` result cell；全 syscall family、cancel-before-start/背压、pointer GC lifetime 和 E2E 尚未完成 |
 | `RawSyscall*` | 不能统一“一律异步” | 逐ABI保留raw、signal-safe、locked-thread或不可重启语义；有contract才stack-cut/offload |
-| defer | overlay可表示；当前有静态、无环cleanup子集 | 动态defer栈、完整控制流、递归/SCC和语言矩阵仍未闭环 |
+| defer | overlay可表示；当前已有静态cleanup及frame-rooted异构动态defer LIFO子集 | range-over-func、Goexit、完整控制流、递归/SCC和语言矩阵仍未闭环 |
 | panic/recover | logical outcome已有task-stop相邻原型 | `CompletionRecord`已覆盖`Return/Panic/Abort/Shutdown`与`ReturnRecovered`提交，但完整panic/recover、`Goexit`和plain/root boundary仍未闭环 |
 | Goexit | 可预留独立control kind | defer drain、parent/root传播 |
 | closure/method value | descriptor模型可预留 | 当前physical ABI仍拒绝多类closure/method；需capture lifetime与ABI hash |
@@ -620,8 +651,8 @@ type OperationRecipe struct {
 - 可挂起 defer/panic/recover/Goexit；
 - 完整动态 function descriptor、interface 和 reflect；
 - 精确 GC frame metadata；
-- syscall/netpoll/worker 组件已有 native vertical slice，但仍需通过 `os`/`net` 标准库全链 E2E、容量/取消/GC 合同和 multi-P；
-- multi-P、P-neutral resume packet 和 affinity；
+- syscall/netpoll/worker已在native双owner TCP链闭环，仍需更广`os`/`net`/syscall、容量/取消/GC合同和高连接数backend；
+- P-neutral parked-result packet、通用global injection/steal、动态P数量和affinity；
 - WASM/WASI/RTOS/baremetal production host adapter。
 
 ### 9.1 syscall 自动染色
@@ -789,14 +820,14 @@ LLVM CoroSplit继续负责普通 SSA liveness和frame materialization。精确 G
 
 | 平台 | 核心模型判断 | 当前实现现实 |
 | --- | --- | --- |
-| Native Linux/Darwin | layout/ownership无已知冲突 | 已有single-P pipe doorbell/POSIX `poll`、monotonic timer、bounded worker、semaphore/notify、channel/select vertical slice和native runner；fleet Timer/Poll exact route、Poll callback ingress及route-local固定reactor pass已闭环，五个冻结标准库探针已E2E通过，但尚无程序级multi-P、实际物理M owner/stop/join循环、完整GC/cleanup与GOROOT矩阵 |
+| Native Linux/Darwin | layout/ownership无已知冲突 | opt-in双owner fleet已接入程序target：两个真实M/P、独立doorbell/POSIX `poll`/timer shard、Timer/Poll/Worker/Channel exact route、共享bounded worker及start/stop/join已闭环；TCP标准库探针fresh E2E与10,000次压力通过。仍缺动态P、通用steal、parked-result迁移、完整GC/cleanup与GOROOT矩阵 |
 | 其他native OS | 尚未审查 | Windows/BSD/mobile production adapter、thread/IO/ABI均未验证 |
 | JS/WASM | layout/ownership无已知冲突，可映射为1P host `RunSlice` | 32-bit layout、pre/post-CoroSplit/object和test adapter有覆盖；production queued run/timer/Promise/IO adapter未实现，仍走fail-closed fallback |
 | WASI | operation模型可映射，未验证 | pollable/poll_oneoff、filesystem/socket/clock production adapter未完成 |
 | RTOS/embedded | 静态执行模型可映射，未验证 | HAL clock/notification/ISR ingress、boundary driver和容量证明都未实现 |
 | baremetal | event-loop模型可映射，未验证 | main loop、IRQ mailbox、WFI/WFE、static/tinygc frame和production adapter都未实现 |
 
-架构不要求每G native stack、libuv、BDWGC或pthread，但这只是兼容候选，不是平台完成度。当前production target adapter实际只有llgo native Linux/Darwin single-P，其bounded blocking worker使用固定pthread pool；`coro_target_none.go` 对queued host run与retained wait采用fail-closed行为。双native domain已与该single-P entry共用唯一物理run-step reducer，并可执行/迁移P-neutral yield任务；空domain还能经公共exact idle gate进入standby、释放owner epoch，由固定route-local poll set等待doorbell/fd/deadline并在唤醒后取得新epoch。普通domain的最终G receipt也不会再触发command终止，但尚未取代program entry或提供实际并行M owner/stop/join循环。Worker也已保持单物理池并用每job的既有`OperationID.Route`支持fleet completion，不做函数地址反查；compiler-reserved profile将program/fleet回调静态分开，两者均已通过真实LLGo raw-plain plan验证。它尚未由program-level fleet coordinator启动，不改变当前single-P完成度结论。缺少filesystem、process、socket或host async能力的平台仍按target capability决定可用package。LLVM支持范围只是19–22，不考虑19以下版本。
+架构不要求每G native stack、libuv、BDWGC或pthread，但这只是兼容候选，不是平台完成度。当前production target adapter中，llgo native Linux/Darwin已有opt-in双owner fleet：route 1原位收养program executor，route 2由固定pthread M拥有；两个domain共用唯一物理run-step reducer，各自通过exact idle gate和route-local poll set等待doorbell/fd/deadline。Program target负责peer与共享worker pool的start/stop/join及route/backend/driver强关闭。Worker保持单物理池并用每job的`OperationID.Route`支持fleet completion，不做函数地址反查；C11 ring支持多个owner并发reservation。仍未提供动态P/GOMAXPROCS、通用steal、已park G跨P结果物化或完整affinity。缺少filesystem、process、socket或host async能力的平台仍按target capability决定可用package。LLVM支持范围只是19–22，不考虑19以下版本。
 
 ## 12. Cache、archive 与 summary
 
@@ -897,9 +928,15 @@ cl/coro_recipe_*.go        ordinary lowering recipe planning/emission pairs
   `internal/build.buildCoroPlan`、`cl.Compilation`、fingerprint和manifest；在事实真正进入
   cache identity时从届时当前schema升级，不使用历史预留的v9号。
 
-验收：FunctionPlan、可执行LLVM CFG、runtime ABI和运行行为不变；cache/manifest digest与相关
-metadata按当次新schema预期变化；已接入observer的预测/实际差异触发fail-closed拒绝；
-fact mutation/cache schema测试通过。
+当前report/cache slice只算迁移准备，不算Phase B完成。后续按recipe cohort推进；每个cohort必须同时：
+
+1. 让closure/helper discovery和analysis读取同一个in-memory `SitePlan`；
+2. 让实际emission observer验证同一个decision；
+3. 删除该cohort原来的helper预测、analysis classifier和preflight镜像；
+4. 增加静态gate，禁止旧classifier符号或新的raw-SSA重分类入口再次出现。
+
+验收：FunctionPlan、可执行LLVM CFG、runtime ABI和运行行为不变；cache/manifest只绑定统一
+ProgramIR identity；已迁移cohort不存在第二个consumer事实源。仅生成report或比较日志不算通过。
 
 ### Phase C：analysis只消费facts
 
@@ -907,27 +944,28 @@ fact mutation/cache schema测试通过。
 - 再逐步替换call/value-flow扫描的重复classification；必要的数据流pass仍保留。
 - report-only计算跨plain调用闭包的MaxAtomicCost，记录与当前instruction budget的差异，但不改变NeedsPreempt、primary或poll。
 
-验收：旧/新 plan、roots、FunctionID、CallPlan、ValuePlan和digest projection一致。
+验收：plan、roots、FunctionID、CallPlan和ValuePlan与冻结基线一致；production `AnalyzeSSA`对已迁移
+site只接受ProgramIR projection。旧callback/classifier在同一提交删除，不能由feature flag保留。
 
 ### Phase D：生成CoroOverlay
 
 - 仅覆盖当前preflight已接受的函数。
 - 显式生成poll、await、park、channel/select、spawn、return/panic的control cut、continuation、outcome和virtual slot；不预展开physical blocks。
-- 新 verifier独立运行；生产仍使用旧emitter。
-- overlay/storage真正进入digest时，再从届时当前schema升级；不为尚不存在的层
-  提前放空字段，不使用历史预留的v10号。
+- physical fields直接冻结进同一`FunctionIR`；诊断层可投影为CoroOverlay，但不增加独立schema/digest。
+- 新verifier先在单个whole-function cohort通过，随后该cohort立即交给新emitter；不允许把全程序
+  report-only overlay作为一个长期阶段。
 
-验收：每个旧支持函数都能产生合法、稳定的overlay dump；旧拒绝用例继续拒绝；除当次
-digest schema/metadata变化外，可执行LLVM CFG不变。
+验收：每个迁移function都只有一份合法physical plan和一个production emitter owner；旧拒绝用例继续
+拒绝。没有“生成overlay但production仍从raw SSA重建控制流”的已完成状态。
 
 ### Phase E：双backend对照
 
 - 新 coroutine emitter使用现有 CoroBuilder。
 - plain function继续旧路径。
-- 对同一fixture执行两个独立compile/module invocation：legacy读取raw SSA，新backend读取overlay，避免同名symbol在一个module双发。
+- 对同一fixture执行两个独立test-only compile/module invocation：legacy读取raw SSA，新backend读取FunctionIR，避免同名symbol在一个module双发；production config没有双backend开关。
 - 比较canonical semantic projection、suspend/continuation/helper/descriptor、post-CoroSplit verify、frame阈值和运行结果，不要求physical CFG同构。
 
-验收：native+nogc E2E、host race/shuffle、JS/WASM test adapter、native64/wasm32、LLVM 19–22全部通过。
+验收：native+nogc E2E、host race/shuffle、JS/WASM test adapter、native64/wasm32、LLVM 19–22全部通过后，在同一cohort cutover并删除legacy emitter。只完成对照而未删除旧路径不算Phase E完成。
 
 ### Phase F：按完整函数切换并删除重复实现
 
@@ -938,7 +976,7 @@ digest schema/metadata变化外，可执行LLVM CFG不变。
 
 验收：production只存在一条coroutine physical emission路径。
 
-### Phase G：在新IR上补语言能力
+### Phase G：在新IR上补语言能力（Phase R全部通过后才开始）
 
 优先顺序建议：
 
@@ -951,22 +989,41 @@ digest schema/metadata变化外，可执行LLVM CFG不变。
 7. P-neutral packet、多P/affinity；
 8. reflect和完整平台adapter。
 
-Phase B–F严格保持plan、runtime ABI和可观察行为不变；这部分才是新功能开发，不应混为一个巨大PR。PrimitiveCatalog生成器重构和Runtime V3也分别立项，不塞入等价迁移。
+Phase B–F严格保持plan、runtime ABI和可观察行为不变；Phase G才是新功能开发，并且必须等待下面Phase R的四个hard-cutover gate全部通过，不能混为一个巨大PR。PrimitiveCatalog生成器重构和Runtime V3也分别立项，不塞入等价迁移。
+
+### Phase R：runtime hard cutover（新增功能前必须完成）
+
+Phase R与compiler cohort可独立提交，但四个gate全部通过前不进入Phase G：
+
+1. **唯一native target**：native coroutine command直接创建fleet domain 0；删除program-state adoption、single-P target、default/fleet poll route、worker completion和ready distribution双实现。domain数量仍可先固定为2，但storage/lifecycle只存在一套。
+2. **唯一logical wait**：semaphore、notify、Sleep及剩余legacy park全部迁到`ParkState/OperationID`；删除G/P中的legacy WaitToken queue、Timer/Poll V1 mode和跨V1/V2 generation兼容分支。若平台idle ingress仍需要小型registration，必须是只持POD ID的物理mailbox，不能再次拥有逻辑G wait状态。
+3. **唯一source dispatcher**：用`SourceKind +`静态direct switch驱动统一bind/rollback/scan/apply/deadline/close/unbind循环；source-specific模块只保留payload、physical commit/cancel和强quiescence。不得使用Go interface、closure或producer持有Go pointer。
+4. **唯一profile**：production只保留一个coroutine enable/profile选择；PhysicalABI、ChildAwait、Bootstrap、Channel、Worker、NativeFleet等阶段开关不再组成配置笛卡尔积。target capability由冻结profile/catalog派生，测试特例留在test-only builder。
+
+runtime hard cutover不删除`OperationRecord/ParkState/WaitSetRecord/result lease/cancel/detach/quiescence/producer admission`。这些是正确性的正交事实，不是legacy层。
+
+### 14.1 不可回退的架构gate
+
+每个cutover提交都必须新增或更新机器gate；最终至少满足：
+
+- production compiler中`currentCoro`只允许存在于统一coroutine emitter边界，普通instruction文件不得直接读取；
+- helper、effect、panic、suspend、frame lifetime的production decision均可追溯到一个`SitePlan`，不存在第二个raw-SSA classifier；
+- cache/archive/manifest只接受一个`CoroProgramIR`schema/digest；旧LoweringFacts/Overlay独立identity被删除；
+- native production source tree不存在single-P/fleet互斥build tag和两套route/completion/ready实现；
+- `G`/`P`及production target不存在`WaitToken`logical queue，Timer/Poll不存在V1/V2 mode；
+- production config不再含多个阶段性`EnableCoro*`布尔字段；
+- 新增一种event source只修改source adapter、profile catalog和测试，不修改compiler opcode/feature lowerer；
+- `go test -race` runtime core、LLVM 19/20/21/22结构门和五项fresh fleet标准库E2E全部通过。
+
+gate应解析Go AST/build constraints或检查冻结catalog，不依赖容易被改名绕过的单一字符串；同时保留少量明确的forbidden-symbol检查，防止旧路径重新出现。任何一项未满足，架构优化状态就是`incomplete`，不得开始后续功能PR。
 
 ## 15. 成本、收益与性能
 
 ### 15.1 迁移代码量估计
 
-基于当前文件分布的保守估计：
+不再接受“先新增完整新backend、再等待未来删除旧backend”的峰值模型。每个replacement cohort只允许短期加入该cohort所需的`SitePlan`字段、verifier和emitter模板，并在同一提交删除对应helper预测、classifier、preflight或旧CFG拼装；production双轨不能跨cohort存在。
 
-- schema、dump、verifier：新增约 1.5–2.5k production LOC；
-- current subset translator/planner：新增约 1.0–1.8k；
-- unified emitter：新增约 1.2–2.0k；
-- 迁移峰值新旧并存：三项算术合计约 +3.7–6.3k production LOC；
-- 稳定后删除/收缩旧audit和direct lowering：约 -3.0–4.7k；
-- 稳定态相对当前只能粗估为 -1.0k 至 +3.3k production LOC，另有2–4k测试。
-
-这个区间尚未计入完整ProgramModelBuilder worklist重构、catalog生成器、digest分层和MaxAtomicCost新功能；它们可能与已有代码替换重叠，也可能净新增，因此不能用单点数字承诺最终行数。更轻的sparse ledger/control-cut overlay正是为了把峰值和稳定维护面压在这个量级，而不是再增加一份完整SSA/physical CFG。
+因此代码量按cohort而不是整个迁移估算：单个cohort原则上应是数百行级净变更；若需要新增超过约1k production LOC，必须先证明它没有复制raw SSA、fixed point或LLVM CFG，并在PR中列出同步删除量。总迁移可能仍需数千行新schema/planner/emitter，但稳定态目标是明显低于当前约55k production净增量，且`cl`、runtime adapter和配置面的架构债务gate持续下降。完整ProgramModelBuilder worklist重构、catalog生成器、digest分层和MaxAtomicCost新功能另行计量，不能混入等价迁移来掩盖净增长。
 
 因此目标不应写成“立即显著减少总行数”，而应是：每个后续能力只增加自己的语义和runtime adapter，不再复制整套compiler proof/CFG。
 
@@ -1069,8 +1126,8 @@ Phase A先报告多次运行中位数和离散度；取得稳定噪声后，再�
 7. operation使用封闭protocol family和独立WaitSetRecipe，不允许任意hook列表演化为字节码。
 8. frame retention改成通用SuspendRegionContract，优先使用稳定OperationRecord。
 9. runtime source catalog由target profile生成direct calls，不使用interface，也不让每个source复制executor。
-10. LoweringFacts和overlay/storage只在真正存在并进入production cache identity时各升级一次
-    届时当前schema；历史v9/v10不再作为版本目标。
+10. LoweringFacts、overlay和storage只作为同一个`CoroProgramIR`的projection；production cache、
+    archive和manifest只绑定一个schema/digest，历史v9/v10不再作为独立版本目标。
 11. 新旧backend按完整函数cohort切换，绝不在一个coroutine body内混拼CFG。
 12. hard-sync/host入口区分thin thunk与有状态BoundaryDriver；Go源码同步风格不强迫所有host ABI同步。
 13. panic/unwind采用logical outcome方向，但先以NoUnwind plain island和focused原型证明。
@@ -1084,16 +1141,26 @@ identity、稀疏LoweringFacts、canonical dump/digest与verifier；`cl`从冻�
 生成owner-scoped snapshot；build在任何package codegen前把该snapshot装入`CoroPlanDigest v26`、
 `cl.Compilation`、package fingerprint与manifest，source/cache registration都会验证内容和digest一致。
 
-Phase B剩余工作按以下顺序推进：
+2026-07-22复审把这一定义为“已建立观测点”，而不是已完成架构层。它目前增加了代码和cache
+identity，却没有替换production classifier/emitter；继续在其上增加完整Overlay会扩大双轨。后续严格按
+replacement cohort推进：
 
-- 增加集中EmissionLedger observer，先覆盖managed helper、explicit coroutine feature、panic和suspend；
-- 让现有lowered helper、intrinsic和frame retention路径读取或精确对照这些facts；
-- 为尚未接入observer的site显式记录coverage，而不是把当前稀疏snapshot宣称成全量emission证明；
-- 实现实际被使用的PrimitiveCatalog条目后再将其digest接入，不提前增加空schema字段；
-- 记录LoweringFacts对象数、bytes和compile wall基线，避免新事实层长期只增不减。
+1. 先提交当前双owner fleet可运行基线及五项fresh E2E结果，不再混入新能力。
+2. architecture gate test已经冻结当前债务的精确AST/build-constraint快照；每个cohort必须在删除旧路径的
+   同一提交下调数字和白名单，禁止留下可反弹额度，也禁止新增`EnableCoro*`、raw-SSA classifier、
+   single-P/fleet分支和logical WaitToken consumer。
+3. 从hidden helper/intrinsic cohort开始，让ProgramModelBuilder缓存的SitePlan同时服务closure、analysis、
+   preflight和emission observer；切换production consumer并删除该cohort旧判断。
+4. 依次迁移pure instruction、implicit fault、await/spawn、park/channel/select、panic/cleanup；每个完整
+   function cohort由统一emitter接管后立即删除旧CFG拼装，最终清除普通compiler中的`currentCoro`分支。
+5. 并行完成runtime Phase R：fleet唯一target、Park/Operation唯一logical wait、统一source dispatcher和
+   单一profile；每一项都以旧production符号为零作为完成条件。
+6. 运行runtime race、LLVM 19–22、native/wasm32结构验证和五项fresh stdlib E2E。只有全部architecture
+   gate通过，才恢复P-neutral result、dynamic P、GC、panic/Goexit和平台adapter等功能开发。
 
-完成上述预测/实际闭环后进入Phase C，让analysis逐项只消费facts；再生成CoroOverlay并开始新旧backend
-对照。除预期schema/cache identity变化外，Phase B不改变FunctionPlan、LLVM CFG、runtime ABI和运行行为。
+迁移过程可以用独立test invocation比较旧/新输出，但production永远只有一个被选择的consumer；临时双轨
+不得跨cohort保留，也不得以feature flag形式进入下一阶段。最终目标不是“文档中有新架构”，而是旧架构
+的production调用者和配置入口已经物理删除。
 
 ## 附录 A：关键代码定位
 
@@ -1118,6 +1185,7 @@ Phase B剩余工作按以下顺序推进：
 
 ## 附录 B：术语
 
+- `CoroProgramIR`：由一个ProgramModelBuilder冻结的唯一production program artifact；包含site、全局summary、physical control和storage视图，并拥有唯一schema/digest。
 - `LoweringFacts ledger`：全局fixed point期间、owner-scoped、冻结frontend lowering事实的稀疏side table。
 - `SSAPlan`：现有Effect/Exec/Demand/FuncRep/CallPlan全局结果。
 - `CoroOverlay`：fixed point之后、显式control cut、continuation、outcome和runtime contract的稀疏覆盖层。

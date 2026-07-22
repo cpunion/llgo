@@ -755,9 +755,10 @@ operation slot只有在以下条件同时满足后才可复用generation：
 | callback/reentry | explicit Callable + ForeignReentry | attach-P/reentry adapter |
 | fork/exec/process critical | special owner/runtime protocol | 禁止普通worker推断 |
 
-当前Darwin/Linux实现使用single-P、pipe doorbell、POSIX `poll`和固定worker原型。高并发
-终态必须替换或补充scalable reactor/completion backend，但不改变Callable/Invocation
-schema。
+当前Darwin/Linux opt-in fleet实现使用两个真实M/P、每route pipe doorbell与POSIX `poll`、
+exact `OperationID.Route`和一个共享固定worker pool；program start/stop/join以及TCP同步标准库
+链已运行。高并发终态仍需替换或补充scalable reactor/completion backend、动态P策略和通用
+steal，但不改变Callable/Invocation schema。
 
 ### 14.2 JS/WASM
 
@@ -805,9 +806,10 @@ schema。
 
 ### 15.1 当前fixed worker的边界
 
-当前native prototype为4个pthread、1024-slot ring、最多9个`uintptr`参数和3个scalar
-result。它验证了stackless ForeignWait、pointer-free completion、errno capture和late
-completion，但不是最终高并发策略：
+当前native profile为4个pthread、1024-slot C11 MPMC sequence ring、最多9个`uintptr`参数和
+3个scalar result。多个P可并发预留不同cell，取消已取得的reservation时以tombstone保持FIFO；完成按exact
+route投递，并在winner publication前strong-join已admit producer。它验证了stackless
+ForeignWait、pointer-free completion、errno capture和late completion，但不是最终高并发策略：
 
 - 4个NFS/FUSE/device/DNS/wait4或其他长期阻塞调用可占满全部worker；
 - 后续job即使已经进入1024-slot queue也不会开始；
@@ -836,7 +838,7 @@ completion，但不是最终高并发策略：
 - large idle connection set仍需全量扫描；
 - level-triggered hot fd会重复报告ready；
 - regular file必须被pollOpen/fstat拒绝，否则“永远ready”会掩盖实际storage阻塞；
-- single-P reactor不能外推为multi-P route、shard或work stealing已经完成。
+- 当前双route reactor不能外推为动态P数量、scalable shard或通用work stealing已经完成。
 
 后续使用epoll/kqueue/IOCP/ready-index ring和dynamic/sharded catalog；这些backend仍发布
 相同的OperationID和ReadyThenTryCommit fact，不改变标准库wrapper。
@@ -982,9 +984,10 @@ report-only原型。截至2026-07-22，迁移顺序和状态如下：
    加入版本化descriptor与runtime catalog；将worker、readiness、Promise、WASI pollable、
    RTOS notification、baremetal IRQ等固化为target-owned `OperationRecipe`，而不把backend名词
    写入通用contract。
-10. **并行、平台验收与清理（待完成）**：完成AwaitCapacity、queued cancel、
-    route-aware submission、P-neutral ResumePacket、multi-P/affinity；在各target的真实file/socket/
-    timer证据成立后，迁移并删除逐trampoline `workeraddr`兼容标注。
+10. **并行、平台验收与清理（部分完成）**：native route-aware submission、双M/P target、
+    worker lifecycle和TCP E2E已落地；仍需AwaitCapacity、queued cancel、P-neutral parked-result
+    packet、动态P/通用steal与affinity。各target的真实file/socket/timer证据成立后，迁移并删除
+    逐trampoline `workeraddr`兼容标注。
 
 ## 19. 验证矩阵
 
@@ -999,8 +1002,9 @@ report-only原型。截至2026-07-22，迁移顺序和状态如下：
   arithmetic/open/escape/unannotated拒绝用例。
 
 尚未有自动化生产证据的主要区域是resource/context lease、复杂wrapper region proof、
-dynamic descriptor、backend recipe、facts archive唯一消费链及下述跨平台E2E。forward shadow
-已经是worker授权gate和最终worker certificate inventory的唯一provenance来源。
+dynamic descriptor、通用backend-recipe catalog、facts archive唯一消费链及非native跨平台E2E。
+Native bounded worker、regular-file与双owner TCP链已有生产证据；forward shadow已经是worker
+授权gate和最终worker certificate inventory的唯一provenance来源。
 
 ### 19.1 Compiler与provenance（最终验收）
 
@@ -1042,7 +1046,7 @@ dynamic descriptor、backend recipe、facts archive唯一消费链及下述跨�
 
 | 平台 | 最终最小运行验证 |
 | --- | --- |
-| Native Linux/Darwin | time.Sleep；regular-file回环；loopback TCP read/write/deadline/close；worker饱和/容量；poll stale/cancel；multi-P route后再开steal |
+| Native Linux/Darwin | time.Sleep；regular-file回环；双owner loopback TCP read/write/deadline/close；worker饱和/容量；poll stale/cancel；P-neutral parked-result后再开通用steal |
 | JS/WASM | real later-turn Schedule；timer；Promise完成/abort/late callback；无递归reentry；wasm32 descriptor/layout |
 | WASI | clock + pollable fd；`poll_oneoff`/preview equivalent；一个nonpoll import的async或Unsupported路径 |
 | RTOS/embedded | QEMU或硬件notification、one-shot alarm、ISR publish、DMA cancel、容量填满、task affinity |
@@ -1082,8 +1086,9 @@ contract，compile-only不能替代production platform E2E。
 **已有基础设施或独立原型**：
 
 - 现有scheduler/operation核心的OperationID、generation、ParkState、WaitSetRecord、
-  select/result lease/cancel/detach/quiescence、Timer/Poll/Worker等能力，以及native single-P原型。
-  这些证明callable模型有可复用底座，不证明backend recipe或各平台已完成。
+  select/result lease/cancel/detach/quiescence、Timer/Poll/Worker等能力，以及native双owner fleet
+  target、共享worker lifecycle和TCP E2E。这些证明callable模型有可复用底座，不证明动态P、
+  通用backend recipe或各平台已完成。
 - target-neutral `NonblockingLeaseGate`的exclusive attempt、generation change、quiescence、
   close/reuse tombstone和duplicate-release防护；尚未与`internal/poll.FD`状态及compiler
   operand/context proof连接。
@@ -1100,8 +1105,9 @@ contract，compile-only不能替代production platform E2E。
 - foreign Callable descriptor、开放dynamic ABI、cross-archive summary与runtime registration/catalog；
 - target-owned OperationRecipe/adapter选择，包括worker/readiness/Promise/WASI/HAL/IRQ，以及
   reentry、retained memory/pin的物理处理；
-- `internal/poll` 迁移、真实file/socket/deadline/close竞态E2E、multi-P/高并发backend与
-  JS/WASM、WASI、RTOS/embedded、baremetal production adapter。
+- 将当前`internal/poll` socket attempt/Poll V2/opaque descriptor vertical slice推广到完整FD族；
+  扩展真实file/socket/deadline/close竞态、动态P/高并发backend，以及JS/WASM、WASI、
+  RTOS/embedded、baremetal production adapter。
 
 因此当前结论是“managed-required C declaration的total callable identity/facts、generic contract、
 target-owned TrustedInline exact-edge闭环与producer-forward shadow授权gate已落地”，不是“文件、
