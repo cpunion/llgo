@@ -1330,7 +1330,7 @@ func Coroutine(channel chan int) { <-channel }
 	testProg.ssa.Build()
 	prog := llssa.NewProgram(nil)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1346,9 +1346,8 @@ func Coroutine(channel chan int) { <-channel }
 		t.Fatal(err)
 	}
 	compilation := &Compilation{
-		CoroPlan:                  plan,
-		EmissionUniverse:          universe,
-		EnableCoroEntryResolution: true,
+		CoroPlan:         plan,
+		EmissionUniverse: universe, CoroProfile: CoroProfileStackless,
 	}
 	err = compilation.preflightCoroPlan()
 	if err == nil || !strings.Contains(err.Error(), "plan coverage") {
@@ -1670,7 +1669,7 @@ var Global struct{ *Base }
 	testProg.ssa.Build()
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1688,9 +1687,8 @@ var Global struct{ *Base }
 	compiled, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, pkg.ssa, []*ast.File{pkg.file}, goembed.VarMap{},
 		PackageOptions{Compilation: &Compilation{
-			CoroPlan:                  plan,
-			EmissionUniverse:          universe,
-			EnableCoroEntryResolution: true,
+			CoroPlan:         plan,
+			EmissionUniverse: universe, CoroProfile: CoroProfileStackless,
 		}},
 	)
 	if err != nil {

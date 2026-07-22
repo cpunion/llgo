@@ -31,10 +31,10 @@ const coroManagedInterfaceRawTrapPrefix = "__llgo_coro_method_raw_trap_v1."
 
 // coroManagedInterfaceDispatchPlan freezes the exact method families whose
 // ABI Method.Ifn_ word uses the universal {descriptor, receiver-environment}
-// transport. A family is introduced only by an open CallPlan explicitly
-// classified as UnknownManagedInterfaceDispatch. Closed invokes of the same
-// method family must use the same transport because ABI type data has one Ifn_
-// word per concrete method, independent of the source call site.
+// transport. The stackless profile uses this transport for both closed and
+// open managed invokes: ABI type data has one Ifn_ word per concrete method,
+// independent of the source call site, and a second receiver-aware plain path
+// would split panic/outcome semantics.
 type coroManagedInterfaceDispatchPlan struct {
 	calls   map[ssa.CallInstruction]struct{}
 	methods map[string]struct{}
@@ -108,7 +108,10 @@ func analyzeCoroManagedInterfaceDispatchPlan(
 	if plan == nil {
 		return nil, fmt.Errorf("managed interface descriptor requires a compilation plan")
 	}
-	// First freeze only explicitly certified open method families.
+	// First freeze every emitted managed method family. Open families retain
+	// their explicit UnknownManagedInterfaceDispatch proof. Closed families are
+	// resolved to exact candidates and publish the same universal descriptor
+	// transport, so plain and coroutine targets share one receiver-aware path.
 	for _, owner := range plan.Functions() {
 		if owner.Function == nil || (owner.Plan.Emission != coro.EmitPlain && owner.Plan.Emission != coro.EmitCoroutine) {
 			continue
@@ -120,22 +123,46 @@ func analyzeCoroManagedInterfaceDispatchPlan(
 					continue
 				}
 				callPlan, found := plan.CallPlan(call)
-				if !found || !callPlan.Open || callPlan.Unresolved != coro.UnknownManagedInterfaceDispatch {
+				if !found || call.Common() == nil || !call.Common().IsInvoke() || callPlan.Rep != coro.Dispatch {
 					continue
 				}
 				if !enabled {
 					return nil, coroLeafInstructionError(owner.Function, owner.Plan, instruction,
 						"managed interface descriptor transport is disabled")
 				}
-				if err := validateCoroManagedInterfaceDispatchCall(plan, universe, owner.Function, call, callPlan); err != nil {
-					return nil, err
-				}
 				common := call.Common()
 				key, err := coroManagedInterfaceInvokeMethodKey(universe, owner.Function, call)
 				if err != nil {
 					return nil, coroLeafInstructionError(owner.Function, owner.Plan, instruction, err.Error())
 				}
+				if callPlan.Open {
+					if callPlan.Unresolved != coro.UnknownManagedInterfaceDispatch {
+						continue
+					}
+					if err := validateCoroManagedInterfaceDispatchCall(plan, universe, owner.Function, call, callPlan); err != nil {
+						return nil, err
+					}
+				} else {
+					direct, ok := call.(*ssa.Call)
+					if !ok {
+						return nil, coroLeafInstructionError(owner.Function, owner.Plan, instruction,
+							"managed closed interface descriptor requires an ordinary call")
+					}
+					dispatch, err := resolveCoroInterfaceDispatchPlan(plan, universe, direct)
+					if err != nil {
+						return nil, coroLeafInstructionError(owner.Function, owner.Plan, instruction,
+							"managed closed interface descriptor: "+err.Error())
+					}
+					for _, candidate := range dispatch.candidates {
+						if previous := result.targets[candidate.id]; previous != nil && previous != candidate.function {
+							return nil, coroLeafInstructionError(owner.Function, owner.Plan, instruction,
+								fmt.Sprintf("managed interface target %q resolves to both %q and %q", candidate.id, previous.Name(), candidate.function.Name()))
+						}
+						result.targets[candidate.id] = candidate.function
+					}
+				}
 				result.methods[key] = struct{}{}
+				result.calls[call] = struct{}{}
 
 				// An open managed invoke can retain a bounded set of exact CHA
 				// candidates in addition to its UnknownManagedInterfaceDispatch

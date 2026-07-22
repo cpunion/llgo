@@ -106,7 +106,7 @@ var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
 	// only decrease; see TestCoroArchitectureDebtIsMonotonic.
 	currentCoro:               0,
 	planAuthority:             367,
-	stagedFeatureGate:         283,
+	stagedFeatureGate:         0,
 	legacyWait:                72,
 	nativeFork:                378,
 	fleetBuildFiles:           13,
@@ -206,19 +206,7 @@ var allowedPhysicalEmissionSessionFields = map[string]bool{
 	"explicitStatus":  true,
 }
 
-var allowedStagedCoroFeatureNames = map[string]bool{
-	"EnableCoroChannel":                true,
-	"EnableCoroChildAwait":             true,
-	"EnableCoroClosedStaticSpawn":      true,
-	"EnableCoroEntryResolution":        true,
-	"EnableCoroExplicitStatusPanicABI": true,
-	"EnableCoroNativeFleet":            true,
-	"EnableCoroPhysicalABI":            true,
-	"EnableCoroPlainDispatch":          true,
-	"EnableCoroProgramBootstrapABI":    true,
-	"EnableCoroProgramBootstrapRun":    true,
-	"EnableCoroWorker":                 true,
-}
+var allowedStagedCoroFeatureNames = map[string]bool{}
 
 var allowedExecutorSourceCatalogFields = map[string]bool{
 	"Waits": true, "Timers": true, "Poll": true, "Manual": true,

@@ -111,9 +111,9 @@ func Root(value interface{ As(any) bool }, target any, flag bool) bool {
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
 	program := newLLSSAProg(t)
 	defer program.Dispose()
-	universe, err := PrepareEmissionUniverseWithOptions(
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		program, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}},
-		EmissionUniverseOptions{EnableCoroChannel: true},
+		EmissionUniverseOptions{CoroProfile: CoroProfileStackless},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -135,7 +135,7 @@ func Root(value interface{ As(any) bool }, target any, flag bool) bool {
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
@@ -212,7 +212,7 @@ func Root(value interface{ As(any) bool }, target any, flag bool) bool {
 	}
 
 	compilation := coroClosedInterfacePlainCompilation(plan, universe)
-	compilation.EnableCoroExplicitStatusPanicABI = true
+	compilation.CoroProfile = CoroProfileStackless
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		program, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
@@ -507,8 +507,8 @@ func buildCoroInterfaceDispatchFixture(t *testing.T, source string, resolution c
 	t.Helper()
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
 	program := newLLSSAProg(t)
-	universe, err := PrepareEmissionUniverseWithOptions(
-		program, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}}, EmissionUniverseOptions{EnableCoroChannel: true},
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
+		program, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}}, EmissionUniverseOptions{CoroProfile: CoroProfileStackless},
 	)
 	if err != nil {
 		program.Dispose()
@@ -523,7 +523,7 @@ func buildCoroInterfaceDispatchFixture(t *testing.T, source string, resolution c
 	invoke := coroInterfaceDispatchFindInvoke(t, root)
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
@@ -542,8 +542,8 @@ func buildCoroPointerPromotedInterfaceDispatchFixture(t *testing.T, source strin
 	t.Helper()
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
 	program := newLLSSAProg(t)
-	universe, err := PrepareEmissionUniverseWithOptions(
-		program, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}}, EmissionUniverseOptions{EnableCoroChannel: true},
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
+		program, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}}, EmissionUniverseOptions{CoroProfile: CoroProfileStackless},
 	)
 	if err != nil {
 		program.Dispose()
@@ -570,7 +570,7 @@ func buildCoroPointerPromotedInterfaceDispatchFixture(t *testing.T, source strin
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		FunctionIDs:          functionIDs,

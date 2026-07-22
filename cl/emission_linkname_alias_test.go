@@ -184,9 +184,9 @@ func llgoRuntimeHook(value int) int { return value + 1 }
 		t.Fatal(err)
 	}
 	ctx.compilation = &Compilation{
-		EnableCoroEntryResolution: true,
-		CoroPlan:                  plan,
-		EmissionUniverse:          universe,
+
+		CoroPlan:         plan,
+		EmissionUniverse: universe, CoroProfile: CoroProfileStackless,
 	}
 	entry, err := ctx.resolveFunctionSymbol(declFn)
 	if err != nil {

@@ -66,7 +66,7 @@ func TestCoroFrameExactRootsAndUintptrKeepaliveAreFrozen(t *testing.T) {
 	digest := ""
 	for iteration := 0; iteration < 2; iteration++ {
 		prog, _, universe, method, audit, proof := prepareCoroFrameRootAudit(
-			t, coroFrameExactRootsFixture, "Method", EmissionUniverseOptions{EnableCoroWorker: true},
+			t, coroFrameExactRootsFixture, "Method", EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 		)
 		if got := proof.exactRootCapabilityProfile(); got != coroFrameRetentionExactRootProfileV2 {
 			prog.Dispose()
@@ -617,7 +617,7 @@ func Root(header *Header, offset uintptr) unsafe.Pointer {
 				prog = newLLSSAProgForTarget(t, test.target)
 			}
 			defer prog.Dispose()
-			universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+			universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -627,7 +627,7 @@ func Root(header *Header, offset uintptr) unsafe.Pointer {
 			}
 			functionIDs := universe.FunctionIDConfig()
 			functionIDs.CoroABI = coro.PhysicalABIV1
-			functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+			functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 			functionIDs.ArchiveReady = true
 			root, align := ssaPkg.Func("Root"), ssaPkg.Func("Align")
 			plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
@@ -864,7 +864,7 @@ func TestCoroFrameExactRootsRejectPreciseShadowProfile(t *testing.T) {
 	emitShadowStackInstrumentation = true
 	defer func() { emitShadowStackInstrumentation = old }()
 	prog, _, _, _, _, proof := prepareCoroFrameRootAudit(
-		t, coroFrameExactRootsFixture, "Method", EmissionUniverseOptions{EnableCoroWorker: true},
+		t, coroFrameExactRootsFixture, "Method", EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	defer prog.Dispose()
 	if proof.exactRootCapabilityProfile() != "" || proof.exactRootCapabilityDigest() != "" || len(proof.exactRetainedRoots()) != 0 {
@@ -879,7 +879,7 @@ func prepareCoroFrameRootAudit(t *testing.T, source, function string, options Em
 	t.Helper()
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
 	prog := newLLSSAProg(t)
-	universe, err := PrepareEmissionUniverseWithOptions(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}}, options)
+	universe, err := prepareStacklessEmissionUniverseWithOptions(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}}, options)
 	if err != nil {
 		prog.Dispose()
 		t.Fatal(err)

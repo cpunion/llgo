@@ -190,7 +190,7 @@ func validateCoroDirectSpawnArgumentTransport(
 // an explicit safepoint using its physical G; there is no TLS/current-G
 // fallback anywhere in this path.
 func (p *context) tryCompileCoroClosedStaticSpawn(b llssa.Builder, spawn *ssa.Go) bool {
-	if spawn == nil {
+	if spawn == nil || p == nil || p.compilation == nil || !p.compilation.CoroClosedStaticSpawnActive() {
 		return false
 	}
 	body := p.coroBody()

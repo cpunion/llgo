@@ -113,7 +113,7 @@ func coroSelectPatchedWorkerAddressTrampoline(fn *ssa.Function, fromPatch bool) 
 // adapter used only by patch code; that form has no upstream alias to install
 // but is held to the same frozen symbol, declaration, and arity constraints.
 func (u *EmissionUniverse) aliasPatchedWorkerAddressTrampolines() error {
-	if u == nil || !u.enableCoroWorker {
+	if u == nil || !u.CoroWorkerEnabled() {
 		return nil
 	}
 	packages := make([]*preparedEmissionPackage, 0, len(u.packages))
@@ -219,7 +219,7 @@ func coroWorkerAddressAliasDeclaration(fn *ssa.Function) bool {
 // aliases are immutable. Unsupported call sites deliberately remain ordinary
 // synchronous intrinsics; a physical coroutine cannot elide/lower them.
 func (u *EmissionUniverse) freezeCoroWorkerSyscallCertificates() error {
-	if u == nil || !u.enableCoroWorker {
+	if u == nil || !u.CoroWorkerEnabled() {
 		return nil
 	}
 	shadows, err := AnalyzeCoroCallableShadows(u)

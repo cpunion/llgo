@@ -361,11 +361,11 @@ func compileCoroChannelFixture(t *testing.T, target *llssa.Target) (
 	} else {
 		prog = newLLSSAProgForTarget(t, target)
 	}
-	universe, err := PrepareEmissionUniverseWithOptions(
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		prog,
 		nil,
 		[]EmissionPackage{{SSA: ssaPkg, Files: files}},
-		EmissionUniverseOptions{EnableCoroChannel: true},
+		EmissionUniverseOptions{CoroProfile: CoroProfileStackless},
 	)
 	if err != nil {
 		prog.Dispose()
@@ -383,7 +383,7 @@ func compileCoroChannelFixture(t *testing.T, target *llssa.Target) (
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	roots := make(coro.Roots, 0, len(functions))
 	for _, fn := range functions {
@@ -399,18 +399,13 @@ func compileCoroChannelFixture(t *testing.T, target *llssa.Target) (
 		t.Fatal(err)
 	}
 	compilation := &Compilation{
-		CoroPlan:                         plan,
-		EmissionUniverse:                 universe,
-		EnableCoroEntryResolution:        true,
-		EnableCoroPhysicalABI:            true,
-		EnableCoroChildAwait:             true,
-		EnableCoroProgramBootstrapRun:    true,
-		EnableCoroChannel:                true,
-		EnableCoroExplicitStatusPanicABI: true,
-		CoroABI:                          coro.PhysicalABIV1,
-		SchedulerABI:                     coro.SchedulerProgramBootstrapChannelABIV0,
-		PanicABI:                         coro.PanicExplicitStatusABIV0,
-		FuncRepABI:                       coro.FuncRepABIV0,
+		CoroPlan:         plan,
+		EmissionUniverse: universe,
+
+		CoroABI:      coro.PhysicalABIV1,
+		SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+		PanicABI:     coro.PanicExplicitStatusABIV0,
+		FuncRepABI:   coro.FuncRepABIV1, CoroProfile: CoroProfileStackless,
 	}
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
@@ -424,20 +419,11 @@ func compileCoroChannelFixture(t *testing.T, target *llssa.Target) (
 }
 
 func TestCoroChannelCompilationCapabilityFailsClosed(t *testing.T) {
-	compilation := &Compilation{EnableCoroChannel: true}
-	if err := compilation.preflightCoroPlan(); err == nil || !strings.Contains(err.Error(), "requires runnable PhysicalABIV1") {
-		t.Fatalf("channel capability dependency error = %v", err)
-	}
-	compilation = &Compilation{
-		EnableCoroEntryResolution:     true,
-		EnableCoroPhysicalABI:         true,
-		EnableCoroChildAwait:          true,
-		EnableCoroProgramBootstrapRun: true,
-		EnableCoroChannel:             true,
-		CoroABI:                       coro.PhysicalABIV1,
-		SchedulerABI:                  coro.SchedulerProgramBootstrapABIV2,
-		PanicABI:                      coro.PanicLegacyABIV0,
-		FuncRepABI:                    coro.FuncRepABIV0,
+	compilation := &Compilation{
+		CoroABI:      coro.PhysicalABIV1,
+		SchedulerABI: "invalid-scheduler",
+		PanicABI:     coro.PanicExplicitStatusABIV0,
+		FuncRepABI:   coro.FuncRepABIV1, CoroProfile: CoroProfileStackless,
 	}
 	if err := compilation.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "scheduler ABI") {
 		t.Fatalf("channel scheduler identity error = %v", err)

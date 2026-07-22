@@ -43,7 +43,7 @@ func Call(value int) int { return Leaf(value) }
 	}
 	prog := llssa.NewProgram(nil)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{
 		SSA: pkg.ssa, Files: []*ast.File{pkg.file}, Identity: pkg.types.Path(),
 		AssemblyNoSuspendProofs: []CoroAssemblyNoSuspendProof{proof},
 	}})
@@ -105,7 +105,7 @@ func Leaf()
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{
+			_, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{
 				SSA: pkg.ssa, Files: []*ast.File{pkg.file}, Identity: pkg.types.Path(),
 				AssemblyNoSuspendProofs: []CoroAssemblyNoSuspendProof{test.proof},
 			}})

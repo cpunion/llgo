@@ -95,16 +95,9 @@ type EmissionUniverseOptions struct {
 	// CompleteRuntimeABI requires the exact LLGo runtime package and freezes
 	// every compiler-inserted runtime helper edge. Missing runtime helpers fail
 	// construction instead of being left to the legacy LLVM symbol resolver.
-	CompleteRuntimeABI bool
-	// EnableCoroChannel freezes the alternate nonblocking runtime-helper edges
-	// used by physical channel operations. It must match Compilation exactly.
-	EnableCoroChannel bool
-	// EnableCoroWorker freezes the llgo.syscall call-site contract as one
-	// compiler-owned worker operation in the current coroutine frame. The
-	// declaration call is erased only for the exact uintptr-only V1 shape plus
-	// a frozen static FuncPCABI0/workeraddr target certificate; arbitrary words,
-	// wider calls, and typed syscall forms remain fail-closed.
-	EnableCoroWorker bool
+	CompleteRuntimeABI     bool
+	CoroProfile            coro.RuntimeProfile
+	CoroTargetCapabilities coro.TargetCapabilities
 }
 
 type preparedEmissionPackage struct {
@@ -136,8 +129,8 @@ type EmissionUniverse struct {
 	goProg             *ssa.Program
 	patches            Patches
 	completeRuntimeABI bool
-	enableCoroChannel  bool
-	enableCoroWorker   bool
+	coroProfile        coro.RuntimeProfile
+	coroCapabilities   coro.TargetCapabilities
 	packages           map[*ssa.Package]*preparedEmissionPackage
 	byTypes            map[*types.Package]*preparedEmissionPackage
 	typeOwners         map[*types.Package]map[*preparedEmissionPackage]none
@@ -483,8 +476,8 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		prog:                       prog,
 		patches:                    patches,
 		completeRuntimeABI:         options.CompleteRuntimeABI,
-		enableCoroChannel:          options.EnableCoroChannel,
-		enableCoroWorker:           options.EnableCoroWorker,
+		coroProfile:                options.CoroProfile,
+		coroCapabilities:           options.CoroTargetCapabilities,
 		packages:                   make(map[*ssa.Package]*preparedEmissionPackage, len(inputs)),
 		byTypes:                    make(map[*types.Package]*preparedEmissionPackage, len(inputs)*3),
 		typeOwners:                 make(map[*types.Package]map[*preparedEmissionPackage]none, len(inputs)*3),
@@ -785,13 +778,13 @@ func (u *EmissionUniverse) CompleteRuntimeABI() bool {
 // CoroChannelEnabled reports the immutable channel-lowering choice frozen
 // while the emission universe was prepared.
 func (u *EmissionUniverse) CoroChannelEnabled() bool {
-	return u != nil && u.enableCoroChannel
+	return u != nil && u.coroProfile.Active()
 }
 
 // CoroWorkerEnabled reports the immutable worker-lowering choice frozen
 // while the emission universe was prepared.
 func (u *EmissionUniverse) CoroWorkerEnabled() bool {
-	return u != nil && u.enableCoroWorker
+	return u != nil && u.coroProfile.Active() && u.coroCapabilities.Worker()
 }
 
 // Functions returns canonical required functions in deterministic order.
@@ -1610,7 +1603,7 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 	if !intrinsic {
 		return CoroIntrinsicCallUnsupported, false, nil
 	}
-	if isLLGoSyscallIntrinsic(opcode) && u.enableCoroWorker {
+	if isLLGoSyscallIntrinsic(opcode) && u.CoroWorkerEnabled() {
 		direct, ok := call.(*ssa.Call)
 		if !ok || direct.Common() == nil || direct.Common().IsInvoke() {
 			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
@@ -2033,7 +2026,7 @@ func (u *EmissionUniverse) CoroStaticCodeAddressCallArgument(call ssa.CallInstru
 	// not authorize invocation; the independent worker syscall certificate still
 	// proves the fixed target, arity, carrier provenance, and active call edges.
 	target, exact := coroFuncPCABI0ExactStaticOperand(direct)
-	if !exact || !u.enableCoroWorker {
+	if !exact || !u.CoroWorkerEnabled() {
 		return false, nil
 	}
 	canonical, resolved := u.Resolve(target)

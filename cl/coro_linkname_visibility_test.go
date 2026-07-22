@@ -91,7 +91,7 @@ func TestCoroGoLinknameVisibilitySysctlBridgeNativeAndWasm32(t *testing.T) {
 				prog = newLLSSAProgForTarget(t, test.target)
 			}
 			defer prog.Dispose()
-			universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{
+			universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{
 				{SSA: cpuPkg.ssa, Files: []*ast.File{cpuPkg.file}},
 				{SSA: runtimePkg.ssa, Files: []*ast.File{runtimePkg.file}},
 				{SSA: consumerPkg.ssa, Files: []*ast.File{consumerPkg.file}},
@@ -127,7 +127,7 @@ func TestCoroGoLinknameVisibilitySysctlBridgeNativeAndWasm32(t *testing.T) {
 			}
 			functionIDs := universe.FunctionIDConfig()
 			functionIDs.CoroABI = coro.PhysicalABIV1
-			functionIDs.SchedulerABI = coro.SchedulerChildAwaitABIV0
+			functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 			functionIDs.ArchiveReady = true
 			plan, err := coro.AnalyzeSSA(testProg.ssa, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 				EmissionUniverse:     ssaUniverse,
@@ -257,7 +257,7 @@ func Root() { T{}.Visible() }
 			}
 			prog := newLLSSAProg(t)
 			defer prog.Dispose()
-			universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+			universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 			if err != nil {
 				t.Fatal(err)
 			}

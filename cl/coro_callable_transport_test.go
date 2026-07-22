@@ -69,7 +69,7 @@ func prepareCoroCallableTransportFixture(t *testing.T) coroCallableTransportFixt
 	ssaPkg, _, files := buildGoSSAPkg(t, coroCallableTransportFixtureSource)
 	prog := newLLSSAProg(t)
 	ParsePkgSyntax(prog, ssaPkg.Pkg, files)
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		prog.Dispose()
 		t.Fatal(err)
@@ -81,7 +81,7 @@ func prepareCoroCallableTransportFixture(t *testing.T) coroCallableTransportFixt
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	roots := make(coro.Roots, 0, 6)
 	for _, name := range []string{"BoxRaw", "AssertRaw", "BoxMixed", "AssertMixed", "BoxManaged", "AssertManaged"} {

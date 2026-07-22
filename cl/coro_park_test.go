@@ -214,7 +214,7 @@ func compileCoroParkFixture(t *testing.T, target *llssa.Target) (
 	} else {
 		prog = newLLSSAProgForTarget(t, target)
 	}
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		prog.Dispose()
 		t.Fatal(err)
@@ -241,7 +241,7 @@ func compileCoroParkFixture(t *testing.T, target *llssa.Target) (
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerChildAwaitABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,

@@ -45,7 +45,7 @@ func Root() int { return Apply(Target, 41) }
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,8 +75,8 @@ func Root() int { return Apply(Target, 41) }
 		t.Fatalf("target ABI hash %x differs from name-less call signature hash %x", targetABI.hash, callABI.hash)
 	}
 	functionIDs := universe.FunctionIDConfig()
-	functionIDs.CoroABI = coro.EntryResolutionABIV0
-	functionIDs.SchedulerABI = coro.SchedulerNoneABIV0
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: ssaPkg.Func("Root"), Demand: coro.SyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
@@ -105,14 +105,13 @@ func Root() int { return Apply(Target, 41) }
 	compiled, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		PackageOptions{Compilation: &Compilation{
-			CoroPlan:                  plan,
-			EmissionUniverse:          universe,
-			EnableCoroEntryResolution: true,
-			EnableCoroPlainDispatch:   true,
-			CoroABI:                   coro.EntryResolutionABIV0,
-			SchedulerABI:              coro.SchedulerNoneABIV0,
-			PanicABI:                  coro.PanicLegacyABIV0,
-			FuncRepABI:                coro.FuncRepABIV1,
+			CoroPlan:         plan,
+			EmissionUniverse: universe,
+
+			CoroABI:      coro.PhysicalABIV1,
+			SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+			PanicABI:     coro.PanicExplicitStatusABIV0,
+			FuncRepABI:   coro.FuncRepABIV1, CoroProfile: CoroProfileStackless,
 		}},
 	)
 	if err != nil {
@@ -208,7 +207,7 @@ func Root() int {
 	dynamicCall := coroPlainDispatchOnlyDynamicCall(t, apply)
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,8 +216,8 @@ func Root() int {
 		t.Fatal(err)
 	}
 	functionIDs := universe.FunctionIDConfig()
-	functionIDs.CoroABI = coro.EntryResolutionABIV0
-	functionIDs.SchedulerABI = coro.SchedulerNoneABIV0
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.SyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
@@ -226,7 +225,7 @@ func Root() int {
 		MaxPlainInstructions: -1,
 		ClassifyClosedDynamicCall: func(_ *ssa.Function, call ssa.CallInstruction) (coro.SSAClosedDynamicCallCertificate, bool, error) {
 			if call == dynamicCall {
-				return coro.SSAClosedDynamicCallCertificate{Targets: []*ssa.Function{target}}, true, nil
+				return coro.SSAClosedDynamicCallCertificate{Targets: []*ssa.Function{target}, SyncDispatch: true}, true, nil
 			}
 			return coro.SSAClosedDynamicCallCertificate{}, false, nil
 		},
@@ -241,14 +240,13 @@ func Root() int {
 	compiled, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		PackageOptions{Compilation: &Compilation{
-			CoroPlan:                  plan,
-			EmissionUniverse:          universe,
-			EnableCoroEntryResolution: true,
-			EnableCoroPlainDispatch:   true,
-			CoroABI:                   coro.EntryResolutionABIV0,
-			SchedulerABI:              coro.SchedulerNoneABIV0,
-			PanicABI:                  coro.PanicLegacyABIV0,
-			FuncRepABI:                coro.FuncRepABIV1,
+			CoroPlan:         plan,
+			EmissionUniverse: universe,
+
+			CoroABI:      coro.PhysicalABIV1,
+			SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+			PanicABI:     coro.PanicExplicitStatusABIV0,
+			FuncRepABI:   coro.FuncRepABIV1, CoroProfile: CoroProfileStackless,
 		}},
 	)
 	if err != nil {

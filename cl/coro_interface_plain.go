@@ -89,6 +89,7 @@ func analyzeCoroClosedInterfacePlainPlan(
 	plan *coro.SSAPlan,
 	universe *EmissionUniverse,
 	explicitStatusPanic, interfaceAwait bool,
+	managedPlans ...*coroManagedInterfaceDispatchPlan,
 ) (*coroClosedInterfacePlainPlan, error) {
 	if plan == nil {
 		return nil, fmt.Errorf("closed interface plain island requires a compilation plan")
@@ -96,6 +97,10 @@ func analyzeCoroClosedInterfacePlainPlan(
 	result := &coroClosedInterfacePlainPlan{
 		calls:   make(map[ssa.CallInstruction]struct{}),
 		targets: make(map[coro.FunctionID]*ssa.Function),
+	}
+	var managed *coroManagedInterfaceDispatchPlan
+	if len(managedPlans) != 0 {
+		managed = managedPlans[0]
 	}
 	// Restricted CHA may mark a receiver method Dispatch because of an
 	// unreachable interface consumer. A live type descriptor can independently
@@ -218,6 +223,9 @@ func analyzeCoroClosedInterfacePlainPlan(
 				}
 
 				if common.IsInvoke() {
+					if managed.acceptsCall(call) {
+						continue
+					}
 					if callPlan.Open && callPlan.Unresolved == coro.UnknownManagedInterfaceDispatch {
 						if !interfaceAwait || owner.Plan.Emission != coro.EmitCoroutine {
 							return nil, coroLeafInstructionError(fn, owner.Plan, instruction,

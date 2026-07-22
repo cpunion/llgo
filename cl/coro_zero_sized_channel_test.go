@@ -91,9 +91,9 @@ func compileCoroZeroSizedChannelFixture(t *testing.T) (llssa.Program, llssa.Pack
 	t.Helper()
 	ssaPkg, _, files := buildGoSSAPkg(t, coroZeroSizedChannelSource)
 	program := newLLSSAProg(t)
-	universe, err := PrepareEmissionUniverseWithOptions(
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		program, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}},
-		EmissionUniverseOptions{EnableCoroChannel: true},
+		EmissionUniverseOptions{CoroProfile: CoroProfileStackless},
 	)
 	if err != nil {
 		program.Dispose()
@@ -107,7 +107,7 @@ func compileCoroZeroSizedChannelFixture(t *testing.T) (llssa.Program, llssa.Pack
 	functions := []*ssa.Function{ssaPkg.Func("Recv"), ssaPkg.Func("Select")}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	roots := make(coro.Roots, 0, len(functions))
 	for _, function := range functions {
@@ -123,18 +123,13 @@ func compileCoroZeroSizedChannelFixture(t *testing.T) (llssa.Program, llssa.Pack
 		t.Fatal(err)
 	}
 	compilation := &Compilation{
-		CoroPlan:                         plan,
-		EmissionUniverse:                 universe,
-		EnableCoroEntryResolution:        true,
-		EnableCoroPhysicalABI:            true,
-		EnableCoroChildAwait:             true,
-		EnableCoroProgramBootstrapRun:    true,
-		EnableCoroChannel:                true,
-		EnableCoroExplicitStatusPanicABI: true,
-		CoroABI:                          coro.PhysicalABIV1,
-		SchedulerABI:                     coro.SchedulerProgramBootstrapChannelABIV0,
-		PanicABI:                         coro.PanicExplicitStatusABIV0,
-		FuncRepABI:                       coro.FuncRepABIV0,
+		CoroPlan:         plan,
+		EmissionUniverse: universe,
+
+		CoroABI:      coro.PhysicalABIV1,
+		SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+		PanicABI:     coro.PanicExplicitStatusABIV0,
+		FuncRepABI:   coro.FuncRepABIV1, CoroProfile: CoroProfileStackless,
 	}
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		program, nil, nil, nil, ssaPkg, files, goembed.VarMap{},

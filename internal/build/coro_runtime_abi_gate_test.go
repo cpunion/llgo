@@ -45,7 +45,7 @@ func Present() {}
 	ctx := &context{
 		prog:      prog,
 		progSSA:   ssaPkg.Prog,
-		buildConf: &Config{EnableCoroEntryResolution: true},
+		buildConf: &Config{CoroProfile: CoroProfileStackless},
 	}
 	if err := prepareCoroEmissionUniverse(ctx, []*aPackage{pkg}); err != nil {
 		t.Fatal(err)
@@ -71,9 +71,7 @@ func Present() {}
 		t.Fatal("report universe unexpectedly claims a complete runtime ABI")
 	}
 	conf := &Config{
-		Goos: "linux", Goarch: "amd64",
-		EnableCoroEntryResolution:     true,
-		EnableCoroProgramBootstrapRun: true,
+		Goos: "linux", Goarch: "amd64", CoroProfile: CoroProfileStackless,
 	}
 	if !nativeCoroTimerRuntimeABI(conf) {
 		t.Fatal("test configuration does not select the native timer target ABI")

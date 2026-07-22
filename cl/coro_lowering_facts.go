@@ -144,7 +144,7 @@ func (u *EmissionUniverse) coroLoweringFactsInstanceID(function *ssa.Function, f
 		u.prog.DataLayout(),
 		strconv.Itoa(u.prog.PointerSize()*8),
 		strconv.FormatBool(u.completeRuntimeABI),
-		strconv.FormatBool(u.enableCoroChannel),
+		strconv.FormatBool(u.CoroChannelEnabled()),
 		owner.identity,
 		strconv.Itoa(kind),
 		strconv.Itoa(int(state.state)),

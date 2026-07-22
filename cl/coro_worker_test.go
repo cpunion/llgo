@@ -215,11 +215,11 @@ func TestCoroWorkerSyscallFailureConventionIdentityIsFrozen(t *testing.T) {
 	ssaPkg, _, files := buildGoSSAPkg(t, coroWorkerTestSource)
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverseWithOptions(
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		prog,
 		nil,
 		[]EmissionPackage{{SSA: ssaPkg, Files: files}},
-		EmissionUniverseOptions{EnableCoroWorker: true},
+		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -264,11 +264,11 @@ func TestCoroWorkerProductionLinuxDynamicRawSyscallFailsClosed(t *testing.T) {
 	ssaPkg, _, files := buildGoSSAPkg(t, fixtureSource)
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverseWithOptions(
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		prog,
 		nil,
 		[]EmissionPackage{{SSA: ssaPkg, Files: files}},
-		EmissionUniverseOptions{EnableCoroWorker: true},
+		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -317,7 +317,7 @@ func TestCoroWorkerProductionLinuxDynamicRawSyscallFailsClosed(t *testing.T) {
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapWorkerABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
@@ -404,11 +404,11 @@ func compileCoroWorkerSourceFixture(
 		}
 		return runtimePackage
 	})
-	universe, err := PrepareEmissionUniverseWithOptions(
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		prog,
 		nil,
 		[]EmissionPackage{{SSA: ssaPkg, Files: files}},
-		EmissionUniverseOptions{EnableCoroWorker: true},
+		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		prog.Dispose()
@@ -459,7 +459,7 @@ func compileCoroWorkerSourceFixture(
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapWorkerABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, analysisRoots, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
@@ -489,23 +489,22 @@ func compileCoroWorkerSourceFixture(
 			}
 			return certificate.ID, nil
 		},
+		ClassifyStaticCodeAddressCallArgument: func(_ *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+			return universe.CoroStaticCodeAddressCallArgument(call, argument)
+		},
 	})
 	if err != nil {
 		prog.Dispose()
 		t.Fatal(err)
 	}
 	compilation := &Compilation{
-		CoroPlan:                      plan,
-		EmissionUniverse:              universe,
-		EnableCoroEntryResolution:     true,
-		EnableCoroPhysicalABI:         true,
-		EnableCoroChildAwait:          true,
-		EnableCoroProgramBootstrapRun: true,
-		EnableCoroWorker:              true,
-		CoroABI:                       coro.PhysicalABIV1,
-		SchedulerABI:                  coro.SchedulerProgramBootstrapWorkerABIV0,
-		PanicABI:                      coro.PanicLegacyABIV0,
-		FuncRepABI:                    coro.FuncRepABIV0,
+		CoroPlan:         plan,
+		EmissionUniverse: universe,
+
+		CoroABI:      coro.PhysicalABIV1,
+		SchedulerABI: coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
+		PanicABI:     coro.PanicExplicitStatusABIV0,
+		FuncRepABI:   coro.FuncRepABIV1, CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities(),
 	}
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},

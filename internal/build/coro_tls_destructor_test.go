@@ -538,7 +538,7 @@ func __llgo_coro_frame_free_v1() {}
 	}
 	ctx := &context{
 		prog:                        prog,
-		buildConf:                   &Config{EnableCoroChildAwait: true, EnableCoroProgramBootstrapRun: true},
+		buildConf:                   &Config{CoroProfile: CoroProfileStackless},
 		coroEmission:                emission,
 		coroSSAEmission:             ssaEmission,
 		coroTLSDestructorFixturePkg: llssa.PkgRuntime,

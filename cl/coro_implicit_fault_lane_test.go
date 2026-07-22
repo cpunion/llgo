@@ -43,7 +43,7 @@ func Root() *byte { return new(byte) }
 
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
+	universe, err := prepareStacklessEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
 		{SSA: runtimePkg.ssa, Files: []*ast.File{runtimePkg.file}},
 		{SSA: callerPkg.ssa, Files: []*ast.File{callerPkg.file}},
 	}, EmissionUniverseOptions{CompleteRuntimeABI: true})
@@ -83,7 +83,7 @@ func Root(values []byte, index int) byte { return values[index] }
 `)
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func Root(values []byte, index int) byte { return values[index] }
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerChildAwaitABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
@@ -149,7 +149,7 @@ func Root(values []byte, index int) byte { return values[index] }
 
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
+	universe, err := prepareStacklessEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
 		{SSA: runtimePkg.ssa, Files: []*ast.File{runtimePkg.file}},
 		{SSA: callerPkg.ssa, Files: []*ast.File{callerPkg.file}},
 	}, EmissionUniverseOptions{CompleteRuntimeABI: true})
@@ -173,7 +173,7 @@ func Root(values []byte, index int) byte { return values[index] }
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerChildAwaitABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(testProg.ssa, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:                 ssaUniverse,

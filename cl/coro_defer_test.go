@@ -613,7 +613,7 @@ func compileCoroAwaitCompletionCleanupFixture(
 	} else {
 		prog = newLLSSAProgForTarget(t, target)
 	}
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		prog.Dispose()
 		t.Fatal(err)
@@ -626,7 +626,7 @@ func compileCoroAwaitCompletionCleanupFixture(
 	parent, child := ssaPkg.Func("Parent"), ssaPkg.Func("Child")
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerChildAwaitABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: parent, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
@@ -645,7 +645,7 @@ func compileCoroAwaitCompletionCleanupFixture(
 	}
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroChildAwaitCompilation(compilation)
-	compilation.EnableCoroExplicitStatusPanicABI = true
+	compilation.CoroProfile = CoroProfileStackless
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
@@ -670,7 +670,7 @@ func compileCoroStaticCleanupIRFixture(
 	} else {
 		prog = newLLSSAProgForTarget(t, target)
 	}
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		prog.Dispose()
 		t.Fatal(err)
@@ -694,7 +694,7 @@ func compileCoroStaticCleanupIRFixture(
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerChildAwaitABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
@@ -713,7 +713,7 @@ func compileCoroStaticCleanupIRFixture(
 	}
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroChildAwaitCompilation(compilation)
-	compilation.EnableCoroExplicitStatusPanicABI = true
+	compilation.CoroProfile = CoroProfileStackless
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
@@ -754,7 +754,7 @@ func AllocZ(size uintptr) unsafe.Pointer {
 	} else {
 		prog = newLLSSAProgForTarget(t, targetMachine)
 	}
-	universe, err := PrepareEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
+	universe, err := prepareStacklessEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
 		{SSA: runtimePackage.ssa, Files: []*ast.File{runtimePackage.file}},
 		{SSA: ssaPkg, Files: files},
 	}, EmissionUniverseOptions{CompleteRuntimeABI: true})
@@ -793,7 +793,7 @@ func AllocZ(size uintptr) unsafe.Pointer {
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerChildAwaitABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
@@ -813,7 +813,7 @@ func AllocZ(size uintptr) unsafe.Pointer {
 	}
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroChildAwaitCompilation(compilation)
-	compilation.EnableCoroExplicitStatusPanicABI = true
+	compilation.CoroProfile = CoroProfileStackless
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
@@ -853,7 +853,7 @@ func FreeDeferNode(pointer unsafe.Pointer) {
 	} else {
 		prog = newLLSSAProgForTarget(t, targetMachine)
 	}
-	universe, err := PrepareEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
+	universe, err := prepareStacklessEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
 		{SSA: runtimePackage.ssa, Files: []*ast.File{runtimePackage.file}},
 		{SSA: ssaPkg, Files: files},
 	}, EmissionUniverseOptions{CompleteRuntimeABI: true})
@@ -886,7 +886,7 @@ func FreeDeferNode(pointer unsafe.Pointer) {
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{
 		{Function: root, Demand: coro.AsyncDemand},
@@ -921,8 +921,8 @@ func FreeDeferNode(pointer unsafe.Pointer) {
 	}
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
-	compilation.EnableCoroPlainDispatch = true
-	compilation.EnableCoroExplicitStatusPanicABI = true
+	compilation.CoroProfile = CoroProfileStackless
+	compilation.CoroProfile = CoroProfileStackless
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
 	compilation.FuncRepABI = coro.FuncRepABIV1
 	pkg, _, err := NewPackageExWithEmbedOptions(
@@ -1069,7 +1069,7 @@ func buildCoroStaticCleanupPlanFixture(
 	t.Helper()
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
 	prog := newLLSSAProg(t)
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		prog.Dispose()
 		t.Fatal(err)
@@ -1082,7 +1082,7 @@ func buildCoroStaticCleanupPlanFixture(
 	root := ssaPkg.Func("Root")
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerChildAwaitABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,

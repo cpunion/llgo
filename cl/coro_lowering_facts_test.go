@@ -178,7 +178,7 @@ func Live() { Target() }
 			}
 			prog := newLLSSAProg(t)
 			t.Cleanup(prog.Dispose)
-			universe, err := PrepareEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
+			universe, err := prepareStacklessEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
 				{SSA: runtimePackage.ssa, Files: []*ast.File{runtimePackage.file}, Identity: "runtime-variant"},
 				{SSA: callerPackage.ssa, Files: []*ast.File{callerPackage.file}, Identity: "caller-variant"},
 			}, EmissionUniverseOptions{CompleteRuntimeABI: true})
@@ -190,8 +190,8 @@ func Live() { Target() }
 				t.Fatal(err)
 			}
 			functionIDs := universe.FunctionIDConfig()
-			functionIDs.CoroABI = coro.EntryResolutionABIV0
-			functionIDs.SchedulerABI = coro.SchedulerNoneABIV0
+			functionIDs.CoroABI = coro.PhysicalABIV1
+			functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 			functionIDs.ArchiveReady = true
 			roots := coro.Roots{{Function: publish, Demand: coro.AsyncDemand}}
 			if test.liveTarget {
@@ -255,7 +255,7 @@ func Root(value uint32) uint32 {
 	testProgram.ssa.Build()
 	prog := newLLSSAProg(t)
 	t.Cleanup(prog.Dispose)
-	universe, err := PrepareEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
+	universe, err := prepareStacklessEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
 		{SSA: runtimePackage.ssa, Files: []*ast.File{runtimePackage.file}, Identity: "runtime-critical"},
 		{SSA: callerPackage.ssa, Files: []*ast.File{callerPackage.file}, Identity: "caller-critical"},
 	}, EmissionUniverseOptions{CompleteRuntimeABI: true})
@@ -269,7 +269,7 @@ func Root(value uint32) uint32 {
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(testProgram.ssa, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		FunctionIDs:          functionIDs,
@@ -337,7 +337,7 @@ func TestCoroLoweringFactsReportFailsClosedWithoutFrozenInputs(t *testing.T) {
 	testProgram.ssa.Build()
 	prog := newLLSSAProg(t)
 	t.Cleanup(prog.Dispose)
-	incomplete, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{
+	incomplete, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{
 		SSA: caller.ssa, Files: []*ast.File{caller.file}, Identity: "incomplete-caller",
 	}})
 	if err != nil {
@@ -364,7 +364,7 @@ func AllocZ(size uintptr) uintptr { return 0 }
 	testProgram.ssa.Build()
 	prog := newLLSSAProg(t)
 	t.Cleanup(prog.Dispose)
-	universe, err := PrepareEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
+	universe, err := prepareStacklessEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
 		{SSA: runtimePackage.ssa, Files: []*ast.File{runtimePackage.file}, Identity: "runtime-variant"},
 		{SSA: callerPackage.ssa, Files: []*ast.File{callerPackage.file}, Identity: "caller-variant"},
 	}, EmissionUniverseOptions{CompleteRuntimeABI: true})
@@ -377,8 +377,8 @@ func AllocZ(size uintptr) uintptr { return 0 }
 		t.Fatal(err)
 	}
 	functionIDs := universe.FunctionIDConfig()
-	functionIDs.CoroABI = coro.EntryResolutionABIV0
-	functionIDs.SchedulerABI = coro.SchedulerNoneABIV0
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(testProgram.ssa, coro.Roots{{Function: owner, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		FunctionIDs:       functionIDs,

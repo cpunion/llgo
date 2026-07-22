@@ -356,7 +356,7 @@ func (p *context) funcAddr(b llssa.Builder, args []ssa.Value) llssa.Expr {
 			switch f := fn.X.(type) {
 			case *ssa.Function:
 				compile := p.compileFunction
-				if p.compilation != nil && p.compilation.EnableCoroEntryResolution {
+				if p.compilation != nil && p.compilation.CoroEntryResolutionActive() {
 					entry := p.mustFunctionSymbol(f)
 					if err := validatePlannedRawPlainEntry(entry.function, entry.plan); err != nil {
 						panic(fmt.Errorf("funcAddr raw function publication: %w", err))

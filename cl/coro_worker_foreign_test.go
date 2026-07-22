@@ -109,11 +109,11 @@ func prepareCoroWorkerForeignFixture(t *testing.T, source, rootName string) prep
 	// emission universe freezes physical signatures. Mirror that ordering so C
 	// callback word-shape tests exercise the real ABI.
 	ParsePkgSyntax(prog, ssaPkg.Pkg, files)
-	universe, err := PrepareEmissionUniverseWithOptions(
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		prog,
 		nil,
 		[]EmissionPackage{{SSA: ssaPkg, Files: files}},
-		EmissionUniverseOptions{EnableCoroWorker: true},
+		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		prog.Dispose()
@@ -152,7 +152,7 @@ func prepareCoroWorkerForeignFixture(t *testing.T, source, rootName string) prep
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapWorkerABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
@@ -247,17 +247,13 @@ func TestCoroWorkerClosedForeignCallUsesTypedThunk(t *testing.T) {
 		t.Fatalf("foreign worker keepalive roots = %q, want pointer", got)
 	}
 	compilation := &Compilation{
-		CoroPlan:                      fixture.plan,
-		EmissionUniverse:              fixture.universe,
-		EnableCoroEntryResolution:     true,
-		EnableCoroPhysicalABI:         true,
-		EnableCoroChildAwait:          true,
-		EnableCoroProgramBootstrapRun: true,
-		EnableCoroWorker:              true,
-		CoroABI:                       coro.PhysicalABIV1,
-		SchedulerABI:                  coro.SchedulerProgramBootstrapWorkerABIV0,
-		PanicABI:                      coro.PanicLegacyABIV0,
-		FuncRepABI:                    coro.FuncRepABIV0,
+		CoroPlan:         fixture.plan,
+		EmissionUniverse: fixture.universe,
+
+		CoroABI:      coro.PhysicalABIV1,
+		SchedulerABI: coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
+		PanicABI:     coro.PanicExplicitStatusABIV0,
+		FuncRepABI:   coro.FuncRepABIV1, CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities(),
 	}
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		fixture.prog, nil, nil, nil, fixture.ssaPkg, fixture.files, goembed.VarMap{},
@@ -469,7 +465,7 @@ func TestCoroWorkerForeignCallRejectsForgedPlanCertificate(t *testing.T) {
 	}
 	functionIDs := fixture.universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapWorkerABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	forged, err := coro.AnalyzeSSA(fixture.ssaPkg.Prog, coro.Roots{{Function: fixture.root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
@@ -527,7 +523,7 @@ func TestCoroWorkerGenericCallableRejectsPlanUniverseCertificateMismatch(t *test
 	}
 	functionIDs := fixture.universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapWorkerABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	forgedPlan, err := coro.AnalyzeSSA(fixture.ssaPkg.Prog, coro.Roots{{Function: fixture.root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,

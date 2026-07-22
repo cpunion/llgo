@@ -219,10 +219,9 @@ int32_t __llgo_coro_native_timer_e2e_finish_v1(int32_t check, uint32_t audit) {
 
 func TestCoroNativeTimerNoGCProductionE2E(t *testing.T) {
 	capability := &Config{
-		BuildMode:                     BuildModeExe,
-		Goos:                          runtime.GOOS,
-		Goarch:                        runtime.GOARCH,
-		EnableCoroProgramBootstrapRun: true,
+		BuildMode: BuildModeExe,
+		Goos:      runtime.GOOS,
+		Goarch:    runtime.GOARCH, CoroProfile: CoroProfileStackless,
 	}
 	if !nativeCoroTimerRuntimeABI(capability) {
 		t.Skipf("native coroutine timer E2E is unavailable on %s/%s", runtime.GOOS, runtime.GOARCH)
@@ -306,7 +305,7 @@ func buildCoroNativeTimerE2EUser(t *testing.T, prog llssa.Program, temp string) 
 	assertCoroNativeTimerE2ECriticalSpan(t, mainFn, prepareCall, parkCall, retireCall)
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	input := CoroPlanInput{
 		Program:                        ssaPkg.Prog,
@@ -350,10 +349,7 @@ func buildCoroNativeTimerE2EUser(t *testing.T, prog llssa.Program, temp string) 
 		!resolvedHotPlan.Exec.Contains(coro.NeedsPreempt) {
 		t.Fatalf("native timer hot spawn = target:%v plan:%+v err:%v; want one preemptible closed static child", resolvedHot, resolvedHotPlan, resolveErr)
 	}
-	if err := validateCoroClosedStaticSpawnRunGate(&Config{
-		EnableCoroClosedStaticSpawn:   true,
-		EnableCoroProgramBootstrapRun: true,
-	}, plan, ""); err != nil {
+	if err := validateCoroClosedStaticSpawnRunGate(&Config{CoroProfile: CoroProfileStackless}, plan, ""); err != nil {
 		t.Fatalf("native timer hot spawn is outside the production run gate: %v", err)
 	}
 	semantics, intrinsic, semanticsErr := coroIntrinsicCallSiteSemanticsForTest(universe, parkCall)
@@ -365,18 +361,14 @@ func buildCoroNativeTimerE2EUser(t *testing.T, prog llssa.Program, temp string) 
 		t.Fatalf("native timer checker plan = %+v, present=%t; want direct plain", checkPlan, ok)
 	}
 	compilation := &cl.Compilation{
-		CoroPlan:                      plan,
-		EnableCoroEntryResolution:     true,
-		EnableCoroPhysicalABI:         true,
-		EnableCoroChildAwait:          true,
-		EnableCoroClosedStaticSpawn:   true,
-		EnableCoroProgramBootstrapRun: true,
-		CoroFrameRetentionABI:         cl.CoroFrameRetentionTimerABIV1,
-		CoroABI:                       coro.PhysicalABIV1,
-		SchedulerABI:                  coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0,
-		PanicABI:                      coro.PanicLegacyABIV0,
-		FuncRepABI:                    coro.FuncRepABIV0,
-		EmissionUniverse:              universe,
+		CoroPlan: plan,
+
+		CoroFrameRetentionABI: cl.CoroFrameRetentionTimerABIV1,
+		CoroABI:               coro.PhysicalABIV1,
+		SchedulerABI:          coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+		PanicABI:              coro.PanicExplicitStatusABIV0,
+		FuncRepABI:            coro.FuncRepABIV1,
+		EmissionUniverse:      universe, CoroProfile: cl.CoroProfileStackless,
 	}
 	pkg, _, err := cl.NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
@@ -409,15 +401,9 @@ func buildCoroNativeTimerE2EUser(t *testing.T, prog llssa.Program, temp string) 
 func buildCoroNativeTimerE2EEntry(t *testing.T, prog llssa.Program, temp, anchor string) string {
 	t.Helper()
 	conf := &Config{
-		BuildMode:                     BuildModeExe,
-		Goos:                          runtime.GOOS,
-		Goarch:                        runtime.GOARCH,
-		EnableCoroEntryResolution:     true,
-		EnableCoroPhysicalABI:         true,
-		EnableCoroChildAwait:          true,
-		EnableCoroClosedStaticSpawn:   true,
-		EnableCoroProgramBootstrapABI: true,
-		EnableCoroProgramBootstrapRun: true,
+		BuildMode: BuildModeExe,
+		Goos:      runtime.GOOS,
+		Goarch:    runtime.GOARCH, CoroProfile: CoroProfileStackless,
 	}
 	if !nativeCoroTimerRuntimeABI(conf) {
 		t.Fatal("native timer entry unexpectedly lacks its runtime capability")

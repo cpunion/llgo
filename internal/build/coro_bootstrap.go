@@ -146,39 +146,39 @@ func validateCoroProgramBootstrapConfig(conf *Config) error {
 	if conf == nil {
 		return nil
 	}
-	if conf.EnableCoroClosedStaticSpawn && !conf.EnableCoroProgramBootstrapRun {
+	if conf.coroClosedStaticSpawnActive() && !conf.coroProgramBootstrapActive() {
 		return fmt.Errorf("enable coroutine closed static spawn: runnable program bootstrap v2 is required")
 	}
-	if conf.EnableCoroProgramBootstrapRun && !conf.EnableCoroProgramBootstrapABI {
+	if conf.coroProgramBootstrapActive() && !conf.coroProgramBootstrapABIActive() {
 		return fmt.Errorf("enable coroutine program bootstrap runtime: program bootstrap ABI is required")
 	}
-	if conf.EnableCoroChannel && !conf.EnableCoroProgramBootstrapRun {
+	if conf.coroChannelActive() && !conf.coroProgramBootstrapActive() {
 		return fmt.Errorf("enable coroutine channel lowering: runnable program bootstrap is required")
 	}
-	if conf.EnableCoroNativeFleet && !conf.EnableCoroProgramBootstrapRun {
+	if conf.coroNativeFleetActive() && !conf.coroProgramBootstrapActive() {
 		return fmt.Errorf("enable native coroutine fleet: runnable program bootstrap is required")
 	}
-	if conf.EnableCoroNativeFleet && !conf.EnableCoroWorker {
+	if conf.coroNativeFleetActive() && !conf.coroWorkerActive() {
 		return fmt.Errorf("enable native coroutine fleet: bounded native worker capability is required")
 	}
-	if conf.EnableCoroWorker && !conf.EnableCoroProgramBootstrapRun {
+	if conf.coroWorkerActive() && !conf.coroProgramBootstrapActive() {
 		return fmt.Errorf("enable coroutine worker lowering: runnable program bootstrap is required")
 	}
-	if conf.EnableCoroWorker && !nativeCoroWorkerRuntimeABI(conf) {
+	if conf.coroWorkerActive() && !nativeCoroWorkerRuntimeABI(conf) {
 		return fmt.Errorf("enable coroutine worker lowering: a native Darwin/Linux pthread worker adapter is required")
 	}
-	if conf.EnableCoroNativeFleet && !nativeCoroTimerRuntimeABI(conf) {
+	if conf.coroNativeFleetActive() && !nativeCoroTimerRuntimeABI(conf) {
 		return fmt.Errorf("enable native coroutine fleet: a 64-bit native Darwin/Linux timer reactor is required")
 	}
-	if !conf.EnableCoroProgramBootstrapABI {
+	if !conf.coroProgramBootstrapABIActive() {
 		return nil
 	}
 	switch {
-	case !conf.EnableCoroEntryResolution:
+	case !conf.coroEntryResolutionActive():
 		return fmt.Errorf("enable coroutine program bootstrap ABI: coroutine entry resolution is required")
-	case !conf.EnableCoroPhysicalABI:
+	case !conf.coroPhysicalABIActive():
 		return fmt.Errorf("enable coroutine program bootstrap ABI: coroutine physical ABI is required")
-	case !conf.EnableCoroChildAwait:
+	case !conf.coroChildAwaitActive():
 		return fmt.Errorf("enable coroutine program bootstrap ABI: coroutine child await is required")
 	case conf.BuildMode != BuildModeExe:
 		return fmt.Errorf("enable coroutine program bootstrap ABI: executable build mode is required")
@@ -188,7 +188,7 @@ func validateCoroProgramBootstrapConfig(conf *Config) error {
 }
 
 func prepareCoroProgramBootstrapsV1(ctx *context) (map[string]*coroProgramBootstrapV1, error) {
-	if ctx == nil || ctx.buildConf == nil || !ctx.buildConf.EnableCoroProgramBootstrapABI {
+	if ctx == nil || ctx.buildConf == nil || !ctx.buildConf.coroProgramBootstrapABIActive() {
 		return nil, nil
 	}
 	bootstraps := make(map[string]*coroProgramBootstrapV1)
@@ -201,7 +201,7 @@ func prepareCoroProgramBootstrapsV1(ctx *context) (map[string]*coroProgramBootst
 		}
 		var bootstrap *coroProgramBootstrapV1
 		var err error
-		if ctx.buildConf.EnableCoroProgramBootstrapRun {
+		if ctx.buildConf.coroProgramBootstrapActive() {
 			bootstrap, err = selectCoroProgramBootstrapV2(ctx, pkg)
 		} else {
 			bootstrap, err = selectCoroProgramBootstrapV1(ctx, pkg)
@@ -223,7 +223,7 @@ func prepareCoroProgramBootstrapsV1(ctx *context) (map[string]*coroProgramBootst
 // and pkg.PkgPath+".main". We verify every premise of that mapping here and do
 // not scan emitted LLVM modules or guess a replacement symbol.
 func selectCoroProgramBootstrapV1(ctx *context, pkg *packages.Package) (*coroProgramBootstrapV1, error) {
-	if ctx == nil || ctx.buildConf == nil || !ctx.buildConf.EnableCoroProgramBootstrapABI {
+	if ctx == nil || ctx.buildConf == nil || !ctx.buildConf.coroProgramBootstrapABIActive() {
 		return nil, nil
 	}
 	if err := validateCoroProgramBootstrapConfig(ctx.buildConf); err != nil {
@@ -275,7 +275,7 @@ func selectCoroProgramBootstrapV1(ctx *context, pkg *packages.Package) (*coroPro
 // init, and main. Go bodies retain exactly one primary selected by the plan;
 // compiler-owned stages are bounded direct-plain calls.
 func selectCoroProgramBootstrapV2(ctx *context, pkg *packages.Package) (*coroProgramBootstrapV1, error) {
-	if ctx == nil || ctx.buildConf == nil || !ctx.buildConf.EnableCoroProgramBootstrapRun {
+	if ctx == nil || ctx.buildConf == nil || !ctx.buildConf.coroProgramBootstrapActive() {
 		return nil, nil
 	}
 	if err := validateCoroProgramBootstrapConfig(ctx.buildConf); err != nil {
@@ -731,7 +731,7 @@ func selectCoroProgramPlainStepV1(ctx *context, aPkg *aPackage, name string, rol
 	// activation, and an unrecovered panic terminates through the existing panic
 	// path without requiring a suspended-parent transport. Every other execution
 	// constraint remains fail-closed until its scheduler protocol exists.
-	if ctx.buildConf.EnableCoroProgramBootstrapRun {
+	if ctx.buildConf.coroProgramBootstrapActive() {
 		const supported = coro.MayUnwind | coro.NeedsCleanupFrame
 		if unsupported := plan.Exec &^ supported; unsupported != 0 {
 			return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap runtime %s: function %q target %q has unsupported execution constraints %s (complete=%s)", name, fn.String(), plan.ID, unsupported, plan.Exec)
@@ -790,7 +790,7 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 	write("bootstrap={version:u32,flags:u32,hash-lo:u64,hash-hi:u64,step-count:uintptr,steps:ptr,factory:ptr}")
 	write("direct-plain=" + strconv.FormatUint(uint64(coroProgramStepDirectPlainV1), 10))
 	write("coro-root=" + strconv.FormatUint(uint64(coroProgramStepCoroRootV1), 10))
-	if ctx.buildConf.EnableCoroProgramBootstrapRun {
+	if ctx.buildConf.coroProgramBootstrapActive() {
 		factory := coroProgramBootstrapFactorySymbolV1
 		if version == coroProgramBootstrapVersionV2 {
 			factory = coroProgramBootstrapFactorySymbolV2
@@ -854,14 +854,14 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 				coroNotifyOneOrAbortSymbolV1 + "(notify-addr:ptr,wait-snapshot:u32)->void;" +
 				coroNotifyAllOrAbortSymbolV1 + "(notify-addr:ptr,wait-snapshot:u32)->void")
 		}
-		if ctx.buildConf.EnableCoroChannel {
+		if ctx.buildConf.coroChannelActive() {
 			write("channel-v1=" +
 				coroChanSendParkSymbolV1 + "(g:ptr,handle:ptr,header:ptr,channel:ptr,elem:ptr,state:ptr,size:uintptr)->void;" +
 				coroChanRecvParkSymbolV1 + "(g:ptr,handle:ptr,header:ptr,channel:ptr,elem:ptr,state:ptr,size:uintptr)->void;" +
 				coroChanResumeSymbolV1 + "(g:ptr,state:ptr)->u32;" +
 				"send-closed-fault=__llgo_coro_fault_prepare_v1:kind=3")
 		}
-		if ctx.buildConf.EnableCoroWorker {
+		if ctx.buildConf.coroWorkerActive() {
 			write("worker-v1=" +
 				coroWorkerParkSymbolV1 + "(g:ptr,handle:ptr,header:ptr,state:ptr,fn:uintptr,argc:u32,a0:uintptr,a1:uintptr,a2:uintptr,a3:uintptr,a4:uintptr,a5:uintptr,a6:uintptr,a7:uintptr,a8:uintptr)->void;" +
 				coroWorkerResumeSymbolV1 + "(g:ptr,state:ptr,r1:*uintptr,r2:*uintptr,errno:*uintptr)->u32")

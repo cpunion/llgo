@@ -199,8 +199,8 @@ func analyzeCoroFuncAddrTest(t *testing.T, ssaPkg *ssa.Package, files []*ast.Fil
 		staticCodeAddressCallArgument:  emission.CoroStaticCodeAddressCallArgument,
 	}
 	functionIDs := emission.FunctionIDConfig()
-	functionIDs.CoroABI = coro.EntryResolutionABIV0
-	functionIDs.SchedulerABI = coro.SchedulerNoneABIV0
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := input.Analyze(coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		MaxPlainInstructions: -1,

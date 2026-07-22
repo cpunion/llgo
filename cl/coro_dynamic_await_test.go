@@ -50,7 +50,7 @@ func Apply(callback func(int) int, value int) int {
 			ssaPkg, _, files := buildGoSSAPkg(t, source)
 			prog := newLLSSAProg(t)
 			defer prog.Dispose()
-			universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+			universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -64,7 +64,7 @@ func Apply(callback func(int) int, value int) int {
 			dynamicCall := onlyCoroManagedDispatchValidationCall(t, apply)
 			functionIDs := universe.FunctionIDConfig()
 			functionIDs.CoroABI = coro.PhysicalABIV1
-			functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+			functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 			functionIDs.ArchiveReady = true
 			plan, err := coro.AnalyzeSSA(
 				ssaPkg.Prog,
@@ -120,8 +120,8 @@ func Apply(callback func(int) int, value int) int {
 
 			compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 			enableCoroPreemptCompilation(compilation)
-			compilation.EnableCoroPlainDispatch = true
-			compilation.EnableCoroExplicitStatusPanicABI = true
+			compilation.CoroProfile = CoroProfileStackless
+			compilation.CoroProfile = CoroProfileStackless
 			compilation.PanicABI = coro.PanicExplicitStatusABIV0
 			compilation.FuncRepABI = coro.FuncRepABIV1
 			compiled, _, err := NewPackageExWithEmbedOptions(
@@ -222,7 +222,7 @@ func Apply(
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +234,7 @@ func Apply(
 	dynamicCall := onlyCoroManagedDispatchValidationCall(t, apply)
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(
 		ssaPkg.Prog,
@@ -272,8 +272,8 @@ func Apply(
 
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
-	compilation.EnableCoroPlainDispatch = true
-	compilation.EnableCoroExplicitStatusPanicABI = true
+	compilation.CoroProfile = CoroProfileStackless
+	compilation.CoroProfile = CoroProfileStackless
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
 	compilation.FuncRepABI = coro.FuncRepABIV1
 	compiled, _, err := NewPackageExWithEmbedOptions(

@@ -117,7 +117,7 @@ func Root(seed int) func(int) int {
 	target := root.AnonFuncs[0]
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,8 +126,8 @@ func Root(seed int) func(int) int {
 		t.Fatal(err)
 	}
 	functionIDs := universe.FunctionIDConfig()
-	functionIDs.CoroABI = coro.EntryResolutionABIV0
-	functionIDs.SchedulerABI = coro.SchedulerNoneABIV0
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.SyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
@@ -145,14 +145,13 @@ func Root(seed int) func(int) int {
 	compiled, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		PackageOptions{Compilation: &Compilation{
-			CoroPlan:                  plan,
-			EmissionUniverse:          universe,
-			EnableCoroEntryResolution: true,
-			EnableCoroPlainDispatch:   true,
-			CoroABI:                   coro.EntryResolutionABIV0,
-			SchedulerABI:              coro.SchedulerNoneABIV0,
-			PanicABI:                  coro.PanicLegacyABIV0,
-			FuncRepABI:                coro.FuncRepABIV1,
+			CoroPlan:         plan,
+			EmissionUniverse: universe,
+
+			CoroABI:      coro.PhysicalABIV1,
+			SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+			PanicABI:     coro.PanicExplicitStatusABIV0,
+			FuncRepABI:   coro.FuncRepABIV1, CoroProfile: CoroProfileStackless,
 		}},
 	)
 	if err != nil {
@@ -206,7 +205,7 @@ func Root() { slot = Target }
 	}
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,8 +214,8 @@ func Root() { slot = Target }
 		t.Fatal(err)
 	}
 	functionIDs := universe.FunctionIDConfig()
-	functionIDs.CoroABI = coro.EntryResolutionABIV0
-	functionIDs.SchedulerABI = coro.SchedulerNoneABIV0
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.SyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
@@ -246,14 +245,13 @@ func Root() { slot = Target }
 	compiled, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		PackageOptions{Compilation: &Compilation{
-			CoroPlan:                  plan,
-			EmissionUniverse:          universe,
-			EnableCoroEntryResolution: true,
-			EnableCoroPlainDispatch:   true,
-			CoroABI:                   coro.EntryResolutionABIV0,
-			SchedulerABI:              coro.SchedulerNoneABIV0,
-			PanicABI:                  coro.PanicLegacyABIV0,
-			FuncRepABI:                coro.FuncRepABIV1,
+			CoroPlan:         plan,
+			EmissionUniverse: universe,
+
+			CoroABI:      coro.PhysicalABIV1,
+			SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+			PanicABI:     coro.PanicExplicitStatusABIV0,
+			FuncRepABI:   coro.FuncRepABIV1, CoroProfile: CoroProfileStackless,
 		}},
 	)
 	if err != nil {
@@ -293,7 +291,7 @@ func Managed() { Target() }
 	}
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +301,7 @@ func Managed() { Target() }
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{
 		{Function: root, Demand: coro.SyncDemand},
@@ -341,7 +339,7 @@ func Managed() { Target() }
 
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
-	compilation.EnableCoroPlainDispatch = true
+	compilation.CoroProfile = CoroProfileStackless
 	compilation.FuncRepABI = coro.FuncRepABIV1
 	compiled, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
@@ -517,7 +515,7 @@ func Root(which bool) func(int) int {
 	root := ssaPkg.Func("Root")
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -526,8 +524,8 @@ func Root(which bool) func(int) int {
 		t.Fatal(err)
 	}
 	functionIDs := universe.FunctionIDConfig()
-	functionIDs.CoroABI = coro.EntryResolutionABIV0
-	functionIDs.SchedulerABI = coro.SchedulerNoneABIV0
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.SyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
@@ -556,14 +554,13 @@ func Root(which bool) func(int) int {
 	compiled, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		PackageOptions{Compilation: &Compilation{
-			CoroPlan:                  plan,
-			EmissionUniverse:          universe,
-			EnableCoroEntryResolution: true,
-			EnableCoroPlainDispatch:   true,
-			CoroABI:                   coro.EntryResolutionABIV0,
-			SchedulerABI:              coro.SchedulerNoneABIV0,
-			PanicABI:                  coro.PanicLegacyABIV0,
-			FuncRepABI:                coro.FuncRepABIV1,
+			CoroPlan:         plan,
+			EmissionUniverse: universe,
+
+			CoroABI:      coro.PhysicalABIV1,
+			SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+			PanicABI:     coro.PanicExplicitStatusABIV0,
+			FuncRepABI:   coro.FuncRepABIV1, CoroProfile: CoroProfileStackless,
 		}},
 	)
 	if err != nil {
@@ -593,7 +590,7 @@ func Root() func(int, []byte) (int, error) { return Target }
 	target := ssaPkg.Func("Target")
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -602,8 +599,8 @@ func Root() func(int, []byte) (int, error) { return Target }
 		t.Fatal(err)
 	}
 	functionIDs := universe.FunctionIDConfig()
-	functionIDs.CoroABI = coro.EntryResolutionABIV0
-	functionIDs.SchedulerABI = coro.SchedulerNoneABIV0
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.SyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
@@ -624,14 +621,13 @@ func Root() func(int, []byte) (int, error) { return Target }
 	compiled, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		PackageOptions{Compilation: &Compilation{
-			CoroPlan:                  plan,
-			EmissionUniverse:          universe,
-			EnableCoroEntryResolution: true,
-			EnableCoroPlainDispatch:   true,
-			CoroABI:                   coro.EntryResolutionABIV0,
-			SchedulerABI:              coro.SchedulerNoneABIV0,
-			PanicABI:                  coro.PanicLegacyABIV0,
-			FuncRepABI:                coro.FuncRepABIV1,
+			CoroPlan:         plan,
+			EmissionUniverse: universe,
+
+			CoroABI:      coro.PhysicalABIV1,
+			SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+			PanicABI:     coro.PanicExplicitStatusABIV0,
+			FuncRepABI:   coro.FuncRepABIV1, CoroProfile: CoroProfileStackless,
 		}},
 	)
 	if err != nil {

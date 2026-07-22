@@ -66,7 +66,7 @@ func prepareCoroRawCAdapterFixture(t *testing.T) coroRawCAdapterFixture {
 	ssaPkg, _, files := buildGoSSAPkg(t, coroRawCAdapterFixtureSource)
 	prog := newLLSSAProg(t)
 	ParsePkgSyntax(prog, ssaPkg.Pkg, files)
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		prog.Dispose()
 		t.Fatal(err)
@@ -86,7 +86,7 @@ func (fixture coroRawCAdapterFixture) analyze(
 	}
 	functionIDs := fixture.universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	target := fixture.pkg.Func("target")
 	sink := fixture.pkg.Func("sink")

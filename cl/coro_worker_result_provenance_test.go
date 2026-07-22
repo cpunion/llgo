@@ -307,9 +307,9 @@ func prepareCoroWorkerResultProvenanceFixture(t *testing.T) (llssa.Program, *ssa
 	t.Helper()
 	pkg, _, files := buildGoSSAPkg(t, coroWorkerResultProvenanceFixture)
 	prog := newLLSSAProg(t)
-	universe, err := PrepareEmissionUniverseWithOptions(
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		prog, nil, []EmissionPackage{{SSA: pkg, Files: files}},
-		EmissionUniverseOptions{EnableCoroWorker: true},
+		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		prog.Dispose()

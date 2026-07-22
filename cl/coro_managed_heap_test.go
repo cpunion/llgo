@@ -251,7 +251,7 @@ func TestCoroManagedHeapAllocationNativeAndWasm32(t *testing.T) {
 
 			compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 			enableCoroPreemptCompilation(compilation)
-			compilation.EnableCoroExplicitStatusPanicABI = true
+			compilation.CoroProfile = CoroProfileStackless
 			compilation.PanicABI = coro.PanicExplicitStatusABIV0
 			pkg, _, err := NewPackageExWithEmbedOptions(
 				prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
@@ -439,7 +439,7 @@ func AllocU(size uintptr) unsafe.Pointer {
 	} else {
 		prog = newLLSSAProgForTarget(t, target)
 	}
-	universe, err := PrepareEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
+	universe, err := prepareStacklessEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
 		{SSA: runtimePkg.ssa, Files: []*ast.File{runtimePkg.file}},
 		{SSA: ssaPkg, Files: files},
 	}, EmissionUniverseOptions{CompleteRuntimeABI: true})
@@ -454,7 +454,7 @@ func AllocU(size uintptr) unsafe.Pointer {
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	root, zero, child, captured := ssaPkg.Func("Root"), ssaPkg.Func("Zero"), ssaPkg.Func("Child"), ssaPkg.Func("CapturedResults")
 	var capturedCleanup *ssa.Function

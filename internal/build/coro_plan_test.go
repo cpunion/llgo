@@ -366,8 +366,8 @@ func root(value *int) { _ = Advance(value, 1) }
 				callSitePlan:       emission.CoroCallSitePlan,
 			}
 			functionIDs := emission.FunctionIDConfig()
-			functionIDs.CoroABI = coro.EntryResolutionABIV0
-			functionIDs.SchedulerABI = coro.SchedulerNoneABIV0
+			functionIDs.CoroABI = coro.PhysicalABIV1
+			functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 			functionIDs.ArchiveReady = true
 			analyze := func() (*coro.SSAPlan, error) {
 				return input.Analyze(coro.Roots{{Function: ssaPkg.Func("root"), Demand: coro.SyncDemand}}, coro.SSAConfig{
@@ -400,8 +400,8 @@ func root(value *int) { _ = Advance(value, 1) }
 				t.Fatal("valid intrinsic site unexpectedly has a managed CallPlan")
 			}
 			metadata := coro.PlanDigestMetadata{
-				CoroABI: coro.EntryResolutionABIV0, SchedulerABI: coro.SchedulerNoneABIV0,
-				PanicABI: coro.PanicLegacyABIV0, FuncRepABI: coro.FuncRepABIV0,
+				CoroABI: coro.PhysicalABIV1, SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+				PanicABI: coro.PanicExplicitStatusABIV0, FuncRepABI: coro.FuncRepABIV1,
 				LoweringFactsSchema: coro.LoweringFactsSchema, LoweringFactsDigest: strings.Repeat("0", sha256.Size*2),
 				TargetTriple: "x86_64-unknown-linux-gnu", PointerBits: 64,
 				Endianness: "little", DataLayout: "e-p:64:64",
@@ -465,7 +465,7 @@ func root(token *WaitToken, ticket WaitTicket) uint32 {
 	}
 	functionIDs := emission.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerChildAwaitABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	analyze := func() (*coro.SSAPlan, error) {
 		return input.Analyze(coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
@@ -490,8 +490,8 @@ func root(token *WaitToken, ticket WaitTicket) uint32 {
 		t.Fatal("park declaration unexpectedly retained a managed CallPlan")
 	}
 	metadata := coro.PlanDigestMetadata{
-		CoroABI: coro.PhysicalABIV1, SchedulerABI: coro.SchedulerChildAwaitABIV0,
-		PanicABI: coro.PanicLegacyABIV0, FuncRepABI: coro.FuncRepABIV0,
+		CoroABI: coro.PhysicalABIV1, SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+		PanicABI: coro.PanicExplicitStatusABIV0, FuncRepABI: coro.FuncRepABIV1,
 		LoweringFactsSchema: coro.LoweringFactsSchema, LoweringFactsDigest: strings.Repeat("0", sha256.Size*2),
 		TargetTriple: "x86_64-unknown-linux-gnu", PointerBits: 64,
 		Endianness: "little", DataLayout: "e-p:64:64",
@@ -599,7 +599,7 @@ func atomicExchange(*uint32, uint32) uint32
 		t.Fatal(err)
 	}
 	ctx := &context{
-		buildConf:       &Config{EnableCoroChildAwait: true, EnableCoroProgramBootstrapRun: true},
+		buildConf:       &Config{CoroProfile: CoroProfileStackless},
 		coroEmission:    emission,
 		coroSSAEmission: ssaEmission,
 	}
@@ -732,10 +732,8 @@ func atomicExchange(*uint32, uint32) uint32
 	}
 	timerCtx := &context{
 		buildConf: &Config{
-			Goos:                          "linux",
-			Goarch:                        "amd64",
-			EnableCoroChildAwait:          true,
-			EnableCoroProgramBootstrapRun: true,
+			Goos:   "linux",
+			Goarch: "amd64", CoroProfile: CoroProfileStackless,
 		},
 		coroEmission:    ctx.coroEmission,
 		coroSSAEmission: ctx.coroSSAEmission,
@@ -1069,11 +1067,7 @@ func atomicExchange(*uint32, uint32) uint32
 		t.Fatal("inactive explicit-status fault hook entered the required plain island")
 	}
 	panicCtx := &context{
-		buildConf: &Config{
-			EnableCoroChildAwait:             true,
-			EnableCoroProgramBootstrapRun:    true,
-			EnableCoroExplicitStatusPanicABI: true,
-		},
+		buildConf:       &Config{CoroProfile: CoroProfileStackless},
 		coroEmission:    ctx.coroEmission,
 		coroSSAEmission: ctx.coroSSAEmission,
 	}
@@ -1116,11 +1110,7 @@ func atomicExchange(*uint32, uint32) uint32
 		t.Fatalf("invalid fault payload ABI error = %v", invalidPayloadErr)
 	}
 	channelCtx := &context{
-		buildConf: &Config{
-			EnableCoroChildAwait:          true,
-			EnableCoroProgramBootstrapRun: true,
-			EnableCoroChannel:             true,
-		},
+		buildConf:       &Config{CoroProfile: CoroProfileStackless},
 		coroEmission:    ctx.coroEmission,
 		coroSSAEmission: ctx.coroSSAEmission,
 	}
@@ -1166,11 +1156,7 @@ func atomicExchange(*uint32, uint32) uint32
 		t.Fatalf("invalid channel resume ABI error = %v", invalidChannelResumeErr)
 	}
 	spawnCtx := &context{
-		buildConf: &Config{
-			EnableCoroChildAwait:          true,
-			EnableCoroProgramBootstrapRun: true,
-			EnableCoroClosedStaticSpawn:   true,
-		},
+		buildConf:       &Config{CoroProfile: CoroProfileStackless},
 		coroEmission:    ctx.coroEmission,
 		coroSSAEmission: ctx.coroSSAEmission,
 	}
@@ -1242,7 +1228,7 @@ func atomicExchange(*uint32, uint32) uint32
 	}
 	functionIDs := emission.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	analyze := func(classify func(*ssa.Function) (coro.SSAFunctionPolicy, error)) (*coro.SSAPlan, error) {
 		return input.Analyze(coro.Roots{{Function: unrelatedLoop, Demand: coro.AsyncDemand}}, coro.SSAConfig{
@@ -1323,8 +1309,8 @@ func atomicExchange(*uint32, uint32) uint32
 	}
 
 	metadata := coro.PlanDigestMetadata{
-		CoroABI: coro.PhysicalABIV1, SchedulerABI: coro.SchedulerProgramBootstrapABIV2,
-		PanicABI: coro.PanicLegacyABIV0, FuncRepABI: coro.FuncRepABIV0,
+		CoroABI: coro.PhysicalABIV1, SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+		PanicABI: coro.PanicExplicitStatusABIV0, FuncRepABI: coro.FuncRepABIV1,
 		LoweringFactsSchema: coro.LoweringFactsSchema, LoweringFactsDigest: strings.Repeat("0", sha256.Size*2),
 		TargetTriple: "x86_64-unknown-linux-gnu", PointerBits: 64,
 		Endianness: "little", DataLayout: "e-p:64:64",
@@ -1415,7 +1401,7 @@ func __llgo_coro_frame_free_v1() {}
 		t.Fatal(err)
 	}
 	ctx := &context{
-		buildConf:       &Config{EnableCoroChildAwait: true},
+		buildConf:       &Config{CoroProfile: CoroProfileStackless},
 		coroEmission:    emission,
 		coroSSAEmission: ssaEmission,
 	}
@@ -1492,7 +1478,7 @@ func inlineIntrinsic(string) *byte
 		t.Fatal(err)
 	}
 	ctx := &context{
-		buildConf:       &Config{EnableCoroChildAwait: true, EnableCoroProgramBootstrapRun: true},
+		buildConf:       &Config{CoroProfile: CoroProfileStackless},
 		coroEmission:    emission,
 		coroSSAEmission: ssaEmission,
 	}
@@ -1958,7 +1944,7 @@ func __llgo_coro_frame_free_v1() {}
 	}
 	ctx := &context{
 		prog:                        prog,
-		buildConf:                   &Config{EnableCoroChildAwait: true, EnableCoroProgramBootstrapRun: true},
+		buildConf:                   &Config{CoroProfile: CoroProfileStackless},
 		coroEmission:                emission,
 		coroSSAEmission:             ssaEmission,
 		coroTLSDestructorFixturePkg: llssa.PkgRuntime,
@@ -1969,7 +1955,7 @@ func __llgo_coro_frame_free_v1() {}
 	}
 	functionIDs := emission.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	return requiredCoroRuntimeFixture{
 		pkg: ssaPkg,
@@ -2016,7 +2002,7 @@ func install() {}
 `
 	t.Run("exact runnable PhysicalABIV1 roots", func(t *testing.T) {
 		fixture := buildRequiredCoroRuntimeFixture(t, exact)
-		fixture.ctx.buildConf.EnableCoroPhysicalABI = true
+		fixture.ctx.buildConf.CoroProfile = CoroProfileStackless
 		roots, requiredPlain, _, _, err := requiredCoroProgramRuntimePlan(fixture.ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -2070,7 +2056,7 @@ func install() {}
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := buildRequiredCoroRuntimeFixture(t, test.body)
-			fixture.ctx.buildConf.EnableCoroPhysicalABI = true
+			fixture.ctx.buildConf.CoroProfile = CoroProfileStackless
 			_, _, _, _, err := requiredCoroProgramRuntimePlan(fixture.ctx)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("critical runtime root error = %v, want substring %q", err, test.want)
@@ -2112,12 +2098,12 @@ func TestBuildCoroPlanInstallsArchiveDigest(t *testing.T) {
 		progSSA: ssaPkg.Prog,
 		prog:    prog,
 		buildConf: &Config{
-			EnableCoroEntryResolution: true,
+
 			CoroPlanBuilder: func(input CoroPlanInput) (*coro.SSAPlan, error) {
 				return input.Analyze(coro.Roots{{Function: ssaPkg.Func("F"), Demand: coro.SyncDemand}}, coro.SSAConfig{
 					MaxPlainInstructions: -1,
 				})
-			},
+			}, CoroProfile: CoroProfileStackless,
 		},
 	}
 	if err := buildCoroPlan(ctx, aPkg); err != nil {
@@ -2140,8 +2126,8 @@ func TestBuildCoroPlanInstallsArchiveDigest(t *testing.T) {
 	if digest, err := ctx.coroLoweringFacts.Digest(); err != nil || digest != ctx.coroLoweringFactsDigest {
 		t.Fatalf("installed lowering-facts digest = %q, %v; want %q", digest, err, ctx.coroLoweringFactsDigest)
 	}
-	if ctx.coroPlanMetadata.CoroABI != coro.EntryResolutionABIV0 ||
-		ctx.coroPlanMetadata.SchedulerABI != coro.SchedulerNoneABIV0 ||
+	if ctx.coroPlanMetadata.CoroABI != coro.PhysicalABIV1 ||
+		ctx.coroPlanMetadata.SchedulerABI != coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0 ||
 		ctx.coroPlanMetadata.TargetTriple != prog.TargetSpec().Triple {
 		t.Fatalf("installed digest metadata = %+v", ctx.coroPlanMetadata)
 	}
@@ -2163,15 +2149,12 @@ func TestBuildCoroPlanInstallsArchiveDigest(t *testing.T) {
 		progSSA: ssaPkg.Prog,
 		prog:    explicitProg,
 		buildConf: &Config{
-			EnableCoroEntryResolution:        true,
-			EnableCoroPhysicalABI:            true,
-			EnableCoroChildAwait:             true,
-			EnableCoroExplicitStatusPanicABI: true,
+
 			CoroPlanBuilder: func(input CoroPlanInput) (*coro.SSAPlan, error) {
 				return input.Analyze(coro.Roots{{Function: ssaPkg.Func("F"), Demand: coro.SyncDemand}}, coro.SSAConfig{
 					MaxPlainInstructions: -1,
 				})
-			},
+			}, CoroProfile: CoroProfileStackless,
 		},
 	}
 	if err := buildCoroPlan(explicitCtx, aPkg); err != nil {
@@ -2179,7 +2162,7 @@ func TestBuildCoroPlanInstallsArchiveDigest(t *testing.T) {
 	}
 	if explicitCtx.coroPlan == nil || explicitCtx.clCompilation == nil || explicitCtx.coroPlanDigest == "" ||
 		explicitCtx.coroPlanMetadata.PanicABI != coro.PanicExplicitStatusABIV0 ||
-		!explicitCtx.clCompilation.EnableCoroExplicitStatusPanicABI {
+		!explicitCtx.clCompilation.CoroExplicitStatusActive() {
 		t.Fatalf("explicit-status panic build state: plan=%v compilation=%v digest=%q metadata=%+v",
 			explicitCtx.coroPlan, explicitCtx.clCompilation, explicitCtx.coroPlanDigest, explicitCtx.coroPlanMetadata)
 	}
@@ -2190,13 +2173,13 @@ func TestBuildCoroPlanInstallsArchiveDigest(t *testing.T) {
 		progSSA: ssaPkg.Prog,
 		prog:    badProg,
 		buildConf: &Config{
-			EnableCoroEntryResolution: true,
+
 			CoroPlanBuilder: func(input CoroPlanInput) (*coro.SSAPlan, error) {
 				return input.Analyze(coro.Roots{{Function: ssaPkg.Func("F"), Demand: coro.SyncDemand}}, coro.SSAConfig{
 					FunctionIDs:          coro.FunctionIDConfig{CoroABI: "conflicting-coro-abi"},
 					MaxPlainInstructions: -1,
 				})
-			},
+			}, CoroProfile: CoroProfileStackless,
 		},
 	}
 	if err := buildCoroPlan(badCtx, aPkg); err == nil || !strings.Contains(err.Error(), "does not match FunctionID ABI") {
@@ -2241,8 +2224,8 @@ func Leaf(value uint32) uint32 { return value + 1 }
 			t.Fatal(err)
 		}
 		functionIDs := universe.FunctionIDConfig()
-		functionIDs.CoroABI = coro.PhysicalABIV0
-		functionIDs.SchedulerABI = coro.SchedulerNoneABIV0
+		functionIDs.CoroABI = coro.PhysicalABIV1
+		functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 		functionIDs.ArchiveReady = true
 		leaf := ssaPkg.Func("Leaf")
 		plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: leaf, Demand: coro.AsyncDemand}}, coro.SSAConfig{
@@ -2264,17 +2247,16 @@ func Leaf(value uint32) uint32 { return value + 1 }
 			t.Fatal(err)
 		}
 		compilation := &cl.Compilation{
-			CoroPlan:                  plan,
-			EnableCoroEntryResolution: true,
-			EnableCoroPhysicalABI:     true,
-			CoroPlanDigest:            strings.Repeat("0", 64),
-			CoroLoweringFacts:         factsReport.Facts,
-			CoroLoweringFactsDigest:   factsReport.Digest,
-			CoroABI:                   coro.PhysicalABIV0,
-			SchedulerABI:              coro.SchedulerNoneABIV0,
-			PanicABI:                  coro.PanicLegacyABIV0,
-			FuncRepABI:                coro.FuncRepABIV0,
-			EmissionUniverse:          universe,
+			CoroPlan: plan,
+
+			CoroPlanDigest:          strings.Repeat("0", 64),
+			CoroLoweringFacts:       factsReport.Facts,
+			CoroLoweringFactsDigest: factsReport.Digest,
+			CoroABI:                 coro.PhysicalABIV1,
+			SchedulerABI:            coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+			PanicABI:                coro.PanicExplicitStatusABIV0,
+			FuncRepABI:              coro.FuncRepABIV1,
+			EmissionUniverse:        universe, CoroProfile: cl.CoroProfileStackless,
 		}
 		lpkg, _, err := cl.NewPackageExWithEmbedOptions(prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{}, cl.PackageOptions{
 			Compilation: compilation,
@@ -2701,13 +2683,13 @@ func external()
 		return plan
 	}
 	plainPlan := build(plain)
-	if err := validateCoroUnwindOnlyLoweredCalls(plainPlan, coro.PanicLegacyABIV0); err != nil {
+	if err := validateCoroUnwindOnlyLoweredCalls(plainPlan, coro.PanicExplicitStatusABIV0); err != nil {
 		t.Fatalf("bounded plain unwind helper rejected: %v", err)
 	}
 	if err := validateCoroUnwindOnlyLoweredCalls(plainPlan, coro.PanicExplicitStatusABIV0); err != nil {
 		t.Fatalf("synchronous-only plain owner was rejected by explicit-status validation: %v", err)
 	}
-	if err := validateCoroUnwindOnlyLoweredCalls(plainPlan, coro.PanicLegacyABIV0); err != nil {
+	if err := validateCoroUnwindOnlyLoweredCalls(plainPlan, coro.PanicExplicitStatusABIV0); err != nil {
 		t.Fatalf("explicit-status rejection changed the legacy bounded-plain certificate: %v", err)
 	}
 	forged := coroLegacyPanicPlainCertificate{owner: owner, logicalName: "runtime.Helper", target: suspending}
@@ -2718,12 +2700,12 @@ func external()
 	if got, ok := suspendingPlan.FunctionPlan(owner); !ok || got.Effect != coro.NoSuspend || got.Emission != coro.EmitPlain {
 		t.Fatalf("unwind-only edge polluted owner before preflight: %+v, present=%v", got, ok)
 	}
-	err = validateCoroUnwindOnlyLoweredCalls(suspendingPlan, coro.PanicLegacyABIV0)
-	if err == nil || !strings.Contains(err.Error(), "exact "+coro.PanicLegacyABIV0+" plain certificate") ||
+	err = validateCoroUnwindOnlyLoweredCalls(suspendingPlan, coro.PanicExplicitStatusABIV0)
+	if err == nil || !strings.Contains(err.Error(), "exact "+coro.PanicExplicitStatusABIV0+" plain certificate") ||
 		!strings.Contains(err.Error(), "effect=may-park") || !strings.Contains(err.Error(), "panic-only") {
 		t.Fatalf("suspending unwind helper error = %v", err)
 	}
-	if err := validateCoroUnwindOnlyLoweredCalls(build(external), coro.PanicLegacyABIV0); err == nil ||
+	if err := validateCoroUnwindOnlyLoweredCalls(build(external), coro.PanicExplicitStatusABIV0); err == nil ||
 		!strings.Contains(err.Error(), "is not a defined Go body") {
 		t.Fatalf("external unwind helper error = %v", err)
 	}
@@ -2818,7 +2800,7 @@ func failure(err error) { _ = err.Error() }
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = validateCoroUnwindOnlyLoweredCalls(plan, coro.PanicLegacyABIV0)
+	err = validateCoroUnwindOnlyLoweredCalls(plan, coro.PanicExplicitStatusABIV0)
 	if err == nil || !strings.Contains(err.Error(), "dynamic invoke Error") ||
 		!strings.Contains(err.Error(), "not a bounded DirectPlain edge") {
 		t.Fatalf("dynamic error method unwind helper error = %v", err)
@@ -2864,7 +2846,7 @@ func publish() { sink = target }
 		got.Emission != coro.EmitPlain || got.Primary != coro.PrimaryPlain || got.Effect != coro.NoSuspend {
 		t.Fatalf("stored static target plan = %+v, present=%v; want Dispatch representation with one plain body", got, ok)
 	}
-	if err := validateCoroUnwindOnlyLoweredCalls(plan, coro.PanicLegacyABIV0); err != nil {
+	if err := validateCoroUnwindOnlyLoweredCalls(plan, coro.PanicExplicitStatusABIV0); err != nil {
 		t.Fatalf("exact static edge to Dispatch-represented plain body rejected: %v", err)
 	}
 }
@@ -2878,16 +2860,16 @@ func TestActiveCoroABIVersions(t *testing.T) {
 		panicABI  string
 		funcRep   string
 	}{
-		{"nil defaults", nil, coro.EntryResolutionABIV0, coro.SchedulerNoneABIV0, coro.PanicLegacyABIV0, coro.FuncRepABIV0},
-		{"entry resolution", &Config{}, coro.EntryResolutionABIV0, coro.SchedulerNoneABIV0, coro.PanicLegacyABIV0, coro.FuncRepABIV0},
-		{"physical leaf", &Config{EnableCoroPhysicalABI: true}, coro.PhysicalABIV0, coro.SchedulerNoneABIV0, coro.PanicLegacyABIV0, coro.FuncRepABIV0},
-		{"explicit status panic", &Config{EnableCoroExplicitStatusPanicABI: true}, coro.EntryResolutionABIV0, coro.SchedulerNoneABIV0, coro.PanicExplicitStatusABIV0, coro.FuncRepABIV0},
-		{"plain dispatch", &Config{EnableCoroPlainDispatch: true}, coro.EntryResolutionABIV0, coro.SchedulerNoneABIV0, coro.PanicLegacyABIV0, coro.FuncRepABIV1},
-		{"child await", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true}, coro.PhysicalABIV1, coro.SchedulerChildAwaitABIV0, coro.PanicLegacyABIV0, coro.FuncRepABIV0},
-		{"channel", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true, EnableCoroChannel: true, EnableCoroProgramBootstrapRun: true}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapChannelABIV0, coro.PanicLegacyABIV0, coro.FuncRepABIV0},
-		{"closed static spawn", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true, EnableCoroClosedStaticSpawn: true, EnableCoroProgramBootstrapRun: true}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0, coro.PanicLegacyABIV0, coro.FuncRepABIV0},
-		{"channel and closed static spawn", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true, EnableCoroChannel: true, EnableCoroClosedStaticSpawn: true, EnableCoroProgramBootstrapRun: true}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0, coro.PanicLegacyABIV0, coro.FuncRepABIV0},
-		{"program bootstrap runtime with plain dispatch", &Config{EnableCoroPhysicalABI: true, EnableCoroChildAwait: true, EnableCoroPlainDispatch: true, EnableCoroProgramBootstrapRun: true}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapABIV2, coro.PanicLegacyABIV0, coro.FuncRepABIV1},
+		{"nil defaults", nil, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0, coro.PanicExplicitStatusABIV0, coro.FuncRepABIV1},
+		{"entry resolution", &Config{}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0, coro.PanicExplicitStatusABIV0, coro.FuncRepABIV1},
+		{"physical leaf", &Config{CoroProfile: CoroProfileStackless}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0, coro.PanicExplicitStatusABIV0, coro.FuncRepABIV1},
+		{"explicit status panic", &Config{CoroProfile: CoroProfileStackless}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0, coro.PanicExplicitStatusABIV0, coro.FuncRepABIV1},
+		{"plain dispatch", &Config{CoroProfile: CoroProfileStackless}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0, coro.PanicExplicitStatusABIV0, coro.FuncRepABIV1},
+		{"child await", &Config{CoroProfile: CoroProfileStackless}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0, coro.PanicExplicitStatusABIV0, coro.FuncRepABIV1},
+		{"channel", &Config{CoroProfile: CoroProfileStackless}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0, coro.PanicExplicitStatusABIV0, coro.FuncRepABIV1},
+		{"closed static spawn", &Config{CoroProfile: CoroProfileStackless}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0, coro.PanicExplicitStatusABIV0, coro.FuncRepABIV1},
+		{"channel and closed static spawn", &Config{CoroProfile: CoroProfileStackless}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0, coro.PanicExplicitStatusABIV0, coro.FuncRepABIV1},
+		{"program bootstrap runtime with plain dispatch", &Config{CoroProfile: CoroProfileStackless}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0, coro.PanicExplicitStatusABIV0, coro.FuncRepABIV1},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -2956,7 +2938,7 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 	})
 
 	t.Run("entry resolution requires builder", func(t *testing.T) {
-		ctx := &context{buildConf: &Config{EnableCoroEntryResolution: true}}
+		ctx := &context{buildConf: &Config{CoroProfile: CoroProfileStackless}}
 		err := buildCoroPlan(ctx)
 		if err == nil || !strings.Contains(err.Error(), "CoroPlanBuilder is required") {
 			t.Fatalf("buildCoroPlan error = %v, want missing-builder rejection", err)
@@ -2967,7 +2949,7 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 	})
 
 	t.Run("physical ABI requires entry resolution", func(t *testing.T) {
-		ctx := &context{buildConf: &Config{EnableCoroPhysicalABI: true}}
+		ctx := &context{buildConf: &Config{CoroProfile: CoroProfileStackless}}
 		err := buildCoroPlan(ctx)
 		if err == nil || !strings.Contains(err.Error(), "entry resolution is required") {
 			t.Fatalf("buildCoroPlan error = %v, want entry-resolution requirement", err)
@@ -2978,7 +2960,7 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 	})
 
 	t.Run("explicit-status panic ABI requires entry resolution", func(t *testing.T) {
-		ctx := &context{buildConf: &Config{EnableCoroExplicitStatusPanicABI: true}}
+		ctx := &context{buildConf: &Config{CoroProfile: CoroProfileStackless}}
 		err := buildCoroPlan(ctx)
 		if err == nil || !strings.Contains(err.Error(), "entry resolution is required") {
 			t.Fatalf("buildCoroPlan error = %v, want explicit-status entry-resolution requirement", err)
@@ -2989,10 +2971,7 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 	})
 
 	t.Run("child await requires physical ABI", func(t *testing.T) {
-		ctx := &context{buildConf: &Config{
-			EnableCoroEntryResolution: true,
-			EnableCoroChildAwait:      true,
-		}}
+		ctx := &context{buildConf: &Config{CoroProfile: CoroProfileStackless}}
 		err := buildCoroPlan(ctx)
 		if err == nil || !strings.Contains(err.Error(), "physical ABI is required") {
 			t.Fatalf("buildCoroPlan error = %v, want physical-ABI requirement", err)
@@ -3004,10 +2983,7 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 
 	t.Run("child await rejects nested c-archive", func(t *testing.T) {
 		ctx := &context{buildConf: &Config{
-			BuildMode:                 BuildModeCArchive,
-			EnableCoroEntryResolution: true,
-			EnableCoroPhysicalABI:     true,
-			EnableCoroChildAwait:      true,
+			BuildMode: BuildModeCArchive, CoroProfile: CoroProfileStackless,
 		}}
 		err := buildCoroPlan(ctx)
 		if err == nil || !strings.Contains(err.Error(), "c-archive requires flattened package members") {
@@ -3025,37 +3001,37 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 	}{
 		{
 			name: "plain dispatch requires entry resolution",
-			conf: Config{EnableCoroPlainDispatch: true},
+			conf: Config{CoroProfile: CoroProfileStackless},
 			want: "plain dispatch: coroutine entry resolution is required",
 		},
 		{
 			name: "program bootstrap runtime requires descriptor ABI",
-			conf: Config{BuildMode: BuildModeExe, EnableCoroEntryResolution: true, EnableCoroPhysicalABI: true, EnableCoroChildAwait: true, EnableCoroProgramBootstrapRun: true},
+			conf: Config{BuildMode: BuildModeExe, CoroProfile: CoroProfileStackless},
 			want: "program bootstrap ABI is required",
 		},
 		{
 			name: "channel requires runnable program bootstrap",
-			conf: Config{BuildMode: BuildModeExe, EnableCoroEntryResolution: true, EnableCoroPhysicalABI: true, EnableCoroChildAwait: true, EnableCoroChannel: true},
+			conf: Config{BuildMode: BuildModeExe, CoroProfile: CoroProfileStackless},
 			want: "runnable program bootstrap is required",
 		},
 		{
 			name: "program bootstrap requires entry resolution",
-			conf: Config{BuildMode: BuildModeExe, EnableCoroProgramBootstrapABI: true},
+			conf: Config{BuildMode: BuildModeExe, CoroProfile: CoroProfileStackless},
 			want: "entry resolution is required",
 		},
 		{
 			name: "program bootstrap requires physical ABI",
-			conf: Config{BuildMode: BuildModeExe, EnableCoroEntryResolution: true, EnableCoroProgramBootstrapABI: true},
+			conf: Config{BuildMode: BuildModeExe, CoroProfile: CoroProfileStackless},
 			want: "physical ABI is required",
 		},
 		{
 			name: "program bootstrap requires child await",
-			conf: Config{BuildMode: BuildModeExe, EnableCoroEntryResolution: true, EnableCoroPhysicalABI: true, EnableCoroProgramBootstrapABI: true},
+			conf: Config{BuildMode: BuildModeExe, CoroProfile: CoroProfileStackless},
 			want: "child await is required",
 		},
 		{
 			name: "program bootstrap requires executable",
-			conf: Config{BuildMode: BuildModeCShared, EnableCoroEntryResolution: true, EnableCoroPhysicalABI: true, EnableCoroChildAwait: true, EnableCoroProgramBootstrapABI: true},
+			conf: Config{BuildMode: BuildModeCShared, CoroProfile: CoroProfileStackless},
 			want: "executable build mode is required",
 		},
 	} {
@@ -3082,11 +3058,11 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 	t.Run("entry resolution requires prepared emission universe", func(t *testing.T) {
 		builderCalls := 0
 		ctx := &context{buildConf: &Config{
-			EnableCoroEntryResolution: true,
+
 			CoroPlanBuilder: func(CoroPlanInput) (*coro.SSAPlan, error) {
 				builderCalls++
 				return &coro.SSAPlan{}, nil
-			},
+			}, CoroProfile: CoroProfileStackless,
 		}}
 		err := buildCoroPlan(ctx)
 		if err == nil || !strings.Contains(err.Error(), "prepared emission universe is required") {
@@ -3131,7 +3107,7 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 			if ctx.coroPlan != plan || ctx.clCompilation == nil || ctx.clCompilation.CoroPlan != plan {
 				t.Fatalf("installed plan = %p, compilation = %+v, want %p", ctx.coroPlan, ctx.clCompilation, plan)
 			}
-			if ctx.clCompilation.EnableCoroEntryResolution {
+			if ctx.clCompilation.CoroProfileActive() {
 				t.Fatal("report-only compilation unexpectedly enabled entry resolution")
 			}
 			ctx.clCompilation.CoroPlanObserver(nil, plan)
@@ -3166,7 +3142,7 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 
 	t.Run("Do rejects entry resolution without builder before codegen", func(t *testing.T) {
 		conf := NewDefaultConf(ModeGen)
-		conf.EnableCoroEntryResolution = true
+		conf.CoroProfile = CoroProfileStackless
 		moduleCalls := 0
 		conf.ModuleHook = func(Package) {
 			moduleCalls++
@@ -3186,7 +3162,7 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 
 	t.Run("Do rejects active builder that bypasses input Analyze", func(t *testing.T) {
 		conf := NewDefaultConf(ModeGen)
-		conf.EnableCoroEntryResolution = true
+		conf.CoroProfile = CoroProfileStackless
 		conf.CoroPlanBuilder = func(CoroPlanInput) (*coro.SSAPlan, error) {
 			return &coro.SSAPlan{}, nil
 		}
@@ -3241,10 +3217,10 @@ func TestCoroEntryResolutionUsesPlanMatchedPackageCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	metadata := coro.PlanDigestMetadata{
-		CoroABI:             coro.EntryResolutionABIV0,
-		SchedulerABI:        coro.SchedulerNoneABIV0,
-		PanicABI:            coro.PanicLegacyABIV0,
-		FuncRepABI:          coro.FuncRepABIV0,
+		CoroABI:             coro.PhysicalABIV1,
+		SchedulerABI:        coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+		PanicABI:            coro.PanicExplicitStatusABIV0,
+		FuncRepABI:          coro.FuncRepABIV1,
 		LoweringFactsSchema: coro.LoweringFactsSchema,
 		LoweringFactsDigest: loweringFactsDigest,
 		TargetTriple:        "x86_64-unknown-linux-gnu",
@@ -3259,22 +3235,21 @@ func TestCoroEntryResolutionUsesPlanMatchedPackageCache(t *testing.T) {
 		plan := &coro.SSAPlan{}
 		emission := &cl.EmissionUniverse{}
 		compilation := &cl.Compilation{
-			CoroPlan:                  plan,
-			EnableCoroEntryResolution: true,
-			CoroPlanDigest:            digest,
-			CoroLoweringFacts:         loweringFacts,
-			CoroLoweringFactsDigest:   loweringFactsDigest,
-			CoroABI:                   metadata.CoroABI,
-			SchedulerABI:              metadata.SchedulerABI,
-			PanicABI:                  metadata.PanicABI,
-			FuncRepABI:                metadata.FuncRepABI,
-			EmissionUniverse:          emission,
+			CoroPlan: plan,
+
+			CoroPlanDigest:          digest,
+			CoroLoweringFacts:       loweringFacts,
+			CoroLoweringFactsDigest: loweringFactsDigest,
+			CoroABI:                 metadata.CoroABI,
+			SchedulerABI:            metadata.SchedulerABI,
+			PanicABI:                metadata.PanicABI,
+			FuncRepABI:              metadata.FuncRepABI,
+			EmissionUniverse:        emission, CoroProfile: cl.CoroProfileStackless,
 		}
 		return &context{
 			buildConf: &Config{
-				Goos:                      "linux",
-				Goarch:                    "amd64",
-				EnableCoroEntryResolution: true,
+				Goos:   "linux",
+				Goarch: "amd64", CoroProfile: CoroProfileStackless,
 			},
 			coroPlan:                plan,
 			coroEmission:            emission,
@@ -3323,41 +3298,41 @@ func TestCoroEntryResolutionUsesPlanMatchedPackageCache(t *testing.T) {
 		t.Fatal("matching coroutine plan did not reuse the package archive")
 	}
 	dispatchCtx := newContext(digestA)
-	dispatchCtx.buildConf.EnableCoroPlainDispatch = true
-	dispatchCtx.clCompilation.EnableCoroPlainDispatch = true
+	dispatchCtx.buildConf.CoroProfile = CoroProfileStackless
+	dispatchCtx.clCompilation.CoroProfile = CoroProfileStackless
 	dispatchCtx.clCompilation.FuncRepABI = coro.FuncRepABIV1
 	dispatchCtx.coroPlanMetadata.FuncRepABI = coro.FuncRepABIV1
 	if !dispatchCtx.canUsePackageCache() {
 		t.Fatal("matching plain-dispatch ABI unexpectedly disabled package cache")
 	}
-	dispatchCtx.clCompilation.EnableCoroPlainDispatch = false
+	dispatchCtx.clCompilation.CoroProfile = CoroProfileNone
 	if dispatchCtx.canUsePackageCache() {
 		t.Fatal("plain-dispatch capability mismatch unexpectedly permits package cache")
 	}
 	explicitStatusCtx := newContext(digestA)
-	explicitStatusCtx.buildConf.EnableCoroExplicitStatusPanicABI = true
-	explicitStatusCtx.clCompilation.EnableCoroExplicitStatusPanicABI = true
+	explicitStatusCtx.buildConf.CoroProfile = CoroProfileStackless
+	explicitStatusCtx.clCompilation.CoroProfile = CoroProfileStackless
 	explicitStatusCtx.clCompilation.PanicABI = coro.PanicExplicitStatusABIV0
 	explicitStatusCtx.coroPlanMetadata.PanicABI = coro.PanicExplicitStatusABIV0
 	if !explicitStatusCtx.canUsePackageCache() {
 		t.Fatal("matching explicit-status panic ABI identity unexpectedly disabled package cache")
 	}
-	explicitStatusCtx.clCompilation.EnableCoroExplicitStatusPanicABI = false
+	explicitStatusCtx.clCompilation.CoroProfile = CoroProfileNone
 	if explicitStatusCtx.canUsePackageCache() {
 		t.Fatal("explicit-status panic capability mismatch unexpectedly permits package cache")
 	}
 	frameRetentionMismatch := newContext(digestA)
-	frameRetentionMismatch.buildConf.EnableCoroPhysicalABI = true
-	frameRetentionMismatch.buildConf.EnableCoroChildAwait = true
-	frameRetentionMismatch.buildConf.EnableCoroProgramBootstrapRun = true
-	frameRetentionMismatch.clCompilation.EnableCoroPhysicalABI = true
-	frameRetentionMismatch.clCompilation.EnableCoroChildAwait = true
-	frameRetentionMismatch.clCompilation.EnableCoroProgramBootstrapRun = true
+	frameRetentionMismatch.buildConf.CoroProfile = CoroProfileStackless
+	frameRetentionMismatch.buildConf.CoroProfile = CoroProfileStackless
+	frameRetentionMismatch.buildConf.CoroProfile = CoroProfileStackless
+	frameRetentionMismatch.clCompilation.CoroProfile = CoroProfileStackless
+	frameRetentionMismatch.clCompilation.CoroProfile = CoroProfileStackless
+	frameRetentionMismatch.clCompilation.CoroProfile = CoroProfileStackless
 	frameRetentionMismatch.coroPlanMetadata.CoroABI = coro.PhysicalABIV1
-	frameRetentionMismatch.coroPlanMetadata.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+	frameRetentionMismatch.coroPlanMetadata.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	frameRetentionMismatch.coroPlanMetadata.FrameRetentionABI = coro.FrameRetentionTimerABIV1
 	frameRetentionMismatch.clCompilation.CoroABI = coro.PhysicalABIV1
-	frameRetentionMismatch.clCompilation.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+	frameRetentionMismatch.clCompilation.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	if frameRetentionMismatch.canUsePackageCache() {
 		t.Fatal("frame-retention ABI identity mismatch unexpectedly permits package cache")
 	}
@@ -3366,7 +3341,7 @@ func TestCoroEntryResolutionUsesPlanMatchedPackageCache(t *testing.T) {
 		t.Fatal("matching frame-retention ABI identity unexpectedly disables package cache")
 	}
 	bootstrapMismatch := newContext(digestA)
-	bootstrapMismatch.clCompilation.EnableCoroProgramBootstrapRun = true
+	bootstrapMismatch.clCompilation.CoroProfile = CoroProfileStackless
 	if bootstrapMismatch.canUsePackageCache() {
 		t.Fatal("program-bootstrap-run capability mismatch unexpectedly permits package cache")
 	}
@@ -3441,7 +3416,7 @@ func TestCoroEntryResolutionBuildsPreparedRuntimePackages(t *testing.T) {
 	}{
 		{name: "host report only", conf: Config{}, want: true},
 		{name: "target report only stays lazy", conf: Config{Target: "embedded"}},
-		{name: "target active emits frozen universe", conf: Config{Target: "embedded", EnableCoroEntryResolution: true}, want: true},
+		{name: "target active emits frozen universe", conf: Config{Target: "embedded", CoroProfile: CoroProfileStackless}, want: true},
 		{name: "target runtime lowering", conf: Config{Target: "embedded"}, needRuntime: true, want: true},
 		{name: "target python lowering", conf: Config{Target: "embedded"}, needPyInit: true, want: true},
 	} {
@@ -3464,8 +3439,8 @@ func TestCoroRuntimeLinkRequirements(t *testing.T) {
 	}{
 		{name: "host keeps runtime link", conf: Config{}, wantLink: true},
 		{name: "named target stays lazy", conf: Config{Target: "embedded"}},
-		{name: "entry resolution alone stays lazy", conf: Config{Target: "embedded", EnableCoroEntryResolution: true}},
-		{name: "child await initializes and links runtime", conf: Config{Target: "embedded", EnableCoroChildAwait: true}, wantInit: true, wantLink: true},
+		{name: "entry resolution alone stays lazy", conf: Config{Target: "embedded", CoroProfile: CoroProfileStackless}},
+		{name: "child await initializes and links runtime", conf: Config{Target: "embedded", CoroProfile: CoroProfileStackless}, wantInit: true, wantLink: true},
 		{name: "legacy runtime reference", conf: Config{Target: "embedded"}, needRuntime: true, wantInit: true, wantLink: true},
 		{name: "python links without runtime init", conf: Config{Target: "embedded"}, needPyInit: true, wantLink: true},
 	} {
@@ -3480,7 +3455,7 @@ func TestCoroRuntimeLinkRequirements(t *testing.T) {
 
 func TestCoroEmissionCoverageStopsBeforeAnyPackageCodegen(t *testing.T) {
 	conf := NewDefaultConf(ModeGen)
-	conf.EnableCoroEntryResolution = true
+	conf.CoroProfile = CoroProfileStackless
 
 	var (
 		builderCalls  int
@@ -3531,7 +3506,7 @@ func TestCoroEmissionCoverageStopsBeforeAnyPackageCodegen(t *testing.T) {
 
 func TestCoroUnsupportedEntryResolutionReturnsErrorBeforeCodegen(t *testing.T) {
 	conf := NewDefaultConf(ModeGen)
-	conf.EnableCoroEntryResolution = true
+	conf.CoroProfile = CoroProfileStackless
 	var (
 		observerCalls int
 		moduleCalls   int

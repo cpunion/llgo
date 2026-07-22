@@ -185,7 +185,7 @@ func TestCoroPrintBuiltinManagedHelpersNativeAndWasm32(t *testing.T) {
 
 			compilation := &Compilation{CoroPlan: fixture.plan, EmissionUniverse: fixture.universe}
 			enableCoroChildAwaitCompilation(compilation)
-			compilation.EnableCoroExplicitStatusPanicABI = true
+			compilation.CoroProfile = CoroProfileStackless
 			compilation.PanicABI = coro.PanicExplicitStatusABIV0
 			runtimeLL, _, err := NewPackageExWithEmbedOptions(
 				fixture.prog, nil, nil, nil, fixture.runtimePkg.ssa, []*ast.File{fixture.runtimePkg.file}, goembed.VarMap{},
@@ -282,7 +282,7 @@ func prepareCoroPrintTestPlan(t *testing.T, target *llssa.Target, loweredCalls, 
 		prog = newLLSSAProgForTarget(t, target)
 	}
 	prog.SetRuntime(runtimePkg.types)
-	universe, err := PrepareEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
+	universe, err := prepareStacklessEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
 		{SSA: runtimePkg.ssa, Files: []*ast.File{runtimePkg.file}},
 		{SSA: fooPkg.ssa, Files: []*ast.File{fooPkg.file}},
 	}, EmissionUniverseOptions{CompleteRuntimeABI: true})
@@ -304,7 +304,7 @@ func prepareCoroPrintTestPlan(t *testing.T, target *llssa.Target, loweredCalls, 
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerChildAwaitABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	config := coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,

@@ -85,7 +85,7 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 						if callee != nil {
 							opcode, intrinsic, classifyErr = u.coroIntrinsicOpcode(callee)
 						}
-						if classifyErr == nil && intrinsic && isLLGoSyscallIntrinsic(opcode) && u.enableCoroWorker {
+						if classifyErr == nil && intrinsic && isLLGoSyscallIntrinsic(opcode) && u.CoroWorkerEnabled() {
 							if direct, ok := call.(*ssa.Call); ok && direct.Common() != nil && !direct.Common().IsInvoke() &&
 								direct.Parent() != nil && u.canonicalAlias(direct.Parent()) == direct.Parent() {
 								workerCertificate, workerCertified = u.workerSyscalls[direct]

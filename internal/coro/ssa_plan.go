@@ -1543,6 +1543,20 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 				if flowComplete {
 					candidates := sortedSSACandidates(flowTargets, ids, includedSet)
 					callKinds[call] = kind
+					if config.OutcomeMode == OutcomeExplicitStatus && common.IsInvoke() {
+						// The stackless explicit-outcome profile has one receiver-aware
+						// descriptor boundary for both closed and open interface calls.
+						// A closed candidate set remains closed in SSACallPlan; this
+						// synthetic managed boundary contributes only structured await
+						// and async target demand, never an unresolved target.
+						if err := addSSAManagedDescriptorTargetDemand(graph, ids[caller], candidates, ids, kind); err != nil {
+							return nil, err
+						}
+						if err := addSSAUnknownCall(graph, ids[caller], kind, UnknownManagedInterfaceDispatch); err != nil {
+							return nil, err
+						}
+						continue
+					}
 					if certificate, certified := closedDynamicCalls[call]; certified && certificate.SyncDispatch {
 						// The exact frontend/build proof selects the descriptor's
 						// synchronous plain entry. Retain target liveness/demand, but do

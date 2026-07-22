@@ -39,7 +39,7 @@ func Value() any { return struct{ Base }{} }
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
 
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{
 		SSA: pkg.ssa, Files: []*ast.File{pkg.file},
 	}})
 	if err != nil {
@@ -84,9 +84,8 @@ func Value() any { return struct{ Base }{} }
 	compiled, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, pkg.ssa, []*ast.File{pkg.file}, nil,
 		PackageOptions{Compilation: &Compilation{
-			CoroPlan:                  plan,
-			EmissionUniverse:          universe,
-			EnableCoroEntryResolution: true,
+			CoroPlan:         plan,
+			EmissionUniverse: universe, CoroProfile: CoroProfileStackless,
 		}},
 	)
 	if err != nil {
@@ -147,7 +146,7 @@ func Value() any { return methoddecl.Error("value") }
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
 
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{
 		{SSA: declaring.ssa, Files: []*ast.File{declaring.file}},
 		{SSA: consumer.ssa, Files: []*ast.File{consumer.file}},
 	})
@@ -197,9 +196,8 @@ func Value() any { return methoddecl.Error("value") }
 		t.Fatal(err)
 	}
 	compilation := &Compilation{
-		CoroPlan:                  plan,
-		EmissionUniverse:          universe,
-		EnableCoroEntryResolution: true,
+		CoroPlan:         plan,
+		EmissionUniverse: universe, CoroProfile: CoroProfileStackless,
 	}
 	compiled, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, consumer.ssa, []*ast.File{consumer.file}, nil,
@@ -412,7 +410,7 @@ func UseString() int { return Generic[string]() }
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
 
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{
 		SSA: pkg.ssa, Files: []*ast.File{pkg.file},
 	}})
 	if err != nil {
@@ -439,9 +437,8 @@ func UseString() int { return Generic[string]() }
 	compiled, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, pkg.ssa, []*ast.File{pkg.file}, nil,
 		PackageOptions{Compilation: &Compilation{
-			CoroPlan:                  plan,
-			EmissionUniverse:          universe,
-			EnableCoroEntryResolution: true,
+			CoroPlan:         plan,
+			EmissionUniverse: universe, CoroProfile: CoroProfileStackless,
 		}},
 	)
 	if err != nil {

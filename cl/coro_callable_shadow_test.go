@@ -74,9 +74,9 @@ func TestCoroCallableShadowClassifiesManagedFuncPCAsCodeAddressOnly(t *testing.T
 	testProg.ssa.Build()
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverseWithOptions(
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}},
-		EmissionUniverseOptions{EnableCoroWorker: true},
+		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -113,9 +113,9 @@ func TestCoroCallableShadowFlowsForwardFromFuncPCABI0(t *testing.T) {
 	testProg.ssa.Build()
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverseWithOptions(
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}},
-		EmissionUniverseOptions{EnableCoroWorker: true},
+		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -164,9 +164,9 @@ func TestCoroCallableShadowBindsABIAtProducerAndKeepsConditionalEdges(t *testing
 	testProg.ssa.Build()
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverseWithOptions(
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}},
-		EmissionUniverseOptions{EnableCoroWorker: true},
+		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -225,9 +225,9 @@ func TestCoroCallableShadowRejectsUnannotatedProducerWithoutAddressRecovery(t *t
 	testProg.ssa.Build()
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverseWithOptions(
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}},
-		EmissionUniverseOptions{EnableCoroWorker: true},
+		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -267,9 +267,9 @@ func RawSyscall(trap, a0, a1, a2 uintptr) uintptr {
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
 	prog.SetLinkname(packagePath+".libc_arbitrary_trap_dispatcher_trampoline", "C.__arbitrary_trap_dispatcher")
-	universe, err := PrepareEmissionUniverseWithOptions(
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}},
-		EmissionUniverseOptions{EnableCoroWorker: true},
+		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -307,9 +307,9 @@ func TestCoroCallableShadowGenericContractAuthorizesProductionWorkerCertificate(
 	testProg.ssa.Build()
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverseWithOptions(
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}},
-		EmissionUniverseOptions{EnableCoroWorker: true},
+		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		t.Fatal(err)

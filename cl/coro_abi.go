@@ -225,7 +225,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 	faultPrepareHook := ""
 	faultPayloadHook := ""
 	completePrepareHook := ""
-	if p.compilation != nil && p.compilation.EnableCoroChildAwait {
+	if p.compilation != nil && p.compilation.CoroChildAwaitActive() {
 		version = coroPhysicalABIVersionV1
 		frameAllocHook = coroFrameAllocHookV1
 		frameFreeHook = coroFrameFreeHookV1
@@ -239,12 +239,12 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		runDecisionTakeHook = coroRunDecisionTakeHookV1
 		runDecisionTakeZeroHook = coroRunDecisionTakeZeroHookV1
 		completePrepareHook = coroCompletePrepareHookV2
-		if p.compilation.EnableCoroProgramBootstrapRun {
+		if p.compilation.CoroProgramBootstrapActive() {
 			criticalEnterHook = coroCriticalEnterHookV1
 			criticalExitHook = coroCriticalExitHookV1
 		}
 	}
-	if p.compilation != nil && p.compilation.EnableCoroExplicitStatusPanicABI {
+	if p.compilation != nil && p.compilation.CoroExplicitStatusActive() {
 		panicPrepareHook = coroPanicPrepareHookV1
 		recoverTakeHook = coroRecoverTakeHookV1
 		faultPrepareHook = coroFaultPrepareHookV1
@@ -275,7 +275,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 	target := p.prog.TargetSpec()
 	coroABI := coro.PhysicalABIV0
 	schedulerABI := coro.SchedulerNoneABIV0
-	if p.compilation != nil && p.compilation.EnableCoroChildAwait {
+	if p.compilation != nil && p.compilation.CoroChildAwaitActive() {
 		coroABI = coro.PhysicalABIV1
 		schedulerABI = coro.SchedulerChildAwaitABIV0
 	}
@@ -435,7 +435,7 @@ func (p *context) beginCoroBody(
 		body.runDecisionTakeZero = p.pkg.NewFunc(
 			abi.runDecisionTakeZeroHook, coroRunDecisionTakeZeroSignature(), llssa.InC,
 		).Expr
-		if p.compilation != nil && (p.compilation.EnableCoroChannel || p.compilation.EnableCoroWorker ||
+		if p.compilation != nil && (p.compilation.CoroChannelActive() || p.compilation.CoroWorkerActive() ||
 			p.compilation.CoroFrameRetentionABI == CoroFrameRetentionParkABIV2) {
 			body.unsupportedRunDecision = p.fn.MakeBlock()
 			body.runDecisionTrap = p.pkg.NewFunc(
@@ -835,7 +835,7 @@ func (c *coroBodyContext) parkCurrentFrame(b llssa.Builder, token, ticket llssa.
 
 func (p *context) compileCoroPark(b llssa.Builder, args []llssa.Expr) {
 	body := p.coroBody()
-	if body == nil || p.compilation == nil || !p.compilation.EnableCoroChildAwait {
+	if body == nil || p.compilation == nil || !p.compilation.CoroChildAwaitActive() {
 		panic("llgo.coroPark requires an active PhysicalABIV1 coroutine body")
 	}
 	if b.Func != p.fn || len(args) != 2 {
@@ -846,7 +846,7 @@ func (p *context) compileCoroPark(b llssa.Builder, args []llssa.Expr) {
 
 func (p *context) compileCoroYield(b llssa.Builder) {
 	body := p.coroBody()
-	if body == nil || p.compilation == nil || !p.compilation.EnableCoroChildAwait {
+	if body == nil || p.compilation == nil || !p.compilation.CoroChildAwaitActive() {
 		panic("llgo.coroYield requires an active PhysicalABIV1 coroutine body")
 	}
 	if b.Func != p.fn {

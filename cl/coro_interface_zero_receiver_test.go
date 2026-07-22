@@ -57,9 +57,9 @@ func Root(runner Runner) int { return runner.Run() }
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
 	program := newLLSSAProg(t)
 	defer program.Dispose()
-	universe, err := PrepareEmissionUniverseWithOptions(
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		program, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}},
-		EmissionUniverseOptions{EnableCoroChannel: true},
+		EmissionUniverseOptions{CoroProfile: CoroProfileStackless},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -89,7 +89,7 @@ func Root(runner Runner) int { return runner.Run() }
 
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
@@ -134,7 +134,7 @@ func Root(runner Runner) int { return runner.Run() }
 	}
 
 	compilation := coroClosedInterfacePlainCompilation(plan, universe)
-	compilation.EnableCoroExplicitStatusPanicABI = true
+	compilation.CoroProfile = CoroProfileStackless
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
 	compiled, _, err := NewPackageExWithEmbedOptions(
 		program, nil, nil, nil, ssaPkg, files, goembed.VarMap{},

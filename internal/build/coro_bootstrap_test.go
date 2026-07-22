@@ -141,7 +141,7 @@ func TestSelectCoroProgramBootstrapRuntimeAcceptsLocalUnwindAndRejectsThreadAffi
 	ctx, pkg := newCoroBootstrapTestContext(t, nil, coroBootstrapTestPlan{
 		rootDemand: map[string]coro.Demand{"init": coro.AsyncDemand, "main": coro.AsyncDemand},
 	})
-	ctx.buildConf.EnableCoroProgramBootstrapRun = true
+	ctx.buildConf.CoroProfile = CoroProfileStackless
 	if _, err := selectCoroProgramBootstrapV1(ctx, pkg); err != nil {
 		t.Fatalf("production bootstrap rejected conservative local MayUnwind: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestSelectCoroProgramBootstrapRuntimeAcceptsLocalUnwindAndRejectsThreadAffi
 		rootDemand: map[string]coro.Demand{"init": coro.AsyncDemand, "main": coro.AsyncDemand},
 		policy:     map[string]coro.SSAFunctionPolicy{"main": {Exec: coro.ThreadAffine}},
 	})
-	ctx.buildConf.EnableCoroProgramBootstrapRun = true
+	ctx.buildConf.CoroProfile = CoroProfileStackless
 	if _, err := selectCoroProgramBootstrapV1(ctx, pkg); err == nil || !strings.Contains(err.Error(), "unsupported execution constraints") {
 		t.Fatalf("production bootstrap error = %v, want thread-affinity rejection", err)
 	}
@@ -504,7 +504,7 @@ func TestCoroProgramBootstrapHashV1StableAndStepComplete(t *testing.T) {
 		t.Fatal("bootstrap hash ignored the canonical plan digest")
 	}
 	ctx.coroPlanDigest = originalDigest
-	ctx.buildConf.EnableCoroProgramBootstrapRun = true
+	ctx.buildConf.CoroProfile = CoroProfileStackless
 	changedDriver, err := coroProgramBootstrapHashV1(ctx, bootstrap.Steps)
 	if err != nil {
 		t.Fatal(err)
@@ -630,14 +630,9 @@ func main() {}
 		suspending[publicRuntimeInit] = true
 	}
 	conf := &Config{
-		BuildMode:                     BuildModeExe,
-		Goos:                          "linux",
-		Goarch:                        "amd64",
-		EnableCoroEntryResolution:     true,
-		EnableCoroPhysicalABI:         true,
-		EnableCoroChildAwait:          true,
-		EnableCoroProgramBootstrapABI: true,
-		EnableCoroProgramBootstrapRun: true,
+		BuildMode: BuildModeExe,
+		Goos:      "linux",
+		Goarch:    "amd64", CoroProfile: CoroProfileStackless,
 	}
 	conf.CoroPlanBuilder = func(input CoroPlanInput) (*coro.SSAPlan, error) {
 		// Deliberately provide roots in reverse name order. Descriptor Aux must
@@ -786,11 +781,7 @@ func buildCoroBootstrapTestContext(t *testing.T, target *llssa.Target, spec coro
 	prog := llssa.NewProgram(target)
 	t.Cleanup(prog.Dispose)
 	conf := &Config{
-		BuildMode:                     BuildModeExe,
-		EnableCoroEntryResolution:     true,
-		EnableCoroPhysicalABI:         true,
-		EnableCoroChildAwait:          true,
-		EnableCoroProgramBootstrapABI: true,
+		BuildMode: BuildModeExe, CoroProfile: CoroProfileStackless,
 	}
 	conf.CoroPlanBuilder = func(input CoroPlanInput) (*coro.SSAPlan, error) {
 		roots := make(coro.Roots, 0, len(spec.rootDemand))

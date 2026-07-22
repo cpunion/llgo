@@ -81,8 +81,8 @@ func NeverCaller() { Never() }
 		t.Fatal(err)
 	}
 	functionIDs := emission.FunctionIDConfig()
-	functionIDs.CoroABI = coro.EntryResolutionABIV0
-	functionIDs.SchedulerABI = coro.SchedulerNoneABIV0
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	return &callableContractBuildFixture{
 		program: program,

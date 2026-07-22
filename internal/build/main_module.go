@@ -88,7 +88,7 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 		return mainAPkg
 	}
 
-	managedBootstrapV2 := ctx.buildConf.EnableCoroProgramBootstrapRun && cfg.coroBootstrap != nil &&
+	managedBootstrapV2 := ctx.buildConf.coroProgramBootstrapActive() && cfg.coroBootstrap != nil &&
 		cfg.coroBootstrap.abiVersion() == coroProgramBootstrapVersionV2
 	var runtimeStub llssa.Function
 	if !managedBootstrapV2 {
@@ -125,7 +125,7 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 			return filterAbiSymbol(cfg.abiInit, sym)
 		})
 	}
-	if ctx.buildConf.EnableCoroProgramBootstrapRun && cfg.coroBootstrap != nil &&
+	if ctx.buildConf.coroProgramBootstrapActive() && cfg.coroBootstrap != nil &&
 		cfg.coroBootstrap.abiVersion() == coroProgramBootstrapVersionV2 {
 		// The v2 table always contains the compiler ABI-init stage. Profiles with
 		// no selected ABI symbols still define the exact target as a bounded no-op
@@ -143,7 +143,7 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 	}
 
 	var mainInit, mainMain llssa.Function
-	if !ctx.buildConf.EnableCoroProgramBootstrapRun {
+	if !ctx.buildConf.coroProgramBootstrapActive() {
 		mainInit = declareNoArgFunc(mainPkg, pkg.PkgPath+".init")
 		mainMain = declareNoArgFunc(mainPkg, pkg.PkgPath+".main")
 	}
@@ -155,7 +155,7 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 	var coroNativePostWait llssa.Function
 	var coroHostPullCallbacks []retainedCoroCallbackV1
 	var coroAllocatorBootstrap llssa.Function
-	if ctx.buildConf.EnableCoroProgramBootstrapRun {
+	if ctx.buildConf.coroProgramBootstrapActive() {
 		if coroEntry.manifest.IsNil() || coroEntry.factory == nil {
 			panic("coroutine program bootstrap runtime enabled without a manifest and factory")
 		}
@@ -215,7 +215,7 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 // module gives every build mode one fixed C ABI without exposing LLVM's handle
 // representation to the runtime.
 func emitCoroControlWrappers(ctx *context, pkg llssa.Package) {
-	if !ctx.buildConf.EnableCoroChildAwait {
+	if !ctx.buildConf.coroChildAwaitActive() {
 		return
 	}
 
@@ -253,7 +253,7 @@ type coroProgramEntryV1 struct {
 }
 
 func emitCoroProgramManifest(ctx *context, pkg llssa.Package, cfg *genConfig) coroProgramEntryV1 {
-	if ctx == nil || ctx.buildConf == nil || !ctx.buildConf.EnableCoroChildAwait {
+	if ctx == nil || ctx.buildConf == nil || !ctx.buildConf.coroChildAwaitActive() {
 		return coroProgramEntryV1{}
 	}
 	prog := pkg.Prog
@@ -277,7 +277,7 @@ func emitCoroProgramManifest(ctx *context, pkg llssa.Package, cfg *genConfig) co
 	}
 	var bootstrap llssa.Expr
 	var factory llssa.Function
-	if ctx.buildConf.EnableCoroProgramBootstrapABI {
+	if ctx.buildConf.coroProgramBootstrapABIActive() {
 		if cfg.coroBootstrap == nil {
 			panic("coroutine program bootstrap ABI enabled without a validated startup table")
 		}
@@ -316,10 +316,10 @@ func emitCoroProgramManifest(ctx *context, pkg llssa.Package, cfg *genConfig) co
 					Target: tableTarget, Aux: step.Aux,
 				}
 			}
-			if ctx.buildConf.EnableCoroProgramBootstrapRun {
+			if ctx.buildConf.coroProgramBootstrapActive() {
 				factory = emitCoroProgramBootstrapFactoryV2(
 					pkg, cfg.coroBootstrap, targets, cfg.coroManifestHash,
-					ctx.buildConf.EnableCoroClosedStaticSpawn,
+					ctx.buildConf.coroClosedStaticSpawnActive(),
 				)
 			}
 		} else {
@@ -332,7 +332,7 @@ func emitCoroProgramManifest(ctx *context, pkg llssa.Package, cfg *genConfig) co
 					Target: target.Expr, Aux: step.Aux,
 				}
 			}
-			if ctx.buildConf.EnableCoroProgramBootstrapRun {
+			if ctx.buildConf.coroProgramBootstrapActive() {
 				if len(targets) != 2 {
 					panic("coroutine program bootstrap v1 runtime requires exactly two static targets")
 				}
@@ -374,7 +374,7 @@ func emitCoroProgramManifest(ctx *context, pkg llssa.Package, cfg *genConfig) co
 // their definitions makes the requirement independent of optimization level,
 // LTO mode, or whether clang participates in the final codegen path.
 func lowerCoroControlWrappers(ctx *context, pkg llssa.Package) error {
-	if ctx == nil || ctx.buildConf == nil || !ctx.buildConf.EnableCoroChildAwait {
+	if ctx == nil || ctx.buildConf == nil || !ctx.buildConf.coroChildAwaitActive() {
 		return nil
 	}
 	if pkg == nil || ctx.prog == nil {

@@ -71,14 +71,9 @@ func __llgo_coro_frame_free_v1() {}
 	ctx := &context{
 		prog: prog,
 		buildConf: &Config{
-			BuildMode:                     BuildModeExe,
-			Goos:                          "wasip1",
-			Goarch:                        "wasm",
-			EnableCoroEntryResolution:     true,
-			EnableCoroPhysicalABI:         true,
-			EnableCoroChildAwait:          true,
-			EnableCoroProgramBootstrapABI: true,
-			EnableCoroProgramBootstrapRun: true,
+			BuildMode: BuildModeExe,
+			Goos:      "wasip1",
+			Goarch:    "wasm", CoroProfile: CoroProfileStackless,
 		},
 		coroEmission:    emission,
 		coroSSAEmission: ssaEmission,

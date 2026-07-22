@@ -21,18 +21,18 @@ func TestRealRuntimeLegacyPanicPlainCertificateAcceptsRawTerminalTrace(t *testin
 	sentinel := errors.New("legacy raw panic trace verified")
 	conf := NewDefaultConf(ModeGen)
 	conf.ForceRebuild = true
-	conf.EnableCoroEntryResolution = true
-	conf.EnableCoroPhysicalABI = true
-	conf.EnableCoroChildAwait = true
-	conf.EnableCoroPlainDispatch = true
-	conf.EnableCoroProgramBootstrapABI = true
-	conf.EnableCoroProgramBootstrapRun = true
+	conf.CoroProfile = CoroProfileStackless
+	conf.CoroProfile = CoroProfileStackless
+	conf.CoroProfile = CoroProfileStackless
+	conf.CoroProfile = CoroProfileStackless
+	conf.CoroProfile = CoroProfileStackless
+	conf.CoroProfile = CoroProfileStackless
 	conf.CoroPlanBuilder = func(input CoroPlanInput) (*coro.SSAPlan, error) {
 		plan, err := input.Analyze(nil, coro.SSAConfig{MaxPlainInstructions: -1})
 		if err != nil {
 			return nil, err
 		}
-		if err := validateCoroUnwindOnlyLoweredCalls(plan, coro.PanicLegacyABIV0); err != nil {
+		if err := validateCoroUnwindOnlyLoweredCalls(plan, coro.PanicExplicitStatusABIV0); err != nil {
 			return nil, fmt.Errorf("real runtime raw terminal panic trace is not a plain certificate: %w", err)
 		}
 		functions := make(map[string]*ssa.Function)

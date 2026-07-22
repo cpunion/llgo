@@ -77,188 +77,79 @@ func F() int { return 42 }
 }
 
 func TestCompilationCoroABIIdentityValidation(t *testing.T) {
-	newPhysical := func() *Compilation {
+	current := func() *Compilation {
 		return &Compilation{
-			EnableCoroEntryResolution: true,
-			EnableCoroPhysicalABI:     true,
-			CoroABI:                   coro.PhysicalABIV0,
-			SchedulerABI:              coro.SchedulerNoneABIV0,
-			PanicABI:                  coro.PanicLegacyABIV0,
-			FuncRepABI:                coro.FuncRepABIV0,
+			CoroProfile:  CoroProfileStackless,
+			CoroABI:      coro.PhysicalABIV1,
+			SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+			PanicABI:     coro.PanicExplicitStatusABIV0,
+			FuncRepABI:   coro.FuncRepABIV1,
 		}
 	}
-	physical := newPhysical()
-	if err := physical.validateCoroABIIdentity(false); err != nil {
-		t.Fatalf("complete source ABI identity: %v", err)
+	if err := current().validateCoroABIIdentity(false); err != nil {
+		t.Fatalf("current stackless ABI identity: %v", err)
 	}
-	if err := (&Compilation{EnableCoroEntryResolution: true, EnableCoroPhysicalABI: true}).validateCoroABIIdentity(false); err != nil {
+	if err := (&Compilation{CoroProfile: CoroProfileStackless}).validateCoroABIIdentity(false); err != nil {
 		t.Fatalf("omitted source ABI identity should use current defaults: %v", err)
 	}
-	newPlainDispatch := func() *Compilation {
-		return &Compilation{
-			EnableCoroEntryResolution: true,
-			EnableCoroPlainDispatch:   true,
-			CoroABI:                   coro.EntryResolutionABIV0,
-			SchedulerABI:              coro.SchedulerNoneABIV0,
-			PanicABI:                  coro.PanicLegacyABIV0,
-			FuncRepABI:                coro.FuncRepABIV1,
+
+	for _, test := range []struct {
+		name string
+		edit func(*Compilation)
+		want string
+	}{
+		{name: "physical", edit: func(c *Compilation) { c.CoroABI = "invalid" }, want: "coroutine ABI"},
+		{name: "scheduler", edit: func(c *Compilation) { c.SchedulerABI = "invalid" }, want: "scheduler ABI"},
+		{name: "panic", edit: func(c *Compilation) { c.PanicABI = "invalid" }, want: "panic ABI"},
+		{name: "function representation", edit: func(c *Compilation) { c.FuncRepABI = "invalid" }, want: "function representation ABI"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			compilation := current()
+			test.edit(compilation)
+			if err := compilation.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("ABI mismatch error = %v, want substring %q", err, test.want)
+			}
+		})
+	}
+
+	inactive := current()
+	inactive.CoroProfile = CoroProfileNone
+	if err := inactive.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "requires the stackless runtime profile") {
+		t.Fatalf("inactive ABI identity error = %v", err)
+	}
+	if err := (&Compilation{}).validateCoroABIIdentity(false); err != nil {
+		t.Fatalf("inactive empty identity: %v", err)
+	}
+
+	for _, retention := range []string{"", CoroFrameRetentionTimerABIV1, CoroFrameRetentionParkABIV2} {
+		compilation := current()
+		compilation.CoroFrameRetentionABI = retention
+		if err := compilation.validateCoroABIIdentity(false); err != nil {
+			t.Fatalf("frame-retention identity %q: %v", retention, err)
 		}
 	}
-	plainDispatch := newPlainDispatch()
-	if err := plainDispatch.validateCoroABIIdentity(false); err != nil {
-		t.Fatalf("complete plain-dispatch ABI identity: %v", err)
+	unknownRetention := current()
+	unknownRetention.CoroFrameRetentionABI = "invalid"
+	if err := unknownRetention.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "unknown coroutine frame-retention ABI") {
+		t.Fatalf("unknown frame-retention error = %v", err)
 	}
-	wrongPlainDispatch := newPlainDispatch()
-	wrongPlainDispatch.FuncRepABI = coro.FuncRepABIV0
-	if err := wrongPlainDispatch.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "function representation ABI") {
-		t.Fatalf("plain-dispatch function representation mismatch = %v", err)
+
+	worker := current()
+	worker.CoroTargetCapabilities = CoroNativeTargetCapabilities()
+	worker.SchedulerABI = coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0
+	if err := worker.validateCoroABIIdentity(false); err != nil {
+		t.Fatalf("native worker ABI identity: %v", err)
 	}
-	withoutEntry := newPlainDispatch()
-	withoutEntry.EnableCoroEntryResolution = false
-	if err := withoutEntry.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "requires coroutine entry resolution") {
-		t.Fatalf("plain-dispatch dependency error = %v", err)
+	worker.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	if err := worker.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "scheduler ABI") {
+		t.Fatalf("native worker scheduler mismatch = %v", err)
 	}
-	if err := withoutEntry.preflightCoroPlan(); err == nil || !strings.Contains(err.Error(), "requires coroutine entry resolution") {
-		t.Fatalf("plain-dispatch preflight dependency error = %v", err)
-	}
-	newExplicitStatus := func() *Compilation {
-		compilation := newPhysical()
-		compilation.EnableCoroChildAwait = true
-		compilation.EnableCoroExplicitStatusPanicABI = true
-		compilation.CoroABI = coro.PhysicalABIV1
-		compilation.SchedulerABI = coro.SchedulerChildAwaitABIV0
-		compilation.PanicABI = coro.PanicExplicitStatusABIV0
-		return compilation
-	}
-	explicitStatus := newExplicitStatus()
-	if err := explicitStatus.validateCoroABIIdentity(false); err != nil {
-		t.Fatalf("complete explicit-status panic ABI identity: %v", err)
-	}
-	legacyIdentity := newExplicitStatus()
-	legacyIdentity.PanicABI = coro.PanicLegacyABIV0
-	if err := legacyIdentity.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "panic ABI") {
-		t.Fatalf("explicit-status panic ABI mismatch = %v", err)
-	}
-	withoutExplicitStatusEntry := newExplicitStatus()
-	withoutExplicitStatusEntry.EnableCoroEntryResolution = false
-	if err := withoutExplicitStatusEntry.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "requires coroutine entry resolution") {
-		t.Fatalf("explicit-status panic ABI dependency error = %v", err)
-	}
-	if err := withoutExplicitStatusEntry.preflightCoroPlan(); err == nil || !strings.Contains(err.Error(), "requires coroutine entry resolution") {
-		t.Fatalf("explicit-status panic ABI preflight dependency error = %v", err)
-	}
-	if err := explicitStatus.preflightCoroPlan(); err == nil || !strings.Contains(err.Error(), "requires a compilation CoroPlan") {
-		t.Fatalf("explicit-status panic ABI active preflight error = %v", err)
-	}
-	newChildAwait := func() *Compilation {
-		return &Compilation{
-			EnableCoroEntryResolution: true,
-			EnableCoroPhysicalABI:     true,
-			EnableCoroChildAwait:      true,
-			CoroABI:                   coro.PhysicalABIV1,
-			SchedulerABI:              coro.SchedulerChildAwaitABIV0,
-			PanicABI:                  coro.PanicLegacyABIV0,
-			FuncRepABI:                coro.FuncRepABIV0,
-		}
-	}
-	newFrameRetention := func() *Compilation {
-		compilation := newChildAwait()
-		compilation.EnableCoroProgramBootstrapRun = true
-		compilation.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
-		compilation.CoroFrameRetentionABI = CoroFrameRetentionTimerABIV1
-		return compilation
-	}
-	childAwait := newChildAwait()
-	if err := childAwait.validateCoroABIIdentity(false); err != nil {
-		t.Fatalf("complete child-await ABI identity: %v", err)
-	}
-	programBootstrap := newChildAwait()
-	programBootstrap.EnableCoroProgramBootstrapRun = true
-	programBootstrap.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
-	if err := programBootstrap.validateCoroABIIdentity(false); err != nil {
-		t.Fatalf("complete program-bootstrap ABI identity: %v", err)
-	}
-	channel := newChildAwait()
-	channel.EnableCoroProgramBootstrapRun = true
-	channel.EnableCoroChannel = true
-	channel.SchedulerABI = coro.SchedulerProgramBootstrapChannelABIV0
-	if err := channel.validateCoroABIIdentity(false); err != nil {
-		t.Fatalf("complete channel ABI identity: %v", err)
-	}
-	withoutChannelBootstrap := newChildAwait()
-	withoutChannelBootstrap.EnableCoroChannel = true
-	withoutChannelBootstrap.SchedulerABI = coro.SchedulerProgramBootstrapChannelABIV0
-	withoutChannelBootstrap.EnableCoroProgramBootstrapRun = false
-	if err := withoutChannelBootstrap.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "requires runnable PhysicalABIV1") {
-		t.Fatalf("channel bootstrap dependency error = %v", err)
-	}
-	frameRetention := newFrameRetention()
-	if err := frameRetention.validateCoroABIIdentity(false); err != nil {
-		t.Fatalf("complete frame-retention ABI identity: %v", err)
-	}
-	parkFrameRetention := newFrameRetention()
-	parkFrameRetention.CoroFrameRetentionABI = CoroFrameRetentionParkABIV2
-	if err := parkFrameRetention.validateCoroABIIdentity(false); err != nil {
-		t.Fatalf("complete generic park frame-retention ABI identity: %v", err)
-	}
-	withoutFrameBootstrap := newFrameRetention()
-	withoutFrameBootstrap.EnableCoroProgramBootstrapRun = false
-	if err := withoutFrameBootstrap.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "requires runnable PhysicalABIV1 program-bootstrap lowering") {
-		t.Fatalf("frame-retention bootstrap dependency error = %v", err)
-	}
-	unknownFrameRetention := newFrameRetention()
-	unknownFrameRetention.CoroFrameRetentionABI += ".unknown"
-	if err := unknownFrameRetention.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "unknown coroutine frame-retention ABI") {
-		t.Fatalf("unknown frame-retention ABI error = %v", err)
-	}
-	closedStaticSpawn := newChildAwait()
-	closedStaticSpawn.EnableCoroProgramBootstrapRun = true
-	closedStaticSpawn.EnableCoroClosedStaticSpawn = true
-	closedStaticSpawn.SchedulerABI = coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0
-	if err := closedStaticSpawn.validateCoroABIIdentity(false); err != nil {
-		t.Fatalf("complete closed-static-spawn ABI identity: %v", err)
-	}
-	channelAndSpawn := newChildAwait()
-	channelAndSpawn.EnableCoroProgramBootstrapRun = true
-	channelAndSpawn.EnableCoroClosedStaticSpawn = true
-	channelAndSpawn.EnableCoroChannel = true
-	channelAndSpawn.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
-	if err := channelAndSpawn.validateCoroABIIdentity(false); err != nil {
-		t.Fatalf("complete channel plus closed-static-spawn ABI identity: %v", err)
-	}
-	closedStaticSpawn.EnableCoroProgramBootstrapRun = false
-	if err := closedStaticSpawn.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "runnable program-bootstrap v2") {
-		t.Fatalf("closed-static-spawn bootstrap dependency error = %v", err)
-	}
-	programBootstrap.EnableCoroChildAwait = false
-	if err := programBootstrap.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "requires child-await") {
-		t.Fatalf("program-bootstrap dependency error = %v", err)
-	}
-	wrongChildAwait := newChildAwait()
-	wrongChildAwait.CoroABI = coro.PhysicalABIV0
-	if err := wrongChildAwait.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "coroutine ABI") {
-		t.Fatalf("child-await physical ABI mismatch = %v", err)
-	}
-	wrongChildAwait = newChildAwait()
-	wrongChildAwait.SchedulerABI = coro.SchedulerNoneABIV0
-	if err := wrongChildAwait.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "scheduler ABI") {
-		t.Fatalf("child-await scheduler ABI mismatch = %v", err)
-	}
-	partial := newPhysical()
-	partial.SchedulerABI = ""
-	if err := partial.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "scheduler ABI") {
-		t.Fatalf("partial source ABI identity error = %v", err)
-	}
-	mismatch := newPhysical()
-	mismatch.SchedulerABI = "llgo.coro.scheduler.other.v0"
-	if err := mismatch.validateCoroABIIdentity(false); err == nil || !strings.Contains(err.Error(), "scheduler ABI") {
-		t.Fatalf("mismatched source ABI identity error = %v", err)
-	}
-	if err := mismatch.preflightCoroPlan(); err == nil || !strings.Contains(err.Error(), "scheduler ABI") {
-		t.Fatalf("active source preflight ABI identity error = %v", err)
-	}
-	if err := (&Compilation{EnableCoroEntryResolution: true}).validateCoroABIIdentity(true); err == nil || !strings.Contains(err.Error(), "coroutine ABI") {
+
+	if err := (&Compilation{CoroProfile: CoroProfileStackless}).validateCoroABIIdentity(true); err == nil || !strings.Contains(err.Error(), "coroutine ABI") {
 		t.Fatalf("missing cache ABI identity error = %v", err)
+	}
+	if err := current().preflightCoroPlan(); err == nil || !strings.Contains(err.Error(), "requires a compilation CoroPlan") {
+		t.Fatalf("active source preflight error = %v", err)
 	}
 }
 
@@ -270,7 +161,7 @@ func F() int { return 42 }
 `)
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,8 +170,8 @@ func F() int { return 42 }
 		t.Fatal(err)
 	}
 	functionIDs := universe.FunctionIDConfig()
-	functionIDs.CoroABI = coro.EntryResolutionABIV0
-	functionIDs.SchedulerABI = coro.SchedulerNoneABIV0
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{
 		{Function: ssaPkg.Func("F"), Demand: coro.SyncDemand},
@@ -290,15 +181,15 @@ func F() int { return 42 }
 	}
 	observerCalls := 0
 	compilation := &Compilation{
-		CoroPlan:                  plan,
-		CoroPlanObserver:          func(*ssa.Package, *coro.SSAPlan) { observerCalls++ },
-		EnableCoroEntryResolution: true,
-		CoroPlanDigest:            strings.Repeat("0", 64),
-		CoroABI:                   coro.EntryResolutionABIV0,
-		SchedulerABI:              coro.SchedulerNoneABIV0,
-		PanicABI:                  coro.PanicLegacyABIV0,
-		FuncRepABI:                coro.FuncRepABIV0,
-		EmissionUniverse:          universe,
+		CoroPlan:         plan,
+		CoroPlanObserver: func(*ssa.Package, *coro.SSAPlan) { observerCalls++ },
+
+		CoroPlanDigest:   strings.Repeat("0", 64),
+		CoroABI:          coro.PhysicalABIV1,
+		SchedulerABI:     coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+		PanicABI:         coro.PanicExplicitStatusABIV0,
+		FuncRepABI:       coro.FuncRepABIV1,
+		EmissionUniverse: universe, CoroProfile: CoroProfileStackless,
 	}
 	installCoroLoweringFactsForTest(t, compilation)
 	mismatchedFacts := &Compilation{
@@ -349,7 +240,7 @@ func F(value int) int { return value + 1 }
 		defer prog.Dispose()
 		var compilation *Compilation
 		if active {
-			universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+			universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -368,9 +259,8 @@ func F(value int) int { return value + 1 }
 				t.Fatal(err)
 			}
 			compilation = &Compilation{
-				CoroPlan:                  plan,
-				EmissionUniverse:          universe,
-				EnableCoroEntryResolution: true,
+				CoroPlan:         plan,
+				EmissionUniverse: universe, CoroProfile: CoroProfileStackless,
 			}
 		}
 		pkg, _, err := NewPackageExWithEmbedOptions(prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{}, PackageOptions{
@@ -406,7 +296,7 @@ func Sum() int {
 		defer prog.Dispose()
 		var compilation *Compilation
 		if reportOnly {
-			universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+			universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 			if err != nil {
 				t.Fatal(err)
 			}

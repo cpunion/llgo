@@ -188,7 +188,7 @@ func (u *EmissionUniverse) materializeLoweredRuntimeHelpers(ctx *context, ownerF
 // frozen per owner by recordCoroRawPlainLoweredCall and its complete raw
 // closure is validated by the whole-program plan.
 func coroCompilerRawPlainLoweredRuntimeHelper(u *EmissionUniverse, helper string) bool {
-	if u == nil || !u.enableCoroChannel {
+	if u == nil || !u.CoroChannelEnabled() {
 		return false
 	}
 	switch helper {
@@ -240,7 +240,7 @@ func (u *EmissionUniverse) classifyPlainRuntimeHelpers(ctx *context, instr ssa.I
 			add(helper)
 		}
 	}
-	if u.enableCoroChannel {
+	if u.CoroChannelEnabled() {
 		switch instruction := instr.(type) {
 		case *ssa.Send:
 			add("ChanSend")
@@ -374,7 +374,7 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(ctx *context, shape coroEm
 	case *ssa.UnOp:
 		switch v.Op {
 		case token.ARROW:
-			if u.enableCoroChannel {
+			if u.CoroChannelEnabled() {
 				add("CoroChanTryRecv")
 			} else {
 				add("ChanRecv")
@@ -504,7 +504,7 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(ctx *context, shape coroEm
 	case *ssa.MakeChan:
 		add("NewChan")
 	case *ssa.Select:
-		if u.enableCoroChannel {
+		if u.CoroChannelEnabled() {
 			add("CoroChanSelectTry")
 			if v.Blocking {
 				add("CoroChanSelectPark", "CoroChanSelectResume")
@@ -526,7 +526,7 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(ctx *context, shape coroEm
 			add("Panic")
 		}
 	case *ssa.Send:
-		if u.enableCoroChannel {
+		if u.CoroChannelEnabled() {
 			add("CoroChanTrySend")
 		} else {
 			add("ChanSend")
@@ -995,7 +995,7 @@ func (u *EmissionUniverse) builtinRuntimeHelpers(ctx *context, call *ssa.CallCom
 	case "copy":
 		add("SliceCopy")
 	case "close":
-		if u.enableCoroChannel {
+		if u.CoroChannelEnabled() {
 			add("CoroChanTryClose")
 		} else {
 			add("ChanClose")

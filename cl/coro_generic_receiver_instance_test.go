@@ -70,7 +70,7 @@ func Root(p *Pointer[int]) *int { return p.Load() }
 				prog = newLLSSAProgForTarget(t, test.target)
 			}
 			defer prog.Dispose()
-			universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+			universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -89,7 +89,7 @@ func Root(p *Pointer[int]) *int { return p.Load() }
 			}
 			functionIDs := universe.FunctionIDConfig()
 			functionIDs.CoroABI = coro.PhysicalABIV1
-			functionIDs.SchedulerABI = coro.SchedulerChildAwaitABIV0
+			functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 			functionIDs.ArchiveReady = true
 			plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 				EmissionUniverse:     ssaUniverse,
@@ -164,7 +164,7 @@ func Root(p *Pointer[int]) *int { return p.Value() }
 
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -193,7 +193,7 @@ func Root(waiter Waiter) uint32 { <-gate; return waiter.Wait() }
 	}
 	rootIR := requireCoroPhysicalFunction(t, module, "foo.Root").String()
 	waitName := funcName(ssaPkg.Pkg, wait, false) + coroPrimarySuffix
-	for _, required := range []string{waitName, "call void @" + coroAwaitPrepareHookV1} {
+	for _, required := range []string{"coro.dispatch", "call void @" + coroAwaitPrepareHookV1} {
 		if !strings.Contains(rootIR, required) {
 			t.Fatalf("pointer-receiver interface await lacks %q:\n%s", required, rootIR)
 		}
@@ -228,7 +228,7 @@ func Root(counter Counter) uint32 {
 }
 `,
 			resolution: coro.DynamicCHAClosed,
-			want:       "synthetic function \"bound method wrapper",
+			want:       "approved runtime helper(s) lack an exact coroutine-safe lowered-call plan: AllocU",
 		},
 		{
 			name: "dynamic suspending interface",
@@ -240,7 +240,7 @@ func (Counter) Wait() uint32 { return <-gate }
 func Root(waiter Waiter) uint32 { <-gate; return waiter.Wait() }
 `,
 			resolution: coro.DynamicCHAClosed,
-			want:       "terminal runtime helper PanicWrapNilPointer lacks an exact lowered-call fact",
+			want:       "",
 		},
 		{
 			name: "variadic method",
@@ -271,18 +271,20 @@ func Root(counter Counter) uint32 { <-gate; return counter.Wait(nil...) }
 				if err != nil {
 					t.Fatalf("compile supported static method ABI: %v", err)
 				}
-				method := methods["Wait"]
-				if method == nil || method.Signature == nil || !method.Signature.Variadic() {
-					t.Fatalf("variadic method fixture lost its source signature: %v", method)
-				}
-				effective, err := universe.coroPhysicalSourceSignature(method)
-				if err != nil || effective == nil || effective.Variadic() {
-					t.Fatalf("variadic method effective signature = %v, %v; want packed non-variadic slice ABI", effective, err)
+				if test.name == "variadic method" {
+					method := methods["Wait"]
+					if method == nil || method.Signature == nil || !method.Signature.Variadic() {
+						t.Fatalf("variadic method fixture lost its source signature: %v", method)
+					}
+					effective, err := universe.coroPhysicalSourceSignature(method)
+					if err != nil || effective == nil || effective.Variadic() {
+						t.Fatalf("variadic method effective signature = %v, %v; want packed non-variadic slice ABI", effective, err)
+					}
 				}
 				module := pkg.Module()
 				defer module.Dispose()
 				if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
-					t.Fatalf("verify supported variadic static method: %v\n%s", err, module.String())
+					t.Fatalf("verify supported static/interface method: %v\n%s", err, module.String())
 				}
 				return
 			}
@@ -318,8 +320,8 @@ func compileCoroStaticMethodFixture(t *testing.T, source string, resolution coro
 func prepareCoroStaticMethodPlan(prog llssa.Program, ssaPkg *ssa.Package, files []*ast.File, resolution coro.DynamicResolution) (
 	*EmissionUniverse, *coro.SSAPlan, map[string]*ssa.Function, error,
 ) {
-	universe, err := PrepareEmissionUniverseWithOptions(
-		prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}}, EmissionUniverseOptions{EnableCoroChannel: true},
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
+		prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}}, EmissionUniverseOptions{CoroProfile: CoroProfileStackless},
 	)
 	if err != nil {
 		return nil, nil, nil, err
@@ -337,13 +339,14 @@ func prepareCoroStaticMethodPlan(prog llssa.Program, ssaPkg *ssa.Package, files 
 	root := ssaPkg.Func("Root")
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
 		FunctionIDs:          functionIDs,
 		DynamicResolution:    resolution,
 		MaxPlainInstructions: -1,
+		OutcomeMode:          coro.OutcomeExplicitStatus,
 	})
 	if err != nil {
 		return universe, nil, methods, err
@@ -353,16 +356,12 @@ func prepareCoroStaticMethodPlan(prog llssa.Program, ssaPkg *ssa.Package, files 
 
 func coroStaticMethodCompilation(plan *coro.SSAPlan, universe *EmissionUniverse) *Compilation {
 	return &Compilation{
-		CoroPlan:                      plan,
-		EmissionUniverse:              universe,
-		EnableCoroEntryResolution:     true,
-		EnableCoroPhysicalABI:         true,
-		EnableCoroChildAwait:          true,
-		EnableCoroProgramBootstrapRun: true,
-		EnableCoroChannel:             true,
-		CoroABI:                       coro.PhysicalABIV1,
-		SchedulerABI:                  coro.SchedulerProgramBootstrapChannelABIV0,
-		PanicABI:                      coro.PanicLegacyABIV0,
-		FuncRepABI:                    coro.FuncRepABIV0,
+		CoroPlan:         plan,
+		EmissionUniverse: universe,
+
+		CoroABI:      coro.PhysicalABIV1,
+		SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+		PanicABI:     coro.PanicExplicitStatusABIV0,
+		FuncRepABI:   coro.FuncRepABIV1, CoroProfile: CoroProfileStackless,
 	}
 }

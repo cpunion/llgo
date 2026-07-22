@@ -59,7 +59,7 @@ func coroStdlibSyncFixtures() []coroStdlibSyncFixture {
 			name:             "time",
 			dir:              "./_testgo/coro_stdlib_time_sleep",
 			wantSource:       []string{"time.Sleep("},
-			wantSchedulerABI: coro.SchedulerProgramBootstrapWorkerClosedStaticSpawnABIV0,
+			wantSchedulerABI: coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
 			wantGo:           true,
 			check: func(t *testing.T, elapsed time.Duration) {
 				t.Helper()
@@ -113,7 +113,7 @@ func coroStdlibSyncFixtures() []coroStdlibSyncFixture {
 				"syscall.Open(", "syscall.Write(", "syscall.Seek(",
 				"syscall.Read(", "syscall.Close(", "syscall.Unlink(", "[1]byte",
 			},
-			wantSchedulerABI: coro.SchedulerProgramBootstrapWorkerClosedStaticSpawnABIV0,
+			wantSchedulerABI: coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
 			wantGo:           true,
 		},
 		{
@@ -141,20 +141,20 @@ func coroStdlibSyncAcceptanceConfig(fixture coroStdlibSyncFixture, output string
 	conf := NewDefaultConf(ModeBuild)
 	conf.OutFile = output
 	conf.ForceRebuild = true
-	conf.EnableCoroEntryResolution = true
-	conf.EnableCoroPhysicalABI = true
-	conf.EnableCoroChildAwait = true
-	conf.EnableCoroPlainDispatch = true
+	conf.CoroProfile = CoroProfileStackless
+	conf.CoroProfile = CoroProfileStackless
+	conf.CoroProfile = CoroProfileStackless
+	conf.CoroProfile = CoroProfileStackless
 	// Ordinary stdlib code contains defer/panic boundaries (notably sync.Once).
 	// Managed child outcomes must therefore return through the parent's cleanup
 	// path instead of using legacy native-stack unwinding.
-	conf.EnableCoroExplicitStatusPanicABI = true
-	conf.EnableCoroProgramBootstrapABI = true
-	conf.EnableCoroProgramBootstrapRun = true
-	conf.EnableCoroClosedStaticSpawn = fixture.wantGo
-	conf.EnableCoroChannel = fixture.wantChannel
-	conf.EnableCoroWorker = true
-	conf.EnableCoroNativeFleet = true
+	conf.CoroProfile = CoroProfileStackless
+	conf.CoroProfile = CoroProfileStackless
+	conf.CoroProfile = CoroProfileStackless
+	conf.CoroProfile = CoroProfileStackless
+	conf.CoroProfile = CoroProfileStackless
+	conf.CoroProfile = CoroProfileStackless
+	conf.CoroProfile = CoroProfileStackless
 	conf.CoroPlanBuilder = func(input CoroPlanInput) (*coro.SSAPlan, error) {
 		plan, err := input.Analyze(nil, coro.SSAConfig{
 			DynamicResolution:    coro.DynamicCHAClosed,
@@ -201,13 +201,13 @@ func TestCoroStdlibSyncAcceptanceConfiguration(t *testing.T) {
 		fixture := fixture
 		t.Run(fixture.name, func(t *testing.T) {
 			conf := coroStdlibSyncAcceptanceConfig(fixture, filepath.Join(t.TempDir(), "acceptance"))
-			if !conf.EnableCoroWorker {
+			if !conf.coroWorkerActive() {
 				t.Fatal("synchronous stdlib acceptance must enable the native worker capability")
 			}
-			if !conf.EnableCoroNativeFleet {
+			if !conf.coroNativeFleetActive() {
 				t.Fatal("synchronous stdlib acceptance must exercise the native multi-owner fleet")
 			}
-			if !conf.EnableCoroExplicitStatusPanicABI {
+			if !conf.coroExplicitStatusActive() {
 				t.Fatal("synchronous stdlib acceptance must propagate child panic through parent cleanup")
 			}
 			if got := activeCoroSchedulerABIVersion(conf); got != fixture.wantSchedulerABI {

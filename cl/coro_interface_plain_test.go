@@ -46,19 +46,21 @@ func Root(value Value) uint32 {
 }
 `
 
-func TestCoroClosedInterfacePlainInvokeKeepsItabAcrossCoroSplit(t *testing.T) {
+func TestCoroManagedClosedInterfaceInvokeSurvivesCoroSplit(t *testing.T) {
 	prog, pkg, plan, root, method, invoke := compileCoroClosedInterfacePlainFixture(t, coroClosedInterfacePlainSource, coro.DynamicCHAClosed)
 	defer prog.Dispose()
 	module := pkg.Module()
 	defer module.Dispose()
 
 	rootPlan, ok := plan.FunctionPlan(root)
-	if !ok || rootPlan.Emission != coro.EmitCoroutine || rootPlan.FuncRep != coro.DirectCoro || !rootPlan.Effect.Contains(coro.MayPark) {
-		t.Fatalf("Root plan = %+v, present=%t; want a parking direct coroutine", rootPlan, ok)
+	if !ok || rootPlan.Emission != coro.EmitCoroutine || rootPlan.FuncRep != coro.DirectCoro ||
+		!rootPlan.Effect.Contains(coro.MayPark|coro.AwaitStructured) {
+		t.Fatalf("Root plan = %+v, present=%t; want a parking managed-interface-await coroutine", rootPlan, ok)
 	}
 	methodPlan, ok := plan.FunctionPlan(method)
-	if !ok || methodPlan.Emission != coro.EmitPlain || methodPlan.Primary != coro.PrimaryPlain || methodPlan.FuncRep != coro.Dispatch || methodPlan.Effect != coro.NoSuspend {
-		t.Fatalf("concrete.Value plan = %+v, present=%t; want a no-suspend plain interface target", methodPlan, ok)
+	if !ok || methodPlan.Emission != coro.EmitPlain || methodPlan.Primary != coro.PrimaryPlain ||
+		methodPlan.FuncRep != coro.Dispatch || methodPlan.Effect != coro.NoSuspend || methodPlan.Exec != 0 {
+		t.Fatalf("concrete.Value plan = %+v, present=%t; want an exactly no-unwind plain descriptor target", methodPlan, ok)
 	}
 	callPlan, ok := plan.CallPlan(invoke)
 	if !ok || callPlan.Open || callPlan.Rep != coro.Dispatch || len(callPlan.Targets) == 0 || !coroInterfaceTargetContains(callPlan.Targets, methodPlan.ID) {
@@ -68,17 +70,14 @@ func TestCoroClosedInterfacePlainInvokeKeepsItabAcrossCoroSplit(t *testing.T) {
 		t.Fatalf("verify closed interface coroutine before CoroSplit: %v\n%s", err, module.String())
 	}
 	rootIR := requireCoroPhysicalFunction(t, module, "foo.Root").String()
-	assertCoroClosedInterfacePlainIR(t, rootIR)
-	if ir := module.String(); strings.Contains(ir, coroPlainDispatchDescriptorPrefix) || strings.Contains(ir, coroPlainDispatchThunkPrefix) {
-		t.Fatalf("interface invoke incorrectly materialized a function-value descriptor:\n%s", ir)
-	}
+	assertCoroManagedClosedInterfaceIR(t, rootIR)
 
 	runCoroABITestPipeline(t, prog, module)
 	resume := module.NamedFunction("foo.Root$coro.resume")
 	if resume.IsNil() {
 		t.Fatalf("CoroSplit did not create Root resume entry:\n%s", module.String())
 	}
-	assertCoroClosedInterfacePlainIR(t, resume.String())
+	assertCoroManagedClosedInterfaceIR(t, resume.String())
 	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("verify closed interface coroutine after CoroSplit: %v\n%s", err, module.String())
 	}
@@ -103,9 +102,7 @@ func Root(value Value, direct concrete) uint32 {
 	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("verify interface target with static call: %v\n%s", err, module.String())
 	}
-	if ir := module.String(); strings.Contains(ir, coroPlainDispatchDescriptorPrefix) || strings.Contains(ir, coroPlainDispatchThunkPrefix) {
-		t.Fatalf("static method call incorrectly forced an interface target descriptor:\n%s", ir)
-	}
+	assertCoroManagedClosedInterfaceIR(t, requireCoroPhysicalFunction(t, module, "foo.Root").String())
 }
 
 func TestCoroDormantInterfaceInvokeDoesNotTurnStaticMethodIntoFunctionValue(t *testing.T) {
@@ -134,8 +131,9 @@ func Root(value concrete) string {
 		t.Fatalf("dormant plan = %+v, present=%t; want EmitNone", dormantPlan, ok)
 	}
 	methodPlan, ok := plan.FunctionPlan(method)
-	if !ok || methodPlan.Emission != coro.EmitPlain || methodPlan.FuncRep != coro.Dispatch {
-		t.Fatalf("concrete.String plan = %+v, present=%t; want emitted plain Dispatch solely from dormant CHA", methodPlan, ok)
+	if !ok || methodPlan.Emission != coro.EmitCoroutine || methodPlan.Primary != coro.PrimaryCoroutine ||
+		methodPlan.FuncRep != coro.Dispatch || !methodPlan.Effect.Contains(coro.OutcomeStructured) {
+		t.Fatalf("concrete.String plan = %+v, present=%t; want one explicit-outcome coroutine selected by the live static call", methodPlan, ok)
 	}
 	callPlan, ok := plan.CallPlan(invoke)
 	if !ok || callPlan.Open || callPlan.Rep != coro.Dispatch || !coroInterfaceTargetContains(callPlan.Targets, methodPlan.ID) {
@@ -205,7 +203,7 @@ func Root(value concrete) string {
 	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("verify live first-class method expression: %v\n%s", err, module.String())
 	}
-	if ir := module.String(); !strings.Contains(ir, coroPlainDispatchDescriptorPrefix) || !strings.Contains(ir, coroPlainDispatchThunkPrefix) {
+	if ir := module.String(); !strings.Contains(ir, coroPlainDispatchDescriptorPrefix) || !strings.Contains(ir, coroCoroDispatchThunkPrefix) {
 		t.Fatalf("live first-class method expression did not materialize its descriptor and entry thunk:\n%s", ir)
 	}
 }
@@ -217,8 +215,8 @@ func prepareCoroDormantInterfaceFixture(
 	files []*ast.File,
 ) (*EmissionUniverse, *coro.SSAPlan, *ssa.Function, *ssa.Function, *ssa.Function, *ssa.Call) {
 	t.Helper()
-	universe, err := PrepareEmissionUniverseWithOptions(
-		program, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}}, EmissionUniverseOptions{EnableCoroChannel: true},
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
+		program, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}}, EmissionUniverseOptions{CoroProfile: CoroProfileStackless},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -252,13 +250,14 @@ func prepareCoroDormantInterfaceFixture(
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
 		FunctionIDs:          functionIDs,
 		DynamicResolution:    coro.DynamicCHAClosed,
 		MaxPlainInstructions: -1,
+		OutcomeMode:          coro.OutcomeExplicitStatus,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -414,19 +413,22 @@ func Root(value Value) uint32 { <-gate; return value.Value() }
 	}
 }
 
-func TestCoroClosedInterfacePlainInvokeRequiresLegacyPanicABI(t *testing.T) {
+func TestCoroClosedInterfaceInvokeUsesExplicitStatusABI(t *testing.T) {
 	ssaPkg, _, files := buildGoSSAPkg(t, coroClosedInterfacePlainSource)
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
 	universe, plan, _, _, _ := prepareCoroClosedInterfacePlainPlan(t, prog, ssaPkg, files, coro.DynamicCHAClosed)
 	compilation := coroClosedInterfacePlainCompilation(plan, universe)
-	compilation.EnableCoroExplicitStatusPanicABI = true
-	compilation.PanicABI = coro.PanicExplicitStatusABIV0
-	_, _, err := NewPackageExWithEmbedOptions(
+	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{}, PackageOptions{Compilation: compilation},
 	)
-	if err == nil || !strings.Contains(err.Error(), "requires the legacy panic ABI") {
-		t.Fatalf("explicit-status compile error = %v", err)
+	if err != nil {
+		t.Fatalf("compile explicit-status closed interface: %v", err)
+	}
+	ir := requireCoroPhysicalFunction(t, pkg.Module(), "foo.Root").String()
+	assertCoroManagedClosedInterfaceIR(t, ir)
+	if !strings.Contains(ir, coroFaultPrepareHookV1) {
+		t.Fatalf("explicit-status closed interface lacks nil-interface fault lowering:\n%s", ir)
 	}
 }
 
@@ -452,8 +454,8 @@ func prepareCoroClosedInterfacePlainPlan(t *testing.T, prog llssa.Program, ssaPk
 	*EmissionUniverse, *coro.SSAPlan, *ssa.Function, *ssa.Function, *ssa.Call,
 ) {
 	t.Helper()
-	universe, err := PrepareEmissionUniverseWithOptions(
-		prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}}, EmissionUniverseOptions{EnableCoroChannel: true},
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
+		prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}}, EmissionUniverseOptions{CoroProfile: CoroProfileStackless},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -486,13 +488,14 @@ func prepareCoroClosedInterfacePlainPlan(t *testing.T, prog llssa.Program, ssaPk
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
 		FunctionIDs:          functionIDs,
 		DynamicResolution:    resolution,
 		MaxPlainInstructions: -1,
+		OutcomeMode:          coro.OutcomeExplicitStatus,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -502,31 +505,26 @@ func prepareCoroClosedInterfacePlainPlan(t *testing.T, prog llssa.Program, ssaPk
 
 func coroClosedInterfacePlainCompilation(plan *coro.SSAPlan, universe *EmissionUniverse) *Compilation {
 	return &Compilation{
-		CoroPlan:                      plan,
-		EmissionUniverse:              universe,
-		EnableCoroEntryResolution:     true,
-		EnableCoroPhysicalABI:         true,
-		EnableCoroChildAwait:          true,
-		EnableCoroPlainDispatch:       true,
-		EnableCoroProgramBootstrapRun: true,
-		EnableCoroChannel:             true,
-		CoroABI:                       coro.PhysicalABIV1,
-		SchedulerABI:                  coro.SchedulerProgramBootstrapChannelABIV0,
-		PanicABI:                      coro.PanicLegacyABIV0,
-		FuncRepABI:                    coro.FuncRepABIV1,
+		CoroPlan:         plan,
+		EmissionUniverse: universe,
+
+		CoroABI:      coro.PhysicalABIV1,
+		SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+		PanicABI:     coro.PanicExplicitStatusABIV0,
+		FuncRepABI:   coro.FuncRepABIV1, CoroProfile: CoroProfileStackless,
 	}
 }
 
-func assertCoroClosedInterfacePlainIR(t *testing.T, ir string) {
+func assertCoroManagedClosedInterfaceIR(t *testing.T, ir string) {
 	t.Helper()
 	if !strings.Contains(ir, "llvm.coro.suspend") && !strings.Contains(ir, ".resume") {
 		t.Fatalf("coroutine body has no suspension/resume marker:\n%s", ir)
 	}
-	if !strings.Contains(ir, "call i32 %") {
-		t.Fatalf("coroutine body does not retain an ordinary indirect itab call:\n%s", ir)
+	if !strings.Contains(ir, "coro.dispatch") {
+		t.Fatalf("coroutine body does not use the managed descriptor protocol:\n%s", ir)
 	}
-	if strings.Contains(ir, "coro.dispatch") || strings.Contains(ir, coroPlainDispatchDescriptorPrefix) {
-		t.Fatalf("interface invoke used coroutine function-value dispatch:\n%s", ir)
+	if !strings.Contains(ir, coroAwaitPrepareHookV1) {
+		t.Fatalf("coroutine body does not await the managed interface child:\n%s", ir)
 	}
 }
 

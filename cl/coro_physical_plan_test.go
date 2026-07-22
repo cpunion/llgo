@@ -232,7 +232,7 @@ func TestCoroPhysicalCodegenRejectsMissingCommittedPlan(t *testing.T) {
 	defer prog.Dispose()
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroChildAwaitCompilation(compilation)
-	compilation.EnableCoroPlainDispatch = true
+	compilation.CoroProfile = CoroProfileStackless
 	compilation.FuncRepABI = coro.FuncRepABIV1
 	if err := compilation.preflightCoroPlan(); err != nil {
 		t.Fatal(err)

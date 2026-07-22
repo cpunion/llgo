@@ -99,7 +99,7 @@ func Root(b *Box[int]) { b.All()(Yield) }
 				prog = newLLSSAProgForTarget(t, test.target)
 			}
 			defer prog.Dispose()
-			universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+			universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -109,7 +109,7 @@ func Root(b *Box[int]) { b.All()(Yield) }
 			}
 			functionIDs := universe.FunctionIDConfig()
 			functionIDs.CoroABI = coro.PhysicalABIV1
-			functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+			functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 			functionIDs.ArchiveReady = true
 			yield := ssaPkg.Func("Yield")
 			plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
@@ -153,8 +153,8 @@ func Root(b *Box[int]) { b.All()(Yield) }
 
 			compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 			enableCoroPreemptCompilation(compilation)
-			compilation.EnableCoroPlainDispatch = true
-			compilation.EnableCoroExplicitStatusPanicABI = true
+			compilation.CoroProfile = CoroProfileStackless
+			compilation.CoroProfile = CoroProfileStackless
 			compilation.PanicABI = coro.PanicExplicitStatusABIV0
 			compilation.FuncRepABI = coro.FuncRepABIV1
 			compiled, _, err := NewPackageExWithEmbedOptions(

@@ -250,7 +250,7 @@ func Leaf(left, right RunDecision) bool {
 				prog = newLLSSAProgForTarget(t, test.target)
 			}
 			defer prog.Dispose()
-			universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+			universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -260,16 +260,20 @@ func Leaf(left, right RunDecision) bool {
 			}
 			functionIDs := universe.FunctionIDConfig()
 			functionIDs.CoroABI = coro.PhysicalABIV1
-			functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+			functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 			functionIDs.ArchiveReady = true
 			leaf, child := ssaPkg.Func("Leaf"), ssaPkg.Func("Child")
 			plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: leaf, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 				EmissionUniverse:     ssaUniverse,
 				FunctionIDs:          functionIDs,
 				MaxPlainInstructions: 1,
+				OutcomeMode:          coro.OutcomeExplicitStatus,
 				ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
 					if fn == child {
 						return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+					}
+					if fn == leaf {
+						return coro.SSAFunctionPolicy{Exec: coro.MayUnwind}, nil
 					}
 					return coro.SSAFunctionPolicy{}, nil
 				},
@@ -435,7 +439,7 @@ func Root(value *uint32) { Global = value }
 			ssaPkg, _, files := buildGoSSAPkg(t, test.source)
 			prog := newLLSSAProg(t)
 			defer prog.Dispose()
-			universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+			universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -742,7 +746,7 @@ func prepareCoroPureSSATestPlan(t *testing.T, target *llssa.Target) (
 	} else {
 		prog = newLLSSAProgForTarget(t, target)
 	}
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		prog.Dispose()
 		t.Fatal(err)
@@ -754,7 +758,7 @@ func prepareCoroPureSSATestPlan(t *testing.T, target *llssa.Target) (
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	root, aggregate := ssaPkg.Func("Root"), ssaPkg.Func("Aggregate")
 	child := ssaPkg.Func("Child")

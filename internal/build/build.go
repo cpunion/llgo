@@ -2311,10 +2311,10 @@ func coroOpaqueEffectTrace(plan *coro.SSAPlan, start *ssa.Function) string {
 }
 
 func validateCoroClosedStaticSpawnRunGate(conf *Config, plan *coro.SSAPlan, frameRetentionABI string) error {
-	if conf == nil || !conf.EnableCoroClosedStaticSpawn {
+	if conf == nil || !conf.coroClosedStaticSpawnActive() {
 		return nil
 	}
-	if !conf.EnableCoroProgramBootstrapRun {
+	if !conf.coroProgramBootstrapActive() {
 		return fmt.Errorf("validate coroutine closed static spawn: runnable program bootstrap v2 is required")
 	}
 	if plan == nil {
@@ -2331,7 +2331,7 @@ func validateCoroClosedStaticSpawnRunGate(conf *Config, plan *coro.SSAPlan, fram
 	if frameRetentionABI == cl.CoroFrameRetentionParkABIV2 {
 		allowed |= coro.MayPark
 	}
-	if conf.EnableCoroWorker {
+	if conf.coroWorkerActive() {
 		allowed |= coro.WaitForeign
 	}
 	for _, owner := range plan.Functions() {
@@ -2497,7 +2497,7 @@ func validateRequiredCoroDirectPlainCallArguments(plan *coro.SSAPlan, uses []req
 // before fingerprinting, cache lookup, or LLVM codegen. The builder owns root
 // and policy selection because directive and ABI classification are not build
 // defaults yet. By default the build pipeline only stores the returned
-// report-only plan; EnableCoroEntryResolution must be set explicitly before cl
+// report-only plan; CoroProfileStackless must be selected before cl
 // may consume its primary-symbol decisions. An active builder must return a
 // plan created by input.Analyze so patch aliases and frontend structural
 // identities cannot be bypassed. Active entry resolution uses archive-ready
@@ -2559,76 +2559,11 @@ type Config struct {
 	// Each Rewrites entry maps variable names to replacement string values. Only
 	// string-typed globals are supported and "main" applies to all root main
 	// packages in the current build.
-	GlobalRewrites map[string]Rewrites
-	ModuleHook     ModuleHook
-
-	// EnableCoroEntryResolution explicitly allows cl to consume the
-	// compilation-scoped plan for primary-symbol validation. It does not enable
-	// physical coroutine ABI or scheduler lowering. It requires CoroPlanBuilder;
-	// leaving it false preserves report-only behavior. Package archives are
-	// reused only when their complete plan/ABI/target fingerprint matches.
-	EnableCoroEntryResolution bool
-	// EnableCoroExplicitStatusPanicABI selects the reserved target-wide
-	// explicit-status panic identity. Managed child and root panic outcomes use
-	// CompletionRecord and PanicRecord; gated compiler/runtime support covers
-	// owner-local cleanup, direct recover, and implicit faults. Unsupported
-	// language shapes remain fail-closed.
-	EnableCoroExplicitStatusPanicABI bool
-	// EnableCoroPhysicalABI enables the experimental LLVM coroutine physical ABI.
-	// It requires EnableCoroEntryResolution and remains leaf-only unless a more
-	// specific lowering capability is enabled.
-	EnableCoroPhysicalABI bool
-	// EnableCoroChildAwait enables the first scheduler handoff slice: a physical
-	// coroutine may await a statically resolved coroutine child, and an explicit
-	// async root receives a typed factory descriptor. It requires the physical
-	// ABI and does not enable a runtime scheduler, spawn, park, or preemption.
-	EnableCoroChildAwait bool
-	// EnableCoroPlainDispatch enables the v1 descriptor/context ABI for the
-	// narrowly supported ordinary call of a no-capture, non-suspending plain Go
-	// function value. It requires entry resolution and does not authorize
-	// coroutine, interface, reflect, method, go/defer, aggregate, or captured
-	// closure dispatch.
-	EnableCoroPlainDispatch bool
-	// EnableCoroClosedStaticSpawn enables only an exact source `go f(args)`
-	// whose operand is one closed, top-level static function. This first
-	// capability accepts only zero-result targets; that is a lowering gate, not
-	// a Go language restriction. It requires the runnable program-bootstrap v2
-	// scheduler (including the v1 physical/child-await ABI) and never gives the
-	// runtime a user callback.
-	EnableCoroClosedStaticSpawn bool
-	// EnableCoroProgramBootstrapABI emits the target-neutral v1 startup table
-	// for an executable after the exact init/main entries have been validated
-	// against the frozen whole-program plan. It does not replace the legacy
-	// direct calls from the platform entry yet. This capability is deliberately
-	// gated separately and requires entry resolution, the physical ABI, and
-	// child-await lowering.
-	EnableCoroProgramBootstrapABI bool
-	// EnableCoroProgramBootstrapRun activates the production v1 bootstrap
-	// driver. It requires EnableCoroProgramBootstrapABI, emits a compiler-owned
-	// LLVM coroutine factory, and replaces only the legacy init/main calls in
-	// the platform entry. This is also the first scheduler ABI that accepts
-	// NeedsPreempt and emits conditional poll/yield handoffs. Keeping it separate
-	// preserves the descriptor-only ABI gate as an independently testable and
-	// reversible boundary.
-	EnableCoroProgramBootstrapRun bool
-	// EnableCoroChannel enables compiler-owned stackless lowering for direct
-	// blocking channel send/receive. It requires the runnable PhysicalABIV1
-	// program bootstrap and freezes its runtime hooks/helper edges before plan
-	// analysis and package caching.
-	EnableCoroChannel bool
-	// EnableCoroWorker enables the bounded native worker source and exact
-	// suspend/resume lowering for statically certified llgo.syscall function-word
-	// sites and certified worker-safe C declarations. Source code keeps the
-	// ordinary synchronous syscall/file/network calling style.
-	EnableCoroWorker bool
-	// EnableCoroNativeFleet selects the native multi-owner scheduler adapter.
-	// It is a compiler/runtime ABI choice, not a user build tag: the compiler
-	// owns the llgo_coro_native_fleet tag, retains the raw pthread owner entry,
-	// and freezes both choices into the same build identity. The first production
-	// profile requires the native timer/reactor and bounded worker capabilities.
-	EnableCoroNativeFleet bool
-	CoroPlanBuilder       CoroPlanBuilder
-	CoroPlanObserver      CoroPlanObserver
+	GlobalRewrites   map[string]Rewrites
+	ModuleHook       ModuleHook
+	CoroProfile      coro.RuntimeProfile
+	CoroPlanBuilder  CoroPlanBuilder
+	CoroPlanObserver CoroPlanObserver
 
 	// compilerBuildTags is a compiler-owned channel for isolated runtime-island
 	// builds that deliberately do not enable the complete program-bootstrap
@@ -2643,6 +2578,63 @@ type Config struct {
 	// It is internal frozen build state, never a user-controlled capability
 	// channel.
 	resolvedTargetBuildTags []string
+}
+
+const (
+	CoroProfileNone      = coro.RuntimeProfileNone
+	CoroProfileStackless = coro.RuntimeProfileStackless
+)
+
+func (conf *Config) coroProfileActive() bool {
+	return conf != nil && conf.CoroProfile.Active()
+}
+
+func (conf *Config) coroEntryResolutionActive() bool {
+	return conf.coroProfileActive()
+}
+
+func (conf *Config) coroPhysicalABIActive() bool {
+	return conf.coroProfileActive()
+}
+
+func (conf *Config) coroChildAwaitActive() bool {
+	return conf.coroProfileActive()
+}
+
+func (conf *Config) coroPlainDispatchActive() bool {
+	return conf.coroProfileActive()
+}
+
+func (conf *Config) coroClosedStaticSpawnActive() bool {
+	return conf.coroProfileActive()
+}
+
+func (conf *Config) coroProgramBootstrapABIActive() bool {
+	return conf.coroProfileActive()
+}
+
+func (conf *Config) coroProgramBootstrapActive() bool {
+	return conf.coroProfileActive()
+}
+
+func (conf *Config) coroChannelActive() bool {
+	return conf.coroProfileActive()
+}
+
+func (conf *Config) coroExplicitStatusActive() bool {
+	return conf.coroProfileActive()
+}
+
+func (conf *Config) coroWorkerActive() bool {
+	return conf.coroProfileActive() && nativeCoroWorkerRuntimeABI(conf)
+}
+
+func (conf *Config) coroNativeFleetActive() bool {
+	return conf.coroProfileActive() && nativeCoroTimerRuntimeABI(conf) && nativeCoroWorkerRuntimeABI(conf)
+}
+
+func (conf *Config) coroTargetCapabilities() coro.TargetCapabilities {
+	return coro.NewTargetCapabilities(conf.coroWorkerActive(), conf.coroNativeFleetActive())
 }
 
 type Rewrites map[string]string
@@ -3109,7 +3101,7 @@ func effectiveBuildTags(conf *Config, export crosscompile.Export) (string, error
 	if conf.AbiMode == cabi.ModeAllFunc {
 		tags = append(tags, "llgo_abi_2")
 	}
-	if conf.EnableCoroProgramBootstrapRun {
+	if conf.coroProgramBootstrapActive() {
 		// The stackless runtime does not yet have a RawCritical bridge that can
 		// turn a synchronous hardware fault into a G-owned panic completion.
 		// Exclude the legacy pthread-TLS/SJLJ SIGSEGV recovery hook instead of
@@ -3129,7 +3121,7 @@ func effectiveBuildTags(conf *Config, export crosscompile.Export) (string, error
 			// 32-bit pipe backend from silently selecting an unverified libc
 			// timespec/time64 layout.
 			tags = append(tags, coroNativeTimerBuildTag)
-			if conf.EnableCoroNativeFleet {
+			if conf.coroNativeFleetActive() {
 				tags = append(tags, coroNativeFleetBuildTag)
 			}
 		}
@@ -3160,11 +3152,11 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	if ctx == nil || ctx.buildConf == nil {
 		return nil
 	}
-	if ctx.buildConf.EnableCoroClosedStaticSpawn {
-		if !ctx.buildConf.EnableCoroProgramBootstrapRun {
+	if ctx.buildConf.coroClosedStaticSpawnActive() {
+		if !ctx.buildConf.coroProgramBootstrapActive() {
 			return fmt.Errorf("enable coroutine closed static spawn: runnable program bootstrap v2 is required")
 		}
-		if !ctx.buildConf.EnableCoroChildAwait {
+		if !ctx.buildConf.coroChildAwaitActive() {
 			return fmt.Errorf("enable coroutine closed static spawn: coroutine child await is required")
 		}
 	}
@@ -3172,37 +3164,37 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		return err
 	}
 	ctx.coroProgramBootstraps = nil
-	if ctx.buildConf.EnableCoroPhysicalABI && !ctx.buildConf.EnableCoroEntryResolution {
+	if ctx.buildConf.coroPhysicalABIActive() && !ctx.buildConf.coroEntryResolutionActive() {
 		return fmt.Errorf("enable coroutine physical ABI: coroutine entry resolution is required")
 	}
-	if ctx.buildConf.EnableCoroChildAwait && !ctx.buildConf.EnableCoroPhysicalABI {
+	if ctx.buildConf.coroChildAwaitActive() && !ctx.buildConf.coroPhysicalABIActive() {
 		return fmt.Errorf("enable coroutine child await: coroutine physical ABI is required")
 	}
-	if ctx.buildConf.EnableCoroChannel {
-		if !ctx.buildConf.EnableCoroChildAwait || !ctx.buildConf.EnableCoroProgramBootstrapRun {
+	if ctx.buildConf.coroChannelActive() {
+		if !ctx.buildConf.coroChildAwaitActive() || !ctx.buildConf.coroProgramBootstrapActive() {
 			return fmt.Errorf("enable coroutine channel lowering: runnable PhysicalABIV1 program bootstrap is required")
 		}
 	}
-	if ctx.buildConf.EnableCoroWorker {
-		if !ctx.buildConf.EnableCoroChildAwait || !ctx.buildConf.EnableCoroProgramBootstrapRun {
+	if ctx.buildConf.coroWorkerActive() {
+		if !ctx.buildConf.coroChildAwaitActive() || !ctx.buildConf.coroProgramBootstrapActive() {
 			return fmt.Errorf("enable coroutine worker lowering: runnable PhysicalABIV1 program bootstrap is required")
 		}
 	}
-	if ctx.buildConf.EnableCoroPlainDispatch && !ctx.buildConf.EnableCoroEntryResolution {
+	if ctx.buildConf.coroPlainDispatchActive() && !ctx.buildConf.coroEntryResolutionActive() {
 		return fmt.Errorf("enable coroutine plain dispatch: coroutine entry resolution is required")
 	}
-	if ctx.buildConf.EnableCoroExplicitStatusPanicABI && !ctx.buildConf.EnableCoroEntryResolution {
+	if ctx.buildConf.coroExplicitStatusActive() && !ctx.buildConf.coroEntryResolutionActive() {
 		return fmt.Errorf("enable coroutine explicit-status panic ABI: coroutine entry resolution is required")
 	}
-	if ctx.buildConf.EnableCoroExplicitStatusPanicABI && !ctx.buildConf.EnableCoroChildAwait {
+	if ctx.buildConf.coroExplicitStatusActive() && !ctx.buildConf.coroChildAwaitActive() {
 		return fmt.Errorf("enable coroutine explicit-status panic ABI: PhysicalABIV1 child-await lowering is required")
 	}
-	if ctx.buildConf.EnableCoroChildAwait && ctx.buildConf.BuildMode == BuildModeCArchive {
+	if ctx.buildConf.coroChildAwaitActive() && ctx.buildConf.BuildMode == BuildModeCArchive {
 		return fmt.Errorf("enable coroutine child await: c-archive requires flattened package members and an explicit host bootstrap extraction contract")
 	}
 	builder := ctx.buildConf.CoroPlanBuilder
 	if builder == nil {
-		if ctx.buildConf.EnableCoroEntryResolution {
+		if ctx.buildConf.coroEntryResolutionActive() {
 			return fmt.Errorf("enable coroutine entry resolution: CoroPlanBuilder is required")
 		}
 		return nil
@@ -3212,7 +3204,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 			return fmt.Errorf("prepare coroutine emission universe: %w", err)
 		}
 	}
-	if ctx.buildConf.EnableCoroEntryResolution && ctx.coroEmission == nil {
+	if ctx.buildConf.coroEntryResolutionActive() && ctx.coroEmission == nil {
 		return fmt.Errorf("enable coroutine entry resolution: prepared emission universe is required")
 	}
 	analyzedPlans := make(map[*coro.SSAPlan]struct{})
@@ -3244,7 +3236,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		frameRetentionABI = validatedCoroFrameRetentionABI(ctx, true)
 		requiredGlobalFunctionSlots = ctx.coroGlobalFunctionSlots
 	}
-	if ctx.coroEmission != nil && ctx.buildConf.EnableCoroPlainDispatch {
+	if ctx.coroEmission != nil && ctx.buildConf.coroPlainDispatchActive() {
 		directPlain, plainClosure, err := requiredCoroDirectPlainCallArguments(ctx, requiredClosedDynamic)
 		if err != nil {
 			return err
@@ -3276,8 +3268,8 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		requiredDirectPlain:         requiredDirectPlain,
 		requiredClosedDynamic:       requiredClosedDynamic,
 		requiredGlobalFunctionSlots: requiredGlobalFunctionSlots,
-		enableClosedStaticSpawn:     ctx.buildConf.EnableCoroClosedStaticSpawn,
-		enableManagedDispatch:       ctx.buildConf.EnableCoroPlainDispatch,
+		enableClosedStaticSpawn:     ctx.buildConf.coroClosedStaticSpawnActive(),
+		enableManagedDispatch:       ctx.buildConf.coroPlainDispatchActive(),
 		recordAnalysis: func(plan *coro.SSAPlan) {
 			if plan != nil {
 				analyzedPlansMu.Lock()
@@ -3286,7 +3278,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 			}
 		},
 	}
-	if ctx.buildConf.EnableCoroExplicitStatusPanicABI {
+	if ctx.buildConf.coroExplicitStatusActive() {
 		input.outcomeMode = coro.OutcomeExplicitStatus
 	}
 	if ctx.coroEmission != nil {
@@ -3322,7 +3314,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		input.syncDemandReferences = ctx.coroEmission.CoroSyncDemandReferences
 		input.loweredCalls = ctx.coroEmission.CoroLoweredCalls
 		input.augmentFunctionIDs = func(config coro.FunctionIDConfig) coro.FunctionIDConfig {
-			if ctx.buildConf.EnableCoroEntryResolution {
+			if ctx.buildConf.coroEntryResolutionActive() {
 				if config.CoroABI == "" {
 					config.CoroABI = activeCoroABIVersion(ctx.buildConf)
 				}
@@ -3341,7 +3333,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	if plan == nil {
 		return fmt.Errorf("build coroutine plan: builder returned nil plan")
 	}
-	if ctx.buildConf.EnableCoroEntryResolution {
+	if ctx.buildConf.coroEntryResolutionActive() {
 		analyzedPlansMu.Lock()
 		if _, ok := analyzedPlans[plan]; !ok {
 			analyzedPlansMu.Unlock()
@@ -3359,7 +3351,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	var digest string
 	var loweringFacts coro.LoweringFacts
 	var loweringFactsDigest string
-	if ctx.buildConf.EnableCoroEntryResolution {
+	if ctx.buildConf.coroEntryResolutionActive() {
 		if ctx.coroEmission == nil {
 			return fmt.Errorf("build coroutine lowering facts: missing frozen emission universe")
 		}
@@ -3387,28 +3379,21 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	ctx.coroLoweringFacts = loweringFacts
 	ctx.coroLoweringFactsDigest = loweringFactsDigest
 	ctx.clCompilation = &cl.Compilation{
-		CoroPlan:                         plan,
-		CoroPlanObserver:                 ctx.buildConf.CoroPlanObserver,
-		EnableCoroEntryResolution:        ctx.buildConf.EnableCoroEntryResolution,
-		EnableCoroExplicitStatusPanicABI: ctx.buildConf.EnableCoroExplicitStatusPanicABI,
-		EnableCoroPhysicalABI:            ctx.buildConf.EnableCoroPhysicalABI,
-		EnableCoroChildAwait:             ctx.buildConf.EnableCoroChildAwait,
-		EnableCoroPlainDispatch:          ctx.buildConf.EnableCoroPlainDispatch,
-		EnableCoroClosedStaticSpawn:      ctx.buildConf.EnableCoroClosedStaticSpawn,
-		EnableCoroProgramBootstrapRun:    ctx.buildConf.EnableCoroProgramBootstrapRun,
-		EnableCoroChannel:                ctx.buildConf.EnableCoroChannel,
-		EnableCoroWorker:                 ctx.buildConf.EnableCoroWorker,
-		CoroFrameRetentionABI:            frameRetentionABI,
-		CoroPlanDigest:                   digest,
-		CoroLoweringFacts:                loweringFacts,
-		CoroLoweringFactsDigest:          loweringFactsDigest,
-		CoroABI:                          metadata.CoroABI,
-		SchedulerABI:                     metadata.SchedulerABI,
-		PanicABI:                         metadata.PanicABI,
-		FuncRepABI:                       metadata.FuncRepABI,
-		EmissionUniverse:                 ctx.coroEmission,
+		CoroPlan:                plan,
+		CoroPlanObserver:        ctx.buildConf.CoroPlanObserver,
+		CoroProfile:             ctx.buildConf.CoroProfile,
+		CoroTargetCapabilities:  ctx.buildConf.coroTargetCapabilities(),
+		CoroFrameRetentionABI:   frameRetentionABI,
+		CoroPlanDigest:          digest,
+		CoroLoweringFacts:       loweringFacts,
+		CoroLoweringFactsDigest: loweringFactsDigest,
+		CoroABI:                 metadata.CoroABI,
+		SchedulerABI:            metadata.SchedulerABI,
+		PanicABI:                metadata.PanicABI,
+		FuncRepABI:              metadata.FuncRepABI,
+		EmissionUniverse:        ctx.coroEmission,
 	}
-	if ctx.buildConf.EnableCoroProgramBootstrapABI {
+	if ctx.buildConf.coroProgramBootstrapABIActive() {
 		bootstraps, err := prepareCoroProgramBootstrapsV1(ctx)
 		if err != nil {
 			ctx.coroPlan = nil
@@ -3422,7 +3407,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		}
 		ctx.coroProgramBootstraps = bootstraps
 	}
-	if ctx.buildConf.EnableCoroEntryResolution {
+	if ctx.buildConf.coroEntryResolutionActive() {
 		if err := validateCoroUnwindOnlyLoweredCalls(plan, metadata.PanicABI); err != nil {
 			ctx.coroPlan = nil
 			ctx.coroPlanDigest = ""
@@ -3693,10 +3678,10 @@ func coroLegacyPanicPlainPathError(path []string, format string, args ...any) er
 }
 
 func activeCoroABIVersion(conf *Config) string {
-	if conf != nil && conf.EnableCoroChildAwait {
+	if conf != nil && conf.coroChildAwaitActive() {
 		return coro.PhysicalABIV1
 	}
-	if conf != nil && conf.EnableCoroPhysicalABI {
+	if conf != nil && conf.coroPhysicalABIActive() {
 		return coro.PhysicalABIV0
 	}
 	return coro.EntryResolutionABIV0
@@ -3708,7 +3693,7 @@ func activeCoroABIVersion(conf *Config) string {
 // demand by canonical function. Descriptor-only builds keep their historical
 // explicit-root contract and legacy native entry.
 func requiredCoroProgramManagedEntryRoots(ctx *context) (coro.Roots, error) {
-	if ctx == nil || ctx.buildConf == nil || !ctx.buildConf.EnableCoroProgramBootstrapRun {
+	if ctx == nil || ctx.buildConf == nil || !ctx.buildConf.coroProgramBootstrapActive() {
 		return nil, nil
 	}
 	if ctx.coroEmission == nil {
@@ -3774,7 +3759,7 @@ func requiredCoroPatchInitEntryRoots(ctx *context) (coro.Roots, error) {
 		return nil, err
 	}
 	demand := coro.SyncDemand
-	if ctx.buildConf != nil && ctx.buildConf.EnableCoroChildAwait {
+	if ctx.buildConf != nil && ctx.buildConf.coroChildAwaitActive() {
 		demand = coro.AsyncDemand
 	}
 	roots := make(coro.Roots, 0, len(entries))
@@ -3792,45 +3777,45 @@ func requiredCoroPatchInitEntryRoots(ctx *context) (coro.Roots, error) {
 }
 
 func activeCoroSchedulerABIVersion(conf *Config) string {
-	if conf != nil && conf.EnableCoroClosedStaticSpawn {
-		if conf.EnableCoroChannel && conf.EnableCoroWorker {
+	if conf != nil && conf.coroClosedStaticSpawnActive() {
+		if conf.coroChannelActive() && conf.coroWorkerActive() {
 			return coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0
 		}
-		if conf.EnableCoroChannel {
+		if conf.coroChannelActive() {
 			return coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 		}
-		if conf.EnableCoroWorker {
+		if conf.coroWorkerActive() {
 			return coro.SchedulerProgramBootstrapWorkerClosedStaticSpawnABIV0
 		}
 		return coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0
 	}
-	if conf != nil && conf.EnableCoroChannel && conf.EnableCoroWorker {
+	if conf != nil && conf.coroChannelActive() && conf.coroWorkerActive() {
 		return coro.SchedulerProgramBootstrapChannelWorkerABIV0
 	}
-	if conf != nil && conf.EnableCoroChannel {
+	if conf != nil && conf.coroChannelActive() {
 		return coro.SchedulerProgramBootstrapChannelABIV0
 	}
-	if conf != nil && conf.EnableCoroWorker {
+	if conf != nil && conf.coroWorkerActive() {
 		return coro.SchedulerProgramBootstrapWorkerABIV0
 	}
-	if conf != nil && conf.EnableCoroProgramBootstrapRun {
+	if conf != nil && conf.coroProgramBootstrapActive() {
 		return coro.SchedulerProgramBootstrapABIV2
 	}
-	if conf != nil && conf.EnableCoroChildAwait {
+	if conf != nil && conf.coroChildAwaitActive() {
 		return coro.SchedulerChildAwaitABIV0
 	}
 	return coro.SchedulerNoneABIV0
 }
 
 func activeCoroPanicABIVersion(conf *Config) string {
-	if conf != nil && conf.EnableCoroExplicitStatusPanicABI {
+	if conf != nil && conf.coroExplicitStatusActive() {
 		return coro.PanicExplicitStatusABIV0
 	}
 	return coro.PanicLegacyABIV0
 }
 
 func activeCoroFuncRepABIVersion(conf *Config) string {
-	if conf != nil && conf.EnableCoroPlainDispatch {
+	if conf != nil && conf.coroPlainDispatchActive() {
 		return coro.FuncRepABIV1
 	}
 	return coro.FuncRepABIV0
@@ -3843,7 +3828,7 @@ func activeCoroFuncRepABIVersion(conf *Config) string {
 // the embedding-owned pull reactor even on a POSIX host, so it must not also
 // acquire the native pipe capability.
 func nativeCoroDoorbellRuntimeABI(conf *Config) bool {
-	if conf == nil || !conf.EnableCoroProgramBootstrapRun || conf.Target != "" ||
+	if conf == nil || !conf.coroProgramBootstrapActive() || conf.Target != "" ||
 		(conf.Goos != "darwin" && conf.Goos != "linux") {
 		return false
 	}
@@ -3873,7 +3858,7 @@ func nativeCoroWorkerRuntimeABI(conf *Config) bool {
 // WASI command providing a reactor; _start may perform only the initial slice,
 // and an embedding must keep the instance alive and consume the pull ABI.
 func hostCoroPullRuntimeABI(conf *Config) bool {
-	if conf == nil || !conf.EnableCoroProgramBootstrapRun ||
+	if conf == nil || !conf.coroProgramBootstrapActive() ||
 		nativeCoroDoorbellRuntimeABI(conf) || configHasBuildTag(conf, "coro_runtime_adapter_test") {
 		return false
 	}
@@ -3917,7 +3902,7 @@ func nativeCoroFleetRuntimeABI(conf *Config) bool {
 	if !nativeCoroTimerRuntimeABI(conf) || conf == nil {
 		return false
 	}
-	if conf.EnableCoroNativeFleet {
+	if conf.coroNativeFleetActive() {
 		return true
 	}
 	for _, tag := range conf.compilerBuildTags {
@@ -4084,10 +4069,10 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 	if ctx == nil || ctx.buildConf == nil {
 		return nil, nil, nil, nil, nil
 	}
-	if ctx.buildConf.EnableCoroClosedStaticSpawn && !ctx.buildConf.EnableCoroProgramBootstrapRun {
+	if ctx.buildConf.coroClosedStaticSpawnActive() && !ctx.buildConf.coroProgramBootstrapActive() {
 		return nil, nil, nil, nil, fmt.Errorf("coroutine closed static spawn runtime roots require runnable program bootstrap v2")
 	}
-	if !ctx.buildConf.EnableCoroChildAwait {
+	if !ctx.buildConf.coroChildAwaitActive() {
 		return nil, nil, nil, nil, nil
 	}
 	if ctx.coroSSAEmission == nil || ctx.coroEmission == nil {
@@ -4118,7 +4103,7 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 	names := []string{"init"}
 	demandByName := map[string]coro.Demand{"init": coro.SyncDemand}
 	plainRootByName := map[string]bool{"init": true}
-	if ctx.buildConf.EnableCoroProgramBootstrapRun {
+	if ctx.buildConf.coroProgramBootstrapActive() {
 		// The managed startup program owns runtime.init. Its synchronous Go source
 		// style is preserved by AsyncDemand propagation: a non-suspending body
 		// remains one DirectPlain body, while an async-tainted body has one
@@ -4140,7 +4125,7 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			coroWaitRetireCompletedSymbolV1,
 		)
 	}
-	if ctx.buildConf.EnableCoroWorker {
+	if ctx.buildConf.coroWorkerActive() {
 		names = append(names, coroWorkerParkSymbolV1, coroWorkerResumeSymbolV1)
 		if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
 			// The fixed native C worker owns both blocking leaves and crosses
@@ -4191,7 +4176,7 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			coroNotifyAllOrAbortSymbolV1,
 		)
 	}
-	if ctx.buildConf.EnableCoroProgramBootstrapRun {
+	if ctx.buildConf.coroProgramBootstrapActive() {
 		names = append(names,
 			"__llgo_coro_frame_alloc_v1",
 			"__llgo_coro_frame_publish_v1",
@@ -4204,7 +4189,7 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			"__llgo_coro_complete_prepare_v1",
 			"__llgo_coro_frame_free_v1",
 		)
-		if ctx.buildConf.EnableCoroPhysicalABI {
+		if ctx.buildConf.coroPhysicalABIActive() {
 			// Source-level managed calls use the outcome-carrying V3 handoff,
 			// which also carries the optional direct-defer recovery scope. The
 			// frame-local V2 completion publishes Return/Abort/Shutdown, while
@@ -4221,7 +4206,7 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			)
 		}
 	}
-	if ctx.buildConf.EnableCoroChannel {
+	if ctx.buildConf.coroChannelActive() {
 		names = append(names,
 			// These typed Go helpers are compiler calls, not ordinary source
 			// calls. Try/park/resume must finish on the current executor stack;
@@ -4241,7 +4226,7 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			"__llgo_coro_fault_prepare_v1",
 		)
 	}
-	if ctx.buildConf.EnableCoroExplicitStatusPanicABI {
+	if ctx.buildConf.coroExplicitStatusActive() {
 		// Physical coroutine bodies reference this hook from compiler-generated
 		// IR, so the source SSA graph has no edge that could retain it. Keep the
 		// exact runtime body as a synchronous direct-plain root only while the
@@ -4252,11 +4237,11 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			"__llgo_coro_recover_take_v1",
 			"__llgo_coro_fault_payload_v1",
 		)
-		if !ctx.buildConf.EnableCoroChannel {
+		if !ctx.buildConf.coroChannelActive() {
 			names = append(names, "__llgo_coro_fault_prepare_v1")
 		}
 	}
-	if ctx.buildConf.EnableCoroClosedStaticSpawn {
+	if ctx.buildConf.coroClosedStaticSpawnActive() {
 		names = append(names,
 			"__llgo_coro_spawn_begin_v1",
 			"__llgo_coro_spawn_commit_v1",
@@ -5155,9 +5140,9 @@ func prepareCoroEmissionUniverse(ctx *context, packages []*aPackage) error {
 		// Active archive-producing entry resolution with the real runtime input
 		// must freeze every hidden compiler/runtime ABI edge. Isolated plan tests
 		// and report-only builds preserve the legacy incomplete-package behavior.
-		CompleteRuntimeABI: hasRuntimeABI && ctx.buildConf != nil && ctx.buildConf.EnableCoroEntryResolution,
-		EnableCoroChannel:  ctx.buildConf != nil && ctx.buildConf.EnableCoroChannel,
-		EnableCoroWorker:   ctx.buildConf != nil && ctx.buildConf.EnableCoroWorker,
+		CompleteRuntimeABI:     hasRuntimeABI && ctx.buildConf != nil && ctx.buildConf.coroEntryResolutionActive(),
+		CoroProfile:            ctx.buildConf.CoroProfile,
+		CoroTargetCapabilities: ctx.buildConf.coroTargetCapabilities(),
 	})
 	if err != nil {
 		return err
@@ -5307,7 +5292,7 @@ type context struct {
 	plan9asmPkgs map[string]bool
 
 	// coroPlan is compilation-scoped. It remains report-only unless
-	// EnableCoroEntryResolution is set explicitly.
+	// CoroProfileStackless is selected explicitly.
 	coroPlan        *coro.SSAPlan
 	coroEmission    *cl.EmissionUniverse
 	coroSSAEmission *coro.SSAEmissionUniverse
@@ -5524,14 +5509,14 @@ func buildAllPkgs(ctx *context, pkgs []*aPackage, verbose bool) ([]*aPackage, er
 }
 
 func shouldBuildRuntimePackages(conf *Config, needRuntime, needPyInit bool) bool {
-	return needRuntime || needPyInit || conf.Target == "" || conf.EnableCoroEntryResolution
+	return needRuntime || needPyInit || conf.Target == "" || conf.coroEntryResolutionActive()
 }
 
 // runtimeLinkRequirements keeps active child-await runtime initialization on
 // the same path as legacy runtime references without changing the lazy-link
 // behavior of entry-resolution-only named targets.
 func runtimeLinkRequirements(conf *Config, needRuntime, needPyInit bool) (initRuntime, linkRuntime bool) {
-	if conf != nil && conf.EnableCoroChildAwait {
+	if conf != nil && conf.coroChildAwaitActive() {
 		needRuntime = true
 	}
 	host := conf != nil && conf.Target == ""
@@ -5841,13 +5826,13 @@ func linkMainPkg(ctx *context, pkg *packages.Package, pkgs []*aPackage, outputPa
 	var coroRootAnchors []string
 	var coroManifestHash [16]byte
 	var coroBootstrap *coroProgramBootstrapV1
-	if ctx.buildConf.EnableCoroChildAwait {
+	if ctx.buildConf.coroChildAwaitActive() {
 		var err error
 		coroRootAnchors, err = collectLinkedCoroRootAnchors(linkedOrder)
 		if err != nil {
 			return err
 		}
-		if ctx.buildConf.EnableCoroProgramBootstrapABI {
+		if ctx.buildConf.coroProgramBootstrapABIActive() {
 			coroBootstrap = ctx.coroProgramBootstraps[pkg.ID]
 			if coroBootstrap == nil {
 				return fmt.Errorf("coroutine program bootstrap: no pre-codegen table was frozen for linked package %q", pkg.ID)

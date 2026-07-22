@@ -40,17 +40,17 @@ func TestNativeCoroDoorbellRuntimeABISelection(t *testing.T) {
 	}{
 		{name: "nil"},
 		{name: "disabled", conf: &Config{Goos: "linux"}},
-		{name: "linux", conf: &Config{Goos: "linux", EnableCoroProgramBootstrapRun: true}, want: true},
-		{name: "darwin", conf: &Config{Goos: "darwin", EnableCoroProgramBootstrapRun: true}, want: true},
-		{name: "windows", conf: &Config{Goos: "windows", EnableCoroProgramBootstrapRun: true}},
-		{name: "named-target", conf: &Config{Goos: "linux", Target: "rp2040", EnableCoroProgramBootstrapRun: true}},
-		{name: "baremetal-comma", conf: &Config{Goos: "linux", Tags: "nogc,baremetal,cortexm", EnableCoroProgramBootstrapRun: true}},
-		{name: "baremetal-space", conf: &Config{Goos: "linux", Tags: "nogc baremetal cortexm", EnableCoroProgramBootstrapRun: true}},
-		{name: "explicit-host", conf: &Config{Goos: "linux", Tags: "llgo_coro_host", EnableCoroProgramBootstrapRun: true}},
-		{name: "adapter-test", conf: &Config{Goos: "linux", Tags: "nogc,coro_runtime_adapter_test", EnableCoroProgramBootstrapRun: true}},
-		{name: "adapter-test-go-build-flags-equals", conf: &Config{Goos: "linux", GoBuildFlags: []string{"-tags=coro_runtime_adapter_test"}, EnableCoroProgramBootstrapRun: true}},
-		{name: "adapter-test-go-build-flags-pair", conf: &Config{Goos: "linux", GoBuildFlags: []string{"-tags", "coro_runtime_adapter_test"}, EnableCoroProgramBootstrapRun: true}},
-		{name: "adapter-test-go-build-flags-double-dash", conf: &Config{Goos: "linux", GoBuildFlags: []string{"--tags=coro_runtime_adapter_test"}, EnableCoroProgramBootstrapRun: true}},
+		{name: "linux", conf: &Config{Goos: "linux", CoroProfile: CoroProfileStackless}, want: true},
+		{name: "darwin", conf: &Config{Goos: "darwin", CoroProfile: CoroProfileStackless}, want: true},
+		{name: "windows", conf: &Config{Goos: "windows", CoroProfile: CoroProfileStackless}},
+		{name: "named-target", conf: &Config{Goos: "linux", Target: "rp2040", CoroProfile: CoroProfileStackless}},
+		{name: "baremetal-comma", conf: &Config{Goos: "linux", Tags: "nogc,baremetal,cortexm", CoroProfile: CoroProfileStackless}},
+		{name: "baremetal-space", conf: &Config{Goos: "linux", Tags: "nogc baremetal cortexm", CoroProfile: CoroProfileStackless}},
+		{name: "explicit-host", conf: &Config{Goos: "linux", Tags: "llgo_coro_host", CoroProfile: CoroProfileStackless}},
+		{name: "adapter-test", conf: &Config{Goos: "linux", Tags: "nogc,coro_runtime_adapter_test", CoroProfile: CoroProfileStackless}},
+		{name: "adapter-test-go-build-flags-equals", conf: &Config{Goos: "linux", GoBuildFlags: []string{"-tags=coro_runtime_adapter_test"}, CoroProfile: CoroProfileStackless}},
+		{name: "adapter-test-go-build-flags-pair", conf: &Config{Goos: "linux", GoBuildFlags: []string{"-tags", "coro_runtime_adapter_test"}, CoroProfile: CoroProfileStackless}},
+		{name: "adapter-test-go-build-flags-double-dash", conf: &Config{Goos: "linux", GoBuildFlags: []string{"--tags=coro_runtime_adapter_test"}, CoroProfile: CoroProfileStackless}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -69,17 +69,17 @@ func TestHostCoroPullRuntimeABISelection(t *testing.T) {
 	}{
 		{name: "nil"},
 		{name: "disabled-wasm", conf: &Config{Goos: "wasip1", Goarch: "wasm"}},
-		{name: "wasm-wasi", conf: &Config{Goos: "wasip1", Goarch: "wasm", EnableCoroProgramBootstrapRun: true}, want: true},
-		{name: "wasm-js", conf: &Config{Goos: "js", Goarch: "wasm", EnableCoroProgramBootstrapRun: true}, want: true},
-		{name: "wasm-unknown", conf: &Config{Goos: "unknown", Goarch: "wasm", EnableCoroProgramBootstrapRun: true}, want: true},
-		{name: "baremetal-config", conf: &Config{Goos: "linux", Goarch: "arm", Tags: "nogc,baremetal", EnableCoroProgramBootstrapRun: true}, want: true},
-		{name: "baremetal-resolved-target", conf: &Config{Goos: "linux", Goarch: "arm", Target: "rp2040", resolvedTargetBuildTags: []string{"rp2040", "baremetal"}, EnableCoroProgramBootstrapRun: true}, want: true},
-		{name: "explicit-embedded", conf: &Config{Goos: "linux", Goarch: "arm64", Tags: "llgo_coro_host", EnableCoroProgramBootstrapRun: true}, want: true},
-		{name: "explicit-embedded-go-flags", conf: &Config{Goos: "linux", Goarch: "arm64", GoBuildFlags: []string{"-tags=llgo_coro_host"}, EnableCoroProgramBootstrapRun: true}, want: true},
-		{name: "explicit-embedded-resolved-target", conf: &Config{Goos: "linux", Goarch: "arm64", Target: "board", resolvedTargetBuildTags: []string{"llgo_coro_host"}, EnableCoroProgramBootstrapRun: true}, want: true},
-		{name: "native-pipe", conf: &Config{Goos: "linux", Goarch: "amd64", EnableCoroProgramBootstrapRun: true}},
-		{name: "unsupported-windows", conf: &Config{Goos: "windows", Goarch: "amd64", EnableCoroProgramBootstrapRun: true}},
-		{name: "test-adapter-wasm", conf: &Config{Goos: "wasip1", Goarch: "wasm", Tags: "coro_runtime_adapter_test", EnableCoroProgramBootstrapRun: true}},
+		{name: "wasm-wasi", conf: &Config{Goos: "wasip1", Goarch: "wasm", CoroProfile: CoroProfileStackless}, want: true},
+		{name: "wasm-js", conf: &Config{Goos: "js", Goarch: "wasm", CoroProfile: CoroProfileStackless}, want: true},
+		{name: "wasm-unknown", conf: &Config{Goos: "unknown", Goarch: "wasm", CoroProfile: CoroProfileStackless}, want: true},
+		{name: "baremetal-config", conf: &Config{Goos: "linux", Goarch: "arm", Tags: "nogc,baremetal", CoroProfile: CoroProfileStackless}, want: true},
+		{name: "baremetal-resolved-target", conf: &Config{Goos: "linux", Goarch: "arm", Target: "rp2040", resolvedTargetBuildTags: []string{"rp2040", "baremetal"}, CoroProfile: CoroProfileStackless}, want: true},
+		{name: "explicit-embedded", conf: &Config{Goos: "linux", Goarch: "arm64", Tags: "llgo_coro_host", CoroProfile: CoroProfileStackless}, want: true},
+		{name: "explicit-embedded-go-flags", conf: &Config{Goos: "linux", Goarch: "arm64", GoBuildFlags: []string{"-tags=llgo_coro_host"}, CoroProfile: CoroProfileStackless}, want: true},
+		{name: "explicit-embedded-resolved-target", conf: &Config{Goos: "linux", Goarch: "arm64", Target: "board", resolvedTargetBuildTags: []string{"llgo_coro_host"}, CoroProfile: CoroProfileStackless}, want: true},
+		{name: "native-pipe", conf: &Config{Goos: "linux", Goarch: "amd64", CoroProfile: CoroProfileStackless}},
+		{name: "unsupported-windows", conf: &Config{Goos: "windows", Goarch: "amd64", CoroProfile: CoroProfileStackless}},
+		{name: "test-adapter-wasm", conf: &Config{Goos: "wasip1", Goarch: "wasm", Tags: "coro_runtime_adapter_test", CoroProfile: CoroProfileStackless}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -94,7 +94,7 @@ func TestHostCoroPullRuntimeABISelection(t *testing.T) {
 }
 
 func TestValidateCoroHostPullEntryConfigRejectsPythonOwnership(t *testing.T) {
-	host := &Config{Goos: "wasip1", Goarch: "wasm", EnableCoroProgramBootstrapRun: true}
+	host := &Config{Goos: "wasip1", Goarch: "wasm", CoroProfile: CoroProfileStackless}
 	if err := validateCoroHostPullEntryConfig(host, false); err != nil {
 		t.Fatalf("host-pull entry without Python ownership: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestValidateCoroHostPullEntryConfigRejectsPythonOwnership(t *testing.T) {
 		}
 	}
 	if err := validateCoroHostPullEntryConfig(
-		&Config{Goos: "linux", Goarch: "amd64", EnableCoroProgramBootstrapRun: true}, true,
+		&Config{Goos: "linux", Goarch: "amd64", CoroProfile: CoroProfileStackless}, true,
 	); err != nil {
 		t.Fatalf("native pipe entry unexpectedly rejected Python ownership: %v", err)
 	}
@@ -122,22 +122,22 @@ func TestNativeCoroTimerRuntimeABISelection(t *testing.T) {
 	}{
 		{name: "nil"},
 		{name: "disabled", conf: &Config{Goos: "linux", Goarch: "amd64"}},
-		{name: "linux-amd64", conf: &Config{Goos: "linux", Goarch: "amd64", EnableCoroProgramBootstrapRun: true}, want: true},
-		{name: "linux-arm64", conf: &Config{Goos: "linux", Goarch: "arm64", EnableCoroProgramBootstrapRun: true}, want: true},
-		{name: "linux-loong64", conf: &Config{Goos: "linux", Goarch: "loong64", EnableCoroProgramBootstrapRun: true}, want: true},
-		{name: "linux-ppc64", conf: &Config{Goos: "linux", Goarch: "ppc64", EnableCoroProgramBootstrapRun: true}, want: true},
-		{name: "linux-ppc64le", conf: &Config{Goos: "linux", Goarch: "ppc64le", EnableCoroProgramBootstrapRun: true}, want: true},
-		{name: "linux-riscv64", conf: &Config{Goos: "linux", Goarch: "riscv64", EnableCoroProgramBootstrapRun: true}, want: true},
-		{name: "linux-s390x", conf: &Config{Goos: "linux", Goarch: "s390x", EnableCoroProgramBootstrapRun: true}, want: true},
-		{name: "darwin-amd64", conf: &Config{Goos: "darwin", Goarch: "amd64", EnableCoroProgramBootstrapRun: true}, want: true},
-		{name: "darwin-arm64", conf: &Config{Goos: "darwin", Goarch: "arm64", EnableCoroProgramBootstrapRun: true}, want: true},
-		{name: "darwin-loong64-not-a-supported-clock-target", conf: &Config{Goos: "darwin", Goarch: "loong64", EnableCoroProgramBootstrapRun: true}},
-		{name: "linux-386-unverified-time-abi", conf: &Config{Goos: "linux", Goarch: "386", EnableCoroProgramBootstrapRun: true}},
-		{name: "linux-arm-unverified-time-abi", conf: &Config{Goos: "linux", Goarch: "arm", EnableCoroProgramBootstrapRun: true}},
-		{name: "windows-amd64", conf: &Config{Goos: "windows", Goarch: "amd64", EnableCoroProgramBootstrapRun: true}},
-		{name: "named-target", conf: &Config{Goos: "linux", Goarch: "arm64", Target: "nintendoswitch", EnableCoroProgramBootstrapRun: true}},
-		{name: "baremetal", conf: &Config{Goos: "linux", Goarch: "arm64", Tags: "baremetal", EnableCoroProgramBootstrapRun: true}},
-		{name: "adapter-test", conf: &Config{Goos: "linux", Goarch: "amd64", Tags: "coro_runtime_adapter_test", EnableCoroProgramBootstrapRun: true}},
+		{name: "linux-amd64", conf: &Config{Goos: "linux", Goarch: "amd64", CoroProfile: CoroProfileStackless}, want: true},
+		{name: "linux-arm64", conf: &Config{Goos: "linux", Goarch: "arm64", CoroProfile: CoroProfileStackless}, want: true},
+		{name: "linux-loong64", conf: &Config{Goos: "linux", Goarch: "loong64", CoroProfile: CoroProfileStackless}, want: true},
+		{name: "linux-ppc64", conf: &Config{Goos: "linux", Goarch: "ppc64", CoroProfile: CoroProfileStackless}, want: true},
+		{name: "linux-ppc64le", conf: &Config{Goos: "linux", Goarch: "ppc64le", CoroProfile: CoroProfileStackless}, want: true},
+		{name: "linux-riscv64", conf: &Config{Goos: "linux", Goarch: "riscv64", CoroProfile: CoroProfileStackless}, want: true},
+		{name: "linux-s390x", conf: &Config{Goos: "linux", Goarch: "s390x", CoroProfile: CoroProfileStackless}, want: true},
+		{name: "darwin-amd64", conf: &Config{Goos: "darwin", Goarch: "amd64", CoroProfile: CoroProfileStackless}, want: true},
+		{name: "darwin-arm64", conf: &Config{Goos: "darwin", Goarch: "arm64", CoroProfile: CoroProfileStackless}, want: true},
+		{name: "darwin-loong64-not-a-supported-clock-target", conf: &Config{Goos: "darwin", Goarch: "loong64", CoroProfile: CoroProfileStackless}},
+		{name: "linux-386-unverified-time-abi", conf: &Config{Goos: "linux", Goarch: "386", CoroProfile: CoroProfileStackless}},
+		{name: "linux-arm-unverified-time-abi", conf: &Config{Goos: "linux", Goarch: "arm", CoroProfile: CoroProfileStackless}},
+		{name: "windows-amd64", conf: &Config{Goos: "windows", Goarch: "amd64", CoroProfile: CoroProfileStackless}},
+		{name: "named-target", conf: &Config{Goos: "linux", Goarch: "arm64", Target: "nintendoswitch", CoroProfile: CoroProfileStackless}},
+		{name: "baremetal", conf: &Config{Goos: "linux", Goarch: "arm64", Tags: "baremetal", CoroProfile: CoroProfileStackless}},
+		{name: "adapter-test", conf: &Config{Goos: "linux", Goarch: "amd64", Tags: "coro_runtime_adapter_test", CoroProfile: CoroProfileStackless}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -182,7 +182,7 @@ func TestEffectiveBuildTagsRejectsForgedNativeCapability(t *testing.T) {
 		},
 		{
 			name:       "named-target-build-tags",
-			conf:       &Config{Goos: "linux", Target: "nintendoswitch", EnableCoroProgramBootstrapRun: true},
+			conf:       &Config{Goos: "linux", Target: "nintendoswitch", CoroProfile: CoroProfileStackless},
 			export:     crosscompile.Export{BuildTags: []string{"nintendoswitch", coroNativePipeBuildTag}},
 			wantSource: "named-target BuildTags",
 		},
@@ -231,10 +231,8 @@ func TestEffectiveBuildTagsRejectsForgedNativeFleetCapability(t *testing.T) {
 
 func TestEffectiveBuildTagsSelectsConfiguredNativeFleet(t *testing.T) {
 	conf := &Config{
-		Goos:                          "linux",
-		Goarch:                        "amd64",
-		EnableCoroProgramBootstrapRun: true,
-		EnableCoroNativeFleet:         true,
+		Goos:   "linux",
+		Goarch: "amd64", CoroProfile: CoroProfileStackless,
 	}
 	tags, err := effectiveBuildTags(conf, crosscompile.Export{})
 	if err != nil {
@@ -244,7 +242,7 @@ func TestEffectiveBuildTagsSelectsConfiguredNativeFleet(t *testing.T) {
 		!nativeCoroFleetRuntimeABI(conf) {
 		t.Fatalf("configured native fleet tags/runtime = %q/%t", tags, nativeCoroFleetRuntimeABI(conf))
 	}
-	conf.EnableCoroNativeFleet = false
+	conf.CoroProfile = CoroProfileNone
 	tags, err = effectiveBuildTags(conf, crosscompile.Export{})
 	if err != nil {
 		t.Fatal(err)
@@ -293,8 +291,7 @@ func TestEffectiveBuildTagsRejectsForgedNativeTimerCapability(t *testing.T) {
 		{
 			name: "named-target-build-tags",
 			conf: &Config{
-				Goos: "linux", Goarch: "arm64", Target: "nintendoswitch",
-				EnableCoroProgramBootstrapRun: true,
+				Goos: "linux", Goarch: "arm64", Target: "nintendoswitch", CoroProfile: CoroProfileStackless,
 			},
 			export:     crosscompile.Export{BuildTags: []string{"nintendoswitch", coroNativeTimerBuildTag}},
 			wantSource: "named-target BuildTags",
@@ -316,7 +313,7 @@ func TestEffectiveBuildTagsRejectsForgedNativeTimerCapability(t *testing.T) {
 }
 
 func TestEffectiveBuildTagsKeepsNativeTimerCapabilityCompilerOwned(t *testing.T) {
-	conf := &Config{Goos: "linux", Goarch: "amd64", EnableCoroProgramBootstrapRun: true}
+	conf := &Config{Goos: "linux", Goarch: "amd64", CoroProfile: CoroProfileStackless}
 	tags, err := effectiveBuildTags(conf, crosscompile.Export{})
 	if err != nil {
 		t.Fatal(err)
@@ -347,16 +344,16 @@ func TestEffectiveBuildTagsKeepsNativeCapabilityCompilerOwned(t *testing.T) {
 	}{
 		{
 			name: "default-linux-program-bootstrap",
-			conf: &Config{Goos: "linux", EnableCoroProgramBootstrapRun: true},
+			conf: &Config{Goos: "linux", CoroProfile: CoroProfileStackless},
 			want: true,
 		},
 		{
 			name: "named-linux-target",
-			conf: &Config{Goos: "linux", Target: "nintendoswitch", EnableCoroProgramBootstrapRun: true},
+			conf: &Config{Goos: "linux", Target: "nintendoswitch", CoroProfile: CoroProfileStackless},
 		},
 		{
 			name: "runtime-adapter",
-			conf: &Config{Goos: "linux", Tags: "coro_runtime_adapter_test", EnableCoroProgramBootstrapRun: true},
+			conf: &Config{Goos: "linux", Tags: "coro_runtime_adapter_test", CoroProfile: CoroProfileStackless},
 		},
 		{
 			name: "isolated-runtime-compiler-channel",
@@ -390,15 +387,15 @@ func TestEffectiveBuildTagsDoesNotMisreadOrdinaryFlagValues(t *testing.T) {
 
 func TestEffectiveBuildTagsMergesGoBuildFlagTags(t *testing.T) {
 	conf := &Config{
-		Goos:                          "linux",
-		EnableCoroProgramBootstrapRun: true,
+		Goos: "linux",
+
 		GoBuildFlags: []string{
 			"-mod=mod",
 			"-tags=user_feature_a",
 			"-gcflags=-N",
 			"-tags", "user_feature_b user_feature_c",
 			"--tags=user_feature_d",
-		},
+		}, CoroProfile: CoroProfileStackless,
 	}
 	tags, err := effectiveBuildTags(conf, crosscompile.Export{})
 	if err != nil {
@@ -423,12 +420,12 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 	sentinel := errors.New("native target plan verified")
 	conf := NewDefaultConf(ModeGen)
 	conf.ForceRebuild = true
-	conf.EnableCoroEntryResolution = true
-	conf.EnableCoroPhysicalABI = true
-	conf.EnableCoroChildAwait = true
-	conf.EnableCoroPlainDispatch = true
-	conf.EnableCoroProgramBootstrapABI = true
-	conf.EnableCoroProgramBootstrapRun = true
+	conf.CoroProfile = CoroProfileStackless
+	conf.CoroProfile = CoroProfileStackless
+	conf.CoroProfile = CoroProfileStackless
+	conf.CoroProfile = CoroProfileStackless
+	conf.CoroProfile = CoroProfileStackless
+	conf.CoroProfile = CoroProfileStackless
 	conf.CoroPlanBuilder = func(input CoroPlanInput) (*coro.SSAPlan, error) {
 		plan, err := input.Analyze(nil, coro.SSAConfig{MaxPlainInstructions: -1})
 		if err != nil {

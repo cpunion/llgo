@@ -64,8 +64,8 @@ func Call(value int) int { return Leaf(value) }
 		},
 	}
 	functionIDs := emission.FunctionIDConfig()
-	functionIDs.CoroABI = coro.EntryResolutionABIV0
-	functionIDs.SchedulerABI = coro.SchedulerNoneABIV0
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	roots := coro.Roots{{Function: ssaPkg.Func("Call"), Demand: coro.SyncDemand}}
 	analyze := func(in CoroPlanInput, classify func(*ssa.Function) (coro.SSAFunctionPolicy, error)) (*coro.SSAPlan, error) {

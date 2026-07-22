@@ -80,13 +80,10 @@ func launchSuspending() { go suspending() }
 	if !coroPlanContainsSpawn(plan) {
 		t.Fatal("emitted plan lost its spawn site")
 	}
-	if err := validateCoroClosedStaticSpawnRunGate(&Config{EnableCoroClosedStaticSpawn: true}, plan, ""); err == nil || !strings.Contains(err.Error(), "runnable program bootstrap v2") {
+	if err := validateCoroClosedStaticSpawnRunGate(&Config{CoroProfile: CoroProfileStackless}, plan, ""); err == nil || !strings.Contains(err.Error(), "runnable program bootstrap v2") {
 		t.Fatalf("non-runnable spawn gate error = %v", err)
 	}
-	err = validateCoroClosedStaticSpawnRunGate(&Config{
-		EnableCoroClosedStaticSpawn:   true,
-		EnableCoroProgramBootstrapRun: true,
-	}, plan, "")
+	err = validateCoroClosedStaticSpawnRunGate(&Config{CoroProfile: CoroProfileStackless}, plan, "")
 	if err == nil || !strings.Contains(err.Error(), "may-park") || !strings.Contains(err.Error(), "main-return cancellation subset") {
 		t.Fatalf("runnable spawn gate error = %v", err)
 	}
@@ -326,12 +323,7 @@ func launch() { go target() }
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = validateCoroClosedStaticSpawnRunGate(&Config{
-				EnableCoroClosedStaticSpawn:   true,
-				EnableCoroProgramBootstrapRun: true,
-				EnableCoroWorker:              test.enableWorker,
-				EnableCoroChannel:             test.enableChannel,
-			}, plan, test.frameABI)
+			err = validateCoroClosedStaticSpawnRunGate(&Config{CoroProfile: CoroProfileStackless}, plan, test.frameABI)
 			if test.wantOK {
 				if err != nil {
 					t.Fatalf("safe runnable spawn rejected: %v", err)
@@ -387,25 +379,18 @@ func TestBuildCoroPlanClosedStaticSpawnCapabilityDependencies(t *testing.T) {
 	}{
 		{
 			name: "runnable bootstrap",
-			conf: &Config{EnableCoroClosedStaticSpawn: true},
+			conf: &Config{CoroProfile: CoroProfileStackless},
 			want: "runnable program bootstrap v2 is required",
 		},
 		{
 			name: "bootstrap ABI",
-			conf: &Config{
-				EnableCoroClosedStaticSpawn:   true,
-				EnableCoroProgramBootstrapRun: true,
-				EnableCoroChildAwait:          true,
-			},
+			conf: &Config{CoroProfile: CoroProfileStackless},
 			want: "program bootstrap ABI is required",
 		},
 		{
 			name: "child await",
 			conf: &Config{
-				BuildMode:                 BuildModeExe,
-				EnableCoroEntryResolution: true, EnableCoroPhysicalABI: true,
-				EnableCoroProgramBootstrapABI: true, EnableCoroProgramBootstrapRun: true,
-				EnableCoroClosedStaticSpawn: true,
+				BuildMode: BuildModeExe, CoroProfile: CoroProfileStackless,
 			},
 			want: "coroutine child await is required",
 		},

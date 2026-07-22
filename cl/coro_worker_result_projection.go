@@ -149,7 +149,7 @@ func coroWorkerResultProjectionFor(fn *ssa.Function) (coroWorkerResultProjection
 // keeps malformed trusted metadata from silently becoming active after an
 // unrelated reachability change.
 func (u *EmissionUniverse) freezeCoroWorkerResultProjectionCertificates() error {
-	if u == nil || !u.enableCoroWorker {
+	if u == nil || !u.CoroWorkerEnabled() {
 		return nil
 	}
 	for _, fn := range u.functions {

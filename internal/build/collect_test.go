@@ -53,7 +53,7 @@ func TestCoroutinePlanInputsAffectFingerprint(t *testing.T) {
 	fingerprint := func(digest string, metadata coro.PlanDigestMetadata) string {
 		t.Helper()
 		ctx := &context{
-			buildConf:        &Config{Goos: "linux", Goarch: "amd64", EnableCoroEntryResolution: true, EnableCoroPhysicalABI: true},
+			buildConf:        &Config{Goos: "linux", Goarch: "amd64", CoroProfile: CoroProfileStackless},
 			coroPlanDigest:   digest,
 			coroPlanMetadata: metadata,
 		}
@@ -69,7 +69,7 @@ func TestCoroutinePlanInputsAffectFingerprint(t *testing.T) {
 	}
 	explicitManifest := newManifestBuilder()
 	(&context{
-		buildConf:        &Config{Goos: "linux", Goarch: "amd64", EnableCoroEntryResolution: true, EnableCoroExplicitStatusPanicABI: true},
+		buildConf:        &Config{Goos: "linux", Goarch: "amd64", CoroProfile: CoroProfileStackless},
 		coroPlanDigest:   strings.Repeat("1", 64),
 		coroPlanMetadata: explicitStatus,
 	}).collectCommonInputs(explicitManifest)
@@ -86,7 +86,7 @@ func TestCoroutinePlanInputsAffectFingerprint(t *testing.T) {
 	}
 	frameRetentionManifest := newManifestBuilder()
 	(&context{
-		buildConf:        &Config{Goos: "linux", Goarch: "amd64", EnableCoroEntryResolution: true, EnableCoroPhysicalABI: true},
+		buildConf:        &Config{Goos: "linux", Goarch: "amd64", CoroProfile: CoroProfileStackless},
 		coroPlanDigest:   strings.Repeat("1", 64),
 		coroPlanMetadata: frameRetention,
 	}).collectCommonInputs(frameRetentionManifest)

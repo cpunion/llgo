@@ -146,7 +146,7 @@ var Ready = true
 	patchedFiles := []*ast.File{original.file, alternate.file}
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverse(prog, patches, []EmissionPackage{
+	universe, err := prepareStacklessEmissionUniverse(prog, patches, []EmissionPackage{
 		{SSA: original.ssa, Files: patchedFiles},
 		{SSA: importer.ssa, Files: []*ast.File{importer.file}},
 	})
@@ -159,7 +159,7 @@ var Ready = true
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(testProg.ssa, coro.Roots{
 		{Function: importerInit, Demand: coro.AsyncDemand},
@@ -174,6 +174,13 @@ var Ready = true
 		ClassifyElidedCall: func(_ *ssa.Function, call ssa.CallInstruction) (bool, error) {
 			_, _, redirected, err := universe.CoroPatchInitRedirect(call)
 			return redirected, err
+		},
+		ClassifyLocalBody: func(fn *ssa.Function) (coro.SSAFunctionBodyFacts, error) {
+			facts, err := universe.CoroLocalBodyFacts(fn)
+			if fn == alternate.ssa.Func("patchedValue") {
+				facts.Exec &^= coro.MayUnwind
+			}
+			return facts, err
 		},
 		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
 			if fn == original.ssa.Func("Yield") {

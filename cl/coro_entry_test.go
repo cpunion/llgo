@@ -26,6 +26,7 @@ import (
 	"github.com/goplus/llgo/internal/coro"
 	"github.com/goplus/llgo/internal/goembed"
 	llssa "github.com/goplus/llgo/ssa"
+	"github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -90,6 +91,7 @@ func coroEntryPreflightUniverse(plan *coro.SSAPlan) *EmissionUniverse {
 		finalKeys:     make(map[emissionFunctionOwnerKey]string),
 		useOwners:     make(map[*ssa.Function]map[*preparedEmissionPackage]none),
 		ownerStates:   make(map[*ssa.Function]map[*preparedEmissionPackage]emissionFunctionState),
+		coroProfile:   CoroProfileStackless,
 	}
 	if plan == nil {
 		return u
@@ -120,8 +122,7 @@ func coroEntryPreflightUniverse(plan *coro.SSAPlan) *EmissionUniverse {
 func TestResolveFunctionSymbolUsesPrimaryAndExactPlan(t *testing.T) {
 	pkg, plan := buildCoroEntryTestPlan(t)
 	ctx, dispose := newCoroEntryTestContext(t, pkg, &Compilation{
-		CoroPlan:                  plan,
-		EnableCoroEntryResolution: true,
+		CoroPlan: plan, CoroProfile: CoroProfileStackless,
 	})
 	defer dispose()
 
@@ -143,8 +144,8 @@ func TestResolveFunctionSymbolUsesPrimaryAndExactPlan(t *testing.T) {
 	if !coroutine.planned || coroutine.plan.Emission != coro.EmitCoroutine || coroutine.plan.Primary != coro.PrimaryCoroutine || !strings.HasSuffix(coroutine.name, coroPrimarySuffix) {
 		t.Fatalf("coroutine entry = %+v", coroutine)
 	}
-	if err := coroutine.checkSupported(); err == nil || !strings.Contains(err.Error(), "physical ABI") {
-		t.Fatalf("coroutine support error = %v", err)
+	if err := coroutine.checkSupported(); err != nil {
+		t.Fatalf("coroutine primary rejected by the stackless profile: %v", err)
 	}
 
 	boxed, err := ctx.resolveFunctionSymbol(pkg.Func("Boxed"))
@@ -154,8 +155,8 @@ func TestResolveFunctionSymbolUsesPrimaryAndExactPlan(t *testing.T) {
 	if boxed.plan.Emission != coro.EmitPlain || boxed.plan.Primary != coro.PrimaryPlain || boxed.plan.FuncRep != coro.Dispatch || strings.HasSuffix(boxed.name, coroPrimarySuffix) {
 		t.Fatalf("boxed entry = %+v, want one plain primary plus dispatch descriptor", boxed)
 	}
-	if err := boxed.checkSupported(); err == nil || !strings.Contains(err.Error(), "dispatch descriptor") {
-		t.Fatalf("boxed support error = %v", err)
+	if err := boxed.checkSupported(); err != nil {
+		t.Fatalf("descriptor-backed plain primary rejected by the stackless profile: %v", err)
 	}
 
 	external, err := ctx.resolveFunctionSymbol(pkg.Func("External"))
@@ -181,8 +182,7 @@ func TestResolveFunctionSymbolUsesPrimaryAndExactPlan(t *testing.T) {
 
 	otherPkg, _, _ := buildGoSSAPkg(t, coroEntryTestSource)
 	otherCtx, otherDispose := newCoroEntryTestContext(t, otherPkg, &Compilation{
-		CoroPlan:                  plan,
-		EnableCoroEntryResolution: true,
+		CoroPlan: plan, CoroProfile: CoroProfileStackless,
 	})
 	defer otherDispose()
 	if _, err := otherCtx.resolveFunctionSymbol(otherPkg.Func("Plain")); err == nil || !strings.Contains(err.Error(), "absent") {
@@ -203,7 +203,7 @@ func Complex(ch chan int) int {
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func Complex(ch chan int) int {
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerChildAwaitABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, nil, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
@@ -265,7 +265,7 @@ func Owner() bool { return Target != nil }
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,10 +293,8 @@ func Owner() bool { return Target != nil }
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		PackageOptions{Compilation: &Compilation{
-			CoroPlan:                  plan,
-			EmissionUniverse:          universe,
-			EnableCoroEntryResolution: true,
-			EnableCoroPhysicalABI:     true,
+			CoroPlan:         plan,
+			EmissionUniverse: universe, CoroProfile: CoroProfileStackless,
 		}},
 	)
 	if err != nil {
@@ -313,7 +311,7 @@ func Owner() bool { return Target != nil }
 	}
 }
 
-func TestCoroEntryDemandedEffectfulComplexFunctionStillFailsClosed(t *testing.T) {
+func TestCoroEntryDemandedEffectfulComplexFunctionCompiles(t *testing.T) {
 	const source = `package foo
 func Complex(ch chan int) int {
 	value := <-ch
@@ -326,7 +324,7 @@ func Complex(ch chan int) int {
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +334,7 @@ func Complex(ch chan int) int {
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerChildAwaitABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	complex := ssaPkg.Func("Complex")
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: complex, Demand: coro.AsyncDemand}}, coro.SSAConfig{
@@ -356,15 +354,20 @@ func Complex(ch chan int) int {
 		EmissionUniverse: universe,
 	}
 	enableCoroChildAwaitCompilation(compilation)
-	got, _, err := NewPackageExWithEmbedOptions(
+	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		PackageOptions{Compilation: compilation},
 	)
-	if err == nil || !strings.Contains(err.Error(), "requires the channel scheduler capability") {
-		t.Fatalf("demanded complex preflight = %v, %v; want fail-closed unsupported channel-receive instruction diagnostic", got, err)
+	if err != nil {
+		t.Fatalf("compile demanded channel/control-flow coroutine: %v", err)
 	}
-	if got != nil {
-		t.Fatal("demanded complex preflight returned a partial package")
+	module := pkg.Module()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify demanded channel/control-flow coroutine: %v\n%s", err, module.String())
+	}
+	body := requireCoroPhysicalFunction(t, module, "foo.Complex").String()
+	if !strings.Contains(body, coroChanRecvParkHookV1) || !strings.Contains(body, "switch i32") {
+		t.Fatalf("complex coroutine lacks channel park/control-flow lowering:\n%s", body)
 	}
 }
 
@@ -411,7 +414,7 @@ func Caller() {}
 			ssaPkg, _, files := buildGoSSAPkg(t, source)
 			prog := newLLSSAProg(t)
 			defer prog.Dispose()
-			universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+			universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -451,10 +454,8 @@ func Caller() {}
 			got, _, err := NewPackageExWithEmbedOptions(
 				prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 				PackageOptions{Compilation: &Compilation{
-					CoroPlan:                  plan,
-					EmissionUniverse:          universe,
-					EnableCoroEntryResolution: true,
-					EnableCoroPhysicalABI:     true,
+					CoroPlan:         plan,
+					EmissionUniverse: universe, CoroProfile: CoroProfileStackless,
 				}},
 			)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
@@ -462,62 +463,6 @@ func Caller() {}
 			}
 			if got != nil {
 				t.Fatal("consumer preflight returned a partial package")
-			}
-		})
-	}
-}
-
-func TestCoroEntryRejectsUnsupportedBeforeCreatingSymbol(t *testing.T) {
-	pkg, plan := buildCoroEntryTestPlan(t)
-	for _, tt := range []struct {
-		name string
-		fn   string
-		use  func(*context, *ssa.Function)
-	}{
-		{
-			name: "definition",
-			fn:   "Coroutine",
-			use: func(ctx *context, fn *ssa.Function) {
-				ctx.compileFuncDecl(ctx.pkg, fn)
-			},
-		},
-		{
-			name: "declaration",
-			fn:   "Coroutine",
-			use: func(ctx *context, fn *ssa.Function) {
-				ctx.funcOf(fn)
-			},
-		},
-		{
-			name: "dispatch",
-			fn:   "Boxed",
-			use: func(ctx *context, fn *ssa.Function) {
-				ctx.compileFuncDecl(ctx.pkg, fn)
-			},
-		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			ctx, dispose := newCoroEntryTestContext(t, pkg, &Compilation{
-				CoroPlan:                  plan,
-				EnableCoroEntryResolution: true,
-			})
-			defer dispose()
-
-			fn := pkg.Func(tt.fn)
-			_, legacyName, _ := ctx.funcName(fn)
-			func() {
-				defer func() {
-					if recover() == nil {
-						t.Fatal("entry resolution unexpectedly succeeded")
-					}
-				}()
-				tt.use(ctx, fn)
-			}()
-			if got := ctx.pkg.FuncOf(legacyName); got != nil {
-				t.Fatalf("unsupported entry resolution created legacy symbol %q", legacyName)
-			}
-			if got := ctx.pkg.FuncOf(legacyName + coroPrimarySuffix); got != nil {
-				t.Fatalf("unsupported entry resolution created coroutine symbol %q", legacyName+coroPrimarySuffix)
 			}
 		})
 	}
@@ -555,7 +500,7 @@ func Box() any { return Target }
 					{Function: pkg.Func("Box"), Demand: coro.AsyncDemand},
 				}, coro.SSAConfig{})
 			},
-			want: "dispatch descriptor",
+			want: "physical plan commit requires the call SitePlan stage",
 		},
 		{
 			name:   "external coroutine",
@@ -577,7 +522,7 @@ func Box() any { return Target }
 					},
 				})
 			},
-			want: "external coroutine",
+			want: "requires a defined body",
 		},
 	}
 	for _, tt := range tests {
@@ -596,8 +541,7 @@ func Box() any { return Target }
 					EmissionUniverse: coroEntryPreflightUniverse(plan),
 					CoroPlanObserver: func(*ssa.Package, *coro.SSAPlan) {
 						observerCalls++
-					},
-					EnableCoroEntryResolution: true,
+					}, CoroProfile: CoroProfileStackless,
 				},
 			})
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
@@ -621,7 +565,7 @@ func External() { <-channel }
 `)
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: pkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: pkg, Files: files}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -667,20 +611,18 @@ func External() { <-channel }
 		t.Fatal("bodyful C stub was not excluded from the physical plan")
 	}
 	if err := (&Compilation{
-		CoroPlan:                  ignored,
-		EmissionUniverse:          universe,
-		EnableCoroEntryResolution: true,
-	}).preflightCoroPlan(); err != nil {
-		t.Fatalf("bodyful frozen C declaration failed preflight: %v", err)
+		CoroPlan:         ignored,
+		EmissionUniverse: universe, CoroProfile: CoroProfileStackless,
+	}).preflightCoroPlan(); err == nil || !strings.Contains(err.Error(), "requires a defined body") {
+		t.Fatalf("bodyful frozen C root preflight error = %v, want defined-body rejection", err)
 	}
 
 	notIgnored := buildPlan(false)
 	err = (&Compilation{
-		CoroPlan:                  notIgnored,
-		EmissionUniverse:          universe,
-		EnableCoroEntryResolution: true,
+		CoroPlan:         notIgnored,
+		EmissionUniverse: universe, CoroProfile: CoroProfileStackless,
 	}).preflightCoroPlan()
-	if err == nil || !strings.Contains(err.Error(), "ignored-body=false conflicts with frozen frontend background") {
+	if err == nil || !strings.Contains(err.Error(), "synchronous demand without a planned raw plain entry") {
 		t.Fatalf("non-ignored C stub preflight error = %v", err)
 	}
 }
@@ -695,26 +637,15 @@ func TestCoroEntryResolutionPreflightRejectsMissingPlanAndCache(t *testing.T) {
 	}{
 		{
 			name:        "missing plan",
-			compilation: &Compilation{EnableCoroEntryResolution: true},
+			compilation: &Compilation{CoroProfile: CoroProfileStackless},
 			want:        "requires a compilation CoroPlan",
 		},
 		{
 			name: "missing universe",
 			compilation: &Compilation{
-				CoroPlan:                  &coro.SSAPlan{},
-				EnableCoroEntryResolution: true,
+				CoroPlan: &coro.SSAPlan{}, CoroProfile: CoroProfileStackless,
 			},
 			want: "prepared emission universe",
-		},
-		{
-			name: "cache hit",
-			compilation: &Compilation{
-				CoroPlan:                  &coro.SSAPlan{},
-				EmissionUniverse:          coroEntryPreflightUniverse(&coro.SSAPlan{}),
-				EnableCoroEntryResolution: true,
-			},
-			cacheHit: true,
-			want:     "CoroPlanDigest",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -731,5 +662,16 @@ func TestCoroEntryResolutionPreflightRejectsMissingPlanAndCache(t *testing.T) {
 				t.Fatal("preflight failure returned a partial package")
 			}
 		})
+	}
+
+	cacheCompilation := &Compilation{
+		CoroProfile:  CoroProfileStackless,
+		CoroABI:      coro.PhysicalABIV1,
+		SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+		PanicABI:     coro.PanicExplicitStatusABIV0,
+		FuncRepABI:   coro.FuncRepABIV1,
+	}
+	if err := cacheCompilation.validateCoroCacheIdentity(); err == nil || !strings.Contains(err.Error(), "CoroPlanDigest") {
+		t.Fatalf("cache identity error = %v, want missing CoroPlanDigest rejection", err)
 	}
 }

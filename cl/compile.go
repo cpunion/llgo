@@ -574,7 +574,7 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 func (p *context) compileFuncDeclVariant(pkg llssa.Package, f *ssa.Function, rawPlain bool) (llssa.Function, llssa.PyObjRef, int) {
 	var entry plannedFunctionSymbol
 	patchOriginal := f != nil && f.Name() == "init" && f.Signature != nil && f.Signature.Recv() == nil &&
-		p.state == pkgHasPatch && p.compilation != nil && p.compilation.EnableCoroEntryResolution
+		p.state == pkgHasPatch && p.compilation != nil && p.compilation.CoroEntryResolutionActive()
 	if patchOriginal {
 		entry = p.mustPatchOriginalInitFunctionSymbol(f)
 	} else {
@@ -1780,7 +1780,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			}
 		}
 		var fn llssa.Expr
-		if target, ok := v.Fn.(*ssa.Function); ok && p.compilation != nil && p.compilation.EnableCoroEntryResolution {
+		if target, ok := v.Fn.(*ssa.Function); ok && p.compilation != nil && p.compilation.CoroEntryResolutionActive() {
 			// The target's own ValuePlan may require a descriptor at another
 			// producer. MakeClosure still needs the raw body entry; feeding a
 			// descriptor-backed closure to Builder.MakeClosure would reinterpret
@@ -2161,7 +2161,7 @@ func (p *context) compileFunction(v *ssa.Function) (goFn llssa.Function, pyFn ll
 }
 
 func (p *context) compileManagedFunction(v *ssa.Function) (goFn llssa.Function, pyFn llssa.PyObjRef, kind int) {
-	if p.compilation != nil && p.compilation.EnableCoroEntryResolution &&
+	if p.compilation != nil && p.compilation.CoroEntryResolutionActive() &&
 		p.compilation.CoroPlan != nil && p.compilation.EmissionUniverse != nil {
 		canonical, ok := p.compilation.EmissionUniverse.Resolve(v)
 		if !ok || canonical == nil {
@@ -2536,7 +2536,7 @@ func NewPackageExWithEmbedOptions(prog llssa.Program, ct *CallerTracking, patche
 
 func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewrites map[string]string, pkg *ssa.Package, files []*ast.File, embedMap *goembed.VarMap, opts PackageOptions) (ret llssa.Package, externs []string, err error) {
 	var prepared *preparedEmissionPackage
-	if opts.Compilation != nil && (opts.Compilation.EnableCoroEntryResolution || opts.Compilation.EnableCoroPhysicalABI) {
+	if opts.Compilation != nil && (opts.Compilation.CoroEntryResolutionActive() || opts.Compilation.CoroPhysicalABIActive()) {
 		if err := opts.Compilation.preflightCoroPlan(); err != nil {
 			return nil, nil, err
 		}
@@ -2608,7 +2608,7 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 		trackCallerFrames:  filesUseRuntimeCaller(files) || packageUsesRuntimeCaller(ct, pkg),
 		runtimeCallerFuncs: runtimeCallerFuncSet(ct, pkg),
 	}
-	if opts.Compilation != nil && opts.Compilation.EnableCoroEntryResolution {
+	if opts.Compilation != nil && opts.Compilation.CoroEntryResolutionActive() {
 		ctx.emissionUniverse = opts.Compilation.EmissionUniverse
 		ctx.emissionOwner = prepared
 	}
@@ -2626,7 +2626,7 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 	ctx.prog.SetPatch(ctx.patchType)
 	ctx.prog.SetCompileMethods(ctx.checkCompileMethods)
 	ret.SetResolveLinkname(ctx.resolveLinkname)
-	if opts.Compilation != nil && opts.Compilation.EnableCoroEntryResolution {
+	if opts.Compilation != nil && opts.Compilation.CoroEntryResolutionActive() {
 		ret.SetResolveMethodLinkname(ctx.resolveMethodLinkname)
 		ret.SetResolveMethodToken(ctx.resolveMethodToken)
 		ret.SetResolveInterfaceMethodDescriptor(ctx.resolveInterfaceMethodDescriptor)
@@ -2679,7 +2679,7 @@ func (p *context) observeCoroPlan() {
 // this path even when a different exact producer for the same SSA target is
 // descriptor-backed.
 func (p *context) compileRawFunctionValue(v *ssa.Function) llssa.Expr {
-	if p.compilation != nil && p.compilation.EnableCoroEntryResolution && p.compilation.EmissionUniverse != nil {
+	if p.compilation != nil && p.compilation.CoroEntryResolutionActive() && p.compilation.EmissionUniverse != nil {
 		canonical, ok := p.compilation.EmissionUniverse.Resolve(v)
 		if !ok {
 			panic(fmt.Errorf("coroutine entry resolution: function value %q is absent from the prepared emission universe", v.Name()))
@@ -2687,7 +2687,7 @@ func (p *context) compileRawFunctionValue(v *ssa.Function) llssa.Expr {
 		v = canonical
 	}
 	if _, _, ftype := p.funcName(v); ftype == llgoInstr {
-		if p.compilation != nil && p.compilation.EnableCoroEntryResolution && p.compilation.EmissionUniverse != nil {
+		if p.compilation != nil && p.compilation.CoroEntryResolutionActive() && p.compilation.EmissionUniverse != nil {
 			wrapper, ok := p.compilation.EmissionUniverse.intrinsicWrapper(p.goPkg, v)
 			if !ok {
 				panic(fmt.Errorf("coroutine entry resolution: intrinsic function value %q was not materialized before codegen", v.Name()))
@@ -2897,7 +2897,7 @@ func (p *context) emissionUniverseForPatch() *EmissionUniverse {
 	if p.emissionUniverse != nil {
 		return p.emissionUniverse
 	}
-	if p.compilation != nil && p.compilation.EnableCoroEntryResolution {
+	if p.compilation != nil && p.compilation.CoroEntryResolutionActive() {
 		return p.compilation.EmissionUniverse
 	}
 	return nil

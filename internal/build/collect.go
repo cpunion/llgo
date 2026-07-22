@@ -364,7 +364,7 @@ func (c *context) ensureCacheManager() *cacheManager {
 // fully represented by the package fingerprint. Active coroutine lowering is
 // fail-closed until a complete plan/ABI/target record has been installed.
 func (c *context) canUsePackageCache() bool {
-	if c.buildConf == nil || !c.buildConf.EnableCoroEntryResolution {
+	if c.buildConf == nil || !c.buildConf.coroEntryResolutionActive() {
 		return true
 	}
 	if c.clCompilation == nil || c.coroPlan == nil || c.clCompilation.CoroPlan != c.coroPlan ||
@@ -377,15 +377,15 @@ func (c *context) canUsePackageCache() bool {
 		return false
 	}
 	metadata := c.coroPlanMetadata
-	return c.clCompilation.EnableCoroEntryResolution &&
-		c.clCompilation.EnableCoroPhysicalABI == c.buildConf.EnableCoroPhysicalABI &&
-		c.clCompilation.EnableCoroChildAwait == c.buildConf.EnableCoroChildAwait &&
-		c.clCompilation.EnableCoroPlainDispatch == c.buildConf.EnableCoroPlainDispatch &&
-		c.clCompilation.EnableCoroExplicitStatusPanicABI == c.buildConf.EnableCoroExplicitStatusPanicABI &&
-		c.clCompilation.EnableCoroClosedStaticSpawn == c.buildConf.EnableCoroClosedStaticSpawn &&
-		c.clCompilation.EnableCoroProgramBootstrapRun == c.buildConf.EnableCoroProgramBootstrapRun &&
-		c.clCompilation.EnableCoroChannel == c.buildConf.EnableCoroChannel &&
-		c.clCompilation.EnableCoroWorker == c.buildConf.EnableCoroWorker &&
+	return c.clCompilation.CoroEntryResolutionActive() &&
+		c.clCompilation.CoroPhysicalABIActive() == c.buildConf.coroPhysicalABIActive() &&
+		c.clCompilation.CoroChildAwaitActive() == c.buildConf.coroChildAwaitActive() &&
+		c.clCompilation.CoroPlainDispatchActive() == c.buildConf.coroPlainDispatchActive() &&
+		c.clCompilation.CoroExplicitStatusActive() == c.buildConf.coroExplicitStatusActive() &&
+		c.clCompilation.CoroClosedStaticSpawnActive() == c.buildConf.coroClosedStaticSpawnActive() &&
+		c.clCompilation.CoroProgramBootstrapActive() == c.buildConf.coroProgramBootstrapActive() &&
+		c.clCompilation.CoroChannelActive() == c.buildConf.coroChannelActive() &&
+		c.clCompilation.CoroWorkerActive() == c.buildConf.coroWorkerActive() &&
 		c.clCompilation.CoroABI == metadata.CoroABI &&
 		c.clCompilation.SchedulerABI == metadata.SchedulerABI &&
 		c.clCompilation.PanicABI == metadata.PanicABI &&
@@ -463,7 +463,7 @@ func (c *context) tryLoadFromCache(pkg *aPackage) bool {
 	if err != nil {
 		return false
 	}
-	if c.buildConf != nil && c.buildConf.EnableCoroEntryResolution && !activeCoroCacheManifestMatches(content, pkg) {
+	if c.buildConf != nil && c.buildConf.coroEntryResolutionActive() && !activeCoroCacheManifestMatches(content, pkg) {
 		return false
 	}
 

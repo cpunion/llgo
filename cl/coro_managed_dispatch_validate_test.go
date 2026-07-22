@@ -63,7 +63,7 @@ func TestCoroManagedDispatchValidationRequiresCapability(t *testing.T) {
 		t.Fatalf("consumer gate-on validation rejected managed descriptor call: %v", err)
 	}
 	// validateCoroPlainDispatchConsumers is reached only when
-	// EnableCoroPlainDispatch is on. It must recognize the same open call rather
+	// The stackless profile is active. It must recognize the same open call rather
 	// than routing it through the legacy closed/plain-only validator.
 	if err := validateCoroPlainDispatchConsumers(plan, nil, nil, nil); err != nil {
 		t.Fatalf("descriptor consumer validation rejected managed descriptor call: %v", err)

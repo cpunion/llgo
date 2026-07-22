@@ -69,7 +69,7 @@ func testGenericIntrinsicInstanceEntry(t *testing.T, target *llssa.Target) {
 		prog = newLLSSAProgForTarget(t, target)
 	}
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,13 +103,14 @@ func testGenericIntrinsicInstanceEntry(t *testing.T, target *llssa.Target) {
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	root := pkg.ssa.Func("Root")
 	plan, err := coro.AnalyzeSSA(testProg.ssa, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
 		FunctionIDs:          functionIDs,
 		MaxPlainInstructions: 1,
+		OutcomeMode:          coro.OutcomeExplicitStatus,
 		ClassifyElidedCall: func(_ *ssa.Function, call ssa.CallInstruction) (bool, error) {
 			semantics, intrinsic, err := universe.CoroIntrinsicCallSiteSemantics(call)
 			return intrinsic && semantics.ElidesManagedCall(), err

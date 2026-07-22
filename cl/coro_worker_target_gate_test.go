@@ -71,15 +71,13 @@ func TestCoroWorkerCompilationPreflightUsesEmissionUniverseTarget(t *testing.T) 
 	prog := newLLSSAProgForTarget(t, &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"})
 	defer prog.Dispose()
 	compilation := &Compilation{
-		EnableCoroEntryResolution:     true,
-		EnableCoroPhysicalABI:         true,
-		EnableCoroChildAwait:          true,
-		EnableCoroProgramBootstrapRun: true,
-		EnableCoroWorker:              true,
 		EmissionUniverse: &EmissionUniverse{
 			prog:             prog,
-			enableCoroWorker: true,
+			coroProfile:      CoroProfileStackless,
+			coroCapabilities: CoroNativeTargetCapabilities(),
 		},
+		CoroProfile:            CoroProfileStackless,
+		CoroTargetCapabilities: CoroNativeTargetCapabilities(),
 	}
 	err := compilation.preflightCoroPlan()
 	if err == nil || !strings.Contains(err.Error(), `GOARCH "wasm"`) {
@@ -94,11 +92,13 @@ func TestCoroWorkerCompilationBindsExactCodegenProgram(t *testing.T) {
 	otherNative := newLLSSAProgForTarget(t, &llssa.Target{GOOS: "linux", GOARCH: "amd64"})
 	defer otherNative.Dispose()
 	compilation := &Compilation{
-		EnableCoroWorker: true,
 		EmissionUniverse: &EmissionUniverse{
 			prog:             native,
-			enableCoroWorker: true,
+			coroProfile:      CoroProfileStackless,
+			coroCapabilities: CoroNativeTargetCapabilities(),
 		},
+		CoroProfile:            CoroProfileStackless,
+		CoroTargetCapabilities: CoroNativeTargetCapabilities(),
 	}
 	if err := compilation.validateCoroWorkerCodegenProgram(native); err != nil {
 		t.Fatalf("exact native program rejected: %v", err)

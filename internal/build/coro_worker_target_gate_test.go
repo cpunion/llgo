@@ -25,15 +25,9 @@ import (
 
 func TestCoroWorkerRequiresNativeRuntimeAdapter(t *testing.T) {
 	base := Config{
-		BuildMode:                     BuildModeExe,
-		Goos:                          "linux",
-		Goarch:                        "amd64",
-		EnableCoroEntryResolution:     true,
-		EnableCoroPhysicalABI:         true,
-		EnableCoroChildAwait:          true,
-		EnableCoroProgramBootstrapABI: true,
-		EnableCoroProgramBootstrapRun: true,
-		EnableCoroWorker:              true,
+		BuildMode: BuildModeExe,
+		Goos:      "linux",
+		Goarch:    "amd64", CoroProfile: CoroProfileStackless,
 	}
 	if err := validateCoroProgramBootstrapConfig(&base); err != nil {
 		t.Fatalf("native worker adapter rejected: %v", err)
@@ -62,16 +56,9 @@ func TestCoroWorkerRequiresNativeRuntimeAdapter(t *testing.T) {
 
 func TestCoroNativeFleetRequiresCompleteNativeRuntime(t *testing.T) {
 	base := Config{
-		BuildMode:                     BuildModeExe,
-		Goos:                          "linux",
-		Goarch:                        "amd64",
-		EnableCoroEntryResolution:     true,
-		EnableCoroPhysicalABI:         true,
-		EnableCoroChildAwait:          true,
-		EnableCoroProgramBootstrapABI: true,
-		EnableCoroProgramBootstrapRun: true,
-		EnableCoroWorker:              true,
-		EnableCoroNativeFleet:         true,
+		BuildMode: BuildModeExe,
+		Goos:      "linux",
+		Goarch:    "amd64", CoroProfile: CoroProfileStackless,
 	}
 	if err := validateCoroProgramBootstrapConfig(&base); err != nil {
 		t.Fatalf("native fleet rejected: %v", err)
@@ -83,10 +70,10 @@ func TestCoroNativeFleetRequiresCompleteNativeRuntime(t *testing.T) {
 		set  func(*Config)
 	}{
 		{name: "program", want: "runnable program bootstrap", set: func(conf *Config) {
-			conf.EnableCoroProgramBootstrapRun = false
+			conf.CoroProfile = CoroProfileNone
 		}},
 		{name: "worker", want: "bounded native worker capability", set: func(conf *Config) {
-			conf.EnableCoroWorker = false
+			conf.CoroProfile = CoroProfileNone
 		}},
 		{name: "32-bit", want: "64-bit native Darwin/Linux timer reactor", set: func(conf *Config) {
 			conf.Goarch = "arm"

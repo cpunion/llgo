@@ -45,16 +45,26 @@ const CoroFrameRetentionTimerABIV1 = coro.FrameRetentionTimerABIV1
 // and focused timer-only inputs, while new runtime profiles use ParkABIV2.
 const CoroFrameRetentionParkABIV2 = coro.FrameRetentionParkABIV2
 
+const (
+	CoroProfileNone      = coro.RuntimeProfileNone
+	CoroProfileStackless = coro.RuntimeProfileStackless
+)
+
+func CoroNativeTargetCapabilities() coro.TargetCapabilities {
+	return coro.NewTargetCapabilities(true, true)
+}
+
 // Compilation contains immutable inputs shared by every package compiled as
 // part of one frontend compilation. Pass it by pointer and do not copy it after
-// first use. A CoroPlan remains report-only unless EnableCoroEntryResolution is
-// explicitly set. The prepared emission universe freezes every function that
+// first use. A CoroPlan remains report-only unless CoroProfileStackless is
+// selected. The prepared emission universe freezes every function that
 // codegen may materialize, and any later out-of-universe lookup fails closed at
 // its first symbol resolution.
 type Compilation struct {
-	CoroPlan                  *coro.SSAPlan
-	CoroPlanObserver          CoroPlanObserver
-	EnableCoroEntryResolution bool
+	CoroPlan               *coro.SSAPlan
+	CoroPlanObserver       CoroPlanObserver
+	CoroProfile            coro.RuntimeProfile
+	CoroTargetCapabilities coro.TargetCapabilities
 	// CoroPlanDigest and the ABI identities are populated by the build driver
 	// after whole-program analysis and participate in every package archive
 	// fingerprint. They are required before an active compilation may register
@@ -66,46 +76,6 @@ type Compilation struct {
 	SchedulerABI            string
 	PanicABI                string
 	FuncRepABI              string
-	// EnableCoroExplicitStatusPanicABI selects the target-wide explicit-status
-	// panic identity. The first lowering slice accepts only exact cleanup-free
-	// physical coroutine bodies whose explicit panic payload can outlive frame
-	// destruction; every wider hidden-outcome or unwind shape remains fail-closed.
-	EnableCoroExplicitStatusPanicABI bool
-	// EnableCoroPhysicalABI permits the conservative leaf-only coroutine ABI
-	// lowering implemented by the current experimental slice. It requires entry
-	// resolution and does not by itself enable await, dispatch, roots, or a
-	// scheduler.
-	EnableCoroPhysicalABI bool
-	// EnableCoroChildAwait permits the narrowly-scoped static child handoff ABI.
-	// It requires the physical ABI and emits typed factories for explicit async
-	// roots. A generated parent only publishes an initial-suspended child and
-	// suspends itself; a matching scheduler owns every resume and destroy
-	// operation.
-	EnableCoroChildAwait bool
-	// EnableCoroPlainDispatch permits the first descriptor/context function-value
-	// ABI. Only a no-capture, non-suspending plain target at an ordinary scalar
-	// call is accepted by this capability; every wider dynamic form remains an
-	// unsupported preflight error.
-	EnableCoroPlainDispatch bool
-	// EnableCoroClosedStaticSpawn permits only the compilation-plan-certified
-	// closed static spawn transaction. The physical parent G is passed to both
-	// runtime hooks; no TLS lookup or indirect user callback is permitted.
-	EnableCoroClosedStaticSpawn bool
-	// EnableCoroProgramBootstrapRun selects the program-root scheduler ABI for
-	// package identities. The factory itself lives in the uncached entry module,
-	// but every linked archive must agree with the runtime driver contract.
-	EnableCoroProgramBootstrapRun bool
-	// EnableCoroChannel enables the exact single blocking send/receive lowering
-	// on the runnable scheduler. It requires PhysicalABIV1 program bootstrap and
-	// is independently fingerprinted from child-await, spawn, and timer support.
-	EnableCoroChannel bool
-	// EnableCoroWorker enables the bounded ForeignWait operation recipe used by
-	// exact llgo.syscall sites with a frozen workeraddr target/dataflow
-	// certificate and exact //llgo:coro worker C declarations through typed
-	// word-transport thunks. It requires the runnable
-	// scheduler; the blocking foreign call executes only on a fixed native worker
-	// pool.
-	EnableCoroWorker bool
 	// CoroFrameRetentionABI selects one compiler/runtime-owned contract under
 	// which x/tools Heap Allocs may be re-proved as current LLVM coroutine-frame
 	// storage. The zero value preserves the ordinary managed-allocation rule.
@@ -125,6 +95,64 @@ type Compilation struct {
 	coroFactsValidationErr   error
 	coroClosedInterfacePlain *coroClosedInterfacePlainPlan
 	coroManagedInterface     *coroManagedInterfaceDispatchPlan
+}
+
+// CoroProfileActive reports whether this compilation owns the complete
+// stackless architecture.
+func (c *Compilation) CoroProfileActive() bool {
+	return c != nil && c.CoroProfile.Active()
+}
+
+func (c *Compilation) CoroEntryResolutionActive() bool {
+	return c.CoroProfileActive()
+}
+
+func (c *Compilation) CoroPhysicalABIActive() bool {
+	return c.CoroProfileActive()
+}
+
+func (c *Compilation) CoroChildAwaitActive() bool {
+	return c.CoroProfileActive()
+}
+
+func (c *Compilation) CoroPlainDispatchActive() bool {
+	return c.CoroProfileActive()
+}
+
+func (c *Compilation) CoroClosedStaticSpawnActive() bool {
+	return c.CoroProfileActive()
+}
+
+func (c *Compilation) CoroProgramBootstrapActive() bool {
+	return c.CoroProfileActive()
+}
+
+func (c *Compilation) CoroChannelActive() bool {
+	return c.CoroProfileActive()
+}
+
+func (c *Compilation) CoroExplicitStatusActive() bool {
+	return c.CoroProfileActive()
+}
+
+func (c *Compilation) CoroWorkerActive() bool {
+	return c != nil && c.CoroProfile.Active() && c.CoroTargetCapabilities.Worker()
+}
+
+func (c *Compilation) validateCoroProfile() error {
+	if c == nil {
+		return nil
+	}
+	if !c.CoroProfile.Valid() {
+		return fmt.Errorf("unknown coroutine runtime profile %d", c.CoroProfile)
+	}
+	if !c.CoroTargetCapabilities.Valid() {
+		return fmt.Errorf("invalid coroutine target capability set %d", c.CoroTargetCapabilities)
+	}
+	if !c.CoroProfile.Active() && c.CoroTargetCapabilities != 0 {
+		return fmt.Errorf("coroutine target capabilities require the stackless runtime profile")
+	}
+	return nil
 }
 
 func (c *Compilation) validateCoroCacheIdentity() error {
@@ -171,89 +199,40 @@ func (c *Compilation) validateCoroABIIdentity(required bool) error {
 	if c == nil {
 		return fmt.Errorf("coroutine ABI validation requires a compilation")
 	}
-	wantCoroABI := coro.EntryResolutionABIV0
-	if c.EnableCoroPhysicalABI {
-		wantCoroABI = coro.PhysicalABIV0
+	if err := c.validateCoroProfile(); err != nil {
+		return err
 	}
-	if c.EnableCoroChildAwait {
-		wantCoroABI = coro.PhysicalABIV1
+	if !c.CoroProfile.Active() {
+		if !required && c.CoroABI == "" && c.SchedulerABI == "" && c.PanicABI == "" && c.FuncRepABI == "" && c.CoroFrameRetentionABI == "" {
+			return nil
+		}
+		return fmt.Errorf("coroutine ABI identity requires the stackless runtime profile")
 	}
-	wantSchedulerABI := coro.SchedulerNoneABIV0
-	if c.EnableCoroChildAwait {
-		wantSchedulerABI = coro.SchedulerChildAwaitABIV0
+	return c.validateStacklessCoroABIIdentity(required)
+}
+
+func (c *Compilation) validateStacklessCoroABIIdentity(required bool) error {
+	if err := c.validateCoroProfile(); err != nil {
+		return err
 	}
-	if c.EnableCoroChannel {
-		if !c.EnableCoroChildAwait || !c.EnableCoroProgramBootstrapRun {
-			return fmt.Errorf("coroutine channel lowering requires runnable PhysicalABIV1 program-bootstrap lowering")
-		}
-		wantSchedulerABI = coro.SchedulerProgramBootstrapChannelABIV0
-	}
-	if c.EnableCoroWorker {
-		if !c.EnableCoroChildAwait || !c.EnableCoroProgramBootstrapRun {
-			return fmt.Errorf("coroutine worker lowering requires runnable PhysicalABIV1 program-bootstrap lowering")
-		}
-		if c.EnableCoroChannel {
-			wantSchedulerABI = coro.SchedulerProgramBootstrapChannelWorkerABIV0
-		} else {
-			wantSchedulerABI = coro.SchedulerProgramBootstrapWorkerABIV0
-		}
-	}
-	if c.EnableCoroClosedStaticSpawn {
-		if !c.EnableCoroChildAwait {
-			return fmt.Errorf("coroutine closed static spawn requires child-await lowering")
-		}
-		if !c.EnableCoroProgramBootstrapRun {
-			return fmt.Errorf("coroutine closed static spawn requires the runnable program-bootstrap v2 scheduler")
-		}
-		if c.EnableCoroChannel && c.EnableCoroWorker {
-			wantSchedulerABI = coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0
-		} else if c.EnableCoroChannel {
-			wantSchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
-		} else if c.EnableCoroWorker {
-			wantSchedulerABI = coro.SchedulerProgramBootstrapWorkerClosedStaticSpawnABIV0
-		} else {
-			wantSchedulerABI = coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0
-		}
-	} else if c.EnableCoroProgramBootstrapRun {
-		if !c.EnableCoroChildAwait {
-			return fmt.Errorf("coroutine program bootstrap runtime requires child-await lowering")
-		}
-		if !c.EnableCoroChannel && !c.EnableCoroWorker {
-			wantSchedulerABI = coro.SchedulerProgramBootstrapABIV2
-		}
-	}
-	if c.EnableCoroPlainDispatch && !c.EnableCoroEntryResolution {
-		return fmt.Errorf("coroutine plain dispatch requires coroutine entry resolution")
-	}
-	if c.EnableCoroExplicitStatusPanicABI && !c.EnableCoroEntryResolution {
-		return fmt.Errorf("coroutine explicit-status panic ABI requires coroutine entry resolution")
+	wantScheduler := coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	if c.CoroWorkerActive() {
+		wantScheduler = coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0
 	}
 	switch c.CoroFrameRetentionABI {
-	case "":
-	case CoroFrameRetentionTimerABIV1, CoroFrameRetentionParkABIV2:
-		if !c.EnableCoroEntryResolution || !c.EnableCoroPhysicalABI || !c.EnableCoroChildAwait || !c.EnableCoroProgramBootstrapRun {
-			return fmt.Errorf("coroutine frame-retention ABI %q requires runnable PhysicalABIV1 program-bootstrap lowering", c.CoroFrameRetentionABI)
-		}
+	case "", CoroFrameRetentionTimerABIV1, CoroFrameRetentionParkABIV2:
 	default:
 		return fmt.Errorf("unknown coroutine frame-retention ABI %q", c.CoroFrameRetentionABI)
-	}
-	wantPanicABI := coro.PanicLegacyABIV0
-	if c.EnableCoroExplicitStatusPanicABI {
-		wantPanicABI = coro.PanicExplicitStatusABIV0
-	}
-	wantFuncRepABI := coro.FuncRepABIV0
-	if c.EnableCoroPlainDispatch {
-		wantFuncRepABI = coro.FuncRepABIV1
 	}
 	checks := []struct {
 		name string
 		got  string
 		want string
 	}{
-		{"coroutine", c.CoroABI, wantCoroABI},
-		{"scheduler", c.SchedulerABI, wantSchedulerABI},
-		{"panic", c.PanicABI, wantPanicABI},
-		{"function representation", c.FuncRepABI, wantFuncRepABI},
+		{"coroutine", c.CoroABI, coro.PhysicalABIV1},
+		{"scheduler", c.SchedulerABI, wantScheduler},
+		{"panic", c.PanicABI, coro.PanicExplicitStatusABIV0},
+		{"function representation", c.FuncRepABI, coro.FuncRepABIV1},
 	}
 	if !required {
 		populated := false

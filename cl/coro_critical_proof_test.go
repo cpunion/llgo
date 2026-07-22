@@ -143,7 +143,7 @@ func Root() { marker() }
 `)
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	_, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	_, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err == nil || !strings.Contains(err.Error(), "critical marker") || !strings.Contains(err.Error(), "cannot be materialized as a function value") {
 		t.Fatalf("critical marker materialization error = %v", err)
 	}
@@ -154,7 +154,7 @@ func proveCoroCriticalFixture(t *testing.T, source string) (*coroCriticalProof, 
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func proveCoroCriticalFixture(t *testing.T, source string) (*coroCriticalProof, 
 	root := ssaPkg.Func("Root")
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,

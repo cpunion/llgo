@@ -46,13 +46,13 @@ func testProductionNativeWorkerCompletionPlan(t *testing.T, compilerTags []strin
 	verified := errors.New("native worker completion plan verified")
 	conf := NewDefaultConf(ModeGen)
 	conf.ForceRebuild = true
-	conf.EnableCoroEntryResolution = true
-	conf.EnableCoroPhysicalABI = true
-	conf.EnableCoroChildAwait = true
-	conf.EnableCoroPlainDispatch = true
-	conf.EnableCoroProgramBootstrapABI = true
-	conf.EnableCoroProgramBootstrapRun = true
-	conf.EnableCoroWorker = true
+	conf.CoroProfile = CoroProfileStackless
+	conf.CoroProfile = CoroProfileStackless
+	conf.CoroProfile = CoroProfileStackless
+	conf.CoroProfile = CoroProfileStackless
+	conf.CoroProfile = CoroProfileStackless
+	conf.CoroProfile = CoroProfileStackless
+	conf.CoroProfile = CoroProfileStackless
 	conf.compilerBuildTags = append(conf.compilerBuildTags, compilerTags...)
 	conf.CoroPlanBuilder = func(input CoroPlanInput) (*coro.SSAPlan, error) {
 		plan, err := input.Analyze(nil, coro.SSAConfig{
@@ -181,11 +181,9 @@ func __llgo_coro_native_worker_complete_v1(uint32, uint32, uintptr, uintptr, uin
 func install() {}
 `)
 		fixture.ctx.buildConf = &Config{
-			BuildMode:                     BuildModeExe,
-			Goos:                          "linux",
-			Goarch:                        "386",
-			EnableCoroChildAwait:          true,
-			EnableCoroProgramBootstrapRun: true,
+			BuildMode: BuildModeExe,
+			Goos:      "linux",
+			Goarch:    "386", CoroProfile: CoroProfileStackless,
 		}
 		assertCoroWorkerCompletionExcluded(t, fixture, false)
 	})
@@ -209,12 +207,9 @@ func __llgo_coro_native_worker_complete_v1(uint32, uint32, uintptr, uintptr, uin
 func install() {}
 `)
 		fixture.ctx.buildConf = &Config{
-			BuildMode:                     BuildModeExe,
-			Goos:                          "wasip1",
-			Goarch:                        "wasm",
-			EnableCoroChildAwait:          true,
-			EnableCoroProgramBootstrapRun: true,
-			EnableCoroWorker:              true,
+			BuildMode: BuildModeExe,
+			Goos:      "wasip1",
+			Goarch:    "wasm", CoroProfile: CoroProfileStackless,
 		}
 		assertCoroWorkerCompletionExcluded(t, fixture, true)
 	})

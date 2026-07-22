@@ -45,7 +45,7 @@ func root(value int) int { return Foreign(value) + Wrapper(value) }
 	testProg.ssa.Build()
 	prog := llssa.NewProgram(nil)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{
 		SSA: pkg.ssa, Files: []*ast.File{pkg.file}, Identity: "callable-contract-owner",
 	}})
 	if err != nil {
@@ -113,7 +113,7 @@ func root(value int) int { return Foreign(value) }
 		testProg.ssa.Build()
 		prog := llssa.NewProgram(nil)
 		defer prog.Dispose()
-		universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{
+		universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{
 			SSA: pkg.ssa, Files: []*ast.File{pkg.file}, Identity: "callable-inline-owner",
 		}})
 		if err != nil {
@@ -156,7 +156,7 @@ func implementation(value int) int { return value + 1 }
 	testProg.ssa.Build()
 	prog := llssa.NewProgram(nil)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{
 		{SSA: declaration.ssa, Files: []*ast.File{declaration.file}},
 		{SSA: definition.ssa, Files: []*ast.File{definition.file}},
 	})
@@ -201,7 +201,7 @@ func root() { _ = Missing(1) }
 			testProg.ssa.Build()
 			prog := llssa.NewProgram(nil)
 			defer prog.Dispose()
-			_, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{
+			_, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{
 				SSA: pkg.ssa, Files: []*ast.File{pkg.file}, Identity: "bad-callable-owner",
 			}})
 			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
@@ -232,7 +232,7 @@ func root() { _ = DifferentABI("") }
 	testProg.ssa.Build()
 	prog := llssa.NewProgram(nil)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{
 		{SSA: firstPkg.ssa, Files: []*ast.File{firstPkg.file}, Identity: "callable-identity-repeat-first"},
 		{SSA: secondPkg.ssa, Files: []*ast.File{secondPkg.file}, Identity: "callable-identity-repeat-second"},
 		{SSA: differentPkg.ssa, Files: []*ast.File{differentPkg.file}, Identity: "callable-identity-repeat-different"},
@@ -296,7 +296,7 @@ func implementation(value int) int { return value + 1 }
 	testProg.ssa.Build()
 	prog := llssa.NewProgram(nil)
 	defer prog.Dispose()
-	_, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{
+	_, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{
 		{SSA: declaration.ssa, Files: []*ast.File{declaration.file}},
 		{SSA: definition.ssa, Files: []*ast.File{definition.file}},
 	})

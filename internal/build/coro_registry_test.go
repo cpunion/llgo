@@ -56,11 +56,8 @@ func TestCoroProgramManifestHashV1StableAndComplete(t *testing.T) {
 	ctx := &context{
 		prog: prog,
 		buildConf: &Config{
-			Goos:                      "linux",
-			Goarch:                    "amd64",
-			EnableCoroEntryResolution: true,
-			EnableCoroPhysicalABI:     true,
-			EnableCoroChildAwait:      true,
+			Goos:   "linux",
+			Goarch: "amd64", CoroProfile: CoroProfileStackless,
 		},
 	}
 	a := coroRootPackageAnchorPrefixV1 + "11111111111111111111111111111111"
@@ -76,12 +73,12 @@ func TestCoroProgramManifestHashV1StableAndComplete(t *testing.T) {
 	if first != again {
 		t.Fatalf("manifest hash is unstable: %x != %x", first, again)
 	}
-	ctx.buildConf.EnableCoroExplicitStatusPanicABI = true
+	ctx.buildConf.CoroProfile = CoroProfileStackless
 	explicitStatus, err := coroProgramManifestHashV1(ctx, []string{a, b})
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx.buildConf.EnableCoroExplicitStatusPanicABI = false
+	ctx.buildConf.CoroProfile = CoroProfileNone
 	if explicitStatus == first {
 		t.Fatal("manifest hash ignored the active panic ABI")
 	}

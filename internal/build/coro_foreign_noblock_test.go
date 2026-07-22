@@ -59,8 +59,8 @@ func OrdinaryCaller(n uintptr) { Memcpy(n) }
 		foreignNoBlock:     emission.CoroForeignNoBlockCertificate,
 	}
 	functionIDs := emission.FunctionIDConfig()
-	functionIDs.CoroABI = coro.EntryResolutionABIV0
-	functionIDs.SchedulerABI = coro.SchedulerNoneABIV0
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	roots := coro.Roots{
 		{Function: ssaPkg.Func("SafeCaller"), Demand: coro.SyncDemand},
@@ -138,8 +138,8 @@ func OrdinaryCaller(n uintptr) { Memcpy(n) }
 		t.Fatalf("uncertified effective Safe plan = %+v, want same %+v", got, safePlan)
 	}
 	metadata := coro.PlanDigestMetadata{
-		CoroABI: coro.EntryResolutionABIV0, SchedulerABI: coro.SchedulerNoneABIV0,
-		PanicABI: coro.PanicLegacyABIV0, FuncRepABI: coro.FuncRepABIV0,
+		CoroABI: coro.PhysicalABIV1, SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+		PanicABI: coro.PanicExplicitStatusABIV0, FuncRepABI: coro.FuncRepABIV1,
 		LoweringFactsSchema: coro.LoweringFactsSchema, LoweringFactsDigest: strings.Repeat("0", 64),
 		TargetTriple: "x86_64-unknown-linux-gnu", PointerBits: 64,
 		Endianness: "little", DataLayout: "e-p:64:64",

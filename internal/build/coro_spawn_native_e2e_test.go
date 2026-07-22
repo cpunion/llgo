@@ -264,7 +264,7 @@ func buildCoroSpawnNativeE2EUserSource(
 	ssaPkg, files := buildCoroPlanTestPackage(t, coroSpawnNativeE2EPackage, source, nil)
 	universe, err := cl.PrepareEmissionUniverseWithOptions(prog, nil, []cl.EmissionPackage{{
 		SSA: ssaPkg, Files: files, Identity: coroSpawnNativeE2EPackage,
-	}}, cl.EmissionUniverseOptions{EnableCoroChannel: enableChannel})
+	}}, cl.EmissionUniverseOptions{CoroProfile: cl.CoroProfileStackless})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +278,7 @@ func buildCoroSpawnNativeE2EUserSource(
 	threadIDFn := ssaPkg.Func("threadID")
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	schedulerABI := coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0
+	schedulerABI := coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	if enableChannel {
 		schedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	}
@@ -311,18 +311,13 @@ func buildCoroSpawnNativeE2EUserSource(
 		t.Fatal(err)
 	}
 	compilation := &cl.Compilation{
-		CoroPlan:                      plan,
-		EnableCoroEntryResolution:     true,
-		EnableCoroPhysicalABI:         true,
-		EnableCoroChildAwait:          true,
-		EnableCoroChannel:             enableChannel,
-		EnableCoroClosedStaticSpawn:   true,
-		EnableCoroProgramBootstrapRun: true,
-		CoroABI:                       coro.PhysicalABIV1,
-		SchedulerABI:                  schedulerABI,
-		PanicABI:                      coro.PanicLegacyABIV0,
-		FuncRepABI:                    coro.FuncRepABIV0,
-		EmissionUniverse:              universe,
+		CoroPlan: plan,
+
+		CoroABI:          coro.PhysicalABIV1,
+		SchedulerABI:     schedulerABI,
+		PanicABI:         coro.PanicExplicitStatusABIV0,
+		FuncRepABI:       coro.FuncRepABIV1,
+		EmissionUniverse: universe, CoroProfile: cl.CoroProfileStackless,
 	}
 	pkg, _, err := cl.NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
@@ -352,16 +347,9 @@ func buildCoroSpawnNativeE2EUserSource(
 func buildCoroSpawnNativeE2EEntry(t *testing.T, prog llssa.Program, temp, anchor string) string {
 	t.Helper()
 	conf := &Config{
-		BuildMode:                     BuildModeExe,
-		Goos:                          runtime.GOOS,
-		Goarch:                        runtime.GOARCH,
-		EnableCoroEntryResolution:     true,
-		EnableCoroPhysicalABI:         true,
-		EnableCoroChildAwait:          true,
-		EnableCoroChannel:             true,
-		EnableCoroClosedStaticSpawn:   true,
-		EnableCoroProgramBootstrapABI: true,
-		EnableCoroProgramBootstrapRun: true,
+		BuildMode: BuildModeExe,
+		Goos:      runtime.GOOS,
+		Goarch:    runtime.GOARCH, CoroProfile: CoroProfileStackless,
 	}
 	ctx := &context{prog: prog, buildConf: conf}
 	bootstrap := &coroProgramBootstrapV1{

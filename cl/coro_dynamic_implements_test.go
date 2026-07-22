@@ -45,7 +45,7 @@ func Materialize() Type { return rtype{} }
 	testProg.ssa.Build()
 	prog := ssatest.NewProgram(t, nil)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverse(prog, Patches{
+	universe, err := prepareStacklessEmissionUniverse(prog, Patches{
 		"example.com/emission/p": {Alt: alt.ssa, Types: typepatch.Clone(alt.types)},
 	}, []EmissionPackage{{
 		SSA: original.ssa, Files: []*ast.File{original.file, alt.file},

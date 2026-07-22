@@ -42,7 +42,7 @@ func Dual(value uint32) uint32 { return RawHelper(value) }
 func Parent(value uint32) uint32 { return Dual(value) }
 `)
 	prog := newLLSSAProg(t)
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		prog.Dispose()
 		t.Fatal(err)
@@ -55,7 +55,7 @@ func Parent(value uint32) uint32 { return Dual(value) }
 	parent, dual, helper := ssaPkg.Func("Parent"), ssaPkg.Func("Dual"), ssaPkg.Func("RawHelper")
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{
 		{Function: parent, Demand: coro.AsyncDemand},
@@ -134,7 +134,7 @@ func RawHelper(value uint32) uint32 {
 func Host(value uint32) uint32 { return RawHelper(value) }
 `)
 	prog := newLLSSAProg(t)
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		prog.Dispose()
 		t.Fatal(err)
@@ -147,7 +147,7 @@ func Host(value uint32) uint32 { return RawHelper(value) }
 	host, helper := ssaPkg.Func("Host"), ssaPkg.Func("RawHelper")
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{
 		Function: host, RawPlainDemand: true,
@@ -222,7 +222,7 @@ func Host(fn func(int) int, value int) int {
 }
 `)
 	prog := newLLSSAProg(t)
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		prog.Dispose()
 		t.Fatal(err)
@@ -236,7 +236,7 @@ func Host(fn func(int) int, value int) int {
 	dynamicCall := coroPlainDispatchOnlyDynamicCall(t, host)
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{
 		Function: host, RawPlainDemand: true,
@@ -284,7 +284,7 @@ func Host(fn func(int) int, value int) int {
 
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
-	compilation.EnableCoroPlainDispatch = true
+	compilation.CoroProfile = CoroProfileStackless
 	compilation.FuncRepABI = coro.FuncRepABIV1
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
@@ -327,7 +327,7 @@ func implementation(value uint32) uint32 { return value + 1 }
 `)
 	testProg.ssa.Build()
 	prog := newLLSSAProg(t)
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{
 		{SSA: declarationPkg.ssa, Files: []*ast.File{declarationPkg.file}},
 		{SSA: definitionPkg.ssa, Files: []*ast.File{definitionPkg.file}},
 	})
@@ -355,7 +355,7 @@ func implementation(value uint32) uint32 { return value + 1 }
 	root := declarationPkg.ssa.Func("Root")
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(testProg.ssa, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
@@ -455,7 +455,7 @@ func Unpaired(value uint32) uint32 { return value + 1 }
 `)
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -502,7 +502,7 @@ func Host(value uint32) uint32 { return RawHelper(value) }
 func Parent(value uint32) uint32 { return Host(value) }
 `)
 	prog := newLLSSAProg(t)
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		prog.Dispose()
 		t.Fatal(err)
@@ -515,7 +515,7 @@ func Parent(value uint32) uint32 { return Host(value) }
 	parent, host, helper := ssaPkg.Func("Parent"), ssaPkg.Func("Host"), ssaPkg.Func("RawHelper")
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{
 		{Function: parent, Demand: coro.AsyncDemand},
@@ -651,7 +651,7 @@ func Parent(seed *Box, value int) int { return Dual(seed, value) }
 		t.Fatal("bound-method closure has no exact Add target")
 	}
 	prog := newLLSSAProg(t)
-	universe, err := PrepareEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
+	universe, err := prepareStacklessEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
 		{SSA: runtimePkg.ssa, Files: []*ast.File{runtimePkg.file}},
 		{SSA: ssaPkg, Files: files},
 	}, EmissionUniverseOptions{CompleteRuntimeABI: true})
@@ -666,7 +666,7 @@ func Parent(seed *Box, value int) int { return Dual(seed, value) }
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{
 		{Function: parent, Demand: coro.AsyncDemand},
@@ -706,8 +706,8 @@ func Parent(seed *Box, value int) int { return Dual(seed, value) }
 
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
-	compilation.EnableCoroPlainDispatch = true
-	compilation.EnableCoroExplicitStatusPanicABI = true
+	compilation.CoroProfile = CoroProfileStackless
+	compilation.CoroProfile = CoroProfileStackless
 	compilation.FuncRepABI = coro.FuncRepABIV1
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
 	pkg, _, err := NewPackageExWithEmbedOptions(

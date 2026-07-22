@@ -472,7 +472,7 @@ func compileCoroStaticSpawnTransportFixture(t *testing.T, target *llssa.Target) 
 	// Mirror production import ordering: //llgo:type metadata must be installed
 	// before the emission universe freezes the C function-value transport.
 	ParsePkgSyntax(prog, ssaPkg.Pkg, files)
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		prog.Dispose()
 		t.Fatal(err)
@@ -515,7 +515,7 @@ func compileCoroStaticSpawnTransportFixture(t *testing.T, target *llssa.Target) 
 
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	config := coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
@@ -560,9 +560,9 @@ func compileCoroStaticSpawnTransportFixture(t *testing.T, target *llssa.Target) 
 
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
-	compilation.EnableCoroClosedStaticSpawn = true
-	compilation.EnableCoroPlainDispatch = true
-	compilation.SchedulerABI = coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0
+	compilation.CoroProfile = CoroProfileStackless
+	compilation.CoroProfile = CoroProfileStackless
+	compilation.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	compilation.FuncRepABI = coro.FuncRepABIV1
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
@@ -586,7 +586,7 @@ func compileCoroClosedStaticMethodSpawnFixture(t *testing.T, target *llssa.Targe
 	} else {
 		prog = newLLSSAProgForTarget(t, target)
 	}
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		prog.Dispose()
 		t.Fatal(err)
@@ -616,7 +616,7 @@ func compileCoroClosedStaticMethodSpawnFixture(t *testing.T, target *llssa.Targe
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: parent, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
@@ -635,9 +635,9 @@ func compileCoroClosedStaticMethodSpawnFixture(t *testing.T, target *llssa.Targe
 	}
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
-	compilation.EnableCoroClosedStaticSpawn = true
-	compilation.EnableCoroPlainDispatch = true
-	compilation.SchedulerABI = coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0
+	compilation.CoroProfile = CoroProfileStackless
+	compilation.CoroProfile = CoroProfileStackless
+	compilation.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	compilation.FuncRepABI = coro.FuncRepABIV1
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
@@ -661,7 +661,7 @@ func compileCoroManagedDispatchSpawnFixture(t *testing.T, target *llssa.Target) 
 	} else {
 		prog = newLLSSAProgForTarget(t, target)
 	}
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		prog.Dispose()
 		t.Fatal(err)
@@ -709,7 +709,7 @@ func compileCoroManagedDispatchSpawnFixture(t *testing.T, target *llssa.Target) 
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{
 		{Function: makeCallback, Demand: coro.SyncDemand},
@@ -741,10 +741,10 @@ func compileCoroManagedDispatchSpawnFixture(t *testing.T, target *llssa.Target) 
 	}
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
-	compilation.EnableCoroClosedStaticSpawn = true
-	compilation.EnableCoroPlainDispatch = true
-	compilation.EnableCoroExplicitStatusPanicABI = true
-	compilation.SchedulerABI = coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0
+	compilation.CoroProfile = CoroProfileStackless
+	compilation.CoroProfile = CoroProfileStackless
+	compilation.CoroProfile = CoroProfileStackless
+	compilation.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
 	compilation.FuncRepABI = coro.FuncRepABIV1
 	pkg, _, err := NewPackageExWithEmbedOptions(
@@ -769,7 +769,7 @@ func compileCoroClosedStaticSpawnFixture(t *testing.T, target *llssa.Target) (
 	} else {
 		prog = newLLSSAProgForTarget(t, target)
 	}
-	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
 	if err != nil {
 		prog.Dispose()
 		t.Fatal(err)
@@ -782,7 +782,7 @@ func compileCoroClosedStaticSpawnFixture(t *testing.T, target *llssa.Target) (
 	parent, plain, async := ssaPkg.Func("Parent"), ssaPkg.Func("Plain"), ssaPkg.Func("Async")
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: parent, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
@@ -800,17 +800,13 @@ func compileCoroClosedStaticSpawnFixture(t *testing.T, target *llssa.Target) (
 		t.Fatal(err)
 	}
 	compilation := &Compilation{
-		CoroPlan:                      plan,
-		EmissionUniverse:              universe,
-		EnableCoroEntryResolution:     true,
-		EnableCoroPhysicalABI:         true,
-		EnableCoroChildAwait:          true,
-		EnableCoroClosedStaticSpawn:   true,
-		EnableCoroProgramBootstrapRun: true,
-		CoroABI:                       coro.PhysicalABIV1,
-		SchedulerABI:                  coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0,
-		PanicABI:                      coro.PanicLegacyABIV0,
-		FuncRepABI:                    coro.FuncRepABIV0,
+		CoroPlan:         plan,
+		EmissionUniverse: universe,
+
+		CoroABI:      coro.PhysicalABIV1,
+		SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+		PanicABI:     coro.PanicExplicitStatusABIV0,
+		FuncRepABI:   coro.FuncRepABIV1, CoroProfile: CoroProfileStackless,
 	}
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
@@ -824,17 +820,8 @@ func compileCoroClosedStaticSpawnFixture(t *testing.T, target *llssa.Target) (
 }
 
 func TestCoroClosedStaticSpawnCompilationCapabilityFailsClosed(t *testing.T) {
-	compilation := &Compilation{EnableCoroClosedStaticSpawn: true}
-	if err := compilation.preflightCoroPlan(); err == nil || !strings.Contains(err.Error(), "requires coroutine child await") {
-		t.Fatalf("capability dependency error = %v", err)
-	}
-	compilation = &Compilation{
-		EnableCoroEntryResolution:   true,
-		EnableCoroPhysicalABI:       true,
-		EnableCoroChildAwait:        true,
-		EnableCoroClosedStaticSpawn: true,
-	}
-	if err := compilation.preflightCoroPlan(); err == nil || !strings.Contains(err.Error(), "requires runnable program bootstrap v2") {
-		t.Fatalf("runnable-bootstrap dependency error = %v", err)
+	compilation := &Compilation{CoroProfile: CoroProfileStackless}
+	if !compilation.CoroClosedStaticSpawnActive() || !compilation.CoroProgramBootstrapActive() || !compilation.CoroChildAwaitActive() {
+		t.Fatal("stackless profile did not activate spawn, bootstrap, and child-await as one contract")
 	}
 }

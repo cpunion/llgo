@@ -65,10 +65,9 @@ const (
 // checks.
 func TestCoroNativeTimeSleepProductionPlanAndCodegen(t *testing.T) {
 	capability := &Config{
-		BuildMode:                     BuildModeExe,
-		Goos:                          runtime.GOOS,
-		Goarch:                        runtime.GOARCH,
-		EnableCoroProgramBootstrapRun: true,
+		BuildMode: BuildModeExe,
+		Goos:      runtime.GOOS,
+		Goarch:    runtime.GOARCH, CoroProfile: CoroProfileStackless,
 	}
 	if !nativeCoroTimerRuntimeABI(capability) {
 		t.Skipf("native coroutine time.Sleep compilation is unavailable on %s/%s", runtime.GOOS, runtime.GOARCH)
@@ -126,7 +125,7 @@ func TestCoroNativeTimeSleepProductionPlanAndCodegen(t *testing.T) {
 	}
 	functionIDs := emission.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapABIV2
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	input := CoroPlanInput{
 		Program:                        ssaProg,
@@ -238,17 +237,14 @@ func TestCoroNativeTimeSleepProductionPlanAndCodegen(t *testing.T) {
 	}
 
 	compilation := &cl.Compilation{
-		CoroPlan:                      plan,
-		EnableCoroEntryResolution:     true,
-		EnableCoroPhysicalABI:         true,
-		EnableCoroChildAwait:          true,
-		EnableCoroProgramBootstrapRun: true,
-		CoroFrameRetentionABI:         cl.CoroFrameRetentionParkABIV2,
-		CoroABI:                       coro.PhysicalABIV1,
-		SchedulerABI:                  coro.SchedulerProgramBootstrapABIV2,
-		PanicABI:                      coro.PanicLegacyABIV0,
-		FuncRepABI:                    coro.FuncRepABIV0,
-		EmissionUniverse:              emission,
+		CoroPlan: plan,
+
+		CoroFrameRetentionABI: cl.CoroFrameRetentionParkABIV2,
+		CoroABI:               coro.PhysicalABIV1,
+		SchedulerABI:          coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+		PanicABI:              coro.PanicExplicitStatusABIV0,
+		FuncRepABI:            coro.FuncRepABIV1,
+		EmissionUniverse:      emission, CoroProfile: cl.CoroProfileStackless,
 	}
 	timePkg, _, err := cl.NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, timeSSA, timeFiles, goembed.VarMap{},

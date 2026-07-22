@@ -79,8 +79,8 @@ func TestProductionCoroPollInlineAttemptDefaultPlanAndPhysicalIR(t *testing.T) {
 		t.Fatal(err)
 	}
 	functionIDs := emission.FunctionIDConfig()
-	functionIDs.CoroABI = coro.EntryResolutionABIV0
-	functionIDs.SchedulerABI = coro.SchedulerNoneABIV0
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	input := CoroPlanInput{
 		Program:                        fixture.program,
@@ -392,8 +392,8 @@ func Auto(fd int32, address unsafe.Pointer, size uintptr) uint64 {
 		t.Fatal(err)
 	}
 	functionIDs := emission.FunctionIDConfig()
-	functionIDs.CoroABI = coro.EntryResolutionABIV0
-	functionIDs.SchedulerABI = coro.SchedulerNoneABIV0
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	input := CoroPlanInput{
 		Program:            ssaPkg.Prog,
@@ -495,8 +495,8 @@ func ReadLeased(gate *Gate) bool { return gate.Acquire() }
 		t.Fatal(err)
 	}
 	functionIDs := emission.FunctionIDConfig()
-	functionIDs.CoroABI = coro.EntryResolutionABIV0
-	functionIDs.SchedulerABI = coro.SchedulerNoneABIV0
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	input := CoroPlanInput{
 		Program:            ssaPkg.Prog,

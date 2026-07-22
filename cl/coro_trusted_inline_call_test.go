@@ -66,7 +66,7 @@ func root(value int) int { return Fast(value) + UnknownFast(value) + Auto(value)
 	testProg.ssa.Build()
 	program := llssa.NewProgram(nil)
 	defer program.Dispose()
-	universe, err := PrepareEmissionUniverse(program, nil, []EmissionPackage{{
+	universe, err := prepareStacklessEmissionUniverse(program, nil, []EmissionPackage{{
 		SSA: pkg.ssa, Files: []*ast.File{pkg.file}, Identity: "trusted-inline-owner",
 	}})
 	if err != nil {

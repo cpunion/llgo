@@ -316,7 +316,7 @@ func buildCoroNativeIngressE2EUser(t *testing.T, prog llssa.Program, temp string
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{
 		{Function: mainFn, Demand: coro.AsyncDemand},
@@ -346,17 +346,13 @@ func buildCoroNativeIngressE2EUser(t *testing.T, prog llssa.Program, temp string
 		t.Fatal(err)
 	}
 	compilation := &cl.Compilation{
-		CoroPlan:                      plan,
-		EnableCoroEntryResolution:     true,
-		EnableCoroPhysicalABI:         true,
-		EnableCoroChildAwait:          true,
-		EnableCoroClosedStaticSpawn:   true,
-		EnableCoroProgramBootstrapRun: true,
-		CoroABI:                       coro.PhysicalABIV1,
-		SchedulerABI:                  coro.SchedulerProgramBootstrapClosedStaticSpawnABIV0,
-		PanicABI:                      coro.PanicLegacyABIV0,
-		FuncRepABI:                    coro.FuncRepABIV0,
-		EmissionUniverse:              universe,
+		CoroPlan: plan,
+
+		CoroABI:          coro.PhysicalABIV1,
+		SchedulerABI:     coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+		PanicABI:         coro.PanicExplicitStatusABIV0,
+		FuncRepABI:       coro.FuncRepABIV1,
+		EmissionUniverse: universe, CoroProfile: cl.CoroProfileStackless,
 	}
 	pkg, _, err := cl.NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
@@ -382,15 +378,9 @@ func buildCoroNativeIngressE2EUser(t *testing.T, prog llssa.Program, temp string
 func buildCoroNativeIngressE2EEntry(t *testing.T, prog llssa.Program, temp, anchor string) string {
 	t.Helper()
 	conf := &Config{
-		BuildMode:                     BuildModeExe,
-		Goos:                          runtime.GOOS,
-		Goarch:                        runtime.GOARCH,
-		EnableCoroEntryResolution:     true,
-		EnableCoroPhysicalABI:         true,
-		EnableCoroChildAwait:          true,
-		EnableCoroClosedStaticSpawn:   true,
-		EnableCoroProgramBootstrapABI: true,
-		EnableCoroProgramBootstrapRun: true,
+		BuildMode: BuildModeExe,
+		Goos:      runtime.GOOS,
+		Goarch:    runtime.GOARCH, CoroProfile: CoroProfileStackless,
 	}
 	ctx := &context{prog: prog, buildConf: conf}
 	bootstrap := &coroProgramBootstrapV1{

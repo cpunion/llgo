@@ -131,9 +131,9 @@ func TestCoroWorkerSyscallFunctionWordCapabilityIsFailClosed(t *testing.T) {
 	testProg.ssa.Build()
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverseWithOptions(
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}},
-		EmissionUniverseOptions{EnableCoroWorker: true},
+		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -182,9 +182,9 @@ func TestCoroWorkerSyscallConditionalIncomingPlanNarrowing(t *testing.T) {
 	testProg.ssa.Build()
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverseWithOptions(
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}},
-		EmissionUniverseOptions{EnableCoroWorker: true},
+		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -299,11 +299,11 @@ func libc_getrlimit_trampoline()
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
 	prog.SetLinkname(alternatePath+".libc_getrlimit_trampoline", "C.getrlimit")
-	universe, err := PrepareEmissionUniverseWithOptions(
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		prog,
 		Patches{originalPath: {Alt: alternate.ssa, Types: typepatch.Clone(alternate.types)}},
 		[]EmissionPackage{{SSA: original.ssa, Files: []*ast.File{original.file}}},
-		EmissionUniverseOptions{EnableCoroWorker: true},
+		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -408,11 +408,11 @@ func SIX_TARGET()
 			defer prog.Dispose()
 			prog.SetLinkname(alternatePath+"."+test.threeTarget, "C."+test.threePhysical)
 			prog.SetLinkname(alternatePath+"."+test.sixTarget, "C."+test.sixPhysical)
-			universe, err := PrepareEmissionUniverseWithOptions(
+			universe, err := prepareStacklessEmissionUniverseWithOptions(
 				prog,
 				Patches{originalPath: {Alt: alternate.ssa, Types: typepatch.Clone(alternate.types)}},
 				[]EmissionPackage{{SSA: original.ssa, Files: []*ast.File{original.file}}},
-				EmissionUniverseOptions{EnableCoroWorker: true},
+				EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -508,14 +508,14 @@ func Write(fd int32, pointer uintptr, size uintptr) int {
 	prog.SetLinkname(alternatePath+".libc_write_trampoline", "C.write")
 	prog.SetLinkname(runtimePath+".c_write", "C.write")
 
-	universe, err := PrepareEmissionUniverseWithOptions(
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		prog,
 		Patches{syscallPath: {Alt: alternate.ssa, Types: typepatch.Clone(alternate.types)}},
 		[]EmissionPackage{
 			{SSA: original.ssa, Files: []*ast.File{original.file}},
 			{SSA: typed.ssa, Files: []*ast.File{typed.file}},
 		},
-		EmissionUniverseOptions{EnableCoroWorker: true},
+		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -591,11 +591,11 @@ func Raw(a1 uintptr) uintptr {
 	prog.SetLinkname(alternatePath+".funcPCABI0", "llgo.funcPCABI0")
 	prog.SetLinkname(alternatePath+".llgoSyscall1", "llgo.syscall")
 	prog.SetLinkname(alternatePath+".libc___llgo_private_v1_trampoline", "C.__llgo_private_v1")
-	universe, err := PrepareEmissionUniverseWithOptions(
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		prog,
 		Patches{originalPath: {Alt: alternate.ssa, Types: typepatch.Clone(alternate.types)}},
 		[]EmissionPackage{{SSA: original.ssa, Files: []*ast.File{original.file}}},
-		EmissionUniverseOptions{EnableCoroWorker: true},
+		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -632,9 +632,9 @@ func Root(a1 uintptr) uintptr {
 	testProg.ssa.Build()
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverseWithOptions(
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}},
-		EmissionUniverseOptions{EnableCoroWorker: true},
+		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -655,9 +655,9 @@ func TestCoroWorkerSyscallExactCertificateJoinsPlanAndRejectsForgery(t *testing.
 	testProg.ssa.Build()
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := PrepareEmissionUniverseWithOptions(
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}},
-		EmissionUniverseOptions{EnableCoroWorker: true},
+		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -787,9 +787,9 @@ func Root() { _, _, _ = raw(pc(libc_target_trampoline)) }
 			testProg.ssa.Build()
 			prog := newLLSSAProg(t)
 			defer prog.Dispose()
-			_, err := PrepareEmissionUniverseWithOptions(
+			_, err := prepareStacklessEmissionUniverseWithOptions(
 				prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}},
-				EmissionUniverseOptions{EnableCoroWorker: true},
+				EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 			)
 			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
 				t.Fatalf("Prepare error = %v; want %q", err, test.wantErr)
@@ -815,9 +815,9 @@ func Second() { _, _, _ = raw(pc(same_worker_target_trampoline)) }
 	testProg.ssa.Build()
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	_, err := PrepareEmissionUniverseWithOptions(
+	_, err := prepareStacklessEmissionUniverseWithOptions(
 		prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}},
-		EmissionUniverseOptions{EnableCoroWorker: true},
+		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err == nil || !strings.Contains(err.Error(), "conflicting producer targets or ABIs") {
 		t.Fatalf("workeraddr physical collision error = %v", err)

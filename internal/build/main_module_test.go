@@ -127,10 +127,9 @@ func TestGenMainModuleCoroControlWrappersBuildModes(t *testing.T) {
 			ctx := &context{
 				prog: prog,
 				buildConf: &Config{
-					BuildMode:            test.buildMode,
-					Goos:                 test.goos,
-					Goarch:               test.goarch,
-					EnableCoroChildAwait: true,
+					BuildMode: test.buildMode,
+					Goos:      test.goos,
+					Goarch:    test.goarch, CoroProfile: CoroProfileStackless,
 				},
 			}
 			mod := genMainModule(ctx, llssa.PkgRuntime,
@@ -188,10 +187,9 @@ func TestGenMainModuleCoroProgramManifest(t *testing.T) {
 	ctx := &context{
 		prog: prog,
 		buildConf: &Config{
-			BuildMode:            BuildModeCArchive,
-			Goos:                 "linux",
-			Goarch:               "amd64",
-			EnableCoroChildAwait: true,
+			BuildMode: BuildModeCArchive,
+			Goos:      "linux",
+			Goarch:    "amd64", CoroProfile: CoroProfileStackless,
 		},
 	}
 	a := coroRootPackageAnchorPrefixV1 + "11111111111111111111111111111111"
@@ -230,10 +228,9 @@ func TestGenMainModuleEmptyCoroProgramManifest(t *testing.T) {
 	ctx := &context{
 		prog: prog,
 		buildConf: &Config{
-			BuildMode:            BuildModeExe,
-			Goos:                 "wasip1",
-			Goarch:               "wasm",
-			EnableCoroChildAwait: true,
+			BuildMode: BuildModeExe,
+			Goos:      "wasip1",
+			Goarch:    "wasm", CoroProfile: CoroProfileStackless,
 		},
 	}
 	entry := genMainModule(ctx, llssa.PkgRuntime,
@@ -292,13 +289,9 @@ func TestGenMainModuleCoroProgramBootstrapNativeAndWasm(t *testing.T) {
 			ctx := &context{
 				prog: prog,
 				buildConf: &Config{
-					BuildMode:                     BuildModeExe,
-					Goos:                          test.goos,
-					Goarch:                        test.goarch,
-					EnableCoroEntryResolution:     true,
-					EnableCoroPhysicalABI:         true,
-					EnableCoroChildAwait:          true,
-					EnableCoroProgramBootstrapABI: true,
+					BuildMode: BuildModeExe,
+					Goos:      test.goos,
+					Goarch:    test.goarch, CoroProfile: CoroProfileStackless,
 				},
 			}
 			var programHash [16]byte
@@ -396,15 +389,9 @@ func TestGenMainModuleCoroProgramBootstrapV2MixedNativeAndWasm(t *testing.T) {
 			ctx := &context{
 				prog: prog,
 				buildConf: &Config{
-					BuildMode:                     BuildModeExe,
-					Goos:                          test.goos,
-					Goarch:                        test.goarch,
-					EnableCoroEntryResolution:     true,
-					EnableCoroPhysicalABI:         true,
-					EnableCoroChildAwait:          true,
-					EnableCoroProgramBootstrapABI: true,
-					EnableCoroProgramBootstrapRun: true,
-					EnableCoroClosedStaticSpawn:   true,
+					BuildMode: BuildModeExe,
+					Goos:      test.goos,
+					Goarch:    test.goarch, CoroProfile: CoroProfileStackless,
 				},
 			}
 			const anchor = "__llgo_coro_root_package_v1.0123456789abcdef0123456789abcdef"
@@ -578,14 +565,9 @@ func TestGenMainModuleCoroProgramBootstrapV2DefinesOnlyOwnedPublicRuntimeNoop(t 
 	ctx := &context{
 		prog: prog,
 		buildConf: &Config{
-			BuildMode:                     BuildModeExe,
-			Goos:                          "linux",
-			Goarch:                        "amd64",
-			EnableCoroEntryResolution:     true,
-			EnableCoroPhysicalABI:         true,
-			EnableCoroChildAwait:          true,
-			EnableCoroProgramBootstrapABI: true,
-			EnableCoroProgramBootstrapRun: true,
+			BuildMode: BuildModeExe,
+			Goos:      "linux",
+			Goarch:    "amd64", CoroProfile: CoroProfileStackless,
 		},
 	}
 	bootstrap := &coroProgramBootstrapV1{
@@ -628,14 +610,9 @@ func TestGenMainModuleCoroProgramBootstrapRuntimeSwitch(t *testing.T) {
 	ctx := &context{
 		prog: prog,
 		buildConf: &Config{
-			BuildMode:                     BuildModeExe,
-			Goos:                          "linux",
-			Goarch:                        "amd64",
-			EnableCoroEntryResolution:     true,
-			EnableCoroPhysicalABI:         true,
-			EnableCoroChildAwait:          true,
-			EnableCoroProgramBootstrapABI: true,
-			EnableCoroProgramBootstrapRun: true,
+			BuildMode: BuildModeExe,
+			Goos:      "linux",
+			Goarch:    "amd64", CoroProfile: CoroProfileStackless,
 		},
 	}
 	var programHash [16]byte
@@ -710,14 +687,9 @@ func TestGenMainModuleCoroProgramBootstrapRuntimeAfterCoroPasses(t *testing.T) {
 			ctx := &context{
 				prog: prog,
 				buildConf: &Config{
-					BuildMode:                     BuildModeExe,
-					Goos:                          test.goos,
-					Goarch:                        test.goarch,
-					EnableCoroEntryResolution:     true,
-					EnableCoroPhysicalABI:         true,
-					EnableCoroChildAwait:          true,
-					EnableCoroProgramBootstrapABI: true,
-					EnableCoroProgramBootstrapRun: true,
+					BuildMode: BuildModeExe,
+					Goos:      test.goos,
+					Goarch:    test.goarch, CoroProfile: CoroProfileStackless,
 				},
 			}
 			entry := genMainModule(ctx, llssa.PkgRuntime,
@@ -1016,10 +988,9 @@ func TestGenMainModuleCoroControlWrappersAfterCoroPasses(t *testing.T) {
 	ctx := &context{
 		prog: prog,
 		buildConf: &Config{
-			BuildMode:            BuildModeCArchive,
-			Goos:                 "linux",
-			Goarch:               "amd64",
-			EnableCoroChildAwait: true,
+			BuildMode: BuildModeCArchive,
+			Goos:      "linux",
+			Goarch:    "amd64", CoroProfile: CoroProfileStackless,
 		},
 	}
 	entry := genMainModule(ctx, llssa.PkgRuntime,
