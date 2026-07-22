@@ -3069,7 +3069,6 @@ func targetGCBuildTags(gc string) ([]string, error) {
 const (
 	coroNativePipeBuildTag        = "llgo_coro_native_pipe"
 	coroNativeTimerBuildTag       = "llgo_coro_native_timer"
-	coroNativeFleetBuildTag       = "llgo_coro_native_fleet"
 	coroNativeIngressTestBuildTag = "llgo_coro_native_ingress_test"
 )
 
@@ -3121,9 +3120,6 @@ func effectiveBuildTags(conf *Config, export crosscompile.Export) (string, error
 			// 32-bit pipe backend from silently selecting an unverified libc
 			// timespec/time64 layout.
 			tags = append(tags, coroNativeTimerBuildTag)
-			if conf.coroNativeFleetActive() {
-				tags = append(tags, coroNativeFleetBuildTag)
-			}
 		}
 	}
 	tags = append(tags, conf.compilerBuildTags...)
@@ -3141,7 +3137,7 @@ func effectiveBuildTags(conf *Config, export crosscompile.Export) (string, error
 func rejectCompilerReservedBuildTags(source string, tags []string) error {
 	for _, tag := range tags {
 		switch tag {
-		case coroNativePipeBuildTag, coroNativeTimerBuildTag, coroNativeFleetBuildTag, coroNativeIngressTestBuildTag:
+		case coroNativePipeBuildTag, coroNativeTimerBuildTag, coroNativeIngressTestBuildTag:
 			return fmt.Errorf("build tag %q from %s is a compiler-reserved capability and cannot be supplied externally", tag, source)
 		}
 	}
@@ -3894,23 +3890,11 @@ func nativeCoroTimerRuntimeABI(conf *Config) bool {
 	return false
 }
 
-// nativeCoroFleetRuntimeABI is selected by an explicit compiler configuration
-// or the private isolated-runtime test channel. GOOS/GOARCH and an externally
-// supplied reserved tag are not enough: the raw pthread entry must agree with
-// the planner roots and runtime source island in the same compiler invocation.
+// nativeCoroFleetRuntimeABI is the only timer-capable native coroutine target.
+// It is derived from the frozen profile and target ABI; there is no second
+// feature tag which can select a competing single-P runtime island.
 func nativeCoroFleetRuntimeABI(conf *Config) bool {
-	if !nativeCoroTimerRuntimeABI(conf) || conf == nil {
-		return false
-	}
-	if conf.coroNativeFleetActive() {
-		return true
-	}
-	for _, tag := range conf.compilerBuildTags {
-		if tag == coroNativeFleetBuildTag {
-			return true
-		}
-	}
-	return false
+	return conf != nil && conf.coroNativeFleetActive()
 }
 
 // validatedCoroFrameRetentionABI selects a lowering identity only after the

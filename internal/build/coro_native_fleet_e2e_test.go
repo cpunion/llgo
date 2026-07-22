@@ -442,7 +442,6 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 		"llgo_coro",
 		coroNativePipeBuildTag,
 		coroNativeTimerBuildTag,
-		coroNativeFleetBuildTag,
 	}
 	allowed := map[string]bool{
 		"command-line-arguments":                               true,

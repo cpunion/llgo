@@ -30,14 +30,10 @@ import (
 )
 
 func TestProductionNativeWorkerCompletionHasOneRawPlainEntry(t *testing.T) {
-	testProductionNativeWorkerCompletionPlan(t, nil)
+	testProductionNativeWorkerCompletionPlan(t)
 }
 
-func TestProductionNativeFleetWorkerCompletionHasOneRawPlainEntry(t *testing.T) {
-	testProductionNativeWorkerCompletionPlan(t, []string{coroNativeFleetBuildTag})
-}
-
-func testProductionNativeWorkerCompletionPlan(t *testing.T, compilerTags []string) {
+func testProductionNativeWorkerCompletionPlan(t *testing.T) {
 	t.Helper()
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("native coroutine worker plan requires Darwin or Linux")
@@ -47,13 +43,6 @@ func testProductionNativeWorkerCompletionPlan(t *testing.T, compilerTags []strin
 	conf := NewDefaultConf(ModeGen)
 	conf.ForceRebuild = true
 	conf.CoroProfile = CoroProfileStackless
-	conf.CoroProfile = CoroProfileStackless
-	conf.CoroProfile = CoroProfileStackless
-	conf.CoroProfile = CoroProfileStackless
-	conf.CoroProfile = CoroProfileStackless
-	conf.CoroProfile = CoroProfileStackless
-	conf.CoroProfile = CoroProfileStackless
-	conf.compilerBuildTags = append(conf.compilerBuildTags, compilerTags...)
 	conf.CoroPlanBuilder = func(input CoroPlanInput) (*coro.SSAPlan, error) {
 		plan, err := input.Analyze(nil, coro.SSAConfig{
 			DynamicResolution:    coro.DynamicCHAClosed,
@@ -96,7 +85,8 @@ func testProductionNativeWorkerCompletionPlan(t *testing.T, compilerTags []strin
 		// It must never acquire an independent managed entry or a coroutine.
 		if got.Demand != coro.SyncDemand || got.ManagedDemand != coro.NoDemand ||
 			!got.RawPlainDemand || !got.RawPlainOnly || !got.RawPlainEntry ||
-			got.Effect != coro.NoSuspend || got.Exec.Contains(coro.BlockForeign) ||
+			got.DeclaredEffect != coro.NoSuspend || got.LocalEffect != coro.NoSuspend ||
+			got.Exec.Contains(coro.BlockForeign) ||
 			got.Exec.Contains(coro.NeedsPreempt) || got.Emission != coro.EmitRawPlain ||
 			got.Primary != coro.PrimaryPlain || got.FuncRep != coro.DirectPlain ||
 			!plan.HasRawPlainVariant(completion) {
@@ -127,39 +117,37 @@ func testProductionNativeWorkerCompletionPlan(t *testing.T, compilerTags []strin
 					workerPath, legacyName, legacyPlan.Demand)
 			}
 		}
-		if len(compilerTags) != 0 {
-			owner, err := findUniqueCoroWorkerPlanFunction(
-				input.Program, llssa.PkgRuntime, coroNativeFleetOwnerSymbolV1,
-			)
-			if err != nil {
-				return nil, err
-			}
-			if _, ok := input.requiredPlain[owner]; !ok {
-				return nil, fmt.Errorf("native fleet owner is outside the required raw scheduler-stack island")
-			}
-			ownerRoots := 0
-			for _, root := range input.requiredRoots {
-				if root.Function == owner {
-					ownerRoots++
-					if root.Demand != coro.SyncDemand {
-						return nil, fmt.Errorf("native fleet owner root demand = %s, want sync", root.Demand)
-					}
+		owner, err := findUniqueCoroWorkerPlanFunction(
+			input.Program, llssa.PkgRuntime, coroNativeFleetOwnerSymbolV1,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := input.requiredPlain[owner]; !ok {
+			return nil, fmt.Errorf("native fleet owner is outside the required raw scheduler-stack island")
+		}
+		ownerRoots := 0
+		for _, root := range input.requiredRoots {
+			if root.Function == owner {
+				ownerRoots++
+				if root.Demand != coro.SyncDemand {
+					return nil, fmt.Errorf("native fleet owner root demand = %s, want sync", root.Demand)
 				}
 			}
-			if ownerRoots != 1 {
-				return nil, fmt.Errorf("native fleet owner root count = %d, want 1", ownerRoots)
-			}
-			got, ok := plan.FunctionPlan(owner)
-			if !ok {
-				return nil, fmt.Errorf("native fleet owner has no function plan")
-			}
-			if got.Demand != coro.SyncDemand || got.ManagedDemand != coro.NoDemand ||
-				!got.RawPlainDemand || !got.RawPlainOnly || !got.RawPlainEntry ||
-				got.Emission != coro.EmitRawPlain || got.Primary != coro.PrimaryPlain ||
-				got.FuncRep != coro.DirectPlain || !plan.HasRawPlainVariant(owner) {
-				return nil, fmt.Errorf("native fleet owner plan = %+v, raw variant=%t; want one raw-only direct-plain scheduler entry",
-					got, plan.HasRawPlainVariant(owner))
-			}
+		}
+		if ownerRoots != 1 {
+			return nil, fmt.Errorf("native fleet owner root count = %d, want 1", ownerRoots)
+		}
+		got, present := plan.FunctionPlan(owner)
+		if !present {
+			return nil, fmt.Errorf("native fleet owner has no function plan")
+		}
+		if got.Demand != coro.SyncDemand || got.ManagedDemand != coro.NoDemand ||
+			!got.RawPlainDemand || !got.RawPlainOnly || !got.RawPlainEntry ||
+			got.Emission != coro.EmitRawPlain || got.Primary != coro.PrimaryPlain ||
+			got.FuncRep != coro.DirectPlain || !plan.HasRawPlainVariant(owner) {
+			return nil, fmt.Errorf("native fleet owner plan = %+v, raw variant=%t; want one raw-only direct-plain scheduler entry",
+				got, plan.HasRawPlainVariant(owner))
 		}
 		return nil, verified
 	}

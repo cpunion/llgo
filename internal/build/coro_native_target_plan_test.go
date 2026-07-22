@@ -216,20 +216,7 @@ func TestDoRejectsForgedNativeCapabilityBeforePackageSelection(t *testing.T) {
 	}
 }
 
-func TestEffectiveBuildTagsRejectsForgedNativeFleetCapability(t *testing.T) {
-	conf := &Config{Tags: "nogc," + coroNativeFleetBuildTag}
-	_, err := effectiveBuildTags(conf, crosscompile.Export{})
-	if err == nil {
-		t.Fatal("forged native fleet capability was accepted")
-	}
-	for _, want := range []string{coroNativeFleetBuildTag, "Config.Tags", "compiler-reserved capability"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error = %q, want %q", err, want)
-		}
-	}
-}
-
-func TestEffectiveBuildTagsSelectsConfiguredNativeFleet(t *testing.T) {
+func TestEffectiveBuildTagsSelectsUniqueNativeFleet(t *testing.T) {
 	conf := &Config{
 		Goos:   "linux",
 		Goarch: "amd64", CoroProfile: CoroProfileStackless,
@@ -238,8 +225,7 @@ func TestEffectiveBuildTagsSelectsConfiguredNativeFleet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(strings.Split(tags, ","), coroNativeFleetBuildTag) ||
-		!nativeCoroFleetRuntimeABI(conf) {
+	if strings.Contains(tags, "llgo_coro_native_fleet") || !nativeCoroFleetRuntimeABI(conf) {
 		t.Fatalf("configured native fleet tags/runtime = %q/%t", tags, nativeCoroFleetRuntimeABI(conf))
 	}
 	conf.CoroProfile = CoroProfileNone
@@ -247,8 +233,7 @@ func TestEffectiveBuildTagsSelectsConfiguredNativeFleet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if slices.Contains(strings.Split(tags, ","), coroNativeFleetBuildTag) ||
-		nativeCoroFleetRuntimeABI(conf) {
+	if strings.Contains(tags, "llgo_coro_native_fleet") || nativeCoroFleetRuntimeABI(conf) {
 		t.Fatalf("disabled native fleet tags/runtime = %q/%t", tags, nativeCoroFleetRuntimeABI(conf))
 	}
 }

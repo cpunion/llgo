@@ -1,4 +1,4 @@
-//go:build (darwin || linux) && !baremetal && ((!llgo && coro_native_fleet_test) || (llgo && llgo_coro && llgo_coro_native_pipe && llgo_coro_native_timer && llgo_coro_native_fleet && !coro_runtime_adapter_test))
+//go:build (darwin || linux) && !baremetal && ((!llgo && coro_native_fleet_test) || (llgo && llgo_coro && llgo_coro_native_pipe && llgo_coro_native_timer && !coro_runtime_adapter_test))
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
