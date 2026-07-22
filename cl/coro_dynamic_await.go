@@ -26,21 +26,17 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
-// tryCompileCoroManagedDispatchAwait lowers an open Go function-value call
+// compileCoroManagedDispatchAwait lowers an open Go function-value call
 // carried by the universal {descriptor, environment} representation. The
 // descriptor publishes exactly the capability of its one primary body:
 // bounded plain targets execute inline, while coroutine targets enter the
 // same scheduler-owned child transaction as an exact static await.
-func (p *context) tryCompileCoroManagedDispatchAwait(b llssa.Builder, call *ssa.Call) (llssa.Expr, bool) {
-	if !p.hasCoroPhysicalBody() || p.compilation == nil || p.compilation.CoroPlan == nil ||
-		!p.compilation.EnableCoroChildAwait || !p.compilation.EnableCoroPlainDispatch || call == nil {
-		return llssa.Nil, false
+func (p *context) compileCoroManagedDispatchAwait(
+	b llssa.Builder, call *ssa.Call, instructionPlan coroPhysicalInstructionPlan,
+) llssa.Expr {
+	if !p.hasCoroPhysicalBody() || call == nil || instructionPlan.control != coroPhysicalControlDispatchAwait {
+		panic("coroutine managed dispatch await escaped its frozen physical control recipe")
 	}
-	instructionPlan, planned := p.plannedCoroPhysicalControl(call)
-	if !planned || instructionPlan.control != coroPhysicalControlDispatchAwait {
-		return llssa.Nil, false
-	}
-	p.observeCoroPhysicalControl(call, coroPhysicalControlDispatchAwait)
 
 	p.recordCallerLocationForCall(b, &call.Call)
 	p.emitPCLineLabel(b, call.Pos())
@@ -60,7 +56,7 @@ func (p *context) tryCompileCoroManagedDispatchAwait(b llssa.Builder, call *ssa.
 	}
 	args := p.compileValues(b, call.Call.Args, fnNormal)
 	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
-	return p.compileCoroManagedDispatchAwaitValue(b, fn, args, call.Call.Signature(), keepaliveSlots), true
+	return p.compileCoroManagedDispatchAwaitValue(b, fn, args, call.Call.Signature(), keepaliveSlots)
 }
 
 // compileCoroManagedDispatchAwaitValue is the one capability probe and child

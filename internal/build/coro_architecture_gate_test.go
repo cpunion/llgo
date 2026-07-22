@@ -105,8 +105,8 @@ var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
 	// Filled from the 2026-07-22 executable fleet checkpoint. These values may
 	// only decrease; see TestCoroArchitectureDebtIsMonotonic.
 	currentCoro:               0,
-	planAuthority:             377,
-	stagedFeatureGate:         303,
+	planAuthority:             367,
+	stagedFeatureGate:         283,
 	legacyWait:                72,
 	nativeFork:                378,
 	fleetBuildFiles:           13,
@@ -135,15 +135,15 @@ var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
 	physicalPlanFreeze:        1,
 	physicalPlanCommit:        1,
 	physicalPlanLookup:        2,
-	physicalRecipeSelection:   8,
-	physicalRecipeObservation: 10,
+	physicalRecipeSelection:   10,
+	physicalRecipeObservation: 14,
 	physicalGuardObservation:  10,
 	physicalCodegenRebuild:    0,
 	physicalProofBuilderCall:  8,
 	legacyPhysicalSelector:    0,
 	legacySplitEmissionState:  0,
 	emissionSessionAccess:     22,
-	bodyCapabilityAccess:      47,
+	bodyCapabilityAccess:      42,
 	emissionSessionBegin:      1,
 	emissionBodyBind:          1,
 	emissionBodyComplete:      1,
@@ -157,11 +157,11 @@ var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
 	semanticRecipePlan:        3,
 	semanticRecipeObservation: 2,
 	controlPlan:               2,
-	controlSelect:             7,
-	controlObserve:            8,
+	controlSelect:             3,
+	controlObserve:            4,
 	operationPlan:             2,
-	operationSelect:           5,
-	operationObserve:          6,
+	operationSelect:           6,
+	operationObserve:          8,
 	outcomePlan:               2,
 	outcomeSelect:             6,
 	outcomeObserve:            6,
@@ -180,25 +180,20 @@ var allowedCoroBodyCapabilityFiles = map[string]bool{
 	"cl/coro_channel.go":           true,
 	"cl/coro_critical_lowering.go": true,
 	"cl/coro_defer.go":             true,
-	"cl/coro_dispatch.go":          true,
 	"cl/coro_dynamic_await.go":     true,
 	"cl/coro_emission_session.go":  true,
 	"cl/coro_emitter_adapter.go":   true,
 	"cl/coro_implicit_fault.go":    true,
-	"cl/coro_interface_await.go":   true,
 	"cl/coro_lowered_call.go":      true,
-	"cl/coro_managed_interface.go": true,
 	"cl/coro_panic.go":             true,
+	"cl/coro_park_emitter.go":      true,
 	"cl/coro_patch_init.go":        true,
-	"cl/coro_poll_wait.go":         true,
 	"cl/coro_recover.go":           true,
 	"cl/coro_slice_to_array.go":    true,
 	"cl/coro_spawn.go":             true,
-	"cl/coro_timer_sleep.go":       true,
 	"cl/coro_unsafe_slice.go":      true,
 	"cl/coro_unsafe_string.go":     true,
 	"cl/coro_worker.go":            true,
-	"cl/coro_worker_foreign.go":    true,
 }
 
 var allowedPhysicalEmissionSessionFields = map[string]bool{
@@ -416,23 +411,15 @@ var allowedPhysicalControlPlanFiles = map[string]bool{
 }
 
 var allowedPhysicalControlSelectionFiles = map[string]bool{
-	"cl/coro_await.go":             true,
-	"cl/coro_dispatch.go":          true,
-	"cl/coro_dynamic_await.go":     true,
-	"cl/coro_interface_await.go":   true,
-	"cl/coro_managed_interface.go": true,
-	"cl/coro_site_plan.go":         true,
-	"cl/coro_spawn.go":             true,
+	"cl/coro_emitter_adapter.go": true,
+	"cl/coro_site_plan.go":       true,
+	"cl/coro_spawn.go":           true,
 }
 
 var allowedPhysicalControlObservationFiles = map[string]bool{
-	"cl/coro_await.go":             true,
-	"cl/coro_dispatch.go":          true,
-	"cl/coro_dynamic_await.go":     true,
-	"cl/coro_interface_await.go":   true,
-	"cl/coro_managed_interface.go": true,
-	"cl/coro_site_plan.go":         true,
-	"cl/coro_spawn.go":             true,
+	"cl/coro_emitter_adapter.go": true,
+	"cl/coro_site_plan.go":       true,
+	"cl/coro_spawn.go":           true,
 }
 
 var allowedPhysicalOperationPlanFiles = map[string]bool{
@@ -446,9 +433,10 @@ var allowedPhysicalOperationSelectionFiles = map[string]bool{
 }
 
 var allowedPhysicalOperationObservationFiles = map[string]bool{
-	"cl/compile.go":        true,
-	"cl/coro_site_plan.go": true,
-	"cl/instr.go":          true,
+	"cl/compile.go":              true,
+	"cl/coro_emitter_adapter.go": true,
+	"cl/coro_site_plan.go":       true,
+	"cl/instr.go":                true,
 }
 
 var allowedPhysicalOutcomePlanFiles = map[string]bool{

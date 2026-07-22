@@ -29,7 +29,7 @@ import (
 // is a compiler-plan error: falling back to the legacy symbol would recreate a
 // hidden call edge after the whole-program fixed point was sealed.
 func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, marker llssa.Expr, args []llssa.Expr) (llssa.Expr, bool) {
-	if p.compilation == nil || !p.compilation.EnableCoroEntryResolution {
+	if p.compilation == nil {
 		return llssa.Nil, false
 	}
 	if p.emissionUniverse == nil || !p.emissionUniverse.CompleteRuntimeABI() {

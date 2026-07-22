@@ -44,6 +44,10 @@ const (
 	coroPhysicalInstructionSyntheticSelectNoCaseBox
 	coroPhysicalInstructionUnsafeString
 	coroPhysicalInstructionUnsafeSlice
+	coroPhysicalInstructionInterfaceNilCompare
+	coroPhysicalInstructionTerminalResultAllocation
+	coroPhysicalInstructionFrameAllocation
+	coroPhysicalInstructionFrameBitcastAllocation
 )
 
 func (recipe coroPhysicalInstructionRecipe) String() string {
@@ -70,6 +74,14 @@ func (recipe coroPhysicalInstructionRecipe) String() string {
 		return "unsafe-string"
 	case coroPhysicalInstructionUnsafeSlice:
 		return "unsafe-slice"
+	case coroPhysicalInstructionInterfaceNilCompare:
+		return "interface-nil-compare"
+	case coroPhysicalInstructionTerminalResultAllocation:
+		return "terminal-result-allocation"
+	case coroPhysicalInstructionFrameAllocation:
+		return "frame-allocation"
+	case coroPhysicalInstructionFrameBitcastAllocation:
+		return "frame-bitcast-allocation"
 	default:
 		return fmt.Sprintf("physical-recipe(%d)", uint8(recipe))
 	}
@@ -134,6 +146,8 @@ const (
 	coroPhysicalOperationChannelClose
 	coroPhysicalOperationChannelSelectPark
 	coroPhysicalOperationChannelSelectTry
+	coroPhysicalOperationWorkerSyscall
+	coroPhysicalOperationWorkerForeign
 )
 
 func (recipe coroPhysicalOperationRecipe) String() string {
@@ -150,6 +164,10 @@ func (recipe coroPhysicalOperationRecipe) String() string {
 		return "channel-select-park"
 	case coroPhysicalOperationChannelSelectTry:
 		return "channel-select-try"
+	case coroPhysicalOperationWorkerSyscall:
+		return "worker-syscall"
+	case coroPhysicalOperationWorkerForeign:
+		return "worker-foreign"
 	default:
 		return fmt.Sprintf("physical-operation-recipe(%d)", uint8(recipe))
 	}
@@ -198,6 +216,7 @@ type coroPhysicalLoweringCapabilities struct {
 	managedDispatch  bool
 	explicitPanic    bool
 	channel          bool
+	worker           bool
 	interfacePlain   *coroClosedInterfacePlainPlan
 	managedInterface *coroManagedInterfaceDispatchPlan
 }
@@ -219,8 +238,10 @@ type coroPhysicalInstructionPlan struct {
 	controlFailureHard bool
 	operation          coroPhysicalOperationRecipe
 	operationFailure   string
+	operationWorker    *coroWorkerForeignCallShape
 	outcome            coroPhysicalOutcomeRecipe
 	outcomeFailure     string
+	valueOperand       ssa.Value
 	container          coroPhysicalContainerKind
 	bound              int64
 	nilGuard           bool
@@ -239,12 +260,13 @@ func (plan coroPhysicalInstructionPlan) mayFault() bool {
 // after preflight. The pointed-to proofs are built to completion before this
 // object is frozen and are read-only thereafter.
 type coroPhysicalFunctionPlan struct {
-	function       *ssa.Function
-	owner          *preparedEmissionPackage
-	frameRetention *coroFrameRetentionProof
-	critical       *coroCriticalProof
-	cleanup        *coroStaticCleanupPlan
-	instructions   map[ssa.Instruction]coroPhysicalInstructionPlan
+	function          *ssa.Function
+	owner             *preparedEmissionPackage
+	frameRetention    *coroFrameRetentionProof
+	critical          *coroCriticalProof
+	cleanup           *coroStaticCleanupPlan
+	frameRetentionABI string
+	instructions      map[ssa.Instruction]coroPhysicalInstructionPlan
 }
 
 func prepareCoroPhysicalFunctionPlan(
@@ -260,16 +282,23 @@ func prepareCoroPhysicalFunctionPlan(
 		return nil, fmt.Errorf("physical function planning requires one exact pure-SSA audit")
 	}
 	plan := &coroPhysicalFunctionPlan{
-		function:       audit.fn,
-		owner:          owner,
-		frameRetention: audit.currentFrameRetentionProof(),
-		critical:       critical,
-		cleanup:        cleanup,
-		instructions:   make(map[ssa.Instruction]coroPhysicalInstructionPlan),
+		function:          audit.fn,
+		owner:             owner,
+		frameRetention:    audit.currentFrameRetentionProof(),
+		critical:          critical,
+		cleanup:           cleanup,
+		frameRetentionABI: audit.frameRetentionABI,
+		instructions:      make(map[ssa.Instruction]coroPhysicalInstructionPlan),
+	}
+	var exactBitcastAllocation *ssa.Alloc
+	if proof, exact := coro.ProveSSAExactScalarBitcast(audit.fn); exact {
+		exactBitcastAllocation = proof.Allocation
 	}
 	for _, block := range audit.fn.Blocks {
 		for _, instruction := range block.Instrs {
-			instructionPlan, err := planCoroPhysicalInstruction(audit, owner, whole, cleanup, instruction, explicitPanic, capabilities)
+			instructionPlan, err := planCoroPhysicalInstruction(
+				audit, owner, whole, cleanup, exactBitcastAllocation, instruction, explicitPanic, capabilities,
+			)
 			if err != nil {
 				return nil, fmt.Errorf("block %d instruction %T: %w", block.Index, instruction, err)
 			}
@@ -375,6 +404,7 @@ func planCoroPhysicalInstruction(
 	owner *preparedEmissionPackage,
 	whole *coro.SSAPlan,
 	cleanup *coroStaticCleanupPlan,
+	exactBitcastAllocation *ssa.Alloc,
 	instruction ssa.Instruction,
 	explicitPanic bool,
 	capabilities coroPhysicalLoweringCapabilities,
@@ -392,9 +422,18 @@ func planCoroPhysicalInstruction(
 	}
 	result.semantic = semantic
 	planCoroPhysicalControlInstruction(audit, whole, instruction, capabilities, &result)
-	planCoroPhysicalOperationInstruction(audit, instruction, capabilities, &result)
+	planCoroPhysicalOperationInstruction(audit, whole, instruction, capabilities, &result)
 	planCoroPhysicalOutcomeInstruction(audit, cleanup, instruction, capabilities, &result)
 	switch instruction := instruction.(type) {
+	case *ssa.Alloc:
+		switch {
+		case coroPhysicalCleanupContainsTerminalAllocation(cleanup, instruction):
+			result.recipe = coroPhysicalInstructionTerminalResultAllocation
+		case instruction == exactBitcastAllocation:
+			result.recipe = coroPhysicalInstructionFrameBitcastAllocation
+		case !instruction.Heap || audit.frameRetainsAllocation(instruction):
+			result.recipe = coroPhysicalInstructionFrameAllocation
+		}
 	case *ssa.FieldAddr:
 		if audit.fieldAddrRequiresImplicitNilFault(instruction) {
 			result.recipe = coroPhysicalInstructionFieldAddr
@@ -490,6 +529,18 @@ func planCoroPhysicalInstruction(
 		if coroSyntheticSelectNoCaseBox(instruction) {
 			result.recipe = coroPhysicalInstructionSyntheticSelectNoCaseBox
 		}
+	case *ssa.BinOp:
+		if (instruction.Op == token.EQL || instruction.Op == token.NEQ) &&
+			(isUntypedNilConst(instruction.X) || isUntypedNilConst(instruction.Y)) {
+			value := instruction.X
+			if isUntypedNilConst(value) {
+				value = instruction.Y
+			}
+			if _, ok := types.Unalias(audit.typeOf(value.Type())).Underlying().(*types.Interface); ok {
+				result.recipe = coroPhysicalInstructionInterfaceNilCompare
+				result.valueOperand = value
+			}
+		}
 	}
 	return result, nil
 }
@@ -557,8 +608,21 @@ func coroPhysicalCleanupContainsDefer(cleanup *coroStaticCleanupPlan, instructio
 	return false
 }
 
+func coroPhysicalCleanupContainsTerminalAllocation(cleanup *coroStaticCleanupPlan, allocation *ssa.Alloc) bool {
+	if cleanup == nil || allocation == nil {
+		return false
+	}
+	for _, candidate := range cleanup.terminalResultAllocations {
+		if candidate == allocation {
+			return true
+		}
+	}
+	return false
+}
+
 func planCoroPhysicalOperationInstruction(
 	audit *coroPhysicalPureSSAAudit,
+	whole *coro.SSAPlan,
 	instruction ssa.Instruction,
 	capabilities coroPhysicalLoweringCapabilities,
 	result *coroPhysicalInstructionPlan,
@@ -619,21 +683,61 @@ func planCoroPhysicalOperationInstruction(
 			result.operation = coroPhysicalOperationChannelSelectTry
 		}
 	case *ssa.Call:
-		if !isCoroCloseBuiltinCall(instruction) {
+		if isCoroCloseBuiltinCall(instruction) {
+			if failChannel("channel close") {
+				return
+			}
+			if !capabilities.explicitPanic {
+				result.operationFailure = "channel close requires the explicit-status panic ABI"
+				return
+			}
+			if len(instruction.Common().Args) != 1 {
+				result.operationFailure = "channel close requires one exact channel operand"
+				return
+			}
+			if err := validateCoroPhysicalChannelType(instruction.Common().Args[0].Type()); err != nil {
+				result.operationFailure = "channel close type: " + err.Error()
+				return
+			}
+			result.operation = coroPhysicalOperationChannelClose
 			return
 		}
-		if failChannel("channel close") {
+		if audit.universe != nil && audit.universe.coroProgramIR != nil {
+			frozen, found, err := audit.universe.coroProgramIR.callSitePlan(instruction)
+			if err != nil {
+				result.operationFailure = "load worker syscall SitePlan: " + err.Error()
+				return
+			}
+			if found && frozen.plan.Intrinsic && isLLGoSyscallIntrinsic(frozen.opcode) &&
+				frozen.plan.IntrinsicSemantics == CoroIntrinsicCallInlineSuspend {
+				if !capabilities.worker {
+					result.operationFailure = "worker llgo.syscall requires the bounded worker capability"
+					return
+				}
+				if err := validateCoroWorkerSyscallCall(whole, audit.universe, instruction); err != nil {
+					result.operationFailure = "invalid worker llgo.syscall capability: " + err.Error()
+					return
+				}
+				result.operation = coroPhysicalOperationWorkerSyscall
+				return
+			}
+		}
+		shape, recognized, err := validateCoroWorkerForeignCall(
+			whole, audit.universe, instruction, coroWorkerTargetPointerSize(audit.universe),
+		)
+		if !recognized {
 			return
 		}
-		if len(instruction.Common().Args) != 1 {
-			result.operationFailure = "channel close requires one exact channel operand"
+		if !capabilities.worker {
+			result.operationFailure = "blocking foreign call requires the bounded worker capability"
 			return
 		}
-		if err := validateCoroPhysicalChannelType(instruction.Common().Args[0].Type()); err != nil {
-			result.operationFailure = "channel close type: " + err.Error()
+		if err != nil {
+			result.operationFailure = "invalid bounded worker foreign call: " + err.Error()
 			return
 		}
-		result.operation = coroPhysicalOperationChannelClose
+		result.operation = coroPhysicalOperationWorkerForeign
+		result.operationWorker = &shape
 	}
 }
 

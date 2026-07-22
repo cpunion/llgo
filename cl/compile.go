@@ -1394,17 +1394,15 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 				}
 				ret = p.call(b, llssa.Call, &v.Call)
 			}
+		} else if p.hasCoroPhysicalBody() {
+			if value, handled := p.tryCompileCoroPhysicalCall(b, v); handled {
+				ret = value
+			} else {
+				ret = p.call(b, llssa.Call, &v.Call)
+			}
 		} else if value, handled := p.tryCompileCoroManagedInterfaceDispatch(b, v); handled {
 			ret = value
-		} else if value, handled := p.tryCompileCoroInterfaceDispatchAwait(b, v); handled {
-			ret = value
-		} else if value, handled := p.tryCompileCoroManagedDispatchAwait(b, v); handled {
-			ret = value
 		} else if value, handled := p.tryCompileCoroPlainDispatchCall(b, v); handled {
-			ret = value
-		} else if value, handled := p.tryCompileCoroWorkerForeignCall(b, v); handled {
-			ret = value
-		} else if value, handled := p.tryCompileCoroStaticAwait(b, v); handled {
 			ret = value
 		} else {
 			ret = p.call(b, llssa.Call, &v.Call)
@@ -1413,9 +1411,20 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			b.DeferStackDrain()
 		}
 	case *ssa.BinOp:
-		if value, handled := p.tryCompileCoroInterfaceNilCompare(b, v); handled {
-			ret = value
+		physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(v)
+		if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionInterfaceNilCompare {
+			if physicalInstruction.valueOperand == nil {
+				panic("interface nil comparison lost its frozen value operand")
+			}
+			p.observeCoroPhysicalInstruction(v, coroPhysicalInstructionInterfaceNilCompare)
+			physical := p.compileValue(b, physicalInstruction.valueOperand)
+			typeWord := b.InterfaceTypeWord(physical)
+			nilType := p.prog.Nil(p.prog.VoidPtr())
+			ret = b.BinOp(v.Op, typeWord, nilType)
 			break
+		}
+		if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary {
+			panic(fmt.Sprintf("BinOp selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
 		}
 		if isUntypedNilConst(v.X) && isUntypedNilConst(v.Y) {
 			switch v.Op {
@@ -1579,11 +1588,30 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		}
 		elem := p.type_(t.Elem(), llssa.InGo)
 		heap := v.Heap
-		bitcast, exactBitcast := coro.ProveSSAExactScalarBitcast(v.Parent())
-		exactBitcast = exactBitcast && bitcast.Allocation == v
-		if value, handled := p.tryCompileCoroAllocation(b, v, elem, exactBitcast); handled {
-			ret = value
-			break
+		physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(v)
+		if physicalPlanned {
+			switch physicalInstruction.recipe {
+			case coroPhysicalInstructionTerminalResultAllocation:
+				p.observeCoroPhysicalInstruction(v, coroPhysicalInstructionTerminalResultAllocation)
+				ret = p.compileCoroTerminalResultAllocation(v)
+			case coroPhysicalInstructionFrameBitcastAllocation:
+				p.observeCoroPhysicalInstruction(v, coroPhysicalInstructionFrameBitcastAllocation)
+				ret = p.coroFrameAlloca(elem)
+			case coroPhysicalInstructionFrameAllocation:
+				p.observeCoroPhysicalInstruction(v, coroPhysicalInstructionFrameAllocation)
+				ret = p.coroFrameAlloc(elem)
+			case coroPhysicalInstructionOrdinary:
+			default:
+				panic(fmt.Sprintf("Alloc selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
+			}
+			if !ret.IsNil() {
+				break
+			}
+		}
+		exactBitcast := false
+		if !physicalPlanned {
+			bitcast, exact := coro.ProveSSAExactScalarBitcast(v.Parent())
+			exactBitcast = exact && bitcast.Allocation == v
 		}
 		if exactBitcast {
 			// The exact body stores the complete same-width scalar before its

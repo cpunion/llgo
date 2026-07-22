@@ -22,6 +22,19 @@ import (
 	llssa "github.com/goplus/llgo/ssa"
 )
 
+func (p *context) requireCoroParkV2Body(b llssa.Builder, operation string) *coroBodyContext {
+	body := p.coroBody()
+	plan := p.coroEmissionPlan()
+	if body == nil || plan == nil || plan.frameRetentionABI != CoroFrameRetentionParkABIV2 || b.Func != p.fn {
+		panic("coroutine " + operation + " lowering requires an active planned ParkABIV2 physical coroutine body")
+	}
+	if body.abi.version < coroPhysicalABIVersionV1 || body.completion == nil ||
+		body.finalSuspend == nil || body.unsupportedRunDecision == nil || body.cancelRunDecision == nil {
+		panic("coroutine " + operation + " lowering requires the complete PhysicalABIV1 scheduler ABI")
+	}
+	return body
+}
+
 // coroParkFaultRoute maps one source-specific resume status to the canonical
 // terminal-fault path. Keeping the route semantic prevents feature lowerers
 // from injecting arbitrary physical dispatch callbacks into the envelope.

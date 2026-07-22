@@ -190,11 +190,11 @@ func validateCoroDirectSpawnArgumentTransport(
 // an explicit safepoint using its physical G; there is no TLS/current-G
 // fallback anywhere in this path.
 func (p *context) tryCompileCoroClosedStaticSpawn(b llssa.Builder, spawn *ssa.Go) bool {
-	if p.compilation == nil || !p.compilation.EnableCoroClosedStaticSpawn || spawn == nil {
+	if spawn == nil {
 		return false
 	}
 	body := p.coroBody()
-	if body == nil || p.compilation.CoroPlan == nil || b.Func != p.fn {
+	if body == nil || b.Func != p.fn {
 		panic("closed static spawn requires an active planned physical coroutine body")
 	}
 	instructionPlan, planned := p.plannedCoroPhysicalControl(spawn)

@@ -38,7 +38,7 @@ func coroInterfaceDispatchNeedsAwait(dispatch *coroInterfaceDispatchPlan) bool {
 	return false
 }
 
-// tryCompileCoroInterfaceDispatchAwait lowers a closed interface invoke into
+// compileCoroInterfaceDispatchAwait lowers a closed interface invoke into
 // one receiver-aware dispatch chain. The ordinary itab method word is used
 // only as the exact target discriminator: an async itab slot currently names
 // a $coro root whose physical signature cannot be called as a legacy method.
@@ -49,21 +49,17 @@ func coroInterfaceDispatchNeedsAwait(dispatch *coroInterfaceDispatchPlan) bool {
 // This is the closed-world bridge to the canonical {descriptor,env} ABI. Once
 // itab emission stores that descriptor directly, the candidate chain reduces
 // to one validated descriptor entry load without changing scheduler semantics.
-func (p *context) tryCompileCoroInterfaceDispatchAwait(b llssa.Builder, call *ssa.Call) (llssa.Expr, bool) {
-	if p.coroBody() == nil || p.compilation == nil || p.compilation.CoroPlan == nil ||
-		!p.compilation.EnableCoroChildAwait || call == nil || call.Common() == nil || !call.Common().IsInvoke() {
-		return llssa.Nil, false
-	}
-	instructionPlan, planned := p.plannedCoroPhysicalControl(call)
-	if !planned || instructionPlan.control != coroPhysicalControlClosedInterfaceAwait {
-		return llssa.Nil, false
+func (p *context) compileCoroInterfaceDispatchAwait(
+	b llssa.Builder, call *ssa.Call, instructionPlan coroPhysicalInstructionPlan,
+) llssa.Expr {
+	if !p.hasCoroPhysicalBody() || call == nil || call.Common() == nil || !call.Common().IsInvoke() ||
+		instructionPlan.control != coroPhysicalControlClosedInterfaceAwait {
+		panic("coroutine interface dispatch escaped its frozen physical control recipe")
 	}
 	dispatch := instructionPlan.controlInterface
 	if dispatch == nil || !coroInterfaceDispatchNeedsAwait(dispatch) {
 		panic("coroutine interface dispatch has an incomplete frozen physical control recipe")
 	}
-	p.observeCoroPhysicalControl(call, coroPhysicalControlClosedInterfaceAwait)
-
 	p.recordCallerLocationForCall(b, &call.Call)
 	p.emitPCLineLabel(b, call.Pos())
 	// Preserve source evaluation order and the existing nil-interface check.
@@ -151,7 +147,7 @@ func (p *context) tryCompileCoroInterfaceDispatchAwait(b llssa.Builder, call *ss
 
 	b.SetBlockContinuation(join)
 	if resultCount == 0 {
-		return llssa.Nil, true
+		return llssa.Nil
 	}
-	return b.LoadKnownNonNil(resultSlot), true
+	return b.LoadKnownNonNil(resultSlot)
 }

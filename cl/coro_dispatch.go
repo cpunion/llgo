@@ -934,7 +934,7 @@ func appendCoroPlainDispatchTypeLayout(builder *strings.Builder, prog llssa.Prog
 }
 
 func (p *context) tryCompileCoroPlainDispatchFunctionValue(b llssa.Builder, value *ssa.Function) (llssa.Expr, bool) {
-	if p.compilation == nil || !p.compilation.EnableCoroPlainDispatch || p.compilation.CoroPlan == nil {
+	if p.compilation == nil || p.compilation.CoroPlan == nil {
 		return llssa.Expr{}, false
 	}
 	valuePlan, found := p.compilation.CoroPlan.ValuePlan(value)
@@ -948,7 +948,7 @@ func (p *context) tryCompileCoroPlainDispatchFunctionValue(b llssa.Builder, valu
 }
 
 func (p *context) tryCompileCoroPlainDispatchClosure(b llssa.Builder, closure *ssa.MakeClosure) (llssa.Expr, bool) {
-	if p.compilation == nil || !p.compilation.EnableCoroPlainDispatch || p.compilation.CoroPlan == nil {
+	if p.compilation == nil || p.compilation.CoroPlan == nil {
 		return llssa.Expr{}, false
 	}
 	valuePlan, found := p.compilation.CoroPlan.ValuePlan(closure)
@@ -1175,33 +1175,37 @@ func (p *context) newCoroDynamicDispatchEntryThunk(
 }
 
 func (p *context) tryCompileCoroPlainDispatchCall(b llssa.Builder, call *ssa.Call) (llssa.Expr, bool) {
-	if p.compilation == nil || !p.compilation.EnableCoroPlainDispatch || p.compilation.CoroPlan == nil || call == nil {
+	if call == nil || p.hasCoroPhysicalBody() || p.compilation == nil || p.compilation.CoroPlan == nil {
 		return llssa.Expr{}, false
 	}
-	physical := p.coroBody() != nil
-	if physical {
-		instructionPlan, planned := p.plannedCoroPhysicalControl(call)
-		if !planned || instructionPlan.control != coroPhysicalControlPlainDispatch {
-			return llssa.Expr{}, false
-		}
-		p.observeCoroPhysicalControl(call, coroPhysicalControlPlainDispatch)
-	} else {
-		callPlan, found := p.compilation.CoroPlan.CallPlan(call)
-		if !found || callPlan.Rep != coro.Dispatch {
-			return llssa.Expr{}, false
-		}
-		if callPlan.Transport != coro.ManagedTransport {
-			panic(fmt.Errorf("coroutine dynamic dispatch ABI: call %q has Dispatch representation with non-managed transport %s", call.String(), callPlan.Transport))
-		}
-		if p.compilation.coroClosedInterfacePlain.acceptsCall(call) {
-			// Preserve the ordinary LLGo itab invoke. The closed candidate proof is
-			// a scheduling constraint, not a second function-value representation.
-			return llssa.Expr{}, false
-		}
-		if err := validateCoroPlainDispatchCall(p.compilation.CoroPlan, call.Parent(), call, callPlan, p.compilation.EmissionUniverse); err != nil {
-			panic(err)
-		}
+	callPlan, found := p.compilation.CoroPlan.CallPlan(call)
+	if !found || callPlan.Rep != coro.Dispatch {
+		return llssa.Expr{}, false
 	}
+	if callPlan.Transport != coro.ManagedTransport {
+		panic(fmt.Errorf("coroutine dynamic dispatch ABI: call %q has Dispatch representation with non-managed transport %s", call.String(), callPlan.Transport))
+	}
+	if p.compilation.coroClosedInterfacePlain.acceptsCall(call) {
+		// Preserve the ordinary LLGo itab invoke. The closed candidate proof is
+		// a scheduling constraint, not a second function-value representation.
+		return llssa.Expr{}, false
+	}
+	if err := validateCoroPlainDispatchCall(p.compilation.CoroPlan, call.Parent(), call, callPlan, p.compilation.EmissionUniverse); err != nil {
+		panic(err)
+	}
+	return p.emitCoroPlainDispatchCall(b, call, false), true
+}
+
+func (p *context) compileCoroPhysicalPlainDispatch(
+	b llssa.Builder, call *ssa.Call, instructionPlan coroPhysicalInstructionPlan,
+) llssa.Expr {
+	if !p.hasCoroPhysicalBody() || call == nil || instructionPlan.control != coroPhysicalControlPlainDispatch {
+		panic("coroutine plain dispatch escaped its frozen physical control recipe")
+	}
+	return p.emitCoroPlainDispatchCall(b, call, true)
+}
+
+func (p *context) emitCoroPlainDispatchCall(b llssa.Builder, call *ssa.Call, physical bool) llssa.Expr {
 	p.recordCallerLocationForCall(b, &call.Call)
 	p.emitPCLineLabel(b, call.Pos())
 	fn := p.compileValue(b, call.Call.Value)
@@ -1225,5 +1229,5 @@ func (p *context) tryCompileCoroPlainDispatchCall(b llssa.Builder, call *ssa.Cal
 		p.compileCoroImplicitNilAccessGuard(b, b.Field(fn, 0))
 		opts.DescriptorNonNil = true
 	}
-	return b.CallCoroPlainDispatch(fn, args, opts), true
+	return b.CallCoroPlainDispatch(fn, args, opts)
 }

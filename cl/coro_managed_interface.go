@@ -265,59 +265,29 @@ func validateCoroManagedInterfaceDispatchCall(
 func (p *context) tryCompileCoroManagedInterfaceDispatch(
 	b llssa.Builder, call *ssa.Call,
 ) (llssa.Expr, bool) {
-	if p.compilation == nil || p.compilation.CoroPlan == nil ||
-		!p.compilation.EnableCoroPlainDispatch || call == nil || call.Common() == nil ||
-		p.compilation.coroManagedInterface == nil {
+	if call == nil || call.Common() == nil || p.hasCoroPhysicalBody() ||
+		p.compilation == nil || p.compilation.CoroPlan == nil || p.compilation.coroManagedInterface == nil {
 		return llssa.Nil, false
 	}
-	common := call.Common()
-	physical := p.coroBody() != nil
-	var callPlan coro.SSACallPlan
-	var signature *types.Signature
-	if physical {
-		instructionPlan, planned := p.plannedCoroPhysicalControl(call)
-		if !planned || instructionPlan.control != coroPhysicalControlManagedInterfaceAwait {
-			return llssa.Nil, false
-		}
-		if instructionPlan.controlSignature == nil {
-			panic("managed interface await has an incomplete frozen physical control recipe")
-		}
-		signature = instructionPlan.controlSignature
-		p.observeCoroPhysicalControl(call, coroPhysicalControlManagedInterfaceAwait)
-	} else {
-		if !p.compilation.coroManagedInterface.acceptsCall(call) {
-			return llssa.Nil, false
-		}
-		var found bool
-		callPlan, found = p.compilation.CoroPlan.CallPlan(call)
-		if !found || callPlan.Rep != coro.Dispatch {
-			panic("managed interface descriptor call lost its frozen Dispatch CallPlan")
-		}
-		if callPlan.Open {
-			if err := validateCoroManagedInterfaceDispatchCall(
-				p.compilation.CoroPlan, p.compilation.EmissionUniverse, p.goFn, call, callPlan,
-			); err != nil {
-				panic(err)
-			}
-		}
-		var err error
-		signature, err = coroInterfaceDispatchSourceSignature(common)
-		if err != nil {
+	if !p.compilation.coroManagedInterface.acceptsCall(call) {
+		return llssa.Nil, false
+	}
+	callPlan, found := p.compilation.CoroPlan.CallPlan(call)
+	if !found || callPlan.Rep != coro.Dispatch {
+		panic("managed interface descriptor call lost its frozen Dispatch CallPlan")
+	}
+	if callPlan.Open {
+		if err := validateCoroManagedInterfaceDispatchCall(
+			p.compilation.CoroPlan, p.compilation.EmissionUniverse, p.goFn, call, callPlan,
+		); err != nil {
 			panic(err)
 		}
 	}
-	p.recordCallerLocationForCall(b, &call.Call)
-	p.emitPCLineLabel(b, call.Pos())
-	// Evaluate the interface receiver before arguments, exactly as the ordinary
-	// LLGo invoke path does. Imethod preserves the nil-interface panic and pairs
-	// the descriptor Ifn_ word with IfacePtrData as its receiver environment.
-	intf := p.compileValue(b, common.Value)
-	method := b.Imethod(intf, common.Method)
-	args := p.compileValues(b, call.Call.Args, fnNormal)
-	if physical {
-		keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
-		return p.compileCoroManagedDispatchAwaitValue(b, method, args, signature, keepaliveSlots), true
+	signature, err := coroInterfaceDispatchSourceSignature(call.Common())
+	if err != nil {
+		panic(err)
 	}
+	method, args := p.compileCoroManagedInterfaceOperands(b, call)
 	if callPlan.Open || coroDispatchCallHasCoroutineTarget(p.compilation.CoroPlan, callPlan) {
 		panic("managed interface descriptor requires a coroutine owner for an open or coroutine-capable target")
 	}
@@ -330,6 +300,35 @@ func (p *context) tryCompileCoroManagedInterfaceDispatch(
 		ABIHash: abi.hash,
 		Result:  p.prog.Type(abi.resultSlotType, llssa.InC),
 	}), true
+}
+
+func (p *context) compileCoroManagedInterfaceAwait(
+	b llssa.Builder, call *ssa.Call, instructionPlan coroPhysicalInstructionPlan,
+) llssa.Expr {
+	if !p.hasCoroPhysicalBody() || call == nil || call.Common() == nil ||
+		instructionPlan.control != coroPhysicalControlManagedInterfaceAwait || instructionPlan.controlSignature == nil {
+		panic("managed interface await escaped its frozen physical control recipe")
+	}
+	method, args := p.compileCoroManagedInterfaceOperands(b, call)
+	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
+	return p.compileCoroManagedDispatchAwaitValue(
+		b, method, args, instructionPlan.controlSignature, keepaliveSlots,
+	)
+}
+
+func (p *context) compileCoroManagedInterfaceOperands(
+	b llssa.Builder, call *ssa.Call,
+) (llssa.Expr, []llssa.Expr) {
+	common := call.Common()
+	p.recordCallerLocationForCall(b, &call.Call)
+	p.emitPCLineLabel(b, call.Pos())
+	// Evaluate the interface receiver before arguments, exactly as the ordinary
+	// LLGo invoke path does. Imethod preserves the nil-interface panic and pairs
+	// the descriptor Ifn_ word with IfacePtrData as its receiver environment.
+	intf := p.compileValue(b, common.Value)
+	method := b.Imethod(intf, common.Method)
+	args := p.compileValues(b, call.Call.Args, fnNormal)
+	return method, args
 }
 
 func (p *context) resolveInterfaceMethodSSA(method *types.Func, signature *types.Signature) *ssa.Function {
@@ -354,8 +353,7 @@ func (p *context) resolveInterfaceMethodSSA(method *types.Func, signature *types
 func (p *context) resolveInterfaceMethodDescriptor(
 	_ string, method *types.Func, signature *types.Signature,
 ) (llssa.Expr, bool) {
-	if p.compilation == nil || p.compilation.coroManagedInterface == nil ||
-		!p.compilation.EnableCoroPlainDispatch || signature == nil {
+	if p.compilation == nil || p.compilation.coroManagedInterface == nil || signature == nil {
 		return llssa.Nil, false
 	}
 	patched, ok := p.patchType(signature).(*types.Signature)

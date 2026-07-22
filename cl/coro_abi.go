@@ -1280,6 +1280,7 @@ func validateCoroPhysicalABIForOwner(
 			managedDispatch:  managedDispatch,
 			explicitPanic:    explicitPanic,
 			channel:          channel,
+			worker:           universe != nil && universe.CoroWorkerEnabled(),
 			interfacePlain:   interfacePlain,
 			managedInterface: managedInterface,
 		},
@@ -1330,6 +1331,9 @@ func validateCoroPhysicalABIForOwner(
 			}
 			if instructionPlan.outcomeFailure != "" {
 				return coroLeafInstructionError(fn, plan, instr, instructionPlan.outcomeFailure)
+			}
+			if instructionPlan.operationFailure != "" {
+				return coroLeafInstructionError(fn, plan, instr, instructionPlan.operationFailure)
 			}
 			if instructionPlan.recipe == coroPhysicalInstructionSyntheticSelectNoCaseBox ||
 				instructionPlan.outcome == coroPhysicalOutcomeSyntheticSelectTrap {
@@ -1449,8 +1453,8 @@ func validateCoroPhysicalABIForOwner(
 						}
 						if intrinsic && semantics == CoroIntrinsicCallInlineSuspend {
 							if isLLGoSyscallIntrinsic(frozen.opcode) {
-								if err := validateCoroWorkerSyscallCall(whole, universe, instr); err != nil {
-									return coroLeafInstructionError(fn, plan, instr, "invalid worker llgo.syscall capability: "+err.Error())
+								if instructionPlan.operation != coroPhysicalOperationWorkerSyscall {
+									return coroLeafInstructionError(fn, plan, instr, "worker llgo.syscall has no frozen operation recipe")
 								}
 							}
 							parks++
@@ -1499,14 +1503,9 @@ func validateCoroPhysicalABIForOwner(
 						return coroLeafInstructionError(fn, plan, instr, instructionPlan.controlFailure)
 					}
 				}
-				if _, recognized, foreignErr := validateCoroWorkerForeignCall(
-					whole, universe, instr, coroWorkerTargetPointerSize(universe),
-				); recognized {
-					if universe == nil || !universe.CoroWorkerEnabled() {
-						return coroLeafInstructionError(fn, plan, instr, "blocking foreign call requires the bounded worker capability")
-					}
-					if foreignErr != nil {
-						return coroLeafInstructionError(fn, plan, instr, "invalid bounded worker foreign call: "+foreignErr.Error())
+				if instructionPlan.operation == coroPhysicalOperationWorkerForeign {
+					if instructionPlan.operationWorker == nil {
+						return coroLeafInstructionError(fn, plan, instr, "bounded worker call has no frozen physical shape")
 					}
 					foreignWaits++
 					continue

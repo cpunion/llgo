@@ -29,7 +29,7 @@ import (
 // package patching. Analysis sees the same physical edge through the owner's
 // frozen lowered-call occurrence.
 func (p *context) tryCompileCoroPatchInitRedirect(b llssa.Builder, call *ssa.Call) (result llssa.Expr, handled bool) {
-	if p.compilation == nil || !p.compilation.EnableCoroEntryResolution || p.emissionUniverse == nil || call == nil {
+	if p.compilation == nil || p.emissionUniverse == nil || call == nil {
 		return llssa.Nil, false
 	}
 	logicalName, target, redirected, err := p.emissionUniverse.CoroPatchInitRedirect(call)

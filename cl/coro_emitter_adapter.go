@@ -17,6 +17,8 @@
 package cl
 
 import (
+	"fmt"
+
 	llssa "github.com/goplus/llgo/ssa"
 	"golang.org/x/tools/go/ssa"
 )
@@ -100,10 +102,6 @@ func (p *context) compileCoroPatchInitAtBlock(b llssa.Builder) bool {
 	return true
 }
 
-func (p *context) coroWorkerLoweringEnabled() bool {
-	return p.hasCoroPhysicalBody() && p.compilation != nil && p.compilation.EnableCoroWorker
-}
-
 func (p *context) coroCurrentSourceCall() *ssa.Call {
 	observer := p.coroEmissionSite()
 	if observer == nil {
@@ -113,34 +111,60 @@ func (p *context) coroCurrentSourceCall() *ssa.Call {
 	return call
 }
 
-func (p *context) tryCompileCoroAllocation(
-	b llssa.Builder,
-	allocation *ssa.Alloc,
-	elem llssa.Type,
-	exactScalarBitcast bool,
-) (llssa.Expr, bool) {
-	body := p.coroBody()
-	if body == nil {
+// tryCompileCoroPhysicalCall is the sole source-call dispatcher for a physical
+// coroutine body. It consumes one frozen instruction plan and reports the
+// selected control/operation recipe before delegating operand emission. The
+// specialized emitters never re-read CallPlan, feature flags, or raw call
+// shape to decide whether they own the site.
+func (p *context) tryCompileCoroPhysicalCall(b llssa.Builder, call *ssa.Call) (llssa.Expr, bool) {
+	if !p.hasCoroPhysicalBody() {
 		return llssa.Expr{}, false
 	}
-	if value, selected := body.terminalResultAllocs[allocation]; selected {
-		if !allocation.Heap || allocation.Block() == nil || allocation.Block().Index != 0 {
-			panic("coroutine terminal-result allocation lost its source-entry heap identity")
+	if call == nil {
+		panic("physical coroutine call dispatcher received a nil source call")
+	}
+	instructionPlan, planned := p.plannedCoroPhysicalControl(call)
+	if !planned {
+		panic("physical coroutine call has no frozen instruction plan")
+	}
+	if instructionPlan.control != coroPhysicalControlNone {
+		p.observeCoroPhysicalControl(call, instructionPlan.control)
+	}
+	switch instructionPlan.control {
+	case coroPhysicalControlDirectAwait:
+		return p.compileCoroStaticAwait(b, call, instructionPlan), true
+	case coroPhysicalControlDispatchAwait:
+		return p.compileCoroManagedDispatchAwait(b, call, instructionPlan), true
+	case coroPhysicalControlClosedInterfaceAwait:
+		return p.compileCoroInterfaceDispatchAwait(b, call, instructionPlan), true
+	case coroPhysicalControlManagedInterfaceAwait:
+		return p.compileCoroManagedInterfaceAwait(b, call, instructionPlan), true
+	case coroPhysicalControlPlainDispatch:
+		return p.compileCoroPhysicalPlainDispatch(b, call, instructionPlan), true
+	case coroPhysicalControlNone:
+		if instructionPlan.operation == coroPhysicalOperationWorkerForeign {
+			if instructionPlan.operationWorker == nil {
+				panic("physical coroutine worker call has no frozen foreign shape")
+			}
+			p.observeCoroPhysicalOperation(call, instructionPlan.operation)
+			return p.compileCoroWorkerForeignCall(b, call, *instructionPlan.operationWorker), true
 		}
-		return value, true
+		return llssa.Expr{}, false
+	default:
+		panic(fmt.Sprintf("source call selected incompatible frozen physical control recipe %s", instructionPlan.control))
 	}
-	if exactScalarBitcast {
-		return p.coroFrameAlloca(elem), true
+}
+
+func (p *context) compileCoroTerminalResultAllocation(allocation *ssa.Alloc) llssa.Expr {
+	body := p.coroBody()
+	if body == nil || allocation == nil || !allocation.Heap || allocation.Block() == nil || allocation.Block().Index != 0 {
+		panic("coroutine terminal-result allocation lost its source-entry heap identity")
 	}
-	if !allocation.Heap {
-		return p.coroFrameAlloc(elem), true
+	value := body.terminalResultAllocs[allocation]
+	if value.IsNil() {
+		panic("coroutine terminal-result allocation lost its frozen physical storage")
 	}
-	if body.frameRetention != nil {
-		if _, retained := body.frameRetention.allocations[allocation]; retained {
-			return p.coroFrameAlloc(elem), true
-		}
-	}
-	return llssa.Expr{}, false
+	return value
 }
 
 func (p *context) compileCoroReturn(b llssa.Builder, results []llssa.Expr) {

@@ -165,7 +165,7 @@ func validateCoroRawCFunctionAdapters(plan *coro.SSAPlan, universe *EmissionUniv
 }
 
 func (p *context) tryCompileCoroRawCChangeType(b llssa.Builder, change *ssa.ChangeType) (llssa.Expr, bool) {
-	if p == nil || p.compilation == nil || !p.compilation.EnableCoroEntryResolution ||
+	if p == nil || p.compilation == nil ||
 		p.compilation.CoroPlan == nil || p.compilation.EmissionUniverse == nil || p.goFn == nil {
 		return llssa.Expr{}, false
 	}

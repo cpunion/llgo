@@ -2103,10 +2103,10 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 	}
 	args := call.Args
 	dbgGoSSAln(">>> Do", act, cv, args)
+	sourceCall := p.coroCurrentSourceCall()
 	switch cv := cv.(type) {
 	case *ssa.Builtin:
 		fn := cv.Name()
-		sourceCall := p.coroCurrentSourceCall()
 		physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(sourceCall)
 		if fn == "ssa:wrapnilchk" {
 			ptr := p.compileValue(b, args[0])
@@ -2269,8 +2269,13 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 			if !ok {
 				panic("unknown coroutine llgo.syscall failure convention")
 			}
-			managedWorker := p.coroWorkerLoweringEnabled()
-			if semantics, planned := p.plannedCoroIntrinsicCall(ftype); planned {
+			operation, operationPlanned := p.plannedCoroPhysicalOperation(sourceCall)
+			managedWorker := operationPlanned && operation.operation == coroPhysicalOperationWorkerSyscall
+			if managedWorker {
+				p.observeCoroPhysicalOperation(sourceCall, coroPhysicalOperationWorkerSyscall)
+			} else if operationPlanned && operation.operation != coroPhysicalOperationNone {
+				panic(fmt.Sprintf("llgo.syscall selected incompatible frozen physical operation recipe %s", operation.operation))
+			} else if semantics, planned := p.plannedCoroIntrinsicCall(ftype); planned {
 				managedWorker = semantics == CoroIntrinsicCallInlineSuspend
 			}
 			if managedWorker {

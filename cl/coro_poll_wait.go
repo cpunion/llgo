@@ -64,17 +64,7 @@ func coroPollResumeSignatureV2() *types.Signature {
 }
 
 func (p *context) requireCoroPollWaitBody(b llssa.Builder) *coroBodyContext {
-	body := p.coroBody()
-	if body == nil || p.compilation == nil ||
-		p.compilation.CoroFrameRetentionABI != CoroFrameRetentionParkABIV2 || b.Func != p.fn {
-		panic("coroutine poll wait lowering requires an active planned ParkABIV2 physical coroutine body")
-	}
-	if body.abi.version < coroPhysicalABIVersionV1 || body.completion == nil ||
-		body.finalSuspend == nil || body.unsupportedRunDecision == nil ||
-		body.cancelRunDecision == nil {
-		panic("coroutine poll wait lowering requires the complete PhysicalABIV1 scheduler ABI")
-	}
-	return body
+	return p.requireCoroParkV2Body(b, "poll wait")
 }
 
 // compileCoroPollWait lowers one synchronous source-style descriptor wait into

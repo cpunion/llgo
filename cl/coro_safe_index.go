@@ -32,7 +32,7 @@ func (p *context) frozenSafeFixedArrayIndex(
 	collection, index ssa.Value,
 ) bool {
 	if p == nil || operation == nil || collection == nil || index == nil ||
-		p.compilation == nil || !p.compilation.EnableCoroEntryResolution ||
+		p.compilation == nil ||
 		p.compilation.CoroPlan == nil || p.emissionUniverse == nil {
 		return false
 	}

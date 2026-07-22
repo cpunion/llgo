@@ -360,19 +360,11 @@ func (p *context) coroWorkerForeignThunk(shape coroWorkerForeignCallShape, targe
 	return thunk
 }
 
-func (p *context) tryCompileCoroWorkerForeignCall(b llssa.Builder, call *ssa.Call) (llssa.Expr, bool) {
-	if p == nil || p.coroBody() == nil || p.compilation == nil || !p.compilation.EnableCoroWorker ||
-		p.compilation.CoroPlan == nil || p.compilation.EmissionUniverse == nil || call == nil {
-		return llssa.Expr{}, false
-	}
-	shape, recognized, err := validateCoroWorkerForeignCall(
-		p.compilation.CoroPlan, p.compilation.EmissionUniverse, call, p.prog.PointerSize(),
-	)
-	if !recognized {
-		return llssa.Expr{}, false
-	}
-	if err != nil {
-		panic(fmt.Errorf("coroutine foreign worker lowering: %w", err))
+func (p *context) compileCoroWorkerForeignCall(
+	b llssa.Builder, call *ssa.Call, shape coroWorkerForeignCallShape,
+) llssa.Expr {
+	if p == nil || !p.hasCoroPhysicalBody() || call == nil || shape.target == nil || shape.signature == nil {
+		panic("coroutine foreign worker lowering escaped its frozen physical operation recipe")
 	}
 	target, _, kind := p.compileFunction(shape.target)
 	if kind != cFunc || target == nil {
@@ -391,7 +383,7 @@ func (p *context) tryCompileCoroWorkerForeignCall(b llssa.Builder, call *ssa.Cal
 	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
 	result := p.compileCoroWorkerWordCall(b, function, words, keepaliveSlots)
 	if shape.result == nil {
-		return llssa.Expr{}, true
+		return llssa.Expr{}
 	}
-	return b.Convert(p.type_(shape.result, llssa.InC), result.r1), true
+	return b.Convert(p.type_(shape.result, llssa.InC), result.r1)
 }

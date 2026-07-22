@@ -184,30 +184,26 @@ func validateCoroAwaitTarget(caller, target coro.FunctionPlan) error {
 	return nil
 }
 
-// tryCompileCoroStaticAwait lowers a source-style synchronous call into one
+// compileCoroStaticAwait lowers a source-style synchronous call into one
 // stackless child handoff. It creates the child only to its initial suspend;
 // this function never resumes or destroys a handle. Those operations belong to
 // the scheduler after the parent's resume episode has returned.
-func (p *context) tryCompileCoroStaticAwait(b llssa.Builder, call *ssa.Call) (llssa.Expr, bool) {
-	if !p.hasCoroPhysicalBody() || p.compilation == nil || p.compilation.CoroPlan == nil || !p.compilation.EnableCoroChildAwait || call == nil {
-		return llssa.Nil, false
+func (p *context) compileCoroStaticAwait(
+	b llssa.Builder, call *ssa.Call, instructionPlan coroPhysicalInstructionPlan,
+) llssa.Expr {
+	if !p.hasCoroPhysicalBody() || call == nil || instructionPlan.control != coroPhysicalControlDirectAwait {
+		panic("coroutine child await escaped its frozen physical control recipe")
 	}
 	// Keep the ordinary call lowerer's frontend-elided package-init rule ahead
 	// of coroutine CallPlan dispatch. fnIgnore is not a variadic arity; passing
 	// it to compileValues would subtract two operands from a zero-argument call.
 	if p.funcKind(call.Call.Value) == fnIgnore {
-		return llssa.Nil, false
-	}
-	instructionPlan, planned := p.plannedCoroPhysicalControl(call)
-	if !planned || instructionPlan.control != coroPhysicalControlDirectAwait {
-		return llssa.Nil, false
+		panic("coroutine child await selected a frontend-elided initializer")
 	}
 	callee := instructionPlan.controlTarget
 	if callee == nil || instructionPlan.controlTargetID == "" {
 		panic("coroutine child await has an incomplete frozen physical control recipe")
 	}
-	p.observeCoroPhysicalControl(call, coroPhysicalControlDirectAwait)
-
 	p.recordCallerLocationForCall(b, &call.Call)
 	p.emitPCLineLabel(b, call.Pos())
 
@@ -224,7 +220,7 @@ func (p *context) tryCompileCoroStaticAwait(b llssa.Builder, call *ssa.Call) (ll
 		closureContext = b.Field(closureValue, 1)
 	}
 	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
-	return p.compileCoroTargetAwaitWithContextAndRecovery(b, callee, closureContext, args, nil, keepaliveSlots), true
+	return p.compileCoroTargetAwaitWithContextAndRecovery(b, callee, closureContext, args, nil, keepaliveSlots)
 }
 
 // compileCoroTargetAwait lowers one already-resolved exact managed target.
@@ -276,7 +272,7 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecovery(
 ) llssa.Expr {
 	callee := entry.function
 	body := p.coroBody()
-	if body == nil || p.compilation == nil || p.compilation.CoroPlan == nil || !p.compilation.EnableCoroChildAwait {
+	if body == nil || p.compilation == nil || p.compilation.CoroPlan == nil {
 		panic("coroutine child await requires an active physical coroutine body")
 	}
 	if b.Func != p.fn {
@@ -356,8 +352,7 @@ func (p *context) compileCoroTargetEntryAwaitWithContextAndRecovery(
 // this edge therefore uses the same scheduler-owned child transaction as an
 // ordinary static synchronous-style call.
 func (p *context) compileCoroPatchInitAwait(b llssa.Builder) {
-	if !p.hasCoroPhysicalBody() || b == nil || b.Func != p.fn ||
-		p.compilation == nil || !p.compilation.EnableCoroChildAwait {
+	if !p.hasCoroPhysicalBody() || b == nil || b.Func != p.fn {
 		panic("coroutine patch initializer await requires an active physical body")
 	}
 	if p.emissionUniverse == nil || p.compilation.CoroPlan == nil || p.goFn == nil {
@@ -438,7 +433,7 @@ func (p *context) awaitCoroChildWithRecovery(
 	cleanup *coroStaticCleanupState, keepaliveSlots []llssa.Expr,
 ) llssa.Expr {
 	body := p.coroBody()
-	if body == nil || p.compilation == nil || !p.compilation.EnableCoroChildAwait {
+	if body == nil {
 		panic("coroutine child await requires an active PhysicalABIV1 body")
 	}
 	if b.Func != p.fn || child.IsNil() || resultSlot.IsNil() {

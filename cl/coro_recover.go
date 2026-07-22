@@ -17,7 +17,6 @@
 package cl
 
 import (
-	"go/token"
 	"go/types"
 
 	llssa "github.com/goplus/llgo/ssa"
@@ -30,35 +29,6 @@ func isCoroRecoverBuiltinCall(call *ssa.Call) bool {
 	}
 	builtin, ok := call.Common().Value.(*ssa.Builtin)
 	return ok && builtin.Name() == "recover"
-}
-
-// tryCompileCoroInterfaceNilCompare replaces helper-backed empty-interface
-// equality with the Go representation rule needed by recover: an interface is
-// nil exactly when its dynamic type word is nil. Comparing only that word is
-// allocation-free, cannot panic on an uncomparable dynamic value, and avoids
-// routing EfaceEqual through a live stackless frame.
-func (p *context) tryCompileCoroInterfaceNilCompare(
-	b llssa.Builder, operation *ssa.BinOp,
-) (llssa.Expr, bool) {
-	if !p.hasCoroPhysicalBody() || operation == nil ||
-		(operation.Op != token.EQL && operation.Op != token.NEQ) {
-		return llssa.Nil, false
-	}
-	var value ssa.Value
-	if isUntypedNilConst(operation.X) {
-		value = operation.Y
-	} else if isUntypedNilConst(operation.Y) {
-		value = operation.X
-	} else {
-		return llssa.Nil, false
-	}
-	if _, ok := types.Unalias(p.patchType(value.Type())).Underlying().(*types.Interface); !ok {
-		return llssa.Nil, false
-	}
-	physical := p.compileValue(b, value)
-	typeWord := b.InterfaceTypeWord(physical)
-	nilType := p.prog.Nil(p.prog.VoidPtr())
-	return b.BinOp(operation.Op, typeWord, nilType), true
 }
 
 // compileCoroRecover replaces LLGo's legacy pthread-TLS Recover helper inside

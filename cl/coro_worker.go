@@ -68,7 +68,7 @@ func coroWorkerResumeSignature() *types.Signature {
 
 func (p *context) requireCoroWorkerBody(b llssa.Builder) *coroBodyContext {
 	body := p.coroBody()
-	if body == nil || p.compilation == nil || !p.compilation.EnableCoroWorker || b.Func != p.fn {
+	if body == nil || b.Func != p.fn {
 		panic("coroutine worker lowering requires an active planned physical coroutine body")
 	}
 	if body.abi.version < coroPhysicalABIVersionV1 || body.completion == nil ||
@@ -76,26 +76,6 @@ func (p *context) requireCoroWorkerBody(b llssa.Builder) *coroBodyContext {
 		panic("coroutine worker lowering requires the complete PhysicalABIV1 scheduler ABI")
 	}
 	return body
-}
-
-func (p *context) validateCoroWorkerSyscallCodegen(args []ssa.Value, results *types.Tuple) {
-	if len(args) < 1 || len(args)-1 > coroWorkerMaxArgsV1 || results == nil || results.Len() != 3 {
-		panic("coroutine worker syscall lowering received a non-V1 argument/result shape")
-	}
-	uintptrLike := func(typ types.Type) bool {
-		basic, ok := types.Unalias(typ).Underlying().(*types.Basic)
-		return ok && basic.Kind() == types.Uintptr
-	}
-	for index, argument := range args {
-		if argument == nil || !uintptrLike(argument.Type()) {
-			panic(fmt.Sprintf("coroutine worker syscall argument %d is not uintptr-shaped", index))
-		}
-	}
-	for index := 0; index < results.Len(); index++ {
-		if !uintptrLike(results.At(index).Type()) {
-			panic(fmt.Sprintf("coroutine worker syscall result %d is not uintptr-shaped", index))
-		}
-	}
 }
 
 type coroWorkerWordResultV1 struct {
@@ -245,11 +225,7 @@ func (p *context) compileCoroWorkerSyscall(
 	results *types.Tuple,
 	convention syscallFailureConvention,
 ) llssa.Expr {
-	p.validateCoroWorkerSyscallCodegen(args, results)
 	direct := p.coroWorkerOrdinaryCall(call)
-	if err := validateCoroWorkerSyscallCall(p.compilation.CoroPlan, p.compilation.EmissionUniverse, direct); err != nil {
-		panic(fmt.Errorf("coroutine worker syscall lowering: %w", err))
-	}
 	compiled := make([]llssa.Expr, len(args))
 	for index, argument := range args {
 		compiled[index] = p.compileValue(b, argument)
