@@ -148,8 +148,11 @@ func TakeRunDecision(
 		p.runDecisionTaken || !expectedAction(p, g, p.action, ActionResume) || !validRunDecision(p.runDecision) {
 		return ParkOutcomePending, 0, OperationResultLease{}, TaskCancelNone, false
 	}
-	decision := p.runDecision
-	if decision == (RunDecision{}) {
+	// Keep the P-owned slot addressed instead of copying the complete decision.
+	// The copy creates unnecessary frame pressure on register-constrained
+	// targets such as Xtensa.
+	decision := &p.runDecision
+	if *decision == (RunDecision{}) {
 		if expected != (ParkTicket{}) {
 			return ParkOutcomePending, 0, OperationResultLease{}, TaskCancelNone, false
 		}
@@ -162,7 +165,8 @@ func TakeRunDecision(
 	if validParkTicket(decision.ticket) && !DeliverParkResume(&g.park, decision.ticket) {
 		return ParkOutcomePending, 0, OperationResultLease{}, TaskCancelNone, false
 	}
+	outcome, caseID, lease, task = decision.outcome, decision.caseID, decision.lease, decision.task
 	p.runDecision = RunDecision{}
 	p.runDecisionTaken = true
-	return decision.outcome, decision.caseID, decision.lease, decision.task, true
+	return outcome, caseID, lease, task, true
 }
