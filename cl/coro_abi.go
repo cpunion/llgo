@@ -74,35 +74,6 @@ func coroSyntheticSelectNoCaseBox(instruction *ssa.MakeInterface) bool {
 	return ok && panicInstruction.X == instruction && coroSyntheticSelectNoCasePanic(panicInstruction)
 }
 
-// coroIndexOperationMayFault mirrors the plan-frozen choice made by
-// compileInstrOrValue. A safe fixed-array bound removes only the range fault;
-// an implicit pointer-to-array dereference can still produce the independent
-// nil fault unless the same emission-time predicates prove its base non-nil.
-func coroIndexOperationMayFault(plan *coro.SSAPlan, instruction ssa.Instruction) bool {
-	var base ssa.Value
-	switch operation := instruction.(type) {
-	case *ssa.Index:
-		base = operation.X
-	case *ssa.IndexAddr:
-		base = operation.X
-	default:
-		return false
-	}
-	if plan == nil {
-		return true
-	}
-	if _, safe := plan.ExactSafeFixedArrayIndex(instruction); !safe {
-		return true
-	}
-	if base == nil || base.Type() == nil {
-		return true
-	}
-	if _, pointer := types.Unalias(base.Type()).Underlying().(*types.Pointer); !pointer {
-		return false
-	}
-	return !emissionKnownNonNilArrayBase(base) && !ssaValueProvenNonNilAt(base, instruction)
-}
-
 const (
 	// Version zero is intentionally experimental: the complete CoroHeader and
 	// FrameDescriptor ABI is not frozen until scheduler/root lowering lands.
@@ -959,6 +930,7 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	oldBase := p.sourceParamBase
 	oldCoro := p.currentCoro
 	oldSourceBlocks := p.coroSourceBlocks
+	oldPhysicalPlan := p.coroPhysicalPlan
 	oldPhysicalEmission := p.coroPhysicalEmission
 	oldExplicitStatus := p.coroExplicitStatus
 	p.sourceParamBase = 2
@@ -972,26 +944,22 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 		p.sourceParamBase = oldBase
 		p.currentCoro = oldCoro
 		p.coroSourceBlocks = oldSourceBlocks
+		p.coroPhysicalPlan = oldPhysicalPlan
 		p.coroPhysicalEmission = oldPhysicalEmission
 		p.coroExplicitStatus = oldExplicitStatus
 	}()
 
-	audit, err := newCoroPhysicalPureSSAAudit(p.emissionUniverse, p.compilation.CoroPlan, fn, p.compilation.CoroFrameRetentionABI)
-	if err != nil {
-		panic(fmt.Errorf("rebuild coroutine frame-retention proof: %w", err))
+	if p.emissionUniverse == nil || p.emissionUniverse.coroProgramIR == nil {
+		panic("coroutine physical body has no ProgramIR")
 	}
-	critical, err := proveCoroCriticalRegions(p.emissionUniverse, p.compilation.CoroPlan, audit)
+	physicalPlan, err := p.emissionUniverse.coroProgramIR.physicalFunctionPlan(fn, p.emissionOwner)
 	if err != nil {
-		panic(fmt.Errorf("rebuild coroutine critical-region proof: %w", err))
+		panic(fmt.Errorf("load frozen coroutine physical plan: %w", err))
 	}
-	frameRetention := audit.currentFrameRetentionProof()
-	cleanupPlan, err := prepareCoroStaticCleanupPlan(
-		fn, p.compilation.CoroPlan, p.emissionUniverse, p.compilation.CoroFrameRetentionABI,
-		p.compilation.EnableCoroExplicitStatusPanicABI,
-	)
-	if err != nil {
-		panic(fmt.Errorf("rebuild coroutine static-cleanup proof: %w", err))
-	}
+	frameRetention := physicalPlan.frameRetention
+	critical := physicalPlan.critical
+	cleanupPlan := physicalPlan.cleanup
+	p.coroPhysicalPlan = physicalPlan
 
 	b.SetBlock(p.fn.Block(0))
 	cleanup := p.beginCoroStaticCleanup(b, cleanupPlan)
@@ -1120,11 +1088,46 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesAndFrameRetention(fn *ssa.Fu
 }
 
 func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn *ssa.Function, plan coro.FunctionPlan, whole *coro.SSAPlan, universe *EmissionUniverse, childAwait, programRun, staticSpawn, explicitPanic bool, frameRetentionABI string, channel, managedDispatch, rawMethodToken bool) error {
+	return validateCoroPhysicalABIForOwner(
+		fn, plan, whole, universe, nil, childAwait, programRun, staticSpawn, explicitPanic,
+		frameRetentionABI, channel, managedDispatch, rawMethodToken, nil,
+	)
+}
+
+func validateCoroPhysicalABIForOwner(
+	fn *ssa.Function,
+	plan coro.FunctionPlan,
+	whole *coro.SSAPlan,
+	universe *EmissionUniverse,
+	owner *preparedEmissionPackage,
+	childAwait, programRun, staticSpawn, explicitPanic bool,
+	frameRetentionABI string,
+	channel, managedDispatch, rawMethodToken bool,
+	accept func(*coroPhysicalFunctionPlan) error,
+) error {
 	if !childAwait {
 		if explicitPanic {
 			return fmt.Errorf("coroutine physical ABI: function %q: explicit-status panic requires PhysicalABIV1 child-await lowering", plan.ID)
 		}
-		return validateCoroLeafPhysicalABI(fn, plan)
+		if err := validateCoroLeafPhysicalABI(fn, plan); err != nil {
+			return err
+		}
+		if accept == nil {
+			return nil
+		}
+		audit, err := newCoroPhysicalPureSSAAuditForOwner(universe, whole, fn, owner, frameRetentionABI)
+		if err != nil {
+			return fmt.Errorf("coroutine physical ABI: function %q: cannot freeze leaf physical proof: %w", plan.ID, err)
+		}
+		critical, err := proveCoroCriticalRegions(universe, whole, audit)
+		if err != nil {
+			return fmt.Errorf("coroutine physical ABI: function %q: leaf critical region: %w", plan.ID, err)
+		}
+		physical, err := prepareCoroPhysicalFunctionPlan(audit, owner, whole, nil, critical, false)
+		if err != nil {
+			return fmt.Errorf("coroutine physical ABI: function %q: leaf physical plan: %w", plan.ID, err)
+		}
+		return accept(physical)
 	}
 
 	fail := func(format string, args ...any) error {
@@ -1253,7 +1256,7 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 	if err := validateCoroLeafPhysicalSignature(plan, physicalSourceSig); err != nil {
 		return err
 	}
-	pureSSA, err := newCoroPhysicalPureSSAAudit(universe, whole, fn, frameRetentionABI)
+	pureSSA, err := newCoroPhysicalPureSSAAuditForOwner(universe, whole, fn, owner, frameRetentionABI)
 	if err != nil {
 		return fail("cannot audit pure SSA lowering: %v", err)
 	}
@@ -1275,6 +1278,12 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 	}
 	if critical != nil && !programRun {
 		return fail("critical regions require the runnable scheduler ABI")
+	}
+	physical, physicalErr := prepareCoroPhysicalFunctionPlan(
+		pureSSA, owner, whole, cleanupPlan, critical, explicitPanic,
+	)
+	if physicalErr != nil {
+		return fail("cannot freeze physical instruction plan: %v", physicalErr)
 	}
 
 	panics := 0
@@ -1323,18 +1332,9 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 				if reason != "" {
 					return coroLeafInstructionError(fn, plan, instr, reason)
 				}
-				if field, ok := instr.(*ssa.FieldAddr); ok && pureSSA.fieldAddrRequiresImplicitNilFault(field) {
-					panics++
-				}
-				if explicitPanic && coroIndexOperationMayFault(whole, instr) {
-					panics++
-				}
-				if conversion, ok := instr.(*ssa.SliceToArrayPointer); ok && explicitPanic {
-					if length, exact := coroSliceToArrayPointerLen(conversion, pureSSA.typeOf); exact && length != 0 {
-						panics++
-					}
-				}
-				if call, ok := instr.(*ssa.Call); ok && explicitPanic && isWrapNilCheckCall(call) {
+				if instructionPlan, ok := physical.instructions[instr]; !ok {
+					return coroLeafInstructionError(fn, plan, instr, "instruction is absent from the frozen physical plan")
+				} else if instructionPlan.mayFault() {
 					panics++
 				}
 				if call, ok := instr.(*ssa.Call); ok && explicitPanic && isCoroCloseBuiltinCall(call) {
@@ -1641,6 +1641,11 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn 
 	}
 	if unsupported := plan.LocalEffect &^ (coro.YieldOnly | coro.AwaitStructured | coro.OutcomeStructured | coro.MayPark); unsupported != 0 {
 		return fail("child-await body has unsupported local effect %s", unsupported)
+	}
+	if accept != nil {
+		if err := accept(physical); err != nil {
+			return fail("freeze physical plan: %v", err)
+		}
 	}
 	return nil
 }

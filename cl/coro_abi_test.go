@@ -600,6 +600,9 @@ func TestCoroPhysicalValueTransportABIV1NativeAndWasm(t *testing.T) {
 			if got != nil {
 				t.Fatal("function-value preflight failure returned a partial package")
 			}
+			if universe.coroProgramIR.physicalPlansSealed || len(universe.coroProgramIR.physicalPlans) != 0 {
+				t.Fatal("failed physical preflight committed a partial ProgramIR projection")
+			}
 
 			compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 			enableCoroChildAwaitCompilation(compilation)

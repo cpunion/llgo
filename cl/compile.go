@@ -190,6 +190,7 @@ type context struct {
 	sourceParamBase      int // hidden physical parameters before source params
 	currentCoro          *coroBodyContext
 	currentCoroSite      *coroSiteEmissionObserver
+	coroPhysicalPlan     *coroPhysicalFunctionPlan
 	coroPhysicalEmission bool
 	coroExplicitStatus   bool
 	rawPlainBody         bool               // compiling the legacy ABI variant of a managed function
@@ -1554,10 +1555,15 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		if v.Op != token.ARROW {
 			p.recordPanicLocation(b, v.Pos())
 		}
-		guardedDeref := v.Op == token.MUL && p.coroDerefRequiresImplicitNilFault(v)
+		physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(v)
+		guardedDeref := physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionDeref
 		if guardedDeref {
+			p.observeCoroPhysicalInstruction(v, coroPhysicalInstructionDeref)
+			p.observeCoroPhysicalNilGuard(v)
 			x = p.compileCoroImplicitNilDerefGuard(b, v, x)
-		} else if shouldAssertDirectNilDeref(v) && !ssaValueProvenNonNilAt(v.X, v) {
+		} else if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary {
+			panic(fmt.Sprintf("typed load selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
+		} else if (!physicalPlanned || !p.coroExplicitStatus) && shouldAssertDirectNilDeref(v) && !ssaValueProvenNonNilAt(v.X, v) {
 			b.AssertNilDeref(x)
 		}
 		if v.Op == token.ARROW {
@@ -1609,9 +1615,14 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 	case *ssa.FieldAddr:
 		x := p.compileValue(b, v.X)
 		p.recordPanicLocation(b, v.Pos())
-		if p.coroFieldAddrRequiresImplicitNilFault(v) {
+		physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(v)
+		if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionFieldAddr {
+			p.observeCoroPhysicalInstruction(v, coroPhysicalInstructionFieldAddr)
+			p.observeCoroPhysicalNilGuard(v)
 			x = p.compileCoroImplicitNilFieldAddrGuard(b, v, x)
-		} else if p.isAddressOfFieldAddr(v) && !ssaAddressValueProvenNonNilAt(v.X, v) {
+		} else if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary {
+			panic(fmt.Sprintf("FieldAddr selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
+		} else if (!physicalPlanned || !p.coroExplicitStatus) && p.isAddressOfFieldAddr(v) && !ssaAddressValueProvenNonNilAt(v.X, v) {
 			b.AssertNilDeref(x)
 		}
 		ret = b.FieldAddr(x, v.Field)
@@ -1664,21 +1675,21 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		x := p.compileValue(b, vx)
 		idx := p.compileValue(b, v.Index)
 		p.recordPanicLocation(b, v.Pos())
-		if p.frozenSafeFixedArrayIndex(v, v.X, v.Index) {
+		physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(v)
+		if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionIndexAddr {
+			p.observeCoroPhysicalInstruction(v, coroPhysicalInstructionIndexAddr)
+			ret = p.compileCoroIndexAddrPlanned(b, v, x, idx, physicalInstruction)
+		} else if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary {
+			panic(fmt.Sprintf("IndexAddr selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
+		} else if p.frozenSafeFixedArrayIndex(v, v.X, v.Index) {
 			if _, pointer := types.Unalias(p.patchType(v.X.Type())).Underlying().(*types.Pointer); pointer &&
 				!emissionKnownNonNilArrayBase(v.X) && !ssaValueProvenNonNilAt(v.X, v) {
 				// Bounds safety says nothing about the implicit *array
 				// dereference. Keep its ordinary nil fault, routing it through
 				// the explicit outcome only in a physical coroutine body.
-				if p.currentCoro != nil && p.compilation != nil && p.compilation.EnableCoroExplicitStatusPanicABI {
-					x = p.compileCoroImplicitNilAccessGuard(b, x)
-				} else {
-					b.AssertNilDeref(x)
-				}
+				b.AssertNilDeref(x)
 			}
 			ret = b.IndexAddrUnchecked(x, idx)
-		} else if p.currentCoro != nil && p.compilation != nil && p.compilation.EnableCoroExplicitStatusPanicABI {
-			ret = p.compileCoroIndexAddrGuarded(b, v, x, idx)
 		} else {
 			ret = b.IndexAddr(x, idx)
 		}
@@ -1695,24 +1706,24 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			}
 			return
 		}
-		if p.frozenSafeFixedArrayIndex(v, v.X, v.Index) {
+		physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(v)
+		if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionIndex {
+			p.observeCoroPhysicalInstruction(v, coroPhysicalInstructionIndex)
+			ret = p.compileCoroIndexPlanned(b, v, x, idx, takeArrayAddr, physicalInstruction)
+		} else if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary {
+			panic(fmt.Sprintf("Index selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
+		} else if p.frozenSafeFixedArrayIndex(v, v.X, v.Index) {
 			switch types.Unalias(p.patchType(v.X.Type())).Underlying().(type) {
 			case *types.Array:
 				ret = b.IndexUnchecked(x, idx, takeArrayAddr)
 			case *types.Pointer:
 				if !emissionKnownNonNilArrayBase(v.X) && !ssaValueProvenNonNilAt(v.X, v) {
-					if p.currentCoro != nil && p.compilation != nil && p.compilation.EnableCoroExplicitStatusPanicABI {
-						x = p.compileCoroImplicitNilAccessGuard(b, x)
-					} else {
-						b.AssertNilDeref(x)
-					}
+					b.AssertNilDeref(x)
 				}
 				ret = b.Load(b.IndexAddrUnchecked(x, idx))
 			default:
 				panic("safe fixed-array Index lost its frozen container shape")
 			}
-		} else if p.currentCoro != nil && p.compilation != nil && p.compilation.EnableCoroExplicitStatusPanicABI {
-			ret = p.compileCoroIndexGuarded(b, v, x, idx, takeArrayAddr)
 		} else {
 			ret = b.Index(x, idx, takeArrayAddr)
 		}
@@ -1741,8 +1752,12 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			max = p.compileValue(b, v.Max)
 		}
 		p.recordPanicLocation(b, v.Pos())
-		if p.currentCoro != nil && p.compilation != nil && p.compilation.EnableCoroExplicitStatusPanicABI {
-			ret = p.compileCoroSliceGuarded(b, v, x, low, high, max)
+		physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(v)
+		if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionSlice {
+			p.observeCoroPhysicalInstruction(v, coroPhysicalInstructionSlice)
+			ret = p.compileCoroSlicePlanned(b, v, x, low, high, max, physicalInstruction)
+		} else if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary {
+			panic(fmt.Sprintf("Slice selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
 		} else {
 			ret = b.Slice(x, low, high, max)
 		}
@@ -1886,6 +1901,20 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 	case *ssa.SliceToArrayPointer:
 		t := p.type_(v.Type(), llssa.InGo)
 		x := p.compileValue(b, v.X)
+		physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(v)
+		if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionSliceToArrayPointer {
+			p.observeCoroPhysicalInstruction(v, coroPhysicalInstructionSliceToArrayPointer)
+			if physicalInstruction.bound == 0 {
+				ret = b.SliceToArrayPointerUnchecked(x, t)
+				break
+			}
+			p.recordPanicLocation(b, v.Pos())
+			ret = p.compileCoroSliceToArrayPointer(b, v, x, t, physicalInstruction)
+			break
+		}
+		if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary {
+			panic(fmt.Sprintf("SliceToArrayPointer selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
+		}
 		length, exact := coroSliceToArrayPointerLen(v, p.patchType)
 		if exact && length == 0 {
 			// Go deliberately preserves the slice data word here: a nil slice
@@ -1895,11 +1924,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			break
 		}
 		p.recordPanicLocation(b, v.Pos())
-		if p.currentCoro != nil && p.compilation != nil && p.compilation.EnableCoroExplicitStatusPanicABI {
-			ret = p.compileCoroSliceToArrayPointer(b, v, x, t)
-		} else {
-			ret = b.SliceToArrayPointer(x, t)
-		}
+		ret = b.SliceToArrayPointer(x, t)
 	default:
 		panic(fmt.Sprintf("compileInstrAndValue: unknown instr - %T\n", iv))
 	}

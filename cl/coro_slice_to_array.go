@@ -93,6 +93,7 @@ func (p *context) compileCoroSliceToArrayPointer(
 	conversion *ssa.SliceToArrayPointer,
 	x llssa.Expr,
 	typ llssa.Type,
+	plan coroPhysicalInstructionPlan,
 ) llssa.Expr {
 	if p == nil || p.currentCoro == nil || conversion == nil || b == nil || b.Func != p.fn {
 		panic("structured slice-to-array-pointer conversion escaped its physical coroutine body")
@@ -101,12 +102,13 @@ func (p *context) compileCoroSliceToArrayPointer(
 		p.currentCoro.abi.version < coroPhysicalABIVersionV1 {
 		panic("slice-to-array-pointer fault requires the PhysicalABIV1 explicit-status panic ABI")
 	}
-	length, exact := coroSliceToArrayPointerLen(conversion, p.patchType)
-	if !exact || length < 0 {
-		panic(fmt.Sprintf("invalid slice-to-array-pointer SSA shape %s", conversion))
+	if plan.recipe != coroPhysicalInstructionSliceToArrayPointer || plan.bound < 0 ||
+		plan.boundsGuard != (plan.bound != 0) {
+		panic(fmt.Sprintf("invalid frozen slice-to-array-pointer recipe for %s", conversion))
 	}
-	if length != 0 {
-		limit := b.Prog.IntVal(uint64(length), b.Prog.Int())
+	if plan.boundsGuard {
+		p.observeCoroPhysicalBoundsGuard(conversion)
+		limit := b.Prog.IntVal(uint64(plan.bound), b.Prog.Int())
 		tooShort := b.BinOp(token.LSS, b.SliceLen(x), limit)
 		p.compileCoroFaultConditionGuard(b, tooShort, coroFaultSliceConvertV1)
 	}

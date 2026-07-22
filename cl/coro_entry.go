@@ -49,6 +49,7 @@ type plannedFunctionSymbol struct {
 	frameRetentionABI string
 	coroPlan          *coro.SSAPlan
 	emission          *EmissionUniverse
+	physicalOwner     *preparedEmissionPackage
 	interfacePlain    *coroClosedInterfacePlainPlan
 	managedInterface  *coroManagedInterfaceDispatchPlan
 	patchOriginalInit bool
@@ -104,6 +105,12 @@ func (p *context) resolveFunctionSymbol(fn *ssa.Function) (plannedFunctionSymbol
 	entry.frameRetentionABI = p.compilation.CoroFrameRetentionABI
 	entry.coroPlan = p.compilation.CoroPlan
 	entry.emission = p.compilation.EmissionUniverse
+	// Symbol resolution can happen in a caller package that merely references
+	// fn. Its physical proof belongs to fn's body owner; actual multi-owner body
+	// emission performs its own exact lookup in compileCoroPhysicalBody.
+	if p.compilation.EmissionUniverse != nil {
+		entry.physicalOwner = p.compilation.EmissionUniverse.ownerOf(fn)
+	}
 	entry.interfacePlain = p.compilation.coroClosedInterfacePlain
 	entry.managedInterface = p.compilation.coroManagedInterface
 	ignored := p.compilation.CoroPlan.IgnoresBody(fn)
@@ -256,6 +263,10 @@ func (p *context) omitUnemittedFunction(fn *ssa.Function) bool {
 // checkSupported rejects plan decisions whose physical ABI is not implemented
 // yet. Callers must run this before looking up or creating an LLVM symbol.
 func (e plannedFunctionSymbol) checkSupported() error {
+	return e.checkSupportedWithPhysicalPlan(nil)
+}
+
+func (e plannedFunctionSymbol) checkSupportedWithPhysicalPlan(accept func(*coroPhysicalFunctionPlan) error) error {
 	if !e.planned {
 		return nil
 	}
@@ -325,9 +336,15 @@ func (e plannedFunctionSymbol) checkSupported() error {
 		}
 		rawMethodToken := e.interfacePlain.acceptsTarget(e.function, e.plan) ||
 			e.managedInterface.acceptsTarget(e.function, e.plan)
-		return validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(
-			e.function, e.plan, e.coroPlan, e.emission, e.childAwait, e.programRun,
+		if accept == nil && e.emission != nil && e.emission.coroProgramIR != nil &&
+			e.emission.coroProgramIR.physicalPlansSealed {
+			_, err := e.emission.coroProgramIR.physicalFunctionPlan(e.function, e.physicalOwner)
+			return err
+		}
+		return validateCoroPhysicalABIForOwner(
+			e.function, e.plan, e.coroPlan, e.emission, e.physicalOwner, e.childAwait, e.programRun,
 			e.staticSpawn, e.explicitPanic, e.frameRetentionABI, e.channel, e.plainDispatch, rawMethodToken,
+			accept,
 		)
 	}
 	if e.plan.Emission == coro.EmitExternal && e.plan.FuncRep == coro.DirectCoro {
@@ -390,28 +407,30 @@ func (c *Compilation) preflightCoroPlan() error {
 				return
 			}
 		}
-		if c.CoroPlan == nil {
+		plan := c.CoroPlan
+		if plan == nil {
 			c.coroPreflightErr = fmt.Errorf("coroutine entry resolution requires a compilation CoroPlan")
 			return
 		}
-		if c.EmissionUniverse == nil {
+		universe := c.EmissionUniverse
+		if universe == nil {
 			c.coroPreflightErr = fmt.Errorf("coroutine entry resolution requires a prepared emission universe")
 			return
 		}
-		if c.EmissionUniverse.CoroChannelEnabled() != c.EnableCoroChannel {
+		if universe.CoroChannelEnabled() != c.EnableCoroChannel {
 			c.coroPreflightErr = fmt.Errorf("coroutine channel lowering disagrees with the prepared emission universe")
 			return
 		}
-		if c.EmissionUniverse.CoroWorkerEnabled() != c.EnableCoroWorker {
+		if universe.CoroWorkerEnabled() != c.EnableCoroWorker {
 			c.coroPreflightErr = fmt.Errorf("coroutine worker lowering disagrees with the prepared emission universe")
 			return
 		}
-		if err := c.EmissionUniverse.ValidateCoroPlan(c.CoroPlan); err != nil {
+		if err := universe.ValidateCoroPlan(plan); err != nil {
 			c.coroPreflightErr = err
 			return
 		}
 		managedInterface, err := analyzeCoroManagedInterfaceDispatchPlan(
-			c.CoroPlan, c.EmissionUniverse, c.EnableCoroPlainDispatch && c.EnableCoroChildAwait,
+			plan, universe, c.EnableCoroPlainDispatch && c.EnableCoroChildAwait,
 		)
 		if err != nil {
 			c.coroPreflightErr = err
@@ -419,7 +438,7 @@ func (c *Compilation) preflightCoroPlan() error {
 		}
 		c.coroManagedInterface = managedInterface
 		interfacePlain, err := analyzeCoroClosedInterfacePlainPlan(
-			c.CoroPlan, c.EmissionUniverse, c.EnableCoroExplicitStatusPanicABI, c.EnableCoroChildAwait,
+			plan, universe, c.EnableCoroExplicitStatusPanicABI, c.EnableCoroChildAwait,
 		)
 		if err != nil {
 			c.coroPreflightErr = err
@@ -427,12 +446,14 @@ func (c *Compilation) preflightCoroPlan() error {
 		}
 		c.coroClosedInterfacePlain = interfacePlain
 		if c.EnableCoroChildAwait {
-			if err := validateCoroRootEntries(c.CoroPlan); err != nil {
+			if err := validateCoroRootEntries(plan); err != nil {
 				c.coroPreflightErr = err
 				return
 			}
 		}
-		for _, function := range c.CoroPlan.Functions() {
+		physicalExpected := make(map[emissionFunctionOwnerKey]none)
+		physicalStage := newCoroPhysicalPlanStage()
+		for _, function := range plan.Functions() {
 			hasEmittedBody, err := c.plannedFunctionEmittedBody(function.Function)
 			if err != nil {
 				c.coroPreflightErr = err
@@ -457,17 +478,35 @@ func (c *Compilation) preflightCoroPlan() error {
 				staticSpawn:       c.EnableCoroClosedStaticSpawn,
 				explicitPanic:     c.EnableCoroExplicitStatusPanicABI,
 				frameRetentionABI: c.CoroFrameRetentionABI,
-				coroPlan:          c.CoroPlan,
-				emission:          c.EmissionUniverse,
+				coroPlan:          plan,
+				emission:          universe,
 				interfacePlain:    c.coroClosedInterfacePlain,
 				managedInterface:  c.coroManagedInterface,
 			}
-			if err := entry.checkSupported(); err != nil {
+			if c.EnableCoroPhysicalABI && function.Plan.Emission == coro.EmitCoroutine {
+				owners := universe.sortedUseOwners(function.Function)
+				if len(owners) == 0 {
+					c.coroPreflightErr = fmt.Errorf("coroutine physical preflight: function %q has no exact emission owner", function.Plan.ID)
+					return
+				}
+				for _, owner := range owners {
+					ownerEntry := entry
+					ownerEntry.physicalOwner = owner
+					key := emissionFunctionOwnerKey{function: function.Function, owner: owner}
+					physicalExpected[key] = none{}
+					if err := ownerEntry.checkSupportedWithPhysicalPlan(func(plan *coroPhysicalFunctionPlan) error {
+						return physicalStage.freezePhysicalFunctionPlan(plan)
+					}); err != nil {
+						c.coroPreflightErr = err
+						return
+					}
+				}
+			} else if err := entry.checkSupported(); err != nil {
 				c.coroPreflightErr = err
 				return
 			}
 			if c.EnableCoroPhysicalABI && function.Plan.Emission == coro.EmitCoroutine {
-				sig, err := c.EmissionUniverse.coroPhysicalEntrySourceSignature(function.Function)
+				sig, err := universe.coroPhysicalEntrySourceSignature(function.Function)
 				if err == nil {
 					err = validateCoroLeafPhysicalSignature(function.Plan, sig)
 				}
@@ -480,17 +519,17 @@ func (c *Compilation) preflightCoroPlan() error {
 				}
 			}
 		}
-		if err := validateCoroRawCFunctionAdapters(c.CoroPlan, c.EmissionUniverse); err != nil {
+		if err := validateCoroRawCFunctionAdapters(plan, universe); err != nil {
 			c.coroPreflightErr = err
 			return
 		}
-		if err := validateCoroRawPlainConsumers(c.CoroPlan, c.EmissionUniverse, c.EnableCoroPlainDispatch); err != nil {
+		if err := validateCoroRawPlainConsumers(plan, universe, c.EnableCoroPlainDispatch); err != nil {
 			c.coroPreflightErr = err
 			return
 		}
 		if c.EnableCoroPhysicalABI {
 			c.coroPreflightErr = validateCoroPhysicalConsumersCapabilities(
-				c.CoroPlan, c.EmissionUniverse, c.EnableCoroChildAwait, c.EnableCoroClosedStaticSpawn,
+				plan, universe, c.EnableCoroChildAwait, c.EnableCoroClosedStaticSpawn,
 				c.EnableCoroPlainDispatch,
 			)
 			if c.coroPreflightErr != nil {
@@ -499,8 +538,17 @@ func (c *Compilation) preflightCoroPlan() error {
 		}
 		if c.EnableCoroPlainDispatch {
 			c.coroPreflightErr = validateCoroPlainDispatchConsumers(
-				c.CoroPlan, c.EmissionUniverse, c.coroClosedInterfacePlain, c.coroManagedInterface,
+				plan, universe, c.coroClosedInterfacePlain, c.coroManagedInterface,
 			)
+			if c.coroPreflightErr != nil {
+				return
+			}
+		}
+		if c.EnableCoroPhysicalABI {
+			if err := universe.coroProgramIR.commitPhysicalFunctionPlans(physicalStage, physicalExpected); err != nil {
+				c.coroPreflightErr = fmt.Errorf("coroutine physical preflight: commit ProgramIR: %w", err)
+				return
+			}
 		}
 	})
 	return c.coroPreflightErr

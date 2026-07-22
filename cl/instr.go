@@ -2108,13 +2108,23 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 		fn := cv.Name()
 		if fn == "ssa:wrapnilchk" {
 			ptr := p.compileValue(b, args[0])
-			if p.currentCoro != nil && p.compilation != nil && p.compilation.EnableCoroExplicitStatusPanicABI {
+			var sourceCall *ssa.Call
+			if p.currentCoroSite != nil {
+				sourceCall, _ = p.currentCoroSite.instruction.(*ssa.Call)
+			}
+			physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(sourceCall)
+			if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionBuiltinNilGuard {
 				// A value-method wrapper's nil check is a language-level panic edge,
 				// not a call that may unwind the native stack through a live LLVM
 				// coroutine frame. ExplicitStatus owns the branch and returns the
 				// original pointer on its non-nil continuation.
+				p.observeCoroPhysicalInstruction(sourceCall, coroPhysicalInstructionBuiltinNilGuard)
+				p.observeCoroPhysicalNilGuard(sourceCall)
 				ret = p.compileCoroImplicitNilAccessGuard(b, ptr)
 				return
+			}
+			if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary {
+				panic(fmt.Sprintf("ssa:wrapnilchk selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
 			}
 			recvType := p.compileValue(b, args[1])
 			methodName := p.compileValue(b, args[2])

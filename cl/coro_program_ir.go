@@ -27,17 +27,20 @@ import (
 // global summaries, physical control and storage projections to this same
 // object rather than creating independently-versioned lowering documents.
 type coroProgramIR struct {
-	sitePlans   map[emissionFunctionOwnerKey]map[ssa.Instruction]coroEmissionSitePlan
-	siteOwners  map[emissionFunctionOwnerKey]none
-	callPlans   map[ssa.CallInstruction]coroFrozenCallSitePlan
-	callsFrozen bool
+	sitePlans           map[emissionFunctionOwnerKey]map[ssa.Instruction]coroEmissionSitePlan
+	siteOwners          map[emissionFunctionOwnerKey]none
+	callPlans           map[ssa.CallInstruction]coroFrozenCallSitePlan
+	callsFrozen         bool
+	physicalPlans       map[emissionFunctionOwnerKey]*coroPhysicalFunctionPlan
+	physicalPlansSealed bool
 }
 
 func newCoroProgramIR() *coroProgramIR {
 	return &coroProgramIR{
-		sitePlans:  make(map[emissionFunctionOwnerKey]map[ssa.Instruction]coroEmissionSitePlan),
-		siteOwners: make(map[emissionFunctionOwnerKey]none),
-		callPlans:  make(map[ssa.CallInstruction]coroFrozenCallSitePlan),
+		sitePlans:     make(map[emissionFunctionOwnerKey]map[ssa.Instruction]coroEmissionSitePlan),
+		siteOwners:    make(map[emissionFunctionOwnerKey]none),
+		callPlans:     make(map[ssa.CallInstruction]coroFrozenCallSitePlan),
+		physicalPlans: make(map[emissionFunctionOwnerKey]*coroPhysicalFunctionPlan),
 	}
 }
 

@@ -1,6 +1,6 @@
 # LLGo Coroutine 语义标准化 IR 与统一 Lowering 设计
 
-状态：2026-07-22架构复审结论；可运行纵向基线已冻结，暂停新增能力。hidden runtime helper与intrinsic/call-elision两个cohort已切换到单一ProgramIR SitePlan；其他LoweringFacts仍主要是report/cache identity，尚未成为production lowering的唯一事实源。在完成单一ProgramIR、单一emitter及runtime hard cutover前，不继续叠加语言或平台功能
+状态：2026-07-22架构复审结论；可运行纵向基线已冻结，暂停新增能力。hidden runtime helper、intrinsic/call-elision以及physical proof/implicit-fault三个cohort已切换到单一ProgramIR SitePlan；其他LoweringFacts仍主要是report/cache identity，尚未成为production lowering的唯一事实源。在完成单一ProgramIR、单一emitter及runtime hard cutover前，不继续叠加语言或平台功能
 
 更新：2026-07-22
 
@@ -225,9 +225,9 @@ Phase 35 修复过 direct receive resume status 跳回 logical block 首部、�
 
 当前实现已越过“只是原型代码多”的范围，存在可量化的横向耦合：
 
-- `currentCoro`出现在24个production compiler文件、171处；coroutine physical context已经渗入普通instruction emitter。
-- `CoroPlan/EmissionUniverse`被42个production compiler文件直接读取、412处；没有窄的function/site plan消费边界。
-- 11个`EnableCoro*`阶段开关在30个production文件出现297次；合法组合靠分散gate维持。
+- `currentCoro`仍出现在24个production compiler文件、173处；coroutine physical context尚未退出普通instruction emitter。
+- `CoroPlan/EmissionUniverse`直接读取已由精确gate从412降到392处，但距离窄的function/site plan消费边界仍有明显差距。
+- `EnableCoro*`阶段开关的精确引用已从330降到322处；合法组合仍主要靠分散gate维持。
 - `ExecutorSourceSet`一个文件约767行，对7类source有153个typed field/case引用，bind失败回滚、scan、apply、deadline、empty、terminal close和unbind均手写展开。
 - native single-P与fleet选择/全局状态涉及29个production runtime文件、362处引用；fleet route 1通过“收养”旧program P/driver/source进入新模型，而不是由唯一fleet profile直接创建domain 0。
 - `WaitToken/WaitRegistration`逻辑队列与`ParkState/OperationID`同时存在；Timer和Poll还各自维护V1/V2 mode及共享generation兼容规则。
@@ -992,10 +992,40 @@ frame lifetime或统一emitter已经迁移。下一cohort必须继续以“新�
 该完成标记只覆盖call occurrence的intrinsic/elision/capability事实及其现有consumer，不代表pure
 instruction、implicit fault、panic/outcome、control overlay、frame storage或统一emitter已经迁移。
 
+#### Phase B.3：physical proof与implicit-fault cohort（已完成）
+
+2026-07-22已完成第三条production replacement cohort；其边界是“physical preflight已接受的函数证明和
+FieldAddr/Deref/Index/IndexAddr/Slice/SliceToArrayPointer/`ssa:wrapnilchk`控制流选择”，不把尚未统一的普通
+pure instruction emitter冒充完成：
+
+- `Compilation.preflightCoroPlan`为每个精确`(function, emission owner)`构造同一ProgramIR中的post-plan
+  `coroPhysicalFunctionPlan`，一次性冻结frame-retention、critical-region、static-cleanup证明及每条source
+  instruction的physical recipe。owner不是caller package：符号引用读取body owner证明，真正multi-owner body
+  emission则读取自己的exact owner projection。
+- freeze采用事务式stage；所有function、raw/plain consumer及dispatch验证全部成功后才原子commit并seal。
+  失败preflight不会把半份projection留在共享EmissionUniverse，重复freeze、缺owner、缺instruction、集合不精确
+  或第二次commit均fail closed。
+- `compileCoroPhysicalBody`只读取sealed physical plan；production codegen中
+  `newCoroPhysicalPureSSAAudit`、`proveCoroCriticalRegions`和`prepareCoroStaticCleanupPlan`重建调用为0。
+  frame-retention、critical和cleanup不再由preflight/codegen各算一遍。
+- implicit-fault recipe同时冻结container kind、array bound、nil guard与bounds guard；safe fixed-array proof只在
+  planner核对一次。explicit-status PhysicalABIV1 codegen不再从patched type、frame proof或raw SSA重新选择FieldAddr/Deref、
+  Index/IndexAddr、Slice、slice-to-array及wrapper nil分支；旧selector和旧`*Guarded`入口已删除且静态gate为0。
+- source emission ledger要求上述每个非ordinary physical recipe精确上报一次。漏发、错recipe、重复发射、
+  未sealed plan或codegen缺plan均立即失败；负向测试覆盖事务污染、重复commit、缺失projection以及recipe
+  missing/mismatch。
+- architecture gate锁定builder=2、freeze=1、commit=1、lookup=2、recipe selection=7、recipe observation=7和
+  nil/bounds guard observation=10，
+  并分别锁定精确文件集合；codegen proof rebuild和legacy physical selector均为0，没有回弹余量。
+
+该完成标记不包含普通pure instruction的统一LLVM recipe、await/spawn/park/channel/select、panic/outcome、
+continuation overlay、virtual storage或单一emitter。后续迁移必须扩展同一个physical plan，不能另建overlay
+权威或恢复codegen现场判断。
+
 ### Phase C：analysis只消费facts
 
-- hidden lowered helper、`ClassifyElidedCall`及intrinsic site/local effect输入已由Phase B.1/B.2替换；继续
-  迁移pure instruction、implicit fault及其local effect/exec输入。
+- hidden lowered helper、`ClassifyElidedCall`、intrinsic site/local effect及physical implicit-fault选择已由
+  Phase B.1/B.2/B.3替换；继续迁移普通pure instruction recipe及其local effect/exec输入。
 - 再逐步替换call/value-flow扫描的重复classification；必要的数据流pass仍保留。
 - report-only计算跨plain调用闭包的MaxAtomicCost，记录与当前instruction budget的差异，但不改变NeedsPreempt、primary或poll。
 
@@ -1191,22 +1221,23 @@ Phase A先报告多次运行中位数和离散度；取得稳定噪声后，再�
 
 ## 18. 建议的下一步
 
-Phase A 与 Phase B 的前两个replacement cohort已经完成：`internal/coro/lowering_facts.go`提供pointer-free site/instance
+Phase A 与 Phase B 的前三个replacement cohort已经完成：`internal/coro/lowering_facts.go`提供pointer-free site/instance
 identity、稀疏LoweringFacts、canonical dump/digest与verifier；`cl`从冻结的EmissionUniverse和SSAPlan
 生成owner-scoped snapshot；build在任何package codegen前把该snapshot装入`CoroPlanDigest v26`、
 `cl.Compilation`、package fingerprint与manifest，source/cache registration都会验证内容和digest一致。
 
 2026-07-22复审最初把LoweringFacts定义为“已建立观测点”，而不是已完成架构层。随后hidden runtime
-helper及intrinsic/call-elision cohort已完成production切换，但其余facts仍未替换production classifier/emitter；继续直接
+helper、intrinsic/call-elision以及physical proof/implicit-fault cohort已完成production切换，但其余facts仍未替换production classifier/emitter；继续直接
 增加完整Overlay仍会扩大双轨。后续严格按replacement cohort推进：
 
 1. 先提交当前双owner fleet可运行基线及五项fresh E2E结果，不再混入新能力。
 2. architecture gate test已经冻结当前债务的精确AST/build-constraint快照；每个cohort必须在删除旧路径的
    同一提交下调数字和白名单，禁止留下可反弹额度，也禁止新增`EnableCoro*`、raw-SSA classifier、
    single-P/fleet分支和logical WaitToken consumer。
-3. hidden helper及intrinsic/call-elision cohort已按上述gate完成；下一步把pure instruction与implicit
-   fault作为一个封闭cohort迁移，不能重新引入raw SSA helper、intrinsic或elision consumer。
-4. 随后依次迁移await/spawn、park/channel/select、panic/cleanup；每个完整
+3. hidden helper、intrinsic/call-elision及physical proof/implicit-fault cohort已按上述gate完成；下一步把
+   ordinary pure instruction recipe与其local effect/exec作为封闭cohort迁移，不能重新引入raw SSA helper、
+   intrinsic、fault selector或codegen proof rebuild。
+4. 随后依次迁移await/spawn、park/channel/select、panic/outcome；每个完整
    function cohort由统一emitter接管后立即删除旧CFG拼装，最终清除普通compiler中的`currentCoro`分支。
 5. 并行完成runtime Phase R：fleet唯一target、Park/Operation唯一logical wait、统一source dispatcher和
    单一profile；每一项都以旧production符号为零作为完成条件。

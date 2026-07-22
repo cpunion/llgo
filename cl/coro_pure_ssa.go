@@ -70,6 +70,16 @@ func newCoroPhysicalPureSSAAudit(
 	fn *ssa.Function,
 	frameRetentionABI string,
 ) (*coroPhysicalPureSSAAudit, error) {
+	return newCoroPhysicalPureSSAAuditForOwner(universe, plan, fn, nil, frameRetentionABI)
+}
+
+func newCoroPhysicalPureSSAAuditForOwner(
+	universe *EmissionUniverse,
+	plan *coro.SSAPlan,
+	fn *ssa.Function,
+	owner *preparedEmissionPackage,
+	frameRetentionABI string,
+) (*coroPhysicalPureSSAAudit, error) {
 	audit := &coroPhysicalPureSSAAudit{
 		universe:          universe,
 		plan:              plan,
@@ -91,7 +101,19 @@ func newCoroPhysicalPureSSAAudit(
 	if _, frozen := universe.required[fn]; !frozen {
 		return nil, fmt.Errorf("function %q is outside the prepared emission universe", fn.Name())
 	}
-	owner := universe.ownerOf(fn)
+	if owner == nil {
+		owner = universe.ownerOf(fn)
+	}
+	if owner == nil {
+		return nil, fmt.Errorf("function %q has no exact emission owner", fn.Name())
+	}
+	owned := false
+	for _, candidate := range universe.sortedUseOwners(fn) {
+		owned = owned || candidate == owner
+	}
+	if !owned {
+		return nil, fmt.Errorf("function %q is not materialized for emission owner %q", fn.Name(), owner.identity)
+	}
 	ctx, err := universe.functionABIContext(fn, owner)
 	if err != nil {
 		return nil, err
@@ -444,6 +466,33 @@ func (a *coroPhysicalPureSSAAudit) fieldAddrRequiresImplicitNilFault(field *ssa.
 	}
 	proof := a.currentFrameRetentionProof()
 	return proof != nil && proof.requiresImplicitNilFault(field, field)
+}
+
+func (a *coroPhysicalPureSSAAudit) derefRequiresImplicitNilFault(deref *ssa.UnOp) bool {
+	if a == nil || deref == nil || deref.Op != token.MUL {
+		return false
+	}
+	if ssaValueProvenNonNilAt(deref.X, deref) {
+		return false
+	}
+	if _, _, synthetic := coroSliceToArrayValueDeref(deref, a.typeOf); synthetic {
+		// The conversion owns the N>0 length fault. N==0 array-value
+		// conversion is the zero value and must remain legal for a nil slice.
+		return false
+	}
+	proof := a.currentFrameRetentionProof()
+	if proof == nil {
+		return false
+	}
+	if field, ok := deref.X.(*ssa.FieldAddr); ok && proof.requiresImplicitNilFault(field, field) {
+		// The FieldAddr recipe owns this base guard before constructing the GEP.
+		return false
+	}
+	if _, indexed := deref.X.(*ssa.IndexAddr); indexed {
+		// The IndexAddr recipe owns its bounds and possible *array nil guards.
+		return false
+	}
+	return proof.requiresImplicitNilFault(deref.X, deref)
 }
 
 func (a *coroPhysicalPureSSAAudit) validateIndexAddr(index *ssa.IndexAddr) string {

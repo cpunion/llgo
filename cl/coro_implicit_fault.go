@@ -130,40 +130,47 @@ func (p *context) compileCoroIndexBoundsGuard(b llssa.Builder, outOfRange llssa.
 	p.compileCoroFaultConditionGuard(b, outOfRange, coroFaultIndexBoundsV1)
 }
 
-func (p *context) compileCoroIndexAddrGuarded(
+func (p *context) compileCoroIndexAddrPlanned(
 	b llssa.Builder,
 	operation *ssa.IndexAddr,
 	base, index llssa.Expr,
+	plan coroPhysicalInstructionPlan,
 ) llssa.Expr {
 	if p == nil || p.currentCoro == nil || operation == nil || operation.X == nil ||
 		b == nil || b.Func != p.fn {
 		panic("structured coroutine IndexAddr escaped its physical body")
 	}
+	if plan.recipe != coroPhysicalInstructionIndexAddr {
+		panic("structured coroutine IndexAddr has the wrong physical recipe")
+	}
 	var limit llssa.Expr
-	pointerBase := false
-	switch container := types.Unalias(p.patchType(operation.X.Type())).Underlying().(type) {
-	case *types.Slice:
-		limit = b.SliceLen(base)
-	case *types.Pointer:
-		pointerBase = true
-		array, ok := types.Unalias(container.Elem()).Underlying().(*types.Array)
-		if !ok {
-			panic("structured coroutine IndexAddr pointer base is not an array")
+	switch plan.container {
+	case coroPhysicalContainerSlice:
+		if plan.boundsGuard {
+			limit = b.SliceLen(base)
 		}
-		limit = b.Prog.IntVal(uint64(array.Len()), b.Prog.Int())
+	case coroPhysicalContainerArrayPointer:
+		if plan.boundsGuard {
+			limit = b.Prog.IntVal(uint64(plan.bound), b.Prog.Int())
+		}
 	default:
-		panic("structured coroutine IndexAddr has unsupported base")
+		panic("structured coroutine IndexAddr has an invalid frozen container")
 	}
 	// Indexing a pointer-to-array first implicitly dereferences the pointer.
 	// Preserve Go's fault order: nil pointer before index bounds. A nil slice,
 	// by contrast, is a valid length-zero slice and therefore takes only the
 	// ordinary bounds fault for any element access.
-	if pointerBase &&
-		!isKnownNonNilAddr(operation.X) && !ssaValueProvenNonNilAt(operation.X, operation) {
+	if plan.nilGuard {
+		p.observeCoroPhysicalNilGuard(operation)
 		base = p.compileCoroImplicitNilAccessGuard(b, base)
 	}
-	normalized, outOfRange := b.IndexBounds(index, limit)
-	p.compileCoroIndexBoundsGuard(b, outOfRange)
+	normalized := index
+	if plan.boundsGuard {
+		p.observeCoroPhysicalBoundsGuard(operation)
+		var outOfRange llssa.Expr
+		normalized, outOfRange = b.IndexBounds(index, limit)
+		p.compileCoroIndexBoundsGuard(b, outOfRange)
+	}
 	return b.IndexAddrUnchecked(base, normalized)
 }
 
@@ -174,54 +181,53 @@ func (p *context) compileCoroIndexAddrGuarded(
 // the address/load is emitted only in the continuation dominated by the Go
 // bounds check. A nullable *array gets the same structured nil-fault edge as
 // IndexAddr after its bounds check.
-func (p *context) compileCoroIndexGuarded(
+func (p *context) compileCoroIndexPlanned(
 	b llssa.Builder,
 	operation *ssa.Index,
 	base, index llssa.Expr,
 	takeArrayAddr func() (addr llssa.Expr, zero bool),
+	plan coroPhysicalInstructionPlan,
 ) llssa.Expr {
 	if p == nil || p.currentCoro == nil || operation == nil || operation.X == nil ||
 		operation.Index == nil || b == nil || b.Func != p.fn {
 		panic("structured coroutine Index escaped its physical body")
 	}
 
-	container := types.Unalias(p.patchType(operation.X.Type())).Underlying()
-	var limit llssa.Expr
-	switch container := container.(type) {
-	case *types.Basic:
-		if !coroPhysicalStringBasic(container) {
-			panic("structured coroutine Index basic base is not a string")
-		}
-		limit = b.StringLen(base)
-	case *types.Array:
-		limit = b.Prog.IntVal(uint64(container.Len()), b.Prog.Int())
-	case *types.Slice:
-		limit = b.SliceLen(base)
-	case *types.Pointer:
-		array, ok := types.Unalias(container.Elem()).Underlying().(*types.Array)
-		if !ok {
-			panic("structured coroutine Index pointer base is not an array")
-		}
-		limit = b.Prog.IntVal(uint64(array.Len()), b.Prog.Int())
-	default:
-		panic(fmt.Sprintf("structured coroutine Index has unsupported base %T", container))
+	if plan.recipe != coroPhysicalInstructionIndex {
+		panic("structured coroutine Index has the wrong physical recipe")
 	}
-	if _, pointer := container.(*types.Pointer); pointer &&
-		!isKnownNonNilAddr(operation.X) && !ssaValueProvenNonNilAt(operation.X, operation) {
-		// Go evaluates an implicit *array dereference before applying the index
-		// operation, so nil wins over an otherwise out-of-range index.
+	var limit llssa.Expr
+	if plan.boundsGuard {
+		switch plan.container {
+		case coroPhysicalContainerString:
+			limit = b.StringLen(base)
+		case coroPhysicalContainerArray, coroPhysicalContainerArrayPointer:
+			limit = b.Prog.IntVal(uint64(plan.bound), b.Prog.Int())
+		case coroPhysicalContainerSlice:
+			limit = b.SliceLen(base)
+		default:
+			panic("structured coroutine Index has an invalid frozen container")
+		}
+	} else if plan.container != coroPhysicalContainerArray && plan.container != coroPhysicalContainerArrayPointer {
+		panic("unchecked coroutine Index is not a fixed-array recipe")
+	}
+	if plan.nilGuard {
+		p.observeCoroPhysicalNilGuard(operation)
 		base = p.compileCoroImplicitNilAccessGuard(b, base)
 	}
 
-	normalized, outOfRange := b.IndexBounds(index, limit)
-	p.compileCoroIndexBoundsGuard(b, outOfRange)
+	normalized := index
+	if plan.boundsGuard {
+		p.observeCoroPhysicalBoundsGuard(operation)
+		var outOfRange llssa.Expr
+		normalized, outOfRange = b.IndexBounds(index, limit)
+		p.compileCoroIndexBoundsGuard(b, outOfRange)
+	}
 
-	switch container.(type) {
-	case *types.Basic, *types.Array:
+	switch plan.container {
+	case coroPhysicalContainerString, coroPhysicalContainerArray:
 		return b.IndexUnchecked(base, normalized, takeArrayAddr)
-	case *types.Slice:
-		return b.Load(b.IndexAddrUnchecked(base, normalized))
-	case *types.Pointer:
+	case coroPhysicalContainerSlice, coroPhysicalContainerArrayPointer:
 		return b.Load(b.IndexAddrUnchecked(base, normalized))
 	default:
 		panic("structured coroutine Index lost its validated container shape")
@@ -233,10 +239,11 @@ func (p *context) compileCoroIndexGuarded(
 // Operand evaluation has already happened in source order. A nullable *array
 // then takes the structured nil edge, followed by the exact inclusive slice
 // bounds predicate; only the dominated continuation constructs the aggregate.
-func (p *context) compileCoroSliceGuarded(
+func (p *context) compileCoroSlicePlanned(
 	b llssa.Builder,
 	operation *ssa.Slice,
 	base, low, high, max llssa.Expr,
+	plan coroPhysicalInstructionPlan,
 ) llssa.Expr {
 	if p == nil || p.currentCoro == nil || operation == nil || operation.X == nil ||
 		b == nil || b.Func != p.fn {
@@ -246,42 +253,43 @@ func (p *context) compileCoroSliceGuarded(
 		p.currentCoro.abi.version < coroPhysicalABIVersionV1 {
 		panic("structured coroutine Slice requires the PhysicalABIV1 explicit-status panic ABI")
 	}
+	if plan.recipe != coroPhysicalInstructionSlice || !plan.boundsGuard {
+		panic("structured coroutine Slice has the wrong physical recipe")
+	}
 
 	zero := b.Prog.IntVal(0, b.Prog.Int())
 	if low.IsNil() {
 		low = zero
 	}
 	var limit llssa.Expr
-	switch container := types.Unalias(p.patchType(operation.X.Type())).Underlying().(type) {
-	case *types.Basic:
-		if !coroPhysicalStringBasic(container) || !max.IsNil() {
+	switch plan.container {
+	case coroPhysicalContainerString:
+		if !max.IsNil() {
 			panic("structured coroutine Slice basic base is not a two-index string")
 		}
 		limit = b.StringLen(base)
 		if high.IsNil() {
 			high = limit
 		}
-	case *types.Slice:
+	case coroPhysicalContainerSlice:
 		limit = b.SliceCap(base)
 		if high.IsNil() {
 			high = b.SliceLen(base)
 		}
-	case *types.Pointer:
-		array, ok := types.Unalias(container.Elem()).Underlying().(*types.Array)
-		if !ok {
-			panic("structured coroutine Slice pointer base is not an array")
-		}
-		if !isKnownNonNilAddr(operation.X) && !ssaValueProvenNonNilAt(operation.X, operation) {
+	case coroPhysicalContainerArrayPointer:
+		if plan.nilGuard {
+			p.observeCoroPhysicalNilGuard(operation)
 			base = p.compileCoroImplicitNilAccessGuard(b, base)
 		}
-		limit = b.Prog.IntVal(uint64(array.Len()), b.Prog.Int())
+		limit = b.Prog.IntVal(uint64(plan.bound), b.Prog.Int())
 		if high.IsNil() {
 			high = limit
 		}
 	default:
-		panic(fmt.Sprintf("structured coroutine Slice has unsupported base %T", container))
+		panic(fmt.Sprintf("structured coroutine Slice has invalid frozen container %d", plan.container))
 	}
 
+	p.observeCoroPhysicalBoundsGuard(operation)
 	low, high, max, outOfRange := b.SliceBounds(low, high, max, limit)
 	p.compileCoroIndexBoundsGuard(b, outOfRange)
 	return b.SliceUnchecked(base, low, high, max)
@@ -386,54 +394,4 @@ func (s *coroStaticCleanupState) replaceFault(p *context, b llssa.Builder, kind 
 	}
 	typeWord, dataWord := p.materializeCoroFaultPayload(b, kind)
 	s.replacePanic(b, typeWord, dataWord)
-}
-
-func (p *context) coroFieldAddrRequiresImplicitNilFault(field *ssa.FieldAddr) bool {
-	if p == nil || p.currentCoro == nil || field == nil || p.currentCoro.frameRetention == nil {
-		return false
-	}
-	if ssaAddressValueProvenNonNilAt(field.X, field) {
-		return false
-	}
-	if !p.currentCoro.frameRetention.requiresImplicitNilFault(field, field) {
-		return false
-	}
-	if p.compilation == nil || !p.compilation.EnableCoroExplicitStatusPanicABI {
-		panic("nullable physical coroutine FieldAddr escaped explicit-status preflight")
-	}
-	return true
-}
-
-func (p *context) coroDerefRequiresImplicitNilFault(deref *ssa.UnOp) bool {
-	if p == nil || p.currentCoro == nil || deref == nil || deref.Op != token.MUL ||
-		p.currentCoro.frameRetention == nil {
-		return false
-	}
-	if ssaValueProvenNonNilAt(deref.X, deref) {
-		return false
-	}
-	if _, _, synthetic := coroSliceToArrayValueDeref(deref, p.patchType); synthetic {
-		// The conversion owns the N>0 length fault. N==0 array-value
-		// conversion is the zero value and must remain legal for a nil slice.
-		return false
-	}
-	if field, ok := deref.X.(*ssa.FieldAddr); ok &&
-		p.currentCoro.frameRetention.requiresImplicitNilFault(field, field) {
-		// FieldAddr lowering already split the block and constructed this GEP
-		// only on its non-nil edge. Do not add a redundant guard to the derived
-		// typed load.
-		return false
-	}
-	if _, indexed := deref.X.(*ssa.IndexAddr); indexed {
-		// ExplicitStatus IndexAddr lowering owns both its bounds branch and a
-		// possible *array nil branch before it forms the address.
-		return false
-	}
-	if !p.currentCoro.frameRetention.requiresImplicitNilFault(deref.X, deref) {
-		return false
-	}
-	if p.compilation == nil || !p.compilation.EnableCoroExplicitStatusPanicABI {
-		panic("nullable physical coroutine typed load escaped explicit-status preflight")
-	}
-	return true
 }

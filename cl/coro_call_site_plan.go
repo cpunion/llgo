@@ -23,11 +23,12 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
-// freezeCallSites is the second and final ProgramIR builder stage. Runtime
+// freezeCallSites is the final pre-SSAPlan ProgramIR builder stage. Runtime
 // helper closure, patch redirects, physical identities, and worker
 // certificates must already be immutable. The stage validates raw SSA exactly
 // once, writes the result into each owner-scoped SitePlan, and rejects any
-// owner-dependent semantic result for one logical call occurrence.
+// owner-dependent semantic result for one logical call occurrence. Physical
+// function projections are added transactionally after the SSAPlan fixed point.
 func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 	if ir == nil || u == nil {
 		return fmt.Errorf("coroutine call SitePlan freeze requires one ProgramIR and emission universe")

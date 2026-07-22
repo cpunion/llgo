@@ -65,14 +65,24 @@ type coroArchitectureDebtBudget struct {
 	elisionObservation        int
 	elisionSelection          int
 	intrinsicSelection        int
+	physicalPlanBuild         int
+	physicalPlanFreeze        int
+	physicalPlanCommit        int
+	physicalPlanLookup        int
+	physicalRecipeSelection   int
+	physicalRecipeObservation int
+	physicalGuardObservation  int
+	physicalCodegenRebuild    int
+	physicalProofBuilderCall  int
+	legacyPhysicalSelector    int
 }
 
 var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
 	// Filled from the 2026-07-22 executable fleet checkpoint. These values may
 	// only decrease; see TestCoroArchitectureDebtIsMonotonic.
-	currentCoro:               187,
-	planAuthority:             412,
-	stagedFeatureGate:         330,
+	currentCoro:               173,
+	planAuthority:             392,
+	stagedFeatureGate:         322,
 	legacyWait:                72,
 	nativeFork:                378,
 	fleetBuildFiles:           13,
@@ -97,6 +107,16 @@ var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
 	elisionObservation:        4,
 	elisionSelection:          2,
 	intrinsicSelection:        2,
+	physicalPlanBuild:         2,
+	physicalPlanFreeze:        1,
+	physicalPlanCommit:        1,
+	physicalPlanLookup:        2,
+	physicalRecipeSelection:   7,
+	physicalRecipeObservation: 7,
+	physicalGuardObservation:  10,
+	physicalCodegenRebuild:    0,
+	physicalProofBuilderCall:  8,
+	legacyPhysicalSelector:    0,
 }
 
 var allowedCurrentCoroFiles = map[string]bool{
@@ -239,6 +259,50 @@ var allowedIntrinsicSelectionFiles = map[string]bool{
 	"cl/instr.go":          true,
 }
 
+var allowedPhysicalPlanBuildFiles = map[string]bool{
+	"cl/coro_abi.go": true,
+}
+
+var allowedPhysicalPlanFreezeFiles = map[string]bool{
+	"cl/coro_entry.go": true,
+}
+
+var allowedPhysicalPlanCommitFiles = map[string]bool{
+	"cl/coro_entry.go": true,
+}
+
+var allowedPhysicalPlanLookupFiles = map[string]bool{
+	"cl/coro_abi.go":   true,
+	"cl/coro_entry.go": true,
+}
+
+var allowedPhysicalRecipeSelectionFiles = map[string]bool{
+	"cl/compile.go": true,
+	"cl/instr.go":   true,
+}
+
+var allowedPhysicalRecipeObservationFiles = map[string]bool{
+	"cl/compile.go": true,
+	"cl/instr.go":   true,
+}
+
+var allowedPhysicalGuardObservationFiles = map[string]bool{
+	"cl/compile.go":             true,
+	"cl/coro_implicit_fault.go": true,
+	"cl/coro_slice_to_array.go": true,
+	"cl/instr.go":               true,
+}
+
+var allowedPhysicalCodegenRebuildFiles = map[string]bool{}
+
+var allowedPhysicalProofBuilderCallFiles = map[string]bool{
+	"cl/coro_abi.go":      true,
+	"cl/coro_defer.go":    true,
+	"cl/coro_pure_ssa.go": true,
+}
+
+var allowedLegacyPhysicalSelectorFiles = map[string]bool{}
+
 type coroArchitectureDebtInventory struct {
 	coroArchitectureDebtBudget
 	currentCoroFiles               map[string]bool
@@ -263,6 +327,16 @@ type coroArchitectureDebtInventory struct {
 	elisionObservationFiles        map[string]bool
 	elisionSelectionFiles          map[string]bool
 	intrinsicSelectionFiles        map[string]bool
+	physicalPlanBuildFiles         map[string]bool
+	physicalPlanFreezeFiles        map[string]bool
+	physicalPlanCommitFiles        map[string]bool
+	physicalPlanLookupFiles        map[string]bool
+	physicalRecipeSelectionFiles   map[string]bool
+	physicalRecipeObservationFiles map[string]bool
+	physicalGuardObservationFiles  map[string]bool
+	physicalCodegenRebuildFiles    map[string]bool
+	physicalProofBuilderCallFiles  map[string]bool
+	legacyPhysicalSelectorFiles    map[string]bool
 }
 
 func TestCoroArchitectureDebtIsMonotonic(t *testing.T) {
@@ -303,6 +377,16 @@ func TestCoroArchitectureDebtIsMonotonic(t *testing.T) {
 	check("call elision observation", inventory.elisionObservation, budget.elisionObservation)
 	check("call elision selection", inventory.elisionSelection, budget.elisionSelection)
 	check("intrinsic recipe selection", inventory.intrinsicSelection, budget.intrinsicSelection)
+	check("physical plan build", inventory.physicalPlanBuild, budget.physicalPlanBuild)
+	check("physical plan freeze", inventory.physicalPlanFreeze, budget.physicalPlanFreeze)
+	check("physical plan commit", inventory.physicalPlanCommit, budget.physicalPlanCommit)
+	check("physical plan lookup", inventory.physicalPlanLookup, budget.physicalPlanLookup)
+	check("physical recipe selection", inventory.physicalRecipeSelection, budget.physicalRecipeSelection)
+	check("physical recipe observation", inventory.physicalRecipeObservation, budget.physicalRecipeObservation)
+	check("physical guard observation", inventory.physicalGuardObservation, budget.physicalGuardObservation)
+	check("physical codegen proof rebuild", inventory.physicalCodegenRebuild, budget.physicalCodegenRebuild)
+	check("physical proof builder call", inventory.physicalProofBuilderCall, budget.physicalProofBuilderCall)
+	check("legacy physical fault selector", inventory.legacyPhysicalSelector, budget.legacyPhysicalSelector)
 
 	checkExactCoroArchitectureSet(t, "currentCoro production files", inventory.currentCoroFiles, allowedCurrentCoroFiles)
 	checkExactCoroArchitectureSet(t, "staged coroutine feature names", inventory.featureNames, allowedStagedCoroFeatureNames)
@@ -326,6 +410,16 @@ func TestCoroArchitectureDebtIsMonotonic(t *testing.T) {
 	checkExactCoroArchitectureSet(t, "call elision observation files", inventory.elisionObservationFiles, allowedElisionObservationFiles)
 	checkExactCoroArchitectureSet(t, "call elision selection files", inventory.elisionSelectionFiles, allowedElisionSelectionFiles)
 	checkExactCoroArchitectureSet(t, "intrinsic recipe selection files", inventory.intrinsicSelectionFiles, allowedIntrinsicSelectionFiles)
+	checkExactCoroArchitectureSet(t, "physical plan build files", inventory.physicalPlanBuildFiles, allowedPhysicalPlanBuildFiles)
+	checkExactCoroArchitectureSet(t, "physical plan freeze files", inventory.physicalPlanFreezeFiles, allowedPhysicalPlanFreezeFiles)
+	checkExactCoroArchitectureSet(t, "physical plan commit files", inventory.physicalPlanCommitFiles, allowedPhysicalPlanCommitFiles)
+	checkExactCoroArchitectureSet(t, "physical plan lookup files", inventory.physicalPlanLookupFiles, allowedPhysicalPlanLookupFiles)
+	checkExactCoroArchitectureSet(t, "physical recipe selection files", inventory.physicalRecipeSelectionFiles, allowedPhysicalRecipeSelectionFiles)
+	checkExactCoroArchitectureSet(t, "physical recipe observation files", inventory.physicalRecipeObservationFiles, allowedPhysicalRecipeObservationFiles)
+	checkExactCoroArchitectureSet(t, "physical guard observation files", inventory.physicalGuardObservationFiles, allowedPhysicalGuardObservationFiles)
+	checkExactCoroArchitectureSet(t, "physical codegen proof rebuild files", inventory.physicalCodegenRebuildFiles, allowedPhysicalCodegenRebuildFiles)
+	checkExactCoroArchitectureSet(t, "physical proof builder call files", inventory.physicalProofBuilderCallFiles, allowedPhysicalProofBuilderCallFiles)
+	checkExactCoroArchitectureSet(t, "legacy physical fault selector files", inventory.legacyPhysicalSelectorFiles, allowedLegacyPhysicalSelectorFiles)
 }
 
 func checkExactCoroArchitectureSet(t *testing.T, name string, got, want map[string]bool) {
@@ -361,6 +455,16 @@ func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitecture
 		elisionObservationFiles:        make(map[string]bool),
 		elisionSelectionFiles:          make(map[string]bool),
 		intrinsicSelectionFiles:        make(map[string]bool),
+		physicalPlanBuildFiles:         make(map[string]bool),
+		physicalPlanFreezeFiles:        make(map[string]bool),
+		physicalPlanCommitFiles:        make(map[string]bool),
+		physicalPlanLookupFiles:        make(map[string]bool),
+		physicalRecipeSelectionFiles:   make(map[string]bool),
+		physicalRecipeObservationFiles: make(map[string]bool),
+		physicalGuardObservationFiles:  make(map[string]bool),
+		physicalCodegenRebuildFiles:    make(map[string]bool),
+		physicalProofBuilderCallFiles:  make(map[string]bool),
+		legacyPhysicalSelectorFiles:    make(map[string]bool),
 	}
 	roots := []string{"cl", "internal/coro", "internal/build", "ssa", "runtime/internal/coro", "runtime/internal/runtime"}
 	for _, root := range roots {
@@ -384,9 +488,41 @@ func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitecture
 			if hasCoroNativeFleetBuildConstraint(file) {
 				inventory.fleetBuildFiles++
 			}
+			var physicalBodyStart, physicalBodyEnd token.Pos
+			for _, declaration := range file.Decls {
+				function, ok := declaration.(*ast.FuncDecl)
+				if ok && function.Name.Name == "compileCoroPhysicalBody" && function.Body != nil {
+					physicalBodyStart, physicalBodyEnd = function.Body.Pos(), function.Body.End()
+				}
+			}
 			ast.Inspect(file, func(node ast.Node) bool {
 				switch node := node.(type) {
 				case *ast.CallExpr:
+					callName := ""
+					switch function := node.Fun.(type) {
+					case *ast.SelectorExpr:
+						callName = function.Sel.Name
+					case *ast.Ident:
+						callName = function.Name
+					}
+					if physicalBodyStart.IsValid() && node.Pos() >= physicalBodyStart && node.End() <= physicalBodyEnd {
+						switch callName {
+						case "newCoroPhysicalPureSSAAudit", "newCoroPhysicalPureSSAAuditForOwner",
+							"proveCoroCriticalRegions", "prepareCoroStaticCleanupPlan":
+							inventory.physicalCodegenRebuild++
+							inventory.physicalCodegenRebuildFiles[rel] = true
+						}
+					}
+					switch callName {
+					case "newCoroPhysicalPureSSAAudit", "newCoroPhysicalPureSSAAuditForOwner",
+						"proveCoroCriticalRegions", "prepareCoroStaticCleanupPlan":
+						inventory.physicalProofBuilderCall++
+						inventory.physicalProofBuilderCallFiles[rel] = true
+					}
+					if callName == "prepareCoroPhysicalFunctionPlan" {
+						inventory.physicalPlanBuild++
+						inventory.physicalPlanBuildFiles[rel] = true
+					}
 					selector, ok := node.Fun.(*ast.SelectorExpr)
 					if !ok {
 						break
@@ -410,6 +546,24 @@ func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitecture
 					case "observeCoroCallElision":
 						inventory.elisionObservation++
 						inventory.elisionObservationFiles[rel] = true
+					case "freezePhysicalFunctionPlan":
+						inventory.physicalPlanFreeze++
+						inventory.physicalPlanFreezeFiles[rel] = true
+					case "commitPhysicalFunctionPlans":
+						inventory.physicalPlanCommit++
+						inventory.physicalPlanCommitFiles[rel] = true
+					case "physicalFunctionPlan":
+						inventory.physicalPlanLookup++
+						inventory.physicalPlanLookupFiles[rel] = true
+					case "plannedCoroPhysicalInstruction":
+						inventory.physicalRecipeSelection++
+						inventory.physicalRecipeSelectionFiles[rel] = true
+					case "observeCoroPhysicalInstruction":
+						inventory.physicalRecipeObservation++
+						inventory.physicalRecipeObservationFiles[rel] = true
+					case "observeCoroPhysicalNilGuard", "observeCoroPhysicalBoundsGuard":
+						inventory.physicalGuardObservation++
+						inventory.physicalGuardObservationFiles[rel] = true
 					case "type_":
 						if rel == "cl/emission_runtime_helpers.go" {
 							inventory.rawHelperPhysicalType++
@@ -467,6 +621,11 @@ func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitecture
 						inventory.intrinsicSelectionFiles[rel] = true
 					case "intrinsicCallSemantics", "patchInitRedirect", "elidedCallCertificate":
 						inventory.legacyIntrinsicInput++
+					case "coroFieldAddrRequiresImplicitNilFault", "coroDerefRequiresImplicitNilFault",
+						"coroIndexOperationMayFault", "compileCoroIndexAddrGuarded",
+						"compileCoroIndexGuarded", "compileCoroSliceGuarded":
+						inventory.legacyPhysicalSelector++
+						inventory.legacyPhysicalSelectorFiles[rel] = true
 					case "timerRegistrationModeV1", "pollOperationModeV1", "coroNativeTargetV1State":
 						inventory.nativeFork++
 					default:
