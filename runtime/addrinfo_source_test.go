@@ -19,15 +19,51 @@
 package runtime
 
 import (
+	"go/build"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
+func TestDebugBackendSelectsLogicalWebAssemblyTargets(t *testing.T) {
+	dir := filepath.Join("internal", "clite", "debug")
+	tests := []struct {
+		name      string
+		goos      string
+		goarch    string
+		buildTags []string
+		want      string
+	}{
+		{name: "native arm", goos: "linux", goarch: "arm", want: "debug.go"},
+		{name: "standard wasm", goos: "wasip1", goarch: "wasm", want: "debug_webassembly.go"},
+		{name: "arm frontend wasm backend", goos: "linux", goarch: "arm", buildTags: []string{"tinygo.wasm", "wasip2"}, want: "debug_webassembly.go"},
+		{name: "bare metal", goos: "linux", goarch: "arm", buildTags: []string{"baremetal"}, want: "debug_baremetal.go"},
+	}
+	files := []string{"debug.go", "debug_webassembly.go", "debug_baremetal.go"}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := build.Default
+			ctx.GOOS = test.goos
+			ctx.GOARCH = test.goarch
+			ctx.BuildTags = append([]string(nil), test.buildTags...)
+			for _, file := range files {
+				matched, err := ctx.MatchFile(dir, file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if matched != (file == test.want) {
+					t.Errorf("%s selected=%v, want selected backend %s", file, matched, test.want)
+				}
+			}
+		})
+	}
+}
+
 func TestAddrinfoKeepsProgramCountersScalarAcrossTheCBoundary(t *testing.T) {
 	for _, path := range []string{
 		"internal/clite/debug/debug.go",
-		"internal/clite/debug/debug_wasm.go",
+		"internal/clite/debug/debug_webassembly.go",
 		"internal/clite/debug/debug_baremetal.go",
 	} {
 		source, err := os.ReadFile(path)

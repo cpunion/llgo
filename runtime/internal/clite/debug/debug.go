@@ -1,4 +1,4 @@
-//go:build !wasm && !baremetal
+//go:build !wasm && !tinygo.wasm && !baremetal
 
 package debug
 
