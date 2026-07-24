@@ -137,6 +137,7 @@ func (c *context) collectCommonInputs(m *manifestBuilder) {
 		m.common.CoroEndianness = metadata.Endianness
 		m.common.CoroDataLayout = metadata.DataLayout
 	}
+	m.common.EnableLTOPlugin = c.buildConf.LTOPlugin.Enabled()
 	m.common.EmitDWARF = shouldEmitDebugInfo(c.buildConf, &c.crossCompile)
 	m.common.PCLNMode = effectivePCLNMode(c.buildConf).String()
 
