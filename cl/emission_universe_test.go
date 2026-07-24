@@ -62,10 +62,14 @@ type emissionTestProgram struct {
 }
 
 func newEmissionTestProgram() *emissionTestProgram {
+	return newEmissionTestProgramWithMode(ssa.SanityCheckFunctions | ssa.InstantiateGenerics)
+}
+
+func newEmissionTestProgramWithMode(mode ssa.BuilderMode) *emissionTestProgram {
 	fset := token.NewFileSet()
 	return &emissionTestProgram{
 		fset: fset,
-		ssa:  ssa.NewProgram(fset, ssa.SanityCheckFunctions|ssa.InstantiateGenerics),
+		ssa:  ssa.NewProgram(fset, mode),
 		importer: &emissionTestImporter{
 			packages: make(map[string]*types.Package),
 			fallback: importer.Default(),

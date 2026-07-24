@@ -166,6 +166,27 @@ type Shape struct {
 	}
 }
 
+func TestConstructDebugAddrDoesNotAddNilDerefRuntimeCall(t *testing.T) {
+	prog := NewProgram(nil)
+	defer prog.Dispose()
+	prog.TypeSizes(types.SizesFor("gc", runtime.GOARCH))
+
+	pkg := prog.NewPackage("p", "example.com/p")
+	empty := types.NewStruct(nil, nil)
+	params := types.NewTuple(types.NewVar(token.NoPos, nil, "value", empty))
+	signature := types.NewSignatureType(nil, nil, nil, params, types.NewTuple(), false)
+	fn := pkg.NewFunc("debugAddr", signature, InGo)
+	builder := fn.MakeBody(1)
+	defer builder.Dispose()
+	builder.constructDebugAddr(fn.Param(0))
+	builder.Return()
+	builder.EndBuild()
+
+	if body := fn.impl.String(); strings.Contains(body, "AssertNilDeref") {
+		t.Fatalf("debug scratch load added a source-language nil check:\n%s", body)
+	}
+}
+
 func newDebugRuntimePackage() *types.Package {
 	pkg := types.NewPackage(PkgRuntime, "runtime")
 	unsafePointer := types.Typ[types.UnsafePointer]

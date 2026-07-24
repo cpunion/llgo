@@ -67,6 +67,85 @@ func TestCoroDispatchNamedInterfaceLayoutIgnoresEquivalentMethodGraphIdentity(t 
 	}
 }
 
+func TestCoroPlainDispatchValidationIgnoresDebugRefFunctionOperands(t *testing.T) {
+	ssaPkg, _, files := buildGoSSAPkgWithMode(
+		t,
+		coroWorkerSyscallCapabilityFixture,
+		ssa.SanityCheckFunctions|ssa.InstantiateGenerics|ssa.GlobalDebug,
+	)
+	debugRefs := 0
+	for _, member := range ssaPkg.Members {
+		fn, ok := member.(*ssa.Function)
+		if !ok {
+			continue
+		}
+		for _, block := range fn.Blocks {
+			for _, instruction := range block.Instrs {
+				if _, ok := instruction.(*ssa.DebugRef); ok {
+					debugRefs++
+				}
+			}
+		}
+	}
+	if debugRefs == 0 {
+		t.Fatal("GlobalDebug SSA did not contain a DebugRef")
+	}
+
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
+		prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}},
+		EmissionUniverseOptions{CoroTargetCapabilities: CoroNativeTargetCapabilities()},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := ssaPkg.Func("Fixed")
+	workerCall := exactWorkerSyscallCall(t, universe, root)
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := coro.AnalyzeSSA(
+		ssaPkg.Prog,
+		coro.Roots{{Function: root, Demand: coro.AsyncDemand}},
+		coro.SSAConfig{
+			EmissionUniverse:     ssaUniverse,
+			FunctionIDs:          universe.FunctionIDConfig(),
+			MaxPlainInstructions: -1,
+			ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+				if fn == root {
+					return coro.SSAFunctionPolicy{Effect: coro.MayPark}, nil
+				}
+				return coro.SSAFunctionPolicy{}, nil
+			},
+			ClassifyElidedCall: func(_ *ssa.Function, call ssa.CallInstruction) (bool, error) {
+				semantics, intrinsic, err := universe.CoroIntrinsicCallSiteSemantics(call)
+				return intrinsic && semantics.ElidesManagedCall(), err
+			},
+			ClassifyElidedCallCertificate: func(_ *ssa.Function, call ssa.CallInstruction) (string, error) {
+				if call != workerCall {
+					return "", nil
+				}
+				certificate, certified, err := universe.CoroWorkerSyscallCertificate(call)
+				if err != nil || !certified {
+					return "", err
+				}
+				return certificate.ID, nil
+			},
+			ClassifyStaticCodeAddressCallArgument: func(_ *ssa.Function, call ssa.CallInstruction, argument int) (bool, error) {
+				return universe.CoroStaticCodeAddressCallArgument(call, argument)
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateCoroPlainDispatchConsumers(plan, universe, nil, nil); err != nil {
+		t.Fatalf("GlobalDebug metadata changed plain dispatch validation: %v", err)
+	}
+}
+
 func TestCoroPlainDispatchCompilesClosedSingletonFunctionValue(t *testing.T) {
 	const source = `package foo
 

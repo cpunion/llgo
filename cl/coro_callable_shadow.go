@@ -432,6 +432,9 @@ func (b *coroCallableShadowBuilder) indexCallsAndEscapes() {
 		}
 		for _, block := range fn.Blocks {
 			for _, instruction := range block.Instrs {
+				if _, debug := instruction.(*ssa.DebugRef); debug {
+					continue
+				}
 				if call, ok := instruction.(*ssa.Call); ok && call.Common() != nil && !call.Common().IsInvoke() {
 					if target, resolved := b.universe.Resolve(call.Common().StaticCallee()); resolved && target != nil {
 						b.incoming[target] = append(b.incoming[target], call)

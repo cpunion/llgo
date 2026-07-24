@@ -670,7 +670,11 @@ func (b Builder) doConstructDebugAddr(v Expr, t types.Type) (dbgPtr Expr, dbgVal
 	dbgPtr = b.AllocaT(ty)
 	dbgPtr.Type = b.Prog.Pointer(v.Type)
 	b.Store(dbgPtr, v)
-	dbgVal = b.Load(dbgPtr)
+	// dbgPtr is compiler-created stack storage. Loading it through the ordinary
+	// source-language path can synthesize AssertNilDeref for zero-sized values,
+	// making debug metadata change the runtime call graph. Keep debug address
+	// materialization semantically inert.
+	dbgVal = b.LoadKnownNonNil(dbgPtr)
 	return dbgPtr, dbgVal
 }
 

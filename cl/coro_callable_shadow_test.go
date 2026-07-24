@@ -22,6 +22,8 @@ import (
 	"go/ast"
 	"strings"
 	"testing"
+
+	"golang.org/x/tools/go/ssa"
 )
 
 const coroCallableContractWorkerFixture = `package contractworker
@@ -155,6 +157,45 @@ func TestCoroCallableShadowFlowsForwardFromFuncPCABI0(t *testing.T) {
 		if test.reason != "" && !strings.Contains(sink.Reason, test.reason) {
 			t.Fatalf("%s reason = %q; want substring %q", test.name, sink.Reason, test.reason)
 		}
+	}
+}
+
+func TestCoroCallableShadowIgnoresDebugRefsWhenCheckingCarrierEscapes(t *testing.T) {
+	testProg := newEmissionTestProgramWithMode(
+		ssa.SanityCheckFunctions | ssa.InstantiateGenerics | ssa.GlobalDebug,
+	)
+	pkg := testProg.addPackage(t, "example.com/emission/callableshadowdebug", coroWorkerSyscallCapabilityFixture)
+	testProg.ssa.Build()
+
+	carrier := pkg.ssa.Func("privateCarrier")
+	debugRefs := 0
+	for _, block := range carrier.Blocks {
+		for _, instruction := range block.Instrs {
+			if _, ok := instruction.(*ssa.DebugRef); ok {
+				debugRefs++
+			}
+		}
+	}
+	if debugRefs == 0 {
+		t.Fatal("GlobalDebug SSA did not contain a DebugRef in privateCarrier")
+	}
+
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
+		prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}},
+		EmissionUniverseOptions{CoroTargetCapabilities: CoroNativeTargetCapabilities()},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	analysis, err := AnalyzeCoroCallableShadows(universe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink, ok := analysis.Sink(exactWorkerSyscallCall(t, universe, carrier))
+	if !ok || !sink.Certified {
+		t.Fatalf("debug private carrier sink = %+v, %t; want certified", sink, ok)
 	}
 }
 

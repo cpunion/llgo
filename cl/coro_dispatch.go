@@ -482,6 +482,9 @@ func validateCoroPlainDispatchConsumers(
 		}
 		for _, block := range fn.Blocks {
 			for _, instr := range block.Instrs {
+				if _, debug := instr.(*ssa.DebugRef); debug {
+					continue
+				}
 				if store, ok := instr.(*ssa.Store); ok && plan.ElidesConditionalManagedStore(store) {
 					// The complete closed-cell proof makes this exact descriptor
 					// producer unobservable. Code generation omits it, so neither
