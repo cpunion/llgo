@@ -20,6 +20,7 @@
 package cl
 
 import (
+	"crypto/sha256"
 	"go/ast"
 	"go/types"
 	"strings"
@@ -377,8 +378,13 @@ func implementation(value int) int { return value + 1 }
 				t.Fatalf("frozen declaration owner metadata-only = %t; want %t", pair.declarationOwner.metadataOnly, test.metadataOnly)
 			}
 			definitionOwner := universe.packages[definition.ssa]
-			if key := universe.finalKeys[emissionFunctionOwnerKey{function: definitionFn, owner: definitionOwner}]; key != pair.key {
-				t.Fatalf("definition frozen key = %q; want pair key %q", key, pair.key)
+			finalKey := universe.finalKeys[emissionFunctionOwnerKey{function: definitionFn, owner: definitionOwner}]
+			wantPairKey, err := universe.managedGoLinknamePairKey(definitionOwner, definitionFn, finalKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pair.key != wantPairKey {
+				t.Fatalf("frozen pair key = %q; want %q", pair.key, wantPairKey)
 			}
 
 			managed, err := universe.exactManagedGoLinknameDefinition(definitionFn)
@@ -546,9 +552,13 @@ func Call(list *notifyList) { runtimeNotifyAll(list) }
 			}
 			if paired {
 				kind, symbol, signature, valid := splitManagedSymbolKey(pair.key)
+				wantSignature := managedGoLinknameABISignatureKey(linknameDefinition)
 				if pair.definition != definitionFn || pair.declarationOwner != universe.packages[declaration.ssa] ||
-					!valid || kind != goFunc || symbol != "example.com/emission/linkmirror.runtimeNotifyAll" || signature != linknameDefinition {
+					!valid || kind != goFunc || symbol != "example.com/emission/linkmirror.runtimeNotifyAll" || signature != wantSignature {
 					t.Fatalf("private-mirror frozen pair = %+v, key=(%d,%q,%q,%t); want exact physical/linkname ABI pair", pair, kind, symbol, signature, valid)
+				}
+				if len(signature) != len("sha256-v1:")+sha256.Size*2 {
+					t.Fatalf("private-mirror frozen signature key length = %d; want fixed digest length", len(signature))
 				}
 			}
 

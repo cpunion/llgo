@@ -4376,7 +4376,21 @@ func (u *EmissionUniverse) managedGoLinknamePairKey(owner *preparedEmissionPacka
 		}
 		signature = framedEmissionKey(fields...)
 	}
-	return managedSymbolKey(goFunc, symbol, signature), nil
+	return managedSymbolKey(goFunc, symbol, managedGoLinknameABISignatureKey(signature)), nil
+}
+
+// managedGoLinknameABISignatureKey keeps the complete structural ABI
+// comparison while bounding the retained group key. Whole-program standard
+// library builds contain thousands of private mirror signatures; retaining
+// every recursively expanded spelling here can otherwise consume gigabytes
+// before alias groups are released. SHA-256 is already the compiler's
+// canonical identity primitive, and the domain separator prevents this digest
+// from being confused with any other structural certificate.
+func managedGoLinknameABISignatureKey(signature string) string {
+	return "sha256-v1:" + emissionDigest(framedEmissionKey(
+		"managed-go-linkname-abi-signature-v1",
+		signature,
+	))
 }
 
 // aliasBodylessGoLinknameDeclarations joins the two source-level views of one
@@ -4385,10 +4399,10 @@ func (u *EmissionUniverse) managedGoLinknamePairKey(owner *preparedEmissionPacka
 // bodyless runtime-hook declarations, while the LLGo runtime provides a
 // differently named, bodyful function with a two-argument directive. The join
 // key combines the already classified final physical Go symbol with a dedicated
-// structural linkname ABI signature. That signature expands named types and
-// ignores non-layout struct metadata so standard-library private mirrors can
-// match, while retaining exact field order/type and all other type structure.
-// Source/display names are never used as a fallback.
+// digest of a structural linkname ABI signature. The signature expands named
+// types and ignores non-layout struct metadata so standard-library private
+// mirrors can match, while retaining exact field order/type and all other type
+// structure. Source/display names are never used as a fallback.
 func (u *EmissionUniverse) aliasBodylessGoLinknameDeclarations() error {
 	packages := make([]*preparedEmissionPackage, 0, len(u.packages))
 	for _, prepared := range u.packages {
