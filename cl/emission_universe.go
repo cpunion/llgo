@@ -37,6 +37,7 @@ import (
 	"github.com/goplus/llgo/internal/coro"
 	"github.com/goplus/llgo/internal/typepatch"
 	llssa "github.com/goplus/llgo/ssa"
+	llabi "github.com/goplus/llgo/ssa/abi"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -168,31 +169,31 @@ type EmissionUniverse struct {
 	patchInitEntries      []*ssa.Function
 	patchInitRedirects    coroPatchInitRedirectIndex
 	normalReturnBlocks    map[*ssa.Function]map[*ssa.BasicBlock]none
-	// unsafeSizeAlignUnevaluated freezes the exact source SSA instructions
-	// erased by unsafe.Sizeof/Alignof lowering.  Inventory, coroutine lowering
+	// unsafeLayoutUnevaluated freezes the exact source SSA instructions erased
+	// by unsafe.Sizeof/Alignof/Offsetof lowering. Inventory, coroutine lowering
 	// facts, preflight, and codegen must all consume this same set: independently
 	// rediscovering it lets a type-only Index/Call acquire a phantom runtime edge.
-	unsafeSizeAlignUnevaluated map[*ssa.Function]map[ssa.Instruction]none
-	foreignNoBlock             map[*ssa.Function]CoroForeignNoBlockCertificate
-	foreignSync                map[*ssa.Function]CoroForeignSyncCertificate
-	foreignSchedulerWait       map[*ssa.Function]CoroForeignSchedulerWaitCertificate
-	foreignWorker              map[*ssa.Function]CoroForeignWorkerCertificate
-	callableIdentities         map[*ssa.Function]CoroCallableIdentityCertificate
-	callableContracts          map[*ssa.Function]CoroCallableContractCertificate
-	noPreempt                  map[*ssa.Function]string
-	noUnwind                   map[*ssa.Function]string
-	rawCritical                map[*ssa.Function]string
-	rawCriticalCalls           map[ssa.CallInstruction]string
-	trustedInlineCalls         map[ssa.CallInstruction]coro.SSATrustedInlineCallCertificate
-	workerSyscalls             map[ssa.CallInstruction]CoroWorkerSyscallCertificate
-	workerSyscallOwners        map[ssa.CallInstruction]map[*ssa.Function]none
-	workerSyscallIncoming      map[ssa.CallInstruction][]coroWorkerSyscallIncomingEdge
-	workerResultProjections    map[*ssa.Function]coroWorkerResultProjectionCertificate
-	assemblyNoSuspend          map[*ssa.Function]CoroAssemblyNoSuspendCertificate
-	managedGoLinknames         map[*ssa.Function]CoroManagedGoLinknameCertificate
-	globalPhysicalIDs          map[*ssa.Global]string
-	globalPhysicalGroups       map[string]CoroGlobalPhysicalIdentity
-	globalPhysicalSeen         map[*ssa.Global]none
+	unsafeLayoutUnevaluated map[*ssa.Function]map[ssa.Instruction]none
+	foreignNoBlock          map[*ssa.Function]CoroForeignNoBlockCertificate
+	foreignSync             map[*ssa.Function]CoroForeignSyncCertificate
+	foreignSchedulerWait    map[*ssa.Function]CoroForeignSchedulerWaitCertificate
+	foreignWorker           map[*ssa.Function]CoroForeignWorkerCertificate
+	callableIdentities      map[*ssa.Function]CoroCallableIdentityCertificate
+	callableContracts       map[*ssa.Function]CoroCallableContractCertificate
+	noPreempt               map[*ssa.Function]string
+	noUnwind                map[*ssa.Function]string
+	rawCritical             map[*ssa.Function]string
+	rawCriticalCalls        map[ssa.CallInstruction]string
+	trustedInlineCalls      map[ssa.CallInstruction]coro.SSATrustedInlineCallCertificate
+	workerSyscalls          map[ssa.CallInstruction]CoroWorkerSyscallCertificate
+	workerSyscallOwners     map[ssa.CallInstruction]map[*ssa.Function]none
+	workerSyscallIncoming   map[ssa.CallInstruction][]coroWorkerSyscallIncomingEdge
+	workerResultProjections map[*ssa.Function]coroWorkerResultProjectionCertificate
+	assemblyNoSuspend       map[*ssa.Function]CoroAssemblyNoSuspendCertificate
+	managedGoLinknames      map[*ssa.Function]CoroManagedGoLinknameCertificate
+	globalPhysicalIDs       map[*ssa.Global]string
+	globalPhysicalGroups    map[string]CoroGlobalPhysicalIdentity
+	globalPhysicalSeen      map[*ssa.Global]none
 
 	localGenericMu     sync.Mutex
 	localGenericTypes  map[*types.Named]emissionLocalGenericType
@@ -245,12 +246,12 @@ func (u *EmissionUniverse) coroRuntimeCodeAddressType(typ types.Type) bool {
 	return ok && selected == named
 }
 
-// CoroForeignNoBlockCertificate is the immutable frontend proof attached to
-// one exact C declaration by //llgo:coro noblock. ID is domain-separated and
-// includes the frozen owner, physical symbol, and structural ABI signature.
-// PhysicalSymbol and ABISignature are exposed only for diagnostics and audit;
-// consumers must compare/use ID rather than reclassifying a declaration from
-// either display field.
+// CoroForeignNoBlockCertificate is the immutable frontend proof attached by
+// //llgo:coro noblock to one exact C declaration or bodyless managed-Go
+// declaration. ID is domain-separated and includes the frozen declaration
+// kind, owner, physical symbol, and structural ABI signature. PhysicalSymbol
+// and ABISignature are exposed only for diagnostics and audit; consumers must
+// compare/use ID rather than reclassifying a declaration from either field.
 type CoroForeignNoBlockCertificate struct {
 	ID             string
 	PhysicalSymbol string
@@ -549,67 +550,67 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 	}
 	identities := make(map[string]*ssa.Package, len(inputs))
 	u := &EmissionUniverse{
-		prog:                       prog,
-		patches:                    patches,
-		completeRuntimeABI:         options.CompleteRuntimeABI,
-		coroCapabilities:           options.CoroTargetCapabilities,
-		packages:                   make(map[*ssa.Package]*preparedEmissionPackage, len(inputs)),
-		byTypes:                    make(map[*types.Package]*preparedEmissionPackage, len(inputs)*3),
-		typeOwners:                 make(map[*types.Package]map[*preparedEmissionPackage]none, len(inputs)*3),
-		packageNamedOwners:         make(map[*types.TypeName]map[*preparedEmissionPackage]none),
-		typesDup:                   make(map[*types.Package]bool),
-		byPath:                     make(map[string]*preparedEmissionPackage, len(inputs)),
-		pathDup:                    make(map[string]bool),
-		required:                   make(map[*ssa.Function]none),
-		aliases:                    make(map[*ssa.Function]*ssa.Function),
-		goLinknameDefinitions:      make(map[*ssa.Function]emissionGoLinknamePair),
-		fnOwners:                   make(map[*ssa.Function]*preparedEmissionPackage),
-		fnStates:                   make(map[*ssa.Function]emissionFunctionState),
-		functionKinds:              make(map[emissionFunctionOwnerKey]int),
-		intrinsicOps:               make(map[emissionFunctionOwnerKey]int),
-		finalKeys:                  make(map[emissionFunctionOwnerKey]string),
-		physicalNames:              make(map[emissionFunctionOwnerKey]string),
-		linkOnceNames:              make(map[*ssa.Function]string),
-		callWraps:                  make(map[intrinsicWrapperKey]*ssa.Function),
-		callWrapInfo:               make(map[*ssa.Function]intrinsicWrapperKey),
-		syntheticKeys:              make(map[*ssa.Function]string),
-		abiMethodReferences:        make(map[*ssa.Function]map[*ssa.Function]none),
-		abiSyncReferences:          make(map[*ssa.Function]map[*ssa.Function]none),
-		loweredCalls:               make(map[*ssa.Function]map[string]coroLoweredCallTarget),
-		plainLoweredCalls:          make(map[*ssa.Function]map[string]*ssa.Function),
-		coroProgramIR:              newCoroProgramIR(),
-		patchInitRedirects:         make(coroPatchInitRedirectIndex),
-		normalReturnBlocks:         make(map[*ssa.Function]map[*ssa.BasicBlock]none),
-		unsafeSizeAlignUnevaluated: make(map[*ssa.Function]map[ssa.Instruction]none),
-		foreignNoBlock:             make(map[*ssa.Function]CoroForeignNoBlockCertificate),
-		foreignSync:                make(map[*ssa.Function]CoroForeignSyncCertificate),
-		foreignSchedulerWait:       make(map[*ssa.Function]CoroForeignSchedulerWaitCertificate),
-		foreignWorker:              make(map[*ssa.Function]CoroForeignWorkerCertificate),
-		callableIdentities:         make(map[*ssa.Function]CoroCallableIdentityCertificate),
-		callableContracts:          make(map[*ssa.Function]CoroCallableContractCertificate),
-		noPreempt:                  make(map[*ssa.Function]string),
-		noUnwind:                   make(map[*ssa.Function]string),
-		rawCritical:                make(map[*ssa.Function]string),
-		rawCriticalCalls:           make(map[ssa.CallInstruction]string),
-		trustedInlineCalls:         make(map[ssa.CallInstruction]coro.SSATrustedInlineCallCertificate),
-		workerSyscalls:             make(map[ssa.CallInstruction]CoroWorkerSyscallCertificate),
-		workerSyscallOwners:        make(map[ssa.CallInstruction]map[*ssa.Function]none),
-		workerSyscallIncoming:      make(map[ssa.CallInstruction][]coroWorkerSyscallIncomingEdge),
-		workerResultProjections:    make(map[*ssa.Function]coroWorkerResultProjectionCertificate),
-		assemblyNoSuspend:          make(map[*ssa.Function]CoroAssemblyNoSuspendCertificate),
-		managedGoLinknames:         make(map[*ssa.Function]CoroManagedGoLinknameCertificate),
-		globalPhysicalIDs:          make(map[*ssa.Global]string),
-		globalPhysicalGroups:       make(map[string]CoroGlobalPhysicalIdentity),
-		globalPhysicalSeen:         make(map[*ssa.Global]none),
-		linkIdentities:             make(map[*ssa.Function]string),
-		excluded:                   make(map[*ssa.Function]none),
-		materialized:               make(map[*ssa.Function]none),
-		useOwners:                  make(map[*ssa.Function]map[*preparedEmissionPackage]none),
-		ownerStates:                make(map[*ssa.Function]map[*preparedEmissionPackage]emissionFunctionState),
-		materializedOwners:         make(map[*ssa.Function]map[*preparedEmissionPackage]none),
-		localGenericTypes:          make(map[*types.Named]emissionLocalGenericType),
-		localGenericOwners:         make(map[*types.Named]*ssa.Function),
-		genericNamedTypes:          make(map[*types.Named]*types.Named),
+		prog:                    prog,
+		patches:                 patches,
+		completeRuntimeABI:      options.CompleteRuntimeABI,
+		coroCapabilities:        options.CoroTargetCapabilities,
+		packages:                make(map[*ssa.Package]*preparedEmissionPackage, len(inputs)),
+		byTypes:                 make(map[*types.Package]*preparedEmissionPackage, len(inputs)*3),
+		typeOwners:              make(map[*types.Package]map[*preparedEmissionPackage]none, len(inputs)*3),
+		packageNamedOwners:      make(map[*types.TypeName]map[*preparedEmissionPackage]none),
+		typesDup:                make(map[*types.Package]bool),
+		byPath:                  make(map[string]*preparedEmissionPackage, len(inputs)),
+		pathDup:                 make(map[string]bool),
+		required:                make(map[*ssa.Function]none),
+		aliases:                 make(map[*ssa.Function]*ssa.Function),
+		goLinknameDefinitions:   make(map[*ssa.Function]emissionGoLinknamePair),
+		fnOwners:                make(map[*ssa.Function]*preparedEmissionPackage),
+		fnStates:                make(map[*ssa.Function]emissionFunctionState),
+		functionKinds:           make(map[emissionFunctionOwnerKey]int),
+		intrinsicOps:            make(map[emissionFunctionOwnerKey]int),
+		finalKeys:               make(map[emissionFunctionOwnerKey]string),
+		physicalNames:           make(map[emissionFunctionOwnerKey]string),
+		linkOnceNames:           make(map[*ssa.Function]string),
+		callWraps:               make(map[intrinsicWrapperKey]*ssa.Function),
+		callWrapInfo:            make(map[*ssa.Function]intrinsicWrapperKey),
+		syntheticKeys:           make(map[*ssa.Function]string),
+		abiMethodReferences:     make(map[*ssa.Function]map[*ssa.Function]none),
+		abiSyncReferences:       make(map[*ssa.Function]map[*ssa.Function]none),
+		loweredCalls:            make(map[*ssa.Function]map[string]coroLoweredCallTarget),
+		plainLoweredCalls:       make(map[*ssa.Function]map[string]*ssa.Function),
+		coroProgramIR:           newCoroProgramIR(),
+		patchInitRedirects:      make(coroPatchInitRedirectIndex),
+		normalReturnBlocks:      make(map[*ssa.Function]map[*ssa.BasicBlock]none),
+		unsafeLayoutUnevaluated: make(map[*ssa.Function]map[ssa.Instruction]none),
+		foreignNoBlock:          make(map[*ssa.Function]CoroForeignNoBlockCertificate),
+		foreignSync:             make(map[*ssa.Function]CoroForeignSyncCertificate),
+		foreignSchedulerWait:    make(map[*ssa.Function]CoroForeignSchedulerWaitCertificate),
+		foreignWorker:           make(map[*ssa.Function]CoroForeignWorkerCertificate),
+		callableIdentities:      make(map[*ssa.Function]CoroCallableIdentityCertificate),
+		callableContracts:       make(map[*ssa.Function]CoroCallableContractCertificate),
+		noPreempt:               make(map[*ssa.Function]string),
+		noUnwind:                make(map[*ssa.Function]string),
+		rawCritical:             make(map[*ssa.Function]string),
+		rawCriticalCalls:        make(map[ssa.CallInstruction]string),
+		trustedInlineCalls:      make(map[ssa.CallInstruction]coro.SSATrustedInlineCallCertificate),
+		workerSyscalls:          make(map[ssa.CallInstruction]CoroWorkerSyscallCertificate),
+		workerSyscallOwners:     make(map[ssa.CallInstruction]map[*ssa.Function]none),
+		workerSyscallIncoming:   make(map[ssa.CallInstruction][]coroWorkerSyscallIncomingEdge),
+		workerResultProjections: make(map[*ssa.Function]coroWorkerResultProjectionCertificate),
+		assemblyNoSuspend:       make(map[*ssa.Function]CoroAssemblyNoSuspendCertificate),
+		managedGoLinknames:      make(map[*ssa.Function]CoroManagedGoLinknameCertificate),
+		globalPhysicalIDs:       make(map[*ssa.Global]string),
+		globalPhysicalGroups:    make(map[string]CoroGlobalPhysicalIdentity),
+		globalPhysicalSeen:      make(map[*ssa.Global]none),
+		linkIdentities:          make(map[*ssa.Function]string),
+		excluded:                make(map[*ssa.Function]none),
+		materialized:            make(map[*ssa.Function]none),
+		useOwners:               make(map[*ssa.Function]map[*preparedEmissionPackage]none),
+		ownerStates:             make(map[*ssa.Function]map[*preparedEmissionPackage]emissionFunctionState),
+		materializedOwners:      make(map[*ssa.Function]map[*preparedEmissionPackage]none),
+		localGenericTypes:       make(map[*types.Named]emissionLocalGenericType),
+		localGenericOwners:      make(map[*types.Named]*ssa.Function),
+		genericNamedTypes:       make(map[*types.Named]*types.Named),
 	}
 	for i, input := range inputs {
 		if input.SSA == nil || input.SSA.Prog == nil || input.SSA.Pkg == nil {
@@ -3885,7 +3886,52 @@ func structuralGoLinknameABITypeKey(typ types.Type) string {
 		expandNamed:             true,
 		omitStructFieldMetadata: true,
 	}
+	if signature, ok := types.Unalias(typ).(*types.Signature); ok {
+		typ = normalizeGoLinknameABISignature(signature)
+	}
 	return builder.key(typ)
+}
+
+// normalizeGoLinknameABISignature models the symbol ABI used by a linkname to
+// an unexported method. Source code must spell that declaration as a package
+// function whose first parameter is the receiver, while the bodyful target
+// carries the same value in Signature.Recv. Flatten the receiver before
+// hashing so the two exact source views can form one managed alias. Generic
+// receiver binders remain unnormalized until linkname has a precise callable
+// instance model for them.
+func normalizeGoLinknameABISignature(signature *types.Signature) *types.Signature {
+	if signature == nil || signature.Recv() == nil {
+		return signature
+	}
+	if recvTypeParams := signature.RecvTypeParams(); recvTypeParams != nil && recvTypeParams.Len() != 0 {
+		return signature
+	}
+	params := signature.Params()
+	flattened := make([]*types.Var, 0, params.Len()+1)
+	flattened = append(flattened, types.NewParam(
+		signature.Recv().Pos(),
+		signature.Recv().Pkg(),
+		signature.Recv().Name(),
+		signature.Recv().Type(),
+	))
+	for index := 0; index < params.Len(); index++ {
+		flattened = append(flattened, params.At(index))
+	}
+	var typeParams []*types.TypeParam
+	if list := signature.TypeParams(); list != nil {
+		typeParams = make([]*types.TypeParam, list.Len())
+		for index := range typeParams {
+			typeParams[index] = list.At(index)
+		}
+	}
+	return types.NewSignatureType(
+		nil,
+		nil,
+		typeParams,
+		types.NewTuple(flattened...),
+		signature.Results(),
+		signature.Variadic(),
+	)
 }
 
 type emissionTypeKeyBuilder struct {
@@ -3901,6 +3947,35 @@ func (b *emissionTypeKeyBuilder) key(typ types.Type) string {
 		return framedEmissionKey("nil-type")
 	}
 	typ = types.Unalias(typ)
+	if named, ok := typ.(*types.Named); ok && b.expandNamed {
+		return b.expandedNamedKey(named)
+	}
+	return b.keyNode(typ)
+}
+
+// expandedNamedKey assigns one cycle identity to a named type and its
+// underlying node. Linkname ABI comparison deliberately erases named
+// identity; a patched signature may therefore contain the named source type
+// on one side and its anonymous physical RawType on the other. Recursive
+// layouts must hash identically in both representations.
+func (b *emissionTypeKeyBuilder) expandedNamedKey(named *types.Named) string {
+	if id, ok := b.active[named]; ok {
+		return framedEmissionKey("type-cycle", strconv.Itoa(id))
+	}
+	underlying := types.Unalias(named.Underlying())
+	if id, ok := b.active[underlying]; ok {
+		return framedEmissionKey("type-cycle", strconv.Itoa(id))
+	}
+	id := b.next
+	b.next++
+	b.active[named] = id
+	b.active[underlying] = id
+	defer delete(b.active, named)
+	defer delete(b.active, underlying)
+	return b.keyBody(underlying)
+}
+
+func (b *emissionTypeKeyBuilder) keyNode(typ types.Type) string {
 	if id, ok := b.active[typ]; ok {
 		return framedEmissionKey("type-cycle", strconv.Itoa(id))
 	}
@@ -3908,7 +3983,10 @@ func (b *emissionTypeKeyBuilder) key(typ types.Type) string {
 	b.next++
 	b.active[typ] = id
 	defer delete(b.active, typ)
+	return b.keyBody(typ)
+}
 
+func (b *emissionTypeKeyBuilder) keyBody(typ types.Type) string {
 	pkgKey := func(pkg *types.Package) string {
 		if pkg == nil {
 			return ""
@@ -3929,9 +4007,6 @@ func (b *emissionTypeKeyBuilder) key(typ types.Type) string {
 	case *types.Chan:
 		return framedEmissionKey("chan", strconv.Itoa(int(typ.Dir())), b.key(typ.Elem()))
 	case *types.Named:
-		if b.expandNamed {
-			return b.key(typ.Underlying())
-		}
 		obj := typ.Obj()
 		fields := []string{"named"}
 		packageLevel := false
@@ -4363,11 +4438,23 @@ func (u *EmissionUniverse) managedGoLinknamePairKey(owner *preparedEmissionPacka
 	if !valid || ftype != goFunc || symbol == "" {
 		return "", fmt.Errorf("managed go:linkname pair for %q has no frozen Go symbol", function.Name())
 	}
-	patchedSignature, ok := u.effectiveType(owner, function, function.Signature).(*types.Signature)
+	patchedSignature, ok := u.effectiveGoLinknameType(owner, function, function.Signature).(*types.Signature)
 	if !ok {
 		return "", fmt.Errorf("managed go:linkname pair for %q has a non-signature type", function.Name())
 	}
-	signature := structuralGoLinknameABITypeKey(patchedSignature)
+	// A method's receiver is a real first symbol argument even though
+	// cvtClosure normally removes Signature.Recv. Flatten it before projecting
+	// the callable so a method definition and its free-function linkname
+	// declaration retain the same physical signature.
+	normalizedSignature := normalizeGoLinknameABISignature(patchedSignature)
+	physicalSignature := types.Type(normalizedSignature)
+	if u.prog != nil {
+		physicalSignature = llabi.PublicType(u.prog.PhysicalType(normalizedSignature, llssa.InGo))
+	}
+	if _, ok := physicalSignature.(*types.Signature); !ok {
+		return "", fmt.Errorf("managed go:linkname pair for %q has a non-signature physical type", function.Name())
+	}
+	signature := structuralGoLinknameABITypeKey(physicalSignature)
 	if typeArgs := function.TypeArgs(); len(typeArgs) != 0 {
 		fields := make([]string, 0, len(typeArgs)+2)
 		fields = append(fields, "go-linkname-callable-instance-v1", signature)
@@ -5116,7 +5203,7 @@ func (u *EmissionUniverse) materializeFunction(fn *ssa.Function) (bool, error) {
 }
 
 func (u *EmissionUniverse) materializeFunctionForOwner(fn *ssa.Function, owner *preparedEmissionPackage, emissionState emissionFunctionState) error {
-	u.freezeUnsafeSizeAlignUnevaluatedSSA(fn)
+	u.freezeUnsafeLayoutUnevaluatedSSA(fn)
 	ctx, err := u.functionABIContext(fn, owner)
 	if err != nil {
 		return err
@@ -5895,10 +5982,30 @@ func (u *EmissionUniverse) intrinsicWrapper(owner *ssa.Package, fn *ssa.Function
 }
 
 func (u *EmissionUniverse) effectiveType(owner *preparedEmissionPackage, fn *ssa.Function, typ types.Type) types.Type {
-	if owner == nil || typ == nil {
+	ctx := u.effectiveTypeContext(owner, fn)
+	if ctx == nil {
 		return typ
 	}
-	ctx := &context{
+	return ctx.patchType(typ)
+}
+
+func (u *EmissionUniverse) effectiveGoLinknameType(owner *preparedEmissionPackage, fn *ssa.Function, typ types.Type) types.Type {
+	ctx := u.effectiveTypeContext(owner, fn)
+	if ctx == nil {
+		return typ
+	}
+	// Linkname pairing compares both sides after one shared physical
+	// projection. Preserve an alternate package's named replacement until that
+	// projection so recursive edges continue to point at the exact same node.
+	ctx.preservePatchedNamed = true
+	return ctx.patchType(typ)
+}
+
+func (u *EmissionUniverse) effectiveTypeContext(owner *preparedEmissionPackage, fn *ssa.Function) *context {
+	if owner == nil {
+		return nil
+	}
+	return &context{
 		prog:             u.prog,
 		goFn:             fn,
 		fset:             u.goProg.Fset,
@@ -5910,7 +6017,6 @@ func (u *EmissionUniverse) effectiveType(owner *preparedEmissionPackage, fn *ssa
 		linkOnceFns:      make(map[*ssa.Function]none),
 		emissionUniverse: u,
 	}
-	return ctx.patchType(typ)
 }
 
 // registerFunctionLocalGenericTypes records the instantiated lexical owner of
@@ -6914,13 +7020,16 @@ func (u *EmissionUniverse) validateGeneratedWrapperPhysicalCollisions() error {
 }
 
 type coroForeignPhysicalABI struct {
+	kind      int
 	symbol    string
 	signature string
 }
 
-// freezeCoroForeignCallCertificates binds all coroutine C-call directives to
-// the same exact physical-ABI inventory already frozen for codegen. The shared
-// scan is intentional: every certificate kind observes the same symbol/ABI
+// freezeCoroForeignCallCertificates binds coroutine declaration directives to
+// the same exact physical-ABI inventory already frozen for codegen. Legacy
+// foreign policies apply to C declarations; noblock additionally certifies an
+// explicitly annotated bodyless managed-Go/linkname declaration. The shared
+// scan is intentional: every certificate observes the same symbol/ABI
 // collision set, and no later consumer may recreate an identity from names.
 func (u *EmissionUniverse) freezeCoroForeignCallCertificates() error {
 	abiByFunction := make(map[*ssa.Function]coroForeignPhysicalABI)
@@ -6932,12 +7041,13 @@ func (u *EmissionUniverse) freezeCoroForeignCallCertificates() error {
 		for _, owner := range owners {
 			key := u.finalKeys[emissionFunctionOwnerKey{function: fn, owner: owner}]
 			ftype, symbol, signature, ok := splitManagedSymbolKey(key)
-			if !ok || ftype != cFunc {
+			managedBodyless := ftype == goFunc && bodylessManagedGoDeclaration(fn)
+			if !ok || ftype != cFunc && !managedBodyless {
 				continue
 			}
-			candidate := coroForeignPhysicalABI{symbol: symbol, signature: signature}
+			candidate := coroForeignPhysicalABI{kind: ftype, symbol: symbol, signature: signature}
 			if haveABI && candidate != abi {
-				return fmt.Errorf("prepare emission universe: C declaration %q has owner-dependent physical ABI while freezing coroutine foreign-call metadata", fn.Name())
+				return fmt.Errorf("prepare emission universe: declaration %q has owner-dependent physical ABI while freezing coroutine call metadata", fn.Name())
 			}
 			abi, haveABI = candidate, true
 		}
@@ -6945,22 +7055,25 @@ func (u *EmissionUniverse) freezeCoroForeignCallCertificates() error {
 			continue
 		}
 		abiByFunction[fn] = abi
-		addressOnly, err := u.coroWorkerAddressOnlyDeclaration(fn)
-		if err != nil {
-			return fmt.Errorf("prepare emission universe: classify C declaration %q for coroutine physical ABI inventory: %w", fn.Name(), err)
+		if abi.kind == cFunc {
+			addressOnly, err := u.coroWorkerAddressOnlyDeclaration(fn)
+			if err != nil {
+				return fmt.Errorf("prepare emission universe: classify C declaration %q for coroutine physical ABI inventory: %w", fn.Name(), err)
+			}
+			if addressOnly {
+				// FuncPCABI0 publishes only this declaration's text address. Its
+				// explicit word-call ABI is frozen by the callable shadow and
+				// worker syscall certificate; the declaration's zero-argument Go
+				// signature is never an ordinary typed C call ABI and must not
+				// collide with a real typed declaration of the same symbol.
+				continue
+			}
 		}
-		if addressOnly {
-			// FuncPCABI0 publishes only this declaration's text address.  Its
-			// explicit word-call ABI is frozen by the callable shadow and worker
-			// syscall certificate; the declaration's zero-argument Go signature
-			// is never an ordinary typed C call ABI and must not collide with a
-			// real typed declaration of the same physical symbol.
-			continue
-		}
-		signatures := signaturesBySymbol[abi.symbol]
+		inventorySymbol := fmt.Sprintf("%d:%s", abi.kind, abi.symbol)
+		signatures := signaturesBySymbol[inventorySymbol]
 		if signatures == nil {
 			signatures = make(map[string]none)
-			signaturesBySymbol[abi.symbol] = signatures
+			signaturesBySymbol[inventorySymbol] = signatures
 		}
 		signatures[abi.signature] = none{}
 	}
@@ -7017,15 +7130,22 @@ func (u *EmissionUniverse) freezeCoroForeignCallCertificates() error {
 		canonical := u.canonicalAlias(fn)
 		abi, ok := abiByFunction[canonical]
 		if !ok {
+			if directive == coroForeignCallNoBlock {
+				return fmt.Errorf("prepare emission universe: %s on %q requires an exact frozen declaration (C or bodyless managed-Go)", directive, fn.Name())
+			}
 			return fmt.Errorf("prepare emission universe: %s on %q requires an exact frozen C declaration", directive, fn.Name())
 		}
-		if signatures := signaturesBySymbol[abi.symbol]; len(signatures) != 1 {
+		if abi.kind == goFunc && directive != coroForeignCallNoBlock {
+			return fmt.Errorf("prepare emission universe: %s on bodyless managed Go declaration %q is unsupported; only noblock can publish an executor-safe managed capability", directive, fn.Name())
+		}
+		inventorySymbol := fmt.Sprintf("%d:%s", abi.kind, abi.symbol)
+		if signatures := signaturesBySymbol[inventorySymbol]; len(signatures) != 1 {
 			return fmt.Errorf("prepare emission universe: %s physical symbol %q has conflicting frozen ABI signatures", directive, abi.symbol)
 		}
-		if previous, exists := directiveBySymbol[abi.symbol]; exists && previous != directive {
+		if previous, exists := directiveBySymbol[inventorySymbol]; exists && previous != directive {
 			return fmt.Errorf("prepare emission universe: physical C symbol %q has mutually exclusive %s and %s coroutine certificates", abi.symbol, previous, directive)
 		}
-		directiveBySymbol[abi.symbol] = directive
+		directiveBySymbol[inventorySymbol] = directive
 		linkIdentity, ok := u.linkIdentities[canonical]
 		if !ok || linkIdentity == "" {
 			return fmt.Errorf("prepare emission universe: %s on %q has no frozen link identity", directive, fn.Name())
@@ -7033,6 +7153,7 @@ func (u *EmissionUniverse) freezeCoroForeignCallCertificates() error {
 		certificateID := framedEmissionKey(
 			directive.identityDomain(),
 			linkIdentity,
+			strconv.Itoa(abi.kind),
 			abi.symbol,
 			abi.signature,
 		)

@@ -111,8 +111,24 @@ func validateCoroStaticMethodCallOperands(call ssa.CallInstruction, target *ssa.
 	if common.IsInvoke() || common.StaticCallee() == nil || !exactValue || raw != common.StaticCallee() {
 		return fmt.Errorf("static coroutine method requires an exact function operand, not an invoke or method value")
 	}
+	if raw.Signature == nil {
+		return fmt.Errorf("static coroutine method source operand has no signature")
+	}
+	flattenedLinkname := false
+	if raw.Signature.Recv() == nil && universe != nil {
+		if pair, ok := universe.goLinknameDefinitions[raw]; ok && pair.key != "" &&
+			universe.canonicalAlias(pair.definition) == target &&
+			universe.managedGoLinknameDefinitionHasKey(target, pair.key) {
+			// Go source can only name an unexported method through a bodyless
+			// receiver-first package function. The frozen managed-linkname pair
+			// proves that this is the same physical callable; it is not a
+			// general synthetic receiver adapter.
+			flattenedLinkname = true
+		}
+	}
 	rawNormalized := coroPhysicalNormalizeSourceSignature(raw.Signature)
-	if raw.Signature == nil || raw.Signature.Recv() == nil || rawNormalized.Params().Len() != len(raw.Params) || len(common.Args) != len(raw.Params) {
+	if (raw.Signature.Recv() == nil && !flattenedLinkname) ||
+		rawNormalized.Params().Len() != len(raw.Params) || len(common.Args) != len(raw.Params) {
 		return fmt.Errorf("static coroutine method source operand has no exact receiver-first SSA shape")
 	}
 	for index, parameter := range raw.Params {
@@ -136,7 +152,7 @@ func validateCoroStaticMethodCallOperands(call ssa.CallInstruction, target *ssa.
 		if err != nil {
 			return fmt.Errorf("derive canonical static coroutine method signature: %w", err)
 		}
-		if !coroInterfaceDispatchSignaturesIdentical(effectiveRaw, normalized) {
+		if !flattenedLinkname && !coroInterfaceDispatchSignaturesIdentical(effectiveRaw, normalized) {
 			return fmt.Errorf("static coroutine method source ABI %s does not match canonical target ABI %s", effectiveRaw, normalized)
 		}
 		targetContext, err = universe.functionABIContext(target, universe.ownerOf(target))
@@ -622,11 +638,16 @@ func (p *context) loadCoroAwaitResult(b llssa.Builder, resultSlot llssa.Expr, re
 	case 0:
 		return llssa.Nil
 	case 1:
-		return b.Load(b.FieldAddr(resultSlot, 0))
+		// resultSlot is compiler-created coroutine-frame storage. The child
+		// transaction cannot publish Return until that slot is valid, so the
+		// continuation may load it as known non-nil. This is observable for
+		// zero-sized results, where an ordinary Load would otherwise invent a
+		// source nil-dereference helper at the call instruction.
+		return b.LoadKnownNonNil(b.FieldAddr(resultSlot, 0))
 	default:
 		fields := make([]llssa.Expr, results.Len())
 		for i := range fields {
-			fields[i] = b.Load(b.FieldAddr(resultSlot, i))
+			fields[i] = b.LoadKnownNonNil(b.FieldAddr(resultSlot, i))
 		}
 		return b.Aggregate(p.prog.Type(results, llssa.InGo), fields...)
 	}

@@ -144,7 +144,7 @@ func Root() { marker() }
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
 	_, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
-	if err == nil || !strings.Contains(err.Error(), "critical marker") || !strings.Contains(err.Error(), "cannot be materialized as a function value") {
+	if err == nil || !strings.Contains(err.Error(), "scheduler marker") || !strings.Contains(err.Error(), "cannot be materialized as a function value") {
 		t.Fatalf("critical marker materialization error = %v", err)
 	}
 }

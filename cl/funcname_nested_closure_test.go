@@ -204,6 +204,16 @@ func use() {
 	if got, ok := patchCtx._patchType(oldNamed); !ok || !types.Identical(got, patchNamed) {
 		t.Fatalf("_patchType(patched named) = %v, %v, want patched named", got, ok)
 	}
+	detachedPkg := types.NewPackage(oldPkg.Path(), oldPkg.Name())
+	detachedObj := types.NewTypeName(token.NoPos, detachedPkg, "N", nil)
+	detachedNamed := types.NewNamed(detachedObj, types.Typ[types.Int64], nil)
+	detachedPkg.Scope().Insert(detachedObj)
+	if typepatch.IsPatched(detachedPkg) {
+		t.Fatal("detached same-path package unexpectedly carries the patch marker")
+	}
+	if got, ok := patchCtx._patchType(detachedNamed); !ok || !types.Identical(got, patchNamed) {
+		t.Fatalf("_patchType(detached same-path named) = %v, %v, want patched named", got, ok)
+	}
 
 	pkglessObj := types.NewTypeName(token.NoPos, nil, "Pkgless", nil)
 	pkgless := types.NewNamed(pkglessObj, types.Typ[types.Int], nil)

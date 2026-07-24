@@ -20,6 +20,7 @@ package cl
 
 import (
 	"go/ast"
+	"go/token"
 	"strings"
 	"testing"
 
@@ -406,6 +407,7 @@ func TestLoweredRuntimeHelpersIncludeZeroSizedLoadNilCheck(t *testing.T) {
 type Empty struct{}
 func (Empty) Method() {}
 func Load(value *Empty) Empty { return *value }
+func NestedLoad(value **Empty) Empty { return **value }
 func Call(value *Empty) { value.Method() }
 `)
 	testProg.ssa.Build()
@@ -415,6 +417,7 @@ func Call(value *Empty) { value.Method() }
 		want []string
 	}{
 		{name: "Load", want: []string{"AssertNilDeref"}},
+		{name: "NestedLoad", want: []string{"AssertNilDeref", "AssertNilDerefPtr"}},
 		{name: "Call", want: []string{"AssertNilDeref", "AssertNilDerefPtr"}},
 	} {
 		fn := pkg.ssa.Func(test.name)
@@ -434,6 +437,78 @@ func Call(value *Empty) { value.Method() }
 			if !found[helper] {
 				t.Errorf("%s zero-sized load helpers %v omit %q", test.name, found, helper)
 			}
+		}
+	}
+}
+
+func TestLargeOrZeroInterfaceDerefConsumerOwnsFusedLoad(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/fusedbox", `package fusedbox
+type Large [1 << 21]byte
+type Empty struct{}
+type Holder struct { Value Large }
+func LargeBox(value *Large) any { return *value }
+func EmptyBox(value *Empty) any { return *value }
+func LargeFieldBox(value *Holder) any { return value.Value }
+`)
+	testProg.ssa.Build()
+	universe, owner := newEmissionABIDemandTestUniverse(testProg, pkg)
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe.prog = prog
+	for _, test := range []struct {
+		name string
+		want coroInterfaceDerefFusion
+	}{
+		{name: "LargeBox", want: coroInterfaceDerefLarge},
+		{name: "EmptyBox", want: coroInterfaceDerefZero},
+		{name: "LargeFieldBox", want: coroInterfaceDerefLarge},
+	} {
+		name := test.name
+		fn := pkg.ssa.Func(name)
+		ctx, err := universe.functionABIContext(fn, owner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var deref *ssa.UnOp
+		for _, block := range fn.Blocks {
+			for _, instruction := range block.Instrs {
+				if candidate, ok := instruction.(*ssa.UnOp); ok && candidate.Op == token.MUL {
+					deref = candidate
+				}
+			}
+		}
+		box, fusion := coroInterfaceDerefConsumer(ctx, deref)
+		if fusion != test.want || box == nil || box.X != deref {
+			t.Fatalf("%s fused interface dereference = %v, %v; want its exact MakeInterface consumer and fusion %v", name, box, fusion, test.want)
+		}
+	}
+}
+
+func TestLoweredRuntimeHelpersIncludeNestedInterfaceCompareNilChecks(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/loweredinterfacecompare", `package loweredinterfacecompare
+func Compare(value **interface{}, other interface{}) bool { return **value == other }
+`)
+	testProg.ssa.Build()
+	universe, owner := newEmissionABIDemandTestUniverse(testProg, pkg)
+	fn := pkg.ssa.Func("Compare")
+	ctx, err := universe.functionABIContext(fn, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var helpers []string
+	for _, block := range fn.Blocks {
+		for _, instruction := range block.Instrs {
+			deref, ok := instruction.(*ssa.UnOp)
+			if ok && isInterfaceCompareDeref(deref) {
+				helpers = universe.loweredRuntimeHelpers(ctx, instruction)
+			}
+		}
+	}
+	for _, helper := range []string{"AssertNilDeref", "AssertNilDerefPtr"} {
+		if !stringSliceContains(helpers, helper) {
+			t.Errorf("nested interface comparison helpers %v omit %q", helpers, helper)
 		}
 	}
 }

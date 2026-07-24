@@ -64,6 +64,12 @@ func validateCoroRawPlainConsumers(plan *coro.SSAPlan, universe *EmissionUnivers
 
 		for _, block := range fn.Blocks {
 			for _, instruction := range block.Instrs {
+				if _, debug := instruction.(*ssa.DebugRef); debug {
+					// DebugRef is source-position metadata only. Its operands
+					// are never emitted and therefore cannot publish a managed
+					// descriptor from a raw/plain body.
+					continue
+				}
 				if err := validateCoroRawPlainLocalDescriptorProducer(plan, universe, fn, instruction); err != nil {
 					return err
 				}

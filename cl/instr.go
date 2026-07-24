@@ -2001,6 +2001,41 @@ func isKnownNonNilAddr(v ssa.Value) bool {
 	return false
 }
 
+// loadAddressOwnsNilFault identifies address-producing SSA instructions whose
+// lowering already owns every source-language failure needed before a load.
+// IndexAddr always owns its bounds and *array nil rules. FieldAddr owns the nil
+// rule only when its exact frozen physical recipe says so; ordinary field
+// lowering must retain Builder.Load's native static-null fallback.
+func (p *context) loadAddressOwnsNilFault(v ssa.Value) bool {
+	switch v := v.(type) {
+	case *ssa.IndexAddr:
+		return true
+	case *ssa.FieldAddr:
+		return p.coroPhysicalProducerHasRecipe(v, coroPhysicalInstructionFieldAddr)
+	default:
+		return false
+	}
+}
+
+// coroPhysicalProducerHasRecipe queries an already-frozen producer recipe
+// without consulting the current instruction observer. This is the only
+// supported way for a consumer lowering to rely on a producer's structured
+// guard.
+func (p *context) coroPhysicalProducerHasRecipe(
+	instruction ssa.Instruction,
+	recipe coroPhysicalInstructionRecipe,
+) bool {
+	plan := p.coroEmissionPlan()
+	if plan == nil {
+		return false
+	}
+	physical, err := plan.instructionPlan(instruction)
+	if err != nil {
+		panic(fmt.Errorf("load physical producer recipe: %w", err))
+	}
+	return physical.recipe == recipe
+}
+
 func isWrapNilCheckCall(v ssa.Value) bool {
 	call, ok := v.(*ssa.Call)
 	if !ok {

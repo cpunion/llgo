@@ -19,6 +19,7 @@
 package cl
 
 import (
+	"bytes"
 	"go/token"
 	"go/types"
 	"strings"
@@ -101,6 +102,30 @@ var Cleanup = (*Counter).Release
 		t.Fatal("forged method-expression identity was accepted")
 	}
 	thunk.Synthetic = original
+}
+
+func TestCoroExactMethodExpressionThunkImplicitIndirectionShape(t *testing.T) {
+	const source = `package foo
+type Number int
+func (number Number) Twice() int { return int(number) * 2 }
+var Twice = (*Number).Twice
+`
+	ssaPkg, _, _ := buildGoSSAPkg(t, source)
+	var thunk *ssa.Function
+	for function := range ssautil.AllFunctions(ssaPkg.Prog) {
+		if function != nil && function.Name() == "Twice$thunk" {
+			thunk = function
+			break
+		}
+	}
+	if thunk == nil {
+		t.Fatal("fixture has no implicit-indirection method-expression thunk")
+	}
+	if err := validateCoroExactMethodExpressionThunk(thunk); err != nil {
+		var dump bytes.Buffer
+		ssa.WriteFunction(&dump, thunk)
+		t.Fatalf("canonical implicit-indirection method-expression thunk rejected: %v\n%s", err, dump.String())
+	}
 }
 
 func TestCoroDynamicDispatchProducerCapturedPlainClosure(t *testing.T) {

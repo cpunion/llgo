@@ -479,12 +479,14 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 				}
 			}
 			frontendC := false
+			frontendManagedBodyless := false
 			if in.functionBackground != nil {
 				background, classified, err := in.functionBackground(fn)
 				if err != nil {
 					return coro.SSAFunctionPolicy{}, fmt.Errorf("classify frozen frontend ABI for %q: %w", fn.Name(), err)
 				}
 				frontendC = classified && background == llssa.InC
+				frontendManagedBodyless = classified && background == llssa.InGo && len(fn.Blocks) == 0
 			}
 			noPreemptCertificate := ""
 			noPreemptCertified := false
@@ -674,12 +676,12 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 				}
 			}
 			if certified {
-				if !frontendC {
-					return coro.SSAFunctionPolicy{}, fmt.Errorf("frozen foreign noblock certificate for %q does not name a frontend C declaration", fn.Name())
+				if !frontendC && !frontendManagedBodyless {
+					return coro.SSAFunctionPolicy{}, fmt.Errorf("frozen noblock certificate for %q does not name a frontend C or bodyless managed-Go declaration", fn.Name())
 				}
 				if policy.Effect != coro.NoSuspend || policy.Exec != 0 || policy.NeedsDispatch ||
 					policy.OverrideExternal && policy.External != coro.ExternalKnown {
-					return coro.SSAFunctionPolicy{}, fmt.Errorf("frontend C declaration %q conflicts with its frozen foreign noblock certificate", fn.Name())
+					return coro.SSAFunctionPolicy{}, fmt.Errorf("frontend declaration %q conflicts with its frozen noblock certificate", fn.Name())
 				}
 				policy.IgnoreBody = true
 				policy.External = coro.ExternalKnown
@@ -774,7 +776,7 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 				policy.Exec = coro.IRQUnsafe
 				policy.AssemblyNoSuspendCertificate = assemblyCertificate
 			}
-			if policy.IgnoreBody && !frontendC && !assemblyCertified {
+			if policy.IgnoreBody && !frontendC && !assemblyCertified && !(frontendManagedBodyless && certified) {
 				return coro.SSAFunctionPolicy{}, fmt.Errorf("builder cannot ignore the SSA body of non-C function %q", fn.Name())
 			}
 			if !frontendC {

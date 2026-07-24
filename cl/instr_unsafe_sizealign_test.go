@@ -19,6 +19,7 @@
 package cl
 
 import (
+	"bytes"
 	"go/ast"
 	"go/types"
 	"strings"
@@ -116,7 +117,7 @@ func Use(values []Record) uintptr { return SizeOnly(values) }
 		}
 
 		instance := unsafeSizeAlignStaticCallee(t, callerPkg.ssa.Func("Use"), "SizeOnly")
-		frozen, ok := universe.frozenUnsafeSizeAlignUnevaluatedSSA(instance)
+		frozen, ok := universe.frozenUnsafeLayoutUnevaluatedSSA(instance)
 		if !ok {
 			t.Fatalf("generic instance %q has no frozen unevaluated SSA set", instance.String())
 		}
@@ -144,6 +145,78 @@ func Use(values []Record) uintptr { return SizeOnly(values) }
 		}
 		if handled, reason := audit.validate(omittedIndex); !handled || reason != "" {
 			t.Fatalf("frozen unevaluated index audit = handled %t, reason %q; want omitted", handled, reason)
+		}
+	})
+
+	t.Run("generic offsetof composite producer is unevaluated", func(t *testing.T) {
+		testProg := newEmissionTestProgram()
+		testProg.ssa.CreatePackage(types.Unsafe, nil, nil, true)
+		runtimePkg := testProg.addPackage(t, llssa.PkgRuntime, `package runtime
+func Present() {}
+`)
+		callerPkg := testProg.addPackage(t, "example.com/emission/offsetof", `package offsetof
+import "unsafe"
+func identity[E any](value E) E { return value }
+func Offset[E ~int](value E) uintptr {
+	return unsafe.Offsetof(struct {
+		Prefix byte
+		Value E
+	}{0, identity(value)}.Value)
+}
+func Use(value int) uintptr { return Offset(value) }
+`)
+		testProg.ssa.Build()
+		prog := newLLSSAProg(t)
+		defer prog.Dispose()
+		universe, err := PrepareEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
+			{SSA: runtimePkg.ssa, Files: []*ast.File{runtimePkg.file}},
+			{SSA: callerPkg.ssa, Files: []*ast.File{callerPkg.file}},
+		}, EmissionUniverseOptions{CompleteRuntimeABI: true})
+		if err != nil {
+			t.Fatalf("prepare offsetof universe: %v", err)
+		}
+
+		instance := unsafeSizeAlignStaticCallee(t, callerPkg.ssa.Func("Use"), "Offset")
+		frozen, ok := universe.frozenUnsafeLayoutUnevaluatedSSA(instance)
+		if !ok {
+			t.Fatalf("generic instance %q has no frozen layout-operand set", instance.String())
+		}
+		var producer *ssa.Call
+		var offsetCall *ssa.Call
+		for _, block := range instance.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(*ssa.Call)
+				if !ok {
+					continue
+				}
+				if builtin, ok := call.Call.Value.(*ssa.Builtin); ok && builtin.Name() == "Offsetof" {
+					offsetCall = call
+					continue
+				}
+				if _, omitted := frozen[call]; omitted {
+					producer = call
+				}
+			}
+		}
+		if producer == nil || offsetCall == nil {
+			var dump bytes.Buffer
+			ssa.WriteFunction(&dump, instance)
+			t.Fatalf("generic Offset frozen=%s; want omitted producer and live Offsetof\n%s", unsafeSizeAlignInstructionSetString(frozen), dump.String())
+		}
+		if _, omitted := frozen[offsetCall]; omitted {
+			t.Fatal("Offsetof instruction itself must remain live")
+		}
+		if calls, err := universe.CoroLoweredCalls(instance); err != nil {
+			t.Fatal(err)
+		} else if len(calls) != 0 {
+			t.Fatalf("Offsetof-only generic body acquired phantom lowered calls: %+v", calls)
+		}
+		audit, err := newCoroPhysicalPureSSAAudit(universe, nil, instance, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if handled, reason := audit.validate(offsetCall); !handled || reason != "" {
+			t.Fatalf("Offsetof audit = handled %t, reason %q; want exact constant lowering", handled, reason)
 		}
 	})
 

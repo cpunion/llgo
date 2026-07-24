@@ -285,13 +285,14 @@ func validateCoroExactBoundMethodWrapper(fn *ssa.Function) error {
 	return validateCoroExactTailCallResults(fn, call, ret, extracts)
 }
 
-// validateCoroExactMethodExpressionThunk recognizes the direct method-
-// expression thunk synthesized by x/tools/ssa for T.Method. Unlike a bound
-// method value, the receiver is the first ordinary parameter and there is no
-// captured environment. Restricting this certificate to an exact receiver
-// type deliberately leaves promoted-field and implicit-indirection wrappers
-// closed until their additional nil/selection operations have their own
-// audited recipe.
+// validateCoroExactMethodExpressionThunk recognizes the method-expression
+// thunk synthesized by x/tools/ssa for T.Method. Unlike a bound method value,
+// the receiver is the first ordinary parameter and there is no captured
+// environment. Besides an exact declared receiver, Go permits (*T).Method for
+// a value-receiver method; x/tools lowers that one implicit indirection to the
+// exact ssa:wrapnilchk -> load -> static-call sequence validated below.
+// Promoted-field wrappers remain closed until their selection chain has its
+// own audited recipe.
 func validateCoroExactMethodExpressionThunk(fn *ssa.Function) error {
 	if fn == nil || fn.Pkg != nil || fn.Parent() != nil || fn.Syntax() != nil {
 		return fmt.Errorf("requires one top-level syntax-free generated thunk")
@@ -313,9 +314,18 @@ func validateCoroExactMethodExpressionThunk(fn *ssa.Function) error {
 	params := fn.Signature.Params()
 	methodParams := method.Params()
 	if params == nil || params.Len() != methodParams.Len()+1 ||
-		!types.Identical(params.At(0).Type(), method.Recv().Type()) ||
 		fn.Signature.Variadic() != method.Variadic() ||
 		!types.Identical(fn.Signature.Results(), method.Results()) {
+		return fmt.Errorf("callable signature is not receiver-first method signature")
+	}
+	callableReceiver := params.At(0).Type()
+	methodReceiver := method.Recv().Type()
+	directReceiver := types.Identical(callableReceiver, methodReceiver)
+	implicitPointerReceiver := false
+	if pointer, ok := types.Unalias(callableReceiver).Underlying().(*types.Pointer); ok {
+		implicitPointerReceiver = types.Identical(pointer.Elem(), methodReceiver)
+	}
+	if !directReceiver && !implicitPointerReceiver {
 		return fmt.Errorf("callable signature is not receiver-first method signature")
 	}
 	for index := 0; index < methodParams.Len(); index++ {
@@ -330,6 +340,7 @@ func validateCoroExactMethodExpressionThunk(fn *ssa.Function) error {
 	var receiverAlloc *ssa.Alloc
 	var receiverStore *ssa.Store
 	var receiverLoad *ssa.UnOp
+	var receiverNilCheck *ssa.Call
 	var call *ssa.Call
 	var ret *ssa.Return
 	extracts := make(map[int]*ssa.Extract)
@@ -356,6 +367,13 @@ func validateCoroExactMethodExpressionThunk(fn *ssa.Function) error {
 				}
 				receiverLoad = instruction
 			case *ssa.Call:
+				if isWrapNilCheckCall(instruction) {
+					if receiverNilCheck != nil {
+						return fmt.Errorf("contains more than one receiver nil check")
+					}
+					receiverNilCheck = instruction
+					continue
+				}
 				if call != nil {
 					return fmt.Errorf("contains more than one call")
 				}
@@ -379,7 +397,21 @@ func validateCoroExactMethodExpressionThunk(fn *ssa.Function) error {
 		return fmt.Errorf("is not one single-block receiver-spill tail call")
 	}
 	var receiver ssa.Value = fn.Params[0]
-	if receiverAlloc != nil || receiverStore != nil || receiverLoad != nil || len(fn.Locals) != 0 {
+	if implicitPointerReceiver {
+		if receiverNilCheck == nil {
+			return fmt.Errorf("has a non-canonical implicit receiver indirection")
+		}
+		common := receiverNilCheck.Common()
+		if common == nil || len(common.Args) != 3 ||
+			common.Args[0] != fn.Params[0] || receiverLoad == nil ||
+			receiverLoad.X != receiverNilCheck || receiverAlloc != nil ||
+			receiverStore != nil || len(fn.Locals) != 0 {
+			return fmt.Errorf("has a non-canonical implicit receiver indirection")
+		}
+		receiver = receiverLoad
+	} else if receiverNilCheck != nil {
+		return fmt.Errorf("direct receiver unexpectedly uses an implicit nil check")
+	} else if receiverAlloc != nil || receiverStore != nil || receiverLoad != nil || len(fn.Locals) != 0 {
 		if receiverAlloc == nil || receiverStore == nil || receiverLoad == nil || len(fn.Locals) != 1 ||
 			fn.Locals[0] != receiverAlloc || receiverStore.Addr != receiverAlloc ||
 			receiverStore.Val != fn.Params[0] || receiverLoad.X != receiverAlloc {

@@ -94,6 +94,60 @@ func TestCoroManagedDispatchValidationTreatsCallPlanAsOccurrenceAuthority(t *tes
 	}
 }
 
+func TestCoroManagedDispatchValidationSubsumesCHAOnlyExternalTarget(t *testing.T) {
+	ssaPkg, _, _ := buildGoSSAPkg(t, `package foo
+	func External()
+	func Apply(callback func()) { callback() }
+	`)
+	apply := ssaPkg.Func("Apply")
+	external := ssaPkg.Func("External")
+	call := onlyCoroManagedDispatchValidationCall(t, apply)
+	plan, err := coro.AnalyzeSSA(
+		ssaPkg.Prog,
+		coro.Roots{{Function: apply, Demand: coro.AsyncDemand}},
+		coro.SSAConfig{
+			MaxPlainInstructions: -1,
+			DynamicResolution:    coro.DynamicCHAClosed,
+			ClassifyUnknownCall: func(*ssa.Function, ssa.CallInstruction) (coro.UnknownTarget, error) {
+				return coro.UnknownManagedDispatch, nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callPlan, ok := plan.CallPlan(call)
+	if !ok || callPlan.Rep != coro.Dispatch {
+		t.Fatalf("managed CallPlan = %+v, found=%t", callPlan, ok)
+	}
+	externalID, ok := plan.FunctionID(external)
+	if !ok {
+		t.Fatal("bodyless CHA candidate has no FunctionID")
+	}
+	containsExternal := false
+	for _, target := range callPlan.Targets {
+		if target == externalID {
+			containsExternal = true
+			break
+		}
+	}
+	if !containsExternal {
+		t.Fatalf("open CallPlan targets = %v, want bodyless CHA candidate %q", callPlan.Targets, externalID)
+	}
+	valuePlan, ok := plan.ValuePlan(call.Common().Value)
+	if !ok || len(valuePlan.Funcs) != 1 {
+		t.Fatalf("callback ValuePlan = %+v, found=%t", valuePlan, ok)
+	}
+	for _, target := range valuePlan.Funcs[0].Targets {
+		if target == externalID {
+			t.Fatal("bodyless CHA-only candidate unexpectedly entered exact callback value flow")
+		}
+	}
+	if err := validateCoroManagedDispatchCall(plan, apply, call, callPlan); err != nil {
+		t.Fatalf("descriptor call rejected its CHA-only external candidate: %v", err)
+	}
+}
+
 func TestCoroManagedDispatchValidationAllowsConstantDeadAwaitSeed(t *testing.T) {
 	fn, call, plan, functionPlan := buildCoroManagedDispatchValidationFixture(t, `
 		const disabled = true

@@ -25,16 +25,19 @@ import (
 	"github.com/goplus/lib/c"
 )
 
+//llgo:coro worker
 //go:linkname directiveSqrt C.sqrt
 func directiveSqrt(x c.Double) c.Double
 
+//llgo:coro worker
 //llgo:link directiveAbs C.abs
 func directiveAbs(x c.Int) c.Int { return 0 }
 
 // The spaced form is an LLGo extension and intentionally differs from Go's
 // compiler directive spelling.
-// llgo:link directiveAbsSpaced C.abs
-func directiveAbsSpaced(x c.Int) c.Int { return 0 }
+// llgo:coro worker
+// llgo:link directiveAbsSpaced C.labs
+func directiveAbsSpaced(x c.Long) c.Long { return 0 }
 
 // The anchor type keeps the named //llgo:skip directive attached to a declaration
 // where LLGo collects skip comments, while the skipped symbol is named explicitly.

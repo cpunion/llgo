@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"testing"
 	"unsafe"
+
+	llgoabi "github.com/goplus/llgo/runtime/abi"
 )
 
 type kubeReflectTypeInterface struct {
@@ -20,27 +22,35 @@ func kubeReflectTypeData(t reflect.Type) unsafe.Pointer {
 	return (*kubeReflectTypeInterface)(unsafe.Pointer(&t)).data
 }
 
+//llgo:coro noblock
 //go:linkname kubeReflectUnsafeNew reflect.unsafe_New
 func kubeReflectUnsafeNew(unsafe.Pointer) unsafe.Pointer
 
+//llgo:coro noblock
 //go:linkname kubeReflectTypedmemmove reflect.typedmemmove
 func kubeReflectTypedmemmove(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer)
 
+//llgo:coro noblock
 //go:linkname kubeReflectUnsafeNewArray reflect.unsafe_NewArray
 func kubeReflectUnsafeNewArray(unsafe.Pointer, int) unsafe.Pointer
 
+//llgo:coro noblock
 //go:linkname kubeReflectMakeMap reflect.makemap
 func kubeReflectMakeMap(unsafe.Pointer, int) unsafe.Pointer
 
+//llgo:coro noblock
 //go:linkname kubeReflectMapAccess reflect.mapaccess
 func kubeReflectMapAccess(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) unsafe.Pointer
 
+//llgo:coro noblock
 //go:linkname kubeReflectMapIterInit reflect.mapiterinit
 func kubeReflectMapIterInit(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer)
 
+//llgo:coro noblock
 //go:linkname kubeReflectMapIterNext reflect.mapiternext
 func kubeReflectMapIterNext(unsafe.Pointer)
 
+//llgo:coro noblock
 //go:linkname kubeReflectIfaceE2I reflect.ifaceE2I
 func kubeReflectIfaceE2I(unsafe.Pointer, any, unsafe.Pointer)
 
@@ -95,10 +105,10 @@ var _ interface {
 } = kubeAddressableValue{}
 
 //go:linkname kubeReflectValueAbiType reflect.Value.abiType
-func kubeReflectValueAbiType(reflect.Value) unsafe.Pointer
+func kubeReflectValueAbiType(reflect.Value) *llgoabi.Type
 
 //go:linkname kubeReflectValueAbiTypeSlow reflect.Value.abiTypeSlow
-func kubeReflectValueAbiTypeSlow(reflect.Value) unsafe.Pointer
+func kubeReflectValueAbiTypeSlow(reflect.Value) *llgoabi.Type
 
 func TestKubeReflectValueGo126PromotedSymbols(t *testing.T) {
 	v := reflect.ValueOf(struct{ A int }{A: 1})

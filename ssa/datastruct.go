@@ -40,9 +40,22 @@ import (
 //
 //	t1 = &t0.name [#1]
 func (b Builder) FieldAddr(x Expr, idx int) Expr {
+	return b.fieldAddr(x, idx, false)
+}
+
+// FieldAddrKnownNonNil yields the address of a field without synthesizing the
+// low-level static-null fallback. The caller must already own the
+// source-language nil edge, as structured coroutine FieldAddr lowering does.
+func (b Builder) FieldAddrKnownNonNil(x Expr, idx int) Expr {
+	return b.fieldAddr(x, idx, true)
+}
+
+func (b Builder) fieldAddr(x Expr, idx int, knownNonNil bool) Expr {
 	dbgInstrf("FieldAddr %v, %d\n", x.impl, idx)
 	prog := b.Prog
-	b.assertStaticNilDeref(x)
+	if !knownNonNil {
+		b.assertStaticNilDeref(x)
+	}
 	tstruc := prog.Elem(x.Type)
 	telem := prog.Field(tstruc, idx)
 	pt := prog.Pointer(telem)

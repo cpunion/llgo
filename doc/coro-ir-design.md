@@ -67,6 +67,7 @@ ProgramModelBuilder fixed point
 - 重写 runtime 或 `internal/coro` 固定点不会解决上述问题，风险反而更大。
 - 新设计可以成为后续 defer/panic/recover、dynamic coroutine descriptor、syscall/IO、精确 GC metadata 和多平台 adapter 的公共编译器底座；但它本身不会自动补齐这些尚未实现的能力。
 - 当前代码已从native single-P vertical slice推进到受限的Linux/Darwin双owner fleet：command M与peer pthread M各自驱动一个P/source shard，使用exact route、route-local poll/timer/doorbell和共享bounded worker；loopback TCP已在该target配置 fresh compile-link-run并完成10,000次压力。普通Go 1.26标准库源码风格的`time.Sleep`、冻结timer语义、固定syscall文件回环、高层`os.File`回环和loopback TCP又在同一fleet acceptance中全部通过；2026-07-23新增的`syscall.Pipe`进度门还证明阻塞`Read`转交worker后，timer唤醒的writer G可继续运行，执行器没有被宿主I/O占住。六个独立fresh compile-link-run均已在Darwin通过；时间只作诊断，不是兼容性结论。这不能结论为“完整Go标准库和所有平台已经基本都可落地”：panic/unwind全矩阵、timer GC/synctest、tooling、cgo reentry、precise GC、动态P/affinity、parked-result迁移和其他平台driver仍需实现或生产验证，见第9、11节及《统一异步核心契约》第9.1节。
+- 2026-07-24的hard-cutover验收已让完整`./test/go`包通过frontend、SSA/effect规划、physical lowering、LLVM生成和最终链接；随后实际运行的10个代表用例通过，覆盖channel/select高频握手与关闭/range、rangefunc defer/panic、Go 1.26 reflect私有method linkname，以及零尺寸/大对象fault。`internal/build.TestTest`也在修正raw/plain `DebugRef`误判后通过。这个结果证明现有编译器能够承载较宽的标准库编译和一组关键运行语义，但仍不是`test/*`或GOROOT全量通过：`reflect.MakeFunc`目前明确fail closed于managed coroutine dispatch，完整`reflect.Call/MakeFunc` typed trampoline仍属Phase 4；全量`cl`和`ssa`旧测试驱动还会因逐目录fresh整程序分析超过Go测试默认10分钟，需要单独做性能治理和分片验收。
 
 ## 2. 目标与非目标
 

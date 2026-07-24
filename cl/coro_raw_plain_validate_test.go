@@ -165,12 +165,12 @@ func Host(value int) int { return Apply(Target, value) }
 }
 
 func TestCoroRawPlainAcceptsCompilerElidedStaticCodeAddressBox(t *testing.T) {
-	ssaPkg, _, files := buildGoSSAPkg(t, `package foo
+	ssaPkg, _, files := buildGoSSAPkgWithMode(t, `package foo
 //llgo:link funcPCABI0 llgo.funcPCABI0
 func funcPCABI0(any) uintptr
 func libc_execve_trampoline()
 func Host() uintptr { return funcPCABI0(libc_execve_trampoline) }
-`)
+`, ssa.SanityCheckFunctions|ssa.InstantiateGenerics|ssa.GlobalDebug)
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
 	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
@@ -198,12 +198,19 @@ func Host() uintptr { return funcPCABI0(libc_execve_trampoline) }
 		},
 	})
 	var box *ssa.MakeInterface
+	debugRefs := 0
 	for _, block := range host.Blocks {
 		for _, instruction := range block.Instrs {
 			if candidate, ok := instruction.(*ssa.MakeInterface); ok {
 				box = candidate
 			}
+			if _, ok := instruction.(*ssa.DebugRef); ok {
+				debugRefs++
+			}
 		}
+	}
+	if debugRefs == 0 {
+		t.Fatal("GlobalDebug raw/plain fixture contains no DebugRef")
 	}
 	if box != nil {
 		refs := box.Referrers()

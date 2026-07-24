@@ -162,13 +162,29 @@ func (b Builder) MakeInterface(tinter Type, x Expr) (ret Expr) {
 }
 
 func (b Builder) MakeInterfaceFromPtr(tinter Type, ptr Expr) (ret Expr) {
+	return b.makeInterfaceFromPtr(tinter, ptr, false)
+}
+
+// MakeInterfaceFromKnownNonNilPtr boxes the value at ptr without synthesizing
+// a nil-dereference helper. The caller must already own or prove the
+// source-language nil edge.
+func (b Builder) MakeInterfaceFromKnownNonNilPtr(tinter Type, ptr Expr) (ret Expr) {
+	return b.makeInterfaceFromPtr(tinter, ptr, true)
+}
+
+func (b Builder) makeInterfaceFromPtr(tinter Type, ptr Expr, knownNonNil bool) (ret Expr) {
 	rawIntf := tinter.raw.Type.Underlying().(*types.Interface)
 	prog := b.Prog
-	b.AssertNilDeref(ptr)
+	if !knownNonNil {
+		b.AssertNilDeref(ptr)
+	}
 
 	typ := prog.Elem(ptr.Type)
 	tabi := b.abiType(typ.raw.Type)
 	if kind, _, _ := abi.DataKindOf(typ.raw.Type, 0, prog.is32Bits); kind != abi.Indirect {
+		if knownNonNil {
+			return b.MakeInterface(tinter, b.LoadKnownNonNil(ptr))
+		}
 		return b.MakeInterface(tinter, b.Load(ptr))
 	}
 

@@ -246,6 +246,18 @@ func (a *coroPhysicalPureSSAAudit) validateMakeClosure(closure *ssa.MakeClosure)
 	if len(target.FreeVars) == 0 && (leaf.Rep == coro.DirectPlain || leaf.Rep == coro.DirectCoro) {
 		return a.requireNoRuntimeHelpers(closure)
 	}
+	if len(target.FreeVars) != 0 && leaf.Rep == coro.DirectPlain {
+		targetPlan, planned := a.plan.FunctionPlan(target)
+		if !planned || targetPlan.ID != targetID || targetPlan.External != coro.Defined ||
+			targetPlan.Emission != coro.EmitPlain || targetPlan.Primary != coro.PrimaryPlain {
+			return "captured direct plain target has no canonical managed plain body"
+		}
+		// An exact, non-escaping plain closure remains LLGo's ordinary
+		// {code,environment} value. Value-flow upgrades it to Dispatch whenever
+		// it can reach a dynamic consumer, so retaining DirectPlain here means
+		// only the environment allocation is needed in the physical body.
+		return a.requireFrozenCoroSafeRuntimeHelpers(closure, "AllocU")
+	}
 	if len(target.FreeVars) != 0 && leaf.Rep == coro.DirectCoro {
 		targetPlan, planned := a.plan.FunctionPlan(target)
 		if !planned || targetPlan.ID != targetID || targetPlan.External != coro.Defined ||
@@ -469,19 +481,50 @@ func (a *coroPhysicalPureSSAAudit) derefRequiresImplicitNilFault(deref *ssa.UnOp
 		// conversion is the zero value and must remain legal for a nil slice.
 		return false
 	}
+	if _, fusion := coroInterfaceDerefConsumer(a.ctx, deref); fusion == coroInterfaceDerefLarge {
+		// MakeInterfaceFromPtr is the exact physical owner of the large
+		// operation's nil check and typed copy; the UnOp intentionally emits no
+		// load and therefore must remain an ordinary producer. Zero-sized
+		// dereferences still own their source-language nil edge.
+		return false
+	}
 	proof := a.currentFrameRetentionProof()
 	if proof == nil {
 		return false
 	}
-	if field, ok := deref.X.(*ssa.FieldAddr); ok && proof.requiresImplicitNilFault(field, field) {
-		// The FieldAddr recipe owns this base guard before constructing the GEP.
-		return false
-	}
-	if _, indexed := deref.X.(*ssa.IndexAddr); indexed {
-		// The IndexAddr recipe owns its bounds and possible *array nil guards.
+	if owns, _ := a.derefAddressProducerOwnsImplicitFault(deref); owns {
 		return false
 	}
 	return proof.requiresImplicitNilFault(deref.X, deref)
+}
+
+// derefAddressProducerOwnsImplicitFault identifies the address recipes that
+// establish every condition required by a following load. The consumer may
+// then elide its legacy nil helper, but it must still carry a frozen deref
+// recipe so that ownership is explicit and observable during codegen.
+func (a *coroPhysicalPureSSAAudit) derefAddressProducerOwnsImplicitFault(
+	deref *ssa.UnOp,
+) (bool, string) {
+	if a == nil || deref == nil || deref.Op != token.MUL {
+		return false, ""
+	}
+	switch address := deref.X.(type) {
+	case *ssa.FieldAddr:
+		owns, reason := a.fieldAddrRequiresImplicitNilFault(address)
+		if reason != "" {
+			return false, reason
+		}
+		return owns, ""
+	case *ssa.IndexAddr:
+		if a.ctx != nil && emissionIsVargsAlloc(a.ctx, address.X) {
+			return false, ""
+		}
+		// IndexAddr owns its bounds check and, for *array containers, its nil
+		// guard before it publishes the element address.
+		return true, ""
+	default:
+		return false, ""
+	}
 }
 
 func (a *coroPhysicalPureSSAAudit) validateIndexAddr(index *ssa.IndexAddr) string {
@@ -1162,14 +1205,28 @@ func (a *coroPhysicalPureSSAAudit) validateNext(next *ssa.Next) string {
 		if coroPhysicalInvalidType(actual) {
 			continue
 		}
-		if !types.Identical(actual, a.typeOf(expected)) {
-			return fmt.Sprintf("Next tuple field %d does not match the range source", index+1)
+		// sourceType was already patched as one complete map/string type above;
+		// its key/element projections therefore belong to the selected emission
+		// owner. Re-patching a projected instantiated named type can select its
+		// pre-substitution origin a second time and create a false mismatch.
+		if !types.Identical(actual, expected) && !types.AssignableTo(expected, actual) {
+			return fmt.Sprintf(
+				"Next tuple field %d is not assignable from the range source (source=%s target=%s)",
+				index+1,
+				types.TypeString(expected, nil),
+				types.TypeString(actual, nil),
+			)
 		}
 		if err := validateCoroPhysicalSSAValueType(actual); err != nil {
 			return fmt.Sprintf("Next tuple field %d has unsupported type: %v", index+1, err)
 		}
 	}
-	return a.requireFrozenStructuredRuntimeHelpers(next, helper)
+	helpers := []string{helper}
+	if a.universe != nil {
+		helpers = append(helpers, a.universe.nextAssignmentRuntimeHelperNames(a.ctx, next)...)
+	}
+	sort.Strings(helpers)
+	return a.requireFrozenStructuredRuntimeHelpers(next, helpers...)
 }
 
 // coroPhysicalRangeStringType gives an untyped string constant the concrete
@@ -1242,8 +1299,9 @@ func (a *coroPhysicalPureSSAAudit) validateConvert(convert *ssa.Convert) string 
 		(proof == nil || !proof.provesTraceableUintptr(convert)) &&
 		!a.coroPointerUintptrScalarTerminal(convert) &&
 		!a.coroPointerUintptrAtomicTerminal(convert) &&
+		!coroPointerUintptrReflectHeaderStoreTerminal(convert) &&
 		(a.universe == nil || !a.universe.coroRuntimeCodeAddressType(source)) {
-		reason := "pointer-to-uintptr conversion is not bound to an exact managed-child/worker uintptrkeepalive source, scalar terminal, or inline atomic terminal"
+		reason := "pointer-to-uintptr conversion is not bound to an exact managed-child/worker uintptrkeepalive source, scalar terminal, inline atomic terminal, or reflect-header store"
 		if coroPointerUintptrScalarTerminal(convert) && a != nil && a.plan != nil && a.fn != nil {
 			plan, planned := a.plan.FunctionPlan(a.fn)
 			reason += fmt.Sprintf(" (structural scalar terminal; planned=%t effect=%s exec=%s)", planned, plan.Effect, plan.Exec)
@@ -1252,7 +1310,8 @@ func (a *coroPhysicalPureSSAAudit) validateConvert(convert *ssa.Convert) string 
 	}
 	if coroFrameRetentionUintptrLike(source) && coroFrameRetentionPointerLike(target) &&
 		(proof == nil || !proof.provesTraceableUintptr(convert.X)) &&
-		!a.provesWorkerForeignPointerResult(convert.X) {
+		!a.provesWorkerForeignPointerResult(convert.X) &&
+		!coroConstantUintptrAddress(convert.X) {
 		return "uintptr-to-pointer conversion has no traceable exact pointer provenance"
 	}
 	if err := validateCoroPhysicalSSAValueType(source); err != nil {
@@ -1262,6 +1321,161 @@ func (a *coroPhysicalPureSSAAudit) validateConvert(convert *ssa.Convert) string 
 		return "conversion result is unsupported: " + err.Error()
 	}
 	return a.requireNoRuntimeHelpers(convert)
+}
+
+// coroConstantUintptrAddress accepts an exact raw numeric address. Such a
+// value has no Go referent whose liveness or relocation must be proved; using
+// the resulting unsafe.Pointer remains the program's responsibility. Besides
+// a direct integer constant, x/tools may spill a captured constant local before
+// later closures are built. Admit only the entry-block image with one direct
+// constant Store before the exact load and no earlier address escape.
+func coroConstantUintptrAddress(value ssa.Value) bool {
+	switch value := value.(type) {
+	case *ssa.Const:
+		basic, ok := types.Unalias(value.Type()).Underlying().(*types.Basic)
+		return value.Value != nil && ok && basic.Info()&types.IsInteger != 0
+	case *ssa.ChangeType:
+		return value.X != nil && coroFrameRetentionIntegerLike(value.Type()) &&
+			coroConstantUintptrAddress(value.X)
+	case *ssa.Convert:
+		return value.X != nil && coroFrameRetentionIntegerLike(value.Type()) &&
+			coroFrameRetentionIntegerLike(value.X.Type()) &&
+			coroConstantUintptrAddress(value.X)
+	case *ssa.UnOp:
+		if value.Op != token.MUL || value.Block() == nil || value.Block().Index != 0 {
+			return false
+		}
+		allocation, ok := value.X.(*ssa.Alloc)
+		if !ok || allocation.Parent() != value.Parent() || allocation.Referrers() == nil {
+			return false
+		}
+		loadIndex := -1
+		for index, instruction := range value.Block().Instrs {
+			if instruction == value {
+				loadIndex = index
+				break
+			}
+		}
+		if loadIndex < 0 {
+			return false
+		}
+		stores := 0
+		for _, reference := range *allocation.Referrers() {
+			instruction, ok := reference.(ssa.Instruction)
+			if !ok || instruction.Block() != value.Block() {
+				continue
+			}
+			index := -1
+			for candidate, blockInstruction := range value.Block().Instrs {
+				if blockInstruction == instruction {
+					index = candidate
+					break
+				}
+			}
+			if index < 0 || index >= loadIndex {
+				continue
+			}
+			switch instruction := instruction.(type) {
+			case *ssa.DebugRef:
+			case *ssa.Store:
+				if instruction.Addr != allocation || !coroConstantUintptrAddress(instruction.Val) {
+					return false
+				}
+				stores++
+			case *ssa.UnOp:
+				if instruction.Op != token.MUL || instruction.X != allocation {
+					return false
+				}
+			default:
+				// In particular, no closure, call, conversion, or address
+				// transport may expose the cell before this load.
+				return false
+			}
+		}
+		return stores == 1
+	}
+	return false
+}
+
+// coroPointerUintptrReflectHeaderStoreTerminal recognizes the legacy standard
+// unsafe construction of reflect.StringHeader/reflect.SliceHeader. The raw
+// address word must flow directly into exactly one Data field Store; only that
+// Store's pure FieldAddr may be formed between them. Thus no scheduler poll,
+// child await, call, arithmetic, Phi, return, or hidden memory roundtrip can
+// split this local conversion. The header's subsequent lifetime remains
+// governed by Go's unsafe rules; this certificate grants no uintptr-to-pointer
+// provenance.
+func coroPointerUintptrReflectHeaderStoreTerminal(value ssa.Value) bool {
+	root, ok := value.(ssa.Instruction)
+	if value == nil || !ok || root.Block() == nil || value.Referrers() == nil {
+		return false
+	}
+	var terminal *ssa.Store
+	for _, reference := range *value.Referrers() {
+		switch instruction := reference.(type) {
+		case *ssa.DebugRef:
+		case *ssa.Store:
+			if terminal != nil || instruction.Val != value ||
+				instruction.Block() != root.Block() ||
+				!coroReflectHeaderDataAddress(instruction.Addr) {
+				return false
+			}
+			terminal = instruction
+		default:
+			return false
+		}
+	}
+	if terminal == nil {
+		return false
+	}
+	rootIndex, storeIndex := -1, -1
+	for index, instruction := range root.Block().Instrs {
+		switch instruction {
+		case root:
+			rootIndex = index
+		case terminal:
+			storeIndex = index
+		}
+	}
+	if rootIndex < 0 || storeIndex <= rootIndex {
+		return false
+	}
+	for _, instruction := range root.Block().Instrs[rootIndex+1 : storeIndex] {
+		switch instruction := instruction.(type) {
+		case *ssa.DebugRef:
+		case ssa.Value:
+			if instruction != terminal.Addr {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func coroReflectHeaderDataAddress(address ssa.Value) bool {
+	field, ok := address.(*ssa.FieldAddr)
+	if !ok || field.X == nil {
+		return false
+	}
+	pointer, ok := types.Unalias(field.X.Type()).Underlying().(*types.Pointer)
+	if !ok {
+		return false
+	}
+	named, ok := types.Unalias(pointer.Elem()).(*types.Named)
+	if !ok || named.Obj() == nil || named.Obj().Pkg() == nil ||
+		named.Obj().Pkg().Path() != "reflect" ||
+		named.Obj().Name() != "StringHeader" && named.Obj().Name() != "SliceHeader" {
+		return false
+	}
+	structure, ok := named.Underlying().(*types.Struct)
+	if !ok || field.Field < 0 || field.Field >= structure.NumFields() {
+		return false
+	}
+	member := structure.Field(field.Field)
+	basic, ok := types.Unalias(member.Type()).Underlying().(*types.Basic)
+	return member.Name() == "Data" && ok && basic.Kind() == types.Uintptr
 }
 
 // coroPointerUintptrScalarTerminal binds the structural scalar-observation
@@ -1855,6 +2069,16 @@ func (a *coroPhysicalPureSSAAudit) validateBinOp(op *ssa.BinOp) string {
 		}
 		return a.requireNoRuntimeHelpers(op)
 	}
+	if (op.Op == token.EQL || op.Op == token.NEQ) &&
+		coroFrameRetentionNilConst(op.X) && coroFrameRetentionNilConst(op.Y) {
+		if err := validateCoroPhysicalSSAValueType(a.typeOf(op.Type())); err != nil {
+			return "nil constant equality has unsupported result type: " + err.Error()
+		}
+		// x/tools emits this exact constant comparison while lowering a nil
+		// switch case for instantiated generic nilable types. LLSSA lowers both
+		// operands as the same null pointer and emits one inline comparison.
+		return a.requireNoRuntimeHelpers(op)
+	}
 	if op.Op == token.EQL || op.Op == token.NEQ || op.Op == token.LSS || op.Op == token.LEQ || op.Op == token.GTR || op.Op == token.GEQ {
 		left, leftOK := types.Unalias(a.typeOf(op.X.Type())).Underlying().(*types.Basic)
 		right, rightOK := types.Unalias(a.typeOf(op.Y.Type())).Underlying().(*types.Basic)
@@ -2212,9 +2436,24 @@ func (a *coroPhysicalPureSSAAudit) validateBuiltin(call *ssa.Call) string {
 			return builtin.Name() + " builtin has no concrete physical operand type"
 		}
 		// The operand is deliberately not validated as a live SSA value:
-		// collectUnsafeSizeAlignUnevaluatedSSA removes its type-only producer
+		// collectUnsafeLayoutUnevaluatedSSA removes its type-only producer
 		// graph, and compileUnsafeSizeAlignBuiltin emits one target-derived
 		// integer constant without a runtime edge.
+		return a.requireNoRuntimeHelpers(call)
+	case "Offsetof":
+		if len(call.Call.Args) != 1 || call.Type() == nil ||
+			!types.Identical(a.typeOf(call.Type()), types.Typ[types.Uintptr]) {
+			return "Offsetof builtin requires one field operand and a uintptr result"
+		}
+		if a.ctx == nil {
+			return "Offsetof builtin has no exact physical layout context"
+		}
+		if _, ok := a.ctx.offsetOfBuiltinArg(call.Call.Args[0]); !ok {
+			return "Offsetof builtin operand is outside the exact field-layout lowering"
+		}
+		// collectUnsafeLayoutUnevaluatedSSA erases the selector's complete
+		// producer graph. offsetOfBuiltinArg above proves that codegen selects
+		// the same target-derived integer constant and no runtime edge.
 		return a.requireNoRuntimeHelpers(call)
 	case "ssa:wrapnilchk":
 		if len(call.Call.Args) != 3 || call.Type() == nil ||
@@ -2245,6 +2484,16 @@ func (a *coroPhysicalPureSSAAudit) validateBuiltin(call *ssa.Call) string {
 		// the same terminal PanicWrapNilPointer edge used by ordinary checked
 		// dereferences. The helper cannot return to the live coroutine frame.
 		return a.requireFrozenTerminalRuntimeHelpers(call, "PanicWrapNilPointer")
+	case "ssa:deferstack":
+		if len(call.Call.Args) != 0 || call.Type() == nil ||
+			coroExplicitDeferStackOwner(a.fn) != a.fn ||
+			len(coroExplicitCleanupFamilySites(a.fn)) == 0 {
+			return "ssa:deferstack builtin has no exact range-over-func cleanup owner"
+		}
+		if _, ok := types.Unalias(a.typeOf(call.Type())).Underlying().(*types.Pointer); !ok {
+			return "ssa:deferstack result is not pointer-shaped"
+		}
+		return a.requireNoRuntimeHelpers(call)
 	case "len":
 		return a.validateLenBuiltin(call)
 	case "cap":

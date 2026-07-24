@@ -157,6 +157,24 @@ func (p *context) compileCoroGoexit(b llssa.Builder) {
 	p.compileCoroTerminalOutcome(b, coroPhysicalOutcomeGoexit, nil)
 }
 
+func coroDeferStackBuiltinCall(call *ssa.Call) bool {
+	if call == nil || call.Common() == nil {
+		return false
+	}
+	builtin, ok := call.Common().Value.(*ssa.Builtin)
+	return ok && builtin.Name() == "ssa:deferstack"
+}
+
+func (p *context) compileCoroDeferStack(b llssa.Builder, instruction *ssa.Call) llssa.Expr {
+	body := p.coroBody()
+	if body == nil || body.cleanup == nil || body.cleanup.external ||
+		!body.cleanup.dynamic || body.cleanup.dynamicHead.IsNil() ||
+		!coroDeferStackBuiltinCall(instruction) {
+		panic("coroutine explicit defer stack has no owner-local dynamic cleanup head")
+	}
+	return b.Convert(p.type_(instruction.Type(), llssa.InGo), body.cleanup.dynamicHead)
+}
+
 // compileCoroTerminalOutcome centralizes the physical frame termination
 // protocol. Return commits values before final suspend; Goexit replaces the
 // cleanup base and never reaches the retained SSA call continuation.
@@ -200,8 +218,15 @@ func (body *coroBodyContext) enterGoexit(b llssa.Builder) {
 
 func (p *context) compileCoroDefer(b llssa.Builder, instruction *ssa.Defer) {
 	body := p.coroBody()
-	if body == nil || body.cleanup == nil {
+	if body == nil {
 		panic("coroutine defer escaped its frozen cleanup plan")
+	}
+	if body.externalCleanup != nil {
+		body.externalCleanup.registerExternal(p, b, instruction)
+		return
+	}
+	if body.cleanup == nil {
+		panic("coroutine defer escaped its owner-local cleanup plan")
 	}
 	body.cleanup.register(p, b, instruction)
 }

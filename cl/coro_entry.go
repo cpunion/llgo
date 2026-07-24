@@ -105,21 +105,17 @@ func (p *context) resolveFunctionSymbol(fn *ssa.Function) (plannedFunctionSymbol
 	entry.interfacePlain = p.compilation.coroClosedInterfacePlain
 	entry.managedInterface = p.compilation.coroManagedInterface
 	ignored := whole.IgnoresBody(fn)
-	assemblyCertified := false
-	if ignored {
-		if universe == nil {
-			return entry, fmt.Errorf("coroutine entry resolution: Go-emitted function %q has an ignored SSA body", plan.ID)
+	hasEmittedBody := len(fn.Blocks) != 0
+	if universe != nil {
+		var err error
+		hasEmittedBody, err = p.compilation.plannedFunctionEmittedBody(fn)
+		if err != nil {
+			return entry, err
 		}
-		_, certified, certificateErr := universe.CoroAssemblyNoSuspendCertificate(fn)
-		if certificateErr != nil {
-			return entry, certificateErr
-		}
-		assemblyCertified = certified
-		if !assemblyCertified {
-			return entry, fmt.Errorf("coroutine entry resolution: Go-emitted function %q has an ignored SSA body without a frozen assembly proof", plan.ID)
-		}
+	} else if ignored {
+		return entry, fmt.Errorf("coroutine entry resolution: Go-emitted function %q has an ignored SSA body", plan.ID)
 	}
-	if err := validatePlannedFunction(fn, plan, len(fn.Blocks) != 0 && !assemblyCertified); err != nil {
+	if err := validatePlannedFunction(fn, plan, hasEmittedBody); err != nil {
 		return entry, err
 	}
 	if plan.Emission == coro.EmitCoroutine {
@@ -236,7 +232,15 @@ func (c *Compilation) plannedFunctionEmittedBody(fn *ssa.Function) (bool, error)
 	if assemblyCertified && (!classified || background != llssa.InGo || len(fn.Blocks) != 0) {
 		return false, fmt.Errorf("coroutine entry resolution: assembly-certified function %q has frontend classified=%t kind=%d body=%t", fn.Name(), classified, background, len(fn.Blocks) != 0)
 	}
-	frozenIgnored := classified && background == llssa.InC || assemblyCertified
+	managedBodylessNoBlock := false
+	if classified && background == llssa.InGo && len(fn.Blocks) == 0 {
+		certificate, certified, certificateErr := universe.CoroForeignNoBlockCertificate(fn)
+		if certificateErr != nil {
+			return false, fmt.Errorf("coroutine entry resolution: classify managed bodyless noblock declaration %q: %w", fn.Name(), certificateErr)
+		}
+		managedBodylessNoBlock = certified && certificate.ID != ""
+	}
+	frozenIgnored := classified && background == llssa.InC || assemblyCertified || managedBodylessNoBlock
 	if ignored != frozenIgnored {
 		return false, fmt.Errorf("coroutine entry resolution: function %q ignored-body=%t conflicts with frozen frontend background classified=%t kind=%d", fn.Name(), ignored, classified, background)
 	}

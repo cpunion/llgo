@@ -1945,6 +1945,12 @@ func coroFrameRetentionNilConst(value ssa.Value) bool {
 	// comparing an unsafe.Pointer with nil. Preserve the exact zero-value check
 	// and recognize pointer-like constants ourselves so this proof matches Go's
 	// source semantics rather than an x/tools implementation detail.
+	if constant.Type() != nil {
+		if basic, ok := types.Unalias(constant.Type()).Underlying().(*types.Basic); ok &&
+			basic.Kind() == types.UntypedNil {
+			return true
+		}
+	}
 	return constant.IsNil() || coroFrameRetentionPointerLike(constant.Type())
 }
 

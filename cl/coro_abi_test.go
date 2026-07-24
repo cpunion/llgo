@@ -642,6 +642,7 @@ func TestCoroAwaitResultReconstruction(t *testing.T) {
 	defer module.Dispose()
 	physical := &context{prog: prog}
 	pointer := types.NewPointer(types.Typ[types.Uint32])
+	empty := types.NewStruct(nil, nil)
 	for _, test := range []struct {
 		name    string
 		results *types.Tuple
@@ -650,6 +651,7 @@ func TestCoroAwaitResultReconstruction(t *testing.T) {
 	}{
 		{name: "zero", results: types.NewTuple()},
 		{name: "one", results: types.NewTuple(types.NewVar(0, nil, "ptr", pointer)), loads: 1},
+		{name: "one_empty", results: types.NewTuple(types.NewVar(0, nil, "empty", empty))},
 		{name: "many", results: types.NewTuple(
 			types.NewVar(0, nil, "ptr", pointer),
 			types.NewVar(0, nil, "count", types.Typ[types.Uintptr]),
@@ -674,8 +676,9 @@ func TestCoroAwaitResultReconstruction(t *testing.T) {
 				t.Fatalf("zero-result await value type = %v, want llssa.Nil", got.RawType())
 			}
 		case 1:
-			if got.IsNil() || !types.Identical(got.RawType(), prog.Type(pointer, llssa.InGo).RawType()) {
-				t.Fatalf("one-result await value type = %v, want field type %v", got.RawType(), pointer)
+			want := test.results.At(0).Type()
+			if got.IsNil() || !types.Identical(got.RawType(), prog.Type(want, llssa.InGo).RawType()) {
+				t.Fatalf("one-result await value type = %v, want field type %v", got.RawType(), want)
 			}
 		default:
 			if got.IsNil() || !types.Identical(got.RawType(), prog.Type(test.results, llssa.InGo).RawType()) {
@@ -691,6 +694,9 @@ func TestCoroAwaitResultReconstruction(t *testing.T) {
 		}
 		if got := strings.Count(body, "insertvalue "); got != test.inserts {
 			t.Fatalf("%s await result tuple inserts = %d, want %d:\n%s", test.name, got, test.inserts, body)
+		}
+		if strings.Contains(body, "AssertNilDeref") {
+			t.Fatalf("%s compiler-owned result slot retained a nil-dereference helper:\n%s", test.name, body)
 		}
 	}
 	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {

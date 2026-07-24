@@ -427,6 +427,11 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(ctx *context, shape coroEm
 			// zero-sized value-receiver wrapper.
 			if emissionUniversallyZeroSizedType(ctx.patchType(v.Type())) &&
 				!isKnownNonNilAddr(v.X) && !ssaValueProvenNonNilAt(v.X, v) {
+				emissionAssertNilDerefBaseRuntimeHelpers(v.X, add)
+				add("AssertNilDeref")
+			}
+			if isInterfaceCompareDeref(v) {
+				emissionAssertNilDerefBaseRuntimeHelpers(v.X, add)
 				add("AssertNilDeref")
 			}
 		}
@@ -540,6 +545,7 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(ctx *context, shape coroEm
 		} else {
 			add("MapIterNext")
 		}
+		add(u.nextAssignmentRuntimeHelperNames(ctx, v)...)
 	case *ssa.ChangeInterface:
 		if interfaceIsNonEmpty(ctx.patchType(v.X.Type())) {
 			add("IfaceType")
@@ -623,6 +629,81 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(ctx *context, shape coroEm
 	return ret
 }
 
+// nextAssignmentRuntimeHelperNames mirrors compileRangeNext's explicit
+// assignment conversions. x/tools records the assignment-target key/value
+// types in Next.Type, while Builder.Next first materializes the source
+// map/string element types. Converting a source value to an interface can
+// therefore add hidden ABI allocation/itab edges at this instruction.
+func (u *EmissionUniverse) nextAssignmentRuntimeHelperNames(ctx *context, next *ssa.Next) []string {
+	if u == nil || ctx == nil || next == nil || next.Iter == nil || next.Type() == nil {
+		return nil
+	}
+	rng, ok := next.Iter.(*ssa.Range)
+	if !ok || rng.X == nil {
+		return nil
+	}
+	result, ok := types.Unalias(ctx.patchType(next.Type())).Underlying().(*types.Tuple)
+	if !ok || result.Len() != 3 {
+		return nil
+	}
+
+	var sourceFields [2]types.Type
+	sourceType := ctx.patchType(rng.X.Type())
+	if _, stringSource := coroPhysicalRangeStringType(sourceType); stringSource {
+		sourceFields = [2]types.Type{types.Typ[types.Int], types.Typ[types.Rune]}
+	} else {
+		sourceMap, ok := types.Unalias(sourceType).Underlying().(*types.Map)
+		if !ok {
+			return nil
+		}
+		sourceFields = [2]types.Type{sourceMap.Key(), sourceMap.Elem()}
+	}
+
+	set := make(map[string]struct{})
+	add := func(name string) {
+		if name != "" {
+			set[name] = struct{}{}
+		}
+	}
+	for index, source := range sourceFields {
+		target := result.At(index + 1).Type()
+		if coroPhysicalInvalidType(target) || types.Identical(source, target) ||
+			!types.AssignableTo(source, target) {
+			continue
+		}
+		targetInterface, targetIsInterface := types.Unalias(target).Underlying().(*types.Interface)
+		if !targetIsInterface {
+			continue
+		}
+		targetInterface.Complete()
+		sourceInterface, sourceIsInterface := types.Unalias(source).Underlying().(*types.Interface)
+		if sourceIsInterface {
+			sourceInterface.Complete()
+			if !sourceInterface.Empty() {
+				add("IfaceType")
+			}
+			if !targetInterface.Empty() {
+				add("NewItab")
+			}
+			continue
+		}
+		if !targetInterface.Empty() {
+			add("NewItab")
+		}
+		physicalSource := u.physicalFunctionABIType(ctx, source)
+		if !emissionDirectIfaceType(physicalSource) {
+			add("AllocU")
+		}
+	}
+
+	ret := make([]string, 0, len(set))
+	for name := range set {
+		ret = append(ret, name)
+	}
+	sort.Strings(ret)
+	return ret
+}
+
 func emissionCgoConversionRuntimeHelper(opcode int) (string, bool) {
 	switch opcode {
 	case llgoCgoCString:
@@ -661,6 +742,31 @@ func emissionCheckedDerefBaseRuntimeHelpers(addr ssa.Value, add func(...string))
 		emissionCheckedDerefBaseRuntimeHelpers(addr.X, add)
 		if isPointerGoType(addr.X.Type()) {
 			add("AssertNilDeref")
+		}
+	}
+}
+
+// emissionAssertNilDerefBaseRuntimeHelpers mirrors assertNilDerefBase. Unlike
+// emitNilDerefBaseCheck, that path retains each checked intermediate pointer
+// by using compileCheckedDeref/NilDerefCheck, whose physical helper is
+// AssertNilDerefPtr. Zero-sized loads and interface-comparison dereferences
+// call it while emitting the outer UnOp, so those edges belong to that outer
+// instruction's frozen SitePlan.
+func emissionAssertNilDerefBaseRuntimeHelpers(addr ssa.Value, add func(...string)) {
+	switch addr := addr.(type) {
+	case *ssa.UnOp:
+		if addr.Op != token.MUL || isKnownNonNilAddr(addr.X) || isWrapNilCheckCall(addr.X) {
+			return
+		}
+		emissionCheckedDerefBaseRuntimeHelpers(addr.X, add)
+		add("AssertNilDerefPtr")
+	case *ssa.FieldAddr:
+		if isKnownNonNilAddr(addr.X) || isWrapNilCheckCall(addr.X) {
+			return
+		}
+		emissionAssertNilDerefBaseRuntimeHelpers(addr.X, add)
+		if isPointerGoType(addr.X.Type()) {
+			add("AssertNilDerefPtr")
 		}
 	}
 }
@@ -974,6 +1080,47 @@ func emissionLargeOrZeroInterfaceDeref(typ types.Type, pointerSize int) bool {
 	}
 	size := emissionTargetTypeSize(raw, word)
 	return size == 0 || size > maxDirectDerefSize
+}
+
+type coroInterfaceDerefFusion uint8
+
+const (
+	coroInterfaceDerefNotFused coroInterfaceDerefFusion = iota
+	coroInterfaceDerefZero
+	coroInterfaceDerefLarge
+)
+
+// coroInterfaceDerefConsumer recognizes the exact frontend/codegen fusion
+// where MakeInterfaceFromPtr performs the typed copy. Large values deliberately
+// emit no producer load and leave the nil edge at MakeInterface. Zero-sized
+// values retain the producer dereference's nil edge even though no physical
+// load remains.
+func coroInterfaceDerefConsumer(ctx *context, deref *ssa.UnOp) (*ssa.MakeInterface, coroInterfaceDerefFusion) {
+	if ctx == nil || ctx.prog == nil || deref == nil || deref.Op != token.MUL {
+		return nil, coroInterfaceDerefNotFused
+	}
+	refs, ok := nonDebugReferrers(deref)
+	if !ok || len(refs) != 1 {
+		return nil, coroInterfaceDerefNotFused
+	}
+	box, ok := refs[0].(*ssa.MakeInterface)
+	if !ok || box.X != deref {
+		return nil, coroInterfaceDerefNotFused
+	}
+	physical := ctx.type_(deref.Type(), llssa.InGo)
+	raw := physical.RawType()
+	if raw == nil {
+		return nil, coroInterfaceDerefNotFused
+	}
+	size := emissionTargetTypeSize(types.Unalias(raw), int64(ctx.prog.PointerSize()))
+	switch {
+	case size == 0:
+		return box, coroInterfaceDerefZero
+	case size > maxDirectDerefSize:
+		return box, coroInterfaceDerefLarge
+	default:
+		return nil, coroInterfaceDerefNotFused
+	}
 }
 
 func emissionZeroSizedType(typ types.Type, pointerSize int) bool {

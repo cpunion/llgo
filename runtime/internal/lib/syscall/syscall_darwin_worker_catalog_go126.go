@@ -142,6 +142,14 @@ func libc_listen_trampoline()
 //go:linkname libc_mkdir_trampoline C.mkdir
 func libc_mkdir_trampoline()
 
+// mprotect changes process VM metadata for a caller-owned mapped slice. It has
+// no executor-thread affinity or managed callback, while the slice data remains
+// rooted by the suspended generated wrapper through worker completion.
+//
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/3
+//go:linkname libc_mprotect_trampoline C.mprotect
+func libc_mprotect_trampoline()
+
 //llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/3
 //go:linkname libc_pipe_trampoline C.pipe
 func libc_pipe_trampoline()

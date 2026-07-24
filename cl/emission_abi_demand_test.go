@@ -1302,7 +1302,8 @@ func TestEmissionIntrinsicOperandPolicyCoversRegistry(t *testing.T) {
 	add(emissionIntrinsicNoValues,
 		"cstr", "pystr", "skip", "_cgoCheckPointer", "sigjmpbuf",
 		"deferData", "unreachable", "stackSave", "coroYield",
-		"coroCriticalEnter", "coroCriticalExit", "coroGoexit")
+		"coroCriticalEnter", "coroCriticalExit", "coroGoexit",
+		"coroOSThreadLock", "coroOSThreadUnlock")
 	add(emissionIntrinsicRawAllValues, "syscall")
 	add(emissionIntrinsicCompileValues,
 		"boolToUint8", "atomicLoad", "atomicStore", "atomicCmpXchg",

@@ -173,7 +173,7 @@ type context struct {
 	bvals                map[ssa.Value]llssa.Expr    // block values
 	methodNilDerefChecks map[*ssa.UnOp]none
 	patchOriginalInitIf  *ssa.If                     // exact synthetic guard whose successors are logically inverted
-	unevaluatedSSA       map[ssa.Instruction]none    // values used only by unsafe.Sizeof/Alignof
+	unevaluatedSSA       map[ssa.Instruction]none    // values used only by unsafe.Sizeof/Alignof/Offsetof
 	vargs                map[*ssa.Alloc][]llssa.Expr // varargs
 	funcs                map[*ssa.Function]llssa.Function
 	rawPlainFuncs        map[*ssa.Function]llssa.Function
@@ -190,6 +190,10 @@ type context struct {
 	pcLineSeq            uint64
 	coroEmission         *coroPhysicalEmissionSession
 	rawPlainBody         bool // compiling the legacy ABI variant of a managed function
+	// preservePatchedNamed keeps an alternate package's named type intact
+	// while constructing source-level ABI certificates. Ordinary codegen
+	// immediately lowers that replacement to its physical raw shape.
+	preservePatchedNamed bool
 	coroRootFactories    []coroRootFactoryRegistration
 	coroPlainDescriptors map[string]llssa.Expr
 
@@ -756,13 +760,13 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 			p.methodNilDerefChecks = collectMethodNilDerefChecks(f)
 			if p.emissionUniverse != nil {
 				var frozen bool
-				p.unevaluatedSSA, frozen = p.emissionUniverse.frozenUnsafeSizeAlignUnevaluatedSSA(f)
+				p.unevaluatedSSA, frozen = p.emissionUniverse.frozenUnsafeLayoutUnevaluatedSSA(f)
 				if !frozen {
-					panic(fmt.Sprintf("function %q has no frozen unsafe.Sizeof/Alignof lowering facts", f.String()))
+					panic(fmt.Sprintf("function %q has no frozen unsafe layout-builtin lowering facts", f.String()))
 				}
 			} else {
 				// Legacy one-package compilation has no whole-program inventory.
-				p.unevaluatedSSA = collectUnsafeSizeAlignUnevaluatedSSA(f)
+				p.unevaluatedSSA = collectUnsafeLayoutUnevaluatedSSA(f)
 			}
 			if physicalABI != nil {
 				p.compileCoroPhysicalBody(b, f, *physicalABI, isInit)
@@ -1447,7 +1451,9 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 				ret = p.call(b, llssa.Call, &v.Call)
 			}
 		} else if p.hasCoroPhysicalBody() {
-			if value, handled := p.tryCompileCoroPhysicalCall(b, v); handled {
+			if coroDeferStackBuiltinCall(v) {
+				ret = p.compileCoroDeferStack(b, v)
+			} else if value, handled := p.tryCompileCoroPhysicalCall(b, v); handled {
 				ret = value
 			} else {
 				ret = p.call(b, llssa.Call, &v.Call)
@@ -1459,7 +1465,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		} else {
 			ret = p.call(b, llssa.Call, &v.Call)
 		}
-		if p.rangeFuncCallNeedsDeferDrain(&v.Call) {
+		if !p.hasCoroPhysicalBody() && p.rangeFuncCallNeedsDeferDrain(&v.Call) {
 			b.DeferStackDrain()
 		}
 	case *ssa.BinOp:
@@ -1501,15 +1507,15 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 	case *ssa.UnOp:
 		physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(v)
 		if v.Op == token.MUL {
-			guardedDeref := physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionDeref
+			plannedDeref := physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionDeref
 			if _, ok := p.methodNilDerefChecks[v]; ok && !ssaValueProvenNonNilAt(v.X, v) {
 				if physicalPlanned && p.coroUsesExplicitStatusFaults() {
 					switch physicalInstruction.recipe {
 					case coroPhysicalInstructionDeref:
-						// The physical dereference recipe below preserves the same base
-						// pointer with an explicit-status guard. AssertNilDerefPtr is the
-						// native-stack spelling of that operation and must not escape into
-						// this stackless coroutine body.
+						// The physical dereference recipe below either preserves the
+						// same base pointer through an explicit-status guard or consumes
+						// an address already checked by its producer. AssertNilDerefPtr
+						// must not escape into this stackless coroutine body.
 					case coroPhysicalInstructionOrdinary:
 						// A non-elided SitePlan retains the managed checked-pointer helper;
 						// its frozen lowered-call fact is observed by compileCheckedDeref.
@@ -1521,21 +1527,19 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 					return p.compileCheckedDeref(b, v)
 				}
 			}
-			if isEffectfulArrayPointerDeref(v) && !guardedDeref {
+			if isEffectfulArrayPointerDeref(v) && !plannedDeref {
 				x := p.compileValue(b, v.X)
 				p.recordPanicLocation(b, v.Pos())
 				b.AssertNilDeref(x)
 			}
-			if refs, ok := nonDebugReferrers(v); guardedDeref && ok && len(refs) == 0 {
+			if refs, ok := nonDebugReferrers(v); plannedDeref && ok && len(refs) == 0 {
 				// An unused load still evaluates its pointer operand and must
 				// preserve the source nil fault, but it has no value-side
-				// memory effect. Let the frozen physical recipe publish that
-				// fault exactly once and avoid the legacy assertNilDerefBase /
-				// NilDerefCheck path, whose nested helper would belong to a
-				// different SSA site.
+				// memory effect. Let the frozen physical recipe either publish
+				// that fault or consume its checked address exactly once.
 				x := p.compileValue(b, v.X)
 				p.recordPanicLocation(b, v.Pos())
-				p.compileCoroPlannedNilDerefGuard(b, v, x)
+				p.compileCoroPlannedDeref(b, v, x, physicalInstruction)
 				return
 			}
 			if refs, ok := nonDebugReferrers(v); ok && len(refs) == 0 {
@@ -1562,16 +1566,11 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 					return
 				}
 			}
-			if refs, ok := nonDebugReferrers(v); ok && len(refs) == 1 {
-				if _, ok := refs[0].(*ssa.MakeInterface); ok {
-					if t := p.type_(v.Type(), llssa.InGo); t.RawType() != nil {
-						if p.isLargeNonPointerValue(t) {
-							// Skip the load: the MakeInterface handler below copies
-							// from the original pointer and preserves the nil check.
-							return
-						}
-					}
-				}
+			if _, fusion := coroInterfaceDerefConsumer(p, v); fusion == coroInterfaceDerefLarge {
+				// Skip the large load: the MakeInterface handler below copies
+				// from the original pointer and owns the nil check. A
+				// zero-sized value still retains this dereference's nil edge.
+				return
 			}
 			// "libc_XXX_trampoline_addr" -> "XXX"
 			if strings.HasSuffix(v.X.Name(), "_trampoline_addr") {
@@ -1590,9 +1589,9 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		if v.Op != token.ARROW {
 			p.recordPanicLocation(b, v.Pos())
 		}
-		guardedDeref := physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionDeref
-		if guardedDeref {
-			x = p.compileCoroPlannedNilDerefGuard(b, v, x)
+		plannedDeref := physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionDeref
+		if plannedDeref {
+			x = p.compileCoroPlannedDeref(b, v, x, physicalInstruction)
 		} else if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary {
 			panic(fmt.Sprintf("typed load selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
 		} else if (!physicalPlanned || !p.coroUsesExplicitStatusFaults()) && shouldAssertDirectNilDeref(v) && !ssaValueProvenNonNilAt(v.X, v) {
@@ -1611,10 +1610,11 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		} else {
 			if v.Op == token.MUL {
 				if t := p.type_(v.Type(), llssa.InGo); t.RawType() != nil && p.prog.SizeOf(t) == 0 {
-					if guardedDeref || isKnownNonNilAddr(v.X) || ssaValueProvenNonNilAt(v.X, v) {
+					if plannedDeref || isKnownNonNilAddr(v.X) || ssaValueProvenNonNilAt(v.X, v) {
 						// A physical explicit-status guard owns the nullable
-						// case; a separately proven non-nil source needs no
-						// memory access in either physical or plain emission.
+						// case, or the address producer already checked it; a
+						// separately proven non-nil source needs no memory access
+						// in either physical or plain emission.
 						// Avoid Builder.UnOp's legacy nil helper and materialize
 						// the sole zero-sized value directly.
 						ret = p.prog.Zero(t)
@@ -1622,12 +1622,22 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 					}
 					p.assertNilDerefBase(b, v.X)
 				}
-				if isInterfaceCompareDeref(v) {
+				if isInterfaceCompareDeref(v) && !plannedDeref {
 					p.assertNilDerefBase(b, v.X)
 					b.AssertNilDeref(x)
 				}
 			}
-			ret = b.UnOp(v.Op, x)
+			if plannedDeref || p.loadAddressOwnsNilFault(v.X) {
+				// The frozen dereference recipe has already emitted the sole
+				// source-language nil edge or recorded its checked producer.
+				// Likewise, checked FieldAddr/IndexAddr producers own their
+				// nil/bounds rules. Builder.UnOp delegates to Load, whose
+				// static-null fallback would otherwise synthesize a second
+				// legacy AssertNilDeref call for constant-folded pointers.
+				ret = b.LoadKnownNonNil(x)
+			} else {
+				ret = b.UnOp(v.Op, x)
+			}
 		}
 	case *ssa.ChangeType:
 		t := v.Type()
@@ -1653,7 +1663,8 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		x := p.compileValue(b, v.X)
 		p.recordPanicLocation(b, v.Pos())
 		physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(v)
-		if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionFieldAddr {
+		guardedFieldAddr := physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionFieldAddr
+		if guardedFieldAddr {
 			p.observeCoroPhysicalInstruction(v, coroPhysicalInstructionFieldAddr)
 			p.observeCoroPhysicalNilGuard(v)
 			x = p.compileCoroImplicitNilFieldAddrGuard(b, v, x)
@@ -1662,7 +1673,11 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		} else if (!physicalPlanned || !p.coroUsesExplicitStatusFaults()) && p.isAddressOfFieldAddr(v) && !ssaAddressValueProvenNonNilAt(v.X, v) {
 			b.AssertNilDeref(x)
 		}
-		ret = b.FieldAddr(x, v.Field)
+		if guardedFieldAddr {
+			ret = b.FieldAddrKnownNonNil(x, v.Field)
+		} else {
+			ret = b.FieldAddr(x, v.Field)
+		}
 	case *ssa.Alloc:
 		t := v.Type().(*types.Pointer)
 		if p.checkVArgs(v, t) { // varargs: this maybe a varargs allocation
@@ -1806,12 +1821,14 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		ret.Type = p.type_(v.Type(), llssa.InGo)
 	case *ssa.MakeInterface:
 		physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(v)
+		checkedInterfacePtr := physicalPlanned &&
+			physicalInstruction.recipe == coroPhysicalInstructionInterfaceFromCheckedPtr
 		if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionSyntheticSelectNoCaseBox {
 			p.observeCoroPhysicalInstruction(v, coroPhysicalInstructionSyntheticSelectNoCaseBox)
 			ret = p.prog.Nil(p.type_(v.Type(), llssa.InGo))
 			break
 		}
-		if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary {
+		if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary && !checkedInterfacePtr {
 			panic(fmt.Sprintf("MakeInterface selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
 		}
 		if refs, _ := nonDebugReferrers(v); len(refs) == 1 {
@@ -1839,8 +1856,27 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			if vt := p.type_(unop.Type(), llssa.InGo); vt.RawType() != nil {
 				if p.isLargeNonPointerValue(vt) || p.isZeroSizedValue(vt) {
 					if ptr := p.compileValue(b, unop.X); ptr.Type != nil {
-						p.assertNilDerefBase(b, unop.X)
-						ret = b.MakeInterfaceFromPtr(t, ptr)
+						producerOwnsFault := p.loadAddressOwnsNilFault(unop.X)
+						derefOwnsFault := p.coroPhysicalProducerHasRecipe(
+							unop, coroPhysicalInstructionDeref,
+						)
+						checkedPointer := producerOwnsFault || derefOwnsFault
+						if !checkedPointer {
+							p.assertNilDerefBase(b, unop.X)
+						}
+						knownNonNil := checkedPointer || isKnownNonNilAddr(unop.X) ||
+							ssaValueProvenNonNilAt(unop.X, v)
+						if checkedInterfacePtr {
+							if !checkedPointer {
+								panic("interface-from-checked-ptr recipe lost its checked pointer producer")
+							}
+							p.observeCoroPhysicalInstruction(v, coroPhysicalInstructionInterfaceFromCheckedPtr)
+						}
+						if knownNonNil {
+							ret = b.MakeInterfaceFromKnownNonNilPtr(t, ptr)
+						} else {
+							ret = b.MakeInterfaceFromPtr(t, ptr)
+						}
 						break
 					}
 				}
@@ -1911,7 +1947,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			typ = p.type_(v.Iter.(*ssa.Range).X.Type(), llssa.InGo)
 		}
 		iter := p.compileValue(b, v.Iter)
-		ret = b.Next(typ, iter, v.IsString)
+		ret = p.compileRangeNext(b, v, typ, iter)
 	case *ssa.ChangeInterface:
 		t := v.Type()
 		x := p.compileValue(b, v.X)
@@ -2081,6 +2117,50 @@ func (p *context) compileValueAs(b llssa.Builder, v ssa.Value, typ types.Type) l
 		return p.nilOf(typ)
 	}
 	return p.compileValue(b, v)
+}
+
+// compileRangeNext makes x/tools' implicit range-assignment conversions
+// explicit at the Next site. Builder.Next first returns the source key/value
+// types; Next.Type may instead contain existing assignment-target types (for
+// example any or a non-empty interface). Keeping the conversion here gives
+// every Extract the exact SSA type and attributes any interface helper to the
+// same frozen SitePlan.
+func (p *context) compileRangeNext(
+	b llssa.Builder,
+	next *ssa.Next,
+	sourceType llssa.Type,
+	iter llssa.Expr,
+) llssa.Expr {
+	if next == nil {
+		panic("range Next lowering requires one exact SSA instruction")
+	}
+	source := b.Next(sourceType, iter, next.IsString)
+	result, ok := types.Unalias(p.patchType(next.Type())).Underlying().(*types.Tuple)
+	if !ok || result.Len() != 3 {
+		panic("range Next lowering lost its (bool, key, value) tuple")
+	}
+	fields := make([]llssa.Expr, result.Len())
+	fieldTypes := make([]llssa.Type, result.Len())
+	for index := 0; index < result.Len(); index++ {
+		field := b.Extract(source, index)
+		targetGo := result.At(index).Type()
+		if coroPhysicalInvalidType(targetGo) {
+			fields[index] = field
+			fieldTypes[index] = field.Type
+			continue
+		}
+		target := p.type_(targetGo, llssa.InGo)
+		if !types.Identical(field.RawType(), target.RawType()) &&
+			!types.AssignableTo(field.RawType(), target.RawType()) {
+			panic(fmt.Sprintf(
+				"range Next field %d source type %s is not assignable to %s",
+				index, field.RawType(), target.RawType(),
+			))
+		}
+		fields[index] = b.Assign(target, field)
+		fieldTypes[index] = target
+	}
+	return b.Aggregate(p.prog.Struct(fieldTypes...), fields...)
 }
 
 func (p *context) assertNilDerefBase(b llssa.Builder, addr ssa.Value) {
@@ -2296,16 +2376,23 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 	}
 }
 
-// compileCoroPlannedNilDerefGuard is the sole bridge from the frozen physical
-// dereference recipe to its explicit-status lowering. Both value-producing
-// loads and evaluation-only loads pass through this observer, so adding a new
-// source shape cannot accidentally create a second physical authority path.
-func (p *context) compileCoroPlannedNilDerefGuard(
+// compileCoroPlannedDeref is the sole bridge from the frozen physical
+// dereference recipe to codegen. A recipe with nilGuard set emits the
+// explicit-status guard; otherwise its address producer already owns the
+// source fault and this site only records the helper elision.
+func (p *context) compileCoroPlannedDeref(
 	b llssa.Builder,
 	deref *ssa.UnOp,
 	base llssa.Expr,
+	physical coroPhysicalInstructionPlan,
 ) llssa.Expr {
+	if physical.recipe != coroPhysicalInstructionDeref {
+		panic(fmt.Sprintf("planned dereference selected incompatible frozen physical recipe %s", physical.recipe))
+	}
 	p.observeCoroPhysicalInstruction(deref, coroPhysicalInstructionDeref)
+	if !physical.nilGuard {
+		return base
+	}
 	p.observeCoroPhysicalNilGuard(deref)
 	return p.compileCoroImplicitNilDerefGuard(b, deref, base)
 }
@@ -3045,10 +3132,23 @@ func (p *context) _patchType(typ types.Type) (types.Type, bool) {
 			return t, true
 		}
 		o := typ.Obj()
-		if pkg := o.Pkg(); typepatch.IsPatched(pkg) {
-			if patch, ok := p.patches[pkg.Path()]; ok {
+		if pkg := o.Pkg(); pkg != nil {
+			// ModeTest and package metadata can retain an equivalent
+			// *types.Package copy that was not the exact object marked by
+			// typepatch.Merge. The immutable patch table is path-keyed, so use
+			// that same identity for every imported copy. An alternate type
+			// already present in Patch.Types is its own replacement and must
+			// terminate this recursion.
+			if patch, ok := p.patches[pkg.Path()]; ok && patch.Types != nil {
 				if obj := patch.Types.Scope().Lookup(o.Name()); obj != nil {
-					raw := p.prog.Type(instantiate(obj.Type(), typ), llssa.InGo).RawType()
+					replacement := instantiate(obj.Type(), typ)
+					if replacement == typ {
+						break
+					}
+					if p.preservePatchedNamed {
+						return replacement, true
+					}
+					raw := p.prog.Type(replacement, llssa.InGo).RawType()
 					return raw, typ != raw
 				}
 			}

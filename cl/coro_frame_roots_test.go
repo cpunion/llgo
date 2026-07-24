@@ -863,6 +863,113 @@ func TestCoroPointerUintptrAlignmentObservationIsScalarTerminal(t *testing.T) {
 	}
 }
 
+func TestCoroPointerUintptrReflectHeaderStoreTerminal(t *testing.T) {
+	pkg, _, _ := buildGoSSAPkg(t, `package foo
+import (
+	"reflect"
+	"unsafe"
+)
+type Header struct { Data uintptr }
+func observe() {}
+func String(header *reflect.StringHeader, bytes []byte) {
+	header.Data = uintptr(unsafe.Pointer(&bytes[0]))
+}
+func Slice(header *reflect.SliceHeader, bytes []byte) {
+	header.Data = uintptr(unsafe.Pointer(&bytes[0]))
+}
+func Fake(header *Header, bytes []byte) {
+	header.Data = uintptr(unsafe.Pointer(&bytes[0]))
+}
+func Gap(header *reflect.StringHeader, bytes []byte) {
+	word := uintptr(unsafe.Pointer(&bytes[0]))
+	observe()
+	header.Data = word
+}
+`)
+	for _, test := range []struct {
+		name string
+		want bool
+	}{
+		{name: "String", want: true},
+		{name: "Slice", want: true},
+		{name: "Fake"},
+		{name: "Gap"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			function := pkg.Func(test.name)
+			var conversion *ssa.Convert
+			for _, block := range function.Blocks {
+				for _, instruction := range block.Instrs {
+					candidate, ok := instruction.(*ssa.Convert)
+					if !ok || !coroFrameRetentionPointerToUintptr(candidate) {
+						continue
+					}
+					if conversion != nil {
+						t.Fatalf("%s has more than one pointer-to-uintptr conversion", test.name)
+					}
+					conversion = candidate
+				}
+			}
+			if conversion == nil {
+				t.Fatalf("%s has no pointer-to-uintptr conversion", test.name)
+			}
+			if got := coroPointerUintptrReflectHeaderStoreTerminal(conversion); got != test.want {
+				var dump bytes.Buffer
+				ssa.WriteFunction(&dump, function)
+				t.Fatalf("%s reflect-header terminal = %t, want %t\n%s", test.name, got, test.want, dump.String())
+			}
+		})
+	}
+}
+
+func TestCoroConstantUintptrAddress(t *testing.T) {
+	pkg, _, _ := buildGoSSAPkg(t, `package foo
+import "unsafe"
+func Captured() (unsafe.Pointer, func() uintptr) {
+	value := ^uintptr(0)
+	pointer := unsafe.Pointer(value)
+	return pointer, func() uintptr { return value }
+}
+func Mutable(word uintptr) (unsafe.Pointer, func() uintptr) {
+	value := ^uintptr(0)
+	value = word
+	pointer := unsafe.Pointer(value)
+	return pointer, func() uintptr { return value }
+}
+`)
+	for _, test := range []struct {
+		name string
+		want bool
+	}{
+		{name: "Captured", want: true},
+		{name: "Mutable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			function := pkg.Func(test.name)
+			var conversion *ssa.Convert
+			for _, block := range function.Blocks {
+				for _, instruction := range block.Instrs {
+					candidate, ok := instruction.(*ssa.Convert)
+					if !ok || !coroFrameRetentionUintptrLike(candidate.X.Type()) ||
+						!coroFrameRetentionPointerLike(candidate.Type()) {
+						continue
+					}
+					conversion = candidate
+					break
+				}
+			}
+			if conversion == nil {
+				t.Fatalf("%s has no uintptr-to-pointer conversion", test.name)
+			}
+			if got := coroConstantUintptrAddress(conversion.X); got != test.want {
+				var dump bytes.Buffer
+				ssa.WriteFunction(&dump, function)
+				t.Fatalf("%s constant-address proof = %t, want %t\n%s", test.name, got, test.want, dump.String())
+			}
+		})
+	}
+}
+
 func TestCoroFrameExactRootsRejectPreciseShadowProfile(t *testing.T) {
 	old := emitShadowStackInstrumentation
 	emitShadowStackInstrumentation = true

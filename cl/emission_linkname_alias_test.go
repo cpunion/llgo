@@ -198,6 +198,146 @@ func llgoRuntimeHook(value int) int { return value + 1 }
 	}
 }
 
+func TestEmissionUniverseAliasesBodylessGoLinknameFunctionToExactMethod(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	definition := testProg.addPackage(t, "example.com/emission/linkmethoddef", `package linkmethoddef
+type ABI struct{}
+type Value struct{}
+func (Value) abiType() *ABI { return new(ABI) }
+`)
+	declaration := testProg.addPackage(t, "example.com/emission/linkmethoddecl", `package linkmethoddecl
+import target "example.com/emission/linkmethoddef"
+//go:linkname valueABIType example.com/emission/linkmethoddef.Value.abiType
+func valueABIType(target.Value) *target.ABI
+func Call(value target.Value) *target.ABI { return valueABIType(value) }
+`)
+	testProg.ssa.Build()
+
+	valueType := definition.types.Scope().Lookup("Value").Type()
+	selection := testProg.ssa.MethodSets.MethodSet(valueType).Lookup(definition.types, "abiType")
+	if selection == nil {
+		t.Fatal("fixture method selection is missing")
+	}
+	defined := testProg.ssa.MethodValue(selection)
+	declared := declaration.ssa.Func("valueABIType")
+	if defined == nil || declared == nil {
+		t.Fatal("fixture method or declaration SSA is missing")
+	}
+	if structuralEmissionABITypeKey(declared.Signature) == structuralEmissionABITypeKey(defined.Signature) {
+		t.Fatal("ordinary managed signatures unexpectedly flattened a method receiver")
+	}
+	if structuralGoLinknameABITypeKey(declared.Signature) != structuralGoLinknameABITypeKey(defined.Signature) {
+		t.Fatal("go:linkname ABI did not flatten the exact method receiver")
+	}
+
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{
+		{SSA: definition.ssa, Files: []*ast.File{definition.file}},
+		{SSA: declaration.ssa, Files: []*ast.File{declaration.file}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved, ok := universe.Resolve(declared); !ok || resolved != defined {
+		t.Fatalf("Resolve(bodyless method linkname) = %v, %t; want %v, true", resolved, ok, defined)
+	}
+	call := exactStaticCallTo(t, declaration.ssa.Func("Call"), declared)
+	if err := validateCoroStaticMethodCallOperands(call, defined, universe); err != nil {
+		t.Fatalf("validate bodyless method linkname await operands: %v", err)
+	}
+}
+
+func TestEmissionUniverseAliasesPatchedMethodLinknameAcrossOriginalTypeCopy(t *testing.T) {
+	const packagePath = "example.com/emission/linkmethodpatch"
+	testProg := newEmissionTestProgram()
+	original := testProg.addPackage(t, packagePath, `package linkmethodpatch
+type ABI struct{ Original uintptr }
+type Value struct{ Original uintptr }
+`)
+	alternate := testProg.addPackage(t, abi.PatchPathPrefix+packagePath, `package linkmethodpatch
+type ABI struct {
+	Equal func(int) bool
+	Next *ABI
+}
+type Value struct{ Type *ABI }
+func (Value) abiType() *ABI { return new(ABI) }
+`)
+	declaration := testProg.addPackage(t, "example.com/emission/linkmethodpatchdecl", `package linkmethodpatchdecl
+import target "example.com/emission/linkmethodpatch"
+//go:linkname valueABIType example.com/emission/linkmethodpatch.Value.abiType
+func valueABIType(target.Value) *target.ABI
+func Call(value target.Value) *target.ABI { return valueABIType(value) }
+`)
+	testProg.ssa.Build()
+
+	valueType := alternate.types.Scope().Lookup("Value").Type()
+	selection := testProg.ssa.MethodSets.MethodSet(valueType).Lookup(alternate.types, "abiType")
+	if selection == nil {
+		t.Fatal("patched fixture method selection is missing")
+	}
+	defined := testProg.ssa.MethodValue(selection)
+	declared := declaration.ssa.Func("valueABIType")
+
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, Patches{
+		packagePath: {
+			Alt:   alternate.ssa,
+			Types: typepatch.Clone(alternate.types),
+		},
+	}, []EmissionPackage{
+		{SSA: original.ssa, Files: []*ast.File{original.file, alternate.file}},
+		{SSA: declaration.ssa, Files: []*ast.File{declaration.file}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair, ok := universe.goLinknameDefinitions[declared]
+	if !ok || pair.definition != defined || pair.key == "" {
+		t.Fatalf("patched method linkname pair = %+v, %t; want exact definition %v", pair, ok, defined)
+	}
+	if resolved, ok := universe.Resolve(declared); !ok || resolved != defined {
+		t.Fatalf("Resolve(patched bodyless method linkname) = %v, %t; want %v, true", resolved, ok, defined)
+	}
+	call := exactStaticCallTo(t, declaration.ssa.Func("Call"), declared)
+	if err := validateCoroStaticMethodCallOperands(call, defined, universe); err != nil {
+		t.Fatalf("validate patched bodyless method linkname await operands: %v", err)
+	}
+}
+
+func exactStaticCallTo(t *testing.T, caller, callee *ssa.Function) ssa.CallInstruction {
+	t.Helper()
+	if caller != nil {
+		for _, block := range caller.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(ssa.CallInstruction)
+				if ok && call.Common() != nil && call.Common().StaticCallee() == callee {
+					return call
+				}
+			}
+		}
+	}
+	t.Fatalf("function %v has no exact static call to %v", caller, callee)
+	return nil
+}
+
+func TestStructuralGoLinknameABITypeKeyErasesRecursiveNamedRoot(t *testing.T) {
+	pkg := types.NewPackage("example.com/emission/recursivekey", "recursivekey")
+	object := types.NewTypeName(0, pkg, "Node", nil)
+	named := types.NewNamed(object, nil, nil)
+	underlying := types.NewStruct([]*types.Var{
+		types.NewField(0, pkg, "Next", types.NewPointer(named), false),
+	}, nil)
+	named.SetUnderlying(underlying)
+
+	namedKey := structuralGoLinknameABITypeKey(named)
+	underlyingKey := structuralGoLinknameABITypeKey(underlying)
+	if namedKey != underlyingKey {
+		t.Fatalf("recursive named/underlying linkname keys differ:\nnamed     %s\nunderlying %s", namedKey, underlyingKey)
+	}
+}
+
 func TestEmissionUniverseAliasesPatchedBodylessGoLinknameToExactDefinition(t *testing.T) {
 	testProg := newEmissionTestProgram()
 	original := testProg.addPackage(t, "example.com/emission/patchedlinkdecl", `package patchedlinkdecl

@@ -217,7 +217,7 @@ func (u *EmissionUniverse) functionABIContext(fn *ssa.Function, owner *preparedE
 	if u == nil || u.goProg == nil || fn == nil || owner == nil {
 		return nil, fmt.Errorf("ABI type demand requires an emission universe, function, and exact owner")
 	}
-	unevaluated, _ := u.frozenUnsafeSizeAlignUnevaluatedSSA(fn)
+	unevaluated, _ := u.frozenUnsafeLayoutUnevaluatedSSA(fn)
 	return &context{
 		prog:                 u.prog,
 		goFn:                 fn,

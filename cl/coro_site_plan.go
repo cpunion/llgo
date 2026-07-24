@@ -85,7 +85,13 @@ func (p *context) beginCoroSiteEmissionMode(
 	helpers := []string(nil)
 	if p.emissionUniverse.CompleteRuntimeABI() {
 		var err error
-		plan, err = p.emissionUniverse.coroProgramIR.sitePlan(p, instruction)
+		physical := p.coroEmissionPlan()
+		if placement != coroRuntimeHelperAtSource && physical != nil &&
+			physical.function != instruction.Parent() && physical.owner != nil {
+			plan, err = p.emissionUniverse.coroProgramIR.sitePlanForOwner(physical.owner, instruction)
+		} else {
+			plan, err = p.emissionUniverse.coroProgramIR.sitePlan(p, instruction)
+		}
 		if err != nil {
 			panic(fmt.Errorf("coroutine emission site %q: %w", instruction.String(), err))
 		}
@@ -496,9 +502,22 @@ func (p *context) observeCoroSiteRuntimeHelper(helper string) {
 		return
 	}
 	if _, expected := observer.expected[helper]; !expected {
+		function := "<unknown>"
+		if observer.instruction.Parent() != nil {
+			function = observer.instruction.Parent().String()
+		}
+		physical := "none"
+		if observer.hasExpectedPhysical {
+			physical = observer.expectedPhysical.recipe.String()
+		}
+		expected := make([]string, 0, len(observer.expected))
+		for name := range observer.expected {
+			expected = append(expected, name)
+		}
+		sort.Strings(expected)
 		panic(fmt.Errorf(
-			"coroutine emission site %q emitted runtime helper %q absent from its frozen SitePlan",
-			observer.instruction.String(), helper,
+			"coroutine emission site %q (%T) in %q with physical recipe %s emitted runtime helper %q absent from its frozen SitePlan %v",
+			observer.instruction.String(), observer.instruction, function, physical, helper, expected,
 		))
 	}
 	observer.seen[helper] = none{}

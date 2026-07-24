@@ -85,11 +85,28 @@ func validateCoroManagedDispatchCallKind(
 			return fail("managed descriptor dispatch requires an ordinary direct call instruction with a matching CallDirect plan")
 		}
 	case coro.CallDefer:
-		if deferred, ordinary := call.(*ssa.Defer); !ordinary || deferred == nil || deferred.DeferStack != nil {
-			return fail("managed descriptor cleanup requires one owner-local defer instruction")
+		deferred, ordinary := call.(*ssa.Defer)
+		if !ordinary || deferred == nil || deferred.Parent() != owner {
+			return fail("managed descriptor cleanup requires one exact defer instruction in its source function")
+		}
+		if deferred.DeferStack != nil {
+			stackOwner := coroExplicitDeferStackOwner(owner)
+			exactFamilySite := false
+			if stackOwner != nil {
+				for _, candidate := range coroExplicitCleanupFamilySites(stackOwner) {
+					if candidate == deferred {
+						exactFamilySite = true
+						break
+					}
+				}
+			}
+			if _, pointer := types.Unalias(deferred.DeferStack.Type()).Underlying().(*types.Pointer); !pointer ||
+				!exactFamilySite {
+				return fail("managed descriptor cleanup has no exact range-over-func owner stack")
+			}
 		}
 		if callPlan.Kind != coro.CallDefer {
-			return fail("managed descriptor cleanup requires one owner-local defer instruction with a matching CallDefer plan")
+			return fail("managed descriptor cleanup requires a matching CallDefer plan")
 		}
 	default:
 		return fail("managed descriptor dispatch has unsupported call kind %v", expectedKind)
@@ -145,6 +162,10 @@ func validateCoroManagedDispatchCallKind(
 		return fail("callee nilability %t conflicts with CallPlan nilability %t", leaf.MayBeNil, callPlan.MayBeNil)
 	}
 
+	producerTargets := make(map[coro.FunctionID]struct{}, len(leaf.Targets))
+	for _, target := range leaf.Targets {
+		producerTargets[target] = struct{}{}
+	}
 	for _, targetID := range callPlan.Targets {
 		target, found := plan.Function(targetID)
 		if !found || target == nil {
@@ -154,11 +175,21 @@ func validateCoroManagedDispatchCallKind(
 		if !found || targetPlan.ID != targetID {
 			return fail("target %q has no canonical function plan", targetID)
 		}
-		if err := validateCoroDynamicDispatchTarget(target, targetPlan, universe); err != nil {
-			return fail("target %q: %v", targetID, err)
-		}
 		if target.Signature == nil || !types.Identical(sig, target.Signature) {
 			return fail("call signature %s does not match target %q signature %s", sig, targetID, target.Signature)
+		}
+		if err := validateCoroDynamicDispatchTarget(target, targetPlan, universe); err != nil {
+			if _, produced := producerTargets[targetID]; !produced {
+				// Closed-world CHA deliberately over-approximates a descriptor
+				// operand with every signature-compatible function. A bodyless
+				// linkname declaration or raw boundary in that set is not a
+				// possible managed descriptor unless exact value flow also records
+				// it in the operand's ValuePlan. Descriptor producers are validated
+				// independently, and the capability/hash check owns invocation, so
+				// do not manufacture a thunk for a CHA-only candidate.
+				continue
+			}
+			return fail("target %q: %v", targetID, err)
 		}
 	}
 	return nil

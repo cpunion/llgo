@@ -23,7 +23,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/goplus/llgo/internal/coro"
 	llssa "github.com/goplus/llgo/ssa"
+	"golang.org/x/tools/go/ssa"
 )
 
 func TestEmissionUniverseFreezesExactForeignNoBlockCertificate(t *testing.T) {
@@ -71,6 +73,77 @@ func root(n uintptr) { _ = Safe(1); Memcpy(n); SameDisplayName() }
 	}
 }
 
+func TestEmissionUniverseFreezesManagedBodylessNoBlockCertificate(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/managednoblock", `package managednoblock
+
+//llgo:coro noblock
+//go:linkname Safe example.com/runtime.privateSafe
+func Safe(uintptr)
+
+func root(pointer uintptr) { Safe(pointer) }
+`)
+	testProg.ssa.Build()
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{
+		SSA: pkg.ssa, Files: []*ast.File{pkg.file}, Identity: "managed-noblock-owner",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	safe := pkg.ssa.Func("Safe")
+	certificate, certified, err := universe.CoroForeignNoBlockCertificate(safe)
+	if err != nil || !certified || certificate.ID == "" ||
+		certificate.ABISignature == "" || certificate.PhysicalSymbol != "example.com/runtime.privateSafe" {
+		t.Fatalf("managed Safe certificate = %+v, %t, %v; want exact bodyless managed proof", certificate, certified, err)
+	}
+	if canonical, ok := universe.Resolve(safe); !ok || canonical != safe || !universe.Contains(safe) {
+		t.Fatalf("managed bodyless Resolve = %v, %t; want the certified external declaration", canonical, ok)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(pkg.ssa.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	functionIDs.ArchiveReady = true
+	plan, err := coro.AnalyzeSSA(pkg.ssa.Prog, coro.Roots{{
+		Function: pkg.ssa.Func("root"), Demand: coro.SyncDemand,
+	}}, coro.SSAConfig{
+		EmissionUniverse:     ssaUniverse,
+		FunctionIDs:          functionIDs,
+		MaxPlainInstructions: -1,
+		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+			if fn != safe {
+				return coro.SSAFunctionPolicy{}, nil
+			}
+			return coro.SSAFunctionPolicy{
+				IgnoreBody:                true,
+				External:                  coro.ExternalKnown,
+				OverrideExternal:          true,
+				Exec:                      coro.IRQUnsafe,
+				ForeignNoBlockCertificate: certificate.ID,
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, dispose := newCoroEntryTestContext(t, pkg.ssa, &Compilation{
+		CoroPlan: plan, EmissionUniverse: universe,
+	})
+	defer dispose()
+	entry, err := ctx.resolveFunctionSymbol(safe)
+	if err != nil {
+		t.Fatalf("resolve managed bodyless noblock symbol: %v", err)
+	}
+	if !entry.planned || entry.plan.Emission != coro.EmitExternal || !plan.IgnoresBody(safe) {
+		t.Fatalf("managed bodyless noblock entry = %+v, ignored=%t; want planned external declaration", entry, plan.IgnoresBody(safe))
+	}
+}
+
 func TestEmissionUniverseForeignNoBlockFailsClosed(t *testing.T) {
 	for _, test := range []struct {
 		name    string
@@ -83,7 +156,7 @@ func TestEmissionUniverseForeignNoBlockFailsClosed(t *testing.T) {
 //llgo:coro noblock
 func Fake() {}
 `,
-			wantErr: "requires an exact frozen C declaration",
+			wantErr: "requires an exact frozen declaration",
 		},
 		{
 			name: "unsupported spelling",

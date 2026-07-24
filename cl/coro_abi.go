@@ -216,6 +216,7 @@ type coroBodyContext struct {
 	coro                   *llssa.CoroBuilder
 	abi                    coroPhysicalABI
 	cleanup                *coroStaticCleanupState
+	externalCleanup        *coroStaticCleanupState
 	header                 llssa.Expr
 	task                   llssa.Expr
 	resultSlot             llssa.Expr
@@ -976,7 +977,13 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	defer finishEmission()
 
 	b.SetBlock(p.fn.Block(0))
-	cleanup := p.beginCoroStaticCleanup(b, cleanupPlan)
+	preparedCleanup := p.beginCoroStaticCleanup(b, cleanupPlan)
+	var cleanup, externalCleanup *coroStaticCleanupState
+	if cleanupPlan != nil && cleanupPlan.external {
+		externalCleanup = preparedCleanup
+	} else {
+		cleanup = preparedCleanup
+	}
 	terminalResultAllocations := []*ssa.Alloc(nil)
 	if cleanupPlan != nil {
 		terminalResultAllocations = cleanupPlan.terminalResultAllocations
@@ -988,6 +995,7 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	physical.frameRetention = frameRetention
 	physical.critical = critical
 	physical.cleanup = cleanup
+	physical.externalCleanup = externalCleanup
 	if physical.cleanup != nil {
 		physical.cleanup.bindBlocks(p.fn)
 	}
@@ -1202,10 +1210,10 @@ func validateCoroPhysicalABIForOwner(
 	if len(fn.FreeVars) != 0 && !managedDispatchTarget && plan.FuncRep != coro.DirectCoro {
 		return fail("captured coroutine bodies require one exact direct or capability-certified descriptor context ABI")
 	}
-	if fn.Recover != nil && cleanupPlan == nil {
+	if fn.Recover != nil && (cleanupPlan == nil || cleanupPlan.external) {
 		return fail("recover blocks require coroutine cleanup/unwind lowering")
 	}
-	if cleanupPlan != nil {
+	if cleanupPlan != nil && !cleanupPlan.external {
 		if err := validateCoroStaticCleanupRecoverBlock(fn); err != nil {
 			return fail("static cleanup recover block: %v", err)
 		}
@@ -2261,11 +2269,12 @@ func coroMaterializedGenericInstance(fn *ssa.Function) bool {
 	return true
 }
 
-// coroMaterializedGenericCallable includes the one Pkg-nil method-set wrapper
-// shape that x/tools synthesizes when a pointer invokes an instantiated generic
-// value-receiver method. Such a wrapper has no Origin or TypeArgs of its own,
-// but its receiver, SSA parameters, and sole callee are fully concrete. Keep
-// this separate from ordinary generic instances so arbitrary synthetic bodies
+// coroMaterializedGenericCallable includes Pkg-nil method-set wrappers that
+// x/tools synthesizes around an instantiated generic receiver method. Such a
+// wrapper has no Origin or TypeArgs of its own, but its receiver, SSA
+// parameters, and sole callee are fully concrete. This covers both pointer
+// adaptation and promotion through a non-generic embedding type. Keep the proof
+// separate from ordinary generic instances so an arbitrary synthetic body
 // cannot acquire a physical ABI from stale RecvTypeParams metadata.
 func coroMaterializedGenericCallable(fn *ssa.Function) bool {
 	return coroMaterializedGenericInstance(fn) || coroMaterializedGenericMethodWrapper(fn)
@@ -2280,7 +2289,6 @@ func coroMaterializedGenericMethodWrapper(fn *ssa.Function) bool {
 		return false
 	}
 	var nilCheck *ssa.Call
-	var receiverLoad *ssa.UnOp
 	var wrapperCall *ssa.Call
 	var callee *ssa.Function
 	for _, instruction := range fn.Blocks[0].Instrs {
@@ -2304,28 +2312,30 @@ func coroMaterializedGenericMethodWrapper(fn *ssa.Function) bool {
 				return false
 			}
 			wrapperCall = instruction
-		case *ssa.UnOp:
-			if receiverLoad != nil || instruction.Op != token.MUL {
-				return false
-			}
-			receiverLoad = instruction
+		case *ssa.Alloc, *ssa.ChangeType, *ssa.Convert, *ssa.Field, *ssa.FieldAddr, *ssa.Store, *ssa.UnOp:
 		default:
 			return false
 		}
+		if _, call := instruction.(*ssa.Call); !call {
+			for _, operand := range instruction.Operands(nil) {
+				if operand == nil || *operand == nil ||
+					coroTypeContainsUnresolvedTypeParam((*operand).Type(), make(map[types.Type]bool)) {
+					return false
+				}
+			}
+		}
+		if value, ok := instruction.(ssa.Value); ok &&
+			coroTypeContainsUnresolvedTypeParam(value.Type(), make(map[types.Type]bool)) {
+			return false
+		}
 	}
-	if nilCheck == nil || receiverLoad == nil || receiverLoad.X != nilCheck || wrapperCall == nil ||
-		callee == nil || !coroMaterializedGenericInstance(callee) ||
+	if wrapperCall == nil || callee == nil || !coroMaterializedGenericInstance(callee) ||
 		callee.Signature == nil || callee.Signature.Recv() == nil || len(wrapperCall.Common().Args) == 0 ||
-		wrapperCall.Common().Args[0] != receiverLoad {
+		len(wrapperCall.Common().Args) != len(callee.Params) {
 		return false
 	}
 	calleeOrigin := callee.Origin()
 	if calleeOrigin == nil || calleeOrigin.Name() != fn.Name() {
-		return false
-	}
-	wrapperReceiver, pointerReceiver := types.Unalias(fn.Signature.Recv().Type()).Underlying().(*types.Pointer)
-	if !pointerReceiver || !types.Identical(wrapperReceiver.Elem(), callee.Signature.Recv().Type()) ||
-		!types.Identical(receiverLoad.Type(), callee.Signature.Recv().Type()) {
 		return false
 	}
 	expectedSyntheticPrefix := "wrapper for func (" + callee.Signature.Recv().Type().String() + ")." + calleeOrigin.Name() + "("
@@ -2342,6 +2352,11 @@ func coroMaterializedGenericMethodWrapper(fn *ssa.Function) bool {
 	for index, parameter := range fn.Params {
 		if parameter == nil || !types.Identical(parameter.Type(), wrapperSig.Params().At(index).Type()) ||
 			(index != 0 && !types.Identical(wrapperSig.Params().At(index).Type(), calleeSig.Params().At(index).Type())) {
+			return false
+		}
+	}
+	for index, argument := range wrapperCall.Common().Args {
+		if argument == nil || !types.Identical(argument.Type(), calleeSig.Params().At(index).Type()) {
 			return false
 		}
 	}
@@ -3179,7 +3194,7 @@ func validateCoroPhysicalConsumersCapabilities(
 			continue
 		}
 		fn := function.Function
-		unevaluated, _ := universe.frozenUnsafeSizeAlignUnevaluatedSSA(fn)
+		unevaluated, _ := universe.frozenUnsafeLayoutUnevaluatedSSA(fn)
 		for _, block := range fn.Blocks {
 			for _, instr := range block.Instrs {
 				if _, omitted := unevaluated[instr]; omitted {

@@ -67,6 +67,8 @@ type coroStaticCleanupPlan struct {
 	sites                     []*coroStaticCleanupSitePlan
 	terminalResultAllocations []*ssa.Alloc
 	dynamic                   bool
+	external                  bool
+	stackOwner                *ssa.Function
 	dynamicTrigger            *ssa.Defer
 	dynamicAlloc              *ssa.Function
 	dynamicFree               *ssa.Function
@@ -157,6 +159,75 @@ func coroCleanupCallPlanContains(plan coro.SSACallPlan, target coro.FunctionID) 
 	return false
 }
 
+// range-over-func yield closures register their Defer instructions in the
+// explicit stack created by the nearest non-yield source function. The stack
+// handle is captured through any nested yield closures, so ownership follows
+// the synthetic parent chain rather than the function that contains the Defer.
+func coroExplicitDeferStackOwner(fn *ssa.Function) *ssa.Function {
+	if fn == nil {
+		return nil
+	}
+	for fn != nil && fn.Synthetic == rangeOverFuncYieldSynthetic {
+		fn = fn.Parent()
+	}
+	return fn
+}
+
+func coroFunctionHasExplicitDeferStack(fn *ssa.Function) bool {
+	if fn == nil {
+		return false
+	}
+	for _, block := range fn.Blocks {
+		for _, instruction := range block.Instrs {
+			if deferred, ok := instruction.(*ssa.Defer); ok && deferred.DeferStack != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// coroExplicitCleanupFamily returns the one source owner followed by its
+// nested range-over-func yield closures in stable SSA anonymous-function order.
+// Ordinary function literals are separate defer owners and are not traversed.
+func coroExplicitCleanupFamily(owner *ssa.Function) []*ssa.Function {
+	if owner == nil {
+		return nil
+	}
+	result := []*ssa.Function{owner}
+	var appendYields func(*ssa.Function)
+	appendYields = func(parent *ssa.Function) {
+		for _, child := range parent.AnonFuncs {
+			if child == nil || child.Synthetic != rangeOverFuncYieldSynthetic {
+				continue
+			}
+			result = append(result, child)
+			appendYields(child)
+		}
+	}
+	appendYields(owner)
+	return result
+}
+
+func coroExplicitCleanupFamilySites(owner *ssa.Function) []*ssa.Defer {
+	var result []*ssa.Defer
+	for _, function := range coroExplicitCleanupFamily(owner) {
+		for _, block := range function.Blocks {
+			for _, instruction := range block.Instrs {
+				deferred, ok := instruction.(*ssa.Defer)
+				if !ok {
+					continue
+				}
+				if function != owner && deferred.DeferStack == nil {
+					continue
+				}
+				result = append(result, deferred)
+			}
+		}
+	}
+	return result
+}
+
 func prepareCoroStaticCleanupPlan(
 	fn *ssa.Function,
 	whole *coro.SSAPlan,
@@ -171,139 +242,166 @@ func prepareCoroStaticCleanupPlan(
 	if !ok {
 		return nil, fmt.Errorf("function %q has no compilation plan", fn.Name())
 	}
+	stackOwner := coroExplicitDeferStackOwner(fn)
+	external := stackOwner != nil && stackOwner != fn && coroFunctionHasExplicitDeferStack(fn)
+	scanFunctions := []*ssa.Function{fn}
+	if !external && stackOwner == fn {
+		scanFunctions = coroExplicitCleanupFamily(fn)
+	}
 	infos := blocks.Infos(fn.Blocks)
 	dynamicCleanup := coroFunctionRequiresDynamicCleanup(fn)
+	if !external && len(scanFunctions) != 1 {
+		for _, candidate := range scanFunctions[1:] {
+			if coroFunctionHasExplicitDeferStack(candidate) {
+				dynamicCleanup = true
+				break
+			}
+		}
+	}
 	byInstruction := make(map[*ssa.Defer]*coroStaticCleanupSitePlan)
 	allSites := make([]*coroStaticCleanupSitePlan, 0)
 	var dynamicTrigger *ssa.Defer
 	runDefers := 0
-	for _, block := range fn.Blocks {
-		for instructionIndex, raw := range block.Instrs {
-			switch instruction := raw.(type) {
-			case *ssa.Defer:
-				if instruction.DeferStack != nil {
-					return nil, fmt.Errorf("defer in block %d uses an alternate dynamic defer stack", block.Index)
-				}
-				if infos[block.Index].InLoop && dynamicTrigger == nil {
-					dynamicTrigger = instruction
-				}
-				var cgoWorkerShape coroWorkerCgoCallShape
-				var cgoWorker bool
-				var err error
-				if universe != nil {
-					cgoWorkerShape, cgoWorker, err = validateCoroWorkerCgoCall(
-						whole, universe, instruction,
-					)
-				}
-				if err != nil {
-					return nil, fmt.Errorf("defer in block %d: cgo worker cleanup: %w", block.Index, err)
-				}
-				var intrinsicOpcode int
-				var intrinsic bool
-				if universe != nil {
-					if !cgoWorker {
-						intrinsicOpcode, intrinsic, err = universe.coroProgramIR.deferredIntrinsicCleanupRecipe(instruction)
+	for _, siteFunction := range scanFunctions {
+		siteCaller, planned := whole.FunctionPlan(siteFunction)
+		if !planned {
+			return nil, fmt.Errorf("cleanup site function %q has no compilation plan", siteFunction.Name())
+		}
+		siteInfos := blocks.Infos(siteFunction.Blocks)
+		for _, block := range siteFunction.Blocks {
+			for instructionIndex, raw := range block.Instrs {
+				switch instruction := raw.(type) {
+				case *ssa.Defer:
+					if siteFunction != fn && instruction.DeferStack == nil {
+						continue
 					}
-				}
-				if err != nil {
-					return nil, fmt.Errorf("defer in block %d: %w", block.Index, err)
-				}
-				var target *ssa.Function
-				var targetPlan coro.FunctionPlan
-				kind := coroStaticCleanupIntrinsic
-				builtinName := ""
-				if cgoWorker {
-					target = cgoWorkerShape.target
-					var planned bool
-					targetPlan, planned = whole.FunctionPlan(target)
-					if !planned {
-						return nil, fmt.Errorf("defer in block %d: cgo worker target has no function plan", block.Index)
+					if external && instruction.DeferStack == nil {
+						return nil, fmt.Errorf("range-over-func yield defer in block %d does not use its owner stack", block.Index)
 					}
-					kind = coroStaticCleanupCgoWorker
-				} else if !intrinsic {
-					if builtin, ok := instruction.Call.Value.(*ssa.Builtin); ok {
-						builtinName, err = validateCoroDeferredBuiltinCleanup(instruction, dynamicCleanup)
-						if err != nil {
-							return nil, fmt.Errorf("defer in block %d: %w", block.Index, err)
-						}
-						if builtinName != builtin.Name() {
-							return nil, fmt.Errorf("defer in block %d: builtin cleanup identity changed", block.Index)
-						}
-						kind = coroStaticCleanupBuiltin
-					} else if instruction.Common().IsInvoke() {
-						kind = coroStaticCleanupDispatch
-					} else {
-						target, targetPlan, kind, err = resolveCoroStaticCleanupTarget(whole, caller, instruction, universe)
-						if err != nil {
-							return nil, fmt.Errorf("defer in block %d: %w", block.Index, err)
+					if (instruction.DeferStack != nil || siteInfos[block.Index].InLoop) && dynamicTrigger == nil {
+						dynamicTrigger = instruction
+					}
+					var cgoWorkerShape coroWorkerCgoCallShape
+					var cgoWorker bool
+					var err error
+					if universe != nil {
+						cgoWorkerShape, cgoWorker, err = validateCoroWorkerCgoCall(
+							whole, universe, instruction,
+						)
+					}
+					if err != nil {
+						return nil, fmt.Errorf("defer in block %d: cgo worker cleanup: %w", block.Index, err)
+					}
+					var intrinsicOpcode int
+					var intrinsic bool
+					if universe != nil {
+						if !cgoWorker {
+							intrinsicOpcode, intrinsic, err = universe.coroProgramIR.deferredIntrinsicCleanupRecipe(instruction)
 						}
 					}
-				}
-				closure, _ := instruction.Call.Value.(*ssa.MakeClosure)
-				// A plain defer still executes inline on this native activation and
-				// therefore needs a strict no-unwind proof. A coroutine defer returns
-				// Panic through the parent-owned CompletionRecord; awaitCoroChild
-				// re-enters this same drainer after clearing the active site, so older
-				// records still run with the replacement panic value.
-				if kind == coroStaticCleanupPlain {
-					if reason := validateCoroStaticCleanupNoUnwind(
-						whole, universe, target, targetPlan, frameRetentionABI,
-					); reason != "" {
-						return nil, fmt.Errorf("plain defer target %q has no exact no-unwind proof: %s", targetPlan.ID, reason)
-					}
-				}
-				site := &coroStaticCleanupSitePlan{
-					instruction: instruction,
-					target:      target,
-					targetPlan:  targetPlan,
-					kind:        kind,
-					closure:     closure,
-					intrinsic:   intrinsicOpcode,
-					builtin:     builtinName,
-				}
-				if cgoWorker {
-					shape := cgoWorkerShape
-					site.cgoWorker = &shape
-				}
-				if kind == coroStaticCleanupDispatch {
-					callPlan, planned := whole.CallPlan(instruction)
-					if !planned {
-						return nil, fmt.Errorf("defer in block %d: managed descriptor cleanup lost its CallPlan", block.Index)
-					}
-					site.callPlan = callPlan
-					if instruction.Common().IsInvoke() {
-						if callPlan.Open {
-							if err := validateCoroManagedInterfaceDispatchCall(
-								whole, universe, fn, instruction, callPlan,
-							); err != nil {
-								return nil, fmt.Errorf("defer in block %d: %w", block.Index, err)
-							}
-						} else if _, err := resolveCoroInterfaceDispatchPlan(whole, universe, instruction); err != nil {
-							return nil, fmt.Errorf("defer in block %d: managed interface cleanup: %w", block.Index, err)
-						}
-						site.interfaceReceiver = instruction.Call.Value
-						site.interfaceMethod = instruction.Call.Method
-						site.signature, err = coroInterfaceDispatchSourceSignature(instruction.Common())
-						if err != nil {
-							return nil, fmt.Errorf("defer in block %d: managed interface cleanup: %w", block.Index, err)
-						}
-					} else {
-						site.descriptor = instruction.Call.Value
-						site.signature = instruction.Call.Signature()
-					}
-					if err := validateCoroManagedCleanupPlainTargets(
-						whole, universe, callPlan, frameRetentionABI,
-					); err != nil {
+					if err != nil {
 						return nil, fmt.Errorf("defer in block %d: %w", block.Index, err)
 					}
+					var target *ssa.Function
+					var targetPlan coro.FunctionPlan
+					kind := coroStaticCleanupIntrinsic
+					builtinName := ""
+					if cgoWorker {
+						target = cgoWorkerShape.target
+						var planned bool
+						targetPlan, planned = whole.FunctionPlan(target)
+						if !planned {
+							return nil, fmt.Errorf("defer in block %d: cgo worker target has no function plan", block.Index)
+						}
+						kind = coroStaticCleanupCgoWorker
+					} else if !intrinsic {
+						if builtin, ok := instruction.Call.Value.(*ssa.Builtin); ok {
+							builtinName, err = validateCoroDeferredBuiltinCleanup(instruction, dynamicCleanup)
+							if err != nil {
+								return nil, fmt.Errorf("defer in block %d: %w", block.Index, err)
+							}
+							if builtinName != builtin.Name() {
+								return nil, fmt.Errorf("defer in block %d: builtin cleanup identity changed", block.Index)
+							}
+							kind = coroStaticCleanupBuiltin
+						} else if instruction.Common().IsInvoke() {
+							kind = coroStaticCleanupDispatch
+						} else {
+							target, targetPlan, kind, err = resolveCoroStaticCleanupTarget(whole, siteCaller, instruction, universe)
+							if err != nil {
+								return nil, fmt.Errorf("defer in block %d: %w", block.Index, err)
+							}
+						}
+					}
+					closure, _ := instruction.Call.Value.(*ssa.MakeClosure)
+					// A plain defer still executes inline on this native activation and
+					// therefore needs a strict no-unwind proof. A coroutine defer returns
+					// Panic through the parent-owned CompletionRecord; awaitCoroChild
+					// re-enters this same drainer after clearing the active site, so older
+					// records still run with the replacement panic value.
+					if kind == coroStaticCleanupPlain {
+						if reason := validateCoroStaticCleanupNoUnwind(
+							whole, universe, target, targetPlan, frameRetentionABI,
+						); reason != "" {
+							return nil, fmt.Errorf("plain defer target %q has no exact no-unwind proof: %s", targetPlan.ID, reason)
+						}
+					}
+					site := &coroStaticCleanupSitePlan{
+						instruction: instruction,
+						target:      target,
+						targetPlan:  targetPlan,
+						kind:        kind,
+						closure:     closure,
+						intrinsic:   intrinsicOpcode,
+						builtin:     builtinName,
+					}
+					if cgoWorker {
+						shape := cgoWorkerShape
+						site.cgoWorker = &shape
+					}
+					if kind == coroStaticCleanupDispatch {
+						callPlan, planned := whole.CallPlan(instruction)
+						if !planned {
+							return nil, fmt.Errorf("defer in block %d: managed descriptor cleanup lost its CallPlan", block.Index)
+						}
+						site.callPlan = callPlan
+						if instruction.Common().IsInvoke() {
+							if callPlan.Open {
+								if err := validateCoroManagedInterfaceDispatchCall(
+									whole, universe, siteFunction, instruction, callPlan,
+								); err != nil {
+									return nil, fmt.Errorf("defer in block %d: %w", block.Index, err)
+								}
+							} else if _, err := resolveCoroInterfaceDispatchPlan(whole, universe, instruction); err != nil {
+								return nil, fmt.Errorf("defer in block %d: managed interface cleanup: %w", block.Index, err)
+							}
+							site.interfaceReceiver = instruction.Call.Value
+							site.interfaceMethod = instruction.Call.Method
+							site.signature, err = coroInterfaceDispatchSourceSignature(instruction.Common())
+							if err != nil {
+								return nil, fmt.Errorf("defer in block %d: managed interface cleanup: %w", block.Index, err)
+							}
+						} else {
+							site.descriptor = instruction.Call.Value
+							site.signature = instruction.Call.Signature()
+						}
+						if err := validateCoroManagedCleanupPlainTargets(
+							whole, universe, callPlan, frameRetentionABI,
+						); err != nil {
+							return nil, fmt.Errorf("defer in block %d: %w", block.Index, err)
+						}
+					}
+					byInstruction[instruction] = site
+					allSites = append(allSites, site)
+				case *ssa.RunDefers:
+					if siteFunction != fn {
+						continue
+					}
+					if !coroStaticRunDefersReturns(block, instructionIndex) {
+						return nil, fmt.Errorf("RunDefers in block %d is not followed only by named-result reloads and the terminal Return", block.Index)
+					}
+					runDefers++
 				}
-				byInstruction[instruction] = site
-				allSites = append(allSites, site)
-			case *ssa.RunDefers:
-				if !coroStaticRunDefersReturns(block, instructionIndex) {
-					return nil, fmt.Errorf("RunDefers in block %d is not followed only by named-result reloads and the terminal Return", block.Index)
-				}
-				runDefers++
 			}
 		}
 	}
@@ -316,6 +414,43 @@ func prepareCoroStaticCleanupPlan(
 	}
 	if !caller.Exec.Contains(coro.NeedsCleanupFrame) {
 		return nil, fmt.Errorf("static defer body lacks needs-cleanup-frame execution classification")
+	}
+	if external {
+		if !explicitPanic {
+			return nil, fmt.Errorf("external coroutine defer registration requires the explicit-status panic ABI")
+		}
+		if dynamicTrigger == nil || stackOwner == nil {
+			return nil, fmt.Errorf("external coroutine defer registration has no exact owner stack")
+		}
+		familySites := coroExplicitCleanupFamilySites(stackOwner)
+		tags := make(map[*ssa.Defer]uint32, len(familySites))
+		for index, instruction := range familySites {
+			if uint64(index) >= uint64(^uint32(0)) {
+				return nil, fmt.Errorf("external cleanup site count %d exceeds the stable tag space", len(familySites))
+			}
+			tags[instruction] = uint32(index) + 1
+		}
+		for _, site := range allSites {
+			tag := tags[site.instruction]
+			if tag == 0 {
+				return nil, fmt.Errorf("external cleanup site %q is absent from owner %q", site.instruction, stackOwner.Name())
+			}
+			site.tag = tag
+		}
+		allocator, allocOK := whole.ResolveLoweredCall(fn, "AllocU")
+		releaser, freeOK := whole.ResolveLoweredCall(fn, "FreeDeferNode")
+		if !allocOK || allocator == nil || !freeOK || releaser == nil {
+			return nil, fmt.Errorf("external cleanup requires exact registration-owner AllocU and FreeDeferNode edges")
+		}
+		return &coroStaticCleanupPlan{
+			sites:          allSites,
+			dynamic:        true,
+			external:       true,
+			stackOwner:     stackOwner,
+			dynamicTrigger: dynamicTrigger,
+			dynamicAlloc:   allocator,
+			dynamicFree:    releaser,
+		}, nil
 	}
 	if fn.Recover == nil {
 		return nil, fmt.Errorf("static defer body has no canonical recover block")
@@ -340,8 +475,9 @@ func prepareCoroStaticCleanupPlan(
 			// one-based tag is deterministic for validation and code generation.
 			site.tag = uint32(index) + 1
 		}
-		allocator, allocOK := whole.ResolveLoweredCall(fn, "AllocU")
-		releaser, freeOK := whole.ResolveLoweredCall(fn, "FreeDeferNode")
+		helperOwner := dynamicTrigger.Parent()
+		allocator, allocOK := whole.ResolveLoweredCall(helperOwner, "AllocU")
+		releaser, freeOK := whole.ResolveLoweredCall(helperOwner, "FreeDeferNode")
 		if !allocOK || allocator == nil || !freeOK || releaser == nil {
 			return nil, fmt.Errorf("dynamic cleanup requires exact owner-scoped AllocU and FreeDeferNode edges")
 		}
@@ -349,6 +485,7 @@ func prepareCoroStaticCleanupPlan(
 			sites:                     allSites,
 			terminalResultAllocations: terminalResultAllocations,
 			dynamic:                   true,
+			stackOwner:                fn,
 			dynamicTrigger:            dynamicTrigger,
 			dynamicAlloc:              allocator,
 			dynamicFree:               releaser,
@@ -469,11 +606,12 @@ func coroFunctionRequiresDynamicCleanup(fn *ssa.Function) bool {
 	}
 	infos := blocks.Infos(fn.Blocks)
 	for _, block := range fn.Blocks {
-		if block == nil || block.Index < 0 || block.Index >= len(infos) || !infos[block.Index].InLoop {
+		if block == nil || block.Index < 0 || block.Index >= len(infos) {
 			continue
 		}
 		for _, instruction := range block.Instrs {
-			if _, deferred := instruction.(*ssa.Defer); deferred {
+			deferred, ok := instruction.(*ssa.Defer)
+			if ok && (deferred.DeferStack != nil || infos[block.Index].InLoop) {
 				return true
 			}
 		}
@@ -1045,6 +1183,7 @@ type coroStaticCleanupState struct {
 	sites         []*coroStaticCleanupSiteState
 	byDefer       map[*ssa.Defer]*coroStaticCleanupSiteState
 	dynamic       bool
+	external      bool
 	dynamicHead   llssa.Expr
 	dynamicHeader llssa.Type
 	dynamicAlloc  *ssa.Function
@@ -1059,9 +1198,11 @@ type coroStaticCleanupState struct {
 	run           []coroStaticCleanupContinuation
 }
 
-// beginCoroStaticCleanup allocates and initializes every value before the
-// initial suspend.  A cancellation decision on the first resume can therefore
-// safely enter the same empty drainer as every later terminal path.
+// beginCoroStaticCleanup allocates and initializes every owner value before the
+// initial suspend. A cancellation decision on the first resume can therefore
+// safely enter the same empty drainer as every later terminal path. An external
+// range-over-func yield plan is registration-only: it retains the frozen node
+// layouts but adds no unused drainer or capture slots to the yield frame.
 func (p *context) beginCoroStaticCleanup(b llssa.Builder, plan *coroStaticCleanupPlan) *coroStaticCleanupState {
 	if plan == nil || len(plan.sites) == 0 {
 		return nil
@@ -1070,24 +1211,29 @@ func (p *context) beginCoroStaticCleanup(b llssa.Builder, plan *coroStaticCleanu
 		sites:        make([]*coroStaticCleanupSiteState, 0, len(plan.sites)),
 		byDefer:      make(map[*ssa.Defer]*coroStaticCleanupSiteState, len(plan.sites)),
 		dynamic:      plan.dynamic,
+		external:     plan.external,
 		dynamicAlloc: plan.dynamicAlloc,
 		dynamicFree:  plan.dynamicFree,
 	}
-	state.continuation = b.AllocaT(p.prog.Uint32())
-	b.Store(state.continuation, p.prog.IntVal(0, p.prog.Uint32()))
-	state.panicActive = b.AllocaT(p.prog.Bool())
-	b.Store(state.panicActive, p.prog.BoolVal(false))
-	state.panicType = b.AllocaT(p.prog.VoidPtr())
-	state.panicData = b.AllocaT(p.prog.VoidPtr())
-	b.Store(state.panicType, p.prog.Nil(p.prog.VoidPtr()))
-	b.Store(state.panicData, p.prog.Nil(p.prog.VoidPtr()))
+	if !state.external {
+		state.continuation = b.AllocaT(p.prog.Uint32())
+		b.Store(state.continuation, p.prog.IntVal(0, p.prog.Uint32()))
+		state.panicActive = b.AllocaT(p.prog.Bool())
+		b.Store(state.panicActive, p.prog.BoolVal(false))
+		state.panicType = b.AllocaT(p.prog.VoidPtr())
+		state.panicData = b.AllocaT(p.prog.VoidPtr())
+		b.Store(state.panicType, p.prog.Nil(p.prog.VoidPtr()))
+		b.Store(state.panicData, p.prog.Nil(p.prog.VoidPtr()))
+	}
 	if state.dynamic {
 		if state.dynamicAlloc == nil || state.dynamicFree == nil {
 			panic("dynamic coroutine cleanup lacks frozen allocator/release targets")
 		}
-		state.dynamicHead = b.AllocaT(p.prog.VoidPtr())
-		b.Store(state.dynamicHead, p.prog.Nil(p.prog.VoidPtr()))
-		state.dynamicHeader = p.prog.Struct(p.prog.VoidPtr(), p.prog.Uint32())
+		if !state.external {
+			state.dynamicHead = b.AllocaT(p.prog.VoidPtr())
+			b.Store(state.dynamicHead, p.prog.Nil(p.prog.VoidPtr()))
+			state.dynamicHeader = p.prog.Struct(p.prog.VoidPtr(), p.prog.Uint32())
+		}
 	}
 	for _, sitePlan := range plan.sites {
 		site := &coroStaticCleanupSiteState{
@@ -1114,9 +1260,11 @@ func (p *context) beginCoroStaticCleanup(b llssa.Builder, plan *coroStaticCleanu
 			if !ok || !llssa.IsClosure(closure) {
 				panic(fmt.Sprintf("managed descriptor cleanup site lowered signature %s as %s, want canonical closure", sitePlan.signature, descriptorType.RawType()))
 			}
-			site.descriptor = b.AllocaT(descriptorType)
 			site.descriptorType = descriptorType
-			b.Store(site.descriptor, p.prog.Zero(descriptorType))
+			if !state.external {
+				site.descriptor = b.AllocaT(descriptorType)
+				b.Store(site.descriptor, p.prog.Zero(descriptorType))
+			}
 			if state.dynamic {
 				site.descriptorField = len(nodeFields)
 				nodeFields = append(nodeFields, descriptorType)
@@ -1131,8 +1279,10 @@ func (p *context) beginCoroStaticCleanup(b llssa.Builder, plan *coroStaticCleanu
 				panic(fmt.Sprintf("captured static cleanup target %q has no exact context ABI: %v", sitePlan.targetPlan.ID, err))
 			}
 			contextType := p.prog.Type(signature.Params().At(0).Type(), llssa.InGo)
-			site.closureContext = b.AllocaT(contextType)
-			b.Store(site.closureContext, p.prog.Nil(contextType))
+			if !state.external {
+				site.closureContext = b.AllocaT(contextType)
+				b.Store(site.closureContext, p.prog.Nil(contextType))
+			}
 			if state.dynamic {
 				site.closureField = len(nodeFields)
 				nodeFields = append(nodeFields, contextType)
@@ -1141,7 +1291,11 @@ func (p *context) beginCoroStaticCleanup(b llssa.Builder, plan *coroStaticCleanu
 		site.argsField = len(nodeFields)
 		for _, argument := range sitePlan.instruction.Call.Args {
 			argumentType := p.type_(argument.Type(), llssa.InGo)
-			site.args = append(site.args, b.AllocaT(argumentType))
+			slot := llssa.Nil
+			if !state.external {
+				slot = b.AllocaT(argumentType)
+			}
+			site.args = append(site.args, slot)
 			if state.dynamic {
 				nodeFields = append(nodeFields, argumentType)
 			}
@@ -1152,8 +1306,11 @@ func (p *context) beginCoroStaticCleanup(b llssa.Builder, plan *coroStaticCleanu
 		}
 		for _, source := range keepaliveSources {
 			keepaliveType := p.coroCallKeepaliveStorageType(source)
-			slot := b.AllocaT(keepaliveType)
-			b.Store(slot, p.prog.Zero(keepaliveType))
+			slot := llssa.Nil
+			if !state.external {
+				slot = b.AllocaT(keepaliveType)
+				b.Store(slot, p.prog.Zero(keepaliveType))
+			}
 			site.keepalives = append(site.keepalives, slot)
 			if state.dynamic {
 				nodeFields = append(nodeFields, keepaliveType)
@@ -1181,6 +1338,27 @@ func (s *coroStaticCleanupState) bindBlocks(function llssa.Function) {
 }
 
 func (s *coroStaticCleanupState) register(p *context, b llssa.Builder, instruction *ssa.Defer) {
+	if s == nil || s.external {
+		panic("coroutine local cleanup registration has no owner-local state")
+	}
+	s.registerAt(p, b, instruction, s.dynamicHead)
+}
+
+func (s *coroStaticCleanupState) registerExternal(p *context, b llssa.Builder, instruction *ssa.Defer) {
+	if s == nil || !s.external || !s.dynamic || instruction == nil || instruction.DeferStack == nil {
+		panic("coroutine external cleanup registration has no explicit owner stack")
+	}
+	stack := p.compileValue(b, instruction.DeferStack)
+	head := b.Convert(p.prog.Pointer(p.prog.VoidPtr()), stack)
+	s.registerAt(p, b, instruction, head)
+}
+
+func (s *coroStaticCleanupState) registerAt(
+	p *context,
+	b llssa.Builder,
+	instruction *ssa.Defer,
+	dynamicHead llssa.Expr,
+) {
 	if s == nil || instruction == nil {
 		panic("coroutine static cleanup registration has no state or instruction")
 	}
@@ -1194,7 +1372,7 @@ func (s *coroStaticCleanupState) register(p *context, b llssa.Builder, instructi
 	// live until the deferred child has completed.
 	descriptor := llssa.Nil
 	if site.plan.kind == coroStaticCleanupDispatch {
-		if site.descriptor.IsNil() {
+		if site.descriptorType == nil || (!s.external && site.descriptor.IsNil()) {
 			panic("managed descriptor cleanup registration has no typed descriptor slot")
 		}
 		if site.plan.interfaceReceiver != nil {
@@ -1238,7 +1416,7 @@ func (s *coroStaticCleanupState) register(p *context, b llssa.Builder, instructi
 	}
 	closureContext := llssa.Nil
 	if site.plan.closure != nil {
-		if site.closureContext.IsNil() {
+		if !s.external && site.closureContext.IsNil() {
 			panic("captured coroutine defer has no closure-context slot")
 		}
 		closure := p.compileValue(b, site.plan.closure)
@@ -1271,7 +1449,7 @@ func (s *coroStaticCleanupState) register(p *context, b llssa.Builder, instructi
 		p.observeCoroDeferredCgoWorkerCapture()
 	}
 	if s.dynamic {
-		s.pushDynamic(p, b, site, descriptor, closureContext, args, keepalives)
+		s.pushDynamicTo(p, b, site, dynamicHead, descriptor, closureContext, args, keepalives)
 		return
 	}
 	for index, argument := range args {
@@ -1287,11 +1465,12 @@ func (s *coroStaticCleanupState) register(p *context, b llssa.Builder, instructi
 // release-store-equivalent compiler order: Go closure/arguments are evaluated
 // first, the private node is filled next, and the frame-rooted head changes
 // last. No scheduler suspension is permitted in the frozen AllocU edge.
-func (s *coroStaticCleanupState) pushDynamic(
+func (s *coroStaticCleanupState) pushDynamicTo(
 	p *context, b llssa.Builder, site *coroStaticCleanupSiteState,
+	dynamicHead llssa.Expr,
 	descriptor, closureContext llssa.Expr, args, keepalives []llssa.Expr,
 ) {
-	if s == nil || p == nil || site == nil || site.nodeType == nil || s.dynamicHead.IsNil() ||
+	if s == nil || p == nil || site == nil || site.nodeType == nil || dynamicHead.IsNil() ||
 		s.dynamicAlloc == nil || site.plan == nil || site.plan.tag == 0 {
 		panic("dynamic coroutine cleanup push has incomplete frozen state")
 	}
@@ -1302,7 +1481,7 @@ func (s *coroStaticCleanupState) pushDynamic(
 	p.observeCoroSiteRuntimeHelper("AllocU")
 	raw := b.Call(allocator.Expr, llssa.SizeOf(p.prog, site.nodeType))
 	node := b.Convert(p.prog.Pointer(site.nodeType), raw)
-	b.Store(b.FieldAddr(node, 0), b.Load(s.dynamicHead))
+	b.Store(b.FieldAddr(node, 0), b.Load(dynamicHead))
 	b.Store(b.FieldAddr(node, 1), p.prog.IntVal(uint64(site.plan.tag), p.prog.Uint32()))
 	if site.descriptorField >= 0 {
 		if descriptor.IsNil() {
@@ -1325,7 +1504,7 @@ func (s *coroStaticCleanupState) pushDynamic(
 		}
 		b.Store(b.FieldAddr(node, site.keepaliveField+index), keepalive)
 	}
-	b.Store(s.dynamicHead, b.Convert(p.prog.VoidPtr(), node))
+	b.Store(dynamicHead, b.Convert(p.prog.VoidPtr(), node))
 }
 
 func (s *coroStaticCleanupState) enter(b llssa.Builder, continuation uint32) {

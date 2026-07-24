@@ -64,7 +64,18 @@ func validateCoroDynamicDispatchTarget(fn *ssa.Function, plan coro.FunctionPlan,
 		}
 		return fmt.Errorf("coroutine dynamic dispatch ABI: function %q (%s): %s", name, plan.ID, fmt.Sprintf(format, args...))
 	}
-	if fn == nil || plan.External != coro.Defined || len(fn.Blocks) == 0 {
+	externalPlain := false
+	if fn != nil && len(fn.Blocks) == 0 && plan.External == coro.ExternalKnown &&
+		plan.Emission == coro.EmitExternal && plan.Primary == coro.PrimaryExternal &&
+		plan.Effect == coro.NoSuspend && plan.Exec&(coro.BlockForeign|coro.NeedsPreempt|coro.ThreadAffine) == 0 &&
+		!plan.Exec.IsOpaque() && universe != nil {
+		certificate, certified, err := universe.CoroForeignNoBlockCertificate(fn)
+		if err != nil {
+			return fail("classify external managed noblock capability: %v", err)
+		}
+		externalPlain = certified && certificate.ID != ""
+	}
+	if fn == nil || !externalPlain && (plan.External != coro.Defined || len(fn.Blocks) == 0) {
 		return fail("requires one defined SSA body")
 	}
 	rawPlainOnly := plan.RawPlainOnly && plan.ManagedDemand == coro.NoDemand && plan.RawPlainDemand &&
@@ -89,6 +100,10 @@ func validateCoroDynamicDispatchTarget(fn *ssa.Function, plan coro.FunctionPlan,
 			return fail("raw-plain capability requires one exact raw-only primary, got raw-only=%t managed=%s raw=%t primary=%s representation=%s",
 				plan.RawPlainOnly, plan.ManagedDemand, plan.RawPlainDemand, plan.Primary, plan.FuncRep)
 		}
+	case coro.EmitExternal:
+		if !externalPlain {
+			return fail("external capability requires one exact managed noblock certificate")
+		}
 	default:
 		return fail("requires one plain or coroutine primary, got emission=%s primary=%s", plan.Emission, plan.Primary)
 	}
@@ -108,7 +123,7 @@ func validateCoroDynamicDispatchTarget(fn *ssa.Function, plan coro.FunctionPlan,
 			return fail("classify ABI directive: %v", err)
 		}
 	}
-	if directive != "" {
+	if directive != "" && !externalPlain {
 		return fail("ABI directive %q requires an explicit boundary adapter", directive)
 	}
 	if isCgoExternSymbol(fn) {
@@ -1089,7 +1104,7 @@ func (p *context) emitCoroDynamicDispatchValue(
 		flags := uint32(0)
 		var plainEntry, coroEntry llssa.Expr
 		switch entry.plan.Emission {
-		case coro.EmitPlain, coro.EmitRawPlain:
+		case coro.EmitPlain, coro.EmitRawPlain, coro.EmitExternal:
 			flags |= llssa.CoroDispatchFlagHasPlain
 			plainEntry = p.newCoroDynamicDispatchEntryThunk(
 				coroPlainDispatchThunkPrefix+targetKey, physical.Expr, abi, entry.plan.Emission, closureCtx,
@@ -1146,7 +1161,7 @@ func (p *context) newCoroDynamicDispatchEntryThunk(
 	source := p.prog.PhysicalFuncDecl(abi.signature, llssa.InGo)
 	var thunkSig *types.Signature
 	switch emission {
-	case coro.EmitPlain, coro.EmitRawPlain:
+	case coro.EmitPlain, coro.EmitRawPlain, coro.EmitExternal:
 		thunkSig = p.prog.CoroDispatchPlainEntrySignature(abi.signature)
 	case coro.EmitCoroutine:
 		thunkSig = p.prog.CoroDispatchCoroEntrySignature(abi.signature)

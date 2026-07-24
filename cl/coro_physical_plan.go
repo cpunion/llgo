@@ -42,6 +42,7 @@ const (
 	coroPhysicalInstructionSliceToArrayPointer
 	coroPhysicalInstructionBuiltinNilGuard
 	coroPhysicalInstructionSyntheticSelectNoCaseBox
+	coroPhysicalInstructionInterfaceFromCheckedPtr
 	coroPhysicalInstructionUnsafeString
 	coroPhysicalInstructionUnsafeSlice
 	coroPhysicalInstructionInterfaceNilCompare
@@ -71,6 +72,8 @@ func (recipe coroPhysicalInstructionRecipe) String() string {
 		return "builtin-nil-guard"
 	case coroPhysicalInstructionSyntheticSelectNoCaseBox:
 		return "synthetic-select-no-case-box"
+	case coroPhysicalInstructionInterfaceFromCheckedPtr:
+		return "interface-from-checked-ptr"
 	case coroPhysicalInstructionUnsafeString:
 		return "unsafe-string"
 	case coroPhysicalInstructionUnsafeSlice:
@@ -295,6 +298,10 @@ func (plan coroPhysicalInstructionPlan) elidesRuntimeHelper(helper string) bool 
 		}
 	case coroPhysicalInstructionBuiltinNilGuard:
 		if helper == "PanicWrapNilPointer" {
+			return true
+		}
+	case coroPhysicalInstructionInterfaceFromCheckedPtr:
+		if helper == "AssertNilDeref" {
 			return true
 		}
 	case coroPhysicalInstructionUnsafeString, coroPhysicalInstructionUnsafeSlice:
@@ -561,9 +568,32 @@ func planCoroPhysicalInstruction(
 			result.nilGuard = true
 		}
 	case *ssa.UnOp:
-		if instruction.Op == token.MUL && audit.derefRequiresImplicitNilFault(instruction) {
-			result.recipe = coroPhysicalInstructionDeref
-			result.nilGuard = true
+		if instruction.Op == token.MUL {
+			if audit.derefRequiresImplicitNilFault(instruction) {
+				result.recipe = coroPhysicalInstructionDeref
+				result.nilGuard = true
+				break
+			}
+			producerOwnsFault, reason := audit.derefAddressProducerOwnsImplicitFault(instruction)
+			if reason != "" {
+				return result, fmt.Errorf("Deref checked address producer: %s", reason)
+			}
+			if !producerOwnsFault {
+				break
+			}
+			helpers, reason := audit.plannedRuntimeHelpers(instruction)
+			if reason != "" {
+				return result, fmt.Errorf("Deref frozen helper plan: %s", reason)
+			}
+			for _, helper := range helpers {
+				if helper == "AssertNilDeref" || helper == "AssertNilDerefPtr" {
+					// The address instruction emits the actual guard. Keep a
+					// no-guard deref recipe here so the outer logical helper is
+					// explicitly elided rather than silently disappearing.
+					result.recipe = coroPhysicalInstructionDeref
+					break
+				}
+			}
 		}
 	case *ssa.IndexAddr:
 		if audit.ctx != nil && emissionIsVargsAlloc(audit.ctx, instruction.X) {
@@ -672,6 +702,34 @@ func planCoroPhysicalInstruction(
 	case *ssa.MakeInterface:
 		if coroSyntheticSelectNoCaseBox(instruction) {
 			result.recipe = coroPhysicalInstructionSyntheticSelectNoCaseBox
+			break
+		}
+		if unop, ok := instruction.X.(*ssa.UnOp); ok {
+			_, fusion := coroInterfaceDerefConsumer(audit.ctx, unop)
+			if fusion == coroInterfaceDerefNotFused {
+				break
+			}
+			if fusion == coroInterfaceDerefZero && audit.derefRequiresImplicitNilFault(unop) {
+				// The zero-sized dereference retains the source nil edge even
+				// though it has no physical load. Its structured guard makes
+				// the pointer safe for the following boxing copy.
+				result.recipe = coroPhysicalInstructionInterfaceFromCheckedPtr
+				break
+			}
+			switch address := unop.X.(type) {
+			case *ssa.FieldAddr:
+				ownsFault, reason := audit.fieldAddrRequiresImplicitNilFault(address)
+				if reason != "" {
+					return result, fmt.Errorf("MakeInterface checked FieldAddr producer: %s", reason)
+				}
+				if ownsFault {
+					result.recipe = coroPhysicalInstructionInterfaceFromCheckedPtr
+				}
+			case *ssa.IndexAddr:
+				if explicitPanic && (audit.ctx == nil || !emissionIsVargsAlloc(audit.ctx, address.X)) {
+					result.recipe = coroPhysicalInstructionInterfaceFromCheckedPtr
+				}
+			}
 		}
 	case *ssa.BinOp:
 		if (instruction.Op == token.EQL || instruction.Op == token.NEQ) &&

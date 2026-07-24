@@ -86,6 +86,80 @@ func TestResolveCoroInterfaceDispatchPlanUniqueAsyncWriter(t *testing.T) {
 	}
 }
 
+func TestResolveCoroInterfaceDispatchPlanAcceptsPromotedGenericMethodWrappers(t *testing.T) {
+	const source = `package foo
+type Interface interface { M() }
+func Call[P Interface](p P) { p.M() }
+type inner[T any] struct{}
+func (*inner[T]) M() {}
+type Outer struct { *inner[int] }
+func KeepPromotedWrapperLive() {
+	var p Interface = &Outer{inner: &inner[int]{}}
+	p.M()
+}
+func Root() { Call[Interface](nil) }
+`
+	ssaPkg, _, files := buildGoSSAPkg(t, source)
+	program := newLLSSAProg(t)
+	defer program.Dispose()
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
+		program, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}}, EmissionUniverseOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	functionIDs.ArchiveReady = true
+	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: ssaPkg.Func("Root"), Demand: coro.AsyncDemand}}, coro.SSAConfig{
+		EmissionUniverse:     ssaUniverse,
+		FunctionIDs:          functionIDs,
+		DynamicResolution:    coro.DynamicCHAClosed,
+		MaxPlainInstructions: -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var invoke *ssa.Call
+	for _, function := range universe.Functions() {
+		if function == nil || function.Origin() == nil || function.Origin().Name() != "Call" {
+			continue
+		}
+		invoke = coroInterfaceDispatchFindInvoke(t, function)
+		break
+	}
+	if invoke == nil {
+		t.Fatal("materialized generic Call instance is absent")
+	}
+	resolved, err := resolveCoroInterfaceDispatchPlan(plan, universe, invoke)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resolved.mayBeNil || len(resolved.candidates) != 3 {
+		t.Fatalf("generic nil invoke plan: may-be-nil=%t candidates=%d, want true and three", resolved.mayBeNil, len(resolved.candidates))
+	}
+	wrappers, instances := 0, 0
+	for _, candidate := range resolved.candidates {
+		switch {
+		case strings.HasPrefix(candidate.function.Synthetic, "wrapper for "):
+			wrappers++
+			if !coroMaterializedGenericMethodWrapper(candidate.function) {
+				t.Fatalf("promoted generic wrapper was not recognized:\n%s", candidate.function)
+			}
+		case coroMaterializedGenericInstance(candidate.function):
+			instances++
+		}
+	}
+	if wrappers != 2 || instances != 1 {
+		t.Fatalf("generic dispatch candidates: wrappers=%d instances=%d, want 2 and 1", wrappers, instances)
+	}
+}
+
 func TestCoroManagedOpenAnonymousInterfaceUsesUniversalMethodDescriptor(t *testing.T) {
 	const source = `package foo
 var gate chan struct{}

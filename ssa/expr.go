@@ -1907,6 +1907,14 @@ func checkExpr(v Expr, t types.Type, b Builder) Expr {
 	return b.ChangeType(dst, v)
 }
 
+// Assign applies Go assignment conversion to v and returns a value with the
+// exact destination type. It exposes the same conversion used internally by
+// Store so compiler-owned tuple lowerings can make implicit SSA assignment
+// conversions explicit at their source instruction.
+func (b Builder) Assign(t Type, v Expr) Expr {
+	return checkExpr(v, t.raw.Type, b)
+}
+
 func needsNegativeCheck(x Expr) bool {
 	if x.kind == vkSigned {
 		if rv := x.impl.IsAConstantInt(); !rv.IsNil() && rv.SExtValue() >= 0 {

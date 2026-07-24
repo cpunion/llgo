@@ -36,12 +36,21 @@ var Sink uint32
 
 type Box struct { Value uint32 }
 type Empty struct{}
+type ZeroField struct {
+	Value uint32
+	Empty struct{}
+}
 
 func Cleanup() { Sink++ }
 func RecoverFault() { recover() }
 
 func Nullable(box *Box) uint32 { return box.Value }
 func EmptyLoad(value *Empty) Empty { return *value }
+func ZeroFieldEqual(first, second *ZeroField) bool { return first.Empty == second.Empty }
+
+func InterfaceCompare(value **interface{}) bool { return **value == nil }
+func StaticNil() int { return *(*int)(nil) }
+func StaticNilFieldLoad() uint32 { var box *Box; return box.Value }
 
 func Guarded(box *Box) uint32 {
 	if box == nil { return 0 }
@@ -67,6 +76,7 @@ type Array4 [4]uint32
 func ArrayAt(values Array4, index int) uint32 { return [4]uint32(values)[index] }
 
 func SliceAt(values []uint32, index int) uint32 { return values[index] }
+func StaticNilSliceAt() int { var values []int; return values[0] }
 
 func PointerEqual(first, second *Box) bool { return first == second }
 
@@ -121,6 +131,41 @@ func TestCoroImplicitNilFieldAddrNativeAndWasm32(t *testing.T) {
 				}
 			}
 
+			interfaceCompare := functions["InterfaceCompare"]
+			interfaceComparePlan, ok := plan.FunctionPlan(interfaceCompare)
+			if !ok || interfaceComparePlan.Emission != coro.EmitCoroutine || !interfaceComparePlan.Exec.Contains(coro.MayUnwind) {
+				t.Fatalf("InterfaceCompare plan = %+v, present=%t; want may-unwind coroutine", interfaceComparePlan, ok)
+			}
+			interfaceCompareBody := requireCoroPhysicalFunction(t, module, "foo.InterfaceCompare").String()
+			if strings.Contains(interfaceCompareBody, "AssertNilDeref") ||
+				strings.Count(interfaceCompareBody, "call void @"+coroFaultPrepareHookV1) != 2 {
+				t.Fatalf("nested interface comparison did not use its two structured pointer guards exclusively:\n%s", interfaceCompareBody)
+			}
+			staticNil := functions["StaticNil"]
+			staticNilPlan, ok := plan.FunctionPlan(staticNil)
+			if !ok || staticNilPlan.Emission != coro.EmitCoroutine || !staticNilPlan.Exec.Contains(coro.MayUnwind) {
+				t.Fatalf("StaticNil plan = %+v, present=%t; want may-unwind coroutine", staticNilPlan, ok)
+			}
+			staticNilBody := requireCoroPhysicalFunction(t, module, "foo.StaticNil").String()
+			if strings.Contains(staticNilBody, "AssertNilDeref") ||
+				strings.Count(staticNilBody, "call void @"+coroFaultPrepareHookV1) != 1 {
+				t.Fatalf("constant nil dereference did not use its structured pointer guard exclusively:\n%s", staticNilBody)
+			}
+			staticFieldBody := requireCoroPhysicalFunction(t, module, "foo.StaticNilFieldLoad").String()
+			if strings.Contains(staticFieldBody, "AssertNilDeref") ||
+				strings.Count(staticFieldBody, "call void @"+coroFaultPrepareHookV1) != 1 {
+				t.Fatalf("constant nil field load did not use its structured pointer guard exclusively:\n%s", staticFieldBody)
+			}
+			zeroField := functions["ZeroFieldEqual"]
+			zeroFieldPlan, ok := plan.FunctionPlan(zeroField)
+			if !ok || zeroFieldPlan.Emission != coro.EmitCoroutine || !zeroFieldPlan.Exec.Contains(coro.MayUnwind) {
+				t.Fatalf("ZeroFieldEqual plan = %+v, present=%t; want may-unwind coroutine", zeroFieldPlan, ok)
+			}
+			zeroFieldBody := requireCoroPhysicalFunction(t, module, "foo.ZeroFieldEqual").String()
+			if strings.Contains(zeroFieldBody, "AssertNilDeref") ||
+				strings.Count(zeroFieldBody, "call void @"+coroFaultPrepareHookV1) != 2 {
+				t.Fatalf("zero-sized field comparison did not consume its two checked FieldAddr producers:\n%s", zeroFieldBody)
+			}
 			guarded := requireCoroPhysicalFunction(t, module, "foo.Guarded").String()
 			if strings.Contains(guarded, coroFaultPrepareHookV1) || strings.Contains(guarded, "AssertNilDeref") {
 				t.Fatalf("dominated non-nil FieldAddr retained a runtime/terminal guard:\n%s", guarded)
@@ -211,6 +256,11 @@ func TestCoroImplicitIndexAddrBoundsNativeAndWasm32(t *testing.T) {
 			gep := strings.Index(body, "getelementptr inbounds i32")
 			if gep < 0 || hook > gep {
 				t.Fatalf("SliceAt formed its element address before the terminal bounds edge:\n%s", body)
+			}
+			staticBody := requireCoroPhysicalFunction(t, module, "foo.StaticNilSliceAt").String()
+			if got := strings.Count(staticBody, "call void @"+coroFaultPrepareHookV1); got != 1 ||
+				strings.Contains(staticBody, "AssertNilDeref") {
+				t.Fatalf("StaticNilSliceAt did not route its sole failure through the structured bounds edge:\n%s", staticBody)
 			}
 
 			runCoroABITestPipeline(t, prog, module)
@@ -329,18 +379,23 @@ func compileCoroImplicitNilFaultFixture(
 		t.Fatal(err)
 	}
 	functions := map[string]*ssa.Function{
-		"Nullable":          ssaPkg.Func("Nullable"),
-		"EmptyLoad":         ssaPkg.Func("EmptyLoad"),
-		"Guarded":           ssaPkg.Func("Guarded"),
-		"WithCleanup":       ssaPkg.Func("WithCleanup"),
-		"RecoverFault":      ssaPkg.Func("RecoverFault"),
-		"WithRecover":       ssaPkg.Func("WithRecover"),
-		"StringAt":          ssaPkg.Func("StringAt"),
-		"ConstantStringAt":  ssaPkg.Func("ConstantStringAt"),
-		"ArrayAt":           ssaPkg.Func("ArrayAt"),
-		"SliceAt":           ssaPkg.Func("SliceAt"),
-		"PointerEqual":      ssaPkg.Func("PointerEqual"),
-		"ValueReceiverCall": ssaPkg.Func("ValueReceiverCall"),
+		"Nullable":           ssaPkg.Func("Nullable"),
+		"EmptyLoad":          ssaPkg.Func("EmptyLoad"),
+		"InterfaceCompare":   ssaPkg.Func("InterfaceCompare"),
+		"StaticNil":          ssaPkg.Func("StaticNil"),
+		"StaticNilFieldLoad": ssaPkg.Func("StaticNilFieldLoad"),
+		"ZeroFieldEqual":     ssaPkg.Func("ZeroFieldEqual"),
+		"Guarded":            ssaPkg.Func("Guarded"),
+		"WithCleanup":        ssaPkg.Func("WithCleanup"),
+		"RecoverFault":       ssaPkg.Func("RecoverFault"),
+		"WithRecover":        ssaPkg.Func("WithRecover"),
+		"StringAt":           ssaPkg.Func("StringAt"),
+		"ConstantStringAt":   ssaPkg.Func("ConstantStringAt"),
+		"ArrayAt":            ssaPkg.Func("ArrayAt"),
+		"SliceAt":            ssaPkg.Func("SliceAt"),
+		"StaticNilSliceAt":   ssaPkg.Func("StaticNilSliceAt"),
+		"PointerEqual":       ssaPkg.Func("PointerEqual"),
+		"ValueReceiverCall":  ssaPkg.Func("ValueReceiverCall"),
 	}
 	roots := make(coro.Roots, 0, len(functions))
 	for _, function := range functions {
