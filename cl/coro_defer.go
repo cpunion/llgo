@@ -1496,7 +1496,7 @@ func (s *coroStaticCleanupState) emit(p *context, b llssa.Builder) {
 		for argument := range args {
 			args[argument] = b.Load(site.args[argument])
 		}
-		if s.emitSiteCall(p, b, site, args) {
+		if s.emitSiteCall(p, b, site, args, false) {
 			b.Jump(next)
 		}
 		next = check
@@ -1567,12 +1567,15 @@ func (s *coroStaticCleanupState) emitDynamic(p *context, b llssa.Builder) {
 				b.Load(b.FieldAddr(node, site.keepaliveField+keepalive)),
 			)
 		}
+		finishSite := s.beginRelocatedSiteEmission(p, site)
 		s.releaseDynamicRecord(p, b, site, record)
 		args := make([]llssa.Expr, len(site.args))
 		for argument := range args {
 			args[argument] = b.Load(site.args[argument])
 		}
-		if s.emitSiteCall(p, b, site, args) {
+		continues := s.emitSiteCall(p, b, site, args, true)
+		finishSite()
+		if continues {
 			b.Jump(s.entry)
 		}
 	}
@@ -1587,8 +1590,6 @@ func (s *coroStaticCleanupState) releaseDynamicRecord(p *context, b llssa.Builde
 	if site == nil || site.plan == nil || site.plan.instruction == nil {
 		panic("dynamic coroutine cleanup release has no exact source SitePlan")
 	}
-	finishSite := s.beginRelocatedSiteEmission(p, site)
-	defer finishSite()
 	releaser, _, kind := p.compileFunction(s.dynamicFree)
 	if releaser == nil || kind != goFunc {
 		panic("dynamic coroutine cleanup FreeDeferNode target did not resolve to a Go entry")
@@ -1609,6 +1610,7 @@ func (s *coroStaticCleanupState) beginRelocatedSiteEmission(
 
 func (s *coroStaticCleanupState) emitSiteCall(
 	p *context, b llssa.Builder, site *coroStaticCleanupSiteState, args []llssa.Expr,
+	siteEmissionActive bool,
 ) bool {
 	switch site.plan.kind {
 	case coroStaticCleanupPlain:
@@ -1650,7 +1652,10 @@ func (s *coroStaticCleanupState) emitSiteCall(
 		finishSite()
 		return true
 	case coroStaticCleanupBuiltin:
-		finishSite := s.beginRelocatedSiteEmission(p, site)
+		finishSite := func() {}
+		if !siteEmissionActive {
+			finishSite = s.beginRelocatedSiteEmission(p, site)
+		}
 		switch site.plan.builtin {
 		case "delete", "copy", "clear", "print", "println":
 			b.Call(llssa.Builtin(site.plan.builtin), args...)
@@ -1687,7 +1692,10 @@ func (s *coroStaticCleanupState) emitSiteCall(
 		if site.plan.cgoWorker == nil {
 			panic("coroutine deferred cgo worker lost its frozen typed shape")
 		}
-		finishSite := s.beginRelocatedSiteEmission(p, site)
+		finishSite := func() {}
+		if !siteEmissionActive {
+			finishSite = s.beginRelocatedSiteEmission(p, site)
+		}
 		p.compileCoroWorkerCgoTransaction(
 			b, *site.plan.cgoWorker, args, site.keepalives,
 		)
