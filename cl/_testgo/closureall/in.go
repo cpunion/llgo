@@ -51,7 +51,7 @@ import "github.com/goplus/lib/c"
 func cSqrt(x c.Double) c.Double
 
 //llgo:coro noblock
-// llgo:link cAbs C.abs
+//llgo:link cAbs C.abs
 func cAbs(x c.Int) c.Int { return 0 }
 
 // llgo:type C
