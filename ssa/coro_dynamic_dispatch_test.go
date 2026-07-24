@@ -127,6 +127,10 @@ func TestCoroDynamicDispatchV1RejectsInvalidCapabilitiesAndEntries(t *testing.T)
 	coroPlainDispatchMustPanicContains(t, "unknown bits", func() {
 		fixture.pkg.NewCoroDispatchDescriptor("unknown_flags", options)
 	})
+	options = fixture.descriptorOptions(CoroDispatchFlagHasCoro | CoroDispatchFlagRuntimeTyped)
+	coroPlainDispatchMustPanicContains(t, "cannot use RuntimeTyped", func() {
+		fixture.pkg.NewCoroDispatchDescriptor("runtime_typed_compiler_descriptor", options)
+	})
 	options = fixture.descriptorOptions(CoroDispatchFlagHasCoro)
 	options.CoroEntry = Nil
 	coroPlainDispatchMustPanicContains(t, "requires a coroutine entry", func() {
@@ -207,6 +211,82 @@ func TestCoroDispatchDescriptorNonNilSuppressesImplicitLoadNilCheck(t *testing.T
 	}
 	if err := llvm.VerifyModule(fixture.pkg.Module(), llvm.ReturnStatusAction); err != nil {
 		t.Fatalf("verify DescriptorNonNil module: %v\n%s", err, ir)
+	}
+}
+
+func TestCoroDynamicDispatchAcceptsPackedVariadicSignature(t *testing.T) {
+	Initialize(InitAll)
+	prog := NewProgram(nil)
+	installCoroPlainDispatchTestRuntime(prog)
+	runtimePkg := prog.runtime()
+	sliceName := types.NewTypeName(0, runtimePkg, "Slice", nil)
+	types.NewNamed(sliceName, types.NewStruct(
+		[]*types.Var{
+			types.NewField(0, runtimePkg, "data", types.Typ[types.UnsafePointer], false),
+			types.NewField(0, runtimePkg, "len", types.Typ[types.Int], false),
+			types.NewField(0, runtimePkg, "cap", types.Typ[types.Int], false),
+		},
+		nil,
+	), nil)
+	runtimePkg.Scope().Insert(sliceName)
+	pkg := prog.NewPackage("corodynamicvariadic", "coro/dynamic/variadic")
+	t.Cleanup(func() {
+		pkg.Module().Dispose()
+		prog.Dispose()
+	})
+
+	valuesType := types.NewSlice(types.Typ[types.Int])
+	signature := types.NewSignatureType(
+		nil, nil, nil,
+		types.NewTuple(types.NewParam(0, nil, "values", valuesType)),
+		types.NewTuple(types.NewParam(0, nil, "", types.Typ[types.Int])),
+		true,
+	)
+	result := prog.Struct(prog.Int())
+	hash := [16]byte{1, 3, 3, 7}
+	entry := pkg.NewFunc("variadic_plain_entry", prog.CoroDispatchPlainEntrySignature(signature), InC)
+	entryBuilder := entry.MakeBody(1)
+	entryBuilder.Return(prog.IntVal(7, prog.Int()))
+	entryBuilder.EndBuild()
+	entryBuilder.Dispose()
+
+	descriptor := pkg.NewCoroDispatchDescriptor("variadic_descriptor", CoroDispatchDescriptorOptions{
+		Version:    CoroDispatchVersionV1,
+		Flags:      CoroDispatchFlagHasPlain,
+		ABIHash:    hash,
+		Signature:  signature,
+		PlainEntry: entry.Expr,
+		Result:     result,
+	})
+	callerSignature := types.NewSignatureType(
+		nil, nil, nil,
+		types.NewTuple(
+			types.NewParam(0, nil, "fn", signature),
+			types.NewParam(0, nil, "values", valuesType),
+		),
+		types.NewTuple(types.NewParam(0, nil, "", types.Typ[types.Int])),
+		false,
+	)
+	caller := pkg.NewFunc("variadic_dispatch_call", callerSignature, InGo)
+	b := caller.MakeBody(1)
+	fn := b.MakeCoroDispatchValue(signature, descriptor, Nil)
+	value := b.CallCoroDispatchPlain(fn, []Expr{caller.Param(1)}, CoroDispatchCallOptions{
+		Version:          CoroDispatchVersionV1,
+		ABIHash:          hash,
+		Result:           result,
+		DescriptorNonNil: true,
+	})
+	b.Return(value)
+	b.EndBuild()
+	b.Dispose()
+
+	ir := pkg.String()
+	body := coroPlainDispatchIRFunction(ir, "variadic_dispatch_call")
+	if !regexp.MustCompile(`call i64 %[^(]+\(ptr null, %"[^"]+\.Slice" %1\)`).MatchString(body) {
+		t.Fatalf("variadic descriptor call did not use one fixed packed-slice argument:\n%s", body)
+	}
+	if err := llvm.VerifyModule(pkg.Module(), llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify packed variadic descriptor module: %v\n%s", err, ir)
 	}
 }
 
@@ -346,8 +426,8 @@ func assertCoroDynamicDispatchGuards(t *testing.T, ir, name string, coro bool) {
 		"coro.dispatch.plain.entry.mismatch",
 		"coro.dispatch.coro.entry.mismatch",
 		"coro.dispatch.nocapture.env.nonnull",
-		"coro.dispatch.hash.lo.invalid",
-		"coro.dispatch.hash.hi.invalid",
+		"coro.dispatch.hash.invalid",
+		"coro.dispatch.runtime-type.invalid",
 		"coro.dispatch.result.size.invalid",
 		"coro.dispatch.result.align.invalid",
 	} {
@@ -389,8 +469,8 @@ func assertCoroDynamicDispatchProbeGuards(t *testing.T, ir, name string) {
 		"coro.dispatch.plain.entry.mismatch",
 		"coro.dispatch.coro.entry.mismatch",
 		"coro.dispatch.nocapture.env.nonnull",
-		"coro.dispatch.hash.lo.invalid",
-		"coro.dispatch.hash.hi.invalid",
+		"coro.dispatch.hash.invalid",
+		"coro.dispatch.runtime-type.invalid",
 		"coro.dispatch.result.size.invalid",
 		"coro.dispatch.result.align.invalid",
 	} {

@@ -30,6 +30,7 @@ func TestCoroPlanInputCertifiesOnlyOrdinaryManagedDescriptorCalls(t *testing.T) 
 	ssaPkg, _ := buildCoroPlanTestPackage(t, "example.com/manageddispatch", `package manageddispatch
 type I interface { M() }
 func call(fn func(int) int) int { return fn(1) }
+func variadic(fn func(...int) int) int { return fn(1, 2) }
 func invoke(value I) { value.M() }
 func invokeDeferred(value I) { defer value.M() }
 func deferred(fn func()) { defer fn() }
@@ -38,6 +39,7 @@ func deferred(fn func()) { defer fn() }
 	input := CoroPlanInput{Program: ssaPkg.Prog}
 	plan, err := input.Analyze(coro.Roots{
 		{Function: ssaPkg.Func("call"), Demand: coro.AsyncDemand},
+		{Function: ssaPkg.Func("variadic"), Demand: coro.AsyncDemand},
 		{Function: ssaPkg.Func("invoke"), Demand: coro.AsyncDemand},
 		{Function: ssaPkg.Func("invokeDeferred"), Demand: coro.AsyncDemand},
 		{Function: ssaPkg.Func("deferred"), Demand: coro.AsyncDemand},
@@ -46,7 +48,7 @@ func deferred(fn func()) { defer fn() }
 		t.Fatal(err)
 	}
 
-	for _, name := range []string{"call", "invoke", "invokeDeferred", "deferred"} {
+	for _, name := range []string{"call", "variadic", "invoke", "invokeDeferred", "deferred"} {
 		fn := ssaPkg.Func(name)
 		var dynamic ssa.CallInstruction
 		for _, candidate := range coroPlanTestCalls(fn) {
@@ -63,7 +65,7 @@ func deferred(fn func()) { defer fn() }
 			t.Fatalf("%s: missing CallPlan", name)
 		}
 		want := coro.UnknownManaged
-		if name == "call" {
+		if name == "call" || name == "variadic" {
 			want = coro.UnknownManagedDispatch
 		} else if name == "invoke" {
 			want = coro.UnknownManagedInterfaceDispatch
@@ -76,6 +78,11 @@ func deferred(fn func()) { defer fn() }
 	callPlan, _ := plan.FunctionPlan(ssaPkg.Func("call"))
 	if !callPlan.LocalEffect.Contains(coro.AwaitStructured) || callPlan.LocalEffect.IsOpaque() || callPlan.LocalExec.IsOpaque() {
 		t.Fatalf("managed descriptor caller = %+v", callPlan)
+	}
+	variadicPlan, _ := plan.FunctionPlan(ssaPkg.Func("variadic"))
+	if !variadicPlan.LocalEffect.Contains(coro.AwaitStructured) ||
+		variadicPlan.LocalEffect.IsOpaque() || variadicPlan.LocalExec.IsOpaque() {
+		t.Fatalf("variadic managed descriptor caller = %+v", variadicPlan)
 	}
 	invokePlan, _ := plan.FunctionPlan(ssaPkg.Func("invoke"))
 	if !invokePlan.LocalEffect.Contains(coro.AwaitStructured) || invokePlan.LocalEffect.IsOpaque() || invokePlan.LocalExec.IsOpaque() {

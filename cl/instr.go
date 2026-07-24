@@ -742,6 +742,7 @@ var llgoInstrs = map[string]int{
 	"coroGoexit":              llgoCoroGoexit,
 	"coroOSThreadLock":        llgoCoroOSThreadLock,
 	"coroOSThreadUnlock":      llgoCoroOSThreadUnlock,
+	"coroFFICall":             llgoCoroFFICall,
 	"pystr":                   llgoPyStr,
 	"pyList":                  llgoPyList,
 	"pyTuple":                 llgoPyTuple,
@@ -2445,6 +2446,12 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 			// their source tail. Keep that tail structurally well-formed but
 			// unreachable after Goexit entered the terminal cleanup protocol.
 			b.SetBlockContinuation(p.fn.MakeBlock())
+		case llgoCoroFFICall:
+			if act != llssa.Call || ds != nil {
+				panic("llgo.coroFFICall requires an exact direct call")
+			}
+			args := p.compileValues(b, args, kind)
+			p.compileCoroFFICall(b, args)
 		case llgoCoroOSThreadLock:
 			if act != llssa.Call || ds != nil || len(args) != 0 {
 				panic("llgo.coroOSThreadLock requires an exact direct zero-argument call")

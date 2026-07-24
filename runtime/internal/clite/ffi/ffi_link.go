@@ -39,16 +39,23 @@ void ffi_call(ffi_cif *cif,
 			void *rvalue,
 			void **avalue);
 */
+// Call is used only with bounded descriptor entries. A coroutine ramp is
+// bounded here because it returns its initially suspended handle before this
+// native call returns; scheduler awaiting starts outside the libffi stack.
+//
+//llgo:coro sync
 //go:linkname Call C.ffi_call
 func Call(cif *Cif, fn unsafe.Pointer, rvalue unsafe.Pointer, avalue *unsafe.Pointer)
 
 // void *ffi_closure_alloc (size_t size, void **code);
 //
+//llgo:coro sync
 //go:linkname ClosureAlloc C.llgo_ffi_closure_alloc
 func ClosureAlloc(code *unsafe.Pointer) unsafe.Pointer
 
 // void ffi_closure_free (void *);
 //
+//llgo:coro sync
 //go:linkname ClosureFree C.ffi_closure_free
 func ClosureFree(unsafe.Pointer)
 
@@ -61,5 +68,6 @@ ffi_prep_closure_loc (ffi_closure*,
       void *codeloc);
 */
 
+//llgo:coro sync
 //go:linkname PreClosureLoc C.ffi_prep_closure_loc
 func PreClosureLoc(closure unsafe.Pointer, cif *Cif, fn ClosureFunc, userdata unsafe.Pointer, codeloc unsafe.Pointer) c.Uint

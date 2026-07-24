@@ -57,6 +57,22 @@ func (p *context) compileCoroInstructionPrologue(b llssa.Builder, instr ssa.Inst
 	if !outerCriticalEnter {
 		body.sourceBlockPollFresh = false
 	}
+	if change, ok := instr.(*ssa.ChangeType); ok && p.compilation != nil &&
+		p.compilation.CoroPlan != nil && p.compilation.EmissionUniverse != nil {
+		if caller, found := p.compilation.CoroPlan.FunctionPlan(p.goFn); found {
+			if target, err := resolveCoroCompilerElidedStaticAwaitRetag(
+				p.compilation.CoroPlan,
+				caller,
+				p.compilation.EmissionUniverse,
+				p.goFn,
+				change,
+			); err == nil && target != nil {
+				// Direct-await lowering owns every executable consumer. Do not
+				// materialize an invalid temporary {coroutine-entry, nil} funcval.
+				return true
+			}
+		}
+	}
 	return false
 }
 

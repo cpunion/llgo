@@ -2437,18 +2437,101 @@ func toFFISig(tin, tout []*abi.Type) (*ffi.Signature, error) {
 }
 
 func toFFIRetType(tout []*abi.Type) *ffi.Type {
-	switch n := len(tout); n {
+	// LLVM carries zero-sized Go results in the logical aggregate but they
+	// consume no bytes in the callable ABI. libffi cannot describe a genuinely
+	// empty struct and represents one with a one-byte sentinel, so including
+	// such a field would change both the result-slot size and ABI
+	// classification. Keep the result in reflect's logical output slice, but
+	// omit it from the native transport.
+	physical := make([]*abi.Type, 0, len(tout))
+	for _, out := range tout {
+		if size, _ := llgoABITypeLayout(out); size != 0 {
+			physical = append(physical, out)
+		}
+	}
+	switch n := len(physical); n {
 	case 0:
 		return ffi.TypeVoid
 	case 1:
-		return toFFIType(tout[0])
+		return toFFIType(physical[0])
 	default:
 		fields := make([]*ffi.Type, n)
-		for i, out := range tout {
+		for i, out := range physical {
 			fields[i] = toFFIType(out)
 		}
 		return ffi.StructOf(fields...)
 	}
+}
+
+func alignUp(value, alignment uintptr) uintptr {
+	return (value + alignment - 1) &^ (alignment - 1)
+}
+
+// llgoABITypeLayout mirrors the unpacked LLVM layout used by LLGo's physical
+// Go ABI. In particular, zero-length arrays retain their element alignment
+// without consuming bytes, and Go's source-level trailing-zero-field padding
+// is not part of a callable value. Function values are the canonical
+// two-pointer {descriptor, environment} carrier.
+func llgoABITypeLayout(typ *abi.Type) (size, alignment uintptr) {
+	if typ == nil {
+		panic("reflect: nil LLGo ABI type")
+	}
+	alignment = uintptr(typ.Align_)
+	if alignment == 0 {
+		alignment = 1
+	}
+	switch typ.Kind() {
+	case abi.Func:
+		return 2 * unsafe.Sizeof(uintptr(0)), unsafe.Alignof(uintptr(0))
+	case abi.Array:
+		array := typ.ArrayType()
+		elemSize, elemAlign := llgoABITypeLayout(array.Elem)
+		return elemSize * array.Len, elemAlign
+	case abi.Struct:
+		if typ.IsClosure() {
+			return 2 * unsafe.Sizeof(uintptr(0)), unsafe.Alignof(uintptr(0))
+		}
+		var offset uintptr
+		alignment = 1
+		for _, field := range typ.StructType().Fields {
+			fieldSize, fieldAlign := llgoABITypeLayout(field.Typ)
+			offset = alignUp(offset, fieldAlign)
+			offset += fieldSize
+			if fieldAlign > alignment {
+				alignment = fieldAlign
+			}
+		}
+		return alignUp(offset, alignment), alignment
+	default:
+		return typ.Size_, alignment
+	}
+}
+
+func llgoResultLayout(tout []*abi.Type) (size, alignment uintptr) {
+	alignment = 1
+	for _, out := range tout {
+		outSize, outAlign := llgoABITypeLayout(out)
+		size = alignUp(size, outAlign)
+		size += outSize
+		if outAlign > alignment {
+			alignment = outAlign
+		}
+	}
+	return alignUp(size, alignment), alignment
+}
+
+func llgoResultStorageSize(tout []*abi.Type) uintptr {
+	var offset, storage uintptr
+	for _, out := range tout {
+		outSize, outAlign := llgoABITypeLayout(out)
+		offset = alignUp(offset, outAlign)
+		end := offset + out.Size_
+		if end > storage {
+			storage = end
+		}
+		offset += outSize
+	}
+	return storage
 }
 
 func (v Value) closureFunc() *abi.FuncType {
@@ -2456,46 +2539,44 @@ func (v Value) closureFunc() *abi.FuncType {
 }
 
 func (v Value) call(op string, in []Value) (out []Value) {
-	panic("llgo: reflect call requires managed coroutine dispatch")
+	if v.flag&flagMethod != 0 {
+		rcvr, method := methodExpressionValue(op, v, int(v.flag)>>flagMethodShift)
+		args := make([]Value, len(in)+1)
+		args[0] = rcvr
+		copy(args[1:], in)
+		return method.call(op, args)
+	}
 
 	var (
 		ft   *abi.FuncType
 		tin  []*abi.Type
 		args []unsafe.Pointer
 		fn   unsafe.Pointer
+		env  unsafe.Pointer
 		ret  unsafe.Pointer
 		ioff int
 	)
 	if v.typ_.IsClosure() && v.flag&flagMethod == 0 {
-		ft = v.typ_.StructType().Fields[0].Typ.FuncType()
-		tin = append([]*abi.Type{rtypeOf(unsafe.Pointer(nil))}, ft.In...)
+		// Named function values use a named closure carrier whose first field
+		// can be normalized to the unnamed physical signature. Recover the
+		// public callable type through the closure cache so runtime-created
+		// descriptors and reflect.Call validate the same exact type identity.
+		ft = v.closureFunc()
+		tin = ft.In
 		c := (*struct {
 			fn  unsafe.Pointer
 			env unsafe.Pointer
 		})(v.ptr)
 		fn = c.fn
-		ioff = 1
-		args = append(args, unsafe.Pointer(&c.env))
+		env = c.env
 	} else {
-		if v.flag&flagMethod != 0 {
-			var (
-				rcvrtype *abi.Type
-			)
-			rcvrtype, ft, fn = methodReceiver(op, v, int(v.flag)>>flagMethodShift)
-			tin = append([]*abi.Type{rcvrtype}, ft.In...)
-			ioff = 1
-			var ptr unsafe.Pointer
-			storeRcvr(v, unsafe.Pointer(&ptr))
-			args = append(args, unsafe.Pointer(&ptr))
+		if v.flag&flagIndir != 0 {
+			fn = *(*unsafe.Pointer)(v.ptr)
 		} else {
-			if v.flag&flagIndir != 0 {
-				fn = *(*unsafe.Pointer)(v.ptr)
-			} else {
-				fn = v.ptr
-			}
-			ft = v.typ_.FuncType()
-			tin = ft.In
+			fn = v.ptr
 		}
+		ft = v.typ_.FuncType()
+		tin = ft.In
 	}
 
 	if fn == nil {
@@ -2559,7 +2640,7 @@ func (v Value) call(op string, in []Value) (out []Value) {
 		panic("reflect.Value.Call: wrong argument count")
 	}
 
-	ffiArgs := make([]*ffi.Type, 0, len(tin)+4)
+	ffiArgs := make([]*ffi.Type, 0, len(tin)+3)
 	for i := 0; i < ioff; i++ {
 		ffiArgs = append(ffiArgs, toFFIType(tin[i]))
 	}
@@ -2575,17 +2656,46 @@ func (v Value) call(op string, in []Value) (out []Value) {
 		args = append(args, toFFIArg(arg, typ))
 	}
 
-	sig, err := ffi.NewSignature(toFFIRetType(ft.Out), ffiArgs...)
+	retType := toFFIRetType(ft.Out)
+	plainArgs := make([]*ffi.Type, len(ffiArgs)+1)
+	plainArgs[0] = ffi.TypePointer
+	copy(plainArgs[1:], ffiArgs)
+	plainSig, err := ffi.NewSignature(retType, plainArgs...)
 	if err != nil {
 		panic(err)
 	}
-	if sig.RType != ffi.TypeVoid {
-		v := runtime.AllocZ(sig.RType.Size)
-		ret = unsafe.Pointer(&v)
+	coroArgs := make([]*ffi.Type, len(ffiArgs)+3)
+	coroArgs[0] = ffi.TypePointer
+	coroArgs[1] = ffi.TypePointer
+	coroArgs[2] = ffi.TypePointer
+	copy(coroArgs[3:], ffiArgs)
+	coroSig, err := ffi.NewSignature(ffi.TypePointer, coroArgs...)
+	if err != nil {
+		panic(err)
 	}
 
-	ffi.Call(sig, fn, ret, args...)
 	tout := toRuntimeTypes(ft.Out)
+	resultSize, resultAlign := llgoResultLayout(tout)
+	if len(tout) != 0 {
+		allocSize := resultSize
+		if ffiSize := plainSig.RType.Size; ffiSize > allocSize {
+			allocSize = ffiSize
+		}
+		if storageSize := llgoResultStorageSize(tout); storageSize > allocSize {
+			allocSize = storageSize
+		}
+		if allocSize == 0 {
+			allocSize = 1
+		}
+		ret = runtime.AllocZ(allocSize)
+	}
+
+	ffi.CallLLGo(
+		plainSig, coroSig,
+		fn, env, unsafe.Pointer(ft), ret,
+		resultSize, resultAlign,
+		args...,
+	)
 	switch n := len(tout); n {
 	case 0:
 	case 1:
@@ -2594,12 +2704,13 @@ func (v Value) call(op string, in []Value) (out []Value) {
 		return []Value{out}
 	default:
 		out = make([]Value, n)
-		alignment := uintptr(sig.RType.Alignment)
 		var off uintptr
 		for i, tout := range tout {
+			size, alignment := llgoABITypeLayout(tout)
+			off = alignUp(off, alignment)
 			out[i] = NewAt(toType(tout), add(ret, off, "")).Elem()
 			resolveIndirectValue(&out[i], tout)
-			off += (tout.Size_ + alignment - 1) &^ (alignment - 1)
+			off += size
 		}
 	}
 	return
@@ -2638,10 +2749,10 @@ func resolveIndirectValue(v *Value, typ *abi.Type) {
 	switch {
 	case k == abi.Float32:
 		fv := *(*float32)(v.ptr)
-		v.ptr = unsafe.Pointer(uintptr(bitcast.FromFloat32(fv)))
+		v.ptr = bitcast.ToPointer(uintptr(uint32(bitcast.FromFloat32(fv))))
 	case k == abi.Float64:
 		fv := *(*float64)(v.ptr)
-		v.ptr = unsafe.Pointer(uintptr(bitcast.FromFloat64(fv)))
+		v.ptr = bitcast.ToPointer(uintptr(uint64(bitcast.FromFloat64(fv))))
 	default:
 		// convert abi.Bool~abi.Uintptr and abi.Struct/abi.Array themselves.
 		// struct/array elem conversion by caller func.
@@ -2656,7 +2767,7 @@ func resolveIndirectValue(v *Value, typ *abi.Type) {
 
 func truncate(addr unsafe.Pointer, bits uintptr) unsafe.Pointer {
 	mask := uintptr(1<<bits) - 1
-	return unsafe.Pointer(uintptr(addr) & mask)
+	return bitcast.ToPointer(bitcast.FromPointer(addr) & mask)
 }
 
 // v is a method receiver. Store at p the word which is used to

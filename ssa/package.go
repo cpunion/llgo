@@ -946,8 +946,8 @@ const (
 	closureStub = "__llgo_stub."
 )
 
-// closureStub creates or reuses a wrapper for function values that lack closure ctx.
-// It stays on Package to match the original placement of closure stubs.
+// closureStub creates or reuses the explicit-context fallback wrapper for
+// targets that cannot transport closure ctx in a dedicated register.
 func (p Package) closureStub(b Builder, fn Expr, sig *types.Signature, origKind valueKind) (Expr, Expr) {
 	prog := b.Prog
 	switch origKind {

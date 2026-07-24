@@ -556,7 +556,7 @@ full-native Darwin/Linux 的 signal adapter 已改为 C `sigaction` + nonblockin
 
 以下是Phase 22 head当时尚未达到核心完成条件的部分；其中已变化的项目同时标出当前head边界：
 
-- Phase 22的descriptor codegen只有受限plain V1。当前head已有dynamic child await、function descriptor/capability、closure/capture、method以及receiver-aware open/closed managed interface dispatch的定向覆盖，不再是plain V1-only；但producer archive/open-world summary、reflect以及完整dynamic call矩阵仍未完成。
+- Phase 22的descriptor codegen只有受限plain V1。当前head已有dynamic child await、function descriptor/capability、closure/capture、method以及receiver-aware open/closed managed interface dispatch的定向覆盖，不再是plain V1-only；native `reflect.Value.Call/CallSlice`、`MakeFunc`、绑定方法值及timer挂起也已通过typed descriptor/libffi边界运行。仍未完成的是producer archive/open-world summary、WASM/baremetal AOT reflect trampoline、runtime未知签名、reflect.Select以及完整dynamic/GOROOT矩阵。
 - package Summary明确不是producer archive ABI；独立预编译标准库的effect传播尚无最终contract。
 - Phase 22的physical coroutine lowering仍是pure-SSA子集。当前head已覆盖method/closure/generic的多个管理路径、常用builtin、slice/aggregate、implicit fault和指针provenance；但完整variadic/recursive/defer/recover/Goexit/cleanup、所有runtime helper和全部Go语言矩阵仍fail closed或待验收。
 - suspended frame没有精确GC root map和write barrier contract。
@@ -626,7 +626,7 @@ full-native Darwin/Linux 的 signal adapter 已改为 C `sigaction` + nonblockin
 2. `RuntimeCapabilityCatalog`集中管理target capability、runtime roots、ABI signatures和contract IDs。
 3. `PackageCoroSummary`作为真实archive ABI。
 4. 用真实stdlib探针持续验收通用physical lowering与emission ownership；`*ssa.MakeMap`和promoted managed wrapper全局唯一发射均已越过，`time`、`timer`、`syscall-file`、`syscall-pipe`、`file`与`tcp`均已形成compile-link-run证据。继续以更广`test/*`、`net`/`os`/`time`及GOROOT测试定位下一项通用缺口，不由这些探针外推完整语言或标准库兼容。
-5. 在已有descriptor、dynamic child await、method/interface/closure/generic定向路径上，补齐open-world archive/reflect、全部dynamic call矩阵以及defer/recover/Goexit/cleanup语义。
+5. 在已有descriptor、dynamic child await、method/interface/closure/generic和native reflect typed-call路径上，补齐open-world archive、非native reflect trampoline、全部dynamic call矩阵以及defer/recover/Goexit/cleanup语义。
 6. 完成source-independent bounded preemption proof。
 
 ### P3：统一模型上的I/O

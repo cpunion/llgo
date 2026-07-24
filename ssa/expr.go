@@ -1374,6 +1374,7 @@ func (b Builder) Call(fn Expr, args ...Expr) (ret Expr) {
 		}
 		ll = b.Prog.FuncDecl(sigCtx, InC).ll
 		ret.impl = llvm.CreateCall(b.impl, ll, fn.impl, llvmParamsEx(data, args, sigCtx.Params(), b))
+		b.Prog.markClosureContextCall(ret.impl, sigCtx)
 		return ret
 	case vkFuncPtr:
 		sig = raw.Underlying().(*types.Signature)
@@ -1393,6 +1394,7 @@ func (b Builder) Call(fn Expr, args ...Expr) (ret Expr) {
 	}
 	ret.Type = b.Prog.retType(sig)
 	ret.impl = llvm.CreateCall(b.impl, ll, fn.impl, llvmParamsEx(data, args, sig.Params(), b))
+	b.Prog.markClosureContextCall(ret.impl, sig)
 	if reflectCheck.Kind&ReflectMethodByName != 0 && reflectCheck.Name == "" {
 		nameArgIndex := len(args) - 1
 		if !data.IsNil() {
@@ -1884,7 +1886,7 @@ func checkExpr(v Expr, t types.Type, b Builder) Expr {
 			}
 		}
 		data := prog.Nil(prog.VoidPtr())
-		if origKind == vkFuncDecl || origKind == vkFuncPtr {
+		if !prog.hasHiddenClosureContextABI() && (origKind == vkFuncDecl || origKind == vkFuncPtr) {
 			if sig, ok := fnType.raw.Type.(*types.Signature); ok && closureCtxParam(sig) == nil {
 				v, data = b.Pkg.closureStub(b, v, sig, origKind)
 			}

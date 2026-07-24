@@ -305,6 +305,61 @@ func TestCoroChildAwaitPhysicalABIV1Presplit(t *testing.T) {
 	}
 }
 
+func TestCoroNamedFunctionTypeDirectAwait(t *testing.T) {
+	const source = `package foo
+type Task func(uint32) uint32
+func Child(value uint32) uint32 { return value + 1 }
+func Parent(value uint32) uint32 {
+	var task Task = Child
+	return task(value)
+}
+`
+	prog, ssaPkg, files, universe, plan := prepareCoroChildAwaitPhysicalABISource(t, nil, source)
+	defer prog.Dispose()
+	parent := ssaPkg.Func("Parent")
+	parentPlan, ok := plan.FunctionPlan(parent)
+	if !ok {
+		t.Fatal("named-function caller has no FunctionPlan")
+	}
+	var retag *ssa.ChangeType
+	for _, block := range parent.Blocks {
+		for _, instruction := range block.Instrs {
+			if change, ok := instruction.(*ssa.ChangeType); ok {
+				retag = change
+				break
+			}
+		}
+	}
+	if retag == nil {
+		t.Fatal("named function conversion did not produce ChangeType")
+	}
+	target, err := resolveCoroCompilerElidedStaticAwaitRetag(plan, parentPlan, universe, parent, retag)
+	if err != nil || target != ssaPkg.Func("Child") {
+		t.Fatalf("named function retag proof = %v, %v; want exact Child", target, err)
+	}
+
+	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
+	enableCoroChildAwaitCompilation(compilation)
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify named-function direct await: %v\n%s", err, module.String())
+	}
+	parentIR := requireCoroPhysicalFunction(t, module, "foo.Parent").String()
+	if !strings.Contains(parentIR, `@"foo.Child$coro"`) {
+		t.Fatalf("named function call did not lower to its exact child await:\n%s", parentIR)
+	}
+	assertCoroStaticChildAwait(t, parentIR)
+	runCoroABITestPipeline(t, prog, module)
+}
+
 func TestCoroChildAwaitPhysicalABIV1CoroSplit(t *testing.T) {
 	prog, pkg := compileCoroChildAwaitPhysicalABI(t, nil)
 	defer prog.Dispose()
@@ -1785,6 +1840,13 @@ func prepareCoroChildAwaitPhysicalABI(t *testing.T, target *llssa.Target) (
 func Child(first uint8, second uint32) uint32 { return uint32(first) + second }
 func Parent(first uint8, second uint32) uint32 { return Child(first, second) + 1 }
 `
+	return prepareCoroChildAwaitPhysicalABISource(t, target, source)
+}
+
+func prepareCoroChildAwaitPhysicalABISource(
+	t *testing.T, target *llssa.Target, source string,
+) (llssa.Program, *ssa.Package, []*ast.File, *EmissionUniverse, *coro.SSAPlan) {
+	t.Helper()
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
 	var prog llssa.Program
 	if target == nil {

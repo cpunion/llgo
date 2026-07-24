@@ -67,7 +67,7 @@ ProgramModelBuilder fixed point
 - 重写 runtime 或 `internal/coro` 固定点不会解决上述问题，风险反而更大。
 - 新设计可以成为后续 defer/panic/recover、dynamic coroutine descriptor、syscall/IO、精确 GC metadata 和多平台 adapter 的公共编译器底座；但它本身不会自动补齐这些尚未实现的能力。
 - 当前代码已从native single-P vertical slice推进到受限的Linux/Darwin双owner fleet：command M与peer pthread M各自驱动一个P/source shard，使用exact route、route-local poll/timer/doorbell和共享bounded worker；loopback TCP已在该target配置 fresh compile-link-run并完成10,000次压力。普通Go 1.26标准库源码风格的`time.Sleep`、冻结timer语义、固定syscall文件回环、高层`os.File`回环和loopback TCP又在同一fleet acceptance中全部通过；2026-07-23新增的`syscall.Pipe`进度门还证明阻塞`Read`转交worker后，timer唤醒的writer G可继续运行，执行器没有被宿主I/O占住。六个独立fresh compile-link-run均已在Darwin通过；时间只作诊断，不是兼容性结论。这不能结论为“完整Go标准库和所有平台已经基本都可落地”：panic/unwind全矩阵、timer GC/synctest、tooling、cgo reentry、precise GC、动态P/affinity、parked-result迁移和其他平台driver仍需实现或生产验证，见第9、11节及《统一异步核心契约》第9.1节。
-- 2026-07-24的hard-cutover验收已让完整`./test/go`包通过frontend、SSA/effect规划、physical lowering、LLVM生成和最终链接；随后实际运行的10个代表用例通过，覆盖channel/select高频握手与关闭/range、rangefunc defer/panic、Go 1.26 reflect私有method linkname，以及零尺寸/大对象fault。`internal/build.TestTest`也在修正raw/plain `DebugRef`误判后通过。这个结果证明现有编译器能够承载较宽的标准库编译和一组关键运行语义，但仍不是`test/*`或GOROOT全量通过：`reflect.MakeFunc`目前明确fail closed于managed coroutine dispatch，完整`reflect.Call/MakeFunc` typed trampoline仍属Phase 4；全量`cl`和`ssa`旧测试驱动还会因逐目录fresh整程序分析超过Go测试默认10分钟，需要单独做性能治理和分片验收。
+- 2026-07-24的hard-cutover验收已让完整`./test/go`包通过frontend、SSA/effect规划、physical lowering、LLVM生成和最终链接；随后实际运行的代表用例覆盖channel/select高频握手与关闭/range、rangefunc defer/panic、Go 1.26 reflect私有method linkname，以及零尺寸/大对象fault。当前native原型又完成了`reflect.Value.Call/CallSlice`、`MakeFunc`、具体/接口/绑定方法值和`Type.Method.Func`的descriptor/libffi桥，并以真实`time.Sleep`验证libffi栈退出后的child await；可变参数、函数值参数、多/聚合/零尺寸及高对齐零尺寸结果、无返回和panic/recover均已运行通过。`internal/build.TestTest`也在修正raw/plain `DebugRef`误判后通过。这个结果证明现有编译器能够承载较宽的标准库编译和一组关键运行语义，但仍不是`test/*`或GOROOT全量通过：WASM/baremetal等无native libffi closure能力的target仍需AOT signature trampoline，runtime未知签名、reflect.Select及完整reflect/GOROOT矩阵尚未验收；全量`cl`和`ssa`旧测试驱动还会因逐目录fresh整程序分析超过Go测试默认10分钟，需要单独做性能治理和分片验收。
 
 ## 2. 目标与非目标
 
@@ -635,10 +635,10 @@ type OperationRecipe struct {
 | defer | overlay可表示；当前已有静态cleanup及frame-rooted异构动态defer LIFO子集 | range-over-func、Goexit、完整控制流、递归/SCC和语言矩阵仍未闭环 |
 | panic/recover | logical outcome已有task-stop相邻原型 | `CompletionRecord`已覆盖`Return/Panic/Abort/Shutdown`与`ReturnRecovered`提交，但完整panic/recover、`Goexit`和plain/root boundary仍未闭环 |
 | Goexit | 可预留独立control kind | defer drain、parent/root传播 |
-| closure/method value | descriptor模型可预留 | 当前physical ABI仍拒绝多类closure/method；需capture lifetime与ABI hash |
-| interface/function value | value-flow方向可用，dynamic能力受限 | async descriptor、multi-target dispatch、nil check；当前dispatch subset很窄 |
-| generics/variadic | identity/schema可预留 | 当前physical ABI仍拒绝部分instance/variadic；需physical lowering与summary冻结 |
-| reflect.Call/MakeFunc | 尚未发现模型冲突，必须原型 | runtime type-driven marshal、dynamic descriptor和boundary driver |
+| closure/method value | descriptor模型已接线 | native捕获闭包、具体/接口/绑定方法值及method expression已覆盖；仍需open-world archive、全target和完整语言矩阵 |
+| interface/function value | dynamic descriptor与receiver-aware method路径已接线 | open-world summary、未知archive、多target完整矩阵与平台能力仍需验收 |
+| generics/variadic | variadic packed ABI和多个generic管理路径已覆盖 | 完整instance/archive/GOROOT矩阵仍需验收 |
+| reflect.Call/MakeFunc | native typed descriptor/libffi原型已运行闭环 | WASM/baremetal AOT trampoline、runtime未知签名、reflect.Select及完整GOROOT矩阵 |
 | cgo/assembly/linkname | 无统一自动转换 | foreign boundary、stack cut、callback/reentry、unwind和summary contract |
 | unsafe pointer | 稳定无栈frame提供基础，必须验证 | 跨suspend address、pin/root/barrier和foreign lifetime |
 | GC | IR有助于表达，当前未闭环 | CoroSplit后frame root map、write barrier、STW和collector adapter |
@@ -650,7 +650,7 @@ type OperationRecipe struct {
 这张表只说明窄 IR 有位置表达问题，不能证明所有语言特性最终可行。当前没有发现“无栈 coroutine + Go 源码同步调用风格”本身的否定证据，但 panic/unwind、logical stack/tooling、GC、cgo reentry 和 affinity 必须由独立原型验证。最重的剩余工作集中在：
 
 - 可挂起 defer/panic/recover/Goexit；
-- 完整动态 function descriptor、interface 和 reflect；
+- open-world archive下的完整动态 function descriptor、interface 与跨平台 reflect；
 - 精确 GC frame metadata；
 - syscall/netpoll/worker已在native双owner TCP链闭环，仍需更广`os`/`net`/syscall、容量/取消/GC合同和高连接数backend；
 - P-neutral parked-result packet、通用global injection/steal、动态P数量和affinity；

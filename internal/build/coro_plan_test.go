@@ -1536,6 +1536,38 @@ func install() { installC(InstallerCallback(callback)) }
 	}
 }
 
+func TestRequiredCoroDirectPlainCallbackAdmitsCertifiedStaticCLeaf(t *testing.T) {
+	fixture := buildRequiredCoroRuntimeFixture(t, `
+//llgo:type C
+type CCallback func()
+
+func installC(CCallback) {}
+
+//llgo:coro sync
+//go:linkname bounded C.bounded
+func bounded()
+
+func callback() { bounded() }
+func install() { installC(CCallback(callback)) }
+`)
+	if len(fixture.directPlain) != 1 || fixture.directPlain[0].target != fixture.pkg.Func("callback") {
+		t.Fatalf("direct-plain callbacks = %+v, want callback", fixture.directPlain)
+	}
+	if _, present := fixture.requiredPlain[fixture.pkg.Func("bounded")]; !present {
+		t.Fatal("certified synchronous C leaf did not enter the exact raw/plain closure")
+	}
+	plan, err := fixture.analyze(coro.SSAConfig{MaxPlainInstructions: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	callbackPlan := functionPlanForBuildTest(t, plan, fixture.pkg.Func("callback"))
+	if callbackPlan.ManagedDemand != coro.NoDemand || !callbackPlan.RawPlainDemand ||
+		!callbackPlan.RawPlainOnly || !callbackPlan.RawPlainEntry ||
+		callbackPlan.Emission != coro.EmitRawPlain {
+		t.Fatalf("callback plan = %+v, want one certified raw-only entry", callbackPlan)
+	}
+}
+
 func TestRequiredCoroProgramRuntimePlanDoesNotTraverseFrozenCStubBodies(t *testing.T) {
 	fixture := buildRequiredCoroRuntimeFixture(t, `
 //llgo:type C

@@ -168,9 +168,9 @@ func validateCoroManagedDispatchAwaitShape(
 		)
 	}
 	sig := common.Signature()
-	if sig == nil || sig.Recv() != nil || sig.Variadic() ||
+	if sig == nil || sig.Recv() != nil ||
 		typeParamCount(sig.TypeParams()) != 0 || typeParamCount(sig.RecvTypeParams()) != 0 {
-		return fail("call signature must be receiver-free, non-variadic, and non-generic")
+		return fail("call signature must be receiver-free and non-generic")
 	}
 	valuePlan, ok := plan.ValuePlan(common.Value)
 	if !ok || len(valuePlan.Funcs) != 1 || len(valuePlan.Funcs[0].Path) != 0 ||

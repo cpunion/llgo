@@ -131,8 +131,8 @@ func validateCoroManagedDispatchCallKind(
 		)
 	}
 	sig := common.Signature()
-	if sig == nil || sig.Recv() != nil || sig.Variadic() {
-		return fail("v1 descriptor requires an ordinary non-variadic function signature")
+	if sig == nil || sig.Recv() != nil {
+		return fail("v1 descriptor requires an ordinary receiver-free function signature")
 	}
 	if params := sig.TypeParams(); params != nil && params.Len() != 0 {
 		return fail("v1 descriptor does not support generic signatures")

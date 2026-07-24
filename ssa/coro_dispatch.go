@@ -37,11 +37,19 @@ const (
 	CoroDispatchFlagHasPlain uint32 = 1 << iota
 	CoroDispatchFlagHasCoro
 	CoroDispatchFlagNoCapture
+	// CoroDispatchFlagRuntimeTyped marks a runtime-created descriptor whose
+	// hash words carry a trusted runtime type identity instead of the
+	// compiler's structural ABI digest. Safe Go calls already preserve the
+	// static function type; reflection additionally validates the exact type
+	// pointer before invoking such a descriptor.
+	CoroDispatchFlagRuntimeTyped
 
 	CoroDispatchCapabilityMaskV1 = CoroDispatchFlagHasPlain | CoroDispatchFlagHasCoro
-	CoroDispatchKnownFlagsV1     = CoroDispatchCapabilityMaskV1 | CoroDispatchFlagNoCapture
+	CoroDispatchKnownFlagsV1     = CoroDispatchCapabilityMaskV1 | CoroDispatchFlagNoCapture | CoroDispatchFlagRuntimeTyped
 	CoroPlainDispatchFlagsV1     = CoroDispatchFlagHasPlain | CoroDispatchFlagNoCapture
 )
+
+const CoroDispatchRuntimeTypeMagicV1 uint64 = 0x4c4c474f52545931 // "LLGORTY1"
 
 const coroPlainDispatchThunkPrefix = "__llgo_coro_func_plain_v1."
 
@@ -278,8 +286,8 @@ func (b Builder) CallCoroPlainDispatch(
 	invalid = coroPlainDispatchOr(b.impl, invalid, resultAlignInvalid)
 	b.coroPlainDispatchTrapIf(invalid)
 
-	ctx := types.NewParam(token.NoPos, nil, closureCtx, types.Typ[types.UnsafePointer])
-	sigCtx := FuncAddCtx(ctx, sig)
+	envParam := types.NewParam(token.NoPos, nil, "__llgo_env", types.Typ[types.UnsafePointer])
+	sigCtx := FuncAddCtx(envParam, sig)
 	ret.Type = wantResult
 	ret.impl = llvm.CreateCall(
 		b.impl, b.Prog.FuncDecl(sigCtx, InC).ll, fields[4].impl,
@@ -304,8 +312,8 @@ func (p Program) coroDispatchDescriptorType() Type {
 func (p Package) newCoroPlainDispatchThunk(
 	name string, target Expr, physicalSig *types.Signature,
 ) Function {
-	ctx := types.NewParam(token.NoPos, nil, closureCtx, types.Typ[types.UnsafePointer])
-	thunk := p.NewFunc(name, FuncAddCtx(ctx, physicalSig), InC)
+	env := types.NewParam(token.NoPos, nil, "__llgo_env", types.Typ[types.UnsafePointer])
+	thunk := p.NewFunc(name, FuncAddCtx(env, physicalSig), InC)
 	thunk.impl.SetLinkage(llvm.LinkOnceODRLinkage)
 	thunk.impl.SetUnnamedAddr(true)
 	b := thunk.MakeBody(1)
@@ -348,7 +356,7 @@ func (p Package) matchesCoroPlainDispatchDescriptor(
 		!types.Identical(
 			thunk.RawType(),
 			FuncAddCtx(
-				types.NewParam(token.NoPos, nil, closureCtx, types.Typ[types.UnsafePointer]),
+				types.NewParam(token.NoPos, nil, "__llgo_env", types.Typ[types.UnsafePointer]),
 				physicalSig,
 			),
 		) || !coroPlainDispatchThunkCalls(thunk, target) {

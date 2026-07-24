@@ -29,14 +29,17 @@ import (
 	"github.com/goplus/llgo/runtime/abi"
 	c "github.com/goplus/llgo/runtime/internal/clite"
 	"github.com/goplus/llgo/runtime/internal/ffi"
+	llruntime "github.com/goplus/llgo/runtime/internal/runtime"
 )
 
 type funcData struct {
-	ftyp *funcType
-	tout []*abi.Type
-	fn   func(args []Value) (results []Value)
-	nin  int
-	off  int
+	ftyp        *funcType
+	tin         []*abi.Type
+	tout        []*abi.Type
+	fn          func(args []Value) (results []Value)
+	nin         int
+	invokeCIF   *ffi.Signature
+	invokeEntry unsafe.Pointer
 }
 
 func MakeFunc(typ Type, fn func(args []Value) (results []Value)) Value {
@@ -44,51 +47,82 @@ func MakeFunc(typ Type, fn func(args []Value) (results []Value)) Value {
 }
 
 func makeFunc(typ Type, method bool, fn func(args []Value) (results []Value)) Value {
-	panic("llgo: reflect.MakeFunc requires managed coroutine dispatch")
-
 	if typ.Kind() != Func {
 		panic("reflect: call of MakeFunc with non-Func type")
+	}
+	if method {
+		panic("reflect: internal error: MakeFunc method bridge is unsupported")
 	}
 
 	t := typ.common()
 	ftyp := (*funcType)(unsafe.Pointer(t))
-	var ins []*abi.Type
-	var off int
-	if method {
-		ins = ftyp.In
-	} else {
-		ins = append([]*abi.Type{unsafePointerType}, ftyp.In...)
-		off = 1
+	entryArgs := make([]*ffi.Type, 0, len(ftyp.In)+3)
+	entryArgs = append(entryArgs, ffi.TypePointer, ffi.TypePointer, ffi.TypePointer)
+	for _, in := range ftyp.In {
+		entryArgs = appendMakeFuncFFIType(entryArgs, in)
 	}
-	sig, err := toFFISig(ins, ftyp.Out)
+	entryCIF, err := ffi.NewSignature(ffi.TypePointer, entryArgs...)
 	if err != nil {
 		panic(err)
 	}
-	outs := toRuntimeTypes(ftyp.Out)
-	closure := ffi.NewClosure()
-	userdata := &funcData{ftyp: ftyp, fn: fn, nin: len(ftyp.In), off: off, tout: outs}
 
-	switch len(ftyp.Out) {
-	case 0:
-		err = closure.Bind(sig, bind0, unsafe.Pointer(userdata))
-	case 1:
-		err = closure.Bind(sig, bind1, unsafe.Pointer(userdata))
-	default:
-		err = closure.Bind(sig, bindn, unsafe.Pointer(userdata))
+	invokeCIF, err := ffi.NewSignature(
+		ffi.TypePointer,
+		ffi.TypePointer, ffi.TypePointer, ffi.TypePointer,
+		ffi.TypePointer, ffi.TypePointer, ffi.TypePointer,
+	)
+	if err != nil {
+		panic(err)
 	}
+	invoker := unpackEface(makeFuncInvokeValue)
+	if invoker.Kind() != Func || invoker.ptr == nil {
+		panic("reflect: internal error: invalid MakeFunc invoker")
+	}
+	invokerWords := (*closure)(invoker.ptr)
+	if invokerWords.fn == nil || invokerWords.env != nil {
+		panic("reflect: internal error: invalid MakeFunc invoker descriptor")
+	}
+
+	ins := make([]*abi.Type, len(ftyp.In))
+	for i, typ := range ftyp.In {
+		ins[i] = typ
+		if typ.Kind() == abi.Func {
+			ins[i] = closureOf(typ.FuncType())
+		}
+	}
+	outs := toRuntimeTypes(ftyp.Out)
+	resultSize, resultAlign := llgoResultLayout(outs)
+	closure := ffi.NewClosure()
+	userdata := &funcData{
+		ftyp:        ftyp,
+		tin:         ins,
+		fn:          fn,
+		nin:         len(ftyp.In),
+		tout:        outs,
+		invokeCIF:   invokeCIF,
+		invokeEntry: ffi.CoroEntry(invokerWords.fn),
+	}
+	err = closure.Bind(entryCIF, bindCoro, unsafe.Pointer(userdata))
 	if err != nil {
 		panic("libffi error: " + err.Error())
 	}
+	descriptor := ffi.NewRuntimeCoroDescriptor(
+		unsafe.Pointer(t), closure.Fn, resultSize, resultAlign,
+	)
+
 	// keep alive for bdw-gc
 	keepMutex.Lock()
-	keepAlive = append(keepAlive, &closure.Fn, sig, userdata)
+	keepAlive = append(
+		keepAlive,
+		closure, entryCIF, invokeCIF, userdata, descriptor,
+	)
 	keepMutex.Unlock()
 
 	styp := closureOf(ftyp)
 	fv := &struct {
 		fn  unsafe.Pointer
 		env unsafe.Pointer
-	}{closure.Fn, unsafe.Pointer(&fn)}
+	}{descriptor, unsafe.Pointer(userdata)}
 	return Value{styp, unsafe.Pointer(fv), flagIndir | flag(Func)}
 }
 
@@ -97,38 +131,97 @@ var (
 	keepAlive []any
 )
 
-func bind0(cif *ffi.Signature, ret unsafe.Pointer, args *unsafe.Pointer, userdata unsafe.Pointer) {
-	fd := (*funcData)(userdata)
-	ins := make([]Value, fd.nin)
-	for i := 0; i < fd.nin; i++ {
-		ins[i] = ffiToValue(ffi.Index(args, uintptr(i+fd.off)), fd.ftyp.In[i])
+func appendMakeFuncFFIType(args []*ffi.Type, typ *abi.Type) []*ffi.Type {
+	if ffiCallSliceAsTriple && typ.Kind() == abi.Slice {
+		return append(args, ffi.TypePointer, ffi.TypeInt, ffi.TypeInt)
 	}
-	fd.fn(ins)
+	return append(args, toFFIType(typ))
 }
 
-func bind1(cif *ffi.Signature, ret unsafe.Pointer, args *unsafe.Pointer, userdata unsafe.Pointer) {
+// bindCoro is a bounded raw-C callback. It only copies libffi-owned arguments
+// into managed storage and invokes the fixed-signature MakeFunc coroutine ramp
+// until that ramp returns its initially suspended child handle. No libffi
+// frame survives suspension.
+func bindCoro(cif *ffi.Signature, ret unsafe.Pointer, args *unsafe.Pointer, userdata unsafe.Pointer) {
 	fd := (*funcData)(userdata)
-	ins := make([]Value, fd.nin)
-	for i := 0; i < fd.nin; i++ {
-		ins[i] = ffiToValue(ffi.Index(args, uintptr(i+fd.off)), fd.ftyp.In[i])
+	env := *(*unsafe.Pointer)(ffi.Index(args, 2))
+	if fd == nil || env != userdata {
+		*(*unsafe.Pointer)(ret) = nil
+		return
 	}
-	out := validateMakeFuncResults(fd.fn(ins), fd.ftyp, fd.tout)
-	storeMakeFuncResult(ret, out[0], fd.tout[0])
+
+	g := *(*unsafe.Pointer)(ffi.Index(args, 0))
+	out := *(*unsafe.Pointer)(ffi.Index(args, 1))
+	values := copyMakeFuncArgs(fd, args)
+	invokerEnv := unsafe.Pointer(nil)
+	fdArg := userdata
+	outArg := out
+	valuesArg := values
+	argv := [6]unsafe.Pointer{
+		unsafe.Pointer(&g),
+		unsafe.Pointer(&out),
+		unsafe.Pointer(&invokerEnv),
+		unsafe.Pointer(&fdArg),
+		unsafe.Pointer(&outArg),
+		unsafe.Pointer(&valuesArg),
+	}
+	ffi.CallRaw(fd.invokeCIF, fd.invokeEntry, ret, &argv[0])
 }
 
-func bindn(cif *ffi.Signature, ret unsafe.Pointer, args *unsafe.Pointer, userdata unsafe.Pointer) {
-	fd := (*funcData)(userdata)
-	ins := make([]Value, fd.nin)
-	for i := 0; i < fd.nin; i++ {
-		ins[i] = ffiToValue(ffi.Index(args, uintptr(i+fd.off)), fd.ftyp.In[i])
+func copyMakeFuncArgs(fd *funcData, args *unsafe.Pointer) unsafe.Pointer {
+	if fd.nin == 0 {
+		return nil
+	}
+	values := llruntime.AllocZ(uintptr(fd.nin) * unsafe.Sizeof(Value{}))
+	ins := unsafe.Slice((*Value)(values), fd.nin)
+	index := uintptr(3)
+	for i, typ := range fd.ftyp.In {
+		if ffiCallSliceAsTriple && typ.Kind() == abi.Slice {
+			header := (*unsafeheaderSlice)(llruntime.AllocZ(unsafe.Sizeof(unsafeheaderSlice{})))
+			header.Data = *(*unsafe.Pointer)(ffi.Index(args, index))
+			header.Len = *(*int)(ffi.Index(args, index+1))
+			header.Cap = *(*int)(ffi.Index(args, index+2))
+			ins[i] = Value{
+				typ_: typ,
+				ptr:  unsafe.Pointer(header),
+				flag: flag(Slice) | flagIndir,
+			}
+			index += 3
+			continue
+		}
+		ins[i] = ffiToOwnedValue(ffi.Index(args, index), typ, fd.tin[i])
+		index++
+	}
+	return values
+}
+
+// makeFuncInvokeValue forces the compiler to publish makeFuncInvoke through
+// the canonical managed descriptor representation. bindCoro consumes only
+// that compiler-injected descriptor; it never reverse-maps a raw PC. Assigning
+// it from init avoids a Go initialization-dependency cycle now that method
+// values reuse MakeFunc.
+var makeFuncInvokeValue any
+
+func init() {
+	makeFuncInvokeValue = makeFuncInvoke
+}
+
+func makeFuncInvoke(fd *funcData, ret, values unsafe.Pointer) {
+	var ins []Value
+	if fd.nin != 0 {
+		ins = unsafe.Slice((*Value)(values), fd.nin)
 	}
 	outs := validateMakeFuncResults(fd.fn(ins), fd.ftyp, fd.tout)
-	var offset uintptr = 0
-	alignment := uintptr(cif.RType.Alignment)
+	if ret == nil {
+		return
+	}
+	var offset uintptr
 	for i, out := range outs {
 		typ := fd.tout[i]
-		storeMakeFuncResult(add(ret, offset, ""), out, typ)
-		offset += (typ.Size_ + alignment - 1) &^ (alignment - 1)
+		size, alignment := llgoABITypeLayout(typ)
+		offset = alignUp(offset, alignment)
+		storeMakeFuncResult(add(ret, offset, ""), out, typ, size)
+		offset += size
 	}
 }
 
@@ -149,30 +242,30 @@ func validateMakeFuncResults(out []Value, ftyp *abi.FuncType, touts []*abi.Type)
 	return out
 }
 
-func storeMakeFuncResult(ret unsafe.Pointer, v Value, typ *abi.Type) {
-	if typ.Size_ == 0 {
+func storeMakeFuncResult(ret unsafe.Pointer, v Value, typ *abi.Type, size uintptr) {
+	if size == 0 {
 		return
 	}
-	c.Memmove(ret, toFFIArg(v, typ), typ.Size_)
+	c.Memmove(ret, toFFIArg(v, typ), size)
 }
 
-func ffiToValue(ptr unsafe.Pointer, typ *abi.Type) (v Value) {
+func ffiToOwnedValue(ptr unsafe.Pointer, typ, storageType *abi.Type) (v Value) {
 	kind := typ.Kind()
-	if typ.Kind() == abi.Func {
-		typ = closureOf(typ.FuncType())
-	}
-	v.typ_ = typ
+	v.typ_ = storageType
 	v.flag = flag(kind)
-	if typ.IfaceIndir() {
+	if storageType.IfaceIndir() {
 		v.flag |= flagIndir
-		if typ.IsClosure() {
-			c := (*closure)(ptr)
-			v.ptr = unsafe.Pointer(&closure{
-				fn:  c.fn,
-				env: c.env,
-			})
-		} else {
-			v.ptr = ptr
+		size, _ := llgoABITypeLayout(storageType)
+		allocSize := storageType.Size_
+		if size > allocSize {
+			allocSize = size
+		}
+		if allocSize == 0 {
+			allocSize = 1
+		}
+		v.ptr = llruntime.AllocZ(allocSize)
+		if size != 0 {
+			c.Memmove(v.ptr, ptr, size)
 		}
 	} else {
 		v.ptr = *(*unsafe.Pointer)(ptr)
@@ -273,25 +366,63 @@ func makeMethodValue(op string, v Value) Value {
 		panic("reflect: internal error: invalid use of makeMethodValue")
 	}
 
-	// Ignoring the flagMethod bit, v describes the receiver, not the method type.
+	rcvr, method := methodExpressionValue(op, v, int(v.flag)>>flagMethodShift)
+	// A method value evaluates its receiver once. Boxing and unpacking it here
+	// copies value receivers while retaining pointer receiver identity.
+	rcvr = ValueOf(valueInterface(rcvr, false))
+	ftyp := v.Type()
+	variadic := ftyp.common().FuncType().Variadic()
+	bound := MakeFunc(ftyp, func(args []Value) []Value {
+		in := make([]Value, len(args)+1)
+		in[0] = rcvr
+		copy(in[1:], args)
+		if variadic {
+			return method.CallSlice(in)
+		}
+		return method.Call(in)
+	})
+	bound.flag |= v.flag & flagRO
+	return bound
+}
+
+// methodExpressionValue converts the receiver+method-index representation
+// used by Value.Method into the ordinary method expression stored in
+// abi.Method.Tfn_. Tfn_ is a managed function descriptor whose receiver is an
+// explicit first argument. This deliberately avoids treating the legacy Ifn_
+// word as a descriptor: Ifn_ may still be a raw one-word-receiver entry for
+// method families which have no managed interface invoke.
+func methodExpressionValue(op string, v Value, methodIndex int) (Value, Value) {
 	fl := v.flag & (flagRO | flagAddr | flagIndir)
 	fl |= flag(v.typ().Kind())
 	rcvr := Value{v.typ(), v.ptr, fl}
 
-	// v.Type returns the actual type of the method value.
-	_, _, fn := methodReceiver(op, rcvr, int(v.flag)>>flagMethodShift)
-	var ptr unsafe.Pointer
-	storeRcvr(v, unsafe.Pointer(&ptr))
-	fv := &struct {
-		fn  unsafe.Pointer
-		env unsafe.Pointer
-	}{fn, ptr}
-	ftyp := (*funcType)(unsafe.Pointer(v.Type().(*rtype)))
-	typ := closureOf(ftyp)
-	// Cause panic if method is not appropriate.
-	// The panic would still happen during the call if we omit this,
-	// but we want Interface() and other operations to fail early.
-	return Value{typ, unsafe.Pointer(fv), v.flag&flagRO | flagIndir | flag(Func)}
+	if rcvr.typ().Kind() == abi.Interface {
+		tt := (*interfaceType)(unsafe.Pointer(rcvr.typ()))
+		if uint(methodIndex) >= uint(len(tt.Methods)) {
+			panic("reflect: internal error: invalid method index")
+		}
+		m := &tt.Methods[methodIndex]
+		if !abi.IsExported(m.Name()) {
+			panic("reflect: " + op + " of unexported method")
+		}
+		iface := (*nonEmptyInterface)(rcvr.ptr)
+		if iface.itab == nil {
+			panic("reflect: " + op + " of method on nil interface value")
+		}
+		rcvr = rcvr.Elem()
+		method, ok := toRType(rcvr.typ()).MethodByName(m.Name())
+		if !ok {
+			panic("reflect: internal error: dynamic method is absent from concrete type")
+		}
+		return rcvr, method.Func
+	}
+
+	methods := rcvr.typ().ExportedMethods()
+	if uint(methodIndex) >= uint(len(methods)) {
+		panic("reflect: internal error: invalid method index")
+	}
+	method := toRType(rcvr.typ()).Method(methodIndex)
+	return rcvr, method.Func
 }
 
 var unsafePointerType = rtypeOf(unsafe.Pointer(nil))

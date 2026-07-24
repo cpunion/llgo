@@ -1,0 +1,14 @@
+12 ok!
+named 9
+variadic-call 2 5
+call!
+variadic-slice 3 15
+slice!
+method 5 15
+method-interface 3 18
+interface-method 7 25
+interface-method-interface 2 27
+method-expression 4 31
+aligned-zero 1 0 2
+single-aligned-zero 0
+apply 12

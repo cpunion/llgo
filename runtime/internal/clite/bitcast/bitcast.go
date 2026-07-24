@@ -47,3 +47,10 @@ func FromFloat32(v float32) int32 {
 func FromPointer(v unsafe.Pointer) uintptr {
 	return uintptr(v)
 }
+
+// ToPointer installs one machine word in an unsafe.Pointer-shaped carrier
+// without performing address arithmetic. Reflect uses that carrier for direct
+// scalar interface payloads as well as real pointers.
+func ToPointer(v uintptr) unsafe.Pointer {
+	return *(*unsafe.Pointer)(unsafe.Pointer(&v))
+}

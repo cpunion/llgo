@@ -513,6 +513,22 @@ func TestCoroDynamicDispatchProducerCapturedCoroThunkInsertsEnvironment(t *testi
 	}
 	thunk := module.NamedFunction(thunkName)
 	call := coroDispatchProducerOnlyCallTo(t, thunk, target.Name())
+	hiddenCallAttrs := 0
+	for _, name := range []string{"nest", "swiftself"} {
+		kind := llvm.AttributeKindID(name)
+		if kind == 0 {
+			continue
+		}
+		if attr := thunk.GetEnumAttributeAtIndex(3, kind); !attr.IsNil() {
+			t.Fatalf("descriptor thunk env unexpectedly uses %s instead of the ordinary C ABI:\n%s", name, module.String())
+		}
+		if attr := call.GetCallSiteEnumAttribute(3, kind); !attr.IsNil() {
+			hiddenCallAttrs++
+		}
+	}
+	if hiddenCallAttrs != 1 {
+		t.Fatalf("descriptor thunk final call has %d hidden context attributes, want exactly one:\n%s", hiddenCallAttrs, module.String())
+	}
 	if got := call.OperandsCount() - 1; got != 4 {
 		t.Fatalf("captured coroutine thunk target arguments = %d, want g+out+ctx+source argument", got)
 	}

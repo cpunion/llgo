@@ -3459,6 +3459,17 @@ func validateCoroPhysicalConsumersCapabilities(
 							// the rest of the two-pointer transport proof.
 							continue
 						}
+						if change, exactRetag := instr.(*ssa.ChangeType); exactRetag && change.X == target {
+							resolved, err := resolveCoroCompilerElidedStaticAwaitRetag(
+								plan, function.Plan, universe, fn, change,
+							)
+							if err == nil && resolved == target {
+								// The physical direct-await recipe consumes the
+								// canonical target without materializing this
+								// source-level function-type name.
+								continue
+							}
+						}
 						if closure, exactClosure := instr.(*ssa.MakeClosure); exactClosure && closure.Fn == target &&
 							childAwait && function.Plan.Emission == coro.EmitCoroutine && len(target.FreeVars) != 0 &&
 							targetPlan.Primary == coro.PrimaryCoroutine && targetPlan.FuncRep == coro.DirectCoro {

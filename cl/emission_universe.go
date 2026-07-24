@@ -2086,6 +2086,11 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 		// been reselected. Unlock likewise exposes already queued peers at one
 		// explicit scheduler boundary.
 		return CoroIntrinsicCallInlineYield, true, nil
+	case llgoCoroFFICall:
+		if err := validateCoroFFICallIntrinsicCallSite(direct); err != nil {
+			return CoroIntrinsicCallUnsupported, true, err
+		}
+		return CoroIntrinsicCallInlineSuspend, true, nil
 	default:
 		return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
 			"emission universe intrinsic call semantics: inline intrinsic %q has no exact call-site verifier", callee.Name(),
@@ -2463,6 +2468,8 @@ func coroIntrinsicCallSemantics(opcode int) CoroIntrinsicCallSemantics {
 		return CoroIntrinsicCallInlineOutcome
 	case llgoCoroOSThreadLock, llgoCoroOSThreadUnlock:
 		return CoroIntrinsicCallInlineYield
+	case llgoCoroFFICall:
+		return CoroIntrinsicCallInlineSuspend
 	default:
 		return CoroIntrinsicCallUnsupported
 	}
@@ -2615,6 +2622,37 @@ func validateCoroParkIntrinsicCallSite(call *ssa.Call) error {
 	if !pointerLike(common.Args[0].Type()) || !pointerLike(signature.Params().At(0).Type()) ||
 		!uint32Like(common.Args[1].Type()) || !uint32Like(signature.Params().At(1).Type()) {
 		return fmt.Errorf("llgo.coroPark call %q requires the exact func(pointer, uint32) shape", call.String())
+	}
+	return nil
+}
+
+func validateCoroFFICallIntrinsicCallSite(call *ssa.Call) error {
+	const shape = "func(pointer, unsafe.Pointer, unsafe.Pointer, *unsafe.Pointer, *unsafe.Pointer)"
+	if call == nil || call.Common() == nil || call.Common().IsInvoke() ||
+		call.Common().Method != nil || len(call.Common().Args) != 5 {
+		return fmt.Errorf("llgo.coroFFICall requires an exact direct five-argument call")
+	}
+	common := call.Common()
+	signature := common.Signature()
+	if signature == nil || signature.Recv() != nil || signature.Variadic() ||
+		signature.Params() == nil || signature.Params().Len() != 5 ||
+		signature.Results() != nil && signature.Results().Len() != 0 {
+		return fmt.Errorf("llgo.coroFFICall call %q requires the exact %s shape", call.String(), shape)
+	}
+	pointerLike := func(typ types.Type) bool {
+		switch value := types.Unalias(typ).Underlying().(type) {
+		case *types.Pointer:
+			return true
+		case *types.Basic:
+			return value.Kind() == types.UnsafePointer
+		default:
+			return false
+		}
+	}
+	for index, argument := range common.Args {
+		if !pointerLike(argument.Type()) || !pointerLike(signature.Params().At(index).Type()) {
+			return fmt.Errorf("llgo.coroFFICall call %q requires the exact %s shape", call.String(), shape)
+		}
 	}
 	return nil
 }

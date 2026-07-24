@@ -91,7 +91,8 @@ func emissionIntrinsicPolicy(instruction int) (emissionIntrinsicOperandPolicy, e
 		llgoAtomicLoad, llgoAtomicStore, llgoAtomicCmpXchg,
 		llgoAtomicCmpXchgOK, llgoAtomicAddReturnNew,
 		llgoAtomicLoadUnsafe, llgoAtomicStoreUnsafe,
-		llgoCoroPark, llgoCoroTimerSleep, llgoCoroPollWait, llgoCoroControlledTimerWait:
+		llgoCoroPark, llgoCoroTimerSleep, llgoCoroPollWait, llgoCoroControlledTimerWait,
+		llgoCoroFFICall:
 		return emissionIntrinsicCompileValues, nil
 	default:
 		if instruction >= llgoAtomicOpBase && instruction <= llgoAtomicOpLast {

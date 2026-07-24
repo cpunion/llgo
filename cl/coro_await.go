@@ -98,6 +98,118 @@ func resolveCoroStaticAwait(plan *coro.SSAPlan, caller coro.FunctionPlan, call s
 	return target, targetPlan, nil
 }
 
+// resolveCoroCompilerElidedStaticAwaitRetag proves that one or more managed
+// ChangeType nodes are only source-level names around a closed direct
+// coroutine call. The physical await lowerer consumes the frozen target and
+// never evaluates CallCommon.Value, so materializing these nodes would create
+// a temporary closure whose code word has the coroutine entry ABI. Skipping
+// them is valid only when every non-debug consumer is an independently
+// validated static await of the same canonical target.
+func resolveCoroCompilerElidedStaticAwaitRetag(
+	plan *coro.SSAPlan,
+	caller coro.FunctionPlan,
+	universe *EmissionUniverse,
+	owner *ssa.Function,
+	change *ssa.ChangeType,
+) (*ssa.Function, error) {
+	if plan == nil || universe == nil || owner == nil || change == nil || change.Parent() != owner {
+		return nil, fmt.Errorf("requires one owner-local managed ChangeType")
+	}
+	verifyRetag := func(retag *ssa.ChangeType) error {
+		if retag == nil || retag.Parent() != owner || retag.X == nil {
+			return fmt.Errorf("retag chain contains an incomplete or foreign-owner ChangeType")
+		}
+		sourceType := coroCallableEffectiveType(universe, owner, retag.X.Type())
+		resultType := coroCallableEffectiveType(universe, owner, retag.Type())
+		sourceTransport, err := coroCallableLeafTransport(universe, sourceType)
+		if err != nil {
+			return fmt.Errorf("source transport: %w", err)
+		}
+		resultTransport, err := coroCallableLeafTransport(universe, resultType)
+		if err != nil {
+			return fmt.Errorf("result transport: %w", err)
+		}
+		if sourceTransport != coro.ManagedTransport || resultTransport != coro.ManagedTransport {
+			return fmt.Errorf(
+				"retag crosses callable transport (%s -> %s)",
+				sourceTransport, resultTransport,
+			)
+		}
+		if !types.Identical(types.Unalias(sourceType).Underlying(), types.Unalias(resultType).Underlying()) {
+			return fmt.Errorf("retag changes its effective function signature")
+		}
+		return nil
+	}
+
+	var source ssa.Value = change
+	for {
+		retag, ok := source.(*ssa.ChangeType)
+		if !ok {
+			break
+		}
+		if err := verifyRetag(retag); err != nil {
+			return nil, err
+		}
+		source = retag.X
+	}
+	rawTarget, ok := source.(*ssa.Function)
+	if !ok || rawTarget == nil {
+		return nil, fmt.Errorf("retag source is not one exact SSA function")
+	}
+	target, ok := universe.Resolve(rawTarget)
+	if !ok || target == nil {
+		return nil, fmt.Errorf("retag source is absent from the frozen emission universe")
+	}
+
+	seen := make(map[ssa.Value]bool)
+	staticCalls := 0
+	var validateConsumers func(ssa.Value) error
+	validateConsumers = func(value ssa.Value) error {
+		if value == nil || seen[value] {
+			return fmt.Errorf("retag consumer graph is cyclic or incomplete")
+		}
+		seen[value] = true
+		refs := value.Referrers()
+		if refs == nil || len(*refs) == 0 {
+			return fmt.Errorf("retag has no executable consumer")
+		}
+		for _, ref := range *refs {
+			if _, debug := ref.(*ssa.DebugRef); debug {
+				continue
+			}
+			if next, ok := ref.(*ssa.ChangeType); ok && next.X == value {
+				if err := verifyRetag(next); err != nil {
+					return err
+				}
+				if err := validateConsumers(next); err != nil {
+					return err
+				}
+				continue
+			}
+			call, ok := ref.(*ssa.Call)
+			if !ok || call.Parent() != owner || call.Common() == nil || call.Common().Value != value {
+				return fmt.Errorf("retag escapes to non-static-await consumer %T", ref)
+			}
+			resolved, _, err := resolveCoroStaticAwait(plan, caller, call, universe)
+			if err != nil {
+				return fmt.Errorf("retag call is not a closed static await: %w", err)
+			}
+			if resolved != target {
+				return fmt.Errorf("retag call resolves to a different canonical target")
+			}
+			staticCalls++
+		}
+		return nil
+	}
+	if err := validateConsumers(change); err != nil {
+		return nil, err
+	}
+	if staticCalls == 0 {
+		return nil, fmt.Errorf("retag has no closed static-await consumer")
+	}
+	return target, nil
+}
+
 // validateCoroStaticMethodCallOperands freezes the x/tools receiver convention
 // at the exact call boundary. A declared receiver is target.Params[0] and the
 // same SSA value is common.Args[0]; bound method values, closures, invokes, and

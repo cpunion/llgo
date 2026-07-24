@@ -1308,7 +1308,8 @@ func TestEmissionIntrinsicOperandPolicyCoversRegistry(t *testing.T) {
 	add(emissionIntrinsicCompileValues,
 		"boolToUint8", "atomicLoad", "atomicStore", "atomicCmpXchg",
 		"atomicCmpXchgOK", "atomicAddReturnNew", "atomicLoadUnsafe", "atomicStoreUnsafe",
-		"coroPark", "coroTimerSleep", "coroPollWait", "coroControlledTimerWait", "atomicXchg", "atomicAdd",
+		"coroPark", "coroTimerSleep", "coroPollWait", "coroControlledTimerWait", "coroFFICall",
+		"atomicXchg", "atomicAdd",
 		"atomicSub", "atomicAnd", "atomicNand", "atomicOr", "atomicXor",
 		"atomicMax", "atomicMin", "atomicUMax", "atomicUMin")
 	add(emissionIntrinsicFirstValue,

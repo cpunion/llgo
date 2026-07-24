@@ -1058,14 +1058,8 @@ _llgo_0:
 define void @holder() #0 {
 _llgo_0:
   %0 = alloca { ptr, ptr }, align 8
-  store { ptr, ptr } { ptr @__llgo_stub.fn, ptr null }, ptr %0, align 8
+  store { ptr, ptr } { ptr @fn, ptr null }, ptr %0, align 8
   ret void
-}
-
-define linkonce i64 @__llgo_stub.fn(ptr %0, i64 %1) {
-_llgo_0:
-  %2 = tail call i64 @fn(i64 %1)
-  ret i64 %2
 }
 
 attributes #0 = { null_pointer_is_valid "frame-pointer"="non-leaf" }
@@ -1099,43 +1093,25 @@ func TestClosureFuncPtrValue(t *testing.T) {
 	hb.Store(ptr, fnPtr)
 	hb.Return()
 
-	wrapName := "__llgo_stub." + prog.abi.FuncName(sig)
-	wrapRef := wrapName
-	if strings.Contains(wrapName, "$") {
-		wrapRef = fmt.Sprintf("\"%s\"", wrapName)
-	}
-	expected := fmt.Sprintf(`; ModuleID = 'foo/bar'
+	expected := `; ModuleID = 'foo/bar'
 source_filename = "foo/bar"
 
 ; Function Attrs: null_pointer_is_valid
-define i64 @fn(i64 %%0) #0 {
+define i64 @fn(i64 %0) #0 {
 _llgo_0:
-  ret i64 %%0
+  ret i64 %0
 }
 
 ; Function Attrs: null_pointer_is_valid
 define void @holder() #0 {
 _llgo_0:
-  %%0 = alloca { ptr, ptr }, align 8
-  %%1 = call ptr @"github.com/goplus/llgo/runtime/internal/runtime.AllocU"(i64 8)
-  store ptr @fn, ptr %%1, align 8
-  %%2 = insertvalue { ptr, ptr } { ptr @%s, ptr undef }, ptr %%1, 1
-  store { ptr, ptr } %%2, ptr %%0, align 8
+  %0 = alloca { ptr, ptr }, align 8
+  store { ptr, ptr } { ptr @fn, ptr null }, ptr %0, align 8
   ret void
 }
 
-define linkonce i64 @%s(ptr %%0, i64 %%1) {
-_llgo_0:
-  %%2 = load ptr, ptr %%0, align 8
-  %%3 = tail call i64 %%2(i64 %%1)
-  ret i64 %%3
-}
-
-; Function Attrs: null_pointer_is_valid
-declare ptr @"github.com/goplus/llgo/runtime/internal/runtime.AllocU"(i64) #0
-
 attributes #0 = { null_pointer_is_valid "frame-pointer"="non-leaf" }
-`, wrapRef, wrapRef)
+`
 	assertPkg(t, pkg, expected)
 }
 
@@ -1291,7 +1267,7 @@ func TestCallClosureDynamic(t *testing.T) {
 	b := caller.MakeBody(1)
 	b.Return(b.Call(caller.Param(0), caller.Param(1)))
 
-	assertPkg(t, pkg, `; ModuleID = 'foo/bar'
+	expected := strings.ReplaceAll(`; ModuleID = 'foo/bar'
 source_filename = "foo/bar"
 
 ; Function Attrs: null_pointer_is_valid
@@ -1299,12 +1275,13 @@ define i64 @caller({ ptr, ptr } %0, i64 %1) #0 {
 _llgo_0:
   %2 = extractvalue { ptr, ptr } %0, 1
   %3 = extractvalue { ptr, ptr } %0, 0
-  %4 = call i64 %3(ptr %2, i64 %1)
+  %4 = call i64 %3(ptr{{CTXATTR}} %2, i64 %1)
   ret i64 %4
 }
 
 attributes #0 = { null_pointer_is_valid "frame-pointer"="non-leaf" }
-`)
+`, "{{CTXATTR}}", closureContextIRAttr(prog))
+	assertPkg(t, pkg, expected)
 }
 
 func TestMakeClosureWithCtx(t *testing.T) {
@@ -1338,11 +1315,11 @@ func TestMakeClosureWithCtx(t *testing.T) {
 	closure := ob.MakeClosure(inner.Expr, []Expr{outer.Param(0)})
 	ob.Return(closure)
 
-	assertPkg(t, pkg, `; ModuleID = 'foo/bar'
+	expected := strings.ReplaceAll(`; ModuleID = 'foo/bar'
 source_filename = "foo/bar"
 
 ; Function Attrs: null_pointer_is_valid
-define i64 @inner(ptr %0, i64 %1) #0 {
+define i64 @inner(ptr{{CTXATTR}} %0, i64 %1) #0 {
 _llgo_0:
   ret i64 %1
 }
@@ -1361,7 +1338,8 @@ _llgo_0:
 declare ptr @"github.com/goplus/llgo/runtime/internal/runtime.AllocU"(i64) #0
 
 attributes #0 = { null_pointer_is_valid "frame-pointer"="non-leaf" }
-`)
+`, "{{CTXATTR}}", closureContextIRAttr(prog))
+	assertPkg(t, pkg, expected)
 }
 
 func TestCvtClosureDropsRecv(t *testing.T) {
@@ -1424,7 +1402,7 @@ func TestIfaceMethodClosureCallIR(t *testing.T) {
 	ret := b.Call(closure, prog.Val(100), prog.Val(200))
 	b.Return(ret)
 
-	assertPkg(t, pkg, `; ModuleID = 'foo/bar'
+	expected := strings.ReplaceAll(`; ModuleID = 'foo/bar'
 source_filename = "foo/bar"
 
 %"github.com/goplus/llgo/runtime/internal/runtime.iface" = type { ptr, ptr }
@@ -1440,7 +1418,7 @@ _llgo_0:
   %6 = insertvalue { ptr, ptr } %5, ptr %1, 1
   %7 = extractvalue { ptr, ptr } %6, 1
   %8 = extractvalue { ptr, ptr } %6, 0
-  %9 = call i64 (ptr, ...) %8(ptr %7, i64 100, i64 200)
+  %9 = call i64 (ptr, ...) %8(ptr{{CTXATTR}} %7, i64 100, i64 200)
   ret i64 %9
 }
 
@@ -1448,7 +1426,8 @@ _llgo_0:
 declare ptr @"github.com/goplus/llgo/runtime/internal/runtime.IfacePtrData"(%"github.com/goplus/llgo/runtime/internal/runtime.iface") #0
 
 attributes #0 = { null_pointer_is_valid "frame-pointer"="non-leaf" }
-`)
+`, "{{CTXATTR}}", closureContextIRAttr(prog))
+	assertPkg(t, pkg, expected)
 }
 
 func TestClosureCtxHelpers(t *testing.T) {

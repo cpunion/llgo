@@ -655,6 +655,10 @@ const (
 	// cannot be materialized and lower only inside a physical coroutine body.
 	llgoCoroOSThreadLock   = llgoInstrBase + 0x54
 	llgoCoroOSThreadUnlock = llgoInstrBase + 0x55
+	// llgoCoroFFICall invokes one coroutine descriptor entry through stock
+	// libffi only until the child reaches its initial suspend. Lowering injects
+	// the current G and awaits only after ffi_call has left the native stack.
+	llgoCoroFFICall = llgoInstrBase + 0x56
 
 	llgoAtomicOpLast = llgoAtomicOpBase + int(llssa.OpUMin)
 )

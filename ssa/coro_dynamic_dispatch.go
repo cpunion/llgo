@@ -69,6 +69,9 @@ func (p Package) NewCoroDispatchDescriptor(
 		panic("ssa: coroutine dispatch descriptor requires a name")
 	}
 	validateCoroDispatchContract(opts.Version, opts.Flags)
+	if opts.Flags&CoroDispatchFlagRuntimeTyped != 0 {
+		panic("ssa: compiler-owned coroutine dispatch descriptor cannot use RuntimeTyped")
+	}
 	if opts.Signature == nil {
 		panic("ssa: coroutine dispatch descriptor requires a signature")
 	}
@@ -106,6 +109,9 @@ func (p Package) NewCoroDispatchDescriptor(
 
 // CoroDispatchPlainEntrySignature returns the final C-ABI signature for a
 // logical Go function's descriptor plain entry: (env,args...)->results.
+// The env parameter is deliberately an ordinary C-ABI argument. The
+// target-specific descriptor thunk is the final chunk that transfers it into
+// the target body's nest/swiftself context register.
 func (p Program) CoroDispatchPlainEntrySignature(sig *types.Signature) *types.Signature {
 	if sig == nil {
 		panic("ssa: coroutine dispatch plain entry requires a signature")
@@ -118,7 +124,9 @@ func (p Program) CoroDispatchPlainEntrySignature(sig *types.Signature) *types.Si
 
 // CoroDispatchCoroEntrySignature returns the final C-ABI signature for a
 // logical Go function's descriptor coroutine entry:
-// (g,out,env,args...)->handle.
+// (g,out,env,args...)->handle. As with the plain entry, env remains ordinary
+// at this dynamic boundary and only the thunk-to-body call uses the hidden
+// closure-context ABI.
 func (p Program) CoroDispatchCoroEntrySignature(sig *types.Signature) *types.Signature {
 	if sig == nil {
 		panic("ssa: coroutine dispatch coroutine entry requires a signature")
@@ -331,13 +339,42 @@ func (b Builder) prepareCoroDispatchCall(
 	envNonNil := llvm.CreateICmp(b.impl, llvm.IntNE, env.impl, llvm.ConstNull(env.impl.Type()))
 	addInvalid("coro.dispatch.nocapture.env.nonnull", llvm.CreateAnd(b.impl, noCapture, envNonNil))
 
-	equalInvalid(
-		"coro.dispatch.hash.lo.invalid", fields[2].impl,
+	runtimeTyped := llvm.CreateICmp(
+		b.impl, llvm.IntNE,
+		llvm.CreateAnd(b.impl, flags, b.Prog.IntVal(uint64(CoroDispatchFlagRuntimeTyped), b.Prog.Uint32()).impl),
+		zeroFlags,
+	)
+	hashLoMismatch := llvm.CreateICmp(
+		b.impl, llvm.IntNE, fields[2].impl,
 		b.Prog.IntVal(binary.BigEndian.Uint64(opts.ABIHash[:8]), b.Prog.Uint64()).impl,
 	)
-	equalInvalid(
-		"coro.dispatch.hash.hi.invalid", fields[3].impl,
+	hashHiMismatch := llvm.CreateICmp(
+		b.impl, llvm.IntNE, fields[3].impl,
 		b.Prog.IntVal(binary.BigEndian.Uint64(opts.ABIHash[8:]), b.Prog.Uint64()).impl,
+	)
+	addInvalid(
+		"coro.dispatch.hash.invalid",
+		llvm.CreateAnd(
+			b.impl,
+			llvm.CreateNot(b.impl, runtimeTyped),
+			b.impl.CreateOr(hashLoMismatch, hashHiMismatch, ""),
+		),
+	)
+	runtimeTypeNil := llvm.CreateICmp(
+		b.impl, llvm.IntEQ, fields[2].impl,
+		b.Prog.IntVal(0, b.Prog.Uint64()).impl,
+	)
+	runtimeMagicMismatch := llvm.CreateICmp(
+		b.impl, llvm.IntNE, fields[3].impl,
+		b.Prog.IntVal(CoroDispatchRuntimeTypeMagicV1, b.Prog.Uint64()).impl,
+	)
+	addInvalid(
+		"coro.dispatch.runtime-type.invalid",
+		llvm.CreateAnd(
+			b.impl,
+			runtimeTyped,
+			b.impl.CreateOr(runtimeTypeNil, runtimeMagicMismatch, ""),
+		),
 	)
 	equalInvalid(
 		"coro.dispatch.result.size.invalid", fields[6].impl,
@@ -477,9 +514,6 @@ func validateCoroDispatchSignature(sig *types.Signature) error {
 	if sig.Recv() != nil {
 		return fmt.Errorf("methods are not supported")
 	}
-	if sig.Variadic() {
-		return fmt.Errorf("variadic signatures are not supported")
-	}
 	if params := sig.TypeParams(); params != nil && params.Len() != 0 {
 		return fmt.Errorf("generic signatures are not supported")
 	}
@@ -490,8 +524,8 @@ func validateCoroDispatchSignature(sig *types.Signature) error {
 }
 
 func validateCoroDispatchPhysicalSignature(sig *types.Signature) error {
-	if sig == nil || sig.Recv() != nil || sig.Variadic() {
-		return fmt.Errorf("requires an ordinary non-variadic function signature")
+	if sig == nil || sig.Recv() != nil {
+		return fmt.Errorf("requires an ordinary receiver-free function signature")
 	}
 	return nil
 }
@@ -503,13 +537,13 @@ func validateCoroDispatchResult(prog Program, result Type, role string) {
 }
 
 func coroDispatchPlainEntrySignature(sig *types.Signature) *types.Signature {
-	ctx := types.NewParam(token.NoPos, nil, closureCtx, types.Typ[types.UnsafePointer])
-	return FuncAddCtx(ctx, sig)
+	env := types.NewParam(token.NoPos, nil, "__llgo_env", types.Typ[types.UnsafePointer])
+	return FuncAddCtx(env, sig)
 }
 
 func coroDispatchCoroEntrySignature(sig *types.Signature) *types.Signature {
 	params := make([]*types.Var, 0, sig.Params().Len()+3)
-	for _, name := range []string{"__llgo_g", "__llgo_out", closureCtx} {
+	for _, name := range []string{"__llgo_g", "__llgo_out", "__llgo_env"} {
 		params = append(params, types.NewParam(token.NoPos, nil, name, types.Typ[types.UnsafePointer]))
 	}
 	for i := 0; i < sig.Params().Len(); i++ {

@@ -280,7 +280,7 @@ func isCoroManagedDescriptorCall(call ssa.CallInstruction) bool {
 		return false
 	}
 	sig := common.Signature()
-	if sig == nil || sig.Recv() != nil || sig.Variadic() ||
+	if sig == nil || sig.Recv() != nil ||
 		typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 {
 		return false
 	}
@@ -5016,16 +5016,16 @@ func exactCoroStaticFunctionValue(ctx *context, value ssa.Value) (*ssa.Function,
 // are direct, statically resolved emitted bodies (or builtins). An ordinary
 // indirect call through an exact //llgo:type C value is a raw code-pointer leaf:
 // it stays on the foreign/native stack and never becomes a managed descriptor
-// edge. An exact frozen C declaration may terminate the closure only for the
-// compiler-owned TLS callback whose field-flow proof supplied one of
-// closedDynamic's calls. The
-// declaration then enters requiredPlain and is classified through the same
-// frozen IgnoreBody/ExternalKnown path as the compiler runtime ABI. Dynamic
-// calls, go/defer, other bodyless leaves, captured closures, and unresolved
-// aliases remain on the ordinary Dispatch path. Effect and representation are
-// independently checked after fixed-point analysis; this prefilter only
-// establishes that it is sound to seed the candidate's exact raw
-// host/scheduler-stack island.
+// edge. An exact frozen C declaration may terminate the closure when it carries
+// a frontend-owned noblock/sync certificate. The declaration then enters
+// requiredPlain and is classified through the same frozen
+// IgnoreBody/ExternalKnown path as the compiler runtime ABI. The compiler-owned
+// TLS callback retains its separately frozen field-flow exception for its exact
+// declaration leaves. Dynamic managed calls, go/defer, other bodyless leaves,
+// captured closures, and unresolved aliases remain on the ordinary Dispatch
+// path. Effect and representation are independently checked after fixed-point
+// analysis; this prefilter only establishes that it is sound to seed the
+// candidate's exact raw host/scheduler-stack island.
 func provenCoroDirectPlainStaticClosure(ctx *context, target *ssa.Function, closedDynamic map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate) ([]*ssa.Function, bool, error) {
 	if ctx == nil || ctx.coroEmission == nil || target == nil || len(target.FreeVars) != 0 {
 		return nil, false, nil
@@ -5111,7 +5111,18 @@ func provenCoroDirectPlainStaticClosure(ctx *context, target *ssa.Function, clos
 					if err != nil {
 						return nil, false, err
 					}
-					if !tlsCallback || !classified || background != llssa.InC {
+					if !classified || background != llssa.InC {
+						return nil, false, nil
+					}
+					_, noBlock, err := ctx.coroEmission.CoroForeignNoBlockCertificate(callee)
+					if err != nil {
+						return nil, false, err
+					}
+					_, synchronous, err := ctx.coroEmission.CoroForeignSyncCertificate(callee)
+					if err != nil {
+						return nil, false, err
+					}
+					if !tlsCallback && !noBlock && !synchronous {
 						return nil, false, nil
 					}
 					if _, ok := seenCLeaves[callee]; !ok {

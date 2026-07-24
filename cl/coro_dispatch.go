@@ -110,9 +110,6 @@ func validateCoroDynamicDispatchTarget(fn *ssa.Function, plan coro.FunctionPlan,
 	if fn.Signature == nil || fn.Signature.Recv() != nil {
 		return fail("methods require receiver-aware dispatch lowering")
 	}
-	if fn.Signature.Variadic() {
-		return fail("variadic dispatch is not implemented")
-	}
 	directive := ""
 	if universe == nil {
 		directive = coroLeafABIDirective(fn)
@@ -222,6 +219,9 @@ func validateCoroPlainDispatchSignatureShape(sig *types.Signature) error {
 	if sig == nil {
 		return fmt.Errorf("missing signature")
 	}
+	if sig.Variadic() {
+		return fmt.Errorf("variadic signatures require capability-aware descriptor dispatch")
+	}
 	if sig.Results().Len() > 1 {
 		return fmt.Errorf("multiple results are not implemented")
 	}
@@ -319,8 +319,8 @@ func validateCoroCallableTransportValue(
 			continue
 		}
 		sig, ok := types.Unalias(expected.typ).Underlying().(*types.Signature)
-		if !ok || sig.Recv() != nil || sig.Variadic() {
-			return fail("value %q managed function leaf %d requires an ordinary non-variadic signature", value.Name(), index)
+		if !ok || sig.Recv() != nil {
+			return fail("value %q managed function leaf %d requires an ordinary receiver-free signature", value.Name(), index)
 		}
 		if params := sig.TypeParams(); params != nil && params.Len() != 0 {
 			return fail("value %q managed function leaf %d has an unsupported generic signature", value.Name(), index)
@@ -882,10 +882,11 @@ func newCoroPlainDispatchEffectiveABI(p *context, patched *types.Signature) (cor
 }
 
 // canonicalCoroPlainDispatchSignature removes source parameter/result names.
-// go/types identity ignores those names, and a target declaration commonly has
-// them while a function-typed parameter at the exact dynamic call does not.
-// Letting names enter the descriptor hash would make two ABI-identical sites
-// disagree at runtime.
+// go/types identity ignores the names, so they must not make an otherwise
+// identical producer and consumer disagree at runtime. The variadic marker is
+// retained: it is part of the Go-visible function type and reflect requires it
+// to distinguish Call from CallSlice. PhysicalFuncDecl still lowers the final
+// variadic parameter to its one packed []T argument for descriptor transport.
 func canonicalCoroPlainDispatchSignature(sig *types.Signature) *types.Signature {
 	params := make([]*types.Var, sig.Params().Len())
 	for i := range params {
@@ -895,7 +896,7 @@ func canonicalCoroPlainDispatchSignature(sig *types.Signature) *types.Signature 
 	for i := range results {
 		results[i] = types.NewParam(token.NoPos, nil, "", sig.Results().At(i).Type())
 	}
-	return types.NewSignatureType(nil, nil, nil, types.NewTuple(params...), types.NewTuple(results...), false)
+	return types.NewSignatureType(nil, nil, nil, types.NewTuple(params...), types.NewTuple(results...), sig.Variadic())
 }
 
 func activeCompilationABI(c *Compilation, value func(*Compilation) string, fallback string) string {
@@ -1181,7 +1182,7 @@ func (p *context) newCoroDynamicDispatchEntryThunk(
 	}
 
 	targetSig, ok := target.RawType().(*types.Signature)
-	if !ok || targetSig.Variadic() {
+	if !ok {
 		panic(fmt.Errorf("coroutine dynamic dispatch ABI: thunk %q target has no ordinary physical signature", name))
 	}
 	targetParam := 0

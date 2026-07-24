@@ -204,6 +204,7 @@ func TestCoroManagedDispatchValidationKeepsUnknownDomainsFailClosed(t *testing.T
 func TestCoroManagedDispatchValidationAcceptsStdlibCallShapes(t *testing.T) {
 	declarations := []string{
 		`func Apply(callback func() error) error { return callback() }`,
+		`func Apply(callback func(...int) int, values []int) int { return callback(values...) }`,
 		`func Apply(callback func(int, []byte) (int, error), fd int, data []byte) (int, error) {
 			return callback(fd, data)
 		}`,

@@ -269,11 +269,15 @@ func (p Package) NewFuncEx(name string, sig *types.Signature, bg Background, has
 		if instantiated {
 			v.impl.SetLinkage(llvm.LinkOnceAnyLinkage)
 		}
+		if sig, ok := v.raw.Type.(*types.Signature); ok {
+			p.Prog.markClosureContextFunction(v.impl, sig)
+		}
 		return v
 	}
 	t := p.Prog.FuncDecl(sig, bg)
 	dbgInstrln("NewFunc", name, t.raw.Type, "hasFreeVars:", hasFreeVars)
 	fn := llvm.AddFunction(p.mod, name, t.ll)
+	p.Prog.markClosureContextFunction(fn, t.raw.Type.(*types.Signature))
 	if bg == InGo {
 		fn.AddFunctionAttr(p.nullPointerIsValidAttr)
 		// Keep frame pointers so the runtime can walk real stacks (FP chain)

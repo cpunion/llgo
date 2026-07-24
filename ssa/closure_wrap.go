@@ -21,23 +21,48 @@ func removeCtx(sig *types.Signature) *types.Signature {
 	return types.NewSignature(sig.Recv(), types.NewTuple(args...), sig.Results(), sig.Variadic())
 }
 
-// closureCtxParam returns the leading __llgo_ctx parameter if present.
+func isClosureCtxParam(param *types.Var) bool {
+	if param == nil || param.Name() != closureCtx {
+		return false
+	}
+	switch typ := param.Type().Underlying().(type) {
+	case *types.Pointer:
+		return true
+	case *types.Basic:
+		return typ.Kind() == types.UnsafePointer
+	default:
+		return false
+	}
+}
+
+// closureCtxParam returns the leading __llgo_ctx parameter if present. Source
+// closure signatures keep the context first even when a later physical ABI
+// prefixes coroutine-owned parameters.
 func closureCtxParam(sig *types.Signature) *types.Var {
-	if sig == nil {
+	if sig == nil || sig.Params().Len() == 0 {
 		return nil
 	}
-	params := sig.Params()
-	if params.Len() == 0 {
-		return nil
-	}
-	first := params.At(0)
-	if first.Name() != closureCtx {
-		return nil
-	}
-	if _, ok := first.Type().Underlying().(*types.Pointer); !ok {
+	first := sig.Params().At(0)
+	if !isClosureCtxParam(first) {
 		return nil
 	}
 	return first
+}
+
+// closureCtxPhysicalParamIndex returns the context's actual LLVM parameter
+// position. Coroutine entries can prefix __llgo_g and __llgo_out, so ABI
+// attribute placement must not assume that the closure context is parameter 0.
+func closureCtxPhysicalParamIndex(sig *types.Signature) int {
+	if sig == nil {
+		return -1
+	}
+	params := sig.Params()
+	for i := 0; i < params.Len(); i++ {
+		if isClosureCtxParam(params.At(i)) {
+			return i
+		}
+	}
+	return -1
 }
 
 // closureWrapArgs returns wrapper arguments excluding the ctx parameter.
@@ -67,8 +92,9 @@ func closureWrapReturn(b Builder, sig *types.Signature, ret Expr) {
 	b.impl.CreateRet(ret.impl)
 }
 
-// closureWrapDecl wraps a function declaration that lacks __llgo_ctx.
-// It directly calls the target symbol and ignores the ctx parameter.
+// closureWrapDecl is the explicit-context fallback for targets without a
+// hidden closure-context register. It directly calls the target symbol and
+// ignores the ctx parameter.
 func (p Package) closureWrapDecl(fn Expr, sig *types.Signature) Function {
 	name := closureStub + fn.impl.Name()
 	if wrap := p.FuncOf(name); wrap != nil {
@@ -85,7 +111,7 @@ func (p Package) closureWrapDecl(fn Expr, sig *types.Signature) Function {
 	return wrap
 }
 
-// closureWrapPtr wraps a raw function pointer by loading it from ctx.
+// closureWrapPtr is the explicit-context fallback for raw function pointers.
 // The ctx parameter is treated as a pointer to a stored function pointer cell.
 func (p Package) closureWrapPtr(sig *types.Signature) Function {
 	name := closureStub + p.Prog.abi.FuncName(sig)
