@@ -407,6 +407,92 @@ func Root(value *state) {
 	}
 }
 
+func TestCoroExplicitStatusPanicAcceptsChannelReceivedInterface(t *testing.T) {
+	const source = `package foo
+func Direct(ch <-chan any) {
+	if value := <-ch; value != nil {
+		panic(value)
+	}
+}
+func CommaOK(ch <-chan any) {
+	if value, ok := <-ch; ok && value != nil {
+		panic(value)
+	}
+}
+func Selected(first, second <-chan any) {
+	select {
+	case value := <-first:
+		if value != nil { panic(value) }
+	case value := <-second:
+		if value != nil { panic(value) }
+	}
+}
+`
+	ssaPkg, _, files := buildGoSSAPkg(t, source)
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := prepareStacklessEmissionUniverse(
+		prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	functions := []*ssa.Function{
+		ssaPkg.Func("Direct"),
+		ssaPkg.Func("CommaOK"),
+		ssaPkg.Func("Selected"),
+	}
+	roots := make(coro.Roots, 0, len(functions))
+	for _, function := range functions {
+		roots = append(roots, coro.Root{Function: function, Demand: coro.AsyncDemand})
+	}
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	functionIDs.ArchiveReady = true
+	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, roots, coro.SSAConfig{
+		EmissionUniverse:     ssaUniverse,
+		FunctionIDs:          functionIDs,
+		MaxPlainInstructions: -1,
+		ClassifyLoweredCalls: universe.CoroLoweredCalls,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, function := range functions {
+		functionPlan, ok := plan.FunctionPlan(function)
+		if !ok || functionPlan.Emission != coro.EmitCoroutine ||
+			!functionPlan.Effect.Contains(coro.MayPark) ||
+			!functionPlan.Exec.Contains(coro.MayUnwind) {
+			t.Fatalf("%s plan = %+v, present=%t; want may-park/may-unwind coroutine", function.Name(), functionPlan, ok)
+		}
+	}
+	compilation := &Compilation{
+		CoroPlan:         plan,
+		EmissionUniverse: universe,
+		CoroABI:          coro.PhysicalABIV1,
+		SchedulerABI:     coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+		PanicABI:         coro.PanicExplicitStatusABIV0,
+		FuncRepABI:       coro.FuncRepABIV1,
+	}
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatalf("channel-received panic payload rejected: %v", err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify channel-received panic payload module: %v\n%s", err, module.String())
+	}
+}
+
 func TestCoroExplicitStatusPanicRejectsPlainCallFromPhysicalBody(t *testing.T) {
 	const source = `package foo
 var Payload uint32

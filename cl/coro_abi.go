@@ -1951,6 +1951,11 @@ func validateCoroExplicitStatusPanicInterfaceValue(
 		}
 		return ""
 	case *ssa.UnOp:
+		if value.Op == token.ARROW {
+			return validateCoroExplicitStatusPanicChannelReceive(
+				audit, value, -1, value.Type(), capabilities,
+			)
+		}
 		if value.Op != token.MUL {
 			return "interface producer is not a typed load"
 		}
@@ -1969,9 +1974,19 @@ func validateCoroExplicitStatusPanicInterfaceValue(
 		if reason := audit.validateExtract(value); reason != "" {
 			return "interface tuple extract has no pure lowering: " + reason
 		}
+		switch tuple := value.Tuple.(type) {
+		case *ssa.UnOp:
+			return validateCoroExplicitStatusPanicChannelReceive(
+				audit, tuple, value.Index, value.Type(), capabilities,
+			)
+		case *ssa.Select:
+			return validateCoroExplicitStatusPanicSelectReceive(
+				audit, tuple, value.Index, value.Type(), capabilities,
+			)
+		}
 		call, ok := value.Tuple.(*ssa.Call)
 		if !ok || call == nil || call.Parent() != audit.fn || call.Common() == nil {
-			return "interface tuple extract is not produced by one call in the current body"
+			return "interface tuple extract is not produced by one call or channel receive in the current body"
 		}
 		signature := call.Common().Signature()
 		if signature == nil || signature.Results() == nil ||
@@ -1996,6 +2011,74 @@ func validateCoroExplicitStatusPanicInterfaceValue(
 	default:
 		return fmt.Sprintf("interface producer %T has no post-destroy lifetime proof", value)
 	}
+}
+
+func validateCoroExplicitStatusPanicChannelReceive(
+	audit *coroPhysicalPureSSAAudit,
+	receive *ssa.UnOp,
+	index int,
+	resultType types.Type,
+	capabilities coroPhysicalLoweringCapabilities,
+) string {
+	if !capabilities.channel {
+		return "interface channel receive requires the channel scheduler capability"
+	}
+	if audit == nil || receive == nil || receive.Parent() != audit.fn ||
+		receive.Op != token.ARROW || receive.X == nil {
+		return "interface channel receive is not one exact operation in the current body"
+	}
+	channel, ok := types.Unalias(audit.typeOf(receive.X.Type())).Underlying().(*types.Chan)
+	if !ok {
+		return "interface channel receive source is not a channel"
+	}
+	if receive.CommaOk {
+		if index != 0 {
+			return "interface channel receive extract is not the received value"
+		}
+	} else if index >= 0 {
+		return "non-tuple interface channel receive has an extract index"
+	}
+	if !types.Identical(audit.typeOf(resultType), audit.typeOf(channel.Elem())) {
+		return "interface channel receive result disagrees with the channel element type"
+	}
+	return ""
+}
+
+func validateCoroExplicitStatusPanicSelectReceive(
+	audit *coroPhysicalPureSSAAudit,
+	selection *ssa.Select,
+	index int,
+	resultType types.Type,
+	capabilities coroPhysicalLoweringCapabilities,
+) string {
+	if !capabilities.channel {
+		return "interface select receive requires the channel scheduler capability"
+	}
+	if audit == nil || selection == nil || selection.Parent() != audit.fn {
+		return "interface select receive is not one exact operation in the current body"
+	}
+	resultIndex := 2
+	for _, state := range selection.States {
+		if state == nil || state.Dir != types.RecvOnly {
+			continue
+		}
+		if resultIndex != index {
+			resultIndex++
+			continue
+		}
+		if state.Chan == nil {
+			return "interface select receive has no channel"
+		}
+		channel, ok := types.Unalias(audit.typeOf(state.Chan.Type())).Underlying().(*types.Chan)
+		if !ok {
+			return "interface select receive source is not a channel"
+		}
+		if !types.Identical(audit.typeOf(resultType), audit.typeOf(channel.Elem())) {
+			return "interface select receive result disagrees with the channel element type"
+		}
+		return ""
+	}
+	return "interface select extract is not a received channel value"
 }
 
 func validateCoroExplicitStatusPanicInterfaceCallResult(
