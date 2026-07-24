@@ -872,9 +872,15 @@ func resolveCoroStaticCleanupTarget(
 	if !ok || targetPlan.ID != callPlan.Targets[0] {
 		return nil, coro.FunctionPlan{}, 0, fmt.Errorf("defer target %q has no canonical function plan", callPlan.Targets[0])
 	}
-	if target.Signature == nil || target.Signature.Variadic() {
-		return nil, coro.FunctionPlan{}, 0, fmt.Errorf("variadic or signature-less defer target is unsupported")
+	if target.Signature == nil {
+		return nil, coro.FunctionPlan{}, 0, fmt.Errorf("signature-less defer target is unsupported")
 	}
+	// A variadic source call has no special physical defer ABI. x/tools SSA
+	// has already evaluated and packed the trailing arguments into the final
+	// []T operand before the Defer instruction. The frame record retains that
+	// ordinary slice value, and coroPhysicalNormalizeSourceSignature clears
+	// the source-only variadic marker for the eventual plain/coroutine call.
+	// validateCoroStaticCleanupOperands below freezes the exact packed shape.
 	if closure != nil {
 		valuePlan, exact := whole.ValuePlan(closure)
 		if !exact || len(valuePlan.Funcs) != 1 || len(valuePlan.Funcs[0].Path) != 0 ||

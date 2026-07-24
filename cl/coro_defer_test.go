@@ -40,11 +40,13 @@ type Guard struct{}
 func First(value uint32) { Sink = Sink*10 + value }
 func Second(value uint32) { Sink = Sink*10 + value }
 func (*Guard) Third(value uint32) { Sink = Sink*10 + value }
+func Variadic(values ...uint32) { Sink = Sink*10 + uint32(len(values)) + values[0] }
 
-func Root(guard *Guard, mode uint32) {
+func Root(guard *Guard, mode uint32, values []uint32) {
 	defer First(1)
 	defer Second(mode + 2)
 	defer guard.Third(mode + 3)
+	defer Variadic(values...)
 	if mode == 9 { panic(&PanicPayload) }
 }
 `
@@ -163,7 +165,7 @@ func TestCoroStaticCleanupIRNativeAndWasm32(t *testing.T) {
 				t.Fatalf("verify static cleanup before CoroSplit: %v\n%s", err, module.String())
 			}
 			body := requireCoroPhysicalFunction(t, module, "foo.Root").String()
-			for _, symbol := range []string{"foo.First$coro", "foo.Second$coro", "Third$coro"} {
+			for _, symbol := range []string{"foo.First$coro", "foo.Second$coro", "Third$coro", "foo.Variadic$coro"} {
 				if got := strings.Count(body, symbol); got != 1 {
 					t.Fatalf("Root cleanup references %s = %d, want one shared guarded call site:\n%s", symbol, got, body)
 				}
@@ -173,8 +175,8 @@ func TestCoroStaticCleanupIRNativeAndWasm32(t *testing.T) {
 					t.Fatalf("stackless cleanup retained legacy defer machinery %q:\n%s", forbidden, body)
 				}
 			}
-			if !strings.Contains(body, "switch i32") || strings.Count(body, "alloca i1") < 3 ||
-				strings.Count(body, "store i1 false") < 3 || strings.Count(body, "store i1 true") < 3 {
+			if !strings.Contains(body, "switch i32") || strings.Count(body, "alloca i1") < 4 ||
+				strings.Count(body, "store i1 false") < 4 || strings.Count(body, "store i1 true") < 4 {
 				t.Fatalf("static cleanup frame/continuation state is incomplete:\n%s", body)
 			}
 			if strings.Count(body, "call void @"+coroPanicPrepareHookV1) != 1 ||
@@ -188,7 +190,7 @@ func TestCoroStaticCleanupIRNativeAndWasm32(t *testing.T) {
 				t.Fatalf("CoroSplit did not create Root cleanup resume entry:\n%s", module.String())
 			}
 			post := resume.String()
-			for _, symbol := range []string{"foo.First$coro", "foo.Second$coro", "Third$coro"} {
+			for _, symbol := range []string{"foo.First$coro", "foo.Second$coro", "Third$coro", "foo.Variadic$coro"} {
 				if got := strings.Count(post, symbol); got != 1 {
 					t.Fatalf("post-split cleanup references %s = %d, want one:\n%s", symbol, got, post)
 				}
@@ -725,6 +727,7 @@ func compileCoroStaticCleanupIRFixture(
 		t.Fatal(err)
 	}
 	root, first, second := ssaPkg.Func("Root"), ssaPkg.Func("First"), ssaPkg.Func("Second")
+	variadic := ssaPkg.Func("Variadic")
 	var third *ssa.Function
 	for _, function := range universe.Functions() {
 		if function != nil && function.Name() == "Third" && function.Signature != nil && function.Signature.Recv() != nil {
@@ -745,7 +748,7 @@ func compileCoroStaticCleanupIRFixture(
 		FunctionIDs:          functionIDs,
 		MaxPlainInstructions: -1,
 		ClassifyFunction: func(function *ssa.Function) (coro.SSAFunctionPolicy, error) {
-			if function == first || function == second || function == third {
+			if function == first || function == second || function == third || function == variadic {
 				return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
 			}
 			return coro.SSAFunctionPolicy{}, nil
