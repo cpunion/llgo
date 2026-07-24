@@ -1040,28 +1040,15 @@ func TestCoroChildAwaitPhysicalABIV1Wasm32(t *testing.T) {
 	assertCoroRunDecisionResumeOnly(t, module, "foo.Child$coro", 1)
 }
 
-func TestCoroStacklessProfileFailsClosed(t *testing.T) {
+func TestCoroTargetCapabilitiesFailClosed(t *testing.T) {
 	for _, test := range []struct {
 		name        string
 		compilation *Compilation
 		want        string
 	}{
 		{
-			name:        "unknown profile",
-			compilation: &Compilation{CoroProfile: coro.RuntimeProfile(255)},
-			want:        "unknown coroutine runtime profile",
-		},
-		{
-			name: "capabilities without profile",
-			compilation: &Compilation{
-				CoroTargetCapabilities: CoroNativeTargetCapabilities(),
-			},
-			want: "target capabilities require the stackless runtime profile",
-		},
-		{
 			name: "native fleet without worker",
 			compilation: &Compilation{
-				CoroProfile:            CoroProfileStackless,
 				CoroTargetCapabilities: coro.TargetCapabilities(2),
 			},
 			want: "invalid coroutine target capability set",
@@ -1070,7 +1057,7 @@ func TestCoroStacklessProfileFailsClosed(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			err := test.compilation.preflightCoroPlan()
 			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("profile validation error = %v, want substring %q", err, test.want)
+				t.Fatalf("target capability validation error = %v, want substring %q", err, test.want)
 			}
 		})
 	}
@@ -1492,7 +1479,6 @@ func Plain(value uint32) uint32 {
 	}
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroChildAwaitCompilation(compilation)
-	compilation.CoroProfile = CoroProfileStackless
 	compilation.FuncRepABI = coro.FuncRepABIV1
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
@@ -1606,8 +1592,7 @@ func Plain(values []int) int { return len(values) }
 	pkg, _, err := NewPackageExWithEmbedOptions(prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{}, PackageOptions{
 		Compilation: &Compilation{
 			CoroPlan:         plan,
-			EmissionUniverse: universe, CoroProfile: CoroProfileStackless,
-		},
+			EmissionUniverse: universe},
 	})
 	if err != nil {
 		t.Fatalf("compile active physical ABI plain builtin: %v", err)
@@ -1675,8 +1660,7 @@ func Leaf(value uint32) uint32 { return value + 1 }
 			SchedulerABI:     coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 			PanicABI:         coro.PanicExplicitStatusABIV0,
 			FuncRepABI:       coro.FuncRepABIV1,
-			EmissionUniverse: universe, CoroProfile: CoroProfileStackless,
-		}
+			EmissionUniverse: universe}
 		installCoroLoweringFactsForTest(t, compilation)
 		pkg, _, err := NewPackageExWithEmbedOptions(prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{}, PackageOptions{
 			Compilation: compilation,
@@ -1759,8 +1743,7 @@ func compileCoroLeafPhysicalABIPackage(t *testing.T, target *llssa.Target, ssaPk
 	pkg, _, err := NewPackageExWithEmbedOptions(prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{}, PackageOptions{
 		Compilation: &Compilation{
 			CoroPlan:         plan,
-			EmissionUniverse: universe, CoroProfile: CoroProfileStackless,
-		},
+			EmissionUniverse: universe},
 	})
 	if err != nil {
 		prog.Dispose()
@@ -1920,7 +1903,6 @@ func Pair(ptr *uint32, count uintptr) (*uint32, uintptr) {
 }
 
 func enableCoroChildAwaitCompilation(compilation *Compilation) {
-	compilation.CoroProfile = CoroProfileStackless
 	compilation.CoroABI = coro.PhysicalABIV1
 	compilation.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
@@ -2174,8 +2156,7 @@ func compileCoroDecisionFrameProbe(t *testing.T, target *llssa.Target, scalarGat
 		compilation: &Compilation{
 
 			CoroABI:      coro.PhysicalABIV1,
-			SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0, CoroProfile: CoroProfileStackless,
-		},
+			SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0},
 	}
 	sourceSignature := types.NewSignatureType(nil, nil, nil, nil, nil, false)
 	abi := newCoroPhysicalABI(ctx, plannedFunctionSymbol{

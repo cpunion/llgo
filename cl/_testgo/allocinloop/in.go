@@ -9,26 +9,17 @@ func Foo(s string) int {
 	return len(s)
 }
 
-// CHECK-LABEL: define void @"{{.*}}allocinloop.Test"(){{.*}} {
-// CHECK-NEXT: _llgo_0:
-// CHECK-NEXT:   br label %_llgo_1
-// CHECK-EMPTY:
-// CHECK-NEXT: _llgo_1:
-// CHECK-NEXT:   %0 = phi i64 [ 0, %_llgo_0 ], [ %4, %_llgo_2 ]
-// CHECK-NEXT:   %1 = phi i64 [ 0, %_llgo_0 ], [ %5, %_llgo_2 ]
-// CHECK-NEXT:   %2 = icmp slt i64 %1, 10000000
-// CHECK-NEXT:   br i1 %2, label %_llgo_2, label %_llgo_3
-// CHECK-EMPTY:
-// CHECK-NEXT: _llgo_2:
-// CHECK-NEXT:   %3 = call i64 @"{{.*}}allocinloop.Foo"(%"{{.*}}String" { ptr @0, i64 5 })
-// CHECK-NEXT:   %4 = add i64 %0, %3
-// CHECK-NEXT:   %5 = add i64 %1, 1
-// CHECK-NEXT:   br label %_llgo_1
-// CHECK-EMPTY:
-// CHECK-NEXT: _llgo_3:
-// CHECK-NEXT:   call void @"{{.*}}PrintInt"(i64 %0)
-// CHECK-NEXT:   call void @"{{.*}}PrintByte"(i8 10)
-// CHECK-NEXT:   ret void
+// A long-running loop is a stackless coroutine and must contain scheduler
+// polling without turning its per-iteration scalar work into heap allocation.
+// CHECK-LABEL: define ptr @"{{.*}}allocinloop.Test$coro"(ptr %0, ptr %1){{.*}} {
+// CHECK: call i1 @__llgo_coro_preempt_poll_v1(ptr %0)
+// CHECK: icmp slt i64 {{.*}}, 10000000
+// CHECK: call i64 @"{{.*}}allocinloop.Foo"(%"{{.*}}String" { ptr @0, i64 5 })
+// CHECK: call ptr @"{{.*}}PrintInt$coro"
+// CHECK: call void @__llgo_coro_await_prepare_v3
+// CHECK: call ptr @"{{.*}}PrintByte$coro"({{.*}}i8 10)
+// CHECK: call void @__llgo_coro_await_prepare_v3
+// CHECK-NOT: call ptr @"{{.*}}AllocZ"
 func Test() {
 	j := 0
 	for i := 0; i < 10000000; i++ {
@@ -37,10 +28,9 @@ func Test() {
 	println(j)
 }
 
-// CHECK-LABEL: define void @"{{.*}}allocinloop.main"(){{.*}} {
-// CHECK-NEXT: _llgo_0:
-// CHECK-NEXT:   call void @"{{.*}}allocinloop.Test"()
-// CHECK-NEXT:   ret void
+// CHECK-LABEL: define ptr @"{{.*}}allocinloop.main$coro"(ptr %0, ptr %1){{.*}} {
+// CHECK: call ptr @"{{.*}}allocinloop.Test$coro"
+// CHECK: call void @__llgo_coro_await_prepare_v3
 func main() {
 	Test()
 }

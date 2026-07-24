@@ -86,8 +86,17 @@ func validateCoroRootEntries(plan *coro.SSAPlan) error {
 				function.ManagedDemand, function.RawPlainDemand, root.ManagedDemand, root.RawPlainDemand,
 			)
 		}
-		if root.Function.Parent() != nil || len(root.Function.FreeVars) != 0 {
-			return fmt.Errorf("coroutine root %q must be a top-level non-capturing entry; captured environments are supplied only by dynamic descriptors", root.ID)
+		if len(root.Function.FreeVars) != 0 {
+			return fmt.Errorf(
+				"coroutine root %q (%s) must be non-capturing; parent=%v freevars=%d, captured environments are supplied only by dynamic descriptors",
+				root.ID, root.Function.String(), root.Function.Parent() != nil, len(root.Function.FreeVars),
+			)
+		}
+		if root.Function.Parent() != nil && root.ManagedDemand != coro.NoDemand {
+			return fmt.Errorf(
+				"managed coroutine root %q (%s) must be a top-level entry; parent=%v root-managed=%s, nested non-capturing entries are valid only for exact raw function addresses",
+				root.ID, root.Function.String(), root.Function.Parent() != nil, root.ManagedDemand,
+			)
 		}
 		if root.RawPlainDemand {
 			if err := validatePlannedRawPlainEntry(root.Function, function); err != nil {

@@ -21,6 +21,23 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
+const (
+	coroOSThreadLockHookV1   = "__llgo_coro_os_thread_lock_v1"
+	coroOSThreadUnlockHookV1 = "__llgo_coro_os_thread_unlock_v1"
+)
+
+// requireCoroSchedulerMarkerBody is the single physical-body capability gate
+// for compiler-owned scheduler markers. Keeping critical regions and
+// OS-thread affinity behind this boundary prevents each marker family from
+// growing an independent context access path.
+func (p *context) requireCoroSchedulerMarkerBody(b llssa.Builder, marker string) *coroBodyContext {
+	body := p.coroBody()
+	if body == nil || p.compilation == nil || b.Func != p.fn {
+		panic(marker + " requires an active PhysicalABIV1 coroutine body")
+	}
+	return body
+}
+
 func (c *coroBodyContext) criticalCallDepth(common *ssa.CallCommon) (coroCriticalCallRole, uint32) {
 	if c == nil || c.critical == nil || common == nil {
 		panic("coroutine critical lowering requires a frozen CFG proof")
@@ -38,8 +55,8 @@ func (c *coroBodyContext) criticalCallDepth(common *ssa.CallCommon) (coroCritica
 }
 
 func (p *context) compileCoroCriticalEnter(b llssa.Builder, common *ssa.CallCommon) {
-	body := p.coroBody()
-	if body == nil || b.Func != p.fn || body.criticalEnter.IsNil() {
+	body := p.requireCoroSchedulerMarkerBody(b, "llgo.coroCriticalEnter")
+	if body.criticalEnter.IsNil() {
 		panic("llgo.coroCriticalEnter requires an active critical-capable coroutine body")
 	}
 	role, depth := body.criticalCallDepth(common)
@@ -59,8 +76,8 @@ func (p *context) compileCoroCriticalEnter(b llssa.Builder, common *ssa.CallComm
 }
 
 func (p *context) compileCoroCriticalExit(b llssa.Builder, common *ssa.CallCommon) {
-	body := p.coroBody()
-	if body == nil || b.Func != p.fn || body.criticalExit.IsNil() {
+	body := p.requireCoroSchedulerMarkerBody(b, "llgo.coroCriticalExit")
+	if body.criticalExit.IsNil() {
 		panic("llgo.coroCriticalExit requires an active critical-capable coroutine body")
 	}
 	role, depth := body.criticalCallDepth(common)
@@ -73,4 +90,21 @@ func (p *context) compileCoroCriticalExit(b llssa.Builder, common *ssa.CallCommo
 		body.instructions = 0
 		body.sourceBlockPollFresh = true
 	}
+}
+
+// compileCoroOSThreadAffinity mutates the scheduler-owned G/P/M lease and then
+// performs one ordinary runnable handoff. The handoff is deliberately part of
+// the marker semantics: it forces the public synchronous wrapper to acquire a
+// coroutine primary, and Lock can return only after the scheduler has selected
+// this same G on its bound physical ownership island.
+func (p *context) compileCoroOSThreadAffinity(b llssa.Builder, lock bool) {
+	body := p.requireCoroSchedulerMarkerBody(b, "llgo OS-thread affinity marker")
+	name := coroOSThreadUnlockHookV1
+	if lock {
+		name = coroOSThreadLockHookV1
+	}
+	// Lock/Unlock use the same exact func(unsafe.Pointer) ABI as critical enter.
+	hook := p.pkg.NewFunc(name, coroCriticalEnterSignature(), llssa.InC)
+	b.Call(hook.Expr, body.task)
+	body.yieldCurrentFrame(b)
 }

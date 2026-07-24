@@ -40,12 +40,6 @@ type plannedFunctionSymbol struct {
 	plan              coro.FunctionPlan
 	planned           bool
 	physical          bool
-	childAwait        bool
-	programRun        bool
-	channel           bool
-	plainDispatch     bool
-	staticSpawn       bool
-	explicitPanic     bool
 	frameRetentionABI string
 	coroPlan          *coro.SSAPlan
 	emission          *EmissionUniverse
@@ -57,11 +51,13 @@ type plannedFunctionSymbol struct {
 
 // resolveFunctionSymbol is shared by function definitions and declarations so
 // they cannot independently choose different primary symbols. The physical
-// descriptor derives the signature from this exact entry. The zero-value
-// compilation and report-only plans deliberately preserve the legacy symbol.
+// descriptor derives the signature from this exact entry. A nil Compilation is
+// accepted only by isolated low-level frontend helpers; production always
+// supplies the compilation-scoped stackless plan.
 func (p *context) resolveFunctionSymbol(fn *ssa.Function) (plannedFunctionSymbol, error) {
-	if p.compilation != nil && p.compilation.CoroEntryResolutionActive() && p.compilation.EmissionUniverse != nil {
-		canonical, ok := p.compilation.EmissionUniverse.Resolve(fn)
+	universe := p.immutableEmissionUniverse()
+	if universe != nil {
+		canonical, ok := universe.Resolve(fn)
 		if !ok {
 			_, unresolvedName, _ := p.funcName(fn)
 			return plannedFunctionSymbol{}, fmt.Errorf("coroutine entry resolution: function %q is absent from the prepared emission universe", unresolvedName)
@@ -69,9 +65,9 @@ func (p *context) resolveFunctionSymbol(fn *ssa.Function) (plannedFunctionSymbol
 		fn = canonical
 	}
 	pkgTypes, name, ftype := p.funcName(fn)
-	if p.compilation != nil && p.compilation.CoroEntryResolutionActive() && p.compilation.EmissionUniverse != nil {
+	if universe != nil {
 		var err error
-		name, err = p.compilation.EmissionUniverse.physicalName(p.goPkg, fn, name)
+		name, err = universe.physicalName(p.goPkg, fn, name)
 		if err != nil {
 			return plannedFunctionSymbol{}, err
 		}
@@ -83,43 +79,38 @@ func (p *context) resolveFunctionSymbol(fn *ssa.Function) (plannedFunctionSymbol
 		baseName: name,
 		ftype:    ftype,
 	}
-	if ftype != goFunc || p.compilation == nil || !p.compilation.CoroEntryResolutionActive() {
+	if ftype != goFunc || p.compilation == nil {
 		return entry, nil
 	}
-	if p.compilation.CoroPlan == nil {
+	whole := p.compilation.immutablePlan()
+	if whole == nil {
 		return entry, fmt.Errorf("coroutine entry resolution requires a compilation CoroPlan")
 	}
-	plan, ok := p.compilation.CoroPlan.FunctionPlan(fn)
+	plan, ok := whole.FunctionPlan(fn)
 	if !ok {
 		return entry, fmt.Errorf("coroutine entry resolution: function %q is absent from the compilation CoroPlan", name)
 	}
 	entry.plan = plan
 	entry.planned = true
-	entry.physical = p.compilation.CoroPhysicalABIActive()
-	entry.childAwait = p.compilation.CoroChildAwaitActive()
-	entry.programRun = p.compilation.CoroProgramBootstrapActive()
-	entry.channel = p.compilation.CoroChannelActive()
-	entry.plainDispatch = p.compilation.CoroPlainDispatchActive()
-	entry.staticSpawn = p.compilation.CoroClosedStaticSpawnActive()
-	entry.explicitPanic = p.compilation.CoroExplicitStatusActive()
+	entry.physical = true
 	entry.frameRetentionABI = p.compilation.CoroFrameRetentionABI
-	entry.coroPlan = p.compilation.CoroPlan
-	entry.emission = p.compilation.EmissionUniverse
+	entry.coroPlan = whole
+	entry.emission = universe
 	// Symbol resolution can happen in a caller package that merely references
 	// fn. Its physical proof belongs to fn's body owner; actual multi-owner body
 	// emission performs its own exact lookup in compileCoroPhysicalBody.
-	if p.compilation.EmissionUniverse != nil {
-		entry.physicalOwner = p.compilation.EmissionUniverse.ownerOf(fn)
+	if universe != nil {
+		entry.physicalOwner = universe.ownerOf(fn)
 	}
 	entry.interfacePlain = p.compilation.coroClosedInterfacePlain
 	entry.managedInterface = p.compilation.coroManagedInterface
-	ignored := p.compilation.CoroPlan.IgnoresBody(fn)
+	ignored := whole.IgnoresBody(fn)
 	assemblyCertified := false
 	if ignored {
-		if p.compilation.EmissionUniverse == nil {
+		if universe == nil {
 			return entry, fmt.Errorf("coroutine entry resolution: Go-emitted function %q has an ignored SSA body", plan.ID)
 		}
-		_, certified, certificateErr := p.compilation.EmissionUniverse.CoroAssemblyNoSuspendCertificate(fn)
+		_, certified, certificateErr := universe.CoroAssemblyNoSuspendCertificate(fn)
 		if certificateErr != nil {
 			return entry, certificateErr
 		}
@@ -147,10 +138,11 @@ func (p *context) resolvePatchOriginalInitSymbol(fn *ssa.Function) (plannedFunct
 	if err != nil {
 		return plannedFunctionSymbol{}, err
 	}
-	if p.compilation == nil || !p.compilation.CoroEntryResolutionActive() || p.compilation.EmissionUniverse == nil {
+	universe := p.immutableEmissionUniverse()
+	if p.compilation == nil || universe == nil {
 		return plannedFunctionSymbol{}, fmt.Errorf("coroutine patch original initializer role requires active entry resolution")
 	}
-	hidden, err := p.compilation.EmissionUniverse.patchOriginalInitPhysicalName(entry.function)
+	hidden, err := universe.patchOriginalInitPhysicalName(entry.function)
 	if err != nil {
 		return plannedFunctionSymbol{}, err
 	}
@@ -174,6 +166,20 @@ func (p *context) mustPatchOriginalInitFunctionSymbol(fn *ssa.Function) plannedF
 	return entry
 }
 
+func coroEntryFunctionDiagnostic(fn *ssa.Function) string {
+	if fn == nil {
+		return "<nil>"
+	}
+	origin := "<nil>"
+	if value := fn.Origin(); value != nil {
+		origin = value.String()
+	}
+	return fmt.Sprintf(
+		"%s [name=%q origin=%q synthetic=%q blocks=%d]",
+		fn.String(), fn.Name(), origin, fn.Synthetic, len(fn.Blocks),
+	)
+}
+
 func validatePlannedFunction(fn *ssa.Function, plan coro.FunctionPlan, hasEmittedBody bool) error {
 	if fn == nil {
 		return fmt.Errorf("coroutine entry resolution: function plan %q has no SSA function", plan.ID)
@@ -186,25 +192,25 @@ func validatePlannedFunction(fn *ssa.Function, plan coro.FunctionPlan, hasEmitte
 		return nil
 	case coro.EmitPlain:
 		if plan.External != coro.Defined || !hasEmittedBody {
-			return fmt.Errorf("coroutine entry resolution: plain emission %q has external kind %s and emitted-body=%t", plan.ID, plan.External, hasEmittedBody)
+			return fmt.Errorf("coroutine entry resolution: plain emission %q (%s) has external kind %s and emitted-body=%t", plan.ID, coroEntryFunctionDiagnostic(fn), plan.External, hasEmittedBody)
 		}
 	case coro.EmitRawPlain:
 		if plan.External != coro.Defined || !hasEmittedBody || !plan.RawPlainOnly ||
 			plan.ManagedDemand != coro.NoDemand || !plan.RawPlainDemand ||
 			plan.Primary != coro.PrimaryPlain || plan.FuncRep != coro.DirectPlain {
 			return fmt.Errorf(
-				"coroutine entry resolution: raw-only emission %q has external=%s emitted-body=%t raw-only=%t managed=%s raw=%t primary=%s representation=%s",
-				plan.ID, plan.External, hasEmittedBody, plan.RawPlainOnly, plan.ManagedDemand,
+				"coroutine entry resolution: raw-only emission %q (%s) has external=%s emitted-body=%t raw-only=%t managed=%s raw=%t primary=%s representation=%s",
+				plan.ID, coroEntryFunctionDiagnostic(fn), plan.External, hasEmittedBody, plan.RawPlainOnly, plan.ManagedDemand,
 				plan.RawPlainDemand, plan.Primary, plan.FuncRep,
 			)
 		}
 	case coro.EmitCoroutine:
 		if plan.External != coro.Defined || !hasEmittedBody {
-			return fmt.Errorf("coroutine entry resolution: coroutine emission %q has external kind %s and emitted-body=%t", plan.ID, plan.External, hasEmittedBody)
+			return fmt.Errorf("coroutine entry resolution: coroutine emission %q (%s) has external kind %s and emitted-body=%t", plan.ID, coroEntryFunctionDiagnostic(fn), plan.External, hasEmittedBody)
 		}
 	case coro.EmitExternal:
 		if plan.External == coro.Defined || hasEmittedBody {
-			return fmt.Errorf("coroutine entry resolution: external emission %q has external kind %s and emitted-body=%t", plan.ID, plan.External, hasEmittedBody)
+			return fmt.Errorf("coroutine entry resolution: external emission %q (%s) has external kind %s and emitted-body=%t", plan.ID, coroEntryFunctionDiagnostic(fn), plan.External, hasEmittedBody)
 		}
 	default:
 		return fmt.Errorf("coroutine entry resolution: function %q has invalid emission kind %d", plan.ID, uint8(plan.Emission))
@@ -213,15 +219,17 @@ func validatePlannedFunction(fn *ssa.Function, plan coro.FunctionPlan, hasEmitte
 }
 
 func (c *Compilation) plannedFunctionEmittedBody(fn *ssa.Function) (bool, error) {
-	if c == nil || c.CoroPlan == nil || c.EmissionUniverse == nil || fn == nil {
+	plan := c.immutablePlan()
+	universe := c.immutableEmissionUniverse()
+	if plan == nil || universe == nil || fn == nil {
 		return false, fmt.Errorf("coroutine entry resolution: cannot classify a nil or unprepared planned function")
 	}
-	background, classified, err := c.EmissionUniverse.FunctionBackground(fn)
+	background, classified, err := universe.FunctionBackground(fn)
 	if err != nil {
 		return false, fmt.Errorf("coroutine entry resolution: classify frozen frontend ABI for %q: %w", fn.Name(), err)
 	}
-	ignored := c.CoroPlan.IgnoresBody(fn)
-	_, assemblyCertified, assemblyErr := c.EmissionUniverse.CoroAssemblyNoSuspendCertificate(fn)
+	ignored := plan.IgnoresBody(fn)
+	_, assemblyCertified, assemblyErr := universe.CoroAssemblyNoSuspendCertificate(fn)
 	if assemblyErr != nil {
 		return false, fmt.Errorf("coroutine entry resolution: classify frozen assembly ABI for %q: %w", fn.Name(), assemblyErr)
 	}
@@ -240,8 +248,8 @@ func (c *Compilation) plannedFunctionEmittedBody(fn *ssa.Function) (bool, error)
 // fail closed instead of silently turning an EmitNone decision into an LLVM
 // declaration.
 func (p *context) omitUnemittedFunction(fn *ssa.Function) bool {
-	if p.compilation != nil && p.compilation.CoroEntryResolutionActive() && p.compilation.EmissionUniverse != nil {
-		canonical, ok := p.compilation.EmissionUniverse.Resolve(fn)
+	if universe := p.immutableEmissionUniverse(); universe != nil {
+		canonical, ok := universe.Resolve(fn)
 		if !ok || canonical == nil {
 			panic(fmt.Errorf("coroutine eager emission: function %q is absent from the prepared emission universe", fn.Name()))
 		}
@@ -305,9 +313,6 @@ func (e plannedFunctionSymbol) checkSupportedWithPhysicalPlan(accept func(*coroP
 				return fmt.Errorf("coroutine entry resolution: raw/interface target %q has unsupported emission %s", e.plan.ID, e.plan.Emission)
 			}
 		} else {
-			if !e.plainDispatch {
-				return fmt.Errorf("coroutine entry resolution: function %q requires an unimplemented dispatch descriptor", e.plan.ID)
-			}
 			if err := validateCoroDynamicDispatchTarget(e.function, e.plan, e.emission); err != nil {
 				return err
 			}
@@ -331,7 +336,7 @@ func (e plannedFunctionSymbol) checkSupportedWithPhysicalPlan(accept func(*coroP
 				return err
 			}
 		}
-		if err := validateCoroPhysicalFunctionValueABI(e.plan, sourceSig, e.plainDispatch); err != nil {
+		if err := validateCoroPhysicalFunctionValueABI(e.plan, sourceSig, true); err != nil {
 			return err
 		}
 		rawMethodToken := e.interfacePlain.acceptsTarget(e.function, e.plan) ||
@@ -342,8 +347,8 @@ func (e plannedFunctionSymbol) checkSupportedWithPhysicalPlan(accept func(*coroP
 			return err
 		}
 		return validateCoroPhysicalABIForOwner(
-			e.function, e.plan, e.coroPlan, e.emission, e.physicalOwner, e.childAwait, e.programRun,
-			e.staticSpawn, e.explicitPanic, e.frameRetentionABI, e.channel, e.plainDispatch, rawMethodToken,
+			e.function, e.plan, e.coroPlan, e.emission, e.physicalOwner, true, true,
+			true, true, e.frameRetentionABI, true, true, rawMethodToken,
 			e.interfacePlain, e.managedInterface, accept,
 		)
 	}
@@ -361,11 +366,8 @@ func (c *Compilation) preflightCoroPlan() error {
 	if c == nil {
 		return nil
 	}
-	if err := c.validateCoroProfile(); err != nil {
+	if err := c.validateCoroTargetCapabilities(); err != nil {
 		return err
-	}
-	if !c.CoroProfile.Active() {
-		return nil
 	}
 	if err := c.validateCoroWorkerUniverseTarget(); err != nil {
 		return err
@@ -381,21 +383,17 @@ func (c *Compilation) preflightCoroPlan() error {
 				return
 			}
 		}
-		plan := c.CoroPlan
+		plan := c.immutablePlan()
 		if plan == nil {
 			c.coroPreflightErr = fmt.Errorf("coroutine entry resolution requires a compilation CoroPlan")
 			return
 		}
-		universe := c.EmissionUniverse
+		universe := c.immutableEmissionUniverse()
 		if universe == nil {
 			c.coroPreflightErr = fmt.Errorf("coroutine entry resolution requires a prepared emission universe")
 			return
 		}
-		if universe.CoroChannelEnabled() != c.CoroChannelActive() {
-			c.coroPreflightErr = fmt.Errorf("coroutine channel lowering disagrees with the prepared emission universe")
-			return
-		}
-		if universe.CoroWorkerEnabled() != c.CoroWorkerActive() {
+		if universe.CoroWorkerSupported() != c.CoroWorkerSupported() {
 			c.coroPreflightErr = fmt.Errorf("coroutine worker lowering disagrees with the prepared emission universe")
 			return
 		}
@@ -404,7 +402,7 @@ func (c *Compilation) preflightCoroPlan() error {
 			return
 		}
 		managedInterface, err := analyzeCoroManagedInterfaceDispatchPlan(
-			plan, universe, c.CoroPlainDispatchActive() && c.CoroChildAwaitActive(),
+			plan, universe, true,
 		)
 		if err != nil {
 			c.coroPreflightErr = err
@@ -412,18 +410,16 @@ func (c *Compilation) preflightCoroPlan() error {
 		}
 		c.coroManagedInterface = managedInterface
 		interfacePlain, err := analyzeCoroClosedInterfacePlainPlan(
-			plan, universe, c.CoroExplicitStatusActive(), c.CoroChildAwaitActive(), managedInterface,
+			plan, universe, true, true, managedInterface,
 		)
 		if err != nil {
 			c.coroPreflightErr = err
 			return
 		}
 		c.coroClosedInterfacePlain = interfacePlain
-		if c.CoroChildAwaitActive() {
-			if err := validateCoroRootEntries(plan); err != nil {
-				c.coroPreflightErr = err
-				return
-			}
+		if err := validateCoroRootEntries(plan); err != nil {
+			c.coroPreflightErr = err
+			return
 		}
 		physicalExpected := make(map[emissionFunctionOwnerKey]none)
 		physicalStage := newCoroPhysicalPlanStage()
@@ -444,20 +440,14 @@ func (c *Compilation) preflightCoroPlan() error {
 				function:          function.Function,
 				plan:              function.Plan,
 				planned:           true,
-				physical:          c.CoroPhysicalABIActive(),
-				childAwait:        c.CoroChildAwaitActive(),
-				programRun:        c.CoroProgramBootstrapActive(),
-				channel:           c.CoroChannelActive(),
-				plainDispatch:     c.CoroPlainDispatchActive(),
-				staticSpawn:       c.CoroClosedStaticSpawnActive(),
-				explicitPanic:     c.CoroExplicitStatusActive(),
+				physical:          true,
 				frameRetentionABI: c.CoroFrameRetentionABI,
 				coroPlan:          plan,
 				emission:          universe,
 				interfacePlain:    c.coroClosedInterfacePlain,
 				managedInterface:  c.coroManagedInterface,
 			}
-			if c.CoroPhysicalABIActive() && function.Plan.Emission == coro.EmitCoroutine {
+			if function.Plan.Emission == coro.EmitCoroutine {
 				owners := universe.sortedUseOwners(function.Function)
 				if len(owners) == 0 {
 					c.coroPreflightErr = fmt.Errorf("coroutine physical preflight: function %q has no exact emission owner", function.Plan.ID)
@@ -479,13 +469,13 @@ func (c *Compilation) preflightCoroPlan() error {
 				c.coroPreflightErr = err
 				return
 			}
-			if c.CoroPhysicalABIActive() && function.Plan.Emission == coro.EmitCoroutine {
+			if function.Plan.Emission == coro.EmitCoroutine {
 				sig, err := universe.coroPhysicalEntrySourceSignature(function.Function)
 				if err == nil {
 					err = validateCoroLeafPhysicalSignature(function.Plan, sig)
 				}
 				if err == nil {
-					err = validateCoroPhysicalFunctionValueABI(function.Plan, sig, c.CoroPlainDispatchActive())
+					err = validateCoroPhysicalFunctionValueABI(function.Plan, sig, true)
 				}
 				if err != nil {
 					c.coroPreflightErr = err
@@ -497,32 +487,23 @@ func (c *Compilation) preflightCoroPlan() error {
 			c.coroPreflightErr = err
 			return
 		}
-		if err := validateCoroRawPlainConsumers(plan, universe, c.CoroPlainDispatchActive()); err != nil {
+		if err := validateCoroRawPlainConsumers(plan, universe, true); err != nil {
 			c.coroPreflightErr = err
 			return
 		}
-		if c.CoroPhysicalABIActive() {
-			c.coroPreflightErr = validateCoroPhysicalConsumersCapabilities(
-				plan, universe, c.CoroChildAwaitActive(), c.CoroClosedStaticSpawnActive(),
-				c.CoroPlainDispatchActive(),
-			)
-			if c.coroPreflightErr != nil {
-				return
-			}
+		c.coroPreflightErr = validateCoroPhysicalConsumersCapabilities(plan, universe, true, true, true)
+		if c.coroPreflightErr != nil {
+			return
 		}
-		if c.CoroPlainDispatchActive() {
-			c.coroPreflightErr = validateCoroPlainDispatchConsumers(
-				plan, universe, c.coroClosedInterfacePlain, c.coroManagedInterface,
-			)
-			if c.coroPreflightErr != nil {
-				return
-			}
+		c.coroPreflightErr = validateCoroPlainDispatchConsumers(
+			plan, universe, c.coroClosedInterfacePlain, c.coroManagedInterface,
+		)
+		if c.coroPreflightErr != nil {
+			return
 		}
-		if c.CoroPhysicalABIActive() {
-			if err := universe.coroProgramIR.commitPhysicalFunctionPlans(physicalStage, physicalExpected); err != nil {
-				c.coroPreflightErr = fmt.Errorf("coroutine physical preflight: commit ProgramIR: %w", err)
-				return
-			}
+		if err := universe.coroProgramIR.commitPhysicalFunctionPlans(physicalStage, physicalExpected); err != nil {
+			c.coroPreflightErr = fmt.Errorf("coroutine physical preflight: commit ProgramIR: %w", err)
+			return
 		}
 	})
 	return c.coroPreflightErr
@@ -557,8 +538,8 @@ func (p *context) mustRawPlainFunctionSymbol(fn *ssa.Function) plannedFunctionSy
 // patch-original role: its raw twin is init$hasPatch, never the public init.
 func (p *context) mustRawPlainFunctionSymbolFromEntry(entry plannedFunctionSymbol, err error) plannedFunctionSymbol {
 	if err == nil {
-		variant := p.compilation != nil && p.compilation.CoroPlan != nil &&
-			p.compilation.CoroPlan.HasRawPlainVariant(entry.function)
+		plan := p.compilation.immutablePlan()
+		variant := plan != nil && plan.HasRawPlainVariant(entry.function)
 		err = validatePlannedRawPlainVariant(entry.function, entry.plan, variant)
 	}
 	if err == nil && (entry.plan.Emission == coro.EmitCoroutine || entry.plan.Emission == coro.EmitRawPlain) {

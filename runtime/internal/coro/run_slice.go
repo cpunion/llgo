@@ -45,7 +45,7 @@ func validExecutorRunCursor(cursor *executorRunCursor, p *P) bool {
 	default:
 		return false
 	}
-	return cursor.issued != ActionInvalid || !cursor.readyDebt || p.current != nil || p.readyHead != nil
+	return cursor.issued != ActionInvalid || !cursor.readyDebt || p.current != nil || runnableForOSThreadOwner(p)
 }
 
 func emptyExecutorRunCursor(driver *ExecutorDriver) bool {
@@ -118,7 +118,7 @@ func serviceExecutorRunSource(driver *ExecutorDriver, now int64, withDeadline bo
 		driver.run.sourceMore = executorRunExternalSourceRequested(driver)
 		driver.run.blocked = progress.Blocked
 		driver.run.actionsSinceSource = 0
-		if driver.p.readyHead != nil {
+		if runnableForOSThreadOwner(driver.p) {
 			driver.run.readyDebt = true
 		}
 	} else {
@@ -133,7 +133,7 @@ func dispatchExecutorRunReady(driver *ExecutorDriver) (ExecutorRunStep, bool) {
 	if !validReadyQueueHeader(p) {
 		return ExecutorRunStep{}, false
 	}
-	g := dequeue(p)
+	g := dequeueOSThreadRunnable(p)
 	if g == nil {
 		return ExecutorRunStep{}, false
 	}
@@ -181,17 +181,17 @@ func nextExecutorRunStepAt(driver *ExecutorDriver, now int64, withDeadline bool)
 		return serviceExecutorRunSource(driver, now, withDeadline)
 	}
 	if driver.run.readyDebt {
-		if p.readyHead != nil {
+		if runnableForOSThreadOwner(p) {
 			return dispatchExecutorRunReady(driver)
 		}
 		driver.run.readyDebt = false
 	}
 	if executorRunSourceRequested(driver) ||
 		driver.run.actionsSinceSource == executorRunSourceQuantum ||
-		p.readyHead == nil && HasWaiting(p) && !driver.run.blocked {
+		!runnableForOSThreadOwner(p) && HasWaiting(p) && !driver.run.blocked {
 		return serviceExecutorRunSource(driver, now, withDeadline)
 	}
-	if p.readyHead != nil {
+	if runnableForOSThreadOwner(p) {
 		return dispatchExecutorRunReady(driver)
 	}
 	return ExecutorRunStep{Kind: ExecutorRunStepIdle}, true
@@ -298,7 +298,7 @@ func CommitExecutorRunDomainDestroy(driver *ExecutorDriver, g *G, receipt Action
 	}
 	p := driver.p
 	schedule := preemptLoad(&p.schedule)
-	if schedule != scheduleIdle && schedule != scheduleRequested || !disableGPreempt(g) {
+	if schedule != scheduleIdle && schedule != scheduleRequested {
 		return Action{}, false
 	}
 	panicking := g.state == GPanicking
@@ -307,6 +307,9 @@ func CommitExecutorRunDomainDestroy(driver *ExecutorDriver, g *G, receipt Action
 			return Action{}, false
 		}
 	} else if g.state != GDispatching || g.panicUnwind || !emptyPanicRecord(&g.panicRecord) {
+		return Action{}, false
+	}
+	if !releaseOSThreadLockForExit(p, g) || !disableGPreempt(g) {
 		return Action{}, false
 	}
 	g.destroyRoot = false

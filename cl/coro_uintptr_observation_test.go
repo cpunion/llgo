@@ -222,7 +222,6 @@ func TestCoroPointerUintptrAffineObservationRemainsFailClosed(t *testing.T) {
 		name string
 		body string
 	}{
-		{name: "return", body: "return uintptr(pointer) + offset"},
 		{name: "store", body: "escaped = uintptr(pointer) + offset; return 0"},
 		{name: "call", body: "consume(uintptr(pointer) + offset); return 0"},
 		{name: "multiply", body: "return (uintptr(pointer) * offset) == 0"},
@@ -266,7 +265,7 @@ func Root(pointer, other unsafe.Pointer, offset uintptr) ` + result + ` { ` + te
 	}
 }
 
-func TestCoroPointerUintptrAffineObservationRequiresNonPreemptingPlan(t *testing.T) {
+func TestCoroPointerUintptrAffineObservationRequiresRetentionForPreemptingPlan(t *testing.T) {
 	ssaPkg, _, files := buildGoSSAPkg(t, coroUintptrObservationFixture)
 	root := ssaPkg.Func("Endpoint")
 	prog := newLLSSAProg(t)
@@ -319,7 +318,85 @@ func TestCoroPointerUintptrAffineObservationRequiresNonPreemptingPlan(t *testing
 		t.Fatal("preempting fixture has no structural affine scalar terminal")
 	}
 	if reason := audit.validateConvert(conversion); !strings.Contains(reason, "not bound to an exact managed-child/worker") {
-		t.Fatalf("NeedsPreempt affine observation rejection = %q", reason)
+		t.Fatalf("preempting affine observation without retention rejection = %q", reason)
+	}
+	audit.frameRetentionABI = CoroFrameRetentionParkABIV2
+	if reason := audit.validateConvert(conversion); reason != "" {
+		t.Fatalf("ParkABIV2 preempting affine observation rejected: %s", reason)
+	}
+}
+
+func TestCoroPointerUintptrInlineAtomicTerminal(t *testing.T) {
+	const source = `package foo
+import "unsafe"
+
+//llgo:link Compare llgo.atomicCmpXchg
+func Compare(ptr *uintptr, old, new uintptr) (uintptr, bool) { return old, false }
+
+func Root(ptr *uintptr) bool {
+	_, swapped := Compare(ptr, 0, uintptr(unsafe.Pointer(ptr)))
+	return swapped
+}
+`
+	ssaPkg, _, files := buildGoSSAPkg(t, source)
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := prepareStacklessEmissionUniverse(prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := ssaPkg.Func("Root")
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	functionIDs.ArchiveReady = true
+	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+		EmissionUniverse:     ssaUniverse,
+		FunctionIDs:          functionIDs,
+		MaxPlainInstructions: -1,
+		OutcomeMode:          coro.OutcomeExplicitStatus,
+		ClassifyFunction: func(function *ssa.Function) (coro.SSAFunctionPolicy, error) {
+			if function == root {
+				return coro.SSAFunctionPolicy{Effect: coro.YieldOnly, Exec: coro.NeedsPreempt | coro.MayUnwind}, nil
+			}
+			return coro.SSAFunctionPolicy{}, nil
+		},
+		ClassifyElidedCall: func(_ *ssa.Function, call ssa.CallInstruction) (bool, error) {
+			semantics, intrinsic, err := universe.CoroIntrinsicCallSiteSemantics(call)
+			return intrinsic && semantics.ElidesManagedCall(), err
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	audit, err := newCoroPhysicalPureSSAAudit(universe, plan, root, CoroFrameRetentionParkABIV2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var conversion *ssa.Convert
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			candidate, ok := instruction.(*ssa.Convert)
+			if ok && coroFrameRetentionPointerToUintptr(candidate) {
+				conversion = candidate
+			}
+		}
+	}
+	if conversion == nil {
+		t.Fatal("atomic fixture has no pointer-to-uintptr conversion")
+	}
+	if coroPointerUintptrScalarTerminal(conversion) {
+		t.Fatal("atomic argument unexpectedly matched the scalar-observation terminal")
+	}
+	if !audit.coroPointerUintptrAtomicTerminal(conversion) {
+		t.Fatal("atomic argument has no exact inline atomic terminal")
+	}
+	if reason := audit.validateConvert(conversion); reason != "" {
+		t.Fatalf("inline atomic pointer word rejected: %s", reason)
 	}
 }
 
@@ -398,7 +475,6 @@ func compileCoroUintptrObservationFixture(
 	}
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroChildAwaitCompilation(compilation)
-	compilation.CoroProfile = CoroProfileStackless
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},

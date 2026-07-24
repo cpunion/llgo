@@ -319,14 +319,14 @@ func NextCommandCancel(p *P) (*G, Action, bool) {
 		!validReadyQueue(p) || !validSchedulerWaitQueues(p) || !emptySchedulerWaitQueues(p) {
 		return nil, Action{}, false
 	}
-	g := p.readyHead
+	g := nextOSThreadRunnable(p)
 	if g == nil {
-		return nil, Action{}, true
+		return nil, Action{}, p.readyHead == nil
 	}
 	if !validCancelableReadyG(g) {
 		return nil, Action{}, false
 	}
-	if dequeue(p) != g {
+	if dequeueOSThreadRunnable(p) != g {
 		return nil, Action{}, false
 	}
 	continuation := g.runAction
@@ -394,7 +394,7 @@ func CancelDestroyed(p *P, g *G, action Action) (Action, bool) {
 	} else if !emptyPanicRecord(&g.panicRecord) {
 		return Action{}, false
 	}
-	if !disableGPreempt(g) {
+	if !releaseOSThreadLockForExit(p, g) || !disableGPreempt(g) {
 		return Action{}, false
 	}
 	g.destroyRoot = false

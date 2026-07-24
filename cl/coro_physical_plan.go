@@ -48,6 +48,7 @@ const (
 	coroPhysicalInstructionTerminalResultAllocation
 	coroPhysicalInstructionFrameAllocation
 	coroPhysicalInstructionFrameBitcastAllocation
+	coroPhysicalInstructionHeapCStr
 )
 
 func (recipe coroPhysicalInstructionRecipe) String() string {
@@ -82,6 +83,8 @@ func (recipe coroPhysicalInstructionRecipe) String() string {
 		return "frame-allocation"
 	case coroPhysicalInstructionFrameBitcastAllocation:
 		return "frame-bitcast-allocation"
+	case coroPhysicalInstructionHeapCStr:
+		return "heap-cstr"
 	default:
 		return fmt.Sprintf("physical-recipe(%d)", uint8(recipe))
 	}
@@ -110,6 +113,7 @@ const (
 	coroPhysicalControlClosedInterfaceAwait
 	coroPhysicalControlManagedInterfaceAwait
 	coroPhysicalControlPlainDispatch
+	coroPhysicalControlRawPlainCall
 	coroPhysicalControlDirectSpawn
 	coroPhysicalControlDispatchSpawn
 )
@@ -128,6 +132,8 @@ func (recipe coroPhysicalControlRecipe) String() string {
 		return "managed-interface-await"
 	case coroPhysicalControlPlainDispatch:
 		return "plain-dispatch"
+	case coroPhysicalControlRawPlainCall:
+		return "raw-plain-call"
 	case coroPhysicalControlDirectSpawn:
 		return "direct-spawn"
 	case coroPhysicalControlDispatchSpawn:
@@ -148,6 +154,7 @@ const (
 	coroPhysicalOperationChannelSelectTry
 	coroPhysicalOperationWorkerSyscall
 	coroPhysicalOperationWorkerForeign
+	coroPhysicalOperationWorkerCgo
 )
 
 func (recipe coroPhysicalOperationRecipe) String() string {
@@ -168,6 +175,8 @@ func (recipe coroPhysicalOperationRecipe) String() string {
 		return "worker-syscall"
 	case coroPhysicalOperationWorkerForeign:
 		return "worker-foreign"
+	case coroPhysicalOperationWorkerCgo:
+		return "worker-cgo"
 	default:
 		return fmt.Sprintf("physical-operation-recipe(%d)", uint8(recipe))
 	}
@@ -186,6 +195,7 @@ const (
 	coroPhysicalOutcomeRunDefers
 	coroPhysicalOutcomePanic
 	coroPhysicalOutcomeRecover
+	coroPhysicalOutcomeGoexit
 	coroPhysicalOutcomeSyntheticSelectTrap
 )
 
@@ -203,6 +213,8 @@ func (recipe coroPhysicalOutcomeRecipe) String() string {
 		return "panic"
 	case coroPhysicalOutcomeRecover:
 		return "recover"
+	case coroPhysicalOutcomeGoexit:
+		return "goexit"
 	case coroPhysicalOutcomeSyntheticSelectTrap:
 		return "synthetic-select-trap"
 	default:
@@ -239,6 +251,7 @@ type coroPhysicalInstructionPlan struct {
 	operation          coroPhysicalOperationRecipe
 	operationFailure   string
 	operationWorker    *coroWorkerForeignCallShape
+	operationCgo       *coroWorkerCgoCallShape
 	outcome            coroPhysicalOutcomeRecipe
 	outcomeFailure     string
 	valueOperand       ssa.Value
@@ -596,6 +609,15 @@ func planCoroPhysicalInstruction(
 		if audit.ctx != nil && emissionIsVargsAlloc(audit.ctx, instruction.X) {
 			break
 		}
+		if audit.ctx != nil {
+			if _, synthetic := audit.ctx.syntheticMakeSliceCap(instruction); synthetic {
+				// The ordinary value recipe is the exact frontend lowering for
+				// this x/tools pair: the synthetic Alloc emits nothing and this
+				// Slice emits runtime.MakeSlice. Its frozen lowered-call record,
+				// not a slice-bounds recipe, owns suspension and unwind.
+				break
+			}
+		}
 		if !explicitPanic {
 			break
 		}
@@ -631,6 +653,20 @@ func planCoroPhysicalInstruction(
 				result.recipe = coroPhysicalInstructionUnsafeString
 			case "Slice":
 				result.recipe = coroPhysicalInstructionUnsafeSlice
+			}
+		}
+		if audit.universe != nil && audit.universe.coroProgramIR != nil {
+			frozen, found, err := audit.universe.coroProgramIR.callSitePlan(instruction)
+			if err != nil {
+				return result, fmt.Errorf("load intrinsic physical SitePlan: %w", err)
+			}
+			if found && frozen.failure == "" && frozen.plan.Intrinsic &&
+				frozen.opcode == llgoAllocaCStr &&
+				frozen.plan.IntrinsicSemantics == CoroIntrinsicCallInlineWithLoweredCalls {
+				if reason := audit.requireFrozenStructuredRuntimeHelpers(instruction, "AllocU", "CStrCopy"); reason != "" {
+					return result, fmt.Errorf("physical llgo.allocaCStr heap storage: %s", reason)
+				}
+				result.recipe = coroPhysicalInstructionHeapCStr
 			}
 		}
 	case *ssa.MakeInterface:
@@ -687,20 +723,38 @@ func planCoroPhysicalOutcomeInstruction(
 			result.outcomeFailure = "explicit panic requires the explicit-status panic ABI"
 			return
 		}
-		if reason := validateCoroExplicitStatusPanic(audit, instruction); reason != "" {
+		if reason := validateCoroExplicitStatusPanic(audit, instruction, capabilities); reason != "" {
 			result.outcomeFailure = reason
 			return
 		}
 		result.outcome = coroPhysicalOutcomePanic
 	case *ssa.Call:
-		if !isCoroRecoverBuiltinCall(instruction) {
+		if isCoroRecoverBuiltinCall(instruction) {
+			if !capabilities.explicitPanic {
+				result.outcomeFailure = "recover builtin requires the explicit-status panic ABI"
+				return
+			}
+			result.outcome = coroPhysicalOutcomeRecover
+			return
+		}
+		if audit.universe == nil || audit.universe.coroProgramIR == nil {
+			return
+		}
+		frozen, found, err := audit.universe.coroProgramIR.callSitePlan(instruction)
+		if err != nil {
+			result.outcomeFailure = "load terminal intrinsic SitePlan: " + err.Error()
+			return
+		}
+		if !found || frozen.failure != "" || !frozen.plan.Intrinsic ||
+			frozen.opcode != llgoCoroGoexit ||
+			frozen.plan.IntrinsicSemantics != CoroIntrinsicCallInlineOutcome {
 			return
 		}
 		if !capabilities.explicitPanic {
-			result.outcomeFailure = "recover builtin requires the explicit-status panic ABI"
+			result.outcomeFailure = "Goexit requires the explicit-status outcome ABI"
 			return
 		}
-		result.outcome = coroPhysicalOutcomeRecover
+		result.outcome = coroPhysicalOutcomeGoexit
 	}
 }
 
@@ -813,7 +867,25 @@ func planCoroPhysicalOperationInstruction(
 		if audit.universe != nil && audit.universe.coroProgramIR != nil {
 			frozen, found, err := audit.universe.coroProgramIR.callSitePlan(instruction)
 			if err != nil {
-				result.operationFailure = "load worker syscall SitePlan: " + err.Error()
+				result.operationFailure = "load worker operation SitePlan: " + err.Error()
+				return
+			}
+			if found && frozen.plan.Elision == CoroCallElidedCgoWorker {
+				if !capabilities.worker {
+					result.operationFailure = "generated cgo call requires the bounded worker capability"
+					return
+				}
+				shape, recognized, err := validateCoroWorkerCgoCall(whole, audit.universe, instruction)
+				if !recognized {
+					result.operationFailure = "generated cgo worker elision has no exact typed call shape"
+					return
+				}
+				if err != nil {
+					result.operationFailure = "invalid generated cgo worker call: " + err.Error()
+					return
+				}
+				result.operation = coroPhysicalOperationWorkerCgo
+				result.operationCgo = &shape
 				return
 			}
 			if found && frozen.plan.Intrinsic && isLLGoSyscallIntrinsic(frozen.opcode) &&
@@ -830,8 +902,12 @@ func planCoroPhysicalOperationInstruction(
 				return
 			}
 		}
+		pointerSize := 0
+		if audit.universe != nil && audit.universe.prog != nil {
+			pointerSize = audit.universe.prog.PointerSize()
+		}
 		shape, recognized, err := validateCoroWorkerForeignCall(
-			whole, audit.universe, instruction, coroWorkerTargetPointerSize(audit.universe),
+			whole, audit.universe, instruction, pointerSize,
 		)
 		if !recognized {
 			return
@@ -842,6 +918,10 @@ func planCoroPhysicalOperationInstruction(
 		}
 		if err != nil {
 			result.operationFailure = "invalid bounded worker foreign call: " + err.Error()
+			return
+		}
+		if shape.nilGuard && !capabilities.explicitPanic {
+			result.operationFailure = "nullable dynamic raw C worker call requires the explicit-status panic ABI"
 			return
 		}
 		result.operation = coroPhysicalOperationWorkerForeign
@@ -867,11 +947,32 @@ func planCoroPhysicalControlInstruction(
 	}
 	switch instruction := instruction.(type) {
 	case *ssa.Call:
-		if !capabilities.childAwait || whole == nil {
+		if whole == nil {
 			return
 		}
 		common := instruction.Common()
 		callPlan, callPlanned := whole.CallPlan(instruction)
+		if callPlanned && callPlan.RawPlain {
+			result.controlFailureHard = true
+			if audit.universe == nil {
+				result.controlFailure = "raw/plain invocation requires one frozen emission universe"
+				return
+			}
+			target, targetPlan, err := validateCoroRawPlainSourceCall(
+				whole, audit.universe.Resolve, instruction,
+			)
+			if err != nil {
+				result.controlFailure = "invalid raw/plain invocation: " + err.Error()
+				return
+			}
+			result.control = coroPhysicalControlRawPlainCall
+			result.controlTarget = target
+			result.controlTargetID = targetPlan.ID
+			return
+		}
+		if !capabilities.childAwait {
+			return
+		}
 		if common != nil && common.IsInvoke() {
 			result.controlFailureHard = true
 			if capabilities.managedInterface.acceptsCall(instruction) {

@@ -43,8 +43,8 @@ type interfacetype = abi.InterfaceType
 type itab struct {
 	inter *interfacetype
 	_type *_type
-	hash  uint32     // copy of _type.hash. Used for type switches.
-	fun   [1]uintptr // variable sized. fun[0]==0 means _type does not implement inter.
+	hash  uint32      // copy of _type.hash. Used for type switches.
+	fun   [1]abi.Text // variable sized. fun[0]==nil means _type does not implement inter.
 }
 
 // -----------------------------------------------------------------------------
@@ -105,14 +105,14 @@ func NewItab(inter *InterfaceType, typ *Type) *Itab {
 
 	u := typ.Uncommon()
 	if u == nil {
-		ret.fun[0] = 0
+		ret.fun[0] = nil
 	} else {
-		data := (*uintptr)(c.Advance(ptr, int(itabHdrSize)))
+		data := (*abi.Text)(c.Advance(ptr, int(itabHdrSize)))
 		mthds := u.Methods()
 		for i, m := range inter.Methods {
 			fn, matched := findMethod(mthds, m)
 			if !matched {
-				ret.fun[0] = 0
+				ret.fun[0] = nil
 				break
 			}
 			if fn == nil {
@@ -121,10 +121,10 @@ func NewItab(inter *InterfaceType, typ *Type) *Itab {
 				// and only panics on call, not at assertion time.
 				fn = abi.Text(c.Func(unreachableMethod))
 			}
-			*c.Advance(data, i) = uintptr(fn)
+			*c.Advance(data, i) = fn
 		}
 	}
-	if ret.fun[0] != 0 {
+	if ret.fun[0] != nil {
 		return addItab(ret)
 	}
 	return ret
@@ -371,7 +371,7 @@ func getitab(inter *interfacetype, typ *_type, canfail bool) *itab {
 
 	m := NewItab(inter, typ)
 
-	if m.fun[0] != 0 {
+	if m.fun[0] != nil {
 		return m
 	}
 	if canfail {

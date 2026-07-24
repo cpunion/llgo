@@ -515,16 +515,33 @@ func checkCgo(fnName string) bool {
 		(fnName[4] == '_' || strings.HasPrefix(fnName[4:], "Check"))
 }
 
-var cgoIgnoredNames = map[string]none{
-	"_Cgo_ptr":        {},
-	"_Cgo_use":        {},
-	"_cgoCheckResult": {},
-	"cgoCheckResult":  {},
+func isCgoIntrinsic(fnName string) bool {
+	if !checkCgo(fnName) {
+		return false
+	}
+	_, ok := llgoInstrs[fnName]
+	return ok
 }
 
-func cgoIgnored(fnName string) bool {
-	_, ok := cgoIgnoredNames[fnName]
-	return ok
+// cgoIntrinsicFunctionName preserves compiler-intrinsic identity across the
+// instantiated SSA functions emitted by Go 1.26 cgo. The instance name may
+// include type arguments while the reserved opcode name lives on its origin.
+func cgoIntrinsicFunctionName(fn *ssa.Function) (string, bool) {
+	for _, candidate := range []*ssa.Function{fn, fn.Origin()} {
+		if candidate == nil {
+			continue
+		}
+		name := candidate.Name()
+		if isCgoIntrinsic(name) {
+			return name, true
+		}
+		if isCgoExternSymbol(candidate) {
+			if opcode, ok := llgoInstrs[name]; ok && opcode != llgoCgoCMalloc {
+				return name, true
+			}
+		}
+	}
+	return "", false
 }
 
 const (
@@ -628,6 +645,16 @@ const (
 	// manager wait. The compiler owns its TimerParkV2 transaction and returns
 	// only Completed/OperationCanceled after exact source cleanup.
 	llgoCoroControlledTimerWait = llgoInstrBase + 0x52
+	// llgoCoroGoexit is the compiler-owned, payload-free terminal outcome used
+	// by runtime.Goexit. It runs the current frame's cleanup and propagates
+	// through parent CompletionRecords without unwinding a native stack.
+	llgoCoroGoexit = llgoInstrBase + 0x53
+	// llgoCoroOSThreadLock and llgoCoroOSThreadUnlock are compiler-owned
+	// current-G affinity operations behind runtime.LockOSThread. Their public
+	// Go wrappers remain ordinary callable functions; these exact markers
+	// cannot be materialized and lower only inside a physical coroutine body.
+	llgoCoroOSThreadLock   = llgoInstrBase + 0x54
+	llgoCoroOSThreadUnlock = llgoInstrBase + 0x55
 
 	llgoAtomicOpLast = llgoAtomicOpBase + int(llssa.OpUMin)
 )
@@ -791,22 +818,23 @@ func llvmTargetFeatureEnabled(features, name string) bool {
 func (p *context) funcName(fn *ssa.Function) (*types.Package, string, int) {
 	var pkg *types.Package
 	var orgName string
+	// Cgo's compiler declarations are identified by a reserved physical name,
+	// even when represented as instantiated SSA functions. Classify exact
+	// intrinsics before the generic-origin path. _Cfunc__CMalloc is the one
+	// deliberate exception: Go 1.26 gives it a real wrapper body which calls
+	// the //go:cgo_unsafe_args _cgo_cmalloc adapter, so retaining that body lets
+	// the ordinary bounded-worker cgo protocol own the blocking allocation.
+	if fname, intrinsic := cgoIntrinsicFunctionName(fn); intrinsic {
+		return nil, fname, llgoInstr
+	}
 	if origin := fn.Origin(); origin != nil {
 		pkg = origin.Pkg.Pkg
 		p.ensureLoaded(pkg)
 		orgName = funcName(pkg, origin, true)
 	} else {
 		fname := fn.Name()
-		if checkCgo(fname) && !cgoIgnored(fname) {
-			return nil, fname, llgoInstr
-		}
 		if strings.HasPrefix(fname, "_cgoexp_") {
 			return nil, fname, ignoredFunc
-		}
-		if isCgoExternSymbol(fn) {
-			if _, ok := llgoInstrs[fname]; ok {
-				return nil, fname, llgoInstr
-			}
 		}
 		if fnPkg := fn.Pkg; fnPkg != nil {
 			pkg = fnPkg.Pkg

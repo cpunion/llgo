@@ -146,6 +146,8 @@ type GCStats struct {
 	GCSys uint64
 }
 
+//llgo:nopreempt
+//llgo:nounwind
 func ReadGCStats() GCStats {
 	var heapInuse, heapIdle uint64
 

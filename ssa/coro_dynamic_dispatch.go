@@ -259,7 +259,16 @@ func (b Builder) prepareCoroDispatchCall(
 		b.AssertNilDeref(descriptorWord)
 	}
 	descriptorPtr := Expr{descriptorWord.impl, b.Prog.Pointer(b.Prog.coroDispatchDescriptorType())}
-	descriptor := b.Load(descriptorPtr)
+	var descriptor Expr
+	if opts.DescriptorNonNil {
+		// A compile-time null descriptor can remain in the continuation of a
+		// frontend-owned constant-true fault branch until LLVM simplifies the
+		// unreachable block. LoadKnownNonNil prevents that dead load from
+		// recreating the very AssertNilDeref edge suppressed above.
+		descriptor = b.LoadKnownNonNil(descriptorPtr)
+	} else {
+		descriptor = b.Load(descriptorPtr)
+	}
 	fields := make([]Expr, 8)
 	for i := range fields {
 		fields[i] = b.Field(descriptor, i)

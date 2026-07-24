@@ -492,6 +492,15 @@ func (fleet *ExecutorFleet) PostTaskControlAndRequest(id OperationID, kind TaskC
 	return fleet.routes.PostTaskControlAndRequest(id, kind)
 }
 
+// RequestTimerExecutor routes an already durable controlled-timer generation
+// change to the exact owner encoded by route.
+func (fleet *ExecutorFleet) RequestTimerExecutor(route RouteID) ExecutorRequestResult {
+	if fleet == nil || fleet.magic != executorFleetMagic {
+		return ExecutorRequestInvalid
+	}
+	return fleet.routes.RequestTimerExecutor(route)
+}
+
 // RequestChannelExecutor routes the wake half of an already committed typed
 // channel rendezvous. The Channel source fact is published by the hchan
 // transaction before this call; this method only resolves and requests the

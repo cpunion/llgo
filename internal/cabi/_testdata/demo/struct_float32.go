@@ -1,19 +1,14 @@
 package main
 
-import "unsafe"
-
 const (
 	LLGoFiles = "../wrap/struct_float32.c"
 )
 
 type pointer = *int8
 
-//go:linkname printf C.printf
-func printf(format *byte, __llgo_va_list ...any) int32
-
 func assert(info string, b bool) {
 	if !b {
-		printf(unsafe.StringData("Assertion failed: %s\n\000"), unsafe.StringData(info))
+		panic(info)
 	}
 }
 
@@ -24,6 +19,7 @@ type point1 struct {
 	x0 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo1 C.demo1
 func cdemo1(a point1) point1
 
@@ -42,6 +38,7 @@ type point2 struct {
 	x1 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo2 C.demo2
 func cdemo2(a point2) point2
 
@@ -61,6 +58,7 @@ type point3 struct {
 	x2 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo3 C.demo3
 func cdemo3(a point3) point3
 
@@ -81,6 +79,7 @@ type point4 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo4 C.demo4
 func cdemo4(a point4) point4
 
@@ -102,6 +101,7 @@ type point5 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo5 C.demo5
 func cdemo5(a point5) point5
 
@@ -124,6 +124,7 @@ type point6 struct {
 	x5 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo6 C.demo6
 func cdemo6(a point6) point6
 
@@ -147,6 +148,7 @@ type point7 struct {
 	x6 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo7 C.demo7
 func cdemo7(a point7) point7
 
@@ -171,6 +173,7 @@ type point8 struct {
 	x7 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo8 C.demo8
 func cdemo8(a point8) point8
 
@@ -196,6 +199,7 @@ type point9 struct {
 	x8 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo9 C.demo9
 func cdemo9(a point9) point9
 
@@ -222,6 +226,7 @@ type point10 struct {
 	x9 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo10 C.demo10
 func cdemo10(a point10) point10
 
@@ -249,6 +254,7 @@ type point11 struct {
 	x10 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo11 C.demo11
 func cdemo11(a point11) point11
 
@@ -277,6 +283,7 @@ type point12 struct {
 	x11 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo12 C.demo12
 func cdemo12(a point12) point12
 
@@ -306,6 +313,7 @@ type point13 struct {
 	x12 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo13 C.demo13
 func cdemo13(a point13) point13
 
@@ -336,6 +344,7 @@ type point14 struct {
 	x13 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo14 C.demo14
 func cdemo14(a point14) point14
 
@@ -367,6 +376,7 @@ type point15 struct {
 	x14 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo15 C.demo15
 func cdemo15(a point15) point15
 
@@ -399,6 +409,7 @@ type point16 struct {
 	x15 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo16 C.demo16
 func cdemo16(a point16) point16
 
@@ -432,6 +443,7 @@ type point17 struct {
 	x16 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo17 C.demo17
 func cdemo17(a point17) point17
 
@@ -466,6 +478,7 @@ type point18 struct {
 	x17 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo18 C.demo18
 func cdemo18(a point18) point18
 
@@ -501,6 +514,7 @@ type point19 struct {
 	x18 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo19 C.demo19
 func cdemo19(a point19) point19
 
@@ -537,6 +551,7 @@ type point20 struct {
 	x19 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo20 C.demo20
 func cdemo20(a point20) point20
 

@@ -126,7 +126,7 @@ func calls(fn func()) {
 	input := CoroPlanInput{Program: ssaPkg.Prog, callSitePlan: baseCallSitePlan}
 	plan, err := input.Analyze(coro.Roots{
 		{Function: ssaPkg.Func("init"), Demand: coro.SyncDemand},
-		{Function: ssaPkg.Func("calls"), Demand: coro.SyncDemand},
+		{Function: ssaPkg.Func("calls"), Demand: coro.AsyncDemand},
 	}, coro.SSAConfig{MaxPlainInstructions: -1})
 	if err != nil {
 		t.Fatal(err)
@@ -160,7 +160,7 @@ func calls(fn func()) {
 	if directOrdinary == nil {
 		t.Fatal("calls body has no ordinary direct target call")
 	}
-	_, err = input.Analyze(coro.Roots{{Function: ssaPkg.Func("calls"), Demand: coro.SyncDemand}}, coro.SSAConfig{
+	_, err = input.Analyze(coro.Roots{{Function: ssaPkg.Func("calls"), Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		MaxPlainInstructions: -1,
 		ClassifyElidedCall: func(_ *ssa.Function, call ssa.CallInstruction) (bool, error) {
 			return call == directOrdinary, nil
@@ -521,12 +521,14 @@ func __llgo_coro_program_run_slice_v2(unsafe.Pointer, unsafe.Pointer, uint32, *c
 func __llgo_coro_program_continue_slice_v2(uint32, uint32, uint32, uint32, *coroProgramRunResultV2) uint32 { return 0 }
 func __llgo_coro_worker_park_v1() {}
 func __llgo_coro_worker_resume_v1() {}
+func __llgo_coro_os_thread_locked_v1(unsafe.Pointer) bool { return false }
+func __llgo_coro_os_thread_foreign_call_v1(unsafe.Pointer, uintptr, uint32, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, *uintptr, *uintptr, *uintptr) {}
 func __llgo_coro_native_worker_complete_v1(uint32, uint32, uintptr, uintptr, uintptr) uint32 { return 0 }
 func __llgo_coro_native_fleet_owner_v1() uint32 { return 0 }
 func __llgo_coro_timer_park_v2(g, handle, header, storage unsafe.Pointer, delay int64) {}
-func __llgo_coro_timer_park_controlled_v2(g, handle, header, storage, controller unsafe.Pointer, control *uint32, expected uint32, deadline int64) {}
+func __llgo_coro_timer_park_controlled_v2(g, handle, header, storage, controller unsafe.Pointer, control, ownerRoute *uint32, expected uint32, deadline int64) {}
 func __llgo_coro_timer_resume_v2(g, storage unsafe.Pointer) uint32 { return 1 }
-func __llgo_coro_timer_cancel_controlled_v2(controller unsafe.Pointer, expected uint32) uint32 { return 0 }
+func __llgo_coro_timer_request_controlled_v2(route uint32) uint32 { return 0 }
 func __llgo_coro_poll_park_v2(g, handle, header, storage unsafe.Pointer, context uintptr, fd int32, interest uint32, deadline int64) {}
 func __llgo_coro_poll_resume_v2(g, storage unsafe.Pointer) uint32 { return 1 }
 func __llgo_coro_poll_update_deadline_or_abort_v1(context uintptr, interest uint32, deadline int64) {}
@@ -553,6 +555,8 @@ func __llgo_coro_complete_prepare_v1() {}
 func __llgo_coro_complete_prepare_v2(g, handle, header unsafe.Pointer, status uint32) {}
 func __llgo_coro_critical_enter_v1(g unsafe.Pointer) {}
 func __llgo_coro_critical_exit_v1(g unsafe.Pointer) bool { return false }
+func __llgo_coro_os_thread_lock_v1(g unsafe.Pointer) {}
+func __llgo_coro_os_thread_unlock_v1(g unsafe.Pointer) {}
 func __llgo_coro_frame_free_v1() {}
 func __llgo_coro_chan_send_park_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uintptr) {}
 func __llgo_coro_chan_recv_park_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uintptr) {}
@@ -569,6 +573,8 @@ func __llgo_coro_panic_prepare_v1() {}
 func __llgo_coro_recover_take_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_fault_payload_v1(uint32, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_fault_prepare_v1() {}
+func __llgo_coro_fault_payload_v2(uint32, uintptr, uintptr, unsafe.Pointer, unsafe.Pointer) {}
+func __llgo_coro_fault_prepare_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32, uintptr, uintptr) {}
 func __llgo_coro_spawn_begin_v1() {}
 func __llgo_coro_spawn_commit_v1() {}
 func __llgo_coro_program_main_return_v1() {}
@@ -595,7 +601,7 @@ func atomicExchange(*uint32, uint32) uint32
 		t.Fatal(err)
 	}
 	ctx := &context{
-		buildConf:       &Config{CoroProfile: CoroProfileStackless},
+		buildConf:       &Config{},
 		coroEmission:    emission,
 		coroSSAEmission: ssaEmission,
 	}
@@ -670,6 +676,8 @@ func atomicExchange(*uint32, uint32) uint32
 		"__llgo_coro_complete_prepare_v2",
 		"__llgo_coro_critical_enter_v1",
 		"__llgo_coro_critical_exit_v1",
+		coroOSThreadLockSymbolV1,
+		coroOSThreadUnlockSymbolV1,
 		"CoroChanTrySend",
 		"CoroChanTryRecv",
 		"CoroChanTryClose",
@@ -680,9 +688,11 @@ func atomicExchange(*uint32, uint32) uint32
 		coroChanRecvParkSymbolV1,
 		coroChanResumeSymbolV1,
 		"__llgo_coro_fault_prepare_v1",
+		"__llgo_coro_fault_prepare_v2",
 		"__llgo_coro_panic_prepare_v1",
 		"__llgo_coro_recover_take_v1",
 		"__llgo_coro_fault_payload_v1",
+		"__llgo_coro_fault_payload_v2",
 		"__llgo_coro_spawn_begin_v1",
 		"__llgo_coro_spawn_commit_v1",
 		coroProgramMainReturnSymbolV1,
@@ -703,7 +713,7 @@ func atomicExchange(*uint32, uint32) uint32
 		coroTimerParkSymbolV2,
 		coroTimerParkControlledSymbolV2,
 		coroTimerResumeSymbolV2,
-		coroTimerCancelControlledSymbolV2,
+		coroTimerRequestControlledSymbolV2,
 		coroPollParkSymbolV2,
 		coroPollResumeSymbolV2,
 		coroPollUpdateDeadlineOrAbortSymbolV1,
@@ -723,8 +733,7 @@ func atomicExchange(*uint32, uint32) uint32
 	timerCtx := &context{
 		buildConf: &Config{
 			Goos:   "linux",
-			Goarch: "amd64", CoroProfile: CoroProfileStackless,
-		},
+			Goarch: "amd64"},
 		coroEmission:    ctx.coroEmission,
 		coroSSAEmission: ctx.coroSSAEmission,
 	}
@@ -740,12 +749,14 @@ func atomicExchange(*uint32, uint32) uint32
 		coroProgramContinueSliceSymbolV2,
 		coroWorkerParkSymbolV1,
 		coroWorkerResumeSymbolV1,
+		coroOSThreadLockedSymbolV1,
+		coroOSThreadForeignCallSymbolV1,
 		coroNativeWorkerCompleteSymbolV1,
 		coroNativeFleetOwnerSymbolV1,
 		coroTimerParkSymbolV2,
 		coroTimerParkControlledSymbolV2,
 		coroTimerResumeSymbolV2,
-		coroTimerCancelControlledSymbolV2,
+		coroTimerRequestControlledSymbolV2,
 		coroPollParkSymbolV2,
 		coroPollResumeSymbolV2,
 		coroPollUpdateDeadlineOrAbortSymbolV1,
@@ -801,7 +812,7 @@ func atomicExchange(*uint32, uint32) uint32
 		coroTimerParkSymbolV2,
 		coroTimerParkControlledSymbolV2,
 		coroTimerResumeSymbolV2,
-		coroTimerCancelControlledSymbolV2,
+		coroTimerRequestControlledSymbolV2,
 		coroPollParkSymbolV2,
 		coroPollResumeSymbolV2,
 		coroPollUpdateDeadlineOrAbortSymbolV1,
@@ -868,17 +879,16 @@ func atomicExchange(*uint32, uint32) uint32
 	if invalidControlledParkErr == nil || !strings.Contains(invalidControlledParkErr.Error(), "controlled coroutine timer park V2 ABI") {
 		t.Fatalf("invalid controlled timer V2 park ABI error = %v", invalidControlledParkErr)
 	}
-	controlledCancelFn := ssaPkg.Func(coroTimerCancelControlledSymbolV2)
-	originalControlledCancelSignature := controlledCancelFn.Signature
-	controlledCancelFn.Signature = types.NewSignatureType(nil, nil, nil,
+	controlledRequestFn := ssaPkg.Func(coroTimerRequestControlledSymbolV2)
+	originalControlledRequestSignature := controlledRequestFn.Signature
+	controlledRequestFn.Signature = types.NewSignatureType(nil, nil, nil,
 		types.NewTuple(
-			types.NewParam(token.NoPos, nil, "controller", types.Typ[types.UnsafePointer]),
-			types.NewParam(token.NoPos, nil, "expected", types.Typ[types.Uint32]),
+			types.NewParam(token.NoPos, nil, "route", types.Typ[types.Uint64]),
 		), types.NewTuple(types.NewParam(token.NoPos, nil, "result", types.Typ[types.Bool])), false)
-	_, _, _, _, invalidControlledCancelErr := requiredCoroProgramRuntimePlan(timerCtx)
-	controlledCancelFn.Signature = originalControlledCancelSignature
-	if invalidControlledCancelErr == nil || !strings.Contains(invalidControlledCancelErr.Error(), "controlled coroutine timer cancel V2 ABI") {
-		t.Fatalf("invalid controlled timer V2 cancel ABI error = %v", invalidControlledCancelErr)
+	_, _, _, _, invalidControlledRequestErr := requiredCoroProgramRuntimePlan(timerCtx)
+	controlledRequestFn.Signature = originalControlledRequestSignature
+	if invalidControlledRequestErr == nil || !strings.Contains(invalidControlledRequestErr.Error(), "controlled coroutine timer request V2 ABI") {
+		t.Fatalf("invalid controlled timer V2 request ABI error = %v", invalidControlledRequestErr)
 	}
 	pollParkFn := ssaPkg.Func(coroPollParkSymbolV2)
 	originalPollParkSignature := pollParkFn.Signature
@@ -1014,12 +1024,17 @@ func atomicExchange(*uint32, uint32) uint32
 	recoverHook := ssaPkg.Func("__llgo_coro_recover_take_v1")
 	payloadHook := ssaPkg.Func("__llgo_coro_fault_payload_v1")
 	faultHook := ssaPkg.Func("__llgo_coro_fault_prepare_v1")
-	if panicHook == nil || recoverHook == nil || payloadHook == nil || faultHook == nil {
+	payloadArgsHook := ssaPkg.Func("__llgo_coro_fault_payload_v2")
+	faultArgsHook := ssaPkg.Func("__llgo_coro_fault_prepare_v2")
+	if panicHook == nil || recoverHook == nil || payloadHook == nil || faultHook == nil ||
+		payloadArgsHook == nil || faultArgsHook == nil {
 		t.Fatal("explicit-status panic hooks are absent from the runtime fixture")
 	}
-	for _, hook := range []*ssa.Function{panicHook, recoverHook, payloadHook, faultHook} {
+	for _, hook := range []*ssa.Function{
+		panicHook, recoverHook, payloadHook, faultHook, payloadArgsHook, faultArgsHook,
+	} {
 		if _, ok := requiredPlain[hook]; !ok {
-			t.Fatalf("stackless profile hook %q is absent from the required plain island", hook.Name())
+			t.Fatalf("stackless architecture hook %q is absent from the required plain island", hook.Name())
 		}
 	}
 	originalPayloadSignature := payloadHook.Signature
@@ -1033,6 +1048,33 @@ func atomicExchange(*uint32, uint32) uint32
 	if invalidPayloadErr == nil || !strings.Contains(invalidPayloadErr.Error(), "fault payload ABI") {
 		t.Fatalf("invalid fault payload ABI error = %v", invalidPayloadErr)
 	}
+	originalPayloadArgsSignature := payloadArgsHook.Signature
+	payloadArgsHook.Signature = types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(
+			types.NewParam(token.NoPos, nil, "kind", types.Typ[types.Uint32]),
+			types.NewParam(token.NoPos, nil, "arg0", types.Typ[types.Uintptr]),
+			types.NewParam(token.NoPos, nil, "typeOut", types.Typ[types.UnsafePointer]),
+			types.NewParam(token.NoPos, nil, "dataOut", types.Typ[types.UnsafePointer]),
+		), types.NewTuple(), false)
+	_, _, _, _, invalidPayloadArgsErr := requiredCoroProgramRuntimePlan(ctx)
+	payloadArgsHook.Signature = originalPayloadArgsSignature
+	if invalidPayloadArgsErr == nil || !strings.Contains(invalidPayloadArgsErr.Error(), "parameterized coroutine fault payload ABI") {
+		t.Fatalf("invalid parameterized fault payload ABI error = %v", invalidPayloadArgsErr)
+	}
+	originalFaultArgsSignature := faultArgsHook.Signature
+	faultArgsHook.Signature = types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(
+			types.NewParam(token.NoPos, nil, "g", types.Typ[types.UnsafePointer]),
+			types.NewParam(token.NoPos, nil, "handle", types.Typ[types.UnsafePointer]),
+			types.NewParam(token.NoPos, nil, "header", types.Typ[types.UnsafePointer]),
+			types.NewParam(token.NoPos, nil, "kind", types.Typ[types.Uint32]),
+			types.NewParam(token.NoPos, nil, "arg0", types.Typ[types.Uintptr]),
+		), types.NewTuple(), false)
+	_, _, _, _, invalidFaultArgsErr := requiredCoroProgramRuntimePlan(ctx)
+	faultArgsHook.Signature = originalFaultArgsSignature
+	if invalidFaultArgsErr == nil || !strings.Contains(invalidFaultArgsErr.Error(), "parameterized coroutine fault prepare ABI") {
+		t.Fatalf("invalid parameterized fault prepare ABI error = %v", invalidFaultArgsErr)
+	}
 	channelNames := []string{
 		"CoroChanTrySend",
 		"CoroChanTryRecv",
@@ -1044,6 +1086,7 @@ func atomicExchange(*uint32, uint32) uint32
 		coroChanRecvParkSymbolV1,
 		coroChanResumeSymbolV1,
 		"__llgo_coro_fault_prepare_v1",
+		"__llgo_coro_fault_prepare_v2",
 	}
 	for _, name := range channelNames {
 		fn := ssaPkg.Func(name)
@@ -1252,14 +1295,16 @@ func atomicExchange(*uint32, uint32) uint32
 	}
 }
 
-func TestStacklessProfileDoesNotExposePartialRuntimeModes(t *testing.T) {
-	conf := &Config{CoroProfile: CoroProfileStackless}
-	if !conf.coroEntryResolutionActive() || !conf.coroPhysicalABIActive() ||
-		!conf.coroChildAwaitActive() || !conf.coroPlainDispatchActive() ||
-		!conf.coroClosedStaticSpawnActive() || !conf.coroProgramBootstrapABIActive() ||
-		!conf.coroProgramBootstrapActive() || !conf.coroChannelActive() ||
-		!conf.coroExplicitStatusActive() {
-		t.Fatal("stackless profile exposed a partial compiler/runtime mode")
+func TestStacklessArchitectureHasOneABIIdentity(t *testing.T) {
+	conf := &Config{}
+	if got := activeCoroABIVersion(conf); got != coro.PhysicalABIV1 {
+		t.Fatalf("coroutine ABI = %q", got)
+	}
+	if got := activeCoroPanicABIVersion(conf); got != coro.PanicExplicitStatusABIV0 {
+		t.Fatalf("panic ABI = %q", got)
+	}
+	if got := activeCoroFuncRepABIVersion(conf); got != coro.FuncRepABIV1 {
+		t.Fatalf("function representation ABI = %q", got)
 	}
 }
 
@@ -1283,6 +1328,8 @@ func __llgo_coro_complete_prepare_v1() {}
 func __llgo_coro_complete_prepare_v2(g, handle, header unsafe.Pointer, status uint32) {}
 func __llgo_coro_critical_enter_v1(g unsafe.Pointer) {}
 func __llgo_coro_critical_exit_v1(g unsafe.Pointer) bool { return false }
+func __llgo_coro_os_thread_lock_v1(g unsafe.Pointer) {}
+func __llgo_coro_os_thread_unlock_v1(g unsafe.Pointer) {}
 func __llgo_coro_frame_free_v1() {}
 func __llgo_coro_chan_send_park_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uintptr) {}
 func __llgo_coro_chan_recv_park_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uintptr) {}
@@ -1296,9 +1343,11 @@ func CoroChanSelectTry(...ChanOp) (int, bool, bool, bool) { return 0, false, fal
 func CoroChanSelectPark(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) {}
 func CoroChanSelectResume(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) (int, bool, uint32) { return 0, false, 0 }
 func __llgo_coro_fault_prepare_v1() {}
+func __llgo_coro_fault_prepare_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32, uintptr, uintptr) {}
 func __llgo_coro_panic_prepare_v1() {}
 func __llgo_coro_recover_take_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_fault_payload_v1(uint32, unsafe.Pointer, unsafe.Pointer) {}
+func __llgo_coro_fault_payload_v2(uint32, uintptr, uintptr, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_spawn_begin_v1() {}
 func __llgo_coro_spawn_commit_v1() {}
 func __llgo_coro_program_main_return_v1() {}
@@ -1320,7 +1369,7 @@ func inlineIntrinsic(string) *byte
 		t.Fatal(err)
 	}
 	ctx := &context{
-		buildConf:       &Config{CoroProfile: CoroProfileStackless},
+		buildConf:       &Config{},
 		coroEmission:    emission,
 		coroSSAEmission: ssaEmission,
 	}
@@ -1394,8 +1443,10 @@ func install() {
 		t.Fatalf("managed/raw C callback plan = %+v, want managed coroutine primary plus exact raw callback variant", mixedCallback)
 	}
 	dynamicPlan, ok := plan.FunctionPlan(dynamicCallback)
-	if !ok || !dynamicPlan.Effect.IsOpaque() || dynamicPlan.FuncRep != coro.DirectCoro || dynamicPlan.RawPlainDemand {
-		t.Fatalf("dynamic C callback plan = %+v, want managed opaque blocker without a raw entry", dynamicPlan)
+	if !ok || dynamicPlan.Effect.IsOpaque() ||
+		!dynamicPlan.Effect.Contains(coro.AwaitStructured|coro.OutcomeStructured) ||
+		dynamicPlan.Exec.IsOpaque() || dynamicPlan.FuncRep != coro.DirectCoro || dynamicPlan.RawPlainDemand {
+		t.Fatalf("dynamic C callback plan = %+v, want a closed-dynamic managed blocker without a raw entry", dynamicPlan)
 	}
 
 	var dynamicUse ssa.CallInstruction
@@ -1751,19 +1802,20 @@ func __llgo_coro_await_consume_v1(g, parent, typeOut, dataOut unsafe.Pointer) ui
 func __llgo_coro_complete_prepare_v2(g, handle, header unsafe.Pointer, status uint32) {}
 func __llgo_coro_critical_enter_v1(g unsafe.Pointer) {}
 func __llgo_coro_critical_exit_v1(g unsafe.Pointer) bool { return false }
+func __llgo_coro_os_thread_lock_v1(g unsafe.Pointer) {}
+func __llgo_coro_os_thread_unlock_v1(g unsafe.Pointer) {}
 `
 
 func buildRequiredCoroRuntimeFixture(t *testing.T, body string) requiredCoroRuntimeFixture {
 	t.Helper()
-	return buildRequiredCoroRuntimeFixtureSource(t, requiredCoroPhysicalRuntimeFixture+body)
+	return buildRequiredCoroRuntimeFixtureSource(t, requiredCoroPhysicalRuntimeFixture+body, true)
 }
 
-func buildRequiredCoroRuntimeFixtureSource(t *testing.T, body string) requiredCoroRuntimeFixture {
-	t.Helper()
-	return buildRequiredCoroRuntimeFixtureSourceProfile(t, body, CoroProfileStackless)
-}
-
-func buildRequiredCoroRuntimeFixtureSourceProfile(t *testing.T, body string, profile coro.RuntimeProfile) requiredCoroRuntimeFixture {
+func buildRequiredCoroRuntimeFixtureSource(
+	t *testing.T,
+	body string,
+	validateRuntimePlan bool,
+) requiredCoroRuntimeFixture {
 	t.Helper()
 	source := `package runtime
 import "unsafe"
@@ -1792,9 +1844,11 @@ func CoroChanSelectTry(...ChanOp) (int, bool, bool, bool) { return 0, false, fal
 func CoroChanSelectPark(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) {}
 func CoroChanSelectResume(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) (int, bool, uint32) { return 0, false, 0 }
 func __llgo_coro_fault_prepare_v1() {}
+func __llgo_coro_fault_prepare_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32, uintptr, uintptr) {}
 func __llgo_coro_panic_prepare_v1() {}
 func __llgo_coro_recover_take_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_fault_payload_v1(uint32, unsafe.Pointer, unsafe.Pointer) {}
+func __llgo_coro_fault_payload_v2(uint32, uintptr, uintptr, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_spawn_begin_v1() {}
 func __llgo_coro_spawn_commit_v1() {}
 func __llgo_coro_program_main_return_v1() {}
@@ -1818,10 +1872,16 @@ func __llgo_coro_program_main_return_v1() {}
 	}
 	ctx := &context{
 		prog:                        prog,
-		buildConf:                   &Config{CoroProfile: profile},
+		buildConf:                   &Config{},
 		coroEmission:                emission,
 		coroSSAEmission:             ssaEmission,
 		coroTLSDestructorFixturePkg: llssa.PkgRuntime,
+	}
+	if !validateRuntimePlan {
+		// Negative ABI tests need the parsed, immutable emission universe but
+		// intentionally cannot build the required-root closure yet: the error
+		// under test is produced by that exact operation.
+		return requiredCoroRuntimeFixture{pkg: ssaPkg, ctx: ctx}
 	}
 	roots, requiredPlain, directPlain, closedDynamic, err := requiredCoroProgramRuntimePlan(ctx)
 	if err != nil {
@@ -1868,6 +1928,8 @@ func TestRequiredCoroProgramRuntimePlanCriticalRoots(t *testing.T) {
 func __llgo_coro_await_prepare_v3() {}
 func __llgo_coro_await_consume_v1() {}
 func __llgo_coro_complete_prepare_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32) {}
+func __llgo_coro_os_thread_lock_v1(unsafe.Pointer) {}
+func __llgo_coro_os_thread_unlock_v1(unsafe.Pointer) {}
 `
 	const exact = physicalHooks + `
 func __llgo_coro_critical_enter_v1(unsafe.Pointer) {}
@@ -1875,8 +1937,7 @@ func __llgo_coro_critical_exit_v1(unsafe.Pointer) bool { return false }
 func install() {}
 `
 	t.Run("exact runnable PhysicalABIV1 roots", func(t *testing.T) {
-		fixture := buildRequiredCoroRuntimeFixtureSource(t, exact)
-		fixture.ctx.buildConf.CoroProfile = CoroProfileStackless
+		fixture := buildRequiredCoroRuntimeFixtureSource(t, exact, true)
 		roots, requiredPlain, _, _, err := requiredCoroProgramRuntimePlan(fixture.ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -1929,8 +1990,7 @@ func install() {}
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			fixture := buildRequiredCoroRuntimeFixtureSourceProfile(t, test.body, CoroProfileNone)
-			fixture.ctx.buildConf.CoroProfile = CoroProfileStackless
+			fixture := buildRequiredCoroRuntimeFixtureSource(t, test.body, false)
 			_, _, _, _, err := requiredCoroProgramRuntimePlan(fixture.ctx)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("critical runtime root error = %v, want substring %q", err, test.want)
@@ -1941,8 +2001,7 @@ func install() {}
 
 func TestBuildCoroPlanRejectsPartialStacklessArchive(t *testing.T) {
 	err := buildCoroPlan(&context{buildConf: &Config{
-		BuildMode:   BuildModeCArchive,
-		CoroProfile: CoroProfileStackless,
+		BuildMode: BuildModeCArchive,
 	}})
 	if err == nil || !strings.Contains(err.Error(), "executable build mode is required") {
 		t.Fatalf("partial stackless archive error = %v", err)
@@ -1974,9 +2033,7 @@ func Leaf(value uint32) uint32 { return value + 1 }
 		prog := llssa.NewProgram(nil)
 		defer prog.Dispose()
 		prog.EnableFuncInfoMetadata(true)
-		universe, err := cl.PrepareEmissionUniverseWithOptions(prog, nil, []cl.EmissionPackage{{SSA: ssaPkg, Files: files}}, cl.EmissionUniverseOptions{
-			CoroProfile: cl.CoroProfileStackless,
-		})
+		universe, err := cl.PrepareEmissionUniverseWithOptions(prog, nil, []cl.EmissionPackage{{SSA: ssaPkg, Files: files}}, cl.EmissionUniverseOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2017,8 +2074,7 @@ func Leaf(value uint32) uint32 { return value + 1 }
 			SchedulerABI:            coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 			PanicABI:                coro.PanicExplicitStatusABIV0,
 			FuncRepABI:              coro.FuncRepABIV1,
-			EmissionUniverse:        universe, CoroProfile: cl.CoroProfileStackless,
-		}
+			EmissionUniverse:        universe}
 		lpkg, _, err := cl.NewPackageExWithEmbedOptions(prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{}, cl.PackageOptions{
 			Compilation: compilation,
 			CacheHit:    cacheHit,
@@ -2050,88 +2106,6 @@ func Leaf(value uint32) uint32 { return value + 1 }
 	}
 	if !found {
 		t.Fatalf("cache registration funcinfo is missing %q: %+v", wantSymbol, cachedRecords)
-	}
-}
-
-func TestCoroPlanBuilderRunsBeforeCodegenWithoutChangingIR(t *testing.T) {
-	t.Setenv(llgoBuildCache, "on")
-	cacheRoot := t.TempDir()
-	oldCacheRootFunc := cacheRootFunc
-	cacheRootFunc = func() string { return cacheRoot }
-	t.Cleanup(func() { cacheRootFunc = oldCacheRootFunc })
-
-	var (
-		builderCalls       int
-		builderDone        bool
-		planned            *coro.SSAPlan
-		mainFn             *ssa.Function
-		cacheRegistrations int
-		sourceCompilations int
-	)
-	observed := make(map[*ssa.Package]int)
-	builder := func(input CoroPlanInput) (*coro.SSAPlan, error) {
-		builderCalls++
-		var err error
-		mainFn, err = findSingleSSAMain(input.Program)
-		if err != nil {
-			return nil, err
-		}
-		planned, err = input.Analyze(coro.Roots{{Function: mainFn, Demand: coro.AsyncDemand}}, coro.SSAConfig{})
-		if err == nil {
-			builderDone = true
-		}
-		return planned, err
-	}
-
-	baselineIR, baselineModules := buildModeGenIR(t, "../../cl/_testgo/chan", nil, nil, nil)
-	plannedIR, plannedModules := buildModeGenIR(t, "../../cl/_testgo/chan", builder, func(pkg *ssa.Package, plan *coro.SSAPlan) {
-		if plan != planned {
-			t.Errorf("package %s observed plan %p, want compilation plan %p", pkg, plan, planned)
-		}
-		observed[pkg]++
-	}, func(Package) {
-		if !builderDone {
-			t.Error("ModuleHook ran before CoroPlanBuilder completed")
-		}
-	}, func(pkg Package) {
-		if pkg.CacheHit {
-			cacheRegistrations++
-			if observed[pkg.SSA] != 0 {
-				t.Errorf("cached package %s reported coroutine source compilation", pkg.PkgPath)
-			}
-			return
-		}
-		sourceCompilations++
-		if observed[pkg.SSA] != 1 {
-			t.Errorf("source package %s observed coroutine plan %d times, want 1", pkg.PkgPath, observed[pkg.SSA])
-		}
-	})
-	if builderCalls != 1 {
-		t.Fatalf("CoroPlanBuilder calls = %d, want 1", builderCalls)
-	}
-	if planned == nil || mainFn == nil {
-		t.Fatal("CoroPlanBuilder did not publish a plan for main")
-	}
-	if sourceCompilations == 0 || len(observed) != sourceCompilations {
-		t.Fatalf("source compilation observations = %d for %d packages, want one per package", len(observed), sourceCompilations)
-	}
-	if cacheRegistrations == 0 {
-		t.Fatal("planned build had no cache registration to verify")
-	}
-	id, ok := planned.FunctionID(mainFn)
-	if !ok {
-		t.Fatal("main function is absent from coroutine plan")
-	}
-	mainPlan, ok := planned.BasePlan().Lookup(id)
-	if !ok || !mainPlan.Effect.Contains(coro.MayPark) || mainPlan.Demand != coro.AsyncDemand {
-		t.Fatalf("main coroutine plan = %+v, %v", mainPlan, ok)
-	}
-
-	if plannedIR != baselineIR {
-		t.Fatal("report-only CoroPlanBuilder changed emitted LLVM IR")
-	}
-	if len(plannedModules) == 0 || !reflect.DeepEqual(plannedModules, baselineModules) {
-		t.Fatalf("report-only CoroPlanBuilder changed generated package modules:\nbaseline: %x\nplanned: %x", baselineModules, plannedModules)
 	}
 }
 
@@ -2550,9 +2524,8 @@ func TestActiveCoroABIVersions(t *testing.T) {
 		panicABI  string
 		funcRep   string
 	}{
-		{"nil defaults", nil, coro.EntryResolutionABIV0, coro.SchedulerNoneABIV0, coro.PanicLegacyABIV0, coro.FuncRepABIV0},
-		{"profile disabled", &Config{}, coro.EntryResolutionABIV0, coro.SchedulerNoneABIV0, coro.PanicLegacyABIV0, coro.FuncRepABIV0},
-		{"stackless profile", &Config{CoroProfile: CoroProfileStackless}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0, coro.PanicExplicitStatusABIV0, coro.FuncRepABIV1},
+		{"compile-time architecture", nil, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0, coro.PanicExplicitStatusABIV0, coro.FuncRepABIV1},
+		{"target config", &Config{}, coro.PhysicalABIV1, coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0, coro.PanicExplicitStatusABIV0, coro.FuncRepABIV1},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -2621,7 +2594,7 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 	})
 
 	t.Run("entry resolution requires builder", func(t *testing.T) {
-		ctx := &context{buildConf: &Config{BuildMode: BuildModeExe, CoroProfile: CoroProfileStackless}}
+		ctx := &context{buildConf: &Config{BuildMode: BuildModeExe}}
 		err := buildCoroPlan(ctx)
 		if err == nil || !strings.Contains(err.Error(), "CoroPlanBuilder is required") {
 			t.Fatalf("buildCoroPlan error = %v, want missing-builder rejection", err)
@@ -2633,8 +2606,7 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 
 	t.Run("child await rejects nested c-archive", func(t *testing.T) {
 		ctx := &context{buildConf: &Config{
-			BuildMode: BuildModeCArchive, CoroProfile: CoroProfileStackless,
-		}}
+			BuildMode: BuildModeCArchive}}
 		err := buildCoroPlan(ctx)
 		if err == nil || !strings.Contains(err.Error(), "executable build mode is required") {
 			t.Fatalf("buildCoroPlan error = %v, want executable-mode rejection", err)
@@ -2652,8 +2624,7 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 			CoroPlanBuilder: func(CoroPlanInput) (*coro.SSAPlan, error) {
 				builderCalls++
 				return &coro.SSAPlan{}, nil
-			}, CoroProfile: CoroProfileStackless,
-		}}
+			}}}
 		err := buildCoroPlan(ctx)
 		if err == nil || !strings.Contains(err.Error(), "prepared emission universe is required") {
 			t.Fatalf("buildCoroPlan error = %v, want missing-universe rejection", err)
@@ -2665,47 +2636,6 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 			t.Fatal("missing universe installed coroutine compilation state")
 		}
 	})
-
-	for _, tt := range []struct {
-		name string
-	}{
-		{name: "report only"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			plan := &coro.SSAPlan{}
-			builderCalls := 0
-			observerCalls := 0
-			ctx := &context{buildConf: &Config{
-				CoroPlanBuilder: func(CoroPlanInput) (*coro.SSAPlan, error) {
-					builderCalls++
-					return plan, nil
-				},
-				CoroPlanObserver: func(_ *ssa.Package, got *coro.SSAPlan) {
-					observerCalls++
-					if got != plan {
-						t.Errorf("observed plan = %p, want %p", got, plan)
-					}
-				},
-			}}
-
-			if err := buildCoroPlan(ctx); err != nil {
-				t.Fatalf("buildCoroPlan: %v", err)
-			}
-			if builderCalls != 1 {
-				t.Fatalf("CoroPlanBuilder calls = %d, want 1", builderCalls)
-			}
-			if ctx.coroPlan != plan || ctx.clCompilation == nil || ctx.clCompilation.CoroPlan != plan {
-				t.Fatalf("installed plan = %p, compilation = %+v, want %p", ctx.coroPlan, ctx.clCompilation, plan)
-			}
-			if ctx.clCompilation.CoroProfileActive() {
-				t.Fatal("report-only compilation unexpectedly enabled entry resolution")
-			}
-			ctx.clCompilation.CoroPlanObserver(nil, plan)
-			if observerCalls != 1 {
-				t.Fatalf("CoroPlanObserver calls = %d, want 1", observerCalls)
-			}
-		})
-	}
 
 	t.Run("Do stops before codegen", func(t *testing.T) {
 		sentinel := errors.New("sentinel")
@@ -2732,7 +2662,6 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 
 	t.Run("Do rejects entry resolution without builder before codegen", func(t *testing.T) {
 		conf := NewDefaultConf(ModeGen)
-		conf.CoroProfile = CoroProfileStackless
 		moduleCalls := 0
 		conf.ModuleHook = func(Package) {
 			moduleCalls++
@@ -2752,7 +2681,6 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 
 	t.Run("Do rejects active builder that bypasses input Analyze", func(t *testing.T) {
 		conf := NewDefaultConf(ModeGen)
-		conf.CoroProfile = CoroProfileStackless
 		conf.CoroPlanBuilder = func(CoroPlanInput) (*coro.SSAPlan, error) {
 			return &coro.SSAPlan{}, nil
 		}
@@ -2837,14 +2765,12 @@ func TestCoroEntryResolutionUsesPlanMatchedPackageCache(t *testing.T) {
 			FuncRepABI:              metadata.FuncRepABI,
 			CoroFrameRetentionABI:   metadata.FrameRetentionABI,
 			EmissionUniverse:        emission,
-			CoroProfile:             cl.CoroProfileStackless,
 			CoroTargetCapabilities:  cl.CoroNativeTargetCapabilities(),
 		}
 		return &context{
 			buildConf: &Config{
 				Goos:   "linux",
-				Goarch: "amd64", CoroProfile: CoroProfileStackless,
-			},
+				Goarch: "amd64"},
 			coroPlan:                plan,
 			coroEmission:            emission,
 			coroPlanDigest:          digest,
@@ -2890,11 +2816,6 @@ func TestCoroEntryResolutionUsesPlanMatchedPackageCache(t *testing.T) {
 	matchingPkg := newPackage(seedCtx)
 	if !seedCtx.tryLoadFromCache(matchingPkg) || !matchingPkg.CacheHit {
 		t.Fatal("matching coroutine plan did not reuse the package archive")
-	}
-	profileMismatch := newContext(digestA)
-	profileMismatch.clCompilation.CoroProfile = CoroProfileNone
-	if profileMismatch.canUsePackageCache() {
-		t.Fatal("runtime profile mismatch unexpectedly permits package cache")
 	}
 	targetMismatch := newContext(digestA)
 	targetMismatch.clCompilation.CoroTargetCapabilities = 0
@@ -2979,9 +2900,8 @@ func TestCoroEntryResolutionBuildsPreparedRuntimePackages(t *testing.T) {
 		needPyInit  bool
 		want        bool
 	}{
-		{name: "host report only", conf: Config{}, want: true},
-		{name: "target report only stays lazy", conf: Config{Target: "embedded"}},
-		{name: "target active emits frozen universe", conf: Config{Target: "embedded", CoroProfile: CoroProfileStackless}, want: true},
+		{name: "host", conf: Config{}, want: true},
+		{name: "target", conf: Config{Target: "embedded"}, want: true},
 		{name: "target runtime lowering", conf: Config{Target: "embedded"}, needRuntime: true, want: true},
 		{name: "target python lowering", conf: Config{Target: "embedded"}, needPyInit: true, want: true},
 	} {
@@ -3002,11 +2922,10 @@ func TestCoroRuntimeLinkRequirements(t *testing.T) {
 		wantInit    bool
 		wantLink    bool
 	}{
-		{name: "host keeps runtime link", conf: Config{}, wantLink: true},
-		{name: "named target stays lazy", conf: Config{Target: "embedded"}},
-		{name: "stackless profile initializes and links runtime", conf: Config{Target: "embedded", CoroProfile: CoroProfileStackless}, wantInit: true, wantLink: true},
+		{name: "host initializes runtime", conf: Config{}, wantInit: true, wantLink: true},
+		{name: "named target initializes runtime", conf: Config{Target: "embedded"}, wantInit: true, wantLink: true},
 		{name: "legacy runtime reference", conf: Config{Target: "embedded"}, needRuntime: true, wantInit: true, wantLink: true},
-		{name: "python links without runtime init", conf: Config{Target: "embedded"}, needPyInit: true, wantLink: true},
+		{name: "python links with runtime init", conf: Config{Target: "embedded"}, needPyInit: true, wantInit: true, wantLink: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			gotInit, gotLink := runtimeLinkRequirements(&test.conf, test.needRuntime, test.needPyInit)
@@ -3019,7 +2938,6 @@ func TestCoroRuntimeLinkRequirements(t *testing.T) {
 
 func TestCoroEmissionCoverageStopsBeforeAnyPackageCodegen(t *testing.T) {
 	conf := NewDefaultConf(ModeGen)
-	conf.CoroProfile = CoroProfileStackless
 
 	var (
 		builderCalls  int
@@ -3070,7 +2988,6 @@ func TestCoroEmissionCoverageStopsBeforeAnyPackageCodegen(t *testing.T) {
 
 func TestCoroUnsupportedEntryResolutionReturnsErrorBeforeCodegen(t *testing.T) {
 	conf := NewDefaultConf(ModeGen)
-	conf.CoroProfile = CoroProfileStackless
 	var (
 		observerCalls int
 		moduleCalls   int
@@ -3149,36 +3066,6 @@ func TestCoroEmissionUniverseAcceptsModeTestVariants(t *testing.T) {
 	// ABI-identical functions copied into a test variant intentionally resolve
 	// to one physical symbol. Distinct same-path bodies remain exact and are
 	// covered by cl.TestEmissionUniverseKeepsSamePathTestVariantsExact.
-}
-
-func buildModeGenIR(t *testing.T, pattern string, builder CoroPlanBuilder, observer CoroPlanObserver, moduleHooks ...ModuleHook) (string, map[string][sha256.Size]byte) {
-	t.Helper()
-	conf := NewDefaultConf(ModeGen)
-	conf.CoroPlanBuilder = builder
-	conf.CoroPlanObserver = observer
-	modules := make(map[string][sha256.Size]byte)
-	conf.ModuleHook = func(pkg Package) {
-		key := pkg.ID
-		if _, exists := modules[key]; exists {
-			t.Errorf("ModuleHook ran more than once for %s", key)
-		}
-		modules[key] = sha256.Sum256([]byte(pkg.LPkg.String()))
-		for _, hook := range moduleHooks {
-			if hook != nil {
-				hook(pkg)
-			}
-		}
-	}
-	pkgs, err := Do([]string{pattern}, conf)
-	if err != nil {
-		t.Fatalf("Do(%q): %v", pattern, err)
-	}
-	if len(pkgs) != 1 || pkgs[0].LPkg == nil {
-		t.Fatalf("Do(%q) packages = %+v, want one generated package", pattern, pkgs)
-	}
-	ir := pkgs[0].LPkg.String()
-	pkgs[0].LPkg.Prog.Dispose()
-	return ir, modules
 }
 
 func findSingleSSAMain(prog *ssa.Program) (*ssa.Function, error) {

@@ -51,10 +51,11 @@ type timerRegistrationSlot struct {
 	deadline   int64
 
 	// A controlled V2 timer may be invalidated by another running G through a
-	// stable logical identity. controller is an opaque, non-owning key (the
-	// parked manager G retains the Go object); controlWord is that object's
-	// exact logical generation. Both are zero for ordinary Sleep.
+	// stable logical identity. controller is an opaque, non-owning key and
+	// control points at that object's atomic logical generation; the parked
+	// manager G keeps both alive. All three fields are zero for ordinary Sleep.
 	controller  uintptr
+	control     *uint32
 	controlWord uint32
 
 	// Owner-P-only V2 suffix. Timers have no external producer, so the stable
@@ -186,8 +187,9 @@ func validTimerRegistrationRecordResidue(slot *timerRegistrationSlot, route Rout
 		id.Generation <= slot.generation && slot.record == (OperationRecord{id: id, phase: operationReusable})
 }
 
-func validTimerRegistrationController(controller uintptr, controlWord uint32) bool {
-	return controller == 0 && controlWord == 0 || controller != 0 && controlWord != 0
+func validTimerRegistrationController(controller uintptr, control *uint32, controlWord uint32) bool {
+	return controller == 0 && control == nil && controlWord == 0 ||
+		controller != 0 && control != nil && controlWord != 0
 }
 
 func timerRegistrationOperationID(route RouteID, index uint32, generation uint32) (OperationID, bool) {
@@ -203,7 +205,7 @@ func timerRegistrationIDForHandle(table *TimerRegistrationTable, handle TimerReg
 
 func validLiveTimerRegistration(slot *timerRegistrationSlot, owner *P, route RouteID, index uint32) bool {
 	if !validTimerRegistrationHeader(slot, owner) ||
-		!validTimerRegistrationController(slot.controller, slot.controlWord) {
+		!validTimerRegistrationController(slot.controller, slot.control, slot.controlWord) {
 		return false
 	}
 	id, ok := timerRegistrationOperationID(route, index, slot.generation)
@@ -213,7 +215,7 @@ func validLiveTimerRegistration(slot *timerRegistrationSlot, owner *P, route Rou
 func reusableTimerRegistrationSlot(slot *timerRegistrationSlot, route RouteID, index uint32) bool {
 	if slot == nil || slot.state != timerRegistrationFree ||
 		slot.p != nil || slot.deadline != 0 ||
-		slot.controller != 0 || slot.controlWord != 0 {
+		slot.controller != 0 || slot.control != nil || slot.controlWord != 0 {
 		return false
 	}
 	return validTimerRegistrationRecordResidue(slot, route, index)
@@ -232,12 +234,13 @@ func (table *TimerRegistrationTable) reserveAndAttachTimerV2(
 	caseID uint32,
 	deadline int64,
 	controller uintptr,
+	control *uint32,
 	controlWord uint32,
 ) (TimerRegistrationHandle, bool) {
 	if table == nil || p == nil || table.owner != p || !table.route.Valid() || state == nil || wait == nil || deadline < 0 {
 		return TimerRegistrationHandle{}, false
 	}
-	if !validTimerRegistrationController(controller, controlWord) {
+	if !validTimerRegistrationController(controller, control, controlWord) {
 		return TimerRegistrationHandle{}, false
 	}
 	for index := uint32(0); index < TimerRegistrationConfiguredCapacity(table); index++ {
@@ -267,6 +270,7 @@ func (table *TimerRegistrationTable) reserveAndAttachTimerV2(
 		slot.p = p
 		slot.deadline = deadline
 		slot.controller = controller
+		slot.control = control
 		slot.controlWord = controlWord
 		slot.state = timerRegistrationActive
 		return TimerRegistrationHandle{Slot: index + 1, Generation: desired.Generation}, true
@@ -282,7 +286,7 @@ func (table *TimerRegistrationTable) ReserveAndAttachTimerV2(
 	caseID uint32,
 	deadline int64,
 ) (TimerRegistrationHandle, bool) {
-	return table.reserveAndAttachTimerV2(p, state, ticket, wait, caseID, deadline, 0, 0)
+	return table.reserveAndAttachTimerV2(p, state, ticket, wait, caseID, deadline, 0, nil, 0)
 }
 
 // ReserveAndAttachControlledTimerV2 installs one V2 timer with the exact
@@ -306,7 +310,7 @@ func (table *TimerRegistrationTable) ReserveAndAttachControlledTimerV2(
 		return TimerRegistrationHandle{}, false
 	}
 	handle, ok := table.reserveAndAttachTimerV2(
-		p, state, ticket, wait, caseID, deadline, controller, expected,
+		p, state, ticket, wait, caseID, deadline, controller, control, expected,
 	)
 	if !ok {
 		return TimerRegistrationHandle{}, false
@@ -403,6 +407,13 @@ func (table *TimerRegistrationTable) drainDueSlotFor(owner *P, now int64, index 
 		if !validLiveTimerRegistration(slot, owner, table.route, index) {
 			return 0, 0, false, false
 		}
+		if slot.control != nil && preemptLoad(slot.control) != slot.controlWord {
+			if slot.record.link.wait == nil ||
+				!RequestWaitSetCancel(owner, slot.record.link.wait, ParkCancelOperation) {
+				return 0, 0, false, false
+			}
+			return 0, 0, false, true
+		}
 		if slot.deadline <= now {
 			id, idOK := timerRegistrationOperationID(table.route, index, slot.generation)
 			if !idOK || PublishOperationCompletion(&slot.record, id) != OperationCompletionPublished {
@@ -446,36 +457,6 @@ func (table *TimerRegistrationTable) drainDueFor(owner *P, now int64) (completed
 		}
 	}
 	return completed, deadline, hasDeadline, true
-}
-
-// CancelControlledV2 publishes operation cancellation for one exact logical
-// Timer generation. It first audits the complete catalog so a duplicated
-// controller identity cannot partially cancel one of two corrupt slots. A
-// completion that is already detached needs no wake: the manager's subsequent
-// control-word check suppresses that stale generation after its ready resume.
-func (table *TimerRegistrationTable) CancelControlledV2(p *P, controller uintptr, controlWord uint32) bool {
-	if table == nil || p == nil || table.owner != p || controller == 0 || controlWord == 0 {
-		return false
-	}
-	var selected *timerRegistrationSlot
-	var wait *WaitSetRecord
-	for index := uint32(0); index < TimerRegistrationConfiguredCapacity(table); index++ {
-		slot, ok := timerRegistrationSlotAt(table, index)
-		if !ok {
-			return false
-		}
-		if slot.controller != controller || slot.controlWord != controlWord {
-			continue
-		}
-		if selected != nil || !validLiveTimerRegistration(slot, p, table.route, index) ||
-			slot.state != timerRegistrationActive && slot.state != timerRegistrationDelivered ||
-			slot.record.link.wait == nil {
-			return false
-		}
-		selected = slot
-		wait = slot.record.link.wait
-	}
-	return selected != nil && RequestWaitSetCancel(p, wait, ParkCancelOperation)
 }
 
 // RequestTimerV2Cancel publishes logical operation cancellation through the
@@ -587,6 +568,7 @@ func (table *TimerRegistrationTable) RecycleTimerV2(p *P, handle TimerRegistrati
 	slot.p = nil
 	slot.deadline = 0
 	slot.controller = 0
+	slot.control = nil
 	slot.controlWord = 0
 	return true
 }

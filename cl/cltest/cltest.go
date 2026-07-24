@@ -575,10 +575,23 @@ func filterRunOutput(in []byte) []byte {
 		return in
 	}
 	var out bytes.Buffer
-	for _, p := range parts {
+	for index := 0; index < len(parts); index++ {
+		p := parts[index]
 		line := bytes.TrimRight(p, "\r\n")
 		trim := bytes.TrimLeft(line, " \t")
 		switch {
+		case bytes.HasPrefix(trim, []byte("==> //go:linkname ")) && index+1 < len(parts):
+			nextLine := bytes.TrimRight(parts[index+1], "\r\n")
+			next := bytes.TrimLeft(nextLine, " \t")
+			if bytes.HasPrefix(next, []byte("llgo: linkname ")) &&
+				bytes.HasSuffix(next, []byte(" not found and ignored")) {
+				// Optional GOROOT/runtime cgo hooks differ by Go release and
+				// selected runtime overlay. They are compiler diagnostics, not
+				// program output; the matching second line proves this is the
+				// deliberately ignored form rather than an arbitrary message.
+				index++
+				continue
+			}
 		case bytes.HasPrefix(trim, []byte("WARNING: Using LLGO root for devel: ")):
 			continue
 		case bytes.HasPrefix(trim, []byte("WARNING: LLGO_ROOT is not a valid LLGO root: ")):

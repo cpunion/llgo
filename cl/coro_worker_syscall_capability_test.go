@@ -133,7 +133,7 @@ func TestCoroWorkerSyscallFunctionWordCapabilityIsFailClosed(t *testing.T) {
 	defer prog.Dispose()
 	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}},
-		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
+		EmissionUniverseOptions{CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -184,7 +184,7 @@ func TestCoroWorkerSyscallConditionalIncomingPlanNarrowing(t *testing.T) {
 	defer prog.Dispose()
 	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}},
-		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
+		EmissionUniverseOptions{CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -303,7 +303,7 @@ func libc_getrlimit_trampoline()
 		prog,
 		Patches{originalPath: {Alt: alternate.ssa, Types: typepatch.Clone(alternate.types)}},
 		[]EmissionPackage{{SSA: original.ssa, Files: []*ast.File{original.file}}},
-		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
+		EmissionUniverseOptions{CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -412,7 +412,7 @@ func SIX_TARGET()
 				prog,
 				Patches{originalPath: {Alt: alternate.ssa, Types: typepatch.Clone(alternate.types)}},
 				[]EmissionPackage{{SSA: original.ssa, Files: []*ast.File{original.file}}},
-				EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
+				EmissionUniverseOptions{CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -515,7 +515,7 @@ func Write(fd int32, pointer uintptr, size uintptr) int {
 			{SSA: original.ssa, Files: []*ast.File{original.file}},
 			{SSA: typed.ssa, Files: []*ast.File{typed.file}},
 		},
-		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
+		EmissionUniverseOptions{CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -595,7 +595,7 @@ func Raw(a1 uintptr) uintptr {
 		prog,
 		Patches{originalPath: {Alt: alternate.ssa, Types: typepatch.Clone(alternate.types)}},
 		[]EmissionPackage{{SSA: original.ssa, Files: []*ast.File{original.file}}},
-		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
+		EmissionUniverseOptions{CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -634,7 +634,7 @@ func Root(a1 uintptr) uintptr {
 	defer prog.Dispose()
 	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}},
-		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
+		EmissionUniverseOptions{CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -657,7 +657,7 @@ func TestCoroWorkerSyscallExactCertificateJoinsPlanAndRejectsForgery(t *testing.
 	defer prog.Dispose()
 	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}},
-		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
+		EmissionUniverseOptions{CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -789,7 +789,7 @@ func Root() { _, _, _ = raw(pc(libc_target_trampoline)) }
 			defer prog.Dispose()
 			_, err := prepareStacklessEmissionUniverseWithOptions(
 				prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}},
-				EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
+				EmissionUniverseOptions{CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 			)
 			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
 				t.Fatalf("Prepare error = %v; want %q", err, test.wantErr)
@@ -817,7 +817,7 @@ func Second() { _, _, _ = raw(pc(same_worker_target_trampoline)) }
 	defer prog.Dispose()
 	_, err := prepareStacklessEmissionUniverseWithOptions(
 		prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}},
-		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
+		EmissionUniverseOptions{CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err == nil || !strings.Contains(err.Error(), "conflicting producer targets or ABIs") {
 		t.Fatalf("workeraddr physical collision error = %v", err)

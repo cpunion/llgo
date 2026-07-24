@@ -1,19 +1,14 @@
 package main
 
-import "unsafe"
-
 const (
 	LLGoFiles = "../wrap/struct_mixed.c"
 )
 
 type pointer = *int8
 
-//go:linkname printf C.printf
-func printf(format *byte, __llgo_va_list ...any) int32
-
 func assert(info string, b bool) {
 	if !b {
-		printf(unsafe.StringData("Assertion failed: %s\n\000"), unsafe.StringData(info))
+		panic(info)
 	}
 }
 
@@ -25,6 +20,7 @@ type point1 struct {
 	x1 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo1 C.demo1
 func cdemo1(a point1) point1
 
@@ -43,6 +39,7 @@ type point2 struct {
 	x1 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo2 C.demo2
 func cdemo2(a point2) point2
 
@@ -61,6 +58,7 @@ type point3 struct {
 	x1 int64
 }
 
+//llgo:coro sync
 //go:linkname cdemo3 C.demo3
 func cdemo3(a point3) point3
 
@@ -79,6 +77,7 @@ type point4 struct {
 	x1 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo4 C.demo4
 func cdemo4(a point4) point4
 
@@ -97,6 +96,7 @@ type point5 struct {
 	x1 float64
 }
 
+//llgo:coro sync
 //go:linkname cdemo5 C.demo5
 func cdemo5(a point5) point5
 
@@ -115,6 +115,7 @@ type point6 struct {
 	x1 pointer
 }
 
+//llgo:coro sync
 //go:linkname cdemo6 C.demo6
 func cdemo6(a point6) point6
 
@@ -133,6 +134,7 @@ type point7 struct {
 	x1 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo7 C.demo7
 func cdemo7(a point7) point7
 
@@ -151,6 +153,7 @@ type point8 struct {
 	x1 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo8 C.demo8
 func cdemo8(a point8) point8
 
@@ -169,6 +172,7 @@ type point9 struct {
 	x1 int64
 }
 
+//llgo:coro sync
 //go:linkname cdemo9 C.demo9
 func cdemo9(a point9) point9
 
@@ -187,6 +191,7 @@ type point10 struct {
 	x1 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo10 C.demo10
 func cdemo10(a point10) point10
 
@@ -205,6 +210,7 @@ type point11 struct {
 	x1 float64
 }
 
+//llgo:coro sync
 //go:linkname cdemo11 C.demo11
 func cdemo11(a point11) point11
 
@@ -223,6 +229,7 @@ type point12 struct {
 	x1 pointer
 }
 
+//llgo:coro sync
 //go:linkname cdemo12 C.demo12
 func cdemo12(a point12) point12
 
@@ -241,6 +248,7 @@ type point13 struct {
 	x1 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo13 C.demo13
 func cdemo13(a point13) point13
 
@@ -259,6 +267,7 @@ type point14 struct {
 	x1 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo14 C.demo14
 func cdemo14(a point14) point14
 
@@ -277,6 +286,7 @@ type point15 struct {
 	x1 int64
 }
 
+//llgo:coro sync
 //go:linkname cdemo15 C.demo15
 func cdemo15(a point15) point15
 
@@ -295,6 +305,7 @@ type point16 struct {
 	x1 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo16 C.demo16
 func cdemo16(a point16) point16
 
@@ -313,6 +324,7 @@ type point17 struct {
 	x1 float64
 }
 
+//llgo:coro sync
 //go:linkname cdemo17 C.demo17
 func cdemo17(a point17) point17
 
@@ -331,6 +343,7 @@ type point18 struct {
 	x1 pointer
 }
 
+//llgo:coro sync
 //go:linkname cdemo18 C.demo18
 func cdemo18(a point18) point18
 
@@ -349,6 +362,7 @@ type point19 struct {
 	x1 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo19 C.demo19
 func cdemo19(a point19) point19
 
@@ -367,6 +381,7 @@ type point20 struct {
 	x1 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo20 C.demo20
 func cdemo20(a point20) point20
 
@@ -385,6 +400,7 @@ type point21 struct {
 	x1 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo21 C.demo21
 func cdemo21(a point21) point21
 
@@ -403,6 +419,7 @@ type point22 struct {
 	x1 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo22 C.demo22
 func cdemo22(a point22) point22
 
@@ -421,6 +438,7 @@ type point23 struct {
 	x1 float64
 }
 
+//llgo:coro sync
 //go:linkname cdemo23 C.demo23
 func cdemo23(a point23) point23
 
@@ -439,6 +457,7 @@ type point24 struct {
 	x1 pointer
 }
 
+//llgo:coro sync
 //go:linkname cdemo24 C.demo24
 func cdemo24(a point24) point24
 
@@ -457,6 +476,7 @@ type point25 struct {
 	x1 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo25 C.demo25
 func cdemo25(a point25) point25
 
@@ -475,6 +495,7 @@ type point26 struct {
 	x1 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo26 C.demo26
 func cdemo26(a point26) point26
 
@@ -493,6 +514,7 @@ type point27 struct {
 	x1 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo27 C.demo27
 func cdemo27(a point27) point27
 
@@ -511,6 +533,7 @@ type point28 struct {
 	x1 int64
 }
 
+//llgo:coro sync
 //go:linkname cdemo28 C.demo28
 func cdemo28(a point28) point28
 
@@ -529,6 +552,7 @@ type point29 struct {
 	x1 float64
 }
 
+//llgo:coro sync
 //go:linkname cdemo29 C.demo29
 func cdemo29(a point29) point29
 
@@ -547,6 +571,7 @@ type point30 struct {
 	x1 pointer
 }
 
+//llgo:coro sync
 //go:linkname cdemo30 C.demo30
 func cdemo30(a point30) point30
 
@@ -565,6 +590,7 @@ type point31 struct {
 	x1 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo31 C.demo31
 func cdemo31(a point31) point31
 
@@ -583,6 +609,7 @@ type point32 struct {
 	x1 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo32 C.demo32
 func cdemo32(a point32) point32
 
@@ -601,6 +628,7 @@ type point33 struct {
 	x1 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo33 C.demo33
 func cdemo33(a point33) point33
 
@@ -619,6 +647,7 @@ type point34 struct {
 	x1 int64
 }
 
+//llgo:coro sync
 //go:linkname cdemo34 C.demo34
 func cdemo34(a point34) point34
 
@@ -637,6 +666,7 @@ type point35 struct {
 	x1 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo35 C.demo35
 func cdemo35(a point35) point35
 
@@ -655,6 +685,7 @@ type point36 struct {
 	x1 pointer
 }
 
+//llgo:coro sync
 //go:linkname cdemo36 C.demo36
 func cdemo36(a point36) point36
 
@@ -673,6 +704,7 @@ type point37 struct {
 	x1 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo37 C.demo37
 func cdemo37(a point37) point37
 
@@ -691,6 +723,7 @@ type point38 struct {
 	x1 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo38 C.demo38
 func cdemo38(a point38) point38
 
@@ -709,6 +742,7 @@ type point39 struct {
 	x1 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo39 C.demo39
 func cdemo39(a point39) point39
 
@@ -727,6 +761,7 @@ type point40 struct {
 	x1 int64
 }
 
+//llgo:coro sync
 //go:linkname cdemo40 C.demo40
 func cdemo40(a point40) point40
 
@@ -745,6 +780,7 @@ type point41 struct {
 	x1 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo41 C.demo41
 func cdemo41(a point41) point41
 
@@ -763,6 +799,7 @@ type point42 struct {
 	x1 float64
 }
 
+//llgo:coro sync
 //go:linkname cdemo42 C.demo42
 func cdemo42(a point42) point42
 
@@ -782,6 +819,7 @@ type point43 struct {
 	x2 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo43 C.demo43
 func cdemo43(a point43) point43
 
@@ -802,6 +840,7 @@ type point44 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo44 C.demo44
 func cdemo44(a point44) point44
 
@@ -823,6 +862,7 @@ type point45 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo45 C.demo45
 func cdemo45(a point45) point45
 
@@ -844,6 +884,7 @@ type point46 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo46 C.demo46
 func cdemo46(a point46) point46
 
@@ -865,6 +906,7 @@ type point47 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo47 C.demo47
 func cdemo47(a point47) point47
 
@@ -886,6 +928,7 @@ type point48 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo48 C.demo48
 func cdemo48(a point48) point48
 
@@ -906,6 +949,7 @@ type point49 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo49 C.demo49
 func cdemo49(a point49) point49
 
@@ -927,6 +971,7 @@ type point50 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo50 C.demo50
 func cdemo50(a point50) point50
 
@@ -948,6 +993,7 @@ type point51 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo51 C.demo51
 func cdemo51(a point51) point51
 
@@ -969,6 +1015,7 @@ type point52 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo52 C.demo52
 func cdemo52(a point52) point52
 
@@ -990,6 +1037,7 @@ type point53 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo53 C.demo53
 func cdemo53(a point53) point53
 
@@ -1010,6 +1058,7 @@ type point54 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo54 C.demo54
 func cdemo54(a point54) point54
 
@@ -1031,6 +1080,7 @@ type point55 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo55 C.demo55
 func cdemo55(a point55) point55
 
@@ -1052,6 +1102,7 @@ type point56 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo56 C.demo56
 func cdemo56(a point56) point56
 
@@ -1073,6 +1124,7 @@ type point57 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo57 C.demo57
 func cdemo57(a point57) point57
 
@@ -1094,6 +1146,7 @@ type point58 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo58 C.demo58
 func cdemo58(a point58) point58
 
@@ -1114,6 +1167,7 @@ type point59 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo59 C.demo59
 func cdemo59(a point59) point59
 
@@ -1135,6 +1189,7 @@ type point60 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo60 C.demo60
 func cdemo60(a point60) point60
 
@@ -1156,6 +1211,7 @@ type point61 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo61 C.demo61
 func cdemo61(a point61) point61
 
@@ -1177,6 +1233,7 @@ type point62 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo62 C.demo62
 func cdemo62(a point62) point62
 
@@ -1198,6 +1255,7 @@ type point63 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo63 C.demo63
 func cdemo63(a point63) point63
 
@@ -1217,6 +1275,7 @@ type point64 struct {
 	x2 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo64 C.demo64
 func cdemo64(a point64) point64
 
@@ -1237,6 +1296,7 @@ type point65 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo65 C.demo65
 func cdemo65(a point65) point65
 
@@ -1258,6 +1318,7 @@ type point66 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo66 C.demo66
 func cdemo66(a point66) point66
 
@@ -1279,6 +1340,7 @@ type point67 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo67 C.demo67
 func cdemo67(a point67) point67
 
@@ -1300,6 +1362,7 @@ type point68 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo68 C.demo68
 func cdemo68(a point68) point68
 
@@ -1321,6 +1384,7 @@ type point69 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo69 C.demo69
 func cdemo69(a point69) point69
 
@@ -1341,6 +1405,7 @@ type point70 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo70 C.demo70
 func cdemo70(a point70) point70
 
@@ -1362,6 +1427,7 @@ type point71 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo71 C.demo71
 func cdemo71(a point71) point71
 
@@ -1383,6 +1449,7 @@ type point72 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo72 C.demo72
 func cdemo72(a point72) point72
 
@@ -1404,6 +1471,7 @@ type point73 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo73 C.demo73
 func cdemo73(a point73) point73
 
@@ -1425,6 +1493,7 @@ type point74 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo74 C.demo74
 func cdemo74(a point74) point74
 
@@ -1445,6 +1514,7 @@ type point75 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo75 C.demo75
 func cdemo75(a point75) point75
 
@@ -1466,6 +1536,7 @@ type point76 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo76 C.demo76
 func cdemo76(a point76) point76
 
@@ -1487,6 +1558,7 @@ type point77 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo77 C.demo77
 func cdemo77(a point77) point77
 
@@ -1508,6 +1580,7 @@ type point78 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo78 C.demo78
 func cdemo78(a point78) point78
 
@@ -1529,6 +1602,7 @@ type point79 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo79 C.demo79
 func cdemo79(a point79) point79
 
@@ -1549,6 +1623,7 @@ type point80 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo80 C.demo80
 func cdemo80(a point80) point80
 
@@ -1570,6 +1645,7 @@ type point81 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo81 C.demo81
 func cdemo81(a point81) point81
 
@@ -1591,6 +1667,7 @@ type point82 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo82 C.demo82
 func cdemo82(a point82) point82
 
@@ -1612,6 +1689,7 @@ type point83 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo83 C.demo83
 func cdemo83(a point83) point83
 
@@ -1633,6 +1711,7 @@ type point84 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo84 C.demo84
 func cdemo84(a point84) point84
 
@@ -1652,6 +1731,7 @@ type point85 struct {
 	x2 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo85 C.demo85
 func cdemo85(a point85) point85
 
@@ -1672,6 +1752,7 @@ type point86 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo86 C.demo86
 func cdemo86(a point86) point86
 
@@ -1693,6 +1774,7 @@ type point87 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo87 C.demo87
 func cdemo87(a point87) point87
 
@@ -1714,6 +1796,7 @@ type point88 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo88 C.demo88
 func cdemo88(a point88) point88
 
@@ -1735,6 +1818,7 @@ type point89 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo89 C.demo89
 func cdemo89(a point89) point89
 
@@ -1756,6 +1840,7 @@ type point90 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo90 C.demo90
 func cdemo90(a point90) point90
 
@@ -1776,6 +1861,7 @@ type point91 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo91 C.demo91
 func cdemo91(a point91) point91
 
@@ -1797,6 +1883,7 @@ type point92 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo92 C.demo92
 func cdemo92(a point92) point92
 
@@ -1818,6 +1905,7 @@ type point93 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo93 C.demo93
 func cdemo93(a point93) point93
 
@@ -1839,6 +1927,7 @@ type point94 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo94 C.demo94
 func cdemo94(a point94) point94
 
@@ -1860,6 +1949,7 @@ type point95 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo95 C.demo95
 func cdemo95(a point95) point95
 
@@ -1880,6 +1970,7 @@ type point96 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo96 C.demo96
 func cdemo96(a point96) point96
 
@@ -1901,6 +1992,7 @@ type point97 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo97 C.demo97
 func cdemo97(a point97) point97
 
@@ -1922,6 +2014,7 @@ type point98 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo98 C.demo98
 func cdemo98(a point98) point98
 
@@ -1943,6 +2036,7 @@ type point99 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo99 C.demo99
 func cdemo99(a point99) point99
 
@@ -1964,6 +2058,7 @@ type point100 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo100 C.demo100
 func cdemo100(a point100) point100
 
@@ -1984,6 +2079,7 @@ type point101 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo101 C.demo101
 func cdemo101(a point101) point101
 
@@ -2005,6 +2101,7 @@ type point102 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo102 C.demo102
 func cdemo102(a point102) point102
 
@@ -2026,6 +2123,7 @@ type point103 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo103 C.demo103
 func cdemo103(a point103) point103
 
@@ -2047,6 +2145,7 @@ type point104 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo104 C.demo104
 func cdemo104(a point104) point104
 
@@ -2068,6 +2167,7 @@ type point105 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo105 C.demo105
 func cdemo105(a point105) point105
 
@@ -2087,6 +2187,7 @@ type point106 struct {
 	x2 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo106 C.demo106
 func cdemo106(a point106) point106
 
@@ -2107,6 +2208,7 @@ type point107 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo107 C.demo107
 func cdemo107(a point107) point107
 
@@ -2128,6 +2230,7 @@ type point108 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo108 C.demo108
 func cdemo108(a point108) point108
 
@@ -2149,6 +2252,7 @@ type point109 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo109 C.demo109
 func cdemo109(a point109) point109
 
@@ -2170,6 +2274,7 @@ type point110 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo110 C.demo110
 func cdemo110(a point110) point110
 
@@ -2191,6 +2296,7 @@ type point111 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo111 C.demo111
 func cdemo111(a point111) point111
 
@@ -2211,6 +2317,7 @@ type point112 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo112 C.demo112
 func cdemo112(a point112) point112
 
@@ -2232,6 +2339,7 @@ type point113 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo113 C.demo113
 func cdemo113(a point113) point113
 
@@ -2253,6 +2361,7 @@ type point114 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo114 C.demo114
 func cdemo114(a point114) point114
 
@@ -2274,6 +2383,7 @@ type point115 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo115 C.demo115
 func cdemo115(a point115) point115
 
@@ -2295,6 +2405,7 @@ type point116 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo116 C.demo116
 func cdemo116(a point116) point116
 
@@ -2315,6 +2426,7 @@ type point117 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo117 C.demo117
 func cdemo117(a point117) point117
 
@@ -2336,6 +2448,7 @@ type point118 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo118 C.demo118
 func cdemo118(a point118) point118
 
@@ -2357,6 +2470,7 @@ type point119 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo119 C.demo119
 func cdemo119(a point119) point119
 
@@ -2378,6 +2492,7 @@ type point120 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo120 C.demo120
 func cdemo120(a point120) point120
 
@@ -2399,6 +2514,7 @@ type point121 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo121 C.demo121
 func cdemo121(a point121) point121
 
@@ -2419,6 +2535,7 @@ type point122 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo122 C.demo122
 func cdemo122(a point122) point122
 
@@ -2440,6 +2557,7 @@ type point123 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo123 C.demo123
 func cdemo123(a point123) point123
 
@@ -2461,6 +2579,7 @@ type point124 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo124 C.demo124
 func cdemo124(a point124) point124
 
@@ -2482,6 +2601,7 @@ type point125 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo125 C.demo125
 func cdemo125(a point125) point125
 
@@ -2503,6 +2623,7 @@ type point126 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo126 C.demo126
 func cdemo126(a point126) point126
 
@@ -2522,6 +2643,7 @@ type point127 struct {
 	x2 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo127 C.demo127
 func cdemo127(a point127) point127
 
@@ -2542,6 +2664,7 @@ type point128 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo128 C.demo128
 func cdemo128(a point128) point128
 
@@ -2563,6 +2686,7 @@ type point129 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo129 C.demo129
 func cdemo129(a point129) point129
 
@@ -2584,6 +2708,7 @@ type point130 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo130 C.demo130
 func cdemo130(a point130) point130
 
@@ -2605,6 +2730,7 @@ type point131 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo131 C.demo131
 func cdemo131(a point131) point131
 
@@ -2626,6 +2752,7 @@ type point132 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo132 C.demo132
 func cdemo132(a point132) point132
 
@@ -2646,6 +2773,7 @@ type point133 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo133 C.demo133
 func cdemo133(a point133) point133
 
@@ -2667,6 +2795,7 @@ type point134 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo134 C.demo134
 func cdemo134(a point134) point134
 
@@ -2688,6 +2817,7 @@ type point135 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo135 C.demo135
 func cdemo135(a point135) point135
 
@@ -2709,6 +2839,7 @@ type point136 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo136 C.demo136
 func cdemo136(a point136) point136
 
@@ -2730,6 +2861,7 @@ type point137 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo137 C.demo137
 func cdemo137(a point137) point137
 
@@ -2750,6 +2882,7 @@ type point138 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo138 C.demo138
 func cdemo138(a point138) point138
 
@@ -2771,6 +2904,7 @@ type point139 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo139 C.demo139
 func cdemo139(a point139) point139
 
@@ -2792,6 +2926,7 @@ type point140 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo140 C.demo140
 func cdemo140(a point140) point140
 
@@ -2813,6 +2948,7 @@ type point141 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo141 C.demo141
 func cdemo141(a point141) point141
 
@@ -2834,6 +2970,7 @@ type point142 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo142 C.demo142
 func cdemo142(a point142) point142
 
@@ -2854,6 +2991,7 @@ type point143 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo143 C.demo143
 func cdemo143(a point143) point143
 
@@ -2875,6 +3013,7 @@ type point144 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo144 C.demo144
 func cdemo144(a point144) point144
 
@@ -2896,6 +3035,7 @@ type point145 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo145 C.demo145
 func cdemo145(a point145) point145
 
@@ -2917,6 +3057,7 @@ type point146 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo146 C.demo146
 func cdemo146(a point146) point146
 
@@ -2938,6 +3079,7 @@ type point147 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo147 C.demo147
 func cdemo147(a point147) point147
 
@@ -2957,6 +3099,7 @@ type point148 struct {
 	x2 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo148 C.demo148
 func cdemo148(a point148) point148
 
@@ -2977,6 +3120,7 @@ type point149 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo149 C.demo149
 func cdemo149(a point149) point149
 
@@ -2998,6 +3142,7 @@ type point150 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo150 C.demo150
 func cdemo150(a point150) point150
 
@@ -3019,6 +3164,7 @@ type point151 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo151 C.demo151
 func cdemo151(a point151) point151
 
@@ -3040,6 +3186,7 @@ type point152 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo152 C.demo152
 func cdemo152(a point152) point152
 
@@ -3061,6 +3208,7 @@ type point153 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo153 C.demo153
 func cdemo153(a point153) point153
 
@@ -3081,6 +3229,7 @@ type point154 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo154 C.demo154
 func cdemo154(a point154) point154
 
@@ -3102,6 +3251,7 @@ type point155 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo155 C.demo155
 func cdemo155(a point155) point155
 
@@ -3123,6 +3273,7 @@ type point156 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo156 C.demo156
 func cdemo156(a point156) point156
 
@@ -3144,6 +3295,7 @@ type point157 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo157 C.demo157
 func cdemo157(a point157) point157
 
@@ -3165,6 +3317,7 @@ type point158 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo158 C.demo158
 func cdemo158(a point158) point158
 
@@ -3185,6 +3338,7 @@ type point159 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo159 C.demo159
 func cdemo159(a point159) point159
 
@@ -3206,6 +3360,7 @@ type point160 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo160 C.demo160
 func cdemo160(a point160) point160
 
@@ -3227,6 +3382,7 @@ type point161 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo161 C.demo161
 func cdemo161(a point161) point161
 
@@ -3248,6 +3404,7 @@ type point162 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo162 C.demo162
 func cdemo162(a point162) point162
 
@@ -3269,6 +3426,7 @@ type point163 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo163 C.demo163
 func cdemo163(a point163) point163
 
@@ -3289,6 +3447,7 @@ type point164 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo164 C.demo164
 func cdemo164(a point164) point164
 
@@ -3310,6 +3469,7 @@ type point165 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo165 C.demo165
 func cdemo165(a point165) point165
 
@@ -3331,6 +3491,7 @@ type point166 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo166 C.demo166
 func cdemo166(a point166) point166
 
@@ -3352,6 +3513,7 @@ type point167 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo167 C.demo167
 func cdemo167(a point167) point167
 
@@ -3373,6 +3535,7 @@ type point168 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo168 C.demo168
 func cdemo168(a point168) point168
 
@@ -3392,6 +3555,7 @@ type point169 struct {
 	x2 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo169 C.demo169
 func cdemo169(a point169) point169
 
@@ -3412,6 +3576,7 @@ type point170 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo170 C.demo170
 func cdemo170(a point170) point170
 
@@ -3433,6 +3598,7 @@ type point171 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo171 C.demo171
 func cdemo171(a point171) point171
 
@@ -3454,6 +3620,7 @@ type point172 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo172 C.demo172
 func cdemo172(a point172) point172
 
@@ -3475,6 +3642,7 @@ type point173 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo173 C.demo173
 func cdemo173(a point173) point173
 
@@ -3496,6 +3664,7 @@ type point174 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo174 C.demo174
 func cdemo174(a point174) point174
 
@@ -3516,6 +3685,7 @@ type point175 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo175 C.demo175
 func cdemo175(a point175) point175
 
@@ -3537,6 +3707,7 @@ type point176 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo176 C.demo176
 func cdemo176(a point176) point176
 
@@ -3558,6 +3729,7 @@ type point177 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo177 C.demo177
 func cdemo177(a point177) point177
 
@@ -3579,6 +3751,7 @@ type point178 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo178 C.demo178
 func cdemo178(a point178) point178
 
@@ -3600,6 +3773,7 @@ type point179 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo179 C.demo179
 func cdemo179(a point179) point179
 
@@ -3620,6 +3794,7 @@ type point180 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo180 C.demo180
 func cdemo180(a point180) point180
 
@@ -3641,6 +3816,7 @@ type point181 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo181 C.demo181
 func cdemo181(a point181) point181
 
@@ -3662,6 +3838,7 @@ type point182 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo182 C.demo182
 func cdemo182(a point182) point182
 
@@ -3683,6 +3860,7 @@ type point183 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo183 C.demo183
 func cdemo183(a point183) point183
 
@@ -3704,6 +3882,7 @@ type point184 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo184 C.demo184
 func cdemo184(a point184) point184
 
@@ -3724,6 +3903,7 @@ type point185 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo185 C.demo185
 func cdemo185(a point185) point185
 
@@ -3745,6 +3925,7 @@ type point186 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo186 C.demo186
 func cdemo186(a point186) point186
 
@@ -3766,6 +3947,7 @@ type point187 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo187 C.demo187
 func cdemo187(a point187) point187
 
@@ -3787,6 +3969,7 @@ type point188 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo188 C.demo188
 func cdemo188(a point188) point188
 
@@ -3808,6 +3991,7 @@ type point189 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo189 C.demo189
 func cdemo189(a point189) point189
 
@@ -3827,6 +4011,7 @@ type point190 struct {
 	x2 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo190 C.demo190
 func cdemo190(a point190) point190
 
@@ -3847,6 +4032,7 @@ type point191 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo191 C.demo191
 func cdemo191(a point191) point191
 
@@ -3868,6 +4054,7 @@ type point192 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo192 C.demo192
 func cdemo192(a point192) point192
 
@@ -3889,6 +4076,7 @@ type point193 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo193 C.demo193
 func cdemo193(a point193) point193
 
@@ -3910,6 +4098,7 @@ type point194 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo194 C.demo194
 func cdemo194(a point194) point194
 
@@ -3931,6 +4120,7 @@ type point195 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo195 C.demo195
 func cdemo195(a point195) point195
 
@@ -3951,6 +4141,7 @@ type point196 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo196 C.demo196
 func cdemo196(a point196) point196
 
@@ -3972,6 +4163,7 @@ type point197 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo197 C.demo197
 func cdemo197(a point197) point197
 
@@ -3993,6 +4185,7 @@ type point198 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo198 C.demo198
 func cdemo198(a point198) point198
 
@@ -4014,6 +4207,7 @@ type point199 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo199 C.demo199
 func cdemo199(a point199) point199
 
@@ -4035,6 +4229,7 @@ type point200 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo200 C.demo200
 func cdemo200(a point200) point200
 
@@ -4055,6 +4250,7 @@ type point201 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo201 C.demo201
 func cdemo201(a point201) point201
 
@@ -4076,6 +4272,7 @@ type point202 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo202 C.demo202
 func cdemo202(a point202) point202
 
@@ -4097,6 +4294,7 @@ type point203 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo203 C.demo203
 func cdemo203(a point203) point203
 
@@ -4118,6 +4316,7 @@ type point204 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo204 C.demo204
 func cdemo204(a point204) point204
 
@@ -4139,6 +4338,7 @@ type point205 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo205 C.demo205
 func cdemo205(a point205) point205
 
@@ -4159,6 +4359,7 @@ type point206 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo206 C.demo206
 func cdemo206(a point206) point206
 
@@ -4180,6 +4381,7 @@ type point207 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo207 C.demo207
 func cdemo207(a point207) point207
 
@@ -4201,6 +4403,7 @@ type point208 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo208 C.demo208
 func cdemo208(a point208) point208
 
@@ -4222,6 +4425,7 @@ type point209 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo209 C.demo209
 func cdemo209(a point209) point209
 
@@ -4243,6 +4447,7 @@ type point210 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo210 C.demo210
 func cdemo210(a point210) point210
 
@@ -4262,6 +4467,7 @@ type point211 struct {
 	x2 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo211 C.demo211
 func cdemo211(a point211) point211
 
@@ -4282,6 +4488,7 @@ type point212 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo212 C.demo212
 func cdemo212(a point212) point212
 
@@ -4303,6 +4510,7 @@ type point213 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo213 C.demo213
 func cdemo213(a point213) point213
 
@@ -4324,6 +4532,7 @@ type point214 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo214 C.demo214
 func cdemo214(a point214) point214
 
@@ -4345,6 +4554,7 @@ type point215 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo215 C.demo215
 func cdemo215(a point215) point215
 
@@ -4366,6 +4576,7 @@ type point216 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo216 C.demo216
 func cdemo216(a point216) point216
 
@@ -4386,6 +4597,7 @@ type point217 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo217 C.demo217
 func cdemo217(a point217) point217
 
@@ -4407,6 +4619,7 @@ type point218 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo218 C.demo218
 func cdemo218(a point218) point218
 
@@ -4428,6 +4641,7 @@ type point219 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo219 C.demo219
 func cdemo219(a point219) point219
 
@@ -4449,6 +4663,7 @@ type point220 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo220 C.demo220
 func cdemo220(a point220) point220
 
@@ -4470,6 +4685,7 @@ type point221 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo221 C.demo221
 func cdemo221(a point221) point221
 
@@ -4490,6 +4706,7 @@ type point222 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo222 C.demo222
 func cdemo222(a point222) point222
 
@@ -4511,6 +4728,7 @@ type point223 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo223 C.demo223
 func cdemo223(a point223) point223
 
@@ -4532,6 +4750,7 @@ type point224 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo224 C.demo224
 func cdemo224(a point224) point224
 
@@ -4553,6 +4772,7 @@ type point225 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo225 C.demo225
 func cdemo225(a point225) point225
 
@@ -4574,6 +4794,7 @@ type point226 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo226 C.demo226
 func cdemo226(a point226) point226
 
@@ -4594,6 +4815,7 @@ type point227 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo227 C.demo227
 func cdemo227(a point227) point227
 
@@ -4615,6 +4837,7 @@ type point228 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo228 C.demo228
 func cdemo228(a point228) point228
 
@@ -4636,6 +4859,7 @@ type point229 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo229 C.demo229
 func cdemo229(a point229) point229
 
@@ -4657,6 +4881,7 @@ type point230 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo230 C.demo230
 func cdemo230(a point230) point230
 
@@ -4678,6 +4903,7 @@ type point231 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo231 C.demo231
 func cdemo231(a point231) point231
 
@@ -4697,6 +4923,7 @@ type point232 struct {
 	x2 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo232 C.demo232
 func cdemo232(a point232) point232
 
@@ -4717,6 +4944,7 @@ type point233 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo233 C.demo233
 func cdemo233(a point233) point233
 
@@ -4738,6 +4966,7 @@ type point234 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo234 C.demo234
 func cdemo234(a point234) point234
 
@@ -4759,6 +4988,7 @@ type point235 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo235 C.demo235
 func cdemo235(a point235) point235
 
@@ -4780,6 +5010,7 @@ type point236 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo236 C.demo236
 func cdemo236(a point236) point236
 
@@ -4801,6 +5032,7 @@ type point237 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo237 C.demo237
 func cdemo237(a point237) point237
 
@@ -4821,6 +5053,7 @@ type point238 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo238 C.demo238
 func cdemo238(a point238) point238
 
@@ -4842,6 +5075,7 @@ type point239 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo239 C.demo239
 func cdemo239(a point239) point239
 
@@ -4863,6 +5097,7 @@ type point240 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo240 C.demo240
 func cdemo240(a point240) point240
 
@@ -4884,6 +5119,7 @@ type point241 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo241 C.demo241
 func cdemo241(a point241) point241
 
@@ -4905,6 +5141,7 @@ type point242 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo242 C.demo242
 func cdemo242(a point242) point242
 
@@ -4925,6 +5162,7 @@ type point243 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo243 C.demo243
 func cdemo243(a point243) point243
 
@@ -4946,6 +5184,7 @@ type point244 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo244 C.demo244
 func cdemo244(a point244) point244
 
@@ -4967,6 +5206,7 @@ type point245 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo245 C.demo245
 func cdemo245(a point245) point245
 
@@ -4988,6 +5228,7 @@ type point246 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo246 C.demo246
 func cdemo246(a point246) point246
 
@@ -5009,6 +5250,7 @@ type point247 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo247 C.demo247
 func cdemo247(a point247) point247
 
@@ -5029,6 +5271,7 @@ type point248 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo248 C.demo248
 func cdemo248(a point248) point248
 
@@ -5050,6 +5293,7 @@ type point249 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo249 C.demo249
 func cdemo249(a point249) point249
 
@@ -5071,6 +5315,7 @@ type point250 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo250 C.demo250
 func cdemo250(a point250) point250
 
@@ -5092,6 +5337,7 @@ type point251 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo251 C.demo251
 func cdemo251(a point251) point251
 
@@ -5113,6 +5359,7 @@ type point252 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo252 C.demo252
 func cdemo252(a point252) point252
 
@@ -5132,6 +5379,7 @@ type point253 struct {
 	x2 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo253 C.demo253
 func cdemo253(a point253) point253
 
@@ -5152,6 +5400,7 @@ type point254 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo254 C.demo254
 func cdemo254(a point254) point254
 
@@ -5173,6 +5422,7 @@ type point255 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo255 C.demo255
 func cdemo255(a point255) point255
 
@@ -5194,6 +5444,7 @@ type point256 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo256 C.demo256
 func cdemo256(a point256) point256
 
@@ -5215,6 +5466,7 @@ type point257 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo257 C.demo257
 func cdemo257(a point257) point257
 
@@ -5236,6 +5488,7 @@ type point258 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo258 C.demo258
 func cdemo258(a point258) point258
 
@@ -5256,6 +5509,7 @@ type point259 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo259 C.demo259
 func cdemo259(a point259) point259
 
@@ -5277,6 +5531,7 @@ type point260 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo260 C.demo260
 func cdemo260(a point260) point260
 
@@ -5298,6 +5553,7 @@ type point261 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo261 C.demo261
 func cdemo261(a point261) point261
 
@@ -5319,6 +5575,7 @@ type point262 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo262 C.demo262
 func cdemo262(a point262) point262
 
@@ -5340,6 +5597,7 @@ type point263 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo263 C.demo263
 func cdemo263(a point263) point263
 
@@ -5360,6 +5618,7 @@ type point264 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo264 C.demo264
 func cdemo264(a point264) point264
 
@@ -5381,6 +5640,7 @@ type point265 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo265 C.demo265
 func cdemo265(a point265) point265
 
@@ -5402,6 +5662,7 @@ type point266 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo266 C.demo266
 func cdemo266(a point266) point266
 
@@ -5423,6 +5684,7 @@ type point267 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo267 C.demo267
 func cdemo267(a point267) point267
 
@@ -5444,6 +5706,7 @@ type point268 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo268 C.demo268
 func cdemo268(a point268) point268
 
@@ -5464,6 +5727,7 @@ type point269 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo269 C.demo269
 func cdemo269(a point269) point269
 
@@ -5485,6 +5749,7 @@ type point270 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo270 C.demo270
 func cdemo270(a point270) point270
 
@@ -5506,6 +5771,7 @@ type point271 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo271 C.demo271
 func cdemo271(a point271) point271
 
@@ -5527,6 +5793,7 @@ type point272 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo272 C.demo272
 func cdemo272(a point272) point272
 
@@ -5548,6 +5815,7 @@ type point273 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo273 C.demo273
 func cdemo273(a point273) point273
 
@@ -5567,6 +5835,7 @@ type point274 struct {
 	x2 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo274 C.demo274
 func cdemo274(a point274) point274
 
@@ -5587,6 +5856,7 @@ type point275 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo275 C.demo275
 func cdemo275(a point275) point275
 
@@ -5608,6 +5878,7 @@ type point276 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo276 C.demo276
 func cdemo276(a point276) point276
 
@@ -5629,6 +5900,7 @@ type point277 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo277 C.demo277
 func cdemo277(a point277) point277
 
@@ -5650,6 +5922,7 @@ type point278 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo278 C.demo278
 func cdemo278(a point278) point278
 
@@ -5671,6 +5944,7 @@ type point279 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo279 C.demo279
 func cdemo279(a point279) point279
 
@@ -5691,6 +5965,7 @@ type point280 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo280 C.demo280
 func cdemo280(a point280) point280
 
@@ -5712,6 +5987,7 @@ type point281 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo281 C.demo281
 func cdemo281(a point281) point281
 
@@ -5733,6 +6009,7 @@ type point282 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo282 C.demo282
 func cdemo282(a point282) point282
 
@@ -5754,6 +6031,7 @@ type point283 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo283 C.demo283
 func cdemo283(a point283) point283
 
@@ -5775,6 +6053,7 @@ type point284 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo284 C.demo284
 func cdemo284(a point284) point284
 
@@ -5795,6 +6074,7 @@ type point285 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo285 C.demo285
 func cdemo285(a point285) point285
 
@@ -5816,6 +6096,7 @@ type point286 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo286 C.demo286
 func cdemo286(a point286) point286
 
@@ -5837,6 +6118,7 @@ type point287 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo287 C.demo287
 func cdemo287(a point287) point287
 
@@ -5858,6 +6140,7 @@ type point288 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo288 C.demo288
 func cdemo288(a point288) point288
 
@@ -5879,6 +6162,7 @@ type point289 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo289 C.demo289
 func cdemo289(a point289) point289
 
@@ -5899,6 +6183,7 @@ type point290 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo290 C.demo290
 func cdemo290(a point290) point290
 
@@ -5920,6 +6205,7 @@ type point291 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo291 C.demo291
 func cdemo291(a point291) point291
 
@@ -5941,6 +6227,7 @@ type point292 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo292 C.demo292
 func cdemo292(a point292) point292
 
@@ -5962,6 +6249,7 @@ type point293 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo293 C.demo293
 func cdemo293(a point293) point293
 
@@ -5983,6 +6271,7 @@ type point294 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo294 C.demo294
 func cdemo294(a point294) point294
 
@@ -6002,6 +6291,7 @@ type point295 struct {
 	x2 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo295 C.demo295
 func cdemo295(a point295) point295
 
@@ -6022,6 +6312,7 @@ type point296 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo296 C.demo296
 func cdemo296(a point296) point296
 
@@ -6043,6 +6334,7 @@ type point297 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo297 C.demo297
 func cdemo297(a point297) point297
 
@@ -6064,6 +6356,7 @@ type point298 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo298 C.demo298
 func cdemo298(a point298) point298
 
@@ -6085,6 +6378,7 @@ type point299 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo299 C.demo299
 func cdemo299(a point299) point299
 
@@ -6106,6 +6400,7 @@ type point300 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo300 C.demo300
 func cdemo300(a point300) point300
 
@@ -6126,6 +6421,7 @@ type point301 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo301 C.demo301
 func cdemo301(a point301) point301
 
@@ -6147,6 +6443,7 @@ type point302 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo302 C.demo302
 func cdemo302(a point302) point302
 
@@ -6168,6 +6465,7 @@ type point303 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo303 C.demo303
 func cdemo303(a point303) point303
 
@@ -6189,6 +6487,7 @@ type point304 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo304 C.demo304
 func cdemo304(a point304) point304
 
@@ -6210,6 +6509,7 @@ type point305 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo305 C.demo305
 func cdemo305(a point305) point305
 
@@ -6230,6 +6530,7 @@ type point306 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo306 C.demo306
 func cdemo306(a point306) point306
 
@@ -6251,6 +6552,7 @@ type point307 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo307 C.demo307
 func cdemo307(a point307) point307
 
@@ -6272,6 +6574,7 @@ type point308 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo308 C.demo308
 func cdemo308(a point308) point308
 
@@ -6293,6 +6596,7 @@ type point309 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo309 C.demo309
 func cdemo309(a point309) point309
 
@@ -6314,6 +6618,7 @@ type point310 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo310 C.demo310
 func cdemo310(a point310) point310
 
@@ -6334,6 +6639,7 @@ type point311 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo311 C.demo311
 func cdemo311(a point311) point311
 
@@ -6355,6 +6661,7 @@ type point312 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo312 C.demo312
 func cdemo312(a point312) point312
 
@@ -6376,6 +6683,7 @@ type point313 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo313 C.demo313
 func cdemo313(a point313) point313
 
@@ -6397,6 +6705,7 @@ type point314 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo314 C.demo314
 func cdemo314(a point314) point314
 
@@ -6418,6 +6727,7 @@ type point315 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo315 C.demo315
 func cdemo315(a point315) point315
 
@@ -6437,6 +6747,7 @@ type point316 struct {
 	x2 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo316 C.demo316
 func cdemo316(a point316) point316
 
@@ -6457,6 +6768,7 @@ type point317 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo317 C.demo317
 func cdemo317(a point317) point317
 
@@ -6478,6 +6790,7 @@ type point318 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo318 C.demo318
 func cdemo318(a point318) point318
 
@@ -6499,6 +6812,7 @@ type point319 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo319 C.demo319
 func cdemo319(a point319) point319
 
@@ -6520,6 +6834,7 @@ type point320 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo320 C.demo320
 func cdemo320(a point320) point320
 
@@ -6541,6 +6856,7 @@ type point321 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo321 C.demo321
 func cdemo321(a point321) point321
 
@@ -6561,6 +6877,7 @@ type point322 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo322 C.demo322
 func cdemo322(a point322) point322
 
@@ -6582,6 +6899,7 @@ type point323 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo323 C.demo323
 func cdemo323(a point323) point323
 
@@ -6603,6 +6921,7 @@ type point324 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo324 C.demo324
 func cdemo324(a point324) point324
 
@@ -6624,6 +6943,7 @@ type point325 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo325 C.demo325
 func cdemo325(a point325) point325
 
@@ -6645,6 +6965,7 @@ type point326 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo326 C.demo326
 func cdemo326(a point326) point326
 
@@ -6665,6 +6986,7 @@ type point327 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo327 C.demo327
 func cdemo327(a point327) point327
 
@@ -6686,6 +7008,7 @@ type point328 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo328 C.demo328
 func cdemo328(a point328) point328
 
@@ -6707,6 +7030,7 @@ type point329 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo329 C.demo329
 func cdemo329(a point329) point329
 
@@ -6728,6 +7052,7 @@ type point330 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo330 C.demo330
 func cdemo330(a point330) point330
 
@@ -6749,6 +7074,7 @@ type point331 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo331 C.demo331
 func cdemo331(a point331) point331
 
@@ -6769,6 +7095,7 @@ type point332 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo332 C.demo332
 func cdemo332(a point332) point332
 
@@ -6790,6 +7117,7 @@ type point333 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo333 C.demo333
 func cdemo333(a point333) point333
 
@@ -6811,6 +7139,7 @@ type point334 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo334 C.demo334
 func cdemo334(a point334) point334
 
@@ -6832,6 +7161,7 @@ type point335 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo335 C.demo335
 func cdemo335(a point335) point335
 
@@ -6853,6 +7183,7 @@ type point336 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo336 C.demo336
 func cdemo336(a point336) point336
 
@@ -6872,6 +7203,7 @@ type point337 struct {
 	x2 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo337 C.demo337
 func cdemo337(a point337) point337
 
@@ -6892,6 +7224,7 @@ type point338 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo338 C.demo338
 func cdemo338(a point338) point338
 
@@ -6913,6 +7246,7 @@ type point339 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo339 C.demo339
 func cdemo339(a point339) point339
 
@@ -6934,6 +7268,7 @@ type point340 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo340 C.demo340
 func cdemo340(a point340) point340
 
@@ -6955,6 +7290,7 @@ type point341 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo341 C.demo341
 func cdemo341(a point341) point341
 
@@ -6976,6 +7312,7 @@ type point342 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo342 C.demo342
 func cdemo342(a point342) point342
 
@@ -6996,6 +7333,7 @@ type point343 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo343 C.demo343
 func cdemo343(a point343) point343
 
@@ -7017,6 +7355,7 @@ type point344 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo344 C.demo344
 func cdemo344(a point344) point344
 
@@ -7038,6 +7377,7 @@ type point345 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo345 C.demo345
 func cdemo345(a point345) point345
 
@@ -7059,6 +7399,7 @@ type point346 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo346 C.demo346
 func cdemo346(a point346) point346
 
@@ -7080,6 +7421,7 @@ type point347 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo347 C.demo347
 func cdemo347(a point347) point347
 
@@ -7100,6 +7442,7 @@ type point348 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo348 C.demo348
 func cdemo348(a point348) point348
 
@@ -7121,6 +7464,7 @@ type point349 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo349 C.demo349
 func cdemo349(a point349) point349
 
@@ -7142,6 +7486,7 @@ type point350 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo350 C.demo350
 func cdemo350(a point350) point350
 
@@ -7163,6 +7508,7 @@ type point351 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo351 C.demo351
 func cdemo351(a point351) point351
 
@@ -7184,6 +7530,7 @@ type point352 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo352 C.demo352
 func cdemo352(a point352) point352
 
@@ -7204,6 +7551,7 @@ type point353 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo353 C.demo353
 func cdemo353(a point353) point353
 
@@ -7225,6 +7573,7 @@ type point354 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo354 C.demo354
 func cdemo354(a point354) point354
 
@@ -7246,6 +7595,7 @@ type point355 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo355 C.demo355
 func cdemo355(a point355) point355
 
@@ -7267,6 +7617,7 @@ type point356 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo356 C.demo356
 func cdemo356(a point356) point356
 
@@ -7288,6 +7639,7 @@ type point357 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo357 C.demo357
 func cdemo357(a point357) point357
 
@@ -7307,6 +7659,7 @@ type point358 struct {
 	x2 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo358 C.demo358
 func cdemo358(a point358) point358
 
@@ -7327,6 +7680,7 @@ type point359 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo359 C.demo359
 func cdemo359(a point359) point359
 
@@ -7348,6 +7702,7 @@ type point360 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo360 C.demo360
 func cdemo360(a point360) point360
 
@@ -7369,6 +7724,7 @@ type point361 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo361 C.demo361
 func cdemo361(a point361) point361
 
@@ -7390,6 +7746,7 @@ type point362 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo362 C.demo362
 func cdemo362(a point362) point362
 
@@ -7411,6 +7768,7 @@ type point363 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo363 C.demo363
 func cdemo363(a point363) point363
 
@@ -7431,6 +7789,7 @@ type point364 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo364 C.demo364
 func cdemo364(a point364) point364
 
@@ -7452,6 +7811,7 @@ type point365 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo365 C.demo365
 func cdemo365(a point365) point365
 
@@ -7473,6 +7833,7 @@ type point366 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo366 C.demo366
 func cdemo366(a point366) point366
 
@@ -7494,6 +7855,7 @@ type point367 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo367 C.demo367
 func cdemo367(a point367) point367
 
@@ -7515,6 +7877,7 @@ type point368 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo368 C.demo368
 func cdemo368(a point368) point368
 
@@ -7535,6 +7898,7 @@ type point369 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo369 C.demo369
 func cdemo369(a point369) point369
 
@@ -7556,6 +7920,7 @@ type point370 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo370 C.demo370
 func cdemo370(a point370) point370
 
@@ -7577,6 +7942,7 @@ type point371 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo371 C.demo371
 func cdemo371(a point371) point371
 
@@ -7598,6 +7964,7 @@ type point372 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo372 C.demo372
 func cdemo372(a point372) point372
 
@@ -7619,6 +7986,7 @@ type point373 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo373 C.demo373
 func cdemo373(a point373) point373
 
@@ -7639,6 +8007,7 @@ type point374 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo374 C.demo374
 func cdemo374(a point374) point374
 
@@ -7660,6 +8029,7 @@ type point375 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo375 C.demo375
 func cdemo375(a point375) point375
 
@@ -7681,6 +8051,7 @@ type point376 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo376 C.demo376
 func cdemo376(a point376) point376
 
@@ -7702,6 +8073,7 @@ type point377 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo377 C.demo377
 func cdemo377(a point377) point377
 
@@ -7723,6 +8095,7 @@ type point378 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo378 C.demo378
 func cdemo378(a point378) point378
 
@@ -7742,6 +8115,7 @@ type point379 struct {
 	x2 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo379 C.demo379
 func cdemo379(a point379) point379
 
@@ -7762,6 +8136,7 @@ type point380 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo380 C.demo380
 func cdemo380(a point380) point380
 
@@ -7783,6 +8158,7 @@ type point381 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo381 C.demo381
 func cdemo381(a point381) point381
 
@@ -7804,6 +8180,7 @@ type point382 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo382 C.demo382
 func cdemo382(a point382) point382
 
@@ -7825,6 +8202,7 @@ type point383 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo383 C.demo383
 func cdemo383(a point383) point383
 
@@ -7846,6 +8224,7 @@ type point384 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo384 C.demo384
 func cdemo384(a point384) point384
 
@@ -7866,6 +8245,7 @@ type point385 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo385 C.demo385
 func cdemo385(a point385) point385
 
@@ -7887,6 +8267,7 @@ type point386 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo386 C.demo386
 func cdemo386(a point386) point386
 
@@ -7908,6 +8289,7 @@ type point387 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo387 C.demo387
 func cdemo387(a point387) point387
 
@@ -7929,6 +8311,7 @@ type point388 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo388 C.demo388
 func cdemo388(a point388) point388
 
@@ -7950,6 +8333,7 @@ type point389 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo389 C.demo389
 func cdemo389(a point389) point389
 
@@ -7970,6 +8354,7 @@ type point390 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo390 C.demo390
 func cdemo390(a point390) point390
 
@@ -7991,6 +8376,7 @@ type point391 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo391 C.demo391
 func cdemo391(a point391) point391
 
@@ -8012,6 +8398,7 @@ type point392 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo392 C.demo392
 func cdemo392(a point392) point392
 
@@ -8033,6 +8420,7 @@ type point393 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo393 C.demo393
 func cdemo393(a point393) point393
 
@@ -8054,6 +8442,7 @@ type point394 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo394 C.demo394
 func cdemo394(a point394) point394
 
@@ -8074,6 +8463,7 @@ type point395 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo395 C.demo395
 func cdemo395(a point395) point395
 
@@ -8095,6 +8485,7 @@ type point396 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo396 C.demo396
 func cdemo396(a point396) point396
 
@@ -8116,6 +8507,7 @@ type point397 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo397 C.demo397
 func cdemo397(a point397) point397
 
@@ -8137,6 +8529,7 @@ type point398 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo398 C.demo398
 func cdemo398(a point398) point398
 
@@ -8158,6 +8551,7 @@ type point399 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo399 C.demo399
 func cdemo399(a point399) point399
 
@@ -8177,6 +8571,7 @@ type point400 struct {
 	x2 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo400 C.demo400
 func cdemo400(a point400) point400
 
@@ -8197,6 +8592,7 @@ type point401 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo401 C.demo401
 func cdemo401(a point401) point401
 
@@ -8218,6 +8614,7 @@ type point402 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo402 C.demo402
 func cdemo402(a point402) point402
 
@@ -8239,6 +8636,7 @@ type point403 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo403 C.demo403
 func cdemo403(a point403) point403
 
@@ -8260,6 +8658,7 @@ type point404 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo404 C.demo404
 func cdemo404(a point404) point404
 
@@ -8281,6 +8680,7 @@ type point405 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo405 C.demo405
 func cdemo405(a point405) point405
 
@@ -8301,6 +8701,7 @@ type point406 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo406 C.demo406
 func cdemo406(a point406) point406
 
@@ -8322,6 +8723,7 @@ type point407 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo407 C.demo407
 func cdemo407(a point407) point407
 
@@ -8343,6 +8745,7 @@ type point408 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo408 C.demo408
 func cdemo408(a point408) point408
 
@@ -8364,6 +8767,7 @@ type point409 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo409 C.demo409
 func cdemo409(a point409) point409
 
@@ -8385,6 +8789,7 @@ type point410 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo410 C.demo410
 func cdemo410(a point410) point410
 
@@ -8405,6 +8810,7 @@ type point411 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo411 C.demo411
 func cdemo411(a point411) point411
 
@@ -8426,6 +8832,7 @@ type point412 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo412 C.demo412
 func cdemo412(a point412) point412
 
@@ -8447,6 +8854,7 @@ type point413 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo413 C.demo413
 func cdemo413(a point413) point413
 
@@ -8468,6 +8876,7 @@ type point414 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo414 C.demo414
 func cdemo414(a point414) point414
 
@@ -8489,6 +8898,7 @@ type point415 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo415 C.demo415
 func cdemo415(a point415) point415
 
@@ -8509,6 +8919,7 @@ type point416 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo416 C.demo416
 func cdemo416(a point416) point416
 
@@ -8530,6 +8941,7 @@ type point417 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo417 C.demo417
 func cdemo417(a point417) point417
 
@@ -8551,6 +8963,7 @@ type point418 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo418 C.demo418
 func cdemo418(a point418) point418
 
@@ -8572,6 +8985,7 @@ type point419 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo419 C.demo419
 func cdemo419(a point419) point419
 
@@ -8593,6 +9007,7 @@ type point420 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo420 C.demo420
 func cdemo420(a point420) point420
 
@@ -8612,6 +9027,7 @@ type point421 struct {
 	x2 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo421 C.demo421
 func cdemo421(a point421) point421
 
@@ -8632,6 +9048,7 @@ type point422 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo422 C.demo422
 func cdemo422(a point422) point422
 
@@ -8653,6 +9070,7 @@ type point423 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo423 C.demo423
 func cdemo423(a point423) point423
 
@@ -8674,6 +9092,7 @@ type point424 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo424 C.demo424
 func cdemo424(a point424) point424
 
@@ -8695,6 +9114,7 @@ type point425 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo425 C.demo425
 func cdemo425(a point425) point425
 
@@ -8716,6 +9136,7 @@ type point426 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo426 C.demo426
 func cdemo426(a point426) point426
 
@@ -8736,6 +9157,7 @@ type point427 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo427 C.demo427
 func cdemo427(a point427) point427
 
@@ -8757,6 +9179,7 @@ type point428 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo428 C.demo428
 func cdemo428(a point428) point428
 
@@ -8778,6 +9201,7 @@ type point429 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo429 C.demo429
 func cdemo429(a point429) point429
 
@@ -8799,6 +9223,7 @@ type point430 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo430 C.demo430
 func cdemo430(a point430) point430
 
@@ -8820,6 +9245,7 @@ type point431 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo431 C.demo431
 func cdemo431(a point431) point431
 
@@ -8840,6 +9266,7 @@ type point432 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo432 C.demo432
 func cdemo432(a point432) point432
 
@@ -8861,6 +9288,7 @@ type point433 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo433 C.demo433
 func cdemo433(a point433) point433
 
@@ -8882,6 +9310,7 @@ type point434 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo434 C.demo434
 func cdemo434(a point434) point434
 
@@ -8903,6 +9332,7 @@ type point435 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo435 C.demo435
 func cdemo435(a point435) point435
 
@@ -8924,6 +9354,7 @@ type point436 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo436 C.demo436
 func cdemo436(a point436) point436
 
@@ -8944,6 +9375,7 @@ type point437 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo437 C.demo437
 func cdemo437(a point437) point437
 
@@ -8965,6 +9397,7 @@ type point438 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo438 C.demo438
 func cdemo438(a point438) point438
 
@@ -8986,6 +9419,7 @@ type point439 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo439 C.demo439
 func cdemo439(a point439) point439
 
@@ -9007,6 +9441,7 @@ type point440 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo440 C.demo440
 func cdemo440(a point440) point440
 
@@ -9028,6 +9463,7 @@ type point441 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo441 C.demo441
 func cdemo441(a point441) point441
 
@@ -9047,6 +9483,7 @@ type point442 struct {
 	x2 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo442 C.demo442
 func cdemo442(a point442) point442
 
@@ -9067,6 +9504,7 @@ type point443 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo443 C.demo443
 func cdemo443(a point443) point443
 
@@ -9088,6 +9526,7 @@ type point444 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo444 C.demo444
 func cdemo444(a point444) point444
 
@@ -9109,6 +9548,7 @@ type point445 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo445 C.demo445
 func cdemo445(a point445) point445
 
@@ -9130,6 +9570,7 @@ type point446 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo446 C.demo446
 func cdemo446(a point446) point446
 
@@ -9151,6 +9592,7 @@ type point447 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo447 C.demo447
 func cdemo447(a point447) point447
 
@@ -9171,6 +9613,7 @@ type point448 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo448 C.demo448
 func cdemo448(a point448) point448
 
@@ -9192,6 +9635,7 @@ type point449 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo449 C.demo449
 func cdemo449(a point449) point449
 
@@ -9213,6 +9657,7 @@ type point450 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo450 C.demo450
 func cdemo450(a point450) point450
 
@@ -9234,6 +9679,7 @@ type point451 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo451 C.demo451
 func cdemo451(a point451) point451
 
@@ -9255,6 +9701,7 @@ type point452 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo452 C.demo452
 func cdemo452(a point452) point452
 
@@ -9275,6 +9722,7 @@ type point453 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo453 C.demo453
 func cdemo453(a point453) point453
 
@@ -9296,6 +9744,7 @@ type point454 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo454 C.demo454
 func cdemo454(a point454) point454
 
@@ -9317,6 +9766,7 @@ type point455 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo455 C.demo455
 func cdemo455(a point455) point455
 
@@ -9338,6 +9788,7 @@ type point456 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo456 C.demo456
 func cdemo456(a point456) point456
 
@@ -9359,6 +9810,7 @@ type point457 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo457 C.demo457
 func cdemo457(a point457) point457
 
@@ -9379,6 +9831,7 @@ type point458 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo458 C.demo458
 func cdemo458(a point458) point458
 
@@ -9400,6 +9853,7 @@ type point459 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo459 C.demo459
 func cdemo459(a point459) point459
 
@@ -9421,6 +9875,7 @@ type point460 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo460 C.demo460
 func cdemo460(a point460) point460
 
@@ -9442,6 +9897,7 @@ type point461 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo461 C.demo461
 func cdemo461(a point461) point461
 
@@ -9463,6 +9919,7 @@ type point462 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo462 C.demo462
 func cdemo462(a point462) point462
 
@@ -9482,6 +9939,7 @@ type point463 struct {
 	x2 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo463 C.demo463
 func cdemo463(a point463) point463
 
@@ -9502,6 +9960,7 @@ type point464 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo464 C.demo464
 func cdemo464(a point464) point464
 
@@ -9523,6 +9982,7 @@ type point465 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo465 C.demo465
 func cdemo465(a point465) point465
 
@@ -9544,6 +10004,7 @@ type point466 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo466 C.demo466
 func cdemo466(a point466) point466
 
@@ -9565,6 +10026,7 @@ type point467 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo467 C.demo467
 func cdemo467(a point467) point467
 
@@ -9586,6 +10048,7 @@ type point468 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo468 C.demo468
 func cdemo468(a point468) point468
 
@@ -9606,6 +10069,7 @@ type point469 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo469 C.demo469
 func cdemo469(a point469) point469
 
@@ -9627,6 +10091,7 @@ type point470 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo470 C.demo470
 func cdemo470(a point470) point470
 
@@ -9648,6 +10113,7 @@ type point471 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo471 C.demo471
 func cdemo471(a point471) point471
 
@@ -9669,6 +10135,7 @@ type point472 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo472 C.demo472
 func cdemo472(a point472) point472
 
@@ -9690,6 +10157,7 @@ type point473 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo473 C.demo473
 func cdemo473(a point473) point473
 
@@ -9710,6 +10178,7 @@ type point474 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo474 C.demo474
 func cdemo474(a point474) point474
 
@@ -9731,6 +10200,7 @@ type point475 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo475 C.demo475
 func cdemo475(a point475) point475
 
@@ -9752,6 +10222,7 @@ type point476 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo476 C.demo476
 func cdemo476(a point476) point476
 
@@ -9773,6 +10244,7 @@ type point477 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo477 C.demo477
 func cdemo477(a point477) point477
 
@@ -9794,6 +10266,7 @@ type point478 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo478 C.demo478
 func cdemo478(a point478) point478
 
@@ -9814,6 +10287,7 @@ type point479 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo479 C.demo479
 func cdemo479(a point479) point479
 
@@ -9835,6 +10309,7 @@ type point480 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo480 C.demo480
 func cdemo480(a point480) point480
 
@@ -9856,6 +10331,7 @@ type point481 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo481 C.demo481
 func cdemo481(a point481) point481
 
@@ -9877,6 +10353,7 @@ type point482 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo482 C.demo482
 func cdemo482(a point482) point482
 
@@ -9898,6 +10375,7 @@ type point483 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo483 C.demo483
 func cdemo483(a point483) point483
 
@@ -9917,6 +10395,7 @@ type point484 struct {
 	x2 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo484 C.demo484
 func cdemo484(a point484) point484
 
@@ -9937,6 +10416,7 @@ type point485 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo485 C.demo485
 func cdemo485(a point485) point485
 
@@ -9958,6 +10438,7 @@ type point486 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo486 C.demo486
 func cdemo486(a point486) point486
 
@@ -9979,6 +10460,7 @@ type point487 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo487 C.demo487
 func cdemo487(a point487) point487
 
@@ -10000,6 +10482,7 @@ type point488 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo488 C.demo488
 func cdemo488(a point488) point488
 
@@ -10021,6 +10504,7 @@ type point489 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo489 C.demo489
 func cdemo489(a point489) point489
 
@@ -10041,6 +10525,7 @@ type point490 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo490 C.demo490
 func cdemo490(a point490) point490
 
@@ -10062,6 +10547,7 @@ type point491 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo491 C.demo491
 func cdemo491(a point491) point491
 
@@ -10083,6 +10569,7 @@ type point492 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo492 C.demo492
 func cdemo492(a point492) point492
 
@@ -10104,6 +10591,7 @@ type point493 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo493 C.demo493
 func cdemo493(a point493) point493
 
@@ -10125,6 +10613,7 @@ type point494 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo494 C.demo494
 func cdemo494(a point494) point494
 
@@ -10145,6 +10634,7 @@ type point495 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo495 C.demo495
 func cdemo495(a point495) point495
 
@@ -10166,6 +10656,7 @@ type point496 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo496 C.demo496
 func cdemo496(a point496) point496
 
@@ -10187,6 +10678,7 @@ type point497 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo497 C.demo497
 func cdemo497(a point497) point497
 
@@ -10208,6 +10700,7 @@ type point498 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo498 C.demo498
 func cdemo498(a point498) point498
 
@@ -10229,6 +10722,7 @@ type point499 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo499 C.demo499
 func cdemo499(a point499) point499
 
@@ -10249,6 +10743,7 @@ type point500 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo500 C.demo500
 func cdemo500(a point500) point500
 
@@ -10270,6 +10765,7 @@ type point501 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo501 C.demo501
 func cdemo501(a point501) point501
 
@@ -10291,6 +10787,7 @@ type point502 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo502 C.demo502
 func cdemo502(a point502) point502
 
@@ -10312,6 +10809,7 @@ type point503 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo503 C.demo503
 func cdemo503(a point503) point503
 
@@ -10333,6 +10831,7 @@ type point504 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo504 C.demo504
 func cdemo504(a point504) point504
 
@@ -10352,6 +10851,7 @@ type point505 struct {
 	x2 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo505 C.demo505
 func cdemo505(a point505) point505
 
@@ -10372,6 +10872,7 @@ type point506 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo506 C.demo506
 func cdemo506(a point506) point506
 
@@ -10393,6 +10894,7 @@ type point507 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo507 C.demo507
 func cdemo507(a point507) point507
 
@@ -10414,6 +10916,7 @@ type point508 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo508 C.demo508
 func cdemo508(a point508) point508
 
@@ -10435,6 +10938,7 @@ type point509 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo509 C.demo509
 func cdemo509(a point509) point509
 
@@ -10456,6 +10960,7 @@ type point510 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo510 C.demo510
 func cdemo510(a point510) point510
 
@@ -10476,6 +10981,7 @@ type point511 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo511 C.demo511
 func cdemo511(a point511) point511
 
@@ -10497,6 +11003,7 @@ type point512 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo512 C.demo512
 func cdemo512(a point512) point512
 
@@ -10518,6 +11025,7 @@ type point513 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo513 C.demo513
 func cdemo513(a point513) point513
 
@@ -10539,6 +11047,7 @@ type point514 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo514 C.demo514
 func cdemo514(a point514) point514
 
@@ -10560,6 +11069,7 @@ type point515 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo515 C.demo515
 func cdemo515(a point515) point515
 
@@ -10580,6 +11090,7 @@ type point516 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo516 C.demo516
 func cdemo516(a point516) point516
 
@@ -10601,6 +11112,7 @@ type point517 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo517 C.demo517
 func cdemo517(a point517) point517
 
@@ -10622,6 +11134,7 @@ type point518 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo518 C.demo518
 func cdemo518(a point518) point518
 
@@ -10643,6 +11156,7 @@ type point519 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo519 C.demo519
 func cdemo519(a point519) point519
 
@@ -10664,6 +11178,7 @@ type point520 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo520 C.demo520
 func cdemo520(a point520) point520
 
@@ -10684,6 +11199,7 @@ type point521 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo521 C.demo521
 func cdemo521(a point521) point521
 
@@ -10705,6 +11221,7 @@ type point522 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo522 C.demo522
 func cdemo522(a point522) point522
 
@@ -10726,6 +11243,7 @@ type point523 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo523 C.demo523
 func cdemo523(a point523) point523
 
@@ -10747,6 +11265,7 @@ type point524 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo524 C.demo524
 func cdemo524(a point524) point524
 
@@ -10768,6 +11287,7 @@ type point525 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo525 C.demo525
 func cdemo525(a point525) point525
 
@@ -10787,6 +11307,7 @@ type point526 struct {
 	x2 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo526 C.demo526
 func cdemo526(a point526) point526
 
@@ -10807,6 +11328,7 @@ type point527 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo527 C.demo527
 func cdemo527(a point527) point527
 
@@ -10828,6 +11350,7 @@ type point528 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo528 C.demo528
 func cdemo528(a point528) point528
 
@@ -10849,6 +11372,7 @@ type point529 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo529 C.demo529
 func cdemo529(a point529) point529
 
@@ -10870,6 +11394,7 @@ type point530 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo530 C.demo530
 func cdemo530(a point530) point530
 
@@ -10891,6 +11416,7 @@ type point531 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo531 C.demo531
 func cdemo531(a point531) point531
 
@@ -10911,6 +11437,7 @@ type point532 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo532 C.demo532
 func cdemo532(a point532) point532
 
@@ -10932,6 +11459,7 @@ type point533 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo533 C.demo533
 func cdemo533(a point533) point533
 
@@ -10953,6 +11481,7 @@ type point534 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo534 C.demo534
 func cdemo534(a point534) point534
 
@@ -10974,6 +11503,7 @@ type point535 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo535 C.demo535
 func cdemo535(a point535) point535
 
@@ -10995,6 +11525,7 @@ type point536 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo536 C.demo536
 func cdemo536(a point536) point536
 
@@ -11015,6 +11546,7 @@ type point537 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo537 C.demo537
 func cdemo537(a point537) point537
 
@@ -11036,6 +11568,7 @@ type point538 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo538 C.demo538
 func cdemo538(a point538) point538
 
@@ -11057,6 +11590,7 @@ type point539 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo539 C.demo539
 func cdemo539(a point539) point539
 
@@ -11078,6 +11612,7 @@ type point540 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo540 C.demo540
 func cdemo540(a point540) point540
 
@@ -11099,6 +11634,7 @@ type point541 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo541 C.demo541
 func cdemo541(a point541) point541
 
@@ -11119,6 +11655,7 @@ type point542 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo542 C.demo542
 func cdemo542(a point542) point542
 
@@ -11140,6 +11677,7 @@ type point543 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo543 C.demo543
 func cdemo543(a point543) point543
 
@@ -11161,6 +11699,7 @@ type point544 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo544 C.demo544
 func cdemo544(a point544) point544
 
@@ -11182,6 +11721,7 @@ type point545 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo545 C.demo545
 func cdemo545(a point545) point545
 
@@ -11203,6 +11743,7 @@ type point546 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo546 C.demo546
 func cdemo546(a point546) point546
 
@@ -11222,6 +11763,7 @@ type point547 struct {
 	x2 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo547 C.demo547
 func cdemo547(a point547) point547
 
@@ -11242,6 +11784,7 @@ type point548 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo548 C.demo548
 func cdemo548(a point548) point548
 
@@ -11263,6 +11806,7 @@ type point549 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo549 C.demo549
 func cdemo549(a point549) point549
 
@@ -11284,6 +11828,7 @@ type point550 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo550 C.demo550
 func cdemo550(a point550) point550
 
@@ -11305,6 +11850,7 @@ type point551 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo551 C.demo551
 func cdemo551(a point551) point551
 
@@ -11326,6 +11872,7 @@ type point552 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo552 C.demo552
 func cdemo552(a point552) point552
 
@@ -11346,6 +11893,7 @@ type point553 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo553 C.demo553
 func cdemo553(a point553) point553
 
@@ -11367,6 +11915,7 @@ type point554 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo554 C.demo554
 func cdemo554(a point554) point554
 
@@ -11388,6 +11937,7 @@ type point555 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo555 C.demo555
 func cdemo555(a point555) point555
 
@@ -11409,6 +11959,7 @@ type point556 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo556 C.demo556
 func cdemo556(a point556) point556
 
@@ -11430,6 +11981,7 @@ type point557 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo557 C.demo557
 func cdemo557(a point557) point557
 
@@ -11450,6 +12002,7 @@ type point558 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo558 C.demo558
 func cdemo558(a point558) point558
 
@@ -11471,6 +12024,7 @@ type point559 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo559 C.demo559
 func cdemo559(a point559) point559
 
@@ -11492,6 +12046,7 @@ type point560 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo560 C.demo560
 func cdemo560(a point560) point560
 
@@ -11513,6 +12068,7 @@ type point561 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo561 C.demo561
 func cdemo561(a point561) point561
 
@@ -11534,6 +12090,7 @@ type point562 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo562 C.demo562
 func cdemo562(a point562) point562
 
@@ -11554,6 +12111,7 @@ type point563 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo563 C.demo563
 func cdemo563(a point563) point563
 
@@ -11575,6 +12133,7 @@ type point564 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo564 C.demo564
 func cdemo564(a point564) point564
 
@@ -11596,6 +12155,7 @@ type point565 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo565 C.demo565
 func cdemo565(a point565) point565
 
@@ -11617,6 +12177,7 @@ type point566 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo566 C.demo566
 func cdemo566(a point566) point566
 
@@ -11638,6 +12199,7 @@ type point567 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo567 C.demo567
 func cdemo567(a point567) point567
 
@@ -11657,6 +12219,7 @@ type point568 struct {
 	x2 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo568 C.demo568
 func cdemo568(a point568) point568
 
@@ -11677,6 +12240,7 @@ type point569 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo569 C.demo569
 func cdemo569(a point569) point569
 
@@ -11698,6 +12262,7 @@ type point570 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo570 C.demo570
 func cdemo570(a point570) point570
 
@@ -11719,6 +12284,7 @@ type point571 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo571 C.demo571
 func cdemo571(a point571) point571
 
@@ -11740,6 +12306,7 @@ type point572 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo572 C.demo572
 func cdemo572(a point572) point572
 
@@ -11761,6 +12328,7 @@ type point573 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo573 C.demo573
 func cdemo573(a point573) point573
 
@@ -11781,6 +12349,7 @@ type point574 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo574 C.demo574
 func cdemo574(a point574) point574
 
@@ -11802,6 +12371,7 @@ type point575 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo575 C.demo575
 func cdemo575(a point575) point575
 
@@ -11823,6 +12393,7 @@ type point576 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo576 C.demo576
 func cdemo576(a point576) point576
 
@@ -11844,6 +12415,7 @@ type point577 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo577 C.demo577
 func cdemo577(a point577) point577
 
@@ -11865,6 +12437,7 @@ type point578 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo578 C.demo578
 func cdemo578(a point578) point578
 
@@ -11885,6 +12458,7 @@ type point579 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo579 C.demo579
 func cdemo579(a point579) point579
 
@@ -11906,6 +12480,7 @@ type point580 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo580 C.demo580
 func cdemo580(a point580) point580
 
@@ -11927,6 +12502,7 @@ type point581 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo581 C.demo581
 func cdemo581(a point581) point581
 
@@ -11948,6 +12524,7 @@ type point582 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo582 C.demo582
 func cdemo582(a point582) point582
 
@@ -11969,6 +12546,7 @@ type point583 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo583 C.demo583
 func cdemo583(a point583) point583
 
@@ -11989,6 +12567,7 @@ type point584 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo584 C.demo584
 func cdemo584(a point584) point584
 
@@ -12010,6 +12589,7 @@ type point585 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo585 C.demo585
 func cdemo585(a point585) point585
 
@@ -12031,6 +12611,7 @@ type point586 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo586 C.demo586
 func cdemo586(a point586) point586
 
@@ -12052,6 +12633,7 @@ type point587 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo587 C.demo587
 func cdemo587(a point587) point587
 
@@ -12073,6 +12655,7 @@ type point588 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo588 C.demo588
 func cdemo588(a point588) point588
 
@@ -12092,6 +12675,7 @@ type point589 struct {
 	x2 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo589 C.demo589
 func cdemo589(a point589) point589
 
@@ -12112,6 +12696,7 @@ type point590 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo590 C.demo590
 func cdemo590(a point590) point590
 
@@ -12133,6 +12718,7 @@ type point591 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo591 C.demo591
 func cdemo591(a point591) point591
 
@@ -12154,6 +12740,7 @@ type point592 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo592 C.demo592
 func cdemo592(a point592) point592
 
@@ -12175,6 +12762,7 @@ type point593 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo593 C.demo593
 func cdemo593(a point593) point593
 
@@ -12196,6 +12784,7 @@ type point594 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo594 C.demo594
 func cdemo594(a point594) point594
 
@@ -12216,6 +12805,7 @@ type point595 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo595 C.demo595
 func cdemo595(a point595) point595
 
@@ -12237,6 +12827,7 @@ type point596 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo596 C.demo596
 func cdemo596(a point596) point596
 
@@ -12258,6 +12849,7 @@ type point597 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo597 C.demo597
 func cdemo597(a point597) point597
 
@@ -12279,6 +12871,7 @@ type point598 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo598 C.demo598
 func cdemo598(a point598) point598
 
@@ -12300,6 +12893,7 @@ type point599 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo599 C.demo599
 func cdemo599(a point599) point599
 
@@ -12320,6 +12914,7 @@ type point600 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo600 C.demo600
 func cdemo600(a point600) point600
 
@@ -12341,6 +12936,7 @@ type point601 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo601 C.demo601
 func cdemo601(a point601) point601
 
@@ -12362,6 +12958,7 @@ type point602 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo602 C.demo602
 func cdemo602(a point602) point602
 
@@ -12383,6 +12980,7 @@ type point603 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo603 C.demo603
 func cdemo603(a point603) point603
 
@@ -12404,6 +13002,7 @@ type point604 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo604 C.demo604
 func cdemo604(a point604) point604
 
@@ -12424,6 +13023,7 @@ type point605 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo605 C.demo605
 func cdemo605(a point605) point605
 
@@ -12445,6 +13045,7 @@ type point606 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo606 C.demo606
 func cdemo606(a point606) point606
 
@@ -12466,6 +13067,7 @@ type point607 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo607 C.demo607
 func cdemo607(a point607) point607
 
@@ -12487,6 +13089,7 @@ type point608 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo608 C.demo608
 func cdemo608(a point608) point608
 
@@ -12508,6 +13111,7 @@ type point609 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo609 C.demo609
 func cdemo609(a point609) point609
 
@@ -12527,6 +13131,7 @@ type point610 struct {
 	x2 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo610 C.demo610
 func cdemo610(a point610) point610
 
@@ -12547,6 +13152,7 @@ type point611 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo611 C.demo611
 func cdemo611(a point611) point611
 
@@ -12568,6 +13174,7 @@ type point612 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo612 C.demo612
 func cdemo612(a point612) point612
 
@@ -12589,6 +13196,7 @@ type point613 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo613 C.demo613
 func cdemo613(a point613) point613
 
@@ -12610,6 +13218,7 @@ type point614 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo614 C.demo614
 func cdemo614(a point614) point614
 
@@ -12631,6 +13240,7 @@ type point615 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo615 C.demo615
 func cdemo615(a point615) point615
 
@@ -12651,6 +13261,7 @@ type point616 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo616 C.demo616
 func cdemo616(a point616) point616
 
@@ -12672,6 +13283,7 @@ type point617 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo617 C.demo617
 func cdemo617(a point617) point617
 
@@ -12693,6 +13305,7 @@ type point618 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo618 C.demo618
 func cdemo618(a point618) point618
 
@@ -12714,6 +13327,7 @@ type point619 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo619 C.demo619
 func cdemo619(a point619) point619
 
@@ -12735,6 +13349,7 @@ type point620 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo620 C.demo620
 func cdemo620(a point620) point620
 
@@ -12755,6 +13370,7 @@ type point621 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo621 C.demo621
 func cdemo621(a point621) point621
 
@@ -12776,6 +13392,7 @@ type point622 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo622 C.demo622
 func cdemo622(a point622) point622
 
@@ -12797,6 +13414,7 @@ type point623 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo623 C.demo623
 func cdemo623(a point623) point623
 
@@ -12818,6 +13436,7 @@ type point624 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo624 C.demo624
 func cdemo624(a point624) point624
 
@@ -12839,6 +13458,7 @@ type point625 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo625 C.demo625
 func cdemo625(a point625) point625
 
@@ -12859,6 +13479,7 @@ type point626 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo626 C.demo626
 func cdemo626(a point626) point626
 
@@ -12880,6 +13501,7 @@ type point627 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo627 C.demo627
 func cdemo627(a point627) point627
 
@@ -12901,6 +13523,7 @@ type point628 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo628 C.demo628
 func cdemo628(a point628) point628
 
@@ -12922,6 +13545,7 @@ type point629 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo629 C.demo629
 func cdemo629(a point629) point629
 
@@ -12943,6 +13567,7 @@ type point630 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo630 C.demo630
 func cdemo630(a point630) point630
 
@@ -12962,6 +13587,7 @@ type point631 struct {
 	x2 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo631 C.demo631
 func cdemo631(a point631) point631
 
@@ -12982,6 +13608,7 @@ type point632 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo632 C.demo632
 func cdemo632(a point632) point632
 
@@ -13003,6 +13630,7 @@ type point633 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo633 C.demo633
 func cdemo633(a point633) point633
 
@@ -13024,6 +13652,7 @@ type point634 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo634 C.demo634
 func cdemo634(a point634) point634
 
@@ -13045,6 +13674,7 @@ type point635 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo635 C.demo635
 func cdemo635(a point635) point635
 
@@ -13066,6 +13696,7 @@ type point636 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo636 C.demo636
 func cdemo636(a point636) point636
 
@@ -13086,6 +13717,7 @@ type point637 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo637 C.demo637
 func cdemo637(a point637) point637
 
@@ -13107,6 +13739,7 @@ type point638 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo638 C.demo638
 func cdemo638(a point638) point638
 
@@ -13128,6 +13761,7 @@ type point639 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo639 C.demo639
 func cdemo639(a point639) point639
 
@@ -13149,6 +13783,7 @@ type point640 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo640 C.demo640
 func cdemo640(a point640) point640
 
@@ -13170,6 +13805,7 @@ type point641 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo641 C.demo641
 func cdemo641(a point641) point641
 
@@ -13190,6 +13826,7 @@ type point642 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo642 C.demo642
 func cdemo642(a point642) point642
 
@@ -13211,6 +13848,7 @@ type point643 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo643 C.demo643
 func cdemo643(a point643) point643
 
@@ -13232,6 +13870,7 @@ type point644 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo644 C.demo644
 func cdemo644(a point644) point644
 
@@ -13253,6 +13892,7 @@ type point645 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo645 C.demo645
 func cdemo645(a point645) point645
 
@@ -13274,6 +13914,7 @@ type point646 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo646 C.demo646
 func cdemo646(a point646) point646
 
@@ -13294,6 +13935,7 @@ type point647 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo647 C.demo647
 func cdemo647(a point647) point647
 
@@ -13315,6 +13957,7 @@ type point648 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo648 C.demo648
 func cdemo648(a point648) point648
 
@@ -13336,6 +13979,7 @@ type point649 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo649 C.demo649
 func cdemo649(a point649) point649
 
@@ -13357,6 +14001,7 @@ type point650 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo650 C.demo650
 func cdemo650(a point650) point650
 
@@ -13378,6 +14023,7 @@ type point651 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo651 C.demo651
 func cdemo651(a point651) point651
 
@@ -13397,6 +14043,7 @@ type point652 struct {
 	x2 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo652 C.demo652
 func cdemo652(a point652) point652
 
@@ -13417,6 +14064,7 @@ type point653 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo653 C.demo653
 func cdemo653(a point653) point653
 
@@ -13438,6 +14086,7 @@ type point654 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo654 C.demo654
 func cdemo654(a point654) point654
 
@@ -13459,6 +14108,7 @@ type point655 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo655 C.demo655
 func cdemo655(a point655) point655
 
@@ -13480,6 +14130,7 @@ type point656 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo656 C.demo656
 func cdemo656(a point656) point656
 
@@ -13501,6 +14152,7 @@ type point657 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo657 C.demo657
 func cdemo657(a point657) point657
 
@@ -13521,6 +14173,7 @@ type point658 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo658 C.demo658
 func cdemo658(a point658) point658
 
@@ -13542,6 +14195,7 @@ type point659 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo659 C.demo659
 func cdemo659(a point659) point659
 
@@ -13563,6 +14217,7 @@ type point660 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo660 C.demo660
 func cdemo660(a point660) point660
 
@@ -13584,6 +14239,7 @@ type point661 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo661 C.demo661
 func cdemo661(a point661) point661
 
@@ -13605,6 +14261,7 @@ type point662 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo662 C.demo662
 func cdemo662(a point662) point662
 
@@ -13625,6 +14282,7 @@ type point663 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo663 C.demo663
 func cdemo663(a point663) point663
 
@@ -13646,6 +14304,7 @@ type point664 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo664 C.demo664
 func cdemo664(a point664) point664
 
@@ -13667,6 +14326,7 @@ type point665 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo665 C.demo665
 func cdemo665(a point665) point665
 
@@ -13688,6 +14348,7 @@ type point666 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo666 C.demo666
 func cdemo666(a point666) point666
 
@@ -13709,6 +14370,7 @@ type point667 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo667 C.demo667
 func cdemo667(a point667) point667
 
@@ -13729,6 +14391,7 @@ type point668 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo668 C.demo668
 func cdemo668(a point668) point668
 
@@ -13750,6 +14413,7 @@ type point669 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo669 C.demo669
 func cdemo669(a point669) point669
 
@@ -13771,6 +14435,7 @@ type point670 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo670 C.demo670
 func cdemo670(a point670) point670
 
@@ -13792,6 +14457,7 @@ type point671 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo671 C.demo671
 func cdemo671(a point671) point671
 
@@ -13813,6 +14479,7 @@ type point672 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo672 C.demo672
 func cdemo672(a point672) point672
 
@@ -13832,6 +14499,7 @@ type point673 struct {
 	x2 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo673 C.demo673
 func cdemo673(a point673) point673
 
@@ -13852,6 +14520,7 @@ type point674 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo674 C.demo674
 func cdemo674(a point674) point674
 
@@ -13873,6 +14542,7 @@ type point675 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo675 C.demo675
 func cdemo675(a point675) point675
 
@@ -13894,6 +14564,7 @@ type point676 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo676 C.demo676
 func cdemo676(a point676) point676
 
@@ -13915,6 +14586,7 @@ type point677 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo677 C.demo677
 func cdemo677(a point677) point677
 
@@ -13936,6 +14608,7 @@ type point678 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo678 C.demo678
 func cdemo678(a point678) point678
 
@@ -13956,6 +14629,7 @@ type point679 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo679 C.demo679
 func cdemo679(a point679) point679
 
@@ -13977,6 +14651,7 @@ type point680 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo680 C.demo680
 func cdemo680(a point680) point680
 
@@ -13998,6 +14673,7 @@ type point681 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo681 C.demo681
 func cdemo681(a point681) point681
 
@@ -14019,6 +14695,7 @@ type point682 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo682 C.demo682
 func cdemo682(a point682) point682
 
@@ -14040,6 +14717,7 @@ type point683 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo683 C.demo683
 func cdemo683(a point683) point683
 
@@ -14060,6 +14738,7 @@ type point684 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo684 C.demo684
 func cdemo684(a point684) point684
 
@@ -14081,6 +14760,7 @@ type point685 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo685 C.demo685
 func cdemo685(a point685) point685
 
@@ -14102,6 +14782,7 @@ type point686 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo686 C.demo686
 func cdemo686(a point686) point686
 
@@ -14123,6 +14804,7 @@ type point687 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo687 C.demo687
 func cdemo687(a point687) point687
 
@@ -14144,6 +14826,7 @@ type point688 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo688 C.demo688
 func cdemo688(a point688) point688
 
@@ -14164,6 +14847,7 @@ type point689 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo689 C.demo689
 func cdemo689(a point689) point689
 
@@ -14185,6 +14869,7 @@ type point690 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo690 C.demo690
 func cdemo690(a point690) point690
 
@@ -14206,6 +14891,7 @@ type point691 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo691 C.demo691
 func cdemo691(a point691) point691
 
@@ -14227,6 +14913,7 @@ type point692 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo692 C.demo692
 func cdemo692(a point692) point692
 
@@ -14248,6 +14935,7 @@ type point693 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo693 C.demo693
 func cdemo693(a point693) point693
 
@@ -14267,6 +14955,7 @@ type point694 struct {
 	x2 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo694 C.demo694
 func cdemo694(a point694) point694
 
@@ -14287,6 +14976,7 @@ type point695 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo695 C.demo695
 func cdemo695(a point695) point695
 
@@ -14308,6 +14998,7 @@ type point696 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo696 C.demo696
 func cdemo696(a point696) point696
 
@@ -14329,6 +15020,7 @@ type point697 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo697 C.demo697
 func cdemo697(a point697) point697
 
@@ -14350,6 +15042,7 @@ type point698 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo698 C.demo698
 func cdemo698(a point698) point698
 
@@ -14371,6 +15064,7 @@ type point699 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo699 C.demo699
 func cdemo699(a point699) point699
 
@@ -14391,6 +15085,7 @@ type point700 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo700 C.demo700
 func cdemo700(a point700) point700
 
@@ -14412,6 +15107,7 @@ type point701 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo701 C.demo701
 func cdemo701(a point701) point701
 
@@ -14433,6 +15129,7 @@ type point702 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo702 C.demo702
 func cdemo702(a point702) point702
 
@@ -14454,6 +15151,7 @@ type point703 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo703 C.demo703
 func cdemo703(a point703) point703
 
@@ -14475,6 +15173,7 @@ type point704 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo704 C.demo704
 func cdemo704(a point704) point704
 
@@ -14495,6 +15194,7 @@ type point705 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo705 C.demo705
 func cdemo705(a point705) point705
 
@@ -14516,6 +15216,7 @@ type point706 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo706 C.demo706
 func cdemo706(a point706) point706
 
@@ -14537,6 +15238,7 @@ type point707 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo707 C.demo707
 func cdemo707(a point707) point707
 
@@ -14558,6 +15260,7 @@ type point708 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo708 C.demo708
 func cdemo708(a point708) point708
 
@@ -14579,6 +15282,7 @@ type point709 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo709 C.demo709
 func cdemo709(a point709) point709
 
@@ -14599,6 +15303,7 @@ type point710 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo710 C.demo710
 func cdemo710(a point710) point710
 
@@ -14620,6 +15325,7 @@ type point711 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo711 C.demo711
 func cdemo711(a point711) point711
 
@@ -14641,6 +15347,7 @@ type point712 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo712 C.demo712
 func cdemo712(a point712) point712
 
@@ -14662,6 +15369,7 @@ type point713 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo713 C.demo713
 func cdemo713(a point713) point713
 
@@ -14683,6 +15391,7 @@ type point714 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo714 C.demo714
 func cdemo714(a point714) point714
 
@@ -14702,6 +15411,7 @@ type point715 struct {
 	x2 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo715 C.demo715
 func cdemo715(a point715) point715
 
@@ -14722,6 +15432,7 @@ type point716 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo716 C.demo716
 func cdemo716(a point716) point716
 
@@ -14743,6 +15454,7 @@ type point717 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo717 C.demo717
 func cdemo717(a point717) point717
 
@@ -14764,6 +15476,7 @@ type point718 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo718 C.demo718
 func cdemo718(a point718) point718
 
@@ -14785,6 +15498,7 @@ type point719 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo719 C.demo719
 func cdemo719(a point719) point719
 
@@ -14806,6 +15520,7 @@ type point720 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo720 C.demo720
 func cdemo720(a point720) point720
 
@@ -14826,6 +15541,7 @@ type point721 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo721 C.demo721
 func cdemo721(a point721) point721
 
@@ -14847,6 +15563,7 @@ type point722 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo722 C.demo722
 func cdemo722(a point722) point722
 
@@ -14868,6 +15585,7 @@ type point723 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo723 C.demo723
 func cdemo723(a point723) point723
 
@@ -14889,6 +15607,7 @@ type point724 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo724 C.demo724
 func cdemo724(a point724) point724
 
@@ -14910,6 +15629,7 @@ type point725 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo725 C.demo725
 func cdemo725(a point725) point725
 
@@ -14930,6 +15650,7 @@ type point726 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo726 C.demo726
 func cdemo726(a point726) point726
 
@@ -14951,6 +15672,7 @@ type point727 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo727 C.demo727
 func cdemo727(a point727) point727
 
@@ -14972,6 +15694,7 @@ type point728 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo728 C.demo728
 func cdemo728(a point728) point728
 
@@ -14993,6 +15716,7 @@ type point729 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo729 C.demo729
 func cdemo729(a point729) point729
 
@@ -15014,6 +15738,7 @@ type point730 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo730 C.demo730
 func cdemo730(a point730) point730
 
@@ -15034,6 +15759,7 @@ type point731 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo731 C.demo731
 func cdemo731(a point731) point731
 
@@ -15055,6 +15781,7 @@ type point732 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo732 C.demo732
 func cdemo732(a point732) point732
 
@@ -15076,6 +15803,7 @@ type point733 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo733 C.demo733
 func cdemo733(a point733) point733
 
@@ -15097,6 +15825,7 @@ type point734 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo734 C.demo734
 func cdemo734(a point734) point734
 
@@ -15118,6 +15847,7 @@ type point735 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo735 C.demo735
 func cdemo735(a point735) point735
 
@@ -15137,6 +15867,7 @@ type point736 struct {
 	x2 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo736 C.demo736
 func cdemo736(a point736) point736
 
@@ -15157,6 +15888,7 @@ type point737 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo737 C.demo737
 func cdemo737(a point737) point737
 
@@ -15178,6 +15910,7 @@ type point738 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo738 C.demo738
 func cdemo738(a point738) point738
 
@@ -15199,6 +15932,7 @@ type point739 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo739 C.demo739
 func cdemo739(a point739) point739
 
@@ -15220,6 +15954,7 @@ type point740 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo740 C.demo740
 func cdemo740(a point740) point740
 
@@ -15241,6 +15976,7 @@ type point741 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo741 C.demo741
 func cdemo741(a point741) point741
 
@@ -15261,6 +15997,7 @@ type point742 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo742 C.demo742
 func cdemo742(a point742) point742
 
@@ -15282,6 +16019,7 @@ type point743 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo743 C.demo743
 func cdemo743(a point743) point743
 
@@ -15303,6 +16041,7 @@ type point744 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo744 C.demo744
 func cdemo744(a point744) point744
 
@@ -15324,6 +16063,7 @@ type point745 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo745 C.demo745
 func cdemo745(a point745) point745
 
@@ -15345,6 +16085,7 @@ type point746 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo746 C.demo746
 func cdemo746(a point746) point746
 
@@ -15365,6 +16106,7 @@ type point747 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo747 C.demo747
 func cdemo747(a point747) point747
 
@@ -15386,6 +16128,7 @@ type point748 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo748 C.demo748
 func cdemo748(a point748) point748
 
@@ -15407,6 +16150,7 @@ type point749 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo749 C.demo749
 func cdemo749(a point749) point749
 
@@ -15428,6 +16172,7 @@ type point750 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo750 C.demo750
 func cdemo750(a point750) point750
 
@@ -15449,6 +16194,7 @@ type point751 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo751 C.demo751
 func cdemo751(a point751) point751
 
@@ -15469,6 +16215,7 @@ type point752 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo752 C.demo752
 func cdemo752(a point752) point752
 
@@ -15490,6 +16237,7 @@ type point753 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo753 C.demo753
 func cdemo753(a point753) point753
 
@@ -15511,6 +16259,7 @@ type point754 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo754 C.demo754
 func cdemo754(a point754) point754
 
@@ -15532,6 +16281,7 @@ type point755 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo755 C.demo755
 func cdemo755(a point755) point755
 
@@ -15553,6 +16303,7 @@ type point756 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo756 C.demo756
 func cdemo756(a point756) point756
 
@@ -15572,6 +16323,7 @@ type point757 struct {
 	x2 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo757 C.demo757
 func cdemo757(a point757) point757
 
@@ -15592,6 +16344,7 @@ type point758 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo758 C.demo758
 func cdemo758(a point758) point758
 
@@ -15613,6 +16366,7 @@ type point759 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo759 C.demo759
 func cdemo759(a point759) point759
 
@@ -15634,6 +16388,7 @@ type point760 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo760 C.demo760
 func cdemo760(a point760) point760
 
@@ -15655,6 +16410,7 @@ type point761 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo761 C.demo761
 func cdemo761(a point761) point761
 
@@ -15676,6 +16432,7 @@ type point762 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo762 C.demo762
 func cdemo762(a point762) point762
 
@@ -15696,6 +16453,7 @@ type point763 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo763 C.demo763
 func cdemo763(a point763) point763
 
@@ -15717,6 +16475,7 @@ type point764 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo764 C.demo764
 func cdemo764(a point764) point764
 
@@ -15738,6 +16497,7 @@ type point765 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo765 C.demo765
 func cdemo765(a point765) point765
 
@@ -15759,6 +16519,7 @@ type point766 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo766 C.demo766
 func cdemo766(a point766) point766
 
@@ -15780,6 +16541,7 @@ type point767 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo767 C.demo767
 func cdemo767(a point767) point767
 
@@ -15800,6 +16562,7 @@ type point768 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo768 C.demo768
 func cdemo768(a point768) point768
 
@@ -15821,6 +16584,7 @@ type point769 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo769 C.demo769
 func cdemo769(a point769) point769
 
@@ -15842,6 +16606,7 @@ type point770 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo770 C.demo770
 func cdemo770(a point770) point770
 
@@ -15863,6 +16628,7 @@ type point771 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo771 C.demo771
 func cdemo771(a point771) point771
 
@@ -15884,6 +16650,7 @@ type point772 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo772 C.demo772
 func cdemo772(a point772) point772
 
@@ -15904,6 +16671,7 @@ type point773 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo773 C.demo773
 func cdemo773(a point773) point773
 
@@ -15925,6 +16693,7 @@ type point774 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo774 C.demo774
 func cdemo774(a point774) point774
 
@@ -15946,6 +16715,7 @@ type point775 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo775 C.demo775
 func cdemo775(a point775) point775
 
@@ -15967,6 +16737,7 @@ type point776 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo776 C.demo776
 func cdemo776(a point776) point776
 
@@ -15988,6 +16759,7 @@ type point777 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo777 C.demo777
 func cdemo777(a point777) point777
 
@@ -16007,6 +16779,7 @@ type point778 struct {
 	x2 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo778 C.demo778
 func cdemo778(a point778) point778
 
@@ -16027,6 +16800,7 @@ type point779 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo779 C.demo779
 func cdemo779(a point779) point779
 
@@ -16048,6 +16822,7 @@ type point780 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo780 C.demo780
 func cdemo780(a point780) point780
 
@@ -16069,6 +16844,7 @@ type point781 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo781 C.demo781
 func cdemo781(a point781) point781
 
@@ -16090,6 +16866,7 @@ type point782 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo782 C.demo782
 func cdemo782(a point782) point782
 
@@ -16111,6 +16888,7 @@ type point783 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo783 C.demo783
 func cdemo783(a point783) point783
 
@@ -16131,6 +16909,7 @@ type point784 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo784 C.demo784
 func cdemo784(a point784) point784
 
@@ -16152,6 +16931,7 @@ type point785 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo785 C.demo785
 func cdemo785(a point785) point785
 
@@ -16173,6 +16953,7 @@ type point786 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo786 C.demo786
 func cdemo786(a point786) point786
 
@@ -16194,6 +16975,7 @@ type point787 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo787 C.demo787
 func cdemo787(a point787) point787
 
@@ -16215,6 +16997,7 @@ type point788 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo788 C.demo788
 func cdemo788(a point788) point788
 
@@ -16235,6 +17018,7 @@ type point789 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo789 C.demo789
 func cdemo789(a point789) point789
 
@@ -16256,6 +17040,7 @@ type point790 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo790 C.demo790
 func cdemo790(a point790) point790
 
@@ -16277,6 +17062,7 @@ type point791 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo791 C.demo791
 func cdemo791(a point791) point791
 
@@ -16298,6 +17084,7 @@ type point792 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo792 C.demo792
 func cdemo792(a point792) point792
 
@@ -16319,6 +17106,7 @@ type point793 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo793 C.demo793
 func cdemo793(a point793) point793
 
@@ -16339,6 +17127,7 @@ type point794 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo794 C.demo794
 func cdemo794(a point794) point794
 
@@ -16360,6 +17149,7 @@ type point795 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo795 C.demo795
 func cdemo795(a point795) point795
 
@@ -16381,6 +17171,7 @@ type point796 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo796 C.demo796
 func cdemo796(a point796) point796
 
@@ -16402,6 +17193,7 @@ type point797 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo797 C.demo797
 func cdemo797(a point797) point797
 
@@ -16423,6 +17215,7 @@ type point798 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo798 C.demo798
 func cdemo798(a point798) point798
 
@@ -16442,6 +17235,7 @@ type point799 struct {
 	x2 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo799 C.demo799
 func cdemo799(a point799) point799
 
@@ -16462,6 +17256,7 @@ type point800 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo800 C.demo800
 func cdemo800(a point800) point800
 
@@ -16483,6 +17278,7 @@ type point801 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo801 C.demo801
 func cdemo801(a point801) point801
 
@@ -16504,6 +17300,7 @@ type point802 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo802 C.demo802
 func cdemo802(a point802) point802
 
@@ -16525,6 +17322,7 @@ type point803 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo803 C.demo803
 func cdemo803(a point803) point803
 
@@ -16546,6 +17344,7 @@ type point804 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo804 C.demo804
 func cdemo804(a point804) point804
 
@@ -16566,6 +17365,7 @@ type point805 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo805 C.demo805
 func cdemo805(a point805) point805
 
@@ -16587,6 +17387,7 @@ type point806 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo806 C.demo806
 func cdemo806(a point806) point806
 
@@ -16608,6 +17409,7 @@ type point807 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo807 C.demo807
 func cdemo807(a point807) point807
 
@@ -16629,6 +17431,7 @@ type point808 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo808 C.demo808
 func cdemo808(a point808) point808
 
@@ -16650,6 +17453,7 @@ type point809 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo809 C.demo809
 func cdemo809(a point809) point809
 
@@ -16670,6 +17474,7 @@ type point810 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo810 C.demo810
 func cdemo810(a point810) point810
 
@@ -16691,6 +17496,7 @@ type point811 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo811 C.demo811
 func cdemo811(a point811) point811
 
@@ -16712,6 +17518,7 @@ type point812 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo812 C.demo812
 func cdemo812(a point812) point812
 
@@ -16733,6 +17540,7 @@ type point813 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo813 C.demo813
 func cdemo813(a point813) point813
 
@@ -16754,6 +17562,7 @@ type point814 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo814 C.demo814
 func cdemo814(a point814) point814
 
@@ -16774,6 +17583,7 @@ type point815 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo815 C.demo815
 func cdemo815(a point815) point815
 
@@ -16795,6 +17605,7 @@ type point816 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo816 C.demo816
 func cdemo816(a point816) point816
 
@@ -16816,6 +17627,7 @@ type point817 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo817 C.demo817
 func cdemo817(a point817) point817
 
@@ -16837,6 +17649,7 @@ type point818 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo818 C.demo818
 func cdemo818(a point818) point818
 
@@ -16858,6 +17671,7 @@ type point819 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo819 C.demo819
 func cdemo819(a point819) point819
 
@@ -16877,6 +17691,7 @@ type point820 struct {
 	x2 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo820 C.demo820
 func cdemo820(a point820) point820
 
@@ -16897,6 +17712,7 @@ type point821 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo821 C.demo821
 func cdemo821(a point821) point821
 
@@ -16918,6 +17734,7 @@ type point822 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo822 C.demo822
 func cdemo822(a point822) point822
 
@@ -16939,6 +17756,7 @@ type point823 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo823 C.demo823
 func cdemo823(a point823) point823
 
@@ -16960,6 +17778,7 @@ type point824 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo824 C.demo824
 func cdemo824(a point824) point824
 
@@ -16981,6 +17800,7 @@ type point825 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo825 C.demo825
 func cdemo825(a point825) point825
 
@@ -17001,6 +17821,7 @@ type point826 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo826 C.demo826
 func cdemo826(a point826) point826
 
@@ -17022,6 +17843,7 @@ type point827 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo827 C.demo827
 func cdemo827(a point827) point827
 
@@ -17043,6 +17865,7 @@ type point828 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo828 C.demo828
 func cdemo828(a point828) point828
 
@@ -17064,6 +17887,7 @@ type point829 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo829 C.demo829
 func cdemo829(a point829) point829
 
@@ -17085,6 +17909,7 @@ type point830 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo830 C.demo830
 func cdemo830(a point830) point830
 
@@ -17105,6 +17930,7 @@ type point831 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo831 C.demo831
 func cdemo831(a point831) point831
 
@@ -17126,6 +17952,7 @@ type point832 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo832 C.demo832
 func cdemo832(a point832) point832
 
@@ -17147,6 +17974,7 @@ type point833 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo833 C.demo833
 func cdemo833(a point833) point833
 
@@ -17168,6 +17996,7 @@ type point834 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo834 C.demo834
 func cdemo834(a point834) point834
 
@@ -17189,6 +18018,7 @@ type point835 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo835 C.demo835
 func cdemo835(a point835) point835
 
@@ -17209,6 +18039,7 @@ type point836 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo836 C.demo836
 func cdemo836(a point836) point836
 
@@ -17230,6 +18061,7 @@ type point837 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo837 C.demo837
 func cdemo837(a point837) point837
 
@@ -17251,6 +18083,7 @@ type point838 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo838 C.demo838
 func cdemo838(a point838) point838
 
@@ -17272,6 +18105,7 @@ type point839 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo839 C.demo839
 func cdemo839(a point839) point839
 
@@ -17293,6 +18127,7 @@ type point840 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo840 C.demo840
 func cdemo840(a point840) point840
 
@@ -17312,6 +18147,7 @@ type point841 struct {
 	x2 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo841 C.demo841
 func cdemo841(a point841) point841
 
@@ -17332,6 +18168,7 @@ type point842 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo842 C.demo842
 func cdemo842(a point842) point842
 
@@ -17353,6 +18190,7 @@ type point843 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo843 C.demo843
 func cdemo843(a point843) point843
 
@@ -17374,6 +18212,7 @@ type point844 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo844 C.demo844
 func cdemo844(a point844) point844
 
@@ -17395,6 +18234,7 @@ type point845 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo845 C.demo845
 func cdemo845(a point845) point845
 
@@ -17416,6 +18256,7 @@ type point846 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo846 C.demo846
 func cdemo846(a point846) point846
 
@@ -17436,6 +18277,7 @@ type point847 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo847 C.demo847
 func cdemo847(a point847) point847
 
@@ -17457,6 +18299,7 @@ type point848 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo848 C.demo848
 func cdemo848(a point848) point848
 
@@ -17478,6 +18321,7 @@ type point849 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo849 C.demo849
 func cdemo849(a point849) point849
 
@@ -17499,6 +18343,7 @@ type point850 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo850 C.demo850
 func cdemo850(a point850) point850
 
@@ -17520,6 +18365,7 @@ type point851 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo851 C.demo851
 func cdemo851(a point851) point851
 
@@ -17540,6 +18386,7 @@ type point852 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo852 C.demo852
 func cdemo852(a point852) point852
 
@@ -17561,6 +18408,7 @@ type point853 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo853 C.demo853
 func cdemo853(a point853) point853
 
@@ -17582,6 +18430,7 @@ type point854 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo854 C.demo854
 func cdemo854(a point854) point854
 
@@ -17603,6 +18452,7 @@ type point855 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo855 C.demo855
 func cdemo855(a point855) point855
 
@@ -17624,6 +18474,7 @@ type point856 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo856 C.demo856
 func cdemo856(a point856) point856
 
@@ -17644,6 +18495,7 @@ type point857 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo857 C.demo857
 func cdemo857(a point857) point857
 
@@ -17665,6 +18517,7 @@ type point858 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo858 C.demo858
 func cdemo858(a point858) point858
 
@@ -17686,6 +18539,7 @@ type point859 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo859 C.demo859
 func cdemo859(a point859) point859
 
@@ -17707,6 +18561,7 @@ type point860 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo860 C.demo860
 func cdemo860(a point860) point860
 
@@ -17728,6 +18583,7 @@ type point861 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo861 C.demo861
 func cdemo861(a point861) point861
 
@@ -17747,6 +18603,7 @@ type point862 struct {
 	x2 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo862 C.demo862
 func cdemo862(a point862) point862
 
@@ -17767,6 +18624,7 @@ type point863 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo863 C.demo863
 func cdemo863(a point863) point863
 
@@ -17788,6 +18646,7 @@ type point864 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo864 C.demo864
 func cdemo864(a point864) point864
 
@@ -17809,6 +18668,7 @@ type point865 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo865 C.demo865
 func cdemo865(a point865) point865
 
@@ -17830,6 +18690,7 @@ type point866 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo866 C.demo866
 func cdemo866(a point866) point866
 
@@ -17851,6 +18712,7 @@ type point867 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo867 C.demo867
 func cdemo867(a point867) point867
 
@@ -17871,6 +18733,7 @@ type point868 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo868 C.demo868
 func cdemo868(a point868) point868
 
@@ -17892,6 +18755,7 @@ type point869 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo869 C.demo869
 func cdemo869(a point869) point869
 
@@ -17913,6 +18777,7 @@ type point870 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo870 C.demo870
 func cdemo870(a point870) point870
 
@@ -17934,6 +18799,7 @@ type point871 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo871 C.demo871
 func cdemo871(a point871) point871
 
@@ -17955,6 +18821,7 @@ type point872 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo872 C.demo872
 func cdemo872(a point872) point872
 
@@ -17975,6 +18842,7 @@ type point873 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo873 C.demo873
 func cdemo873(a point873) point873
 
@@ -17996,6 +18864,7 @@ type point874 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo874 C.demo874
 func cdemo874(a point874) point874
 
@@ -18017,6 +18886,7 @@ type point875 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo875 C.demo875
 func cdemo875(a point875) point875
 
@@ -18038,6 +18908,7 @@ type point876 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo876 C.demo876
 func cdemo876(a point876) point876
 
@@ -18059,6 +18930,7 @@ type point877 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo877 C.demo877
 func cdemo877(a point877) point877
 
@@ -18079,6 +18951,7 @@ type point878 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo878 C.demo878
 func cdemo878(a point878) point878
 
@@ -18100,6 +18973,7 @@ type point879 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo879 C.demo879
 func cdemo879(a point879) point879
 
@@ -18121,6 +18995,7 @@ type point880 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo880 C.demo880
 func cdemo880(a point880) point880
 
@@ -18142,6 +19017,7 @@ type point881 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo881 C.demo881
 func cdemo881(a point881) point881
 
@@ -18163,6 +19039,7 @@ type point882 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo882 C.demo882
 func cdemo882(a point882) point882
 
@@ -18182,6 +19059,7 @@ type point883 struct {
 	x2 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo883 C.demo883
 func cdemo883(a point883) point883
 
@@ -18202,6 +19080,7 @@ type point884 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo884 C.demo884
 func cdemo884(a point884) point884
 
@@ -18223,6 +19102,7 @@ type point885 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo885 C.demo885
 func cdemo885(a point885) point885
 
@@ -18244,6 +19124,7 @@ type point886 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo886 C.demo886
 func cdemo886(a point886) point886
 
@@ -18265,6 +19146,7 @@ type point887 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo887 C.demo887
 func cdemo887(a point887) point887
 
@@ -18286,6 +19168,7 @@ type point888 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo888 C.demo888
 func cdemo888(a point888) point888
 
@@ -18306,6 +19189,7 @@ type point889 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo889 C.demo889
 func cdemo889(a point889) point889
 
@@ -18327,6 +19211,7 @@ type point890 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo890 C.demo890
 func cdemo890(a point890) point890
 
@@ -18348,6 +19233,7 @@ type point891 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo891 C.demo891
 func cdemo891(a point891) point891
 
@@ -18369,6 +19255,7 @@ type point892 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo892 C.demo892
 func cdemo892(a point892) point892
 
@@ -18390,6 +19277,7 @@ type point893 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo893 C.demo893
 func cdemo893(a point893) point893
 
@@ -18410,6 +19298,7 @@ type point894 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo894 C.demo894
 func cdemo894(a point894) point894
 
@@ -18431,6 +19320,7 @@ type point895 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo895 C.demo895
 func cdemo895(a point895) point895
 
@@ -18452,6 +19342,7 @@ type point896 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo896 C.demo896
 func cdemo896(a point896) point896
 
@@ -18473,6 +19364,7 @@ type point897 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo897 C.demo897
 func cdemo897(a point897) point897
 
@@ -18494,6 +19386,7 @@ type point898 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo898 C.demo898
 func cdemo898(a point898) point898
 
@@ -18514,6 +19407,7 @@ type point899 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo899 C.demo899
 func cdemo899(a point899) point899
 
@@ -18535,6 +19429,7 @@ type point900 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo900 C.demo900
 func cdemo900(a point900) point900
 
@@ -18556,6 +19451,7 @@ type point901 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo901 C.demo901
 func cdemo901(a point901) point901
 
@@ -18577,6 +19473,7 @@ type point902 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo902 C.demo902
 func cdemo902(a point902) point902
 
@@ -18598,6 +19495,7 @@ type point903 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo903 C.demo903
 func cdemo903(a point903) point903
 
@@ -18617,6 +19515,7 @@ type point904 struct {
 	x2 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo904 C.demo904
 func cdemo904(a point904) point904
 
@@ -18637,6 +19536,7 @@ type point905 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo905 C.demo905
 func cdemo905(a point905) point905
 
@@ -18658,6 +19558,7 @@ type point906 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo906 C.demo906
 func cdemo906(a point906) point906
 
@@ -18679,6 +19580,7 @@ type point907 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo907 C.demo907
 func cdemo907(a point907) point907
 
@@ -18700,6 +19602,7 @@ type point908 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo908 C.demo908
 func cdemo908(a point908) point908
 
@@ -18721,6 +19624,7 @@ type point909 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo909 C.demo909
 func cdemo909(a point909) point909
 
@@ -18741,6 +19645,7 @@ type point910 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo910 C.demo910
 func cdemo910(a point910) point910
 
@@ -18762,6 +19667,7 @@ type point911 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo911 C.demo911
 func cdemo911(a point911) point911
 
@@ -18783,6 +19689,7 @@ type point912 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo912 C.demo912
 func cdemo912(a point912) point912
 
@@ -18804,6 +19711,7 @@ type point913 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo913 C.demo913
 func cdemo913(a point913) point913
 
@@ -18825,6 +19733,7 @@ type point914 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo914 C.demo914
 func cdemo914(a point914) point914
 
@@ -18845,6 +19754,7 @@ type point915 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo915 C.demo915
 func cdemo915(a point915) point915
 
@@ -18866,6 +19776,7 @@ type point916 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo916 C.demo916
 func cdemo916(a point916) point916
 
@@ -18887,6 +19798,7 @@ type point917 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo917 C.demo917
 func cdemo917(a point917) point917
 
@@ -18908,6 +19820,7 @@ type point918 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo918 C.demo918
 func cdemo918(a point918) point918
 
@@ -18929,6 +19842,7 @@ type point919 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo919 C.demo919
 func cdemo919(a point919) point919
 
@@ -18949,6 +19863,7 @@ type point920 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo920 C.demo920
 func cdemo920(a point920) point920
 
@@ -18970,6 +19885,7 @@ type point921 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo921 C.demo921
 func cdemo921(a point921) point921
 
@@ -18991,6 +19907,7 @@ type point922 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo922 C.demo922
 func cdemo922(a point922) point922
 
@@ -19012,6 +19929,7 @@ type point923 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo923 C.demo923
 func cdemo923(a point923) point923
 
@@ -19033,6 +19951,7 @@ type point924 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo924 C.demo924
 func cdemo924(a point924) point924
 
@@ -19052,6 +19971,7 @@ type point925 struct {
 	x2 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo925 C.demo925
 func cdemo925(a point925) point925
 
@@ -19072,6 +19992,7 @@ type point926 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo926 C.demo926
 func cdemo926(a point926) point926
 
@@ -19093,6 +20014,7 @@ type point927 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo927 C.demo927
 func cdemo927(a point927) point927
 
@@ -19114,6 +20036,7 @@ type point928 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo928 C.demo928
 func cdemo928(a point928) point928
 
@@ -19135,6 +20058,7 @@ type point929 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo929 C.demo929
 func cdemo929(a point929) point929
 
@@ -19156,6 +20080,7 @@ type point930 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo930 C.demo930
 func cdemo930(a point930) point930
 
@@ -19176,6 +20101,7 @@ type point931 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo931 C.demo931
 func cdemo931(a point931) point931
 
@@ -19197,6 +20123,7 @@ type point932 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo932 C.demo932
 func cdemo932(a point932) point932
 
@@ -19218,6 +20145,7 @@ type point933 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo933 C.demo933
 func cdemo933(a point933) point933
 
@@ -19239,6 +20167,7 @@ type point934 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo934 C.demo934
 func cdemo934(a point934) point934
 
@@ -19260,6 +20189,7 @@ type point935 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo935 C.demo935
 func cdemo935(a point935) point935
 
@@ -19280,6 +20210,7 @@ type point936 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo936 C.demo936
 func cdemo936(a point936) point936
 
@@ -19301,6 +20232,7 @@ type point937 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo937 C.demo937
 func cdemo937(a point937) point937
 
@@ -19322,6 +20254,7 @@ type point938 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo938 C.demo938
 func cdemo938(a point938) point938
 
@@ -19343,6 +20276,7 @@ type point939 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo939 C.demo939
 func cdemo939(a point939) point939
 
@@ -19364,6 +20298,7 @@ type point940 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo940 C.demo940
 func cdemo940(a point940) point940
 
@@ -19384,6 +20319,7 @@ type point941 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo941 C.demo941
 func cdemo941(a point941) point941
 
@@ -19405,6 +20341,7 @@ type point942 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo942 C.demo942
 func cdemo942(a point942) point942
 
@@ -19426,6 +20363,7 @@ type point943 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo943 C.demo943
 func cdemo943(a point943) point943
 
@@ -19447,6 +20385,7 @@ type point944 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo944 C.demo944
 func cdemo944(a point944) point944
 
@@ -19468,6 +20407,7 @@ type point945 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo945 C.demo945
 func cdemo945(a point945) point945
 
@@ -19487,6 +20427,7 @@ type point946 struct {
 	x2 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo946 C.demo946
 func cdemo946(a point946) point946
 
@@ -19507,6 +20448,7 @@ type point947 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo947 C.demo947
 func cdemo947(a point947) point947
 
@@ -19528,6 +20470,7 @@ type point948 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo948 C.demo948
 func cdemo948(a point948) point948
 
@@ -19549,6 +20492,7 @@ type point949 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo949 C.demo949
 func cdemo949(a point949) point949
 
@@ -19570,6 +20514,7 @@ type point950 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo950 C.demo950
 func cdemo950(a point950) point950
 
@@ -19591,6 +20536,7 @@ type point951 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo951 C.demo951
 func cdemo951(a point951) point951
 
@@ -19611,6 +20557,7 @@ type point952 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo952 C.demo952
 func cdemo952(a point952) point952
 
@@ -19632,6 +20579,7 @@ type point953 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo953 C.demo953
 func cdemo953(a point953) point953
 
@@ -19653,6 +20601,7 @@ type point954 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo954 C.demo954
 func cdemo954(a point954) point954
 
@@ -19674,6 +20623,7 @@ type point955 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo955 C.demo955
 func cdemo955(a point955) point955
 
@@ -19695,6 +20645,7 @@ type point956 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo956 C.demo956
 func cdemo956(a point956) point956
 
@@ -19715,6 +20666,7 @@ type point957 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo957 C.demo957
 func cdemo957(a point957) point957
 
@@ -19736,6 +20688,7 @@ type point958 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo958 C.demo958
 func cdemo958(a point958) point958
 
@@ -19757,6 +20710,7 @@ type point959 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo959 C.demo959
 func cdemo959(a point959) point959
 
@@ -19778,6 +20732,7 @@ type point960 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo960 C.demo960
 func cdemo960(a point960) point960
 
@@ -19799,6 +20754,7 @@ type point961 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo961 C.demo961
 func cdemo961(a point961) point961
 
@@ -19819,6 +20775,7 @@ type point962 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo962 C.demo962
 func cdemo962(a point962) point962
 
@@ -19840,6 +20797,7 @@ type point963 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo963 C.demo963
 func cdemo963(a point963) point963
 
@@ -19861,6 +20819,7 @@ type point964 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo964 C.demo964
 func cdemo964(a point964) point964
 
@@ -19882,6 +20841,7 @@ type point965 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo965 C.demo965
 func cdemo965(a point965) point965
 
@@ -19903,6 +20863,7 @@ type point966 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo966 C.demo966
 func cdemo966(a point966) point966
 
@@ -19922,6 +20883,7 @@ type point967 struct {
 	x2 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo967 C.demo967
 func cdemo967(a point967) point967
 
@@ -19942,6 +20904,7 @@ type point968 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo968 C.demo968
 func cdemo968(a point968) point968
 
@@ -19963,6 +20926,7 @@ type point969 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo969 C.demo969
 func cdemo969(a point969) point969
 
@@ -19984,6 +20948,7 @@ type point970 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo970 C.demo970
 func cdemo970(a point970) point970
 
@@ -20005,6 +20970,7 @@ type point971 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo971 C.demo971
 func cdemo971(a point971) point971
 
@@ -20026,6 +20992,7 @@ type point972 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo972 C.demo972
 func cdemo972(a point972) point972
 
@@ -20046,6 +21013,7 @@ type point973 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo973 C.demo973
 func cdemo973(a point973) point973
 
@@ -20067,6 +21035,7 @@ type point974 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo974 C.demo974
 func cdemo974(a point974) point974
 
@@ -20088,6 +21057,7 @@ type point975 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo975 C.demo975
 func cdemo975(a point975) point975
 
@@ -20109,6 +21079,7 @@ type point976 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo976 C.demo976
 func cdemo976(a point976) point976
 
@@ -20130,6 +21101,7 @@ type point977 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo977 C.demo977
 func cdemo977(a point977) point977
 
@@ -20150,6 +21122,7 @@ type point978 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo978 C.demo978
 func cdemo978(a point978) point978
 
@@ -20171,6 +21144,7 @@ type point979 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo979 C.demo979
 func cdemo979(a point979) point979
 
@@ -20192,6 +21166,7 @@ type point980 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo980 C.demo980
 func cdemo980(a point980) point980
 
@@ -20213,6 +21188,7 @@ type point981 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo981 C.demo981
 func cdemo981(a point981) point981
 
@@ -20234,6 +21210,7 @@ type point982 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo982 C.demo982
 func cdemo982(a point982) point982
 
@@ -20254,6 +21231,7 @@ type point983 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo983 C.demo983
 func cdemo983(a point983) point983
 
@@ -20275,6 +21253,7 @@ type point984 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo984 C.demo984
 func cdemo984(a point984) point984
 
@@ -20296,6 +21275,7 @@ type point985 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo985 C.demo985
 func cdemo985(a point985) point985
 
@@ -20317,6 +21297,7 @@ type point986 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo986 C.demo986
 func cdemo986(a point986) point986
 
@@ -20338,6 +21319,7 @@ type point987 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo987 C.demo987
 func cdemo987(a point987) point987
 
@@ -20357,6 +21339,7 @@ type point988 struct {
 	x2 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo988 C.demo988
 func cdemo988(a point988) point988
 
@@ -20377,6 +21360,7 @@ type point989 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo989 C.demo989
 func cdemo989(a point989) point989
 
@@ -20398,6 +21382,7 @@ type point990 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo990 C.demo990
 func cdemo990(a point990) point990
 
@@ -20419,6 +21404,7 @@ type point991 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo991 C.demo991
 func cdemo991(a point991) point991
 
@@ -20440,6 +21426,7 @@ type point992 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo992 C.demo992
 func cdemo992(a point992) point992
 
@@ -20461,6 +21448,7 @@ type point993 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo993 C.demo993
 func cdemo993(a point993) point993
 
@@ -20481,6 +21469,7 @@ type point994 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo994 C.demo994
 func cdemo994(a point994) point994
 
@@ -20502,6 +21491,7 @@ type point995 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo995 C.demo995
 func cdemo995(a point995) point995
 
@@ -20523,6 +21513,7 @@ type point996 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo996 C.demo996
 func cdemo996(a point996) point996
 
@@ -20544,6 +21535,7 @@ type point997 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo997 C.demo997
 func cdemo997(a point997) point997
 
@@ -20565,6 +21557,7 @@ type point998 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo998 C.demo998
 func cdemo998(a point998) point998
 
@@ -20585,6 +21578,7 @@ type point999 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo999 C.demo999
 func cdemo999(a point999) point999
 
@@ -20606,6 +21600,7 @@ type point1000 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo1000 C.demo1000
 func cdemo1000(a point1000) point1000
 
@@ -20627,6 +21622,7 @@ type point1001 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo1001 C.demo1001
 func cdemo1001(a point1001) point1001
 
@@ -20648,6 +21644,7 @@ type point1002 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo1002 C.demo1002
 func cdemo1002(a point1002) point1002
 
@@ -20669,6 +21666,7 @@ type point1003 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo1003 C.demo1003
 func cdemo1003(a point1003) point1003
 
@@ -20689,6 +21687,7 @@ type point1004 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo1004 C.demo1004
 func cdemo1004(a point1004) point1004
 
@@ -20710,6 +21709,7 @@ type point1005 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo1005 C.demo1005
 func cdemo1005(a point1005) point1005
 
@@ -20731,6 +21731,7 @@ type point1006 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo1006 C.demo1006
 func cdemo1006(a point1006) point1006
 
@@ -20752,6 +21753,7 @@ type point1007 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo1007 C.demo1007
 func cdemo1007(a point1007) point1007
 
@@ -20773,6 +21775,7 @@ type point1008 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo1008 C.demo1008
 func cdemo1008(a point1008) point1008
 
@@ -20792,6 +21795,7 @@ type point1009 struct {
 	x2 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo1009 C.demo1009
 func cdemo1009(a point1009) point1009
 
@@ -20812,6 +21816,7 @@ type point1010 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo1010 C.demo1010
 func cdemo1010(a point1010) point1010
 
@@ -20833,6 +21838,7 @@ type point1011 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo1011 C.demo1011
 func cdemo1011(a point1011) point1011
 
@@ -20854,6 +21860,7 @@ type point1012 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo1012 C.demo1012
 func cdemo1012(a point1012) point1012
 
@@ -20875,6 +21882,7 @@ type point1013 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo1013 C.demo1013
 func cdemo1013(a point1013) point1013
 
@@ -20896,6 +21904,7 @@ type point1014 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo1014 C.demo1014
 func cdemo1014(a point1014) point1014
 
@@ -20916,6 +21925,7 @@ type point1015 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo1015 C.demo1015
 func cdemo1015(a point1015) point1015
 
@@ -20937,6 +21947,7 @@ type point1016 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo1016 C.demo1016
 func cdemo1016(a point1016) point1016
 
@@ -20958,6 +21969,7 @@ type point1017 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo1017 C.demo1017
 func cdemo1017(a point1017) point1017
 
@@ -20979,6 +21991,7 @@ type point1018 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo1018 C.demo1018
 func cdemo1018(a point1018) point1018
 
@@ -21000,6 +22013,7 @@ type point1019 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo1019 C.demo1019
 func cdemo1019(a point1019) point1019
 
@@ -21020,6 +22034,7 @@ type point1020 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo1020 C.demo1020
 func cdemo1020(a point1020) point1020
 
@@ -21041,6 +22056,7 @@ type point1021 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo1021 C.demo1021
 func cdemo1021(a point1021) point1021
 
@@ -21062,6 +22078,7 @@ type point1022 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo1022 C.demo1022
 func cdemo1022(a point1022) point1022
 
@@ -21083,6 +22100,7 @@ type point1023 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo1023 C.demo1023
 func cdemo1023(a point1023) point1023
 
@@ -21104,6 +22122,7 @@ type point1024 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo1024 C.demo1024
 func cdemo1024(a point1024) point1024
 
@@ -21124,6 +22143,7 @@ type point1025 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo1025 C.demo1025
 func cdemo1025(a point1025) point1025
 
@@ -21145,6 +22165,7 @@ type point1026 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo1026 C.demo1026
 func cdemo1026(a point1026) point1026
 
@@ -21166,6 +22187,7 @@ type point1027 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo1027 C.demo1027
 func cdemo1027(a point1027) point1027
 
@@ -21187,6 +22209,7 @@ type point1028 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo1028 C.demo1028
 func cdemo1028(a point1028) point1028
 
@@ -21208,6 +22231,7 @@ type point1029 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo1029 C.demo1029
 func cdemo1029(a point1029) point1029
 
@@ -21227,6 +22251,7 @@ type point1030 struct {
 	x2 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo1030 C.demo1030
 func cdemo1030(a point1030) point1030
 
@@ -21247,6 +22272,7 @@ type point1031 struct {
 	x3 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo1031 C.demo1031
 func cdemo1031(a point1031) point1031
 
@@ -21268,6 +22294,7 @@ type point1032 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo1032 C.demo1032
 func cdemo1032(a point1032) point1032
 
@@ -21289,6 +22316,7 @@ type point1033 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo1033 C.demo1033
 func cdemo1033(a point1033) point1033
 
@@ -21310,6 +22338,7 @@ type point1034 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo1034 C.demo1034
 func cdemo1034(a point1034) point1034
 
@@ -21331,6 +22360,7 @@ type point1035 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo1035 C.demo1035
 func cdemo1035(a point1035) point1035
 
@@ -21351,6 +22381,7 @@ type point1036 struct {
 	x3 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo1036 C.demo1036
 func cdemo1036(a point1036) point1036
 
@@ -21372,6 +22403,7 @@ type point1037 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo1037 C.demo1037
 func cdemo1037(a point1037) point1037
 
@@ -21393,6 +22425,7 @@ type point1038 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo1038 C.demo1038
 func cdemo1038(a point1038) point1038
 
@@ -21414,6 +22447,7 @@ type point1039 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo1039 C.demo1039
 func cdemo1039(a point1039) point1039
 
@@ -21435,6 +22469,7 @@ type point1040 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo1040 C.demo1040
 func cdemo1040(a point1040) point1040
 
@@ -21455,6 +22490,7 @@ type point1041 struct {
 	x3 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo1041 C.demo1041
 func cdemo1041(a point1041) point1041
 
@@ -21476,6 +22512,7 @@ type point1042 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo1042 C.demo1042
 func cdemo1042(a point1042) point1042
 
@@ -21497,6 +22534,7 @@ type point1043 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo1043 C.demo1043
 func cdemo1043(a point1043) point1043
 
@@ -21518,6 +22556,7 @@ type point1044 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo1044 C.demo1044
 func cdemo1044(a point1044) point1044
 
@@ -21539,6 +22578,7 @@ type point1045 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo1045 C.demo1045
 func cdemo1045(a point1045) point1045
 
@@ -21559,6 +22599,7 @@ type point1046 struct {
 	x3 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo1046 C.demo1046
 func cdemo1046(a point1046) point1046
 
@@ -21580,6 +22621,7 @@ type point1047 struct {
 	x4 int8
 }
 
+//llgo:coro sync
 //go:linkname cdemo1047 C.demo1047
 func cdemo1047(a point1047) point1047
 
@@ -21601,6 +22643,7 @@ type point1048 struct {
 	x4 int16
 }
 
+//llgo:coro sync
 //go:linkname cdemo1048 C.demo1048
 func cdemo1048(a point1048) point1048
 
@@ -21622,6 +22665,7 @@ type point1049 struct {
 	x4 int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo1049 C.demo1049
 func cdemo1049(a point1049) point1049
 
@@ -21643,6 +22687,7 @@ type point1050 struct {
 	x4 float32
 }
 
+//llgo:coro sync
 //go:linkname cdemo1050 C.demo1050
 func cdemo1050(a point1050) point1050
 

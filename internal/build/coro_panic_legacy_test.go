@@ -21,7 +21,6 @@ func TestRealRuntimeLegacyPanicPlainCertificateAcceptsRawTerminalTrace(t *testin
 	sentinel := errors.New("legacy raw panic trace verified")
 	conf := NewDefaultConf(ModeGen)
 	conf.ForceRebuild = true
-	conf.CoroProfile = CoroProfileStackless
 	conf.CoroPlanBuilder = func(input CoroPlanInput) (*coro.SSAPlan, error) {
 		plan, err := input.Analyze(nil, coro.SSAConfig{MaxPlainInstructions: -1})
 		if err != nil {

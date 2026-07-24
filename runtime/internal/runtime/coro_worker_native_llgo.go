@@ -29,9 +29,12 @@ const (
 	// The physical pthread count stays small; this static ring holds logical
 	// pending work while those threads block in file and syscall operations.
 	// Production configures the Worker source to the same 16-page capacity.
-	coroNativeWorkerPageCountV1 = 16
+	coroNativeWorkerPageCountV1 = coroNativeSourcePageCountV1
 	coroNativeWorkerQueueSizeV1 = coroworker.QueueCapacity
+	coroNativeWorkerCapacityV1  = coroNativeWorkerPageCountV1 * coro.WorkerOperationPageCapacity
 )
+
+var coroProgramWorkerExtraPagesV1State [coroNativeWorkerPageCountV1 - 1]coro.WorkerOperationPage
 
 type coroNativeWorkerJobV1 struct {
 	id       coro.OperationID

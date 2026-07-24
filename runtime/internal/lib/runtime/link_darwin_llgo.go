@@ -94,6 +94,7 @@ func syscall_runtime_envs() []string {
 	return out
 }
 
+//llgo:managedlink
 //go:linkname syscall_runtimeSetenv syscall.runtimeSetenv
 func syscall_runtimeSetenv(key, value string) {
 	name := c.AllocaCStr(key)
@@ -109,6 +110,7 @@ func syscall_runtimeSetenv(key, value string) {
 	}
 }
 
+//llgo:managedlink
 //go:linkname syscall_runtimeUnsetenv syscall.runtimeUnsetenv
 func syscall_runtimeUnsetenv(key string) {
 	name := c.AllocaCStr(key)

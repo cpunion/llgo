@@ -144,7 +144,7 @@ func (u *EmissionUniverse) coroLoweringFactsInstanceID(function *ssa.Function, f
 		u.prog.DataLayout(),
 		strconv.Itoa(u.prog.PointerSize()*8),
 		strconv.FormatBool(u.completeRuntimeABI),
-		strconv.FormatBool(u.CoroChannelEnabled()),
+		"channel=stackless-v1",
 		owner.identity,
 		strconv.Itoa(kind),
 		strconv.Itoa(int(state.state)),
@@ -222,6 +222,7 @@ func (u *EmissionUniverse) coroInstructionLoweringFact(ctx *context, plan *coro.
 			Ordinal:              len(helpers),
 			LogicalName:          logicalName,
 			Target:               targetID,
+			NoUnwind:             planned.NoUnwind,
 			UnwindOnly:           planned.UnwindOnly,
 			ExplicitStatusElided: planned.ExplicitStatusElided,
 		})
@@ -230,6 +231,9 @@ func (u *EmissionUniverse) coroInstructionLoweringFact(ctx *context, plan *coro.
 	semantic, err := u.coroProgramIR.semanticInstructionPlan(function, ctx.emissionOwner, instruction)
 	if err != nil {
 		return coro.LoweringFact{}, false, fmt.Errorf("load frozen semantic SitePlan: %w", err)
+	}
+	if !semantic.evaluated {
+		return coro.LoweringFact{}, false, nil
 	}
 	class, recipe, effect, exec, materialized := semantic.class, semantic.recipe, semantic.effect, semantic.exec, semantic.materialized
 	functionUses := []coro.FunctionValueFact{}
@@ -268,13 +272,54 @@ func (u *EmissionUniverse) coroInstructionLoweringFact(ctx *context, plan *coro.
 		}
 	}
 	if call, ok := instruction.(ssa.CallInstruction); ok && call.Common() != nil {
+		frozenCall, found, frozenErr := u.coroProgramIR.callSitePlan(call)
+		if frozenErr != nil {
+			return coro.LoweringFact{}, false, frozenErr
+		}
+		if found && frozenCall.plan.Elision == CoroCallElidedCgoWorker {
+			if frozenCall.failure != "" {
+				return coro.LoweringFact{}, false, fmt.Errorf("invalid frozen cgo worker call: %s", frozenCall.failure)
+			}
+			if !plan.ElidesCall(call) || frozenCall.cgoWorker.ID == "" ||
+				frozenCall.plan.ElisionCertificate != frozenCall.cgoWorker.ID {
+				return coro.LoweringFact{}, false, fmt.Errorf("cgo worker call lost its exact frozen elision certificate")
+			}
+			materialized = true
+			class = coro.OpLowered
+			recipe = generatedCgoWorkerCallRecipeID(frozenCall.cgoWorker)
+			effect = coro.WaitForeign
+			contract = coro.ContractID("llgo.coro.cgo-worker-call.v1")
+		}
 		if callee := call.Common().StaticCallee(); callee != nil {
 			if _, frozen := u.Resolve(callee); frozen {
 				semantics, intrinsic, err := coroIntrinsicCallSiteSemantics(u, call)
 				if err != nil {
 					return coro.LoweringFact{}, false, err
 				}
-				if intrinsic && semantics.ElidesManagedCall() {
+				if found && frozenCall.plan.StaticSpawnTarget != nil {
+					spawn, ok := instruction.(*ssa.Go)
+					if !ok || !intrinsic || !semantics.ElidesManagedCall() ||
+						frozenCall.plan.Elision != CoroCallNotElided || plan.ElidesCall(call) {
+						return coro.LoweringFact{}, false, fmt.Errorf("static spawn carrier has an inconsistent frozen call recipe")
+					}
+					callPlan, planned := plan.CallPlan(spawn)
+					targetID, identified := plan.FunctionID(frozenCall.plan.StaticSpawnTarget)
+					if !planned || !identified || callPlan.Kind != coro.CallSpawn ||
+						len(callPlan.Targets) != 1 || callPlan.Targets[0] != targetID {
+						return coro.LoweringFact{}, false, fmt.Errorf("static spawn carrier lost its exact CallPlan target")
+					}
+					materialized = true
+					class = coro.OpSpawn
+					recipe = coro.RecipeID("cl.ssa.spawn.inline-carrier.v1")
+					contract = coro.ContractID("llgo.coro.static-spawn-carrier.v1")
+					functionUses = []coro.FunctionValueFact{{
+						Order: 0, Role: coro.RolePrimary, Ordinal: 0,
+						Targets: []coro.FunctionID{targetID}, Open: false, MayBeNil: false,
+					}}
+				} else if intrinsic && semantics.ElidesManagedCall() {
+					if found && frozenCall.plan.Elision == CoroCallElidedCgoWorker {
+						return coro.LoweringFact{}, false, fmt.Errorf("cgo worker call is also classified as an intrinsic")
+					}
 					if !plan.ElidesCall(call) {
 						return coro.LoweringFact{}, false, fmt.Errorf("elided intrinsic call is not elided by the frozen plan")
 					}
@@ -356,6 +401,8 @@ func coroIntrinsicLoweringRecipe(semantics CoroIntrinsicCallSemantics) (coro.Rec
 		return coro.RecipeID("cl.intrinsic.inline-suspend.v0"), coro.MayPark
 	case CoroIntrinsicCallInlineYield:
 		return coro.RecipeID("cl.intrinsic.inline-yield.v0"), coro.YieldOnly
+	case CoroIntrinsicCallInlineOutcome:
+		return coro.RecipeID("cl.intrinsic.inline-outcome.v0"), coro.OutcomeStructured
 	default:
 		return coro.RecipeID("cl.intrinsic.unsupported.v0"), coro.NoSuspend
 	}

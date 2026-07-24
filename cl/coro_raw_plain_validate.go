@@ -29,10 +29,12 @@ import (
 // an EmitCoroutine raw variant resolves static/lowered calls differently from
 // its managed primary.
 //
-// Local descriptor construction is deliberately fail-closed for now. Raw
-// bodies can consume an exact incoming/stored Dispatch value, as required by
-// the TLS destructor, but compileValue intentionally does not yet manufacture
-// descriptor thunks while rawPlainBody is active.
+// Local descriptor construction uses the same capability-complete immutable
+// descriptor as a managed body. The producer validator below proves its exact
+// ValuePlan and target; codegen then publishes a managed primary and, when the
+// plan has one, the separately validated raw/plain twin. This permits a raw
+// runtime island to enqueue a closure for later managed execution without
+// reinterpreting either entry ABI.
 func validateCoroRawPlainConsumers(plan *coro.SSAPlan, universe *EmissionUniverse, plainDispatch bool) error {
 	if plan == nil || universe == nil {
 		return fmt.Errorf("coroutine raw plain consumer validation requires a compilation plan and emission universe")
@@ -92,6 +94,18 @@ func validateCoroRawPlainConsumers(plan *coro.SSAPlan, universe *EmissionUnivers
 				callPlan, planned := plan.CallPlan(call)
 				if !planned {
 					return coroLeafInstructionError(fn, functionPlan, instruction, "raw plain call has no compilation CallPlan")
+				}
+				if callPlan.RawPlain {
+					direct, ordinary := call.(*ssa.Call)
+					if !ordinary {
+						return coroLeafInstructionError(fn, functionPlan, instruction,
+							"nested raw/plain invocation is not an ordinary call")
+					}
+					if _, _, err := validateCoroRawPlainSourceCall(plan, universe.Resolve, direct); err != nil {
+						return coroLeafInstructionError(fn, functionPlan, instruction,
+							"invalid nested raw/plain invocation: "+err.Error())
+					}
+					continue
 				}
 				if _, spawn := call.(*ssa.Go); spawn || callPlan.Kind == coro.CallSpawn {
 					return coroLeafInstructionError(fn, functionPlan, instruction, "raw plain body cannot spawn a goroutine")
@@ -202,10 +216,20 @@ func validateCoroRawPlainLocalDescriptorProducer(plan *coro.SSAPlan, universe *E
 			return coroPlainDispatchInstructionError(owner, instruction, err.Error())
 		}
 		if dispatch {
-			return coroPlainDispatchInstructionError(
-				owner, instruction,
-				"raw plain body cannot yet construct a local descriptor closure; only exact incoming or stored Dispatch values are supported",
-			)
+			target, exact := closure.Fn.(*ssa.Function)
+			if !exact || target == nil || len(closure.Bindings) != len(target.FreeVars) {
+				return coroPlainDispatchInstructionError(owner, instruction,
+					"raw plain descriptor closure has no exact target and binding shape")
+			}
+			targetPlan, planned := plan.FunctionPlan(target)
+			if !planned {
+				return coroPlainDispatchInstructionError(owner, instruction,
+					fmt.Sprintf("raw plain descriptor closure target %q has no function plan", target.Name()))
+			}
+			if err := validateCoroDynamicDispatchTarget(target, targetPlan, universe); err != nil {
+				return coroPlainDispatchInstructionError(owner, instruction,
+					"raw plain descriptor closure target: "+err.Error())
+			}
 		}
 	}
 	call, _ := instruction.(ssa.CallInstruction)
@@ -228,10 +252,15 @@ func validateCoroRawPlainLocalDescriptorProducer(plan *coro.SSAPlan, universe *E
 		if !dispatch {
 			continue
 		}
-		return coroPlainDispatchInstructionError(
-			owner, instruction,
-			fmt.Sprintf("raw plain body cannot yet construct local descriptor value %q; only exact incoming or stored Dispatch values are supported", function.Name()),
-		)
+		targetPlan, planned := plan.FunctionPlan(function)
+		if !planned {
+			return coroPlainDispatchInstructionError(owner, instruction,
+				fmt.Sprintf("raw plain descriptor value target %q has no function plan", function.Name()))
+		}
+		if err := validateCoroDynamicDispatchTarget(function, targetPlan, universe); err != nil {
+			return coroPlainDispatchInstructionError(owner, instruction,
+				"raw plain descriptor value target: "+err.Error())
+		}
 	}
 	return nil
 }

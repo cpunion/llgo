@@ -1,19 +1,14 @@
 package main
 
-import "unsafe"
-
 const (
 	LLGoFiles = "../wrap/array_pointer.c"
 )
 
 type pointer = *int8
 
-//go:linkname printf C.printf
-func printf(format *byte, __llgo_va_list ...any) int32
-
 func assert(info string, b bool) {
 	if !b {
-		printf(unsafe.StringData("Assertion failed: %s\n\000"), unsafe.StringData(info))
+		panic(info)
 	}
 }
 
@@ -24,6 +19,7 @@ type array1 struct {
 	x [1]pointer
 }
 
+//llgo:coro sync
 //go:linkname cdemo1 C.demo1
 func cdemo1(a array1) array1
 
@@ -41,6 +37,7 @@ type array2 struct {
 	x [2]pointer
 }
 
+//llgo:coro sync
 //go:linkname cdemo2 C.demo2
 func cdemo2(a array2) array2
 
@@ -58,6 +55,7 @@ type array3 struct {
 	x [3]pointer
 }
 
+//llgo:coro sync
 //go:linkname cdemo3 C.demo3
 func cdemo3(a array3) array3
 
@@ -75,6 +73,7 @@ type array4 struct {
 	x [4]pointer
 }
 
+//llgo:coro sync
 //go:linkname cdemo4 C.demo4
 func cdemo4(a array4) array4
 
@@ -92,6 +91,7 @@ type array5 struct {
 	x [5]pointer
 }
 
+//llgo:coro sync
 //go:linkname cdemo5 C.demo5
 func cdemo5(a array5) array5
 
@@ -109,6 +109,7 @@ type array6 struct {
 	x [6]pointer
 }
 
+//llgo:coro sync
 //go:linkname cdemo6 C.demo6
 func cdemo6(a array6) array6
 
@@ -126,6 +127,7 @@ type array7 struct {
 	x [7]pointer
 }
 
+//llgo:coro sync
 //go:linkname cdemo7 C.demo7
 func cdemo7(a array7) array7
 
@@ -143,6 +145,7 @@ type array8 struct {
 	x [8]pointer
 }
 
+//llgo:coro sync
 //go:linkname cdemo8 C.demo8
 func cdemo8(a array8) array8
 
@@ -160,6 +163,7 @@ type array9 struct {
 	x [9]pointer
 }
 
+//llgo:coro sync
 //go:linkname cdemo9 C.demo9
 func cdemo9(a array9) array9
 
@@ -177,6 +181,7 @@ type array10 struct {
 	x [10]pointer
 }
 
+//llgo:coro sync
 //go:linkname cdemo10 C.demo10
 func cdemo10(a array10) array10
 
@@ -194,6 +199,7 @@ type array11 struct {
 	x [11]pointer
 }
 
+//llgo:coro sync
 //go:linkname cdemo11 C.demo11
 func cdemo11(a array11) array11
 
@@ -211,6 +217,7 @@ type array12 struct {
 	x [12]pointer
 }
 
+//llgo:coro sync
 //go:linkname cdemo12 C.demo12
 func cdemo12(a array12) array12
 
@@ -228,6 +235,7 @@ type array13 struct {
 	x [13]pointer
 }
 
+//llgo:coro sync
 //go:linkname cdemo13 C.demo13
 func cdemo13(a array13) array13
 
@@ -245,6 +253,7 @@ type array14 struct {
 	x [14]pointer
 }
 
+//llgo:coro sync
 //go:linkname cdemo14 C.demo14
 func cdemo14(a array14) array14
 
@@ -262,6 +271,7 @@ type array15 struct {
 	x [15]pointer
 }
 
+//llgo:coro sync
 //go:linkname cdemo15 C.demo15
 func cdemo15(a array15) array15
 
@@ -279,6 +289,7 @@ type array16 struct {
 	x [16]pointer
 }
 
+//llgo:coro sync
 //go:linkname cdemo16 C.demo16
 func cdemo16(a array16) array16
 
@@ -296,6 +307,7 @@ type array17 struct {
 	x [17]pointer
 }
 
+//llgo:coro sync
 //go:linkname cdemo17 C.demo17
 func cdemo17(a array17) array17
 
@@ -313,6 +325,7 @@ type array18 struct {
 	x [18]pointer
 }
 
+//llgo:coro sync
 //go:linkname cdemo18 C.demo18
 func cdemo18(a array18) array18
 
@@ -330,6 +343,7 @@ type array19 struct {
 	x [19]pointer
 }
 
+//llgo:coro sync
 //go:linkname cdemo19 C.demo19
 func cdemo19(a array19) array19
 
@@ -347,6 +361,7 @@ type array20 struct {
 	x [20]pointer
 }
 
+//llgo:coro sync
 //go:linkname cdemo20 C.demo20
 func cdemo20(a array20) array20
 

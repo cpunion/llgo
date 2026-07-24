@@ -156,7 +156,7 @@ func buildCoroPanicNativeE2EUser(t *testing.T, prog llssa.Program, temp string) 
 	ssaPkg, files := buildCoroPlanTestPackage(t, coroPanicNativeE2EPackage, coroPanicNativeE2ESource, nil)
 	universe, err := cl.PrepareEmissionUniverseWithOptions(prog, nil, []cl.EmissionPackage{{
 		SSA: ssaPkg, Files: files, Identity: coroPanicNativeE2EPackage,
-	}}, cl.EmissionUniverseOptions{CoroProfile: cl.CoroProfileStackless})
+	}}, cl.EmissionUniverseOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,8 +194,7 @@ func buildCoroPanicNativeE2EUser(t *testing.T, prog llssa.Program, temp string) 
 		SchedulerABI:     coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 		PanicABI:         coro.PanicExplicitStatusABIV0,
 		FuncRepABI:       coro.FuncRepABIV1,
-		EmissionUniverse: universe, CoroProfile: cl.CoroProfileStackless,
-	}
+		EmissionUniverse: universe}
 	pkg, _, err := cl.NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		cl.PackageOptions{Compilation: compilation},
@@ -229,8 +228,7 @@ func buildCoroPanicNativeE2EEntry(t *testing.T, prog llssa.Program, temp, anchor
 	conf := &Config{
 		BuildMode: BuildModeExe,
 		Goos:      runtime.GOOS,
-		Goarch:    runtime.GOARCH, CoroProfile: CoroProfileStackless,
-	}
+		Goarch:    runtime.GOARCH}
 	ctx := &context{prog: prog, buildConf: conf}
 	bootstrap := &coroProgramBootstrapV1{
 		Version: coroProgramBootstrapVersionV2,

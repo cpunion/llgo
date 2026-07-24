@@ -61,7 +61,8 @@ const coroDynamicCleanupIRFixture = `package foo
 var Sink uint32
 
 func Cleanup(value uint32) { Sink = Sink*10 + value }
-var CleanupFunc func(uint32) = Cleanup
+type CleanupCallback func(uint32)
+var CleanupFunc CleanupCallback = Cleanup
 
 func Root(limit uint32) {
 	defer Cleanup(99)
@@ -95,6 +96,46 @@ func Root(locked, ok bool) (swapped bool) {
 	}
 	if found != 2 {
 		t.Fatalf("shared-return fixture RunDefers count = %d, want 2", found)
+	}
+}
+
+func TestCoroStaticCleanupPanicOnlyShapeNeedsNoRunDefers(t *testing.T) {
+	const source = `package foo
+func cleanup() {}
+func Root() {
+	defer cleanup()
+	panic("sentinel")
+}
+`
+	prog, universe, plan, root, _ := buildCoroStaticCleanupPlanFixture(t, source)
+	defer prog.Dispose()
+
+	runDefers := 0
+	normalReturns := 0
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			switch instruction.(type) {
+			case *ssa.RunDefers:
+				runDefers++
+			case *ssa.Return:
+				if block != root.Recover {
+					normalReturns++
+				}
+			}
+		}
+	}
+	if runDefers != 0 || normalReturns != 0 || root.Recover == nil {
+		t.Fatalf("panic-only SSA shape: RunDefers=%d normal Returns=%d Recover=%v", runDefers, normalReturns, root.Recover)
+	}
+	if coroStaticCleanupHasReachableNormalReturn(root) {
+		t.Fatal("panic-only cleanup was classified as having a reachable normal Return")
+	}
+	cleanup, err := prepareCoroStaticCleanupPlan(root, plan, universe, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleanup == nil || len(cleanup.sites) != 1 {
+		t.Fatalf("panic-only cleanup plan = %+v", cleanup)
 	}
 }
 
@@ -451,7 +492,7 @@ func assertCoroAwaitCompletionCleanupControlFlow(t *testing.T, function llvm.Val
 	if !gateFound {
 		t.Fatalf("%s normal/canceled consumes are not mutually exclusive resumed run-decision successors:\n%s", function.Name(), body)
 	}
-	var returned, panicked, aborted, shutdown llvm.BasicBlock
+	var returned, panicked, aborted, shutdown, goexited llvm.BasicBlock
 	for successor := 1; successor < dispatch.SuccessorsCount(); successor++ {
 		switch dispatch.GetSwitchCaseValue(successor).ZExtValue() {
 		case coroAwaitCompletionReturn:
@@ -462,12 +503,15 @@ func assertCoroAwaitCompletionCleanupControlFlow(t *testing.T, function llvm.Val
 			aborted = dispatch.Successor(successor)
 		case coroAwaitCompletionShutdown:
 			shutdown = dispatch.Successor(successor)
+		case coroAwaitCompletionGoexit:
+			goexited = dispatch.Successor(successor)
 		}
 	}
-	if returned.IsNil() || panicked.IsNil() || aborted.IsNil() || shutdown.IsNil() ||
+	if returned.IsNil() || panicked.IsNil() || aborted.IsNil() || shutdown.IsNil() || goexited.IsNil() ||
 		returned == panicked || returned == aborted || returned == shutdown || panicked == aborted ||
-		panicked == shutdown || aborted == shutdown {
-		t.Fatalf("%s completion switch lacks distinct Return/Panic/Abort/Shutdown cases:\n%s", function.Name(), body)
+		returned == goexited || panicked == shutdown || panicked == goexited || aborted == shutdown ||
+		aborted == goexited || shutdown == goexited {
+		t.Fatalf("%s completion switch lacks distinct Return/Panic/Abort/Shutdown/Goexit cases:\n%s", function.Name(), body)
 	}
 	if !coroTestBlockLoadsI32(returned) || !coroTestBlockStoresGlobal(returned, "foo.Sink") {
 		t.Fatalf("%s Return completion does not load and commit the child result:\n%s", function.Name(), returned.AsValue().String())
@@ -482,6 +526,7 @@ func assertCoroAwaitCompletionCleanupControlFlow(t *testing.T, function llvm.Val
 	}{
 		{name: "Abort", block: aborted, status: uint32(coroAwaitCompletionAbort)},
 		{name: "Shutdown", block: shutdown, status: uint32(coroAwaitCompletionShutdown)},
+		{name: "Goexit", block: goexited, status: uint32(coroAwaitCompletionGoexit)},
 	} {
 		if coroTestBlockLoadsI32(terminal.block) || coroTestBlockStoresGlobal(terminal.block, "foo.Sink") ||
 			!coroTestBlockStoresI32(terminal.block, terminal.status) ||
@@ -645,7 +690,6 @@ func compileCoroAwaitCompletionCleanupFixture(
 	}
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroChildAwaitCompilation(compilation)
-	compilation.CoroProfile = CoroProfileStackless
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
@@ -713,7 +757,6 @@ func compileCoroStaticCleanupIRFixture(
 	}
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroChildAwaitCompilation(compilation)
-	compilation.CoroProfile = CoroProfileStackless
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
@@ -813,7 +856,6 @@ func AllocZ(size uintptr) unsafe.Pointer {
 	}
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroChildAwaitCompilation(compilation)
-	compilation.CoroProfile = CoroProfileStackless
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
@@ -921,7 +963,6 @@ func FreeDeferNode(pointer unsafe.Pointer) {
 	}
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
-	compilation.CoroProfile = CoroProfileStackless
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
 	compilation.FuncRepABI = coro.FuncRepABIV1
 	pkg, _, err := NewPackageExWithEmbedOptions(
@@ -1029,16 +1070,6 @@ func Root() { for index := 0; index != 1; index++ { defer cleanup() } }
 			want:     "AllocU",
 		},
 		{
-			name: "nested cleanup target",
-			source: `package foo
-func inner() {}
-func cleanup() { defer inner() }
-func Root() { defer cleanup() }
-`,
-			explicit: true,
-			want:     "nested cleanup",
-		},
-		{
 			name: "cleanup child panic",
 			source: `package foo
 var Payload uint32
@@ -1058,6 +1089,135 @@ func Root() { defer cleanup() }
 				t.Fatalf("cleanup preflight error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestCoroStaticCleanupPlanComposesNestedCoroutineTarget(t *testing.T) {
+	const source = `package foo
+var ready chan struct{}
+func inner() {}
+func cleanup() { defer inner(); <-ready }
+func Root() { defer cleanup() }
+`
+	prog, universe, plan, root, target := buildCoroStaticCleanupPlanFixture(t, source)
+	defer prog.Dispose()
+	if target == nil {
+		t.Fatal("Root defer target is absent")
+	}
+	var deferPlan coro.SSACallPlan
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			if deferred, ok := instruction.(*ssa.Defer); ok {
+				deferPlan, _ = plan.CallPlan(deferred)
+			}
+		}
+	}
+	targetPlan, planned := plan.FunctionPlan(target)
+	if !planned || targetPlan.Emission != coro.EmitCoroutine ||
+		!targetPlan.Exec.Contains(coro.NeedsCleanupFrame) {
+		t.Fatalf("nested cleanup target plan = %+v, present=%t; defer=%+v", targetPlan, planned, deferPlan)
+	}
+	rootCleanup, err := prepareCoroStaticCleanupPlan(root, plan, universe, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rootCleanup == nil || len(rootCleanup.sites) != 1 ||
+		rootCleanup.sites[0].target != target ||
+		rootCleanup.sites[0].kind != coroStaticCleanupCoroutine {
+		t.Fatalf("Root nested cleanup plan = %+v", rootCleanup)
+	}
+	targetCleanup, err := prepareCoroStaticCleanupPlan(target, plan, universe, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if targetCleanup == nil || len(targetCleanup.sites) != 1 {
+		t.Fatalf("deferred child cleanup plan = %+v", targetCleanup)
+	}
+}
+
+func TestCoroStaticCleanupPlanCapturesFunctionValuedArgument(t *testing.T) {
+	const source = `package foo
+func cleanup(func(int)) {}
+func Root() { defer cleanup(func(int) {}) }
+`
+	prog, universe, plan, root, target := buildCoroStaticCleanupPlanFixture(t, source)
+	defer prog.Dispose()
+	cleanup, err := prepareCoroStaticCleanupPlan(root, plan, universe, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleanup == nil || len(cleanup.sites) != 1 || cleanup.sites[0].target != target ||
+		len(cleanup.sites[0].instruction.Call.Args) != 1 {
+		t.Fatalf("function-valued cleanup plan = %+v", cleanup)
+	}
+	argument := cleanup.sites[0].instruction.Call.Args[0]
+	if _, ok := types.Unalias(argument.Type()).Underlying().(*types.Signature); !ok {
+		t.Fatalf("captured cleanup argument type = %s, want function", argument.Type())
+	}
+}
+
+func TestCoroStaticCleanupPlanCanonicalizesPatchedTarget(t *testing.T) {
+	universe, original, alternate, dispose := preparePatchedEmissionTest(t, `package p
+type Guard struct{}
+func (*Guard) Cleanup() {}
+func Root(guard *Guard) { defer guard.Cleanup() }
+`, `package p
+type Guard struct{}
+func (*Guard) Cleanup() {}
+`)
+	defer dispose()
+
+	root := original.ssa.Func("Root")
+	var rawTarget *ssa.Function
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			if deferred, ok := instruction.(*ssa.Defer); ok {
+				rawTarget = deferred.Call.StaticCallee()
+			}
+		}
+	}
+	if rawTarget == nil {
+		t.Fatal("patched method defer has no static source target")
+	}
+	target, ok := universe.Resolve(rawTarget)
+	if !ok || target == nil || target.Pkg != alternate.ssa {
+		t.Fatalf("Resolve(original Cleanup) = %v, %t; want patched method in %v", target, ok, alternate.ssa)
+	}
+	if resolved, ok := universe.Resolve(rawTarget); !ok || resolved != target {
+		t.Fatalf("Resolve(original Cleanup) = %v, %t; want patched target %v", resolved, ok, target)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(original.ssa.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	functionIDs.ArchiveReady = true
+	plan, err := coro.AnalyzeSSA(original.ssa.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+		EmissionUniverse:     ssaUniverse,
+		FunctionIDs:          functionIDs,
+		MaxPlainInstructions: -1,
+		ResolveFunction: func(function *ssa.Function) (*ssa.Function, bool, error) {
+			resolved, ok := universe.Resolve(function)
+			return resolved, ok, nil
+		},
+		ClassifyFunction: func(function *ssa.Function) (coro.SSAFunctionPolicy, error) {
+			if function == root {
+				return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+			}
+			return coro.SSAFunctionPolicy{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanup, err := prepareCoroStaticCleanupPlan(root, plan, universe, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleanup == nil || len(cleanup.sites) != 1 || cleanup.sites[0].target != target {
+		t.Fatalf("patched cleanup plan = %+v; want exact target %v", cleanup, target)
 	}
 }
 

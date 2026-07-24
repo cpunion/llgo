@@ -14,21 +14,29 @@
  * limitations under the License.
  */
 
-package cl
+package runtime
 
-import llssa "github.com/goplus/llgo/ssa"
+import (
+	"unsafe"
 
-func prepareStacklessEmissionUniverse(
-	prog llssa.Program, patches Patches, inputs []EmissionPackage,
-) (*EmissionUniverse, error) {
-	return PrepareEmissionUniverseWithOptions(prog, patches, inputs, EmissionUniverseOptions{
-		CoroProfile: CoroProfileStackless,
-	})
+	"github.com/goplus/llgo/runtime/internal/coro"
+)
+
+//export __llgo_coro_os_thread_lock_v1
+func __llgo_coro_os_thread_lock_v1(g unsafe.Pointer) {
+	if !coro.EnterOSThreadLock((*coro.G)(g)) {
+		coroRuntimeAbort("invalid coroutine OS-thread lock")
+	}
 }
 
-func prepareStacklessEmissionUniverseWithOptions(
-	prog llssa.Program, patches Patches, inputs []EmissionPackage, options EmissionUniverseOptions,
-) (*EmissionUniverse, error) {
-	options.CoroProfile = CoroProfileStackless
-	return PrepareEmissionUniverseWithOptions(prog, patches, inputs, options)
+//export __llgo_coro_os_thread_unlock_v1
+func __llgo_coro_os_thread_unlock_v1(g unsafe.Pointer) {
+	if !coro.ExitOSThreadLock((*coro.G)(g)) {
+		coroRuntimeAbort("invalid coroutine OS-thread unlock")
+	}
+}
+
+//export __llgo_coro_os_thread_locked_v1
+func __llgo_coro_os_thread_locked_v1(g unsafe.Pointer) bool {
+	return coro.CurrentOSThreadLocked((*coro.G)(g))
 }

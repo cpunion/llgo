@@ -51,7 +51,7 @@ func (p *context) tryCompileCoroPatchInitRedirect(b llssa.Builder, call *ssa.Cal
 		panic("coroutine patch initializer replacement source occurrence is not frontend-elided in the SSA plan")
 	}
 	frozen, planned := p.compilation.CoroPlan.ResolveLoweredCallRecord(p.goFn, logicalName)
-	if !planned || frozen.Target != target || frozen.RawPlain || frozen.UnwindOnly || frozen.ExplicitStatusElided {
+	if !planned || frozen.Target != target || frozen.NoUnwind || frozen.RawPlain || frozen.UnwindOnly || frozen.ExplicitStatusElided {
 		panic("coroutine patch initializer replacement disagrees between the emission universe and SSA plan")
 	}
 	targetPlan, planned := p.compilation.CoroPlan.FunctionPlan(target)

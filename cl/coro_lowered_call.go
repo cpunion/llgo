@@ -67,10 +67,17 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 	if !plainOnly {
 		plannedCall, planned := p.compilation.CoroPlan.ResolveLoweredCallRecord(p.goFn, helper)
 		if !planned || plannedCall.Target != target || plannedCall.RawPlain != rawPlainOccurrence ||
+			plannedCall.NoUnwind != frozenCall.NoUnwind ||
 			plannedCall.UnwindOnly != frozenCall.UnwindOnly ||
 			plannedCall.ExplicitStatusElided != frozenCall.ExplicitStatusElided {
 			panic(fmt.Errorf("coroutine lowered runtime call %q in %q disagrees between the frozen emission universe and SSA plan", helper, p.goFn.Name()))
 		}
+	}
+	explicitStatusLegacyPlain, err := coroExplicitStatusElidedUsesRawPlainEntry(
+		p.hasCoroPhysicalBody(), p.rawPlainBody, frozenCall.ExplicitStatusElided,
+	)
+	if err != nil {
+		panic(fmt.Errorf("coroutine lowered runtime call %q in %q: %w", helper, p.goFn.Name(), err))
 	}
 	targetPlan, planned := p.compilation.CoroPlan.FunctionPlan(target)
 	if !planned {
@@ -101,7 +108,7 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 			types.TypeString(sourceSig, types.RelativeTo(nil)),
 		))
 	}
-	if plainOnly || rawPlainOccurrence {
+	if plainOnly || rawPlainOccurrence || explicitStatusLegacyPlain {
 		if !targetPlan.RawPlainDemand || !p.compilation.CoroPlan.HasRawPlainVariant(target) {
 			panic(fmt.Errorf("coroutine raw/plain lowered runtime call %q in %q targets %q without an exact raw-plain variant", helper, p.goFn.Name(), targetPlan.ID))
 		}
@@ -133,6 +140,9 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 		}
 		return b.Call(fn.Expr, args...), true
 	case coro.EmitCoroutine:
+		if site := p.coroEmissionSite(); site != nil && site.placement == coroRuntimeHelperAtCleanup {
+			return p.compileCoroCleanupTargetAwait(b, target, args), true
+		}
 		return p.compileCoroTargetAwait(b, target, args), true
 	case coro.EmitRawPlain:
 		panic(fmt.Errorf(
@@ -146,4 +156,34 @@ func (p *context) resolveCoroLoweredRuntimeCall(b llssa.Builder, helper string, 
 	default:
 		panic(fmt.Errorf("coroutine lowered runtime call %q in %q targets function %q with invalid emission %d", helper, p.goFn.Name(), targetPlan.ID, uint8(targetPlan.Emission)))
 	}
+}
+
+// coroExplicitStatusElidedUsesRawPlainEntry projects one immutable source-panic
+// fact into the body currently being emitted. The graph deliberately retains
+// only raw demand for the legacy runtime.Panic call: a physical coroutine
+// publishes its outcome and emits no call, while a managed plain primary (or a
+// raw variant) still executes the legacy native-stack helper. Keeping this
+// decision beside entry resolution prevents a plain primary from accidentally
+// requesting a managed helper entry and widening the whole-program coloring.
+func coroExplicitStatusElidedUsesRawPlainEntry(
+	physicalCoroutineBody bool,
+	rawPlainBody bool,
+	explicitStatusElided bool,
+) (bool, error) {
+	if !explicitStatusElided {
+		return false, nil
+	}
+	if physicalCoroutineBody {
+		if rawPlainBody {
+			return false, fmt.Errorf("ExplicitStatus-elided helper observed incompatible physical-coroutine and raw-plain body domains")
+		}
+		return false, fmt.Errorf("ExplicitStatus-elided helper escaped into its physical coroutine body")
+	}
+	if rawPlainBody {
+		return true, nil
+	}
+	// There is no third executable physical domain: an emitted body which is
+	// neither the stackless coroutine body nor its separately frozen raw
+	// variant is the ordinary managed/plain primary.
+	return true, nil
 }

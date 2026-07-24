@@ -439,8 +439,11 @@ func install() {}
 			}
 			function := functionPlanForBuildTest(t, plan, root)
 			callPlan, planned := plan.CallPlan(call)
-			if !function.Effect.IsOpaque() || !planned || !callPlan.Open || callPlan.Rep != coro.Dispatch {
-				t.Fatalf("linknamed global caller = function:%+v call:%+v/%t, want ordinary open dynamic call", function, callPlan, planned)
+			if function.Effect.IsOpaque() || !function.Effect.Contains(coro.AwaitStructured|coro.OutcomeStructured) ||
+				!function.Exec.Contains(coro.MayUnwind) || !planned || !callPlan.Open ||
+				callPlan.Rep != coro.Dispatch || callPlan.Unresolved != coro.UnknownManagedDispatch ||
+				!callPlan.MayBeNil || len(callPlan.Targets) != 0 {
+				t.Fatalf("linknamed global caller = function:%+v call:%+v/%t, want structured open descriptor dispatch", function, callPlan, planned)
 			}
 		})
 	}

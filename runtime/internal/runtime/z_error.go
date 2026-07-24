@@ -222,31 +222,31 @@ func printanycustomtype(i any) {
 		print(typestring, `("`, *(*string)(e.data), `")`)
 	case abi.Bool:
 		if isDirectIface(e._type) {
-			print(typestring, "(", uintptr(e.data) != 0, ")")
+			print(typestring, "(", bitcast.FromPointer(e.data) != 0, ")")
 		} else {
 			print(typestring, "(", *(*bool)(e.data), ")")
 		}
 	case abi.Int, abi.Int8, abi.Int16, abi.Int32, abi.Int64:
 		if isDirectIface(e._type) {
-			print(typestring, "(", int64(uintptr(e.data)), ")")
+			print(typestring, "(", int64(bitcast.FromPointer(e.data)), ")")
 		} else {
 			print(typestring, "(", *(*int64)(e.data), ")")
 		}
 	case abi.Uint, abi.Uint8, abi.Uint16, abi.Uint32, abi.Uint64, abi.Uintptr:
 		if isDirectIface(e._type) {
-			print(typestring, "(", uint64(uintptr(e.data)), ")")
+			print(typestring, "(", uint64(bitcast.FromPointer(e.data)), ")")
 		} else {
 			print(typestring, "(", *(*uint64)(e.data), ")")
 		}
 	case abi.Float32:
 		if isDirectIface(e._type) {
-			print(typestring, "(", bitcast.ToFloat32(int32(uintptr(e.data))), ")")
+			print(typestring, "(", bitcast.ToFloat32(int32(bitcast.FromPointer(e.data))), ")")
 		} else {
 			print(typestring, "(", *(*float32)(e.data), ")")
 		}
 	case abi.Float64:
 		if isDirectIface(e._type) {
-			print(typestring, "(", bitcast.ToFloat64(int64(uintptr(e.data))), ")")
+			print(typestring, "(", bitcast.ToFloat64(int64(bitcast.FromPointer(e.data))), ")")
 		} else {
 			print(typestring, "(", *(*float64)(e.data), ")")
 		}

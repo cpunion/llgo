@@ -122,7 +122,7 @@ func TestProductionCoroPollInlineAttemptDefaultPlanAndPhysicalIR(t *testing.T) {
 	assertProductionCoroPollInlinePlan(t, plan, write, "llgoCoroPollWriteAttemptPackedV1")
 
 	// Production enables the explicit-status implicit-fault profile. Under that
-	// profile a merely conservative MayUnwind body becomes structured outcome
+	// architecture a merely conservative MayUnwind body becomes structured outcome
 	// work, so this second analysis is the exact regression that the legacy
 	// focused fixture previously missed.
 	explicitRoots := coro.Roots{
@@ -131,7 +131,6 @@ func TestProductionCoroPollInlineAttemptDefaultPlanAndPhysicalIR(t *testing.T) {
 		{Function: fdProbe, Demand: coro.AsyncDemand},
 	}
 	explicitInput := input
-	explicitInput.outcomeMode = coro.OutcomeExplicitStatus
 	explicitPlan, err := explicitInput.Analyze(explicitRoots, coro.SSAConfig{
 		FunctionIDs: functionIDs,
 		OutcomeMode: coro.OutcomeExplicitStatus,

@@ -37,8 +37,6 @@ import (
 	c "github.com/goplus/llgo/runtime/internal/clite"
 )
 
-const gcDebug = false
-
 // blockState stores the four states in which a block can be. It is two bits in
 // size.
 const (
@@ -126,7 +124,12 @@ func Init() {
 }
 
 func gcPanic(s *c.Char) {
-	c.Printf(c.Str("%s"), s)
+	// The collector owns the current native resume stack while scanning it.
+	// A diagnostic write here would make the whole GC critical path wait on
+	// external I/O and invalidate getsp's synchronous-stack contract. Baremetal
+	// has no universal nonblocking diagnostic sink, so fail terminally without
+	// attempting output.
+	_ = s
 	c.Exit(2)
 }
 
@@ -156,6 +159,9 @@ func gcAddressOf(blockAddr uintptr) uintptr {
 // findHead returns the head (first block) of an object, assuming the block
 // points to an allocated object. It returns the same block if this block
 // already points to the head.
+//
+//llgo:nopreempt
+//llgo:nounwind
 func gcFindHead(blockAddr uintptr) uintptr {
 	for {
 		// Optimization: check whether the current block state byte (which
@@ -186,6 +192,9 @@ func gcFindHead(blockAddr uintptr) uintptr {
 
 // findNext returns the first block just past the end of the tail. This may or
 // may not be the head of an object.
+//
+//llgo:nopreempt
+//llgo:nounwind
 func gcFindNext(blockAddr uintptr) uintptr {
 	if gcStateOf(blockAddr) == blockStateHead || gcStateOf(blockAddr) == blockStateMark {
 		blockAddr++
@@ -196,6 +205,7 @@ func gcFindNext(blockAddr uintptr) uintptr {
 	return blockAddr
 }
 
+//llgo:nounwind
 func gcStateByteOf(blockAddr uintptr) byte {
 	return *(*uint8)(unsafe.Add(metadataStart, blockAddr/blocksPerStateByte))
 }
@@ -207,6 +217,8 @@ func gcStateFromByte(blockAddr uintptr, stateByte byte) uint8 {
 }
 
 // State returns the current block state.
+//
+//llgo:nounwind
 func gcStateOf(blockAddr uintptr) uint8 {
 	return gcStateFromByte(blockAddr, gcStateByteOf(blockAddr))
 }
@@ -214,6 +226,8 @@ func gcStateOf(blockAddr uintptr) uint8 {
 // setState sets the current block to the given state, which must contain more
 // bits than the current state. Allowed transitions: from free to any state and
 // from head to mark.
+//
+//llgo:nounwind
 func gcSetState(blockAddr uintptr, newState uint8) {
 	stateBytePtr := (*uint8)(unsafe.Add(metadataStart, blockAddr/blocksPerStateByte))
 	*stateBytePtr |= uint8(newState << ((blockAddr % blocksPerStateByte) * stateBits))
@@ -223,6 +237,8 @@ func gcSetState(blockAddr uintptr, newState uint8) {
 }
 
 // markFree sets the block state to free, no matter what state it was in before.
+//
+//llgo:nounwind
 func gcMarkFree(blockAddr uintptr) {
 	stateBytePtr := (*uint8)(unsafe.Add(metadataStart, blockAddr/blocksPerStateByte))
 	*stateBytePtr &^= uint8(blockStateMask << ((blockAddr % blocksPerStateByte) * stateBits))
@@ -234,6 +250,8 @@ func gcMarkFree(blockAddr uintptr) {
 
 // unmark changes the state of the block from mark to head. It must be marked
 // before calling this function.
+//
+//llgo:nounwind
 func gcUnmark(blockAddr uintptr) {
 	if gcStateOf(blockAddr) != blockStateMark {
 		gcPanic(c.Str("gc: unmark() on a block that is not marked"))
@@ -258,6 +276,8 @@ func isPointer(ptr uintptr) bool {
 // alloc tries to find some free space on the heap, possibly doing a garbage
 // collection cycle if needed. If no space is free, it panics.
 //
+//llgo:nopreempt
+//llgo:nounwind
 //go:noinline
 func Alloc(size uintptr) unsafe.Pointer {
 	if size == 0 {
@@ -390,12 +410,10 @@ func GC() uintptr {
 // runGC performs a garbage collection cycle. It is the internal implementation
 // of the runtime.GC() function. The difference is that it returns the number of
 // free bytes in the heap after the GC is finished.
+//
+//llgo:nounwind
 func gc() (freeBytes uintptr) {
 	lazyInit()
-
-	if gcDebug {
-		println("running collection cycle...")
-	}
 
 	// Mark phase: mark all reachable objects, recursively.
 	gcMarkReachable()
@@ -417,6 +435,9 @@ func gc() (freeBytes uintptr) {
 // like a heap pointer and are unmarked, marks them and scans that object as
 // well (recursively). The start and end parameters must be valid pointers and
 // must be aligned.
+//
+//llgo:nopreempt
+//llgo:nounwind
 func markRoots(start, end uintptr) {
 	if start >= end {
 		gcPanic(c.Str("gc: unexpected range to mark"))
@@ -432,6 +453,9 @@ func markRoots(start, end uintptr) {
 }
 
 // startMark starts the marking process on a root and all of its children.
+//
+//llgo:nopreempt
+//llgo:nounwind
 func startMark(root uintptr) {
 	var stack [markStackSize]uintptr
 	stack[0] = root
@@ -477,9 +501,6 @@ func startMark(root uintptr) {
 				// The stack is full.
 				// It is necessary to rescan all marked blocks once we are done.
 				markStackOverflow = true
-				if gcDebug {
-					println("gc stack overflowed")
-				}
 				continue
 			}
 
@@ -491,6 +512,9 @@ func startMark(root uintptr) {
 }
 
 // finishMark finishes the marking process by processing all stack overflows.
+//
+//llgo:nopreempt
+//llgo:nounwind
 func finishMark() {
 	for markStackOverflow {
 		// Re-mark all blocks.
@@ -508,6 +532,8 @@ func finishMark() {
 }
 
 // mark a GC root at the address addr.
+//
+//llgo:nounwind
 func markRoot(addr, root uintptr) {
 	if isOnHeap(root) {
 		block := blockFromAddr(root)
@@ -527,6 +553,9 @@ func markRoot(addr, root uintptr) {
 
 // Sweep goes through all memory and frees unmarked
 // It returns how many bytes are free in the heap after the sweep.
+//
+//llgo:nopreempt
+//llgo:nounwind
 func sweep() (freeBytes uintptr) {
 	freeCurrentObject := false
 	var freed uint64
@@ -568,6 +597,7 @@ func growHeap() bool {
 	return false
 }
 
+//llgo:nounwind
 func gcMarkReachable() {
 	markRoots(uintptr(getsp()), stackTop)
 	markRoots(globalsStart, globalsEnd)

@@ -38,3 +38,12 @@ func FromFloat64(v float64) int64 {
 func FromFloat32(v float32) int32 {
 	return *(*int32)(unsafe.Pointer(&v))
 }
+
+// FromPointer extracts the machine word carried by an unsafe.Pointer. LLGo's
+// reflect Value representation also uses its pointer field for direct scalar
+// payloads; keeping that representation cast in this tiny leaf gives the
+// coroutine compiler one exact terminal pointer-to-uintptr operation instead
+// of making every scalar decoder carry pointer provenance through arithmetic.
+func FromPointer(v unsafe.Pointer) uintptr {
+	return uintptr(v)
+}

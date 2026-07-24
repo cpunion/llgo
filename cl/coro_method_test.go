@@ -321,7 +321,7 @@ func prepareCoroStaticMethodPlan(prog llssa.Program, ssaPkg *ssa.Package, files 
 	*EmissionUniverse, *coro.SSAPlan, map[string]*ssa.Function, error,
 ) {
 	universe, err := prepareStacklessEmissionUniverseWithOptions(
-		prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}}, EmissionUniverseOptions{CoroProfile: CoroProfileStackless},
+		prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}}, EmissionUniverseOptions{},
 	)
 	if err != nil {
 		return nil, nil, nil, err
@@ -362,6 +362,5 @@ func coroStaticMethodCompilation(plan *coro.SSAPlan, universe *EmissionUniverse)
 		CoroABI:      coro.PhysicalABIV1,
 		SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 		PanicABI:     coro.PanicExplicitStatusABIV0,
-		FuncRepABI:   coro.FuncRepABIV1, CoroProfile: CoroProfileStackless,
-	}
+		FuncRepABI:   coro.FuncRepABIV1}
 }

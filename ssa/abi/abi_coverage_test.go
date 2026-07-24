@@ -125,6 +125,37 @@ func TestDataKindOfCoverage(t *testing.T) {
 	_, _, _ = DataKindOf(types.NewTuple(types.NewVar(token.NoPos, nil, "", types.Typ[types.Int])), 0, false)
 }
 
+func TestMapBucketSlotSizesUsePointersForLargeValues(t *testing.T) {
+	for _, arch := range []string{"amd64", "wasm"} {
+		sizes := types.SizesFor("gc", arch)
+		if sizes == nil {
+			t.Fatalf("types.SizesFor(gc, %q) returned nil", arch)
+		}
+		ptrSize := uintptr(sizes.Sizeof(types.NewPointer(types.Typ[types.Byte])))
+		b := New(ptrSize, sizes)
+		large := types.NewArray(types.Typ[types.Byte], 1000)
+
+		tests := []struct {
+			name     string
+			typ      *types.Map
+			wantKey  uintptr
+			wantElem uintptr
+		}{
+			{"inline", types.NewMap(types.Typ[types.Int], types.NewArray(types.Typ[types.Byte], 100)), ptrSize, 100},
+			{"indirect key", types.NewMap(large, types.Typ[types.Byte]), ptrSize, 1},
+			{"indirect elem", types.NewMap(types.Typ[types.Int], large), ptrSize, ptrSize},
+			{"indirect both", types.NewMap(large, large), ptrSize, ptrSize},
+		}
+		for _, test := range tests {
+			key, elem := b.MapBucketSlotSizes(test.typ)
+			if key != test.wantKey || elem != test.wantElem {
+				t.Errorf("%s/%s slots = (%d, %d), want (%d, %d)",
+					arch, test.name, key, elem, test.wantKey, test.wantElem)
+			}
+		}
+	}
+}
+
 func TestTypeNameAndHashingCoverage(t *testing.T) {
 	b := newCoverageBuilder()
 	pkg := types.NewPackage("example.com/p", "p")

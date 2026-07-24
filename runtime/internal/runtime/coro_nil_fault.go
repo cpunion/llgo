@@ -42,13 +42,15 @@ var coroChannelCloseClosedErrorV1 = error(plainError("close of closed channel"))
 var coroUnsafeStringLenErrorV1 = error(errorString("unsafe.String: len out of range"))
 var coroUnsafeStringNilErrorV1 = error(errorString("unsafe.String: nil pointer with non-zero length"))
 
-// The v1 implicit-fault ABI carries a static kind rather than transient
-// operands from a child coroutine frame. This payload therefore preserves Go
-// panic/recover control semantics and runtime.Error classification, but does
-// not yet reproduce PanicSliceConvert's dynamic source/target lengths in the
-// error text. A future parameterized fault ABI may add those words without
-// changing the stable v1 kind values below.
+// V1 remains the allocation-free payload for operand-free faults. Slice
+// conversion uses the parameterized V2 hook below because Go's boundsError
+// message is part of observable panic/recover behavior.
 var coroSliceConvertErrorV1 = error(errorString("cannot convert slice to array or pointer to array: length too short"))
+
+// coroBoundsErrorTypeV2 roots the exact dynamic value type used by the
+// standard runtime's bounds panics. Parameterized faults allocate only the
+// scalar payload object; the interface type word is shared and immutable.
+var coroBoundsErrorTypeV2 = error(boundsError{})
 
 const (
 	coroFaultNilV1 uint32 = iota + 1
@@ -108,6 +110,37 @@ func coroFaultPayloadV1(kind uint32) (typeWord, dataWord unsafe.Pointer) {
 	}
 }
 
+// coroFaultPayloadV2 adds two target-width operand words without changing the
+// stable V1 kind namespace. Operand-free kinds delegate to V1 only when both
+// words are zero. Slice conversion interprets arg0 as the target array length
+// and arg1 as the source slice length, matching PanicSliceConvert(x, y).
+//
+// The boundsError object must outlive the active LLVM frame: a child fault is
+// copied as an interface pair into its parent's CompletionRecord after the
+// child frame is destroyed. AllocZ provides GC-visible storage on native,
+// tinygogc storage on bare metal, and the configured malloc storage on
+// wasm/nogc targets.
+func coroFaultPayloadV2(kind uint32, arg0, arg1 uintptr) (typeWord, dataWord unsafe.Pointer) {
+	if kind != coroFaultSliceConvertV1 {
+		if arg0 != 0 || arg1 != 0 {
+			return nil, nil
+		}
+		return coroFaultPayloadV1(kind)
+	}
+	typeWord, _ = coroErrorFaultPayloadV1(&coroBoundsErrorTypeV2)
+	payload := (*boundsError)(AllocZ(unsafe.Sizeof(boundsError{})))
+	if typeWord == nil || payload == nil {
+		return nil, nil
+	}
+	*payload = boundsError{
+		x:      int64(arg0),
+		y:      int(arg1),
+		signed: true,
+		code:   boundsConvert,
+	}
+	return typeWord, unsafe.Pointer(payload)
+}
+
 // __llgo_coro_fault_payload_v1 materializes one stable language-fault panic
 // pair without publishing a terminal scheduler outcome. Compiler cleanup
 // lowering uses it before invoking deferred children so an ordinary recover
@@ -123,6 +156,23 @@ func __llgo_coro_fault_payload_v1(kind uint32, typeOut, dataOut unsafe.Pointer) 
 	typeWord, dataWord := coroFaultPayloadV1(kind)
 	if typeWord == nil {
 		coroRuntimeAbort("invalid coroutine fault payload kind")
+	}
+	*(*unsafe.Pointer)(typeOut) = typeWord
+	*(*unsafe.Pointer)(dataOut) = dataWord
+}
+
+// __llgo_coro_fault_payload_v2 materializes an operand-carrying fault payload
+// for cleanup/recover lowering. Its output ownership is identical to V1; only
+// the payload construction receives two target-width scalar words.
+//
+//export __llgo_coro_fault_payload_v2
+func __llgo_coro_fault_payload_v2(kind uint32, arg0, arg1 uintptr, typeOut, dataOut unsafe.Pointer) {
+	if typeOut == nil || dataOut == nil {
+		coroRuntimeAbort("invalid parameterized coroutine fault payload output")
+	}
+	typeWord, dataWord := coroFaultPayloadV2(kind, arg0, arg1)
+	if typeWord == nil {
+		coroRuntimeAbort("invalid parameterized coroutine fault payload")
 	}
 	*(*unsafe.Pointer)(typeOut) = typeWord
 	*(*unsafe.Pointer)(dataOut) = dataWord
@@ -146,5 +196,26 @@ func __llgo_coro_fault_prepare_v1(g, handle, header unsafe.Pointer, kind uint32)
 		dataWord,
 	) {
 		coroRuntimeAbort("invalid coroutine fault panic handoff")
+	}
+}
+
+// __llgo_coro_fault_prepare_v2 is the immediate-publication counterpart of
+// fault_payload_v2 for physical bodies without a cleanup drainer.
+//
+//export __llgo_coro_fault_prepare_v2
+func __llgo_coro_fault_prepare_v2(
+	g, handle, header unsafe.Pointer,
+	kind uint32,
+	arg0, arg1 uintptr,
+) {
+	typeWord, dataWord := coroFaultPayloadV2(kind, arg0, arg1)
+	if typeWord == nil || !coro.PreparePanic(
+		(*coro.G)(g),
+		handle,
+		(*coro.HeaderV1)(header),
+		typeWord,
+		dataWord,
+	) {
+		coroRuntimeAbort("invalid parameterized coroutine fault panic handoff")
 	}
 }

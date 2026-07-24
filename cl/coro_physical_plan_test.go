@@ -108,6 +108,94 @@ func Root(value int) int { return value + 1 }
 	}
 }
 
+func TestCoroPhysicalPlanOwnsManagedToRawPlainCall(t *testing.T) {
+	ssaPkg, _, files := buildGoSSAPkg(t, `package foo
+func Critical() {}
+func Root() {
+	Critical()
+	for {}
+}
+`)
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := prepareStacklessEmissionUniverse(
+		prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, critical := ssaPkg.Func("Root"), ssaPkg.Func("Critical")
+	var rawCall *ssa.Call
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(*ssa.Call)
+			if ok && call.Common().StaticCallee() == critical {
+				rawCall = call
+			}
+		}
+	}
+	if rawCall == nil {
+		t.Fatal("Root has no static Critical call")
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	functionIDs.ArchiveReady = true
+	whole, err := coro.AnalyzeSSA(
+		ssaPkg.Prog,
+		coro.Roots{{Function: root, ManagedDemand: coro.AsyncDemand}},
+		coro.SSAConfig{
+			EmissionUniverse:     ssaUniverse,
+			FunctionIDs:          functionIDs,
+			MaxPlainInstructions: -1,
+			ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+				if fn == critical {
+					return coro.SSAFunctionPolicy{
+						TrustedNoPreempt: true,
+						TrustedNoUnwind:  true,
+					}, nil
+				}
+				return coro.SSAFunctionPolicy{}, nil
+			},
+			ClassifyRawPlainCall: func(_ *ssa.Function, call ssa.CallInstruction) (coro.SSARawPlainCallCertificate, bool, error) {
+				if call == rawCall {
+					return coro.SSARawPlainCallCertificate{ID: "test.raw-critical.v0"}, true, nil
+				}
+				return coro.SSARawPlainCallCertificate{}, false, nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootPlan, found := whole.FunctionPlan(root)
+	if !found || rootPlan.Emission != coro.EmitCoroutine {
+		t.Fatalf("Root plan = %+v, present=%t; want physical coroutine", rootPlan, found)
+	}
+	criticalPlan, found := whole.FunctionPlan(critical)
+	if !found || criticalPlan.Emission != coro.EmitRawPlain || !criticalPlan.RawPlainOnly {
+		t.Fatalf("Critical plan = %+v, present=%t; want private raw/plain body", criticalPlan, found)
+	}
+	audit, err := newCoroPhysicalPureSSAAudit(universe, whole, root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	instructionPlan := coroPhysicalInstructionPlan{}
+	planCoroPhysicalControlInstruction(
+		audit, whole, rawCall,
+		coroPhysicalLoweringCapabilities{childAwait: true},
+		&instructionPlan,
+	)
+	if instructionPlan.controlFailure != "" || instructionPlan.control != coroPhysicalControlRawPlainCall ||
+		instructionPlan.controlTarget != critical || instructionPlan.controlTargetID != criticalPlan.ID {
+		t.Fatalf("raw/plain physical control plan = %+v", instructionPlan)
+	}
+}
+
 func TestCoroPhysicalEmissionGeneratedWrapperBorrowsSharedFrozenOwner(t *testing.T) {
 	ssaPkg, _, _ := buildGoSSAPkg(t, `package foo
 func Root(value int) int { return value + 1 }
@@ -358,7 +446,6 @@ func TestCoroPhysicalCodegenRejectsMissingCommittedPlan(t *testing.T) {
 	defer prog.Dispose()
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroChildAwaitCompilation(compilation)
-	compilation.CoroProfile = CoroProfileStackless
 	compilation.FuncRepABI = coro.FuncRepABIV1
 	if err := compilation.preflightCoroPlan(); err != nil {
 		t.Fatal(err)

@@ -113,7 +113,7 @@ func Root(value interface{ As(any) bool }, target any, flag bool) bool {
 	defer program.Dispose()
 	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		program, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}},
-		EmissionUniverseOptions{CoroProfile: CoroProfileStackless},
+		EmissionUniverseOptions{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -212,7 +212,6 @@ func Root(value interface{ As(any) bool }, target any, flag bool) bool {
 	}
 
 	compilation := coroClosedInterfacePlainCompilation(plan, universe)
-	compilation.CoroProfile = CoroProfileStackless
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		program, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
@@ -260,7 +259,7 @@ func RawRoot() any { return writer{} }
 	defer program.Dispose()
 	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		program, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}},
-		EmissionUniverseOptions{CoroProfile: CoroProfileStackless},
+		EmissionUniverseOptions{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -604,7 +603,7 @@ func buildCoroInterfaceDispatchFixture(t *testing.T, source string, resolution c
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
 	program := newLLSSAProg(t)
 	universe, err := prepareStacklessEmissionUniverseWithOptions(
-		program, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}}, EmissionUniverseOptions{CoroProfile: CoroProfileStackless},
+		program, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}}, EmissionUniverseOptions{},
 	)
 	if err != nil {
 		program.Dispose()
@@ -639,7 +638,7 @@ func buildCoroPointerPromotedInterfaceDispatchFixture(t *testing.T, source strin
 	ssaPkg, _, files := buildGoSSAPkg(t, source)
 	program := newLLSSAProg(t)
 	universe, err := prepareStacklessEmissionUniverseWithOptions(
-		program, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}}, EmissionUniverseOptions{CoroProfile: CoroProfileStackless},
+		program, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}}, EmissionUniverseOptions{},
 	)
 	if err != nil {
 		program.Dispose()

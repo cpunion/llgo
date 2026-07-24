@@ -36,7 +36,7 @@ import (
 // unresolved-target marker: every accepted candidate set is closed and
 // nonempty.
 type coroInterfaceDispatchPlan struct {
-	call                *ssa.Call
+	call                ssa.CallInstruction
 	receiver            ssa.Value
 	iface               *types.Interface
 	method              *types.Func
@@ -54,18 +54,23 @@ type coroInterfaceDispatchCandidate struct {
 	methodEntry    *ssa.Function
 }
 
-// resolveCoroInterfaceDispatchPlan freezes one ordinary interface invoke for
-// frontend code generation. The returned candidates are sorted by FunctionID,
-// independent of SSA or map enumeration order. The source call signature is
-// receiver-free and shared by every candidate, so target-specific codegen must
-// not reconstruct it from a selected method body.
-func resolveCoroInterfaceDispatchPlan(plan *coro.SSAPlan, universe *EmissionUniverse, call *ssa.Call) (*coroInterfaceDispatchPlan, error) {
-	if plan == nil || call == nil || call.Common() == nil {
+// resolveCoroInterfaceDispatchPlan freezes one interface operation recipe for
+// frontend code generation. Ordinary calls and defers share the exact
+// receiver-aware candidate proof; their carrier alone determines whether the
+// recipe executes now or from the frame-resident cleanup drainer. The returned
+// candidates are sorted by FunctionID, independent of SSA or map enumeration
+// order. The source signature is receiver-free and shared by every candidate.
+func resolveCoroInterfaceDispatchPlan(plan *coro.SSAPlan, universe *EmissionUniverse, call ssa.CallInstruction) (*coroInterfaceDispatchPlan, error) {
+	if plan == nil || coroInterfaceDispatchCallIsNil(call) || call.Common() == nil {
 		return nil, fmt.Errorf("coroutine interface dispatch requires an exact call and compilation plan")
+	}
+	kind := coro.CallDirect
+	if _, deferred := call.(*ssa.Defer); deferred {
+		kind = coro.CallDefer
 	}
 	common := call.Common()
 	if !common.IsInvoke() || common.StaticCallee() != nil || common.Method == nil {
-		return nil, fmt.Errorf("coroutine interface dispatch requires an ordinary interface invoke")
+		return nil, fmt.Errorf("coroutine interface dispatch requires an interface invoke")
 	}
 	if call.Parent() == nil {
 		return nil, fmt.Errorf("coroutine interface dispatch requires an invoke owned by an SSA function")
@@ -83,10 +88,10 @@ func resolveCoroInterfaceDispatchPlan(plan *coro.SSAPlan, universe *EmissionUniv
 	if !ok || callPlan.Call != call {
 		return nil, fmt.Errorf("coroutine interface dispatch invoke has no exact compilation CallPlan")
 	}
-	if callPlan.Kind != coro.CallDirect || callPlan.Rep != coro.Dispatch || callPlan.Open || len(callPlan.Targets) == 0 {
+	if callPlan.Kind != kind || callPlan.Rep != coro.Dispatch || callPlan.Open || len(callPlan.Targets) == 0 {
 		return nil, fmt.Errorf(
-			"coroutine interface dispatch requires a closed nonempty Dispatch CallPlan, got kind=%v representation=%s open=%t may-be-nil=%t targets=%d",
-			callPlan.Kind, callPlan.Rep, callPlan.Open, callPlan.MayBeNil, len(callPlan.Targets),
+			"coroutine interface dispatch requires a closed nonempty Dispatch CallPlan for kind %v, got kind=%v representation=%s open=%t may-be-nil=%t targets=%d",
+			kind, callPlan.Kind, callPlan.Rep, callPlan.Open, callPlan.MayBeNil, len(callPlan.Targets),
 		)
 	}
 
@@ -134,6 +139,22 @@ func resolveCoroInterfaceDispatchPlan(plan *coro.SSAPlan, universe *EmissionUniv
 		})
 	}
 	return result, nil
+}
+
+func coroInterfaceDispatchCallIsNil(call ssa.CallInstruction) bool {
+	if call == nil {
+		return true
+	}
+	switch call := call.(type) {
+	case *ssa.Call:
+		return call == nil
+	case *ssa.Defer:
+		return call == nil
+	case *ssa.Go:
+		return call == nil
+	default:
+		return false
+	}
 }
 
 func coroInterfaceDispatchSourceSignature(common *ssa.CallCommon) (*types.Signature, error) {
@@ -232,16 +253,17 @@ func validateCoroInterfaceDispatchCandidate(
 	if directive != "" {
 		return fail("ABI directive %q requires an explicit boundary adapter", directive)
 	}
-	if params := target.TypeParams(); params != nil && params.Len() != 0 {
+	genericInstance := coroMaterializedGenericCallable(target)
+	if params := target.TypeParams(); params != nil && params.Len() != 0 && !genericInstance {
 		return fail("generic declarations are not materialized method bodies")
 	}
-	if params := target.Signature.TypeParams(); params != nil && params.Len() != 0 {
+	if params := target.Signature.TypeParams(); params != nil && params.Len() != 0 && !genericInstance {
 		return fail("generic method signatures are not materialized")
 	}
-	if params := target.Signature.RecvTypeParams(); params != nil && params.Len() != 0 {
+	if params := target.Signature.RecvTypeParams(); params != nil && params.Len() != 0 && !genericInstance {
 		return fail("generic receiver methods are not materialized")
 	}
-	if len(target.TypeArgs()) != 0 || target.Origin() != nil {
+	if (len(target.TypeArgs()) != 0 || target.Origin() != nil) && !genericInstance {
 		return fail("generic instances require a frozen instantiated interface ABI")
 	}
 

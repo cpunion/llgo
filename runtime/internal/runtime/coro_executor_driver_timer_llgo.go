@@ -30,11 +30,8 @@ import (
 // synchronization operations. Embedded and bare-metal profiles do not compile
 // this file and retain the inline page unless they provide their own storage.
 const (
-	coroNativeSourcePageCountV1 = 16
-	coroNativeTimerPageCountV1  = 64
 	coroNativeTimerCapacityV1   = coroNativeTimerPageCountV1 * coro.TimerRegistrationPageCapacity
 	coroNativePollCapacityV1    = coroNativeSourcePageCountV1 * coro.PollOperationPageCapacity
-	coroNativeWorkerCapacityV1  = coroNativeSourcePageCountV1 * coro.WorkerOperationPageCapacity
 	coroNativeChannelCapacityV1 = coroNativeSourcePageCountV1 * coro.ChannelOperationPageCapacity
 )
 
@@ -42,7 +39,6 @@ var (
 	coroProgramTimerExtraPagesV1State   [coroNativeTimerPageCountV1 - 1]coro.TimerRegistrationPage
 	coroProgramPollExtraPagesV1State    [coroNativeSourcePageCountV1 - 1]coro.PollOperationPage
 	coroProgramManualExtraPagesV2State  [coroNativeManualPageCountV2 - 1]coro.ManualOperationPage
-	coroProgramWorkerExtraPagesV1State  [coroNativeSourcePageCountV1 - 1]coro.WorkerOperationPage
 	coroProgramChannelExtraPagesV1State [coroNativeSourcePageCountV1 - 1]coro.ChannelOperationPage
 )
 
@@ -57,7 +53,7 @@ func coroProgramBindExecutorDriverV1(driver *coro.ExecutorDriver, p *coroP, regi
 		coro.ManualOperationConfiguredCapacity(&coroProgramManualSourceV2State) != coroNativeSourcePageCountV1*coro.ManualOperationPageCapacity ||
 		coro.WorkerOperationConfiguredCapacity(&coroProgramWorkerSourceV1State) != coroNativeWorkerCapacityV1 ||
 		coro.ChannelOperationConfiguredCapacity(&coroProgramChannelSourceV1State) != coroNativeChannelCapacityV1 ||
-		coroNativeWorkerCapacityV1 != coroNativeSourcePageCountV1*coro.ManualOperationPageCapacity ||
+		coroNativeWorkerCapacityV1 != coroNativeWorkerPageCountV1*coro.ManualOperationPageCapacity ||
 		coroNativeChannelCapacityV1 != coroNativeSourcePageCountV1*coro.ManualOperationPageCapacity ||
 		coroNativeWorkerQueueSizeV1 != coroNativeWorkerCapacityV1 {
 		return false

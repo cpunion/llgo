@@ -356,6 +356,7 @@ type ManagedEdge struct {
 	Ordinal              int        `json:"ordinal"`
 	LogicalName          string     `json:"logical_name"`
 	Target               FunctionID `json:"target"`
+	NoUnwind             bool       `json:"no_unwind"`
 	UnwindOnly           bool       `json:"unwind_only"`
 	ExplicitStatusElided bool       `json:"explicit_status_elided"`
 }
@@ -556,6 +557,9 @@ func verifyManagedEdges(edges []ManagedEdge) error {
 		}
 		if edge.ExplicitStatusElided && !edge.UnwindOnly {
 			return fmt.Errorf("coro: managed helper %q is ExplicitStatus-elided but not unwind-only", edge.LogicalName)
+		}
+		if edge.NoUnwind && (edge.UnwindOnly || edge.ExplicitStatusElided) {
+			return fmt.Errorf("coro: managed helper %q mixes no-unwind and unwind-only semantics", edge.LogicalName)
 		}
 	}
 	return nil

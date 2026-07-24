@@ -2,7 +2,7 @@
 
 状态：设计与实现收敛契约
 
-更新：2026-07-22
+更新：2026-07-23
 
 关联文档：
 
@@ -802,6 +802,95 @@ steal，但不改变Callable/Invocation schema。
   fallback；
 - SMP baremetal按core建立P，并用IPI doorbell和稳定route分发operation。
 
+### 14.6 线程亲和、`LockOSThread` 与 foreign session
+
+2026-07-23的真实cgo运行验证确认了一个此前只列为风险的缺口：四个共享worker都能正确
+执行单次generated-cgo transaction，但把同一Python runtime的初始化、执行和销毁随机分配到
+不同worker会在线程局部解释器状态中崩溃；临时把物理worker数降为1后同一程序通过。这个
+实验只定位了通用thread-affinity问题，不授权按Python符号、库名或函数地址增加特例，也不说明
+“一个全局worker”是可接受方案。
+
+线程亲和必须作为独立于blocking、event kind和backend的能力建模：
+
+```text
+AffinityRequirement
+    AnyThread | CallerThread | OwnerThread | HostMain
+
+AffinityLease
+    domain ID + generation + nesting + exact owner capability
+
+ExecutionDomain
+    native M/thread | host realm | RTOS task/core | baremetal core
+```
+
+规则如下：
+
+- `AnyThread`调用继续进入现有共享bounded worker，不携带affinity lease，也不因同一G的前一次
+  调用恰好落在某个worker而获得粘性；
+- `CallerThread`/`OwnerThread`/`HostMain`必须先取得exact `AffinityLease`。job只前向携带
+  domain ID与generation，runtime不能从function address、TLS值或符号反查domain；
+- lease在一个logical session内独占其owner，嵌套取得只增加同一G的计数；不同G不能在两个
+  相邻foreign call之间插入到同一个session，从而避免“线程相同但session交错”的伪实现；
+- worker completion、task cancel和defer cleanup都不得提前释放lease。已进入不可取消C调用时，
+  logical cancel仍等待late completion/quiescence，再在owner上完成cleanup与最后一次unlock；
+- callback/reentry仍使用独立ForeignReentry/attach-P协议。affinity lease本身不授权C回调Go；
+- pool满、owner不可用或target没有相应执行域时，取得lease必须走统一capacity wait或明确
+  `Unsupported`，不能退化为占住唯一executor，也不能fail-stop队列；
+- 普通wrapper annotation只声明并传播affinity region；完整Go body、内部调用、panic、defer和
+  退出边仍分析。只有runtime/受控标准库或target catalog提供的exact contract能授权foreign
+  callable，wrapper不能把未知C自行升级为worker-safe或callback-safe。
+
+Native上的Go兼容入口是`runtime.LockOSThread`。它不能继续是空实现：
+
+1. 第一次lock把当前G绑定到一个generation-stable M/execution domain，重复lock只增加嵌套；
+2. locked G的runnable continuation、parked result和cleanup只能回到该domain，禁止普通
+   P-neutral transfer/steal；
+3. 线程亲和foreign call在同一owner上执行。若它可能阻塞，owner必须像Go的M/P模型一样交还或
+   补偿可运行P，使其他G继续运行；不能让“保持线程”重新变成“阻塞整个调度器”；
+4. 最后一次`UnlockOSThread`只在没有active affine operation、callback或cleanup lease时解除；
+5. G异常返回、panic、Goexit和task abort都必须通过compiler cleanup表释放隐式owner资源，但
+   不得替用户伪造缺失的`UnlockOSThread`可观察语义。
+
+实现上不应给共享MPMC ring增加一个“lane号然后由任意worker碰运气取走”。可行的最小结构是：
+
+- 保留现有any-thread ring和四个共享consumer；
+- target另提供固定容量的`AffinityOwner`目录，每个已租用owner有串行POD ingress；
+- compiler/runtime park recipe把同一G的exact lease前向带到提交点，owner只接受匹配的
+  `(domain,generation)`；
+- owner执行foreign call并通过现有`OperationID`、result lease、cancel/detach/quiescence链返回，
+  不新建第二套scheduler或完成状态机；
+- 后续动态M/P只扩展owner目录和补偿策略，不改变Callable/Invocation/Operation事实模型。
+
+平台映射为：
+
+| 平台 | affinity domain |
+| --- | --- |
+| Native | generation-stable M或专用foreign owner；blocking时执行P handoff/补偿 |
+| JS/WASM | host-main realm；later-turn continuation保持realm，不制造pthread |
+| WASI threads | 显式thread capability；无threads profile为host realm或Unsupported |
+| RTOS/embedded | 固定task/core owner，通知队列只携带POD generation |
+| Baremetal | 当前core/主循环owner；SMP用core route，单核不可把阻塞C伪装为异步 |
+
+截至2026-07-24，第一版Native闭环已经进入production path：
+
+- `runtime.LockOSThread`/`UnlockOSThread`通过两个exact compiler marker取得/释放当前G对
+  executor M/P domain的嵌套逻辑租约；marker执行一次runnable handoff，API返回时该G已重新
+  落在同一物理owner；
+- scheduler只允许locked G由exact owner选择，禁止普通ready distribution和跨domain迁移；
+- ordinary `AnyThread` foreign call仍进入共享bounded worker；locked G的foreign call先查询
+  当前task租约，再在当前M直接执行同一个typed `uintptr` thunk，不按库名、符号或地址增加特例；
+- 默认四worker配置下的generated-cgo Python init/use/fini已经fresh compile-link-run通过并输出
+  `Hello, Python!`；`cgobasic`与`cgodefer`同时通过，证明any-thread worker路径没有被替换；
+- compiler marker、runtime owner选择、嵌套lock/unlock、terminal logical lease cleanup和
+  architecture-debt gate都有独立测试。
+
+这仍不是完整Go affinity语义。locked G若未unlock就终止，当前会先清除逻辑owner再回收G，
+但尚未物理退休/替换被污染的M；一个可能阻塞的locked foreign call会占用该M/P island，现有
+第二个native domain可继续推进其他G，但尚无按压力动态创建M/P的补偿机制。WASM、WASI、
+embedded和baremetal目前只有目标中立的logical domain模型，没有等价的production affinity
+backend。后续完成门仍包括：两个独立session并行、defer/panic/Goexit/cancel清理、错误generation
+拒绝、locked-G异常退出的M退休，以及affine C长期阻塞时的动态P补偿。
+
 ## 15. 容量、公平性与性能边界
 
 ### 15.1 当前fixed worker的边界
@@ -986,8 +1075,10 @@ report-only原型。截至2026-07-22，迁移顺序和状态如下：
    写入通用contract。
 10. **并行、平台验收与清理（部分完成）**：native route-aware submission、双M/P target、
     worker lifecycle和TCP E2E已落地；仍需AwaitCapacity、queued cancel、P-neutral parked-result
-    packet、动态P/通用steal与affinity。各target的真实file/socket/timer证据成立后，迁移并删除
-    逐trampoline `workeraddr`兼容标注。
+    packet、动态P/通用steal与affinity。2026-07-23已用真实generated-cgo/Python序列确认共享worker
+    会破坏线程局部session，并冻结第14.6节的`AffinityLease + AffinityOwner`方向；尚未接入
+    `LockOSThread`或production owner目录。各target的真实file/socket/timer证据成立后，迁移并
+    删除逐trampoline `workeraddr`兼容标注。
 
 ## 19. 验证矩阵
 
@@ -1095,6 +1186,9 @@ contract，compile-only不能替代production platform E2E。
 
 **尚未完成的关键闭环**：
 
+- 第一版`runtime.LockOSThread`、locked G exact P/M归属和同M foreign call已经闭环；仍缺
+  locked G未unlock退出时的物理M退休、动态owner容量和blocking compensation。共享worker继续
+  只授权`AnyThread`，thread-local session必须持有当前G的exact lock lease；
 - 将当前小wrapper exact-edge proof扩展为绑定operand/resource generation、target capability和
   cost bound的region/context proof，同时保持target-owned refinement约束；
 - 与 `SetBlocking`、close/reuse、resource generation/epoch同步的真实NonblockingLease；

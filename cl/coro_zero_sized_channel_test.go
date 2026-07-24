@@ -93,7 +93,7 @@ func compileCoroZeroSizedChannelFixture(t *testing.T) (llssa.Program, llssa.Pack
 	program := newLLSSAProg(t)
 	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		program, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}},
-		EmissionUniverseOptions{CoroProfile: CoroProfileStackless},
+		EmissionUniverseOptions{},
 	)
 	if err != nil {
 		program.Dispose()
@@ -129,8 +129,7 @@ func compileCoroZeroSizedChannelFixture(t *testing.T) (llssa.Program, llssa.Pack
 		CoroABI:      coro.PhysicalABIV1,
 		SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 		PanicABI:     coro.PanicExplicitStatusABIV0,
-		FuncRepABI:   coro.FuncRepABIV1, CoroProfile: CoroProfileStackless,
-	}
+		FuncRepABI:   coro.FuncRepABIV1}
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		program, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		PackageOptions{Compilation: compilation},

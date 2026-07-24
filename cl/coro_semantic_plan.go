@@ -36,6 +36,7 @@ type coroSemanticInstructionPlan struct {
 	exec         coro.ExecFlags
 	materialized bool
 	debug        bool
+	evaluated    bool
 }
 
 // planCoroSemanticInstruction is the only raw-SSA semantic recipe classifier.

@@ -4,6 +4,11 @@ import (
 	_ "unsafe"
 )
 
+// This fixture validates C ABI shape on targets which may deliberately have no
+// external-I/O adapter. Keep diagnostic arguments evaluated without coupling
+// the ABI matrix to stdout progress.
+func println(...any) {}
+
 const (
 	LLGoFiles = "../wrap/demo.c"
 )
@@ -13,6 +18,7 @@ type point struct {
 	y int32
 }
 
+//llgo:coro sync
 //go:linkname pt C.pt
 func pt(pt point) point
 
@@ -22,6 +28,7 @@ type point1 struct {
 	z int32
 }
 
+//llgo:coro sync
 //go:linkname pt1 C.pt1
 func pt1(pt point1) point1
 
@@ -31,6 +38,7 @@ type point2 struct {
 	z int32
 }
 
+//llgo:coro sync
 //go:linkname pt2 C.pt2
 func pt2(pt point2) point2
 
@@ -40,6 +48,7 @@ type point3 struct {
 	z int8
 }
 
+//llgo:coro sync
 //go:linkname pt3 C.pt3
 func pt3(pt point3) point3
 
@@ -50,6 +59,7 @@ type point4 struct {
 	m int32
 }
 
+//llgo:coro sync
 //go:linkname pt4 C.pt4
 func pt4(pt point4) point4
 
@@ -61,6 +71,7 @@ type point5 struct {
 	n int8
 }
 
+//llgo:coro sync
 //go:linkname pt5 C.pt5
 func pt5(pt point5) point5
 
@@ -73,6 +84,7 @@ type point6 struct {
 	k int32
 }
 
+//llgo:coro sync
 //go:linkname pt6 C.pt6
 func pt6(pt point6) point6
 
@@ -86,6 +98,7 @@ type point7 struct {
 	o int8
 }
 
+//llgo:coro sync
 //go:linkname pt7 C.pt7
 func pt7(pt point7) point7
 
@@ -94,6 +107,7 @@ type data1 struct {
 	y int64
 }
 
+//llgo:coro sync
 //go:linkname fn1 C.fn1
 func fn1(data1) data1
 
@@ -102,6 +116,7 @@ type data2 struct {
 	y int64
 }
 
+//llgo:coro sync
 //go:linkname fn2 C.fn2
 func fn2(data2) data2
 
@@ -110,6 +125,7 @@ type data3 struct {
 	y int8
 }
 
+//llgo:coro sync
 //go:linkname fn3 C.fn3
 func fn3(data3) data3
 
@@ -117,6 +133,7 @@ type fdata1 struct {
 	x float32
 }
 
+//llgo:coro sync
 //go:linkname ff1 C.ff1
 func ff1(fdata1) fdata1
 
@@ -125,6 +142,7 @@ type fdata2 struct {
 	y float32
 }
 
+//llgo:coro sync
 //go:linkname ff2 C.ff2
 func ff2(fdata2) fdata2
 
@@ -133,6 +151,7 @@ type fdata2i struct {
 	y int32
 }
 
+//llgo:coro sync
 //go:linkname ff2i C.ff2i
 func ff2i(fdata2i) fdata2i
 
@@ -142,6 +161,7 @@ type fdata3 struct {
 	z float32
 }
 
+//llgo:coro sync
 //go:linkname ff3 C.ff3
 func ff3(fdata3) fdata3
 
@@ -152,6 +172,7 @@ type fdata4 struct {
 	m float32
 }
 
+//llgo:coro sync
 //go:linkname ff4 C.ff4
 func ff4(fdata4) fdata4
 
@@ -163,6 +184,7 @@ type fdata5 struct {
 	n float32
 }
 
+//llgo:coro sync
 //go:linkname ff5 C.ff5
 func ff5(fdata5) fdata5
 
@@ -172,6 +194,7 @@ type fdata2id struct {
 	z float64
 }
 
+//llgo:coro sync
 //go:linkname ff2id C.ff2id
 func ff2id(fdata2id) fdata2id
 
@@ -180,6 +203,7 @@ type fdata7if struct {
 	y float32
 }
 
+//llgo:coro sync
 //go:linkname ff7if C.ff7if
 func ff7if(fdata7if) fdata7if
 
@@ -190,6 +214,7 @@ type fdata4if struct {
 	m float32
 }
 
+//llgo:coro sync
 //go:linkname ff4if C.ff4if
 func ff4if(fdata4if) fdata4if
 
@@ -197,9 +222,11 @@ type array struct {
 	x [8]int32
 }
 
+//llgo:coro sync
 //go:linkname demo64 C.demo64
 func demo64(n int64) int64
 
+//llgo:coro sync
 //go:linkname demo32 C.demo32
 func demo32(n int32) int32
 
@@ -207,6 +234,7 @@ type struct32 struct {
 	v int32
 }
 
+//llgo:coro sync
 //go:linkname demo32s C.demo32s
 func demo32s(v struct32) struct32
 
@@ -215,12 +243,15 @@ type point64 struct {
 	y int64
 }
 
+//llgo:coro sync
 //go:linkname pt64 C.pt64
 func pt64(pt point64) point64
 
+//llgo:coro sync
 //go:linkname demo C.demo
 func demo(a array) array
 
+//llgo:coro sync
 //go:linkname demo2 C.demo2
 func demo2(x int32) array
 
@@ -228,6 +259,7 @@ type ddata1 struct {
 	x float64
 }
 
+//llgo:coro sync
 //go:linkname dd1 C.dd1
 func dd1(d ddata1) ddata1
 
@@ -236,6 +268,7 @@ type ddata2 struct {
 	y float64
 }
 
+//llgo:coro sync
 //go:linkname dd2 C.dd2
 func dd2(d ddata2) ddata2
 
@@ -245,21 +278,25 @@ type ddata3 struct {
 	z float64
 }
 
+//llgo:coro sync
 //go:linkname dd3 C.dd3
 func dd3(d ddata3) ddata3
 
 //llgo:type C
 type Callback func(array, point, point1) array
 
+//llgo:coro sync
 //go:linkname callback C.callback
 func callback(fn Callback, ar array)
 
 //llgo:type C
 type Callback1 func(array, point, point1) point
 
+//llgo:coro sync
 //go:linkname callback1 C.callback1
 func callback1(fn Callback1, ar array)
 
+//llgo:coro sync
 //go:linkname mycallback C.mycallback
 func mycallback(ar array, pt point, pt1 point1) point
 

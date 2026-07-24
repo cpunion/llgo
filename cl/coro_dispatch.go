@@ -129,13 +129,20 @@ func validateCoroDynamicDispatchTarget(fn *ssa.Function, plan coro.FunctionPlan,
 		}
 		methodExpression = true
 	}
-	if fn.Synthetic != "" && !genericInstance && !boundMethod && !methodExpression {
+	rangeYield := false
+	if fn.Synthetic == rangeOverFuncYieldSynthetic {
+		if err := validateCoroExactRangeYield(fn); err != nil {
+			return fail("invalid range-over-func yield: %v", err)
+		}
+		rangeYield = true
+	}
+	if fn.Synthetic != "" && !genericInstance && !boundMethod && !methodExpression && !rangeYield {
 		return fail("synthetic function %q is outside the plain dispatch ABI", fn.Synthetic)
 	}
-	if params := fn.TypeParams(); params != nil && params.Len() != 0 && !genericInstance {
+	if params := fn.TypeParams(); params != nil && params.Len() != 0 && !genericInstance && !rangeYield {
 		return fail("generic declarations are not materialized dispatch bodies")
 	}
-	if (len(fn.TypeArgs()) != 0 || fn.Origin() != nil) && !genericInstance {
+	if (len(fn.TypeArgs()) != 0 || fn.Origin() != nil) && !genericInstance && !rangeYield {
 		return fail("generic instances require a frozen instantiated dispatch ABI")
 	}
 	if err := validateCoroManagedDispatchSignatureShape(fn.Signature); err != nil {
@@ -958,7 +965,7 @@ func appendCoroPlainDispatchTypeLayout(builder *strings.Builder, prog llssa.Prog
 // dynamically callable value. Preflight owns validation of the complete plan;
 // emission only observes the exact immutable ValuePlan through this helper.
 func (p *context) coroPlainDispatchValuePlan(value ssa.Value) (coro.SSAValuePlan, bool) {
-	if p == nil || p.compilation == nil || !p.compilation.CoroPlainDispatchActive() {
+	if p == nil || p.compilation == nil {
 		return coro.SSAValuePlan{}, false
 	}
 	plan := p.compilation.CoroPlan
@@ -1019,13 +1026,23 @@ func (p *context) emitCoroDynamicDispatchValue(
 	if err != nil {
 		panic(err)
 	}
-	compile := p.compileFunction
+	// Descriptor construction is capability-complete and independent of the
+	// body currently being emitted. In particular a raw/plain twin may publish
+	// a closure for later managed invocation: its HasCoro word must still name
+	// the managed primary, while HasPlain names the separately proven raw twin.
+	// Using compileFunction here would contextually select the raw twin for both
+	// words while p.rawPlainBody is active.
+	compile := p.compileManagedFunction
 	if entry.plan.Emission == coro.EmitRawPlain {
 		compile = p.compileRawPlainFunction
 	}
 	physical, py, ftype := compile(entry.function)
 	if ftype != goFunc || physical == nil || py != nil {
-		panic(fmt.Errorf("coroutine dynamic dispatch ABI: target %q did not compile as one Go function", entry.plan.ID))
+		panic(fmt.Errorf(
+			"coroutine dynamic dispatch ABI: target %q (%s, emission=%s, frontend-kind=%d) did not compile as one Go function (physical=%t python=%t returned-kind=%d)",
+			entry.plan.ID, entry.function.String(), entry.plan.Emission, entry.ftype,
+			physical != nil, py != nil, ftype,
+		))
 	}
 	var rawPhysical llssa.Function
 	if entry.plan.Emission == coro.EmitCoroutine && p.compilation.CoroPlan.HasRawPlainVariant(entry.function) {
@@ -1176,7 +1193,16 @@ func (p *context) newCoroDynamicDispatchEntryThunk(
 	}
 	for i := 0; i < source.Params().Len(); i++ {
 		if !types.Identical(targetSig.Params().At(targetParam+i).Type(), source.Params().At(i).Type()) {
-			panic(fmt.Errorf("coroutine dynamic dispatch ABI: thunk %q target source parameter %d has the wrong type", name, i))
+			panic(fmt.Errorf(
+				"coroutine dynamic dispatch ABI: thunk %q target %q source parameter %d has type %s, want %s (target signature %s; source signature %s)",
+				name,
+				target.Name(),
+				i,
+				types.TypeString(targetSig.Params().At(targetParam+i).Type(), nil),
+				types.TypeString(source.Params().At(i).Type(), nil),
+				types.TypeString(targetSig, nil),
+				types.TypeString(source, nil),
+			))
 		}
 	}
 	b := thunk.MakeBody(1)

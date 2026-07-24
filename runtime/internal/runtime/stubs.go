@@ -7,21 +7,28 @@ package runtime
 import (
 	"unsafe"
 
+	c "github.com/goplus/llgo/runtime/internal/clite"
 	"github.com/goplus/llgo/runtime/internal/clite/sync/atomic"
 	"github.com/goplus/llgo/runtime/internal/clite/time"
 	"github.com/goplus/llgo/runtime/internal/runtime/math"
 )
 
 // rand and srand mutate only libc's process-local PRNG state. They do not
-// perform I/O, wait for a host event, or call back into Go.
+// perform I/O, wait for a host event, or call back into Go. libc may serialize
+// that state with an internal lock, so this is synchronous rather than the
+// stronger IRQ-safe noblock contract.
 //
-//llgo:coro noblock
-//go:linkname fastrand C.rand
-func fastrand() uint32
+//llgo:coro sync
+//go:linkname libcRand C.rand
+func libcRand() c.Int
 
-//llgo:coro noblock
+//llgo:coro sync
 //go:linkname srand C.srand
 func srand(uint32)
+
+func fastrand() uint32 {
+	return uint32(libcRand())
+}
 
 func fastrand64() uint64 {
 	n := uint64(fastrand())

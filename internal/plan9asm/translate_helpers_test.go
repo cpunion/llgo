@@ -11,6 +11,7 @@ import (
 	"go/types"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	llpackages "github.com/goplus/llgo/internal/packages"
@@ -260,6 +261,55 @@ func TestExtraAsmSigsAndDeclMap(t *testing.T) {
 		}
 		if len(sig.ArgRegs) != 1 || sig.ArgRegs[0] != extplan9asm.AX {
 			t.Fatalf("%s arg regs = %#v, want [AX]", name, sig.ArgRegs)
+		}
+	}
+
+	for _, test := range []struct {
+		arch string
+		regs []extplan9asm.Reg
+		cb   []extplan9asm.Reg
+	}{
+		{
+			arch: "arm64",
+			regs: []extplan9asm.Reg{"R0", "R1", "R2", "R3"},
+			cb:   []extplan9asm.Reg{"R0", "R1", "R3"},
+		},
+		{
+			arch: "amd64",
+			regs: []extplan9asm.Reg{"DI", "SI", "DX", "CX"},
+			cb:   []extplan9asm.Reg{"DI", "SI", "CX"},
+		},
+	} {
+		sigs := extraAsmSigsAndDeclMap("runtime/cgo", test.arch)
+		wantArgs := []extplan9asm.LLVMType{
+			extplan9asm.Ptr, extplan9asm.Ptr, extplan9asm.LLVMType("i32"), extplan9asm.I64,
+		}
+		for _, name := range []string{"runtime/cgo.crosscall2", "runtime/cgo.crosscall2_trampoline"} {
+			sig, ok := sigs[name]
+			if !ok {
+				t.Fatalf("%s: missing %s signature", test.arch, name)
+			}
+			if !reflect.DeepEqual(sig.Args, wantArgs) {
+				t.Fatalf("%s %s args = %#v, want %#v", test.arch, name, sig.Args, wantArgs)
+			}
+			if sig.Ret != extplan9asm.Void {
+				t.Fatalf("%s %s ret = %#v, want Void", test.arch, name, sig.Ret)
+			}
+			if !reflect.DeepEqual(sig.ArgRegs, test.regs) {
+				t.Fatalf("%s %s arg regs = %#v, want %#v", test.arch, name, sig.ArgRegs, test.regs)
+			}
+		}
+		callback, ok := sigs["runtime.cgocallback"]
+		if !ok || callback.Ret != extplan9asm.Void ||
+			!reflect.DeepEqual(callback.Args, []extplan9asm.LLVMType{
+				extplan9asm.I64, extplan9asm.I64, extplan9asm.I64,
+			}) ||
+			!reflect.DeepEqual(callback.ArgRegs, test.cb) {
+			t.Fatalf("%s runtime.cgocallback signature = %#v", test.arch, callback)
+		}
+		loadG, ok := sigs["runtime.load_g"]
+		if !ok || len(loadG.Args) != 0 || loadG.Ret != extplan9asm.Void {
+			t.Fatalf("%s runtime.load_g signature = %#v", test.arch, loadG)
 		}
 	}
 }

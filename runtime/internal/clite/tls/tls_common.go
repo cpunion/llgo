@@ -58,8 +58,7 @@ type Handle[T any] struct {
 func Alloc[T any](destructor func(*T)) Handle[T] {
 	var key pthread.Key
 	if ret := key.Create(pthread.KeyDestructor(slotDestructor[T])); ret != 0 {
-		c.Fprintf(c.Stderr, c.Str("tls: pthread_key_create failed (errno=%d)\n"), ret)
-		panic("tls: failed to create thread local storage key")
+		panic("tls: pthread_key_create failed")
 	}
 	return Handle[T]{key: key, destructor: destructor}
 }
@@ -105,8 +104,7 @@ func (h Handle[T]) ensureSlot() *slot[T] {
 	}
 	if ret := h.key.Set(mem); ret != 0 {
 		c.Free(mem)
-		c.Fprintf(c.Stderr, c.Str("tls: pthread_setspecific failed (errno=%d)\n"), ret)
-		panic("tls: failed to set thread local storage value")
+		panic("tls: pthread_setspecific failed")
 	}
 	registerSlot(s)
 	return s

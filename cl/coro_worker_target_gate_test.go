@@ -73,10 +73,8 @@ func TestCoroWorkerCompilationPreflightUsesEmissionUniverseTarget(t *testing.T) 
 	compilation := &Compilation{
 		EmissionUniverse: &EmissionUniverse{
 			prog:             prog,
-			coroProfile:      CoroProfileStackless,
 			coroCapabilities: CoroNativeTargetCapabilities(),
 		},
-		CoroProfile:            CoroProfileStackless,
 		CoroTargetCapabilities: CoroNativeTargetCapabilities(),
 	}
 	err := compilation.preflightCoroPlan()
@@ -94,10 +92,8 @@ func TestCoroWorkerCompilationBindsExactCodegenProgram(t *testing.T) {
 	compilation := &Compilation{
 		EmissionUniverse: &EmissionUniverse{
 			prog:             native,
-			coroProfile:      CoroProfileStackless,
 			coroCapabilities: CoroNativeTargetCapabilities(),
 		},
-		CoroProfile:            CoroProfileStackless,
 		CoroTargetCapabilities: CoroNativeTargetCapabilities(),
 	}
 	if err := compilation.validateCoroWorkerCodegenProgram(native); err != nil {

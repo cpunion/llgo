@@ -1,4 +1,4 @@
-//go:build llgo && llgo_coro && llgo_coro_native_pipe && llgo_coro_native_timer && (darwin || linux) && !baremetal && !coro_runtime_adapter_test
+//go:build llgo && llgo_coro && llgo_coro_native_pipe && (darwin || linux) && !baremetal && !coro_runtime_adapter_test
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -65,9 +65,9 @@ func validCoroWorkerResultWordsV1(state unsafe.Pointer, r1, r2, errno *uintptr) 
 // P/Q/R/S/T are park admission; A/B/C/D/E/F/G/H are resume ABI, decision,
 // owner, completed/canceled tuple, finish, payload, and scalar validation.
 func coroWorkerAbortV1(phase byte, message string) {
-	c.Fputs(c.Str("coroutine worker abort phase "), c.Stderr)
-	c.Fputc(c.Int(phase), c.Stderr)
-	c.Fputc(c.Int('\n'), c.Stderr)
+	coroTerminalFputs(c.Str("coroutine worker abort phase "), c.Stderr)
+	coroTerminalFputc(c.Int(phase), c.Stderr)
+	coroTerminalFputc(c.Int('\n'), c.Stderr)
 	coroRuntimeAbort(message)
 	for {
 	}
@@ -188,9 +188,9 @@ func __llgo_coro_worker_resume_v1(
 	if !finish.Finished() {
 		// Finish result digits are stable: 2=context, 3=lease,
 		// 4=quiescence, 5=result release, and 6=recycle.
-		c.Fputs(c.Str("coroutine worker finish result "), c.Stderr)
-		c.Fputc(c.Int(byte('0')+byte(finish)), c.Stderr)
-		c.Fputc(c.Int('\n'), c.Stderr)
+		coroTerminalFputs(c.Str("coroutine worker finish result "), c.Stderr)
+		coroTerminalFputc(c.Int(byte('0')+byte(finish)), c.Stderr)
+		coroTerminalFputc(c.Int('\n'), c.Stderr)
 		coroWorkerAbortV1('F', "cannot finish coroutine worker park")
 		return 0
 	}

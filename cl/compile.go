@@ -451,7 +451,7 @@ func makeClosureCtx(pkg *types.Package, vars []*ssa.FreeVar) *types.Var {
 
 func isCgoExternSymbol(f *ssa.Function) bool {
 	name := f.Name()
-	return isCgoCfunc(name) || isCgoCmacro(name) || isCgoC2func(name)
+	return isCgoCfunc(name) || isCgoCmacro(name) || isCgoC2func(name) || isCgoCMalloc(name)
 }
 
 func isCgoCfpvar(name string) bool {
@@ -464,6 +464,13 @@ func isCgoCfunc(name string) bool {
 
 func isCgoC2func(name string) bool {
 	return strings.HasPrefix(name, "_C2func_")
+}
+
+func isCgoCMalloc(name string) bool {
+	// Go 1.26 emits this generated allocation adapter in addition to the
+	// ordinary _Cfunc_* family. It has the same //go:cgo_unsafe_args raw
+	// lowering protocol and must not be compiled as an ordinary Go CFG.
+	return name == "_cgo_cmalloc"
 }
 
 func isCgoCmacro(name string) bool {
@@ -576,7 +583,7 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 func (p *context) compileFuncDeclVariant(pkg llssa.Package, f *ssa.Function, rawPlain bool) (llssa.Function, llssa.PyObjRef, int) {
 	var entry plannedFunctionSymbol
 	patchOriginal := f != nil && f.Name() == "init" && f.Signature != nil && f.Signature.Recv() == nil &&
-		p.state == pkgHasPatch && p.compilation != nil && p.compilation.CoroEntryResolutionActive()
+		p.state == pkgHasPatch && p.compilation != nil
 	if patchOriginal {
 		entry = p.mustPatchOriginalInitFunctionSymbol(f)
 	} else {
@@ -677,7 +684,7 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 	} else {
 		p.funcs[f] = fn
 	}
-	if physicalABI != nil && entry.childAwait {
+	if physicalABI != nil {
 		p.emitCoroRootFactory(pkg, entry, *physicalABI, sourceSig, fn)
 	}
 	isCgo := isCgoExternSymbol(f)
@@ -1023,7 +1030,7 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 
 	fnName := block.Parent().Name()
 	cgoReturned := false
-	isCgoCfunc := isCgoCfunc(fnName)
+	isCgoCfunc := isCgoCfunc(fnName) || isCgoCMalloc(fnName)
 	isCgoC2 := isCgoC2func(fnName)
 	isCgoCmacro := isCgoCmacro(fnName)
 	for i, instr := range instrs {
@@ -1052,6 +1059,11 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 					p.cgoSymbols = append(p.cgoSymbols, varName)
 					p.compileInstr(b, instr)
 				}
+			case *ssa.ChangeType:
+				// Value-only conversion selected by the frozen dedicated cgo
+				// lowering plan (notably size_t -> uint64 in Go 1.26's
+				// _Cfunc__CMalloc wrapper).
+				p.compileInstr(b, instr)
 			case *ssa.Call:
 				if isCgoCmacro {
 					p.cgoRet = p.compileValue(b, instr.Call.Args[0])
@@ -1068,6 +1080,24 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 					p.cgoRet.Type = p.prog.Pointer(ty)
 					p.cgoRet = b.Load(p.cgoRet)
 				} else {
+					if p.emissionUniverse != nil {
+						value, direct, err := p.emissionUniverse.coroProgramIR.cgoDirectReturn(instr)
+						if err != nil {
+							panic(fmt.Errorf("load frozen cgo direct-return recipe: %w", err))
+						}
+						if direct {
+							p.cgoRet = p.compileValue(b, value)
+						}
+					} else if len(instr.Results) == 1 {
+						// Legacy one-package compilation has no ProgramIR. Admit
+						// only an already-lowered direct call; production whole
+						// builds always consume the frozen recipe above.
+						if call, ok := instr.Results[0].(*ssa.Call); ok {
+							if value, ready := p.bvals[call]; ready {
+								p.cgoRet = value
+							}
+						}
+					}
 					p.cgoReturn(b, isCgoC2)
 					cgoReturned = true
 					continue
@@ -1374,6 +1404,8 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 	case *ssa.Call:
 		if value, handled := p.tryCompileCoroPatchInitRedirect(b, v); handled {
 			ret = value
+		} else if value, handled := p.tryCompileCoroRawPlainCall(b, v); handled {
+			ret = value
 		} else if p.rawPlainBody {
 			// A compiler-frozen closed SyncDispatch (currently the TLS destructor
 			// callback) has a complete singleton target and plain descriptor ABI.
@@ -1469,6 +1501,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 	case *ssa.UnOp:
 		physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(v)
 		if v.Op == token.MUL {
+			guardedDeref := physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionDeref
 			if _, ok := p.methodNilDerefChecks[v]; ok && !ssaValueProvenNonNilAt(v.X, v) {
 				if physicalPlanned && p.coroUsesExplicitStatusFaults() {
 					switch physicalInstruction.recipe {
@@ -1488,10 +1521,22 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 					return p.compileCheckedDeref(b, v)
 				}
 			}
-			if isEffectfulArrayPointerDeref(v) {
+			if isEffectfulArrayPointerDeref(v) && !guardedDeref {
 				x := p.compileValue(b, v.X)
 				p.recordPanicLocation(b, v.Pos())
 				b.AssertNilDeref(x)
+			}
+			if refs, ok := nonDebugReferrers(v); guardedDeref && ok && len(refs) == 0 {
+				// An unused load still evaluates its pointer operand and must
+				// preserve the source nil fault, but it has no value-side
+				// memory effect. Let the frozen physical recipe publish that
+				// fault exactly once and avoid the legacy assertNilDerefBase /
+				// NilDerefCheck path, whose nested helper would belong to a
+				// different SSA site.
+				x := p.compileValue(b, v.X)
+				p.recordPanicLocation(b, v.Pos())
+				p.compileCoroPlannedNilDerefGuard(b, v, x)
+				return
 			}
 			if refs, ok := nonDebugReferrers(v); ok && len(refs) == 0 {
 				if t := p.type_(v.Type(), llssa.InGo); t.RawType() != nil {
@@ -1547,9 +1592,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		}
 		guardedDeref := physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionDeref
 		if guardedDeref {
-			p.observeCoroPhysicalInstruction(v, coroPhysicalInstructionDeref)
-			p.observeCoroPhysicalNilGuard(v)
-			x = p.compileCoroImplicitNilDerefGuard(b, v, x)
+			x = p.compileCoroPlannedNilDerefGuard(b, v, x)
 		} else if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary {
 			panic(fmt.Sprintf("typed load selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
 		} else if (!physicalPlanned || !p.coroUsesExplicitStatusFaults()) && shouldAssertDirectNilDeref(v) && !ssaValueProvenNonNilAt(v.X, v) {
@@ -1568,11 +1611,12 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		} else {
 			if v.Op == token.MUL {
 				if t := p.type_(v.Type(), llssa.InGo); t.RawType() != nil && p.prog.SizeOf(t) == 0 {
-					if p.hasCoroPhysicalBody() {
-						// The explicit-status guard above owns the nullable case;
-						// a proven non-nil source needs no memory access. Avoid
-						// Builder.UnOp's legacy native-stack nil helper and
-						// materialize the sole zero-sized value directly.
+					if guardedDeref || isKnownNonNilAddr(v.X) || ssaValueProvenNonNilAt(v.X, v) {
+						// A physical explicit-status guard owns the nullable
+						// case; a separately proven non-nil source needs no
+						// memory access in either physical or plain emission.
+						// Avoid Builder.UnOp's legacy nil helper and materialize
+						// the sole zero-sized value directly.
 						ret = p.prog.Zero(t)
 						break
 					}
@@ -1817,14 +1861,12 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		}
 		ret = b.MakeMap(t, nReserve)
 	case *ssa.MakeClosure:
-		if !p.rawPlainBody {
-			if value, handled := p.tryCompileCoroPlainDispatchClosure(b, v); handled {
-				ret = value
-				break
-			}
+		if value, handled := p.tryCompileCoroPlainDispatchClosure(b, v); handled {
+			ret = value
+			break
 		}
 		var fn llssa.Expr
-		if target, ok := v.Fn.(*ssa.Function); ok && p.compilation != nil && p.compilation.CoroEntryResolutionActive() {
+		if target, ok := v.Fn.(*ssa.Function); ok && p.compilation != nil {
 			// The target's own ValuePlan may require a descriptor at another
 			// producer. MakeClosure still needs the raw body entry; feeding a
 			// descriptor-backed closure to Builder.MakeClosure would reinterpret
@@ -2254,6 +2296,20 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 	}
 }
 
+// compileCoroPlannedNilDerefGuard is the sole bridge from the frozen physical
+// dereference recipe to its explicit-status lowering. Both value-producing
+// loads and evaluation-only loads pass through this observer, so adding a new
+// source shape cannot accidentally create a second physical authority path.
+func (p *context) compileCoroPlannedNilDerefGuard(
+	b llssa.Builder,
+	deref *ssa.UnOp,
+	base llssa.Expr,
+) llssa.Expr {
+	p.observeCoroPhysicalInstruction(deref, coroPhysicalInstructionDeref)
+	p.observeCoroPhysicalNilGuard(deref)
+	return p.compileCoroImplicitNilDerefGuard(b, deref, base)
+}
+
 func (p *context) getLocalVariable(b llssa.Builder, fn *ssa.Function, v *types.Var) llssa.DIVar {
 	if p.debugDIVars != nil {
 		if div, ok := p.debugDIVars[v]; ok {
@@ -2277,8 +2333,24 @@ func (p *context) compileFunction(v *ssa.Function) (goFn llssa.Function, pyFn ll
 	return p.compileManagedFunction(v)
 }
 
+func (p *context) ownsFunctionEmission(v *ssa.Function) bool {
+	if v == nil {
+		return false
+	}
+	if v.Pkg == p.goPkg || v.Pkg == nil {
+		return true
+	}
+	// A patched package's original and alternate SSA packages share one LLVM
+	// module and one prepared emission owner. A nested alternate function may be
+	// demanded before eager member traversal reaches its parent; treating it as
+	// cross-package would return ignoredFunc because captured declarations
+	// cannot be reconstructed outside their owning module.
+	return p.emissionUniverse != nil && p.emissionOwner != nil &&
+		p.emissionUniverse.ownerOf(v) == p.emissionOwner
+}
+
 func (p *context) compileManagedFunction(v *ssa.Function) (goFn llssa.Function, pyFn llssa.PyObjRef, kind int) {
-	if p.compilation != nil && p.compilation.CoroEntryResolutionActive() &&
+	if p.compilation != nil &&
 		p.compilation.CoroPlan != nil && p.compilation.EmissionUniverse != nil {
 		canonical, ok := p.compilation.EmissionUniverse.Resolve(v)
 		if !ok || canonical == nil {
@@ -2297,7 +2369,7 @@ func (p *context) compileManagedFunction(v *ssa.Function) (goFn llssa.Function, 
 		v = canonical
 	}
 	// TODO(xsw) v.Pkg == nil: means auto generated function?
-	if v.Pkg == p.goPkg || v.Pkg == nil {
+	if p.ownsFunctionEmission(v) {
 		// function in this package
 		goFn, pyFn, kind = p.compileFuncDecl(p.pkg, v)
 		if kind != ignoredFunc {
@@ -2360,7 +2432,7 @@ func (p *context) compileRawPlainFunction(v *ssa.Function) (goFn llssa.Function,
 		if !p.compilation.CoroPlan.HasRawPlainVariant(v) {
 			panic(fmt.Errorf("raw plain function resolution: raw-only function %q has no planned raw plain body", plan.ID))
 		}
-		if v.Pkg == p.goPkg || v.Pkg == nil {
+		if p.ownsFunctionEmission(v) {
 			return p.compileFuncDeclVariant(p.pkg, v, true)
 		}
 		return p.funcOfEntry(p.mustRawPlainFunctionSymbol(v))
@@ -2385,7 +2457,7 @@ func (p *context) compileRawPlainFunction(v *ssa.Function) (goFn llssa.Function,
 	if !p.compilation.CoroPlan.HasRawPlainVariant(v) {
 		panic(fmt.Errorf("raw plain function resolution: managed coroutine %q has no planned raw plain variant", plan.ID))
 	}
-	if v.Pkg == p.goPkg || v.Pkg == nil {
+	if p.ownsFunctionEmission(v) {
 		return p.compileFuncDeclVariant(p.pkg, v, true)
 	}
 	return p.funcOfEntry(p.mustRawPlainFunctionSymbol(v))
@@ -2404,10 +2476,8 @@ func (p *context) compileValue(b llssa.Builder, v ssa.Value) llssa.Expr {
 			}
 		}
 	case *ssa.Function:
-		if !p.rawPlainBody {
-			if value, handled := p.tryCompileCoroPlainDispatchFunctionValue(b, v); handled {
-				return value
-			}
+		if value, handled := p.tryCompileCoroPlainDispatchFunctionValue(b, v); handled {
+			return value
 		}
 		return p.compileRawFunctionValue(v)
 	case *ssa.Global:
@@ -2653,7 +2723,7 @@ func NewPackageExWithEmbedOptions(prog llssa.Program, ct *CallerTracking, patche
 
 func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewrites map[string]string, pkg *ssa.Package, files []*ast.File, embedMap *goembed.VarMap, opts PackageOptions) (ret llssa.Package, externs []string, err error) {
 	var prepared *preparedEmissionPackage
-	if opts.Compilation != nil && (opts.Compilation.CoroEntryResolutionActive() || opts.Compilation.CoroPhysicalABIActive()) {
+	if opts.Compilation != nil {
 		if err := opts.Compilation.preflightCoroPlan(); err != nil {
 			return nil, nil, err
 		}
@@ -2726,18 +2796,11 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 		trackCallerFrames:  filesUseRuntimeCaller(files) || packageUsesRuntimeCaller(ct, pkg),
 		runtimeCallerFuncs: runtimeCallerFuncSet(ct, pkg),
 	}
-	if opts.Compilation != nil && opts.Compilation.CoroEntryResolutionActive() {
+	if opts.Compilation != nil {
 		ctx.emissionUniverse = opts.Compilation.EmissionUniverse
 		ctx.emissionOwner = prepared
 	}
 	ctx.observeCoroPlan()
-	if ctx.compilation != nil && !ctx.compilation.CoroProfileActive() {
-		// A report-only plan is delivered exactly once above and must be
-		// unreachable from every code-generation decision. Clearing the context
-		// capability here provides one boundary instead of relying on every
-		// lowering helper to remember an inactive-profile check.
-		ctx.compilation = nil
-	}
 	if embedMap != nil {
 		ctx.embedMap = *embedMap
 	} else {
@@ -2751,9 +2814,9 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 	ctx.prog.SetPatch(ctx.patchType)
 	ctx.prog.SetCompileMethods(ctx.checkCompileMethods)
 	ret.SetResolveLinkname(ctx.resolveLinkname)
-	if opts.Compilation != nil && opts.Compilation.CoroEntryResolutionActive() {
+	if opts.Compilation != nil {
 		ret.SetResolveMethodLinkname(ctx.resolveMethodLinkname)
-		ret.SetResolveMethodToken(ctx.resolveMethodToken)
+		ret.SetResolveMethodEntry(ctx.resolveMethodEntry)
 		ret.SetResolveInterfaceMethodDescriptor(ctx.resolveInterfaceMethodDescriptor)
 		ret.SetResolveRuntimeCall(ctx.resolveCoroLoweredRuntimeCall)
 	}
@@ -2804,7 +2867,7 @@ func (p *context) observeCoroPlan() {
 // this path even when a different exact producer for the same SSA target is
 // descriptor-backed.
 func (p *context) compileRawFunctionValue(v *ssa.Function) llssa.Expr {
-	if p.compilation != nil && p.compilation.CoroEntryResolutionActive() && p.compilation.EmissionUniverse != nil {
+	if p.compilation != nil && p.compilation.EmissionUniverse != nil {
 		canonical, ok := p.compilation.EmissionUniverse.Resolve(v)
 		if !ok {
 			panic(fmt.Errorf("coroutine entry resolution: function value %q is absent from the prepared emission universe", v.Name()))
@@ -2812,7 +2875,7 @@ func (p *context) compileRawFunctionValue(v *ssa.Function) llssa.Expr {
 		v = canonical
 	}
 	if _, _, ftype := p.funcName(v); ftype == llgoInstr {
-		if p.compilation != nil && p.compilation.CoroEntryResolutionActive() && p.compilation.EmissionUniverse != nil {
+		if p.compilation != nil && p.compilation.EmissionUniverse != nil {
 			wrapper, ok := p.compilation.EmissionUniverse.intrinsicWrapper(p.goPkg, v)
 			if !ok {
 				panic(fmt.Errorf("coroutine entry resolution: intrinsic function value %q was not materialized before codegen", v.Name()))
@@ -2889,7 +2952,7 @@ func (p *context) patchType(typ types.Type) (r types.Type) {
 
 func (p *context) _patchType(typ types.Type) (types.Type, bool) {
 	original := typ
-	if universe := p.emissionUniverseForPatch(); universe != nil {
+	if universe := p.immutableEmissionUniverse(); universe != nil {
 		typ, _ = universe.patchEmissionTypeGraph(p, typ)
 	}
 	switch typ := typ.(type) {
@@ -3015,24 +3078,21 @@ func (p *context) _patchType(typ types.Type) (types.Type, bool) {
 	return typ, typ != original
 }
 
-func (p *context) emissionUniverseForPatch() *EmissionUniverse {
+func (p *context) immutableEmissionUniverse() *EmissionUniverse {
 	if p == nil {
 		return nil
 	}
 	if p.emissionUniverse != nil {
 		return p.emissionUniverse
 	}
-	if p.compilation != nil && p.compilation.CoroEntryResolutionActive() {
-		return p.compilation.EmissionUniverse
-	}
-	return nil
+	return p.compilation.immutableEmissionUniverse()
 }
 
 func (p *context) patchLocalGenericNamed(t *types.Named) (*types.Named, bool) {
 	if p.goFn == nil || isPatchedLocalGenericName(t.Obj().Name()) {
 		return nil, false
 	}
-	universe := p.emissionUniverseForPatch()
+	universe := p.immutableEmissionUniverse()
 	if universe != nil {
 		if canonical := universe.cachedLocalGenericNamed(t); canonical != nil {
 			return canonical, true
@@ -3134,7 +3194,7 @@ func typeListArgs(list *types.TypeList, nameOf func(types.Type) string) []string
 func (p *context) typeArgName(t types.Type) string {
 	// Keep this formatter aligned with ssa/abi.typeArgString; this variant must
 	// additionally encode local generic type names while patching frontend types.
-	if universe := p.emissionUniverseForPatch(); universe != nil {
+	if universe := p.immutableEmissionUniverse(); universe != nil {
 		return universe.emissionTypeArgName(p, t)
 	}
 	switch t := t.(type) {
@@ -3340,7 +3400,7 @@ retry:
 	switch t := types.Unalias(nt).(type) {
 	case *types.Named:
 		if !hasTypeArgs(t) {
-			if universe := p.emissionUniverseForPatch(); universe != nil {
+			if universe := p.immutableEmissionUniverse(); universe != nil {
 				if _, packageNamed := universe.frozenPackageNamedType(t); packageNamed {
 					p.compileSyntheticMethods(pkg, typ)
 					return

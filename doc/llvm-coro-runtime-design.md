@@ -2,7 +2,7 @@
 
 状态：实现中（可验证无栈原型；尚非完整 Go runtime）
 
-更新：2026-07-18
+更新：2026-07-23
 
 当前审查基线：`cpunion/llgo:llvm-coro` @ `897d251f8`
 
@@ -508,11 +508,12 @@ LLGo 当前会实例化泛型。分析必须按每个 instantiated `*ssa.Functio
 - `//llgo:async`：强制 coroutine primary。
 - `//llgo:nosuspend`：声明函数不能产生语义 suspend。
 - `//llgo:nopreempt`：runtime 短临界函数，不插入抢占点。
+- `//llgo:nounwind`：runtime 不变量函数不能发起 Go panic/unwind；显式 panic/defer、开放调用和会 unwind 的静态 callee 仍由 verifier 拒绝。
 - `//llgo:noblock`：已知短小、不阻塞的 C 调用。
 - `//llgo:blocking`：foreign call 需要 executor compensation。
 - `//llgo:interrupt`：声明IRQ入口；整个可达图必须验证为NoSuspend、NoBlock、NoAlloc和IRQ-safe。
 
-`nosuspend/nopreempt/noblock/interrupt` 都必须由 verifier 验证。`nopreempt` 中出现循环、未知调用、blocking call 或 coroutine intrinsic 应直接报错；interrupt可达图中出现分配、GC、锁、park或非IRQ-safe call也必须报错。
+`nosuspend/nopreempt/nounwind/noblock/interrupt` 都必须由 verifier 验证。`nopreempt` 中出现未知调用、blocking call 或 coroutine intrinsic 应直接报错；原型阶段仅对显式 runtime 证书容忍计算循环，计入后续 M/P/G 解耦债务。`nounwind` 不得掩盖显式 panic/defer、开放调用或未证明的 callee；interrupt可达图中出现分配、GC、锁、park或非IRQ-safe call也必须报错。
 
 AST directive 必须在全程序分析前收集。不能等到 codegen 才发现 `//export` 或 linkname，否则会遗漏 hard sync boundary。
 
@@ -1757,14 +1758,9 @@ Logical traceback：
 
 旧的 pclntab/caller 工作应通过 FrameDescriptor 接入，而不是依赖 LLVM resume 函数名字猜测源函数。
 
-## 23. Build mode、ABI 版本和回滚
+## 23. Build mode 与 ABI 版本
 
-新增显式构建选项：
-
-    -scheduler=pthread   # 现有默认，过渡期保留
-    -scheduler=coro      # 新 runtime
-
-不依赖仅在 codegen 中读取的环境变量切换 ABI。
+production不提供scheduler/profile切换：LLVM stackless coroutine是唯一架构，目标差异只通过冻结的`TargetCapabilities`和adapter catalog表达。不依赖仅在codegen中读取的环境变量切换ABI，也不允许以pthread fallback绕过缺失的平台能力。
 
 Coroutine binary 导出：
 
@@ -1860,7 +1856,7 @@ Pure sync library/archive不需要链接scheduler。Executable一旦选择 `-sch
 - 多基本块 CFG、聚合值、PHI 和抢占 lowering 已完成。自然循环、循环入口及每 64 条有效指令的长直线块插入 poll；scheduler 的 P 级原子 request 只有在 slow path 才执行 publish/yield/`llvm.coro.suspend`，fast path 不切换。LLVM 19–22 上均有 native64/wasm32 pre-/post-CoroSplit 与 object 测试。
 - 第一条 production `go` 路径已经落地：严格限定为 closed static、top-level、非捕获、非泛型、非变参、零返回的 `go f(args)`。编译器先按 Go 顺序完整求值参数，再以显式 parent G 执行 begin，调用 target 唯一的 `DirectCoro` primary 到 LLVM initial suspend，commit 后在 parent 上 poll/yield；runtime 不接收用户 callback，也不依赖 TLS。owner 与 target 都由精确 `YieldOnly` seed 进入 effect 传播，因此 target 即使当前很短也保留抢占点，普通同步 caller 则透明 await 同一主体。
 - Command `main` 的正常 continuation 现在显式通知 runtime。main root 完成后，single-P shutdown 先整体校验 ready/wait/current/action 状态，再封闭调度 gate，按 FIFO 取 ready G、按 active-child 到 root 顺序直接 `llvm.coro.destroy`，最后每个 task storage 只释放一次。该 v1 路径只接收 `YieldOnly|AwaitStructured` target 且拒绝非空 wait set；panic/Goexit 不经过正常 main-return hook。
-- terminal-only ExplicitStatus runtime core 已有 task-local 两字 `PanicRecord`、原子 once publication和无 TLS 的 `__llgo_coro_panic_prepare_v1(g, handle, header, typeWord, dataWord)`。compiler 对精确 cleanup-free PhysicalABIV1 body 生成 `SuspendPanic`/`FinalSuspended`，panic 与 normal return branch 到同一个 LLVM final suspend；active panic frame 先经过 `coro.done` 验证并 destroy，之后 suspended-await ancestor 不再 resume，而是从深到 root 直接 destroy，最终保留 record 并返回独立 `PanicComplete`。当前 payload 只接受 typed nil 或从 package global 派生的 concrete pointer，确保 frame destroy 后 data word 仍有效；dynamic interface、scalar/local/parameter payload、cleanup/recover、Goexit、implicit fault、重复发布及 managed plain unwind 均 fail closed。尚未实现用户 `Error/String` 报告、最终进程退出所有权或 defer/recover。
+- terminal-only ExplicitStatus runtime core 已有 task-local 两字 `PanicRecord`、原子 once publication和无 TLS 的 `__llgo_coro_panic_prepare_v1(g, handle, header, typeWord, dataWord)`。compiler 对精确 cleanup-free PhysicalABIV1 body 生成 `SuspendPanic`/`FinalSuspended`，panic 与 normal return branch 到同一个 LLVM final suspend；active panic frame 先经过 `coro.done` 验证并 destroy，之后 suspended-await ancestor 不再 resume，而是从深到 root 直接 destroy，最终保留 record 并返回独立 `PanicComplete`。后续hard-cutover已把implicit language fault接入同一显式结果：无操作数的nil、bounds、channel和unsafe fault使用allocation-free V1静态payload；需要现场值的slice-to-array失败使用V2的两个target-width operand，由异常路径分配可跨LLVM frame destroy存活的GC可见`boundsError`，从而保持Go 1.26的动态类型、`runtime.Error`和逐值文本。V1/V2 hook均为required raw/plain runtime root并进入bootstrap/physical ABI identity；尚未定义的parameterized kind或不匹配的operand必须fail closed，不能静默退回无参数错误。更宽的dynamic explicit-panic payload、所有cleanup/recover/Goexit组合和最终进程报告仍分别由其专门验收矩阵约束，不能由本条fault ABI证据外推。
 - park/wake handshake 已落地 32-bit 原子 `WaitToken`、generation ticket、early/late completion、park 前后 cancellation、唯一 waiter claim、ABA 范围校验及 terminal gate。完成/取消 outcome 在 scheduler consume 后仍保持到下一次 Arm，恢复后的同步风格 continuation 可用 exact ticket 查询赢家；精确 intrinsic `llgo.coroPark(token, ticket)` 被 Effect 分析识别为 `MayPark`，并在调用者当前 LLVM frame 中生成 park prepare、stateID、`coro.suspend` 和恢复路径，没有隐藏在普通同步 helper 中。channel/timer/syscall 的 submit/retry producer 尚未接入。
 - 固定容量 `WaitRegistrationTable` 已实现 POD `{slot,generation}` handle、producer admission seal/refcount、`Active→Posting→Posted→Draining→Delivered` one-shot mailbox、scheduler-side Drain、strong unregister/quiescence handoff、cancel-vs-complete winner、silent late callback、generation reuse 和 capacity fail-closed。平台 Post 不接触 P/G/token/LLVM handle；Phase 17 绑定后 table 固定归一个 `P`，只有 driver drain 可解引用 waiter，standalone drain 和错误 owner registration 均 fail closed。race+shuffle 已覆盖 concurrent post、post-vs-close、旧 producer pin/reuse、pre-park cancel 和 exactly-once promotion。真实 backend 的 strong unregister/join 与 result payload 仍需各 target adapter 证明。
 - 固定容量 `ExecutorRegistry` 已实现 POD `{slot,generation}` handle、`Requested|IdleArmed|Closed` gate、producer admission seal/refcount、exact idle commit、request/close 线性化、strong join/quiescence、generation reuse 和 capacity fail-closed。Phase 17 的 target-neutral `ExecutorDriver` 已把 gate 绑定单 P：`PollPreempt` observe-only，scheduler 独占 drain→ack→无条件重扫，idle 执行 poll→ArmIdle→完整事实源重扫→exact CommitSleep，wake 执行 LeaveIdle→poll，close 执行 seal→外部 strong join→confirm/retire/unbind。旧 `P.schedule` 只保留给 unbound internal path，wait drain/cancel 不再发布 legacy request。
@@ -2002,7 +1998,7 @@ Pure sync library/archive不需要链接scheduler。Executable一旦选择 `-sch
 
 验收：优化前后Plan/ABI/stack和抢占证明不变；race/pprof/trace/Caller显示logical G/frame；WASM threads/MCU SMP只有在并发GC与atomic litmus通过后才标Full；Native plugin/reflect任意signature达到声明的L5能力。
 
-在对应阶段验收前，`-scheduler=pthread` 保持默认。
+production已硬切换为mandatory LLVM stackless coroutine，不再提供`None`、pthread scheduler或profile切换。尚未完成的平台能力必须通过target capability诊断或明确降级，不能回退到另一套每G线程运行时。
 
 ## 26. 测试与 CI
 
@@ -2741,6 +2737,7 @@ Native `os/exec` 优先使用 `posix_spawn`。必须 `fork` 时由runtime fork l
 
 #### Tier 2：Native标准库
 
+- 仓库`test/*`（包括`test/std/*`）全部适用测试。
 - `go test std`。
 - Go GOROOT test driver并发、timer、net、reflect、panic、runtime tests。
 - HTTP/TLS/database/sql/os/exec/signal集成。
@@ -2856,21 +2853,22 @@ Native退出实验模式的最低要求是 Tier 2，而不是少量自定义coro
 7. 不含显式yield的循环、递归和长路径可被稳定抢占；Strict/release artifact的`unboundedRegions == 0`，CPU-time bound与GC/OS/host pause分项报告。
 8. Per-kind/per-target request generation不会因G迁移或并发Preempt/GCStop/Profile而丢失/覆盖；只有scheduler完成handoff后ack。
 9. Timer/channel/select/sema在单executor下不阻塞平台thread；wake/park模型和stress无lost wake、duplicate enqueue或并发resume。
-10. Root/child frame都按publish→unlink→DestroyPending→destroy/unregister→terminal ack顺序exactly-once终结；cancel、foreign return和GC竞态无UAF。
-11. Panic/defer/recover/Goexit、named result和语言级nil/bounds/divide panic跨plain/coro frame符合Go语义，不依赖不可恢复host trap。
-12. Command main正常返回立即退出；Reactor/Embedded bootstrap完成和显式shutdown遵守host lifecycle；range-over-func、`iter.Pull`、init、finalizer/cleanup、signal和LockOSThread按target capability有专项测试。
-13. GC Full target的suspended-frame root、timer weak lease、Pinner/Handle与forced-GC测试通过；nogc target完成后无frame/task泄漏并准确报告GC相关语义不可用/降级。
-14. Logical panic stack、Caller和goroutine dump显示source frame chain，不暴露scheduler/adapter噪声。
-15. Build cache、archive、plugin/module registration和linker校验Coro/Scheduler/PanicABI、recursive FuncRep layout与CoroPlanDigest。
-16. Go memory model同步边和atomic实现通过该target的并发/对齐/barrier测试；不支持lock-free宽度时使用验证过的锁/关中断fallback。
-17. 每个xfail只归因于明确host/HAL capability，不能掩盖transparent await、抢占、stack-cut、park/wake或ABI错误。
+10. OS/host I/O和其他外部等待先stack-cut并park或转交bounded worker/event source；至少一个对抗用例证明等待尚未完成时另一G仍前进。纯计算可在当前过渡阶段暂时占用一个P，但生产级Native必须通过M/P/G、P-neutral runnable/result、动态P/steal和blocking compensation把密集计算、I/O及不可避免的阻塞解耦。
+11. Root/child frame都按publish→unlink→DestroyPending→destroy/unregister→terminal ack顺序exactly-once终结；cancel、foreign return和GC竞态无UAF。
+12. Panic/defer/recover/Goexit、named result和语言级nil/bounds/divide panic跨plain/coro frame符合Go语义，不依赖不可恢复host trap。
+13. Command main正常返回立即退出；Reactor/Embedded bootstrap完成和显式shutdown遵守host lifecycle；range-over-func、`iter.Pull`、init、finalizer/cleanup、signal和LockOSThread按target capability有专项测试。
+14. GC Full target的suspended-frame root、timer weak lease、Pinner/Handle与forced-GC测试通过；nogc target完成后无frame/task泄漏并准确报告GC相关语义不可用/降级。
+15. Logical panic stack、Caller和goroutine dump显示source frame chain，不暴露scheduler/adapter噪声。
+16. Build cache、archive、plugin/module registration和linker校验Coro/Scheduler/PanicABI、recursive FuncRep layout与CoroPlanDigest。
+17. Go memory model同步边和atomic实现通过该target的并发/对齐/barrier测试；不支持lock-free宽度时使用验证过的锁/关中断fallback。
+18. 每个xfail只归因于明确host/HAL capability，不能掩盖transparent await、抢占、stack-cut、park/wake或ABI错误。最终`test/*`和Go 1.26 GOROOT基线无unexpected failure和stale XPASS。
 
 ### 35.2 Native POSIX 门槛
 
 1. Blocking C、Syscall和RawSyscall执行时其他G继续前进；ForeignOp/ForeignReentry、reserved permit、LockOSThread和STW/cancel协议通过。
 2. `runtime.Pinner`、`runtime/cgo.Handle`、SetCgoTraceback、signal和plugin/callback registry达到声明能力。
 3. 单P/多P、work stealing、BDWGC或所选GC、race-sensitive atomic测试通过。
-4. 通过目标范围`go test std`和Go 1.26 GOROOT并发/runtime测试门槛；Native退出实验模式至少达到33.7 Tier 2。
+4. 通过仓库`test/*`、目标范围`go test std`和Go 1.26 GOROOT全部适用测试；不得用function/package白名单或扩大xfail掩盖通用缺口。Native退出实验模式至少达到33.7 Tier 2。
 
 ### 35.3 JS/WASM 与 WASI 门槛
 

@@ -29,6 +29,7 @@ func compilePkgSFiles(ctx *context, aPkg *aPackage, pkg *packages.Package, verbo
 	if err != nil {
 		return nil, err
 	}
+	sfiles = plan9AsmSFiles(sfiles)
 	if len(sfiles) == 0 {
 		return nil, nil
 	}
@@ -260,6 +261,7 @@ func plan9asmSigsForPkg(ctx *context, pkgPath string) (map[string]struct{}, erro
 	if err != nil {
 		return nil, err
 	}
+	sfiles = plan9AsmSFiles(sfiles)
 	for _, sfile := range sfiles {
 		src, err := llplan9asm.ReadFileWithOverlay(ctx.conf.Overlay, sfile)
 		if err != nil {
@@ -314,6 +316,7 @@ func plan9asmNoSuspendProofsForPkg(ctx *context, pkgPath string) (map[string]llp
 	if err != nil {
 		return nil, err
 	}
+	sfiles = plan9AsmSFiles(sfiles)
 	skipDarwinDynimportTrampolines := shouldCheckDarwinDynimportTrampolineAsm(ctx, pkg)
 	for _, sfile := range sfiles {
 		src, err := llplan9asm.ReadFileWithOverlay(ctx.conf.Overlay, sfile)
@@ -561,6 +564,22 @@ func selectedSFiles(dir string, files []string) []string {
 		paths = append(paths, filepath.Join(dir, f))
 	}
 	return paths
+}
+
+func plan9AsmSFiles(files []string) []string {
+	if len(files) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(files))
+	for _, file := range files {
+		// Extension matching is deliberately case-sensitive: .s is Go/Plan 9
+		// assembly, while .S is C-preprocessed system assembly compiled by
+		// buildCgo with the package's C flags.
+		if filepath.Ext(file) == ".s" {
+			result = append(result, file)
+		}
+	}
+	return result
 }
 
 func shouldSkipPlan9AsmSFilesForTarget(conf *Config, pkgPath string) bool {

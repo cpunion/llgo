@@ -8,6 +8,7 @@ import (
 
 var uniqueMapCleanup = make(chan struct{}, 1)
 
+//llgo:managedlink
 //go:linkname unique_runtime_registerUniqueMapCleanup unique.runtime_registerUniqueMapCleanup
 func unique_runtime_registerUniqueMapCleanup(f func()) {
 	// Start the goroutine in the runtime so it's counted as a system goroutine.

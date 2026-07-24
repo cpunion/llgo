@@ -245,8 +245,8 @@ type nonEmptyInterface struct {
 	itab *struct {
 		inter *abi.InterfaceType
 		typ   *abi.Type
-		hash  uint32     // copy of _type.hash. Used for type switches.
-		fun   [1]uintptr // variable sized. fun[0]==0 means _type does not implement inter.
+		hash  uint32      // copy of _type.hash. Used for type switches.
+		fun   [1]abi.Text // variable sized. fun[0]==nil means _type does not implement inter.
 	}
 	word unsafe.Pointer
 }
@@ -402,7 +402,7 @@ func (v Value) Bool() bool {
 	if v.flag&flagIndir != 0 {
 		return *(*bool)(v.ptr)
 	}
-	return uintptr(v.ptr) != 0
+	return bitcast.FromPointer(v.ptr) != 0
 }
 
 func (v Value) panicNotBool() {
@@ -731,10 +731,10 @@ func (v Value) Float() float64 {
 	} else {
 		switch k {
 		case Float32:
-			return float64(bitcast.ToFloat32(int32(uintptr(v.ptr))))
+			return float64(bitcast.ToFloat32(int32(bitcast.FromPointer(v.ptr))))
 		case Float64:
 			if is64bit {
-				return bitcast.ToFloat64(int64(uintptr(v.ptr)))
+				return bitcast.ToFloat64(int64(bitcast.FromPointer(v.ptr)))
 			} else {
 				return *(*float64)(v.ptr)
 			}
@@ -823,10 +823,10 @@ func (v Value) Int() int64 {
 	} else {
 		switch k {
 		case Int, Int8, Int16, Int32:
-			return int64(uintptr(p))
+			return int64(bitcast.FromPointer(p))
 		case Int64:
 			if is64bit {
-				return int64(uintptr(p))
+				return int64(bitcast.FromPointer(p))
 			} else {
 				return *(*int64)(p)
 			}
@@ -1696,10 +1696,10 @@ func (v Value) Uint() uint64 {
 	} else {
 		switch k {
 		case Uint, Uint8, Uint16, Uint32:
-			return uint64(uintptr(p))
+			return uint64(bitcast.FromPointer(p))
 		case Uint64, Uintptr:
 			if is64bit {
-				return uint64(uintptr(p))
+				return uint64(bitcast.FromPointer(p))
 			} else {
 				return *(*uint64)(p)
 			}
@@ -2456,6 +2456,8 @@ func (v Value) closureFunc() *abi.FuncType {
 }
 
 func (v Value) call(op string, in []Value) (out []Value) {
+	panic("llgo: reflect call requires managed coroutine dispatch")
+
 	var (
 		ft   *abi.FuncType
 		tin  []*abi.Type
@@ -3360,22 +3362,22 @@ func cvtI2I(v Value, typ Type) Value {
 	return cvtT2I(v.Elem(), typ)
 }
 
-//go:linkname chancap github.com/goplus/llgo/runtime/internal/runtime.ChanCap
+//go:linkname chancap github.com/goplus/llgo/runtime/internal/runtime.ReflectChanCap
 func chancap(ch unsafe.Pointer) int
 
-//go:linkname chanlen github.com/goplus/llgo/runtime/internal/runtime.ChanLen
+//go:linkname chanlen github.com/goplus/llgo/runtime/internal/runtime.ReflectChanLen
 func chanlen(ch unsafe.Pointer) int
 
-//go:linkname makemap github.com/goplus/llgo/runtime/internal/runtime.MakeMap
+//go:linkname makemap github.com/goplus/llgo/runtime/internal/runtime.ReflectMakeMap
 func makemap(t *abi.Type, cap int) (m unsafe.Pointer)
 
-//go:linkname maplen github.com/goplus/llgo/runtime/internal/runtime.MapLen
+//go:linkname maplen github.com/goplus/llgo/runtime/internal/runtime.ReflectMapLen
 func maplen(ch unsafe.Pointer) int
 
-//go:linkname mapaccess github.com/goplus/llgo/runtime/internal/runtime.MapAccess2
+//go:linkname mapaccess github.com/goplus/llgo/runtime/internal/runtime.ReflectMapAccess
 func mapaccess(t *abi.Type, m unsafe.Pointer, key unsafe.Pointer) (val unsafe.Pointer, ok bool)
 
-//go:linkname mapassign0 github.com/goplus/llgo/runtime/internal/runtime.MapAssign
+//go:linkname mapassign0 github.com/goplus/llgo/runtime/internal/runtime.ReflectMapAssign
 func mapassign0(t *abi.Type, m unsafe.Pointer, key unsafe.Pointer) unsafe.Pointer
 
 func mapassign(t *abi.Type, m unsafe.Pointer, key, val unsafe.Pointer) {
@@ -3394,14 +3396,18 @@ func mapassign(t *abi.Type, m unsafe.Pointer, key, val unsafe.Pointer) {
 // 	mapassign_faststr0(t, m, key, val)
 // }
 
-//go:linkname mapdelete github.com/goplus/llgo/runtime/internal/runtime.MapDelete
+//go:linkname mapdelete github.com/goplus/llgo/runtime/internal/runtime.ReflectMapDelete
 func mapdelete(t *abi.Type, m unsafe.Pointer, key unsafe.Pointer)
 
 //go:noescape
 // func mapdelete_faststr(t *abi.Type, m unsafe.Pointer, key string)
 
-//go:linkname mapiterinit github.com/goplus/llgo/runtime/internal/runtime.mapiterinit
-func mapiterinit(t *abi.Type, m unsafe.Pointer, it *hiter)
+//go:linkname mapiterinit0 github.com/goplus/llgo/runtime/internal/runtime.ReflectMapIterInit
+func mapiterinit0(t *abi.Type, m unsafe.Pointer, it unsafe.Pointer)
+
+func mapiterinit(t *abi.Type, m unsafe.Pointer, it *hiter) {
+	mapiterinit0(t, m, unsafe.Pointer(it))
+}
 
 func mapiterkey(it *hiter) (key unsafe.Pointer) {
 	return it.key
@@ -3411,10 +3417,14 @@ func mapiterelem(it *hiter) (elem unsafe.Pointer) {
 	return it.elem
 }
 
-//go:linkname mapiternext github.com/goplus/llgo/runtime/internal/runtime.mapiternext
-func mapiternext(it *hiter)
+//go:linkname mapiternext0 github.com/goplus/llgo/runtime/internal/runtime.ReflectMapIterNext
+func mapiternext0(it unsafe.Pointer)
 
-//go:linkname mapclear github.com/goplus/llgo/runtime/internal/runtime.mapclear
+func mapiternext(it *hiter) {
+	mapiternext0(unsafe.Pointer(it))
+}
+
+//go:linkname mapclear github.com/goplus/llgo/runtime/internal/runtime.ReflectMapClear
 func mapclear(t *abi.Type, m unsafe.Pointer)
 
 //go:linkname typehash github.com/goplus/llgo/runtime/internal/runtime.typehash
@@ -3423,7 +3433,7 @@ func typehash(t *abi.Type, p unsafe.Pointer, h uintptr) uintptr
 //go:linkname typeequal github.com/goplus/llgo/runtime/internal/runtime.typeequal
 func typeequal(t *abi.Type, p, q unsafe.Pointer) bool
 
-//go:linkname makechan github.com/goplus/llgo/runtime/internal/runtime.NewChan
+//go:linkname makechan github.com/goplus/llgo/runtime/internal/runtime.ReflectMakeChan
 func makechan(eltSize, cap int) unsafe.Pointer
 
 // MakeSlice creates a new zero-initialized slice value
@@ -3539,8 +3549,8 @@ func (v Value) Clear() {
 	}
 }
 
-//go:linkname sliceclear github.com/goplus/llgo/runtime/internal/runtime.SliceClear
+//go:linkname sliceclear github.com/goplus/llgo/runtime/internal/runtime.ReflectSliceClear
 func sliceclear(t *abi.Type, s unsafeheaderSlice)
 
-//go:linkname ifaceE2I github.com/goplus/llgo/runtime/internal/runtime.IfaceE2I
+//go:linkname ifaceE2I github.com/goplus/llgo/runtime/internal/runtime.ReflectIfaceE2I
 func ifaceE2I(t *abi.Type, src any, dst unsafe.Pointer)

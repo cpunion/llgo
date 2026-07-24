@@ -42,7 +42,6 @@ func testProductionNativeWorkerCompletionPlan(t *testing.T) {
 	verified := errors.New("native worker completion plan verified")
 	conf := NewDefaultConf(ModeGen)
 	conf.ForceRebuild = true
-	conf.CoroProfile = CoroProfileStackless
 	conf.CoroPlanBuilder = func(input CoroPlanInput) (*coro.SSAPlan, error) {
 		plan, err := input.Analyze(nil, coro.SSAConfig{
 			DynamicResolution:    coro.DynamicCHAClosed,
@@ -177,8 +176,7 @@ func install() {}
 		fixture.ctx.buildConf = &Config{
 			BuildMode: BuildModeExe,
 			Goos:      "wasip1",
-			Goarch:    "wasm", CoroProfile: CoroProfileStackless,
-		}
+			Goarch:    "wasm"}
 		assertCoroWorkerCompletionExcluded(t, fixture)
 	})
 }

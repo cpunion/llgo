@@ -35,6 +35,10 @@ const (
 	// deferred child consumed its parent's panic. It tells the cleanup drainer
 	// to clear its panic overlay; the base return/cancel control remains intact.
 	CompletionReturnRecovered
+	// CompletionGoexit is a payload-free language outcome. Each resumed parent
+	// replaces its cleanup base with Goexit, runs remaining defers, and
+	// republishes the same status instead of returning to its call continuation.
+	CompletionGoexit
 )
 
 const (
@@ -56,8 +60,8 @@ type CompletionRecord struct {
 }
 
 // CompletionSnapshot is the compiler-adapter-facing copy consumed by the
-// resumed parent. Return, Abort, and Shutdown have nil payload words; Panic
-// carries one concrete Go interface pair.
+// resumed parent. Return, Abort, Shutdown, and Goexit have nil payload words;
+// Panic carries one concrete Go interface pair.
 type CompletionSnapshot struct {
 	Status   CompletionStatus
 	TypeWord unsafe.Pointer
@@ -110,7 +114,8 @@ func hasAwaitCompletionTransaction(child *Frame) bool {
 func validAwaitCompletionPublisher(g *G, child *Frame, status CompletionStatus) bool {
 	if !ValidG(g) || child == nil || child.handle == nil || child.header == nil ||
 		(status != CompletionReturn && status != CompletionPanic &&
-			status != CompletionAbort && status != CompletionShutdown) {
+			status != CompletionAbort && status != CompletionShutdown &&
+			status != CompletionGoexit) {
 		return false
 	}
 	parent := child.parent
@@ -188,6 +193,28 @@ func publishAwaitCompletion(parent *Frame, status CompletionStatus, typeWord, da
 		record.dataWord = nil
 		record.status = status
 		return true
+	case CompletionGoexit:
+		if typeWord != nil || dataWord != nil || record.child == nil {
+			return false
+		}
+		switch record.status {
+		case completionArmed:
+			if record.typeWord != nil || record.dataWord != nil {
+				return false
+			}
+		case completionRecoverArmed, completionRecoverTaken:
+			if record.typeWord == nil {
+				return false
+			}
+		default:
+			return false
+		}
+		// Unlike cancellation, Goexit abandons the currently propagated panic:
+		// recover in subsequent defers must observe nil until a new panic starts.
+		record.typeWord = nil
+		record.dataWord = nil
+		record.status = CompletionGoexit
+		return true
 	default:
 		return false
 	}
@@ -237,7 +264,7 @@ func completionMatchesTerminalFrame(frame *Frame) bool {
 	case CompletionNone:
 		// Legacy/V1 child transactions have no parent-owned outcome record.
 		return frame.header.SuspendReason == uint16(SuspendFrameComplete)
-	case CompletionReturn, CompletionReturnRecovered, CompletionAbort, CompletionShutdown:
+	case CompletionReturn, CompletionReturnRecovered, CompletionAbort, CompletionShutdown, CompletionGoexit:
 		return frame.header.SuspendReason == uint16(SuspendFrameComplete)
 	case CompletionPanic:
 		return frame.header.SuspendReason == uint16(SuspendPanic)
@@ -277,7 +304,7 @@ func ConsumeAwaitCompletion(g *G, parentHandle unsafe.Pointer) (CompletionSnapsh
 		if record.typeWord == nil {
 			return CompletionSnapshot{}, false
 		}
-	case CompletionAbort, CompletionShutdown:
+	case CompletionAbort, CompletionShutdown, CompletionGoexit:
 		if record.typeWord != nil || record.dataWord != nil {
 			return CompletionSnapshot{}, false
 		}

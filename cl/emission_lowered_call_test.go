@@ -27,6 +27,35 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
+func TestExplicitStatusElidedLoweredCallUsesItsPhysicalDomain(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		physicalCoroBody bool
+		rawPlainBody     bool
+		explicit         bool
+		wantRaw          bool
+		wantFailClose    bool
+	}{
+		{name: "managed plain primary", explicit: true, wantRaw: true},
+		{name: "coroutine raw variant", rawPlainBody: true, explicit: true, wantRaw: true},
+		{name: "ordinary managed call"},
+		{name: "physical coroutine leak", physicalCoroBody: true, explicit: true, wantFailClose: true},
+		{name: "incompatible physical raw state", physicalCoroBody: true, rawPlainBody: true, explicit: true, wantFailClose: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := coroExplicitStatusElidedUsesRawPlainEntry(
+				test.physicalCoroBody, test.rawPlainBody, test.explicit,
+			)
+			if (err != nil) != test.wantFailClose {
+				t.Fatalf("route error = %v, want fail-close %t", err, test.wantFailClose)
+			}
+			if got != test.wantRaw {
+				t.Fatalf("raw route = %t, want %t", got, test.wantRaw)
+			}
+		})
+	}
+}
+
 func TestEmissionUniverseCoroLoweredCallsAreExactSortedAndFailClosed(t *testing.T) {
 	testProg := newEmissionTestProgram()
 	pkg := testProg.addPackage(t, "example.com/emission/loweredcalls", `package loweredcalls
@@ -368,6 +397,44 @@ func Call(value *Value) { value.Method() }
 	}
 	if !found {
 		t.Fatal("value-receiver lowering omitted AssertNilDerefPtr")
+	}
+}
+
+func TestLoweredRuntimeHelpersIncludeZeroSizedLoadNilCheck(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/loweredzeroload", `package loweredzeroload
+type Empty struct{}
+func (Empty) Method() {}
+func Load(value *Empty) Empty { return *value }
+func Call(value *Empty) { value.Method() }
+`)
+	testProg.ssa.Build()
+	universe, owner := newEmissionABIDemandTestUniverse(testProg, pkg)
+	for _, test := range []struct {
+		name string
+		want []string
+	}{
+		{name: "Load", want: []string{"AssertNilDeref"}},
+		{name: "Call", want: []string{"AssertNilDeref", "AssertNilDerefPtr"}},
+	} {
+		fn := pkg.ssa.Func(test.name)
+		ctx, err := universe.functionABIContext(fn, owner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := make(map[string]bool)
+		for _, block := range fn.Blocks {
+			for _, instruction := range block.Instrs {
+				for _, helper := range universe.loweredRuntimeHelpers(ctx, instruction) {
+					found[helper] = true
+				}
+			}
+		}
+		for _, helper := range test.want {
+			if !found[helper] {
+				t.Errorf("%s zero-sized load helpers %v omit %q", test.name, found, helper)
+			}
+		}
 	}
 }
 

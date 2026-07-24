@@ -91,6 +91,11 @@ type SSACallPlan struct {
 	// execution protocol, so it is retained independently from target/value
 	// representation and included in the compilation digest.
 	SyncDispatch bool
+	// RawPlain selects one exact target's native-stack variant. It is valid only
+	// for a closed ordinary static call certified by the frontend's
+	// RawCritical policy; it never publishes a raw address.
+	RawPlain            bool
+	RawPlainCertificate string
 	// InvocationPolicy is empty for ordinary calls. Trusted-inline calls retain
 	// the exact target-neutral contract, structural ABI, and frozen certificate
 	// identity that authorized this edge's foreign-wait suppression and selected
@@ -161,17 +166,23 @@ func (p *SSAPlan) ResolveClosedStaticSpawn(call *ssa.Go) (*ssa.Function, Functio
 	if !ok || targetPlan.ID != callPlan.Targets[0] {
 		return nil, FunctionPlan{}, fmt.Errorf("spawn target %q has no canonical function plan", callPlan.Targets[0])
 	}
-	if len(target.FreeVars) != 0 || target.Synthetic != "" || target.Origin() != nil || len(target.TypeArgs()) != 0 {
+	redirected := target != raw
+	if len(target.FreeVars) != 0 || !redirected && target.Synthetic != "" ||
+		redirected && target.Synthetic == "" ||
+		target.Origin() != nil || len(target.TypeArgs()) != 0 {
 		return nil, FunctionPlan{}, fmt.Errorf("target %q is not an exact non-capturing context-free function", targetPlan.ID)
 	}
 	if params := target.TypeParams(); params != nil && params.Len() != 0 {
 		return nil, FunctionPlan{}, fmt.Errorf("target %q is a generic declaration", targetPlan.ID)
 	}
 	sig := target.Signature
-	if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Results().Len() != 0 ||
+	if sig == nil || sig.Recv() != nil || sig.Variadic() ||
 		(sig.TypeParams() != nil && sig.TypeParams().Len() != 0) ||
 		(sig.RecvTypeParams() != nil && sig.RecvTypeParams().Len() != 0) {
-		return nil, FunctionPlan{}, fmt.Errorf("target %q must have one non-method, non-variadic, zero-result signature", targetPlan.ID)
+		return nil, FunctionPlan{}, fmt.Errorf("target %q must have one non-method, non-variadic, non-generic signature", targetPlan.ID)
+	}
+	if redirected && !types.Identical(common.Signature(), sig) {
+		return nil, FunctionPlan{}, fmt.Errorf("target %q does not preserve the source spawn signature", targetPlan.ID)
 	}
 	if targetPlan.External != Defined || targetPlan.Demand != AsyncDemand {
 		return nil, FunctionPlan{}, fmt.Errorf(
@@ -188,10 +199,10 @@ func (p *SSAPlan) ResolveClosedStaticSpawn(call *ssa.Go) (*ssa.Function, Functio
 	}
 	caller := call.Parent()
 	callerPlan, ok := p.FunctionPlan(caller)
-	if !ok || callerPlan.Emission != EmitCoroutine || callerPlan.Primary != PrimaryCoroutine || callerPlan.FuncRep != DirectCoro ||
+	if !ok || callerPlan.Emission != EmitCoroutine || callerPlan.Primary != PrimaryCoroutine ||
 		callerPlan.Demand != AsyncDemand || !callerPlan.Effect.Contains(YieldOnly) {
 		return nil, FunctionPlan{}, fmt.Errorf(
-			"spawn owner is not one async-only contextful coroutine primary (emission=%s primary=%s representation=%s demand=%s effect=%s)",
+			"spawn owner is not one async-only coroutine primary (emission=%s primary=%s representation=%s demand=%s effect=%s)",
 			callerPlan.Emission, callerPlan.Primary, callerPlan.FuncRep, callerPlan.Demand, callerPlan.Effect,
 		)
 	}
@@ -217,9 +228,9 @@ func (p *SSAPlan) ResolveManagedDispatchSpawn(call *ssa.Go) (SSACallPlan, error)
 		return SSACallPlan{}, fmt.Errorf("builtin spawns are outside the managed descriptor ABI")
 	}
 	sig := common.Signature()
-	if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Results().Len() != 0 ||
+	if sig == nil || sig.Recv() != nil || sig.Variadic() ||
 		typeParamListLen(sig.TypeParams()) != 0 || typeParamListLen(sig.RecvTypeParams()) != 0 {
-		return SSACallPlan{}, fmt.Errorf("managed descriptor spawn requires a receiver-free, non-variadic, non-generic, zero-result signature")
+		return SSACallPlan{}, fmt.Errorf("managed descriptor spawn requires a receiver-free, non-variadic, non-generic signature")
 	}
 	callPlan, ok := p.CallPlan(call)
 	if !ok {
@@ -902,6 +913,17 @@ func (f *ssaFuncFlow) seedInstruction(instruction ssa.Instruction) {
 	case ssa.CallInstruction:
 		common := instruction.Common()
 		_, builtin := common.Value.(*ssa.Builtin)
+		// A captured target can use the context-first DirectCoro ABI only while
+		// the exact MakeClosure producer is still the call operand. Once a Phi,
+		// conversion, parameter, or another value-flow join selects that closure,
+		// its environment is part of the runtime callable value and must travel
+		// through the canonical {descriptor, environment} representation.
+		//
+		// Keep context-free singleton values direct: nullable/direct lowering can
+		// preserve their nil-call check without manufacturing a descriptor.
+		if !builtin && f.capturedCallNeedsDispatch(instruction) {
+			f.markBoundary(common.Value)
+		}
 		// x/tools/ssa reports the nested body of a MakeClosure as a static
 		// callee. A spawned captured closure nevertheless crosses the scheduler
 		// as its full {descriptor, environment} value.
@@ -940,6 +962,31 @@ func (f *ssaFuncFlow) seedInstruction(instruction ssa.Instruction) {
 			f.markBoundary(value)
 		}
 	}
+}
+
+func (f *ssaFuncFlow) capturedCallNeedsDispatch(call ssa.CallInstruction) bool {
+	if f == nil || call == nil || call.Common() == nil {
+		return false
+	}
+	common := call.Common()
+	if common.StaticCallee() != nil || common.IsInvoke() || f.rawCValue(common.Value) {
+		return false
+	}
+	if _, exact := common.Value.(*ssa.MakeClosure); exact {
+		return false
+	}
+	index, ok := f.index[common.Value]
+	if !ok {
+		return false
+	}
+	root := f.root(index)
+	if len(f.targets[root]) != 1 {
+		return false
+	}
+	for target := range f.targets[root] {
+		return target != nil && len(target.FreeVars) != 0
+	}
+	return false
 }
 
 func (f *ssaFuncFlow) validateDirectPlainCallArguments() error {
@@ -1149,6 +1196,7 @@ func (f *ssaFuncFlow) finalize(
 	base *Plan,
 	callKinds map[ssa.CallInstruction]CallKind,
 	unknownTargets map[ssa.CallInstruction]UnknownTarget,
+	staticSpawnTargets map[*ssa.Go]*ssa.Function,
 ) (map[ssa.Value]SSAValuePlan, map[ssa.CallInstruction]SSACallPlan, error) {
 	valuePlans := make(map[ssa.Value]SSAValuePlan, len(f.allValues))
 	for value := range f.allValues {
@@ -1208,7 +1256,7 @@ func (f *ssaFuncFlow) finalize(
 			plan.SyncDispatch = certificate.SyncDispatch
 		}
 		if rawCallee := common.StaticCallee(); rawCallee != nil {
-			callee, resolved, err := f.resolveTarget(rawCallee)
+			callee, resolved, err := resolveSSAStaticCallTarget(f, call, rawCallee, staticSpawnTargets)
 			if err != nil {
 				caller := "<unknown>"
 				if call.Parent() != nil {

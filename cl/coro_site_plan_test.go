@@ -169,7 +169,6 @@ func compileCoroSitePlanFailure(fixture coroStringConcatTestPlan) (message strin
 	}()
 	compilation := &Compilation{CoroPlan: fixture.plan, EmissionUniverse: fixture.universe}
 	enableCoroChildAwaitCompilation(compilation)
-	compilation.CoroProfile = CoroProfileStackless
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
 	for _, pkg := range []emissionTestPackage{fixture.runtimePkg, fixture.fooPkg} {
 		compiled, _, err := NewPackageExWithEmbedOptions(

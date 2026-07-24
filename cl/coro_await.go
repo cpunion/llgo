@@ -31,6 +31,7 @@ const (
 	coroAwaitCompletionAbort           uint64 = 3
 	coroAwaitCompletionShutdown        uint64 = 4
 	coroAwaitCompletionReturnRecovered uint64 = 5
+	coroAwaitCompletionGoexit          uint64 = 6
 
 	coroAwaitRecoverNone   uint64 = 0
 	coroAwaitRecoverDirect uint64 = 1
@@ -243,13 +244,13 @@ func (p *context) compileCoroTargetAwaitWithContext(
 }
 
 func (p *context) compileCoroCleanupTargetAwait(
-	b llssa.Builder, callee *ssa.Function, args []llssa.Expr, cleanup *coroStaticCleanupState,
+	b llssa.Builder, callee *ssa.Function, args []llssa.Expr,
 ) llssa.Expr {
 	body := p.coroBody()
-	if cleanup == nil || body == nil || body.cleanup != cleanup {
+	if body == nil || body.cleanup == nil {
 		panic("coroutine cleanup await requires the active static cleanup drainer")
 	}
-	return p.compileCoroTargetAwaitWithContextAndRecovery(b, callee, llssa.Nil, args, cleanup, nil)
+	return p.compileCoroTargetAwaitWithContextAndRecovery(b, callee, llssa.Nil, args, body.cleanup, nil)
 }
 
 func (p *context) compileCoroTargetAwaitWithContextAndRecovery(
@@ -484,6 +485,7 @@ func (p *context) awaitCoroChildWithRecovery(
 	})
 	body.activate(b)
 	cancelBuilder := p.fn.NewBuilder()
+	cancelBuilder.DICopyCurrentDebugLocation(b)
 	cancelBuilder.SetBlock(canceled)
 	body.activate(cancelBuilder)
 	cancelStatus := cancelBuilder.Call(
@@ -502,6 +504,7 @@ func (p *context) awaitCoroChildWithRecovery(
 		panickedCancel := p.fn.MakeBlock()
 		abortedCancel := p.fn.MakeBlock()
 		shutdownCancel := p.fn.MakeBlock()
+		goexitedCancel := p.fn.MakeBlock()
 		drainCancel := p.fn.MakeBlock()
 		invalidCancel := p.fn.MakeBlock()
 		cancelDispatch := cancelBuilder.Switch(cancelStatus, invalidCancel)
@@ -509,6 +512,7 @@ func (p *context) awaitCoroChildWithRecovery(
 		cancelDispatch.Case(p.prog.IntVal(coroAwaitCompletionPanic, p.prog.Uint32()), panickedCancel)
 		cancelDispatch.Case(p.prog.IntVal(coroAwaitCompletionAbort, p.prog.Uint32()), abortedCancel)
 		cancelDispatch.Case(p.prog.IntVal(coroAwaitCompletionShutdown, p.prog.Uint32()), shutdownCancel)
+		cancelDispatch.Case(p.prog.IntVal(coroAwaitCompletionGoexit, p.prog.Uint32()), goexitedCancel)
 		var recoveredCancel llssa.BasicBlock
 		if cleanup != nil {
 			if cleanup != ownerCleanup {
@@ -528,6 +532,8 @@ func (p *context) awaitCoroChildWithRecovery(
 		cancelBuilder.Jump(drainCancel)
 		cancelBuilder.SetBlockEx(shutdownCancel, llssa.AtEnd, false)
 		cancelBuilder.Jump(drainCancel)
+		cancelBuilder.SetBlockEx(goexitedCancel, llssa.AtEnd, false)
+		body.enterGoexit(cancelBuilder)
 		cancelBuilder.SetBlockEx(invalidCancel, llssa.AtEnd, false)
 		cancelBuilder.Unreachable()
 		if cleanup != nil {
@@ -556,12 +562,14 @@ func (p *context) awaitCoroChildWithRecovery(
 	panicked := p.fn.MakeBlock()
 	aborted := p.fn.MakeBlock()
 	shutdown := p.fn.MakeBlock()
+	goexited := p.fn.MakeBlock()
 	invalid := p.fn.MakeBlock()
 	dispatch := b.Switch(status, invalid)
 	dispatch.Case(p.prog.IntVal(coroAwaitCompletionReturn, p.prog.Uint32()), returned)
 	dispatch.Case(p.prog.IntVal(coroAwaitCompletionPanic, p.prog.Uint32()), panicked)
 	dispatch.Case(p.prog.IntVal(coroAwaitCompletionAbort, p.prog.Uint32()), aborted)
 	dispatch.Case(p.prog.IntVal(coroAwaitCompletionShutdown, p.prog.Uint32()), shutdown)
+	dispatch.Case(p.prog.IntVal(coroAwaitCompletionGoexit, p.prog.Uint32()), goexited)
 	var recovered llssa.BasicBlock
 	if cleanup != nil {
 		recovered = p.fn.MakeBlock()
@@ -587,6 +595,8 @@ func (p *context) awaitCoroChildWithRecovery(
 	body.enterCancellation(b, coroAwaitCompletionAbort)
 	b.SetBlockEx(shutdown, llssa.AtEnd, false)
 	body.enterCancellation(b, coroAwaitCompletionShutdown)
+	b.SetBlockEx(goexited, llssa.AtEnd, false)
+	body.enterGoexit(b)
 
 	b.SetBlockEx(invalid, llssa.AtEnd, false)
 	b.Unreachable()

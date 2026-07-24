@@ -410,9 +410,14 @@ func dynamic(fn func(int)) { fn(1) }
 		t.Fatalf("exact synchronous publication target = %+v, want sync-demanded plain descriptor", targetPlan)
 	}
 
-	_, _, err = analyze(true)
-	if err == nil || !strings.Contains(err.Error(), "not one defined non-suspending descriptor-backed plain primary") {
-		t.Fatalf("mixed ordinary publication error = %v", err)
+	mixedPlan, mixedTarget, err := analyze(true)
+	if err != nil {
+		t.Fatalf("mixed ordinary publication rejected: %v", err)
+	}
+	mixedTargetPlan := functionPlanFor(t, mixedPlan, mixedTarget)
+	if mixedTargetPlan.ManagedDemand != SyncDemand || mixedTargetPlan.Effect != NoSuspend ||
+		mixedTargetPlan.FuncRep != Dispatch || mixedTargetPlan.Emission != EmitPlain {
+		t.Fatalf("mixed ordinary publication target = %+v, want exact no-suspend descriptor", mixedTargetPlan)
 	}
 }
 

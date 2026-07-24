@@ -28,6 +28,8 @@ import (
 const (
 	coroFaultPrepareHookV1 = "__llgo_coro_fault_prepare_v1"
 	coroFaultPayloadHookV1 = "__llgo_coro_fault_payload_v1"
+	coroFaultPrepareHookV2 = "__llgo_coro_fault_prepare_v2"
+	coroFaultPayloadHookV2 = "__llgo_coro_fault_payload_v2"
 )
 
 const (
@@ -63,6 +65,38 @@ func coroFaultPayloadSignature() *types.Signature {
 		types.NewParam(token.NoPos, nil, "dataOut", pointer),
 	)
 	return types.NewSignatureType(nil, nil, nil, params, nil, false)
+}
+
+func coroFaultPrepareSignatureV2() *types.Signature {
+	pointer := types.Typ[types.UnsafePointer]
+	params := types.NewTuple(
+		types.NewParam(token.NoPos, nil, "g", pointer),
+		types.NewParam(token.NoPos, nil, "handle", pointer),
+		types.NewParam(token.NoPos, nil, "header", pointer),
+		types.NewParam(token.NoPos, nil, "kind", types.Typ[types.Uint32]),
+		types.NewParam(token.NoPos, nil, "arg0", types.Typ[types.Uintptr]),
+		types.NewParam(token.NoPos, nil, "arg1", types.Typ[types.Uintptr]),
+	)
+	return types.NewSignatureType(nil, nil, nil, params, nil, false)
+}
+
+func coroFaultPayloadSignatureV2() *types.Signature {
+	pointer := types.Typ[types.UnsafePointer]
+	params := types.NewTuple(
+		types.NewParam(token.NoPos, nil, "kind", types.Typ[types.Uint32]),
+		types.NewParam(token.NoPos, nil, "arg0", types.Typ[types.Uintptr]),
+		types.NewParam(token.NoPos, nil, "arg1", types.Typ[types.Uintptr]),
+		types.NewParam(token.NoPos, nil, "typeOut", pointer),
+		types.NewParam(token.NoPos, nil, "dataOut", pointer),
+	)
+	return types.NewSignatureType(nil, nil, nil, params, nil, false)
+}
+
+// coroFaultOperands are the two target-width scalar words accepted by the
+// parameterized fault ABI. A nil pointer selects the allocation-free V1 path.
+type coroFaultOperands struct {
+	arg0 llssa.Expr
+	arg1 llssa.Expr
 }
 
 // compileCoroImplicitNilFieldAddrGuard splits the current source block before
@@ -301,15 +335,27 @@ func (p *context) compileCoroSlicePlanned(
 }
 
 func (p *context) compileCoroFaultConditionGuard(b llssa.Builder, condition llssa.Expr, kind uint32) {
+	p.compileCoroFaultConditionGuardWithOperands(b, condition, kind, nil)
+}
+
+func (p *context) compileCoroFaultConditionGuardWithOperands(
+	b llssa.Builder,
+	condition llssa.Expr,
+	kind uint32,
+	operands *coroFaultOperands,
+) {
 	if p == nil || p.coroBody() == nil || b == nil || b.Func != p.fn || condition.IsNil() {
 		panic("structured coroutine fault guard escaped its physical body")
+	}
+	if operands != nil && (operands.arg0.IsNil() || operands.arg1.IsNil()) {
+		panic("parameterized coroutine fault guard has an incomplete operand pair")
 	}
 	fault := b.Func.MakeBlock()
 	normal := b.Func.MakeBlock()
 	b.If(condition, fault, normal)
 
 	b.SetBlockEx(fault, llssa.AtEnd, false)
-	p.compileCoroTerminalFault(b, kind)
+	p.compileCoroTerminalFaultWithOperands(b, kind, operands)
 
 	// The fault path is terminal (possibly after the static drainer). Continue
 	// source lowering only in the block dominated by base != nil.
@@ -322,30 +368,60 @@ func (p *context) compileCoroFaultConditionGuard(b llssa.Builder, condition llss
 // body without cleanup publishes immediately. The call never returns to the
 // source continuation.
 func (p *context) compileCoroTerminalFault(b llssa.Builder, kind uint32) {
+	p.compileCoroTerminalFaultWithOperands(b, kind, nil)
+}
+
+func (p *context) compileCoroTerminalFaultWithOperands(
+	b llssa.Builder,
+	kind uint32,
+	operands *coroFaultOperands,
+) {
 	body := p.coroBody()
 	if body == nil || b == nil || b.Func != p.fn {
 		panic("coroutine terminal fault escaped its physical body")
 	}
 	if cleanup := body.cleanup; cleanup != nil {
-		cleanup.enterFault(p, b, kind)
+		cleanup.enterFaultWithOperands(p, b, kind, operands)
 	} else {
-		body.implicitFault(p, b, kind)
+		body.implicitFaultWithOperands(p, b, kind, operands)
 	}
 }
 
 func (c *coroBodyContext) implicitFault(p *context, b llssa.Builder, kind uint32) {
+	c.implicitFaultWithOperands(p, b, kind, nil)
+}
+
+func (c *coroBodyContext) implicitFaultWithOperands(
+	p *context,
+	b llssa.Builder,
+	kind uint32,
+	operands *coroFaultOperands,
+) {
 	if c == nil || p == nil || b == nil || c.abi.version < coroPhysicalABIVersionV1 || c.finalSuspend == nil {
 		panic("implicit nil fault requires a PhysicalABIV1 body and shared final suspend")
 	}
 	c.publishState(b, coroSuspendPanic, coroLifecycleFinalSuspended, c.terminalStateID())
-	prepare := p.pkg.NewFunc(coroFaultPrepareHookV1, coroFaultPrepareSignature(), llssa.InC)
-	b.Call(
-		prepare.Expr,
+	args := []llssa.Expr{
 		c.task,
 		c.coro.Handle(),
 		b.Convert(b.Prog.VoidPtr(), c.header),
 		b.Prog.IntVal(uint64(kind), b.Prog.Uint32()),
-	)
+	}
+	prepareHook := coroFaultPrepareHookV1
+	prepareSignature := coroFaultPrepareSignature()
+	if operands != nil {
+		if operands.arg0.IsNil() || operands.arg1.IsNil() {
+			panic("parameterized coroutine fault preparation has an incomplete operand pair")
+		}
+		prepareHook = coroFaultPrepareHookV2
+		prepareSignature = coroFaultPrepareSignatureV2()
+		args = append(args,
+			b.Convert(p.prog.Uintptr(), operands.arg0),
+			b.Convert(p.prog.Uintptr(), operands.arg1),
+		)
+	}
+	prepare := p.pkg.NewFunc(prepareHook, prepareSignature, llssa.InC)
+	b.Call(prepare.Expr, args...)
 	b.Jump(c.finalSuspend)
 }
 
@@ -359,6 +435,14 @@ func (c *coroBodyContext) implicitFault(p *context, b llssa.Builder, kind uint32
 func (p *context) materializeCoroFaultPayload(
 	b llssa.Builder, kind uint32,
 ) (typeWord, dataWord llssa.Expr) {
+	return p.materializeCoroFaultPayloadWithOperands(b, kind, nil)
+}
+
+func (p *context) materializeCoroFaultPayloadWithOperands(
+	b llssa.Builder,
+	kind uint32,
+	operands *coroFaultOperands,
+) (typeWord, dataWord llssa.Expr) {
 	body := p.coroBody()
 	if body == nil || b == nil || b.Func != p.fn ||
 		!p.coroEmissionExplicitStatus() ||
@@ -369,13 +453,26 @@ func (p *context) materializeCoroFaultPayload(
 	dataSlot := p.coroFrameAlloca(p.prog.VoidPtr())
 	b.Store(typeSlot, p.prog.Nil(p.prog.VoidPtr()))
 	b.Store(dataSlot, p.prog.Nil(p.prog.VoidPtr()))
-	payload := p.pkg.NewFunc(coroFaultPayloadHookV1, coroFaultPayloadSignature(), llssa.InC)
-	b.Call(
-		payload.Expr,
-		p.prog.IntVal(uint64(kind), p.prog.Uint32()),
+	args := []llssa.Expr{p.prog.IntVal(uint64(kind), p.prog.Uint32())}
+	payloadHook := coroFaultPayloadHookV1
+	payloadSignature := coroFaultPayloadSignature()
+	if operands != nil {
+		if operands.arg0.IsNil() || operands.arg1.IsNil() {
+			panic("parameterized coroutine fault payload has an incomplete operand pair")
+		}
+		payloadHook = coroFaultPayloadHookV2
+		payloadSignature = coroFaultPayloadSignatureV2()
+		args = append(args,
+			b.Convert(p.prog.Uintptr(), operands.arg0),
+			b.Convert(p.prog.Uintptr(), operands.arg1),
+		)
+	}
+	args = append(args,
 		b.Convert(p.prog.VoidPtr(), typeSlot),
 		b.Convert(p.prog.VoidPtr(), dataSlot),
 	)
+	payload := p.pkg.NewFunc(payloadHook, payloadSignature, llssa.InC)
+	b.Call(payload.Expr, args...)
 	return b.Load(typeSlot), b.Load(dataSlot)
 }
 
@@ -384,10 +481,19 @@ func (p *context) materializeCoroFaultPayload(
 // retained as the base; if no direct deferred child recovers the payload, the
 // shared cleanup panic block publishes it through panic_prepare_v1.
 func (s *coroStaticCleanupState) enterFault(p *context, b llssa.Builder, kind uint32) {
+	s.enterFaultWithOperands(p, b, kind, nil)
+}
+
+func (s *coroStaticCleanupState) enterFaultWithOperands(
+	p *context,
+	b llssa.Builder,
+	kind uint32,
+	operands *coroFaultOperands,
+) {
 	if s == nil || p == nil || p.coroBody() == nil || b == nil {
 		panic("implicit nil fault cleanup has no active coroutine state")
 	}
-	typeWord, dataWord := p.materializeCoroFaultPayload(b, kind)
+	typeWord, dataWord := p.materializeCoroFaultPayloadWithOperands(b, kind, operands)
 	s.enterPanic(b, typeWord, dataWord)
 }
 

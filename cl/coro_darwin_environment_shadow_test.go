@@ -62,7 +62,7 @@ func TestCoroDarwinEnvironmentWorkerPublishesExactCallableShadows(t *testing.T) 
 	prog.SetLinkname(packagePath+".libc_unsetenv_trampoline", "C.unsetenv")
 	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}},
-		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
+		EmissionUniverseOptions{CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		t.Fatal(err)

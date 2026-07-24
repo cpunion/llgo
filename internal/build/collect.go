@@ -369,8 +369,8 @@ func (c *context) ensureCacheManager() *cacheManager {
 // fully represented by the package fingerprint. Active coroutine lowering is
 // fail-closed until a complete plan/ABI/target record has been installed.
 func (c *context) canUsePackageCache() bool {
-	if c.buildConf == nil || !c.buildConf.coroEntryResolutionActive() {
-		return true
+	if c.buildConf == nil || c.mode == ModeGen {
+		return false
 	}
 	if c.clCompilation == nil || c.coroPlan == nil || c.clCompilation.CoroPlan != c.coroPlan ||
 		c.coroEmission == nil || c.clCompilation.EmissionUniverse != c.coroEmission || c.coroPlanDigest == "" ||
@@ -382,15 +382,7 @@ func (c *context) canUsePackageCache() bool {
 		return false
 	}
 	metadata := c.coroPlanMetadata
-	return c.clCompilation.CoroEntryResolutionActive() &&
-		c.clCompilation.CoroPhysicalABIActive() == c.buildConf.coroPhysicalABIActive() &&
-		c.clCompilation.CoroChildAwaitActive() == c.buildConf.coroChildAwaitActive() &&
-		c.clCompilation.CoroPlainDispatchActive() == c.buildConf.coroPlainDispatchActive() &&
-		c.clCompilation.CoroExplicitStatusActive() == c.buildConf.coroExplicitStatusActive() &&
-		c.clCompilation.CoroClosedStaticSpawnActive() == c.buildConf.coroClosedStaticSpawnActive() &&
-		c.clCompilation.CoroProgramBootstrapActive() == c.buildConf.coroProgramBootstrapActive() &&
-		c.clCompilation.CoroChannelActive() == c.buildConf.coroChannelActive() &&
-		c.clCompilation.CoroWorkerActive() == c.buildConf.coroWorkerActive() &&
+	return c.clCompilation.CoroWorkerSupported() == c.buildConf.coroWorkerSupported() &&
 		c.clCompilation.CoroABI == metadata.CoroABI &&
 		c.clCompilation.SchedulerABI == metadata.SchedulerABI &&
 		c.clCompilation.PanicABI == metadata.PanicABI &&
@@ -468,7 +460,7 @@ func (c *context) tryLoadFromCache(pkg *aPackage) bool {
 	if err != nil {
 		return false
 	}
-	if c.buildConf != nil && c.buildConf.coroEntryResolutionActive() && !activeCoroCacheManifestMatches(content, pkg) {
+	if c.buildConf != nil && !activeCoroCacheManifestMatches(content, pkg) {
 		return false
 	}
 

@@ -26,8 +26,7 @@ import (
 )
 
 // CoroPlanObserver observes the immutable, compilation-scoped coroutine plan
-// immediately before cl processes a package from source. It is report-only:
-// installing an observer does not enable coroutine lowering or change LLVM IR.
+// immediately before cl processes a package from source.
 // The observer is not called for a package whose compiled archive came from
 // the build cache. Observers must treat both arguments as read-only.
 type CoroPlanObserver func(pkg *ssa.Package, plan *coro.SSAPlan)
@@ -35,13 +34,8 @@ type CoroPlanObserver func(pkg *ssa.Package, plan *coro.SSAPlan)
 // CoroFrameRetentionParkABIV2 is the sole stackless frame-retention identity.
 // A generic llgo.coroPark state is frame-owned only when its exact prepare call
 // has a frozen executor-safe, borrow-until-return callable contract. Event
-// source symbols never participate in this compiler profile.
+// source symbols never participate in this compiler/runtime contract.
 const CoroFrameRetentionParkABIV2 = coro.FrameRetentionParkABIV2
-
-const (
-	CoroProfileNone      = coro.RuntimeProfileNone
-	CoroProfileStackless = coro.RuntimeProfileStackless
-)
 
 func CoroNativeTargetCapabilities() coro.TargetCapabilities {
 	return coro.NewTargetCapabilities(true, true)
@@ -49,14 +43,12 @@ func CoroNativeTargetCapabilities() coro.TargetCapabilities {
 
 // Compilation contains immutable inputs shared by every package compiled as
 // part of one frontend compilation. Pass it by pointer and do not copy it after
-// first use. A CoroPlan remains report-only unless CoroProfileStackless is
-// selected. The prepared emission universe freezes every function that
+// first use. The prepared emission universe freezes every function that
 // codegen may materialize, and any later out-of-universe lookup fails closed at
 // its first symbol resolution.
 type Compilation struct {
 	CoroPlan               *coro.SSAPlan
 	CoroPlanObserver       CoroPlanObserver
-	CoroProfile            coro.RuntimeProfile
 	CoroTargetCapabilities coro.TargetCapabilities
 	// CoroPlanDigest and the ABI identities are populated by the build driver
 	// after whole-program analysis and participate in every package archive
@@ -90,60 +82,34 @@ type Compilation struct {
 	coroManagedInterface     *coroManagedInterfaceDispatchPlan
 }
 
-// CoroProfileActive reports whether this compilation owns the complete
-// stackless architecture.
-func (c *Compilation) CoroProfileActive() bool {
-	return c != nil && c.CoroProfile.Active()
-}
-
-func (c *Compilation) CoroEntryResolutionActive() bool {
-	return c.CoroProfileActive()
-}
-
-func (c *Compilation) CoroPhysicalABIActive() bool {
-	return c.CoroProfileActive()
-}
-
-func (c *Compilation) CoroChildAwaitActive() bool {
-	return c.CoroProfileActive()
-}
-
-func (c *Compilation) CoroPlainDispatchActive() bool {
-	return c.CoroProfileActive()
-}
-
-func (c *Compilation) CoroClosedStaticSpawnActive() bool {
-	return c.CoroProfileActive()
-}
-
-func (c *Compilation) CoroProgramBootstrapActive() bool {
-	return c.CoroProfileActive()
-}
-
-func (c *Compilation) CoroChannelActive() bool {
-	return c.CoroProfileActive()
-}
-
-func (c *Compilation) CoroExplicitStatusActive() bool {
-	return c.CoroProfileActive()
-}
-
-func (c *Compilation) CoroWorkerActive() bool {
-	return c != nil && c.CoroProfile.Active() && c.CoroTargetCapabilities.Worker()
-}
-
-func (c *Compilation) validateCoroProfile() error {
+// immutablePlan and immutableEmissionUniverse are the single read boundaries
+// used by frontend helpers after the compilation inputs have been frozen.
+// Keeping those helpers behind these boundaries prevents representation
+// emitters from becoming new plan owners.
+func (c *Compilation) immutablePlan() *coro.SSAPlan {
 	if c == nil {
 		return nil
 	}
-	if !c.CoroProfile.Valid() {
-		return fmt.Errorf("unknown coroutine runtime profile %d", c.CoroProfile)
+	return c.CoroPlan
+}
+
+func (c *Compilation) immutableEmissionUniverse() *EmissionUniverse {
+	if c == nil {
+		return nil
+	}
+	return c.EmissionUniverse
+}
+
+func (c *Compilation) CoroWorkerSupported() bool {
+	return c != nil && c.CoroTargetCapabilities.Worker()
+}
+
+func (c *Compilation) validateCoroTargetCapabilities() error {
+	if c == nil {
+		return nil
 	}
 	if !c.CoroTargetCapabilities.Valid() {
 		return fmt.Errorf("invalid coroutine target capability set %d", c.CoroTargetCapabilities)
-	}
-	if !c.CoroProfile.Active() && c.CoroTargetCapabilities != 0 {
-		return fmt.Errorf("coroutine target capabilities require the stackless runtime profile")
 	}
 	return nil
 }
@@ -192,24 +158,18 @@ func (c *Compilation) validateCoroABIIdentity(required bool) error {
 	if c == nil {
 		return fmt.Errorf("coroutine ABI validation requires a compilation")
 	}
-	if err := c.validateCoroProfile(); err != nil {
+	if err := c.validateCoroTargetCapabilities(); err != nil {
 		return err
-	}
-	if !c.CoroProfile.Active() {
-		if !required && c.CoroABI == "" && c.SchedulerABI == "" && c.PanicABI == "" && c.FuncRepABI == "" && c.CoroFrameRetentionABI == "" {
-			return nil
-		}
-		return fmt.Errorf("coroutine ABI identity requires the stackless runtime profile")
 	}
 	return c.validateStacklessCoroABIIdentity(required)
 }
 
 func (c *Compilation) validateStacklessCoroABIIdentity(required bool) error {
-	if err := c.validateCoroProfile(); err != nil {
+	if err := c.validateCoroTargetCapabilities(); err != nil {
 		return err
 	}
 	wantScheduler := coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
-	if c.CoroWorkerActive() {
+	if c.CoroWorkerSupported() {
 		wantScheduler = coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0
 	}
 	switch c.CoroFrameRetentionABI {

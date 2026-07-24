@@ -104,6 +104,17 @@ func TestCoroWorkerSyscallCurrentFrame(t *testing.T) {
 			t.Fatalf("Root references to %q = %d, want 1:\n%s", symbol, got, body)
 		}
 	}
+	for _, symbol := range []string{coroOSThreadLockedHookV1, coroOSThreadForeignCallHookV1} {
+		if got := strings.Count(body, "@"+symbol); got != 1 {
+			t.Fatalf("Root references to locked-thread branch %q = %d, want 1:\n%s", symbol, got, body)
+		}
+	}
+	lockedQuery := strings.Index(body, "call i1 @"+coroOSThreadLockedHookV1)
+	directCall := strings.Index(body, "call void @"+coroOSThreadForeignCallHookV1)
+	workerPark := strings.Index(body, "call void @"+coroWorkerParkHookV1)
+	if lockedQuery < 0 || directCall < lockedQuery || workerPark < lockedQuery {
+		t.Fatalf("Root does not branch from the lock query to both direct and worker paths:\n%s", body)
+	}
 	for _, forbidden := range []string{"@foo.raw", "@llgo.syscall"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("worker lowering retained ordinary intrinsic call %q:\n%s", forbidden, body)
@@ -142,7 +153,12 @@ func TestCoroWorkerSyscallCurrentFrame(t *testing.T) {
 		t.Fatalf("emit post-CoroSplit worker object: %v\n%s", err, module.String())
 	}
 	defer object.Dispose()
-	for _, symbol := range []string{coroWorkerParkHookV1, coroWorkerResumeHookV1} {
+	for _, symbol := range []string{
+		coroWorkerParkHookV1,
+		coroWorkerResumeHookV1,
+		coroOSThreadLockedHookV1,
+		coroOSThreadForeignCallHookV1,
+	} {
 		if len(object.Bytes()) == 0 || !bytes.Contains(object.Bytes(), []byte(symbol)) {
 			t.Fatalf("post-CoroSplit object lost worker ABI symbol %q", symbol)
 		}
@@ -219,7 +235,7 @@ func TestCoroWorkerSyscallFailureConventionIdentityIsFrozen(t *testing.T) {
 		prog,
 		nil,
 		[]EmissionPackage{{SSA: ssaPkg, Files: files}},
-		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
+		EmissionUniverseOptions{CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -268,7 +284,7 @@ func TestCoroWorkerProductionLinuxDynamicRawSyscallFailsClosed(t *testing.T) {
 		prog,
 		nil,
 		[]EmissionPackage{{SSA: ssaPkg, Files: files}},
-		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
+		EmissionUniverseOptions{CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -408,7 +424,7 @@ func compileCoroWorkerSourceFixture(
 		prog,
 		nil,
 		[]EmissionPackage{{SSA: ssaPkg, Files: files}},
-		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
+		EmissionUniverseOptions{CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		prog.Dispose()
@@ -504,7 +520,7 @@ func compileCoroWorkerSourceFixture(
 		CoroABI:      coro.PhysicalABIV1,
 		SchedulerABI: coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
 		PanicABI:     coro.PanicExplicitStatusABIV0,
-		FuncRepABI:   coro.FuncRepABIV1, CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities(),
+		FuncRepABI:   coro.FuncRepABIV1, CoroTargetCapabilities: CoroNativeTargetCapabilities(),
 	}
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},

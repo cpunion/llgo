@@ -97,3 +97,12 @@ func QueueStop(workerCount uint32) bool
 //llgo:coro sync
 //go:linkname QueueDestroyAfterJoin C.__llgo_coro_worker_queue_destroy_after_join_v1
 func QueueDestroyAfterJoin() bool
+
+// Call executes one exact uintptr-shaped foreign thunk synchronously on the
+// calling native thread. It is reserved for the runtime's dynamically proved
+// LockOSThread path; ordinary potentially blocking calls use the bounded
+// worker queue above.
+//
+//llgo:coro sync
+//go:linkname Call C.__llgo_coro_worker_call_v1
+func Call(function uintptr, argc uint32, args *[MaxArgs]uintptr, result *Result) bool

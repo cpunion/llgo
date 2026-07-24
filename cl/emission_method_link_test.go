@@ -85,8 +85,7 @@ func Value() any { return struct{ Base }{} }
 		prog, nil, nil, nil, pkg.ssa, []*ast.File{pkg.file}, nil,
 		PackageOptions{Compilation: &Compilation{
 			CoroPlan:         plan,
-			EmissionUniverse: universe, CoroProfile: CoroProfileStackless,
-		}},
+			EmissionUniverse: universe}},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -197,8 +196,7 @@ func Value() any { return methoddecl.Error("value") }
 	}
 	compilation := &Compilation{
 		CoroPlan:         plan,
-		EmissionUniverse: universe, CoroProfile: CoroProfileStackless,
-	}
+		EmissionUniverse: universe}
 	compiled, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, consumer.ssa, []*ast.File{consumer.file}, nil,
 		PackageOptions{Compilation: compilation},
@@ -438,8 +436,7 @@ func UseString() int { return Generic[string]() }
 		prog, nil, nil, nil, pkg.ssa, []*ast.File{pkg.file}, nil,
 		PackageOptions{Compilation: &Compilation{
 			CoroPlan:         plan,
-			EmissionUniverse: universe, CoroProfile: CoroProfileStackless,
-		}},
+			EmissionUniverse: universe}},
 	)
 	if err != nil {
 		t.Fatal(err)

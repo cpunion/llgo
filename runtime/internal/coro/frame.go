@@ -37,9 +37,9 @@ type HeaderV1 struct {
 }
 
 // FrameDescriptorV1 is the runtime prefix emitted for every physical
-// coroutine frame. SpawnCommit currently admits only zero-result goroutine
-// roots, so it validates this descriptor instead of trusting a nil result
-// slot alone.
+// coroutine frame. SpawnCommit validates the descriptor result layout; a Go
+// spawn requires a nil ResultSlot and discards any values returned by the
+// target function.
 type FrameDescriptorV1 struct {
 	Version     uint32
 	Flags       uint32
@@ -319,9 +319,10 @@ func PrepareAwaitCompletionRecover(
 
 // PrepareCompleteStatus records a final-suspended frame and its exact cleanup
 // base. Destruction remains owned by the scheduler and occurs only after the
-// resume operation returns. Abort/Shutdown are admitted only after the task
-// cancellation token has entered cleanup, so a malformed compiler cannot
-// manufacture a terminal stop outcome.
+// resume operation returns. Goexit is a payload-free language outcome;
+// Abort/Shutdown are admitted only after the task cancellation token has
+// entered cleanup, so a malformed compiler cannot manufacture a terminal stop
+// outcome.
 func PrepareCompleteStatus(g *G, handle unsafe.Pointer, header *HeaderV1, status CompletionStatus) bool {
 	if !ValidG(g) || !resumeGateTaken(g) || handle == nil || header == nil || g.pending.kind != pendingNone || g.spawnChild != nil ||
 		!releasableParkState(&g.park) || g.park.taskCancelPhase == taskCancelRequested {
@@ -329,6 +330,7 @@ func PrepareCompleteStatus(g *G, handle unsafe.Pointer, header *HeaderV1, status
 	}
 	switch status {
 	case CompletionReturn:
+	case CompletionGoexit:
 	case CompletionAbort:
 		if g.park.taskCancelPhase != taskCancelCleanup || g.park.taskCancelKind != TaskCancelAbort {
 			return false

@@ -58,7 +58,7 @@ func TestCoroTimerOwnerV2SourceABI(t *testing.T) {
 			name: "__llgo_coro_timer_park_controlled_v2",
 			params: []string{
 				"unsafe.Pointer", "unsafe.Pointer", "unsafe.Pointer", "unsafe.Pointer",
-				"unsafe.Pointer", "*uint32", "uint32", "int64",
+				"unsafe.Pointer", "*uint32", "*uint32", "uint32", "int64",
 			},
 			delegates: "coro.PrepareCurrentExecutorControlledTimerPark",
 			failStop:  true,
@@ -71,10 +71,10 @@ func TestCoroTimerOwnerV2SourceABI(t *testing.T) {
 			failStop:  true,
 		},
 		{
-			name:      "__llgo_coro_timer_cancel_controlled_v2",
-			params:    []string{"unsafe.Pointer", "uint32"},
+			name:      "__llgo_coro_timer_request_controlled_v2",
+			params:    []string{"uint32"},
 			result:    "uint32",
-			delegates: "coro.CancelExecutorControlledTimerV2",
+			delegates: "coroTargetRequestControlledTimerV2",
 		},
 	}
 

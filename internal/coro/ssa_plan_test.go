@@ -768,6 +768,51 @@ func outsideFrozenUniverse() {}
 	}
 }
 
+func TestAnalyzeSSANoUnwindLoweredCallSuppressesOnlyHelperUnwind(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "lowered_no_unwind.go", `package coroid
+func owner() {}
+func helper() { panic("boom") }
+`)
+	owner := packageFunction(t, pkg, "owner")
+	helper := packageFunction(t, pkg, "helper")
+	build := func(noUnwind bool) *SSAPlan {
+		t.Helper()
+		plan, err := AnalyzeSSA(prog, Roots{{Function: owner, Demand: SyncDemand}}, SSAConfig{
+			ClassifyLoweredCalls: func(fn *ssa.Function) ([]SSALoweredCall, error) {
+				if fn == owner {
+					return []SSALoweredCall{{
+						LogicalName: "runtime.helper",
+						Target:      helper,
+						NoUnwind:    noUnwind,
+					}}, nil
+				}
+				return nil, nil
+			},
+			MaxPlainInstructions: -1,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return plan
+	}
+
+	exact := build(true)
+	if got := functionPlanFor(t, exact, owner); got.Exec.Contains(MayUnwind) {
+		t.Fatalf("no-unwind lowered helper polluted owner: %+v", got)
+	}
+	if got := functionPlanFor(t, exact, helper); !got.Exec.Contains(MayUnwind) {
+		t.Fatalf("occurrence proof changed helper's global plan: %+v", got)
+	}
+	if calls := exact.LoweredCalls(owner); len(calls) != 1 || !calls[0].NoUnwind {
+		t.Fatalf("no-unwind lowered call was not frozen: %+v", calls)
+	}
+
+	ordinary := build(false)
+	if got := functionPlanFor(t, ordinary, owner); !got.Exec.Contains(MayUnwind) {
+		t.Fatalf("ordinary lowered helper lost unwind propagation: %+v", got)
+	}
+}
+
 func TestAnalyzeSSAUnwindOnlyLoweredCallDoesNotPolluteNormalReturnPlan(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "lowered_unwind_only.go", `package coroid
 func owner() {}
@@ -884,9 +929,9 @@ func helper() { <-channel }
 func TestAnalyzeSSAExplicitStatusOutcomeAwareLoweredCalls(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "lowered_explicit_outcome.go", `package coroid
 func owner() {}
-func direct() {}
-func unwind() {}
-func sourcePanicHelper() {}
+func direct() { panic("direct") }
+func unwind() { panic("unwind") }
+func sourcePanicHelper() { panic("source") }
 `)
 	owner := packageFunction(t, pkg, "owner")
 	direct := packageFunction(t, pkg, "direct")
@@ -1219,6 +1264,8 @@ func alias() {}
 		{name: "alias", calls: []SSALoweredCall{{LogicalName: "runtime.alias", Target: alias}}, want: "not the exact canonical function"},
 		{name: "raw plain unwind only", calls: []SSALoweredCall{{LogicalName: "runtime.raw", Target: helper, RawPlain: true, UnwindOnly: true}}, want: "both raw-plain and unwind-only"},
 		{name: "raw plain ExplicitStatus elided", calls: []SSALoweredCall{{LogicalName: "runtime.raw", Target: helper, RawPlain: true, ExplicitStatusElided: true}}, want: "both raw-plain and ExplicitStatus-elided"},
+		{name: "no unwind raw plain", calls: []SSALoweredCall{{LogicalName: "runtime.raw", Target: helper, NoUnwind: true, RawPlain: true}}, want: "mixes no-unwind"},
+		{name: "no unwind unwind only", calls: []SSALoweredCall{{LogicalName: "runtime.unwind", Target: helper, NoUnwind: true, UnwindOnly: true}}, want: "mixes no-unwind"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -1811,7 +1858,7 @@ func target(value int) int {
 	}
 }
 
-func TestAnalyzeSSADefinedBodiesConservativelyMayUnwind(t *testing.T) {
+func TestAnalyzeSSAProvesEmptyBodyNoUnwindAndKeepsFaultingBodiesConservative(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "source.go", `package coroid
 func plain() {}
 func deferredPanic() { defer panic("boom") }
@@ -1828,8 +1875,8 @@ func implicitPanic(values []int, index int) int { return values[index] }
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := functionPlanFor(t, plan, plain); !got.Exec.Contains(MayUnwind) {
-		t.Fatalf("plain defined body lacks conservative MayUnwind: %+v", got)
+	if got := functionPlanFor(t, plan, plain); got.Exec.Contains(MayUnwind) {
+		t.Fatalf("empty defined body retained spurious MayUnwind: %+v", got)
 	}
 	if got := functionPlanFor(t, plan, deferred); !got.Exec.Contains(MayUnwind | NeedsCleanupFrame) {
 		t.Fatalf("deferred panic flags = %s", got.Exec)
@@ -2293,15 +2340,21 @@ func spawned() { go target() }
 		t.Fatal("elided-call query accepted an ordinary or nil call")
 	}
 
-	for _, name := range []string{"dynamic", "spawned"} {
-		fn := packageFunction(t, pkg, name)
+	for _, test := range []struct {
+		name string
+		want string
+	}{
+		{name: "dynamic", want: "must have one exact static target"},
+		{name: "spawned", want: "must be an ordinary call or owner-local defer"},
+	} {
+		fn := packageFunction(t, pkg, test.name)
 		_, err := AnalyzeSSA(prog, Roots{{Function: fn, Demand: SyncDemand}}, SSAConfig{
 			ClassifyElidedCall: func(_ *ssa.Function, call ssa.CallInstruction) (bool, error) {
 				return call == onlyNonBuiltinCall(t, fn), nil
 			},
 		})
-		if err == nil || !strings.Contains(err.Error(), "must be a direct static call") {
-			t.Fatalf("elide %s error = %v", name, err)
+		if err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Fatalf("elide %s error = %v, want %q", test.name, err, test.want)
 		}
 	}
 }
@@ -2424,6 +2477,130 @@ func root(seed int) int {
 	})
 	if err == nil || !strings.Contains(err.Error(), "RawPlainEntry requires a non-capturing body") {
 		t.Fatalf("captured raw address publication error = %v", err)
+	}
+}
+
+func TestAnalyzeSSARawPlainCallSelectsDualTargetVariant(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "raw_plain_call_dual.go", `package coroid
+func wait() {}
+func critical() { wait() }
+func rawCaller() { critical() }
+func managedCaller() { critical() }
+`)
+	wait := packageFunction(t, pkg, "wait")
+	critical := packageFunction(t, pkg, "critical")
+	rawCaller := packageFunction(t, pkg, "rawCaller")
+	managedCaller := packageFunction(t, pkg, "managedCaller")
+	rawCall := onlyNonBuiltinCall(t, rawCaller)
+	managedCall := onlyNonBuiltinCall(t, managedCaller)
+
+	plan, err := AnalyzeSSA(prog, Roots{
+		{Function: rawCaller, ManagedDemand: AsyncDemand},
+		{Function: managedCaller, ManagedDemand: AsyncDemand},
+	}, SSAConfig{
+		MaxPlainInstructions: -1,
+		ClassifyFunction: func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+			switch fn {
+			case wait:
+				return SSAFunctionPolicy{Effect: YieldOnly}, nil
+			case critical:
+				return SSAFunctionPolicy{
+					TrustedNoPreempt: true,
+					TrustedNoUnwind:  true,
+				}, nil
+			default:
+				return SSAFunctionPolicy{}, nil
+			}
+		},
+		ClassifyRawPlainCall: func(_ *ssa.Function, call ssa.CallInstruction) (SSARawPlainCallCertificate, bool, error) {
+			if call == rawCall {
+				return SSARawPlainCallCertificate{ID: "test.raw-critical.dual.v1"}, true, nil
+			}
+			return SSARawPlainCallCertificate{}, false, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	criticalPlan := functionPlanFor(t, plan, critical)
+	if criticalPlan.Emission != EmitCoroutine || criticalPlan.Primary != PrimaryCoroutine ||
+		criticalPlan.RawPlainOnly || criticalPlan.ManagedDemand == NoDemand ||
+		!criticalPlan.RawPlainDemand || !plan.HasRawPlainVariant(critical) {
+		t.Fatalf(
+			"dual raw/plain target = %+v, variant=%t; want coroutine primary plus raw twin",
+			criticalPlan, plan.HasRawPlainVariant(critical),
+		)
+	}
+	rawPlan, ok := plan.CallPlan(rawCall)
+	if !ok || !rawPlan.RawPlain || rawPlan.RawPlainCertificate != "test.raw-critical.dual.v1" ||
+		rawPlan.Rep != DirectPlain || rawPlan.Open || len(rawPlan.Targets) != 1 ||
+		rawPlan.Targets[0] != criticalPlan.ID {
+		t.Fatalf("raw occurrence CallPlan = %+v, present=%t", rawPlan, ok)
+	}
+	managedPlan, ok := plan.CallPlan(managedCall)
+	if !ok || managedPlan.RawPlain || managedPlan.Rep != DirectCoro ||
+		managedPlan.Open || len(managedPlan.Targets) != 1 ||
+		managedPlan.Targets[0] != criticalPlan.ID {
+		t.Fatalf("managed occurrence CallPlan = %+v, present=%t", managedPlan, ok)
+	}
+}
+
+func TestAnalyzeSSARawPlainCallKeepsDormantCertificateWithoutDemand(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "raw_plain_call_dormant.go", `package coroid
+func wait() {}
+func critical() { wait() }
+func dormantCaller() { critical() }
+func root() {}
+`)
+	wait := packageFunction(t, pkg, "wait")
+	critical := packageFunction(t, pkg, "critical")
+	dormantCaller := packageFunction(t, pkg, "dormantCaller")
+	root := packageFunction(t, pkg, "root")
+	rawCall := onlyNonBuiltinCall(t, dormantCaller)
+
+	plan, err := AnalyzeSSA(prog, Roots{
+		{Function: root, ManagedDemand: AsyncDemand},
+	}, SSAConfig{
+		MaxPlainInstructions: -1,
+		ClassifyFunction: func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+			switch fn {
+			case wait:
+				return SSAFunctionPolicy{Effect: YieldOnly}, nil
+			case critical:
+				return SSAFunctionPolicy{
+					TrustedNoPreempt: true,
+					TrustedNoUnwind:  true,
+				}, nil
+			default:
+				return SSAFunctionPolicy{}, nil
+			}
+		},
+		ClassifyRawPlainCall: func(_ *ssa.Function, call ssa.CallInstruction) (SSARawPlainCallCertificate, bool, error) {
+			if call == rawCall {
+				return SSARawPlainCallCertificate{ID: "test.raw-critical.dormant.v1"}, true, nil
+			}
+			return SSARawPlainCallCertificate{}, false, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	criticalPlan := functionPlanFor(t, plan, critical)
+	if criticalPlan.Emission != EmitNone || criticalPlan.ManagedDemand != NoDemand ||
+		criticalPlan.RawPlainDemand || criticalPlan.RawPlainOnly ||
+		plan.HasRawPlainVariant(critical) {
+		t.Fatalf(
+			"dormant raw/plain target = %+v, variant=%t; want no emitted capability",
+			criticalPlan, plan.HasRawPlainVariant(critical),
+		)
+	}
+	rawPlan, ok := plan.CallPlan(rawCall)
+	if !ok || !rawPlan.RawPlain || rawPlan.RawPlainCertificate != "test.raw-critical.dormant.v1" ||
+		rawPlan.Rep != DirectPlain || rawPlan.Open || len(rawPlan.Targets) != 1 ||
+		rawPlan.Targets[0] != criticalPlan.ID {
+		t.Fatalf("dormant raw occurrence CallPlan = %+v, present=%t", rawPlan, ok)
 	}
 }
 

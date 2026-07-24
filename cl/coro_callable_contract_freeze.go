@@ -126,7 +126,19 @@ func (u *EmissionUniverse) freezeCoroCallableContractCertificates() error {
 	}
 	annotations := make([]exactAnnotation, 0)
 	annotatedCanonical := make(map[*ssa.Function]*ssa.Function)
+	legacyCanonical := make(map[*ssa.Function]coroForeignCallDirective)
 	for _, declaration := range declarations {
+		legacy, err := coroForeignCallDirectiveFor(declaration)
+		if err != nil {
+			return fmt.Errorf("prepare emission universe: callable contract legacy policy on %q: %w", declaration.Name(), err)
+		}
+		if legacy != coroForeignCallNone {
+			canonical := u.canonicalAlias(declaration)
+			if canonical == nil {
+				return fmt.Errorf("prepare emission universe: callable contract legacy policy on %q has cyclic canonical aliases", declaration.Name())
+			}
+			legacyCanonical[canonical] = legacy
+		}
 		parsed, present, err := coroCallableContractCertificateFor(declaration)
 		if err != nil {
 			return fmt.Errorf("prepare emission universe: callable contract on %q: %w", declaration.Name(), err)
@@ -150,6 +162,31 @@ func (u *EmissionUniverse) freezeCoroCallableContractCertificates() error {
 		annotatedCanonical[canonical] = declaration
 		annotations = append(annotations, exactAnnotation{
 			declaration: declaration,
+			canonical:   canonical,
+			parsed:      parsed,
+		})
+	}
+	// An exact bodyless C declaration without an explicit policy uses LLGo's
+	// conservative foreign-call default: it may block, may run on any worker
+	// thread, does not reenter Go, and borrows arguments until completion.
+	// This is a frozen frontend policy, not a backend inference from a symbol or
+	// code address. Explicit target-neutral contracts and legacy noblock/sync/
+	// schedulerwait/worker policies remain authoritative and mutually
+	// exclusive with the default.
+	for _, canonical := range u.functions {
+		if canonical == nil || u.canonicalAlias(canonical) != canonical ||
+			annotatedCanonical[canonical] != nil || legacyCanonical[canonical] != coroForeignCallNone ||
+			len(canonical.Blocks) != 0 {
+			continue
+		}
+		shape, ok := shapes[canonical]
+		if !ok || shape.kind != cFunc || shape.physicalSymbol == "" || shape.typedABISignature == "" {
+			continue
+		}
+		parsed := defaultCoroForeignDeclarationContract()
+		annotatedCanonical[canonical] = canonical
+		annotations = append(annotations, exactAnnotation{
+			declaration: canonical,
 			canonical:   canonical,
 			parsed:      parsed,
 		})
@@ -285,6 +322,20 @@ func (u *EmissionUniverse) freezeCoroCallableContractCertificates() error {
 		u.callableContracts[canonical] = frozen
 	}
 	return nil
+}
+
+func defaultCoroForeignDeclarationContract() coroCallableContractCertificate {
+	return coroCallableContractCertificate{
+		Contract: coro.CallableContract{
+			ID:       coroCallableContractIDForeignV1,
+			Progress: coro.ProgressMayBlock,
+			Affinity: coro.AffinityAnyThread,
+			Reentry:  coro.ReentryNone,
+			Memory:   coro.MemoryBorrowUntilComplete,
+		},
+		Scope:     coroCallableContractScopeDeclaration,
+		Canonical: "llgo:coro default foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete",
+	}
 }
 
 func (u *EmissionUniverse) freezeCoroCallableShape(fn *ssa.Function) (coroCallableFrozenShape, error) {

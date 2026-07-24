@@ -31,7 +31,7 @@ func reflectlite_resolveTypeOff(rtype unsafe.Pointer, off int32) unsafe.Pointer 
 	return addOff(rtype, off)
 }
 
-//go:linkname llrtIfaceE2I github.com/goplus/llgo/runtime/internal/runtime.IfaceE2I
+//go:linkname llrtIfaceE2I github.com/goplus/llgo/runtime/internal/runtime.ReflectIfaceE2I
 func llrtIfaceE2I(t *abi.Type, src any, dst unsafe.Pointer)
 
 //go:linkname reflectlite_unsafe_New internal/reflectlite.unsafe_New

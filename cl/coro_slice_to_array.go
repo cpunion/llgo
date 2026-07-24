@@ -110,8 +110,14 @@ func (p *context) compileCoroSliceToArrayPointer(
 	if plan.boundsGuard {
 		p.observeCoroPhysicalBoundsGuard(conversion)
 		limit := b.Prog.IntVal(uint64(plan.bound), b.Prog.Int())
-		tooShort := b.BinOp(token.LSS, b.SliceLen(x), limit)
-		p.compileCoroFaultConditionGuard(b, tooShort, coroFaultSliceConvertV1)
+		length := b.SliceLen(x)
+		tooShort := b.BinOp(token.LSS, length, limit)
+		p.compileCoroFaultConditionGuardWithOperands(
+			b,
+			tooShort,
+			coroFaultSliceConvertV1,
+			&coroFaultOperands{arg0: limit, arg1: length},
+		)
 	}
 	return b.SliceToArrayPointerUnchecked(x, typ)
 }

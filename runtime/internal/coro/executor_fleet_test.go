@@ -335,8 +335,23 @@ func TestExecutorFleetBindsTimerAndRoutesPollSources(t *testing.T) {
 		if route, routeOK := timers.Route(); !routeOK || route != RouteID(handle.Route) {
 			t.Fatalf("timer fleet source route = (%d, %t), want %d", route, routeOK, handle.Route)
 		}
-		if !BeginExecutorFleetClose(fleet, handle) || !ConfirmExecutorFleetRouteClose(fleet, handle) ||
-			!BeginExecutorFleetDriverClose(fleet, handle) || !ConfirmExecutorFleetClose(fleet, handle) ||
+		route := RouteID(handle.Route)
+		if first := fleet.RequestTimerExecutor(route); first != ExecutorRequestPublished {
+			t.Fatalf("first timer generation request = %d", first)
+		}
+		if second := fleet.RequestTimerExecutor(route); second != ExecutorRequestCoalesced {
+			t.Fatalf("coalesced timer generation request = %d", second)
+		}
+		if timersDone, promoted, pollOK := PollExecutorAt(driver, 0); !pollOK || timersDone != 0 || promoted != 0 {
+			t.Fatalf("service timer generation request = (%d, %d, %t)", timersDone, promoted, pollOK)
+		}
+		if !BeginExecutorFleetClose(fleet, handle) || !ConfirmExecutorFleetRouteClose(fleet, handle) {
+			t.Fatal("strong-close timer request route")
+		}
+		if late := fleet.RequestTimerExecutor(route); late != ExecutorRequestClosed {
+			t.Fatalf("closed timer route request = %d", late)
+		}
+		if !BeginExecutorFleetDriverClose(fleet, handle) || !ConfirmExecutorFleetClose(fleet, handle) ||
 			!fleet.AllRetired() || !timers.CanRelease() {
 			t.Fatal("timer fleet route retained source or executor state")
 		}

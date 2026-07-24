@@ -148,6 +148,41 @@ func TestCoroTerminalReconstructionAllocationSubset(t *testing.T) {
 	}
 }
 
+func TestCoroTerminalReconstructionIncludesCanonicalRecoverReturn(t *testing.T) {
+	ssaPkg, _, _ := buildGoSSAPkg(t, `package foo
+func RecoveredResults() (recovered any, ran bool) {
+	defer func() {
+		recovered = recover()
+		ran = true
+	}()
+	panic("sentinel")
+}
+`)
+	function := ssaPkg.Func("RecoveredResults")
+	if function.Recover == nil {
+		t.Fatal("RecoveredResults has no canonical x/tools Recover block")
+	}
+	for _, block := range function.Blocks {
+		for _, instruction := range block.Instrs {
+			if _, runDefers := instruction.(*ssa.RunDefers); runDefers {
+				t.Fatal("panic-only RecoveredResults unexpectedly has a normal RunDefers tail")
+			}
+		}
+	}
+	selected, err := coroStaticTerminalReconstructionAllocations(function)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selected) != 2 {
+		t.Fatalf("Recover reconstruction allocations = %v; want two named-result cells", selected)
+	}
+	for _, allocation := range selected {
+		if !allocation.Heap || allocation.Block() == nil || allocation.Block().Index != 0 {
+			t.Fatalf("Recover reconstruction selected non-entry heap cell %v", allocation)
+		}
+	}
+}
+
 func TestCoroManagedHeapAllocationNativeAndWasm32(t *testing.T) {
 	llssa.Initialize(llssa.InitAll)
 	for _, test := range []struct {
@@ -251,7 +286,6 @@ func TestCoroManagedHeapAllocationNativeAndWasm32(t *testing.T) {
 
 			compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 			enableCoroPreemptCompilation(compilation)
-			compilation.CoroProfile = CoroProfileStackless
 			compilation.PanicABI = coro.PanicExplicitStatusABIV0
 			pkg, _, err := NewPackageExWithEmbedOptions(
 				prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},

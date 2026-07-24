@@ -78,8 +78,16 @@ func Root() { Unknown(); Legacy() }
 		if !ok || frontendErr != nil || !frontendOK || identity != frontend {
 			t.Fatalf("%s identity = %+v, %t; frontend=%+v, %t, %v", name, identity, ok, frontend, frontendOK, frontendErr)
 		}
-		if _, generic := plan.CallableContractCertificate(fn); generic {
-			t.Fatalf("%s synthetic identity manufactured a generic behavior contract", name)
+		contract, generic := plan.CallableContractCertificate(fn)
+		if name == "Unknown" {
+			if !generic || contract.Contract.Progress != coro.ProgressMayBlock ||
+				contract.Contract.Affinity != coro.AffinityAnyThread ||
+				contract.Contract.Reentry != coro.ReentryNone ||
+				contract.Contract.Memory != coro.MemoryBorrowUntilComplete {
+				t.Fatalf("Unknown default foreign contract = %+v, %t", contract, generic)
+			}
+		} else if generic {
+			t.Fatalf("Legacy policy unexpectedly acquired a generic behavior contract: %+v", contract)
 		}
 		functionPlan, _ := plan.FunctionPlan(fn)
 		if functionPlan.External != coro.ExternalUnknownForeign ||
@@ -110,9 +118,23 @@ func Root() { Unknown(); Legacy() }
 				break
 			}
 		}
-		if contract.Progress != coro.ProgressUnknown || contract.Affinity != coro.AffinityUnknown ||
-			contract.Reentry != coro.ReentryUnknown || contract.Memory != coro.MemoryUnknown {
-			t.Fatalf("identity-only callable %q behavior = %+v", callable.Ref, contract)
+		fn, ok := plan.Function(callable.Function)
+		if !ok || fn == nil {
+			t.Fatalf("callable %q has no planned function %q", callable.Ref, callable.Function)
+		}
+		switch fn.Name() {
+		case "Unknown":
+			if contract.Progress != coro.ProgressMayBlock || contract.Affinity != coro.AffinityAnyThread ||
+				contract.Reentry != coro.ReentryNone || contract.Memory != coro.MemoryBorrowUntilComplete {
+				t.Fatalf("default foreign callable %q behavior = %+v", callable.Ref, contract)
+			}
+		case "Legacy":
+			if contract.Progress != coro.ProgressUnknown || contract.Affinity != coro.AffinityUnknown ||
+				contract.Reentry != coro.ReentryUnknown || contract.Memory != coro.MemoryUnknown {
+				t.Fatalf("legacy identity-only callable %q behavior = %+v", callable.Ref, contract)
+			}
+		default:
+			t.Fatalf("unexpected callable function %q", fn.Name())
 		}
 	}
 	if err := facts.Verify(); err != nil {

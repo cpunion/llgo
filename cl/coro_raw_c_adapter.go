@@ -93,6 +93,38 @@ func resolveCoroRawCChangeType(
 		}
 		return coroRawCChangeTypePlan{resultType: resultType, rawRetag: true}, true, nil
 	}
+	// A bodyless frontend C declaration already denotes one physical C code
+	// pointer even when its source-level Go signature is not itself named with
+	// //llgo:type C. Converting that exact symbol to a compatible named C
+	// callback is therefore a representation-preserving retag, not a request
+	// for a Go raw/plain adapter.
+	if static, exact := change.X.(*ssa.Function); exact && static != nil {
+		canonical, resolved := universe.Resolve(static)
+		background, classified, backgroundErr := universe.FunctionBackground(static)
+		if backgroundErr != nil {
+			return fail("classify static source background: %v", backgroundErr)
+		}
+		if resolved && canonical != nil && classified && background == llssa.InC {
+			if sourceLeaf.Rep != coro.DirectPlain || sourceLeaf.MayBeNil || resultLeaf.MayBeNil ||
+				len(sourceLeaf.Targets) != 1 || len(resultLeaf.Targets) != 1 ||
+				sourceLeaf.Targets[0] != resultLeaf.Targets[0] {
+				return fail("physical C retag requires one identical, statically non-nil direct target")
+			}
+			target, found := plan.Function(resultLeaf.Targets[0])
+			if !found || target == nil || target != canonical {
+				return fail("physical C retag target %q is absent or non-canonical", resultLeaf.Targets[0])
+			}
+			targetPlan, planned := plan.FunctionPlan(target)
+			if !planned || targetPlan.ID != resultLeaf.Targets[0] ||
+				targetPlan.External == coro.Defined || targetPlan.Emission != coro.EmitExternal {
+				return fail("physical C retag target %q is not one emitted external declaration", resultLeaf.Targets[0])
+			}
+			if !types.Identical(types.Unalias(sourceType).Underlying(), types.Unalias(resultType).Underlying()) {
+				return fail("physical C source and result signatures are not identical")
+			}
+			return coroRawCChangeTypePlan{resultType: resultType, rawRetag: true}, true, nil
+		}
+	}
 	if sourceLeaf.Transport != coro.ManagedTransport ||
 		(sourceLeaf.Rep != coro.DirectPlain && sourceLeaf.Rep != coro.DirectCoro) {
 		return fail("Go-to-RawC source requires an exact managed direct entry, got %s/%s", sourceLeaf.Transport, sourceLeaf.Rep)

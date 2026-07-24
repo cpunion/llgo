@@ -48,6 +48,8 @@ func __llgo_coro_complete_prepare_v1() {}
 func __llgo_coro_complete_prepare_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32) {}
 func __llgo_coro_critical_enter_v1(unsafe.Pointer) {}
 func __llgo_coro_critical_exit_v1(unsafe.Pointer) bool { return false }
+func __llgo_coro_os_thread_lock_v1(unsafe.Pointer) {}
+func __llgo_coro_os_thread_unlock_v1(unsafe.Pointer) {}
 func __llgo_coro_frame_free_v1() {}
 func __llgo_coro_chan_send_park_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uintptr) {}
 func __llgo_coro_chan_recv_park_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uintptr) {}
@@ -61,9 +63,11 @@ func CoroChanSelectTry(...ChanOp) (int, bool, bool, bool) { return 0, false, fal
 func CoroChanSelectPark(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) {}
 func CoroChanSelectResume(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) (int, bool, uint32) { return 0, false, 0 }
 func __llgo_coro_fault_prepare_v1() {}
+func __llgo_coro_fault_prepare_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32, uintptr, uintptr) {}
 func __llgo_coro_panic_prepare_v1() {}
 func __llgo_coro_recover_take_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_fault_payload_v1(uint32, unsafe.Pointer, unsafe.Pointer) {}
+func __llgo_coro_fault_payload_v2(uint32, uintptr, uintptr, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_spawn_begin_v1() {}
 func __llgo_coro_spawn_commit_v1() {}
 func __llgo_coro_program_main_return_v1() {}
@@ -85,8 +89,7 @@ func __llgo_coro_program_main_return_v1() {}
 		buildConf: &Config{
 			BuildMode: BuildModeExe,
 			Goos:      "wasip1",
-			Goarch:    "wasm", CoroProfile: CoroProfileStackless,
-		},
+			Goarch:    "wasm"},
 		coroEmission:    emission,
 		coroSSAEmission: ssaEmission,
 	}
@@ -123,6 +126,8 @@ func __llgo_coro_program_main_return_v1() {}
 		"__llgo_coro_complete_prepare_v2",
 		"__llgo_coro_critical_enter_v1",
 		"__llgo_coro_critical_exit_v1",
+		coroOSThreadLockSymbolV1,
+		coroOSThreadUnlockSymbolV1,
 		"CoroChanTrySend",
 		"CoroChanTryRecv",
 		"CoroChanTryClose",
@@ -133,9 +138,11 @@ func __llgo_coro_program_main_return_v1() {}
 		coroChanRecvParkSymbolV1,
 		coroChanResumeSymbolV1,
 		"__llgo_coro_fault_prepare_v1",
+		"__llgo_coro_fault_prepare_v2",
 		"__llgo_coro_panic_prepare_v1",
 		"__llgo_coro_recover_take_v1",
 		"__llgo_coro_fault_payload_v1",
+		"__llgo_coro_fault_payload_v2",
 		"__llgo_coro_spawn_begin_v1",
 		"__llgo_coro_spawn_commit_v1",
 		coroProgramMainReturnSymbolV1,

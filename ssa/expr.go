@@ -985,12 +985,10 @@ func (b Builder) ChangeType(t Type, x Expr) (ret Expr) {
 		case vkFuncDecl:
 			ret.impl = checkExpr(x, t.raw.Type, b).impl
 		case vkClosure:
-			// TODO(xsw): change type should be a noop instruction
-			convType := func() Expr {
-				r := Expr{llvm.CreateAlloca(b.impl, t.ll), b.Prog.Pointer(t)}
-				b.Store(r, x)
-				return b.Load(r)
-			}
+			// Identified named closure structs and their anonymous canonical
+			// carrier have the same fields but distinct LLVM aggregate types.
+			// Rebuild directly instead of round-tripping through a native-stack
+			// alloca; this is valid both in ordinary and stackless bodies.
 			convNamedType := func() Expr {
 				agg := llvm.Undef(t.ll)
 				for i := range t.ll.StructElementTypes() {
@@ -1003,7 +1001,7 @@ func (b Builder) ChangeType(t Type, x Expr) (ret Expr) {
 			case *types.Named:
 				switch x.RawType().(type) {
 				case *types.Struct:
-					return convType()
+					return convNamedType()
 				case *types.Named:
 					if !types.Identical(x.RawType(), t.RawType()) {
 						return convNamedType()
@@ -1011,7 +1009,7 @@ func (b Builder) ChangeType(t Type, x Expr) (ret Expr) {
 				}
 			case *types.Struct:
 				if _, ok := x.RawType().(*types.Named); ok {
-					return convType()
+					return convNamedType()
 				}
 			}
 			fallthrough

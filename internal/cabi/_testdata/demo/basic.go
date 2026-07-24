@@ -1,25 +1,21 @@
 package main
 
-import "unsafe"
-
 const (
 	LLGoFiles = "../wrap/basic.c"
 )
 
 type pointer = *int8
 
-//go:linkname printf C.printf
-func printf(format *byte, __llgo_va_list ...any) int32
-
 func assert(info string, b bool) {
 	if !b {
-		printf(unsafe.StringData("Assertion failed: %s\n\000"), unsafe.StringData(info))
+		panic(info)
 	}
 }
 
 func main() {
 }
 
+//llgo:coro sync
 //go:linkname cbasic_int8 C.basic_int8
 func cbasic_int8(a int8) int8
 
@@ -32,6 +28,7 @@ func init() {
 	assert("basic_int8\000", basic_int8(100) == 100)
 }
 
+//llgo:coro sync
 //go:linkname cbasic_int16 C.basic_int16
 func cbasic_int16(a int16) int16
 
@@ -44,6 +41,7 @@ func init() {
 	assert("basic_int16\000", basic_int16(100) == 100)
 }
 
+//llgo:coro sync
 //go:linkname cbasic_int32 C.basic_int32
 func cbasic_int32(a int32) int32
 
@@ -56,6 +54,7 @@ func init() {
 	assert("basic_int32\000", basic_int32(100) == 100)
 }
 
+//llgo:coro sync
 //go:linkname cbasic_int64 C.basic_int64
 func cbasic_int64(a int64) int64
 
@@ -68,6 +67,7 @@ func init() {
 	assert("basic_int64\000", basic_int64(100) == 100)
 }
 
+//llgo:coro sync
 //go:linkname cbasic_float32 C.basic_float32
 func cbasic_float32(a float32) float32
 
@@ -80,6 +80,7 @@ func init() {
 	assert("basic_float32\000", basic_float32(100) == 100)
 }
 
+//llgo:coro sync
 //go:linkname cbasic_float64 C.basic_float64
 func cbasic_float64(a float64) float64
 
@@ -92,6 +93,7 @@ func init() {
 	assert("basic_float64\000", basic_float64(100) == 100)
 }
 
+//llgo:coro sync
 //go:linkname cbasic_pointer C.basic_pointer
 func cbasic_pointer(a pointer) pointer
 

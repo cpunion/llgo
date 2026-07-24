@@ -24,13 +24,12 @@ func TestCoroWorkerCapabilityMatchesNativeRuntimeAdapter(t *testing.T) {
 	base := Config{
 		BuildMode: BuildModeExe,
 		Goos:      "linux",
-		Goarch:    "amd64", CoroProfile: CoroProfileStackless,
-	}
+		Goarch:    "amd64"}
 	if err := validateCoroProgramBootstrapConfig(&base); err != nil {
 		t.Fatalf("native worker adapter rejected: %v", err)
 	}
-	if !base.coroWorkerActive() {
-		t.Fatal("native stackless profile did not select its worker adapter")
+	if !base.coroWorkerSupported() {
+		t.Fatal("native stackless target did not select its worker adapter")
 	}
 
 	for _, test := range []struct {
@@ -46,7 +45,7 @@ func TestCoroWorkerCapabilityMatchesNativeRuntimeAdapter(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			conf := base
 			test.mutate(&conf)
-			if conf.coroWorkerActive() {
+			if conf.coroWorkerSupported() {
 				t.Fatal("target without a native worker adapter advertised worker capability")
 			}
 			if err := validateCoroProgramBootstrapConfig(&conf); err != nil {
@@ -60,22 +59,18 @@ func TestCoroNativeFleetCapabilityMatchesCompleteNativeRuntime(t *testing.T) {
 	base := Config{
 		BuildMode: BuildModeExe,
 		Goos:      "linux",
-		Goarch:    "amd64", CoroProfile: CoroProfileStackless,
-	}
+		Goarch:    "amd64"}
 	if err := validateCoroProgramBootstrapConfig(&base); err != nil {
 		t.Fatalf("native fleet rejected: %v", err)
 	}
-	if !base.coroNativeFleetActive() {
-		t.Fatal("native stackless profile did not select its executor fleet")
+	if !base.coroNativeFleetSupported() {
+		t.Fatal("native stackless target did not select its executor fleet")
 	}
 
 	for _, test := range []struct {
 		name string
 		set  func(*Config)
 	}{
-		{name: "profile disabled", set: func(conf *Config) {
-			conf.CoroProfile = CoroProfileNone
-		}},
 		{name: "32-bit", set: func(conf *Config) {
 			conf.Goarch = "arm"
 		}},
@@ -83,7 +78,10 @@ func TestCoroNativeFleetCapabilityMatchesCompleteNativeRuntime(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			conf := base
 			test.set(&conf)
-			if conf.coroNativeFleetActive() {
+			if !conf.coroWorkerSupported() {
+				t.Fatal("32-bit POSIX target lost its bounded pthread worker capability")
+			}
+			if conf.coroNativeFleetSupported() {
 				t.Fatal("target without the complete native reactor advertised fleet capability")
 			}
 			if err := validateCoroProgramBootstrapConfig(&conf); err != nil {

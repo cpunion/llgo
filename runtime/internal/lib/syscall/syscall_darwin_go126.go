@@ -97,7 +97,7 @@ func libc_lseek_trampoline()
 // wrapper. mmap may block in the host VM, but its fixed target and by-value
 // arguments/results satisfy the worker transport contract.
 //
-//llgo:coro workeraddr 6
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/6+foreign-pointer-result=r1
 //go:linkname libc_mmap_trampoline C.mmap
 func libc_mmap_trampoline()
 
@@ -243,6 +243,7 @@ func syscall6(fn, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2 uintptr, err stdsyscal
 	return r1, r2, llgoErrno32(r1, errno)
 }
 
+//llgo:coro workerresult v1 fn=0 map=r1:r1
 func syscall6X(fn, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2 uintptr, err stdsyscall.Errno) {
 	r1, r2, errno := llgoSyscall6Word(fn, a1, a2, a3, a4, a5, a6)
 	return r1, r2, llgoErrnoWord(r1, errno)

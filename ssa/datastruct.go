@@ -716,14 +716,18 @@ func (b Builder) Lookup(x, key Expr, commaOk bool) (ret Expr) {
 	ptr := b.mapKeyPtr(key)
 	if commaOk {
 		vals := b.Call(b.Pkg.rtFunc("MapAccess2"), typ, x, ptr)
-		val := b.Load(Expr{b.impl.CreateExtractValue(vals.impl, 0, ""), prog.Pointer(vtyp)})
+		// The Go runtime map ABI never returns a nil element pointer: a miss
+		// points at its zero-value storage. Do not manufacture a second
+		// source-language nil edge after the exact MapAccess2 call.
+		val := b.LoadKnownNonNil(Expr{b.impl.CreateExtractValue(vals.impl, 0, ""), prog.Pointer(vtyp)})
 		ok := b.impl.CreateExtractValue(vals.impl, 1, "")
 		t := prog.Struct(vtyp, prog.Bool())
 		return b.aggregateValue(t, val.impl, ok)
 	} else {
 		val := b.Call(b.Pkg.rtFunc("MapAccess1"), typ, x, ptr)
 		val.Type = prog.Pointer(vtyp)
-		ret = b.Load(val)
+		// MapAccess1 follows the same non-nil zero-value-pointer ABI.
+		ret = b.LoadKnownNonNil(val)
 	}
 	return
 }

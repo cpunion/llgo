@@ -49,6 +49,7 @@ func GuardedExplicitValue0(value []byte) [0]byte {
 	if pointer == nil { return [0]byte{} }
 	return *pointer
 }
+func IndirectValue0(pointer **[]byte) { _ = [0]byte(**pointer) }
 func NamedPointer4(value Octets) *FourOctets { return (*FourOctets)(value) }
 `
 
@@ -92,7 +93,8 @@ func TestCoroSliceToArrayPointerNativeAndWasm32(t *testing.T) {
 			}
 			for _, name := range []string{"Pointer0", "Value0", "GuardedExplicitValue0"} {
 				body := requireCoroPhysicalFunction(t, module, "foo."+name).String()
-				if strings.Contains(body, coroFaultPrepareHookV1) || strings.Contains(body, "PanicSliceConvert") ||
+				if strings.Contains(body, coroFaultPrepareHookV1) || strings.Contains(body, coroFaultPrepareHookV2) ||
+					strings.Contains(body, "PanicSliceConvert") ||
 					strings.Contains(body, "AssertNilDeref") {
 					t.Fatalf("%s retained a zero-length fault edge:\n%s", name, body)
 				}
@@ -106,11 +108,19 @@ func TestCoroSliceToArrayPointerNativeAndWasm32(t *testing.T) {
 			if strings.Contains(explicit0, "i32 10") {
 				t.Fatalf("ExplicitValue0 incorrectly used the slice-length fault:\n%s", explicit0)
 			}
+			indirect := functions["IndirectValue0"]
+			indirectPlan, ok := plan.FunctionPlan(indirect)
+			if !ok || indirectPlan.Emission != coro.EmitCoroutine || !indirectPlan.Exec.Contains(coro.MayUnwind) {
+				t.Fatalf("IndirectValue0 plan = %+v, present=%t; want nullable coroutine dereference", indirectPlan, ok)
+			}
+			indirectName := funcName(indirect.Pkg.Pkg, indirect, false)
+			indirectBody := requireCoroPhysicalFunction(t, module, indirectName).String()
+			requireCoroSliceToArrayFaultCount(t, "IndirectValue0", indirectBody, coroFaultNilV1, 2)
 
 			for name, function := range functions {
 				conversion := coroOnlySliceToArrayPointer(function)
 				if conversion == nil {
-					if name != "Value0" {
+					if name != "Value0" && name != "IndirectValue0" {
 						t.Fatalf("%s fixture has no SliceToArrayPointer", name)
 					}
 					continue
@@ -139,7 +149,8 @@ func TestCoroSliceToArrayPointerNativeAndWasm32(t *testing.T) {
 			}
 			for _, name := range []string{"Pointer0", "Value0", "GuardedExplicitValue0"} {
 				resume := module.NamedFunction("foo." + name + "$coro.resume")
-				if resume.IsNil() || strings.Contains(resume.String(), coroFaultPrepareHookV1) {
+				if resume.IsNil() || strings.Contains(resume.String(), coroFaultPrepareHookV1) ||
+					strings.Contains(resume.String(), coroFaultPrepareHookV2) {
 					t.Fatalf("post-split %s acquired a zero-length fault edge:\n%s", name, module.String())
 				}
 			}
@@ -148,14 +159,21 @@ func TestCoroSliceToArrayPointerNativeAndWasm32(t *testing.T) {
 				t.Fatal("post-split ExplicitValue0 has no resume function")
 			}
 			requireCoroSliceToArrayFault(t, "ExplicitValue0 resume", explicit0Resume.String(), coroFaultNilV1)
+			indirectResume := module.NamedFunction(indirectName + "$coro.resume")
+			if indirectResume.IsNil() {
+				t.Fatal("post-split IndirectValue0 has no resume function")
+			}
+			requireCoroSliceToArrayFaultCount(t, "IndirectValue0 resume", indirectResume.String(), coroFaultNilV1, 2)
 
 			object, err := prog.TargetMachine().EmitToMemoryBuffer(module, llvm.ObjectFile)
 			if err != nil {
 				t.Fatalf("emit slice-to-array conversion object: %v\n%s", err, module.String())
 			}
 			defer object.Dispose()
-			if len(object.Bytes()) == 0 || !bytes.Contains(object.Bytes(), []byte(coroFaultPrepareHookV1)) {
-				t.Fatal("post-CoroSplit object lost the slice-to-array fault hook")
+			if len(object.Bytes()) == 0 ||
+				!bytes.Contains(object.Bytes(), []byte(coroFaultPrepareHookV1)) ||
+				!bytes.Contains(object.Bytes(), []byte(coroFaultPrepareHookV2)) {
+				t.Fatal("post-CoroSplit object lost a slice-to-array fault hook")
 			}
 		})
 	}
@@ -282,20 +300,35 @@ func TestSliceToArrayPointerZeroLengthReferenceSemantics(t *testing.T) {
 }
 
 func requireCoroSliceToArrayFault(t *testing.T, name, body string, kind uint32) {
+	requireCoroSliceToArrayFaultCount(t, name, body, kind, 1)
+}
+
+func requireCoroSliceToArrayFaultCount(t *testing.T, name, body string, kind uint32, count int) {
 	t.Helper()
-	if got := strings.Count(body, "call void @"+coroFaultPrepareHookV1); got != 1 {
-		t.Fatalf("%s fault prepare calls = %d, want one:\n%s", name, got, body)
+	hookName := coroFaultPrepareHookV1
+	if kind == coroFaultSliceConvertV1 {
+		hookName = coroFaultPrepareHookV2
+	}
+	if got := strings.Count(body, "call void @"+hookName); got != count {
+		t.Fatalf("%s fault prepare calls = %d, want %d:\n%s", name, got, count, body)
 	}
 	if strings.Contains(body, "PanicSliceConvert") || strings.Contains(body, "AssertNilDeref") {
 		t.Fatalf("%s retained a native-stack fault helper:\n%s", name, body)
 	}
-	hook := strings.Index(body, "call void @"+coroFaultPrepareHookV1)
-	line := body[hook:]
-	if end := strings.IndexByte(line, '\n'); end >= 0 {
-		line = line[:end]
-	}
-	if !strings.Contains(line, fmt.Sprintf("i32 %d", kind)) {
-		t.Fatalf("%s selected the wrong fault kind; hook=%q", name, line)
+	remaining := body
+	for index := 0; index < count; index++ {
+		hook := strings.Index(remaining, "call void @"+hookName)
+		if hook < 0 {
+			t.Fatalf("%s lost fault hook %d", name, index)
+		}
+		line := remaining[hook:]
+		if end := strings.IndexByte(line, '\n'); end >= 0 {
+			line = line[:end]
+		}
+		if !strings.Contains(line, fmt.Sprintf("i32 %d", kind)) {
+			t.Fatalf("%s selected the wrong fault kind at hook %d; hook=%q", name, index, line)
+		}
+		remaining = remaining[hook+len("call void @"+hookName):]
 	}
 }
 
@@ -362,7 +395,7 @@ func compileCoroSliceToArrayFixture(
 	functions := make(map[string]*ssa.Function)
 	var roots coro.Roots
 	for _, name := range []string{
-		"Pointer4", "Value4", "ExplicitValue4", "Pointer0", "Value0", "ExplicitValue0", "GuardedExplicitValue0", "NamedPointer4",
+		"Pointer4", "Value4", "ExplicitValue4", "Pointer0", "Value0", "ExplicitValue0", "GuardedExplicitValue0", "IndirectValue0", "NamedPointer4",
 	} {
 		function := ssaPkg.Func(name)
 		functions[name] = function
@@ -389,7 +422,6 @@ func compileCoroSliceToArrayFixture(
 	}
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroChildAwaitCompilation(compilation)
-	compilation.CoroProfile = CoroProfileStackless
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},

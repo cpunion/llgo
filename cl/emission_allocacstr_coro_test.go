@@ -20,6 +20,7 @@ package cl
 
 import (
 	"go/ast"
+	"go/types"
 	"strings"
 	"testing"
 
@@ -88,12 +89,15 @@ func UseAlloc(value string) *int8 { return AllocCStr(value) }
 
 func TestAllocaCStrElidesOnlyIntrinsicAndFreezesCStrCopy(t *testing.T) {
 	testProg := newEmissionTestProgram()
+	testProg.ssa.CreatePackage(types.Unsafe, nil, nil, true)
 	runtimePkg := testProg.addPackage(t, llssa.PkgRuntime, `package runtime
+import "unsafe"
 type Pointer uintptr
 type String struct {
 	data Pointer
 	len int
 }
+func AllocU(uintptr) unsafe.Pointer { return nil }
 func CStrCopy(Pointer, String) *int8 { return nil }
 `)
 	callerPkg := testProg.addPackage(t, "example.com/emission/allocacstr", `package allocacstr
@@ -116,13 +120,15 @@ func Use(value string) *int8 { return AllocaCStr(value) }
 	}
 
 	owner := callerPkg.ssa.Func("Use")
+	allocHelper := runtimePkg.ssa.Func("AllocU")
 	helper := runtimePkg.ssa.Func("CStrCopy")
 	lowered, err := universe.CoroLoweredCalls(owner)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(lowered) != 1 || lowered[0].LogicalName != "CStrCopy" || lowered[0].Target != helper {
-		t.Fatalf("AllocaCStr lowered calls = %+v; want exact owner-scoped CStrCopy", lowered)
+	if len(lowered) != 2 || lowered[0].LogicalName != "AllocU" || lowered[0].Target != allocHelper ||
+		lowered[1].LogicalName != "CStrCopy" || lowered[1].Target != helper {
+		t.Fatalf("AllocaCStr lowered calls = %+v; want exact owner-scoped AllocU and CStrCopy", lowered)
 	}
 	calls := allocaCStrTestCalls(owner)
 	if len(calls) != 1 {
@@ -175,8 +181,9 @@ func Use(value string) *int8 { return AllocaCStr(value) }
 		t.Fatal("AllocaCStr intrinsic declaration unexpectedly retained a managed CallPlan")
 	}
 	plannedLowered := plan.LoweredCalls(owner)
-	if len(plannedLowered) != 1 || plannedLowered[0].LogicalName != "CStrCopy" || plannedLowered[0].Target != helper {
-		t.Fatalf("planned AllocaCStr lowered calls = %+v; want exact CStrCopy", plannedLowered)
+	if len(plannedLowered) != 2 || plannedLowered[0].LogicalName != "AllocU" || plannedLowered[0].Target != allocHelper ||
+		plannedLowered[1].LogicalName != "CStrCopy" || plannedLowered[1].Target != helper {
+		t.Fatalf("planned AllocaCStr lowered calls = %+v; want exact AllocU and CStrCopy", plannedLowered)
 	}
 	ownerPlan, ok := plan.FunctionPlan(owner)
 	if !ok || !ownerPlan.Effect.Contains(coro.WaitPlatform) {

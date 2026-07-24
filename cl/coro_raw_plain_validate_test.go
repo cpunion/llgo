@@ -104,7 +104,7 @@ func Host() {}
 	}
 }
 
-func TestCoroRawPlainPreflightRejectsLocalDescriptorProducer(t *testing.T) {
+func TestCoroRawPlainPreflightAcceptsValidatedLocalDescriptorProducer(t *testing.T) {
 	ssaPkg, _, files := buildGoSSAPkg(t, `package foo
 func Target(value int) int { return value + 1 }
 func Apply(fn func(int) int, value int) int {
@@ -159,8 +159,8 @@ func Host(value int) int { return Apply(Target, value) }
 		t.Fatalf("Target ValuePlan = %+v, present=%t; want a local descriptor producer", targetValue, found)
 	}
 	err = rawPlainValidationCompilation(plan, universe, true).preflightCoroPlan()
-	if err == nil || !strings.Contains(err.Error(), "raw plain body cannot yet construct local descriptor value \"Target\"") {
-		t.Fatalf("raw local descriptor producer preflight error = %v", err)
+	if err != nil {
+		t.Fatalf("validated raw local descriptor producer was rejected: %v", err)
 	}
 }
 
@@ -292,7 +292,6 @@ func rawPlainValidationCompilation(plan *coro.SSAPlan, universe *EmissionUnivers
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
 	if plainDispatch {
-		compilation.CoroProfile = CoroProfileStackless
 		compilation.FuncRepABI = coro.FuncRepABIV1
 	}
 	return compilation

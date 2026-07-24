@@ -252,5 +252,52 @@ func extraAsmSigsAndDeclMap(pkgPath string, goarch string) map[string]extplan9as
 			}
 		}
 	}
+	if pkgPath == "runtime/cgo" {
+		// Go 1.26 publishes crosscall2 through a local trampoline so it does
+		// not take the address of a dynamically exported function directly.
+		// The local TEXT symbol has no Go declaration and a $0-0 frame, but
+		// its tail jump preserves the complete C ABI of crosscall2:
+		//
+		//	func crosscall2(fn, arg unsafe.Pointer, n int32, ctxt uintptr)
+		//
+		// Keep the signature target-specific because these are incoming C ABI
+		// registers, not Go ABIInternal registers inferred from a declaration.
+		var crosscall2 extplan9asm.FuncSig
+		switch goarch {
+		case "arm64":
+			crosscall2 = extplan9asm.FuncSig{
+				Args: []extplan9asm.LLVMType{
+					extplan9asm.Ptr, extplan9asm.Ptr, extplan9asm.LLVMType("i32"), extplan9asm.I64,
+				},
+				Ret:     extplan9asm.Void,
+				ArgRegs: []extplan9asm.Reg{"R0", "R1", "R2", "R3"},
+			}
+			manual["runtime.cgocallback"] = extplan9asm.FuncSig{
+				Args:    []extplan9asm.LLVMType{extplan9asm.I64, extplan9asm.I64, extplan9asm.I64},
+				Ret:     extplan9asm.Void,
+				ArgRegs: []extplan9asm.Reg{"R0", "R1", "R3"},
+			}
+		case "amd64":
+			crosscall2 = extplan9asm.FuncSig{
+				Args: []extplan9asm.LLVMType{
+					extplan9asm.Ptr, extplan9asm.Ptr, extplan9asm.LLVMType("i32"), extplan9asm.I64,
+				},
+				Ret:     extplan9asm.Void,
+				ArgRegs: []extplan9asm.Reg{"DI", "SI", "DX", "CX"},
+			}
+			manual["runtime.cgocallback"] = extplan9asm.FuncSig{
+				Args:    []extplan9asm.LLVMType{extplan9asm.I64, extplan9asm.I64, extplan9asm.I64},
+				Ret:     extplan9asm.Void,
+				ArgRegs: []extplan9asm.Reg{"DI", "SI", "CX"},
+			}
+		}
+		if len(crosscall2.Args) != 0 {
+			// Both symbols are assembly-only C ABI entries in Go 1.26.
+			// The trampoline is a transparent tail jump to crosscall2.
+			manual["runtime/cgo.crosscall2"] = crosscall2
+			manual["runtime/cgo.crosscall2_trampoline"] = crosscall2
+			manual["runtime.load_g"] = extplan9asm.FuncSig{Ret: extplan9asm.Void}
+		}
+	}
 	return manual
 }

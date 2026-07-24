@@ -212,17 +212,6 @@ func FinishCloseCurrentExecutorTaskControl(driver *ExecutorDriver, task *G, id O
 	return RetireTaskControl(driver.sources.control, driver.p, id)
 }
 
-// CancelExecutorControlledTimerV2 publishes ordinary operation cancellation
-// for one exact standard-library logical generation. Cleanup remains owned by
-// the resumed manager's V2 ParkSet transaction.
-func CancelExecutorControlledTimerV2(driver *ExecutorDriver, controller uintptr, controlWord uint32) bool {
-	if !validRunningExecutorOwner(driver) {
-		return false
-	}
-	timers := driver.sources.timerTable()
-	return timers != nil && timers.CancelControlledV2(driver.p, controller, controlWord)
-}
-
 // UpdateExecutorPollDeadlineExact dispatches a descriptor deadline update by
 // the same routed OperationID retained by the reactor. It accepts both frozen
 // poll protocols without probing one after the other on failure.
@@ -300,7 +289,8 @@ func activeExecutorHandle(registry *ExecutorRegistry, handle ExecutorHandle) boo
 func idleExecutorScheduler(p *P) bool {
 	return p != nil && p.current == nil && !p.inResume && p.action.Kind == ActionInvalid && p.action.Handle == nil &&
 		p.runDecision == (RunDecision{}) && !p.runDecisionTaken && p.servicePreemptBudget == 0 &&
-		validReadyQueueHeader(p) && validParkWaitQueueHeader(p) && validAffectedWaitQueueHeader(p)
+		validReadyQueueHeader(p) && validOSThreadOwnerHeader(p) &&
+		validParkWaitQueueHeader(p) && validAffectedWaitQueueHeader(p)
 }
 
 // BindExecutor attaches a newly registered exact-zero executor gate and an
@@ -318,6 +308,7 @@ func bindExecutorAtRoute(driver *ExecutorDriver, p *P, registry *ExecutorRegistr
 		driver.prepareNow != 0 || driver.hasPrepareNow ||
 		driver.terminalKind != ActionInvalid ||
 		p == nil || p.executor != nil || preemptLoad(&p.executorMode) != executorModeUnbound ||
+		p.osThreadLockOwner != nil ||
 		preemptLoad(&p.schedule) != scheduleIdle || !idleExecutorScheduler(p) ||
 		p.readyHead != nil || p.readyTail != nil || !emptySchedulerWaitQueues(p) ||
 		!route.Valid() || !activeExecutorHandle(registry, handle) || !bindExecutorSourceSetAtRoute(&driver.sources, p, route, catalog) {
@@ -489,7 +480,7 @@ func PrepareExecutorSleep(driver *ExecutorDriver) (sleep bool, ok bool) {
 	if _, _, ok = pollExecutor(driver); !ok {
 		return false, false
 	}
-	if driver.p.readyHead != nil || !HasWaiting(driver.p) {
+	if runnableForOSThreadOwner(driver.p) || !HasWaiting(driver.p) {
 		return false, true
 	}
 	if !driver.registry.ArmIdle(driver.handle) {
@@ -511,7 +502,7 @@ func PrepareExecutorSleep(driver *ExecutorDriver) (sleep bool, ok bool) {
 		_, _ = driver.registry.LeaveIdle(driver.handle)
 		return false, false
 	}
-	hasWork := drained != 0 || driver.p.readyHead != nil || driver.sources.pending(driver.p) ||
+	hasWork := drained != 0 || runnableForOSThreadOwner(driver.p) || driver.sources.pending(driver.p) ||
 		driver.registry.ObserveRequested(driver.handle) || preemptLoad(&driver.p.schedule) != scheduleIdle
 	if hasWork {
 		if _, _, ok = leaveExecutorIdleAndPoll(driver); !ok {
@@ -547,7 +538,7 @@ func prepareExecutorSleepAt(
 	if _, ok = pollExecutorSourcesAt(driver, now, true); !ok {
 		return false, false
 	}
-	if driver.p.readyHead != nil || !allowEmpty && !HasWaiting(driver.p) {
+	if runnableForOSThreadOwner(driver.p) || !allowEmpty && !HasWaiting(driver.p) {
 		return false, true
 	}
 	if !driver.registry.ArmIdle(driver.handle) {
@@ -565,7 +556,7 @@ func prepareExecutorSleepAt(
 		_ = leaveExecutorIdle(driver)
 		return false, false
 	}
-	hasWork := scan.completed != 0 || driver.p.readyHead != nil ||
+	hasWork := scan.completed != 0 || runnableForOSThreadOwner(driver.p) ||
 		driver.sources.pending(driver.p) || driver.registry.ObserveRequested(driver.handle) ||
 		preemptLoad(&driver.p.schedule) != scheduleIdle
 	if hasWork {
@@ -615,7 +606,7 @@ func CommitExecutorSleepAt(driver *ExecutorDriver, now int64) (sleep bool, deadl
 		_ = leaveExecutorIdle(driver)
 		return false, 0, false, false
 	}
-	hasWork := scan.completed != 0 || driver.p.readyHead != nil ||
+	hasWork := scan.completed != 0 || runnableForOSThreadOwner(driver.p) ||
 		driver.sources.pending(driver.p) || driver.registry.ObserveRequested(driver.handle) ||
 		preemptLoad(&driver.p.schedule) != scheduleIdle
 	if hasWork {

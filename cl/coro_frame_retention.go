@@ -59,7 +59,7 @@ type coroFrameRetentionProof struct {
 	exactRoots      map[ssa.Value]coroFrameRetentionExactRoot
 	stableAddresses map[coroFrameRetentionAddressUse]coroFrameRetentionAddressFact
 	uintptrValues   map[ssa.Value]coroFrameRetentionUintptrFact
-	callKeepalives  map[*ssa.Call]coroFrameRetentionCallFact
+	callKeepalives  map[ssa.CallInstruction]coroFrameRetentionCallFact
 	rootDigest      string
 }
 
@@ -91,6 +91,7 @@ const (
 	coroFrameRetentionRootLocalAddress
 	coroFrameRetentionRootClosureFreeVar
 	coroFrameRetentionRootManagedHeapAllocation
+	coroFrameRetentionRootInterfaceParameter
 )
 
 type coroFrameRetentionExactRoot struct {
@@ -196,7 +197,7 @@ func coroTerminalResultAllocationSetMatches(
 	return true
 }
 
-func (p *coroFrameRetentionProof) exactCallKeepaliveRoots(call *ssa.Call) []ssa.Value {
+func (p *coroFrameRetentionProof) exactCallKeepaliveRoots(call ssa.CallInstruction) []ssa.Value {
 	if p == nil || call == nil {
 		return nil
 	}
@@ -212,7 +213,7 @@ func (p *coroFrameRetentionProof) exactCallKeepaliveRoots(call *ssa.Call) []ssa.
 // SSA to dominate that call even when the root trace crossed a Phi component.
 // Codegen must spill these sources at the call boundary and use roots only as
 // the immutable proof that each source carries valid pointer provenance.
-func (p *coroFrameRetentionProof) exactCallKeepaliveSources(call *ssa.Call) []ssa.Value {
+func (p *coroFrameRetentionProof) exactCallKeepaliveSources(call ssa.CallInstruction) []ssa.Value {
 	if p == nil || call == nil {
 		return nil
 	}
@@ -255,6 +256,16 @@ func (p *coroFrameRetentionProof) provesTraceableUintptr(value ssa.Value) bool {
 	return ok
 }
 
+func (p *coroFrameRetentionProof) provesInterfaceParameter(parameter *ssa.Parameter) bool {
+	if p == nil || parameter == nil {
+		return false
+	}
+	root, ok := p.exactRoots[parameter]
+	return ok &&
+		root.value == parameter &&
+		root.kind == coroFrameRetentionRootInterfaceParameter
+}
+
 func (a *coroPhysicalPureSSAAudit) frameRetainsAllocation(alloc *ssa.Alloc) bool {
 	proof := a.currentFrameRetentionProof()
 	if proof == nil {
@@ -292,7 +303,7 @@ func (a *coroPhysicalPureSSAAudit) proveCurrentFrameRetention() *coroFrameRetent
 		exactRoots:                make(map[ssa.Value]coroFrameRetentionExactRoot),
 		stableAddresses:           make(map[coroFrameRetentionAddressUse]coroFrameRetentionAddressFact),
 		uintptrValues:             make(map[ssa.Value]coroFrameRetentionUintptrFact),
-		callKeepalives:            make(map[*ssa.Call]coroFrameRetentionCallFact),
+		callKeepalives:            make(map[ssa.CallInstruction]coroFrameRetentionCallFact),
 	}
 	if a.universe == nil || a.ctx == nil || a.fn == nil || emitShadowStackInstrumentation {
 		return proof
@@ -526,6 +537,20 @@ func (b *coroFrameRetentionRootBuilder) prove() {
 	if b == nil || b.audit == nil || b.audit.fn == nil || b.proof == nil {
 		return
 	}
+	// An interface parameter arrives as a copied type/data pair owned by this
+	// invocation. LLVM may spill those exact words into the coroutine frame,
+	// and terminal panic publication copies them into the parent-owned
+	// completion record before that frame is destroyed. The dynamic data word
+	// remains governed by ordinary Go call/escape lifetime and the selected
+	// nonmoving-conservative-or-none root profile.
+	for _, parameter := range b.audit.fn.Params {
+		if parameter == nil {
+			continue
+		}
+		if _, ok := types.Unalias(b.audit.typeOf(parameter.Type())).Underlying().(*types.Interface); ok {
+			b.addExactRoot(parameter, coroFrameRetentionRootInterfaceParameter)
+		}
+	}
 	// Ordinary escaping Allocs keep their Go heap identity. Recording the exact
 	// SSA pointer here states only that LLVM may spill that pointer into the
 	// scanned coroutine frame; it does not turn the referent into frame storage.
@@ -560,12 +585,13 @@ func (b *coroFrameRetentionRootBuilder) prove() {
 	}
 
 	// A pointer->uintptr value is certified only when every semantic use is a
-	// value-preserving integer conversion or one exact bounded
-	// managed-child/worker call. Returning, storing, arithmetic on, dynamically
-	// dispatching, or passing it to an arbitrary foreign declaration leaves it
-	// uncertified.  The conversion chain is deliberately one-way: converting an
-	// integer alias back to a pointer is still admitted only by the separate,
-	// exact same-expression roundtrip proof below.
+	// value-preserving integer conversion/Phi, a scalar comparison terminal, or
+	// one exact bounded managed-child/worker call. Returning, storing, general
+	// arithmetic on, dynamically dispatching, or passing it to an arbitrary
+	// foreign declaration leaves it uncertified. The conversion chain is
+	// deliberately one-way: converting an integer alias back to a pointer is
+	// still admitted only by the separate exact same-expression roundtrip proof
+	// below.
 	for _, block := range b.audit.fn.Blocks {
 		for _, instruction := range block.Instrs {
 			conversion, ok := instruction.(*ssa.Convert)
@@ -580,12 +606,12 @@ func (b *coroFrameRetentionRootBuilder) prove() {
 	// proof above.
 	for _, block := range b.audit.fn.Blocks {
 		for _, instruction := range block.Instrs {
-			call, ok := instruction.(*ssa.Call)
-			if !ok {
+			call, ok := instruction.(ssa.CallInstruction)
+			if !ok || call.Common() == nil {
 				continue
 			}
-			kind, bounded := b.boundedCallKind(call)
-			if !bounded || call.Common() == nil {
+			kind, bounded := b.boundedCallInstructionKind(call)
+			if !bounded {
 				continue
 			}
 			for _, argument := range call.Common().Args {
@@ -964,9 +990,27 @@ func (b *coroFrameRetentionRootBuilder) proveUintptrKeepalive(conversion *ssa.Co
 	for alias := range aliases {
 		b.proof.uintptrValues[alias] = coroFrameRetentionUintptrFact{roots: append([]ssa.Value(nil), roots...)}
 	}
-	sources := b.sortedValueSet(aliases)
 	for call, kind := range calls {
-		b.mergeCallFact(call, kind, trace.roots, sources)
+		// Retain only the pointer-derived aliases that this exact call consumes.
+		// The complete alias set can span sibling CFG branches and therefore
+		// does not necessarily dominate every call in the graph. Call arguments
+		// do dominate their call by SSA construction and are evaluated before
+		// compileCoroCallKeepaliveSlots publishes the child.
+		callSources := make(map[ssa.Value]struct{})
+		if common := call.Common(); common != nil {
+			for _, argument := range common.Args {
+				if _, pointerDerived := aliases[argument]; pointerDerived {
+					callSources[argument] = struct{}{}
+				}
+			}
+		}
+		if len(callSources) == 0 {
+			// boundedUintptrUses records a call only after finding at least one
+			// exact alias argument. Preserve fail-closed behavior if that
+			// invariant ever diverges.
+			continue
+		}
+		b.mergeCallFact(call, kind, trace.roots, b.sortedValueSet(callSources))
 	}
 }
 
@@ -1117,9 +1161,9 @@ func coroFrameRetentionIntegerHasPointerProvenance(value ssa.Value, visiting map
 	return false
 }
 
-func (b *coroFrameRetentionRootBuilder) boundedUintptrUses(root ssa.Value) (map[ssa.Value]struct{}, map[*ssa.Call]coroFrameRetentionCallKindV1, bool) {
+func (b *coroFrameRetentionRootBuilder) boundedUintptrUses(root ssa.Value) (map[ssa.Value]struct{}, map[ssa.CallInstruction]coroFrameRetentionCallKindV1, bool) {
 	aliases := map[ssa.Value]struct{}{root: {}}
-	calls := make(map[*ssa.Call]coroFrameRetentionCallKindV1)
+	calls := make(map[ssa.CallInstruction]coroFrameRetentionCallKindV1)
 	queue := []ssa.Value{root}
 	for head := 0; head < len(queue); head++ {
 		value := queue[head]
@@ -1158,6 +1202,22 @@ func (b *coroFrameRetentionRootBuilder) boundedUintptrUses(root ssa.Value) (map[
 					aliases[instruction] = struct{}{}
 					queue = append(queue, instruction)
 				}
+			case *ssa.BinOp:
+				if instruction.X != value && instruction.Y != value ||
+					!coroFrameRetentionIntegerLike(value.Type()) ||
+					!coroFrameRetentionIntegerLike(instruction.X.Type()) ||
+					!coroFrameRetentionIntegerLike(instruction.Y.Type()) {
+					return nil, nil, false
+				}
+				switch instruction.Op {
+				case token.EQL, token.NEQ, token.LSS, token.LEQ, token.GTR, token.GEQ:
+					// Comparisons consume the address-shaped word and produce a
+					// plain bool. Do not add the result to the provenance queue:
+					// it cannot later reconstruct or transport the pointer.
+					semanticUses++
+				default:
+					return nil, nil, false
+				}
 			case *ssa.Call:
 				if b.exactScalarBitcastTransform(instruction, value) {
 					semanticUses++
@@ -1167,6 +1227,25 @@ func (b *coroFrameRetentionRootBuilder) boundedUintptrUses(root ssa.Value) (map[
 					}
 					continue
 				}
+				kind, bounded := b.boundedUintptrCallKind(instruction, value)
+				if !bounded || instruction.Common() == nil {
+					return nil, nil, false
+				}
+				matches := 0
+				for _, argument := range instruction.Common().Args {
+					if argument == value {
+						matches++
+					}
+				}
+				if matches == 0 {
+					return nil, nil, false
+				}
+				semanticUses += matches
+				if previous, exists := calls[instruction]; exists && previous != kind {
+					return nil, nil, false
+				}
+				calls[instruction] = kind
+			case *ssa.Defer:
 				kind, bounded := b.boundedUintptrCallKind(instruction, value)
 				if !bounded || instruction.Common() == nil {
 					return nil, nil, false
@@ -1243,12 +1322,34 @@ func (b *coroFrameRetentionRootBuilder) exactScalarBitcastTransform(call *ssa.Ca
 // only when the complete builtin lowering is frozen and the helper for this
 // exact operand is a demanded coroutine child.  A plain, foreign, elided, or
 // otherwise unresolved helper is not a uintptr keepalive terminal.
-func (b *coroFrameRetentionRootBuilder) boundedUintptrCallKind(call *ssa.Call, value ssa.Value) (coroFrameRetentionCallKindV1, bool) {
-	if kind, bounded := b.boundedCallKind(call); bounded {
+func (b *coroFrameRetentionRootBuilder) boundedUintptrCallKind(call ssa.CallInstruction, value ssa.Value) (coroFrameRetentionCallKindV1, bool) {
+	if kind, bounded := b.boundedCallInstructionKind(call); bounded {
 		return kind, true
 	}
-	if b.boundedManagedPrintArgument(call, value) {
+	if ordinary, ok := call.(*ssa.Call); ok && b.boundedManagedPrintArgument(ordinary, value) {
 		return coroFrameRetentionCallManagedChildV1, true
+	}
+	return coroFrameRetentionCallInvalidV1, false
+}
+
+func (b *coroFrameRetentionRootBuilder) boundedCallInstructionKind(
+	call ssa.CallInstruction,
+) (coroFrameRetentionCallKindV1, bool) {
+	if call == nil || call.Common() == nil || call.Parent() != b.audit.fn {
+		return coroFrameRetentionCallInvalidV1, false
+	}
+	switch call := call.(type) {
+	case *ssa.Call:
+		return b.boundedCallKind(call)
+	case *ssa.Defer:
+		if b.audit.universe == nil || !b.audit.universe.CoroWorkerSupported() {
+			return coroFrameRetentionCallInvalidV1, false
+		}
+		if _, recognized, err := validateCoroWorkerCgoCall(
+			b.audit.plan, b.audit.universe, call,
+		); recognized && err == nil {
+			return coroFrameRetentionCallWorkerV1, true
+		}
 	}
 	return coroFrameRetentionCallInvalidV1, false
 }
@@ -1302,7 +1403,7 @@ func (b *coroFrameRetentionRootBuilder) boundedCallKind(call *ssa.Call) (coroFra
 			}
 		}
 	}
-	if b.audit.universe.CoroWorkerEnabled() {
+	if b.audit.universe.CoroWorkerSupported() {
 		semantics, intrinsic, err := coroIntrinsicCallSiteSemantics(b.audit.universe, call)
 		if err == nil && intrinsic && semantics == CoroIntrinsicCallInlineSuspend {
 			workerCertified := false
@@ -1318,6 +1419,11 @@ func (b *coroFrameRetentionRootBuilder) boundedCallKind(call *ssa.Call) (coroFra
 			if workerCertified {
 				return coroFrameRetentionCallWorkerV1, true
 			}
+		}
+		if _, recognized, cgoErr := validateCoroWorkerCgoCall(
+			b.audit.plan, b.audit.universe, call,
+		); recognized && cgoErr == nil {
+			return coroFrameRetentionCallWorkerV1, true
 		}
 		if _, recognized, foreignErr := validateCoroWorkerForeignCall(
 			b.audit.plan, b.audit.universe, call, b.audit.universe.prog.PointerSize(),
@@ -1356,7 +1462,7 @@ func (b *coroFrameRetentionRootBuilder) boundedCallKind(call *ssa.Call) (coroFra
 	return coroFrameRetentionCallManagedChildV1, true
 }
 
-func (b *coroFrameRetentionRootBuilder) mergeCallFact(call *ssa.Call, kind coroFrameRetentionCallKindV1, roots map[ssa.Value]struct{}, sources []ssa.Value) {
+func (b *coroFrameRetentionRootBuilder) mergeCallFact(call ssa.CallInstruction, kind coroFrameRetentionCallKindV1, roots map[ssa.Value]struct{}, sources []ssa.Value) {
 	if call == nil || kind == coroFrameRetentionCallInvalidV1 {
 		return
 	}
@@ -2011,7 +2117,7 @@ func coroFrameRetentionRootDigest(a *coroPhysicalPureSSAAudit, proof *coroFrameR
 		}
 		fields = append(fields, framedEmissionKey(entry...))
 	}
-	callKeys := make([]*ssa.Call, 0, len(proof.callKeepalives))
+	callKeys := make([]ssa.CallInstruction, 0, len(proof.callKeepalives))
 	for call := range proof.callKeepalives {
 		callKeys = append(callKeys, call)
 	}

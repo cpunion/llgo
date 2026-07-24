@@ -29,6 +29,7 @@ import (
 // observer state enters generated code or the runtime ABI.
 type coroSiteEmissionObserver struct {
 	instruction                ssa.Instruction
+	placement                  coroRuntimeHelperPlacement
 	expected                   map[string]none
 	seen                       map[string]none
 	expectedIntrinsic          bool
@@ -50,17 +51,32 @@ type coroSiteEmissionObserver struct {
 }
 
 func (p *context) beginCoroSiteEmission(instruction ssa.Instruction) func() {
-	return p.beginCoroSiteEmissionMode(instruction, coroRuntimeHelperAtSource)
+	return p.beginCoroSiteEmissionMode(instruction, coroRuntimeHelperAtSource, true, true)
 }
 
 func (p *context) beginCoroRelocatedSiteEmission(instruction ssa.Instruction, placement coroRuntimeHelperPlacement) func() {
 	if placement == coroRuntimeHelperAtSource {
 		panic("relocated coroutine SitePlan emission requires a non-source placement")
 	}
-	return p.beginCoroSiteEmissionMode(instruction, placement)
+	return p.beginCoroSiteEmissionMode(instruction, placement, true, false)
 }
 
-func (p *context) beginCoroSiteEmissionMode(instruction ssa.Instruction, placement coroRuntimeHelperPlacement) func() {
+func (p *context) beginCoroRelocatedIntrinsicEmission(
+	instruction ssa.Instruction,
+	placement coroRuntimeHelperPlacement,
+) func() {
+	if placement == coroRuntimeHelperAtSource {
+		panic("relocated coroutine intrinsic emission requires a non-source placement")
+	}
+	return p.beginCoroSiteEmissionMode(instruction, placement, false, true)
+}
+
+func (p *context) beginCoroSiteEmissionMode(
+	instruction ssa.Instruction,
+	placement coroRuntimeHelperPlacement,
+	observeHelpers bool,
+	observeCall bool,
+) func() {
 	if p == nil || instruction == nil || p.compilation == nil || p.emissionUniverse == nil ||
 		!p.hasCoroPhysicalEmission() || p.rawPlainBody {
 		return func() {}
@@ -73,7 +89,9 @@ func (p *context) beginCoroSiteEmissionMode(instruction ssa.Instruction, placeme
 		if err != nil {
 			panic(fmt.Errorf("coroutine emission site %q: %w", instruction.String(), err))
 		}
-		helpers = plan.managedRuntimeHelpersAt(placement)
+		if observeHelpers {
+			helpers = plan.managedRuntimeHelpersAt(placement)
+		}
 	}
 	physical := coroPhysicalInstructionPlan{}
 	hasPhysical := false
@@ -95,6 +113,7 @@ func (p *context) beginCoroSiteEmissionMode(instruction ssa.Instruction, placeme
 	helpers = filtered
 	observer := &coroSiteEmissionObserver{
 		instruction:       instruction,
+		placement:         placement,
 		expected:          make(map[string]none, len(helpers)),
 		seen:              make(map[string]none, len(helpers)),
 		observeFrozenSite: p.emissionUniverse.CompleteRuntimeABI(),
@@ -107,15 +126,19 @@ func (p *context) beginCoroSiteEmissionMode(instruction ssa.Instruction, placeme
 		observer.seenPhysicalOperation = physical.operation == coroPhysicalOperationNone
 		observer.seenPhysicalOutcome = physical.outcome == coroPhysicalOutcomeNone
 	}
-	if plan.hasCallPlan {
+	if observeCall && plan.hasCallPlan {
 		if plan.callPlan.failure != "" {
 			panic(fmt.Errorf("coroutine emission site %q has an invalid frozen call SitePlan: %s", instruction.String(), plan.callPlan.failure))
 		}
 		callPlan := plan.callPlan.plan
-		observer.expectedIntrinsic = callPlan.Intrinsic && callPlan.Elision == CoroCallElidedIntrinsic
+		observer.expectedIntrinsic = callPlan.Intrinsic &&
+			callPlan.Elision == CoroCallElidedIntrinsic &&
+			plan.callPlan.intrinsicPlacement == placement
 		observer.expectedIntrinsicOpcode = plan.callPlan.opcode
 		observer.expectedIntrinsicSemantics = callPlan.IntrinsicSemantics
-		observer.expectedElision = callPlan.Elision
+		if placement == coroRuntimeHelperAtSource {
+			observer.expectedElision = callPlan.Elision
+		}
 	}
 	for _, helper := range helpers {
 		observer.expected[helper] = none{}
@@ -336,6 +359,9 @@ func (p *context) observeCoroPhysicalOperation(instruction ssa.Instruction, actu
 		panic(fmt.Errorf("coroutine emission site %q emitted its physical operation recipe more than once", instruction.String()))
 	}
 	observer.seenPhysicalOperation = true
+	if actual == coroPhysicalOperationWorkerCgo {
+		p.recordCoroCallElision(CoroCallElidedCgoWorker)
+	}
 }
 
 func (p *context) observeCoroPhysicalOutcome(instruction ssa.Instruction, actual coroPhysicalOutcomeRecipe) {
@@ -357,6 +383,39 @@ func (p *context) observeCoroPhysicalOutcome(instruction ssa.Instruction, actual
 }
 
 func (p *context) observeCoroCallElision(actual CoroCallElisionKind) {
+	p.recordCoroCallElision(actual)
+}
+
+func (p *context) observeCoroDeferredIntrinsicCapture() {
+	observer := p.coroEmissionSite()
+	if observer == nil || !observer.observeFrozenSite {
+		return
+	}
+	if _, deferred := observer.instruction.(*ssa.Defer); !deferred ||
+		observer.expectedElision != CoroCallElidedIntrinsic ||
+		observer.expectedIntrinsic {
+		panic("deferred intrinsic capture has no exact relocated SitePlan")
+	}
+	p.recordCoroCallElision(CoroCallElidedIntrinsic)
+}
+
+func (p *context) observeCoroDeferredCgoWorkerCapture() {
+	observer := p.coroEmissionSite()
+	if observer == nil || !observer.observeFrozenSite {
+		return
+	}
+	if _, deferred := observer.instruction.(*ssa.Defer); !deferred ||
+		observer.expectedElision != CoroCallElidedCgoWorker ||
+		observer.expectedIntrinsic {
+		panic("deferred cgo worker capture has no exact relocated SitePlan")
+	}
+	p.recordCoroCallElision(CoroCallElidedCgoWorker)
+}
+
+// recordCoroCallElision is shared by source-level frontend elisions and
+// physical operations whose recipe replaces the source call. Keeping the
+// mutation here makes one SitePlan observer authoritative for both views.
+func (p *context) recordCoroCallElision(actual CoroCallElisionKind) {
 	observer := p.coroEmissionSite()
 	if observer == nil || !observer.observeFrozenSite {
 		return
@@ -407,7 +466,9 @@ func (p *context) observeCoroIntrinsicCallEmission(opcode int, actual CoroIntrin
 			observer.instruction.String(), opcode, observer.expectedIntrinsicOpcode,
 		))
 	}
-	p.observeCoroCallElision(CoroCallElidedIntrinsic)
+	if observer.expectedElision == CoroCallElidedIntrinsic {
+		p.observeCoroCallElision(CoroCallElidedIntrinsic)
+	}
 	if actual != observer.expectedIntrinsicSemantics {
 		panic(fmt.Errorf(
 			"coroutine emission site %q emitted intrinsic recipe %d, frozen SitePlan requires %d",

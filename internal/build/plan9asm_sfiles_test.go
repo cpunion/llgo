@@ -30,6 +30,18 @@ func TestSelectedSFilesSkipsTestAsm(t *testing.T) {
 	}
 }
 
+func TestPlan9AsmSFilesExcludesCPreprocessedAssembly(t *testing.T) {
+	dir := "/tmp/pkg"
+	got := plan9AsmSFiles([]string{
+		filepath.Join(dir, "asm_arm64.s"),
+		filepath.Join(dir, "gcc_arm64.S"),
+	})
+	want := []string{filepath.Join(dir, "asm_arm64.s")}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("plan9AsmSFiles() = %#v, want %#v", got, want)
+	}
+}
+
 func TestSelectedSFilesHandlesEmptyInput(t *testing.T) {
 	if got := selectedSFiles("", []string{"stub.s"}); got != nil {
 		t.Fatalf("selectedSFiles(empty dir) = %#v, want nil", got)

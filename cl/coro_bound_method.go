@@ -24,6 +24,173 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
+// validateCoroExactMethodWrapper recognizes x/tools/ssa's canonical promoted
+// or implicit-indirection method wrapper. The wrapper has one receiver spill,
+// an optional nil check and field-selection chain, and one exact tail call to
+// the declared method. These wrappers are ordinary Go bodies and must remain
+// available when a complete method set is colored by the stackless plan.
+func validateCoroExactMethodWrapper(fn *ssa.Function) error {
+	if fn == nil || fn.Pkg != nil || fn.Parent() != nil || fn.Syntax() != nil ||
+		fn.Signature == nil || fn.Signature.Recv() == nil || len(fn.FreeVars) != 0 {
+		return fmt.Errorf("requires one top-level syntax-free receiver method")
+	}
+	object, ok := fn.Object().(*types.Func)
+	if !ok || object == nil {
+		return fmt.Errorf("has no exact declared method object")
+	}
+	method, ok := object.Type().(*types.Signature)
+	if !ok || method.Recv() == nil {
+		return fmt.Errorf("declared method has no receiver")
+	}
+	if fn.Name() != object.Name() || fn.Synthetic != fmt.Sprintf("wrapper for %s", object) {
+		return fmt.Errorf("has non-canonical method-wrapper identity")
+	}
+	params := coroPhysicalNormalizeSourceSignature(fn.Signature).Params()
+	if params == nil || len(fn.Params) != params.Len() || len(fn.Params) == 0 {
+		return fmt.Errorf("SSA parameters do not match the receiver-first signature")
+	}
+	for index, parameter := range fn.Params {
+		if parameter == nil || !types.Identical(parameter.Type(), params.At(index).Type()) {
+			return fmt.Errorf("SSA parameter %d does not match the receiver-first signature", index)
+		}
+	}
+	if len(fn.Locals) > 1 || len(fn.Locals) == 1 && fn.Locals[0] == nil {
+		return fmt.Errorf("contains more than one receiver spill")
+	}
+	var receiverAlloc *ssa.Alloc
+	if len(fn.Locals) == 1 {
+		receiverAlloc = fn.Locals[0]
+	}
+
+	var receiverStore *ssa.Store
+	var wrapperCall *ssa.Call
+	var ret *ssa.Return
+	extracts := make(map[int]*ssa.Extract)
+	derived := func(value ssa.Value) bool { return false }
+	derived = func(value ssa.Value) bool {
+		switch value := value.(type) {
+		case *ssa.Parameter:
+			return value == fn.Params[0]
+		case *ssa.Alloc:
+			return receiverAlloc != nil && value == receiverAlloc
+		case *ssa.UnOp:
+			return derived(value.X)
+		case *ssa.FieldAddr:
+			return derived(value.X)
+		case *ssa.Field:
+			return derived(value.X)
+		case *ssa.ChangeType:
+			return derived(value.X)
+		case *ssa.Convert:
+			return derived(value.X)
+		case *ssa.Call:
+			common := value.Common()
+			builtin, ok := common.Value.(*ssa.Builtin)
+			return ok && builtin.Name() == "ssa:wrapnilchk" && len(common.Args) == 3 && derived(common.Args[0])
+		default:
+			return false
+		}
+	}
+
+	if len(fn.Blocks) != 1 || fn.Blocks[0] == nil {
+		return fmt.Errorf("is not one single-block tail wrapper")
+	}
+	for _, instruction := range fn.Blocks[0].Instrs {
+		switch instruction := instruction.(type) {
+		case *ssa.DebugRef:
+		case *ssa.Alloc:
+			if receiverAlloc == nil || instruction != receiverAlloc {
+				return fmt.Errorf("contains a non-receiver allocation")
+			}
+		case *ssa.Store:
+			if receiverAlloc == nil || receiverStore != nil || instruction.Addr != receiverAlloc || instruction.Val != fn.Params[0] {
+				return fmt.Errorf("contains a non-canonical receiver spill")
+			}
+			receiverStore = instruction
+		case *ssa.UnOp:
+			if instruction.Op != token.MUL || !derived(instruction.X) {
+				return fmt.Errorf("contains a non-canonical receiver load")
+			}
+		case *ssa.FieldAddr:
+			if !derived(instruction.X) {
+				return fmt.Errorf("contains a field selection outside the receiver chain")
+			}
+		case *ssa.Field:
+			if !derived(instruction.X) {
+				return fmt.Errorf("contains a field selection outside the receiver chain")
+			}
+		case *ssa.ChangeType:
+			if !derived(instruction.X) {
+				return fmt.Errorf("contains a type change outside the receiver chain")
+			}
+		case *ssa.Convert:
+			if !derived(instruction.X) {
+				return fmt.Errorf("contains a conversion outside the receiver chain")
+			}
+		case *ssa.Call:
+			common := instruction.Common()
+			if common == nil {
+				return fmt.Errorf("contains a call without CallCommon")
+			}
+			if builtin, ok := common.Value.(*ssa.Builtin); ok {
+				if builtin.Name() != "ssa:wrapnilchk" || !derived(instruction) {
+					return fmt.Errorf("contains a non-canonical wrapper builtin %q", builtin.Name())
+				}
+				continue
+			}
+			if wrapperCall != nil {
+				return fmt.Errorf("contains more than one method call")
+			}
+			wrapperCall = instruction
+		case *ssa.Extract:
+			if _, duplicate := extracts[instruction.Index]; duplicate {
+				return fmt.Errorf("contains a duplicate result extract")
+			}
+			extracts[instruction.Index] = instruction
+		case *ssa.Return:
+			if ret != nil {
+				return fmt.Errorf("contains more than one return")
+			}
+			ret = instruction
+		default:
+			return fmt.Errorf("contains non-wrapper instruction %T", instruction)
+		}
+	}
+	if receiverAlloc != nil && receiverStore == nil || wrapperCall == nil || ret == nil {
+		return fmt.Errorf("does not contain one canonical receiver value, method call, and return")
+	}
+	common := wrapperCall.Common()
+	if common.IsInvoke() {
+		if common.Method != object || !derived(common.Value) || len(common.Args) != len(fn.Params)-1 {
+			return fmt.Errorf("interface wrapper does not invoke the exact declared method")
+		}
+		for index, argument := range common.Args {
+			if argument != fn.Params[index+1] {
+				return fmt.Errorf("interface wrapper argument %d is not the source parameter", index)
+			}
+		}
+	} else {
+		callee := common.StaticCallee()
+		calleeObject, _ := calleeObject(callee).(*types.Func)
+		if callee == nil || calleeObject != object || len(common.Args) != len(fn.Params) || !derived(common.Args[0]) {
+			return fmt.Errorf("concrete wrapper does not call the exact declared method")
+		}
+		for index := 1; index < len(common.Args); index++ {
+			if common.Args[index] != fn.Params[index] {
+				return fmt.Errorf("concrete wrapper argument %d is not the source parameter", index)
+			}
+		}
+	}
+	return validateCoroExactTailCallResults(fn, wrapperCall, ret, extracts)
+}
+
+func calleeObject(fn *ssa.Function) types.Object {
+	if fn == nil {
+		return nil
+	}
+	return fn.Object()
+}
+
 // validateCoroExactBoundMethodWrapper recognizes only x/tools/ssa's canonical
 // method-value closure body. The wrapper has one captured receiver and a
 // tail-call to that exact method; this makes it an ordinary captured function

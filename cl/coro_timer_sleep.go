@@ -68,6 +68,7 @@ func coroControlledTimerParkSignatureV2() *types.Signature {
 		types.NewParam(token.NoPos, nil, "state", pointer),
 		types.NewParam(token.NoPos, nil, "controller", pointer),
 		types.NewParam(token.NoPos, nil, "control", types.NewPointer(types.Typ[types.Uint32])),
+		types.NewParam(token.NoPos, nil, "ownerRoute", types.NewPointer(types.Typ[types.Uint32])),
 		types.NewParam(token.NoPos, nil, "expected", types.Typ[types.Uint32]),
 		types.NewParam(token.NoPos, nil, "deadline", types.Typ[types.Int64]),
 	)
@@ -124,13 +125,14 @@ func (p *context) compileCoroTimerSleep(b llssa.Builder, args []ssa.Value) {
 // task abort/shutdown enter compiler cleanup and never return to the manager.
 func (p *context) compileCoroControlledTimerWait(b llssa.Builder, args []ssa.Value) llssa.Expr {
 	body := p.requireCoroTimerSleepBody(b)
-	if len(args) != 4 {
-		panic("llgo.coroControlledTimerWait requires exactly (unsafe.Pointer, *uint32, uint32, int64) arguments")
+	if len(args) != 5 {
+		panic("llgo.coroControlledTimerWait requires exactly (unsafe.Pointer, *uint32, *uint32, uint32, int64) arguments")
 	}
 	controller := p.compileValue(b, args[0])
 	control := p.compileValue(b, args[1])
-	expected := p.compileValue(b, args[2])
-	deadline := p.compileValue(b, args[3])
+	ownerRoute := p.compileValue(b, args[2])
+	expected := p.compileValue(b, args[3])
+	deadline := p.compileValue(b, args[4])
 	state := b.Alloc(p.prog.RuntimeType("CoroTimerParkV2"), false)
 	result := b.Alloc(p.prog.Uint32(), false)
 
@@ -146,6 +148,7 @@ func (p *context) compileCoroControlledTimerWait(b llssa.Builder, args []ssa.Val
 				suspend.Convert(suspend.Prog.VoidPtr(), state),
 				controller,
 				control,
+				ownerRoute,
 				expected,
 				deadline,
 			)
@@ -170,6 +173,6 @@ func (p *context) compileCoroControlledTimerWait(b llssa.Builder, args []ssa.Val
 	// The timer table deliberately owns only a scalar controller key. This
 	// post-resume use makes the address-shaped owner and its interior control
 	// pointer live across llvm.coro.suspend until source retirement completes.
-	b.KeepAlive(controller, control)
+	b.KeepAlive(controller, control, ownerRoute)
 	return b.Load(result)
 }

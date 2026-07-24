@@ -28,7 +28,7 @@ func TestCoroPlanDigestMetadataUsesEffectiveLLVMTarget(t *testing.T) {
 			defer prog.Dispose()
 			ctx := &context{
 				prog:      prog,
-				buildConf: &Config{CoroProfile: CoroProfileStackless},
+				buildConf: &Config{},
 			}
 			metadata, err := buildCoroPlanDigestMetadata(ctx)
 			if err != nil {

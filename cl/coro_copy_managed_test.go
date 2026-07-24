@@ -107,7 +107,6 @@ func TestCoroCopyHelperNativeAndWasm32(t *testing.T) {
 
 			compilation := &Compilation{CoroPlan: fixture.plan, EmissionUniverse: fixture.universe}
 			enableCoroChildAwaitCompilation(compilation)
-			compilation.CoroProfile = CoroProfileStackless
 			compilation.PanicABI = coro.PanicExplicitStatusABIV0
 			runtimeLL, _, err := NewPackageExWithEmbedOptions(
 				fixture.prog, nil, nil, nil, fixture.runtimePkg.ssa, []*ast.File{fixture.runtimePkg.file}, goembed.VarMap{},

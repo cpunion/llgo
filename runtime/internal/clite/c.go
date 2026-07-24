@@ -197,12 +197,15 @@ func Strtok(s, delim *Char) *Char
 //go:linkname Strerror C.strerror
 func Strerror(errnum Int) *Char
 
+//llgo:coro sync
 //go:linkname Sprintf C.sprintf
 func Sprintf(s *Char, format *Char, __llgo_va_list ...any) Int
 
+//llgo:coro sync
 //go:linkname Snprintf C.snprintf
 func Snprintf(s *Char, n uintptr, format *Char, __llgo_va_list ...any) Int
 
+//llgo:coro sync
 //go:linkname Vsnprintf C.vsnprintf
 func Vsnprintf(s *Char, n uintptr, format *Char, ap Pointer) Int
 
@@ -242,6 +245,10 @@ func Exit(Int)
 
 // -----------------------------------------------------------------------------
 
+// rand may serialize libc's process-local PRNG state with an internal lock,
+// but does not wait for application I/O or an external event.
+//
+//llgo:coro sync
 //go:linkname Rand C.rand
 func Rand() Int
 
@@ -276,6 +283,14 @@ func Fread(data Pointer, size, count uintptr, fp FilePtr) uintptr
 //go:linkname Fflush C.fflush
 func Fflush(fp FilePtr) Int
 
+// Fopen remains may-block by default: an ordinary filesystem open can wait on
+// an external service and must not run while owning an executor. A narrowly
+// certified wrapper may select the executor-safe refinement when it proves
+// that the exact target operation is bounded (for example, baremetal startup
+// registration of the fixed /dev/std* streams). The refinement is attached to
+// the exact SSA call site; it does not change direct user calls to Fopen.
+//
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete inline-progress=executor-safe inline-affinity=any-thread inline-reentry=none inline-memory=borrow-until-return
 //go:linkname Fopen C.fopen
 func Fopen(c *Char, mod *Char) FilePtr
 

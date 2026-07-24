@@ -793,6 +793,23 @@ func (b Builder) DISetCurrentDebugLocation(diScope DIScope, pos token.Position) 
 	)
 }
 
+// DICopyCurrentDebugLocation makes a compiler-owned auxiliary builder inherit
+// the source location already selected on from. Frontends use this when one Go
+// instruction expands into control flow emitted through more than one LLVM
+// builder. Without the copy, calls in those auxiliary blocks have no !dbg even
+// though their function has a DISubprogram, which LLVM correctly rejects for
+// potentially inlinable calls.
+func (b Builder) DICopyCurrentDebugLocation(from Builder) {
+	if b == nil || from == nil || b.Func == nil || from.Func != b.Func || b.Func.diFunc == nil {
+		return
+	}
+	loc := from.impl.GetCurrentDebugLocation()
+	if loc.Scope.IsNil() {
+		return
+	}
+	b.impl.SetCurrentDebugLocation(loc.Line, loc.Col, loc.Scope, loc.InlinedAt)
+}
+
 func (b Builder) DebugFunction(f Function, funcScope *types.Scope, pos token.Position, bodyPos token.Position) {
 	b.diFuncScope = funcScope
 	p := f

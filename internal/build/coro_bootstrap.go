@@ -56,7 +56,7 @@ const (
 	coroTimerParkSymbolV2                                       = "__llgo_coro_timer_park_v2"
 	coroTimerParkControlledSymbolV2                             = "__llgo_coro_timer_park_controlled_v2"
 	coroTimerResumeSymbolV2                                     = "__llgo_coro_timer_resume_v2"
-	coroTimerCancelControlledSymbolV2                           = "__llgo_coro_timer_cancel_controlled_v2"
+	coroTimerRequestControlledSymbolV2                          = "__llgo_coro_timer_request_controlled_v2"
 	coroPollParkSymbolV2                                        = "__llgo_coro_poll_park_v2"
 	coroPollResumeSymbolV2                                      = "__llgo_coro_poll_resume_v2"
 	coroPollUpdateDeadlineOrAbortSymbolV1                       = "__llgo_coro_poll_update_deadline_or_abort_v1"
@@ -73,6 +73,10 @@ const (
 	coroChanResumeSymbolV1                                      = "__llgo_coro_chan_resume_v1"
 	coroWorkerParkSymbolV1                                      = "__llgo_coro_worker_park_v1"
 	coroWorkerResumeSymbolV1                                    = "__llgo_coro_worker_resume_v1"
+	coroOSThreadLockSymbolV1                                    = "__llgo_coro_os_thread_lock_v1"
+	coroOSThreadUnlockSymbolV1                                  = "__llgo_coro_os_thread_unlock_v1"
+	coroOSThreadLockedSymbolV1                                  = "__llgo_coro_os_thread_locked_v1"
+	coroOSThreadForeignCallSymbolV1                             = "__llgo_coro_os_thread_foreign_call_v1"
 
 	// Step kinds and semantic roles are part of the cross-target bootstrap ABI.
 	// Keep these numeric values synchronized with ssa and runtime/internal/coro.
@@ -124,50 +128,24 @@ func validateCoroProgramBootstrapConfig(conf *Config) error {
 	if conf == nil {
 		return nil
 	}
-	if conf.coroClosedStaticSpawnActive() && !conf.coroProgramBootstrapActive() {
-		return fmt.Errorf("enable coroutine closed static spawn: runnable program bootstrap v2 is required")
-	}
-	if conf.coroProgramBootstrapActive() && !conf.coroProgramBootstrapABIActive() {
-		return fmt.Errorf("enable coroutine program bootstrap runtime: program bootstrap ABI is required")
-	}
-	if conf.coroChannelActive() && !conf.coroProgramBootstrapActive() {
-		return fmt.Errorf("enable coroutine channel lowering: runnable program bootstrap is required")
-	}
-	if conf.coroNativeFleetActive() && !conf.coroProgramBootstrapActive() {
-		return fmt.Errorf("enable native coroutine fleet: runnable program bootstrap is required")
-	}
-	if conf.coroNativeFleetActive() && !conf.coroWorkerActive() {
+	if conf.coroNativeFleetSupported() && !conf.coroWorkerSupported() {
 		return fmt.Errorf("enable native coroutine fleet: bounded native worker capability is required")
 	}
-	if conf.coroWorkerActive() && !conf.coroProgramBootstrapActive() {
-		return fmt.Errorf("enable coroutine worker lowering: runnable program bootstrap is required")
-	}
-	if conf.coroWorkerActive() && !nativeCoroWorkerRuntimeABI(conf) {
+	if conf.coroWorkerSupported() && !nativeCoroWorkerRuntimeABI(conf) {
 		return fmt.Errorf("enable coroutine worker lowering: a native Darwin/Linux pthread worker adapter is required")
 	}
-	if conf.coroNativeFleetActive() && !nativeCoroTimerRuntimeABI(conf) {
+	if conf.coroNativeFleetSupported() && !nativeCoroTimerRuntimeABI(conf) {
 		return fmt.Errorf("enable native coroutine fleet: a 64-bit native Darwin/Linux timer reactor is required")
 	}
-	if !conf.coroProgramBootstrapABIActive() {
-		return nil
-	}
-	switch {
-	case !conf.coroEntryResolutionActive():
-		return fmt.Errorf("enable coroutine program bootstrap ABI: coroutine entry resolution is required")
-	case !conf.coroPhysicalABIActive():
-		return fmt.Errorf("enable coroutine program bootstrap ABI: coroutine physical ABI is required")
-	case !conf.coroChildAwaitActive():
-		return fmt.Errorf("enable coroutine program bootstrap ABI: coroutine child await is required")
-	case conf.BuildMode != BuildModeExe:
-		return fmt.Errorf("enable coroutine program bootstrap ABI: executable build mode is required")
-	default:
-		return nil
-	}
+	return nil
 }
 
 func prepareCoroProgramBootstrapsV1(ctx *context) (map[string]*coroProgramBootstrapV1, error) {
-	if ctx == nil || ctx.buildConf == nil || !ctx.buildConf.coroProgramBootstrapABIActive() {
+	if ctx == nil || ctx.buildConf == nil {
 		return nil, nil
+	}
+	if ctx.buildConf.BuildMode != BuildModeExe {
+		return map[string]*coroProgramBootstrapV1{}, nil
 	}
 	bootstraps := make(map[string]*coroProgramBootstrapV1)
 	for _, pkg := range ctx.initial {
@@ -183,9 +161,11 @@ func prepareCoroProgramBootstrapsV1(ctx *context) (map[string]*coroProgramBootst
 		}
 		bootstraps[pkg.ID] = bootstrap
 	}
-	if len(bootstraps) == 0 {
-		return nil, fmt.Errorf("no linked main package is available for the executable startup table")
-	}
+	// Some compiler/runtime-island tests build executable-shaped package
+	// modules without performing a final link. There is no program entry module
+	// to bind in that phase, so an empty table set is valid. The actual
+	// executable link still fails closed in linkPkgs when its exact main-package
+	// table is absent.
 	return bootstraps, nil
 }
 
@@ -194,7 +174,7 @@ func prepareCoroProgramBootstrapsV1(ctx *context) (map[string]*coroProgramBootst
 // init, and main. Go bodies retain exactly one primary selected by the plan;
 // compiler-owned stages are bounded direct-plain calls.
 func selectCoroProgramBootstrapV2(ctx *context, pkg *packages.Package) (*coroProgramBootstrapV1, error) {
-	if ctx == nil || ctx.buildConf == nil || !ctx.buildConf.coroProgramBootstrapActive() {
+	if ctx == nil || ctx.buildConf == nil {
 		return nil, nil
 	}
 	if err := validateCoroProgramBootstrapConfig(ctx.buildConf); err != nil {
@@ -390,7 +370,12 @@ func selectCoroProgramManagedStepV2(
 			return coroProgramBootstrapStepV1{}, fmt.Errorf("coroutine program bootstrap %s: coroutine target %q is not one async-only direct coroutine (root=%s demand=%s rep=%s primary=%s effect=%s; value-sites=%v)",
 				label, plan.ID, rootDemand, plan.Demand, plan.FuncRep, plan.Primary, plan.Effect, coroProgramFunctionValueSites(ctx.coroPlan, fn))
 		}
-		if unsupported := plan.Exec &^ (coro.MayUnwind | coro.NeedsPreempt | coro.IRQUnsafe); unsupported != 0 {
+		// NeedsCleanupFrame is a property of the already-frozen coroutine body,
+		// not a separate bootstrap execution protocol. Physical preflight proves
+		// and emits that body's defer/recover frame before this selector publishes
+		// its ordinary scheduler root descriptor.
+		const supportedCoroutine = coro.MayUnwind | coro.NeedsCleanupFrame | coro.NeedsPreempt | coro.IRQUnsafe
+		if unsupported := plan.Exec &^ supportedCoroutine; unsupported != 0 {
 			trace := ""
 			if unsupported.Contains(coro.OpaqueExec) {
 				trace = "; opaque path: " + coroProgramOpaqueExecPath(ctx.coroPlan, fn)
@@ -627,80 +612,75 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 	write("bootstrap={version:u32,flags:u32,hash-lo:u64,hash-hi:u64,step-count:uintptr,steps:ptr,factory:ptr}")
 	write("direct-plain=" + strconv.FormatUint(uint64(coroProgramStepDirectPlainV1), 10))
 	write("coro-root=" + strconv.FormatUint(uint64(coroProgramStepCoroRootV1), 10))
-	if ctx.buildConf.coroProgramBootstrapActive() {
-		write("factory=compiler-static-mixed-v2:" + coroProgramBootstrapFactorySymbolV2)
-		if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
-			write("driver=runtime-static-single-p-native-v2:" +
-				coroProgramBeginSymbolV1 + ":" +
-				coroProgramRunSliceSymbolV2 + "(g:ptr,handle:ptr,budget:u32,out:*run-result-v2)->u32:" +
-				coroProgramContinueSliceSymbolV2 + "(executor-slot:u32,executor-generation:u32,epoch:u32,budget:u32,out:*run-result-v2)->u32:" +
-				"budget=" + strconv.FormatUint(uint64(coroProgramNativeRunBudgetV2), 10) + ":" +
-				"run-result-v2={flags:u32,used:u32,executor-slot:u32,executor-generation:u32,epoch:u32,deadline-lo:u32,deadline-hi:u32,reserved:u32}:" +
-				"complete=" + strconv.FormatUint(uint64(coroProgramDriveCompleteV2), 10) + ":" +
-				"yielded=" + strconv.FormatUint(uint64(coroProgramDriveYieldedV2), 10) + ":" +
-				"inline-flags=" + strconv.FormatUint(uint64(coroProgramRunMoreV2|coroProgramRunRequestInlineV2), 10))
-		} else if hostCoroPullRuntimeABI(ctx.buildConf) {
-			write("driver=runtime-static-single-p-host-pull-v1:" +
-				coroProgramBeginSymbolV1 + ":" +
-				coroProgramRunSliceSymbolV2 + "(g:ptr,handle:ptr,budget:u32,out:*run-result-v2)->u32:" +
-				coroProgramContinueSliceSymbolV2 + "(executor-slot:u32,executor-generation:u32,epoch:u32,budget:u32,out:*run-result-v2)->u32:" +
-				"budget=" + strconv.FormatUint(uint64(coroProgramNativeRunBudgetV2), 10) + ":" +
-				"run-result-v2={flags:u32,used:u32,executor-slot:u32,executor-generation:u32,epoch:u32,deadline-lo:u32,deadline-hi:u32,reserved:u32}:" +
-				"complete=" + strconv.FormatUint(uint64(coroProgramDriveCompleteV2), 10) + ":" +
-				"suspended=" + strconv.FormatUint(uint64(coroProgramDriveSuspendedV2), 10) + ":" +
-				"yielded=" + strconv.FormatUint(uint64(coroProgramDriveYieldedV2), 10) + ":" +
-				"queued-flags=" + strconv.FormatUint(uint64(coroProgramRunMoreV2|coroProgramRunRequestQueuedV2), 10) + ":" +
-				"blocked-flags=" + strconv.FormatUint(uint64(coroProgramRunBlockedV2|coroProgramRunHasDeadlineV2), 10) + ":" +
-				"pull=" + coroHostNextActionSymbolV1 + ":" + coroHostProfileSymbolV1 + ":" +
-				coroHostNextDeadlineSymbolV1 + ":" + coroHostPublishTimeSymbolV1 + ":" +
-				coroHostAckCancelSymbolV1 + ":" + coroHostContinueSliceSymbolV1)
-		} else {
-			write("driver=runtime-static-single-p-v1:" + coroProgramBeginSymbolV1 + ":" + coroProgramRunSymbolV1 + ":" + coroProgramContinueSymbolV1 + ":continue(epoch:u32)->void")
-		}
-		write("resume-decision-v1=" + coroRunDecisionTakeSymbolV1 + "(g:ptr,expected-epoch:u32,expected-generation:u32,outcome:*u32,case:*u32,task-kind:*u32,operation-source-slot:*u32,operation-generation:*u32)->void")
-		write("resume-decision-zero-v1=" + coroRunDecisionTakeZeroSymbolV1 + "(g:ptr)->u32")
-		if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
-			write("native-doorbell=pipe-poll-operation-id-v2")
-		}
-		if nativeCoroTimerRuntimeABI(ctx.buildConf) {
-			write("native-timer=source-aware-park-v2:" +
-				coroTimerParkSymbolV2 + "(g:ptr,handle:ptr,header:ptr,state:ptr,delay-ns:i64)->void;" +
-				coroTimerParkControlledSymbolV2 + "(g:ptr,handle:ptr,header:ptr,state:ptr,controller:ptr,control:*u32,expected:u32,deadline-ns:i64)->void;" +
-				coroTimerResumeSymbolV2 + "(g:ptr,state:ptr)->u32;" +
-				coroTimerCancelControlledSymbolV2 + "(controller:ptr,expected:u32)->u32")
-			write("native-poll=source-aware-park-v2:" +
-				coroPollParkSymbolV2 + "(g:ptr,handle:ptr,header:ptr,state:ptr,context:uintptr,fd:i32,interest:u32,deadline-ns:i64)->void;" +
-				coroPollResumeSymbolV2 + "(g:ptr,state:ptr)->u32;" +
-				coroPollUpdateDeadlineOrAbortSymbolV1 + "(context:uintptr,interest:u32,deadline-ns:i64)->void;" +
-				coroPollPostClosingOrAbortSymbolV1 + "(context:uintptr,interest:u32)->void")
-			write("keyed-park-v2=" +
-				coroKeyedParkSymbolV2 + "(g:ptr,handle:ptr,header:ptr,state:ptr)->void;" +
-				coroKeyedResumeSymbolV2 + "(g:ptr,state:ptr)->u32")
-			write("semaphore-owner-v2=" +
-				coroSemaphorePrepareOrAbortSymbolV2 + "(state:ptr,addr:ptr)->void;" +
-				coroSemaphoreReleaseOrAbortSymbolV2 + "(addr:ptr)->void")
-			write("notify-owner-v2=" +
-				coroNotifyPrepareOrAbortSymbolV2 + "(state:ptr,notify-addr:ptr,target:u32)->void;" +
-				coroNotifyOneOrAbortSymbolV2 + "(notify-addr:ptr,wait-snapshot:u32)->void;" +
-				coroNotifyAllOrAbortSymbolV2 + "(notify-addr:ptr,wait-snapshot:u32)->void")
-		}
-		if ctx.buildConf.coroChannelActive() {
-			write("channel-v1=" +
-				coroChanSendParkSymbolV1 + "(g:ptr,handle:ptr,header:ptr,channel:ptr,elem:ptr,state:ptr,size:uintptr)->void;" +
-				coroChanRecvParkSymbolV1 + "(g:ptr,handle:ptr,header:ptr,channel:ptr,elem:ptr,state:ptr,size:uintptr)->void;" +
-				coroChanResumeSymbolV1 + "(g:ptr,state:ptr)->u32;" +
-				"send-closed-fault=__llgo_coro_fault_prepare_v1:kind=3")
-		}
-		if ctx.buildConf.coroWorkerActive() {
-			write("worker-v1=" +
-				coroWorkerParkSymbolV1 + "(g:ptr,handle:ptr,header:ptr,state:ptr,fn:uintptr,argc:u32,a0:uintptr,a1:uintptr,a2:uintptr,a3:uintptr,a4:uintptr,a5:uintptr,a6:uintptr,a7:uintptr,a8:uintptr)->void;" +
-				coroWorkerResumeSymbolV1 + "(g:ptr,state:ptr,r1:*uintptr,r2:*uintptr,errno:*uintptr)->u32")
-		}
-		write("header=physical-abi-v1")
+	write("factory=compiler-static-mixed-v2:" + coroProgramBootstrapFactorySymbolV2)
+	if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
+		write("driver=runtime-static-single-p-native-v2:" +
+			coroProgramBeginSymbolV1 + ":" +
+			coroProgramRunSliceSymbolV2 + "(g:ptr,handle:ptr,budget:u32,out:*run-result-v2)->u32:" +
+			coroProgramContinueSliceSymbolV2 + "(executor-slot:u32,executor-generation:u32,epoch:u32,budget:u32,out:*run-result-v2)->u32:" +
+			"budget=" + strconv.FormatUint(uint64(coroProgramNativeRunBudgetV2), 10) + ":" +
+			"run-result-v2={flags:u32,used:u32,executor-slot:u32,executor-generation:u32,epoch:u32,deadline-lo:u32,deadline-hi:u32,reserved:u32}:" +
+			"complete=" + strconv.FormatUint(uint64(coroProgramDriveCompleteV2), 10) + ":" +
+			"yielded=" + strconv.FormatUint(uint64(coroProgramDriveYieldedV2), 10) + ":" +
+			"inline-flags=" + strconv.FormatUint(uint64(coroProgramRunMoreV2|coroProgramRunRequestInlineV2), 10))
+	} else if hostCoroPullRuntimeABI(ctx.buildConf) {
+		write("driver=runtime-static-single-p-host-pull-v1:" +
+			coroProgramBeginSymbolV1 + ":" +
+			coroProgramRunSliceSymbolV2 + "(g:ptr,handle:ptr,budget:u32,out:*run-result-v2)->u32:" +
+			coroProgramContinueSliceSymbolV2 + "(executor-slot:u32,executor-generation:u32,epoch:u32,budget:u32,out:*run-result-v2)->u32:" +
+			"budget=" + strconv.FormatUint(uint64(coroProgramNativeRunBudgetV2), 10) + ":" +
+			"run-result-v2={flags:u32,used:u32,executor-slot:u32,executor-generation:u32,epoch:u32,deadline-lo:u32,deadline-hi:u32,reserved:u32}:" +
+			"complete=" + strconv.FormatUint(uint64(coroProgramDriveCompleteV2), 10) + ":" +
+			"suspended=" + strconv.FormatUint(uint64(coroProgramDriveSuspendedV2), 10) + ":" +
+			"yielded=" + strconv.FormatUint(uint64(coroProgramDriveYieldedV2), 10) + ":" +
+			"queued-flags=" + strconv.FormatUint(uint64(coroProgramRunMoreV2|coroProgramRunRequestQueuedV2), 10) + ":" +
+			"blocked-flags=" + strconv.FormatUint(uint64(coroProgramRunBlockedV2|coroProgramRunHasDeadlineV2), 10) + ":" +
+			"pull=" + coroHostNextActionSymbolV1 + ":" + coroHostProfileSymbolV1 + ":" +
+			coroHostNextDeadlineSymbolV1 + ":" + coroHostPublishTimeSymbolV1 + ":" +
+			coroHostAckCancelSymbolV1 + ":" + coroHostContinueSliceSymbolV1)
 	} else {
-		write("factory=null")
-		write("driver=descriptor-only")
+		write("driver=runtime-static-single-p-v1:" + coroProgramBeginSymbolV1 + ":" + coroProgramRunSymbolV1 + ":" + coroProgramContinueSymbolV1 + ":continue(epoch:u32)->void")
 	}
+	write("resume-decision-v1=" + coroRunDecisionTakeSymbolV1 + "(g:ptr,expected-epoch:u32,expected-generation:u32,outcome:*u32,case:*u32,task-kind:*u32,operation-source-slot:*u32,operation-generation:*u32)->void")
+	write("resume-decision-zero-v1=" + coroRunDecisionTakeZeroSymbolV1 + "(g:ptr)->u32")
+	write("parameterized-fault-v2=__llgo_coro_fault_prepare_v2(g:ptr,handle:ptr,header:ptr,kind:u32,arg0:uintptr,arg1:uintptr)->void;" +
+		"__llgo_coro_fault_payload_v2(kind:u32,arg0:uintptr,arg1:uintptr,type-out:ptr,data-out:ptr)->void")
+	if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
+		write("native-doorbell=pipe-poll-operation-id-v2")
+	}
+	if nativeCoroTimerRuntimeABI(ctx.buildConf) {
+		write("native-timer=source-aware-park-v2:" +
+			coroTimerParkSymbolV2 + "(g:ptr,handle:ptr,header:ptr,state:ptr,delay-ns:i64)->void;" +
+			coroTimerParkControlledSymbolV2 + "(g:ptr,handle:ptr,header:ptr,state:ptr,controller:ptr,control:*u32,owner-route:*u32,expected:u32,deadline-ns:i64)->void;" +
+			coroTimerResumeSymbolV2 + "(g:ptr,state:ptr)->u32;" +
+			coroTimerRequestControlledSymbolV2 + "(route:u32)->u32")
+		write("native-poll=source-aware-park-v2:" +
+			coroPollParkSymbolV2 + "(g:ptr,handle:ptr,header:ptr,state:ptr,context:uintptr,fd:i32,interest:u32,deadline-ns:i64)->void;" +
+			coroPollResumeSymbolV2 + "(g:ptr,state:ptr)->u32;" +
+			coroPollUpdateDeadlineOrAbortSymbolV1 + "(context:uintptr,interest:u32,deadline-ns:i64)->void;" +
+			coroPollPostClosingOrAbortSymbolV1 + "(context:uintptr,interest:u32)->void")
+		write("keyed-park-v2=" +
+			coroKeyedParkSymbolV2 + "(g:ptr,handle:ptr,header:ptr,state:ptr)->void;" +
+			coroKeyedResumeSymbolV2 + "(g:ptr,state:ptr)->u32")
+		write("semaphore-owner-v2=" +
+			coroSemaphorePrepareOrAbortSymbolV2 + "(state:ptr,addr:ptr)->void;" +
+			coroSemaphoreReleaseOrAbortSymbolV2 + "(addr:ptr)->void")
+		write("notify-owner-v2=" +
+			coroNotifyPrepareOrAbortSymbolV2 + "(state:ptr,notify-addr:ptr,target:u32)->void;" +
+			coroNotifyOneOrAbortSymbolV2 + "(notify-addr:ptr,wait-snapshot:u32)->void;" +
+			coroNotifyAllOrAbortSymbolV2 + "(notify-addr:ptr,wait-snapshot:u32)->void")
+	}
+	write("channel-v1=" +
+		coroChanSendParkSymbolV1 + "(g:ptr,handle:ptr,header:ptr,channel:ptr,elem:ptr,state:ptr,size:uintptr)->void;" +
+		coroChanRecvParkSymbolV1 + "(g:ptr,handle:ptr,header:ptr,channel:ptr,elem:ptr,state:ptr,size:uintptr)->void;" +
+		coroChanResumeSymbolV1 + "(g:ptr,state:ptr)->u32;" +
+		"send-closed-fault=__llgo_coro_fault_prepare_v1:kind=3")
+	if ctx.buildConf.coroWorkerSupported() {
+		write("worker-v1=" +
+			coroWorkerParkSymbolV1 + "(g:ptr,handle:ptr,header:ptr,state:ptr,fn:uintptr,argc:u32,a0:uintptr,a1:uintptr,a2:uintptr,a3:uintptr,a4:uintptr,a5:uintptr,a6:uintptr,a7:uintptr,a8:uintptr)->void;" +
+			coroWorkerResumeSymbolV1 + "(g:ptr,state:ptr,r1:*uintptr,r2:*uintptr,errno:*uintptr)->u32")
+	}
+	write("header=physical-abi-v1")
 	write(ctx.coroPlanDigest)
 	write(metadata.CoroABI)
 	write(metadata.SchedulerABI)

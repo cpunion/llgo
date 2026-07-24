@@ -21,6 +21,7 @@ package runtime
 import (
 	"unsafe"
 
+	catomic "github.com/goplus/llgo/runtime/internal/clite/sync/atomic"
 	"github.com/goplus/llgo/runtime/internal/coro"
 	"github.com/goplus/llgo/runtime/internal/coroclock"
 	"github.com/goplus/llgo/runtime/internal/corotimer"
@@ -114,12 +115,14 @@ func __llgo_coro_timer_park_v2(g, handle, header, storage unsafe.Pointer, delay 
 func __llgo_coro_timer_park_controlled_v2(
 	g, handle, header, storage, controller unsafe.Pointer,
 	control *uint32,
+	ownerRoute *uint32,
 	expected uint32,
 	deadline int64,
 ) {
 	state := (*CoroTimerParkV2)(storage)
 	if g == nil || handle == nil || header == nil || state == nil || controller == nil ||
-		control == nil || expected == 0 || deadline < 0 || *state != (CoroTimerParkV2{}) {
+		control == nil || ownerRoute == nil || catomic.Load(ownerRoute) != 0 ||
+		expected == 0 || deadline < 0 || *state != (CoroTimerParkV2{}) {
 		coroTimerAbortV2("invalid controlled coroutine Timer V2 park ABI")
 		return
 	}
@@ -129,6 +132,10 @@ func __llgo_coro_timer_park_controlled_v2(
 		coroTimerAbortV2("cannot resolve controlled coroutine Timer V2 owner")
 		return
 	}
+	// Publish the immutable route before source attachment. A concurrent
+	// Stop/Reset either requests this owner or changes control before the
+	// post-attach recheck below; there is no route-publication lost-wake gap.
+	catomic.Store(ownerRoute, uint32(wantRoute))
 	ticket, timer, operation, executor, prepared := coro.PrepareCurrentExecutorControlledTimerPark(
 		driver,
 		task,
@@ -208,23 +215,15 @@ func __llgo_coro_timer_resume_v2(g, storage unsafe.Pointer) uint32 {
 	return status
 }
 
-// __llgo_coro_timer_cancel_controlled_v2 publishes ordinary operation
-// cancellation for one exact logical Timer generation. Zero means either the
-// legal pre-publication side of Stop/Reset or a stale identity; the manager's
-// post-attach atomic recheck closes the former race.
+// __llgo_coro_timer_request_controlled_v2 wakes the exact route after
+// Stop/Reset has atomically changed a timer's logical generation. The control
+// word is the durable fact; the owner-side timer scan turns its mismatch into
+// ordinary operation cancellation.
 //
-//export __llgo_coro_timer_cancel_controlled_v2
-func __llgo_coro_timer_cancel_controlled_v2(controller unsafe.Pointer, controlWord uint32) uint32 {
-	if !coroProgramExecutorBoundV1State || controller == nil || controlWord == 0 ||
-		coroProgramExecutorHandleV1State == (coro.ExecutorHandle{}) {
+//export __llgo_coro_timer_request_controlled_v2
+func __llgo_coro_timer_request_controlled_v2(route uint32) uint32 {
+	if !coroTargetRequestControlledTimerV2(coro.RouteID(route)) {
 		return 0
 	}
-	if coro.CancelExecutorControlledTimerV2(
-		&coroProgramExecutorDriverV1State,
-		uintptr(controller),
-		controlWord,
-	) {
-		return 1
-	}
-	return 0
+	return 1
 }

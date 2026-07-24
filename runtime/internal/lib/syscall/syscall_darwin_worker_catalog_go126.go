@@ -51,6 +51,14 @@ func libc_accept_trampoline()
 //go:linkname libc_bind_trampoline C.bind
 func libc_bind_trampoline()
 
+// chdir changes process-wide state but has no caller-thread affinity. Once the
+// host operation starts cancellation is logical-only; the pathname remains
+// rooted by the suspended wrapper until worker completion.
+//
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/3
+//go:linkname libc_chdir_trampoline C.chdir
+func libc_chdir_trampoline()
+
 //llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/3
 //go:linkname libc_chmod_trampoline C.chmod
 func libc_chmod_trampoline()
@@ -87,6 +95,21 @@ func libc_ftruncate_trampoline()
 //go:linkname libc_getcwd_trampoline C.getcwd
 func libc_getcwd_trampoline()
 
+// getpid is executor-safe on Darwin, but the current FuncPCABI0 word-call
+// carrier has no target-specific inline operation recipe. Route this exact
+// producer through the bounded worker contract for now so the generic
+// rawSyscall carrier cannot block or acquire unchecked address authority on
+// the executor. A future executor-safe word-call recipe may specialize this
+// occurrence without changing the producer-forward identity.
+//
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/3
+//go:linkname libc_getpid_trampoline C.getpid
+func libc_getpid_trampoline()
+
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/3
+//go:linkname libc_getrusage_trampoline C.getrusage
+func libc_getrusage_trampoline()
+
 //llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/3
 //go:linkname libc_getpeername_trampoline C.getpeername
 func libc_getpeername_trampoline()
@@ -99,6 +122,14 @@ func libc_getsockname_trampoline()
 //go:linkname libc_lchown_trampoline C.lchown
 func libc_lchown_trampoline()
 
+// kill is a process-wide, irreversible host operation but is not bound to the
+// executor thread and does not reenter managed Go. The fixed three-word
+// transport therefore uses the common worker completion path.
+//
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/3
+//go:linkname libc_kill_trampoline C.kill
+func libc_kill_trampoline()
+
 //llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/3
 //go:linkname libc_link_trampoline C.link
 func libc_link_trampoline()
@@ -110,6 +141,10 @@ func libc_listen_trampoline()
 //llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/3
 //go:linkname libc_mkdir_trampoline C.mkdir
 func libc_mkdir_trampoline()
+
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/3
+//go:linkname libc_pipe_trampoline C.pipe
+func libc_pipe_trampoline()
 
 //llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/3
 //go:linkname libc_readlink_trampoline C.readlink

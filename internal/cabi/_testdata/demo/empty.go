@@ -1,17 +1,12 @@
 package main
 
-import "unsafe"
-
 const (
 	LLGoFiles = "../wrap/empty.c"
 )
 
-//go:linkname printf C.printf
-func printf(format *byte, __llgo_va_list ...any) int32
-
 func assert(info string, b bool) {
 	if !b {
-		printf(unsafe.StringData("Assertion failed: %s\n\000"), unsafe.StringData(info))
+		panic(info)
 	}
 }
 
@@ -20,6 +15,7 @@ func main() {}
 type empty struct {
 }
 
+//llgo:coro sync
 //go:linkname cdemo0 C.demo0
 func cdemo0(empty) empty
 
@@ -32,6 +28,7 @@ func init() {
 	assert("demo0", demo0(empty{}) == empty{})
 }
 
+//llgo:coro sync
 //go:linkname cdemo1 C.demo1
 func cdemo1(empty, int32) empty
 
@@ -44,6 +41,7 @@ func init() {
 	assert("demo1", demo1(empty{}, 2) == empty{})
 }
 
+//llgo:coro sync
 //go:linkname cdemo2 C.demo2
 func cdemo2(int32, empty) int32
 
@@ -56,6 +54,7 @@ func init() {
 	assert("demo2", demo2(100, empty{}) == 100)
 }
 
+//llgo:coro sync
 //go:linkname cdemo3 C.demo3
 func cdemo3(int32, empty, int32) int32
 

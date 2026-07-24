@@ -60,7 +60,8 @@ func emissionIntrinsicPolicy(instruction int) (emissionIntrinsicOperandPolicy, e
 	case llgoCstr, llgoPyStr,
 		llgoSkip, llgoCgoCheckPointer,
 		llgoSigjmpbuf, llgoDeferData, llgoUnreachable, llgoStackSave,
-		llgoCoroYield, llgoCoroCriticalEnter, llgoCoroCriticalExit:
+		llgoCoroYield, llgoCoroCriticalEnter, llgoCoroCriticalExit,
+		llgoCoroGoexit, llgoCoroOSThreadLock, llgoCoroOSThreadUnlock:
 		return emissionIntrinsicNoValues, nil
 
 	case llgoAdvance, llgoIndex,
@@ -436,7 +437,9 @@ type emissionCgoLoweredCall struct {
 }
 
 type emissionCgoLoweringPlan struct {
-	calls []emissionCgoLoweredCall
+	calls         []emissionCgoLoweredCall
+	evaluated     map[ssa.Instruction]none
+	directReturns map[*ssa.Return]ssa.Value
 }
 
 func emissionSkipsSyntheticMakeSliceAlloc(alloc *ssa.Alloc) bool {
@@ -472,7 +475,10 @@ func emissionSkipsSyntheticMakeSliceAlloc(alloc *ssa.Alloc) bool {
 // Alloc, _cgo_ pointer load, or Call already populated bvals; compileValue does
 // not recursively lower its producer.
 func (u *EmissionUniverse) cgoLoweringPlan(ctx *context, fn *ssa.Function) (*emissionCgoLoweringPlan, error) {
-	plan := new(emissionCgoLoweringPlan)
+	plan := &emissionCgoLoweringPlan{
+		evaluated:     make(map[ssa.Instruction]none),
+		directReturns: make(map[*ssa.Return]ssa.Value),
+	}
 	if fn == nil || len(fn.Blocks) == 0 {
 		return plan, nil
 	}
@@ -501,10 +507,29 @@ func (u *EmissionUniverse) cgoLoweringPlan(ctx *context, fn *ssa.Function) (*emi
 				continue
 			}
 			available[instruction] = none{}
+			plan.evaluated[instruction] = none{}
 		case *ssa.UnOp:
 			if instruction.Op == token.MUL && strings.HasPrefix(instruction.X.Name(), "_cgo_") {
 				available[instruction] = none{}
+				plan.evaluated[instruction] = none{}
 			}
+		case *ssa.ChangeType:
+			// Go 1.26's _Cfunc__CMalloc wrapper converts its named size_t
+			// parameter to uint64 before entering the generated
+			// //go:cgo_unsafe_args adapter. This is a value-only operation and
+			// belongs to the same dedicated first-block lowering; certify its
+			// producer explicitly instead of making compileValue reconstruct an
+			// unplanned instruction.
+			if producer, ok := instruction.X.(ssa.Instruction); ok {
+				if _, ready := available[producer]; !ready {
+					return nil, fmt.Errorf(
+						"prepare emission universe: cgo function %q ChangeType consumes unavailable SSA producer %T %q",
+						fn.Name(), producer, producer.String(),
+					)
+				}
+			}
+			available[instruction] = none{}
+			plan.evaluated[instruction] = none{}
 		case *ssa.Call:
 			var roots []emissionCallValueRoot
 			var err error
@@ -535,8 +560,23 @@ func (u *EmissionUniverse) cgoLoweringPlan(ctx *context, fn *ssa.Function) (*emi
 				return nil, err
 			}
 			plan.calls = append(plan.calls, emissionCgoLoweredCall{call: instruction, compiled: compiled, roots: roots})
+			plan.evaluated[instruction] = none{}
 			if compiled {
 				available[instruction] = none{}
+			}
+		case *ssa.Return:
+			plan.evaluated[instruction] = none{}
+			// Traditional generated adapters return the side-channel result
+			// installed by _cgo_runtime_cgocall. Go 1.26's _Cfunc__CMalloc
+			// instead returns one evaluated direct-call SSA value. Freeze that
+			// exceptional dataflow here so codegen does not rediscover it from
+			// a function name or from whatever happens to be present in bvals.
+			if len(instruction.Results) == 1 {
+				if resultCall, ok := instruction.Results[0].(*ssa.Call); ok {
+					if _, ready := available[resultCall]; ready {
+						plan.directReturns[instruction] = resultCall
+					}
+				}
 			}
 		}
 	}

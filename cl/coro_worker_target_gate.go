@@ -37,7 +37,7 @@ func validateCoroWorkerNativeProgramTarget(prog llssa.Program) error {
 	}
 	target := prog.Target()
 	if target == nil {
-		return fmt.Errorf("coroutine worker lowering requires the %s: missing target profile", coroWorkerNativeTargetRequirement)
+		return fmt.Errorf("coroutine worker lowering requires the %s: missing target capability", coroWorkerNativeTargetRequirement)
 	}
 	if target.Target != "" {
 		return fmt.Errorf(
@@ -110,7 +110,7 @@ func coroWorkerTripleMatchesNativeOS(triple, goos string) bool {
 // validateCoroWorkerUniverseTarget protects direct Compilation users which do
 // not pass through internal/build's target gate.
 func (c *Compilation) validateCoroWorkerUniverseTarget() error {
-	if c == nil || !c.CoroWorkerActive() || c.EmissionUniverse == nil {
+	if c == nil || !c.CoroWorkerSupported() || c.EmissionUniverse == nil {
 		return nil
 	}
 	return validateCoroWorkerNativeProgramTarget(c.EmissionUniverse.prog)
@@ -121,7 +121,7 @@ func (c *Compilation) validateCoroWorkerUniverseTarget() error {
 // could prepare a native universe and then lower its worker operations into a
 // WASM (or otherwise incompatible) program.
 func (c *Compilation) validateCoroWorkerCodegenProgram(prog llssa.Program) error {
-	if c == nil || !c.CoroWorkerActive() {
+	if c == nil || !c.CoroWorkerSupported() {
 		return nil
 	}
 	if c.EmissionUniverse == nil {

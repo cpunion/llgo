@@ -28,12 +28,14 @@ const (
 
 // -----------------------------------------------------------------------------
 
+//llgo:coro sync
 //go:linkname Rand C.rand
 func Rand() c.Int
 
 //go:linkname RandR C.rand_r
 func RandR(*c.Uint) c.Int
 
+//llgo:coro sync
 //go:linkname Srand C.srand
 func Srand(c.Uint)
 

@@ -34,6 +34,8 @@ func Real64(value complex64) float32 { return real(value) }
 func Imag64(value C64) float32 { return imag(value) }
 func Real128(value C128) float64 { return real(value) }
 func Imag128(value complex128) float64 { return imag(value) }
+func Complex64(real, imag float32) complex64 { return complex(real, imag) }
+func Complex128(real, imag float64) C128 { return C128(complex(real, imag)) }
 `
 
 func TestCoroComplexComponentBuiltins(t *testing.T) {
@@ -56,6 +58,23 @@ func TestCoroComplexComponentBuiltins(t *testing.T) {
 			}
 			if reason := audit.validateBuiltin(call); reason != "" {
 				t.Fatalf("%s rejected: %s", test.builtin, reason)
+			}
+		})
+	}
+}
+
+func TestCoroComplexConstructionBuiltins(t *testing.T) {
+	ssaPkg, _, _ := buildGoSSAPkg(t, coroComplexBuiltinFixture)
+	for _, name := range []string{"Complex64", "Complex128"} {
+		t.Run(name, func(t *testing.T) {
+			fn := ssaPkg.Func(name)
+			call := coroComplexBuiltinCall(t, fn, "complex")
+			audit := &coroPhysicalPureSSAAudit{
+				fn:              fn,
+				reachableBlocks: coroPhysicalConstantReachableBlocks(fn),
+			}
+			if reason := audit.validateBuiltin(call); reason != "" {
+				t.Fatalf("complex rejected: %s", reason)
 			}
 		})
 	}

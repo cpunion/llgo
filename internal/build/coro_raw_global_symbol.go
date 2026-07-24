@@ -308,7 +308,9 @@ func inventoryCoroRawPackageInputs(
 		}
 		for _, source := range srcFiles {
 			kind := "opaque C input"
-			if source.isCXX {
+			if source.isAsm {
+				kind = "opaque C-preprocessed assembly input"
+			} else if source.isCXX {
 				kind = "opaque C++ input"
 			}
 			builder.block(kind, source.path)
@@ -416,6 +418,7 @@ func inventoryCoroPlan9Symbols(ctx *context, builder *coroRawGlobalSymbolInvento
 	if err != nil {
 		return fmt.Errorf("freeze Plan9 assembly inputs for %q: %w", pkg.PkgPath, err)
 	}
+	sfiles = plan9AsmSFiles(sfiles)
 	skipDarwinDynimports := shouldCheckDarwinDynimportTrampolineAsm(ctx, pkg)
 	var overlay map[string][]byte
 	if ctx.conf != nil {

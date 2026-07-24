@@ -54,10 +54,10 @@ const coroControlledTimerWaitTestSource = `package foo
 import "unsafe"
 
 //go:linkname wait llgo.coroControlledTimerWait
-func wait(controller unsafe.Pointer, control *uint32, expected uint32, deadline int64) uint32
+func wait(controller unsafe.Pointer, control, ownerRoute *uint32, expected uint32, deadline int64) uint32
 
-func Root(controller unsafe.Pointer, control *uint32, expected uint32, deadline int64) uint32 {
-	return wait(controller, control, expected, deadline)
+func Root(controller unsafe.Pointer, control, ownerRoute *uint32, expected uint32, deadline int64) uint32 {
+	return wait(controller, control, ownerRoute, expected, deadline)
 }
 `
 

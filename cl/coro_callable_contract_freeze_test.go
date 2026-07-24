@@ -36,11 +36,18 @@ func TestEmissionUniverseFreezesCallableDeclarationAndWrapperContracts(t *testin
 //go:linkname Foreign C.callable_contract_foreign
 func Foreign(int) int
 
+//go:linkname Default C.callable_contract_default
+func Default(int) int
+
+//llgo:coro worker
+//go:linkname LegacyWorker C.callable_contract_legacy_worker
+func LegacyWorker(int) int
+
 //llgo:coro contract foreign.v1 scope=wrapper progress=async-completion affinity=host-main reentry=managed-callback memory=retained abi=word-call.v1/1
 func Wrapper(value int) int { return value + 1 }
 
 func Plain() {}
-func root(value int) int { return Foreign(value) + Wrapper(value) }
+func root(value int) int { return Foreign(value) + Default(value) + LegacyWorker(value) + Wrapper(value) }
 `)
 	testProg.ssa.Build()
 	prog := llssa.NewProgram(nil)
@@ -85,6 +92,22 @@ func root(value int) int { return Foreign(value) + Wrapper(value) }
 	}
 	if wrapper.Contract.ID == foreign.Contract.ID {
 		t.Fatalf("different callable behaviors share frozen contract ID %q", wrapper.Contract.ID)
+	}
+	defaultForeign, ok, err := universe.CoroCallableContractCertificate(pkg.ssa.Func("Default"))
+	if err != nil || !ok {
+		t.Fatalf("Default callable contract = %+v, %t, %v", defaultForeign, ok, err)
+	}
+	if defaultForeign.Scope != CoroCallableContractScopeDeclaration ||
+		defaultForeign.Contract.Progress != coro.ProgressMayBlock ||
+		defaultForeign.Contract.Affinity != coro.AffinityAnyThread ||
+		defaultForeign.Contract.Reentry != coro.ReentryNone ||
+		defaultForeign.Contract.Memory != coro.MemoryBorrowUntilComplete ||
+		defaultForeign.HasTrustedInlineContract || defaultForeign.CallableABIExplicit ||
+		defaultForeign.PhysicalSymbol != "callable_contract_default" {
+		t.Fatalf("Default frozen callable contract = %+v", defaultForeign)
+	}
+	if _, ok, err := universe.CoroCallableContractCertificate(pkg.ssa.Func("LegacyWorker")); err != nil || ok {
+		t.Fatalf("LegacyWorker callable contract = %t, %v; want legacy policy only", ok, err)
 	}
 	if _, ok, err := universe.CoroCallableContractCertificate(pkg.ssa.Func("Plain")); err != nil || ok {
 		t.Fatalf("Plain callable contract = %t, %v; want absent", ok, err)
@@ -266,16 +289,24 @@ func root() { _ = DifferentABI("") }
 		first.PhysicalABISignature == different.PhysicalABISignature {
 		t.Fatalf("repeated physical ABI inventory = first:%q second:%q different:%q", first.PhysicalABISignature, second.PhysicalABISignature, different.PhysicalABISignature)
 	}
-	contract, ok, err := universe.CoroCallableContractCertificate(functions["First"])
-	if err != nil || !ok {
-		t.Fatalf("First contract = %+v, %t, %v", contract, ok, err)
-	}
-	if err := coro.ValidateCallableContractIdentity(first, contract); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"Second", "DifferentABI"} {
-		if _, ok, err := universe.CoroCallableContractCertificate(functions[name]); err != nil || ok {
-			t.Fatalf("%s behavior contract = %t, %v; want identity-only", name, ok, err)
+	for _, name := range []string{"First", "Second", "DifferentABI"} {
+		contract, ok, err := universe.CoroCallableContractCertificate(functions[name])
+		if err != nil || !ok {
+			t.Fatalf("%s contract = %+v, %t, %v", name, contract, ok, err)
+		}
+		if contract.Contract.Progress != coro.ProgressMayBlock ||
+			contract.Contract.Affinity != coro.AffinityAnyThread ||
+			contract.Contract.Reentry != coro.ReentryNone ||
+			contract.Contract.Memory != coro.MemoryBorrowUntilComplete {
+			t.Fatalf("%s contract = %+v; want conservative default behavior", name, contract)
+		}
+		if err := coro.ValidateCallableContractIdentity(
+			map[string]CoroCallableIdentityCertificate{
+				"First": first, "Second": second, "DifferentABI": different,
+			}[name],
+			contract,
+		); err != nil {
+			t.Fatal(err)
 		}
 	}
 }

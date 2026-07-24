@@ -185,6 +185,31 @@ func coroTargetRequestChannelOperationV1(id coro.OperationID) bool {
 	return accepted && (!coro.ExecutorRequestNeedsDoorbell(result) || domain.doorbell.Ring())
 }
 
+// coroTargetRequestControlledTimerV2 requests the exact owner after
+// time.Timer atomically publishes a new logical generation. The timer catalog
+// owns no producer callback: its next owner scan observes the retained control
+// pointer mismatch and performs the ordinary ParkSet cancellation.
+func coroTargetRequestControlledTimerV2(route coro.RouteID) bool {
+	if !route.Valid() || uint32(route) > coroNativeFleetDomainCapacityV1 {
+		return false
+	}
+	domain := &coroNativeFleetV1State.domains[uint32(route)-1]
+	if !domain.ingress.Enter() {
+		return false
+	}
+	if domain.lifecycle != coroNativeFleetDomainActiveV1 ||
+		domain.handle.Route != uint32(route) || domain.timerOwnerV1() == nil {
+		_, _ = domain.ingress.Leave()
+		return false
+	}
+	result := coroNativeFleetV1State.fleet.RequestTimerExecutor(route)
+	accepted := result == coro.ExecutorRequestPublished ||
+		result == coro.ExecutorRequestCoalesced || result == coro.ExecutorRequestIdleWake
+	ringOK := !coro.ExecutorRequestNeedsDoorbell(result) || domain.doorbell.Ring()
+	_, leaveOK := domain.ingress.Leave()
+	return accepted && ringOK && leaveOK
+}
+
 func coroTargetPostTaskControlV1(
 	id coro.OperationID,
 	kind coro.TaskCancelKind,

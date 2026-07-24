@@ -19,6 +19,7 @@
 package runtime
 
 import (
+	"fmt"
 	"runtime"
 	"testing"
 	"unsafe"
@@ -38,6 +39,33 @@ type plainError string
 
 func (s plainError) Error() string { return string(s) }
 func (s plainError) RuntimeError() {}
+
+type boundsErrorCode uint8
+
+const boundsConvert boundsErrorCode = 1
+
+type boundsError struct {
+	x      int64
+	y      int
+	signed bool
+	code   boundsErrorCode
+}
+
+func (e boundsError) Error() string {
+	return fmt.Sprintf(
+		"runtime error: cannot convert slice with length %d to array or pointer to array with length %d",
+		e.y, e.x,
+	)
+}
+
+func (boundsError) RuntimeError() {}
+
+func AllocZ(size uintptr) unsafe.Pointer {
+	if size != unsafe.Sizeof(boundsError{}) {
+		panic("unexpected parameterized fault allocation size")
+	}
+	return unsafe.Pointer(new(boundsError))
+}
 
 type _type struct{}
 type interfacetype struct{}
@@ -233,6 +261,56 @@ func TestCoroFaultPayloadV1KindsAreStableDistinctAndAllocationFree(t *testing.T)
 		"runtime error: cannot convert slice to array or pointer to array: length too short"; got != want {
 		t.Fatalf("static slice-conversion message = %q, want %q", got, want)
 	}
+}
+
+func TestCoroFaultPayloadV2CarriesSliceConversionOperands(t *testing.T) {
+	typeWord, dataWord := coroFaultPayloadV2(coroFaultSliceConvertV1, 9, 8)
+	wantType, _ := coroErrorFaultPayloadV1(&coroBoundsErrorTypeV2)
+	if typeWord == nil || typeWord != wantType || dataWord == nil {
+		t.Fatalf("parameterized payload = (%p, %p), want type %p and data", typeWord, dataWord, wantType)
+	}
+	payload := *(*boundsError)(dataWord)
+	if payload.x != 9 || payload.y != 8 || !payload.signed || payload.code != boundsConvert {
+		t.Fatalf("parameterized bounds payload = %+v", payload)
+	}
+	if got, want := payload.Error(),
+		"runtime error: cannot convert slice with length 8 to array or pointer to array with length 9"; got != want {
+		t.Fatalf("parameterized slice-conversion message = %q, want %q", got, want)
+	}
+	if _, ok := any(payload).(interface{ RuntimeError() }); !ok {
+		t.Fatal("parameterized slice-conversion payload does not implement runtime.Error")
+	}
+
+	var hookType, hookData unsafe.Pointer
+	__llgo_coro_fault_payload_v2(
+		coroFaultSliceConvertV1,
+		9,
+		8,
+		unsafe.Pointer(&hookType),
+		unsafe.Pointer(&hookData),
+	)
+	if hookType != typeWord || hookData == nil {
+		t.Fatalf("parameterized payload hook = (%p, %p), want type %p and data", hookType, hookData, typeWord)
+	}
+	if got := (*boundsError)(hookData).Error(); got != payload.Error() {
+		t.Fatalf("parameterized hook message = %q, want %q", got, payload.Error())
+	}
+
+	for _, test := range []struct {
+		name       string
+		kind       uint32
+		arg0, arg1 uintptr
+	}{
+		{name: "unknown kind", kind: ^uint32(0)},
+		{name: "operand on static kind", kind: coroFaultNilV1, arg0: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if typ, data := coroFaultPayloadV2(test.kind, test.arg0, test.arg1); typ != nil || data != nil {
+				t.Fatalf("invalid parameterized payload = (%p, %p)", typ, data)
+			}
+		})
+	}
+	runtime.KeepAlive(coroBoundsErrorTypeV2)
 }
 
 func TestCoroFaultPayloadHookFeedsDirectRecover(t *testing.T) {

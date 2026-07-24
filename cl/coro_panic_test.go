@@ -215,7 +215,6 @@ func compileCoroExplicitStatusPanicFixture(t *testing.T, target *llssa.Target) (
 	}
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroChildAwaitCompilation(compilation)
-	compilation.CoroProfile = CoroProfileStackless
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
@@ -235,13 +234,6 @@ func TestCoroExplicitStatusPanicPreflightRemainsFailClosed(t *testing.T) {
 		want   string
 		exec   coro.ExecFlags
 	}{
-		{
-			name: "dynamic interface operand",
-			source: `package foo
-func Root(value any, trigger bool) { if trigger { panic(value) } }
-`,
-			want: "has no post-destroy lifetime proof",
-		},
 		{
 			name: "unproven interface load address",
 			source: `package foo
@@ -314,6 +306,48 @@ func Root(trigger bool) { defer cleanup(); if trigger { panic(&Payload) } }
 				t.Fatalf("preflight error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestCoroExplicitStatusPanicAcceptsFrameRetainedInterfaceParameter(t *testing.T) {
+	const source = `package foo
+func Root(value any, trigger bool) { if trigger { panic(value) } }
+`
+	ssaPkg, _, files := buildGoSSAPkg(t, source)
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := prepareStacklessEmissionUniverse(
+		prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := ssaPkg.Func("Root")
+	if root == nil || len(root.Params) != 2 {
+		t.Fatalf("Root parameter shape = %v", root)
+	}
+	audit, err := newCoroPhysicalPureSSAAudit(universe, nil, root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proof := audit.currentFrameRetentionProof(); !proof.provesInterfaceParameter(root.Params[0]) {
+		t.Fatal("interface parameter has no exact frame-retention certificate")
+	}
+	plan := coro.FunctionPlan{
+		ID:            coro.FunctionID("foo.Root"),
+		External:      coro.Defined,
+		Demand:        coro.AsyncDemand,
+		ManagedDemand: coro.AsyncDemand,
+		Emission:      coro.EmitCoroutine,
+		Primary:       coro.PrimaryCoroutine,
+		FuncRep:       coro.DirectCoro,
+		Effect:        coro.YieldOnly,
+		Exec:          coro.MayUnwind,
+	}
+	if err := validateCoroPhysicalABIWithUniverseCapabilities(
+		root, plan, nil, universe, true, false, false, true,
+	); err != nil {
+		t.Fatalf("frame-retained interface parameter rejected: %v", err)
 	}
 }
 
@@ -419,7 +453,6 @@ func Root(value, divisor uint32, trigger bool) uint32 {
 	}
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroChildAwaitCompilation(compilation)
-	compilation.CoroProfile = CoroProfileStackless
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
 	got, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
@@ -480,7 +513,6 @@ func Root(value uint32, trigger bool) uint32 {
 	}
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroChildAwaitCompilation(compilation)
-	compilation.CoroProfile = CoroProfileStackless
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
 	got, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
@@ -491,5 +523,89 @@ func Root(value uint32, trigger bool) uint32 {
 	}
 	if got == nil {
 		t.Fatal("exact no-unwind plain call returned no package")
+	}
+}
+
+func TestCoroExplicitStatusPanicAcceptsManagedInterfaceResult(t *testing.T) {
+	const source = `package foo
+type Decoder interface { Decode([]byte) error }
+type concrete struct{}
+func (*concrete) Decode([]byte) error { return nil }
+func Root(decoder Decoder, data []byte) {
+	if err := decoder.Decode(data); err != nil {
+		panic(err)
+	}
+}
+`
+	ssaPkg, _, files := buildGoSSAPkg(t, source)
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := prepareStacklessEmissionUniverse(
+		prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := ssaPkg.Func("Root")
+	invoke := coroInterfaceDispatchFindInvoke(t, root)
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	functionIDs.ArchiveReady = true
+	plan, err := coro.AnalyzeSSA(
+		ssaPkg.Prog,
+		coro.Roots{{Function: root, Demand: coro.AsyncDemand}},
+		coro.SSAConfig{
+			EmissionUniverse:     ssaUniverse,
+			FunctionIDs:          functionIDs,
+			DynamicResolution:    coro.DynamicCHAOpen,
+			MaxPlainInstructions: -1,
+			OutcomeMode:          coro.OutcomeExplicitStatus,
+			ClassifyUnknownCall: func(_ *ssa.Function, call ssa.CallInstruction) (coro.UnknownTarget, error) {
+				if call == invoke {
+					return coro.UnknownManagedInterfaceDispatch, nil
+				}
+				return coro.UnknownManaged, nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callPlan, ok := plan.CallPlan(invoke)
+	if !ok || !callPlan.Open || callPlan.Rep != coro.Dispatch ||
+		callPlan.Unresolved != coro.UnknownManagedInterfaceDispatch {
+		t.Fatalf("managed interface panic producer CallPlan = %+v, present=%t", callPlan, ok)
+	}
+	managedInterface, err := analyzeCoroManagedInterfaceDispatchPlan(plan, universe, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !managedInterface.acceptsCall(invoke) {
+		t.Fatal("managed interface plan does not own the panic-result producer")
+	}
+	audit, err := newCoroPhysicalPureSSAAudit(universe, plan, root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	capabilities := coroPhysicalLoweringCapabilities{
+		childAwait:       true,
+		managedDispatch:  true,
+		explicitPanic:    true,
+		managedInterface: managedInterface,
+	}
+	if reason := validateCoroExplicitStatusPanicInterfaceCallResult(
+		audit, invoke, capabilities,
+	); reason != "" {
+		t.Fatalf("managed interface panic result rejected: %s", reason)
+	}
+	if reason := validateCoroExplicitStatusPanicInterfaceCallResult(
+		audit, invoke, coroPhysicalLoweringCapabilities{},
+	); !strings.Contains(reason, "frame-stable carrier") {
+		t.Fatalf("managed interface panic result without capability = %q", reason)
 	}
 }

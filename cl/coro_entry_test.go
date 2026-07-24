@@ -91,7 +91,6 @@ func coroEntryPreflightUniverse(plan *coro.SSAPlan) *EmissionUniverse {
 		finalKeys:     make(map[emissionFunctionOwnerKey]string),
 		useOwners:     make(map[*ssa.Function]map[*preparedEmissionPackage]none),
 		ownerStates:   make(map[*ssa.Function]map[*preparedEmissionPackage]emissionFunctionState),
-		coroProfile:   CoroProfileStackless,
 	}
 	if plan == nil {
 		return u
@@ -122,8 +121,7 @@ func coroEntryPreflightUniverse(plan *coro.SSAPlan) *EmissionUniverse {
 func TestResolveFunctionSymbolUsesPrimaryAndExactPlan(t *testing.T) {
 	pkg, plan := buildCoroEntryTestPlan(t)
 	ctx, dispose := newCoroEntryTestContext(t, pkg, &Compilation{
-		CoroPlan: plan, CoroProfile: CoroProfileStackless,
-	})
+		CoroPlan: plan})
 	defer dispose()
 
 	plain, err := ctx.resolveFunctionSymbol(pkg.Func("Plain"))
@@ -145,7 +143,7 @@ func TestResolveFunctionSymbolUsesPrimaryAndExactPlan(t *testing.T) {
 		t.Fatalf("coroutine entry = %+v", coroutine)
 	}
 	if err := coroutine.checkSupported(); err != nil {
-		t.Fatalf("coroutine primary rejected by the stackless profile: %v", err)
+		t.Fatalf("coroutine primary rejected by the stackless architecture: %v", err)
 	}
 
 	boxed, err := ctx.resolveFunctionSymbol(pkg.Func("Boxed"))
@@ -156,7 +154,7 @@ func TestResolveFunctionSymbolUsesPrimaryAndExactPlan(t *testing.T) {
 		t.Fatalf("boxed entry = %+v, want one plain primary plus dispatch descriptor", boxed)
 	}
 	if err := boxed.checkSupported(); err != nil {
-		t.Fatalf("descriptor-backed plain primary rejected by the stackless profile: %v", err)
+		t.Fatalf("descriptor-backed plain primary rejected by the stackless architecture: %v", err)
 	}
 
 	external, err := ctx.resolveFunctionSymbol(pkg.Func("External"))
@@ -170,20 +168,9 @@ func TestResolveFunctionSymbolUsesPrimaryAndExactPlan(t *testing.T) {
 		t.Fatalf("external support error = %v", err)
 	}
 
-	reportOnlyCtx, reportOnlyDispose := newCoroEntryTestContext(t, pkg, &Compilation{CoroPlan: plan})
-	defer reportOnlyDispose()
-	reportOnly, err := reportOnlyCtx.resolveFunctionSymbol(pkg.Func("Coroutine"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if reportOnly.planned || strings.HasSuffix(reportOnly.name, coroPrimarySuffix) {
-		t.Fatalf("report-only entry = %+v, want unchanged legacy entry", reportOnly)
-	}
-
 	otherPkg, _, _ := buildGoSSAPkg(t, coroEntryTestSource)
 	otherCtx, otherDispose := newCoroEntryTestContext(t, otherPkg, &Compilation{
-		CoroPlan: plan, CoroProfile: CoroProfileStackless,
-	})
+		CoroPlan: plan})
 	defer otherDispose()
 	if _, err := otherCtx.resolveFunctionSymbol(otherPkg.Func("Plain")); err == nil || !strings.Contains(err.Error(), "absent") {
 		t.Fatalf("other-program resolution error = %v, want exact-pointer plan miss", err)
@@ -294,8 +281,7 @@ func Owner() bool { return Target != nil }
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		PackageOptions{Compilation: &Compilation{
 			CoroPlan:         plan,
-			EmissionUniverse: universe, CoroProfile: CoroProfileStackless,
-		}},
+			EmissionUniverse: universe}},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -455,8 +441,7 @@ func Caller() {}
 				prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 				PackageOptions{Compilation: &Compilation{
 					CoroPlan:         plan,
-					EmissionUniverse: universe, CoroProfile: CoroProfileStackless,
-				}},
+					EmissionUniverse: universe}},
 			)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("inconsistent emitted consumer = %v, %v; want error containing %q", got, err, test.want)
@@ -541,8 +526,7 @@ func Box() any { return Target }
 					EmissionUniverse: coroEntryPreflightUniverse(plan),
 					CoroPlanObserver: func(*ssa.Package, *coro.SSAPlan) {
 						observerCalls++
-					}, CoroProfile: CoroProfileStackless,
-				},
+					}},
 			})
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("preflight result = %v, %v; want error containing %q", got, err, tt.want)
@@ -612,16 +596,14 @@ func External() { <-channel }
 	}
 	if err := (&Compilation{
 		CoroPlan:         ignored,
-		EmissionUniverse: universe, CoroProfile: CoroProfileStackless,
-	}).preflightCoroPlan(); err == nil || !strings.Contains(err.Error(), "requires a defined body") {
+		EmissionUniverse: universe}).preflightCoroPlan(); err == nil || !strings.Contains(err.Error(), "requires a defined body") {
 		t.Fatalf("bodyful frozen C root preflight error = %v, want defined-body rejection", err)
 	}
 
 	notIgnored := buildPlan(false)
 	err = (&Compilation{
 		CoroPlan:         notIgnored,
-		EmissionUniverse: universe, CoroProfile: CoroProfileStackless,
-	}).preflightCoroPlan()
+		EmissionUniverse: universe}).preflightCoroPlan()
 	if err == nil || !strings.Contains(err.Error(), "synchronous demand without a planned raw plain entry") {
 		t.Fatalf("non-ignored C stub preflight error = %v", err)
 	}
@@ -637,14 +619,13 @@ func TestCoroEntryResolutionPreflightRejectsMissingPlanAndCache(t *testing.T) {
 	}{
 		{
 			name:        "missing plan",
-			compilation: &Compilation{CoroProfile: CoroProfileStackless},
+			compilation: &Compilation{},
 			want:        "requires a compilation CoroPlan",
 		},
 		{
 			name: "missing universe",
 			compilation: &Compilation{
-				CoroPlan: &coro.SSAPlan{}, CoroProfile: CoroProfileStackless,
-			},
+				CoroPlan: &coro.SSAPlan{}},
 			want: "prepared emission universe",
 		},
 	} {
@@ -665,7 +646,6 @@ func TestCoroEntryResolutionPreflightRejectsMissingPlanAndCache(t *testing.T) {
 	}
 
 	cacheCompilation := &Compilation{
-		CoroProfile:  CoroProfileStackless,
 		CoroABI:      coro.PhysicalABIV1,
 		SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 		PanicABI:     coro.PanicExplicitStatusABIV0,

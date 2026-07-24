@@ -153,6 +153,63 @@ func TestCoroDynamicDispatchV1RejectsInvalidCapabilitiesAndEntries(t *testing.T)
 	})
 }
 
+func TestCoroDispatchDescriptorNonNilSuppressesImplicitLoadNilCheck(t *testing.T) {
+	fixture := newCoroDynamicDispatchTestFixture(t)
+	zero := fixture.prog.Zero(fixture.prog.Closure(fixture.signature))
+
+	probe := fixture.pkg.NewFunc(
+		"guarded_dynamic_probe",
+		coroPlainDispatchTestSignature(nil, []types.Type{types.Typ[types.Bool]}),
+		InGo,
+	)
+	probeBuilder := probe.MakeBody(1)
+	probeBuilder.Return(probeBuilder.CoroDispatchHasCoro(zero, CoroDispatchCallOptions{
+		Version:          CoroDispatchVersionV1,
+		ABIHash:          fixture.hash,
+		Result:           fixture.result,
+		DescriptorNonNil: true,
+	}))
+	probeBuilder.EndBuild()
+	probeBuilder.Dispose()
+
+	plain := fixture.pkg.NewFunc(
+		"guarded_plain_call",
+		coroPlainDispatchTestSignature(nil, []types.Type{types.Typ[types.Uint32]}),
+		InGo,
+	)
+	plainBuilder := plain.MakeBody(1)
+	plainBuilder.Return(plainBuilder.CallCoroPlainDispatch(
+		zero,
+		[]Expr{fixture.prog.IntVal(1, fixture.prog.Uint32())},
+		CoroPlainDispatchCallOptions{
+			Version:          CoroPlainDispatchVersionV1,
+			Flags:            CoroPlainDispatchFlagsV1,
+			ABIHash:          fixture.hash,
+			Result:           fixture.result,
+			DescriptorNonNil: true,
+		},
+	))
+	plainBuilder.EndBuild()
+	plainBuilder.Dispose()
+
+	ir := fixture.pkg.String()
+	for _, name := range []string{"guarded_dynamic_probe", "guarded_plain_call"} {
+		body := coroPlainDispatchIRFunction(ir, name)
+		if body == "" {
+			t.Fatalf("missing DescriptorNonNil fixture %q:\n%s", name, ir)
+		}
+		if strings.Contains(body, "AssertNilDeref") {
+			t.Fatalf("DescriptorNonNil fixture %q recreated an implicit nil helper:\n%s", name, body)
+		}
+		if !strings.Contains(body, "load { i32, i32, i64, i64, ptr, ptr") {
+			t.Fatalf("DescriptorNonNil fixture %q omitted descriptor validation:\n%s", name, body)
+		}
+	}
+	if err := llvm.VerifyModule(fixture.pkg.Module(), llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify DescriptorNonNil module: %v\n%s", err, ir)
+	}
+}
+
 func newCoroDynamicDispatchTestFixture(t *testing.T) *coroDynamicDispatchTestFixture {
 	t.Helper()
 	Initialize(InitAll)

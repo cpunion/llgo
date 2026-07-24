@@ -146,10 +146,12 @@ func TestTimeSleepAndTimerImplementationsStayProfileLocal(t *testing.T) {
 		"func llgoCoroTimerStopV1(timer unsafe.Pointer) bool",
 		"//go:linkname llgoCoroTimerResetV1 runtime.llgoCoroTimerResetV1",
 		"func llgoCoroTimerResetV1(timer unsafe.Pointer, when, period int64) bool",
-		"func llgoCoroControlledTimerWaitV2(controller unsafe.Pointer, control *uint32, expected uint32, deadline int64) uint32",
-		"__llgo_coro_timer_cancel_controlled_v2",
+		"func llgoCoroControlledTimerWaitV2(",
+		"control, ownerRoute *uint32",
+		"__llgo_coro_timer_request_controlled_v2",
 		"go coroTimerManager(t)",
-		"go coroRunTimerCallback(arg.(func()))",
+		"state.manager = 0",
+		"coroRunTimerCallback(arg.(func()))",
 		"corort.MarkTimerChannel((*corort.Chan)(cp))",
 		"coroTimerLock(&state.sendLock)",
 		"coroTimerDrainChannel(state.channel)",
@@ -167,6 +169,8 @@ func TestTimeSleepAndTimerImplementationsStayProfileLocal(t *testing.T) {
 		"__llgo_coro_timer_prepare_controlled_or_abort_v1",
 		"__llgo_coro_timer_cancel_controlled_v1",
 		"__llgo_coro_timer_retire_controlled_or_abort_v1",
+		"__llgo_coro_timer_cancel_controlled_v2",
+		"go coroRunTimerCallback(",
 	} {
 		if strings.Contains(coroSource, obsolete) {
 			t.Errorf("%s still claims standard-library physical symbol %q", coroGo123TimerSource, obsolete)
@@ -189,9 +193,10 @@ func TestControlledTimerOwnerUsesUnifiedTimerSource(t *testing.T) {
 	source := string(data)
 	for _, contract := range []string{
 		"func __llgo_coro_timer_park_controlled_v2(",
-		"func __llgo_coro_timer_cancel_controlled_v2(",
+		"func __llgo_coro_timer_request_controlled_v2(",
 		"coro.PrepareCurrentExecutorControlledTimerPark(",
-		"coro.CancelExecutorControlledTimerV2(",
+		"coroTargetRequestControlledTimerV2(",
+		"catomic.Store(ownerRoute, uint32(wantRoute))",
 	} {
 		if !strings.Contains(source, contract) {
 			t.Errorf("controlled timer owner lacks %q", contract)
@@ -204,9 +209,27 @@ func TestControlledTimerOwnerUsesUnifiedTimerSource(t *testing.T) {
 		"__llgo_coro_timer_prepare_controlled_or_abort_v1",
 		"__llgo_coro_timer_cancel_controlled_v1",
 		"__llgo_coro_timer_retire_controlled_or_abort_v1",
+		"__llgo_coro_timer_cancel_controlled_v2",
 	} {
 		if strings.Contains(source, forbidden) {
 			t.Errorf("controlled timer owner contains forbidden driver behavior %q", forbidden)
+		}
+	}
+
+	targetData, err := os.ReadFile(filepath.Join("internal", "runtime", "coro_target_native_fleet_llgo.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetSource := string(targetData)
+	for _, contract := range []string{
+		"func coroTargetRequestControlledTimerV2(route coro.RouteID) bool",
+		"domain.ingress.Enter()",
+		"fleet.RequestTimerExecutor(route)",
+		"domain.doorbell.Ring()",
+		"domain.ingress.Leave()",
+	} {
+		if !strings.Contains(targetSource, contract) {
+			t.Errorf("controlled timer target route lacks %q", contract)
 		}
 	}
 }
@@ -240,19 +263,35 @@ func TestSleepTimerV2OwnerUsesExactCurrentSource(t *testing.T) {
 }
 
 func TestNativeTimerCapacityIsIndependentAndAdmitsStandardLibraryStress(t *testing.T) {
+	policyData, err := os.ReadFile(filepath.Join("internal", "runtime", "coro_native_fleet.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := string(policyData)
+	for _, contract := range []string{
+		"coroNativeSourcePageCountV1 = 16",
+		"coroNativeTimerPageCountV1  = 64",
+		"timerPages   [coroNativeTimerPageCountV1 - 1]coro.TimerRegistrationPage",
+		"pollPages    [coroNativeSourcePageCountV1 - 1]coro.PollOperationPage",
+		"workerPages  [coroNativeSourcePageCountV1 - 1]coro.WorkerOperationPage",
+		"channelPages [coroNativeSourcePageCountV1 - 1]coro.ChannelOperationPage",
+		"coroNativeFleetConfigureOwnedDomainSourcesV1(domain)",
+	} {
+		if !strings.Contains(policy, contract) {
+			t.Errorf("native fleet capacity policy lacks %q", contract)
+		}
+	}
+
 	data, err := os.ReadFile(filepath.Join("internal", "runtime", "coro_executor_driver_timer_llgo.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	source := string(data)
 	for _, contract := range []string{
-		"coroNativeSourcePageCountV1 = 16",
-		"coroNativeTimerPageCountV1  = 64",
 		"coroNativeTimerCapacityV1   = coroNativeTimerPageCountV1 * coro.TimerRegistrationPageCapacity",
 		"coroProgramTimerExtraPagesV1State   [coroNativeTimerPageCountV1 - 1]coro.TimerRegistrationPage",
 		"coroProgramPollExtraPagesV1State    [coroNativeSourcePageCountV1 - 1]coro.PollOperationPage",
 		"coroProgramManualExtraPagesV2State  [coroNativeManualPageCountV2 - 1]coro.ManualOperationPage",
-		"coroProgramWorkerExtraPagesV1State  [coroNativeSourcePageCountV1 - 1]coro.WorkerOperationPage",
 		"coroProgramChannelExtraPagesV1State [coroNativeSourcePageCountV1 - 1]coro.ChannelOperationPage",
 		"coro.TimerRegistrationConfiguredCapacity(&coroProgramTimerTableV1State) != coroNativeTimerCapacityV1",
 	} {

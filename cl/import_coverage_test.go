@@ -26,6 +26,21 @@ func TestReplaceGoNameRuntimeBranch(t *testing.T) {
 	}
 }
 
+func TestCgoIntrinsicClassificationIsExact(t *testing.T) {
+	for _, name := range []string{"_cgoCheckPointer", "_cgo_runtime_cgocall"} {
+		if !isCgoIntrinsic(name) {
+			t.Fatalf("%q should be an exact llgo cgo intrinsic", name)
+		}
+	}
+	for _, name := range []string{
+		"_Cgo_ptr", "_Cgo_use", "_Cgo_keepalive", "_Cgo_no_callback", "_cgoCheckResult",
+	} {
+		if isCgoIntrinsic(name) {
+			t.Fatalf("%q must remain an ordinary generated Go declaration", name)
+		}
+	}
+}
+
 func TestTypeBackgroundAndParsePkgSyntaxCoverage(t *testing.T) {
 	if got := typeBackground(nil); got != "" {
 		t.Fatalf("typeBackground(nil)=%q, want empty", got)

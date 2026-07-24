@@ -18,12 +18,18 @@
 
 package runtime
 
-// The stackless coroutine profile does not install the legacy SA_SIGINFO
+// The stackless coroutine architecture does not install the legacy SA_SIGINFO
 // callback that walks a native stack and turns a hardware fault into a Go
 // panic. Language nil/bounds/divide faults use compiler-owned ExplicitStatus
 // edges instead. Keep the ordinary panic traceback hook link-complete while
 // reporting that no legacy hardware-fault snapshot exists.
 func faultTraceback(skip int) bool {
 	_ = skip
+	return false
+}
+
+func clearFaultTraceback() {}
+
+func faultTracebackActive() bool {
 	return false
 }

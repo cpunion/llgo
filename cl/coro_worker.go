@@ -26,8 +26,10 @@ import (
 )
 
 const (
-	coroWorkerParkHookV1   = "__llgo_coro_worker_park_v1"
-	coroWorkerResumeHookV1 = "__llgo_coro_worker_resume_v1"
+	coroWorkerParkHookV1          = "__llgo_coro_worker_park_v1"
+	coroWorkerResumeHookV1        = "__llgo_coro_worker_resume_v1"
+	coroOSThreadLockedHookV1      = "__llgo_coro_os_thread_locked_v1"
+	coroOSThreadForeignCallHookV1 = "__llgo_coro_os_thread_foreign_call_v1"
 )
 
 const (
@@ -64,6 +66,34 @@ func coroWorkerResumeSignature() *types.Signature {
 	)
 	results := types.NewTuple(types.NewParam(token.NoPos, nil, "status", types.Typ[types.Uint32]))
 	return types.NewSignatureType(nil, nil, nil, params, results, false)
+}
+
+func coroOSThreadLockedSignature() *types.Signature {
+	pointer := types.Typ[types.UnsafePointer]
+	params := types.NewTuple(types.NewParam(token.NoPos, nil, "g", pointer))
+	results := types.NewTuple(types.NewParam(token.NoPos, nil, "locked", types.Typ[types.Bool]))
+	return types.NewSignatureType(nil, nil, nil, params, results, false)
+}
+
+func coroOSThreadForeignCallSignature() *types.Signature {
+	pointer := types.Typ[types.UnsafePointer]
+	wordPointer := types.NewPointer(types.Typ[types.Uintptr])
+	params := []*types.Var{
+		types.NewParam(token.NoPos, nil, "g", pointer),
+		types.NewParam(token.NoPos, nil, "function", types.Typ[types.Uintptr]),
+		types.NewParam(token.NoPos, nil, "argc", types.Typ[types.Uint32]),
+	}
+	for index := 0; index < coroWorkerMaxArgsV1; index++ {
+		params = append(params, types.NewParam(
+			token.NoPos, nil, fmt.Sprintf("a%d", index), types.Typ[types.Uintptr],
+		))
+	}
+	params = append(params,
+		types.NewParam(token.NoPos, nil, "r1", wordPointer),
+		types.NewParam(token.NoPos, nil, "r2", wordPointer),
+		types.NewParam(token.NoPos, nil, "errno", wordPointer),
+	)
+	return types.NewSignatureType(nil, nil, nil, types.NewTuple(params...), nil, false)
 }
 
 func (p *context) requireCoroWorkerBody(b llssa.Builder) *coroBodyContext {
@@ -130,6 +160,25 @@ func (p *context) compileCoroWorkerWordCall(
 		}
 	}
 
+	lockedHook := p.pkg.NewFunc(coroOSThreadLockedHookV1, coroOSThreadLockedSignature(), llssa.InC)
+	locked := b.Call(lockedHook.Expr, body.task)
+	directBlock := b.Func.MakeBlock()
+	workerBlock := b.Func.MakeBlock()
+	join := b.Func.MakeBlock()
+	b.If(locked, directBlock, workerBlock)
+
+	b.SetBlockEx(directBlock, llssa.AtEnd, false)
+	direct := p.pkg.NewFunc(
+		coroOSThreadForeignCallHookV1, coroOSThreadForeignCallSignature(), llssa.InC,
+	)
+	directArgs := make([]llssa.Expr, 0, 3+coroWorkerMaxArgsV1+3)
+	directArgs = append(directArgs, body.task, function, physicalArgs[5])
+	directArgs = append(directArgs, physicalArgs[6:]...)
+	directArgs = append(directArgs, r1, r2, errno)
+	b.Call(direct.Expr, directArgs...)
+	b.Jump(join)
+
+	b.SetBlockEx(workerBlock, llssa.AtEnd, false)
 	body.emitCoroParkOperation(p, b, coroParkOperation{
 		shouldSuspend: b.Prog.BoolVal(true),
 		park: func(suspend llssa.Builder) {
@@ -151,6 +200,8 @@ func (p *context) compileCoroWorkerWordCall(
 		abort:    coroWorkerResumeTaskAbortV1,
 		shutdown: coroWorkerResumeShutdownV1,
 	})
+	b.Jump(join)
+	b.SetBlockContinuation(join)
 	// The worker queue deliberately contains only copied uintptr words. Keep
 	// every independently proved typed owner live until the physical completion
 	// acknowledgement has selected this normal resume path; llvm.fake.use emits
@@ -165,13 +216,30 @@ func (p *context) compileCoroWorkerWordCall(
 // an edge on which the source SSA value does not dominate. Reloading the slot
 // in that continuation preserves both valid LLVM SSA and the typed owner until
 // the physical completion/retirement boundary.
-func (p *context) compileCoroCallKeepaliveSlots(b llssa.Builder, call *ssa.Call) []llssa.Expr {
+func (p *context) coroCallKeepaliveSources(call ssa.CallInstruction) []ssa.Value {
 	body := p.coroBody()
 	if body == nil || body.frameRetention == nil || call == nil {
 		return nil
 	}
-	sources := body.frameRetention.exactCallKeepaliveSources(call)
-	slots := make([]llssa.Expr, len(sources))
+	return body.frameRetention.exactCallKeepaliveSources(call)
+}
+
+func (p *context) coroCallKeepaliveStorageType(source ssa.Value) llssa.Type {
+	if p == nil || source == nil {
+		panic("coroutine keepalive storage requires one exact source value")
+	}
+	if coroFrameRetentionIntegerLike(source.Type()) {
+		return p.prog.VoidPtr()
+	}
+	return p.type_(source.Type(), llssa.InGo)
+}
+
+func (p *context) compileCoroCallKeepaliveValues(
+	b llssa.Builder,
+	call ssa.CallInstruction,
+) []llssa.Expr {
+	sources := p.coroCallKeepaliveSources(call)
+	values := make([]llssa.Expr, len(sources))
 	for index, source := range sources {
 		value := p.compileValue(b, source)
 		if coroFrameRetentionIntegerLike(source.Type()) {
@@ -181,6 +249,15 @@ func (p *context) compileCoroCallKeepaliveSlots(b llssa.Builder, call *ssa.Call)
 			// carries an address-shaped root rather than an optimizer-only integer.
 			value = b.Convert(p.prog.VoidPtr(), value)
 		}
+		values[index] = value
+	}
+	return values
+}
+
+func (p *context) compileCoroCallKeepaliveSlots(b llssa.Builder, call ssa.CallInstruction) []llssa.Expr {
+	values := p.compileCoroCallKeepaliveValues(b, call)
+	slots := make([]llssa.Expr, len(values))
+	for index, value := range values {
 		slots[index] = p.coroFrameAlloc(value.Type)
 		b.Store(slots[index], value)
 	}

@@ -59,8 +59,24 @@ func (shape coroEmissionFunctionShape) helperPlacement(instr ssa.Instruction, he
 			return coroRuntimeHelperAtPrologue
 		}
 	}
-	if _, deferred := instr.(*ssa.Defer); deferred && shape.dynamicCleanup && helper == "FreeDeferNode" {
-		return coroRuntimeHelperAtCleanup
+	if deferred, ok := instr.(*ssa.Defer); ok {
+		if shape.dynamicCleanup && helper == "FreeDeferNode" {
+			return coroRuntimeHelperAtCleanup
+		}
+		// Interface method selection is part of evaluating the deferred
+		// function value, so IfacePtrData runs at registration. Builtin helpers
+		// implement the deferred operation itself and therefore move with that
+		// operation into the frame cleanup drainer.
+		if helper != "IfacePtrData" {
+			if _, builtin := deferred.Call.Value.(*ssa.Builtin); builtin {
+				// A dynamic cleanup record has its own registration-time AllocU.
+				// A deferred builtin that also needs AllocU is rejected by the
+				// cleanup planner until helper occurrences become a multiset.
+				if !(shape.dynamicCleanup && helper == "AllocU") {
+					return coroRuntimeHelperAtCleanup
+				}
+			}
+		}
 	}
 	return coroRuntimeHelperAtSource
 }
@@ -188,7 +204,7 @@ func (u *EmissionUniverse) materializeLoweredRuntimeHelpers(ctx *context, ownerF
 // frozen per owner by recordCoroRawPlainLoweredCall and its complete raw
 // closure is validated by the whole-program plan.
 func coroCompilerRawPlainLoweredRuntimeHelper(u *EmissionUniverse, helper string) bool {
-	if u == nil || !u.CoroChannelEnabled() {
+	if u == nil {
 		return false
 	}
 	switch helper {
@@ -235,28 +251,45 @@ func (u *EmissionUniverse) classifyPlainRuntimeHelpers(ctx *context, instr ssa.I
 			}
 		}
 	}
+	plainStackCStr := false
+	if call, ok := instr.(*ssa.Call); ok && u.prog != nil {
+		opcode, intrinsic := emissionCallIntrinsicInstruction(ctx, &call.Call)
+		plainStackCStr = intrinsic && opcode == llgoAllocaCStr
+	}
 	for _, helper := range managed {
+		if plainStackCStr && helper == "AllocU" {
+			continue
+		}
 		if !coroCompilerRawPlainLoweredRuntimeHelper(u, helper) {
 			add(helper)
 		}
 	}
-	if u.CoroChannelEnabled() {
-		switch instruction := instr.(type) {
-		case *ssa.Send:
-			add("ChanSend")
-		case *ssa.UnOp:
-			if instruction.Op == token.ARROW {
-				add("ChanRecv")
-			}
-		case *ssa.Select:
-			if instruction.Blocking {
-				add("Select")
-			} else {
-				add("TrySelect")
-			}
-		case *ssa.Call:
-			if builtin, ok := instruction.Common().Value.(*ssa.Builtin); ok && builtin.Name() == "close" {
+	switch instruction := instr.(type) {
+	case *ssa.Send:
+		add("ChanSend")
+	case *ssa.UnOp:
+		if instruction.Op == token.ARROW {
+			add("ChanRecv")
+		}
+	case *ssa.Select:
+		if instruction.Blocking {
+			add("Select")
+		} else {
+			add("TrySelect")
+		}
+	case *ssa.Call:
+		if builtin, ok := instruction.Common().Value.(*ssa.Builtin); ok && builtin.Name() == "close" {
+			add("ChanClose")
+		}
+	case *ssa.Defer:
+		if builtin, ok := instruction.Common().Value.(*ssa.Builtin); ok {
+			switch builtin.Name() {
+			case "close":
 				add("ChanClose")
+			case "panic":
+				add("Panic")
+			case "recover":
+				add("Recover")
 			}
 		}
 	}
@@ -374,11 +407,7 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(ctx *context, shape coroEm
 	case *ssa.UnOp:
 		switch v.Op {
 		case token.ARROW:
-			if u.CoroChannelEnabled() {
-				add("CoroChanTryRecv")
-			} else {
-				add("ChanRecv")
-			}
+			add("CoroChanTryRecv")
 		case token.MUL:
 			if _, checkedReceiver := ctx.methodNilDerefChecks[v]; checkedReceiver {
 				// compileCheckedDeref preserves the checked pointer through the
@@ -388,6 +417,16 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(ctx *context, shape coroEm
 					add("AssertNilDerefPtr")
 				}
 			} else if shouldAssertDirectNilDeref(v) && !ssaValueProvenNonNilAt(v.X, v) {
+				add("AssertNilDeref")
+			}
+			// Builder.Load must still perform the source-language nil check
+			// when the loaded value has zero physical size: there is no LLVM
+			// load whose fault could preserve that edge. This applies to
+			// aggregate values as well as the scalar subset handled by
+			// shouldAssertDirectNilDeref, and follows an AssertNilDerefPtr for a
+			// zero-sized value-receiver wrapper.
+			if emissionUniversallyZeroSizedType(ctx.patchType(v.Type())) &&
+				!isKnownNonNilAddr(v.X) && !ssaValueProvenNonNilAt(v.X, v) {
 				add("AssertNilDeref")
 			}
 		}
@@ -405,6 +444,13 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(ctx *context, shape coroEm
 	case *ssa.Defer:
 		if shape.dynamicCleanup {
 			add("AllocU", "FreeDeferNode")
+		}
+		if v.Call.IsInvoke() {
+			add("IfacePtrData")
+		}
+		if builtin, ok := v.Call.Value.(*ssa.Builtin); !ok ||
+			builtin.Name() != "panic" && builtin.Name() != "recover" {
+			u.builtinRuntimeHelpers(ctx, &v.Call, add)
 		}
 	case *ssa.FieldAddr:
 		if ctx.isAddressOfFieldAddr(v) && !ssaAddressValueProvenNonNilAt(v.X, v) {
@@ -504,15 +550,9 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(ctx *context, shape coroEm
 	case *ssa.MakeChan:
 		add("NewChan")
 	case *ssa.Select:
-		if u.CoroChannelEnabled() {
-			add("CoroChanSelectTry")
-			if v.Blocking {
-				add("CoroChanSelectPark", "CoroChanSelectResume")
-			}
-		} else if v.Blocking {
-			add("Select")
-		} else {
-			add("TrySelect")
+		add("CoroChanSelectTry")
+		if v.Blocking {
+			add("CoroChanSelectPark", "CoroChanSelectResume")
 		}
 	case *ssa.SliceToArrayPointer:
 		if length, exact := coroSliceToArrayPointerLen(v, ctx.patchType); !exact || length != 0 {
@@ -526,11 +566,7 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(ctx *context, shape coroEm
 			add("Panic")
 		}
 	case *ssa.Send:
-		if u.CoroChannelEnabled() {
-			add("CoroChanTrySend")
-		} else {
-			add("ChanSend")
-		}
+		add("CoroChanTrySend")
 	case *ssa.Call:
 		if v.Call.IsInvoke() {
 			// Builder.Imethod extracts the receiver through this runtime helper
@@ -544,12 +580,11 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(ctx *context, shape coroEm
 			opcode, intrinsic := emissionCallIntrinsicInstruction(ctx, &v.Call)
 			switch {
 			case intrinsic && opcode == llgoAllocaCStr:
-				// Builder.AllocaCStr emits StringLen, +1, and LLVM alloca
-				// directly, then inserts this one managed runtime call. The
-				// intrinsic declaration edge is elided, so CStrCopy must remain
-				// an exact owner-scoped lowered edge for effect propagation and
-				// coroutine-aware codegen resolution.
-				add("CStrCopy")
+				// A plain body emits the stack-backed AllocaCStr recipe, while
+				// a physical body consumes the frozen heap-cstr recipe. The
+				// latter emits AllocU followed by CStrCopy, so both managed
+				// edges must be known before whole-program analysis.
+				add("AllocU", "CStrCopy")
 			case intrinsic && opcode == llgoDeferData:
 				// Builder.DeferData replaces the compiler declaration with an
 				// ordinary runtime.GetThreadDefer call.
@@ -559,6 +594,16 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(ctx *context, shape coroEm
 				// already-lowered varargs shape. Invalid shapes are rejected later
 				// by CoroIntrinsicCallSiteSemantics.
 				if helper, err := emissionStringIntrinsicHelper(ctx, v); err == nil {
+					add(helper)
+				}
+			case intrinsic && (opcode == llgoCgoCString || opcode == llgoCgoCBytes ||
+				opcode == llgoCgoGoString || opcode == llgoCgoGoStringN || opcode == llgoCgoGoBytes):
+				// The five cgo conversion intrinsics are compiler declarations,
+				// not callable Go bodies. Their physical lowering inserts one
+				// exact runtime helper call; retain that hidden edge just like
+				// llgo.string so its complete allocation/foreign-call effects
+				// remain visible to the whole-program plan.
+				if helper, ok := emissionCgoConversionRuntimeHelper(opcode); ok {
 					add(helper)
 				}
 			case intrinsic && opcode == llgoSigsetjmp && u.coroUsesRuntimeSigjmpHelpers():
@@ -576,6 +621,23 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(ctx *context, shape coroEm
 	}
 	sort.Strings(ret)
 	return ret
+}
+
+func emissionCgoConversionRuntimeHelper(opcode int) (string, bool) {
+	switch opcode {
+	case llgoCgoCString:
+		return "CString", true
+	case llgoCgoCBytes:
+		return "CBytes", true
+	case llgoCgoGoString:
+		return "GoString", true
+	case llgoCgoGoStringN:
+		return "GoStringN", true
+	case llgoCgoGoBytes:
+		return "GoBytes", true
+	default:
+		return "", false
+	}
 }
 
 // emissionCheckedDerefBaseRuntimeHelpers mirrors emitNilDerefBaseCheck. A
@@ -921,6 +983,29 @@ func emissionZeroSizedType(typ types.Type, pointerSize int) bool {
 	return emissionTargetTypeSize(types.Unalias(typ), int64(pointerSize)) == 0
 }
 
+// emissionUniversallyZeroSizedType classifies the aggregate shapes whose size
+// is zero independently of a 32- or 64-bit target. It is used during early
+// helper discovery, including report-only universes that intentionally have no
+// LLVM target yet.
+func emissionUniversallyZeroSizedType(typ types.Type) bool {
+	if typ == nil {
+		return false
+	}
+	switch typ := types.Unalias(typ).Underlying().(type) {
+	case *types.Array:
+		return typ.Len() == 0 || emissionUniversallyZeroSizedType(typ.Elem())
+	case *types.Struct:
+		for index := 0; index < typ.NumFields(); index++ {
+			if !emissionUniversallyZeroSizedType(typ.Field(index).Type()) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
 func emissionTargetTypeSize(typ types.Type, word int64) int64 {
 	if typ == nil || word <= 0 {
 		return -1
@@ -1002,11 +1087,7 @@ func (u *EmissionUniverse) builtinRuntimeHelpers(ctx *context, call *ssa.CallCom
 	case "copy":
 		add("SliceCopy")
 	case "close":
-		if u.CoroChannelEnabled() {
-			add("CoroChanTryClose")
-		} else {
-			add("ChanClose")
-		}
+		add("CoroChanTryClose")
 	case "recover":
 		add("Recover")
 	case "panic":

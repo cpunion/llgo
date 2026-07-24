@@ -107,15 +107,31 @@ func (p *context) tryCompileCoroPhysicalCall(b llssa.Builder, call *ssa.Call) (l
 		return p.compileCoroManagedInterfaceAwait(b, call, instructionPlan), true
 	case coroPhysicalControlPlainDispatch:
 		return p.compileCoroPhysicalPlainDispatch(b, call, instructionPlan), true
+	case coroPhysicalControlRawPlainCall:
+		if instructionPlan.controlTarget == nil || instructionPlan.controlTargetID == "" {
+			panic("physical raw/plain call has no frozen target identity")
+		}
+		return p.compileCoroRawPlainTargetCall(b, call, instructionPlan.controlTarget), true
 	case coroPhysicalControlNone:
-		if instructionPlan.operation == coroPhysicalOperationWorkerForeign {
+		if instructionPlan.operation != coroPhysicalOperationWorkerCgo &&
+			instructionPlan.operation != coroPhysicalOperationWorkerForeign {
+			return llssa.Expr{}, false
+		}
+		p.observeCoroPhysicalOperation(call, instructionPlan.operation)
+		switch instructionPlan.operation {
+		case coroPhysicalOperationWorkerCgo:
+			if instructionPlan.operationCgo == nil {
+				panic("physical coroutine cgo worker call has no frozen typed shape")
+			}
+			return p.compileCoroWorkerCgoCall(b, call, *instructionPlan.operationCgo), true
+		case coroPhysicalOperationWorkerForeign:
 			if instructionPlan.operationWorker == nil {
 				panic("physical coroutine worker call has no frozen foreign shape")
 			}
-			p.observeCoroPhysicalOperation(call, instructionPlan.operation)
 			return p.compileCoroWorkerForeignCall(b, call, *instructionPlan.operationWorker), true
+		default:
+			panic("physical coroutine worker call selected an unsupported operation")
 		}
-		return llssa.Expr{}, false
 	default:
 		panic(fmt.Sprintf("source call selected incompatible frozen physical control recipe %s", instructionPlan.control))
 	}
@@ -134,15 +150,52 @@ func (p *context) compileCoroTerminalResultAllocation(allocation *ssa.Alloc) lls
 }
 
 func (p *context) compileCoroReturn(b llssa.Builder, results []llssa.Expr) {
+	p.compileCoroTerminalOutcome(b, coroPhysicalOutcomeReturn, results)
+}
+
+func (p *context) compileCoroGoexit(b llssa.Builder) {
+	p.compileCoroTerminalOutcome(b, coroPhysicalOutcomeGoexit, nil)
+}
+
+// compileCoroTerminalOutcome centralizes the physical frame termination
+// protocol. Return commits values before final suspend; Goexit replaces the
+// cleanup base and never reaches the retained SSA call continuation.
+func (p *context) compileCoroTerminalOutcome(
+	b llssa.Builder,
+	outcome coroPhysicalOutcomeRecipe,
+	results []llssa.Expr,
+) {
 	body := p.coroBody()
-	if body == nil {
-		panic("coroutine return escaped its planned physical body")
+	if body == nil || body.completion == nil || b == nil || b.Func != p.fn {
+		panic("terminal outcome escaped its planned physical coroutine body")
 	}
-	if body.completion == nil {
-		panic("coroutine return has no completion block")
+	switch outcome {
+	case coroPhysicalOutcomeReturn:
+		p.storeCoroLeafResult(b, body.abi, body.resultSlot, results)
+		b.Jump(body.completion)
+	case coroPhysicalOutcomeGoexit:
+		if len(results) != 0 || body.terminalStatus.IsNil() || !p.coroEmissionExplicitStatus() {
+			panic("Goexit requires an active explicit-status coroutine body")
+		}
+		body.enterGoexit(b)
+	default:
+		panic(fmt.Sprintf("unsupported physical terminal outcome recipe %s", outcome))
 	}
-	p.storeCoroLeafResult(b, body.abi, body.resultSlot, results)
-	b.Jump(body.completion)
+}
+
+func (body *coroBodyContext) enterGoexit(b llssa.Builder) {
+	if body == nil || body.completion == nil || body.terminalStatus.IsNil() || b == nil {
+		panic("structured Goexit requires a complete physical coroutine body")
+	}
+	b.Store(
+		body.terminalStatus,
+		b.Prog.IntVal(coroAwaitCompletionGoexit, b.Prog.Uint32()),
+	)
+	if body.cleanup == nil {
+		b.Jump(body.completion)
+		return
+	}
+	body.cleanup.enterGoexit(b)
 }
 
 func (p *context) compileCoroDefer(b llssa.Builder, instruction *ssa.Defer) {

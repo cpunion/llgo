@@ -28,6 +28,46 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
+func TestCoroRawPlainDirectForeignContractCompatibility(t *testing.T) {
+	base := coro.CallableContract{
+		ID:       "foreign.v1/test",
+		Progress: coro.ProgressMayBlock,
+		Affinity: coro.AffinityAnyThread,
+		Reentry:  coro.ReentryNone,
+		Memory:   coro.MemoryBorrowUntilComplete,
+	}
+	if !coroRawPlainDirectForeignContractCompatible(base) {
+		t.Fatal("default may-block foreign contract was rejected on a raw caller stack")
+	}
+	callerThread := base
+	callerThread.Affinity = coro.AffinityCallerThread
+	if !coroRawPlainDirectForeignContractCompatible(callerThread) {
+		t.Fatal("caller-thread contract was rejected on its exact raw caller stack")
+	}
+	for name, mutate := range map[string]func(*coro.CallableContract){
+		"executor-safe": func(contract *coro.CallableContract) {
+			contract.Progress = coro.ProgressExecutorSafe
+		},
+		"owner-thread": func(contract *coro.CallableContract) {
+			contract.Affinity = coro.AffinityOwnerThread
+		},
+		"managed-reentry": func(contract *coro.CallableContract) {
+			contract.Reentry = coro.ReentryManagedCallback
+		},
+		"retained-memory": func(contract *coro.CallableContract) {
+			contract.Memory = coro.MemoryRetained
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			contract := base
+			mutate(&contract)
+			if coroRawPlainDirectForeignContractCompatible(contract) {
+				t.Fatalf("raw caller accepted incompatible contract %+v", contract)
+			}
+		})
+	}
+}
+
 // A raw ABI address demand may suppress scanner-only preemption in an owned Go
 // closure, but it is not evidence that a C leaf is nonblocking. In particular,
 // following the exact static call below must not turn Foreign into
@@ -235,7 +275,6 @@ func OutcomeRoot(depth int) int {
 		},
 		requiredRoots: coro.Roots{{Function: root, Demand: coro.SyncDemand}},
 		requiredPlain: map[*ssa.Function]struct{}{root: {}},
-		outcomeMode:   coro.OutcomeExplicitStatus,
 	}
 	plan, err := input.Analyze(nil, coro.SSAConfig{MaxPlainInstructions: -1})
 	if err != nil {
@@ -273,11 +312,136 @@ func ParkRoot() { <-blocked }
 		},
 		requiredRoots: coro.Roots{{Function: root, Demand: coro.SyncDemand}},
 		requiredPlain: map[*ssa.Function]struct{}{root: {}},
-		outcomeMode:   coro.OutcomeExplicitStatus,
 	}
 	_, err = input.Analyze(nil, coro.SSAConfig{MaxPlainInstructions: -1})
 	if err == nil || !strings.Contains(err.Error(), "real local suspend effect may-park") {
 		t.Fatalf("required synchronous runtime park error = %v; want exact raw-ABI feasibility rejection", err)
+	}
+}
+
+func TestCoroGeneratedWorkerElisionPublishesExactRawAdapter(t *testing.T) {
+	ssaPkg, _ := buildCoroPlanTestPackage(t, "example.com/cgoworkerraw", `package cgoworkerraw
+func Adapter(value uint64) uint64 { return value + 1 }
+func Root(value uint64) uint64 { return Adapter(value) }
+`, nil)
+	root := ssaPkg.Func("Root")
+	adapter := ssaPkg.Func("Adapter")
+	calls := coroPlanTestCalls(root)
+	if len(calls) != 1 {
+		t.Fatalf("Root calls = %d, want one generated-adapter call", len(calls))
+	}
+	workerCall := calls[0]
+	universe, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, []*ssa.Function{root, adapter})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := CoroPlanInput{
+		Program:          ssaPkg.Prog,
+		EmissionUniverse: universe,
+		functionBackground: func(*ssa.Function) (llssa.Background, bool, error) {
+			return llssa.InGo, true, nil
+		},
+		syncDemandReferences: func(*ssa.Function) ([]*ssa.Function, error) {
+			return nil, nil
+		},
+		callSitePlan: func(call ssa.CallInstruction) (cl.CoroCallSitePlan, bool, error) {
+			if call != workerCall {
+				return cl.CoroCallSitePlan{}, false, nil
+			}
+			return cl.CoroCallSitePlan{
+				Elision:            cl.CoroCallElidedCgoWorker,
+				ElisionCertificate: "exact-cgo-worker",
+				CgoWorkerTarget:    adapter,
+			}, true, nil
+		},
+	}
+	plan, err := input.Analyze(
+		coro.Roots{{Function: root, Demand: coro.SyncDemand}},
+		coro.SSAConfig{MaxPlainInstructions: -1},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootPlan := functionPlanForBuildTest(t, plan, root)
+	if !rootPlan.Effect.Contains(coro.WaitForeign) || rootPlan.Emission != coro.EmitCoroutine ||
+		!plan.ElidesCall(workerCall) {
+		t.Fatalf("managed cgo caller plan = %+v, elided=%t; want coroutine worker wait", rootPlan, plan.ElidesCall(workerCall))
+	}
+	adapterPlan := functionPlanForBuildTest(t, plan, adapter)
+	if adapterPlan.ManagedDemand != coro.NoDemand || !adapterPlan.RawPlainDemand ||
+		!adapterPlan.RawPlainOnly || !adapterPlan.RawPlainEntry ||
+		adapterPlan.Emission != coro.EmitRawPlain || adapterPlan.Primary != coro.PrimaryPlain ||
+		!plan.HasRawPlainVariant(adapter) {
+		t.Fatalf(
+			"generated cgo adapter plan = %+v, variant=%t; want exact raw-only worker entry",
+			adapterPlan, plan.HasRawPlainVariant(adapter),
+		)
+	}
+}
+
+func TestCoroDeferredGeneratedWorkerElisionPublishesExactRawAdapter(t *testing.T) {
+	ssaPkg, _ := buildCoroPlanTestPackage(t, "example.com/cgoworkerdeferraw", `package cgoworkerdeferraw
+func Adapter(value uint64) uint64 { return value + 1 }
+func Root(value uint64) { defer Adapter(value) }
+`, nil)
+	root := ssaPkg.Func("Root")
+	adapter := ssaPkg.Func("Adapter")
+	calls := coroPlanTestCalls(root)
+	if len(calls) != 1 {
+		t.Fatalf("Root calls = %d, want one deferred generated-adapter call", len(calls))
+	}
+	workerDefer, deferred := calls[0].(*ssa.Defer)
+	if !deferred {
+		t.Fatalf("Root call = %T, want *ssa.Defer", calls[0])
+	}
+	universe, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, []*ssa.Function{root, adapter})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := CoroPlanInput{
+		Program:          ssaPkg.Prog,
+		EmissionUniverse: universe,
+		functionBackground: func(*ssa.Function) (llssa.Background, bool, error) {
+			return llssa.InGo, true, nil
+		},
+		syncDemandReferences: func(*ssa.Function) ([]*ssa.Function, error) {
+			return nil, nil
+		},
+		callSitePlan: func(call ssa.CallInstruction) (cl.CoroCallSitePlan, bool, error) {
+			if call != workerDefer {
+				return cl.CoroCallSitePlan{}, false, nil
+			}
+			return cl.CoroCallSitePlan{
+				Elision:            cl.CoroCallElidedCgoWorker,
+				ElisionCertificate: "exact-deferred-cgo-worker",
+				CgoWorkerTarget:    adapter,
+			}, true, nil
+		},
+	}
+	plan, err := input.Analyze(
+		coro.Roots{{Function: root, Demand: coro.SyncDemand}},
+		coro.SSAConfig{MaxPlainInstructions: -1},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootPlan := functionPlanForBuildTest(t, plan, root)
+	if !rootPlan.Effect.Contains(coro.WaitForeign) || rootPlan.Emission != coro.EmitCoroutine ||
+		!plan.ElidesCall(workerDefer) {
+		t.Fatalf(
+			"deferred managed cgo caller plan = %+v, elided=%t; want coroutine worker wait",
+			rootPlan, plan.ElidesCall(workerDefer),
+		)
+	}
+	adapterPlan := functionPlanForBuildTest(t, plan, adapter)
+	if adapterPlan.ManagedDemand != coro.NoDemand || !adapterPlan.RawPlainDemand ||
+		!adapterPlan.RawPlainOnly || !adapterPlan.RawPlainEntry ||
+		adapterPlan.Emission != coro.EmitRawPlain || adapterPlan.Primary != coro.PrimaryPlain ||
+		!plan.HasRawPlainVariant(adapter) {
+		t.Fatalf(
+			"deferred generated cgo adapter plan = %+v, variant=%t; want exact raw-only worker entry",
+			adapterPlan, plan.HasRawPlainVariant(adapter),
+		)
 	}
 }
 
@@ -405,7 +569,6 @@ func RawRoot() {}
 				UnwindOnly: true, ExplicitStatusElided: true,
 			}}, nil
 		},
-		outcomeMode: coro.OutcomeExplicitStatus,
 	}
 
 	rawPlan, err := input.Analyze(nil, coro.SSAConfig{MaxPlainInstructions: -1})
@@ -450,9 +613,8 @@ func OpenRoot(callback func()) { callback() }
 		functionBackground: func(*ssa.Function) (llssa.Background, bool, error) {
 			return llssa.InGo, true, nil
 		},
-		requiredRoots:         coro.Roots{{Function: root, Demand: coro.SyncDemand}},
-		requiredPlain:         map[*ssa.Function]struct{}{root: {}},
-		enableManagedDispatch: true,
+		requiredRoots: coro.Roots{{Function: root, Demand: coro.SyncDemand}},
+		requiredPlain: map[*ssa.Function]struct{}{root: {}},
 	}
 	_, err = input.Analyze(nil, coro.SSAConfig{MaxPlainInstructions: -1})
 	if err == nil || !strings.Contains(err.Error(), "dynamic/open call") {

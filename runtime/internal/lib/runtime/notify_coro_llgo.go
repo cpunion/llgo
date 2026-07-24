@@ -43,6 +43,7 @@ func llgoCoroNotifyAllOrAbortV2(notifyAddr unsafe.Pointer, waitSnapshot uint32)
 //go:linkname llgoCoroNotifySuspendV2 llgo.coroPark
 func llgoCoroNotifySuspendV2(state *llgoCoroNotifyParkV2, reserved uint32)
 
+//llgo:managedlink
 //go:linkname sync_runtime_notifyListWait sync.runtime_notifyListWait
 func sync_runtime_notifyListWait(l *notifyList, target uint32) {
 	if l == nil {
@@ -57,6 +58,7 @@ func sync_runtime_notifyListWait(l *notifyList, target uint32) {
 	llgoCoroNotifySuspendV2(&state, 0)
 }
 
+//llgo:managedlink
 //go:linkname sync_runtime_notifyListNotifyOne sync.runtime_notifyListNotifyOne
 func sync_runtime_notifyListNotifyOne(l *notifyList) {
 	llgoCoroNotifyOneOrAbortV2(
@@ -65,6 +67,7 @@ func sync_runtime_notifyListNotifyOne(l *notifyList) {
 	)
 }
 
+//llgo:managedlink
 //go:linkname sync_runtime_notifyListNotifyAll sync.runtime_notifyListNotifyAll
 func sync_runtime_notifyListNotifyAll(l *notifyList) {
 	llgoCoroNotifyAllOrAbortV2(

@@ -34,25 +34,55 @@ type coroProgramIR struct {
 	localBodyFacts      map[*ssa.Function]coro.SSAFunctionBodyFacts
 	callPlans           map[ssa.CallInstruction]coroFrozenCallSitePlan
 	callsFrozen         bool
+	cgoDirectReturns    map[*ssa.Return]ssa.Value
 	physicalPlans       map[emissionFunctionOwnerKey]*coroPhysicalFunctionPlan
 	physicalPlansSealed bool
 }
 
 func newCoroProgramIR() *coroProgramIR {
 	return &coroProgramIR{
-		sitePlans:      make(map[emissionFunctionOwnerKey]map[ssa.Instruction]coroEmissionSitePlan),
-		siteOwners:     make(map[emissionFunctionOwnerKey]none),
-		semanticPlans:  make(map[emissionFunctionOwnerKey]map[ssa.Instruction]coroSemanticInstructionPlan),
-		localBodyFacts: make(map[*ssa.Function]coro.SSAFunctionBodyFacts),
-		callPlans:      make(map[ssa.CallInstruction]coroFrozenCallSitePlan),
-		physicalPlans:  make(map[emissionFunctionOwnerKey]*coroPhysicalFunctionPlan),
+		sitePlans:        make(map[emissionFunctionOwnerKey]map[ssa.Instruction]coroEmissionSitePlan),
+		siteOwners:       make(map[emissionFunctionOwnerKey]none),
+		semanticPlans:    make(map[emissionFunctionOwnerKey]map[ssa.Instruction]coroSemanticInstructionPlan),
+		localBodyFacts:   make(map[*ssa.Function]coro.SSAFunctionBodyFacts),
+		callPlans:        make(map[ssa.CallInstruction]coroFrozenCallSitePlan),
+		cgoDirectReturns: make(map[*ssa.Return]ssa.Value),
+		physicalPlans:    make(map[emissionFunctionOwnerKey]*coroPhysicalFunctionPlan),
 	}
+}
+
+func (ir *coroProgramIR) freezeCgoDirectReturns(plan *emissionCgoLoweringPlan) error {
+	if ir == nil || plan == nil {
+		return fmt.Errorf("cgo direct-return plan requires one exact program IR and lowering plan")
+	}
+	for ret, value := range plan.directReturns {
+		if ret == nil || value == nil || ret.Parent() == nil || value.Parent() != ret.Parent() {
+			return fmt.Errorf("cgo direct-return recipe has an invalid source value")
+		}
+		if previous, exists := ir.cgoDirectReturns[ret]; exists && previous != value {
+			return fmt.Errorf("cgo return in %q acquired owner-dependent direct values", ret.Parent().Name())
+		}
+		ir.cgoDirectReturns[ret] = value
+	}
+	return nil
+}
+
+func (ir *coroProgramIR) cgoDirectReturn(ret *ssa.Return) (ssa.Value, bool, error) {
+	if ir == nil || !ir.callsFrozen {
+		return nil, false, fmt.Errorf("cgo direct-return recipes are not frozen")
+	}
+	if ret == nil || ret.Parent() == nil {
+		return nil, false, fmt.Errorf("cgo direct-return lookup requires one exact return")
+	}
+	value, found := ir.cgoDirectReturns[ret]
+	return value, found, nil
 }
 
 func (ir *coroProgramIR) freezeSemanticInstruction(
 	function *ssa.Function,
 	owner *preparedEmissionPackage,
 	instruction ssa.Instruction,
+	evaluated bool,
 ) error {
 	if ir == nil || function == nil || owner == nil || instruction == nil || instruction.Parent() != function {
 		return fmt.Errorf("semantic SitePlan requires one exact program IR, owner, and source instruction")
@@ -64,6 +94,15 @@ func (ir *coroProgramIR) freezeSemanticInstruction(
 	plan, err := planCoroSemanticInstruction(instruction)
 	if err != nil {
 		return err
+	}
+	if evaluated {
+		plan.evaluated = true
+	} else {
+		plan = coroSemanticInstructionPlan{
+			class:  coro.OpPure,
+			recipe: coro.RecipeID("cl.ssa.frontend-unevaluated.v0"),
+			effect: coro.NoSuspend,
+		}
 	}
 	byInstruction := ir.semanticPlans[key]
 	if byInstruction == nil {
@@ -122,6 +161,9 @@ func (ir *coroProgramIR) freezeSiteOwner(function *ssa.Function, owner *prepared
 			if !ok {
 				return fmt.Errorf("coroutine semantic SitePlan owner %q omitted source instruction %q", function.Name(), instruction.String())
 			}
+			if !plan.evaluated {
+				continue
+			}
 			facts.Effect = facts.Effect.Join(plan.effect)
 			facts.Exec = facts.Exec.Join(plan.exec)
 			if !plan.debug {
@@ -130,13 +172,52 @@ func (ir *coroProgramIR) freezeSiteOwner(function *ssa.Function, owner *prepared
 		}
 	}
 	facts.Effect = facts.Effect.Normalize()
-	facts.HasCycle = coroSemanticCFGHasCycle(function.Blocks)
+	facts.HasCycle = coroSemanticEvaluatedCFGHasCycle(function.Blocks, semantic)
 	if previous, exists := ir.localBodyFacts[function]; exists && previous != facts {
 		return fmt.Errorf("function %q acquired owner-dependent local semantic facts", function.Name())
 	}
 	ir.localBodyFacts[function] = facts
 	ir.siteOwners[key] = none{}
 	return nil
+}
+
+func coroSemanticEvaluatedCFGHasCycle(
+	blocks []*ssa.BasicBlock,
+	semantic map[ssa.Instruction]coroSemanticInstructionPlan,
+) bool {
+	evaluated := make(map[*ssa.BasicBlock]bool)
+	for _, block := range blocks {
+		for _, instruction := range block.Instrs {
+			if semantic[instruction].evaluated {
+				evaluated[block] = true
+				break
+			}
+		}
+	}
+	state := make(map[*ssa.BasicBlock]uint8, len(evaluated))
+	var visit func(*ssa.BasicBlock) bool
+	visit = func(block *ssa.BasicBlock) bool {
+		switch state[block] {
+		case 1:
+			return true
+		case 2:
+			return false
+		}
+		state[block] = 1
+		for _, successor := range block.Succs {
+			if evaluated[successor] && visit(successor) {
+				return true
+			}
+		}
+		state[block] = 2
+		return false
+	}
+	for block := range evaluated {
+		if state[block] == 0 && visit(block) {
+			return true
+		}
+	}
+	return false
 }
 
 func (ir *coroProgramIR) semanticInstructionPlan(

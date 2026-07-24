@@ -27,6 +27,95 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
+func TestAnalyzeSSATrustedNoUnwindTrustsOnlyLocalImplicitFaults(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "trusted_no_unwind.go", `package coroid
+func load(value *int) int { return *value }
+func caller(value *int) int { return load(value) }
+func explicitPanic() { panic("boom") }
+func openCall(fn func()) { fn() }
+`)
+	load := packageFunction(t, pkg, "load")
+	caller := packageFunction(t, pkg, "caller")
+	explicitPanic := packageFunction(t, pkg, "explicitPanic")
+	openCall := packageFunction(t, pkg, "openCall")
+	plan, err := AnalyzeSSA(prog, Roots{
+		{Function: caller, Demand: SyncDemand},
+		{Function: explicitPanic, Demand: SyncDemand},
+		{Function: openCall, Demand: SyncDemand},
+	}, SSAConfig{
+		MaxPlainInstructions: -1,
+		ClassifyFunction: func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+			switch fn {
+			case load, explicitPanic, openCall:
+				return SSAFunctionPolicy{TrustedNoUnwind: true}, nil
+			default:
+				return SSAFunctionPolicy{}, nil
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fn := range []*ssa.Function{load, caller} {
+		if got := functionPlanFor(t, plan, fn); got.Exec.Contains(MayUnwind) {
+			t.Fatalf("%s trusted no-unwind closure remains may-unwind: %+v", fn.Name(), got)
+		}
+	}
+	for _, fn := range []*ssa.Function{explicitPanic, openCall} {
+		if got := functionPlanFor(t, plan, fn); !got.Exec.Contains(MayUnwind) {
+			t.Fatalf("%s explicit/open unwind was hidden: %+v", fn.Name(), got)
+		}
+	}
+}
+
+func TestAnalyzeSSATrustedNoUnwindUsesExactNonNilStaticCallArguments(t *testing.T) {
+	prog, pkg := buildCoroTestSSA(t, "trusted_no_unwind_call_argument.go", `package coroid
+type box struct { value int }
+var global box
+func load(value *box) int { return value.value }
+func exact() int { return load(&global) }
+func unknown(value *box) int { return load(value) }
+func panicLoad(value *box) int {
+	if value != nil { panic("boom") }
+	return 0
+}
+func exactPanic() int { return panicLoad(&global) }
+`)
+	load := packageFunction(t, pkg, "load")
+	exact := packageFunction(t, pkg, "exact")
+	unknown := packageFunction(t, pkg, "unknown")
+	exactPanic := packageFunction(t, pkg, "exactPanic")
+	plan, err := AnalyzeSSA(prog, Roots{
+		{Function: exact, Demand: SyncDemand},
+		{Function: unknown, Demand: SyncDemand},
+		{Function: exactPanic, Demand: SyncDemand},
+	}, SSAConfig{
+		MaxPlainInstructions: -1,
+		ClassifyFunction: func(fn *ssa.Function) (SSAFunctionPolicy, error) {
+			switch fn {
+			case exact, unknown, exactPanic:
+				return SSAFunctionPolicy{TrustedNoUnwind: true}, nil
+			default:
+				return SSAFunctionPolicy{}, nil
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := functionPlanFor(t, plan, load); !got.Exec.Contains(MayUnwind) {
+		t.Fatalf("globally nullable load unexpectedly became no-unwind: %+v", got)
+	}
+	if got := functionPlanFor(t, plan, exact); got.Exec.Contains(MayUnwind) {
+		t.Fatalf("exact non-nil static call remains may-unwind: %+v", got)
+	}
+	for _, fn := range []*ssa.Function{unknown, exactPanic} {
+		if got := functionPlanFor(t, plan, fn); !got.Exec.Contains(MayUnwind) {
+			t.Fatalf("%s call-site proof hid a nullable receiver or explicit panic: %+v", fn.Name(), got)
+		}
+	}
+}
+
 func TestAnalyzeSSAExactNoUnwindTLSRecipeFixedPoint(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "no_unwind_tls.go", `package coroid
 import "unsafe"
@@ -181,7 +270,7 @@ func unknownExternalCaller(p *int) { if p != nil { unknownExternal() } }
 		t.Fatal(err)
 	}
 	for _, name := range []string{
-		"empty", "unguardedLoad", "divide", "remainder", "signedShift", "panicBody", "openDynamic",
+		"unguardedLoad", "divide", "remainder", "signedShift", "panicBody", "openDynamic",
 		"certifiedUnguarded", "index", "allocate", "sizeofAndUse", "rootRange", "unsafeCaller",
 		"unknownExternalCaller",
 		"stringConcat",
@@ -191,7 +280,7 @@ func unknownExternalCaller(p *int) { if p != nil { unknownExternal() } }
 		}
 	}
 	for _, name := range []string{
-		"guardedLoad", "certifiedGuarded", "safeLeaf", "safeCaller", "knownExternalCaller", "fieldValue",
+		"empty", "guardedLoad", "certifiedGuarded", "safeLeaf", "safeCaller", "knownExternalCaller", "fieldValue",
 		"integerArithmetic", "constantShift", "unsignedShift",
 		"divideConstant", "remainderConstant",
 	} {

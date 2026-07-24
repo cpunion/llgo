@@ -41,6 +41,11 @@ type Embedded struct{}
 func (Embedded) hidden() {}
 type Wrapper struct{ Embedded }
 
+type Adder interface { Add(int) int }
+func boundInterface(value Adder) {
+	_ = value.Add
+}
+
 func init() {}
 func init() {}
 

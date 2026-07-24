@@ -161,10 +161,12 @@ func pollCoroFDStreamLeafV1(fd int32) bool {
 	return llgoCoroPollFDStreamV1(fd) != 0
 }
 
+//llgo:managedlink
 //go:linkname poll_runtime_pollServerInit internal/poll.runtime_pollServerInit
 func poll_runtime_pollServerInit() {
 }
 
+//llgo:managedlink
 //go:linkname poll_runtime_pollOpen internal/poll.runtime_pollOpen
 func poll_runtime_pollOpen(fd uintptr) (uintptr, int) {
 	if fd > uintptr(^uint32(0)>>1) {
@@ -185,6 +187,7 @@ func poll_runtime_pollOpen(fd uintptr) (uintptr, int) {
 	return ctx, 0
 }
 
+//llgo:managedlink
 //go:linkname poll_runtime_pollClose internal/poll.runtime_pollClose
 func poll_runtime_pollClose(ctx uintptr) {
 	if ctx == 0 {
@@ -236,6 +239,7 @@ func pollCoroAttemptEligible(ctx uintptr, fd int, size int) bool {
 		!pollDescClosing(state) && int32(fd) == pollDescFD(state)
 }
 
+//llgo:managedlink
 //go:linkname poll_runtime_pollReadAttempt internal/poll.runtime_pollReadAttempt
 func poll_runtime_pollReadAttempt(ctx uintptr, fd int, address unsafe.Pointer, size int) (int, int, bool) {
 	if !pollCoroAttemptEligible(ctx, fd, size) {
@@ -244,6 +248,7 @@ func poll_runtime_pollReadAttempt(ctx uintptr, fd int, address unsafe.Pointer, s
 	return pollCoroReadAttemptV1(int32(fd), address, uintptr(size))
 }
 
+//llgo:managedlink
 //go:linkname poll_runtime_pollWriteAttempt internal/poll.runtime_pollWriteAttempt
 func poll_runtime_pollWriteAttempt(ctx uintptr, fd int, address unsafe.Pointer, size int) (int, int, bool) {
 	if !pollCoroAttemptEligible(ctx, fd, size) {
@@ -323,6 +328,7 @@ func pollCoroFinishWaitV2(ctx uintptr, mode int, result uint32) (status int, ret
 // per wait. internal/poll retains the context allocation until every such wait
 // has returned.
 //
+//llgo:managedlink
 //go:linkname poll_runtime_pollWait internal/poll.runtime_pollWait
 func poll_runtime_pollWait(ctx uintptr, mode int) int {
 	for {
@@ -337,11 +343,13 @@ func poll_runtime_pollWait(ctx uintptr, mode int) int {
 	}
 }
 
+//llgo:managedlink
 //go:linkname poll_runtime_pollWaitCanceled internal/poll.runtime_pollWaitCanceled
 func poll_runtime_pollWaitCanceled(uintptr, int) {
 	// Unix does not use this Windows async-I/O cancellation hook.
 }
 
+//llgo:managedlink
 //go:linkname poll_runtime_pollReset internal/poll.runtime_pollReset
 func poll_runtime_pollReset(ctx uintptr, mode int) int {
 	if ctx == 0 {
@@ -359,6 +367,7 @@ func poll_runtime_pollReset(ctx uintptr, mode int) int {
 	return pollNoError
 }
 
+//llgo:managedlink
 //go:linkname poll_runtime_pollSetDeadline internal/poll.runtime_pollSetDeadline
 func poll_runtime_pollSetDeadline(ctx uintptr, delay int64, mode int) {
 	if ctx == 0 {
@@ -381,6 +390,7 @@ func poll_runtime_pollSetDeadline(ctx uintptr, delay int64, mode int) {
 	}
 }
 
+//llgo:managedlink
 //go:linkname poll_runtime_pollUnblock internal/poll.runtime_pollUnblock
 func poll_runtime_pollUnblock(ctx uintptr) {
 	if ctx == 0 {
@@ -394,6 +404,7 @@ func poll_runtime_pollUnblock(ctx uintptr) {
 	llgoCoroPollPostClosingOrAbortV1(ctx, coroPollInterestWriteV2)
 }
 
+//llgo:managedlink
 //go:linkname poll_runtime_isPollServerDescriptor internal/poll.runtime_isPollServerDescriptor
 func poll_runtime_isPollServerDescriptor(fd uintptr) bool {
 	return llrt.CoroNativePollServerDescriptorV1(fd)

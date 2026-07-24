@@ -90,5 +90,6 @@ var sourcePatchPkgs = map[string]struct{}{
 	"internal/sync":                {},
 	"iter":                         {},
 	"runtime/metrics":              {},
+	"syscall":                      {},
 	"time":                         {},
 }

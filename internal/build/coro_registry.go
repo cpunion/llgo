@@ -63,7 +63,7 @@ func coroProgramManifestHashV1(ctx *context, anchors []string, bootstrap ...*cor
 	if ctx == nil || ctx.prog == nil || ctx.buildConf == nil {
 		return [16]byte{}, fmt.Errorf("coroutine program manifest requires a build context")
 	}
-	if ctx.clCompilation != nil && ctx.buildConf.coroChildAwaitActive() {
+	if ctx.clCompilation != nil {
 		decoded, err := hex.DecodeString(ctx.coroPlanDigest)
 		if err != nil || len(decoded) != sha256.Size || hex.EncodeToString(decoded) != ctx.coroPlanDigest {
 			return [16]byte{}, fmt.Errorf("coroutine program manifest requires a canonical CoroPlanDigest")

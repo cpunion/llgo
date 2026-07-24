@@ -20,24 +20,40 @@ package runtime
 
 import "github.com/goplus/llgo/runtime/internal/coro"
 
-// coroTargetRecordReadySpawnV1 records causal provenance, not permanent task
-// affinity. Only a child committed by this exact running owner can become the
-// next opportunistic transfer candidate. A second spawn in the same physical
-// resume remains local; this keeps the hint O(1) and never makes `go` fail
-// merely because a distribution slot is already occupied.
-func coroTargetRecordReadySpawnV1(parent, child *coro.G) bool {
+func coroTargetReadySpawnDomainV1(parent *coro.G) (*coroNativeFleetDomainV1, bool) {
 	driver, handle, route, ok := coro.CurrentExecutorDriver(parent)
-	if !ok || child == nil || !route.Valid() {
-		return false
+	if !ok || !route.Valid() {
+		return nil, false
 	}
 	domain, valid := coroNativeFleetActiveDomainForRouteV1(route)
 	if !valid || domain.driverOwnerV1() != driver || domain.handle.Executor != handle {
-		return false
+		return nil, false
+	}
+	return domain, true
+}
+
+// coroTargetCanRecordReadySpawnV1 performs every target-specific validation
+// before CommitSpawn publishes the child to the scheduler. An occupied hint is
+// deliberately valid: the new child remains on the owner's ordinary FIFO.
+func coroTargetCanRecordReadySpawnV1(parent *coro.G) bool {
+	_, ok := coroTargetReadySpawnDomainV1(parent)
+	return ok
+}
+
+// coroTargetRecordReadySpawnV1 records causal provenance, not permanent task
+// affinity. CommitSpawn cannot change the running owner's frozen route/domain
+// identity, so losing it here is an invariant violation rather than a
+// recoverable post-publication failure. A second spawn in the same physical
+// resume remains local; this keeps the hint O(1).
+func coroTargetRecordReadySpawnV1(parent, child *coro.G) {
+	domain, ok := coroTargetReadySpawnDomainV1(parent)
+	if !ok || child == nil {
+		coroRuntimeAbort("native coroutine spawn owner changed after commit")
+		return
 	}
 	if domain.readySpawn == nil {
 		domain.readySpawn = child
 	}
-	return true
 }
 
 // coroTargetAfterStableRunActionV1 is owner-to-owner work distribution, not a

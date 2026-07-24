@@ -313,6 +313,30 @@ func TestAnalyzeTrustedInlineSuppressesOnlyExactForeignWait(t *testing.T) {
 	}
 }
 
+func TestAnalyzeDirectNoUnwindSuppressesOnlyMayUnwind(t *testing.T) {
+	g := NewGraph()
+	mustAddFunction(t, g, FunctionSpec{ID: "exact", Demand: SyncDemand})
+	mustAddFunction(t, g, FunctionSpec{ID: "ordinary", Demand: SyncDemand})
+	mustAddFunction(t, g, FunctionSpec{
+		ID: "target", Seed: MayPark, Exec: ThreadAffine | IRQUnsafe | MayUnwind,
+	})
+	mustAddCall(t, g, CallEdge{Caller: "exact", Callee: "target", Kind: CallDirectNoUnwind})
+	mustAddCall(t, g, CallEdge{Caller: "ordinary", Callee: "target", Kind: CallDirect})
+
+	plan, err := g.Analyze()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exact := mustLookup(t, plan, "exact")
+	if exact.Effect != AwaitStructured|MayPark || exact.Exec != ThreadAffine|IRQUnsafe {
+		t.Fatalf("exact no-unwind caller = %+v; want suspend/affinity/IRQ propagation without MayUnwind", exact)
+	}
+	ordinary := mustLookup(t, plan, "ordinary")
+	if ordinary.Effect != AwaitStructured|MayPark || ordinary.Exec != ThreadAffine|IRQUnsafe|MayUnwind {
+		t.Fatalf("ordinary caller = %+v; want complete target propagation", ordinary)
+	}
+}
+
 func TestTrustedInlineCallEdgeContractExecFailsClosed(t *testing.T) {
 	tests := []struct {
 		name string
@@ -647,8 +671,8 @@ func TestAnalyzeExplicitStatusElidedDemandFollowsPhysicalDomain(t *testing.T) {
 	if got := mustLookup(t, plan, "elided"); got.Demand != NoDemand || got.Emission != EmitNone {
 		t.Fatalf("physically elided managed helper = %+v", got)
 	}
-	if got := mustLookup(t, plan, "plain-helper"); got.ManagedDemand != SyncDemand || got.RawPlainDemand || got.Emission != EmitPlain {
-		t.Fatalf("plain managed helper = %+v", got)
+	if got := mustLookup(t, plan, "plain-helper"); got.ManagedDemand != NoDemand || !got.RawPlainDemand || !got.RawPlainOnly || got.Emission != EmitRawPlain {
+		t.Fatalf("plain legacy-stack helper = %+v", got)
 	}
 	if got := mustLookup(t, plan, "raw-helper"); got.ManagedDemand != NoDemand || !got.RawPlainDemand || !got.RawPlainOnly || got.Emission != EmitRawPlain {
 		t.Fatalf("raw legacy helper = %+v", got)
@@ -1068,6 +1092,8 @@ func kindName(kind CallKind) string {
 		return "foreign"
 	case CallTrustedInline:
 		return "trusted-inline"
+	case CallDirectNoUnwind:
+		return "direct-no-unwind"
 	default:
 		return "invalid"
 	}

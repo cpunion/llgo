@@ -560,7 +560,6 @@ func compileCoroStaticSpawnTransportFixture(t *testing.T, target *llssa.Target) 
 
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
-	compilation.CoroProfile = CoroProfileStackless
 	compilation.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	compilation.FuncRepABI = coro.FuncRepABIV1
 	pkg, _, err := NewPackageExWithEmbedOptions(
@@ -634,7 +633,6 @@ func compileCoroClosedStaticMethodSpawnFixture(t *testing.T, target *llssa.Targe
 	}
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
-	compilation.CoroProfile = CoroProfileStackless
 	compilation.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	compilation.FuncRepABI = coro.FuncRepABIV1
 	pkg, _, err := NewPackageExWithEmbedOptions(
@@ -739,7 +737,6 @@ func compileCoroManagedDispatchSpawnFixture(t *testing.T, target *llssa.Target) 
 	}
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
-	compilation.CoroProfile = CoroProfileStackless
 	compilation.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
 	compilation.FuncRepABI = coro.FuncRepABIV1
@@ -802,8 +799,7 @@ func compileCoroClosedStaticSpawnFixture(t *testing.T, target *llssa.Target) (
 		CoroABI:      coro.PhysicalABIV1,
 		SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 		PanicABI:     coro.PanicExplicitStatusABIV0,
-		FuncRepABI:   coro.FuncRepABIV1, CoroProfile: CoroProfileStackless,
-	}
+		FuncRepABI:   coro.FuncRepABIV1}
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		PackageOptions{Compilation: compilation},
@@ -813,11 +809,4 @@ func compileCoroClosedStaticSpawnFixture(t *testing.T, target *llssa.Target) (
 		t.Fatal(err)
 	}
 	return prog, pkg, plan, ssaPkg
-}
-
-func TestCoroClosedStaticSpawnCompilationCapabilityFailsClosed(t *testing.T) {
-	compilation := &Compilation{CoroProfile: CoroProfileStackless}
-	if !compilation.CoroClosedStaticSpawnActive() || !compilation.CoroProgramBootstrapActive() || !compilation.CoroChildAwaitActive() {
-		t.Fatal("stackless profile did not activate spawn, bootstrap, and child-await as one contract")
-	}
 }

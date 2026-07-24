@@ -326,10 +326,11 @@ func Leaf(left, right RunDecision) bool {
 	}
 }
 
-func TestCoroPureAggregateEqualityRejectsHelperBackedLeaves(t *testing.T) {
+func TestCoroPureAggregateEqualityRequiresFrozenHelperBackedLeaves(t *testing.T) {
 	tests := []struct {
-		name   string
-		source string
+		name    string
+		source  string
+		helpers string
 	}{
 		{
 			name: "string field",
@@ -337,6 +338,7 @@ func TestCoroPureAggregateEqualityRejectsHelperBackedLeaves(t *testing.T) {
 type Value struct { Count uint32; Text string }
 func Root(left, right Value) bool { return left == right }
 `,
+			helpers: "StringEqual",
 		},
 		{
 			name: "nested string array",
@@ -344,6 +346,7 @@ func Root(left, right Value) bool { return left == right }
 type Value struct { Text [2]string }
 func Root(left, right Value) bool { return left != right }
 `,
+			helpers: "StringEqual",
 		},
 		{
 			name: "interface field",
@@ -351,6 +354,7 @@ func Root(left, right Value) bool { return left != right }
 type Value struct { Payload any }
 func Root(left, right Value) bool { return left == right }
 `,
+			helpers: "EfaceEqual",
 		},
 		{
 			name: "nested interface array",
@@ -358,11 +362,21 @@ func Root(left, right Value) bool { return left == right }
 type Value struct { Payload [2]any }
 func Root(left, right Value) bool { return left != right }
 `,
+			helpers: "EfaceEqual",
+		},
+		{
+			name: "nonempty interface field",
+			source: `package foo
+type Stringer interface { String() string }
+type Value struct { Payload Stringer }
+func Root(left, right Value) bool { return left == right }
+`,
+			helpers: "EfaceEqual,IfaceType",
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			prog, _, _, root, audit, _ := prepareCoroFrameRootAudit(t, test.source, "Root", EmissionUniverseOptions{})
+			prog, _, universe, root, audit, _ := prepareCoroFrameRootAudit(t, test.source, "Root", EmissionUniverseOptions{})
 			defer prog.Dispose()
 			found := false
 			for _, block := range root.Blocks {
@@ -372,8 +386,11 @@ func Root(left, right Value) bool { return left != right }
 						continue
 					}
 					found = true
+					if got := strings.Join(universe.loweredRuntimeHelpers(audit.ctx, operation), ","); got != test.helpers {
+						t.Fatalf("helper-backed aggregate equality helpers = %q, want %q", got, test.helpers)
+					}
 					handled, reason := audit.validate(operation)
-					if !handled || !strings.Contains(reason, "aggregate equality contains a helper-backed or unsupported element") {
+					if !handled || !strings.Contains(reason, "structured runtime helper validation requires a frozen emission universe") {
 						t.Fatalf("helper-backed aggregate equality validation = handled %t, reason %q", handled, reason)
 					}
 				}
@@ -669,6 +686,54 @@ func Root(value uint64, count int) uint64 { return value >> count }
 	audit.allowImplicitNilFault = true
 	if handled, reason := audit.validate(shift); !handled || reason != "runtime helper capability validation requires a frozen emission universe" {
 		t.Fatalf("signed shift with ExplicitStatus = handled %t, reason %q", handled, reason)
+	}
+}
+
+func TestCoroPureSSAComplexArithmeticUsesExactDivisionHelper(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		operator   token.Token
+		wantHelper string
+		wantReason string
+	}{
+		{name: "add", operator: token.ADD},
+		{name: "subtract", operator: token.SUB},
+		{name: "multiply", operator: token.MUL},
+		{
+			name:       "divide",
+			operator:   token.QUO,
+			wantHelper: "Complex128Div",
+			wantReason: "runtime helper capability validation requires a frozen emission universe",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := "package foo\nfunc Root(left, right complex128) complex128 { return left " +
+				test.operator.String() + " right }\n"
+			prog, _, universe, root, audit, _ := prepareCoroFrameRootAudit(
+				t, source, "Root", EmissionUniverseOptions{},
+			)
+			defer prog.Dispose()
+			var operation *ssa.BinOp
+			for _, block := range root.Blocks {
+				for _, instruction := range block.Instrs {
+					if candidate, ok := instruction.(*ssa.BinOp); ok && candidate.Op == test.operator {
+						operation = candidate
+					}
+				}
+			}
+			if operation == nil {
+				t.Fatalf("fixture has no %s BinOp", test.operator)
+			}
+			if got := strings.Join(universe.loweredRuntimeHelpers(audit.ctx, operation), ","); got != test.wantHelper {
+				t.Fatalf("complex %s helpers = %q, want %q", test.operator, got, test.wantHelper)
+			}
+			if handled, reason := audit.validate(operation); !handled || reason != test.wantReason {
+				t.Fatalf(
+					"complex %s validation = handled %t, reason %q; want %q",
+					test.operator, handled, reason, test.wantReason,
+				)
+			}
+		})
 	}
 }
 

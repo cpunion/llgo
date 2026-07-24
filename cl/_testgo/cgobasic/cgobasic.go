@@ -12,90 +12,40 @@ import (
 	"unsafe"
 )
 
-// CHECK-LABEL: define double @"{{.*}}/cl/_testgo/cgobasic._Cfunc_cos"(double %0){{.*}} {
-// CHECK-NEXT: _llgo_0:
-// CHECK-NEXT:   %1 = call ptr @"{{.*}}/runtime/internal/runtime.AllocZ"(i64 8)
-// CHECK-NEXT:   %2 = load ptr, ptr @"{{.*}}/cl/_testgo/cgobasic._cgo_{{.*}}_Cfunc_cos", align 8
-// CHECK-NEXT:   %3 = load ptr, ptr %2, align 8
-// CHECK-NEXT:   %4 = call double %3(double %0)
-// CHECK-NEXT:   ret double %4
-// CHECK-NEXT: }
-
-// CHECK-LABEL: define [0 x i8] @"{{.*}}/cl/_testgo/cgobasic._Cfunc_free"(ptr %0){{.*}} {
-// CHECK-NEXT: _llgo_0:
-// CHECK-NEXT:   %1 = call ptr @"{{.*}}/runtime/internal/runtime.AllocZ"(i64 8)
-// CHECK-NEXT:   %2 = load ptr, ptr @"{{.*}}/cl/_testgo/cgobasic._cgo_{{.*}}_Cfunc_free", align 8
-// CHECK-NEXT:   %3 = load ptr, ptr %2, align 8
-// CHECK-NEXT:   %4 = call [0 x i8] %3(ptr %0)
-// CHECK-NEXT:   ret [0 x i8] %4
-// CHECK-NEXT: }
-
-// CHECK-LABEL: define double @"{{.*}}/cl/_testgo/cgobasic._Cfunc_log"(double %0){{.*}} {
-// CHECK-NEXT: _llgo_0:
-// CHECK-NEXT:   %1 = call ptr @"{{.*}}/runtime/internal/runtime.AllocZ"(i64 8)
-// CHECK-NEXT:   %2 = load ptr, ptr @"{{.*}}/cl/_testgo/cgobasic._cgo_{{.*}}_Cfunc_log", align 8
-// CHECK-NEXT:   %3 = load ptr, ptr %2, align 8
-// CHECK-NEXT:   %4 = call double %3(double %0)
-// CHECK-NEXT:   ret double %4
-// CHECK-NEXT: }
-
-// CHECK-LABEL: define i32 @"{{.*}}/cl/_testgo/cgobasic._Cfunc_puts"(ptr %0){{.*}} {
-// CHECK-NEXT: _llgo_0:
-// CHECK-NEXT:   %1 = call ptr @"{{.*}}/runtime/internal/runtime.AllocZ"(i64 8)
-// CHECK-NEXT:   %2 = load ptr, ptr @"{{.*}}/cl/_testgo/cgobasic._cgo_{{.*}}_Cfunc_puts", align 8
-// CHECK-NEXT:   %3 = load ptr, ptr %2, align 8
-// CHECK-NEXT:   %4 = call i32 %3(ptr %0)
-// CHECK-NEXT:   ret i32 %4
-// CHECK-NEXT: }
-
-// CHECK-LABEL: define double @"{{.*}}/cl/_testgo/cgobasic._Cfunc_sin"(double %0){{.*}} {
-// CHECK-NEXT: _llgo_0:
-// CHECK-NEXT:   %1 = call ptr @"{{.*}}/runtime/internal/runtime.AllocZ"(i64 8)
-// CHECK-NEXT:   %2 = load ptr, ptr @"{{.*}}/cl/_testgo/cgobasic._cgo_{{.*}}_Cfunc_sin", align 8
-// CHECK-NEXT:   %3 = load ptr, ptr %2, align 8
-// CHECK-NEXT:   %4 = call double %3(double %0)
-// CHECK-NEXT:   ret double %4
-// CHECK-NEXT: }
-
-// CHECK-LABEL: define double @"{{.*}}/cl/_testgo/cgobasic._Cfunc_sqrt"(double %0){{.*}} {
-// CHECK-NEXT: _llgo_0:
-// CHECK-NEXT:   %1 = call ptr @"{{.*}}/runtime/internal/runtime.AllocZ"(i64 8)
-// CHECK-NEXT:   %2 = load ptr, ptr @"{{.*}}/cl/_testgo/cgobasic._cgo_{{.*}}_Cfunc_sqrt", align 8
-// CHECK-NEXT:   %3 = load ptr, ptr %2, align 8
-// CHECK-NEXT:   %4 = call double %3(double %0)
-// CHECK-NEXT:   ret double %4
-// CHECK-NEXT: }
-
-// CHECK-LABEL: define void @"{{.*}}/cl/_testgo/cgobasic.init"(){{.*}} {
-// CHECK-NEXT: _llgo_0:
-// CHECK-NEXT:   %0 = load i1, ptr @"{{.*}}/cl/_testgo/cgobasic.init$guard", align 1
-// CHECK-NEXT:   br i1 %0, label %_llgo_2, label %_llgo_1
-// CHECK-EMPTY:
-// CHECK-NEXT: _llgo_1:                                          ; preds = %_llgo_0
-// CHECK-NEXT:   store i1 true, ptr @"{{.*}}/cl/_testgo/cgobasic.init$guard", align 1
-// CHECK-NEXT:   call void @syscall.init()
-// CHECK-NEXT:   call void @fmt.init()
-// CHECK-NEXT:   store ptr @_cgo_{{.*}}_Cfunc_cos, ptr @"{{.*}}/cl/_testgo/cgobasic._cgo_{{.*}}_Cfunc_cos", align 8
-// CHECK-NEXT:   store ptr @_cgo_{{.*}}_Cfunc_free, ptr @"{{.*}}/cl/_testgo/cgobasic._cgo_{{.*}}_Cfunc_free", align 8
-// CHECK-NEXT:   store ptr @_cgo_{{.*}}_Cfunc_log, ptr @"{{.*}}/cl/_testgo/cgobasic._cgo_{{.*}}_Cfunc_log", align 8
-// CHECK-NEXT:   store ptr @_cgo_{{.*}}_Cfunc_puts, ptr @"{{.*}}/cl/_testgo/cgobasic._cgo_{{.*}}_Cfunc_puts", align 8
-// CHECK-NEXT:   store ptr @_cgo_{{.*}}_Cfunc_sin, ptr @"{{.*}}/cl/_testgo/cgobasic._cgo_{{.*}}_Cfunc_sin", align 8
-// CHECK-NEXT:   store ptr @_cgo_{{.*}}_Cfunc_sqrt, ptr @"{{.*}}/cl/_testgo/cgobasic._cgo_{{.*}}_Cfunc_sqrt", align 8
-// CHECK-NEXT:   store ptr @_cgo_{{.*}}_Cfunc__Cmalloc, ptr @"{{.*}}/cl/_testgo/cgobasic._cgo_{{.*}}_Cfunc__Cmalloc", align 8
-// CHECK-NEXT:   br label %_llgo_2
-// CHECK-EMPTY:
-// CHECK-NEXT: _llgo_2:                                          ; preds = %_llgo_1, %_llgo_0
-// CHECK-NEXT:   ret void
-// CHECK-NEXT: }
-
-// CHECK-LABEL: define void @"{{.*}}/cl/_testgo/cgobasic.main"(){{.*}} {
-// CHECK:   %{{.*}} = call i32 @"{{.*}}/cl/_testgo/cgobasic._Cfunc_puts"(ptr %{{.*}})
-// CHECK:   %{{.*}} = call double @"{{.*}}/cl/_testgo/cgobasic._Cfunc_sqrt"(double 2.000000e+00)
-// CHECK:   %{{.*}} = call double @"{{.*}}/cl/_testgo/cgobasic._Cfunc_sin"(double 2.000000e+00)
-// CHECK:   %{{.*}} = call double @"{{.*}}/cl/_testgo/cgobasic._Cfunc_cos"(double 2.000000e+00)
-// CHECK:   %{{.*}} = call double @"{{.*}}/cl/_testgo/cgobasic._Cfunc_log"(double 2.000000e+00)
-// CHECK:   %{{.*}} = insertvalue { ptr, ptr } { ptr @"{{.*}}/cl/_testgo/cgobasic.main$3", ptr undef }, ptr %{{.*}}, 1
-// CHECK:   %{{.*}} = insertvalue { ptr, ptr } { ptr @"{{.*}}/cl/_testgo/cgobasic.main$4", ptr undef }, ptr %{{.*}}, 1
+// Generated C adapters remain synchronous raw/native-stack entries.
+//
+// CHECK-LABEL: define double @"{{.*}}/cl/_testgo/cgobasic._Cfunc_cos"
+// CHECK: call double %
+// CHECK-LABEL: define [0 x i8] @"{{.*}}/cl/_testgo/cgobasic._Cfunc_free"
+// CHECK: call [0 x i8] %
+// CHECK-LABEL: define double @"{{.*}}/cl/_testgo/cgobasic._Cfunc_sqrt"
+// CHECK: call double %
+//
+// Package initialization and source main use the default stackless ABI; C
+// calls park the logical task and execute through exact typed worker thunks.
+//
+// CHECK-LABEL: define ptr @"{{.*}}/cl/_testgo/cgobasic.init$coro"
+// CHECK: call token @llvm.coro.id
+// CHECK: call i8 @llvm.coro.suspend
+// CHECK-LABEL: define ptr @"{{.*}}/cl/_testgo/cgobasic.main$coro"
+// CHECK: call token @llvm.coro.id
+// CHECK: call void @__llgo_coro_worker_park_v1
+// CHECK: ptr @__llgo_coro_worker_cgo_thunk_v1_
+// CHECK: call i8 @llvm.coro.suspend
+// CHECK: call i32 @__llgo_coro_worker_resume_v1
+//
+// CHECK-LABEL: define linkonce i64 @__llgo_coro_worker_cgo_thunk_v1_
+// CHECK: call i32 @"{{.*}}/cl/_testgo/cgobasic._Cfunc_puts"
+// CHECK-LABEL: define linkonce i64 @__llgo_coro_worker_cgo_thunk_v1_
+// CHECK: call double @"{{.*}}/cl/_testgo/cgobasic._Cfunc_sqrt"
+// CHECK-LABEL: define linkonce i64 @__llgo_coro_worker_cgo_thunk_v1_
+// CHECK: call double @"{{.*}}/cl/_testgo/cgobasic._Cfunc_sin"
+// CHECK-LABEL: define linkonce i64 @__llgo_coro_worker_cgo_thunk_v1_
+// CHECK: call double @"{{.*}}/cl/_testgo/cgobasic._Cfunc_cos"
+// CHECK-LABEL: define linkonce i64 @__llgo_coro_worker_cgo_thunk_v1_
+// CHECK: call double @"{{.*}}/cl/_testgo/cgobasic._Cfunc_log"
+// CHECK-LABEL: define linkonce i64 @__llgo_coro_worker_cgo_thunk_v1_
+// CHECK: call [0 x i8] @"{{.*}}/cl/_testgo/cgobasic._Cfunc_free"
 func main() {
 	// C.CString example
 	cstr := C.CString("Hello, World!")
@@ -119,64 +69,18 @@ func main() {
 
 	// C math library examples
 	x := 2.0
-	// Calculate square root
 	sqrtResult := C.sqrt(C.double(x))
 	fmt.Printf("sqrt(%v) = %v\n", x, float64(sqrtResult))
 
-	// Calculate sine
 	sinResult := C.sin(C.double(x))
 	fmt.Printf("sin(%v) = %v\n", x, float64(sinResult))
 
-	// Calculate cosine
 	cosResult := C.cos(C.double(x))
 	fmt.Printf("cos(%v) = %v\n", x, float64(cosResult))
 
-	// Calculate natural logarithm
 	logResult := C.log(C.double(x))
 	fmt.Printf("log(%v) = %v\n", x, float64(logResult))
 
 	C.free(unsafe.Pointer(cstr))
 	C.free(cbytes)
 }
-
-// CHECK-LABEL: define ptr @"{{.*}}/cl/_testgo/cgobasic.main$1"(ptr %0){{.*}} {
-// CHECK-NEXT: _llgo_0:
-// CHECK-NEXT:   %1 = load { ptr }, ptr %0, align 8
-// CHECK-NEXT:   %2 = extractvalue { ptr } %1, 0
-// CHECK-NEXT:   %3 = load %"{{.*}}/runtime/internal/runtime.Slice", ptr %2, align 8
-// CHECK-NEXT:   %4 = call ptr @"{{.*}}/runtime/internal/runtime.AllocU"(i64 24)
-// CHECK-NEXT:   store %"{{.*}}/runtime/internal/runtime.Slice" %3, ptr %4, align 8
-// CHECK-NEXT:   %5 = insertvalue %"{{.*}}/runtime/internal/runtime.eface" { ptr @"[]_llgo_uint8", ptr undef }, ptr %4, 1
-// CHECK-NEXT:   %6 = call ptr @"{{.*}}/runtime/internal/runtime.CBytes"(%"{{.*}}/runtime/internal/runtime.Slice" %3)
-// CHECK-NEXT:   ret ptr %6
-// CHECK-NEXT: }
-
-// CHECK-LABEL: define %"{{.*}}/runtime/internal/runtime.Slice" @"{{.*}}/cl/_testgo/cgobasic.main$2"(ptr %0){{.*}} {
-// CHECK-NEXT: _llgo_0:
-// CHECK-NEXT:   %1 = load { ptr }, ptr %0, align 8
-// CHECK-NEXT:   %2 = extractvalue { ptr } %1, 0
-// CHECK-NEXT:   %3 = load ptr, ptr %2, align 8
-// CHECK-NEXT:   %4 = insertvalue %"{{.*}}/runtime/internal/runtime.eface" { ptr @_llgo_Pointer, ptr undef }, ptr %3, 1
-// CHECK-NEXT:   %5 = call %"{{.*}}/runtime/internal/runtime.Slice" @"{{.*}}/runtime/internal/runtime.GoBytes"(ptr %3, i64 4)
-// CHECK-NEXT:   ret %"{{.*}}/runtime/internal/runtime.Slice" %5
-// CHECK-NEXT: }
-
-// CHECK-LABEL: define void @"{{.*}}/cl/_testgo/cgobasic.main$3"(ptr %0){{.*}} {
-// CHECK-NEXT: _llgo_0:
-// CHECK-NEXT:   %1 = load { ptr }, ptr %0, align 8
-// CHECK-NEXT:   %2 = extractvalue { ptr } %1, 0
-// CHECK-NEXT:   %3 = load ptr, ptr %2, align 8
-// CHECK-NEXT:   %4 = insertvalue %"{{.*}}/runtime/internal/runtime.eface" { ptr @_llgo_Pointer, ptr undef }, ptr %3, 1
-// CHECK-NEXT:   %5 = call [0 x i8] @"{{.*}}/cl/_testgo/cgobasic._Cfunc_free"(ptr %3)
-// CHECK-NEXT:   ret void
-// CHECK-NEXT: }
-
-// CHECK-LABEL: define void @"{{.*}}/cl/_testgo/cgobasic.main$4"(ptr %0){{.*}} {
-// CHECK-NEXT: _llgo_0:
-// CHECK-NEXT:   %1 = load { ptr }, ptr %0, align 8
-// CHECK-NEXT:   %2 = extractvalue { ptr } %1, 0
-// CHECK-NEXT:   %3 = load ptr, ptr %2, align 8
-// CHECK-NEXT:   %4 = insertvalue %"{{.*}}/runtime/internal/runtime.eface" { ptr @_llgo_Pointer, ptr undef }, ptr %3, 1
-// CHECK-NEXT:   %5 = call [0 x i8] @"{{.*}}/cl/_testgo/cgobasic._Cfunc_free"(ptr %3)
-// CHECK-NEXT:   ret void
-// CHECK-NEXT: }

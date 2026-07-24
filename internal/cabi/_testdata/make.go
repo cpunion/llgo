@@ -13,20 +13,15 @@ import (
 
 var ghead_basic = `package main
 
-import "unsafe"
-
 const (
 	LLGoFiles = "../wrap/basic.c"
 )
 
 type pointer = *int8
 
-//go:linkname printf C.printf
-func printf(format *byte, __llgo_va_list ...any) int32
-
 func assert(info string, b bool) {
 	if !b {
-		printf(unsafe.StringData("Assertion failed: %s\n\000"), unsafe.StringData(info))
+		panic(info)
 	}
 }
 
@@ -35,6 +30,7 @@ func main() {
 `
 
 var gbasic = `
+//llgo:coro sync
 //go:linkname cbasic C.basic
 func cbasic(a int) int
 
@@ -49,6 +45,7 @@ func init() {
 `
 
 var gbasic_pointer = `
+//llgo:coro sync
 //go:linkname cbasic_pointer C.basic_pointer
 func cbasic_pointer(a pointer) pointer
 
@@ -68,6 +65,7 @@ type array struct {
 	x [N]int
 }
 
+//llgo:coro sync
 //go:linkname cdemo C.demo
 func cdemo(a array) array
 
@@ -87,6 +85,7 @@ type point struct {
 	x int
 }
 
+//llgo:coro sync
 //go:linkname cdemo C.demo
 func cdemo(a point) point
 

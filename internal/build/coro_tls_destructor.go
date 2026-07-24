@@ -553,6 +553,9 @@ func auditCoroTLSAllocatorUses(ctx *context, functions []*ssa.Function, allocato
 	for _, owner := range functions {
 		for _, block := range owner.Blocks {
 			for _, instruction := range block.Instrs {
+				if _, debug := instruction.(*ssa.DebugRef); debug {
+					continue
+				}
 				operands = instruction.Operands(operands[:0])
 				usesAllocator := false
 				for _, operand := range operands {

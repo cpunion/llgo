@@ -308,6 +308,7 @@ func (b Builder) abiExtendedFields(t types.Type, name string, global llvm.Value)
 	case *types.Map:
 		bucket := prog.abi.MapBucket(t)
 		flags := prog.abi.MapFlags(t)
+		keySize, elemSize := prog.abi.MapBucketSlotSizes(t)
 		hash := b.Pkg.rtFunc("typehash")
 		b.Pkg.recordAbiTypeFakeUse(global, hash.impl)
 		env := b.abiType(t.Key())
@@ -317,8 +318,8 @@ func (b Builder) abiExtendedFields(t types.Type, name string, global llvm.Value)
 			b.abiType(abi.PublicType(t.Elem())).impl,
 			b.abiType(bucket).impl,
 			hasher.impl,
-			prog.IntVal(uint64(prog.abi.Size(t.Key())), prog.Byte()).impl,
-			prog.IntVal(uint64(prog.abi.Size(t.Elem())), prog.Byte()).impl,
+			prog.IntVal(uint64(keySize), prog.Byte()).impl,
+			prog.IntVal(uint64(elemSize), prog.Byte()).impl,
 			prog.IntVal(uint64(prog.abi.Size(bucket)), prog.Uint16()).impl,
 			prog.IntVal(uint64(flags), prog.Uint32()).impl,
 		}
@@ -469,13 +470,15 @@ func (b Builder) abiUncommonMethods(t types.Type, methods []*types.Selection) ll
 		tfnName := b.abiMethodName(anonymous, pkg, obj, mSig)
 		tfnSig := funcType(prog, methodExprSignature(mSig)).(*types.Signature)
 		var tfnExpr Expr
-		if b.Pkg.methodToken != nil {
-			if token, ok := b.Pkg.methodToken(tfnName, obj, mSig); ok {
-				if token.IsNil() || token.impl.IsAFunction().IsNil() || token.impl.GlobalParent().C != b.Pkg.mod.C {
-					panic("ssa: method token resolver must return a function from the same package module")
+		if b.Pkg.methodEntry != nil {
+			if entry, ok := b.Pkg.methodEntry(tfnName, obj, mSig); ok {
+				function := entry.impl.IsAFunction()
+				descriptor := coroPlainDispatchGlobal(entry.impl)
+				if entry.IsNil() || function.IsNil() && descriptor.IsNil() || entry.impl.GlobalParent().C != b.Pkg.mod.C {
+					panic("ssa: method entry resolver must return a function or dispatch descriptor from the same package module")
 				}
-				tfn = token.impl
-				tfnExpr = token
+				tfn = entry.impl
+				tfnExpr = entry
 			}
 		}
 		if tfn.IsNil() {

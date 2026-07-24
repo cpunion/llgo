@@ -87,8 +87,9 @@ const (
 	// publishes into the task-local PanicRecord. Parent-frame direct-child scopes
 	// and frame-rooted owner-local records implement static/dynamic cleanup and
 	// direct recover without TLS; compiler-materialized implicit faults use the
-	// same recoverable payload overlay. Goexit, range-over-func cross-frame defer,
-	// and other unsupported language shapes remain independently fail-closed.
+	// same recoverable payload overlay. Structured Goexit uses the shared
+	// payload-free completion channel; range-over-func cross-frame defer and
+	// other unsupported language shapes remain independently fail-closed.
 	PanicExplicitStatusABIV0 = "llgo.coro.panic.explicit-status.v0"
 	FuncRepABIV0             = "llgo.coro.func-rep.v0"
 	// FuncRepABIV1 introduces an explicit descriptor/context representation for
@@ -184,6 +185,8 @@ type planDigestCall struct {
 	Unresolved            uint8            `json:"unresolved"`
 	MayBeNil              bool             `json:"may_be_nil"`
 	SyncDispatch          bool             `json:"sync_dispatch"`
+	RawPlain              bool             `json:"raw_plain"`
+	RawPlainCertificate   string           `json:"raw_plain_certificate,omitempty"`
 	InvocationPolicy      InvocationPolicy `json:"invocation_policy,omitempty"`
 	InvocationContract    ContractID       `json:"invocation_contract,omitempty"`
 	InvocationABI         string           `json:"invocation_abi,omitempty"`
@@ -194,6 +197,7 @@ type planDigestLoweredCall struct {
 	Owner                FunctionID `json:"owner"`
 	LogicalName          string     `json:"logical_name"`
 	Target               FunctionID `json:"target"`
+	NoUnwind             bool       `json:"no_unwind"`
 	RawPlain             bool       `json:"raw_plain"`
 	UnwindOnly           bool       `json:"unwind_only"`
 	ExplicitStatusElided bool       `json:"explicit_status_elided"`
@@ -515,6 +519,9 @@ func (p *SSAPlan) canonicalDigestLoweredCalls() ([]planDigestLoweredCall, error)
 				return nil, fmt.Errorf("coro: lowered calls in %q are not in strict logical-name order", ownerID)
 			}
 			previous = call.LogicalName
+			if call.NoUnwind && (call.RawPlain || call.UnwindOnly || call.ExplicitStatusElided) {
+				return nil, fmt.Errorf("coro: lowered call %q in %q mixes no-unwind with raw-plain or unwind-only semantics", call.LogicalName, ownerID)
+			}
 			targetID, ok := p.byFunction[call.Target]
 			if !ok {
 				return nil, fmt.Errorf("coro: lowered call %q in %q targets a function outside the plan", call.LogicalName, ownerID)
@@ -523,6 +530,7 @@ func (p *SSAPlan) canonicalDigestLoweredCalls() ([]planDigestLoweredCall, error)
 				Owner:                ownerID,
 				LogicalName:          call.LogicalName,
 				Target:               targetID,
+				NoUnwind:             call.NoUnwind,
 				RawPlain:             call.RawPlain,
 				UnwindOnly:           call.UnwindOnly,
 				ExplicitStatusElided: call.ExplicitStatusElided,
@@ -964,9 +972,28 @@ func (p *SSAPlan) canonicalDigestCall(id FunctionID, block, instruction int, cal
 		common := call.Common()
 		if common == nil || common.StaticCallee() != nil || common.IsInvoke() || common.Method != nil ||
 			plan.Kind != CallForeign || plan.Rep != DirectPlain || !plan.Open ||
-			plan.Unresolved != UnknownForeign || plan.SyncDispatch {
+			plan.Unresolved != UnknownForeign || plan.SyncDispatch || plan.RawPlain {
 			return planDigestCall{}, fmt.Errorf("coro: CallPlan at function %q block %d instruction %d has malformed raw C code-pointer transport", id, block, instruction)
 		}
+	}
+	if plan.RawPlain {
+		common := call.Common()
+		if common == nil || common.StaticCallee() == nil || common.IsInvoke() || common.Method != nil ||
+			plan.Kind != CallDirect || plan.Rep != DirectPlain || plan.Transport != ManagedTransport ||
+			plan.Open || plan.MayBeNil || len(plan.Targets) != 1 || plan.SyncDispatch {
+			return planDigestCall{}, fmt.Errorf(
+				"coro: CallPlan at function %q block %d instruction %d has malformed raw/plain invocation",
+				id, block, instruction,
+			)
+		}
+		if err := validateStableToken("raw/plain invocation certificate", plan.RawPlainCertificate); err != nil {
+			return planDigestCall{}, err
+		}
+	} else if plan.RawPlainCertificate != "" {
+		return planDigestCall{}, fmt.Errorf(
+			"coro: CallPlan at function %q block %d instruction %d has raw/plain certificate data without the policy",
+			id, block, instruction,
+		)
 	}
 	if err := plan.Unresolved.validate(); err != nil {
 		return planDigestCall{}, err
@@ -1011,6 +1038,8 @@ func (p *SSAPlan) canonicalDigestCall(id FunctionID, block, instruction int, cal
 		Unresolved:            uint8(plan.Unresolved),
 		MayBeNil:              plan.MayBeNil,
 		SyncDispatch:          plan.SyncDispatch,
+		RawPlain:              plan.RawPlain,
+		RawPlainCertificate:   plan.RawPlainCertificate,
 		InvocationPolicy:      plan.InvocationPolicy,
 		InvocationContract:    plan.InvocationContract,
 		InvocationABI:         plan.InvocationABI,

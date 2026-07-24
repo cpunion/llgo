@@ -151,8 +151,7 @@ func Root(seed int) func(int) int {
 			CoroABI:      coro.PhysicalABIV1,
 			SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 			PanicABI:     coro.PanicExplicitStatusABIV0,
-			FuncRepABI:   coro.FuncRepABIV1, CoroProfile: CoroProfileStackless,
-		}},
+			FuncRepABI:   coro.FuncRepABIV1}},
 	)
 	if err != nil {
 		t.Fatalf("compile captured descriptor producer: %v", err)
@@ -251,8 +250,7 @@ func Root() { slot = Target }
 			CoroABI:      coro.PhysicalABIV1,
 			SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 			PanicABI:     coro.PanicExplicitStatusABIV0,
-			FuncRepABI:   coro.FuncRepABIV1, CoroProfile: CoroProfileStackless,
-		}},
+			FuncRepABI:   coro.FuncRepABIV1}},
 	)
 	if err != nil {
 		t.Fatalf("compile dormant conditional descriptor producer: %v", err)
@@ -339,7 +337,6 @@ func Managed() { Target() }
 
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
-	compilation.CoroProfile = CoroProfileStackless
 	compilation.FuncRepABI = coro.FuncRepABIV1
 	compiled, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
@@ -560,8 +557,7 @@ func Root(which bool) func(int) int {
 			CoroABI:      coro.PhysicalABIV1,
 			SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 			PanicABI:     coro.PanicExplicitStatusABIV0,
-			FuncRepABI:   coro.FuncRepABIV1, CoroProfile: CoroProfileStackless,
-		}},
+			FuncRepABI:   coro.FuncRepABIV1}},
 	)
 	if err != nil {
 		t.Fatalf("compile multi-target descriptor producer: %v", err)
@@ -627,8 +623,7 @@ func Root() func(int, []byte) (int, error) { return Target }
 			CoroABI:      coro.PhysicalABIV1,
 			SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 			PanicABI:     coro.PanicExplicitStatusABIV0,
-			FuncRepABI:   coro.FuncRepABIV1, CoroProfile: CoroProfileStackless,
-		}},
+			FuncRepABI:   coro.FuncRepABIV1}},
 	)
 	if err != nil {
 		t.Fatalf("compile multi-result descriptor producer: %v", err)

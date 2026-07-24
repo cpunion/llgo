@@ -22,6 +22,7 @@ import (
 	stdcontext "context"
 	"fmt"
 	goimporter "go/importer"
+	"go/token"
 	"go/types"
 	"os"
 	"os/exec"
@@ -172,8 +173,15 @@ func coroChannelNativeE2EPanicWrapNilPointer(bool, string, string) {}
 //go:linkname AllocU C.malloc
 func AllocU(uintptr) unsafe.Pointer
 
-//go:linkname fastrand C.rand
-func fastrand() uint32
+// libc rand returns C int. Keep this fixture ABI identical to every other
+// declaration of the shared physical symbol, then perform the Go uint32
+// conversion in a bodyful wrapper.
+//
+//llgo:coro sync
+//go:linkname libcRand C.rand
+func libcRand() int32
+
+func fastrand() uint32 { return uint32(libcRand()) }
 `
 
 // TestCoroChannelAndClosedStaticSpawnNativeNoStdlibRuntimeE2E is deliberately a
@@ -264,7 +272,7 @@ func buildCoroSpawnNativeE2EUserSource(
 	ssaPkg, files := buildCoroPlanTestPackage(t, coroSpawnNativeE2EPackage, source, nil)
 	universe, err := cl.PrepareEmissionUniverseWithOptions(prog, nil, []cl.EmissionPackage{{
 		SSA: ssaPkg, Files: files, Identity: coroSpawnNativeE2EPackage,
-	}}, cl.EmissionUniverseOptions{CoroProfile: cl.CoroProfileStackless})
+	}}, cl.EmissionUniverseOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,8 +325,7 @@ func buildCoroSpawnNativeE2EUserSource(
 		SchedulerABI:     schedulerABI,
 		PanicABI:         coro.PanicExplicitStatusABIV0,
 		FuncRepABI:       coro.FuncRepABIV1,
-		EmissionUniverse: universe, CoroProfile: cl.CoroProfileStackless,
-	}
+		EmissionUniverse: universe}
 	pkg, _, err := cl.NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		cl.PackageOptions{Compilation: compilation},
@@ -349,8 +356,7 @@ func buildCoroSpawnNativeE2EEntry(t *testing.T, prog llssa.Program, temp, anchor
 	conf := &Config{
 		BuildMode: BuildModeExe,
 		Goos:      runtime.GOOS,
-		Goarch:    runtime.GOARCH, CoroProfile: CoroProfileStackless,
-	}
+		Goarch:    runtime.GOARCH}
 	ctx := &context{prog: prog, buildConf: conf}
 	bootstrap := &coroProgramBootstrapV1{
 		Version: coroProgramBootstrapVersionV2,
@@ -590,7 +596,7 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_executor_retired_default.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_nil_fault.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_panic_payload.go"),
-		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor_driver_legacy.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor_driver_worker_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_spawn.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_native_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_worker_native_llgo.go"),
@@ -624,6 +630,7 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 	// runtime files through the private compiler channel; the public Config.Tags
 	// path must reject this capability as forged.
 	conf.compilerBuildTags = []string{"llgo_coro", coroNativePipeBuildTag}
+	configureCoroRuntimeIslandPlan(conf)
 	allowed := map[string]bool{
 		"command-line-arguments":                               true,
 		"github.com/goplus/llgo/runtime/internal/coro":         true,
@@ -675,6 +682,59 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 		t.Fatalf("production coroutine runtime island objects = %d, want exactly %d package objects plus worker and doorbell leaves", len(objects), len(allowed))
 	}
 	return objects
+}
+
+// configureCoroRuntimeIslandPlan gives source-list E2E fixtures the exact raw
+// runtime boundary that an ordinary build derives from the canonical runtime
+// package identity. Source lists are deliberately loaded as
+// command-line-arguments, so this is fixture provenance rather than a runtime
+// profile or a production feature switch.
+func configureCoroRuntimeIslandPlan(conf *Config) {
+	conf.CoroPlanBuilder = func(input CoroPlanInput) (*coro.SSAPlan, error) {
+		if input.requiredPlain == nil {
+			input.requiredPlain = make(map[*ssa.Function]struct{})
+		}
+		if input.requiredHostPlain == nil {
+			input.requiredHostPlain = make(map[*ssa.Function]struct{})
+		}
+		rootCount := 0
+		for _, fn := range input.EmissionUniverse.Functions() {
+			if fn == nil || fn.Pkg == nil || fn.Pkg.Pkg == nil {
+				continue
+			}
+			pkgPath := fn.Pkg.Pkg.Path()
+			if pkgPath != "command-line-arguments" && pkgPath != "github.com/goplus/llgo/runtime/internal/coro" {
+				continue
+			}
+			if len(fn.Blocks) == 0 && input.functionBackground != nil {
+				background, classified, err := input.functionBackground(fn)
+				if err != nil {
+					return nil, err
+				}
+				if classified && background == llssa.InC {
+					input.requiredPlain[fn] = struct{}{}
+					input.requiredHostPlain[fn] = struct{}{}
+				}
+				continue
+			}
+			externalRuntimeEntry := pkgPath == "command-line-arguments" &&
+				(strings.HasPrefix(fn.Name(), "__llgo_coro_") || token.IsExported(fn.Name()))
+			externalCoreEntry := pkgPath == "github.com/goplus/llgo/runtime/internal/coro" &&
+				token.IsExported(fn.Name())
+			if fn.Parent() != nil || fn.Signature == nil || fn.Signature.Recv() != nil ||
+				(!externalRuntimeEntry && !externalCoreEntry) {
+				continue
+			}
+			input.requiredRoots = append(input.requiredRoots, coro.Root{Function: fn, Demand: coro.SyncDemand})
+			input.requiredPlain[fn] = struct{}{}
+			input.requiredHostPlain[fn] = struct{}{}
+			rootCount++
+		}
+		if rootCount == 0 {
+			return nil, fmt.Errorf("runtime island has no exported coroutine ABI roots")
+		}
+		return input.Analyze(nil, coro.SSAConfig{DynamicResolution: coro.DynamicCHAClosed})
+	}
 }
 
 func materializeCoroChannelNativeE2ERuntimeIsland(t *testing.T, production []string) []string {
@@ -746,6 +806,8 @@ func assertCoroSpawnNativeE2ELinkedSymbols(t *testing.T, executable string) {
 		"__llgo_coro_chan_recv_park_v1",
 		"__llgo_coro_chan_resume_v1",
 		"__llgo_coro_fault_prepare_v1",
+		"__llgo_coro_fault_prepare_v2",
+		"__llgo_coro_fault_payload_v2",
 		"github.com/goplus/llgo/runtime/internal/coro.CommitSpawn",
 		"github.com/goplus/llgo/runtime/internal/coro.BeginChannelExternalCommit",
 		"github.com/goplus/llgo/runtime/internal/coro.BeginChannelExternalCommitPair",
@@ -789,6 +851,16 @@ func runCoroSpawnNativeE2EPasses(t *testing.T, prog llssa.Program, module llvm.M
 
 func emitCoroSpawnNativeE2EObject(t *testing.T, prog llssa.Program, module llvm.Module, path string) string {
 	t.Helper()
+	for function := module.FirstFunction(); !function.IsNil(); function = llvm.NextFunction(function) {
+		if strings.HasPrefix(function.Name(), "llvm.coro.") && !function.FirstUse().IsNil() {
+			// ModuleHook-based fixtures intercept frontend IR before buildPkg's
+			// mandatory backend boundary. Lower exactly once here before asking
+			// TargetMachine for native code; already-lowered handcrafted modules
+			// retain only unused intrinsic declarations and skip this path.
+			runCoroSpawnNativeE2EPasses(t, prog, module)
+			break
+		}
+	}
 	module.SetDataLayout(prog.DataLayout())
 	module.SetTarget(prog.TargetSpec().Triple)
 	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {

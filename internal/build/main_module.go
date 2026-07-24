@@ -91,23 +91,11 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 		return mainAPkg
 	}
 
-	managedBootstrapV2 := ctx.buildConf.coroProgramBootstrapActive()
-	if managedBootstrapV2 && (cfg.coroBootstrap == nil || cfg.coroBootstrap.Version != coroProgramBootstrapVersionV2) {
+	if cfg.coroBootstrap == nil || cfg.coroBootstrap.Version != coroProgramBootstrapVersionV2 {
 		panic("stackless coroutine entry requires the unique V2 startup table")
 	}
 	var runtimeStub llssa.Function
-	if !managedBootstrapV2 {
-		// Legacy entry modes retain the historical optional public-runtime hook.
-		// V2 resolves the exact public runtime SSA init through its managed table;
-		// defining a weak symbol here would satisfy the archive relocation with a
-		// no-op and could silently prevent extraction of the real strong body.
-		runtimeStub = defineWeakNoArgStub(mainPkg, "runtime.init")
-		// TODO(lijie): legacy workaround for syscall patch. It is deliberately
-		// absent from V2: a weak entry-module definition could also intercept a
-		// real syscall.init relocation reached through the managed package-init
-		// chain and violate the single-primary plan.
-		defineWeakNoArgStub(mainPkg, "syscall.init")
-	}
+	var mainInit, mainMain llssa.Function
 
 	var pyInit llssa.Function
 	var pyFinalize llssa.Function
@@ -117,9 +105,6 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 	}
 
 	var rtInit llssa.Function
-	if cfg.rtInit && !managedBootstrapV2 {
-		rtInit = declareNoArgFunc(mainPkg, rtPkgPath+".init")
-	}
 
 	var abiInit llssa.Function
 	if cfg.abiInit != 0 {
@@ -130,27 +115,20 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 			return filterAbiSymbol(cfg.abiInit, sym)
 		})
 	}
-	if managedBootstrapV2 {
-		// The v2 table always contains the compiler ABI-init stage. Profiles with
-		// no selected ABI symbols still define the exact target as a bounded no-op
-		// so the five-stage program never relies on an optional external symbol.
+	// The v2 table always contains the compiler ABI-init stage. Targets with no
+	// selected ABI symbols still define the exact target as a bounded no-op so
+	// the five-stage program never relies on an optional external symbol.
+	if abiInit == nil {
+		abiInit = mainPkg.FuncOf("init$abitypes")
 		if abiInit == nil {
-			abiInit = mainPkg.FuncOf("init$abitypes")
-			if abiInit == nil {
-				abiInit = declareNoArgFunc(mainPkg, "init$abitypes")
-			}
-			if !abiInit.HasBody() {
-				body := abiInit.MakeBody(1)
-				body.Return()
-			}
+			abiInit = declareNoArgFunc(mainPkg, "init$abitypes")
+		}
+		if !abiInit.HasBody() {
+			body := abiInit.MakeBody(1)
+			body.Return()
 		}
 	}
 
-	var mainInit, mainMain llssa.Function
-	if !ctx.buildConf.coroProgramBootstrapActive() {
-		mainInit = declareNoArgFunc(mainPkg, pkg.PkgPath+".init")
-		mainMain = declareNoArgFunc(mainPkg, pkg.PkgPath+".main")
-	}
 	var coroBegin llssa.Function
 	var coroRun llssa.Function
 	var coroContinue llssa.Function
@@ -158,23 +136,21 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 	var coroContinueSliceV2 llssa.Function
 	var coroHostPullCallbacks []retainedCoroCallbackV1
 	var coroAllocatorBootstrap llssa.Function
-	if ctx.buildConf.coroProgramBootstrapActive() {
-		if coroEntry.manifest.IsNil() || coroEntry.factory == nil {
-			panic("coroutine program bootstrap runtime enabled without a manifest and factory")
-		}
-		coroAllocatorBootstrap = declareNoArgFunc(mainPkg, coroFrameAllocatorBootstrapSymbolV1)
-		coroBegin = declareCoroProgramBeginV1(mainPkg)
-		if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
-			coroRunSliceV2 = declareCoroProgramRunSliceV2(mainPkg)
-			coroContinueSliceV2 = declareCoroProgramContinueSliceV2(mainPkg)
-		} else if hostCoroPullRuntimeABI(ctx.buildConf) {
-			coroRunSliceV2 = declareCoroProgramRunSliceV2(mainPkg)
-			coroContinueSliceV2 = declareCoroProgramContinueSliceV2(mainPkg)
-			coroHostPullCallbacks = declareCoroHostPullCallbacksV1(mainPkg)
-		} else {
-			coroRun = declareCoroProgramRunV1(mainPkg)
-			coroContinue = declareCoroProgramContinueV1(mainPkg)
-		}
+	if coroEntry.manifest.IsNil() || coroEntry.factory == nil {
+		panic("coroutine program bootstrap runtime enabled without a manifest and factory")
+	}
+	coroAllocatorBootstrap = declareNoArgFunc(mainPkg, coroFrameAllocatorBootstrapSymbolV1)
+	coroBegin = declareCoroProgramBeginV1(mainPkg)
+	if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
+		coroRunSliceV2 = declareCoroProgramRunSliceV2(mainPkg)
+		coroContinueSliceV2 = declareCoroProgramContinueSliceV2(mainPkg)
+	} else if hostCoroPullRuntimeABI(ctx.buildConf) {
+		coroRunSliceV2 = declareCoroProgramRunSliceV2(mainPkg)
+		coroContinueSliceV2 = declareCoroProgramContinueSliceV2(mainPkg)
+		coroHostPullCallbacks = declareCoroHostPullCallbacksV1(mainPkg)
+	} else {
+		coroRun = declareCoroProgramRunV1(mainPkg)
+		coroContinue = declareCoroProgramContinueV1(mainPkg)
 	}
 
 	bootstrapVersion := uint32(0)
@@ -220,7 +196,7 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 // to this boundary even when an ordinary library build has no coroutine root,
 // so a runtime-linked c-shared/c-archive output owns the definitions too.
 func emitCoroControlWrappers(ctx *context, pkg llssa.Package, runtimeLinked bool) {
-	if !runtimeLinked && (ctx == nil || ctx.buildConf == nil || !ctx.buildConf.coroChildAwaitActive()) {
+	if !runtimeLinked && (ctx == nil || ctx.buildConf == nil) {
 		return
 	}
 
@@ -257,7 +233,7 @@ type coroProgramEntryV1 struct {
 }
 
 func emitCoroProgramManifest(ctx *context, pkg llssa.Package, cfg *genConfig) coroProgramEntryV1 {
-	if ctx == nil || ctx.buildConf == nil || !ctx.buildConf.coroChildAwaitActive() {
+	if ctx == nil || ctx.buildConf == nil {
 		return coroProgramEntryV1{}
 	}
 	prog := pkg.Prog
@@ -281,9 +257,9 @@ func emitCoroProgramManifest(ctx *context, pkg llssa.Package, cfg *genConfig) co
 	}
 	var bootstrap llssa.Expr
 	var factory llssa.Function
-	if ctx.buildConf.coroProgramBootstrapABIActive() {
+	if ctx.buildConf.BuildMode == BuildModeExe {
 		if cfg.coroBootstrap == nil {
-			panic("coroutine program bootstrap ABI enabled without a validated startup table")
+			panic("coroutine executable requires a validated startup table")
 		}
 		if cfg.coroBootstrap.Version != coroProgramBootstrapVersionV2 {
 			panic("coroutine manifest accepts only the V2 startup table")
@@ -321,12 +297,9 @@ func emitCoroProgramManifest(ctx *context, pkg llssa.Package, cfg *genConfig) co
 				Target: tableTarget, Aux: step.Aux,
 			}
 		}
-		if ctx.buildConf.coroProgramBootstrapActive() {
-			factory = emitCoroProgramBootstrapFactoryV2(
-				pkg, cfg.coroBootstrap, targets, cfg.coroManifestHash,
-				ctx.buildConf.coroClosedStaticSpawnActive(),
-			)
-		}
+		factory = emitCoroProgramBootstrapFactoryV2(
+			pkg, cfg.coroBootstrap, targets, cfg.coroManifestHash, true,
+		)
 		var factoryExpr llssa.Expr
 		if factory != nil {
 			factoryExpr = factory.Expr

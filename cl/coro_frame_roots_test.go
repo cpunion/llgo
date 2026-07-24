@@ -66,7 +66,7 @@ func TestCoroFrameExactRootsAndUintptrKeepaliveAreFrozen(t *testing.T) {
 	digest := ""
 	for iteration := 0; iteration < 2; iteration++ {
 		prog, _, universe, method, audit, proof := prepareCoroFrameRootAudit(
-			t, coroFrameExactRootsFixture, "Method", EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
+			t, coroFrameExactRootsFixture, "Method", EmissionUniverseOptions{CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 		)
 		if got := proof.exactRootCapabilityProfile(); got != coroFrameRetentionExactRootProfileV2 {
 			prog.Dispose()
@@ -142,6 +142,10 @@ func TestCoroFrameExactRootsAndUintptrKeepaliveAreFrozen(t *testing.T) {
 		if got := rootNames(proof.exactCallKeepaliveRoots(workerCall)); strings.Join(got, ",") != "bytes" {
 			prog.Dispose()
 			t.Fatalf("worker keepalive roots = %v", got)
+		}
+		if sources := proof.exactCallKeepaliveSources(workerCall); len(sources) != 1 || sources[0] != pointerWord {
+			prog.Dispose()
+			t.Fatalf("worker keepalive sources = %v, want only exact call argument %v", sources, pointerWord)
 		}
 		prog.Dispose()
 	}
@@ -864,7 +868,7 @@ func TestCoroFrameExactRootsRejectPreciseShadowProfile(t *testing.T) {
 	emitShadowStackInstrumentation = true
 	defer func() { emitShadowStackInstrumentation = old }()
 	prog, _, _, _, _, proof := prepareCoroFrameRootAudit(
-		t, coroFrameExactRootsFixture, "Method", EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
+		t, coroFrameExactRootsFixture, "Method", EmissionUniverseOptions{CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	defer prog.Dispose()
 	if proof.exactRootCapabilityProfile() != "" || proof.exactRootCapabilityDigest() != "" || len(proof.exactRetainedRoots()) != 0 {

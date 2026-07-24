@@ -100,9 +100,9 @@ func resolveCoroDirectStaticSpawn(
 		)
 	}
 	if target.Signature == nil || target.Signature.Recv() == nil || target.Signature.Variadic() ||
-		target.Signature.Results().Len() != 0 || typeParamCount(target.Signature.TypeParams()) != 0 ||
+		typeParamCount(target.Signature.TypeParams()) != 0 ||
 		typeParamCount(target.Signature.RecvTypeParams()) != 0 {
-		return nil, coro.FunctionPlan{}, fmt.Errorf("spawn target %q is not an exact non-generic zero-result method", targetPlan.ID)
+		return nil, coro.FunctionPlan{}, fmt.Errorf("spawn target %q is not an exact non-generic method", targetPlan.ID)
 	}
 	ownerPlan, found := plan.FunctionPlan(spawn.Parent())
 	if !found || ownerPlan.Emission != coro.EmitCoroutine || ownerPlan.Primary != coro.PrimaryCoroutine ||
@@ -190,7 +190,7 @@ func validateCoroDirectSpawnArgumentTransport(
 // an explicit safepoint using its physical G; there is no TLS/current-G
 // fallback anywhere in this path.
 func (p *context) tryCompileCoroClosedStaticSpawn(b llssa.Builder, spawn *ssa.Go) bool {
-	if spawn == nil || p == nil || p.compilation == nil || !p.compilation.CoroClosedStaticSpawnActive() {
+	if spawn == nil || p == nil || p.compilation == nil {
 		return false
 	}
 	body := p.coroBody()
@@ -268,9 +268,6 @@ func (p *context) compileCoroManagedDispatchSpawn(b llssa.Builder, spawn *ssa.Go
 	abi, err := newCoroPlainDispatchABI(p, spawn.Call.Signature())
 	if err != nil {
 		panic(fmt.Errorf("managed descriptor spawn: %w", err))
-	}
-	if abi.signature.Results().Len() != 0 {
-		panic("managed descriptor spawn requires a zero-result signature")
 	}
 	opts := llssa.CoroDispatchCallOptions{
 		Version: coroPlainDispatchVersion,

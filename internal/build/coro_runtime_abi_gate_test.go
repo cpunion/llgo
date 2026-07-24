@@ -45,7 +45,7 @@ func Present() {}
 	ctx := &context{
 		prog:      prog,
 		progSSA:   ssaPkg.Prog,
-		buildConf: &Config{CoroProfile: CoroProfileStackless},
+		buildConf: &Config{},
 	}
 	if err := prepareCoroEmissionUniverse(ctx, []*aPackage{pkg}); err != nil {
 		t.Fatal(err)
@@ -71,8 +71,7 @@ func Present() {}
 		t.Fatal("report universe unexpectedly claims a complete runtime ABI")
 	}
 	conf := &Config{
-		Goos: "linux", Goarch: "amd64", CoroProfile: CoroProfileStackless,
-	}
+		Goos: "linux", Goarch: "amd64"}
 	if !nativeCoroTimerRuntimeABI(conf) {
 		t.Fatal("test configuration does not select the native timer target ABI")
 	}
@@ -101,5 +100,16 @@ func Present() {}
 	}
 	if got := validatedCoroFrameRetentionABI(completeCtx, false); got != "" {
 		t.Fatalf("unvalidated runtime roots selected frame-retention ABI %q", got)
+	}
+	for _, target := range []Config{
+		{Goos: "linux", Goarch: "arm"},
+		{Goos: "wasip1", Goarch: "wasm"},
+		{Goos: "linux", Goarch: "amd64", Tags: "baremetal"},
+	} {
+		completeCtx.buildConf = &target
+		if got := validatedCoroFrameRetentionABI(completeCtx, true); got != cl.CoroFrameRetentionParkABIV2 {
+			t.Fatalf("%s/%s tags %q selected frame-retention ABI %q, want %q",
+				target.Goos, target.Goarch, target.Tags, got, cl.CoroFrameRetentionParkABIV2)
+		}
 	}
 }

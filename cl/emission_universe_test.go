@@ -1426,8 +1426,7 @@ func Coroutine(channel chan int) { <-channel }
 	}
 	compilation := &Compilation{
 		CoroPlan:         plan,
-		EmissionUniverse: universe, CoroProfile: CoroProfileStackless,
-	}
+		EmissionUniverse: universe}
 	err = compilation.preflightCoroPlan()
 	if err == nil || !strings.Contains(err.Error(), "plan coverage") {
 		t.Fatalf("preflight error = %v; want coverage miss", err)
@@ -1767,8 +1766,7 @@ var Global struct{ *Base }
 		prog, nil, nil, nil, pkg.ssa, []*ast.File{pkg.file}, goembed.VarMap{},
 		PackageOptions{Compilation: &Compilation{
 			CoroPlan:         plan,
-			EmissionUniverse: universe, CoroProfile: CoroProfileStackless,
-		}},
+			EmissionUniverse: universe}},
 	)
 	if err != nil {
 		t.Fatalf("active codegen found a late function: %v", err)

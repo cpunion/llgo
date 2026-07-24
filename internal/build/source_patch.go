@@ -83,11 +83,13 @@ func applySourcePatchForPkg(base, current map[string][]byte, runtimeDir, goroot,
 	}
 
 	var (
-		out       = current
-		changed   bool
-		patchSrcs = make(map[string][]byte)
-		skipAll   bool
-		skips     = make(map[string]struct{})
+		out              = current
+		changed          bool
+		patchSrcs        = make(map[string][]byte)
+		skipAll          bool
+		skips            = make(map[string]struct{})
+		annotations      = make(map[string][]string)
+		annotationCounts = make(map[string]int)
 	)
 	readOverlay := func(filename string) ([]byte, error) {
 		if out != nil {
@@ -136,6 +138,9 @@ func applySourcePatchForPkg(base, current map[string][]byte, runtimeDir, goroot,
 		for name := range directives.skips {
 			skips[name] = struct{}{}
 		}
+		for name, markers := range directives.annotations {
+			annotations[name] = append(annotations[name], markers...)
+		}
 	}
 	if len(patchSrcs) == 0 {
 		return false, current, nil
@@ -172,7 +177,7 @@ func applySourcePatchForPkg(base, current map[string][]byte, runtimeDir, goroot,
 			out[filename] = stub
 			changed = true
 		}
-	} else if len(skips) != 0 {
+	} else if len(skips) != 0 || len(annotations) != 0 {
 		for _, entry := range srcEntries {
 			if entry.IsDir() {
 				continue
@@ -186,16 +191,31 @@ func applySourcePatchForPkg(base, current map[string][]byte, runtimeDir, goroot,
 			if err != nil {
 				return false, nil, fmt.Errorf("read stdlib source file %s: %w", filename, err)
 			}
-			filtered, changedFile, err := filterSourcePatchFile(src, skips)
-			if err != nil {
-				return false, nil, fmt.Errorf("filter stdlib source file %s: %w", filename, err)
+			filtered, changedFile := src, false
+			if len(skips) != 0 {
+				filtered, changedFile, err = filterSourcePatchFile(src, skips)
+				if err != nil {
+					return false, nil, fmt.Errorf("filter stdlib source file %s: %w", filename, err)
+				}
 			}
-			if !changedFile {
+			annotated, annotatedFile, counts, err := annotateSourcePatchFile(filtered, annotations)
+			if err != nil {
+				return false, nil, fmt.Errorf("annotate stdlib source file %s: %w", filename, err)
+			}
+			for name, count := range counts {
+				annotationCounts[name] += count
+			}
+			if !changedFile && !annotatedFile {
 				continue
 			}
 			ensureOverlay()
-			out[filename] = filtered
+			out[filename] = annotated
 			changed = true
+		}
+	}
+	for name := range annotations {
+		if annotationCounts[name] == 0 {
+			return false, nil, fmt.Errorf("source patch annotation target %q was not found in package %s", name, pkgPath)
 		}
 	}
 
@@ -305,8 +325,9 @@ func packageStubSource(src []byte) ([]byte, error) {
 }
 
 type sourcePatchDirectives struct {
-	skipAll bool
-	skips   map[string]struct{}
+	skipAll     bool
+	skips       map[string]struct{}
+	annotations map[string][]string
 }
 
 func collectSourcePatchDirectives(src []byte) (sourcePatchDirectives, error) {
@@ -315,10 +336,24 @@ func collectSourcePatchDirectives(src []byte) (sourcePatchDirectives, error) {
 	if err != nil {
 		return sourcePatchDirectives{}, err
 	}
-	d := sourcePatchDirectives{skips: make(map[string]struct{})}
+	d := sourcePatchDirectives{
+		skips:       make(map[string]struct{}),
+		annotations: make(map[string][]string),
+	}
 	for _, group := range file.Comments {
 		for _, comment := range group.List {
 			line := strings.TrimSpace(comment.Text)
+			if name, marker, ok := parseSourcePatchAnnotationDirective(line); ok {
+				for _, previous := range d.annotations[name] {
+					if previous == marker {
+						return sourcePatchDirectives{}, fmt.Errorf(
+							"duplicate source patch annotation %q for %q", marker, name,
+						)
+					}
+				}
+				d.annotations[name] = append(d.annotations[name], marker)
+				continue
+			}
 			skipAll, names, ok := parseSourcePatchDirective(line)
 			if !ok {
 				continue
@@ -344,6 +379,7 @@ func collectSourcePatchDirectives(src []byte) (sourcePatchDirectives, error) {
 // Supported directives:
 //   - //llgo:skipall: clear every stdlib .go file in the patched package to a package stub
 //   - //llgo:skip A B: comment the named declarations from the stdlib package view
+//   - //llgo:annotate F marker: attach //llgo:marker to the exact stdlib function F
 //
 // Unlike cl/import.go directives, these are consumed only while constructing the
 // load-time overlay and are rewritten to plain comments before type checking.
@@ -375,6 +411,42 @@ func parseSourcePatchDirective(line string) (skipAll bool, names []string, ok bo
 	}
 }
 
+func parseSourcePatchAnnotationDirective(line string) (name, marker string, ok bool) {
+	const (
+		llgo1 = "//llgo:annotate "
+		llgo2 = "// llgo:annotate "
+	)
+	var tail string
+	switch {
+	case strings.HasPrefix(line, llgo1):
+		tail = line[len(llgo1):]
+	case strings.HasPrefix(line, llgo2):
+		tail = line[len(llgo2):]
+	default:
+		return "", "", false
+	}
+	fields := strings.Fields(tail)
+	if len(fields) != 2 || !validSourcePatchAnnotationMarker(fields[1]) {
+		return "", "", false
+	}
+	return fields[0], fields[1], true
+}
+
+func validSourcePatchAnnotationMarker(marker string) bool {
+	if marker == "" || marker[0] < 'a' || marker[0] > 'z' {
+		return false
+	}
+	for index := 1; index < len(marker); index++ {
+		ch := marker[index]
+		if ch < 'a' || ch > 'z' {
+			if ch < '0' || ch > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func sanitizeSourcePatchDirectiveLines(src []byte) []byte {
 	out := slices.Clone(src)
 	lines := bytes.SplitAfter(out, []byte{'\n'})
@@ -389,7 +461,8 @@ func sanitizeSourcePatchDirectiveLines(src []byte) []byte {
 	}
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(string(line))
-		if _, _, ok := parseSourcePatchDirective(trimmed); !ok {
+		_, _, annotation := parseSourcePatchAnnotationDirective(trimmed)
+		if _, _, ok := parseSourcePatchDirective(trimmed); !ok && !annotation {
 			continue
 		}
 		switch {
@@ -403,6 +476,79 @@ func sanitizeSourcePatchDirectiveLines(src []byte) []byte {
 		return src
 	}
 	return out
+}
+
+type sourcePatchAnnotationInsertion struct {
+	offset int
+	text   string
+}
+
+func annotateSourcePatchFile(src []byte, annotations map[string][]string) ([]byte, bool, map[string]int, error) {
+	counts := make(map[string]int)
+	if len(annotations) == 0 {
+		return src, false, counts, nil
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "", src, parser.ParseComments)
+	if err != nil {
+		return nil, false, nil, err
+	}
+	tokFile := fset.File(file.Pos())
+	if tokFile == nil {
+		return nil, false, nil, fmt.Errorf("missing file positions")
+	}
+	var insertions []sourcePatchAnnotationInsertion
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		name := declPatchKeyFunc(function)
+		markers := annotations[name]
+		if len(markers) == 0 {
+			continue
+		}
+		counts[name]++
+		existing := make(map[string]struct{})
+		if function.Doc != nil {
+			for _, comment := range function.Doc.List {
+				existing[strings.TrimSpace(comment.Text)] = struct{}{}
+			}
+		}
+		var text strings.Builder
+		for _, marker := range markers {
+			directive := "//llgo:" + marker
+			if _, present := existing[directive]; present {
+				continue
+			}
+			text.WriteString(directive)
+			text.WriteByte('\n')
+		}
+		if text.Len() != 0 {
+			insertions = append(insertions, sourcePatchAnnotationInsertion{
+				offset: tokFile.Offset(function.Type.Pos()),
+				text:   text.String(),
+			})
+		}
+	}
+	if len(insertions) == 0 {
+		return src, false, counts, nil
+	}
+	slices.SortFunc(insertions, func(left, right sourcePatchAnnotationInsertion) int {
+		return right.offset - left.offset
+	})
+	out := slices.Clone(src)
+	for _, insertion := range insertions {
+		if insertion.offset < 0 || insertion.offset > len(out) {
+			return nil, false, nil, fmt.Errorf("annotation insertion offset %d is outside source", insertion.offset)
+		}
+		next := make([]byte, 0, len(out)+len(insertion.text))
+		next = append(next, out[:insertion.offset]...)
+		next = append(next, insertion.text...)
+		next = append(next, out[insertion.offset:]...)
+		out = next
+	}
+	return out, true, counts, nil
 }
 
 func buildInjectedSourcePatchFile(filename string, src []byte) []byte {

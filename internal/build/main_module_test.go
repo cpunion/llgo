@@ -153,8 +153,7 @@ func TestGenMainModuleCoroControlWrappersBuildModes(t *testing.T) {
 				buildConf: &Config{
 					BuildMode: test.buildMode,
 					Goos:      test.goos,
-					Goarch:    test.goarch, CoroProfile: CoroProfileStackless,
-				},
+					Goarch:    test.goarch},
 			}
 			bootstrap := &coroProgramBootstrapV1{
 				Version: coroProgramBootstrapVersionV2,
@@ -189,7 +188,7 @@ func TestGenMainModuleCoroControlWrappersBuildModes(t *testing.T) {
 	}
 }
 
-func TestGenMainModuleCoroControlWrappersDisabled(t *testing.T) {
+func TestGenMainModuleAlwaysOwnsCoroControlWrappers(t *testing.T) {
 	llvm.InitializeAllTargets()
 	t.Setenv(llgoStdioNobuf, "")
 	prog := llssa.NewProgram(nil)
@@ -197,7 +196,7 @@ func TestGenMainModuleCoroControlWrappersDisabled(t *testing.T) {
 	ctx := &context{
 		prog: prog,
 		buildConf: &Config{
-			BuildMode: BuildModeExe,
+			BuildMode: BuildModeCShared,
 			Goos:      "linux",
 			Goarch:    "amd64",
 		},
@@ -205,8 +204,11 @@ func TestGenMainModuleCoroControlWrappersDisabled(t *testing.T) {
 	mod := genMainModule(ctx, llssa.PkgRuntime,
 		&packages.Package{PkgPath: "example.com/foo", ExportFile: "foo.a"},
 		&genConfig{})
-	if strings.Contains(mod.LPkg.String(), "__llgo_coro_") {
-		t.Fatalf("disabled child-await mode emitted coroutine control ABI:\n%s", mod.LPkg.String())
+	for _, name := range []string{"__llgo_coro_resume_v1", "__llgo_coro_done_v1", "__llgo_coro_destroy_v1"} {
+		fn := mod.LPkg.Module().NamedFunction(name)
+		if fn.IsNil() || fn.IsDeclaration() {
+			t.Fatalf("single stackless architecture did not define %q:\n%s", name, mod.LPkg.String())
+		}
 	}
 }
 
@@ -221,8 +223,6 @@ func TestGenMainModuleRuntimeLinkedLibraryOwnsCoroControlWrappers(t *testing.T) 
 			BuildMode: BuildModeCShared,
 			Goos:      "linux",
 			Goarch:    "amd64",
-			// Deliberately leave CoroProfile disabled. The unified runtime still
-			// references its compiler-owned handle boundary in library modes.
 		},
 	}
 	entry := genMainModule(ctx, llssa.PkgRuntime,
@@ -288,8 +288,7 @@ func TestGenMainModuleCoroProgramBootstrapV2MixedNativeAndWasm(t *testing.T) {
 				buildConf: &Config{
 					BuildMode: BuildModeExe,
 					Goos:      test.goos,
-					Goarch:    test.goarch, CoroProfile: CoroProfileStackless,
-				},
+					Goarch:    test.goarch},
 			}
 			const anchor = "__llgo_coro_root_package_v1.0123456789abcdef0123456789abcdef"
 			var programHash [16]byte
@@ -460,8 +459,7 @@ func TestGenMainModuleCoroProgramBootstrapV2DefinesOwnedPublicRuntimeNoop(t *tes
 		buildConf: &Config{
 			BuildMode: BuildModeExe,
 			Goos:      "linux",
-			Goarch:    "amd64", CoroProfile: CoroProfileStackless,
-		},
+			Goarch:    "amd64"},
 	}
 	bootstrap := &coroProgramBootstrapV1{
 		Version: coroProgramBootstrapVersionV2,
@@ -717,8 +715,7 @@ func TestGenMainModuleCoroControlWrappersAfterCoroPasses(t *testing.T) {
 		buildConf: &Config{
 			BuildMode: BuildModeExe,
 			Goos:      "linux",
-			Goarch:    "amd64", CoroProfile: CoroProfileStackless,
-		},
+			Goarch:    "amd64"},
 	}
 	bootstrap := &coroProgramBootstrapV1{
 		Version: coroProgramBootstrapVersionV2,

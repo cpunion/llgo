@@ -42,7 +42,7 @@ func proveSSAExactNoUnwind(
 	elidedCalls map[ssa.CallInstruction]bool,
 	safeFixedArrayIndexes map[ssa.Instruction]int64,
 	canonicalizer *ssaFunctionCanonicalizer,
-) (map[*ssa.Function]bool, error) {
+) (map[*ssa.Function]bool, map[ssa.CallInstruction]bool, error) {
 	bodySet := make(map[*ssa.Function]bool, len(functions))
 	for _, fn := range functions {
 		bodySet[fn] = true
@@ -63,7 +63,8 @@ func proveSSAExactNoUnwind(
 	}
 
 	type candidate struct {
-		dependencies map[*ssa.Function]struct{}
+		dependencies    map[*ssa.Function]struct{}
+		contextualCalls map[ssa.CallInstruction]map[*ssa.Function]struct{}
 	}
 	candidates := make(map[*ssa.Function]candidate, len(functions))
 	for _, fn := range functions {
@@ -75,12 +76,16 @@ func proveSSAExactNoUnwind(
 		analysis := newSSAExactNoUnwindAnalysis(
 			fn, bodySet, leaves, closedCalls, trustedInlineNoUnwind, elidedCalls, safeFixedArrayIndexes, canonicalizer,
 		)
+		analysis.trustedLocal = policy.TrustedNoUnwind
 		ok, err := analysis.scan()
 		if err != nil {
-			return nil, fmt.Errorf("coro: prove exact no-unwind body %q: %w", fn.Name(), err)
+			return nil, nil, fmt.Errorf("coro: prove exact no-unwind body %q: %w", fn.Name(), err)
 		}
 		if ok {
-			candidates[fn] = candidate{dependencies: analysis.dependencies}
+			candidates[fn] = candidate{
+				dependencies:    analysis.dependencies,
+				contextualCalls: analysis.contextualCalls,
+			}
 		}
 	}
 
@@ -106,12 +111,27 @@ func proveSSAExactNoUnwind(
 			}
 		}
 	}
+	contextualCalls := make(map[ssa.CallInstruction]bool)
+	for _, candidate := range candidates {
+		for call, dependencies := range candidate.contextualCalls {
+			exact := true
+			for dependency := range dependencies {
+				if !result[dependency] {
+					exact = false
+					break
+				}
+			}
+			if exact {
+				contextualCalls[call] = true
+			}
+		}
+	}
 	// External leaves are useful while solving dependencies, but callers only
 	// need to know which defined scanner seeds may be cleared.
 	for fn := range leaves {
 		delete(result, fn)
 	}
-	return result, nil
+	return result, contextualCalls, nil
 }
 
 type ssaExactNoUnwindAnalysis struct {
@@ -125,9 +145,12 @@ type ssaExactNoUnwindAnalysis struct {
 	canonicalizer         *ssaFunctionCanonicalizer
 	blocks                map[ssa.Instruction]*ssa.BasicBlock
 	dependencies          map[*ssa.Function]struct{}
+	contextualCalls       map[ssa.CallInstruction]map[*ssa.Function]struct{}
 	nonEvalMemo           map[ssa.Value]uint8
 	scalarBitcast         *ssa.Alloc
+	assumedNonNil         map[ssa.Value]bool
 	meaningful            bool
+	trustedLocal          bool
 }
 
 func newSSAExactNoUnwindAnalysis(
@@ -151,7 +174,9 @@ func newSSAExactNoUnwindAnalysis(
 		canonicalizer:         canonicalizer,
 		blocks:                make(map[ssa.Instruction]*ssa.BasicBlock),
 		dependencies:          make(map[*ssa.Function]struct{}),
+		contextualCalls:       make(map[ssa.CallInstruction]map[*ssa.Function]struct{}),
 		nonEvalMemo:           make(map[ssa.Value]uint8),
+		assumedNonNil:         make(map[ssa.Value]bool),
 	}
 	if fn != nil {
 		if proof, exact := ProveSSAExactScalarBitcast(fn); exact {
@@ -187,12 +212,28 @@ func (a *ssaExactNoUnwindAnalysis) scan() (bool, error) {
 			}
 		}
 	}
-	// Preserve the historic conservative seed for an ordinary empty body. A
-	// body is cleared only after at least one explicit recipe operation.
-	return a.meaningful, nil
+	// Reaching this point proves every executable SSA instruction in the body.
+	// A body containing only Return/Jump instructions is therefore no-unwind as
+	// well: those control instructions cannot initiate a Go panic merely because
+	// there was no value-producing operation to mark as meaningful.
+	return true, nil
 }
 
 func (a *ssaExactNoUnwindAnalysis) instruction(instruction ssa.Instruction) (bool, error) {
+	if a.trustedLocal {
+		switch instruction := instruction.(type) {
+		case *ssa.Panic, *ssa.Defer, *ssa.RunDefers, *ssa.Send, *ssa.Select:
+			return false, nil
+		case *ssa.UnOp:
+			if instruction.Op == token.ARROW {
+				return false, nil
+			}
+		case *ssa.Call:
+			return a.call(instruction)
+		}
+		a.meaningful = true
+		return true, nil
+	}
 	switch instruction := instruction.(type) {
 	case *ssa.Return, *ssa.Jump:
 		return true, nil
@@ -371,6 +412,20 @@ func (a *ssaExactNoUnwindAnalysis) call(call *ssa.Call) (bool, error) {
 		if !resolved || target == nil || (!a.bodySet[target] && !a.leaves[target]) {
 			return false, nil
 		}
+		if a.trustedLocal && a.bodySet[target] {
+			dependencies, exact, err := a.contextualStaticCall(target, call)
+			if err != nil {
+				return false, err
+			}
+			if exact {
+				for dependency := range dependencies {
+					a.dependencies[dependency] = struct{}{}
+				}
+				a.contextualCalls[call] = dependencies
+				a.meaningful = true
+				return true, nil
+			}
+		}
 		a.dependencies[target] = struct{}{}
 		a.meaningful = true
 		return true, nil
@@ -397,6 +452,49 @@ func (a *ssaExactNoUnwindAnalysis) call(call *ssa.Call) (bool, error) {
 	}
 	a.meaningful = true
 	return true, nil
+}
+
+// contextualStaticCall proves the narrow case where a static callee's global
+// no-unwind result is conservative only because one of its pointer parameters
+// may be nil. The proof substitutes only arguments that this exact call site
+// already proves non-nil, scans the complete callee body with the ordinary
+// strict recipe, and returns the callee's real dependencies to the outer fixed
+// point. It does not inherit trustedLocal, recurse context-sensitively, or
+// suppress an explicit panic/open call.
+func (a *ssaExactNoUnwindAnalysis) contextualStaticCall(
+	target *ssa.Function,
+	call *ssa.Call,
+) (map[*ssa.Function]struct{}, bool, error) {
+	if a == nil || target == nil || call == nil || call.Common() == nil ||
+		len(target.Blocks) == 0 || len(target.Params) != len(call.Common().Args) {
+		return nil, false, nil
+	}
+	assumed := make(map[ssa.Value]bool)
+	for index, parameter := range target.Params {
+		if parameter == nil || !a.pointerProvenNonNil(call.Common().Args[index], call) {
+			continue
+		}
+		assumed[parameter] = true
+	}
+	if len(assumed) == 0 {
+		return nil, false, nil
+	}
+	nested := newSSAExactNoUnwindAnalysis(
+		target,
+		a.bodySet,
+		a.leaves,
+		a.closedCalls,
+		a.trustedInlineNoUnwind,
+		a.elidedCalls,
+		a.safeFixedArrayIndexes,
+		a.canonicalizer,
+	)
+	nested.assumedNonNil = assumed
+	exact, err := nested.scan()
+	if err != nil || !exact {
+		return nil, false, err
+	}
+	return nested.dependencies, true, nil
 }
 
 func noUnwindBinOp(operation *ssa.BinOp) bool {
@@ -476,6 +574,9 @@ func noUnwindConversionType(typ types.Type) bool {
 
 func (a *ssaExactNoUnwindAnalysis) pointerProvenNonNil(value ssa.Value, use ssa.Instruction) bool {
 	value = noUnwindStripConversions(value)
+	if a.assumedNonNil[value] {
+		return true
+	}
 	switch value := value.(type) {
 	case *ssa.Global, *ssa.Alloc:
 		// Alloc itself is outside the recipe, but recognizing its result here

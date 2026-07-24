@@ -195,7 +195,23 @@ func (p *context) compileCoroChanRecv(b llssa.Builder, instruction *ssa.UnOp, ch
 }
 
 func (p *context) compileCoroChanClose(b llssa.Builder, channel llssa.Expr) {
+	p.compileCoroChanCloseWithRecovery(b, channel, nil)
+}
+
+// compileCoroChanCloseWithRecovery shares the typed close operation between an
+// ordinary source call and a deferred cleanup carrier. A cleanup-time close
+// fault replaces the current panic overlay while preserving the drainer's
+// normal/RunDefers/cancellation base; a source-time fault enters cleanup from
+// the ordinary Recover continuation.
+func (p *context) compileCoroChanCloseWithRecovery(
+	b llssa.Builder,
+	channel llssa.Expr,
+	cleanup *coroStaticCleanupState,
+) {
 	body := p.requireCoroChannelBody(b)
+	if cleanup != nil && body.cleanup != cleanup {
+		panic("coroutine deferred close does not belong to the active cleanup drainer")
+	}
 	status := b.CoroChanTryClose(channel)
 	nilChannel := b.Func.MakeBlock()
 	alreadyClosed := b.Func.MakeBlock()
@@ -207,9 +223,17 @@ func (p *context) compileCoroChanClose(b llssa.Builder, channel llssa.Expr) {
 	dispatch.End(b)
 
 	b.SetBlockEx(nilChannel, llssa.AtEnd, false)
-	p.compileCoroTerminalFault(b, coroFaultChannelCloseNilV1)
+	if cleanup == nil {
+		p.compileCoroTerminalFault(b, coroFaultChannelCloseNilV1)
+	} else {
+		cleanup.replaceFault(p, b, coroFaultChannelCloseNilV1)
+	}
 	b.SetBlockEx(alreadyClosed, llssa.AtEnd, false)
-	p.compileCoroTerminalFault(b, coroFaultChannelCloseClosedV1)
+	if cleanup == nil {
+		p.compileCoroTerminalFault(b, coroFaultChannelCloseClosedV1)
+	} else {
+		cleanup.replaceFault(p, b, coroFaultChannelCloseClosedV1)
+	}
 	b.SetBlockContinuation(normal)
 	body.activate(b)
 }

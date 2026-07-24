@@ -16,31 +16,10 @@
 
 package coro
 
-// RuntimeProfile is the only user-visible coroutine architecture selection.
-// Stackless is a complete language/runtime contract: entry resolution,
-// physical LLVM coroutines, synchronous-style await, explicit outcomes,
-// channels/select, spawn, preemption, and the program executor always move as
-// one unit. Target-dependent transports are described separately by
-// TargetCapabilities; they are not independently selectable language stages.
-type RuntimeProfile uint8
-
-const (
-	RuntimeProfileNone RuntimeProfile = iota
-	RuntimeProfileStackless
-)
-
-func (profile RuntimeProfile) Active() bool {
-	return profile == RuntimeProfileStackless
-}
-
-func (profile RuntimeProfile) Valid() bool {
-	return profile == RuntimeProfileNone || profile == RuntimeProfileStackless
-}
-
 // TargetCapabilities is compiler-derived from the selected target runtime.
 // It deliberately contains only transports which cannot exist on every
-// environment. Portable scheduler semantics never appear here: they are part
-// of RuntimeProfileStackless and therefore cannot be disabled piecemeal.
+// environment. Portable stackless scheduler semantics never appear here: they
+// are the sole LLGo execution architecture and cannot be disabled piecemeal.
 type TargetCapabilities uint8
 
 const (

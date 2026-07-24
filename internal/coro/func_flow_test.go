@@ -77,6 +77,17 @@ func nilCall() {
 	var fn func()
 	fn()
 }
+func capturedCoro(flag bool) int {
+	var fn func() int
+	if flag {
+		value := 1
+		fn = func() int {
+			<-channel
+			return value
+		}
+	}
+	return fn()
+}
 func dynamicGo(flag bool) {
 	var fn func()
 	if flag { fn = goTarget }
@@ -95,6 +106,7 @@ func dynamicDefer(flag bool) {
 	throughParam := packageFunction(t, pkg, "throughParam")
 	openKnown := packageFunction(t, pkg, "openKnown")
 	nilCall := packageFunction(t, pkg, "nilCall")
+	capturedCoro := packageFunction(t, pkg, "capturedCoro")
 	dynamicGo := packageFunction(t, pkg, "dynamicGo")
 	dynamicDefer := packageFunction(t, pkg, "dynamicDefer")
 
@@ -107,6 +119,7 @@ func dynamicDefer(flag bool) {
 		{Function: throughParam, Demand: AsyncDemand},
 		{Function: openKnown, Demand: AsyncDemand},
 		{Function: nilCall, Demand: AsyncDemand},
+		{Function: capturedCoro, Demand: AsyncDemand},
 		{Function: dynamicGo, Demand: AsyncDemand},
 		{Function: dynamicDefer, Demand: AsyncDemand},
 	}, SSAConfig{})
@@ -153,6 +166,26 @@ func dynamicDefer(flag bool) {
 	}
 	if got := functionPlanFor(t, plan, nilCall); got.Effect.IsOpaque() || got.Effect.MaySuspend() {
 		t.Fatalf("closed nil-only call polluted the effect graph: %+v", got)
+	}
+	capturedCall := onlyNonBuiltinCall(t, capturedCoro)
+	capturedCallPlan, ok := plan.CallPlan(capturedCall)
+	if !ok || capturedCallPlan.Rep != Dispatch || capturedCallPlan.Open ||
+		!capturedCallPlan.MayBeNil || len(capturedCallPlan.Targets) != 1 {
+		t.Fatalf("captured Phi call plan = %+v, present=%t; want closed nullable singleton Dispatch", capturedCallPlan, ok)
+	}
+	capturedValuePlan, ok := plan.ValuePlan(capturedCall.Common().Value)
+	if !ok || len(capturedValuePlan.Funcs) != 1 ||
+		capturedValuePlan.Funcs[0].Rep != Dispatch ||
+		!capturedValuePlan.Funcs[0].MayBeNil ||
+		len(capturedValuePlan.Funcs[0].Targets) != 1 {
+		t.Fatalf("captured Phi value plan = %+v, present=%t; want nullable singleton Dispatch", capturedValuePlan, ok)
+	}
+	if len(capturedCoro.AnonFuncs) != 1 {
+		t.Fatalf("capturedCoro closures = %d, want 1", len(capturedCoro.AnonFuncs))
+	}
+	if got := functionPlanFor(t, plan, capturedCoro.AnonFuncs[0]); got.FuncRep != Dispatch ||
+		got.Emission != EmitCoroutine || !got.Effect.Contains(MayPark) {
+		t.Fatalf("captured Phi target plan = %+v, want descriptor-backed coroutine", got)
 	}
 
 	chaPlan, err := AnalyzeSSA(prog, Roots{{Function: local, Demand: AsyncDemand}}, SSAConfig{DynamicResolution: DynamicCHAOpen})

@@ -356,7 +356,7 @@ func (p *context) funcAddr(b llssa.Builder, args []ssa.Value) llssa.Expr {
 			switch f := fn.X.(type) {
 			case *ssa.Function:
 				compile := p.compileFunction
-				if p.compilation != nil && p.compilation.CoroEntryResolutionActive() {
+				if p.compilation != nil {
 					entry := p.mustFunctionSymbol(f)
 					if err := validatePlannedRawPlainEntry(entry.function, entry.plan); err != nil {
 						panic(fmt.Errorf("funcAddr raw function publication: %w", err))
@@ -669,6 +669,39 @@ func (p *context) atomicCmpXchgOK(b llssa.Builder, args []llssa.Expr) llssa.Expr
 	return b.Extract(ret, 1)
 }
 
+func (p *context) compileAtomicIntrinsic(b llssa.Builder, opcode int, args []llssa.Expr) llssa.Expr {
+	switch opcode {
+	case llgoAtomicLoad:
+		return p.atomicLoad(b, args)
+	case llgoAtomicStore:
+		return p.atomicStore(b, args)
+	case llgoAtomicLoadUnsafe:
+		return p.atomicLoadUnsafe(b, args)
+	case llgoAtomicStoreUnsafe:
+		return p.atomicStoreUnsafe(b, args)
+	case llgoAtomicCmpXchg:
+		return p.atomicCmpXchg(b, args)
+	case llgoAtomicCmpXchgOK:
+		return p.atomicCmpXchgOK(b, args)
+	case llgoAtomicAddReturnNew:
+		old := p.atomic(b, llssa.OpAdd, args)
+		delta := b.ChangeType(old.Type, args[1])
+		return b.BinOp(token.ADD, old, delta)
+	default:
+		if opcode >= llgoAtomicOpBase && opcode <= llgoAtomicOpLast {
+			return p.atomic(b, llssa.AtomicOp(opcode-llgoAtomicOpBase), args)
+		}
+		panic(fmt.Sprintf("unsupported atomic intrinsic opcode %d", opcode))
+	}
+}
+
+// completeCoroIntrinsicCallEmission is the sole codegen-to-SitePlan
+// observation gateway. Source calls and relocated cleanup recipes both report
+// through this boundary after their selected operation has been emitted.
+func (p *context) completeCoroIntrinsicCallEmission(opcode int, actual CoroIntrinsicCallSemantics) {
+	p.observeCoroIntrinsicCallEmission(opcode, actual)
+}
+
 func (p *context) boolToUint8(b llssa.Builder, args []llssa.Expr) llssa.Expr {
 	if len(args) == 1 {
 		retType := p.type_(types.Typ[types.Uint8], llssa.InGo)
@@ -706,6 +739,9 @@ var llgoInstrs = map[string]int{
 	"coroControlledTimerWait": llgoCoroControlledTimerWait,
 	"coroCriticalEnter":       llgoCoroCriticalEnter,
 	"coroCriticalExit":        llgoCoroCriticalExit,
+	"coroGoexit":              llgoCoroGoexit,
+	"coroOSThreadLock":        llgoCoroOSThreadLock,
+	"coroOSThreadUnlock":      llgoCoroOSThreadUnlock,
 	"pystr":                   llgoPyStr,
 	"pyList":                  llgoPyList,
 	"pyTuple":                 llgoPyTuple,
@@ -2075,6 +2111,27 @@ func collectMethodNilDerefChecks(fn *ssa.Function) map[*ssa.UnOp]none {
 	return checks
 }
 
+// selectCoroPhysicalOutcome is the single emission adapter for all
+// compiler-owned completion outcomes. Callers choose only the expected frozen
+// recipe; this boundary owns both lookup and exactly-once observation.
+func (p *context) selectCoroPhysicalOutcome(
+	instruction ssa.Instruction,
+	expected coroPhysicalOutcomeRecipe,
+) bool {
+	outcome, planned := p.plannedCoroPhysicalOutcome(instruction)
+	if !planned {
+		return false
+	}
+	if outcome.outcome != expected {
+		panic(fmt.Sprintf(
+			"source instruction selected incompatible frozen physical outcome recipe %s, want %s",
+			outcome.outcome, expected,
+		))
+	}
+	p.observeCoroPhysicalOutcome(instruction, expected)
+	return true
+}
+
 func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallCommon, ds *explicitDeferStack) (ret llssa.Expr) {
 	p.recordCallerLocationForCall(b, call)
 	p.emitPCLineLabel(b, call.Pos())
@@ -2107,10 +2164,13 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 	args := call.Args
 	dbgGoSSAln(">>> Do", act, cv, args)
 	sourceCall := p.coroCurrentSourceCall()
+	physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(sourceCall)
+	observePhysicalInstruction := func(actual coroPhysicalInstructionRecipe) {
+		p.observeCoroPhysicalInstruction(sourceCall, actual)
+	}
 	switch cv := cv.(type) {
 	case *ssa.Builtin:
 		fn := cv.Name()
-		physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(sourceCall)
 		if fn == "ssa:wrapnilchk" {
 			ptr := p.compileValue(b, args[0])
 			if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionBuiltinNilGuard {
@@ -2118,7 +2178,7 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 				// not a call that may unwind the native stack through a live LLVM
 				// coroutine frame. ExplicitStatus owns the branch and returns the
 				// original pointer on its non-nil continuation.
-				p.observeCoroPhysicalInstruction(sourceCall, coroPhysicalInstructionBuiltinNilGuard)
+				observePhysicalInstruction(coroPhysicalInstructionBuiltinNilGuard)
 				p.observeCoroPhysicalNilGuard(sourceCall)
 				ret = p.compileCoroImplicitNilAccessGuard(b, ptr)
 				return
@@ -2148,12 +2208,7 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 			return
 		} else if fn == "recover" && act == llssa.Call {
 			sourceCall := p.coroCurrentSourceCall()
-			outcome, outcomePlanned := p.plannedCoroPhysicalOutcome(sourceCall)
-			if outcomePlanned {
-				if outcome.outcome != coroPhysicalOutcomeRecover {
-					panic(fmt.Sprintf("recover selected incompatible frozen physical outcome recipe %s", outcome.outcome))
-				}
-				p.observeCoroPhysicalOutcome(sourceCall, coroPhysicalOutcomeRecover)
+			if p.selectCoroPhysicalOutcome(sourceCall, coroPhysicalOutcomeRecover) {
 				ret = p.compileCoroRecover(b, call)
 				return
 			}
@@ -2174,7 +2229,7 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 			}
 		} else if fn == "String" && len(args) == 2 && act == llssa.Call &&
 			physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionUnsafeString {
-			p.observeCoroPhysicalInstruction(sourceCall, coroPhysicalInstructionUnsafeString)
+			observePhysicalInstruction(coroPhysicalInstructionUnsafeString)
 			compiled := p.compileValues(b, args, kind)
 			ret = p.compileCoroUnsafeString(b, call, compiled[0], compiled[1])
 			return
@@ -2183,7 +2238,7 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 			// unsafe.Slice remains a generic SSA builtin. Only its outcome
 			// mechanism changes here: evaluate ptr and len in source order, then
 			// publish language faults without unwinding through the LLVM frame.
-			p.observeCoroPhysicalInstruction(sourceCall, coroPhysicalInstructionUnsafeSlice)
+			observePhysicalInstruction(coroPhysicalInstructionUnsafeSlice)
 			compiled := p.compileValues(b, args, kind)
 			ret = p.compileCoroUnsafeSlice(b, call, compiled[0], compiled[1])
 			return
@@ -2240,7 +2295,18 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 		case llgoAlloca:
 			ret = p.alloca(b, args)
 		case llgoAllocaCStr:
-			ret = p.allocaCStr(b, args)
+			if physicalPlanned {
+				if physicalInstruction.recipe != coroPhysicalInstructionHeapCStr {
+					panic(fmt.Sprintf(
+						"llgo.allocaCStr selected incompatible frozen physical recipe %s",
+						physicalInstruction.recipe,
+					))
+				}
+				observePhysicalInstruction(coroPhysicalInstructionHeapCStr)
+				ret = p.allocCStr(b, args)
+			} else {
+				ret = p.allocaCStr(b, args)
+			}
 		case llgoAllocCStr:
 			ret = p.allocCStr(b, args)
 		case llgoAllocaCStrs:
@@ -2286,10 +2352,10 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 					panic("coroutine llgo.syscall requires an exact direct call")
 				}
 				ret = p.compileCoroWorkerSyscall(b, call, args, call.Signature().Results(), convention)
-				p.observeCoroIntrinsicCallEmission(ftype, CoroIntrinsicCallInlineSuspend)
+				p.completeCoroIntrinsicCallEmission(ftype, CoroIntrinsicCallInlineSuspend)
 			} else {
 				ret = p.syscallIntrinsic(b, args, call.Signature().Results(), convention)
-				p.observeCoroIntrinsicCallEmission(ftype, CoroIntrinsicCallUnsupported)
+				p.completeCoroIntrinsicCallEmission(ftype, CoroIntrinsicCallUnsupported)
 			}
 		case llgoBoolToUint8:
 			args := p.compileValues(b, args, kind)
@@ -2332,6 +2398,28 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 				panic("llgo.coroCriticalExit requires an exact direct zero-argument call")
 			}
 			p.compileCoroCriticalExit(b, call)
+		case llgoCoroGoexit:
+			if act != llssa.Call || ds != nil || len(args) != 0 {
+				panic("llgo.coroGoexit requires an exact direct zero-argument call")
+			}
+			if !p.selectCoroPhysicalOutcome(sourceCall, coroPhysicalOutcomeGoexit) {
+				panic("llgo.coroGoexit has no frozen terminal outcome recipe")
+			}
+			p.compileCoroGoexit(b)
+			// x/tools models compiler declarations as ordinary calls and retains
+			// their source tail. Keep that tail structurally well-formed but
+			// unreachable after Goexit entered the terminal cleanup protocol.
+			b.SetBlockContinuation(p.fn.MakeBlock())
+		case llgoCoroOSThreadLock:
+			if act != llssa.Call || ds != nil || len(args) != 0 {
+				panic("llgo.coroOSThreadLock requires an exact direct zero-argument call")
+			}
+			p.compileCoroOSThreadAffinity(b, true)
+		case llgoCoroOSThreadUnlock:
+			if act != llssa.Call || ds != nil || len(args) != 0 {
+				panic("llgo.coroOSThreadUnlock requires an exact direct zero-argument call")
+			}
+			p.compileCoroOSThreadAffinity(b, false)
 		case llgoUnreachable: // func unreachable()
 			b.Unreachable()
 			// x/tools models this compiler intrinsic as an ordinary call, so the
@@ -2340,48 +2428,17 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 			// it after llvm.unreachable would put two terminators in one block,
 			// while dropping it outright can invalidate successor PHI edges.
 			b.SetBlockContinuation(p.fn.MakeBlock())
-		case llgoAtomicLoad:
+		case llgoAtomicLoad, llgoAtomicStore, llgoAtomicLoadUnsafe, llgoAtomicStoreUnsafe,
+			llgoAtomicCmpXchg, llgoAtomicCmpXchgOK, llgoAtomicAddReturnNew:
 			args := p.compileValues(b, args, kind)
 			ret = p.emitDo(b, act, ds, llssa.Nil, func(b llssa.Builder, _ llssa.Expr, args ...llssa.Expr) llssa.Expr {
-				return p.atomicLoad(b, args)
-			}, args...)
-		case llgoAtomicStore:
-			args := p.compileValues(b, args, kind)
-			p.emitDo(b, act, ds, llssa.Nil, func(b llssa.Builder, _ llssa.Expr, args ...llssa.Expr) llssa.Expr {
-				return p.atomicStore(b, args)
-			}, args...)
-		case llgoAtomicLoadUnsafe:
-			args := p.compileValues(b, args, kind)
-			ret = p.emitDo(b, act, ds, llssa.Nil, func(b llssa.Builder, _ llssa.Expr, args ...llssa.Expr) llssa.Expr {
-				return p.atomicLoadUnsafe(b, args)
-			}, args...)
-		case llgoAtomicStoreUnsafe:
-			args := p.compileValues(b, args, kind)
-			p.emitDo(b, act, ds, llssa.Nil, func(b llssa.Builder, _ llssa.Expr, args ...llssa.Expr) llssa.Expr {
-				return p.atomicStoreUnsafe(b, args)
-			}, args...)
-		case llgoAtomicCmpXchg:
-			args := p.compileValues(b, args, kind)
-			ret = p.emitDo(b, act, ds, llssa.Nil, func(b llssa.Builder, _ llssa.Expr, args ...llssa.Expr) llssa.Expr {
-				return p.atomicCmpXchg(b, args)
-			}, args...)
-		case llgoAtomicCmpXchgOK:
-			args := p.compileValues(b, args, kind)
-			ret = p.emitDo(b, act, ds, llssa.Nil, func(b llssa.Builder, _ llssa.Expr, args ...llssa.Expr) llssa.Expr {
-				return p.atomicCmpXchgOK(b, args)
-			}, args...)
-		case llgoAtomicAddReturnNew:
-			args := p.compileValues(b, args, kind)
-			ret = p.emitDo(b, act, ds, llssa.Nil, func(b llssa.Builder, _ llssa.Expr, args ...llssa.Expr) llssa.Expr {
-				old := p.atomic(b, llssa.OpAdd, args)
-				delta := b.ChangeType(old.Type, args[1])
-				return b.BinOp(token.ADD, old, delta)
+				return p.compileAtomicIntrinsic(b, ftype, args)
 			}, args...)
 		default:
 			if ftype >= llgoAtomicOpBase && ftype <= llgoAtomicOpLast {
 				args := p.compileValues(b, args, kind)
 				ret = p.emitDo(b, act, ds, llssa.Nil, func(b llssa.Builder, _ llssa.Expr, args ...llssa.Expr) llssa.Expr {
-					return p.atomic(b, llssa.AtomicOp(ftype-llgoAtomicOpBase), args)
+					return p.compileAtomicIntrinsic(b, ftype, args)
 				}, args...)
 			} else {
 				log.Panicf("unknown ftype: %d for %s", ftype, cv.Name())
@@ -2391,7 +2448,7 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 			// Record the recipe only after the selected lowering completed. This
 			// keeps the SitePlan ledger tied to actual emission rather than merely
 			// observing the opcode before the switch.
-			p.observeCoroIntrinsicCallEmission(ftype, coroIntrinsicCallSemantics(ftype))
+			p.completeCoroIntrinsicCallEmission(ftype, coroIntrinsicCallSemantics(ftype))
 		}
 	default:
 		rawC := p.prog.TypeBackground(cv.Type()) == llssa.InC

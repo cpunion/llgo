@@ -19,6 +19,7 @@ package cl
 import (
 	"fmt"
 	"slices"
+	"strconv"
 
 	"github.com/goplus/llgo/internal/coro"
 	"golang.org/x/tools/go/ssa"
@@ -37,6 +38,66 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 	if ir.callsFrozen {
 		return fmt.Errorf("coroutine call SitePlans were frozen more than once")
 	}
+	// RawCritical is deliberately stronger than nopreempt/nounwind. Freeze an
+	// occurrence-level native-stack capability for each exact ordinary static
+	// call before the owner-scoped SitePlans consume it. Names, addresses,
+	// interface values, methods, defer, go, and recursive entry never match.
+	u.rawCriticalCalls = make(map[ssa.CallInstruction]string)
+	for _, caller := range u.functions {
+		caller = u.canonicalAlias(caller)
+		if caller == nil || len(caller.Blocks) == 0 {
+			continue
+		}
+		callerIdentity := u.finalIdentity(caller)
+		if callerIdentity == "" || callerIdentity == "<nil>" || callerIdentity == "<cyclic-alias>" {
+			return fmt.Errorf("prepare emission universe: raw-critical caller %q has no exact identity", caller.Name())
+		}
+		for _, block := range caller.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ordinary := instruction.(*ssa.Call)
+				if !ordinary || call == nil || call.Common() == nil || call.Common().IsInvoke() ||
+					call.Common().Method != nil {
+					continue
+				}
+				target := u.canonicalAlias(call.Common().StaticCallee())
+				bodyCertificate, critical := u.rawCritical[target]
+				if !critical {
+					continue
+				}
+				if target == nil || target == caller {
+					return fmt.Errorf(
+						"prepare emission universe: raw-critical call in %q has an invalid recursive target",
+						caller.Name(),
+					)
+				}
+				if _, required := u.required[target]; !required {
+					return fmt.Errorf(
+						"prepare emission universe: raw-critical target %q is outside the frozen program",
+						target.Name(),
+					)
+				}
+				targetIdentity := u.finalIdentity(target)
+				if targetIdentity == "" || targetIdentity == "<nil>" || targetIdentity == "<cyclic-alias>" {
+					return fmt.Errorf("prepare emission universe: raw-critical target %q has no exact identity", target.Name())
+				}
+				semantic, err := coro.SemanticInstructionOrdinal(call)
+				if err != nil {
+					return fmt.Errorf(
+						"prepare emission universe: identify raw-critical call in %q: %w",
+						caller.Name(), err,
+					)
+				}
+				u.rawCriticalCalls[call] = emissionDigest(framedEmissionKey(
+					coroRawCriticalCallCertificateDomain,
+					bodyCertificate,
+					callerIdentity,
+					strconv.Itoa(block.Index),
+					strconv.Itoa(semantic),
+					targetIdentity,
+				))
+			}
+		}
+	}
 	for _, function := range u.functions {
 		if function == nil {
 			continue
@@ -46,10 +107,6 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 			ctx, err := u.functionABIContext(function, owner)
 			if err != nil {
 				return fmt.Errorf("function %q call SitePlan context: %w", function.Name(), err)
-			}
-			_, _, functionKind := ctx.funcName(function)
-			if functionKind != goFunc {
-				continue
 			}
 			if _, frozen := ir.siteOwners[key]; !frozen {
 				return fmt.Errorf("function %q call SitePlan has no frozen owner", function.Name())
@@ -66,6 +123,11 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 						continue
 					}
 					site := byInstruction[instruction]
+					semantic, semanticFound := ir.semanticPlans[key][instruction]
+					if !semanticFound {
+						return fmt.Errorf("function %q call %q has no frozen semantic SitePlan", function.Name(), call.String())
+					}
+					frontendUnevaluated := !semantic.evaluated
 					noInit := FrontendElidesNoInitCall(call)
 					patchRedirect := false
 					var frozenPatchRedirect coroPatchInitRedirect
@@ -77,15 +139,29 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 						patchRedirect = true
 						frozenPatchRedirect = coroPatchInitRedirect{logicalName: logicalName, target: patchTarget}
 					}
+					var cgoWorkerCertificate CoroCgoWorkerCallCertificate
+					var cgoWorkerTarget *ssa.Function
+					cgoWorkerCertified := false
+					if !frontendUnevaluated && !noInit && !patchRedirect && classifyErr == nil {
+						cgoWorkerCertificate, cgoWorkerTarget, cgoWorkerCertified, classifyErr =
+							u.freezeCoroCgoWorkerCallCertificate(ctx, call)
+					}
 					semantics, intrinsic, opcode := CoroIntrinsicCallUnsupported, false, 0
 					var workerCertificate CoroWorkerSyscallCertificate
 					workerCertified := false
-					if !noInit && !patchRedirect && classifyErr == nil {
+					if !frontendUnevaluated && !noInit && !patchRedirect && !cgoWorkerCertified && classifyErr == nil {
 						callee := call.Common().StaticCallee()
 						if callee != nil {
-							opcode, intrinsic, classifyErr = u.coroIntrinsicOpcode(callee)
+							// ProgramIR inventories fallback bodies even when their
+							// frontend declaration is replaced and the fallback's
+							// private callees are deliberately absent from the
+							// emission universe. Preserve the source site, but only
+							// classify an intrinsic edge for a frozen target.
+							if _, frozen := u.Resolve(callee); frozen {
+								opcode, intrinsic, classifyErr = u.coroIntrinsicOpcode(callee)
+							}
 						}
-						if classifyErr == nil && intrinsic && isLLGoSyscallIntrinsic(opcode) && u.CoroWorkerEnabled() {
+						if classifyErr == nil && intrinsic && isLLGoSyscallIntrinsic(opcode) && u.CoroWorkerSupported() {
 							if direct, ok := call.(*ssa.Call); ok && direct.Common() != nil && !direct.Common().IsInvoke() &&
 								direct.Parent() != nil && u.canonicalAlias(direct.Parent()) == direct.Parent() {
 								workerCertificate, workerCertified = u.workerSyscalls[direct]
@@ -101,12 +177,46 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 						IntrinsicSemantics: semantics,
 						Intrinsic:          intrinsic,
 					}
+					if rawCertificate := u.rawCriticalCalls[call]; rawCertificate != "" {
+						if frontendUnevaluated || noInit || patchRedirect || cgoWorkerCertified || intrinsic {
+							classifyErr = fmt.Errorf(
+								"raw-critical call overlaps an elided, generated-worker, or intrinsic recipe",
+							)
+						} else {
+							plan.RawPlain = true
+							plan.RawPlainCertificate = rawCertificate
+						}
+					}
+					intrinsicPlacement := coroRuntimeHelperAtSource
+					if _, deferred := call.(*ssa.Defer); deferred && intrinsic && classifyErr == nil &&
+						isCoroAtomicIntrinsic(opcode) {
+						intrinsicPlacement = coroRuntimeHelperAtCleanup
+					}
+					if _, spawned := call.(*ssa.Go); spawned && intrinsic && classifyErr == nil &&
+						isCoroAtomicIntrinsic(opcode) {
+						callee := call.Common().StaticCallee()
+						wrapper, wrapped := u.intrinsicWrapper(ctx.goPkg, callee)
+						if !wrapped || wrapper == nil {
+							classifyErr = fmt.Errorf(
+								"spawned inline intrinsic %q has no compiler-owned coroutine carrier",
+								callee.Name(),
+							)
+						} else {
+							plan.StaticSpawnTarget = wrapper
+						}
+					}
 					switch {
+					case frontendUnevaluated:
+						plan.Elision = CoroCallElidedFrontendUnevaluated
 					case noInit:
 						plan.Elision = CoroCallElidedNoInit
 					case patchRedirect:
 						plan.Elision = CoroCallElidedPatchRedirect
-					case intrinsic && classifyErr == nil && semantics.ElidesManagedCall():
+					case cgoWorkerCertified:
+						plan.Elision = CoroCallElidedCgoWorker
+						plan.ElisionCertificate = cgoWorkerCertificate.ID
+						plan.CgoWorkerTarget = cgoWorkerTarget
+					case intrinsic && classifyErr == nil && semantics.ElidesManagedCall() && plan.StaticSpawnTarget == nil:
 						plan.Elision = CoroCallElidedIntrinsic
 					}
 					if plan.ElidesCall() && intrinsic && classifyErr == nil && workerCertified {
@@ -117,12 +227,14 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 						}
 					}
 					frozenCall := coroFrozenCallSitePlan{
-						plan:              plan,
-						opcode:            opcode,
-						workerCertificate: workerCertificate,
-						workerCertified:   workerCertified,
-						patchRedirect:     frozenPatchRedirect,
-						patchAttempted:    redirected || redirectErr != nil,
+						plan:               plan,
+						opcode:             opcode,
+						intrinsicPlacement: intrinsicPlacement,
+						workerCertificate:  workerCertificate,
+						workerCertified:    workerCertified,
+						cgoWorker:          cgoWorkerCertificate,
+						patchRedirect:      frozenPatchRedirect,
+						patchAttempted:     redirected || redirectErr != nil,
 					}
 					if workerCertified {
 						frozenCall.workerOwners = cloneCoroWorkerOwnerSet(u.workerSyscallOwners[call])
@@ -153,6 +265,8 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 	u.workerSyscallOwners = nil
 	u.workerSyscallIncoming = nil
 	u.patchInitRedirects = nil
+	u.rawCriticalCalls = nil
+	u.rawCritical = nil
 	return nil
 }
 
@@ -180,7 +294,9 @@ func cloneCoroWorkerIncomingEdges(source []coroWorkerSyscallIncomingEdge) []coro
 
 func sameCoroFrozenCallSitePlan(first, second coroFrozenCallSitePlan) bool {
 	if first.plan != second.plan || first.failure != second.failure || first.opcode != second.opcode ||
+		first.intrinsicPlacement != second.intrinsicPlacement ||
 		first.workerCertificate != second.workerCertificate || first.workerCertified != second.workerCertified ||
+		first.cgoWorker != second.cgoWorker ||
 		first.patchRedirect != second.patchRedirect || first.patchAttempted != second.patchAttempted ||
 		len(first.workerOwners) != len(second.workerOwners) || len(first.workerIncoming) != len(second.workerIncoming) {
 		return false

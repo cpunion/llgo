@@ -59,7 +59,7 @@ func Root(runner Runner) int { return runner.Run() }
 	defer program.Dispose()
 	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		program, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}},
-		EmissionUniverseOptions{CoroProfile: CoroProfileStackless},
+		EmissionUniverseOptions{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -134,7 +134,6 @@ func Root(runner Runner) int { return runner.Run() }
 	}
 
 	compilation := coroClosedInterfacePlainCompilation(plan, universe)
-	compilation.CoroProfile = CoroProfileStackless
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
 	compiled, _, err := NewPackageExWithEmbedOptions(
 		program, nil, nil, nil, ssaPkg, files, goembed.VarMap{},

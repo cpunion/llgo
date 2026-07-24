@@ -175,6 +175,57 @@ func TestAwaitCompletionReturnConsumedAfterChildDestroy(t *testing.T) {
 	fixture.keepAlive()
 }
 
+func TestAwaitCompletionGoexitConsumedAfterChildDestroy(t *testing.T) {
+	fixture := newAwaitCompletionFixture(t)
+	fixture.child.header.SuspendReason = uint16(SuspendFrameComplete)
+	fixture.child.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PrepareCompleteStatus(fixture.g, fixture.child.handle, fixture.child.header, CompletionGoexit) {
+		t.Fatal("publish child Goexit completion")
+	}
+	wantRecord := CompletionRecord{status: CompletionGoexit, child: fixture.child.handle}
+	if fixture.parentFrame().completion != wantRecord {
+		t.Fatalf("published Goexit record = %+v, want %+v", fixture.parentFrame().completion, wantRecord)
+	}
+	if snapshot, consumed := ConsumeAwaitCompletion(fixture.g, fixture.parent.handle); consumed || snapshot != (CompletionSnapshot{}) {
+		t.Fatalf("Goexit completion consumed while child was live = (%+v, %t)", snapshot, consumed)
+	}
+
+	fixture.destroyChildAndResumeParent(t)
+	snapshot, ok := ConsumeAwaitCompletion(fixture.g, fixture.parent.handle)
+	if !ok || snapshot != (CompletionSnapshot{Status: CompletionGoexit}) {
+		t.Fatalf("consume child Goexit = (%+v, %t)", snapshot, ok)
+	}
+	if !emptyCompletionRecord(&fixture.parentFrame().completion) {
+		t.Fatalf("Goexit consume retained parent record: %+v", fixture.parentFrame().completion)
+	}
+	fixture.keepAlive()
+}
+
+func TestAwaitCompletionGoexitClearsRecoverPayload(t *testing.T) {
+	typeWord := unsafe.Pointer(new(byte))
+	dataWord := unsafe.Pointer(new(byte))
+	fixture := newAwaitCompletionFixtureConfigured(t, nil, typeWord, dataWord)
+	fixture.child.header.SuspendReason = uint16(SuspendFrameComplete)
+	fixture.child.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PrepareCompleteStatus(fixture.g, fixture.child.handle, fixture.child.header, CompletionGoexit) {
+		t.Fatal("publish recoverable child Goexit completion")
+	}
+	wantRecord := CompletionRecord{status: CompletionGoexit, child: fixture.child.handle}
+	if fixture.parentFrame().completion != wantRecord {
+		t.Fatalf("Goexit did not replace recover payload: got %+v, want %+v",
+			fixture.parentFrame().completion, wantRecord)
+	}
+
+	fixture.destroyChildAndResumeParent(t)
+	snapshot, ok := ConsumeAwaitCompletion(fixture.g, fixture.parent.handle)
+	if !ok || snapshot != (CompletionSnapshot{Status: CompletionGoexit}) {
+		t.Fatalf("consume recoverable child Goexit = (%+v, %t)", snapshot, ok)
+	}
+	runtime.KeepAlive(typeWord)
+	runtime.KeepAlive(dataWord)
+	fixture.keepAlive()
+}
+
 func TestAwaitCompletionCancellationPropagatesAcrossAncestors(t *testing.T) {
 	tests := []struct {
 		name   string

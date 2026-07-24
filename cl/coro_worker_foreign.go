@@ -30,10 +30,16 @@ import (
 const coroWorkerForeignThunkPrefixV1 = "__llgo_coro_worker_foreign_thunk_v1_"
 
 type coroWorkerForeignCallShape struct {
-	target    *ssa.Function
-	signature *types.Signature
-	argc      int
-	result    types.Type
+	target       *ssa.Function
+	calleeType   types.Type
+	calleeField  int
+	signature    *types.Signature
+	record       *types.Struct
+	argumentBase int
+	argc         int
+	result       types.Type
+	resultField  int
+	nilGuard     bool
 }
 
 func coroWorkerTypeParamLen(list *types.TypeParamList) int {
@@ -41,13 +47,6 @@ func coroWorkerTypeParamLen(list *types.TypeParamList) int {
 		return 0
 	}
 	return list.Len()
-}
-
-func coroWorkerTargetPointerSize(universe *EmissionUniverse) int {
-	if universe == nil || universe.prog == nil {
-		return 0
-	}
-	return universe.prog.PointerSize()
 }
 
 func coroWorkerWordType(typ types.Type, pointerSize int) bool {
@@ -106,6 +105,113 @@ func coroWorkerResultWordType(typ types.Type, pointerSize int) bool {
 	sizes := &types.StdSizes{WordSize: int64(pointerSize), MaxAlign: int64(pointerSize)}
 	size := sizes.Sizeof(typ)
 	return size > 0 && size <= int64(pointerSize)
+}
+
+// coroWorkerForeignRecordValueType accepts values whose exact typed
+// representation can live in the compiler-owned call record until the worker
+// publishes completion. Ordinary Go descriptors (slice, string, interface,
+// map, chan, or Go function values) are rejected: copying their bits into a C
+// call would neither be a valid C ABI nor establish their managed lifetime.
+//
+// Arguments may contain pointers because the record itself remains a typed,
+// traced coroutine-frame object and the ordinary call-site retention proof
+// keeps every independent owner live. Results deliberately remain
+// pointer-free: a worker writing a new Go pointer into the frame would bypass
+// the managed write barrier and foreign-result provenance contract.
+func coroWorkerForeignRecordValueType(
+	universe *EmissionUniverse,
+	typ types.Type,
+	argument bool,
+	visiting map[types.Type]bool,
+) bool {
+	if universe == nil || typ == nil {
+		return false
+	}
+	typ = types.Unalias(typ)
+	if visiting[typ] {
+		// Recursive C values are necessarily recursive through a pointer, which
+		// is handled before descending. Treat any other cycle as malformed.
+		return false
+	}
+	switch underlying := typ.Underlying().(type) {
+	case *types.Basic:
+		if underlying.Info()&types.IsUntyped != 0 || underlying.Kind() == types.String {
+			return false
+		}
+		if underlying.Kind() == types.UnsafePointer {
+			return argument
+		}
+		return underlying.Info()&(types.IsBoolean|types.IsInteger|types.IsFloat|types.IsComplex) != 0
+	case *types.Pointer:
+		return argument
+	case *types.Signature:
+		return argument && universe.prog != nil &&
+			universe.prog.TypeBackground(typ) == llssa.InC &&
+			!underlying.Variadic()
+	case *types.Array:
+		visiting[typ] = true
+		ok := coroWorkerForeignRecordValueType(universe, underlying.Elem(), argument, visiting)
+		delete(visiting, typ)
+		return ok
+	case *types.Struct:
+		visiting[typ] = true
+		for index := 0; index < underlying.NumFields(); index++ {
+			if !coroWorkerForeignRecordValueType(
+				universe, underlying.Field(index).Type(), argument, visiting,
+			) {
+				delete(visiting, typ)
+				return false
+			}
+		}
+		delete(visiting, typ)
+		return true
+	default:
+		return false
+	}
+}
+
+func coroWorkerForeignRecordType(
+	signature *types.Signature,
+	result types.Type,
+) (record *types.Struct, resultField int) {
+	record, resultField, _ = coroWorkerForeignRecordLayout(signature, result, nil)
+	return record, resultField
+}
+
+func coroWorkerForeignRecordLayout(
+	signature *types.Signature,
+	result types.Type,
+	calleeType types.Type,
+) (record *types.Struct, resultField, argumentBase int) {
+	if signature == nil {
+		panic("coroutine worker foreign record requires a signature")
+	}
+	params := signature.Params()
+	paramCount := 0
+	if params != nil {
+		paramCount = params.Len()
+	}
+	fields := make([]*types.Var, 0, paramCount+2)
+	if calleeType != nil {
+		fields = append(fields, types.NewField(token.NoPos, nil, "callee", calleeType, false))
+	}
+	argumentBase = len(fields)
+	for index := 0; index < paramCount; index++ {
+		fields = append(fields, types.NewField(
+			token.NoPos, nil, fmt.Sprintf("a%d", index), params.At(index).Type(), false,
+		))
+	}
+	resultField = -1
+	if result != nil {
+		resultField = len(fields)
+		fields = append(fields, types.NewField(token.NoPos, nil, "result", result, false))
+	}
+	if len(fields) == 0 {
+		// A concrete byte keeps the record address non-zero and stable even for
+		// a void zero-argument target.
+		fields = append(fields, types.NewField(token.NoPos, nil, "reserved", types.Typ[types.Uint8], false))
+	}
+	return types.NewStruct(fields, nil), resultField, argumentBase
 }
 
 // validateCoroWorkerForeignAuthorization accepts exactly one of the legacy
@@ -201,15 +307,19 @@ func validateCoroWorkerForeignAuthorization(
 	}
 }
 
-// validateCoroWorkerForeignCall recognizes only an ordinary, closed CallForeign
-// edge to one exact frontend C declaration. recognized distinguishes a malformed
-// foreign edge (which must fail closed) from an unrelated call.
+// validateCoroWorkerForeignCall recognizes either an ordinary closed
+// CallForeign edge to one exact frontend C declaration or an ordinary dynamic
+// RawCCodePointer call. Both use the same typed record and bounded worker
+// protocol. A dynamic raw pointer carries no declaration to authorize; its
+// frontend-frozen //llgo:type C transport is the exact capability, and its
+// conservative WaitForeign effect remains unchanged.
 func validateCoroWorkerForeignCall(
 	plan *coro.SSAPlan,
 	universe *EmissionUniverse,
 	call *ssa.Call,
 	pointerSize int,
 ) (shape coroWorkerForeignCallShape, recognized bool, err error) {
+	shape.resultField = -1
 	if plan == nil || universe == nil || call == nil || call.Common() == nil {
 		return shape, false, nil
 	}
@@ -218,9 +328,15 @@ func validateCoroWorkerForeignCall(
 		return shape, false, nil
 	}
 	recognized = true
+	if pointerSize <= 0 {
+		return shape, true, fmt.Errorf("target pointer width is unavailable")
+	}
 	common := call.Common()
 	if call.Parent() == nil {
 		return shape, true, fmt.Errorf("call has no exact SSA owner")
+	}
+	if callPlan.Transport == coro.RawCCodePointer {
+		return validateCoroWorkerDynamicForeignCall(plan, universe, call, callPlan)
 	}
 	raw := common.StaticCallee()
 	if raw == nil || common.IsInvoke() || common.Method != nil {
@@ -272,14 +388,14 @@ func validateCoroWorkerForeignCall(
 		return shape, true, fmt.Errorf("derive target effective signature: %w", signatureErr)
 	}
 	if signature == nil || signature.Recv() != nil || signature.Variadic() {
-		return shape, true, fmt.Errorf("requires a non-variadic signature with zero to %d arguments", coroWorkerMaxArgsV1)
+		return shape, true, fmt.Errorf("requires a non-variadic signature")
 	}
 	shape.argc = 0
 	if signature.Params() != nil {
 		shape.argc = signature.Params().Len()
 	}
-	if shape.argc != len(common.Args) || shape.argc > coroWorkerMaxArgsV1 {
-		return shape, true, fmt.Errorf("requires a non-variadic signature with zero to %d arguments", coroWorkerMaxArgsV1)
+	if shape.argc != len(common.Args) {
+		return shape, true, fmt.Errorf("effective signature argument count differs from the call site")
 	}
 	owner := universe.ownerOf(call.Parent())
 	ownerContext, contextErr := universe.functionABIContext(call.Parent(), owner)
@@ -299,8 +415,13 @@ func validateCoroWorkerForeignCall(
 		if !types.Identical(argumentType, parameterType) {
 			return shape, true, fmt.Errorf("argument %d type does not match the effective C parameter", index)
 		}
-		if !coroWorkerArgumentWordType(universe, parameterType, pointerSize) {
-			return shape, true, fmt.Errorf("argument %d type %s is not losslessly word-packable integer/pointer data", index, parameterType)
+		if !coroWorkerForeignRecordValueType(
+			universe, parameterType, true, make(map[types.Type]bool),
+		) {
+			return shape, true, fmt.Errorf(
+				"argument %d type %s cannot be represented in a typed worker call record",
+				index, parameterType,
+			)
 		}
 	}
 	results := signature.Results()
@@ -309,52 +430,167 @@ func validateCoroWorkerForeignCall(
 	}
 	if results != nil && results.Len() == 1 {
 		shape.result = results.At(0).Type()
-		if !coroWorkerResultWordType(shape.result, pointerSize) {
+		if !coroWorkerForeignRecordValueType(
+			universe, shape.result, false, make(map[types.Type]bool),
+		) {
 			return coroWorkerForeignCallShape{}, true, fmt.Errorf(
-				"result type %s is not losslessly word-packable integer data", shape.result,
+				"result type %s cannot be represented in a pointer-free typed worker call record",
+				shape.result,
 			)
 		}
 	}
 	shape.target = target
+	shape.calleeField = -1
 	shape.signature = signature
+	shape.record, shape.resultField, shape.argumentBase =
+		coroWorkerForeignRecordLayout(signature, shape.result, nil)
 	return shape, true, nil
 }
 
-func coroWorkerForeignThunkSignature(argc int) *types.Signature {
-	params := make([]*types.Var, argc)
-	for index := range params {
-		params[index] = types.NewParam(token.NoPos, nil, fmt.Sprintf("a%d", index), types.Typ[types.Uintptr])
+func validateCoroWorkerDynamicForeignCall(
+	plan *coro.SSAPlan,
+	universe *EmissionUniverse,
+	call *ssa.Call,
+	callPlan coro.SSACallPlan,
+) (shape coroWorkerForeignCallShape, recognized bool, err error) {
+	shape.calleeField = -1
+	shape.resultField = -1
+	if plan == nil || universe == nil || call == nil || call.Common() == nil {
+		return shape, true, fmt.Errorf("dynamic raw C worker call requires an exact plan, universe, and call")
+	}
+	common := call.Common()
+	if common.StaticCallee() != nil || common.IsInvoke() || common.Method != nil ||
+		callPlan.Kind != coro.CallForeign || callPlan.Rep != coro.DirectPlain ||
+		callPlan.Transport != coro.RawCCodePointer || !callPlan.Open ||
+		callPlan.Unresolved != coro.UnknownForeign || callPlan.SyncDispatch {
+		return shape, true, fmt.Errorf(
+			"requires one open raw-C DirectPlain foreign call, got kind=%v representation=%s transport=%s open=%t unresolved=%v",
+			callPlan.Kind, callPlan.Rep, callPlan.Transport, callPlan.Open, callPlan.Unresolved,
+		)
+	}
+	if err := validateCoroCallableTransportValue(plan, call.Parent(), common.Value, universe); err != nil {
+		return shape, true, fmt.Errorf("dynamic raw C callee: %w", err)
+	}
+	owner := universe.ownerOf(call.Parent())
+	ownerContext, contextErr := universe.functionABIContext(call.Parent(), owner)
+	if contextErr != nil {
+		return shape, true, fmt.Errorf("derive dynamic call-site ABI: %w", contextErr)
+	}
+	calleeType := ownerContext.patchType(common.Value.Type())
+	signature, ok := types.Unalias(calleeType).Underlying().(*types.Signature)
+	if !ok || signature == nil || signature.Recv() != nil || signature.Variadic() ||
+		coroWorkerTypeParamLen(signature.TypeParams()) != 0 ||
+		coroWorkerTypeParamLen(signature.RecvTypeParams()) != 0 {
+		return shape, true, fmt.Errorf("dynamic raw C callee is not a receiver-free, non-variadic, non-generic function pointer")
+	}
+	callSignature, ok := ownerContext.patchType(common.Signature()).(*types.Signature)
+	if !ok || !types.Identical(
+		coroPhysicalNormalizeSourceSignature(callSignature),
+		coroPhysicalNormalizeSourceSignature(signature),
+	) {
+		return shape, true, fmt.Errorf("dynamic callee and call-site effective C signatures differ")
+	}
+	shape.argc = signature.Params().Len()
+	if shape.argc != len(common.Args) {
+		return shape, true, fmt.Errorf("effective signature argument count differs from the call site")
+	}
+	for index, argument := range common.Args {
+		if argument == nil {
+			return shape, true, fmt.Errorf("argument %d is nil", index)
+		}
+		argumentType := ownerContext.patchType(argument.Type())
+		parameterType := signature.Params().At(index).Type()
+		if !types.Identical(argumentType, parameterType) {
+			return shape, true, fmt.Errorf("argument %d type does not match the effective C parameter", index)
+		}
+		if !coroWorkerForeignRecordValueType(
+			universe, parameterType, true, make(map[types.Type]bool),
+		) {
+			return shape, true, fmt.Errorf(
+				"argument %d type %s cannot be represented in a typed worker call record",
+				index, parameterType,
+			)
+		}
+	}
+	results := signature.Results()
+	if results != nil && results.Len() > 1 {
+		return shape, true, fmt.Errorf("requires zero or one result")
+	}
+	if results != nil && results.Len() == 1 {
+		shape.result = results.At(0).Type()
+		if !coroWorkerForeignRecordValueType(
+			universe, shape.result, false, make(map[types.Type]bool),
+		) {
+			return coroWorkerForeignCallShape{}, true, fmt.Errorf(
+				"result type %s cannot be represented in a pointer-free typed worker call record",
+				shape.result,
+			)
+		}
+	}
+	shape.calleeType = calleeType
+	shape.calleeField = 0
+	shape.signature = signature
+	shape.nilGuard = callPlan.MayBeNil &&
+		!ssaFunctionValueProvenNonNilAt(common.Value, call)
+	shape.record, shape.resultField, shape.argumentBase =
+		coroWorkerForeignRecordLayout(signature, shape.result, calleeType)
+	return shape, true, nil
+}
+
+func coroWorkerForeignThunkSignature() *types.Signature {
+	params := []*types.Var{
+		types.NewParam(token.NoPos, nil, "record", types.Typ[types.Uintptr]),
 	}
 	result := types.NewVar(token.NoPos, nil, "result", types.Typ[types.Uintptr])
 	return types.NewSignatureType(nil, nil, nil, types.NewTuple(params...), types.NewTuple(result), false)
 }
 
 func (p *context) coroWorkerForeignThunk(shape coroWorkerForeignCallShape, target llssa.Function) llssa.Function {
-	if p == nil || shape.target == nil || shape.signature == nil || target == nil {
-		panic("coroutine foreign worker thunk requires an exact target and signature")
+	dynamic := shape.calleeType != nil
+	if p == nil || shape.signature == nil || shape.record == nil ||
+		dynamic && (shape.target != nil || shape.calleeField < 0 || target != nil) ||
+		!dynamic && (shape.target == nil || target == nil) {
+		panic("coroutine foreign worker thunk requires an exact target, signature, and call record")
+	}
+	targetName := "<dynamic>"
+	if target != nil {
+		targetName = target.Name()
 	}
 	key := framedEmissionKey(
 		"cl-coro-worker-foreign-thunk-v1",
-		target.Name(),
+		targetName,
+		structuralEmissionABITypeKey(shape.calleeType),
 		structuralEmissionABITypeKey(shape.signature),
 		strconv.Itoa(p.prog.PointerSize()),
 	)
 	name := coroWorkerForeignThunkPrefixV1 + emissionDigest(key)
-	thunk := p.pkg.NewFuncEx(name, coroWorkerForeignThunkSignature(shape.argc), llssa.InC, false, true)
+	thunk := p.pkg.NewFuncEx(name, coroWorkerForeignThunkSignature(), llssa.InC, false, true)
 	if thunk.HasBody() {
 		return thunk
 	}
 	b := thunk.MakeBody(1)
+	recordPointer := b.Convert(
+		p.type_(types.NewPointer(shape.record), llssa.InC),
+		thunk.Param(0),
+	)
+	targetExpr := llssa.Expr{}
+	if dynamic {
+		targetExpr = b.LoadKnownNonNil(b.FieldAddr(recordPointer, shape.calleeField))
+	} else {
+		targetExpr = target.Expr
+	}
 	args := make([]llssa.Expr, shape.argc)
 	for index := range args {
-		args[index] = b.Convert(p.type_(shape.signature.Params().At(index).Type(), llssa.InC), thunk.Param(index))
+		args[index] = b.LoadKnownNonNil(b.FieldAddr(recordPointer, shape.argumentBase+index))
 	}
-	ret := b.Call(target.Expr, args...)
-	if shape.result == nil {
-		b.Return(p.prog.Zero(p.prog.Uintptr()))
-	} else {
-		b.Return(b.Convert(p.prog.Uintptr(), ret))
+	ret := b.Call(targetExpr, args...)
+	if shape.result != nil {
+		if shape.resultField < 0 {
+			panic("coroutine foreign worker thunk lost its result record field")
+		}
+		b.Store(b.FieldAddr(recordPointer, shape.resultField), ret)
 	}
+	b.Return(p.prog.Zero(p.prog.Uintptr()))
 	b.EndBuild()
 	b.Dispose()
 	return thunk
@@ -363,27 +599,58 @@ func (p *context) coroWorkerForeignThunk(shape coroWorkerForeignCallShape, targe
 func (p *context) compileCoroWorkerForeignCall(
 	b llssa.Builder, call *ssa.Call, shape coroWorkerForeignCallShape,
 ) llssa.Expr {
-	if p == nil || !p.hasCoroPhysicalBody() || call == nil || shape.target == nil || shape.signature == nil {
+	dynamic := shape.calleeType != nil
+	if p == nil || !p.hasCoroPhysicalBody() || call == nil ||
+		shape.signature == nil || shape.record == nil ||
+		dynamic && (shape.target != nil || shape.calleeField < 0) ||
+		!dynamic && shape.target == nil {
 		panic("coroutine foreign worker lowering escaped its frozen physical operation recipe")
 	}
-	target, _, kind := p.compileFunction(shape.target)
-	if kind != cFunc || target == nil {
-		panic("coroutine foreign worker lowering lost its exact C target")
+	var target llssa.Function
+	if !dynamic {
+		var kind int
+		target, _, kind = p.compileFunction(shape.target)
+		if kind != cFunc || target == nil {
+			panic("coroutine foreign worker lowering lost its exact C target")
+		}
 	}
 	thunk := p.coroWorkerForeignThunk(shape, target)
 	oldInCFunc := p.inCFunc
 	p.inCFunc = true
+	callee := llssa.Expr{}
+	if dynamic {
+		callee = p.compileValue(b, call.Common().Value)
+	}
 	compiled := p.compileValues(b, call.Common().Args, fnNormal)
 	p.inCFunc = oldInCFunc
-	words := make([]llssa.Expr, len(compiled))
+	if shape.nilGuard {
+		p.compileCoroImplicitNilAccessGuard(b, callee)
+	}
+	record := p.coroFrameAlloc(p.type_(shape.record, llssa.InC))
+	if dynamic {
+		b.Store(b.FieldAddr(record, shape.calleeField), callee)
+	}
 	for index, argument := range compiled {
-		words[index] = b.Convert(p.prog.Uintptr(), argument)
+		b.Store(b.FieldAddr(record, shape.argumentBase+index), argument)
 	}
 	function := b.Convert(p.prog.Uintptr(), thunk.Expr)
 	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
-	result := p.compileCoroWorkerWordCall(b, function, words, keepaliveSlots)
+	p.compileCoroWorkerWordCall(
+		b,
+		function,
+		[]llssa.Expr{b.Convert(p.prog.Uintptr(), record)},
+		keepaliveSlots,
+	)
+	// The native queue carries the record address as an opaque uintptr. This
+	// post-acknowledgement use forces CoroSplit to retain the complete typed
+	// record—including nested pointer owners—until the worker can no longer
+	// dereference or write it.
+	b.KeepAlive(record)
 	if shape.result == nil {
 		return llssa.Expr{}
 	}
-	return b.Convert(p.type_(shape.result, llssa.InC), result.r1)
+	if shape.resultField < 0 {
+		panic("coroutine foreign worker lowering lost its result record field")
+	}
+	return b.LoadKnownNonNil(b.FieldAddr(record, shape.resultField))
 }

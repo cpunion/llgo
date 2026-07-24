@@ -67,6 +67,16 @@ func Root(fd FD, pointer unsafe.Pointer, count Count) FD {
 }
 `
 
+const coroWorkerDynamicForeignTestSource = `package foreignworker
+
+//llgo:type C
+type Callback func(int32) int32
+
+func Root(callback Callback, value int32) int32 {
+	return callback(value)
+}
+`
+
 type preparedCoroWorkerForeignFixture struct {
 	prog     llssa.Program
 	ssaPkg   *ssa.Package
@@ -113,7 +123,7 @@ func prepareCoroWorkerForeignFixture(t *testing.T, source, rootName string) prep
 		prog,
 		nil,
 		[]EmissionPackage{{SSA: ssaPkg, Files: files}},
-		EmissionUniverseOptions{CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities()},
+		EmissionUniverseOptions{CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		prog.Dispose()
@@ -133,11 +143,17 @@ func prepareCoroWorkerForeignFixture(t *testing.T, source, rootName string) prep
 	for _, block := range root.Blocks {
 		for _, instruction := range block.Instrs {
 			call, ok := instruction.(*ssa.Call)
-			if !ok || call.Common().StaticCallee() == nil {
+			if !ok || call.Common() == nil {
 				continue
 			}
-			background, classified, backgroundErr := universe.FunctionBackground(call.Common().StaticCallee())
-			if backgroundErr == nil && classified && background == llssa.InC {
+			foreign := false
+			if target := call.Common().StaticCallee(); target != nil {
+				background, classified, backgroundErr := universe.FunctionBackground(target)
+				foreign = backgroundErr == nil && classified && background == llssa.InC
+			} else if !call.Common().IsInvoke() && call.Common().Method == nil {
+				foreign = prog.TypeBackground(call.Common().Value.Type()) == llssa.InC
+			}
+			if foreign {
 				if foreignCall != nil {
 					prog.Dispose()
 					t.Fatalf("foreign worker root %q has multiple C calls", rootName)
@@ -206,6 +222,16 @@ func prepareCoroWorkerForeignFixture(t *testing.T, source, rootName string) prep
 			callee := call.Common().StaticCallee()
 			return callee != nil && callee.Pkg != nil && callee.Pkg.Pkg.Path() == "unsafe" && callee.Name() == "init", nil
 		},
+		ClassifyUnknownCall: func(_ *ssa.Function, call ssa.CallInstruction) (coro.UnknownTarget, error) {
+			if call == foreignCall && call.Common().StaticCallee() == nil {
+				return coro.UnknownForeign, nil
+			}
+			return coro.UnknownManaged, nil
+		},
+		ClassifyRawCFunctionType: func(typ types.Type) (bool, error) {
+			_, signature := types.Unalias(typ).Underlying().(*types.Signature)
+			return signature && prog.TypeBackground(typ) == llssa.InC, nil
+		},
 	})
 	if err != nil {
 		prog.Dispose()
@@ -215,6 +241,75 @@ func prepareCoroWorkerForeignFixture(t *testing.T, source, rootName string) prep
 		prog: prog, ssaPkg: ssaPkg, files: files, universe: universe,
 		plan: plan, root: root, call: foreignCall,
 	}
+}
+
+func TestCoroWorkerDynamicRawCCodePointerUsesTypedThunk(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	fixture := prepareCoroWorkerForeignFixture(t, coroWorkerDynamicForeignTestSource, "Root")
+	defer fixture.prog.Dispose()
+
+	rootPlan, planned := fixture.plan.FunctionPlan(fixture.root)
+	if !planned || rootPlan.Emission != coro.EmitCoroutine ||
+		!rootPlan.Effect.Contains(coro.WaitForeign) {
+		t.Fatalf("dynamic raw C Root plan = %+v, present=%t", rootPlan, planned)
+	}
+	callPlan, planned := fixture.plan.CallPlan(fixture.call)
+	if !planned || callPlan.Kind != coro.CallForeign ||
+		callPlan.Rep != coro.DirectPlain ||
+		callPlan.Transport != coro.RawCCodePointer ||
+		!callPlan.Open || callPlan.Unresolved != coro.UnknownForeign {
+		t.Fatalf("dynamic raw C CallPlan = %+v, present=%t", callPlan, planned)
+	}
+	shape, recognized, err := validateCoroWorkerForeignCall(
+		fixture.plan, fixture.universe, fixture.call, fixture.prog.PointerSize(),
+	)
+	if !recognized || err != nil || shape.target != nil || shape.calleeType == nil ||
+		shape.calleeField != 0 || shape.argumentBase != 1 || !shape.nilGuard ||
+		shape.resultField != 2 {
+		t.Fatalf("dynamic raw C worker shape = %+v, recognized=%t, error=%v", shape, recognized, err)
+	}
+
+	compilation := &Compilation{
+		CoroPlan: fixture.plan, EmissionUniverse: fixture.universe,
+		CoroABI:      coro.PhysicalABIV1,
+		SchedulerABI: coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
+		PanicABI:     coro.PanicExplicitStatusABIV0,
+		FuncRepABI:   coro.FuncRepABIV1, CoroTargetCapabilities: CoroNativeTargetCapabilities(),
+	}
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		fixture.prog, nil, nil, nil, fixture.ssaPkg, fixture.files, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify dynamic raw C worker coroutine: %v\n%s", err, module.String())
+	}
+	body := requireCoroPhysicalFunction(t, module, "foreignworker.Root").String()
+	if strings.Contains(body, "call i32 %") {
+		t.Fatalf("physical coroutine directly invokes the raw C pointer:\n%s", body)
+	}
+	for _, symbol := range []string{coroWorkerParkHookV1, coroWorkerResumeHookV1} {
+		if got := strings.Count(body, "@"+symbol); got != 1 {
+			t.Fatalf("Root %q calls = %d, want one:\n%s", symbol, got, body)
+		}
+	}
+	var thunk llvm.Value
+	for function := module.FirstFunction(); !function.IsNil(); function = llvm.NextFunction(function) {
+		if strings.HasPrefix(function.Name(), coroWorkerForeignThunkPrefixV1) {
+			if !thunk.IsNil() {
+				t.Fatalf("module has multiple dynamic foreign thunks: %q and %q", thunk.Name(), function.Name())
+			}
+			thunk = function
+		}
+	}
+	if thunk.IsNil() || !regexp.MustCompile(`call i32 %[^(]+\(i32`).MatchString(thunk.String()) {
+		t.Fatalf("dynamic worker thunk does not invoke its record callee:\n%s", module.String())
+	}
+	runCoroABITestPipeline(t, fixture.prog, module)
 }
 
 func TestCoroWorkerClosedForeignCallUsesTypedThunk(t *testing.T) {
@@ -253,7 +348,7 @@ func TestCoroWorkerClosedForeignCallUsesTypedThunk(t *testing.T) {
 		CoroABI:      coro.PhysicalABIV1,
 		SchedulerABI: coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
 		PanicABI:     coro.PanicExplicitStatusABIV0,
-		FuncRepABI:   coro.FuncRepABIV1, CoroProfile: CoroProfileStackless, CoroTargetCapabilities: CoroNativeTargetCapabilities(),
+		FuncRepABI:   coro.FuncRepABIV1, CoroTargetCapabilities: CoroNativeTargetCapabilities(),
 	}
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		fixture.prog, nil, nil, nil, fixture.ssaPkg, fixture.files, goembed.VarMap{},
@@ -279,8 +374,9 @@ func TestCoroWorkerClosedForeignCallUsesTypedThunk(t *testing.T) {
 	if !strings.Contains(body, "call void (...) @llvm.fake.use(ptr") {
 		t.Fatalf("Root does not keep the typed pointer live after worker acknowledgement:\n%s", body)
 	}
-	if !regexp.MustCompile(`trunc i64 [^\n]+ to i32`).MatchString(body) {
-		t.Fatalf("Root does not unpack the signed 32-bit result from its worker word:\n%s", body)
+	if strings.Contains(body, "trunc i64") ||
+		!regexp.MustCompile(`getelementptr inbounds \{ i32, ptr, i64, i32 \}, ptr [^\n]+, i32 0, i32 3\n\s+%[^\s]+ = load i32`).MatchString(body) {
+		t.Fatalf("Root does not load the signed 32-bit result directly from its typed worker record:\n%s", body)
 	}
 	var thunk llvm.Value
 	for function := module.FirstFunction(); !function.IsNil(); function = llvm.NextFunction(function) {
@@ -299,7 +395,8 @@ func TestCoroWorkerClosedForeignCallUsesTypedThunk(t *testing.T) {
 		`define linkonce i64 @` + regexp.QuoteMeta(thunk.Name()) + `\(i64`,
 		`call i32 @foreign_word_probe\(i32`,
 		`inttoptr i64`,
-		`sext i32 [^\n]+ to i64`,
+		`store i32 [^\n]+, ptr`,
+		`ret i64 0`,
 	} {
 		if !regexp.MustCompile(pattern).MatchString(thunkText) {
 			t.Errorf("typed thunk lacks %q:\n%s", pattern, thunkText)
@@ -313,6 +410,47 @@ func TestCoroWorkerClosedForeignCallUsesTypedThunk(t *testing.T) {
 	}
 }
 
+func TestCoroWorkerForeignCallShapeAcceptsTypedRecordABIs(t *testing.T) {
+	tests := []struct {
+		name        string
+		declaration string
+		statement   string
+		wantArgs    int
+		wantResult  bool
+	}{
+		{"float argument", "func foreign(float64) uintptr", "_ = foreign(1)", 1, true},
+		{"aggregate argument", "func foreign(struct{ X uintptr }) uintptr", "_ = foreign(struct{ X uintptr }{})", 1, true},
+		{"float result", "func foreign(uintptr) float64", "_ = foreign(1)", 1, true},
+		{
+			"more than queue word limit",
+			"func foreign(uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr) uintptr",
+			"_ = foreign(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)",
+			10,
+			true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source := `package foreignworker
+import _ "unsafe"
+//llgo:coro worker
+//go:linkname foreign C.foreign_typed_record_probe
+` + test.declaration + `
+func Root() { ` + test.statement + ` }
+`
+			fixture := prepareCoroWorkerForeignFixture(t, source, "Root")
+			defer fixture.prog.Dispose()
+			shape, recognized, err := validateCoroWorkerForeignCall(
+				fixture.plan, fixture.universe, fixture.call, fixture.prog.PointerSize(),
+			)
+			if !recognized || err != nil || shape.record == nil || shape.argc != test.wantArgs ||
+				(shape.result != nil) != test.wantResult {
+				t.Fatalf("typed-record preflight = shape:%+v recognized:%t err:%v", shape, recognized, err)
+			}
+		})
+	}
+}
+
 func TestCoroWorkerForeignCallShapeRejectsUnsafeABIs(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -320,13 +458,14 @@ func TestCoroWorkerForeignCallShapeRejectsUnsafeABIs(t *testing.T) {
 		statement   string
 		want        string
 	}{
-		{"float argument", "func foreign(float64) uintptr", "_ = foreign(1)", "argument 0 type float64 is not losslessly word-packable"},
-		{"aggregate argument", "func foreign(struct{ X uintptr }) uintptr", "_ = foreign(struct{ X uintptr }{})", "argument 0 type struct"},
-		{"float result", "func foreign(uintptr) float64", "_ = foreign(1)", "result type float64 is not losslessly word-packable"},
-		{"pointer result", "func foreign(uintptr) *byte", "_ = foreign(1)", "result type *byte is not losslessly word-packable integer data"},
+		{"string argument", "func foreign(string) uintptr", "_ = foreign(\"\")", "argument 0 type string cannot be represented in a typed worker call record"},
+		{"slice argument", "func foreign([]byte) uintptr", "_ = foreign(nil)", "argument 0 type []byte cannot be represented in a typed worker call record"},
+		{"Go function argument", "func foreign(func()) uintptr", "_ = foreign(func(){})", "argument 0 type func() cannot be represented in a typed worker call record"},
+		{"pointer result", "func foreign(uintptr) *byte", "_ = foreign(1)", "result type *byte cannot be represented in a pointer-free typed worker call record"},
+		{"pointer aggregate result", "func foreign(uintptr) struct{ P *byte }", "_ = foreign(1)", "result type struct{P *byte} cannot be represented in a pointer-free typed worker call record"},
+		{"string result", "func foreign(uintptr) string", "_ = foreign(1)", "result type string cannot be represented in a pointer-free typed worker call record"},
 		{"multiple results", "func foreign(uintptr) (uintptr, uintptr)", "_, _ = foreign(1)", "requires zero or one result"},
 		{"variadic", "func foreign(...uintptr) uintptr", "_ = foreign(1)", "receiver-free, non-variadic"},
-		{"too many arguments", "func foreign(uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr) uintptr", "_ = foreign(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)", "zero to 9 arguments"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -444,15 +583,28 @@ func TestCoroWorkerGenericCallableContractRejectsUnsupportedDimensions(t *testin
 	}
 }
 
-func TestCoroWorkerForeignCallRequiresFrozenCertificate(t *testing.T) {
+func TestCoroWorkerForeignCallUsesFrozenDefaultContract(t *testing.T) {
 	source := strings.Replace(coroWorkerForeignTestSource, "//llgo:coro worker\n", "", 1)
 	fixture := prepareCoroWorkerForeignFixture(t, source, "Root")
 	defer fixture.prog.Dispose()
+	target := fixture.call.Common().StaticCallee()
+	certificate, certified, err := fixture.universe.CoroCallableContractCertificate(target)
+	if err != nil || !certified ||
+		certificate.Contract.Progress != coro.ProgressMayBlock ||
+		certificate.Contract.Affinity != coro.AffinityAnyThread ||
+		certificate.Contract.Reentry != coro.ReentryNone ||
+		certificate.Contract.Memory != coro.MemoryBorrowUntilComplete {
+		t.Fatalf("default foreign callable contract = %+v, %t, %v", certificate, certified, err)
+	}
+	planned, plannedOK := fixture.plan.CallableContractCertificate(target)
+	if !plannedOK || planned != certificate {
+		t.Fatalf("planned default foreign callable contract = %+v, %t; want %+v", planned, plannedOK, certificate)
+	}
 	_, recognized, err := validateCoroWorkerForeignCall(
 		fixture.plan, fixture.universe, fixture.call, fixture.prog.PointerSize(),
 	)
-	if !recognized || err == nil || !strings.Contains(err.Error(), "no exact worker-safe certificate") {
-		t.Fatalf("uncertified worker call validation = recognized:%t err:%v", recognized, err)
+	if !recognized || err != nil {
+		t.Fatalf("default-contract worker call validation = recognized:%t err:%v", recognized, err)
 	}
 }
 

@@ -44,6 +44,8 @@ func MakeFunc(typ Type, fn func(args []Value) (results []Value)) Value {
 }
 
 func makeFunc(typ Type, method bool, fn func(args []Value) (results []Value)) Value {
+	panic("llgo: reflect.MakeFunc requires managed coroutine dispatch")
+
 	if typ.Kind() != Func {
 		panic("reflect: call of MakeFunc with non-Func type")
 	}

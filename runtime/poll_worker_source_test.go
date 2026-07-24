@@ -43,6 +43,7 @@ const (
 	runtimeCoroWorkerFleetCompletionSource   = "internal/runtime/coro_worker_completion_fleet_llgo.go"
 	runtimeCoroWorkerOwnerSource             = "internal/runtime/coro_worker_owner_llgo.go"
 	runtimeCoroNativeDriverSource            = "internal/runtime/coro_executor_driver_timer_llgo.go"
+	runtimeCoroNativeFleetSource             = "internal/runtime/coro_native_fleet.go"
 	runtimeCoroWorkerCallSource              = "internal/coroworker/call_llgo.go"
 	runtimeCoroWorkerCSource                 = "internal/coroworker/_worker/worker.c"
 	runtimeCoroWorkerHeaderSource            = "internal/coroworker/_worker/worker.h"
@@ -78,6 +79,16 @@ func TestRuntimeCoroChannelCapacityUsesPagedLogicalSource(t *testing.T) {
 			t.Errorf("%s lacks native channel capacity marker %q", runtimeCoroNativeDriverSource, required)
 		}
 	}
+	fleet := readRuntimePollFile(t, runtimeCoroNativeFleetSource)
+	for _, required := range []string{
+		"channelPages [coroNativeSourcePageCountV1 - 1]coro.ChannelOperationPage",
+		"coro.ConfigureChannelOperationPages(&domain.channel, domain.channelPages[:])",
+		"coro.ChannelOperationConfiguredCapacity(&domain.channel)",
+	} {
+		if !strings.Contains(fleet, required) {
+			t.Errorf("%s lacks owned-P channel capacity marker %q", runtimeCoroNativeFleetSource, required)
+		}
+	}
 }
 
 func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *testing.T) {
@@ -98,7 +109,8 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 	native := readRuntimePollFile(t, runtimeCoroNativeWorkerSource)
 	for _, required := range []string{
 		"coroNativeWorkerThreadCountV1 = 4",
-		"coroNativeWorkerPageCountV1 = 16",
+		"coroNativeWorkerPageCountV1 = coroNativeSourcePageCountV1",
+		"coroNativeWorkerCapacityV1  = coroNativeWorkerPageCountV1 * coro.WorkerOperationPageCapacity",
 		"coroNativeWorkerQueueSizeV1 = coroworker.QueueCapacity",
 		"bounded C11 sequence ring",
 		"coroworker.QueueReserve(&reservation)",
@@ -257,7 +269,6 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 
 	driver := readRuntimePollFile(t, runtimeCoroNativeDriverSource)
 	for _, required := range []string{
-		"coroNativeWorkerCapacityV1  = coroNativeSourcePageCountV1 * coro.WorkerOperationPageCapacity",
 		"coroProgramWorkerExtraPagesV1State",
 		"coro.ConfigureWorkerOperationPages(&coroProgramWorkerSourceV1State",
 		"coro.WorkerOperationConfiguredCapacity(&coroProgramWorkerSourceV1State) != coroNativeWorkerCapacityV1",
@@ -265,6 +276,16 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 	} {
 		if !strings.Contains(driver, required) {
 			t.Errorf("%s lacks native worker capacity marker %q", runtimeCoroNativeDriverSource, required)
+		}
+	}
+	fleet := readRuntimePollFile(t, runtimeCoroNativeFleetSource)
+	for _, required := range []string{
+		"workerPages  [coroNativeSourcePageCountV1 - 1]coro.WorkerOperationPage",
+		"coro.ConfigureWorkerOperationPages(&domain.worker, domain.workerPages[:])",
+		"coro.WorkerOperationConfiguredCapacity(&domain.worker)",
+	} {
+		if !strings.Contains(fleet, required) {
+			t.Errorf("%s lacks owned-P worker capacity marker %q", runtimeCoroNativeFleetSource, required)
 		}
 	}
 }

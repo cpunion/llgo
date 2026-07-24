@@ -67,20 +67,18 @@ func Panic(v any) {
 }
 
 var (
-	excepKey   pthread.Key
-	goexitKey  pthread.Key
-	mainThread pthread.Thread
+	excepKey pthread.Key
 )
 
+//go:linkname coroGoexit llgo.coroGoexit
+func coroGoexit()
+
 func Goexit() {
-	goexitKey.Set(unsafe.Pointer(&goexitKey))
-	Rethrow((*Defer)(c.GoDeferData()))
+	coroGoexit()
 }
 
 func init() {
 	excepKey.Create(nil)
-	goexitKey.Create(nil)
-	mainThread = pthread.Self()
 }
 
 // -----------------------------------------------------------------------------

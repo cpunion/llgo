@@ -42,6 +42,7 @@ func syscall_runtime_envs() []string {
 	return out
 }
 
+//llgo:managedlink
 //go:linkname syscall_runtimeSetenv syscall.runtimeSetenv
 func syscall_runtimeSetenv(key, value string) {
 	cliteos.Setenv(c.AllocaCStr(key), c.AllocaCStr(value), 1)
@@ -50,6 +51,7 @@ func syscall_runtimeSetenv(key, value string) {
 	}
 }
 
+//llgo:managedlink
 //go:linkname syscall_runtimeUnsetenv syscall.runtimeUnsetenv
 func syscall_runtimeUnsetenv(key string) {
 	cliteos.Unsetenv(c.AllocaCStr(key))

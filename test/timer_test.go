@@ -96,8 +96,10 @@ func TestAfterFuncStop(t *testing.T) {
 // Reset on an active AfterFunc should reschedule the callback.
 func TestAfterFuncReset(t *testing.T) {
 	var count atomic.Int32
+	fired := make(chan struct{}, 2)
 	tmr := time.AfterFunc(100*time.Millisecond, func() {
 		count.Add(1)
+		fired <- struct{}{}
 	})
 
 	time.Sleep(20 * time.Millisecond)
@@ -105,10 +107,51 @@ func TestAfterFuncReset(t *testing.T) {
 		// Even if Reset returns false, Go's semantics allow the callback to run twice.
 	}
 
-	// Wait long enough to observe executions triggered before/after Reset.
-	time.Sleep(150 * time.Millisecond)
-	if got := count.Load(); got < 1 || got > 2 {
-		t.Fatalf("expected callback 1 or 2 times after reset, got %d", got)
+	// Wait for the semantic event instead of assuming a loaded CI executor
+	// schedules the callback within one fixed sleep interval.
+	select {
+	case <-fired:
+		if got := count.Load(); got < 1 || got > 2 {
+			t.Fatalf("expected callback 1 or 2 times after reset, got %d", got)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("AfterFunc callback did not run after Reset")
+	}
+}
+
+// Reset after a func-based timer has started must schedule a new callback
+// independently; it must not wait for the previous callback to return.
+func TestAfterFuncResetWhileCallbackRuns(t *testing.T) {
+	var count atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	second := make(chan struct{}, 1)
+	defer close(release)
+
+	tmr := time.AfterFunc(20*time.Millisecond, func() {
+		if count.Add(1) == 1 {
+			close(started)
+			<-release
+			return
+		}
+		select {
+		case second <- struct{}{}:
+		default:
+		}
+	})
+
+	select {
+	case <-started:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("first AfterFunc callback did not start")
+	}
+	if tmr.Reset(20 * time.Millisecond) {
+		t.Fatal("Reset returned true after the callback started")
+	}
+	select {
+	case <-second:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Reset callback waited for the previous callback to return")
 	}
 }
 

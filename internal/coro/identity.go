@@ -374,18 +374,34 @@ func (b *functionIDBuilder) declaredReceiverKey(receiver types.Type) (string, er
 		pointer = true
 		receiver = indirect.Elem()
 	}
-	named, ok := types.Unalias(receiver).(*types.Named)
-	if !ok {
+	switch receiver := types.Unalias(receiver).(type) {
+	case *types.Named:
+		object, err := b.objectKey(receiver.Obj())
+		if err != nil {
+			return "", err
+		}
+		return identityNode("declared-receiver",
+			identityPair{"object", object},
+			identityPair{"pointer", strconv.FormatBool(pointer)},
+		), nil
+	case *types.Interface:
+		// go/types represents the declared receiver of an interface method as
+		// the interface itself rather than the surrounding named type. Its
+		// structural method-set key is stable and signatureKey deliberately
+		// omits receiver metadata, so this does not recurse through the method
+		// currently being identified. A bound/thunk wrapper still records its
+		// exact named receiver separately.
+		key, err := b.typeKey(receiver)
+		if err != nil {
+			return "", err
+		}
+		return identityNode("declared-interface-receiver",
+			identityPair{"type", key},
+			identityPair{"pointer", strconv.FormatBool(pointer)},
+		), nil
+	default:
 		return "", fmt.Errorf("coro: declared method receiver has unsupported type %T", receiver)
 	}
-	object, err := b.objectKey(named.Obj())
-	if err != nil {
-		return "", err
-	}
-	return identityNode("declared-receiver",
-		identityPair{"object", object},
-		identityPair{"pointer", strconv.FormatBool(pointer)},
-	), nil
 }
 
 func (b *functionIDBuilder) packageKey(pkg *types.Package) (string, error) {

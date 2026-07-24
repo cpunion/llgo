@@ -2,7 +2,7 @@
 
 状态：设计冻结前的实现审查稿
 
-更新：2026-07-20
+更新：2026-07-23
 
 关联总体设计：[`llvm-coro-runtime-design.md`](./llvm-coro-runtime-design.md)
 
@@ -392,13 +392,14 @@ worker queue满必须确定地失败或背压，shutdown在owner P之外join已�
 
 ## 9. 当前实现审查
 
-### 9.1 2026-07-22 当前垂直验收
+### 9.1 2026-07-23 当前垂直验收
 
 本节记录当前工作分支的垂直切片，不覆盖下文保留的 Phase 22–32 历史审查。验收硬边界是：
 
 - 用户程序和 Go 标准库必须保持普通同步 Go 源码风格；只允许使用 `time.Sleep`、`os.File.Read/Write`、`net.TCPConn.Read/Write`、`go`、channel 等标准语法和 API。
 - 验收 fixture 不得 import LLGo/LLVM 实现包，不得出现私有 `Future`、`Await`、`Task` 或显式 callback 改写。底层 wrapper 变成 `MayPark` 后，由 effect 固定点自动染色所有 managed caller。
 - 只有“使用 LLGo 编译普通标准库源码，并且编译、链接、运行与可观察语义全部通过”才算 E2E 通过。host Go 运行成功、source-selection 测试、runtime 单元测试或手写 runtime driver E2E 都不能替代这个门槛。
+- OS/host I/O、timer、同步原语及其他外部等待不得占住executor；必须先stack-cut并park，或转交bounded worker/平台event source。每一种接入都要有等待尚未完成时另一G仍能继续运行的进度测试。当前允许纯计算暂时占用一个P；生产级并行在P-neutral result/runnable之后以M/P/G、动态P/steal和blocking compensation解耦。
 
 核心能力已有以下可运行/可编译证据，用来确认compiler、coroutine frame、executor和source契约能在真实链接边界上闭环：
 
@@ -413,7 +414,7 @@ worker queue满必须确定地失败或背压，shutdown在owner P之外join已�
 - native poll descriptor已从共享Go map/fd反查改为每FD一个C分配的opaque scalar owner；read/write方向各原子保存deadline和完整`OperationID`，park/close/deadline update通过seq_cst handshake精确投递route。owner同一轮同时观察到到期deadline与已排队readiness时由deadline胜出；deadline reset/remove通过frame-retained snapshot与当前descriptor重检后重新注册。双owner TCP probe已fresh compile-link-run，并完成8路共10,000次压力而无deadline/readiness误序；
 - managed heap allocation已在native和wasm32通过compile/CoroSplit、spill/reload、exact-root profile与zero-size sentinel测试；
 - coroutine string concatenation已收敛为对`runtime.StringCat`的精确structured-outcome lowering，overflow panic沿显式结果传播，native/wasm32 compile、CoroSplit与object emission已通过；
-- slice到array pointer/value转换的`N>0`长度失败已进入同一explicit-status fault/recover路径，`N==0`保持nil与empty-non-nil slice的原始data pointer语义。当前v1静态fault payload保持`panic`/`recover`和`runtime.Error`分类，但尚不携带源slice长度与目标array长度，因此错误文本未达到Go `boundsError`的逐值兼容；这属于后续parameterized fault ABI边界，不影响控制流语义。
+- slice到array pointer/value转换的`N>0`长度失败已进入同一explicit-status fault/recover路径，`N==0`保持nil与empty-non-nil slice的原始data pointer语义。operand-free fault继续使用allocation-free V1静态payload；需要运行时操作数的转换失败使用正交V2 payload/prepare ABI，把目标array长度和源slice长度作为两个target-width word直接从lowering传入，并在异常路径分配GC可见的`boundsError`。其动态类型、`runtime.Error`分类和Go 1.26逐值错误文本均已由runtime contract以及GOROOT `convert4.go`的真实compile-link-run验证。V2的两个hook、精确签名和ABI identity已经进入required-root、bootstrap digest与physical ABI hash；未知kind、operand不匹配或缺失V2 runtime一律fail closed，不退回丢失参数的通用文本。
 - 泛型intrinsic已能从精确instance解析origin和SSA body，`llgo.index`在native/wasm32均按inline-no-suspend语义lower，不伪造可调用函数体；
 - Darwin已补齐`internal/cpu`两个sysctl bodyless声明的精确runtime bridge和C sync certificate；另外，一参数、不重定向的visibility-only `go:linkname`已冻结为独立证书，paired bodyless consumer只选择managed `$coro`入口，不生成raw plain body。
 
@@ -425,15 +426,16 @@ Worker transport的route-aware核心现已完成：仍只有一个进程级固�
 
 #### 少量标准库能力探针政策
 
-核心契约完成后，只保留少量、固定且使用普通Go源码的标准库程序作为能力探针。最小纵向门使用`time.Sleep`验证timer/park/deadline，使用标准库固定导出的`syscall.Open/Write/Seek/Read/Close/Unlink`封装完成一字节文件回环，验证bounded worker/syscall/result ownership；完整`time.Timer`验证controlled Timer V2上的Go timer基本语义，高层`os.File`验证interface/defer与regular-file worker封装，loopback TCP验证readiness/deadline/close-cancel链路。2026-07-22最终hard-cutover在同一双owner fleet上把五项全部fresh compile-link-run通过：`time` 60.54s、`timer` 84.02s、`syscall-file` 56.49s、`file` 78.39s、`tcp` 114.62s（并行执行，时间仅作诊断）；TCP另有8路共10,000次压力证据。首个失败点必须归纳为缺失的通用compiler、runtime core、source或target adapter契约并在该层修复；不得添加按库名、函数名或fixture匹配的特例opcode/lowering，也不得绕过统一executor/event模型。
+核心契约完成后，只保留少量、固定且使用普通Go源码的标准库程序作为能力探针。最小纵向门使用`time.Sleep`验证timer/park/deadline，使用标准库固定导出的`syscall.Open/Write/Seek/Read/Close/Unlink`封装完成一字节文件回环，验证bounded worker/syscall/result ownership；完整`time.Timer`验证controlled Timer V2上的Go timer基本语义，高层`os.File`验证interface/defer与regular-file worker封装，loopback TCP验证readiness/deadline/close-cancel链路。2026-07-23又加入`syscall.Pipe`进度门：main G先执行必然等待的`syscall.Read`，另一G只有经过timer后才`syscall.Write`；若Read留在executor上，程序必然死锁。该用例已fresh compile-link-run通过，连同原五项构成六个探针；TCP另有8路共10,000次压力证据。首个失败点必须归纳为缺失的通用compiler、runtime core、source或target adapter契约并在该层修复；不得添加按库名、函数名或fixture匹配的特例opcode/lowering，也不得绕过统一executor/event模型。
 
-`LLGO_CORO_STDLIB_ACCEPTANCE`的`time`、`syscall-file`、`file`、`tcp`和完整`timer`程序已冻结上述源码约束，且 host Go 参考运行可以通过；最终hard-cutover复验五项均为绿色。较早的fleet checkpoint还对TCP完成8路并发共10,000次执行。它们只证明各自冻结的垂直用例，不等于完整`time`、`os`、`syscall`、`net`或GOROOT兼容。
+`LLGO_CORO_STDLIB_ACCEPTANCE`的`time`、`timer`、`syscall-file`、`syscall-pipe`、`file`和`tcp`程序已冻结上述源码约束，且host Go参考运行可以通过；六项在Darwin均有LLGo fresh compile-link-run绿色证据。较早的fleet checkpoint还对TCP完成8路并发共10,000次执行。它们只证明各自冻结的垂直用例，不等于完整`time`、`os`、`syscall`、`net`或GOROOT兼容。
 
 | 验收程序 | 冻结的可观察语义 | 当前证据与缺口 |
 | --- | --- | --- |
 | `time` | 普通 `time.Sleep(200*time.Millisecond)` 至少延迟 150 ms | 真实Go 1.26 stdlib源码已经完成effect plan、compiler lowering、object compile、native link和运行，状态为0且无额外输出。Sleep已切到compiler-owned Timer V2 typed recipe；native/wasm32/CoroSplit、owner、cancel和race定向测试同时通过 |
 | `timer` | `NewTimer`/`After`、Stop/Reset active结果与旧generation抑制、Ticker drop/Stop、AfterFunc、timer channel同步可见`len/cap`、双timer `select`和context deadline | promoted wrapper由全局physical identity、结构ABI和确定性SSA body证明后按`linkonce_odr`唯一物化，重复符号阻塞已经消除。真实Go 1.26 stdlib探针现已完成plan、compile、link和run，状态为0且无额外输出；这是上述冻结用例的E2E证据，不外推为全部GOROOT timer race、GC、`asynctimerchan`或`synctest`兼容 |
 | `syscall-file` | 标准库固定导出的`syscall.Open/Write/Seek/Read/Close/Unlink`封装完成一字节回环；不经过`os.File` method/reflect表面 | 当前compiler/emission节点已用真实Go 1.26 stdlib源码fresh compile-link-run通过，证明这些fixed-target wrapper的自动染色、worker scalar result和调用者同步风格回环闭合；动态`RawSyscall`/未取得精确证书的trap仍fail closed，不外推其他syscall族或进程/信号语义 |
+| `syscall-pipe` | `syscall.Pipe`后main G阻塞读；另一G经过50ms timer后写入；读至少等待25ms并收到精确字节 | Darwin已fresh compile-link-run通过，直接证明`Read`由worker等待且executor仍能运行timer/writer。实现同时补齐`C.pipe`的声明级foreign contract和type-patch方法值接收者ABI；两者都是通用metadata/lowering修复，不是fixture白名单。Linux及更广pipe/close/cancel矩阵由CI继续验收 |
 | `file` | `OpenFile ->` 单次一字节 `Write -> Seek -> Read -> compare -> Close`；不混入deadline、poll或slice growth | 当前compiler/emission节点已用真实Go 1.26 stdlib源码fresh compile-link-run通过，证明该冻结路径上的`os.File`/`internal/poll`/regular-file worker封装闭合；deadline、目录、并发close及完整`io/fs`/reflect矩阵仍待验收 |
 | `tcp` | loopback `ListenTCP/DialTCP/AcceptTCP`，顶层无捕获`go serve()`；一字节I/O，20ms read deadline超时，清除后读取60ms延迟回复 | 真实Go 1.26 stdlib源码已在双owner fleet完成effect/emission plan、compiler lowering、LLVM验证、native link和loopback运行；覆盖route 1/2 spawn分配、Poll V2 exact route、readiness、deadline超时、清除deadline后读取延迟回复和共享worker。fresh binary的8路10,000次压力通过。它仍不证明并发close/大量连接、完整`net`/resolver矩阵或WASM/WASI backend；WASM当前仍只有lowering/CoroSplit/module compile证据 |
 
@@ -586,11 +588,11 @@ full-native Darwin/Linux 的 signal adapter 已改为 C `sigaction` + nonblockin
 
 2026-07-22的执行顺序是“核心能力优先，少量标准库程序只作定位探针”：
 
-1. `StringCat`、泛型`llgo.index`、Darwin sysctl bridge、visibility-only `go:linkname`、`*ssa.MakeMap`及promoted managed wrapper唯一发射阻塞已经越过；真实`time`、`timer`、`syscall-file`、`file`与`tcp`探针已在同一native fleet acceptance全部fresh compile-link-run通过，TCP另有10,000次压力证据。下一步把该组固定为架构等价重构门，同时保持“只修generic core、不写package/function白名单”的门槛。
+1. `StringCat`、泛型`llgo.index`、Darwin sysctl bridge、visibility-only `go:linkname`、`*ssa.MakeMap`及promoted managed wrapper唯一发射阻塞已经越过；真实`time`、`timer`、`syscall-file`、`syscall-pipe`、`file`与`tcp`探针已在同一native fleet acceptance全部fresh compile-link-run通过，TCP另有10,000次压力证据。下一步把该组固定为架构等价重构门，同时保持“只修generic core、不写package/function白名单”的门槛。
 2. `ExecutorFleet`的程序接入、双M owner/stop/join、worker lifecycle、route-local reactor和Timer/Poll/Worker exact route已完成。下一并行核心是把source-affine winner物化为P-neutral `ResumePacket/ResultCell`，随后再开放通用global injection/steal、动态P数量和affinity；在物化前不迁移已park G。
 3. 以已完成的host-owned pull core和host-target V2 initial command entry为边界，分别补JS/WASM外部reactor pump、WASI `poll_oneoff`/pollable reactor、RTOS HAL和baremetal IRQ/alarm/WFI loop；它们必须消费action并回调continuation，Poll V2的WASM compile-only证据不升格为平台E2E。
 4. 在已闭环的静态task-stop cleanup/`CompletionRecord`子集上，完成动态defer、完整panic/recover、`Goexit`、P-neutral result以及post-LLVM bounded-preemption/GC证明。
-5. 上述核心门稳定后，在已通过的五个冻结探针上继续扩展`net`/`os`/`time`与GOROOT语义矩阵，不反向把标准库特例写进compiler core。
+5. 上述核心门稳定后，在已通过的六个冻结探针上继续扩展`test/*`、`net`/`os`/`time`与GOROOT语义矩阵，不反向把标准库特例写进compiler core。最终仓库门是`test/*`和Go 1.26 GOROOT全部适用测试通过、无unexpected failure和stale XPASS；六个探针只是快速定位门。
 
 以下P0–P3保留为契约checklist，不表示每一项都仍未开始；完成状态以上述当前垂直验收和平台矩阵为准。
 
@@ -623,7 +625,7 @@ full-native Darwin/Linux 的 signal adapter 已改为 C `sigaction` + nonblockin
 1. 通用suspend-region/operation-record lowering和GC frame metadata。
 2. `RuntimeCapabilityCatalog`集中管理target capability、runtime roots、ABI signatures和contract IDs。
 3. `PackageCoroSummary`作为真实archive ABI。
-4. 用真实stdlib探针持续验收通用physical lowering与emission ownership；`*ssa.MakeMap`和promoted managed wrapper全局唯一发射均已越过，`time`、`timer`、`syscall-file`、`file`与`tcp`均已形成compile-link-run证据。继续以更广`net`/`os`/`time`及GOROOT测试定位下一项通用缺口，不由这些探针外推完整语言或标准库兼容。
+4. 用真实stdlib探针持续验收通用physical lowering与emission ownership；`*ssa.MakeMap`和promoted managed wrapper全局唯一发射均已越过，`time`、`timer`、`syscall-file`、`syscall-pipe`、`file`与`tcp`均已形成compile-link-run证据。继续以更广`test/*`、`net`/`os`/`time`及GOROOT测试定位下一项通用缺口，不由这些探针外推完整语言或标准库兼容。
 5. 在已有descriptor、dynamic child await、method/interface/closure/generic定向路径上，补齐open-world archive/reflect、全部dynamic call矩阵以及defer/recover/Goexit/cleanup语义。
 6. 完成source-independent bounded preemption proof。
 

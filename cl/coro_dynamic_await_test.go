@@ -120,7 +120,6 @@ func Apply(callback func(int) int, value int) int {
 
 			compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 			enableCoroPreemptCompilation(compilation)
-			compilation.CoroProfile = CoroProfileStackless
 			compilation.PanicABI = coro.PanicExplicitStatusABIV0
 			compilation.FuncRepABI = coro.FuncRepABIV1
 			compiled, _, err := NewPackageExWithEmbedOptions(
@@ -271,7 +270,6 @@ func Apply(
 
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
-	compilation.CoroProfile = CoroProfileStackless
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
 	compilation.FuncRepABI = coro.FuncRepABIV1
 	compiled, _, err := NewPackageExWithEmbedOptions(

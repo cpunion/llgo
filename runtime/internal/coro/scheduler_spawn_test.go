@@ -176,7 +176,7 @@ func TestSpawnBeginRollbackIsExactlyOnce(t *testing.T) {
 	runtime.KeepAlive(child)
 }
 
-func TestSpawnCommitZeroResultAtomicAndTaskReclaim(t *testing.T) {
+func TestSpawnCommitDiscardedResultAtomicAndTaskReclaim(t *testing.T) {
 	p := new(P)
 	parent := newYieldingTestG(t, "commit-parent")
 	if !Enqueue(p, parent.g) {
@@ -192,21 +192,21 @@ func TestSpawnCommitZeroResultAtomicAndTaskReclaim(t *testing.T) {
 		t.Fatal("begin committed spawn")
 	}
 	handle := unsafe.Pointer(new(byte))
-	frame, descriptor := newSpawnTestFrame(t, child, handle, 8, 8)
+	frame, descriptor := newSpawnTestFrame(t, child, handle, 8, 0)
 	if CommitSpawn(parent.g, child, handle) {
-		t.Fatal("non-zero-result goroutine root accepted")
+		t.Fatal("invalid result layout accepted")
 	}
 	if child.root != nil || child.active != nil || child.state != GNew || child.queued ||
 		p.readyHead != nil || parent.g.spawnChild != child || preemptLoad(preemptAddress(parent.g)) != preemptIdle {
 		t.Fatal("rejected result layout partially committed spawn")
 	}
-	descriptor.ResultSize = 0
-	descriptor.ResultAlign = 1
+	descriptor.ResultAlign = 8
 	if !CommitSpawn(parent.g, child, handle) {
-		t.Fatal("commit zero-result goroutine root")
+		t.Fatal("commit goroutine root with discarded result")
 	}
 	if parent.g.spawnChild != nil || child.root == nil || child.active != child.root || child.state != GRunnable ||
-		!child.queued || p.readyHead != child || p.readyTail != child || preemptLoad(preemptAddress(parent.g)) != preemptRequested {
+		child.root.header.ResultSlot != nil || !child.queued ||
+		p.readyHead != child || p.readyTail != child || preemptLoad(preemptAddress(parent.g)) != preemptRequested {
 		t.Fatal("committed spawn state is incomplete")
 	}
 	if CommitSpawn(parent.g, child, handle) || p.readyHead != child || p.readyTail != child || child.nextReady != nil {

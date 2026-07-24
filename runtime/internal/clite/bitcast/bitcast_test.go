@@ -16,7 +16,10 @@
 
 package bitcast
 
-import "testing"
+import (
+	"testing"
+	"unsafe"
+)
 
 func TestBitcastPreservesExactBits(t *testing.T) {
 	for _, bits := range []uint64{
@@ -40,5 +43,13 @@ func TestBitcastPreservesExactBits(t *testing.T) {
 		if got := uint32(FromFloat32(ToFloat32(int32(bits)))); got != bits {
 			t.Fatalf("32-bit roundtrip = %#08x, want %#08x", got, bits)
 		}
+	}
+}
+
+func TestFromPointerPreservesMachineWord(t *testing.T) {
+	value := byte(1)
+	pointer := unsafe.Pointer(&value)
+	if got, want := FromPointer(pointer), uintptr(pointer); got != want {
+		t.Fatalf("pointer word = %#x, want %#x", got, want)
 	}
 }

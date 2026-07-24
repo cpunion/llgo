@@ -394,6 +394,66 @@ const Only = "patched"
 	}
 }
 
+func TestApplySourcePatchForPkg_AnnotatesExactFunction(t *testing.T) {
+	goroot := t.TempDir()
+	runtimeDir := t.TempDir()
+	const pkgPath = "demo"
+	srcDir := filepath.Join(goroot, "src", pkgPath)
+	patchDir := filepath.Join(runtimeDir, "_patch", pkgPath)
+	sourceFile := filepath.Join(srcDir, "demo.go")
+	mustWriteFile(t, sourceFile, `package demo
+
+// Target keeps its existing source documentation.
+//go:norace
+func Target() {}
+
+func Other() {}
+`)
+	mustWriteFile(t, filepath.Join(patchDir, "patch.go"), `package demo
+
+//llgo:annotate Target rawcritical
+`)
+
+	changed, overlay, err := applySourcePatchForPkg(
+		nil, nil, runtimeDir, goroot, pkgPath, sourcePatchBuildContext{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("expected source annotation patch to change the package")
+	}
+	got := string(overlay[sourceFile])
+	if !strings.Contains(got, "//go:norace\n//llgo:rawcritical\nfunc Target()") {
+		t.Fatalf("annotated function lost its attached directive group:\n%s", got)
+	}
+	if strings.Contains(got, "//llgo:rawcritical\nfunc Other()") {
+		t.Fatalf("annotation leaked to another function:\n%s", got)
+	}
+	injected := filepath.Join(srcDir, "z_llgo_patch_patch.go")
+	if strings.Contains(string(overlay[injected]), "//llgo:annotate") {
+		t.Fatalf("build-only annotation directive leaked into injected source:\n%s", overlay[injected])
+	}
+}
+
+func TestApplySourcePatchForPkg_RejectsMissingAnnotationTarget(t *testing.T) {
+	goroot := t.TempDir()
+	runtimeDir := t.TempDir()
+	const pkgPath = "demo"
+	mustWriteFile(t, filepath.Join(goroot, "src", pkgPath, "demo.go"), "package demo\n")
+	mustWriteFile(t, filepath.Join(runtimeDir, "_patch", pkgPath, "patch.go"), `package demo
+
+//llgo:annotate Missing rawcritical
+`)
+
+	_, _, err := applySourcePatchForPkg(
+		nil, nil, runtimeDir, goroot, pkgPath, sourcePatchBuildContext{},
+	)
+	if err == nil || !strings.Contains(err.Error(), `annotation target "Missing" was not found`) {
+		t.Fatalf("missing annotation target error = %v", err)
+	}
+}
+
 func TestApplySourcePatchForPkg_UnreadableStdlibPkg(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("chmod-based permission test is Unix-only")

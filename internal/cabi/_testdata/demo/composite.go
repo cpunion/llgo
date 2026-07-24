@@ -1,17 +1,12 @@
 package main
 
-import "unsafe"
-
 const (
 	LLGoFiles = "../wrap/composite.c"
 )
 
-//go:linkname printf C.printf
-func printf(format *byte, __llgo_va_list ...any) int32
-
 func assert(info string, b bool) {
 	if !b {
-		printf(unsafe.StringData("Assertion failed: %s\n\000"), unsafe.StringData(info))
+		panic(info)
 	}
 }
 
@@ -26,6 +21,7 @@ type array10 struct {
 	base basearray1
 }
 
+//llgo:coro sync
 //go:linkname cdemo_array10 C.demo_array10
 func cdemo_array10(a array10) array10
 
@@ -44,6 +40,7 @@ type array11 struct {
 	z    int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo_array11 C.demo_array11
 func cdemo_array11(a array11) array11
 
@@ -65,6 +62,7 @@ type point10 struct {
 	base basepoint1
 }
 
+//llgo:coro sync
 //go:linkname cdemo_point10 C.demo_point10
 func cdemo_point10(a point10) point10
 
@@ -83,6 +81,7 @@ type point11 struct {
 	z    int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo_point11 C.demo_point11
 func cdemo_point11(a point11) point11
 
@@ -104,6 +103,7 @@ type array20 struct {
 	base basearray2
 }
 
+//llgo:coro sync
 //go:linkname cdemo_array20 C.demo_array20
 func cdemo_array20(a array20) array20
 
@@ -122,6 +122,7 @@ type array21 struct {
 	z    int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo_array21 C.demo_array21
 func cdemo_array21(a array21) array21
 
@@ -144,6 +145,7 @@ type point20 struct {
 	base basepoint2
 }
 
+//llgo:coro sync
 //go:linkname cdemo_point20 C.demo_point20
 func cdemo_point20(a point20) point20
 
@@ -162,6 +164,7 @@ type point21 struct {
 	z    int32
 }
 
+//llgo:coro sync
 //go:linkname cdemo_point21 C.demo_point21
 func cdemo_point21(a point21) point21
 

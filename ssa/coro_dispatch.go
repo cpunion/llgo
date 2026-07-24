@@ -229,7 +229,14 @@ func (b Builder) CallCoroPlainDispatch(
 
 	descriptorType := b.Prog.coroDispatchDescriptorType()
 	descriptorPtr := Expr{descriptorWord.impl, b.Prog.Pointer(descriptorType)}
-	descriptor := b.Load(descriptorPtr)
+	var descriptor Expr
+	if opts.DescriptorNonNil {
+		// Keep the frontend-owned nil edge unique even when the descriptor word
+		// is a compile-time null in an unreachable post-guard continuation.
+		descriptor = b.LoadKnownNonNil(descriptorPtr)
+	} else {
+		descriptor = b.Load(descriptorPtr)
+	}
 	fields := make([]Expr, 8)
 	for i := range fields {
 		fields[i] = b.Field(descriptor, i)

@@ -186,8 +186,7 @@ func llgoRuntimeHook(value int) int { return value + 1 }
 	ctx.compilation = &Compilation{
 
 		CoroPlan:         plan,
-		EmissionUniverse: universe, CoroProfile: CoroProfileStackless,
-	}
+		EmissionUniverse: universe}
 	entry, err := ctx.resolveFunctionSymbol(declFn)
 	if err != nil {
 		t.Fatal(err)
@@ -235,6 +234,89 @@ func runtimeHook(value int) int { return value + 1 }
 	}
 	if universe.Contains(declaration) || !universe.Contains(defined) {
 		t.Fatalf("patched linkname membership = declaration %t, definition %t; want false, true", universe.Contains(declaration), universe.Contains(defined))
+	}
+}
+
+func TestEmissionUniverseAliasesRedirectingGoDeclarationToSameSymbolDefinition(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	declaration := testProg.addPackage(t, "example.com/emission/redirectdecl", `package redirectdecl
+//go:linkname runtimeHook runtime.redirectHook
+func runtimeHook(int) int
+func Call(value int) int { return runtimeHook(value) }
+`)
+	definition := testProg.addPackage(t, "example.com/emission/redirectdef", `package redirectdef
+//go:linkname implementation runtime.redirectHook
+func implementation(value int) int { return value + 1 }
+`)
+	testProg.ssa.Build()
+
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{
+		{SSA: declaration.ssa, Files: []*ast.File{declaration.file}},
+		{SSA: definition.ssa, Files: []*ast.File{definition.file}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	declarationFn := declaration.ssa.Func("runtimeHook")
+	definitionFn := definition.ssa.Func("implementation")
+	if resolved, ok := universe.Resolve(declarationFn); !ok || resolved != definitionFn {
+		t.Fatalf("Resolve(redirecting declaration) = %v, %t; want %v, true", resolved, ok, definitionFn)
+	}
+	if managed, err := universe.exactManagedGoLinknameDefinition(definitionFn); err != nil || !managed {
+		t.Fatalf("same-symbol redirecting definition managed = %t, %v; want true, nil", managed, err)
+	}
+	if directive, err := universe.CoroRawABIDirective(definitionFn); err != nil || directive != "" {
+		t.Fatalf("same-symbol redirecting definition raw ABI directive = %q, %v; want empty, nil", directive, err)
+	}
+}
+
+func TestEmissionUniverseAliasesPatchedOneArgumentGoLinknameToExactDefinition(t *testing.T) {
+	const packagePath = "example.com/emission/patchedlinkone"
+	testProg := newEmissionTestProgram()
+	original := testProg.addPackage(t, packagePath, `package patchedlinkone
+type Original struct{}
+`)
+	alternate := testProg.addPackage(t, abi.PatchPathPrefix+packagePath, `package patchedlinkone
+//llgo:skipall
+type PatchControl struct{}
+//go:linkname runtimeHook
+func runtimeHook(int) int
+func Call(value int) int { return runtimeHook(value) }
+`)
+	definition := testProg.addPackage(t, "example.com/emission/patchedlinkonedef", `package patchedlinkonedef
+//go:linkname implementation example.com/emission/patchedlinkone.runtimeHook
+func implementation(value int) int { return value + 1 }
+`)
+	testProg.ssa.Build()
+
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, Patches{
+		packagePath: {
+			Alt:   alternate.ssa,
+			Types: typepatch.Clone(alternate.types),
+		},
+	}, []EmissionPackage{
+		{SSA: original.ssa, Files: []*ast.File{original.file, alternate.file}},
+		{SSA: definition.ssa, Files: []*ast.File{definition.file}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	declaration := alternate.ssa.Func("runtimeHook")
+	implementation := definition.ssa.Func("implementation")
+	if resolved, ok := universe.Resolve(declaration); !ok || resolved != implementation {
+		t.Fatalf("Resolve(patched one-argument go:linkname) = %v, %v; want exact definition %v, true", resolved, ok, implementation)
+	}
+	if managed, err := universe.exactManagedGoLinknameDefinition(implementation); err != nil || !managed {
+		t.Fatalf("patched one-argument managed definition = %t, %v; want true, nil", managed, err)
+	}
+	if directive, err := universe.CoroRawABIDirective(implementation); err != nil || directive != "" {
+		t.Fatalf("patched one-argument raw ABI directive = %q, %v; want empty, nil", directive, err)
 	}
 }
 

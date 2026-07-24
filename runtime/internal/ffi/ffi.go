@@ -3,7 +3,6 @@ package ffi
 import (
 	"unsafe"
 
-	c "github.com/goplus/llgo/runtime/internal/clite"
 	"github.com/goplus/llgo/runtime/internal/clite/ffi"
 )
 
@@ -28,37 +27,22 @@ func (s Error) Error() string {
 }
 
 func NewSignature(ret *Type, args ...*Type) (*Signature, error) {
-	var cif Signature
-	var atype **Type
-	if len(args) > 0 {
-		atype = &args[0]
-	}
-	status := ffi.PrepCif(&cif, ffi.DefaultAbi, c.Uint(len(args)), ret, atype)
-	if status == 0 {
-		return &cif, nil
-	}
-	return nil, Error(status)
+	panic("llgo: reflect call requires managed coroutine dispatch")
 }
 
 func NewSignatureVar(ret *Type, fixed int, args ...*Type) (*Signature, error) {
-	var cif Signature
-	var atype **Type
-	if len(args) > 0 {
-		atype = &args[0]
-	}
-	status := ffi.PrepCifVar(&cif, ffi.DefaultAbi, c.Uint(fixed), c.Uint(len(args)), ret, atype)
-	if status == ffi.OK {
-		return &cif, nil
-	}
-	return nil, Error(status)
+	panic("llgo: variadic reflect call requires managed coroutine dispatch")
 }
 
 func Call(cif *Signature, fn unsafe.Pointer, ret unsafe.Pointer, args ...unsafe.Pointer) {
-	var avalues *unsafe.Pointer
-	if len(args) > 0 {
-		avalues = &args[0]
-	}
-	ffi.Call(cif, fn, ret, avalues)
+	// A managed LLGo function value carries a coroutine dispatch descriptor,
+	// not a directly callable code address. Calling ffi_call here would execute
+	// the descriptor as code and, for a coroutine primary, would also omit the
+	// current G, result slot, and child-await transaction. Keep this boundary
+	// fail-closed until the compiler-owned reflect-call lowering can select the
+	// descriptor entry, create the child handle through libffi, and feed it into
+	// the ordinary scheduler-owned child await path.
+	panic("llgo: reflect call requires managed coroutine dispatch")
 }
 
 type Closure struct {
@@ -67,24 +51,17 @@ type Closure struct {
 }
 
 func NewClosure() *Closure {
-	c := &Closure{}
-	c.ptr = ffi.ClosureAlloc(&c.Fn)
-	return c
+	panic("llgo: reflect.MakeFunc requires managed coroutine dispatch")
 }
 
 func (c *Closure) Free() {
 	if c != nil && c.ptr != nil {
-		ffi.ClosureFree(c.ptr)
-		c.ptr = nil
+		panic("llgo: reflect.MakeFunc closure release requires managed coroutine dispatch")
 	}
 }
 
 func (c *Closure) Bind(cif *Signature, fn ffi.ClosureFunc, userdata unsafe.Pointer) error {
-	status := ffi.PreClosureLoc(c.ptr, cif, fn, userdata, c.Fn)
-	if status == ffi.OK {
-		return nil
-	}
-	return Error(status)
+	panic("llgo: reflect.MakeFunc closure binding requires managed coroutine dispatch")
 }
 
 func Index(args *unsafe.Pointer, i uintptr) unsafe.Pointer {

@@ -835,10 +835,9 @@ type aPackage struct {
 	goStrs      map[string]llvm.Value
 	fnlink      func(string) string
 	methodlink  func(string, *types.Func, *types.Signature) string
-	methodToken func(string, *types.Func, *types.Signature) (Expr, bool)
+	methodEntry func(string, *types.Func, *types.Signature) (Expr, bool)
 	// interfaceMethodDescriptor may replace one ABI Method.Ifn_ raw entry
-	// with a compiler-owned descriptor pointer. Tfn_ and every other raw
-	// address consumer deliberately remain on methodlink/fnlink.
+	// with a compiler-owned descriptor pointer.
 	interfaceMethodDescriptor func(string, *types.Func, *types.Signature) (Expr, bool)
 	runtimeCall               RuntimeCallResolver
 	runtimeFuncs              map[Type]string
@@ -995,11 +994,11 @@ func (p Package) SetResolveMethodLinkname(fn func(string, *types.Func, *types.Si
 	p.methodlink = fn
 }
 
-// SetResolveMethodToken installs the resolver for a Method.Tfn_ word used only
-// as a non-callable dispatch discriminator. Returning ok=true bypasses the
-// ordinary closure-context stub and stores the supplied exact code pointer.
-func (p Package) SetResolveMethodToken(fn func(string, *types.Func, *types.Signature) (Expr, bool)) {
-	p.methodToken = fn
+// SetResolveMethodEntry installs the resolver for a Method.Tfn_ word. The
+// result may be either an exact raw function or a coroutine dispatch
+// descriptor; returning ok=true bypasses the legacy closure-context stub.
+func (p Package) SetResolveMethodEntry(fn func(string, *types.Func, *types.Signature) (Expr, bool)) {
+	p.methodEntry = fn
 }
 
 // SetResolveInterfaceMethodDescriptor installs the narrowly-scoped resolver

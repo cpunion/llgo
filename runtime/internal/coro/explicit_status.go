@@ -21,7 +21,8 @@ import "unsafe"
 // ExplicitStatus is a terminal completion published by compiler-generated
 // code. Explicit panic now has two ownership paths: a child publishes into its
 // suspended parent's CompletionRecord, while a root publishes the task-local
-// PanicRecord. Goexit and implicit faults still require their own producers.
+// PanicRecord. Goexit uses the payload-free CompletionStatus channel and
+// implicit faults still require their own producers.
 type ExplicitStatus uint32
 
 const (

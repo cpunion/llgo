@@ -100,7 +100,6 @@ func TestCoroTLSDestructorClosedDynamicCallProof(t *testing.T) {
 	}
 
 	explicitFixture := fixture
-	explicitFixture.input.outcomeMode = coro.OutcomeExplicitStatus
 	explicitPlan, err := explicitFixture.analyze(coro.SSAConfig{
 		MaxPlainInstructions: -1,
 		OutcomeMode:          coro.OutcomeExplicitStatus,
@@ -534,7 +533,7 @@ func __llgo_coro_frame_free_v1() {}
 	}
 	ctx := &context{
 		prog:                        prog,
-		buildConf:                   &Config{CoroProfile: CoroProfileStackless},
+		buildConf:                   &Config{},
 		coroEmission:                emission,
 		coroSSAEmission:             ssaEmission,
 		coroTLSDestructorFixturePkg: llssa.PkgRuntime,

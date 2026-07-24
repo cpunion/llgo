@@ -45,6 +45,7 @@ type cgoDecl struct {
 type cgoSrcFile struct {
 	path  string
 	isCXX bool
+	isAsm bool
 }
 
 type cgoPreamble struct {
@@ -317,7 +318,7 @@ func parseCgo_(buildCtx *build.Context, pkg *aPackage, files []*ast.File) (srcFi
 		dir, _ := filepath.Split(pos.Filename)
 		dirs[dir] = none{}
 	}
-	addFile := func(dir, match string, isCXX bool) error {
+	addFile := func(dir, match string, isCXX, isAsm bool) error {
 		fi, statErr := os.Stat(match)
 		if statErr != nil {
 			if os.IsNotExist(statErr) {
@@ -333,7 +334,8 @@ func parseCgo_(buildCtx *build.Context, pkg *aPackage, files []*ast.File) (srcFi
 		case strings.HasSuffix(name, "_test.c"),
 			strings.HasSuffix(name, "_test.cc"),
 			strings.HasSuffix(name, "_test.cpp"),
-			strings.HasSuffix(name, "_test.cxx"):
+			strings.HasSuffix(name, "_test.cxx"),
+			strings.HasSuffix(name, "_test.S"):
 			return nil
 		}
 		if buildCtx != nil {
@@ -345,25 +347,30 @@ func parseCgo_(buildCtx *build.Context, pkg *aPackage, files []*ast.File) (srcFi
 				return nil
 			}
 		}
-		srcFiles = append(srcFiles, cgoSrcFile{path: match, isCXX: isCXX})
+		srcFiles = append(srcFiles, cgoSrcFile{path: match, isCXX: isCXX, isAsm: isAsm})
 		return nil
 	}
 	for dir := range dirs {
 		for _, pattern := range []struct {
 			glob  string
 			isCXX bool
+			isAsm bool
 		}{
 			{glob: "*.c"},
 			{glob: "*.cc", isCXX: true},
 			{glob: "*.cpp", isCXX: true},
 			{glob: "*.cxx", isCXX: true},
+			// Upper-case .S is assembler input run through the C
+			// preprocessor. It shares the package C flags, but must never be
+			// sent to the Go/Plan 9 assembly translator.
+			{glob: "*.S", isAsm: true},
 		} {
 			matches, err := filepath.Glob(filepath.Join(dir, pattern.glob))
 			if err != nil {
 				continue
 			}
 			for _, match := range matches {
-				if err := addFile(dir, match, pattern.isCXX); err != nil {
+				if err := addFile(dir, match, pattern.isCXX, pattern.isAsm); err != nil {
 					return nil, nil, nil, err
 				}
 			}

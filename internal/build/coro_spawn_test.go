@@ -37,7 +37,7 @@ func launchSuspending() { go suspending() }
 `, nil)
 	launchPlain := ssaPkg.Func("launchPlain")
 	launchSuspending := ssaPkg.Func("launchSuspending")
-	input := CoroPlanInput{Program: ssaPkg.Prog, enableClosedStaticSpawn: true}
+	input := CoroPlanInput{Program: ssaPkg.Prog}
 	plan, err := input.Analyze(coro.Roots{
 		{Function: launchPlain, Demand: coro.AsyncDemand},
 		{Function: launchSuspending, Demand: coro.AsyncDemand},
@@ -80,7 +80,7 @@ func launchSuspending() { go suspending() }
 	if !coroPlanContainsSpawn(plan) {
 		t.Fatal("emitted plan lost its spawn site")
 	}
-	err = validateCoroClosedStaticSpawnRunGate(&Config{CoroProfile: CoroProfileStackless}, plan, "")
+	err = validateCoroClosedStaticSpawnRunGate(&Config{}, plan, "")
 	if err == nil || !strings.Contains(err.Error(), "may-park") || !strings.Contains(err.Error(), "main-return cancellation subset") {
 		t.Fatalf("runnable spawn gate error = %v", err)
 	}
@@ -94,7 +94,7 @@ func launch(value int) {
 }
 `, nil)
 	launch := ssaPkg.Func("launch")
-	input := CoroPlanInput{Program: ssaPkg.Prog, enableClosedStaticSpawn: true}
+	input := CoroPlanInput{Program: ssaPkg.Prog}
 	plan, err := input.Analyze(
 		coro.Roots{{Function: launch, Demand: coro.AsyncDemand}},
 		coro.SSAConfig{MaxPlainInstructions: -1},
@@ -139,9 +139,7 @@ func launchDynamic(fn func()) { go fn() }
 	launchCaptured := ssaPkg.Func("launchCaptured")
 	launchDynamic := ssaPkg.Func("launchDynamic")
 	input := CoroPlanInput{
-		Program:                 ssaPkg.Prog,
-		enableClosedStaticSpawn: true,
-		enableManagedDispatch:   true,
+		Program: ssaPkg.Prog,
 	}
 	plan, err := input.Analyze(coro.Roots{
 		{Function: launchCaptured, Demand: coro.AsyncDemand},
@@ -205,9 +203,7 @@ func launch(callback func(int), value int) {
 `, nil)
 	launch := ssaPkg.Func("launch")
 	input := CoroPlanInput{
-		Program:                 ssaPkg.Prog,
-		enableClosedStaticSpawn: true,
-		enableManagedDispatch:   true,
+		Program: ssaPkg.Prog,
 	}
 	plan, err := input.Analyze(
 		coro.Roots{{Function: launch, Demand: coro.AsyncDemand}},
@@ -320,7 +316,7 @@ func launch() { go target() }
 			if err != nil {
 				t.Fatal(err)
 			}
-			conf := &Config{CoroProfile: CoroProfileStackless}
+			conf := &Config{}
 			if test.enableWorker {
 				conf.Goos, conf.Goarch = "linux", "amd64"
 			}
@@ -338,36 +334,19 @@ func launch() { go target() }
 	}
 }
 
-func TestCoroPlanInputClosedStaticSpawnFailsClosedOnUnsupportedShapes(t *testing.T) {
-	tests := []struct {
-		name   string
-		source string
-		want   string
-	}{
-		{
-			name:   "captured closure",
-			source: `package spawn; func launch(value int) { go func() { _ = value }() }`,
-			want:   "closures, interfaces, and function values",
-		},
-		{
-			name:   "dynamic function value",
-			source: `package spawn; func launch(fn func()) { go fn() }`,
-			want:   "closures, interfaces, and function values",
-		},
-		{
-			name:   "discarded result capability",
-			source: `package spawn; func worker() int { return 1 }; func launch() { go worker() }`,
-			want:   "zero-result signature",
-		},
+func TestCoroPlanInputClosedStaticSpawnSupportsDiscardedResults(t *testing.T) {
+	const source = `package spawn; func worker() int { return 1 }; func launch() { go worker() }`
+	ssaPkg, _ := buildCoroPlanTestPackage(t, "example.com/spawn", source, nil)
+	input := CoroPlanInput{Program: ssaPkg.Prog}
+	plan, err := input.Analyze(
+		coro.Roots{{Function: ssaPkg.Func("launch"), Demand: coro.AsyncDemand}},
+		coro.SSAConfig{MaxPlainInstructions: -1},
+	)
+	if err != nil {
+		t.Fatalf("discarded-result spawn rejected: %v", err)
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			ssaPkg, _ := buildCoroPlanTestPackage(t, "example.com/spawn", test.source, nil)
-			input := CoroPlanInput{Program: ssaPkg.Prog, enableClosedStaticSpawn: true}
-			_, err := input.Analyze(coro.Roots{{Function: ssaPkg.Func("launch"), Demand: coro.AsyncDemand}}, coro.SSAConfig{MaxPlainInstructions: -1})
-			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("error = %v, want substring %q", err, test.want)
-			}
-		})
+	worker, ok := plan.FunctionPlan(ssaPkg.Func("worker"))
+	if !ok || worker.Emission != coro.EmitCoroutine || worker.Demand != coro.AsyncDemand {
+		t.Fatalf("discarded-result worker plan = %+v, present=%t", worker, ok)
 	}
 }

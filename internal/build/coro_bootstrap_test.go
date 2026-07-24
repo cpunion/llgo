@@ -159,6 +159,31 @@ func TestSelectCoroProgramBootstrapV2AllowsIRQUnsafeManagedRoot(t *testing.T) {
 	}
 }
 
+func TestSelectCoroProgramBootstrapV2AllowsManagedCleanupRoot(t *testing.T) {
+	fixture := newCoroBootstrapV2CleanupTestContext(t)
+	step, err := selectCoroProgramManagedStepV2(
+		fixture.ctx,
+		fixture.cleanupRuntimeRoot,
+		llssa.PkgRuntime+".cleanupRuntimeRoot",
+		llssa.PkgRuntime,
+		"managed defer/recover startup fixture",
+		coroProgramStepRoleRuntimeInitV2,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, ok := fixture.ctx.coroPlan.FunctionPlan(fixture.cleanupRuntimeRoot)
+	if !ok || plan.Emission != coro.EmitCoroutine || !plan.Effect.MaySuspend() ||
+		!plan.Exec.Contains(coro.NeedsCleanupFrame) {
+		t.Fatalf("cleanup fixture plan = %+v, present=%t; want managed coroutine cleanup frame", plan, ok)
+	}
+	if step.Kind != coroProgramStepCoroRootV1 ||
+		step.Target != llssa.PkgRuntime+".cleanupRuntimeRoot$coro" ||
+		step.Owner != llssa.PkgRuntime {
+		t.Fatalf("managed cleanup-root step = %+v, want coroutine root", step)
+	}
+}
+
 func TestBindCoroProgramBootstrapV2OwnersAndAnchors(t *testing.T) {
 	fixture := newCoroBootstrapV2TestContext(t)
 	semantic := fixture.ctx.coroProgramBootstraps[fixture.mainPackage.ID]
@@ -316,13 +341,14 @@ func TestCoroProgramManifestHashV1CoversV2OwnerAnchorBinding(t *testing.T) {
 }
 
 type coroBootstrapV2TestFixture struct {
-	ctx               *context
-	mainPackage       *packages.Package
-	runtimeInit       *ssa.Function
-	irqRuntimeRoot    *ssa.Function
-	publicRuntimeInit *ssa.Function
-	mainInit          *ssa.Function
-	mainMain          *ssa.Function
+	ctx                *context
+	mainPackage        *packages.Package
+	runtimeInit        *ssa.Function
+	irqRuntimeRoot     *ssa.Function
+	cleanupRuntimeRoot *ssa.Function
+	publicRuntimeInit  *ssa.Function
+	mainInit           *ssa.Function
+	mainMain           *ssa.Function
 }
 
 func newCoroBootstrapV2TestContext(t *testing.T) coroBootstrapV2TestFixture {
@@ -330,14 +356,30 @@ func newCoroBootstrapV2TestContext(t *testing.T) coroBootstrapV2TestFixture {
 }
 
 func newCoroBootstrapV2TestContextWithPublicRuntime(t *testing.T, includePublicRuntime bool) coroBootstrapV2TestFixture {
+	return newCoroBootstrapV2TestContextWithOptions(t, includePublicRuntime, false)
+}
+
+func newCoroBootstrapV2CleanupTestContext(t *testing.T) coroBootstrapV2TestFixture {
+	return newCoroBootstrapV2TestContextWithOptions(t, true, true)
+}
+
+func newCoroBootstrapV2TestContextWithOptions(
+	t *testing.T, includePublicRuntime, includeCleanupRuntime bool,
+) coroBootstrapV2TestFixture {
 	t.Helper()
 	fset := token.NewFileSet()
 	ssaProg := ssa.NewProgram(fset, ssa.SanityCheckFunctions|ssa.InstantiateGenerics)
-	runtimeSSA, runtimeFiles, _, _ := createCoroBootstrapV2SSAPackage(t, ssaProg, fset, llssa.PkgRuntime, `package runtime
+	runtimeSource := `package runtime
 func aRuntimeRoot() {}
 func irqRuntimeRoot() {}
 func zRuntimeRoot() {}
-`)
+`
+	if includeCleanupRuntime {
+		runtimeSource += "func cleanupRuntimeRoot() { defer func() {}() }\n"
+	}
+	runtimeSSA, runtimeFiles, _, _ := createCoroBootstrapV2SSAPackage(
+		t, ssaProg, fset, llssa.PkgRuntime, runtimeSource,
+	)
 	var publicRuntimeSSA *ssa.Package
 	var publicRuntimeFiles []*ast.File
 	if includePublicRuntime {
@@ -378,6 +420,7 @@ func main() {}
 	aMain := &aPackage{Package: mainPackage, SSA: mainSSA}
 	runtimeInit := runtimeSSA.Func("init")
 	irqRuntimeRoot := runtimeSSA.Func("irqRuntimeRoot")
+	cleanupRuntimeRoot := runtimeSSA.Func("cleanupRuntimeRoot")
 	var publicRuntimeInit *ssa.Function
 	if publicRuntimeSSA != nil {
 		publicRuntimeInit = publicRuntimeSSA.Func("init")
@@ -392,14 +435,16 @@ func main() {}
 		mainSSA.Func("aMainRoot"):       true,
 		mainSSA.Func("zMainRoot"):       true,
 	}
+	if cleanupRuntimeRoot != nil {
+		suspending[cleanupRuntimeRoot] = true
+	}
 	if publicRuntimeInit != nil {
 		suspending[publicRuntimeInit] = true
 	}
 	conf := &Config{
 		BuildMode: BuildModeExe,
 		Goos:      "linux",
-		Goarch:    "amd64", CoroProfile: CoroProfileStackless,
-	}
+		Goarch:    "amd64"}
 	conf.CoroPlanBuilder = func(input CoroPlanInput) (*coro.SSAPlan, error) {
 		// Deliberately provide roots in reverse name order. Descriptor Aux must
 		// follow the canonical same-package FunctionID order, never this input
@@ -411,6 +456,9 @@ func main() {}
 			{Function: irqRuntimeRoot, Demand: coro.AsyncDemand},
 			{Function: runtimeInit, Demand: coro.AsyncDemand},
 			{Function: runtimeSSA.Func("aRuntimeRoot"), Demand: coro.AsyncDemand},
+		}
+		if cleanupRuntimeRoot != nil {
+			roots = append(roots, coro.Root{Function: cleanupRuntimeRoot, Demand: coro.AsyncDemand})
 		}
 		return input.Analyze(roots, coro.SSAConfig{
 			MaxPlainInstructions: -1,
@@ -443,8 +491,9 @@ func main() {}
 	}
 	return coroBootstrapV2TestFixture{
 		ctx: ctx, mainPackage: mainPackage,
-		runtimeInit: runtimeInit, irqRuntimeRoot: irqRuntimeRoot, publicRuntimeInit: publicRuntimeInit,
-		mainInit: mainInit, mainMain: mainMain,
+		runtimeInit: runtimeInit, irqRuntimeRoot: irqRuntimeRoot, cleanupRuntimeRoot: cleanupRuntimeRoot,
+		publicRuntimeInit: publicRuntimeInit,
+		mainInit:          mainInit, mainMain: mainMain,
 	}
 }
 

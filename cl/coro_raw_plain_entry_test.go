@@ -213,6 +213,42 @@ func Host(value uint32) uint32 { return RawHelper(value) }
 	}
 }
 
+func TestCoroRawPlainOnlyAllowsNonCapturingNestedRoot(t *testing.T) {
+	ssaPkg, _, _ := buildGoSSAPkg(t, `package foo
+func Owner() int {
+	callback := func(value int) int { return value + 1 }
+	return callback(41)
+}
+`)
+	owner := ssaPkg.Func("Owner")
+	if len(owner.AnonFuncs) != 1 || owner.AnonFuncs[0].Parent() != owner || len(owner.AnonFuncs[0].FreeVars) != 0 {
+		t.Fatalf("Owner anonymous functions = %+v, want one nested zero-binding closure", owner.AnonFuncs)
+	}
+	callback := owner.AnonFuncs[0]
+	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{
+		Function: callback, RawPlainDemand: true,
+	}}, coro.SSAConfig{
+		MaxPlainInstructions: -1,
+		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+			if fn == callback {
+				return coro.SSAFunctionPolicy{RawPlainEntry: true}, nil
+			}
+			return coro.SSAFunctionPolicy{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	callbackPlan, ok := plan.FunctionPlan(callback)
+	if !ok || callbackPlan.ManagedDemand != coro.NoDemand || !callbackPlan.RawPlainDemand ||
+		!callbackPlan.RawPlainOnly || callbackPlan.Emission != coro.EmitRawPlain {
+		t.Fatalf("nested raw callback plan = %+v, present=%t", callbackPlan, ok)
+	}
+	if err := validateCoroRootEntries(plan); err != nil {
+		t.Fatalf("validate nested non-capturing raw callback: %v", err)
+	}
+}
+
 func TestCoroRawPlainOnlyCompilesClosedSingletonSyncDispatch(t *testing.T) {
 	ssaPkg, _, files := buildGoSSAPkg(t, `package foo
 func Target(value int) int { return value + 1 }
@@ -284,7 +320,6 @@ func Host(fn func(int) int, value int) int {
 
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
-	compilation.CoroProfile = CoroProfileStackless
 	compilation.FuncRepABI = coro.FuncRepABIV1
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
@@ -706,7 +741,6 @@ func Parent(seed *Box, value int) int { return Dual(seed, value) }
 
 	compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 	enableCoroPreemptCompilation(compilation)
-	compilation.CoroProfile = CoroProfileStackless
 	compilation.FuncRepABI = coro.FuncRepABIV1
 	compilation.PanicABI = coro.PanicExplicitStatusABIV0
 	pkg, _, err := NewPackageExWithEmbedOptions(

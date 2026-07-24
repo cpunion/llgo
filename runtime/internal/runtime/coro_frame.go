@@ -24,13 +24,30 @@ import (
 	"github.com/goplus/llgo/runtime/internal/coroalloc"
 )
 
+// The scheduler-stack abort path is already fail-stop and cannot suspend into
+// the managed worker protocol. Keep its stdio leaves behind private,
+// synchronous declarations so ordinary c.Fputs/c.Fputc calls retain the
+// conservative default-worker policy everywhere else.
+//
+//llgo:coro sync
+//go:linkname coroTerminalFputs C.fputs
+func coroTerminalFputs(s *c.Char, fp c.FilePtr) c.Int
+
+//llgo:coro sync
+//go:linkname coroTerminalFputc C.fputc
+func coroTerminalFputc(ch c.Int, fp c.FilePtr) c.Int
+
 func coroRuntimeAbort(message string) {
 	// Scheduler/runtime ABI failures happen on the executor stack and cannot
 	// enter the general formatting or panic machinery: either path may require a
-	// managed coroutine continuation. Keep this terminal path bounded and
-	// allocation-free; detailed diagnostics belong in the caller-side verifier.
-	_ = message
-	c.Fputs(c.Str("fatal error: invalid coroutine runtime state\n"), c.Stderr)
+	// managed coroutine continuation. Emit the already-owned message one byte at
+	// a time so this terminal path remains bounded and allocation-free while
+	// still identifying the exact failed invariant.
+	coroTerminalFputs(c.Str("fatal error: "), c.Stderr)
+	for index := 0; index < len(message); index++ {
+		coroTerminalFputc(c.Int(message[index]), c.Stderr)
+	}
+	coroTerminalFputc(c.Int('\n'), c.Stderr)
 	c.Exit(2)
 	// C.exit is declared through a bodyless C ABI and Go SSA cannot infer its
 	// noreturn attribute. Keep this source function structurally terminal even

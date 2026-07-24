@@ -153,7 +153,6 @@ func Root(b *Box[int]) { b.All()(Yield) }
 
 			compilation := &Compilation{CoroPlan: plan, EmissionUniverse: universe}
 			enableCoroPreemptCompilation(compilation)
-			compilation.CoroProfile = CoroProfileStackless
 			compilation.PanicABI = coro.PanicExplicitStatusABIV0
 			compilation.FuncRepABI = coro.FuncRepABIV1
 			compiled, _, err := NewPackageExWithEmbedOptions(

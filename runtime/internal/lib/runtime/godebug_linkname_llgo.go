@@ -34,6 +34,7 @@ func godebugEnvChanged(env string) {
 	godebugNotify()
 }
 
+//llgo:managedlink
 //go:linkname godebug_setUpdate internal/godebug.setUpdate
 func godebug_setUpdate(update func(string, string)) {
 	godebugUpdate = update
@@ -42,8 +43,10 @@ func godebug_setUpdate(update func(string, string)) {
 	godebugNotify()
 }
 
+//llgo:managedlink
 //go:linkname godebug_setNewIncNonDefault internal/godebug.setNewIncNonDefault
 func godebug_setNewIncNonDefault(newIncNonDefault func(string) func()) {}
 
+//llgo:managedlink
 //go:linkname godebug_registerMetric internal/godebug.registerMetric
 func godebug_registerMetric(name string, read func() uint64) {}

@@ -316,6 +316,14 @@ func (a *coroPhysicalPureSSAAudit) validateAlloc(alloc *ssa.Alloc) string {
 		// allocation crosses a suspension boundary.
 		return ""
 	}
+	if a.ctx != nil && a.ctx.skipSyntheticMakeSliceAlloc(alloc) {
+		// x/tools represents make([]T, dynamicLen, constantCap) as a synthetic
+		// heap Alloc consumed by one Slice. compileValue emits no code for this
+		// Alloc; the paired Slice owns the complete runtime.MakeSlice operation
+		// and its coroutine child-await. Keep the two proof obligations separate:
+		// this frontend-elided node must remain helper-free.
+		return a.requireNoRuntimeHelpers(alloc)
+	}
 	if alloc.Heap {
 		if a.frameRetainsAllocation(alloc) {
 			// The complete address-use proof changes this exact lowering from
@@ -334,9 +342,6 @@ func (a *coroPhysicalPureSSAAudit) validateAlloc(alloc *ssa.Alloc) string {
 			reason = "allocation is absent from the immutable managed-heap root proof"
 		}
 		return "heap allocation requires managed allocation and coroutine GC-root lowering: " + reason
-	}
-	if a.ctx != nil && a.ctx.skipSyntheticMakeSliceAlloc(alloc) {
-		return "synthetic slice/varargs allocation belongs to a non-pure enclosing lowering"
 	}
 	pointer, ok := types.Unalias(a.typeOf(alloc.Type())).Underlying().(*types.Pointer)
 	if !ok {
@@ -560,7 +565,17 @@ func (a *coroPhysicalPureSSAAudit) validateSlice(slice *ssa.Slice) string {
 	}
 	if a.ctx != nil {
 		if _, synthetic := a.ctx.syntheticMakeSliceCap(slice); synthetic {
-			return "synthetic make-slice lowering is outside structured slice bounds"
+			if _, ok := types.Unalias(a.typeOf(slice.Type())).Underlying().(*types.Slice); !ok {
+				return "synthetic MakeSlice result is not a slice"
+			}
+			length, ok := types.Unalias(a.typeOf(slice.High.Type())).Underlying().(*types.Basic)
+			if !ok || length.Info()&types.IsInteger == 0 {
+				return "synthetic MakeSlice length is not an integer"
+			}
+			if err := validateCoroPhysicalSSAValueType(a.typeOf(slice.Type())); err != nil {
+				return "synthetic MakeSlice result has unsupported type: " + err.Error()
+			}
+			return a.requireFrozenOutcomeRuntimeHelper(slice, "MakeSlice")
 		}
 	}
 
@@ -1226,8 +1241,9 @@ func (a *coroPhysicalPureSSAAudit) validateConvert(convert *ssa.Convert) string 
 	if coroFrameRetentionPointerLike(source) && coroFrameRetentionUintptrLike(target) &&
 		(proof == nil || !proof.provesTraceableUintptr(convert)) &&
 		!a.coroPointerUintptrScalarTerminal(convert) &&
+		!a.coroPointerUintptrAtomicTerminal(convert) &&
 		(a.universe == nil || !a.universe.coroRuntimeCodeAddressType(source)) {
-		reason := "pointer-to-uintptr conversion is not bound to an exact managed-child/worker uintptrkeepalive source or scalar terminal"
+		reason := "pointer-to-uintptr conversion is not bound to an exact managed-child/worker uintptrkeepalive source, scalar terminal, or inline atomic terminal"
 		if coroPointerUintptrScalarTerminal(convert) && a != nil && a.plan != nil && a.fn != nil {
 			plan, planned := a.plan.FunctionPlan(a.fn)
 			reason += fmt.Sprintf(" (structural scalar terminal; planned=%t effect=%s exec=%s)", planned, plan.Effect, plan.Exec)
@@ -1249,48 +1265,186 @@ func (a *coroPhysicalPureSSAAudit) validateConvert(convert *ssa.Convert) string 
 }
 
 // coroPointerUintptrScalarTerminal binds the structural scalar-observation
-// recipe below to the immutable whole-function suspension plan. A same-block
-// chain by itself is insufficient: an ordinary budget poll could split a
-// NeedsPreempt body. OutcomeStructured is allowed because it describes only
-// terminal Return/Panic transport; every actual suspension effect and explicit
-// preemption requirement remains rejected. The conservative/no-GC frame
-// profile is still the authority for LLVM motion inside this bounded body.
+// recipe below to the immutable whole-function suspension plan. Without a
+// frame-retention identity, the chain is accepted only in a non-preempting,
+// non-suspending body. Under ParkABIV2, an inserted poll or managed-child await
+// may split the chain: LLVM then retains the live address-shaped word in the
+// coroutine frame, and the sole nonmoving-conservative-or-none profile keeps
+// its referent stable. OutcomeStructured describes only terminal Return/Panic
+// transport and is therefore harmless in the non-suspending fallback too.
 func (a *coroPhysicalPureSSAAudit) coroPointerUintptrScalarTerminal(value ssa.Value) bool {
 	if a == nil || a.plan == nil || a.fn == nil || !coroPointerUintptrScalarTerminal(value) {
 		return false
 	}
 	plan, planned := a.plan.FunctionPlan(a.fn)
+	if planned && a.frameRetentionABI == CoroFrameRetentionParkABIV2 &&
+		plan.Emission == coro.EmitCoroutine && !plan.Exec.IsOpaque() {
+		// Return, map-key, comparison, remainder, affine comparison, and exact
+		// pointer-distance terminals are all forward-only scalar observations.
+		// None grants uintptr-to-pointer reconstruction authority. A future
+		// precise or moving collector must introduce a different retention ABI
+		// and explicit pin/relocation rules before reusing this branch.
+		return true
+	}
 	return planned && !plan.Exec.Contains(coro.NeedsPreempt) &&
 		plan.Effect&^coro.OutcomeStructured == coro.NoSuspend
 }
 
+// coroPointerUintptrAtomicTerminal recognizes the other standard forward-only
+// address-word observation used by sync.copyChecker: an exact inline atomic
+// operation consumes (and may store) the integer representation without
+// suspending or reconstructing a pointer. The conversion and every consuming
+// atomic must remain in the same SSA block, so no poll/await can split this
+// local lifetime. Both ProgramIR and SSAPlan must agree that the source call is
+// an elided atomic intrinsic; an ordinary call, a helper-backed intrinsic, or
+// any additional use keeps the conversion fail-closed.
+func (a *coroPhysicalPureSSAAudit) coroPointerUintptrAtomicTerminal(value ssa.Value) bool {
+	root, ok := value.(ssa.Instruction)
+	if !ok || root == nil || root.Block() == nil || value.Referrers() == nil ||
+		a == nil || a.universe == nil || a.universe.coroProgramIR == nil || a.plan == nil {
+		return false
+	}
+	uses := 0
+	for _, reference := range *value.Referrers() {
+		switch instruction := reference.(type) {
+		case *ssa.DebugRef:
+		case *ssa.Call:
+			if instruction.Block() != root.Block() || instruction.Common() == nil ||
+				instruction.Common().IsInvoke() || !a.plan.ElidesCall(instruction) {
+				return false
+			}
+			frozen, found, err := a.universe.coroProgramIR.callSitePlan(instruction)
+			if err != nil || !found || frozen.failure != "" ||
+				!frozen.plan.Intrinsic || !frozen.plan.ElidesCall() ||
+				frozen.plan.IntrinsicSemantics != CoroIntrinsicCallInlineNoSuspend ||
+				!isCoroAtomicIntrinsic(frozen.opcode) {
+				return false
+			}
+			matches := 0
+			for _, argument := range instruction.Common().Args {
+				if argument == value {
+					matches++
+				}
+			}
+			if matches == 0 {
+				return false
+			}
+			uses += matches
+		default:
+			return false
+		}
+	}
+	return uses != 0
+}
+
+type coroWorkerPointerResultVisit struct {
+	function *ssa.Function
+	result   int
+}
+
 // provesWorkerForeignPointerResult accepts one exact producer-injected result
-// fact from a certified worker call. It deliberately recognizes only a direct
-// tuple extract: integer arithmetic, storage, Phi merging, and arbitrary
-// uintptr parameters cannot acquire pointer provenance after the fact. The
-// callable shadow carries this metadata forward from FuncPCABI0 formation,
-// and validateCoroWorkerSyscallCall joins it with the immutable whole-program
-// plan before physical lowering may consume it.
+// fact from a certified worker call. Besides the worker call's direct tuple
+// extract, the fact may cross an exact wrapper return and a closed ordinary
+// call result. That is the minimum operation-level propagation needed by
+// standard-library wrappers such as syscall.mmap and mmapper.Mmap.
+//
+// Integer arithmetic, storage, Phi merging, parameters, open calls, and
+// multiple-target calls still destroy the fact. The callable shadow injects
+// metadata at FuncPCABI0 formation; the worker-result projection binds a
+// private carrier result to one incoming producer; and the immutable CallPlan
+// selects every wrapper target before physical lowering consumes the fact.
 func (a *coroPhysicalPureSSAAudit) provesWorkerForeignPointerResult(value ssa.Value) bool {
 	if a == nil || a.plan == nil || a.universe == nil || value == nil {
 		return false
 	}
+	return a.provesWorkerForeignPointerValue(
+		a.fn, value, make(map[coroWorkerPointerResultVisit]bool),
+	)
+}
+
+func (a *coroPhysicalPureSSAAudit) provesWorkerForeignPointerValue(
+	owner *ssa.Function,
+	value ssa.Value,
+	visiting map[coroWorkerPointerResultVisit]bool,
+) bool {
 	extract, ok := value.(*ssa.Extract)
 	if !ok || extract.Index < 0 || extract.Index >= 8 {
 		return false
 	}
 	call, ok := extract.Tuple.(*ssa.Call)
-	if !ok || call == nil || call.Parent() != a.fn {
+	if !ok || call == nil || call.Parent() != owner {
+		return false
+	}
+	return a.provesWorkerForeignPointerCallResult(owner, call, extract.Index, visiting)
+}
+
+func (a *coroPhysicalPureSSAAudit) provesWorkerForeignPointerCallResult(
+	owner *ssa.Function,
+	call *ssa.Call,
+	result int,
+	visiting map[coroWorkerPointerResultVisit]bool,
+) bool {
+	if owner == nil || call == nil || call.Parent() != owner ||
+		result < 0 || result >= coroWorkerResultProjectionWidthV1 {
 		return false
 	}
 	if validateCoroWorkerSyscallCall(a.plan, a.universe, call) == nil {
 		certificate, certified, err := a.universe.CoroWorkerSyscallCertificate(call)
-		return err == nil && certified && certificate.ID != "" &&
-			certificate.ForeignPointerResultMask&(uint8(1)<<uint(extract.Index)) != 0
+		if err == nil && certified && certificate.ID != "" &&
+			certificate.ForeignPointerResultMask&(uint8(1)<<uint(result)) != 0 {
+			return true
+		}
 	}
-	return validateCoroWorkerProjectedForeignPointerResult(
-		a.plan, a.universe, call, extract.Index,
-	) == nil
+	if validateCoroWorkerProjectedForeignPointerResult(
+		a.plan, a.universe, call, result,
+	) == nil {
+		return true
+	}
+
+	callPlan, planned := a.plan.CallPlan(call)
+	if !planned || callPlan.Kind != coro.CallDirect || callPlan.Open ||
+		len(callPlan.Targets) != 1 {
+		return false
+	}
+	target, found := a.plan.Function(callPlan.Targets[0])
+	if !found || target == nil || len(target.Blocks) == 0 ||
+		a.universe.canonicalAlias(target) != target {
+		return false
+	}
+	targetPlan, targetPlanned := a.plan.FunctionPlan(target)
+	if !targetPlanned || targetPlan.ID != callPlan.Targets[0] ||
+		targetPlan.External != coro.Defined || target.Signature == nil ||
+		target.Signature.Results() == nil || result >= target.Signature.Results().Len() ||
+		!coroWorkerUintptrType(target.Signature.Results().At(result).Type()) {
+		return false
+	}
+
+	visit := coroWorkerPointerResultVisit{function: target, result: result}
+	if visiting[visit] {
+		return false
+	}
+	visiting[visit] = true
+	defer delete(visiting, visit)
+
+	reachable := coroPhysicalConstantReachableBlocks(target)
+	returns := 0
+	for _, block := range target.Blocks {
+		if !reachable[block] {
+			continue
+		}
+		for _, instruction := range block.Instrs {
+			returned, ok := instruction.(*ssa.Return)
+			if !ok {
+				continue
+			}
+			returns++
+			if result >= len(returned.Results) ||
+				!a.provesWorkerForeignPointerValue(target, returned.Results[result], visiting) {
+				return false
+			}
+		}
+	}
+	return returns != 0
 }
 
 // coroRuntimeConversionHelper mirrors Builder.Convert's complete allocating
@@ -1345,18 +1499,21 @@ func coroRuntimeConversionHelper(source, target types.Type) string {
 }
 
 // coroPointerUintptrScalarTerminal recognizes an address word whose complete
-// semantic lifetime ends either in an integer comparison or as one operand of
-// an exact pointer-distance expression, uintptr(end)-uintptr(start). Neither
-// result preserves pointer provenance or can be dereferenced. If a safepoint
-// splits the pure expression, the address word itself is retained in LLVM's
-// conservatively scanned/non-GC coroutine frame; the active frame profile
-// explicitly excludes precise or moving collectors. Returning, storing,
-// general arithmetic, pointer reconstruction, or call transport of the
-// address word remains fail-closed through the exact retention proof.
+// semantic lifetime ends in an integer comparison, as one operand of an exact
+// pointer-distance expression, uintptr(end)-uintptr(start), as a scalar map
+// key, or at a direct Go return. None of these terminals authorizes pointer
+// reconstruction. If a safepoint splits a map-key/return observation, the
+// address word itself is retained in LLVM's conservatively scanned/non-GC
+// coroutine frame; the active frame profile explicitly excludes precise or
+// moving collectors. General storage, call transport, pointer reconstruction,
+// and unbounded arithmetic remain fail-closed.
 func coroPointerUintptrScalarTerminal(value ssa.Value) bool {
 	root, rootIsInstruction := value.(ssa.Instruction)
 	if value == nil || !rootIsInstruction || root.Block() == nil || value.Referrers() == nil {
 		return false
+	}
+	if coroPointerUintptrReturnTerminal(value) || coroPointerUintptrMapKeyTerminal(value) {
+		return true
 	}
 	uses := 0
 	affine := false
@@ -1414,6 +1571,136 @@ func coroPointerUintptrScalarTerminal(value ssa.Value) bool {
 		// comparison terminal. It cannot also be returned, stored, called with,
 		// merged through a Phi, or reconstructed as a pointer.
 		return uses == 1
+	}
+	return uses != 0
+}
+
+// coroPointerUintptrMapKeyTerminal accepts a forward-only integer expression
+// whose every path ends as a map key. This is an observation, not pointer
+// provenance: no alias is added to frameRetention.uintptrValues, so loading the
+// key later or converting any derived hash back to a pointer remains rejected.
+//
+// Each arithmetic step may combine the address-derived word with one scalar
+// operand, but never with a second pointer-derived integer. Phi merging,
+// returns, calls, stores, and use as a map value are deliberately excluded.
+func coroPointerUintptrMapKeyTerminal(root ssa.Value) bool {
+	if root == nil || !coroFrameRetentionIntegerLike(root.Type()) {
+		return false
+	}
+	const (
+		coroMapKeyVisiting uint8 = 1
+		coroMapKeyAccepted uint8 = 2
+		coroMapKeyRejected uint8 = 3
+	)
+	state := make(map[ssa.Value]uint8)
+	var visit func(ssa.Value) bool
+	visit = func(value ssa.Value) bool {
+		switch state[value] {
+		case coroMapKeyVisiting, coroMapKeyRejected:
+			return false
+		case coroMapKeyAccepted:
+			return true
+		}
+		state[value] = coroMapKeyVisiting
+		refs := value.Referrers()
+		if refs == nil {
+			state[value] = coroMapKeyRejected
+			return false
+		}
+		uses := 0
+		for _, reference := range *refs {
+			switch instruction := reference.(type) {
+			case *ssa.DebugRef:
+			case *ssa.BinOp:
+				if instruction.X != value && instruction.Y != value ||
+					!coroFrameRetentionIntegerLike(instruction.Type()) {
+					state[value] = coroMapKeyRejected
+					return false
+				}
+				switch instruction.Op {
+				case token.ADD, token.SUB, token.MUL, token.QUO, token.REM,
+					token.AND, token.OR, token.XOR, token.AND_NOT, token.SHL, token.SHR:
+				default:
+					state[value] = coroMapKeyRejected
+					return false
+				}
+				other := instruction.X
+				if other == value {
+					other = instruction.Y
+				}
+				if other == value || !coroFrameRetentionIntegerLike(other.Type()) ||
+					coroFrameRetentionIntegerHasPointerProvenance(other, make(map[ssa.Value]bool)) ||
+					!visit(instruction) {
+					state[value] = coroMapKeyRejected
+					return false
+				}
+				uses++
+			case *ssa.Lookup:
+				if instruction.Index != value || !coroPointerUintptrExactMapKey(instruction.X, value) {
+					state[value] = coroMapKeyRejected
+					return false
+				}
+				uses++
+			case *ssa.MapUpdate:
+				if instruction.Key != value || !coroPointerUintptrExactMapKey(instruction.Map, value) {
+					state[value] = coroMapKeyRejected
+					return false
+				}
+				uses++
+			default:
+				state[value] = coroMapKeyRejected
+				return false
+			}
+		}
+		if uses == 0 {
+			state[value] = coroMapKeyRejected
+			return false
+		}
+		state[value] = coroMapKeyAccepted
+		return true
+	}
+	return visit(root)
+}
+
+func coroPointerUintptrExactMapKey(mapping, key ssa.Value) bool {
+	if mapping == nil || key == nil {
+		return false
+	}
+	typ, ok := types.Unalias(mapping.Type()).Underlying().(*types.Map)
+	return ok && types.Identical(typ.Key(), key.Type())
+}
+
+// coroPointerUintptrReturnTerminal accepts only the address word itself as an
+// exact return operand. Phi merging, arithmetic, storage, calls, and conversion
+// back to a pointer are deliberately not inferred here. Debug references do
+// not extend the semantic lifetime.
+func coroPointerUintptrReturnTerminal(value ssa.Value) bool {
+	instruction, ok := value.(ssa.Instruction)
+	if value == nil || !ok || instruction.Parent() == nil || value.Referrers() == nil {
+		return false
+	}
+	uses := 0
+	for _, reference := range *value.Referrers() {
+		switch terminal := reference.(type) {
+		case *ssa.DebugRef:
+		case *ssa.Return:
+			if terminal.Parent() != instruction.Parent() {
+				return false
+			}
+			found := false
+			for _, result := range terminal.Results {
+				if result == value {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false
+			}
+			uses++
+		default:
+			return false
+		}
 	}
 	return uses != 0
 }
@@ -1534,8 +1821,10 @@ func (a *coroPhysicalPureSSAAudit) validateBinOp(op *ssa.BinOp) string {
 	if (op.Op == token.EQL || op.Op == token.NEQ) &&
 		(coroPureAggregateType(a.typeOf(op.X.Type())) || coroPureAggregateType(a.typeOf(op.Y.Type()))) {
 		left, right := a.typeOf(op.X.Type()), a.typeOf(op.Y.Type())
-		if !types.Identical(left, right) || !coroPureAggregateEqualityType(left, make(map[types.Type]bool)) {
-			return "aggregate equality contains a helper-backed or unsupported element"
+		helperSet := make(map[string]struct{})
+		if !types.Identical(left, right) ||
+			!coroAggregateEqualityRuntimeHelpers(left, make(map[types.Type]bool), helperSet) {
+			return "aggregate equality is not an exact supported comparable layout"
 		}
 		for _, typ := range []types.Type{left, right, a.typeOf(op.Type())} {
 			if err := validateCoroPhysicalSSAValueType(typ); err != nil {
@@ -1543,11 +1832,20 @@ func (a *coroPhysicalPureSSAAudit) validateBinOp(op *ssa.BinOp) string {
 			}
 		}
 		// LLSSA Builder.BinOp recursively extracts array elements and non-blank
-		// struct fields, combines their scalar comparisons, and negates once for
-		// !=. Freeze that implementation fact through the ordinary helper
-		// inventory as well: a future string/interface/helper-backed leaf must
-		// fail here even if the structural predicate is accidentally widened.
-		return a.requireNoRuntimeHelpers(op)
+		// struct fields, combines their comparisons, and negates once for !=.
+		// Scalar leaves stay inline. String/interface leaves use the same frozen
+		// StringEqual/EfaceEqual/IfaceType edges as direct comparisons, so bind
+		// the complete unique helper inventory to the owner-scoped plan instead
+		// of rejecting an otherwise ordinary Go comparable aggregate.
+		helpers := make([]string, 0, len(helperSet))
+		for helper := range helperSet {
+			helpers = append(helpers, helper)
+		}
+		sort.Strings(helpers)
+		if len(helpers) == 0 {
+			return a.requireNoRuntimeHelpers(op)
+		}
+		return a.requireFrozenStructuredRuntimeHelpers(op, helpers...)
 	}
 	if (op.Op == token.EQL || op.Op == token.NEQ) &&
 		coroPureDirectEqualityType(a.typeOf(op.X.Type())) &&
@@ -1616,6 +1914,26 @@ func (a *coroPhysicalPureSSAAudit) validateBinOp(op *ssa.BinOp) string {
 			(coroPureNilComparableType(a.typeOf(op.Y.Type())) && coroFrameRetentionNilConst(op.X))) {
 		return a.requireNoRuntimeHelpers(op)
 	}
+	if coroPureComplexArithmeticBinOp(
+		op.Op,
+		a.typeOf(op.Type()),
+		a.typeOf(op.X.Type()),
+		a.typeOf(op.Y.Type()),
+	) {
+		for _, typ := range []types.Type{a.typeOf(op.Type()), a.typeOf(op.X.Type()), a.typeOf(op.Y.Type())} {
+			if err := validateCoroPhysicalSSAValueType(typ); err != nil {
+				return "complex arithmetic has unsupported physical value type: " + err.Error()
+			}
+		}
+		if op.Op == token.QUO {
+			// LLSSA implements Go's scale-safe complex division through this
+			// exact helper. It neither has an integer-style zero-divisor panic
+			// nor needs a special physical recipe; the normal owner-scoped
+			// lowered-call resolver selects its proven plain or coroutine entry.
+			return a.requireFrozenExactRuntimeHelper(op, "Complex128Div")
+		}
+		return a.requireNoRuntimeHelpers(op)
+	}
 	if !coroPureBasicScalar(a.typeOf(op.Type())) || !coroPureBasicScalar(a.typeOf(op.X.Type())) || !coroPureBasicScalar(a.typeOf(op.Y.Type())) {
 		return "potentially panicking or non-scalar binary operation"
 	}
@@ -1640,6 +1958,24 @@ func (a *coroPhysicalPureSSAAudit) validateBinOp(op *ssa.BinOp) string {
 		}
 	}
 	return a.requireNoRuntimeHelpers(op)
+}
+
+func coroPureComplexArithmeticBinOp(op token.Token, values ...types.Type) bool {
+	switch op {
+	case token.ADD, token.SUB, token.MUL, token.QUO:
+	default:
+		return false
+	}
+	if len(values) == 0 {
+		return false
+	}
+	for _, typ := range values {
+		basic, ok := types.Unalias(typ).Underlying().(*types.Basic)
+		if !ok || basic.Info()&types.IsComplex == 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func coroEmptyInterfaceType(typ types.Type) bool {
@@ -1682,13 +2018,17 @@ func coroPureAggregateType(typ types.Type) bool {
 	}
 }
 
-// coroPureAggregateEqualityType mirrors the helper-free recursive cases in
-// LLSSA Builder.BinOp. It is intentionally narrower than Go comparability:
-// strings need StringEqual and interfaces need EfaceEqual (and may panic for a
-// dynamically uncomparable payload), so neither can enter a PhysicalABIV1
-// coroutine through this certificate. Blank struct fields are not compared by
-// Go or LLSSA and therefore contribute no leaf requirement.
-func coroPureAggregateEqualityType(typ types.Type, visiting map[types.Type]bool) bool {
+// coroAggregateEqualityRuntimeHelpers mirrors the complete comparable
+// aggregate recursion in LLSSA Builder.BinOp and records its unique logical
+// helper leaves. StringEqual is non-panicking; EfaceEqual may panic for a
+// dynamically uncomparable payload and is therefore accepted only later by
+// the structured ExplicitStatus helper gate. Blank struct fields are not
+// compared by Go or LLSSA and contribute no leaf requirement.
+func coroAggregateEqualityRuntimeHelpers(
+	typ types.Type,
+	visiting map[types.Type]bool,
+	helpers map[string]struct{},
+) bool {
 	if typ == nil || visiting[typ] {
 		return false
 	}
@@ -1696,19 +2036,30 @@ func coroPureAggregateEqualityType(typ types.Type, visiting map[types.Type]bool)
 	defer delete(visiting, typ)
 	switch underlying := types.Unalias(typ).Underlying().(type) {
 	case *types.Basic:
+		if underlying.Kind() == types.String {
+			helpers["StringEqual"] = struct{}{}
+			return true
+		}
 		return underlying.Kind() == types.UnsafePointer ||
 			underlying.Info()&(types.IsBoolean|types.IsInteger|types.IsFloat|types.IsComplex) != 0
 	case *types.Pointer, *types.Chan:
 		return true
+	case *types.Interface:
+		helpers["EfaceEqual"] = struct{}{}
+		underlying.Complete()
+		if !underlying.Empty() {
+			helpers["IfaceType"] = struct{}{}
+		}
+		return true
 	case *types.Array:
-		return coroPureAggregateEqualityType(underlying.Elem(), visiting)
+		return coroAggregateEqualityRuntimeHelpers(underlying.Elem(), visiting, helpers)
 	case *types.Struct:
 		for index := 0; index < underlying.NumFields(); index++ {
 			field := underlying.Field(index)
 			if field.Name() == "_" {
 				continue
 			}
-			if !coroPureAggregateEqualityType(field.Type(), visiting) {
+			if !coroAggregateEqualityRuntimeHelpers(field.Type(), visiting, helpers) {
 				return false
 			}
 		}
@@ -1902,6 +2253,8 @@ func (a *coroPhysicalPureSSAAudit) validateBuiltin(call *ssa.Call) string {
 		return a.validateAppendBuiltin(call)
 	case "copy":
 		return a.validateCopyBuiltin(call)
+	case "complex":
+		return a.validateComplexBuiltin(call)
 	case "real", "imag":
 		if reason := a.validateComplexComponentBuiltin(call, builtin.Name()); reason != "" {
 			return reason
@@ -2360,6 +2713,46 @@ func (a *coroPhysicalPureSSAAudit) validateCopyBuiltin(call *ssa.Call) string {
 		}
 	}
 	return a.requireFrozenExactRuntimeHelper(call, "SliceCopy")
+}
+
+// validateComplexBuiltin mirrors Builder.BuiltinCall's aggregate construction.
+// Both operands have Go's already-converted component type and the result is
+// the corresponding two-field complex scalar; no runtime helper is emitted.
+func (a *coroPhysicalPureSSAAudit) validateComplexBuiltin(call *ssa.Call) string {
+	if call == nil || call.Common() == nil || len(call.Common().Args) != 2 || call.Type() == nil {
+		return "complex builtin requires two floating-point arguments and one result"
+	}
+	builtin, ok := call.Common().Value.(*ssa.Builtin)
+	if !ok || builtin.Name() != "complex" {
+		return "complex validation requires the exact complex builtin"
+	}
+	left := a.typeOf(call.Common().Args[0].Type())
+	right := a.typeOf(call.Common().Args[1].Type())
+	result := a.typeOf(call.Type())
+	leftBasic, leftOK := types.Unalias(left).Underlying().(*types.Basic)
+	rightBasic, rightOK := types.Unalias(right).Underlying().(*types.Basic)
+	resultBasic, resultOK := types.Unalias(result).Underlying().(*types.Basic)
+	if !leftOK || !rightOK || !resultOK || !types.Identical(left, right) {
+		return "complex builtin operands do not have one identical concrete floating-point type"
+	}
+	want := types.Invalid
+	switch leftBasic.Kind() {
+	case types.Float32:
+		want = types.Complex64
+	case types.Float64:
+		want = types.Complex128
+	default:
+		return "complex builtin operands are not float32 or float64"
+	}
+	if rightBasic.Kind() != leftBasic.Kind() || resultBasic.Kind() != want {
+		return fmt.Sprintf("complex builtin result kind is %s, want %s", resultBasic, types.Typ[want])
+	}
+	for _, typ := range []types.Type{left, right, result} {
+		if err := validateCoroPhysicalSSAValueType(typ); err != nil {
+			return "complex builtin has unsupported physical type: " + err.Error()
+		}
+	}
+	return a.requireNoRuntimeHelpers(call)
 }
 
 // validateComplexComponentBuiltin mirrors Builder.BuiltinCall's extractvalue
@@ -3017,7 +3410,7 @@ func (a *coroPhysicalPureSSAAudit) allHelpersHaveCoroSafeLowering(helpers []stri
 // aggregate managed Effect/Exec facts deliberately remain unchanged because a
 // separate managed consumer may still need a coroutine entry.
 func (a *coroPhysicalPureSSAAudit) validRawPlainLoweredCall(call coro.SSALoweredCall, plan coro.FunctionPlan) bool {
-	return a != nil && a.plan != nil && call.RawPlain && !call.UnwindOnly && !call.ExplicitStatusElided &&
+	return a != nil && a.plan != nil && call.RawPlain && !call.NoUnwind && !call.UnwindOnly && !call.ExplicitStatusElided &&
 		call.Target != nil && plan.External == coro.Defined && plan.RawPlainDemand && plan.RawPlainEntry &&
 		a.plan.HasRawPlainVariant(call.Target) &&
 		(plan.Emission == coro.EmitRawPlain || plan.Emission == coro.EmitPlain || plan.Emission == coro.EmitCoroutine)

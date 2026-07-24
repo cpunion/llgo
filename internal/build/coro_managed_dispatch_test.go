@@ -32,25 +32,21 @@ type I interface { M() }
 func call(fn func(int) int) int { return fn(1) }
 func invoke(value I) { value.M() }
 func invokeDeferred(value I) { defer value.M() }
-func invokeSpawned(value I) { go value.M() }
 func deferred(fn func()) { defer fn() }
-func spawned(fn func()) { go fn() }
 `, nil)
 
-	input := CoroPlanInput{Program: ssaPkg.Prog, enableManagedDispatch: true}
+	input := CoroPlanInput{Program: ssaPkg.Prog}
 	plan, err := input.Analyze(coro.Roots{
 		{Function: ssaPkg.Func("call"), Demand: coro.AsyncDemand},
 		{Function: ssaPkg.Func("invoke"), Demand: coro.AsyncDemand},
 		{Function: ssaPkg.Func("invokeDeferred"), Demand: coro.AsyncDemand},
-		{Function: ssaPkg.Func("invokeSpawned"), Demand: coro.AsyncDemand},
 		{Function: ssaPkg.Func("deferred"), Demand: coro.AsyncDemand},
-		{Function: ssaPkg.Func("spawned"), Demand: coro.AsyncDemand},
 	}, coro.SSAConfig{MaxPlainInstructions: -1})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	for _, name := range []string{"call", "invoke", "invokeDeferred", "invokeSpawned", "deferred", "spawned"} {
+	for _, name := range []string{"call", "invoke", "invokeDeferred", "deferred"} {
 		fn := ssaPkg.Func(name)
 		var dynamic ssa.CallInstruction
 		for _, candidate := range coroPlanTestCalls(fn) {
@@ -92,7 +88,7 @@ func TestCoroPlanInputManagedDescriptorClassificationPreservesForeignAndRejectsB
 func call(fn func()) { fn() }
 `, nil)
 	root := ssaPkg.Func("call")
-	input := CoroPlanInput{Program: ssaPkg.Prog, enableManagedDispatch: true}
+	input := CoroPlanInput{Program: ssaPkg.Prog}
 
 	plan, err := input.Analyze(coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		MaxPlainInstructions: -1,

@@ -27,13 +27,35 @@ import (
 )
 
 // TestCoroHardCutoverRejectsLegacyProductionSurface is a zero-tolerance gate,
-// not a debt snapshot. Once the stackless profile crossed this boundary there
+// not a debt snapshot. Once the stackless architecture crossed this boundary there
 // is only one logical Park protocol, one current Timer/Poll ABI, and no staged
 // EnableCoro feature surface. Reintroducing an old spelling therefore fails in
 // the same commit instead of silently creating a second runtime track.
 func TestCoroHardCutoverRejectsLegacyProductionSurface(t *testing.T) {
 	repoRoot := filepath.Clean(filepath.Join("..", ".."))
 	forbidden := []string{
+		"RuntimeProfile",
+		"CoroProfile",
+		"CoroEntryResolutionActive(",
+		"CoroPhysicalABIActive(",
+		"CoroChildAwaitActive(",
+		"CoroPlainDispatchActive(",
+		"CoroClosedStaticSpawnActive(",
+		"CoroProgramBootstrapActive(",
+		"CoroChannelActive(",
+		"CoroExplicitStatusActive(",
+		"coroEntryResolutionActive(",
+		"coroPhysicalABIActive(",
+		"coroChildAwaitActive(",
+		"coroPlainDispatchActive(",
+		"coroClosedStaticSpawnActive(",
+		"coroProgramBootstrapABIActive(",
+		"coroProgramBootstrapActive(",
+		"coroChannelActive(",
+		"coroExplicitStatusActive(",
+		"enableClosedStaticSpawn",
+		"enableManagedDispatch",
+		"outcomeMode",
 		"WaitToken",
 		"WaitRegistration",
 		"KeyedWait",

@@ -58,28 +58,23 @@ func (p *coroClosedInterfacePlainPlan) acceptsTarget(fn *ssa.Function, plan coro
 	return ok && target == fn
 }
 
-// resolveMethodToken keeps a closed async method's itab discriminator on the
-// exact physical entry. The word is compared but never called through the
-// legacy method ABI, so wrapping it with closureWrapDecl would manufacture an
-// invalid source-signature call to a (g,out,receiver,args...) coroutine entry.
-func (p *context) resolveMethodToken(
-	resolvedName string, method *types.Func, signature *types.Signature,
+// resolveMethodEntry publishes every Go Method.Tfn_ through the universal
+// function descriptor. Reflection turns this word back into an ordinary Go
+// function value, so a raw code pointer would reintroduce a second dynamic
+// calling convention and would be invalid for coroutine physical entries.
+func (p *context) resolveMethodEntry(
+	_ string, method *types.Func, signature *types.Signature,
 ) (llssa.Expr, bool) {
-	if p == nil || p.compilation == nil || p.compilation.coroClosedInterfacePlain == nil ||
-		method == nil || signature == nil {
+	if p == nil || p.compilation.immutablePlan() == nil || method == nil ||
+		signature == nil || signature.Recv() == nil {
 		return llssa.Nil, false
 	}
 	target := p.resolveInterfaceMethodSSA(method, signature)
-	entry := p.mustFunctionSymbol(target)
-	if entry.plan.Emission != coro.EmitCoroutine || resolvedName != entry.name ||
-		!p.compilation.coroClosedInterfacePlain.acceptsTarget(entry.function, entry.plan) {
-		return llssa.Nil, false
+	descriptor, err := p.emitCoroMethodValueDescriptor(target, signature)
+	if err != nil {
+		panic(err)
 	}
-	fn, _, kind := p.funcOfEntry(entry)
-	if fn == nil || kind != goFunc {
-		panic(fmt.Errorf("coroutine method token target %q did not resolve to one physical Go entry", entry.plan.ID))
-	}
-	return fn.Expr, true
+	return descriptor, true
 }
 
 // analyzeCoroClosedInterfacePlainPlan freezes the code-generation proof once,
@@ -136,7 +131,7 @@ func analyzeCoroClosedInterfacePlainPlan(
 				}
 			} else if asyncMethodToken {
 				if err := validateCoroRawABIMethodTokenTarget(target, targetPlan); err != nil {
-					return nil, err
+					return nil, fmt.Errorf("%w; opaque trace: %s", err, plan.OpaqueEffectTrace(target))
 				}
 			} else if err := validateCoroRawABIPlainTarget(target, targetPlan); err != nil {
 				return nil, err

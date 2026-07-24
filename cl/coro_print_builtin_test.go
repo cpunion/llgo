@@ -72,8 +72,12 @@ func arithmeticTransformed(pointer unsafe.Pointer) float32 {
 }
 
 func Root(number int, text string, pointer unsafe.Pointer) {
+	word := uintptr(pointer)
+	if word == 0 {
+		word = 1
+	}
 	print(
-		"value=", number, int64(uintptr(pointer)),
+		"value=", number, int64(word),
 		scalarBitcast32(int32(uintptr(pointer))),
 		scalarBitcast64(int64(uintptr(pointer))),
 	)
@@ -172,6 +176,19 @@ func TestCoroPrintBuiltinManagedHelpersNativeAndWasm32(t *testing.T) {
 			if got := strings.Join(rootNames(proof.exactCallKeepaliveRoots(fixture.calls["print"])), ","); got != "pointer" {
 				t.Fatalf("print keepalive roots = %q, want pointer", got)
 			}
+			printArguments := make(map[ssa.Value]bool)
+			for _, argument := range fixture.calls["print"].Common().Args {
+				printArguments[argument] = true
+			}
+			printSources := proof.exactCallKeepaliveSources(fixture.calls["print"])
+			if len(printSources) != 3 {
+				t.Fatalf("print keepalive sources = %d, want three exact pointer-derived call arguments", len(printSources))
+			}
+			for _, source := range printSources {
+				if !printArguments[source] {
+					t.Fatalf("print keepalive source %q is not an exact call argument", source)
+				}
+			}
 
 			for _, name := range []string{"PrintByte", "PrintFloat", "PrintInt", "PrintString"} {
 				helper := fixture.runtimePkg.ssa.Func(name)
@@ -185,7 +202,6 @@ func TestCoroPrintBuiltinManagedHelpersNativeAndWasm32(t *testing.T) {
 
 			compilation := &Compilation{CoroPlan: fixture.plan, EmissionUniverse: fixture.universe}
 			enableCoroChildAwaitCompilation(compilation)
-			compilation.CoroProfile = CoroProfileStackless
 			compilation.PanicABI = coro.PanicExplicitStatusABIV0
 			runtimeLL, _, err := NewPackageExWithEmbedOptions(
 				fixture.prog, nil, nil, nil, fixture.runtimePkg.ssa, []*ast.File{fixture.runtimePkg.file}, goembed.VarMap{},

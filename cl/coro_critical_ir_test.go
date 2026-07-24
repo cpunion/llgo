@@ -40,6 +40,12 @@ func criticalEnter()
 //go:linkname criticalExit llgo.coroCriticalExit
 func criticalExit()
 
+//go:linkname osThreadLock llgo.coroOSThreadLock
+func osThreadLock()
+
+//go:linkname osThreadUnlock llgo.coroOSThreadUnlock
+func osThreadUnlock()
+
 var cell uint32
 
 func Root(value uint32) uint32 {
@@ -48,6 +54,11 @@ func Root(value uint32) uint32 {
 	result := cell
 	criticalExit()
 	return result
+}
+
+func AffinityRoot() {
+	osThreadLock()
+	osThreadUnlock()
 }
 `
 
@@ -139,6 +150,66 @@ func TestCoroCriticalRegionLoweringNativeAndWasm32(t *testing.T) {
 	}
 }
 
+func TestCoroOSThreadAffinityMarkerLowering(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	prog, pkg, plan, root, _, _ := compileCoroCriticalIRFixture(t, nil)
+	defer prog.Dispose()
+	module := pkg.Module()
+	defer module.Dispose()
+
+	affinityRoot := root.Pkg.Func("AffinityRoot")
+	if affinityRoot == nil {
+		t.Fatal("OS-thread affinity fixture lacks AffinityRoot")
+	}
+	affinityPlan, ok := plan.FunctionPlan(affinityRoot)
+	if !ok || affinityPlan.Emission != coro.EmitCoroutine ||
+		!affinityPlan.LocalEffect.Contains(coro.YieldOnly) {
+		t.Fatalf("AffinityRoot plan = %+v, present=%t; want one yield-capable coroutine body", affinityPlan, ok)
+	}
+	for _, block := range affinityRoot.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(*ssa.Call)
+			if !ok || call.Common().StaticCallee() == nil {
+				continue
+			}
+			switch call.Common().StaticCallee().Name() {
+			case "osThreadLock", "osThreadUnlock":
+				if !plan.ElidesCall(call) {
+					t.Fatalf("OS-thread marker %q retained an ordinary call edge", call.Common().StaticCallee().Name())
+				}
+			}
+		}
+	}
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify OS-thread affinity coroutine before CoroSplit: %v\n%s", err, module.String())
+	}
+	body := requireCoroPhysicalFunction(t, module, "foo.AffinityRoot").String()
+	lock := strings.Index(body, "call void @"+coroOSThreadLockHookV1)
+	unlock := strings.Index(body, "call void @"+coroOSThreadUnlockHookV1)
+	if lock < 0 || unlock <= lock {
+		t.Fatalf("AffinityRoot lacks ordered lock/unlock ABI hooks:\n%s", body)
+	}
+	if got := strings.Count(body[lock:], "call void @"+coroYieldPrepareHookV1); got != 2 {
+		t.Fatalf("AffinityRoot post-lock runnable handoffs = %d, want one after each affinity marker:\n%s", got, body)
+	}
+	for _, marker := range []string{
+		"@foo.osThreadLock",
+		"@foo.osThreadUnlock",
+		"@llgo.coroOSThreadLock",
+		"@llgo.coroOSThreadUnlock",
+	} {
+		if strings.Contains(body, marker) {
+			t.Fatalf("source OS-thread marker %q leaked into physical IR:\n%s", marker, body)
+		}
+	}
+	runCoroABITestPipeline(t, prog, module)
+	for _, hook := range []string{coroOSThreadLockHookV1, coroOSThreadUnlockHookV1} {
+		if !strings.Contains(module.String(), "@"+hook) {
+			t.Fatalf("post-CoroSplit module lost OS-thread affinity ABI hook %q", hook)
+		}
+	}
+}
+
 func compileCoroCriticalIRFixture(t *testing.T, target *llssa.Target) (
 	llssa.Program, llssa.Package, *coro.SSAPlan, *ssa.Function, *ssa.Call, *ssa.Call,
 ) {
@@ -161,6 +232,7 @@ func compileCoroCriticalIRFixture(t *testing.T, target *llssa.Target) (
 		t.Fatal(err)
 	}
 	root := ssaPkg.Func("Root")
+	affinityRoot := ssaPkg.Func("AffinityRoot")
 	var enter, exit *ssa.Call
 	for _, block := range root.Blocks {
 		for _, instruction := range block.Instrs {
@@ -184,12 +256,15 @@ func compileCoroCriticalIRFixture(t *testing.T, target *llssa.Target) (
 	functionIDs.CoroABI = coro.PhysicalABIV1
 	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
-	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{{Function: root, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{
+		{Function: root, Demand: coro.AsyncDemand},
+		{Function: affinityRoot, Demand: coro.AsyncDemand},
+	}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
 		FunctionIDs:          functionIDs,
 		MaxPlainInstructions: -1,
 		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
-			if fn == root {
+			if fn == root || fn == affinityRoot {
 				return coro.SSAFunctionPolicy{Effect: coro.YieldOnly, Exec: coro.NeedsPreempt}, nil
 			}
 			return coro.SSAFunctionPolicy{}, nil

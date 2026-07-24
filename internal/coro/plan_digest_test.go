@@ -1356,6 +1356,10 @@ func second() {}
 		{LogicalName: "runtime.first", Target: first, RawPlain: true},
 		{LogicalName: "runtime.second", Target: second},
 	})
+	noUnwind := build([]SSALoweredCall{
+		{LogicalName: "runtime.first", Target: first, NoUnwind: true},
+		{LogicalName: "runtime.second", Target: second},
+	})
 	metadata := validPlanDigestMetadata()
 	baselineDigest, err := baseline.CoroPlanDigest(metadata)
 	if err != nil {
@@ -1396,6 +1400,13 @@ func second() {}
 	if baselineDigest == rawPlainDigest {
 		t.Fatal("marking a lowered-call occurrence raw-plain did not change digest")
 	}
+	noUnwindDigest, err := noUnwind.CoroPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baselineDigest == noUnwindDigest {
+		t.Fatal("marking a lowered-call occurrence no-unwind did not change digest")
+	}
 	document, err := baseline.canonicalPlanDigest(metadata)
 	if err != nil {
 		t.Fatal(err)
@@ -1425,6 +1436,14 @@ func second() {}
 	}
 	if len(rawPlainDocument.LoweredCalls) != 2 || !rawPlainDocument.LoweredCalls[0].RawPlain || rawPlainDocument.LoweredCalls[1].RawPlain {
 		t.Fatalf("canonical raw-plain lowered calls = %+v", rawPlainDocument.LoweredCalls)
+	}
+	noUnwindDocument, err := noUnwind.canonicalPlanDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(noUnwindDocument.LoweredCalls) != 2 || !noUnwindDocument.LoweredCalls[0].NoUnwind ||
+		noUnwindDocument.LoweredCalls[1].NoUnwind {
+		t.Fatalf("canonical no-unwind lowered calls = %+v", noUnwindDocument.LoweredCalls)
 	}
 
 	// Bind the occurrence fact directly, independently of the fixed-point plan

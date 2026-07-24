@@ -14,6 +14,7 @@ import (
 //go:linkname cSqrt C.sqrt
 func cSqrt(x c.Double) c.Double
 
+//llgo:coro noblock
 // llgo:link cAbs C.abs
 func cAbs(x c.Int) c.Int { return 0 }
 

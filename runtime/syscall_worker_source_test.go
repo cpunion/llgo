@@ -134,7 +134,7 @@ func TestDarwinSyscallFailureConventionsAreExplicit(t *testing.T) {
 		"//llgo:coro workeraddr 3\n//go:linkname libc_close_trampoline C.close",
 		"//llgo:coro workeraddr 3\n//go:linkname libc_read_trampoline C.read",
 		"//llgo:coro workeraddr 3\n//go:linkname libc_lseek_trampoline C.lseek",
-		"//llgo:coro workeraddr 6\n//go:linkname libc_mmap_trampoline C.mmap",
+		"//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/6+foreign-pointer-result=r1\n//go:linkname libc_mmap_trampoline C.mmap",
 		"//llgo:coro workeraddr 3\n//go:linkname libc_munmap_trampoline C.munmap",
 		"//llgo:coro workeraddr 3\n//go:linkname libc_fdopendir_trampoline C.fdopendir",
 		"//llgo:coro workeraddr 3\n//go:linkname libc_writev_trampoline C.writev",
@@ -159,6 +159,7 @@ func TestDarwinSyscallFailureConventionsAreExplicit(t *testing.T) {
 		"llgoSyscall3Int32(fn, a1, a2, a3)",
 		"llgoSyscall3Word(fn, a1, a2, a3)",
 		"llgoSyscall3Pointer(fn, a1, a2, a3)",
+		"//llgo:coro workerresult v1 fn=0 map=r1:r1\nfunc syscall6X(",
 	} {
 		if !strings.Contains(string(source), required) {
 			t.Errorf("%s lacks explicit failure-convention marker %q", path, required)
@@ -209,6 +210,46 @@ func TestDarwinSyscallFailureConventionsAreExplicit(t *testing.T) {
 	}
 }
 
+func TestDarwinRuntimeSyscallLinknameWrappersStayManaged(t *testing.T) {
+	files := map[string][]string{
+		"internal/lib/runtime/syscall_darwin_go126_llgo.go": {
+			"syscall_syscalln syscall.syscalln",
+			"syscall_rawsyscalln syscall.rawsyscalln",
+		},
+		"internal/lib/runtime/syscall_darwin_llgo.go": {
+			"syscall_syscall syscall.syscall",
+			"syscall_syscall6 syscall.syscall6",
+			"syscall_syscall6X syscall.syscall6X",
+			"syscall_syscallPtr syscall.syscallPtr",
+			"syscall_syscallX syscall.syscallX",
+			"syscall_syscall9 syscall.syscall9",
+			"syscall_rawSyscall syscall.rawSyscall",
+			"syscall_rawSyscall6 syscall.rawSyscall6",
+		},
+	}
+	for path, wrappers := range files {
+		source, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, wrapper := range wrappers {
+			marker := "//llgo:managedlink\n//go:linkname " + wrapper
+			if !strings.Contains(string(source), marker) {
+				t.Errorf("%s lacks managed Go-facing syscall boundary %q", path, marker)
+			}
+		}
+		for _, forbidden := range []string{
+			"//llgo:managedlink\n//go:linkname llgo_rawSyscall ",
+			"//llgo:managedlink\n//go:linkname llgo_rawSyscall6 ",
+			"//llgo:managedlink\n//go:linkname llgo_rawSyscall9 ",
+		} {
+			if strings.Contains(string(source), forbidden) {
+				t.Errorf("%s falsely certifies the dynamic foreign syscall leaf %q", path, forbidden)
+			}
+		}
+	}
+}
+
 func TestDarwinGeneratedWorkerCatalogCoversFileAndTCPWithoutUnsafeTransitions(t *testing.T) {
 	path := "internal/lib/syscall/syscall_darwin_worker_catalog_go126.go"
 	sourceBytes, err := os.ReadFile(path)
@@ -233,12 +274,15 @@ func TestDarwinGeneratedWorkerCatalogCoversFileAndTCPWithoutUnsafeTransitions(t 
 		{"libc_fchown_trampoline", "fchown", "3"},
 		{"libc_ftruncate_trampoline", "ftruncate", "3"},
 		{"libc_getcwd_trampoline", "getcwd", "3"},
+		{"libc_getpid_trampoline", "getpid", "3"},
+		{"libc_getrusage_trampoline", "getrusage", "3"},
 		{"libc_getpeername_trampoline", "getpeername", "3"},
 		{"libc_getsockname_trampoline", "getsockname", "3"},
 		{"libc_lchown_trampoline", "lchown", "3"},
 		{"libc_link_trampoline", "link", "3"},
 		{"libc_listen_trampoline", "listen", "3"},
 		{"libc_mkdir_trampoline", "mkdir", "3"},
+		{"libc_pipe_trampoline", "pipe", "3"},
 		{"libc_readlink_trampoline", "readlink", "3"},
 		{"libc_recvmsg_trampoline", "recvmsg", "3"},
 		{"libc_rename_trampoline", "rename", "3"},

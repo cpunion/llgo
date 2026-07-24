@@ -269,3 +269,32 @@ func Root() { T{}.Visible() }
 		})
 	}
 }
+
+func TestCoroManagedGoLinknameAcceptsPackedVariadicDefinition(t *testing.T) {
+	ssaPkg, _, _ := buildGoSSAPkg(t, `package variadic
+//llgo:managedlink
+//go:linkname runtimeHook runtime.variadicHook
+func runtimeHook(prefix int, values ...int) int {
+	return prefix + len(values)
+}
+`)
+	fn := ssaPkg.Func("runtimeHook")
+	if fn == nil || fn.Signature == nil || !fn.Signature.Variadic() {
+		t.Fatalf("fixture lost its variadic source signature: %v", fn)
+	}
+	source, exact, err := attachedManagedGoLinknameSource(fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exact || !source.managedOnly || source.gorootAuto ||
+		source.target != "runtime.variadicHook" ||
+		source.directive != "//go:linkname runtimeHook runtime.variadicHook" {
+		t.Fatalf("managed variadic source = %+v, exact=%t; want exact explicit managed-only boundary", source, exact)
+	}
+	effective := coroPhysicalNormalizeSourceSignature(fn.Signature)
+	if effective == nil || effective.Variadic() ||
+		effective.Params().Len() != 2 ||
+		!types.Identical(effective.Params().At(1).Type(), fn.Signature.Params().At(1).Type()) {
+		t.Fatalf("managed variadic physical signature = %v; want the exact packed []T parameter ABI", effective)
+	}
+}

@@ -117,6 +117,21 @@ func coroStdlibSyncFixtures() []coroStdlibSyncFixture {
 			wantGo:           true,
 		},
 		{
+			// Scheduler-progress gate for a genuinely blocking syscall. The
+			// initial pipe Read cannot complete until another G wakes from its
+			// timer and writes. Executing Read on the executor would therefore
+			// deadlock; only park/offload lets the writer make progress.
+			name: "syscall-pipe",
+			dir:  "./_testgo/coro_stdlib_syscall_pipe_progress",
+			wantSource: []string{
+				"syscall.Pipe(", "go writeAfterDelay(", "time.Sleep(",
+				"syscall.Read(", "syscall.Write(", "syscall.Close(",
+			},
+			wantSchedulerABI: coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
+			wantGo:           true,
+			requireGoStmt:    true,
+		},
+		{
 			// P0 readiness/deadline probe: one top-level server G and one-byte
 			// TCP operations. The fixture does not spell a channel operation, but
 			// Go 1.26 net.(*netFD).connect itself uses a nonblocking channel select,
@@ -141,10 +156,9 @@ func coroStdlibSyncAcceptanceConfig(fixture coroStdlibSyncFixture, output string
 	conf := NewDefaultConf(ModeBuild)
 	conf.OutFile = output
 	conf.ForceRebuild = true
-	conf.CoroProfile = CoroProfileStackless
 	// Ordinary stdlib code contains defer/panic boundaries (notably sync.Once).
 	// Managed child outcomes must therefore return through the parent's cleanup
-	// path through the single stackless profile.
+	// path through the single stackless architecture.
 	conf.CoroPlanBuilder = func(input CoroPlanInput) (*coro.SSAPlan, error) {
 		plan, err := input.Analyze(nil, coro.SSAConfig{
 			DynamicResolution:    coro.DynamicCHAClosed,
@@ -191,14 +205,11 @@ func TestCoroStdlibSyncAcceptanceConfiguration(t *testing.T) {
 		fixture := fixture
 		t.Run(fixture.name, func(t *testing.T) {
 			conf := coroStdlibSyncAcceptanceConfig(fixture, filepath.Join(t.TempDir(), "acceptance"))
-			if !conf.coroWorkerActive() {
+			if !conf.coroWorkerSupported() {
 				t.Fatal("synchronous stdlib acceptance must enable the native worker capability")
 			}
-			if !conf.coroNativeFleetActive() {
+			if !conf.coroNativeFleetSupported() {
 				t.Fatal("synchronous stdlib acceptance must exercise the native multi-owner fleet")
-			}
-			if !conf.coroExplicitStatusActive() {
-				t.Fatal("synchronous stdlib acceptance must propagate child panic through parent cleanup")
 			}
 			if got := activeCoroSchedulerABIVersion(conf); got != fixture.wantSchedulerABI {
 				t.Fatalf("configured scheduler ABI = %q, want %q", got, fixture.wantSchedulerABI)
@@ -411,11 +422,11 @@ func TestCoroStdlibSyncAcceptanceFixtures(t *testing.T) {
 	}
 }
 
-// TestCoroStdlibSyncAcceptance is deliberately opt-in until the P0 time,file,tcp
-// programs compile, link, and run. Use that exact comma list for the core-first
-// gate. The larger timer fixture remains explicitly selectable as a later Go
-// 1.26 semantics gate; "all" includes it. Once selected, a build/runtime failure
-// is a real test failure and is never converted into a known-failure pass.
+// TestCoroStdlibSyncAcceptance is deliberately opt-in because every selected
+// program performs a fresh standard-library compile, link, and run. The
+// time,timer,syscall-file,syscall-pipe,file,tcp set is the fast vertical gate;
+// "all" selects all six. Once selected, a build/runtime failure is a real test
+// failure and is never converted into a known-failure pass.
 func TestCoroStdlibSyncAcceptance(t *testing.T) {
 	selected := parseCoroStdlibAcceptanceSelection(t)
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
@@ -475,9 +486,12 @@ func parseCoroStdlibAcceptanceSelection(t *testing.T) map[string]bool {
 	t.Helper()
 	raw := strings.TrimSpace(os.Getenv(coroStdlibAcceptanceEnv))
 	if raw == "" {
-		t.Skipf("set %s=all or a comma-separated subset of time,timer,file,syscall-file,tcp", coroStdlibAcceptanceEnv)
+		t.Skipf("set %s=all or a comma-separated subset of time,timer,file,syscall-file,syscall-pipe,tcp", coroStdlibAcceptanceEnv)
 	}
-	known := map[string]bool{"time": true, "timer": true, "file": true, "syscall-file": true, "tcp": true}
+	known := map[string]bool{
+		"time": true, "timer": true, "file": true,
+		"syscall-file": true, "syscall-pipe": true, "tcp": true,
+	}
 	selected := make(map[string]bool, len(known))
 	for _, item := range strings.Split(raw, ",") {
 		item = strings.TrimSpace(item)
@@ -488,7 +502,7 @@ func parseCoroStdlibAcceptanceSelection(t *testing.T) map[string]bool {
 			continue
 		}
 		if !known[item] {
-			t.Fatalf("unknown %s selection %q; want all or time,timer,file,syscall-file,tcp", coroStdlibAcceptanceEnv, item)
+			t.Fatalf("unknown %s selection %q; want all or time,timer,file,syscall-file,syscall-pipe,tcp", coroStdlibAcceptanceEnv, item)
 		}
 		selected[item] = true
 	}

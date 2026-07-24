@@ -125,7 +125,7 @@ func BeginSpawn(parent, child *G, storage unsafe.Pointer, size uintptr) bool {
 	return true
 }
 
-func validZeroResultSpawnRoot(child *G, handle unsafe.Pointer) (*Frame, bool) {
+func validDiscardResultSpawnRoot(child *G, handle unsafe.Pointer) (*Frame, bool) {
 	root := findFrame(child, handle)
 	if root == nil || child.frames != root || root.next != nil || root.owner != child ||
 		root.parent != nil || root.handle != handle || root.header == nil ||
@@ -139,7 +139,7 @@ func validZeroResultSpawnRoot(child *G, handle unsafe.Pointer) (*Frame, bool) {
 	}
 	descriptor := (*FrameDescriptorV1)(root.descriptor)
 	if descriptor.Version != 1 || descriptor.Flags != 0 ||
-		descriptor.ResultSize != 0 || descriptor.ResultAlign != 1 {
+		!validProgramPayloadLayoutV1(descriptor.ResultSize, descriptor.ResultAlign) {
 		return nil, false
 	}
 	return root, true
@@ -164,7 +164,7 @@ func CommitSpawn(parent, child *G, handle unsafe.Pointer) bool {
 		child.taskSize != TaskStorageSize() || !gPreemptStateAtDepthZero(child, preemptIdle) {
 		return false
 	}
-	root, ok := validZeroResultSpawnRoot(child, handle)
+	root, ok := validDiscardResultSpawnRoot(child, handle)
 	if !ok || (p.readyHead == nil) != (p.readyTail == nil) ||
 		(p.readyTail != nil && p.readyTail.nextReady != nil) {
 		return false
@@ -232,6 +232,7 @@ func RollbackSpawn(parent, child *G) (unsafe.Pointer, uintptr, bool) {
 func ReclaimableG(g *G) bool {
 	return ValidG(g) && gPreemptStateAtDepthZero(g, preemptDisabled) && g.state == GDead &&
 		g.taskControlLeases == 0 && g.runAction == ActionInvalid && g.transferState == runnableTransferGIdle &&
+		g.osThreadLockDepth == 0 &&
 		g.root == nil && g.active == nil && g.frames == nil &&
 		g.pending.kind == pendingNone && g.pending.from == nil && g.pending.target == nil &&
 		g.destroyTarget == nil && !g.destroyRoot && g.nextReady == nil && !g.queued &&

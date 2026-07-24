@@ -113,7 +113,7 @@ func coroSelectPatchedWorkerAddressTrampoline(fn *ssa.Function, fromPatch bool) 
 // adapter used only by patch code; that form has no upstream alias to install
 // but is held to the same frozen symbol, declaration, and arity constraints.
 func (u *EmissionUniverse) aliasPatchedWorkerAddressTrampolines() error {
-	if u == nil || !u.CoroWorkerEnabled() {
+	if u == nil || !u.CoroWorkerSupported() {
 		return nil
 	}
 	packages := make([]*preparedEmissionPackage, 0, len(u.packages))
@@ -219,7 +219,7 @@ func coroWorkerAddressAliasDeclaration(fn *ssa.Function) bool {
 // aliases are immutable. Unsupported call sites deliberately remain ordinary
 // synchronous intrinsics; a physical coroutine cannot elide/lower them.
 func (u *EmissionUniverse) freezeCoroWorkerSyscallCertificates() error {
-	if u == nil || !u.CoroWorkerEnabled() {
+	if u == nil || !u.CoroWorkerSupported() {
 		return nil
 	}
 	shadows, err := AnalyzeCoroCallableShadows(u)
@@ -729,6 +729,7 @@ func validateCoroWorkerSyscallCall(plan *coro.SSAPlan, universe *EmissionUnivers
 			return fmt.Errorf("worker llgo.syscall parameter owner %q has no closed direct managed plan", owner.Name())
 		}
 	}
+	var uncertifiedActive []string
 	for _, edge := range frozen.workerIncoming {
 		if edge.call == nil || edge.call.Parent() == nil || edge.carrier == nil || edge.stableIdentity == "" {
 			return fmt.Errorf("worker llgo.syscall has an incomplete frozen static incoming edge")
@@ -777,11 +778,10 @@ func validateCoroWorkerSyscallCall(plan *coro.SSAPlan, universe *EmissionUnivers
 			)
 		}
 		if !edge.certified {
-			return fmt.Errorf(
-				"worker llgo.syscall active static incoming edge %q is uncertified (%s; caller=%+v carrier=%+v carrier-variant=%t call=%+v)",
-				edge.stableIdentity, edge.reason, callerPlan, carrierPlan,
-				carrierPlanned && coroWorkerHasExactRawPlainVariant(plan, edge.carrier, carrierPlan), callPlan,
-			)
+			uncertifiedActive = append(uncertifiedActive, fmt.Sprintf(
+				"%q (%s)", edge.call.Parent().String(), edge.reason,
+			))
+			continue
 		}
 		if !carrierPlanned || !callPlanned || callPlan.Kind != coro.CallDirect || callPlan.Rep != coro.DirectCoro ||
 			callPlan.Open || callPlan.MayBeNil || len(callPlan.Targets) != 1 || callPlan.Targets[0] != carrierPlan.ID {
@@ -790,6 +790,12 @@ func validateCoroWorkerSyscallCall(plan *coro.SSAPlan, universe *EmissionUnivers
 				edge.stableIdentity,
 			)
 		}
+	}
+	if len(uncertifiedActive) != 0 {
+		return fmt.Errorf(
+			"worker llgo.syscall active static incoming edges are uncertified: %s",
+			strings.Join(uncertifiedActive, ", "),
+		)
 	}
 	return nil
 }

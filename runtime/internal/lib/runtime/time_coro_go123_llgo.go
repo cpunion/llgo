@@ -49,10 +49,11 @@ type timeTimer struct {
 }
 
 type coroTimeTimerState struct {
-	lock     uint32
-	sendLock uint32
-	control  uint32
-	manager  uint32
+	lock       uint32
+	sendLock   uint32
+	control    uint32
+	manager    uint32
+	ownerRoute uint32
 
 	when      int64
 	period    int64
@@ -63,11 +64,16 @@ type coroTimeTimerState struct {
 }
 
 //go:linkname llgoCoroControlledTimerWaitV2 llgo.coroControlledTimerWait
-func llgoCoroControlledTimerWaitV2(controller unsafe.Pointer, control *uint32, expected uint32, deadline int64) uint32
+func llgoCoroControlledTimerWaitV2(
+	controller unsafe.Pointer,
+	control, ownerRoute *uint32,
+	expected uint32,
+	deadline int64,
+) uint32
 
 //llgo:coro noblock
-//go:linkname llgoCoroTimerCancelControlledV2 C.__llgo_coro_timer_cancel_controlled_v2
-func llgoCoroTimerCancelControlledV2(controller unsafe.Pointer, controlWord uint32) uint32
+//go:linkname llgoCoroTimerRequestControlledV2 C.__llgo_coro_timer_request_controlled_v2
+func llgoCoroTimerRequestControlledV2(route uint32) uint32
 
 func coroTimerControl(generation, phase uint32) uint32 {
 	return generation<<coroTimerControlPhaseBits | phase
@@ -103,12 +109,26 @@ func coroTimerUnlock(word *uint32) {
 // standard Timer manager. The compiler owns the complete V2 park/resume/source
 // transaction; source-style runtime code observes only its terminal status.
 func coroTimerWaitOne(t *timeTimer, expected uint32, deadline int64) uint32 {
-	if t == nil {
+	if t == nil || latomic.LoadUint32(&t.state.ownerRoute) != 0 {
 		return 0
 	}
-	outcome := llgoCoroControlledTimerWaitV2(unsafe.Pointer(t), &t.state.control, expected, deadline)
+	outcome := llgoCoroControlledTimerWaitV2(
+		unsafe.Pointer(t),
+		&t.state.control,
+		&t.state.ownerRoute,
+		expected,
+		deadline,
+	)
+	latomic.StoreUint32(&t.state.ownerRoute, 0)
 	KeepAlive(t)
 	return outcome
+}
+
+func coroTimerRequestGenerationChange(state *coroTimeTimerState) {
+	if route := latomic.LoadUint32(&state.ownerRoute); route != 0 &&
+		llgoCoroTimerRequestControlledV2(route) == 0 {
+		throw("time: controlled timer owner request failed")
+	}
 }
 
 func coroTimerNextTickerDeadline(when, period, now int64) int64 {
@@ -130,8 +150,9 @@ func coroTimerNextTickerDeadline(when, period, now int64) int64 {
 // sends are serialized with Stop/Reset so the latter can suppress or drain a
 // stale buffered value before returning. The coroutine time.AfterFunc patch
 // leaves the legacy f slot nil and retains the user callback in arg. This
-// manager starts that callback through one managed wrapper G while state.lock
-// still serializes the "callback has started" boundary promised by Stop.
+// manager itself is the callback G. Before invoking a one-shot callback it
+// publishes manager=0 under state.lock, so Reset after expiry starts an
+// independent manager and may overlap the old callback as required by Go.
 func coroTimerManager(t *timeTimer) {
 	for {
 		state := &t.state
@@ -189,10 +210,18 @@ func coroTimerManager(t *timeTimer) {
 		}
 
 		if state.afterFunc {
-			// Publish the callback G before Stop can observe the inactive
-			// state under this same lock. The target driver never executes it.
-			go coroRunTimerCallback(arg.(func()))
+			if period > 0 {
+				coroTimerUnlock(&state.lock)
+				throw("time: periodic AfterFunc timer")
+				return
+			}
+			// This manager is already the dedicated callback G. Retire its
+			// ownership before the call so Stop observes that the callback has
+			// started and Reset may launch the next generation independently.
+			state.manager = 0
 			coroTimerUnlock(&state.lock)
+			coroRunTimerCallback(arg.(func()))
+			return
 		} else {
 			coroTimerUnlock(&state.lock)
 			f(arg, uintptr(coroTimerControlGeneration(expected)), delta)
@@ -215,6 +244,7 @@ func coroRunTimerCallback(callback func()) {
 	callback()
 }
 
+//llgo:managedlink
 //go:linkname time_now time.now
 func time_now() (sec int64, nsec int32, mono int64) {
 	var tv ct.Timespec
@@ -225,21 +255,25 @@ func time_now() (sec int64, nsec int32, mono int64) {
 	return
 }
 
+//llgo:managedlink
 //go:linkname time_runtimeNow time.runtimeNow
 func time_runtimeNow() (sec int64, nsec int32, mono int64) {
 	return time_now()
 }
 
+//llgo:managedlink
 //go:linkname time_runtimeNano time.runtimeNano
 func time_runtimeNano() int64 {
 	return runtimeNano()
 }
 
+//llgo:managedlink
 //go:linkname time_runtimeIsBubbled time.runtimeIsBubbled
 func time_runtimeIsBubbled() bool {
 	return false
 }
 
+//llgo:managedlink
 //go:linkname llgoCoroTimerNewV1 runtime.llgoCoroTimerNewV1
 func llgoCoroTimerNewV1(when, period int64, f func(any, uintptr, int64), arg any, cp unsafe.Pointer) unsafe.Pointer {
 	t := &timeTimer{c: cp, init: true}
@@ -259,6 +293,7 @@ func llgoCoroTimerNewV1(when, period int64, f func(any, uintptr, int64), arg any
 	return unsafe.Pointer(t)
 }
 
+//llgo:managedlink
 //go:linkname llgoCoroTimerStopV1 runtime.llgoCoroTimerStopV1
 func llgoCoroTimerStopV1(timer unsafe.Pointer) bool {
 	t := (*timeTimer)(timer)
@@ -277,9 +312,9 @@ func llgoCoroTimerStopV1(timer unsafe.Pointer) bool {
 	}
 	coroTimerUnlock(&state.lock)
 	if pending {
-		// Invalid is the legal pre-publication side of the prepare handshake;
-		// every other result also leaves the old logical generation stale.
-		_ = llgoCoroTimerCancelControlledV2(unsafe.Pointer(t), old)
+		// A zero route is the legal pre-publication side of the prepare
+		// handshake; the post-attach control recheck closes that race.
+		coroTimerRequestGenerationChange(state)
 	}
 	if state.channel != nil {
 		if coroTimerDrainChannel(state.channel) {
@@ -290,6 +325,7 @@ func llgoCoroTimerStopV1(timer unsafe.Pointer) bool {
 	return pending
 }
 
+//llgo:managedlink
 //go:linkname llgoCoroTimerResetV1 runtime.llgoCoroTimerResetV1
 func llgoCoroTimerResetV1(timer unsafe.Pointer, when, period int64) bool {
 	t := (*timeTimer)(timer)
@@ -312,7 +348,7 @@ func llgoCoroTimerResetV1(timer unsafe.Pointer, when, period int64) bool {
 	}
 	coroTimerUnlock(&state.lock)
 	if pending {
-		_ = llgoCoroTimerCancelControlledV2(unsafe.Pointer(t), old)
+		coroTimerRequestGenerationChange(state)
 	}
 	if state.channel != nil {
 		if coroTimerDrainChannel(state.channel) {

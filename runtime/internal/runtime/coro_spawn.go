@@ -52,7 +52,14 @@ func coroSpawnBeginV1(parentPointer unsafe.Pointer) (unsafe.Pointer, bool) {
 
 func coroSpawnCommitV1(parentPointer, childPointer, handle unsafe.Pointer) bool {
 	parent, child := (*coroG)(parentPointer), (*coroG)(childPointer)
-	return coro.CommitSpawn(parent, child, handle) && coroTargetRecordReadySpawnV1(parent, child)
+	// All target-specific fallible checks precede scheduler publication. Once
+	// CommitSpawn succeeds, recording the owner-local work-sharing hint is a
+	// no-fail operation; an ownership change is a runtime invariant violation.
+	if !coroTargetCanRecordReadySpawnV1(parent) || !coro.CommitSpawn(parent, child, handle) {
+		return false
+	}
+	coroTargetRecordReadySpawnV1(parent, child)
+	return true
 }
 
 // coroReleaseCompletedTask performs the physical half of spawned-G

@@ -151,6 +151,21 @@ func MapTypeFlags(t *types.Map, sizes types.Sizes) (flags int) {
 	return
 }
 
+// MapBucketSlotSizes returns the physical key and element strides encoded in
+// runtime.abi.MapType. Large source values live behind pointers in a bucket,
+// so their slot size is the target pointer size rather than their Go size.
+func (b *Builder) MapBucketSlotSizes(t *types.Map) (key, elem uintptr) {
+	key = b.Size(t.Key())
+	if key > MAXKEYSIZE {
+		key = b.PtrSize
+	}
+	elem = b.Size(t.Elem())
+	if elem > MAXELEMSIZE {
+		elem = b.PtrSize
+	}
+	return
+}
+
 // $GOROOT/src/cmd/compile/internal/reflectdata/reflect.go
 // func MapBucketType(t *types.Type) *types.Type {
 // 	if t.MapType().Bucket != nil {

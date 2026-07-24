@@ -4,6 +4,7 @@
 package cabi_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -74,12 +75,14 @@ func buildConf(mode cabi.Mode, arch string) (conf *build.Config, targetAbi strin
 func TestBuild(t *testing.T) {
 	for _, mode := range modes {
 		for _, arch := range archs {
-			conf, _ := buildConf(mode, arch)
-			pkgs, err := build.Do([]string{"./_testdata/demo/demo.go"}, conf)
-			if err != nil {
-				t.Fatalf("build error: %v-%v %v", arch, mode, err)
-			}
-			pkgs[0].LPkg.Prog.Dispose()
+			t.Run(fmt.Sprintf("%s-%d", arch, mode), func(t *testing.T) {
+				conf, _ := buildConf(mode, arch)
+				pkgs, err := build.Do([]string{"./_testdata/demo/demo.go"}, conf)
+				if err != nil {
+					t.Fatal(err)
+				}
+				pkgs[0].LPkg.Prog.Dispose()
+			})
 		}
 	}
 }

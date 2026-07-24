@@ -150,8 +150,7 @@ func Root() int { return Apply(Target, 41) }
 			CoroABI:      coro.PhysicalABIV1,
 			SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 			PanicABI:     coro.PanicExplicitStatusABIV0,
-			FuncRepABI:   coro.FuncRepABIV1, CoroProfile: CoroProfileStackless,
-		}},
+			FuncRepABI:   coro.FuncRepABIV1}},
 	)
 	if err != nil {
 		t.Fatalf("compile plain dispatch package: %v", err)
@@ -181,19 +180,15 @@ func Root() int { return Apply(Target, 41) }
 	}
 }
 
-func TestCoroPlainDispatchGateAndTargetShapeFailClosed(t *testing.T) {
+func TestCoroPlainDispatchTargetShapeFailsClosed(t *testing.T) {
 	pkg, plan := buildCoroEntryTestPlan(t)
 	boxedPlan, ok := plan.FunctionPlan(pkg.Func("Boxed"))
 	if !ok || boxedPlan.FuncRep != coro.Dispatch {
 		t.Fatalf("Boxed plan = %+v, present=%t", boxedPlan, ok)
 	}
 	entry := plannedFunctionSymbol{function: pkg.Func("Boxed"), plan: boxedPlan, planned: true, coroPlan: plan}
-	if err := entry.checkSupported(); err == nil || !strings.Contains(err.Error(), "unimplemented dispatch descriptor") {
-		t.Fatalf("gate-off dispatch error = %v", err)
-	}
-	entry.plainDispatch = true
 	if err := entry.checkSupported(); err != nil {
-		t.Fatalf("gate-on plain target rejected: %v", err)
+		t.Fatalf("plain dispatch target rejected: %v", err)
 	}
 
 	badSignatures := []struct {
@@ -285,8 +280,7 @@ func Root() int {
 			CoroABI:      coro.PhysicalABIV1,
 			SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 			PanicABI:     coro.PanicExplicitStatusABIV0,
-			FuncRepABI:   coro.FuncRepABIV1, CoroProfile: CoroProfileStackless,
-		}},
+			FuncRepABI:   coro.FuncRepABIV1}},
 	)
 	if err != nil {
 		t.Fatalf("compile zero-binding descriptor closure: %v", err)

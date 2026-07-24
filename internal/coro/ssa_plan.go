@@ -131,6 +131,12 @@ type SSAFunctionPolicy struct {
 	// that execute on the scheduler stack and therefore must retain a plain ABI.
 	// It does not clear recursion, suspend effects, or any other execution flag.
 	TrustedNoPreempt bool
+	// TrustedNoUnwind authorizes the exact-body no-unwind solver to trust local
+	// implicit fault operations while it still validates explicit panic/defer,
+	// open calls, and the complete static callee dependency closure. It is for
+	// compiler/runtime invariant code whose impossible fault path must not force
+	// a stackless outcome ABI.
+	TrustedNoUnwind bool
 	// TrustedBoundedRecursion certifies that this exact function has a bounded
 	// recursion depth. The claim is effective only when every member of its
 	// complete managed recursive SCC is certified. It suppresses only the
@@ -265,6 +271,14 @@ type SSATrustedInlineCallCertificate struct {
 	ABI      string
 }
 
+// SSARawPlainCallCertificate binds one exact ordinary static source call to
+// the target's separately emitted native-stack body. It is intentionally
+// opaque: the frontend owns the RawCritical source marker and freezes the
+// occurrence identity before whole-program analysis.
+type SSARawPlainCallCertificate struct {
+	ID string
+}
+
 // SSALoweredCall records one exact call inserted by frontend lowering even
 // though no CallInstruction for it exists in the source SSA body.
 // LogicalName is a frontend-owned stable identity used to resolve the exact
@@ -280,6 +294,11 @@ type SSATrustedInlineCallCertificate struct {
 type SSALoweredCall struct {
 	LogicalName string
 	Target      *ssa.Function
+	// NoUnwind is an exact owner/logical-name occurrence proof that this
+	// compiler-inserted helper cannot unwind from the source operation it
+	// implements. It suppresses only MayUnwind propagation; suspend, affinity,
+	// IRQ, demand, and all other target properties remain ordinary.
+	NoUnwind bool
 	// RawPlain is a frozen occurrence-level proof that every physical use of
 	// this owner/logical-name pair invokes Target's raw plain body directly on
 	// the current legacy stack. It is neither a managed call nor an unwind
@@ -375,16 +394,18 @@ type SSAConfig struct {
 	// this from a package or type name.
 	ClassifyRawCFunctionType func(typ types.Type) (bool, error)
 
-	// ClassifyElidedCall identifies a direct static call for which the frontend
-	// emits no callable edge to that exact SSA declaration: either the call is
-	// omitted entirely, a proven no-suspend compiler intrinsic is lowered inline
-	// in the caller, or the declaration is replaced by exact calls supplied
-	// through ClassifyLoweredCalls. Such a site has no CallPlan but remains in the
-	// plan/digest. Eliding the declaration does not elide separately classified
-	// lowered calls or their effects. The callback is trusted frontend policy,
-	// not an effect summary: AnalyzeSSA rejects attempts to elide go, defer, or
-	// dynamic calls. Argument-producing SSA instructions remain analyzed
-	// independently.
+	// ClassifyElidedCall identifies an exact static call occurrence for which
+	// the frontend emits no callable edge to that SSA declaration: either the
+	// call is omitted entirely, a compiler intrinsic is lowered inline in the
+	// caller, a defer's already-evaluated operands are carried into the owning
+	// frame's cleanup recipe, or the declaration is replaced by exact calls
+	// supplied through ClassifyLoweredCalls. Such a site has no CallPlan but
+	// remains in the plan/digest. Eliding the declaration does not elide
+	// separately classified lowered calls or their effects. The callback is
+	// trusted frontend policy, not an effect summary: AnalyzeSSA accepts only an
+	// ordinary *ssa.Call or an owner-local *ssa.Defer, and continues to reject
+	// go, dynamic, invoke, alternate-defer-stack, and builtin sites.
+	// Argument-producing SSA instructions remain analyzed independently.
 	ClassifyElidedCall func(caller *ssa.Function, call ssa.CallInstruction) (bool, error)
 
 	// ClassifyElidedCallCertificate freezes an optional opaque frontend
@@ -393,6 +414,15 @@ type SSAConfig struct {
 	// included in CoroPlanDigest. An empty string means the elision needs no
 	// additional capability.
 	ClassifyElidedCallCertificate func(caller *ssa.Function, call ssa.CallInstruction) (string, error)
+
+	// ClassifyStaticSpawnTarget identifies the exact compiler-owned Go wrapper
+	// that carries a direct source `go intrinsic(args...)` operation. The
+	// wrapper is a bodyful, context-free function with the exact source call
+	// signature; AnalyzeSSA substitutes it only for this CallSpawn edge and
+	// leaves the intrinsic declaration and every ordinary/defer occurrence
+	// unchanged. This is an occurrence-level lowering fact, not a general
+	// function alias or function-value conversion.
+	ClassifyStaticSpawnTarget func(caller *ssa.Function, call *ssa.Go) (target *ssa.Function, redirected bool, err error)
 
 	// ClassifyTrustedInlineCall identifies one exact ordinary static call whose
 	// target remains conservatively ExternalUnknownForeign/BlockForeign for all
@@ -404,6 +434,14 @@ type SSAConfig struct {
 	// refinement. Independent IRQ, unwind, and every unrelated body effect or
 	// execution constraint remain conservative.
 	ClassifyTrustedInlineCall func(caller *ssa.Function, call ssa.CallInstruction) (SSATrustedInlineCallCertificate, bool, error)
+
+	// ClassifyRawPlainCall identifies one exact ordinary static call whose
+	// source-owned RawCritical contract requires the target's raw/plain body.
+	// AnalyzeSSA replaces the managed call edge with raw provenance, demands no
+	// public raw entry address, and rejects the final plan unless the target has
+	// one exact raw/plain variant. The target may independently retain a plain
+	// or coroutine managed primary for other occurrences.
+	ClassifyRawPlainCall func(caller *ssa.Function, call ssa.CallInstruction) (SSARawPlainCallCertificate, bool, error)
 
 	// ClassifyDirectPlainCallArgument identifies one exact static-call argument
 	// use whose frontend ABI synchronously invokes a direct plain entry while
@@ -1358,8 +1396,16 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if err != nil {
 		return nil, err
 	}
+	staticSpawnTargets, err := classifySSAStaticSpawnTargets(
+		bodyFunctions, includedSet, canonicalizer, config,
+	)
+	if err != nil {
+		return nil, err
+	}
 	safeFixedArrayIndexes := analyzeSSAExactSafeFixedArrayIndexes(bodyFunctions)
-	unknownTargets, err := classifySSAUnknownCalls(bodyFunctions, includedSet, flow, elidedCalls, config)
+	unknownTargets, err := classifySSAUnknownCalls(
+		bodyFunctions, includedSet, flow, elidedCalls, staticSpawnTargets, config,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -1436,11 +1482,22 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if err != nil {
 		return nil, err
 	}
+	rawPlainCalls, err := classifySSARawPlainCalls(
+		bodyFunctions, includedSet, ignoredBodies, trustedPolicies, elidedCalls, canonicalizer, config,
+	)
+	if err != nil {
+		return nil, err
+	}
 	trustedInlineCalls, err := classifySSATrustedInlineCalls(
 		bodyFunctions, includedSet, ignoredBodies, preliminaryPolicies, elidedCalls, canonicalizer, config,
 	)
 	if err != nil {
 		return nil, err
+	}
+	for call := range rawPlainCalls {
+		if _, overlap := trustedInlineCalls[call]; overlap {
+			return nil, fmt.Errorf("coro: raw-plain call in %q is also trusted-inline", call.Parent().Name())
+		}
 	}
 	trustedInlineNoUnwind, err := classifySSATrustedInlineNoUnwindCalls(
 		trustedInlineCalls, preliminaryPolicies, canonicalizer,
@@ -1448,7 +1505,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if err != nil {
 		return nil, err
 	}
-	exactNoUnwind, err := proveSSAExactNoUnwind(
+	exactNoUnwind, exactNoUnwindCalls, err := proveSSAExactNoUnwind(
 		bodyFunctions, trustedPolicies, closedDynamicCalls, trustedInlineNoUnwind, elidedCalls, safeFixedArrayIndexes, canonicalizer,
 	)
 	if err != nil {
@@ -1495,13 +1552,43 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 				}
 				kind := ssaCallKind(call)
 				if rawCallee := common.StaticCallee(); rawCallee != nil {
-					callee, resolved, resolveErr := flow.resolveTarget(rawCallee)
+					callee, resolved, resolveErr := resolveSSAStaticCallTarget(
+						flow, call, rawCallee, staticSpawnTargets,
+					)
 					if resolveErr != nil {
 						return nil, fmt.Errorf("coro: resolve static callee %q in %q while building graph: %w", rawCallee.Name(), caller.Name(), resolveErr)
 					}
 					if resolved && includedSet[callee] {
+						if _, rawPlain := rawPlainCalls[call]; rawPlain {
+							if kind != CallDirect {
+								return nil, fmt.Errorf(
+									"coro: raw-plain call in %q is not one ordinary direct call",
+									caller.Name(),
+								)
+							}
+							callKinds[call] = CallDirect
+							if err := graph.AddReference(ReferenceEdge{
+								Owner: ids[caller], Target: ids[callee], RawPlain: true,
+							}); err != nil {
+								return nil, fmt.Errorf(
+									"coro: add raw-plain call from %q to %q: %w",
+									caller.Name(), callee.Name(), err,
+								)
+							}
+							continue
+						}
 						edgeKind := staticCallKind(kind, policies[callee])
-						edge := CallEdge{Caller: ids[caller], Callee: ids[callee], Kind: edgeKind}
+						graphEdgeKind := edgeKind
+						if exactNoUnwindCalls[call] {
+							if edgeKind != CallDirect {
+								return nil, fmt.Errorf(
+									"coro: exact contextual no-unwind call in %q is not one managed direct edge",
+									caller.Name(),
+								)
+							}
+							graphEdgeKind = CallDirectNoUnwind
+						}
+						edge := CallEdge{Caller: ids[caller], Callee: ids[callee], Kind: graphEdgeKind}
 						if _, trustedInline := trustedInlineCalls[call]; trustedInline {
 							if edgeKind != CallForeign {
 								return nil, fmt.Errorf("coro: trusted-inline call in %q did not resolve to one conservative foreign edge", caller.Name())
@@ -1548,7 +1635,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 					candidates := sortedSSACandidates(flowTargets, ids, includedSet)
 					callKinds[call] = kind
 					if config.OutcomeMode == OutcomeExplicitStatus && common.IsInvoke() {
-						// The stackless explicit-outcome profile has one receiver-aware
+						// The stackless explicit-outcome architecture has one receiver-aware
 						// descriptor boundary for both closed and open interface calls.
 						// A closed candidate set remains closed in SSACallPlan; this
 						// synthetic managed boundary contributes only structured await
@@ -1696,7 +1783,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if err := validateSSACallableContractPlans(base, policies, ids); err != nil {
 		return nil, err
 	}
-	valuePlans, callPlans, err := flow.finalize(base, callKinds, unknownTargets)
+	valuePlans, callPlans, err := flow.finalize(base, callKinds, unknownTargets, staticSpawnTargets)
 	if err != nil {
 		return nil, fmt.Errorf("coro: finalize SSA value and call plans: %w", err)
 	}
@@ -1704,6 +1791,9 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		return nil, err
 	}
 	if err := applySSATrustedInlineCallPlans(callPlans, trustedInlineCalls); err != nil {
+		return nil, err
+	}
+	if err := applySSARawPlainCallPlans(base, callPlans, rawPlainCalls, ids); err != nil {
 		return nil, err
 	}
 	elidedCallSet := make(map[ssa.CallInstruction]struct{}, len(elidedCalls))
@@ -1980,6 +2070,9 @@ func addSSAClassifiedLoweredCalls(
 			if call.RawPlain && call.UnwindOnly {
 				return nil, fmt.Errorf("coro: lowered call %q in %q is both raw-plain and unwind-only", call.LogicalName, owner.Name())
 			}
+			if call.NoUnwind && (call.RawPlain || call.UnwindOnly || call.ExplicitStatusElided) {
+				return nil, fmt.Errorf("coro: lowered call %q in %q mixes no-unwind with raw-plain or unwind-only semantics", call.LogicalName, owner.Name())
+			}
 			if call.RawPlain && call.ExplicitStatusElided {
 				return nil, fmt.Errorf("coro: lowered call %q in %q is both raw-plain and ExplicitStatus-elided", call.LogicalName, owner.Name())
 			}
@@ -2022,6 +2115,15 @@ func addSSAClassifiedLoweredCalls(
 				kind = CallExplicitStatusElided
 			} else if !call.UnwindOnly {
 				kind = staticCallKind(CallDirect, policies[call.Target])
+				if call.NoUnwind {
+					if kind != CallDirect {
+						return nil, fmt.Errorf(
+							"coro: no-unwind lowered call %q in %q is not one managed direct edge",
+							call.LogicalName, owner.Name(),
+						)
+					}
+					kind = CallDirectNoUnwind
+				}
 			}
 			if err := graph.AddCall(CallEdge{Caller: ids[owner], Callee: ids[call.Target], Kind: kind}); err != nil {
 				return nil, fmt.Errorf("coro: add lowered call %q from %q to %q: %w", call.LogicalName, owner.Name(), call.Target.Name(), err)
@@ -2671,8 +2773,21 @@ func classifySSAElidedCalls(functions []*ssa.Function, config SSAConfig) (map[ss
 				if !elided {
 					continue
 				}
-				if call.Common() == nil || call.Common().StaticCallee() == nil || ssaCallKind(call) != CallDirect {
-					return nil, fmt.Errorf("coro: frontend-elided call in %q must be a direct static call", caller.Name())
+				common := call.Common()
+				if common == nil || common.StaticCallee() == nil || common.IsInvoke() {
+					return nil, fmt.Errorf("coro: frontend-elided call in %q must have one exact static target", caller.Name())
+				}
+				switch exact := call.(type) {
+				case *ssa.Call:
+					if exact == nil {
+						return nil, fmt.Errorf("coro: frontend-elided call in %q has a nil ordinary call", caller.Name())
+					}
+				case *ssa.Defer:
+					if exact == nil || exact.DeferStack != nil {
+						return nil, fmt.Errorf("coro: frontend-elided defer in %q requires its owner-local cleanup stack", caller.Name())
+					}
+				default:
+					return nil, fmt.Errorf("coro: frontend-elided call in %q must be an ordinary call or owner-local defer", caller.Name())
 				}
 				result[call] = true
 			}
@@ -2708,11 +2823,98 @@ func classifySSAElidedCallCertificates(
 	return result, nil
 }
 
+func classifySSAStaticSpawnTargets(
+	functions []*ssa.Function,
+	included map[*ssa.Function]bool,
+	canonicalizer *ssaFunctionCanonicalizer,
+	config SSAConfig,
+) (map[*ssa.Go]*ssa.Function, error) {
+	result := make(map[*ssa.Go]*ssa.Function)
+	if config.ClassifyStaticSpawnTarget == nil {
+		return result, nil
+	}
+	for _, caller := range functions {
+		for _, block := range caller.Blocks {
+			for _, instruction := range block.Instrs {
+				spawn, ok := instruction.(*ssa.Go)
+				if !ok {
+					continue
+				}
+				target, redirected, err := config.ClassifyStaticSpawnTarget(caller, spawn)
+				if err != nil {
+					return nil, fmt.Errorf("coro: classify static spawn target in %q: %w", caller.Name(), err)
+				}
+				if !redirected {
+					if target != nil {
+						return nil, fmt.Errorf("coro: unclassified static spawn in %q returned a target", caller.Name())
+					}
+					continue
+				}
+				common := spawn.Common()
+				if common == nil {
+					return nil, fmt.Errorf("coro: redirected spawn in %q has no call operands", caller.Name())
+				}
+				raw, direct := common.Value.(*ssa.Function)
+				if spawn.Parent() != caller || !direct || raw == nil ||
+					common.StaticCallee() != raw || common.IsInvoke() || common.Method != nil {
+					return nil, fmt.Errorf("coro: redirected spawn in %q is not one exact direct static function call", caller.Name())
+				}
+				if target == nil || target == raw || target.Prog != caller.Prog {
+					return nil, fmt.Errorf("coro: redirected spawn in %q has no distinct same-program target", caller.Name())
+				}
+				canonical, resolved, resolveErr := canonicalizer.resolve(target)
+				if resolveErr != nil {
+					return nil, fmt.Errorf("coro: resolve redirected spawn target %q in %q: %w", target.Name(), caller.Name(), resolveErr)
+				}
+				if !resolved || canonical != target || !included[target] {
+					return nil, fmt.Errorf("coro: redirected spawn target %q in %q is not one exact emission-universe function", target.Name(), caller.Name())
+				}
+				if len(target.Blocks) == 0 || len(target.FreeVars) != 0 || target.Synthetic == "" ||
+					target.Origin() != nil || len(target.TypeArgs()) != 0 {
+					return nil, fmt.Errorf("coro: redirected spawn target %q in %q is not one bodyful context-free compiler wrapper", target.Name(), caller.Name())
+				}
+				signature := target.Signature
+				if signature == nil || signature.Recv() != nil || signature.Variadic() ||
+					typeParamListLen(signature.TypeParams()) != 0 ||
+					typeParamListLen(signature.RecvTypeParams()) != 0 ||
+					!types.Identical(common.Signature(), signature) {
+					return nil, fmt.Errorf("coro: redirected spawn target %q in %q does not preserve the exact source signature", target.Name(), caller.Name())
+				}
+				if len(common.Args) != signature.Params().Len() {
+					return nil, fmt.Errorf("coro: redirected spawn target %q in %q has %d arguments, want %d", target.Name(), caller.Name(), len(common.Args), signature.Params().Len())
+				}
+				for index, argument := range common.Args {
+					if argument == nil || !types.Identical(argument.Type(), signature.Params().At(index).Type()) {
+						return nil, fmt.Errorf("coro: redirected spawn target %q in %q has an incompatible argument %d", target.Name(), caller.Name(), index)
+					}
+				}
+				result[spawn] = target
+			}
+		}
+	}
+	return result, nil
+}
+
+func resolveSSAStaticCallTarget(
+	flow *ssaFuncFlow,
+	call ssa.CallInstruction,
+	raw *ssa.Function,
+	staticSpawnTargets map[*ssa.Go]*ssa.Function,
+) (*ssa.Function, bool, error) {
+	if spawn, ok := call.(*ssa.Go); ok {
+		if target := staticSpawnTargets[spawn]; target != nil {
+			return target, true, nil
+		}
+	}
+	return flow.resolveTarget(raw)
+}
+
 func classifySSAUnknownCalls(
 	functions []*ssa.Function,
 	included map[*ssa.Function]bool,
 	flow *ssaFuncFlow,
 	elided map[ssa.CallInstruction]bool,
+	staticSpawnTargets map[*ssa.Go]*ssa.Function,
 	config SSAConfig,
 ) (map[ssa.CallInstruction]UnknownTarget, error) {
 	result := make(map[ssa.CallInstruction]UnknownTarget)
@@ -2731,7 +2933,9 @@ func classifySSAUnknownCalls(
 					continue
 				}
 				if callee := common.StaticCallee(); callee != nil {
-					canonical, ok, err := flow.resolveTarget(callee)
+					canonical, ok, err := resolveSSAStaticCallTarget(
+						flow, call, callee, staticSpawnTargets,
+					)
 					if err != nil {
 						return nil, fmt.Errorf("coro: resolve static callee %q in %q while classifying unknown calls: %w", callee.Name(), caller.Name(), err)
 					}

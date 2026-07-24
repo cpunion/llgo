@@ -20,6 +20,7 @@ func llgo_rawSyscall9(fn, a1, a2, a3, a4, a5, a6, a7, a8, a9 uintptr) (r1, r2, e
 // such as syscall9/rawSyscall9/syscallPtr, so runtime mirrors the raw runtime
 // entry points and returns the libc errno unchanged here.
 
+//llgo:managedlink
 //go:linkname syscall_syscalln syscall.syscalln
 func syscall_syscalln(fn uintptr, args ...uintptr) (r1, r2, err uintptr) {
 	entersyscall()
@@ -28,6 +29,7 @@ func syscall_syscalln(fn uintptr, args ...uintptr) (r1, r2, err uintptr) {
 	return r1, r2, err
 }
 
+//llgo:managedlink
 //go:linkname syscall_rawsyscalln syscall.rawsyscalln
 func syscall_rawsyscalln(fn uintptr, args ...uintptr) (r1, r2, err uintptr) {
 	switch len(args) {
@@ -56,6 +58,7 @@ func syscall_rawsyscalln(fn uintptr, args ...uintptr) (r1, r2, err uintptr) {
 	}
 }
 
+//llgo:managedlink
 //go:linkname crypto_x509_syscall crypto/x509/internal/macos.syscall
 func crypto_x509_syscall(fn, a1, a2, a3, a4, a5 uintptr, f1 float64) uintptr {
 	r1, _, _ := llgo_syscall5f64(fn, a1, a2, a3, a4, a5, f1)

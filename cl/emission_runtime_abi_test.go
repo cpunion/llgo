@@ -192,7 +192,7 @@ func Close(ch chan int) { close(ch) }
 	universe, err := PrepareEmissionUniverseWithOptions(prog, nil, []EmissionPackage{
 		{SSA: runtimePkg.ssa, Files: []*ast.File{runtimePkg.file}},
 		{SSA: callerPkg.ssa, Files: []*ast.File{callerPkg.file}},
-	}, EmissionUniverseOptions{CompleteRuntimeABI: true, CoroProfile: CoroProfileStackless})
+	}, EmissionUniverseOptions{CompleteRuntimeABI: true})
 	if err != nil {
 		t.Fatal(err)
 	}

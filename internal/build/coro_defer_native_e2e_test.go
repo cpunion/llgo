@@ -181,7 +181,7 @@ func buildCoroStaticDeferNativeE2EUser(
 	ssaPkg, files := buildCoroPlanTestPackage(t, coroSpawnNativeE2EPackage, coroStaticDeferNativeE2ESource, nil)
 	universe, err := cl.PrepareEmissionUniverseWithOptions(prog, nil, []cl.EmissionPackage{{
 		SSA: ssaPkg, Files: files, Identity: coroSpawnNativeE2EPackage,
-	}}, cl.EmissionUniverseOptions{CoroProfile: cl.CoroProfileStackless})
+	}}, cl.EmissionUniverseOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,8 +226,7 @@ func buildCoroStaticDeferNativeE2EUser(
 		SchedulerABI:     coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 		PanicABI:         coro.PanicExplicitStatusABIV0,
 		FuncRepABI:       coro.FuncRepABIV1,
-		EmissionUniverse: universe, CoroProfile: cl.CoroProfileStackless,
-	}
+		EmissionUniverse: universe}
 	pkg, _, err := cl.NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		cl.PackageOptions{Compilation: compilation},
@@ -255,8 +254,7 @@ func buildCoroStaticDeferNativeE2EEntry(t *testing.T, prog llssa.Program, temp, 
 	conf := &Config{
 		BuildMode: BuildModeExe,
 		Goos:      runtime.GOOS,
-		Goarch:    runtime.GOARCH, CoroProfile: CoroProfileStackless,
-	}
+		Goarch:    runtime.GOARCH}
 	ctx := &context{prog: prog, buildConf: conf}
 	bootstrap := &coroProgramBootstrapV1{
 		Version: coroProgramBootstrapVersionV2,

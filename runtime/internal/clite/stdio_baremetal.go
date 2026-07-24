@@ -27,6 +27,16 @@ const (
 	LLGoPackage = true
 )
 
-var Stdin FilePtr = Fopen(Str("/dev/stdin"), Str("r"))
-var Stdout FilePtr = Fopen(Str("/dev/stdout"), Str("w"))
+// openBaremetalStandardStream is limited to startup registration of the fixed
+// newlib device streams. It creates a FILE handle but performs no data
+// transfer or readiness wait. Keep ordinary Fopen calls conservative: only
+// this exact wrapper edge selects Fopen's executor-safe refinement.
+//
+//llgo:coro contract foreign.v1 scope=wrapper progress=executor-safe affinity=caller-thread reentry=none memory=borrow-until-return
+func openBaremetalStandardStream(name, mode *Char) FilePtr {
+	return Fopen(name, mode)
+}
+
+var Stdin FilePtr = openBaremetalStandardStream(Str("/dev/stdin"), Str("r"))
+var Stdout FilePtr = openBaremetalStandardStream(Str("/dev/stdout"), Str("w"))
 var Stderr FilePtr = Stdout

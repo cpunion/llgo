@@ -533,6 +533,36 @@ func (registry *OperationRouteRegistry) PostTaskControlAndRequest(id OperationID
 	return registry.PostAndRequest(id, kind)
 }
 
+// RequestTimerExecutor routes the wake half of an atomically published
+// controlled-timer generation change. The control word is the durable fact;
+// this method only protects the route lookup through ExecutorRegistry.Request.
+// The owner later observes the mismatch while scanning its timer catalog and
+// performs ordinary ParkSet cancellation.
+func (registry *OperationRouteRegistry) RequestTimerExecutor(route RouteID) ExecutorRequestResult {
+	if !route.Valid() {
+		return ExecutorRequestInvalid
+	}
+	slot, ok := operationRouteSlotFor(registry, route)
+	if !ok {
+		return ExecutorRequestStale
+	}
+	if !operationRouteAcquireProducer(slot) {
+		state := operationRouteLifecycle(preemptLoad(&slot.state))
+		if state == operationRouteClosing || state == operationRouteQuiesced || state == operationRouteRetired {
+			return ExecutorRequestClosed
+		}
+		return ExecutorRequestStale
+	}
+	result := ExecutorRequestInvalid
+	if preemptLoad(&slot.state) == uint32(operationRouteActive) &&
+		preemptLoad(&slot.route) == uint32(route) && slot.timers != nil &&
+		slot.executorRegistry != nil {
+		result = slot.executorRegistry.Request(slot.executor)
+	}
+	operationRouteReleaseProducer(slot)
+	return result
+}
+
 // RequestChannelExecutor requests the exact executor after the typed hchan
 // adapter has durably committed one Channel endpoint. Unlike PostAndRequest,
 // this method does not publish a source fact: the adapter's external commit

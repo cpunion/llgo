@@ -29,9 +29,115 @@ import (
 
 const coroManagedInterfaceRawTrapPrefix = "__llgo_coro_method_raw_trap_v1."
 
+// emitCoroMethodValueDescriptor materializes the descriptor stored in
+// abi.Method.Tfn_. Unlike Ifn_, its receiver is an explicit first argument and
+// the descriptor environment is always nil. This is the representation used
+// when reflect exposes Method.Func as a normal Go function value.
+func (p *context) emitCoroMethodValueDescriptor(
+	target *ssa.Function, methodSignature *types.Signature,
+) (llssa.Expr, error) {
+	if p == nil || target == nil || methodSignature == nil || methodSignature.Recv() == nil {
+		return llssa.Nil, fmt.Errorf("coroutine method value descriptor requires an exact receiver target and compilation plan")
+	}
+	plan := p.compilation.immutablePlan()
+	if plan == nil {
+		return llssa.Nil, fmt.Errorf("coroutine method value descriptor requires an exact receiver target and compilation plan")
+	}
+	entry := p.mustFunctionSymbol(target)
+	if entry.function.Signature == nil || entry.function.Signature.Recv() == nil ||
+		len(entry.function.FreeVars) != 0 || entry.plan.Demand == coro.NoDemand {
+		return llssa.Nil, fmt.Errorf("coroutine method value descriptor target %q is not one demanded non-capturing method", entry.plan.ID)
+	}
+
+	// Method-table materialization can start from an upstream receiver type
+	// whose implementation is supplied by a type patch. patchType deliberately
+	// leaves Signature.Recv untouched, so rebuilding the method expression from
+	// methodSignature would mix an upstream receiver with the patched physical
+	// body. Derive the callable ABI from the exact frozen target/owner instead;
+	// coroPhysicalSourceSignature patches the receiver and then exposes it as
+	// the leading ordinary method-expression parameter.
+	universe := p.immutableEmissionUniverse()
+	if universe == nil {
+		return llssa.Nil, fmt.Errorf("coroutine method value descriptor target %q has no emission universe", entry.plan.ID)
+	}
+	logical, err := universe.coroPhysicalSourceSignature(entry.function)
+	if err != nil {
+		return llssa.Nil, fmt.Errorf("coroutine method value descriptor target %q: derive effective method expression: %w", entry.plan.ID, err)
+	}
+	if logical == nil || logical.Recv() != nil {
+		return llssa.Nil, fmt.Errorf("coroutine method value descriptor target %q lost its receiver-first callable signature", entry.plan.ID)
+	}
+	abi, err := newCoroPlainDispatchEffectiveABI(p, logical)
+	if err != nil {
+		return llssa.Nil, fmt.Errorf("coroutine method value descriptor target %q: %w", entry.plan.ID, err)
+	}
+
+	physical, _, kind := p.funcOfEntry(entry)
+	if kind != goFunc || physical == nil {
+		return llssa.Nil, fmt.Errorf("coroutine method value descriptor target %q did not resolve to one Go entry", entry.plan.ID)
+	}
+	physicalEmission := entry.plan.Emission
+	if physicalEmission == coro.EmitExternal {
+		if entry.plan.Effect != coro.NoSuspend || entry.plan.Exec.Contains(coro.BlockForeign|coro.MayUnwind|coro.OpaqueExec) {
+			return llssa.Nil, fmt.Errorf("coroutine method value descriptor external target %q has no executor-safe plain capability", entry.plan.ID)
+		}
+		physicalEmission = coro.EmitPlain
+	}
+	if physicalEmission != coro.EmitPlain && physicalEmission != coro.EmitCoroutine {
+		return llssa.Nil, fmt.Errorf("coroutine method value descriptor target %q has unsupported emission %s", entry.plan.ID, entry.plan.Emission)
+	}
+
+	targetHash := sha256.Sum256([]byte(entry.plan.ID))
+	targetKey := "method-value." + hex.EncodeToString(targetHash[:8]) + "." + hex.EncodeToString(abi.hash[:])
+	descriptorName := coroPlainDispatchDescriptorPrefix + targetKey
+	if descriptor, found := p.coroPlainDescriptors[descriptorName]; found {
+		return descriptor, nil
+	}
+
+	flags := uint32(llssa.CoroDispatchFlagNoCapture)
+	var plainEntry, coroEntry llssa.Expr
+	switch physicalEmission {
+	case coro.EmitPlain:
+		flags |= llssa.CoroDispatchFlagHasPlain
+		plainEntry = p.newCoroDynamicDispatchEntryThunk(
+			coroPlainDispatchThunkPrefix+targetKey, physical.Expr, abi, coro.EmitPlain, nil,
+		)
+	case coro.EmitCoroutine:
+		flags |= llssa.CoroDispatchFlagHasCoro
+		coroEntry = p.newCoroDynamicDispatchEntryThunk(
+			coroCoroDispatchThunkPrefix+targetKey, physical.Expr, abi, coro.EmitCoroutine, nil,
+		)
+		if plan.HasRawPlainVariant(entry.function) {
+			raw, _, rawKind := p.funcOfEntry(p.mustRawPlainFunctionSymbol(entry.function))
+			if rawKind != goFunc || raw == nil {
+				return llssa.Nil, fmt.Errorf("coroutine method value descriptor target %q lost its raw plain variant", entry.plan.ID)
+			}
+			flags |= llssa.CoroDispatchFlagHasPlain
+			plainEntry = p.newCoroDynamicDispatchEntryThunk(
+				coroPlainDispatchThunkPrefix+targetKey, raw.Expr, abi, coro.EmitRawPlain, nil,
+			)
+		}
+	}
+
+	descriptor := p.pkg.NewCoroDispatchDescriptor(descriptorName, llssa.CoroDispatchDescriptorOptions{
+		Version:    coroPlainDispatchVersion,
+		Flags:      flags,
+		ABIHash:    abi.hash,
+		Signature:  abi.signature,
+		PlainEntry: plainEntry,
+		CoroEntry:  coroEntry,
+		Result:     p.prog.Type(abi.resultSlotType, llssa.InC),
+	})
+	if p.coroPlainDescriptors == nil {
+		p.coroPlainDescriptors = make(map[string]llssa.Expr)
+	}
+	p.coroPlainDescriptors[descriptorName] = descriptor
+	return descriptor, nil
+}
+
 // coroManagedInterfaceDispatchPlan freezes the exact method families whose
 // ABI Method.Ifn_ word uses the universal {descriptor, receiver-environment}
-// transport. The stackless profile uses this transport for both closed and
+// transport. The stackless architecture uses this transport for both closed and
 // open managed invokes: ABI type data has one Ifn_ word per concrete method,
 // independent of the source call site, and a second receiver-aware plain path
 // would split panic/outcome semantics.
@@ -139,16 +245,23 @@ func analyzeCoroManagedInterfaceDispatchPlan(
 					if callPlan.Unresolved != coro.UnknownManagedInterfaceDispatch {
 						continue
 					}
-					if err := validateCoroManagedInterfaceDispatchCall(plan, universe, owner.Function, call, callPlan); err != nil {
+					if err := validateCoroManagedInterfaceDispatchCall(
+						plan, universe, owner.Function, call, callPlan,
+					); err != nil {
 						return nil, err
 					}
 				} else {
-					direct, ok := call.(*ssa.Call)
-					if !ok {
+					var dispatch *coroInterfaceDispatchPlan
+					var err error
+					switch call := call.(type) {
+					case *ssa.Call:
+						dispatch, err = resolveCoroInterfaceDispatchPlan(plan, universe, call)
+					case *ssa.Defer:
+						dispatch, err = resolveCoroInterfaceDispatchPlan(plan, universe, call)
+					default:
 						return nil, coroLeafInstructionError(owner.Function, owner.Plan, instruction,
-							"managed closed interface descriptor requires an ordinary call")
+							fmt.Sprintf("managed closed interface descriptor has no %T carrier", call))
 					}
-					dispatch, err := resolveCoroInterfaceDispatchPlan(plan, universe, direct)
 					if err != nil {
 						return nil, coroLeafInstructionError(owner.Function, owner.Plan, instruction,
 							"managed closed interface descriptor: "+err.Error())
@@ -258,18 +371,31 @@ func validateCoroManagedInterfaceDispatchCall(
 	fail := func(format string, args ...any) error {
 		return coroPlainDispatchInstructionError(owner, call, "managed interface descriptor: "+fmt.Sprintf(format, args...))
 	}
-	direct, ordinary := call.(*ssa.Call)
-	if plan == nil || owner == nil || !ordinary || direct == nil || direct.Parent() != owner || direct.Common() == nil {
-		return fail("requires one exact ordinary call in the compilation plan")
+	if plan == nil || owner == nil || call == nil || call.Parent() != owner || call.Common() == nil {
+		return fail("requires one exact call carrier in the compilation plan")
 	}
-	common := direct.Common()
-	if callPlan.Call != call || callPlan.Kind != coro.CallDirect || callPlan.Rep != coro.Dispatch ||
+	kind := coro.CallDirect
+	cleanup := false
+	switch call := call.(type) {
+	case *ssa.Call:
+	case *ssa.Defer:
+		if call.DeferStack != nil {
+			return fail("defer uses an alternate dynamic cleanup stack")
+		}
+		kind = coro.CallDefer
+		cleanup = true
+	default:
+		return fail("interface invoke has no %T carrier", call)
+	}
+	common := call.Common()
+	if callPlan.Call != call || callPlan.Kind != kind || callPlan.Rep != coro.Dispatch ||
 		callPlan.SyncDispatch || !callPlan.Open || callPlan.Unresolved != coro.UnknownManagedInterfaceDispatch ||
 		common.StaticCallee() != nil || !common.IsInvoke() || common.Method == nil {
 		return fail("requires an open UnknownManagedInterfaceDispatch CallPlan")
 	}
 	ownerPlan, ok := plan.FunctionPlan(owner)
-	if !ok || ownerPlan.Emission != coro.EmitCoroutine || ownerPlan.Primary != coro.PrimaryCoroutine {
+	if !ok || ownerPlan.Emission != coro.EmitCoroutine || ownerPlan.Primary != coro.PrimaryCoroutine ||
+		(cleanup && !ownerPlan.Exec.Contains(coro.NeedsCleanupFrame)) {
 		return fail("owner plan present=%t emission=%s primary=%s demand=%s effect=%s exec=%s is not one coroutine primary",
 			ok, ownerPlan.Emission, ownerPlan.Primary, ownerPlan.Demand, ownerPlan.Effect, ownerPlan.Exec)
 	}
@@ -571,8 +697,11 @@ func validateCoroManagedInterfaceDescriptorTarget(
 	default:
 		return fail("unsupported emission %s", functionPlan.Emission)
 	}
-	if target.Signature.Variadic() || typeParamCount(target.Signature.TypeParams()) != 0 ||
-		typeParamCount(target.Signature.RecvTypeParams()) != 0 || len(target.TypeArgs()) != 0 || target.Origin() != nil {
+	genericInstance := coroMaterializedGenericCallable(target)
+	if target.Signature.Variadic() ||
+		(typeParamCount(target.Signature.TypeParams()) != 0 ||
+			typeParamCount(target.Signature.RecvTypeParams()) != 0 ||
+			len(target.TypeArgs()) != 0 || target.Origin() != nil) && !genericInstance {
 		return fail("variadic or generic method ABI is not implemented")
 	}
 	directive, err := coroRawABIDirective(target, universe)

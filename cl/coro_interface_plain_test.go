@@ -26,7 +26,9 @@ import (
 
 	"github.com/goplus/llgo/internal/coro"
 	"github.com/goplus/llgo/internal/goembed"
+	"github.com/goplus/llgo/internal/typepatch"
 	llssa "github.com/goplus/llgo/ssa"
+	"github.com/goplus/llgo/ssa/abi"
 	"github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/ssa"
 )
@@ -216,7 +218,7 @@ func prepareCoroDormantInterfaceFixture(
 ) (*EmissionUniverse, *coro.SSAPlan, *ssa.Function, *ssa.Function, *ssa.Function, *ssa.Call) {
 	t.Helper()
 	universe, err := prepareStacklessEmissionUniverseWithOptions(
-		program, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}}, EmissionUniverseOptions{CoroProfile: CoroProfileStackless},
+		program, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}}, EmissionUniverseOptions{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -432,6 +434,94 @@ func TestCoroClosedInterfaceInvokeUsesExplicitStatusABI(t *testing.T) {
 	}
 }
 
+func TestCoroMethodValueDescriptorUsesPatchedReceiverABI(t *testing.T) {
+	const patchedPath = "example.com/emission/patchedmethod"
+	testProg := newEmissionTestProgram()
+	original := testProg.addPackage(t, patchedPath, `package patchedmethod
+
+var gate chan struct{}
+var value noCopy
+
+type noCopy struct{}
+
+func (*noCopy) Lock() {}
+
+func Root() any {
+	<-gate
+	return &value
+}
+`)
+	alternate := testProg.addPackage(t, abi.PatchPathPrefix+patchedPath, `package patchedmethod
+
+type noCopy struct{}
+
+func (*noCopy) Lock() {}
+`)
+	testProg.ssa.Build()
+
+	patches := Patches{patchedPath: {
+		Alt:   alternate.ssa,
+		Types: typepatch.Clone(alternate.types),
+	}}
+	files := []*ast.File{original.file, alternate.file}
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := prepareStacklessEmissionUniverse(
+		prog, patches, []EmissionPackage{{SSA: original.ssa, Files: files}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(testProg.ssa, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := original.ssa.Func("Root")
+	var lock *ssa.Function
+	for _, function := range universe.Functions() {
+		if function != nil && function.Pkg == alternate.ssa && function.Name() == "Lock" &&
+			function.Signature != nil && function.Signature.Recv() != nil {
+			lock = function
+			break
+		}
+	}
+	if lock == nil {
+		t.Fatal("patched Lock method is absent from the emission universe")
+	}
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	functionIDs.ArchiveReady = true
+	plan, err := coro.AnalyzeSSA(testProg.ssa, coro.Roots{
+		{Function: root, Demand: coro.AsyncDemand},
+		{Function: lock, Demand: coro.SyncDemand},
+	}, coro.SSAConfig{
+		EmissionUniverse:     ssaUniverse,
+		FunctionIDs:          functionIDs,
+		DynamicResolution:    coro.DynamicCHAClosed,
+		MaxPlainInstructions: -1,
+		OutcomeMode:          coro.OutcomeExplicitStatus,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, patches, nil, original.ssa, files, goembed.VarMap{},
+		PackageOptions{Compilation: coroClosedInterfacePlainCompilation(plan, universe)},
+	)
+	if err != nil {
+		t.Fatalf("compile patched receiver method descriptor: %v", err)
+	}
+	module := compiled.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify patched receiver method descriptor: %v\n%s", err, module.String())
+	}
+	if !strings.Contains(module.String(), coroPlainDispatchThunkPrefix+"method-value.") {
+		t.Fatalf("patched receiver method table did not materialize a method-value descriptor:\n%s", module.String())
+	}
+}
+
 func compileCoroClosedInterfacePlainFixture(t *testing.T, source string, resolution coro.DynamicResolution) (
 	llssa.Program, llssa.Package, *coro.SSAPlan, *ssa.Function, *ssa.Function, *ssa.Call,
 ) {
@@ -455,7 +545,7 @@ func prepareCoroClosedInterfacePlainPlan(t *testing.T, prog llssa.Program, ssaPk
 ) {
 	t.Helper()
 	universe, err := prepareStacklessEmissionUniverseWithOptions(
-		prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}}, EmissionUniverseOptions{CoroProfile: CoroProfileStackless},
+		prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}}, EmissionUniverseOptions{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -511,8 +601,7 @@ func coroClosedInterfacePlainCompilation(plan *coro.SSAPlan, universe *EmissionU
 		CoroABI:      coro.PhysicalABIV1,
 		SchedulerABI: coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
 		PanicABI:     coro.PanicExplicitStatusABIV0,
-		FuncRepABI:   coro.FuncRepABIV1, CoroProfile: CoroProfileStackless,
-	}
+		FuncRepABI:   coro.FuncRepABIV1}
 }
 
 func assertCoroManagedClosedInterfaceIR(t *testing.T, ir string) {

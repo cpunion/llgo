@@ -18,6 +18,7 @@ func syscall_runtime_envs() []string {
 	return nil
 }
 
+//llgo:managedlink
 //go:linkname syscall_runtimeSetenv syscall.runtimeSetenv
 func syscall_runtimeSetenv(key, value string) {
 	_, _ = key, value
@@ -26,6 +27,7 @@ func syscall_runtimeSetenv(key, value string) {
 	}
 }
 
+//llgo:managedlink
 //go:linkname syscall_runtimeUnsetenv syscall.runtimeUnsetenv
 func syscall_runtimeUnsetenv(key string) {
 	if key == "GODEBUG" {

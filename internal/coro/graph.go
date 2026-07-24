@@ -75,10 +75,15 @@ const (
 	// refinement. Independent IRQ, unwind, and other execution constraints still
 	// propagate.
 	CallTrustedInline
+	// CallDirectNoUnwind is an ordinary managed direct call whose exact
+	// occurrence has a context-sensitive no-unwind proof. Suspend effects,
+	// demand, affinity, IRQ, and every other execution property propagate
+	// normally; only the callee's conservative MayUnwind bit is suppressed.
+	CallDirectNoUnwind
 )
 
 func (k CallKind) validate() error {
-	if k > CallTrustedInline {
+	if k > CallDirectNoUnwind {
 		return fmt.Errorf("coro: invalid call kind %d", uint8(k))
 	}
 	return nil
@@ -321,7 +326,8 @@ func (g *Graph) AddUnknownCall(call UnknownCall) error {
 	if err := call.Kind.validate(); err != nil {
 		return err
 	}
-	if call.Kind == CallUnwind || call.Kind == CallExplicitStatusElided || call.Kind == CallTrustedInline {
+	if call.Kind == CallUnwind || call.Kind == CallExplicitStatusElided ||
+		call.Kind == CallTrustedInline || call.Kind == CallDirectNoUnwind {
 		return fmt.Errorf("coro: call kind %d requires an exact target", call.Kind)
 	}
 	if err := call.Target.validate(); err != nil {
@@ -459,12 +465,15 @@ func (g *Graph) AnalyzeWithConfig(config GraphAnalysisConfig) (*Plan, error) {
 			var effectContribution Effect
 			var execContribution ExecFlags
 			switch edge.Kind {
-			case CallDirect, CallDefer:
+			case CallDirect, CallDefer, CallDirectNoUnwind:
 				effectContribution = managedCallEffect(effects[callee])
 				if localExec[callee].Contains(BlockForeign) {
 					effectContribution = effectContribution.Join(WaitForeign)
 				}
 				execContribution = execFlags[callee] & propagatedExecFlags
+				if edge.Kind == CallDirectNoUnwind {
+					execContribution &^= MayUnwind
+				}
 			case CallSpawn:
 				continue
 			case CallForeign:
@@ -600,7 +609,7 @@ func (g *Graph) AnalyzeWithConfig(config GraphAnalysisConfig) (*Plan, error) {
 					switch edge.Kind {
 					case CallSpawn:
 						contribution = AsyncDemand
-					case CallDirect, CallDefer:
+					case CallDirect, CallDefer, CallDirectNoUnwind:
 						if effects[edge.Callee].MaySuspend() {
 							contribution = AsyncDemand
 						}
@@ -666,7 +675,7 @@ func (g *Graph) AnalyzeWithConfig(config GraphAnalysisConfig) (*Plan, error) {
 					// target is still emitted as a coroutine and must be rejected by
 					// the panic-ABI/lowering verifier until such an adapter exists.
 					contribution = SyncDemand
-				case CallDirect, CallDefer:
+				case CallDirect, CallDefer, CallDirectNoUnwind:
 					contribution = SyncDemand
 					if effects[edge.Callee].MaySuspend() {
 						contribution = AsyncDemand
@@ -826,13 +835,20 @@ func (g *Graph) AnalyzeWithConfig(config GraphAnalysisConfig) (*Plan, error) {
 						if physicalCoroutine {
 							continue
 						}
-						contribution = SyncDemand
+						// A source panic that remains in a physical plain body
+						// invokes the legacy native-stack helper. That is raw
+						// reachability, not a managed entry request. If this
+						// owner later acquires OutcomeStructured, the edge is
+						// physically elided; keeping it in the raw domain avoids
+						// an irreversible stale managed SyncDemand.
+						joinRawDemand(edge.Callee)
+						continue
 					case CallUnwind:
 						contribution = SyncDemand
 						if physicalCoroutine && calleeNeedsOutcomeChild(edge.Callee) {
 							contribution = AsyncDemand
 						}
-					case CallDirect, CallDefer:
+					case CallDirect, CallDefer, CallDirectNoUnwind:
 						contribution = SyncDemand
 						if effects[edge.Callee].MaySuspend() || physicalCoroutine && calleeNeedsOutcomeChild(edge.Callee) {
 							contribution = AsyncDemand
@@ -863,7 +879,7 @@ func (g *Graph) AnalyzeWithConfig(config GraphAnalysisConfig) (*Plan, error) {
 					enqueueDemand(edge.Caller)
 					var contribution Effect
 					switch edge.Kind {
-					case CallDirect, CallDefer:
+					case CallDirect, CallDefer, CallDirectNoUnwind:
 						contribution = managedCallEffect(effects[callee])
 						if localExec[callee].Contains(BlockForeign) {
 							contribution = contribution.Join(WaitForeign)
