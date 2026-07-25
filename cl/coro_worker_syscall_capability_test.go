@@ -271,7 +271,7 @@ func TestCoroWorkerSyscallConditionalIncomingPlanNarrowing(t *testing.T) {
 
 func TestCoroLinuxSyscallTrapPolicyNarrowsActiveConstantCallers(t *testing.T) {
 	testProg := newEmissionTestProgram()
-testProg.addPackage(t, "syscall", `package syscall
+	testProg.addPackage(t, "syscall", `package syscall
 type Errno uintptr
 const (
 	SYS_WRITE      = 1
