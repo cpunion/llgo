@@ -348,7 +348,9 @@ func sameCoroFrozenCallSitePlan(first, second coroFrozenCallSitePlan) bool {
 		if left.call != right.call || left.carrier != right.carrier || left.parameter != right.parameter ||
 			left.certified != right.certified || left.reason != right.reason ||
 			left.foreignPointerResultMask != right.foreignPointerResultMask ||
-			left.resultProjectionID != right.resultProjectionID || left.stableIdentity != right.stableIdentity ||
+			left.resultProjectionID != right.resultProjectionID ||
+			left.trapPolicyIdentity != right.trapPolicyIdentity ||
+			left.stableIdentity != right.stableIdentity ||
 			!slices.Equal(left.targetKeys, right.targetKeys) {
 			return false
 		}

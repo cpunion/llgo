@@ -375,7 +375,7 @@ func TestCoroWorkerClosedForeignCallUsesTypedThunk(t *testing.T) {
 		t.Fatalf("Root does not keep the typed pointer live after worker acknowledgement:\n%s", body)
 	}
 	if strings.Contains(body, "trunc i64") ||
-		!regexp.MustCompile(`getelementptr inbounds \{ i32, ptr, i64, i32 \}, ptr [^\n]+, i32 0, i32 3\n\s+%[^\s]+ = load i32`).MatchString(body) {
+		!regexp.MustCompile(`getelementptr inbounds (?:nuw )?\{ i32, ptr, i64, i32 \}, ptr [^\n]+, i32 0, i32 3\n\s+%[^\s]+ = load i32`).MatchString(body) {
 		t.Fatalf("Root does not load the signed 32-bit result directly from its typed worker record:\n%s", body)
 	}
 	var thunk llvm.Value

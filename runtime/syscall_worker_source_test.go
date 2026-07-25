@@ -28,7 +28,7 @@ import (
 	"testing"
 )
 
-func TestLinuxDynamicSyscallHasNoBlanketWorkerAuthority(t *testing.T) {
+func TestLinuxSyscallWorkerAuthorityRequiresExactTrapPolicy(t *testing.T) {
 	goPath := "internal/lib/syscall/syscall_linux_coro.go"
 	goSource, err := os.ReadFile(goPath)
 	if err != nil {
@@ -47,10 +47,11 @@ func TestLinuxDynamicSyscallHasNoBlanketWorkerAuthority(t *testing.T) {
 		"func RawSyscall(",
 		"func RawSyscall6(",
 		"if r1 == ^uintptr(0)",
-		"implementation adapters, not",
-		"worker capabilities",
-		"exact target-specific",
-		"constant-trap capability",
+		"fixed C leaves supply the typed word-call half",
+		"exact constant accepted by the target-owned Linux trap policy",
+		"active managed incoming edge",
+		"abi=word-call.v1/4",
+		"abi=word-call.v1/7",
 		"Dynamic, fork, exec, exit, and other",
 		"process-control trap numbers have no worker certificate",
 	} {
@@ -60,7 +61,6 @@ func TestLinuxDynamicSyscallHasNoBlanketWorkerAuthority(t *testing.T) {
 	}
 	for _, forbidden := range []string{
 		"//llgo:coro workeraddr",
-		"//llgo:coro contract",
 		"becomes a worker park",
 		"uses the same worker handoff",
 		"internal/runtime/syscall/linux",
@@ -84,8 +84,10 @@ func TestLinuxDynamicSyscallHasNoBlanketWorkerAuthority(t *testing.T) {
 		"return result == -1L ? UINTPTR_MAX",
 		"records the positive errno in the current",
 		"invocation thread's TLS",
-		"These adapters carry no",
-		"worker authority",
+		"carry no",
+		"standalone worker authority",
+		"ProgramIR independently proves an exact",
+		"target-safe constant trap",
 	} {
 		if !strings.Contains(string(cSource), required) {
 			t.Errorf("%s lacks plain syscall adapter marker %q", cPath, required)

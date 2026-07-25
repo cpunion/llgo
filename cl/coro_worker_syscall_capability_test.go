@@ -269,6 +269,125 @@ func TestCoroWorkerSyscallConditionalIncomingPlanNarrowing(t *testing.T) {
 	}
 }
 
+func TestCoroLinuxSyscallTrapPolicyNarrowsActiveConstantCallers(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	testProg.addPackage(t, "syscall", `package syscall
+type Errno uintptr
+const (
+	SYS_WRITE = 1
+	SYS_EXIT = 60
+)
+`)
+	const packagePath = "example.com/emission/linuxtrap"
+	pkg := testProg.addPackage(t, packagePath, `package linuxtrap
+import stdsyscall "syscall"
+
+//llgo:link funcPCABI0 llgo.funcPCABI0
+func funcPCABI0(fn any) uintptr
+
+//llgo:link raw llgo.syscall
+func raw(fn, trap, a1, a2, a3 uintptr) (uintptr, uintptr, uintptr)
+
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/4
+func libc___llgo_linux_syscall3_v1_trampoline()
+
+func carrier(trap, a1, a2, a3 uintptr) uintptr {
+	r1, _, _ := raw(funcPCABI0(libc___llgo_linux_syscall3_v1_trampoline), trap, a1, a2, a3)
+	return r1
+}
+
+func Safe() uintptr {
+	return carrier(stdsyscall.SYS_WRITE, 1, 2, 3)
+}
+
+func ProcessControl() uintptr {
+	return carrier(stdsyscall.SYS_EXIT, 0, 0, 0)
+}
+
+func Dynamic(trap uintptr) uintptr {
+	return carrier(trap, 0, 0, 0)
+}
+`)
+	testProg.ssa.Build()
+	prog := newLLSSAProgForTarget(t, &llssa.Target{GOOS: "linux", GOARCH: "amd64"})
+	defer prog.Dispose()
+	prog.SetLinkname(packagePath+".libc___llgo_linux_syscall3_v1_trampoline", "C.__llgo_linux_syscall3_v1")
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
+		prog, nil, []EmissionPackage{{SSA: pkg.ssa, Files: []*ast.File{pkg.file}}},
+		EmissionUniverseOptions{CoroTargetCapabilities: CoroNativeTargetCapabilities()},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	carrier := pkg.ssa.Func("carrier")
+	call := exactWorkerSyscallCall(t, universe, carrier)
+	certificate, certified, err := universe.CoroWorkerSyscallCertificate(call)
+	if err != nil || !certified || certificate.ID == "" || certificate.StaticTargetCount != 1 {
+		t.Fatalf("Linux constant-trap certificate = %+v, %t, %v", certificate, certified, err)
+	}
+	incoming := frozenCoroWorkerIncomingForTest(t, universe, call)
+	status := make(map[string]bool, len(incoming))
+	for _, edge := range incoming {
+		if edge.call != nil && edge.call.Parent() != nil && edge.trapPolicyIdentity != "" {
+			status[edge.call.Parent().Name()] = edge.certified
+		}
+	}
+	if len(status) != 3 || !status["Safe"] || status["ProcessControl"] || status["Dynamic"] {
+		t.Fatalf("Linux constant-trap incoming inventory = %+v; want Safe only certified", incoming)
+	}
+
+	analyze := func(root coro.Root) *coro.SSAPlan {
+		ssaUniverse, err := coro.NewSSAEmissionUniverse(pkg.ssa.Prog, universe.Functions())
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan, err := coro.AnalyzeSSA(pkg.ssa.Prog, coro.Roots{root}, coro.SSAConfig{
+			EmissionUniverse:     ssaUniverse,
+			FunctionIDs:          universe.FunctionIDConfig(),
+			MaxPlainInstructions: -1,
+			ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+				if fn == carrier {
+					return coro.SSAFunctionPolicy{Effect: coro.MayPark}, nil
+				}
+				return coro.SSAFunctionPolicy{}, nil
+			},
+			ClassifyElidedCall: func(_ *ssa.Function, candidate ssa.CallInstruction) (bool, error) {
+				semantics, intrinsic, err := universe.CoroIntrinsicCallSiteSemantics(candidate)
+				return intrinsic && semantics.ElidesManagedCall(), err
+			},
+			ClassifyElidedCallCertificate: func(_ *ssa.Function, candidate ssa.CallInstruction) (string, error) {
+				certificate, certified, err := universe.CoroWorkerSyscallCertificate(candidate)
+				if err != nil || !certified {
+					return "", err
+				}
+				return certificate.ID, nil
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return plan
+	}
+
+	safe := analyze(coro.Root{Function: pkg.ssa.Func("Safe"), Demand: coro.AsyncDemand})
+	if err := validateCoroWorkerSyscallCall(safe, universe, call); err != nil {
+		t.Fatalf("safe Linux constant trap rejected: %v", err)
+	}
+	for _, name := range []string{"ProcessControl", "Dynamic"} {
+		unsafe := analyze(coro.Root{Function: pkg.ssa.Func(name), Demand: coro.AsyncDemand})
+		if err := validateCoroWorkerSyscallCall(unsafe, universe, call); err == nil ||
+			(!strings.Contains(err.Error(), "active static incoming edge") &&
+				!strings.Contains(err.Error(), "externally established entry")) {
+			t.Fatalf("%s Linux trap did not fail closed: %v", name, err)
+		}
+	}
+	raw := analyze(coro.Root{Function: pkg.ssa.Func("Dynamic"), RawPlainDemand: true})
+	if err := validateCoroWorkerSyscallCall(raw, universe, call); err != nil {
+		t.Fatalf("raw/plain dynamic Linux trap rejected: %v", err)
+	}
+}
+
 func TestCoroWorkerAddressPatchAliasesUpstreamFuncPCABI0Target(t *testing.T) {
 	testProg := newEmissionTestProgram()
 	const originalPath = "example.com/emission/darwinsyscall"

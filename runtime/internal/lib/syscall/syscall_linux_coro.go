@@ -29,17 +29,18 @@ const (
 )
 
 // The Linux kernel ABI starts with a syscall number rather than a callable
-// function address. These fixed C leaves are implementation adapters, not
-// worker capabilities: they turn the 3- and 6-argument syscall families into
-// the uintptr-only function ABI understood by llgo.syscall, but their address
-// says nothing about the dynamic trap's progress, affinity, memory lifetime,
-// or return behavior. Their names deliberately use the standard
-// libc_*_trampoline spelling so llgo.funcPCABI0 can select the C entry for a
-// proven plain/current-thread call without materializing a Go callback.
+// function address. These fixed C leaves supply the typed word-call half of a
+// worker capability. The compiler grants the other half only when the trap is
+// an exact constant accepted by the target-owned Linux trap policy on every
+// active managed incoming edge. A dynamic/process-control path therefore
+// remains synchronous only in a proven raw/plain body and fails closed if it
+// reaches a managed coroutine.
 //
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/4
 //go:linkname libc___llgo_linux_syscall3_v1_trampoline C.__llgo_linux_syscall3_v1
 func libc___llgo_linux_syscall3_v1_trampoline()
 
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/7
 //go:linkname libc___llgo_linux_syscall6_v1_trampoline C.__llgo_linux_syscall6_v1
 func libc___llgo_linux_syscall6_v1_trampoline()
 
@@ -61,9 +62,9 @@ func linuxSyscallErrno(r1, errno uintptr) stdsyscall.Errno {
 
 // Syscall and Syscall6 preserve the ordinary synchronous Go API. In a proven
 // plain body llgo.syscall calls the fixed C adapter directly, so no scheduler
-// or process-global current-G lookup is introduced. A managed coroutine has no
-// worker authority until the compiler owns an exact target-specific
-// constant-trap capability; the fixed adapter address alone is never enough.
+// or process-global current-G lookup is introduced. In a managed coroutine,
+// ProgramIR requires both this adapter contract and an exact target-specific
+// constant-trap capability before replacing the call with a worker park.
 func Syscall(trap, a1, a2, a3 uintptr) (r1, r2 uintptr, err stdsyscall.Errno) {
 	r1, r2, errno := llgoLinuxSyscall4(
 		llgoLinuxFuncPCABI0(libc___llgo_linux_syscall3_v1_trampoline),
@@ -83,8 +84,9 @@ func Syscall6(trap, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2 uintptr, err stdsysc
 // RawSyscall deliberately has no entersyscall/exitsyscall hooks. It remains a
 // direct current-thread call when reached from a proven plain context (for
 // example a post-fork raw path). Dynamic, fork, exec, exit, and other
-// process-control trap numbers have no worker certificate; a managed path
-// fails closed until an exact target-owned constant-trap proof exists.
+// process-control trap numbers have no worker certificate; an ordinary
+// constant file/network/resource trap can still park transparently when all
+// active managed incoming edges carry the same target-owned proof.
 func RawSyscall(trap, a1, a2, a3 uintptr) (r1, r2 uintptr, err stdsyscall.Errno) {
 	r1, r2, errno := llgoLinuxSyscall4(
 		llgoLinuxFuncPCABI0(libc___llgo_linux_syscall3_v1_trampoline),

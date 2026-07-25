@@ -19,6 +19,7 @@ package cl
 import (
 	"fmt"
 	"go/ast"
+	"go/constant"
 	"go/types"
 	"sort"
 	"strconv"
@@ -74,7 +75,35 @@ type coroWorkerSyscallIncomingEdge struct {
 	targetKeys               []string
 	foreignPointerResultMask uint8
 	resultProjectionID       string
+	trapPolicyIdentity       string
 	stableIdentity           string
+}
+
+// coroWorkerSyscallTrapPolicy is the target-owned half of a syscall-number
+// adapter capability. A fixed Linux adapter proves the word-call ABI, but the
+// syscall number is an independent operand: ProgramIR accepts a managed worker
+// lowering only when that operand is an exact safe constant, either at the
+// intrinsic itself or through every active static parameter-carrier edge.
+//
+// incoming reuses the ordinary conditional worker edge transaction. This is
+// intentional: the final plan join already rejects roots, escaped/raw managed
+// carriers, inactive-versus-active uncertified edges, and forged CallPlans.
+type coroWorkerSyscallTrapPolicy struct {
+	required  bool
+	certified bool
+	identity  string
+	owners    map[*ssa.Function]none
+	incoming  []coroWorkerSyscallIncomingEdge
+}
+
+// coroLinuxSyscallTrapAnalysis is the read-only fact surface injected by the
+// existing ProgramIR worker-certificate freeze transaction. Helpers do not
+// acquire a second emission-universe authority.
+type coroLinuxSyscallTrapAnalysis struct {
+	functions      []*ssa.Function
+	linkIdentities map[*ssa.Function]string
+	canonical      func(*ssa.Function) *ssa.Function
+	resolve        func(*ssa.Function) (*ssa.Function, bool)
 }
 
 type coroWorkerSyscallIncomingKey struct {
@@ -226,6 +255,12 @@ func (u *EmissionUniverse) freezeCoroWorkerSyscallCertificates() error {
 	if err != nil {
 		return fmt.Errorf("prepare emission universe: freeze producer-forward callable shadows: %w", err)
 	}
+	trapAnalysis := coroLinuxSyscallTrapAnalysis{
+		functions:      u.functions,
+		linkIdentities: u.linkIdentities,
+		canonical:      u.canonicalAlias,
+		resolve:        u.Resolve,
+	}
 	for _, fn := range u.functions {
 		if fn == nil || len(fn.Blocks) == 0 || u.canonicalAlias(fn) != fn {
 			continue
@@ -249,7 +284,20 @@ func (u *EmissionUniverse) freezeCoroWorkerSyscallCertificates() error {
 					// No producer-forward shadow means no worker authority.
 					continue
 				}
-				certificate, owners, incoming, err := freezeCoroWorkerSyscallShadowCertificate(u, call, opcode, shadow)
+				trapPolicy, err := freezeCoroWorkerSyscallTrapPolicy(&trapAnalysis, call, shadow)
+				if err != nil {
+					return fmt.Errorf("prepare emission universe: worker llgo.syscall trap policy for %q: %w", call.String(), err)
+				}
+				if trapPolicy.required && !trapPolicy.certified {
+					// A fixed Linux adapter is only half a capability. Keep a
+					// dynamic, process-control, escaped, or wholly unsafe trap
+					// as an ordinary synchronous intrinsic so managed analysis
+					// fails closed while a proven raw/plain body remains valid.
+					continue
+				}
+				certificate, owners, incoming, err := freezeCoroWorkerSyscallShadowCertificate(
+					u, call, opcode, shadow, trapPolicy,
+				)
 				if err != nil {
 					return fmt.Errorf("prepare emission universe: worker llgo.syscall call %q: %w", call.String(), err)
 				}
@@ -355,6 +403,402 @@ func coroWorkerCallableCompatibleShadowTargets(
 	return targets
 }
 
+func freezeCoroWorkerSyscallTrapPolicy(
+	analysis *coroLinuxSyscallTrapAnalysis,
+	call *ssa.Call,
+	shadow CoroCallableShadowSink,
+) (coroWorkerSyscallTrapPolicy, error) {
+	var policy coroWorkerSyscallTrapPolicy
+	wordArgs, required, err := coroLinuxSyscallAdapterWordArgs(shadow)
+	if err != nil || !required {
+		return policy, err
+	}
+	policy.required = true
+	if analysis == nil || call == nil || call.Common() == nil || call.Parent() == nil ||
+		len(call.Common().Args)-1 != wordArgs || len(call.Common().Args) < 2 {
+		return policy, fmt.Errorf("Linux syscall adapter has no exact trap operand")
+	}
+	unsafeValues, err := coroLinuxUnsafeSyscallValues(analysis)
+	if err != nil {
+		return policy, err
+	}
+	trap := call.Common().Args[1]
+	if value, exact := coroWorkerSyscallConstantWord(trap); exact {
+		safe, reason := coroLinuxSyscallTrapWorkerSafe(value, unsafeValues)
+		policy.certified = safe
+		policy.identity = framedEmissionKey(
+			"llgo-coro-linux-syscall-trap-v1",
+			"constant", strconv.FormatUint(value, 10),
+			strconv.FormatBool(safe), reason,
+		)
+		return policy, nil
+	}
+	parameter, parameterTrap := trap.(*ssa.Parameter)
+	if !parameterTrap || parameter.Parent() != call.Parent() {
+		policy.identity = framedEmissionKey(
+			"llgo-coro-linux-syscall-trap-v1",
+			"nonconstant", types.TypeString(trap.Type(), nil),
+		)
+		return policy, nil
+	}
+	incoming, owners, certified, reason, err := coroLinuxSyscallTrapParameterInventory(
+		analysis, parameter, unsafeValues, make(map[*ssa.Parameter]bool),
+	)
+	if err != nil {
+		return policy, err
+	}
+	policy.incoming = incoming
+	policy.owners = owners
+	policy.certified = certified
+	edgeKeys := make([]string, 0, len(incoming))
+	for _, edge := range incoming {
+		edgeKeys = append(edgeKeys, edge.trapPolicyIdentity)
+	}
+	sort.Strings(edgeKeys)
+	fields := []string{
+		"llgo-coro-linux-syscall-trap-v1",
+		"parameter",
+		analysis.linkIdentities[call.Parent()],
+		strconv.Itoa(coroSSAParameterIndex(parameter)),
+		strconv.FormatBool(certified),
+		reason,
+	}
+	fields = append(fields, edgeKeys...)
+	policy.identity = framedEmissionKey(fields...)
+	return policy, nil
+}
+
+func coroLinuxSyscallAdapterWordArgs(shadow CoroCallableShadowSink) (wordArgs int, required bool, err error) {
+	sawOther := false
+	for _, candidate := range shadow.Candidates {
+		if candidate.ABI != shadow.ABI {
+			continue
+		}
+		symbol := strings.TrimPrefix(candidate.PhysicalSymbol, "C.")
+		var arity int
+		switch {
+		case strings.HasSuffix(symbol, "__llgo_linux_syscall3_v1"):
+			arity = 4
+		case strings.HasSuffix(symbol, "__llgo_linux_syscall6_v1"):
+			arity = 7
+		default:
+			sawOther = true
+			continue
+		}
+		if sawOther {
+			return 0, false, fmt.Errorf("Linux syscall adapter is mixed with a non-Linux callable target")
+		}
+		if required && wordArgs != arity {
+			return 0, false, fmt.Errorf("Linux syscall adapter target set mixes %d- and %d-word ABIs", wordArgs, arity)
+		}
+		required, wordArgs = true, arity
+	}
+	if required && sawOther {
+		return 0, false, fmt.Errorf("Linux syscall adapter is mixed with a non-Linux callable target")
+	}
+	if required && shadow.ABI.WordArgs != wordArgs {
+		return 0, false, fmt.Errorf(
+			"Linux syscall adapter contract has %d words, want %d",
+			shadow.ABI.WordArgs, wordArgs,
+		)
+	}
+	return wordArgs, required, nil
+}
+
+func coroLinuxSyscallTrapParameterInventory(
+	analysis *coroLinuxSyscallTrapAnalysis,
+	parameter *ssa.Parameter,
+	unsafeValues map[uint64]string,
+	visiting map[*ssa.Parameter]bool,
+) (incoming []coroWorkerSyscallIncomingEdge, owners map[*ssa.Function]none, certified bool, reason string, err error) {
+	owners = make(map[*ssa.Function]none)
+	if analysis == nil || parameter == nil || parameter.Parent() == nil {
+		return nil, owners, false, "linux-syscall-open-trap-carrier", nil
+	}
+	if visiting[parameter] {
+		return nil, owners, false, "linux-syscall-cyclic-trap-carrier", nil
+	}
+	visiting[parameter] = true
+	defer delete(visiting, parameter)
+
+	owner := analysis.canonical(parameter.Parent())
+	index := coroSSAParameterIndex(parameter)
+	if owner == nil || owner != parameter.Parent() || index < 0 {
+		return nil, owners, false, "linux-syscall-noncanonical-trap-carrier", nil
+	}
+	owners[owner] = none{}
+	calls, escaped := coroWorkerStaticIncomingCalls(analysis, owner)
+	if escaped {
+		return coroLinuxSyscallUncertifiedTrapEdges(analysis, owner, index, calls, "linux-syscall-escaped-trap-carrier"),
+			owners, false, "linux-syscall-escaped-trap-carrier", nil
+	}
+	if len(calls) == 0 {
+		return nil, owners, false, "linux-syscall-trap-carrier-has-no-static-incoming", nil
+	}
+
+	anyCertified := false
+	for _, incomingCall := range calls {
+		edge := coroWorkerSyscallIncomingEdge{
+			call:      incomingCall,
+			carrier:   owner,
+			parameter: index,
+		}
+		if incomingCall == nil || incomingCall.Common() == nil || index >= len(incomingCall.Common().Args) {
+			edge.reason = "linux-syscall-invalid-trap-incoming"
+			edge.trapPolicyIdentity = coroLinuxSyscallTrapEdgeIdentity(analysis, edge, "invalid")
+			incoming = append(incoming, edge)
+			continue
+		}
+		source := incomingCall.Common().Args[index]
+		switch source := source.(type) {
+		case *ssa.Const:
+			value, exact := coroWorkerSyscallConstantWord(source)
+			safe, unsafeReason := false, "linux-syscall-non-word-trap"
+			if exact {
+				safe, unsafeReason = coroLinuxSyscallTrapWorkerSafe(value, unsafeValues)
+			}
+			edge.certified = safe
+			edge.reason = unsafeReason
+			edge.trapPolicyIdentity = coroLinuxSyscallTrapEdgeIdentity(
+				analysis, edge, "constant", strconv.FormatUint(value, 10),
+			)
+		case *ssa.Parameter:
+			nested, nestedOwners, nestedCertified, nestedReason, nestedErr :=
+				coroLinuxSyscallTrapParameterInventory(analysis, source, unsafeValues, visiting)
+			if nestedErr != nil {
+				return nil, nil, false, "", nestedErr
+			}
+			incoming = append(incoming, nested...)
+			for nestedOwner := range nestedOwners {
+				owners[nestedOwner] = none{}
+			}
+			edge.certified = nestedCertified
+			if !nestedCertified {
+				edge.reason = nestedReason
+			}
+			edge.trapPolicyIdentity = coroLinuxSyscallTrapEdgeIdentity(
+				analysis, edge, "parameter", analysis.linkIdentities[source.Parent()],
+				strconv.Itoa(coroSSAParameterIndex(source)),
+			)
+		default:
+			edge.reason = "linux-syscall-nonconstant-trap"
+			edge.trapPolicyIdentity = coroLinuxSyscallTrapEdgeIdentity(
+				analysis, edge, "value", types.TypeString(source.Type(), nil),
+			)
+		}
+		if edge.certified {
+			anyCertified = true
+			edge.reason = ""
+		}
+		incoming = append(incoming, edge)
+	}
+	if anyCertified {
+		return incoming, owners, true, "", nil
+	}
+	reason = "linux-syscall-trap-carrier-has-no-certified-incoming"
+	if len(incoming) == 1 && incoming[0].reason != "" {
+		reason = incoming[0].reason
+	}
+	return incoming, owners, false, reason, nil
+}
+
+func coroWorkerStaticIncomingCalls(analysis *coroLinuxSyscallTrapAnalysis, target *ssa.Function) (calls []*ssa.Call, escaped bool) {
+	if analysis == nil || target == nil {
+		return nil, true
+	}
+	for _, function := range analysis.functions {
+		if function == nil || len(function.Blocks) == 0 || analysis.canonical(function) != function {
+			continue
+		}
+		for _, block := range function.Blocks {
+			for _, instruction := range block.Instrs {
+				direct, directCall := instruction.(*ssa.Call)
+				exactDirect := false
+				if directCall && direct.Common() != nil && !direct.Common().IsInvoke() {
+					if callee, resolved := analysis.resolve(direct.Common().StaticCallee()); resolved && callee == target {
+						calls = append(calls, direct)
+						exactDirect = true
+					}
+				} else if call, callInstruction := instruction.(ssa.CallInstruction); callInstruction &&
+					call.Common() != nil && !call.Common().IsInvoke() {
+					if callee, resolved := analysis.resolve(call.Common().StaticCallee()); resolved && callee == target {
+						escaped = true
+					}
+				}
+				for _, operand := range instruction.Operands(nil) {
+					if operand == nil {
+						continue
+					}
+					reference, ok := (*operand).(*ssa.Function)
+					if !ok {
+						continue
+					}
+					resolved, frozen := analysis.resolve(reference)
+					isExactCallee := exactDirect && direct.Common().Value == *operand
+					if frozen && resolved == target && !isExactCallee {
+						escaped = true
+					}
+				}
+			}
+		}
+	}
+	sort.SliceStable(calls, func(i, j int) bool {
+		leftBlock, leftInstruction := coroWorkerSyscallInstructionSite(calls[i])
+		rightBlock, rightInstruction := coroWorkerSyscallInstructionSite(calls[j])
+		left := analysis.linkIdentities[calls[i].Parent()] + ":" + strconv.Itoa(leftBlock) + ":" + strconv.Itoa(leftInstruction)
+		right := analysis.linkIdentities[calls[j].Parent()] + ":" + strconv.Itoa(rightBlock) + ":" + strconv.Itoa(rightInstruction)
+		return left < right
+	})
+	return calls, escaped
+}
+
+func coroLinuxSyscallUncertifiedTrapEdges(
+	analysis *coroLinuxSyscallTrapAnalysis,
+	carrier *ssa.Function,
+	parameter int,
+	calls []*ssa.Call,
+	reason string,
+) []coroWorkerSyscallIncomingEdge {
+	edges := make([]coroWorkerSyscallIncomingEdge, 0, len(calls))
+	for _, call := range calls {
+		edge := coroWorkerSyscallIncomingEdge{
+			call:      call,
+			carrier:   carrier,
+			parameter: parameter,
+			reason:    reason,
+		}
+		edge.trapPolicyIdentity = coroLinuxSyscallTrapEdgeIdentity(analysis, edge, "escaped")
+		edges = append(edges, edge)
+	}
+	return edges
+}
+
+func coroLinuxSyscallTrapEdgeIdentity(
+	analysis *coroLinuxSyscallTrapAnalysis,
+	edge coroWorkerSyscallIncomingEdge,
+	fields ...string,
+) string {
+	callerIdentity, carrierIdentity := "", ""
+	block, instruction := -1, -1
+	if analysis != nil && edge.call != nil {
+		callerIdentity = analysis.linkIdentities[edge.call.Parent()]
+		block, instruction = coroWorkerSyscallInstructionSite(edge.call)
+	}
+	if analysis != nil && edge.carrier != nil {
+		carrierIdentity = analysis.linkIdentities[edge.carrier]
+	}
+	identity := []string{
+		"llgo-coro-linux-syscall-trap-edge-v1",
+		callerIdentity, strconv.Itoa(block), strconv.Itoa(instruction),
+		carrierIdentity, strconv.Itoa(edge.parameter),
+	}
+	identity = append(identity, fields...)
+	return framedEmissionKey(identity...)
+}
+
+func coroSSAParameterIndex(parameter *ssa.Parameter) int {
+	if parameter == nil || parameter.Parent() == nil {
+		return -1
+	}
+	for index, candidate := range parameter.Parent().Params {
+		if candidate == parameter {
+			return index
+		}
+	}
+	return -1
+}
+
+func coroWorkerSyscallConstantWord(value ssa.Value) (uint64, bool) {
+	literal, ok := value.(*ssa.Const)
+	if !ok || literal == nil || literal.Value == nil {
+		return 0, false
+	}
+	return constant.Uint64Val(literal.Value)
+}
+
+func coroLinuxSyscallTrapWorkerSafe(value uint64, unsafeValues map[uint64]string) (bool, string) {
+	if name := unsafeValues[value]; name != "" {
+		return false, "linux-syscall-trap-" + strings.ToLower(name)
+	}
+	return true, ""
+}
+
+func coroLinuxUnsafeSyscallValues(analysis *coroLinuxSyscallTrapAnalysis) (map[uint64]string, error) {
+	var syscallPackage *types.Package
+	for _, function := range analysis.functions {
+		if function == nil || function.Pkg == nil || function.Pkg.Pkg == nil {
+			continue
+		}
+		pkg := function.Pkg.Pkg
+		if pkg.Path() == "syscall" {
+			syscallPackage = pkg
+			break
+		}
+		for _, imported := range pkg.Imports() {
+			if imported.Path() == "syscall" {
+				syscallPackage = imported
+				break
+			}
+		}
+		if syscallPackage != nil {
+			break
+		}
+	}
+	if syscallPackage == nil {
+		return nil, fmt.Errorf("Linux syscall trap policy has no target syscall constant package")
+	}
+	// These operations are no-return, process-control, or observe/mutate the
+	// calling kernel thread. They need the RawCritical/target-M protocol and
+	// cannot be moved to an arbitrary bounded worker. All other exact Linux
+	// constants use the ordinary process-wide/descriptor worker contract;
+	// a numerically dynamic trap remains fail-closed.
+	unsafeNames := []string{
+		"SYS_RESTART_SYSCALL",
+		"SYS_EXIT", "SYS_EXIT_GROUP",
+		"SYS_FORK", "SYS_VFORK", "SYS_CLONE", "SYS_CLONE3",
+		"SYS_EXECVE", "SYS_EXECVEAT",
+		"SYS_RT_SIGRETURN", "SYS_RT_SIGPROCMASK", "SYS_RT_SIGPENDING",
+		"SYS_RT_SIGTIMEDWAIT", "SYS_RT_SIGSUSPEND", "SYS_SIGALTSTACK",
+		"SYS_TKILL", "SYS_TGKILL",
+		"SYS_GETTID", "SYS_SET_TID_ADDRESS",
+		"SYS_SET_ROBUST_LIST", "SYS_GET_ROBUST_LIST", "SYS_RSEQ",
+		"SYS_ARCH_PRCTL", "SYS_SET_THREAD_AREA", "SYS_GET_THREAD_AREA", "SYS_MODIFY_LDT",
+		"SYS_UNSHARE", "SYS_SETNS",
+		"SYS_PRCTL", "SYS_SECCOMP", "SYS_PTRACE",
+		"SYS_CAPGET", "SYS_CAPSET",
+		"SYS_SETUID", "SYS_SETGID", "SYS_SETREUID", "SYS_SETREGID",
+		"SYS_SETRESUID", "SYS_SETRESGID", "SYS_SETFSUID", "SYS_SETFSGID",
+		"SYS_SETGROUPS",
+		"SYS_GETUID", "SYS_GETGID", "SYS_GETEUID", "SYS_GETEGID",
+		"SYS_GETRESUID", "SYS_GETRESGID", "SYS_GETGROUPS",
+		"SYS_SCHED_SETPARAM", "SYS_SCHED_GETPARAM",
+		"SYS_SCHED_SETSCHEDULER", "SYS_SCHED_GETSCHEDULER",
+		"SYS_SCHED_SETAFFINITY", "SYS_SCHED_GETAFFINITY",
+		"SYS_SCHED_SETATTR", "SYS_SCHED_GETATTR",
+		"SYS_SETPRIORITY", "SYS_GETPRIORITY",
+		"SYS_IOPRIO_SET", "SYS_IOPRIO_GET",
+		"SYS_PAUSE",
+	}
+	values := make(map[uint64]string)
+	for _, name := range unsafeNames {
+		object := syscallPackage.Scope().Lookup(name)
+		constantObject, ok := object.(*types.Const)
+		if !ok || constantObject == nil {
+			continue
+		}
+		value, exact := constant.Uint64Val(constantObject.Val())
+		if !exact {
+			return nil, fmt.Errorf("Linux syscall constant %s is not a target word", name)
+		}
+		if previous := values[value]; previous == "" {
+			values[value] = strings.TrimPrefix(name, "SYS_")
+		} else {
+			values[value] = previous + "_" + strings.TrimPrefix(name, "SYS_")
+		}
+	}
+	return values, nil
+}
+
 // freezeCoroWorkerSyscallShadowCertificate materializes the final worker
 // certificate inventory directly from producer-forward facts. No consumer
 // value is walked backwards and no emitted address is inspected.
@@ -363,6 +807,7 @@ func freezeCoroWorkerSyscallShadowCertificate(
 	call *ssa.Call,
 	opcode int,
 	shadow CoroCallableShadowSink,
+	trapPolicy coroWorkerSyscallTrapPolicy,
 ) (CoroWorkerSyscallCertificate, map[*ssa.Function]none, []coroWorkerSyscallIncomingEdge, error) {
 	if universe == nil || call == nil || call.Parent() == nil || shadow.Call != call || !shadow.Certified {
 		return CoroWorkerSyscallCertificate{}, nil, nil, fmt.Errorf("producer-forward callable shadow is absent or uncertified")
@@ -480,6 +925,40 @@ func freezeCoroWorkerSyscallShadowCertificate(
 		incoming = append(incoming, frozen)
 		owners[edge.Carrier] = none{}
 	}
+	if trapPolicy.required {
+		if !trapPolicy.certified || trapPolicy.identity == "" {
+			return CoroWorkerSyscallCertificate{}, nil, nil, fmt.Errorf("target syscall trap policy is not certified")
+		}
+		for owner := range trapPolicy.owners {
+			if owner == nil {
+				return CoroWorkerSyscallCertificate{}, nil, nil, fmt.Errorf("target syscall trap policy has a nil owner")
+			}
+			owners[owner] = none{}
+		}
+		for _, edge := range trapPolicy.incoming {
+			key := coroWorkerSyscallIncomingKey{call: edge.call, carrier: edge.carrier, parameter: edge.parameter}
+			if edge.call == nil || edge.carrier == nil || edge.parameter < 0 {
+				return CoroWorkerSyscallCertificate{}, nil, nil, fmt.Errorf("target syscall trap policy has an incomplete incoming edge")
+			}
+			if _, duplicate := edgeSet[key]; duplicate {
+				return CoroWorkerSyscallCertificate{}, nil, nil, fmt.Errorf("target syscall trap policy overlaps a callable-shadow incoming edge")
+			}
+			edgeSet[key] = none{}
+			edge.targetKeys = append([]string(nil), targetKeys...)
+			if edge.certified {
+				edge.reason = ""
+				certifiedIncoming++
+			} else if edge.reason == "" {
+				edge.reason = "target-syscall-trap-uncertified"
+			}
+			identity, err := coroWorkerSyscallIncomingIdentity(universe, edge)
+			if err != nil {
+				return CoroWorkerSyscallCertificate{}, nil, nil, err
+			}
+			edge.stableIdentity = identity
+			incoming = append(incoming, edge)
+		}
+	}
 	if len(incoming) != 0 && certifiedIncoming == 0 {
 		return CoroWorkerSyscallCertificate{}, nil, nil, fmt.Errorf("callable shadow has no certified incoming edge")
 	}
@@ -520,12 +999,17 @@ func freezeCoroWorkerSyscallShadowCertificate(
 		targetSetID,
 		incomingSetID,
 		shadowSetID,
+	}
+	if trapPolicy.required {
+		fields = append(fields, "target-syscall-trap-policy-v1", trapPolicy.identity)
+	}
+	fields = append(fields,
 		target.Triple,
 		target.CPU,
 		target.Features,
 		target.TargetABI,
 		universe.prog.DataLayout(),
-	}
+	)
 	fields = append(fields, ownerKeys...)
 	return CoroWorkerSyscallCertificate{
 		ID:                       framedEmissionKey(fields...),
@@ -620,6 +1104,7 @@ func coroWorkerSyscallIncomingIdentity(universe *EmissionUniverse, edge coroWork
 		callerIdentity, strconv.Itoa(block), strconv.Itoa(instruction),
 		carrierIdentity, strconv.Itoa(edge.parameter), status, reason,
 		edge.resultProjectionID,
+		edge.trapPolicyIdentity,
 		strconv.FormatUint(uint64(edge.foreignPointerResultMask), 10),
 	}
 	targetKeys := append([]string(nil), edge.targetKeys...)
@@ -715,11 +1200,25 @@ func validateCoroWorkerSyscallCall(plan *coro.SSAPlan, universe *EmissionUnivers
 	owners := frozen.workerOwners
 	for _, root := range plan.Roots() {
 		if _, parameterEntry := owners[root.Function]; parameterEntry {
+			rootPlan, planned := plan.FunctionPlan(root.Function)
+			if planned && coroWorkerHasExactRawPlainOnly(plan, root.Function, rootPlan) {
+				// A raw/plain externally established trap or function word is
+				// executed synchronously by its legacy-stack body and never
+				// consumes this worker certificate.
+				continue
+			}
 			return fmt.Errorf("worker llgo.syscall parameter owner %q is an externally established entry", root.ID)
 		}
 	}
 	for owner := range owners {
 		ownerPlan, ok := plan.FunctionPlan(owner)
+		if ok && ownerPlan.Emission == coro.EmitNone {
+			// Trap carriers are frozen transitively so a public/dynamic wrapper
+			// can share the same syscall leaf with constant-safe callers. An
+			// inactive carrier supplies no runtime trap value; its exact
+			// incoming edge is checked if a later root makes it active.
+			continue
+		}
 		managedOwner := ok && ownerPlan.External == coro.Defined && ownerPlan.ManagedDemand != coro.NoDemand &&
 			ownerPlan.Emission == coro.EmitCoroutine && ownerPlan.Primary == coro.PrimaryCoroutine &&
 			ownerPlan.FuncRep == coro.DirectCoro && (!ownerPlan.RawPlainDemand ||
