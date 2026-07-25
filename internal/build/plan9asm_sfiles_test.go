@@ -150,3 +150,45 @@ printf '{"Dir":"%s","SFiles":["asm_amd64.s"]}\n' "$PACKAGE_DIR"
 		t.Fatalf("pkgSFiles = %v, want [%s]", got, sfile)
 	}
 }
+
+func TestPkgSFilesNamedWebAssemblySkipsChachaStubBeforeGenericFallback(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses a shell script as a fake go command")
+	}
+
+	pkgDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(pkgDir, "chacha8_stub.s"), []byte("TEXT ·block(SB),NOSPLIT,$0-0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	goCmd := filepath.Join(binDir, "go")
+	script := `#!/bin/sh
+printf '{"Dir":"%s","SFiles":["chacha8_stub.s"]}\n' "$PACKAGE_DIR"
+`
+	if err := os.WriteFile(goCmd, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PACKAGE_DIR", pkgDir)
+
+	ctx := &context{
+		conf: &packages.Config{Env: os.Environ()},
+		buildConf: &Config{
+			Target:                  "wasip2",
+			Goos:                    "linux",
+			Goarch:                  "arm",
+			resolvedTargetBuildTags: []string{"tinygo.wasm", "wasip2"},
+		},
+	}
+	got, err := pkgSFiles(ctx, &packages.Package{
+		ID:      "internal/chacha8rand",
+		PkgPath: "internal/chacha8rand",
+		Dir:     pkgDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("named WebAssembly chacha8rand SFiles = %v, want none", got)
+	}
+}

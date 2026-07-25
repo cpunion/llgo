@@ -539,6 +539,14 @@ func pkgSFiles(ctx *context, pkg *packages.Package) ([]string, error) {
 		return nil, fmt.Errorf("go list -json %s: parse: %w", pkg.PkgPath, err)
 	}
 
+	// Target-specific source islands own the decision before the generic
+	// chacha8 fallback below. In particular, named WebAssembly replaces block
+	// with a pure-Go source patch and must not re-admit chacha8_stub.s merely
+	// because that file exists in GOROOT.
+	if shouldSkipPlan9AsmSFilesForTarget(ctx.buildConf, pkg.PkgPath) {
+		ctx.sfilesCache[pkg.ID] = nil
+		return nil, nil
+	}
 	// internal/chacha8rand has highly optimized arch asm on amd64/arm64.
 	// Until full vector lowering lands, force the generic stub entry, which
 	// tail-jumps to block_generic and preserves package behavior.
@@ -550,14 +558,6 @@ func pkgSFiles(ctx *context, pkg *packages.Package) ([]string, error) {
 			return paths, nil
 		}
 	}
-	// Embedded ARM targets currently reuse GOOS=linux metadata, but they do not
-	// have a Linux syscall surface. Skip syscall asm in that mode so embedded
-	// builds do not inherit Linux/ARM-specific frame layouts.
-	if shouldSkipPlan9AsmSFilesForTarget(ctx.buildConf, pkg.PkgPath) {
-		ctx.sfilesCache[pkg.ID] = nil
-		return nil, nil
-	}
-
 	paths := selectedSFiles(lp.Dir, lp.SFiles)
 	ctx.sfilesCache[pkg.ID] = paths
 	return paths, nil
