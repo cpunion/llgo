@@ -600,7 +600,12 @@ func shouldSkipPlan9AsmSFilesForTarget(conf *Config, pkgPath string) bool {
 	if pkgPath == "syscall" {
 		return true
 	}
-	// The source patch for internal/chacha8rand replaces the selected ARM
-	// assembly trampoline with the upstream pure-Go block implementation.
-	return pkgPath == "internal/chacha8rand" && configHasBuildTag(conf, "tinygo.wasm")
+	if !configHasBuildTag(conf, "tinygo.wasm") {
+		return false
+	}
+	// Named WebAssembly source patches replace both selected ARM assembly
+	// islands: chacha8rand uses its upstream pure-Go block implementation,
+	// while internal/runtime/syscall/linux fails closed with ENOSYS instead of
+	// emitting a Linux SWI into a freestanding WebAssembly module.
+	return pkgPath == "internal/chacha8rand" || pkgPath == "internal/runtime/syscall/linux"
 }

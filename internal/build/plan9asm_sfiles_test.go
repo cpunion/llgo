@@ -72,6 +72,9 @@ func TestShouldSkipPlan9AsmSFilesForTarget(t *testing.T) {
 	if !shouldSkipPlan9AsmSFilesForTarget(wasip2, "internal/chacha8rand") {
 		t.Fatal("named WebAssembly chacha8rand trampoline should be replaced by its pure-Go source patch")
 	}
+	if !shouldSkipPlan9AsmSFilesForTarget(wasip2, "internal/runtime/syscall/linux") {
+		t.Fatal("named WebAssembly Linux syscall assembly should be replaced by its fail-closed source patch")
+	}
 	if shouldSkipPlan9AsmSFilesForTarget(wasip2, "internal/bytealg") {
 		t.Fatal("named WebAssembly bytealg assembly must remain available for LLVM translation")
 	}
