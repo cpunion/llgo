@@ -224,7 +224,11 @@ try {
     ) >>> 0;
     const result = readWords(resultPtr, 8);
     if (status === 0 || status === 4 || status === 5 || status > 6 || result[7] !== 0) {
-      throw new Error(`invalid scheduler result ${status}: ${result.join(",")}`);
+      throw new Error(
+        `invalid scheduler result ${status}: ${result.join(",")}; ` +
+          `operations=${operations}, opcodes=${[...opcodes].join(",")}, ` +
+          `files=${files.size}, fds=${descriptors.size}, scheduleActions=${scheduleActions}`,
+      );
     }
   }
   const completeFileLifecycle =
