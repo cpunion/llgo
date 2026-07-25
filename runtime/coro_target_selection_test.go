@@ -73,6 +73,7 @@ func TestCoroNativeTargetBuildSelection(t *testing.T) {
 			timer := slices.Contains(pkg.GoFiles, "coro_executor_driver_timer_llgo.go") &&
 				slices.Contains(pkg.GoFiles, "coro_target_wait_timer_llgo.go") &&
 				slices.Contains(pkg.GoFiles, "coro_timer_owner_llgo.go")
+			workerDriver := slices.Contains(pkg.GoFiles, "coro_executor_driver_worker_llgo.go")
 			legacyDriver := slices.Contains(pkg.GoFiles, "coro_executor_driver_legacy.go")
 			host := slices.Contains(pkg.GoFiles, "coro_target_host_llgo.go") &&
 				slices.Contains(pkg.GoFiles, "coro_executor_driver_host_llgo.go")
@@ -87,9 +88,11 @@ func TestCoroNativeTargetBuildSelection(t *testing.T) {
 			adapter := slices.Contains(pkg.GoFiles, "coro_target_test_adapter.go")
 			if native != test.native || timer != test.timer || host != test.host ||
 				(profileCount == 1) != test.host || test.profile != "" && !slices.Contains(pkg.GoFiles, test.profile) ||
-				legacyDriver != (!test.timer && !test.host) || pipeWait != (test.native && !test.timer) ||
+				workerDriver != (test.native && !test.timer) ||
+				legacyDriver != (!test.timer && !test.host && !test.native) ||
+				pipeWait != (test.native && !test.timer) ||
 				adapter != test.adapter || fallback != (!test.native && !test.host && !test.adapter) {
-				t.Fatalf("GoFiles = %v, native=%t timer=%t host=%t legacy-driver=%t pipe-wait=%t adapter=%t fallback=%t", pkg.GoFiles, native, timer, host, legacyDriver, pipeWait, adapter, fallback)
+				t.Fatalf("GoFiles = %v, native=%t timer=%t host=%t worker-driver=%t legacy-driver=%t pipe-wait=%t adapter=%t fallback=%t", pkg.GoFiles, native, timer, host, workerDriver, legacyDriver, pipeWait, adapter, fallback)
 			}
 			const doorbell = "github.com/goplus/llgo/runtime/internal/corodoorbell"
 			if imported := slices.Contains(pkg.Imports, doorbell); imported != test.doorbellOK {

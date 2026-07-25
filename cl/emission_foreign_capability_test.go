@@ -122,6 +122,44 @@ func root(v int) int { return NoBlock(v) + Sync(v) + SchedulerWait(v) + Worker(v
 	}
 }
 
+func TestEmissionUniverseCPhysicalABIErasesNamedCallbackIdentity(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/callbackabi", `package callbackabi
+
+//llgo:type C
+type Callback func(*int, *int)
+
+//llgo:coro sync
+//go:linkname Named C.same_callback_abi
+func Named(Callback)
+
+//go:linkname Anonymous C.same_callback_abi
+func Anonymous(func(*int, *int))
+
+func root(named Callback, anonymous func(*int, *int)) {
+	Named(named)
+	Anonymous(anonymous)
+}
+`)
+	testProg.ssa.Build()
+	prog := llssa.NewProgram(nil)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{
+		SSA: pkg.ssa, Files: []*ast.File{pkg.file}, Identity: "callback-abi-owner",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate, ok, err := universe.CoroForeignSyncCertificate(pkg.ssa.Func("Named"))
+	if err != nil || !ok || certificate.ABISignature == "" {
+		t.Fatalf("named callback sync certificate = %+v, %t, %v", certificate, ok, err)
+	}
+	aliasCertificate, ok, err := universe.CoroForeignSyncCertificate(pkg.ssa.Func("Anonymous"))
+	if err != nil || !ok || aliasCertificate != certificate {
+		t.Fatalf("ABI-equivalent declaration sync certificate = %+v, %t, %v; want canonical %+v", aliasCertificate, ok, err, certificate)
+	}
+}
+
 func TestEmissionUniverseForeignCallCapabilitiesFailClosed(t *testing.T) {
 	for _, test := range []struct {
 		name    string

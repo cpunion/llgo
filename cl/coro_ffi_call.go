@@ -29,12 +29,12 @@ import (
 // suspension: the ordinary scheduler child transaction begins only after the
 // C call below has returned.
 func (p *context) compileCoroFFICall(b llssa.Builder, args []llssa.Expr) {
-	body := p.coroBody()
-	if body == nil || b.Func != p.fn || len(args) != 5 {
+	task := p.coroTask()
+	if task.IsNil() || b.Func != p.fn || len(args) != 5 {
 		panic("llgo.coroFFICall requires five arguments in the active coroutine function")
 	}
 	cif, entry, out, gslot, argv := args[0], args[1], args[2], args[3], args[4]
-	b.Store(gslot, body.task)
+	b.Store(gslot, task)
 
 	childSlot := p.coroFrameAlloca(p.prog.VoidPtr())
 	ffiCall := p.pkg.NewFunc("ffi_call", coroFFIRawCallSignature(), llssa.InC)

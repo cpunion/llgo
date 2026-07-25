@@ -333,7 +333,10 @@ func Parent(value uint32) uint32 {
 	if retag == nil {
 		t.Fatal("named function conversion did not produce ChangeType")
 	}
-	target, err := resolveCoroCompilerElidedStaticAwaitRetag(plan, parentPlan, universe, parent, retag)
+	audit := &coroPhysicalPureSSAAudit{
+		plan: plan, universe: universe, fn: parent,
+	}
+	target, err := resolveCoroCompilerElidedStaticAwaitRetag(audit, parentPlan, retag)
 	if err != nil || target != ssaPkg.Func("Child") {
 		t.Fatalf("named function retag proof = %v, %v; want exact Child", target, err)
 	}

@@ -254,7 +254,7 @@ func (u *EmissionUniverse) classifyPlainRuntimeHelpers(ctx *context, instr ssa.I
 	plainStackCStr := false
 	if call, ok := instr.(*ssa.Call); ok && u.prog != nil {
 		opcode, intrinsic := emissionCallIntrinsicInstruction(ctx, &call.Call)
-		plainStackCStr = intrinsic && opcode == llgoAllocaCStr
+		plainStackCStr = intrinsic && (opcode == llgoAllocaCStr || opcode == llgoAllocaCStrs)
 	}
 	for _, helper := range managed {
 		if plainStackCStr && helper == "AllocU" {
@@ -585,12 +585,20 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(ctx *context, shape coroEm
 		if u.prog != nil {
 			opcode, intrinsic := emissionCallIntrinsicInstruction(ctx, &v.Call)
 			switch {
-			case intrinsic && opcode == llgoAllocaCStr:
-				// A plain body emits the stack-backed AllocaCStr recipe, while
-				// a physical body consumes the frozen heap-cstr recipe. The
-				// latter emits AllocU followed by CStrCopy, so both managed
-				// edges must be known before whole-program analysis.
+			case intrinsic && (opcode == llgoAllocaCStr || opcode == llgoAllocaCStrs):
+				// A plain body emits the stack-backed C-string recipe, while a
+				// physical body consumes the frozen heap recipe. The latter emits
+				// AllocU followed by CStrCopy, so both managed edges must be known
+				// before whole-program analysis.
 				add("AllocU", "CStrCopy")
+			case intrinsic && opcode == llgoCgoCgocall &&
+				v.Parent() != nil && isCgoC2func(v.Parent().Name()):
+				// The exact generated C2 worker transaction resumes in the Go
+				// wrapper and constructs its (result, error) pair there. Attach
+				// that synthetic interface construction to the cgocall source
+				// site so helper closure, physical emission, and observation
+				// share one immutable recipe.
+				add("AllocU", "NewItab")
 			case intrinsic && opcode == llgoDeferData:
 				// Builder.DeferData replaces the compiler declaration with an
 				// ordinary runtime.GetThreadDefer call.
@@ -1095,8 +1103,12 @@ const (
 // emit no producer load and leave the nil edge at MakeInterface. Zero-sized
 // values retain the producer dereference's nil edge even though no physical
 // load remains.
-func coroInterfaceDerefConsumer(ctx *context, deref *ssa.UnOp) (*ssa.MakeInterface, coroInterfaceDerefFusion) {
-	if ctx == nil || ctx.prog == nil || deref == nil || deref.Op != token.MUL {
+func coroInterfaceDerefConsumerForPhysicalType(
+	deref *ssa.UnOp,
+	physical types.Type,
+	pointerSize int,
+) (*ssa.MakeInterface, coroInterfaceDerefFusion) {
+	if deref == nil || deref.Op != token.MUL || physical == nil || pointerSize <= 0 {
 		return nil, coroInterfaceDerefNotFused
 	}
 	refs, ok := nonDebugReferrers(deref)
@@ -1107,12 +1119,7 @@ func coroInterfaceDerefConsumer(ctx *context, deref *ssa.UnOp) (*ssa.MakeInterfa
 	if !ok || box.X != deref {
 		return nil, coroInterfaceDerefNotFused
 	}
-	physical := ctx.type_(deref.Type(), llssa.InGo)
-	raw := physical.RawType()
-	if raw == nil {
-		return nil, coroInterfaceDerefNotFused
-	}
-	size := emissionTargetTypeSize(types.Unalias(raw), int64(ctx.prog.PointerSize()))
+	size := emissionTargetTypeSize(types.Unalias(physical), int64(pointerSize))
 	switch {
 	case size == 0:
 		return box, coroInterfaceDerefZero

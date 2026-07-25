@@ -418,9 +418,12 @@ func TestCoroWorkerForeignCallShapeAcceptsTypedRecordABIs(t *testing.T) {
 		wantArgs    int
 		wantResult  bool
 	}{
+		{"zero arguments", "func foreign() uintptr", "_ = foreign()", 0, true},
 		{"float argument", "func foreign(float64) uintptr", "_ = foreign(1)", 1, true},
 		{"aggregate argument", "func foreign(struct{ X uintptr }) uintptr", "_ = foreign(struct{ X uintptr }{})", 1, true},
 		{"float result", "func foreign(uintptr) float64", "_ = foreign(1)", 1, true},
+		{"foreign or borrowed pointer result", "func foreign(uintptr) *byte", "_ = foreign(1)", 1, true},
+		{"foreign or borrowed pointer aggregate result", "func foreign(uintptr) struct{ P *byte }", "_ = foreign(1)", 1, true},
 		{
 			"more than queue word limit",
 			"func foreign(uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr) uintptr",
@@ -451,6 +454,69 @@ func Root() { ` + test.statement + ` }
 	}
 }
 
+func TestCoroWorkerForeignCallShapeAcceptsCDeclarationMethod(t *testing.T) {
+	const source = `package foreignworker
+type Handle struct{}
+//llgo:link (*Handle).Read C.foreign_method_probe
+func (handle *Handle) Read(value uintptr) uintptr { return 0 }
+func Root(handle *Handle) uintptr { return handle.Read(1) }
+`
+	fixture := prepareCoroWorkerForeignFixture(t, source, "Root")
+	defer fixture.prog.Dispose()
+	shape, recognized, err := validateCoroWorkerForeignCall(
+		fixture.plan, fixture.universe, fixture.call, fixture.prog.PointerSize(),
+	)
+	if !recognized || err != nil || shape.target == nil || shape.signature == nil ||
+		shape.signature.Recv() != nil || shape.argc != 2 ||
+		shape.signature.Params().At(0).Type().String() != "*foreignworker.Handle" {
+		t.Fatalf("C method worker shape = %+v, recognized=%t, error=%v", shape, recognized, err)
+	}
+}
+
+func TestCoroWorkerForeignCallShapeSpecializesCVarargs(t *testing.T) {
+	const source = `package foreignworker
+import _ "unsafe"
+//go:linkname foreign C.foreign_varargs_probe
+func foreign(format *byte, __llgo_va_list ...any) uintptr
+func Root(format *byte, value uintptr) uintptr { return foreign(format, value) }
+`
+	fixture := prepareCoroWorkerForeignFixture(t, source, "Root")
+	defer fixture.prog.Dispose()
+	shape, recognized, err := validateCoroWorkerForeignCall(
+		fixture.plan, fixture.universe, fixture.call, fixture.prog.PointerSize(),
+	)
+	if !recognized || err != nil || shape.target == nil || shape.signature == nil ||
+		!shape.variadic || shape.signature.Variadic() || shape.argc != 2 ||
+		shape.signature.Params().At(0).Type().String() != "*byte" ||
+		shape.signature.Params().At(1).Type().String() != "uintptr" ||
+		shape.record == nil || shape.argumentBase != 0 ||
+		shape.record.NumFields() != 3 ||
+		shape.record.Field(0).Type().String() != "*byte" ||
+		shape.record.Field(1).Type().String() != "uintptr" {
+		t.Fatalf("C varargs worker shape = %+v, recognized=%t, error=%v", shape, recognized, err)
+	}
+}
+
+func TestCoroWorkerForeignCallShapeAcceptsExplicitStringViewAlias(t *testing.T) {
+	const source = `package foreignworker
+import _ "unsafe"
+type StringView = string
+//llgo:coro worker
+//go:linkname foreign C.foreign_string_view_probe
+func foreign(StringView) uintptr
+func Root(value string) uintptr { return foreign(value) }
+`
+	fixture := prepareCoroWorkerForeignFixture(t, source, "Root")
+	defer fixture.prog.Dispose()
+	shape, recognized, err := validateCoroWorkerForeignCall(
+		fixture.plan, fixture.universe, fixture.call, fixture.prog.PointerSize(),
+	)
+	if !recognized || err != nil || shape.argc != 1 || shape.record == nil ||
+		shape.record.Field(0).Type().String() != "foreignworker.StringView" {
+		t.Fatalf("C string-view worker shape = %+v, recognized=%t, error=%v", shape, recognized, err)
+	}
+}
+
 func TestCoroWorkerForeignCallShapeRejectsUnsafeABIs(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -461,11 +527,9 @@ func TestCoroWorkerForeignCallShapeRejectsUnsafeABIs(t *testing.T) {
 		{"string argument", "func foreign(string) uintptr", "_ = foreign(\"\")", "argument 0 type string cannot be represented in a typed worker call record"},
 		{"slice argument", "func foreign([]byte) uintptr", "_ = foreign(nil)", "argument 0 type []byte cannot be represented in a typed worker call record"},
 		{"Go function argument", "func foreign(func()) uintptr", "_ = foreign(func(){})", "argument 0 type func() cannot be represented in a typed worker call record"},
-		{"pointer result", "func foreign(uintptr) *byte", "_ = foreign(1)", "result type *byte cannot be represented in a pointer-free typed worker call record"},
-		{"pointer aggregate result", "func foreign(uintptr) struct{ P *byte }", "_ = foreign(1)", "result type struct{P *byte} cannot be represented in a pointer-free typed worker call record"},
-		{"string result", "func foreign(uintptr) string", "_ = foreign(1)", "result type string cannot be represented in a pointer-free typed worker call record"},
+		{"string result", "func foreign(uintptr) string", "_ = foreign(1)", "result type string cannot be represented in a declaration-authorized typed worker call record"},
 		{"multiple results", "func foreign(uintptr) (uintptr, uintptr)", "_, _ = foreign(1)", "requires zero or one result"},
-		{"variadic", "func foreign(...uintptr) uintptr", "_ = foreign(1)", "receiver-free, non-variadic"},
+		{"non-LLGo variadic", "func foreign(...uintptr) uintptr", "_ = foreign(1)", "requires the trailing __llgo_va_list ...any ABI"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -485,6 +549,23 @@ func Root() { ` + test.statement + ` }
 				t.Fatalf("preflight error = %v; want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestCoroWorkerDynamicForeignCallRejectsPointerResultWithoutDeclarationProvenance(t *testing.T) {
+	const source = `package foreignworker
+//llgo:type C
+type Callback func(uintptr) *byte
+func Root(callback Callback) *byte { return callback(1) }
+`
+	fixture := prepareCoroWorkerForeignFixture(t, source, "Root")
+	defer fixture.prog.Dispose()
+	_, recognized, err := validateCoroWorkerForeignCall(
+		fixture.plan, fixture.universe, fixture.call, fixture.prog.PointerSize(),
+	)
+	if !recognized || err == nil ||
+		!strings.Contains(err.Error(), "result type *byte cannot be represented in a pointer-free typed worker call record") {
+		t.Fatalf("dynamic pointer-result preflight = recognized:%t err:%v", recognized, err)
 	}
 }
 

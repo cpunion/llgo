@@ -197,6 +197,18 @@ func (b Builder) AllocCStr(gostr Expr) (ret Expr) {
 // func allocaCStrs(strs []string, endWithNil bool) **int8
 func (b Builder) AllocaCStrs(strs Expr, endWithNil bool) (cstrs Expr) {
 	dbgInstrf("AllocaCStrs %v, %v\n", strs.impl, endWithNil)
+	return b.makeCStrs(strs, endWithNil, false)
+}
+
+// AllocCStrs allocates a C string vector and every pointed-to string in
+// runtime-managed storage. It is the stackless-coroutine counterpart of
+// AllocaCStrs: none of the returned addresses belong to a native resume stack.
+func (b Builder) AllocCStrs(strs Expr, endWithNil bool) (cstrs Expr) {
+	dbgInstrf("AllocCStrs %v, %v\n", strs.impl, endWithNil)
+	return b.makeCStrs(strs, endWithNil, true)
+}
+
+func (b Builder) makeCStrs(strs Expr, endWithNil, managed bool) (cstrs Expr) {
 	prog := b.Prog
 	n := b.SliceLen(strs)
 	n1 := n
@@ -204,11 +216,23 @@ func (b Builder) AllocaCStrs(strs Expr, endWithNil bool) (cstrs Expr) {
 		n1 = b.BinOp(token.ADD, n, prog.Val(1))
 	}
 	tcstr := prog.CStr()
-	cstrs = b.ArrayAlloca(tcstr, n1)
+	if managed {
+		cstrs = b.ArrayAllocU(tcstr, n1)
+	} else {
+		cstrs = b.ArrayAlloca(tcstr, n1)
+	}
 	b.Times(n, func(i Expr) {
-		pstr := b.IndexAddr(strs, i)
+		// Times establishes 0 <= i < len(strs), so this compiler-generated
+		// access already owns the exact Go bounds proof.
+		pstr := b.IndexAddrUnchecked(strs, i)
 		s := b.Load(pstr)
-		b.Store(b.Advance(cstrs, i), b.AllocaCStr(s))
+		var cstr Expr
+		if managed {
+			cstr = b.AllocCStr(s)
+		} else {
+			cstr = b.AllocaCStr(s)
+		}
+		b.Store(b.Advance(cstrs, i), cstr)
 	})
 	if endWithNil {
 		b.Store(b.Advance(cstrs, n), prog.Nil(tcstr))
@@ -280,6 +304,16 @@ func (b Builder) ArrayAlloca(telem Type, n Expr) (ret Expr) {
 	dbgInstrf("ArrayAlloca %v, %v\n", telem.raw.Type, n.impl)
 	ret.impl = llvm.CreateArrayAlloca(b.impl, telem.ll, n.impl)
 	ret.Type = b.Prog.Pointer(telem)
+	return
+}
+
+// ArrayAllocU reserves runtime-managed, uninitialized storage for n elements.
+func (b Builder) ArrayAllocU(telem Type, n Expr) (ret Expr) {
+	dbgInstrf("ArrayAllocU %v, %v\n", telem.raw.Type, n.impl)
+	prog := b.Prog
+	size := b.BinOp(token.MUL, n, SizeOf(prog, telem))
+	ret = b.allocUninited(size)
+	ret.Type = prog.Pointer(telem)
 	return
 }
 
@@ -400,10 +434,23 @@ func (b Builder) load(ptr Expr, knownNonNil bool) Expr {
 
 // Store stores val at the pointer ptr.
 func (b Builder) Store(ptr, val Expr) Expr {
+	return b.store(ptr, val, false)
+}
+
+// StoreKnownNonNil stores val at ptr without emitting LLGo's static
+// nil-dereference helper. The caller must already own the source-language nil
+// edge or prove that ptr is non-nil.
+func (b Builder) StoreKnownNonNil(ptr, val Expr) Expr {
+	return b.store(ptr, val, true)
+}
+
+func (b Builder) store(ptr, val Expr, knownNonNil bool) Expr {
 	raw := ptr.raw.Type
 	dbgInstrf("Store %v, %v, %v\n", raw, ptr.impl, val.impl)
 	val = checkExpr(val, raw.(*types.Pointer).Elem(), b)
-	b.assertStaticNilDeref(ptr)
+	if !knownNonNil {
+		b.assertStaticNilDeref(ptr)
+	}
 	return Expr{b.impl.CreateStore(val.impl, ptr.impl), b.Prog.Void()}
 }
 

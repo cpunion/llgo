@@ -294,6 +294,12 @@ func (p Package) NewFuncEx(name string, sig *types.Signature, bg Background, has
 	}
 	if p.isPreservedName(name) {
 		p.markLLVMUsed(fn)
+		// SetExport declares an externally discoverable ABI entry. Keep that
+		// entry not only through LLVM optimization (llvm.compiler.used), but
+		// also through final-link section garbage collection (llvm.used).
+		// Otherwise an exported hook that is reached only by a foreign caller
+		// disappears whenever the current Go program has no direct reference.
+		p.markLLVMRetained(fn)
 	}
 	ret := newFunction(fn, t, p, p.Prog, hasFreeVars)
 	p.fns[name] = ret

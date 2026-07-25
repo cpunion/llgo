@@ -114,14 +114,41 @@ func (s *coroPhysicalEmissionSession) completeCoroPhysicalBody(body *coroBodyCon
 // modules. The ordinary SSA compiler uses semantic adapter methods instead of
 // reading physical state directly.
 func (p *context) coroBody() *coroBodyContext {
-	if p == nil || p.coroEmission == nil || p.coroEmission.phase != coroPhysicalEmissionBody {
+	return p.activeCoroEmissionBody()
+}
+
+func (p *context) activeCoroEmissionBody() *coroBodyContext {
+	if p == nil {
 		return nil
 	}
-	return p.coroEmission.body
+	session := p.coroEmission
+	if session == nil || session.phase != coroPhysicalEmissionBody {
+		return nil
+	}
+	return session.body
 }
 
 func (p *context) hasCoroPhysicalBody() bool {
 	return p.coroBody() != nil
+}
+
+// coroTask and coroCleanup expose narrow capabilities owned by the active
+// physical-emission session. Lowerers that need only one capability must not
+// retain or inspect the complete mutable body.
+func (p *context) coroTask() llssa.Expr {
+	body := p.activeCoroEmissionBody()
+	if body == nil {
+		return llssa.Expr{}
+	}
+	return body.task
+}
+
+func (p *context) coroCleanup() *coroStaticCleanupState {
+	body := p.activeCoroEmissionBody()
+	if body == nil {
+		return nil
+	}
+	return body.cleanup
 }
 
 func (p *context) hasCoroPhysicalEmission() bool {

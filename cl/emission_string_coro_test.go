@@ -94,3 +94,49 @@ func Use(value *int8) uintptr { return String(value) }
 		t.Fatalf("wrong-shape string semantics = _, %v, %v; want exact-shape error", intrinsic, err)
 	}
 }
+
+func TestStringDataIntrinsicIsExactInlineNoSuspend(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/stringdataintrinsic", `package stringdataintrinsic
+//llgo:link StringData llgo.stringData
+func StringData(string) *int8
+func Use(value string) *int8 { return StringData(value) }
+`)
+	testProg.ssa.Build()
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{
+		SSA: pkg.ssa, Files: []*ast.File{pkg.file},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := allocaCStrTestCalls(pkg.ssa.Func("Use"))[0]
+	semantics, intrinsic, err := universe.CoroIntrinsicCallSiteSemantics(call)
+	if err != nil || !intrinsic || semantics != CoroIntrinsicCallInlineNoSuspend {
+		t.Fatalf("stringData semantics = %v, %v, %v; want inline-no-suspend, true, nil", semantics, intrinsic, err)
+	}
+}
+
+func TestStringDataIntrinsicRejectsWrongDeclarationShape(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/stringdataintrinsicbad", `package stringdataintrinsicbad
+//llgo:link StringData llgo.stringData
+func StringData(string) uintptr
+func Use(value string) uintptr { return StringData(value) }
+`)
+	testProg.ssa.Build()
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{{
+		SSA: pkg.ssa, Files: []*ast.File{pkg.file},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := allocaCStrTestCalls(pkg.ssa.Func("Use"))[0]
+	if _, intrinsic, err := universe.CoroIntrinsicCallSiteSemantics(call); err == nil || !intrinsic ||
+		!strings.Contains(err.Error(), "func(string) *int8") {
+		t.Fatalf("wrong-shape stringData semantics = _, %v, %v; want exact-shape error", intrinsic, err)
+	}
+}

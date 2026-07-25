@@ -1680,9 +1680,10 @@ func callGo() { goDeclaration() }
 	}
 
 	required := functionPlanForBuildTest(t, plan, fixture.pkg.Func("requiredC"))
-	if required.External != coro.ExternalKnown || required.Effect != coro.NoSuspend || required.Exec.Contains(coro.BlockForeign) ||
+	if required.External != coro.ExternalUnknownForeign || required.Effect != coro.NoSuspend ||
+		!required.Exec.Contains(coro.BlockForeign|coro.IRQUnsafe) ||
 		required.FuncRep != coro.DirectPlain || required.Emission != coro.EmitExternal {
-		t.Fatalf("required scheduler-stack C declaration = %+v, want trusted external-known direct plain", required)
+		t.Fatalf("required scheduler-stack C declaration = %+v, want conservative external-unknown-foreign direct plain", required)
 	}
 	foreign := functionPlanForBuildTest(t, plan, fixture.pkg.Func("foreignC"))
 	if foreign.External != coro.ExternalUnknownForeign || foreign.Effect != coro.NoSuspend || !foreign.Exec.Contains(coro.BlockForeign|coro.IRQUnsafe) ||
@@ -1708,7 +1709,7 @@ func callGo() { goDeclaration() }
 		t.Fatalf("Go declaration CallPlan = %+v, present=%t", got, ok)
 	}
 
-	known, err := fixture.input.Analyze(coro.Roots{{Function: callC, Demand: coro.AsyncDemand}}, coro.SSAConfig{
+	_, err = fixture.input.Analyze(coro.Roots{{Function: callC, Demand: coro.AsyncDemand}}, coro.SSAConfig{
 		MaxPlainInstructions: -1,
 		FunctionIDs:          fixture.functionIDs,
 		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
@@ -1723,14 +1724,8 @@ func callGo() { goDeclaration() }
 			return coro.SSAFunctionPolicy{}, nil
 		},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	knownForeign := functionPlanForBuildTest(t, known, fixture.pkg.Func("foreignC"))
-	if !known.IgnoresBody(fixture.pkg.Func("foreignC")) || knownForeign.External != coro.ExternalKnown ||
-		!knownForeign.Effect.Contains(coro.WaitHost) || !knownForeign.Exec.Contains(coro.ThreadAffine) ||
-		knownForeign.FuncRep != coro.DirectCoro || knownForeign.Emission != coro.EmitExternal {
-		t.Fatalf("explicit frozen C summary = %+v, ignored=%t; want preserved known async/host policy", knownForeign, known.IgnoresBody(fixture.pkg.Func("foreignC")))
+	if err == nil || !strings.Contains(err.Error(), `frontend C declaration "foreignC" conflicts with its frozen callable contract`) {
+		t.Fatalf("handcrafted C summary error = %v, want frozen callable-contract rejection", err)
 	}
 }
 
@@ -1931,6 +1926,8 @@ func __llgo_coro_program_main_return_v1() {}
 			EmissionUniverse:   ssaEmission,
 			resolveFunction:    emission.Resolve,
 			functionBackground: emission.FunctionBackground,
+			callableIdentity:   emission.CoroCallableIdentityCertificate,
+			callableContract:   emission.CoroCallableContractCertificate,
 			callSitePlan:       emission.CoroCallSitePlan,
 			rawCFunctionType: func(typ types.Type) (bool, error) {
 				if typ == nil {
@@ -1943,6 +1940,7 @@ func __llgo_coro_program_main_return_v1() {}
 			},
 			requiredRoots:               roots,
 			requiredPlain:               requiredPlain,
+			requiredHostPlain:           requiredPlain,
 			requiredDirectPlain:         directPlain,
 			requiredClosedDynamic:       closedDynamic,
 			requiredGlobalFunctionSlots: ctx.coroGlobalFunctionSlots,
@@ -2035,7 +2033,7 @@ func TestBuildCoroPlanRejectsPartialStacklessArchive(t *testing.T) {
 	err := buildCoroPlan(&context{buildConf: &Config{
 		BuildMode: BuildModeCArchive,
 	}})
-	if err == nil || !strings.Contains(err.Error(), "executable build mode is required") {
+	if err == nil || !strings.Contains(err.Error(), "c-archive requires flattened package members") {
 		t.Fatalf("partial stackless archive error = %v", err)
 	}
 }
@@ -2625,14 +2623,14 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 		}
 	})
 
-	t.Run("entry resolution requires builder", func(t *testing.T) {
+	t.Run("configuration-only context has no program to analyze", func(t *testing.T) {
 		ctx := &context{buildConf: &Config{BuildMode: BuildModeExe}}
 		err := buildCoroPlan(ctx)
-		if err == nil || !strings.Contains(err.Error(), "CoroPlanBuilder is required") {
-			t.Fatalf("buildCoroPlan error = %v, want missing-builder rejection", err)
+		if err != nil {
+			t.Fatalf("configuration-only buildCoroPlan error = %v", err)
 		}
 		if ctx.coroPlan != nil || ctx.clCompilation != nil {
-			t.Fatal("missing builder installed coroutine compilation state")
+			t.Fatal("configuration-only build installed coroutine compilation state")
 		}
 	})
 
@@ -2640,15 +2638,15 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 		ctx := &context{buildConf: &Config{
 			BuildMode: BuildModeCArchive}}
 		err := buildCoroPlan(ctx)
-		if err == nil || !strings.Contains(err.Error(), "executable build mode is required") {
-			t.Fatalf("buildCoroPlan error = %v, want executable-mode rejection", err)
+		if err == nil || !strings.Contains(err.Error(), "c-archive requires flattened package members") {
+			t.Fatalf("buildCoroPlan error = %v, want flattened-archive rejection", err)
 		}
 		if ctx.coroPlan != nil || ctx.clCompilation != nil {
 			t.Fatal("invalid c-archive configuration installed coroutine compilation state")
 		}
 	})
 
-	t.Run("entry resolution requires prepared emission universe", func(t *testing.T) {
+	t.Run("custom builder must return input analysis", func(t *testing.T) {
 		builderCalls := 0
 		ctx := &context{buildConf: &Config{
 			BuildMode: BuildModeExe,
@@ -2658,14 +2656,14 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 				return &coro.SSAPlan{}, nil
 			}}}
 		err := buildCoroPlan(ctx)
-		if err == nil || !strings.Contains(err.Error(), "prepared emission universe is required") {
-			t.Fatalf("buildCoroPlan error = %v, want missing-universe rejection", err)
+		if err == nil || !strings.Contains(err.Error(), "plan created by CoroPlanInput.Analyze") {
+			t.Fatalf("buildCoroPlan error = %v, want Analyze provenance rejection", err)
 		}
-		if builderCalls != 0 {
-			t.Fatalf("CoroPlanBuilder calls = %d, want 0", builderCalls)
+		if builderCalls != 1 {
+			t.Fatalf("CoroPlanBuilder calls = %d, want 1", builderCalls)
 		}
 		if ctx.coroPlan != nil || ctx.clCompilation != nil {
-			t.Fatal("missing universe installed coroutine compilation state")
+			t.Fatal("unproven builder installed coroutine compilation state")
 		}
 	})
 
@@ -2692,22 +2690,14 @@ func TestBuildCoroPlanErrors(t *testing.T) {
 		}
 	})
 
-	t.Run("Do rejects entry resolution without builder before codegen", func(t *testing.T) {
+	t.Run("Do uses the default planner", func(t *testing.T) {
 		conf := NewDefaultConf(ModeGen)
-		moduleCalls := 0
-		conf.ModuleHook = func(Package) {
-			moduleCalls++
-		}
-
 		pkgs, err := Do([]string{"../../cl/_testgo/print"}, conf)
-		if err == nil || !strings.Contains(err.Error(), "CoroPlanBuilder is required") {
-			t.Fatalf("Do error = %v, want missing-builder rejection", err)
+		if err != nil {
+			t.Fatalf("Do with default coroutine planner: %v", err)
 		}
-		if len(pkgs) != 0 {
-			t.Fatalf("Do packages = %+v, want none", pkgs)
-		}
-		if moduleCalls != 0 {
-			t.Fatalf("ModuleHook calls = %d, want 0", moduleCalls)
+		if len(pkgs) == 0 {
+			t.Fatal("Do with default coroutine planner returned no packages")
 		}
 	})
 

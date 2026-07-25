@@ -47,6 +47,7 @@ const (
 	runtimeCoroWorkerCallSource              = "internal/coroworker/call_llgo.go"
 	runtimeCoroWorkerCSource                 = "internal/coroworker/_worker/worker.c"
 	runtimeCoroWorkerHeaderSource            = "internal/coroworker/_worker/worker.h"
+	runtimeCoroOSThreadForeignSource         = "internal/runtime/coro_os_thread_foreign_llgo.go"
 	runtimePthreadSyncSource                 = "internal/clite/pthread/sync/sync.go"
 	runtimePthreadGCSource                   = "internal/clite/pthread/pthread_gc.go"
 	runtimePthreadNoGCSource                 = "internal/clite/pthread/pthread_nogc.go"
@@ -109,7 +110,7 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 	native := readRuntimePollFile(t, runtimeCoroNativeWorkerSource)
 	for _, required := range []string{
 		"coroNativeWorkerThreadCountV1 = 4",
-		"coroNativeWorkerPageCountV1 = coroNativeSourcePageCountV1",
+		"coroNativeWorkerPageCountV1 = 16",
 		"coroNativeWorkerCapacityV1  = coroNativeWorkerPageCountV1 * coro.WorkerOperationPageCapacity",
 		"coroNativeWorkerQueueSizeV1 = coroworker.QueueCapacity",
 		"bounded C11 sequence ring",
@@ -351,11 +352,30 @@ func TestRuntimeCoroWorkerKeepsPthreadCreationCertificateOwnerScoped(t *testing.
 	}
 }
 
-func TestRuntimeCoroWorkerBlockingCallStaysInRawHostStackIsland(t *testing.T) {
+func TestRuntimeCoroWorkerBlockingCallHasOnlyGuardedSameMEntrance(t *testing.T) {
 	declaration := readRuntimePollFile(t, runtimeCoroWorkerCallSource)
-	for _, forbidden := range []string{"func Call(", "func QueueWaitTake("} {
-		if strings.Contains(declaration, forbidden) {
-			t.Errorf("%s exposes blocking worker operation %q to managed Go", runtimeCoroWorkerCallSource, forbidden)
+	if strings.Contains(declaration, "func QueueWaitTake(") {
+		t.Errorf("%s exposes the blocking worker consumer loop to managed Go", runtimeCoroWorkerCallSource)
+	}
+	for _, required := range []string{
+		"reserved for the runtime's dynamically proved",
+		"LockOSThread path",
+		"//llgo:coro sync\n//go:linkname Call C.__llgo_coro_worker_call_v1",
+		"func Call(function uintptr, argc uint32, args *[MaxArgs]uintptr, result *Result) bool",
+	} {
+		if !strings.Contains(declaration, required) {
+			t.Errorf("%s lacks guarded same-M call contract %q", runtimeCoroWorkerCallSource, required)
+		}
+	}
+
+	entrance := readRuntimePollFile(t, runtimeCoroOSThreadForeignSource)
+	for _, required := range []string{
+		"sole same-M blocking foreign",
+		"!coro.CurrentOSThreadLocked(task)",
+		"if !coroworker.Call(function, argc, &args, &result)",
+	} {
+		if !strings.Contains(entrance, required) {
+			t.Errorf("%s lacks locked-thread call guard %q", runtimeCoroOSThreadForeignSource, required)
 		}
 	}
 	cSource := readRuntimePollFile(t, runtimeCoroWorkerCSource)
@@ -577,9 +597,13 @@ func TestRuntimePollWaitSeparatesLegacyWorkerAndCoroutineOwnerABI(t *testing.T) 
 		t.Fatal("poll timeout -1 low-32-bit round trip is not explicit at both ABI ends")
 	}
 
-	manifest := readRuntimePollFile(t, "internal/lib/runtime/runtime_default.go")
+	manifest := readRuntimePollFile(t, "internal/runtime/coro_poll_c_llgo.go")
 	if !strings.Contains(manifest, "_wrap/poll.c") {
-		t.Fatal("non-baremetal runtime C manifest does not include the fixed poll wrapper")
+		t.Fatal("compiler runtime C manifest does not include the fixed poll wrapper")
+	}
+	legacyManifest := readRuntimePollFile(t, "internal/lib/runtime/runtime_default.go")
+	if strings.Contains(legacyManifest, "_wrap/poll.c") {
+		t.Fatal("standard-library runtime patch still owns the compiler poll C object")
 	}
 }
 

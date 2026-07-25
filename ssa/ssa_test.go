@@ -177,7 +177,8 @@ func TestNewFuncExLLVMUsed(t *testing.T) {
 	pkg := prog.NewPackage("main", "main")
 	sig := types.NewSignatureType(nil, nil, nil, nil, nil, false)
 
-	// Mark the exported name before function creation so NewFuncEx can protect it via llvm.compiler.used.
+	// Mark the exported name before function creation so NewFuncEx can protect
+	// it through both LLVM optimization and final-link dead stripping.
 	pkg.SetExport("main.Foo", "Foo")
 	pkg.SetExport("main.Bar", "Bar")
 	pkg.NewFunc("Foo", sig, InGo)
@@ -197,6 +198,19 @@ func TestNewFuncExLLVMUsed(t *testing.T) {
 	}
 	if got := pkg.String(); !strings.Contains(got, `@llvm.compiler.used = appending global [2 x ptr] [ptr @Foo, ptr @Bar], section "llvm.metadata"`) {
 		t.Fatalf("module missing llvm.compiler.used entry:\n%s", got)
+	}
+	retained := pkg.Module().NamedGlobal("llvm.used")
+	if retained.IsNil() {
+		t.Fatal("missing llvm.used")
+	}
+	if got := retained.Linkage(); got != llvm.AppendingLinkage {
+		t.Fatalf("llvm.used linkage = %v, want %v", got, llvm.AppendingLinkage)
+	}
+	if got := retained.Section(); got != "llvm.metadata" {
+		t.Fatalf("llvm.used section = %q, want %q", got, "llvm.metadata")
+	}
+	if got := pkg.String(); !strings.Contains(got, `@llvm.used = appending global [2 x ptr] [ptr @Foo, ptr @Bar], section "llvm.metadata"`) {
+		t.Fatalf("module missing llvm.used entry:\n%s", got)
 	}
 }
 

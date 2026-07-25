@@ -39,6 +39,9 @@ func Foreign(int) int
 //go:linkname Default C.callable_contract_default
 func Default(int) int
 
+//llgo:link LegacyStub C.callable_contract_legacy_stub
+func LegacyStub(int) int { return 0 }
+
 //llgo:coro worker
 //go:linkname LegacyWorker C.callable_contract_legacy_worker
 func LegacyWorker(int) int
@@ -47,7 +50,9 @@ func LegacyWorker(int) int
 func Wrapper(value int) int { return value + 1 }
 
 func Plain() {}
-func root(value int) int { return Foreign(value) + Default(value) + LegacyWorker(value) + Wrapper(value) }
+func root(value int) int {
+	return Foreign(value) + Default(value) + LegacyStub(value) + LegacyWorker(value) + Wrapper(value)
+}
 `)
 	testProg.ssa.Build()
 	prog := llssa.NewProgram(nil)
@@ -108,6 +113,19 @@ func root(value int) int { return Foreign(value) + Default(value) + LegacyWorker
 	}
 	if _, ok, err := universe.CoroCallableContractCertificate(pkg.ssa.Func("LegacyWorker")); err != nil || ok {
 		t.Fatalf("LegacyWorker callable contract = %t, %v; want legacy policy only", ok, err)
+	}
+	legacyStub, ok, err := universe.CoroCallableContractCertificate(pkg.ssa.Func("LegacyStub"))
+	if err != nil || !ok {
+		t.Fatalf("LegacyStub callable contract = %+v, %t, %v", legacyStub, ok, err)
+	}
+	if legacyStub.Scope != CoroCallableContractScopeDeclaration ||
+		legacyStub.Contract.Progress != coro.ProgressMayBlock ||
+		legacyStub.Contract.Affinity != coro.AffinityAnyThread ||
+		legacyStub.Contract.Reentry != coro.ReentryNone ||
+		legacyStub.Contract.Memory != coro.MemoryBorrowUntilComplete ||
+		legacyStub.HasTrustedInlineContract || legacyStub.CallableABIExplicit ||
+		legacyStub.PhysicalSymbol != "callable_contract_legacy_stub" {
+		t.Fatalf("LegacyStub frozen callable contract = %+v", legacyStub)
 	}
 	if _, ok, err := universe.CoroCallableContractCertificate(pkg.ssa.Func("Plain")); err != nil || ok {
 		t.Fatalf("Plain callable contract = %t, %v; want absent", ok, err)

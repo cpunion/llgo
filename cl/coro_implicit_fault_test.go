@@ -51,6 +51,8 @@ func ZeroFieldEqual(first, second *ZeroField) bool { return first.Empty == secon
 func InterfaceCompare(value **interface{}) bool { return **value == nil }
 func StaticNil() int { return *(*int)(nil) }
 func StaticNilFieldLoad() uint32 { var box *Box; return box.Value }
+func NullableStore(value *uint32) { *value = 7 }
+func StaticNilStore() { *(*uint32)(nil) = 7 }
 
 func Guarded(box *Box) uint32 {
 	if box == nil { return 0 }
@@ -155,6 +157,19 @@ func TestCoroImplicitNilFieldAddrNativeAndWasm32(t *testing.T) {
 			if strings.Contains(staticFieldBody, "AssertNilDeref") ||
 				strings.Count(staticFieldBody, "call void @"+coroFaultPrepareHookV1) != 1 {
 				t.Fatalf("constant nil field load did not use its structured pointer guard exclusively:\n%s", staticFieldBody)
+			}
+			for _, name := range []string{"NullableStore", "StaticNilStore"} {
+				function := functions[name]
+				functionPlan, ok := plan.FunctionPlan(function)
+				if !ok || functionPlan.Emission != coro.EmitCoroutine || !functionPlan.Exec.Contains(coro.MayUnwind) {
+					t.Fatalf("%s plan = %+v, present=%t; want may-unwind coroutine", name, functionPlan, ok)
+				}
+				body := requireCoroPhysicalFunction(t, module, "foo."+name).String()
+				if strings.Contains(body, "AssertNilDeref") ||
+					strings.Count(body, "call void @"+coroFaultPrepareHookV1) != 1 ||
+					!strings.Contains(body, "store i32 7") {
+					t.Fatalf("%s did not use one structured Store guard followed by the normal-edge store:\n%s", name, body)
+				}
 			}
 			zeroField := functions["ZeroFieldEqual"]
 			zeroFieldPlan, ok := plan.FunctionPlan(zeroField)
@@ -384,6 +399,8 @@ func compileCoroImplicitNilFaultFixture(
 		"InterfaceCompare":   ssaPkg.Func("InterfaceCompare"),
 		"StaticNil":          ssaPkg.Func("StaticNil"),
 		"StaticNilFieldLoad": ssaPkg.Func("StaticNilFieldLoad"),
+		"NullableStore":      ssaPkg.Func("NullableStore"),
+		"StaticNilStore":     ssaPkg.Func("StaticNilStore"),
 		"ZeroFieldEqual":     ssaPkg.Func("ZeroFieldEqual"),
 		"Guarded":            ssaPkg.Func("Guarded"),
 		"WithCleanup":        ssaPkg.Func("WithCleanup"),

@@ -3329,6 +3329,12 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	if ctx.buildConf.BuildMode == BuildModeCArchive {
 		return fmt.Errorf("enable coroutine child await: c-archive requires flattened package members and an explicit host bootstrap extraction contract")
 	}
+	if ctx.progSSA == nil && len(packages) == 0 && ctx.buildConf.CoroPlanBuilder == nil {
+		// A configuration-only caller has no program to analyze. Production Do
+		// always installs progSSA before this phase; retaining the no-op keeps
+		// validation helpers total without manufacturing an empty SSA plan.
+		return nil
+	}
 	builder := ctx.buildConf.CoroPlanBuilder
 	if builder == nil {
 		builder = defaultCoroPlanBuilder
@@ -3849,6 +3855,13 @@ func requiredCoroProgramManagedEntryRoots(ctx *context) (coro.Roots, error) {
 	if ctx == nil || ctx.buildConf == nil {
 		return nil, nil
 	}
+	// Isolated planner tests and analysis-only callers may have no linked
+	// program packages at all. There is then no main/public-runtime entry to
+	// inject and no emission universe is required merely to build an empty
+	// plan. Real Do builds install initial packages before this phase.
+	if len(ctx.initial) == 0 && ctx.coroEmission == nil {
+		return nil, nil
+	}
 	if ctx.coroEmission == nil {
 		return nil, fmt.Errorf("coroutine managed program roots require a frozen emission universe")
 	}
@@ -3916,6 +3929,40 @@ func requiredCoroRawABIEntryRoots(ctx *context) (coro.Roots, map[*ssa.Function]s
 			return nil, nil, fmt.Errorf("classify coroutine raw ABI entry %q: %w", fn.Name(), err)
 		}
 		if directive == "" {
+			continue
+		}
+		managedCgoErrno := 0
+		for _, block := range fn.Blocks {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(ssa.CallInstruction)
+				if !ok || call.Common() == nil {
+					continue
+				}
+				site, frozen, siteErr := ctx.coroEmission.CoroCallSitePlan(call)
+				if siteErr != nil {
+					return nil, nil, fmt.Errorf(
+						"classify coroutine raw ABI entry %q managed C2 transaction: %w",
+						fn.Name(), siteErr,
+					)
+				}
+				if frozen && site.Elision == cl.CoroCallElidedIntrinsic &&
+					site.Intrinsic &&
+					site.IntrinsicSemantics == cl.CoroIntrinsicCallInlineForeignSuspend {
+					managedCgoErrno++
+				}
+			}
+		}
+		if managedCgoErrno != 0 {
+			if directive != "//go:cgo_unsafe_args" || managedCgoErrno != 1 {
+				return nil, nil, fmt.Errorf(
+					"managed C2 adapter %q has directive %q and %d foreign-suspend transactions",
+					fn.Name(), directive, managedCgoErrno,
+				)
+			}
+			// In a generated _C2func_* wrapper this directive describes the
+			// source argument-frame convention; it does not publish the Go
+			// wrapper as an independently callable raw entry. The exact typed
+			// worker transaction frozen above is its sole physical crossing.
 			continue
 		}
 		goBody, err := frozenGoEmittedBody(ctx.coroEmission, fn)
@@ -4824,8 +4871,37 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 					// from its exact frozen lowered-call set.
 					continue
 				}
-				if _, seen := plain[callee]; !seen {
-					queue = append(queue, callee)
+				requirePlainCallee := true
+				calleeGoBody, bodyErr := frozenGoEmittedBody(ctx.coroEmission, callee)
+				if bodyErr != nil {
+					return nil, nil, nil, nil, fmt.Errorf(
+						"classify compiler runtime ABI callee %q in %q: %w",
+						callee.Name(), fn.Name(), bodyErr,
+					)
+				}
+				if !calleeGoBody && !provenCoroTLSDirectPlainClosureRoot(ctx, fn, closedDynamic) {
+					callable, certified, certificateErr := ctx.coroEmission.CoroCallableContractCertificate(callee)
+					if certificateErr != nil {
+						return nil, nil, nil, nil, fmt.Errorf(
+							"classify raw compiler-runtime foreign call %q in %q: %w",
+							callee.Name(), fn.Name(), certificateErr,
+						)
+					}
+					if certified && callable.Scope == coro.CallableContractScopeDeclaration &&
+						coroRawPlainDirectForeignContractCompatible(callable.Contract) {
+						// This call executes on the already-foreign/raw caller
+						// stack. Keep the declaration's conservative may-block
+						// policy instead of turning requiredPlain membership into
+						// a false ExternalKnown/no-suspend certificate. The exact
+						// raw closure validator consumes this same contract after
+						// fixed-point planning.
+						requirePlainCallee = false
+					}
+				}
+				if requirePlainCallee {
+					if _, seen := plain[callee]; !seen {
+						queue = append(queue, callee)
+					}
 				}
 				for argument, value := range call.Common().Args {
 					parameter, ok := staticCallArgumentParameterType(call, argument)
@@ -4912,9 +4988,10 @@ func staticCallArgumentParameterType(call ssa.CallInstruction, argument int) (ty
 
 // requiredCoroDirectPlainCallArguments freezes source-level C callback ABI
 // boundaries across the whole emission universe. A callback passed to a
-// //llgo:type C function parameter is a raw synchronous entry, never a Go
-// descriptor. The exact closed target closure is independently revalidated
-// after fixed-point planning as NoSuspend/DirectPlain.
+// function parameter of an exact C declaration—or to an independently
+// //llgo:type C parameter—is a raw synchronous entry, never a Go descriptor.
+// The exact closed target closure is independently revalidated after
+// fixed-point planning as NoSuspend/DirectPlain.
 func requiredCoroDirectPlainCallArguments(
 	ctx *context,
 	closedDynamic map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate,
@@ -4934,9 +5011,20 @@ func requiredCoroDirectPlainCallArguments(
 				if !ok || call.Common() == nil || call.Common().StaticCallee() == nil {
 					continue
 				}
+				rawCDeclaration := false
+				if callee, resolved := ctx.coroEmission.Resolve(call.Common().StaticCallee()); resolved && callee != nil {
+					background, classified, backgroundErr := ctx.coroEmission.FunctionBackground(callee)
+					if backgroundErr != nil {
+						return nil, nil, fmt.Errorf(
+							"classify static callback declaration %q in %q: %w",
+							callee.Name(), function.Name(), backgroundErr,
+						)
+					}
+					rawCDeclaration = classified && background == llssa.InC
+				}
 				for argument, value := range call.Common().Args {
 					parameter, ok := staticCallArgumentParameterType(call, argument)
-					if !ok || ctx.prog.TypeBackground(parameter) != llssa.InC {
+					if !ok || !rawCDeclaration && ctx.prog.TypeBackground(parameter) != llssa.InC {
 						continue
 					}
 					if _, signature := types.Unalias(parameter).Underlying().(*types.Signature); !signature {
@@ -5017,15 +5105,16 @@ func exactCoroStaticFunctionValue(ctx *context, value ssa.Value) (*ssa.Function,
 // indirect call through an exact //llgo:type C value is a raw code-pointer leaf:
 // it stays on the foreign/native stack and never becomes a managed descriptor
 // edge. An exact frozen C declaration may terminate the closure when it carries
-// a frontend-owned noblock/sync certificate. The declaration then enters
-// requiredPlain and is classified through the same frozen
-// IgnoreBody/ExternalKnown path as the compiler runtime ABI. The compiler-owned
-// TLS callback retains its separately frozen field-flow exception for its exact
-// declaration leaves. Dynamic managed calls, go/defer, other bodyless leaves,
-// captured closures, and unresolved aliases remain on the ordinary Dispatch
-// path. Effect and representation are independently checked after fixed-point
-// analysis; this prefilter only establishes that it is sound to seed the
-// candidate's exact raw host/scheduler-stack island.
+// a frontend-owned noblock/sync certificate. A conservative non-reentrant
+// may-block callable contract is also valid without entering requiredPlain:
+// this raw callback already executes on its foreign caller's native stack, so
+// an inline blocking leaf cannot occupy a managed executor. The final raw
+// closure validator independently joins and revalidates that exact contract.
+// Dynamic managed calls, go/defer, other bodyless leaves, captured closures,
+// and unresolved aliases remain on the ordinary Dispatch path. Effect and
+// representation are independently checked after fixed-point analysis; this
+// prefilter only establishes that it is sound to seed the candidate's exact raw
+// host/scheduler-stack island.
 func provenCoroDirectPlainStaticClosure(ctx *context, target *ssa.Function, closedDynamic map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate) ([]*ssa.Function, bool, error) {
 	if ctx == nil || ctx.coroEmission == nil || target == nil || len(target.FreeVars) != 0 {
 		return nil, false, nil
@@ -5121,6 +5210,16 @@ func provenCoroDirectPlainStaticClosure(ctx *context, target *ssa.Function, clos
 					_, synchronous, err := ctx.coroEmission.CoroForeignSyncCertificate(callee)
 					if err != nil {
 						return nil, false, err
+					}
+					callable, callableCertified, err := ctx.coroEmission.CoroCallableContractCertificate(callee)
+					if err != nil {
+						return nil, false, err
+					}
+					if callableCertified && callable.Scope == coro.CallableContractScopeDeclaration &&
+						coroRawPlainDirectForeignContractCompatible(callable.Contract) {
+						// Keep the declaration's conservative managed policy.
+						// Only this raw callback variant invokes it inline.
+						continue
 					}
 					if !tlsCallback && !noBlock && !synchronous {
 						return nil, false, nil

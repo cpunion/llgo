@@ -22,6 +22,7 @@ package cl_test
 import (
 	"os"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -397,15 +398,44 @@ func TestValidSelectOutputLines(t *testing.T) {
 }
 
 func selectOutputLines(output string) []string {
+	// The writers in _testgo/select intentionally race. Two complete writes can
+	// therefore be observed in one captured line (for example "100exit") even
+	// though each individual token is valid. Consume only whole strings made
+	// from the known tokens; unrelated compiler/emulator diagnostics remain
+	// ignored, while an unknown suffix cannot be mistaken for a valid event.
+	tokens := [...]string{"exit", "ch1", "ch2", "100", "200"}
 	var lines []string
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
-		switch line {
-		case "100", "200", "ch1", "ch2", "exit":
-			lines = append(lines, line)
+		var parsed []string
+		rest := line
+		for rest != "" {
+			matched := false
+			for _, token := range tokens {
+				if strings.HasPrefix(rest, token) {
+					parsed = append(parsed, token)
+					rest = rest[len(token):]
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				parsed = nil
+				break
+			}
+		}
+		if len(parsed) != 0 {
+			lines = append(lines, parsed...)
 		}
 	}
 	return lines
+}
+
+func TestSelectOutputLinesSplitsCoalescedWrites(t *testing.T) {
+	output := "runtime warning\n100exit\nch1\n200unknown\n"
+	if got, want := selectOutputLines(output), []string{"100", "exit", "ch1"}; !slices.Equal(got, want) {
+		t.Fatalf("selectOutputLines() = %q, want %q", got, want)
+	}
 }
 
 func TestRunAndTestFromTestpy(t *testing.T) {
@@ -446,8 +476,26 @@ func TestCgofullGeneratesC2func(t *testing.T) {
 	if !strings.Contains(ir, "_C2func_test_structs") {
 		t.Fatal("missing _C2func_test_structs in cgofull IR")
 	}
-	if !strings.Contains(ir, "cliteErrno") {
+	errnoCall := strings.Index(ir, "call i32 @cliteErrno()")
+	if errnoCall < 0 {
 		t.Fatal("missing cliteErrno call in cgofull IR")
+	}
+	functionStart := strings.LastIndex(ir[:errnoCall], "\ndefine ")
+	functionEnd := strings.Index(ir[errnoCall:], "\n}")
+	if functionStart < 0 || functionEnd < 0 {
+		t.Fatal("cliteErrno call is not enclosed by an LLVM function")
+	}
+	errnoThunk := ir[functionStart : errnoCall+functionEnd]
+	if !strings.Contains(errnoThunk, "@__llgo_coro_worker_cgo_thunk_v1_") {
+		t.Fatal("cliteErrno is not captured by the typed C2 worker thunk")
+	}
+	for _, symbol := range []string{
+		"__llgo_coro_worker_park_v1",
+		"__llgo_coro_worker_resume_v1",
+	} {
+		if !strings.Contains(ir, "@"+symbol) {
+			t.Fatalf("C2 lowering does not use the coroutine worker boundary %s", symbol)
+		}
 	}
 }
 

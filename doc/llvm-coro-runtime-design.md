@@ -2,11 +2,12 @@
 
 状态：实现中（可验证无栈原型；尚非完整 Go runtime）
 
-更新：2026-07-23
+更新：2026-07-24
 
-当前审查基线：`cpunion/llgo:llvm-coro` @ `897d251f8`
+当前审查基线：`cpunion/llgo:llvm-coro` / PR #45，基于
+`xgo-dev/llgo:main` @ `e514fb4ec`
 
-集成状态：已合并至 Phase 35 / PR #42
+集成状态：Phase 35 已合并；Phase 36 hard-cutover 收敛正在 PR #45 验证，尚未合并
 
 关联提案：[Issue #1546](https://github.com/xgo-dev/llgo/issues/1546)
 
@@ -1888,6 +1889,37 @@ Pure sync library/archive不需要链接scheduler。Executable一旦选择 `-sch
 - 当前 Phase 35 已实现普通Go blocking/nonblocking多事件`select`的可编译运行版本。编译器按源码语义先求值并物化所有`ChanOp`，fast probe随机起点；blocking slow path在同一LLVM frame中保存typed candidate array和共享state，只创建一个logical wait/claim并在真正`suspend`前发布所有非nil case。runtime按channel地址用candidate内置heap-sort顺序加锁，不创建临时slice/接口对象；winner与所有loser经过exact detach、claim reset、result lease Take/Discard和slot recycle。receive/send、nil case、empty `select{}`取消、closed send显式panic、普通Try操作互操作、physical select与physical direct sender配对、select后立即再次park、TaskCancelAbort均有定向覆盖。nonblocking select只调用Try，不产生select park/resume。
 - Phase 35 的native+nogc最终链接E2E实际执行两case select、后续direct rendezvous和buffer fast path，正常约3秒内完成；host adapter通过`-race -shuffle`，JS/Wasm adapter实际运行通过，native64/wasm32均通过pre/post-CoroSplit verify和object emission。开发中同时修复了direct receive resume status block错误跳回logical block首部、重放receive前副作用的问题；status现在进入compiler-owned physical continuation。
 - Phase 35 仍是有界可运行原型而不是完整Go channel/select：`ChannelOperationSource`仍为每个single-P executor固定4个同时live physical slot，因此超过4个非nil case或高并发占满slot会fail-stop；尚无stable paged catalog、P-neutral packet/multi-P迁移、`reflect.Select`动态descriptor端到端、完整GC precise root或标准库`sync`slow path。本阶段冻结范围只保证当前direct channel与普通源码select可编译、链接、运行和确定性清理，不把这些后续能力混入同一PR。
+- 当前Phase 36 / PR #45把实验性多入口路径收敛为唯一stackless profile和冻结的
+  `ProgramIR -> physical operation recipe -> emitter`事实流。普通函数仍只有一个primary；
+  只有进入func value、interface、reflect或其他开放动态边界的callable才发布descriptor。
+  architecture gate持续限制直接读取plan、原始intrinsic opcode、后验语义重建和legacy
+  fallback，当前hard-cutover没有扩大这些允许面。
+- Phase 36已把闭包物理上下文统一为LLVM `nest`/`swiftself`，函数对象继续保持固定
+  `{descriptor/function, env}`两字结构，不采用变长Go funcval。native
+  `reflect.Value.Call/CallSlice/MakeFunc`经过`runtime/internal/ffi.CallLLGo`和
+  `llgo.coroFFICall`进入同一descriptor；stock libffi只负责初次创建并挂起child，
+  最终typed thunk才把普通`env`参数送入目标context寄存器，因此没有libffi/C栈跨越
+  suspend。WASM、baremetal和无可执行内存环境的runtime-created MakeFunc签名仍是明确
+  AOT capability缺口。
+- ForeignWait已统一复用一个有界worker park/resume事务。编译器在冻结阶段从forward
+  provenance生成typed record与exact certificate，不在runtime从函数地址反查语义。
+  ordinary generated `_Cfunc_*`、C method、varargs和静态C pointer result已进入该路径；
+  generated `_C2func_*`只把精确C调用与同线程`errno`快照放到同一worker transaction，
+  `(result,error)`的Go构造在原coroutine恢复后完成。未证明ABI、callback/reentry、
+  affinity、retention或pointer provenance的动态C调用继续fail closed。
+- compiler runtime现独占`poll.c`及scheduler-facing符号，轻量runtime不再依赖标准库
+  runtime patch间接带入该对象。`llgo.allocaCStrs`在coroutine body中改用managed
+  storage，exported runtime hook同时进入LLVM optimizer与final-link retention。
+  file/pipe/TCP/time同步风格acceptance、select合法并发输出、native defer/panic、
+  multi-executor fleet/channel shutdown以及C2 errno IR均已在本地分层通过；完整
+  `test/*`、Go 1.26 GOROOT、跨LLVM 19–22和各target CI仍是合并前验收，不得由这些
+  focused结果外推为完整标准库兼容。
+- Phase 36之后的主要缺口仍是工程闭环而非新的coroutine可行性障碍：P-neutral
+  `ResumePacket`、动态P/steal和blocking compensation；paged/dynamic channel、timer与
+  worker capacity；完整defer/recover/Goexit和precise suspended-frame GC；netpoll全FD族、
+  DNS/process/signal；logical stack/tooling；以及WASM/WASI/RTOS/baremetal各自真实
+  event/host/HAL adapter。native退出实验模式仍必须满足35.1与35.2，尤其仓库
+  `test/*`和GOROOT不得存在unexpected failure。
 - compiler的所有现有initial、child-await、yield和legacy-park resume边已接入terminating dispatch gate。zero-ticket路径调用scalar `__llgo_coro_run_decision_take_zero_v1(g) uint32`，正常值进入唯一normal continuation，Abort/Shutdown在cleanup lowering完成前进入共享trap而不会误执行用户continuation；full ticket/lease ABI继续供bootstrap与未来park-site reconciliation使用。同一LLVM/target的gate开关对照证明scalar gate不会增加stackless coroutine frame，CoroSplit ramp/destroy也没有可达gate。
 - 两字Operation identity已冻结为`source:8/route:9/local:15 + generation:32`，保持size 8、align 4。route按runtime instance单调分配且永不复用，关闭后保留永久tombstone；Manual/TaskControl ingress的producer lease覆盖`source.Post -> executor.Request`完整tail，strong join后才允许清除source/executor pointer；Timer V2 reserve、publish、Apply和result lease也验证exact route/local/generation。该机制只解决多executor寻址与ABA前置条件；P-neutral ResumePacket、global injection与work stealing仍未完成。
 - 第一个标准库同步风格原型已以GOROOT source patch实现`time.Sleep`：普通`time.Sleep(d)`被Effect分析自动传播为`DirectCoro/AwaitStructured`，不修改public signature，不依赖libuv、BDWGC、pthread producer或用户goroutine。真实linked native+nogc E2E已编译production runtime island，实际等待30ms并恢复原frame；timer/wake路径由monotonic clock与pipe/poll/fcntl实现，符号审计确认不依赖libuv、BDWGC或pthread producer。另一focused production-overlay测试直接读取真实注入的`time.Sleep`源，不用测试effect seed，验证跨包同步caller染色、frame证书和CoroSplit，但不声称链接执行标准库`time.Sleep`。LLVM 19–22都跑该契约，Go 1.24跑真实linked E2E，Go 1.26也跑production overlay分析/codegen。

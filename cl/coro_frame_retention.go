@@ -614,7 +614,26 @@ func (b *coroFrameRetentionRootBuilder) prove() {
 			if !bounded {
 				continue
 			}
-			for _, argument := range call.Common().Args {
+			arguments := call.Common().Args
+			specializedWorkerVarargs := false
+			if kind == coroFrameRetentionCallWorkerV1 {
+				if direct, ok := call.(*ssa.Call); ok {
+					shape, recognized, err := validateCoroWorkerForeignCall(
+						b.audit.plan, b.audit.universe, direct, b.audit.universe.prog.PointerSize(),
+					)
+					if recognized && err == nil && shape.variadic {
+						// The ordinary frontend deliberately erases the synthetic
+						// [N]any allocation and its []any Slice into a side table.
+						// The worker record likewise carries the already-unboxed
+						// physical arguments, so freeze those exact SSA values as
+						// retention sources rather than a slice which has no emitted
+						// LLVM value.
+						arguments = shape.arguments
+						specializedWorkerVarargs = true
+					}
+				}
+			}
+			for _, argument := range arguments {
 				var trace coroFrameRetentionTrace
 				var traced bool
 				switch types.Unalias(b.audit.typeOf(argument.Type())).Underlying().(type) {
@@ -625,6 +644,15 @@ func (b *coroFrameRetentionRootBuilder) prove() {
 				case *types.Basic:
 					if coroFrameRetentionUnsafePointer(argument.Type()) {
 						trace, traced = b.traceAddress(argument, call, false, make(map[ssa.Value]bool))
+					} else if specializedWorkerVarargs && coroFrameRetentionUintptrLike(argument.Type()) {
+						trace, traced = b.traceSpecializedWorkerUintptr(
+							argument, call, make(map[ssa.Value]bool),
+						)
+						if traced {
+							b.proof.uintptrValues[argument] = coroFrameRetentionUintptrFact{
+								roots: b.sortedValues(trace.roots),
+							}
+						}
 					}
 				}
 				if traced {
@@ -633,6 +661,72 @@ func (b *coroFrameRetentionRootBuilder) prove() {
 			}
 		}
 	}
+}
+
+// traceSpecializedWorkerUintptr proves the pointer provenance of one concrete
+// C-varargs operand after the frontend's synthetic []any transport has been
+// erased. Unlike the general use-graph proof, this is occurrence-scoped to the
+// exact frozen worker call above: unrelated uses of the same integer do not
+// weaken the fact that this physical record field carries the traced address.
+// Only value-preserving conversions and address +/- scalar offset are admitted.
+func (b *coroFrameRetentionRootBuilder) traceSpecializedWorkerUintptr(
+	value ssa.Value,
+	use ssa.Instruction,
+	visiting map[ssa.Value]bool,
+) (coroFrameRetentionTrace, bool) {
+	trace := newCoroFrameRetentionTrace()
+	if value == nil || visiting[value] || !coroFrameRetentionUintptrLike(value.Type()) {
+		return trace, false
+	}
+	visiting[value] = true
+	defer delete(visiting, value)
+	switch value := value.(type) {
+	case *ssa.Convert:
+		if value.X == nil {
+			return trace, false
+		}
+		if coroFrameRetentionPointerLike(value.X.Type()) {
+			return b.traceAddress(value.X, value, false, make(map[ssa.Value]bool))
+		}
+		if coroFrameRetentionIntegerLike(value.X.Type()) {
+			return b.traceSpecializedWorkerUintptr(value.X, use, visiting)
+		}
+	case *ssa.ChangeType:
+		if value.X != nil && coroFrameRetentionIntegerLike(value.X.Type()) {
+			return b.traceSpecializedWorkerUintptr(value.X, use, visiting)
+		}
+	case *ssa.BinOp:
+		if value.Op != token.ADD && value.Op != token.SUB {
+			return trace, false
+		}
+		xHasPointer := coroFrameRetentionIntegerHasPointerProvenance(value.X, make(map[ssa.Value]bool))
+		yHasPointer := coroFrameRetentionIntegerHasPointerProvenance(value.Y, make(map[ssa.Value]bool))
+		if xHasPointer == yHasPointer || value.Op == token.SUB && !xHasPointer {
+			return trace, false
+		}
+		provenance := value.X
+		offset := value.Y
+		if yHasPointer {
+			provenance, offset = value.Y, value.X
+		}
+		if coroFrameRetentionIntegerHasPointerProvenance(offset, make(map[ssa.Value]bool)) {
+			return trace, false
+		}
+		return b.traceSpecializedWorkerUintptr(provenance, use, visiting)
+	case *ssa.Phi:
+		if len(value.Edges) == 0 {
+			return trace, false
+		}
+		for _, edge := range value.Edges {
+			part, ok := b.traceSpecializedWorkerUintptr(edge, use, visiting)
+			if !ok {
+				return newCoroFrameRetentionTrace(), false
+			}
+			trace.merge(part)
+		}
+		return trace, true
+	}
+	return trace, false
 }
 
 func (b *coroFrameRetentionRootBuilder) recordStableAddress(value ssa.Value, use ssa.Instruction) {
@@ -1405,6 +1499,13 @@ func (b *coroFrameRetentionRootBuilder) boundedCallKind(call *ssa.Call) (coroFra
 	}
 	if b.audit.universe.CoroWorkerSupported() {
 		semantics, intrinsic, err := coroIntrinsicCallSiteSemantics(b.audit.universe, call)
+		if err == nil && intrinsic && semantics == CoroIntrinsicCallInlineForeignSuspend {
+			if _, recognized, cgoErr := validateCoroWorkerCgoErrnoCall(
+				b.audit.plan, b.audit.ctx, call,
+			); recognized && cgoErr == nil {
+				return coroFrameRetentionCallWorkerV1, true
+			}
+		}
 		if err == nil && intrinsic && semantics == CoroIntrinsicCallInlineSuspend {
 			workerCertified := false
 			if b.audit.plan == nil {

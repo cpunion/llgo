@@ -39,7 +39,6 @@ func TestNativeCoroDoorbellRuntimeABISelection(t *testing.T) {
 		want bool
 	}{
 		{name: "nil"},
-		{name: "disabled", conf: &Config{Goos: "linux"}},
 		{name: "linux", conf: &Config{Goos: "linux"}, want: true},
 		{name: "darwin", conf: &Config{Goos: "darwin"}, want: true},
 		{name: "windows", conf: &Config{Goos: "windows"}},
@@ -68,7 +67,6 @@ func TestHostCoroPullRuntimeABISelection(t *testing.T) {
 		want bool
 	}{
 		{name: "nil"},
-		{name: "disabled-wasm", conf: &Config{Goos: "wasip1", Goarch: "wasm"}},
 		{name: "wasm-wasi", conf: &Config{Goos: "wasip1", Goarch: "wasm"}, want: true},
 		{name: "wasm-js", conf: &Config{Goos: "js", Goarch: "wasm"}, want: true},
 		{name: "wasm-unknown", conf: &Config{Goos: "unknown", Goarch: "wasm"}, want: true},

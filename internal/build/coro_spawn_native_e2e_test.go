@@ -140,6 +140,20 @@ type plainError string
 func (e plainError) Error() string { return string(e) }
 func (e plainError) RuntimeError() {}
 
+type boundsErrorCode uint8
+
+const boundsConvert boundsErrorCode = 1
+
+type boundsError struct {
+	x      int64
+	y      int
+	signed bool
+	code   boundsErrorCode
+}
+
+func (boundsError) Error() string { return "slice conversion bounds error" }
+func (boundsError) RuntimeError() {}
+
 type _type struct{}
 type interfacetype struct{}
 type itab struct {
@@ -172,6 +186,8 @@ func coroChannelNativeE2EPanicWrapNilPointer(bool, string, string) {}
 
 //go:linkname AllocU C.malloc
 func AllocU(uintptr) unsafe.Pointer
+
+func AllocZ(size uintptr) unsafe.Pointer { return AllocU(size) }
 
 // libc rand returns C int. Keep this fixture ABI identical to every other
 // declaration of the shared physical symbol, then perform the Go uint32

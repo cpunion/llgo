@@ -120,7 +120,7 @@ func (p *context) compileCoroImplicitNilFieldAddrGuard(
 	if _, ok := types.Unalias(field.X.Type()).Underlying().(*types.Pointer); !ok {
 		panic(fmt.Sprintf("implicit nil FieldAddr base %T is not pointer-shaped", field.X.Type()))
 	}
-	return p.compileCoroImplicitNilAccessGuard(b, base)
+	return p.compileCoroPlannedNilAccessGuard(b, field, base)
 }
 
 // compileCoroImplicitNilDerefGuard gives an ordinary typed load the same
@@ -139,6 +139,15 @@ func (p *context) compileCoroImplicitNilDerefGuard(
 	if _, ok := types.Unalias(deref.X.Type()).Underlying().(*types.Pointer); !ok {
 		panic(fmt.Sprintf("implicit nil typed-load base %T is not pointer-shaped", deref.X.Type()))
 	}
+	return p.compileCoroPlannedNilAccessGuard(b, deref, base)
+}
+
+func (p *context) compileCoroPlannedNilAccessGuard(
+	b llssa.Builder,
+	instruction ssa.Instruction,
+	base llssa.Expr,
+) llssa.Expr {
+	p.observeCoroPhysicalNilGuard(instruction)
 	return p.compileCoroImplicitNilAccessGuard(b, base)
 }
 
@@ -157,6 +166,21 @@ func (p *context) compileCoroImplicitNilAccessGuard(b llssa.Builder, base llssa.
 	return base
 }
 
+func (p *context) compileCoroImplicitNilStoreGuard(
+	b llssa.Builder,
+	store *ssa.Store,
+	base llssa.Expr,
+) llssa.Expr {
+	if p == nil || !p.hasCoroPhysicalBody() || store == nil || store.Addr == nil ||
+		b == nil || b.Func != p.fn {
+		panic("implicit nil Store guard escaped its physical coroutine body")
+	}
+	if _, ok := types.Unalias(store.Addr.Type()).Underlying().(*types.Pointer); !ok {
+		panic(fmt.Sprintf("implicit nil Store address %T is not pointer-shaped", store.Addr.Type()))
+	}
+	return p.compileCoroPlannedNilAccessGuard(b, store, base)
+}
+
 // compileCoroIndexBoundsGuard routes an out-of-range predicate through the
 // target-neutral explicit-status fault ABI. The caller emits an unchecked GEP
 // or load only in the normal continuation block.
@@ -165,6 +189,15 @@ func (p *context) compileCoroIndexBoundsGuard(b llssa.Builder, outOfRange llssa.
 		return
 	}
 	p.compileCoroFaultConditionGuard(b, outOfRange, coroFaultIndexBoundsV1)
+}
+
+func (p *context) compileCoroPlannedIndexBoundsGuard(
+	b llssa.Builder,
+	instruction ssa.Instruction,
+	outOfRange llssa.Expr,
+) {
+	p.observeCoroPhysicalBoundsGuard(instruction)
+	p.compileCoroIndexBoundsGuard(b, outOfRange)
 }
 
 func (p *context) compileCoroIndexAddrPlanned(
@@ -199,15 +232,13 @@ func (p *context) compileCoroIndexAddrPlanned(
 	// by contrast, is a valid length-zero slice and therefore takes only the
 	// ordinary bounds fault for any element access.
 	if plan.nilGuard {
-		p.observeCoroPhysicalNilGuard(operation)
-		base = p.compileCoroImplicitNilAccessGuard(b, base)
+		base = p.compileCoroPlannedNilAccessGuard(b, operation, base)
 	}
 	normalized := index
 	if plan.boundsGuard {
-		p.observeCoroPhysicalBoundsGuard(operation)
 		var outOfRange llssa.Expr
 		normalized, outOfRange = b.IndexBounds(index, limit)
-		p.compileCoroIndexBoundsGuard(b, outOfRange)
+		p.compileCoroPlannedIndexBoundsGuard(b, operation, outOfRange)
 	}
 	return b.IndexAddrUnchecked(base, normalized)
 }
@@ -250,16 +281,14 @@ func (p *context) compileCoroIndexPlanned(
 		panic("unchecked coroutine Index is not a fixed-array recipe")
 	}
 	if plan.nilGuard {
-		p.observeCoroPhysicalNilGuard(operation)
-		base = p.compileCoroImplicitNilAccessGuard(b, base)
+		base = p.compileCoroPlannedNilAccessGuard(b, operation, base)
 	}
 
 	normalized := index
 	if plan.boundsGuard {
-		p.observeCoroPhysicalBoundsGuard(operation)
 		var outOfRange llssa.Expr
 		normalized, outOfRange = b.IndexBounds(index, limit)
-		p.compileCoroIndexBoundsGuard(b, outOfRange)
+		p.compileCoroPlannedIndexBoundsGuard(b, operation, outOfRange)
 	}
 
 	switch plan.container {
@@ -317,8 +346,7 @@ func (p *context) compileCoroSlicePlanned(
 		}
 	case coroPhysicalContainerArrayPointer:
 		if plan.nilGuard {
-			p.observeCoroPhysicalNilGuard(operation)
-			base = p.compileCoroImplicitNilAccessGuard(b, base)
+			base = p.compileCoroPlannedNilAccessGuard(b, operation, base)
 		}
 		limit = b.Prog.IntVal(uint64(plan.bound), b.Prog.Int())
 		if high.IsNil() {
@@ -328,9 +356,8 @@ func (p *context) compileCoroSlicePlanned(
 		panic(fmt.Sprintf("structured coroutine Slice has invalid frozen container %d", plan.container))
 	}
 
-	p.observeCoroPhysicalBoundsGuard(operation)
 	low, high, max, outOfRange := b.SliceBounds(low, high, max, limit)
-	p.compileCoroIndexBoundsGuard(b, outOfRange)
+	p.compileCoroPlannedIndexBoundsGuard(b, operation, outOfRange)
 	return b.SliceUnchecked(base, low, high, max)
 }
 

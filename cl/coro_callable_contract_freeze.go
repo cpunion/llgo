@@ -166,17 +166,19 @@ func (u *EmissionUniverse) freezeCoroCallableContractCertificates() error {
 			parsed:      parsed,
 		})
 	}
-	// An exact bodyless C declaration without an explicit policy uses LLGo's
-	// conservative foreign-call default: it may block, may run on any worker
-	// thread, does not reenter Go, and borrows arguments until completion.
+	// An exact C declaration without an explicit policy uses LLGo's conservative
+	// foreign-call default: it may block, may run on any worker thread, does not
+	// reenter Go, and borrows arguments until completion. The frozen function
+	// kind is authoritative here: legacy GoPlus C/C++ declarations may retain a
+	// dummy Go body that code generation never emits.
+	//
 	// This is a frozen frontend policy, not a backend inference from a symbol or
 	// code address. Explicit target-neutral contracts and legacy noblock/sync/
 	// schedulerwait/worker policies remain authoritative and mutually
 	// exclusive with the default.
 	for _, canonical := range u.functions {
 		if canonical == nil || u.canonicalAlias(canonical) != canonical ||
-			annotatedCanonical[canonical] != nil || legacyCanonical[canonical] != coroForeignCallNone ||
-			len(canonical.Blocks) != 0 {
+			annotatedCanonical[canonical] != nil || legacyCanonical[canonical] != coroForeignCallNone {
 			continue
 		}
 		shape, ok := shapes[canonical]

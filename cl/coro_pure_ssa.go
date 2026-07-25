@@ -64,6 +64,22 @@ type coroPhysicalPureSSAAudit struct {
 	allowExplicitRecover bool
 }
 
+// coroInterfaceDerefConsumer projects the active source type exactly once at
+// the physical-proof boundary, then delegates structural consumer recognition
+// to the target-independent helper scanner.
+func coroInterfaceDerefConsumer(
+	ctx *context,
+	deref *ssa.UnOp,
+) (*ssa.MakeInterface, coroInterfaceDerefFusion) {
+	if ctx == nil || ctx.prog == nil || deref == nil {
+		return nil, coroInterfaceDerefNotFused
+	}
+	physical := ctx.prog.PhysicalType(ctx.patchType(deref.Type()), llssa.InGo)
+	return coroInterfaceDerefConsumerForPhysicalType(
+		deref, physical, ctx.prog.PointerSize(),
+	)
+}
+
 func newCoroPhysicalPureSSAAudit(
 	universe *EmissionUniverse,
 	plan *coro.SSAPlan,
@@ -525,6 +541,37 @@ func (a *coroPhysicalPureSSAAudit) derefAddressProducerOwnsImplicitFault(
 	default:
 		return false, ""
 	}
+}
+
+// storeRequiresImplicitNilFault selects an explicit-status nil edge only when
+// the Store itself owns the final raw pointer dereference. FieldAddr and
+// IndexAddr producers already publish their checked address on the normal
+// edge, so guarding them again would duplicate the source fault.
+func (a *coroPhysicalPureSSAAudit) storeRequiresImplicitNilFault(store *ssa.Store) (bool, string) {
+	if a == nil || store == nil || store.Addr == nil {
+		return false, ""
+	}
+	switch address := store.Addr.(type) {
+	case *ssa.FieldAddr:
+		owns, reason := a.fieldAddrRequiresImplicitNilFault(address)
+		if reason != "" {
+			return false, reason
+		}
+		if owns {
+			return false, ""
+		}
+	case *ssa.IndexAddr:
+		if a.ctx != nil && emissionIsVargsAlloc(a.ctx, address.X) {
+			return false, ""
+		}
+		// IndexAddr owns all bounds checks and the nullable *array guard.
+		return false, ""
+	}
+	if ssaAddressValueProvenNonNilAt(store.Addr, store) {
+		return false, ""
+	}
+	proof := a.currentFrameRetentionProof()
+	return proof != nil && proof.requiresImplicitNilFault(store.Addr, store), ""
 }
 
 func (a *coroPhysicalPureSSAAudit) validateIndexAddr(index *ssa.IndexAddr) string {

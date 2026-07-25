@@ -106,12 +106,14 @@ func resolveCoroStaticAwait(plan *coro.SSAPlan, caller coro.FunctionPlan, call s
 // them is valid only when every non-debug consumer is an independently
 // validated static await of the same canonical target.
 func resolveCoroCompilerElidedStaticAwaitRetag(
-	plan *coro.SSAPlan,
+	audit *coroPhysicalPureSSAAudit,
 	caller coro.FunctionPlan,
-	universe *EmissionUniverse,
-	owner *ssa.Function,
 	change *ssa.ChangeType,
 ) (*ssa.Function, error) {
+	if audit == nil {
+		return nil, fmt.Errorf("requires one exact physical audit")
+	}
+	plan, universe, owner := audit.plan, audit.universe, audit.fn
 	if plan == nil || universe == nil || owner == nil || change == nil || change.Parent() != owner {
 		return nil, fmt.Errorf("requires one owner-local managed ChangeType")
 	}

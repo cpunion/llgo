@@ -18,6 +18,7 @@ package cl
 
 import (
 	"fmt"
+	"go/constant"
 	"go/token"
 	"go/types"
 	"strconv"
@@ -36,10 +37,13 @@ type coroWorkerForeignCallShape struct {
 	signature    *types.Signature
 	record       *types.Struct
 	argumentBase int
+	arguments    []ssa.Value
 	argc         int
 	result       types.Type
 	resultField  int
+	rawCallbacks map[int]*ssa.Function
 	nilGuard     bool
+	variadic     bool
 }
 
 func coroWorkerTypeParamLen(list *types.TypeParamList) int {
@@ -89,11 +93,9 @@ func coroWorkerArgumentWordType(universe *EmissionUniverse, typ types.Type, poin
 	return ok && signature != nil && !signature.Variadic()
 }
 
-// coroWorkerResultWordType deliberately excludes pointer-shaped results. The
-// native completion queue transports only untraced uintptr words; until a
-// result-provenance capability can prove that a returned pointer is either
-// non-Go storage or still owned by an exact retained root, reconstructing a Go
-// pointer after the worker acknowledgement would create an unrooted interval.
+// coroWorkerResultWordType deliberately excludes pointer-shaped results from
+// the address-only llgo.syscall transport. That path has no typed declaration
+// whose contract can prove foreign-or-borrowed pointer provenance.
 func coroWorkerResultWordType(typ types.Type, pointerSize int) bool {
 	if typ == nil || pointerSize <= 0 {
 		return false
@@ -109,15 +111,21 @@ func coroWorkerResultWordType(typ types.Type, pointerSize int) bool {
 
 // coroWorkerForeignRecordValueType accepts values whose exact typed
 // representation can live in the compiler-owned call record until the worker
-// publishes completion. Ordinary Go descriptors (slice, string, interface,
-// map, chan, or Go function values) are rejected: copying their bits into a C
-// call would neither be a valid C ABI nor establish their managed lifetime.
+// publishes completion. Ordinary Go descriptors (slice, bare string,
+// interface, map, chan, or Go function values) are rejected: copying their
+// bits into a C call would neither be a valid C ABI nor establish their
+// managed lifetime. An explicit string type alias in an exact C declaration is
+// different: bindings use that source form for two-word by-value C++ views
+// such as std::string_view. The typed record preserves that already-supported
+// direct-call ABI and stays live through the worker acknowledgement.
 //
 // Arguments may contain pointers because the record itself remains a typed,
 // traced coroutine-frame object and the ordinary call-site retention proof
-// keeps every independent owner live. Results deliberately remain
-// pointer-free: a worker writing a new Go pointer into the frame would bypass
-// the managed write barrier and foreign-result provenance contract.
+// keeps every independent owner live. Pointer-bearing results are admitted
+// only by callers that independently proved an exact non-reentrant C
+// declaration (or generated cgo adapter): such a result is foreign storage or
+// borrowed from an input whose owner remains in the record until completion.
+// Dynamic raw C pointers have no declaration provenance and pass argument=false.
 func coroWorkerForeignRecordValueType(
 	universe *EmissionUniverse,
 	typ types.Type,
@@ -127,6 +135,7 @@ func coroWorkerForeignRecordValueType(
 	if universe == nil || typ == nil {
 		return false
 	}
+	sourceType := typ
 	typ = types.Unalias(typ)
 	if visiting[typ] {
 		// Recursive C values are necessarily recursive through a pointer, which
@@ -135,8 +144,12 @@ func coroWorkerForeignRecordValueType(
 	}
 	switch underlying := typ.Underlying().(type) {
 	case *types.Basic:
-		if underlying.Info()&types.IsUntyped != 0 || underlying.Kind() == types.String {
+		if underlying.Info()&types.IsUntyped != 0 {
 			return false
+		}
+		if underlying.Kind() == types.String {
+			_, explicitForeignView := sourceType.(*types.Alias)
+			return argument && explicitForeignView
 		}
 		if underlying.Kind() == types.UnsafePointer {
 			return argument
@@ -168,6 +181,43 @@ func coroWorkerForeignRecordValueType(
 	default:
 		return false
 	}
+}
+
+// coroWorkerForeignRecordArgumentValue admits an ordinary Go function type
+// only when whole-program planning has already converted this exact argument
+// occurrence into a closed raw-C code pointer and retained its raw/plain body.
+// This is the static-C-parameter analogue of an explicit //llgo:type C named
+// callback; arbitrary funcvals, closures with an environment, and dynamic
+// target sets remain rejected.
+func coroWorkerForeignRawCallbackArgument(
+	plan *coro.SSAPlan,
+	value ssa.Value,
+	typ types.Type,
+) (rawTarget *ssa.Function, valid bool) {
+	signature, functionType := types.Unalias(typ).Underlying().(*types.Signature)
+	if !functionType || signature == nil || signature.Variadic() ||
+		plan == nil || value == nil {
+		return nil, false
+	}
+	valuePlan, planned := plan.ValuePlan(value)
+	if !planned || len(valuePlan.Funcs) != 1 {
+		return nil, false
+	}
+	leaf := valuePlan.Funcs[0]
+	if len(leaf.Path) != 0 || leaf.Rep != coro.DirectPlain ||
+		leaf.MayBeNil || len(leaf.Targets) != 1 {
+		return nil, false
+	}
+	target, found := plan.Function(leaf.Targets[0])
+	if !found || target == nil || len(target.FreeVars) != 0 {
+		return nil, false
+	}
+	targetPlan, found := plan.FunctionPlan(target)
+	if !found || targetPlan.External != coro.Defined ||
+		!targetPlan.RawPlainDemand || !plan.HasRawPlainVariant(target) {
+		return nil, false
+	}
+	return target, true
 }
 
 func coroWorkerForeignRecordType(
@@ -212,6 +262,134 @@ func coroWorkerForeignRecordLayout(
 		fields = append(fields, types.NewField(token.NoPos, nil, "reserved", types.Typ[types.Uint8], false))
 	}
 	return types.NewStruct(fields, nil), resultField, argumentBase
+}
+
+// coroWorkerForeignVariadicValues mirrors compileVArg's frontend-owned
+// __llgo_va_list expansion without constructing LLVM values. x/tools lowers
+// every concrete variadic list to one synthetic [N]any allocation followed by
+// constant-index stores in the call block. Freeze those unboxed operands into
+// the call-site-specific typed worker record; arbitrary Go []any values remain
+// unsupported because neither ordinary LLGo C lowering nor this adapter can
+// recover their dynamic ABI safely.
+func coroWorkerForeignVariadicValues(
+	ctx *context,
+	call *ssa.Call,
+	value ssa.Value,
+) ([]ssa.Value, error) {
+	switch value := value.(type) {
+	case *ssa.Const:
+		if value.Value == nil {
+			return nil, nil
+		}
+	case *ssa.Parameter:
+		if value.Parent() != nil && llssa.HasNameValist(value.Parent().Signature) {
+			return nil, nil
+		}
+	case *ssa.Slice:
+		alloc, ok := value.X.(*ssa.Alloc)
+		if !ok || !emissionIsVargsAlloc(ctx, alloc) {
+			break
+		}
+		pointer, ok := types.Unalias(alloc.Type()).Underlying().(*types.Pointer)
+		if !ok {
+			break
+		}
+		array, ok := types.Unalias(pointer.Elem()).Underlying().(*types.Array)
+		if !ok || array.Len() < 0 || uint64(array.Len()) > uint64(^uint(0)>>1) {
+			break
+		}
+		if call == nil || call.Block() == nil || alloc.Parent() != call.Parent() {
+			return nil, fmt.Errorf("synthetic varargs allocation and call have different owners")
+		}
+		values := make([]ssa.Value, int(array.Len()))
+		for _, instruction := range call.Block().Instrs {
+			if instruction == call {
+				break
+			}
+			store, ok := instruction.(*ssa.Store)
+			if !ok {
+				continue
+			}
+			address, ok := store.Addr.(*ssa.IndexAddr)
+			if !ok || address.X != alloc {
+				continue
+			}
+			index, ok := address.Index.(*ssa.Const)
+			if !ok || index.Value == nil {
+				return nil, fmt.Errorf("synthetic varargs store has a non-constant index")
+			}
+			slot, exact := constant.Int64Val(index.Value)
+			if !exact || slot < 0 || slot >= int64(len(values)) {
+				return nil, fmt.Errorf("synthetic varargs store index %v is outside [0,%d)", index.Value, len(values))
+			}
+			if values[slot] != nil {
+				return nil, fmt.Errorf("synthetic varargs slot %d has multiple stores", slot)
+			}
+			concrete := store.Val
+			if boxed, ok := concrete.(*ssa.MakeInterface); ok {
+				concrete = boxed.X
+			}
+			if concrete == nil {
+				return nil, fmt.Errorf("synthetic varargs slot %d has no concrete operand", slot)
+			}
+			values[slot] = concrete
+		}
+		for index, concrete := range values {
+			if concrete == nil {
+				return nil, fmt.Errorf("synthetic varargs slot %d has no dominating store", index)
+			}
+		}
+		return values, nil
+	}
+	return nil, fmt.Errorf("unsupported __llgo_va_list lowering shape %T", value)
+}
+
+func coroWorkerForeignSpecializedSignature(
+	ctx *context,
+	call *ssa.Call,
+	target *ssa.Function,
+	signature *types.Signature,
+) (*types.Signature, []ssa.Value, bool, error) {
+	if ctx == nil || call == nil || call.Common() == nil || target == nil || signature == nil {
+		return nil, nil, false, fmt.Errorf("variadic specialization requires an exact context, call, target, and signature")
+	}
+	common := call.Common()
+	if !target.Signature.Variadic() {
+		return signature, common.Args, false, nil
+	}
+	if !llssa.HasNameValist(target.Signature) {
+		return nil, nil, false, fmt.Errorf(
+			"variadic C declaration requires the trailing %s ...any ABI",
+			llssa.NameValist,
+		)
+	}
+	if signature.Params() == nil || signature.Params().Len() == 0 ||
+		len(common.Args) != signature.Params().Len() {
+		return nil, nil, false, fmt.Errorf("variadic C declaration and call have different fixed SSA shapes")
+	}
+	fixed := signature.Params().Len() - 1
+	varargs, err := coroWorkerForeignVariadicValues(ctx, call, common.Args[fixed])
+	if err != nil {
+		return nil, nil, false, err
+	}
+	arguments := make([]ssa.Value, 0, fixed+len(varargs))
+	arguments = append(arguments, common.Args[:fixed]...)
+	arguments = append(arguments, varargs...)
+	params := make([]*types.Var, 0, len(arguments))
+	for index := 0; index < fixed; index++ {
+		parameter := signature.Params().At(index)
+		params = append(params, types.NewParam(
+			parameter.Pos(), parameter.Pkg(), parameter.Name(), parameter.Type(),
+		))
+	}
+	for index, argument := range varargs {
+		params = append(params, types.NewParam(
+			token.NoPos, nil, fmt.Sprintf("va%d", index), ctx.patchType(argument.Type()),
+		))
+	}
+	return types.NewSignatureType(
+		nil, nil, nil, types.NewTuple(params...), signature.Results(), false,
+	), arguments, true, nil
 }
 
 // validateCoroWorkerForeignAuthorization accepts exactly one of the legacy
@@ -377,11 +555,11 @@ func validateCoroWorkerForeignCall(
 			targetPlan.ID, targetPlan.External, targetPlan.Emission, targetPlan.Effect, targetPlan.Exec,
 		)
 	}
-	if target.Signature == nil || target.Signature.Recv() != nil || target.Signature.Variadic() ||
+	if target.Signature == nil ||
 		coroWorkerTypeParamLen(target.Signature.TypeParams()) != 0 ||
 		coroWorkerTypeParamLen(target.Signature.RecvTypeParams()) != 0 ||
 		len(target.FreeVars) != 0 || target.Origin() != nil || len(target.TypeArgs()) != 0 {
-		return shape, true, fmt.Errorf("target is not a receiver-free, non-variadic, non-generic C declaration")
+		return shape, true, fmt.Errorf("target is not a non-variadic, non-generic C declaration")
 	}
 	signature, signatureErr := universe.coroPhysicalSourceSignature(target)
 	if signatureErr != nil {
@@ -389,13 +567,6 @@ func validateCoroWorkerForeignCall(
 	}
 	if signature == nil || signature.Recv() != nil || signature.Variadic() {
 		return shape, true, fmt.Errorf("requires a non-variadic signature")
-	}
-	shape.argc = 0
-	if signature.Params() != nil {
-		shape.argc = signature.Params().Len()
-	}
-	if shape.argc != len(common.Args) {
-		return shape, true, fmt.Errorf("effective signature argument count differs from the call site")
 	}
 	owner := universe.ownerOf(call.Parent())
 	ownerContext, contextErr := universe.functionABIContext(call.Parent(), owner)
@@ -406,44 +577,79 @@ func validateCoroWorkerForeignCall(
 	if !ok || !types.Identical(coroPhysicalNormalizeSourceSignature(callSignature), signature) {
 		return shape, true, fmt.Errorf("call-site and target effective C signatures differ")
 	}
-	for index, argument := range common.Args {
+	recordSignature, arguments, variadic, specializationErr := coroWorkerForeignSpecializedSignature(
+		ownerContext, call, target, signature,
+	)
+	if specializationErr != nil {
+		return shape, true, specializationErr
+	}
+	shape.argc = len(arguments)
+	shape.variadic = variadic
+	parameterCount := 0
+	if recordSignature.Params() != nil {
+		parameterCount = recordSignature.Params().Len()
+	}
+	if shape.argc != parameterCount {
+		return shape, true, fmt.Errorf("specialized worker signature argument count differs from the call site")
+	}
+	for index, argument := range arguments {
 		if argument == nil {
 			return shape, true, fmt.Errorf("argument %d is nil", index)
 		}
 		argumentType := ownerContext.patchType(argument.Type())
-		parameterType := signature.Params().At(index).Type()
+		parameterType := recordSignature.Params().At(index).Type()
 		if !types.Identical(argumentType, parameterType) {
 			return shape, true, fmt.Errorf("argument %d type does not match the effective C parameter", index)
 		}
-		if !coroWorkerForeignRecordValueType(
+		argumentOK := coroWorkerForeignRecordValueType(
 			universe, parameterType, true, make(map[types.Type]bool),
-		) {
-			return shape, true, fmt.Errorf(
-				"argument %d type %s cannot be represented in a typed worker call record",
-				index, parameterType,
+		)
+		var rawCallback *ssa.Function
+		if !argumentOK {
+			rawCallback, argumentOK = coroWorkerForeignRawCallbackArgument(
+				plan, argument, parameterType,
 			)
 		}
+		if !argumentOK {
+			valuePlan, valuePlanned := plan.ValuePlan(argument)
+			return shape, true, fmt.Errorf(
+				"argument %d type %s cannot be represented in a typed worker call record (value-plan=%+v present=%t)",
+				index, parameterType, valuePlan.Funcs, valuePlanned,
+			)
+		}
+		if rawCallback != nil {
+			if shape.rawCallbacks == nil {
+				shape.rawCallbacks = make(map[int]*ssa.Function)
+			}
+			shape.rawCallbacks[index] = rawCallback
+		}
 	}
-	results := signature.Results()
+	results := recordSignature.Results()
 	if results != nil && results.Len() > 1 {
 		return shape, true, fmt.Errorf("requires zero or one result")
 	}
 	if results != nil && results.Len() == 1 {
 		shape.result = results.At(0).Type()
+		// Authorization above proves one exact C declaration which cannot
+		// reenter managed Go. A returned pointer therefore either denotes
+		// foreign storage or is borrowed from an input; the typed record and
+		// call-site retention proof keep every input owner live through the
+		// acknowledgement and result reload.
 		if !coroWorkerForeignRecordValueType(
-			universe, shape.result, false, make(map[types.Type]bool),
+			universe, shape.result, true, make(map[types.Type]bool),
 		) {
 			return coroWorkerForeignCallShape{}, true, fmt.Errorf(
-				"result type %s cannot be represented in a pointer-free typed worker call record",
+				"result type %s cannot be represented in a declaration-authorized typed worker call record",
 				shape.result,
 			)
 		}
 	}
 	shape.target = target
+	shape.arguments = append([]ssa.Value(nil), arguments...)
 	shape.calleeField = -1
-	shape.signature = signature
+	shape.signature = recordSignature
 	shape.record, shape.resultField, shape.argumentBase =
-		coroWorkerForeignRecordLayout(signature, shape.result, nil)
+		coroWorkerForeignRecordLayout(recordSignature, shape.result, nil)
 	return shape, true, nil
 }
 
@@ -529,6 +735,7 @@ func validateCoroWorkerDynamicForeignCall(
 	}
 	shape.calleeType = calleeType
 	shape.calleeField = 0
+	shape.arguments = append([]ssa.Value(nil), common.Args...)
 	shape.signature = signature
 	shape.nilGuard = callPlan.MayBeNil &&
 		!ssaFunctionValueProvenNonNilAt(common.Value, call)
@@ -621,7 +828,21 @@ func (p *context) compileCoroWorkerForeignCall(
 	if dynamic {
 		callee = p.compileValue(b, call.Common().Value)
 	}
-	compiled := p.compileValues(b, call.Common().Args, fnNormal)
+	if len(shape.arguments) != shape.argc {
+		panic("coroutine foreign worker lowering disagrees with its frozen variadic arguments")
+	}
+	compiled := make([]llssa.Expr, shape.argc)
+	for index, argument := range shape.arguments {
+		if callback := shape.rawCallbacks[index]; callback != nil {
+			entry, _, kind := p.compileRawPlainFunction(callback)
+			if entry == nil || kind != goFunc {
+				panic("coroutine foreign worker lowering lost a raw/plain C callback entry")
+			}
+			compiled[index] = entry.Expr
+			continue
+		}
+		compiled[index] = p.compileValue(b, argument)
+	}
 	p.inCFunc = oldInCFunc
 	if shape.nilGuard {
 		p.compileCoroImplicitNilAccessGuard(b, callee)

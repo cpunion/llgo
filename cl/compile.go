@@ -210,15 +210,16 @@ type context struct {
 	inCFunc bool
 	skipall bool
 
-	cgoCalled  bool
-	cgoArgs    []llssa.Expr
-	cgoRet     llssa.Expr
-	cgoErrno   llssa.Expr
-	cgoErrnoTy types.Type
-	cgoSymbols []string
-	rewrites   map[string]string
-	embedMap   goembed.VarMap
-	embedInits []embedInit
+	cgoCalled   bool
+	cgoReturned bool
+	cgoArgs     []llssa.Expr
+	cgoRet      llssa.Expr
+	cgoErrno    llssa.Expr
+	cgoErrnoTy  types.Type
+	cgoSymbols  []string
+	rewrites    map[string]string
+	embedMap    goembed.VarMap
+	embedInits  []embedInit
 
 	trackCallerFrames bool
 	callerFrameMark   llssa.Expr
@@ -565,9 +566,12 @@ func (p *context) compileFuncDecl(pkg llssa.Package, f *ssa.Function) (llssa.Fun
 		return p.compileFuncDeclVariant(pkg, entry.function, true)
 	}
 	fn, py, kind := p.compileFuncDeclVariant(pkg, f, false)
-	if entry.planned && entry.plan.Emission == coro.EmitCoroutine &&
-		p.compilation != nil && p.compilation.CoroPlan != nil &&
-		p.compilation.CoroPlan.HasRawPlainVariant(entry.function) {
+	var needsRawTwin bool
+	if entry.planned && entry.plan.Emission == coro.EmitCoroutine && p.compilation != nil {
+		plan := p.compilation.CoroPlan
+		needsRawTwin = plan != nil && plan.HasRawPlainVariant(entry.function)
+	}
+	if needsRawTwin {
 		// RawPlainEntry is only the public address/ABI capability. A raw closure
 		// helper may need a private legacy-stack twin without being an entry.
 		// Eagerly materialize every planned twin in its defining package so a
@@ -715,6 +719,7 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 			p.inits = parentInits
 		}
 		p.cgoCalled = false
+		p.cgoReturned = false
 		p.cgoArgs = nil
 		p.cgoErrno = llssa.Nil
 		if physicalABI != nil {
@@ -756,6 +761,15 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 				bodyPos := p.getFuncBodyPos(f)
 				b.DebugFunction(fn, debugFunctionScope(f), pos, bodyPos)
 			}
+			// Function bodies are emitted by deferred initializers on one shared
+			// context. Reset cgo side-channel state at execution time as well as
+			// declaration time so a completed C2 adapter cannot affect the next
+			// generated wrapper.
+			p.cgoCalled = false
+			p.cgoReturned = false
+			p.cgoArgs = nil
+			p.cgoRet = llssa.Expr{}
+			p.cgoErrno = llssa.Nil
 			p.bvals = make(map[ssa.Value]llssa.Expr)
 			p.methodNilDerefChecks = collectMethodNilDerefChecks(f)
 			if p.emissionUniverse != nil {
@@ -1076,6 +1090,10 @@ func (p *context) compileBlock(b llssa.Builder, block *ssa.BasicBlock, n int, do
 					// call c function
 					p.compileInstr(b, instr)
 					p.cgoCalled = true
+					if p.cgoReturned {
+						cgoReturned = true
+						goto end
+					}
 				}
 			case *ssa.Return:
 				// return cgo function result
@@ -1213,14 +1231,28 @@ func (p *context) cgoErrnoType() types.Type {
 
 func (p *context) cgoReturn(b llssa.Builder, isCgoC2 bool) {
 	if !isCgoC2 {
-		b.Return(p.cgoRet)
+		p.cgoEmitReturn(b, p.cgoRet)
 		return
 	}
 	sig := p.fn.Type.RawType().(*types.Signature)
+	if p.hasCoroPhysicalBody() {
+		if p.goFn == nil || p.goFn.Signature == nil {
+			panic("physical cgo C2func has no source signature")
+		}
+		sig = p.goFn.Signature
+	}
 	if sig.Results().Len() != 2 {
 		panic("cgo C2func should return (result, error)")
 	}
-	p.cgoC2Return(b, p.cgoRet, sig.Results().At(1).Type())
+	p.cgoC2Return(b, p.cgoRet, p.patchType(sig.Results().At(1).Type()))
+}
+
+func (p *context) cgoEmitReturn(b llssa.Builder, results ...llssa.Expr) {
+	if p.hasCoroPhysicalBody() {
+		p.compileCoroReturn(b, results)
+		return
+	}
+	b.Return(results...)
 }
 
 func (p *context) cgoC2Return(b llssa.Builder, ret llssa.Expr, errType types.Type) {
@@ -1229,7 +1261,7 @@ func (p *context) cgoC2Return(b llssa.Builder, ret llssa.Expr, errType types.Typ
 	b.Store(nilSlot, p.prog.Zero(errTy))
 	nilErr := b.Load(nilSlot)
 	if p.cgoErrno.IsNil() {
-		b.Return(ret, nilErr)
+		p.cgoEmitReturn(b, ret, nilErr)
 		return
 	}
 	i32 := p.type_(types.Typ[types.Int32], llssa.InGo)
@@ -1246,9 +1278,9 @@ func (p *context) cgoC2Return(b llssa.Builder, ret llssa.Expr, errType types.Typ
 	okBlk := fn.MakeBlock()
 	b.If(cond, errBlk, okBlk)
 	b.SetBlockEx(errBlk, llssa.AtEnd, false)
-	b.Return(ret, errIface)
+	p.cgoEmitReturn(b, ret, errIface)
 	b.SetBlockEx(okBlk, llssa.AtEnd, false)
-	b.Return(ret, nilErr)
+	p.cgoEmitReturn(b, ret, nilErr)
 }
 
 func (p *context) isVArgs(v ssa.Value) (ret []llssa.Expr, ok bool) {
@@ -1404,6 +1436,28 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		}
 		log.Panicln("unreachable:", iv)
 	}
+	var (
+		frozenPhysical        coroPhysicalInstructionPlan
+		frozenPhysicalPlanned bool
+		frozenPhysicalLoaded  bool
+	)
+	physicalPlan := func() (coroPhysicalInstructionPlan, bool) {
+		if !frozenPhysicalLoaded {
+			frozenPhysical, frozenPhysicalPlanned = p.plannedCoroPhysicalInstruction(iv)
+			frozenPhysicalLoaded = true
+		}
+		return frozenPhysical, frozenPhysicalPlanned
+	}
+	observePhysical := func(actual coroPhysicalInstructionRecipe) {
+		plan, planned := physicalPlan()
+		if !planned {
+			panic(fmt.Sprintf("physical recipe %s escaped ordinary SSA emission", actual))
+		}
+		p.observeCoroPhysicalInstruction(iv, actual)
+		if plan.recipe != actual {
+			panic("physical recipe observation returned after a mismatched frozen plan")
+		}
+	}
 	switch v := iv.(type) {
 	case *ssa.Call:
 		if value, handled := p.tryCompileCoroPatchInitRedirect(b, v); handled {
@@ -1469,12 +1523,12 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			b.DeferStackDrain()
 		}
 	case *ssa.BinOp:
-		physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(v)
+		physicalInstruction, physicalPlanned := physicalPlan()
 		if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionInterfaceNilCompare {
 			if physicalInstruction.valueOperand == nil {
 				panic("interface nil comparison lost its frozen value operand")
 			}
-			p.observeCoroPhysicalInstruction(v, coroPhysicalInstructionInterfaceNilCompare)
+			observePhysical(coroPhysicalInstructionInterfaceNilCompare)
 			physical := p.compileValue(b, physicalInstruction.valueOperand)
 			typeWord := b.InterfaceTypeWord(physical)
 			nilType := p.prog.Nil(p.prog.VoidPtr())
@@ -1505,7 +1559,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			ret = b.BinOp(v.Op, x, y)
 		}
 	case *ssa.UnOp:
-		physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(v)
+		physicalInstruction, physicalPlanned := physicalPlan()
 		if v.Op == token.MUL {
 			plannedDeref := physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionDeref
 			if _, ok := p.methodNilDerefChecks[v]; ok && !ssaValueProvenNonNilAt(v.X, v) {
@@ -1662,11 +1716,10 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 	case *ssa.FieldAddr:
 		x := p.compileValue(b, v.X)
 		p.recordPanicLocation(b, v.Pos())
-		physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(v)
+		physicalInstruction, physicalPlanned := physicalPlan()
 		guardedFieldAddr := physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionFieldAddr
 		if guardedFieldAddr {
-			p.observeCoroPhysicalInstruction(v, coroPhysicalInstructionFieldAddr)
-			p.observeCoroPhysicalNilGuard(v)
+			observePhysical(coroPhysicalInstructionFieldAddr)
 			x = p.compileCoroImplicitNilFieldAddrGuard(b, v, x)
 		} else if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary {
 			panic(fmt.Sprintf("FieldAddr selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
@@ -1688,17 +1741,17 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		}
 		elem := p.type_(t.Elem(), llssa.InGo)
 		heap := v.Heap
-		physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(v)
+		physicalInstruction, physicalPlanned := physicalPlan()
 		if physicalPlanned {
 			switch physicalInstruction.recipe {
 			case coroPhysicalInstructionTerminalResultAllocation:
-				p.observeCoroPhysicalInstruction(v, coroPhysicalInstructionTerminalResultAllocation)
+				observePhysical(coroPhysicalInstructionTerminalResultAllocation)
 				ret = p.compileCoroTerminalResultAllocation(v)
 			case coroPhysicalInstructionFrameBitcastAllocation:
-				p.observeCoroPhysicalInstruction(v, coroPhysicalInstructionFrameBitcastAllocation)
+				observePhysical(coroPhysicalInstructionFrameBitcastAllocation)
 				ret = p.coroFrameAlloca(elem)
 			case coroPhysicalInstructionFrameAllocation:
-				p.observeCoroPhysicalInstruction(v, coroPhysicalInstructionFrameAllocation)
+				observePhysical(coroPhysicalInstructionFrameAllocation)
 				ret = p.coroFrameAlloc(elem)
 			case coroPhysicalInstructionOrdinary:
 			default:
@@ -1732,9 +1785,9 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		x := p.compileValue(b, vx)
 		idx := p.compileValue(b, v.Index)
 		p.recordPanicLocation(b, v.Pos())
-		physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(v)
+		physicalInstruction, physicalPlanned := physicalPlan()
 		if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionIndexAddr {
-			p.observeCoroPhysicalInstruction(v, coroPhysicalInstructionIndexAddr)
+			observePhysical(coroPhysicalInstructionIndexAddr)
 			ret = p.compileCoroIndexAddrPlanned(b, v, x, idx, physicalInstruction)
 		} else if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary {
 			panic(fmt.Sprintf("IndexAddr selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
@@ -1763,9 +1816,9 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			}
 			return
 		}
-		physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(v)
+		physicalInstruction, physicalPlanned := physicalPlan()
 		if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionIndex {
-			p.observeCoroPhysicalInstruction(v, coroPhysicalInstructionIndex)
+			observePhysical(coroPhysicalInstructionIndex)
 			ret = p.compileCoroIndexPlanned(b, v, x, idx, takeArrayAddr, physicalInstruction)
 		} else if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary {
 			panic(fmt.Sprintf("Index selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
@@ -1809,9 +1862,9 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 			max = p.compileValue(b, v.Max)
 		}
 		p.recordPanicLocation(b, v.Pos())
-		physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(v)
+		physicalInstruction, physicalPlanned := physicalPlan()
 		if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionSlice {
-			p.observeCoroPhysicalInstruction(v, coroPhysicalInstructionSlice)
+			observePhysical(coroPhysicalInstructionSlice)
 			ret = p.compileCoroSlicePlanned(b, v, x, low, high, max, physicalInstruction)
 		} else if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary {
 			panic(fmt.Sprintf("Slice selected incompatible frozen physical recipe %s", physicalInstruction.recipe))
@@ -1820,11 +1873,11 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		}
 		ret.Type = p.type_(v.Type(), llssa.InGo)
 	case *ssa.MakeInterface:
-		physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(v)
+		physicalInstruction, physicalPlanned := physicalPlan()
 		checkedInterfacePtr := physicalPlanned &&
 			physicalInstruction.recipe == coroPhysicalInstructionInterfaceFromCheckedPtr
 		if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionSyntheticSelectNoCaseBox {
-			p.observeCoroPhysicalInstruction(v, coroPhysicalInstructionSyntheticSelectNoCaseBox)
+			observePhysical(coroPhysicalInstructionSyntheticSelectNoCaseBox)
 			ret = p.prog.Nil(p.type_(v.Type(), llssa.InGo))
 			break
 		}
@@ -1870,7 +1923,7 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 							if !checkedPointer {
 								panic("interface-from-checked-ptr recipe lost its checked pointer producer")
 							}
-							p.observeCoroPhysicalInstruction(v, coroPhysicalInstructionInterfaceFromCheckedPtr)
+							observePhysical(coroPhysicalInstructionInterfaceFromCheckedPtr)
 						}
 						if knownNonNil {
 							ret = b.MakeInterfaceFromKnownNonNilPtr(t, ptr)
@@ -1988,9 +2041,9 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 	case *ssa.SliceToArrayPointer:
 		t := p.type_(v.Type(), llssa.InGo)
 		x := p.compileValue(b, v.X)
-		physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(v)
+		physicalInstruction, physicalPlanned := physicalPlan()
 		if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionSliceToArrayPointer {
-			p.observeCoroPhysicalInstruction(v, coroPhysicalInstructionSliceToArrayPointer)
+			observePhysical(coroPhysicalInstructionSliceToArrayPointer)
 			if physicalInstruction.bound == 0 {
 				ret = b.SliceToArrayPointerUnchecked(x, t)
 				break
@@ -2225,12 +2278,14 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		if _, ok := p.staticInitStores[v]; ok {
 			return
 		}
-		if p.compilation != nil && p.compilation.CoroPlan != nil &&
-			p.compilation.CoroPlan.ElidesConditionalManagedStore(v) {
-			// Whole-program analysis proved this exact direct descriptor
-			// publication has no live reader or other target consumer. Avoid
-			// materializing a reference to the intentionally EmitNone target.
-			return
+		if p.compilation != nil {
+			plan := p.compilation.CoroPlan
+			if plan != nil && plan.ElidesConditionalManagedStore(v) {
+				// Whole-program analysis proved this exact direct descriptor
+				// publication has no live reader or other target consumer. Avoid
+				// materializing a reference to the intentionally EmitNone target.
+				return
+			}
 		}
 		va := v.Addr
 		if va, ok := va.(*ssa.IndexAddr); ok {
@@ -2257,6 +2312,16 @@ func (p *context) compileInstr(b llssa.Builder, instr ssa.Instruction) {
 		}
 		ptr := p.compileValue(b, va)
 		val := p.compileValue(b, v.Val)
+		physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(v)
+		if physicalPlanned && physicalInstruction.recipe == coroPhysicalInstructionStore {
+			p.observeCoroPhysicalInstruction(v, coroPhysicalInstructionStore)
+			if !physicalInstruction.nilGuard {
+				panic("structured coroutine Store omitted its frozen nil guard")
+			}
+			ptr = p.compileCoroImplicitNilStoreGuard(b, v, ptr)
+			b.StoreKnownNonNil(ptr, val)
+			return
+		}
 		b.Store(ptr, val)
 	case *ssa.Jump:
 		jmpb := p.jumpTo(v)
@@ -2393,7 +2458,6 @@ func (p *context) compileCoroPlannedDeref(
 	if !physical.nilGuard {
 		return base
 	}
-	p.observeCoroPhysicalNilGuard(deref)
 	return p.compileCoroImplicitNilDerefGuard(b, deref, base)
 }
 

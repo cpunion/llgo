@@ -36,6 +36,7 @@ const (
 	coroPhysicalInstructionOrdinary coroPhysicalInstructionRecipe = iota
 	coroPhysicalInstructionFieldAddr
 	coroPhysicalInstructionDeref
+	coroPhysicalInstructionStore
 	coroPhysicalInstructionIndexAddr
 	coroPhysicalInstructionIndex
 	coroPhysicalInstructionSlice
@@ -60,6 +61,8 @@ func (recipe coroPhysicalInstructionRecipe) String() string {
 		return "fieldaddr"
 	case coroPhysicalInstructionDeref:
 		return "deref"
+	case coroPhysicalInstructionStore:
+		return "store"
 	case coroPhysicalInstructionIndexAddr:
 		return "indexaddr"
 	case coroPhysicalInstructionIndex:
@@ -158,6 +161,7 @@ const (
 	coroPhysicalOperationWorkerSyscall
 	coroPhysicalOperationWorkerForeign
 	coroPhysicalOperationWorkerCgo
+	coroPhysicalOperationWorkerCgoErrno
 )
 
 func (recipe coroPhysicalOperationRecipe) String() string {
@@ -180,6 +184,8 @@ func (recipe coroPhysicalOperationRecipe) String() string {
 		return "worker-foreign"
 	case coroPhysicalOperationWorkerCgo:
 		return "worker-cgo"
+	case coroPhysicalOperationWorkerCgoErrno:
+		return "worker-cgo-errno"
 	default:
 		return fmt.Sprintf("physical-operation-recipe(%d)", uint8(recipe))
 	}
@@ -255,8 +261,10 @@ type coroPhysicalInstructionPlan struct {
 	operationFailure   string
 	operationWorker    *coroWorkerForeignCallShape
 	operationCgo       *coroWorkerCgoCallShape
+	operationCgoErrno  *coroWorkerCgoErrnoCallShape
 	outcome            coroPhysicalOutcomeRecipe
 	outcomeFailure     string
+	elideValue         bool
 	valueOperand       ssa.Value
 	container          coroPhysicalContainerKind
 	bound              int64
@@ -338,6 +346,7 @@ type coroPhysicalFunctionPlan struct {
 	critical          *coroCriticalProof
 	cleanup           *coroStaticCleanupPlan
 	frameRetentionABI string
+	needsPreempt      bool
 	instructions      map[ssa.Instruction]coroPhysicalInstructionPlan
 }
 
@@ -361,6 +370,13 @@ func prepareCoroPhysicalFunctionPlan(
 		cleanup:           cleanup,
 		frameRetentionABI: audit.frameRetentionABI,
 		instructions:      make(map[ssa.Instruction]coroPhysicalInstructionPlan),
+	}
+	if whole != nil {
+		function, planned := whole.FunctionPlan(audit.fn)
+		if !planned {
+			return nil, fmt.Errorf("physical function planning requires a frozen function plan")
+		}
+		plan.needsPreempt = function.Exec.Contains(coro.NeedsPreempt)
 	}
 	var exactBitcastAllocation *ssa.Alloc
 	if proof, exact := coro.ProveSSAExactScalarBitcast(audit.fn); exact {
@@ -595,6 +611,21 @@ func planCoroPhysicalInstruction(
 				}
 			}
 		}
+	case *ssa.Store:
+		if audit.ctx != nil {
+			if index, ok := instruction.Addr.(*ssa.IndexAddr); ok &&
+				emissionIsVargsAlloc(audit.ctx, index.X) {
+				break
+			}
+		}
+		requiresGuard, reason := audit.storeRequiresImplicitNilFault(instruction)
+		if reason != "" {
+			return result, fmt.Errorf("Store frozen helper plan: %s", reason)
+		}
+		if explicitPanic && requiresGuard {
+			result.recipe = coroPhysicalInstructionStore
+			result.nilGuard = true
+		}
 	case *ssa.IndexAddr:
 		if audit.ctx != nil && emissionIsVargsAlloc(audit.ctx, instruction.X) {
 			break
@@ -691,13 +722,26 @@ func planCoroPhysicalInstruction(
 				return result, fmt.Errorf("load intrinsic physical SitePlan: %w", err)
 			}
 			if found && frozen.failure == "" && frozen.plan.Intrinsic &&
-				frozen.opcode == llgoAllocaCStr &&
+				(frozen.opcode == llgoAllocaCStr || frozen.opcode == llgoAllocaCStrs) &&
 				frozen.plan.IntrinsicSemantics == CoroIntrinsicCallInlineWithLoweredCalls {
 				if reason := audit.requireFrozenStructuredRuntimeHelpers(instruction, "AllocU", "CStrCopy"); reason != "" {
-					return result, fmt.Errorf("physical llgo.allocaCStr heap storage: %s", reason)
+					return result, fmt.Errorf("physical llgo C string heap storage: %s", reason)
 				}
 				result.recipe = coroPhysicalInstructionHeapCStr
 			}
+		}
+	case *ssa.ChangeType:
+		if whole == nil {
+			break
+		}
+		caller, planned := whole.FunctionPlan(audit.fn)
+		if !planned {
+			break
+		}
+		if target, err := resolveCoroCompilerElidedStaticAwaitRetag(
+			audit, caller, instruction,
+		); err == nil && target != nil {
+			result.elideValue = true
 		}
 	case *ssa.MakeInterface:
 		if coroSyntheticSelectNoCaseBox(instruction) {
@@ -944,6 +988,27 @@ func planCoroPhysicalOperationInstruction(
 				}
 				result.operation = coroPhysicalOperationWorkerCgo
 				result.operationCgo = &shape
+				return
+			}
+			if found && frozen.plan.Intrinsic && frozen.opcode == llgoCgoCgocall &&
+				frozen.plan.IntrinsicSemantics == CoroIntrinsicCallInlineForeignSuspend {
+				if !capabilities.worker {
+					result.operationFailure = "generated C2 call requires the bounded worker capability"
+					return
+				}
+				shape, recognized, err := validateCoroWorkerCgoErrnoCall(
+					whole, audit.ctx, instruction,
+				)
+				if !recognized {
+					result.operationFailure = "generated C2 worker intrinsic has no exact typed errno shape"
+					return
+				}
+				if err != nil {
+					result.operationFailure = "invalid generated C2 worker call: " + err.Error()
+					return
+				}
+				result.operation = coroPhysicalOperationWorkerCgoErrno
+				result.operationCgoErrno = &shape
 				return
 			}
 			if found && frozen.plan.Intrinsic && isLLGoSyscallIntrinsic(frozen.opcode) &&

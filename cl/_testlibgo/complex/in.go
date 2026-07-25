@@ -5,22 +5,23 @@ import (
 	"math/cmplx"
 )
 
-// CHECK-LABEL: define void @"{{.*}}/cl/_testlibgo/complex.f"({ double, double } %0, { double, double } %1){{.*}} {
+// CHECK-LABEL: define ptr @"{{.*}}/cl/_testlibgo/complex.f$coro"(
 func f(c, z complex128) {
-	// CHECK: %2 = call double @"math/cmplx.Abs"({ double, double } %0)
+	// CHECK: [[ABS:%[0-9]+]] = call ptr @"math/cmplx.Abs$coro"
+	// CHECK: call void @__llgo_coro_await_prepare_v3({{.*}}ptr [[ABS]]
 	println("abs(3+4i):", cmplx.Abs(c))
-	// CHECK: %3 = extractvalue { double, double } %1, 0
-	// CHECK: %4 = extractvalue { double, double } %1, 1
+	// CHECK: extractvalue { double, double } %3, 0
+	// CHECK: extractvalue { double, double } %3, 1
 	println("real(3+4i):", real(z))
 	println("imag(3+4i):", imag(z))
 }
 
-// CHECK-LABEL: define void @"{{.*}}/cl/_testlibgo/complex.main"(){{.*}} {
+// CHECK-LABEL: define ptr @"{{.*}}/cl/_testlibgo/complex.main$coro"(
 func main() {
 	re := 3.0
 	im := 4.0
 	z := 3 + 4i
 	c := complex(re, im)
-	// CHECK: call void @"{{.*}}/cl/_testlibgo/complex.f"({ double, double } { double 3.000000e+00, double 4.000000e+00 }, { double, double } { double 3.000000e+00, double 4.000000e+00 })
+	// CHECK: call ptr @"{{.*}}/cl/_testlibgo/complex.f$coro"({{.*}}{ double, double } { double 3.000000e+00, double 4.000000e+00 }, { double, double } { double 3.000000e+00, double 4.000000e+00 })
 	f(c, z)
 }

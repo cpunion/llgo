@@ -399,6 +399,8 @@ func coroIntrinsicLoweringRecipe(semantics CoroIntrinsicCallSemantics) (coro.Rec
 		return coro.RecipeID("cl.intrinsic.inline-with-helpers.v0"), coro.NoSuspend
 	case CoroIntrinsicCallInlineSuspend:
 		return coro.RecipeID("cl.intrinsic.inline-suspend.v0"), coro.MayPark
+	case CoroIntrinsicCallInlineForeignSuspend:
+		return coro.RecipeID("cl.intrinsic.inline-foreign-suspend.v1"), coro.WaitForeign
 	case CoroIntrinsicCallInlineYield:
 		return coro.RecipeID("cl.intrinsic.inline-yield.v0"), coro.YieldOnly
 	case CoroIntrinsicCallInlineOutcome:

@@ -92,3 +92,41 @@ func TestFieldAddrKnownNonNilSkipsStaticNilDerefGuard(t *testing.T) {
 		t.Fatalf("ordinary static-nil field address lost nil-deref helper:\n%s", ordinaryBody)
 	}
 }
+
+func TestStoreKnownNonNilSkipsStaticNilDerefGuard(t *testing.T) {
+	prog := NewProgram(nil)
+	prog.sizes = types.SizesFor("gc", runtime.GOARCH)
+	prog.SetRuntime(func() *types.Package {
+		pkg, err := importer.For("source", nil).Import(PkgRuntime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pkg
+	})
+	pkg := prog.NewPackage("memory", "test/memory")
+	sig := types.NewSignatureType(nil, nil, nil, nil, nil, false)
+
+	build := func(name string, knownNonNil bool) string {
+		fn := pkg.NewFunc(name, sig, InGo)
+		b := fn.MakeBody(1)
+		ptr := prog.Nil(prog.rawType(types.NewPointer(types.Typ[types.Int])))
+		value := prog.Zero(prog.rawType(types.Typ[types.Int]))
+		if knownNonNil {
+			b.StoreKnownNonNil(ptr, value)
+		} else {
+			b.Store(ptr, value)
+		}
+		b.Return()
+		b.EndBuild()
+		return fn.impl.String()
+	}
+
+	knownBody := build("storeKnownNonNil", true)
+	if strings.Contains(knownBody, "AssertNilDeref") {
+		t.Fatalf("known-non-nil store emitted nil-deref helper:\n%s", knownBody)
+	}
+	ordinaryBody := build("storeOrdinary", false)
+	if !strings.Contains(ordinaryBody, "AssertNilDeref") {
+		t.Fatalf("ordinary static-nil store lost nil-deref helper:\n%s", ordinaryBody)
+	}
+}

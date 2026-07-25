@@ -142,6 +142,8 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 					var cgoWorkerCertificate CoroCgoWorkerCallCertificate
 					var cgoWorkerTarget *ssa.Function
 					cgoWorkerCertified := false
+					var cgoErrnoCertificate CoroCgoWorkerCallCertificate
+					cgoErrnoCertified := false
 					if !frontendUnevaluated && !noInit && !patchRedirect && classifyErr == nil {
 						cgoWorkerCertificate, cgoWorkerTarget, cgoWorkerCertified, classifyErr =
 							u.freezeCoroCgoWorkerCallCertificate(ctx, call)
@@ -161,6 +163,10 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 								opcode, intrinsic, classifyErr = u.coroIntrinsicOpcode(callee)
 							}
 						}
+						if classifyErr == nil && intrinsic && opcode == llgoCgoCgocall {
+							cgoErrnoCertificate, cgoErrnoCertified, classifyErr =
+								ctx.freezeCoroCgoErrnoWorkerCallCertificate(call)
+						}
 						if classifyErr == nil && intrinsic && isLLGoSyscallIntrinsic(opcode) && u.CoroWorkerSupported() {
 							if direct, ok := call.(*ssa.Call); ok && direct.Common() != nil && !direct.Common().IsInvoke() &&
 								direct.Parent() != nil && u.canonicalAlias(direct.Parent()) == direct.Parent() {
@@ -170,6 +176,7 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 						if classifyErr == nil {
 							semantics, intrinsic, classifyErr = u.classifyCoroIntrinsicCallSite(
 								ctx, site, call, opcode, intrinsic, workerCertificate, workerCertified,
+								cgoErrnoCertificate, cgoErrnoCertified,
 							)
 						}
 					}
@@ -235,6 +242,9 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 						cgoWorker:          cgoWorkerCertificate,
 						patchRedirect:      frozenPatchRedirect,
 						patchAttempted:     redirected || redirectErr != nil,
+					}
+					if cgoErrnoCertified {
+						frozenCall.cgoWorker = cgoErrnoCertificate
 					}
 					if workerCertified {
 						frozenCall.workerOwners = cloneCoroWorkerOwnerSet(u.workerSyscallOwners[call])

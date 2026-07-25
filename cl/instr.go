@@ -329,6 +329,20 @@ func (p *context) allocaCStrs(b llssa.Builder, args []ssa.Value) (ret llssa.Expr
 	panic("allocaCStrs(strs []string, endWithNil bool): invalid arguments")
 }
 
+// func allocaCStrs(strs []string, endWithNil bool) **int8, with every
+// allocation promoted out of the native resume stack.
+func (p *context) allocCStrs(b llssa.Builder, args []ssa.Value) (ret llssa.Expr) {
+	if len(args) == 2 {
+		endWithNil, ok := constBool(args[1])
+		if !ok {
+			panic("allocCStrs(strs, endWithNil): endWithNil should be constant bool")
+		}
+		strs := p.compileValue(b, args[0])
+		return b.AllocCStrs(strs, endWithNil)
+	}
+	panic("allocCStrs(strs []string, endWithNil bool): invalid arguments")
+}
+
 // func string(cstr *int8, n ...int) *int8
 func (p *context) string(b llssa.Builder, args []ssa.Value) (ret llssa.Expr) {
 	if len(args) == 2 {
@@ -2215,8 +2229,7 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 				// coroutine frame. ExplicitStatus owns the branch and returns the
 				// original pointer on its non-nil continuation.
 				observePhysicalInstruction(coroPhysicalInstructionBuiltinNilGuard)
-				p.observeCoroPhysicalNilGuard(sourceCall)
-				ret = p.compileCoroImplicitNilAccessGuard(b, ptr)
+				ret = p.compileCoroPlannedNilAccessGuard(b, sourceCall, ptr)
 				return
 			}
 			if physicalPlanned && physicalInstruction.recipe != coroPhysicalInstructionOrdinary {
@@ -2346,7 +2359,18 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 		case llgoAllocCStr:
 			ret = p.allocCStr(b, args)
 		case llgoAllocaCStrs:
-			ret = p.allocaCStrs(b, args)
+			if physicalPlanned {
+				if physicalInstruction.recipe != coroPhysicalInstructionHeapCStr {
+					panic(fmt.Sprintf(
+						"llgo.allocaCStrs selected incompatible frozen physical recipe %s",
+						physicalInstruction.recipe,
+					))
+				}
+				observePhysicalInstruction(coroPhysicalInstructionHeapCStr)
+				ret = p.allocCStrs(b, args)
+			} else {
+				ret = p.allocaCStrs(b, args)
+			}
 		case llgoString:
 			ret = p.string(b, args)
 		case llgoStringData:

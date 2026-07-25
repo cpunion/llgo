@@ -390,15 +390,15 @@ func slotDestructor(dst *slot) {
 		t.Fatal(err)
 	}
 	callbackPlan := functionPlanForBuildTest(t, plan, slotDestructor)
-	if callbackPlan.External != coro.Defined || callbackPlan.Effect != coro.NoSuspend || callbackPlan.Exec.Contains(coro.NeedsPreempt) ||
+	if callbackPlan.External != coro.Defined || callbackPlan.Effect != coro.WaitForeign || callbackPlan.Exec.Contains(coro.NeedsPreempt) ||
 		callbackPlan.ManagedDemand != coro.NoDemand || !callbackPlan.RawPlainDemand || !callbackPlan.RawPlainOnly ||
 		callbackPlan.FuncRep != coro.DirectPlain || callbackPlan.Primary != coro.PrimaryPlain || callbackPlan.Emission != coro.EmitRawPlain {
-		t.Fatalf("TLS callback plan = %+v, want one post-plan validated raw-only plain body", callbackPlan)
+		t.Fatalf("TLS callback plan = %+v, want a raw-only body retaining the managed foreign-wait summary", callbackPlan)
 	}
 	leafPlan := functionPlanForBuildTest(t, plan, tlsCLeaf)
-	if !plan.IgnoresBody(tlsCLeaf) || leafPlan.External != coro.ExternalKnown || leafPlan.Effect != coro.NoSuspend ||
-		leafPlan.Exec.Contains(coro.BlockForeign|coro.NeedsPreempt) || leafPlan.FuncRep != coro.DirectPlain || leafPlan.Emission != coro.EmitExternal {
-		t.Fatalf("TLS C leaf plan = %+v, ignored=%t; want exact compatible-known declaration", leafPlan, plan.IgnoresBody(tlsCLeaf))
+	if !plan.IgnoresBody(tlsCLeaf) || leafPlan.External != coro.ExternalUnknownForeign || leafPlan.Effect != coro.NoSuspend ||
+		leafPlan.Exec != coro.BlockForeign|coro.IRQUnsafe || leafPlan.FuncRep != coro.DirectPlain || leafPlan.Emission != coro.EmitExternal {
+		t.Fatalf("TLS C leaf plan = %+v, ignored=%t; want the conservative default foreign declaration", leafPlan, plan.IgnoresBody(tlsCLeaf))
 	}
 	ordinaryC := functionPlanForBuildTest(t, plan, fixture.pkg.Func("ordinaryC"))
 	if ordinaryC.External != coro.ExternalUnknownForeign || !ordinaryC.Exec.Contains(coro.BlockForeign|coro.IRQUnsafe) {
@@ -406,8 +406,8 @@ func slotDestructor(dst *slot) {
 	}
 }
 
-func TestCoroTLSDestructorDirectPlainClosureCLeafFailsClosed(t *testing.T) {
-	t.Run("user callback", func(t *testing.T) {
+func TestCoroTLSDestructorDirectPlainClosureCLeafPolicy(t *testing.T) {
+	t.Run("user callback on raw caller stack", func(t *testing.T) {
 		fixture := buildRequiredCoroRuntimeFixture(t, coroTLSRuntimeFixtureSource(`
 //llgo:link userCLeaf C.user_c_leaf
 func userCLeaf()
@@ -419,17 +419,42 @@ func install() {
 	installC(CCallback(userCallback))
 }
 `))
-		if len(fixture.directPlain) != 1 || fixture.directPlain[0].target != fixture.pkg.Func("slotDestructor") {
-			t.Fatalf("direct-plain callbacks = %+v, want only compiler-owned slotDestructor", fixture.directPlain)
+		slotDestructor := fixture.pkg.Func("slotDestructor")
+		userCallback := fixture.pkg.Func("userCallback")
+		callbacks := make(map[*ssa.Function]bool, len(fixture.directPlain))
+		for _, use := range fixture.directPlain {
+			callbacks[use.target] = true
 		}
-		if _, required := fixture.requiredPlain[fixture.pkg.Func("userCallback")]; required {
-			t.Fatal("user callback inherited the TLS C-leaf exception")
+		if len(fixture.directPlain) != 2 || !callbacks[slotDestructor] || !callbacks[userCallback] {
+			t.Fatalf("direct-plain callbacks = %+v, want slotDestructor and userCallback", fixture.directPlain)
 		}
-		if _, required := fixture.requiredPlain[fixture.pkg.Func("userCLeaf")]; required {
-			t.Fatal("user callback C leaf entered the required plain island")
+		if _, required := fixture.requiredPlain[userCallback]; !required {
+			t.Fatal("raw C callback did not enter its exact required plain closure")
 		}
-		if _, ok, err := provenCoroDirectPlainStaticClosure(fixture.ctx, fixture.pkg.Func("userCallback"), fixture.closedDynamic); err != nil || ok {
-			t.Fatalf("user callback closure proof = ok:%t err:%v, want false/nil", ok, err)
+		userCLeaf := fixture.pkg.Func("userCLeaf")
+		if _, required := fixture.requiredPlain[userCLeaf]; required {
+			t.Fatal("default may-block C leaf entered requiredPlain instead of retaining its foreign contract")
+		}
+		closure, ok, err := provenCoroDirectPlainStaticClosure(
+			fixture.ctx, userCallback, fixture.closedDynamic,
+		)
+		if err != nil || !ok || len(closure) != 1 || closure[0] != userCallback {
+			t.Fatalf("user callback closure proof = closure:%v ok:%t err:%v, want only userCallback", closure, ok, err)
+		}
+		plan, err := fixture.analyze(coro.SSAConfig{MaxPlainInstructions: -1})
+		if err != nil {
+			t.Fatalf("raw callback with non-reentrant may-block C leaf: %v", err)
+		}
+		callbackPlan := functionPlanForBuildTest(t, plan, userCallback)
+		if callbackPlan.External != coro.Defined || !callbackPlan.RawPlainDemand ||
+			!callbackPlan.RawPlainOnly || callbackPlan.Emission != coro.EmitRawPlain {
+			t.Fatalf("user callback plan = %+v, want an exact raw-only plain body", callbackPlan)
+		}
+		leafPlan := functionPlanForBuildTest(t, plan, userCLeaf)
+		if leafPlan.External != coro.ExternalUnknownForeign ||
+			!leafPlan.Exec.Contains(coro.BlockForeign|coro.IRQUnsafe) ||
+			leafPlan.Emission != coro.EmitExternal {
+			t.Fatalf("user callback C leaf plan = %+v, want the conservative foreign declaration policy", leafPlan)
 		}
 	})
 

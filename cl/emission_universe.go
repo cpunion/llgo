@@ -361,6 +361,12 @@ const (
 	// The build analyzer seeds the owner with MayPark; there is no callable sync
 	// helper and no managed callee edge.
 	CoroIntrinsicCallInlineSuspend
+	// CoroIntrinsicCallInlineForeignSuspend is the same current-frame erasure
+	// shape, but the structured suspension waits for a bounded foreign-worker
+	// transaction rather than a scheduler-local event. Keeping it distinct
+	// makes WaitForeign an exact owner-local effect instead of disguising the
+	// operation as a generic park.
+	CoroIntrinsicCallInlineForeignSuspend
 	// CoroIntrinsicCallInlineYield is also a current-frame suspension, but the
 	// task remains runnable. It seeds YieldOnly rather than MayPark and is used
 	// for explicit scheduler handoff/backoff, not event waiting.
@@ -377,7 +383,8 @@ const (
 // through the owner's exact frozen lowered-call set.
 func (s CoroIntrinsicCallSemantics) ElidesManagedCall() bool {
 	return s == CoroIntrinsicCallInlineNoSuspend || s == CoroIntrinsicCallInlineWithLoweredCalls ||
-		s == CoroIntrinsicCallInlineSuspend || s == CoroIntrinsicCallInlineYield ||
+		s == CoroIntrinsicCallInlineSuspend || s == CoroIntrinsicCallInlineForeignSuspend ||
+		s == CoroIntrinsicCallInlineYield ||
 		s == CoroIntrinsicCallInlineOutcome
 }
 
@@ -386,7 +393,8 @@ func (s CoroIntrinsicCallSemantics) ElidesManagedCall() bool {
 // frontend lowering. Terminal structured outcomes share this physical
 // requirement even though they do not have a resumable continuation.
 func (s CoroIntrinsicCallSemantics) SuspendsCurrentFrame() bool {
-	return s == CoroIntrinsicCallInlineSuspend || s == CoroIntrinsicCallInlineYield ||
+	return s == CoroIntrinsicCallInlineSuspend || s == CoroIntrinsicCallInlineForeignSuspend ||
+		s == CoroIntrinsicCallInlineYield ||
 		s == CoroIntrinsicCallInlineOutcome
 
 }
@@ -408,6 +416,8 @@ func (s CoroIntrinsicCallSemantics) CurrentFrameEffect() coro.Effect {
 	switch s {
 	case CoroIntrinsicCallInlineSuspend:
 		return coro.MayPark
+	case CoroIntrinsicCallInlineForeignSuspend:
+		return coro.WaitForeign
 	case CoroIntrinsicCallInlineYield:
 		return coro.YieldOnly
 	case CoroIntrinsicCallInlineOutcome:
@@ -1694,6 +1704,8 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 	intrinsic bool,
 	workerCertificate CoroWorkerSyscallCertificate,
 	workerCertified bool,
+	cgoErrnoCertificate CoroCgoWorkerCallCertificate,
+	cgoErrnoCertified bool,
 ) (semantics CoroIntrinsicCallSemantics, exact bool, err error) {
 	if call == nil || call.Common() == nil {
 		return CoroIntrinsicCallUnsupported, false, fmt.Errorf("emission universe intrinsic call semantics: nil SSA call")
@@ -1879,6 +1891,11 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 			)
 		}
 		return CoroIntrinsicCallInlineNoSuspend, true, nil
+	case llgoStringData:
+		if err := verifyCoroStringDataShape(direct); err != nil {
+			return CoroIntrinsicCallUnsupported, true, err
+		}
+		return CoroIntrinsicCallInlineNoSuspend, true, nil
 	case llgoAllocaCStr:
 		args := direct.Common().Args
 		if len(args) != 1 {
@@ -1920,6 +1937,20 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 		if !sitePlan.hasManagedRuntimeHelper("AllocU") || !sitePlan.hasManagedRuntimeHelper("CStrCopy") {
 			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
 				"emission universe intrinsic call semantics: llgo.allocaCStr call %q has no exact frozen AllocU/CStrCopy lowered calls", direct.String(),
+			)
+		}
+		return CoroIntrinsicCallInlineWithLoweredCalls, true, nil
+	case llgoAllocaCStrs:
+		if err := verifyCoroAllocaCStrsShape(direct); err != nil {
+			return CoroIntrinsicCallUnsupported, true, err
+		}
+		if !u.CompleteRuntimeABI() {
+			return CoroIntrinsicCallUnsupported, true, nil
+		}
+		if !sitePlan.hasManagedRuntimeHelper("AllocU") || !sitePlan.hasManagedRuntimeHelper("CStrCopy") {
+			return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+				"emission universe intrinsic call semantics: llgo.allocaCStrs call %q has no exact frozen AllocU/CStrCopy lowered calls",
+				direct.String(),
 			)
 		}
 		return CoroIntrinsicCallInlineWithLoweredCalls, true, nil
@@ -2030,6 +2061,16 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 		}
 		return CoroIntrinsicCallInlineNoSuspend, true, nil
 	case llgoCgoCgocall:
+		if cgoErrnoCertified {
+			if cgoErrnoCertificate.ID == "" || cgoErrnoCertificate.TargetIdentity == "" ||
+				cgoErrnoCertificate.ABISignature == "" {
+				return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
+					"generated C2 call %q has an incomplete bounded-worker certificate",
+					direct.String(),
+				)
+			}
+			return CoroIntrinsicCallInlineForeignSuspend, true, nil
+		}
 		if err := u.verifyCoroRawCgocallShape(ctx, direct); err != nil {
 			return CoroIntrinsicCallUnsupported, true, err
 		}
@@ -2040,7 +2081,16 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 		}
 		return CoroIntrinsicCallInlineNoSuspend, true, nil
 	case llgoCoroPark:
-		if err := validateCoroParkIntrinsicCallSite(direct); err != nil {
+		if err := verifyCoroExactIntrinsicCallShape(
+			direct,
+			"llgo.coroPark",
+			"func(pointer, uint32)",
+			[]coroIntrinsicTypeShape{
+				{anyPointer: true},
+				{basic: types.Uint32},
+			},
+			nil,
+		); err != nil {
 			return CoroIntrinsicCallUnsupported, true, err
 		}
 		return CoroIntrinsicCallInlineSuspend, true, nil
@@ -2050,17 +2100,46 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 		}
 		return CoroIntrinsicCallInlineYield, true, nil
 	case llgoCoroTimerSleep:
-		if err := validateCoroTimerSleepIntrinsicCallSite(direct); err != nil {
+		if err := verifyCoroExactIntrinsicCallShape(
+			direct,
+			"llgo.coroTimerSleep",
+			"func(int64)",
+			[]coroIntrinsicTypeShape{{basic: types.Int64}},
+			nil,
+		); err != nil {
 			return CoroIntrinsicCallUnsupported, true, err
 		}
 		return CoroIntrinsicCallInlineSuspend, true, nil
 	case llgoCoroPollWait:
-		if err := validateCoroPollWaitIntrinsicCallSite(direct); err != nil {
+		if err := verifyCoroExactIntrinsicCallShape(
+			direct,
+			"llgo.coroPollWait",
+			"func(uintptr, int32, uint32, int64) uint32",
+			[]coroIntrinsicTypeShape{
+				{basic: types.Uintptr},
+				{basic: types.Int32},
+				{basic: types.Uint32},
+				{basic: types.Int64},
+			},
+			&coroIntrinsicTypeShape{basic: types.Uint32},
+		); err != nil {
 			return CoroIntrinsicCallUnsupported, true, err
 		}
 		return CoroIntrinsicCallInlineSuspend, true, nil
 	case llgoCoroControlledTimerWait:
-		if err := validateCoroControlledTimerWaitIntrinsicCallSite(direct); err != nil {
+		if err := verifyCoroExactIntrinsicCallShape(
+			direct,
+			"llgo.coroControlledTimerWait",
+			"func(unsafe.Pointer, *uint32, *uint32, uint32, int64) uint32",
+			[]coroIntrinsicTypeShape{
+				{basic: types.UnsafePointer},
+				{pointerElement: types.Uint32},
+				{pointerElement: types.Uint32},
+				{basic: types.Uint32},
+				{basic: types.Int64},
+			},
+			&coroIntrinsicTypeShape{basic: types.Uint32},
+		); err != nil {
 			return CoroIntrinsicCallUnsupported, true, err
 		}
 		return CoroIntrinsicCallInlineSuspend, true, nil
@@ -2087,7 +2166,19 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 		// explicit scheduler boundary.
 		return CoroIntrinsicCallInlineYield, true, nil
 	case llgoCoroFFICall:
-		if err := validateCoroFFICallIntrinsicCallSite(direct); err != nil {
+		if err := verifyCoroExactIntrinsicCallShape(
+			direct,
+			"llgo.coroFFICall",
+			"func(pointer, unsafe.Pointer, unsafe.Pointer, *unsafe.Pointer, *unsafe.Pointer)",
+			[]coroIntrinsicTypeShape{
+				{anyPointer: true},
+				{anyPointer: true},
+				{anyPointer: true},
+				{anyPointer: true},
+				{anyPointer: true},
+			},
+			nil,
+		); err != nil {
 			return CoroIntrinsicCallUnsupported, true, err
 		}
 		return CoroIntrinsicCallInlineSuspend, true, nil
@@ -2403,10 +2494,15 @@ func coroIntrinsicCallSemantics(opcode int) CoroIntrinsicCallSemantics {
 		// one load. Generic instances retain the origin's frozen intrinsic
 		// ownership; their source stub is never a separately callable Go body.
 		return CoroIntrinsicCallInlineNoSuspend
-	case llgoAllocaCStr:
-		// allocaCStr lowers its string length arithmetic and storage directly,
-		// then calls runtime.CStrCopy. The intrinsic declaration disappears, but
-		// the exact CStrCopy edge is retained in the owner's lowered-call set.
+	case llgoStringData:
+		// stringData projects the already-rooted source string data word. It
+		// emits no call and owns no scheduler state.
+		return CoroIntrinsicCallInlineNoSuspend
+	case llgoAllocaCStr, llgoAllocaCStrs:
+		// The C-string allocation intrinsics lower their size arithmetic and
+		// storage directly, then call runtime.AllocU/CStrCopy in a physical
+		// coroutine. Their declarations disappear, but those exact helper edges
+		// remain in the owner's lowered-call set.
 		return CoroIntrinsicCallInlineWithLoweredCalls
 	case llgoDeferData:
 		// deferData removes the intrinsic declaration but emits the exact
@@ -2473,6 +2569,55 @@ func coroIntrinsicCallSemantics(opcode int) CoroIntrinsicCallSemantics {
 	default:
 		return CoroIntrinsicCallUnsupported
 	}
+}
+
+func verifyCoroAllocaCStrsShape(call *ssa.Call) error {
+	const shape = "func([]string, bool) **int8 with a constant bool"
+	if err := verifyCoroExactIntrinsicCallShape(
+		call,
+		"llgo.allocaCStrs",
+		shape,
+		[]coroIntrinsicTypeShape{
+			{sliceElement: types.String},
+			{basic: types.Bool},
+		},
+		&coroIntrinsicTypeShape{pointerElement: types.Int8, pointerDepth: 2},
+	); err != nil {
+		return err
+	}
+	if _, constantBool := constBool(call.Common().Args[1]); !constantBool {
+		return fmt.Errorf("llgo.allocaCStrs call %q requires the exact %s shape", call.String(), shape)
+	}
+	return nil
+}
+
+func verifyCoroStringDataShape(call *ssa.Call) error {
+	const shape = "func(string) *int8"
+	if call == nil || call.Common() == nil || call.Common().IsInvoke() ||
+		call.Common().Method != nil || len(call.Common().Args) != 1 {
+		return fmt.Errorf("llgo.stringData requires one exact direct %s call", shape)
+	}
+	common := call.Common()
+	signature := common.Signature()
+	if signature == nil || signature.Recv() != nil || signature.Variadic() ||
+		signature.Params() == nil || signature.Params().Len() != 1 ||
+		signature.Results() == nil || signature.Results().Len() != 1 {
+		return fmt.Errorf("llgo.stringData call %q requires the exact %s shape", call.String(), shape)
+	}
+	argument, ok := types.Unalias(common.Args[0].Type()).Underlying().(*types.Basic)
+	if !ok || argument.Kind() != types.String ||
+		!types.Identical(signature.Params().At(0).Type(), common.Args[0].Type()) {
+		return fmt.Errorf("llgo.stringData call %q requires the exact %s shape", call.String(), shape)
+	}
+	result, ok := types.Unalias(signature.Results().At(0).Type()).Underlying().(*types.Pointer)
+	if !ok || !types.Identical(call.Type(), signature.Results().At(0).Type()) {
+		return fmt.Errorf("llgo.stringData call %q requires the exact %s shape", call.String(), shape)
+	}
+	element, ok := types.Unalias(result.Elem()).Underlying().(*types.Basic)
+	if !ok || element.Kind() != types.Int8 {
+		return fmt.Errorf("llgo.stringData call %q requires the exact %s shape", call.String(), shape)
+	}
+	return nil
 }
 
 func verifyCoroCgoConversionCall(opcode int, call *ssa.Call) error {
@@ -2593,54 +2738,22 @@ func (u *EmissionUniverse) coroCriticalCallSite(call *ssa.Call) (coroCriticalCal
 	return role, true, nil
 }
 
-func validateCoroParkIntrinsicCallSite(call *ssa.Call) error {
-	if call == nil || call.Common() == nil {
-		return fmt.Errorf("llgo.coroPark requires an exact direct call")
-	}
-	common := call.Common()
-	if common.IsInvoke() || len(common.Args) != 2 {
-		return fmt.Errorf("llgo.coroPark call %q requires exactly (pointer, uint32) arguments", call.String())
-	}
-	signature := common.Signature()
-	if signature == nil || signature.Recv() != nil || signature.Variadic() ||
-		(signature.Results() != nil && signature.Results().Len() != 0) ||
-		signature.Params() == nil || signature.Params().Len() != 2 {
-		return fmt.Errorf("llgo.coroPark call %q requires the exact func(pointer, uint32) shape", call.String())
-	}
-	pointerLike := func(typ types.Type) bool {
-		typ = types.Unalias(typ)
-		if _, ok := typ.Underlying().(*types.Pointer); ok {
-			return true
-		}
-		basic, ok := typ.Underlying().(*types.Basic)
-		return ok && basic.Kind() == types.UnsafePointer
-	}
-	uint32Like := func(typ types.Type) bool {
-		basic, ok := types.Unalias(typ).Underlying().(*types.Basic)
-		return ok && basic.Kind() == types.Uint32
-	}
-	if !pointerLike(common.Args[0].Type()) || !pointerLike(signature.Params().At(0).Type()) ||
-		!uint32Like(common.Args[1].Type()) || !uint32Like(signature.Params().At(1).Type()) {
-		return fmt.Errorf("llgo.coroPark call %q requires the exact func(pointer, uint32) shape", call.String())
-	}
-	return nil
+// coroIntrinsicTypeShape is the small structural vocabulary shared by inline
+// scheduler intrinsics. Keeping parameter/result verification in one classifier
+// prevents each new intrinsic from creating another independently evolving
+// call-shape boundary.
+type coroIntrinsicTypeShape struct {
+	basic          types.BasicKind
+	pointerElement types.BasicKind
+	pointerDepth   uint8
+	sliceElement   types.BasicKind
+	anyPointer     bool
 }
 
-func validateCoroFFICallIntrinsicCallSite(call *ssa.Call) error {
-	const shape = "func(pointer, unsafe.Pointer, unsafe.Pointer, *unsafe.Pointer, *unsafe.Pointer)"
-	if call == nil || call.Common() == nil || call.Common().IsInvoke() ||
-		call.Common().Method != nil || len(call.Common().Args) != 5 {
-		return fmt.Errorf("llgo.coroFFICall requires an exact direct five-argument call")
-	}
-	common := call.Common()
-	signature := common.Signature()
-	if signature == nil || signature.Recv() != nil || signature.Variadic() ||
-		signature.Params() == nil || signature.Params().Len() != 5 ||
-		signature.Results() != nil && signature.Results().Len() != 0 {
-		return fmt.Errorf("llgo.coroFFICall call %q requires the exact %s shape", call.String(), shape)
-	}
-	pointerLike := func(typ types.Type) bool {
-		switch value := types.Unalias(typ).Underlying().(type) {
+func (shape coroIntrinsicTypeShape) matches(typ types.Type) bool {
+	typ = types.Unalias(typ)
+	if shape.anyPointer {
+		switch value := typ.Underlying().(type) {
 		case *types.Pointer:
 			return true
 		case *types.Basic:
@@ -2649,101 +2762,60 @@ func validateCoroFFICallIntrinsicCallSite(call *ssa.Call) error {
 			return false
 		}
 	}
-	for index, argument := range common.Args {
-		if !pointerLike(argument.Type()) || !pointerLike(signature.Params().At(index).Type()) {
-			return fmt.Errorf("llgo.coroFFICall call %q requires the exact %s shape", call.String(), shape)
+	if shape.pointerElement != types.Invalid {
+		depth := shape.pointerDepth
+		if depth == 0 {
+			depth = 1
 		}
+		for ; depth != 0; depth-- {
+			pointer, ok := typ.Underlying().(*types.Pointer)
+			if !ok {
+				return false
+			}
+			typ = types.Unalias(pointer.Elem())
+		}
+		return (coroIntrinsicTypeShape{basic: shape.pointerElement}).matches(typ)
 	}
-	return nil
+	if shape.sliceElement != types.Invalid {
+		slice, ok := typ.Underlying().(*types.Slice)
+		return ok && (coroIntrinsicTypeShape{basic: shape.sliceElement}).matches(slice.Elem())
+	}
+	basic, ok := typ.Underlying().(*types.Basic)
+	return ok && basic.Kind() == shape.basic
 }
 
-func validateCoroTimerSleepIntrinsicCallSite(call *ssa.Call) error {
-	if call == nil || call.Common() == nil || call.Common().IsInvoke() || len(call.Common().Args) != 1 {
-		return fmt.Errorf("llgo.coroTimerSleep requires an exact direct one-argument call")
-	}
-	signature := call.Common().Signature()
-	if signature == nil || signature.Recv() != nil || signature.Variadic() ||
-		signature.Params() == nil || signature.Params().Len() != 1 ||
-		(signature.Results() != nil && signature.Results().Len() != 0) {
-		return fmt.Errorf("llgo.coroTimerSleep call %q requires the exact func(int64) shape", call.String())
-	}
-	int64Like := func(typ types.Type) bool {
-		basic, ok := types.Unalias(typ).Underlying().(*types.Basic)
-		return ok && basic.Kind() == types.Int64
-	}
-	if !int64Like(call.Common().Args[0].Type()) || !int64Like(signature.Params().At(0).Type()) {
-		return fmt.Errorf("llgo.coroTimerSleep call %q requires the exact func(int64) shape", call.String())
-	}
-	return nil
-}
-
-func validateCoroControlledTimerWaitIntrinsicCallSite(call *ssa.Call) error {
-	const shape = "func(unsafe.Pointer, *uint32, *uint32, uint32, int64) uint32"
-	if call == nil || call.Common() == nil || call.Common().IsInvoke() || len(call.Common().Args) != 5 {
-		return fmt.Errorf("llgo.coroControlledTimerWait requires an exact direct five-argument call")
+func verifyCoroExactIntrinsicCallShape(
+	call *ssa.Call,
+	name, signatureText string,
+	parameters []coroIntrinsicTypeShape,
+	result *coroIntrinsicTypeShape,
+) error {
+	if call == nil || call.Common() == nil || call.Common().IsInvoke() ||
+		call.Common().Method != nil || len(call.Common().Args) != len(parameters) {
+		return fmt.Errorf("%s requires one exact direct %s call", name, signatureText)
 	}
 	common := call.Common()
 	signature := common.Signature()
+	resultCount := 0
+	if result != nil {
+		resultCount = 1
+	}
 	if signature == nil || signature.Recv() != nil || signature.Variadic() ||
-		signature.Params() == nil || signature.Params().Len() != 5 ||
-		signature.Results() == nil || signature.Results().Len() != 1 {
-		return fmt.Errorf("llgo.coroControlledTimerWait call %q requires the exact %s shape", call.String(), shape)
+		signature.Params() == nil && len(parameters) != 0 ||
+		signature.Params() != nil && signature.Params().Len() != len(parameters) ||
+		signature.Results() == nil && resultCount != 0 ||
+		signature.Results() != nil && signature.Results().Len() != resultCount {
+		return fmt.Errorf("%s call %q requires the exact %s shape", name, call.String(), signatureText)
 	}
-	basicKind := func(typ types.Type, kind types.BasicKind) bool {
-		basic, ok := types.Unalias(typ).Underlying().(*types.Basic)
-		return ok && basic.Kind() == kind
-	}
-	uint32Pointer := func(typ types.Type) bool {
-		pointer, ok := types.Unalias(typ).Underlying().(*types.Pointer)
-		return ok && basicKind(pointer.Elem(), types.Uint32)
-	}
-	checks := []bool{
-		basicKind(common.Args[0].Type(), types.UnsafePointer),
-		basicKind(signature.Params().At(0).Type(), types.UnsafePointer),
-		uint32Pointer(common.Args[1].Type()),
-		uint32Pointer(signature.Params().At(1).Type()),
-		uint32Pointer(common.Args[2].Type()),
-		uint32Pointer(signature.Params().At(2).Type()),
-		basicKind(common.Args[3].Type(), types.Uint32),
-		basicKind(signature.Params().At(3).Type(), types.Uint32),
-		basicKind(common.Args[4].Type(), types.Int64),
-		basicKind(signature.Params().At(4).Type(), types.Int64),
-		basicKind(signature.Results().At(0).Type(), types.Uint32),
-		basicKind(call.Type(), types.Uint32),
-	}
-	for _, valid := range checks {
-		if !valid {
-			return fmt.Errorf("llgo.coroControlledTimerWait call %q requires the exact %s shape", call.String(), shape)
+	for index, expected := range parameters {
+		if !expected.matches(common.Args[index].Type()) ||
+			!expected.matches(signature.Params().At(index).Type()) {
+			return fmt.Errorf("%s call %q requires the exact %s shape", name, call.String(), signatureText)
 		}
 	}
-	return nil
-}
-
-func validateCoroPollWaitIntrinsicCallSite(call *ssa.Call) error {
-	const shape = "func(uintptr, int32, uint32, int64) uint32"
-	if call == nil || call.Common() == nil || call.Common().IsInvoke() || len(call.Common().Args) != 4 {
-		return fmt.Errorf("llgo.coroPollWait requires an exact direct four-argument call")
-	}
-	common := call.Common()
-	signature := common.Signature()
-	if signature == nil || signature.Recv() != nil || signature.Variadic() ||
-		signature.Params() == nil || signature.Params().Len() != 4 ||
-		signature.Results() == nil || signature.Results().Len() != 1 {
-		return fmt.Errorf("llgo.coroPollWait call %q requires the exact %s shape", call.String(), shape)
-	}
-	basicKind := func(typ types.Type, kind types.BasicKind) bool {
-		basic, ok := types.Unalias(typ).Underlying().(*types.Basic)
-		return ok && basic.Kind() == kind
-	}
-	want := []types.BasicKind{types.Uintptr, types.Int32, types.Uint32, types.Int64}
-	for index, kind := range want {
-		if !basicKind(common.Args[index].Type(), kind) || !basicKind(signature.Params().At(index).Type(), kind) {
-			return fmt.Errorf("llgo.coroPollWait call %q requires the exact %s shape", call.String(), shape)
-		}
-	}
-	if !basicKind(signature.Results().At(0).Type(), types.Uint32) ||
-		!basicKind(call.Type(), types.Uint32) {
-		return fmt.Errorf("llgo.coroPollWait call %q requires an exact uint32 result", call.String())
+	if result != nil && (!result.matches(signature.Results().At(0).Type()) ||
+		!result.matches(call.Type())) {
+		return fmt.Errorf("%s call %q requires the exact %s shape", name, call.String(), signatureText)
 	}
 	return nil
 }
@@ -3918,6 +3990,20 @@ func structuralEmissionABITypeKey(typ types.Type) string {
 // metadata cannot participate in this one pairing key. Field order and type,
 // along with all other conservative type structure, remain exact.
 func structuralGoLinknameABITypeKey(typ types.Type) string {
+	return structuralNamedIdentityFreeABITypeKey(typ)
+}
+
+// structuralCFunctionABITypeKey models the physical callable ABI of a C
+// declaration. Package-level Go named identity, field names, tags, and
+// parameter names do not survive into that ABI. In particular, a named
+// //llgo:type C callback and an equivalent anonymous callback type are one
+// function-pointer parameter, not conflicting declarations of the outer C
+// symbol.
+func structuralCFunctionABITypeKey(typ types.Type) string {
+	return structuralNamedIdentityFreeABITypeKey(typ)
+}
+
+func structuralNamedIdentityFreeABITypeKey(typ types.Type) string {
 	builder := emissionTypeKeyBuilder{
 		active:                  make(map[types.Type]int),
 		omitTupleNames:          true,
@@ -5045,7 +5131,11 @@ func (u *EmissionUniverse) classifiedManagedSymbol(prepared *preparedEmissionPac
 	}
 	// Parameter and result names are source/debug metadata, not callable ABI.
 	// Patch replacements may legitimately omit or rename them.
-	sig = structuralEmissionABITypeKey(patchedSignature)
+	if ftype == cFunc {
+		sig = structuralCFunctionABITypeKey(patchedSignature)
+	} else {
+		sig = structuralEmissionABITypeKey(patchedSignature)
+	}
 	if typeArgs := fn.TypeArgs(); len(typeArgs) != 0 {
 		// A generic argument is not necessarily observable in the callable
 		// signature (for example, func F[T any]() any).  funcName's legacy

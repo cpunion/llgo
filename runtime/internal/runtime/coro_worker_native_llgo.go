@@ -28,8 +28,9 @@ const (
 	coroNativeWorkerThreadCountV1 = 4
 	// The physical pthread count stays small; this static ring holds logical
 	// pending work while those threads block in file and syscall operations.
-	// Production configures the Worker source to the same 16-page capacity.
-	coroNativeWorkerPageCountV1 = coroNativeSourcePageCountV1
+	// Keep this program/fleet-neutral: the non-timer native profile deliberately
+	// does not link the fleet capacity policy.
+	coroNativeWorkerPageCountV1 = 16
 	coroNativeWorkerQueueSizeV1 = coroworker.QueueCapacity
 	coroNativeWorkerCapacityV1  = coroNativeWorkerPageCountV1 * coro.WorkerOperationPageCapacity
 )

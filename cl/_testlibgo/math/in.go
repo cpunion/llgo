@@ -5,11 +5,12 @@ import (
 	"math"
 )
 
-// CHECK-LABEL: define void @"{{.*}}/cl/_testlibgo/math.main"(){{.*}} {
+// CHECK-LABEL: define ptr @"{{.*}}/cl/_testlibgo/math.main$coro"(
 func main() {
-	// CHECK: %0 = call double @math.Sqrt(double 2.000000e+00)
-	// CHECK: %1 = call double @math.Abs(double -1.200000e+00)
-	// CHECK: %2 = call double @math.Ldexp(double 1.200000e+00, i64 3)
+	// CHECK: [[SQRT:%[0-9]+]] = call ptr @"math.Sqrt$coro"({{.*}}double 2.000000e+00)
+	// CHECK: call void @__llgo_coro_await_prepare_v3({{.*}}ptr [[SQRT]]
+	// CHECK: call ptr @"math.Abs$coro"({{.*}}double -1.200000e+00)
+	// CHECK: call ptr @"math.Ldexp$coro"({{.*}}double 1.200000e+00, i64 3)
 	println(math.Sqrt(2))
 	println(math.Abs(-1.2))
 	println(math.Ldexp(1.2, 3))

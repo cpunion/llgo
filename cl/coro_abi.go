@@ -1014,16 +1014,15 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 	physical.activate(b)
 	b.Jump(sourceBlocks[0])
 
+	cgoFrontend := isCgoExternSymbol(fn)
 	off := make([]int, len(fn.Blocks))
-	for i, block := range fn.Blocks {
-		off[i] = p.compilePhis(b, block)
+	if !cgoFrontend {
+		for i, block := range fn.Blocks {
+			off[i] = p.compilePhis(b, block)
+		}
 	}
 	p.blkInfos = blocks.Infos(fn.Blocks)
-	plan, ok := p.compilation.CoroPlan.FunctionPlan(fn)
-	if !ok {
-		panic("coroutine physical body has no compilation plan")
-	}
-	physical.needsPreempt = plan.Exec.Contains(coro.NeedsPreempt)
+	physical.needsPreempt = physicalPlan.needsPreempt
 
 	i := 0
 	for {
@@ -1051,6 +1050,17 @@ func (p *context) compileCoroPhysicalBody(b llssa.Builder, fn *ssa.Function, abi
 		}
 		doModInit := i == 1 && isInit
 		p.compileBlock(b, block, off[i], doModInit)
+		if cgoFrontend {
+			// Generated cgo adapters have a dedicated first-block frontend
+			// recipe. Their remaining Go SSA models errno/interface control
+			// flow that compileBlock reconstructs explicitly from p.cgoRet and
+			// p.cgoErrno, exactly as in the plain compiler.
+			for index := 1; index < len(sourceBlocks); index++ {
+				b.SetBlock(sourceBlocks[index])
+				b.Unreachable()
+			}
+			break
+		}
 		if i = p.blkInfos[i].Next; i < 0 {
 			break
 		}
@@ -1218,14 +1228,16 @@ func validateCoroPhysicalABIForOwner(
 			return fail("static cleanup recover block: %v", err)
 		}
 	}
+	cgoErrnoWorker := isCgoC2func(fn.Name())
 	directive, directiveErr := coroRawABIDirective(fn, universe)
 	if directiveErr != nil {
 		return fail("classify ABI directive: %v", directiveErr)
 	}
-	if directive != "" && !(plan.RawPlainEntry && rawVariant) {
+	if directive != "" && !(plan.RawPlainEntry && rawVariant) &&
+		!(cgoErrnoWorker && directive == "//go:cgo_unsafe_args") {
 		return fail("ABI directive %q requires a root or foreign adapter", directive)
 	}
-	if isCgoExternSymbol(fn) {
+	if isCgoExternSymbol(fn) && !cgoErrnoWorker {
 		return fail("cgo entry requires a foreign adapter")
 	}
 	programEntry := programRun && isCoroProgramManagedEntry(fn)
@@ -1397,6 +1409,11 @@ func validateCoroPhysicalABIForOwner(
 	if err != nil {
 		return fail("cannot audit pure SSA lowering: %v", err)
 	}
+	if cgoErrnoWorker {
+		if err := validateCoroCgoErrnoWorkerOwner(whole, pureSSA.ctx, fn); err != nil {
+			return fail("generated C2 worker adapter: %v", err)
+		}
+	}
 	// Nullable FieldAddr values are accepted only under the target-wide
 	// explicit-status identity. Codegen then replaces the host signal/legacy
 	// AssertNilDeref behavior with a compiler-owned terminal coroutine edge.
@@ -1478,6 +1495,14 @@ func validateCoroPhysicalABIForOwner(
 			instructionPlan, frozen := physical.instructions[instr]
 			if !frozen {
 				return coroLeafInstructionError(fn, plan, instr, "instruction is absent from the frozen physical plan")
+			}
+			if !instructionPlan.semantic.evaluated {
+				// A dedicated frontend recipe (notably generated cgo) owns and
+				// reconstructs this source region. ProgramIR already excluded it
+				// from local effects and helper inventory; physical validation
+				// must consume the same frozen evaluated bit instead of auditing
+				// code that will never be emitted.
+				continue
 			}
 			if instructionPlan.outcomeFailure != "" {
 				return coroLeafInstructionError(fn, plan, instr, instructionPlan.outcomeFailure)
@@ -1618,7 +1643,15 @@ func validateCoroPhysicalABIForOwner(
 							foreignWaits++
 							continue
 						}
-						if intrinsic && semantics == CoroIntrinsicCallInlineSuspend {
+						if intrinsic && semantics == CoroIntrinsicCallInlineForeignSuspend {
+							if frozen.opcode != llgoCgoCgocall ||
+								instructionPlan.operation != coroPhysicalOperationWorkerCgoErrno ||
+								instructionPlan.operationCgoErrno == nil {
+								return coroLeafInstructionError(fn, plan, instr,
+									"generated C2 foreign suspend has no frozen typed errno operation")
+							}
+							foreignWaits++
+						} else if intrinsic && semantics == CoroIntrinsicCallInlineSuspend {
 							if isLLGoSyscallIntrinsic(frozen.opcode) {
 								if instructionPlan.operation != coroPhysicalOperationWorkerSyscall {
 									return coroLeafInstructionError(fn, plan, instr, "worker llgo.syscall has no frozen operation recipe")
@@ -1643,10 +1676,10 @@ func validateCoroPhysicalABIForOwner(
 								return coroLeafInstructionError(fn, plan, instr,
 									"dynamic llgo.alloca is valid only in a no-suspend plain island; a physical coroutine requires an exact resume-local lifetime proof")
 							}
-							if frozen.opcode == llgoAllocaCStr &&
+							if (frozen.opcode == llgoAllocaCStr || frozen.opcode == llgoAllocaCStrs) &&
 								instructionPlan.recipe != coroPhysicalInstructionHeapCStr {
 								return coroLeafInstructionError(fn, plan, instr,
-									"llgo.allocaCStr in a physical coroutine requires the frozen heap-backed C string recipe")
+									"llgo C string allocation in a physical coroutine requires the frozen heap-backed recipe")
 							}
 							if frozen.opcode == llgoStackSave {
 								return coroLeafInstructionError(fn, plan, instr,
@@ -3460,8 +3493,11 @@ func validateCoroPhysicalConsumersCapabilities(
 							continue
 						}
 						if change, exactRetag := instr.(*ssa.ChangeType); exactRetag && change.X == target {
+							audit := &coroPhysicalPureSSAAudit{
+								plan: plan, universe: universe, fn: fn,
+							}
 							resolved, err := resolveCoroCompilerElidedStaticAwaitRetag(
-								plan, function.Plan, universe, fn, change,
+								audit, function.Plan, change,
 							)
 							if err == nil && resolved == target {
 								// The physical direct-await recipe consumes the

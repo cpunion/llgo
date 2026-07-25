@@ -121,7 +121,7 @@ var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
 	rawNoInitPlan:             2,
 	rawIntrinsicPlan:          2,
 	rawIntrinsicOpcode:        7,
-	rawIntrinsicShape:         16,
+	rawIntrinsicShape:         15,
 	rawWorkerCertificateStore: 5,
 	rawWorkerGraphStore:       10,
 	rawPatchRedirectStore:     6,
@@ -136,14 +136,14 @@ var currentCoroArchitectureDebtBudget = coroArchitectureDebtBudget{
 	physicalPlanFreeze:        1,
 	physicalPlanCommit:        1,
 	physicalPlanLookup:        1,
-	physicalRecipeSelection:   10,
-	physicalRecipeObservation: 12,
-	physicalGuardObservation:  10,
+	physicalRecipeSelection:   3,
+	physicalRecipeObservation: 4,
+	physicalGuardObservation:  3,
 	physicalCodegenRebuild:    0,
 	physicalProofBuilderCall:  8,
 	legacyPhysicalSelector:    0,
 	legacySplitEmissionState:  0,
-	emissionSessionAccess:     22,
+	emissionSessionAccess:     20,
 	bodyCapabilityAccess:      39,
 	emissionSessionBegin:      1,
 	emissionBodyBind:          1,
@@ -344,10 +344,8 @@ var allowedPhysicalRecipeObservationFiles = map[string]bool{
 }
 
 var allowedPhysicalGuardObservationFiles = map[string]bool{
-	"cl/compile.go":             true,
 	"cl/coro_implicit_fault.go": true,
 	"cl/coro_slice_to_array.go": true,
-	"cl/instr.go":               true,
 }
 
 var allowedPhysicalCodegenRebuildFiles = map[string]bool{}
@@ -972,6 +970,9 @@ func inspectCoroArchitectureDebt(t *testing.T, repoRoot string) coroArchitecture
 					case "coroIntrinsicOpcode":
 						inventory.rawIntrinsicOpcode++
 						inventory.rawIntrinsicOpcodeFiles[rel] = true
+					case "verifyCoroExactIntrinsicCallShape":
+						inventory.rawIntrinsicShape++
+						inventory.rawIntrinsicShapeFiles[rel] = true
 					case "workerSyscalls":
 						inventory.rawWorkerCertificateStore++
 						inventory.rawWorkerCertificateStoreFiles[rel] = true

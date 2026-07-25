@@ -19,7 +19,9 @@ package cl
 import (
 	"fmt"
 	"go/ast"
+	"go/token"
 	"go/types"
+	"strconv"
 	"strings"
 
 	"github.com/goplus/llgo/internal/coro"
@@ -48,6 +50,24 @@ type coroWorkerCgoCallShape struct {
 	result      types.Type
 	resultField int
 	certificate CoroCgoWorkerCallCertificate
+}
+
+// coroWorkerCgoErrnoCallShape is the managed half of Go's generated
+// _C2func_* protocol. The source wrapper stays a coroutine so construction of
+// its (result, error) pair happens on the logical G. Only the exact C function
+// pointer, typed arguments, primary result, and same-thread errno snapshot
+// cross the bounded-worker transaction.
+type coroWorkerCgoErrnoCallShape struct {
+	function     ssa.Value
+	signature    *types.Signature
+	record       *types.Struct
+	calleeField  int
+	argumentBase int
+	argc         int
+	result       types.Type
+	resultField  int
+	errnoField   int
+	certificate  CoroCgoWorkerCallCertificate
 }
 
 func isGeneratedCgoWorkerAdapterName(name string) bool {
@@ -158,6 +178,218 @@ func (ctx *context) verifyCoroCMallocWrapperShape(fn *ssa.Function) error {
 		return fmt.Errorf("_Cfunc__CMalloc is outside the exact dedicated cgo lowering")
 	}
 	return nil
+}
+
+// coroCgoErrnoWorkerCallShape freezes the exact generated _C2func_* boundary.
+// It is intentionally stricter than name recognition: the compiler directive,
+// intrinsic ABI, first-block lowering occurrence, C function cell, source ABI,
+// and target configuration all participate in the certificate. No function
+// pointer is reverse-classified at runtime.
+func (ctx *context) coroCgoErrnoWorkerCallShape(
+	call *ssa.Call,
+) (shape coroWorkerCgoErrnoCallShape, recognized bool, err error) {
+	shape.resultField = -1
+	shape.errnoField = -1
+	if ctx == nil || ctx.emissionUniverse == nil || call == nil || call.Common() == nil ||
+		ctx.goFn != call.Parent() || !ctx.emissionUniverse.CoroWorkerSupported() {
+		return shape, false, nil
+	}
+	u := ctx.emissionUniverse
+	common := call.Common()
+	callee := common.StaticCallee()
+	if callee == nil || common.IsInvoke() || common.Method != nil {
+		return shape, false, nil
+	}
+	parent := call.Parent()
+	if parent == nil || ctx.goFn != parent || parent.Parent() != nil ||
+		!isCgoC2func(parent.Name()) {
+		return shape, false, nil
+	}
+	recognized = true
+	if len(parent.FreeVars) != 0 || parent.Signature == nil ||
+		parent.Signature.Recv() != nil || parent.Signature.Variadic() ||
+		coroWorkerTypeParamLen(parent.Signature.TypeParams()) != 0 ||
+		coroWorkerTypeParamLen(parent.Signature.RecvTypeParams()) != 0 ||
+		parent.Origin() != nil || len(parent.TypeArgs()) != 0 {
+		return shape, true, fmt.Errorf("generated C2 adapter %q has an unsupported function shape", parent.Name())
+	}
+	marker, markerErr := exactCgoUnsafeArgsDirective(parent)
+	if markerErr != nil {
+		return shape, true, fmt.Errorf("generated C2 adapter %q directive: %w", parent.Name(), markerErr)
+	}
+	if !marker {
+		return shape, true, fmt.Errorf("generated C2 adapter %q lacks //go:cgo_unsafe_args", parent.Name())
+	}
+	directive, directiveErr := coroRawABIDirective(parent, u)
+	if directiveErr != nil {
+		return shape, true, directiveErr
+	}
+	if directive != "//go:cgo_unsafe_args" {
+		return shape, true, fmt.Errorf("generated C2 adapter %q has raw ABI directive %q", parent.Name(), directive)
+	}
+	background, classified, backgroundErr := u.FunctionBackground(parent)
+	if backgroundErr != nil {
+		return shape, true, backgroundErr
+	}
+	if !classified || background != llssa.InGo {
+		return shape, true, fmt.Errorf("generated C2 adapter %q is not one exact Go body", parent.Name())
+	}
+
+	const intrinsicShape = "func(unsafe.Pointer, uintptr) int32"
+	signature := common.Signature()
+	basicKind := func(typ types.Type, kind types.BasicKind) bool {
+		basic, ok := types.Unalias(typ).Underlying().(*types.Basic)
+		return ok && basic.Kind() == kind
+	}
+	if signature == nil || signature.Recv() != nil || signature.Variadic() ||
+		signature.Params() == nil || signature.Params().Len() != 2 ||
+		signature.Results() == nil || signature.Results().Len() != 1 ||
+		len(common.Args) != 2 ||
+		!basicKind(signature.Params().At(0).Type(), types.UnsafePointer) ||
+		!basicKind(signature.Params().At(1).Type(), types.Uintptr) ||
+		!basicKind(signature.Results().At(0).Type(), types.Int32) ||
+		!types.Identical(common.Args[0].Type(), signature.Params().At(0).Type()) ||
+		!types.Identical(common.Args[1].Type(), signature.Params().At(1).Type()) {
+		return shape, true, fmt.Errorf(
+			"_cgo_runtime_cgocall in %q requires the exact %s shape",
+			parent.Name(), intrinsicShape,
+		)
+	}
+	functionLoad, ok := common.Args[0].(*ssa.UnOp)
+	if !ok || functionLoad.Op != token.MUL {
+		return shape, true, fmt.Errorf("generated C2 adapter %q has no exact C function-cell load", parent.Name())
+	}
+	functionCell, ok := functionLoad.X.(*ssa.Global)
+	if !ok || !strings.HasPrefix(functionCell.Name(), "_cgo_") ||
+		!strings.HasSuffix(functionCell.Name(), parent.Name()) ||
+		!basicKind(functionLoad.Type(), types.UnsafePointer) {
+		return shape, true, fmt.Errorf(
+			"generated C2 adapter %q has an incompatible C function cell %q",
+			parent.Name(), functionLoad.String(),
+		)
+	}
+	lowering, loweringErr := u.cgoLoweringPlan(ctx, parent)
+	if loweringErr != nil {
+		return shape, true, loweringErr
+	}
+	if len(lowering.calls) != 1 || lowering.calls[0].call != call ||
+		!lowering.calls[0].compiled {
+		return shape, true, fmt.Errorf(
+			"generated C2 adapter %q does not have one exact compiled cgo call",
+			parent.Name(),
+		)
+	}
+
+	sourceSignature, sourceErr := u.coroPhysicalSourceSignature(parent)
+	if sourceErr != nil {
+		return shape, true, sourceErr
+	}
+	if sourceSignature == nil || sourceSignature.Results() == nil ||
+		sourceSignature.Results().Len() != 2 ||
+		!types.Identical(
+			types.Unalias(sourceSignature.Results().At(1).Type()),
+			types.Unalias(types.Universe.Lookup("error").Type()),
+		) {
+		return shape, true, fmt.Errorf("generated C2 adapter %q must return exactly (result, error)", parent.Name())
+	}
+	result := sourceSignature.Results().At(0).Type()
+	if !coroWorkerForeignRecordValueType(u, result, true, make(map[types.Type]bool)) {
+		return shape, true, fmt.Errorf(
+			"generated C2 adapter %q result type %s has no typed worker-record representation",
+			parent.Name(), result,
+		)
+	}
+	params := sourceSignature.Params()
+	for index := 0; index < params.Len(); index++ {
+		parameter := params.At(index).Type()
+		if !coroWorkerForeignRecordValueType(u, parameter, true, make(map[types.Type]bool)) {
+			return shape, true, fmt.Errorf(
+				"generated C2 adapter %q argument %d type %s has no typed worker-record representation",
+				parent.Name(), index, parameter,
+			)
+		}
+	}
+	directSignature := types.NewSignatureType(
+		nil, nil, nil, params,
+		types.NewTuple(types.NewVar(token.NoPos, nil, "", result)),
+		false,
+	)
+	fields := make([]*types.Var, 0, params.Len()+3)
+	calleeField := len(fields)
+	fields = append(fields, types.NewField(token.NoPos, nil, "callee", directSignature, false))
+	argumentBase := len(fields)
+	for index := 0; index < params.Len(); index++ {
+		fields = append(fields, types.NewField(
+			token.NoPos, nil, fmt.Sprintf("a%d", index), params.At(index).Type(), false,
+		))
+	}
+	resultField := len(fields)
+	fields = append(fields, types.NewField(token.NoPos, nil, "result", result, false))
+	errnoField := len(fields)
+	fields = append(fields, types.NewField(token.NoPos, nil, "errno", types.Typ[types.Int32], false))
+
+	ownerIdentity := u.linkIdentities[parent]
+	if ownerIdentity == "" {
+		return shape, true, fmt.Errorf("generated C2 adapter %q has no frozen linkage identity", parent.Name())
+	}
+	semantic, semanticErr := coro.SemanticInstructionOrdinal(call)
+	if semanticErr != nil {
+		return shape, true, semanticErr
+	}
+	block := call.Block()
+	if block == nil {
+		return shape, true, fmt.Errorf("generated C2 adapter %q has a detached cgo call", parent.Name())
+	}
+	targetIdentity := framedEmissionKey(
+		"cl-coro-cgo-errno-target-v1",
+		ownerIdentity,
+		functionCell.String(),
+		strconv.Itoa(block.Index),
+		strconv.Itoa(semantic),
+	)
+	abi := structuralCFunctionABITypeKey(directSignature)
+	targetSpec := u.prog.TargetSpec()
+	certificate := CoroCgoWorkerCallCertificate{
+		ID: emissionDigest(framedEmissionKey(
+			"llgo-coro-cgo-errno-worker-call-v1",
+			targetIdentity,
+			abi,
+			targetSpec.Triple,
+			targetSpec.CPU,
+			targetSpec.Features,
+			targetSpec.TargetABI,
+			u.prog.DataLayout(),
+		)),
+		TargetIdentity: targetIdentity,
+		ABISignature:   abi,
+	}
+	shape = coroWorkerCgoErrnoCallShape{
+		function:     functionLoad,
+		signature:    directSignature,
+		record:       types.NewStruct(fields, nil),
+		calleeField:  calleeField,
+		argumentBase: argumentBase,
+		argc:         params.Len(),
+		result:       result,
+		resultField:  resultField,
+		errnoField:   errnoField,
+		certificate:  certificate,
+	}
+	return shape, true, nil
+}
+
+func (ctx *context) freezeCoroCgoErrnoWorkerCallCertificate(
+	call ssa.CallInstruction,
+) (CoroCgoWorkerCallCertificate, bool, error) {
+	direct, ok := call.(*ssa.Call)
+	if !ok {
+		return CoroCgoWorkerCallCertificate{}, false, nil
+	}
+	shape, recognized, err := ctx.coroCgoErrnoWorkerCallShape(direct)
+	if err != nil || !recognized {
+		return CoroCgoWorkerCallCertificate{}, recognized, err
+	}
+	return shape.certificate, true, nil
 }
 
 // verifyCoroRawCgocallShape proves the narrow synchronous half of the
@@ -447,6 +679,93 @@ func validateCoroWorkerCgoCall(
 	return shape, true, nil
 }
 
+func validateCoroWorkerCgoErrnoCall(
+	plan *coro.SSAPlan,
+	ctx *context,
+	call *ssa.Call,
+) (shape coroWorkerCgoErrnoCallShape, recognized bool, err error) {
+	shape.resultField = -1
+	shape.errnoField = -1
+	if plan == nil || ctx == nil || ctx.emissionUniverse == nil ||
+		call == nil || call.Common() == nil ||
+		ctx.emissionUniverse.coroProgramIR == nil {
+		return shape, false, nil
+	}
+	universe := ctx.emissionUniverse
+	frozen, found, frozenErr := universe.coroProgramIR.callSitePlan(call)
+	if frozenErr != nil {
+		return shape, false, frozenErr
+	}
+	if !found || !frozen.plan.Intrinsic || frozen.opcode != llgoCgoCgocall ||
+		frozen.plan.IntrinsicSemantics != CoroIntrinsicCallInlineForeignSuspend {
+		return shape, false, nil
+	}
+	recognized = true
+	if frozen.failure != "" {
+		return shape, true, fmt.Errorf("%s", frozen.failure)
+	}
+	if frozen.plan.Elision != CoroCallElidedIntrinsic || !plan.ElidesCall(call) ||
+		frozen.cgoWorker.ID == "" || frozen.cgoWorker.TargetIdentity == "" ||
+		frozen.cgoWorker.ABISignature == "" {
+		return shape, true, fmt.Errorf("frozen C2 cgo call has no exact intrinsic worker certificate")
+	}
+	parent := call.Parent()
+	parentPlan, planned := plan.FunctionPlan(parent)
+	if !planned || parentPlan.External != coro.Defined ||
+		parentPlan.Emission != coro.EmitCoroutine ||
+		parentPlan.Primary != coro.PrimaryCoroutine ||
+		!parentPlan.Effect.Contains(coro.WaitForeign) ||
+		parentPlan.RawPlainOnly {
+		return shape, true, fmt.Errorf(
+			"generated C2 owner %q is not one managed wait-foreign coroutine: %+v",
+			parent.Name(), parentPlan,
+		)
+	}
+	derived, exact, shapeErr := ctx.coroCgoErrnoWorkerCallShape(call)
+	if shapeErr != nil {
+		return shape, true, shapeErr
+	}
+	if !exact {
+		return shape, true, fmt.Errorf("frozen C2 cgo call no longer has its generated worker shape")
+	}
+	if derived.certificate != frozen.cgoWorker ||
+		structuralCFunctionABITypeKey(derived.signature) != frozen.cgoWorker.ABISignature {
+		return shape, true, fmt.Errorf("generated C2 cgo call differs from its frozen worker certificate")
+	}
+	return derived, true, nil
+}
+
+func validateCoroCgoErrnoWorkerOwner(
+	plan *coro.SSAPlan,
+	ctx *context,
+	fn *ssa.Function,
+) error {
+	if plan == nil || ctx == nil || ctx.emissionUniverse == nil ||
+		fn == nil || ctx.goFn != fn || !isCgoC2func(fn.Name()) {
+		return fmt.Errorf("C2 worker owner validation requires one exact generated C2 function")
+	}
+	count := 0
+	for _, block := range fn.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(*ssa.Call)
+			if !ok {
+				continue
+			}
+			_, recognized, err := validateCoroWorkerCgoErrnoCall(plan, ctx, call)
+			if err != nil {
+				return err
+			}
+			if recognized {
+				count++
+			}
+		}
+	}
+	if count != 1 {
+		return fmt.Errorf("generated C2 function %q has %d typed errno worker operations, want 1", fn.Name(), count)
+	}
+	return nil
+}
+
 func (p *context) coroWorkerCgoThunk(shape coroWorkerCgoCallShape, target llssa.Function) llssa.Function {
 	if p == nil || shape.target == nil || shape.signature == nil || shape.record == nil || target == nil {
 		panic("coroutine cgo worker thunk requires an exact target, signature, and call record")
@@ -481,6 +800,84 @@ func (p *context) coroWorkerCgoThunk(shape coroWorkerCgoCallShape, target llssa.
 	b.EndBuild()
 	b.Dispose()
 	return thunk
+}
+
+func (p *context) coroWorkerCgoErrnoThunk(shape coroWorkerCgoErrnoCallShape) llssa.Function {
+	if p == nil || shape.function == nil || shape.signature == nil || shape.record == nil ||
+		shape.result == nil || shape.calleeField < 0 || shape.argumentBase < 0 ||
+		shape.resultField < 0 || shape.errnoField < 0 {
+		panic("coroutine C2 worker thunk requires one exact typed errno record")
+	}
+	name := coroWorkerCgoThunkPrefixV1 + emissionDigest(framedEmissionKey(
+		"cl-coro-worker-cgo-errno-thunk-v1",
+		shape.certificate.ID,
+		structuralCFunctionABITypeKey(shape.signature),
+	))
+	thunk := p.pkg.NewFuncEx(name, coroWorkerForeignThunkSignature(), llssa.InC, false, true)
+	if thunk.HasBody() {
+		return thunk
+	}
+	b := thunk.MakeBody(1)
+	recordPointer := b.Convert(
+		p.type_(types.NewPointer(shape.record), llssa.InC),
+		thunk.Param(0),
+	)
+	target := b.LoadKnownNonNil(b.FieldAddr(recordPointer, shape.calleeField))
+	args := make([]llssa.Expr, shape.argc)
+	for index := range args {
+		args[index] = b.LoadKnownNonNil(b.FieldAddr(recordPointer, shape.argumentBase+index))
+	}
+	result := b.Call(target, args...)
+	b.Store(b.FieldAddr(recordPointer, shape.resultField), result)
+	errnoSignature := types.NewSignatureType(
+		nil, nil, nil, nil,
+		types.NewTuple(types.NewVar(token.NoPos, nil, "", types.Typ[types.Int32])),
+		false,
+	)
+	errnoFunction := b.Pkg.NewFunc("cliteErrno", errnoSignature, llssa.InC)
+	errno := b.Call(errnoFunction.Expr)
+	b.Store(b.FieldAddr(recordPointer, shape.errnoField), errno)
+	b.Return(p.prog.Zero(p.prog.Uintptr()))
+	b.EndBuild()
+	b.Dispose()
+	return thunk
+}
+
+func (p *context) compileCoroWorkerCgoErrnoCall(
+	b llssa.Builder,
+	call *ssa.Call,
+	shape coroWorkerCgoErrnoCallShape,
+) llssa.Expr {
+	if p == nil || !p.hasCoroPhysicalBody() || call == nil ||
+		p.goFn == nil || p.goFn != call.Parent() ||
+		shape.function == nil || shape.signature == nil || shape.record == nil ||
+		shape.argc != len(p.goFn.Params) || shape.resultField < 0 ||
+		shape.errnoField < 0 {
+		panic("coroutine C2 worker lowering escaped its frozen typed errno recipe")
+	}
+	functionCell := p.compileValue(b, shape.function)
+	functionCell.Type = p.prog.Pointer(p.type_(shape.signature, llssa.InC))
+	callee := b.Load(functionCell)
+	arguments := make([]llssa.Expr, shape.argc)
+	for index, parameter := range p.goFn.Params {
+		arguments[index] = p.compileValue(b, parameter)
+	}
+	record := p.coroFrameAlloc(p.type_(shape.record, llssa.InC))
+	b.Store(b.FieldAddr(record, shape.calleeField), callee)
+	for index, argument := range arguments {
+		b.Store(b.FieldAddr(record, shape.argumentBase+index), argument)
+	}
+	thunk := p.coroWorkerCgoErrnoThunk(shape)
+	p.compileCoroWorkerWordCall(
+		b,
+		b.Convert(p.prog.Uintptr(), thunk.Expr),
+		[]llssa.Expr{b.Convert(p.prog.Uintptr(), record)},
+		nil,
+	)
+	b.KeepAlive(record)
+	p.cgoRet = b.LoadKnownNonNil(b.FieldAddr(record, shape.resultField))
+	p.cgoErrno = b.LoadKnownNonNil(b.FieldAddr(record, shape.errnoField))
+	return p.cgoErrno
 }
 
 func (p *context) compileCoroWorkerCgoCall(

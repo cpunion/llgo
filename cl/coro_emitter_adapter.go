@@ -57,20 +57,19 @@ func (p *context) compileCoroInstructionPrologue(b llssa.Builder, instr ssa.Inst
 	if !outerCriticalEnter {
 		body.sourceBlockPollFresh = false
 	}
-	if change, ok := instr.(*ssa.ChangeType); ok && p.compilation != nil &&
-		p.compilation.CoroPlan != nil && p.compilation.EmissionUniverse != nil {
-		if caller, found := p.compilation.CoroPlan.FunctionPlan(p.goFn); found {
-			if target, err := resolveCoroCompilerElidedStaticAwaitRetag(
-				p.compilation.CoroPlan,
-				caller,
-				p.compilation.EmissionUniverse,
-				p.goFn,
-				change,
-			); err == nil && target != nil {
-				// Direct-await lowering owns every executable consumer. Do not
-				// materialize an invalid temporary {coroutine-entry, nil} funcval.
-				return true
-			}
+	if change, ok := instr.(*ssa.ChangeType); ok {
+		plan := p.coroEmissionPlan()
+		if plan == nil {
+			panic("coroutine ChangeType prologue has no frozen physical plan")
+		}
+		physical, err := plan.instructionPlan(change)
+		if err != nil {
+			panic(fmt.Errorf("coroutine ChangeType prologue: %w", err))
+		}
+		if physical.elideValue {
+			// Direct-await lowering owns every executable consumer. Do not
+			// materialize an invalid temporary {coroutine-entry, nil} funcval.
+			return true
 		}
 	}
 	return false
@@ -130,6 +129,7 @@ func (p *context) tryCompileCoroPhysicalCall(b llssa.Builder, call *ssa.Call) (l
 		return p.compileCoroRawPlainTargetCall(b, call, instructionPlan.controlTarget), true
 	case coroPhysicalControlNone:
 		if instructionPlan.operation != coroPhysicalOperationWorkerCgo &&
+			instructionPlan.operation != coroPhysicalOperationWorkerCgoErrno &&
 			instructionPlan.operation != coroPhysicalOperationWorkerForeign {
 			return llssa.Expr{}, false
 		}
@@ -140,6 +140,18 @@ func (p *context) tryCompileCoroPhysicalCall(b llssa.Builder, call *ssa.Call) (l
 				panic("physical coroutine cgo worker call has no frozen typed shape")
 			}
 			return p.compileCoroWorkerCgoCall(b, call, *instructionPlan.operationCgo), true
+		case coroPhysicalOperationWorkerCgoErrno:
+			if instructionPlan.operationCgoErrno == nil {
+				panic("physical coroutine C2 worker call has no frozen typed errno shape")
+			}
+			result := p.compileCoroWorkerCgoErrnoCall(b, call, *instructionPlan.operationCgoErrno)
+			p.completeCoroIntrinsicCallEmission(
+				llgoCgoCgocall,
+				CoroIntrinsicCallInlineForeignSuspend,
+			)
+			p.cgoReturn(b, true)
+			p.cgoReturned = true
+			return result, true
 		case coroPhysicalOperationWorkerForeign:
 			if instructionPlan.operationWorker == nil {
 				panic("physical coroutine worker call has no frozen foreign shape")
@@ -182,13 +194,13 @@ func coroDeferStackBuiltinCall(call *ssa.Call) bool {
 }
 
 func (p *context) compileCoroDeferStack(b llssa.Builder, instruction *ssa.Call) llssa.Expr {
-	body := p.coroBody()
-	if body == nil || body.cleanup == nil || body.cleanup.external ||
-		!body.cleanup.dynamic || body.cleanup.dynamicHead.IsNil() ||
+	cleanup := p.coroCleanup()
+	if cleanup == nil || cleanup.external ||
+		!cleanup.dynamic || cleanup.dynamicHead.IsNil() ||
 		!coroDeferStackBuiltinCall(instruction) {
 		panic("coroutine explicit defer stack has no owner-local dynamic cleanup head")
 	}
-	return b.Convert(p.type_(instruction.Type(), llssa.InGo), body.cleanup.dynamicHead)
+	return b.Convert(p.type_(instruction.Type(), llssa.InGo), cleanup.dynamicHead)
 }
 
 // compileCoroTerminalOutcome centralizes the physical frame termination

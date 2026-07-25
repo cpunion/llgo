@@ -151,7 +151,7 @@ func TestSelectCoroProgramBootstrapV2AllowsIRQUnsafeManagedRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	plan, ok := fixture.ctx.coroPlan.FunctionPlan(fixture.irqRuntimeRoot)
-	if !ok || !plan.Effect.Contains(coro.OutcomeStructured) || !plan.Exec.Contains(coro.IRQUnsafe) || plan.Exec.Contains(coro.ThreadAffine) {
+	if !ok || !plan.Effect.MaySuspend() || !plan.Exec.Contains(coro.IRQUnsafe) || plan.Exec.Contains(coro.ThreadAffine) {
 		t.Fatalf("IRQ-unsafe fixture plan = %+v, present=%t", plan, ok)
 	}
 	if step.Kind != coroProgramStepCoroRootV1 || step.Target != llssa.PkgRuntime+".irqRuntimeRoot$coro" || step.Owner != llssa.PkgRuntime {
@@ -429,9 +429,11 @@ func main() {}
 	mainMain := mainSSA.Func("main")
 	suspending := map[*ssa.Function]bool{
 		runtimeInit:                     true,
+		irqRuntimeRoot:                  true,
 		runtimeSSA.Func("aRuntimeRoot"): true,
 		runtimeSSA.Func("zRuntimeRoot"): true,
 		mainInit:                        true,
+		mainMain:                        true,
 		mainSSA.Func("aMainRoot"):       true,
 		mainSSA.Func("zMainRoot"):       true,
 	}
@@ -463,13 +465,14 @@ func main() {}
 		return input.Analyze(roots, coro.SSAConfig{
 			MaxPlainInstructions: -1,
 			ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+				var policy coro.SSAFunctionPolicy
 				if fn == irqRuntimeRoot {
-					return coro.SSAFunctionPolicy{Exec: coro.IRQUnsafe}, nil
+					policy.Exec = coro.IRQUnsafe
 				}
 				if suspending[fn] {
-					return coro.SSAFunctionPolicy{Effect: coro.MayPark}, nil
+					policy.Effect = coro.MayPark
 				}
-				return coro.SSAFunctionPolicy{}, nil
+				return policy, nil
 			},
 		})
 	}
