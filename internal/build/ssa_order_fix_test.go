@@ -28,11 +28,12 @@ func f() {
 	case *fp(&x, 100) = <-fc(c, 1):
 	}
 }`
-	fn := buildSSAOrderTestPackage(t, src)
-	got := instrOrder(fn, "fc(", "<-", "fp(", "*t")
-	if !inOrder(got, "fc(", "<-", "fp(") {
-		t.Fatalf("single-case select receive assignment order = %v, want fc/receive before fp", got)
-	}
+	testSSAOrderModes(t, src, func(t *testing.T, fn *ssa.Function) {
+		got := instrOrder(fn, "fc(", "<-", "fp(", "*t")
+		if !inOrder(got, "fc(", "<-", "fp(") {
+			t.Fatalf("single-case select receive assignment order = %v, want fc/receive before fp", got)
+		}
+	})
 }
 
 func TestFixSSAOrderPlainRecvAssignKeepsLeftToRight(t *testing.T) {
@@ -66,11 +67,12 @@ func f() {
 	case m[fn(13, 100)] = <-fc(c, 1):
 	}
 }`
-	fn := buildSSAOrderTestPackage(t, src)
-	got := instrOrder(fn, "fc(", "<-", "fn(")
-	if !inOrder(got, "fc(", "<-", "fn(") {
-		t.Fatalf("single-case select map receive assignment order = %v, want fc/receive before fn", got)
-	}
+	testSSAOrderModes(t, src, func(t *testing.T, fn *ssa.Function) {
+		got := instrOrder(fn, "fc(", "<-", "fn(")
+		if !inOrder(got, "fc(", "<-", "fn(") {
+			t.Fatalf("single-case select map receive assignment order = %v, want fc/receive before fn", got)
+		}
+	})
 }
 
 func TestFixSSAOrderSingleCaseSelectTwoValueRecv(t *testing.T) {
@@ -87,11 +89,12 @@ func f() {
 	case *fp(&x, 100), ok = <-fc(c, 1):
 	}
 }`
-	fn := buildSSAOrderTestPackage(t, src)
-	got := instrOrder(fn, "fc(", "<-", "fp(", "*t")
-	if !inOrder(got, "fc(", "<-", "fp(") {
-		t.Fatalf("single-case select two-value receive assignment order = %v, want fc/receive before fp", got)
-	}
+	testSSAOrderModes(t, src, func(t *testing.T, fn *ssa.Function) {
+		got := instrOrder(fn, "fc(", "<-", "fp(", "*t")
+		if !inOrder(got, "fc(", "<-", "fp(") {
+			t.Fatalf("single-case select two-value receive assignment order = %v, want fc/receive before fp", got)
+		}
+	})
 }
 
 func TestFixSSAOrderMultiCaseSelectKeepsLeftToRight(t *testing.T) {
@@ -116,6 +119,26 @@ func f() {
 }
 
 func buildSSAOrderTestPackage(t *testing.T, src string) *ssa.Function {
+	return buildSSAOrderTestPackageMode(t, src, ssa.SanityCheckFunctions|ssa.InstantiateGenerics)
+}
+
+func testSSAOrderModes(t *testing.T, src string, check func(*testing.T, *ssa.Function)) {
+	t.Helper()
+	base := ssa.SanityCheckFunctions | ssa.InstantiateGenerics
+	for _, test := range []struct {
+		name string
+		mode ssa.BuilderMode
+	}{
+		{name: "default", mode: base},
+		{name: "global-debug", mode: base | ssa.GlobalDebug},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			check(t, buildSSAOrderTestPackageMode(t, src, test.mode))
+		})
+	}
+}
+
+func buildSSAOrderTestPackageMode(t *testing.T, src string, mode ssa.BuilderMode) *ssa.Function {
 	t.Helper()
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "p.go", src, 0)
@@ -129,7 +152,7 @@ func buildSSAOrderTestPackage(t *testing.T, src string) *ssa.Function {
 		fset,
 		pkg,
 		files,
-		ssa.SanityCheckFunctions|ssa.InstantiateGenerics,
+		mode,
 	)
 	if err != nil {
 		t.Fatalf("BuildPackage: %v", err)
