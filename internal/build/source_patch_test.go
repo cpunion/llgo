@@ -261,6 +261,60 @@ func TestNamedWebAssemblyChacha8UsesPureGoSourcePatch(t *testing.T) {
 	}
 }
 
+func TestCoroBytealgCountUsesPreemptibleGoSourcePatch(t *testing.T) {
+	overlay, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
+		goos:       "linux",
+		goarch:     "amd64",
+		buildFlags: []string{"-tags=llgo,llgo_coro,nogc"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bytealgDir := filepath.Join(runtime.GOROOT(), "src", "internal", "bytealg")
+	patchFile := filepath.Join(bytealgDir, "z_llgo_patch_count_coro_llgo.go")
+	patch, ok := overlay[patchFile]
+	if !ok {
+		t.Fatalf("missing coroutine bytealg count source patch %s", patchFile)
+	}
+	for _, call := range []string{"countGeneric(b, c)", "countGenericString(s, c)"} {
+		if !strings.Contains(string(patch), call) {
+			t.Fatalf("bytealg source patch lacks standard fallback call %q:\n%s", call, patch)
+		}
+	}
+	original := filepath.Join(bytealgDir, "count_native.go")
+	filtered, ok := overlay[original]
+	if !ok {
+		t.Fatalf("bytealg source patch did not filter %s", original)
+	}
+	parsed, err := parser.ParseFile(token.NewFileSet(), original, filtered, 0)
+	if err != nil {
+		t.Fatalf("parse filtered bytealg source: %v", err)
+	}
+	functions := make(map[string]bool)
+	for _, declaration := range parsed.Decls {
+		if function, ok := declaration.(*ast.FuncDecl); ok {
+			functions[function.Name.Name] = true
+		}
+	}
+	if functions["Count"] || functions["CountString"] {
+		t.Fatal("filtered GOROOT bytealg retained assembly Count declarations")
+	}
+	if !functions["countGeneric"] || !functions["countGenericString"] {
+		t.Fatal("filtered GOROOT bytealg lost its standard generic implementations")
+	}
+	assembly := filepath.Join(bytealgDir, "count_amd64.s")
+	replacement, ok := overlay[assembly]
+	if !ok {
+		t.Fatalf("bytealg source patch did not mask %s", assembly)
+	}
+	if bytes.Contains(replacement, []byte("TEXT")) {
+		t.Fatalf("bytealg assembly replacement retained executable Count definitions:\n%s", replacement)
+	}
+	if !llruntime.HasSourcePatchPkg("internal/bytealg") {
+		t.Fatal("internal/bytealg should be registered as a source patch package")
+	}
+}
+
 func TestNamedWebAssemblyInternalLinuxSyscallFailsClosed(t *testing.T) {
 	overlay, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
 		goos:       "linux",

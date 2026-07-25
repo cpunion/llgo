@@ -86,6 +86,7 @@ func SourcePatchPkgPaths() []string {
 
 var sourcePatchPkgs = map[string]struct{}{
 	"crypto/internal/constanttime":   {},
+	"internal/bytealg":               {},
 	"internal/chacha8rand":           {},
 	"internal/poll":                  {},
 	"internal/runtime/syscall/linux": {},
