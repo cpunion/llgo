@@ -232,9 +232,14 @@ jobs:
 
       - name: Test synchronous stdlib coroutine acceptance
         if: matrix.lane == 'stdlib'
-        env:
-          LLGO_CORO_STDLIB_ACCEPTANCE: all
-        run: go test ./internal/build -run '^TestCoroStdlibSyncAcceptance$' -timeout=15m -count=1
+        run: |
+          # Each fixture performs a fresh whole-stdlib LLVM build. Keep them in
+          # separate Go processes so LLVM/global build state from an earlier
+          # fixture cannot accumulate into the later TCP/DNS gate.
+          for fixture in time timer file syscall-file syscall-pipe tcp; do
+            LLGO_CORO_STDLIB_ACCEPTANCE="$fixture" \
+              go test ./internal/build -run '^TestCoroStdlibSyncAcceptance$' -timeout=15m -count=1
+          done
 
       - name: Verify production time.Sleep coroutine plan
         if: matrix.lane == 'compat'
