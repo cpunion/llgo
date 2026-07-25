@@ -116,6 +116,22 @@ func TestTimeTimerSourceSelection(t *testing.T) {
 	}
 }
 
+func TestNanotimeUsesFrameSafeFixedLocal(t *testing.T) {
+	for _, file := range []string{"nanotime_linux_llgo.go", "nanotime_other_llgo.go"} {
+		source := readTimeSleepSource(t, file)
+		for _, required := range []string{"var value ct.Timespec", "&value"} {
+			if !strings.Contains(source, required) {
+				t.Errorf("%s lacks frame-safe nanotime marker %q", file, required)
+			}
+		}
+		for _, forbidden := range []string{"c.Alloca(", "unsafe.Sizeof("} {
+			if strings.Contains(source, forbidden) {
+				t.Errorf("%s retains coroutine-unsafe fixed local %q", file, forbidden)
+			}
+		}
+	}
+}
+
 func TestTimeSleepAndTimerImplementationsStayProfileLocal(t *testing.T) {
 	for _, file := range []string{legacyTimerSource, legacyGo123TimerSource} {
 		if names := sourceFunctionsNamed(t, file, "timeSleep", "timeSleepWake"); len(names) != 0 {

@@ -18,12 +18,7 @@
 
 package runtime
 
-import (
-	"unsafe"
-
-	c "github.com/goplus/llgo/runtime/internal/clite"
-	ct "github.com/goplus/llgo/runtime/internal/clite/time"
-)
+import ct "github.com/goplus/llgo/runtime/internal/clite/time"
 
 // Linux CLOCK_MONOTONIC (see <linux/time.h>), which has nanosecond
 // resolution. Deliberately a local constant: ct.CLOCK_MONOTONIC carries
@@ -34,7 +29,7 @@ const _CLOCK_MONOTONIC = 1
 
 // nanotime1 mirrors Go's runtime.nanotime1 on Linux.
 func nanotime1() int64 {
-	tv := (*ct.Timespec)(c.Alloca(unsafe.Sizeof(ct.Timespec{})))
-	ct.ClockGettime(ct.ClockidT(_CLOCK_MONOTONIC), tv)
-	return int64(tv.Sec)*1e9 + int64(tv.Nsec)
+	var value ct.Timespec
+	ct.ClockGettime(ct.ClockidT(_CLOCK_MONOTONIC), &value)
+	return int64(value.Sec)*1e9 + int64(value.Nsec)
 }

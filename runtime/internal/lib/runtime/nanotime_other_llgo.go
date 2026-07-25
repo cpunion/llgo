@@ -18,16 +18,11 @@
 
 package runtime
 
-import (
-	"unsafe"
-
-	c "github.com/goplus/llgo/runtime/internal/clite"
-	ct "github.com/goplus/llgo/runtime/internal/clite/time"
-)
+import ct "github.com/goplus/llgo/runtime/internal/clite/time"
 
 // nanotime1 keeps the previous behavior on remaining platforms.
 func nanotime1() int64 {
-	tv := (*ct.Timespec)(c.Alloca(unsafe.Sizeof(ct.Timespec{})))
-	ct.ClockGettime(ct.CLOCK_MONOTONIC, tv)
-	return int64(tv.Sec)*1e9 + int64(tv.Nsec)
+	var value ct.Timespec
+	ct.ClockGettime(ct.CLOCK_MONOTONIC, &value)
+	return int64(value.Sec)*1e9 + int64(value.Nsec)
 }
