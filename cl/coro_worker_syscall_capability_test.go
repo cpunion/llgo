@@ -271,11 +271,14 @@ func TestCoroWorkerSyscallConditionalIncomingPlanNarrowing(t *testing.T) {
 
 func TestCoroLinuxSyscallTrapPolicyNarrowsActiveConstantCallers(t *testing.T) {
 	testProg := newEmissionTestProgram()
-	testProg.addPackage(t, "syscall", `package syscall
+testProg.addPackage(t, "syscall", `package syscall
 type Errno uintptr
 const (
-	SYS_WRITE = 1
-	SYS_EXIT = 60
+	SYS_WRITE      = 1
+	SYS_EXIT       = 60
+	SYS_CAPGET     = 125
+	SYS_GETGROUPS  = 115
+	SYS_EXIT_GROUP = 231
 )
 `)
 	const packagePath = "example.com/emission/linuxtrap"
@@ -300,8 +303,20 @@ func Safe() uintptr {
 	return carrier(stdsyscall.SYS_WRITE, 1, 2, 3)
 }
 
+func CredentialCapabilityQuery() uintptr {
+	return carrier(stdsyscall.SYS_CAPGET, 0, 0, 0)
+}
+
+func CredentialGroupsQuery() uintptr {
+	return carrier(stdsyscall.SYS_GETGROUPS, 0, 0, 0)
+}
+
 func ProcessControl() uintptr {
 	return carrier(stdsyscall.SYS_EXIT, 0, 0, 0)
+}
+
+func ProcessGroupExit() uintptr {
+	return carrier(stdsyscall.SYS_EXIT_GROUP, 0, 0, 0)
 }
 
 func Dynamic(trap uintptr) uintptr {
@@ -333,8 +348,10 @@ func Dynamic(trap uintptr) uintptr {
 			status[edge.call.Parent().Name()] = edge.certified
 		}
 	}
-	if len(status) != 3 || !status["Safe"] || status["ProcessControl"] || status["Dynamic"] {
-		t.Fatalf("Linux constant-trap incoming inventory = %+v; want Safe only certified", incoming)
+	if len(status) != 6 || !status["Safe"] ||
+		!status["CredentialCapabilityQuery"] || !status["CredentialGroupsQuery"] ||
+		status["ProcessControl"] || status["ProcessGroupExit"] || status["Dynamic"] {
+		t.Fatalf("Linux constant-trap incoming inventory = %+v; want I/O and read-only credential queries certified", incoming)
 	}
 
 	analyze := func(root coro.Root) *coro.SSAPlan {
@@ -370,11 +387,13 @@ func Dynamic(trap uintptr) uintptr {
 		return plan
 	}
 
-	safe := analyze(coro.Root{Function: pkg.ssa.Func("Safe"), Demand: coro.AsyncDemand})
-	if err := validateCoroWorkerSyscallCall(safe, universe, call); err != nil {
-		t.Fatalf("safe Linux constant trap rejected: %v", err)
+	for _, name := range []string{"Safe", "CredentialCapabilityQuery", "CredentialGroupsQuery"} {
+		safe := analyze(coro.Root{Function: pkg.ssa.Func(name), Demand: coro.AsyncDemand})
+		if err := validateCoroWorkerSyscallCall(safe, universe, call); err != nil {
+			t.Fatalf("%s safe Linux constant trap rejected: %v", name, err)
+		}
 	}
-	for _, name := range []string{"ProcessControl", "Dynamic"} {
+	for _, name := range []string{"ProcessControl", "ProcessGroupExit", "Dynamic"} {
 		unsafe := analyze(coro.Root{Function: pkg.ssa.Func(name), Demand: coro.AsyncDemand})
 		if err := validateCoroWorkerSyscallCall(unsafe, universe, call); err == nil ||
 			(!strings.Contains(err.Error(), "active static incoming edge") &&

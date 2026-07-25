@@ -655,6 +655,35 @@ func Other() {}
 	}
 }
 
+func TestLinuxProcessControlSourcePatchMarksRawCriticalBodies(t *testing.T) {
+	goroot := t.TempDir()
+	const pkgPath = "syscall"
+	sourceFile := filepath.Join(goroot, "src", pkgPath, "exec_linux.go")
+	mustWriteFile(t, sourceFile, `package syscall
+
+func forkAndExecInChild1() {}
+
+func doCheckClonePidfd() {}
+`)
+
+	changed, overlay, err := applySourcePatchForPkg(
+		nil, nil, env.LLGoRuntimeDir(), goroot, pkgPath,
+		sourcePatchBuildContext{goos: "linux", goarch: "amd64", goversion: "go1.26.0"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("expected Linux process-control source annotations to change syscall")
+	}
+	got := string(overlay[sourceFile])
+	for _, name := range []string{"forkAndExecInChild1", "doCheckClonePidfd"} {
+		if !strings.Contains(got, "//llgo:rawcritical\nfunc "+name+"()") {
+			t.Fatalf("Linux process-control function %s lacks raw-critical annotation:\n%s", name, got)
+		}
+	}
+}
+
 func TestApplySourcePatchForPkg_RejectsMissingAnnotationTarget(t *testing.T) {
 	goroot := t.TempDir()
 	runtimeDir := t.TempDir()

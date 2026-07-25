@@ -749,9 +749,14 @@ func coroLinuxUnsafeSyscallValues(analysis *coroLinuxSyscallTrapAnalysis) (map[u
 	}
 	// These operations are no-return, process-control, or observe/mutate the
 	// calling kernel thread. They need the RawCritical/target-M protocol and
-	// cannot be moved to an arbitrary bounded worker. All other exact Linux
-	// constants use the ordinary process-wide/descriptor worker contract;
-	// a numerically dynamic trap remains fail-closed.
+	// cannot be moved to an arbitrary bounded worker. Read-only credentials
+	// (CAPGET, GETUID/GID/EUID/EGID, GETRESUID/GID, and GETGROUPS) deliberately
+	// remain outside this set. Credential mutation remains fail-closed, while
+	// the current worker fleet inherits one startup credential domain; adding
+	// Go's all-thread mutation support must extend that transaction to every
+	// fleet worker before this invariant can be widened. All other exact Linux
+	// constants use the ordinary process-wide/descriptor worker contract; a
+	// numerically dynamic trap remains fail-closed.
 	unsafeNames := []string{
 		"SYS_RESTART_SYSCALL",
 		"SYS_EXIT", "SYS_EXIT_GROUP",
@@ -765,12 +770,10 @@ func coroLinuxUnsafeSyscallValues(analysis *coroLinuxSyscallTrapAnalysis) (map[u
 		"SYS_ARCH_PRCTL", "SYS_SET_THREAD_AREA", "SYS_GET_THREAD_AREA", "SYS_MODIFY_LDT",
 		"SYS_UNSHARE", "SYS_SETNS",
 		"SYS_PRCTL", "SYS_SECCOMP", "SYS_PTRACE",
-		"SYS_CAPGET", "SYS_CAPSET",
+		"SYS_CAPSET",
 		"SYS_SETUID", "SYS_SETGID", "SYS_SETREUID", "SYS_SETREGID",
 		"SYS_SETRESUID", "SYS_SETRESGID", "SYS_SETFSUID", "SYS_SETFSGID",
 		"SYS_SETGROUPS",
-		"SYS_GETUID", "SYS_GETGID", "SYS_GETEUID", "SYS_GETEGID",
-		"SYS_GETRESUID", "SYS_GETRESGID", "SYS_GETGROUPS",
 		"SYS_SCHED_SETPARAM", "SYS_SCHED_GETPARAM",
 		"SYS_SCHED_SETSCHEDULER", "SYS_SCHED_GETSCHEDULER",
 		"SYS_SCHED_SETAFFINITY", "SYS_SCHED_GETAFFINITY",
