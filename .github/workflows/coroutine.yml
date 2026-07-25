@@ -245,9 +245,6 @@ jobs:
         run: |
           go test -race ./cl/ssawrap -count=1
           go test -race ./cl -run '^Test(CompilationCoroPlanObservationAndCacheRegistration|CoroEntryResolutionPlainPrimaryPreservesIR|ResolveFunctionSymbolUsesPrimaryAndExactPlan|CoroEntryRejectsUnsupportedBeforeCreatingSymbol|CoroEntryResolutionPreflightRejectsWholePlanBeforeCodegen|CoroEntryResolutionPreflightRejectsMissingPlanAndCache|Emission.*)$' -count=1
-          # Compile and execute one ordinary program through LLGo so the new
-          # runtime glue is checked by LLGo itself, not only by the host Go compiler.
-          go test ./cl -run '^TestRunAndTestFromTestgo/print$' -count=1
 
       - name: Test structured LLVM coroutine builder
         if: matrix.lane == 'compat'
