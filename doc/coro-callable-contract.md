@@ -579,6 +579,23 @@ linker仍可验证：
 这些是完整性验证，不是semantic contract来源。多个合法alias若前向解析到同一canonical
 fact可以合并；不能因symbol相同而把一个未认证地址提升为已认证callable。
 
+### 10.4 syscall number是正交能力
+
+Linux的固定`__llgo_linux_syscall{3,6}_v1`适配器只声明`word-call.v1/4`或
+`word-call.v1/7`调用ABI；适配器地址本身不证明动态trap可以在任意worker thread执行。
+ProgramIR在同一worker certificate事务中另行冻结trap policy：
+
+- intrinsic处的exact constant，或经过closed static parameter carrier到达的exact constant，
+  才能形成候选；
+- final SSA plan只接受当前managed root实际激活的certified incoming edge，未激活wrapper
+  不污染安全路径；
+- fork/exec/exit、signal/thread/credential/affinity等target-owned syscall constant拒绝进入
+  通用worker，动态值、escaped carrier和open incoming同样fail closed；
+- raw/plain root仍执行同步legacy-stack body，不消费worker certificate。
+
+trap identity、每条incoming edge及owner集合都进入冻结SitePlan和certificate digest。
+consumer仍不得从最终函数地址或syscall数值反查、补造能力。
+
 ## 11. 显式 `Callable` 与 descriptor ABI
 
 ### 11.1 何时需要显式Callable

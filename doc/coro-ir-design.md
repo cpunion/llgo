@@ -1368,6 +1368,12 @@ gate应解析Go AST/build constraints或检查冻结catalog，不依赖容易被
 
 当前feature PR必跑层按现有 `coroutine.yml`：Ubuntu 22.04；Go 1.26.5上的LLVM 19/20/21/22 compatibility矩阵，并在LLVM 19单独运行integration与targets lane；host runtime core `-race -shuffle`、JS/WASM test adapter、native timer/time.Sleep focused E2E、arm/riscv/WASM/baremetal compile/link检查。快速structural/verify矩阵与LLVM 19完整E2E保持拆分，避免四个compatibility job重复重runtime而超过20分钟job预算。
 
+`cpunion/llgo`的coro开发分支只触发`Format Check`和上述focused coroutine workflow；
+Go、cache、LLGo、target、release、docs及stdlib coverage等宽工作流只接受`main`的push/PR。
+最终完成时必须以`main`为base再运行全部自动工作流，并显式dispatch分片`GOROOT` workflow；
+已知的编译器/平台不兼容失败可以分类记录，但不得通过跳过任务、扩大xfail或修改无关期望
+把它伪装成通过。
+
 upstream cutover gate再要求：macOS native执行；upstream `main` PR同时触发full Go、cache、LLGo与target workflow，focused coroutine workflow也明确接受`main`；验证native arm64/riscv64等cross compile、wasm32实际production adapter、baremetal/embedded无host依赖，以及目标支持的nogc/BDWGC/tinygc profile。未落地production adapter的平台不能用compile-only冒充运行兼容。
 
 ### 16.4 编译性能
