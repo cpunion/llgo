@@ -168,3 +168,23 @@ func TestCoroSysctlForeignCallHasExactSyncCapability(t *testing.T) {
 	}
 	t.Fatal("clite/os has no Sysctlbyname declaration")
 }
+
+func TestPatchedRuntimeSysctlUsesTypedSyncDeclaration(t *testing.T) {
+	const path = "internal/lib/runtime/os_darwin.go"
+	source, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	if !strings.Contains(text, "cos.Sysctlbyname(") {
+		t.Fatal("patched runtime sysctl does not use the audited typed C declaration")
+	}
+	for _, forbidden := range []string{
+		"llgo_rawSyscall",
+		"libc_sysctlbyname_trampoline_addr",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("patched runtime sysctl retains unclassified address transport %q", forbidden)
+		}
+	}
+}

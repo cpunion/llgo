@@ -1,6 +1,11 @@
 package runtime
 
-import "unsafe"
+import (
+	"unsafe"
+
+	c "github.com/goplus/llgo/runtime/internal/clite"
+	cos "github.com/goplus/llgo/runtime/internal/clite/os"
+)
 
 func sysctlbynameInt32(name []byte) (int32, int32) {
 	out := int32(0)
@@ -14,18 +19,15 @@ func internal_cpu_getsysctlbyname(name []byte) (int32, int32) {
 	return sysctlbynameInt32(name)
 }
 
-var libc_sysctlbyname_trampoline_addr uintptr
-
-// adapted from runtime/sys_darwin.go in the pattern of sysctl() above, as defined in x/sys/unix
+// sysctlbyname is an exact synchronous Darwin metadata query used during
+// runtime startup. Reuse the compiler-audited typed C declaration instead of
+// transporting an unclassified function address through llgo.rawSyscall6.
 func sysctlbyname(name *byte, old *byte, oldlen *uintptr, new *byte, newlen uintptr) int32 {
-	r, _, _ := llgo_rawSyscall6(
-		libc_sysctlbyname_trampoline_addr,
-		uintptr(unsafe.Pointer(name)),
-		uintptr(unsafe.Pointer(old)),
-		uintptr(unsafe.Pointer(oldlen)),
-		uintptr(unsafe.Pointer(new)),
-		uintptr(newlen),
-		0,
-	)
-	return int32(r)
+	return int32(cos.Sysctlbyname(
+		(*c.Char)(unsafe.Pointer(name)),
+		unsafe.Pointer(old),
+		oldlen,
+		unsafe.Pointer(new),
+		newlen,
+	))
 }
