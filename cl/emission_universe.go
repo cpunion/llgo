@@ -2864,9 +2864,15 @@ func verifyCoroCgoConversionCall(opcode int, call *ssa.Call) error {
 		basic, ok := types.Unalias(typ).Underlying().(*types.Basic)
 		return ok && basic.Kind() == kind
 	}
-	isInt8Pointer := func(typ types.Type) bool {
+	isCCharPointer := func(typ types.Type) bool {
 		pointer, ok := types.Unalias(typ).Underlying().(*types.Pointer)
-		return ok && isBasic(pointer.Elem(), types.Int8)
+		if !ok {
+			return false
+		}
+		// C plain char is signed on targets such as x86_64 and unsigned on
+		// targets such as linux/arm64. cgo exposes that target choice in
+		// _Ctype_char; both representations have the same one-byte string ABI.
+		return isBasic(pointer.Elem(), types.Int8) || isBasic(pointer.Elem(), types.Uint8)
 	}
 	isByteSlice := func(typ types.Type) bool {
 		slice, ok := types.Unalias(typ).Underlying().(*types.Slice)
@@ -2883,13 +2889,13 @@ func verifyCoroCgoConversionCall(opcode int, call *ssa.Call) error {
 	valid := false
 	switch opcode {
 	case llgoCgoCString:
-		valid = len(args) == 1 && isBasic(args[0].Type(), types.String) && isInt8Pointer(call.Type())
+		valid = len(args) == 1 && isBasic(args[0].Type(), types.String) && isCCharPointer(call.Type())
 	case llgoCgoCBytes:
 		valid = len(args) == 1 && isByteSlice(args[0].Type()) && isUnsafePointer(call.Type())
 	case llgoCgoGoString:
-		valid = len(args) == 1 && isInt8Pointer(args[0].Type()) && isBasic(call.Type(), types.String)
+		valid = len(args) == 1 && isCCharPointer(args[0].Type()) && isBasic(call.Type(), types.String)
 	case llgoCgoGoStringN:
-		valid = len(args) == 2 && isInt8Pointer(args[0].Type()) &&
+		valid = len(args) == 2 && isCCharPointer(args[0].Type()) &&
 			isInteger(args[1].Type()) && isBasic(call.Type(), types.String)
 	case llgoCgoGoBytes:
 		valid = len(args) == 2 && isUnsafePointer(args[0].Type()) &&

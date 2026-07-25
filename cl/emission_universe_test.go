@@ -42,6 +42,50 @@ type emissionTestImporter struct {
 	fallback types.Importer
 }
 
+func TestCoroCgoStringConversionsAcceptTargetCCharSignedness(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/cgocharsignedness", `package cgocharsignedness
+
+func cStringSigned(string) *int8
+func cStringUnsigned(string) *uint8
+func goStringSigned(*int8) string
+func goStringUnsigned(*uint8) string
+func goStringWide(*uint16) string
+
+func CStringSigned(value string) *int8 { return cStringSigned(value) }
+func CStringUnsigned(value string) *uint8 { return cStringUnsigned(value) }
+func GoStringSigned(value *int8) string { return goStringSigned(value) }
+func GoStringUnsigned(value *uint8) string { return goStringUnsigned(value) }
+func GoStringWide(value *uint16) string { return goStringWide(value) }
+`)
+	testProg.ssa.Build()
+
+	tests := []struct {
+		caller string
+		callee string
+		opcode int
+		valid  bool
+	}{
+		{"CStringSigned", "cStringSigned", llgoCgoCString, true},
+		{"CStringUnsigned", "cStringUnsigned", llgoCgoCString, true},
+		{"GoStringSigned", "goStringSigned", llgoCgoGoString, true},
+		{"GoStringUnsigned", "goStringUnsigned", llgoCgoGoString, true},
+		{"GoStringWide", "goStringWide", llgoCgoGoString, false},
+	}
+	for _, test := range tests {
+		call, ok := exactStaticCallTo(t, pkg.ssa.Func(test.caller), pkg.ssa.Func(test.callee)).(*ssa.Call)
+		if !ok {
+			t.Fatalf("%s call is not an ordinary *ssa.Call", test.caller)
+		}
+		err := verifyCoroCgoConversionCall(test.opcode, call)
+		if test.valid && err != nil {
+			t.Errorf("%s target C char conversion rejected: %v", test.caller, err)
+		} else if !test.valid && err == nil {
+			t.Errorf("%s non-char pointer conversion was accepted", test.caller)
+		}
+	}
+}
+
 func (p *emissionTestImporter) Import(path string) (*types.Package, error) {
 	if pkg := p.packages[path]; pkg != nil {
 		return pkg, nil
