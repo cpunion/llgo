@@ -453,14 +453,16 @@ func Owner() {}
 func RawWorker() { Intrinsic(1) }
 func RawChannel() { Intrinsic(2); <-blocked }
 func RawUncertified() { Intrinsic(3) }
+func RawSynchronous() { Intrinsic(4) }
 `, nil)
 	owner := ssaPkg.Func("Owner")
 	intrinsic := ssaPkg.Func("Intrinsic")
 	rawWorker := ssaPkg.Func("RawWorker")
 	rawChannel := ssaPkg.Func("RawChannel")
 	rawUncertified := ssaPkg.Func("RawUncertified")
+	rawSynchronous := ssaPkg.Func("RawSynchronous")
 	universe, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, []*ssa.Function{
-		owner, intrinsic, rawWorker, rawChannel, rawUncertified,
+		owner, intrinsic, rawWorker, rawChannel, rawUncertified, rawSynchronous,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -487,15 +489,23 @@ func RawUncertified() { Intrinsic(3) }
 			},
 			callSitePlan: func(call ssa.CallInstruction) (cl.CoroCallSitePlan, bool, error) {
 				if call != nil && call.Common() != nil && call.Common().StaticCallee() == intrinsic {
+					if call.Parent() == rawSynchronous {
+						return cl.CoroCallSitePlan{
+							IntrinsicSemantics:           cl.CoroIntrinsicCallUnsupported,
+							Intrinsic:                    true,
+							RawPlainSynchronousIntrinsic: true,
+						}, true, nil
+					}
 					certificate := ""
 					if call.Parent() != rawUncertified {
 						certificate = "worker-exact"
 					}
 					return cl.CoroCallSitePlan{
-						IntrinsicSemantics: cl.CoroIntrinsicCallInlineSuspend,
-						Intrinsic:          true,
-						Elision:            cl.CoroCallElidedIntrinsic,
-						ElisionCertificate: certificate,
+						IntrinsicSemantics:           cl.CoroIntrinsicCallInlineSuspend,
+						Intrinsic:                    true,
+						RawPlainSynchronousIntrinsic: true,
+						Elision:                      cl.CoroCallElidedIntrinsic,
+						ElisionCertificate:           certificate,
 					}, true, nil
 				}
 				return cl.CoroCallSitePlan{}, false, nil
@@ -522,13 +532,23 @@ func RawUncertified() { Intrinsic(3) }
 		t.Fatalf("certified worker raw plan = %+v, variant=%t", workerPlan, plan.HasRawPlainVariant(rawWorker))
 	}
 
+	plan, err = analyze(rawSynchronous, false)
+	if err != nil {
+		t.Fatalf("exact retained syscall did not receive its synchronous raw interpretation: %v", err)
+	}
+	synchronousPlan := functionPlanForBuildTest(t, plan, rawSynchronous)
+	if !synchronousPlan.RawPlainOnly || synchronousPlan.Emission != coro.EmitRawPlain ||
+		!plan.HasRawPlainVariant(rawSynchronous) {
+		t.Fatalf("retained synchronous raw plan = %+v, variant=%t", synchronousPlan, plan.HasRawPlainVariant(rawSynchronous))
+	}
+
 	for name, test := range map[string]struct {
 		raw        *ssa.Function
 		policyPark bool
 		want       string
 	}{
 		"real-channel":        {raw: rawChannel, want: "real local suspend effect may-park"},
-		"uncertified-park":    {raw: rawUncertified, want: "real local suspend effect may-park"},
+		"uncertified-park":    {raw: rawUncertified, want: "has no exact worker elision certificate"},
 		"builder-policy-park": {raw: rawWorker, policyPark: true, want: "unsupported declared raw-stack effect may-park"},
 	} {
 		_, err := analyze(test.raw, test.policyPark)

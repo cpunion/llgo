@@ -20,6 +20,7 @@ package cl
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -78,7 +79,21 @@ type Array4 [4]uint32
 func ArrayAt(values Array4, index int) uint32 { return [4]uint32(values)[index] }
 
 func SliceAt(values []uint32, index int) uint32 { return values[index] }
+func SliceAtUnsigned(values []uint32, index uint64) uint32 { return values[index] }
 func StaticNilSliceAt() int { var values []int; return values[0] }
+
+func SliceHigh(values []uint32, high int) []uint32 { return values[:high] }
+func ArrayHigh(values *Array4, high int) []uint32 { return values[:high] }
+func StringHigh(value string, high int) string { return value[:high] }
+func SliceLowUnsigned(values []uint32, low uint64, high int) []uint32 { return values[low:high] }
+func SliceFullMaxUnsigned(values []uint32, low, high int, max uint64) []uint32 {
+	return values[low:high:max]
+}
+func ArrayFullMax(values *Array4, low, high, max int) []uint32 {
+	return values[low:high:max]
+}
+func SliceFullHigh(values []uint32, high, max int) []uint32 { return values[:high:max] }
+func SliceFullLow(values []uint32, low, high, max int) []uint32 { return values[low:high:max] }
 
 func PointerEqual(first, second *Box) bool { return first == second }
 
@@ -258,14 +273,15 @@ func TestCoroImplicitIndexAddrBoundsNativeAndWasm32(t *testing.T) {
 				t.Fatalf("verify structured IndexAddr before CoroSplit: %v\n%s", err, module.String())
 			}
 			body := requireCoroPhysicalFunction(t, module, "foo.SliceAt").String()
-			if got := strings.Count(body, "call void @"+coroFaultPrepareHookV1); got != 1 {
+			if got := strings.Count(body, "call void @"+coroFaultPrepareHookV2); got != 1 {
 				t.Fatalf("SliceAt fault prepare calls = %d, want one:\n%s", got, body)
 			}
 			if strings.Contains(body, "CheckIndexRange") || strings.Contains(body, "AssertIndexRange") {
 				t.Fatalf("SliceAt retained a native-stack bounds helper:\n%s", body)
 			}
-			hook := strings.Index(body, "call void @"+coroFaultPrepareHookV1)
-			if hook < 0 || !strings.Contains(body[hook:], "i32 2") {
+			hook := strings.Index(body, "call void @"+coroFaultPrepareHookV2)
+			if hook < 0 || !strings.Contains(body[hook:], "i32 11") ||
+				!strings.Contains(body[hook:], "i64 ") {
 				t.Fatalf("SliceAt did not select the index-bounds fault kind:\n%s", body)
 			}
 			gep := strings.Index(body, "getelementptr inbounds i32")
@@ -273,14 +289,14 @@ func TestCoroImplicitIndexAddrBoundsNativeAndWasm32(t *testing.T) {
 				t.Fatalf("SliceAt formed its element address before the terminal bounds edge:\n%s", body)
 			}
 			staticBody := requireCoroPhysicalFunction(t, module, "foo.StaticNilSliceAt").String()
-			if got := strings.Count(staticBody, "call void @"+coroFaultPrepareHookV1); got != 1 ||
+			if got := strings.Count(staticBody, "call void @"+coroFaultPrepareHookV2); got != 1 ||
 				strings.Contains(staticBody, "AssertNilDeref") {
 				t.Fatalf("StaticNilSliceAt did not route its sole failure through the structured bounds edge:\n%s", staticBody)
 			}
 
 			runCoroABITestPipeline(t, prog, module)
 			resume := module.NamedFunction("foo.SliceAt$coro.resume")
-			if resume.IsNil() || strings.Count(resume.String(), "call void @"+coroFaultPrepareHookV1) != 1 {
+			if resume.IsNil() || strings.Count(resume.String(), "call void @"+coroFaultPrepareHookV2) != 1 {
 				t.Fatalf("post-split SliceAt resume lost its bounds-fault edge:\n%s", module.String())
 			}
 			object, err := prog.TargetMachine().EmitToMemoryBuffer(module, llvm.ObjectFile)
@@ -288,10 +304,142 @@ func TestCoroImplicitIndexAddrBoundsNativeAndWasm32(t *testing.T) {
 				t.Fatalf("emit structured IndexAddr object: %v\n%s", err, module.String())
 			}
 			defer object.Dispose()
-			if len(object.Bytes()) == 0 || !bytes.Contains(object.Bytes(), []byte(coroFaultPrepareHookV1)) {
+			if len(object.Bytes()) == 0 || !bytes.Contains(object.Bytes(), []byte(coroFaultPrepareHookV2)) {
 				t.Fatal("post-CoroSplit object lost the bounds-fault hook")
 			}
 		})
+	}
+}
+
+func TestCoroExactBoundsFaultKindsNativeAndWasm32(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	for _, target := range []struct {
+		name   string
+		target *llssa.Target
+	}{
+		{name: "native"},
+		{name: "wasm32", target: &llssa.Target{GOOS: "wasip1", GOARCH: "wasm"}},
+	} {
+		t.Run(target.name, func(t *testing.T) {
+			prog, pkg, plan, functions := compileCoroImplicitNilFaultFixture(t, target.target)
+			defer prog.Dispose()
+			module := pkg.Module()
+			defer module.Dispose()
+
+			tests := []struct {
+				name  string
+				kinds []uint32
+			}{
+				{
+					name: "SliceAtUnsigned",
+					kinds: []uint32{
+						coroBoundsFaultKind(coroBoundsFaultIndex, false),
+					},
+				},
+				{
+					name: "SliceHigh",
+					kinds: []uint32{
+						coroBoundsFaultKind(coroBoundsFaultSliceAcap, true),
+						coroBoundsFaultKind(coroBoundsFaultSliceB, true),
+					},
+				},
+				{
+					name: "ArrayHigh",
+					kinds: []uint32{
+						coroBoundsFaultKind(coroBoundsFaultSliceAlen, true),
+						coroBoundsFaultKind(coroBoundsFaultSliceB, true),
+					},
+				},
+				{
+					name: "StringHigh",
+					kinds: []uint32{
+						coroBoundsFaultKind(coroBoundsFaultSliceAlen, true),
+						coroBoundsFaultKind(coroBoundsFaultSliceB, true),
+					},
+				},
+				{
+					name: "SliceLowUnsigned",
+					kinds: []uint32{
+						coroBoundsFaultKind(coroBoundsFaultSliceAcap, true),
+						coroBoundsFaultKind(coroBoundsFaultSliceB, false),
+					},
+				},
+				{
+					name: "SliceFullMaxUnsigned",
+					kinds: []uint32{
+						coroBoundsFaultKind(coroBoundsFaultSlice3Acap, false),
+						coroBoundsFaultKind(coroBoundsFaultSlice3B, true),
+						coroBoundsFaultKind(coroBoundsFaultSlice3C, true),
+					},
+				},
+				{
+					name: "ArrayFullMax",
+					kinds: []uint32{
+						coroBoundsFaultKind(coroBoundsFaultSlice3Alen, true),
+						coroBoundsFaultKind(coroBoundsFaultSlice3B, true),
+						coroBoundsFaultKind(coroBoundsFaultSlice3C, true),
+					},
+				},
+				{
+					name: "SliceFullHigh",
+					kinds: []uint32{
+						coroBoundsFaultKind(coroBoundsFaultSlice3Acap, true),
+						coroBoundsFaultKind(coroBoundsFaultSlice3B, true),
+						coroBoundsFaultKind(coroBoundsFaultSlice3C, true),
+					},
+				},
+				{
+					name: "SliceFullLow",
+					kinds: []uint32{
+						coroBoundsFaultKind(coroBoundsFaultSlice3Acap, true),
+						coroBoundsFaultKind(coroBoundsFaultSlice3B, true),
+						coroBoundsFaultKind(coroBoundsFaultSlice3C, true),
+					},
+				},
+			}
+			for _, test := range tests {
+				functionPlan, ok := plan.FunctionPlan(functions[test.name])
+				if !ok || functionPlan.Emission != coro.EmitCoroutine ||
+					!functionPlan.Exec.Contains(coro.MayUnwind) {
+					t.Fatalf("%s plan = %+v, present=%t; want may-unwind coroutine",
+						test.name, functionPlan, ok)
+				}
+				body := requireCoroPhysicalFunction(t, module, "foo."+test.name).String()
+				requireCoroParameterizedBoundsFaultKinds(t, body, test.kinds...)
+			}
+
+			if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+				t.Fatalf("verify exact bounds faults before CoroSplit: %v\n%s", err, module.String())
+			}
+			runCoroABITestPipeline(t, prog, module)
+			for _, test := range tests {
+				resume := module.NamedFunction("foo." + test.name + "$coro.resume")
+				if resume.IsNil() {
+					t.Fatalf("post-split %s resume is missing", test.name)
+				}
+				requireCoroParameterizedBoundsFaultKinds(t, resume.String(), test.kinds...)
+			}
+		})
+	}
+}
+
+func requireCoroParameterizedBoundsFaultKinds(t *testing.T, body string, kinds ...uint32) {
+	t.Helper()
+	var calls []string
+	for _, line := range strings.Split(body, "\n") {
+		if strings.Contains(line, "call void @"+coroFaultPrepareHookV2) {
+			calls = append(calls, line)
+		}
+	}
+	if len(calls) != len(kinds) {
+		t.Fatalf("parameterized bounds calls = %d, want %d:\n%s", len(calls), len(kinds), body)
+	}
+	for i, kind := range kinds {
+		if !strings.Contains(calls[i], fmt.Sprintf("i32 %d", kind)) ||
+			!strings.Contains(calls[i], "i64 ") {
+			t.Fatalf("parameterized bounds call %d = %q, want kind %d and i64 x",
+				i, calls[i], kind)
+		}
 	}
 }
 
@@ -394,25 +542,34 @@ func compileCoroImplicitNilFaultFixture(
 		t.Fatal(err)
 	}
 	functions := map[string]*ssa.Function{
-		"Nullable":           ssaPkg.Func("Nullable"),
-		"EmptyLoad":          ssaPkg.Func("EmptyLoad"),
-		"InterfaceCompare":   ssaPkg.Func("InterfaceCompare"),
-		"StaticNil":          ssaPkg.Func("StaticNil"),
-		"StaticNilFieldLoad": ssaPkg.Func("StaticNilFieldLoad"),
-		"NullableStore":      ssaPkg.Func("NullableStore"),
-		"StaticNilStore":     ssaPkg.Func("StaticNilStore"),
-		"ZeroFieldEqual":     ssaPkg.Func("ZeroFieldEqual"),
-		"Guarded":            ssaPkg.Func("Guarded"),
-		"WithCleanup":        ssaPkg.Func("WithCleanup"),
-		"RecoverFault":       ssaPkg.Func("RecoverFault"),
-		"WithRecover":        ssaPkg.Func("WithRecover"),
-		"StringAt":           ssaPkg.Func("StringAt"),
-		"ConstantStringAt":   ssaPkg.Func("ConstantStringAt"),
-		"ArrayAt":            ssaPkg.Func("ArrayAt"),
-		"SliceAt":            ssaPkg.Func("SliceAt"),
-		"StaticNilSliceAt":   ssaPkg.Func("StaticNilSliceAt"),
-		"PointerEqual":       ssaPkg.Func("PointerEqual"),
-		"ValueReceiverCall":  ssaPkg.Func("ValueReceiverCall"),
+		"Nullable":             ssaPkg.Func("Nullable"),
+		"EmptyLoad":            ssaPkg.Func("EmptyLoad"),
+		"InterfaceCompare":     ssaPkg.Func("InterfaceCompare"),
+		"StaticNil":            ssaPkg.Func("StaticNil"),
+		"StaticNilFieldLoad":   ssaPkg.Func("StaticNilFieldLoad"),
+		"NullableStore":        ssaPkg.Func("NullableStore"),
+		"StaticNilStore":       ssaPkg.Func("StaticNilStore"),
+		"ZeroFieldEqual":       ssaPkg.Func("ZeroFieldEqual"),
+		"Guarded":              ssaPkg.Func("Guarded"),
+		"WithCleanup":          ssaPkg.Func("WithCleanup"),
+		"RecoverFault":         ssaPkg.Func("RecoverFault"),
+		"WithRecover":          ssaPkg.Func("WithRecover"),
+		"StringAt":             ssaPkg.Func("StringAt"),
+		"ConstantStringAt":     ssaPkg.Func("ConstantStringAt"),
+		"ArrayAt":              ssaPkg.Func("ArrayAt"),
+		"SliceAt":              ssaPkg.Func("SliceAt"),
+		"SliceAtUnsigned":      ssaPkg.Func("SliceAtUnsigned"),
+		"StaticNilSliceAt":     ssaPkg.Func("StaticNilSliceAt"),
+		"SliceHigh":            ssaPkg.Func("SliceHigh"),
+		"ArrayHigh":            ssaPkg.Func("ArrayHigh"),
+		"StringHigh":           ssaPkg.Func("StringHigh"),
+		"SliceLowUnsigned":     ssaPkg.Func("SliceLowUnsigned"),
+		"SliceFullMaxUnsigned": ssaPkg.Func("SliceFullMaxUnsigned"),
+		"ArrayFullMax":         ssaPkg.Func("ArrayFullMax"),
+		"SliceFullHigh":        ssaPkg.Func("SliceFullHigh"),
+		"SliceFullLow":         ssaPkg.Func("SliceFullLow"),
+		"PointerEqual":         ssaPkg.Func("PointerEqual"),
+		"ValueReceiverCall":    ssaPkg.Func("ValueReceiverCall"),
 	}
 	roots := make(coro.Roots, 0, len(functions))
 	for _, function := range functions {

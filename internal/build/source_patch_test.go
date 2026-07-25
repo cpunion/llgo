@@ -1,6 +1,7 @@
 package build
 
 import (
+	"bytes"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -215,6 +216,96 @@ func TestNativeCoroTimeSleepPatchIsCapabilityGated(t *testing.T) {
 	}
 }
 
+func TestNamedWebAssemblyChacha8UsesPureGoSourcePatch(t *testing.T) {
+	overlay, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
+		goos:       "linux",
+		goarch:     "arm",
+		buildFlags: []string{"-tags=llgo,llgo_coro,tinygo.wasm,wasip2,nogc"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chachaDir := filepath.Join(runtime.GOROOT(), "src", "internal", "chacha8rand")
+	patchFile := filepath.Join(chachaDir, "z_llgo_patch_block_freestanding_webassembly_llgo.go")
+	patch, ok := overlay[patchFile]
+	if !ok {
+		t.Fatalf("missing named WebAssembly chacha8rand source patch %s", patchFile)
+	}
+	if !strings.Contains(string(patch), "block_generic(seed, blocks, counter)") {
+		t.Fatalf("chacha8rand source patch does not call the standard generic implementation:\n%s", patch)
+	}
+	assembly := filepath.Join(chachaDir, "chacha8_stub.s")
+	replacement, ok := overlay[assembly]
+	if !ok {
+		t.Fatalf("chacha8rand source patch did not mask %s", assembly)
+	}
+	if bytes.Contains(replacement, []byte("TEXT")) {
+		t.Fatalf("chacha8rand assembly replacement retained an executable TEXT definition:\n%s", replacement)
+	}
+	original := filepath.Join(chachaDir, "chacha8.go")
+	filtered, ok := overlay[original]
+	if !ok {
+		t.Fatalf("chacha8rand source patch did not filter %s", original)
+	}
+	parsed, err := parser.ParseFile(token.NewFileSet(), original, filtered, 0)
+	if err != nil {
+		t.Fatalf("parse filtered chacha8rand source: %v", err)
+	}
+	for _, decl := range parsed.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "block" {
+			t.Fatal("filtered GOROOT chacha8rand retained its assembly block declaration")
+		}
+	}
+	if !llruntime.HasSourcePatchPkg("internal/chacha8rand") {
+		t.Fatal("internal/chacha8rand should be registered as a source patch package")
+	}
+}
+
+func TestNamedWebAssemblyInternalLinuxSyscallFailsClosed(t *testing.T) {
+	overlay, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), runtime.GOROOT(), sourcePatchBuildContext{
+		goos:       "linux",
+		goarch:     "arm",
+		buildFlags: []string{"-tags=llgo,llgo_coro,tinygo.wasm,wasip2,nogc"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	syscallDir := filepath.Join(runtime.GOROOT(), "src", "internal", "runtime", "syscall", "linux")
+	patchFile := filepath.Join(syscallDir, "z_llgo_patch_syscall_freestanding_webassembly_llgo.go")
+	patch, ok := overlay[patchFile]
+	if !ok {
+		t.Fatalf("missing named WebAssembly internal syscall patch %s", patchFile)
+	}
+	if !strings.Contains(string(patch), "return ^uintptr(0), 0, enosys") {
+		t.Fatalf("internal syscall patch does not fail closed with ENOSYS:\n%s", patch)
+	}
+	assembly := filepath.Join(syscallDir, "asm_linux_arm.s")
+	replacement, ok := overlay[assembly]
+	if !ok {
+		t.Fatalf("internal syscall patch did not mask %s", assembly)
+	}
+	if bytes.Contains(replacement, []byte("TEXT")) || bytes.Contains(replacement, []byte("SWI")) {
+		t.Fatalf("internal syscall assembly replacement retained executable ARM syscall code:\n%s", replacement)
+	}
+	original := filepath.Join(syscallDir, "syscall_linux.go")
+	filtered, ok := overlay[original]
+	if !ok {
+		t.Fatalf("internal syscall patch did not filter %s", original)
+	}
+	parsed, err := parser.ParseFile(token.NewFileSet(), original, filtered, 0)
+	if err != nil {
+		t.Fatalf("parse filtered internal syscall source: %v", err)
+	}
+	for _, decl := range parsed.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "Syscall6" {
+			t.Fatal("filtered GOROOT internal syscall retained its assembly declaration")
+		}
+	}
+	if !llruntime.HasSourcePatchPkg("internal/runtime/syscall/linux") {
+		t.Fatal("internal/runtime/syscall/linux should be registered as a source patch package")
+	}
+}
+
 func TestSyncAtomicRemainsAltPkg(t *testing.T) {
 	if llruntime.HasSourcePatchPkg("sync/atomic") {
 		t.Fatal("sync/atomic should not be registered as a source patch package")
@@ -308,6 +399,80 @@ func TestDarwinCompatibilityFiles(t *testing.T) {
 	}
 	if !matched {
 		t.Error("Darwin public syscall bridge is excluded for Go 1.26")
+	}
+}
+
+func TestDarwinCoroProcessSyscallsUseIsolatedRawCarrier(t *testing.T) {
+	overlay, err := buildSourcePatchOverlayForGOROOT(
+		nil,
+		env.LLGoRuntimeDir(),
+		runtime.GOROOT(),
+		sourcePatchBuildContext{
+			goos:      "darwin",
+			goarch:    "arm64",
+			goversion: "go1.26",
+			buildFlags: []string{
+				"-tags=llgo,llgo_coro,llgo_coro_native_pipe,llgo_coro_native_timer",
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	syscallDir := filepath.Join(runtime.GOROOT(), "src", "syscall")
+	injectedPath := filepath.Join(
+		syscallDir,
+		"z_llgo_patch_process_raw_syscall_darwin_go126.go",
+	)
+	injected, ok := overlay[injectedPath]
+	if !ok {
+		t.Fatalf("missing Darwin coroutine process-syscall patch %s", injectedPath)
+	}
+	source := string(injected)
+	for _, required := range []string{
+		"//llgo:coro sync\n//go:linkname llgoCoroFork C.fork",
+		"//llgo:coro sync\n//go:linkname llgoCoroExecve C.execve",
+		"//llgo:coro noblock\n//go:linkname llgoCoroExit C.exit",
+		"//llgo:coro noblock\n//go:linkname llgoCoroProcessErrno C.cliteErrno",
+		"func fork()",
+		"func execve(",
+		"func exit(",
+	} {
+		if !strings.Contains(source, required) {
+			t.Errorf("Darwin process-syscall patch lacks %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"llgo.syscall32",
+		"abi.FuncPCABI0(",
+		"llgoCoroProcessRawSyscall3",
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Errorf("Darwin process-syscall patch retained dynamic carrier %q", forbidden)
+		}
+	}
+	if strings.Contains(source, "//llgo:skip") {
+		t.Fatal("source-patch control directive leaked into injected Go source")
+	}
+
+	generatedPath := filepath.Join(syscallDir, "zsyscall_darwin_arm64.go")
+	filtered, ok := overlay[generatedPath]
+	if !ok {
+		t.Fatalf("Darwin process-syscall patch did not filter %s", generatedPath)
+	}
+	parsed, err := parser.ParseFile(token.NewFileSet(), generatedPath, filtered, 0)
+	if err != nil {
+		t.Fatalf("parse filtered Darwin syscall source: %v", err)
+	}
+	for _, declaration := range parsed.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		switch function.Name.Name {
+		case "fork", "execve", "exit":
+			t.Errorf("filtered GOROOT source retained original %s wrapper", function.Name.Name)
+		}
 	}
 }
 

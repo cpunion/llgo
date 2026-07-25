@@ -1,12 +1,13 @@
-//go:build arm && baremetal
+//go:build arm && (baremetal || tinygo.wasm)
 
 package atomic
 
 import "unsafe"
 
-// This file is a single-threaded baremetal fallback for ARM targets that do not
-// provide upstream runtime atomics. These helpers are plain loads/stores and do
-// not provide inter-core atomicity.
+// This file is the single-owner fallback for ARM-fronted baremetal and logical
+// wasm targets that do not advertise WebAssembly threads. These helpers are
+// plain loads/stores and deliberately do not claim inter-core atomicity; a
+// future shared-memory wasm target must select a real atomic implementation.
 
 // Export some functions via linkname to assembly in sync/atomic.
 //

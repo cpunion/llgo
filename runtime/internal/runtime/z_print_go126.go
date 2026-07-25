@@ -1,4 +1,4 @@
-//go:build go1.26
+//go:build go1.26 && !wasip2 && !wasm_unknown
 
 /*
  * Copyright (c) 2024 The XGo Authors (xgo.dev). All rights reserved.

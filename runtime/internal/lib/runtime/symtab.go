@@ -9,7 +9,6 @@ import (
 
 	c "github.com/goplus/llgo/runtime/internal/clite"
 	clitedebug "github.com/goplus/llgo/runtime/internal/clite/debug"
-	cliteos "github.com/goplus/llgo/runtime/internal/clite/os"
 	latomic "github.com/goplus/llgo/runtime/internal/lib/sync/atomic"
 	rtdebug "github.com/goplus/llgo/runtime/internal/runtime"
 )
@@ -686,20 +685,6 @@ var runtimeFuncInfoDebugState uint32
 
 var runtimeFuncPCFramesFromSites bool
 var runtimeFuncPCStubsFromSites bool
-
-func runtimeFuncInfoDebugEnabled() bool {
-	state := latomic.LoadUint32(&runtimeFuncInfoDebugState)
-	if state == 0 {
-		state = 1
-		if p := cliteos.Getenv(c.AllocaCStr("LLGO_FUNCINFO_DEBUG")); p != nil {
-			if v := c.GoString(p); v != "" && v != "0" {
-				state = 2
-			}
-		}
-		latomic.StoreUint32(&runtimeFuncInfoDebugState, state)
-	}
-	return state == 2
-}
 
 func runtimeFuncInfoDebugSource(fromSites bool) string {
 	if fromSites {

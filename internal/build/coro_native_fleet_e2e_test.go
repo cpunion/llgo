@@ -409,6 +409,7 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 	t.Helper()
 	files := []string{
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_allocator.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_abort_libc.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_frame.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_program.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_run_decision.go"),

@@ -66,7 +66,7 @@ ProgramModelBuilder fixed point
 - 只增加 post-plan overlay 能解决 physical CFG 拼装，但不能消除 hidden helper 和 effect 事实的重复提取，收益只有一半。
 - 重写 runtime 或 `internal/coro` 固定点不会解决上述问题，风险反而更大。
 - 新设计可以成为后续 defer/panic/recover、dynamic coroutine descriptor、syscall/IO、精确 GC metadata 和多平台 adapter 的公共编译器底座；但它本身不会自动补齐这些尚未实现的能力。
-- 当前代码已从native single-P vertical slice推进到受限的Linux/Darwin双owner fleet：command M与peer pthread M各自驱动一个P/source shard，使用exact route、route-local poll/timer/doorbell和共享bounded worker；loopback TCP已在该target配置 fresh compile-link-run并完成10,000次压力。普通Go 1.26标准库源码风格的`time.Sleep`、冻结timer语义、固定syscall文件回环、高层`os.File`回环和loopback TCP又在同一fleet acceptance中全部通过；2026-07-23新增的`syscall.Pipe`进度门还证明阻塞`Read`转交worker后，timer唤醒的writer G可继续运行，执行器没有被宿主I/O占住。六个独立fresh compile-link-run均已在Darwin通过；时间只作诊断，不是兼容性结论。这不能结论为“完整Go标准库和所有平台已经基本都可落地”：panic/unwind全矩阵、timer GC/synctest、tooling、cgo reentry、precise GC、动态P/affinity、parked-result迁移和其他平台driver仍需实现或生产验证，见第9、11节及《统一异步核心契约》第9.1节。
+- 当前代码已从native single-P vertical slice推进到受限的Linux/Darwin双owner fleet：command M与peer pthread M各自驱动一个P/source shard，使用exact route、route-local poll/timer/doorbell和共享bounded worker；loopback TCP已在该target配置 fresh compile-link-run并完成10,000次压力。普通Go 1.26标准库源码风格的`time.Sleep`、冻结timer语义、固定syscall文件回环、高层`os.File`回环和loopback TCP又在同一fleet acceptance中全部通过；2026-07-23新增的`syscall.Pipe`进度门还证明阻塞`Read`转交worker后，timer唤醒的writer G可继续运行，执行器没有被宿主I/O占住。2026-07-25扩展后的网络门又在native、`wasm-unknown`和`wasip2`同时运行通过动态read/write/accept deadline、Close取消、Dial timeout/context cancel、UDP RecvFrom/SendTo和RecvMsg/SendMsg，以及Go自带pure-Go resolver经受控hosts文件完成`LookupHost("localhost")`、经受控UDP DNS server并发完成A/AAAA wire查询；WASM显式Node embedding的功能场景记录114个HostOp、17次exact cancel、18个alarm和171个schedule action，追加80次listener顺序创建/关闭后最终为594/17/18/651并越过64槽poll descriptor页。并发DNS曾暴露preemptible descriptor扫描的重复槽保留，现由target-lowered原子CAS及源码gate修复；deadline/Close在snapshot与bind之间的丢失更新窗口又由control epoch和preparing ParkSet sticky cancel关闭，host transport以显式双义状态固定同一generation的Submit先于Cancel；最终Close若未满足标准`FD`引用保护下的closing+lane-idle契约则fail-stop，不能静默泄漏/ABA。新增网络verb仍没有修改compiler effect、executor或source状态机。六个独立native acceptance仍均为绿色；时间只作诊断，不是兼容性结论。这不能结论为“完整Go标准库和所有平台已经基本都可落地”：panic/unwind全矩阵、timer GC/synctest、tooling、cgo reentry、precise GC、动态P/affinity、parked-result迁移、外部DNS/cgo resolver、Unix/raw socket和其他平台内建driver仍需实现或生产验证，见第9、11节及《统一异步核心契约》第9.1节。
 - 2026-07-24的hard-cutover验收已让完整`./test/go`包通过frontend、SSA/effect规划、physical lowering、LLVM生成和最终链接；随后实际运行的代表用例覆盖channel/select高频握手与关闭/range、rangefunc defer/panic、Go 1.26 reflect私有method linkname，以及零尺寸/大对象fault。当前native原型又完成了`reflect.Value.Call/CallSlice`、`MakeFunc`、具体/接口/绑定方法值和`Type.Method.Func`的descriptor/libffi桥，并以真实`time.Sleep`验证libffi栈退出后的child await；可变参数、函数值参数、多/聚合/零尺寸及高对齐零尺寸结果、无返回和panic/recover均已运行通过。`internal/build.TestTest`也在修正raw/plain `DebugRef`误判后通过。这个结果证明现有编译器能够承载较宽的标准库编译和一组关键运行语义，但仍不是`test/*`或GOROOT全量通过：WASM/baremetal等无native libffi closure能力的target仍需AOT signature trampoline，runtime未知签名、reflect.Select及完整reflect/GOROOT矩阵尚未验收；全量`cl`和`ssa`旧测试驱动还会因逐目录fresh整程序分析超过Go测试默认10分钟，需要单独做性能治理和分片验收。
 
 ## 2. 目标与非目标
@@ -1189,6 +1189,13 @@ WaitSet reconciliation或whole-function CFG已经由单一emitter拥有。后续
   await、plain dispatch和foreign worker call的feature emitter只负责typed operand emission，不再各自读取CallPlan、
   EmissionUniverse或阶段开关重做owner判断。worker syscall同样在operation planner中冻结，codegen不再重新验证
   raw syscall shape或certificate。
+- 2026-07-25的HostOp收敛把exact direct call的`opcode/pointerMask/argumentCount/metadataWords`在
+  `coroProgramIR.freezeCallSites`中一次性验证并冻结成POD recipe；physical planner只搬运该recipe，
+  emitter只编译对应operand，不再读取常量opcode、Go参数类型或deadline布局。worker与HostOp共用
+  `compileCoroWorkerWordCall`和唯一`emitCoroParkOperation`调用点，仅state/hooks/result contract不同。
+  operation recipe的select+observe也已收拢到一个helper，slice与slice-to-array的bounds family共用一个
+  planned-fault observer/emitter；architecture gate的直接plan authority由354降至352，physical guard
+  observation文件从2个降至1个，未为HostOp增加raw-shape、Park或operation-selection额度。
 - interface-nil compare、terminal-result allocation、frame allocation及exact scalar-bitcast allocation成为显式value
   recipe。exact-bitcast proof只在physical function planner建立一次；source compiler只消费recipe和冻结operand，
   不再以多个`tryCompile*`回退入口重新推断physical storage。
@@ -1201,6 +1208,9 @@ WaitSet reconciliation或whole-function CFG已经由单一emitter拥有。后续
   80行，新增内容是typed recipe字段与一次性planner，已同时删除feature-local selector、重复证书验证和CFG入口。
 - 全部`TestCoro*`覆盖native/wasm32的await、interface、worker、timer、poll、allocation、panic与channel路径；
   observer负向测试继续证明漏消费、错recipe或重复消费会在编译期失败。
+- 上述HostOp follow-up又以新构建的compiler在`wasm-unknown`和`wasip2`分别运行直接网络
+  `16/2/15`（operation/cancel/action）、文件`5/10`、Sleep `4 actions/1 alarm`以及完整TCP/DNS
+  `594/17/18/651`账本；这证明冻结recipe到runtime transport的纵向路径一致，不把focused场景外推为完整GOROOT。
 
 该完成标记覆盖当前已知source call/value/storage的最终physical选择，不表示whole-function CFG已经统一。
 runtime旧logical wait/fleet分支随后已由Phase R删除；compiler下一阶段必须继续完成统一function emitter，不得

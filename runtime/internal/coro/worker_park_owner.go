@@ -59,6 +59,25 @@ func CurrentExecutorWorkerDriver(g *G) (*ExecutorDriver, ExecutorHandle, RouteID
 	return driver, handle, route, true
 }
 
+// ExecutorWorkerPhysicalCancelRequested is the target-adapter view of one
+// exact submitted operation. It keeps P and source ownership private while
+// allowing a host transport to mirror the common logical cancel bit into its
+// own physical request catalog after a scheduler source pass.
+func ExecutorWorkerPhysicalCancelRequested(
+	driver *ExecutorDriver,
+	id OperationID,
+) (requested bool, ok bool) {
+	if !validExecutorDriver(driver) || driver.sources.worker == nil ||
+		id.Route() != driver.route {
+		return false, false
+	}
+	return WorkerOperationPhysicalCancelRequested(
+		driver.sources.worker,
+		driver.p,
+		id,
+	)
+}
+
 func currentExecutorWorkerSource(
 	driver *ExecutorDriver,
 	g *G,
@@ -94,6 +113,89 @@ func PrepareCurrentExecutorWorkerPark(
 	return PrepareSingleWorkerPark(g, handle, header, source, wait, caseID, seed)
 }
 
+// PrepareCurrentExecutorWorkerTimerPark installs one external operation and,
+// when deadline is non-zero, one absolute timer in the same ParkSet. A zero
+// deadline keeps the operation controllable without manufacturing an infinite
+// physical alarm. For a real deadline, either physical completion or the timer
+// wins, and the ordinary source-resolution pass requests physical cancellation
+// of the losing submitted worker operation before the G may resume.
+func PrepareCurrentExecutorWorkerTimerPark(
+	driver *ExecutorDriver,
+	g *G,
+	handle unsafe.Pointer,
+	header *HeaderV1,
+	wait *WaitSetRecord,
+	workerCaseID uint32,
+	timerCaseID uint32,
+	seed uint32,
+	deadline int64,
+) (
+	ticket ParkTicket,
+	worker OperationID,
+	timer TimerRegistrationHandle,
+	timerOperation OperationID,
+	executor ExecutorHandle,
+	ok bool,
+) {
+	workerSource, workerOK := currentExecutorWorkerSource(driver, g)
+	timerTable, timerOK := currentExecutorTimerTable(driver, g)
+	hasTimer := deadline > 0
+	if !workerOK || !timerOK || handle == nil || header == nil || wait == nil ||
+		*wait != (WaitSetRecord{}) || workerCaseID == 0 || timerCaseID == 0 ||
+		workerCaseID == timerCaseID || deadline < 0 || g.active == nil ||
+		g.active.handle != handle || g.active.header != header ||
+		hasTimer && !CanReserveTimerV2(g.runP, timerTable) {
+		return ParkTicket{}, OperationID{}, TimerRegistrationHandle{}, OperationID{}, ExecutorHandle{}, false
+	}
+	workerCapacity := false
+	for index := uint32(0); index < WorkerOperationConfiguredCapacity(workerSource); index++ {
+		slot, slotOK := workerOperationSlotAt(workerSource, index)
+		if !slotOK {
+			return ParkTicket{}, OperationID{}, TimerRegistrationHandle{}, OperationID{}, ExecutorHandle{}, false
+		}
+		if preemptLoad(&slot.generation) != ^uint32(0) &&
+			workerOperationReusableSlot(workerSource, slot, index) {
+			workerCapacity = true
+			break
+		}
+	}
+	if !workerCapacity {
+		return ParkTicket{}, OperationID{}, TimerRegistrationHandle{}, OperationID{}, ExecutorHandle{}, false
+	}
+	expected := uint32(1)
+	if hasTimer {
+		expected = 2
+	}
+	ticket, ok = BeginParkSet(&g.park, expected, seed)
+	if !ok || !PrepareWaitSetRecord(wait, g, ticket) {
+		return ParkTicket{}, OperationID{}, TimerRegistrationHandle{}, OperationID{}, ExecutorHandle{}, false
+	}
+	worker, ok = workerSource.ReserveAndAttachWait(
+		g.runP, &g.park, ticket, wait, workerCaseID,
+	)
+	if !ok {
+		return ParkTicket{}, OperationID{}, TimerRegistrationHandle{}, OperationID{}, ExecutorHandle{}, false
+	}
+	if hasTimer {
+		timer, ok = timerTable.ReserveAndAttachTimerV2(
+			g.runP, &g.park, ticket, wait, timerCaseID, deadline,
+		)
+		var timerIDOK bool
+		timerOperation, timerIDOK = timerRegistrationIDForHandle(timerTable, timer)
+		if !ok || !timerIDOK {
+			return ticket, worker, timer, timerOperation, driver.handle, false
+		}
+	}
+	if !SealParkSet(&g.park, ticket) ||
+		!PrepareParkSet(g, handle, header, ticket, wait) {
+		// Both sources were allocation-free preflighted on the sole owner P.
+		// A failure after the first attachment is therefore corruption rather
+		// than ordinary capacity pressure; retain it fail-closed for the caller.
+		return ticket, worker, timer, timerOperation, driver.handle, false
+	}
+	return ticket, worker, timer, timerOperation, driver.handle, true
+}
+
 // CommitCurrentExecutorWorkerSubmission records the irreversible backend
 // handoff only against the worker source bound to g's current driver.
 func CommitCurrentExecutorWorkerSubmission(
@@ -103,6 +205,31 @@ func CommitCurrentExecutorWorkerSubmission(
 ) bool {
 	source, ok := currentExecutorWorkerSource(driver, g)
 	return ok && CommitWorkerSubmission(g, source, id)
+}
+
+// RequestCurrentExecutorWorkerParkCancel closes a configuration-change race
+// while the compiler-owned ParkState is still preparing or sealed. Unlike
+// RequestCancelID, it does not require an already active WaitSetRecord: the
+// scheduler's mandatory initial affected visit observes the sticky
+// ParkCancelOperation immediately after CommitParkSet.
+func RequestCurrentExecutorWorkerParkCancel(
+	driver *ExecutorDriver,
+	g *G,
+	id OperationID,
+	ticket ParkTicket,
+) bool {
+	source, ok := currentExecutorWorkerSource(driver, g)
+	if !ok || !id.Valid() || ticket == (ParkTicket{}) {
+		return false
+	}
+	slot, slotOK := workerOperationSlotFor(source, id)
+	return slotOK && preemptLoad(&slot.generation) == id.Generation &&
+		preemptLoad(&slot.state) == uint32(producerSourceActive) &&
+		slot.submitted && slot.record.Matches(id) &&
+		slot.record.phase == operationActive &&
+		slot.record.link.park == &g.park &&
+		slot.record.link.ticket == ticket &&
+		RequestParkCancel(&g.park, ticket, ParkCancelOperation)
 }
 
 // FinishCurrentExecutorWorkerPark strongly retires the exact current owner's

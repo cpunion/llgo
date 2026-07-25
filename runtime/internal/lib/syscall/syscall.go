@@ -1,3 +1,5 @@
+//go:build !wasm && !tinygo.wasm
+
 package syscall
 
 import (

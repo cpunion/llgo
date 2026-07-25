@@ -88,7 +88,13 @@ type CoroGlobalPhysicalIdentity struct {
 	// complete same-package raw-symbol profile with no mention of the symbol,
 	// and no materialized referencing function owned by another package.
 	InternalLinkage bool
-	Members         []*ssa.Global
+	// ClosedWorldWrites proves that every possible writer is represented in
+	// the frozen Go SSA universe. Unlike InternalLinkage it does not require an
+	// unexported source variable or change LLVM visibility: every emitted
+	// package's raw-input profile must be complete and omit PhysicalSymbol, and
+	// no Go linkname may alias another cell to that symbol.
+	ClosedWorldWrites bool
+	Members           []*ssa.Global
 }
 
 // EmissionUniverseOptions selects construction contracts that are available
@@ -475,8 +481,14 @@ const (
 type CoroCallSitePlan struct {
 	IntrinsicSemantics CoroIntrinsicCallSemantics
 	Intrinsic          bool
-	Elision            CoroCallElisionKind
-	ElisionCertificate string
+	// RawPlainSynchronousIntrinsic proves that this exact direct llgo.syscall
+	// occurrence has the uintptr word ABI accepted by ordinary synchronous
+	// intrinsic lowering. It authorizes only a separately proven raw/plain
+	// body: managed code still needs a worker certificate and otherwise
+	// retains its conservative call edge.
+	RawPlainSynchronousIntrinsic bool
+	Elision                      CoroCallElisionKind
+	ElisionCertificate           string
 	// CgoWorkerTarget is the exact generated Go adapter whose native-stack
 	// entry is published to the bounded worker by CoroCallElidedCgoWorker.
 	// It is nil for every other elision. Whole-program analysis consumes this
@@ -501,11 +513,32 @@ func (p CoroCallSitePlan) ElidesCall() bool {
 	return p.Elision != CoroCallNotElided
 }
 
+// coroHostOperationCallShape is the complete owner-independent ProgramIR
+// recipe for one llgo.coroHostOperation occurrence. Codegen consumes this POD
+// instead of recovering opcode, metadata placement, or pointer provenance from
+// raw SSA a second time.
+type coroHostOperationCallShape struct {
+	opcode        uint32
+	pointerMask   uint16
+	argumentCount uint8
+	metadataWords uint8
+}
+
+func (shape coroHostOperationCallShape) valid() bool {
+	if shape.opcode == 0 || shape.argumentCount > coroWorkerMaxArgsV1 ||
+		shape.pointerMask>>shape.argumentCount != 0 {
+		return false
+	}
+	return shape.metadataWords == 0 ||
+		shape.metadataWords == coroHostOperationDeadlineMetadataWordsV1
+}
+
 type coroFrozenCallSitePlan struct {
 	plan               CoroCallSitePlan
 	failure            string
 	opcode             int
 	intrinsicPlacement coroRuntimeHelperPlacement
+	hostOperation      coroHostOperationCallShape
 	workerCertificate  CoroWorkerSyscallCertificate
 	workerCertified    bool
 	workerOwners       map[*ssa.Function]none
@@ -2182,6 +2215,11 @@ func (u *EmissionUniverse) classifyCoroIntrinsicCallSite(
 			return CoroIntrinsicCallUnsupported, true, err
 		}
 		return CoroIntrinsicCallInlineSuspend, true, nil
+	case llgoCoroHostOperation:
+		if !u.coroCapabilities.HostOperation() {
+			return CoroIntrinsicCallUnsupported, true, nil
+		}
+		return CoroIntrinsicCallInlineSuspend, true, nil
 	default:
 		return CoroIntrinsicCallUnsupported, true, fmt.Errorf(
 			"emission universe intrinsic call semantics: inline intrinsic %q has no exact call-site verifier", callee.Name(),
@@ -2227,16 +2265,145 @@ func verifyCoroCgoCheckPointerCall(call *ssa.Call) error {
 
 const coroWorkerMaxArgsV1 = 9
 
-func validateCoroWorkerSyscallIntrinsicCallSite(call *ssa.Call) error {
+func planCoroHostOperationCallShape(call *ssa.Call) (coroHostOperationCallShape, error) {
+	if call == nil || call.Common() == nil || call.Common().IsInvoke() ||
+		call.Common().Method != nil {
+		return coroHostOperationCallShape{}, fmt.Errorf("llgo.coroHostOperation requires an exact direct call")
+	}
+	common := call.Common()
+	signature := common.Signature()
+	if signature == nil || signature.Recv() != nil || signature.Variadic() ||
+		signature.Params() == nil ||
+		signature.Params().Len() != len(common.Args) ||
+		len(common.Args) < 1 ||
+		len(common.Args)-1 > coroWorkerMaxArgsV1+coroHostOperationDeadlineMetadataWordsV1 {
+		return coroHostOperationCallShape{}, fmt.Errorf(
+			"llgo.coroHostOperation call %q has an invalid opcode/argument word count",
+			call.String(),
+		)
+	}
+	uintptrLike := func(typ types.Type) bool {
+		basic, ok := types.Unalias(typ).Underlying().(*types.Basic)
+		return ok && basic.Kind() == types.Uintptr
+	}
+	if !uintptrLike(signature.Params().At(0).Type()) ||
+		common.Args[0] == nil || !uintptrLike(common.Args[0].Type()) {
+		return coroHostOperationCallShape{}, fmt.Errorf(
+			"llgo.coroHostOperation call %q opcode is not uintptr-shaped", call.String(),
+		)
+	}
+	opcode, constantOpcode := common.Args[0].(*ssa.Const)
+	value, exact := uint64(0), false
+	if constantOpcode && opcode.Value != nil {
+		value, exact = constant.Uint64Val(opcode.Value)
+	}
+	if !exact || value == 0 || value > uint64(^uint32(0)) {
+		return coroHostOperationCallShape{}, fmt.Errorf(
+			"llgo.coroHostOperation call %q requires a non-zero compile-time uint32 opcode",
+			call.String(),
+		)
+	}
+	deadline := value&coroHostOperationDeadlineFlagV1 != 0
+	metadataWords := 0
+	if deadline {
+		metadataWords = coroHostOperationDeadlineMetadataWordsV1
+	}
+	if value&^coroHostOperationDeadlineFlagV1 == 0 ||
+		len(common.Args) < 1+metadataWords ||
+		len(common.Args)-1-metadataWords > coroWorkerMaxArgsV1 {
+		return coroHostOperationCallShape{}, fmt.Errorf(
+			"llgo.coroHostOperation call %q has invalid deadline metadata or more than %d host argument words",
+			call.String(), coroWorkerMaxArgsV1,
+		)
+	}
+	wordOrPointer := func(typ types.Type) bool {
+		if uintptrLike(typ) {
+			return true
+		}
+		switch underlying := types.Unalias(typ).Underlying().(type) {
+		case *types.Pointer:
+			return true
+		case *types.Basic:
+			return underlying.Kind() == types.UnsafePointer
+		default:
+			return false
+		}
+	}
+	for index := 1; index <= metadataWords; index++ {
+		if common.Args[index] == nil ||
+			!uintptrLike(common.Args[index].Type()) ||
+			!uintptrLike(signature.Params().At(index).Type()) {
+			return coroHostOperationCallShape{}, fmt.Errorf(
+				"llgo.coroHostOperation call %q deadline metadata %d is not uintptr-shaped",
+				call.String(), index-1,
+			)
+		}
+	}
+	pointerMask := uint16(0)
+	for index := 1 + metadataWords; index < len(common.Args); index++ {
+		if common.Args[index] == nil ||
+			!wordOrPointer(common.Args[index].Type()) ||
+			!wordOrPointer(signature.Params().At(index).Type()) {
+			return coroHostOperationCallShape{}, fmt.Errorf(
+				"llgo.coroHostOperation call %q argument %d is not uintptr/pointer-shaped",
+				call.String(), index,
+			)
+		}
+		switch underlying := types.Unalias(common.Args[index].Type()).Underlying().(type) {
+		case *types.Pointer:
+			pointerMask |= uint16(1) << (index - 1 - metadataWords)
+		case *types.Basic:
+			if underlying.Kind() == types.UnsafePointer {
+				pointerMask |= uint16(1) << (index - 1 - metadataWords)
+			}
+		}
+	}
+	results := signature.Results()
+	if results == nil || results.Len() != 3 {
+		return coroHostOperationCallShape{}, fmt.Errorf(
+			"llgo.coroHostOperation call %q requires exactly three uintptr results",
+			call.String(),
+		)
+	}
+	for index := 0; index < results.Len(); index++ {
+		if !uintptrLike(results.At(index).Type()) {
+			return coroHostOperationCallShape{}, fmt.Errorf(
+				"llgo.coroHostOperation call %q result %d is not uintptr-shaped",
+				call.String(), index,
+			)
+		}
+	}
+	shape := coroHostOperationCallShape{
+		opcode:        uint32(value &^ coroHostOperationDeadlineFlagV1),
+		pointerMask:   pointerMask,
+		argumentCount: uint8(len(common.Args) - 1 - metadataWords),
+		metadataWords: uint8(metadataWords),
+	}
+	if !shape.valid() {
+		return coroHostOperationCallShape{}, fmt.Errorf(
+			"llgo.coroHostOperation call %q produced an invalid frozen shape",
+			call.String(),
+		)
+	}
+	return shape, nil
+}
+
+// planCoroSynchronousSyscallShape validates the source-level synchronous
+// llgo.syscall ABI. The direct lowering preserves each physical scalar type:
+// Darwin's crypto/x509 bridge, for example, passes a float64 in the platform
+// floating-point argument register. This is deliberately wider than the
+// current address-only worker transport, whose callable contract is still the
+// exact uintptr-only word-call.v1 ABI checked below.
+func planCoroSynchronousSyscallShape(call *ssa.Call) error {
 	if call == nil || call.Common() == nil || call.Common().IsInvoke() {
-		return fmt.Errorf("emission universe intrinsic call semantics: worker llgo.syscall must be an exact direct call")
+		return fmt.Errorf("emission universe intrinsic call semantics: llgo.syscall must be an exact direct call")
 	}
 	common := call.Common()
 	signature := common.Signature()
 	if signature == nil || signature.Recv() != nil || signature.Variadic() || signature.Params() == nil ||
 		signature.Params().Len() != len(common.Args) || len(common.Args) < 1 || len(common.Args)-1 > coroWorkerMaxArgsV1 {
 		return fmt.Errorf(
-			"emission universe intrinsic call semantics: worker llgo.syscall call %q requires one function word and zero to %d argument words",
+			"emission universe intrinsic call semantics: llgo.syscall call %q requires one function word and zero to %d scalar arguments",
 			call.String(), coroWorkerMaxArgsV1,
 		)
 	}
@@ -2244,10 +2411,30 @@ func validateCoroWorkerSyscallIntrinsicCallSite(call *ssa.Call) error {
 		basic, ok := types.Unalias(typ).Underlying().(*types.Basic)
 		return ok && basic.Kind() == types.Uintptr
 	}
-	for index, argument := range common.Args {
-		if argument == nil || !uintptrLike(argument.Type()) || !uintptrLike(signature.Params().At(index).Type()) {
+	if common.Args[0] == nil || !uintptrLike(common.Args[0].Type()) ||
+		!uintptrLike(signature.Params().At(0).Type()) {
+		return fmt.Errorf(
+			"emission universe intrinsic call semantics: llgo.syscall call %q function argument is not uintptr-shaped",
+			call.String(),
+		)
+	}
+	scalarOrPointer := func(typ types.Type) bool {
+		switch underlying := types.Unalias(typ).Underlying().(type) {
+		case *types.Pointer:
+			return true
+		case *types.Basic:
+			return underlying.Kind() == types.UnsafePointer ||
+				underlying.Info()&(types.IsBoolean|types.IsInteger|types.IsFloat|types.IsComplex) != 0
+		default:
+			return false
+		}
+	}
+	for index := 1; index < len(common.Args); index++ {
+		argument := common.Args[index]
+		if argument == nil || !scalarOrPointer(argument.Type()) ||
+			!scalarOrPointer(signature.Params().At(index).Type()) {
 			return fmt.Errorf(
-				"emission universe intrinsic call semantics: worker llgo.syscall call %q argument %d is not uintptr-shaped",
+				"emission universe intrinsic call semantics: llgo.syscall call %q argument %d is not scalar/pointer-shaped",
 				call.String(), index,
 			)
 		}
@@ -2263,6 +2450,34 @@ func validateCoroWorkerSyscallIntrinsicCallSite(call *ssa.Call) error {
 		if !uintptrLike(results.At(index).Type()) {
 			return fmt.Errorf(
 				"emission universe intrinsic call semantics: worker llgo.syscall call %q result %d is not uintptr-shaped",
+				call.String(), index,
+			)
+		}
+	}
+	return nil
+}
+
+// validateCoroWorkerSyscallIntrinsicCallSite is the narrower physical
+// word-call.v1 gate. A typed synchronous syscall is valid source, but it may
+// enter the bounded worker only after a future typed callable contract and
+// typed-record lowering have been frozen; silently bitcasting a float or a
+// platform vector into this ABI would call the C target with the wrong
+// register convention.
+func validateCoroWorkerSyscallIntrinsicCallSite(call *ssa.Call) error {
+	if err := planCoroSynchronousSyscallShape(call); err != nil {
+		return err
+	}
+	common := call.Common()
+	signature := common.Signature()
+	uintptrLike := func(typ types.Type) bool {
+		basic, ok := types.Unalias(typ).Underlying().(*types.Basic)
+		return ok && basic.Kind() == types.Uintptr
+	}
+	for index, argument := range common.Args {
+		if argument == nil || !uintptrLike(argument.Type()) ||
+			!uintptrLike(signature.Params().At(index).Type()) {
+			return fmt.Errorf(
+				"emission universe intrinsic call semantics: worker llgo.syscall call %q argument %d is not uintptr-shaped",
 				call.String(), index,
 			)
 		}
@@ -2564,7 +2779,7 @@ func coroIntrinsicCallSemantics(opcode int) CoroIntrinsicCallSemantics {
 		return CoroIntrinsicCallInlineOutcome
 	case llgoCoroOSThreadLock, llgoCoroOSThreadUnlock:
 		return CoroIntrinsicCallInlineYield
-	case llgoCoroFFICall:
+	case llgoCoroFFICall, llgoCoroHostOperation:
 		return CoroIntrinsicCallInlineSuspend
 	default:
 		return CoroIntrinsicCallUnsupported
@@ -4474,6 +4689,21 @@ func (u *EmissionUniverse) exactManagedGoLinknameDefinition(fn *ssa.Function) (b
 		}
 	}
 	return false, nil
+}
+
+// CoroExactManagedGoLinknameDefinition reports whether fn is the frozen Go
+// body paired with one exact managed go:linkname declaration and whether the
+// linked raw-input inventory excludes a non-Go consumer. Callers may use this
+// as entry-closure evidence, but must still audit all ordinary Go call/value
+// uses in the frozen SSA universe.
+func (u *EmissionUniverse) CoroExactManagedGoLinknameDefinition(fn *ssa.Function) (bool, error) {
+	if u == nil {
+		return false, fmt.Errorf("managed go:linkname definition requires a prepared emission universe")
+	}
+	if fn == nil {
+		return false, fmt.Errorf("managed go:linkname definition requires a non-nil function")
+	}
+	return u.exactManagedGoLinknameDefinition(fn)
 }
 
 func (u *EmissionUniverse) pendingManagedGoLinknamePairHasNoRawConsumer(
@@ -6881,6 +7111,48 @@ func (u *EmissionUniverse) freezeCoroGlobalPhysicalIdentities() error {
 		}
 	}
 
+	// A linknamed Go global can reach a cell without sharing the owner's SSA
+	// object. Freeze its physical target even when the declaration-only package
+	// itself emits no data definition, so exported cells cannot accidentally
+	// acquire a whole-program writer certificate.
+	linknameTargets := make(map[string]none)
+	for _, prepared := range preparedPackages {
+		if prepared == nil {
+			continue
+		}
+		collectTargets := func(pkg *ssa.Package) {
+			if pkg == nil {
+				return
+			}
+			for name, member := range pkg.Members {
+				if _, global := member.(*ssa.Global); !global {
+					continue
+				}
+				if target, linked := u.prog.Linkname(llssa.FullName(prepared.pkgTypes, name)); linked && target != "" {
+					linknameTargets[target] = none{}
+				}
+			}
+		}
+		collectTargets(prepared.ssa)
+		if prepared.hasPatch {
+			collectTargets(prepared.patch.Alt)
+		}
+	}
+	rawWorldProvesAbsent := func(symbol string) bool {
+		if symbol == "" {
+			return false
+		}
+		for _, prepared := range preparedPackages {
+			if prepared == nil || prepared.metadataOnly {
+				continue
+			}
+			if !prepared.rawDataSymbols.provesAbsent(symbol) {
+				return false
+			}
+		}
+		return true
+	}
+
 	cells := make([]string, 0, len(byCell))
 	for cell := range byCell {
 		cells = append(cells, cell)
@@ -6898,6 +7170,10 @@ func (u *EmissionUniverse) freezeCoroGlobalPhysicalIdentities() error {
 		members := make([]*ssa.Global, 0, len(candidates))
 		memberSet := make(map[*ssa.Global]none, len(candidates))
 		internalLinkage := certified && first.privateSource && first.owner.rawDataSymbols.provesAbsent(first.physicalSymbol)
+		closedWorldWrites := certified && rawWorldProvesAbsent(first.physicalSymbol)
+		if _, aliased := linknameTargets[first.physicalSymbol]; aliased {
+			closedWorldWrites = false
+		}
 		for _, candidate := range candidates {
 			if candidate.owner != first.owner || candidate.physicalSymbol != first.physicalSymbol ||
 				candidate.structuralType != first.structuralType || candidate.background != first.background ||
@@ -6906,6 +7182,9 @@ func (u *EmissionUniverse) freezeCoroGlobalPhysicalIdentities() error {
 			}
 			if !candidate.privateSource {
 				internalLinkage = false
+			}
+			if candidate.linknamed {
+				closedWorldWrites = false
 			}
 			if _, exists := memberSet[candidate.global]; !exists {
 				memberSet[candidate.global] = none{}
@@ -6919,26 +7198,28 @@ func (u *EmissionUniverse) freezeCoroGlobalPhysicalIdentities() error {
 			internalLinkage = false
 		}
 		id := framedEmissionKey(
-			"cl-coro-global-physical-identity-v2",
+			"cl-coro-global-physical-identity-v3",
 			first.owner.identity,
 			first.physicalSymbol,
 			strconv.Itoa(int(first.background)),
 			first.structuralType,
 			strconv.FormatBool(first.define),
 			strconv.FormatBool(internalLinkage),
+			strconv.FormatBool(closedWorldWrites),
 		)
 		if _, exists := u.globalPhysicalGroups[id]; exists {
 			return fmt.Errorf("prepare emission universe: duplicate coroutine global physical identity %q", id)
 		}
 		group := CoroGlobalPhysicalIdentity{
-			ID:              id,
-			PackageIdentity: first.owner.identity,
-			PhysicalSymbol:  first.physicalSymbol,
-			StructuralType:  first.structuralType,
-			Background:      first.background,
-			Define:          first.define,
-			InternalLinkage: internalLinkage,
-			Members:         append([]*ssa.Global(nil), members...),
+			ID:                id,
+			PackageIdentity:   first.owner.identity,
+			PhysicalSymbol:    first.physicalSymbol,
+			StructuralType:    first.structuralType,
+			Background:        first.background,
+			Define:            first.define,
+			InternalLinkage:   internalLinkage,
+			ClosedWorldWrites: closedWorldWrites,
+			Members:           append([]*ssa.Global(nil), members...),
 		}
 		u.globalPhysicalGroups[id] = group
 		for _, member := range members {

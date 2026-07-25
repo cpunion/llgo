@@ -757,6 +757,7 @@ var llgoInstrs = map[string]int{
 	"coroOSThreadLock":        llgoCoroOSThreadLock,
 	"coroOSThreadUnlock":      llgoCoroOSThreadUnlock,
 	"coroFFICall":             llgoCoroFFICall,
+	"coroHostOperation":       llgoCoroHostOperation,
 	"pystr":                   llgoPyStr,
 	"pyList":                  llgoPyList,
 	"pyTuple":                 llgoPyTuple,
@@ -2398,14 +2399,13 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 			if !ok {
 				panic("unknown coroutine llgo.syscall failure convention")
 			}
-			operation, operationPlanned := p.plannedCoroPhysicalOperation(sourceCall)
-			managedWorker := operationPlanned && operation.operation == coroPhysicalOperationWorkerSyscall
-			if managedWorker {
-				p.observeCoroPhysicalOperation(sourceCall, coroPhysicalOperationWorkerSyscall)
-			} else if operationPlanned && operation.operation != coroPhysicalOperationNone {
-				panic(fmt.Sprintf("llgo.syscall selected incompatible frozen physical operation recipe %s", operation.operation))
-			} else if semantics, planned := p.plannedCoroIntrinsicCall(ftype); planned {
-				managedWorker = semantics == CoroIntrinsicCallInlineSuspend
+			_, managedWorker, operationPlanned := p.selectCoroPhysicalOperation(
+				sourceCall, coroPhysicalOperationWorkerSyscall,
+			)
+			if !managedWorker && !operationPlanned {
+				if semantics, planned := p.plannedCoroIntrinsicCall(ftype); planned {
+					managedWorker = semantics == CoroIntrinsicCallInlineSuspend
+				}
 			}
 			if managedWorker {
 				if act != llssa.Call || ds != nil {
@@ -2476,6 +2476,19 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 			}
 			args := p.compileValues(b, args, kind)
 			p.compileCoroFFICall(b, args)
+		case llgoCoroHostOperation:
+			if act != llssa.Call || ds != nil {
+				panic("llgo.coroHostOperation requires an exact direct call")
+			}
+			operation, selected, operationPlanned := p.selectCoroPhysicalOperation(
+				sourceCall, coroPhysicalOperationHostCall,
+			)
+			if !operationPlanned || !selected {
+				panic("llgo.coroHostOperation has no frozen host-operation recipe")
+			}
+			ret = p.compileCoroHostOperation(
+				b, args, call.Signature().Results(), operation.operationHost,
+			)
 		case llgoCoroOSThreadLock:
 			if act != llssa.Call || ds != nil || len(args) != 0 {
 				panic("llgo.coroOSThreadLock requires an exact direct zero-argument call")

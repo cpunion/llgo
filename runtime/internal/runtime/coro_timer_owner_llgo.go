@@ -1,4 +1,4 @@
-//go:build llgo && llgo_coro && llgo_coro_native_pipe && llgo_coro_native_timer && (darwin || linux) && !baremetal && !coro_runtime_adapter_test
+//go:build llgo && llgo_coro && !coro_runtime_adapter_test && ((llgo_coro_native_pipe && llgo_coro_native_timer && (darwin || linux) && !baremetal) || wasm || tinygo.wasm || baremetal || llgo_coro_host)
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -23,7 +23,6 @@ import (
 
 	catomic "github.com/goplus/llgo/runtime/internal/clite/sync/atomic"
 	"github.com/goplus/llgo/runtime/internal/coro"
-	"github.com/goplus/llgo/runtime/internal/coroclock"
 	"github.com/goplus/llgo/runtime/internal/corotimer"
 )
 
@@ -79,7 +78,7 @@ func __llgo_coro_timer_park_v2(g, handle, header, storage unsafe.Pointer, delay 
 	}
 	task := (*coro.G)(g)
 	driver, wantExecutor, wantRoute, ok := coro.CurrentExecutorTimerDriver(task)
-	now, clockOK := coroclock.MonotonicNano()
+	now, clockOK := CoroMonotonicNano()
 	deadline, deadlineOK := corotimer.DeadlineAfter(now, delay)
 	if !ok || !clockOK || !deadlineOK {
 		coroTimerAbortV2("cannot resolve coroutine Timer V2 owner or deadline")

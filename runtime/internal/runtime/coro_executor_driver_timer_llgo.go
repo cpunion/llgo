@@ -42,6 +42,13 @@ var (
 	coroProgramChannelExtraPagesV1State [coroNativeSourcePageCountV1 - 1]coro.ChannelOperationPage
 )
 
+// CoroMonotonicNano is the target-neutral clock consumed by Timer/Park and the
+// standard-library timer bridge. Native targets sample their local monotonic
+// clock; host-pull targets provide the same contract from published POD time.
+func CoroMonotonicNano() (int64, bool) {
+	return coroclock.MonotonicNano()
+}
+
 func coroProgramBindExecutorDriverV1(driver *coro.ExecutorDriver, p *coroP, registry *coro.ExecutorRegistry, handle coro.ExecutorHandle) bool {
 	if !coro.ConfigureTimerRegistrationPages(&coroProgramTimerTableV1State, coroProgramTimerExtraPagesV1State[:]) ||
 		!coro.ConfigurePollOperationPages(&coroProgramPollSourceV1State, coroProgramPollExtraPagesV1State[:]) ||

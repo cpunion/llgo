@@ -142,7 +142,20 @@ func (e plainError) RuntimeError() {}
 
 type boundsErrorCode uint8
 
-const boundsConvert boundsErrorCode = 1
+// Keep the source-island model numerically identical to the production
+// runtime. coro_nil_fault.go transports this code through its compact V2 fault
+// kind, so a fixture-local shortened enum would test a different ABI.
+const (
+	boundsIndex boundsErrorCode = iota
+	boundsSliceAlen
+	boundsSliceAcap
+	boundsSliceB
+	boundsSlice3Alen
+	boundsSlice3Acap
+	boundsSlice3B
+	boundsSlice3C
+	boundsConvert
+)
 
 type boundsError struct {
 	x      int64
@@ -601,6 +614,7 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 	t.Helper()
 	files := []string{
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_allocator.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_abort_libc.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_frame.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_program.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_run_decision.go"),

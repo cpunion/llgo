@@ -64,18 +64,69 @@ func TestCoroDynamicSliceBoundsNativeAndWasm32(t *testing.T) {
 				t.Fatalf("verify structured Slice before CoroSplit: %v\n%s", err, module.String())
 			}
 			for _, test := range []struct {
-				name       string
-				faults     int
-				boundsKind int
-				minUGT     int
+				name     string
+				kinds    []uint32
+				nilFault bool
+				minUGT   int
 			}{
-				{name: "Slice2", faults: 1, boundsKind: 1, minUGT: 2},
-				{name: "Slice2Suffix", faults: 1, boundsKind: 1, minUGT: 2},
-				{name: "Slice2Wide", faults: 1, boundsKind: 1, minUGT: 2},
-				{name: "Slice3", faults: 1, boundsKind: 1, minUGT: 3},
-				{name: "String2", faults: 1, boundsKind: 1, minUGT: 2},
-				{name: "StringConst", faults: 1, boundsKind: 1, minUGT: 2},
-				{name: "Pointer2", faults: 2, boundsKind: 1, minUGT: 2},
+				{
+					name: "Slice2",
+					kinds: []uint32{
+						coroBoundsFaultKind(coroBoundsFaultSliceAcap, true),
+						coroBoundsFaultKind(coroBoundsFaultSliceB, true),
+					},
+					minUGT: 2,
+				},
+				{
+					name: "Slice2Suffix",
+					kinds: []uint32{
+						coroBoundsFaultKind(coroBoundsFaultSliceAcap, true),
+						coroBoundsFaultKind(coroBoundsFaultSliceB, true),
+					},
+					minUGT: 2,
+				},
+				{
+					name: "Slice2Wide",
+					kinds: []uint32{
+						coroBoundsFaultKind(coroBoundsFaultSliceAcap, false),
+						coroBoundsFaultKind(coroBoundsFaultSliceB, false),
+					},
+					minUGT: 2,
+				},
+				{
+					name: "Slice3",
+					kinds: []uint32{
+						coroBoundsFaultKind(coroBoundsFaultSlice3Acap, true),
+						coroBoundsFaultKind(coroBoundsFaultSlice3B, true),
+						coroBoundsFaultKind(coroBoundsFaultSlice3C, true),
+					},
+					minUGT: 3,
+				},
+				{
+					name: "String2",
+					kinds: []uint32{
+						coroBoundsFaultKind(coroBoundsFaultSliceAlen, true),
+						coroBoundsFaultKind(coroBoundsFaultSliceB, true),
+					},
+					minUGT: 2,
+				},
+				{
+					name: "StringConst",
+					kinds: []uint32{
+						coroBoundsFaultKind(coroBoundsFaultSliceAlen, true),
+						coroBoundsFaultKind(coroBoundsFaultSliceB, true),
+					},
+					minUGT: 2,
+				},
+				{
+					name: "Pointer2",
+					kinds: []uint32{
+						coroBoundsFaultKind(coroBoundsFaultSliceAlen, true),
+						coroBoundsFaultKind(coroBoundsFaultSliceB, true),
+					},
+					nilFault: true,
+					minUGT:   2,
+				},
 			} {
 				function := functions[test.name]
 				functionPlan, ok := plan.FunctionPlan(function)
@@ -83,8 +134,13 @@ func TestCoroDynamicSliceBoundsNativeAndWasm32(t *testing.T) {
 					t.Fatalf("%s plan = %+v, present=%t; want may-unwind coroutine", test.name, functionPlan, ok)
 				}
 				body := requireCoroPhysicalFunction(t, module, "foo."+test.name).String()
-				if got := strings.Count(body, "call void @"+coroFaultPrepareHookV1); got != test.faults {
-					t.Fatalf("%s fault prepare calls = %d, want %d:\n%s", test.name, got, test.faults, body)
+				requireCoroParameterizedBoundsFaultKinds(t, body, test.kinds...)
+				wantNilFaults := 0
+				if test.nilFault {
+					wantNilFaults = 1
+				}
+				if got := strings.Count(body, "call void @"+coroFaultPrepareHookV1); got != wantNilFaults {
+					t.Fatalf("%s nil fault prepare calls = %d, want %d:\n%s", test.name, got, wantNilFaults, body)
 				}
 				if got := strings.Count(body, "icmp ugt"); got < test.minUGT {
 					t.Fatalf("%s inclusive bounds comparisons = %d, want at least %d:\n%s", test.name, got, test.minUGT, body)
@@ -94,10 +150,7 @@ func TestCoroDynamicSliceBoundsNativeAndWasm32(t *testing.T) {
 						t.Fatalf("%s retained native-stack helper %s:\n%s", test.name, helper, body)
 					}
 				}
-				if got := strings.Count(body, "i32 2"); got < test.boundsKind {
-					t.Fatalf("%s did not select the index/slice-bounds fault kind:\n%s", test.name, body)
-				}
-				if hook, aggregate := strings.Index(body, "call void @"+coroFaultPrepareHookV1), strings.LastIndex(body, "insertvalue"); hook < 0 || aggregate < hook {
+				if hook, aggregate := strings.Index(body, "call void @"+coroFaultPrepareHookV2), strings.LastIndex(body, "insertvalue"); hook < 0 || aggregate < hook {
 					t.Fatalf("%s constructed its result before the terminal bounds edge:\n%s", test.name, body)
 				}
 			}
@@ -105,7 +158,7 @@ func TestCoroDynamicSliceBoundsNativeAndWasm32(t *testing.T) {
 			runCoroABITestPipeline(t, prog, module)
 			for name := range functions {
 				resume := module.NamedFunction("foo." + name + "$coro.resume")
-				if resume.IsNil() || !strings.Contains(resume.String(), coroFaultPrepareHookV1) {
+				if resume.IsNil() || !strings.Contains(resume.String(), coroFaultPrepareHookV2) {
 					t.Fatalf("post-split %s resume lost its structured slice fault edge:\n%s", name, module.String())
 				}
 			}
@@ -114,7 +167,7 @@ func TestCoroDynamicSliceBoundsNativeAndWasm32(t *testing.T) {
 				t.Fatalf("emit structured Slice object: %v\n%s", err, module.String())
 			}
 			defer object.Dispose()
-			if len(object.Bytes()) == 0 || !bytes.Contains(object.Bytes(), []byte(coroFaultPrepareHookV1)) {
+			if len(object.Bytes()) == 0 || !bytes.Contains(object.Bytes(), []byte(coroFaultPrepareHookV2)) {
 				t.Fatal("post-CoroSplit object lost the structured slice fault hook")
 			}
 		})

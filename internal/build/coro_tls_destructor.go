@@ -887,9 +887,13 @@ func validateRequiredCoroClosedDynamicCalls(
 			return fmt.Errorf("compiler conditional global function-slot Store in %q lost its exact target", publication.owner.Name())
 		}
 		target, targetPlanned := plan.FunctionPlan(publication.target)
-		value, valuePlanned := plan.ValuePlan(publication.target)
+		value, valuePlanned := plan.ValuePlan(publication.store.Val)
+		targetID, targetIDPlanned := plan.FunctionID(publication.target)
 		if !targetPlanned || target.External != coro.Defined ||
-			!valuePlanned || len(value.Funcs) != 1 || value.Funcs[0].Rep != coro.Dispatch {
+			!targetIDPlanned || !valuePlanned || len(value.Funcs) != 1 ||
+			len(value.Funcs[0].Path) != 0 || value.Funcs[0].Rep != coro.Dispatch ||
+			value.Funcs[0].MayBeNil || len(value.Funcs[0].Targets) != 1 ||
+			value.Funcs[0].Targets[0] != targetID {
 			return fmt.Errorf("compiler conditional global function-slot Store target %q lost its managed descriptor plan (owner=%s target=%+v value=%+v/%t)",
 				publication.target.Name(), owner.Emission, target, value, valuePlanned)
 		}

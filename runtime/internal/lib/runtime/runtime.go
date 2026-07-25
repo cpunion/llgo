@@ -20,7 +20,6 @@ import (
 	"sync/atomic"
 	"unsafe"
 
-	c "github.com/goplus/llgo/runtime/internal/clite"
 	"github.com/goplus/llgo/runtime/internal/runtime"
 )
 
@@ -50,12 +49,8 @@ func Goexit() {
 func KeepAlive(x any) {
 }
 
-//llgo:coro worker
-//go:linkname c_write C.write
-func c_write(fd c.Int, p unsafe.Pointer, n c.SizeT) c.SsizeT
-
 func write(fd uintptr, p unsafe.Pointer, n int32) int32 {
-	return int32(c_write(c.Int(fd), p, c.SizeT(n)))
+	return runtimeWrite(fd, p, n)
 }
 
 const heapArenaBytes = 1024 * 1024

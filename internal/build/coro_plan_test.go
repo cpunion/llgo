@@ -573,8 +573,8 @@ func __llgo_coro_panic_prepare_v1() {}
 func __llgo_coro_recover_take_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_fault_payload_v1(uint32, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_fault_prepare_v1() {}
-func __llgo_coro_fault_payload_v2(uint32, uintptr, uintptr, unsafe.Pointer, unsafe.Pointer) {}
-func __llgo_coro_fault_prepare_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32, uintptr, uintptr) {}
+func __llgo_coro_fault_payload_v2(uint32, uint64, uintptr, unsafe.Pointer, unsafe.Pointer) {}
+func __llgo_coro_fault_prepare_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32, uint64, uintptr) {}
 func __llgo_coro_spawn_begin_v1() {}
 func __llgo_coro_spawn_commit_v1() {}
 func __llgo_coro_program_main_return_v1() {}
@@ -757,10 +757,6 @@ func atomicExchange(*uint32, uint32) uint32
 		coroTimerParkControlledSymbolV2,
 		coroTimerResumeSymbolV2,
 		coroTimerRequestControlledSymbolV2,
-		coroPollParkSymbolV2,
-		coroPollResumeSymbolV2,
-		coroPollUpdateDeadlineOrAbortSymbolV1,
-		coroPollPostClosingOrAbortSymbolV1,
 		coroKeyedParkSymbolV2,
 		coroKeyedResumeSymbolV2,
 		coroSemaphorePrepareOrAbortSymbolV2,
@@ -768,6 +764,10 @@ func atomicExchange(*uint32, uint32) uint32
 		coroNotifyPrepareOrAbortSymbolV2,
 		coroNotifyOneOrAbortSymbolV2,
 		coroNotifyAllOrAbortSymbolV2,
+		coroPollParkSymbolV2,
+		coroPollResumeSymbolV2,
+		coroPollUpdateDeadlineOrAbortSymbolV1,
+		coroPollPostClosingOrAbortSymbolV1,
 	}
 	wantTimerRoots = append(wantTimerRoots, wantRoots[5:]...)
 	if len(timerRoots) != len(wantTimerRoots) {
@@ -1134,10 +1134,13 @@ func atomicExchange(*uint32, uint32) uint32
 	externalABI := ssaPkg.Func("externalABI")
 	inlineIntrinsic := ssaPkg.Func("inlineIntrinsic")
 	atomicExchange := ssaPkg.Func("atomicExchange")
-	for _, fn := range []*ssa.Function{ssaPkg.Func("bootstrapHelper"), closureLoop, externalABI} {
+	for _, fn := range []*ssa.Function{ssaPkg.Func("bootstrapHelper"), closureLoop} {
 		if _, ok := requiredPlain[fn]; !ok {
 			t.Fatalf("required plain closure omitted %s", fn.Name())
 		}
+	}
+	if _, ok := requiredPlain[externalABI]; ok {
+		t.Fatal("default may-block external ABI was rewritten as a required no-suspend plain leaf")
 	}
 	if _, ok := requiredPlain[unrelatedLoop]; ok {
 		t.Fatal("required plain closure captured an unrelated function")
@@ -1159,6 +1162,8 @@ func atomicExchange(*uint32, uint32) uint32
 		EmissionUniverse:      ssaEmission,
 		resolveFunction:       emission.Resolve,
 		functionBackground:    emission.FunctionBackground,
+		callableIdentity:      emission.CoroCallableIdentityCertificate,
+		callableContract:      emission.CoroCallableContractCertificate,
 		callSitePlan:          emission.CoroCallSitePlan,
 		requiredRoots:         roots,
 		requiredPlain:         requiredPlain,
@@ -1213,8 +1218,12 @@ func atomicExchange(*uint32, uint32) uint32
 		t.Fatalf("unrelated loop plan = %+v, want coroutine preemption", unrelatedPlan)
 	}
 	externalPlan, ok := plan.FunctionPlan(externalABI)
-	if !ok || externalPlan.External != coro.ExternalKnown || externalPlan.Emission != coro.EmitExternal || externalPlan.Demand != coro.SyncDemand {
-		t.Fatalf("required bodyless ABI plan = %+v, want sync external-known", externalPlan)
+	if !ok || externalPlan.External != coro.ExternalUnknownForeign ||
+		externalPlan.Emission != coro.EmitExternal || externalPlan.Demand != coro.SyncDemand ||
+		externalPlan.ManagedDemand != coro.NoDemand || !externalPlan.RawPlainDemand ||
+		externalPlan.Exec != coro.BlockForeign|coro.IRQUnsafe ||
+		externalPlan.FuncRep != coro.DirectPlain {
+		t.Fatalf("raw bodyless ABI plan = %+v, want certified synchronous call on the foreign caller stack", externalPlan)
 	}
 	var intrinsicCall ssa.CallInstruction
 	for _, call := range coroPlanTestCalls(ssaPkg.Func("bootstrapHelper")) {
@@ -1343,11 +1352,11 @@ func CoroChanSelectTry(...ChanOp) (int, bool, bool, bool) { return 0, false, fal
 func CoroChanSelectPark(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) {}
 func CoroChanSelectResume(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) (int, bool, uint32) { return 0, false, 0 }
 func __llgo_coro_fault_prepare_v1() {}
-func __llgo_coro_fault_prepare_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32, uintptr, uintptr) {}
+func __llgo_coro_fault_prepare_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32, uint64, uintptr) {}
 func __llgo_coro_panic_prepare_v1() {}
 func __llgo_coro_recover_take_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_fault_payload_v1(uint32, unsafe.Pointer, unsafe.Pointer) {}
-func __llgo_coro_fault_payload_v2(uint32, uintptr, uintptr, unsafe.Pointer, unsafe.Pointer) {}
+func __llgo_coro_fault_payload_v2(uint32, uint64, uintptr, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_spawn_begin_v1() {}
 func __llgo_coro_spawn_commit_v1() {}
 func __llgo_coro_program_main_return_v1() {}
@@ -1439,8 +1448,9 @@ func install() {
 	mixedCallback, ok := mixedPlan.FunctionPlan(syncCallback)
 	if !ok || mixedCallback.ManagedDemand == coro.NoDemand || !mixedCallback.RawPlainDemand || mixedCallback.RawPlainOnly ||
 		!mixedCallback.RawPlainEntry || !mixedPlan.HasRawPlainVariant(syncCallback) ||
-		mixedCallback.FuncRep != coro.DirectCoro || mixedCallback.Primary != coro.PrimaryCoroutine || mixedCallback.Emission != coro.EmitCoroutine {
-		t.Fatalf("managed/raw C callback plan = %+v, want managed coroutine primary plus exact raw callback variant", mixedCallback)
+		mixedCallback.FuncRep != coro.DirectPlain || mixedCallback.Primary != coro.PrimaryPlain ||
+		mixedCallback.Emission != coro.EmitPlain {
+		t.Fatalf("managed/raw C callback plan = %+v, want one shared no-suspend plain body", mixedCallback)
 	}
 	dynamicPlan, ok := plan.FunctionPlan(dynamicCallback)
 	if !ok || dynamicPlan.Effect.IsOpaque() ||
@@ -1590,8 +1600,8 @@ func install() {
 	cLeaf := fixture.pkg.Func("cLeaf")
 	hidden := fixture.pkg.Func("hidden")
 	cCallback := fixture.pkg.Func("cCallback")
-	if _, ok := fixture.requiredPlain[cLeaf]; !ok {
-		t.Fatal("exact frozen C static callee was not retained as a required plain leaf")
+	if _, ok := fixture.requiredPlain[cLeaf]; ok {
+		t.Fatal("default may-block C leaf was rewritten as a required no-suspend plain leaf")
 	}
 	if _, ok := fixture.requiredPlain[hidden]; ok {
 		t.Fatal("callee reachable only through a frozen C fallback body entered requiredPlain")
@@ -1871,11 +1881,11 @@ func CoroChanSelectTry(...ChanOp) (int, bool, bool, bool) { return 0, false, fal
 func CoroChanSelectPark(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) {}
 func CoroChanSelectResume(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) (int, bool, uint32) { return 0, false, 0 }
 func __llgo_coro_fault_prepare_v1() {}
-func __llgo_coro_fault_prepare_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32, uintptr, uintptr) {}
+func __llgo_coro_fault_prepare_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32, uint64, uintptr) {}
 func __llgo_coro_panic_prepare_v1() {}
 func __llgo_coro_recover_take_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_fault_payload_v1(uint32, unsafe.Pointer, unsafe.Pointer) {}
-func __llgo_coro_fault_payload_v2(uint32, uintptr, uintptr, unsafe.Pointer, unsafe.Pointer) {}
+func __llgo_coro_fault_payload_v2(uint32, uint64, uintptr, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_spawn_begin_v1() {}
 func __llgo_coro_spawn_commit_v1() {}
 func __llgo_coro_program_main_return_v1() {}

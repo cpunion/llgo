@@ -1,4 +1,4 @@
-//go:build llgo_coro
+//go:build llgo_coro && !wasip2 && !wasm_unknown
 
 package runtime
 

@@ -1,4 +1,4 @@
-//go:build llgo && llgo_coro && wasm && !js && !wasip1 && !wasi && !baremetal && !coro_runtime_adapter_test
+//go:build llgo && llgo_coro && (wasm || tinygo.wasm) && !js && !wasip1 && !wasi && !wasip2 && !baremetal && !coro_runtime_adapter_test
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -12,4 +12,5 @@ package runtime
 // Unknown/custom wasm environments use only the explicit pull reactor ABI.
 // They are not silently treated as either JS microtasks or WASI poll_oneoff.
 const coroHostPlatformProfileV1 = coroHostProfileWasmReactorV1 |
-	coroHostCapabilityScheduleV1 | coroHostCapabilityAlarmV1 | coroHostCapabilityExternalReactorV1
+	coroHostCapabilityScheduleV1 | coroHostCapabilityAlarmV1 |
+	coroHostCapabilityOperationV1 | coroHostCapabilityExternalReactorV1

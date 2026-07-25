@@ -81,7 +81,12 @@ const (
 	// SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0 is the
 	// complete identity for all three independently gated scheduler sources.
 	SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0 = "llgo.coro.scheduler.program-bootstrap.v2.channel.v0.worker.v0.closed-static-spawn.v0"
-	PanicLegacyABIV0                                             = "llgo.coro.panic.legacy.v0"
+	// SchedulerProgramBootstrapChannelHostOperationClosedStaticSpawnABIV0
+	// replaces the native pthread transport with the host-pull external
+	// operation catalog. Both share logical scalar completion semantics, but
+	// their physical request/cancel ABIs must never share archive identity.
+	SchedulerProgramBootstrapChannelHostOperationClosedStaticSpawnABIV0 = "llgo.coro.scheduler.program-bootstrap.v2.channel.v0.host-operation.v1.closed-static-spawn.v0"
+	PanicLegacyABIV0                                                    = "llgo.coro.panic.legacy.v0"
 	// PanicExplicitStatusABIV0 identifies compiler-carried panic outcomes. A
 	// managed child publishes into its parent's CompletionRecord; a root
 	// publishes into the task-local PanicRecord. Parent-frame direct-child scopes
@@ -402,13 +407,16 @@ func (p *SSAPlan) canonicalPlanDigest(metadata PlanDigestMetadata) (planDigestDo
 						if store.Parent() != fn || target == nil {
 							return planDigestDocument{}, fmt.Errorf("coro: conditional managed Store at function %q block %d instruction %d has no exact owner/target", id, blockIndex, semanticIndex)
 						}
-						exact, singleton := exactSSAContextFreeFunctionValue(store.Val)
-						if !singleton || exact != target {
-							return planDigestDocument{}, fmt.Errorf("coro: conditional managed Store at function %q block %d instruction %d no longer carries its exact target", id, blockIndex, semanticIndex)
-						}
 						targetID, planned := p.byFunction[target]
 						if !planned {
 							return planDigestDocument{}, fmt.Errorf("coro: conditional managed Store at function %q block %d instruction %d targets a function outside the plan", id, blockIndex, semanticIndex)
+						}
+						value, valuePlanned := p.valuePlans[store.Val]
+						if !valuePlanned || value.Value != store.Val || len(value.Funcs) != 1 ||
+							len(value.Funcs[0].Path) != 0 || value.Funcs[0].Rep != Dispatch ||
+							value.Funcs[0].MayBeNil || len(value.Funcs[0].Targets) != 1 ||
+							value.Funcs[0].Targets[0] != targetID {
+							return planDigestDocument{}, fmt.Errorf("coro: conditional managed Store at function %q block %d instruction %d no longer carries its exact target", id, blockIndex, semanticIndex)
 						}
 						if _, duplicate := seenConditionalStores[store]; duplicate {
 							return planDigestDocument{}, fmt.Errorf("coro: duplicate conditional managed Store occurrence for function %q block %d instruction %d", id, blockIndex, semanticIndex)
@@ -595,6 +603,7 @@ func (m PlanDigestMetadata) validate() error {
 				m.SchedulerABI != SchedulerProgramBootstrapChannelABIV0 &&
 				m.SchedulerABI != SchedulerProgramBootstrapChannelWorkerABIV0 &&
 				m.SchedulerABI != SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0 &&
+				m.SchedulerABI != SchedulerProgramBootstrapChannelHostOperationClosedStaticSpawnABIV0 &&
 				m.SchedulerABI != SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0) {
 			return fmt.Errorf("coro: plan digest frame-retention ABI %q requires PhysicalABIV1 runnable program-bootstrap metadata", m.FrameRetentionABI)
 		}

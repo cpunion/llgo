@@ -70,6 +70,8 @@ func TestHostCoroPullRuntimeABISelection(t *testing.T) {
 		{name: "wasm-wasi", conf: &Config{Goos: "wasip1", Goarch: "wasm"}, want: true},
 		{name: "wasm-js", conf: &Config{Goos: "js", Goarch: "wasm"}, want: true},
 		{name: "wasm-unknown", conf: &Config{Goos: "unknown", Goarch: "wasm"}, want: true},
+		{name: "named-wasip2", conf: &Config{Goos: "linux", Goarch: "arm", Target: "wasip2", resolvedTargetBuildTags: []string{"tinygo.wasm", "wasip2"}}, want: true},
+		{name: "named-wasm-unknown", conf: &Config{Goos: "linux", Goarch: "arm", Target: "wasm-unknown", resolvedTargetBuildTags: []string{"tinygo.wasm", "wasm_unknown"}}, want: true},
 		{name: "baremetal-config", conf: &Config{Goos: "linux", Goarch: "arm", Tags: "nogc,baremetal"}, want: true},
 		{name: "baremetal-resolved-target", conf: &Config{Goos: "linux", Goarch: "arm", Target: "rp2040", resolvedTargetBuildTags: []string{"rp2040", "baremetal"}}, want: true},
 		{name: "explicit-embedded", conf: &Config{Goos: "linux", Goarch: "arm64", Tags: "llgo_coro_host"}, want: true},

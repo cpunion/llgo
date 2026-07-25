@@ -20,7 +20,6 @@ import (
 	"unsafe"
 
 	c "github.com/goplus/llgo/runtime/internal/clite"
-	"github.com/goplus/llgo/runtime/internal/clite/pthread"
 	"github.com/goplus/llgo/runtime/internal/clite/setjmp"
 )
 
@@ -67,7 +66,7 @@ func Panic(v any) {
 }
 
 var (
-	excepKey pthread.Key
+	excepKey panicSlot
 )
 
 //go:linkname coroGoexit llgo.coroGoexit
@@ -78,7 +77,7 @@ func Goexit() {
 }
 
 func init() {
-	excepKey.Create(nil)
+	excepKey.Create()
 }
 
 // -----------------------------------------------------------------------------

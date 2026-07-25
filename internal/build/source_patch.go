@@ -83,13 +83,14 @@ func applySourcePatchForPkg(base, current map[string][]byte, runtimeDir, goroot,
 	}
 
 	var (
-		out              = current
-		changed          bool
-		patchSrcs        = make(map[string][]byte)
-		skipAll          bool
-		skips            = make(map[string]struct{})
-		annotations      = make(map[string][]string)
-		annotationCounts = make(map[string]int)
+		out                  = current
+		changed              bool
+		patchSrcs            = make(map[string][]byte)
+		assemblyReplacements = make(map[string][]byte)
+		skipAll              bool
+		skips                = make(map[string]struct{})
+		annotations          = make(map[string][]string)
+		annotationCounts     = make(map[string]int)
 	)
 	readOverlay := func(filename string) ([]byte, error) {
 		if out != nil {
@@ -112,7 +113,9 @@ func applySourcePatchForPkg(base, current map[string][]byte, runtimeDir, goroot,
 			continue
 		}
 		name := entry.Name()
-		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+		isGo := strings.HasSuffix(name, ".go") && !strings.HasSuffix(name, "_test.go")
+		isPlan9Assembly := strings.HasSuffix(name, ".s")
+		if !isGo && !isPlan9Assembly {
 			continue
 		}
 		match, err := buildCtx.MatchFile(patchDir, name)
@@ -126,6 +129,14 @@ func applySourcePatchForPkg(base, current map[string][]byte, runtimeDir, goroot,
 		src, err := readOverlay(filename)
 		if err != nil {
 			return false, nil, fmt.Errorf("read source patch file %s: %w", filename, err)
+		}
+		if isPlan9Assembly {
+			original := filepath.Join(srcDir, name)
+			if _, err := os.Stat(original); err != nil {
+				return false, nil, fmt.Errorf("source patch assembly replacement %s has no GOROOT target: %w", filename, err)
+			}
+			assemblyReplacements[name] = src
+			continue
 		}
 		directives, err := collectSourcePatchDirectives(src)
 		if err != nil {
@@ -223,6 +234,12 @@ func applySourcePatchForPkg(base, current map[string][]byte, runtimeDir, goroot,
 		target := filepath.Join(srcDir, "z_llgo_patch_"+name)
 		ensureOverlay()
 		out[target] = src
+		changed = true
+	}
+	for name, src := range assemblyReplacements {
+		target := filepath.Join(srcDir, name)
+		ensureOverlay()
+		out[target] = slices.Clone(src)
 		changed = true
 	}
 	return changed, out, nil

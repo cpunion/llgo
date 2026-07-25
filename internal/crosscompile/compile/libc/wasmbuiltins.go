@@ -11,7 +11,7 @@ import (
 )
 
 const wasmBuiltinsRevision = "1dfe5c302d1c5ab621f7abf04620fae92700fd22"
-const wasmBuiltinsRecipe = "dlmalloc-v4"
+const wasmBuiltinsRecipe = "dlmalloc-v5"
 
 // GetWasmBuiltinsConfig returns the pinned wasi-libc source used for the
 // freestanding WebAssembly builtin library. This is deliberately separate
@@ -201,8 +201,10 @@ func GetWasmBuiltinsCompileConfig(baseDir, includeDir, target string) compile.Co
 				filepath.Join(includeDir, "errno_state.c"),
 				filepath.Join(baseDir, "libc-bottom-half", "sources", "abort.c"),
 				source("string", "memcpy.c"),
+				source("string", "memcmp.c"),
 				source("string", "memmove.c"),
 				source("string", "memset.c"),
+				source("string", "strlen.c"),
 				source("math", "__math_divzero.c"),
 				source("math", "__math_invalid.c"),
 				source("math", "__math_oflow.c"),

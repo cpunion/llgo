@@ -26,16 +26,31 @@ import (
 )
 
 const (
-	coroWorkerParkHookV1          = "__llgo_coro_worker_park_v1"
-	coroWorkerResumeHookV1        = "__llgo_coro_worker_resume_v1"
-	coroOSThreadLockedHookV1      = "__llgo_coro_os_thread_locked_v1"
-	coroOSThreadForeignCallHookV1 = "__llgo_coro_os_thread_foreign_call_v1"
+	coroWorkerParkHookV1                  = "__llgo_coro_worker_park_v1"
+	coroWorkerResumeHookV1                = "__llgo_coro_worker_resume_v1"
+	coroHostOperationParkHookV1           = "__llgo_coro_host_operation_park_v1"
+	coroHostOperationResumeHookV1         = "__llgo_coro_host_operation_resume_v1"
+	coroHostOperationDeadlineParkHookV1   = "__llgo_coro_host_operation_deadline_park_v1"
+	coroHostOperationDeadlineResumeHookV1 = "__llgo_coro_host_operation_deadline_resume_v1"
+	coroOSThreadLockedHookV1              = "__llgo_coro_os_thread_locked_v1"
+	coroOSThreadForeignCallHookV1         = "__llgo_coro_os_thread_foreign_call_v1"
+)
+
+const (
+	coroHostOperationDeadlineFlagV1          = uint64(1 << 31)
+	coroHostOperationDeadlineMetadataWordsV1 = 6
 )
 
 const (
 	coroWorkerResumeSuccessV1 uint64 = iota + 1
 	coroWorkerResumeTaskAbortV1
 	coroWorkerResumeShutdownV1
+)
+
+const (
+	coroHostOperationResumeSuccessV1 uint64 = iota + 1
+	coroHostOperationResumeTaskAbortV1
+	coroHostOperationResumeShutdownV1
 )
 
 func coroWorkerParkSignature() *types.Signature {
@@ -66,6 +81,48 @@ func coroWorkerResumeSignature() *types.Signature {
 	)
 	results := types.NewTuple(types.NewParam(token.NoPos, nil, "status", types.Typ[types.Uint32]))
 	return types.NewSignatureType(nil, nil, nil, params, results, false)
+}
+
+func coroHostOperationParkSignature() *types.Signature {
+	pointer := types.Typ[types.UnsafePointer]
+	params := []*types.Var{
+		types.NewParam(token.NoPos, nil, "g", pointer),
+		types.NewParam(token.NoPos, nil, "handle", pointer),
+		types.NewParam(token.NoPos, nil, "header", pointer),
+		types.NewParam(token.NoPos, nil, "state", pointer),
+		types.NewParam(token.NoPos, nil, "opcode", types.Typ[types.Uint32]),
+		types.NewParam(token.NoPos, nil, "argc", types.Typ[types.Uint32]),
+	}
+	for index := 0; index < coroWorkerMaxArgsV1; index++ {
+		params = append(params, types.NewParam(token.NoPos, nil, fmt.Sprintf("a%d", index), types.Typ[types.Uintptr]))
+	}
+	return types.NewSignatureType(nil, nil, nil, types.NewTuple(params...), nil, false)
+}
+
+func coroHostOperationResumeSignature() *types.Signature {
+	return coroWorkerResumeSignature()
+}
+
+func coroHostOperationDeadlineParkSignature() *types.Signature {
+	pointer := types.Typ[types.UnsafePointer]
+	params := []*types.Var{
+		types.NewParam(token.NoPos, nil, "g", pointer),
+		types.NewParam(token.NoPos, nil, "handle", pointer),
+		types.NewParam(token.NoPos, nil, "header", pointer),
+		types.NewParam(token.NoPos, nil, "state", pointer),
+		types.NewParam(token.NoPos, nil, "opcode", types.Typ[types.Uint32]),
+		types.NewParam(token.NoPos, nil, "argc", types.Typ[types.Uint32]),
+		types.NewParam(token.NoPos, nil, "deadlineLo", types.Typ[types.Uintptr]),
+		types.NewParam(token.NoPos, nil, "deadlineHi", types.Typ[types.Uintptr]),
+		types.NewParam(token.NoPos, nil, "timeoutErrno", types.Typ[types.Uintptr]),
+		types.NewParam(token.NoPos, nil, "controlKey", types.Typ[types.Uintptr]),
+		types.NewParam(token.NoPos, nil, "controlLane", types.Typ[types.Uintptr]),
+		types.NewParam(token.NoPos, nil, "controlEpoch", types.Typ[types.Uintptr]),
+	}
+	for index := 0; index < coroWorkerMaxArgsV1; index++ {
+		params = append(params, types.NewParam(token.NoPos, nil, fmt.Sprintf("a%d", index), types.Typ[types.Uintptr]))
+	}
+	return types.NewSignatureType(nil, nil, nil, types.NewTuple(params...), nil, false)
 }
 
 func coroOSThreadLockedSignature() *types.Signature {
@@ -114,6 +171,63 @@ type coroWorkerWordResultV1 struct {
 	errno llssa.Expr
 }
 
+type coroHostWordOperationV1 struct {
+	metadata []llssa.Expr
+}
+
+// compileCoroHostOperation lowers one source-style synchronous host request
+// into the shared scalar external-operation source. Unlike a native worker it
+// has no current-thread/direct branch: only a later host turn owns the
+// operation. Pointer-shaped operands remain typed in compiler-owned frame
+// slots until exact completion, while the host catalog receives copied words.
+func (p *context) compileCoroHostOperation(
+	b llssa.Builder,
+	args []ssa.Value,
+	results *types.Tuple,
+	shape coroHostOperationCallShape,
+) llssa.Expr {
+	if !shape.valid() ||
+		len(args) != 1+int(shape.metadataWords)+int(shape.argumentCount) {
+		panic("coroutine host operation disagrees with its frozen ProgramIR shape")
+	}
+	word := p.prog.Uintptr()
+	metadata := make([]llssa.Expr, int(shape.metadataWords))
+	for index := range metadata {
+		metadata[index] = p.compileValue(b, args[index+1])
+		if !types.Identical(metadata[index].RawType(), word.RawType()) {
+			panic(fmt.Sprintf("coroutine host operation metadata %d is not word-shaped", index))
+		}
+	}
+	physicalWords := make([]llssa.Expr, 0, int(shape.argumentCount))
+	keepaliveSlots := make([]llssa.Expr, 0, int(shape.argumentCount))
+	for index, argument := range args[1+int(shape.metadataWords):] {
+		value := p.compileValue(b, argument)
+		if shape.pointerMask&(uint16(1)<<index) != 0 {
+			slot := p.coroFrameAlloc(value.Type)
+			b.Store(slot, value)
+			keepaliveSlots = append(keepaliveSlots, slot)
+			value = b.Convert(word, value)
+		}
+		if !types.Identical(value.RawType(), word.RawType()) {
+			panic(fmt.Sprintf("coroutine host operation argument %d is not word-shaped", index))
+		}
+		physicalWords = append(physicalWords, value)
+	}
+	result := p.compileCoroWorkerWordCall(
+		b,
+		p.prog.IntVal(uint64(shape.opcode), p.prog.Uint32()),
+		physicalWords,
+		keepaliveSlots,
+		&coroHostWordOperationV1{metadata: metadata},
+	)
+	return b.Aggregate(
+		p.type_(results, llssa.InGo),
+		result.r1,
+		result.r2,
+		result.errno,
+	)
+}
+
 // compileCoroWorkerWordCall is the one physical ForeignWait transaction used
 // by both llgo.syscall and exact ordinary C-call thunks. function always names
 // a uniform uintptr (...uintptr) thunk whose arity is len(args); typed foreign
@@ -123,14 +237,21 @@ func (p *context) compileCoroWorkerWordCall(
 	function llssa.Expr,
 	args []llssa.Expr,
 	keepaliveSlots []llssa.Expr,
+	host *coroHostWordOperationV1,
 ) coroWorkerWordResultV1 {
 	body := p.requireCoroWorkerBody(b)
-	if function.IsNil() || len(args) > coroWorkerMaxArgsV1 {
+	if function.IsNil() || len(args) > coroWorkerMaxArgsV1 ||
+		host != nil && len(host.metadata) != 0 &&
+			len(host.metadata) != coroHostOperationDeadlineMetadataWordsV1 {
 		panic("coroutine worker word call received an invalid function or argument count")
 	}
 	word := p.prog.Uintptr()
-	if !types.Identical(function.RawType(), word.RawType()) {
-		panic("coroutine worker word call function is not uintptr-shaped")
+	keyType := word
+	if host != nil {
+		keyType = p.prog.Uint32()
+	}
+	if !types.Identical(function.RawType(), keyType.RawType()) {
+		panic("coroutine external word operation has the wrong key type")
 	}
 	for index, argument := range args {
 		if argument.IsNil() || !types.Identical(argument.RawType(), word.RawType()) {
@@ -138,12 +259,38 @@ func (p *context) compileCoroWorkerWordCall(
 		}
 	}
 
-	state := b.Alloc(p.prog.RuntimeType("CoroWorkerParkV1"), false)
+	stateType := "CoroWorkerParkV1"
+	parkHook := coroWorkerParkHookV1
+	parkSignature := coroWorkerParkSignature()
+	resumeHook := coroWorkerResumeHookV1
+	resumeSignature := coroWorkerResumeSignature()
+	normal := coroWorkerResumeSuccessV1
+	abort := coroWorkerResumeTaskAbortV1
+	shutdown := coroWorkerResumeShutdownV1
+	metadata := []llssa.Expr(nil)
+	if host != nil {
+		stateType = "CoroHostOperationParkV1"
+		parkHook = coroHostOperationParkHookV1
+		parkSignature = coroHostOperationParkSignature()
+		resumeHook = coroHostOperationResumeHookV1
+		resumeSignature = coroHostOperationResumeSignature()
+		normal = coroHostOperationResumeSuccessV1
+		abort = coroHostOperationResumeTaskAbortV1
+		shutdown = coroHostOperationResumeShutdownV1
+		metadata = host.metadata
+		if len(metadata) != 0 {
+			stateType = "CoroHostOperationDeadlineParkV1"
+			parkHook = coroHostOperationDeadlineParkHookV1
+			parkSignature = coroHostOperationDeadlineParkSignature()
+			resumeHook = coroHostOperationDeadlineResumeHookV1
+		}
+	}
+	state := b.Alloc(p.prog.RuntimeType(stateType), false)
 	r1 := b.Alloc(p.prog.Uintptr(), false)
 	r2 := b.Alloc(p.prog.Uintptr(), false)
 	errno := b.Alloc(p.prog.Uintptr(), false)
 	zero := p.prog.Zero(p.prog.Uintptr())
-	physicalArgs := make([]llssa.Expr, 0, 6+coroWorkerMaxArgsV1)
+	physicalArgs := make([]llssa.Expr, 0, 6+len(metadata)+coroWorkerMaxArgsV1)
 	physicalArgs = append(physicalArgs,
 		body.task,
 		body.coro.Handle(),
@@ -152,12 +299,42 @@ func (p *context) compileCoroWorkerWordCall(
 		function,
 		p.prog.IntVal(uint64(len(args)), p.prog.Uint32()),
 	)
+	physicalArgs = append(physicalArgs, metadata...)
 	for index := 0; index < coroWorkerMaxArgsV1; index++ {
 		if index < len(args) {
 			physicalArgs = append(physicalArgs, args[index])
 		} else {
 			physicalArgs = append(physicalArgs, zero)
 		}
+	}
+
+	emitPark := func(worker llssa.Builder) {
+		body.emitCoroParkOperation(p, worker, coroParkOperation{
+			shouldSuspend: worker.Prog.BoolVal(true),
+			park: func(suspend llssa.Builder) {
+				park := p.pkg.NewFunc(parkHook, parkSignature, llssa.InC)
+				suspend.Call(park.Expr, physicalArgs...)
+			},
+			resume: func(resume llssa.Builder) llssa.Expr {
+				hook := p.pkg.NewFunc(resumeHook, resumeSignature, llssa.InC)
+				return resume.Call(
+					hook.Expr,
+					body.task,
+					resume.Convert(resume.Prog.VoidPtr(), state),
+					r1,
+					r2,
+					errno,
+				)
+			},
+			normal:   []uint64{normal},
+			abort:    abort,
+			shutdown: shutdown,
+		})
+	}
+	if host != nil {
+		emitPark(b)
+		p.emitCoroKeepaliveSlots(b, keepaliveSlots)
+		return coroWorkerWordResultV1{r1: b.Load(r1), r2: b.Load(r2), errno: b.Load(errno)}
 	}
 
 	lockedHook := p.pkg.NewFunc(coroOSThreadLockedHookV1, coroOSThreadLockedSignature(), llssa.InC)
@@ -179,27 +356,7 @@ func (p *context) compileCoroWorkerWordCall(
 	b.Jump(join)
 
 	b.SetBlockEx(workerBlock, llssa.AtEnd, false)
-	body.emitCoroParkOperation(p, b, coroParkOperation{
-		shouldSuspend: b.Prog.BoolVal(true),
-		park: func(suspend llssa.Builder) {
-			park := p.pkg.NewFunc(coroWorkerParkHookV1, coroWorkerParkSignature(), llssa.InC)
-			suspend.Call(park.Expr, physicalArgs...)
-		},
-		resume: func(resume llssa.Builder) llssa.Expr {
-			resumeHook := p.pkg.NewFunc(coroWorkerResumeHookV1, coroWorkerResumeSignature(), llssa.InC)
-			return resume.Call(
-				resumeHook.Expr,
-				body.task,
-				resume.Convert(resume.Prog.VoidPtr(), state),
-				r1,
-				r2,
-				errno,
-			)
-		},
-		normal:   []uint64{coroWorkerResumeSuccessV1},
-		abort:    coroWorkerResumeTaskAbortV1,
-		shutdown: coroWorkerResumeShutdownV1,
-	})
+	emitPark(b)
 	b.Jump(join)
 	b.SetBlockContinuation(join)
 	// The worker queue deliberately contains only copied uintptr words. Keep
@@ -308,7 +465,7 @@ func (p *context) compileCoroWorkerSyscall(
 		compiled[index] = p.compileValue(b, argument)
 	}
 	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, direct)
-	result := p.compileCoroWorkerWordCall(b, compiled[0], compiled[1:], keepaliveSlots)
+	result := p.compileCoroWorkerWordCall(b, compiled[0], compiled[1:], keepaliveSlots, nil)
 	errnoValue := p.filterSyscallErrno(b, result.r1, result.errno, convention)
 	return b.Aggregate(p.type_(results, llssa.InGo), result.r1, result.r2, errnoValue)
 }

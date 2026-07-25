@@ -32,7 +32,7 @@ import (
 // coroGlobalFunctionSlotProof is the build-owned half of one closed
 // dynamic-call certificate. The SSA certificate freezes the target set seen by
 // fixed-point analysis. identityID and members bind every original/Alt SSA
-// pointer to the one LLVM-internal physical cell certified by EmissionUniverse.
+// pointer to the one physical cell whose writers are closed by EmissionUniverse.
 // inactive freezes every other writer/escape edge whose
 // contribution was omitted from that set. Post-plan validation accepts the
 // omission only when the exact owner has EmitNone, so an external/raw root or a
@@ -49,7 +49,7 @@ type coroGlobalFunctionSlotProof struct {
 }
 
 // coroGlobalFunctionSlotStoreProof binds one exact ordinary Go Store to the
-// non-capturing body published through a closed, LLVM-internal function cell.
+// non-capturing body published through a closed-world function cell.
 // The occurrence is build-owned: a CoroPlanBuilder cannot create or retarget
 // it. Publication itself does not imply invocation: dormant readers let codegen
 // elide the unobservable Store, while a live reader independently adds managed
@@ -106,8 +106,9 @@ type coroGlobalFunctionSlotValueState struct {
 
 // proveCoroGlobalFunctionSlotClosedDynamicCalls closes direct calls through an
 // exact package-level function cell. It is deliberately independent of package
-// and source names. Only a cell with certified LLVM internal linkage is
-// considered, so separately linked code cannot add a hidden writer. Every
+// and source names. Only a cell with a certified closed writer world is
+// considered, so separately linked code cannot add a hidden writer. The cell
+// may remain externally visible when the Go API exports it. Every
 // emitted Go-body use of every original/Alt member address is audited;
 // direct stores accept only nil, one exact context-free Go function, or
 // a formal whose complete static incoming flow has the same property.
@@ -165,7 +166,7 @@ func proveCoroGlobalFunctionSlotClosedDynamicCalls(
 				if err != nil {
 					return nil, nil, fmt.Errorf("resolve global function slot %q physical identity: %w", global.Name(), err)
 				}
-				if !certified || !identity.InternalLinkage {
+				if !certified || !identity.ClosedWorldWrites {
 					continue
 				}
 				index, exists := byIdentity[identity.ID]
@@ -306,7 +307,7 @@ func newCoroGlobalFunctionSlotFlow(ctx *context, functions []*ssa.Function) (*co
 func (flow *coroGlobalFunctionSlotFlow) proveSlot(
 	identity cl.CoroGlobalPhysicalIdentity,
 ) (coro.SSAClosedDynamicCallCertificate, []coroGlobalFunctionSlotStoreProof, []coroGlobalFunctionSlotHazard, bool, error) {
-	if flow == nil || identity.ID == "" || !identity.InternalLinkage || len(identity.Members) == 0 {
+	if flow == nil || identity.ID == "" || !identity.ClosedWorldWrites || len(identity.Members) == 0 {
 		return coro.SSAClosedDynamicCallCertificate{}, nil, nil, false, nil
 	}
 	global := identity.Members[0]
@@ -485,7 +486,7 @@ func (flow *coroGlobalFunctionSlotFlow) proveParameter(
 			break
 		}
 	}
-	if index < 0 || !coroClosedGlobalFunctionSlotWriter(owner) {
+	if index < 0 || !coroClosedGlobalFunctionSlotWriter(flow.ctx, owner) {
 		result.inactive = append(result.inactive, coroGlobalFunctionSlotHazard{
 			owner: owner, reason: "parameter-fed global writer is not one private top-level Go function",
 		})
@@ -735,10 +736,12 @@ func coroExactGlobalFunctionSlotClosureTarget(
 }
 
 func coroExactGlobalFunctionSlotTargetShape(ctx *context, target *ssa.Function, signature *types.Signature) bool {
+	genericInstance := ctx != nil && ctx.coroEmission != nil &&
+		ctx.coroEmission.CoroMaterializedGenericInstance(target)
 	if ctx == nil || target == nil || signature == nil || target.Signature == nil ||
 		target.Signature.Recv() != nil || !types.Identical(target.Signature, signature) ||
 		typeParamLen(target.Signature.TypeParams()) != 0 || typeParamLen(target.Signature.RecvTypeParams()) != 0 ||
-		target.Origin() != nil || len(target.TypeArgs()) != 0 {
+		(target.Origin() != nil || len(target.TypeArgs()) != 0) && !genericInstance {
 		return false
 	}
 	goBody, err := frozenGoEmittedBody(ctx.coroEmission, target)
@@ -755,10 +758,12 @@ func coroExactGlobalFunctionSlotFactory(ctx *context, call *ssa.Call) (*ssa.Func
 		return nil, false
 	}
 	target, resolved := ctx.coroEmission.Resolve(raw)
+	genericInstance := ctx.coroEmission.CoroMaterializedGenericInstance(target)
 	if !resolved || target == nil || target != raw || target.Signature == nil ||
 		target.Parent() != nil || len(target.FreeVars) != 0 || target.Signature.Recv() != nil || target.Signature.Variadic() ||
 		typeParamLen(target.Signature.TypeParams()) != 0 || typeParamLen(target.Signature.RecvTypeParams()) != 0 ||
-		target.Origin() != nil || len(target.TypeArgs()) != 0 || len(target.Params) != len(common.Args) {
+		(target.Origin() != nil || len(target.TypeArgs()) != 0) && !genericInstance ||
+		len(target.Params) != len(common.Args) {
 		return nil, false
 	}
 	for index, parameter := range target.Params {
@@ -770,7 +775,7 @@ func coroExactGlobalFunctionSlotFactory(ctx *context, call *ssa.Call) (*ssa.Func
 	return target, err == nil && goBody
 }
 
-func coroClosedGlobalFunctionSlotWriter(owner *ssa.Function) bool {
+func coroClosedGlobalFunctionSlotWriter(ctx *context, owner *ssa.Function) bool {
 	if owner == nil || owner.Signature == nil || owner.Parent() != nil || len(owner.FreeVars) != 0 ||
 		owner.Signature.Recv() != nil || token.IsExported(owner.Name()) ||
 		typeParamLen(owner.Signature.TypeParams()) != 0 || typeParamLen(owner.Signature.RecvTypeParams()) != 0 {
@@ -783,17 +788,25 @@ func coroClosedGlobalFunctionSlotWriter(owner *ssa.Function) bool {
 	if declaration.Doc == nil {
 		return true
 	}
+	hasExternalDirective := false
 	for _, comment := range declaration.Doc.List {
 		text := strings.TrimSpace(comment.Text)
 		for _, prefix := range []string{
 			"//go:linkname", "//llgo:link", "// llgo:link", "//export", "//go:wasmexport", "//go:wasmimport",
 		} {
 			if strings.HasPrefix(text, prefix) {
-				return false
+				hasExternalDirective = true
 			}
 		}
 	}
-	return true
+	if !hasExternalDirective {
+		return true
+	}
+	if ctx == nil || ctx.coroEmission == nil {
+		return false
+	}
+	exact, err := ctx.coroEmission.CoroExactManagedGoLinknameDefinition(owner)
+	return err == nil && exact
 }
 
 func mergeCoroGlobalFunctionSlotValueProof(destination *coroGlobalFunctionSlotValueProof, source coroGlobalFunctionSlotValueProof) {

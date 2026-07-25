@@ -343,6 +343,39 @@ func (source *WorkerOperationSource) RequestCancel(p *P, wait *WaitSetRecord) bo
 	return validWorkerOperationOwner(source, p) && RequestWaitSetCancel(p, wait, ParkCancelOperation)
 }
 
+// RequestCancelID is the scalar-keyed owner counterpart used by an
+// operation-specific controller such as internal/poll. The controller retains
+// only the exact two-word generation; the worker catalog resolves its private
+// WaitSetRecord and applies the ordinary logical-cancel transaction.
+func (source *WorkerOperationSource) RequestCancelID(p *P, id OperationID) bool {
+	slot, ok := workerOperationSlotFor(source, id)
+	return ok && validWorkerOperationOwner(source, p) &&
+		preemptLoad(&slot.generation) == id.Generation &&
+		preemptLoad(&slot.state) == uint32(producerSourceActive) &&
+		slot.record.Matches(id) && slot.record.phase == operationActive &&
+		slot.record.link.wait != nil &&
+		RequestWaitSetCancel(p, slot.record.link.wait, ParkCancelOperation)
+}
+
+// WorkerOperationPhysicalCancelRequested exposes only the owner-side physical
+// cancellation bit for an exact submitted generation. A backend adapter uses
+// it after the common apply phase has frozen a loser/canceled disposition; it
+// does not expose the OperationRecord, ParkLink, wait set, or G.
+func WorkerOperationPhysicalCancelRequested(
+	source *WorkerOperationSource,
+	p *P,
+	id OperationID,
+) (requested bool, ok bool) {
+	slot, found := workerOperationSlotFor(source, id)
+	if !found || !validWorkerOperationOwner(source, p) ||
+		preemptLoad(&slot.generation) != id.Generation ||
+		!slot.submitted || !slot.record.Matches(id) ||
+		slot.record.phase != operationActive {
+		return false, false
+	}
+	return slot.record.cancelRequested, true
+}
+
 func (source *WorkerOperationSource) appendAffected(index uint32) bool {
 	oneBased := index + 1
 	if source.affectedHead == 0 {

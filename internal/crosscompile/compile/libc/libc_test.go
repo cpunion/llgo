@@ -27,7 +27,7 @@ func TestWasmBuiltinsCompileConfigIsFreestandingAndTripleScoped(t *testing.T) {
 		t.Fatalf("archive names do not preserve target triples: %q, %q",
 			wasip2.Groups[0].OutputFileName, unknown.Groups[0].OutputFileName)
 	}
-	for _, name := range []string{"dlmalloc.c", "sbrk.c", "errno.c", "errno_state.c", "abort.c", "memcpy.c", "memmove.c", "memset.c", "exp.c", "log.c"} {
+	for _, name := range []string{"dlmalloc.c", "sbrk.c", "errno.c", "errno_state.c", "abort.c", "memcpy.c", "memcmp.c", "memmove.c", "memset.c", "strlen.c", "exp.c", "log.c"} {
 		if !slices.ContainsFunc(wasip2.Groups[0].Files, func(path string) bool {
 			return filepath.Base(path) == name
 		}) {

@@ -458,6 +458,17 @@ func plan9asmEnabledByDefault(conf *Config, pkgPath string) bool {
 	if conf == nil {
 		return false
 	}
+	// The freestanding wasm32 named targets intentionally use the 32-bit ARM
+	// Go frontend for standard-library layout compatibility, while emitting a
+	// WebAssembly LLVM module. internal/bytealg therefore selects the bounded
+	// ARM Plan9 assembly declarations. Translate that package so the existing
+	// exact no-suspend proof accompanies each leaf; leaving the declarations
+	// bodyless would incorrectly turn pure byte scans into opaque scheduler
+	// boundaries.
+	if conf.Goarch == "arm" && configHasBuildTag(conf, "tinygo.wasm") &&
+		pkgPath == "internal/bytealg" {
+		return true
+	}
 	if !archSupportsPlan9AsmDefaults(conf.Goarch) {
 		return false
 	}
@@ -583,5 +594,13 @@ func plan9AsmSFiles(files []string) []string {
 }
 
 func shouldSkipPlan9AsmSFilesForTarget(conf *Config, pkgPath string) bool {
-	return conf != nil && conf.Target != "" && conf.Goarch == "arm" && pkgPath == "syscall"
+	if conf == nil || conf.Target == "" || conf.Goarch != "arm" {
+		return false
+	}
+	if pkgPath == "syscall" {
+		return true
+	}
+	// The source patch for internal/chacha8rand replaces the selected ARM
+	// assembly trampoline with the upstream pure-Go block implementation.
+	return pkgPath == "internal/chacha8rand" && configHasBuildTag(conf, "tinygo.wasm")
 }

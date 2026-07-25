@@ -277,6 +277,14 @@ func (b Builder) boundsArg(idx Expr) (Expr, bool) {
 	return idx, signed
 }
 
+// BoundsOperand widens an integer bound to the exact 64-bit bit pattern used
+// by runtime boundsError and reports whether that pattern must be interpreted
+// as signed. Unlike FitIntSize, it does not truncate a uint64 index on 32-bit
+// targets.
+func (b Builder) BoundsOperand(idx Expr) (Expr, bool) {
+	return b.boundsArg(idx)
+}
+
 // check index >= 0 && index < max and size to uint
 func (b Builder) checkIndex(idx Expr, max Expr) Expr {
 	idx, check := b.IndexBounds(idx, max)
@@ -528,25 +536,86 @@ func (b Builder) Slice(x, low, high, max Expr) (ret Expr) {
 // pointer-to-array values, cap for slices. A nil max selects the two-index
 // rules. This emits no panic helper.
 func (b Builder) SliceBounds(low, high, max, limit Expr) (nlow, nhigh, nmax, outOfRange Expr) {
+	nlow, nhigh, nmax, checks := b.SliceBoundsChecks(low, high, max, limit)
+	for _, check := range checks {
+		outOfRange = b.orBool(outOfRange, check.OutOfRange)
+	}
+	return
+}
+
+// SliceBoundsCheck is one ordered Go slice-bounds failure. X retains the
+// original operand as a 64-bit bit pattern and Signed selects its
+// interpretation. Y is target-width because every preceding check proves that
+// relational upper operands fit in a non-negative Go int before a later check
+// can expose them as boundsError.y.
+type SliceBoundsCheck struct {
+	OutOfRange Expr
+	X          Expr
+	Y          Expr
+	Signed     bool
+}
+
+// SliceBoundsChecks returns normalized target-width low/high/max values and
+// the ordered failure predicates required by Go panic semantics:
+//
+//   - two-index: high > len/cap, then low > high
+//   - three-index: max > len/cap, high > max, then low > high
+//
+// Keeping these predicates separate lets coroutine lowering preserve the
+// precise boundsError code and operand that failed instead of collapsing the
+// checks into one generic "index out of range" edge.
+func (b Builder) SliceBoundsChecks(
+	low, high, max, limit Expr,
+) (nlow, nhigh, nmax Expr, checks []SliceBoundsCheck) {
 	if low.IsNil() || high.IsNil() || limit.IsNil() {
-		panic("SliceBounds requires explicit low, high, and limit values")
+		panic("SliceBoundsChecks requires explicit low, high, and limit values")
 	}
 
 	low64, lowSigned := b.boundsArg(low)
 	high64, highSigned := b.boundsArg(high)
 	limit64, _ := b.boundsArg(limit)
-	if max.IsNil() {
-		outOfRange = b.sliceBoundAbove(high64, highSigned, limit64)
-		outOfRange = b.orBool(outOfRange, b.sliceBoundAbove(low64, lowSigned, high64))
-	} else {
-		max64, maxSigned := b.boundsArg(max)
-		outOfRange = b.sliceBoundAbove(max64, maxSigned, limit64)
-		outOfRange = b.orBool(outOfRange, b.sliceBoundAbove(high64, highSigned, max64))
-		outOfRange = b.orBool(outOfRange, b.sliceBoundAbove(low64, lowSigned, high64))
-		nmax = b.FitIntSize(max64)
-	}
 	nlow = b.FitIntSize(low64)
 	nhigh = b.FitIntSize(high64)
+	nlimit := b.FitIntSize(limit64)
+	if max.IsNil() {
+		checks = []SliceBoundsCheck{
+			{
+				OutOfRange: b.sliceBoundAbove(high64, highSigned, limit64),
+				X:          high64,
+				Y:          nlimit,
+				Signed:     highSigned,
+			},
+			{
+				OutOfRange: b.sliceBoundAbove(low64, lowSigned, high64),
+				X:          low64,
+				Y:          nhigh,
+				Signed:     lowSigned,
+			},
+		}
+	} else {
+		max64, maxSigned := b.boundsArg(max)
+		nmax = b.FitIntSize(max64)
+		checks = []SliceBoundsCheck{
+			{
+				OutOfRange: b.sliceBoundAbove(max64, maxSigned, limit64),
+				X:          max64,
+				Y:          nlimit,
+				Signed:     maxSigned,
+			},
+			{
+				OutOfRange: b.sliceBoundAbove(high64, highSigned, max64),
+				X:          high64,
+				Y:          nmax,
+				Signed:     highSigned,
+			},
+			{
+				OutOfRange: b.sliceBoundAbove(low64, lowSigned, high64),
+				X:          low64,
+				Y:          nhigh,
+				Signed:     lowSigned,
+			},
+		}
+	}
 	return
 }
 

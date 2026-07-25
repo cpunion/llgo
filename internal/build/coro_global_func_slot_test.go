@@ -19,6 +19,7 @@
 package build
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -121,6 +122,33 @@ func install() {}
 				t.Fatalf("exact global slot CallPlan = %+v, target id=%q/%t", callPlan, id, hasID)
 			}
 		})
+	}
+}
+
+func TestCoroGlobalFunctionSlotExportedCellUsesClosedWriterWorld(t *testing.T) {
+	fixture := buildRequiredCoroRuntimeFixture(t, `
+var Optional func()
+func target() {}
+func callOptional() { Optional() }
+func useOptional() { Optional = target; callOptional() }
+func install() {}
+`)
+	call, certificate := onlyCoroGlobalFunctionSlotCertificate(t, fixture, "callOptional")
+	if len(certificate.Targets) != 1 || certificate.Targets[0] != fixture.pkg.Func("target") {
+		t.Fatalf("exported global slot certificate = %+v", certificate)
+	}
+	proof := fixture.ctx.coroGlobalFunctionSlots[call]
+	identity, certified, err := fixture.ctx.coroEmission.CoroGlobalPhysicalIdentity(proof.global)
+	if err != nil || !certified || identity.InternalLinkage || !identity.ClosedWorldWrites {
+		t.Fatalf("exported global slot identity = %+v, certified=%t, err=%v", identity, certified, err)
+	}
+	plan, err := analyzeCoroGlobalFunctionSlotFixture(fixture, fixture.pkg.Func("useOptional"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	callPlan, planned := plan.CallPlan(call)
+	if !planned || callPlan.Open || len(callPlan.Targets) != 1 {
+		t.Fatalf("exported global slot CallPlan = %+v/%t", callPlan, planned)
 	}
 }
 
@@ -306,6 +334,55 @@ func install() {}
 		targetPlan.FuncRep != coro.Dispatch || targetPlan.Emission != coro.EmitCoroutine ||
 		targetPlan.Primary != coro.PrimaryCoroutine {
 		t.Fatalf("captured factory result plans = call:%+v/%t target:%+v", callPlan, planned, targetPlan)
+	}
+}
+
+func TestCoroGlobalFunctionSlotStaticGenericFactoryResultClosure(t *testing.T) {
+	fixture := buildRequiredCoroRuntimeFixture(t, `
+var optional func()
+var sink int
+func makeCallback[T any](value T) func() {
+	return func() { _ = value; sink++ }
+}
+func useOptional() { optional = makeCallback(42); optional() }
+func install() {}
+`)
+	call, certificate := onlyCoroGlobalFunctionSlotCertificate(t, fixture, "useOptional")
+	if len(certificate.Targets) != 1 {
+		proof := fixture.ctx.coroGlobalFunctionSlots[call]
+		var producer string
+		if store, ok := call.Common().Value.(*ssa.UnOp); ok {
+			producer = store.String()
+		}
+		var factory string
+		if len(proof.inactive) != 0 {
+			if factoryCall, ok := proof.inactive[0].instruction.(*ssa.Call); ok {
+				raw := factoryCall.Common().StaticCallee()
+				factory = fmt.Sprintf("%v parent=%v origin=%v args=%v synthetic=%q",
+					raw, raw.Parent(), raw.Origin(), raw.TypeArgs(), raw.Synthetic)
+			}
+		}
+		t.Fatalf("generic factory-result certificate = %+v, want one exact target (call=%s producer=%s hazards=%+v factory=%s)",
+			certificate, call.String(), producer, proof.inactive, factory)
+	}
+	target := certificate.Targets[0]
+	if target == nil || target.Parent() == nil || target.Parent().Origin() != fixture.pkg.Func("makeCallback") ||
+		len(target.FreeVars) != 1 || !certificate.MayBeNil || certificate.SyncDispatch {
+		t.Fatalf("generic factory-result certificate = %+v, target=%v", certificate, target)
+	}
+	if proof := fixture.ctx.coroGlobalFunctionSlots[call]; len(proof.inactive) != 0 {
+		t.Fatalf("generic factory-result proof has conditional hazards: %+v", proof.inactive)
+	}
+	plan, err := analyzeCoroGlobalFunctionSlotFixture(fixture, fixture.pkg.Func("useOptional"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	callPlan, planned := plan.CallPlan(call)
+	targetPlan := functionPlanForBuildTest(t, plan, target)
+	if !planned || callPlan.Open || callPlan.Rep != coro.Dispatch || len(callPlan.Targets) != 1 ||
+		targetPlan.FuncRep != coro.Dispatch || targetPlan.Emission != coro.EmitCoroutine ||
+		targetPlan.Primary != coro.PrimaryCoroutine {
+		t.Fatalf("generic factory-result plans = call:%+v/%t target:%+v", callPlan, planned, targetPlan)
 	}
 }
 

@@ -46,6 +46,38 @@ const (
 	coroFaultLimitV1
 )
 
+const (
+	// V2 bounds kinds encode the runtime boundsError code in the upper bits
+	// and the original operand signedness in the low bit. Even values are
+	// signed, odd values are unsigned.
+	coroFaultBoundsBaseV2  uint32 = coroFaultLimitV1
+	coroFaultBoundsLimitV2        = coroFaultBoundsBaseV2 + 2*8
+)
+
+type coroBoundsFaultCode uint32
+
+const (
+	coroBoundsFaultIndex coroBoundsFaultCode = iota
+	coroBoundsFaultSliceAlen
+	coroBoundsFaultSliceAcap
+	coroBoundsFaultSliceB
+	coroBoundsFaultSlice3Alen
+	coroBoundsFaultSlice3Acap
+	coroBoundsFaultSlice3B
+	coroBoundsFaultSlice3C
+)
+
+func coroBoundsFaultKind(code coroBoundsFaultCode, signed bool) uint32 {
+	if code > coroBoundsFaultSlice3C {
+		panic("invalid coroutine bounds fault code")
+	}
+	kind := coroFaultBoundsBaseV2 + uint32(code)*2
+	if !signed {
+		kind++
+	}
+	return kind
+}
+
 func coroFaultPrepareSignature() *types.Signature {
 	pointer := types.Typ[types.UnsafePointer]
 	params := types.NewTuple(
@@ -74,7 +106,7 @@ func coroFaultPrepareSignatureV2() *types.Signature {
 		types.NewParam(token.NoPos, nil, "handle", pointer),
 		types.NewParam(token.NoPos, nil, "header", pointer),
 		types.NewParam(token.NoPos, nil, "kind", types.Typ[types.Uint32]),
-		types.NewParam(token.NoPos, nil, "arg0", types.Typ[types.Uintptr]),
+		types.NewParam(token.NoPos, nil, "arg0", types.Typ[types.Uint64]),
 		types.NewParam(token.NoPos, nil, "arg1", types.Typ[types.Uintptr]),
 	)
 	return types.NewSignatureType(nil, nil, nil, params, nil, false)
@@ -84,7 +116,7 @@ func coroFaultPayloadSignatureV2() *types.Signature {
 	pointer := types.Typ[types.UnsafePointer]
 	params := types.NewTuple(
 		types.NewParam(token.NoPos, nil, "kind", types.Typ[types.Uint32]),
-		types.NewParam(token.NoPos, nil, "arg0", types.Typ[types.Uintptr]),
+		types.NewParam(token.NoPos, nil, "arg0", types.Typ[types.Uint64]),
 		types.NewParam(token.NoPos, nil, "arg1", types.Typ[types.Uintptr]),
 		types.NewParam(token.NoPos, nil, "typeOut", pointer),
 		types.NewParam(token.NoPos, nil, "dataOut", pointer),
@@ -92,8 +124,10 @@ func coroFaultPayloadSignatureV2() *types.Signature {
 	return types.NewSignatureType(nil, nil, nil, params, nil, false)
 }
 
-// coroFaultOperands are the two target-width scalar words accepted by the
-// parameterized fault ABI. A nil pointer selects the allocation-free V1 path.
+// coroFaultOperands are the exact scalar words accepted by the parameterized
+// V2 fault ABI. arg0 is a 64-bit integer bit pattern so uint64 bounds remain
+// observable on wasm32; arg1 is a non-negative target-width len/cap/bound.
+// A nil pointer selects the allocation-free V1 path.
 type coroFaultOperands struct {
 	arg0 llssa.Expr
 	arg1 llssa.Expr
@@ -184,20 +218,58 @@ func (p *context) compileCoroImplicitNilStoreGuard(
 // compileCoroIndexBoundsGuard routes an out-of-range predicate through the
 // target-neutral explicit-status fault ABI. The caller emits an unchecked GEP
 // or load only in the normal continuation block.
-func (p *context) compileCoroIndexBoundsGuard(b llssa.Builder, outOfRange llssa.Expr) {
+func (p *context) compileCoroIndexBoundsGuard(
+	b llssa.Builder,
+	outOfRange, index, limit llssa.Expr,
+) {
 	if outOfRange.IsNil() {
 		return
 	}
-	p.compileCoroFaultConditionGuard(b, outOfRange, coroFaultIndexBoundsV1)
+	x, signed := b.BoundsOperand(index)
+	p.compileCoroFaultConditionGuardWithOperands(
+		b,
+		outOfRange,
+		coroBoundsFaultKind(coroBoundsFaultIndex, signed),
+		&coroFaultOperands{arg0: x, arg1: limit},
+	)
 }
 
 func (p *context) compileCoroPlannedIndexBoundsGuard(
 	b llssa.Builder,
 	instruction ssa.Instruction,
-	outOfRange llssa.Expr,
+	outOfRange, index, limit llssa.Expr,
 ) {
 	p.observeCoroPhysicalBoundsGuard(instruction)
-	p.compileCoroIndexBoundsGuard(b, outOfRange)
+	p.compileCoroIndexBoundsGuard(b, outOfRange, index, limit)
+}
+
+type coroPlannedBoundsFault struct {
+	condition llssa.Expr
+	kind      uint32
+	operands  coroFaultOperands
+}
+
+// compileCoroPlannedBoundsFaultSet is the shared observer/emitter for one
+// source operation with an ordered family of bounds failures. Slice and
+// slice-to-array lowering differ only in their frozen fault records; neither
+// owns another physical-plan observation path.
+func (p *context) compileCoroPlannedBoundsFaultSet(
+	b llssa.Builder,
+	instruction ssa.Instruction,
+	faults []coroPlannedBoundsFault,
+) {
+	if len(faults) == 0 {
+		panic("planned coroutine bounds fault set is empty")
+	}
+	p.observeCoroPhysicalBoundsGuard(instruction)
+	for _, fault := range faults {
+		p.compileCoroFaultConditionGuardWithOperands(
+			b,
+			fault.condition,
+			fault.kind,
+			&fault.operands,
+		)
+	}
 }
 
 func (p *context) compileCoroIndexAddrPlanned(
@@ -238,7 +310,7 @@ func (p *context) compileCoroIndexAddrPlanned(
 	if plan.boundsGuard {
 		var outOfRange llssa.Expr
 		normalized, outOfRange = b.IndexBounds(index, limit)
-		p.compileCoroPlannedIndexBoundsGuard(b, operation, outOfRange)
+		p.compileCoroPlannedIndexBoundsGuard(b, operation, outOfRange, index, limit)
 	}
 	return b.IndexAddrUnchecked(base, normalized)
 }
@@ -288,7 +360,7 @@ func (p *context) compileCoroIndexPlanned(
 	if plan.boundsGuard {
 		var outOfRange llssa.Expr
 		normalized, outOfRange = b.IndexBounds(index, limit)
-		p.compileCoroPlannedIndexBoundsGuard(b, operation, outOfRange)
+		p.compileCoroPlannedIndexBoundsGuard(b, operation, outOfRange, index, limit)
 	}
 
 	switch plan.container {
@@ -356,8 +428,38 @@ func (p *context) compileCoroSlicePlanned(
 		panic(fmt.Sprintf("structured coroutine Slice has invalid frozen container %d", plan.container))
 	}
 
-	low, high, max, outOfRange := b.SliceBounds(low, high, max, limit)
-	p.compileCoroPlannedIndexBoundsGuard(b, operation, outOfRange)
+	threeIndex := !max.IsNil()
+	low, high, max, checks := b.SliceBoundsChecks(low, high, max, limit)
+	var codes []coroBoundsFaultCode
+	if threeIndex {
+		upper := coroBoundsFaultSlice3Alen
+		if plan.container == coroPhysicalContainerSlice {
+			upper = coroBoundsFaultSlice3Acap
+		}
+		codes = []coroBoundsFaultCode{
+			upper,
+			coroBoundsFaultSlice3B,
+			coroBoundsFaultSlice3C,
+		}
+	} else {
+		upper := coroBoundsFaultSliceAlen
+		if plan.container == coroPhysicalContainerSlice {
+			upper = coroBoundsFaultSliceAcap
+		}
+		codes = []coroBoundsFaultCode{upper, coroBoundsFaultSliceB}
+	}
+	if len(checks) != len(codes) {
+		panic("structured coroutine Slice lost its ordered bounds checks")
+	}
+	faults := make([]coroPlannedBoundsFault, len(checks))
+	for i, check := range checks {
+		faults[i] = coroPlannedBoundsFault{
+			condition: check.OutOfRange,
+			kind:      coroBoundsFaultKind(codes[i], check.Signed),
+			operands:  coroFaultOperands{arg0: check.X, arg1: check.Y},
+		}
+	}
+	p.compileCoroPlannedBoundsFaultSet(b, operation, faults)
 	return b.SliceUnchecked(base, low, high, max)
 }
 
@@ -376,6 +478,11 @@ func (p *context) compileCoroFaultConditionGuardWithOperands(
 	}
 	if operands != nil && (operands.arg0.IsNil() || operands.arg1.IsNil()) {
 		panic("parameterized coroutine fault guard has an incomplete operand pair")
+	}
+	if operands != nil &&
+		(p.prog.SizeOf(operands.arg0.Type) != 8 ||
+			p.prog.SizeOf(operands.arg1.Type) != uint64(p.prog.PointerSize())) {
+		panic("parameterized coroutine fault guard has the wrong operand widths")
 	}
 	fault := b.Func.MakeBlock()
 	normal := b.Func.MakeBlock()
@@ -442,10 +549,7 @@ func (c *coroBodyContext) implicitFaultWithOperands(
 		}
 		prepareHook = coroFaultPrepareHookV2
 		prepareSignature = coroFaultPrepareSignatureV2()
-		args = append(args,
-			b.Convert(p.prog.Uintptr(), operands.arg0),
-			b.Convert(p.prog.Uintptr(), operands.arg1),
-		)
+		args = append(args, operands.arg0, operands.arg1)
 	}
 	prepare := p.pkg.NewFunc(prepareHook, prepareSignature, llssa.InC)
 	b.Call(prepare.Expr, args...)
@@ -489,10 +593,7 @@ func (p *context) materializeCoroFaultPayloadWithOperands(
 		}
 		payloadHook = coroFaultPayloadHookV2
 		payloadSignature = coroFaultPayloadSignatureV2()
-		args = append(args,
-			b.Convert(p.prog.Uintptr(), operands.arg0),
-			b.Convert(p.prog.Uintptr(), operands.arg1),
-		)
+		args = append(args, operands.arg0, operands.arg1)
 	}
 	args = append(args,
 		b.Convert(p.prog.VoidPtr(), typeSlot),

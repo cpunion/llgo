@@ -375,6 +375,29 @@ Running和Waiting G不可迁移，completion必须投递原owner；只有已经�
 
 `internal/poll`向netpoll source提交fd、interest、deadline和result record；当前G park。Readiness到达后由owner按Go wrapper契约执行一次或重试operation。Raw syscall本身不能擅自改变EINTR、short result或EAGAIN语义。
 
+host-owned pull target不伪造POSIX readiness fd，而把一次完整I/O作为同一个
+`HostOp -> WorkerOperationSource -> ParkSet`事务提交。当前class-2 verb只扩展薄平台表：
+`read/write/accept/connect/recvfrom/sendto/recvmsg/sendmsg`共用两字exact
+`OperationID`、read/write control lane、deadline timer loser barrier和Close物理取消确认；
+compiler、executor和source状态机没有按verb分支。`recvmsg`用固定36-byte POD回传
+target-neutral sockaddr与message flags，并以第二个scalar result回传OOB长度；连同payload、
+OOB和地址的借用指针共8个operation word，未突破统一9-word transport。该结构只覆盖当前
+IPv4/IPv6 host ABI；Unix domain、raw packet及真实ancillary control-message语义仍需各target
+扩展和验收。
+
+compiler只在ProgramIR freeze读取一次HostOp的raw SSA形状，并冻结
+`{opcode,pointerMask,argumentCount,metadataWords}`；physical plan与emitter只能消费该POD
+recipe。HostOp和bounded worker共享同一个word-call Park模板，不能各自再建一套suspend CFG，
+也不能在codegen按函数地址、参数类型或opcode反推transport策略。
+
+control lane同时保存exact `OperationID`与单调非零epoch。`SetDeadline`/`Close`先发布
+descriptor状态，再推进epoch并取消当前已绑定operation；park hook在提交后重读epoch，
+若与compiler传入的snapshot不一致，就把`ParkCancelOperation`作为preparing/sealed
+ParkSet的sticky事实交给首次source visit，随后走普通exact物理取消、terminal ack和result
+discard。这样配置修改落在snapshot与bind之间时也不会丢失。host pull transport还显式保留
+“Submit尚未交付且Cancel已请求”状态：同一个generation必须先向embedding交付Submit，
+后续pull才可交付Cancel；embedding不需要也不允许为从未见过的operation缓存取消。
+
 ### 8.3 普通文件和不可poll operation
 
 POSIX regular file、DNS或阻塞C调用根据target capability选择：
@@ -408,7 +431,7 @@ worker queue满必须确定地失败或背压，shutdown在owner P之外join已�
 - native timer已与CPU hot loop同时运行，由compiler safepoint、有界`RunSlice`和timer due drain完成公平唤醒，hot loop不需要显式yield；
 - `time.Sleep`已改为compiler-owned Timer V2 typed park recipe；定向lowering/CoroSplit、current-owner、cancel/shutdown与race验证已通过，不再依赖按timer符号猜测frame retention；
 - 受控Timer manager的wait/Stop/Reset已迁移到compiler-owned Timer V2 typed recipe和exact `(controller, generation)` park/cancel/resume；旧controlled V1 prepare/park/cancel/retire ABI、build root和symbol-specific frame-retention特判已删除，exact cancel、prepare-publication race、winner lease和shutdown-before-deadline定向验证已通过。这些只证明transport/ownership core，不代表完整Go Timer语义已通过；
-- `internal/poll.runtime_pollWait`已改为compiler-owned Poll V2 typed park recipe；定向lowering、current-owner retained reactor、deadline/closing/cancel/shutdown与race验证已通过。WASM只验证了lowering/CoroSplit/module compile，没有host poll adapter运行证据；
+- `internal/poll.runtime_pollWait`已改为compiler-owned Poll V2 typed park recipe；定向lowering、current-owner retained reactor、deadline/closing/cancel/shutdown与race验证已通过。外部Node embedding现已在`wasm-unknown`与`wasip2`真实运行标准库同步TCP/UDP fixture，覆盖HostOp提交、alarm、动态deadline、Close取消和物理ack；这仍不等于普通command自带reactor；
 - production `TaskControl`端点已通过register/post/close、exact executor request、safepoint claim与terminal竞态测试；
 - allocation-free `ExecutorFleet`核心、route registry和P-neutral runnable transfer已通过core/race测试并接入native程序入口；route 1由command线程执行，route 2由固定pthread M并行执行，两者共用同一物理reducer并各自拥有P/source catalog/doorbell/reactor。普通空domain通过同一`IdleArmed -> final scan -> CommitSleep`事务进入standby，由routed request精确唤醒；启动、shutdown publication、route strong-join、peer join和driver/source回收已形成完整target lifecycle。当前只迁移无source-affinity的新spawn/yield任务，已park结果仍留在原route；
 - native poll descriptor已从共享Go map/fd反查改为每FD一个C分配的opaque scalar owner；read/write方向各原子保存deadline和完整`OperationID`，park/close/deadline update通过seq_cst handshake精确投递route。owner同一轮同时观察到到期deadline与已排队readiness时由deadline胜出；deadline reset/remove通过frame-retained snapshot与当前descriptor重检后重新注册。双owner TCP probe已fresh compile-link-run，并完成8路共10,000次压力而无deadline/readiness误序；
@@ -418,7 +441,7 @@ worker queue满必须确定地失败或背压，shutdown在owner P之外join已�
 - 泛型intrinsic已能从精确instance解析origin和SSA body，`llgo.index`在native/wasm32均按inline-no-suspend语义lower，不伪造可调用函数体；
 - Darwin已补齐`internal/cpu`两个sysctl bodyless声明的精确runtime bridge和C sync certificate；另外，一参数、不重定向的visibility-only `go:linkname`已冻结为独立证书，paired bodyless consumer只选择managed `$coro`入口，不生成raw plain body。
 
-这些是core-first证据，不是标准库兼容性证明。native compiler command entry仍是固定机器栈V2循环，但target start现已把program P/driver/source/registry作为route 1原位收养，同时创建route 2并启动其pthread owner；program return会停止并join peer与共享worker pool，再按route、backend、driver顺序强关闭。Timer catalog、Poll V2 callback与Worker transport均使用exact route：Timer由各domain owner的单调时钟扫描；Poll和Worker的两字`OperationID`在route admission内完成source publication、exact executor request、duplicate/stale分类和关闭强汇合；Worker复用一个进程级固定物理池。尚未完成的是动态P数量、普通global injection/steal、已park G的result物化/迁移和thread-affinity策略。target-neutral host-owned pull adapter已完成core/race与JS/WASM、WASIp1、baremetal、显式embedded交叉编译验证：`more`只发布later-turn action，idle只暴露POD executor/generation/epoch/deadline，alarm/notification取消后才可复用epoch，shutdown seal两个ingress并strong-join callback tail。compiler的host-target V2 entry也已完成：它只执行一次有界initial slice，保留host callback/reference roots，仅接受canonical `Complete`或executor slot/generation/epoch/flags/deadline均精确的`Yielded`/`Suspended` tuple，后两者detached返回host，不在entry内继续调度或递归re-entry。这仍只是embedding reactor ABI：普通JS/WASM或WASI `_start`没有外部reactor消费`next_action`、调用callback/continuation，因此不能称platform E2E。JS microtask/timeout pump、WASI reactor `poll_oneoff`、RTOS HAL与baremetal IRQ/WFI glue、完整cleanup/defer/recover/Goexit lowering以及precise/moving GC仍是明确缺口。
+这些是core-first证据，不是标准库兼容性证明。native compiler command entry仍是固定机器栈V2循环，但target start现已把program P/driver/source/registry作为route 1原位收养，同时创建route 2并启动其pthread owner；program return会停止并join peer与共享worker pool，再按route、backend、driver顺序强关闭。Timer catalog、Poll V2 callback与Worker transport均使用exact route：Timer由各domain owner的单调时钟扫描；Poll和Worker的两字`OperationID`在route admission内完成source publication、exact executor request、duplicate/stale分类和关闭强汇合；Worker复用一个进程级固定物理池。尚未完成的是动态P数量、普通global injection/steal、已park G的result物化/迁移和thread-affinity策略。target-neutral host-owned pull adapter已完成core/race与JS/WASM、WASIp1、baremetal、显式embedded交叉编译验证：`more`只发布later-turn action，idle只暴露POD executor/generation/epoch/deadline，alarm/notification取消后才可复用epoch，shutdown seal两个ingress并strong-join callback tail。compiler的host-target V2 entry也已完成：它只执行一次有界initial slice，保留host callback/reference roots，仅接受canonical `Complete`或executor slot/generation/epoch/flags/deadline均精确的`Yielded`/`Suspended` tuple，后两者detached返回host，不在entry内继续调度或递归re-entry。仓库Node runner现已作为显式embedding真实消费这些action，并在`wasm-unknown`/`wasip2`运行file与TCP/UDP标准库fixture；普通JS/WASM或WASI `_start`仍没有内建reactor，因此不能把该受控embedding外推为通用platform E2E。JS command pump、WASI `poll_oneoff`、RTOS HAL与baremetal IRQ/WFI glue、完整cleanup/defer/recover/Goexit lowering以及precise/moving GC仍是明确缺口。
 
 执行器已收口到一套物理run-step reducer；fleet外层只保留exact domain owner、显式单调时钟和budget，不存在第二套resume/destroy/commit语义。空fleet P使用公共timer-aware idle事务完成standby admission；提交后先释放owner epoch，route-local固定poll set执行fault-containment有界物理pass，doorbell/fd/deadline唤醒后再取得新epoch并执行公共`WakeExecutorAt`全source重扫。普通domain最后一个G销毁只完成该G并保持executor可接收未来routed work；command route的main-return语义仍由program coordinator独占。实际peer M循环、共享worker pool lifecycle、分布式shutdown和强关闭引用清理现均已接入并通过production-island、source/race及TCP E2E验证。
 
@@ -437,7 +460,7 @@ Worker transport的route-aware核心现已完成：仍只有一个进程级固�
 | `syscall-file` | 标准库固定导出的`syscall.Open/Write/Seek/Read/Close/Unlink`封装完成一字节回环；不经过`os.File` method/reflect表面 | 当前compiler/emission节点已用真实Go 1.26 stdlib源码fresh compile-link-run通过，证明这些fixed-target wrapper的自动染色、worker scalar result和调用者同步风格回环闭合；动态`RawSyscall`/未取得精确证书的trap仍fail closed，不外推其他syscall族或进程/信号语义 |
 | `syscall-pipe` | `syscall.Pipe`后main G阻塞读；另一G经过50ms timer后写入；读至少等待25ms并收到精确字节 | Darwin已fresh compile-link-run通过，直接证明`Read`由worker等待且executor仍能运行timer/writer。实现同时补齐`C.pipe`的声明级foreign contract和type-patch方法值接收者ABI；两者都是通用metadata/lowering修复，不是fixture白名单。Linux及更广pipe/close/cancel矩阵由CI继续验收 |
 | `file` | `OpenFile ->` 单次一字节 `Write -> Seek -> Read -> compare -> Close`；不混入deadline、poll或slice growth | 当前compiler/emission节点已用真实Go 1.26 stdlib源码fresh compile-link-run通过，证明该冻结路径上的`os.File`/`internal/poll`/regular-file worker封装闭合；deadline、目录、并发close及完整`io/fs`/reflect矩阵仍待验收 |
-| `tcp` | loopback `ListenTCP/DialTCP/AcceptTCP`，顶层无捕获`go serve()`；一字节I/O，20ms read deadline超时，清除后读取60ms延迟回复 | 真实Go 1.26 stdlib源码已在双owner fleet完成effect/emission plan、compiler lowering、LLVM验证、native link和loopback运行；覆盖route 1/2 spawn分配、Poll V2 exact route、readiness、deadline超时、清除deadline后读取延迟回复和共享worker。fresh binary的8路10,000次压力通过。它仍不证明并发close/大量连接、完整`net`/resolver矩阵或WASM/WASI backend；WASM当前仍只有lowering/CoroSplit/module compile证据 |
+| `tcp` | TCP loopback的Listen/Dial/Accept、读写；静态及并发修改read/write/accept deadline；Read与Host write在途时Close；dial timeout/context cancel；UDP `ReadFrom/WriteTo`与`ReadMsg/WriteMsg`往返；pure-Go hosts及DNS wire解析 | Go 1.26同步源码已在Darwin双owner native fresh compile-link-run通过；`wasm-unknown`和`wasip2`也由显式Node embedding fresh build、零undefined并运行完成。host路径的功能场景原账本为114个operation、17次exact cancellation、18个alarm和171个schedule action；现在又顺序创建/关闭80个listener，增加480个operation并使最终账本成为594/17/18/651，确定性越过64槽固定poll descriptor页并证明Close后可持续复用。功能场景覆盖Worker-only与Worker+Timer ParkSet、动态deadline重配、Close物理ack、Accept/Connect、RecvFrom/SendTo、RecvMsg/SendMsg、resolver读取受控nsswitch/resolv/hosts文件，以及并发A/AAAA UDP DNS wire查询。该并发查询曾暴露preemptible poll descriptor扫描重复分配`runtimeCtx`，现由target-lowered原子CAS保留槽且以源码gate固定；确定性stale-epoch探针还验证snapshot与bind之间的deadline/Close变更必经Submit、exact Cancel、terminal ack和同步超时返回。`runtime_pollClose`依赖标准`FD`从snapshot前持有到resume/unbind后的read/write ref，任何非closing或control lane未idle的最终close现在fail-stop而不再静默泄漏。native使用真实内核socket/文件，host保留可控的在途write/connect强竞态。早期native TCP另有8路10,000次压力。仍未证明外部DNS服务器/cgo resolver、Unix/raw socket、非空ancillary OOB、FD大量并发及完整`net`/GOROOT矩阵，也不代表WASI command已有内建reactor |
 
 TCP探针在取得首个全绿结果前依次暴露并修复了四类通用compiler边界，而没有加入`net`函数白名单：slice-to-array pointer显式fault、runtime静态section span的受限pointer-to-uintptr证明、`unsafe.Sizeof/Alignof`未求值SSA与physical/plain helper分流，以及`defer`捕获命名结果时cleanup continuation所需heap cell的CoroSplit支配关系。最后一项只把`RunDefers`后terminal result重建精确使用的、已具备managed `AllocZ`能力的entry heap cell放到`coro.begin`和frame publish之后、initial suspend之前；普通entry、条件和循环heap allocation仍留在source位置。native与wasm32的CoroSplit前后验证、无重复分配和同cleanup owner负例均已覆盖。
 
@@ -522,7 +545,7 @@ deadline 修改必须更新已 park operation，且 timeout 恢复后重新读�
 | 平台 | 模型映射 | 2026-07-22 production 现状 |
 | --- | --- | --- |
 | Native Linux/Darwin | POSIX monotonic clock + 每route pipe doorbell/`poll` reactor + 共享bounded pthread worker | opt-in fleet profile已接入program target：command M/route 1与peer pthread M/route 2并行运行独立P/source catalog，program start/stop、peer join、共享4-worker/1024-job MPMC ring、Timer/Poll/Worker/Channel exact route和强关闭均已闭环；双owner TCP stdlib probe及10,000次压力通过。当前只机会性转移安全的新spawn/yield任务；已park G、dynamic GOMAXPROCS、通用global runq/steal、完整GC/语言/GOROOT矩阵仍未完成，因此不是完整Go runtime兼容 |
-| JS/WASM | 1P `RunSlice` 返回 host，Promise/timer/requestRun 投递 POD fact | host-owned pull ABI、generation/epoch、microtask/timeout capability profile及交叉编译已完成；compiler host-target V2 entry只执行一次initial slice，保留callbacks，严格校验canonical `Complete`或精确detached `Yielded`/`Suspended` tuple。普通command `_start`仍没有JS reactor pump消费action和回调continuation，Promise/source adapter也未运行；Poll V2只有WASM lowering/CoroSplit/module compile证据，不能称可运行Poll或E2E |
+| JS/WASM | 1P `RunSlice` 返回 host，Promise/timer/requestRun 投递 POD fact | host-owned pull ABI、generation/epoch、microtask/timeout capability profile及交叉编译已完成；compiler host-target V2 entry只执行一次initial slice，保留callbacks，严格校验canonical `Complete`或精确detached `Yielded`/`Suspended` tuple。显式Node embedding已对`wasm-unknown`和`wasip2`真实驱动file及TCP/UDP HostOp、timer、动态deadline和取消；普通command `_start`仍没有内建JS reactor pump，不能由受控runner外推为任意Promise/source或通用E2E |
 | WASI | 1P + pollable/poll_oneoff 或对应 preview API | compiler host-target V2 initial entry、retained callbacks、strict tuple与detached return已完成；外部reactor仍必须消费`next_action`，调用`poll_oneoff`/相应pollable，发布time/ack并调用continuation。普通command尚无该pump，fd/socket source glue也未接，不能称E2E |
 | RTOS/embedded | 静态 P/source catalog + notification/event queue + one-shot alarm + ISR POD ingress | compiler已选择仅一次initial slice且detached返回的host-target V2 entry，callback roots已保留；HAL notification/alarm、ISR source、持久reactor pump与capacity配置仍由embedding实现，不能称E2E |
 | baremetal | 1P main loop + IRQ ring + hardware alarm + WFI/WFE | host-target V2 initial entry、allocation-free notification/alarm profile、POD action与strong-join core可交叉编译，callback roots已保留；真实IRQ ring、hardware compare、WFI/WFE reactor/startup和GC集成未实现，不能称E2E |
@@ -590,7 +613,7 @@ full-native Darwin/Linux 的 signal adapter 已改为 C `sigaction` + nonblockin
 
 1. `StringCat`、泛型`llgo.index`、Darwin sysctl bridge、visibility-only `go:linkname`、`*ssa.MakeMap`及promoted managed wrapper唯一发射阻塞已经越过；真实`time`、`timer`、`syscall-file`、`syscall-pipe`、`file`与`tcp`探针已在同一native fleet acceptance全部fresh compile-link-run通过，TCP另有10,000次压力证据。下一步把该组固定为架构等价重构门，同时保持“只修generic core、不写package/function白名单”的门槛。
 2. `ExecutorFleet`的程序接入、双M owner/stop/join、worker lifecycle、route-local reactor和Timer/Poll/Worker exact route已完成。下一并行核心是把source-affine winner物化为P-neutral `ResumePacket/ResultCell`，随后再开放通用global injection/steal、动态P数量和affinity；在物化前不迁移已park G。
-3. 以已完成的host-owned pull core和host-target V2 initial command entry为边界，分别补JS/WASM外部reactor pump、WASI `poll_oneoff`/pollable reactor、RTOS HAL和baremetal IRQ/alarm/WFI loop；它们必须消费action并回调continuation，Poll V2的WASM compile-only证据不升格为平台E2E。
+3. 以已完成的host-owned pull core、host-target V2 entry和显式Node file/network runner为边界，把同一action/continuation协议接入普通JS/WASM command pump、WASI `poll_oneoff`/pollable reactor、RTOS HAL和baremetal IRQ/alarm/WFI loop；受控runner证据不升格为这些平台的内建启动/runtime E2E。
 4. 在已闭环的静态task-stop cleanup/`CompletionRecord`子集上，完成动态defer、完整panic/recover、`Goexit`、P-neutral result以及post-LLVM bounded-preemption/GC证明。
 5. 上述核心门稳定后，在已通过的六个冻结探针上继续扩展`test/*`、`net`/`os`/`time`与GOROOT语义矩阵，不反向把标准库特例写进compiler core。最终仓库门是`test/*`和Go 1.26 GOROOT全部适用测试通过、无unexpected failure和stale XPASS；六个探针只是快速定位门。
 
@@ -631,7 +654,7 @@ full-native Darwin/Linux 的 signal adapter 已改为 C `sigaction` + nonblockin
 
 ### P3：统一模型上的I/O
 
-1. netpoll/readiness source；Poll V2 typed recipe、opaque descriptor、exact fleet route及native双owner TCP E2E/压力已通过，其他平台backend、并发close/大量连接和完整netpoll矩阵仍待完成。
+1. netpoll/readiness source；Poll V2 typed recipe、opaque descriptor、exact fleet route及native双owner TCP E2E/压力已通过；host complete-operation路径又在双WASM target覆盖TCP/UDP、动态deadline、Close、Accept/Connect、RecvFrom/SendTo和RecvMsg/SendMsg，pure-Go resolver已通过文件HostOp读取hosts及并发A/AAAA UDP DNS wire查询。外部DNS服务器/cgo resolver、Unix/raw socket、ancillary OOB、FD复用/大量连接和完整netpoll矩阵仍待完成。
 2. completion/worker ForeignOp source；已有bounded worker/core、scalar result、route-aware fleet transport、并发producer MPMC ring、program-level fleet lifecycle及`syscall-file`/高层`file`真实E2E证据；完整syscall族、排队背压和取消/容量矩阵仍待完成。
 3. 标准库 `internal/poll`、`os`、`net` 和 syscall family的同步风格接入。
 4. 验证 effect 自动染色所有上层caller，不维护async源码分叉。

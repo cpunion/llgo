@@ -641,6 +641,8 @@ func assertCoroHostPullRetentionV1(t *testing.T, module llvm.Module, entryName s
 		{coroHostPublishTimeSymbolV1, coroHostPublishTimeReferenceSymbolV1, "i1 (i32, i32)"},
 		{coroHostAckCancelSymbolV1, coroHostAckCancelReferenceSymbolV1, "i1 (i32, i32, i32, i32)"},
 		{coroHostContinueSliceSymbolV1, coroHostContinueSliceReferenceSymbolV1, "i32 (i32, i32, i32, i32, i32, i32, i32, ptr)"},
+		{coroHostNextOperationSymbolV1, coroHostNextOperationReferenceSymbolV1, "i32 (ptr)"},
+		{coroHostCompleteOperationSymbolV1, coroHostCompleteOperationReferenceSymbolV1, "i32 (i32, i32, i32, i32, i32, i32, i32, i32, i32, i32)"},
 	}
 	entry := module.NamedFunction(entryName)
 	if entry.IsNil() || entry.IsDeclaration() {

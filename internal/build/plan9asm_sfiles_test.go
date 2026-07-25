@@ -64,6 +64,35 @@ func TestShouldSkipPlan9AsmSFilesForTarget(t *testing.T) {
 	if shouldSkipPlan9AsmSFilesForTarget(&Config{Target: "cortex-m-qemu", Goarch: "arm"}, "internal/bytealg") {
 		t.Fatal("only syscall asm should be skipped by embedded arm rule")
 	}
+	wasip2 := &Config{
+		Target:                  "wasip2",
+		Goarch:                  "arm",
+		resolvedTargetBuildTags: []string{"tinygo.wasm", "wasip2"},
+	}
+	if !shouldSkipPlan9AsmSFilesForTarget(wasip2, "internal/chacha8rand") {
+		t.Fatal("named WebAssembly chacha8rand trampoline should be replaced by its pure-Go source patch")
+	}
+	if shouldSkipPlan9AsmSFilesForTarget(wasip2, "internal/bytealg") {
+		t.Fatal("named WebAssembly bytealg assembly must remain available for LLVM translation")
+	}
+}
+
+func TestPlan9AsmEnabledByDefaultForNamedWebAssemblyBytealg(t *testing.T) {
+	conf := &Config{
+		Target:                  "wasip2",
+		Goos:                    "linux",
+		Goarch:                  "arm",
+		resolvedTargetBuildTags: []string{"tinygo.wasm", "wasip2"},
+	}
+	if !plan9asmEnabledByDefault(conf, "internal/bytealg") {
+		t.Fatal("named WebAssembly target must translate its selected ARM internal/bytealg assembly")
+	}
+	if plan9asmEnabledByDefault(conf, "internal/chacha8rand") {
+		t.Fatal("named WebAssembly target unexpectedly enabled unrelated ARM assembly")
+	}
+	if plan9asmEnabledByDefault(&Config{Goos: "linux", Goarch: "arm"}, "internal/bytealg") {
+		t.Fatal("ordinary ARM target unexpectedly changed its Plan9 assembly default")
+	}
 }
 
 func TestPkgSFilesUsesPackageLoadDir(t *testing.T) {

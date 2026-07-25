@@ -24,5 +24,5 @@ func coroTargetPostKeyedOperationV2(id coro.OperationID) bool {
 	posted := coroProgramManualSourceV2State.Post(id)
 	requested := coroProgramExecutorRegistryV1State.Request(coroProgramExecutorHandleV1State)
 	return posted == coro.ManualOperationPosted &&
-		(requested == coro.ExecutorRequestPublished || requested == coro.ExecutorRequestCoalesced)
+		coro.ExecutorRequestAccepted(requested)
 }

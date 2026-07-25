@@ -23,5 +23,5 @@ import "github.com/goplus/llgo/runtime/internal/coro"
 func coroTargetPostKeyedOperationV2(id coro.OperationID) bool {
 	result := coroNativeFleetPostManualV1(id)
 	return result.Route == coro.OperationRoutePosted &&
-		(result.Executor == coro.ExecutorRequestPublished || result.Executor == coro.ExecutorRequestCoalesced)
+		coro.ExecutorRequestAccepted(result.Executor)
 }

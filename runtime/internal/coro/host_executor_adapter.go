@@ -618,6 +618,17 @@ type HostMonotonicClock struct {
 	hi       uint32
 }
 
+// EnsureInitialized installs the canonical zero epoch when no host timestamp
+// exists yet. It never rewinds an already-published clock. This is the only
+// initialization needed by a freestanding command entry before its first
+// bounded scheduler slice; later host turns still advance time with Publish.
+func (clock *HostMonotonicClock) EnsureInitialized() bool {
+	if _, ok := clock.Snapshot(); ok {
+		return true
+	}
+	return clock.Publish(0, 0)
+}
+
 func (clock *HostMonotonicClock) Snapshot() (int64, bool) {
 	if clock == nil {
 		return 0, false
@@ -665,6 +676,56 @@ func (clock *HostMonotonicClock) Publish(lo, hi uint32) bool {
 		}
 		preemptStore(&clock.lo, lo)
 		preemptStore(&clock.hi, hi)
+		preemptStore(&clock.sequence, sequence+2)
+		return true
+	}
+	return false
+}
+
+// HostWallClock is a uint32 seqlock for a host-supplied Unix wall-clock
+// sample. Unlike HostMonotonicClock, wall time may move in either direction.
+// Keeping seconds and nanoseconds separate preserves the full time.now domain
+// on wasm32 without requiring lock-free i64 atomics.
+type HostWallClock struct {
+	sequence uint32
+	secLo    uint32
+	secHi    uint32
+	nsec     uint32
+}
+
+func (clock *HostWallClock) Snapshot() (sec int64, nsec int32, ok bool) {
+	if clock == nil {
+		return 0, 0, false
+	}
+	for attempt := 0; attempt != 8; attempt++ {
+		before := preemptLoad(&clock.sequence)
+		if before == 0 || before&1 != 0 {
+			continue
+		}
+		secLo := preemptLoad(&clock.secLo)
+		secHi := preemptLoad(&clock.secHi)
+		nsecWord := preemptLoad(&clock.nsec)
+		if preemptLoad(&clock.sequence) != before || nsecWord >= 1e9 {
+			continue
+		}
+		return int64(uint64(secHi)<<32 | uint64(secLo)), int32(nsecWord), true
+	}
+	return 0, 0, false
+}
+
+func (clock *HostWallClock) Publish(secLo, secHi, nsec uint32) bool {
+	if clock == nil || nsec >= 1e9 {
+		return false
+	}
+	for attempt := 0; attempt != 8; attempt++ {
+		sequence := preemptLoad(&clock.sequence)
+		if sequence&1 != 0 || sequence >= ^uint32(0)-1 ||
+			!preemptCompareAndSwap(&clock.sequence, sequence, sequence+1) {
+			continue
+		}
+		preemptStore(&clock.secLo, secLo)
+		preemptStore(&clock.secHi, secHi)
+		preemptStore(&clock.nsec, nsec)
 		preemptStore(&clock.sequence, sequence+2)
 		return true
 	}

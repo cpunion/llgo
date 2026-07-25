@@ -38,7 +38,7 @@ type CoroPlanObserver func(pkg *ssa.Package, plan *coro.SSAPlan)
 const CoroFrameRetentionParkABIV2 = coro.FrameRetentionParkABIV2
 
 func CoroNativeTargetCapabilities() coro.TargetCapabilities {
-	return coro.NewTargetCapabilities(true, true)
+	return coro.NewTargetCapabilities(true, true, false)
 }
 
 // Compilation contains immutable inputs shared by every package compiled as
@@ -102,6 +102,10 @@ func (c *Compilation) immutableEmissionUniverse() *EmissionUniverse {
 
 func (c *Compilation) CoroWorkerSupported() bool {
 	return c != nil && c.CoroTargetCapabilities.Worker()
+}
+
+func (c *Compilation) CoroHostOperationSupported() bool {
+	return c != nil && c.CoroTargetCapabilities.HostOperation()
 }
 
 func (c *Compilation) validateCoroTargetCapabilities() error {
@@ -171,6 +175,8 @@ func (c *Compilation) validateStacklessCoroABIIdentity(required bool) error {
 	wantScheduler := coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	if c.CoroWorkerSupported() {
 		wantScheduler = coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0
+	} else if c.CoroHostOperationSupported() {
+		wantScheduler = coro.SchedulerProgramBootstrapChannelHostOperationClosedStaticSpawnABIV0
 	}
 	switch c.CoroFrameRetentionABI {
 	case "", CoroFrameRetentionParkABIV2:

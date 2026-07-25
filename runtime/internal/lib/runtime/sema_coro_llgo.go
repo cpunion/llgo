@@ -1,4 +1,4 @@
-//go:build llgo && llgo_coro && llgo_coro_native_pipe && llgo_coro_native_timer && (darwin || linux) && !baremetal && !coro_runtime_adapter_test
+//go:build llgo && llgo_coro && !coro_runtime_adapter_test && ((llgo_coro_native_pipe && llgo_coro_native_timer && (darwin || linux) && !baremetal) || wasm || tinygo.wasm || baremetal || llgo_coro_host)
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -25,10 +25,10 @@ import (
 )
 
 // llgoCoroSemaphoreParkV2 is opaque compiler-spilled ParkState/source storage.
-// Sixteen pointer words cover the runtime layout on both 32- and 64-bit
-// targets without exposing scheduler pointers to the standard library.
+// Twenty pointer words cover the wasm32 and native64 runtime layouts without
+// exposing scheduler pointers to the standard library.
 type llgoCoroSemaphoreParkV2 struct {
-	words [16]uintptr
+	words [20]uintptr
 }
 
 //llgo:coro contract foreign.v1 scope=declaration progress=executor-safe affinity=caller-thread reentry=none memory=borrow-until-return

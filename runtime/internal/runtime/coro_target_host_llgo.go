@@ -1,4 +1,4 @@
-//go:build llgo && llgo_coro && !coro_runtime_adapter_test && (wasm || baremetal || llgo_coro_host) && !(llgo_coro_native_pipe && (darwin || linux) && !baremetal)
+//go:build llgo && llgo_coro && !coro_runtime_adapter_test && (wasm || tinygo.wasm || baremetal || llgo_coro_host) && !(llgo_coro_native_pipe && (darwin || linux) && !baremetal)
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -29,6 +29,7 @@ import "github.com/goplus/llgo/runtime/internal/coro"
 var (
 	coroHostTargetV1State coro.HostExecutorAdapter
 	coroHostClockV1State  coro.HostMonotonicClock
+	coroHostWallV1State   coro.HostWallClock
 )
 
 const (
@@ -42,6 +43,7 @@ const (
 	coroHostCapabilityScheduleV1        uint32 = 1 << 8
 	coroHostCapabilityAlarmV1           uint32 = 1 << 9
 	coroHostCapabilityReactorPollV1     uint32 = 1 << 10
+	coroHostCapabilityOperationV1       uint32 = 1 << 11
 	coroHostCapabilityExternalReactorV1 uint32 = 1 << 31
 )
 
@@ -49,8 +51,15 @@ func coroTargetExecutorStartV1(handle coro.ExecutorHandle) bool {
 	// The compiler's ordinary command entry still owns a native-only V2 loop.
 	// Until a platform wrapper owns the host reactor it selects LegacyV1; reject
 	// that mode loudly instead of returning Suspended and silently abandoning a
-	// queued action. Embeddings enter through RunSliceV2 after publishing time.
+	// queued action. A host wrapper may publish its absolute clock before this
+	// call. The ordinary freestanding command entry has no earlier host turn,
+	// so zero is its canonical monotonic epoch; the first later host callback
+	// may advance it through the same non-regressing Publish contract.
+	if !coroHostClockV1State.EnsureInitialized() {
+		return false
+	}
 	return coroHostPlatformProfileV1&coroHostProfileKindMaskV1 != 0 &&
+		coroHostOperationAdapterV1State.CanRelease() &&
 		coroProgramDriverModeV2State == coroProgramDriverModeSliceV2 &&
 		handle == coroProgramExecutorHandleV1State && coroHostTargetV1State.Start(handle, true)
 }
@@ -87,6 +96,9 @@ func coroTargetPollExecutorWakeV1(handle coro.ExecutorHandle, epoch uint32) coro
 }
 
 func coroTargetBeginExecutorCloseV1(handle coro.ExecutorHandle, epoch uint32) coroTargetDispatchResultV1 {
+	if !coroHostOperationAdapterV1State.CanRelease() {
+		return coroTargetDispatchInvalidV1
+	}
 	switch coroHostTargetV1State.BeginClose(handle, epoch) {
 	case coro.HostAdapterCompletionComplete:
 		return coroTargetDispatchCompleteV1
@@ -122,6 +134,17 @@ func coroTargetRequestExecutorV1(handle coro.ExecutorHandle) bool {
 	result, ok := coroHostRequestExecutorV1(handle)
 	return ok && (result == coro.ExecutorRequestPublished || result == coro.ExecutorRequestCoalesced ||
 		result == coro.ExecutorRequestIdleWake)
+}
+
+// coroTargetRequestControlledTimerV2 requests the sole host-owned route after
+// Stop or Reset changes the logical timer generation. The durable timer source
+// state is scanned on the later Schedule turn; no managed pointer crosses the
+// host boundary.
+func coroTargetRequestControlledTimerV2(route coro.RouteID) bool {
+	return route == coro.RouteID(1) &&
+		coroProgramExecutorBoundV1State &&
+		coroProgramExecutorHandleV1State != (coro.ExecutorHandle{}) &&
+		coroTargetRequestExecutorV1(coroProgramExecutorHandleV1State)
 }
 
 func coroTargetPostTaskControlV1(id coro.OperationID, kind coro.TaskCancelKind, executor coro.ExecutorHandle) coro.TaskControlExecutorPostResult {
@@ -189,6 +212,16 @@ func __llgo_coro_host_next_deadline_v1(out *coro.HostActionV1) bool {
 //export __llgo_coro_host_publish_time_v1
 func __llgo_coro_host_publish_time_v1(nowLo, nowHi uint32) bool {
 	return coroHostClockV1State.Publish(nowLo, nowHi)
+}
+
+// __llgo_coro_host_publish_wall_time_v1 publishes one Unix wall-clock sample.
+// Hosts should call it immediately before a clean ContinueSlice entry when
+// time.Now must observe current civil time. Wall-clock correction is allowed;
+// scheduler deadlines remain exclusively monotonic.
+//
+//export __llgo_coro_host_publish_wall_time_v1
+func __llgo_coro_host_publish_wall_time_v1(secLo, secHi, nsec uint32) bool {
+	return coroHostWallV1State.Publish(secLo, secHi, nsec)
 }
 
 //export __llgo_coro_host_ack_cancel_v1

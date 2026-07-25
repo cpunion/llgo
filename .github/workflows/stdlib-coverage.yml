@@ -7,7 +7,7 @@ on:
       - "!dependabot/**"
       - "!xgopilot/**"
   pull_request:
-    branches: ["**"]
+    branches: [main]
 
 concurrency:
   group: stdlib-coverage-${{ github.event.pull_request.number || github.ref }}

@@ -1914,10 +1914,38 @@ Pure sync library/archive不需要链接scheduler。Executable一旦选择 `-sch
   multi-executor fleet/channel shutdown以及C2 errno IR均已在本地分层通过；完整
   `test/*`、Go 1.26 GOROOT、跨LLVM 19–22和各target CI仍是合并前验收，不得由这些
   focused结果外推为完整标准库兼容。
+- host complete-operation网络族现以同一个8-word以内的typed recipe覆盖
+  read/write/accept/connect/recvfrom/sendto/recvmsg/sendmsg；deadline metadata只选择
+  Worker-only或Worker+Timer ParkSet，动态SetDeadline与Close均通过exact read/write lane
+  取消并等待物理ack。Go 1.26同步`net` fixture已在Darwin、`wasm-unknown`和`wasip2`
+  运行通过；同一fixture又让Go自带pure-Go resolver通过现有文件HostOp读取受控
+  nsswitch/resolv/hosts并完成`LookupHost("localhost")`，并经受控UDP DNS server并发完成
+  A/AAAA wire查询。WASM显式Node embedding的功能场景账本为114个operation、17次cancel、
+  18个alarm和171个schedule action；追加80次listener顺序创建/关闭后最终为
+  594/17/18/651，确定性越过64槽poll descriptor页。并发查询暴露的preemptible poll descriptor扫描重复
+  `runtimeCtx`分配已改为target-lowered原子CAS保留并由源码gate固定。read/write control
+  lane又加入单调epoch：deadline/Close先发布descriptor状态并推进epoch，park hook在HostOp
+  Submit后重检snapshot，失配时向仍处于preparing/sealed的ParkSet发布sticky operation
+  cancel，随后统一resolver完成exact物理Cancel、terminal ack与result discard。pull adapter
+  用独立`SubmitCancelPending`状态保留两项义务并固定同generation的Submit先于Cancel；
+  两个WASM target上的确定性stale-epoch E2E已覆盖该窗口。最终`runtime_pollClose`还把
+  标准`FD` read/write ref所保证的post-resume/unbind lane-idle变成fail-stop gate，违约不能
+  静默留下固定表槽或形成`runtimeCtx` ABA。
+  新增RecvMsg/SendMsg只增加target-neutral opcode、36-byte POD result和stdlib薄wrapper，
+  没有增加compiler effect、executor或source状态机分支。
+- HostOp的compiler边界现已完全进入同一ProgramIR事实流：call-site freeze一次验证exact
+  direct shape并保存`opcode/pointerMask/argumentCount/metadataWords`，physical operation
+  recipe只引用该POD，codegen不再从raw SSA恢复opcode、pointer provenance或deadline metadata。
+  HostOp与worker word-call共用一个Park CFG emitter，operation select/observe也经统一入口；
+  architecture debt的direct plan authority从354降到352，raw intrinsic shape、Park emission和
+  physical operation selector预算没有上升。使用本次重构后新构建的compiler，两个WASM目标均
+  重新通过直接网络`16/2/15`、文件`5/10`、Sleep `4/1`及TCP/DNS
+  `594/17/18/651`纵向账本。
 - Phase 36之后的主要缺口仍是工程闭环而非新的coroutine可行性障碍：P-neutral
   `ResumePacket`、动态P/steal和blocking compensation；paged/dynamic channel、timer与
-  worker capacity；完整defer/recover/Goexit和precise suspended-frame GC；netpoll全FD族、
-  DNS/process/signal；logical stack/tooling；以及WASM/WASI/RTOS/baremetal各自真实
+  worker capacity；完整defer/recover/Goexit和precise suspended-frame GC；外部DNS
+  server/cgo resolver、Unix/raw socket与ancillary OOB、process/signal；logical stack/tooling；以及
+  WASM/WASI/RTOS/baremetal各自内建
   event/host/HAL adapter。native退出实验模式仍必须满足35.1与35.2，尤其仓库
   `test/*`和GOROOT不得存在unexpected failure。
 - compiler的所有现有initial、child-await、yield和legacy-park resume边已接入terminating dispatch gate。zero-ticket路径调用scalar `__llgo_coro_run_decision_take_zero_v1(g) uint32`，正常值进入唯一normal continuation，Abort/Shutdown在cleanup lowering完成前进入共享trap而不会误执行用户continuation；full ticket/lease ABI继续供bootstrap与未来park-site reconciliation使用。同一LLVM/target的gate开关对照证明scalar gate不会增加stackless coroutine frame，CoroSplit ramp/destroy也没有可达gate。

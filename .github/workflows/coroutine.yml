@@ -25,6 +25,8 @@ jobs:
           - { llvm: 21, go: "1.26.5", tags: "llvm21", lane: "compat", check: "test (21, 1.26.5, llvm21)" }
           - { llvm: 22, go: "1.26.5", tags: "llvm22", lane: "compat", check: "test (22, 1.26.5, llvm22)" }
           - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "integration", check: "test integration (19, 1.26.5, llvm19)" }
+          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "native-e2e", check: "test native linked E2E (19, 1.26.5, llvm19)" }
+          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "fleet-e2e", check: "test native fleet E2E (19, 1.26.5, llvm19)" }
           - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "stdlib", check: "test stdlib scheduler progress (19, 1.26.5, llvm19)" }
           - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "targets", check: "test targets (19, 1.26.5, llvm19)" }
     steps:
@@ -163,6 +165,41 @@ jobs:
               test "$result" = '0'
             fi
           done
+          host_exports='--export=main --export=malloc --export=free --export=__llgo_coro_host_next_action_v1 --export=__llgo_coro_host_profile_v1 --export=__llgo_coro_host_publish_time_v1 --export=__llgo_coro_host_publish_wall_time_v1 --export=__llgo_coro_host_continue_slice_v1 --export=__llgo_coro_host_ack_cancel_v1 --export=__llgo_coro_host_next_operation_v1 --export=__llgo_coro_host_complete_operation_v1'
+          for target in wasip2 wasm-unknown; do
+            output="/tmp/llgo-${target}-stdlib-file.wasm"
+            LDFLAGS="$host_exports" \
+              /tmp/llgo-wasm-target build -target="$target" -o "$output" \
+              ./internal/build/_testgo/coro_stdlib_file_rw
+            test -z "$(llvm-nm --undefined-only --format=just-symbols "$output")"
+            result="$(node ./internal/build/_testgo/coro_host_file_rw/host_runner.mjs "$output")"
+            grep -F '"status":"complete"' <<<"$result"
+            grep -F '"operations":5' <<<"$result"
+          done
+          for target in wasip2 wasm-unknown; do
+            output="/tmp/llgo-${target}-host-network.wasm"
+            LLGO_BUILD_CACHE=off LDFLAGS="$host_exports" \
+              /tmp/llgo-wasm-target build -target="$target" -o "$output" \
+              ./internal/build/_testgo/coro_host_network_loopback
+            test -z "$(llvm-nm --undefined-only --format=just-symbols "$output")"
+            result="$(node ./internal/build/_testgo/coro_host_network_loopback/host_runner.mjs "$output")"
+            grep -F '"status":"complete"' <<<"$result"
+            grep -F '"operations":16' <<<"$result"
+            grep -F '"cancellations":2' <<<"$result"
+          done
+          for target in wasip2 wasm-unknown; do
+            output="/tmp/llgo-${target}-stdlib-tcp.wasm"
+            LDFLAGS="$host_exports" \
+              /tmp/llgo-wasm-target build -target="$target" -o "$output" \
+              ./internal/build/_testgo/coro_stdlib_tcp_loopback
+            test -z "$(llvm-nm --undefined-only --format=just-symbols "$output")"
+            result="$(node ./internal/build/_testgo/coro_stdlib_tcp_loopback/host_runner.mjs "$output")"
+            grep -F '"status":"complete"' <<<"$result"
+            grep -F '"operations":594' <<<"$result"
+            grep -F '"cancellations":17' <<<"$result"
+            grep -F '"alarms":18' <<<"$result"
+            grep -F '"dnsQueries":[1,28]' <<<"$result"
+          done
 
       - name: Compile coroutine runtime adapter across targets
         if: matrix.lane == 'targets'
@@ -178,13 +215,20 @@ jobs:
 
       - name: Test coroutine build integration
         if: matrix.lane == 'integration'
-        # Keep the focused workflow exhaustive for the build-side coroutine
-        # contract. This includes park effect seeding, frozen foreign noblock
-        # certificates, IRQUnsafe handling, the explicit-status panic stop, and
-        # the native linked static-spawn scheduler-island execution smoke. The
-        # timer checks have their own LLVM 19-22 steps below, so do not run them
-        # twice in the LLVM 19 job.
-        run: go test ./internal/build -run 'Coro|Coroutine' -skip '^TestCoroNativeTimeSleepProductionPlanAndCodegen$' -timeout=10m -count=1
+        # Keep one short-lived Go process for the build-side contract. Linked
+        # E2Es create several LLVM Programs and therefore run in isolated lanes
+        # below: keeping all of them in this process retains LLVM allocations
+        # across tests and can exceed the runner memory/timeout without a
+        # functional failure.
+        run: go test ./internal/build -run 'Coro|Coroutine' -skip 'E2E|^TestCoroNativeTimeSleepProductionPlanAndCodegen$|^TestCoroStdlibSyncAcceptance$' -timeout=10m -count=1
+
+      - name: Test native linked coroutine islands
+        if: matrix.lane == 'native-e2e'
+        run: go test ./internal/build -run '^TestCoro(StaticPlainDeferNativeNoStdlibRuntimeE2E|ExplicitPanicNativeNoStdlibRuntimeE2E|ChannelAndClosedStaticSpawnNativeNoStdlibRuntimeE2E)$' -timeout=10m -count=1
+
+      - name: Test native coroutine fleet
+        if: matrix.lane == 'fleet-e2e'
+        run: go test ./internal/build -run '^TestCoroNativeFleet.*E2E$' -timeout=10m -count=1
 
       - name: Test synchronous stdlib coroutine acceptance
         if: matrix.lane == 'stdlib'

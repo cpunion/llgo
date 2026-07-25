@@ -659,6 +659,11 @@ const (
 	// libffi only until the child reaches its initial suspend. Lowering injects
 	// the current G and awaits only after ffi_call has left the native stack.
 	llgoCoroFFICall = llgoInstrBase + 0x56
+	// llgoCoroHostOperation is the host-pull external-operation intrinsic. Its
+	// first uintptr operand is a compile-time opcode; remaining uintptr or
+	// pointer operands are copied into a fixed POD request catalog. It has no
+	// synchronous callable fallback.
+	llgoCoroHostOperation = llgoInstrBase + 0x57
 
 	llgoAtomicOpLast = llgoAtomicOpBase + int(llssa.OpUMin)
 )

@@ -26,6 +26,11 @@ import "unsafe"
 func __llgo_coro_program_begin_v1() {}
 type coroProgramRunResultV2 struct { Flags, Used, ExecutorSlot, ExecutorGeneration, Epoch, DeadlineLo, DeadlineHi, Reserved uint32 }
 type hostActionV1 struct { Kind, ExecutorSlot, ExecutorGeneration, Epoch, DeadlineLo, DeadlineHi, Reserved0, Reserved1 uint32 }
+type hostOperationActionV1 struct {
+	Kind, SourceSlot, SourceGeneration, Opcode, ArgCount, Reserved uint32
+	Args [18]uint32
+}
+type CoroHostOperationParkV1 struct{}
 func __llgo_coro_program_run_slice_v2(unsafe.Pointer, unsafe.Pointer, uint32, *coroProgramRunResultV2) uint32 { return 0 }
 func __llgo_coro_program_continue_slice_v2(uint32, uint32, uint32, uint32, *coroProgramRunResultV2) uint32 { return 0 }
 func __llgo_coro_host_next_action_v1(*hostActionV1) uint32 { return 0 }
@@ -34,6 +39,21 @@ func __llgo_coro_host_next_deadline_v1(*hostActionV1) bool { return false }
 func __llgo_coro_host_publish_time_v1(uint32, uint32) bool { return false }
 func __llgo_coro_host_ack_cancel_v1(uint32, uint32, uint32, uint32) bool { return false }
 func __llgo_coro_host_continue_slice_v1(uint32, uint32, uint32, uint32, uint32, uint32, uint32, *coroProgramRunResultV2) uint32 { return 0 }
+func __llgo_coro_host_next_operation_v1(*hostOperationActionV1) uint32 { return 0 }
+func __llgo_coro_host_complete_operation_v1(uint32, uint32, uint32, uint32, uint32, uint32, uint32, uint32, uint32, uint32) uint32 { return 0 }
+func __llgo_coro_host_operation_park_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32, uint32, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr) {}
+func __llgo_coro_host_operation_resume_v1(unsafe.Pointer, unsafe.Pointer, *uintptr, *uintptr, *uintptr) uint32 { return 0 }
+func __llgo_coro_timer_park_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, int64) {}
+func __llgo_coro_timer_park_controlled_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, *uint32, *uint32, uint32, int64) {}
+func __llgo_coro_timer_resume_v2(unsafe.Pointer, unsafe.Pointer) uint32 { return 0 }
+func __llgo_coro_timer_request_controlled_v2(uint32) uint32 { return 0 }
+func __llgo_coro_keyed_park_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) {}
+func __llgo_coro_keyed_resume_v2(unsafe.Pointer, unsafe.Pointer) uint32 { return 0 }
+func __llgo_coro_sema_prepare_or_abort_v2(unsafe.Pointer, unsafe.Pointer) {}
+func __llgo_coro_sema_release_or_abort_v2(unsafe.Pointer) {}
+func __llgo_coro_notify_prepare_or_abort_v2(unsafe.Pointer, unsafe.Pointer, uint32) {}
+func __llgo_coro_notify_one_or_abort_v2(unsafe.Pointer, uint32) {}
+func __llgo_coro_notify_all_or_abort_v2(unsafe.Pointer, uint32) {}
 func __llgo_coro_frame_allocator_bootstrap_v1() {}
 func __llgo_coro_frame_alloc_v1() {}
 func __llgo_coro_frame_publish_v1() {}
@@ -63,11 +83,11 @@ func CoroChanSelectTry(...ChanOp) (int, bool, bool, bool) { return 0, false, fal
 func CoroChanSelectPark(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) {}
 func CoroChanSelectResume(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, ...ChanOp) (int, bool, uint32) { return 0, false, 0 }
 func __llgo_coro_fault_prepare_v1() {}
-func __llgo_coro_fault_prepare_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32, uintptr, uintptr) {}
+func __llgo_coro_fault_prepare_v2(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32, uint64, uintptr) {}
 func __llgo_coro_panic_prepare_v1() {}
 func __llgo_coro_recover_take_v1(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_fault_payload_v1(uint32, unsafe.Pointer, unsafe.Pointer) {}
-func __llgo_coro_fault_payload_v2(uint32, uintptr, uintptr, unsafe.Pointer, unsafe.Pointer) {}
+func __llgo_coro_fault_payload_v2(uint32, uint64, uintptr, unsafe.Pointer, unsafe.Pointer) {}
 func __llgo_coro_spawn_begin_v1() {}
 func __llgo_coro_spawn_commit_v1() {}
 func __llgo_coro_program_main_return_v1() {}
@@ -112,6 +132,21 @@ func __llgo_coro_program_main_return_v1() {}
 		coroHostPublishTimeSymbolV1,
 		coroHostAckCancelSymbolV1,
 		coroHostContinueSliceSymbolV1,
+		coroHostNextOperationSymbolV1,
+		coroHostCompleteOperationSymbolV1,
+		coroHostOperationParkSymbolV1,
+		coroHostOperationResumeSymbolV1,
+		coroTimerParkSymbolV2,
+		coroTimerParkControlledSymbolV2,
+		coroTimerResumeSymbolV2,
+		coroTimerRequestControlledSymbolV2,
+		coroKeyedParkSymbolV2,
+		coroKeyedResumeSymbolV2,
+		coroSemaphorePrepareOrAbortSymbolV2,
+		coroSemaphoreReleaseOrAbortSymbolV2,
+		coroNotifyPrepareOrAbortSymbolV2,
+		coroNotifyOneOrAbortSymbolV2,
+		coroNotifyAllOrAbortSymbolV2,
 		"__llgo_coro_frame_alloc_v1",
 		"__llgo_coro_frame_publish_v1",
 		"__llgo_coro_await_prepare_v1",

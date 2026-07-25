@@ -400,8 +400,10 @@ func TestWorkerOperationSourceSubmittedCancellationAwaitsPhysicalCompletion(t *t
 		t.Fatal("reserve and submit scheduler worker operation")
 	}
 	commitTimerV2TestPark(t, p, park)
-	if !RequestWaitSetCancel(p, park.wait, ParkCancelOperation) {
-		t.Fatal("request submitted worker cancellation")
+	stale := id
+	stale.Generation++
+	if source.RequestCancelID(p, stale) || !source.RequestCancelID(p, id) {
+		t.Fatal("request exact submitted worker cancellation")
 	}
 	batch, tail, resolution, ok := resolveAffectedWaitSets(p, nil)
 	if !ok || batch != park.wait || tail != park.wait ||
@@ -411,6 +413,9 @@ func TestWorkerOperationSourceSubmittedCancellationAwaitsPhysicalCompletion(t *t
 	slot, _ := workerOperationSlotFor(source, id)
 	if got := source.ApplyOne(p, id, &slot.record); got != OperationApplyAwaitExternalFact {
 		t.Fatalf("apply submitted worker cancellation = %d, want await-external", got)
+	}
+	if requested, ok := WorkerOperationPhysicalCancelRequested(source, p, id); !ok || !requested {
+		t.Fatalf("submitted worker physical cancel = %t, %t", requested, ok)
 	}
 	if retry, await, ok := finishWaitSetApplyProgress(park.wait, false, true); !ok || retry || !await {
 		t.Fatalf("finish submitted worker await = (%t, %t, %t)", retry, await, ok)

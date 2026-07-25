@@ -1,4 +1,4 @@
-//go:build arm && baremetal
+//go:build arm && (baremetal || tinygo.wasm)
 
 package atomic
 

@@ -1,4 +1,4 @@
-//go:build (llgo && llgo_coro && llgo_coro_native_pipe && llgo_coro_native_timer && (darwin || linux) && !baremetal && !coro_runtime_adapter_test) || coro_sema_owner_test || coro_notify_owner_test
+//go:build (llgo && llgo_coro && !coro_runtime_adapter_test && ((llgo_coro_native_pipe && llgo_coro_native_timer && (darwin || linux) && !baremetal) || wasm || tinygo.wasm || baremetal || llgo_coro_host)) || coro_sema_owner_test || coro_notify_owner_test
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -96,10 +96,11 @@ type CoroKeyedParkV2 struct {
 	magic     uint32
 }
 
-// The standard-library wrappers reserve [16]uintptr of opaque frame storage.
-// Keep the runtime view allocation-free and target-pointer-width neutral.
+// The standard-library wrappers reserve [20]uintptr of opaque frame storage.
+// Twenty words cover both wasm32 and native64 layouts without exposing runtime
+// fields across the package boundary.
 var (
-	_ [16*unsafe.Sizeof(uintptr(0)) - unsafe.Sizeof(CoroKeyedParkV2{})]byte
+	_ [20*unsafe.Sizeof(uintptr(0)) - unsafe.Sizeof(CoroKeyedParkV2{})]byte
 	_ [unsafe.Alignof(uintptr(0)) - unsafe.Alignof(CoroKeyedParkV2{})]byte
 )
 
