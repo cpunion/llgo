@@ -1508,7 +1508,7 @@ type coroRawABIPlainClosure struct {
 	externalPlain      map[*ssa.Function]struct{}
 	closedDynamic      map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate
 	basePolicyEffects  map[*ssa.Function]coro.Effect
-	rawSyncIntrinsics  map[ssa.CallInstruction]string
+	rawSyncIntrinsics  map[ssa.CallInstruction]cl.CoroCallSitePlan
 	nonRawLocalEffects map[*ssa.Function]coro.Effect
 	normalReturnBlocks map[*ssa.Function]map[*ssa.BasicBlock]struct{}
 	rawReferences      map[*ssa.Function][]*ssa.Function
@@ -1611,7 +1611,7 @@ func (in CoroPlanInput) liveCoroRawABIPlainClosure(
 		externalPlain:      make(map[*ssa.Function]struct{}),
 		closedDynamic:      in.requiredClosedDynamic,
 		basePolicyEffects:  basePolicyEffects,
-		rawSyncIntrinsics:  make(map[ssa.CallInstruction]string),
+		rawSyncIntrinsics:  make(map[ssa.CallInstruction]cl.CoroCallSitePlan),
 		nonRawLocalEffects: make(map[*ssa.Function]coro.Effect),
 		normalReturnBlocks: make(map[*ssa.Function]map[*ssa.BasicBlock]struct{}),
 		rawReferences:      make(map[*ssa.Function][]*ssa.Function),
@@ -1851,16 +1851,29 @@ func (in CoroPlanInput) liveCoroRawABIPlainClosure(
 					if !frozen {
 						return nil, fmt.Errorf("raw-plain call %q in %q is absent from the frozen ProgramIR", direct.String(), fn.Name())
 					}
-					if callSite.Intrinsic && callSite.IntrinsicSemantics.SuspendsCurrentFrame() {
-						if callSite.IntrinsicSemantics == cl.CoroIntrinsicCallInlineSuspend && callSite.ElisionCertificate != "" {
-							// The only frontend certificate currently exposed here is
-							// the exact worker-syscall call-site certificate. Its managed
-							// body parks, while rawPlainBody deliberately selects the
-							// ordinary synchronous intrinsic lowering.
-							closure.rawSyncIntrinsics[direct] = callSite.ElisionCertificate
-						} else {
-							closure.nonRawLocalEffects[fn] = closure.nonRawLocalEffects[fn].Join(callSite.IntrinsicSemantics.CurrentFrameEffect())
+					if callSite.RawPlainSynchronousIntrinsic {
+						if !callSite.Intrinsic {
+							return nil, fmt.Errorf("raw-plain synchronous call %q in %q is not a frozen intrinsic", direct.String(), fn.Name())
 						}
+						switch callSite.IntrinsicSemantics {
+						case cl.CoroIntrinsicCallUnsupported:
+							if callSite.ElidesCall() || callSite.ElisionCertificate != "" {
+								return nil, fmt.Errorf("raw-plain synchronous call %q in %q has a malformed retained managed recipe", direct.String(), fn.Name())
+							}
+						case cl.CoroIntrinsicCallInlineSuspend:
+							if callSite.Elision != cl.CoroCallElidedIntrinsic || callSite.ElisionCertificate == "" {
+								return nil, fmt.Errorf("raw-plain synchronous call %q in %q has no exact worker elision certificate", direct.String(), fn.Name())
+							}
+						default:
+							return nil, fmt.Errorf("raw-plain synchronous call %q in %q has incompatible managed semantics %d", direct.String(), fn.Name(), callSite.IntrinsicSemantics)
+						}
+						// A certified worker call parks in the managed twin. An
+						// uncertified dynamic syscall remains fail-closed there.
+						// In either case the separately proven raw/plain body uses
+						// the exact ordinary synchronous intrinsic lowering.
+						closure.rawSyncIntrinsics[direct] = callSite
+					} else if callSite.Intrinsic && callSite.IntrinsicSemantics.SuspendsCurrentFrame() {
+						closure.nonRawLocalEffects[fn] = closure.nonRawLocalEffects[fn].Join(callSite.IntrinsicSemantics.CurrentFrameEffect())
 					}
 				}
 				if makeClosure, ok := instruction.(*ssa.MakeClosure); ok {
@@ -1886,6 +1899,9 @@ func (in CoroPlanInput) liveCoroRawABIPlainClosure(
 				}
 				call, ok := instruction.(ssa.CallInstruction)
 				if !ok || call.Common() == nil || call.Common().StaticCallee() == nil {
+					continue
+				}
+				if _, rawSynchronous := closure.rawSyncIntrinsics[call]; rawSynchronous {
 					continue
 				}
 				callPlan, planned := preliminary.CallPlan(call)
@@ -2115,15 +2131,30 @@ func validateLiveCoroRawABIPlainClosure(plan *coro.SSAPlan, raw *coroRawABIPlain
 			allowedExec |= coro.BlockForeign
 		}
 		rawSyncEffects := coro.NoSuspend
-		for call, certificate := range raw.rawSyncIntrinsics {
+		for call, site := range raw.rawSyncIntrinsics {
 			if call == nil || call.Parent() != fn {
 				continue
 			}
-			plannedCertificate, planned := plan.ElidedCallCertificate(call)
-			if !planned || !plan.ElidesCall(call) || plannedCertificate != certificate {
-				return fmt.Errorf("live raw ABI plain closure function %q (%s) lost its exact synchronous raw intrinsic certificate", functionPlan.ID, fn.String())
+			if !site.Intrinsic || !site.RawPlainSynchronousIntrinsic {
+				return fmt.Errorf("live raw ABI plain closure function %q (%s) lost its exact synchronous raw intrinsic recipe", functionPlan.ID, fn.String())
 			}
-			rawSyncEffects = rawSyncEffects.Join(coro.MayPark)
+			switch site.IntrinsicSemantics {
+			case cl.CoroIntrinsicCallUnsupported:
+				if plan.ElidesCall(call) {
+					return fmt.Errorf("live raw ABI plain closure function %q (%s) unexpectedly elided its managed fail-closed syscall edge", functionPlan.ID, fn.String())
+				}
+				if _, planned := plan.CallPlan(call); !planned {
+					return fmt.Errorf("live raw ABI plain closure function %q (%s) lost its retained managed fail-closed syscall edge", functionPlan.ID, fn.String())
+				}
+			case cl.CoroIntrinsicCallInlineSuspend:
+				plannedCertificate, planned := plan.ElidedCallCertificate(call)
+				if !planned || !plan.ElidesCall(call) || plannedCertificate != site.ElisionCertificate {
+					return fmt.Errorf("live raw ABI plain closure function %q (%s) lost its exact worker syscall certificate", functionPlan.ID, fn.String())
+				}
+			default:
+				return fmt.Errorf("live raw ABI plain closure function %q (%s) has incompatible synchronous raw intrinsic semantics %d", functionPlan.ID, fn.String(), site.IntrinsicSemantics)
+			}
+			rawSyncEffects = rawSyncEffects.Join(site.IntrinsicSemantics.CurrentFrameEffect())
 		}
 		// Aggregate Effect/Exec intentionally retain conservative managed-primary
 		// contributions from every explicit static call, including calls in a
@@ -2131,10 +2162,11 @@ func validateLiveCoroRawABIPlainClosure(plan *coro.SSAPlan, raw *coroRawABIPlain
 		// local facts and then every exact edge recursively, using the same CFG
 		// terminal proof above. This keeps the managed fixed point untouched while
 		// avoiding false ordinary reachability from fatal formatting/allocation.
-		// A worker intrinsic is the sole local effect whose physical meaning
-		// differs between the two bodies: managed parks, raw executes the ordinary
-		// synchronous syscall. Prove every other source independently before
-		// admitting that exact certified bit in the aggregate FunctionPlan.
+		// A syscall intrinsic has a separate raw/plain meaning: a certified
+		// managed worker parks, while the raw twin executes the ordinary
+		// synchronous syscall. An uncertified dynamic trap keeps its managed
+		// fail-closed edge but is equally exact in this proven raw body. Prove
+		// every other source independently.
 		if unsupported := raw.basePolicyEffects[fn] &^ managedOnlyEffects; unsupported != 0 {
 			return fmt.Errorf("live raw ABI plain closure function %q (%s) has unsupported declared raw-stack effect %s", functionPlan.ID, fn.String(), unsupported)
 		}
@@ -2171,6 +2203,9 @@ func validateLiveCoroRawABIPlainClosure(plan *coro.SSAPlan, raw *coroRawABIPlain
 					continue
 				}
 				if _, builtin := call.Common().Value.(*ssa.Builtin); builtin {
+					continue
+				}
+				if _, rawSynchronous := raw.rawSyncIntrinsics[call]; rawSynchronous {
 					continue
 				}
 				callPlan, planned := plan.CallPlan(call)
@@ -2793,12 +2828,20 @@ func (conf *Config) coroWorkerSupported() bool {
 	return conf != nil && nativeCoroWorkerRuntimeABI(conf)
 }
 
+func (conf *Config) coroHostOperationSupported() bool {
+	return conf != nil && hostCoroPullRuntimeABI(conf)
+}
+
 func (conf *Config) coroNativeFleetSupported() bool {
 	return conf != nil && nativeCoroTimerRuntimeABI(conf) && nativeCoroWorkerRuntimeABI(conf)
 }
 
 func (conf *Config) coroTargetCapabilities() coro.TargetCapabilities {
-	return coro.NewTargetCapabilities(conf.coroWorkerSupported(), conf.coroNativeFleetSupported())
+	return coro.NewTargetCapabilities(
+		conf.coroWorkerSupported(),
+		conf.coroNativeFleetSupported(),
+		conf.coroHostOperationSupported(),
+	)
 }
 
 type Rewrites map[string]string
@@ -4009,6 +4052,9 @@ func activeCoroSchedulerABIVersion(conf *Config) string {
 	if conf != nil && conf.coroWorkerSupported() {
 		return coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0
 	}
+	if conf != nil && conf.coroHostOperationSupported() {
+		return coro.SchedulerProgramBootstrapChannelHostOperationClosedStaticSpawnABIV0
+	}
 	return coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 }
 
@@ -4061,7 +4107,8 @@ func hostCoroPullRuntimeABI(conf *Config) bool {
 		nativeCoroDoorbellRuntimeABI(conf) || configHasBuildTag(conf, "coro_runtime_adapter_test") {
 		return false
 	}
-	return conf.Goarch == "wasm" || configHasBuildTag(conf, "baremetal") ||
+	return conf.Goarch == "wasm" || configHasBuildTag(conf, "tinygo.wasm") ||
+		configHasBuildTag(conf, "baremetal") ||
 		configHasBuildTag(conf, "llgo_coro_host")
 }
 
@@ -4091,6 +4138,15 @@ func nativeCoroTimerRuntimeABI(conf *Config) bool {
 		}
 	}
 	return false
+}
+
+// coroTimerRuntimeABI is the target-neutral timer/event capability consumed by
+// compiler lowering. Native targets provide it with the POSIX timer reactor;
+// host-pull targets provide the same Timer/Park protocol through Alarm actions
+// and host-published monotonic time. Poll and blocking-worker capabilities stay
+// native-only and are intentionally not implied by this predicate.
+func coroTimerRuntimeABI(conf *Config) bool {
+	return nativeCoroTimerRuntimeABI(conf) || hostCoroPullRuntimeABI(conf)
 }
 
 // nativeCoroFleetRuntimeABI is the only timer-capable native coroutine target.
@@ -4171,10 +4227,30 @@ func validCoroHostActionPointerV1(typ types.Type) bool {
 	return true
 }
 
+func validCoroHostOperationActionPointerV1(typ types.Type) bool {
+	pointer, ok := types.Unalias(typ).(*types.Pointer)
+	if !ok {
+		return false
+	}
+	action, ok := pointer.Elem().Underlying().(*types.Struct)
+	if !ok || action.NumFields() != 7 {
+		return false
+	}
+	for index := 0; index < 6; index++ {
+		if !types.Identical(action.Field(index).Type(), types.Typ[types.Uint32]) || action.Tag(index) != "" {
+			return false
+		}
+	}
+	args, ok := action.Field(6).Type().Underlying().(*types.Array)
+	return ok && args.Len() == 18 && types.Identical(args.Elem(), types.Typ[types.Uint32]) &&
+		action.Tag(6) == ""
+}
+
 func validateCoroHostPullRuntimeFunctionV1(name string, fn *ssa.Function) (bool, error) {
 	switch name {
 	case coroHostNextActionSymbolV1, coroHostProfileSymbolV1, coroHostNextDeadlineSymbolV1,
-		coroHostPublishTimeSymbolV1, coroHostAckCancelSymbolV1, coroHostContinueSliceSymbolV1:
+		coroHostPublishTimeSymbolV1, coroHostAckCancelSymbolV1, coroHostContinueSliceSymbolV1,
+		coroHostNextOperationSymbolV1, coroHostCompleteOperationSymbolV1:
 	default:
 		return false, nil
 	}
@@ -4235,6 +4311,18 @@ func validateCoroHostPullRuntimeFunctionV1(name string, fn *ssa.Function) (bool,
 			return true, nil
 		}
 		return true, fmt.Errorf("coroutine host continue-slice ABI %q must have exact func(7 x uint32, *{8 x uint32}) uint32 signature", name)
+	case coroHostNextOperationSymbolV1:
+		if sig.Params().Len() == 1 &&
+			validCoroHostOperationActionPointerV1(sig.Params().At(0).Type()) &&
+			oneResult(uint32Type) {
+			return true, nil
+		}
+		return true, fmt.Errorf("coroutine host next-operation ABI %q must have exact func(*host-operation-v1) uint32 signature", name)
+	case coroHostCompleteOperationSymbolV1:
+		if allUint32Params(10) && oneResult(uint32Type) {
+			return true, nil
+		}
+		return true, fmt.Errorf("coroutine host complete-operation ABI %q must have exact func(10 x uint32) uint32 signature", name)
 	default:
 		panic("unreachable host-pull runtime ABI validator")
 	}
@@ -4328,18 +4416,18 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			coroHostPublishTimeSymbolV1,
 			coroHostAckCancelSymbolV1,
 			coroHostContinueSliceSymbolV1,
+			coroHostNextOperationSymbolV1,
+			coroHostCompleteOperationSymbolV1,
+			coroHostOperationParkSymbolV1,
+			coroHostOperationResumeSymbolV1,
 		)
 	}
-	if nativeCoroTimerRuntimeABI(ctx.buildConf) {
+	if coroTimerRuntimeABI(ctx.buildConf) {
 		names = append(names,
 			coroTimerParkSymbolV2,
 			coroTimerParkControlledSymbolV2,
 			coroTimerResumeSymbolV2,
 			coroTimerRequestControlledSymbolV2,
-			coroPollParkSymbolV2,
-			coroPollResumeSymbolV2,
-			coroPollUpdateDeadlineOrAbortSymbolV1,
-			coroPollPostClosingOrAbortSymbolV1,
 			coroKeyedParkSymbolV2,
 			coroKeyedResumeSymbolV2,
 			coroSemaphorePrepareOrAbortSymbolV2,
@@ -4347,6 +4435,14 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			coroNotifyPrepareOrAbortSymbolV2,
 			coroNotifyOneOrAbortSymbolV2,
 			coroNotifyAllOrAbortSymbolV2,
+		)
+	}
+	if nativeCoroTimerRuntimeABI(ctx.buildConf) {
+		names = append(names,
+			coroPollParkSymbolV2,
+			coroPollResumeSymbolV2,
+			coroPollUpdateDeadlineOrAbortSymbolV1,
+			coroPollPostClosingOrAbortSymbolV1,
 		)
 	}
 	names = append(names,
@@ -4453,22 +4549,22 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 				!types.Identical(sig.Params().At(1).Type(), types.Typ[types.UnsafePointer]) ||
 				!types.Identical(sig.Params().At(2).Type(), types.Typ[types.UnsafePointer]) ||
 				!types.Identical(sig.Params().At(3).Type(), types.Typ[types.Uint32]) ||
-				!types.Identical(sig.Params().At(4).Type(), types.Typ[types.Uintptr]) ||
+				!types.Identical(sig.Params().At(4).Type(), types.Typ[types.Uint64]) ||
 				!types.Identical(sig.Params().At(5).Type(), types.Typ[types.Uintptr]) ||
 				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
-				return nil, nil, nil, nil, fmt.Errorf("parameterized coroutine fault prepare ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32, uintptr, uintptr) signature", name)
+				return nil, nil, nil, nil, fmt.Errorf("parameterized coroutine fault prepare ABI %q must have exact func(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uint32, uint64, uintptr) signature", name)
 			}
 		}
 		if name == "__llgo_coro_fault_payload_v2" {
 			sig := fn.Signature
 			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 5 || sig.Results().Len() != 0 ||
 				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.Uint32]) ||
-				!types.Identical(sig.Params().At(1).Type(), types.Typ[types.Uintptr]) ||
+				!types.Identical(sig.Params().At(1).Type(), types.Typ[types.Uint64]) ||
 				!types.Identical(sig.Params().At(2).Type(), types.Typ[types.Uintptr]) ||
 				!types.Identical(sig.Params().At(3).Type(), types.Typ[types.UnsafePointer]) ||
 				!types.Identical(sig.Params().At(4).Type(), types.Typ[types.UnsafePointer]) ||
 				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
-				return nil, nil, nil, nil, fmt.Errorf("parameterized coroutine fault payload ABI %q must have exact func(uint32, uintptr, uintptr, unsafe.Pointer, unsafe.Pointer) signature", name)
+				return nil, nil, nil, nil, fmt.Errorf("parameterized coroutine fault payload ABI %q must have exact func(uint32, uint64, uintptr, unsafe.Pointer, unsafe.Pointer) signature", name)
 			}
 		}
 		if name == "__llgo_coro_critical_enter_v1" || name == "__llgo_coro_critical_exit_v1" {

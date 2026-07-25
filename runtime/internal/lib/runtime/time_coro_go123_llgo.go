@@ -1,4 +1,4 @@
-//go:build go1.23 && llgo && llgo_coro && llgo_coro_native_pipe && llgo_coro_native_timer && (darwin || linux) && !baremetal && !coro_runtime_adapter_test
+//go:build go1.23 && llgo && llgo_coro && !baremetal && !coro_runtime_adapter_test && ((llgo_coro_native_pipe && llgo_coro_native_timer && (darwin || linux)) || wasm || tinygo.wasm || llgo_coro_host)
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -21,7 +21,6 @@ package runtime
 import (
 	"unsafe"
 
-	ct "github.com/goplus/llgo/runtime/internal/clite/time"
 	latomic "github.com/goplus/llgo/runtime/internal/lib/sync/atomic"
 	corort "github.com/goplus/llgo/runtime/internal/runtime"
 )
@@ -247,10 +246,7 @@ func coroRunTimerCallback(callback func()) {
 //llgo:managedlink
 //go:linkname time_now time.now
 func time_now() (sec int64, nsec int32, mono int64) {
-	var tv ct.Timespec
-	ct.ClockGettime(ct.CLOCK_REALTIME, &tv)
-	sec = int64(tv.Sec)
-	nsec = int32(tv.Nsec)
+	sec, nsec = coroRealtime()
 	mono = runtimeNano()
 	return
 }

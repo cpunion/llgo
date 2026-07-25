@@ -110,10 +110,18 @@ func coroWorkerTripleMatchesNativeOS(triple, goos string) bool {
 // validateCoroWorkerUniverseTarget protects direct Compilation users which do
 // not pass through internal/build's target gate.
 func (c *Compilation) validateCoroWorkerUniverseTarget() error {
-	if c == nil || !c.CoroWorkerSupported() || c.EmissionUniverse == nil {
+	universe := c.immutableEmissionUniverse()
+	if universe == nil {
 		return nil
 	}
-	return validateCoroWorkerNativeProgramTarget(c.EmissionUniverse.prog)
+	if c.CoroHostOperationSupported() &&
+		!universe.coroCapabilities.HostOperation() {
+		return fmt.Errorf("coroutine host operation lowering requires a matching prepared emission universe")
+	}
+	if !c.CoroWorkerSupported() {
+		return nil
+	}
+	return validateCoroWorkerNativeProgramTarget(universe.prog)
 }
 
 // validateCoroWorkerCodegenProgram binds the target-safe universe to the exact
@@ -121,14 +129,18 @@ func (c *Compilation) validateCoroWorkerUniverseTarget() error {
 // could prepare a native universe and then lower its worker operations into a
 // WASM (or otherwise incompatible) program.
 func (c *Compilation) validateCoroWorkerCodegenProgram(prog llssa.Program) error {
-	if c == nil || !c.CoroWorkerSupported() {
+	if c == nil || !c.CoroWorkerSupported() && !c.CoroHostOperationSupported() {
 		return nil
 	}
-	if c.EmissionUniverse == nil {
+	universe := c.immutableEmissionUniverse()
+	if universe == nil {
 		return fmt.Errorf("coroutine worker lowering requires a prepared emission universe")
 	}
-	if prog != c.EmissionUniverse.prog {
-		return fmt.Errorf("coroutine worker lowering requires the exact LLVM program used to prepare its emission universe")
+	if prog != universe.prog {
+		return fmt.Errorf("coroutine external-operation lowering requires the exact LLVM program used to prepare its emission universe")
+	}
+	if !c.CoroWorkerSupported() {
+		return nil
 	}
 	return validateCoroWorkerNativeProgramTarget(prog)
 }

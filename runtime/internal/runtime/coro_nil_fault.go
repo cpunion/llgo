@@ -65,6 +65,11 @@ const (
 	coroFaultSliceConvertV1
 )
 
+const (
+	coroFaultBoundsBaseV2  uint32 = coroFaultSliceConvertV1 + 1
+	coroFaultBoundsLimitV2        = coroFaultBoundsBaseV2 + 2*8
+)
+
 // coroNilFaultPayloadV1 extracts the concrete empty-interface pair expected by
 // coro.PreparePanic from the existing non-empty error interface. This is a
 // two-word read only: it performs no interface conversion and cannot allocate.
@@ -110,35 +115,63 @@ func coroFaultPayloadV1(kind uint32) (typeWord, dataWord unsafe.Pointer) {
 	}
 }
 
-// coroFaultPayloadV2 adds two target-width operand words without changing the
-// stable V1 kind namespace. Operand-free kinds delegate to V1 only when both
-// words are zero. Slice conversion interprets arg0 as the target array length
-// and arg1 as the source slice length, matching PanicSliceConvert(x, y).
+func coroFaultBoundsMetadataV2(kind uint32) (code boundsErrorCode, signed, ok bool) {
+	if kind < coroFaultBoundsBaseV2 || kind >= coroFaultBoundsLimitV2 {
+		return 0, false, false
+	}
+	offset := kind - coroFaultBoundsBaseV2
+	code = boundsErrorCode(offset / 2)
+	signed = offset&1 == 0
+	return code, signed, code <= boundsSlice3C
+}
+
+func coroFaultBoundsPayloadV2(
+	arg0 uint64,
+	arg1 uintptr,
+	signed bool,
+	code boundsErrorCode,
+) (typeWord, dataWord unsafe.Pointer) {
+	typeWord, _ = coroErrorFaultPayloadV1(&coroBoundsErrorTypeV2)
+	if typeWord == nil {
+		return nil, nil
+	}
+	payload := (*boundsError)(AllocZ(unsafe.Sizeof(boundsError{})))
+	if payload == nil {
+		return nil, nil
+	}
+	*payload = boundsError{
+		x:      int64(arg0),
+		y:      int(arg1),
+		signed: signed,
+		code:   code,
+	}
+	return typeWord, unsafe.Pointer(payload)
+}
+
+// coroFaultPayloadV2 adds one exact 64-bit operand and one target-width
+// non-negative bound without changing the stable V1 kind namespace.
+// Operand-free kinds delegate to V1 only when both words are zero. Slice
+// conversion interprets arg0 as the target array length and arg1 as the source
+// slice length, matching PanicSliceConvert(x, y). Dynamic index/slice kinds
+// encode boundsError.code and signedness in kind so uint64 indexes remain
+// observable on wasm32.
 //
 // The boundsError object must outlive the active LLVM frame: a child fault is
 // copied as an interface pair into its parent's CompletionRecord after the
 // child frame is destroyed. AllocZ provides GC-visible storage on native,
 // tinygogc storage on bare metal, and the configured malloc storage on
 // wasm/nogc targets.
-func coroFaultPayloadV2(kind uint32, arg0, arg1 uintptr) (typeWord, dataWord unsafe.Pointer) {
-	if kind != coroFaultSliceConvertV1 {
-		if arg0 != 0 || arg1 != 0 {
-			return nil, nil
-		}
-		return coroFaultPayloadV1(kind)
+func coroFaultPayloadV2(kind uint32, arg0 uint64, arg1 uintptr) (typeWord, dataWord unsafe.Pointer) {
+	if kind == coroFaultSliceConvertV1 {
+		return coroFaultBoundsPayloadV2(arg0, arg1, true, boundsConvert)
 	}
-	typeWord, _ = coroErrorFaultPayloadV1(&coroBoundsErrorTypeV2)
-	payload := (*boundsError)(AllocZ(unsafe.Sizeof(boundsError{})))
-	if typeWord == nil || payload == nil {
+	if code, signed, ok := coroFaultBoundsMetadataV2(kind); ok {
+		return coroFaultBoundsPayloadV2(arg0, arg1, signed, code)
+	}
+	if arg0 != 0 || arg1 != 0 {
 		return nil, nil
 	}
-	*payload = boundsError{
-		x:      int64(arg0),
-		y:      int(arg1),
-		signed: true,
-		code:   boundsConvert,
-	}
-	return typeWord, unsafe.Pointer(payload)
+	return coroFaultPayloadV1(kind)
 }
 
 // __llgo_coro_fault_payload_v1 materializes one stable language-fault panic
@@ -166,7 +199,7 @@ func __llgo_coro_fault_payload_v1(kind uint32, typeOut, dataOut unsafe.Pointer) 
 // the payload construction receives two target-width scalar words.
 //
 //export __llgo_coro_fault_payload_v2
-func __llgo_coro_fault_payload_v2(kind uint32, arg0, arg1 uintptr, typeOut, dataOut unsafe.Pointer) {
+func __llgo_coro_fault_payload_v2(kind uint32, arg0 uint64, arg1 uintptr, typeOut, dataOut unsafe.Pointer) {
 	if typeOut == nil || dataOut == nil {
 		coroRuntimeAbort("invalid parameterized coroutine fault payload output")
 	}
@@ -206,7 +239,8 @@ func __llgo_coro_fault_prepare_v1(g, handle, header unsafe.Pointer, kind uint32)
 func __llgo_coro_fault_prepare_v2(
 	g, handle, header unsafe.Pointer,
 	kind uint32,
-	arg0, arg1 uintptr,
+	arg0 uint64,
+	arg1 uintptr,
 ) {
 	typeWord, dataWord := coroFaultPayloadV2(kind, arg0, arg1)
 	if typeWord == nil || !coro.PreparePanic(

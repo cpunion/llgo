@@ -1,4 +1,4 @@
-//go:build llgo && !baremetal
+//go:build llgo && !baremetal && !wasm && !tinygo.wasm
 
 /*
  * Copyright (c) 2025 The XGo Authors (xgo.dev). All rights reserved.
@@ -40,6 +40,10 @@
 // Build tags:
 //   - llgo && !nogc: Enables GC-aware slot registration via BDWGC
 //   - llgo && nogc:  Disables GC integration; TLS acts as plain pthread TLS
+//
+// Logical WebAssembly targets use the single-host-thread implementation in
+// tls_webassembly.go and never acquire a pthread dependency merely because a
+// named target reuses a Linux/ARM frontend.
 package tls
 
 import (

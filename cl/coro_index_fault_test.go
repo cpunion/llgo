@@ -64,20 +64,15 @@ func TestCoroImplicitIndexBoundsNativeAndWasm32(t *testing.T) {
 					t.Fatalf("%s plan = %+v, present=%t; want may-unwind coroutine", operation.name, functionPlan, ok)
 				}
 				body := requireCoroPhysicalFunction(t, module, "foo."+operation.name).String()
-				if got := strings.Count(body, "call void @"+coroFaultPrepareHookV1); got != 1 {
-					t.Fatalf("%s fault prepare calls = %d, want one:\n%s", operation.name, got, body)
-				}
+				requireCoroParameterizedBoundsFaultKinds(
+					t,
+					body,
+					coroBoundsFaultKind(coroBoundsFaultIndex, true),
+				)
 				if strings.Contains(body, "CheckIndexRange") || strings.Contains(body, "AssertNilDeref") {
 					t.Fatalf("%s retained a native-stack index helper:\n%s", operation.name, body)
 				}
-				hook := strings.Index(body, "call void @"+coroFaultPrepareHookV1)
-				hookLine := body[hook:]
-				if end := strings.IndexByte(hookLine, '\n'); end >= 0 {
-					hookLine = hookLine[:end]
-				}
-				if !strings.Contains(hookLine, "i32 2") {
-					t.Fatalf("%s did not select the index-bounds fault kind:\n%s", operation.name, body)
-				}
+				hook := strings.Index(body, "call void @"+coroFaultPrepareHookV2)
 				if !strings.Contains(body[hook:], operation.elementGEP) {
 					t.Fatalf("%s formed no element address after its terminal bounds edge:\n%s", operation.name, body)
 				}
@@ -86,16 +81,21 @@ func TestCoroImplicitIndexBoundsNativeAndWasm32(t *testing.T) {
 			runCoroABITestPipeline(t, prog, module)
 			for _, name := range []string{"StringAt", "ConstantStringAt", "ArrayAt"} {
 				resume := module.NamedFunction("foo." + name + "$coro.resume")
-				if resume.IsNil() || strings.Count(resume.String(), "call void @"+coroFaultPrepareHookV1) != 1 {
+				if resume.IsNil() {
 					t.Fatalf("post-split %s resume lost its bounds-fault edge:\n%s", name, module.String())
 				}
+				requireCoroParameterizedBoundsFaultKinds(
+					t,
+					resume.String(),
+					coroBoundsFaultKind(coroBoundsFaultIndex, true),
+				)
 			}
 			object, err := prog.TargetMachine().EmitToMemoryBuffer(module, llvm.ObjectFile)
 			if err != nil {
 				t.Fatalf("emit structured Index object: %v\n%s", err, module.String())
 			}
 			defer object.Dispose()
-			if len(object.Bytes()) == 0 || !bytes.Contains(object.Bytes(), []byte(coroFaultPrepareHookV1)) {
+			if len(object.Bytes()) == 0 || !bytes.Contains(object.Bytes(), []byte(coroFaultPrepareHookV2)) {
 				t.Fatal("post-CoroSplit object lost the bounds-fault hook")
 			}
 		})

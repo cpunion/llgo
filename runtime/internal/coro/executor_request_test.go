@@ -22,6 +22,27 @@ import (
 	"unsafe"
 )
 
+func TestExecutorRequestAccepted(t *testing.T) {
+	for _, result := range []ExecutorRequestResult{
+		ExecutorRequestPublished,
+		ExecutorRequestIdleWake,
+		ExecutorRequestCoalesced,
+	} {
+		if !ExecutorRequestAccepted(result) {
+			t.Fatalf("accepted executor request %d rejected", result)
+		}
+	}
+	for _, result := range []ExecutorRequestResult{
+		ExecutorRequestInvalid,
+		ExecutorRequestClosed,
+		ExecutorRequestStale,
+	} {
+		if ExecutorRequestAccepted(result) {
+			t.Fatalf("failed executor request %d accepted", result)
+		}
+	}
+}
+
 func registerTestExecutor(t *testing.T, registry *ExecutorRegistry) ExecutorHandle {
 	t.Helper()
 	handle, ok := registry.Register()

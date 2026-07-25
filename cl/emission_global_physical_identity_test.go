@@ -41,11 +41,12 @@ func emissionTestGlobal(t *testing.T, pkg emissionTestPackage, name string) *ssa
 
 func TestCoroGlobalPhysicalIdentityInternalLinkageGates(t *testing.T) {
 	for _, test := range []struct {
-		name    string
-		source  string
-		profile CoroRawDataSymbolProfile
-		global  string
-		want    bool
+		name         string
+		source       string
+		profile      CoroRawDataSymbolProfile
+		global       string
+		wantInternal bool
+		wantClosed   bool
 	}{
 		{
 			name: "private complete raw profile",
@@ -53,7 +54,8 @@ func TestCoroGlobalPhysicalIdentityInternalLinkageGates(t *testing.T) {
 var slot func()
 func Call() { slot() }
 `,
-			profile: CoroRawDataSymbolProfile{Complete: true}, global: "slot", want: true,
+			profile: CoroRawDataSymbolProfile{Complete: true}, global: "slot",
+			wantInternal: true, wantClosed: true,
 		},
 		{
 			name: "same package raw mention",
@@ -75,7 +77,7 @@ var slot func()
 			source: `package p
 var Slot func()
 `,
-			profile: CoroRawDataSymbolProfile{Complete: true}, global: "Slot",
+			profile: CoroRawDataSymbolProfile{Complete: true}, global: "Slot", wantClosed: true,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -91,8 +93,11 @@ var Slot func()
 				t.Fatal(err)
 			}
 			identity, certified, err := universe.CoroGlobalPhysicalIdentity(emissionTestGlobal(t, pkg, test.global))
-			if err != nil || !certified || identity.InternalLinkage != test.want {
-				t.Fatalf("identity = %+v, certified=%t, err=%v; want internal=%t", identity, certified, err, test.want)
+			if err != nil || !certified ||
+				identity.InternalLinkage != test.wantInternal ||
+				identity.ClosedWorldWrites != test.wantClosed {
+				t.Fatalf("identity = %+v, certified=%t, err=%v; want internal=%t closed-writes=%t",
+					identity, certified, err, test.wantInternal, test.wantClosed)
 			}
 		})
 	}
@@ -139,8 +144,67 @@ func Use() { internalgen.F[int]() }
 		t.Fatalf("F[int] materialized owners = %d; want 2", len(universe.materializedOwners[instance]))
 	}
 	identity, certified, err := universe.CoroGlobalPhysicalIdentity(emissionTestGlobal(t, gen, "slot"))
-	if err != nil || !certified || identity.InternalLinkage {
-		t.Fatalf("cross-owner identity = %+v, certified=%t, err=%v; want external linkage", identity, certified, err)
+	if err != nil || !certified || identity.InternalLinkage || !identity.ClosedWorldWrites {
+		t.Fatalf("cross-owner identity = %+v, certified=%t, err=%v; want external linkage with closed writers",
+			identity, certified, err)
+	}
+}
+
+func TestCoroGlobalPhysicalIdentityClosedWriterWorldGates(t *testing.T) {
+	const (
+		ownerPath = "example.com/emission/closedowner"
+		otherPath = "example.com/emission/closedother"
+		symbol    = ownerPath + ".Slot"
+	)
+	for _, test := range []struct {
+		name       string
+		rawMention bool
+		linkAlias  bool
+		wantClosed bool
+	}{
+		{name: "all raw inputs absent", wantClosed: true},
+		{name: "other package raw mention", rawMention: true},
+		{name: "other package linkname alias", linkAlias: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			testProg := newEmissionTestProgram()
+			owner := testProg.addPackage(t, ownerPath, `package closedowner
+var Slot func()
+func Call() { Slot() }
+`)
+			other := testProg.addPackage(t, otherPath, `package closedother
+var Alias func()
+`)
+			testProg.ssa.Build()
+			prog := llssa.NewProgram(nil)
+			defer prog.Dispose()
+			if test.linkAlias {
+				prog.SetLinkname(otherPath+".Alias", symbol)
+			}
+			otherProfile := CoroRawDataSymbolProfile{Complete: true}
+			if test.rawMention {
+				otherProfile.Mentions = []string{symbol}
+			}
+			universe, err := PrepareEmissionUniverse(prog, nil, []EmissionPackage{
+				{
+					SSA: owner.ssa, Files: []*ast.File{owner.file}, Identity: "closed-owner",
+					RawDataSymbols: CoroRawDataSymbolProfile{Complete: true},
+				},
+				{
+					SSA: other.ssa, Files: []*ast.File{other.file}, Identity: "closed-other",
+					RawDataSymbols: otherProfile,
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			identity, certified, err := universe.CoroGlobalPhysicalIdentity(emissionTestGlobal(t, owner, "Slot"))
+			if err != nil || !certified || identity.InternalLinkage ||
+				identity.ClosedWorldWrites != test.wantClosed {
+				t.Fatalf("closed-writer identity = %+v, certified=%t, err=%v; want closed=%t",
+					identity, certified, err, test.wantClosed)
+			}
+		})
 	}
 }
 

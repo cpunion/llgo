@@ -18,7 +18,16 @@
 
 package runtime
 
+import "unsafe"
+
 // SetFinalizer is deliberately inert when no finalizer-capable collector is
 // present. Objects are not reclaimed by the leaking/nogc profile, and tinygogc
 // does not implement finalizer queues, so the callback can never run.
 func SetFinalizer(obj any, finalizer any) {}
+
+// addCleanupPtr mirrors SetFinalizer for the leaking profile. Weak and cleanup
+// bookkeeping may retain a tombstone forever, but it must never claim that a
+// callback can run without a collector.
+func addCleanupPtr(_ unsafe.Pointer, _ func()) (cancel func()) {
+	return func() {}
+}

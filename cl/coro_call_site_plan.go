@@ -149,6 +149,7 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 							u.freezeCoroCgoWorkerCallCertificate(ctx, call)
 					}
 					semantics, intrinsic, opcode := CoroIntrinsicCallUnsupported, false, 0
+					var hostOperation coroHostOperationCallShape
 					var workerCertificate CoroWorkerSyscallCertificate
 					workerCertified := false
 					if !frontendUnevaluated && !noInit && !patchRedirect && !cgoWorkerCertified && classifyErr == nil {
@@ -167,6 +168,16 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 							cgoErrnoCertificate, cgoErrnoCertified, classifyErr =
 								ctx.freezeCoroCgoErrnoWorkerCallCertificate(call)
 						}
+						if classifyErr == nil && intrinsic && opcode == llgoCoroHostOperation {
+							direct, ok := call.(*ssa.Call)
+							if !ok {
+								classifyErr = fmt.Errorf(
+									"llgo.coroHostOperation requires one exact direct call",
+								)
+							} else {
+								hostOperation, classifyErr = planCoroHostOperationCallShape(direct)
+							}
+						}
 						if classifyErr == nil && intrinsic && isLLGoSyscallIntrinsic(opcode) && u.CoroWorkerSupported() {
 							if direct, ok := call.(*ssa.Call); ok && direct.Common() != nil && !direct.Common().IsInvoke() &&
 								direct.Parent() != nil && u.canonicalAlias(direct.Parent()) == direct.Parent() {
@@ -180,9 +191,23 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 							)
 						}
 					}
+					rawPlainSynchronousIntrinsic := false
+					if classifyErr == nil && intrinsic && isLLGoSyscallIntrinsic(opcode) {
+						direct, ok := call.(*ssa.Call)
+						if !ok {
+							classifyErr = fmt.Errorf(
+								"raw/plain llgo.syscall requires one exact direct call",
+							)
+						} else if validateErr := planCoroSynchronousSyscallShape(direct); validateErr != nil {
+							classifyErr = validateErr
+						} else {
+							rawPlainSynchronousIntrinsic = true
+						}
+					}
 					plan := CoroCallSitePlan{
-						IntrinsicSemantics: semantics,
-						Intrinsic:          intrinsic,
+						IntrinsicSemantics:           semantics,
+						Intrinsic:                    intrinsic,
+						RawPlainSynchronousIntrinsic: rawPlainSynchronousIntrinsic,
 					}
 					if rawCertificate := u.rawCriticalCalls[call]; rawCertificate != "" {
 						if frontendUnevaluated || noInit || patchRedirect || cgoWorkerCertified || intrinsic {
@@ -237,6 +262,7 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 						plan:               plan,
 						opcode:             opcode,
 						intrinsicPlacement: intrinsicPlacement,
+						hostOperation:      hostOperation,
 						workerCertificate:  workerCertificate,
 						workerCertified:    workerCertified,
 						cgoWorker:          cgoWorkerCertificate,
@@ -305,6 +331,7 @@ func cloneCoroWorkerIncomingEdges(source []coroWorkerSyscallIncomingEdge) []coro
 func sameCoroFrozenCallSitePlan(first, second coroFrozenCallSitePlan) bool {
 	if first.plan != second.plan || first.failure != second.failure || first.opcode != second.opcode ||
 		first.intrinsicPlacement != second.intrinsicPlacement ||
+		first.hostOperation != second.hostOperation ||
 		first.workerCertificate != second.workerCertificate || first.workerCertified != second.workerCertified ||
 		first.cgoWorker != second.cgoWorker ||
 		first.patchRedirect != second.patchRedirect || first.patchAttempted != second.patchAttempted ||
@@ -321,7 +348,9 @@ func sameCoroFrozenCallSitePlan(first, second coroFrozenCallSitePlan) bool {
 		if left.call != right.call || left.carrier != right.carrier || left.parameter != right.parameter ||
 			left.certified != right.certified || left.reason != right.reason ||
 			left.foreignPointerResultMask != right.foreignPointerResultMask ||
-			left.resultProjectionID != right.resultProjectionID || left.stableIdentity != right.stableIdentity ||
+			left.resultProjectionID != right.resultProjectionID ||
+			left.trapPolicyIdentity != right.trapPolicyIdentity ||
+			left.stableIdentity != right.stableIdentity ||
 			!slices.Equal(left.targetKeys, right.targetKeys) {
 			return false
 		}

@@ -1,4 +1,4 @@
-//go:build llgo && llgo_coro && (wasip1 || wasi) && wasm && !baremetal && !coro_runtime_adapter_test
+//go:build llgo && llgo_coro && (wasip1 || wasi || wasip2) && (wasm || tinygo.wasm) && !baremetal && !coro_runtime_adapter_test
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -15,4 +15,4 @@ package runtime
 // RunSlice/Continue activation still owns the scheduler.
 const coroHostPlatformProfileV1 = coroHostProfileWASIV1 |
 	coroHostCapabilityScheduleV1 | coroHostCapabilityAlarmV1 | coroHostCapabilityReactorPollV1 |
-	coroHostCapabilityExternalReactorV1
+	coroHostCapabilityOperationV1 | coroHostCapabilityExternalReactorV1

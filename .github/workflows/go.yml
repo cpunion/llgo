@@ -5,12 +5,9 @@ name: Go
 
 on:
   push:
-    branches:
-      - "**"
-      - "!dependabot/**"
-      - "!xgopilot/**"
+    branches: [main]
   pull_request:
-    branches: ["**"]
+    branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}

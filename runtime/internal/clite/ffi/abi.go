@@ -1,4 +1,4 @@
-//go:build !amd64 && !wasm
+//go:build !amd64 && !wasm && !tinygo.wasm
 
 package ffi
 

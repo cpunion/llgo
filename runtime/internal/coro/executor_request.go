@@ -48,6 +48,15 @@ func ExecutorRequestNeedsDoorbell(result ExecutorRequestResult) bool {
 	return result == ExecutorRequestIdleWake
 }
 
+// ExecutorRequestAccepted reports whether a request is durably retained by
+// the executor gate. IdleWake is successful publication plus the obligation
+// for the target adapter to ring its retained doorbell.
+func ExecutorRequestAccepted(result ExecutorRequestResult) bool {
+	return result == ExecutorRequestPublished ||
+		result == ExecutorRequestIdleWake ||
+		result == ExecutorRequestCoalesced
+}
+
 const (
 	executorGateRequested uint32 = 1 << iota
 	executorGateIdleArmed

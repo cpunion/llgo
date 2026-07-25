@@ -25,15 +25,19 @@ type TargetCapabilities uint8
 const (
 	targetCapabilityWorker TargetCapabilities = 1 << iota
 	targetCapabilityNativeFleet
+	targetCapabilityHostOperation
 )
 
-func NewTargetCapabilities(worker, nativeFleet bool) TargetCapabilities {
+func NewTargetCapabilities(worker, nativeFleet, hostOperation bool) TargetCapabilities {
 	var capabilities TargetCapabilities
 	if worker {
 		capabilities |= targetCapabilityWorker
 	}
 	if nativeFleet {
 		capabilities |= targetCapabilityNativeFleet
+	}
+	if hostOperation {
+		capabilities |= targetCapabilityHostOperation
 	}
 	return capabilities
 }
@@ -46,7 +50,11 @@ func (capabilities TargetCapabilities) NativeFleet() bool {
 	return capabilities&targetCapabilityNativeFleet != 0
 }
 
+func (capabilities TargetCapabilities) HostOperation() bool {
+	return capabilities&targetCapabilityHostOperation != 0
+}
+
 func (capabilities TargetCapabilities) Valid() bool {
-	const known = targetCapabilityWorker | targetCapabilityNativeFleet
+	const known = targetCapabilityWorker | targetCapabilityNativeFleet | targetCapabilityHostOperation
 	return capabilities&^known == 0 && (!capabilities.NativeFleet() || capabilities.Worker())
 }

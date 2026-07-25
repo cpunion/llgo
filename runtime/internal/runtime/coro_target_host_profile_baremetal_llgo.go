@@ -13,4 +13,5 @@ package runtime
 // loop iteration and Alarm to a hardware compare. Neither hook may allocate;
 // an IRQ publishes POD source state and notification only.
 const coroHostPlatformProfileV1 = coroHostProfileBaremetalV1 |
-	coroHostCapabilityScheduleV1 | coroHostCapabilityAlarmV1 | coroHostCapabilityExternalReactorV1
+	coroHostCapabilityScheduleV1 | coroHostCapabilityAlarmV1 |
+	coroHostCapabilityOperationV1 | coroHostCapabilityExternalReactorV1

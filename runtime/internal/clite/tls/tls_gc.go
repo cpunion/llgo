@@ -1,4 +1,4 @@
-//go:build llgo && !baremetal && !nogc
+//go:build llgo && !baremetal && !nogc && !wasm && !tinygo.wasm
 
 /*
  * Copyright (c) 2025 The XGo Authors (xgo.dev). All rights reserved.

@@ -22,6 +22,8 @@ import (
 	gobuild "go/build"
 	"go/constant"
 	"go/types"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -30,6 +32,7 @@ import (
 	"github.com/goplus/llgo/internal/packages"
 	llplan9asm "github.com/goplus/llgo/internal/plan9asm"
 	llruntime "github.com/goplus/llgo/runtime"
+	xenv "github.com/goplus/llgo/xtool/env"
 	"github.com/xgo-dev/llvm"
 )
 
@@ -287,7 +290,9 @@ func inventoryCoroRawPackageInputs(
 	}
 	origin := pkg.PkgPath + " (" + role + ")"
 	if value, ok := coroRawLLGoFiles(pkg); ok && strings.TrimSpace(value) != "" {
-		builder.block("opaque LLGoFiles input", origin+": "+value)
+		if err := inventoryCoroRawLLGoFiles(ctx, builder, pkg, value, origin); err != nil {
+			builder.block("opaque LLGoFiles input", origin+": "+value+" ("+err.Error()+")")
+		}
 	}
 	for _, other := range pkg.OtherFiles {
 		if strings.EqualFold(filepath.Ext(other), ".syso") {
@@ -361,6 +366,96 @@ func coroRawLLGoFiles(pkg *packages.Package) (string, bool) {
 		return "", false
 	}
 	return constant.StringVal(constantObject.Val()), true
+}
+
+// inventoryCoroRawLLGoFiles compiles the exact target-selected LLGoFiles
+// inputs with the same compiler configuration used by clFile, then records
+// every defined or undefined object symbol. This is a structural linker-level
+// inventory: absence is never inferred by searching C/C++ source text.
+func inventoryCoroRawLLGoFiles(
+	ctx *context,
+	builder *coroRawGlobalSymbolInventoryBuilder,
+	pkg *packages.Package,
+	files, origin string,
+) error {
+	if ctx == nil || ctx.buildConf == nil || builder == nil || pkg == nil ||
+		len(pkg.GoFiles) == 0 || strings.TrimSpace(ctx.crossCompile.CC) == "" {
+		return fmt.Errorf("target compiler or package source root is unavailable")
+	}
+	dir := filepath.Dir(pkg.GoFiles[0])
+	args := make([]string, 0, 16)
+	if strings.HasPrefix(files, "$") {
+		position := strings.IndexByte(files, ':')
+		if position <= 0 {
+			return fmt.Errorf("malformed LLGoFiles compiler flags")
+		}
+		args = append(args, xenv.ExpandEnvToArgs(files[:position])...)
+		files = files[position+1:]
+	}
+	nm, err := coroRawLLVMNM(ctx)
+	if err != nil {
+		return err
+	}
+	selected := 0
+	for _, file := range strings.Split(files, ";") {
+		file = strings.TrimSpace(file)
+		if file == "" {
+			continue
+		}
+		selected++
+		source := filepath.Join(dir, file)
+		object, err := os.CreateTemp("", "llgo-coro-raw-*.o")
+		if err != nil {
+			return fmt.Errorf("create object inventory output for %s: %w", source, err)
+		}
+		objectPath := object.Name()
+		if closeErr := object.Close(); closeErr != nil {
+			os.Remove(objectPath)
+			return fmt.Errorf("close object inventory output for %s: %w", source, closeErr)
+		}
+		compileArgs := append([]string(nil), args...)
+		if filepath.Ext(source) == ".c" {
+			compileArgs = append(compileArgs, "-x", "c")
+		}
+		compileArgs = append(compileArgs, "-o", objectPath, "-c", source)
+		compileErr := ctx.compiler().Compile(compileArgs...)
+		if compileErr != nil {
+			os.Remove(objectPath)
+			return fmt.Errorf("compile %s for symbol inventory: %w", source, compileErr)
+		}
+		command := exec.Command(nm, "--format=just-symbols", objectPath)
+		output, nmErr := command.Output()
+		os.Remove(objectPath)
+		if nmErr != nil {
+			if exit, ok := nmErr.(*exec.ExitError); ok && len(exit.Stderr) != 0 {
+				return fmt.Errorf("inventory %s symbols: %w: %s", source, nmErr, strings.TrimSpace(string(exit.Stderr)))
+			}
+			return fmt.Errorf("inventory %s symbols: %w", source, nmErr)
+		}
+		for _, symbol := range strings.Fields(string(output)) {
+			builder.mention(symbol, "LLGoFiles object symbol", origin+": "+source)
+		}
+	}
+	if selected == 0 {
+		return fmt.Errorf("LLGoFiles selected no source")
+	}
+	return nil
+}
+
+func coroRawLLVMNM(ctx *context) (string, error) {
+	if ctx == nil {
+		return "", fmt.Errorf("missing build context")
+	}
+	if compiler := strings.TrimSpace(ctx.crossCompile.CC); compiler != "" {
+		candidate := filepath.Join(filepath.Dir(compiler), "llvm-nm")
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate, nil
+		}
+	}
+	if path, err := exec.LookPath("llvm-nm"); err == nil {
+		return path, nil
+	}
+	return "", fmt.Errorf("llvm-nm is unavailable")
 }
 
 func inventoryCoroDarwinDynimports(

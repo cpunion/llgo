@@ -1,4 +1,4 @@
-//go:build !coro_runtime_adapter_test && !(llgo && llgo_coro && llgo_coro_native_pipe && (darwin || linux) && !baremetal) && !(llgo && llgo_coro && (wasm || baremetal || llgo_coro_host) && !(llgo_coro_native_pipe && (darwin || linux) && !baremetal))
+//go:build !coro_runtime_adapter_test && !(llgo && llgo_coro && llgo_coro_native_pipe && (darwin || linux) && !baremetal) && !(llgo && llgo_coro && (wasm || tinygo.wasm || baremetal || llgo_coro_host) && !(llgo_coro_native_pipe && (darwin || linux) && !baremetal))
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.

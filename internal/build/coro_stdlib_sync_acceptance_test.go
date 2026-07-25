@@ -90,9 +90,11 @@ func coroStdlibSyncFixtures() []coroStdlibSyncFixture {
 			// os/io also retains io.Pipe's channel-close methods; their synchronous
 			// source surface requires the channel scheduler even though this narrow
 			// fixture performs only regular-file I/O.
-			name:             "file",
-			dir:              "./_testgo/coro_stdlib_file_rw",
-			wantSource:       []string{"os.OpenFile(", "[1]byte", ".Write(", ".Seek(", ".Read(", ".Close("},
+			name: "file",
+			dir:  "./_testgo/coro_stdlib_file_rw",
+			wantSource: []string{
+				"os.OpenFile(", "[1]byte", ".Write(", ".Seek(", ".Read(", ".Close(",
+			},
 			wantSchedulerABI: coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
 			wantGo:           true,
 			wantChannel:      true,
@@ -142,12 +144,20 @@ func coroStdlibSyncFixtures() []coroStdlibSyncFixture {
 			wantSource: []string{
 				"net.ListenTCP(", "net.DialTCP(", ".AcceptTCP(", "go serve()", "[1]byte",
 				".Write(", ".Read(", "time.Sleep(60 * time.Millisecond)", ".SetReadDeadline(",
-				"os.ErrDeadlineExceeded", "time.Time{}",
+				".SetWriteDeadline(", ".SetDeadline(", "os.ErrDeadlineExceeded", "time.Time{}",
+				"net.Dialer{Timeout:", ".DialContext(", "context.Canceled",
+				"net.ListenUDP(", ".WriteToUDP(", ".ReadFromUDP(",
+				".WriteMsgUDP(", ".ReadMsgUDP(",
+				"net.Resolver{PreferGo: true}", ".LookupHost(",
 			},
 			wantSchedulerABI: coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
 			wantGo:           true,
 			wantChannel:      true,
 			requireGoStmt:    true,
+			args: func(t *testing.T) []string {
+				t.Helper()
+				return []string{"native"}
+			},
 		},
 	}
 }

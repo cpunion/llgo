@@ -285,6 +285,101 @@ func TestCoroPollDescriptorUsesOpaqueScalarOwner(t *testing.T) {
 	}
 }
 
+func TestCoroHostPollDescriptorReservationIsPreemptionSafe(t *testing.T) {
+	const sourcePath = "internal/lib/runtime/poll_host_operation_llgo.go"
+	source := readRuntimePollFile(t, sourcePath)
+	for _, marker := range []string{
+		"active  uint32",
+		"catomic.Load(&desc.active)",
+		"catomic.CompareAndExchange(&desc.active, 0, 1)",
+		"catomic.Store(&desc.active, 0)",
+		"The scan is preemptible.",
+		"publish an identical runtimeCtx",
+		"func poll_runtime_pollDeadlineEpoch(ctx uintptr, mode int) (int64, uintptr)",
+		"llrt.CoroHostOperationControlEpochV1(ctx, lane)",
+		"Snapshot the control epoch before the deadline.",
+		"scalar deadline first and advances the epoch second",
+		"forcedMismatch := epoch + 1",
+		"internal/poll holds its fd read/write reference",
+		"throw(\"runtime: close host coroutine polldesc without completed unblock\")",
+	} {
+		if !strings.Contains(source, marker) {
+			t.Errorf("%s lacks preemption-safe reservation marker %q", sourcePath, marker)
+		}
+	}
+	for _, forbidden := range []string{
+		"active  bool",
+		"*desc = coroHostPollDescV1",
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Errorf("%s retains non-atomic descriptor reservation %q", sourcePath, forbidden)
+		}
+	}
+
+	openStart := strings.Index(source, "func poll_runtime_pollOpen(")
+	closeStart := strings.Index(source, "func poll_runtime_pollClose(")
+	if openStart < 0 || closeStart <= openStart {
+		t.Fatalf("%s lacks ordered open/close owners", sourcePath)
+	}
+	open := source[openStart:closeStart]
+	reserve := strings.Index(open, "catomic.CompareAndExchange(&desc.active, 0, 1)")
+	retirementGate := strings.Index(open, "llrt.CoroHostOperationControlIdleV1(ctx)")
+	if reserve < 0 || retirementGate < 0 || reserve >= retirementGate {
+		t.Fatalf("%s does not reserve before checking the cross-table retirement gate", sourcePath)
+	}
+
+	closeEnd := strings.Index(source[closeStart:], "//go:linkname poll_runtime_pollWait ")
+	if closeEnd < 0 {
+		t.Fatalf("%s lacks poll close boundary", sourcePath)
+	}
+	closeBody := source[closeStart : closeStart+closeEnd]
+	release := strings.LastIndex(closeBody, "catomic.Store(&desc.active, 0)")
+	if release < 0 {
+		t.Fatalf("%s poll close does not release its reservation", sourcePath)
+	}
+	for _, clear := range []string{
+		"desc.fd = 0",
+		"desc.closing = false",
+		"desc.read = 0",
+		"desc.write = 0",
+	} {
+		index := strings.Index(closeBody, clear)
+		if index < 0 || index >= release {
+			t.Errorf("%s poll close does not clear %q before publishing inactivity", sourcePath, clear)
+		}
+	}
+
+	controlPath := "internal/runtime/coro_host_operation_control_llgo.go"
+	control := readRuntimePollFile(t, controlPath)
+	for _, marker := range []string{
+		"type coroHostOperationControlLaneV1 struct",
+		"operation coro.OperationID",
+		"epoch     uint32",
+		"func CoroHostOperationControlEpochV1(",
+		"coroHostOperationControlAdvanceEpochV1(cell)",
+		"catomic.CompareAndExchange(&cell.epoch, current, next)",
+		"If no operation is bound yet, its later park hook detects the epoch",
+	} {
+		if !strings.Contains(control, marker) {
+			t.Errorf("%s lacks reconfiguration epoch marker %q", controlPath, marker)
+		}
+	}
+
+	deadlineOwnerPath := "internal/runtime/coro_host_operation_deadline_owner_llgo.go"
+	deadlineOwner := readRuntimePollFile(t, deadlineOwnerPath)
+	for _, marker := range []string{
+		"controlKey, controlLane, controlEpoch uintptr",
+		"expectedEpoch := uint32(controlEpoch)",
+		"currentEpoch != expectedEpoch",
+		"coro.RequestCurrentExecutorWorkerParkCancel(driver, task, worker, ticket)",
+		"cannot cancel reconfigured deadline coroutine host operation",
+	} {
+		if !strings.Contains(deadlineOwner, marker) {
+			t.Errorf("%s lacks exact reconfiguration reconciliation %q", deadlineOwnerPath, marker)
+		}
+	}
+}
+
 func pollOwnerContainsTerminalLoop(node ast.Node) bool {
 	found := false
 	ast.Inspect(node, func(node ast.Node) bool {

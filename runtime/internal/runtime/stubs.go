@@ -7,71 +7,9 @@ package runtime
 import (
 	"unsafe"
 
-	c "github.com/goplus/llgo/runtime/internal/clite"
 	"github.com/goplus/llgo/runtime/internal/clite/sync/atomic"
-	"github.com/goplus/llgo/runtime/internal/clite/time"
 	"github.com/goplus/llgo/runtime/internal/runtime/math"
 )
-
-// rand and srand mutate only libc's process-local PRNG state. They do not
-// perform I/O, wait for a host event, or call back into Go. libc may serialize
-// that state with an internal lock, so this is synchronous rather than the
-// stronger IRQ-safe noblock contract.
-//
-//llgo:coro sync
-//go:linkname libcRand C.rand
-func libcRand() c.Int
-
-//llgo:coro sync
-//go:linkname srand C.srand
-func srand(uint32)
-
-func fastrand() uint32 {
-	return uint32(libcRand())
-}
-
-func fastrand64() uint64 {
-	n := uint64(fastrand())
-	n += 0xa0761d6478bd642f
-	hi, lo := math.Mul64(n, n^0xe7037ed1a0b428db)
-	return hi ^ lo
-}
-
-func init() {
-	srand(uint32(time.Time(nil)))
-	hashkey[0] = uintptr(fastrand()) | 1
-	hashkey[1] = uintptr(fastrand()) | 1
-	hashkey[2] = uintptr(fastrand()) | 1
-	hashkey[3] = uintptr(fastrand()) | 1
-}
-
-/* TODO(xsw):
-func fastrand() uint32 {
-	mp := getg().m
-	// Implement wyrand: https://github.com/wangyi-fudan/wyhash
-	// Only the platform that math.Mul64 can be lowered
-	// by the compiler should be in this list.
-	if goarch.IsAmd64|goarch.IsArm64|goarch.IsPpc64|
-		goarch.IsPpc64le|goarch.IsMips64|goarch.IsMips64le|
-		goarch.IsS390x|goarch.IsRiscv64|goarch.IsLoong64 == 1 {
-		mp.fastrand += 0xa0761d6478bd642f
-		hi, lo := math.Mul64(mp.fastrand, mp.fastrand^0xe7037ed1a0b428db)
-		return uint32(hi ^ lo)
-	}
-
-	// Implement xorshift64+: 2 32-bit xorshift sequences added together.
-	// Shift triplet [17,7,16] was calculated as indicated in Marsaglia's
-	// Xorshift paper: https://www.jstatsoft.org/article/view/v008i14/xorshift.pdf
-	// This generator passes the SmallCrush suite, part of TestU01 framework:
-	// http://simul.iro.umontreal.ca/testu01/tu01.html
-	t := (*[2]uint32)(unsafe.Pointer(&mp.fastrand))
-	s1, s0 := t[0], t[1]
-	s1 ^= s1 << 17
-	s1 = s1 ^ s0 ^ s1>>7 ^ s0>>16
-	t[0], t[1] = s0, s1
-	return s0 + s1
-}
-*/
 
 //go:nosplit
 func add(p unsafe.Pointer, x uintptr) unsafe.Pointer {

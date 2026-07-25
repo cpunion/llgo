@@ -198,3 +198,43 @@ func TestHostMonotonicClockConcurrentSnapshotsDoNotTear(t *testing.T) {
 	}()
 	wg.Wait()
 }
+
+func TestHostMonotonicClockEnsureInitializedPreservesPublishedTime(t *testing.T) {
+	var zero HostMonotonicClock
+	if !zero.EnsureInitialized() || !zero.EnsureInitialized() {
+		t.Fatal("zero epoch initialization is not idempotent")
+	}
+	if value, ok := zero.Snapshot(); !ok || value != 0 {
+		t.Fatalf("initialized zero clock = %d, %v; want 0, true", value, ok)
+	}
+
+	var published HostMonotonicClock
+	if !published.Publish(17, 0) || !published.EnsureInitialized() {
+		t.Fatal("pre-published clock was rejected")
+	}
+	if value, ok := published.Snapshot(); !ok || value != 17 {
+		t.Fatalf("pre-published clock = %d, %v; want 17, true", value, ok)
+	}
+}
+
+func TestHostWallClockPreservesSignedSecondsAndAllowsCorrection(t *testing.T) {
+	var clock HostWallClock
+	if _, _, ok := clock.Snapshot(); ok || clock.Publish(0, 0, 1e9) {
+		t.Fatal("unpublished or invalid wall-clock sample accepted")
+	}
+	if !clock.Publish(^uint32(0)-1, ^uint32(0), 17) {
+		t.Fatal("negative wall-clock sample rejected")
+	}
+	if sec, nsec, ok := clock.Snapshot(); !ok || sec != -2 || nsec != 17 {
+		t.Fatalf("negative wall-clock snapshot = (%d, %d, %t)", sec, nsec, ok)
+	}
+	if !clock.Publish(5, 0, 29) {
+		t.Fatal("forward wall-clock correction rejected")
+	}
+	if !clock.Publish(3, 0, 31) {
+		t.Fatal("backward wall-clock correction rejected")
+	}
+	if sec, nsec, ok := clock.Snapshot(); !ok || sec != 3 || nsec != 31 {
+		t.Fatalf("corrected wall-clock snapshot = (%d, %d, %t)", sec, nsec, ok)
+	}
+}

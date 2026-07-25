@@ -5,6 +5,7 @@ package debug
 import (
 	"unsafe"
 
+	"github.com/goplus/llgo/runtime/abi"
 	c "github.com/goplus/llgo/runtime/internal/clite"
 )
 
@@ -20,11 +21,17 @@ type Info struct {
 }
 
 func Address() unsafe.Pointer {
-	panic("not implemented")
+	return nil
 }
 
 func Addrinfo(addr uintptr, info *Info) c.Int {
-	panic("not implemented")
+	return 0
+}
+
+// Symbol lookup through a native dynamic loader does not exist in a core wasm
+// module. Static LLGo function metadata remains the authoritative source.
+func Symbol(name *c.Char) abi.Text {
+	return abi.Text(nil)
 }
 
 type Frame struct {
@@ -35,7 +42,8 @@ type Frame struct {
 }
 
 func StackTrace(skip int, fn func(fr *Frame) bool) {
-	panic("not implemented")
+	// Native frame walking is not meaningful for stackless wasm. Logical
+	// coroutine frames are reported by the runtime metadata path instead.
 }
 
 func PrintStack(skip int) {

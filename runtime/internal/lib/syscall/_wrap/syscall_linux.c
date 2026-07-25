@@ -25,9 +25,10 @@
  * converts a kernel error to -1 and records the positive errno in the current
  * invocation thread's TLS. Returning UINTPTR_MAX gives the common
  * llgo.syscall lowering one exact failure predicate. These adapters carry no
- * worker authority; a dynamic syscall number must remain on a proven plain
- * current-thread path unless the compiler supplies a separate exact trap
- * capability.
+ * standalone worker authority. The matching Go declaration supplies the
+ * fixed word-call contract, while ProgramIR independently proves an exact
+ * target-safe constant trap on every active managed incoming edge. Dynamic
+ * and process-control traps remain on a proven raw/plain current-thread path.
  */
 uintptr_t __llgo_linux_syscall3_v1(
     uintptr_t number,

@@ -111,6 +111,227 @@ func TestWorkerParkOwnerPrepareCompleteAndFinish(t *testing.T) {
 	}
 }
 
+func TestWorkerParkOwnerReconfigurationCancelsPreparingSubmission(t *testing.T) {
+	p := new(P)
+	driver := new(ExecutorDriver)
+	registry := new(ExecutorRegistry)
+	workers := new(WorkerOperationSource)
+	executor := registerTestExecutor(t, registry)
+	if !BindExecutorSourceCatalog(driver, p, registry, executor, ExecutorSourceCatalog{Worker: workers}) {
+		t.Fatal("bind reconfigured worker owner catalog")
+	}
+	task := newYieldingTestG(t, "worker-owner-reconfigured")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue reconfigured worker owner task")
+	}
+	if g, ok := NextRunnable(p); !ok || g != task.g {
+		t.Fatal("dequeue reconfigured worker owner task")
+	}
+	action := beginWaitTestResume(t, p, task)
+	var wait WaitSetRecord
+	task.frame.header.SuspendReason = uint16(SuspendPark)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+	ticket, id, ok := PrepareCurrentExecutorWorkerPark(
+		driver, task.g, task.handle, task.frame.header, &wait, 41, 83,
+	)
+	if !ok || !CommitCurrentExecutorWorkerSubmission(driver, task.g, id) {
+		t.Fatal("prepare reconfigured worker owner park")
+	}
+	if workers.RequestCancelID(p, id) {
+		t.Fatal("active-wait cancellation unexpectedly accepted a preparing park")
+	}
+	if !RequestCurrentExecutorWorkerParkCancel(driver, task.g, id, ticket) {
+		t.Fatal("request preparing worker park cancellation")
+	}
+	if kind, ok := ParkCancelKindOf(&task.g.park, ticket); !ok || kind != ParkCancelOperation {
+		t.Fatalf("preparing worker park cancel = (%d, %t)", kind, ok)
+	}
+	if action, ok = Resumed(p, task.g, action); !ok || action.Kind != ActionPark {
+		t.Fatalf("commit reconfigured worker owner park = (%+v, %t)", action, ok)
+	}
+
+	requested := false
+	for steps := 0; steps < 1000; steps++ {
+		if _, ok := PollExecutorSlice(driver, 1); !ok {
+			t.Fatalf("poll reconfigured worker owner step %d", steps)
+		}
+		var exact bool
+		requested, exact = ExecutorWorkerPhysicalCancelRequested(driver, id)
+		if !exact {
+			t.Fatal("reconfigured worker owner lost exact operation")
+		}
+		if requested {
+			break
+		}
+	}
+	if !requested || p.readyHead != nil {
+		t.Fatalf("reconfigured worker physical cancellation = %t, ready=%p", requested, p.readyHead)
+	}
+	payload := workerPayloadForTest(t, 51, ^uint64(0), 0, 125)
+	if workers.Post(id, payload) != WorkerOperationPosted {
+		t.Fatal("post reconfigured worker physical cancellation")
+	}
+	for steps := 0; steps < 1000 && p.readyHead == nil; steps++ {
+		if _, ok := PollExecutorSlice(driver, 1); !ok {
+			t.Fatalf("retire reconfigured worker owner step %d", steps)
+		}
+	}
+	if g, ok := NextRunnable(p); !ok || g != task.g {
+		t.Fatal("dequeue reconfigured worker owner")
+	}
+	action = beginWaitTestResume(t, p, task)
+	task.frame.header.SuspendReason = uint16(SuspendPark)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+	outcome, caseID, lease, cancel, taken := TakeRunDecision(task.g, ticket)
+	if !taken || outcome != ParkOutcomeCanceled || caseID != 0 ||
+		lease.Valid() || cancel != TaskCancelNone {
+		t.Fatalf("take reconfigured worker decision = (%d, %d, %+v, %d, %t)",
+			outcome, caseID, lease, cancel, taken)
+	}
+	if result := FinishCurrentExecutorWorkerPark(
+		driver, task.g, id, OperationResultLease{}, true, nil,
+	); !result.Finished() {
+		t.Fatalf("finish reconfigured worker source = %d", result)
+	}
+
+	task.frame.header.SuspendReason = uint16(SuspendFrameComplete)
+	task.frame.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PrepareComplete(task.g, task.handle, task.frame.header) {
+		t.Fatal("prepare reconfigured worker completion")
+	}
+	action, ok = Resumed(p, task.g, action)
+	if !ok || action.Kind != ActionCheckDestroy {
+		t.Fatalf("resume reconfigured worker completion = (%+v, %t)", action, ok)
+	}
+	action, ok = Checked(p, task.g, action, true)
+	if !ok || action.Kind != ActionDestroy {
+		t.Fatalf("check reconfigured worker destroy = (%+v, %t)", action, ok)
+	}
+	releaseTestFrame(t, task.g, task.frame)
+	closeAction, ok := Destroyed(p, task.g, action)
+	if !ok || closeAction.Kind != ActionTerminalExecutorClose {
+		t.Fatalf("begin reconfigured worker terminal close = (%+v, %t)", closeAction, ok)
+	}
+	closed, terminal, ok := ConfirmTerminalExecutorClose(driver)
+	if !ok || closed != task.g || terminal.Kind != ActionComplete {
+		t.Fatalf("confirm reconfigured worker terminal close = (%p, %+v, %t)", closed, terminal, ok)
+	}
+	if !workers.CanRelease() || !registry.CanRelease() {
+		t.Fatal("reconfigured worker retained source state")
+	}
+}
+
+func TestWorkerTimerParkDeadlineWaitsForPhysicalWorkerCancel(t *testing.T) {
+	p := new(P)
+	driver := new(ExecutorDriver)
+	registry := new(ExecutorRegistry)
+	workers := new(WorkerOperationSource)
+	timers := new(TimerRegistrationTable)
+	executor := registerTestExecutor(t, registry)
+	if !BindExecutorSourceCatalog(driver, p, registry, executor, ExecutorSourceCatalog{
+		Timers: timers,
+		Worker: workers,
+	}) {
+		t.Fatal("bind worker/timer owner catalog")
+	}
+	task := newYieldingTestG(t, "worker-timer-deadline")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue worker/timer task")
+	}
+	if g, ok := NextRunnableAt(p, 0); !ok || g != task.g {
+		t.Fatal("dequeue worker/timer task")
+	}
+	action := beginWaitTestResume(t, p, task)
+	var wait WaitSetRecord
+	task.frame.header.SuspendReason = uint16(SuspendPark)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+	ticket, worker, timer, timerOperation, retainedExecutor, ok :=
+		PrepareCurrentExecutorWorkerTimerPark(
+			driver,
+			task.g,
+			task.handle,
+			task.frame.header,
+			&wait,
+			11,
+			12,
+			97,
+			20,
+		)
+	if !ok || retainedExecutor != executor ||
+		!CommitCurrentExecutorWorkerSubmission(driver, task.g, worker) {
+		t.Fatal("prepare submitted worker/timer park")
+	}
+	if action, ok = Resumed(p, task.g, action); !ok || action.Kind != ActionPark {
+		t.Fatalf("commit worker/timer park = (%+v, %t)", action, ok)
+	}
+
+	if due, promoted, ok := PollExecutorAt(driver, 20); !ok || due != 1 || promoted != 0 {
+		t.Fatalf("poll due worker/timer park = (%d, %d, %t)", due, promoted, ok)
+	}
+	if requested, exact := ExecutorWorkerPhysicalCancelRequested(driver, worker); !exact || !requested {
+		t.Fatalf("deadline loser physical cancel = (%t, %t)", requested, exact)
+	}
+	if p.readyHead != nil {
+		t.Fatal("deadline resumed before physical worker cancellation completed")
+	}
+
+	payload := workerPayloadForTest(t, 31, 3100, 0, 125)
+	if workers.Post(worker, payload) != WorkerOperationPosted {
+		t.Fatal("post physical worker cancellation completion")
+	}
+	if due, promoted, ok := PollExecutorAt(driver, 20); !ok || due != 0 || promoted != 1 {
+		t.Fatalf("poll completed physical cancellation = (%d, %d, %t)", due, promoted, ok)
+	}
+	if g, ok := NextRunnableAt(p, 20); !ok || g != task.g {
+		t.Fatal("dequeue timed-out worker/timer task")
+	}
+	action = beginWaitTestResume(t, p, task)
+	task.frame.header.SuspendReason = uint16(SuspendPark)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+	outcome, caseID, lease, cancel, taken := TakeRunDecision(task.g, ticket)
+	if !taken || outcome != ParkOutcomeCompleted || caseID != 12 ||
+		!lease.Valid() || cancel != TaskCancelNone {
+		t.Fatalf("take worker/timer deadline decision = (%d, %d, %+v, %d, %t)",
+			outcome, caseID, lease, cancel, taken)
+	}
+	if result := FinishCurrentExecutorWorkerPark(
+		driver, task.g, worker, OperationResultLease{}, true, nil,
+	); !result.Finished() {
+		t.Fatalf("finish canceled worker source = %d", result)
+	}
+	if !FinishCurrentExecutorTimerPark(
+		driver, task.g, executor, timer, timerOperation, lease, false,
+	) {
+		t.Fatal("finish winning timer source")
+	}
+
+	task.frame.header.SuspendReason = uint16(SuspendFrameComplete)
+	task.frame.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PrepareComplete(task.g, task.handle, task.frame.header) {
+		t.Fatal("prepare worker/timer completion")
+	}
+	action, ok = Resumed(p, task.g, action)
+	if !ok || action.Kind != ActionCheckDestroy {
+		t.Fatalf("resume worker/timer completion = (%+v, %t)", action, ok)
+	}
+	action, ok = Checked(p, task.g, action, true)
+	if !ok || action.Kind != ActionDestroy {
+		t.Fatalf("check worker/timer destroy = (%+v, %t)", action, ok)
+	}
+	releaseTestFrame(t, task.g, task.frame)
+	closeAction, ok := Destroyed(p, task.g, action)
+	if !ok || closeAction.Kind != ActionTerminalExecutorClose {
+		t.Fatalf("begin worker/timer terminal close = (%+v, %t)", closeAction, ok)
+	}
+	closed, terminal, ok := ConfirmTerminalExecutorClose(driver)
+	if !ok || closed != task.g || terminal.Kind != ActionComplete {
+		t.Fatalf("confirm worker/timer terminal close = (%p, %+v, %t)", closed, terminal, ok)
+	}
+	if !workers.CanRelease() || !timers.CanRelease() || !registry.CanRelease() {
+		t.Fatal("worker/timer deadline retained source state")
+	}
+}
+
 func TestCommandShutdownDrainAwaitsSubmittedWorkerCompletion(t *testing.T) {
 	p := new(P)
 	driver := new(ExecutorDriver)

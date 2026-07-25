@@ -1,4 +1,4 @@
-//go:build llgo && llgo_coro && llgo_coro_host && !wasm && !baremetal && !coro_runtime_adapter_test && !(llgo_coro_native_pipe && (darwin || linux))
+//go:build llgo && llgo_coro && llgo_coro_host && !wasm && !tinygo.wasm && !baremetal && !coro_runtime_adapter_test && !(llgo_coro_native_pipe && (darwin || linux))
 
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
@@ -12,4 +12,5 @@ package runtime
 // An explicit embedded host supplies a main-loop notification and one-shot
 // alarm implementation. This profile makes no pthread/RTOS/OS assumption.
 const coroHostPlatformProfileV1 = coroHostProfileEmbeddedV1 |
-	coroHostCapabilityScheduleV1 | coroHostCapabilityAlarmV1 | coroHostCapabilityExternalReactorV1
+	coroHostCapabilityScheduleV1 | coroHostCapabilityAlarmV1 |
+	coroHostCapabilityOperationV1 | coroHostCapabilityExternalReactorV1

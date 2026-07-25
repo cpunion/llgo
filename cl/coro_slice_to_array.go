@@ -108,15 +108,18 @@ func (p *context) compileCoroSliceToArrayPointer(
 		panic(fmt.Sprintf("invalid frozen slice-to-array-pointer recipe for %s", conversion))
 	}
 	if plan.boundsGuard {
-		p.observeCoroPhysicalBoundsGuard(conversion)
 		limit := b.Prog.IntVal(uint64(plan.bound), b.Prog.Int())
 		length := b.SliceLen(x)
+		wideLimit, _ := b.BoundsOperand(limit)
 		tooShort := b.BinOp(token.LSS, length, limit)
-		p.compileCoroFaultConditionGuardWithOperands(
+		p.compileCoroPlannedBoundsFaultSet(
 			b,
-			tooShort,
-			coroFaultSliceConvertV1,
-			&coroFaultOperands{arg0: limit, arg1: length},
+			conversion,
+			[]coroPlannedBoundsFault{{
+				condition: tooShort,
+				kind:      coroFaultSliceConvertV1,
+				operands:  coroFaultOperands{arg0: wideLimit, arg1: length},
+			}},
 		)
 	}
 	return b.SliceToArrayPointerUnchecked(x, typ)

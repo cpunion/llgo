@@ -1,3 +1,5 @@
+//go:build !wasm && !tinygo.wasm
+
 /*
  * Copyright (c) 2024 The XGo Authors (xgo.dev). All rights reserved.
  *

@@ -382,7 +382,9 @@ func TestCoroCallableShadowGenericContractAuthorizesProductionWorkerCertificate(
 	if opcodeErr != nil || !intrinsic {
 		t.Fatalf("worker opcode = %d, %t, %v", opcode, intrinsic, opcodeErr)
 	}
-	if _, _, _, err := freezeCoroWorkerSyscallShadowCertificate(universe, call, opcode, sink); err == nil ||
+	if _, _, _, err := freezeCoroWorkerSyscallShadowCertificate(
+		universe, call, opcode, sink, coroWorkerSyscallTrapPolicy{},
+	); err == nil ||
 		!strings.Contains(err.Error(), "differs from its exact producer contract") {
 		t.Fatalf("forged forward shadow target was not rejected: %v", err)
 	}

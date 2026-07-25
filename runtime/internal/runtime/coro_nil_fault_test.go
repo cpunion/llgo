@@ -19,7 +19,6 @@
 package runtime
 
 import (
-	"fmt"
 	"runtime"
 	"testing"
 	"unsafe"
@@ -42,7 +41,17 @@ func (s plainError) RuntimeError() {}
 
 type boundsErrorCode uint8
 
-const boundsConvert boundsErrorCode = 1
+const (
+	boundsIndex boundsErrorCode = iota
+	boundsSliceAlen
+	boundsSliceAcap
+	boundsSliceB
+	boundsSlice3Alen
+	boundsSlice3Acap
+	boundsSlice3B
+	boundsSlice3C
+	boundsConvert
+)
 
 type boundsError struct {
 	x      int64
@@ -52,13 +61,66 @@ type boundsError struct {
 }
 
 func (e boundsError) Error() string {
-	return fmt.Sprintf(
-		"runtime error: cannot convert slice with length %d to array or pointer to array with length %d",
-		e.y, e.x,
-	)
+	formats := [...]string{
+		"index out of range [%x] with length %y",
+		"slice bounds out of range [:%x] with length %y",
+		"slice bounds out of range [:%x] with capacity %y",
+		"slice bounds out of range [%x:%y]",
+		"slice bounds out of range [::%x] with length %y",
+		"slice bounds out of range [::%x] with capacity %y",
+		"slice bounds out of range [:%x:%y]",
+		"slice bounds out of range [%x:%y:]",
+		"cannot convert slice with length %y to array or pointer to array with length %x",
+	}
+	negativeFormats := [...]string{
+		"index out of range [%x]",
+		"slice bounds out of range [:%x]",
+		"slice bounds out of range [:%x]",
+		"slice bounds out of range [%x:]",
+		"slice bounds out of range [::%x]",
+		"slice bounds out of range [::%x]",
+		"slice bounds out of range [:%x:]",
+		"slice bounds out of range [%x::]",
+	}
+	format := formats[e.code]
+	if e.signed && e.x < 0 {
+		format = negativeFormats[e.code]
+	}
+	out := []byte("runtime error: ")
+	for i := 0; i < len(format); i++ {
+		if format[i] != '%' {
+			out = append(out, format[i])
+			continue
+		}
+		i++
+		switch format[i] {
+		case 'x':
+			out = appendTestBoundsInt(out, e.x, e.signed)
+		case 'y':
+			out = appendTestBoundsInt(out, int64(e.y), true)
+		}
+	}
+	return string(out)
 }
 
 func (boundsError) RuntimeError() {}
+
+func appendTestBoundsInt(out []byte, value int64, signed bool) []byte {
+	if signed && value < 0 {
+		out = append(out, '-')
+		value = -value
+	}
+	var buf [20]byte
+	i := len(buf) - 1
+	unsigned := uint64(value)
+	for unsigned >= 10 {
+		buf[i] = byte(unsigned%10 + '0')
+		i--
+		unsigned /= 10
+	}
+	buf[i] = byte(unsigned + '0')
+	return append(out, buf[i:]...)
+}
 
 func AllocZ(size uintptr) unsafe.Pointer {
 	if size != unsafe.Sizeof(boundsError{}) {
@@ -297,9 +359,10 @@ func TestCoroFaultPayloadV2CarriesSliceConversionOperands(t *testing.T) {
 	}
 
 	for _, test := range []struct {
-		name       string
-		kind       uint32
-		arg0, arg1 uintptr
+		name string
+		kind uint32
+		arg0 uint64
+		arg1 uintptr
 	}{
 		{name: "unknown kind", kind: ^uint32(0)},
 		{name: "operand on static kind", kind: coroFaultNilV1, arg0: 1},
@@ -309,6 +372,94 @@ func TestCoroFaultPayloadV2CarriesSliceConversionOperands(t *testing.T) {
 				t.Fatalf("invalid parameterized payload = (%p, %p)", typ, data)
 			}
 		})
+	}
+	runtime.KeepAlive(coroBoundsErrorTypeV2)
+}
+
+func TestCoroFaultPayloadV2CarriesExactBoundsErrors(t *testing.T) {
+	tests := []struct {
+		name   string
+		code   boundsErrorCode
+		signed bool
+		arg0   uint64
+		arg1   uintptr
+		want   string
+	}{
+		{
+			name: "negative index", code: boundsIndex, signed: true,
+			arg0: ^uint64(0), arg1: 3,
+			want: "runtime error: index out of range [-1]",
+		},
+		{
+			name: "unsigned index", code: boundsIndex, signed: false,
+			arg0: ^uint64(0), arg1: 3,
+			want: "runtime error: index out of range [18446744073709551615] with length 3",
+		},
+		{
+			name: "slice length", code: boundsSliceAlen, signed: true,
+			arg0: 4, arg1: 3,
+			want: "runtime error: slice bounds out of range [:4] with length 3",
+		},
+		{
+			name: "slice capacity", code: boundsSliceAcap, signed: true,
+			arg0: 4, arg1: 3,
+			want: "runtime error: slice bounds out of range [:4] with capacity 3",
+		},
+		{
+			name: "slice low", code: boundsSliceB, signed: false,
+			arg0: ^uint64(0), arg1: 0,
+			want: "runtime error: slice bounds out of range [18446744073709551615:0]",
+		},
+		{
+			name: "full slice length", code: boundsSlice3Alen, signed: true,
+			arg0: 4, arg1: 3,
+			want: "runtime error: slice bounds out of range [::4] with length 3",
+		},
+		{
+			name: "full slice capacity", code: boundsSlice3Acap, signed: true,
+			arg0: 4, arg1: 3,
+			want: "runtime error: slice bounds out of range [::4] with capacity 3",
+		},
+		{
+			name: "full slice high", code: boundsSlice3B, signed: true,
+			arg0: 2, arg1: 1,
+			want: "runtime error: slice bounds out of range [:2:1]",
+		},
+		{
+			name: "full slice low", code: boundsSlice3C, signed: true,
+			arg0: 1, arg1: 0,
+			want: "runtime error: slice bounds out of range [1:0:]",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			kind := coroFaultBoundsBaseV2 + uint32(test.code)*2
+			if !test.signed {
+				kind++
+			}
+			code, signed, ok := coroFaultBoundsMetadataV2(kind)
+			if !ok || code != test.code || signed != test.signed {
+				t.Fatalf("bounds metadata = (%d, %t, %t), want (%d, %t, true)",
+					code, signed, ok, test.code, test.signed)
+			}
+			typeWord, dataWord := coroFaultPayloadV2(kind, test.arg0, test.arg1)
+			if typeWord == nil || dataWord == nil {
+				t.Fatal("exact bounds payload is empty")
+			}
+			payload := *(*boundsError)(dataWord)
+			if payload.x != int64(test.arg0) || payload.y != int(test.arg1) ||
+				payload.signed != test.signed || payload.code != test.code {
+				t.Fatalf("exact bounds payload = %+v", payload)
+			}
+			if got := payload.Error(); got != test.want {
+				t.Fatalf("bounds message = %q, want %q", got, test.want)
+			}
+		})
+	}
+	for _, kind := range []uint32{coroFaultBoundsBaseV2 - 1, coroFaultBoundsLimitV2} {
+		if _, _, ok := coroFaultBoundsMetadataV2(kind); ok {
+			t.Fatalf("out-of-range bounds kind %d was accepted", kind)
+		}
 	}
 	runtime.KeepAlive(coroBoundsErrorTypeV2)
 }

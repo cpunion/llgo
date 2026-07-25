@@ -42,7 +42,18 @@ type coroSemanticInstructionPlan struct {
 // planCoroSemanticInstruction is the only raw-SSA semantic recipe classifier.
 // It runs while the emission closure is still open. Analysis, preflight and
 // emission consume the frozen result and must not repeat this switch.
-func planCoroSemanticInstruction(instruction ssa.Instruction) (coroSemanticInstructionPlan, error) {
+func planCoroSemanticInstruction(instruction ssa.Instruction) (plan coroSemanticInstructionPlan, err error) {
+	// A raw instruction handed to this classifier is part of the evaluated
+	// source program. Frontend-only, unevaluated operands are represented by
+	// freezeSemanticInstruction with their own explicit recipe instead. Keep
+	// this invariant here so structural preflight callers cannot silently skip
+	// every instruction merely because they do not have an owner-scoped frozen
+	// ProgramIR.
+	defer func() {
+		if err == nil {
+			plan.evaluated = true
+		}
+	}()
 	ordinary := func(recipe string) (coroSemanticInstructionPlan, error) {
 		return coroSemanticInstructionPlan{
 			class:  coro.OpPure,

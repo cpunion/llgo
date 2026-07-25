@@ -302,6 +302,30 @@ func (p *context) plannedCoroPhysicalOperation(instruction ssa.Instruction) (cor
 	return current.expectedPhysical, true
 }
 
+// selectCoroPhysicalOperation is the shared source-emission gate for inline
+// operations which may retain a synchronous fallback. It reads and consumes
+// the frozen recipe exactly once; callers decide only whether None is legal.
+func (p *context) selectCoroPhysicalOperation(
+	instruction ssa.Instruction,
+	expected coroPhysicalOperationRecipe,
+) (operation coroPhysicalInstructionPlan, selected, planned bool) {
+	operation, planned = p.plannedCoroPhysicalOperation(instruction)
+	if !planned {
+		return coroPhysicalInstructionPlan{}, false, false
+	}
+	if operation.operation == expected {
+		p.observeCoroPhysicalOperation(instruction, expected)
+		return operation, true, true
+	}
+	if operation.operation != coroPhysicalOperationNone {
+		panic(fmt.Sprintf(
+			"operation selected incompatible frozen physical recipe %s, expected %s",
+			operation.operation, expected,
+		))
+	}
+	return operation, false, true
+}
+
 func (p *context) plannedCoroPhysicalOutcome(instruction ssa.Instruction) (coroPhysicalInstructionPlan, bool) {
 	if p == nil || p.coroEmissionPlan() == nil {
 		return coroPhysicalInstructionPlan{}, false

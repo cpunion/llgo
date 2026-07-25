@@ -313,7 +313,7 @@ func newCoroPhysicalABI(p *context, entry plannedFunctionSymbol, sourceSig *type
 		}
 	}
 	key := fmt.Sprintf(
-		"llgo-coro-physical-v%d\x00%s\x00coro=%s\x00scheduler=%s\x00panic=%s\x00panic-hook=%s\x00recover-take=%s\x00fault-hook=%s\x00fault-payload-hook=%s\x00fault-args-hook=%s\x00fault-args-payload-hook=%s\x00func-rep=%s\x00await-prepare=%s\x00await-consume=%s\x00resume-decision=%s\x00resume-decision-zero=%s\x00critical-enter=%s\x00critical-exit=%s\x00os-thread-lock=%s\x00os-thread-unlock=%s\x00triple=%s\x00cpu=%s\x00features=%s\x00target-abi=%s\x00data-layout=%s\x00ptr=%d\x00sig=%s\x00result=%s",
+		"llgo-coro-physical-v%d\x00%s\x00coro=%s\x00scheduler=%s\x00panic=%s\x00panic-hook=%s\x00recover-take=%s\x00fault-hook=%s\x00fault-payload-hook=%s\x00fault-args-hook=%s\x00fault-args-payload-hook=%s\x00fault-args-abi=x64-yword-v2\x00func-rep=%s\x00await-prepare=%s\x00await-consume=%s\x00resume-decision=%s\x00resume-decision-zero=%s\x00critical-enter=%s\x00critical-exit=%s\x00os-thread-lock=%s\x00os-thread-unlock=%s\x00triple=%s\x00cpu=%s\x00features=%s\x00target-abi=%s\x00data-layout=%s\x00ptr=%d\x00sig=%s\x00result=%s",
 		version,
 		entry.plan.ID,
 		coroABI,
@@ -1215,7 +1215,10 @@ func validateCoroPhysicalABIForOwner(
 		allowedExec |= coro.NeedsCleanupFrame
 	}
 	if unsupported := plan.Exec &^ allowedExec; unsupported != 0 {
-		return fail("execution flags %s require lowering outside the CFG physical ABI", unsupported)
+		return fail(
+			"execution flags %s require lowering outside the CFG physical ABI; effect-trace: %s",
+			unsupported, whole.OpaqueEffectTrace(fn),
+		)
 	}
 	if len(fn.FreeVars) != 0 && !managedDispatchTarget && plan.FuncRep != coro.DirectCoro {
 		return fail("captured coroutine bodies require one exact direct or capability-certified descriptor context ABI")
@@ -1442,6 +1445,7 @@ func validateCoroPhysicalABIForOwner(
 			explicitPanic:    explicitPanic,
 			channel:          channel,
 			worker:           universe != nil && universe.CoroWorkerSupported(),
+			hostOperation:    universe != nil && universe.coroCapabilities.HostOperation(),
 			interfacePlain:   interfacePlain,
 			managedInterface: managedInterface,
 		},
@@ -1656,6 +1660,9 @@ func validateCoroPhysicalABIForOwner(
 								if instructionPlan.operation != coroPhysicalOperationWorkerSyscall {
 									return coroLeafInstructionError(fn, plan, instr, "worker llgo.syscall has no frozen operation recipe")
 								}
+							} else if frozen.opcode == llgoCoroHostOperation &&
+								instructionPlan.operation != coroPhysicalOperationHostCall {
+								return coroLeafInstructionError(fn, plan, instr, "host operation has no frozen operation recipe")
 							}
 							parks++
 						} else if intrinsic && semantics == CoroIntrinsicCallInlineYield {
@@ -2300,6 +2307,16 @@ func coroMaterializedGenericInstance(fn *ssa.Function) bool {
 		}
 	}
 	return true
+}
+
+// CoroMaterializedGenericInstance reports whether fn is one exact, fully
+// concrete x/tools generic body (including a function literal materialized
+// inside such a body). Build-level whole-program proofs use this same
+// predicate instead of reconstructing generic-instance identity from Origin
+// and TypeArgs independently.
+func (u *EmissionUniverse) CoroMaterializedGenericInstance(fn *ssa.Function) bool {
+	return u != nil && fn != nil && u.canonicalAlias(fn) == fn &&
+		coroMaterializedGenericInstance(fn)
 }
 
 // coroMaterializedGenericCallable includes Pkg-nil method-set wrappers that

@@ -4,8 +4,10 @@ package runtime
 
 import _ "unsafe"
 
-// Minimal internal/poll hooks for baremetal target smoke builds.
-// Embedded targets in this path do not provide a runtime poller.
+// Minimal internal/poll hooks for targets whose current host capability does
+// not include a descriptor-event adapter. Returning NotPollable is explicit:
+// it keeps unrelated standard packages linkable without importing a blocking
+// POSIX/libuv poller or pretending that file/network readiness is implemented.
 
 const (
 	pollNoError        = 0

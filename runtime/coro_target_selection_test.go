@@ -214,8 +214,19 @@ func TestCoroHostTargetOwnedReactorSourceContract(t *testing.T) {
 			t.Errorf("host adapter imports forbidden backend %q", forbidden)
 		}
 	}
-	if strings.Contains(driver, "Poll:") || strings.Contains(driver, "Worker:") {
-		t.Error("host source catalog pretends to provide Poll or Worker")
+	if strings.Contains(driver, "Poll:") {
+		t.Error("host source catalog pretends to provide descriptor Poll")
+	}
+	if !strings.Contains(driver, "Worker: &coroProgramWorkerSourceV1State") {
+		t.Error("host source catalog lacks the shared external-operation source")
+	}
+	if !strings.Contains(driver, "Manual: &coroProgramManualSourceV2State") {
+		t.Error("host source catalog lacks keyed semaphore/notify completion")
+	}
+	keyedPost := read("coro_keyed_post_host_llgo.go")
+	if !strings.Contains(keyedPost, "coroProgramManualSourceV2State.Post(id)") ||
+		!strings.Contains(keyedPost, "coroTargetRequestExecutorV1") {
+		t.Error("host keyed completion does not publish-before-request")
 	}
 	js := read("coro_target_host_profile_js_llgo.go")
 	wasi := read("coro_target_host_profile_wasi_llgo.go")

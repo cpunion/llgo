@@ -884,17 +884,24 @@ func declareCoroHostPullCallbacksV1(pkg llssa.Package) []retainedCoroCallbackV1 
 		declare(coroHostContinueSliceSymbolV1,
 			[]types.Type{word, word, word, word, word, word, word, resultPointer}, []types.Type{word},
 			coroHostContinueSliceReferenceSymbolV1, "coroutine host continue-slice callback"),
+		declare(coroHostNextOperationSymbolV1, []types.Type{pointer}, []types.Type{word},
+			coroHostNextOperationReferenceSymbolV1, "coroutine host next-operation callback"),
+		declare(coroHostCompleteOperationSymbolV1,
+			[]types.Type{word, word, word, word, word, word, word, word, word, word}, []types.Type{word},
+			coroHostCompleteOperationReferenceSymbolV1, "coroutine host complete-operation callback"),
 	}
 }
 
 const (
-	coroProgramContinueReferenceSymbolV1   = "__llgo_coro_program_continue_reference_v1"
-	coroHostNextActionReferenceSymbolV1    = "__llgo_coro_host_next_action_reference_v1"
-	coroHostProfileReferenceSymbolV1       = "__llgo_coro_host_profile_reference_v1"
-	coroHostNextDeadlineReferenceSymbolV1  = "__llgo_coro_host_next_deadline_reference_v1"
-	coroHostPublishTimeReferenceSymbolV1   = "__llgo_coro_host_publish_time_reference_v1"
-	coroHostAckCancelReferenceSymbolV1     = "__llgo_coro_host_ack_cancel_reference_v1"
-	coroHostContinueSliceReferenceSymbolV1 = "__llgo_coro_host_continue_slice_reference_v1"
+	coroProgramContinueReferenceSymbolV1       = "__llgo_coro_program_continue_reference_v1"
+	coroHostNextActionReferenceSymbolV1        = "__llgo_coro_host_next_action_reference_v1"
+	coroHostProfileReferenceSymbolV1           = "__llgo_coro_host_profile_reference_v1"
+	coroHostNextDeadlineReferenceSymbolV1      = "__llgo_coro_host_next_deadline_reference_v1"
+	coroHostPublishTimeReferenceSymbolV1       = "__llgo_coro_host_publish_time_reference_v1"
+	coroHostAckCancelReferenceSymbolV1         = "__llgo_coro_host_ack_cancel_reference_v1"
+	coroHostContinueSliceReferenceSymbolV1     = "__llgo_coro_host_continue_slice_reference_v1"
+	coroHostNextOperationReferenceSymbolV1     = "__llgo_coro_host_next_operation_reference_v1"
+	coroHostCompleteOperationReferenceSymbolV1 = "__llgo_coro_host_complete_operation_reference_v1"
 )
 
 // retainCoroProgramContinueV1 gives the target callback ABI a live relocation

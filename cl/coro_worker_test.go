@@ -71,6 +71,45 @@ func RootPointer(a0 uintptr) (uintptr, uintptr, uintptr) {
 }
 `
 
+const coroWorkerTypedSyncSyscallTestSource = `package typed
+
+import _ "unsafe"
+
+//go:linkname raw32 llgo.syscall32
+func raw32(fn, a0 uintptr, f0 float64) (uintptr, uintptr, uintptr)
+
+func Root(fn, a0 uintptr, f0 float64) (uintptr, uintptr, uintptr) {
+	return raw32(fn, a0, f0)
+}
+`
+
+func TestCoroTypedSyncSyscallDoesNotForgeWordWorkerABI(t *testing.T) {
+	ssaPkg, _, _ := buildGoSSAPkg(t, coroWorkerTypedSyncSyscallTestSource)
+	root := ssaPkg.Func("Root")
+	if root == nil {
+		t.Fatal("typed syscall fixture has no Root")
+	}
+	var rawCall *ssa.Call
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(*ssa.Call)
+			if ok && call.Common() != nil && call.Common().StaticCallee() == ssaPkg.Func("raw32") {
+				rawCall = call
+			}
+		}
+	}
+	if rawCall == nil {
+		t.Fatal("typed syscall fixture has no raw32 call")
+	}
+	if err := planCoroSynchronousSyscallShape(rawCall); err != nil {
+		t.Fatalf("typed synchronous syscall rejected: %v", err)
+	}
+	if err := validateCoroWorkerSyscallIntrinsicCallSite(rawCall); err == nil ||
+		!strings.Contains(err.Error(), "argument 2 is not uintptr-shaped") {
+		t.Fatalf("typed syscall worker validation = %v; want exact word-ABI rejection", err)
+	}
+}
+
 func TestCoroWorkerSyscallCurrentFrame(t *testing.T) {
 	llssa.Initialize(llssa.InitAll)
 	prog, pkg, plan, root, rawCall := compileCoroWorkerFixture(t)
@@ -325,6 +364,11 @@ func TestCoroWorkerProductionLinuxDynamicRawSyscallFailsClosed(t *testing.T) {
 	semantics, intrinsic, semanticsErr := universe.CoroIntrinsicCallSiteSemantics(rawCall)
 	if semanticsErr != nil || !intrinsic || semantics != CoroIntrinsicCallUnsupported {
 		t.Fatalf("dynamic RawSyscall intrinsic semantics = %v, %t, %v; want unsupported, true, nil", semantics, intrinsic, semanticsErr)
+	}
+	site, frozen, siteErr := universe.CoroCallSitePlan(rawCall)
+	if siteErr != nil || !frozen || !site.Intrinsic || !site.RawPlainSynchronousIntrinsic ||
+		site.IntrinsicSemantics != CoroIntrinsicCallUnsupported || site.ElidesCall() {
+		t.Fatalf("dynamic RawSyscall SitePlan = %+v, %t, %v; want retained managed edge plus exact raw/plain synchronous recipe", site, frozen, siteErr)
 	}
 
 	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())

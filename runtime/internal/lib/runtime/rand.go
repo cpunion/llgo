@@ -1,3 +1,5 @@
+//go:build !wasip2 && !wasm_unknown
+
 package runtime
 
 import (

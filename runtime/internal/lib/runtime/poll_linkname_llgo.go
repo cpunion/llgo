@@ -1,4 +1,4 @@
-//go:build (darwin || linux) && !baremetal && (coro_runtime_adapter_test || !(llgo && llgo_coro && llgo_coro_native_pipe && llgo_coro_native_timer))
+//go:build (darwin || linux) && !baremetal && !wasm && !tinygo.wasm && (coro_runtime_adapter_test || !(llgo && llgo_coro && llgo_coro_native_pipe && llgo_coro_native_timer))
 
 package runtime
 

@@ -7,11 +7,15 @@ func fail(code int) {
 }
 
 func main() {
-	if len(os.Args) != 2 {
+	path := "/llgo-host/stdlib-roundtrip.txt"
+	if len(os.Args) > 2 {
 		fail(10)
 	}
+	if len(os.Args) == 2 {
+		path = os.Args[1]
+	}
 
-	f, err := os.OpenFile(os.Args[1], os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0o600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0o600)
 	if err != nil {
 		fail(11)
 	}

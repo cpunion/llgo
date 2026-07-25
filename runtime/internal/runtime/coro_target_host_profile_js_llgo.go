@@ -13,4 +13,5 @@ package runtime
 // (never a synchronous wasm re-entry); Alarm maps to a one-shot host timeout.
 // Blocking the current JS callback is not a capability of this profile.
 const coroHostPlatformProfileV1 = coroHostProfileJSV1 |
-	coroHostCapabilityScheduleV1 | coroHostCapabilityAlarmV1 | coroHostCapabilityExternalReactorV1
+	coroHostCapabilityScheduleV1 | coroHostCapabilityAlarmV1 |
+	coroHostCapabilityOperationV1 | coroHostCapabilityExternalReactorV1

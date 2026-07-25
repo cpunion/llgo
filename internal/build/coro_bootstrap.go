@@ -51,6 +51,8 @@ const (
 	coroHostPublishTimeSymbolV1                                 = "__llgo_coro_host_publish_time_v1"
 	coroHostAckCancelSymbolV1                                   = "__llgo_coro_host_ack_cancel_v1"
 	coroHostContinueSliceSymbolV1                               = "__llgo_coro_host_continue_slice_v1"
+	coroHostNextOperationSymbolV1                               = "__llgo_coro_host_next_operation_v1"
+	coroHostCompleteOperationSymbolV1                           = "__llgo_coro_host_complete_operation_v1"
 	coroRunDecisionTakeSymbolV1                                 = "__llgo_coro_run_decision_take_v1"
 	coroRunDecisionTakeZeroSymbolV1                             = "__llgo_coro_run_decision_take_zero_v1"
 	coroTimerParkSymbolV2                                       = "__llgo_coro_timer_park_v2"
@@ -73,6 +75,8 @@ const (
 	coroChanResumeSymbolV1                                      = "__llgo_coro_chan_resume_v1"
 	coroWorkerParkSymbolV1                                      = "__llgo_coro_worker_park_v1"
 	coroWorkerResumeSymbolV1                                    = "__llgo_coro_worker_resume_v1"
+	coroHostOperationParkSymbolV1                               = "__llgo_coro_host_operation_park_v1"
+	coroHostOperationResumeSymbolV1                             = "__llgo_coro_host_operation_resume_v1"
 	coroOSThreadLockSymbolV1                                    = "__llgo_coro_os_thread_lock_v1"
 	coroOSThreadUnlockSymbolV1                                  = "__llgo_coro_os_thread_unlock_v1"
 	coroOSThreadLockedSymbolV1                                  = "__llgo_coro_os_thread_locked_v1"
@@ -133,6 +137,9 @@ func validateCoroProgramBootstrapConfig(conf *Config) error {
 	}
 	if conf.coroWorkerSupported() && !nativeCoroWorkerRuntimeABI(conf) {
 		return fmt.Errorf("enable coroutine worker lowering: a native Darwin/Linux pthread worker adapter is required")
+	}
+	if conf.coroHostOperationSupported() && !hostCoroPullRuntimeABI(conf) {
+		return fmt.Errorf("enable coroutine host operation lowering: a host-pull operation adapter is required")
 	}
 	if conf.coroNativeFleetSupported() && !nativeCoroTimerRuntimeABI(conf) {
 		return fmt.Errorf("enable native coroutine fleet: a 64-bit native Darwin/Linux timer reactor is required")
@@ -637,28 +644,24 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 			"blocked-flags=" + strconv.FormatUint(uint64(coroProgramRunBlockedV2|coroProgramRunHasDeadlineV2), 10) + ":" +
 			"pull=" + coroHostNextActionSymbolV1 + ":" + coroHostProfileSymbolV1 + ":" +
 			coroHostNextDeadlineSymbolV1 + ":" + coroHostPublishTimeSymbolV1 + ":" +
-			coroHostAckCancelSymbolV1 + ":" + coroHostContinueSliceSymbolV1)
+			coroHostAckCancelSymbolV1 + ":" + coroHostContinueSliceSymbolV1 + ":" +
+			coroHostNextOperationSymbolV1 + ":" + coroHostCompleteOperationSymbolV1)
 	} else {
 		write("driver=runtime-static-single-p-v1:" + coroProgramBeginSymbolV1 + ":" + coroProgramRunSymbolV1 + ":" + coroProgramContinueSymbolV1 + ":continue(epoch:u32)->void")
 	}
 	write("resume-decision-v1=" + coroRunDecisionTakeSymbolV1 + "(g:ptr,expected-epoch:u32,expected-generation:u32,outcome:*u32,case:*u32,task-kind:*u32,operation-source-slot:*u32,operation-generation:*u32)->void")
 	write("resume-decision-zero-v1=" + coroRunDecisionTakeZeroSymbolV1 + "(g:ptr)->u32")
-	write("parameterized-fault-v2=__llgo_coro_fault_prepare_v2(g:ptr,handle:ptr,header:ptr,kind:u32,arg0:uintptr,arg1:uintptr)->void;" +
-		"__llgo_coro_fault_payload_v2(kind:u32,arg0:uintptr,arg1:uintptr,type-out:ptr,data-out:ptr)->void")
+	write("parameterized-fault-v2=__llgo_coro_fault_prepare_v2(g:ptr,handle:ptr,header:ptr,kind:u32,arg0:u64,arg1:uintptr)->void;" +
+		"__llgo_coro_fault_payload_v2(kind:u32,arg0:u64,arg1:uintptr,type-out:ptr,data-out:ptr)->void")
 	if nativeCoroDoorbellRuntimeABI(ctx.buildConf) {
 		write("native-doorbell=pipe-poll-operation-id-v2")
 	}
-	if nativeCoroTimerRuntimeABI(ctx.buildConf) {
-		write("native-timer=source-aware-park-v2:" +
+	if coroTimerRuntimeABI(ctx.buildConf) {
+		write("timer=source-aware-park-v2:" +
 			coroTimerParkSymbolV2 + "(g:ptr,handle:ptr,header:ptr,state:ptr,delay-ns:i64)->void;" +
 			coroTimerParkControlledSymbolV2 + "(g:ptr,handle:ptr,header:ptr,state:ptr,controller:ptr,control:*u32,owner-route:*u32,expected:u32,deadline-ns:i64)->void;" +
 			coroTimerResumeSymbolV2 + "(g:ptr,state:ptr)->u32;" +
 			coroTimerRequestControlledSymbolV2 + "(route:u32)->u32")
-		write("native-poll=source-aware-park-v2:" +
-			coroPollParkSymbolV2 + "(g:ptr,handle:ptr,header:ptr,state:ptr,context:uintptr,fd:i32,interest:u32,deadline-ns:i64)->void;" +
-			coroPollResumeSymbolV2 + "(g:ptr,state:ptr)->u32;" +
-			coroPollUpdateDeadlineOrAbortSymbolV1 + "(context:uintptr,interest:u32,deadline-ns:i64)->void;" +
-			coroPollPostClosingOrAbortSymbolV1 + "(context:uintptr,interest:u32)->void")
 		write("keyed-park-v2=" +
 			coroKeyedParkSymbolV2 + "(g:ptr,handle:ptr,header:ptr,state:ptr)->void;" +
 			coroKeyedResumeSymbolV2 + "(g:ptr,state:ptr)->u32")
@@ -670,6 +673,13 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 			coroNotifyOneOrAbortSymbolV2 + "(notify-addr:ptr,wait-snapshot:u32)->void;" +
 			coroNotifyAllOrAbortSymbolV2 + "(notify-addr:ptr,wait-snapshot:u32)->void")
 	}
+	if nativeCoroTimerRuntimeABI(ctx.buildConf) {
+		write("native-poll=source-aware-park-v2:" +
+			coroPollParkSymbolV2 + "(g:ptr,handle:ptr,header:ptr,state:ptr,context:uintptr,fd:i32,interest:u32,deadline-ns:i64)->void;" +
+			coroPollResumeSymbolV2 + "(g:ptr,state:ptr)->u32;" +
+			coroPollUpdateDeadlineOrAbortSymbolV1 + "(context:uintptr,interest:u32,deadline-ns:i64)->void;" +
+			coroPollPostClosingOrAbortSymbolV1 + "(context:uintptr,interest:u32)->void")
+	}
 	write("channel-v1=" +
 		coroChanSendParkSymbolV1 + "(g:ptr,handle:ptr,header:ptr,channel:ptr,elem:ptr,state:ptr,size:uintptr)->void;" +
 		coroChanRecvParkSymbolV1 + "(g:ptr,handle:ptr,header:ptr,channel:ptr,elem:ptr,state:ptr,size:uintptr)->void;" +
@@ -679,6 +689,13 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 		write("worker-v1=" +
 			coroWorkerParkSymbolV1 + "(g:ptr,handle:ptr,header:ptr,state:ptr,fn:uintptr,argc:u32,a0:uintptr,a1:uintptr,a2:uintptr,a3:uintptr,a4:uintptr,a5:uintptr,a6:uintptr,a7:uintptr,a8:uintptr)->void;" +
 			coroWorkerResumeSymbolV1 + "(g:ptr,state:ptr,r1:*uintptr,r2:*uintptr,errno:*uintptr)->u32")
+	}
+	if ctx.buildConf.coroHostOperationSupported() {
+		write("host-operation-v1=" +
+			coroHostOperationParkSymbolV1 + "(g:ptr,handle:ptr,header:ptr,state:ptr,opcode:u32,argc:u32,a0:uintptr,a1:uintptr,a2:uintptr,a3:uintptr,a4:uintptr,a5:uintptr,a6:uintptr,a7:uintptr,a8:uintptr)->void;" +
+			coroHostOperationResumeSymbolV1 + "(g:ptr,state:ptr,r1:*uintptr,r2:*uintptr,errno:*uintptr)->u32;" +
+			coroHostNextOperationSymbolV1 + "(out:*host-operation-v1)->u32;" +
+			coroHostCompleteOperationSymbolV1 + "(source-slot:u32,generation:u32,flags:u32,count:u32,r1-lo:u32,r1-hi:u32,r2-lo:u32,r2-hi:u32,errno-lo:u32,errno-hi:u32)->u32")
 	}
 	write("header=physical-abi-v1")
 	write(ctx.coroPlanDigest)

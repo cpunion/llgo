@@ -8,13 +8,16 @@ import "unsafe"
 // triple-scoped wasmbuiltins archive. Linknames keep this fixture independent
 // of a host C sysroot and make the real llgo -target route exercise that ABI.
 //
-//go:linkname malloc malloc
+//llgo:coro sync
+//go:linkname malloc C.malloc
 func malloc(size uintptr) unsafe.Pointer
 
-//go:linkname free free
+//llgo:coro sync
+//go:linkname free C.free
 func free(ptr unsafe.Pointer)
 
-//go:linkname abort abort
+//llgo:coro noblock
+//go:linkname abort C.abort
 func abort()
 
 func main() {

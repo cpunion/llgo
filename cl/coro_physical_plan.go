@@ -162,6 +162,7 @@ const (
 	coroPhysicalOperationWorkerForeign
 	coroPhysicalOperationWorkerCgo
 	coroPhysicalOperationWorkerCgoErrno
+	coroPhysicalOperationHostCall
 )
 
 func (recipe coroPhysicalOperationRecipe) String() string {
@@ -186,6 +187,8 @@ func (recipe coroPhysicalOperationRecipe) String() string {
 		return "worker-cgo"
 	case coroPhysicalOperationWorkerCgoErrno:
 		return "worker-cgo-errno"
+	case coroPhysicalOperationHostCall:
+		return "host-operation"
 	default:
 		return fmt.Sprintf("physical-operation-recipe(%d)", uint8(recipe))
 	}
@@ -238,6 +241,7 @@ type coroPhysicalLoweringCapabilities struct {
 	explicitPanic    bool
 	channel          bool
 	worker           bool
+	hostOperation    bool
 	interfacePlain   *coroClosedInterfacePlainPlan
 	managedInterface *coroManagedInterfaceDispatchPlan
 }
@@ -262,6 +266,7 @@ type coroPhysicalInstructionPlan struct {
 	operationWorker    *coroWorkerForeignCallShape
 	operationCgo       *coroWorkerCgoCallShape
 	operationCgoErrno  *coroWorkerCgoErrnoCallShape
+	operationHost      coroHostOperationCallShape
 	outcome            coroPhysicalOutcomeRecipe
 	outcomeFailure     string
 	elideValue         bool
@@ -970,6 +975,20 @@ func planCoroPhysicalOperationInstruction(
 			frozen, found, err := audit.universe.coroProgramIR.callSitePlan(instruction)
 			if err != nil {
 				result.operationFailure = "load worker operation SitePlan: " + err.Error()
+				return
+			}
+			if found && frozen.plan.Intrinsic && frozen.opcode == llgoCoroHostOperation &&
+				frozen.plan.IntrinsicSemantics == CoroIntrinsicCallInlineSuspend {
+				if !capabilities.hostOperation {
+					result.operationFailure = "host operation requires the host-pull operation capability"
+					return
+				}
+				if !frozen.hostOperation.valid() {
+					result.operationFailure = "host operation has no frozen ProgramIR call shape"
+					return
+				}
+				result.operation = coroPhysicalOperationHostCall
+				result.operationHost = frozen.hostOperation
 				return
 			}
 			if found && frozen.plan.Elision == CoroCallElidedCgoWorker {

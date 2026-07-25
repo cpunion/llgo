@@ -1,4 +1,4 @@
-//go:build wasm && !baremetal
+//go:build (wasm || tinygo.wasm) && !baremetal && !wasip2 && !wasm_unknown
 
 package runtime
 

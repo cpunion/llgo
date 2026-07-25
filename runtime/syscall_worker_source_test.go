@@ -28,7 +28,7 @@ import (
 	"testing"
 )
 
-func TestLinuxDynamicSyscallHasNoBlanketWorkerAuthority(t *testing.T) {
+func TestLinuxSyscallWorkerAuthorityRequiresExactTrapPolicy(t *testing.T) {
 	goPath := "internal/lib/syscall/syscall_linux_coro.go"
 	goSource, err := os.ReadFile(goPath)
 	if err != nil {
@@ -47,10 +47,11 @@ func TestLinuxDynamicSyscallHasNoBlanketWorkerAuthority(t *testing.T) {
 		"func RawSyscall(",
 		"func RawSyscall6(",
 		"if r1 == ^uintptr(0)",
-		"implementation adapters, not",
-		"worker capabilities",
-		"exact target-specific",
-		"constant-trap capability",
+		"fixed C leaves supply the typed word-call half",
+		"exact constant accepted by the target-owned Linux trap policy",
+		"active managed incoming edge",
+		"abi=word-call.v1/4",
+		"abi=word-call.v1/7",
 		"Dynamic, fork, exec, exit, and other",
 		"process-control trap numbers have no worker certificate",
 	} {
@@ -60,7 +61,6 @@ func TestLinuxDynamicSyscallHasNoBlanketWorkerAuthority(t *testing.T) {
 	}
 	for _, forbidden := range []string{
 		"//llgo:coro workeraddr",
-		"//llgo:coro contract",
 		"becomes a worker park",
 		"uses the same worker handoff",
 		"internal/runtime/syscall/linux",
@@ -84,8 +84,10 @@ func TestLinuxDynamicSyscallHasNoBlanketWorkerAuthority(t *testing.T) {
 		"return result == -1L ? UINTPTR_MAX",
 		"records the positive errno in the current",
 		"invocation thread's TLS",
-		"These adapters carry no",
-		"worker authority",
+		"carry no",
+		"standalone worker authority",
+		"ProgramIR independently proves an exact",
+		"target-safe constant trap",
 	} {
 		if !strings.Contains(string(cSource), required) {
 			t.Errorf("%s lacks plain syscall adapter marker %q", cPath, required)
@@ -99,13 +101,42 @@ func TestLinuxDynamicSyscallHasNoBlanketWorkerAuthority(t *testing.T) {
 }
 
 func TestRuntimeWriteCarriesExactWorkerSafetyContract(t *testing.T) {
-	path := "internal/lib/runtime/runtime.go"
-	source, err := os.ReadFile(path)
+	commonPath := "internal/lib/runtime/runtime.go"
+	commonSource, err := os.ReadFile(commonPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(source), "//llgo:coro worker\n//go:linkname c_write C.write") {
-		t.Fatalf("%s does not bind c_write to the exact worker-safe declaration certificate", path)
+	if !strings.Contains(string(commonSource), "return runtimeWrite(fd, p, n)") ||
+		strings.Contains(string(commonSource), "C.write") {
+		t.Fatalf("%s does not keep runtime.write behind its target-specific leaf", commonPath)
+	}
+
+	libcPath := "internal/lib/runtime/runtime_write_libc_llgo.go"
+	libcSource, err := os.ReadFile(libcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(libcSource), "//llgo:coro worker\n//go:linkname c_write C.write") {
+		t.Fatalf("%s does not bind c_write to the exact worker-safe declaration certificate", libcPath)
+	}
+
+	freestandingPath := "internal/lib/runtime/runtime_write_freestanding_webassembly_llgo.go"
+	freestandingSource, err := os.ReadFile(freestandingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{
+		"//go:build wasip2 || wasm_unknown",
+		"func runtimeWrite(fd uintptr, p unsafe.Pointer, n int32) int32",
+		"return n",
+	} {
+		if !strings.Contains(string(freestandingSource), marker) {
+			t.Fatalf("%s lacks freestanding runtime.write marker %q", freestandingPath, marker)
+		}
+	}
+	if strings.Contains(string(freestandingSource), "C.write") ||
+		strings.Contains(string(freestandingSource), "//llgo:coro worker") {
+		t.Fatalf("%s retains a libc worker dependency", freestandingPath)
 	}
 
 	osPath := "internal/clite/os/os.go"
