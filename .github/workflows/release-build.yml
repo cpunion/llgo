@@ -2,10 +2,7 @@ name: Release Build
 
 on:
   push:
-    branches:
-      - "**"
-      - "!dependabot/**"
-      - "!xgopilot/**"
+    branches: [main]
     tags: ["*"]
   pull_request:
     branches: [main]
