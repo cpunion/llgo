@@ -4,8 +4,8 @@
 
 更新：2026-07-26
 
-集成基线：`97b73b16d`（`cpunion/llgo:llvm-coro`）；Phase R、P-neutral
-materialization与全局按需work sharing已合并
+集成基线：`8a957a2df`（`cpunion/llgo:llvm-coro`）；Phase R、P-neutral
+materialization、全局按需work sharing与固定native fleet已合并
 
 关联总体设计：[`llvm-coro-runtime-design.md`](./llvm-coro-runtime-design.md)
 
@@ -67,7 +67,7 @@ ProgramModelBuilder fixed point
 - 只增加 post-plan overlay 能解决 physical CFG 拼装，但不能消除 hidden helper 和 effect 事实的重复提取，收益只有一半。
 - 重写 runtime 或 `internal/coro` 固定点不会解决上述问题，风险反而更大。
 - 新设计可以成为后续 defer/panic/recover、dynamic coroutine descriptor、syscall/IO、精确 GC metadata 和多平台 adapter 的公共编译器底座；但它本身不会自动补齐这些尚未实现的能力。
-- 当前代码已从native single-P vertical slice推进到Linux/Darwin启动期1–8 owner fleet：command M驱动route 1，其余route由独立pthread M驱动；启动策略读取正整数`GOMAXPROCS`或online CPU并截断到8，活动前缀随后冻结，C边界只传`uint32 route`。1/4/8 route core生命周期、单P channel progress及8 P真实peer start/distribute/stop/join已通过。Command root又以不增加G大小的一字节mobility保持program-P边界，4 P peer→program反向spawn/main-return E2E通过。此前双owner配置上的loopback TCP已fresh compile-link-run并完成10,000次压力；普通Go 1.26标准库源码风格的`time.Sleep`、冻结timer语义、固定syscall文件回环、高层`os.File`回环和loopback TCP也在同一fleet acceptance中通过。2026-07-25扩展后的网络门又在native、`wasm-unknown`和`wasip2`运行通过动态read/write/accept deadline、Close取消、Dial timeout/context cancel、UDP RecvFrom/SendTo和RecvMsg/SendMsg，以及pure-Go hosts/DNS解析。新增网络verb没有修改compiler effect、executor或source状态机。这不能结论为“完整Go标准库和所有平台已经基本都可落地”：运行期`runtime.GOMAXPROCS` resize、panic/unwind全矩阵、timer GC/synctest、tooling、cgo reentry、precise GC、完整affinity、外部DNS/cgo resolver、Unix/raw socket和其他平台内建driver仍需实现或生产验证，见第9、11节及《统一异步核心契约》第9.1节。
+- 当前代码已从native single-P vertical slice推进到Linux/Darwin固定8-route owner fleet：command M驱动route 1，其余7个route由独立pthread M驱动；C边界只传`uint32 route`。环境/online CPU初始化逻辑execution quota，标准`runtime.GOMAXPROCS`可在运行期调整managed resume并行上限而不重建route/source identity。1/4/8 route core生命周期、固定topology下单配额channel progress、8 P真实peer start/distribute/stop/join及1→4→1并发上限变化已通过。Command root又以不增加G大小的一字节mobility保持program-P边界，peer→program反向spawn/main-return E2E通过。此前双owner配置上的loopback TCP已fresh compile-link-run并完成10,000次压力；普通Go 1.26标准库源码风格的`time.Sleep`、冻结timer语义、固定syscall文件回环、高层`os.File`回环和loopback TCP也在同一fleet acceptance中通过。2026-07-25扩展后的网络门又在native、`wasm-unknown`和`wasip2`运行通过动态read/write/accept deadline、Close取消、Dial timeout/context cancel、UDP RecvFrom/SendTo和RecvMsg/SendMsg，以及pure-Go hosts/DNS解析。新增网络verb没有修改compiler effect、executor或source状态机。这不能结论为“完整Go标准库和所有平台已经基本都可落地”：blocking compensation、panic/unwind全矩阵、timer GC/synctest、tooling、cgo reentry、precise GC、完整affinity、自动cgroup/affinity默认值刷新、外部DNS/cgo resolver、Unix/raw socket和其他平台内建driver仍需实现或生产验证，见第9、11节及《统一异步核心契约》第9.1节。
 - 2026-07-24的hard-cutover验收已让完整`./test/go`包通过frontend、SSA/effect规划、physical lowering、LLVM生成和最终链接；随后实际运行的代表用例覆盖channel/select高频握手与关闭/range、rangefunc defer/panic、Go 1.26 reflect私有method linkname，以及零尺寸/大对象fault。当前native原型又完成了`reflect.Value.Call/CallSlice`、`MakeFunc`、具体/接口/绑定方法值和`Type.Method.Func`的descriptor/libffi桥，并以真实`time.Sleep`验证libffi栈退出后的child await；可变参数、函数值参数、多/聚合/零尺寸及高对齐零尺寸结果、无返回和panic/recover均已运行通过。`internal/build.TestTest`也在修正raw/plain `DebugRef`误判后通过。这个结果证明现有编译器能够承载较宽的标准库编译和一组关键运行语义，但仍不是`test/*`或GOROOT全量通过：WASM/baremetal等无native libffi closure能力的target仍需AOT signature trampoline，runtime未知签名、reflect.Select及完整reflect/GOROOT矩阵尚未验收；全量`cl`和`ssa`旧测试驱动还会因逐目录fresh整程序分析超过Go测试默认10分钟，需要单独做性能治理和分片验收。
 
 ## 2. 目标与非目标
@@ -654,7 +654,7 @@ type OperationRecipe struct {
 - open-world archive下的完整动态 function descriptor、interface 与跨平台 reflect；
 - 精确 GC frame metadata；
 - syscall/netpoll/worker已在native双owner TCP链闭环，仍需更广`os`/`net`/syscall、容量/取消/GC合同和高连接数backend；
-- 零/单Timer、Manual、Poll、Worker以及Channel/select、HostOp deadline、keyed/private-registry parked-result已能物化到pointer-free frame-local packet并跨P resume；无指针demand + exact mailbox也已支持启动期1–8 P的通用P-neutral注入/工作共享，仍需运行期P resize、批量/local-deque steal和完整affinity；
+- 零/单Timer、Manual、Poll、Worker以及Channel/select、HostOp deadline、keyed/private-registry parked-result已能物化到pointer-free frame-local packet并跨P resume；无指针demand + exact mailbox也已支持固定8-route topology的通用P-neutral注入/工作共享，动态逻辑execution quota和标准`runtime.GOMAXPROCS`已接入，仍需批量/local-deque steal、blocking compensation和完整affinity；
 - WASM/WASI/RTOS/baremetal production host adapter。
 
 ### 9.1 syscall 自动染色
@@ -822,14 +822,14 @@ LLVM CoroSplit继续负责普通 SSA liveness和frame materialization。精确 G
 
 | 平台 | 核心模型判断 | 当前实现现实 |
 | --- | --- | --- |
-| Native Linux/Darwin | layout/ownership无已知冲突 | opt-in fleet已接入程序target：启动期按环境/CPU选择1–8个真实M/P，每route有独立doorbell/POSIX `poll`/timer shard，Timer/Poll/Worker/Channel exact route、共享bounded worker及start/stop/all-peer-join已闭环；TCP标准库探针fresh E2E与10,000次压力通过。已验证P-neutral initial/yield/materialized-park的demand injection与跨P执行；仍缺运行期P resize、批量/local-deque steal、完整affinity、GC/cleanup与GOROOT矩阵 |
+| Native Linux/Darwin | layout/ownership无已知冲突 | opt-in fleet已接入程序target：固定8个真实M/P route，每route有独立doorbell/POSIX `poll`/timer shard；环境/CPU初始化逻辑execution quota，标准`runtime.GOMAXPROCS`可动态调整managed resume并行上限。Timer/Poll/Worker/Channel exact route、共享bounded worker及start/stop/all-peer-join已闭环；TCP标准库探针fresh E2E与10,000次压力、quota race和真实1→4→1并发验证通过。已验证P-neutral initial/yield/materialized-park的demand injection与跨P执行；仍缺批量/local-deque steal、blocking compensation、完整affinity、GC/cleanup与GOROOT矩阵 |
 | 其他native OS | 尚未审查 | Windows/BSD/mobile production adapter、thread/IO/ABI均未验证 |
 | JS/WASM | layout/ownership无已知冲突，可映射为1P host `RunSlice` | 32-bit layout、pre/post-CoroSplit/object和test adapter有覆盖；production queued run/timer/Promise/IO adapter未实现，仍走fail-closed fallback |
 | WASI | operation模型可映射，未验证 | pollable/poll_oneoff、filesystem/socket/clock production adapter未完成 |
 | RTOS/embedded | 静态执行模型可映射，未验证 | HAL clock/notification/ISR ingress、boundary driver和容量证明都未实现 |
 | baremetal | event-loop模型可映射，未验证 | main loop、IRQ mailbox、WFI/WFE、static/tinygc frame和production adapter都未实现 |
 
-架构不要求每G native stack、libuv、BDWGC或pthread，但这只是兼容候选，不是平台完成度。当前production target adapter中，llgo native Linux/Darwin已有opt-in有界fleet：route 1原位收养program executor，启动时再创建0–7个固定pthread M；所有domain共用唯一物理run-step reducer，各自通过exact idle gate和route-local poll set等待doorbell/fd/deadline。Program target负责全部peer与共享worker pool的start/stop/join及route/backend/driver强关闭。Worker保持单物理池并用每job的`OperationID.Route`支持fleet completion，不做函数地址反查；pthread入口只携带scalar route，C11 ring支持多个owner并发reservation。P-neutral result物化和demand injection/work sharing已经接通；仍未提供运行期`runtime.GOMAXPROCS`调整、批量/local-deque steal、完整affinity或blocking compensation。缺少filesystem、process、socket或host async能力的平台仍按target capability决定可用package。LLVM支持范围只是19–22，不考虑19以下版本。
+架构不要求每G native stack、libuv、BDWGC或pthread，但这只是兼容候选，不是平台完成度。当前production target adapter中，llgo native Linux/Darwin已有opt-in有界fleet：route 1原位收养program executor，启动时创建固定7个pthread M；所有domain共用唯一物理run-step reducer，各自通过exact idle gate和route-local poll set等待doorbell/fd/deadline。Program target负责全部peer与共享worker pool的start/stop/join及route/backend/driver强关闭。Worker保持单物理池并用每job的`OperationID.Route`支持fleet completion，不做函数地址反查；pthread入口只携带scalar route，C11 ring支持多个owner并发reservation。P-neutral result物化、demand injection/work sharing和运行期逻辑`runtime.GOMAXPROCS`已经接通；仍未提供批量/local-deque steal、完整affinity或blocking compensation。缺少filesystem、process、socket或host async能力的平台仍按target capability决定可用package。LLVM支持范围只是19–22，不考虑19以下版本。
 
 ## 12. Cache、archive 与 summary
 
@@ -1454,8 +1454,9 @@ channel/select physical operation choice、panic/outcome/cleanup choice及remain
 5. runtime Phase R已经完成：fleet唯一target、Park/Operation唯一logical wait、统一source dispatcher和
    mandatory stackless架构均以旧production符号/配置入口为零，并由hard-cutover gate持续约束。
 6. 本轮合并门运行runtime race、LLVM 19–22、native/wasm32结构验证和六项fresh stdlib E2E。后续compiler
-   whole-function emitter仍按完整replacement cohort推进；single-source P-neutral result和Channel/select typed multi-source materialization已独立落地，HostOp/keyed composite result、运行期P resize、GC、panic/Goexit和更多平台adapter
-   属于功能阶段，不能借机恢复旧runtime轨道。
+   whole-function emitter仍按完整replacement cohort推进；single-source、Channel/select、HostOp/keyed
+   P-neutral materialization以及动态逻辑execution quota已独立落地，blocking compensation、GC、
+   panic/Goexit和更多平台adapter属于功能阶段，不能借机恢复旧runtime轨道。
 
 迁移过程可以用独立test invocation比较旧/新输出，但production永远只有一个被选择的consumer；临时双轨
 不得跨cohort保留，也不得以feature flag形式进入下一阶段。最终目标不是“文档中有新架构”，而是旧架构

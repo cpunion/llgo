@@ -91,6 +91,8 @@ func coroStdlibSyncFixtures() []coroStdlibSyncFixture {
 			dir:  "./_testgo/coro_stdlib_sync_primitives",
 			wantSource: []string{
 				"sync.NewCond(", "sync.WaitGroup", "mutex.Lock()",
+				"runtime.GOMAXPROCS(1)", "runtime.GOMAXPROCS(0)",
+				"runtime.SetDefaultGOMAXPROCS()",
 				"go publish()", "cond.Wait()", "cond.Signal()", "group.Wait()",
 			},
 			wantSchedulerABI: coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
@@ -247,6 +249,7 @@ func assertCoroStdlibSyncRuntimeSelection(t *testing.T, fixture coroStdlibSyncFi
 	t.Helper()
 	const runtimePackage = "github.com/goplus/llgo/runtime/internal/runtime"
 	required := map[string]bool{
+		"coro_execution_quota_native_llgo.go":   false,
 		"coro_executor_driver_timer_llgo.go":    false,
 		"coro_native_fleet.go":                  false,
 		"coro_native_fleet_owner_llgo.go":       false,
@@ -267,6 +270,8 @@ func assertCoroStdlibSyncRuntimeSelection(t *testing.T, fixture coroStdlibSyncFi
 		"coro_worker_owner_llgo.go":             false,
 	}
 	forbidden := map[string]bool{
+		"coro_execution_quota_default.go":        false,
+		"coro_gomaxprocs_single_llgo.go":         false,
 		"coro_executor_driver_legacy.go":         false,
 		"coro_poll_route_default_llgo.go":        false,
 		"coro_ready_distribution_default.go":     false,
@@ -324,6 +329,7 @@ func assertCoroStdlibSyncRuntimeSelection(t *testing.T, fixture coroStdlibSyncFi
 		t.Fatalf("%s acceptance runtime has no selected llgo runtime patch package", fixture.name)
 	}
 	altRequired := map[string]bool{
+		"gomaxprocs_coro_llgo.go":    false,
 		"notify_coro_llgo.go":        false,
 		"poll_linkname_coro_llgo.go": false,
 		"sema_coro_llgo.go":          false,
@@ -331,6 +337,7 @@ func assertCoroStdlibSyncRuntimeSelection(t *testing.T, fixture coroStdlibSyncFi
 		"time_coro_go123_llgo.go":    false,
 	}
 	altForbidden := map[string]bool{
+		"gomaxprocs_legacy.go":  false,
 		"notify_legacy_llgo.go": false,
 		"poll_linkname_llgo.go": false,
 		"sema_legacy_llgo.go":   false,

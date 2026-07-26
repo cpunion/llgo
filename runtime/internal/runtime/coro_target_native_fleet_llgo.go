@@ -85,7 +85,7 @@ func coroTargetConsumeExecutorRunV2(handle coro.ExecutorHandle, epoch uint32) bo
 	return true
 }
 
-// CoroNativePollServerDescriptorV1 recognizes every selected route doorbell.
+// CoroNativePollServerDescriptorV1 recognizes every configured route doorbell.
 // It exposes descriptor ownership only; no fd is a scheduler/P identity.
 func CoroNativePollServerDescriptorV1(fd uintptr) bool {
 	for index := uint32(0); index < coroNativeFleetV1State.domainCount; index++ {
@@ -98,10 +98,17 @@ func CoroNativePollServerDescriptorV1(fd uintptr) bool {
 
 func coroTargetExecutorStartV1(handle coro.ExecutorHandle) bool {
 	state := &coroNativeFleetTargetV1State
-	count, countOK := coroNativeFleetPhysicalOwnerCountV1()
+	limit, limitOK := coroNativeInitialExecutionLimitV1()
 	if state.lifecycle != coroNativeFleetTargetUnusedV1 || state.program != (coro.ExecutorFleetHandle{}) ||
 		handle != coroProgramExecutorHandleV1State || handle.Slot == 0 || handle.Generation == 0 ||
-		!countOK || !coroNativeWorkerPoolCanReleaseV1() || !coroNativeFleetStartProgramV1(count) {
+		!limitOK || !coroNativeWorkerPoolCanReleaseV1() ||
+		!coroNativeFleetV1State.execution.CanRelease() ||
+		!coroNativeFleetStartProgramV1(coroNativeFleetDomainCapacityV1) {
+		return false
+	}
+	if !coroNativeFleetV1State.execution.Start(limit) {
+		state.lifecycle = coroNativeFleetTargetFailedV1
+		coroRuntimeAbort("native coroutine execution quota start failed")
 		return false
 	}
 	program, programOK := coroNativeFleetHandleV1(0)
@@ -248,7 +255,13 @@ func coroTargetBeginExecutorCloseV1(handle coro.ExecutorHandle, epoch uint32) co
 	state := &coroNativeFleetTargetV1State
 	if state.lifecycle != coroNativeFleetTargetActiveV1 || state.program.Executor != handle ||
 		epoch == 0 || state.waitEpoch != 0 || state.runEpoch != 0 ||
-		!coroNativeFleetPhysicalOwnersStopV1() || !coroNativeWorkerPoolStopFleetV1() {
+		!coroNativeFleetPhysicalOwnersStopV1() {
+		return coroTargetDispatchInvalidV1
+	}
+	if _, sealed := coroNativeFleetV1State.execution.Seal(); !sealed ||
+		!coroNativeFleetV1State.execution.Quiesced() ||
+		!coroNativeFleetV1State.execution.Retire() ||
+		!coroNativeWorkerPoolStopFleetV1() {
 		return coroTargetDispatchInvalidV1
 	}
 	state.lifecycle = coroNativeFleetTargetClosingV1
@@ -303,7 +316,8 @@ func coroTargetExecutorRetiredV1(handle coro.ExecutorHandle) bool {
 	state := &coroNativeFleetTargetV1State
 	if state.lifecycle != coroNativeFleetTargetClosingV1 || state.program.Executor != handle ||
 		!coroNativeFleetConfirmExternalDriverCloseV1(state.program) ||
-		!coroNativeFleetAllRetiredV1() {
+		!coroNativeFleetAllRetiredV1() ||
+		!coroNativeFleetV1State.execution.CanRelease() {
 		state.lifecycle = coroNativeFleetTargetFailedV1
 		return false
 	}

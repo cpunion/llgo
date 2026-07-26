@@ -25,8 +25,9 @@ import (
 
 const (
 	// coroNativeFleetDomainCapacityV1 is the allocation-free lifetime bound of
-	// the native target. Startup selects an active prefix in [1, capacity];
-	// route identities remain monotonic tombstones and are never reused.
+	// the native target. Production starts the complete topology; deterministic
+	// host tests may configure a smaller prefix. Route identities remain
+	// monotonic tombstones and are never reused.
 	coroNativeFleetDomainCapacityV1 = coro.ExecutorFleetCapacity
 
 	// Every owned native P needs the same production catalog capacity as the
@@ -196,6 +197,7 @@ func coroNativeFleetReleaseAdoptedOwnersV1(domain *coroNativeFleetDomainV1) bool
 // object is never reset or reused after shutdown.
 type coroNativeFleetStateV1 struct {
 	fleet       coro.ExecutorFleet
+	execution   coro.ExecutionQuota
 	domains     [coroNativeFleetDomainCapacityV1]coroNativeFleetDomainV1
 	domainCount uint32
 	lifecycle   coroNativeFleetLifecycleV1
@@ -273,7 +275,7 @@ func coroNativeFleetRollbackBoundDomainV1(
 // coroNativeFleetAbortActiveDomainV1 is startup rollback, not ordinary
 // reusable shutdown. The fleet lifecycle stays Failed and every consumed route
 // remains a permanent tombstone. Although handles are not published until the
-// complete active-prefix start succeeds, the exported POD shim can be called
+// complete configured fleet start succeeds, the exported POD shim can be called
 // with guessed words, so rollback still performs the full target-ingress join.
 func coroNativeFleetAbortActiveDomainV1(
 	state *coroNativeFleetStateV1,
@@ -387,7 +389,7 @@ func coroNativeFleetStartDomainsV1(
 		count == 0 || count > coroNativeFleetDomainCapacityV1 || !state.fleet.AllRetired() {
 		return false
 	}
-	// The selected prefix is immutable even on startup failure. Consumed route
+	// The configured prefix is immutable even on startup failure. Consumed route
 	// identities and guessed callback words must keep observing one permanent
 	// fail-stop policy rather than a recyclable zero state.
 	state.domainCount = count
@@ -415,14 +417,15 @@ func coroNativeFleetStartDomainsV1(
 }
 
 // coroNativeFleetStartStateV1 consumes an exact-zero fleet. Monotonic route
-// allocation freezes domain[i] as Route i+1 for the selected active prefix.
-// No other adapter may pre-bind this private fleet.
+// allocation freezes domain[i] as Route i+1 for the requested deterministic
+// topology. No other adapter may pre-bind this private fleet.
 func coroNativeFleetStartStateV1(state *coroNativeFleetStateV1, count uint32) bool {
 	return coroNativeFleetStartDomainsV1(state, nil, count)
 }
 
 // coroNativeFleetStartV1 retains a deterministic two-domain host-test entry.
-// Production selects its active prefix through coroNativeFleetStartProgramV1.
+// Production starts the complete bounded topology through
+// coroNativeFleetStartProgramV1.
 func coroNativeFleetStartV1() bool {
 	return coroNativeFleetStartStateV1(&coroNativeFleetV1State, 2)
 }

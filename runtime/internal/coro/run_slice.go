@@ -227,6 +227,34 @@ func NextExecutorRunStepAt(driver *ExecutorDriver, now int64) (ExecutorRunStep, 
 	return nextExecutorRunStepAt(driver, now, true)
 }
 
+// ExecutorRunManagedResumePending reports whether the next bounded runner
+// reduction will enter a managed llvm.coro.resume. It is deliberately
+// observational and must be called before NextExecutorRunStep marks the
+// physical Action interval issued. A target can therefore acquire its
+// process-level execution permit without returning across an issued action or
+// teaching the target-neutral driver about threads and GOMAXPROCS.
+func ExecutorRunManagedResumePending(driver *ExecutorDriver) (pending, ok bool) {
+	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
+		driver.run.issued != ActionInvalid {
+		return false, false
+	}
+	p := driver.p
+	if p.current == nil {
+		return false, true
+	}
+	action := p.action
+	switch action.Kind {
+	case ActionCheckResume:
+		return action.Handle != nil, action.Handle != nil
+	case ActionCheckDestroy, ActionPanicDestroy:
+		return false, action.Handle != nil
+	case ActionCommitDestroy:
+		return false, action.Handle == nil
+	default:
+		return false, false
+	}
+}
+
 func completedExecutorRunAction(p *P, g *G, action Action) bool {
 	if p == nil || g == nil || action.Handle != nil || p.current != nil || p.inResume ||
 		p.action != (Action{}) || p.runDecision != (RunDecision{}) || p.runDecisionTaken ||

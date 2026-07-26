@@ -27,7 +27,7 @@ import (
 	"testing"
 )
 
-func TestCoroNativeFleetOwnerCountPolicy(t *testing.T) {
+func TestCoroNativeInitialExecutionLimitPolicy(t *testing.T) {
 	clang, err := exec.LookPath("clang")
 	if err != nil {
 		t.Skip("clang is unavailable")
@@ -72,7 +72,7 @@ int main(int argc, char **argv) {
 		"-o",
 		executable,
 	).CombinedOutput(); err != nil {
-		t.Fatalf("compile native fleet owner-count policy: %v\n%s", err, output)
+		t.Fatalf("compile native initial execution-limit policy: %v\n%s", err, output)
 	}
 
 	run := func(maximum string, gomaxprocs *string) uint64 {
@@ -89,11 +89,11 @@ int main(int argc, char **argv) {
 		}
 		output, err := command.CombinedOutput()
 		if err != nil {
-			t.Fatalf("run native fleet owner-count policy: %v\n%s", err, output)
+			t.Fatalf("run native initial execution-limit policy: %v\n%s", err, output)
 		}
 		value, err := strconv.ParseUint(strings.TrimSpace(string(output)), 10, 32)
 		if err != nil {
-			t.Fatalf("parse native fleet owner count %q: %v", output, err)
+			t.Fatalf("parse native initial execution limit %q: %v", output, err)
 		}
 		return value
 	}
@@ -102,7 +102,7 @@ int main(int argc, char **argv) {
 		return &text
 	}
 	if got := run("0", value("4")); got != 0 {
-		t.Fatalf("zero capacity selected %d owners", got)
+		t.Fatalf("zero maximum selected execution limit %d", got)
 	}
 	for _, test := range []struct {
 		name       string
@@ -117,19 +117,19 @@ int main(int argc, char **argv) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := run(test.maximum, test.gomaxprocs); got != test.want {
-				t.Fatalf("owner count = %d, want %d", got, test.want)
+				t.Fatalf("initial execution limit = %d, want %d", got, test.want)
 			}
 		})
 	}
 
 	fallback := run("4294967295", nil)
 	if fallback == 0 {
-		t.Fatal("online CPU fallback selected zero owners")
+		t.Fatal("online CPU fallback selected zero execution limit")
 	}
 	for _, invalid := range []string{"", "0", "+4", "429496729600000000000x"} {
 		t.Run("fallback-"+invalid, func(t *testing.T) {
 			if got := run("4294967295", value(invalid)); got != fallback {
-				t.Fatalf("invalid GOMAXPROCS %q selected %d owners, want fallback %d", invalid, got, fallback)
+				t.Fatalf("invalid GOMAXPROCS %q selected limit %d, want fallback %d", invalid, got, fallback)
 			}
 		})
 	}

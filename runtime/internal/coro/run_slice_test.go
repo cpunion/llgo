@@ -172,6 +172,49 @@ func TestExecutorRunBudgetOneStableProgressAndFIFO(t *testing.T) {
 	runtime.KeepAlive(b.frame.memory)
 }
 
+func TestExecutorRunManagedResumePendingIsObservational(t *testing.T) {
+	p := new(P)
+	driver, _, _ := bindTestExecutorDriver(t, p)
+	task := newYieldingTestG(t, "managed-resume-pending")
+
+	if pending, ok := ExecutorRunManagedResumePending(driver); !ok || pending {
+		t.Fatalf("empty managed-resume observation = (%t, %t)", pending, ok)
+	}
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue managed-resume task")
+	}
+	if pending, ok := ExecutorRunManagedResumePending(driver); !ok || pending {
+		t.Fatalf("queued managed-resume observation = (%t, %t)", pending, ok)
+	}
+
+	step, ok := NextExecutorRunStep(driver)
+	if !ok || step.Kind != ExecutorRunStepDispatch || step.G != task.g ||
+		p.current != task.g || p.action.Kind != ActionCheckResume ||
+		driver.run.issued != ActionInvalid {
+		t.Fatalf("managed-resume dispatch = (%+v, %t), action=%+v cursor=%+v", step, ok, p.action, driver.run)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if pending, observed := ExecutorRunManagedResumePending(driver); !observed || !pending {
+			t.Fatalf("managed-resume observation %d = (%t, %t)", attempt, pending, observed)
+		}
+		if p.current != task.g || p.action.Kind != ActionCheckResume ||
+			driver.run.issued != ActionInvalid {
+			t.Fatalf("managed-resume observation %d mutated action state", attempt)
+		}
+	}
+
+	step, ok = NextExecutorRunStep(driver)
+	if !ok || step.Kind != ExecutorRunStepAction || step.G != task.g ||
+		step.Action.Kind != ActionCheckResume || driver.run.issued != ActionCheckResume {
+		t.Fatalf("managed-resume action = (%+v, %t), cursor=%+v", step, ok, driver.run)
+	}
+	if pending, observed := ExecutorRunManagedResumePending(driver); observed || pending {
+		t.Fatalf("issued managed-resume observation = (%t, %t)", pending, observed)
+	}
+	runnerYieldAction(t, driver, step, task)
+	runtime.KeepAlive(task.frame.memory)
+}
+
 func TestExecutorRunCommandBootstrapDirectChildHandoffPrecedesTwoPeers(t *testing.T) {
 	p := new(P)
 	driver, _, _ := bindTestExecutorDriver(t, p)

@@ -8,7 +8,10 @@
 
 package main
 
-import "sync"
+import (
+	"runtime"
+	"sync"
+)
 
 var (
 	mutex sync.Mutex
@@ -26,6 +29,18 @@ func publish() {
 }
 
 func main() {
+	previous := runtime.GOMAXPROCS(1)
+	if previous < 1 || runtime.GOMAXPROCS(0) != 1 {
+		panic("runtime.GOMAXPROCS shrink/query failed")
+	}
+	if runtime.GOMAXPROCS(previous) != 1 || runtime.GOMAXPROCS(0) != previous {
+		panic("runtime.GOMAXPROCS restore/query failed")
+	}
+	runtime.SetDefaultGOMAXPROCS()
+	if runtime.GOMAXPROCS(0) < 1 {
+		panic("runtime.SetDefaultGOMAXPROCS produced an invalid limit")
+	}
+
 	group.Add(1)
 	mutex.Lock()
 	go publish()
