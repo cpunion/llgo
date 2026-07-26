@@ -964,6 +964,33 @@ func TestCoroNativeFleetRuntimeGOMAXPROCSQuotaE2E(t *testing.T) {
 	runCoroNativeFleetE2E(t, coroNativeFleetGOMAXPROCSE2ESource, "runtime-gomaxprocs-quota", true, 1)
 }
 
+func TestCoroNativeFleetLockedForeignReleasesQuotaBeforeReplacementStarts(t *testing.T) {
+	path := filepath.Join(
+		"..", "..", "runtime", "internal", "runtime",
+		"coro_os_thread_foreign_llgo.go",
+	)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal("read locked-thread foreign owner:", err)
+	}
+	source := string(raw)
+	release := strings.Index(
+		source,
+		"if !coroTargetReleaseManagedExecutionV1(driver)",
+	)
+	create := strings.Index(
+		source,
+		"if corofleet.CreateOwner(&child.thread, childSlot)",
+	)
+	if release < 0 || create < 0 || release >= create {
+		t.Fatalf(
+			"locked-thread foreign owner must release its route quota before the replacement pthread can start: release=%d create=%d",
+			release,
+			create,
+		)
+	}
+}
+
 func TestCoroNativeFleetLockedForeignCompensationE2E(t *testing.T) {
 	runCoroNativeFleetE2E(t, coroNativeFleetLockedForeignCompensationE2ESource, "locked-foreign-compensation", true, 1)
 }

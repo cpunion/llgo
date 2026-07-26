@@ -206,6 +206,71 @@ func TestExecutorResumeHandoffRunsReplacementAndRestoresExactResume(t *testing.T
 	runtime.KeepAlive(peer.frame.memory)
 }
 
+func TestExecutorResumeHandoffSettlesIssuedReadyDebt(t *testing.T) {
+	p := new(P)
+	driver, _, _ := bindTestExecutorDriver(t, p)
+	task := newYieldingTestG(t, "foreign-ready-debt-owner")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue ready-debt handoff task")
+	}
+	driver.run.readyDebt = true
+	driver.run.blocked = true
+	driver.run.actionsSinceSource = 7
+	step := runnerNextPhysicalAction(t, driver, task, ActionCheckResume)
+	resume, ok := Checked(p, task.g, step.Action, false)
+	if !ok || resume.Kind != ActionResume {
+		t.Fatal("check ready-debt handoff resume")
+	}
+	takeNormalRunnerDecision(t, task.g)
+	task.frame.header.SuspendReason = uint16(SuspendNone)
+	task.frame.header.Lifecycle = uint16(FrameActive)
+	if !EnterOSThreadLock(task.g) {
+		t.Fatal("lock ready-debt handoff task")
+	}
+	var handoff ExecutorResumeHandoff
+	if !DetachExecutorResume(&handoff, driver, task.g) {
+		t.Fatal("detach ready-debt handoff task")
+	}
+	route, routeOK := driver.Route()
+	if driver.run.readyDebt || driver.run.blocked ||
+		driver.run.actionsSinceSource != 7 ||
+		!routeOK || route != RouteID(1) ||
+		!ExecutorResumeHandoffReturnable(driver) {
+		t.Fatalf(
+			"detached ready debt = (ready:%t blocked:%t actions:%d route:%d routeOK:%t returnable:%t)",
+			driver.run.readyDebt,
+			driver.run.blocked,
+			driver.run.actionsSinceSource,
+			route,
+			routeOK,
+			ExecutorResumeHandoffReturnable(driver),
+		)
+	}
+	if !RestoreExecutorResume(&handoff) {
+		t.Fatal("restore ready-debt handoff task")
+	}
+	if !ExitOSThreadLock(task.g) {
+		t.Fatal("unlock restored ready-debt handoff task")
+	}
+	task.frame.header.SuspendReason = uint16(SuspendYield)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+	if !PrepareYield(task.g, task.handle, task.frame.header) {
+		t.Fatal("prepare restored ready-debt task yield")
+	}
+	next, resumed := Resumed(p, task.g, resume)
+	if !resumed || next.Kind != ActionYield ||
+		!CommitExecutorRunAction(driver, task.g, next) {
+		t.Fatalf("commit restored ready-debt task yield = (%+v, %t)", next, resumed)
+	}
+	if driver.run.actionsSinceSource != 8 {
+		t.Fatalf(
+			"restored ready-debt action count = %d, want one deferred commit",
+			driver.run.actionsSinceSource,
+		)
+	}
+	runtime.KeepAlive(task.frame.memory)
+}
+
 func TestExecutorResumeHandoffCompletesLastVisibleReplacementChildWithoutClosingDomain(t *testing.T) {
 	p := new(P)
 	driver, _, _ := bindTestExecutorDriver(t, p)

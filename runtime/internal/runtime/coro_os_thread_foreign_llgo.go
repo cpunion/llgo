@@ -32,8 +32,12 @@ import (
 // boundary. The compiler selects it dynamically only while the current G owns
 // this P/M island through LockOSThread. All ordinary calls continue through
 // the shared any-thread worker pool. This owner detaches the active resume,
-// creates one scalar-slot replacement M, releases its managed-execution
-// permit, and strongly rejoins that replacement before restoring the resume.
+// reserves one scalar-slot replacement M, releases its managed-execution
+// permit before creating the replacement thread, and strongly rejoins that
+// replacement before restoring the resume. Releasing first is mandatory:
+// execution-quota ownership belongs to the route, so a replacement which
+// starts while its parent still holds that route is a fail-closed double
+// acquire rather than ordinary quota contention.
 //
 //export __llgo_coro_os_thread_foreign_call_v1
 func __llgo_coro_os_thread_foreign_call_v1(
@@ -78,19 +82,20 @@ func __llgo_coro_os_thread_foreign_call_v1(
 		}
 		coroRuntimeAbort("locked-thread foreign call exhausted M directory")
 	}
+	if !coroTargetReleaseManagedExecutionV1(driver) {
+		coroRuntimeAbort("locked-thread foreign call cannot release managed execution permit")
+	}
 	if corofleet.CreateOwner(&child.thread, childSlot) != 0 || child.thread == nil {
 		child.thread = nil
 		if parent.handoff.RequestReturn(baton) !=
 			coro.ExecutionDomainHandoffReturnUnclaimed ||
 			!parent.handoff.Complete(baton) ||
 			!coroNativeMReleaseUnstartedReplacementV1(childSlot) ||
+			!coroTargetReenterManagedExecutionV1(driver) ||
 			!coro.RestoreExecutorResume(&parent.resume) {
 			coroRuntimeAbort("locked-thread foreign call pthread rollback failed")
 		}
 		coroRuntimeAbort("locked-thread foreign call cannot create replacement M")
-	}
-	if !coroTargetReleaseManagedExecutionV1(driver) {
-		coroRuntimeAbort("locked-thread foreign call cannot release managed execution")
 	}
 	args := [coroworker.MaxArgs]uintptr{a0, a1, a2, a3, a4, a5, a6, a7, a8}
 	var result coroworker.Result

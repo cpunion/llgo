@@ -2840,10 +2840,11 @@ Native使用有界blocking worker pool：
 对于必须保留thread-local状态的调用，Caller仍先stack-cut；operation绑定目标M，由该M回到干净scheduler stack后执行typed thunk并释放P，而不是把活跃Go continuation留在C frame之下或搬到普通worker。
 
 当前实现已把`LockOSThread`选择的同M foreign边界接到完整同P补偿：
-active resume先detach到M-local record，generation/owner-epoch baton把route的active-M
-slot切到scalar-slot replacement；replacement释放原调用持有的managed permit后沿公共
-reducer服务同一ready/source域。原M执行C并保留物理thread identity，返回后request/ring、
-strong join replacement、重获permit，再精确restore。单配额同route channel、timer、
+active resume先detach到M-local record，generation/owner-epoch baton预留scalar-slot
+replacement；原M先释放managed permit，再创建并把route的active-M slot切到replacement，
+后者沿公共reducer服务同一ready/source域。permit必须在线程创建前释放，因为quota
+holder按route而非M计账，child抢跑会被判为同route double-acquire。原M执行C并保留
+物理thread identity，返回后request/ring、strong join replacement、重获permit，再精确restore。单配额同route channel、timer、
 socket readiness和nested blocking linked E2E均已通过。当前仍是每次locked call
 create/join一个replacement pthread的正确性实现；standby缓存、`SetMaxThreads`联动、
 blocked parent上的shutdown/fatal和完整callback/entersyscall矩阵未完成，因此仍不能标成
