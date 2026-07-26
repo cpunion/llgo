@@ -282,6 +282,130 @@ func pollCoroChannelAdapterExecutor(t *testing.T, driver *coro.ExecutorDriver) {
 	}
 }
 
+func coroChannelTestQueueLength(queue *chanWaitq) int {
+	length := 0
+	for waiter := queue.first; waiter != nil; waiter = waiter.next {
+		length++
+	}
+	return length
+}
+
+func driveCoroChannelCleanupCursorTest(
+	t *testing.T,
+	cursor *coroChanCleanupCursorV1,
+	wantSmall uint8,
+) int {
+	t.Helper()
+	for step := 1; step <= 10000; step++ {
+		ch := cursor.ch
+		before := coroChannelTestQueueLength(&ch.recvq) +
+			coroChannelTestQueueLength(&ch.sendq)
+		small, complete, ok := advanceCoroChanCleanupCursorV1(cursor)
+		if !ok {
+			t.Fatalf("advance channel cleanup cursor at step %d", step)
+		}
+		after := coroChannelTestQueueLength(&ch.recvq) +
+			coroChannelTestQueueLength(&ch.sendq)
+		if removed := before - after; removed < 0 || removed > 1 {
+			t.Fatalf("channel cleanup step %d changed %d peer nodes", step, removed)
+		}
+		if complete {
+			if small != wantSmall || *cursor != (coroChanCleanupCursorV1{}) {
+				t.Fatalf("complete channel cleanup cursor = small:%d cursor:%+v", small, *cursor)
+			}
+			return step
+		}
+		if small != coro.ResumeSmallInvalid {
+			t.Fatalf("incomplete channel cleanup step %d returned status %d", step, small)
+		}
+	}
+	t.Fatal("channel cleanup cursor did not complete")
+	return 0
+}
+
+func TestCoroChannelCleanupCursorBoundsPeerWork(t *testing.T) {
+	const peers = 64
+	bufferValue := uint32(0x6a7b8c9d)
+	buffered := &Chan{
+		qcount:   1,
+		dataqsiz: 1,
+		buf:      unsafe.Pointer(&bufferValue),
+		elemsize: int(unsafe.Sizeof(bufferValue)),
+	}
+	buffered.mutex.Init(nil)
+	var (
+		recvValues  [peers]uint32
+		recvStates  [peers]selectState
+		recvWaiters [peers]chanWaiter
+	)
+	for index := range recvWaiters {
+		recvStates[index].chosen = -1
+		recvStates[index].mutex.Init(nil)
+		if index+1 != peers {
+			recvStates[index].status = waitRecvOK
+		}
+		recvWaiters[index] = chanWaiter{
+			ch: buffered, elem: unsafe.Pointer(&recvValues[index]), size: buffered.elemsize,
+			sel: &recvStates[index], caseIndex: index,
+		}
+		buffered.recvq.enqueue(&recvWaiters[index])
+	}
+	cursor := coroChanCleanupCursorV1{
+		ch: buffered, status: waitRecvOK, phase: coroChanCleanupBufferRecvV1, selected: true,
+	}
+	steps := driveCoroChannelCleanupCursorTest(t, &cursor, uint8(waitRecvOK))
+	if steps < peers || buffered.qcount != 0 ||
+		buffered.recvq.first != nil || buffered.recvq.last != nil ||
+		recvValues[peers-1] != 0x6a7b8c9d ||
+		recvStates[peers-1].status != waitRecvOK {
+		t.Fatalf("bounded buffer cleanup = steps:%d count:%d queue:(%p,%p) value:%#x status:%d",
+			steps, buffered.qcount, buffered.recvq.first, buffered.recvq.last,
+			recvValues[peers-1], recvStates[peers-1].status)
+	}
+
+	closed := &Chan{elemsize: int(unsafe.Sizeof(uint32(0))), closed: true}
+	closed.mutex.Init(nil)
+	var (
+		closedValues  [peers]uint32
+		closedStates  [peers]selectState
+		closedWaiters [peers]chanWaiter
+	)
+	for index := range closedWaiters {
+		closedValues[index] = ^uint32(0)
+		closedStates[index].chosen = -1
+		closedStates[index].mutex.Init(nil)
+		send := index%2 != 0
+		closedWaiters[index] = chanWaiter{
+			ch: closed, elem: unsafe.Pointer(&closedValues[index]), size: closed.elemsize,
+			send: send, sel: &closedStates[index], caseIndex: index,
+		}
+		if send {
+			closed.sendq.enqueue(&closedWaiters[index])
+		} else {
+			closed.recvq.enqueue(&closedWaiters[index])
+		}
+	}
+	cursor = coroChanCleanupCursorV1{
+		ch: closed, status: waitSendClosed, phase: coroChanCleanupClosedRecvV1, selected: true,
+	}
+	steps = driveCoroChannelCleanupCursorTest(t, &cursor, uint8(waitSendClosed))
+	if steps < peers ||
+		closed.recvq.first != nil || closed.recvq.last != nil ||
+		closed.sendq.first != nil || closed.sendq.last != nil {
+		t.Fatalf("bounded closed cleanup = steps:%d recv:(%p,%p) send:(%p,%p)",
+			steps, closed.recvq.first, closed.recvq.last, closed.sendq.first, closed.sendq.last)
+	}
+	for index := range closedStates {
+		want := waitRecvClosed
+		if index%2 != 0 {
+			want = waitSendClosed
+		}
+		if closedStates[index].status != want {
+			t.Fatalf("closed peer %d status = %d, want %d", index, closedStates[index].status, want)
+		}
+	}
+}
+
 func TestCoroChannelAdapterPairCommitAndResume(t *testing.T) {
 	p := new(coro.P)
 	driver := new(coro.ExecutorDriver)

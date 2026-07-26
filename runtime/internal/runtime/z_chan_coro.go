@@ -40,6 +40,26 @@ type coroChanOperationV1 struct {
 	magic  uint32
 }
 
+type coroChanCleanupPhaseV1 uint8
+
+const (
+	coroChanCleanupIdleV1 coroChanCleanupPhaseV1 = iota
+	coroChanCleanupBufferRecvV1
+	coroChanCleanupBufferSendV1
+	coroChanCleanupClosedRecvV1
+	coroChanCleanupClosedSendV1
+)
+
+// coroChanCleanupCursorV1 is frame-local scheduler work, not hchan state. It
+// releases the hchan mutex after every bounded reduction and never survives
+// the old-P materialization barrier.
+type coroChanCleanupCursorV1 struct {
+	ch       *Chan
+	status   waitStatus
+	phase    coroChanCleanupPhaseV1
+	selected bool
+}
+
 // CoroChanParkV1 is compiler-spilled storage for one direct blocking channel
 // operation. It is not a Future/Task object and is never separately allocated:
 // LLGo emits one typed alloca which LLVM CoroSplit retains only on the slow
@@ -54,6 +74,7 @@ type CoroChanParkV1 struct {
 	claim     coro.SelectClaim
 	packet    coro.ResumePacket
 	cleanup   coro.ResumeCleanupPlan
+	reconcile coroChanCleanupCursorV1
 	ticket    coro.ParkTicket
 	operation coroChanOperationV1
 	waiter    chanWaiter
@@ -78,6 +99,7 @@ type CoroChanSelectV1 struct {
 	claim      coro.SelectClaim
 	packet     coro.ResumePacket
 	cleanup    coro.ResumeCleanupPlan
+	reconcile  coroChanCleanupCursorV1
 	ticket     coro.ParkTicket
 	candidates unsafe.Pointer
 	count      uintptr
@@ -114,9 +136,24 @@ func validCoroChanOperationV1(operation *coroChanOperationV1, waiter *chanWaiter
 	return ok && route == operation.id.Route()
 }
 
+func validCoroChanCleanupCursorV1(cursor *coroChanCleanupCursorV1) bool {
+	if cursor == nil {
+		return false
+	}
+	if cursor.phase == coroChanCleanupIdleV1 {
+		return *cursor == (coroChanCleanupCursorV1{})
+	}
+	return cursor.ch != nil &&
+		cursor.phase >= coroChanCleanupBufferRecvV1 &&
+		cursor.phase <= coroChanCleanupClosedSendV1 &&
+		cursor.status <= waitSendClosed &&
+		cursor.selected == cursor.status.done()
+}
+
 func validCoroChanParkV1(state *CoroChanParkV1) bool {
 	if state == nil || state.magic != coroChanParkMagicV1 ||
-		state.waiter.status > waitSendClosed || state.waiter.size < 0 {
+		state.waiter.status > waitSendClosed || state.waiter.size < 0 ||
+		state.reconcile != (coroChanCleanupCursorV1{}) {
 		return false
 	}
 	if state.operation == (coroChanOperationV1{}) && state.waiter == (chanWaiter{}) {
@@ -209,7 +246,8 @@ func unlockCoroChanSelectChannels(candidates unsafe.Pointer, ops []ChanOp) {
 
 func validCoroChanSelectV1(state *CoroChanSelectV1, candidates unsafe.Pointer, ops []ChanOp) bool {
 	return state != nil && state.magic == coroChanSelectMagicV1 && state.candidates == candidates &&
-		state.count == uintptr(len(ops)) && (len(ops) == 0 || candidates != nil)
+		state.count == uintptr(len(ops)) && (len(ops) == 0 || candidates != nil) &&
+		state.reconcile == (coroChanCleanupCursorV1{})
 }
 
 func classifyCoroChanSingleBegin(result coro.ChannelExternalCommitBeginResult) coroChanMatchResult {
@@ -573,44 +611,69 @@ func coroChanTryRecvLocked(ch *Chan, waiter *chanWaiter) (ready bool, ok bool) {
 	return false, true
 }
 
-func dequeueSendToBufferLocked(ch *Chan) (progress, ok bool) {
+type coroChanQueueStepV1 uint8
+
+const (
+	coroChanQueueInvalidV1 coroChanQueueStepV1 = iota
+	coroChanQueueIdleV1
+	coroChanQueueCommittedV1
+	coroChanQueueDiscardedV1
+	coroChanQueueBlockedV1
+)
+
+// dequeueSendToBufferStepLocked examines and removes at most one queued
+// sender. The caller owns ch.mutex.
+func dequeueSendToBufferStepLocked(ch *Chan) coroChanQueueStepV1 {
 	if ch == nil || ch.closed || ch.qcount >= ch.dataqsiz {
-		return false, true
+		return coroChanQueueIdleV1
 	}
-	for {
-		w := ch.sendq.dequeue()
-		if w == nil {
-			return false, true
-		}
-		if w.coro != nil {
-			switch result := commitCoroSendWaiterLocked(w, chanBuf(ch, ch.sendx), ch.elemsize, waitSendOK); result {
-			case coroChanMatchCommitted:
-				ch.sendx++
-				if ch.sendx == ch.dataqsiz {
-					ch.sendx = 0
-				}
-				ch.qcount++
-				return true, true
-			case coroChanMatchDiscarded:
-				continue
-			case coroChanMatchRetry:
-				ch.sendq.enqueueFront(w)
-				return false, true
-			default:
-				return false, false
+	w := ch.sendq.dequeue()
+	if w == nil {
+		return coroChanQueueIdleV1
+	}
+	if w.coro != nil {
+		switch result := commitCoroSendWaiterLocked(w, chanBuf(ch, ch.sendx), ch.elemsize, waitSendOK); result {
+		case coroChanMatchCommitted:
+			ch.sendx++
+			if ch.sendx == ch.dataqsiz {
+				ch.sendx = 0
 			}
+			ch.qcount++
+			return coroChanQueueCommittedV1
+		case coroChanMatchDiscarded:
+			return coroChanQueueDiscardedV1
+		case coroChanMatchRetry:
+			ch.sendq.enqueueFront(w)
+			return coroChanQueueBlockedV1
+		default:
+			return coroChanQueueInvalidV1
 		}
-		if !claimWaiter(w) {
+	}
+	if !claimWaiter(w) {
+		return coroChanQueueDiscardedV1
+	}
+	copyChanElem(chanBuf(ch, ch.sendx), w.elem, ch.elemsize)
+	ch.sendx++
+	if ch.sendx == ch.dataqsiz {
+		ch.sendx = 0
+	}
+	ch.qcount++
+	w.finish(waitSendOK)
+	return coroChanQueueCommittedV1
+}
+
+func dequeueSendToBufferLocked(ch *Chan) (progress, ok bool) {
+	for {
+		switch dequeueSendToBufferStepLocked(ch) {
+		case coroChanQueueCommittedV1:
+			return true, true
+		case coroChanQueueDiscardedV1:
 			continue
+		case coroChanQueueIdleV1, coroChanQueueBlockedV1:
+			return false, true
+		default:
+			return false, false
 		}
-		copyChanElem(chanBuf(ch, ch.sendx), w.elem, ch.elemsize)
-		ch.sendx++
-		if ch.sendx == ch.dataqsiz {
-			ch.sendx = 0
-		}
-		ch.qcount++
-		w.finish(waitSendOK)
-		return true, true
 	}
 }
 
@@ -620,32 +683,47 @@ func dequeueSendToBuffer(ch *Chan) {
 	}
 }
 
+// dequeueBufferToRecvStepLocked examines and removes at most one queued
+// receiver. The buffer position advances only after the exact receiver
+// transaction has committed its typed copy.
+func dequeueBufferToRecvStepLocked(ch *Chan) coroChanQueueStepV1 {
+	if ch == nil || ch.qcount == 0 {
+		return coroChanQueueIdleV1
+	}
+	w := ch.recvq.dequeue()
+	if w == nil {
+		return coroChanQueueIdleV1
+	}
+	switch result := completeRecvWaiter(w, chanBuf(ch, ch.recvx), ch.elemsize, waitRecvOK); result {
+	case coroChanMatchCommitted:
+		zeroChanRecv(chanBuf(ch, ch.recvx), ch.elemsize)
+		ch.recvx++
+		if ch.recvx == ch.dataqsiz {
+			ch.recvx = 0
+		}
+		ch.qcount--
+		return coroChanQueueCommittedV1
+	case coroChanMatchDiscarded:
+		return coroChanQueueDiscardedV1
+	case coroChanMatchRetry:
+		ch.recvq.enqueueFront(w)
+		return coroChanQueueBlockedV1
+	default:
+		return coroChanQueueInvalidV1
+	}
+}
+
 // dequeueBufferToRecvLocked restores the ordinary buffered-channel invariant
 // after claim contention temporarily leaves both queued receivers and buffered
-// data. The buffer position advances only after the exact receiver transaction
-// has committed its typed copy.
+// data.
 func dequeueBufferToRecvLocked(ch *Chan) (progress, ok bool) {
-	if ch == nil || ch.qcount == 0 {
-		return false, true
-	}
 	for {
-		w := ch.recvq.dequeue()
-		if w == nil {
-			return false, true
-		}
-		switch result := completeRecvWaiter(w, chanBuf(ch, ch.recvx), ch.elemsize, waitRecvOK); result {
-		case coroChanMatchCommitted:
-			zeroChanRecv(chanBuf(ch, ch.recvx), ch.elemsize)
-			ch.recvx++
-			if ch.recvx == ch.dataqsiz {
-				ch.recvx = 0
-			}
-			ch.qcount--
+		switch dequeueBufferToRecvStepLocked(ch) {
+		case coroChanQueueCommittedV1:
 			return true, true
-		case coroChanMatchDiscarded:
+		case coroChanQueueDiscardedV1:
 			continue
-		case coroChanMatchRetry:
-			ch.recvq.enqueueFront(w)
+		case coroChanQueueIdleV1, coroChanQueueBlockedV1:
 			return false, true
 		default:
 			return false, false
@@ -1123,26 +1201,138 @@ func __llgo_coro_chan_resume_v1(g, storage unsafe.Pointer) uint32 {
 	}
 }
 
+func finishCoroChanCleanupCursorV1(
+	cursor *coroChanCleanupCursorV1,
+) (small uint8, complete bool, ok bool) {
+	if !validCoroChanCleanupCursorV1(cursor) ||
+		cursor.phase == coroChanCleanupIdleV1 {
+		return 0, false, false
+	}
+	small = coro.ResumeSmallInvalid
+	if cursor.selected {
+		small = uint8(cursor.status)
+	}
+	*cursor = coroChanCleanupCursorV1{}
+	return small, true, true
+}
+
+// advanceCoroChanCleanupCursorV1 performs at most one peer-waiter operation.
+// Phase-only transitions are separate reductions so releasing the hchan gate
+// never hides a loop behind one ExecutorRunStepMaterialize.
+func advanceCoroChanCleanupCursorV1(
+	cursor *coroChanCleanupCursorV1,
+) (small uint8, complete bool, ok bool) {
+	if !validCoroChanCleanupCursorV1(cursor) ||
+		cursor.phase == coroChanCleanupIdleV1 {
+		return 0, false, false
+	}
+	ch := cursor.ch
+	finish := false
+	ch.mutex.Lock()
+	switch cursor.phase {
+	case coroChanCleanupBufferRecvV1:
+		if ch.dataqsiz == 0 || ch.qcount == 0 {
+			cursor.phase = coroChanCleanupBufferSendV1
+			break
+		}
+		switch dequeueBufferToRecvStepLocked(ch) {
+		case coroChanQueueCommittedV1, coroChanQueueDiscardedV1:
+		case coroChanQueueIdleV1, coroChanQueueBlockedV1:
+			cursor.phase = coroChanCleanupBufferSendV1
+		default:
+			ch.mutex.Unlock()
+			return 0, false, false
+		}
+	case coroChanCleanupBufferSendV1:
+		if ch.dataqsiz != 0 && !ch.closed && ch.qcount < ch.dataqsiz {
+			switch dequeueSendToBufferStepLocked(ch) {
+			case coroChanQueueCommittedV1:
+				cursor.phase = coroChanCleanupBufferRecvV1
+			case coroChanQueueDiscardedV1:
+			case coroChanQueueIdleV1, coroChanQueueBlockedV1:
+				finish = true
+			default:
+				ch.mutex.Unlock()
+				return 0, false, false
+			}
+		} else {
+			finish = true
+		}
+		if finish {
+			if ch.closed {
+				cursor.phase = coroChanCleanupClosedRecvV1
+				finish = false
+			}
+		}
+	case coroChanCleanupClosedRecvV1:
+		if !ch.closed {
+			ch.mutex.Unlock()
+			return 0, false, false
+		}
+		switch dequeueClosedRecvStepLocked(ch) {
+		case coroChanQueueCommittedV1, coroChanQueueDiscardedV1:
+		case coroChanQueueIdleV1:
+			cursor.phase = coroChanCleanupClosedSendV1
+		case coroChanQueueBlockedV1:
+			finish = true
+		default:
+			ch.mutex.Unlock()
+			return 0, false, false
+		}
+	case coroChanCleanupClosedSendV1:
+		if !ch.closed {
+			ch.mutex.Unlock()
+			return 0, false, false
+		}
+		switch dequeueClosedSendStepLocked(ch) {
+		case coroChanQueueCommittedV1, coroChanQueueDiscardedV1:
+		case coroChanQueueIdleV1, coroChanQueueBlockedV1:
+			finish = true
+		default:
+			ch.mutex.Unlock()
+			return 0, false, false
+		}
+	default:
+		ch.mutex.Unlock()
+		return 0, false, false
+	}
+	ch.mutex.Unlock()
+	if finish {
+		return finishCoroChanCleanupCursorV1(cursor)
+	}
+	return coro.ResumeSmallInvalid, false, validCoroChanCleanupCursorV1(cursor)
+}
+
 func materializeCoroChanOperationV1(
 	operation *coroChanOperationV1,
 	waiter *chanWaiter,
+	cursor *coroChanCleanupCursorV1,
 	selected bool,
-) (uint8, bool) {
-	if operation == nil || waiter == nil {
-		return 0, false
+) (small uint8, complete bool, ok bool) {
+	if operation == nil || waiter == nil || cursor == nil ||
+		!validCoroChanCleanupCursorV1(cursor) {
+		return 0, false, false
+	}
+	if cursor.phase != coroChanCleanupIdleV1 {
+		idOnly := coroChanOperationV1{id: operation.id}
+		if !operation.id.Valid() || *operation != idOnly ||
+			*waiter != (chanWaiter{}) || cursor.selected != selected {
+			return 0, false, false
+		}
+		return advanceCoroChanCleanupCursorV1(cursor)
 	}
 	if *operation == (coroChanOperationV1{}) && *waiter == (chanWaiter{}) {
 		if selected {
-			return 0, false
+			return 0, false, false
 		}
-		return coro.ResumeSmallInvalid, true
+		return coro.ResumeSmallInvalid, true, true
 	}
 	if !validCoroChanOperationV1(operation, waiter) {
-		return 0, false
+		return 0, false, false
 	}
 	status := waiter.status
 	if selected != status.done() {
-		return 0, false
+		return 0, false, false
 	}
 	ch := waiter.ch
 	ch.mutex.Lock()
@@ -1151,28 +1341,25 @@ func materializeCoroChanOperationV1(
 	} else {
 		ch.recvq.remove(waiter)
 	}
-	ok := reconcileBufferedChanLocked(ch, !ch.closed)
-	if ok && ch.closed {
-		ok = drainClosedChanWaitersLocked(ch)
-	}
 	ch.mutex.Unlock()
-	if !ok {
-		return 0, false
-	}
 	id := operation.id
 	*waiter = chanWaiter{}
 	*operation = coroChanOperationV1{id: id}
-	if selected {
-		return uint8(status), true
+	*cursor = coroChanCleanupCursorV1{
+		ch:       ch,
+		status:   status,
+		phase:    coroChanCleanupBufferRecvV1,
+		selected: selected,
 	}
-	return coro.ResumeSmallInvalid, true
+	return coro.ResumeSmallInvalid, false, validCoroChanCleanupCursorV1(cursor)
 }
 
 func coroMaterializeResumeCleanupStepV1(step coro.ResumeCleanupStep) bool {
 	selected := step.Outcome == coro.ParkOutcomeCompleted && step.WinnerCase == step.Index+1
 	var (
-		small uint8
-		ok    bool
+		small    uint8
+		complete bool
+		ok       bool
 	)
 	switch step.Kind {
 	case coro.ResumeCleanupChannelDirect:
@@ -1183,7 +1370,12 @@ func coroMaterializeResumeCleanupStepV1(step coro.ResumeCleanupStep) bool {
 		if state == nil || state.magic != coroChanParkMagicV1 {
 			return false
 		}
-		small, ok = materializeCoroChanOperationV1(&state.operation, &state.waiter, selected)
+		small, complete, ok = materializeCoroChanOperationV1(
+			&state.operation,
+			&state.waiter,
+			&state.reconcile,
+			selected,
+		)
 	case coro.ResumeCleanupChannelSelect:
 		state := (*CoroChanSelectV1)(step.Context)
 		if state == nil || state.magic != coroChanSelectMagicV1 || step.Index >= uint32(state.count) ||
@@ -1191,12 +1383,20 @@ func coroMaterializeResumeCleanupStepV1(step coro.ResumeCleanupStep) bool {
 			return false
 		}
 		candidate := coroChanSelectCaseAt(state.candidates, uintptr(step.Index))
-		small, ok = materializeCoroChanOperationV1(&candidate.operation, &candidate.waiter, selected)
+		small, complete, ok = materializeCoroChanOperationV1(
+			&candidate.operation,
+			&candidate.waiter,
+			&state.reconcile,
+			selected,
+		)
 		if ok {
 			candidate.order = 0
 		}
 	default:
 		return false
 	}
-	return ok && coro.CommitResumeCleanupStep(step, small)
+	if !ok || !complete {
+		return ok
+	}
+	return coro.CommitResumeCleanupStep(step, small)
 }
