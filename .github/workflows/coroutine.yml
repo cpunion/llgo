@@ -201,6 +201,19 @@ jobs:
             grep -F '"dnsQueries":[1,28]' <<<"$result"
           done
 
+      - name: Upload failed WebAssembly coroutine probes
+        if: failure() && matrix.lane == 'targets'
+        uses: actions/upload-artifact@v7
+        with:
+          name: coroutine-wasm-failure-${{ github.run_id }}
+          path: |
+            /tmp/llgo-*-stdlib-file.wasm
+            /tmp/llgo-*-host-network.wasm
+            /tmp/llgo-*-stdlib-tcp.wasm
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
       - name: Compile coroutine runtime adapter across targets
         if: matrix.lane == 'targets'
         run: |
