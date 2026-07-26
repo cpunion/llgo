@@ -100,6 +100,7 @@ jobs:
             ./internal/runtime/coro_ready_distribution_default.go \
             ./internal/runtime/coro_native_fleet.go \
             ./internal/runtime/coro_native_fleet_reactor.go \
+            ./internal/runtime/coro_native_atomic_host.go \
             ./internal/runtime/coro_native_fleet_test.go \
             -run '^TestCoroNativeFleet' -count=1
           GOOS=js GOARCH=wasm CGO_ENABLED=0 go test \
