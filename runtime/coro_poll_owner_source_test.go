@@ -355,7 +355,7 @@ func TestCoroHostPollDescriptorReservationIsPreemptionSafe(t *testing.T) {
 
 	controlPath := "internal/runtime/coro_host_operation_control_llgo.go"
 	control := readRuntimePollFile(t, controlPath)
-	materializePath := "internal/runtime/coro_host_operation_materialize.go"
+	materializePath := "internal/runtime/coro_resume_materialize.go"
 	controlMaterialization := readRuntimePollFile(t, materializePath)
 	controlContract := controlMaterialization + "\n" + control
 	for _, marker := range []string{

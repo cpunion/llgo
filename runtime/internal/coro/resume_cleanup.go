@@ -30,6 +30,7 @@ const (
 	ResumeCleanupChannelSelect
 	ResumeCleanupHostOperation
 	ResumeCleanupHostOperationDeadline
+	ResumeCleanupKeyedPark
 )
 
 type resumeCleanupPhase uint8
@@ -89,7 +90,7 @@ type ResumeCleanupPlan struct {
 }
 
 func validResumeCleanupKind(kind ResumeCleanupKind) bool {
-	return kind >= ResumeCleanupChannelDirect && kind <= ResumeCleanupHostOperationDeadline
+	return kind >= ResumeCleanupChannelDirect && kind <= ResumeCleanupKeyedPark
 }
 
 func resumeCleanupUsesChannelClaim(kind ResumeCleanupKind) bool {
@@ -164,6 +165,8 @@ func validResumeCleanupSourceShape(
 			return id.Valid() && id.Source() == OperationSourceWorker
 		}
 		return index == 1 && (id == (OperationID{}) || id.Source() == OperationSourceTimer)
+	case ResumeCleanupKeyedPark:
+		return index == 0 && id.Valid() && id.Source() == OperationSourceManual
 	default:
 		return false
 	}
@@ -179,6 +182,8 @@ func validResumeCleanupRuntimeShape(binding ResumeCleanupBinding) bool {
 		return binding.Count == 1 && binding.RuntimeCount == 1 && binding.Claim == nil
 	case ResumeCleanupHostOperationDeadline:
 		return binding.Count == 2 && binding.RuntimeCount == 1 && binding.Claim == nil
+	case ResumeCleanupKeyedPark:
+		return binding.Count == 1 && binding.RuntimeCount == 1 && binding.Claim == nil
 	default:
 		return false
 	}
@@ -197,6 +202,8 @@ func validResumeCleanupPlanShape(plan *ResumeCleanupPlan) bool {
 		return plan.count == 1 && plan.runtime == 1 && plan.claim == nil
 	case ResumeCleanupHostOperationDeadline:
 		return plan.count == 2 && plan.runtime == 1 && plan.claim == nil
+	case ResumeCleanupKeyedPark:
+		return plan.count == 1 && plan.runtime == 1 && plan.claim == nil
 	default:
 		return false
 	}

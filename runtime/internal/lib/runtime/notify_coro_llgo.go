@@ -24,8 +24,11 @@ import (
 	latomic "github.com/goplus/llgo/runtime/internal/lib/sync/atomic"
 )
 
+// llgoCoroNotifyParkV2 shares the pointer-aligned 256-byte opaque keyed-park
+// contract with semaphore waits.
 type llgoCoroNotifyParkV2 struct {
-	words [20]uintptr
+	_       uintptr
+	storage [256 - unsafe.Sizeof(uintptr(0))]byte
 }
 
 //llgo:coro contract foreign.v1 scope=declaration progress=executor-safe affinity=caller-thread reentry=none memory=borrow-until-return

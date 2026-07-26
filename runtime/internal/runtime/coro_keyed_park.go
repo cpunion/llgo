@@ -25,117 +25,11 @@ import (
 	"github.com/goplus/llgo/runtime/internal/coro"
 )
 
-type coroKeyedParkKindV2 uint32
-
-const (
-	coroKeyedParkInvalidV2 coroKeyedParkKindV2 = iota
-	coroKeyedParkSemaphoreV2
-	coroKeyedParkNotifyV2
-)
-
-const (
-	coroKeyedParkPreparedMagicV2 uint32 = 0x4b505250 // KPRP
-	coroKeyedParkActiveMagicV2   uint32 = 0x4b504152 // KPAR
-)
-
 const (
 	coroKeyedResumeSuccessV2 uint32 = iota + 1
 	coroKeyedResumeTaskAbortV2
 	coroKeyedResumeShutdownV2
 )
-
-// Two native domains each configure 1024 manual-operation slots. The registry
-// stores only scalar equality keys and POD identities; it never retains G, P,
-// ParkState, an LLVM handle, or any other Go pointer.
-const coroKeyedRegistryCapacityV2 = 2 * 1024
-
-type coroKeyedRegistryHandleV2 struct {
-	Slot       uint32
-	Generation uint32
-}
-
-type coroKeyedRegistrySlotStateV2 uint32
-
-const (
-	coroKeyedRegistryFreeV2 coroKeyedRegistrySlotStateV2 = iota
-	coroKeyedRegistryActiveV2
-	coroKeyedRegistryPostingV2
-	coroKeyedRegistryDeliveredV2
-)
-
-type coroKeyedRegistrySlotV2 struct {
-	generation uint32
-	state      coroKeyedRegistrySlotStateV2
-	kind       coroKeyedParkKindV2
-	logical    uint32
-	key        uintptr
-	sequence   uint64
-	operation  coro.OperationID
-}
-
-type coroKeyedRegistryV2 struct {
-	mutex    channelMutex
-	sequence uint64
-	slots    [coroKeyedRegistryCapacityV2]coroKeyedRegistrySlotV2
-}
-
-var coroProgramKeyedRegistryV2State coroKeyedRegistryV2
-
-// CoroKeyedParkV2 is compiler-spilled state for semaphore and notify waits.
-// Its source OperationRecord lives in the route-local ManualOperationSource;
-// this frame state owns only the WaitSet queue links and scalar identities.
-type CoroKeyedParkV2 struct {
-	wait      coro.WaitSetRecord
-	ticket    coro.ParkTicket
-	operation coro.OperationID
-	executor  coro.ExecutorHandle
-	registry  coroKeyedRegistryHandleV2
-	key       uintptr
-	logical   uint32
-	kind      coroKeyedParkKindV2
-	magic     uint32
-}
-
-// The standard-library wrappers reserve [20]uintptr of opaque frame storage.
-// Twenty words cover both wasm32 and native64 layouts without exposing runtime
-// fields across the package boundary.
-var (
-	_ [20*unsafe.Sizeof(uintptr(0)) - unsafe.Sizeof(CoroKeyedParkV2{})]byte
-	_ [unsafe.Alignof(uintptr(0)) - unsafe.Alignof(CoroKeyedParkV2{})]byte
-)
-
-func validPreparedCoroKeyedParkV2(state *CoroKeyedParkV2) bool {
-	return state != nil && state.magic == coroKeyedParkPreparedMagicV2 &&
-		(state.kind == coroKeyedParkSemaphoreV2 || state.kind == coroKeyedParkNotifyV2) &&
-		state.key != 0 && state.wait == (coro.WaitSetRecord{}) && state.ticket == (coro.ParkTicket{}) &&
-		state.operation == (coro.OperationID{}) && state.executor == (coro.ExecutorHandle{}) &&
-		state.registry == (coroKeyedRegistryHandleV2{})
-}
-
-func validActiveCoroKeyedParkV2(state *CoroKeyedParkV2) bool {
-	return state != nil && state.magic == coroKeyedParkActiveMagicV2 &&
-		(state.kind == coroKeyedParkSemaphoreV2 || state.kind == coroKeyedParkNotifyV2) &&
-		state.key != 0 && state.ticket != (coro.ParkTicket{}) && state.operation.Valid() &&
-		state.operation.Source() == coro.OperationSourceManual &&
-		state.executor.Slot != 0 && state.executor.Generation != 0 &&
-		state.registry.Slot != 0 && state.registry.Generation != 0
-}
-
-func coroKeyedRegistryReusableSlotV2(slot *coroKeyedRegistrySlotV2) bool {
-	return slot != nil && slot.state == coroKeyedRegistryFreeV2 && slot.kind == coroKeyedParkInvalidV2 &&
-		slot.logical == 0 && slot.key == 0 && slot.sequence == 0 && slot.operation == (coro.OperationID{})
-}
-
-func coroKeyedRegistrySlotV2For(
-	registry *coroKeyedRegistryV2,
-	handle coroKeyedRegistryHandleV2,
-) (*coroKeyedRegistrySlotV2, bool) {
-	if registry == nil || handle.Slot == 0 || handle.Generation == 0 ||
-		handle.Slot > uint32(len(registry.slots)) {
-		return nil, false
-	}
-	return &registry.slots[handle.Slot-1], true
-}
 
 func (registry *coroKeyedRegistryV2) register(
 	kind coroKeyedParkKindV2,
@@ -240,57 +134,83 @@ func (registry *coroKeyedRegistryV2) claimOne(
 	return handle, operation, true
 }
 
+type coroKeyedRegistryPublishV2 uint8
+
+const (
+	coroKeyedRegistryPublishInvalidV2 coroKeyedRegistryPublishV2 = iota
+	coroKeyedRegistryPublishReadyV2
+	coroKeyedRegistryPublishRetiredV2
+)
+
+func coroKeyedRegistryPublicationRetiredV2(
+	slot *coroKeyedRegistrySlotV2,
+	handle coroKeyedRegistryHandleV2,
+) bool {
+	if slot == nil || slot.generation < handle.Generation {
+		return false
+	}
+	return slot.generation > handle.Generation ||
+		slot.generation == handle.Generation && coroKeyedRegistryReusableSlotV2(slot)
+}
+
+// finishPost publishes the private registry terminal state before the Manual
+// source fact. A concurrent cancellation may already have retired this exact
+// generation; in that case the producer owns no remaining frame-visible work
+// and must skip its source Post.
 func (registry *coroKeyedRegistryV2) finishPost(
 	handle coroKeyedRegistryHandleV2,
 	operation coro.OperationID,
+) coroKeyedRegistryPublishV2 {
+	registry.mutex.Lock()
+	slot, ok := coroKeyedRegistrySlotV2For(registry, handle)
+	if !ok {
+		registry.mutex.Unlock()
+		return coroKeyedRegistryPublishInvalidV2
+	}
+	if slot.generation == handle.Generation && slot.operation == operation &&
+		slot.state == coroKeyedRegistryPostingV2 {
+		slot.state = coroKeyedRegistryDeliveredV2
+		registry.mutex.Unlock()
+		return coroKeyedRegistryPublishReadyV2
+	}
+	retired := coroKeyedRegistryPublicationRetiredV2(slot, handle)
+	registry.mutex.Unlock()
+	if retired {
+		return coroKeyedRegistryPublishRetiredV2
+	}
+	return coroKeyedRegistryPublishInvalidV2
+}
+
+func (registry *coroKeyedRegistryV2) publicationRetired(
+	handle coroKeyedRegistryHandleV2,
 ) bool {
 	registry.mutex.Lock()
 	slot, ok := coroKeyedRegistrySlotV2For(registry, handle)
-	if !ok || slot.generation != handle.Generation || slot.operation != operation ||
-		slot.state != coroKeyedRegistryPostingV2 {
-		registry.mutex.Unlock()
-		return false
-	}
-	slot.state = coroKeyedRegistryDeliveredV2
+	retired := ok && coroKeyedRegistryPublicationRetiredV2(slot, handle)
 	registry.mutex.Unlock()
-	return true
+	return retired
 }
 
 func coroKeyedTicketLessV2(a, b uint32) bool {
 	return int32(a-b) < 0
 }
 
-func (registry *coroKeyedRegistryV2) retire(
-	handle coroKeyedRegistryHandleV2,
-	operation coro.OperationID,
-) bool {
-	for {
-		registry.mutex.Lock()
-		slot, ok := coroKeyedRegistrySlotV2For(registry, handle)
-		if !ok || slot.generation != handle.Generation || slot.operation != operation {
-			registry.mutex.Unlock()
-			return false
-		}
-		if slot.state == coroKeyedRegistryPostingV2 {
-			registry.mutex.Unlock()
-			continue
-		}
-		if slot.state != coroKeyedRegistryActiveV2 && slot.state != coroKeyedRegistryDeliveredV2 {
-			registry.mutex.Unlock()
-			return false
-		}
-		generation := slot.generation
-		*slot = coroKeyedRegistrySlotV2{generation: generation}
-		registry.mutex.Unlock()
-		return true
-	}
-}
-
 func coroKeyedPostClaimedV2(handle coroKeyedRegistryHandleV2, operation coro.OperationID) bool {
-	if !coroTargetPostKeyedOperationV2(operation) {
+	switch coroProgramKeyedRegistryV2State.finishPost(handle, operation) {
+	case coroKeyedRegistryPublishRetiredV2:
+		return true
+	case coroKeyedRegistryPublishReadyV2:
+		if coroTargetPostKeyedOperationV2(operation) {
+			return true
+		}
+		// Cancellation may retire the registry and close/recycle the source
+		// between private publication and the target Post. Exact generation
+		// retirement makes that failed Post an ordinary lost wake: semaphore
+		// count or notify ticket remains the durable repair fact.
+		return coroProgramKeyedRegistryV2State.publicationRetired(handle)
+	default:
 		return false
 	}
-	return coroProgramKeyedRegistryV2State.finishPost(handle, operation)
 }
 
 func coroKeyedPostExactV2(handle coroKeyedRegistryHandleV2, operation coro.OperationID) bool {
@@ -350,6 +270,29 @@ func __llgo_coro_keyed_park_v2(g, handle, header, storage unsafe.Pointer) {
 		coroKeyedAbortV2("cannot prepare coroutine keyed Park V2 source")
 		return
 	}
+	state.ticket = ticket
+	state.operation = operation
+	state.magic = coroKeyedParkActiveMagicV2
+	if !coro.BindWaitSetResumeCleanup(
+		&state.wait,
+		&state.packet,
+		&state.cleanup,
+		coro.ResumeCleanupBinding{
+			Kind:         coro.ResumeCleanupKeyedPark,
+			Context:      unsafe.Pointer(state),
+			Entries:      unsafe.Pointer(&state.operation),
+			Count:        1,
+			RuntimeCount: 1,
+			Stride:       unsafe.Sizeof(coro.OperationID{}),
+		},
+	) {
+		coroKeyedAbortV2("cannot bind coroutine keyed Park V2 cleanup")
+		return
+	}
+	// Publish the scalar key only after the complete P-neutral cleanup
+	// descriptor is bound. A concurrent release can post the Manual fact
+	// immediately, but the current owner cannot suspend this G with a partially
+	// initialized resume contract.
 	registry, registered := coroProgramKeyedRegistryV2State.register(
 		state.kind, state.key, state.logical, operation,
 	)
@@ -357,11 +300,7 @@ func __llgo_coro_keyed_park_v2(g, handle, header, storage unsafe.Pointer) {
 		coroKeyedAbortV2("cannot publish coroutine keyed Park V2 registry")
 		return
 	}
-	state.ticket = ticket
-	state.operation = operation
-	state.executor = executor
 	state.registry = registry
-	state.magic = coroKeyedParkActiveMagicV2
 
 	ready := state.kind == coroKeyedParkSemaphoreV2 && catomic.Load((*uint32)(unsafe.Pointer(state.key))) != 0 ||
 		state.kind == coroKeyedParkNotifyV2 && coroKeyedTicketLessV2(
@@ -375,38 +314,31 @@ func __llgo_coro_keyed_park_v2(g, handle, header, storage unsafe.Pointer) {
 //export __llgo_coro_keyed_resume_v2
 func __llgo_coro_keyed_resume_v2(g, storage unsafe.Pointer) uint32 {
 	state := (*CoroKeyedParkV2)(storage)
-	if g == nil || !validActiveCoroKeyedParkV2(state) {
+	if g == nil || !validMaterializedCoroKeyedParkV2(state) {
 		coroKeyedAbortV2("invalid coroutine keyed Park V2 resume ABI")
 		return 0
 	}
 	task := (*coro.G)(g)
-	outcome, caseID, lease, cancel, taken := coro.TakeRunDecision(task, state.ticket)
-	if !taken || !coroProgramKeyedRegistryV2State.retire(state.registry, state.operation) {
-		coroKeyedAbortV2("invalid coroutine keyed Park V2 decision or registry")
-		return 0
-	}
-	driver, executor, route, ok := coro.CurrentExecutorManualDriver(task)
-	if !ok || executor != state.executor || route != state.operation.Route() {
-		coroKeyedAbortV2("coroutine keyed Park V2 resumed on the wrong source")
+	outcome, caseID, cancel, result, small, taken := coro.TakeResumePacket(
+		task,
+		state.ticket,
+		&state.packet,
+		nil,
+	)
+	if !taken || result != coro.ResumeResultNone || small != coro.ResumeSmallInvalid {
+		coroKeyedAbortV2("invalid coroutine keyed Park V2 resume packet")
 		return 0
 	}
 	status := uint32(0)
-	discard := outcome == coro.ParkOutcomeCanceled
 	switch {
-	case outcome == coro.ParkOutcomeCompleted && caseID == 1 && lease.Valid() && cancel == coro.TaskCancelNone:
-		status, discard = coroKeyedResumeSuccessV2, false
+	case outcome == coro.ParkOutcomeCompleted && caseID == 1 && cancel == coro.TaskCancelNone:
+		status = coroKeyedResumeSuccessV2
 	case outcome == coro.ParkOutcomeCanceled && caseID == 0 && cancel == coro.TaskCancelAbort:
 		status = coroKeyedResumeTaskAbortV2
 	case outcome == coro.ParkOutcomeCanceled && caseID == 0 && cancel == coro.TaskCancelShutdown:
 		status = coroKeyedResumeShutdownV2
 	default:
 		coroKeyedAbortV2("unsupported coroutine keyed Park V2 run decision")
-		return 0
-	}
-	if !coro.FinishCurrentExecutorManualPark(
-		driver, task, state.executor, state.operation, lease, discard,
-	) {
-		coroKeyedAbortV2("cannot retire coroutine keyed Park V2 source")
 		return 0
 	}
 	*state = CoroKeyedParkV2{}

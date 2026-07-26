@@ -25,10 +25,12 @@ import (
 )
 
 // llgoCoroSemaphoreParkV2 is opaque compiler-spilled ParkState/source storage.
-// Twenty pointer words cover the wasm32 and native64 runtime layouts without
+// The leading word gives target pointer alignment; the remaining bytes keep
+// one fixed 256-byte source-level contract on wasm32 and native64 without
 // exposing scheduler pointers to the standard library.
 type llgoCoroSemaphoreParkV2 struct {
-	words [20]uintptr
+	_       uintptr
+	storage [256 - unsafe.Sizeof(uintptr(0))]byte
 }
 
 //llgo:coro contract foreign.v1 scope=declaration progress=executor-safe affinity=caller-thread reentry=none memory=borrow-until-return

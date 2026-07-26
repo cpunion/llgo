@@ -321,3 +321,137 @@ complete:
 			workerOperationSourceEmpty(workers, p), timerRegistrationTableEmpty(timers, p))
 	}
 }
+
+func TestTypedResumeCleanupKeyedManualIsPNeutral(t *testing.T) {
+	p := new(P)
+	driver, registry, manual, executor := bindTestExecutorDriverWithManual(t, p)
+	task := newYieldingTestG(t, "typed-keyed-manual-cleanup")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue keyed manual task")
+	}
+	if g, ok := NextRunnable(p); !ok || g != task.g {
+		t.Fatal("dequeue keyed manual task")
+	}
+	action := beginWaitTestResume(t, p, task)
+	var (
+		wait   WaitSetRecord
+		packet ResumePacket
+		plan   ResumeCleanupPlan
+		token  byte
+	)
+	task.frame.header.SuspendReason = uint16(SuspendPark)
+	task.frame.header.Lifecycle = uint16(FrameSuspended)
+	ticket, operation, ok := PrepareSingleManualPark(
+		task.g,
+		task.handle,
+		task.frame.header,
+		manual,
+		&wait,
+		1,
+		131,
+	)
+	if !ok ||
+		!BindWaitSetResumeCleanup(
+			&wait,
+			&packet,
+			&plan,
+			ResumeCleanupBinding{
+				Kind:         ResumeCleanupKeyedPark,
+				Context:      unsafe.Pointer(&token),
+				Entries:      unsafe.Pointer(&operation),
+				Count:        1,
+				RuntimeCount: 1,
+				Stride:       unsafe.Sizeof(OperationID{}),
+			},
+		) {
+		t.Fatal("prepare keyed manual cleanup")
+	}
+	if action, ok = Resumed(p, task.g, action); !ok || action.Kind != ActionPark {
+		t.Fatalf("commit keyed manual park = (%+v, %t)", action, ok)
+	}
+	if manual.Post(operation) != ManualOperationPosted ||
+		registry.Request(executor) != ExecutorRequestPublished {
+		t.Fatal("publish keyed manual completion")
+	}
+
+	runtimeSteps := 0
+	for reduction := 0; reduction < 10000; reduction++ {
+		step, stepOK := NextExecutorRunStep(driver)
+		if !stepOK {
+			t.Fatalf("keyed manual reduction %d: plan=%+v park=%+v",
+				reduction, plan, task.g.park)
+		}
+		switch step.Kind {
+		case ExecutorRunStepSource:
+			if step.Poll.Complete && packet.state == resumePacketMaterialized {
+				goto complete
+			}
+		case ExecutorRunStepMaterialize:
+			if step.Cleanup.Kind != ResumeCleanupKeyedPark ||
+				step.Cleanup.Context != unsafe.Pointer(&token) ||
+				step.Cleanup.Index != 0 ||
+				step.Cleanup.WinnerCase != 1 ||
+				step.Cleanup.Outcome != ParkOutcomeCompleted ||
+				!CommitResumeCleanupStep(step.Cleanup, ResumeSmallInvalid) {
+				t.Fatalf("keyed manual materialization = %+v", step.Cleanup)
+			}
+			runtimeSteps++
+		default:
+			t.Fatalf("unexpected keyed manual step %d", step.Kind)
+		}
+	}
+	t.Fatal("keyed manual cleanup did not complete")
+
+complete:
+	if runtimeSteps != 1 || operation != (OperationID{}) ||
+		plan != (ResumeCleanupPlan{}) || packet.state != resumePacketMaterialized ||
+		packet.outcome != ParkOutcomeCompleted || packet.caseID != 1 ||
+		packet.result != ResumeResultNone || packet.small != ResumeSmallInvalid ||
+		!manualOperationSourceEmpty(manual, p) {
+		t.Fatalf("keyed manual materialization retained state: runtime=%d operation=%+v plan=%+v packet=%+v empty=%t",
+			runtimeSteps, operation, plan, packet, manualOperationSourceEmpty(manual, p))
+	}
+	if !EnterExecutorRunCompatibility(driver) {
+		t.Fatal("leave keyed manual unified runner")
+	}
+	if g, ready := NextRunnable(p); !ready || g != task.g {
+		t.Fatal("dequeue keyed manual task")
+	}
+	action = beginWaitTestResume(t, p, task)
+	outcome, caseID, cancel, result, small, taken := TakeResumePacket(
+		task.g,
+		ticket,
+		&packet,
+		nil,
+	)
+	if !taken || outcome != ParkOutcomeCompleted || caseID != 1 ||
+		cancel != TaskCancelNone || result != ResumeResultNone ||
+		small != ResumeSmallInvalid || packet != (ResumePacket{}) {
+		t.Fatalf("take keyed manual packet = (%d, %d, %d, %d, %d, %t), packet=%+v",
+			outcome, caseID, cancel, result, small, taken, packet)
+	}
+	task.frame.header.SuspendReason = uint16(SuspendFrameComplete)
+	task.frame.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PrepareComplete(task.g, task.handle, task.frame.header) {
+		t.Fatal("prepare keyed manual task completion")
+	}
+	action, ok = Resumed(p, task.g, action)
+	if !ok || action.Kind != ActionCheckDestroy {
+		t.Fatalf("resume keyed manual completion = (%+v, %t)", action, ok)
+	}
+	action, ok = Checked(p, task.g, action, true)
+	if !ok || action.Kind != ActionDestroy {
+		t.Fatalf("check keyed manual destroy = (%+v, %t)", action, ok)
+	}
+	releaseTestFrame(t, task.g, task.frame)
+	receipt, ok := DestroyedBounded(p, task.g, action)
+	if !ok || receipt.Kind != ActionCommitDestroy {
+		t.Fatalf("publish keyed manual destroy receipt = (%+v, %t)", receipt, ok)
+	}
+	completeAction, ok := CommitExecutorRunDomainDestroy(driver, task.g, receipt)
+	if !ok || completeAction.Kind != ActionComplete {
+		t.Fatalf("commit keyed manual domain destroy = (%+v, %t)", completeAction, ok)
+	}
+	closeTestExecutorDriver(t, driver)
+	runtime.KeepAlive(task.frame.memory)
+}

@@ -83,6 +83,21 @@ func coroStdlibSyncFixtures() []coroStdlibSyncFixture {
 			wantChannel:      true,
 		},
 		{
+			// Deterministically force both keyed standard-library paths. main
+			// holds the Mutex while publishing the worker, so Cond.Wait must
+			// park before the worker can Signal; WaitGroup closes the child
+			// lifetime through the same synchronous Go surface.
+			name: "sync",
+			dir:  "./_testgo/coro_stdlib_sync_primitives",
+			wantSource: []string{
+				"sync.NewCond(", "sync.WaitGroup", "mutex.Lock()",
+				"go publish()", "cond.Wait()", "cond.Signal()", "group.Wait()",
+			},
+			wantSchedulerABI: coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
+			wantGo:           true,
+			requireGoStmt:    true,
+		},
+		{
 			// P0 regular-file worker probe: exactly one small blocking
 			// Write/Read round trip, without poll deadlines or slice growth.
 			// Go 1.26 sync.WaitGroup.Go remains a reflect-visible stdlib method,
@@ -242,6 +257,7 @@ func assertCoroStdlibSyncRuntimeSelection(t *testing.T, fixture coroStdlibSyncFi
 		"coro_poll_owner_llgo.go":               false,
 		"coro_poll_route_native_fleet_llgo.go":  false,
 		"coro_ready_distribution_fleet_llgo.go": false,
+		"coro_resume_materialize.go":            false,
 		"coro_sema_owner_llgo.go":               false,
 		"coro_target_native_fleet_llgo.go":      false,
 		"coro_target_wait_timer_llgo.go":        false,
@@ -434,8 +450,8 @@ func TestCoroStdlibSyncAcceptanceFixtures(t *testing.T) {
 
 // TestCoroStdlibSyncAcceptance is deliberately opt-in because every selected
 // program performs a fresh standard-library compile, link, and run. The
-// time,timer,syscall-file,syscall-pipe,file,tcp set is the fast vertical gate;
-// "all" selects all six. Once selected, a build/runtime failure is a real test
+// time,timer,sync,syscall-file,syscall-pipe,file,tcp set is the fast vertical
+// gate; "all" selects all seven. Once selected, a build/runtime failure is a real test
 // failure and is never converted into a known-failure pass.
 func TestCoroStdlibSyncAcceptance(t *testing.T) {
 	selected := parseCoroStdlibAcceptanceSelection(t)
@@ -496,10 +512,10 @@ func parseCoroStdlibAcceptanceSelection(t *testing.T) map[string]bool {
 	t.Helper()
 	raw := strings.TrimSpace(os.Getenv(coroStdlibAcceptanceEnv))
 	if raw == "" {
-		t.Skipf("set %s=all or a comma-separated subset of time,timer,file,syscall-file,syscall-pipe,tcp", coroStdlibAcceptanceEnv)
+		t.Skipf("set %s=all or a comma-separated subset of time,timer,sync,file,syscall-file,syscall-pipe,tcp", coroStdlibAcceptanceEnv)
 	}
 	known := map[string]bool{
-		"time": true, "timer": true, "file": true,
+		"time": true, "timer": true, "sync": true, "file": true,
 		"syscall-file": true, "syscall-pipe": true, "tcp": true,
 	}
 	selected := make(map[string]bool, len(known))
@@ -512,7 +528,7 @@ func parseCoroStdlibAcceptanceSelection(t *testing.T) map[string]bool {
 			continue
 		}
 		if !known[item] {
-			t.Fatalf("unknown %s selection %q; want all or time,timer,file,syscall-file,syscall-pipe,tcp", coroStdlibAcceptanceEnv, item)
+			t.Fatalf("unknown %s selection %q; want all or time,timer,sync,file,syscall-file,syscall-pipe,tcp", coroStdlibAcceptanceEnv, item)
 		}
 		selected[item] = true
 	}

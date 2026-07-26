@@ -1354,7 +1354,7 @@ func materializeCoroChanOperationV1(
 	return coro.ResumeSmallInvalid, false, validCoroChanCleanupCursorV1(cursor)
 }
 
-func coroMaterializeResumeCleanupStepV1(step coro.ResumeCleanupStep) bool {
+func coroMaterializeChannelResumeCleanupStepV1(step coro.ResumeCleanupStep) bool {
 	selected := step.Outcome == coro.ParkOutcomeCompleted && step.WinnerCase == step.Index+1
 	var (
 		small    uint8
@@ -1392,8 +1392,6 @@ func coroMaterializeResumeCleanupStepV1(step coro.ResumeCleanupStep) bool {
 		if ok {
 			candidate.order = 0
 		}
-	case coro.ResumeCleanupHostOperation, coro.ResumeCleanupHostOperationDeadline:
-		return coroMaterializeHostOperationResumeCleanupStepV1(step)
 	default:
 		return false
 	}
