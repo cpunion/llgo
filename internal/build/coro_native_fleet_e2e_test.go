@@ -22,6 +22,7 @@ import (
 	stdcontext "context"
 	"fmt"
 	goimporter "go/importer"
+	"go/token"
 	"go/types"
 	"os"
 	"os/exec"
@@ -418,6 +419,66 @@ func Check() int32 {
 }
 `
 
+const coroNativeFleetLockedForeignCompensationE2ESource = `package main
+
+import _ "unsafe"
+
+var Failed uint32
+var Start chan uint32
+
+//go:linkname osThreadLock llgo.coroOSThreadLock
+func osThreadLock()
+
+//go:linkname osThreadUnlock llgo.coroOSThreadUnlock
+func osThreadUnlock()
+
+//llgo:coro noblock
+//go:linkname resetState C.__llgo_coro_native_fleet_e2e_block_reset_v1
+func resetState()
+
+//llgo:coro noblock
+//go:linkname isWaiting C.__llgo_coro_native_fleet_e2e_blocked_v1
+func isWaiting() uintptr
+
+//llgo:coro noblock
+//go:linkname unblock C.__llgo_coro_native_fleet_e2e_release_v1
+func unblock()
+
+//llgo:coro worker
+//go:linkname block C.__llgo_coro_native_fleet_e2e_block_v1
+func block()
+
+func child() {
+	<-Start
+	for isWaiting() == 0 {
+	}
+	unblock()
+}
+
+func Setup() {
+	Failed = 0
+	Start = make(chan uint32)
+}
+
+func main() {
+	resetState()
+	go child()
+	// The rendezvous creates a stable stack-cut boundary and establishes the
+	// child on a peer route before this G enters same-M C.
+	Start <- 1
+	osThreadLock()
+	block()
+	osThreadUnlock()
+	if isWaiting() == 0 {
+		Failed = 81
+	}
+}
+
+func Check() int32 {
+	return int32(Failed)
+}
+`
+
 func TestCoroNativeFleetPhysicalPeerRunsDistributedChildE2E(t *testing.T) {
 	runCoroNativeFleetE2E(t, coroNativeFleetE2ESource, "distributed-child", false, 8)
 }
@@ -444,6 +505,10 @@ func TestCoroNativeFleetSingleExecutionQuotaChannelProgressE2E(t *testing.T) {
 
 func TestCoroNativeFleetRuntimeGOMAXPROCSQuotaE2E(t *testing.T) {
 	runCoroNativeFleetE2E(t, coroNativeFleetGOMAXPROCSE2ESource, "runtime-gomaxprocs-quota", true, 1)
+}
+
+func TestCoroNativeFleetLockedForeignCompensationE2E(t *testing.T) {
+	runCoroNativeFleetE2E(t, coroNativeFleetLockedForeignCompensationE2ESource, "locked-foreign-compensation", true, 1)
 }
 
 func runCoroNativeFleetE2E(t *testing.T, source, name string, enableChannel bool, initialLimit uint32) {
@@ -473,6 +538,13 @@ func runCoroNativeFleetE2E(t *testing.T, source, name string, enableChannel bool
 		rt, err := goimporter.For("source", nil).Import(llssa.PkgRuntime)
 		if err != nil {
 			t.Fatal("load runtime type model:", err)
+		}
+		if rt.Scope().Lookup("CoroWorkerParkV1") == nil {
+			name := types.NewTypeName(token.NoPos, rt, "CoroWorkerParkV1", nil)
+			types.NewNamed(name, types.NewArray(types.Typ[types.Uintptr], 32), nil)
+			if previous := rt.Scope().Insert(name); previous != nil {
+				t.Fatalf("install worker frame-storage type: duplicate %v", previous)
+			}
 		}
 		return rt
 	})
@@ -581,7 +653,10 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_native_fleet_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_wait_timer_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_timer_owner_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_os_thread_affinity.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_os_thread_foreign_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_worker_native_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_worker_owner_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_worker_completion_fleet_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_resume_materialize.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan.go"),
