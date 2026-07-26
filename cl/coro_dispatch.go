@@ -1281,6 +1281,29 @@ func (p *context) compileCoroPhysicalPlainDispatch(
 	return p.emitCoroPlainDispatchCall(b, call, true)
 }
 
+// compileCoroPhysicalNilDispatchFault owns a closed nil-only function call
+// without inventing a child transaction or constraining its result signature
+// to the ordinary plain-dispatch ABI. Go has already evaluated the call's SSA
+// operands in source order; materialize each operand, publish the structured
+// nil-call panic in this frame, and retain only a structurally unreachable
+// source tail for SSA successors and result uses.
+func (p *context) compileCoroPhysicalNilDispatchFault(
+	b llssa.Builder, call *ssa.Call, instructionPlan coroPhysicalInstructionPlan,
+) llssa.Expr {
+	if !p.hasCoroPhysicalBody() || call == nil ||
+		instructionPlan.control != coroPhysicalControlNilDispatchFault {
+		panic("coroutine nil-only dispatch fault escaped its frozen physical control recipe")
+	}
+	p.recordCallerLocationForCall(b, &call.Call)
+	p.emitPCLineLabel(b, call.Pos())
+	fn := p.compileValue(b, call.Call.Value)
+	_ = p.compileValues(b, call.Call.Args, fnNormal)
+	p.compileCoroImplicitNilAccessGuard(b, b.Field(fn, 0))
+	b.Unreachable()
+	b.SetBlockContinuation(p.fn.MakeBlock())
+	return p.zeroResult(call.Call.Signature().Results())
+}
+
 func (p *context) emitCoroPlainDispatchCall(b llssa.Builder, call *ssa.Call, physical bool) llssa.Expr {
 	p.recordCallerLocationForCall(b, &call.Call)
 	p.emitPCLineLabel(b, call.Pos())

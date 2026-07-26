@@ -1,0 +1,48 @@
+[TypeChildren]
+*_llgo_github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.T:
+    _llgo_github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.T
+
+[OrdinaryEdges]
+*_llgo_github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.T:
+    _llgo_github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.T
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+__llgo_coro_root_factory_descriptor_v1.d8d862b15239d9fd7afbe10db509ec2b:
+    __llgo_coro_root_factory_v1.d8d862b15239d9fd7afbe10db509ec2b
+__llgo_coro_root_factory_v1.d8d862b15239d9fd7afbe10db509ec2b:
+    github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.main$coro
+__llgo_coro_root_package_v1.e76fda7918556a7b3cf5d8752e57849d:
+    __llgo_coro_root_package_v1.e76fda7918556a7b3cf5d8752e57849d.entries
+__llgo_coro_root_package_v1.e76fda7918556a7b3cf5d8752e57849d.entries:
+    __llgo_coro_root_factory_descriptor_v1.d8d862b15239d9fd7afbe10db509ec2b
+_llgo_github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.T:
+    *_llgo_github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.T
+    github.com/goplus/llgo/runtime/internal/runtime.memequal0
+github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.init:
+    github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.init$guard
+github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.main$coro:
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.d8d862b15239d9fd7afbe10db509ec2b
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_run_decision_take_zero_v1
+    _llgo_github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.T
+    github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.sink
+    github.com/goplus/llgo/runtime/internal/runtime.AllocU
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.trap
+llvm.used:
+    __llgo_coro_root_factory_descriptor_v1.d8d862b15239d9fd7afbe10db509ec2b
+    __llgo_coro_root_package_v1.e76fda7918556a7b3cf5d8752e57849d
+
+[UseIface]
+github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.main$coro:
+    _llgo_github.com/goplus/llgo/cl/_testmeta/ifaceuse_basic.T
+

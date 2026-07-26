@@ -1,0 +1,40 @@
+[OrdinaryEdges]
+github.com/goplus/llgo/cl/_testmeta/interface_imported/api.(*Source).Close$llgo$promoted$v1$d9d16704fd4b513ad5cc5ca05e5313d21569cf64028767237294838230bc1d05$coro:
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_fault_prepare_v1
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.71225ffef2b652f8285d03c281059fc4
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_run_decision_take_zero_v1
+    github.com/goplus/llgo/cl/_testmeta/interface_imported/api.Source.Close
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.trap
+github.com/goplus/llgo/cl/_testmeta/interface_imported/api.(*Source).Read$llgo$promoted$v1$7bdad60d478825b41555c1c694bb0b22cdf3a6e2bf922a31265f2a0621d52b08$coro:
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_fault_prepare_v1
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.48d8064c06d05bd6c73d65b945a0c008
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_run_decision_take_zero_v1
+    github.com/goplus/llgo/cl/_testmeta/interface_imported/api.Source.Read
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.trap
+github.com/goplus/llgo/cl/_testmeta/interface_imported/api.init:
+    github.com/goplus/llgo/cl/_testmeta/interface_imported/api.init$guard
+

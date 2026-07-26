@@ -30,6 +30,7 @@ import (
 
 	"github.com/goplus/llgo/internal/coro"
 	"github.com/goplus/llgo/internal/env"
+	"github.com/goplus/llgo/internal/meta"
 	"github.com/goplus/llgo/internal/packages"
 	intllvm "github.com/goplus/llgo/internal/xtool/llvm"
 	gopackages "golang.org/x/tools/go/packages"
@@ -464,6 +465,13 @@ func (c *context) tryLoadFromCache(pkg *aPackage) bool {
 	if c.buildConf != nil && !activeCoroCacheManifestMatches(content, pkg) {
 		return false
 	}
+	var pkgMeta *meta.PackageMeta
+	if c.buildConf.packageMetaEnabled() {
+		pkgMeta, err = readMeta(paths.Meta)
+		if err != nil {
+			return false
+		}
+	}
 
 	// Parse metadata from manifest [Package] section (INI format)
 	meta, err := parseManifestMetadata(content)
@@ -477,6 +485,7 @@ func (c *context) tryLoadFromCache(pkg *aPackage) bool {
 	pkg.NeedRt = meta.NeedRt
 	pkg.NeedPyInit = meta.NeedPyInit
 	pkg.CoroRootAnchorV1 = meta.CoroRootAnchorV1
+	pkg.Meta = pkgMeta
 	pkg.CacheHit = true
 
 	return true
@@ -586,6 +595,12 @@ func (c *context) saveToCache(pkg *aPackage) error {
 		}
 	} else {
 		return nil
+	}
+
+	if c.buildConf.packageMetaEnabled() {
+		if err := writeMeta(paths.Meta, pkg.Meta); err != nil {
+			return err
+		}
 	}
 
 	// Append metadata to existing manifest (pkg.Manifest was built in collectFingerprint).

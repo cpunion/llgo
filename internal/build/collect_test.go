@@ -23,16 +23,102 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/goplus/llgo/cl"
 	"github.com/goplus/llgo/internal/buildenv"
 	"github.com/goplus/llgo/internal/coro"
 	"github.com/goplus/llgo/internal/crosscompile"
 	"github.com/goplus/llgo/internal/lto"
+	"github.com/goplus/llgo/internal/meta"
 	"github.com/goplus/llgo/internal/packages"
 	gopackages "golang.org/x/tools/go/packages"
 )
+
+func activateCoroPackageCacheTest(t *testing.T, ctx *context) {
+	t.Helper()
+	activateCoroPackageCacheTestWithDigest(t, ctx, strings.Repeat("a", 64))
+	if !ctx.canUsePackageCache() {
+		t.Fatal("active coroutine cache fixture did not satisfy the production cache gate")
+	}
+}
+
+func activateCoroPackageCacheTestWithDigest(t *testing.T, ctx *context, digest string) {
+	t.Helper()
+	if ctx == nil || ctx.buildConf == nil {
+		t.Fatal("active coroutine cache fixture requires a build context")
+	}
+	loweringFacts, err := coro.NewLoweringFacts(nil).Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	loweringFactsDigest, err := loweringFacts.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pointerBits := 64
+	switch ctx.buildConf.Goarch {
+	case "386", "arm", "mips", "mipsle", "wasm":
+		pointerBits = 32
+	}
+	endianness := "little"
+	switch ctx.buildConf.Goarch {
+	case "mips", "mips64", "ppc64", "s390x":
+		endianness = "big"
+	}
+	plan := &coro.SSAPlan{}
+	emission := &cl.EmissionUniverse{}
+	metadata := coro.PlanDigestMetadata{
+		CoroABI:             activeCoroABIVersion(ctx.buildConf),
+		SchedulerABI:        activeCoroSchedulerABIVersion(ctx.buildConf),
+		PanicABI:            activeCoroPanicABIVersion(ctx.buildConf),
+		FuncRepABI:          activeCoroFuncRepABIVersion(ctx.buildConf),
+		FrameRetentionABI:   coro.FrameRetentionParkABIV2,
+		LoweringFactsSchema: coro.LoweringFactsSchema,
+		LoweringFactsDigest: loweringFactsDigest,
+		TargetTriple:        ctx.targetTriple(),
+		TargetCPU:           ctx.crossCompile.CPU,
+		TargetFeatures:      ctx.crossCompile.Features,
+		TargetABI:           ctx.crossCompile.TargetABI,
+		PointerBits:         pointerBits,
+		Endianness:          endianness,
+		DataLayout:          "e-p:" + strconv.FormatUint(uint64(pointerBits), 10) + ":" + strconv.FormatUint(uint64(pointerBits), 10),
+	}
+	ctx.coroPlan = plan
+	ctx.coroEmission = emission
+	ctx.coroPlanDigest = digest
+	ctx.coroPlanMetadata = metadata
+	ctx.coroLoweringFacts = loweringFacts
+	ctx.coroLoweringFactsDigest = loweringFactsDigest
+	ctx.clCompilation = &cl.Compilation{
+		CoroPlan:                plan,
+		CoroPlanDigest:          digest,
+		CoroLoweringFacts:       loweringFacts,
+		CoroLoweringFactsDigest: loweringFactsDigest,
+		CoroABI:                 metadata.CoroABI,
+		SchedulerABI:            metadata.SchedulerABI,
+		PanicABI:                metadata.PanicABI,
+		FuncRepABI:              metadata.FuncRepABI,
+		CoroFrameRetentionABI:   metadata.FrameRetentionABI,
+		EmissionUniverse:        emission,
+		CoroTargetCapabilities:  ctx.buildConf.coroTargetCapabilities(),
+	}
+}
+
+func setCoroPackageCacheManifest(t *testing.T, ctx *context, pkg *aPackage) {
+	t.Helper()
+	if ctx == nil || pkg == nil || pkg.Package == nil {
+		t.Fatal("coroutine cache manifest fixture requires a context and package")
+	}
+	m := newManifestBuilder()
+	ctx.collectCommonInputs(m)
+	m.env.Goos = ctx.buildConf.Goos
+	m.pkg.PkgPath = pkg.PkgPath
+	pkg.Manifest = m.Build()
+	pkg.Fingerprint = m.Fingerprint()
+}
 
 func TestCoroutinePlanInputsAffectFingerprint(t *testing.T) {
 	base := coro.PlanDigestMetadata{
@@ -818,6 +904,7 @@ func TestTryLoadFromCache_ForceRebuild(t *testing.T) {
 			LLVMTarget: "arm64-apple-darwin",
 		},
 	}
+	activateCoroPackageCacheTest(t, ctx)
 
 	// Create a fake cache entry
 	pkg := &aPackage{
@@ -832,7 +919,9 @@ func TestTryLoadFromCache_ForceRebuild(t *testing.T) {
 			m.pkg.PkgPath = "example.com/cached"
 			return m.Build()
 		}(),
+		Meta: func() *meta.PackageMeta { pm, _ := meta.NewBuilder().Build(); return pm }(),
 	}
+	setCoroPackageCacheManifest(t, ctx, pkg)
 
 	// Create a temporary .o file
 	objFile, err := os.CreateTemp(td, "test-*.o")
@@ -852,7 +941,7 @@ func TestTryLoadFromCache_ForceRebuild(t *testing.T) {
 
 	// Verify cache exists
 	cm := ctx.ensureCacheManager()
-	paths := cm.PackagePaths("arm64-apple-darwin", "example.com/cached", "test123")
+	paths := cm.PackagePaths(ctx.targetTriple(), pkg.PkgPath, pkg.Fingerprint)
 	if _, err := os.Stat(paths.Archive); err != nil {
 		t.Fatalf("cache should exist: %v", err)
 	}
@@ -887,13 +976,15 @@ func TestSaveToCache_MainPackage(t *testing.T) {
 	ctx := &context{
 		conf: &packages.Config{},
 		buildConf: &Config{
-			Goos:   "darwin",
-			Goarch: "arm64",
+			Goos:               "darwin",
+			Goarch:             "arm64",
+			CollectPackageMeta: true,
 		},
 		crossCompile: crosscompile.Export{
 			LLVMTarget: "arm64-apple-darwin",
 		},
 	}
+	activateCoroPackageCacheTest(t, ctx)
 
 	pkg := &aPackage{
 		Package: &packages.Package{
@@ -911,7 +1002,7 @@ func TestSaveToCache_MainPackage(t *testing.T) {
 
 	// Check no cache was created
 	cm := ctx.ensureCacheManager()
-	paths := cm.PackagePaths("arm64-apple-darwin", "main", "abc123")
+	paths := cm.PackagePaths(ctx.targetTriple(), pkg.PkgPath, pkg.Fingerprint)
 	if _, err := os.Stat(paths.Manifest); !os.IsNotExist(err) {
 		t.Error("main package should not be cached")
 	}
@@ -926,13 +1017,15 @@ func TestTryLoadFromCache_MainPackage(t *testing.T) {
 	ctx := &context{
 		conf: &packages.Config{},
 		buildConf: &Config{
-			Goos:   "darwin",
-			Goarch: "arm64",
+			Goos:               "darwin",
+			Goarch:             "arm64",
+			CollectPackageMeta: true,
 		},
 		crossCompile: crosscompile.Export{
 			LLVMTarget: "arm64-apple-darwin",
 		},
 	}
+	activateCoroPackageCacheTest(t, ctx)
 
 	pkg := &aPackage{
 		Package: &packages.Package{
@@ -943,7 +1036,7 @@ func TestTryLoadFromCache_MainPackage(t *testing.T) {
 	}
 
 	cm := ctx.ensureCacheManager()
-	paths := cm.PackagePaths("arm64-apple-darwin", "main", "abc123")
+	paths := cm.PackagePaths(ctx.targetTriple(), pkg.PkgPath, pkg.Fingerprint)
 	if err := cm.EnsureDir(paths); err != nil {
 		t.Fatal(err)
 	}
@@ -974,13 +1067,15 @@ func TestSaveToCache_Success(t *testing.T) {
 	ctx := &context{
 		conf: &packages.Config{},
 		buildConf: &Config{
-			Goos:   "darwin",
-			Goarch: "arm64",
+			Goos:               "darwin",
+			Goarch:             "arm64",
+			CollectPackageMeta: true,
 		},
 		crossCompile: crosscompile.Export{
 			LLVMTarget: "arm64-apple-darwin",
 		},
 	}
+	activateCoroPackageCacheTest(t, ctx)
 
 	// Create a temporary .o file
 	objFile, err := os.CreateTemp(td, "test-*.o")
@@ -1004,7 +1099,9 @@ func TestSaveToCache_Success(t *testing.T) {
 			return m.Build()
 		}(),
 		ObjFiles: []string{objFile.Name()},
+		Meta:     func() *meta.PackageMeta { pm, _ := meta.NewBuilder().Build(); return pm }(),
 	}
+	setCoroPackageCacheManifest(t, ctx, pkg)
 
 	if err := ctx.saveToCache(pkg); err != nil {
 		t.Fatalf("saveToCache: %v", err)
@@ -1012,7 +1109,7 @@ func TestSaveToCache_Success(t *testing.T) {
 
 	// Check cache was created
 	cm := ctx.ensureCacheManager()
-	paths := cm.PackagePaths("arm64-apple-darwin", "example.com/lib", "def456")
+	paths := cm.PackagePaths(ctx.targetTriple(), pkg.PkgPath, pkg.Fingerprint)
 
 	// Check manifest contains original content and metadata in Package section
 	content, err := readManifest(paths.Manifest)
@@ -1033,6 +1130,186 @@ func TestSaveToCache_Success(t *testing.T) {
 	// Check archive exists
 	if _, err := os.Stat(paths.Archive); err != nil {
 		t.Errorf("archive should exist: %v", err)
+	}
+
+	pm, err := meta.Open(paths.Meta)
+	if err != nil {
+		t.Errorf("meta should exist: %v", err)
+	} else {
+		defer pm.Close()
+	}
+}
+
+func TestTryLoadFromCache_LoadsPackageMeta(t *testing.T) {
+	td := t.TempDir()
+	oldFunc := cacheRootFunc
+	cacheRootFunc = func() string { return td }
+	defer func() { cacheRootFunc = oldFunc }()
+
+	ctx := &context{
+		conf: &packages.Config{},
+		buildConf: &Config{
+			Goos:               "darwin",
+			Goarch:             "arm64",
+			CollectPackageMeta: true,
+		},
+		crossCompile: crosscompile.Export{
+			LLVMTarget: "arm64-apple-darwin",
+		},
+	}
+	activateCoroPackageCacheTest(t, ctx)
+
+	objFile, err := os.CreateTemp(td, "test-*.o")
+	if err != nil {
+		t.Fatalf("CreateTemp: %v", err)
+	}
+	objFile.WriteString("fake object file")
+	objFile.Close()
+
+	builder := meta.NewBuilder()
+	main := builder.Sym("pkg.main")
+	helper := builder.Sym("pkg.helper")
+	builder.AddOrdinaryEdge(main, helper)
+
+	pkg := &aPackage{
+		Package: &packages.Package{
+			PkgPath: "example.com/loadmeta",
+			Name:    "loadmeta",
+		},
+		Fingerprint: "loadmeta123",
+		Manifest: func() string {
+			m := newManifestBuilder()
+			m.env.Goos = "darwin"
+			m.pkg.PkgPath = "example.com/loadmeta"
+			return m.Build()
+		}(),
+		ObjFiles: []string{objFile.Name()},
+	}
+	pkg.Meta, _ = builder.Build()
+	setCoroPackageCacheManifest(t, ctx, pkg)
+
+	if err := ctx.saveToCache(pkg); err != nil {
+		t.Fatalf("saveToCache: %v", err)
+	}
+
+	pkg.ObjFiles = nil
+	pkg.ArchiveFile = ""
+	pkg.CacheHit = false
+	pkg.Meta = nil
+
+	if !ctx.tryLoadFromCache(pkg) {
+		t.Fatal("tryLoadFromCache = false, want true")
+	}
+	if pkg.Meta == nil {
+		t.Fatal("Meta was not loaded from cache")
+	}
+	summary, err := meta.NewGlobalSummary([]*meta.PackageMeta{pkg.Meta})
+	if err != nil {
+		t.Fatalf("NewGlobalSummary: %v", err)
+	}
+	mainSym, ok := summary.LookupSymbol("pkg.main")
+	if !ok {
+		t.Fatal("pkg.main not found in cached metadata")
+	}
+	edges := summary.OrdinaryEdges(mainSym)
+	if len(edges) != 1 || summary.SymbolName(edges[0]) != "pkg.helper" {
+		t.Fatalf("cached metadata edge mismatch: %#v", edges)
+	}
+}
+
+func TestTryLoadFromCacheRejectsBadMeta(t *testing.T) {
+	td := t.TempDir()
+	oldFunc := cacheRootFunc
+	cacheRootFunc = func() string { return td }
+	defer func() { cacheRootFunc = oldFunc }()
+
+	ctx := &context{
+		conf: &packages.Config{},
+		buildConf: &Config{
+			Goos:               "darwin",
+			Goarch:             "arm64",
+			CollectPackageMeta: true,
+		},
+		crossCompile: crosscompile.Export{
+			LLVMTarget: "arm64-apple-darwin",
+		},
+	}
+	activateCoroPackageCacheTest(t, ctx)
+
+	pkg := &aPackage{
+		Package: &packages.Package{
+			PkgPath: "example.com/badmeta",
+			Name:    "badmeta",
+		},
+		Fingerprint: "badmeta123",
+	}
+	setCoroPackageCacheManifest(t, ctx, pkg)
+	cm := ctx.ensureCacheManager()
+	paths := cm.PackagePaths(ctx.targetTriple(), pkg.PkgPath, pkg.Fingerprint)
+	if err := cm.EnsureDir(paths); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.Archive, []byte("archive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeManifest(paths.Manifest, pkg.Manifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.Meta, []byte("bad meta"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if ctx.tryLoadFromCache(pkg) {
+		t.Fatal("tryLoadFromCache accepted invalid meta")
+	}
+}
+
+func TestTryLoadFromCacheIgnoresMetaWhenPackageMetaDisabled(t *testing.T) {
+	td := t.TempDir()
+	oldFunc := cacheRootFunc
+	cacheRootFunc = func() string { return td }
+	defer func() { cacheRootFunc = oldFunc }()
+
+	ctx := &context{
+		conf: &packages.Config{},
+		buildConf: &Config{
+			Goos:   "darwin",
+			Goarch: "arm64",
+		},
+		crossCompile: crosscompile.Export{
+			LLVMTarget: "arm64-apple-darwin",
+		},
+	}
+	activateCoroPackageCacheTest(t, ctx)
+
+	pkg := &aPackage{
+		Package: &packages.Package{
+			PkgPath: "example.com/nometa",
+			Name:    "nometa",
+		},
+		Fingerprint: "nometa123",
+	}
+	setCoroPackageCacheManifest(t, ctx, pkg)
+	cm := ctx.ensureCacheManager()
+	paths := cm.PackagePaths(ctx.targetTriple(), pkg.PkgPath, pkg.Fingerprint)
+	if err := cm.EnsureDir(paths); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.Archive, []byte("archive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeManifest(paths.Manifest, pkg.Manifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.Meta, []byte("bad meta"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !ctx.tryLoadFromCache(pkg) {
+		t.Fatal("tryLoadFromCache rejected cache while deadcode drop is disabled")
+	}
+	if pkg.Meta != nil {
+		t.Fatal("Meta should not be loaded while deadcode drop is disabled")
 	}
 }
 

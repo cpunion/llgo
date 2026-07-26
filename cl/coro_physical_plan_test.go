@@ -198,6 +198,129 @@ func Root() {
 	}
 }
 
+func TestCoroPhysicalPlanKeepsClosedNilOnlyDispatchInCurrentFrame(t *testing.T) {
+	ssaPkg, _, files := buildGoSSAPkg(t, `package foo
+var callback func() (bool, error)
+func Root() {
+	if callback != nil {
+		callback()
+	}
+}
+`)
+	root := ssaPkg.Func("Root")
+	var dynamicCall *ssa.Call
+	for _, block := range root.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(*ssa.Call)
+			if ok && call.Common().StaticCallee() == nil {
+				dynamicCall = call
+			}
+		}
+	}
+	if dynamicCall == nil {
+		t.Fatal("Root has no dynamic callback call")
+	}
+
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := prepareStacklessEmissionUniverse(
+		prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	functionIDs.ArchiveReady = true
+	whole, err := coro.AnalyzeSSA(
+		ssaPkg.Prog,
+		coro.Roots{{Function: root, ManagedDemand: coro.AsyncDemand}},
+		coro.SSAConfig{
+			EmissionUniverse:     ssaUniverse,
+			FunctionIDs:          functionIDs,
+			MaxPlainInstructions: -1,
+			OutcomeMode:          coro.OutcomeExplicitStatus,
+			ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+				if fn == root {
+					return coro.SSAFunctionPolicy{
+						Effect: coro.OutcomeStructured,
+						Exec:   coro.MayUnwind,
+					}, nil
+				}
+				return coro.SSAFunctionPolicy{}, nil
+			},
+			ClassifyClosedDynamicCall: func(
+				_ *ssa.Function, call ssa.CallInstruction,
+			) (coro.SSAClosedDynamicCallCertificate, bool, error) {
+				if call == dynamicCall {
+					return coro.SSAClosedDynamicCallCertificate{MayBeNil: true}, true, nil
+				}
+				return coro.SSAClosedDynamicCallCertificate{}, false, nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootPlan, found := whole.FunctionPlan(root)
+	if !found || rootPlan.Emission != coro.EmitCoroutine ||
+		rootPlan.Effect != coro.OutcomeStructured ||
+		rootPlan.LocalEffect.Contains(coro.AwaitStructured) {
+		t.Fatalf("Root plan = %+v, present=%t; want outcome-only physical coroutine", rootPlan, found)
+	}
+	callPlan, found := whole.CallPlan(dynamicCall)
+	if !found || callPlan.Open || !callPlan.MayBeNil || len(callPlan.Targets) != 0 ||
+		callPlan.Rep != coro.Dispatch {
+		t.Fatalf("nil-only CallPlan = %+v, present=%t", callPlan, found)
+	}
+
+	audit, err := newCoroPhysicalPureSSAAudit(universe, whole, root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	instructionPlan := coroPhysicalInstructionPlan{}
+	planCoroPhysicalControlInstruction(
+		audit, whole, dynamicCall,
+		coroPhysicalLoweringCapabilities{
+			childAwait:      true,
+			managedDispatch: true,
+			explicitPanic:   true,
+		},
+		&instructionPlan,
+	)
+	if instructionPlan.controlFailure != "" ||
+		instructionPlan.control != coroPhysicalControlNilDispatchFault {
+		t.Fatalf("nil-only physical control plan = %+v; want current-frame fault", instructionPlan)
+	}
+	if err := validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(
+		root, rootPlan, whole, universe,
+		true, true, false, true, "", false, true, false,
+	); err != nil {
+		t.Fatalf("validate nil-only outcome coroutine: %v", err)
+	}
+
+	compilation := &Compilation{CoroPlan: whole, EmissionUniverse: universe}
+	enableCoroChildAwaitCompilation(compilation)
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	physical := requireCoroPhysicalFunction(t, module, "foo.Root").String()
+	if strings.Contains(physical, "coro.dispatch.plain") {
+		t.Fatalf("nil-only physical call emitted an ordinary descriptor dispatch:\n%s", physical)
+	}
+}
+
 func TestCoroPhysicalEmissionGeneratedWrapperBorrowsSharedFrozenOwner(t *testing.T) {
 	ssaPkg, _, _ := buildGoSSAPkg(t, `package foo
 func Root(value int) int { return value + 1 }

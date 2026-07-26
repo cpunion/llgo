@@ -33,6 +33,7 @@ func synctest_acquire() any {
 func synctest_release(bubble any) {
 }
 
+//llgo:managedlink
 //go:linkname synctest_inBubble internal/synctest.inBubble
 func synctest_inBubble(bubble any, f func()) {
 	f()

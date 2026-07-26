@@ -17,7 +17,7 @@ var (
 // any panic that escapes such a boundary is reported and terminates instead of
 // manufacturing an invalid jump target.
 func Rethrow(_ *Defer) {
-	if ptr := excepKey.Get(); ptr != nil {
+	if ptr := getg().panic_; ptr != nil {
 		TracePanic(*(*any)(ptr))
 		traceTerminalPanic(2)
 		c.Free(ptr)

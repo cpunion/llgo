@@ -31,8 +31,18 @@ func TestGenMainModuleExecutable(t *testing.T) {
 		},
 	}
 	pkg := &packages.Package{PkgPath: "example.com/foo", ExportFile: "foo.a"}
+	bootstrap := &coroProgramBootstrapV1{
+		Version: coroProgramBootstrapVersionV2,
+		Steps: []coroProgramBootstrapStepV1{
+			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleRuntimeInitV2, FunctionID: "runtime-init", Target: llssa.PkgRuntime + ".init"},
+			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleABIInitV2, FunctionID: "abi-init", Target: "init$abitypes"},
+			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRolePublicRuntimeInitV2, FunctionID: coroProgramPublicRuntimeNoopIDV2, Target: coroProgramPublicRuntimeNoopSymbolV2},
+			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRolePackageInitV2, FunctionID: "package-init", Target: pkg.PkgPath + ".init"},
+			{Kind: coroProgramStepDirectPlainV1, Role: coroProgramStepRoleMainV2, FunctionID: "main", Target: pkg.PkgPath + ".main"},
+		},
+	}
 	mod := genMainModule(ctx, llssa.PkgRuntime, pkg,
-		&genConfig{rtInit: true, pyInit: true})
+		&genConfig{rtInit: true, pyInit: true, coroBootstrap: bootstrap})
 	if mod.ExportFile != "foo.a-main" {
 		t.Fatalf("unexpected export file: %s", mod.ExportFile)
 	}
@@ -49,10 +59,15 @@ func TestGenMainModuleExecutable(t *testing.T) {
 			t.Fatalf("main module IR missing %q:\n%s", want, ir)
 		}
 	}
-	assertInOrder(t, ir,
-		"call void @Py_Initialize()",
+	factory := mod.LPkg.Module().NamedFunction(coroProgramBootstrapFactorySymbolV2).String()
+	assertInOrder(t, factory,
 		"call void @\"example.com/foo.init\"()",
 		"call void @\"example.com/foo.main\"()",
+	)
+	entry := mod.LPkg.Module().NamedFunction("main").String()
+	assertInOrder(t, entry,
+		"call void @Py_Initialize()",
+		"call ptr @"+coroProgramBeginSymbolV1,
 		"call void @Py_Finalize()",
 	)
 }
@@ -77,8 +92,8 @@ func TestGenMainModuleLibrary(t *testing.T) {
 	if !strings.Contains(ir, "@__llgo_argc = global i32 0") {
 		t.Fatalf("library mode missing argc global:\n%s", ir)
 	}
-	if strings.Contains(ir, "@llvm.global_ctors") {
-		t.Fatalf("library mode without the runtime should not emit a constructor:\n%s", ir)
+	if !strings.Contains(ir, "@llvm.global_ctors") {
+		t.Fatalf("library mode missing constructor:\n%s", ir)
 	}
 }
 

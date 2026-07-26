@@ -1,0 +1,139 @@
+[TypeChildren]
+*_llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac:
+    _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac
+*_llgo_github.com/goplus/llgo/cl/_testmeta/reflect_dynamic.T:
+    _llgo_github.com/goplus/llgo/cl/_testmeta/reflect_dynamic.T
+
+[OrdinaryEdges]
+*_llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac:
+    _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_github.com/goplus/llgo/cl/_testmeta/reflect_dynamic.T:
+    _llgo_github.com/goplus/llgo/cl/_testmeta/reflect_dynamic.T
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+__llgo_coro_func_coro_v1.method-value.0cd4f77ff63e585c.2f3cac44c7396ee13e82055058cfc610:
+    github.com/goplus/llgo/cl/_testmeta/reflect_dynamic.(*T).M$llgo$promoted$v1$a3a3daeb82eca1a133c0bd482b3f19829860f37e659e4fc19ff240ab941849f7$coro
+__llgo_coro_func_descriptor_v1.method-value.0cd4f77ff63e585c.2f3cac44c7396ee13e82055058cfc610:
+    __llgo_coro_func_coro_v1.method-value.0cd4f77ff63e585c.2f3cac44c7396ee13e82055058cfc610
+__llgo_coro_func_descriptor_v1.method-value.ef2217fffc4cbc60.daa984bc57e82bb7a8351659939bfe54:
+    __llgo_coro_func_plain_v1.method-value.ef2217fffc4cbc60.daa984bc57e82bb7a8351659939bfe54
+__llgo_coro_func_plain_v1.method-value.ef2217fffc4cbc60.daa984bc57e82bb7a8351659939bfe54:
+    github.com/goplus/llgo/cl/_testmeta/reflect_dynamic.T.M
+__llgo_coro_root_factory_descriptor_v1.40e0ca481d5a9219cdb2b4aa29cda674:
+    __llgo_coro_root_factory_v1.40e0ca481d5a9219cdb2b4aa29cda674
+__llgo_coro_root_factory_descriptor_v1.a593e5b2ac6eb722fc3adcc72ac2035b:
+    __llgo_coro_root_factory_v1.a593e5b2ac6eb722fc3adcc72ac2035b
+__llgo_coro_root_factory_v1.40e0ca481d5a9219cdb2b4aa29cda674:
+    github.com/goplus/llgo/cl/_testmeta/reflect_dynamic.init$coro
+__llgo_coro_root_factory_v1.a593e5b2ac6eb722fc3adcc72ac2035b:
+    github.com/goplus/llgo/cl/_testmeta/reflect_dynamic.main$coro
+__llgo_coro_root_package_v1.6f23f9b2a3e43b9dd812b616e50dafcc:
+    __llgo_coro_root_package_v1.6f23f9b2a3e43b9dd812b616e50dafcc.entries
+__llgo_coro_root_package_v1.6f23f9b2a3e43b9dd812b616e50dafcc.entries:
+    __llgo_coro_root_factory_descriptor_v1.40e0ca481d5a9219cdb2b4aa29cda674
+    __llgo_coro_root_factory_descriptor_v1.a593e5b2ac6eb722fc3adcc72ac2035b
+_llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac:
+    *_llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac
+_llgo_github.com/goplus/llgo/cl/_testmeta/reflect_dynamic.T:
+    *_llgo_github.com/goplus/llgo/cl/_testmeta/reflect_dynamic.T
+    github.com/goplus/llgo/runtime/internal/runtime.memequal0
+github.com/goplus/llgo/cl/_testmeta/reflect_dynamic.(*T).M$llgo$promoted$v1$a3a3daeb82eca1a133c0bd482b3f19829860f37e659e4fc19ff240ab941849f7$coro:
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_fault_prepare_v1
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.44b78c86c98466a91fa05a369a13dfbd
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_run_decision_take_zero_v1
+    github.com/goplus/llgo/cl/_testmeta/reflect_dynamic.T.M
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.trap
+github.com/goplus/llgo/cl/_testmeta/reflect_dynamic.init$coro:
+    __llgo_coro_await_consume_v1
+    __llgo_coro_await_prepare_v3
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.40e0ca481d5a9219cdb2b4aa29cda674
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_panic_prepare_v1
+    __llgo_coro_run_decision_take_zero_v1
+    github.com/goplus/llgo/cl/_testmeta/reflect_dynamic.init$guard
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.promise
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.trap
+    reflect.init$coro
+github.com/goplus/llgo/cl/_testmeta/reflect_dynamic.main$coro:
+    __llgo_coro_await_consume_v1
+    __llgo_coro_await_prepare_v3
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.a593e5b2ac6eb722fc3adcc72ac2035b
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_panic_prepare_v1
+    __llgo_coro_run_decision_take_zero_v1
+    github.com/goplus/llgo/cl/_testmeta/reflect_dynamic.use$coro
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.promise
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.trap
+github.com/goplus/llgo/cl/_testmeta/reflect_dynamic.use$coro:
+    __llgo_coro_await_consume_v1
+    __llgo_coro_await_prepare_v3
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.5283c9a34f1a314937c31fcfdbafaae5
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_panic_prepare_v1
+    __llgo_coro_run_decision_take_zero_v1
+    _llgo_github.com/goplus/llgo/cl/_testmeta/reflect_dynamic.T
+    github.com/goplus/llgo/runtime/internal/runtime.AllocU
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.promise
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.trap
+    reflect.Value.MethodByName$coro
+    reflect.ValueOf$coro
+llvm.used:
+    __llgo_coro_root_factory_descriptor_v1.40e0ca481d5a9219cdb2b4aa29cda674
+    __llgo_coro_root_factory_descriptor_v1.a593e5b2ac6eb722fc3adcc72ac2035b
+    __llgo_coro_root_package_v1.6f23f9b2a3e43b9dd812b616e50dafcc
+
+[UseIface]
+github.com/goplus/llgo/cl/_testmeta/reflect_dynamic.use$coro:
+    _llgo_github.com/goplus/llgo/cl/_testmeta/reflect_dynamic.T
+
+[MethodInfo]
+*_llgo_github.com/goplus/llgo/cl/_testmeta/reflect_dynamic.T:
+    0 M _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac __llgo_coro_func_descriptor_v1.method-value.0cd4f77ff63e585c.2f3cac44c7396ee13e82055058cfc610 __llgo_coro_func_descriptor_v1.method-value.0cd4f77ff63e585c.2f3cac44c7396ee13e82055058cfc610
+_llgo_github.com/goplus/llgo/cl/_testmeta/reflect_dynamic.T:
+    0 M _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac github.com/goplus/llgo/cl/_testmeta/reflect_dynamic.(*T).M$llgo$promoted$v1$a3a3daeb82eca1a133c0bd482b3f19829860f37e659e4fc19ff240ab941849f7$coro __llgo_coro_func_descriptor_v1.method-value.ef2217fffc4cbc60.daa984bc57e82bb7a8351659939bfe54
+

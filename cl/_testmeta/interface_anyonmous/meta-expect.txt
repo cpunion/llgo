@@ -1,0 +1,176 @@
+[TypeChildren]
+*_llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac:
+    _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac
+*_llgo_github.com/goplus/llgo/cl/_testmeta/interface_anyonmous.T:
+    _llgo_github.com/goplus/llgo/cl/_testmeta/interface_anyonmous.T
+*_llgo_iface$f14WsslTA1u5wwC83jLU0HU2u2mmAWxBVE38vPBbRAo:
+    _llgo_iface$f14WsslTA1u5wwC83jLU0HU2u2mmAWxBVE38vPBbRAo
+
+[OrdinaryEdges]
+*_llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac:
+    _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_github.com/goplus/llgo/cl/_testmeta/interface_anyonmous.T:
+    _llgo_github.com/goplus/llgo/cl/_testmeta/interface_anyonmous.T
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_iface$f14WsslTA1u5wwC83jLU0HU2u2mmAWxBVE38vPBbRAo:
+    _llgo_iface$f14WsslTA1u5wwC83jLU0HU2u2mmAWxBVE38vPBbRAo
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+__llgo_coro_func_coro_v1.method-value.3a22a426e5608f1e.6a60c50b22b6bf532b121aacceef6848:
+    github.com/goplus/llgo/cl/_testmeta/interface_anyonmous.(*T).M$llgo$promoted$v1$cd81b9c48e903c014ec6d2dd046b2938986044bf3097819f03a4b24105a9492d$coro
+__llgo_coro_func_coro_v1.method-value.e25d19b1e0fd88b9.6a60c50b22b6bf532b121aacceef6848:
+    github.com/goplus/llgo/cl/_testmeta/interface_anyonmous.(*T).N$llgo$promoted$v1$7f2ba16f9ccb258cee505ccf9f70db8219b3a5bf26885b901e49d37e1343da53$coro
+__llgo_coro_func_coro_v1.method.3a22a426e5608f1e.88c3d2383da6469b697cffacc8f592fd:
+    github.com/goplus/llgo/cl/_testmeta/interface_anyonmous.(*T).M$llgo$promoted$v1$cd81b9c48e903c014ec6d2dd046b2938986044bf3097819f03a4b24105a9492d$coro
+__llgo_coro_func_coro_v1.method.e25d19b1e0fd88b9.88c3d2383da6469b697cffacc8f592fd:
+    github.com/goplus/llgo/cl/_testmeta/interface_anyonmous.(*T).N$llgo$promoted$v1$7f2ba16f9ccb258cee505ccf9f70db8219b3a5bf26885b901e49d37e1343da53$coro
+__llgo_coro_func_descriptor_v1.method-value.3a22a426e5608f1e.6a60c50b22b6bf532b121aacceef6848:
+    __llgo_coro_func_coro_v1.method-value.3a22a426e5608f1e.6a60c50b22b6bf532b121aacceef6848
+__llgo_coro_func_descriptor_v1.method-value.dfec4ef1bd593a64.681d587a261db3b06ac64fcd7e890d72:
+    __llgo_coro_func_plain_v1.method-value.dfec4ef1bd593a64.681d587a261db3b06ac64fcd7e890d72
+__llgo_coro_func_descriptor_v1.method-value.e25d19b1e0fd88b9.6a60c50b22b6bf532b121aacceef6848:
+    __llgo_coro_func_coro_v1.method-value.e25d19b1e0fd88b9.6a60c50b22b6bf532b121aacceef6848
+__llgo_coro_func_descriptor_v1.method-value.e32b3061ae6ff3d8.681d587a261db3b06ac64fcd7e890d72:
+    __llgo_coro_func_plain_v1.method-value.e32b3061ae6ff3d8.681d587a261db3b06ac64fcd7e890d72
+__llgo_coro_func_descriptor_v1.method.3a22a426e5608f1e.88c3d2383da6469b697cffacc8f592fd:
+    __llgo_coro_func_coro_v1.method.3a22a426e5608f1e.88c3d2383da6469b697cffacc8f592fd
+__llgo_coro_func_descriptor_v1.method.e25d19b1e0fd88b9.88c3d2383da6469b697cffacc8f592fd:
+    __llgo_coro_func_coro_v1.method.e25d19b1e0fd88b9.88c3d2383da6469b697cffacc8f592fd
+__llgo_coro_func_plain_v1.method-value.dfec4ef1bd593a64.681d587a261db3b06ac64fcd7e890d72:
+    github.com/goplus/llgo/cl/_testmeta/interface_anyonmous.T.M
+__llgo_coro_func_plain_v1.method-value.e32b3061ae6ff3d8.681d587a261db3b06ac64fcd7e890d72:
+    github.com/goplus/llgo/cl/_testmeta/interface_anyonmous.T.N
+__llgo_coro_method_raw_trap_v1.54043b1955ebe96288577b3144da6035:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.7b3f257953ef93d7c7ac385d5e57dead:
+    llvm.trap
+__llgo_coro_root_factory_descriptor_v1.f5973b935eae770809ac058325a53ba2:
+    __llgo_coro_root_factory_v1.f5973b935eae770809ac058325a53ba2
+__llgo_coro_root_factory_v1.f5973b935eae770809ac058325a53ba2:
+    github.com/goplus/llgo/cl/_testmeta/interface_anyonmous.main$coro
+__llgo_coro_root_package_v1.afa23082971f44917db8ca2a861fcb19:
+    __llgo_coro_root_package_v1.afa23082971f44917db8ca2a861fcb19.entries
+__llgo_coro_root_package_v1.afa23082971f44917db8ca2a861fcb19.entries:
+    __llgo_coro_root_factory_descriptor_v1.f5973b935eae770809ac058325a53ba2
+_llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac:
+    *_llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac
+_llgo_github.com/goplus/llgo/cl/_testmeta/interface_anyonmous.T:
+    *_llgo_github.com/goplus/llgo/cl/_testmeta/interface_anyonmous.T
+    github.com/goplus/llgo/runtime/internal/runtime.memequal0
+_llgo_iface$f14WsslTA1u5wwC83jLU0HU2u2mmAWxBVE38vPBbRAo:
+    *_llgo_iface$f14WsslTA1u5wwC83jLU0HU2u2mmAWxBVE38vPBbRAo
+    _llgo_iface$f14WsslTA1u5wwC83jLU0HU2u2mmAWxBVE38vPBbRAo$imethods
+    github.com/goplus/llgo/runtime/internal/runtime.interequal
+_llgo_iface$f14WsslTA1u5wwC83jLU0HU2u2mmAWxBVE38vPBbRAo$imethods:
+    _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac
+github.com/goplus/llgo/cl/_testmeta/interface_anyonmous.(*T).M$llgo$promoted$v1$cd81b9c48e903c014ec6d2dd046b2938986044bf3097819f03a4b24105a9492d$coro:
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_fault_prepare_v1
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.34789a95e7c58309833b76c52e8f0708
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_run_decision_take_zero_v1
+    github.com/goplus/llgo/cl/_testmeta/interface_anyonmous.T.M
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.trap
+github.com/goplus/llgo/cl/_testmeta/interface_anyonmous.(*T).N$llgo$promoted$v1$7f2ba16f9ccb258cee505ccf9f70db8219b3a5bf26885b901e49d37e1343da53$coro:
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_fault_prepare_v1
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.ebc7cbd269a32be910f0a659a9834d3f
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_run_decision_take_zero_v1
+    github.com/goplus/llgo/cl/_testmeta/interface_anyonmous.T.N
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.trap
+github.com/goplus/llgo/cl/_testmeta/interface_anyonmous.init:
+    github.com/goplus/llgo/cl/_testmeta/interface_anyonmous.init$guard
+github.com/goplus/llgo/cl/_testmeta/interface_anyonmous.main$coro:
+    __llgo_coro_await_consume_v1
+    __llgo_coro_await_prepare_v3
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.f5973b935eae770809ac058325a53ba2
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_panic_prepare_v1
+    __llgo_coro_run_decision_take_zero_v1
+    _llgo_github.com/goplus/llgo/cl/_testmeta/interface_anyonmous.T
+    _llgo_iface$f14WsslTA1u5wwC83jLU0HU2u2mmAWxBVE38vPBbRAo
+    github.com/goplus/llgo/cl/_testmeta/interface_anyonmous.use$coro
+    github.com/goplus/llgo/runtime/internal/runtime.AllocU
+    github.com/goplus/llgo/runtime/internal/runtime.NewItab$coro
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.promise
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.trap
+github.com/goplus/llgo/cl/_testmeta/interface_anyonmous.use$coro:
+    __llgo_coro_await_consume_v1
+    __llgo_coro_await_prepare_v3
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_fault_prepare_v1
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.61cb817a3f43a1c1c508728c68d23ba7
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_panic_prepare_v1
+    __llgo_coro_run_decision_take_zero_v1
+    github.com/goplus/llgo/runtime/internal/runtime.IfacePtrData$coro
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.promise
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.trap
+llvm.used:
+    __llgo_coro_root_factory_descriptor_v1.f5973b935eae770809ac058325a53ba2
+    __llgo_coro_root_package_v1.afa23082971f44917db8ca2a861fcb19
+
+[UseIface]
+github.com/goplus/llgo/cl/_testmeta/interface_anyonmous.main$coro:
+    _llgo_github.com/goplus/llgo/cl/_testmeta/interface_anyonmous.T
+
+[UseIfaceMethod]
+github.com/goplus/llgo/cl/_testmeta/interface_anyonmous.use$coro:
+    _llgo_iface$f14WsslTA1u5wwC83jLU0HU2u2mmAWxBVE38vPBbRAo M _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac
+    _llgo_iface$f14WsslTA1u5wwC83jLU0HU2u2mmAWxBVE38vPBbRAo N _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac
+
+[MethodInfo]
+*_llgo_github.com/goplus/llgo/cl/_testmeta/interface_anyonmous.T:
+    0 M _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac __llgo_coro_func_descriptor_v1.method.3a22a426e5608f1e.88c3d2383da6469b697cffacc8f592fd __llgo_coro_func_descriptor_v1.method-value.3a22a426e5608f1e.6a60c50b22b6bf532b121aacceef6848
+    1 N _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac __llgo_coro_func_descriptor_v1.method.e25d19b1e0fd88b9.88c3d2383da6469b697cffacc8f592fd __llgo_coro_func_descriptor_v1.method-value.e25d19b1e0fd88b9.6a60c50b22b6bf532b121aacceef6848
+_llgo_github.com/goplus/llgo/cl/_testmeta/interface_anyonmous.T:
+    0 M _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac __llgo_coro_func_descriptor_v1.method.3a22a426e5608f1e.88c3d2383da6469b697cffacc8f592fd __llgo_coro_func_descriptor_v1.method-value.dfec4ef1bd593a64.681d587a261db3b06ac64fcd7e890d72
+    1 N _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac __llgo_coro_func_descriptor_v1.method.e25d19b1e0fd88b9.88c3d2383da6469b697cffacc8f592fd __llgo_coro_func_descriptor_v1.method-value.e32b3061ae6ff3d8.681d587a261db3b06ac64fcd7e890d72
+
+[InterfaceInfo]
+_llgo_iface$f14WsslTA1u5wwC83jLU0HU2u2mmAWxBVE38vPBbRAo:
+    M _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac
+    N _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac
+
