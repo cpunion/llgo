@@ -120,6 +120,7 @@ jobs:
           go test -race -shuffle=on -tags='coro_channel_adapter_test,coro_channel_owner_test' \
             ./internal/runtime/z_chan.go \
             ./internal/runtime/z_chan_coro.go \
+            ./internal/runtime/coro_host_operation_materialize.go \
             ./internal/runtime/z_chan_lock_coro.go \
             ./internal/runtime/z_chan_lock_coro_atomic_host.go \
             ./internal/runtime/coro_channel_adapter_test.go \
@@ -130,6 +131,7 @@ jobs:
             -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" \
             ./internal/runtime/z_chan.go \
             ./internal/runtime/z_chan_coro.go \
+            ./internal/runtime/coro_host_operation_materialize.go \
             ./internal/runtime/z_chan_lock_coro.go \
             ./internal/runtime/z_chan_lock_coro_atomic_host.go \
             ./internal/runtime/coro_channel_adapter_test.go \

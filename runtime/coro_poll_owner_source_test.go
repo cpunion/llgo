@@ -355,6 +355,9 @@ func TestCoroHostPollDescriptorReservationIsPreemptionSafe(t *testing.T) {
 
 	controlPath := "internal/runtime/coro_host_operation_control_llgo.go"
 	control := readRuntimePollFile(t, controlPath)
+	materializePath := "internal/runtime/coro_host_operation_materialize.go"
+	controlMaterialization := readRuntimePollFile(t, materializePath)
+	controlContract := controlMaterialization + "\n" + control
 	for _, marker := range []string{
 		"type coroHostOperationControlLaneV1 struct",
 		"operation coro.OperationID",
@@ -364,8 +367,9 @@ func TestCoroHostPollDescriptorReservationIsPreemptionSafe(t *testing.T) {
 		"catomic.CompareAndExchange(&cell.epoch, current, next)",
 		"If no operation is bound yet, its later park hook detects the epoch",
 	} {
-		if !strings.Contains(control, marker) {
-			t.Errorf("%s lacks reconfiguration epoch marker %q", controlPath, marker)
+		if !strings.Contains(controlContract, marker) {
+			t.Errorf("%s and %s lack reconfiguration epoch marker %q",
+				materializePath, controlPath, marker)
 		}
 	}
 
@@ -377,9 +381,61 @@ func TestCoroHostPollDescriptorReservationIsPreemptionSafe(t *testing.T) {
 		"currentEpoch != expectedEpoch",
 		"coro.RequestCurrentExecutorWorkerParkCancel(driver, task, worker, ticket)",
 		"cannot cancel reconfigured deadline coroutine host operation",
+		"coro.BindWaitSetResumeCleanup(",
+		"coro.TakeResumePacket(",
 	} {
 		if !strings.Contains(deadlineOwner, marker) {
 			t.Errorf("%s lacks exact reconfiguration reconciliation %q", deadlineOwnerPath, marker)
+		}
+	}
+
+	hostOwnerPath := "internal/runtime/coro_host_operation_owner_llgo.go"
+	hostOwner := readRuntimePollFile(t, hostOwnerPath)
+	for _, marker := range []string{
+		"coro.BindWaitSetResumeCleanup(",
+		"coro.TakeResumePacket(",
+	} {
+		if !strings.Contains(hostOwner, marker) {
+			t.Errorf("%s lacks P-neutral resume marker %q", hostOwnerPath, marker)
+		}
+	}
+	hostResumeStart := strings.Index(hostOwner, "func __llgo_coro_host_operation_resume_v1(")
+	deadlineResumeStart := strings.Index(
+		deadlineOwner,
+		"func __llgo_coro_host_operation_deadline_resume_v1(",
+	)
+	if hostResumeStart < 0 || deadlineResumeStart < 0 {
+		t.Fatal("host operation sources lack resume functions")
+	}
+	for _, source := range []struct {
+		path string
+		body string
+	}{
+		{path: hostOwnerPath, body: hostOwner[hostResumeStart:]},
+		{path: deadlineOwnerPath, body: deadlineOwner[deadlineResumeStart:]},
+	} {
+		for _, marker := range []string{
+			"coro.TakeRunDecision(",
+			"coro.CurrentExecutorWorkerDriver(",
+			"coro.FinishCurrentExecutorWorkerPark(",
+			"coro.FinishCurrentExecutorTimerPark(",
+			"coroHostOperationAdapterV1State.Retire(",
+			"coroHostOperationControlUnbindV1(",
+		} {
+			if strings.Contains(source.body, marker) {
+				t.Errorf("%s revisits old-owner state during resume via %q", source.path, marker)
+			}
+		}
+	}
+	for _, marker := range []string{
+		"case coro.ResumeCleanupHostOperation:",
+		"case coro.ResumeCleanupHostOperationDeadline:",
+		"coroHostOperationAdapterV1State.Retire(",
+		"coroHostOperationControlUnbindV1(",
+		"return coro.CommitResumeCleanupStep(",
+	} {
+		if !strings.Contains(controlMaterialization, marker) {
+			t.Errorf("%s lacks old-owner materialization marker %q", materializePath, marker)
 		}
 	}
 }

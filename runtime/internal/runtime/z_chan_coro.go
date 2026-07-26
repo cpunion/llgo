@@ -911,13 +911,13 @@ func prepareCoroChanSelectV1(
 		&state.packet,
 		&state.cleanup,
 		coro.ResumeCleanupBinding{
-			Kind:    coro.ResumeCleanupChannelSelect,
-			Context: unsafe.Pointer(state),
-			Entries: candidates,
-			Source:  source,
-			Claim:   &state.claim,
-			Count:   uint32(len(ops)),
-			Stride:  unsafe.Sizeof(CoroChanSelectCaseV1{}),
+			Kind:         coro.ResumeCleanupChannelSelect,
+			Context:      unsafe.Pointer(state),
+			Entries:      candidates,
+			Claim:        &state.claim,
+			Count:        uint32(len(ops)),
+			RuntimeCount: uint32(len(ops)),
+			Stride:       unsafe.Sizeof(CoroChanSelectCaseV1{}),
 		},
 	) {
 		coroRuntimeAbort("cannot bind coroutine channel select cleanup")
@@ -1097,13 +1097,13 @@ func prepareCoroChanParkV1(
 		&state.packet,
 		&state.cleanup,
 		coro.ResumeCleanupBinding{
-			Kind:    coro.ResumeCleanupChannelDirect,
-			Context: unsafe.Pointer(state),
-			Entries: unsafe.Pointer(&state.operation.id),
-			Source:  source,
-			Claim:   &state.claim,
-			Count:   1,
-			Stride:  unsafe.Sizeof(coro.OperationID{}),
+			Kind:         coro.ResumeCleanupChannelDirect,
+			Context:      unsafe.Pointer(state),
+			Entries:      unsafe.Pointer(&state.operation.id),
+			Claim:        &state.claim,
+			Count:        1,
+			RuntimeCount: 1,
+			Stride:       unsafe.Sizeof(coro.OperationID{}),
 		},
 	) {
 		coroRuntimeAbort("cannot bind coroutine channel cleanup")
@@ -1392,6 +1392,8 @@ func coroMaterializeResumeCleanupStepV1(step coro.ResumeCleanupStep) bool {
 		if ok {
 			candidate.order = 0
 		}
+	case coro.ResumeCleanupHostOperation, coro.ResumeCleanupHostOperationDeadline:
+		return coroMaterializeHostOperationResumeCleanupStepV1(step)
 	default:
 		return false
 	}

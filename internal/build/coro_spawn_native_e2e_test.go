@@ -632,6 +632,7 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_worker_native_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_worker_completion_program_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_wait_pipe_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_host_operation_materialize.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan_coro.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "z_chan_lock_coro.go"),
@@ -646,6 +647,7 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_worker_completion_program_llgo.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_nil_fault.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_panic_payload.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_host_operation_materialize.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "z_chan.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "z_chan_coro.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "z_chan_lock_coro.go")
