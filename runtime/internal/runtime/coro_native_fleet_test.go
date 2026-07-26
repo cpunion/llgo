@@ -19,6 +19,7 @@
 package runtime
 
 import (
+	"fmt"
 	"os"
 	stdruntime "runtime"
 	"sync"
@@ -777,18 +778,60 @@ func TestCoroNativeFleetProductionIslandsV1(t *testing.T) {
 
 func TestCoroNativeFleetStartFailureIsPermanentV1(t *testing.T) {
 	var state coroNativeFleetStateV1
-	// Force only the second fixed domain's preflight to reject. The first route
+	// Force only the selected prefix's second domain preflight to reject. Route 1
 	// must be fully joined and retired, while the enclosing adapter remains a
 	// fail-stop tombstone rather than appearing pristine/restartable.
 	state.domains[1].lifecycle = coroNativeFleetDomainFailedV1
-	if coroNativeFleetStartStateV1(&state) || state.lifecycle != coroNativeFleetFailedV1 ||
+	if coroNativeFleetStartStateV1(&state, 2) || state.lifecycle != coroNativeFleetFailedV1 ||
 		state.domains[0].lifecycle != coroNativeFleetDomainFailedV1 ||
 		!state.domains[0].ingress.Retired() || !state.domains[0].doorbell.Closed() ||
 		state.domains[0].driver != (coro.ExecutorDriver{}) || !state.fleet.AllRetired() {
 		t.Fatal("partial native fleet start did not fail-stop and strongly retire route 1")
 	}
-	if coroNativeFleetStartStateV1(&state) {
+	if coroNativeFleetStartStateV1(&state, 2) {
 		t.Fatal("failed native fleet was restartable")
+	}
+}
+
+func TestCoroNativeFleetConfigurableDomainPrefixV1(t *testing.T) {
+	for _, count := range []uint32{1, 4, coroNativeFleetDomainCapacityV1} {
+		t.Run(fmt.Sprintf("count-%d", count), func(t *testing.T) {
+			state := new(coroNativeFleetStateV1)
+			if !coroNativeFleetStartStateV1(state, count) ||
+				state.lifecycle != coroNativeFleetActiveV1 || state.domainCount != count {
+				t.Fatalf("start native fleet prefix %d = lifecycle:%d count:%d",
+					count, state.lifecycle, state.domainCount)
+			}
+			for index := uint32(0); index < count; index++ {
+				domain := &state.domains[index]
+				if domain.lifecycle != coroNativeFleetDomainActiveV1 ||
+					domain.handle.Route != index+1 || !domain.handle.Valid() {
+					t.Fatalf("native fleet prefix %d domain %d = %+v/%d",
+						count, index, domain.handle, domain.lifecycle)
+				}
+			}
+			for index := count; index < coroNativeFleetDomainCapacityV1; index++ {
+				if !coroNativeFleetDomainCandidateV1(&state.domains[index]) {
+					t.Fatalf("native fleet prefix %d consumed suffix domain %d", count, index)
+				}
+			}
+			for index := count; index > 0; index-- {
+				if !coroNativeFleetAbortActiveDomainV1(state, &state.domains[index-1]) {
+					t.Fatalf("retire native fleet prefix %d domain %d", count, index-1)
+				}
+			}
+			if !state.fleet.AllRetired() {
+				t.Fatalf("native fleet prefix %d retained core resources", count)
+			}
+		})
+	}
+	for _, count := range []uint32{0, coroNativeFleetDomainCapacityV1 + 1} {
+		state := new(coroNativeFleetStateV1)
+		if coroNativeFleetStartStateV1(state, count) ||
+			state.domainCount != 0 || state.lifecycle != coroNativeFleetUnusedV1 ||
+			!state.fleet.AllRetired() {
+			t.Fatalf("invalid native fleet prefix %d mutated state", count)
+		}
 	}
 }
 
@@ -834,7 +877,7 @@ func TestCoroNativeFleetAdoptsBoundProgramStorageV1(t *testing.T) {
 			Control: &programControl,
 		},
 	}
-	if !coroNativeFleetStartDomainsV1(&state, &owners) {
+	if !coroNativeFleetStartDomainsV1(&state, &owners, 2) {
 		t.Fatal("start native fleet around bound program executor")
 	}
 	program := &state.domains[0]

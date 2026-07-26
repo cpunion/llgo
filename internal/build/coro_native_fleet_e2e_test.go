@@ -28,10 +28,16 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	llssa "github.com/goplus/llgo/ssa"
+)
+
+var (
+	coroNativeFleetE2ERuntimeArchiveOnce sync.Once
+	coroNativeFleetE2ERuntimeArchive     string
 )
 
 const coroNativeFleetE2ESource = `package main
@@ -311,30 +317,64 @@ func Check() int32 {
 }
 `
 
+const coroNativeFleetSingleOwnerE2ESource = `package main
+
+var Data chan uint32
+var Got uint32
+
+func Setup() {
+	Data = make(chan uint32)
+	Got = 0
+}
+
+func child() {
+	Data <- 0x51a91e
+}
+
+func main() {
+	go child()
+	Got = <-Data
+}
+
+func Check() int32 {
+	if Got != 0x51a91e {
+		return 67
+	}
+	return 0
+}
+`
+
 func TestCoroNativeFleetPhysicalPeerRunsDistributedChildE2E(t *testing.T) {
-	runCoroNativeFleetE2E(t, coroNativeFleetE2ESource, "distributed-child", false)
+	runCoroNativeFleetE2E(t, coroNativeFleetE2ESource, "distributed-child", false, 8)
 }
 
 func TestCoroNativeFleetMainReturnCancelsPeerE2E(t *testing.T) {
-	runCoroNativeFleetE2E(t, coroNativeFleetShutdownE2ESource, "main-return-cancel", false)
+	runCoroNativeFleetE2E(t, coroNativeFleetShutdownE2ESource, "main-return-cancel", false, 4)
 }
 
 func TestCoroNativeFleetPeerSpawnReturnsToProgramE2E(t *testing.T) {
-	runCoroNativeFleetE2E(t, coroNativeFleetPeerSpawnE2ESource, "peer-spawn-program", false)
+	runCoroNativeFleetE2E(t, coroNativeFleetPeerSpawnE2ESource, "peer-spawn-program", false, 4)
 }
 
 func TestCoroNativeFleetChannelSelectCrossRouteE2E(t *testing.T) {
-	runCoroNativeFleetE2E(t, coroNativeFleetChannelSelectE2ESource, "channel-select-cross-route", true)
+	runCoroNativeFleetE2E(t, coroNativeFleetChannelSelectE2ESource, "channel-select-cross-route", true, 4)
 }
 
 func TestCoroNativeFleetShutdownCancelsPeerChannelSelectE2E(t *testing.T) {
-	runCoroNativeFleetE2E(t, coroNativeFleetChannelShutdownE2ESource, "channel-select-shutdown", true)
+	runCoroNativeFleetE2E(t, coroNativeFleetChannelShutdownE2ESource, "channel-select-shutdown", true, 4)
 }
 
-func runCoroNativeFleetE2E(t *testing.T, source, name string, enableChannel bool) {
+func TestCoroNativeFleetSingleOwnerChannelProgressE2E(t *testing.T) {
+	runCoroNativeFleetE2E(t, coroNativeFleetSingleOwnerE2ESource, "single-owner-channel", true, 1)
+}
+
+func runCoroNativeFleetE2E(t *testing.T, source, name string, enableChannel bool, ownerCount uint32) {
 	t.Helper()
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("native coroutine fleet link smoke requires Darwin or Linux")
+	}
+	if ownerCount == 0 {
+		t.Fatal("native coroutine fleet E2E owner count must be positive")
 	}
 	clang, err := exec.LookPath("clang")
 	if err != nil {
@@ -366,13 +406,7 @@ func runCoroNativeFleetE2E(t *testing.T, source, name string, enableChannel bool
 	)
 	entryObject := buildCoroSpawnNativeE2EEntry(t, prog, temp, anchor)
 	driverObject := buildCoroSpawnNativeE2EDriver(t, prog, temp, setupSymbol, checkSymbol)
-	runtimeObjects := buildCoroNativeFleetE2ERuntimeIsland(t, temp)
-	runtimeObjects = append(runtimeObjects, buildCoroNativeFleetE2EBoundaryObject(t, clang, temp))
-	runtimeArchive := filepath.Join(temp, "libllgo-coro-fleet-runtime-island.a")
-	arArgs := append([]string{"rcs", runtimeArchive}, runtimeObjects...)
-	if output, err := exec.Command(ar, arArgs...).CombinedOutput(); err != nil {
-		t.Fatalf("archive coroutine fleet runtime island: %v\n%s", err, output)
-	}
+	runtimeArchive := cachedCoroNativeFleetE2ERuntimeArchive(t, clang, ar)
 
 	executable := filepath.Join(temp, "coro-native-fleet-"+name+"-e2e")
 	// Keep an opt-in stable output path for inspecting a failed native fleet
@@ -393,6 +427,13 @@ func runCoroNativeFleetE2E(t *testing.T, source, name string, enableChannel bool
 	runCtx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 10*time.Second)
 	defer cancel()
 	command := exec.CommandContext(runCtx, executable)
+	command.Env = make([]string, 0, len(os.Environ())+1)
+	for _, item := range os.Environ() {
+		if !strings.HasPrefix(item, "GOMAXPROCS=") {
+			command.Env = append(command.Env, item)
+		}
+	}
+	command.Env = append(command.Env, fmt.Sprintf("GOMAXPROCS=%d", ownerCount))
 	output, err := command.CombinedOutput()
 	if runCtx.Err() != nil {
 		t.Fatalf("native coroutine fleet smoke timed out: %v\n%s", runCtx.Err(), output)
@@ -400,6 +441,32 @@ func runCoroNativeFleetE2E(t *testing.T, source, name string, enableChannel bool
 	if err != nil {
 		t.Fatalf("native coroutine fleet smoke failed: %v\n%s", err, output)
 	}
+}
+
+func cachedCoroNativeFleetE2ERuntimeArchive(t *testing.T, clang, ar string) string {
+	t.Helper()
+	coroNativeFleetE2ERuntimeArchiveOnce.Do(func() {
+		// The runtime island and fixed C boundary are identical for every
+		// program in this suite. Keep their archive under TestMain's shared
+		// cache root so all E2Es pay the production-runtime compile once while
+		// retaining separate user, entry, driver, link, and execution checks.
+		temp := filepath.Join(cacheRootFunc(), "coro-native-fleet-e2e-runtime")
+		if err := os.MkdirAll(temp, 0o755); err != nil {
+			t.Fatal("create shared native fleet runtime directory:", err)
+		}
+		runtimeObjects := buildCoroNativeFleetE2ERuntimeIsland(t, temp)
+		runtimeObjects = append(runtimeObjects, buildCoroNativeFleetE2EBoundaryObject(t, clang, temp))
+		archive := filepath.Join(temp, "libllgo-coro-fleet-runtime-island.a")
+		arArgs := append([]string{"rcs", archive}, runtimeObjects...)
+		if output, err := exec.Command(ar, arArgs...).CombinedOutput(); err != nil {
+			t.Fatalf("archive coroutine fleet runtime island: %v\n%s", err, output)
+		}
+		coroNativeFleetE2ERuntimeArchive = archive
+	})
+	if coroNativeFleetE2ERuntimeArchive == "" {
+		t.Fatal("shared native fleet runtime archive is unavailable")
+	}
+	return coroNativeFleetE2ERuntimeArchive
 }
 
 func buildCoroNativeFleetE2EBoundaryObject(t *testing.T, clang, temp string) string {

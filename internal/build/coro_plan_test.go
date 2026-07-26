@@ -525,7 +525,7 @@ func __llgo_coro_worker_resume_v1() {}
 func __llgo_coro_os_thread_locked_v1(unsafe.Pointer) bool { return false }
 func __llgo_coro_os_thread_foreign_call_v1(unsafe.Pointer, uintptr, uint32, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, *uintptr, *uintptr, *uintptr) {}
 func __llgo_coro_native_worker_complete_v1(uint32, uint32, uintptr, uintptr, uintptr) uint32 { return 0 }
-func __llgo_coro_native_fleet_owner_v1() uint32 { return 0 }
+func __llgo_coro_native_fleet_owner_v2(uint32) uint32 { return 0 }
 func __llgo_coro_timer_park_v2(g, handle, header, storage unsafe.Pointer, delay int64) {}
 func __llgo_coro_timer_park_controlled_v2(g, handle, header, storage, controller unsafe.Pointer, control, ownerRoute *uint32, expected uint32, deadline int64) {}
 func __llgo_coro_timer_resume_v2(g, storage unsafe.Pointer) uint32 { return 1 }
@@ -753,7 +753,7 @@ func atomicExchange(*uint32, uint32) uint32
 		coroOSThreadLockedSymbolV1,
 		coroOSThreadForeignCallSymbolV1,
 		coroNativeWorkerCompleteSymbolV1,
-		coroNativeFleetOwnerSymbolV1,
+		coroNativeFleetOwnerSymbolV2,
 		coroTimerParkSymbolV2,
 		coroTimerParkControlledSymbolV2,
 		coroTimerResumeSymbolV2,

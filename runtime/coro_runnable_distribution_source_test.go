@@ -54,6 +54,8 @@ func TestCoroRunnableDistributionUsesDemandAndExactMailbox(t *testing.T) {
 		"g.transferState == runnableTransferGImported",
 		"g.transferState = runnableTransferGIdle",
 		"g.transferState != runnableTransferGImported",
+		"func BindRunnableOwner(g *G) bool",
+		"runnableAffinity runnableOwnerAffinity",
 	} {
 		if !strings.Contains(scheduler, required) {
 			t.Errorf("scheduler lacks imported dequeue gate %q", required)
@@ -67,6 +69,7 @@ func TestCoroRunnableDistributionHasOneGenericTargetPath(t *testing.T) {
 		"internal/runtime/coro_native_fleet_owner_llgo.go",
 		"internal/runtime/coro_ready_distribution_default.go",
 		"internal/runtime/coro_ready_distribution_fleet_llgo.go",
+		"internal/runtime/coro_program.go",
 		"internal/runtime/coro_sched.go",
 		"internal/runtime/coro_spawn.go",
 	}
@@ -80,6 +83,7 @@ func TestCoroRunnableDistributionHasOneGenericTargetPath(t *testing.T) {
 		"RequestPNeutralRunnable(",
 		"CancelPNeutralRunnableRequest(",
 		"coroTargetRequestProgramRunnableV1(",
+		"coro.BindRunnableOwner(&coroProgramGV1State)",
 	} {
 		if !strings.Contains(text, required) {
 			t.Errorf("native fleet distribution lacks generic marker %q", required)
@@ -93,6 +97,66 @@ func TestCoroRunnableDistributionHasOneGenericTargetPath(t *testing.T) {
 	} {
 		if strings.Contains(text, forbidden) {
 			t.Errorf("native fleet distribution retained spawn-specific path %q", forbidden)
+		}
+	}
+}
+
+func TestCoroNativeFleetUsesBoundedStartupPrefixAndScalarPeerABI(t *testing.T) {
+	fleet := readRuntimePollFile(t, "internal/runtime/coro_native_fleet.go")
+	for _, required := range []string{
+		"coroNativeFleetDomainCapacityV1 = coro.ExecutorFleetCapacity",
+		"domainCount uint32",
+		"count == 0 || count > coroNativeFleetDomainCapacityV1",
+		"state.domainCount = count",
+		"for index := uint32(0); index < count; index++",
+	} {
+		if !strings.Contains(fleet, required) {
+			t.Errorf("native fleet lacks bounded active-prefix marker %q", required)
+		}
+	}
+
+	owner := readRuntimePollFile(t, "internal/runtime/coro_native_fleet_owner_llgo.go")
+	for _, required := range []string{
+		"[coroNativeFleetDomainCapacityV1 - 1]coroNativeFleetPhysicalOwnerV1",
+		"corofleet.OwnerCount(uint32(coroNativeFleetDomainCapacityV1))",
+		"corofleet.CreatePeer(&peer.thread, handle.Route)",
+		"func __llgo_coro_native_fleet_owner_v2(route uint32) uint32",
+		"state.stop.Quiesced()",
+	} {
+		if !strings.Contains(owner, required) {
+			t.Errorf("native fleet physical owner lacks startup-policy marker %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"coroNativeFleetPeerIndexV1",
+		"state.lifecycle == coroNativeFleetPhysicalStoppingV1",
+		"__llgo_coro_native_fleet_owner_v1",
+	} {
+		if strings.Contains(owner, forbidden) {
+			t.Errorf("native fleet physical owner retained fixed/non-atomic path %q", forbidden)
+		}
+	}
+
+	leaf := readRuntimePollFile(t, "internal/corofleet/_owner/owner.c")
+	for _, required := range []string{
+		"getenv(\"GOMAXPROCS\")",
+		"sysconf(_SC_NPROCESSORS_ONLN)",
+		"__llgo_coro_native_fleet_owner_v2((uint32_t)route)",
+		"__llgo_coro_fleet_owner_create_v2(pthread_t *thread, uint32_t route)",
+		"(void *)(uintptr_t)route",
+	} {
+		if !strings.Contains(leaf, required) {
+			t.Errorf("native fleet C leaf lacks scalar startup-policy marker %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"__llgo_coro_native_fleet_owner_v1",
+		"__llgo_coro_fleet_owner_create_v1",
+		"malloc(",
+		"void (*",
+	} {
+		if strings.Contains(leaf, forbidden) {
+			t.Errorf("native fleet C leaf retained callback/address-owned path %q", forbidden)
 		}
 	}
 }

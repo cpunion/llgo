@@ -4427,7 +4427,7 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 		// stack. Its static closure owns the ordinary-domain reducer, bounded
 		// reactor wait, and LLVM resume/destroy wrappers; it must never acquire a
 		// managed entry or an independently suspended coroutine twin.
-		names = append(names, coroNativeFleetOwnerSymbolV1)
+		names = append(names, coroNativeFleetOwnerSymbolV2)
 	}
 	if hostCoroPullRuntimeABI(ctx.buildConf) {
 		names = append(names,
@@ -4699,13 +4699,14 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 				}
 			}
 		}
-		if name == coroNativeFleetOwnerSymbolV1 {
+		if name == coroNativeFleetOwnerSymbolV2 {
 			sig := fn.Signature
-			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 0 ||
+			if sig == nil || sig.Recv() != nil || sig.Variadic() || sig.Params().Len() != 1 ||
 				sig.Results().Len() != 1 ||
+				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.Uint32]) ||
 				!types.Identical(sig.Results().At(0).Type(), types.Typ[types.Uint32]) ||
 				typeParamLen(sig.TypeParams()) != 0 || typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
-				return nil, nil, nil, nil, fmt.Errorf("coroutine native fleet owner %q must have exact func() uint32 signature", name)
+				return nil, nil, nil, nil, fmt.Errorf("coroutine native fleet owner %q must have exact func(uint32) uint32 signature", name)
 			}
 		}
 		if name == coroTimerParkSymbolV2 {

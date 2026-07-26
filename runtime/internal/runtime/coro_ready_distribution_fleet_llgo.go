@@ -33,7 +33,7 @@ func coroTargetReadyDistributionDomainV1(
 		return nil, false
 	}
 	state := &coroNativeFleetV1State
-	for index := uint32(0); index < coroNativeFleetDomainCapacityV1; index++ {
+	for index := uint32(0); index < state.domainCount; index++ {
 		domain := &state.domains[index]
 		if domain.lifecycle == coroNativeFleetDomainActiveV1 &&
 			domain.pOwnerV1() == p && domain.driverOwnerV1() == driver {
@@ -44,9 +44,9 @@ func coroTargetReadyDistributionDomainV1(
 }
 
 // coroTargetAfterStableRunActionV1 is owner-to-owner work distribution, not a
-// producer callback. The two domains and their P/driver identities are frozen
-// before either physical M starts, and the program coordinator joins both Ms
-// before route close; the fleet's route producer lease therefore needs no
+// producer callback. The active domain prefix and every P/driver identity are
+// frozen before any peer M starts, and the program coordinator joins all peer
+// Ms before route close; the fleet's route producer lease therefore needs no
 // additional target-ingress lease around this short publish/request/ring tail.
 func coroTargetAfterStableRunActionV1(source *coro.P, driver *coro.ExecutorDriver) bool {
 	state := &coroNativeFleetV1State

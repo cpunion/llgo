@@ -94,7 +94,20 @@ type G struct {
 	// The bounded byte is sufficient for a deliberately exceptional API and
 	// keeps the exact previous G size on both 32- and 64-bit targets.
 	osThreadLockDepth uint8
+	// runnableAffinity occupies one byte of the remaining tail padding. An
+	// AnyOwner G may enter the P-neutral mailbox protocol. CurrentOwner is a
+	// permanent root-boundary property: its first enqueue establishes the
+	// owner, and refusing cross-P publication keeps that owner implicit in
+	// ordinary queue/run state rather than adding a P pointer to every G.
+	runnableAffinity runnableOwnerAffinity
 }
+
+type runnableOwnerAffinity uint8
+
+const (
+	runnableAnyOwner runnableOwnerAffinity = iota
+	runnableCurrentOwner
+)
 
 const (
 	// These values occupy only G.preempt's low preemptStateBits. A zero G starts
@@ -254,6 +267,7 @@ func expectedAction(p *P, g *G, action Action, kind ActionKind) bool {
 func InitG(g *G) bool {
 	if g == nil || g.magic != 0 || !gPreemptStateAtDepthZero(g, preemptDisabled) || g.state != GNew || g.taskControlLeases != 0 ||
 		g.runAction != ActionInvalid || g.transferState != runnableTransferGIdle || g.osThreadLockDepth != 0 ||
+		g.runnableAffinity != runnableAnyOwner ||
 		g.frames != nil || g.active != nil || g.root != nil ||
 		g.pending.kind != pendingNone || g.pending.from != nil || g.pending.target != nil ||
 		g.destroyTarget != nil || g.destroyRoot || g.nextReady != nil || g.queued ||
@@ -269,6 +283,23 @@ func InitG(g *G) bool {
 	// other G field, so an asynchronous requester can never observe a partially
 	// initialized scheduler object.
 	return compareAndSwapGPreemptStateAtDepthZero(g, preemptDisabled, preemptIdle)
+}
+
+// BindRunnableOwner permanently marks a freshly initialized root G as
+// owner-affine. The first ordinary Enqueue selects that owner; afterwards the
+// only cross-P runnable path rejects the G, so no durable P pointer or target
+// route is needed in G. This is distinct from LockOSThread: the owner is an
+// executor/P boundary, not necessarily one OS thread identity.
+func BindRunnableOwner(g *G) bool {
+	if !ValidG(g) || g.state != GNew || g.runnableAffinity != runnableAnyOwner ||
+		g.root != nil || g.active != nil || g.frames != nil ||
+		g.queued || g.nextReady != nil || g.waiting || g.runP != nil ||
+		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
+		!validLiveTaskStorage(g) {
+		return false
+	}
+	g.runnableAffinity = runnableCurrentOwner
+	return true
 }
 
 // RequestPreempt coalesces one asynchronous request while g's atomic preemption
