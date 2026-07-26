@@ -82,8 +82,9 @@ type PollOperationSnapshot struct {
 
 // PollOperationPostResult classifies owner-side import of a readiness event.
 // The first native slice has no reactor callback thread: target wait returns on
-// the executor owner and imports an exact handle before WakeExecutorAt scans
-// this source. Keeping a generation-classified result now preserves the same
+// the executor owner and imports an exact handle before WakeExecutorAt returns
+// source service to the unified reducer. Keeping a generation-classified
+// result now preserves the same
 // ABI if a future multi-P target moves import behind a stable ingress shim.
 type PollOperationPostResult uint8
 

@@ -110,3 +110,62 @@ func TestExecutorDriverBindCloseLifecycle(t *testing.T) {
 		t.Fatal("closed driver retained stable ownership")
 	}
 }
+
+func drainTimerAwareExecutorRunSources(t *testing.T, driver *ExecutorDriver, now int64) {
+	t.Helper()
+	for reduction := 0; reduction < 4096; reduction++ {
+		step, ok := NextExecutorRunStepAt(driver, now)
+		if !ok {
+			t.Fatalf("drain timer-aware executor source reduction %d", reduction)
+		}
+		switch step.Kind {
+		case ExecutorRunStepSource:
+			continue
+		case ExecutorRunStepIdle:
+			return
+		default:
+			t.Fatalf("timer-aware source drain reduction %d = %d", reduction, step.Kind)
+		}
+	}
+	t.Fatal("timer-aware executor source drain exceeded reduction bound")
+}
+
+func TestExecutorRunWakeDefersSourceService(t *testing.T) {
+	p := new(P)
+	driver, _, _, _ := bindTestExecutorDriverWithTimers(t, p)
+	prepared, ok := PrepareExecutorStandbyAt(driver, 10)
+	if !ok || !prepared {
+		t.Fatalf("prepare empty timer-aware standby = (%t, %t)", prepared, ok)
+	}
+	sleep, deadline, hasDeadline, ok := CommitExecutorSleepAt(driver, 11)
+	if !ok || !sleep || hasDeadline || deadline != 0 {
+		t.Fatalf("commit empty timer-aware standby = (%t, %d, %t, %t)", sleep, deadline, hasDeadline, ok)
+	}
+	if !WakeExecutorAt(driver, 12) || driver.state != executorDriverActive ||
+		!driver.run.sourceMore || driver.poll.phase != executorPollIdle {
+		t.Fatal("run wake did not retain source work for the unified reducer")
+	}
+	drainTimerAwareExecutorRunSources(t, driver, 13)
+	if driver.run != (executorRunCursor{}) {
+		t.Fatalf("drained run cursor = %+v", driver.run)
+	}
+	closeTestExecutorDriver(t, driver)
+}
+
+func TestPrepareExecutorStandbyDefersRacingRequest(t *testing.T) {
+	p := new(P)
+	driver, registry, _, handle := bindTestExecutorDriverWithTimers(t, p)
+	if result := registry.Request(handle); result != ExecutorRequestPublished {
+		t.Fatalf("publish pre-standby executor request = %d", result)
+	}
+	prepared, ok := PrepareExecutorStandbyAt(driver, 20)
+	if !ok || prepared || driver.state != executorDriverActive || !driver.run.sourceMore {
+		t.Fatalf("prepare over racing request = (%t, %t), state=%d run=%+v",
+			prepared, ok, driver.state, driver.run)
+	}
+	drainTimerAwareExecutorRunSources(t, driver, 21)
+	if registry.ObserveRequested(handle) {
+		t.Fatal("unified source reducer retained the racing executor request")
+	}
+	closeTestExecutorDriver(t, driver)
+}

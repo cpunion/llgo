@@ -110,8 +110,9 @@ func coroTargetWaitExecutorV1(pipe *corodoorbell.Pipe, deadline int64, hasDeadli
 				return false
 			}
 			if reached {
-				// A fresh WakeExecutorAt sample publishes all due timer and poll
-				// deadlines; a physical timeout is not itself a completion.
+				// A fresh WakeExecutorAt sample returns all due timer and
+				// poll deadlines to the unified reducer; a physical timeout is
+				// not itself a completion.
 				return true
 			}
 		}

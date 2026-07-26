@@ -453,42 +453,38 @@ func leaveExecutorIdle(driver *ExecutorDriver) bool {
 	return true
 }
 
-func leaveExecutorIdleAndPoll(driver *ExecutorDriver) (drained, promoted int, ok bool) {
+func leaveExecutorIdleForRun(driver *ExecutorDriver) bool {
 	if !leaveExecutorIdle(driver) {
-		return 0, 0, false
+		return false
 	}
-	return pollExecutor(driver)
+	// Facts discovered during the idle transaction may require a typed runtime
+	// materialization step. Retain only a source-work hint here; the unified
+	// reducer owns every later source-neutral and direct-runtime reduction.
+	driver.run.sourceMore = true
+	return validExecutorDriver(driver)
 }
 
-func leaveExecutorIdleAndPollAt(driver *ExecutorDriver, now int64) (scan executorSourceScan, ok bool) {
-	if !leaveExecutorIdle(driver) {
-		return executorSourceScan{}, false
-	}
-	return pollExecutorSourcesAt(driver, now, true)
-}
-
-// PrepareExecutorSleep services current work and, only when parked Gs remain
-// with no runnable work, executes ArmIdle, an unconditional final source scan,
-// and exact CommitSleep. A true sleep result authorizes the target to enter its
-// retained wait. false,true means work or a racing request won and the
-// scheduler should continue without blocking.
+// PrepareExecutorSleep executes ArmIdle, an unconditional source fact scan,
+// and exact CommitSleep only when no runnable exists and parked Gs remain.
+// Source resolution stays in the unified runner. A true sleep result authorizes
+// the target to enter its retained wait. false,true means work or a racing
+// request won and the scheduler should continue without blocking.
 func PrepareExecutorSleep(driver *ExecutorDriver) (sleep bool, ok bool) {
 	if !validExecutorDriver(driver) || driver.sources.usesMonotonicTime() || driver.state != executorDriverActive ||
 		!emptyExecutorRunCursor(driver) || !idleExecutorScheduler(driver.p) {
-		return false, false
-	}
-	if _, _, ok = pollExecutor(driver); !ok {
 		return false, false
 	}
 	if runnableForOSThreadOwner(driver.p) || !HasWaiting(driver.p) {
 		return false, true
 	}
 	if !driver.registry.ArmIdle(driver.handle) {
-		// Request won the exact zero-gate race. Service it while still active.
-		if _, _, ok = pollExecutor(driver); !ok {
+		// Request won the exact zero-gate race. Its fact remains durable and the
+		// unified runner will service it after this compatibility boundary.
+		if !driver.registry.ObserveRequested(driver.handle) {
 			return false, false
 		}
-		return false, true
+		driver.run.sourceMore = true
+		return false, validExecutorDriver(driver)
 	}
 
 	// Scan facts, not just pending, after publishing IdleArmed. This closes a
@@ -505,13 +501,13 @@ func PrepareExecutorSleep(driver *ExecutorDriver) (sleep bool, ok bool) {
 	hasWork := drained != 0 || runnableForOSThreadOwner(driver.p) || driver.sources.pending(driver.p) ||
 		driver.registry.ObserveRequested(driver.handle) || preemptLoad(&driver.p.schedule) != scheduleIdle
 	if hasWork {
-		if _, _, ok = leaveExecutorIdleAndPoll(driver); !ok {
+		if !leaveExecutorIdleForRun(driver) {
 			return false, false
 		}
 		return false, true
 	}
 	if !driver.registry.CommitSleep(driver.handle) {
-		if _, _, ok = leaveExecutorIdleAndPoll(driver); !ok {
+		if !leaveExecutorIdleForRun(driver) {
 			return false, false
 		}
 		return false, true
@@ -521,11 +517,12 @@ func PrepareExecutorSleep(driver *ExecutorDriver) (sleep bool, ok bool) {
 }
 
 // PrepareExecutorSleepAt performs the first half of timer-aware retained-wait
-// admission. It services the complete source set at now, publishes IdleArmed,
-// and scans the complete set once more. true,true leaves the driver in an explicit
-// idle-preparing state and requires the caller to take a fresh monotonic sample
-// and call CommitExecutorSleepAt. false,true means work won and the driver is
-// active. A failure never leaves a newly armed idle gate behind.
+// admission. It publishes IdleArmed and scans every durable source fact at now
+// without resolving the resulting epoch. true,true leaves the driver in an
+// explicit idle-preparing state and requires the caller to take a fresh
+// monotonic sample and call CommitExecutorSleepAt. false,true means work won
+// and the unified runner must continue. A failure never leaves a newly armed
+// idle gate behind.
 func prepareExecutorSleepAt(
 	driver *ExecutorDriver,
 	now int64,
@@ -535,18 +532,17 @@ func prepareExecutorSleepAt(
 		!emptyExecutorRunCursor(driver) || !idleExecutorScheduler(driver.p) || now < 0 {
 		return false, false
 	}
-	if _, ok = pollExecutorSourcesAt(driver, now, true); !ok {
-		return false, false
-	}
 	if runnableForOSThreadOwner(driver.p) || !allowEmpty && !HasWaiting(driver.p) {
 		return false, true
 	}
 	if !driver.registry.ArmIdle(driver.handle) {
-		// Request won the exact zero-gate race. Service it while still active.
-		if _, ok = pollExecutorSourcesAt(driver, now, true); !ok {
+		// Request won the exact zero-gate race. Defer source service to the
+		// unified runner so typed materialization stays resumable.
+		if !driver.registry.ObserveRequested(driver.handle) {
 			return false, false
 		}
-		return false, true
+		driver.run.sourceMore = true
+		return false, validExecutorDriver(driver)
 	}
 
 	// Scan facts, not just pending, after publishing IdleArmed. Commit performs
@@ -560,7 +556,7 @@ func prepareExecutorSleepAt(
 		driver.sources.pending(driver.p) || driver.registry.ObserveRequested(driver.handle) ||
 		preemptLoad(&driver.p.schedule) != scheduleIdle
 	if hasWork {
-		if _, ok = leaveExecutorIdleAndPollAt(driver, now); !ok {
+		if !leaveExecutorIdleForRun(driver) {
 			return false, false
 		}
 		return false, true
@@ -610,7 +606,7 @@ func CommitExecutorSleepAt(driver *ExecutorDriver, now int64) (sleep bool, deadl
 		driver.sources.pending(driver.p) || driver.registry.ObserveRequested(driver.handle) ||
 		preemptLoad(&driver.p.schedule) != scheduleIdle
 	if hasWork {
-		if _, ok = leaveExecutorIdleAndPollAt(driver, now); !ok {
+		if !leaveExecutorIdleForRun(driver) {
 			return false, 0, false, false
 		}
 		return false, 0, false, true
@@ -620,7 +616,7 @@ func CommitExecutorSleepAt(driver *ExecutorDriver, now int64) (sleep bool, deadl
 		return false, 0, false, false
 	}
 	if !driver.registry.CommitSleep(driver.handle) {
-		if _, ok = leaveExecutorIdleAndPollAt(driver, now); !ok {
+		if !leaveExecutorIdleForRun(driver) {
 			return false, 0, false, false
 		}
 		return false, 0, false, true
@@ -631,26 +627,28 @@ func CommitExecutorSleepAt(driver *ExecutorDriver, now int64) (sleep bool, deadl
 	return true, scan.deadline, scan.hasDeadline, true
 }
 
-// WakeExecutor leaves a committed retained wait and immediately services all
-// durable sources. It also accepts a spurious target wake while the gate still
-// contains exact IdleArmed.
-func WakeExecutor(driver *ExecutorDriver) (drained, promoted int, ok bool) {
-	if !validExecutorDriver(driver) || driver.sources.usesMonotonicTime() || driver.state != executorDriverSleeping ||
-		!emptyExecutorRunCursor(driver) || !idleExecutorScheduler(driver.p) {
-		return 0, 0, false
+func wakeExecutorRun(driver *ExecutorDriver, now int64, withDeadline bool) bool {
+	if !validExecutorDriver(driver) || driver.sources.usesMonotonicTime() != withDeadline ||
+		driver.state != executorDriverSleeping || !emptyExecutorRunCursor(driver) ||
+		!idleExecutorScheduler(driver.p) || withDeadline && now < 0 {
+		return false
 	}
-	return leaveExecutorIdleAndPoll(driver)
+	return leaveExecutorIdleForRun(driver)
 }
 
-// WakeExecutorAt leaves a committed timer-aware retained wait and services both
-// source set using the target's fresh post-wake monotonic sample.
-func WakeExecutorAt(driver *ExecutorDriver, now int64) (timers, promoted int, ok bool) {
-	if !validExecutorDriver(driver) || !driver.sources.usesMonotonicTime() || driver.state != executorDriverSleeping ||
-		!emptyExecutorRunCursor(driver) || !idleExecutorScheduler(driver.p) || now < 0 {
-		return 0, 0, false
-	}
-	scan, ok := leaveExecutorIdleAndPollAt(driver, now)
-	return scan.timers, scan.promoted, ok
+// WakeExecutor leaves a retained no-deadline wait and defers all source
+// service to NextExecutorRunStep. Production runtimes use this boundary because
+// typed resume materialization may require a direct runtime reduction between
+// source-neutral steps.
+func WakeExecutor(driver *ExecutorDriver) bool {
+	return wakeExecutorRun(driver, 0, false)
+}
+
+// WakeExecutorAt is the monotonic-time counterpart to WakeExecutor. The
+// timestamp validates the target wake sample; each later bounded source
+// reduction receives its own fresh sample through NextExecutorRunStepAt.
+func WakeExecutorAt(driver *ExecutorDriver, now int64) bool {
+	return wakeExecutorRun(driver, now, true)
 }
 
 func canBeginExecutorClose(driver *ExecutorDriver) bool {

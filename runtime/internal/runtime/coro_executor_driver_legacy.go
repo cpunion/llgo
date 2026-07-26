@@ -41,6 +41,5 @@ func coroProgramPollExecutorV1(driver *coro.ExecutorDriver) bool {
 }
 
 func coroProgramWakeExecutorV1(driver *coro.ExecutorDriver) bool {
-	_, _, ok := coro.WakeExecutor(driver)
-	return ok
+	return coro.WakeExecutor(driver)
 }

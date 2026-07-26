@@ -116,6 +116,5 @@ func coroProgramWakeExecutorV1(driver *coro.ExecutorDriver) bool {
 	if !clockOK {
 		return false
 	}
-	_, _, ok := coro.WakeExecutorAt(driver, now)
-	return ok
+	return coro.WakeExecutorAt(driver, now)
 }

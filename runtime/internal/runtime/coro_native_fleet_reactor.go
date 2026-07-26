@@ -156,7 +156,8 @@ func coroNativeFleetPollPostAcceptedV1(result coro.OperationRouteIngressResult) 
 // bounded poll call. Retry requires the physical owner to take a fresh
 // monotonic sample and re-enter, giving the coordinator a stop-check boundary
 // after EINTR and ordinary timeouts. Wake means it may reacquire a new logical
-// owner epoch and run the common WakeExecutorAt transaction.
+// owner epoch and run the common WakeExecutorAt transition. Source service
+// then resumes through the same bounded reducer used before sleep.
 func coroNativeFleetWaitOwnerPassAtV1(
 	wait coroNativeFleetArmedWaitV1,
 	now int64,

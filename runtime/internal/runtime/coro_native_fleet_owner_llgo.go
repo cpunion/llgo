@@ -297,7 +297,7 @@ func coroNativeFleetRunPhysicalOwnerPassV1(
 				if !wakeClockOK {
 					return coroNativeFleetPhysicalOwnerFailV1("native fleet peer wake clock failed")
 				}
-				next, _, _, wakeOK := coroNativeFleetWakeOwnerAtV1(handle, wakeNow)
+				next, wakeOK := coroNativeFleetWakeOwnerAtV1(handle, wakeNow)
 				if !wakeOK {
 					return coroNativeFleetPhysicalOwnerFailV1("native fleet peer wake transition failed")
 				}
