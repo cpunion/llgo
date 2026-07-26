@@ -14,9 +14,13 @@
  * limitations under the License.
  */
 
+#include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <sys/socket.h>
+#include <time.h>
+#include <unistd.h>
 
 uintptr_t __llgo_coro_native_fleet_e2e_thread_id_v1(void) {
     return (uintptr_t)pthread_self();
@@ -26,6 +30,8 @@ static _Atomic uint32_t llgo_coro_native_fleet_e2e_active_v1;
 static _Atomic uint32_t llgo_coro_native_fleet_e2e_maximum_v1;
 static _Atomic uint32_t llgo_coro_native_fleet_e2e_blocked_state_v1;
 static _Atomic uint32_t llgo_coro_native_fleet_e2e_release_state_v1;
+static _Atomic uint32_t llgo_coro_native_fleet_e2e_nested_blocked_state_v1;
+static int llgo_coro_native_fleet_e2e_stream_v1[2] = {-1, -1};
 
 void __llgo_coro_native_fleet_e2e_quota_reset_v1(void) {
     atomic_store_explicit(
@@ -67,6 +73,10 @@ void __llgo_coro_native_fleet_e2e_block_reset_v1(void) {
         &llgo_coro_native_fleet_e2e_blocked_state_v1, 0, memory_order_seq_cst);
     atomic_store_explicit(
         &llgo_coro_native_fleet_e2e_release_state_v1, 0, memory_order_seq_cst);
+    atomic_store_explicit(
+        &llgo_coro_native_fleet_e2e_nested_blocked_state_v1,
+        0,
+        memory_order_seq_cst);
 }
 
 uintptr_t __llgo_coro_native_fleet_e2e_blocked_v1(void) {
@@ -85,5 +95,70 @@ void __llgo_coro_native_fleet_e2e_block_v1(void) {
     while (atomic_load_explicit(
                &llgo_coro_native_fleet_e2e_release_state_v1,
                memory_order_seq_cst) == 0) {
+    }
+}
+
+uintptr_t __llgo_coro_native_fleet_e2e_nested_blocked_v1(void) {
+    return (uintptr_t)atomic_load_explicit(
+        &llgo_coro_native_fleet_e2e_nested_blocked_state_v1,
+        memory_order_seq_cst);
+}
+
+void __llgo_coro_native_fleet_e2e_nested_block_v1(void) {
+    atomic_store_explicit(
+        &llgo_coro_native_fleet_e2e_nested_blocked_state_v1,
+        1,
+        memory_order_seq_cst);
+    struct timespec remaining = {
+        .tv_sec = 0,
+        .tv_nsec = 30 * 1000 * 1000,
+    };
+    while (nanosleep(&remaining, &remaining) != 0 && errno == EINTR) {
+    }
+}
+
+uintptr_t __llgo_coro_native_fleet_e2e_stream_reset_v1(void) {
+    for (uint32_t index = 0; index < 2; index++) {
+        if (llgo_coro_native_fleet_e2e_stream_v1[index] >= 0) {
+            (void)close(llgo_coro_native_fleet_e2e_stream_v1[index]);
+            llgo_coro_native_fleet_e2e_stream_v1[index] = -1;
+        }
+    }
+    return socketpair(
+               AF_UNIX,
+               SOCK_STREAM,
+               0,
+               llgo_coro_native_fleet_e2e_stream_v1) == 0;
+}
+
+int32_t __llgo_coro_native_fleet_e2e_stream_read_fd_v1(void) {
+    return (int32_t)llgo_coro_native_fleet_e2e_stream_v1[0];
+}
+
+uintptr_t __llgo_coro_native_fleet_e2e_stream_write_v1(void) {
+    const uint8_t value = UINT8_C(0x5a);
+    return send(
+               llgo_coro_native_fleet_e2e_stream_v1[1],
+               &value,
+               sizeof(value),
+               MSG_DONTWAIT) == (ssize_t)sizeof(value);
+}
+
+uintptr_t __llgo_coro_native_fleet_e2e_stream_read_v1(void) {
+    uint8_t value = 0;
+    ssize_t size = recv(
+        llgo_coro_native_fleet_e2e_stream_v1[0],
+        &value,
+        sizeof(value),
+        MSG_DONTWAIT);
+    return size == (ssize_t)sizeof(value) ? (uintptr_t)value : UINTPTR_MAX;
+}
+
+void __llgo_coro_native_fleet_e2e_stream_close_v1(void) {
+    for (uint32_t index = 0; index < 2; index++) {
+        if (llgo_coro_native_fleet_e2e_stream_v1[index] >= 0) {
+            (void)close(llgo_coro_native_fleet_e2e_stream_v1[index]);
+            llgo_coro_native_fleet_e2e_stream_v1[index] = -1;
+        }
     }
 }

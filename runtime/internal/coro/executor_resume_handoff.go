@@ -121,7 +121,15 @@ func DetachExecutorResume(
 	handoff.action = p.action
 	handoff.budget = p.servicePreemptBudget
 
+	// The issued resume has already started the ready action which satisfied
+	// any source-to-ready ordering debt. Ordinary actions clear these advisory
+	// cursor bits when they commit; detachment is the only stable boundary
+	// exposed in the middle of that physical action, so settle them here before
+	// the replacement validates and re-enters the same driver. The action count
+	// remains deferred until the restored logical resume actually commits.
 	driver.run.issued = ActionInvalid
+	driver.run.readyDebt = false
+	driver.run.blocked = false
 	p.osThreadLockOwner = nil
 	p.current = nil
 	p.inResume = false

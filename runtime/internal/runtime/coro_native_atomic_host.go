@@ -1,3 +1,5 @@
+//go:build (darwin || linux) && !baremetal && !llgo
+
 /*
  * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
  *
@@ -14,13 +16,18 @@
  * limitations under the License.
  */
 
-#ifndef LLGO_CORO_FLEET_OWNER_V1_H
-#define LLGO_CORO_FLEET_OWNER_V1_H
+package runtime
 
-#include <pthread.h>
-#include <stdint.h>
+import "sync/atomic"
 
-uint32_t __llgo_coro_fleet_owner_count_v1(uint32_t maximum);
-int __llgo_coro_fleet_owner_create_v2(pthread_t *thread, uint32_t slot);
+func coroNativeAtomicLoadV1(word *uint32) uint32 {
+	return atomic.LoadUint32(word)
+}
 
-#endif
+func coroNativeAtomicStoreV1(word *uint32, value uint32) {
+	atomic.StoreUint32(word, value)
+}
+
+func coroNativeAtomicCASV1(word *uint32, old, next uint32) bool {
+	return atomic.CompareAndSwapUint32(word, old, next)
+}

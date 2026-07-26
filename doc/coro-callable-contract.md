@@ -946,7 +946,7 @@ ForeignWait、pointer-free completion、errno capture和late completion，但不
 - large idle connection set仍需全量扫描；
 - level-triggered hot fd会重复报告ready；
 - regular file必须被pollOpen/fstat拒绝，否则“永远ready”会掩盖实际storage阻塞；
-- 当前每route reactor、固定8-route fleet、动态逻辑execution quota和demand injection不能外推为scalable shard、批量/local-deque stealing、blocking compensation或完整affinity已经完成。
+- 当前每route reactor、固定8-route fleet、动态逻辑execution quota、demand injection和locked-M同P replacement不能外推为scalable shard、批量/local-deque stealing、standby M、全部阻塞shutdown/fatal或完整affinity已经完成。
 
 后续使用epoll/kqueue/IOCP/ready-index ring和dynamic/sharded catalog；这些backend仍发布
 相同的OperationID和ReadyThenTryCommit fact，不改变标准库wrapper。
@@ -1094,10 +1094,10 @@ report-only原型。截至2026-07-22，迁移顺序和状态如下：
    写入通用contract。
 10. **并行、平台验收与清理（部分完成）**：native route-aware submission、固定8-route M/P target、
     动态逻辑execution quota与标准`runtime.GOMAXPROCS`、worker lifecycle、P-neutral typed
-    parked-result packet、fleet demand injection/work sharing和TCP E2E已落地；仍需AwaitCapacity、
-    queued cancel、blocking compensation、批量/local-deque steal与完整affinity。2026-07-23已用真实generated-cgo/Python序列确认共享worker
+    parked-result packet、fleet demand injection/work sharing、locked-M同P replacement和TCP E2E已落地；仍需AwaitCapacity、
+    queued cancel、standby M、阻塞shutdown/fatal、批量/local-deque steal与完整affinity。2026-07-23已用真实generated-cgo/Python序列确认共享worker
     会破坏线程局部session，并冻结第14.6节的`AffinityLease + AffinityOwner`方向；尚未接入
-    `LockOSThread`或production owner目录。各target的真实file/socket/timer证据成立后，迁移并
+    更广thread-local callback/reentry owner目录。各target的真实file/socket/timer证据成立后，迁移并
     删除逐trampoline `workeraddr`兼容标注。
 
 ## 19. 验证矩阵
@@ -1199,16 +1199,16 @@ contract，compile-only不能替代production platform E2E。
 - 现有scheduler/operation核心的OperationID、generation、ParkState、WaitSetRecord、
   select/result lease/cancel/detach/quiescence、Timer/Poll/Worker等能力，以及native固定8-route fleet、
   动态逻辑execution quota、标准`runtime.GOMAXPROCS`、共享worker lifecycle、P-neutral typed
-  materialization、fleet demand injection/work sharing和TCP E2E。这些证明callable模型有可复用
-  底座，不证明blocking compensation、批量/local-deque steal、通用backend recipe或各平台已完成。
+  materialization、fleet demand injection/work sharing、locked-M同P replacement和TCP E2E。这些证明callable模型有可复用
+  底座，不证明standby M、阻塞shutdown/fatal、批量/local-deque steal、通用backend recipe或各平台已完成。
 - target-neutral `NonblockingLeaseGate`的exclusive attempt、generation change、quiescence、
   close/reuse tombstone和duplicate-release防护；尚未与`internal/poll.FD`状态及compiler
   operand/context proof连接。
 
 **尚未完成的关键闭环**：
 
-- 第一版`runtime.LockOSThread`、locked G exact P/M归属和同M foreign call已经闭环；仍缺
-  locked G未unlock退出时的物理M退休、动态owner容量和blocking compensation。共享worker继续
+- 第一版`runtime.LockOSThread`、locked G exact P/M归属、同M foreign call和generation-bound replacement owner已经闭环；仍缺
+  locked G未unlock退出/进程shutdown时的物理M退休、standby M缓存、`SetMaxThreads`联动和完整callback/reentry。共享worker继续
   只授权`AnyThread`，thread-local session必须持有当前G的exact lock lease；
 - 将当前小wrapper exact-edge proof扩展为绑定operand/resource generation、target capability和
   cost bound的region/context proof，同时保持target-owned refinement约束；

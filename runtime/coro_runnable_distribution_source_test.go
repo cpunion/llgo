@@ -119,8 +119,9 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 	owner := readRuntimePollFile(t, "internal/runtime/coro_native_fleet_owner_llgo.go")
 	for _, required := range []string{
 		"[coroNativeFleetDomainCapacityV1 - 1]coroNativeFleetPhysicalOwnerV1",
-		"corofleet.CreatePeer(&peer.thread, handle.Route)",
-		"func __llgo_coro_native_fleet_owner_v2(route uint32) uint32",
+		"corofleet.CreateOwner(&owner.thread, slot)",
+		"func __llgo_coro_native_fleet_owner_v2(slot uint32) uint32",
+		"coroNativeMRunReplacementOwnerV1(slot)",
 		"state.stop.Quiesced()",
 	} {
 		if !strings.Contains(owner, required) {
@@ -134,6 +135,21 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 	} {
 		if strings.Contains(owner, forbidden) {
 			t.Errorf("native fleet physical owner retained fixed/non-atomic path %q", forbidden)
+		}
+	}
+
+	directory := readRuntimePollFile(t, "internal/runtime/coro_native_m_owner_llgo.go")
+	for _, required := range []string{
+		"coroNativeMDirectoryCapacityV1 uint32 = 10_000",
+		"handoff coro.ExecutionDomainHandoff",
+		"resume  coro.ExecutorResumeHandoff",
+		"active [coroNativeFleetDomainCapacityV1]uint32",
+		"coroNativeMAllocateReplacementV1(",
+		"coroNativeMClaimReplacementV1(",
+		"coroNativeMFinishReplacementReturnV1(",
+	} {
+		if !strings.Contains(directory, required) {
+			t.Errorf("native M directory lacks replacement-owner marker %q", required)
 		}
 	}
 
@@ -167,9 +183,9 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 	for _, required := range []string{
 		"getenv(\"GOMAXPROCS\")",
 		"sysconf(_SC_NPROCESSORS_ONLN)",
-		"__llgo_coro_native_fleet_owner_v2((uint32_t)route)",
-		"__llgo_coro_fleet_owner_create_v2(pthread_t *thread, uint32_t route)",
-		"(void *)(uintptr_t)route",
+		"__llgo_coro_native_fleet_owner_v2((uint32_t)slot)",
+		"__llgo_coro_fleet_owner_create_v2(pthread_t *thread, uint32_t slot)",
+		"(void *)(uintptr_t)slot",
 	} {
 		if !strings.Contains(leaf, required) {
 			t.Errorf("native fleet C leaf lacks scalar startup-policy marker %q", required)

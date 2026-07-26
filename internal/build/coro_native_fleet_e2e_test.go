@@ -479,6 +479,463 @@ func Check() int32 {
 }
 `
 
+const coroNativeFleetSameRouteReplacementE2ESource = `package main
+
+import _ "unsafe"
+
+var Failed uint32
+var Ready chan uint32
+var Signal chan uint32
+var Never chan uint32
+var MainThread uintptr
+var WaiterBefore uintptr
+var WaiterAfter uintptr
+var Got uint32
+
+//go:linkname osThreadLock llgo.coroOSThreadLock
+func osThreadLock()
+
+//go:linkname osThreadUnlock llgo.coroOSThreadUnlock
+func osThreadUnlock()
+
+//llgo:coro noblock
+//go:linkname threadID C.__llgo_coro_native_fleet_e2e_thread_id_v1
+func threadID() uintptr
+
+//llgo:coro noblock
+//go:linkname resetState C.__llgo_coro_native_fleet_e2e_block_reset_v1
+func resetState()
+
+//llgo:coro noblock
+//go:linkname isWaiting C.__llgo_coro_native_fleet_e2e_blocked_v1
+func isWaiting() uintptr
+
+//llgo:coro noblock
+//go:linkname unblock C.__llgo_coro_native_fleet_e2e_release_v1
+func unblock()
+
+//llgo:coro worker
+//go:linkname block C.__llgo_coro_native_fleet_e2e_block_v1
+func block()
+
+func waiter() {
+	thread := threadID()
+	// Preserve a real backedge in the fixture so the coroutine plan carries
+	// the same preemption contract as an ordinary long-running goroutine.
+	for spin := uint32(0); spin < Got; spin++ {
+		WaiterBefore = thread
+	}
+	if thread != MainThread {
+		go waiter()
+		return
+	}
+	WaiterBefore = thread
+	Ready <- 1
+	select {
+	case Got = <-Signal:
+	case Got = <-Never:
+		Failed = 94
+		return
+	}
+	WaiterAfter = threadID()
+	unblock()
+}
+
+func sender() {
+	for isWaiting() == 0 {
+	}
+	Signal <- 1
+}
+
+func Setup() {
+	Failed = 0
+	Ready = make(chan uint32)
+	Signal = make(chan uint32)
+	Never = make(chan uint32)
+	MainThread = threadID()
+	WaiterBefore = 0
+	WaiterAfter = 0
+	Got = 0
+}
+
+func main() {
+	resetState()
+	go waiter()
+	<-Ready
+	go sender()
+	parentThread := threadID()
+	osThreadLock()
+	block()
+	osThreadUnlock()
+	if isWaiting() == 0 {
+		Failed = 91
+		return
+	}
+	if threadID() != parentThread {
+		Failed = 92
+		return
+	}
+	if WaiterBefore != MainThread || WaiterAfter == 0 || Got != 1 {
+		Failed = 93
+	}
+}
+
+func Check() int32 {
+	return int32(Failed)
+}
+`
+
+const coroNativeFleetSameRouteTimerReplacementE2ESource = `package main
+
+import _ "unsafe"
+
+var Failed uint32
+var Ready chan uint32
+var MainThread uintptr
+var WaiterBefore uintptr
+var WaiterAfter uintptr
+
+//go:linkname osThreadLock llgo.coroOSThreadLock
+func osThreadLock()
+
+//go:linkname osThreadUnlock llgo.coroOSThreadUnlock
+func osThreadUnlock()
+
+//go:linkname timerSleep llgo.coroTimerSleep
+func timerSleep(delay int64)
+
+//llgo:coro noblock
+//go:linkname threadID C.__llgo_coro_native_fleet_e2e_thread_id_v1
+func threadID() uintptr
+
+//llgo:coro noblock
+//go:linkname resetState C.__llgo_coro_native_fleet_e2e_block_reset_v1
+func resetState()
+
+//llgo:coro noblock
+//go:linkname isWaiting C.__llgo_coro_native_fleet_e2e_blocked_v1
+func isWaiting() uintptr
+
+//llgo:coro noblock
+//go:linkname unblock C.__llgo_coro_native_fleet_e2e_release_v1
+func unblock()
+
+//llgo:coro worker
+//go:linkname block C.__llgo_coro_native_fleet_e2e_block_v1
+func block()
+
+func timerWaiter() {
+	thread := threadID()
+	if thread != MainThread {
+		go timerWaiter()
+		return
+	}
+	WaiterBefore = thread
+	Ready <- 1
+	timerSleep(30 * 1000 * 1000)
+	WaiterAfter = threadID()
+	if isWaiting() == 0 {
+		Failed = 101
+		return
+	}
+	unblock()
+}
+
+func Setup() {
+	Failed = 0
+	Ready = make(chan uint32)
+	MainThread = threadID()
+	WaiterBefore = 0
+	WaiterAfter = 0
+}
+
+func main() {
+	resetState()
+	go timerWaiter()
+	<-Ready
+	parentThread := threadID()
+	osThreadLock()
+	block()
+	osThreadUnlock()
+	if isWaiting() == 0 {
+		Failed = 102
+		return
+	}
+	if threadID() != parentThread {
+		Failed = 103
+		return
+	}
+	if WaiterBefore != MainThread || WaiterAfter == 0 ||
+		WaiterAfter == MainThread {
+		Failed = 104
+	}
+}
+
+func Check() int32 {
+	return int32(Failed)
+}
+`
+
+const coroNativeFleetNestedSameRouteReplacementE2ESource = `package main
+
+import _ "unsafe"
+
+var Failed uint32
+var Ready chan uint32
+var Start chan uint32
+var MainThread uintptr
+var NestedBefore uintptr
+var NestedAfter uintptr
+
+//go:linkname osThreadLock llgo.coroOSThreadLock
+func osThreadLock()
+
+//go:linkname osThreadUnlock llgo.coroOSThreadUnlock
+func osThreadUnlock()
+
+//llgo:coro noblock
+//go:linkname threadID C.__llgo_coro_native_fleet_e2e_thread_id_v1
+func threadID() uintptr
+
+//llgo:coro noblock
+//go:linkname resetState C.__llgo_coro_native_fleet_e2e_block_reset_v1
+func resetState()
+
+//llgo:coro noblock
+//go:linkname isWaiting C.__llgo_coro_native_fleet_e2e_blocked_v1
+func isWaiting() uintptr
+
+//llgo:coro noblock
+//go:linkname unblock C.__llgo_coro_native_fleet_e2e_release_v1
+func unblock()
+
+//llgo:coro worker
+//go:linkname block C.__llgo_coro_native_fleet_e2e_block_v1
+func block()
+
+//llgo:coro noblock
+//go:linkname isNestedWaiting C.__llgo_coro_native_fleet_e2e_nested_blocked_v1
+func isNestedWaiting() uintptr
+
+//llgo:coro worker
+//go:linkname blockNested C.__llgo_coro_native_fleet_e2e_nested_block_v1
+func blockNested()
+
+func nestedOwner() {
+	thread := threadID()
+	if thread != MainThread {
+		go nestedOwner()
+		return
+	}
+	Ready <- 2
+	<-Start
+	osThreadLock()
+	NestedBefore = threadID()
+	blockNested()
+	NestedAfter = threadID()
+	osThreadUnlock()
+	unblock()
+}
+
+func starter() {
+	for isWaiting() == 0 {
+	}
+	Start <- 1
+}
+
+func Setup() {
+	Failed = 0
+	Ready = make(chan uint32)
+	Start = make(chan uint32)
+	MainThread = threadID()
+	NestedBefore = 0
+	NestedAfter = 0
+}
+
+func main() {
+	resetState()
+	go nestedOwner()
+	<-Ready
+	go starter()
+	parentThread := threadID()
+	osThreadLock()
+	block()
+	osThreadUnlock()
+	if isWaiting() == 0 || isNestedWaiting() == 0 {
+		Failed = 111
+		return
+	}
+	if threadID() != parentThread || parentThread != MainThread {
+		Failed = 112
+		return
+	}
+	if NestedBefore == 0 || NestedBefore == MainThread ||
+		NestedAfter != NestedBefore {
+		Failed = 113
+	}
+}
+
+func Check() int32 {
+	return int32(Failed)
+}
+`
+
+const coroNativeFleetSameRoutePollReplacementE2ESource = `package main
+
+import _ "unsafe"
+
+var Failed uint32
+var Ready chan uint32
+var PollContext uintptr
+var ReadFD int32
+var MainThread uintptr
+var WaiterBefore uintptr
+var WaiterAfter uintptr
+
+//go:linkname osThreadLock llgo.coroOSThreadLock
+func osThreadLock()
+
+//go:linkname osThreadUnlock llgo.coroOSThreadUnlock
+func osThreadUnlock()
+
+//go:linkname pollWait llgo.coroPollWait
+func pollWait(context uintptr, fd int32, interest uint32, deadline int64) uint32
+
+//llgo:coro sync
+//go:linkname pollAlloc C.__llgo_runtime_poll_desc_alloc_v1
+func pollAlloc(fd int32, inlineStream uint32) uintptr
+
+//llgo:coro sync
+//go:linkname pollFree C.__llgo_runtime_poll_desc_free_v1
+func pollFree(context uintptr)
+
+//llgo:coro noblock
+//go:linkname threadID C.__llgo_coro_native_fleet_e2e_thread_id_v1
+func threadID() uintptr
+
+//llgo:coro noblock
+//go:linkname resetState C.__llgo_coro_native_fleet_e2e_block_reset_v1
+func resetState()
+
+//llgo:coro noblock
+//go:linkname isWaiting C.__llgo_coro_native_fleet_e2e_blocked_v1
+func isWaiting() uintptr
+
+//llgo:coro noblock
+//go:linkname unblock C.__llgo_coro_native_fleet_e2e_release_v1
+func unblock()
+
+//llgo:coro worker
+//go:linkname block C.__llgo_coro_native_fleet_e2e_block_v1
+func block()
+
+//llgo:coro sync
+//go:linkname streamReset C.__llgo_coro_native_fleet_e2e_stream_reset_v1
+func streamReset() uintptr
+
+//llgo:coro noblock
+//go:linkname streamReadFD C.__llgo_coro_native_fleet_e2e_stream_read_fd_v1
+func streamReadFD() int32
+
+//llgo:coro noblock
+//go:linkname streamWrite C.__llgo_coro_native_fleet_e2e_stream_write_v1
+func streamWrite() uintptr
+
+//llgo:coro noblock
+//go:linkname streamRead C.__llgo_coro_native_fleet_e2e_stream_read_v1
+func streamRead() uintptr
+
+//llgo:coro sync
+//go:linkname streamClose C.__llgo_coro_native_fleet_e2e_stream_close_v1
+func streamClose()
+
+func pollWaiter() {
+	thread := threadID()
+	if thread != MainThread {
+		go pollWaiter()
+		return
+	}
+	WaiterBefore = thread
+	Ready <- 1
+	if status := pollWait(PollContext, ReadFD, 1, 0); status != 1 {
+		Failed = 121
+		unblock()
+		return
+	}
+	if value := streamRead(); value != 0x5a {
+		Failed = 122
+		unblock()
+		return
+	}
+	WaiterAfter = threadID()
+	unblock()
+}
+
+func sender() {
+	for isWaiting() == 0 {
+	}
+	if streamWrite() != 1 {
+		Failed = 123
+		unblock()
+	}
+}
+
+func Setup() {
+	Failed = 0
+	Ready = make(chan uint32)
+	PollContext = 0
+	ReadFD = -1
+	MainThread = threadID()
+	WaiterBefore = 0
+	WaiterAfter = 0
+	if streamReset() != 1 {
+		Failed = 124
+		return
+	}
+	ReadFD = streamReadFD()
+	PollContext = pollAlloc(ReadFD, 1)
+	if ReadFD < 0 || PollContext == 0 {
+		Failed = 125
+	}
+}
+
+func main() {
+	if Failed != 0 {
+		return
+	}
+	resetState()
+	go pollWaiter()
+	<-Ready
+	go sender()
+	parentThread := threadID()
+	osThreadLock()
+	block()
+	osThreadUnlock()
+	if isWaiting() == 0 {
+		Failed = 126
+		return
+	}
+	if threadID() != parentThread || parentThread != MainThread {
+		Failed = 127
+		return
+	}
+	if WaiterBefore != MainThread || WaiterAfter == 0 ||
+		WaiterAfter == MainThread {
+		Failed = 128
+	}
+}
+
+func Check() int32 {
+	result := Failed
+	if PollContext != 0 {
+		pollFree(PollContext)
+		PollContext = 0
+	}
+	streamClose()
+	return int32(result)
+}
+`
+
 func TestCoroNativeFleetPhysicalPeerRunsDistributedChildE2E(t *testing.T) {
 	runCoroNativeFleetE2E(t, coroNativeFleetE2ESource, "distributed-child", false, 8)
 }
@@ -507,8 +964,51 @@ func TestCoroNativeFleetRuntimeGOMAXPROCSQuotaE2E(t *testing.T) {
 	runCoroNativeFleetE2E(t, coroNativeFleetGOMAXPROCSE2ESource, "runtime-gomaxprocs-quota", true, 1)
 }
 
+func TestCoroNativeFleetLockedForeignReleasesQuotaBeforeReplacementStarts(t *testing.T) {
+	path := filepath.Join(
+		"..", "..", "runtime", "internal", "runtime",
+		"coro_os_thread_foreign_llgo.go",
+	)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal("read locked-thread foreign owner:", err)
+	}
+	source := string(raw)
+	release := strings.Index(
+		source,
+		"if !coroTargetReleaseManagedExecutionV1(driver)",
+	)
+	create := strings.Index(
+		source,
+		"if corofleet.CreateOwner(&child.thread, childSlot)",
+	)
+	if release < 0 || create < 0 || release >= create {
+		t.Fatalf(
+			"locked-thread foreign owner must release its route quota before the replacement pthread can start: release=%d create=%d",
+			release,
+			create,
+		)
+	}
+}
+
 func TestCoroNativeFleetLockedForeignCompensationE2E(t *testing.T) {
 	runCoroNativeFleetE2E(t, coroNativeFleetLockedForeignCompensationE2ESource, "locked-foreign-compensation", true, 1)
+}
+
+func TestCoroNativeFleetSameRouteReplacementE2E(t *testing.T) {
+	runCoroNativeFleetE2E(t, coroNativeFleetSameRouteReplacementE2ESource, "same-route-replacement", true, 1)
+}
+
+func TestCoroNativeFleetSameRouteTimerReplacementE2E(t *testing.T) {
+	runCoroNativeFleetE2E(t, coroNativeFleetSameRouteTimerReplacementE2ESource, "same-route-timer-replacement", true, 1)
+}
+
+func TestCoroNativeFleetNestedSameRouteReplacementE2E(t *testing.T) {
+	runCoroNativeFleetE2E(t, coroNativeFleetNestedSameRouteReplacementE2ESource, "nested-same-route-replacement", true, 1)
+}
+
+func TestCoroNativeFleetSameRoutePollReplacementE2E(t *testing.T) {
+	runCoroNativeFleetE2E(t, coroNativeFleetSameRoutePollReplacementE2ESource, "same-route-poll-replacement", true, 1)
 }
 
 func runCoroNativeFleetE2E(t *testing.T, source, name string, enableChannel bool, initialLimit uint32) {
@@ -539,11 +1039,18 @@ func runCoroNativeFleetE2E(t *testing.T, source, name string, enableChannel bool
 		if err != nil {
 			t.Fatal("load runtime type model:", err)
 		}
-		if rt.Scope().Lookup("CoroWorkerParkV1") == nil {
-			name := types.NewTypeName(token.NoPos, rt, "CoroWorkerParkV1", nil)
+		for _, typeName := range []string{
+			"CoroWorkerParkV1",
+			"CoroTimerParkV2",
+			"CoroPollParkV2",
+		} {
+			if rt.Scope().Lookup(typeName) != nil {
+				continue
+			}
+			name := types.NewTypeName(token.NoPos, rt, typeName, nil)
 			types.NewNamed(name, types.NewArray(types.Typ[types.Uintptr], 32), nil)
 			if previous := rt.Scope().Insert(name); previous != nil {
-				t.Fatalf("install worker frame-storage type: duplicate %v", previous)
+				t.Fatalf("install %s frame-storage type: duplicate %v", typeName, previous)
 			}
 		}
 		return rt
@@ -645,16 +1152,23 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_nil_fault.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_panic_payload.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_spawn.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_atomic_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_fleet.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_fleet_owner_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_fleet_program_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_fleet_reactor.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_m_owner_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_replacement_owner_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_native_replacement_reactor_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_ready_distribution_fleet_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_native_fleet_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_wait_timer_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_timer_owner_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_os_thread_affinity.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_os_thread_foreign_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_poll_descriptor_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_poll_owner_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_poll_route_native_fleet_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_worker_native_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_worker_owner_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_worker_completion_fleet_llgo.go"),
@@ -719,10 +1233,11 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 	objects = append(objects,
 		buildCoroNativeWorkerCallObject(t, temp),
 		buildCoroNativeDoorbellObject(t, temp),
+		buildCoroNativePollObject(t, temp),
 		buildCoroNativeFleetOwnerObject(t, temp),
 	)
-	if len(objects) != len(allowed)+3 {
-		t.Fatalf("native fleet runtime objects = %d, want exactly %d package objects plus worker, doorbell, and fleet-owner leaves", len(objects), len(allowed))
+	if len(objects) != len(allowed)+4 {
+		t.Fatalf("native fleet runtime objects = %d, want exactly %d package objects plus worker, doorbell, poll, and fleet-owner leaves", len(objects), len(allowed))
 	}
 	return objects
 }

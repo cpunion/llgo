@@ -84,7 +84,7 @@ func coroTargetAfterStableRunActionV1(source *coro.P, driver *coro.ExecutorDrive
 	if !valid {
 		return coroTargetReadyDistributionFailV1("native ready distribution target route mismatch")
 	}
-	if coro.ExecutorRequestNeedsDoorbell(distribution.Request) && !target.doorbell.Ring() {
+	if coroNativeFleetRequestNeedsRingV1(target, distribution.Request) && !target.doorbell.Ring() {
 		return coroTargetReadyDistributionFailV1("native ready distribution doorbell failed")
 	}
 	return true

@@ -21,14 +21,23 @@ package runtime
 import (
 	"unsafe"
 
+	c "github.com/goplus/llgo/runtime/internal/clite"
+	"github.com/goplus/llgo/runtime/internal/clite/pthread"
 	"github.com/goplus/llgo/runtime/internal/coro"
+	"github.com/goplus/llgo/runtime/internal/corofleet"
 	"github.com/goplus/llgo/runtime/internal/coroworker"
 )
 
 // __llgo_coro_os_thread_foreign_call_v1 is the sole same-M blocking foreign
 // boundary. The compiler selects it dynamically only while the current G owns
 // this P/M island through LockOSThread. All ordinary calls continue through
-// the shared any-thread worker pool.
+// the shared any-thread worker pool. This owner detaches the active resume,
+// reserves one scalar-slot replacement M, releases its managed-execution
+// permit before creating the replacement thread, and strongly rejoins that
+// replacement before restoring the resume. Releasing first is mandatory:
+// execution-quota ownership belongs to the route, so a replacement which
+// starts while its parent still holds that route is a fail-closed double
+// acquire rather than ordinary quota contention.
 //
 //export __llgo_coro_os_thread_foreign_call_v1
 func __llgo_coro_os_thread_foreign_call_v1(
@@ -46,16 +55,72 @@ func __llgo_coro_os_thread_foreign_call_v1(
 		coroRuntimeAbort("invalid locked-thread foreign call")
 	}
 	driver, _, _, ownerOK := coro.CurrentExecutorDriver(task)
-	if !ownerOK || !coroTargetLeaveManagedExecutionForSameMBlockV1(driver) {
-		coroRuntimeAbort("locked-thread foreign call cannot release managed execution")
+	parent, domain, parentSlot, ownerEpoch, physicalOK :=
+		coroNativeMCurrentOwnerV1(driver)
+	if !ownerOK || !physicalOK ||
+		!coro.DetachExecutorResume(&parent.resume, driver, task) {
+		coroRuntimeAbort("locked-thread foreign call cannot detach active resume")
+	}
+	baton, begun := parent.handoff.Begin(ownerEpoch)
+	if !begun {
+		if !coro.RestoreExecutorResume(&parent.resume) {
+			coroRuntimeAbort("locked-thread foreign call handoff rollback failed")
+		}
+		coroRuntimeAbort("locked-thread foreign call cannot begin domain handoff")
+	}
+	childSlot, child, allocated := coroNativeMAllocateReplacementV1(
+		parentSlot,
+		domain.handle,
+		baton,
+	)
+	if !allocated {
+		if parent.handoff.RequestReturn(baton) !=
+			coro.ExecutionDomainHandoffReturnUnclaimed ||
+			!parent.handoff.Complete(baton) ||
+			!coro.RestoreExecutorResume(&parent.resume) {
+			coroRuntimeAbort("locked-thread foreign call allocation rollback failed")
+		}
+		coroRuntimeAbort("locked-thread foreign call exhausted M directory")
+	}
+	if !coroTargetReleaseManagedExecutionV1(driver) {
+		coroRuntimeAbort("locked-thread foreign call cannot release managed execution permit")
+	}
+	if corofleet.CreateOwner(&child.thread, childSlot) != 0 || child.thread == nil {
+		child.thread = nil
+		if parent.handoff.RequestReturn(baton) !=
+			coro.ExecutionDomainHandoffReturnUnclaimed ||
+			!parent.handoff.Complete(baton) ||
+			!coroNativeMReleaseUnstartedReplacementV1(childSlot) ||
+			!coroTargetReenterManagedExecutionV1(driver) ||
+			!coro.RestoreExecutorResume(&parent.resume) {
+			coroRuntimeAbort("locked-thread foreign call pthread rollback failed")
+		}
+		coroRuntimeAbort("locked-thread foreign call cannot create replacement M")
 	}
 	args := [coroworker.MaxArgs]uintptr{a0, a1, a2, a3, a4, a5, a6, a7, a8}
 	var result coroworker.Result
-	if !coroworker.Call(function, argc, &args, &result) {
-		coroRuntimeAbort("locked-thread foreign call failed")
+	callOK := coroworker.Call(function, argc, &args, &result)
+	returnResult := parent.handoff.RequestReturn(baton)
+	ringOK := returnResult != coro.ExecutionDomainHandoffReturnInvalid &&
+		domain.doorbell.Ring()
+	var threadResult c.Pointer
+	joinOK := pthread.Join(child.thread, &threadResult) == 0 &&
+		threadResult == nil
+	returned := parent.handoff.Returned(baton) &&
+		coroNativeMOwnerLifecycleLoadV1(child) == coroNativeMOwnerReturnedV1 &&
+		coroNativeAtomicLoadV1(
+			&coroNativeMDirectoryV1State.active[domain.handle.Route-1],
+		) == parentSlot
+	if !ringOK || !joinOK || !returned || !parent.handoff.Complete(baton) {
+		coroRuntimeAbort("locked-thread foreign call replacement join failed")
 	}
-	if !coroTargetReenterManagedExecutionAfterSameMBlockV1(driver) {
+	if !coroTargetReenterManagedExecutionV1(driver) ||
+		!coro.RestoreExecutorResume(&parent.resume) ||
+		!coroNativeMRecycleReplacementV1(childSlot) {
 		coroRuntimeAbort("locked-thread foreign call cannot reacquire managed execution")
+	}
+	if !callOK {
+		coroRuntimeAbort("locked-thread foreign call failed")
 	}
 	*r1, *r2, *errno = result.R1, result.R2, result.Errno
 }
