@@ -19,7 +19,6 @@
 package runtime
 
 import (
-	c "github.com/goplus/llgo/runtime/internal/clite"
 	"github.com/goplus/llgo/runtime/internal/clite/pthread"
 	"github.com/goplus/llgo/runtime/internal/coro"
 	"github.com/goplus/llgo/runtime/internal/coroclock"
@@ -115,9 +114,10 @@ func coroNativeFleetPhysicalOwnersStartV1() bool {
 		peer.handle = handle
 		coroNativeAtomicStoreV1(&peer.slot, slot)
 		peer.lifecycle = coroNativeFleetPhysicalActiveV1
-		if corofleet.CreateOwner(&owner.thread, slot) != 0 || owner.thread == nil {
+		if !coroNativeMStartPhysicalOwnerV1(owner, slot) {
 			// pthread_create leaves the result slot unspecified on failure.
 			owner.thread = nil
+			owner.token = 0
 			peer.lifecycle = coroNativeFleetPhysicalFailedV1
 			break
 		}
@@ -143,9 +143,7 @@ func coroNativeFleetPhysicalOwnersStartV1() bool {
 		owner, ownerOK := coroNativeMOwnerForSlotV1(
 			coroNativeAtomicLoadV1(&peer.slot),
 		)
-		var result c.Pointer
-		ok := ownerOK && owner.thread != nil &&
-			pthread.Join(owner.thread, &result) == 0 && result == nil
+		ok := ownerOK && coroNativeMJoinPhysicalOwnerV1(owner)
 		peer.lifecycle = coroNativeFleetPhysicalFailedV1
 		joined = joined && ok
 	}
@@ -192,9 +190,8 @@ func coroNativeFleetPhysicalOwnersStopV1() bool {
 		owner, ownerOK := coroNativeMOwnerForSlotV1(
 			coroNativeAtomicLoadV1(&peer.slot),
 		)
-		var result c.Pointer
 		if !ownerOK || owner.thread == nil ||
-			pthread.Join(owner.thread, &result) != 0 || result != nil ||
+			!coroNativeMJoinPhysicalOwnerV1(owner) ||
 			coroNativeMOwnerLifecycleLoadV1(owner) != coroNativeMOwnerReturnedV1 ||
 			owner.resume.Detached() || !owner.handoff.Idle() ||
 			!coroNativeMOwnerLifecycleCASV1(
@@ -593,6 +590,10 @@ func __llgo_coro_native_fleet_owner_v2(slot uint32) uint32 {
 	default:
 		coroRuntimeAbort("native coroutine M owner lifecycle invalid")
 		return 0
+	}
+	if coroNativeMOwnerLifecycleLoadV1(owner) == coroNativeMOwnerReturnedV1 &&
+		owner.baton.Valid() {
+		return 2
 	}
 	return 1
 }

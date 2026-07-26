@@ -47,14 +47,23 @@ func OwnerCount(maximum uint32) uint32
 func StartFactory() c.Int
 
 // CreateOwner synchronously asks the clean template pthread to start one
-// joinable scheduler owner with default pthread attributes. slot is a small
-// scalar pthread argument, never a Go pointer. In particular, a locked M never
-// creates its own replacement and cannot propagate a modified signal mask,
-// namespace, cwd/fs view, credentials, or similar inherited state.
+// joinable scheduler owner with default pthread attributes. token is the
+// generation-bound physical record identity used for exact join/release; slot
+// remains the only scalar passed across C-to-Go. In particular, a locked M
+// never creates its own replacement and cannot propagate a modified signal
+// mask, namespace, cwd/fs view, credentials, or similar inherited state.
 //
 //llgo:coro sync
-//go:linkname CreateOwner C.__llgo_coro_fleet_owner_create_v2
-func CreateOwner(thread *pthread.Thread, slot uint32) c.Int
+//go:linkname CreateOwner C.__llgo_coro_fleet_owner_create_v3
+func CreateOwner(thread *pthread.Thread, token *uint32, slot uint32) c.Int
+
+// TryReuseOwner assigns one acknowledged standby pthread to slot. Zero means
+// reused, one means the bounded cache was empty, and every other value is an
+// invariant failure. No pthread is created by this operation.
+//
+//llgo:coro schedulerwait
+//go:linkname TryReuseOwner C.__llgo_coro_fleet_owner_try_reuse_v1
+func TryReuseOwner(thread *pthread.Thread, token *uint32, slot uint32) c.Int
 
 // OwnerReady completes CreateOwner only after the new raw owner has claimed
 // its stable scalar directory slot and execution route.
@@ -63,12 +72,34 @@ func CreateOwner(thread *pthread.Thread, slot uint32) c.Int
 //go:linkname OwnerReady C.__llgo_coro_fleet_owner_ready_v1
 func OwnerReady(slot uint32) c.Int
 
-// DetachSelf releases a permanently retired joinable owner. The process entry
-// thread is never detached; a clean successor owns its route before this call.
+// JoinOwner strongly joins one permanent owner and retires its exact physical
+// record. The caller releases one SetMaxThreads reservation only after success.
+//
+//llgo:coro schedulerwait
+//go:linkname JoinOwner C.__llgo_coro_fleet_owner_join_v1
+func JoinOwner(thread pthread.Thread, token uint32) c.Int
+
+// ReleaseOwner acknowledges that one temporary replacement has returned from
+// Go and may be cached. Zero retains the live pthread in standby; one means
+// the bounded cache was full and the adapter strongly joined it.
+//
+//llgo:coro schedulerwait
+//go:linkname ReleaseOwner C.__llgo_coro_fleet_owner_release_v1
+func ReleaseOwner(thread pthread.Thread, token, slot uint32) c.Int
+
+// RetireSelf detaches a permanently tainted owner record before pthread_exit.
+// The process entry thread has no factory record and never calls this leaf.
 //
 //llgo:coro noblock
-//go:linkname DetachSelf C.__llgo_coro_fleet_owner_detach_self_v1
-func DetachSelf() c.Int
+//go:linkname RetireSelf C.__llgo_coro_fleet_owner_retire_self_v1
+func RetireSelf(slot uint32) c.Int
+
+// StopStandby terminates and strongly joins every cached raw M. joined is the
+// exact number of physical thread reservations the target must release.
+//
+//llgo:coro sync
+//go:linkname StopStandby C.__llgo_coro_fleet_owner_stop_standby_v1
+func StopStandby(joined *uint32) c.Int
 
 // Yield lets the close owner wait for an already-admitted succession lease
 // without monopolizing a CPU while the clean successor finishes publication.
@@ -79,7 +110,10 @@ func Yield() c.Int
 
 // StopFactory seals the scalar request rendezvous and strongly joins the clean
 // template after every scheduler owner has returned and been joined.
+// terminalOwnerToken is zero on the original program M. A clean program
+// successor passes its exact token because its wrapper remains live only until
+// the immediately following process exit.
 //
 //llgo:coro sync
-//go:linkname StopFactory C.__llgo_coro_fleet_factory_stop_v1
-func StopFactory() c.Int
+//go:linkname StopFactory C.__llgo_coro_fleet_factory_stop_v2
+func StopFactory(terminalOwnerToken uint32) c.Int

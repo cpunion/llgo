@@ -64,7 +64,7 @@ func coroTargetExecutorStartV1(handle coro.ExecutorHandle) bool {
 	if state.started || state.handle != (coro.ExecutorHandle{}) || !state.ingress.CanReleaseResources() ||
 		!coroNativeWorkerPoolCanReleaseV1() ||
 		handle != coroProgramExecutorHandleV1State || handle.Slot == 0 || handle.Generation == 0 ||
-		!state.doorbell.Open() {
+		!coroTargetStartPhysicalThreadCapacityV1() || !state.doorbell.Open() {
 		return false
 	}
 	state.handle = handle

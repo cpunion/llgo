@@ -38,6 +38,7 @@ func TestCoroNativeTargetBuildSelection(t *testing.T) {
 		host       bool
 		profile    string
 		adapter    bool
+		singleM    bool
 		doorbellOK bool
 	}{
 		{name: "linux-amd64-llgo", goos: "linux", goarch: "amd64", tags: "llgo,llgo_coro,llgo_coro_native_pipe,nogc", native: true, doorbellOK: true},
@@ -45,13 +46,13 @@ func TestCoroNativeTargetBuildSelection(t *testing.T) {
 		{name: "darwin-arm64-llgo", goos: "darwin", goarch: "arm64", tags: "llgo,llgo_coro,llgo_coro_native_pipe,nogc", native: true, doorbellOK: true},
 		{name: "darwin-arm64-timer", goos: "darwin", goarch: "arm64", tags: "llgo,llgo_coro,llgo_coro_native_pipe,llgo_coro_native_timer,nogc", native: true, timer: true, doorbellOK: true},
 		{name: "linux-386-pipe-only", goos: "linux", goarch: "386", tags: "llgo,llgo_coro,llgo_coro_native_pipe,nogc", native: true, doorbellOK: true},
-		{name: "named-linux-without-capability", goos: "linux", goarch: "arm64", tags: "llgo,llgo_coro,nogc,nintendoswitch"},
+		{name: "named-linux-without-capability", goos: "linux", goarch: "arm64", tags: "llgo,llgo_coro,nogc,nintendoswitch", singleM: true},
 		{name: "host-go-fallback", goos: "linux", goarch: "amd64", tags: "llgo_coro,nogc", doorbellOK: true},
-		{name: "js-wasm-host", goos: "js", goarch: "wasm", tags: "llgo,llgo_coro,nogc", host: true, profile: "coro_target_host_profile_js_llgo.go"},
-		{name: "wasip1-host", goos: "wasip1", goarch: "wasm", tags: "llgo,llgo_coro,nogc", host: true, profile: "coro_target_host_profile_wasi_llgo.go"},
-		{name: "baremetal-host", goos: "linux", goarch: "arm", tags: "llgo,llgo_coro,llgo_coro_native_pipe,nogc,baremetal,cortexm", host: true, profile: "coro_target_host_profile_baremetal_llgo.go"},
-		{name: "explicit-embedded-host", goos: "linux", goarch: "arm64", tags: "llgo,llgo_coro,llgo_coro_host,nogc,nintendoswitch", host: true, profile: "coro_target_host_profile_embedded_llgo.go"},
-		{name: "runtime-adapter-overrides-native", goos: "linux", goarch: "amd64", tags: "llgo,llgo_coro,llgo_coro_native_pipe,nogc,coro_runtime_adapter_test", adapter: true, doorbellOK: true},
+		{name: "js-wasm-host", goos: "js", goarch: "wasm", tags: "llgo,llgo_coro,nogc", host: true, profile: "coro_target_host_profile_js_llgo.go", singleM: true},
+		{name: "wasip1-host", goos: "wasip1", goarch: "wasm", tags: "llgo,llgo_coro,nogc", host: true, profile: "coro_target_host_profile_wasi_llgo.go", singleM: true},
+		{name: "baremetal-host", goos: "linux", goarch: "arm", tags: "llgo,llgo_coro,llgo_coro_native_pipe,nogc,baremetal,cortexm", host: true, profile: "coro_target_host_profile_baremetal_llgo.go", singleM: true},
+		{name: "explicit-embedded-host", goos: "linux", goarch: "arm64", tags: "llgo,llgo_coro,llgo_coro_host,nogc,nintendoswitch", host: true, profile: "coro_target_host_profile_embedded_llgo.go", singleM: true},
+		{name: "runtime-adapter-overrides-native", goos: "linux", goarch: "amd64", tags: "llgo,llgo_coro,llgo_coro_native_pipe,nogc,coro_runtime_adapter_test", adapter: true, singleM: true, doorbellOK: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -86,13 +87,16 @@ func TestCoroNativeTargetBuildSelection(t *testing.T) {
 			pipeWait := slices.Contains(pkg.GoFiles, "coro_target_wait_pipe_llgo.go")
 			fallback := slices.Contains(pkg.GoFiles, "coro_target_none.go")
 			adapter := slices.Contains(pkg.GoFiles, "coro_target_test_adapter.go")
+			nativeM := slices.Contains(pkg.GoFiles, "coro_physical_thread_capacity_native_llgo.go")
+			singleM := slices.Contains(pkg.GoFiles, "coro_setmaxthreads_single_llgo.go")
 			if native != test.native || timer != test.timer || host != test.host ||
 				(profileCount == 1) != test.host || test.profile != "" && !slices.Contains(pkg.GoFiles, test.profile) ||
 				workerDriver != (test.native && !test.timer) ||
 				legacyDriver != (!test.timer && !test.host && !test.native) ||
 				pipeWait != (test.native && !test.timer) ||
-				adapter != test.adapter || fallback != (!test.native && !test.host && !test.adapter) {
-				t.Fatalf("GoFiles = %v, native=%t timer=%t host=%t worker-driver=%t legacy-driver=%t pipe-wait=%t adapter=%t fallback=%t", pkg.GoFiles, native, timer, host, workerDriver, legacyDriver, pipeWait, adapter, fallback)
+				adapter != test.adapter || fallback != (!test.native && !test.host && !test.adapter) ||
+				nativeM != test.native || singleM != test.singleM {
+				t.Fatalf("GoFiles = %v, native=%t timer=%t host=%t worker-driver=%t legacy-driver=%t pipe-wait=%t adapter=%t fallback=%t native-M=%t single-M=%t", pkg.GoFiles, native, timer, host, workerDriver, legacyDriver, pipeWait, adapter, fallback, nativeM, singleM)
 			}
 			const doorbell = "github.com/goplus/llgo/runtime/internal/corodoorbell"
 			if imported := slices.Contains(pkg.Imports, doorbell); imported != test.doorbellOK {
@@ -123,6 +127,7 @@ func TestCoroNativeFleetTargetBuildSelection(t *testing.T) {
 	}
 	for _, required := range []string{
 		"coro_target_native_fleet_llgo.go",
+		"coro_physical_thread_capacity_native_llgo.go",
 		"coro_native_fleet_owner_llgo.go",
 		"coro_native_fleet_program_llgo.go",
 		"coro_native_fleet_reactor.go",

@@ -102,7 +102,8 @@ func coroNativeWorkerPoolJoinCreatedV1(state *coroNativeWorkerPoolV1) bool {
 	ok := true
 	for index := uint32(0); index < state.created; index++ {
 		thread := state.threads[index]
-		if thread == nil || pthread.Join(thread, nil) != 0 {
+		if thread == nil || pthread.Join(thread, nil) != 0 ||
+			!coroTargetReleasePhysicalThreadV1() {
 			ok = false
 		}
 		state.threads[index] = nil
@@ -142,9 +143,16 @@ func coroNativeWorkerPoolStartDeliveryV1(
 	state.route = route
 	state.started = true
 	for index := uint32(0); index < coroNativeWorkerThreadCountV1; index++ {
+		if !coroTargetReservePhysicalThreadV1() {
+			return false
+		}
 		if coroworker.Create(&state.threads[index]) != 0 {
 			// pthread_create leaves its result slot undefined on failure.
 			state.threads[index] = nil
+			if !coroTargetReleasePhysicalThreadV1() {
+				coroRuntimeAbort("native coroutine worker create reservation rollback failed")
+				return false
+			}
 			if !coroworker.QueueStop(state.created) {
 				coroRuntimeAbort("native coroutine worker start stop failed")
 				return false

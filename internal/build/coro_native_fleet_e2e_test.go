@@ -774,6 +774,66 @@ func Check() int32 {
 }
 `
 
+const coroNativeFleetStandbyMSetMaxThreadsE2ESource = `package main
+
+import _ "unsafe"
+
+var Failed uint32
+var MainThread uintptr
+
+//go:linkname osThreadLock llgo.coroOSThreadLock
+func osThreadLock()
+
+//go:linkname osThreadUnlock llgo.coroOSThreadUnlock
+func osThreadUnlock()
+
+//llgo:coro noblock
+//go:linkname setMaxThreads command-line-arguments.CoroSetMaxThreads
+func setMaxThreads(threads int) int
+
+//llgo:coro noblock
+//go:linkname threadID C.__llgo_coro_native_fleet_e2e_thread_id_v1
+func threadID() uintptr
+
+//llgo:coro worker
+//go:linkname blockNested C.__llgo_coro_native_fleet_e2e_nested_block_v1
+func blockNested()
+
+func Setup() {
+	Failed = 0
+	MainThread = threadID()
+}
+
+func main() {
+	// The native fleet owns 13 baseline threads:
+	// program + clean factory + 4 workers + 7 peer owners.
+	// One temporary replacement fills a limit of 14. The second call can
+	// succeed only by reusing that returned physical M from standby.
+	if previous := setMaxThreads(14); previous != 10_000 {
+		Failed = 141
+		return
+	}
+	for iteration := uint32(0); iteration < 2; iteration++ {
+		osThreadLock()
+		before := threadID()
+		blockNested()
+		after := threadID()
+		osThreadUnlock()
+		if before != MainThread || after != before {
+			Failed = 142 + iteration
+			return
+		}
+	}
+	if previous := setMaxThreads(14); previous != 14 {
+		Failed = 144
+	}
+}
+
+func Check() int32 {
+	return int32(Failed)
+}
+`
+
 const coroNativeFleetSameRouteTimerReplacementE2ESource = `package main
 
 import _ "unsafe"
@@ -1289,7 +1349,7 @@ func TestCoroNativeFleetLockedForeignReleasesQuotaBeforeReplacementStarts(t *tes
 	)
 	create := strings.Index(
 		source,
-		"if corofleet.CreateOwner(&child.thread, childSlot)",
+		"if !coroNativeMStartPhysicalOwnerV1(child, childSlot)",
 	)
 	if release < 0 || create < 0 || release >= create {
 		t.Fatalf(
@@ -1306,6 +1366,10 @@ func TestCoroNativeFleetLockedForeignCompensationE2E(t *testing.T) {
 
 func TestCoroNativeFleetSameRouteReplacementE2E(t *testing.T) {
 	runCoroNativeFleetE2E(t, coroNativeFleetSameRouteReplacementE2ESource, "same-route-replacement", true, 1)
+}
+
+func TestCoroNativeFleetStandbyMHonorsSetMaxThreadsE2E(t *testing.T) {
+	runCoroNativeFleetE2E(t, coroNativeFleetStandbyMSetMaxThreadsE2ESource, "standby-m-setmaxthreads", false, 1)
 }
 
 func TestCoroNativeFleetSameRouteTimerReplacementE2E(t *testing.T) {
@@ -1459,6 +1523,7 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_run_decision.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_run_slice.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_execution_quota_native_llgo.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_physical_thread_capacity_native_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_sched.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor_driver_timer_llgo.go"),

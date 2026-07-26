@@ -61,15 +61,18 @@ const (
 )
 
 // coroNativeMOwnerV1 is stable process storage for one physical M identity.
-// Initial owners retain their slots for process life. Replacement slots are
-// recycled only after pthread_join, the parent's baton is Complete, and this
-// entry's own nested-handoff gate is back at Idle.
+// Initial owners retain their slots for process life. A replacement slot is
+// recycled only after its parent baton proves Returned, the raw wrapper has
+// acknowledged that exact token/slot, and this entry's nested-handoff gate is
+// back at Idle. The physical pthread may then remain in the bounded C standby
+// cache independently of this logical directory slot.
 type coroNativeMOwnerV1 struct {
 	handoff coro.ExecutionDomainHandoff
 	resume  coro.ExecutorResumeHandoff
 
 	thread pthread.Thread
 	self   pthread.Thread
+	token  uint32
 	handle coro.ExecutorFleetHandle
 	baton  coro.ExecutionDomainHandoffHandle
 
@@ -114,6 +117,91 @@ func coroNativeMOwnerLifecycleCASV1(
 	)
 }
 
+func coroNativeMStartPhysicalOwnerV1(
+	owner *coroNativeMOwnerV1,
+	slot uint32,
+) bool {
+	if owner == nil || slot == 0 || owner.thread != nil || owner.token != 0 {
+		return false
+	}
+	switch corofleet.TryReuseOwner(&owner.thread, &owner.token, slot) {
+	case 0:
+		return owner.thread != nil && owner.token != 0
+	case 1:
+		owner.thread = nil
+		owner.token = 0
+	default:
+		owner.thread = nil
+		owner.token = 0
+		return false
+	}
+	if !coroTargetReservePhysicalThreadV1() {
+		return false
+	}
+	if corofleet.CreateOwner(&owner.thread, &owner.token, slot) == 0 &&
+		owner.thread != nil && owner.token != 0 {
+		return true
+	}
+	owner.thread = nil
+	owner.token = 0
+	if !coroTargetReleasePhysicalThreadV1() {
+		coroRuntimeAbort("native coroutine M create reservation rollback failed")
+	}
+	return false
+}
+
+func coroNativeMJoinPhysicalOwnerV1(owner *coroNativeMOwnerV1) bool {
+	if owner == nil || owner.thread == nil || owner.token == 0 ||
+		corofleet.JoinOwner(owner.thread, owner.token) != 0 {
+		return false
+	}
+	return coroTargetReleasePhysicalThreadV1()
+}
+
+func coroNativeMStopStandbyV1() bool {
+	var joined uint32
+	if corofleet.StopStandby(&joined) != 0 {
+		return false
+	}
+	for joined != 0 {
+		if !coroTargetReleasePhysicalThreadV1() {
+			return false
+		}
+		joined--
+	}
+	return true
+}
+
+func coroNativeMStartCleanFactoryV1() bool {
+	if !coroTargetReservePhysicalThreadV1() {
+		return false
+	}
+	if corofleet.StartFactory() == 0 {
+		return true
+	}
+	if !coroTargetReleasePhysicalThreadV1() {
+		coroRuntimeAbort("native coroutine clean M factory reservation rollback failed")
+	}
+	return false
+}
+
+func coroNativeMStopCleanFactoryV1() bool {
+	terminalToken := uint32(0)
+	slot := coroNativeAtomicLoadV1(&coroNativeMDirectoryV1State.active[0])
+	owner, ownerOK := coroNativeMOwnerForSlotV1(slot)
+	if ownerOK && owner.token != 0 && owner.self != nil &&
+		pthread.Equal(owner.self, pthread.Self()) != 0 {
+		if owner.handle.Route != 1 ||
+			coroNativeMOwnerLifecycleLoadV1(owner) !=
+				coroNativeMOwnerSuccessorActiveV1 {
+			return false
+		}
+		terminalToken = owner.token
+	}
+	return corofleet.StopFactory(terminalToken) == 0 &&
+		coroTargetReleasePhysicalThreadV1()
+}
+
 func coroNativeMDirectoryStartV1(program coro.ExecutorFleetHandle) bool {
 	directory := &coroNativeMDirectoryV1State
 	count := coroNativeFleetV1State.domainCount
@@ -131,6 +219,7 @@ func coroNativeMDirectoryStartV1(program coro.ExecutorFleetHandle) bool {
 		handle, ok := coroNativeFleetHandleV1(route - 1)
 		if !ok || handle.Route != route || !owner.handoff.Idle() ||
 			owner.resume.Detached() || owner.thread != nil || owner.self != nil ||
+			owner.token != 0 ||
 			owner.handle != (coro.ExecutorFleetHandle{}) ||
 			owner.baton != (coro.ExecutionDomainHandoffHandle{}) ||
 			owner.parentSlot != 0 || owner.predecessorSlot != 0 ||
@@ -262,6 +351,7 @@ func coroNativeMAllocateSuccessorV1(
 			continue
 		}
 		if owner.thread != nil || owner.self != nil ||
+			owner.token != 0 ||
 			owner.handle != (coro.ExecutorFleetHandle{}) ||
 			owner.baton != (coro.ExecutionDomainHandoffHandle{}) ||
 			owner.parentSlot != 0 || owner.predecessorSlot != 0 ||
@@ -406,6 +496,7 @@ func coroNativeMAllocateReplacementV1(
 			continue
 		}
 		if owner.thread != nil || owner.self != nil ||
+			owner.token != 0 ||
 			owner.handle != (coro.ExecutorFleetHandle{}) ||
 			owner.baton != (coro.ExecutionDomainHandoffHandle{}) ||
 			owner.parentSlot != 0 || owner.predecessorSlot != 0 ||
@@ -438,6 +529,7 @@ func coroNativeMReleaseUnstartedReplacementV1(slot uint32) bool {
 		coroNativeMOwnerReplacementPublishedV1,
 		coroNativeMOwnerPreparingV1,
 	) || owner.thread != nil || owner.self != nil || owner.resume.Detached() ||
+		owner.token != 0 ||
 		!owner.handoff.Idle() || owner.predecessorSlot != 0 ||
 		owner.lineageRootSlot != slot ||
 		coroNativeAtomicLoadV1(&owner.lineageSlot) != slot {
@@ -456,7 +548,8 @@ func coroNativeMReleaseUnstartedReplacementV1(slot uint32) bool {
 func coroNativeMRecycleReplacementV1(slot uint32) bool {
 	owner, ok := coroNativeMOwnerForSlotV1(slot)
 	if !ok || coroNativeMOwnerLifecycleLoadV1(owner) != coroNativeMOwnerReturnedV1 ||
-		owner.thread == nil || owner.self == nil || !owner.handle.Valid() ||
+		owner.thread == nil || owner.self == nil || owner.token == 0 ||
+		!owner.handle.Valid() ||
 		owner.handle.Route > coroNativeFleetDomainCapacityV1 ||
 		!owner.baton.Valid() || owner.parentSlot == 0 ||
 		owner.lineageRootSlot == 0 ||
@@ -480,8 +573,22 @@ func coroNativeMRecycleReplacementV1(slot uint32) bool {
 		) {
 		return false
 	}
+	released := corofleet.ReleaseOwner(
+		owner.thread,
+		owner.token,
+		slot,
+	)
+	if released != 0 && released != 1 {
+		coroNativeAtomicStoreV1(&owner.lifecycle, uint32(coroNativeMOwnerFailedV1))
+		return false
+	}
+	if released == 1 && !coroTargetReleasePhysicalThreadV1() {
+		coroNativeAtomicStoreV1(&owner.lifecycle, uint32(coroNativeMOwnerFailedV1))
+		return false
+	}
 	owner.thread = nil
 	owner.self = nil
+	owner.token = 0
 	owner.handle = coro.ExecutorFleetHandle{}
 	owner.baton = coro.ExecutionDomainHandoffHandle{}
 	owner.parentSlot = 0
@@ -699,8 +806,7 @@ func coroTargetRetirePhysicalOwnerV1(
 		replacement,
 	)
 	if !allocated || successor == nil ||
-		corofleet.CreateOwner(&successor.thread, successorSlot) != 0 ||
-		successor.thread == nil ||
+		!coroNativeMStartPhysicalOwnerV1(successor, successorSlot) ||
 		coroNativeMOwnerLifecycleLoadV1(successor) != coroNativeMOwnerSuccessorActiveV1 {
 		coroRuntimeAbort("native coroutine physical owner succession failed")
 		return false
@@ -720,8 +826,12 @@ func coroTargetRetirePhysicalOwnerV1(
 		coroRuntimeAbort("native coroutine physical owner retirement failed")
 		return false
 	}
-	if slot != 1 && corofleet.DetachSelf() != 0 {
+	if slot != 1 && corofleet.RetireSelf(slot) != 0 {
 		coroRuntimeAbort("native coroutine physical owner detach failed")
+		return false
+	}
+	if !coroTargetReleasePhysicalThreadV1() {
+		coroRuntimeAbort("native coroutine physical owner capacity release failed")
 		return false
 	}
 	pthread.Exit(c.Pointer(nil))

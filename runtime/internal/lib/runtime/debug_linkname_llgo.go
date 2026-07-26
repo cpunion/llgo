@@ -5,10 +5,9 @@ import (
 )
 
 var (
-	llgoMaxStack   int
-	llgoGCPercent  int32 = 100
-	llgoMemLimit   int64
-	llgoMaxThreads int
+	llgoMaxStack  int
+	llgoGCPercent int32 = 100
+	llgoMemLimit  int64
 )
 
 //go:linkname setTraceback runtime/debug.SetTraceback
@@ -39,9 +38,7 @@ func setPanicOnFault(_ bool) (old bool) { return false }
 
 //go:linkname setMaxThreads runtime/debug.setMaxThreads
 func setMaxThreads(in int) (out int) {
-	out = llgoMaxThreads
-	llgoMaxThreads = in
-	return out
+	return llgoSetMaxThreads(in)
 }
 
 //go:linkname setMemoryLimit runtime/debug.setMemoryLimit
