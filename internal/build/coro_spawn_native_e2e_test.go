@@ -724,6 +724,7 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_panic_payload.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor_driver_worker_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_spawn.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_physical_thread_capacity_native_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_target_native_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_worker_native_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_worker_completion_program_llgo.go"),
@@ -738,6 +739,7 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_run_decision.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_run_slice.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_execution_quota_default.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_physical_thread_capacity_native_llgo.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_channel_request_default.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_ready_distribution_default.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_target_executor_retired_default.go")
