@@ -1,0 +1,191 @@
+/*
+ * Copyright (c) 2026 The XGo Authors (xgo.dev). All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package coro
+
+import "unsafe"
+
+type executorResumeHandoffState uint8
+
+const (
+	executorResumeHandoffIdle executorResumeHandoffState = iota
+	executorResumeHandoffDetached
+)
+
+type executorResumeHandoffNoCopy struct{}
+
+func (*executorResumeHandoffNoCopy) Lock()   {}
+func (*executorResumeHandoffNoCopy) Unlock() {}
+
+// ExecutorResumeHandoff is one physical M's private root for an active LLVM
+// resume which entered a thread-affine blocking foreign call. It records only
+// the scheduler fields removed by DetachExecutorResume; a compensation M
+// never reads or copies it.
+//
+// The zero value is reusable. A record must stay at a stable address from
+// DetachExecutorResume through RestoreExecutorResume. Nested compensation does
+// not share a P-local slot: if a replacement M blocks in turn, that M owns a
+// separate record, so the chain is bounded only by target M/thread policy.
+type ExecutorResumeHandoff struct {
+	noCopy executorResumeHandoffNoCopy
+	driver *ExecutorDriver
+	task   *G
+	action Action
+	budget uint32
+	state  executorResumeHandoffState
+}
+
+// Detached reports whether handoff currently roots one active foreign wait.
+// It is owner-M-only and is not a synchronization primitive.
+func (handoff *ExecutorResumeHandoff) Detached() bool {
+	return handoff != nil && handoff.state == executorResumeHandoffDetached
+}
+
+func emptyExecutorResumeHandoff(handoff *ExecutorResumeHandoff) bool {
+	return handoff != nil &&
+		handoff.driver == nil && handoff.task == nil &&
+		handoff.action == (Action{}) && handoff.budget == 0 &&
+		handoff.state == executorResumeHandoffIdle
+}
+
+func validForeignWaitingExecutorTask(p *P, task *G) bool {
+	if p == nil || !ValidG(task) || task.state != GForeignWaiting ||
+		task.runP != p || task.runAction != ActionInvalid ||
+		task.transferState != runnableTransferGIdle ||
+		task.osThreadLockDepth == 0 || task.queued || task.nextReady != nil ||
+		task.waiting || task.spawnChild != nil || task.spawnParent != nil ||
+		task.spawnP != nil || task.destroyTarget != nil || task.destroyRoot ||
+		task.pending.kind != pendingNone || task.pending.from != nil ||
+		task.pending.target != nil || !gPreemptEnabledAtDepthZero(task) ||
+		!releasableParkState(&task.park) || !validLiveTaskStorage(task) {
+		return false
+	}
+	active := task.active
+	return active != nil && active.owner == task && active.handle != nil &&
+		active.header != nil && active.state == FrameActive &&
+		active.header.G == unsafe.Pointer(task) &&
+		active.header.SuspendReason == uint16(SuspendNone) &&
+		active.header.Lifecycle == uint16(FrameActive)
+}
+
+// DetachExecutorResume removes one exact issued ActionResume from its P and
+// driver while leaving the LLVM frame active on the calling locked M. The
+// caller must publish an ExecutionDomainHandoff only after this succeeds.
+//
+// No coroutine transition or scheduler action is executed here. The task
+// remains rooted by handoff, keeps runP as its cancellation ownership domain,
+// and enters GForeignWaiting. Clearing P.osThreadLockOwner lets a replacement
+// M run unrelated work on the same P without weakening the original G-to-M
+// affinity.
+func DetachExecutorResume(
+	handoff *ExecutorResumeHandoff,
+	driver *ExecutorDriver,
+	task *G,
+) bool {
+	if !emptyExecutorResumeHandoff(handoff) || driver == nil || task == nil {
+		return false
+	}
+	current, _, _, ownerOK := CurrentExecutorDriver(task)
+	if !ownerOK || current != driver || !enterCriticalContext(task) ||
+		driver.run.issued != ActionCheckResume {
+		return false
+	}
+	p := driver.p
+	if p == nil || p.current != task || task.runP != p ||
+		p.osThreadLockOwner != task || task.osThreadLockDepth == 0 ||
+		task.runAction != ActionInvalid || task.queued || task.nextReady != nil ||
+		task.waiting || task.spawnParent != nil || task.spawnP != nil ||
+		task.destroyTarget != nil || task.destroyRoot ||
+		p.action.Kind != ActionResume || p.action.Handle == nil ||
+		task.active == nil || task.active.handle != p.action.Handle ||
+		p.runDecision != (RunDecision{}) || !p.runDecisionTaken ||
+		p.servicePreemptBudget == 0 {
+		return false
+	}
+
+	handoff.driver = driver
+	handoff.task = task
+	handoff.action = p.action
+	handoff.budget = p.servicePreemptBudget
+
+	driver.run.issued = ActionInvalid
+	p.osThreadLockOwner = nil
+	p.current = nil
+	p.inResume = false
+	p.action = Action{}
+	p.runDecisionTaken = false
+	p.servicePreemptBudget = 0
+	task.state = GForeignWaiting
+	handoff.state = executorResumeHandoffDetached
+	return true
+}
+
+// ExecutorResumeHandoffReturnable reports the necessary target-neutral
+// physical-owner boundary. A replacement owner may finish its
+// ExecutionDomainHandoff return only here: no physical action or source
+// A/ack/B transaction is split, while queued runnable work and durable source
+// requests may remain for the returning M. A target must additionally settle
+// its route mailbox, admission and physical-owner directory before FinishReturn.
+func ExecutorResumeHandoffReturnable(driver *ExecutorDriver) bool {
+	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
+		driver.run.issued != ActionInvalid || driver.poll.phase != executorPollIdle {
+		return false
+	}
+	p := driver.p
+	if !idleExecutorScheduler(p) || p.osThreadLockOwner != nil {
+		return false
+	}
+	schedule := preemptLoad(&p.schedule)
+	return schedule == scheduleIdle || schedule == scheduleRequested
+}
+
+// RestoreExecutorResume reattaches the exact active LLVM resume after the
+// replacement owner has finished and the target has strongly joined it. The
+// caller must reacquire its managed-execution permit before calling Restore.
+// Success consumes and zeroes handoff; a duplicate or mismatched restore is
+// rejected without changing scheduler state.
+func RestoreExecutorResume(handoff *ExecutorResumeHandoff) bool {
+	if handoff == nil || handoff.state != executorResumeHandoffDetached ||
+		handoff.driver == nil || handoff.task == nil ||
+		handoff.action.Kind != ActionResume || handoff.action.Handle == nil ||
+		handoff.budget == 0 {
+		return false
+	}
+	driver, task := handoff.driver, handoff.task
+	p := driver.p
+	if !ExecutorResumeHandoffReturnable(driver) ||
+		!validForeignWaitingExecutorTask(p, task) ||
+		task.active.handle != handoff.action.Handle ||
+		task.runP != p || driver.run.issued != ActionInvalid {
+		return false
+	}
+
+	p.current = task
+	p.inResume = true
+	p.action = handoff.action
+	p.runDecision = RunDecision{}
+	p.runDecisionTaken = true
+	p.servicePreemptBudget = handoff.budget
+	p.osThreadLockOwner = task
+	driver.run.issued = ActionCheckResume
+	task.state = GRunning
+	handoff.driver = nil
+	handoff.task = nil
+	handoff.action = Action{}
+	handoff.budget = 0
+	handoff.state = executorResumeHandoffIdle
+	return true
+}

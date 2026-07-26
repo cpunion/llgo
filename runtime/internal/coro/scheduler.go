@@ -32,6 +32,11 @@ const (
 	// GPanicking destroys suspended-await ancestors deepest-to-root after the
 	// active final-suspended panic frame has passed its normal done check.
 	GPanicking
+	// GForeignWaiting retains one active LLVM resume on its locked physical M
+	// while a compensation M services the released P and source domain. The G
+	// remains rooted by that M's explicit ExecutorResumeHandoff record; it is
+	// never runnable, parked, or owned by a scheduler queue in this state.
+	GForeignWaiting
 )
 
 // G owns the stackless frame chain for one logical Go task.

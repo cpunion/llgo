@@ -81,8 +81,11 @@ func pQueueContainsReady(p *P, target *G) bool {
 
 // pOwnsTaskCancellation proves scheduler ownership for the public arbitrary-G
 // APIs without adding a permanent P pointer or external handle to every G.
-// Those APIs retain a full queue audit: cancellation is rare, so a scan is
-// preferable to inflating the hot G/P representation.
+// Runnable and parked tasks retain a full queue audit: cancellation is rare,
+// so a scan is preferable to inflating the hot G/P representation. An active
+// locked foreign wait instead has no queue membership; its explicit
+// GForeignWaiting state and active-frame/runP invariants prove the retained
+// M-local handoff root.
 func pOwnsTaskCancellation(p *P, g *G) bool {
 	if p == nil || !ValidG(g) {
 		return false
@@ -92,6 +95,8 @@ func pOwnsTaskCancellation(p *P, g *G) bool {
 		return g.queued && pQueueContainsReady(p, g)
 	case GRunning, GDispatching:
 		return p.current == g && g.runP == p
+	case GForeignWaiting:
+		return validForeignWaitingExecutorTask(p, g)
 	case GWaiting:
 		return g.waiting && g.active != nil && g.active.parkWait != nil &&
 			validActiveWaitSetRecordFast(p, g.active.parkWait)
@@ -273,6 +278,9 @@ func pOwnsRegisteredTaskCancellation(p *P, g *G) bool {
 	case GRunning, GDispatching:
 		return p.current == g && g.runP == p && !g.queued && g.nextReady == nil &&
 			!g.waiting &&
+			validRegisteredRunningParkHeader(&g.park)
+	case GForeignWaiting:
+		return validForeignWaitingExecutorTask(p, g) &&
 			validRegisteredRunningParkHeader(&g.park)
 	case GWaiting:
 		if !g.waiting || g.queued || g.nextReady != nil || g.runP != nil ||

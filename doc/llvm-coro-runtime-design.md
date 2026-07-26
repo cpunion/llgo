@@ -4,13 +4,13 @@
 
 更新：2026-07-26
 
-当前审查基线：`cpunion/llgo:llvm-coro` @ `b3d02bc49`
+当前审查基线：`cpunion/llgo:llvm-coro` @ `e919b7086`
 
 集成状态：Phase 36 hard-cutover、P-neutral result materialization 与 demand-driven
 work sharing、native 固定有界物理 topology、动态 managed-execution quota 和标准
-`runtime.GOMAXPROCS` 接口已合并；同M阻塞的第一阶段配额补偿已实现，完整P/source
-handoff的generation-bound ownership baton已实现，active resume detach/restore与native
-replacement M接线仍在收敛
+`runtime.GOMAXPROCS` 接口已合并；同M阻塞的第一阶段配额补偿、generation-bound
+ownership baton及target-neutral active resume detach/restore core已实现，native
+replacement M目录与真实P/source驱动接线仍在收敛
 
 关联提案：[Issue #1546](https://github.com/xgo-dev/llgo/issues/1546)
 
@@ -922,11 +922,25 @@ Idle
 - doorbell、等待和replacement容量属于target adapter。core不自旋、不创建线程，也不引入
   第二套scheduler。
 
-该baton只解决跨物理owner的独占与归还。Native接线还必须在原owner上原子保存
-`P.current/inResume/action/runDecisionTaken/servicePreemptBudget`与`driver.run.issued`，清出可服务
-的稳定P；replacement只能运行现有bounded reducer，return后再原样恢复blocked G的resume
-episode。任何只释放managed-execution quota而未完成这一步的实现都不能宣称同P source
-handoff已经完成。
+active resume core现已用M-local `ExecutorResumeHandoff`完成baton两侧的逻辑切换。Detach只接受
+compiler prologue已经消费run decision、`driver.run.issued=ActionCheckResume`、active frame仍为
+`FrameActive/SuspendNone`且当前G精确持有`P.osThreadLockOwner`的窗口；它保存
+`{driver,G,ActionResume,budget}`，清除
+`P.current/inResume/action/runDecisionTaken/servicePreemptBudget/osThreadLockOwner`与
+`driver.run.issued`，并把G置为不入任何queue的`GForeignWaiting`。`G.runP`继续绑定原P，使
+`TaskControlSource`可在replacement owner上把Abort/Shutdown保持为sticky请求。
+
+replacement仍只能运行现有bounded reducer。`ExecutorResumeHandoffReturnable`要求没有issued
+physical action、poll A/ack/B transaction已经回到Idle、P没有current/resume/action/lock owner；
+ready queue和durable source request可以保留。Target在该边界`FinishReturn`并strong-join后，
+原M先重获managed-execution permit，再由`RestoreExecutorResume`精确恢复原action、预算、
+driver receipt和LockOSThread owner。record成功restore后立即清零；重复或结构不匹配的restore
+fail closed。record归属M而不是P，因此replacement再次阻塞时使用自己的record，仍支持有界链。
+
+这完成的是target-neutral active resume协议，不等于native handoff已经端到端完成。Native还需
+实现可增长但受`maxThreads`限制的replacement M目录、active M slot、create/claim/return/join
+顺序及真实doorbell等待；任何只释放managed-execution quota或只调用core detach而未完成这些
+步骤的实现都不能宣称同P source handoff已经完成。
 
 ### 11.2 G 状态机
 
@@ -953,6 +967,7 @@ handoff已经完成。
 | `Park` | exact ParkTicket已seal，candidate operation已release publish | Parking；owner提交后按sticky fact变Waiting或进入resolution/detach | wait owner / source-affine ready queue |
 | `GCStop` | 发布stateID和stack/root状态 | GCStopped，STW list | GC恢复后原/任意M |
 | `ForeignCall` | publish ForeignOp | ForeignWait，foreign-op registry | foreign worker/targetM；完成后ready |
+| locked active foreign call | M-local `ExecutorResumeHandoff`保根，P/source交给replacement | GForeignWaiting，不入queue且active frame留在原M | replacement服务P；return/join后原M恢复同一resume |
 | `ForeignReentry start` | 在owner G push special child | ForeignWait -> Dispatching -> Running | 持有C boundary的M |
 | `ForeignReentry return` | publishcallback result并pop child | Running -> Dispatching -> ForeignWait | 返回同一C thunk |
 | `HostCall/Reentry` | publish HostOp/ReentryRecord；push/pop special child | HostWait与Dispatching/Running间受控切换 | 持有host boundary的M/entry |
@@ -1158,9 +1173,10 @@ Runtime 提供 nesting counter：
 - UnlockOSThread 清除绑定后，G 可在下一 safepoint 迁移。
 
 当前production路径已经在同M foreign call前后释放/重获process managed-execution quota，
-因此其他route在`GOMAXPROCS=1`时仍可运行；上述`ExecutionDomainHandoff`也已覆盖
-generation、claim/return竞态和retire。但blocked active resume的P字段detach/restore以及
-replacement M对同一P/source的实际驱动尚未接线，二者必须完成后才是这里定义的完整语义。
+因此其他route在`GOMAXPROCS=1`时仍可运行；`ExecutionDomainHandoff`已覆盖generation、
+claim/return竞态和retire，`ExecutorResumeHandoff`也已覆盖blocked active resume的P字段
+detach/restore、稳定return gate和期间的registered cancellation。尚缺的是native replacement M
+目录及其对同一P/source的真实驱动；接线与linked对抗测试完成后才是这里定义的完整语义。
 
 Full语义要求locked G使用固定M，且该M在G park/preempt期间不运行其他G；因此还需要replacement M维持其他P进展。单M JS/WASM、WASI和baremetal不能同时满足“该线程不运行其他G”和“locked G park时其他G继续”：
 
@@ -2819,10 +2835,11 @@ Native使用有界blocking worker pool：
 当前实现已先关闭一个独立的并发漏洞：`LockOSThread`选择的同M foreign
 边界在进入C前精确归还当前route的managed-execution permit，返回后必须在接触
 managed state前重获同一route permit。固定fleet因此可在`GOMAXPROCS=1`时由其他
-route继续执行；linked对抗测试要求阻塞C必须由另一G解除。这个门只证明跨route
-执行配额补偿，不等于上述最终P handoff：原route的ready queue、timer/poll/channel
-source和owner epoch仍由阻塞M持有，必须在下一阶段用单owner generation协议转交，
-且不得把当前临时direct-C路径标成完整`entersyscall/exitsyscall`实现。
+route继续执行；linked对抗测试要求阻塞C必须由另一G解除。随后实现的target-neutral
+active-resume core已能把原route的P/driver执行字段detach到M-local record，允许现有
+reducer服务同一ready/source域，并在稳定边界精确restore。当前production direct-C
+路径尚未创建/claim/join replacement M，故linked证据仍只证明跨route配额补偿，不能
+标成完整`entersyscall/exitsyscall`实现。
 
 Worker pool必须有backpressure、取消/generation、shutdown和最大线程数；不能退化为每次调用创建pthread。
 
