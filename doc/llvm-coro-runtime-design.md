@@ -946,9 +946,11 @@ M0→M1→M2 nested handoff的linked E2E已通过。所有managed-start后的own
 启动期创建、永不执行用户代码的clean factory串行创建；locked M只提交scalar slot并同步等待，
 不会把其signal mask、namespace、cwd/fs view、credentials等可继承状态传播给replacement。
 factory在所有owner strong-join后才停止并自join；原生C并发测试以16个已污染请求线程验证
-隔离和restart/stop线性化。剩余生产化项是把per-call create/join升级为有界standby-M缓存、
-与`runtime/debug.SetMaxThreads`联动，并覆盖blocked parent遇到command shutdown/fatal、
-callback/reentry和异常退出的完整矩阵；这些不能由当前成功路径外推。
+隔离和restart/stop线性化。未解锁G退出又以clean successor覆盖program、peer和temporary
+replacement owner；command main-return遇不可取消blocked M时按Go进程语义终止。剩余生产化项
+是把per-call create/join升级为有界standby-M缓存、与`runtime/debug.SetMaxThreads`联动，
+并覆盖普通locked park/preempt、callback/reentry、非command shutdown和异常路径的完整矩阵；
+这些不能由当前成功路径外推。
 
 ### 11.2 G 状态机
 
@@ -1183,9 +1185,10 @@ Runtime 提供 nesting counter：
 当前production的locked foreign子路径已经在同M C调用前detach active resume，通过
 `ExecutionDomainHandoff`和active-M slot把原P/source交给replacement，释放/重获process
 managed-execution quota，并在strong join后恢复exact resume。`GOMAXPROCS=1`同route
-channel、timer、socket poll及nested replacement的linked对抗测试已通过。这里仍未完成的是
-任意locked G普通park/preempt后的pinned queue、locked G异常退出/command shutdown时的M退休、
-standby M缓存和完整`entersyscall/exitsyscall`矩阵，因此不能把foreign子路径等同于全部
+channel、timer、socket poll及nested replacement的linked对抗测试已通过；未解锁G退出的
+program、peer和temporary replacement M会由clean successor替换，command main-return也不会
+等待不可取消的blocked M。这里仍未完成的是任意locked G普通park/preempt后的pinned queue、
+standby M缓存、`SetMaxThreads`及完整callback/reentry/`entersyscall`/`exitsyscall`矩阵，因此不能把foreign子路径等同于全部
 `LockOSThread`语义。
 
 Full语义要求locked G使用固定M，且该M在G park/preempt期间不运行其他G；因此还需要replacement M维持其他P进展。单M JS/WASM、WASI和baremetal不能同时满足“该线程不运行其他G”和“locked G park时其他G继续”：
@@ -2017,20 +2020,20 @@ Pure sync library/archive不需要链接scheduler。Executable一旦选择 `-sch
   `594/17/18/651`纵向账本。
 - Phase 36之后的主要缺口仍是工程闭环而非新的coroutine可行性障碍：零/单source
   `ResumePacket`、Channel/select typed multi-source materialization、单Worker HostOp、Worker+Timer
-  deadline和keyed/private-registry park的P-neutral composite cleanup已经完成；基于无指针需求claim、exact mailbox和Imported首次执行门的global injection/work sharing也已完成。native现在于首个managed resume前创建固定8-route物理topology，route/source/event identity保持到进程关闭；启动环境或online CPU只初始化逻辑execution quota，标准`runtime.GOMAXPROCS(n)`可在运行期查询、增大或缩小该quota，而不销毁P、迁移source或撤销已经开始的resume。single-executor target固定返回1。locked-M阻塞已接通同P replacement owner、嵌套handoff和route-local channel/timer/poll驱动。下一步是pthread standby缓存、批量/local-deque steal、完整affinity、shutdown/fatal阻塞矩阵，以及Linux自动cgroup/affinity默认值刷新；paged/dynamic channel、timer与
+  deadline和keyed/private-registry park的P-neutral composite cleanup已经完成；基于无指针需求claim、exact mailbox和Imported首次执行门的global injection/work sharing也已完成。native现在于首个managed resume前创建固定8-route物理topology，route/source/event identity保持到进程关闭；启动环境或online CPU只初始化逻辑execution quota，标准`runtime.GOMAXPROCS(n)`可在运行期查询、增大或缩小该quota，而不销毁P、迁移source或撤销已经开始的resume。single-executor target固定返回1。locked-M阻塞已接通同P replacement owner、嵌套handoff和route-local channel/timer/poll驱动；未解锁退出又以clean successor覆盖program、peer和temporary replacement M，command main-return不会等待不可取消的blocked M。下一步是pthread standby缓存、`SetMaxThreads`、批量/local-deque steal、普通locked park/preempt、完整affinity、callback/reentry与非command shutdown矩阵，以及Linux自动cgroup/affinity默认值刷新；paged/dynamic channel、timer与
   worker capacity；完整defer/recover/Goexit和precise suspended-frame GC；外部DNS
   server/cgo resolver、Unix/raw socket与ancillary OOB、process/signal；logical stack/tooling；以及
   WASM/WASI/RTOS/baremetal各自内建
   event/host/HAL adapter。native退出实验模式仍必须满足35.1与35.2，尤其仓库
   `test/*`和GOROOT不得存在unexpected failure。
 - compiler的所有现有initial、child-await、yield和legacy-park resume边已接入terminating dispatch gate。zero-ticket路径调用scalar `__llgo_coro_run_decision_take_zero_v1(g) uint32`，正常值进入唯一normal continuation，Abort/Shutdown在cleanup lowering完成前进入共享trap而不会误执行用户continuation；full ticket/lease ABI继续供bootstrap与未来park-site reconciliation使用。同一LLVM/target的gate开关对照证明scalar gate不会增加stackless coroutine frame，CoroSplit ramp/destroy也没有可达gate。
-- 两字Operation identity已冻结为`source:8/route:9/local:15 + generation:32`，保持size 8、align 4。route按runtime instance单调分配且永不复用，关闭后保留永久tombstone；Manual/TaskControl ingress的producer lease覆盖`source.Post -> executor.Request`完整tail，strong join后才允许清除source/executor pointer；Timer V2 reserve、publish、Apply和result lease也验证exact route/local/generation。52-byte pointer-free `ResumePacket`已覆盖零/单Timer、Manual、Poll、Worker以及经typed plan物化的direct Channel/multi-case select，HostOp deadline与keyed/private-registry cleanup也复用同一POD plan。P-neutral global injection/work sharing已在1/4/8 route core生命周期以及1/8 P真实linked E2E验证。Command root用G尾部padding中的一字节`AnyOwner/CurrentOwner` mobility保持program-P边界；这不增加G大小、P指针或registry，也不等于完整thread/realm affinity。运行期逻辑execution quota和locked-M同P replacement handoff均已完成：active resume先变为私有rooted的`GForeignWaiting`，10,000槽BSS M目录以generation/owner-epoch baton把active route从parent scalar slot切到replacement，replacement复用原driver/source/common reducer并服务channel、timer和poll；原C返回后request/ring/join，重获permit并恢复exact resume。`GOMAXPROCS=1`下同route channel、timer、真实socket poll及nested M0→M1→M2 linked E2E均已通过。尚未完成的是pthread standby缓存、`SetMaxThreads`联动、批量/local-deque steal、完整affinity以及标准库/GOROOT的locked syscall/callback矩阵。
+- 两字Operation identity已冻结为`source:8/route:9/local:15 + generation:32`，保持size 8、align 4。route按runtime instance单调分配且永不复用，关闭后保留永久tombstone；Manual/TaskControl ingress的producer lease覆盖`source.Post -> executor.Request`完整tail，strong join后才允许清除source/executor pointer；Timer V2 reserve、publish、Apply和result lease也验证exact route/local/generation。52-byte pointer-free `ResumePacket`已覆盖零/单Timer、Manual、Poll、Worker以及经typed plan物化的direct Channel/multi-case select，HostOp deadline与keyed/private-registry cleanup也复用同一POD plan。P-neutral global injection/work sharing已在1/4/8 route core生命周期以及1/8 P真实linked E2E验证。Command root用G尾部padding中的一字节`AnyOwner/CurrentOwner` mobility保持program-P边界；这不增加G大小、P指针或registry，也不等于完整thread/realm affinity。运行期逻辑execution quota和locked-M同P replacement handoff均已完成：active resume先变为私有rooted的`GForeignWaiting`，10,000槽BSS M目录以generation/owner-epoch baton把active route从parent scalar slot切到replacement，replacement复用原driver/source/common reducer并服务channel、timer和poll；原C返回后request/ring/join，重获permit并恢复exact resume。未解锁G退出通过Action padding retire bit和clean-factory succession覆盖program、peer及temporary replacement lineage；TLS destructor E2E证明旧pthread退出，main-return遇不可取消locked C按进程终止语义退出而不join。`GOMAXPROCS=1`下同route channel、timer、真实socket poll及nested M0→M1→M2 linked E2E均已通过。尚未完成的是pthread standby缓存、`SetMaxThreads`联动、批量/local-deque steal、完整affinity以及标准库/GOROOT的locked syscall/callback/reentry矩阵。
 - 第一个标准库同步风格原型已以GOROOT source patch实现`time.Sleep`：普通`time.Sleep(d)`被Effect分析自动传播为`DirectCoro/AwaitStructured`，不修改public signature，不依赖libuv、BDWGC、pthread producer或用户goroutine。真实linked native+nogc E2E已编译production runtime island，实际等待30ms并恢复原frame；timer/wake路径由monotonic clock与pipe/poll/fcntl实现，符号审计确认不依赖libuv、BDWGC或pthread producer。另一focused production-overlay测试直接读取真实注入的`time.Sleep`源，不用测试effect seed，验证跨包同步caller染色、frame证书和CoroSplit，但不声称链接执行标准库`time.Sleep`。LLVM 19–22都跑该契约，Go 1.24跑真实linked E2E，Go 1.26也跑production overlay分析/codegen。
 - Phase 22 仍是有界prototype，不是完整`time`runtime：第65个同时live timer会按fail-stop ABI终止，尚需dynamic/sharded table和heap；`Timer`/`Ticker`/`AfterFunc`仍使用legacy libuv路径；`f := time.Sleep`、interface/reflect和dynamic dispatch还没有end-to-end callable coroutine descriptor；`Sleep(0)`/负值在Sleep体内不注册timer，但value-insensitive caller仍会创建并await child frame，尚需conditional effect或call-site fast path才能避免可观测的多余handoff。完整`Do`标准库构建现在先被`sync.Pool` TLS destructor的捕获闭包挡住：exact同步C callback ABI没有closure context slot，不能直接放宽。后续需改成显式`owner/local` TLS state，并同时为`tls.Handle[T]`经`Pool.local`的unsafe transport建立字段级whole-program证书。WASM、WASI、RTOS和baremetal也尚未有对应timer source。
 - wait/preempt core 要求目标提供可靠的 32-bit atomic load/store/CAS。WASM 可直接满足；带 A 扩展的 RISC-V 可满足；ESP32-C3 RV32IMC 当前会在链接时缺少 `__atomic_*_4`，直到平台用 IRQ critical section 提供单核适配。这里故意不使用非原子 fallback。
 - `wasip1`、`wasip2` 和 `wasm-unknown` 明确选择 leaking/nogc frame backend，不依赖 libuv 或 BDWGC。`wasip2` 与 `wasm-unknown` 已通过真实 `llgo build -target=...`、wasm magic/symbol closure、无 `GC_*`/undefined 检查，并由 wasmtime 运行返回 0。当前 `wasip2` 产物是 Preview 2 目标的 core module，尚不是 WIT component。
 - frame allocator 已有 conservative BDWGC、nogc/WASM malloc 和 tinygogc/baremetal 后端。跨 suspend 的 pointer 目前只在 conservative 或 non-collecting 配置下安全；精确 frame root map、write barrier、STW、weak timer/finalizer 与 cleanup 语义尚未实现，不能据此宣称完整 Go GC 兼容。
-- deterministic scheduler core 已能管理多个 frame、ready queue、park/wake、稳定 wait registration/cancel、绑定 P 的 target-neutral executor driver、正常 main-return cancellation、terminal panic frame destruction和 idle/requested/stopping/disabled 状态。Native production runner使用固定8-route topology；route 1收养command M，其余route各由一个joinable pthread M拥有，所有M复用同一reducer和route-local source/reactor。target-neutral原子execution quota只包围真正的managed resume，缺少permit的route仍可服务timer/poll/channel/cancel/transfer；缩容不撤销in-flight resume，扩容通过sticky waiter与doorbell关闭lost-wake窗口。locked-M blocking call现会detach active resume并把同一P/driver/source执行域交给临时replacement M；replacement沿公共reducer继续处理同route事件，原M在C返回后strong join replacement、重获quota并精确restore。core race、真实1→4→1物理并发、单配额同/跨route补偿、channel/timer/socket poll和嵌套replacement E2E以及普通标准库`runtime.GOMAXPROCS`同步调用已经通过。尚未接入registration unregister枚举、dynamic/sharded timer heap、standby replacement cache、完整peer fatal teardown、完整panic/defer/recover/Goexit和全量标准库/GOROOT矩阵。
+- deterministic scheduler core 已能管理多个 frame、ready queue、park/wake、稳定 wait registration/cancel、绑定 P 的 target-neutral executor driver、正常 main-return cancellation、terminal panic frame destruction和 idle/requested/stopping/disabled 状态。Native production runner使用固定8-route topology；route 1收养command M，其余route各由一个joinable pthread M拥有，所有M复用同一reducer和route-local source/reactor。target-neutral原子execution quota只包围真正的managed resume，缺少permit的route仍可服务timer/poll/channel/cancel/transfer；缩容不撤销in-flight resume，扩容通过sticky waiter与doorbell关闭lost-wake窗口。locked-M blocking call会detach active resume并把同一P/driver/source执行域交给临时replacement M；replacement沿公共reducer继续处理同route事件，原M在C返回后strong join exact current lineage、重获quota并精确restore。未解锁退出的M由clean successor永久替换，command main-return不会等待不可取消的blocked M。core race、真实1→4→1物理并发、单配额同/跨route补偿、channel/timer/socket poll、嵌套replacement/retirement E2E以及普通标准库`runtime.GOMAXPROCS`同步调用已经通过。尚未接入registration unregister枚举、dynamic/sharded timer heap、standby replacement cache、`SetMaxThreads`、完整callback/reentry teardown、完整panic/defer/recover/Goexit和全量标准库/GOROOT矩阵。
 - native+nogc scheduler-island 已把真实 nested static `go` lowering、V2 entry/factory/control wrapper、production scheduler/spawn/shutdown/coroalloc 最终链接并执行。确定性 fixture 验证 `Before=1, After=0, Leaf=0`，最终符号审计同时要求 production `CommitSpawn`/`BeginCommandShutdown` 且禁止 legacy `Panic/Rethrow/TracePanic/printany`。该测试以四个 bounded init no-op 和 fail-stop nil-check/libc allocation stub 隔离完整标准库 runtime，因此证明的是可运行 scheduler 原型，不是完整 runtime 启动兼容。
 - terminal panic 的独立 native+nogc scheduler-island 已真实编译并运行 `panic(&GlobalPayload)`。production internal runner返回精确`DrivePanic`状态，导出的void program-run ABI随后执行fatal abort；bootstrap、main、panicChild三个不同LLVM handle各destroy一次，两个祖先均不resume，task-local record在三层frame销毁后仍保持exact type/data word，且G为Dead/non-Reclaimable。最终二进制要求production `PreparePanic`/`PanicDestroyed`/`LoadPanicRecord`并禁止legacy panic/print链；测试report只观察internal drive-panic与record，不代替production printer/exit owner。
 - 完整真实 `entry → allocator → v2 factory → runtime/package init → main → scheduler` linked smoke 仍受上述 runtime/Panic/foreign blockers 限制；scheduler-island、runtime adapter 和 freestanding wasm CLI fixture 各自证明的边界不能合并表述为完整 Go runtime 已经端到端运行。
@@ -2853,8 +2856,10 @@ holder按route而非M计账，child抢跑会被判为同route double-acquire。�
 scalar M slot，因此其已修改的可继承thread state不会污染replacement。返回后
 request/ring、strong join replacement、重获permit，再精确restore。单配额同route channel、timer、
 socket readiness和nested blocking linked E2E均已通过。当前仍是每次locked call
-create/join一个replacement pthread的正确性实现；standby缓存、`SetMaxThreads`联动、
-blocked parent上的shutdown/fatal和完整callback/entersyscall矩阵未完成，因此仍不能标成
+create/join一个replacement pthread的正确性实现；未解锁退出的program、peer和temporary
+replacement owner已有clean succession，command main-return blocked-M也已闭环。standby缓存、
+`SetMaxThreads`联动、普通locked park/preempt、callback/reentry、非command shutdown和完整
+`entersyscall`/`exitsyscall`矩阵仍未完成，因此仍不能标成
 完整Go `entersyscall/exitsyscall`实现。
 
 Worker pool必须有backpressure、取消/generation、shutdown和最大线程数；不能退化为每次调用创建pthread。

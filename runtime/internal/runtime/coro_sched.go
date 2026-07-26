@@ -170,6 +170,7 @@ func coroFinishRunSliceCompatibility(
 			return result
 		case coro.ActionComplete:
 			isMain := result.g == main
+			retireOwner := coro.ActionRetiresPhysicalOwner(next)
 			if !coroReleaseCompletedTask(result.g) {
 				return coroRunResultV1{}
 			}
@@ -178,6 +179,9 @@ func coroFinishRunSliceCompatibility(
 				result.g = main
 				result.action = coro.Action{}
 				return result
+			}
+			if retireOwner && !coroTargetRetirePhysicalOwnerV1(p, driver) {
+				return coroRunResultV1{}
 			}
 			result.stop = coroRunAgainV1
 			return result

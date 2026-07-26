@@ -72,7 +72,20 @@ func coroNativeFleetPhysicalOwnerForHandleV1(
 		return nil, false
 	}
 	peer := &state.peers[handle.Route-2]
-	return peer, peer.handle == handle && peer.slot == handle.Route
+	slot := coroNativeAtomicLoadV1(&peer.slot)
+	owner, ownerOK := coroNativeMOwnerForSlotV1(slot)
+	if !ownerOK || owner.handle != handle {
+		return nil, false
+	}
+	switch coroNativeMOwnerLifecycleLoadV1(owner) {
+	case coroNativeMOwnerPeerPublishedV1, coroNativeMOwnerPeerActiveV1,
+		coroNativeMOwnerSuccessorPublishedV1,
+		coroNativeMOwnerSuccessorActiveV1, coroNativeMOwnerRetiringV1,
+		coroNativeMOwnerReturnedV1:
+		return peer, peer.handle == handle
+	default:
+		return nil, false
+	}
 }
 
 func coroNativeFleetPhysicalOwnersStartV1() bool {
@@ -91,7 +104,8 @@ func coroNativeFleetPhysicalOwnersStartV1() bool {
 		peer := &state.peers[index]
 		handle, ok := coroNativeFleetHandleV1(index + 1)
 		if !ok || peer.lifecycle != coroNativeFleetPhysicalUnusedV1 ||
-			peer.slot != 0 || peer.handle != (coro.ExecutorFleetHandle{}) || peer.shutdown {
+			coroNativeAtomicLoadV1(&peer.slot) != 0 ||
+			peer.handle != (coro.ExecutorFleetHandle{}) || peer.shutdown {
 			break
 		}
 		slot, owner, ownerOK := coroNativeMInitialPeerV1(handle)
@@ -99,7 +113,7 @@ func coroNativeFleetPhysicalOwnersStartV1() bool {
 			break
 		}
 		peer.handle = handle
-		peer.slot = slot
+		coroNativeAtomicStoreV1(&peer.slot, slot)
 		peer.lifecycle = coroNativeFleetPhysicalActiveV1
 		if corofleet.CreateOwner(&owner.thread, slot) != 0 || owner.thread == nil {
 			// pthread_create leaves the result slot unspecified on failure.
@@ -126,7 +140,9 @@ func coroNativeFleetPhysicalOwnersStartV1() bool {
 	joined := rang
 	for index := uint32(0); index < created; index++ {
 		peer := &state.peers[index]
-		owner, ownerOK := coroNativeMOwnerForSlotV1(peer.slot)
+		owner, ownerOK := coroNativeMOwnerForSlotV1(
+			coroNativeAtomicLoadV1(&peer.slot),
+		)
 		var result c.Pointer
 		ok := ownerOK && owner.thread != nil &&
 			pthread.Join(owner.thread, &result) == 0 && result == nil
@@ -156,14 +172,26 @@ func coroNativeFleetPhysicalOwnersStopV1() bool {
 			coroNativeFleetDomainActiveV1,
 		)
 		if !ok || peer.lifecycle != coroNativeFleetPhysicalActiveV1 ||
-			peer.slot == 0 || !domain.doorbell.Ring() {
+			!domain.doorbell.Ring() {
+			state.lifecycle = coroNativeFleetPhysicalFailedV1
+			return false
+		}
+	}
+	// Seal may race a retirement transition which already admitted its
+	// succession lease. Wait until that transition has published the clean
+	// successor slot (or the old owner has remained the stable stop owner)
+	// before reading peer.slot and choosing the one join target per route.
+	for !state.stop.Quiesced() {
+		if corofleet.Yield() != 0 {
 			state.lifecycle = coroNativeFleetPhysicalFailedV1
 			return false
 		}
 	}
 	for index := uint32(0); index < state.count; index++ {
 		peer := &state.peers[index]
-		owner, ownerOK := coroNativeMOwnerForSlotV1(peer.slot)
+		owner, ownerOK := coroNativeMOwnerForSlotV1(
+			coroNativeAtomicLoadV1(&peer.slot),
+		)
 		var result c.Pointer
 		if !ownerOK || owner.thread == nil ||
 			pthread.Join(owner.thread, &result) != 0 || result != nil ||
@@ -434,19 +462,19 @@ func coroNativeFleetRunPhysicalOwnerPassV1(
 	}
 }
 
-// coroNativeFleetRunPhysicalOwnerV1 is the complete ordinary-domain M loop.
-// It shares the common reducer and logical driver with every target profile;
-// this layer owns only clock sampling, mailbox import, physical poll, and the
-// explicit stop boundary. No recursion or dynamically selected callback is
-// used, and every blocking wait is bounded so stop is observed promptly.
-func coroNativeFleetRunPhysicalOwnerV1(handle coro.ExecutorFleetHandle) bool {
+func coroNativeFleetRunPhysicalOwnerEpochV1(
+	handle coro.ExecutorFleetHandle,
+	epoch uint32,
+) bool {
 	peer, ok := coroNativeFleetPhysicalOwnerForHandleV1(handle)
-	if !ok || peer.lifecycle != coroNativeFleetPhysicalActiveV1 {
+	domain, domainOK := coroNativeFleetDomainForHandleV1(
+		&coroNativeFleetV1State,
+		handle,
+		coroNativeFleetDomainActiveV1,
+	)
+	if !ok || !domainOK || peer.lifecycle != coroNativeFleetPhysicalActiveV1 ||
+		epoch == 0 || domain.ownerEpoch != epoch {
 		return coroNativeFleetPhysicalOwnerFailV1("native fleet peer handle invalid")
-	}
-	epoch, ok := coroNativeFleetBeginOwnerEpochV1(handle)
-	if !ok {
-		return coroNativeFleetPhysicalOwnerFailV1("native fleet peer begin epoch failed")
 	}
 	done := false
 	for {
@@ -459,11 +487,24 @@ func coroNativeFleetRunPhysicalOwnerV1(handle coro.ExecutorFleetHandle) bool {
 	}
 }
 
+// coroNativeFleetRunPhysicalOwnerV1 is the complete ordinary-domain M loop.
+// It shares the common reducer and logical driver with every target profile;
+// this layer owns only clock sampling, mailbox import, physical poll, and the
+// explicit stop boundary. No recursion or dynamically selected callback is
+// used, and every blocking wait is bounded so stop is observed promptly.
+func coroNativeFleetRunPhysicalOwnerV1(handle coro.ExecutorFleetHandle) bool {
+	epoch, ok := coroNativeFleetBeginOwnerEpochV1(handle)
+	if !ok {
+		return coroNativeFleetPhysicalOwnerFailV1("native fleet peer begin epoch failed")
+	}
+	return coroNativeFleetRunPhysicalOwnerEpochV1(handle, epoch)
+}
+
 // __llgo_coro_native_fleet_owner_v2 is called only by corofleet's fixed C
 // pthread routine. slot is a scalar index into stable runtime M storage; it is
 // never a Go pointer, G, P, function address, or coroutine handle. The same
-// static entry dispatches initial peers and temporary replacement owners. The
-// compiler retains this exact body and its static
+// static entry dispatches initial peers, temporary replacements, and permanent
+// clean successors. The compiler retains this exact body and its static
 // closure as a raw scheduler-stack island, so coroHandleResume/Destroy never
 // acquire a managed coroutine twin. One means coordinated stop; every
 // invariant failure is process-fatal because no managed G can safely receive a
@@ -496,7 +537,10 @@ func __llgo_coro_native_fleet_owner_v2(slot uint32) uint32 {
 		// join. Do not gate entry on the aggregate lifecycle: a program which
 		// returns immediately may request Stopping before the new pthread reaches
 		// this fixed ABI.
-		if owner.self == nil || peer.slot != slot || peer.handle != owner.handle ||
+		if owner.self == nil ||
+			coroNativeAtomicLoadV1(&peer.slot) != slot ||
+			peer.handle != owner.handle ||
+			corofleet.OwnerReady(slot) != 0 ||
 			!coroNativeFleetRunPhysicalOwnerV1(peer.handle) ||
 			!coroNativeMOwnerLifecycleCASV1(
 				owner,
@@ -509,6 +553,41 @@ func __llgo_coro_native_fleet_owner_v2(slot uint32) uint32 {
 	case coroNativeMOwnerReplacementPublishedV1:
 		if !coroNativeMRunReplacementOwnerV1(slot) {
 			coroRuntimeAbort("native coroutine replacement owner failed")
+			return 0
+		}
+	case coroNativeMOwnerSuccessorPublishedV1:
+		successor, _, domain, claimed := coroNativeMClaimSuccessorV1(slot)
+		if !claimed || successor != owner || domain == nil ||
+			corofleet.OwnerReady(slot) != 0 {
+			coroRuntimeAbort("native coroutine successor owner claim failed")
+			return 0
+		}
+		if owner.baton.Valid() {
+			parent, parentOK := coroNativeMOwnerForSlotV1(owner.parentSlot)
+			if !parentOK || !coroNativeMRunClaimedReplacementOwnerV1(
+				slot,
+				owner,
+				parent,
+				domain,
+			) {
+				coroRuntimeAbort("native coroutine replacement successor failed")
+				return 0
+			}
+		} else if domain.adopted {
+			if domain.handle.Route != 1 ||
+				!coroNativeMRunProgramSuccessorV1() {
+				coroRuntimeAbort("native coroutine program successor failed")
+				return 0
+			}
+		} else if !coroNativeFleetRunPhysicalOwnerEpochV1(
+			domain.handle,
+			owner.ownerEpoch,
+		) || !coroNativeMOwnerLifecycleCASV1(
+			owner,
+			coroNativeMOwnerSuccessorActiveV1,
+			coroNativeMOwnerReturnedV1,
+		) {
+			coroRuntimeAbort("native coroutine fleet successor failed")
 			return 0
 		}
 	default:

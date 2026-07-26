@@ -245,12 +245,52 @@ const (
 	ActionCommitDestroy
 )
 
+// ActionFlags carries target-neutral physical-owner obligations across a
+// handle-free scheduler boundary. It occupies existing pointer-alignment
+// padding in Action; no pointer, platform handle, or target policy is added to
+// the core protocol.
+type ActionFlags uint8
+
+const (
+	// ActionRetirePhysicalOwner is emitted when a G reaches terminal state
+	// without balancing its LockOSThread depth. A native target must terminate
+	// that pthread instead of returning it to an owner pool; an RTOS/realm
+	// target applies its equivalent policy. Single-owner targets may reject or
+	// explicitly degrade the capability, but must not silently lose the fact.
+	ActionRetirePhysicalOwner ActionFlags = 1 << iota
+)
+
 // Action is one deterministic scheduler operation or control event. Handle is
 // opaque to the core and is non-nil only for a handle operation; terminal
 // control events carry no handle.
 type Action struct {
 	Kind   ActionKind
+	Flags  ActionFlags
 	Handle unsafe.Pointer
+}
+
+func validActionFlags(action Action) bool {
+	switch action.Kind {
+	case ActionComplete, ActionCancelComplete, ActionPanicComplete,
+		ActionTerminalExecutorClose, ActionCommitDestroy:
+		return action.Flags == 0 || action.Flags == ActionRetirePhysicalOwner
+	default:
+		return action.Flags == 0
+	}
+}
+
+func physicalOwnerRetireFlags(retire bool) ActionFlags {
+	if retire {
+		return ActionRetirePhysicalOwner
+	}
+	return 0
+}
+
+// ActionRetiresPhysicalOwner reports the exact terminal owner-retirement
+// obligation. It rejects malformed or non-terminal flag placement rather than
+// interpreting unknown bits as a weaker request.
+func ActionRetiresPhysicalOwner(action Action) bool {
+	return validActionFlags(action) && action.Flags == ActionRetirePhysicalOwner
 }
 
 func setAction(p *P, kind ActionKind, handle unsafe.Pointer) (Action, bool) {
@@ -264,7 +304,7 @@ func setAction(p *P, kind ActionKind, handle unsafe.Pointer) (Action, bool) {
 }
 
 func expectedAction(p *P, g *G, action Action, kind ActionKind) bool {
-	return p != nil && p.current == g && ValidG(g) && action.Kind == kind && action.Handle != nil &&
+	return p != nil && p.current == g && ValidG(g) && action.Kind == kind && action.Flags == 0 && action.Handle != nil &&
 		p.action == action && g.runP == p
 }
 
@@ -1112,16 +1152,16 @@ func validRootDestroyedCommitMarker(p *P, g *G, kind ActionKind) bool {
 		// The legacy whole-operation path still owns the just-destroyed
 		// physical action. ReleaseFrame unlinked the allocation but the cached
 		// root identity is retained until this compatibility commit.
-		return p.action.Handle != nil && g.root != nil
+		return p.action.Flags == 0 && p.action.Handle != nil && g.root != nil
 	case ActionCommitDestroy:
 		// The bounded path discarded both the handle and cached root before it
 		// published this receipt.
-		return p.action.Handle == nil && g.root == nil
+		return validActionFlags(p.action) && p.action.Handle == nil && g.root == nil
 	case ActionTerminalExecutorClose:
 		// A successful strong join retires the driver before retrying the
 		// logical root commit. No executor, canonical source, or physical
 		// handle may survive it.
-		return p.action.Handle == nil && g.root == nil &&
+		return validActionFlags(p.action) && p.action.Handle == nil && g.root == nil &&
 			preemptLoad(&p.executorMode) == executorModeUnbound && p.executor == nil && p.channelSource == nil
 	default:
 		return false
@@ -1171,9 +1211,12 @@ func commitRootDestroyedCompatibility(p *P, g *G, kind ActionKind) (Action, bool
 		(p.channelSource != nil || !preemptCompareAndSwap(&p.schedule, scheduleIdle, scheduleDisabled)) {
 		return Action{}, false
 	}
-	if !releaseOSThreadLockForExit(p, g) || !disableGPreempt(g) {
+	flags := p.action.Flags
+	retireOwner, released := releaseOSThreadLockForExit(p, g)
+	if !released || !disableGPreempt(g) {
 		return Action{}, false
 	}
+	flags |= physicalOwnerRetireFlags(retireOwner)
 	g.destroyRoot = false
 	g.root = nil
 	if panicking {
@@ -1185,9 +1228,9 @@ func commitRootDestroyedCompatibility(p *P, g *G, kind ActionKind) (Action, bool
 	p.servicePreemptBudget = 0
 	p.action = Action{}
 	if panicking {
-		return Action{Kind: ActionPanicComplete}, true
+		return Action{Kind: ActionPanicComplete, Flags: flags}, true
 	}
-	return Action{Kind: ActionComplete}, true
+	return Action{Kind: ActionComplete, Flags: flags}, true
 }
 
 func validBoundedRootHeaders(p *P, g *G, wasRoot bool) bool {
@@ -1221,12 +1264,16 @@ func finishBoundedRootDestroy(p *P, g *G, wasRoot, panicking bool) (Action, bool
 	// ReleaseFrame has already freed the combined root allocation. Clear the
 	// cached root before publishing any return boundary; destroyRoot remains the
 	// logical receipt bit and is never dereferenced.
-	if !releaseOSThreadLockForExit(p, g) || !disableGPreempt(g) {
+	retireOwner, released := releaseOSThreadLockForExit(p, g)
+	if !released || !disableGPreempt(g) {
 		return Action{}, false
 	}
 	g.root = nil
 	if p.readyHead == nil && emptySchedulerWaitQueues(p) {
-		receipt := Action{Kind: ActionCommitDestroy}
+		receipt := Action{
+			Kind:  ActionCommitDestroy,
+			Flags: physicalOwnerRetireFlags(retireOwner),
+		}
 		p.action = receipt
 		return receipt, true
 	}
@@ -1241,9 +1288,15 @@ func finishBoundedRootDestroy(p *P, g *G, wasRoot, panicking bool) (Action, bool
 	p.servicePreemptBudget = 0
 	p.action = Action{}
 	if panicking {
-		return Action{Kind: ActionPanicComplete}, true
+		return Action{
+			Kind:  ActionPanicComplete,
+			Flags: physicalOwnerRetireFlags(retireOwner),
+		}, true
 	}
-	return Action{Kind: ActionComplete}, true
+	return Action{
+		Kind:  ActionComplete,
+		Flags: physicalOwnerRetireFlags(retireOwner),
+	}, true
 }
 
 // DestroyedBounded is the production post-destroy commit used by RunSlice.
@@ -1283,7 +1336,7 @@ func DestroyedBounded(p *P, g *G, action Action) (Action, bool) {
 }
 
 func validDestroyCommitReceipt(p *P, g *G, receipt Action) bool {
-	if p == nil || g == nil || receipt.Kind != ActionCommitDestroy || receipt.Handle != nil ||
+	if p == nil || g == nil || receipt.Kind != ActionCommitDestroy || !validActionFlags(receipt) || receipt.Handle != nil ||
 		p.current != g || p.action != receipt || p.inResume || p.runDecision != (RunDecision{}) ||
 		p.runDecisionTaken || p.servicePreemptBudget == 0 || !ValidG(g) || g.runP != p ||
 		g.runAction != ActionInvalid || g.transferState != runnableTransferGIdle ||

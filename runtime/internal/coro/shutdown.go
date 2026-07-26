@@ -394,7 +394,8 @@ func CancelDestroyed(p *P, g *G, action Action) (Action, bool) {
 	} else if !emptyPanicRecord(&g.panicRecord) {
 		return Action{}, false
 	}
-	if !releaseOSThreadLockForExit(p, g) || !disableGPreempt(g) {
+	retireOwner, released := releaseOSThreadLockForExit(p, g)
+	if !released || !disableGPreempt(g) {
 		return Action{}, false
 	}
 	g.destroyRoot = false
@@ -404,7 +405,10 @@ func CancelDestroyed(p *P, g *G, action Action) (Action, bool) {
 	p.current = nil
 	p.servicePreemptBudget = 0
 	p.action = Action{}
-	return Action{Kind: ActionCancelComplete}, true
+	return Action{
+		Kind:  ActionCancelComplete,
+		Flags: physicalOwnerRetireFlags(retireOwner),
+	}, true
 }
 
 // FinishCommandShutdown disables the sealed P only after every ready child has

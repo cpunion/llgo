@@ -262,12 +262,16 @@ func coroReduceExecutorRunStepV1(
 			}
 		case coro.ActionComplete:
 			isMain := step.G == policy.main
+			retireOwner := coro.ActionRetiresPhysicalOwner(next)
 			if !coroReleaseCompletedTask(step.G) {
 				return false, false
 			}
 			if isMain {
 				result.stop, result.g = coroRunMainDoneV1, policy.main
 				return true, true
+			}
+			if retireOwner && !coroTargetRetirePhysicalOwnerV1(p, driver) {
+				return false, false
 			}
 		case coro.ActionPanicComplete:
 			result.stop, result.g, result.action = coroRunPanicCompleteV1, step.G, next

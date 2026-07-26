@@ -16,6 +16,7 @@
 
 #include <errno.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <sys/socket.h>
@@ -31,7 +32,56 @@ static _Atomic uint32_t llgo_coro_native_fleet_e2e_maximum_v1;
 static _Atomic uint32_t llgo_coro_native_fleet_e2e_blocked_state_v1;
 static _Atomic uint32_t llgo_coro_native_fleet_e2e_release_state_v1;
 static _Atomic uint32_t llgo_coro_native_fleet_e2e_nested_blocked_state_v1;
+static _Atomic uint32_t llgo_coro_native_fleet_e2e_thread_exit_count_v1;
 static int llgo_coro_native_fleet_e2e_stream_v1[2] = {-1, -1};
+static pthread_key_t llgo_coro_native_fleet_e2e_thread_exit_key_v1;
+static pthread_once_t llgo_coro_native_fleet_e2e_thread_exit_once_v1 =
+    PTHREAD_ONCE_INIT;
+
+static void llgo_coro_native_fleet_e2e_thread_exit_destructor_v1(void *value) {
+    if (value != NULL) {
+        atomic_fetch_add_explicit(
+            &llgo_coro_native_fleet_e2e_thread_exit_count_v1,
+            1,
+            memory_order_seq_cst);
+    }
+}
+
+static void llgo_coro_native_fleet_e2e_thread_exit_init_v1(void) {
+    (void)pthread_key_create(
+        &llgo_coro_native_fleet_e2e_thread_exit_key_v1,
+        llgo_coro_native_fleet_e2e_thread_exit_destructor_v1);
+}
+
+uintptr_t __llgo_coro_native_fleet_e2e_arm_thread_exit_v1(void) {
+    if (pthread_once(
+            &llgo_coro_native_fleet_e2e_thread_exit_once_v1,
+            llgo_coro_native_fleet_e2e_thread_exit_init_v1) != 0 ||
+        pthread_setspecific(
+            llgo_coro_native_fleet_e2e_thread_exit_key_v1,
+            (void *)(uintptr_t)1) != 0) {
+        return 0;
+    }
+    return 1;
+}
+
+uintptr_t __llgo_coro_native_fleet_e2e_thread_exit_count_v1(void) {
+    return (uintptr_t)atomic_load_explicit(
+        &llgo_coro_native_fleet_e2e_thread_exit_count_v1,
+        memory_order_seq_cst);
+}
+
+void __llgo_coro_native_fleet_e2e_wait_exit_and_release_v1(void) {
+    while (atomic_load_explicit(
+               &llgo_coro_native_fleet_e2e_thread_exit_count_v1,
+               memory_order_seq_cst) == 0) {
+        (void)sched_yield();
+    }
+    atomic_store_explicit(
+        &llgo_coro_native_fleet_e2e_release_state_v1,
+        1,
+        memory_order_seq_cst);
+}
 
 void __llgo_coro_native_fleet_e2e_quota_reset_v1(void) {
     atomic_store_explicit(

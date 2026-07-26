@@ -16,6 +16,7 @@
 
 #include "owner.h"
 
+#include <sched.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -47,6 +48,7 @@ enum llgo_coro_fleet_factory_state_v1 {
     LLGO_CORO_FLEET_FACTORY_UNUSED_V1 = 0,
     LLGO_CORO_FLEET_FACTORY_IDLE_V1,
     LLGO_CORO_FLEET_FACTORY_REQUESTED_V1,
+    LLGO_CORO_FLEET_FACTORY_STARTING_V1,
     LLGO_CORO_FLEET_FACTORY_READY_V1,
     LLGO_CORO_FLEET_FACTORY_STOPPING_V1,
     LLGO_CORO_FLEET_FACTORY_FAILED_V1,
@@ -148,11 +150,21 @@ static void *llgo_coro_fleet_factory_main_v1(void *unused) {
         }
         factory->result = result;
         factory->result_thread = result == 0 ? thread : (pthread_t)0;
-        factory->state = LLGO_CORO_FLEET_FACTORY_READY_V1;
+        factory->state = result == 0
+            ? LLGO_CORO_FLEET_FACTORY_STARTING_V1
+            : LLGO_CORO_FLEET_FACTORY_READY_V1;
         if (pthread_cond_broadcast(&factory->changed) != 0) {
             factory->state = LLGO_CORO_FLEET_FACTORY_FAILED_V1;
             (void)pthread_mutex_unlock(&factory->mutex);
             return (void *)(uintptr_t)1;
+        }
+        while (factory->state == LLGO_CORO_FLEET_FACTORY_STARTING_V1) {
+            if (pthread_cond_wait(&factory->changed, &factory->mutex) != 0) {
+                factory->state = LLGO_CORO_FLEET_FACTORY_FAILED_V1;
+                (void)pthread_cond_broadcast(&factory->changed);
+                (void)pthread_mutex_unlock(&factory->mutex);
+                return (void *)(uintptr_t)1;
+            }
         }
         while (factory->state == LLGO_CORO_FLEET_FACTORY_READY_V1) {
             if (pthread_cond_wait(&factory->changed, &factory->mutex) != 0) {
@@ -246,6 +258,7 @@ int __llgo_coro_fleet_owner_create_v2(pthread_t *thread, uint32_t slot) {
     }
     *thread = (pthread_t)0;
     while (factory->state == LLGO_CORO_FLEET_FACTORY_REQUESTED_V1 ||
+           factory->state == LLGO_CORO_FLEET_FACTORY_STARTING_V1 ||
            factory->state == LLGO_CORO_FLEET_FACTORY_READY_V1) {
         if (pthread_cond_wait(&factory->changed, &factory->mutex) != 0) {
             factory->state = LLGO_CORO_FLEET_FACTORY_FAILED_V1;
@@ -264,7 +277,8 @@ int __llgo_coro_fleet_owner_create_v2(pthread_t *thread, uint32_t slot) {
         (void)pthread_mutex_unlock(&factory->mutex);
         return -1;
     }
-    while (factory->state == LLGO_CORO_FLEET_FACTORY_REQUESTED_V1) {
+    while (factory->state == LLGO_CORO_FLEET_FACTORY_REQUESTED_V1 ||
+           factory->state == LLGO_CORO_FLEET_FACTORY_STARTING_V1) {
         if (pthread_cond_wait(&factory->changed, &factory->mutex) != 0) {
             factory->state = LLGO_CORO_FLEET_FACTORY_FAILED_V1;
             (void)pthread_mutex_unlock(&factory->mutex);
@@ -287,6 +301,61 @@ int __llgo_coro_fleet_owner_create_v2(pthread_t *thread, uint32_t slot) {
         return -1;
     }
     return result;
+}
+
+/*
+ * CreateOwner does not return merely because pthread_create published an
+ * identity. The new raw owner calls this after it has claimed its scalar M
+ * slot and route. This acknowledgement closes the old-owner exit versus
+ * successor-start gap without exposing a Go pointer or callback address to C.
+ */
+int __llgo_coro_fleet_owner_ready_v1(uint32_t slot) {
+    struct llgo_coro_fleet_factory_v1 *factory =
+        &llgo_coro_fleet_factory_v1;
+    if (slot == 0 || pthread_mutex_lock(&factory->mutex) != 0) {
+        return -1;
+    }
+    /*
+     * The new pthread may reach this acknowledgement before its factory has
+     * reacquired the mutex after pthread_create and published result_thread.
+     * Wait for that exact REQUESTED -> STARTING transition; rejecting the
+     * early arrival would strand the factory in STARTING forever.
+     */
+    while (factory->state == LLGO_CORO_FLEET_FACTORY_REQUESTED_V1 &&
+           factory->slot == slot) {
+        if (pthread_cond_wait(&factory->changed, &factory->mutex) != 0) {
+            factory->state = LLGO_CORO_FLEET_FACTORY_FAILED_V1;
+            (void)pthread_cond_broadcast(&factory->changed);
+            (void)pthread_mutex_unlock(&factory->mutex);
+            return -1;
+        }
+    }
+    if (factory->state != LLGO_CORO_FLEET_FACTORY_STARTING_V1 ||
+        factory->slot != slot ||
+        factory->result != 0 ||
+        factory->result_thread == (pthread_t)0 ||
+        pthread_equal(factory->result_thread, pthread_self()) == 0) {
+        (void)pthread_mutex_unlock(&factory->mutex);
+        return -1;
+    }
+    factory->state = LLGO_CORO_FLEET_FACTORY_READY_V1;
+    if (pthread_cond_broadcast(&factory->changed) != 0 ||
+        pthread_mutex_unlock(&factory->mutex) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+int __llgo_coro_fleet_owner_detach_self_v1(void) {
+#if defined(LLGO_CORO_FLEET_BDWGC)
+    return GC_pthread_detach(pthread_self());
+#else
+    return pthread_detach(pthread_self());
+#endif
+}
+
+int __llgo_coro_fleet_owner_yield_v1(void) {
+    return sched_yield();
 }
 
 int __llgo_coro_fleet_factory_stop_v1(void) {

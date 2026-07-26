@@ -291,7 +291,7 @@ func ExecutorOwnerWaitPending(driver *ExecutorDriver) (pending, ok bool) {
 }
 
 func completedExecutorRunAction(p *P, g *G, action Action) bool {
-	if p == nil || g == nil || action.Handle != nil || p.current != nil || p.inResume ||
+	if p == nil || g == nil || !validActionFlags(action) || action.Handle != nil || p.current != nil || p.inResume ||
 		p.action != (Action{}) || p.runDecision != (RunDecision{}) || p.runDecisionTaken ||
 		p.servicePreemptBudget != 0 || g.runP != nil || g.runAction != ActionInvalid ||
 		g.transferState != runnableTransferGIdle {
@@ -299,9 +299,9 @@ func completedExecutorRunAction(p *P, g *G, action Action) bool {
 	}
 	switch action.Kind {
 	case ActionYield:
-		return gPreemptEnabledAtDepthZero(g) && g.state == GRunnable && g.queued
+		return action.Flags == 0 && gPreemptEnabledAtDepthZero(g) && g.state == GRunnable && g.queued
 	case ActionPark:
-		return gPreemptEnabledAtDepthZero(g) && g.state == GWaiting &&
+		return action.Flags == 0 && gPreemptEnabledAtDepthZero(g) && g.state == GWaiting &&
 			(g.waiting || g.active != nil && g.active.parkWait != nil)
 	case ActionComplete:
 		return gPreemptStateAtDepthZero(g, preemptDisabled) && g.state == GDead && !g.panicUnwind
@@ -382,9 +382,12 @@ func CommitExecutorRunDomainDestroy(driver *ExecutorDriver, g *G, receipt Action
 	} else if g.state != GDispatching || g.panicUnwind || !emptyPanicRecord(&g.panicRecord) {
 		return Action{}, false
 	}
-	if !releaseOSThreadLockForExit(p, g) || !disableGPreempt(g) {
+	flags := receipt.Flags
+	retireOwner, released := releaseOSThreadLockForExit(p, g)
+	if !released || !disableGPreempt(g) {
 		return Action{}, false
 	}
+	flags |= physicalOwnerRetireFlags(retireOwner)
 	g.destroyRoot = false
 	if panicking {
 		g.panicUnwind = false
@@ -395,9 +398,9 @@ func CommitExecutorRunDomainDestroy(driver *ExecutorDriver, g *G, receipt Action
 	p.servicePreemptBudget = 0
 	p.action = Action{}
 	if panicking {
-		return Action{Kind: ActionPanicComplete}, true
+		return Action{Kind: ActionPanicComplete, Flags: flags}, true
 	}
-	return Action{Kind: ActionComplete}, true
+	return Action{Kind: ActionComplete, Flags: flags}, true
 }
 
 // CommitExecutorRunCommandBootstrapDirectChildHandoff retains the frozen

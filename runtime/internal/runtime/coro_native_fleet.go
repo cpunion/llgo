@@ -853,8 +853,15 @@ func coroNativeFleetCommitOwnerDestroyV1(
 	if !ok {
 		return coro.Action{}, false
 	}
-	if result.Kind == coro.ActionComplete && !coroReleaseCompletedTask(g) {
-		return coro.Action{}, false
+	if result.Kind == coro.ActionComplete {
+		retireOwner := coro.ActionRetiresPhysicalOwner(result)
+		if !coroReleaseCompletedTask(g) ||
+			retireOwner && !coroTargetRetirePhysicalOwnerV1(
+				domain.pOwnerV1(),
+				driver,
+			) {
+			return coro.Action{}, false
+		}
 	}
 	return result, result.Kind == coro.ActionComplete || result.Kind == coro.ActionPanicComplete
 }

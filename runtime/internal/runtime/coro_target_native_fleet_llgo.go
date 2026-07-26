@@ -19,6 +19,7 @@
 package runtime
 
 import (
+	c "github.com/goplus/llgo/runtime/internal/clite"
 	"github.com/goplus/llgo/runtime/internal/coro"
 	"github.com/goplus/llgo/runtime/internal/corofleet"
 )
@@ -269,8 +270,26 @@ func coroTargetPostTaskControlV1(
 func coroTargetBeginExecutorCloseV1(handle coro.ExecutorHandle, epoch uint32) coroTargetDispatchResultV1 {
 	state := &coroNativeFleetTargetV1State
 	if state.lifecycle != coroNativeFleetTargetActiveV1 || state.program.Executor != handle ||
-		epoch == 0 || state.waitEpoch != 0 || state.runEpoch != 0 ||
-		!coroNativeFleetPhysicalOwnersStopV1() {
+		epoch == 0 || state.waitEpoch != 0 || state.runEpoch != 0 {
+		return coroTargetDispatchInvalidV1
+	}
+	if coroProgramLifecycleV1State == coroProgramMainReturnRequestedV1 {
+		blocked, scanned := coroNativeMHasBlockedOwnerV1()
+		if !scanned {
+			return coroTargetDispatchInvalidV1
+		}
+		if blocked {
+			// Go main return terminates the process even when a background
+			// LockOSThread G remains inside an uninterruptible syscall. Such an
+			// M cannot be strongly joined or reused; process exit is its terminal
+			// lifetime boundary. Ordinary drainable shutdown still takes the
+			// full close/join path below.
+			c.Exit(0)
+			for {
+			}
+		}
+	}
+	if !coroNativeFleetPhysicalOwnersStopV1() {
 		return coroTargetDispatchInvalidV1
 	}
 	if _, sealed := coroNativeFleetV1State.execution.Seal(); !sealed ||

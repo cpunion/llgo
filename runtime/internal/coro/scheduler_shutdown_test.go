@@ -68,7 +68,15 @@ func (fixture *commandShutdownFixture) completeMain(t *testing.T) {
 }
 
 func cancelOneCommandChild(t *testing.T, p *P, want *commandShutdownChild) {
+	cancelOneCommandChildWithOwnerRetire(t, p, want, false)
+}
+
+func cancelOneCommandChildWithOwnerRetire(t *testing.T, p *P, want *commandShutdownChild, retireOwner bool) {
 	t.Helper()
+	if retireOwner {
+		want.g.osThreadLockDepth = 1
+		p.osThreadLockOwner = want.g
+	}
 	g, action, ok := NextCommandCancel(p)
 	if !ok || g != want.g || action.Kind != ActionCancelDestroy || action.Handle != want.handle {
 		t.Fatalf("next command cancel = (g=%p action=%+v ok=%t), want %p/%p", g, action, ok, want.g, want.handle)
@@ -78,7 +86,8 @@ func cancelOneCommandChild(t *testing.T, p *P, want *commandShutdownChild) {
 	}
 	releaseTestFrame(t, g, want.frame)
 	action, ok = CancelDestroyed(p, g, action)
-	if !ok || action.Kind != ActionCancelComplete || action.Handle != nil || !ReclaimableG(g) {
+	if !ok || action.Kind != ActionCancelComplete || action.Handle != nil ||
+		ActionRetiresPhysicalOwner(action) != retireOwner || !ReclaimableG(g) {
 		t.Fatalf("complete command cancel = (%+v, %t), reclaimable=%t", action, ok, ReclaimableG(g))
 	}
 	if _, ok := CancelDestroyed(p, g, Action{Kind: ActionCancelDestroy, Handle: want.handle}); ok {
@@ -90,6 +99,20 @@ func cancelOneCommandChild(t *testing.T, p *P, want *commandShutdownChild) {
 	if _, _, ok := ReleaseTaskStorage(g); ok {
 		t.Fatal("release canceled command task twice")
 	}
+}
+
+func TestCommandShutdownRetainsPhysicalOwnerRetireObligation(t *testing.T) {
+	fixture := newCommandShutdownFixture(t)
+	child := fixture.spawn(t)
+	fixture.completeMain(t)
+	if !BeginCommandShutdown(fixture.p, fixture.main.g) {
+		t.Fatal("begin owner-retire command shutdown")
+	}
+	cancelOneCommandChildWithOwnerRetire(t, fixture.p, child, true)
+	if !FinishCommandShutdown(fixture.p, fixture.main.g) {
+		t.Fatal("finish owner-retire command shutdown")
+	}
+	keepCommandShutdownFixtureAlive(fixture)
 }
 
 func keepCommandShutdownFixtureAlive(fixture *commandShutdownFixture) {

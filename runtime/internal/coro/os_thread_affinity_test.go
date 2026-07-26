@@ -174,7 +174,8 @@ func TestOSThreadLockIsReleasedBeforeTerminalGPublication(t *testing.T) {
 	}
 	releaseTestFrame(t, task.g, task.frame)
 	action, ok = Destroyed(p, task.g, action)
-	if !ok || action.Kind != ActionComplete || task.g.osThreadLockDepth != 0 ||
+	if !ok || action.Kind != ActionComplete || action.Flags != ActionRetirePhysicalOwner ||
+		!ActionRetiresPhysicalOwner(action) || task.g.osThreadLockDepth != 0 ||
 		p.osThreadLockOwner != nil || !ReclaimableG(task.g) {
 		t.Fatalf("terminal lock release = action:%+v ok:%t depth:%d owner:%p reclaimable:%t",
 			action, ok, task.g.osThreadLockDepth, p.osThreadLockOwner, ReclaimableG(task.g))
@@ -185,6 +186,32 @@ func TestOSThreadLockIsReleasedBeforeTerminalGPublication(t *testing.T) {
 	}
 	runtime.KeepAlive(task.frame.memory)
 	runtime.KeepAlive(peer.frame.memory)
+}
+
+func TestPhysicalOwnerRetireFlagUsesActionPadding(t *testing.T) {
+	pointerSize := unsafe.Sizeof(uintptr(0))
+	if unsafe.Offsetof(Action{}.Flags) != unsafe.Sizeof(Action{}.Kind) ||
+		unsafe.Offsetof(Action{}.Handle) != pointerSize ||
+		unsafe.Sizeof(Action{}) != 2*pointerSize {
+		t.Fatalf("owner-retire action layout = kind:%d flags:%d handle:%d size:%d pointer:%d",
+			unsafe.Offsetof(Action{}.Kind), unsafe.Offsetof(Action{}.Flags),
+			unsafe.Offsetof(Action{}.Handle), unsafe.Sizeof(Action{}), pointerSize)
+	}
+	if !ActionRetiresPhysicalOwner(Action{
+		Kind:  ActionComplete,
+		Flags: ActionRetirePhysicalOwner,
+	}) {
+		t.Fatal("valid terminal owner-retire flag was rejected")
+	}
+	if ActionRetiresPhysicalOwner(Action{
+		Kind:  ActionYield,
+		Flags: ActionRetirePhysicalOwner,
+	}) || ActionRetiresPhysicalOwner(Action{
+		Kind:  ActionComplete,
+		Flags: ActionRetirePhysicalOwner << 1,
+	}) {
+		t.Fatal("malformed owner-retire flag was accepted")
+	}
 }
 
 func TestOSThreadLockDepthUsesExistingGPadding(t *testing.T) {

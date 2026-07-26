@@ -120,20 +120,20 @@ func CurrentOSThreadLocked(g *G) bool {
 }
 
 // releaseOSThreadLockForExit closes the logical lease before terminal G
-// publication. A later native M-retirement policy may replace the physical
-// island when a user exits without balancing the lock; scheduler ownership
-// must nevertheless never retain a reclaimable G pointer.
-func releaseOSThreadLockForExit(p *P, g *G) bool {
+// publication. retireOwner distinguishes a balanced/unlocked exit from a G
+// which still held LockOSThread: the scheduler must clear both logical pointers
+// in either case, while the target must terminate the latter physical owner.
+func releaseOSThreadLockForExit(p *P, g *G) (retireOwner, ok bool) {
 	if p == nil || g == nil || p.current != g || g.runP != p {
-		return false
+		return false, false
 	}
 	if g.osThreadLockDepth == 0 {
-		return p.osThreadLockOwner != g
+		return false, p.osThreadLockOwner != g
 	}
 	if p.osThreadLockOwner != g {
-		return false
+		return false, false
 	}
 	g.osThreadLockDepth = 0
 	p.osThreadLockOwner = nil
-	return true
+	return true, true
 }
