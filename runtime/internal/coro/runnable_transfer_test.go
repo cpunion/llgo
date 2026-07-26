@@ -297,10 +297,24 @@ func TestRunnableTransferPublishedRejectsThirdPOwnership(t *testing.T) {
 			task.g.transferState, preemptLoad(preemptAddress(task.g)), third.readyHead, third.readyTail,
 			mailbox.count, mailbox.slots[id.Slot-1].g)
 	}
-	if !ImportPNeutralRunnable(&mailbox, target, id) || task.g.transferState != runnableTransferGIdle ||
+	if !ImportPNeutralRunnable(&mailbox, target, id) || task.g.transferState != runnableTransferGImported ||
 		preemptLoad(preemptAddress(task.g)) != preemptIdle || target.readyHead != task.g || !task.g.queued ||
 		mailbox.slots[id.Slot-1].g != nil {
 		t.Fatal("owner import did not complete unique handoff")
+	}
+	var rebound RunnableTransferMailbox
+	if !BindRunnableTransferMailbox(&rebound, third) {
+		t.Fatal("bind imported rebound mailbox")
+	}
+	if reboundID, reboundOK := PublishPNeutralRunnable(&rebound, target, task.g); reboundOK || reboundID != (RunnableTransferID{}) ||
+		target.readyHead != task.g || task.g.transferState != runnableTransferGImported {
+		t.Fatalf("imported initial rebounded before execution = (%+v,%t), head=%p state=%d",
+			reboundID, reboundOK, target.readyHead, task.g.transferState)
+	}
+	if runnable, nextOK := NextRunnable(target); !nextOK || runnable != task.g ||
+		task.g.transferState != runnableTransferGIdle {
+		t.Fatalf("dequeue imported initial = (%p,%t), state=%d",
+			runnable, nextOK, task.g.transferState)
 	}
 }
 
@@ -433,7 +447,7 @@ func TestRunnableTransferConcurrentPublishImportNoLoss(t *testing.T) {
 	}
 	for index, task := range tasks {
 		if !seen[task.g] || sources[index].readyHead != nil || sources[index].readyTail != nil ||
-			!task.g.queued || task.g.transferState != runnableTransferGIdle ||
+			!task.g.queued || task.g.transferState != runnableTransferGImported ||
 			preemptLoad(preemptAddress(task.g)) != preemptIdle {
 			t.Fatalf("interleaved task %d lost/duplicated: seen=%t source=(%p,%p) queued=%t state=%d preempt=%d",
 				index, seen[task.g], sources[index].readyHead, sources[index].readyTail, task.g.queued,

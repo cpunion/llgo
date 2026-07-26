@@ -20,40 +20,27 @@ package runtime
 
 import "github.com/goplus/llgo/runtime/internal/coro"
 
-func coroTargetReadySpawnDomainV1(parent *coro.G) (*coroNativeFleetDomainV1, bool) {
-	driver, handle, route, ok := coro.CurrentExecutorDriver(parent)
-	if !ok || !route.Valid() {
-		return nil, false
-	}
-	domain, valid := coroNativeFleetActiveDomainForRouteV1(route)
-	if !valid || domain.driverOwnerV1() != driver || domain.handle.Executor != handle {
-		return nil, false
-	}
-	return domain, true
+func coroTargetReadyDistributionFailV1(message string) bool {
+	coroRuntimeAbort(message)
+	return false
 }
 
-// coroTargetCanRecordReadySpawnV1 performs every target-specific validation
-// before CommitSpawn publishes the child to the scheduler. An occupied hint is
-// deliberately valid: the new child remains on the owner's ordinary FIFO.
-func coroTargetCanRecordReadySpawnV1(parent *coro.G) bool {
-	_, ok := coroTargetReadySpawnDomainV1(parent)
-	return ok
-}
-
-// coroTargetRecordReadySpawnV1 records causal provenance, not permanent task
-// affinity. CommitSpawn cannot change the running owner's frozen route/domain
-// identity, so losing it here is an invariant violation rather than a
-// recoverable post-publication failure. A second spawn in the same physical
-// resume remains local; this keeps the hint O(1).
-func coroTargetRecordReadySpawnV1(parent, child *coro.G) {
-	domain, ok := coroTargetReadySpawnDomainV1(parent)
-	if !ok || child == nil {
-		coroRuntimeAbort("native coroutine spawn owner changed after commit")
-		return
+func coroTargetReadyDistributionDomainV1(
+	p *coro.P,
+	driver *coro.ExecutorDriver,
+) (*coroNativeFleetDomainV1, bool) {
+	if p == nil || driver == nil {
+		return nil, false
 	}
-	if domain.readySpawn == nil {
-		domain.readySpawn = child
+	state := &coroNativeFleetV1State
+	for index := uint32(0); index < coroNativeFleetDomainCapacityV1; index++ {
+		domain := &state.domains[index]
+		if domain.lifecycle == coroNativeFleetDomainActiveV1 &&
+			domain.pOwnerV1() == p && domain.driverOwnerV1() == driver {
+			return domain, true
+		}
 	}
+	return nil, false
 }
 
 // coroTargetAfterStableRunActionV1 is owner-to-owner work distribution, not a
@@ -63,53 +50,44 @@ func coroTargetRecordReadySpawnV1(parent, child *coro.G) {
 // additional target-ingress lease around this short publish/request/ring tail.
 func coroTargetAfterStableRunActionV1(source *coro.P, driver *coro.ExecutorDriver) bool {
 	state := &coroNativeFleetV1State
-	if state.lifecycle != coroNativeFleetActiveV1 || source == nil || driver == nil {
-		return false
-	}
-	sourceIndex := uint32(coroNativeFleetDomainCapacityV1)
-	var sourceDomain *coroNativeFleetDomainV1
-	for index := uint32(0); index < coroNativeFleetDomainCapacityV1; index++ {
-		domain := &state.domains[index]
-		if domain.lifecycle == coroNativeFleetDomainActiveV1 &&
-			domain.pOwnerV1() == source && domain.driverOwnerV1() == driver {
-			sourceIndex = index
-			sourceDomain = domain
-			break
-		}
-	}
-	if sourceIndex >= coroNativeFleetDomainCapacityV1 || sourceDomain == nil {
-		return false
-	}
-	candidate := sourceDomain.readySpawn
-	sourceDomain.readySpawn = nil
-	if candidate == nil {
-		return true
+	if source == nil || driver == nil {
+		return coroTargetReadyDistributionFailV1("native ready distribution lacks source owner")
 	}
 	if coroNativeFleetPhysicalOwnerV1State.stop.Quiesced() {
-		// Fleet shutdown is a one-way ownership barrier. No continuation may be
-		// transferred after the program coordinator has requested peer drain.
+		// Fleet shutdown is a one-way ownership barrier. A peer action which
+		// committed concurrently with program-main return is still valid, but
+		// it must not publish another transfer after the stop boundary.
 		return true
 	}
-	targetIndex := uint32(0)
-	if sourceIndex == 0 {
-		targetIndex = coroNativeFleetPeerIndexV1
+	if state.lifecycle != coroNativeFleetActiveV1 {
+		return coroTargetReadyDistributionFailV1("native ready distribution fleet is not active")
 	}
-	target := &state.domains[targetIndex]
-	if target.lifecycle != coroNativeFleetDomainActiveV1 || !target.handle.Valid() {
-		return false
+	sourceDomain, ok := coroTargetReadyDistributionDomainV1(source, driver)
+	if !ok {
+		return coroTargetReadyDistributionFailV1("native ready distribution source route mismatch")
 	}
-	_, request, published := state.fleet.PublishPNeutralRunnableAndRequest(target.handle, source, candidate)
-	if !published {
-		// No initial head, a contended bounded mailbox, or a full mailbox simply
-		// retains ordinary FIFO execution on the current P.
-		return request == coro.ExecutorRequestInvalid || request == coro.ExecutorRequestClosed
+	distribution, distributed := state.fleet.DistributePNeutralRunnable(
+		sourceDomain.handle,
+		source,
+	)
+	if !distributed {
+		return coroTargetReadyDistributionFailV1("native ready distribution core rejected owner")
 	}
-	accepted := request == coro.ExecutorRequestPublished ||
-		request == coro.ExecutorRequestCoalesced || request == coro.ExecutorRequestIdleWake
-	if !accepted {
-		return false
+	if !distribution.Valid() {
+		return true
 	}
-	return !coro.ExecutorRequestNeedsDoorbell(request) || target.doorbell.Ring()
+	target, valid := coroNativeFleetDomainForHandleV1(
+		state,
+		distribution.Target,
+		coroNativeFleetDomainActiveV1,
+	)
+	if !valid {
+		return coroTargetReadyDistributionFailV1("native ready distribution target route mismatch")
+	}
+	if coro.ExecutorRequestNeedsDoorbell(distribution.Request) && !target.doorbell.Ring() {
+		return coroTargetReadyDistributionFailV1("native ready distribution doorbell failed")
+	}
+	return true
 }
 
 // coroTargetDrainProgramTransfersV1 imports the adopted route-1 mailbox while
@@ -147,7 +125,23 @@ func coroTargetDrainProgramTransfersV1(p *coro.P, driver *coro.ExecutorDriver) (
 	}
 }
 
+func coroTargetRequestProgramRunnableV1(p *coro.P, driver *coro.ExecutorDriver) bool {
+	domain, ok := coroTargetReadyDistributionDomainV1(p, driver)
+	return ok && domain.adopted &&
+		coroNativeFleetV1State.fleet.RequestPNeutralRunnable(domain.handle, p)
+}
+
 func coroTargetBeforeProgramRunSliceV1(p *coro.P, driver *coro.ExecutorDriver) bool {
+	domain, valid := coroTargetReadyDistributionDomainV1(p, driver)
+	if !valid || !domain.adopted {
+		return false
+	}
+	if _, ok := coroNativeFleetV1State.fleet.CancelPNeutralRunnableRequest(
+		domain.handle,
+		p,
+	); !ok {
+		return false
+	}
 	_, ok := coroTargetDrainProgramTransfersV1(p, driver)
 	return ok
 }

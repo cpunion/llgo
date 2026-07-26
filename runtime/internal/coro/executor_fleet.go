@@ -70,11 +70,20 @@ const (
 	executorFleetSlotPoisoned
 )
 
+type runnableDemandState uint32
+
+const (
+	runnableDemandIdle runnableDemandState = iota
+	runnableDemandRequested
+	runnableDemandClaimed
+)
+
 type executorFleetSlot struct {
-	// state is the only producer-observed fleet word. The remaining suffix is
-	// immutable while Active and is cleared only after the route admission
-	// strong join.
-	state uint32
+	// state and runnableDemand are the only producer-observed fleet words. The
+	// remaining suffix is immutable while Active and is cleared only after the
+	// route admission strong join.
+	state          uint32
+	runnableDemand uint32
 
 	handle  ExecutorFleetHandle
 	p       *P
@@ -100,6 +109,20 @@ type ExecutorFleet struct {
 	executors ExecutorRegistry
 	routes    OperationRouteRegistry
 	slots     [ExecutorFleetCapacity]executorFleetSlot
+}
+
+// RunnableDistribution is one exact demand-driven global injection. Target is
+// the idle route which claimed work, Transfer owns the destination mailbox
+// root, and Request records the exact executor wake publication.
+type RunnableDistribution struct {
+	Target   ExecutorFleetHandle
+	Transfer RunnableTransferID
+	Request  ExecutorRequestResult
+}
+
+func (distribution RunnableDistribution) Valid() bool {
+	return distribution.Target.Valid() && distribution.Transfer.Valid() &&
+		ExecutorRequestAccepted(distribution.Request)
 }
 
 func pristineExecutorFleet(fleet *ExecutorFleet) bool {
@@ -406,20 +429,191 @@ func (fleet *ExecutorFleet) PublishPNeutralRunnableAndRequest(
 	return id, request, published
 }
 
-// PublishInitialReadyHeadAndRequest opportunistically moves only the exact
-// source ready-head when it is a never-run initial coroutine. It is called by
-// a source-P owner after a physical resume has completely committed, never by
-// a callback or from inside managed code. Ineligibility and mailbox contention
-// are ordinary local-execution fallback and leave the source queue untouched.
-func (fleet *ExecutorFleet) PublishInitialReadyHeadAndRequest(
+// RequestPNeutralRunnable publishes one coalesced global work demand for an
+// exact empty owner P. The request contains no G or frame pointer. A source
+// owner may later claim it and inject one P-neutral surplus continuation into
+// this route's existing exact mailbox.
+func (fleet *ExecutorFleet) RequestPNeutralRunnable(
 	handle ExecutorFleetHandle,
-	source *P,
-) (RunnableTransferID, ExecutorRequestResult, bool) {
-	if source == nil || !stableRunnableTransferP(source) || !validReadyQueue(source) ||
-		source.readyHead == nil || !initialPNeutralRunnable(source.readyHead, true) {
-		return RunnableTransferID{}, ExecutorRequestInvalid, false
+	owner *P,
+) bool {
+	slot, _, ok := executorFleetSlotFor(fleet, handle)
+	if !ok || preemptLoad(&slot.state) != uint32(executorFleetSlotActive) ||
+		slot.p != owner || owner == nil || owner.osThreadLockOwner != nil ||
+		!stableRunnableTransferP(owner) || !validReadyQueue(owner) ||
+		owner.readyHead != nil {
+		return false
 	}
-	return fleet.PublishPNeutralRunnableAndRequest(handle, source, source.readyHead)
+	for {
+		switch runnableDemandState(preemptLoad(&slot.runnableDemand)) {
+		case runnableDemandIdle:
+			if preemptCompareAndSwap(
+				&slot.runnableDemand,
+				uint32(runnableDemandIdle),
+				uint32(runnableDemandRequested),
+			) {
+				return true
+			}
+		case runnableDemandRequested, runnableDemandClaimed:
+			return true
+		default:
+			return false
+		}
+	}
+}
+
+// CancelPNeutralRunnableRequest clears an unclaimed demand at the next owner
+// entry. inflight=true is ordinary: another source already owns the bounded
+// publish/request tail, and its route producer lease plus mailbox root close
+// the race without making this owner wait or spin.
+func (fleet *ExecutorFleet) CancelPNeutralRunnableRequest(
+	handle ExecutorFleetHandle,
+	owner *P,
+) (inflight, ok bool) {
+	slot, _, valid := executorFleetSlotFor(fleet, handle)
+	if !valid || preemptLoad(&slot.state) != uint32(executorFleetSlotActive) ||
+		slot.p != owner || owner == nil {
+		return false, false
+	}
+	for {
+		switch runnableDemandState(preemptLoad(&slot.runnableDemand)) {
+		case runnableDemandIdle:
+			return false, true
+		case runnableDemandRequested:
+			if preemptCompareAndSwap(
+				&slot.runnableDemand,
+				uint32(runnableDemandRequested),
+				uint32(runnableDemandIdle),
+			) {
+				return false, true
+			}
+		case runnableDemandClaimed:
+			return true, true
+		default:
+			return false, false
+		}
+	}
+}
+
+func restoreRunnableDemandAfterFailedClaim(slot *executorFleetSlot) bool {
+	if slot == nil {
+		return false
+	}
+	next := runnableDemandIdle
+	if preemptLoad(&slot.state) == uint32(executorFleetSlotActive) {
+		next = runnableDemandRequested
+	}
+	return preemptCompareAndSwap(
+		&slot.runnableDemand,
+		uint32(runnableDemandClaimed),
+		uint32(next),
+	)
+}
+
+// DistributePNeutralRunnable services at most one global demand from an exact
+// source owner after a stable physical action. A source normally exports work
+// only when at least two local runnables exist, so one continuation remains
+// local and a lone yielding G cannot bounce between idle Ps. The only
+// single-runnable exception is a never-run initial frame, derived directly
+// from frozen G/frame state rather than a target-owned spawn pointer. It may
+// use an active route even before that route publishes demand: otherwise a
+// child spawned immediately before a non-safepointed compute loop could never
+// reach an idle P. Target selection scans the fixed route catalog beginning
+// after the source route; a demanded target is protected by its route producer
+// lease until mailbox publication and executor request have both completed.
+//
+// An empty valid result is ordinary: there was no demand, no surplus, or every
+// demanded mailbox was transiently contended/full. ok=false denotes a broken
+// fleet/demand invariant after a claim.
+func (fleet *ExecutorFleet) DistributePNeutralRunnable(
+	sourceHandle ExecutorFleetHandle,
+	source *P,
+) (distribution RunnableDistribution, ok bool) {
+	sourceSlot, _, sourceOK := executorFleetSlotFor(fleet, sourceHandle)
+	if !sourceOK || preemptLoad(&sourceSlot.state) != uint32(executorFleetSlotActive) ||
+		sourceSlot.p != source || source == nil || !validReadyQueueHeader(source) {
+		return RunnableDistribution{}, false
+	}
+	if source.readyHead == nil {
+		return RunnableDistribution{}, true
+	}
+	candidate := source.readyHead
+	initialCandidate := initialPNeutralRunnable(candidate, true)
+	if candidate == source.readyTail {
+		if !initialCandidate {
+			return RunnableDistribution{}, true
+		}
+	} else if !initialCandidate && !pNeutralRunnable(candidate, true) {
+		return RunnableDistribution{}, true
+	}
+	if !stableRunnableTransferP(source) {
+		return RunnableDistribution{}, true
+	}
+	if !validReadyQueue(source) {
+		return RunnableDistribution{}, false
+	}
+	for offset := uint32(1); offset < ExecutorFleetCapacity; offset++ {
+		index := (sourceHandle.Route - 1 + offset) % ExecutorFleetCapacity
+		target := &fleet.slots[index]
+		if preemptLoad(&target.state) != uint32(executorFleetSlotActive) ||
+			target.handle == sourceHandle ||
+			!preemptCompareAndSwap(
+				&target.runnableDemand,
+				uint32(runnableDemandRequested),
+				uint32(runnableDemandClaimed),
+			) {
+			continue
+		}
+		id, request, published := fleet.PublishPNeutralRunnableAndRequest(
+			target.handle,
+			source,
+			candidate,
+		)
+		if !published {
+			if !restoreRunnableDemandAfterFailedClaim(target) {
+				return RunnableDistribution{}, false
+			}
+			continue
+		}
+		if !preemptCompareAndSwap(
+			&target.runnableDemand,
+			uint32(runnableDemandClaimed),
+			uint32(runnableDemandIdle),
+		) {
+			return RunnableDistribution{}, false
+		}
+		distribution = RunnableDistribution{
+			Target:   target.handle,
+			Transfer: id,
+			Request:  request,
+		}
+		return distribution, distribution.Valid()
+	}
+	if initialCandidate {
+		for offset := uint32(1); offset < ExecutorFleetCapacity; offset++ {
+			index := (sourceHandle.Route - 1 + offset) % ExecutorFleetCapacity
+			target := &fleet.slots[index]
+			if preemptLoad(&target.state) != uint32(executorFleetSlotActive) ||
+				target.handle == sourceHandle {
+				continue
+			}
+			id, request, published := fleet.PublishPNeutralRunnableAndRequest(
+				target.handle,
+				source,
+				candidate,
+			)
+			if !published {
+				continue
+			}
+			distribution = RunnableDistribution{
+				Target:   target.handle,
+				Transfer: id,
+				Request:  request,
+			}
+			return distribution, distribution.Valid()
+		}
+	}
+	return RunnableDistribution{}, true
 }
 
 // ImportPNeutralRunnable imports one exact FIFO transfer on its destination P.
@@ -521,6 +715,11 @@ func BeginExecutorFleetClose(fleet *ExecutorFleet, handle ExecutorFleetHandle) b
 		return false
 	}
 	preemptStore(&slot.state, uint32(executorFleetSlotRouteClosing))
+	preemptCompareAndSwap(
+		&slot.runnableDemand,
+		uint32(runnableDemandRequested),
+		uint32(runnableDemandIdle),
+	)
 	return true
 }
 
@@ -569,7 +768,8 @@ func ConfirmExecutorFleetRouteClose(fleet *ExecutorFleet, handle ExecutorFleetHa
 		return false
 	}
 	routeSlot, routeOK := operationRouteSlotFor(&fleet.routes, route)
-	if !routeOK || !operationRouteProducersQuiesced(routeSlot) || !emptyExecutorFleetMailbox(&slot.mailbox, slot.p) ||
+	if !routeOK || preemptLoad(&slot.runnableDemand) != uint32(runnableDemandIdle) ||
+		!operationRouteProducersQuiesced(routeSlot) || !emptyExecutorFleetMailbox(&slot.mailbox, slot.p) ||
 		!fleet.routes.ConfirmQuiesced(route) || !fleet.routes.Retire(route) {
 		return false
 	}
@@ -657,6 +857,7 @@ func (fleet *ExecutorFleet) AllRetired() bool {
 		if uint32(index) < fleet.routes.next {
 			if preemptLoad(&slot.state) != uint32(executorFleetSlotRetired) || !slot.handle.Valid() ||
 				slot.handle.Route != uint32(index+1) || slot.p != nil || slot.driver != nil ||
+				preemptLoad(&slot.runnableDemand) != uint32(runnableDemandIdle) ||
 				slot.mailbox != (RunnableTransferMailbox{}) {
 				return false
 			}

@@ -653,7 +653,7 @@ type OperationRecipe struct {
 - open-world archive下的完整动态 function descriptor、interface 与跨平台 reflect；
 - 精确 GC frame metadata；
 - syscall/netpoll/worker已在native双owner TCP链闭环，仍需更广`os`/`net`/syscall、容量/取消/GC合同和高连接数backend；
-- 零/单Timer、Manual、Poll、Worker parked-result已能物化到pointer-free frame-local packet并跨P resume；仍需Channel/select/HostOp typed multi-source plan、通用global injection/steal、动态P数量和affinity；
+- 零/单Timer、Manual、Poll、Worker以及Channel/select、HostOp deadline、keyed/private-registry parked-result已能物化到pointer-free frame-local packet并跨P resume；固定fleet的无指针demand + exact mailbox也已支持通用P-neutral注入/工作共享，仍需动态P数量、批量/local-deque steal和完整affinity；
 - WASM/WASI/RTOS/baremetal production host adapter。
 
 ### 9.1 syscall 自动染色
@@ -821,14 +821,14 @@ LLVM CoroSplit继续负责普通 SSA liveness和frame materialization。精确 G
 
 | 平台 | 核心模型判断 | 当前实现现实 |
 | --- | --- | --- |
-| Native Linux/Darwin | layout/ownership无已知冲突 | opt-in双owner fleet已接入程序target：两个真实M/P、独立doorbell/POSIX `poll`/timer shard、Timer/Poll/Worker/Channel exact route、共享bounded worker及start/stop/join已闭环；TCP标准库探针fresh E2E与10,000次压力通过。仍缺动态P、通用steal、parked-result迁移、完整GC/cleanup与GOROOT矩阵 |
+| Native Linux/Darwin | layout/ownership无已知冲突 | opt-in双owner fleet已接入程序target：两个真实M/P、独立doorbell/POSIX `poll`/timer shard、Timer/Poll/Worker/Channel exact route、共享bounded worker及start/stop/join已闭环；TCP标准库探针fresh E2E与10,000次压力通过。固定fleet已验证P-neutral initial/yield/materialized-park的demand injection与跨P执行；仍缺动态P、批量/local-deque steal、完整affinity、GC/cleanup与GOROOT矩阵 |
 | 其他native OS | 尚未审查 | Windows/BSD/mobile production adapter、thread/IO/ABI均未验证 |
 | JS/WASM | layout/ownership无已知冲突，可映射为1P host `RunSlice` | 32-bit layout、pre/post-CoroSplit/object和test adapter有覆盖；production queued run/timer/Promise/IO adapter未实现，仍走fail-closed fallback |
 | WASI | operation模型可映射，未验证 | pollable/poll_oneoff、filesystem/socket/clock production adapter未完成 |
 | RTOS/embedded | 静态执行模型可映射，未验证 | HAL clock/notification/ISR ingress、boundary driver和容量证明都未实现 |
 | baremetal | event-loop模型可映射，未验证 | main loop、IRQ mailbox、WFI/WFE、static/tinygc frame和production adapter都未实现 |
 
-架构不要求每G native stack、libuv、BDWGC或pthread，但这只是兼容候选，不是平台完成度。当前production target adapter中，llgo native Linux/Darwin已有opt-in双owner fleet：route 1原位收养program executor，route 2由固定pthread M拥有；两个domain共用唯一物理run-step reducer，各自通过exact idle gate和route-local poll set等待doorbell/fd/deadline。Program target负责peer与共享worker pool的start/stop/join及route/backend/driver强关闭。Worker保持单物理池并用每job的`OperationID.Route`支持fleet completion，不做函数地址反查；C11 ring支持多个owner并发reservation。仍未提供动态P/GOMAXPROCS、通用steal、已park G跨P结果物化或完整affinity。缺少filesystem、process、socket或host async能力的平台仍按target capability决定可用package。LLVM支持范围只是19–22，不考虑19以下版本。
+架构不要求每G native stack、libuv、BDWGC或pthread，但这只是兼容候选，不是平台完成度。当前production target adapter中，llgo native Linux/Darwin已有opt-in双owner fleet：route 1原位收养program executor，route 2由固定pthread M拥有；两个domain共用唯一物理run-step reducer，各自通过exact idle gate和route-local poll set等待doorbell/fd/deadline。Program target负责peer与共享worker pool的start/stop/join及route/backend/driver强关闭。Worker保持单物理池并用每job的`OperationID.Route`支持fleet completion，不做函数地址反查；C11 ring支持多个owner并发reservation。P-neutral result物化和固定fleet demand injection/work sharing已经接通；仍未提供动态P/GOMAXPROCS、批量/local-deque steal、完整affinity或blocking compensation。缺少filesystem、process、socket或host async能力的平台仍按target capability决定可用package。LLVM支持范围只是19–22，不考虑19以下版本。
 
 ## 12. Cache、archive 与 summary
 

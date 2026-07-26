@@ -182,6 +182,9 @@ func coroNativeFleetRunPhysicalOwnerPassV1(
 		return coroNativeFleetPhysicalOwnerFailV1("native fleet peer epoch invalid")
 	}
 	*done = false
+	if _, ok := coroNativeFleetCancelOwnerRunnableDemandV1(handle, *epoch); !ok {
+		return coroNativeFleetPhysicalOwnerFailV1("native fleet peer demand cancel failed")
+	}
 	_, _, drainStatus := coroNativeFleetTryDrainOwnerEpochV1(
 		handle,
 		*epoch,
@@ -262,6 +265,28 @@ func coroNativeFleetRunPhysicalOwnerPassV1(
 				return coroNativeFleetPhysicalOwnerFailV1("native fleet peer finish epoch failed")
 			}
 			*done = true
+			return true
+		}
+		if !coroNativeFleetRequestOwnerRunnableV1(handle, *epoch) {
+			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer demand publication failed")
+		}
+		moved, more, finalDrainStatus = coroNativeFleetTryDrainOwnerEpochV1(
+			handle,
+			*epoch,
+			coro.RunnableTransferMailboxCapacity,
+		)
+		switch finalDrainStatus {
+		case coro.RunnableTransferDrainContended:
+			return true
+		case coro.RunnableTransferDrainComplete:
+		case coro.RunnableTransferDrainOwnerUnstable:
+			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer demand recheck owner unstable")
+		case coro.RunnableTransferDrainCorrupt:
+			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer demand recheck corrupt")
+		case coro.RunnableTransferDrainInvalid:
+			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer demand recheck failed")
+		}
+		if moved != 0 || more {
 			return true
 		}
 		freshNow, freshClockOK := coroNativeFleetPhysicalOwnerClockV1()

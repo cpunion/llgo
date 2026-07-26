@@ -60,6 +60,37 @@ func closeExecutorFleetFixture(t *testing.T, fleet *ExecutorFleet, fixture *exec
 	}
 }
 
+func finishExecutorFleetTask(
+	t *testing.T,
+	fixture *executorFleetManualFixture,
+	task *yieldingTestG,
+	action Action,
+) {
+	t.Helper()
+	task.frame.header.SuspendReason = uint16(SuspendFrameComplete)
+	task.frame.header.Lifecycle = uint16(FrameFinalSuspended)
+	if !PrepareComplete(task.g, task.handle, task.frame.header) {
+		t.Fatalf("prepare fleet task completion for %s", task.name)
+	}
+	action, ok := Resumed(fixture.p, task.g, action)
+	if !ok || action.Kind != ActionCheckDestroy {
+		t.Fatalf("resume fleet task completion for %s = (%+v,%t)", task.name, action, ok)
+	}
+	action, ok = Checked(fixture.p, task.g, action, true)
+	if !ok || action.Kind != ActionDestroy {
+		t.Fatalf("check fleet task destroy for %s = (%+v,%t)", task.name, action, ok)
+	}
+	releaseTestFrame(t, task.g, task.frame)
+	receipt, ok := DestroyedBounded(fixture.p, task.g, action)
+	if !ok || receipt.Kind != ActionCommitDestroy {
+		t.Fatalf("publish fleet task destroy for %s = (%+v,%t)", task.name, receipt, ok)
+	}
+	complete, ok := CommitExecutorRunDomainDestroy(fixture.driver, task.g, receipt)
+	if !ok || complete.Kind != ActionComplete {
+		t.Fatalf("commit fleet task destroy for %s = (%+v,%t)", task.name, complete, ok)
+	}
+}
+
 func settleExecutorFleetManual(
 	t *testing.T,
 	fixture *executorFleetManualFixture,
@@ -527,37 +558,207 @@ func TestExecutorFleetTransferUsesRouteAdmissionAndRequiresEmptyMailbox(t *testi
 	}
 }
 
-func TestExecutorFleetInitialReadyHeadDistributionDoesNotBounceYieldedWork(t *testing.T) {
+func TestExecutorFleetDemandDistributesSurplusWithoutBouncingLastRunnable(t *testing.T) {
 	fleet := new(ExecutorFleet)
-	initialTarget := bindExecutorFleetManualFixture(t, fleet)
-	yieldedTarget := bindExecutorFleetManualFixture(t, fleet)
+	source := bindExecutorFleetManualFixture(t, fleet)
+	first := bindExecutorFleetManualFixture(t, fleet)
+	second := bindExecutorFleetManualFixture(t, fleet)
+	tasks := [3]*yieldingTestG{
+		newYieldingTestG(t, "fleet-demand-first"),
+		newYieldingTestG(t, "fleet-demand-second"),
+		newYieldingTestG(t, "fleet-demand-local"),
+	}
+	for _, task := range tasks {
+		scratch := new(P)
+		yieldRunnableForTransfer(t, scratch, task)
+		runnable, ok := NextRunnable(scratch)
+		if !ok || runnable != task.g {
+			t.Fatal("detach yielded global distribution candidate")
+		}
+		if !Enqueue(source.p, task.g) {
+			t.Fatal("enqueue global distribution source")
+		}
+	}
+	if !fleet.RequestPNeutralRunnable(first.handle, first.p) ||
+		!fleet.RequestPNeutralRunnable(second.handle, second.p) {
+		t.Fatal("publish two exact runnable demands")
+	}
+	firstDistribution, ok := fleet.DistributePNeutralRunnable(source.handle, source.p)
+	if !ok || !firstDistribution.Valid() || firstDistribution.Target != first.handle ||
+		source.p.readyHead != tasks[1].g {
+		t.Fatalf("first demand distribution = %+v, ok=%t head=%p",
+			firstDistribution, ok, source.p.readyHead)
+	}
+	secondDistribution, ok := fleet.DistributePNeutralRunnable(source.handle, source.p)
+	if !ok || !secondDistribution.Valid() || secondDistribution.Target != second.handle ||
+		source.p.readyHead != tasks[2].g || source.p.readyTail != tasks[2].g {
+		t.Fatalf("second demand distribution = %+v, ok=%t source=(%p,%p)",
+			secondDistribution, ok, source.p.readyHead, source.p.readyTail)
+	}
+	if !fleet.ImportPNeutralRunnable(
+		first.handle,
+		first.p,
+		firstDistribution.Transfer,
+	) || !fleet.ImportPNeutralRunnable(
+		second.handle,
+		second.p,
+		secondDistribution.Transfer,
+	) {
+		t.Fatal("import demanded runnable transfers")
+	}
+	for index, fixture := range [3]*executorFleetManualFixture{first, second, source} {
+		if index < 2 {
+			if _, _, pollOK := PollExecutor(fixture.driver); !pollOK {
+				t.Fatalf("acknowledge demanded executor %d", index)
+			}
+		}
+		runnable, nextOK := NextRunnable(fixture.p)
+		if !nextOK || runnable != tasks[index].g {
+			t.Fatalf("dequeue distributed runnable %d = (%p,%t)", index, runnable, nextOK)
+		}
+		action := beginWaitTestResume(t, fixture.p, tasks[index])
+		finishExecutorFleetTask(t, fixture, tasks[index], action)
+	}
+	closeExecutorFleetFixture(t, fleet, source)
+	closeExecutorFleetFixture(t, fleet, first)
+	closeExecutorFleetFixture(t, fleet, second)
+	if !fleet.AllRetired() {
+		t.Fatal("demand distribution retained fleet resources")
+	}
+}
 
-	initialSource := new(P)
-	initial := newYieldingTestG(t, "fleet-initial-distribution")
-	if !Enqueue(initialSource, initial.g) {
-		t.Fatal("enqueue initial distribution source")
-	}
-	id, request, published := fleet.PublishInitialReadyHeadAndRequest(initialTarget.handle, initialSource)
-	if !published || !id.Valid() || request != ExecutorRequestPublished ||
-		initialSource.readyHead != nil || initialSource.readyTail != nil {
-		t.Fatalf("publish initial ready head = (%+v,%d,%t), source=(%p,%p)",
-			id, request, published, initialSource.readyHead, initialSource.readyTail)
-	}
+func TestExecutorFleetDemandSharesSingleInitialButNotSingleYielded(t *testing.T) {
+	t.Run("initial", func(t *testing.T) {
+		fleet := new(ExecutorFleet)
+		source := bindExecutorFleetManualFixture(t, fleet)
+		target := bindExecutorFleetManualFixture(t, fleet)
+		task := newYieldingTestG(t, "fleet-single-initial")
+		if !Enqueue(source.p, task.g) {
+			t.Fatal("prepare single initial demand")
+		}
+		distribution, ok := fleet.DistributePNeutralRunnable(source.handle, source.p)
+		if !ok || !distribution.Valid() || distribution.Target != target.handle ||
+			source.p.readyHead != nil || source.p.readyTail != nil {
+			t.Fatalf("single initial distribution = %+v/%t source=(%p,%p)",
+				distribution, ok, source.p.readyHead, source.p.readyTail)
+		}
+	})
+	t.Run("yielded", func(t *testing.T) {
+		fleet := new(ExecutorFleet)
+		source := bindExecutorFleetManualFixture(t, fleet)
+		target := bindExecutorFleetManualFixture(t, fleet)
+		task := newYieldingTestG(t, "fleet-single-yielded")
+		yieldRunnableForTransfer(t, source.p, task)
+		if !fleet.RequestPNeutralRunnable(target.handle, target.p) {
+			t.Fatal("prepare single yielded demand")
+		}
+		distribution, ok := fleet.DistributePNeutralRunnable(source.handle, source.p)
+		if !ok || distribution != (RunnableDistribution{}) ||
+			source.p.readyHead != task.g || source.p.readyTail != task.g || !task.g.queued {
+			t.Fatalf("single yielded bounced = %+v/%t source=(%p,%p) queued=%t",
+				distribution, ok, source.p.readyHead, source.p.readyTail, task.g.queued)
+		}
+		if inflight, cancelOK := fleet.CancelPNeutralRunnableRequest(target.handle, target.p); !cancelOK || inflight {
+			t.Fatalf("cancel yielded demand = (%t,%t)", inflight, cancelOK)
+		}
+	})
+}
 
-	yieldedSource := new(P)
-	yielded := newYieldingTestG(t, "fleet-yielded-local-fallback")
-	yieldRunnableForTransfer(t, yieldedSource, yielded)
-	beforeHead, beforeTail := yieldedSource.readyHead, yieldedSource.readyTail
-	if yieldedID, yieldedRequest, yieldedPublished := fleet.PublishInitialReadyHeadAndRequest(
-		yieldedTarget.handle,
-		yieldedSource,
-	); yieldedPublished || yieldedID != (RunnableTransferID{}) ||
-		yieldedRequest != ExecutorRequestInvalid || yieldedSource.readyHead != beforeHead ||
-		yieldedSource.readyTail != beforeTail || !yielded.g.queued {
-		t.Fatalf("yielded distribution fallback = (%+v,%d,%t), source=(%p,%p) queued=%t",
-			yieldedID, yieldedRequest, yieldedPublished, yieldedSource.readyHead,
-			yieldedSource.readyTail, yielded.g.queued)
+func TestExecutorFleetConcurrentSourcesClaimOneRunnableDemand(t *testing.T) {
+	fleet := new(ExecutorFleet)
+	first := bindExecutorFleetManualFixture(t, fleet)
+	second := bindExecutorFleetManualFixture(t, fleet)
+	target := bindExecutorFleetManualFixture(t, fleet)
+	for index, source := range [2]*executorFleetManualFixture{first, second} {
+		yielded := newYieldingTestG(t, "fleet-concurrent-demand-yielded")
+		yieldRunnableForTransfer(t, source.p, yielded)
+		initial := newYieldingTestG(t, "fleet-concurrent-demand-initial")
+		if !Enqueue(source.p, initial.g) {
+			t.Fatalf("enqueue concurrent source %d surplus", index)
+		}
 	}
+	if !fleet.RequestPNeutralRunnable(target.handle, target.p) {
+		t.Fatal("publish concurrent runnable demand")
+	}
+	type result struct {
+		distribution RunnableDistribution
+		ok           bool
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	var group sync.WaitGroup
+	for _, source := range [2]*executorFleetManualFixture{first, second} {
+		group.Add(1)
+		go func(source *executorFleetManualFixture) {
+			defer group.Done()
+			<-start
+			distribution, ok := fleet.DistributePNeutralRunnable(source.handle, source.p)
+			results <- result{distribution: distribution, ok: ok}
+		}(source)
+	}
+	close(start)
+	group.Wait()
+	close(results)
+	published := 0
+	for result := range results {
+		if !result.ok {
+			t.Fatal("concurrent demand distribution broke a fleet invariant")
+		}
+		if result.distribution.Valid() {
+			published++
+			if result.distribution.Target != target.handle {
+				t.Fatalf("concurrent demand selected wrong target %+v", result.distribution)
+			}
+		} else if result.distribution != (RunnableDistribution{}) {
+			t.Fatalf("concurrent demand returned partial result %+v", result.distribution)
+		}
+	}
+	if published != 1 || preemptLoad(&fleet.slots[target.handle.Route-1].runnableDemand) !=
+		uint32(runnableDemandIdle) {
+		t.Fatalf("concurrent demand publications/state = %d/%d", published,
+			preemptLoad(&fleet.slots[target.handle.Route-1].runnableDemand))
+	}
+}
+
+func TestExecutorFleetCloseCancelsDemandAndJoinsClaim(t *testing.T) {
+	t.Run("requested", func(t *testing.T) {
+		fleet := new(ExecutorFleet)
+		target := bindExecutorFleetManualFixture(t, fleet)
+		if !fleet.RequestPNeutralRunnable(target.handle, target.p) ||
+			!BeginExecutorFleetClose(fleet, target.handle) ||
+			preemptLoad(&fleet.slots[target.handle.Route-1].runnableDemand) != uint32(runnableDemandIdle) ||
+			!ConfirmExecutorFleetRouteClose(fleet, target.handle) ||
+			!BeginExecutorFleetDriverClose(fleet, target.handle) ||
+			!ConfirmExecutorFleetClose(fleet, target.handle) || !fleet.AllRetired() {
+			t.Fatal("requested demand survived fleet close")
+		}
+	})
+	t.Run("claimed", func(t *testing.T) {
+		fleet := new(ExecutorFleet)
+		target := bindExecutorFleetManualFixture(t, fleet)
+		slot := &fleet.slots[target.handle.Route-1]
+		if !fleet.RequestPNeutralRunnable(target.handle, target.p) ||
+			!preemptCompareAndSwap(
+				&slot.runnableDemand,
+				uint32(runnableDemandRequested),
+				uint32(runnableDemandClaimed),
+			) ||
+			!BeginExecutorFleetClose(fleet, target.handle) {
+			t.Fatal("prepare claimed demand close")
+		}
+		if ConfirmExecutorFleetRouteClose(fleet, target.handle) {
+			t.Fatal("fleet close crossed an in-flight demand claim")
+		}
+		if !preemptCompareAndSwap(
+			&slot.runnableDemand,
+			uint32(runnableDemandClaimed),
+			uint32(runnableDemandIdle),
+		) || !ConfirmExecutorFleetRouteClose(fleet, target.handle) ||
+			!BeginExecutorFleetDriverClose(fleet, target.handle) ||
+			!ConfirmExecutorFleetClose(fleet, target.handle) || !fleet.AllRetired() {
+			t.Fatal("fleet did not close after demand claimant quiesced")
+		}
+	})
 }
 
 func TestExecutorFleetConcurrentCompletionAndCloseFailClosed(t *testing.T) {

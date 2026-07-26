@@ -88,13 +88,9 @@ type coroNativeFleetDomainV1 struct {
 	handle         coro.ExecutorFleetHandle
 	nextOwnerEpoch uint32
 	ownerEpoch     uint32
-	// readySpawn is an owner-local, one-shot work-sharing hint. It names only
-	// the first child committed by the current physical resume; imported initial
-	// tasks never acquire it and therefore cannot bounce between idle routes.
-	readySpawn *coro.G
-	adopted    bool
-	owners     coroNativeFleetDomainOwnersV1
-	lifecycle  coroNativeFleetDomainLifecycleV1
+	adopted        bool
+	owners         coroNativeFleetDomainOwnersV1
+	lifecycle      coroNativeFleetDomainLifecycleV1
 }
 
 // coroNativeFleetDomainOwnersV1 is populated only for a domain which adopts
@@ -210,7 +206,7 @@ var coroNativeFleetV1State coroNativeFleetStateV1
 func coroNativeFleetDomainCandidateV1(domain *coroNativeFleetDomainV1) bool {
 	return domain != nil && domain.lifecycle == coroNativeFleetDomainUnusedV1 &&
 		domain.handle == (coro.ExecutorFleetHandle{}) && domain.ownerEpoch == 0 &&
-		domain.nextOwnerEpoch == 0 && domain.readySpawn == nil && !domain.adopted &&
+		domain.nextOwnerEpoch == 0 && !domain.adopted &&
 		domain.owners == (coroNativeFleetDomainOwnersV1{}) &&
 		domain.driver == (coro.ExecutorDriver{}) &&
 		domain.timers.CanRelease() && domain.poll.CanRelease() &&
@@ -724,6 +720,41 @@ func coroNativeFleetTryDrainOwnerEpochV1(
 	return coroNativeFleetV1State.fleet.TryDrainPNeutralRunnables(handle, p, budget)
 }
 
+func coroNativeFleetCancelOwnerRunnableDemandV1(
+	handle coro.ExecutorFleetHandle,
+	epoch uint32,
+) (inflight, ok bool) {
+	domain, valid := coroNativeFleetDomainForHandleV1(
+		&coroNativeFleetV1State,
+		handle,
+		coroNativeFleetDomainActiveV1,
+	)
+	if !valid || epoch == 0 || domain.ownerEpoch != epoch {
+		return false, false
+	}
+	p := domain.pOwnerV1()
+	if p == nil {
+		return false, false
+	}
+	return coroNativeFleetV1State.fleet.CancelPNeutralRunnableRequest(handle, p)
+}
+
+func coroNativeFleetRequestOwnerRunnableV1(
+	handle coro.ExecutorFleetHandle,
+	epoch uint32,
+) bool {
+	domain, valid := coroNativeFleetDomainForHandleV1(
+		&coroNativeFleetV1State,
+		handle,
+		coroNativeFleetDomainActiveV1,
+	)
+	if !valid || epoch == 0 || domain.ownerEpoch != epoch {
+		return false
+	}
+	p := domain.pOwnerV1()
+	return p != nil && coroNativeFleetV1State.fleet.RequestPNeutralRunnable(handle, p)
+}
+
 // coroNativeFleetPollOwnerEpochV1 reuses the existing unified source
 // transaction. There is no fleet-specific polling loop or scheduler copy.
 func coroNativeFleetPollOwnerEpochV1(
@@ -952,7 +983,7 @@ func coroNativeFleetBeginRouteCloseV1(handle coro.ExecutorFleetHandle) bool {
 		handle,
 		coroNativeFleetDomainActiveV1,
 	)
-	if !ok || domain.ownerEpoch != 0 || domain.readySpawn != nil ||
+	if !ok || domain.ownerEpoch != 0 ||
 		!coro.BeginExecutorFleetClose(&coroNativeFleetV1State.fleet, handle) {
 		return false
 	}
@@ -1065,7 +1096,7 @@ func coroNativeFleetAllRetiredV1() bool {
 	}
 	for index := range state.domains {
 		domain := &state.domains[index]
-		if domain.lifecycle != coroNativeFleetDomainRetiredV1 || domain.ownerEpoch != 0 || domain.readySpawn != nil ||
+		if domain.lifecycle != coroNativeFleetDomainRetiredV1 || domain.ownerEpoch != 0 ||
 			domain.owners != (coroNativeFleetDomainOwnersV1{}) ||
 			!domain.ingress.Retired() || !domain.doorbell.Closed() ||
 			!domain.admission.CanRelease() || domain.driver != (coro.ExecutorDriver{}) ||

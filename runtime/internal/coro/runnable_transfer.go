@@ -23,6 +23,7 @@ type runnableTransferGState uint8
 const (
 	runnableTransferGIdle runnableTransferGState = iota
 	runnableTransferGPublished
+	runnableTransferGImported
 )
 
 // RunnableTransferMailboxCapacity is the fixed target-neutral capacity of one
@@ -186,10 +187,10 @@ func pNeutralRunnableParkState(state *ParkState) bool {
 	}
 }
 
-// initialPNeutralRunnable is the work-sharing admission used immediately
-// after a stable resume commit. Restricting opportunistic distribution to a
-// never-run root gives spawned goroutines another P without bouncing ordinary
-// yielded continuations between otherwise idle domains.
+// initialPNeutralRunnable recognizes the one safe single-runnable sharing
+// exception without a target-owned spawn hint. A never-run frame cannot have
+// bounced from another P; after its first physical action it becomes yielded,
+// parked, or terminal and must satisfy the ordinary surplus rule.
 func initialPNeutralRunnable(g *G, queued bool) bool {
 	return pNeutralRunnable(g, queued) && g.active == g.root &&
 		g.active.state == FrameInitialSuspended &&
@@ -361,7 +362,7 @@ func importPNeutralRunnableLocked(mailbox *RunnableTransferMailbox, owner *P, id
 	// Published, so only this owner-side handoff may cross that state.
 	g := slot.g
 	appendReadyUnchecked(owner, g)
-	g.transferState = runnableTransferGIdle
+	g.transferState = runnableTransferGImported
 	if !compareAndSwapGPreemptStateAtDepthZero(g, preemptDisabled, preemptIdle) {
 		return false
 	}
