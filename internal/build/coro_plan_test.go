@@ -37,6 +37,7 @@ import (
 
 	"github.com/goplus/llgo/cl"
 	"github.com/goplus/llgo/internal/coro"
+	"github.com/goplus/llgo/internal/crosscompile"
 	"github.com/goplus/llgo/internal/goembed"
 	"github.com/goplus/llgo/internal/packages"
 	llssa "github.com/goplus/llgo/ssa"
@@ -2758,59 +2759,20 @@ func TestCoroEntryResolutionUsesPlanMatchedPackageCache(t *testing.T) {
 	}
 
 	const pkgPath = "example.com/coro-cache"
-	loweringFacts, err := coro.NewLoweringFacts(nil).Canonical()
-	if err != nil {
-		t.Fatal(err)
-	}
-	loweringFactsDigest, err := loweringFacts.Digest()
-	if err != nil {
-		t.Fatal(err)
-	}
-	metadata := coro.PlanDigestMetadata{
-		CoroABI:             coro.PhysicalABIV1,
-		SchedulerABI:        coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
-		PanicABI:            coro.PanicExplicitStatusABIV0,
-		FuncRepABI:          coro.FuncRepABIV1,
-		FrameRetentionABI:   coro.FrameRetentionParkABIV2,
-		LoweringFactsSchema: coro.LoweringFactsSchema,
-		LoweringFactsDigest: loweringFactsDigest,
-		TargetTriple:        "x86_64-unknown-linux-gnu",
-		TargetCPU:           "x86-64",
-		TargetFeatures:      "+sse2",
-		TargetABI:           "gnu",
-		PointerBits:         64,
-		Endianness:          "little",
-		DataLayout:          "e-p:64:64",
-	}
 	newContext := func(digest string) *context {
-		plan := &coro.SSAPlan{}
-		emission := &cl.EmissionUniverse{}
-		compilation := &cl.Compilation{
-			CoroPlan: plan,
-
-			CoroPlanDigest:          digest,
-			CoroLoweringFacts:       loweringFacts,
-			CoroLoweringFactsDigest: loweringFactsDigest,
-			CoroABI:                 metadata.CoroABI,
-			SchedulerABI:            metadata.SchedulerABI,
-			PanicABI:                metadata.PanicABI,
-			FuncRepABI:              metadata.FuncRepABI,
-			CoroFrameRetentionABI:   metadata.FrameRetentionABI,
-			EmissionUniverse:        emission,
-			CoroTargetCapabilities:  cl.CoroNativeTargetCapabilities(),
-		}
-		return &context{
+		ctx := &context{
 			buildConf: &Config{
 				Goos:   "linux",
 				Goarch: "amd64"},
-			coroPlan:                plan,
-			coroEmission:            emission,
-			coroPlanDigest:          digest,
-			coroPlanMetadata:        metadata,
-			coroLoweringFacts:       loweringFacts,
-			coroLoweringFactsDigest: loweringFactsDigest,
-			clCompilation:           compilation,
+			crossCompile: crosscompile.Export{
+				LLVMTarget: "x86_64-unknown-linux-gnu",
+				CPU:        "x86-64",
+				Features:   "+sse2",
+				TargetABI:  "gnu",
+			},
 		}
+		activateCoroPackageCacheTestWithDigest(t, ctx, digest)
+		return ctx
 	}
 	manifest := func(ctx *context, path string) (string, string) {
 		m := newManifestBuilder()

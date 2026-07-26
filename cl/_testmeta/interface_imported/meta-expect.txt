@@ -1,0 +1,249 @@
+[TypeChildren]
+*[]_llgo_uint8:
+    []_llgo_uint8
+*_llgo_error:
+    _llgo_error
+*_llgo_func$8rsrSd_r3UHd_2DiYTyaOKR7BYkei4zw5ysG35KF38w:
+    _llgo_func$8rsrSd_r3UHd_2DiYTyaOKR7BYkei4zw5ysG35KF38w
+*_llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk:
+    _llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk
+*_llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to:
+    _llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to
+*_llgo_github.com/goplus/llgo/cl/_testmeta/interface_imported/api.Source:
+    _llgo_github.com/goplus/llgo/cl/_testmeta/interface_imported/api.Source
+*_llgo_iface$uycIKA3bbxRhudEjW1hHKWKdLqHQsCVy8NdW1bkQmNw:
+    _llgo_iface$uycIKA3bbxRhudEjW1hHKWKdLqHQsCVy8NdW1bkQmNw
+*_llgo_int:
+    _llgo_int
+*_llgo_string:
+    _llgo_string
+*_llgo_uint8:
+    _llgo_uint8
+[]_llgo_uint8:
+    _llgo_uint8
+_llgo_func$8rsrSd_r3UHd_2DiYTyaOKR7BYkei4zw5ysG35KF38w:
+    _llgo_error
+_llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk:
+    []_llgo_uint8
+    _llgo_error
+    _llgo_int
+_llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to:
+    _llgo_string
+
+[OrdinaryEdges]
+*[]_llgo_uint8:
+    []_llgo_uint8
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_error:
+    _llgo_error
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$8rsrSd_r3UHd_2DiYTyaOKR7BYkei4zw5ysG35KF38w:
+    _llgo_func$8rsrSd_r3UHd_2DiYTyaOKR7BYkei4zw5ysG35KF38w
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk:
+    _llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to:
+    _llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_github.com/goplus/llgo/cl/_testmeta/interface_imported/api.Source:
+    _llgo_github.com/goplus/llgo/cl/_testmeta/interface_imported/api.Source
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_iface$uycIKA3bbxRhudEjW1hHKWKdLqHQsCVy8NdW1bkQmNw:
+    _llgo_iface$uycIKA3bbxRhudEjW1hHKWKdLqHQsCVy8NdW1bkQmNw
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_int:
+    _llgo_int
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_string:
+    _llgo_string
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_uint8:
+    _llgo_uint8
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+[]_llgo_uint8:
+    *[]_llgo_uint8
+    _llgo_uint8
+__llgo_coro_func_coro_v1.method-value.483c159cd912c609.9d42abe2265192cf6f8139d3be7b3d9c:
+    github.com/goplus/llgo/cl/_testmeta/interface_imported/api.(*Source).Close$llgo$promoted$v1$d9d16704fd4b513ad5cc5ca05e5313d21569cf64028767237294838230bc1d05$coro
+__llgo_coro_func_coro_v1.method-value.8fcffdabd1b0c121.8ea442e3b07b81cec2ec43a73593d91c:
+    github.com/goplus/llgo/cl/_testmeta/interface_imported/api.(*Source).Read$llgo$promoted$v1$7bdad60d478825b41555c1c694bb0b22cdf3a6e2bf922a31265f2a0621d52b08$coro
+__llgo_coro_func_coro_v1.method.8fcffdabd1b0c121.03b183a61ec5112a0c2ca62c6769aa13:
+    github.com/goplus/llgo/cl/_testmeta/interface_imported/api.(*Source).Read$llgo$promoted$v1$7bdad60d478825b41555c1c694bb0b22cdf3a6e2bf922a31265f2a0621d52b08$coro
+__llgo_coro_func_descriptor_v1.method-value.360174cb867701ba.d2ee7bb3b5efb1775e27e7d978d69ee2:
+    __llgo_coro_func_plain_v1.method-value.360174cb867701ba.d2ee7bb3b5efb1775e27e7d978d69ee2
+__llgo_coro_func_descriptor_v1.method-value.483c159cd912c609.9d42abe2265192cf6f8139d3be7b3d9c:
+    __llgo_coro_func_coro_v1.method-value.483c159cd912c609.9d42abe2265192cf6f8139d3be7b3d9c
+__llgo_coro_func_descriptor_v1.method-value.8fcffdabd1b0c121.8ea442e3b07b81cec2ec43a73593d91c:
+    __llgo_coro_func_coro_v1.method-value.8fcffdabd1b0c121.8ea442e3b07b81cec2ec43a73593d91c
+__llgo_coro_func_descriptor_v1.method-value.a5678790966cb1d1.eb59df75dfb0c7ee5000515d306e7f42:
+    __llgo_coro_func_plain_v1.method-value.a5678790966cb1d1.eb59df75dfb0c7ee5000515d306e7f42
+__llgo_coro_func_descriptor_v1.method.8fcffdabd1b0c121.03b183a61ec5112a0c2ca62c6769aa13:
+    __llgo_coro_func_coro_v1.method.8fcffdabd1b0c121.03b183a61ec5112a0c2ca62c6769aa13
+__llgo_coro_func_plain_v1.method-value.360174cb867701ba.d2ee7bb3b5efb1775e27e7d978d69ee2:
+    github.com/goplus/llgo/cl/_testmeta/interface_imported/api.Source.Read
+__llgo_coro_func_plain_v1.method-value.a5678790966cb1d1.eb59df75dfb0c7ee5000515d306e7f42:
+    github.com/goplus/llgo/cl/_testmeta/interface_imported/api.Source.Close
+__llgo_coro_method_raw_trap_v1.4a1abf4558ef04cc04c1b8cb61e29a84:
+    llvm.trap
+__llgo_coro_root_factory_descriptor_v1.009da03a00ad1092403251dbb6b7cda1:
+    __llgo_coro_root_factory_v1.009da03a00ad1092403251dbb6b7cda1
+__llgo_coro_root_factory_v1.009da03a00ad1092403251dbb6b7cda1:
+    github.com/goplus/llgo/cl/_testmeta/interface_imported.main$coro
+__llgo_coro_root_package_v1.9b577a4916af133eba554feb44207798:
+    __llgo_coro_root_package_v1.9b577a4916af133eba554feb44207798.entries
+__llgo_coro_root_package_v1.9b577a4916af133eba554feb44207798.entries:
+    __llgo_coro_root_factory_descriptor_v1.009da03a00ad1092403251dbb6b7cda1
+_llgo_error:
+    *_llgo_error
+    _llgo_iface$Fh8eUJ-Gw4e6TYuajcFIOSCuqSPKAt5nS4ow7xeGXEU$imethods
+    github.com/goplus/llgo/runtime/internal/runtime.interequal
+_llgo_func$8rsrSd_r3UHd_2DiYTyaOKR7BYkei4zw5ysG35KF38w:
+    *_llgo_func$8rsrSd_r3UHd_2DiYTyaOKR7BYkei4zw5ysG35KF38w
+    _llgo_func$8rsrSd_r3UHd_2DiYTyaOKR7BYkei4zw5ysG35KF38w$out
+_llgo_func$8rsrSd_r3UHd_2DiYTyaOKR7BYkei4zw5ysG35KF38w$out:
+    _llgo_error
+_llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk:
+    *_llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk
+    _llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk$in
+    _llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk$out
+_llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk$in:
+    []_llgo_uint8
+_llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk$out:
+    _llgo_error
+    _llgo_int
+_llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to:
+    *_llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to
+    _llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to$out
+_llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to$out:
+    _llgo_string
+_llgo_github.com/goplus/llgo/cl/_testmeta/interface_imported/api.Source:
+    *_llgo_github.com/goplus/llgo/cl/_testmeta/interface_imported/api.Source
+    github.com/goplus/llgo/runtime/internal/runtime.memequal0
+_llgo_iface$Fh8eUJ-Gw4e6TYuajcFIOSCuqSPKAt5nS4ow7xeGXEU$imethods:
+    _llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to
+_llgo_iface$uycIKA3bbxRhudEjW1hHKWKdLqHQsCVy8NdW1bkQmNw:
+    *_llgo_iface$uycIKA3bbxRhudEjW1hHKWKdLqHQsCVy8NdW1bkQmNw
+    _llgo_iface$uycIKA3bbxRhudEjW1hHKWKdLqHQsCVy8NdW1bkQmNw$imethods
+    github.com/goplus/llgo/runtime/internal/runtime.interequal
+_llgo_iface$uycIKA3bbxRhudEjW1hHKWKdLqHQsCVy8NdW1bkQmNw$imethods:
+    _llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk
+_llgo_int:
+    *_llgo_int
+    github.com/goplus/llgo/runtime/internal/runtime.memequal64
+_llgo_string:
+    *_llgo_string
+    github.com/goplus/llgo/runtime/internal/runtime.strequal
+_llgo_uint8:
+    *_llgo_uint8
+    github.com/goplus/llgo/runtime/internal/runtime.memequal8
+github.com/goplus/llgo/cl/_testmeta/interface_imported.init:
+    github.com/goplus/llgo/cl/_testmeta/interface_imported.init$guard
+    github.com/goplus/llgo/cl/_testmeta/interface_imported/api.init
+github.com/goplus/llgo/cl/_testmeta/interface_imported.main$coro:
+    __llgo_coro_await_consume_v1
+    __llgo_coro_await_prepare_v3
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.009da03a00ad1092403251dbb6b7cda1
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_panic_prepare_v1
+    __llgo_coro_run_decision_take_zero_v1
+    _llgo_github.com/goplus/llgo/cl/_testmeta/interface_imported/api.Source
+    _llgo_iface$uycIKA3bbxRhudEjW1hHKWKdLqHQsCVy8NdW1bkQmNw
+    github.com/goplus/llgo/cl/_testmeta/interface_imported.use$coro
+    github.com/goplus/llgo/runtime/internal/runtime.AllocU
+    github.com/goplus/llgo/runtime/internal/runtime.NewItab$coro
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.promise
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.trap
+github.com/goplus/llgo/cl/_testmeta/interface_imported.use$coro:
+    __llgo_coro_await_consume_v1
+    __llgo_coro_await_prepare_v3
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_fault_prepare_v1
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.73db676e7b87c8eb7bf7ea4e2387af00
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_panic_prepare_v1
+    __llgo_coro_run_decision_take_zero_v1
+    github.com/goplus/llgo/runtime/internal/runtime.IfacePtrData$coro
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.promise
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.trap
+github.com/goplus/llgo/cl/_testmeta/interface_imported/api.(*Source).Close$llgo$promoted$v1$d9d16704fd4b513ad5cc5ca05e5313d21569cf64028767237294838230bc1d05$coro:
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_fault_prepare_v1
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.71225ffef2b652f8285d03c281059fc4
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_run_decision_take_zero_v1
+    github.com/goplus/llgo/cl/_testmeta/interface_imported/api.Source.Close
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.trap
+github.com/goplus/llgo/cl/_testmeta/interface_imported/api.(*Source).Read$llgo$promoted$v1$7bdad60d478825b41555c1c694bb0b22cdf3a6e2bf922a31265f2a0621d52b08$coro:
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_fault_prepare_v1
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.48d8064c06d05bd6c73d65b945a0c008
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_run_decision_take_zero_v1
+    github.com/goplus/llgo/cl/_testmeta/interface_imported/api.Source.Read
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.trap
+llvm.used:
+    __llgo_coro_root_factory_descriptor_v1.009da03a00ad1092403251dbb6b7cda1
+    __llgo_coro_root_package_v1.9b577a4916af133eba554feb44207798
+
+[UseIface]
+github.com/goplus/llgo/cl/_testmeta/interface_imported.main$coro:
+    _llgo_github.com/goplus/llgo/cl/_testmeta/interface_imported/api.Source
+
+[UseIfaceMethod]
+github.com/goplus/llgo/cl/_testmeta/interface_imported.use$coro:
+    _llgo_iface$uycIKA3bbxRhudEjW1hHKWKdLqHQsCVy8NdW1bkQmNw Read _llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk
+
+[MethodInfo]
+*_llgo_github.com/goplus/llgo/cl/_testmeta/interface_imported/api.Source:
+    0 Close _llgo_func$8rsrSd_r3UHd_2DiYTyaOKR7BYkei4zw5ysG35KF38w __llgo_coro_func_descriptor_v1.method-value.483c159cd912c609.9d42abe2265192cf6f8139d3be7b3d9c __llgo_coro_func_descriptor_v1.method-value.483c159cd912c609.9d42abe2265192cf6f8139d3be7b3d9c
+    1 Read _llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk __llgo_coro_func_descriptor_v1.method.8fcffdabd1b0c121.03b183a61ec5112a0c2ca62c6769aa13 __llgo_coro_func_descriptor_v1.method-value.8fcffdabd1b0c121.8ea442e3b07b81cec2ec43a73593d91c
+_llgo_github.com/goplus/llgo/cl/_testmeta/interface_imported/api.Source:
+    0 Close _llgo_func$8rsrSd_r3UHd_2DiYTyaOKR7BYkei4zw5ysG35KF38w github.com/goplus/llgo/cl/_testmeta/interface_imported/api.(*Source).Close$llgo$promoted$v1$d9d16704fd4b513ad5cc5ca05e5313d21569cf64028767237294838230bc1d05$coro __llgo_coro_func_descriptor_v1.method-value.a5678790966cb1d1.eb59df75dfb0c7ee5000515d306e7f42
+    1 Read _llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk __llgo_coro_func_descriptor_v1.method.8fcffdabd1b0c121.03b183a61ec5112a0c2ca62c6769aa13 __llgo_coro_func_descriptor_v1.method-value.360174cb867701ba.d2ee7bb3b5efb1775e27e7d978d69ee2
+
+[InterfaceInfo]
+_llgo_iface$uycIKA3bbxRhudEjW1hHKWKdLqHQsCVy8NdW1bkQmNw:
+    Read _llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk
+

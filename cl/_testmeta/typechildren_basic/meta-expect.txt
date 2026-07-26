@@ -1,0 +1,84 @@
+[TypeChildren]
+*_llgo_github.com/goplus/llgo/cl/_testmeta/typechildren_basic.Inner:
+    _llgo_github.com/goplus/llgo/cl/_testmeta/typechildren_basic.Inner
+*_llgo_github.com/goplus/llgo/cl/_testmeta/typechildren_basic.Outer:
+    _llgo_github.com/goplus/llgo/cl/_testmeta/typechildren_basic.Outer
+*_llgo_int:
+    _llgo_int
+*_llgo_string:
+    _llgo_string
+_llgo_github.com/goplus/llgo/cl/_testmeta/typechildren_basic.Inner:
+    _llgo_string
+_llgo_github.com/goplus/llgo/cl/_testmeta/typechildren_basic.Outer:
+    _llgo_github.com/goplus/llgo/cl/_testmeta/typechildren_basic.Inner
+    _llgo_int
+
+[OrdinaryEdges]
+*_llgo_github.com/goplus/llgo/cl/_testmeta/typechildren_basic.Inner:
+    _llgo_github.com/goplus/llgo/cl/_testmeta/typechildren_basic.Inner
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_github.com/goplus/llgo/cl/_testmeta/typechildren_basic.Outer:
+    _llgo_github.com/goplus/llgo/cl/_testmeta/typechildren_basic.Outer
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_int:
+    _llgo_int
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_string:
+    _llgo_string
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+__llgo_coro_root_factory_descriptor_v1.6b2931c67867c742cf7ff02b52ee0401:
+    __llgo_coro_root_factory_v1.6b2931c67867c742cf7ff02b52ee0401
+__llgo_coro_root_factory_v1.6b2931c67867c742cf7ff02b52ee0401:
+    github.com/goplus/llgo/cl/_testmeta/typechildren_basic.main$coro
+__llgo_coro_root_package_v1.f6632fceaf1f713854c4929570d8e85f:
+    __llgo_coro_root_package_v1.f6632fceaf1f713854c4929570d8e85f.entries
+__llgo_coro_root_package_v1.f6632fceaf1f713854c4929570d8e85f.entries:
+    __llgo_coro_root_factory_descriptor_v1.6b2931c67867c742cf7ff02b52ee0401
+_llgo_github.com/goplus/llgo/cl/_testmeta/typechildren_basic.Inner:
+    *_llgo_github.com/goplus/llgo/cl/_testmeta/typechildren_basic.Inner
+    _llgo_struct$MTAKiWNMPODH0G9-y5PI3BUGLd6hRciSbX1QTpCDOZg$fields
+    github.com/goplus/llgo/runtime/internal/runtime.structequal
+_llgo_github.com/goplus/llgo/cl/_testmeta/typechildren_basic.Outer:
+    *_llgo_github.com/goplus/llgo/cl/_testmeta/typechildren_basic.Outer
+    _llgo_struct$VaHvQdd7oPMFznC6BSA9M_OXdmuO77w_Ys1GnWZpjRM$fields
+    github.com/goplus/llgo/runtime/internal/runtime.structequal
+_llgo_int:
+    *_llgo_int
+    github.com/goplus/llgo/runtime/internal/runtime.memequal64
+_llgo_string:
+    *_llgo_string
+    github.com/goplus/llgo/runtime/internal/runtime.strequal
+_llgo_struct$MTAKiWNMPODH0G9-y5PI3BUGLd6hRciSbX1QTpCDOZg$fields:
+    _llgo_string
+_llgo_struct$VaHvQdd7oPMFznC6BSA9M_OXdmuO77w_Ys1GnWZpjRM$fields:
+    _llgo_github.com/goplus/llgo/cl/_testmeta/typechildren_basic.Inner
+    _llgo_int
+github.com/goplus/llgo/cl/_testmeta/typechildren_basic.init:
+    github.com/goplus/llgo/cl/_testmeta/typechildren_basic.init$guard
+github.com/goplus/llgo/cl/_testmeta/typechildren_basic.main$coro:
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.6b2931c67867c742cf7ff02b52ee0401
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_run_decision_take_zero_v1
+    _llgo_github.com/goplus/llgo/cl/_testmeta/typechildren_basic.Outer
+    github.com/goplus/llgo/cl/_testmeta/typechildren_basic.use
+    github.com/goplus/llgo/runtime/internal/runtime.AllocU
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.trap
+llvm.used:
+    __llgo_coro_root_factory_descriptor_v1.6b2931c67867c742cf7ff02b52ee0401
+    __llgo_coro_root_package_v1.f6632fceaf1f713854c4929570d8e85f
+
+[UseIface]
+github.com/goplus/llgo/cl/_testmeta/typechildren_basic.main$coro:
+    _llgo_github.com/goplus/llgo/cl/_testmeta/typechildren_basic.Outer
+

@@ -21,6 +21,8 @@ package cl_test
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -29,8 +31,10 @@ import (
 	"github.com/goplus/llgo/cl/cltest"
 	"github.com/goplus/llgo/internal/build"
 	"github.com/goplus/llgo/internal/buildenv"
+	"github.com/goplus/llgo/internal/cabi"
 	"github.com/goplus/llgo/internal/llgen"
 	"github.com/goplus/llgo/internal/lto"
+	llvmenv "github.com/goplus/llgo/xtool/env/llvm"
 )
 
 func testCompile(t *testing.T, src, expected string) {
@@ -176,6 +180,17 @@ func TestRunAndTestFromTestgo(t *testing.T) {
 	cltest.RunAndTestFromDir(t, "", "./_testgo", nil)
 }
 
+func TestRunAndTestFromTestmeta(t *testing.T) {
+	conf := build.NewDefaultConf(build.ModeRun)
+	conf.CollectPackageMeta = true
+	cltest.RunAndTestFromDir(t, "", "./_testmeta", nil,
+		cltest.WithRunConfig(conf),
+		cltest.WithOutputCheck(false),
+		cltest.WithIRCheck(false),
+		cltest.WithMetaCheck(true),
+	)
+}
+
 func TestRunAndTestFromTestlto(t *testing.T) {
 	conf := build.NewDefaultConf(build.ModeRun)
 	conf.LTO = lto.Full
@@ -188,6 +203,7 @@ func TestRunAndTestFromTestlto(t *testing.T) {
 		"./_testlto/globaldce_reflect_method_by_name_ltoplugin_param",
 		"./_testlto/globaldce_reflect_method_by_name_ltoplugin_range_literal",
 		"./_testlto/globaldce_reflect_method_by_name_ltoplugin_slice",
+		"./_testlto/globaldce_reflect_method_by_name_ltoplugin_string_abi",
 		"./_testlto/globaldce_reflect_method_by_name_ltoplugin_switch",
 	}
 	if !buildenv.Dev {
@@ -226,6 +242,7 @@ var testltoLTOPluginTests = []string{
 	"globaldce_reflect_method_by_name_ltoplugin_param",
 	"globaldce_reflect_method_by_name_ltoplugin_range_literal",
 	"globaldce_reflect_method_by_name_ltoplugin_slice",
+	"globaldce_reflect_method_by_name_ltoplugin_string_abi",
 	"globaldce_reflect_method_by_name_ltoplugin_switch",
 }
 
@@ -266,6 +283,60 @@ func TestBuildAndCheckSymbolsFromTestltoLTOPlugin(t *testing.T) {
 	cltest.BuildAndCheckSymbolsFromDir(t, "", "./_testlto", testltoLTOPluginTests,
 		cltest.WithRunConfig(buildConf),
 	)
+}
+
+func runTestltoLTOPluginAggregateABI(t *testing.T, fixture string) string {
+	t.Helper()
+	conf := testltoLTOPluginConf(t, build.ModeGen)
+	// Apply a fixed LP64 ABI below so the aggregate form is tested on every host.
+	conf.AbiMode = cabi.ModeNone
+	plugin := conf.LTOPlugin.Path
+	pkgs, err := build.Do([]string{fixture}, conf)
+	if err != nil {
+		t.Fatalf("generate aggregate string module: %v", err)
+	}
+	if len(pkgs) != 1 {
+		t.Fatalf("generate aggregate string module: got %d packages", len(pkgs))
+	}
+	cabi.NewTransformer(pkgs[0].LPkg.Prog, "arm64-unknown-linux", "", cabi.ModeAllFunc, true).
+		TransformModule(pkgs[0].PkgPath, pkgs[0].LPkg.Module())
+	aggregateIR := pkgs[0].LPkg.String()
+	pkgs[0].LPkg.Prog.Dispose()
+	if !strings.Contains(aggregateIR, `runtime.String" "llgo.reflect.methodbyname.name"`) {
+		t.Fatalf("MethodByName string argument was not captured in aggregate form:\n%s", aggregateIR)
+	}
+
+	opt := filepath.Join(llvmenv.New("").BinDir(), "opt")
+	cmd := exec.Command(opt, "-load-pass-plugin="+plugin,
+		"-passes=llgo-lto-pre-globaldce", "-S", "-o", "-")
+	cmd.Stdin = strings.NewReader(aggregateIR)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run LTO plugin for aggregate ABI: %v\n%s", err, out)
+	}
+	return string(out)
+}
+
+func TestBuildAndCheckSymbolsFromTestltoLTOPluginAggregateABI(t *testing.T) {
+	result := runTestltoLTOPluginAggregateABI(t,
+		"./_testlto/globaldce_reflect_method_by_name_ltoplugin_string_abi")
+	for _, name := range []string{"Direct", "Concat", "Slice", "Forward"} {
+		marker := `metadata !"go.method.value.reflect.` + name + `"`
+		if !strings.Contains(result, marker) {
+			t.Fatalf("aggregate ABI output missing %s\n%s", marker, result)
+		}
+	}
+	if strings.Contains(result, `metadata !"go.method.value.reflect"`) {
+		t.Fatalf("aggregate ABI output retained the generic value marker\n%s", result)
+	}
+
+	// A generic marker conservatively retains every matching method, so test
+	// unknown-name fallback in a separate module from the Drop symbol check.
+	unknownResult := runTestltoLTOPluginAggregateABI(t,
+		"./_testlto/_globaldce_reflect_method_by_name_ltoplugin_string_abi_unknown")
+	if !strings.Contains(unknownResult, `metadata !"go.method.type.reflect"`) {
+		t.Fatalf("aggregate ABI output lost the unknown-name type marker\n%s", unknownResult)
+	}
 }
 
 func TestFilterEmulatorOutput(t *testing.T) {

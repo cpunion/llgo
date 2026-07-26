@@ -37,9 +37,10 @@ type Defer struct {
 
 // Recover recovers a panic.
 func Recover() (ret any) {
-	ptr := excepKey.Get()
+	gp := getg()
+	ptr := gp.panic_
 	if ptr != nil {
-		excepKey.Set(nil)
+		gp.panic_ = nil
 		ret = *(*any)(ptr)
 		c.Free(ptr)
 		if PanicRecovered != nil {
@@ -60,14 +61,11 @@ func Panic(v any) {
 	SavePanicCallerFrames()
 	ptr := c.Malloc(unsafe.Sizeof(v))
 	*(*any)(ptr) = v
-	excepKey.Set(ptr)
+	gp := getg()
+	gp.panic_ = ptr
 
-	Rethrow((*Defer)(c.GoDeferData()))
+	Rethrow(gp.defer_)
 }
-
-var (
-	excepKey panicSlot
-)
 
 //go:linkname coroGoexit llgo.coroGoexit
 func coroGoexit()
@@ -77,7 +75,7 @@ func Goexit() {
 }
 
 func init() {
-	excepKey.Create()
+	getg().isMain = true
 }
 
 // -----------------------------------------------------------------------------

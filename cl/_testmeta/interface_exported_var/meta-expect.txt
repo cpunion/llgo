@@ -1,0 +1,699 @@
+[TypeChildren]
+*[]_llgo_uint8:
+    []_llgo_uint8
+*_llgo_encoding/binary.littleEndian:
+    _llgo_encoding/binary.littleEndian
+*_llgo_func$HQem8FNvPqrEVQ_c0XssBDFXIDOnET_Ex7o3PlV9bSs:
+    _llgo_func$HQem8FNvPqrEVQ_c0XssBDFXIDOnET_Ex7o3PlV9bSs
+*_llgo_func$ICfGJV9Kp4o-2SMi1iuyC9xBBX1c5utHD63uVbyrfEc:
+    _llgo_func$ICfGJV9Kp4o-2SMi1iuyC9xBBX1c5utHD63uVbyrfEc
+*_llgo_func$JXgl4jz35cOkksEkyj-ImVTqIDNL16JrZ25HHa-Yekw:
+    _llgo_func$JXgl4jz35cOkksEkyj-ImVTqIDNL16JrZ25HHa-Yekw
+*_llgo_func$YjgNCugJxKXYLk39KOJyRyLtvcHU1d7KRz4inhHdVgg:
+    _llgo_func$YjgNCugJxKXYLk39KOJyRyLtvcHU1d7KRz4inhHdVgg
+*_llgo_func$_JswjMs_mFNKWtFb56TJlZa479nBYWhoAxYBwUTwOyc:
+    _llgo_func$_JswjMs_mFNKWtFb56TJlZa479nBYWhoAxYBwUTwOyc
+*_llgo_func$hV5ojfmZDe6MffI0ylemgDF5GZlZiYaJbQvka2A0Gus:
+    _llgo_func$hV5ojfmZDe6MffI0ylemgDF5GZlZiYaJbQvka2A0Gus
+*_llgo_func$ibbVVENlZHDgol7ROnCbrRmXPuO818NXcpl5dfFoKhU:
+    _llgo_func$ibbVVENlZHDgol7ROnCbrRmXPuO818NXcpl5dfFoKhU
+*_llgo_func$mBhSCdZCFK2IHVQVA73dFmon0gMcig2Q387khsbzmm8:
+    _llgo_func$mBhSCdZCFK2IHVQVA73dFmon0gMcig2Q387khsbzmm8
+*_llgo_func$mjkdaEUHPtpOYlUrWGfnskhhvdyc7k9Fk-vwWj3VftE:
+    _llgo_func$mjkdaEUHPtpOYlUrWGfnskhhvdyc7k9Fk-vwWj3VftE
+*_llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to:
+    _llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to
+*_llgo_iface$J1wM-rGcIPemx5jloXBmH7pUzUCSqpgNkOdb0QIFTxw:
+    _llgo_iface$J1wM-rGcIPemx5jloXBmH7pUzUCSqpgNkOdb0QIFTxw
+*_llgo_string:
+    _llgo_string
+*_llgo_uint16:
+    _llgo_uint16
+*_llgo_uint32:
+    _llgo_uint32
+*_llgo_uint64:
+    _llgo_uint64
+*_llgo_uint8:
+    _llgo_uint8
+[]_llgo_uint8:
+    _llgo_uint8
+_llgo_func$HQem8FNvPqrEVQ_c0XssBDFXIDOnET_Ex7o3PlV9bSs:
+    []_llgo_uint8
+    _llgo_uint64
+_llgo_func$ICfGJV9Kp4o-2SMi1iuyC9xBBX1c5utHD63uVbyrfEc:
+    []_llgo_uint8
+    _llgo_uint32
+_llgo_func$JXgl4jz35cOkksEkyj-ImVTqIDNL16JrZ25HHa-Yekw:
+    []_llgo_uint8
+    _llgo_uint16
+_llgo_func$YjgNCugJxKXYLk39KOJyRyLtvcHU1d7KRz4inhHdVgg:
+    []_llgo_uint8
+    _llgo_uint32
+_llgo_func$_JswjMs_mFNKWtFb56TJlZa479nBYWhoAxYBwUTwOyc:
+    []_llgo_uint8
+    _llgo_uint32
+_llgo_func$hV5ojfmZDe6MffI0ylemgDF5GZlZiYaJbQvka2A0Gus:
+    []_llgo_uint8
+    _llgo_uint16
+_llgo_func$ibbVVENlZHDgol7ROnCbrRmXPuO818NXcpl5dfFoKhU:
+    []_llgo_uint8
+    _llgo_uint16
+_llgo_func$mBhSCdZCFK2IHVQVA73dFmon0gMcig2Q387khsbzmm8:
+    []_llgo_uint8
+    _llgo_uint64
+_llgo_func$mjkdaEUHPtpOYlUrWGfnskhhvdyc7k9Fk-vwWj3VftE:
+    []_llgo_uint8
+    _llgo_uint64
+_llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to:
+    _llgo_string
+
+[OrdinaryEdges]
+*[]_llgo_uint8:
+    []_llgo_uint8
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_encoding/binary.littleEndian:
+    _llgo_encoding/binary.littleEndian
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$HQem8FNvPqrEVQ_c0XssBDFXIDOnET_Ex7o3PlV9bSs:
+    _llgo_func$HQem8FNvPqrEVQ_c0XssBDFXIDOnET_Ex7o3PlV9bSs
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$ICfGJV9Kp4o-2SMi1iuyC9xBBX1c5utHD63uVbyrfEc:
+    _llgo_func$ICfGJV9Kp4o-2SMi1iuyC9xBBX1c5utHD63uVbyrfEc
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$JXgl4jz35cOkksEkyj-ImVTqIDNL16JrZ25HHa-Yekw:
+    _llgo_func$JXgl4jz35cOkksEkyj-ImVTqIDNL16JrZ25HHa-Yekw
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$YjgNCugJxKXYLk39KOJyRyLtvcHU1d7KRz4inhHdVgg:
+    _llgo_func$YjgNCugJxKXYLk39KOJyRyLtvcHU1d7KRz4inhHdVgg
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$_JswjMs_mFNKWtFb56TJlZa479nBYWhoAxYBwUTwOyc:
+    _llgo_func$_JswjMs_mFNKWtFb56TJlZa479nBYWhoAxYBwUTwOyc
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$hV5ojfmZDe6MffI0ylemgDF5GZlZiYaJbQvka2A0Gus:
+    _llgo_func$hV5ojfmZDe6MffI0ylemgDF5GZlZiYaJbQvka2A0Gus
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$ibbVVENlZHDgol7ROnCbrRmXPuO818NXcpl5dfFoKhU:
+    _llgo_func$ibbVVENlZHDgol7ROnCbrRmXPuO818NXcpl5dfFoKhU
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$mBhSCdZCFK2IHVQVA73dFmon0gMcig2Q387khsbzmm8:
+    _llgo_func$mBhSCdZCFK2IHVQVA73dFmon0gMcig2Q387khsbzmm8
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$mjkdaEUHPtpOYlUrWGfnskhhvdyc7k9Fk-vwWj3VftE:
+    _llgo_func$mjkdaEUHPtpOYlUrWGfnskhhvdyc7k9Fk-vwWj3VftE
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to:
+    _llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_iface$J1wM-rGcIPemx5jloXBmH7pUzUCSqpgNkOdb0QIFTxw:
+    _llgo_iface$J1wM-rGcIPemx5jloXBmH7pUzUCSqpgNkOdb0QIFTxw
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_string:
+    _llgo_string
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_uint16:
+    _llgo_uint16
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_uint32:
+    _llgo_uint32
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_uint64:
+    _llgo_uint64
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_uint8:
+    _llgo_uint8
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+[]_llgo_uint8:
+    *[]_llgo_uint8
+    _llgo_uint8
+__llgo_coro_func_coro_v1.method-value.084552df3fbbf22e.9d87c66a8d281d5277ad93cf7920a40e:
+    encoding/binary.(*littleEndian).PutUint32$llgo$promoted$v1$75f53293fbf603febfcbaa61924262c095af80b1b0e5cfb1d998c3a38606b185$coro
+__llgo_coro_func_coro_v1.method-value.1c26e7d1478ffc54.ec81270e66e1adae67076694b6fb2b79:
+    encoding/binary.littleEndian.Uint16$coro
+__llgo_coro_func_coro_v1.method-value.1f4462118874624d.9c44310ac892f2d2558e463af4295ee6:
+    encoding/binary.littleEndian.PutUint16$coro
+__llgo_coro_func_coro_v1.method-value.2c7a411a98573815.3524c77a82043516740f9883d33cf9ea:
+    encoding/binary.(*littleEndian).AppendUint32$llgo$promoted$v1$e3822bdd4ff73e11805b4c4df5dd49444feb538277cdc0f5d9b98f7f648d4ee1$coro
+__llgo_coro_func_coro_v1.method-value.2e4e7ac983a31b3c.1c381c395700d975c1751a12461a80df:
+    encoding/binary.(*littleEndian).Uint16$llgo$promoted$v1$7c7697b5397f5e0f45eb4a29b4600a204451e221900478fb6184d277c489ab19$coro
+__llgo_coro_func_coro_v1.method-value.460ba1c555d4ba98.8a5ff30babb13fd4910cef43b21b2bed:
+    encoding/binary.littleEndian.AppendUint32$coro
+__llgo_coro_func_coro_v1.method-value.531a5548eb8e0f83.e1da6022e9f897556c3f83bd074152e5:
+    encoding/binary.littleEndian.AppendUint64$coro
+__llgo_coro_func_coro_v1.method-value.798e2ddd00d0ffeb.ded6262ec4fb386fb887a56b6356569c:
+    encoding/binary.(*littleEndian).PutUint64$llgo$promoted$v1$13ad23a0c70412efa020dcc0e1f1a27d925cad66a902c70c9f5b17d1285e6358$coro
+__llgo_coro_func_coro_v1.method-value.82d24837f22f0899.a443c84091573d844cbcf3323db13b23:
+    encoding/binary.(*littleEndian).PutUint16$llgo$promoted$v1$dc8e7b86ceaa0060baac4a74e0a71c17587167c0a7a701314d5a53e6ff903dc2$coro
+__llgo_coro_func_coro_v1.method-value.9306fb7da9e75d9b.ec45f7c5cbde504a1d4e4be754006568:
+    encoding/binary.littleEndian.Uint64$coro
+__llgo_coro_func_coro_v1.method-value.a14fb0d0fbd7c65c.c0d0d12fa0874208203eda0cafd6eb53:
+    encoding/binary.(*littleEndian).String$llgo$promoted$v1$3c48a4918c9b8e708fd49633109c7ca1cff4cf16e511d0ab4f9211f3daf9b74a$coro
+__llgo_coro_func_coro_v1.method-value.a5d661463798deef.05299f659bf1bec6c076b3f1716c82c5:
+    encoding/binary.(*littleEndian).AppendUint64$llgo$promoted$v1$aea065d4ce707d0866c52bbf70746e85392b3152711552ada53526e8ae0774c5$coro
+__llgo_coro_func_coro_v1.method-value.a65b35204221f860.9ce967374cb4d01410c78d8f5711f064:
+    encoding/binary.littleEndian.PutUint32$coro
+__llgo_coro_func_coro_v1.method-value.ae0a5faf9655912f.3a99050f45c03b9a4b59f2bb27b5ac65:
+    encoding/binary.(*littleEndian).Uint64$llgo$promoted$v1$09357b172e545ff846ffa3f905fa49f913353de82bcdb3ed855cf9c8c2600a89$coro
+__llgo_coro_func_coro_v1.method-value.c1b822eff698b0f8.36ab8fd976d3c58b157e53b37df91c1a:
+    encoding/binary.(*littleEndian).AppendUint16$llgo$promoted$v1$c8cb180aaebe10090610dbe2c60e11d453d85c23849f1cbad81d0afa6537e7ea$coro
+__llgo_coro_func_coro_v1.method-value.c9e51e7c9ae405a5.82a8e38435703abdbc70e49d70ef834d:
+    encoding/binary.(*littleEndian).Uint32$llgo$promoted$v1$4652a64a8e486c77882b25d74de2829b5ea4bfe63b33272ddb89a115b4c96363$coro
+__llgo_coro_func_coro_v1.method-value.d9363bf86eaf4c49.c0d0d12fa0874208203eda0cafd6eb53:
+    encoding/binary.(*littleEndian).GoString$llgo$promoted$v1$c458b001fee7a87908c224256ab93d5f371869d657980de293917ab34ba7b03e$coro
+__llgo_coro_func_coro_v1.method-value.d981f928d920cee4.9351fbff86d7304f64410c6c5c70a5d7:
+    encoding/binary.littleEndian.Uint32$coro
+__llgo_coro_func_coro_v1.method-value.fac63efed18761ce.e1bd697f63d2ec7f8a48e1cb32183465:
+    encoding/binary.littleEndian.PutUint64$coro
+__llgo_coro_func_coro_v1.method-value.fb595fff7705d0ba.ec86d9cef7a8628073cf2481dc38e1ec:
+    encoding/binary.littleEndian.AppendUint16$coro
+__llgo_coro_func_coro_v1.method.2e4e7ac983a31b3c.b08f47c0f4cab15051bc692aa94b0aea:
+    encoding/binary.(*littleEndian).Uint16$llgo$promoted$v1$7c7697b5397f5e0f45eb4a29b4600a204451e221900478fb6184d277c489ab19$coro
+__llgo_coro_func_coro_v1.method.a14fb0d0fbd7c65c.13e7e22a079934b417e80b9b61e3b8e1:
+    encoding/binary.(*littleEndian).String$llgo$promoted$v1$3c48a4918c9b8e708fd49633109c7ca1cff4cf16e511d0ab4f9211f3daf9b74a$coro
+__llgo_coro_func_descriptor_v1.method-value.084552df3fbbf22e.9d87c66a8d281d5277ad93cf7920a40e:
+    __llgo_coro_func_coro_v1.method-value.084552df3fbbf22e.9d87c66a8d281d5277ad93cf7920a40e
+__llgo_coro_func_descriptor_v1.method-value.1c26e7d1478ffc54.ec81270e66e1adae67076694b6fb2b79:
+    __llgo_coro_func_coro_v1.method-value.1c26e7d1478ffc54.ec81270e66e1adae67076694b6fb2b79
+__llgo_coro_func_descriptor_v1.method-value.1f4462118874624d.9c44310ac892f2d2558e463af4295ee6:
+    __llgo_coro_func_coro_v1.method-value.1f4462118874624d.9c44310ac892f2d2558e463af4295ee6
+__llgo_coro_func_descriptor_v1.method-value.2c7a411a98573815.3524c77a82043516740f9883d33cf9ea:
+    __llgo_coro_func_coro_v1.method-value.2c7a411a98573815.3524c77a82043516740f9883d33cf9ea
+__llgo_coro_func_descriptor_v1.method-value.2e4e7ac983a31b3c.1c381c395700d975c1751a12461a80df:
+    __llgo_coro_func_coro_v1.method-value.2e4e7ac983a31b3c.1c381c395700d975c1751a12461a80df
+__llgo_coro_func_descriptor_v1.method-value.460ba1c555d4ba98.8a5ff30babb13fd4910cef43b21b2bed:
+    __llgo_coro_func_coro_v1.method-value.460ba1c555d4ba98.8a5ff30babb13fd4910cef43b21b2bed
+__llgo_coro_func_descriptor_v1.method-value.531a5548eb8e0f83.e1da6022e9f897556c3f83bd074152e5:
+    __llgo_coro_func_coro_v1.method-value.531a5548eb8e0f83.e1da6022e9f897556c3f83bd074152e5
+__llgo_coro_func_descriptor_v1.method-value.7105be5bf98ccbd6.f8848745b8f26e0c02b34f35f6aa490b:
+    __llgo_coro_func_plain_v1.method-value.7105be5bf98ccbd6.f8848745b8f26e0c02b34f35f6aa490b
+__llgo_coro_func_descriptor_v1.method-value.798e2ddd00d0ffeb.ded6262ec4fb386fb887a56b6356569c:
+    __llgo_coro_func_coro_v1.method-value.798e2ddd00d0ffeb.ded6262ec4fb386fb887a56b6356569c
+__llgo_coro_func_descriptor_v1.method-value.82d24837f22f0899.a443c84091573d844cbcf3323db13b23:
+    __llgo_coro_func_coro_v1.method-value.82d24837f22f0899.a443c84091573d844cbcf3323db13b23
+__llgo_coro_func_descriptor_v1.method-value.9306fb7da9e75d9b.ec45f7c5cbde504a1d4e4be754006568:
+    __llgo_coro_func_coro_v1.method-value.9306fb7da9e75d9b.ec45f7c5cbde504a1d4e4be754006568
+__llgo_coro_func_descriptor_v1.method-value.a14fb0d0fbd7c65c.c0d0d12fa0874208203eda0cafd6eb53:
+    __llgo_coro_func_coro_v1.method-value.a14fb0d0fbd7c65c.c0d0d12fa0874208203eda0cafd6eb53
+__llgo_coro_func_descriptor_v1.method-value.a5d661463798deef.05299f659bf1bec6c076b3f1716c82c5:
+    __llgo_coro_func_coro_v1.method-value.a5d661463798deef.05299f659bf1bec6c076b3f1716c82c5
+__llgo_coro_func_descriptor_v1.method-value.a65b35204221f860.9ce967374cb4d01410c78d8f5711f064:
+    __llgo_coro_func_coro_v1.method-value.a65b35204221f860.9ce967374cb4d01410c78d8f5711f064
+__llgo_coro_func_descriptor_v1.method-value.ae0a5faf9655912f.3a99050f45c03b9a4b59f2bb27b5ac65:
+    __llgo_coro_func_coro_v1.method-value.ae0a5faf9655912f.3a99050f45c03b9a4b59f2bb27b5ac65
+__llgo_coro_func_descriptor_v1.method-value.c1b822eff698b0f8.36ab8fd976d3c58b157e53b37df91c1a:
+    __llgo_coro_func_coro_v1.method-value.c1b822eff698b0f8.36ab8fd976d3c58b157e53b37df91c1a
+__llgo_coro_func_descriptor_v1.method-value.c9e51e7c9ae405a5.82a8e38435703abdbc70e49d70ef834d:
+    __llgo_coro_func_coro_v1.method-value.c9e51e7c9ae405a5.82a8e38435703abdbc70e49d70ef834d
+__llgo_coro_func_descriptor_v1.method-value.ce24ca049034c591.f8848745b8f26e0c02b34f35f6aa490b:
+    __llgo_coro_func_plain_v1.method-value.ce24ca049034c591.f8848745b8f26e0c02b34f35f6aa490b
+__llgo_coro_func_descriptor_v1.method-value.d9363bf86eaf4c49.c0d0d12fa0874208203eda0cafd6eb53:
+    __llgo_coro_func_coro_v1.method-value.d9363bf86eaf4c49.c0d0d12fa0874208203eda0cafd6eb53
+__llgo_coro_func_descriptor_v1.method-value.d981f928d920cee4.9351fbff86d7304f64410c6c5c70a5d7:
+    __llgo_coro_func_coro_v1.method-value.d981f928d920cee4.9351fbff86d7304f64410c6c5c70a5d7
+__llgo_coro_func_descriptor_v1.method-value.fac63efed18761ce.e1bd697f63d2ec7f8a48e1cb32183465:
+    __llgo_coro_func_coro_v1.method-value.fac63efed18761ce.e1bd697f63d2ec7f8a48e1cb32183465
+__llgo_coro_func_descriptor_v1.method-value.fb595fff7705d0ba.ec86d9cef7a8628073cf2481dc38e1ec:
+    __llgo_coro_func_coro_v1.method-value.fb595fff7705d0ba.ec86d9cef7a8628073cf2481dc38e1ec
+__llgo_coro_func_descriptor_v1.method.2e4e7ac983a31b3c.b08f47c0f4cab15051bc692aa94b0aea:
+    __llgo_coro_func_coro_v1.method.2e4e7ac983a31b3c.b08f47c0f4cab15051bc692aa94b0aea
+__llgo_coro_func_descriptor_v1.method.a14fb0d0fbd7c65c.13e7e22a079934b417e80b9b61e3b8e1:
+    __llgo_coro_func_coro_v1.method.a14fb0d0fbd7c65c.13e7e22a079934b417e80b9b61e3b8e1
+__llgo_coro_func_plain_v1.method-value.7105be5bf98ccbd6.f8848745b8f26e0c02b34f35f6aa490b:
+    encoding/binary.littleEndian.String
+__llgo_coro_func_plain_v1.method-value.ce24ca049034c591.f8848745b8f26e0c02b34f35f6aa490b:
+    encoding/binary.littleEndian.GoString
+__llgo_coro_method_raw_trap_v1.1c2b03c44bbe96fa883691df176523d6:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.c08a2da21c6ee66dbb14f81cc560d27a:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.e04a5a63a29dd8a3f9ae565e0a635f42:
+    llvm.trap
+__llgo_coro_root_factory_descriptor_v1.0754f15644e492b711d4134196a8007a:
+    __llgo_coro_root_factory_v1.0754f15644e492b711d4134196a8007a
+__llgo_coro_root_factory_descriptor_v1.27868b98c556a6d668e7d9735cc12d5e:
+    __llgo_coro_root_factory_v1.27868b98c556a6d668e7d9735cc12d5e
+__llgo_coro_root_factory_v1.0754f15644e492b711d4134196a8007a:
+    github.com/goplus/llgo/cl/_testmeta/interface_exported_var.main$coro
+__llgo_coro_root_factory_v1.27868b98c556a6d668e7d9735cc12d5e:
+    github.com/goplus/llgo/cl/_testmeta/interface_exported_var.init$coro
+__llgo_coro_root_package_v1.5fc9d7394a66d774c5c8bf02d3329109:
+    __llgo_coro_root_package_v1.5fc9d7394a66d774c5c8bf02d3329109.entries
+__llgo_coro_root_package_v1.5fc9d7394a66d774c5c8bf02d3329109.entries:
+    __llgo_coro_root_factory_descriptor_v1.0754f15644e492b711d4134196a8007a
+    __llgo_coro_root_factory_descriptor_v1.27868b98c556a6d668e7d9735cc12d5e
+_llgo_encoding/binary.littleEndian:
+    *_llgo_encoding/binary.littleEndian
+    github.com/goplus/llgo/runtime/internal/runtime.memequal0
+_llgo_func$HQem8FNvPqrEVQ_c0XssBDFXIDOnET_Ex7o3PlV9bSs:
+    *_llgo_func$HQem8FNvPqrEVQ_c0XssBDFXIDOnET_Ex7o3PlV9bSs
+    _llgo_func$HQem8FNvPqrEVQ_c0XssBDFXIDOnET_Ex7o3PlV9bSs$in
+    _llgo_func$HQem8FNvPqrEVQ_c0XssBDFXIDOnET_Ex7o3PlV9bSs$out
+_llgo_func$HQem8FNvPqrEVQ_c0XssBDFXIDOnET_Ex7o3PlV9bSs$in:
+    []_llgo_uint8
+    _llgo_uint64
+_llgo_func$HQem8FNvPqrEVQ_c0XssBDFXIDOnET_Ex7o3PlV9bSs$out:
+    []_llgo_uint8
+_llgo_func$ICfGJV9Kp4o-2SMi1iuyC9xBBX1c5utHD63uVbyrfEc:
+    *_llgo_func$ICfGJV9Kp4o-2SMi1iuyC9xBBX1c5utHD63uVbyrfEc
+    _llgo_func$ICfGJV9Kp4o-2SMi1iuyC9xBBX1c5utHD63uVbyrfEc$in
+    _llgo_func$ICfGJV9Kp4o-2SMi1iuyC9xBBX1c5utHD63uVbyrfEc$out
+_llgo_func$ICfGJV9Kp4o-2SMi1iuyC9xBBX1c5utHD63uVbyrfEc$in:
+    []_llgo_uint8
+_llgo_func$ICfGJV9Kp4o-2SMi1iuyC9xBBX1c5utHD63uVbyrfEc$out:
+    _llgo_uint32
+_llgo_func$JXgl4jz35cOkksEkyj-ImVTqIDNL16JrZ25HHa-Yekw:
+    *_llgo_func$JXgl4jz35cOkksEkyj-ImVTqIDNL16JrZ25HHa-Yekw
+    _llgo_func$JXgl4jz35cOkksEkyj-ImVTqIDNL16JrZ25HHa-Yekw$in
+    _llgo_func$JXgl4jz35cOkksEkyj-ImVTqIDNL16JrZ25HHa-Yekw$out
+_llgo_func$JXgl4jz35cOkksEkyj-ImVTqIDNL16JrZ25HHa-Yekw$in:
+    []_llgo_uint8
+    _llgo_uint16
+_llgo_func$JXgl4jz35cOkksEkyj-ImVTqIDNL16JrZ25HHa-Yekw$out:
+    []_llgo_uint8
+_llgo_func$YjgNCugJxKXYLk39KOJyRyLtvcHU1d7KRz4inhHdVgg:
+    *_llgo_func$YjgNCugJxKXYLk39KOJyRyLtvcHU1d7KRz4inhHdVgg
+    _llgo_func$YjgNCugJxKXYLk39KOJyRyLtvcHU1d7KRz4inhHdVgg$in
+_llgo_func$YjgNCugJxKXYLk39KOJyRyLtvcHU1d7KRz4inhHdVgg$in:
+    []_llgo_uint8
+    _llgo_uint32
+_llgo_func$_JswjMs_mFNKWtFb56TJlZa479nBYWhoAxYBwUTwOyc:
+    *_llgo_func$_JswjMs_mFNKWtFb56TJlZa479nBYWhoAxYBwUTwOyc
+    _llgo_func$_JswjMs_mFNKWtFb56TJlZa479nBYWhoAxYBwUTwOyc$in
+    _llgo_func$_JswjMs_mFNKWtFb56TJlZa479nBYWhoAxYBwUTwOyc$out
+_llgo_func$_JswjMs_mFNKWtFb56TJlZa479nBYWhoAxYBwUTwOyc$in:
+    []_llgo_uint8
+    _llgo_uint32
+_llgo_func$_JswjMs_mFNKWtFb56TJlZa479nBYWhoAxYBwUTwOyc$out:
+    []_llgo_uint8
+_llgo_func$hV5ojfmZDe6MffI0ylemgDF5GZlZiYaJbQvka2A0Gus:
+    *_llgo_func$hV5ojfmZDe6MffI0ylemgDF5GZlZiYaJbQvka2A0Gus
+    _llgo_func$hV5ojfmZDe6MffI0ylemgDF5GZlZiYaJbQvka2A0Gus$in
+    _llgo_func$hV5ojfmZDe6MffI0ylemgDF5GZlZiYaJbQvka2A0Gus$out
+_llgo_func$hV5ojfmZDe6MffI0ylemgDF5GZlZiYaJbQvka2A0Gus$in:
+    []_llgo_uint8
+_llgo_func$hV5ojfmZDe6MffI0ylemgDF5GZlZiYaJbQvka2A0Gus$out:
+    _llgo_uint16
+_llgo_func$ibbVVENlZHDgol7ROnCbrRmXPuO818NXcpl5dfFoKhU:
+    *_llgo_func$ibbVVENlZHDgol7ROnCbrRmXPuO818NXcpl5dfFoKhU
+    _llgo_func$ibbVVENlZHDgol7ROnCbrRmXPuO818NXcpl5dfFoKhU$in
+_llgo_func$ibbVVENlZHDgol7ROnCbrRmXPuO818NXcpl5dfFoKhU$in:
+    []_llgo_uint8
+    _llgo_uint16
+_llgo_func$mBhSCdZCFK2IHVQVA73dFmon0gMcig2Q387khsbzmm8:
+    *_llgo_func$mBhSCdZCFK2IHVQVA73dFmon0gMcig2Q387khsbzmm8
+    _llgo_func$mBhSCdZCFK2IHVQVA73dFmon0gMcig2Q387khsbzmm8$in
+_llgo_func$mBhSCdZCFK2IHVQVA73dFmon0gMcig2Q387khsbzmm8$in:
+    []_llgo_uint8
+    _llgo_uint64
+_llgo_func$mjkdaEUHPtpOYlUrWGfnskhhvdyc7k9Fk-vwWj3VftE:
+    *_llgo_func$mjkdaEUHPtpOYlUrWGfnskhhvdyc7k9Fk-vwWj3VftE
+    _llgo_func$mjkdaEUHPtpOYlUrWGfnskhhvdyc7k9Fk-vwWj3VftE$in
+    _llgo_func$mjkdaEUHPtpOYlUrWGfnskhhvdyc7k9Fk-vwWj3VftE$out
+_llgo_func$mjkdaEUHPtpOYlUrWGfnskhhvdyc7k9Fk-vwWj3VftE$in:
+    []_llgo_uint8
+_llgo_func$mjkdaEUHPtpOYlUrWGfnskhhvdyc7k9Fk-vwWj3VftE$out:
+    _llgo_uint64
+_llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to:
+    *_llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to
+    _llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to$out
+_llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to$out:
+    _llgo_string
+_llgo_iface$J1wM-rGcIPemx5jloXBmH7pUzUCSqpgNkOdb0QIFTxw:
+    *_llgo_iface$J1wM-rGcIPemx5jloXBmH7pUzUCSqpgNkOdb0QIFTxw
+    _llgo_iface$J1wM-rGcIPemx5jloXBmH7pUzUCSqpgNkOdb0QIFTxw$imethods
+    github.com/goplus/llgo/runtime/internal/runtime.interequal
+_llgo_iface$J1wM-rGcIPemx5jloXBmH7pUzUCSqpgNkOdb0QIFTxw$imethods:
+    _llgo_func$ICfGJV9Kp4o-2SMi1iuyC9xBBX1c5utHD63uVbyrfEc
+    _llgo_func$YjgNCugJxKXYLk39KOJyRyLtvcHU1d7KRz4inhHdVgg
+    _llgo_func$hV5ojfmZDe6MffI0ylemgDF5GZlZiYaJbQvka2A0Gus
+    _llgo_func$ibbVVENlZHDgol7ROnCbrRmXPuO818NXcpl5dfFoKhU
+    _llgo_func$mBhSCdZCFK2IHVQVA73dFmon0gMcig2Q387khsbzmm8
+    _llgo_func$mjkdaEUHPtpOYlUrWGfnskhhvdyc7k9Fk-vwWj3VftE
+    _llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to
+_llgo_string:
+    *_llgo_string
+    github.com/goplus/llgo/runtime/internal/runtime.strequal
+_llgo_uint16:
+    *_llgo_uint16
+    github.com/goplus/llgo/runtime/internal/runtime.memequal16
+_llgo_uint32:
+    *_llgo_uint32
+    github.com/goplus/llgo/runtime/internal/runtime.memequal32
+_llgo_uint64:
+    *_llgo_uint64
+    github.com/goplus/llgo/runtime/internal/runtime.memequal64
+_llgo_uint8:
+    *_llgo_uint8
+    github.com/goplus/llgo/runtime/internal/runtime.memequal8
+encoding/binary.(*littleEndian).AppendUint16$llgo$promoted$v1$c8cb180aaebe10090610dbe2c60e11d453d85c23849f1cbad81d0afa6537e7ea$coro:
+    __llgo_coro_await_consume_v1
+    __llgo_coro_await_prepare_v3
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_fault_prepare_v1
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.32c0d8f58ec920e745acfb48b9bcda2f
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_panic_prepare_v1
+    __llgo_coro_run_decision_take_zero_v1
+    encoding/binary.littleEndian.AppendUint16$coro
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.promise
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.fake.use
+    llvm.memset.p0.i64
+    llvm.trap
+encoding/binary.(*littleEndian).AppendUint32$llgo$promoted$v1$e3822bdd4ff73e11805b4c4df5dd49444feb538277cdc0f5d9b98f7f648d4ee1$coro:
+    __llgo_coro_await_consume_v1
+    __llgo_coro_await_prepare_v3
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_fault_prepare_v1
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.ac8a832ec10f3be5e734f4946abe6048
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_panic_prepare_v1
+    __llgo_coro_run_decision_take_zero_v1
+    encoding/binary.littleEndian.AppendUint32$coro
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.promise
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.fake.use
+    llvm.memset.p0.i64
+    llvm.trap
+encoding/binary.(*littleEndian).AppendUint64$llgo$promoted$v1$aea065d4ce707d0866c52bbf70746e85392b3152711552ada53526e8ae0774c5$coro:
+    __llgo_coro_await_consume_v1
+    __llgo_coro_await_prepare_v3
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_fault_prepare_v1
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.53b30c83fdfe7e30bf49e4bacf08f5f4
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_panic_prepare_v1
+    __llgo_coro_run_decision_take_zero_v1
+    encoding/binary.littleEndian.AppendUint64$coro
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.promise
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.fake.use
+    llvm.memset.p0.i64
+    llvm.trap
+encoding/binary.(*littleEndian).GoString$llgo$promoted$v1$c458b001fee7a87908c224256ab93d5f371869d657980de293917ab34ba7b03e$coro:
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_fault_prepare_v1
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.a146a0b15b5db954cbcb57102265d565
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_run_decision_take_zero_v1
+    encoding/binary.littleEndian.GoString
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.trap
+encoding/binary.(*littleEndian).PutUint16$llgo$promoted$v1$dc8e7b86ceaa0060baac4a74e0a71c17587167c0a7a701314d5a53e6ff903dc2$coro:
+    __llgo_coro_await_consume_v1
+    __llgo_coro_await_prepare_v3
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_fault_prepare_v1
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.2ddf3f6afdf1cdecae9311aa314cfccd
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_panic_prepare_v1
+    __llgo_coro_run_decision_take_zero_v1
+    encoding/binary.littleEndian.PutUint16$coro
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.promise
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.fake.use
+    llvm.memset.p0.i64
+    llvm.trap
+encoding/binary.(*littleEndian).PutUint32$llgo$promoted$v1$75f53293fbf603febfcbaa61924262c095af80b1b0e5cfb1d998c3a38606b185$coro:
+    __llgo_coro_await_consume_v1
+    __llgo_coro_await_prepare_v3
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_fault_prepare_v1
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.ea4fbc5121787acd1441b0fd0354edb6
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_panic_prepare_v1
+    __llgo_coro_run_decision_take_zero_v1
+    encoding/binary.littleEndian.PutUint32$coro
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.promise
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.fake.use
+    llvm.memset.p0.i64
+    llvm.trap
+encoding/binary.(*littleEndian).PutUint64$llgo$promoted$v1$13ad23a0c70412efa020dcc0e1f1a27d925cad66a902c70c9f5b17d1285e6358$coro:
+    __llgo_coro_await_consume_v1
+    __llgo_coro_await_prepare_v3
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_fault_prepare_v1
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.a81e7f2f44d9a6e76fa589e6484514c0
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_panic_prepare_v1
+    __llgo_coro_run_decision_take_zero_v1
+    encoding/binary.littleEndian.PutUint64$coro
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.promise
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.fake.use
+    llvm.memset.p0.i64
+    llvm.trap
+encoding/binary.(*littleEndian).String$llgo$promoted$v1$3c48a4918c9b8e708fd49633109c7ca1cff4cf16e511d0ab4f9211f3daf9b74a$coro:
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_fault_prepare_v1
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.ef98282654ce48483c02d3e7af1d8622
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_run_decision_take_zero_v1
+    encoding/binary.littleEndian.String
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.trap
+encoding/binary.(*littleEndian).Uint16$llgo$promoted$v1$7c7697b5397f5e0f45eb4a29b4600a204451e221900478fb6184d277c489ab19$coro:
+    __llgo_coro_await_consume_v1
+    __llgo_coro_await_prepare_v3
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_fault_prepare_v1
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.d8089aa39814801161ce42584bcac0e5
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_panic_prepare_v1
+    __llgo_coro_run_decision_take_zero_v1
+    encoding/binary.littleEndian.Uint16$coro
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.promise
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.fake.use
+    llvm.memset.p0.i64
+    llvm.trap
+encoding/binary.(*littleEndian).Uint32$llgo$promoted$v1$4652a64a8e486c77882b25d74de2829b5ea4bfe63b33272ddb89a115b4c96363$coro:
+    __llgo_coro_await_consume_v1
+    __llgo_coro_await_prepare_v3
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_fault_prepare_v1
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.853fd002747d9a349625d78586acdc90
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_panic_prepare_v1
+    __llgo_coro_run_decision_take_zero_v1
+    encoding/binary.littleEndian.Uint32$coro
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.promise
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.fake.use
+    llvm.memset.p0.i64
+    llvm.trap
+encoding/binary.(*littleEndian).Uint64$llgo$promoted$v1$09357b172e545ff846ffa3f905fa49f913353de82bcdb3ed855cf9c8c2600a89$coro:
+    __llgo_coro_await_consume_v1
+    __llgo_coro_await_prepare_v3
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_fault_prepare_v1
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.251e05857b2afa52e30bb2679fb1e42e
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_panic_prepare_v1
+    __llgo_coro_run_decision_take_zero_v1
+    encoding/binary.littleEndian.Uint64$coro
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.promise
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.fake.use
+    llvm.memset.p0.i64
+    llvm.trap
+github.com/goplus/llgo/cl/_testmeta/interface_exported_var.init$coro:
+    __llgo_coro_await_consume_v1
+    __llgo_coro_await_prepare_v3
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.27868b98c556a6d668e7d9735cc12d5e
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_panic_prepare_v1
+    __llgo_coro_run_decision_take_zero_v1
+    encoding/binary.init$coro
+    github.com/goplus/llgo/cl/_testmeta/interface_exported_var.init$guard
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.promise
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.trap
+github.com/goplus/llgo/cl/_testmeta/interface_exported_var.main$coro:
+    __llgo_coro_await_consume_v1
+    __llgo_coro_await_prepare_v3
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_fault_prepare_v1
+    __llgo_coro_fault_prepare_v2
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.0754f15644e492b711d4134196a8007a
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_panic_prepare_v1
+    __llgo_coro_run_decision_take_zero_v1
+    _llgo_encoding/binary.littleEndian
+    _llgo_iface$J1wM-rGcIPemx5jloXBmH7pUzUCSqpgNkOdb0QIFTxw
+    encoding/binary.LittleEndian
+    github.com/goplus/llgo/runtime/internal/runtime.AllocU
+    github.com/goplus/llgo/runtime/internal/runtime.AllocZ
+    github.com/goplus/llgo/runtime/internal/runtime.IfacePtrData$coro
+    github.com/goplus/llgo/runtime/internal/runtime.NewItab$coro
+    github.com/goplus/llgo/runtime/internal/runtime.Typedmemmove$coro
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.promise
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.trap
+llvm.used:
+    __llgo_coro_root_factory_descriptor_v1.0754f15644e492b711d4134196a8007a
+    __llgo_coro_root_factory_descriptor_v1.27868b98c556a6d668e7d9735cc12d5e
+    __llgo_coro_root_package_v1.5fc9d7394a66d774c5c8bf02d3329109
+
+[UseIface]
+github.com/goplus/llgo/cl/_testmeta/interface_exported_var.main$coro:
+    _llgo_encoding/binary.littleEndian
+
+[UseIfaceMethod]
+github.com/goplus/llgo/cl/_testmeta/interface_exported_var.main$coro:
+    _llgo_iface$J1wM-rGcIPemx5jloXBmH7pUzUCSqpgNkOdb0QIFTxw Uint16 _llgo_func$hV5ojfmZDe6MffI0ylemgDF5GZlZiYaJbQvka2A0Gus
+
+[MethodInfo]
+*_llgo_encoding/binary.littleEndian:
+    0 AppendUint16 _llgo_func$JXgl4jz35cOkksEkyj-ImVTqIDNL16JrZ25HHa-Yekw __llgo_coro_func_descriptor_v1.method-value.c1b822eff698b0f8.36ab8fd976d3c58b157e53b37df91c1a __llgo_coro_func_descriptor_v1.method-value.c1b822eff698b0f8.36ab8fd976d3c58b157e53b37df91c1a
+    1 AppendUint32 _llgo_func$_JswjMs_mFNKWtFb56TJlZa479nBYWhoAxYBwUTwOyc __llgo_coro_func_descriptor_v1.method-value.2c7a411a98573815.3524c77a82043516740f9883d33cf9ea __llgo_coro_func_descriptor_v1.method-value.2c7a411a98573815.3524c77a82043516740f9883d33cf9ea
+    2 AppendUint64 _llgo_func$HQem8FNvPqrEVQ_c0XssBDFXIDOnET_Ex7o3PlV9bSs __llgo_coro_func_descriptor_v1.method-value.a5d661463798deef.05299f659bf1bec6c076b3f1716c82c5 __llgo_coro_func_descriptor_v1.method-value.a5d661463798deef.05299f659bf1bec6c076b3f1716c82c5
+    3 GoString _llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to __llgo_coro_func_descriptor_v1.method-value.d9363bf86eaf4c49.c0d0d12fa0874208203eda0cafd6eb53 __llgo_coro_func_descriptor_v1.method-value.d9363bf86eaf4c49.c0d0d12fa0874208203eda0cafd6eb53
+    4 PutUint16 _llgo_func$ibbVVENlZHDgol7ROnCbrRmXPuO818NXcpl5dfFoKhU __llgo_coro_func_descriptor_v1.method-value.82d24837f22f0899.a443c84091573d844cbcf3323db13b23 __llgo_coro_func_descriptor_v1.method-value.82d24837f22f0899.a443c84091573d844cbcf3323db13b23
+    5 PutUint32 _llgo_func$YjgNCugJxKXYLk39KOJyRyLtvcHU1d7KRz4inhHdVgg __llgo_coro_func_descriptor_v1.method-value.084552df3fbbf22e.9d87c66a8d281d5277ad93cf7920a40e __llgo_coro_func_descriptor_v1.method-value.084552df3fbbf22e.9d87c66a8d281d5277ad93cf7920a40e
+    6 PutUint64 _llgo_func$mBhSCdZCFK2IHVQVA73dFmon0gMcig2Q387khsbzmm8 __llgo_coro_func_descriptor_v1.method-value.798e2ddd00d0ffeb.ded6262ec4fb386fb887a56b6356569c __llgo_coro_func_descriptor_v1.method-value.798e2ddd00d0ffeb.ded6262ec4fb386fb887a56b6356569c
+    7 String _llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to __llgo_coro_func_descriptor_v1.method.a14fb0d0fbd7c65c.13e7e22a079934b417e80b9b61e3b8e1 __llgo_coro_func_descriptor_v1.method-value.a14fb0d0fbd7c65c.c0d0d12fa0874208203eda0cafd6eb53
+    8 Uint16 _llgo_func$hV5ojfmZDe6MffI0ylemgDF5GZlZiYaJbQvka2A0Gus __llgo_coro_func_descriptor_v1.method.2e4e7ac983a31b3c.b08f47c0f4cab15051bc692aa94b0aea __llgo_coro_func_descriptor_v1.method-value.2e4e7ac983a31b3c.1c381c395700d975c1751a12461a80df
+    9 Uint32 _llgo_func$ICfGJV9Kp4o-2SMi1iuyC9xBBX1c5utHD63uVbyrfEc __llgo_coro_func_descriptor_v1.method-value.c9e51e7c9ae405a5.82a8e38435703abdbc70e49d70ef834d __llgo_coro_func_descriptor_v1.method-value.c9e51e7c9ae405a5.82a8e38435703abdbc70e49d70ef834d
+    10 Uint64 _llgo_func$mjkdaEUHPtpOYlUrWGfnskhhvdyc7k9Fk-vwWj3VftE __llgo_coro_func_descriptor_v1.method-value.ae0a5faf9655912f.3a99050f45c03b9a4b59f2bb27b5ac65 __llgo_coro_func_descriptor_v1.method-value.ae0a5faf9655912f.3a99050f45c03b9a4b59f2bb27b5ac65
+_llgo_encoding/binary.littleEndian:
+    0 AppendUint16 _llgo_func$JXgl4jz35cOkksEkyj-ImVTqIDNL16JrZ25HHa-Yekw encoding/binary.(*littleEndian).AppendUint16$llgo$promoted$v1$c8cb180aaebe10090610dbe2c60e11d453d85c23849f1cbad81d0afa6537e7ea$coro __llgo_coro_func_descriptor_v1.method-value.fb595fff7705d0ba.ec86d9cef7a8628073cf2481dc38e1ec
+    1 AppendUint32 _llgo_func$_JswjMs_mFNKWtFb56TJlZa479nBYWhoAxYBwUTwOyc encoding/binary.(*littleEndian).AppendUint32$llgo$promoted$v1$e3822bdd4ff73e11805b4c4df5dd49444feb538277cdc0f5d9b98f7f648d4ee1$coro __llgo_coro_func_descriptor_v1.method-value.460ba1c555d4ba98.8a5ff30babb13fd4910cef43b21b2bed
+    2 AppendUint64 _llgo_func$HQem8FNvPqrEVQ_c0XssBDFXIDOnET_Ex7o3PlV9bSs encoding/binary.(*littleEndian).AppendUint64$llgo$promoted$v1$aea065d4ce707d0866c52bbf70746e85392b3152711552ada53526e8ae0774c5$coro __llgo_coro_func_descriptor_v1.method-value.531a5548eb8e0f83.e1da6022e9f897556c3f83bd074152e5
+    3 GoString _llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to encoding/binary.(*littleEndian).GoString$llgo$promoted$v1$c458b001fee7a87908c224256ab93d5f371869d657980de293917ab34ba7b03e$coro __llgo_coro_func_descriptor_v1.method-value.ce24ca049034c591.f8848745b8f26e0c02b34f35f6aa490b
+    4 PutUint16 _llgo_func$ibbVVENlZHDgol7ROnCbrRmXPuO818NXcpl5dfFoKhU encoding/binary.(*littleEndian).PutUint16$llgo$promoted$v1$dc8e7b86ceaa0060baac4a74e0a71c17587167c0a7a701314d5a53e6ff903dc2$coro __llgo_coro_func_descriptor_v1.method-value.1f4462118874624d.9c44310ac892f2d2558e463af4295ee6
+    5 PutUint32 _llgo_func$YjgNCugJxKXYLk39KOJyRyLtvcHU1d7KRz4inhHdVgg encoding/binary.(*littleEndian).PutUint32$llgo$promoted$v1$75f53293fbf603febfcbaa61924262c095af80b1b0e5cfb1d998c3a38606b185$coro __llgo_coro_func_descriptor_v1.method-value.a65b35204221f860.9ce967374cb4d01410c78d8f5711f064
+    6 PutUint64 _llgo_func$mBhSCdZCFK2IHVQVA73dFmon0gMcig2Q387khsbzmm8 encoding/binary.(*littleEndian).PutUint64$llgo$promoted$v1$13ad23a0c70412efa020dcc0e1f1a27d925cad66a902c70c9f5b17d1285e6358$coro __llgo_coro_func_descriptor_v1.method-value.fac63efed18761ce.e1bd697f63d2ec7f8a48e1cb32183465
+    7 String _llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to __llgo_coro_func_descriptor_v1.method.a14fb0d0fbd7c65c.13e7e22a079934b417e80b9b61e3b8e1 __llgo_coro_func_descriptor_v1.method-value.7105be5bf98ccbd6.f8848745b8f26e0c02b34f35f6aa490b
+    8 Uint16 _llgo_func$hV5ojfmZDe6MffI0ylemgDF5GZlZiYaJbQvka2A0Gus __llgo_coro_func_descriptor_v1.method.2e4e7ac983a31b3c.b08f47c0f4cab15051bc692aa94b0aea __llgo_coro_func_descriptor_v1.method-value.1c26e7d1478ffc54.ec81270e66e1adae67076694b6fb2b79
+    9 Uint32 _llgo_func$ICfGJV9Kp4o-2SMi1iuyC9xBBX1c5utHD63uVbyrfEc encoding/binary.(*littleEndian).Uint32$llgo$promoted$v1$4652a64a8e486c77882b25d74de2829b5ea4bfe63b33272ddb89a115b4c96363$coro __llgo_coro_func_descriptor_v1.method-value.d981f928d920cee4.9351fbff86d7304f64410c6c5c70a5d7
+    10 Uint64 _llgo_func$mjkdaEUHPtpOYlUrWGfnskhhvdyc7k9Fk-vwWj3VftE encoding/binary.(*littleEndian).Uint64$llgo$promoted$v1$09357b172e545ff846ffa3f905fa49f913353de82bcdb3ed855cf9c8c2600a89$coro __llgo_coro_func_descriptor_v1.method-value.9306fb7da9e75d9b.ec45f7c5cbde504a1d4e4be754006568
+
+[InterfaceInfo]
+_llgo_iface$J1wM-rGcIPemx5jloXBmH7pUzUCSqpgNkOdb0QIFTxw:
+    PutUint16 _llgo_func$ibbVVENlZHDgol7ROnCbrRmXPuO818NXcpl5dfFoKhU
+    PutUint32 _llgo_func$YjgNCugJxKXYLk39KOJyRyLtvcHU1d7KRz4inhHdVgg
+    PutUint64 _llgo_func$mBhSCdZCFK2IHVQVA73dFmon0gMcig2Q387khsbzmm8
+    String _llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to
+    Uint16 _llgo_func$hV5ojfmZDe6MffI0ylemgDF5GZlZiYaJbQvka2A0Gus
+    Uint32 _llgo_func$ICfGJV9Kp4o-2SMi1iuyC9xBBX1c5utHD63uVbyrfEc
+    Uint64 _llgo_func$mjkdaEUHPtpOYlUrWGfnskhhvdyc7k9Fk-vwWj3VftE
+

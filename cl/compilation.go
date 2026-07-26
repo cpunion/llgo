@@ -214,6 +214,11 @@ func (c *Compilation) validateStacklessCoroABIIdentity(required bool) error {
 type PackageOptions struct {
 	Compilation *Compilation
 
+	// MetaCollect enables package-level global metadata collection. Cache-hit
+	// reconstruction keeps it disabled and restores the persisted metadata
+	// alongside the archive manifest.
+	MetaCollect bool
+
 	// CacheHit means cl is rebuilding frontend registrations and link-time
 	// metadata for an already-compiled archive. The transient module is discarded
 	// by the build driver. Report-only observers are skipped; active coroutine

@@ -14,7 +14,8 @@ var (
 
 // Rethrow rethrows a panic.
 func Rethrow(link *Defer) {
-	if ptr := excepKey.Get(); ptr != nil {
+	gp := getg()
+	if ptr := gp.panic_; ptr != nil {
 		if link == nil {
 			TracePanic(*(*any)(ptr))
 			traceTerminalPanic(2)

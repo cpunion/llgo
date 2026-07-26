@@ -357,6 +357,62 @@ func (b Builder) abiExtendedFields(t types.Type, name string, global llvm.Value)
 	return
 }
 
+func (b Builder) recordTypeChildren(parentName string, t types.Type) {
+	mb := b.Pkg.metaBuilder
+	if mb == nil {
+		return
+	}
+	parent := mb.Sym(parentName)
+	for _, child := range b.directTypeChildren(t) {
+		childName, _ := b.Prog.abi.TypeName(child)
+		mb.AddTypeChild(parent, mb.Sym(childName))
+	}
+}
+
+func (b Builder) directTypeChildren(t types.Type) []types.Type {
+	switch t := types.Unalias(t).(type) {
+	case *types.Basic:
+		return nil
+	case *types.Pointer:
+		return []types.Type{abi.PublicType(t.Elem())}
+	case *types.Chan:
+		return []types.Type{abi.PublicType(t.Elem())}
+	case *types.Slice:
+		return []types.Type{abi.PublicType(t.Elem())}
+	case *types.Array:
+		return []types.Type{abi.PublicType(t.Elem())}
+	case *types.Map:
+		return []types.Type{
+			abi.PublicType(t.Key()),
+			abi.PublicType(t.Elem()),
+		}
+	case *types.Signature:
+		var children []types.Type
+		children = appendTupleTypeChildren(children, t.Params())
+		children = appendTupleTypeChildren(children, t.Results())
+		return children
+	case *types.Struct:
+		children := make([]types.Type, 0, t.NumFields())
+		for i := 0; i < t.NumFields(); i++ {
+			children = append(children, abi.PublicType(t.Field(i).Type()))
+		}
+		return children
+	case *types.Named:
+		return b.directTypeChildren(t.Underlying())
+	}
+	return nil
+}
+
+func appendTupleTypeChildren(children []types.Type, tuple *types.Tuple) []types.Type {
+	if tuple == nil {
+		return children
+	}
+	for i := 0; i < tuple.Len(); i++ {
+		children = append(children, abi.PublicType(tuple.At(i).Type()))
+	}
+	return children
+}
+
 func (b Builder) abiUncommonPkg(t types.Type) (*types.Package, string) {
 retry:
 	switch typ := types.Unalias(t).(type) {
@@ -448,6 +504,7 @@ func (b Builder) abiUncommonMethods(t types.Type, methods []*types.Selection) ll
 	ft := prog.rtType("Method")
 	n := len(methods)
 	fields := make([]llvm.Value, n)
+	typeName, _ := prog.abi.TypeName(t)
 	pkg, _ := b.abiUncommonPkg(t)
 	anonymous := pkg == nil
 	if anonymous {
@@ -459,12 +516,8 @@ func (b Builder) abiUncommonMethods(t types.Type, methods []*types.Selection) ll
 		if !ok {
 			panic("ABI method-set entry is not a function")
 		}
-		mName := obj.Name()
-		abiName := mName
-		if !token.IsExported(mName) {
-			abiName = abi.FullName(obj.Pkg(), mName)
-		}
-		name := b.Str(abiName).impl
+		fullName := abiMethodName(obj)
+		name := b.Str(fullName).impl
 		mSig := m.Type().(*types.Signature)
 		var tfn, ifn llvm.Value
 		tfnName := b.abiMethodName(anonymous, pkg, obj, mSig)
@@ -515,6 +568,10 @@ func (b Builder) abiUncommonMethods(t types.Type, methods []*types.Selection) ll
 		values = append(values, ifn)
 		values = append(values, tfn)
 		fields[i] = llvm.ConstNamedStruct(ft.ll, values)
+		if mb := b.Pkg.metaBuilder; mb != nil {
+			mtypeName, _ := prog.abi.TypeName(ftyp)
+			mb.AddMethodSlot(mb.Sym(typeName), fullName, mb.Sym(mtypeName), mb.Sym(ifn.Name()), mb.Sym(tfn.Name()))
+		}
 	}
 	return llvm.ConstArray(ft.ll, fields)
 }
@@ -537,6 +594,14 @@ func (b Builder) abiInterfaceMethods(mset *types.MethodSet) []*types.Selection {
 func funcType(prog Program, typ types.Type) types.Type {
 	ftyp := prog.Type(typ, InGo)
 	return ftyp.raw.Type.(*types.Struct).Field(0).Type()
+}
+
+func abiMethodName(obj types.Object) string {
+	name := obj.Name()
+	if token.IsExported(name) {
+		return name
+	}
+	return abi.FullName(obj.Pkg(), name)
 }
 
 func methodExprSignature(sig *types.Signature) *types.Signature {
@@ -595,6 +660,7 @@ func (b Builder) abiType(t types.Type) Expr {
 		if prog.patchType != nil {
 			t = prog.patchType(t)
 		}
+		b.recordTypeChildren(name, t)
 		mset, hasUncommon := b.abiUncommonMethodSet(t)
 		var methods []*types.Selection
 		if hasUncommon {
@@ -627,6 +693,9 @@ func (b Builder) abiType(t types.Type) Expr {
 				llvm.ConstNamedStruct(prog.Type(rt, InGo).ll, fields),
 				b.abiUncommonType(t, methods),
 				b.abiUncommonMethods(t, methods),
+			}
+			if pkg.metaBuilder != nil {
+				pkg.abiTypeWithUncommon[g.impl] = struct{}{}
 			}
 		}
 		g.impl.SetInitializer(llvm.ConstNamedStruct(g.impl.GlobalValueType(), fields))

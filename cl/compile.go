@@ -2872,6 +2872,15 @@ func NewPackageExWithEmbedOptions(prog llssa.Program, ct *CallerTracking, patche
 	return newPackageEx(prog, ct, patches, rewrites, pkg, files, &embedMap, opts)
 }
 
+// NewPackageExWithEmbedMeta preserves the metadata-aware frontend entry point
+// while routing all per-package inputs through the single PackageOptions
+// contract used by active coroutine compilation.
+func NewPackageExWithEmbedMeta(prog llssa.Program, ct *CallerTracking, patches Patches, rewrites map[string]string, pkg *ssa.Package, files []*ast.File, embedMap goembed.VarMap, metaCollect bool) (ret llssa.Package, externs []string, err error) {
+	return newPackageEx(prog, ct, patches, rewrites, pkg, files, &embedMap, PackageOptions{
+		MetaCollect: metaCollect,
+	})
+}
+
 func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewrites map[string]string, pkg *ssa.Package, files []*ast.File, embedMap *goembed.VarMap, opts PackageOptions) (ret llssa.Package, externs []string, err error) {
 	var prepared *preparedEmissionPackage
 	if opts.Compilation != nil {
@@ -2912,7 +2921,7 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 	if pkgPath == llssa.PkgRuntime {
 		prog.SetRuntime(pkgTypes)
 	}
-	ret = prog.NewPackage(pkgName, pkgPath)
+	ret = prog.NewPackageEx(pkgName, pkgPath, opts.MetaCollect)
 	if enableDbg {
 		ret.InitDebug(pkgName, pkgPath, pkgProg.Fset)
 		defer ret.FinalizeDebug()
@@ -3000,6 +3009,11 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 	}
 	ctx.emitCoroRootPackageAnchor(ret)
 	ret.MaterializePreserveSyms()
+	if opts.MetaCollect {
+		if err := ret.FinishMetaCollection(); err != nil {
+			return nil, nil, fmt.Errorf("build meta for %s: %w", pkgPath, err)
+		}
+	}
 	externs = ctx.cgoSymbols
 	return
 }

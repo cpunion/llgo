@@ -1,0 +1,692 @@
+[TypeChildren]
+*[]_llgo_uint8:
+    []_llgo_uint8
+*_llgo_bool:
+    _llgo_bool
+*_llgo_bytes.Buffer:
+    _llgo_bytes.Buffer
+*_llgo_bytes.readOp:
+    _llgo_bytes.readOp
+*_llgo_error:
+    _llgo_error
+*_llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac:
+    _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac
+*_llgo_func$8rsrSd_r3UHd_2DiYTyaOKR7BYkei4zw5ysG35KF38w:
+    _llgo_func$8rsrSd_r3UHd_2DiYTyaOKR7BYkei4zw5ysG35KF38w
+*_llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA:
+    _llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA
+*_llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk:
+    _llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk
+*_llgo_func$TBlCn7YTQdraI1HMiBWmkrqIGG-8UgD1UVyJy62Z_0o:
+    _llgo_func$TBlCn7YTQdraI1HMiBWmkrqIGG-8UgD1UVyJy62Z_0o
+*_llgo_func$VZ-8VPNF1RaLICwxc1Ghn7BbgyFX3v762OCdx127EkA:
+    _llgo_func$VZ-8VPNF1RaLICwxc1Ghn7BbgyFX3v762OCdx127EkA
+*_llgo_func$YHeRw3AOvQtzv982-ZO3Yn8vh3Fx89RM3VvI8E4iKVk:
+    _llgo_func$YHeRw3AOvQtzv982-ZO3Yn8vh3Fx89RM3VvI8E4iKVk
+*_llgo_func$Z_-7GWzB37LCYRTQLsSYmEihg_hqBK8o_GbT88pqnPY:
+    _llgo_func$Z_-7GWzB37LCYRTQLsSYmEihg_hqBK8o_GbT88pqnPY
+*_llgo_func$aJkaU3jhXr0Q2QraTe2_TTdupeMMW2MD66UwBxynRM0:
+    _llgo_func$aJkaU3jhXr0Q2QraTe2_TTdupeMMW2MD66UwBxynRM0
+*_llgo_func$c8Vvy7bpifdsF4PDKWnpU2KNuhLPRr7XBIDM-4p45sQ:
+    _llgo_func$c8Vvy7bpifdsF4PDKWnpU2KNuhLPRr7XBIDM-4p45sQ
+*_llgo_func$d4kMA_oCkLwnd1j8nVlv1hwRarEVuCIrDCpnHhDz9UY:
+    _llgo_func$d4kMA_oCkLwnd1j8nVlv1hwRarEVuCIrDCpnHhDz9UY
+*_llgo_func$ekGNsrYBSzltfAjxbl6T8H6Yq8j16wzqS3nDj2xxGMU:
+    _llgo_func$ekGNsrYBSzltfAjxbl6T8H6Yq8j16wzqS3nDj2xxGMU
+*_llgo_func$lukqSsfDYBoIp_R8GMojGkZnrYDqaq2iHn8RkCjW7iQ:
+    _llgo_func$lukqSsfDYBoIp_R8GMojGkZnrYDqaq2iHn8RkCjW7iQ
+*_llgo_func$q-bw-_pPYBCXnr1TXIF8sOD4fVVzzIlpHqD-A13AB4Y:
+    _llgo_func$q-bw-_pPYBCXnr1TXIF8sOD4fVVzzIlpHqD-A13AB4Y
+*_llgo_func$qVJ5SH6qhXP_h0AM41vpBGzQEMp-fQIfvwQEJy5NI8M:
+    _llgo_func$qVJ5SH6qhXP_h0AM41vpBGzQEMp-fQIfvwQEJy5NI8M
+*_llgo_func$thH5FBpdXzJNnCpSfiLU5ItTntFU6LWp0RJhDm2XJjw:
+    _llgo_func$thH5FBpdXzJNnCpSfiLU5ItTntFU6LWp0RJhDm2XJjw
+*_llgo_func$uVmBDI0DMcrui3Q9y-g_hbtVN8JckQ18V2wmO5_G7A8:
+    _llgo_func$uVmBDI0DMcrui3Q9y-g_hbtVN8JckQ18V2wmO5_G7A8
+*_llgo_func$uf8yw1UkUdbDuCneSpNKIq_NThWIEVE7f1IYfJGz_bw:
+    _llgo_func$uf8yw1UkUdbDuCneSpNKIq_NThWIEVE7f1IYfJGz_bw
+*_llgo_func$vSv85k0UY6JWccAc3T-lvdCx9J-4GM-oZC9zGLrxW1M:
+    _llgo_func$vSv85k0UY6JWccAc3T-lvdCx9J-4GM-oZC9zGLrxW1M
+*_llgo_func$w4tN9iibS_UimF5vLUWoKP0uAk2tJZF26VqETo_8LVg:
+    _llgo_func$w4tN9iibS_UimF5vLUWoKP0uAk2tJZF26VqETo_8LVg
+*_llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to:
+    _llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to
+*_llgo_iface$uycIKA3bbxRhudEjW1hHKWKdLqHQsCVy8NdW1bkQmNw:
+    _llgo_iface$uycIKA3bbxRhudEjW1hHKWKdLqHQsCVy8NdW1bkQmNw
+*_llgo_int:
+    _llgo_int
+*_llgo_int32:
+    _llgo_int32
+*_llgo_int64:
+    _llgo_int64
+*_llgo_io.Reader:
+    _llgo_io.Reader
+*_llgo_io.Writer:
+    _llgo_io.Writer
+*_llgo_string:
+    _llgo_string
+*_llgo_uint8:
+    _llgo_uint8
+[]_llgo_uint8:
+    _llgo_uint8
+_llgo_bytes.Buffer:
+    []_llgo_uint8
+    _llgo_bytes.readOp
+    _llgo_int
+_llgo_func$8rsrSd_r3UHd_2DiYTyaOKR7BYkei4zw5ysG35KF38w:
+    _llgo_error
+_llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA:
+    _llgo_int
+_llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk:
+    []_llgo_uint8
+    _llgo_error
+    _llgo_int
+_llgo_func$TBlCn7YTQdraI1HMiBWmkrqIGG-8UgD1UVyJy62Z_0o:
+    _llgo_error
+    _llgo_string
+    _llgo_uint8
+_llgo_func$VZ-8VPNF1RaLICwxc1Ghn7BbgyFX3v762OCdx127EkA:
+    _llgo_int
+_llgo_func$YHeRw3AOvQtzv982-ZO3Yn8vh3Fx89RM3VvI8E4iKVk:
+    _llgo_bool
+_llgo_func$Z_-7GWzB37LCYRTQLsSYmEihg_hqBK8o_GbT88pqnPY:
+    []_llgo_uint8
+_llgo_func$aJkaU3jhXr0Q2QraTe2_TTdupeMMW2MD66UwBxynRM0:
+    []_llgo_uint8
+    _llgo_error
+    _llgo_uint8
+_llgo_func$c8Vvy7bpifdsF4PDKWnpU2KNuhLPRr7XBIDM-4p45sQ:
+    []_llgo_uint8
+    _llgo_error
+    _llgo_int
+_llgo_func$d4kMA_oCkLwnd1j8nVlv1hwRarEVuCIrDCpnHhDz9UY:
+    []_llgo_uint8
+    _llgo_int
+_llgo_func$ekGNsrYBSzltfAjxbl6T8H6Yq8j16wzqS3nDj2xxGMU:
+    _llgo_int
+_llgo_func$lukqSsfDYBoIp_R8GMojGkZnrYDqaq2iHn8RkCjW7iQ:
+    _llgo_error
+    _llgo_uint8
+_llgo_func$q-bw-_pPYBCXnr1TXIF8sOD4fVVzzIlpHqD-A13AB4Y:
+    _llgo_error
+    _llgo_int
+    _llgo_int32
+_llgo_func$qVJ5SH6qhXP_h0AM41vpBGzQEMp-fQIfvwQEJy5NI8M:
+    _llgo_bool
+    _llgo_int
+_llgo_func$thH5FBpdXzJNnCpSfiLU5ItTntFU6LWp0RJhDm2XJjw:
+    _llgo_error
+    _llgo_int
+    _llgo_string
+_llgo_func$uVmBDI0DMcrui3Q9y-g_hbtVN8JckQ18V2wmO5_G7A8:
+    _llgo_error
+    _llgo_int64
+    _llgo_io.Reader
+_llgo_func$uf8yw1UkUdbDuCneSpNKIq_NThWIEVE7f1IYfJGz_bw:
+    _llgo_error
+    _llgo_int
+    _llgo_int32
+_llgo_func$vSv85k0UY6JWccAc3T-lvdCx9J-4GM-oZC9zGLrxW1M:
+    _llgo_error
+    _llgo_int64
+    _llgo_io.Writer
+_llgo_func$w4tN9iibS_UimF5vLUWoKP0uAk2tJZF26VqETo_8LVg:
+    _llgo_error
+    _llgo_uint8
+_llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to:
+    _llgo_string
+
+[OrdinaryEdges]
+*[]_llgo_uint8:
+    []_llgo_uint8
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_bool:
+    _llgo_bool
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_bytes.Buffer:
+    _llgo_bytes.Buffer
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_bytes.readOp:
+    _llgo_bytes.readOp
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_error:
+    _llgo_error
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac:
+    _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$8rsrSd_r3UHd_2DiYTyaOKR7BYkei4zw5ysG35KF38w:
+    _llgo_func$8rsrSd_r3UHd_2DiYTyaOKR7BYkei4zw5ysG35KF38w
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA:
+    _llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk:
+    _llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$TBlCn7YTQdraI1HMiBWmkrqIGG-8UgD1UVyJy62Z_0o:
+    _llgo_func$TBlCn7YTQdraI1HMiBWmkrqIGG-8UgD1UVyJy62Z_0o
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$VZ-8VPNF1RaLICwxc1Ghn7BbgyFX3v762OCdx127EkA:
+    _llgo_func$VZ-8VPNF1RaLICwxc1Ghn7BbgyFX3v762OCdx127EkA
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$YHeRw3AOvQtzv982-ZO3Yn8vh3Fx89RM3VvI8E4iKVk:
+    _llgo_func$YHeRw3AOvQtzv982-ZO3Yn8vh3Fx89RM3VvI8E4iKVk
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$Z_-7GWzB37LCYRTQLsSYmEihg_hqBK8o_GbT88pqnPY:
+    _llgo_func$Z_-7GWzB37LCYRTQLsSYmEihg_hqBK8o_GbT88pqnPY
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$aJkaU3jhXr0Q2QraTe2_TTdupeMMW2MD66UwBxynRM0:
+    _llgo_func$aJkaU3jhXr0Q2QraTe2_TTdupeMMW2MD66UwBxynRM0
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$c8Vvy7bpifdsF4PDKWnpU2KNuhLPRr7XBIDM-4p45sQ:
+    _llgo_func$c8Vvy7bpifdsF4PDKWnpU2KNuhLPRr7XBIDM-4p45sQ
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$d4kMA_oCkLwnd1j8nVlv1hwRarEVuCIrDCpnHhDz9UY:
+    _llgo_func$d4kMA_oCkLwnd1j8nVlv1hwRarEVuCIrDCpnHhDz9UY
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$ekGNsrYBSzltfAjxbl6T8H6Yq8j16wzqS3nDj2xxGMU:
+    _llgo_func$ekGNsrYBSzltfAjxbl6T8H6Yq8j16wzqS3nDj2xxGMU
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$lukqSsfDYBoIp_R8GMojGkZnrYDqaq2iHn8RkCjW7iQ:
+    _llgo_func$lukqSsfDYBoIp_R8GMojGkZnrYDqaq2iHn8RkCjW7iQ
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$q-bw-_pPYBCXnr1TXIF8sOD4fVVzzIlpHqD-A13AB4Y:
+    _llgo_func$q-bw-_pPYBCXnr1TXIF8sOD4fVVzzIlpHqD-A13AB4Y
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$qVJ5SH6qhXP_h0AM41vpBGzQEMp-fQIfvwQEJy5NI8M:
+    _llgo_func$qVJ5SH6qhXP_h0AM41vpBGzQEMp-fQIfvwQEJy5NI8M
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$thH5FBpdXzJNnCpSfiLU5ItTntFU6LWp0RJhDm2XJjw:
+    _llgo_func$thH5FBpdXzJNnCpSfiLU5ItTntFU6LWp0RJhDm2XJjw
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$uVmBDI0DMcrui3Q9y-g_hbtVN8JckQ18V2wmO5_G7A8:
+    _llgo_func$uVmBDI0DMcrui3Q9y-g_hbtVN8JckQ18V2wmO5_G7A8
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$uf8yw1UkUdbDuCneSpNKIq_NThWIEVE7f1IYfJGz_bw:
+    _llgo_func$uf8yw1UkUdbDuCneSpNKIq_NThWIEVE7f1IYfJGz_bw
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$vSv85k0UY6JWccAc3T-lvdCx9J-4GM-oZC9zGLrxW1M:
+    _llgo_func$vSv85k0UY6JWccAc3T-lvdCx9J-4GM-oZC9zGLrxW1M
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$w4tN9iibS_UimF5vLUWoKP0uAk2tJZF26VqETo_8LVg:
+    _llgo_func$w4tN9iibS_UimF5vLUWoKP0uAk2tJZF26VqETo_8LVg
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to:
+    _llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_iface$uycIKA3bbxRhudEjW1hHKWKdLqHQsCVy8NdW1bkQmNw:
+    _llgo_iface$uycIKA3bbxRhudEjW1hHKWKdLqHQsCVy8NdW1bkQmNw
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_int:
+    _llgo_int
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_int32:
+    _llgo_int32
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_int64:
+    _llgo_int64
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_io.Reader:
+    _llgo_io.Reader
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_io.Writer:
+    _llgo_io.Writer
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_string:
+    _llgo_string
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+*_llgo_uint8:
+    _llgo_uint8
+    github.com/goplus/llgo/runtime/internal/runtime.memequalptr
+[]_llgo_uint8:
+    *[]_llgo_uint8
+    _llgo_uint8
+__llgo_coro_func_coro_v1.method-value.002ca78595a8148a.6afd34d6241fb65606dc9a9d15a73e47:
+    bytes.(*Buffer).WriteTo$coro
+__llgo_coro_func_coro_v1.method-value.009a33007e719435.2a4fa100637dcb4dfb2d5d665546b84e:
+    bytes.(*Buffer).Reset$coro
+__llgo_coro_func_coro_v1.method-value.05a16653d13ac52a.d3475ecdb3eac2c801a7fb75439853ad:
+    bytes.(*Buffer).Peek$coro
+__llgo_coro_func_coro_v1.method-value.0fe6d624b8ac96ca.69caa4ca9362f12dd05180e21ed23aa5:
+    bytes.(*Buffer).WriteByte$coro
+__llgo_coro_func_coro_v1.method-value.1d468b98ca283625.8bf9336ed72a6e1c127722c5490314f9:
+    bytes.(*Buffer).ReadByte$coro
+__llgo_coro_func_coro_v1.method-value.1e3245d035af12ba.1d0daf87902e73f534ddb11571ba7c7a:
+    bytes.(*Buffer).ReadBytes$coro
+__llgo_coro_func_coro_v1.method-value.276370927fa84a5b.04198b8360c042a567460c04b9ba6eec:
+    bytes.(*Buffer).ReadFrom$coro
+__llgo_coro_func_coro_v1.method-value.2dcb2d77b78d105e.7d758e4b6b9cc748b64e6f9c21847b9d:
+    bytes.(*Buffer).String$coro
+__llgo_coro_func_coro_v1.method-value.2f95704f57cb02d3.b9f72d2368a63a753610df10d16b7b32:
+    bytes.(*Buffer).Write$coro
+__llgo_coro_func_coro_v1.method-value.35bed44f17d83d96.6c4cfab5daa3f235a649982dd3e05fed:
+    bytes.(*Buffer).Available$coro
+__llgo_coro_func_coro_v1.method-value.3a8ea487e6ae6dd3.6c4cfab5daa3f235a649982dd3e05fed:
+    bytes.(*Buffer).Len$coro
+__llgo_coro_func_coro_v1.method-value.3e9cff5760cafc35.95d55d0e23c59dcc7c3dd1eb7ef8ef91:
+    bytes.(*Buffer).Grow$coro
+__llgo_coro_func_coro_v1.method-value.484e574e60e186ce.3b68e258fb6c8dcd408244e56cc33113:
+    bytes.(*Buffer).UnreadByte$coro
+__llgo_coro_func_coro_v1.method-value.560de2ca4f0a270e.cb41ef48dd822a7de58ef76727105f47:
+    bytes.(*Buffer).AvailableBuffer$coro
+__llgo_coro_func_coro_v1.method-value.563dd53a6453a638.95d55d0e23c59dcc7c3dd1eb7ef8ef91:
+    bytes.(*Buffer).Truncate$coro
+__llgo_coro_func_coro_v1.method-value.71be09a0c31a91f6.3b68e258fb6c8dcd408244e56cc33113:
+    bytes.(*Buffer).UnreadRune$coro
+__llgo_coro_func_coro_v1.method-value.734906f1cb77d561.7ca93155c1e285094a85fb0a8bc7b35b:
+    bytes.(*Buffer).grow$coro
+__llgo_coro_func_coro_v1.method-value.7dbfdd46526b8b4f.902853ef23ab83b4218246474433cd90:
+    bytes.(*Buffer).empty$coro
+__llgo_coro_func_coro_v1.method-value.9937155120ec934c.3da7e2144b0818116753f833781e1c7e:
+    bytes.(*Buffer).Next$coro
+__llgo_coro_func_coro_v1.method-value.a17a13d4691913d6.6c4cfab5daa3f235a649982dd3e05fed:
+    bytes.(*Buffer).Cap$coro
+__llgo_coro_func_coro_v1.method-value.a381ee101ecfbfaa.ced60e836bada2be6d58da88f9921705:
+    bytes.(*Buffer).tryGrowByReslice$coro
+__llgo_coro_func_coro_v1.method-value.b22921ec46b3f96b.0d2a26e5b83ef86e4253f7ef46642530:
+    bytes.(*Buffer).WriteRune$coro
+__llgo_coro_func_coro_v1.method-value.b805ca14fc6b5550.db3c3be2084447ed16fc17a636e0cd5b:
+    bytes.(*Buffer).ReadString$coro
+__llgo_coro_func_coro_v1.method-value.c62d44364aaab0ab.1d0daf87902e73f534ddb11571ba7c7a:
+    bytes.(*Buffer).readSlice$coro
+__llgo_coro_func_coro_v1.method-value.cf2b8cb3bbd7deda.50f6e952fab3257a3ab8d830e1c81107:
+    bytes.(*Buffer).ReadRune$coro
+__llgo_coro_func_coro_v1.method-value.d86cebce478836a1.472f77a0cda4a6a6554070e03e5e10c7:
+    bytes.(*Buffer).WriteString$coro
+__llgo_coro_func_coro_v1.method-value.e88237c34bd43ab6.b9f72d2368a63a753610df10d16b7b32:
+    bytes.(*Buffer).Read$coro
+__llgo_coro_func_coro_v1.method-value.ee67a82fd736488e.cb41ef48dd822a7de58ef76727105f47:
+    bytes.(*Buffer).Bytes$coro
+__llgo_coro_func_coro_v1.method.002ca78595a8148a.693d52254397bb10650e24062d192e89:
+    bytes.(*Buffer).WriteTo$coro
+__llgo_coro_func_coro_v1.method.276370927fa84a5b.327ee51b636f3afa5638403426c82c3e:
+    bytes.(*Buffer).ReadFrom$coro
+__llgo_coro_func_coro_v1.method.2f95704f57cb02d3.03b183a61ec5112a0c2ca62c6769aa13:
+    bytes.(*Buffer).Write$coro
+__llgo_coro_func_coro_v1.method.e88237c34bd43ab6.03b183a61ec5112a0c2ca62c6769aa13:
+    bytes.(*Buffer).Read$coro
+__llgo_coro_func_descriptor_v1.method-value.002ca78595a8148a.6afd34d6241fb65606dc9a9d15a73e47:
+    __llgo_coro_func_coro_v1.method-value.002ca78595a8148a.6afd34d6241fb65606dc9a9d15a73e47
+__llgo_coro_func_descriptor_v1.method-value.009a33007e719435.2a4fa100637dcb4dfb2d5d665546b84e:
+    __llgo_coro_func_coro_v1.method-value.009a33007e719435.2a4fa100637dcb4dfb2d5d665546b84e
+__llgo_coro_func_descriptor_v1.method-value.05a16653d13ac52a.d3475ecdb3eac2c801a7fb75439853ad:
+    __llgo_coro_func_coro_v1.method-value.05a16653d13ac52a.d3475ecdb3eac2c801a7fb75439853ad
+__llgo_coro_func_descriptor_v1.method-value.0fe6d624b8ac96ca.69caa4ca9362f12dd05180e21ed23aa5:
+    __llgo_coro_func_coro_v1.method-value.0fe6d624b8ac96ca.69caa4ca9362f12dd05180e21ed23aa5
+__llgo_coro_func_descriptor_v1.method-value.1d468b98ca283625.8bf9336ed72a6e1c127722c5490314f9:
+    __llgo_coro_func_coro_v1.method-value.1d468b98ca283625.8bf9336ed72a6e1c127722c5490314f9
+__llgo_coro_func_descriptor_v1.method-value.1e3245d035af12ba.1d0daf87902e73f534ddb11571ba7c7a:
+    __llgo_coro_func_coro_v1.method-value.1e3245d035af12ba.1d0daf87902e73f534ddb11571ba7c7a
+__llgo_coro_func_descriptor_v1.method-value.276370927fa84a5b.04198b8360c042a567460c04b9ba6eec:
+    __llgo_coro_func_coro_v1.method-value.276370927fa84a5b.04198b8360c042a567460c04b9ba6eec
+__llgo_coro_func_descriptor_v1.method-value.2dcb2d77b78d105e.7d758e4b6b9cc748b64e6f9c21847b9d:
+    __llgo_coro_func_coro_v1.method-value.2dcb2d77b78d105e.7d758e4b6b9cc748b64e6f9c21847b9d
+__llgo_coro_func_descriptor_v1.method-value.2f95704f57cb02d3.b9f72d2368a63a753610df10d16b7b32:
+    __llgo_coro_func_coro_v1.method-value.2f95704f57cb02d3.b9f72d2368a63a753610df10d16b7b32
+__llgo_coro_func_descriptor_v1.method-value.35bed44f17d83d96.6c4cfab5daa3f235a649982dd3e05fed:
+    __llgo_coro_func_coro_v1.method-value.35bed44f17d83d96.6c4cfab5daa3f235a649982dd3e05fed
+__llgo_coro_func_descriptor_v1.method-value.3a8ea487e6ae6dd3.6c4cfab5daa3f235a649982dd3e05fed:
+    __llgo_coro_func_coro_v1.method-value.3a8ea487e6ae6dd3.6c4cfab5daa3f235a649982dd3e05fed
+__llgo_coro_func_descriptor_v1.method-value.3e9cff5760cafc35.95d55d0e23c59dcc7c3dd1eb7ef8ef91:
+    __llgo_coro_func_coro_v1.method-value.3e9cff5760cafc35.95d55d0e23c59dcc7c3dd1eb7ef8ef91
+__llgo_coro_func_descriptor_v1.method-value.484e574e60e186ce.3b68e258fb6c8dcd408244e56cc33113:
+    __llgo_coro_func_coro_v1.method-value.484e574e60e186ce.3b68e258fb6c8dcd408244e56cc33113
+__llgo_coro_func_descriptor_v1.method-value.560de2ca4f0a270e.cb41ef48dd822a7de58ef76727105f47:
+    __llgo_coro_func_coro_v1.method-value.560de2ca4f0a270e.cb41ef48dd822a7de58ef76727105f47
+__llgo_coro_func_descriptor_v1.method-value.563dd53a6453a638.95d55d0e23c59dcc7c3dd1eb7ef8ef91:
+    __llgo_coro_func_coro_v1.method-value.563dd53a6453a638.95d55d0e23c59dcc7c3dd1eb7ef8ef91
+__llgo_coro_func_descriptor_v1.method-value.71be09a0c31a91f6.3b68e258fb6c8dcd408244e56cc33113:
+    __llgo_coro_func_coro_v1.method-value.71be09a0c31a91f6.3b68e258fb6c8dcd408244e56cc33113
+__llgo_coro_func_descriptor_v1.method-value.734906f1cb77d561.7ca93155c1e285094a85fb0a8bc7b35b:
+    __llgo_coro_func_coro_v1.method-value.734906f1cb77d561.7ca93155c1e285094a85fb0a8bc7b35b
+__llgo_coro_func_descriptor_v1.method-value.7dbfdd46526b8b4f.902853ef23ab83b4218246474433cd90:
+    __llgo_coro_func_coro_v1.method-value.7dbfdd46526b8b4f.902853ef23ab83b4218246474433cd90
+__llgo_coro_func_descriptor_v1.method-value.9937155120ec934c.3da7e2144b0818116753f833781e1c7e:
+    __llgo_coro_func_coro_v1.method-value.9937155120ec934c.3da7e2144b0818116753f833781e1c7e
+__llgo_coro_func_descriptor_v1.method-value.a17a13d4691913d6.6c4cfab5daa3f235a649982dd3e05fed:
+    __llgo_coro_func_coro_v1.method-value.a17a13d4691913d6.6c4cfab5daa3f235a649982dd3e05fed
+__llgo_coro_func_descriptor_v1.method-value.a381ee101ecfbfaa.ced60e836bada2be6d58da88f9921705:
+    __llgo_coro_func_coro_v1.method-value.a381ee101ecfbfaa.ced60e836bada2be6d58da88f9921705
+__llgo_coro_func_descriptor_v1.method-value.b22921ec46b3f96b.0d2a26e5b83ef86e4253f7ef46642530:
+    __llgo_coro_func_coro_v1.method-value.b22921ec46b3f96b.0d2a26e5b83ef86e4253f7ef46642530
+__llgo_coro_func_descriptor_v1.method-value.b805ca14fc6b5550.db3c3be2084447ed16fc17a636e0cd5b:
+    __llgo_coro_func_coro_v1.method-value.b805ca14fc6b5550.db3c3be2084447ed16fc17a636e0cd5b
+__llgo_coro_func_descriptor_v1.method-value.c62d44364aaab0ab.1d0daf87902e73f534ddb11571ba7c7a:
+    __llgo_coro_func_coro_v1.method-value.c62d44364aaab0ab.1d0daf87902e73f534ddb11571ba7c7a
+__llgo_coro_func_descriptor_v1.method-value.cf2b8cb3bbd7deda.50f6e952fab3257a3ab8d830e1c81107:
+    __llgo_coro_func_coro_v1.method-value.cf2b8cb3bbd7deda.50f6e952fab3257a3ab8d830e1c81107
+__llgo_coro_func_descriptor_v1.method-value.d86cebce478836a1.472f77a0cda4a6a6554070e03e5e10c7:
+    __llgo_coro_func_coro_v1.method-value.d86cebce478836a1.472f77a0cda4a6a6554070e03e5e10c7
+__llgo_coro_func_descriptor_v1.method-value.e88237c34bd43ab6.b9f72d2368a63a753610df10d16b7b32:
+    __llgo_coro_func_coro_v1.method-value.e88237c34bd43ab6.b9f72d2368a63a753610df10d16b7b32
+__llgo_coro_func_descriptor_v1.method-value.ee67a82fd736488e.cb41ef48dd822a7de58ef76727105f47:
+    __llgo_coro_func_coro_v1.method-value.ee67a82fd736488e.cb41ef48dd822a7de58ef76727105f47
+__llgo_coro_func_descriptor_v1.method.002ca78595a8148a.693d52254397bb10650e24062d192e89:
+    __llgo_coro_func_coro_v1.method.002ca78595a8148a.693d52254397bb10650e24062d192e89
+__llgo_coro_func_descriptor_v1.method.276370927fa84a5b.327ee51b636f3afa5638403426c82c3e:
+    __llgo_coro_func_coro_v1.method.276370927fa84a5b.327ee51b636f3afa5638403426c82c3e
+__llgo_coro_func_descriptor_v1.method.2f95704f57cb02d3.03b183a61ec5112a0c2ca62c6769aa13:
+    __llgo_coro_func_coro_v1.method.2f95704f57cb02d3.03b183a61ec5112a0c2ca62c6769aa13
+__llgo_coro_func_descriptor_v1.method.e88237c34bd43ab6.03b183a61ec5112a0c2ca62c6769aa13:
+    __llgo_coro_func_coro_v1.method.e88237c34bd43ab6.03b183a61ec5112a0c2ca62c6769aa13
+__llgo_coro_method_raw_trap_v1.231878b42d64d4baec9a383ce5735a59:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.a3d5c03284b006a6c875695d86512359:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.a6b612581aae291f4610c6a5aa8539e6:
+    llvm.trap
+__llgo_coro_method_raw_trap_v1.e0443b6e94b691a5a125bce785b5f2b4:
+    llvm.trap
+__llgo_coro_root_factory_descriptor_v1.0d627411dc9078404821003a96e96444:
+    __llgo_coro_root_factory_v1.0d627411dc9078404821003a96e96444
+__llgo_coro_root_factory_descriptor_v1.b5a3a94c213082b6a7ac87bea5641b40:
+    __llgo_coro_root_factory_v1.b5a3a94c213082b6a7ac87bea5641b40
+__llgo_coro_root_factory_v1.0d627411dc9078404821003a96e96444:
+    github.com/goplus/llgo/cl/_testmeta/methodinfo_imported.main$coro
+__llgo_coro_root_factory_v1.b5a3a94c213082b6a7ac87bea5641b40:
+    github.com/goplus/llgo/cl/_testmeta/methodinfo_imported.init$coro
+__llgo_coro_root_package_v1.ed5a45b226b064d95de16d3eb4ba2903:
+    __llgo_coro_root_package_v1.ed5a45b226b064d95de16d3eb4ba2903.entries
+__llgo_coro_root_package_v1.ed5a45b226b064d95de16d3eb4ba2903.entries:
+    __llgo_coro_root_factory_descriptor_v1.0d627411dc9078404821003a96e96444
+    __llgo_coro_root_factory_descriptor_v1.b5a3a94c213082b6a7ac87bea5641b40
+_llgo_bool:
+    *_llgo_bool
+    github.com/goplus/llgo/runtime/internal/runtime.memequal8
+_llgo_bytes.Buffer:
+    *_llgo_bytes.Buffer
+    bytes.struct$8M6lRFZ7Fk2XCr2laNI9Y7uQtk2A8VDBrezMuq2Fkuo$fields
+_llgo_bytes.readOp:
+    *_llgo_bytes.readOp
+    github.com/goplus/llgo/runtime/internal/runtime.memequal8
+_llgo_error:
+    *_llgo_error
+    _llgo_iface$Fh8eUJ-Gw4e6TYuajcFIOSCuqSPKAt5nS4ow7xeGXEU$imethods
+    github.com/goplus/llgo/runtime/internal/runtime.interequal
+_llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac:
+    *_llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac
+_llgo_func$8rsrSd_r3UHd_2DiYTyaOKR7BYkei4zw5ysG35KF38w:
+    *_llgo_func$8rsrSd_r3UHd_2DiYTyaOKR7BYkei4zw5ysG35KF38w
+    _llgo_func$8rsrSd_r3UHd_2DiYTyaOKR7BYkei4zw5ysG35KF38w$out
+_llgo_func$8rsrSd_r3UHd_2DiYTyaOKR7BYkei4zw5ysG35KF38w$out:
+    _llgo_error
+_llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA:
+    *_llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA
+    _llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA$out
+_llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA$out:
+    _llgo_int
+_llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk:
+    *_llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk
+    _llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk$in
+    _llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk$out
+_llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk$in:
+    []_llgo_uint8
+_llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk$out:
+    _llgo_error
+    _llgo_int
+_llgo_func$TBlCn7YTQdraI1HMiBWmkrqIGG-8UgD1UVyJy62Z_0o:
+    *_llgo_func$TBlCn7YTQdraI1HMiBWmkrqIGG-8UgD1UVyJy62Z_0o
+    _llgo_func$TBlCn7YTQdraI1HMiBWmkrqIGG-8UgD1UVyJy62Z_0o$in
+    _llgo_func$TBlCn7YTQdraI1HMiBWmkrqIGG-8UgD1UVyJy62Z_0o$out
+_llgo_func$TBlCn7YTQdraI1HMiBWmkrqIGG-8UgD1UVyJy62Z_0o$in:
+    _llgo_uint8
+_llgo_func$TBlCn7YTQdraI1HMiBWmkrqIGG-8UgD1UVyJy62Z_0o$out:
+    _llgo_error
+    _llgo_string
+_llgo_func$VZ-8VPNF1RaLICwxc1Ghn7BbgyFX3v762OCdx127EkA:
+    *_llgo_func$VZ-8VPNF1RaLICwxc1Ghn7BbgyFX3v762OCdx127EkA
+    _llgo_func$VZ-8VPNF1RaLICwxc1Ghn7BbgyFX3v762OCdx127EkA$in
+_llgo_func$VZ-8VPNF1RaLICwxc1Ghn7BbgyFX3v762OCdx127EkA$in:
+    _llgo_int
+_llgo_func$YHeRw3AOvQtzv982-ZO3Yn8vh3Fx89RM3VvI8E4iKVk:
+    *_llgo_func$YHeRw3AOvQtzv982-ZO3Yn8vh3Fx89RM3VvI8E4iKVk
+    _llgo_func$YHeRw3AOvQtzv982-ZO3Yn8vh3Fx89RM3VvI8E4iKVk$out
+_llgo_func$YHeRw3AOvQtzv982-ZO3Yn8vh3Fx89RM3VvI8E4iKVk$out:
+    _llgo_bool
+_llgo_func$Z_-7GWzB37LCYRTQLsSYmEihg_hqBK8o_GbT88pqnPY:
+    *_llgo_func$Z_-7GWzB37LCYRTQLsSYmEihg_hqBK8o_GbT88pqnPY
+    _llgo_func$Z_-7GWzB37LCYRTQLsSYmEihg_hqBK8o_GbT88pqnPY$out
+_llgo_func$Z_-7GWzB37LCYRTQLsSYmEihg_hqBK8o_GbT88pqnPY$out:
+    []_llgo_uint8
+_llgo_func$aJkaU3jhXr0Q2QraTe2_TTdupeMMW2MD66UwBxynRM0:
+    *_llgo_func$aJkaU3jhXr0Q2QraTe2_TTdupeMMW2MD66UwBxynRM0
+    _llgo_func$aJkaU3jhXr0Q2QraTe2_TTdupeMMW2MD66UwBxynRM0$in
+    _llgo_func$aJkaU3jhXr0Q2QraTe2_TTdupeMMW2MD66UwBxynRM0$out
+_llgo_func$aJkaU3jhXr0Q2QraTe2_TTdupeMMW2MD66UwBxynRM0$in:
+    _llgo_uint8
+_llgo_func$aJkaU3jhXr0Q2QraTe2_TTdupeMMW2MD66UwBxynRM0$out:
+    []_llgo_uint8
+    _llgo_error
+_llgo_func$c8Vvy7bpifdsF4PDKWnpU2KNuhLPRr7XBIDM-4p45sQ:
+    *_llgo_func$c8Vvy7bpifdsF4PDKWnpU2KNuhLPRr7XBIDM-4p45sQ
+    _llgo_func$c8Vvy7bpifdsF4PDKWnpU2KNuhLPRr7XBIDM-4p45sQ$in
+    _llgo_func$c8Vvy7bpifdsF4PDKWnpU2KNuhLPRr7XBIDM-4p45sQ$out
+_llgo_func$c8Vvy7bpifdsF4PDKWnpU2KNuhLPRr7XBIDM-4p45sQ$in:
+    _llgo_int
+_llgo_func$c8Vvy7bpifdsF4PDKWnpU2KNuhLPRr7XBIDM-4p45sQ$out:
+    []_llgo_uint8
+    _llgo_error
+_llgo_func$d4kMA_oCkLwnd1j8nVlv1hwRarEVuCIrDCpnHhDz9UY:
+    *_llgo_func$d4kMA_oCkLwnd1j8nVlv1hwRarEVuCIrDCpnHhDz9UY
+    _llgo_func$d4kMA_oCkLwnd1j8nVlv1hwRarEVuCIrDCpnHhDz9UY$in
+    _llgo_func$d4kMA_oCkLwnd1j8nVlv1hwRarEVuCIrDCpnHhDz9UY$out
+_llgo_func$d4kMA_oCkLwnd1j8nVlv1hwRarEVuCIrDCpnHhDz9UY$in:
+    _llgo_int
+_llgo_func$d4kMA_oCkLwnd1j8nVlv1hwRarEVuCIrDCpnHhDz9UY$out:
+    []_llgo_uint8
+_llgo_func$ekGNsrYBSzltfAjxbl6T8H6Yq8j16wzqS3nDj2xxGMU:
+    *_llgo_func$ekGNsrYBSzltfAjxbl6T8H6Yq8j16wzqS3nDj2xxGMU
+    _llgo_func$ekGNsrYBSzltfAjxbl6T8H6Yq8j16wzqS3nDj2xxGMU$in
+    _llgo_func$ekGNsrYBSzltfAjxbl6T8H6Yq8j16wzqS3nDj2xxGMU$out
+_llgo_func$ekGNsrYBSzltfAjxbl6T8H6Yq8j16wzqS3nDj2xxGMU$in:
+    _llgo_int
+_llgo_func$ekGNsrYBSzltfAjxbl6T8H6Yq8j16wzqS3nDj2xxGMU$out:
+    _llgo_int
+_llgo_func$lukqSsfDYBoIp_R8GMojGkZnrYDqaq2iHn8RkCjW7iQ:
+    *_llgo_func$lukqSsfDYBoIp_R8GMojGkZnrYDqaq2iHn8RkCjW7iQ
+    _llgo_func$lukqSsfDYBoIp_R8GMojGkZnrYDqaq2iHn8RkCjW7iQ$out
+_llgo_func$lukqSsfDYBoIp_R8GMojGkZnrYDqaq2iHn8RkCjW7iQ$out:
+    _llgo_error
+    _llgo_uint8
+_llgo_func$q-bw-_pPYBCXnr1TXIF8sOD4fVVzzIlpHqD-A13AB4Y:
+    *_llgo_func$q-bw-_pPYBCXnr1TXIF8sOD4fVVzzIlpHqD-A13AB4Y
+    _llgo_func$q-bw-_pPYBCXnr1TXIF8sOD4fVVzzIlpHqD-A13AB4Y$out
+_llgo_func$q-bw-_pPYBCXnr1TXIF8sOD4fVVzzIlpHqD-A13AB4Y$out:
+    _llgo_error
+    _llgo_int
+    _llgo_int32
+_llgo_func$qVJ5SH6qhXP_h0AM41vpBGzQEMp-fQIfvwQEJy5NI8M:
+    *_llgo_func$qVJ5SH6qhXP_h0AM41vpBGzQEMp-fQIfvwQEJy5NI8M
+    _llgo_func$qVJ5SH6qhXP_h0AM41vpBGzQEMp-fQIfvwQEJy5NI8M$in
+    _llgo_func$qVJ5SH6qhXP_h0AM41vpBGzQEMp-fQIfvwQEJy5NI8M$out
+_llgo_func$qVJ5SH6qhXP_h0AM41vpBGzQEMp-fQIfvwQEJy5NI8M$in:
+    _llgo_int
+_llgo_func$qVJ5SH6qhXP_h0AM41vpBGzQEMp-fQIfvwQEJy5NI8M$out:
+    _llgo_bool
+    _llgo_int
+_llgo_func$thH5FBpdXzJNnCpSfiLU5ItTntFU6LWp0RJhDm2XJjw:
+    *_llgo_func$thH5FBpdXzJNnCpSfiLU5ItTntFU6LWp0RJhDm2XJjw
+    _llgo_func$thH5FBpdXzJNnCpSfiLU5ItTntFU6LWp0RJhDm2XJjw$in
+    _llgo_func$thH5FBpdXzJNnCpSfiLU5ItTntFU6LWp0RJhDm2XJjw$out
+_llgo_func$thH5FBpdXzJNnCpSfiLU5ItTntFU6LWp0RJhDm2XJjw$in:
+    _llgo_string
+_llgo_func$thH5FBpdXzJNnCpSfiLU5ItTntFU6LWp0RJhDm2XJjw$out:
+    _llgo_error
+    _llgo_int
+_llgo_func$uVmBDI0DMcrui3Q9y-g_hbtVN8JckQ18V2wmO5_G7A8:
+    *_llgo_func$uVmBDI0DMcrui3Q9y-g_hbtVN8JckQ18V2wmO5_G7A8
+    _llgo_func$uVmBDI0DMcrui3Q9y-g_hbtVN8JckQ18V2wmO5_G7A8$in
+    _llgo_func$uVmBDI0DMcrui3Q9y-g_hbtVN8JckQ18V2wmO5_G7A8$out
+_llgo_func$uVmBDI0DMcrui3Q9y-g_hbtVN8JckQ18V2wmO5_G7A8$in:
+    _llgo_io.Reader
+_llgo_func$uVmBDI0DMcrui3Q9y-g_hbtVN8JckQ18V2wmO5_G7A8$out:
+    _llgo_error
+    _llgo_int64
+_llgo_func$uf8yw1UkUdbDuCneSpNKIq_NThWIEVE7f1IYfJGz_bw:
+    *_llgo_func$uf8yw1UkUdbDuCneSpNKIq_NThWIEVE7f1IYfJGz_bw
+    _llgo_func$uf8yw1UkUdbDuCneSpNKIq_NThWIEVE7f1IYfJGz_bw$in
+    _llgo_func$uf8yw1UkUdbDuCneSpNKIq_NThWIEVE7f1IYfJGz_bw$out
+_llgo_func$uf8yw1UkUdbDuCneSpNKIq_NThWIEVE7f1IYfJGz_bw$in:
+    _llgo_int32
+_llgo_func$uf8yw1UkUdbDuCneSpNKIq_NThWIEVE7f1IYfJGz_bw$out:
+    _llgo_error
+    _llgo_int
+_llgo_func$vSv85k0UY6JWccAc3T-lvdCx9J-4GM-oZC9zGLrxW1M:
+    *_llgo_func$vSv85k0UY6JWccAc3T-lvdCx9J-4GM-oZC9zGLrxW1M
+    _llgo_func$vSv85k0UY6JWccAc3T-lvdCx9J-4GM-oZC9zGLrxW1M$in
+    _llgo_func$vSv85k0UY6JWccAc3T-lvdCx9J-4GM-oZC9zGLrxW1M$out
+_llgo_func$vSv85k0UY6JWccAc3T-lvdCx9J-4GM-oZC9zGLrxW1M$in:
+    _llgo_io.Writer
+_llgo_func$vSv85k0UY6JWccAc3T-lvdCx9J-4GM-oZC9zGLrxW1M$out:
+    _llgo_error
+    _llgo_int64
+_llgo_func$w4tN9iibS_UimF5vLUWoKP0uAk2tJZF26VqETo_8LVg:
+    *_llgo_func$w4tN9iibS_UimF5vLUWoKP0uAk2tJZF26VqETo_8LVg
+    _llgo_func$w4tN9iibS_UimF5vLUWoKP0uAk2tJZF26VqETo_8LVg$in
+    _llgo_func$w4tN9iibS_UimF5vLUWoKP0uAk2tJZF26VqETo_8LVg$out
+_llgo_func$w4tN9iibS_UimF5vLUWoKP0uAk2tJZF26VqETo_8LVg$in:
+    _llgo_uint8
+_llgo_func$w4tN9iibS_UimF5vLUWoKP0uAk2tJZF26VqETo_8LVg$out:
+    _llgo_error
+_llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to:
+    *_llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to
+    _llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to$out
+_llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to$out:
+    _llgo_string
+_llgo_iface$Fh8eUJ-Gw4e6TYuajcFIOSCuqSPKAt5nS4ow7xeGXEU$imethods:
+    _llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to
+_llgo_iface$kr1iSWwMezh0B9LdQN0MhEZUNZvBlHPhlst95jAyxE0$imethods:
+    _llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk
+_llgo_iface$uycIKA3bbxRhudEjW1hHKWKdLqHQsCVy8NdW1bkQmNw:
+    *_llgo_iface$uycIKA3bbxRhudEjW1hHKWKdLqHQsCVy8NdW1bkQmNw
+    _llgo_iface$uycIKA3bbxRhudEjW1hHKWKdLqHQsCVy8NdW1bkQmNw$imethods
+    github.com/goplus/llgo/runtime/internal/runtime.interequal
+_llgo_iface$uycIKA3bbxRhudEjW1hHKWKdLqHQsCVy8NdW1bkQmNw$imethods:
+    _llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk
+_llgo_int:
+    *_llgo_int
+    github.com/goplus/llgo/runtime/internal/runtime.memequal64
+_llgo_int32:
+    *_llgo_int32
+    github.com/goplus/llgo/runtime/internal/runtime.memequal32
+_llgo_int64:
+    *_llgo_int64
+    github.com/goplus/llgo/runtime/internal/runtime.memequal64
+_llgo_io.Reader:
+    *_llgo_io.Reader
+    _llgo_iface$uycIKA3bbxRhudEjW1hHKWKdLqHQsCVy8NdW1bkQmNw$imethods
+    github.com/goplus/llgo/runtime/internal/runtime.interequal
+_llgo_io.Writer:
+    *_llgo_io.Writer
+    _llgo_iface$kr1iSWwMezh0B9LdQN0MhEZUNZvBlHPhlst95jAyxE0$imethods
+    github.com/goplus/llgo/runtime/internal/runtime.interequal
+_llgo_string:
+    *_llgo_string
+    github.com/goplus/llgo/runtime/internal/runtime.strequal
+_llgo_uint8:
+    *_llgo_uint8
+    github.com/goplus/llgo/runtime/internal/runtime.memequal8
+bytes.struct$8M6lRFZ7Fk2XCr2laNI9Y7uQtk2A8VDBrezMuq2Fkuo$fields:
+    []_llgo_uint8
+    _llgo_bytes.readOp
+    _llgo_int
+github.com/goplus/llgo/cl/_testmeta/methodinfo_imported.init$coro:
+    __llgo_coro_await_consume_v1
+    __llgo_coro_await_prepare_v3
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.b5a3a94c213082b6a7ac87bea5641b40
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_panic_prepare_v1
+    __llgo_coro_run_decision_take_zero_v1
+    bytes.init$coro
+    github.com/goplus/llgo/cl/_testmeta/methodinfo_imported.init$guard
+    io.init$coro
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.promise
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.trap
+github.com/goplus/llgo/cl/_testmeta/methodinfo_imported.main$coro:
+    *_llgo_bytes.Buffer
+    __llgo_coro_await_consume_v1
+    __llgo_coro_await_prepare_v3
+    __llgo_coro_complete_prepare_v2
+    __llgo_coro_fault_prepare_v1
+    __llgo_coro_frame_alloc_v1
+    __llgo_coro_frame_descriptor_v1.0d627411dc9078404821003a96e96444
+    __llgo_coro_frame_free_v1
+    __llgo_coro_frame_publish_v1
+    __llgo_coro_panic_prepare_v1
+    __llgo_coro_run_decision_take_zero_v1
+    _llgo_iface$uycIKA3bbxRhudEjW1hHKWKdLqHQsCVy8NdW1bkQmNw
+    bytes.NewBuffer$coro
+    github.com/goplus/llgo/runtime/internal/runtime.IfacePtrData$coro
+    github.com/goplus/llgo/runtime/internal/runtime.NewItab$coro
+    llvm.coro.align.i64
+    llvm.coro.alloc
+    llvm.coro.begin
+    llvm.coro.end
+    llvm.coro.free
+    llvm.coro.id
+    llvm.coro.promise
+    llvm.coro.size.i64
+    llvm.coro.suspend
+    llvm.fake.use
+    llvm.memset.p0.i64
+    llvm.trap
+llvm.used:
+    __llgo_coro_root_factory_descriptor_v1.0d627411dc9078404821003a96e96444
+    __llgo_coro_root_factory_descriptor_v1.b5a3a94c213082b6a7ac87bea5641b40
+    __llgo_coro_root_package_v1.ed5a45b226b064d95de16d3eb4ba2903
+
+[UseIface]
+github.com/goplus/llgo/cl/_testmeta/methodinfo_imported.main$coro:
+    *_llgo_bytes.Buffer
+
+[UseIfaceMethod]
+github.com/goplus/llgo/cl/_testmeta/methodinfo_imported.main$coro:
+    _llgo_iface$uycIKA3bbxRhudEjW1hHKWKdLqHQsCVy8NdW1bkQmNw Read _llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk
+
+[MethodInfo]
+*_llgo_bytes.Buffer:
+    0 Available _llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA __llgo_coro_func_descriptor_v1.method-value.35bed44f17d83d96.6c4cfab5daa3f235a649982dd3e05fed __llgo_coro_func_descriptor_v1.method-value.35bed44f17d83d96.6c4cfab5daa3f235a649982dd3e05fed
+    1 AvailableBuffer _llgo_func$Z_-7GWzB37LCYRTQLsSYmEihg_hqBK8o_GbT88pqnPY __llgo_coro_func_descriptor_v1.method-value.560de2ca4f0a270e.cb41ef48dd822a7de58ef76727105f47 __llgo_coro_func_descriptor_v1.method-value.560de2ca4f0a270e.cb41ef48dd822a7de58ef76727105f47
+    2 Bytes _llgo_func$Z_-7GWzB37LCYRTQLsSYmEihg_hqBK8o_GbT88pqnPY __llgo_coro_func_descriptor_v1.method-value.ee67a82fd736488e.cb41ef48dd822a7de58ef76727105f47 __llgo_coro_func_descriptor_v1.method-value.ee67a82fd736488e.cb41ef48dd822a7de58ef76727105f47
+    3 Cap _llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA __llgo_coro_func_descriptor_v1.method-value.a17a13d4691913d6.6c4cfab5daa3f235a649982dd3e05fed __llgo_coro_func_descriptor_v1.method-value.a17a13d4691913d6.6c4cfab5daa3f235a649982dd3e05fed
+    4 Grow _llgo_func$VZ-8VPNF1RaLICwxc1Ghn7BbgyFX3v762OCdx127EkA __llgo_coro_func_descriptor_v1.method-value.3e9cff5760cafc35.95d55d0e23c59dcc7c3dd1eb7ef8ef91 __llgo_coro_func_descriptor_v1.method-value.3e9cff5760cafc35.95d55d0e23c59dcc7c3dd1eb7ef8ef91
+    5 Len _llgo_func$ETeB8WwW04JEq0ztcm-XPTJtuYvtpkjIsAc0-2NT9zA __llgo_coro_func_descriptor_v1.method-value.3a8ea487e6ae6dd3.6c4cfab5daa3f235a649982dd3e05fed __llgo_coro_func_descriptor_v1.method-value.3a8ea487e6ae6dd3.6c4cfab5daa3f235a649982dd3e05fed
+    6 Next _llgo_func$d4kMA_oCkLwnd1j8nVlv1hwRarEVuCIrDCpnHhDz9UY __llgo_coro_func_descriptor_v1.method-value.9937155120ec934c.3da7e2144b0818116753f833781e1c7e __llgo_coro_func_descriptor_v1.method-value.9937155120ec934c.3da7e2144b0818116753f833781e1c7e
+    7 Peek _llgo_func$c8Vvy7bpifdsF4PDKWnpU2KNuhLPRr7XBIDM-4p45sQ __llgo_coro_func_descriptor_v1.method-value.05a16653d13ac52a.d3475ecdb3eac2c801a7fb75439853ad __llgo_coro_func_descriptor_v1.method-value.05a16653d13ac52a.d3475ecdb3eac2c801a7fb75439853ad
+    8 Read _llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk __llgo_coro_func_descriptor_v1.method.e88237c34bd43ab6.03b183a61ec5112a0c2ca62c6769aa13 __llgo_coro_func_descriptor_v1.method-value.e88237c34bd43ab6.b9f72d2368a63a753610df10d16b7b32
+    9 ReadByte _llgo_func$lukqSsfDYBoIp_R8GMojGkZnrYDqaq2iHn8RkCjW7iQ __llgo_coro_func_descriptor_v1.method-value.1d468b98ca283625.8bf9336ed72a6e1c127722c5490314f9 __llgo_coro_func_descriptor_v1.method-value.1d468b98ca283625.8bf9336ed72a6e1c127722c5490314f9
+    10 ReadBytes _llgo_func$aJkaU3jhXr0Q2QraTe2_TTdupeMMW2MD66UwBxynRM0 __llgo_coro_func_descriptor_v1.method-value.1e3245d035af12ba.1d0daf87902e73f534ddb11571ba7c7a __llgo_coro_func_descriptor_v1.method-value.1e3245d035af12ba.1d0daf87902e73f534ddb11571ba7c7a
+    11 ReadFrom _llgo_func$uVmBDI0DMcrui3Q9y-g_hbtVN8JckQ18V2wmO5_G7A8 __llgo_coro_func_descriptor_v1.method.276370927fa84a5b.327ee51b636f3afa5638403426c82c3e __llgo_coro_func_descriptor_v1.method-value.276370927fa84a5b.04198b8360c042a567460c04b9ba6eec
+    12 ReadRune _llgo_func$q-bw-_pPYBCXnr1TXIF8sOD4fVVzzIlpHqD-A13AB4Y __llgo_coro_func_descriptor_v1.method-value.cf2b8cb3bbd7deda.50f6e952fab3257a3ab8d830e1c81107 __llgo_coro_func_descriptor_v1.method-value.cf2b8cb3bbd7deda.50f6e952fab3257a3ab8d830e1c81107
+    13 ReadString _llgo_func$TBlCn7YTQdraI1HMiBWmkrqIGG-8UgD1UVyJy62Z_0o __llgo_coro_func_descriptor_v1.method-value.b805ca14fc6b5550.db3c3be2084447ed16fc17a636e0cd5b __llgo_coro_func_descriptor_v1.method-value.b805ca14fc6b5550.db3c3be2084447ed16fc17a636e0cd5b
+    14 Reset _llgo_func$2_iS07vIlF2_rZqWB5eU0IvP_9HviM4MYZNkXZDvbac __llgo_coro_func_descriptor_v1.method-value.009a33007e719435.2a4fa100637dcb4dfb2d5d665546b84e __llgo_coro_func_descriptor_v1.method-value.009a33007e719435.2a4fa100637dcb4dfb2d5d665546b84e
+    15 String _llgo_func$zNDVRsWTIpUPKouNUS805RGX--IV9qVK8B31IZbg5to __llgo_coro_func_descriptor_v1.method-value.2dcb2d77b78d105e.7d758e4b6b9cc748b64e6f9c21847b9d __llgo_coro_func_descriptor_v1.method-value.2dcb2d77b78d105e.7d758e4b6b9cc748b64e6f9c21847b9d
+    16 Truncate _llgo_func$VZ-8VPNF1RaLICwxc1Ghn7BbgyFX3v762OCdx127EkA __llgo_coro_func_descriptor_v1.method-value.563dd53a6453a638.95d55d0e23c59dcc7c3dd1eb7ef8ef91 __llgo_coro_func_descriptor_v1.method-value.563dd53a6453a638.95d55d0e23c59dcc7c3dd1eb7ef8ef91
+    17 UnreadByte _llgo_func$8rsrSd_r3UHd_2DiYTyaOKR7BYkei4zw5ysG35KF38w __llgo_coro_func_descriptor_v1.method-value.484e574e60e186ce.3b68e258fb6c8dcd408244e56cc33113 __llgo_coro_func_descriptor_v1.method-value.484e574e60e186ce.3b68e258fb6c8dcd408244e56cc33113
+    18 UnreadRune _llgo_func$8rsrSd_r3UHd_2DiYTyaOKR7BYkei4zw5ysG35KF38w __llgo_coro_func_descriptor_v1.method-value.71be09a0c31a91f6.3b68e258fb6c8dcd408244e56cc33113 __llgo_coro_func_descriptor_v1.method-value.71be09a0c31a91f6.3b68e258fb6c8dcd408244e56cc33113
+    19 Write _llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk __llgo_coro_func_descriptor_v1.method.2f95704f57cb02d3.03b183a61ec5112a0c2ca62c6769aa13 __llgo_coro_func_descriptor_v1.method-value.2f95704f57cb02d3.b9f72d2368a63a753610df10d16b7b32
+    20 WriteByte _llgo_func$w4tN9iibS_UimF5vLUWoKP0uAk2tJZF26VqETo_8LVg __llgo_coro_func_descriptor_v1.method-value.0fe6d624b8ac96ca.69caa4ca9362f12dd05180e21ed23aa5 __llgo_coro_func_descriptor_v1.method-value.0fe6d624b8ac96ca.69caa4ca9362f12dd05180e21ed23aa5
+    21 WriteRune _llgo_func$uf8yw1UkUdbDuCneSpNKIq_NThWIEVE7f1IYfJGz_bw __llgo_coro_func_descriptor_v1.method-value.b22921ec46b3f96b.0d2a26e5b83ef86e4253f7ef46642530 __llgo_coro_func_descriptor_v1.method-value.b22921ec46b3f96b.0d2a26e5b83ef86e4253f7ef46642530
+    22 WriteString _llgo_func$thH5FBpdXzJNnCpSfiLU5ItTntFU6LWp0RJhDm2XJjw __llgo_coro_func_descriptor_v1.method-value.d86cebce478836a1.472f77a0cda4a6a6554070e03e5e10c7 __llgo_coro_func_descriptor_v1.method-value.d86cebce478836a1.472f77a0cda4a6a6554070e03e5e10c7
+    23 WriteTo _llgo_func$vSv85k0UY6JWccAc3T-lvdCx9J-4GM-oZC9zGLrxW1M __llgo_coro_func_descriptor_v1.method.002ca78595a8148a.693d52254397bb10650e24062d192e89 __llgo_coro_func_descriptor_v1.method-value.002ca78595a8148a.6afd34d6241fb65606dc9a9d15a73e47
+    24 bytes.empty _llgo_func$YHeRw3AOvQtzv982-ZO3Yn8vh3Fx89RM3VvI8E4iKVk __llgo_coro_func_descriptor_v1.method-value.7dbfdd46526b8b4f.902853ef23ab83b4218246474433cd90 __llgo_coro_func_descriptor_v1.method-value.7dbfdd46526b8b4f.902853ef23ab83b4218246474433cd90
+    25 bytes.grow _llgo_func$ekGNsrYBSzltfAjxbl6T8H6Yq8j16wzqS3nDj2xxGMU __llgo_coro_func_descriptor_v1.method-value.734906f1cb77d561.7ca93155c1e285094a85fb0a8bc7b35b __llgo_coro_func_descriptor_v1.method-value.734906f1cb77d561.7ca93155c1e285094a85fb0a8bc7b35b
+    26 bytes.readSlice _llgo_func$aJkaU3jhXr0Q2QraTe2_TTdupeMMW2MD66UwBxynRM0 __llgo_coro_func_descriptor_v1.method-value.c62d44364aaab0ab.1d0daf87902e73f534ddb11571ba7c7a __llgo_coro_func_descriptor_v1.method-value.c62d44364aaab0ab.1d0daf87902e73f534ddb11571ba7c7a
+    27 bytes.tryGrowByReslice _llgo_func$qVJ5SH6qhXP_h0AM41vpBGzQEMp-fQIfvwQEJy5NI8M __llgo_coro_func_descriptor_v1.method-value.a381ee101ecfbfaa.ced60e836bada2be6d58da88f9921705 __llgo_coro_func_descriptor_v1.method-value.a381ee101ecfbfaa.ced60e836bada2be6d58da88f9921705
+
+[InterfaceInfo]
+_llgo_iface$uycIKA3bbxRhudEjW1hHKWKdLqHQsCVy8NdW1bkQmNw:
+    Read _llgo_func$G2hch9Iy9DrhKKsg70PbL54bK-XSl-1IUUORN17J2Dk
+

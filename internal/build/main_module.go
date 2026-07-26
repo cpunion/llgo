@@ -84,16 +84,6 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 		LPkg: mainPkg,
 	}
 
-	if ctx.buildConf.BuildMode != BuildModeExe {
-		if cfg.rtInit {
-			defineLibraryRuntimeInit(mainPkg, declareNoArgFunc(mainPkg, rtPkgPath+".init"))
-		}
-		return mainAPkg
-	}
-
-	if cfg.coroBootstrap == nil || cfg.coroBootstrap.Version != coroProgramBootstrapVersionV2 {
-		panic("stackless coroutine entry requires the unique V2 startup table")
-	}
 	var runtimeStub llssa.Function
 	var mainInit, mainMain llssa.Function
 
@@ -105,7 +95,6 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 	}
 
 	var rtInit llssa.Function
-
 	var abiInit llssa.Function
 	if cfg.abiInit != 0 {
 		abiInit = mainPkg.InitAbiTypesFor("init$abitypes", func(sym *llssa.AbiSymbol) bool {
@@ -115,6 +104,23 @@ func genMainModule(ctx *context, rtPkgPath string, pkg *packages.Package, cfg *g
 			return filterAbiSymbol(cfg.abiInit, sym)
 		})
 	}
+
+	if ctx.buildConf.BuildMode != BuildModeExe {
+		runtimeStub = defineWeakNoArgStub(mainPkg, "runtime.init")
+		// TODO(lijie): workaround for syscall patch
+		defineWeakNoArgStub(mainPkg, "syscall.init")
+		if cfg.rtInit {
+			rtInit = declareNoArgFunc(mainPkg, rtPkgPath+".init")
+		}
+		mainInit = declareNoArgFunc(mainPkg, pkg.PkgPath+".init")
+		defineLibraryRuntimeInit(mainPkg, pyInit, rtInit, abiInit, runtimeStub, mainInit)
+		return mainAPkg
+	}
+
+	if cfg.coroBootstrap == nil || cfg.coroBootstrap.Version != coroProgramBootstrapVersionV2 {
+		panic("stackless coroutine entry requires the unique V2 startup table")
+	}
+
 	// The v2 table always contains the compiler ABI-init stage. Targets with no
 	// selected ABI symbols still define the exact target as a bounded no-op so
 	// the five-stage program never relies on an optional external symbol.
@@ -374,13 +380,17 @@ func lowerCoroControlWrappers(ctx *context, pkg llssa.Package) error {
 // before a C program calls an exported Go function. llvm.global_ctors is
 // lowered to the platform's native constructor mechanism for both shared
 // libraries and archive members.
-func defineLibraryRuntimeInit(pkg llssa.Package, rtInit llssa.Function) {
+func defineLibraryRuntimeInit(pkg llssa.Package, inits ...llssa.Function) {
 	const ctorName = "__llgo_runtime_ctor"
 	ctor := pkg.NewFunc(ctorName, llssa.NoArgsNoRet, llssa.InC)
 	ctorValue := pkg.Module().NamedFunction(ctorName)
 	ctorValue.SetLinkage(llvm.InternalLinkage)
 	b := ctor.MakeBody(1)
-	b.Call(rtInit.Expr)
+	for _, init := range inits {
+		if init != nil {
+			b.Call(init.Expr)
+		}
+	}
 	b.Return()
 
 	mod := pkg.Module()
