@@ -4,12 +4,13 @@
 
 更新：2026-07-26
 
-当前审查基线：`cpunion/llgo:llvm-coro` @ `3071990b6`
+当前审查基线：`cpunion/llgo:llvm-coro` @ `b3d02bc49`
 
 集成状态：Phase 36 hard-cutover、P-neutral result materialization 与 demand-driven
 work sharing、native 固定有界物理 topology、动态 managed-execution quota 和标准
 `runtime.GOMAXPROCS` 接口已合并；同M阻塞的第一阶段配额补偿已实现，完整P/source
-handoff仍在收敛
+handoff的generation-bound ownership baton已实现，active resume detach/restore与native
+replacement M接线仍在收敛
 
 关联提案：[Issue #1546](https://github.com/xgo-dev/llgo/issues/1546)
 
@@ -887,6 +888,46 @@ Native 上 M 是 pthread，P 数量通常受 GOMAXPROCS 控制。JS/WASM、单�
 
 这里的结构只表达ownership，不冻结字段排列。V2等待由稳定G内嵌的`ParkState`、直接park frame拥有的`WaitSetRecord`和source-owned `OperationRecord/ParkLink`共同表示；旧`parkGeneration + wakePending`只属于legacy单等待迁移层，不能继续作为channel、select、timer或I/O的新契约。
 
+#### Execution-domain handoff
+
+`LockOSThread`绑定的是G到物理M，不是把P永久绑定到同一M。一个thread-affine foreign call
+不可避免地阻塞locked M时，active LLVM frame和本次native调用栈仍留在locked M；P、driver、
+ready queue和source catalog则由replacement M临时服务。这个边界不能复用普通runnable
+transfer：被阻塞G仍是`Running/FrameActive`，既不是可迁移runnable，也没有产生park result。
+
+target-neutral `ExecutionDomainHandoff`为此冻结一个8-byte、无指针baton。handle只包含
+`{generation, ownerEpoch}`，状态转换为：
+
+```text
+Idle
+  -> Publishing -> Released
+       Released -- Claim --> Claimed -- RequestReturn --> ReturnRequested
+       Released -- RequestReturn ------------------------> Returned
+       ReturnRequested -- FinishReturn ------------------> Returned
+       Returned -> Completing -> Idle
+       Idle -> Retired
+```
+
+- `Publishing`在发布epoch前先独占下一generation，claimant不能观察半发布handle；
+- `Claim`与`RequestReturn`在线性化的同一32-bit状态字上竞争。未claim的release可直接撤回；
+  已claim的replacement必须在不再接触任何P/driver/source字段的稳定边界执行`FinishReturn`；
+- `Completing`先清除owner epoch再发布`Idle`，复制或延迟的complete不能跨reuse污染下一次调用；
+- generation耗尽永久`Retired`，不允许ABA回绕；
+- gate归属物理M/execution-domain slot，而不是P route；不包含G、P、driver、handle pointer或
+  callback。Native pthread、RTOS task、host realm与baremetal core按稳定M/domain slot找到
+  gate，再携带POD handle；
+- replacement M若再次进入thread-affine blocking call，使用自己的gate把同一P继续交给下一
+  replacement。由此多个blocked M可形成受`maxThreads`约束的链，而不是让一个P只能保存一个
+  detached resume；每个blocked active resume仍只由其M上的显式record保根；
+- doorbell、等待和replacement容量属于target adapter。core不自旋、不创建线程，也不引入
+  第二套scheduler。
+
+该baton只解决跨物理owner的独占与归还。Native接线还必须在原owner上原子保存
+`P.current/inResume/action/runDecisionTaken/servicePreemptBudget`与`driver.run.issued`，清出可服务
+的稳定P；replacement只能运行现有bounded reducer，return后再原样恢复blocked G的resume
+episode。任何只释放managed-execution quota而未完成这一步的实现都不能宣称同P source
+handoff已经完成。
+
 ### 11.2 G 状态机
 
     New -> Runnable -> Running -> Dispatching
@@ -1115,6 +1156,11 @@ Runtime 提供 nesting counter：
 - Locked G park时，其M释放P并等待该G，不执行其他G；scheduler可唤醒replacement M保持P的并行度。
 - Locked G ready后唤醒对应M，由该M重新获取P再resume。
 - UnlockOSThread 清除绑定后，G 可在下一 safepoint 迁移。
+
+当前production路径已经在同M foreign call前后释放/重获process managed-execution quota，
+因此其他route在`GOMAXPROCS=1`时仍可运行；上述`ExecutionDomainHandoff`也已覆盖
+generation、claim/return竞态和retire。但blocked active resume的P字段detach/restore以及
+replacement M对同一P/source的实际驱动尚未接线，二者必须完成后才是这里定义的完整语义。
 
 Full语义要求locked G使用固定M，且该M在G park/preempt期间不运行其他G；因此还需要replacement M维持其他P进展。单M JS/WASM、WASI和baremetal不能同时满足“该线程不运行其他G”和“locked G park时其他G继续”：
 
