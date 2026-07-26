@@ -40,9 +40,9 @@ const (
 	coroNativeFleetPhysicalFailedV1
 )
 
-// coroNativeFleetPhysicalOwnerV1 is one process-lifetime peer M. The active
-// prefix is frozen before any pthread starts, and each slot retains its exact
-// route tombstone after join.
+// coroNativeFleetPhysicalOwnerV1 is one process-lifetime peer M. Production
+// starts the complete bounded topology before any managed resume, and each
+// slot retains its exact route tombstone after join.
 type coroNativeFleetPhysicalOwnerV1 struct {
 	thread    pthread.Thread
 	handle    coro.ExecutorFleetHandle
@@ -50,10 +50,10 @@ type coroNativeFleetPhysicalOwnerV1 struct {
 	lifecycle coroNativeFleetPhysicalLifecycleV1
 }
 
-// coroNativeFleetPhysicalOwnersV1 owns the selected peer prefix and one atomic
-// broadcast stop word. TargetIngress has no callback entrants here: Seal is
-// the release publication observed by every peer through Quiesced, and Retire
-// leaves a permanent non-reusable process tombstone after all joins.
+// coroNativeFleetPhysicalOwnersV1 owns the complete bounded peer set and one
+// atomic broadcast stop word. TargetIngress has no callback entrants here:
+// Seal is the release publication observed by every peer through Quiesced, and
+// Retire leaves a permanent non-reusable process tombstone after all joins.
 type coroNativeFleetPhysicalOwnersV1 struct {
 	stop      coro.TargetIngress
 	peers     [coroNativeFleetDomainCapacityV1 - 1]coroNativeFleetPhysicalOwnerV1
@@ -62,11 +62,6 @@ type coroNativeFleetPhysicalOwnersV1 struct {
 }
 
 var coroNativeFleetPhysicalOwnerV1State coroNativeFleetPhysicalOwnersV1
-
-func coroNativeFleetPhysicalOwnerCountV1() (uint32, bool) {
-	count := corofleet.OwnerCount(uint32(coroNativeFleetDomainCapacityV1))
-	return count, count > 0 && count <= coroNativeFleetDomainCapacityV1
-}
 
 func coroNativeFleetPhysicalOwnerForHandleV1(
 	handle coro.ExecutorFleetHandle,
@@ -289,6 +284,16 @@ func coroNativeFleetRunPhysicalOwnerPassV1(
 	switch result.stop {
 	case coroRunSliceBudgetV1, coroRunAgainV1:
 		return true
+	case coroRunExecutionWaitV1:
+		domain, ok := coroNativeFleetDomainForHandleV1(
+			&coroNativeFleetV1State,
+			handle,
+			coroNativeFleetDomainActiveV1,
+		)
+		if !ok || !coroTargetWaitManagedExecutionV1(domain.driverOwnerV1()) {
+			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer execution wait failed")
+		}
+		return true
 	case coroRunDestroyCommitV1:
 		completed, committed := coroNativeFleetCommitOwnerDestroyV1(
 			handle,
@@ -441,7 +446,7 @@ func coroNativeFleetRunPhysicalOwnerV1(handle coro.ExecutorFleetHandle) bool {
 }
 
 // __llgo_coro_native_fleet_owner_v2 is called only by corofleet's fixed C
-// pthread routine. route is the scalar active-prefix route passed as the
+// pthread routine. route is the scalar fixed-topology route passed as the
 // pthread start argument; it is never a Go pointer, G, P, function address, or
 // coroutine handle. The compiler retains this exact body and its static
 // closure as a raw scheduler-stack island, so coroHandleResume/Destroy never

@@ -151,6 +151,7 @@ import _ "unsafe"
 
 var ChildStage uint32
 var GrandchildStage uint32
+var Ack chan uint32
 var MainThread uintptr
 var ChildThread uintptr
 var GrandchildThread uintptr
@@ -162,6 +163,7 @@ func threadID() uintptr
 func Setup() {
 	ChildStage = 0
 	GrandchildStage = 0
+	Ack = make(chan uint32)
 	MainThread = threadID()
 	ChildThread = 0
 	GrandchildThread = 0
@@ -175,6 +177,7 @@ func grandchild() {
 	}
 	GrandchildThread = thread
 	GrandchildStage = 1
+	Ack <- 1
 }
 
 func child() {
@@ -185,15 +188,14 @@ func child() {
 	}
 	ChildThread = thread
 	go grandchild()
-	for GrandchildStage == 0 {
-	}
 	ChildStage = 1
+	Ack <- 2
 }
 
 func main() {
 	go child()
-	for ChildStage == 0 {
-	}
+	<-Ack
+	<-Ack
 }
 
 func Check() int32 {
@@ -317,7 +319,7 @@ func Check() int32 {
 }
 `
 
-const coroNativeFleetSingleOwnerE2ESource = `package main
+const coroNativeFleetSingleExecutionQuotaE2ESource = `package main
 
 var Data chan uint32
 var Got uint32
@@ -344,6 +346,78 @@ func Check() int32 {
 }
 `
 
+const coroNativeFleetGOMAXPROCSE2ESource = `package main
+
+import _ "unsafe"
+
+var Done chan uint32
+var Failed uint32
+
+//llgo:coro noblock
+//go:linkname gomaxprocs command-line-arguments.CoroGOMAXPROCS
+func gomaxprocs(int) int
+
+//llgo:coro noblock
+//go:linkname quotaReset C.__llgo_coro_native_fleet_e2e_quota_reset_v1
+func quotaReset()
+
+//llgo:coro noblock
+//go:linkname quotaRun C.__llgo_coro_native_fleet_e2e_quota_run_v1
+func quotaRun(uint32)
+
+//llgo:coro noblock
+//go:linkname quotaMaximum C.__llgo_coro_native_fleet_e2e_quota_maximum_v1
+func quotaMaximum() uint32
+
+func Setup() {
+	Done = make(chan uint32)
+	Failed = 0
+}
+
+func child() {
+	quotaRun(12000000)
+	Done <- 1
+}
+
+func runPhase() uint32 {
+	quotaReset()
+	for index := 0; index < 8; index++ {
+		go child()
+	}
+	for index := 0; index < 8; index++ {
+		<-Done
+	}
+	return quotaMaximum()
+}
+
+func main() {
+	if gomaxprocs(0) != 1 {
+		Failed = 71
+		return
+	}
+	if gomaxprocs(4) != 1 || gomaxprocs(0) != 4 {
+		Failed = 72
+		return
+	}
+	maximum := runPhase()
+	if maximum < 2 || maximum > 4 {
+		Failed = 73
+		return
+	}
+	if gomaxprocs(1) != 4 || gomaxprocs(0) != 1 {
+		Failed = 74
+		return
+	}
+	if maximum = runPhase(); maximum != 1 {
+		Failed = 75
+	}
+}
+
+func Check() int32 {
+	return int32(Failed)
+}
+`
+
 func TestCoroNativeFleetPhysicalPeerRunsDistributedChildE2E(t *testing.T) {
 	runCoroNativeFleetE2E(t, coroNativeFleetE2ESource, "distributed-child", false, 8)
 }
@@ -353,7 +427,7 @@ func TestCoroNativeFleetMainReturnCancelsPeerE2E(t *testing.T) {
 }
 
 func TestCoroNativeFleetPeerSpawnReturnsToProgramE2E(t *testing.T) {
-	runCoroNativeFleetE2E(t, coroNativeFleetPeerSpawnE2ESource, "peer-spawn-program", false, 4)
+	runCoroNativeFleetE2E(t, coroNativeFleetPeerSpawnE2ESource, "peer-spawn-program", true, 4)
 }
 
 func TestCoroNativeFleetChannelSelectCrossRouteE2E(t *testing.T) {
@@ -364,17 +438,21 @@ func TestCoroNativeFleetShutdownCancelsPeerChannelSelectE2E(t *testing.T) {
 	runCoroNativeFleetE2E(t, coroNativeFleetChannelShutdownE2ESource, "channel-select-shutdown", true, 4)
 }
 
-func TestCoroNativeFleetSingleOwnerChannelProgressE2E(t *testing.T) {
-	runCoroNativeFleetE2E(t, coroNativeFleetSingleOwnerE2ESource, "single-owner-channel", true, 1)
+func TestCoroNativeFleetSingleExecutionQuotaChannelProgressE2E(t *testing.T) {
+	runCoroNativeFleetE2E(t, coroNativeFleetSingleExecutionQuotaE2ESource, "single-quota-channel", true, 1)
 }
 
-func runCoroNativeFleetE2E(t *testing.T, source, name string, enableChannel bool, ownerCount uint32) {
+func TestCoroNativeFleetRuntimeGOMAXPROCSQuotaE2E(t *testing.T) {
+	runCoroNativeFleetE2E(t, coroNativeFleetGOMAXPROCSE2ESource, "runtime-gomaxprocs-quota", true, 1)
+}
+
+func runCoroNativeFleetE2E(t *testing.T, source, name string, enableChannel bool, initialLimit uint32) {
 	t.Helper()
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("native coroutine fleet link smoke requires Darwin or Linux")
 	}
-	if ownerCount == 0 {
-		t.Fatal("native coroutine fleet E2E owner count must be positive")
+	if initialLimit == 0 {
+		t.Fatal("native coroutine fleet E2E initial execution limit must be positive")
 	}
 	clang, err := exec.LookPath("clang")
 	if err != nil {
@@ -433,7 +511,7 @@ func runCoroNativeFleetE2E(t *testing.T, source, name string, enableChannel bool
 			command.Env = append(command.Env, item)
 		}
 	}
-	command.Env = append(command.Env, fmt.Sprintf("GOMAXPROCS=%d", ownerCount))
+	command.Env = append(command.Env, fmt.Sprintf("GOMAXPROCS=%d", initialLimit))
 	output, err := command.CombinedOutput()
 	if runCtx.Err() != nil {
 		t.Fatalf("native coroutine fleet smoke timed out: %v\n%s", runCtx.Err(), output)
@@ -488,6 +566,7 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_program.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_run_decision.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_run_slice.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_execution_quota_native_llgo.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_sched.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor_driver_timer_llgo.go"),

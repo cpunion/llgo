@@ -311,6 +311,7 @@ func buildCoroSpawnNativeE2EUserSource(
 	}
 	mainFn, childFn := ssaPkg.Func("main"), ssaPkg.Func("child")
 	grandchildFn := ssaPkg.Func("grandchild")
+	runPhaseFn := ssaPkg.Func("runPhase")
 	setupFn, checkFn := ssaPkg.Func("Setup"), ssaPkg.Func("Check")
 	threadIDFn := ssaPkg.Func("threadID")
 	functionIDs := universe.FunctionIDConfig()
@@ -331,7 +332,7 @@ func buildCoroSpawnNativeE2EUserSource(
 		MaxPlainInstructions: -1,
 		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
 			switch fn {
-			case mainFn, childFn, grandchildFn:
+			case mainFn, childFn, grandchildFn, runPhaseFn:
 				return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
 			case threadIDFn:
 				return coro.SSAFunctionPolicy{
@@ -340,7 +341,21 @@ func buildCoroSpawnNativeE2EUserSource(
 					ForeignNoBlockCertificate: "llgo.coro.foreign-noblock.test.v1:thread-id",
 				}, nil
 			default:
-				return coro.SSAFunctionPolicy{}, nil
+				switch fn.Name() {
+				case "gomaxprocs":
+					return coro.SSAFunctionPolicy{
+						Effect: coro.NoSuspend, IgnoreBody: true,
+						External: coro.ExternalKnown, OverrideExternal: true,
+					}, nil
+				case "quotaReset", "quotaRun", "quotaMaximum":
+					return coro.SSAFunctionPolicy{
+						Effect: coro.NoSuspend, Exec: coro.IRQUnsafe,
+						IgnoreBody: true, External: coro.ExternalKnown, OverrideExternal: true,
+						ForeignNoBlockCertificate: "llgo.coro.foreign-noblock.test.v1:quota-probe",
+					}, nil
+				default:
+					return coro.SSAFunctionPolicy{}, nil
+				}
 			}
 		},
 	})
@@ -619,6 +634,7 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_program.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_run_decision.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_run_slice.go"),
+		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_execution_quota_default.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_sched.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_executor.go"),
 		filepath.Join("..", "..", "runtime", "internal", "runtime", "coro_channel_request_default.go"),
@@ -641,6 +657,7 @@ func buildCoroSpawnNativeE2ERuntimeIsland(t *testing.T, temp string) []string {
 	}
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_run_decision.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_run_slice.go")
+	requireCoroRuntimeIslandProductionSource(t, files, "coro_execution_quota_default.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_channel_request_default.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_ready_distribution_default.go")
 	requireCoroRuntimeIslandProductionSource(t, files, "coro_target_executor_retired_default.go")

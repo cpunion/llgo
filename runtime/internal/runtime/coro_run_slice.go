@@ -69,6 +69,7 @@ const (
 	coroRunIdleV1
 	coroRunDestroyCommitV1
 	coroRunAgainV1
+	coroRunExecutionWaitV1
 )
 
 type coroRunResultV1 struct {
@@ -140,6 +141,35 @@ func coroRunPhysicalActionV1(p *coro.P, g *coro.G, action coro.Action) (coro.Act
 	default:
 		return coro.Action{}, false
 	}
+}
+
+// coroPrepareManagedExecutionV1 acquires the target's process-level execution
+// permit before NextExecutorRunStep opens an issued physical Action interval.
+// wait=true is an ordinary stable scheduler-stack return: the route keeps all
+// runnable and source ownership and waits only for another permit publication.
+func coroPrepareManagedExecutionV1(driver *coro.ExecutorDriver) (held, wait, ok bool) {
+	pending, valid := coro.ExecutorRunManagedResumePending(driver)
+	if !valid {
+		return false, false, false
+	}
+	if !pending {
+		return false, false, true
+	}
+	acquired, valid := coroTargetAcquireManagedExecutionV1(driver)
+	if !valid {
+		return false, false, false
+	}
+	return acquired, !acquired, true
+}
+
+func coroFinishManagedExecutionV1(driver *coro.ExecutorDriver, held bool) bool {
+	return !held || coroTargetReleaseManagedExecutionV1(driver)
+}
+
+func coroStepMatchesManagedExecutionV1(step coro.ExecutorRunStep, held bool) bool {
+	resume := step.Kind == coro.ExecutorRunStepAction &&
+		step.Action.Kind == coro.ActionCheckResume
+	return resume == held
 }
 
 // coroReduceExecutorRunStepV1 is the single physical scheduler reducer shared
@@ -273,14 +303,23 @@ func coroRunSliceAtV1(p *coro.P, driver *coro.ExecutorDriver, now int64, budget 
 	}
 	result := coroRunResultV1{}
 	for result.used < budget {
+		held, wait, permitOK := coroPrepareManagedExecutionV1(driver)
+		if !permitOK {
+			return coroRunResultV1{}
+		}
+		if wait {
+			result.stop = coroRunExecutionWaitV1
+			return result
+		}
 		step, nextOK := coro.NextExecutorRunStepAt(driver, now)
-		if !nextOK {
+		if !nextOK || !coroStepMatchesManagedExecutionV1(step, held) {
+			_ = coroFinishManagedExecutionV1(driver, held)
 			return coroRunResultV1{}
 		}
 		terminal, reduced := coroReduceExecutorRunStepV1(
 			p, driver, coroRunPolicyV1{}, step, &result,
 		)
-		if !reduced {
+		if !coroFinishManagedExecutionV1(driver, held) || !reduced {
 			return coroRunResultV1{}
 		}
 		if terminal {

@@ -101,30 +101,30 @@ func TestCoroRunnableDistributionHasOneGenericTargetPath(t *testing.T) {
 	}
 }
 
-func TestCoroNativeFleetUsesBoundedStartupPrefixAndScalarPeerABI(t *testing.T) {
+func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing.T) {
 	fleet := readRuntimePollFile(t, "internal/runtime/coro_native_fleet.go")
 	for _, required := range []string{
 		"coroNativeFleetDomainCapacityV1 = coro.ExecutorFleetCapacity",
+		"execution   coro.ExecutionQuota",
 		"domainCount uint32",
 		"count == 0 || count > coroNativeFleetDomainCapacityV1",
 		"state.domainCount = count",
 		"for index := uint32(0); index < count; index++",
 	} {
 		if !strings.Contains(fleet, required) {
-			t.Errorf("native fleet lacks bounded active-prefix marker %q", required)
+			t.Errorf("native fleet lacks bounded topology marker %q", required)
 		}
 	}
 
 	owner := readRuntimePollFile(t, "internal/runtime/coro_native_fleet_owner_llgo.go")
 	for _, required := range []string{
 		"[coroNativeFleetDomainCapacityV1 - 1]coroNativeFleetPhysicalOwnerV1",
-		"corofleet.OwnerCount(uint32(coroNativeFleetDomainCapacityV1))",
 		"corofleet.CreatePeer(&peer.thread, handle.Route)",
 		"func __llgo_coro_native_fleet_owner_v2(route uint32) uint32",
 		"state.stop.Quiesced()",
 	} {
 		if !strings.Contains(owner, required) {
-			t.Errorf("native fleet physical owner lacks startup-policy marker %q", required)
+			t.Errorf("native fleet physical owner lacks fixed-topology marker %q", required)
 		}
 	}
 	for _, forbidden := range []string{
@@ -134,6 +134,32 @@ func TestCoroNativeFleetUsesBoundedStartupPrefixAndScalarPeerABI(t *testing.T) {
 	} {
 		if strings.Contains(owner, forbidden) {
 			t.Errorf("native fleet physical owner retained fixed/non-atomic path %q", forbidden)
+		}
+	}
+
+	quota := readRuntimePollFile(t, "internal/runtime/coro_execution_quota_native_llgo.go")
+	for _, required := range []string{
+		"corofleet.OwnerCount(coroNativeMaximumLogicalProcsV1)",
+		"coroNativeFleetV1State.execution.TryAcquire(route)",
+		"coroNativeFleetV1State.execution.Release(route)",
+		"func CoroGOMAXPROCS(n int) int",
+		"coroNativeFleetRingExecutionWaitersV1()",
+	} {
+		if !strings.Contains(quota, required) {
+			t.Errorf("native fleet execution quota lacks logical-limit marker %q", required)
+		}
+	}
+
+	target := readRuntimePollFile(t, "internal/runtime/coro_target_native_fleet_llgo.go")
+	for _, required := range []string{
+		"coroNativeInitialExecutionLimitV1()",
+		"coroNativeFleetStartProgramV1(coroNativeFleetDomainCapacityV1)",
+		"coroNativeFleetV1State.execution.Start(limit)",
+		"coroNativeFleetV1State.execution.Seal()",
+		"coroNativeFleetV1State.execution.Retire()",
+	} {
+		if !strings.Contains(target, required) {
+			t.Errorf("native fleet target lacks fixed-topology quota lifecycle marker %q", required)
 		}
 	}
 
