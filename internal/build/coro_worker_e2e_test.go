@@ -60,6 +60,22 @@ func buildCoroNativeDoorbellObject(t *testing.T, temp string) string {
 	return object
 }
 
+// buildCoroNativePollObject materializes the scalar poll-descriptor and
+// bounded socket-attempt leaf normally owned by runtime's source package.
+func buildCoroNativePollObject(t *testing.T, temp string) string {
+	t.Helper()
+	clang, err := exec.LookPath("clang")
+	if err != nil {
+		t.Skip("clang is unavailable")
+	}
+	source := filepath.Join("..", "..", "runtime", "internal", "lib", "runtime", "_wrap", "poll.c")
+	object := filepath.Join(temp, "coro-poll.o")
+	if output, err := exec.Command(clang, "-std=c11", "-O2", "-c", source, "-o", object).CombinedOutput(); err != nil {
+		t.Fatalf("compile native coroutine poll leaf: %v\n%s", err, output)
+	}
+	return object
+}
+
 // buildCoroNativeFleetOwnerObject materializes the bounded pthread routine
 // owned by runtime/internal/corofleet. It has one static C-to-Go edge and
 // accepts only a scalar route, never a function pointer or coroutine identity

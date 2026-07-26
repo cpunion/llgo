@@ -26,18 +26,19 @@
 
 /*
  * This is intentionally the only C-to-Go scheduler-owner edge. The routine
- * carries only the small route scalar supplied as pthread's opaque argument.
+ * carries only the small stable M-directory slot supplied as pthread's opaque
+ * argument.
  * A zero pthread result means clean coordinated stop; a nonzero sentinel lets
  * the joining program owner reject a failed raw scheduler loop.
  */
-extern uint32_t __llgo_coro_native_fleet_owner_v2(uint32_t route);
+extern uint32_t __llgo_coro_native_fleet_owner_v2(uint32_t slot);
 
-static void *llgo_coro_fleet_owner_main_v2(void *route_word) {
-    uintptr_t route = (uintptr_t)route_word;
-    if (route == 0 || route > UINT32_MAX) {
+static void *llgo_coro_fleet_owner_main_v2(void *slot_word) {
+    uintptr_t slot = (uintptr_t)slot_word;
+    if (slot == 0 || slot > UINT32_MAX) {
         return (void *)(uintptr_t)1;
     }
-    return __llgo_coro_native_fleet_owner_v2((uint32_t)route) == 1
+    return __llgo_coro_native_fleet_owner_v2((uint32_t)slot) == 1
         ? (void *)0
         : (void *)(uintptr_t)1;
 }
@@ -78,15 +79,15 @@ uint32_t __llgo_coro_fleet_owner_count_v1(uint32_t maximum) {
     return selected > maximum ? maximum : selected;
 }
 
-int __llgo_coro_fleet_owner_create_v2(pthread_t *thread, uint32_t route) {
-    if (thread == 0 || route == 0) {
+int __llgo_coro_fleet_owner_create_v2(pthread_t *thread, uint32_t slot) {
+    if (thread == 0 || slot == 0) {
         return -1;
     }
 #if defined(LLGO_CORO_FLEET_BDWGC)
     return GC_pthread_create(
-        thread, 0, llgo_coro_fleet_owner_main_v2, (void *)(uintptr_t)route);
+        thread, 0, llgo_coro_fleet_owner_main_v2, (void *)(uintptr_t)slot);
 #else
     return pthread_create(
-        thread, 0, llgo_coro_fleet_owner_main_v2, (void *)(uintptr_t)route);
+        thread, 0, llgo_coro_fleet_owner_main_v2, (void *)(uintptr_t)slot);
 #endif
 }

@@ -206,6 +206,76 @@ func TestExecutorResumeHandoffRunsReplacementAndRestoresExactResume(t *testing.T
 	runtime.KeepAlive(peer.frame.memory)
 }
 
+func TestExecutorResumeHandoffCompletesLastVisibleReplacementChildWithoutClosingDomain(t *testing.T) {
+	p := new(P)
+	driver, _, _ := bindTestExecutorDriver(t, p)
+	owner := newYieldingTestG(t, "foreign-wait-owner")
+	child := newYieldingTestG(t, "replacement-child")
+	fixture := beginExecutorResumeHandoffFixture(t, p, driver, owner)
+	if !Enqueue(p, child.g) {
+		t.Fatal("enqueue replacement child")
+	}
+
+	target := queueRunnerCheckDestroy(t, driver, child)
+	step := runnerNextPhysicalAction(t, driver, child, ActionCheckDestroy)
+	destroy, ok := Checked(p, child.g, step.Action, true)
+	if !ok || destroy.Kind != ActionDestroy || child.g.destroyTarget != target {
+		t.Fatalf("check replacement child destroy = (%+v, %t)", destroy, ok)
+	}
+	releaseTestFrame(t, child.g, child.frame)
+	receipt, ok := DestroyedBounded(p, child.g, destroy)
+	if !ok || receipt.Kind != ActionCommitDestroy ||
+		!CommitExecutorRunAction(driver, child.g, receipt) {
+		t.Fatalf("publish replacement child destroy = (%+v, %t)", receipt, ok)
+	}
+	if !fixture.handoff.Detached() ||
+		owner.g.state != GForeignWaiting || owner.g.runP != p ||
+		ExecutorResumeHandoffReturnable(driver) ||
+		driver.state != executorDriverActive {
+		t.Fatalf(
+			"replacement child receipt disturbed detached owner: detached=%t state=%d runP=%p returnable=%t driver=%d",
+			fixture.handoff.Detached(),
+			owner.g.state,
+			owner.g.runP,
+			ExecutorResumeHandoffReturnable(driver),
+			driver.state,
+		)
+	}
+	completed, ok := CommitExecutorRunDomainDestroy(driver, child.g, receipt)
+	if !ok || completed.Kind != ActionComplete ||
+		driver.state != executorDriverActive || child.g.state != GDead ||
+		!fixture.handoff.Detached() || owner.g.state != GForeignWaiting ||
+		!ExecutorResumeHandoffReturnable(driver) {
+		t.Fatalf(
+			"commit replacement child destroy = (%+v, %t), driver=%d child=%d detached=%t owner=%d returnable=%t",
+			completed,
+			ok,
+			driver.state,
+			child.g.state,
+			fixture.handoff.Detached(),
+			owner.g.state,
+			ExecutorResumeHandoffReturnable(driver),
+		)
+	}
+
+	fixture.restore(t)
+	if !ExitOSThreadLock(owner.g) {
+		t.Fatal("restored owner could not release its original M lock")
+	}
+	owner.frame.header.SuspendReason = uint16(SuspendYield)
+	owner.frame.header.Lifecycle = uint16(FrameSuspended)
+	if !PrepareYield(owner.g, owner.handle, owner.frame.header) {
+		t.Fatal("prepare restored owner yield")
+	}
+	next, ok := Resumed(p, owner.g, fixture.resume)
+	if !ok || next.Kind != ActionYield ||
+		!CommitExecutorRunAction(driver, owner.g, next) {
+		t.Fatalf("commit restored owner yield = (%+v, %t)", next, ok)
+	}
+	runtime.KeepAlive(owner.frame.memory)
+	runtime.KeepAlive(child.frame.memory)
+}
+
 func TestExecutorResumeHandoffKeepsRegisteredCancellationSticky(t *testing.T) {
 	p := new(P)
 	driver := new(ExecutorDriver)

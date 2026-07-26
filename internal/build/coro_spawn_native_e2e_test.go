@@ -317,6 +317,26 @@ func buildCoroSpawnNativeE2EUserSource(
 	grandchildFn := ssaPkg.Func("grandchild")
 	runPhaseFn := ssaPkg.Func("runPhase")
 	setupFn, checkFn := ssaPkg.Func("Setup"), ssaPkg.Func("Check")
+	spawnSeeded := make(map[*ssa.Function]struct{})
+	for _, fn := range universe.Functions() {
+		if fn == nil {
+			continue
+		}
+		for _, block := range fn.Blocks {
+			for _, instruction := range block.Instrs {
+				spawn, ok := instruction.(*ssa.Go)
+				if !ok || spawn.Common() == nil {
+					continue
+				}
+				spawnSeeded[fn] = struct{}{}
+				if target := spawn.Common().StaticCallee(); target != nil {
+					if canonical, exact := universe.Resolve(target); exact {
+						spawnSeeded[canonical] = struct{}{}
+					}
+				}
+			}
+		}
+	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
 	schedulerABI := coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
@@ -337,9 +357,34 @@ func buildCoroSpawnNativeE2EUserSource(
 		FunctionIDs:          functionIDs,
 		MaxPlainInstructions: -1,
 		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
+			effect := coro.NoSuspend
+			if _, required := spawnSeeded[fn]; required {
+				effect = effect.Join(coro.YieldOnly)
+			}
 			switch fn {
 			case mainFn, childFn, grandchildFn, runPhaseFn:
-				return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+				effect = effect.Join(coro.YieldOnly)
+			}
+			for _, block := range fn.Blocks {
+				for _, instruction := range block.Instrs {
+					call, ok := instruction.(ssa.CallInstruction)
+					if !ok || call.Common() == nil {
+						continue
+					}
+					semantics, intrinsic, err := coroIntrinsicCallSiteSemanticsForTest(
+						universe,
+						call,
+					)
+					if err != nil {
+						return coro.SSAFunctionPolicy{}, err
+					}
+					if intrinsic && semantics.SuspendsCurrentFrame() {
+						effect = effect.Join(semantics.CurrentFrameEffect())
+					}
+				}
+			}
+			if effect != coro.NoSuspend {
+				return coro.SSAFunctionPolicy{Effect: effect}, nil
 			}
 			if fn.Name() == "gomaxprocs" {
 				return coro.SSAFunctionPolicy{
@@ -356,6 +401,17 @@ func buildCoroSpawnNativeE2EUserSource(
 					Effect: coro.NoSuspend, Exec: coro.IRQUnsafe,
 					IgnoreBody: true, External: coro.ExternalKnown, OverrideExternal: true,
 					ForeignNoBlockCertificate: noblock.ID,
+				}, nil
+			}
+			synchronous, certified, err := universe.CoroForeignSyncCertificate(fn)
+			if err != nil {
+				return coro.SSAFunctionPolicy{}, err
+			}
+			if certified {
+				return coro.SSAFunctionPolicy{
+					Effect: coro.NoSuspend, Exec: coro.IRQUnsafe,
+					IgnoreBody: true, External: coro.ExternalKnown, OverrideExternal: true,
+					ForeignSyncCertificate: synchronous.ID,
 				}, nil
 			}
 			worker, certified, err := universe.CoroForeignWorkerCertificate(fn)
@@ -387,6 +443,7 @@ func buildCoroSpawnNativeE2EUserSource(
 	compilation := &cl.Compilation{
 		CoroPlan: plan,
 
+		CoroFrameRetentionABI:  cl.CoroFrameRetentionParkABIV2,
 		CoroABI:                coro.PhysicalABIV1,
 		SchedulerABI:           schedulerABI,
 		PanicABI:               coro.PanicExplicitStatusABIV0,

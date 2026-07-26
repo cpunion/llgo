@@ -60,7 +60,7 @@ func TestCoroNativePollReactorSharesExecutorWait(t *testing.T) {
 	}
 }
 
-func TestCoroNativeFleetPollReactorKeepsExactFixedOwnerPass(t *testing.T) {
+func TestCoroNativeFleetPollReactorKeepsOneExactPhysicalWaitPrimitive(t *testing.T) {
 	const source = "internal/runtime/coro_native_fleet_reactor.go"
 	data, err := os.ReadFile(source)
 	if err != nil {
@@ -72,10 +72,15 @@ func TestCoroNativeFleetPollReactorKeepsExactFixedOwnerPass(t *testing.T) {
 		"poll, driver := domain.pollOwnerV1(), domain.driverOwnerV1()",
 		"coro.SnapshotExecutorPollOperation(driver, index)",
 		"domain.nextOwnerEpoch != wait.Epoch",
+		"func coroNativeFleetBuildPhysicalWaitV1(",
+		"func coroNativeFleetWaitPhysicalPassAtV1(",
+		"coroNativeFleetPhysicalWaitIdleV1",
+		"coroNativeFleetPhysicalWaitActiveV1",
 		"domain.doorbell.ConsumeRetainedWake()",
-		"corodoorbell.DeadlinePollTimeout(now, wait.Deadline)",
-		"corodoorbell.WaitPollSet(&storage.entries[0], wait.Count, timeoutMS)",
-		"coroNativeFleetPostPollV1(storage.operations[entry-1], coro.PollOperationReady)",
+		"corodoorbell.DeadlinePollTimeout(now, wait.deadline)",
+		"corodoorbell.WaitPollSet(&storage.entries[0], wait.count, timeoutMS)",
+		"coroNativeFleetPostPollV1(",
+		"storage.operations[entry-1]",
 		"coroNativeFleetWaitPassRetryV1",
 		"coroNativeFleetWaitPassWakeV1",
 	} {
@@ -95,5 +100,37 @@ func TestCoroNativeFleetPollReactorKeepsExactFixedOwnerPass(t *testing.T) {
 		if strings.Contains(body, forbidden) {
 			t.Errorf("%s contains dynamic/per-wait mechanism %q", source, forbidden)
 		}
+	}
+
+	const replacement = "internal/runtime/coro_native_replacement_reactor_llgo.go"
+	data, err = os.ReadFile(replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = string(data)
+	for _, required := range []string{
+		"coroNativeFleetBuildPhysicalWaitV1(",
+		"coroNativeFleetWaitPhysicalPassAtV1(",
+		"coroNativeFleetPhysicalWaitActiveV1",
+	} {
+		if !strings.Contains(body, required) {
+			t.Errorf("%s lacks shared physical-wait marker %q", replacement, required)
+		}
+	}
+	for _, forbidden := range []string{
+		"corodoorbell.WaitPollSet(",
+		"coro.SnapshotExecutorPollOperation(",
+		"corodoorbell.DeadlinePollTimeout(",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("%s duplicates physical-wait mechanism %q", replacement, forbidden)
+		}
+	}
+	owner, err := os.ReadFile("internal/runtime/coro_native_replacement_owner_llgo.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(owner), "coro.RequestExecutorSourceService(") {
+		t.Error("replacement deadline does not request common reducer source service")
 	}
 }

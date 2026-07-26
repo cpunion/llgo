@@ -93,27 +93,10 @@ func coroTargetWaitManagedExecutionV1(driver *coro.ExecutorDriver) bool {
 	return ok
 }
 
-// coroTargetLeaveManagedExecutionForSameMBlockV1 temporarily returns the
-// current route's managed-resume permit while its LockOSThread G executes an
-// unavoidable blocking foreign call on the same physical M. The coroutine
-// frame and route owner epoch remain exclusively owned by that M; only the
-// process-wide execution quota is released, allowing an already-runnable peer
-// route to compensate even when GOMAXPROCS is one.
-//
-// This is deliberately paired with the reacquire function below. The outer
-// run-step reducer still owns one permit receipt for this ActionResume and will
-// release it after llvm.coro.resume returns, so the same route must reacquire
-// before the foreign boundary returns to managed code.
-func coroTargetLeaveManagedExecutionForSameMBlockV1(driver *coro.ExecutorDriver) bool {
-	return coroTargetReleaseManagedExecutionV1(driver)
-}
-
-// coroTargetReenterManagedExecutionAfterSameMBlockV1 restores the exact
-// ActionResume permit before the locked G can touch managed state again.
-// Contention is ordinary: the route waits on its retained doorbell, which is
-// rung by every quota release/expansion, and retries without exposing the
-// issued physical action to another scheduler owner.
-func coroTargetReenterManagedExecutionAfterSameMBlockV1(driver *coro.ExecutorDriver) bool {
+// coroTargetReenterManagedExecutionV1 restores an outer reducer's exact
+// ActionResume permit after its replacement M has returned and been joined.
+// The caller restores the detached active resume only after this succeeds.
+func coroTargetReenterManagedExecutionV1(driver *coro.ExecutorDriver) bool {
 	for {
 		acquired, ok := coroTargetAcquireManagedExecutionV1(driver)
 		if !ok {

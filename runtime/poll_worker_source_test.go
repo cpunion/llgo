@@ -376,25 +376,37 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyGuardedSameMEntrance(t *testing.T) 
 		"sole same-M blocking foreign",
 		"!coro.CurrentOSThreadLocked(task)",
 		"coro.CurrentExecutorDriver(task)",
-		"coroTargetLeaveManagedExecutionForSameMBlockV1(driver)",
-		"if !coroworker.Call(function, argc, &args, &result)",
-		"coroTargetReenterManagedExecutionAfterSameMBlockV1(driver)",
+		"coro.DetachExecutorResume(&parent.resume, driver, task)",
+		"parent.handoff.Begin(ownerEpoch)",
+		"coroNativeMAllocateReplacementV1(",
+		"corofleet.CreateOwner(&child.thread, childSlot)",
+		"coroTargetReleaseManagedExecutionV1(driver)",
+		"callOK := coroworker.Call(function, argc, &args, &result)",
+		"parent.handoff.RequestReturn(baton)",
+		"pthread.Join(child.thread, &threadResult)",
+		"coroTargetReenterManagedExecutionV1(driver)",
+		"coro.RestoreExecutorResume(&parent.resume)",
 	} {
 		if !strings.Contains(entrance, required) {
 			t.Errorf("%s lacks locked-thread call guard %q", runtimeCoroOSThreadForeignSource, required)
 		}
 	}
-	leave := strings.Index(entrance, "coroTargetLeaveManagedExecutionForSameMBlockV1(driver)")
-	call := strings.Index(entrance, "if !coroworker.Call(function, argc, &args, &result)")
-	reenter := strings.Index(entrance, "coroTargetReenterManagedExecutionAfterSameMBlockV1(driver)")
-	if leave < 0 || call <= leave || reenter <= call {
-		t.Errorf("%s does not bracket same-M C with exact quota leave/reenter", runtimeCoroOSThreadForeignSource)
+	detach := strings.Index(entrance, "coro.DetachExecutorResume(&parent.resume, driver, task)")
+	create := strings.Index(entrance, "corofleet.CreateOwner(&child.thread, childSlot)")
+	leave := strings.Index(entrance, "coroTargetReleaseManagedExecutionV1(driver)")
+	call := strings.Index(entrance, "callOK := coroworker.Call(function, argc, &args, &result)")
+	request := strings.LastIndex(entrance, "parent.handoff.RequestReturn(baton)")
+	join := strings.Index(entrance, "pthread.Join(child.thread, &threadResult)")
+	reenter := strings.Index(entrance, "coroTargetReenterManagedExecutionV1(driver)")
+	restore := strings.LastIndex(entrance, "coro.RestoreExecutorResume(&parent.resume)")
+	if detach < 0 || create <= detach || leave <= create || call <= leave ||
+		request <= call || join <= request || reenter <= join || restore <= reenter {
+		t.Errorf("%s does not bracket same-M C with detach/create/return/join/restore", runtimeCoroOSThreadForeignSource)
 	}
 	quota := readRuntimePollFile(t, "internal/runtime/coro_execution_quota_native_llgo.go")
 	for _, required := range []string{
-		"func coroTargetLeaveManagedExecutionForSameMBlockV1(driver *coro.ExecutorDriver) bool",
-		"return coroTargetReleaseManagedExecutionV1(driver)",
-		"func coroTargetReenterManagedExecutionAfterSameMBlockV1(driver *coro.ExecutorDriver) bool",
+		"func coroTargetReleaseManagedExecutionV1(driver *coro.ExecutorDriver) bool",
+		"func coroTargetReenterManagedExecutionV1(driver *coro.ExecutorDriver) bool",
 		"acquired, ok := coroTargetAcquireManagedExecutionV1(driver)",
 		"if !coroTargetWaitManagedExecutionV1(driver)",
 	} {

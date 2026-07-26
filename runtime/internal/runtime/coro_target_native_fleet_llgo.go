@@ -119,6 +119,11 @@ func coroTargetExecutorStartV1(handle coro.ExecutorHandle) bool {
 	}
 	state.program = program
 	state.lifecycle = coroNativeFleetTargetActiveV1
+	if !coroNativeMDirectoryStartV1(program) {
+		state.lifecycle = coroNativeFleetTargetFailedV1
+		coroRuntimeAbort("native coroutine M directory start failed")
+		return false
+	}
 	if !coroNativeWorkerPoolStartFleetV1() {
 		state.lifecycle = coroNativeFleetTargetFailedV1
 		coroRuntimeAbort("native coroutine fleet worker start failed")
@@ -172,7 +177,7 @@ func coroTargetRequestExecutorV1(handle coro.ExecutorHandle) bool {
 	result := coroProgramExecutorRegistryV1State.Request(handle)
 	accepted := result == coro.ExecutorRequestPublished || result == coro.ExecutorRequestCoalesced ||
 		result == coro.ExecutorRequestIdleWake
-	ringOK := !coro.ExecutorRequestNeedsDoorbell(result) || domain.doorbell.Ring()
+	ringOK := !coroNativeFleetRequestNeedsRingV1(domain, result) || domain.doorbell.Ring()
 	_, leaveOK := domain.ingress.Leave()
 	return accepted && ringOK && leaveOK
 }
@@ -192,7 +197,7 @@ func coroTargetRequestChannelOperationV1(id coro.OperationID) bool {
 	result := coroNativeFleetV1State.fleet.RequestChannelExecutor(id)
 	accepted := result == coro.ExecutorRequestPublished ||
 		result == coro.ExecutorRequestCoalesced || result == coro.ExecutorRequestIdleWake
-	return accepted && (!coro.ExecutorRequestNeedsDoorbell(result) || domain.doorbell.Ring())
+	return accepted && (!coroNativeFleetRequestNeedsRingV1(domain, result) || domain.doorbell.Ring())
 }
 
 // coroTargetRequestControlledTimerV2 requests the exact owner after
@@ -215,7 +220,7 @@ func coroTargetRequestControlledTimerV2(route coro.RouteID) bool {
 	result := coroNativeFleetV1State.fleet.RequestTimerExecutor(route)
 	accepted := result == coro.ExecutorRequestPublished ||
 		result == coro.ExecutorRequestCoalesced || result == coro.ExecutorRequestIdleWake
-	ringOK := !coro.ExecutorRequestNeedsDoorbell(result) || domain.doorbell.Ring()
+	ringOK := !coroNativeFleetRequestNeedsRingV1(domain, result) || domain.doorbell.Ring()
 	_, leaveOK := domain.ingress.Leave()
 	return accepted && ringOK && leaveOK
 }

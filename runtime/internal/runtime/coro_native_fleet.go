@@ -88,6 +88,7 @@ type coroNativeFleetDomainV1 struct {
 	handle         coro.ExecutorFleetHandle
 	nextOwnerEpoch uint32
 	ownerEpoch     uint32
+	borrowedWait   uint32
 	adopted        bool
 	owners         coroNativeFleetDomainOwnersV1
 	lifecycle      coroNativeFleetDomainLifecycleV1
@@ -208,7 +209,7 @@ var coroNativeFleetV1State coroNativeFleetStateV1
 func coroNativeFleetDomainCandidateV1(domain *coroNativeFleetDomainV1) bool {
 	return domain != nil && domain.lifecycle == coroNativeFleetDomainUnusedV1 &&
 		domain.handle == (coro.ExecutorFleetHandle{}) && domain.ownerEpoch == 0 &&
-		domain.nextOwnerEpoch == 0 && !domain.adopted &&
+		domain.nextOwnerEpoch == 0 && coroNativeAtomicLoadV1(&domain.borrowedWait) == 0 && !domain.adopted &&
 		domain.owners == (coroNativeFleetDomainOwnersV1{}) &&
 		domain.driver == (coro.ExecutorDriver{}) &&
 		domain.timers.CanRelease() && domain.poll.CanRelease() &&
@@ -504,6 +505,19 @@ func coroNativeFleetInvalidIngressV1() coro.OperationRouteIngressResult {
 	}
 }
 
+// A normal retained wait asks for a doorbell only after the executor gate has
+// published IdleArmed. A replacement M deliberately keeps the same driver
+// active while it borrows the route, so borrowedWait is the orthogonal
+// physical-wait publication which makes every accepted request ring during
+// that interval. The durable source/request remains authoritative.
+func coroNativeFleetRequestNeedsRingV1(
+	domain *coroNativeFleetDomainV1,
+	result coro.ExecutorRequestResult,
+) bool {
+	return coro.ExecutorRequestNeedsDoorbell(result) ||
+		domain != nil && coroNativeAtomicLoadV1(&domain.borrowedWait) != 0
+}
+
 // coroNativeFleetPostV1 is the complete target-global completion ingress. The
 // caller supplies only the frozen two-word OperationID (plus a source-specific
 // POD result/control value). Route selects the stable ingress as the first
@@ -571,7 +585,7 @@ func coroNativeFleetPostV1(
 	}
 
 	ringOK := true
-	if coro.ExecutorRequestNeedsDoorbell(result.Executor) {
+	if coroNativeFleetRequestNeedsRingV1(domain, result.Executor) {
 		ringOK = domain.doorbell.Ring()
 	}
 	_, leaveOK := domain.ingress.Leave()

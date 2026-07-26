@@ -666,6 +666,58 @@ func TestExecutorRunCursorRejectsExportedPollSlice(t *testing.T) {
 	}
 }
 
+func TestRequestExecutorSourceServiceResumesBlockedOwnerTransaction(t *testing.T) {
+	p := new(P)
+	driver, _, _, _ := bindTestExecutorDriverWithTimers(t, p)
+	driver.run.blocked = true
+	if !RequestExecutorSourceService(driver) ||
+		!driver.run.sourceMore || driver.run.blocked {
+		t.Fatalf("request owner source service = %+v", driver.run)
+	}
+	step, ok := NextExecutorRunStepAt(driver, 1)
+	if !ok || step.Kind != ExecutorRunStepSource {
+		t.Fatalf("requested owner source step = (%+v, %t)", step, ok)
+	}
+}
+
+func TestRequestExecutorSourceServiceRejectsUnstableOwner(t *testing.T) {
+	p := new(P)
+	driver, _, _ := bindTestExecutorDriver(t, p)
+	task := newYieldingTestG(t, "owner-service-unstable")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue unstable owner")
+	}
+	step, ok := NextExecutorRunStep(driver)
+	if !ok || step.Kind != ExecutorRunStepDispatch || step.G != task.g {
+		t.Fatalf("dispatch unstable owner = (%+v, %t)", step, ok)
+	}
+	before := driver.run
+	if RequestExecutorSourceService(driver) || driver.run != before {
+		t.Fatalf("unstable owner source request mutated cursor: before=%+v after=%+v", before, driver.run)
+	}
+}
+
+func TestExecutorOwnerWaitPendingClosesPublishedWakeWindow(t *testing.T) {
+	p := new(P)
+	driver, registry, handle := bindTestExecutorDriver(t, p)
+	if pending, ok := ExecutorOwnerWaitPending(driver); !ok || pending {
+		t.Fatalf("empty owner wait pending = (%t, %t)", pending, ok)
+	}
+	if result := registry.Request(handle); result != ExecutorRequestPublished {
+		t.Fatalf("publish running-owner request = %d", result)
+	}
+	if pending, ok := ExecutorOwnerWaitPending(driver); !ok || !pending {
+		t.Fatalf("requested owner wait pending = (%t, %t)", pending, ok)
+	}
+	task := newYieldingTestG(t, "owner-wait-pending")
+	if !Enqueue(p, task.g) {
+		t.Fatal("enqueue owner-wait-pending task")
+	}
+	if pending, ok := ExecutorOwnerWaitPending(driver); !ok || !pending {
+		t.Fatalf("runnable owner wait pending = (%t, %t)", pending, ok)
+	}
+}
+
 func TestExecutorRunTaskControlBlocksQueuedDestroy(t *testing.T) {
 	for _, kind := range []ActionKind{ActionCheckDestroy, ActionPanicDestroy} {
 		name := "check-destroy"

@@ -255,6 +255,41 @@ func ExecutorRunManagedResumePending(driver *ExecutorDriver) (pending, ok bool) 
 	}
 }
 
+// RequestExecutorSourceService is the scheduler-owner wake half for a target
+// wait which deliberately kept the driver active instead of entering the
+// retained IdleArmed protocol. Native replacement owners use it when their
+// physical deadline expires: the next bounded runner reduction performs the
+// same resumable source A/ack/B transaction as every other wake path.
+//
+// This is not a producer API. It accepts only a stable active-owner boundary
+// and retains no platform state; asynchronous producers must still publish a
+// durable source and use the registry request/doorbell protocol.
+func RequestExecutorSourceService(driver *ExecutorDriver) bool {
+	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
+		driver.run.issued != ActionInvalid || driver.poll.phase != executorPollIdle ||
+		!idleExecutorScheduler(driver.p) {
+		return false
+	}
+	driver.run.sourceMore = true
+	driver.run.blocked = false
+	return validExecutorDriver(driver)
+}
+
+// ExecutorOwnerWaitPending closes the running-owner-to-physical-wait window
+// without entering the retained IdleArmed state. The caller must first publish
+// its target-specific wake marker, then call this method; a preexisting ready
+// G, source fact, registry request, or scheduler request makes blocking
+// unnecessary, while a later producer observes that marker and rings.
+func ExecutorOwnerWaitPending(driver *ExecutorDriver) (pending, ok bool) {
+	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
+		driver.run.issued != ActionInvalid || driver.poll.phase != executorPollIdle ||
+		!idleExecutorScheduler(driver.p) {
+		return false, false
+	}
+	return runnableForOSThreadOwner(driver.p) ||
+		executorRunSourceRequested(driver), true
+}
+
 func completedExecutorRunAction(p *P, g *G, action Action) bool {
 	if p == nil || g == nil || action.Handle != nil || p.current != nil || p.inResume ||
 		p.action != (Action{}) || p.runDecision != (RunDecision{}) || p.runDecisionTaken ||
