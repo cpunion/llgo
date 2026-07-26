@@ -28,10 +28,16 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	llssa "github.com/goplus/llgo/ssa"
+)
+
+var (
+	coroNativeFleetE2ERuntimeArchiveOnce sync.Once
+	coroNativeFleetE2ERuntimeArchive     string
 )
 
 const coroNativeFleetE2ESource = `package main
@@ -400,13 +406,7 @@ func runCoroNativeFleetE2E(t *testing.T, source, name string, enableChannel bool
 	)
 	entryObject := buildCoroSpawnNativeE2EEntry(t, prog, temp, anchor)
 	driverObject := buildCoroSpawnNativeE2EDriver(t, prog, temp, setupSymbol, checkSymbol)
-	runtimeObjects := buildCoroNativeFleetE2ERuntimeIsland(t, temp)
-	runtimeObjects = append(runtimeObjects, buildCoroNativeFleetE2EBoundaryObject(t, clang, temp))
-	runtimeArchive := filepath.Join(temp, "libllgo-coro-fleet-runtime-island.a")
-	arArgs := append([]string{"rcs", runtimeArchive}, runtimeObjects...)
-	if output, err := exec.Command(ar, arArgs...).CombinedOutput(); err != nil {
-		t.Fatalf("archive coroutine fleet runtime island: %v\n%s", err, output)
-	}
+	runtimeArchive := cachedCoroNativeFleetE2ERuntimeArchive(t, clang, ar)
 
 	executable := filepath.Join(temp, "coro-native-fleet-"+name+"-e2e")
 	// Keep an opt-in stable output path for inspecting a failed native fleet
@@ -441,6 +441,32 @@ func runCoroNativeFleetE2E(t *testing.T, source, name string, enableChannel bool
 	if err != nil {
 		t.Fatalf("native coroutine fleet smoke failed: %v\n%s", err, output)
 	}
+}
+
+func cachedCoroNativeFleetE2ERuntimeArchive(t *testing.T, clang, ar string) string {
+	t.Helper()
+	coroNativeFleetE2ERuntimeArchiveOnce.Do(func() {
+		// The runtime island and fixed C boundary are identical for every
+		// program in this suite. Keep their archive under TestMain's shared
+		// cache root so all E2Es pay the production-runtime compile once while
+		// retaining separate user, entry, driver, link, and execution checks.
+		temp := filepath.Join(cacheRootFunc(), "coro-native-fleet-e2e-runtime")
+		if err := os.MkdirAll(temp, 0o755); err != nil {
+			t.Fatal("create shared native fleet runtime directory:", err)
+		}
+		runtimeObjects := buildCoroNativeFleetE2ERuntimeIsland(t, temp)
+		runtimeObjects = append(runtimeObjects, buildCoroNativeFleetE2EBoundaryObject(t, clang, temp))
+		archive := filepath.Join(temp, "libllgo-coro-fleet-runtime-island.a")
+		arArgs := append([]string{"rcs", archive}, runtimeObjects...)
+		if output, err := exec.Command(ar, arArgs...).CombinedOutput(); err != nil {
+			t.Fatalf("archive coroutine fleet runtime island: %v\n%s", err, output)
+		}
+		coroNativeFleetE2ERuntimeArchive = archive
+	})
+	if coroNativeFleetE2ERuntimeArchive == "" {
+		t.Fatal("shared native fleet runtime archive is unavailable")
+	}
+	return coroNativeFleetE2ERuntimeArchive
 }
 
 func buildCoroNativeFleetE2EBoundaryObject(t *testing.T, clang, temp string) string {
