@@ -22,6 +22,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"unsafe"
 
 	"github.com/goplus/llgo/runtime/internal/coro"
 )
@@ -34,6 +35,9 @@ var (
 	coroProgramExecutorRegistryV1State coro.ExecutorRegistry
 	coroProgramExecutorHandleV1State   coro.ExecutorHandle
 )
+
+// This named registry source island does not compile the typed hchan adapter.
+func coroMaterializeChannelResumeCleanupStepV1(coro.ResumeCleanupStep) bool { return false }
 
 func coroRuntimeAbort(message string) {
 	panic(message)
@@ -61,11 +65,13 @@ func TestCoroKeyedRegistryFIFOAndExactLogicalSelectionV2(t *testing.T) {
 	}
 
 	claimed, operation, ok := registry.claimOne(coroKeyedParkSemaphoreV2, 0x10, 0, false)
-	if !ok || claimed != first || operation != firstID || !registry.finishPost(claimed, operation) {
+	if !ok || claimed != first || operation != firstID ||
+		registry.finishPost(claimed, operation) != coroKeyedRegistryPublishReadyV2 {
 		t.Fatalf("first FIFO claim = %+v/%+v/%t", claimed, operation, ok)
 	}
 	claimed, operation, ok = registry.claimOne(coroKeyedParkSemaphoreV2, 0x10, 0, false)
-	if !ok || claimed != second || operation != secondID || !registry.finishPost(claimed, operation) {
+	if !ok || claimed != second || operation != secondID ||
+		registry.finishPost(claimed, operation) != coroKeyedRegistryPublishReadyV2 {
 		t.Fatalf("second FIFO claim = %+v/%+v/%t", claimed, operation, ok)
 	}
 	if claimed, operation, ok = registry.claimOne(coroKeyedParkNotifyV2, 0x20, 6, true); ok ||
@@ -73,7 +79,8 @@ func TestCoroKeyedRegistryFIFOAndExactLogicalSelectionV2(t *testing.T) {
 		t.Fatalf("wrong logical ticket claimed = %+v/%+v/%t", claimed, operation, ok)
 	}
 	claimed, operation, ok = registry.claimOne(coroKeyedParkNotifyV2, 0x20, 7, true)
-	if !ok || claimed != other || operation != otherID || !registry.finishPost(claimed, operation) {
+	if !ok || claimed != other || operation != otherID ||
+		registry.finishPost(claimed, operation) != coroKeyedRegistryPublishReadyV2 {
 		t.Fatalf("exact logical claim = %+v/%+v/%t", claimed, operation, ok)
 	}
 	for handle, id := range map[coroKeyedRegistryHandleV2]coro.OperationID{
@@ -116,8 +123,36 @@ func TestCoroKeyedRegistryConcurrentClaimIsSingleOwnerV2(t *testing.T) {
 	if owners.Load() != 1 || already.Load() != claimers-1 || invalid.Load() != 0 {
 		t.Fatalf("concurrent claims owner/already/invalid = %d/%d/%d", owners.Load(), already.Load(), invalid.Load())
 	}
-	if !registry.finishPost(handle, id) || !registry.retire(handle, id) {
+	if registry.finishPost(handle, id) != coroKeyedRegistryPublishReadyV2 ||
+		!registry.retire(handle, id) {
 		t.Fatal("finish and retire concurrent keyed claim")
+	}
+}
+
+func TestCoroKeyedRegistryPostingRetireIsBoundedAndProducerNeutralV2(t *testing.T) {
+	registry := new(coroKeyedRegistryV2)
+	id := keyedRegistryOperation(t, 1, 1)
+	handle, ok := registry.register(coroKeyedParkSemaphoreV2, 0x31, 0, id)
+	if !ok || registry.claimExact(handle, id) != coroKeyedRegistryClaimOwnerV2 {
+		t.Fatal("claim keyed posting race")
+	}
+	if !registry.retire(handle, id) {
+		t.Fatal("retire keyed posting generation")
+	}
+	if publish := registry.finishPost(handle, id); publish != coroKeyedRegistryPublishRetiredV2 {
+		t.Fatalf("finish retired keyed post = %d", publish)
+	}
+	if !registry.publicationRetired(handle) {
+		t.Fatal("retired keyed publication lost its terminal generation fact")
+	}
+	replacementID := keyedRegistryOperation(t, 1, 2)
+	replacement, ok := registry.register(coroKeyedParkNotifyV2, 0x32, 9, replacementID)
+	if !ok || replacement.Slot != handle.Slot || replacement.Generation <= handle.Generation ||
+		!registry.publicationRetired(handle) {
+		t.Fatalf("replacement after posting retire = %+v, old=%+v", replacement, handle)
+	}
+	if !registry.retire(replacement, replacementID) {
+		t.Fatal("retire keyed posting-race replacement")
 	}
 }
 
@@ -174,5 +209,12 @@ func TestCoroKeyedPreparedStateAndTicketOrderingV2(t *testing.T) {
 	}
 	if !coroKeyedTicketLessV2(^uint32(0), 0) || coroKeyedTicketLessV2(0, ^uint32(0)) {
 		t.Fatal("keyed ticket wrap ordering is not serial-number safe")
+	}
+	wantSize := uintptr(196)
+	if unsafe.Sizeof(uintptr(0)) == 8 {
+		wantSize = 256
+	}
+	if got := unsafe.Sizeof(state); got != wantSize {
+		t.Fatalf("CoroKeyedParkV2 size = %d, want %d", got, wantSize)
 	}
 }

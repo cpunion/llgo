@@ -29,7 +29,7 @@ jobs:
           - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "integration", check: "test integration (19, 1.26.5, llvm19)" }
           - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "native-e2e", check: "test native linked E2E (19, 1.26.5, llvm19)" }
           - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "fleet-e2e", check: "test native fleet E2E (19, 1.26.5, llvm19)" }
-          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "stdlib-time", fixtures: "time timer", check: "test stdlib time and timer (19, 1.26.5, llvm19)" }
+          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "stdlib-time", fixtures: "time timer sync", check: "test stdlib time, timer and sync (19, 1.26.5, llvm19)" }
           - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "stdlib-file", fixtures: "file syscall-file syscall-pipe", check: "test stdlib file and syscall (19, 1.26.5, llvm19)" }
           - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "stdlib-tcp", fixtures: "tcp", check: "test stdlib TCP (19, 1.26.5, llvm19)" }
           - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "target-core", check: "test target adapters (19, 1.26.5, llvm19)" }
@@ -120,7 +120,7 @@ jobs:
           go test -race -shuffle=on -tags='coro_channel_adapter_test,coro_channel_owner_test' \
             ./internal/runtime/z_chan.go \
             ./internal/runtime/z_chan_coro.go \
-            ./internal/runtime/coro_host_operation_materialize.go \
+            ./internal/runtime/coro_resume_materialize.go \
             ./internal/runtime/z_chan_lock_coro.go \
             ./internal/runtime/z_chan_lock_coro_atomic_host.go \
             ./internal/runtime/coro_channel_adapter_test.go \
@@ -131,7 +131,7 @@ jobs:
             -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" \
             ./internal/runtime/z_chan.go \
             ./internal/runtime/z_chan_coro.go \
-            ./internal/runtime/coro_host_operation_materialize.go \
+            ./internal/runtime/coro_resume_materialize.go \
             ./internal/runtime/z_chan_lock_coro.go \
             ./internal/runtime/z_chan_lock_coro_atomic_host.go \
             ./internal/runtime/coro_channel_adapter_test.go \
@@ -143,6 +143,17 @@ jobs:
           go test -race -shuffle=on -tags=coro_sema_owner_test \
             ./internal/runtime/z_chan_lock_coro.go \
             ./internal/runtime/z_chan_lock_coro_atomic_host.go \
+            ./internal/runtime/coro_resume_materialize.go \
+            ./internal/runtime/coro_keyed_park.go \
+            ./internal/runtime/coro_keyed_post_test.go \
+            ./internal/runtime/coro_keyed_registry_test.go \
+            -run '^TestCoroKeyed' -count=1
+          GOOS=js GOARCH=wasm CGO_ENABLED=0 go test \
+            -tags=coro_sema_owner_test \
+            -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" \
+            ./internal/runtime/z_chan_lock_coro.go \
+            ./internal/runtime/z_chan_lock_coro_atomic_host.go \
+            ./internal/runtime/coro_resume_materialize.go \
             ./internal/runtime/coro_keyed_park.go \
             ./internal/runtime/coro_keyed_post_test.go \
             ./internal/runtime/coro_keyed_registry_test.go \

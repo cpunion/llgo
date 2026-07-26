@@ -59,6 +59,7 @@ func TestRuntimeNotifyListSelectsEventDrivenCoroImplementation(t *testing.T) {
 		"unsafe.Pointer(&l.notify)",
 		"llgoCoroNotifyPrepareOrAbortV2(unsafe.Pointer(&state), unsafe.Pointer(&l.notify), target)",
 		"llgoCoroNotifySuspendV2(&state, 0)",
+		"storage [256 - unsafe.Sizeof(uintptr(0))]byte",
 	} {
 		if !strings.Contains(coroSource, marker) {
 			t.Errorf("%s lacks event-driven notify marker %q", runtimeNotifyCoroSource, marker)

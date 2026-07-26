@@ -46,6 +46,7 @@ func TestRuntimeSemaphoreSelectsEventDrivenCoroImplementation(t *testing.T) {
 		"llgoCoroSemaphoreSuspendV2(&state, 0)",
 		"latomic.CompareAndSwapUint32(addr, value, value-1)",
 		"llgoCoroSemaphoreReleaseOrAbortV2(unsafe.Pointer(addr))",
+		"storage [256 - unsafe.Sizeof(uintptr(0))]byte",
 	} {
 		if !strings.Contains(coroSource, marker) {
 			t.Errorf("%s lacks event-driven semaphore marker %q", runtimeSemaphoreCoroSource, marker)
@@ -232,5 +233,63 @@ func TestCoroSemaphoreOwnerV2FailStopABIAndKeyedSource(t *testing.T) {
 		if strings.Contains(source, forbidden) {
 			t.Errorf("%s contains blocking semaphore implementation %q", ownerPath, forbidden)
 		}
+	}
+}
+
+func TestCoroKeyedResumeIsPNeutralAndRegistryRetireIsBounded(t *testing.T) {
+	const (
+		parkPath        = "internal/runtime/coro_keyed_park.go"
+		materializePath = "internal/runtime/coro_resume_materialize.go"
+	)
+	park := readRuntimePollFile(t, parkPath)
+	materialize := readRuntimePollFile(t, materializePath)
+	for _, marker := range []string{
+		"coro.BindWaitSetResumeCleanup(",
+		"Kind:         coro.ResumeCleanupKeyedPark",
+		"coro.TakeResumePacket(",
+		"validMaterializedCoroKeyedParkV2(state)",
+	} {
+		if !strings.Contains(park, marker) {
+			t.Errorf("%s lacks keyed P-neutral marker %q", parkPath, marker)
+		}
+	}
+	resumeStart := strings.Index(park, "func __llgo_coro_keyed_resume_v2(")
+	if resumeStart < 0 {
+		t.Fatalf("%s lacks keyed resume", parkPath)
+	}
+	for _, marker := range []string{
+		"coro.TakeRunDecision(",
+		"coro.CurrentExecutorManualDriver(",
+		"coro.FinishCurrentExecutorManualPark(",
+		"coroProgramKeyedRegistryV2State.retire(",
+	} {
+		if strings.Contains(park[resumeStart:], marker) {
+			t.Errorf("%s keyed resume revisits old owner via %q", parkPath, marker)
+		}
+	}
+	for _, marker := range []string{
+		"func coroMaterializeResumeCleanupStepV1(step coro.ResumeCleanupStep) bool {",
+		"return coroMaterializeChannelResumeCleanupStepV1(step)",
+		"return coroMaterializePrivateResumeCleanupStepV1(step)",
+		"case coro.ResumeCleanupKeyedPark:",
+		"coroProgramKeyedRegistryV2State.retire(state.registry, state.operation)",
+		"state.magic = coroKeyedParkMaterializedMagicV2",
+		"return coro.CommitResumeCleanupStep(step, coro.ResumeSmallInvalid)",
+		"slot.state != coroKeyedRegistryPostingV2",
+	} {
+		if !strings.Contains(materialize, marker) {
+			t.Errorf("%s lacks keyed old-owner materialization marker %q", materializePath, marker)
+		}
+	}
+	retireStart := strings.Index(materialize, "func (registry *coroKeyedRegistryV2) retire(")
+	if retireStart < 0 {
+		t.Fatalf("%s lacks keyed retire function", materializePath)
+	}
+	retireEnd := strings.Index(materialize[retireStart:], "var coroHostOperationAdapterV1State")
+	if retireEnd < 0 {
+		t.Fatalf("%s lacks bounded keyed retire span", materializePath)
+	}
+	if strings.Contains(materialize[retireStart:retireStart+retireEnd], "for {") {
+		t.Errorf("%s keyed registry retire retains a busy loop", materializePath)
 	}
 }
