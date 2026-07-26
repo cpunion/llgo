@@ -115,6 +115,18 @@ func LLGoROOT() string {
 			return root
 		}
 	}
+	// Development and diagnostic binaries are often written outside the
+	// source tree (for example, /tmp/llgo in CI). A trimpath build cannot
+	// recover the tree from runtime.Caller, but invoking it from the LLGo
+	// checkout is still unambiguous.
+	if wd, err := os.Getwd(); err == nil {
+		if root, ok := isLLGoRoot(wd); ok {
+			if Devel() {
+				fmt.Fprintln(os.Stderr, "WARNING: Using LLGO root for devel: "+root)
+			}
+			return root
+		}
+	}
 	if Devel() {
 		root, err := getRuntimePkgDirByCaller()
 		if err != nil {

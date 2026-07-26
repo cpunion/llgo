@@ -16,6 +16,8 @@ jobs:
     name: ${{ matrix.check }}
     runs-on: ubuntu-22.04
     timeout-minutes: 20
+    env:
+      LLGO_ROOT: ${{ github.workspace }}
     strategy:
       fail-fast: false
       matrix:
