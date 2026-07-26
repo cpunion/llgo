@@ -174,6 +174,10 @@ const serviceOperation = (record) => {
 
 let status = 2;
 let scheduleActions = 0;
+const stdlibFileStage = () =>
+  "__llgo_coro_stdlib_file_stage_v1" in api
+    ? api.__llgo_coro_stdlib_file_stage_v1() >>> 0
+    : 0;
 try {
   if (api.main(0, 0) !== 0) {
     throw new Error("module entry failed");
@@ -227,7 +231,8 @@ try {
       throw new Error(
         `invalid scheduler result ${status}: ${result.join(",")}; ` +
           `operations=${operations}, opcodes=${[...opcodes].join(",")}, ` +
-          `files=${files.size}, fds=${descriptors.size}, scheduleActions=${scheduleActions}`,
+          `files=${files.size}, fds=${descriptors.size}, scheduleActions=${scheduleActions}, ` +
+          `stdlibFileStage=${stdlibFileStage()}`,
       );
     }
   }
