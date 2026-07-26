@@ -440,17 +440,21 @@ func TestExecutorRunDispatchFailureRestoresReadyHead(t *testing.T) {
 	if !Enqueue(p, a.g) || !Enqueue(p, b.g) {
 		t.Fatal("enqueue dispatch atomic tasks")
 	}
+	a.g.transferState = runnableTransferGImported
 
 	// Corrupt only the selected element, leaving the O(1) queue header valid.
-	// The bounded dispatcher must fail closed without silently dropping it.
+	// The bounded dispatcher must fail closed without silently dropping it or
+	// losing the imported no-retransfer ownership state.
 	a.g.state = GWaiting
 	if step, ok := NextExecutorRunStep(driver); ok || step != (ExecutorRunStep{}) {
 		t.Fatalf("invalid ready head dispatched = (%+v, %t)", step, ok)
 	}
 	if p.readyHead != a.g || p.readyTail != b.g || !a.g.queued || a.g.nextReady != b.g ||
+		a.g.transferState != runnableTransferGImported ||
 		!b.g.queued || b.g.nextReady != nil || p.current != nil || p.action != (Action{}) {
-		t.Fatalf("failed dispatch mutated queue: head=%p tail=%p a={queued:%t next:%p} b={queued:%t next:%p} current=%p action=%+v",
-			p.readyHead, p.readyTail, a.g.queued, a.g.nextReady, b.g.queued, b.g.nextReady, p.current, p.action)
+		t.Fatalf("failed dispatch mutated queue: head=%p tail=%p a={queued:%t next:%p transfer:%d} b={queued:%t next:%p} current=%p action=%+v",
+			p.readyHead, p.readyTail, a.g.queued, a.g.nextReady, a.g.transferState,
+			b.g.queued, b.g.nextReady, p.current, p.action)
 	}
 	runtime.KeepAlive(a.frame.memory)
 	runtime.KeepAlive(b.frame.memory)

@@ -1943,14 +1943,14 @@ Pure sync library/archive不需要链接scheduler。Executable一旦选择 `-sch
   `594/17/18/651`纵向账本。
 - Phase 36之后的主要缺口仍是工程闭环而非新的coroutine可行性障碍：零/单source
   `ResumePacket`、Channel/select typed multi-source materialization、单Worker HostOp、Worker+Timer
-  deadline和keyed/private-registry park的P-neutral composite cleanup已经完成；下一步是动态P/steal和blocking compensation；paged/dynamic channel、timer与
+  deadline和keyed/private-registry park的P-neutral composite cleanup已经完成；固定fleet内基于无指针需求claim、exact mailbox和Imported首次执行门的global injection/work sharing也已完成。下一步是动态P、批量/local-deque steal、affinity和blocking compensation；paged/dynamic channel、timer与
   worker capacity；完整defer/recover/Goexit和precise suspended-frame GC；外部DNS
   server/cgo resolver、Unix/raw socket与ancillary OOB、process/signal；logical stack/tooling；以及
   WASM/WASI/RTOS/baremetal各自内建
   event/host/HAL adapter。native退出实验模式仍必须满足35.1与35.2，尤其仓库
   `test/*`和GOROOT不得存在unexpected failure。
 - compiler的所有现有initial、child-await、yield和legacy-park resume边已接入terminating dispatch gate。zero-ticket路径调用scalar `__llgo_coro_run_decision_take_zero_v1(g) uint32`，正常值进入唯一normal continuation，Abort/Shutdown在cleanup lowering完成前进入共享trap而不会误执行用户continuation；full ticket/lease ABI继续供bootstrap与未来park-site reconciliation使用。同一LLVM/target的gate开关对照证明scalar gate不会增加stackless coroutine frame，CoroSplit ramp/destroy也没有可达gate。
-- 两字Operation identity已冻结为`source:8/route:9/local:15 + generation:32`，保持size 8、align 4。route按runtime instance单调分配且永不复用，关闭后保留永久tombstone；Manual/TaskControl ingress的producer lease覆盖`source.Post -> executor.Request`完整tail，strong join后才允许清除source/executor pointer；Timer V2 reserve、publish、Apply和result lease也验证exact route/local/generation。52-byte pointer-free `ResumePacket`已覆盖零/单Timer、Manual、Poll、Worker以及经typed plan物化的direct Channel/multi-case select；global injection与通用work stealing仍未完成。
+- 两字Operation identity已冻结为`source:8/route:9/local:15 + generation:32`，保持size 8、align 4。route按runtime instance单调分配且永不复用，关闭后保留永久tombstone；Manual/TaskControl ingress的producer lease覆盖`source.Post -> executor.Request`完整tail，strong join后才允许清除source/executor pointer；Timer V2 reserve、publish、Apply和result lease也验证exact route/local/generation。52-byte pointer-free `ResumePacket`已覆盖零/单Timer、Manual、Poll、Worker以及经typed plan物化的direct Channel/multi-case select，HostOp deadline与keyed/private-registry cleanup也复用同一POD plan。固定fleet内的P-neutral global injection/work sharing已接通；dynamic P、批量/local-deque steal和affinity仍未完成。
 - 第一个标准库同步风格原型已以GOROOT source patch实现`time.Sleep`：普通`time.Sleep(d)`被Effect分析自动传播为`DirectCoro/AwaitStructured`，不修改public signature，不依赖libuv、BDWGC、pthread producer或用户goroutine。真实linked native+nogc E2E已编译production runtime island，实际等待30ms并恢复原frame；timer/wake路径由monotonic clock与pipe/poll/fcntl实现，符号审计确认不依赖libuv、BDWGC或pthread producer。另一focused production-overlay测试直接读取真实注入的`time.Sleep`源，不用测试effect seed，验证跨包同步caller染色、frame证书和CoroSplit，但不声称链接执行标准库`time.Sleep`。LLVM 19–22都跑该契约，Go 1.24跑真实linked E2E，Go 1.26也跑production overlay分析/codegen。
 - Phase 22 仍是有界prototype，不是完整`time`runtime：第65个同时live timer会按fail-stop ABI终止，尚需dynamic/sharded table和heap；`Timer`/`Ticker`/`AfterFunc`仍使用legacy libuv路径；`f := time.Sleep`、interface/reflect和dynamic dispatch还没有end-to-end callable coroutine descriptor；`Sleep(0)`/负值在Sleep体内不注册timer，但value-insensitive caller仍会创建并await child frame，尚需conditional effect或call-site fast path才能避免可观测的多余handoff。完整`Do`标准库构建现在先被`sync.Pool` TLS destructor的捕获闭包挡住：exact同步C callback ABI没有closure context slot，不能直接放宽。后续需改成显式`owner/local` TLS state，并同时为`tls.Handle[T]`经`Pool.local`的unsafe transport建立字段级whole-program证书。WASM、WASI、RTOS和baremetal也尚未有对应timer source。
 - wait/preempt core 要求目标提供可靠的 32-bit atomic load/store/CAS。WASM 可直接满足；带 A 扩展的 RISC-V 可满足；ESP32-C3 RV32IMC 当前会在链接时缺少 `__atomic_*_4`，直到平台用 IRQ critical section 提供单核适配。这里故意不使用非原子 fallback。
@@ -2014,7 +2014,7 @@ Pure sync library/archive不需要链接scheduler。Executable一旦选择 `-sch
 
 ### Phase 5：Native 多 P
 
-- P-neutral `ResumePacket/ResultCell`物化和source-affine ready边界完成后，再启用本地deque、global injection与work stealing。
+- P-neutral `ResumePacket/ResultCell`物化和source-affine ready边界完成后，先用固定fleet的无指针demand + exact mailbox启用按需global injection/work sharing；该层已完成。下一步再增加动态P、本地deque/批量steal和affinity，不改变transfer ownership协议。
 - Worker pool及其他有限source使用generation capacity permit/backpressure，不按operation增生线程或对象。
 - ForeignOp worker/locked-M clean-stack execution、P release/reacquire和ForeignReentry。
 - `Syscall*`/`RawSyscall*`的single-call ForeignOp、PollWait wrapper event lowering、pointer provenance/pin和thread-affine thunk。

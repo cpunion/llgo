@@ -944,7 +944,7 @@ ForeignWait、pointer-free completion、errno capture和late completion，但不
 - large idle connection set仍需全量扫描；
 - level-triggered hot fd会重复报告ready；
 - regular file必须被pollOpen/fstat拒绝，否则“永远ready”会掩盖实际storage阻塞；
-- 当前双route reactor不能外推为动态P数量、scalable shard或通用work stealing已经完成。
+- 当前双route reactor与固定fleet demand injection不能外推为动态P数量、scalable shard、批量/local-deque stealing或完整affinity已经完成。
 
 后续使用epoll/kqueue/IOCP/ready-index ring和dynamic/sharded catalog；这些backend仍发布
 相同的OperationID和ReadyThenTryCommit fact，不改变标准库wrapper。
@@ -1091,8 +1091,8 @@ report-only原型。截至2026-07-22，迁移顺序和状态如下：
    RTOS notification、baremetal IRQ等固化为target-owned `OperationRecipe`，而不把backend名词
    写入通用contract。
 10. **并行、平台验收与清理（部分完成）**：native route-aware submission、双M/P target、
-    worker lifecycle和TCP E2E已落地；仍需AwaitCapacity、queued cancel、P-neutral parked-result
-    packet、动态P/通用steal与affinity。2026-07-23已用真实generated-cgo/Python序列确认共享worker
+    worker lifecycle、P-neutral typed parked-result packet、固定fleet demand injection/work sharing
+    和TCP E2E已落地；仍需AwaitCapacity、queued cancel、动态P、批量/local-deque steal与完整affinity。2026-07-23已用真实generated-cgo/Python序列确认共享worker
     会破坏线程局部session，并冻结第14.6节的`AffinityLease + AffinityOwner`方向；尚未接入
     `LockOSThread`或production owner目录。各target的真实file/socket/timer证据成立后，迁移并
     删除逐trampoline `workeraddr`兼容标注。
@@ -1154,7 +1154,7 @@ Native bounded worker、regular-file与双owner TCP链已有生产证据；forwa
 
 | 平台 | 最终最小运行验证 |
 | --- | --- |
-| Native Linux/Darwin | time.Sleep；regular-file回环；双owner loopback TCP read/write/deadline/close；worker饱和/容量；poll stale/cancel；P-neutral parked-result后再开通用steal |
+| Native Linux/Darwin | time.Sleep；regular-file回环；双owner loopback TCP read/write/deadline/close；worker饱和/容量；poll stale/cancel；P-neutral parked-result demand injection/no-bounce；动态P与批量/local-deque steal |
 | JS/WASM | real later-turn Schedule；timer；Promise完成/abort/late callback；无递归reentry；wasm32 descriptor/layout |
 | WASI | clock + pollable fd；`poll_oneoff`/preview equivalent；一个nonpoll import的async或Unsupported路径 |
 | RTOS/embedded | QEMU或硬件notification、one-shot alarm、ISR publish、DMA cancel、容量填满、task affinity |
@@ -1167,7 +1167,7 @@ contract，compile-only不能替代production platform E2E。
 
 ## 20. 当前实现状态与差距
 
-截至2026-07-22，可准确归类为以下三层。
+截至2026-07-26，可准确归类为以下三层。
 
 **已进入生产路径**：
 
@@ -1195,7 +1195,8 @@ contract，compile-only不能替代production platform E2E。
 
 - 现有scheduler/operation核心的OperationID、generation、ParkState、WaitSetRecord、
   select/result lease/cancel/detach/quiescence、Timer/Poll/Worker等能力，以及native双owner fleet
-  target、共享worker lifecycle和TCP E2E。这些证明callable模型有可复用底座，不证明动态P、
+  target、共享worker lifecycle、P-neutral typed materialization、固定fleet demand injection/work
+  sharing和TCP E2E。这些证明callable模型有可复用底座，不证明动态P、批量/local-deque steal、
   通用backend recipe或各平台已完成。
 - target-neutral `NonblockingLeaseGate`的exclusive attempt、generation change、quiescence、
   close/reuse tombstone和duplicate-release防护；尚未与`internal/poll.FD`状态及compiler

@@ -114,6 +114,17 @@ func coroFinishRunSliceCompatibility(
 		if !coro.HasWaiting(p) {
 			return coroRunResultV1{}
 		}
+		if !coroTargetRequestProgramRunnableV1(p, driver) {
+			return coroRunResultV1{}
+		}
+		more, drained = coroTargetDrainProgramTransfersV1(p, driver)
+		if !drained {
+			return coroRunResultV1{}
+		}
+		if more {
+			result.stop = coroRunAgainV1
+			return result
+		}
 		sleep, deadline, hasDeadline, prepared := coroProgramPrepareExecutorSleepV1(driver)
 		if !prepared {
 			return coroRunResultV1{}

@@ -478,7 +478,11 @@ func dequeueOSThreadRunnable(p *P) *G {
 	}
 	owner := p.osThreadLockOwner
 	if owner == nil {
-		return dequeue(p)
+		g := dequeue(p)
+		if g != nil && g.transferState == runnableTransferGImported {
+			g.transferState = runnableTransferGIdle
+		}
+		return g
 	}
 	if owner.osThreadLockDepth == 0 || !owner.queued {
 		return nil
@@ -490,7 +494,11 @@ func dequeueOSThreadRunnable(p *P) *G {
 			continue
 		}
 		if previous == nil {
-			return dequeue(p)
+			g := dequeue(p)
+			if g != nil && g.transferState == runnableTransferGImported {
+				g.transferState = runnableTransferGIdle
+			}
+			return g
 		}
 		previous.nextReady = current.nextReady
 		if p.readyTail == current {
@@ -498,6 +506,9 @@ func dequeueOSThreadRunnable(p *P) *G {
 		}
 		current.nextReady = nil
 		current.queued = false
+		if current.transferState == runnableTransferGImported {
+			current.transferState = runnableTransferGIdle
+		}
 		return current
 	}
 	return nil
@@ -584,7 +595,8 @@ func validReadyQueue(p *P) bool {
 		if !ValidG(g) || g.state != GRunnable || !g.queued || g.waiting ||
 			!gPreemptEnabledAtDepthZero(g) ||
 			g.runP != nil ||
-			g.transferState != runnableTransferGIdle ||
+			(g.transferState != runnableTransferGIdle &&
+				g.transferState != runnableTransferGImported) ||
 			(g.active == nil && g.runAction != ActionCheckDestroy && g.runAction != ActionPanicDestroy) ||
 			(g.active != nil && g.active.parkWait != nil) ||
 			!validRunnableParkState(&g.park) ||

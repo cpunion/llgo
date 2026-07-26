@@ -135,8 +135,10 @@ func dispatchExecutorRunReady(driver *ExecutorDriver) (ExecutorRunStep, bool) {
 	if !validReadyQueueHeader(p) {
 		return ExecutorRunStep{}, false
 	}
+	selected := nextOSThreadRunnable(p)
+	imported := selected != nil && selected.transferState == runnableTransferGImported
 	g := dequeueOSThreadRunnable(p)
-	if g == nil {
+	if g == nil || g != selected {
 		return ExecutorRunStep{}, false
 	}
 	action, ok := BeginRunG(p, g)
@@ -145,6 +147,9 @@ func dispatchExecutorRunReady(driver *ExecutorDriver) (ExecutorRunStep, bool) {
 		// Restore those exact fields on a fail-closed BeginRunG rejection so a
 		// malformed head cannot turn a rejected bounded reduction into a hidden
 		// queue mutation.
+		if imported {
+			g.transferState = runnableTransferGImported
+		}
 		prependReadyUnchecked(p, g)
 		return ExecutorRunStep{}, false
 	}

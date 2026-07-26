@@ -24,14 +24,12 @@ func coroTargetAfterStableRunActionV1(*coro.P, *coro.ExecutorDriver) bool {
 	return true
 }
 
-func coroTargetCanRecordReadySpawnV1(*coro.G) bool {
-	return true
-}
-
-func coroTargetRecordReadySpawnV1(*coro.G, *coro.G) {}
-
 func coroTargetDrainProgramTransfersV1(*coro.P, *coro.ExecutorDriver) (bool, bool) {
 	return false, true
+}
+
+func coroTargetRequestProgramRunnableV1(*coro.P, *coro.ExecutorDriver) bool {
+	return true
 }
 
 func coroTargetBeforeProgramRunSliceV1(p *coro.P, driver *coro.ExecutorDriver) bool {
