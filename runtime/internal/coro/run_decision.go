@@ -30,7 +30,10 @@ type RunDecision struct {
 	caseID  uint32
 	outcome ParkOutcome
 	task    TaskCancelKind
-	lease   OperationResultLease
+	// materialized selects a frame-local ResumePacket rather than an
+	// old-source OperationResultLease. It occupies existing scalar padding.
+	materialized bool
+	lease        OperationResultLease
 }
 
 func validRunDecision(decision RunDecision) bool {
@@ -44,10 +47,24 @@ func validRunDecision(decision RunDecision) bool {
 	hasPark := validParkTicket(decision.ticket)
 	if !hasPark {
 		return decision.outcome == ParkOutcomePending && decision.caseID == 0 &&
-			decision.lease == (OperationResultLease{}) && decision.task != TaskCancelNone
+			decision.lease == (OperationResultLease{}) && decision.task != TaskCancelNone &&
+			!decision.materialized
 	}
 	if decision.outcome == ParkOutcomePending {
 		return false
+	}
+	if decision.materialized {
+		if decision.lease != (OperationResultLease{}) {
+			return false
+		}
+		switch decision.outcome {
+		case ParkOutcomeCompleted, ParkOutcomeDefault:
+			return decision.task == TaskCancelNone && decision.caseID != 0
+		case ParkOutcomeCanceled:
+			return decision.caseID == 0
+		default:
+			return false
+		}
 	}
 	if decision.outcome == ParkOutcomeCompleted {
 		return decision.task == TaskCancelNone && decision.lease.Valid() && decision.lease.ticket == decision.ticket
@@ -107,6 +124,14 @@ func prepareRunDecision(p *P, g *G) bool {
 			lease:   lease,
 			task:    task,
 		}
+	} else if g.park.phase == parkMaterialized {
+		decision = RunDecision{
+			g:            g,
+			ticket:       g.park.ticket,
+			outcome:      g.park.outcome,
+			caseID:       g.park.winnerCase,
+			materialized: true,
+		}
 	} else if !releasableParkState(&g.park) {
 		return false
 	}
@@ -117,8 +142,15 @@ func prepareRunDecision(p *P, g *G) bool {
 		}
 		if decision == (RunDecision{}) {
 			decision = RunDecision{g: g, task: kind}
-		} else if decision.task != kind {
-			return false
+		} else {
+			if decision.materialized {
+				decision.outcome = ParkOutcomeCanceled
+				decision.caseID = 0
+			}
+			if decision.task != TaskCancelNone && decision.task != kind {
+				return false
+			}
+			decision.task = kind
 		}
 	}
 	if !validRunDecision(decision) {
@@ -160,6 +192,9 @@ func TakeRunDecision(
 		return ParkOutcomePending, 0, OperationResultLease{}, TaskCancelNone, true
 	}
 	if decision.g != g || decision.ticket != expected {
+		return ParkOutcomePending, 0, OperationResultLease{}, TaskCancelNone, false
+	}
+	if decision.materialized {
 		return ParkOutcomePending, 0, OperationResultLease{}, TaskCancelNone, false
 	}
 	if validParkTicket(decision.ticket) && !DeliverParkResume(&g.park, decision.ticket) {

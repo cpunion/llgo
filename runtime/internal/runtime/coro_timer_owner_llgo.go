@@ -43,6 +43,7 @@ const (
 type CoroTimerParkV2 struct {
 	magic     uint32
 	wait      coro.WaitSetRecord
+	packet    coro.ResumePacket
 	ticket    coro.ParkTicket
 	timer     coro.TimerRegistrationHandle
 	operation coro.OperationID
@@ -103,6 +104,10 @@ func __llgo_coro_timer_park_v2(g, handle, header, storage unsafe.Pointer, delay 
 	state.timer = timer
 	state.operation = operation
 	state.executor = executor
+	if !coro.BindSingleWaitSetResumePacket(&state.wait, &state.packet, operation) {
+		coroTimerAbortV2("cannot bind coroutine Timer V2 resume packet")
+		return
+	}
 }
 
 // __llgo_coro_timer_park_controlled_v2 is the standard-library Timer manager
@@ -157,12 +162,16 @@ func __llgo_coro_timer_park_controlled_v2(
 	state.timer = timer
 	state.operation = operation
 	state.executor = executor
+	if !coro.BindSingleWaitSetResumePacket(&state.wait, &state.packet, operation) {
+		coroTimerAbortV2("cannot bind controlled coroutine Timer V2 resume packet")
+		return
+	}
 }
 
-// __llgo_coro_timer_resume_v2 consumes the exact run decision, releases or
-// discards a winner lease, and recycles the timer generation before returning
-// control to user/stdlib code. Task abort and command shutdown remain distinct
-// so compiler cleanup dispatch can preserve the terminal cause.
+// __llgo_coro_timer_resume_v2 consumes the frame-local result packet. The old
+// owner already released or discarded the winner lease and recycled the exact
+// timer generation before ready-queue publication. Task abort and command
+// shutdown remain distinct so compiler cleanup preserves the terminal cause.
 //
 //export __llgo_coro_timer_resume_v2
 func __llgo_coro_timer_resume_v2(g, storage unsafe.Pointer) uint32 {
@@ -172,42 +181,32 @@ func __llgo_coro_timer_resume_v2(g, storage unsafe.Pointer) uint32 {
 		return 0
 	}
 	task := (*coro.G)(g)
-	outcome, caseID, lease, cancel, taken := coro.TakeRunDecision(task, state.ticket)
+	outcome, caseID, cancel, result, poll, taken := coro.TakeResumePacket(
+		task,
+		state.ticket,
+		&state.packet,
+		nil,
+	)
 	if !taken {
 		coroTimerAbortV2("invalid coroutine Timer V2 run decision")
 		return 0
 	}
-	driver, executor, route, ok := coro.CurrentExecutorTimerDriver(task)
-	if !ok || executor != state.executor || route != state.operation.Route() {
-		coroTimerAbortV2("coroutine Timer V2 resumed on the wrong source")
-		return 0
-	}
-	discard := outcome == coro.ParkOutcomeCanceled
 	status := uint32(0)
 	switch {
-	case outcome == coro.ParkOutcomeCompleted && caseID == 1 && lease.Valid() && cancel == coro.TaskCancelNone:
+	case outcome == coro.ParkOutcomeCompleted && caseID == 1 && cancel == coro.TaskCancelNone &&
+		result == coro.ResumeResultNone && poll == coro.PollOperationResultInvalid:
 		status = coroTimerResumeSuccessV2
-		discard = false
-	case outcome == coro.ParkOutcomeCanceled && caseID == 0 && cancel == coro.TaskCancelNone:
+	case outcome == coro.ParkOutcomeCanceled && caseID == 0 && cancel == coro.TaskCancelNone &&
+		result == coro.ResumeResultNone && poll == coro.PollOperationResultInvalid:
 		status = coroTimerResumeOperationCanceledV2
-	case outcome == coro.ParkOutcomeCanceled && caseID == 0 && cancel == coro.TaskCancelAbort:
+	case outcome == coro.ParkOutcomeCanceled && caseID == 0 && cancel == coro.TaskCancelAbort &&
+		result == coro.ResumeResultNone && poll == coro.PollOperationResultInvalid:
 		status = coroTimerResumeTaskAbortV2
-	case outcome == coro.ParkOutcomeCanceled && caseID == 0 && cancel == coro.TaskCancelShutdown:
+	case outcome == coro.ParkOutcomeCanceled && caseID == 0 && cancel == coro.TaskCancelShutdown &&
+		result == coro.ResumeResultNone && poll == coro.PollOperationResultInvalid:
 		status = coroTimerResumeShutdownV2
 	default:
 		coroTimerAbortV2("unsupported coroutine Timer V2 run decision")
-		return 0
-	}
-	if !coro.FinishCurrentExecutorTimerPark(
-		driver,
-		task,
-		state.executor,
-		state.timer,
-		state.operation,
-		lease,
-		discard,
-	) {
-		coroTimerAbortV2("cannot retire coroutine Timer V2 source")
 		return 0
 	}
 	*state = CoroTimerParkV2{}

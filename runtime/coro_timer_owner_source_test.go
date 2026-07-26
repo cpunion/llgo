@@ -67,7 +67,7 @@ func TestCoroTimerOwnerV2SourceABI(t *testing.T) {
 			name:      "__llgo_coro_timer_resume_v2",
 			params:    []string{"unsafe.Pointer", "unsafe.Pointer"},
 			result:    "uint32",
-			delegates: "coro.FinishCurrentExecutorTimerPark",
+			delegates: "coro.TakeResumePacket",
 			failStop:  true,
 		},
 		{
@@ -114,6 +114,24 @@ func TestCoroTimerOwnerV2SourceABI(t *testing.T) {
 				t.Fatalf("%s does not fail-stop malformed ownership:\n%s", test.name, body)
 			}
 		})
+	}
+	ownerText := string(data)
+	for _, marker := range []string{
+		"packet    coro.ResumePacket",
+		"coro.BindSingleWaitSetResumePacket(",
+		"coro.TakeResumePacket(",
+	} {
+		if !strings.Contains(ownerText, marker) {
+			t.Errorf("%s lacks P-neutral resume marker %q", source, marker)
+		}
+	}
+	for _, forbidden := range []string{
+		"coro.TakeRunDecision(",
+		"coro.FinishCurrentExecutorTimerPark(",
+	} {
+		if strings.Contains(ownerText, forbidden) {
+			t.Errorf("%s retains owner-affine resume marker %q", source, forbidden)
+		}
 	}
 	for _, obsolete := range []string{
 		"__llgo_coro_timer_prepare_after_v1",

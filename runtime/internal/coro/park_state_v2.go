@@ -69,6 +69,10 @@ const (
 	parkParked
 	parkDetaching
 	parkReady
+	// parkMaterialized is a source-neutral runnable park. The old owner copied
+	// or discarded the winner result into a frame-local ResumePacket and
+	// recycled the exact source generation before entering this phase.
+	parkMaterialized
 	parkConsumed
 	// parkDelivered records that the scheduler's pre-resume gate transferred
 	// the logical outcome into its transient RunDecision. Keeping this distinct
@@ -179,6 +183,22 @@ func validPendingParkCommitCursor(state *ParkState) bool {
 		validParkTicket(record.resultTicket) && record.resultState == operationResultEmpty
 }
 
+func validMaterializedParkHeader(state *ParkState) bool {
+	if state == nil || !validParkTicket(state.ticket) || state.expected != 0 || state.attached != 0 ||
+		state.seed != 0 || state.hasDefault || state.cancelKind != ParkCancelNone ||
+		state.winnerID != (OperationID{}) || state.winnerRecord != nil || state.head != nil {
+		return false
+	}
+	switch state.outcome {
+	case ParkOutcomeCompleted, ParkOutcomeDefault:
+		return state.winnerCase != 0
+	case ParkOutcomeCanceled:
+		return state.winnerCase == 0
+	default:
+		return false
+	}
+}
+
 func validParkState(state *ParkState) bool {
 	if state == nil || state.resolving || !validTaskCancelState(state.taskCancelKind, state.taskCancelPhase) || state.cancelKind > ParkCancelShutdown ||
 		state.attached > state.expected {
@@ -286,6 +306,8 @@ func validParkState(state *ParkState) bool {
 					state.winnerID == (OperationID{}) && state.winnerRecord == nil) ||
 				(state.outcome == ParkOutcomeDefault && state.hasDefault && state.cancelKind == ParkCancelNone &&
 					state.winnerID == (OperationID{}) && state.winnerRecord == nil))
+	case parkMaterialized:
+		return validMaterializedParkHeader(state)
 	case parkConsumed:
 		return validParkTicket(state.ticket) && state.attached == 0 && state.head == nil &&
 			((state.outcome == ParkOutcomeCompleted && !state.hasDefault && state.cancelKind < ParkCancelTaskAbort && state.winnerID.Valid() && state.winnerRecord == nil) ||
@@ -307,6 +329,38 @@ func releasableParkState(state *ParkState) bool {
 		return false
 	}
 	return state.phase == parkIdle || state.phase == parkConsumed || state.phase == parkDelivered
+}
+
+func materializedParkState(state *ParkState, ticket ParkTicket, outcome ParkOutcome, caseID uint32) bool {
+	if state == nil || !validParkState(state) || state.phase != parkConsumed || state.ticket != ticket ||
+		outcome == ParkOutcomePending || outcome == ParkOutcomeCanceled && caseID != 0 ||
+		(outcome == ParkOutcomeCompleted || outcome == ParkOutcomeDefault) && caseID == 0 {
+		return false
+	}
+	kind, phase := state.taskCancelKind, state.taskCancelPhase
+	*state = ParkState{
+		ticket:          ticket,
+		phase:           parkMaterialized,
+		taskCancelKind:  kind,
+		taskCancelPhase: phase,
+		outcome:         outcome,
+		winnerCase:      caseID,
+	}
+	return validParkState(state)
+}
+
+func deliverMaterializedParkResume(state *ParkState, ticket ParkTicket) bool {
+	if !validParkState(state) || state.phase != parkMaterialized || state.ticket != ticket {
+		return false
+	}
+	kind, phase := state.taskCancelKind, state.taskCancelPhase
+	*state = ParkState{
+		ticket:          ticket,
+		phase:           parkDelivered,
+		taskCancelKind:  kind,
+		taskCancelPhase: phase,
+	}
+	return validParkState(state)
 }
 
 // BeginParkSet starts one logical N-candidate wait. The two-word ticket only

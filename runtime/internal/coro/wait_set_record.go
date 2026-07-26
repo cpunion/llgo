@@ -46,7 +46,12 @@ const (
 
 // WaitSetRecord contains the queue links which exist only while one G is
 // physically parked. In particular activePrev is not a permanent G field.
-// The record is 48 bytes on 64-bit targets and 28 bytes on 32-bit/WASM32.
+// resume points at compiler/runtime-provided storage in the same coroutine
+// frame. It is optional for owner-affine compatibility parks. A bound executor
+// may promote a packet-backed park only after the old source result has been
+// copied/discarded and every exact source generation has been recycled.
+//
+// The record is 56 bytes on 64-bit targets and 32 bytes on 32-bit/WASM32.
 // None of its fields are producer-concurrent: callbacks and IRQs retain only
 // an OperationID and the source owner enqueues this record after draining it.
 type WaitSetRecord struct {
@@ -54,6 +59,7 @@ type WaitSetRecord struct {
 	activePrev *WaitSetRecord
 	activeNext *WaitSetRecord
 	workNext   *WaitSetRecord
+	resume     *ResumePacket
 	ticket     ParkTicket
 	state      waitSetRecordState
 	work       waitSetWorkState
@@ -77,13 +83,14 @@ func PrepareWaitSetRecord(record *WaitSetRecord, g *G, ticket ParkTicket) bool {
 func validPreparingWaitSetRecord(record *WaitSetRecord, state *ParkState, ticket ParkTicket) bool {
 	return record != nil && record.g != nil && &record.g.park == state && record.ticket == ticket &&
 		record.state == waitSetRecordPreparing && record.work == waitSetWorkIdle &&
-		record.activePrev == nil && record.activeNext == nil && record.workNext == nil
+		record.activePrev == nil && record.activeNext == nil && record.workNext == nil && record.resume == nil
 }
 
 func validCommittedWaitSetRecord(record *WaitSetRecord, g *G, frame *Frame) bool {
 	return record != nil && record.g == g && frame != nil && frame.owner == g && frame.parkWait == record &&
 		record.ticket == g.park.ticket && record.state == waitSetRecordCommitted &&
-		record.work == waitSetWorkIdle && record.activePrev == nil && record.activeNext == nil && record.workNext == nil
+		record.work == waitSetWorkIdle && record.activePrev == nil && record.activeNext == nil && record.workNext == nil &&
+		validWaitSetResumeBinding(record)
 }
 
 func validParkWaitQueueHeader(p *P) bool {
@@ -143,7 +150,8 @@ func validActiveWaitSetRecordFast(p *P, record *WaitSetRecord) bool {
 		record.g == nil || !ValidG(record.g) || record.g.state != GWaiting || !record.g.waiting ||
 		record.g.queued || record.g.nextReady != nil || record.g.runP != nil ||
 		record.g.transferState != runnableTransferGIdle || record.g.active == nil ||
-		record.g.active.parkWait != record || !validActiveParkStateHeader(&record.g.park, record.ticket) {
+		record.g.active.parkWait != record || !validActiveParkStateHeader(&record.g.park, record.ticket) ||
+		!validWaitSetResumeBinding(record) {
 		return false
 	}
 	if record.activePrev == nil {
@@ -408,7 +416,7 @@ func appendRunnableUnchecked(p *P, g *G) {
 	p.readyTail = g
 }
 
-func promoteReadyWaitSet(p *P, record *WaitSetRecord) bool {
+func promoteReadyWaitSet(sources *ExecutorSourceSet, p *P, record *WaitSetRecord) bool {
 	if !validActiveWaitSetRecordFast(p, record) || record.work != waitSetWorkResolving ||
 		record.g.park.phase != parkReady || !validReadyQueueHeader(p) {
 		return false
@@ -418,6 +426,9 @@ func promoteReadyWaitSet(p *P, record *WaitSetRecord) bool {
 	schedule := preemptLoad(&p.schedule)
 	if frame == nil || frame.parkWait != record || g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
 		(schedule != scheduleIdle && schedule != scheduleRequested) {
+		return false
+	}
+	if record.resume != nil && !materializeSingleResumePacket(sources, p, record) {
 		return false
 	}
 	previous, next := record.activePrev, record.activeNext
@@ -465,7 +476,7 @@ func promoteResolvedWaitSets(p *P, batch *WaitSetRecord) (promoted int, ok bool)
 		record.work = waitSetWorkResolving
 		switch record.g.park.phase {
 		case parkReady:
-			if !promoteReadyWaitSet(p, record) {
+			if !promoteReadyWaitSet(nil, p, record) {
 				return promoted, false
 			}
 			promoted++
@@ -496,6 +507,7 @@ func promoteResolvedWaitSets(p *P, batch *WaitSetRecord) (promoted int, ok bool)
 func ReleasePreparedWaitSetRecord(record *WaitSetRecord) bool {
 	if record == nil || record.state != waitSetRecordPreparing || record.work != waitSetWorkIdle ||
 		record.g == nil || record.activePrev != nil || record.activeNext != nil || record.workNext != nil ||
+		record.resume != nil ||
 		!validParkState(&record.g.park) || record.g.park.ticket != record.ticket || record.g.park.attached != 0 ||
 		record.g.park.head != nil || (record.g.park.phase != parkReady && record.g.park.phase != parkConsumed) {
 		return false

@@ -42,6 +42,7 @@ const (
 type CoroWorkerParkV1 struct {
 	magic     uint32
 	wait      coro.WaitSetRecord
+	packet    coro.ResumePacket
 	ticket    coro.ParkTicket
 	operation coro.OperationID
 }
@@ -62,8 +63,8 @@ func validCoroWorkerResultWordsV1(state unsafe.Pointer, r1, r2, errno *uintptr) 
 // transaction, and reducing every invariant violation to the same exit made a
 // rare scheduler/producer race impossible to distinguish in production. The
 // phase byte has no success-path cost and remains stable for crash triage:
-// P/Q/R/S/T are park admission; A/B/C/D/E/F/G/H are resume ABI, decision,
-// owner, completed/canceled tuple, finish, payload, and scalar validation.
+// P/Q/R/S/T/U are park admission; A/B/D/E/G/H are resume ABI, packet decision,
+// completed/canceled tuple, payload, and scalar validation.
 func coroWorkerAbortV1(phase byte, message string) {
 	coroTerminalFputs(c.Str("coroutine worker abort phase "), c.Stderr)
 	coroTerminalFputc(c.Int(phase), c.Stderr)
@@ -122,6 +123,10 @@ func __llgo_coro_worker_park_v1(
 	}
 	state.ticket = ticket
 	state.operation = operation
+	if !coro.BindSingleWaitSetResumePacket(&state.wait, &state.packet, operation) {
+		coroWorkerAbortV1('U', "cannot bind coroutine worker resume packet")
+		return
+	}
 	args := [coroworker.MaxArgs]uintptr{a0, a1, a2, a3, a4, a5, a6, a7, a8}
 	if !coroCommitNativeWorkerSubmissionV1(
 		driver, task, executor, route, reservation, operation, function, argc, &args,
@@ -130,9 +135,10 @@ func __llgo_coro_worker_park_v1(
 	}
 }
 
-// __llgo_coro_worker_resume_v1 consumes the exact run decision, copies or
-// discards the result lease, strongly retires the source generation, and only
-// then releases the compiler-owned frame storage back to user code.
+// __llgo_coro_worker_resume_v1 consumes the frame-local result packet. The
+// original owner already copied or discarded the scalar payload and strongly
+// retired the exact worker generation before publishing this G as runnable.
+// Resume therefore remains valid after a P-neutral transfer.
 //
 //export __llgo_coro_worker_resume_v1
 func __llgo_coro_worker_resume_v1(
@@ -148,50 +154,28 @@ func __llgo_coro_worker_resume_v1(
 	*r1, *r2, *errno = 0, 0, 0
 
 	task := (*coro.G)(g)
-	outcome, caseID, lease, cancel, ok := coro.TakeRunDecision(task, state.ticket)
+	var payload coro.ScalarResultPayloadV1
+	outcome, caseID, cancel, result, poll, ok := coro.TakeResumePacket(
+		task,
+		state.ticket,
+		&state.packet,
+		&payload,
+	)
 	if !ok {
 		coroWorkerAbortV1('B', "invalid coroutine worker run decision")
 		return 0
 	}
-	driver, _, _, current := coro.CurrentExecutorWorkerDriver(task)
-	if !current {
-		coroWorkerAbortV1('C', "coroutine worker resume has no current executor owner")
-		return 0
-	}
 	discard := outcome == coro.ParkOutcomeCanceled
-	var payload coro.ScalarResultPayloadV1
 	if outcome == coro.ParkOutcomeCompleted {
-		if caseID != 1 || cancel != coro.TaskCancelNone || !lease.Valid() {
+		if caseID != 1 || cancel != coro.TaskCancelNone ||
+			result != coro.ResumeResultScalar || poll != coro.PollOperationResultInvalid {
 			coroWorkerAbortV1('D', "invalid completed coroutine worker decision")
 			return 0
 		}
 	} else if !discard || caseID != 0 ||
-		cancel != coro.TaskCancelAbort && cancel != coro.TaskCancelShutdown {
+		cancel != coro.TaskCancelAbort && cancel != coro.TaskCancelShutdown ||
+		result != coro.ResumeResultNone || poll != coro.PollOperationResultInvalid {
 		coroWorkerAbortV1('E', "invalid canceled coroutine worker decision")
-		return 0
-	}
-	// A task stop may arrive after worker completion already won and detached.
-	// ConsumeParkSet then deliberately returns Canceled with the winner lease:
-	// cleanup must discard that payload before recycling the exact generation.
-	var output *coro.ScalarResultPayloadV1
-	if !discard {
-		output = &payload
-	}
-	finish := coro.FinishCurrentExecutorWorkerPark(
-		driver,
-		task,
-		state.operation,
-		lease,
-		discard,
-		output,
-	)
-	if !finish.Finished() {
-		// Finish result digits are stable: 2=context, 3=lease,
-		// 4=quiescence, 5=result release, and 6=recycle.
-		coroTerminalFputs(c.Str("coroutine worker finish result "), c.Stderr)
-		coroTerminalFputc(c.Int(byte('0')+byte(finish)), c.Stderr)
-		coroTerminalFputc(c.Int('\n'), c.Stderr)
-		coroWorkerAbortV1('F', "cannot finish coroutine worker park")
 		return 0
 	}
 	*state = CoroWorkerParkV1{}

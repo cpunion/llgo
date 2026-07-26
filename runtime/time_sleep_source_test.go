@@ -262,8 +262,9 @@ func TestSleepTimerV2OwnerUsesExactCurrentSource(t *testing.T) {
 		"func __llgo_coro_timer_resume_v2(",
 		"coro.CurrentExecutorTimerDriver(task)",
 		"coro.PrepareCurrentExecutorTimerPark(",
-		"coro.TakeRunDecision(task, state.ticket)",
-		"coro.FinishCurrentExecutorTimerPark(",
+		"coro.BindSingleWaitSetResumePacket(",
+		"coro.TakeResumePacket(",
+		"packet    coro.ResumePacket",
 		"coroTimerResumeTaskAbortV2",
 		"coroTimerResumeShutdownV2",
 	} {
@@ -274,6 +275,14 @@ func TestSleepTimerV2OwnerUsesExactCurrentSource(t *testing.T) {
 	for _, forbidden := range []string{"libuv", "pthread", "go func"} {
 		if strings.Contains(source, forbidden) {
 			t.Errorf("Sleep Timer V2 owner contains forbidden driver behavior %q", forbidden)
+		}
+	}
+	for _, forbidden := range []string{
+		"coro.TakeRunDecision(",
+		"coro.FinishCurrentExecutorTimerPark(",
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Errorf("Sleep Timer V2 owner retained owner-affine resume %q", forbidden)
 		}
 	}
 }

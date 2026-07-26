@@ -165,10 +165,25 @@ func validRunnableTransferHeaderLocked(mailbox *RunnableTransferMailbox) bool {
 }
 
 // pNeutralRunnable freezes the deliberately narrow first migration class. It
-// accepts only an initial never-run root or a normal yielded continuation. No
-// source/result/control/panic/cancel/pin lease may follow the G to another P.
+// accepts an initial root, a normal yielded continuation, or a park whose old
+// owner already committed a frame-local ResumePacket. No source/result lease,
+// control endpoint, panic, spawn, or pin ownership may follow the G.
 func pNeutralRunnable(g *G, queued bool) bool {
 	return pNeutralRunnableHeader(g, queued) && pNeutralFrameChain(g)
+}
+
+func pNeutralRunnableParkState(state *ParkState) bool {
+	if !validParkState(state) {
+		return false
+	}
+	switch state.phase {
+	case parkIdle:
+		return *state == (ParkState{})
+	case parkMaterialized:
+		return true
+	default:
+		return false
+	}
 }
 
 // initialPNeutralRunnable is the work-sharing admission used immediately
@@ -197,7 +212,7 @@ func pNeutralRunnableHeader(g *G, queued bool) bool {
 		g.taskControlLeases != 0 || g.runAction != ActionInvalid || g.osThreadLockDepth != 0 ||
 		g.pending != (pendingTransition{}) || g.destroyTarget != nil || g.destroyRoot ||
 		g.waiting || g.runP != nil ||
-		g.park != (ParkState{}) || g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
+		!pNeutralRunnableParkState(&g.park) || g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
 		!validLiveTaskStorage(g) || !emptyPanicRecord(&g.panicRecord) || g.panicUnwind {
 		return false
 	}
@@ -216,7 +231,11 @@ func pNeutralRunnableHeader(g *G, queued bool) bool {
 	yielded := active.state == FrameSuspended &&
 		active.header.SuspendReason == uint16(SuspendYield) &&
 		active.header.Lifecycle == uint16(FrameSuspended)
-	return initial || yielded
+	materialized := active.state == FrameSuspended &&
+		active.header.SuspendReason == uint16(SuspendPark) &&
+		active.header.Lifecycle == uint16(FrameSuspended) &&
+		g.park.phase == parkMaterialized
+	return initial || yielded || materialized
 }
 
 func pNeutralFrameChain(g *G) bool {

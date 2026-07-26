@@ -25,7 +25,7 @@ import (
 const (
 	wantParkStateSize     = 40 + 2*unsafe.Sizeof(uintptr(0))
 	wantRunDecisionSize   = 32 + unsafe.Sizeof(uintptr(0))
-	wantWaitSetRecordSize = 8 + 5*unsafe.Sizeof(uintptr(0))
+	wantWaitSetRecordSize = 8 + 6*unsafe.Sizeof(uintptr(0))
 	wantOperationSize     = 40 + 5*unsafe.Sizeof(uintptr(0))
 )
 
