@@ -173,6 +173,8 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 		"coroNativeFleetV1State.execution.Start(limit)",
 		"coroNativeFleetV1State.execution.Seal()",
 		"coroNativeFleetV1State.execution.Retire()",
+		"corofleet.StartFactory()",
+		"corofleet.StopFactory()",
 	} {
 		if !strings.Contains(target, required) {
 			t.Errorf("native fleet target lacks fixed-topology quota lifecycle marker %q", required)
@@ -184,7 +186,12 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 		"getenv(\"GOMAXPROCS\")",
 		"sysconf(_SC_NPROCESSORS_ONLN)",
 		"__llgo_coro_native_fleet_owner_v2((uint32_t)slot)",
+		"llgo_coro_fleet_factory_main_v1",
+		"llgo_coro_fleet_owner_create_direct_v1",
+		"LLGO_CORO_FLEET_FACTORY_REQUESTED_V1",
 		"__llgo_coro_fleet_owner_create_v2(pthread_t *thread, uint32_t slot)",
+		"__llgo_coro_fleet_factory_stop_v1(void)",
+		"pthread_cond_wait(&factory->changed, &factory->mutex)",
 		"(void *)(uintptr_t)slot",
 	} {
 		if !strings.Contains(leaf, required) {

@@ -39,11 +39,26 @@ import (
 //go:linkname OwnerCount C.__llgo_coro_fleet_owner_count_v1
 func OwnerCount(maximum uint32) uint32
 
-// CreateOwner starts one joinable scheduler owner with default pthread
-// attributes. slot is a small scalar pthread argument, never a Go pointer.
-// Thread creation may enter libc, allocator, or collector locks; sync records
-// same-thread return without claiming a bounded nonblocking leaf.
+// StartFactory creates the process-lifetime clean template pthread before any
+// managed Go code can alter inherited per-thread process state.
+//
+//llgo:coro sync
+//go:linkname StartFactory C.__llgo_coro_fleet_factory_start_v1
+func StartFactory() c.Int
+
+// CreateOwner synchronously asks the clean template pthread to start one
+// joinable scheduler owner with default pthread attributes. slot is a small
+// scalar pthread argument, never a Go pointer. In particular, a locked M never
+// creates its own replacement and cannot propagate a modified signal mask,
+// namespace, cwd/fs view, credentials, or similar inherited state.
 //
 //llgo:coro sync
 //go:linkname CreateOwner C.__llgo_coro_fleet_owner_create_v2
 func CreateOwner(thread *pthread.Thread, slot uint32) c.Int
+
+// StopFactory seals the scalar request rendezvous and strongly joins the clean
+// template after every scheduler owner has returned and been joined.
+//
+//llgo:coro sync
+//go:linkname StopFactory C.__llgo_coro_fleet_factory_stop_v1
+func StopFactory() c.Int

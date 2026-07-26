@@ -4,13 +4,14 @@
 
 更新：2026-07-26
 
-当前审查基线：`cpunion/llgo:llvm-coro` @ `19fee142d`
+当前审查基线：`cpunion/llgo:llvm-coro` @ `5e80e4064`
 
 集成状态：Phase 36 hard-cutover、P-neutral result materialization 与 demand-driven
 work sharing、native 固定有界物理 topology、动态 managed-execution quota 和标准
 `runtime.GOMAXPROCS` 接口、generation-bound ownership baton及target-neutral
 active resume detach/restore core已合并；当前实现分支已接通native replacement
-M目录、同P ready/source驱动、嵌套handoff以及channel/timer/poll linked E2E
+M目录、同P ready/source驱动、嵌套handoff以及channel/timer/poll linked E2E，并以
+process-lifetime clean thread factory隔离replacement创建和已锁M的可继承线程状态
 
 关联提案：[Issue #1546](https://github.com/xgo-dev/llgo/issues/1546)
 
@@ -941,9 +942,13 @@ Native已经把该core接到完整物理路径：固定10,000槽BSS M目录、�
 scalar pthread入口、create/claim/return/join、`borrowedWait` publication及公共
 doorbell/timer/poll physical-wait primitive均已落地。replacement保持logical driver Active，
 只借用原P/source和公共reducer；同route channel、timer、socket poll、最后可见子G完成以及
-M0→M1→M2 nested handoff的linked E2E已通过。剩余生产化项是把per-call create/join升级为
-有界standby-M缓存、与`runtime/debug.SetMaxThreads`联动，并覆盖blocked parent遇到
-command shutdown/fatal、callback/reentry和异常退出的完整矩阵；这些不能由当前成功路径外推。
+M0→M1→M2 nested handoff的linked E2E已通过。所有managed-start后的owner pthread都由
+启动期创建、永不执行用户代码的clean factory串行创建；locked M只提交scalar slot并同步等待，
+不会把其signal mask、namespace、cwd/fs view、credentials等可继承状态传播给replacement。
+factory在所有owner strong-join后才停止并自join；原生C并发测试以16个已污染请求线程验证
+隔离和restart/stop线性化。剩余生产化项是把per-call create/join升级为有界standby-M缓存、
+与`runtime/debug.SetMaxThreads`联动，并覆盖blocked parent遇到command shutdown/fatal、
+callback/reentry和异常退出的完整矩阵；这些不能由当前成功路径外推。
 
 ### 11.2 G 状态机
 
@@ -2844,7 +2849,9 @@ active resume先detach到M-local record，generation/owner-epoch baton预留scal
 replacement；原M先释放managed permit，再创建并把route的active-M slot切到replacement，
 后者沿公共reducer服务同一ready/source域。permit必须在线程创建前释放，因为quota
 holder按route而非M计账，child抢跑会被判为同route double-acquire。原M执行C并保留
-物理thread identity，返回后request/ring、strong join replacement、重获permit，再精确restore。单配额同route channel、timer、
+物理thread identity；实际`pthread_create`只由启动期clean factory执行，原M仅同步提交
+scalar M slot，因此其已修改的可继承thread state不会污染replacement。返回后
+request/ring、strong join replacement、重获permit，再精确restore。单配额同route channel、timer、
 socket readiness和nested blocking linked E2E均已通过。当前仍是每次locked call
 create/join一个replacement pthread的正确性实现；standby缓存、`SetMaxThreads`联动、
 blocked parent上的shutdown/fatal和完整callback/entersyscall矩阵未完成，因此仍不能标成
