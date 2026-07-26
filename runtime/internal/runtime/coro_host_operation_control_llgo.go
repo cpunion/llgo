@@ -17,61 +17,6 @@ import (
 	"github.com/goplus/llgo/runtime/internal/coro"
 )
 
-const (
-	CoroHostOperationControlReadV1 uint32 = 1 << iota
-	CoroHostOperationControlWriteV1
-)
-
-const coroHostOperationControlCapacityV1 = 64
-
-type coroHostOperationControlLaneV1 struct {
-	operation coro.OperationID
-	epoch     uint32
-}
-
-type coroHostOperationControlSlotV1 struct {
-	read  coroHostOperationControlLaneV1
-	write coroHostOperationControlLaneV1
-}
-
-// The table is owner-executor state. It retains only exact scalar operation
-// generations, never a G, frame, WaitSetRecord, or buffer pointer.
-var coroHostOperationControlSlotsV1 [coroHostOperationControlCapacityV1]coroHostOperationControlSlotV1
-
-func coroHostOperationControlCellV1(key uintptr, lane uint32) (*coroHostOperationControlLaneV1, bool) {
-	if key == 0 || key > uintptr(len(coroHostOperationControlSlotsV1)) {
-		return nil, false
-	}
-	slot := &coroHostOperationControlSlotsV1[key-1]
-	switch lane {
-	case CoroHostOperationControlReadV1:
-		return &slot.read, true
-	case CoroHostOperationControlWriteV1:
-		return &slot.write, true
-	default:
-		return nil, false
-	}
-}
-
-func coroHostOperationControlBindV1(key uintptr, lane uint32, id coro.OperationID) bool {
-	cell, ok := coroHostOperationControlCellV1(key, lane)
-	if !ok || !id.Valid() || id.Source() != coro.OperationSourceWorker ||
-		cell.operation != (coro.OperationID{}) {
-		return false
-	}
-	cell.operation = id
-	return true
-}
-
-func coroHostOperationControlUnbindV1(key uintptr, lane uint32, id coro.OperationID) bool {
-	cell, ok := coroHostOperationControlCellV1(key, lane)
-	if !ok || cell.operation != id {
-		return false
-	}
-	cell.operation = coro.OperationID{}
-	return true
-}
-
 func coroHostOperationControlAdvanceEpochV1(cell *coroHostOperationControlLaneV1) bool {
 	if cell == nil {
 		return false

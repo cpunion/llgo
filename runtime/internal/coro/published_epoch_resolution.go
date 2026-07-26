@@ -540,7 +540,20 @@ func resolvePublishedEpochPromoteStep(sources *ExecutorSourceSet, p *P, cursor *
 		}
 		switch plan.phase {
 		case resumeCleanupBound:
-			return beginResumeCleanup(wait, plan)
+			switch wait.g.park.phase {
+			case parkReady:
+				return beginResumeCleanup(wait, plan)
+			case parkDetaching:
+				// A composite source may have selected a winner while a
+				// submitted loser still owes physical cancellation. Preserve
+				// the ordinary AwaitingExternal gate; ConsumeParkSet is valid
+				// only after that exact loser detaches and parkReady is reached.
+				if wait.work != waitSetWorkAwaitingExternal {
+					return false
+				}
+			default:
+				return false
+			}
 		case resumeCleanupRuntime:
 			// The unified runner must return ExecutorRunStepMaterialize so the
 			// direct runtime switch can remove exactly one typed queue node.

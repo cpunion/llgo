@@ -15,31 +15,11 @@ import (
 	"github.com/goplus/llgo/runtime/internal/coro"
 )
 
-const coroHostOperationParkMagicV1 uint32 = 0x43484f31 // "CHO1"
-
 const (
 	coroHostOperationResumeSuccessV1 uint32 = iota + 1
 	coroHostOperationResumeTaskAbortV1
 	coroHostOperationResumeShutdownV1
 )
-
-// CoroHostOperationParkV1 is compiler-owned current-frame storage. The host
-// receives only the operation's two-word identity plus copied scalar
-// arguments; it never receives this address, a G, ParkState, or source.
-type CoroHostOperationParkV1 struct {
-	magic     uint32
-	wait      coro.WaitSetRecord
-	ticket    coro.ParkTicket
-	operation coro.OperationID
-}
-
-var coroHostOperationAdapterV1State coro.HostOperationAdapter
-
-func validCoroHostOperationParkV1(state *CoroHostOperationParkV1) bool {
-	return state != nil && state.magic == coroHostOperationParkMagicV1 &&
-		state.ticket.Valid() && state.operation.Valid() &&
-		state.operation.Source() == coro.OperationSourceWorker
-}
 
 func coroHostOperationAbortV1(message string) {
 	coroRuntimeAbort(message)
@@ -84,7 +64,19 @@ func __llgo_coro_host_operation_park_v1(
 	state.ticket = ticket
 	state.operation = operation
 	args := [coro.HostOperationMaxArgsV1]uintptr{a0, a1, a2, a3, a4, a5, a6, a7, a8}
-	if !coro.CommitCurrentExecutorWorkerSubmission(driver, task, operation) ||
+	if !coro.BindWaitSetResumeCleanup(
+		&state.wait,
+		&state.packet,
+		&state.cleanup,
+		coro.ResumeCleanupBinding{
+			Kind:         coro.ResumeCleanupHostOperation,
+			Context:      unsafe.Pointer(state),
+			Entries:      unsafe.Pointer(&state.operation),
+			Count:        1,
+			RuntimeCount: 1,
+			Stride:       unsafe.Sizeof(coro.OperationID{}),
+		},
+	) || !coro.CommitCurrentExecutorWorkerSubmission(driver, task, operation) ||
 		!coroHostOperationAdapterV1State.Submit(operation, opcode, args[:argc]) {
 		coroHostOperationAbortV1("cannot publish coroutine host operation")
 	}
@@ -101,56 +93,40 @@ func __llgo_coro_host_operation_resume_v1(
 	r1, r2, errno *uintptr,
 ) uint32 {
 	state := (*CoroHostOperationParkV1)(storage)
-	if g == nil || !validCoroHostOperationParkV1(state) ||
+	if g == nil || !validMaterializedCoroHostOperationParkV1(state) ||
 		!validCoroHostOperationResultWordsV1(storage, r1, r2, errno) {
 		coroHostOperationAbortV1("invalid coroutine host operation resume ABI")
 		return 0
 	}
 	*r1, *r2, *errno = 0, 0, 0
 	task := (*coro.G)(g)
-	outcome, caseID, lease, cancel, taken := coro.TakeRunDecision(task, state.ticket)
-	if !taken {
-		coroHostOperationAbortV1("invalid coroutine host operation run decision")
-		return 0
-	}
-	driver, _, _, current := coro.CurrentExecutorWorkerDriver(task)
-	if !current {
-		coroHostOperationAbortV1("coroutine host operation resumed without its owner")
-		return 0
-	}
-	discard := outcome == coro.ParkOutcomeCanceled
 	var payload coro.ScalarResultPayloadV1
-	if outcome == coro.ParkOutcomeCompleted {
-		if caseID != 1 || cancel != coro.TaskCancelNone || !lease.Valid() {
+	outcome, caseID, cancel, result, small, taken := coro.TakeResumePacket(
+		task,
+		state.ticket,
+		&state.packet,
+		&payload,
+	)
+	if !taken {
+		coroHostOperationAbortV1("invalid coroutine host operation resume packet")
+		return 0
+	}
+	canceled := outcome == coro.ParkOutcomeCanceled
+	if !canceled {
+		if outcome != coro.ParkOutcomeCompleted || caseID != 1 ||
+			cancel != coro.TaskCancelNone || result != coro.ResumeResultScalar ||
+			small != coro.ResumeSmallInvalid {
 			coroHostOperationAbortV1("invalid completed coroutine host operation")
 			return 0
 		}
-	} else if !discard || caseID != 0 ||
+	} else if caseID != 0 || result != coro.ResumeResultNone ||
+		small != coro.ResumeSmallInvalid ||
 		cancel != coro.TaskCancelAbort && cancel != coro.TaskCancelShutdown {
 		coroHostOperationAbortV1("invalid canceled coroutine host operation")
 		return 0
 	}
-	var output *coro.ScalarResultPayloadV1
-	if !discard {
-		output = &payload
-	}
-	if finish := coro.FinishCurrentExecutorWorkerPark(
-		driver,
-		task,
-		state.operation,
-		lease,
-		discard,
-		output,
-	); !finish.Finished() {
-		coroHostOperationAbortV1("cannot retire coroutine host operation source")
-		return 0
-	}
-	if !coroHostOperationAdapterV1State.Retire(state.operation) {
-		coroHostOperationAbortV1("cannot retire coroutine host operation transport")
-		return 0
-	}
 	*state = CoroHostOperationParkV1{}
-	if discard {
+	if canceled {
 		if cancel == coro.TaskCancelShutdown {
 			return coroHostOperationResumeShutdownV1
 		}

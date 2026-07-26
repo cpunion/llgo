@@ -28,6 +28,8 @@ const (
 	ResumeCleanupInvalid ResumeCleanupKind = iota
 	ResumeCleanupChannelDirect
 	ResumeCleanupChannelSelect
+	ResumeCleanupHostOperation
+	ResumeCleanupHostOperationDeadline
 )
 
 type resumeCleanupPhase uint8
@@ -50,24 +52,24 @@ const (
 //
 // The descriptor is consumed at bind time and is never producer-visible.
 type ResumeCleanupBinding struct {
-	Kind     ResumeCleanupKind
-	Context  unsafe.Pointer
-	Entries  unsafe.Pointer
-	Source   *ChannelOperationSource
-	Claim    *SelectClaim
-	Count    uint32
-	Stride   uintptr
-	IDOffset uintptr
+	Kind         ResumeCleanupKind
+	Context      unsafe.Pointer
+	Entries      unsafe.Pointer
+	Claim        *SelectClaim
+	Count        uint32
+	RuntimeCount uint32
+	Stride       uintptr
+	IDOffset     uintptr
 }
 
 // ResumeCleanupPlan is compiler-spilled continuation state for bounded
 // owner-side materialization. It is not a callback, interface, Future, heap
-// task, or permanent G field. Runtime cleanup advances one logical case per
-// ExecutorRunStepMaterialize; every later core call confirms or recycles at
-// most one exact source generation.
+// task, or permanent G field. Runtime cleanup advances one typed runtime step
+// per ExecutorRunStepMaterialize; every later core call confirms or recycles
+// at most one exact source generation. The runtime-step count and physical
+// source count are deliberately independent.
 type ResumeCleanupPlan struct {
 	packet   *ResumePacket
-	source   *ChannelOperationSource
 	claim    *SelectClaim
 	context  unsafe.Pointer
 	entries  unsafe.Pointer
@@ -76,17 +78,38 @@ type ResumeCleanupPlan struct {
 	stride   uintptr
 	idOffset uintptr
 	count    uint32
+	runtime  uint32
 	index    uint32
 	caseID   uint32
 	outcome  ParkOutcome
 	kind     ResumeCleanupKind
 	phase    resumeCleanupPhase
+	result   ResumeResultKind
 	small    uint8
-	_        [1]byte
 }
 
 func validResumeCleanupKind(kind ResumeCleanupKind) bool {
+	return kind >= ResumeCleanupChannelDirect && kind <= ResumeCleanupHostOperationDeadline
+}
+
+func resumeCleanupUsesChannelClaim(kind ResumeCleanupKind) bool {
 	return kind == ResumeCleanupChannelDirect || kind == ResumeCleanupChannelSelect
+}
+
+func validResumeCleanupPacket(plan *ResumeCleanupPlan, ticket ParkTicket) bool {
+	if plan == nil || plan.packet == nil || plan.packet.state != resumePacketBound ||
+		plan.packet.ticket != ticket || !validParkTicket(ticket) ||
+		plan.packet.source != (OperationID{}) || plan.packet.caseID != 0 ||
+		plan.packet.outcome != ParkOutcomePending ||
+		plan.packet.result != ResumeResultNone ||
+		plan.packet.small != ResumeSmallInvalid {
+		return false
+	}
+	if plan.result == ResumeResultScalar {
+		return (plan.phase == resumeCleanupRecycle || plan.phase == resumeCleanupFinalize) &&
+			plan.packet.scalar.Valid()
+	}
+	return plan.packet.scalar == (ScalarResultPayloadV1{})
 }
 
 func validResumeCleanupRange(entries unsafe.Pointer, count uint32, stride, idOffset uintptr) bool {
@@ -106,6 +129,79 @@ func resumeCleanupIDAt(plan *ResumeCleanupPlan, index uint32) *OperationID {
 	return (*OperationID)(unsafe.Add(plan.entries, uintptr(index)*plan.stride+plan.idOffset))
 }
 
+func executorSupportsResumeCleanupSource(sources *ExecutorSourceSet, id OperationID) bool {
+	if sources == nil || !id.Valid() || id.Route() != sources.route {
+		return false
+	}
+	switch id.Source() {
+	case OperationSourceChannel:
+		return sources.channel != nil
+	case OperationSourceManual:
+		return sources.manual != nil
+	case OperationSourceWorker:
+		return sources.worker != nil
+	case OperationSourceTimer:
+		return sources.timers != nil
+	case OperationSourcePoll:
+		return sources.poll != nil
+	default:
+		return false
+	}
+}
+
+func validResumeCleanupSourceShape(
+	kind ResumeCleanupKind,
+	index uint32,
+	id OperationID,
+) bool {
+	switch kind {
+	case ResumeCleanupChannelDirect, ResumeCleanupChannelSelect:
+		return id == (OperationID{}) || id.Source() == OperationSourceChannel
+	case ResumeCleanupHostOperation:
+		return index == 0 && id.Valid() && id.Source() == OperationSourceWorker
+	case ResumeCleanupHostOperationDeadline:
+		if index == 0 {
+			return id.Valid() && id.Source() == OperationSourceWorker
+		}
+		return index == 1 && (id == (OperationID{}) || id.Source() == OperationSourceTimer)
+	default:
+		return false
+	}
+}
+
+func validResumeCleanupRuntimeShape(binding ResumeCleanupBinding) bool {
+	switch binding.Kind {
+	case ResumeCleanupChannelDirect:
+		return binding.Count == 1 && binding.RuntimeCount == 1 && binding.Claim != nil
+	case ResumeCleanupChannelSelect:
+		return binding.RuntimeCount == binding.Count && binding.Claim != nil
+	case ResumeCleanupHostOperation:
+		return binding.Count == 1 && binding.RuntimeCount == 1 && binding.Claim == nil
+	case ResumeCleanupHostOperationDeadline:
+		return binding.Count == 2 && binding.RuntimeCount == 1 && binding.Claim == nil
+	default:
+		return false
+	}
+}
+
+func validResumeCleanupPlanShape(plan *ResumeCleanupPlan) bool {
+	if plan == nil {
+		return false
+	}
+	switch plan.kind {
+	case ResumeCleanupChannelDirect:
+		return plan.count == 1 && plan.runtime == 1 && plan.claim != nil
+	case ResumeCleanupChannelSelect:
+		return plan.runtime == plan.count && plan.claim != nil
+	case ResumeCleanupHostOperation:
+		return plan.count == 1 && plan.runtime == 1 && plan.claim == nil
+	case ResumeCleanupHostOperationDeadline:
+		return plan.count == 2 && plan.runtime == 1 && plan.claim == nil
+	default:
+		return false
+	}
+}
+
 func validResumeCleanupBindingForWait(
 	record *WaitSetRecord,
 	packet *ResumePacket,
@@ -114,15 +210,17 @@ func validResumeCleanupBindingForWait(
 ) bool {
 	if record == nil || packet == nil || plan == nil || *packet != (ResumePacket{}) ||
 		*plan != (ResumeCleanupPlan{}) || !validResumeCleanupKind(binding.Kind) ||
-		binding.Context == nil || binding.Source == nil || binding.Claim == nil ||
+		binding.Context == nil || !validResumeCleanupRuntimeShape(binding) ||
 		!validResumeCleanupRange(binding.Entries, binding.Count, binding.Stride, binding.IDOffset) ||
 		record.g == nil || record.g.runP == nil {
 		return false
 	}
 	p, state := record.g.runP, &record.g.park
-	if !validChannelOperationOwner(binding.Source, p) || p.channelSource != binding.Source ||
-		selectClaimLoad(binding.Claim) != selectClaimOpen || state.expected == 0 ||
-		state.expected > binding.Count {
+	sources := &p.executor.sources
+	if !validExecutorSourceSet(sources, p) || state.expected == 0 || state.expected > binding.Count ||
+		resumeCleanupUsesChannelClaim(binding.Kind) &&
+			(!validChannelOperationOwner(sources.channel, p) || p.channelSource != sources.channel ||
+				selectClaimLoad(binding.Claim) != selectClaimOpen) {
 		return false
 	}
 	physical := uint32(0)
@@ -131,32 +229,53 @@ func validResumeCleanupBindingForWait(
 			binding.Entries,
 			uintptr(index)*binding.Stride+binding.IDOffset,
 		))
+		if !validResumeCleanupSourceShape(binding.Kind, index, *id) {
+			return false
+		}
 		if *id == (OperationID{}) {
 			continue
 		}
-		slot, ok := channelOperationSlotFor(binding.Source, *id)
-		if !ok || preemptLoad(&slot.generation) != id.Generation ||
-			preemptLoad(&slot.state) != uint32(producerSourceActive) ||
-			preemptLoad(&slot.external) != uint32(channelExternalExposed) ||
-			slot.claim != binding.Claim || slot.record.id != *id ||
-			slot.record.phase != operationActive || slot.record.link.operation != &slot.record ||
-			slot.record.link.park != state || slot.record.link.wait != record ||
-			slot.record.link.ticket != record.ticket || slot.record.link.caseID != index+1 {
+		if !executorSupportsResumeCleanupSource(sources, *id) {
 			return false
+		}
+		if id.Source() == OperationSourceChannel {
+			slot, ok := channelOperationSlotFor(sources.channel, *id)
+			if !ok || preemptLoad(&slot.generation) != id.Generation ||
+				preemptLoad(&slot.state) != uint32(producerSourceActive) ||
+				preemptLoad(&slot.external) != uint32(channelExternalExposed) ||
+				slot.claim != binding.Claim || slot.record.id != *id ||
+				slot.record.phase != operationActive || slot.record.link.operation != &slot.record ||
+				slot.record.link.park != state || slot.record.link.wait != record ||
+				slot.record.link.ticket != record.ticket || slot.record.link.caseID != index+1 {
+				return false
+			}
 		}
 		physical++
 	}
 	if physical != state.expected {
 		return false
 	}
-	return binding.Kind != ResumeCleanupChannelDirect ||
-		binding.Count == 1 && physical == 1
+	linked := uint32(0)
+	for link := state.head; link != nil; link = link.next {
+		if link.caseID == 0 || link.caseID > binding.Count || link.operation == nil {
+			return false
+		}
+		id := (*OperationID)(unsafe.Add(
+			binding.Entries,
+			uintptr(link.caseID-1)*binding.Stride+binding.IDOffset,
+		))
+		if *id != link.operation.id || link.operation.link.wait != record ||
+			link.operation.link.ticket != record.ticket {
+			return false
+		}
+		linked++
+	}
+	return linked == physical
 }
 
-// BindWaitSetResumeCleanup opts a typed channel park into owner-side
-// materialization after all exact source endpoints are Exposed and before any
-// hchan queue node is made reachable. The complete range is audited once here;
-// later reductions use only the retained fixed descriptor and exact IDs.
+// BindWaitSetResumeCleanup opts a typed park into owner-side materialization.
+// The complete source range and closed runtime-hook shape are audited once
+// here; later reductions use only the retained fixed descriptor and exact IDs.
 func BindWaitSetResumeCleanup(
 	record *WaitSetRecord,
 	packet *ResumePacket,
@@ -183,7 +302,6 @@ func BindWaitSetResumeCleanup(
 	}
 	*plan = ResumeCleanupPlan{
 		packet:   packet,
-		source:   binding.Source,
 		claim:    binding.Claim,
 		context:  binding.Context,
 		entries:  binding.Entries,
@@ -191,6 +309,7 @@ func BindWaitSetResumeCleanup(
 		stride:   binding.Stride,
 		idOffset: binding.IDOffset,
 		count:    binding.Count,
+		runtime:  binding.RuntimeCount,
 		kind:     binding.Kind,
 		phase:    resumeCleanupBound,
 	}
@@ -202,22 +321,24 @@ func BindWaitSetResumeCleanup(
 func validResumeCleanupPlan(record *WaitSetRecord, plan *ResumeCleanupPlan) bool {
 	if record == nil || plan == nil || record.resume != unsafe.Pointer(plan) ||
 		record.resumeKind != resumeBindingCleanup || plan.packet == nil ||
-		!validBoundResumePacket(plan.packet, record.ticket) ||
-		plan.source == nil || plan.claim == nil || plan.context == nil ||
+		!validResumeCleanupPacket(plan, record.ticket) ||
+		plan.context == nil ||
 		plan.ticket != record.ticket || !validResumeCleanupKind(plan.kind) ||
 		!validResumeCleanupRange(plan.entries, plan.count, plan.stride, plan.idOffset) ||
-		plan.index > plan.count || plan.outcome > ParkOutcomeDefault {
+		!validResumeCleanupPlanShape(plan) || plan.outcome > ParkOutcomeDefault ||
+		resumeCleanupUsesChannelClaim(plan.kind) != (plan.claim != nil) {
 		return false
 	}
 	switch plan.phase {
 	case resumeCleanupBound:
 		return plan.index == 0 && plan.caseID == 0 && plan.outcome == ParkOutcomePending &&
-			plan.lease == (OperationResultLease{}) && plan.small == ResumeSmallInvalid &&
+			plan.lease == (OperationResultLease{}) && plan.result == ResumeResultNone &&
+			plan.small == ResumeSmallInvalid &&
 			record.g != nil &&
 			(record.g.park.phase == parkParked || record.g.park.phase == parkDetaching ||
 				record.g.park.phase == parkReady)
 	case resumeCleanupRuntime:
-		return plan.index < plan.count && plan.outcome != ParkOutcomePending &&
+		return plan.index < plan.runtime && plan.outcome != ParkOutcomePending &&
 			record.g != nil && record.g.park.phase == parkConsumed
 	case resumeCleanupConfirm, resumeCleanupRecycle:
 		return plan.index < plan.count && plan.outcome != ParkOutcomePending &&
@@ -297,32 +418,127 @@ func pendingResumeCleanupStep(driver *ExecutorDriver) (ResumeCleanupStep, bool) 
 	}, true
 }
 
-// CommitResumeCleanupStep completes the exact outstanding typed runtime case.
-// small is zero for every loser/canceled case and is the closed runtime status
-// for the physical winner.
+// CommitResumeCleanupStep completes the exact outstanding typed runtime step.
+// small is invalid for source-neutral hooks. Channel hooks alone publish the
+// closed runtime wait status for their physical winner.
 func CommitResumeCleanupStep(step ResumeCleanupStep, small uint8) bool {
 	plan := step.plan
 	if plan == nil || plan.phase != resumeCleanupRuntime || plan.index != step.Index ||
 		plan.kind != step.Kind || plan.context != step.Context ||
 		plan.caseID != step.WinnerCase || plan.outcome != step.Outcome ||
-		step.Index >= plan.count {
+		step.Index >= plan.runtime {
 		return false
 	}
-	selected := plan.outcome == ParkOutcomeCompleted && plan.caseID == plan.index+1
-	if selected {
-		if small == ResumeSmallInvalid || plan.small != ResumeSmallInvalid {
+	if resumeCleanupUsesChannelClaim(plan.kind) {
+		selected := plan.outcome == ParkOutcomeCompleted && plan.caseID == plan.index+1
+		if selected {
+			if small == ResumeSmallInvalid || plan.small != ResumeSmallInvalid {
+				return false
+			}
+			plan.small = small
+		} else if small != ResumeSmallInvalid {
 			return false
 		}
-		plan.small = small
 	} else if small != ResumeSmallInvalid {
 		return false
 	}
 	plan.index++
-	if plan.index == plan.count {
+	if plan.index == plan.runtime {
 		plan.index = 0
 		plan.phase = resumeCleanupConfirm
 	}
 	return true
+}
+
+func confirmResumeCleanupOperation(
+	sources *ExecutorSourceSet,
+	p *P,
+	id OperationID,
+) bool {
+	if !executorSupportsResumeCleanupSource(sources, id) {
+		return false
+	}
+	switch id.Source() {
+	case OperationSourceChannel:
+		return sources.channel.ConfirmQuiesced(p, id)
+	case OperationSourceManual:
+		return sources.manual.ConfirmQuiesced(p, id)
+	case OperationSourceWorker:
+		return sources.worker.ConfirmQuiesced(p, id)
+	case OperationSourceTimer, OperationSourcePoll:
+		return true
+	default:
+		return false
+	}
+}
+
+func takeResumeCleanupResult(
+	sources *ExecutorSourceSet,
+	p *P,
+	id OperationID,
+	lease OperationResultLease,
+	scalar *ScalarResultPayloadV1,
+	small *uint8,
+) (ResumeResultKind, bool) {
+	if !executorSupportsResumeCleanupSource(sources, id) || !lease.Valid() ||
+		scalar == nil || small == nil || *scalar != (ScalarResultPayloadV1{}) {
+		return ResumeResultNone, false
+	}
+	switch id.Source() {
+	case OperationSourceChannel:
+		return ResumeResultChannel, *small != ResumeSmallInvalid &&
+			sources.channel.TakeResult(p, lease)
+	case OperationSourceManual:
+		return ResumeResultNone, *small == ResumeSmallInvalid &&
+			sources.manual.TakeResult(p, lease)
+	case OperationSourceWorker:
+		return ResumeResultScalar, *small == ResumeSmallInvalid &&
+			sources.worker.TakeResult(p, lease, scalar)
+	case OperationSourceTimer:
+		handle := TimerRegistrationHandle{Slot: id.LocalSlot(), Generation: id.Generation}
+		return ResumeResultNone, *small == ResumeSmallInvalid &&
+			sources.timers.TakeTimerV2Result(p, handle, lease)
+	case OperationSourcePoll:
+		handle := PollOperationHandle{Slot: id.LocalSlot(), Generation: id.Generation}
+		result, ok := sources.poll.TakePollOperationV2Result(p, handle, lease)
+		if !ok || result < PollOperationReady || result > PollOperationTimeout {
+			return ResumeResultNone, false
+		}
+		*small = uint8(result)
+		return ResumeResultPoll, true
+	default:
+		return ResumeResultNone, false
+	}
+}
+
+func recycleResumeCleanupOperation(
+	sources *ExecutorSourceSet,
+	p *P,
+	id OperationID,
+) bool {
+	if !executorSupportsResumeCleanupSource(sources, id) {
+		return false
+	}
+	switch id.Source() {
+	case OperationSourceChannel:
+		return sources.channel.Recycle(p, id)
+	case OperationSourceManual:
+		return sources.manual.Recycle(p, id)
+	case OperationSourceWorker:
+		return sources.worker.Recycle(p, id)
+	case OperationSourceTimer:
+		return sources.timers.RecycleTimerV2(
+			p,
+			TimerRegistrationHandle{Slot: id.LocalSlot(), Generation: id.Generation},
+		)
+	case OperationSourcePoll:
+		return sources.poll.RecyclePollOperationV2(
+			p,
+			PollOperationHandle{Slot: id.LocalSlot(), Generation: id.Generation},
+		)
+	default:
+		return false
+	}
 }
 
 // advanceResumeCleanupCore performs one source-neutral bounded reduction after
@@ -334,14 +550,15 @@ func advanceResumeCleanupCore(
 	plan *ResumeCleanupPlan,
 ) (finalized bool, ok bool) {
 	if sources == nil || p == nil || !validExecutorSourceSet(sources, p) ||
-		sources.channel != plan.source || !validResumeCleanupPlan(record, plan) {
+		!validResumeCleanupPlan(record, plan) {
 		return false, false
 	}
 	switch plan.phase {
 	case resumeCleanupConfirm:
 		if plan.index < plan.count {
 			id := resumeCleanupIDAt(plan, plan.index)
-			if id == nil || *id != (OperationID{}) && !plan.source.ConfirmQuiesced(p, *id) {
+			if id == nil || *id != (OperationID{}) &&
+				!confirmResumeCleanupOperation(sources, p, *id) {
 				return false, false
 			}
 			plan.index++
@@ -352,22 +569,34 @@ func advanceResumeCleanupCore(
 			return false, true
 		}
 	case resumeCleanupClaim:
-		if !plan.source.ResetSelectClaim(p, plan.claim) {
+		if plan.claim != nil && !sources.channel.ResetSelectClaim(p, plan.claim) {
 			return false, false
 		}
 		plan.phase = resumeCleanupResult
 		return false, true
 	case resumeCleanupResult:
 		if plan.lease.Valid() {
-			var released bool
-			if plan.outcome == ParkOutcomeCompleted {
-				released = plan.source.TakeResult(p, plan.lease)
-			} else {
-				released = plan.source.DiscardResult(p, plan.lease)
-			}
-			if !released {
+			if plan.outcome != ParkOutcomeCompleted || plan.caseID == 0 {
 				return false, false
 			}
+			id := resumeCleanupIDAt(plan, plan.caseID-1)
+			if id == nil || *id == (OperationID{}) {
+				return false, false
+			}
+			result, taken := takeResumeCleanupResult(
+				sources,
+				p,
+				*id,
+				plan.lease,
+				&plan.packet.scalar,
+				&plan.small,
+			)
+			if !taken {
+				return false, false
+			}
+			plan.result = result
+		} else if plan.outcome == ParkOutcomeCompleted {
+			return false, false
 		}
 		plan.lease = OperationResultLease{}
 		plan.phase = resumeCleanupRecycle
@@ -379,7 +608,7 @@ func advanceResumeCleanupCore(
 				return false, false
 			}
 			if *id != (OperationID{}) {
-				if !plan.source.Recycle(p, *id) {
+				if !recycleResumeCleanupOperation(sources, p, *id) {
 					return false, false
 				}
 				*id = OperationID{}
@@ -392,20 +621,20 @@ func advanceResumeCleanupCore(
 			return false, true
 		}
 	case resumeCleanupFinalize:
-		if plan.outcome == ParkOutcomeCompleted && plan.small == ResumeSmallInvalid ||
-			plan.outcome != ParkOutcomeCompleted && plan.small != ResumeSmallInvalid {
+		if plan.outcome != ParkOutcomeCompleted &&
+			(plan.result != ResumeResultNone || plan.packet.scalar != (ScalarResultPayloadV1{}) ||
+				plan.small != ResumeSmallInvalid) {
 			return false, false
 		}
-		packet, ticket, outcome, caseID, small := plan.packet, plan.ticket, plan.outcome, plan.caseID, plan.small
+		packet := plan.packet
+		ticket, outcome, caseID := plan.ticket, plan.outcome, plan.caseID
+		result, scalar, small := plan.result, packet.scalar, plan.small
 		if !materializedParkState(&record.g.park, ticket, outcome, caseID) {
 			return false, false
 		}
-		result := ResumeResultNone
-		if outcome == ParkOutcomeCompleted {
-			result = ResumeResultChannel
-		}
 		*packet = ResumePacket{
 			ticket:  ticket,
+			scalar:  scalar,
 			caseID:  caseID,
 			outcome: outcome,
 			result:  result,
