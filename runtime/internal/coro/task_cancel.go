@@ -201,6 +201,8 @@ func validRegisteredReleasableParkHeader(state *ParkState) bool {
 		default:
 			return false
 		}
+	case parkMaterialized:
+		return validMaterializedParkHeader(state)
 	case parkDelivered:
 		return validParkTicket(state.ticket) && state.expected == 0 && state.attached == 0 &&
 			state.seed == 0 && !state.hasDefault && state.cancelKind == ParkCancelNone &&
@@ -314,7 +316,7 @@ func applyTaskCancellationToParkOwned(g *G, kind TaskCancelKind, proof taskCance
 			g.park.cancelKind = parkKind
 		}
 		return true
-	case parkDetaching, parkReady:
+	case parkDetaching, parkReady, parkMaterialized:
 		return true
 	default:
 		return false

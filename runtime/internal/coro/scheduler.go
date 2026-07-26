@@ -488,7 +488,8 @@ func validRunnableParkState(state *ParkState) bool {
 	if !validParkState(state) {
 		return false
 	}
-	return state.phase == parkIdle || state.phase == parkConsumed || state.phase == parkDelivered || state.phase == parkReady
+	return state.phase == parkIdle || state.phase == parkConsumed || state.phase == parkDelivered ||
+		state.phase == parkReady || state.phase == parkMaterialized
 }
 
 // validRunnableRunAction distinguishes an ordinary runnable suspension from a

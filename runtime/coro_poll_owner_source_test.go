@@ -85,7 +85,7 @@ func TestCoroPollOwnerFailStopABIAndCatalogSource(t *testing.T) {
 			name:      "__llgo_coro_poll_resume_v2",
 			params:    []string{"unsafe.Pointer", "unsafe.Pointer"},
 			result:    "uint32",
-			delegates: "coro.FinishCurrentExecutorPollPark",
+			delegates: "coro.TakeResumePacket",
 			failStop:  true,
 		},
 		{
@@ -140,7 +140,9 @@ func TestCoroPollOwnerFailStopABIAndCatalogSource(t *testing.T) {
 		"coroTargetPostPollOperationV2(",
 		"coro.CurrentExecutorPollDriver(",
 		"coro.PrepareCurrentExecutorPollPark(",
-		"coro.FinishCurrentExecutorPollPark(",
+		"coro.BindSingleWaitSetResumePacket(",
+		"coro.TakeResumePacket(",
+		"packet    coro.ResumePacket",
 		"coroPollDescPublishOperationV1(",
 		"coroPollDescClearOperationV1(",
 		"coroPollDescLoadOperationV1(",
@@ -166,6 +168,8 @@ func TestCoroPollOwnerFailStopABIAndCatalogSource(t *testing.T) {
 		"coroProgramFindActivePollSnapshotV2(",
 		"coro.SnapshotExecutorPollOperation(",
 		"coro.UpdateExecutorPollDeadlineExact(",
+		"coro.TakeRunDecision(",
+		"coro.FinishCurrentExecutorPollPark(",
 	} {
 		if strings.Contains(ownerText, obsolete) {
 			t.Errorf("%s retains obsolete Poll V1 wait ABI %q", ownerSource, obsolete)

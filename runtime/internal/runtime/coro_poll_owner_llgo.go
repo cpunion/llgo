@@ -44,6 +44,7 @@ type CoroPollParkV2 struct {
 	interest  coro.PollInterest
 	deadline  int64
 	wait      coro.WaitSetRecord
+	packet    coro.ResumePacket
 	ticket    coro.ParkTicket
 	poll      coro.PollOperationHandle
 	operation coro.OperationID
@@ -118,6 +119,10 @@ func __llgo_coro_poll_park_v2(
 	state.poll = poll
 	state.operation = operation
 	state.executor = executor
+	if !coro.BindSingleWaitSetResumePacket(&state.wait, &state.packet, operation) {
+		coroPollAbortV2("cannot bind coroutine Poll V2 resume packet")
+		return
+	}
 	closing, published := coroPollDescPublishOperationV1(context, pollInterest, operation)
 	if !published {
 		coroPollAbortV2("cannot publish coroutine Poll V2 descriptor operation")
@@ -145,8 +150,10 @@ func __llgo_coro_poll_park_v2(
 	}
 }
 
-// __llgo_coro_poll_resume_v2 consumes the exact decision and releases the
-// winner result (or discarded late winner) before recycling source storage.
+// __llgo_coro_poll_resume_v2 consumes the frame-local result packet. The old
+// owner already copied or discarded the Poll result and recycled the exact
+// source generation. Descriptor cleanup below uses only the retained opaque
+// scalar context and remains valid after a P-neutral transfer.
 //
 //export __llgo_coro_poll_resume_v2
 func __llgo_coro_poll_resume_v2(g, storage unsafe.Pointer) uint32 {
@@ -156,42 +163,31 @@ func __llgo_coro_poll_resume_v2(g, storage unsafe.Pointer) uint32 {
 		return 0
 	}
 	task := (*coro.G)(g)
-	outcome, caseID, lease, cancel, taken := coro.TakeRunDecision(task, state.ticket)
+	outcome, caseID, cancel, resultKind, result, taken := coro.TakeResumePacket(
+		task,
+		state.ticket,
+		&state.packet,
+		nil,
+	)
 	if !taken {
 		coroPollAbortV2("invalid coroutine Poll V2 run decision")
 		return 0
 	}
-	driver, executor, route, ok := coro.CurrentExecutorPollDriver(task)
-	if !ok || executor != state.executor || route != state.operation.Route() {
-		coroPollAbortV2("coroutine Poll V2 resumed on the wrong source")
-		return 0
-	}
-	discard := outcome == coro.ParkOutcomeCanceled
 	status := uint32(0)
 	switch {
-	case outcome == coro.ParkOutcomeCompleted && caseID == 1 && lease.Valid() && cancel == coro.TaskCancelNone:
-		discard = false
-	case outcome == coro.ParkOutcomeCanceled && caseID == 0 && cancel == coro.TaskCancelNone && !lease.Valid():
+	case outcome == coro.ParkOutcomeCompleted && caseID == 1 && cancel == coro.TaskCancelNone &&
+		resultKind == coro.ResumeResultPoll && result != coro.PollOperationResultInvalid:
+	case outcome == coro.ParkOutcomeCanceled && caseID == 0 && cancel == coro.TaskCancelNone &&
+		resultKind == coro.ResumeResultNone && result == coro.PollOperationResultInvalid:
 		status = coroPollResumeOperationCanceledV2
-	case outcome == coro.ParkOutcomeCanceled && caseID == 0 && cancel == coro.TaskCancelAbort:
+	case outcome == coro.ParkOutcomeCanceled && caseID == 0 && cancel == coro.TaskCancelAbort &&
+		resultKind == coro.ResumeResultNone && result == coro.PollOperationResultInvalid:
 		status = coroPollResumeTaskAbortV2
-	case outcome == coro.ParkOutcomeCanceled && caseID == 0 && cancel == coro.TaskCancelShutdown:
+	case outcome == coro.ParkOutcomeCanceled && caseID == 0 && cancel == coro.TaskCancelShutdown &&
+		resultKind == coro.ResumeResultNone && result == coro.PollOperationResultInvalid:
 		status = coroPollResumeShutdownV2
 	default:
 		coroPollAbortV2("unsupported coroutine Poll V2 run decision")
-		return 0
-	}
-	result, finished := coro.FinishCurrentExecutorPollPark(
-		driver,
-		task,
-		state.executor,
-		state.poll,
-		state.operation,
-		lease,
-		discard,
-	)
-	if !finished {
-		coroPollAbortV2("cannot retire coroutine Poll V2 source")
 		return 0
 	}
 	if !coroPollDescClearOperationV1(state.context, state.interest, state.operation) {

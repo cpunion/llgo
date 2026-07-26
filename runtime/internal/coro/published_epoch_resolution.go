@@ -543,7 +543,7 @@ func resolvePublishedEpochPromoteStep(sources *ExecutorSourceSet, p *P, cursor *
 		wait.work = waitSetWorkResolving
 		switch wait.g.park.phase {
 		case parkReady:
-			if !promoteReadyWaitSet(p, wait) {
+			if !promoteReadyWaitSet(sources, p, wait) {
 				return false
 			}
 			step.promoted = 1

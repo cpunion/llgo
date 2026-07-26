@@ -189,9 +189,10 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 	for _, required := range []string{
 		"coro.CurrentExecutorWorkerDriver(task)",
 		"coro.PrepareCurrentExecutorWorkerPark(",
-		"coro.FinishCurrentExecutorWorkerPark(",
+		"coro.BindSingleWaitSetResumePacket(",
+		"coro.TakeResumePacket(",
 		"coroReserveNativeWorkerSubmissionV1(executor, route)",
-		"ConsumeParkSet then deliberately returns Canceled with the winner lease",
+		"packet    coro.ResumePacket",
 	} {
 		if !strings.Contains(owner, required) {
 			t.Errorf("%s lacks current-owner worker marker %q", runtimeCoroWorkerOwnerSource, required)
@@ -202,6 +203,8 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 		"coroProgramReserveNativeWorkerSubmissionV1",
 		"coroProgramCancelNativeWorkerSubmissionV1",
 		"coroProgramCommitNativeWorkerSubmissionV1",
+		"coro.TakeRunDecision(",
+		"coro.FinishCurrentExecutorWorkerPark(",
 	} {
 		if strings.Contains(owner, forbidden) {
 			t.Errorf("%s retained singleton owner selection %q", runtimeCoroWorkerOwnerSource, forbidden)
