@@ -18,7 +18,10 @@
 
 package runtime
 
-import "github.com/goplus/llgo/runtime/internal/coro"
+import (
+	"github.com/goplus/llgo/runtime/internal/coro"
+	"github.com/goplus/llgo/runtime/internal/corofleet"
+)
 
 type coroNativeFleetTargetLifecycleV1 uint8
 
@@ -124,13 +127,20 @@ func coroTargetExecutorStartV1(handle coro.ExecutorHandle) bool {
 		coroRuntimeAbort("native coroutine M directory start failed")
 		return false
 	}
+	if corofleet.StartFactory() != 0 {
+		state.lifecycle = coroNativeFleetTargetFailedV1
+		coroRuntimeAbort("native coroutine clean M factory start failed")
+		return false
+	}
 	if !coroNativeWorkerPoolStartFleetV1() {
+		_ = corofleet.StopFactory()
 		state.lifecycle = coroNativeFleetTargetFailedV1
 		coroRuntimeAbort("native coroutine fleet worker start failed")
 		return false
 	}
 	if !coroNativeFleetPhysicalOwnersStartV1() {
 		_ = coroNativeWorkerPoolStopFleetV1()
+		_ = corofleet.StopFactory()
 		state.lifecycle = coroNativeFleetTargetFailedV1
 		coroRuntimeAbort("native coroutine fleet peer owners start failed")
 		return false
@@ -266,7 +276,8 @@ func coroTargetBeginExecutorCloseV1(handle coro.ExecutorHandle, epoch uint32) co
 	if _, sealed := coroNativeFleetV1State.execution.Seal(); !sealed ||
 		!coroNativeFleetV1State.execution.Quiesced() ||
 		!coroNativeFleetV1State.execution.Retire() ||
-		!coroNativeWorkerPoolStopFleetV1() {
+		!coroNativeWorkerPoolStopFleetV1() ||
+		corofleet.StopFactory() != 0 {
 		return coroTargetDispatchInvalidV1
 	}
 	state.lifecycle = coroNativeFleetTargetClosingV1
