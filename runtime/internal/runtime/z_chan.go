@@ -603,6 +603,48 @@ func ChanClose(p *Chan) {
 	}
 }
 
+func dequeueClosedRecvStepLocked(p *Chan) coroChanQueueStepV1 {
+	if p == nil || !p.closed {
+		return coroChanQueueInvalidV1
+	}
+	w := p.recvq.dequeue()
+	if w == nil {
+		return coroChanQueueIdleV1
+	}
+	switch result := completeRecvWaiter(w, nil, p.elemsize, waitRecvClosed); result {
+	case coroChanMatchCommitted:
+		return coroChanQueueCommittedV1
+	case coroChanMatchDiscarded:
+		return coroChanQueueDiscardedV1
+	case coroChanMatchRetry:
+		p.recvq.enqueueFront(w)
+		return coroChanQueueBlockedV1
+	default:
+		return coroChanQueueInvalidV1
+	}
+}
+
+func dequeueClosedSendStepLocked(p *Chan) coroChanQueueStepV1 {
+	if p == nil || !p.closed {
+		return coroChanQueueInvalidV1
+	}
+	w := p.sendq.dequeue()
+	if w == nil {
+		return coroChanQueueIdleV1
+	}
+	switch result := completeSendWaiter(w, waitSendClosed); result {
+	case coroChanMatchCommitted:
+		return coroChanQueueCommittedV1
+	case coroChanMatchDiscarded:
+		return coroChanQueueDiscardedV1
+	case coroChanMatchRetry:
+		p.sendq.enqueueFront(w)
+		return coroChanQueueBlockedV1
+	default:
+		return coroChanQueueInvalidV1
+	}
+}
+
 // drainClosedChanWaitersLocked publishes every currently claimable waiter.
 // Claim contention is not corruption: the competing select/cancel owner will
 // eventually resume and remove that exact node. Its resume tail calls this
@@ -610,36 +652,29 @@ func ChanClose(p *Chan) {
 // already-closed channel.
 func drainClosedChanWaitersLocked(p *Chan) bool {
 	for {
-		w := p.recvq.dequeue()
-		if w == nil {
-			break
-		}
-		switch result := completeRecvWaiter(w, nil, p.elemsize, waitRecvClosed); result {
-		case coroChanMatchCommitted, coroChanMatchDiscarded:
+		switch dequeueClosedRecvStepLocked(p) {
+		case coroChanQueueCommittedV1, coroChanQueueDiscardedV1:
 			continue
-		case coroChanMatchRetry:
-			p.recvq.enqueueFront(w)
+		case coroChanQueueBlockedV1:
 			return true
+		case coroChanQueueIdleV1:
+			goto send
 		default:
 			return false
 		}
 	}
+
+send:
 	for {
-		w := p.sendq.dequeue()
-		if w == nil {
-			break
-		}
-		switch result := completeSendWaiter(w, waitSendClosed); result {
-		case coroChanMatchCommitted, coroChanMatchDiscarded:
+		switch dequeueClosedSendStepLocked(p) {
+		case coroChanQueueCommittedV1, coroChanQueueDiscardedV1:
 			continue
-		case coroChanMatchRetry:
-			p.sendq.enqueueFront(w)
+		case coroChanQueueIdleV1, coroChanQueueBlockedV1:
 			return true
 		default:
 			return false
 		}
 	}
-	return true
 }
 
 func blockForever() {
