@@ -18,7 +18,9 @@
 #define LLGO_CORO_FLEET_OWNER_V1_H
 
 #include <pthread.h>
+#include <stdint.h>
 
-int __llgo_coro_fleet_owner_create_v1(pthread_t *thread);
+uint32_t __llgo_coro_fleet_owner_count_v1(uint32_t maximum);
+int __llgo_coro_fleet_owner_create_v2(pthread_t *thread, uint32_t route);
 
 #endif

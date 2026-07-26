@@ -40,11 +40,13 @@ type coroNativeFleetTargetStateV1 struct {
 var coroNativeFleetTargetV1State coroNativeFleetTargetStateV1
 
 func coroNativeFleetActiveDomainForRouteV1(route coro.RouteID) (*coroNativeFleetDomainV1, bool) {
+	fleet := &coroNativeFleetV1State
 	if coroNativeFleetTargetV1State.lifecycle != coroNativeFleetTargetActiveV1 ||
-		!route.Valid() || uint32(route) > coroNativeFleetDomainCapacityV1 {
+		fleet.lifecycle != coroNativeFleetActiveV1 || !route.Valid() ||
+		uint32(route) > fleet.domainCount {
 		return nil, false
 	}
-	domain := &coroNativeFleetV1State.domains[uint32(route)-1]
+	domain := &fleet.domains[uint32(route)-1]
 	if domain.lifecycle != coroNativeFleetDomainActiveV1 ||
 		domain.handle.Route != uint32(route) || !domain.handle.Valid() {
 		return nil, false
@@ -83,10 +85,10 @@ func coroTargetConsumeExecutorRunV2(handle coro.ExecutorHandle, epoch uint32) bo
 	return true
 }
 
-// CoroNativePollServerDescriptorV1 recognizes both fixed route doorbells. It
-// exposes descriptor ownership only; neither fd is a scheduler/P identity.
+// CoroNativePollServerDescriptorV1 recognizes every selected route doorbell.
+// It exposes descriptor ownership only; no fd is a scheduler/P identity.
 func CoroNativePollServerDescriptorV1(fd uintptr) bool {
-	for index := uint32(0); index < coroNativeFleetDomainCapacityV1; index++ {
+	for index := uint32(0); index < coroNativeFleetV1State.domainCount; index++ {
 		if coroNativeFleetV1State.domains[index].doorbell.OwnsDescriptor(fd) {
 			return true
 		}
@@ -96,9 +98,10 @@ func CoroNativePollServerDescriptorV1(fd uintptr) bool {
 
 func coroTargetExecutorStartV1(handle coro.ExecutorHandle) bool {
 	state := &coroNativeFleetTargetV1State
+	count, countOK := coroNativeFleetPhysicalOwnerCountV1()
 	if state.lifecycle != coroNativeFleetTargetUnusedV1 || state.program != (coro.ExecutorFleetHandle{}) ||
 		handle != coroProgramExecutorHandleV1State || handle.Slot == 0 || handle.Generation == 0 ||
-		!coroNativeWorkerPoolCanReleaseV1() || !coroNativeFleetStartProgramV1() {
+		!countOK || !coroNativeWorkerPoolCanReleaseV1() || !coroNativeFleetStartProgramV1(count) {
 		return false
 	}
 	program, programOK := coroNativeFleetHandleV1(0)
@@ -114,10 +117,10 @@ func coroTargetExecutorStartV1(handle coro.ExecutorHandle) bool {
 		coroRuntimeAbort("native coroutine fleet worker start failed")
 		return false
 	}
-	if !coroNativeFleetPhysicalOwnerStartV1() {
+	if !coroNativeFleetPhysicalOwnersStartV1() {
 		_ = coroNativeWorkerPoolStopFleetV1()
 		state.lifecycle = coroNativeFleetTargetFailedV1
-		coroRuntimeAbort("native coroutine fleet peer owner start failed")
+		coroRuntimeAbort("native coroutine fleet peer owners start failed")
 		return false
 	}
 	return true
@@ -190,7 +193,7 @@ func coroTargetRequestChannelOperationV1(id coro.OperationID) bool {
 // owns no producer callback: its next owner scan observes the retained control
 // pointer mismatch and performs the ordinary ParkSet cancellation.
 func coroTargetRequestControlledTimerV2(route coro.RouteID) bool {
-	if !route.Valid() || uint32(route) > coroNativeFleetDomainCapacityV1 {
+	if !route.Valid() || uint32(route) > coroNativeFleetV1State.domainCount {
 		return false
 	}
 	domain := &coroNativeFleetV1State.domains[uint32(route)-1]
@@ -245,19 +248,46 @@ func coroTargetBeginExecutorCloseV1(handle coro.ExecutorHandle, epoch uint32) co
 	state := &coroNativeFleetTargetV1State
 	if state.lifecycle != coroNativeFleetTargetActiveV1 || state.program.Executor != handle ||
 		epoch == 0 || state.waitEpoch != 0 || state.runEpoch != 0 ||
-		!coroNativeFleetPhysicalOwnerStopV1() || !coroNativeWorkerPoolStopFleetV1() {
+		!coroNativeFleetPhysicalOwnersStopV1() || !coroNativeWorkerPoolStopFleetV1() {
 		return coroTargetDispatchInvalidV1
 	}
 	state.lifecycle = coroNativeFleetTargetClosingV1
-	program, programOK := coroNativeFleetHandleV1(0)
-	peer, peerOK := coroNativeFleetHandleV1(1)
-	if !programOK || !peerOK || program != state.program ||
-		!coroNativeFleetBeginRouteCloseV1(program) || !coroNativeFleetBeginRouteCloseV1(peer) ||
-		!coroNativeFleetConfirmRouteCloseV1(program) || !coroNativeFleetConfirmRouteCloseV1(peer) ||
-		!coroNativeFleetRetireBackendV1(program) || !coroNativeFleetRetireBackendV1(peer) ||
-		!coroNativeFleetBeginExternalDriverCloseV1(program) || !coroNativeFleetRetireDriverV1(peer) {
+	count := coroNativeFleetV1State.domainCount
+	if count == 0 || count > coroNativeFleetDomainCapacityV1 {
 		state.lifecycle = coroNativeFleetTargetFailedV1
 		return coroTargetDispatchInvalidV1
+	}
+	var handles [coroNativeFleetDomainCapacityV1]coro.ExecutorFleetHandle
+	for index := uint32(0); index < count; index++ {
+		var ok bool
+		handles[index], ok = coroNativeFleetHandleV1(index)
+		if !ok || index == 0 && handles[index] != state.program {
+			state.lifecycle = coroNativeFleetTargetFailedV1
+			return coroTargetDispatchInvalidV1
+		}
+	}
+	for index := uint32(0); index < count; index++ {
+		if !coroNativeFleetBeginRouteCloseV1(handles[index]) {
+			state.lifecycle = coroNativeFleetTargetFailedV1
+			return coroTargetDispatchInvalidV1
+		}
+	}
+	for index := uint32(0); index < count; index++ {
+		if !coroNativeFleetConfirmRouteCloseV1(handles[index]) ||
+			!coroNativeFleetRetireBackendV1(handles[index]) {
+			state.lifecycle = coroNativeFleetTargetFailedV1
+			return coroTargetDispatchInvalidV1
+		}
+	}
+	if !coroNativeFleetBeginExternalDriverCloseV1(handles[0]) {
+		state.lifecycle = coroNativeFleetTargetFailedV1
+		return coroTargetDispatchInvalidV1
+	}
+	for index := uint32(1); index < count; index++ {
+		if !coroNativeFleetRetireDriverV1(handles[index]) {
+			state.lifecycle = coroNativeFleetTargetFailedV1
+			return coroTargetDispatchInvalidV1
+		}
 	}
 	return coroTargetDispatchCompleteV1
 }

@@ -24,11 +24,10 @@ import (
 )
 
 const (
-	// coroNativeFleetDomainCapacityV1 is the first executable native multi-P
-	// architecture. It is deliberately smaller than coro.ExecutorFleetCapacity:
-	// this adapter proves independent ownership and routing without making a
-	// policy claim about the eventual GOMAXPROCS/default-P count.
-	coroNativeFleetDomainCapacityV1 = 2
+	// coroNativeFleetDomainCapacityV1 is the allocation-free lifetime bound of
+	// the native target. Startup selects an active prefix in [1, capacity];
+	// route identities remain monotonic tombstones and are never reused.
+	coroNativeFleetDomainCapacityV1 = coro.ExecutorFleetCapacity
 
 	// Every owned native P needs the same production catalog capacity as the
 	// adopted program P. Keeping the page policy here gives the program and
@@ -196,9 +195,10 @@ func coroNativeFleetReleaseAdoptedOwnersV1(domain *coroNativeFleetDomainV1) bool
 // Retired route and ingress tombstones reject delayed two-word callbacks; the
 // object is never reset or reused after shutdown.
 type coroNativeFleetStateV1 struct {
-	fleet     coro.ExecutorFleet
-	domains   [coroNativeFleetDomainCapacityV1]coroNativeFleetDomainV1
-	lifecycle coroNativeFleetLifecycleV1
+	fleet       coro.ExecutorFleet
+	domains     [coroNativeFleetDomainCapacityV1]coroNativeFleetDomainV1
+	domainCount uint32
+	lifecycle   coroNativeFleetLifecycleV1
 }
 
 var coroNativeFleetV1State coroNativeFleetStateV1
@@ -273,8 +273,8 @@ func coroNativeFleetRollbackBoundDomainV1(
 // coroNativeFleetAbortActiveDomainV1 is startup rollback, not ordinary
 // reusable shutdown. The fleet lifecycle stays Failed and every consumed route
 // remains a permanent tombstone. Although handles are not published until the
-// complete two-domain start succeeds, the exported POD shim can be called with
-// guessed words, so rollback still performs the full target-ingress join.
+// complete active-prefix start succeeds, the exported POD shim can be called
+// with guessed words, so rollback still performs the full target-ingress join.
 func coroNativeFleetAbortActiveDomainV1(
 	state *coroNativeFleetStateV1,
 	domain *coroNativeFleetDomainV1,
@@ -381,11 +381,17 @@ func coroNativeFleetAdoptDomainV1(
 func coroNativeFleetStartDomainsV1(
 	state *coroNativeFleetStateV1,
 	program *coroNativeFleetDomainOwnersV1,
+	count uint32,
 ) bool {
-	if state == nil || state.lifecycle != coroNativeFleetUnusedV1 || !state.fleet.AllRetired() {
+	if state == nil || state.lifecycle != coroNativeFleetUnusedV1 || state.domainCount != 0 ||
+		count == 0 || count > coroNativeFleetDomainCapacityV1 || !state.fleet.AllRetired() {
 		return false
 	}
-	for index := uint32(0); index < coroNativeFleetDomainCapacityV1; index++ {
+	// The selected prefix is immutable even on startup failure. Consumed route
+	// identities and guessed callback words must keep observing one permanent
+	// fail-stop policy rather than a recyclable zero state.
+	state.domainCount = count
+	for index := uint32(0); index < count; index++ {
 		started := false
 		if index == 0 && program != nil {
 			started = coroNativeFleetAdoptDomainV1(state, index, *program)
@@ -409,19 +415,16 @@ func coroNativeFleetStartDomainsV1(
 }
 
 // coroNativeFleetStartStateV1 consumes an exact-zero fleet. Monotonic route
-// allocation therefore freezes domain[0]/domain[1] as Route 1/Route 2. No
-// other adapter may pre-bind this private fleet; the production-island test
-// asserts the mapping before any OperationID is issued.
-func coroNativeFleetStartStateV1(state *coroNativeFleetStateV1) bool {
-	return coroNativeFleetStartDomainsV1(state, nil)
+// allocation freezes domain[i] as Route i+1 for the selected active prefix.
+// No other adapter may pre-bind this private fleet.
+func coroNativeFleetStartStateV1(state *coroNativeFleetStateV1, count uint32) bool {
+	return coroNativeFleetStartDomainsV1(state, nil, count)
 }
 
-// coroNativeFleetStartV1 binds exactly two independent native domains. It is
-// intentionally separate from the legacy single-P program entry so the
-// migration can be validated without changing process-start semantics. A
-// failed or retired static fleet is never restarted.
+// coroNativeFleetStartV1 retains a deterministic two-domain host-test entry.
+// Production selects its active prefix through coroNativeFleetStartProgramV1.
 func coroNativeFleetStartV1() bool {
-	return coroNativeFleetStartStateV1(&coroNativeFleetV1State)
+	return coroNativeFleetStartStateV1(&coroNativeFleetV1State, 2)
 }
 
 func coroNativeFleetDomainForHandleV1(
@@ -429,7 +432,8 @@ func coroNativeFleetDomainForHandleV1(
 	handle coro.ExecutorFleetHandle,
 	want coroNativeFleetDomainLifecycleV1,
 ) (*coroNativeFleetDomainV1, bool) {
-	if state == nil || !handle.Valid() || handle.Route == 0 || handle.Route > coroNativeFleetDomainCapacityV1 {
+	if state == nil || state.domainCount == 0 || state.domainCount > coroNativeFleetDomainCapacityV1 ||
+		!handle.Valid() || handle.Route == 0 || handle.Route > state.domainCount {
 		return nil, false
 	}
 	domain := &state.domains[handle.Route-1]
@@ -438,7 +442,7 @@ func coroNativeFleetDomainForHandleV1(
 
 func coroNativeFleetHandleV1(index uint32) (coro.ExecutorFleetHandle, bool) {
 	state := &coroNativeFleetV1State
-	if state.lifecycle != coroNativeFleetActiveV1 || index >= coroNativeFleetDomainCapacityV1 {
+	if state.lifecycle != coroNativeFleetActiveV1 || index >= state.domainCount {
 		return coro.ExecutorFleetHandle{}, false
 	}
 	domain := &state.domains[index]
@@ -453,7 +457,7 @@ func coroNativeFleetWorkerTransportReadyV1() bool {
 	if state.lifecycle != coroNativeFleetActiveV1 {
 		return false
 	}
-	for index := uint32(0); index < coroNativeFleetDomainCapacityV1; index++ {
+	for index := uint32(0); index < state.domainCount; index++ {
 		domain := &state.domains[index]
 		worker := domain.workerOwnerV1()
 		if worker == nil {
@@ -474,17 +478,18 @@ func coroNativeFleetWorkerTransportReadyV1() bool {
 // different M owners may validate their domains concurrently. The durable
 // worker job keeps only its OperationID and scalar call words.
 func coroNativeFleetWorkerSubmissionOwnerV1(handle coro.ExecutorHandle, route coro.RouteID) bool {
-	if !route.Valid() || uint32(route) > coroNativeFleetDomainCapacityV1 {
+	state := &coroNativeFleetV1State
+	if state.lifecycle != coroNativeFleetActiveV1 || !route.Valid() ||
+		uint32(route) > state.domainCount {
 		return false
 	}
-	domain := &coroNativeFleetV1State.domains[uint32(route)-1]
+	domain := &state.domains[uint32(route)-1]
 	worker := domain.workerOwnerV1()
 	if worker == nil {
 		return false
 	}
 	workerRoute, routeOK := worker.Route()
-	return coroNativeFleetV1State.lifecycle == coroNativeFleetActiveV1 &&
-		domain.lifecycle == coroNativeFleetDomainActiveV1 &&
+	return domain.lifecycle == coroNativeFleetDomainActiveV1 &&
 		domain.handle.Executor == handle && domain.handle.Route == uint32(route) &&
 		routeOK && workerRoute == route
 }
@@ -507,10 +512,11 @@ func coroNativeFleetPostV1(
 	control coro.TaskCancelKind,
 	pollResult coro.PollOperationResult,
 ) coro.OperationRouteIngressResult {
-	if !id.Valid() || id.Route() == 0 || uint32(id.Route()) > coroNativeFleetDomainCapacityV1 {
+	state := &coroNativeFleetV1State
+	if !id.Valid() || id.Route() == 0 || uint32(id.Route()) > state.domainCount {
 		return coroNativeFleetInvalidIngressV1()
 	}
-	domain := &coroNativeFleetV1State.domains[uint32(id.Route())-1]
+	domain := &state.domains[uint32(id.Route())-1]
 	// Enter is deliberately the first read of mutable domain storage. A close
 	// owner may retire every pointer-bearing suffix immediately after Leave.
 	if !domain.ingress.Enter() {
@@ -1091,11 +1097,18 @@ func coroNativeFleetConfirmExternalDriverCloseV1(handle coro.ExecutorFleetHandle
 
 func coroNativeFleetAllRetiredV1() bool {
 	state := &coroNativeFleetV1State
-	if state.lifecycle != coroNativeFleetClosingV1 || !state.fleet.AllRetired() {
+	if state.lifecycle != coroNativeFleetClosingV1 || state.domainCount == 0 ||
+		state.domainCount > coroNativeFleetDomainCapacityV1 || !state.fleet.AllRetired() {
 		return false
 	}
 	for index := range state.domains {
 		domain := &state.domains[index]
+		if uint32(index) >= state.domainCount {
+			if !coroNativeFleetDomainCandidateV1(domain) {
+				return false
+			}
+			continue
+		}
 		if domain.lifecycle != coroNativeFleetDomainRetiredV1 || domain.ownerEpoch != 0 ||
 			domain.owners != (coroNativeFleetDomainOwnersV1{}) ||
 			!domain.ingress.Retired() || !domain.doorbell.Closed() ||

@@ -117,7 +117,7 @@ func testProductionNativeWorkerCompletionPlan(t *testing.T) {
 			}
 		}
 		owner, err := findUniqueCoroWorkerPlanFunction(
-			input.Program, llssa.PkgRuntime, coroNativeFleetOwnerSymbolV1,
+			input.Program, llssa.PkgRuntime, coroNativeFleetOwnerSymbolV2,
 		)
 		if err != nil {
 			return nil, err

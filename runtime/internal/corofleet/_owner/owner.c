@@ -17,6 +17,8 @@
 #include "owner.h"
 
 #include <stdint.h>
+#include <stdlib.h>
+#include <unistd.h>
 
 #if defined(LLGO_CORO_FLEET_BDWGC)
 #include <gc/gc.h>
@@ -24,26 +26,67 @@
 
 /*
  * This is intentionally the only C-to-Go scheduler-owner edge. The routine
- * has no argument and the Go body selects its statically assigned route. A
- * zero pthread result means clean coordinated stop; a nonzero sentinel lets
+ * carries only the small route scalar supplied as pthread's opaque argument.
+ * A zero pthread result means clean coordinated stop; a nonzero sentinel lets
  * the joining program owner reject a failed raw scheduler loop.
  */
-extern uint32_t __llgo_coro_native_fleet_owner_v1(void);
+extern uint32_t __llgo_coro_native_fleet_owner_v2(uint32_t route);
 
-static void *llgo_coro_fleet_owner_main_v1(void *unused) {
-    (void)unused;
-    return __llgo_coro_native_fleet_owner_v1() == 1
+static void *llgo_coro_fleet_owner_main_v2(void *route_word) {
+    uintptr_t route = (uintptr_t)route_word;
+    if (route == 0 || route > UINT32_MAX) {
+        return (void *)(uintptr_t)1;
+    }
+    return __llgo_coro_native_fleet_owner_v2((uint32_t)route) == 1
         ? (void *)0
         : (void *)(uintptr_t)1;
 }
 
-int __llgo_coro_fleet_owner_create_v1(pthread_t *thread) {
-    if (thread == 0) {
+static uint32_t llgo_coro_fleet_positive_decimal_v1(const char *text) {
+    uint64_t value = 0;
+    int overflow = 0;
+    if (text == 0 || *text == 0) {
+        return 0;
+    }
+    for (; *text != 0; text++) {
+        if (*text < '0' || *text > '9') {
+            return 0;
+        }
+        if (!overflow) {
+            value = value * 10 + (uint32_t)(*text - '0');
+            overflow = value > UINT32_MAX;
+        }
+    }
+    return overflow ? UINT32_MAX : (uint32_t)value;
+}
+
+uint32_t __llgo_coro_fleet_owner_count_v1(uint32_t maximum) {
+    if (maximum == 0) {
+        return 0;
+    }
+    uint32_t selected = llgo_coro_fleet_positive_decimal_v1(getenv("GOMAXPROCS"));
+    if (selected == 0) {
+#ifdef _SC_NPROCESSORS_ONLN
+        long online = sysconf(_SC_NPROCESSORS_ONLN);
+        selected = online > 0 && (uint64_t)online <= UINT32_MAX
+            ? (uint32_t)online
+            : 1;
+#else
+        selected = 1;
+#endif
+    }
+    return selected > maximum ? maximum : selected;
+}
+
+int __llgo_coro_fleet_owner_create_v2(pthread_t *thread, uint32_t route) {
+    if (thread == 0 || route == 0) {
         return -1;
     }
 #if defined(LLGO_CORO_FLEET_BDWGC)
-    return GC_pthread_create(thread, 0, llgo_coro_fleet_owner_main_v1, 0);
+    return GC_pthread_create(
+        thread, 0, llgo_coro_fleet_owner_main_v2, (void *)(uintptr_t)route);
 #else
-    return pthread_create(thread, 0, llgo_coro_fleet_owner_main_v1, 0);
+    return pthread_create(
+        thread, 0, llgo_coro_fleet_owner_main_v2, (void *)(uintptr_t)route);
 #endif
 }

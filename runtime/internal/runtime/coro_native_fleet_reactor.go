@@ -61,7 +61,7 @@ func coroNativeFleetWaitStorageV1(
 		handle,
 		coroNativeFleetDomainActiveV1,
 	)
-	if !ok || handle.Route == 0 || handle.Route > coroNativeFleetDomainCapacityV1 {
+	if !ok || handle.Route == 0 || handle.Route > coroNativeFleetV1State.domainCount {
 		return nil, nil, false
 	}
 	return domain, &coroNativeFleetPollSetsV1[handle.Route-1], true

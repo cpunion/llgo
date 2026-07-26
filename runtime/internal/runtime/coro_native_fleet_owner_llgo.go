@@ -27,7 +27,6 @@ import (
 )
 
 const (
-	coroNativeFleetPeerIndexV1 uint32 = 1
 	coroNativeFleetRunBudgetV1 uint32 = 64
 )
 
@@ -41,67 +40,137 @@ const (
 	coroNativeFleetPhysicalFailedV1
 )
 
-// coroNativeFleetPhysicalOwnerV1 contains only the one process-lifetime peer
-// M and its atomic stop word. TargetIngress is reused here as a one-writer,
-// one-reader seal: no callback enters it, so Quiesced is the acquire-visible
-// stop observation and Retire leaves a permanent non-reusable tombstone.
+// coroNativeFleetPhysicalOwnerV1 is one process-lifetime peer M. The active
+// prefix is frozen before any pthread starts, and each slot retains its exact
+// route tombstone after join.
 type coroNativeFleetPhysicalOwnerV1 struct {
-	stop      coro.TargetIngress
 	thread    pthread.Thread
 	handle    coro.ExecutorFleetHandle
 	shutdown  bool
 	lifecycle coroNativeFleetPhysicalLifecycleV1
 }
 
-var coroNativeFleetPhysicalOwnerV1State coroNativeFleetPhysicalOwnerV1
+// coroNativeFleetPhysicalOwnersV1 owns the selected peer prefix and one atomic
+// broadcast stop word. TargetIngress has no callback entrants here: Seal is
+// the release publication observed by every peer through Quiesced, and Retire
+// leaves a permanent non-reusable process tombstone after all joins.
+type coroNativeFleetPhysicalOwnersV1 struct {
+	stop      coro.TargetIngress
+	peers     [coroNativeFleetDomainCapacityV1 - 1]coroNativeFleetPhysicalOwnerV1
+	count     uint32
+	lifecycle coroNativeFleetPhysicalLifecycleV1
+}
 
-func coroNativeFleetPhysicalOwnerStartV1() bool {
+var coroNativeFleetPhysicalOwnerV1State coroNativeFleetPhysicalOwnersV1
+
+func coroNativeFleetPhysicalOwnerCountV1() (uint32, bool) {
+	count := corofleet.OwnerCount(uint32(coroNativeFleetDomainCapacityV1))
+	return count, count > 0 && count <= coroNativeFleetDomainCapacityV1
+}
+
+func coroNativeFleetPhysicalOwnerForHandleV1(
+	handle coro.ExecutorFleetHandle,
+) (*coroNativeFleetPhysicalOwnerV1, bool) {
 	state := &coroNativeFleetPhysicalOwnerV1State
-	handle, ok := coroNativeFleetHandleV1(coroNativeFleetPeerIndexV1)
-	if !ok || state.lifecycle != coroNativeFleetPhysicalUnusedV1 || state.thread != nil ||
-		state.handle != (coro.ExecutorFleetHandle{}) || state.shutdown || !state.stop.CanReleaseResources() ||
-		!state.stop.Start() {
+	if !handle.Valid() || handle.Route < 2 || handle.Route > coroNativeFleetV1State.domainCount ||
+		handle.Route-2 >= state.count {
+		return nil, false
+	}
+	peer := &state.peers[handle.Route-2]
+	return peer, peer.handle == handle
+}
+
+func coroNativeFleetPhysicalOwnersStartV1() bool {
+	state := &coroNativeFleetPhysicalOwnerV1State
+	count := coroNativeFleetV1State.domainCount
+	if coroNativeFleetV1State.lifecycle != coroNativeFleetActiveV1 ||
+		count == 0 || count > coroNativeFleetDomainCapacityV1 ||
+		state.lifecycle != coroNativeFleetPhysicalUnusedV1 || state.count != 0 ||
+		!state.stop.CanReleaseResources() || !state.stop.Start() {
 		return false
 	}
-	state.handle = handle
+	state.count = count - 1
 	state.lifecycle = coroNativeFleetPhysicalActiveV1
-	if corofleet.CreatePeer(&state.thread) == 0 && state.thread != nil {
+	created := uint32(0)
+	for index := uint32(0); index < state.count; index++ {
+		peer := &state.peers[index]
+		handle, ok := coroNativeFleetHandleV1(index + 1)
+		if !ok || peer.lifecycle != coroNativeFleetPhysicalUnusedV1 ||
+			peer.thread != nil || peer.handle != (coro.ExecutorFleetHandle{}) || peer.shutdown {
+			break
+		}
+		peer.handle = handle
+		peer.lifecycle = coroNativeFleetPhysicalActiveV1
+		if corofleet.CreatePeer(&peer.thread, handle.Route) != 0 || peer.thread == nil {
+			// pthread_create leaves the result slot unspecified on failure.
+			peer.thread = nil
+			peer.lifecycle = coroNativeFleetPhysicalFailedV1
+			break
+		}
+		created++
+	}
+	if created == state.count {
 		return true
 	}
-	// pthread_create leaves the result slot unspecified on failure. The whole
-	// fleet startup is single-use, so retire the stop word and make failure a
-	// permanent state instead of trying to recycle an ambiguous native handle.
-	state.thread = nil
-	state.lifecycle = coroNativeFleetPhysicalFailedV1
 	sealed := state.stop.Seal()
-	quiesced := sealed && state.stop.Quiesced()
-	retired := quiesced && state.stop.Retire()
+	rang := sealed
+	for index := uint32(0); index < created; index++ {
+		domain, ok := coroNativeFleetDomainForHandleV1(
+			&coroNativeFleetV1State,
+			state.peers[index].handle,
+			coroNativeFleetDomainActiveV1,
+		)
+		ringOK := ok && domain.doorbell.Ring()
+		rang = rang && ringOK
+	}
+	joined := rang
+	for index := uint32(0); index < created; index++ {
+		peer := &state.peers[index]
+		var result c.Pointer
+		ok := pthread.Join(peer.thread, &result) == 0 && result == nil
+		peer.thread = nil
+		peer.lifecycle = coroNativeFleetPhysicalFailedV1
+		joined = joined && ok
+	}
+	retired := joined && state.stop.Quiesced() && state.stop.Retire()
+	state.lifecycle = coroNativeFleetPhysicalFailedV1
 	if !retired {
 		coroRuntimeAbort("native coroutine fleet peer start rollback failed")
 	}
 	return false
 }
 
-func coroNativeFleetPhysicalOwnerStopV1() bool {
+func coroNativeFleetPhysicalOwnersStopV1() bool {
 	state := &coroNativeFleetPhysicalOwnerV1State
-	if state.lifecycle != coroNativeFleetPhysicalActiveV1 || state.thread == nil ||
-		!state.handle.Valid() || !state.stop.Seal() {
+	if state.lifecycle != coroNativeFleetPhysicalActiveV1 ||
+		state.count+1 != coroNativeFleetV1State.domainCount || !state.stop.Seal() {
 		return false
 	}
 	state.lifecycle = coroNativeFleetPhysicalStoppingV1
-	domain, ok := coroNativeFleetDomainForHandleV1(
-		&coroNativeFleetV1State,
-		state.handle,
-		coroNativeFleetDomainActiveV1,
-	)
-	if !ok || !domain.doorbell.Ring() {
-		state.lifecycle = coroNativeFleetPhysicalFailedV1
-		return false
+	for index := uint32(0); index < state.count; index++ {
+		peer := &state.peers[index]
+		domain, ok := coroNativeFleetDomainForHandleV1(
+			&coroNativeFleetV1State,
+			peer.handle,
+			coroNativeFleetDomainActiveV1,
+		)
+		if !ok || peer.lifecycle != coroNativeFleetPhysicalActiveV1 ||
+			peer.thread == nil || !domain.doorbell.Ring() {
+			state.lifecycle = coroNativeFleetPhysicalFailedV1
+			return false
+		}
 	}
-	var result c.Pointer
-	joined := pthread.Join(state.thread, &result) == 0
-	state.thread = nil
-	if !joined || result != nil || !state.stop.Quiesced() || !state.stop.Retire() {
+	for index := uint32(0); index < state.count; index++ {
+		peer := &state.peers[index]
+		var result c.Pointer
+		if pthread.Join(peer.thread, &result) != 0 || result != nil {
+			state.lifecycle = coroNativeFleetPhysicalFailedV1
+			return false
+		}
+		peer.thread = nil
+		peer.lifecycle = coroNativeFleetPhysicalRetiredV1
+	}
+	if !state.stop.Quiesced() || !state.stop.Retire() {
 		state.lifecycle = coroNativeFleetPhysicalFailedV1
 		return false
 	}
@@ -111,7 +180,11 @@ func coroNativeFleetPhysicalOwnerStopV1() bool {
 
 func coroNativeFleetPhysicalOwnerStoppingV1(handle coro.ExecutorFleetHandle) bool {
 	state := &coroNativeFleetPhysicalOwnerV1State
-	return state.handle == handle && state.stop.Quiesced()
+	peer, ok := coroNativeFleetPhysicalOwnerForHandleV1(handle)
+	// The atomic stop word is the only coordinator-to-peer shutdown fact.
+	// Aggregate lifecycle is coordinator-owned diagnostic state and must not
+	// become a second, non-atomic publication protocol.
+	return ok && peer.lifecycle == coroNativeFleetPhysicalActiveV1 && state.stop.Quiesced()
 }
 
 func coroNativeFleetPhysicalOwnerClockV1() (int64, bool) {
@@ -128,8 +201,8 @@ func coroNativeFleetPhysicalOwnerFailV1(message string) bool {
 // stable reduction boundary gives that child the same sticky Shutdown before
 // the domain is allowed to report drained.
 func coroNativeFleetPhysicalOwnerBeginShutdownV1(handle coro.ExecutorFleetHandle, epoch uint32) (bool, bool) {
-	state := &coroNativeFleetPhysicalOwnerV1State
-	if state.handle != handle || !coroNativeFleetPhysicalOwnerStoppingV1(handle) {
+	peer, ownerOK := coroNativeFleetPhysicalOwnerForHandleV1(handle)
+	if !ownerOK || !coroNativeFleetPhysicalOwnerStoppingV1(handle) {
 		return false, false
 	}
 	domain, ok := coroNativeFleetDomainForHandleV1(
@@ -149,18 +222,18 @@ func coroNativeFleetPhysicalOwnerBeginShutdownV1(handle coro.ExecutorFleetHandle
 	if _, requested := coro.RequestExecutorShutdownDrain(driver); !requested {
 		return false, false
 	}
-	state.shutdown = true
+	peer.shutdown = true
 	return true, true
 }
 
 func coroNativeFleetPhysicalOwnerShutdownReadyV1(handle coro.ExecutorFleetHandle) bool {
-	state := &coroNativeFleetPhysicalOwnerV1State
+	peer, ownerOK := coroNativeFleetPhysicalOwnerForHandleV1(handle)
 	domain, ok := coroNativeFleetDomainForHandleV1(
 		&coroNativeFleetV1State,
 		handle,
 		coroNativeFleetDomainActiveV1,
 	)
-	if !ok || state.handle != handle || !state.shutdown || domain.driverOwnerV1() == nil ||
+	if !ownerOK || !ok || !peer.shutdown || domain.driverOwnerV1() == nil ||
 		!coro.EnterExecutorRunCompatibility(domain.driverOwnerV1()) {
 		return false
 	}
@@ -252,8 +325,11 @@ func coroNativeFleetRunPhysicalOwnerPassV1(
 		if moved != 0 || more {
 			return true
 		}
-		if coroNativeFleetPhysicalOwnerStoppingV1(handle) &&
-			!coroNativeFleetPhysicalOwnerV1State.shutdown {
+		peer, ownerOK := coroNativeFleetPhysicalOwnerForHandleV1(handle)
+		if !ownerOK {
+			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer owner identity lost")
+		}
+		if coroNativeFleetPhysicalOwnerStoppingV1(handle) && !peer.shutdown {
 			// A previous budget boundary may have landed inside a source
 			// transaction. Idle proves that transaction is now complete; retry
 			// the one-time shutdown publication before arming another wait.
@@ -345,8 +421,8 @@ func coroNativeFleetRunPhysicalOwnerPassV1(
 // explicit stop boundary. No recursion or dynamically selected callback is
 // used, and every blocking wait is bounded so stop is observed promptly.
 func coroNativeFleetRunPhysicalOwnerV1(handle coro.ExecutorFleetHandle) bool {
-	if !handle.Valid() || handle.Route != coroNativeFleetPeerIndexV1+1 ||
-		coroNativeFleetPhysicalOwnerV1State.handle != handle {
+	peer, ok := coroNativeFleetPhysicalOwnerForHandleV1(handle)
+	if !ok || peer.lifecycle != coroNativeFleetPhysicalActiveV1 {
 		return coroNativeFleetPhysicalOwnerFailV1("native fleet peer handle invalid")
 	}
 	epoch, ok := coroNativeFleetBeginOwnerEpochV1(handle)
@@ -364,19 +440,30 @@ func coroNativeFleetRunPhysicalOwnerV1(handle coro.ExecutorFleetHandle) bool {
 	}
 }
 
-// __llgo_coro_native_fleet_owner_v1 is called only by corofleet's fixed C
-// pthread routine. The compiler retains this exact body and its static closure
-// as a raw scheduler-stack island, so coroHandleResume/Destroy never acquire a
-// managed coroutine twin. One means coordinated stop; every invariant failure
-// is process-fatal because no managed G can safely receive a scheduler panic.
+// __llgo_coro_native_fleet_owner_v2 is called only by corofleet's fixed C
+// pthread routine. route is the scalar active-prefix route passed as the
+// pthread start argument; it is never a Go pointer, G, P, function address, or
+// coroutine handle. The compiler retains this exact body and its static
+// closure as a raw scheduler-stack island, so coroHandleResume/Destroy never
+// acquire a managed coroutine twin. One means coordinated stop; every
+// invariant failure is process-fatal because no managed G can safely receive a
+// scheduler panic.
 //
-//export __llgo_coro_native_fleet_owner_v1
-func __llgo_coro_native_fleet_owner_v1() uint32 {
+//export __llgo_coro_native_fleet_owner_v2
+func __llgo_coro_native_fleet_owner_v2(route uint32) uint32 {
 	state := &coroNativeFleetPhysicalOwnerV1State
+	if route < 2 || route > coroNativeFleetV1State.domainCount ||
+		route-2 >= state.count {
+		coroRuntimeAbort("native coroutine fleet physical owner route invalid")
+		return 0
+	}
+	peer := &state.peers[route-2]
 	// handle is published before pthread_create and remains immutable until
-	// join. Do not gate entry on lifecycle: a program which returns immediately
-	// may request Stopping before the new pthread reaches this fixed ABI.
-	if !state.handle.Valid() || !coroNativeFleetRunPhysicalOwnerV1(state.handle) {
+	// join. Do not gate entry on the aggregate lifecycle: a program which
+	// returns immediately may request Stopping before the new pthread reaches
+	// this fixed ABI.
+	if peer.handle.Route != route || !peer.handle.Valid() ||
+		!coroNativeFleetRunPhysicalOwnerV1(peer.handle) {
 		coroRuntimeAbort("native coroutine fleet physical owner failed")
 		return 0
 	}

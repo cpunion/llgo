@@ -311,30 +311,64 @@ func Check() int32 {
 }
 `
 
+const coroNativeFleetSingleOwnerE2ESource = `package main
+
+var Data chan uint32
+var Got uint32
+
+func Setup() {
+	Data = make(chan uint32)
+	Got = 0
+}
+
+func child() {
+	Data <- 0x51a91e
+}
+
+func main() {
+	go child()
+	Got = <-Data
+}
+
+func Check() int32 {
+	if Got != 0x51a91e {
+		return 67
+	}
+	return 0
+}
+`
+
 func TestCoroNativeFleetPhysicalPeerRunsDistributedChildE2E(t *testing.T) {
-	runCoroNativeFleetE2E(t, coroNativeFleetE2ESource, "distributed-child", false)
+	runCoroNativeFleetE2E(t, coroNativeFleetE2ESource, "distributed-child", false, 8)
 }
 
 func TestCoroNativeFleetMainReturnCancelsPeerE2E(t *testing.T) {
-	runCoroNativeFleetE2E(t, coroNativeFleetShutdownE2ESource, "main-return-cancel", false)
+	runCoroNativeFleetE2E(t, coroNativeFleetShutdownE2ESource, "main-return-cancel", false, 4)
 }
 
 func TestCoroNativeFleetPeerSpawnReturnsToProgramE2E(t *testing.T) {
-	runCoroNativeFleetE2E(t, coroNativeFleetPeerSpawnE2ESource, "peer-spawn-program", false)
+	runCoroNativeFleetE2E(t, coroNativeFleetPeerSpawnE2ESource, "peer-spawn-program", false, 4)
 }
 
 func TestCoroNativeFleetChannelSelectCrossRouteE2E(t *testing.T) {
-	runCoroNativeFleetE2E(t, coroNativeFleetChannelSelectE2ESource, "channel-select-cross-route", true)
+	runCoroNativeFleetE2E(t, coroNativeFleetChannelSelectE2ESource, "channel-select-cross-route", true, 4)
 }
 
 func TestCoroNativeFleetShutdownCancelsPeerChannelSelectE2E(t *testing.T) {
-	runCoroNativeFleetE2E(t, coroNativeFleetChannelShutdownE2ESource, "channel-select-shutdown", true)
+	runCoroNativeFleetE2E(t, coroNativeFleetChannelShutdownE2ESource, "channel-select-shutdown", true, 4)
 }
 
-func runCoroNativeFleetE2E(t *testing.T, source, name string, enableChannel bool) {
+func TestCoroNativeFleetSingleOwnerChannelProgressE2E(t *testing.T) {
+	runCoroNativeFleetE2E(t, coroNativeFleetSingleOwnerE2ESource, "single-owner-channel", true, 1)
+}
+
+func runCoroNativeFleetE2E(t *testing.T, source, name string, enableChannel bool, ownerCount uint32) {
 	t.Helper()
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("native coroutine fleet link smoke requires Darwin or Linux")
+	}
+	if ownerCount == 0 {
+		t.Fatal("native coroutine fleet E2E owner count must be positive")
 	}
 	clang, err := exec.LookPath("clang")
 	if err != nil {
@@ -393,6 +427,13 @@ func runCoroNativeFleetE2E(t *testing.T, source, name string, enableChannel bool
 	runCtx, cancel := stdcontext.WithTimeout(stdcontext.Background(), 10*time.Second)
 	defer cancel()
 	command := exec.CommandContext(runCtx, executable)
+	command.Env = make([]string, 0, len(os.Environ())+1)
+	for _, item := range os.Environ() {
+		if !strings.HasPrefix(item, "GOMAXPROCS=") {
+			command.Env = append(command.Env, item)
+		}
+	}
+	command.Env = append(command.Env, fmt.Sprintf("GOMAXPROCS=%d", ownerCount))
 	output, err := command.CombinedOutput()
 	if runCtx.Err() != nil {
 		t.Fatalf("native coroutine fleet smoke timed out: %v\n%s", runCtx.Err(), output)

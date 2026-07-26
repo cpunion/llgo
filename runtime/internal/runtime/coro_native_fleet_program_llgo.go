@@ -21,10 +21,11 @@ package runtime
 import "github.com/goplus/llgo/runtime/internal/coro"
 
 // coroNativeFleetStartProgramV1 adopts the already-bound program executor as
-// route 1 and creates one independent fleet-owned route 2. The program globals
-// remain authoritative; the fleet domain retains only stable references until
-// its route, ingress, backend, and driver have been strongly retired.
-func coroNativeFleetStartProgramV1() bool {
+// route 1 and creates count-1 independent fleet-owned routes. The program
+// globals remain authoritative; the fleet domain retains only stable
+// references until every route, ingress, backend, and driver is strongly
+// retired.
+func coroNativeFleetStartProgramV1(count uint32) bool {
 	owners := coroNativeFleetDomainOwnersV1{
 		p:      &coroProgramPV1State,
 		driver: &coroProgramExecutorDriverV1State,
@@ -37,5 +38,5 @@ func coroNativeFleetStartProgramV1() bool {
 			Control: &coroProgramTaskControlSourceV1State,
 		},
 	}
-	return coroNativeFleetStartDomainsV1(&coroNativeFleetV1State, &owners)
+	return coroNativeFleetStartDomainsV1(&coroNativeFleetV1State, &owners, count)
 }

@@ -102,11 +102,16 @@ func TestRunnableTransferInitialAndYielded(t *testing.T) {
 func TestRunnableTransferStateUsesExistingGPadding(t *testing.T) {
 	transferOffset := unsafe.Offsetof(G{}.transferState)
 	rootOffset := unsafe.Offsetof(G{}.root)
+	affinityOffset := unsafe.Offsetof(G{}.runnableAffinity)
+	lockDepthOffset := unsafe.Offsetof(G{}.osThreadLockDepth)
 	if transferOffset != 11 || unsafe.Sizeof(G{}.transferState) != 1 ||
 		unsafe.Sizeof(G{}) != wantSchedulerGSize ||
+		affinityOffset != lockDepthOffset+1 || unsafe.Sizeof(G{}.runnableAffinity) != 1 ||
 		rootOffset != uintptr(12) && rootOffset != uintptr(16) {
-		t.Fatalf("G transfer layout changed: transfer=%d/%d root=%d size=%d want=%d",
-			transferOffset, unsafe.Sizeof(G{}.transferState), rootOffset, unsafe.Sizeof(G{}), wantSchedulerGSize)
+		t.Fatalf("G transfer layout changed: transfer=%d/%d affinity=%d/%d lock=%d root=%d size=%d want=%d",
+			transferOffset, unsafe.Sizeof(G{}.transferState),
+			affinityOffset, unsafe.Sizeof(G{}.runnableAffinity), lockDepthOffset,
+			rootOffset, unsafe.Sizeof(G{}), wantSchedulerGSize)
 	}
 	if unsafe.Sizeof(RunnableTransferID{}) != 8 || unsafe.Alignof(RunnableTransferID{}) != 4 ||
 		unsafe.Offsetof(RunnableTransferID{}.Slot) != 0 || unsafe.Offsetof(RunnableTransferID{}.Generation) != 4 {
@@ -122,6 +127,15 @@ func TestRunnableTransferStateUsesExistingGPadding(t *testing.T) {
 	corruptInit := &G{transferState: runnableTransferGPublished}
 	if InitG(corruptInit) {
 		t.Fatal("InitG accepted a pre-published transfer state")
+	}
+	corruptAffinity := &G{runnableAffinity: runnableCurrentOwner}
+	if InitG(corruptAffinity) {
+		t.Fatal("InitG accepted a pre-bound runnable owner")
+	}
+	bound := new(G)
+	if !InitG(bound) || !BindRunnableOwner(bound) ||
+		bound.runnableAffinity != runnableCurrentOwner || BindRunnableOwner(bound) {
+		t.Fatal("fresh G did not acquire one permanent runnable owner binding")
 	}
 	terminal := &G{magic: gMagic, state: GDead, transferState: runnableTransferGPublished}
 	terminalP := new(P)
@@ -154,6 +168,7 @@ func TestRunnableTransferEligibilityFailsClosed(t *testing.T) {
 			task.g.park.taskCancelPhase = taskCancelRequested
 		}},
 		{"spawn pin", func(task *yieldingTestG) { task.g.spawnParent = new(G) }},
+		{"owner affinity", func(task *yieldingTestG) { task.g.runnableAffinity = runnableCurrentOwner }},
 		{"park source", func(task *yieldingTestG) { task.g.active.parkWait = new(WaitSetRecord) }},
 		{"completion result", func(task *yieldingTestG) {
 			task.g.active.completion.status = CompletionReturn

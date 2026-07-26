@@ -16,10 +16,11 @@
  * limitations under the License.
  */
 
-// Package corofleet is the fixed native-thread creation leaf for the
-// stackless scheduler. It accepts no function pointer, callback address, G,
-// P, or LLVM coroutine handle: the C adapter has one statically linked owner
-// routine and that routine enters one compiler-validated raw Go ABI.
+// Package corofleet is the bounded native-thread creation leaf for the
+// stackless scheduler. It accepts no function pointer, callback address, G, P,
+// or LLVM coroutine handle: the C adapter has one statically linked owner
+// routine and passes only its selected scalar route into one
+// compiler-validated raw Go ABI.
 package corofleet
 
 import (
@@ -29,10 +30,19 @@ import (
 	"github.com/goplus/llgo/runtime/internal/clite/pthread"
 )
 
-// CreatePeer starts exactly one joinable scheduler peer with default pthread
-// attributes. Thread creation may enter libc, allocator, or collector locks;
-// sync records same-thread return without claiming a bounded nonblocking leaf.
+// OwnerCount returns the startup GOMAXPROCS policy clamped to [1, maximum].
+// It honors one positive decimal GOMAXPROCS environment value and otherwise
+// uses the online CPU count.
 //
 //llgo:coro sync
-//go:linkname CreatePeer C.__llgo_coro_fleet_owner_create_v1
-func CreatePeer(thread *pthread.Thread) c.Int
+//go:linkname OwnerCount C.__llgo_coro_fleet_owner_count_v1
+func OwnerCount(maximum uint32) uint32
+
+// CreatePeer starts one joinable scheduler peer with default pthread
+// attributes. route is a small scalar pthread argument, never a Go pointer.
+// Thread creation may enter libc, allocator, or collector locks; sync records
+// same-thread return without claiming a bounded nonblocking leaf.
+//
+//llgo:coro sync
+//go:linkname CreatePeer C.__llgo_coro_fleet_owner_create_v2
+func CreatePeer(thread *pthread.Thread, route uint32) c.Int
