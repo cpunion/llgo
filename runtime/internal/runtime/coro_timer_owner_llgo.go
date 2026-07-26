@@ -181,7 +181,7 @@ func __llgo_coro_timer_resume_v2(g, storage unsafe.Pointer) uint32 {
 		return 0
 	}
 	task := (*coro.G)(g)
-	outcome, caseID, cancel, result, poll, taken := coro.TakeResumePacket(
+	outcome, caseID, cancel, result, small, taken := coro.TakeResumePacket(
 		task,
 		state.ticket,
 		&state.packet,
@@ -194,16 +194,16 @@ func __llgo_coro_timer_resume_v2(g, storage unsafe.Pointer) uint32 {
 	status := uint32(0)
 	switch {
 	case outcome == coro.ParkOutcomeCompleted && caseID == 1 && cancel == coro.TaskCancelNone &&
-		result == coro.ResumeResultNone && poll == coro.PollOperationResultInvalid:
+		result == coro.ResumeResultNone && small == coro.ResumeSmallInvalid:
 		status = coroTimerResumeSuccessV2
 	case outcome == coro.ParkOutcomeCanceled && caseID == 0 && cancel == coro.TaskCancelNone &&
-		result == coro.ResumeResultNone && poll == coro.PollOperationResultInvalid:
+		result == coro.ResumeResultNone && small == coro.ResumeSmallInvalid:
 		status = coroTimerResumeOperationCanceledV2
 	case outcome == coro.ParkOutcomeCanceled && caseID == 0 && cancel == coro.TaskCancelAbort &&
-		result == coro.ResumeResultNone && poll == coro.PollOperationResultInvalid:
+		result == coro.ResumeResultNone && small == coro.ResumeSmallInvalid:
 		status = coroTimerResumeTaskAbortV2
 	case outcome == coro.ParkOutcomeCanceled && caseID == 0 && cancel == coro.TaskCancelShutdown &&
-		result == coro.ResumeResultNone && poll == coro.PollOperationResultInvalid:
+		result == coro.ResumeResultNone && small == coro.ResumeSmallInvalid:
 		status = coroTimerResumeShutdownV2
 	default:
 		coroTimerAbortV2("unsupported coroutine Timer V2 run decision")

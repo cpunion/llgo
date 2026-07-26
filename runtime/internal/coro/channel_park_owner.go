@@ -20,8 +20,9 @@ import "unsafe"
 
 // CurrentExecutorChannelDriver resolves the exact channel source owner during
 // the compiler's narrow SuspendPark/FrameSuspended transition window. Channel
-// queue nodes may later rendezvous across executor routes, but preparation and
-// resume cleanup are always owned by the current G's exact P/source pair.
+// queue nodes may later rendezvous across executor routes, but preparation is
+// owned by the current G's exact P/source pair. Typed resume cleanup now runs
+// on the scheduler stack before runnable publication.
 func CurrentExecutorChannelDriver(g *G) (*ExecutorDriver, ExecutorHandle, RouteID, bool) {
 	driver, handle, route, ok := currentExecutorParkDriver(g)
 	if !ok || driver.sources.channel == nil ||
@@ -51,10 +52,10 @@ func CurrentExecutorChannelParkOwner(
 	return driver.p, &g.park, driver.sources.channel, true
 }
 
-// ActiveChannelParkOwner returns the scheduler-owner context used by the
-// trusted typed-channel adapter while a compiler resume gate is active. The
-// returned ParkState pointer is frame-independent G storage and must not be
-// retained after the adapter returns or passed to a producer.
+// ActiveChannelParkOwner is retained for target-neutral lifecycle tests and
+// compatibility adapters which have not opted into ResumeCleanupPlan. New
+// typed channel code must materialize before promotion instead of consulting
+// its old source from a compiler resume gate.
 func ActiveChannelParkOwner(g *G, source *ChannelOperationSource) (*P, *ParkState, bool) {
 	if !ValidG(g) || !resumeGateTaken(g) || g.runP == nil || !validChannelOperationOwner(source, g.runP) {
 		return nil, nil, false
@@ -154,9 +155,8 @@ func CanReserveChannelOperations(p *P, source *ChannelOperationSource, needed ui
 	return false
 }
 
-// FinishSingleChannelPark releases one detached channel operation after the
-// compiler's exact-ticket resume gate has consumed its RunDecision and the
-// typed hchan layer has removed the frame node from its queue. A valid lease
+// FinishSingleChannelPark is the compatibility release boundary for adapters
+// which have not opted into ResumeCleanupPlan. A valid lease
 // is taken for a selected continuation or discarded when task cancellation
 // suppresses an already committed result. A canceled operation with no
 // physical winner carries a zero lease.

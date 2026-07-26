@@ -19,15 +19,18 @@ package coro
 import "unsafe"
 
 // ResumeResultKind is the closed pointer-free result union retained in a
-// compiler-provided ResumePacket. Typed channel data already lives in its
-// frame slots and therefore uses ResumeResultNone.
+// compiler-provided ResumePacket. Typed channel element data already lives in
+// frame slots; ResumeResultChannel carries only the selected operation status.
 type ResumeResultKind uint8
 
 const (
 	ResumeResultNone ResumeResultKind = iota
 	ResumeResultScalar
 	ResumeResultPoll
+	ResumeResultChannel
 )
+
+const ResumeSmallInvalid uint8 = 0
 
 type resumePacketState uint8
 
@@ -35,6 +38,15 @@ const (
 	resumePacketEmpty resumePacketState = iota
 	resumePacketBound
 	resumePacketMaterialized
+)
+
+type resumeBindingKind uint8
+
+const (
+	resumeBindingNone resumeBindingKind = iota
+	resumeBindingSingle
+	resumeBindingCleanup
+	resumeBindingMaterialized
 )
 
 // ResumePacket is stable storage in the direct-parking LLVM coroutine frame.
@@ -52,7 +64,7 @@ type ResumePacket struct {
 	caseID  uint32
 	outcome ParkOutcome
 	result  ResumeResultKind
-	poll    PollOperationResult
+	small   uint8
 	state   resumePacketState
 }
 
@@ -107,7 +119,7 @@ func validBoundResumePacket(packet *ResumePacket, ticket ParkTicket) bool {
 		validParkTicket(ticket) && supportedSingleResumeSource(packet.source) &&
 		packet.scalar == (ScalarResultPayloadV1{}) && packet.caseID == 0 &&
 		packet.outcome == ParkOutcomePending && packet.result == ResumeResultNone &&
-		packet.poll == PollOperationResultInvalid
+		packet.small == ResumeSmallInvalid
 }
 
 func validMaterializedResumePacket(packet *ResumePacket) bool {
@@ -129,23 +141,40 @@ func validMaterializedResumePacket(packet *ResumePacket) bool {
 	}
 	if packet.outcome != ParkOutcomeCompleted {
 		return packet.result == ResumeResultNone && packet.scalar == (ScalarResultPayloadV1{}) &&
-			packet.poll == PollOperationResultInvalid
+			packet.small == ResumeSmallInvalid
 	}
 	switch packet.result {
 	case ResumeResultNone:
-		return packet.scalar == (ScalarResultPayloadV1{}) && packet.poll == PollOperationResultInvalid
+		return packet.scalar == (ScalarResultPayloadV1{}) && packet.small == ResumeSmallInvalid
 	case ResumeResultScalar:
-		return packet.scalar.Valid() && packet.poll == PollOperationResultInvalid
+		return packet.scalar.Valid() && packet.small == ResumeSmallInvalid
 	case ResumeResultPoll:
 		return packet.scalar == (ScalarResultPayloadV1{}) &&
-			packet.poll >= PollOperationReady && packet.poll <= PollOperationTimeout
+			PollOperationResult(packet.small) >= PollOperationReady &&
+			PollOperationResult(packet.small) <= PollOperationTimeout
+	case ResumeResultChannel:
+		return packet.scalar == (ScalarResultPayloadV1{}) && packet.small != ResumeSmallInvalid
 	default:
 		return false
 	}
 }
 
 func validWaitSetResumeBinding(record *WaitSetRecord) bool {
-	return record != nil && (record.resume == nil || validBoundResumePacket(record.resume, record.ticket))
+	if record == nil {
+		return false
+	}
+	switch record.resumeKind {
+	case resumeBindingNone:
+		return record.resume == nil
+	case resumeBindingSingle:
+		return validBoundResumePacket((*ResumePacket)(record.resume), record.ticket)
+	case resumeBindingCleanup:
+		return validResumeCleanupPlan(record, (*ResumeCleanupPlan)(record.resume))
+	case resumeBindingMaterialized:
+		return validMaterializedResumePacket((*ResumePacket)(record.resume))
+	default:
+		return false
+	}
 }
 
 // BindSingleWaitSetResumePacket opts one zero/one-source direct park into
@@ -156,7 +185,8 @@ func validWaitSetResumeBinding(record *WaitSetRecord) bool {
 // and typed hchan queue node must be retired before transfer; accepting it here
 // would make a partially neutral G look stealable.
 func BindSingleWaitSetResumePacket(record *WaitSetRecord, packet *ResumePacket, source OperationID) bool {
-	if record == nil || packet == nil || *packet != (ResumePacket{}) || record.resume != nil ||
+	if record == nil || packet == nil || *packet != (ResumePacket{}) ||
+		record.resume != nil || record.resumeKind != resumeBindingNone ||
 		record.state != waitSetRecordCommitted || record.work != waitSetWorkIdle ||
 		record.activePrev != nil || record.activeNext != nil || record.workNext != nil ||
 		record.g == nil || !ValidG(record.g) || !validParkTicket(record.ticket) ||
@@ -185,7 +215,8 @@ func BindSingleWaitSetResumePacket(record *WaitSetRecord, packet *ResumePacket, 
 		source: source,
 		state:  resumePacketBound,
 	}
-	record.resume = packet
+	record.resume = unsafe.Pointer(packet)
+	record.resumeKind = resumeBindingSingle
 	return true
 }
 
@@ -305,10 +336,11 @@ func materializePollResume(
 func materializeSingleResumePacket(sources *ExecutorSourceSet, p *P, record *WaitSetRecord) bool {
 	if sources == nil || !validExecutorSourceSet(sources, p) || record == nil ||
 		!validActiveWaitSetRecordFast(p, record) || record.work != waitSetWorkResolving ||
-		record.g.park.phase != parkReady || !validBoundResumePacket(record.resume, record.ticket) {
+		record.g.park.phase != parkReady || record.resumeKind != resumeBindingSingle ||
+		!validBoundResumePacket((*ResumePacket)(record.resume), record.ticket) {
 		return false
 	}
-	packet, state := record.resume, &record.g.park
+	packet, state := (*ResumePacket)(record.resume), &record.g.park
 	sourceID := packet.source
 	physicalOutcome := state.outcome
 	if physicalOutcome == ParkOutcomeCompleted {
@@ -340,7 +372,7 @@ func materializeSingleResumePacket(sources *ExecutorSourceSet, p *P, record *Wai
 	var (
 		result ResumeResultKind
 		scalar ScalarResultPayloadV1
-		poll   PollOperationResult
+		small  uint8
 	)
 	if sourceID == (OperationID{}) {
 		if (physicalOutcome != ParkOutcomeCanceled && physicalOutcome != ParkOutcomeDefault) || lease.Valid() {
@@ -368,7 +400,10 @@ func materializeSingleResumePacket(sources *ExecutorSourceSet, p *P, record *Wai
 				return false
 			}
 		case OperationSourcePoll:
-			var out *PollOperationResult
+			var (
+				poll PollOperationResult
+				out  *PollOperationResult
+			)
 			if !discard {
 				out = &poll
 			}
@@ -377,6 +412,7 @@ func materializeSingleResumePacket(sources *ExecutorSourceSet, p *P, record *Wai
 			}
 			if !discard {
 				result = ResumeResultPoll
+				small = uint8(poll)
 			}
 		default:
 			return false
@@ -394,9 +430,10 @@ func materializeSingleResumePacket(sources *ExecutorSourceSet, p *P, record *Wai
 		caseID:  caseID,
 		outcome: outcome,
 		result:  result,
-		poll:    poll,
+		small:   small,
 		state:   resumePacketMaterialized,
 	}
+	record.resumeKind = resumeBindingMaterialized
 	return validMaterializedResumePacket(packet)
 }
 
@@ -414,46 +451,46 @@ func TakeResumePacket(
 	caseID uint32,
 	task TaskCancelKind,
 	result ResumeResultKind,
-	poll PollOperationResult,
+	small uint8,
 	ok bool,
 ) {
 	if !ValidG(g) || g.runP == nil || !validMaterializedResumePacket(packet) ||
 		packet.ticket != expected {
-		return ParkOutcomePending, 0, TaskCancelNone, ResumeResultNone, PollOperationResultInvalid, false
+		return ParkOutcomePending, 0, TaskCancelNone, ResumeResultNone, ResumeSmallInvalid, false
 	}
 	p := g.runP
 	if p.current != g || !p.inResume || g.state != GRunning || p.runDecisionTaken ||
 		!expectedAction(p, g, p.action, ActionResume) || !validRunDecision(p.runDecision) {
-		return ParkOutcomePending, 0, TaskCancelNone, ResumeResultNone, PollOperationResultInvalid, false
+		return ParkOutcomePending, 0, TaskCancelNone, ResumeResultNone, ResumeSmallInvalid, false
 	}
 	decision := &p.runDecision
 	if !decision.materialized || decision.g != g || decision.ticket != expected ||
 		g.park.phase != parkMaterialized || g.park.ticket != expected ||
 		packet.outcome != g.park.outcome || packet.caseID != g.park.winnerCase {
-		return ParkOutcomePending, 0, TaskCancelNone, ResumeResultNone, PollOperationResultInvalid, false
+		return ParkOutcomePending, 0, TaskCancelNone, ResumeResultNone, ResumeSmallInvalid, false
 	}
 	var scalar ScalarResultPayloadV1
 	if decision.outcome == ParkOutcomeCompleted {
 		if decision.caseID != packet.caseID {
-			return ParkOutcomePending, 0, TaskCancelNone, ResumeResultNone, PollOperationResultInvalid, false
+			return ParkOutcomePending, 0, TaskCancelNone, ResumeResultNone, ResumeSmallInvalid, false
 		}
 		switch packet.result {
 		case ResumeResultScalar:
 			if scalarOut == nil {
-				return ParkOutcomePending, 0, TaskCancelNone, ResumeResultNone, PollOperationResultInvalid, false
+				return ParkOutcomePending, 0, TaskCancelNone, ResumeResultNone, ResumeSmallInvalid, false
 			}
 			scalar = packet.scalar
-		case ResumeResultPoll, ResumeResultNone:
+		case ResumeResultPoll, ResumeResultChannel, ResumeResultNone:
 			if scalarOut != nil {
-				return ParkOutcomePending, 0, TaskCancelNone, ResumeResultNone, PollOperationResultInvalid, false
+				return ParkOutcomePending, 0, TaskCancelNone, ResumeResultNone, ResumeSmallInvalid, false
 			}
 		default:
-			return ParkOutcomePending, 0, TaskCancelNone, ResumeResultNone, PollOperationResultInvalid, false
+			return ParkOutcomePending, 0, TaskCancelNone, ResumeResultNone, ResumeSmallInvalid, false
 		}
-		result, poll = packet.result, packet.poll
+		result, small = packet.result, packet.small
 	}
 	if !deliverMaterializedParkResume(&g.park, expected) {
-		return ParkOutcomePending, 0, TaskCancelNone, ResumeResultNone, PollOperationResultInvalid, false
+		return ParkOutcomePending, 0, TaskCancelNone, ResumeResultNone, ResumeSmallInvalid, false
 	}
 	if scalarOut != nil {
 		*scalarOut = scalar
@@ -462,5 +499,5 @@ func TakeResumePacket(
 	*packet = ResumePacket{}
 	p.runDecision = RunDecision{}
 	p.runDecisionTaken = true
-	return outcome, caseID, task, result, poll, true
+	return outcome, caseID, task, result, small, true
 }

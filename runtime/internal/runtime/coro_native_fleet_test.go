@@ -29,6 +29,10 @@ import (
 	"github.com/goplus/llgo/runtime/internal/coro"
 )
 
+// The source-island fleet test does not compile the typed hchan adapter.
+// Reaching materialization without that adapter is therefore invalid.
+func coroMaterializeResumeCleanupStepV1(coro.ResumeCleanupStep) bool { return false }
+
 type coroNativeFleetTestTask struct {
 	g           *coro.G
 	handle      unsafe.Pointer

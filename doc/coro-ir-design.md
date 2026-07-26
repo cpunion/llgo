@@ -1268,7 +1268,7 @@ site只接受ProgramIR projection。旧callback/classifier在同一提交删除�
 4. dynamic coroutine descriptor、closure/method/interface；
 5. syscall/netpoll/worker/host sources；
 6. precise GC/debug metadata；
-7. 在已完成的零/单source packet上补typed multi-source materialization，再完成global injection、多P/affinity；
+7. 在已完成的零/单source packet和Channel/select typed materialization上补HostOp deadline、keyed/transport composite cleanup，再完成global injection、多P/affinity；
 8. reflect和完整平台adapter。
 
 Phase B–F严格保持plan、runtime ABI和可观察行为不变；Phase G才是新功能开发，并且必须等待下面Phase R的四个hard-cutover gate全部通过，不能混为一个巨大PR。PrimitiveCatalog生成器重构和Runtime V3也分别立项，不塞入等价迁移。
@@ -1453,7 +1453,7 @@ channel/select physical operation choice、panic/outcome/cleanup choice及remain
 5. runtime Phase R已经完成：fleet唯一target、Park/Operation唯一logical wait、统一source dispatcher和
    mandatory stackless架构均以旧production符号/配置入口为零，并由hard-cutover gate持续约束。
 6. 本轮合并门运行runtime race、LLVM 19–22、native/wasm32结构验证和六项fresh stdlib E2E。后续compiler
-   whole-function emitter仍按完整replacement cohort推进；single-source P-neutral result已独立落地，typed multi-source result、dynamic P、GC、panic/Goexit和更多平台adapter
+   whole-function emitter仍按完整replacement cohort推进；single-source P-neutral result和Channel/select typed multi-source materialization已独立落地，HostOp/keyed composite result、dynamic P、GC、panic/Goexit和更多平台adapter
    属于功能阶段，不能借机恢复旧runtime轨道。
 
 迁移过程可以用独立test invocation比较旧/新输出，但production永远只有一个被选择的consumer；临时双轨
