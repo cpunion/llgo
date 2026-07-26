@@ -3131,7 +3131,8 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	output := conf.OutFile != ""
 	ctx := &context{env: env, conf: cfg, progSSA: progSSA, prog: prog, dedup: dedup,
 		patches: patches, callerTracking: cl.NewCallerTracking(),
-		built: make(map[string]none), initial: initial, mode: mode,
+		goRoot: sourcePatchGOROOT,
+		built:  make(map[string]none), initial: initial, mode: mode,
 		fingerprinting: make(map[string]bool),
 		pkgs:           map[*packages.Package]Package{},
 		pkgByID:        map[string]Package{},
@@ -5461,6 +5462,7 @@ func prepareCoroEmissionUniverse(ctx *context, packages []*aPackage) error {
 		// deliberately prepare an incomplete package universe.
 		CompleteRuntimeABI:     hasRuntimeABI,
 		CoroTargetCapabilities: ctx.buildConf.coroTargetCapabilities(),
+		GOROOT:                 ctx.goRoot,
 	})
 	if err != nil {
 		return err
@@ -5612,6 +5614,7 @@ type context struct {
 	conf           *packages.Config
 	progSSA        *ssa.Program
 	prog           llssa.Program
+	goRoot         string
 	dedup          packages.Deduper
 	patches        cl.Patches
 	callerTracking *cl.CallerTracking

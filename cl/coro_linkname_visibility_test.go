@@ -21,6 +21,8 @@ package cl
 import (
 	"go/ast"
 	"go/types"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -30,6 +32,37 @@ import (
 	"github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/ssa"
 )
+
+func TestEmissionGOROOTSourceProvenance(t *testing.T) {
+	root := t.TempDir()
+	sourceFile := filepath.Join(root, "src", "time", "time.go")
+	if err := os.MkdirAll(filepath.Dir(sourceFile), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sourceFile, []byte("package time\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	normalized, err := normalizeEmissionGOROOT(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !emissionGOROOTContainsSourceFile(normalized, sourceFile) {
+		t.Fatalf("GOROOT %q did not contain source file %q", normalized, sourceFile)
+	}
+	if emissionGOROOTContainsSourceFile("", sourceFile) {
+		t.Fatal("empty GOROOT authorized a standard-library source file")
+	}
+	outside := filepath.Join(t.TempDir(), "time.go")
+	if err := os.WriteFile(outside, []byte("package time\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if emissionGOROOTContainsSourceFile(normalized, outside) {
+		t.Fatalf("GOROOT %q authorized outside source file %q", normalized, outside)
+	}
+	if _, err := normalizeEmissionGOROOT("relative"); err == nil {
+		t.Fatal("relative GOROOT was accepted")
+	}
+}
 
 const coroSysctlCPUFixture = `package cpu
 import _ "unsafe"
