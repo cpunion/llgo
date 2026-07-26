@@ -119,9 +119,10 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 	owner := readRuntimePollFile(t, "internal/runtime/coro_native_fleet_owner_llgo.go")
 	for _, required := range []string{
 		"[coroNativeFleetDomainCapacityV1 - 1]coroNativeFleetPhysicalOwnerV1",
-		"corofleet.CreateOwner(&owner.thread, slot)",
+		"coroNativeMStartPhysicalOwnerV1(owner, slot)",
 		"func __llgo_coro_native_fleet_owner_v2(slot uint32) uint32",
 		"coroNativeMRunReplacementOwnerV1(slot)",
+		"owner.baton.Valid() {\n\t\treturn 2",
 		"state.stop.Quiesced()",
 	} {
 		if !strings.Contains(owner, required) {
@@ -143,7 +144,10 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 		"coroNativeMDirectoryCapacityV1 uint32 = 10_000",
 		"handoff coro.ExecutionDomainHandoff",
 		"resume  coro.ExecutorResumeHandoff",
+		"token  uint32",
 		"active [coroNativeFleetDomainCapacityV1]uint32",
+		"corofleet.TryReuseOwner(&owner.thread, &owner.token, slot)",
+		"corofleet.ReleaseOwner(",
 		"coroNativeMAllocateReplacementV1(",
 		"coroNativeMClaimReplacementV1(",
 		"coroNativeMFinishReplacementReturnV1(",
@@ -169,12 +173,14 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 	target := readRuntimePollFile(t, "internal/runtime/coro_target_native_fleet_llgo.go")
 	for _, required := range []string{
 		"coroNativeInitialExecutionLimitV1()",
+		"coroTargetStartPhysicalThreadCapacityV1()",
 		"coroNativeFleetStartProgramV1(coroNativeFleetDomainCapacityV1)",
 		"coroNativeFleetV1State.execution.Start(limit)",
 		"coroNativeFleetV1State.execution.Seal()",
 		"coroNativeFleetV1State.execution.Retire()",
-		"corofleet.StartFactory()",
-		"corofleet.StopFactory()",
+		"coroNativeMStartCleanFactoryV1()",
+		"coroNativeMStopStandbyV1()",
+		"coroNativeMStopCleanFactoryV1()",
 	} {
 		if !strings.Contains(target, required) {
 			t.Errorf("native fleet target lacks fixed-topology quota lifecycle marker %q", required)
@@ -185,14 +191,18 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 	for _, required := range []string{
 		"getenv(\"GOMAXPROCS\")",
 		"sysconf(_SC_NPROCESSORS_ONLN)",
-		"__llgo_coro_native_fleet_owner_v2((uint32_t)slot)",
+		"__llgo_coro_native_fleet_owner_v2(slot)",
 		"llgo_coro_fleet_factory_main_v1",
-		"llgo_coro_fleet_owner_create_direct_v1",
+		"llgo_coro_fleet_owner_main_v3",
 		"LLGO_CORO_FLEET_FACTORY_REQUESTED_V1",
-		"__llgo_coro_fleet_owner_create_v2(pthread_t *thread, uint32_t slot)",
-		"__llgo_coro_fleet_factory_stop_v1(void)",
+		"__llgo_coro_fleet_owner_create_v3(",
+		"__llgo_coro_fleet_owner_try_reuse_v1(",
+		"__llgo_coro_fleet_owner_release_v1(",
+		"__llgo_coro_fleet_owner_stop_standby_v1(",
+		"LLGO_CORO_FLEET_OWNER_STANDBY_CAPACITY_V1 = 8",
+		"__llgo_coro_fleet_factory_stop_v2(uint32_t terminal_owner_token)",
 		"pthread_cond_wait(&factory->changed, &factory->mutex)",
-		"(void *)(uintptr_t)slot",
+		"slot_records[LLGO_CORO_FLEET_OWNER_SLOT_CAPACITY_V1]",
 	} {
 		if !strings.Contains(leaf, required) {
 			t.Errorf("native fleet C leaf lacks scalar startup-policy marker %q", required)
@@ -201,11 +211,84 @@ func TestCoroNativeFleetUsesFixedTopologyLogicalQuotaAndScalarPeerABI(t *testing
 	for _, forbidden := range []string{
 		"__llgo_coro_native_fleet_owner_v1",
 		"__llgo_coro_fleet_owner_create_v1",
+		"__llgo_coro_fleet_owner_create_v2",
 		"malloc(",
-		"void (*",
+		"void (*callback",
 	} {
 		if strings.Contains(leaf, forbidden) {
 			t.Errorf("native fleet C leaf retained callback/address-owned path %q", forbidden)
 		}
+	}
+}
+
+func TestCoroNativePhysicalThreadCapacityCoversEveryRuntimeThreadCreator(t *testing.T) {
+	core := readRuntimePollFile(t, "internal/coro/physical_thread_capacity.go")
+	for _, required := range []string{
+		"PhysicalThreadDefaultLimit uint32 = 10_000",
+		"PhysicalThreadMaximumLimit uint32 = 1<<31 - 1",
+		"type PhysicalThreadCapacity struct",
+		"func (capacity *PhysicalThreadCapacity) Reserve()",
+		"func (capacity *PhysicalThreadCapacity) Release() bool",
+		"func (capacity *PhysicalThreadCapacity) SetLimit(",
+	} {
+		if !strings.Contains(core, required) {
+			t.Errorf("physical thread capacity core lacks %q", required)
+		}
+	}
+
+	native := readRuntimePollFile(t, "internal/runtime/coro_physical_thread_capacity_native_llgo.go")
+	for _, required := range []string{
+		"coroNativePhysicalThreadCapacityV1State.Start(",
+		"func coroTargetReservePhysicalThreadV1() bool",
+		"func coroTargetReleasePhysicalThreadV1() bool",
+		"func CoroSetMaxThreads(n int) int",
+		"coroNativePhysicalThreadCapacityV1State.SetLimit(next)",
+	} {
+		if !strings.Contains(native, required) {
+			t.Errorf("native physical thread capacity adapter lacks %q", required)
+		}
+	}
+
+	worker := readRuntimePollFile(t, "internal/runtime/coro_worker_native_llgo.go")
+	reserveWorker := strings.Index(worker, "if !coroTargetReservePhysicalThreadV1()")
+	createWorker := strings.Index(worker, "if coroworker.Create(&state.threads[index])")
+	joinWorker := strings.Index(worker, "pthread.Join(thread, nil)")
+	releaseWorker := strings.Index(worker, "!coroTargetReleasePhysicalThreadV1()")
+	if reserveWorker < 0 || createWorker <= reserveWorker ||
+		joinWorker < 0 || releaseWorker <= joinWorker {
+		t.Error("native worker threads are not reserved before create and released after join")
+	}
+
+	directory := readRuntimePollFile(t, "internal/runtime/coro_native_m_owner_llgo.go")
+	reuseOwner := strings.Index(directory, "corofleet.TryReuseOwner(&owner.thread, &owner.token, slot)")
+	reserveOwner := strings.Index(directory, "if !coroTargetReservePhysicalThreadV1()")
+	createOwner := strings.Index(directory, "corofleet.CreateOwner(&owner.thread, &owner.token, slot)")
+	if reuseOwner < 0 || reserveOwner <= reuseOwner || createOwner <= reserveOwner {
+		t.Error("native owner acquisition does not reuse standby before reserving and creating")
+	}
+	for _, required := range []string{
+		"corofleet.ReleaseOwner(",
+		"corofleet.StopStandby(&joined)",
+		"coroTargetReservePhysicalThreadV1()",
+		"corofleet.StartFactory()",
+		"corofleet.StopFactory(terminalToken)",
+		"coroTargetReleasePhysicalThreadV1()",
+	} {
+		if !strings.Contains(directory, required) {
+			t.Errorf("native M lifecycle lacks physical capacity marker %q", required)
+		}
+	}
+
+	target := readRuntimePollFile(t, "internal/runtime/coro_target_native_fleet_llgo.go")
+	stopWorker := strings.Index(target, "!coroNativeWorkerPoolStopFleetV1()")
+	stopStandby := strings.Index(target, "!coroNativeMStopStandbyV1()")
+	stopFactory := strings.Index(target, "!coroNativeMStopCleanFactoryV1()")
+	if stopWorker < 0 || stopStandby <= stopWorker || stopFactory <= stopStandby {
+		t.Error("native target does not stop workers, standby Ms, and clean factory in ownership order")
+	}
+
+	stdlib := readRuntimePollFile(t, "internal/lib/runtime/setmaxthreads_coro_llgo.go")
+	if !strings.Contains(stdlib, "return llruntime.CoroSetMaxThreads(in)") {
+		t.Error("runtime/debug.SetMaxThreads is not delegated to the physical capacity ledger")
 	}
 }

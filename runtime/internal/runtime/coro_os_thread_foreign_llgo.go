@@ -21,8 +21,6 @@ package runtime
 import (
 	"unsafe"
 
-	c "github.com/goplus/llgo/runtime/internal/clite"
-	"github.com/goplus/llgo/runtime/internal/clite/pthread"
 	"github.com/goplus/llgo/runtime/internal/coro"
 	"github.com/goplus/llgo/runtime/internal/corofleet"
 	"github.com/goplus/llgo/runtime/internal/coroworker"
@@ -85,8 +83,9 @@ func __llgo_coro_os_thread_foreign_call_v1(
 	if !coroTargetReleaseManagedExecutionV1(driver) {
 		coroRuntimeAbort("locked-thread foreign call cannot release managed execution permit")
 	}
-	if corofleet.CreateOwner(&child.thread, childSlot) != 0 || child.thread == nil {
+	if !coroNativeMStartPhysicalOwnerV1(child, childSlot) {
 		child.thread = nil
+		child.token = 0
 		if parent.handoff.RequestReturn(baton) !=
 			coro.ExecutionDomainHandoffReturnUnclaimed ||
 			!parent.handoff.Complete(baton) ||
@@ -114,11 +113,7 @@ func __llgo_coro_os_thread_foreign_call_v1(
 		parent,
 		baton,
 	)
-	var threadResult c.Pointer
-	joinOK := returned && returnedOwner.thread != nil &&
-		pthread.Join(returnedOwner.thread, &threadResult) == 0 &&
-		threadResult == nil
-	returned = returned && joinOK &&
+	returned = returned && returnedOwner.thread != nil &&
 		coroNativeMOwnerLifecycleLoadV1(returnedOwner) == coroNativeMOwnerReturnedV1 &&
 		coroNativeAtomicLoadV1(
 			&coroNativeMDirectoryV1State.active[domain.handle.Route-1],
@@ -126,10 +121,10 @@ func __llgo_coro_os_thread_foreign_call_v1(
 	// Recycle while the parent baton still proves Returned. Completing the
 	// baton first would erase the exact lineage identity and make a scalar slot
 	// alone insufficient authority to return this storage to the free pool.
-	if !ringOK || !joinOK || !returned ||
+	if !ringOK || !returned ||
 		!coroNativeMRecycleReplacementV1(returnedSlot) ||
 		!parent.handoff.Complete(baton) {
-		coroRuntimeAbort("locked-thread foreign call replacement join failed")
+		coroRuntimeAbort("locked-thread foreign call replacement return failed")
 	}
 	if !coroTargetReenterManagedExecutionV1(driver) ||
 		!coro.RestoreExecutorResume(&parent.resume) {

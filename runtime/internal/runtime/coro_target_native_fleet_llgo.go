@@ -21,7 +21,6 @@ package runtime
 import (
 	c "github.com/goplus/llgo/runtime/internal/clite"
 	"github.com/goplus/llgo/runtime/internal/coro"
-	"github.com/goplus/llgo/runtime/internal/corofleet"
 )
 
 type coroNativeFleetTargetLifecycleV1 uint8
@@ -107,6 +106,7 @@ func coroTargetExecutorStartV1(handle coro.ExecutorHandle) bool {
 		handle != coroProgramExecutorHandleV1State || handle.Slot == 0 || handle.Generation == 0 ||
 		!limitOK || !coroNativeWorkerPoolCanReleaseV1() ||
 		!coroNativeFleetV1State.execution.CanRelease() ||
+		!coroTargetStartPhysicalThreadCapacityV1() ||
 		!coroNativeFleetStartProgramV1(coroNativeFleetDomainCapacityV1) {
 		return false
 	}
@@ -128,20 +128,20 @@ func coroTargetExecutorStartV1(handle coro.ExecutorHandle) bool {
 		coroRuntimeAbort("native coroutine M directory start failed")
 		return false
 	}
-	if corofleet.StartFactory() != 0 {
+	if !coroNativeMStartCleanFactoryV1() {
 		state.lifecycle = coroNativeFleetTargetFailedV1
 		coroRuntimeAbort("native coroutine clean M factory start failed")
 		return false
 	}
 	if !coroNativeWorkerPoolStartFleetV1() {
-		_ = corofleet.StopFactory()
+		_ = coroNativeMStopCleanFactoryV1()
 		state.lifecycle = coroNativeFleetTargetFailedV1
 		coroRuntimeAbort("native coroutine fleet worker start failed")
 		return false
 	}
 	if !coroNativeFleetPhysicalOwnersStartV1() {
 		_ = coroNativeWorkerPoolStopFleetV1()
-		_ = corofleet.StopFactory()
+		_ = coroNativeMStopCleanFactoryV1()
 		state.lifecycle = coroNativeFleetTargetFailedV1
 		coroRuntimeAbort("native coroutine fleet peer owners start failed")
 		return false
@@ -296,7 +296,8 @@ func coroTargetBeginExecutorCloseV1(handle coro.ExecutorHandle, epoch uint32) co
 		!coroNativeFleetV1State.execution.Quiesced() ||
 		!coroNativeFleetV1State.execution.Retire() ||
 		!coroNativeWorkerPoolStopFleetV1() ||
-		corofleet.StopFactory() != 0 {
+		!coroNativeMStopStandbyV1() ||
+		!coroNativeMStopCleanFactoryV1() {
 		return coroTargetDispatchInvalidV1
 	}
 	state.lifecycle = coroNativeFleetTargetClosingV1

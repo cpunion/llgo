@@ -379,11 +379,12 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyGuardedSameMEntrance(t *testing.T) 
 		"coro.DetachExecutorResume(&parent.resume, driver, task)",
 		"parent.handoff.Begin(ownerEpoch)",
 		"coroNativeMAllocateReplacementV1(",
-		"corofleet.CreateOwner(&child.thread, childSlot)",
 		"coroTargetReleaseManagedExecutionV1(driver)",
+		"coroNativeMStartPhysicalOwnerV1(child, childSlot)",
 		"callOK := coroworker.Call(function, argc, &args, &result)",
 		"parent.handoff.RequestReturn(baton)",
-		"pthread.Join(child.thread, &threadResult)",
+		"coroNativeMReplacementLineageOwnerV1(",
+		"coroNativeMRecycleReplacementV1(returnedSlot)",
 		"coroTargetReenterManagedExecutionV1(driver)",
 		"coro.RestoreExecutorResume(&parent.resume)",
 	} {
@@ -392,16 +393,16 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyGuardedSameMEntrance(t *testing.T) 
 		}
 	}
 	detach := strings.Index(entrance, "coro.DetachExecutorResume(&parent.resume, driver, task)")
-	create := strings.Index(entrance, "corofleet.CreateOwner(&child.thread, childSlot)")
 	leave := strings.Index(entrance, "coroTargetReleaseManagedExecutionV1(driver)")
+	create := strings.Index(entrance, "coroNativeMStartPhysicalOwnerV1(child, childSlot)")
 	call := strings.Index(entrance, "callOK := coroworker.Call(function, argc, &args, &result)")
 	request := strings.LastIndex(entrance, "parent.handoff.RequestReturn(baton)")
-	join := strings.Index(entrance, "pthread.Join(child.thread, &threadResult)")
-	reenter := strings.Index(entrance, "coroTargetReenterManagedExecutionV1(driver)")
+	recycle := strings.Index(entrance, "coroNativeMRecycleReplacementV1(returnedSlot)")
+	reenter := strings.LastIndex(entrance, "coroTargetReenterManagedExecutionV1(driver)")
 	restore := strings.LastIndex(entrance, "coro.RestoreExecutorResume(&parent.resume)")
-	if detach < 0 || create <= detach || leave <= create || call <= leave ||
-		request <= call || join <= request || reenter <= join || restore <= reenter {
-		t.Errorf("%s does not bracket same-M C with detach/create/return/join/restore", runtimeCoroOSThreadForeignSource)
+	if detach < 0 || leave <= detach || create <= leave || call <= create ||
+		request <= call || recycle <= request || reenter <= recycle || restore <= reenter {
+		t.Errorf("%s does not bracket same-M C with detach/release/create/return/recycle/restore", runtimeCoroOSThreadForeignSource)
 	}
 	quota := readRuntimePollFile(t, "internal/runtime/coro_execution_quota_native_llgo.go")
 	for _, required := range []string{

@@ -36,6 +36,7 @@ func TestNativeFactorySerializesConcurrentTaintedOwnerCreation(t *testing.T) {
 #include "owner.h"
 
 #include <pthread.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -44,12 +45,16 @@ enum {
     requester_count = 16,
 };
 
-static _Atomic uint32_t seen[requester_count + 2];
+static _Atomic uint32_t seen[requester_count + 13];
 static _Atomic uint32_t inherited_taint;
+static _Atomic uint32_t standby_mode;
+static _Atomic uint32_t terminal_mode;
+static _Atomic int terminal_stop_result = -2;
+static uint32_t terminal_token;
 
 uint32_t __llgo_coro_native_fleet_owner_v2(uint32_t slot) {
     sigset_t current;
-    if (slot == 0 || slot > requester_count + 1 ||
+    if (slot == 0 || slot > requester_count + 12 ||
         pthread_sigmask(SIG_SETMASK, NULL, &current) != 0 ||
         __llgo_coro_fleet_owner_ready_v1(slot) != 0) {
         return 0;
@@ -59,7 +64,15 @@ uint32_t __llgo_coro_native_fleet_owner_v2(uint32_t slot) {
             &inherited_taint, 1, memory_order_relaxed);
     }
     atomic_fetch_add_explicit(&seen[slot], 1, memory_order_relaxed);
-    return 1;
+    if (atomic_load_explicit(&terminal_mode, memory_order_relaxed) != 0) {
+        int result = __llgo_coro_fleet_factory_stop_v2(terminal_token);
+        atomic_store_explicit(
+            &terminal_stop_result, result, memory_order_relaxed);
+        return 1;
+    }
+    return atomic_load_explicit(&standby_mode, memory_order_relaxed) != 0
+        ? 2
+        : 1;
 }
 
 static void *request_owner(void *word) {
@@ -71,12 +84,12 @@ static void *request_owner(void *word) {
         return (void *)(uintptr_t)1;
     }
     pthread_t owner = (pthread_t)0;
-    if (__llgo_coro_fleet_owner_create_v2(&owner, slot) != 0 ||
-        owner == (pthread_t)0) {
+    uint32_t token = 0;
+    if (__llgo_coro_fleet_owner_create_v3(&owner, &token, slot) != 0 ||
+        owner == (pthread_t)0 || token == 0) {
         return (void *)(uintptr_t)2;
     }
-    void *result = (void *)(uintptr_t)1;
-    if (pthread_join(owner, &result) != 0 || result != NULL) {
+    if (__llgo_coro_fleet_owner_join_v1(owner, token) != 0) {
         return (void *)(uintptr_t)3;
     }
     return NULL;
@@ -84,8 +97,10 @@ static void *request_owner(void *word) {
 
 int main(void) {
     pthread_t rejected = (pthread_t)0;
-    if (__llgo_coro_fleet_owner_create_v2(&rejected, 1) == 0 ||
-        __llgo_coro_fleet_factory_stop_v1() == 0) {
+    uint32_t rejected_token = 0;
+    if (__llgo_coro_fleet_owner_create_v3(
+            &rejected, &rejected_token, 1) == 0 ||
+        __llgo_coro_fleet_factory_stop_v2(0) == 0) {
         return 10;
     }
 
@@ -122,27 +137,121 @@ int main(void) {
             return 15;
         }
     }
-    if (__llgo_coro_fleet_factory_stop_v1() != 0 ||
-        __llgo_coro_fleet_owner_create_v2(&rejected, 1) == 0) {
+
+    atomic_store_explicit(&standby_mode, 1, memory_order_relaxed);
+    pthread_t standby = (pthread_t)0;
+    uint32_t standby_token = 0;
+    if (__llgo_coro_fleet_owner_try_reuse_v1(
+            &standby, &standby_token, requester_count + 1) != 1 ||
+        __llgo_coro_fleet_owner_create_v3(
+            &standby, &standby_token, requester_count + 1) != 0 ||
+        standby == (pthread_t)0 || standby_token == 0 ||
+        __llgo_coro_fleet_owner_release_v1(
+            standby, standby_token, requester_count + 1) != 0) {
         return 16;
     }
-
-    /* Restart proves stop destroyed every pthread primitive and tombstone. */
-    if (__llgo_coro_fleet_factory_start_v1() != 0) {
+    pthread_t reused = (pthread_t)0;
+    uint32_t reused_token = 0;
+    if (__llgo_coro_fleet_owner_try_reuse_v1(
+            &reused, &reused_token, requester_count + 2) != 0) {
         return 17;
     }
-    pthread_t owner = (pthread_t)0;
-    if (__llgo_coro_fleet_owner_create_v2(
-            &owner, requester_count + 1) != 0 ||
-        owner == (pthread_t)0) {
-        return 18;
+    if (pthread_equal(standby, reused) == 0 ||
+        reused_token != standby_token) {
+        return 23;
     }
-    void *result = (void *)(uintptr_t)1;
-    if (pthread_join(owner, &result) != 0 || result != NULL ||
+    if (__llgo_coro_fleet_owner_release_v1(
+            reused, reused_token, requester_count + 2) != 0) {
+        return 24;
+    }
+
+    pthread_t overflow_owners[8];
+    uint32_t overflow_tokens[8];
+    for (uint32_t index = 0; index < 8; index++) {
+        overflow_owners[index] = (pthread_t)0;
+        overflow_tokens[index] = 0;
+        uint32_t slot = requester_count + 3 + index;
+        if (__llgo_coro_fleet_owner_create_v3(
+                &overflow_owners[index], &overflow_tokens[index], slot) != 0 ||
+            overflow_owners[index] == (pthread_t)0 ||
+            overflow_tokens[index] == 0) {
+            return 25;
+        }
+        int released = __llgo_coro_fleet_owner_release_v1(
+            overflow_owners[index], overflow_tokens[index], slot);
+        if (released != (index == 7 ? 1 : 0)) {
+            return 26;
+        }
+    }
+    uint32_t standby_joined = 0;
+    if (__llgo_coro_fleet_owner_stop_standby_v1(&standby_joined) != 0 ||
+        standby_joined != 8 ||
         atomic_load_explicit(
             &seen[requester_count + 1], memory_order_relaxed) != 1 ||
-        __llgo_coro_fleet_factory_stop_v1() != 0) {
+        atomic_load_explicit(
+            &seen[requester_count + 2], memory_order_relaxed) != 1) {
+        return 18;
+    }
+    for (uint32_t slot = requester_count + 3;
+         slot <= requester_count + 10;
+         slot++) {
+        if (atomic_load_explicit(&seen[slot], memory_order_relaxed) != 1) {
+            return 27;
+        }
+    }
+    atomic_store_explicit(&standby_mode, 0, memory_order_relaxed);
+    if (__llgo_coro_fleet_factory_stop_v2(0) != 0 ||
+        __llgo_coro_fleet_owner_create_v3(
+            &rejected, &rejected_token, 1) == 0) {
         return 19;
+    }
+
+    /* Restart proves stop retired every pthread record and tombstone. */
+    if (__llgo_coro_fleet_factory_start_v1() != 0) {
+        return 20;
+    }
+    pthread_t owner = (pthread_t)0;
+    uint32_t token = 0;
+    if (__llgo_coro_fleet_owner_create_v3(
+            &owner, &token, requester_count + 11) != 0 ||
+        owner == (pthread_t)0 || token == 0) {
+        return 21;
+    }
+    if (__llgo_coro_fleet_owner_join_v1(owner, token) != 0 ||
+        atomic_load_explicit(
+            &seen[requester_count + 11], memory_order_relaxed) != 1 ||
+        __llgo_coro_fleet_factory_stop_v2(0) != 0) {
+        return 22;
+    }
+
+    if (__llgo_coro_fleet_factory_start_v1() != 0) {
+        return 28;
+    }
+    atomic_store_explicit(&terminal_mode, 1, memory_order_relaxed);
+    owner = (pthread_t)0;
+    terminal_token = 0;
+    if (__llgo_coro_fleet_owner_create_v3(
+            &owner, &terminal_token, requester_count + 12) != 0) {
+        return 29;
+    }
+    if (owner == (pthread_t)0 || terminal_token == 0) {
+        return 30;
+    }
+    while (atomic_load_explicit(
+               &terminal_stop_result, memory_order_relaxed) == -2) {
+        (void)sched_yield();
+    }
+    if (__llgo_coro_fleet_owner_join_v1(owner, terminal_token) != 0) {
+        return 31;
+    }
+    int terminal_result = atomic_load_explicit(
+        &terminal_stop_result, memory_order_relaxed);
+    if (terminal_result != 0) {
+        return 32;
+    }
+    if (atomic_load_explicit(
+            &seen[requester_count + 12], memory_order_relaxed) != 1) {
+        return 33;
     }
     return 0;
 }

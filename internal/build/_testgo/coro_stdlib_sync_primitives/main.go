@@ -10,6 +10,7 @@ package main
 
 import (
 	"runtime"
+	"runtime/debug"
 	"sync"
 )
 
@@ -39,6 +40,10 @@ func main() {
 	runtime.SetDefaultGOMAXPROCS()
 	if runtime.GOMAXPROCS(0) < 1 {
 		panic("runtime.SetDefaultGOMAXPROCS produced an invalid limit")
+	}
+	previousThreads := debug.SetMaxThreads(64)
+	if previousThreads != 10_000 || debug.SetMaxThreads(previousThreads) != 64 {
+		panic("runtime/debug.SetMaxThreads query/restore failed")
 	}
 
 	group.Add(1)
