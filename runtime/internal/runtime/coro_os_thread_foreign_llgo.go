@@ -101,22 +101,38 @@ func __llgo_coro_os_thread_foreign_call_v1(
 	var result coroworker.Result
 	callOK := coroworker.Call(function, argc, &args, &result)
 	returnResult := parent.handoff.RequestReturn(baton)
-	ringOK := returnResult != coro.ExecutionDomainHandoffReturnInvalid &&
+	ringOK := returnResult == coro.ExecutionDomainHandoffReturnClaimed &&
 		domain.doorbell.Ring()
+	for ringOK && !parent.handoff.Returned(baton) {
+		if corofleet.Yield() != 0 {
+			ringOK = false
+		}
+	}
+	returnedSlot, returnedOwner, returned := coroNativeMReplacementLineageOwnerV1(
+		childSlot,
+		child,
+		parent,
+		baton,
+	)
 	var threadResult c.Pointer
-	joinOK := pthread.Join(child.thread, &threadResult) == 0 &&
+	joinOK := returned && returnedOwner.thread != nil &&
+		pthread.Join(returnedOwner.thread, &threadResult) == 0 &&
 		threadResult == nil
-	returned := parent.handoff.Returned(baton) &&
-		coroNativeMOwnerLifecycleLoadV1(child) == coroNativeMOwnerReturnedV1 &&
+	returned = returned && joinOK &&
+		coroNativeMOwnerLifecycleLoadV1(returnedOwner) == coroNativeMOwnerReturnedV1 &&
 		coroNativeAtomicLoadV1(
 			&coroNativeMDirectoryV1State.active[domain.handle.Route-1],
 		) == parentSlot
-	if !ringOK || !joinOK || !returned || !parent.handoff.Complete(baton) {
+	// Recycle while the parent baton still proves Returned. Completing the
+	// baton first would erase the exact lineage identity and make a scalar slot
+	// alone insufficient authority to return this storage to the free pool.
+	if !ringOK || !joinOK || !returned ||
+		!coroNativeMRecycleReplacementV1(returnedSlot) ||
+		!parent.handoff.Complete(baton) {
 		coroRuntimeAbort("locked-thread foreign call replacement join failed")
 	}
 	if !coroTargetReenterManagedExecutionV1(driver) ||
-		!coro.RestoreExecutorResume(&parent.resume) ||
-		!coroNativeMRecycleReplacementV1(childSlot) {
+		!coro.RestoreExecutorResume(&parent.resume) {
 		coroRuntimeAbort("locked-thread foreign call cannot reacquire managed execution")
 	}
 	if !callOK {

@@ -19,8 +19,10 @@
 package runtime
 
 import (
+	c "github.com/goplus/llgo/runtime/internal/clite"
 	"github.com/goplus/llgo/runtime/internal/clite/pthread"
 	"github.com/goplus/llgo/runtime/internal/coro"
+	"github.com/goplus/llgo/runtime/internal/corofleet"
 )
 
 const (
@@ -41,6 +43,9 @@ const (
 	coroNativeMOwnerPeerActiveV1
 	coroNativeMOwnerReplacementPublishedV1
 	coroNativeMOwnerReplacementActiveV1
+	coroNativeMOwnerSuccessorPublishedV1
+	coroNativeMOwnerSuccessorActiveV1
+	coroNativeMOwnerRetiringV1
 	coroNativeMOwnerReturnedV1
 	coroNativeMOwnerRetiredV1
 	coroNativeMOwnerFailedV1
@@ -68,9 +73,12 @@ type coroNativeMOwnerV1 struct {
 	handle coro.ExecutorFleetHandle
 	baton  coro.ExecutionDomainHandoffHandle
 
-	parentSlot uint32
-	ownerEpoch uint32
-	lifecycle  uint32
+	parentSlot      uint32
+	predecessorSlot uint32
+	lineageRootSlot uint32
+	lineageSlot     uint32
+	ownerEpoch      uint32
+	lifecycle       uint32
 }
 
 type coroNativeMDirectoryV1 struct {
@@ -125,7 +133,10 @@ func coroNativeMDirectoryStartV1(program coro.ExecutorFleetHandle) bool {
 			owner.resume.Detached() || owner.thread != nil || owner.self != nil ||
 			owner.handle != (coro.ExecutorFleetHandle{}) ||
 			owner.baton != (coro.ExecutionDomainHandoffHandle{}) ||
-			owner.parentSlot != 0 || owner.ownerEpoch != 0 ||
+			owner.parentSlot != 0 || owner.predecessorSlot != 0 ||
+			owner.lineageRootSlot != 0 ||
+			coroNativeAtomicLoadV1(&owner.lineageSlot) != 0 ||
+			owner.ownerEpoch != 0 ||
 			coroNativeMOwnerLifecycleLoadV1(owner) != coroNativeMOwnerUnusedV1 ||
 			coroNativeAtomicLoadV1(&directory.active[route-1]) != 0 {
 			coroNativeAtomicStoreV1(&directory.state, uint32(coroNativeMDirectoryFailedV1))
@@ -197,7 +208,30 @@ func coroNativeMCurrentOwnerV1(
 		}
 		epoch = domain.ownerEpoch
 	case coroNativeMOwnerReplacementActiveV1:
-		if owner.parentSlot == 0 || owner.ownerEpoch == 0 || !owner.baton.Valid() {
+		if owner.parentSlot == 0 || owner.predecessorSlot != 0 ||
+			owner.lineageRootSlot != slot ||
+			coroNativeAtomicLoadV1(&owner.lineageSlot) != slot ||
+			owner.ownerEpoch == 0 || !owner.baton.Valid() {
+			return nil, nil, 0, 0, false
+		}
+		epoch = owner.ownerEpoch
+	case coroNativeMOwnerSuccessorActiveV1:
+		if owner.predecessorSlot == 0 || owner.ownerEpoch == 0 {
+			return nil, nil, 0, 0, false
+		}
+		if owner.baton.Valid() {
+			if owner.parentSlot == 0 || owner.lineageRootSlot == 0 {
+				return nil, nil, 0, 0, false
+			}
+		} else if owner.parentSlot != 0 || owner.lineageRootSlot != 0 {
+			return nil, nil, 0, 0, false
+		}
+		if domain.handle.Route == 1 {
+			if !domain.adopted || owner.ownerEpoch != coroNativeProgramOwnerEpochV1 {
+				return nil, nil, 0, 0, false
+			}
+		} else if domain.adopted || domain.ownerEpoch == 0 ||
+			owner.ownerEpoch != domain.ownerEpoch {
 			return nil, nil, 0, 0, false
 		}
 		epoch = owner.ownerEpoch
@@ -205,6 +239,153 @@ func coroNativeMCurrentOwnerV1(
 		return nil, nil, 0, 0, false
 	}
 	return owner, domain, slot, epoch, true
+}
+
+func coroNativeMAllocateSuccessorV1(
+	predecessorSlot uint32,
+	predecessor *coroNativeMOwnerV1,
+	epoch uint32,
+	replacement bool,
+) (uint32, *coroNativeMOwnerV1, bool) {
+	if predecessorSlot == 0 || predecessor == nil || epoch == 0 ||
+		!predecessor.handle.Valid() ||
+		coroNativeMOwnerLifecycleLoadV1(predecessor) != coroNativeMOwnerRetiringV1 {
+		return 0, nil, false
+	}
+	for slot := uint32(coroNativeFleetDomainCapacityV1 + 1); slot <= coroNativeMDirectoryCapacityV1; slot++ {
+		owner := &coroNativeMDirectoryV1State.owners[slot-1]
+		if !coroNativeMOwnerLifecycleCASV1(
+			owner,
+			coroNativeMOwnerUnusedV1,
+			coroNativeMOwnerPreparingV1,
+		) {
+			continue
+		}
+		if owner.thread != nil || owner.self != nil ||
+			owner.handle != (coro.ExecutorFleetHandle{}) ||
+			owner.baton != (coro.ExecutionDomainHandoffHandle{}) ||
+			owner.parentSlot != 0 || owner.predecessorSlot != 0 ||
+			owner.lineageRootSlot != 0 ||
+			coroNativeAtomicLoadV1(&owner.lineageSlot) != 0 ||
+			owner.ownerEpoch != 0 ||
+			owner.resume.Detached() || !owner.handoff.Idle() {
+			coroNativeAtomicStoreV1(&owner.lifecycle, uint32(coroNativeMOwnerFailedV1))
+			return 0, nil, false
+		}
+		owner.handle = predecessor.handle
+		owner.predecessorSlot = predecessorSlot
+		owner.ownerEpoch = epoch
+		if replacement {
+			rootSlot := predecessor.lineageRootSlot
+			if rootSlot == 0 || predecessor.parentSlot == 0 ||
+				!predecessor.baton.Valid() {
+				coroNativeAtomicStoreV1(&owner.lifecycle, uint32(coroNativeMOwnerFailedV1))
+				return 0, nil, false
+			}
+			owner.baton = predecessor.baton
+			owner.parentSlot = predecessor.parentSlot
+			owner.lineageRootSlot = rootSlot
+		} else if predecessor.parentSlot != 0 ||
+			predecessor.lineageRootSlot != 0 || predecessor.baton.Valid() {
+			coroNativeAtomicStoreV1(&owner.lifecycle, uint32(coroNativeMOwnerFailedV1))
+			return 0, nil, false
+		}
+		coroNativeAtomicStoreV1(
+			&owner.lifecycle,
+			uint32(coroNativeMOwnerSuccessorPublishedV1),
+		)
+		return slot, owner, true
+	}
+	return 0, nil, false
+}
+
+func coroNativeMClaimSuccessorV1(
+	slot uint32,
+) (
+	owner, predecessor *coroNativeMOwnerV1,
+	domain *coroNativeFleetDomainV1,
+	ok bool,
+) {
+	owner, ownerOK := coroNativeMOwnerForSlotV1(slot)
+	if !ownerOK ||
+		coroNativeMOwnerLifecycleLoadV1(owner) != coroNativeMOwnerSuccessorPublishedV1 ||
+		owner.predecessorSlot == 0 || owner.ownerEpoch == 0 || !owner.handle.Valid() ||
+		owner.self != nil {
+		return nil, nil, nil, false
+	}
+	self := pthread.Self()
+	if self == nil {
+		return nil, nil, nil, false
+	}
+	predecessor, predecessorOK := coroNativeMOwnerForSlotV1(owner.predecessorSlot)
+	domain, domainOK := coroNativeFleetDomainForHandleV1(
+		&coroNativeFleetV1State,
+		owner.handle,
+		coroNativeFleetDomainActiveV1,
+	)
+	if !predecessorOK || !domainOK ||
+		coroNativeMOwnerLifecycleLoadV1(predecessor) != coroNativeMOwnerRetiringV1 ||
+		predecessor.handle != owner.handle ||
+		coroNativeAtomicLoadV1(
+			&coroNativeMDirectoryV1State.active[owner.handle.Route-1],
+		) != owner.predecessorSlot {
+		return nil, nil, nil, false
+	}
+	if owner.handle.Route == 1 {
+		if !domain.adopted || owner.ownerEpoch != coroNativeProgramOwnerEpochV1 {
+			return nil, nil, nil, false
+		}
+	} else if domain.adopted || domain.ownerEpoch == 0 ||
+		owner.ownerEpoch != domain.ownerEpoch {
+		return nil, nil, nil, false
+	}
+	var lineageRoot *coroNativeMOwnerV1
+	if owner.baton.Valid() {
+		var rootOK bool
+		lineageRoot, rootOK = coroNativeMOwnerForSlotV1(owner.lineageRootSlot)
+		parent, parentOK := coroNativeMOwnerForSlotV1(owner.parentSlot)
+		if !rootOK || !parentOK || lineageRoot.lineageRootSlot != owner.lineageRootSlot ||
+			lineageRoot.baton != owner.baton ||
+			lineageRoot.parentSlot != owner.parentSlot ||
+			coroNativeAtomicLoadV1(&lineageRoot.lineageSlot) != owner.predecessorSlot ||
+			parent.handle != owner.handle {
+			return nil, nil, nil, false
+		}
+	} else if owner.parentSlot != 0 || owner.lineageRootSlot != 0 {
+		return nil, nil, nil, false
+	}
+	var peer *coroNativeFleetPhysicalOwnerV1
+	if !owner.baton.Valid() && owner.handle.Route != 1 {
+		var peerOK bool
+		peer, peerOK = coroNativeFleetPhysicalOwnerForHandleV1(owner.handle)
+		if !peerOK ||
+			coroNativeAtomicLoadV1(&peer.slot) != owner.predecessorSlot {
+			return nil, nil, nil, false
+		}
+	}
+	owner.self = self
+	if !coroNativeAtomicCASV1(
+		&coroNativeMDirectoryV1State.active[owner.handle.Route-1],
+		owner.predecessorSlot,
+		slot,
+	) || !coroNativeMOwnerLifecycleCASV1(
+		owner,
+		coroNativeMOwnerSuccessorPublishedV1,
+		coroNativeMOwnerSuccessorActiveV1,
+	) {
+		return nil, nil, nil, false
+	}
+	if lineageRoot != nil && !coroNativeAtomicCASV1(
+		&lineageRoot.lineageSlot,
+		owner.predecessorSlot,
+		slot,
+	) {
+		return nil, nil, nil, false
+	}
+	if peer != nil {
+		coroNativeAtomicStoreV1(&peer.slot, slot)
+	}
+	return owner, predecessor, domain, true
 }
 
 func coroNativeMAllocateReplacementV1(
@@ -227,7 +408,10 @@ func coroNativeMAllocateReplacementV1(
 		if owner.thread != nil || owner.self != nil ||
 			owner.handle != (coro.ExecutorFleetHandle{}) ||
 			owner.baton != (coro.ExecutionDomainHandoffHandle{}) ||
-			owner.parentSlot != 0 || owner.ownerEpoch != 0 ||
+			owner.parentSlot != 0 || owner.predecessorSlot != 0 ||
+			owner.lineageRootSlot != 0 ||
+			coroNativeAtomicLoadV1(&owner.lineageSlot) != 0 ||
+			owner.ownerEpoch != 0 ||
 			owner.resume.Detached() || !owner.handoff.Idle() {
 			coroNativeAtomicStoreV1(&owner.lifecycle, uint32(coroNativeMOwnerFailedV1))
 			return 0, nil, false
@@ -235,6 +419,8 @@ func coroNativeMAllocateReplacementV1(
 		owner.handle = handle
 		owner.baton = baton
 		owner.parentSlot = parentSlot
+		owner.lineageRootSlot = slot
+		coroNativeAtomicStoreV1(&owner.lineageSlot, slot)
 		owner.ownerEpoch = baton.OwnerEpoch
 		coroNativeAtomicStoreV1(
 			&owner.lifecycle,
@@ -252,12 +438,16 @@ func coroNativeMReleaseUnstartedReplacementV1(slot uint32) bool {
 		coroNativeMOwnerReplacementPublishedV1,
 		coroNativeMOwnerPreparingV1,
 	) || owner.thread != nil || owner.self != nil || owner.resume.Detached() ||
-		!owner.handoff.Idle() {
+		!owner.handoff.Idle() || owner.predecessorSlot != 0 ||
+		owner.lineageRootSlot != slot ||
+		coroNativeAtomicLoadV1(&owner.lineageSlot) != slot {
 		return false
 	}
 	owner.handle = coro.ExecutorFleetHandle{}
 	owner.baton = coro.ExecutionDomainHandoffHandle{}
 	owner.parentSlot = 0
+	owner.lineageRootSlot = 0
+	coroNativeAtomicStoreV1(&owner.lineageSlot, 0)
 	owner.ownerEpoch = 0
 	coroNativeAtomicStoreV1(&owner.lifecycle, uint32(coroNativeMOwnerUnusedV1))
 	return true
@@ -265,12 +455,29 @@ func coroNativeMReleaseUnstartedReplacementV1(slot uint32) bool {
 
 func coroNativeMRecycleReplacementV1(slot uint32) bool {
 	owner, ok := coroNativeMOwnerForSlotV1(slot)
-	if !ok || !coroNativeMOwnerLifecycleCASV1(
-		owner,
-		coroNativeMOwnerReturnedV1,
-		coroNativeMOwnerPreparingV1,
-	) || owner.thread == nil || owner.self == nil ||
+	if !ok || coroNativeMOwnerLifecycleLoadV1(owner) != coroNativeMOwnerReturnedV1 ||
+		owner.thread == nil || owner.self == nil || !owner.handle.Valid() ||
+		owner.handle.Route > coroNativeFleetDomainCapacityV1 ||
+		!owner.baton.Valid() || owner.parentSlot == 0 ||
+		owner.lineageRootSlot == 0 ||
+		owner.ownerEpoch != owner.baton.OwnerEpoch ||
 		owner.resume.Detached() || !owner.handoff.Idle() {
+		return false
+	}
+	root, rootOK := coroNativeMOwnerForSlotV1(owner.lineageRootSlot)
+	parent, parentOK := coroNativeMOwnerForSlotV1(owner.parentSlot)
+	if !rootOK || !parentOK || root.lineageRootSlot != owner.lineageRootSlot ||
+		root.baton != owner.baton || root.parentSlot != owner.parentSlot ||
+		coroNativeAtomicLoadV1(&root.lineageSlot) != slot ||
+		parent.handle != owner.handle || !parent.handoff.Returned(owner.baton) ||
+		coroNativeAtomicLoadV1(
+			&coroNativeMDirectoryV1State.active[owner.handle.Route-1],
+		) != owner.parentSlot ||
+		!coroNativeMOwnerLifecycleCASV1(
+			owner,
+			coroNativeMOwnerReturnedV1,
+			coroNativeMOwnerPreparingV1,
+		) {
 		return false
 	}
 	owner.thread = nil
@@ -278,6 +485,9 @@ func coroNativeMRecycleReplacementV1(slot uint32) bool {
 	owner.handle = coro.ExecutorFleetHandle{}
 	owner.baton = coro.ExecutionDomainHandoffHandle{}
 	owner.parentSlot = 0
+	owner.predecessorSlot = 0
+	owner.lineageRootSlot = 0
+	coroNativeAtomicStoreV1(&owner.lineageSlot, 0)
 	owner.ownerEpoch = 0
 	coroNativeAtomicStoreV1(&owner.lifecycle, uint32(coroNativeMOwnerUnusedV1))
 	return true
@@ -294,7 +504,10 @@ func coroNativeMClaimReplacementV1(
 	owner, ownerOK := coroNativeMOwnerForSlotV1(slot)
 	if !ownerOK ||
 		coroNativeMOwnerLifecycleLoadV1(owner) != coroNativeMOwnerReplacementPublishedV1 ||
-		owner.parentSlot == 0 || !owner.handle.Valid() || !owner.baton.Valid() {
+		owner.parentSlot == 0 || owner.predecessorSlot != 0 ||
+		owner.lineageRootSlot != slot ||
+		coroNativeAtomicLoadV1(&owner.lineageSlot) != slot ||
+		!owner.handle.Valid() || !owner.baton.Valid() {
 		return nil, nil, nil, false, false
 	}
 	self := pthread.Self()
@@ -339,9 +552,12 @@ func coroNativeMFinishReplacementReturnV1(
 	slot uint32,
 	owner, parent *coroNativeMOwnerV1,
 ) bool {
+	lifecycle := coroNativeMOwnerLifecycleLoadV1(owner)
 	if owner == nil || parent == nil || owner.parentSlot == 0 ||
 		owner.baton.OwnerEpoch != owner.ownerEpoch ||
-		coroNativeMOwnerLifecycleLoadV1(owner) != coroNativeMOwnerReplacementActiveV1 ||
+		(lifecycle != coroNativeMOwnerReplacementActiveV1 &&
+			(lifecycle != coroNativeMOwnerSuccessorActiveV1 ||
+				!owner.baton.Valid())) ||
 		coroNativeAtomicLoadV1(&coroNativeMDirectoryV1State.active[owner.handle.Route-1]) != slot ||
 		!coroNativeAtomicCASV1(
 			&coroNativeMDirectoryV1State.active[owner.handle.Route-1],
@@ -350,7 +566,7 @@ func coroNativeMFinishReplacementReturnV1(
 		) || !parent.handoff.FinishReturn(owner.baton) ||
 		!coroNativeMOwnerLifecycleCASV1(
 			owner,
-			coroNativeMOwnerReplacementActiveV1,
+			lifecycle,
 			coroNativeMOwnerReturnedV1,
 		) {
 		return false
@@ -363,4 +579,170 @@ func coroNativeMReplacementReturnRequestedV1(
 ) bool {
 	return owner != nil && parent != nil && owner.baton.Valid() &&
 		parent.handoff.ReturnRequested(owner.baton)
+}
+
+func coroNativeMReplacementLineageOwnerV1(
+	rootSlot uint32,
+	root, parent *coroNativeMOwnerV1,
+	baton coro.ExecutionDomainHandoffHandle,
+) (uint32, *coroNativeMOwnerV1, bool) {
+	if rootSlot == 0 || root == nil || parent == nil || !baton.Valid() ||
+		root.lineageRootSlot != rootSlot || root.baton != baton ||
+		root.parentSlot == 0 || root.parentSlot > coroNativeMDirectoryCapacityV1 ||
+		parent.handle != root.handle || !parent.handoff.Returned(baton) {
+		return 0, nil, false
+	}
+	slot := coroNativeAtomicLoadV1(&root.lineageSlot)
+	owner, ownerOK := coroNativeMOwnerForSlotV1(slot)
+	if !ownerOK || owner.handle != root.handle || owner.baton != baton ||
+		owner.parentSlot != root.parentSlot ||
+		owner.lineageRootSlot != rootSlot ||
+		coroNativeMOwnerLifecycleLoadV1(owner) != coroNativeMOwnerReturnedV1 {
+		return 0, nil, false
+	}
+	return slot, owner, true
+}
+
+func coroNativeMHasBlockedOwnerV1() (bool, bool) {
+	directory := &coroNativeMDirectoryV1State
+	count := coroNativeFleetV1State.domainCount
+	if coroNativeAtomicLoadV1(&directory.state) != uint32(coroNativeMDirectoryActiveV1) ||
+		count == 0 || count > coroNativeFleetDomainCapacityV1 {
+		return false, false
+	}
+	for route := uint32(1); route <= count; route++ {
+		slot := coroNativeAtomicLoadV1(&directory.active[route-1])
+		complete := false
+		for depth := uint32(0); depth < coroNativeMDirectoryCapacityV1; depth++ {
+			owner, ownerOK := coroNativeMOwnerForSlotV1(slot)
+			if !ownerOK || owner.handle.Route != route {
+				return false, false
+			}
+			if !owner.handoff.Idle() {
+				return true, true
+			}
+			if !owner.baton.Valid() || owner.parentSlot == 0 {
+				complete = true
+				break
+			}
+			slot = owner.parentSlot
+		}
+		if !complete {
+			return false, false
+		}
+	}
+	return false, true
+}
+
+// coroTargetRetirePhysicalOwnerV1 permanently replaces the current native M
+// after an unbalanced LockOSThread G exit. The stop ingress is a succession
+// lease: close either seals before this transition starts, in which case the
+// already-stopping owner may return normally, or waits until a clean successor
+// has claimed the exact route before joining the stable peer slots.
+func coroTargetRetirePhysicalOwnerV1(
+	p *coro.P,
+	driver *coro.ExecutorDriver,
+) bool {
+	state := &coroNativeFleetPhysicalOwnerV1State
+	if p == nil || driver == nil {
+		return false
+	}
+	if !state.stop.Enter() {
+		// A sealed fleet is already retiring every physical owner. Returning to
+		// that one-way shutdown loop cannot expose this M to later managed work.
+		return true
+	}
+	owner, domain, slot, epoch, ownerOK := coroNativeMCurrentOwnerV1(driver)
+	if !ownerOK || domain == nil || domain.pOwnerV1() != p ||
+		slot == 0 || epoch == 0 {
+		_, _ = state.stop.Leave()
+		return false
+	}
+	lifecycle := coroNativeMOwnerLifecycleLoadV1(owner)
+	replacement := false
+	switch lifecycle {
+	case coroNativeMOwnerProgramV1, coroNativeMOwnerPeerActiveV1,
+		coroNativeMOwnerSuccessorActiveV1:
+		replacement = owner.baton.Valid()
+	case coroNativeMOwnerReplacementActiveV1:
+		replacement = true
+	default:
+		_, _ = state.stop.Leave()
+		return false
+	}
+	if replacement {
+		parent, parentOK := coroNativeMOwnerForSlotV1(owner.parentSlot)
+		if !parentOK || !owner.baton.Valid() {
+			_, _ = state.stop.Leave()
+			return false
+		}
+		if parent.handoff.ReturnRequested(owner.baton) {
+			// The blocked predecessor already asked this temporary lineage to
+			// return. Its next loop boundary exits and is strongly joined, so no
+			// reusable M survives this unbalanced lock.
+			_, _ = state.stop.Leave()
+			return true
+		}
+	}
+	if !coroNativeMOwnerLifecycleCASV1(
+		owner,
+		lifecycle,
+		coroNativeMOwnerRetiringV1,
+	) {
+		_, _ = state.stop.Leave()
+		return false
+	}
+	successorSlot, successor, allocated := coroNativeMAllocateSuccessorV1(
+		slot,
+		owner,
+		epoch,
+		replacement,
+	)
+	if !allocated || successor == nil ||
+		corofleet.CreateOwner(&successor.thread, successorSlot) != 0 ||
+		successor.thread == nil ||
+		coroNativeMOwnerLifecycleLoadV1(successor) != coroNativeMOwnerSuccessorActiveV1 {
+		coroRuntimeAbort("native coroutine physical owner succession failed")
+		return false
+	}
+	// Seal is allowed to linearize while this succession lease is active.
+	// The close owner waits for Quiesced before it snapshots peer.slot, so the
+	// successor published above is then the exact thread it will join.
+	if _, left := state.stop.Leave(); !left {
+		coroRuntimeAbort("native coroutine physical owner succession lease failed")
+		return false
+	}
+	if !coroNativeMOwnerLifecycleCASV1(
+		owner,
+		coroNativeMOwnerRetiringV1,
+		coroNativeMOwnerRetiredV1,
+	) {
+		coroRuntimeAbort("native coroutine physical owner retirement failed")
+		return false
+	}
+	if slot != 1 && corofleet.DetachSelf() != 0 {
+		coroRuntimeAbort("native coroutine physical owner detach failed")
+		return false
+	}
+	pthread.Exit(c.Pointer(nil))
+	for {
+	}
+}
+
+// coroNativeMRunProgramSuccessorV1 continues the already-owned legacy program
+// drive admission on a clean raw M. The predecessor never releases that
+// logical admission; it exits after CreateOwner observes this successor's
+// claim acknowledgement.
+func coroNativeMRunProgramSuccessorV1() bool {
+	status := coroProgramFinishFreshDriveV1(coroProgramDriveAgainV1)
+	switch status {
+	case coroProgramDriveCompleteV1:
+		c.Exit(0)
+	case coroProgramDrivePanicV1:
+		coroRuntimeAbort("coroutine program successor terminated by panic")
+	default:
+		return false
+	}
+	for {
+	}
 }

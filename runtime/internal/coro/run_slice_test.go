@@ -965,6 +965,11 @@ func TestExecutorRunDestroyReceiptIsStableAndHandleFree(t *testing.T) {
 	if boundary, boundaryOK := NextExecutorRunStep(driver); boundaryOK || boundary != (ExecutorRunStep{}) {
 		t.Fatalf("runner exposed boundary after Checked/ActionResume = (%+v, %t)", boundary, boundaryOK)
 	}
+	task.frame.header.SuspendReason = uint16(SuspendNone)
+	task.frame.header.Lifecycle = uint16(FrameActive)
+	if !EnterOSThreadLock(task.g) {
+		t.Fatal("lock bounded-destroy physical owner")
+	}
 	task.frame.header.SuspendReason = uint16(SuspendFrameComplete)
 	task.frame.header.Lifecycle = uint16(FrameFinalSuspended)
 	if !PrepareComplete(task.g, task.handle, task.frame.header) {
@@ -992,7 +997,8 @@ func TestExecutorRunDestroyReceiptIsStableAndHandleFree(t *testing.T) {
 	oldHandle := destroy.Handle
 	releaseTestFrame(t, task.g, task.frame)
 	receipt, ok := DestroyedBounded(p, task.g, destroy)
-	if !ok || receipt.Kind != ActionCommitDestroy || receipt.Handle != nil ||
+	if !ok || receipt.Kind != ActionCommitDestroy || receipt.Flags != ActionRetirePhysicalOwner ||
+		!ActionRetiresPhysicalOwner(receipt) || receipt.Handle != nil ||
 		!CommitExecutorRunAction(driver, task.g, receipt) {
 		t.Fatalf("bounded destroy receipt = (%+v, %t)", receipt, ok)
 	}
@@ -1012,7 +1018,8 @@ func TestExecutorRunDestroyReceiptIsStableAndHandleFree(t *testing.T) {
 		t.Fatalf("repeated stable receipt = (%+v, %t), first %+v", second, ok, first)
 	}
 	completed, ok := CommitExecutorRunDomainDestroy(driver, task.g, receipt)
-	if !ok || completed.Kind != ActionComplete || completed.Handle != nil ||
+	if !ok || completed.Kind != ActionComplete || completed.Flags != ActionRetirePhysicalOwner ||
+		!ActionRetiresPhysicalOwner(completed) || completed.Handle != nil ||
 		p.current != nil || p.action != (Action{}) || task.g.state != GDead ||
 		task.g.runP != nil || driver.state != executorDriverActive {
 		t.Fatalf("ordinary domain destroy commit = (%+v, %t), current=%p action=%+v state=%d runP=%p driver=%d",

@@ -799,19 +799,23 @@ func settleTerminalExecutorClose(driver *ExecutorDriver, p *P, terminal *G) bool
 // target adapter nor an asynchronous GC scan can retain or reuse them.
 func beginTerminalExecutorClose(p *P, g *G, kind ActionKind) (Action, bool) {
 	driver, ok := terminalExecutorCloseCandidate(p, g, kind)
-	if !ok || !driver.sources.beginTerminalClose(p) || !settleTerminalExecutorClose(driver, p, g) {
+	if !ok || !validActionFlags(p.action) ||
+		!driver.sources.beginTerminalClose(p) || !settleTerminalExecutorClose(driver, p, g) {
 		return Action{}, false
 	}
 	driver.terminalKind = kind
 	driver.state = executorDriverTerminalClosing
 	g.root = nil
-	closeAction := Action{Kind: ActionTerminalExecutorClose}
+	closeAction := Action{
+		Kind:  ActionTerminalExecutorClose,
+		Flags: p.action.Flags,
+	}
 	p.action = closeAction
 	return closeAction, true
 }
 
 func terminalExecutorCloseDriver(p *P, g *G, action Action) (*ExecutorDriver, bool) {
-	if p == nil || action.Kind != ActionTerminalExecutorClose || action.Handle != nil ||
+	if p == nil || action.Kind != ActionTerminalExecutorClose || !validActionFlags(action) || action.Handle != nil ||
 		p.action != action || preemptLoad(&p.executorMode) != executorModeBound {
 		return nil, false
 	}

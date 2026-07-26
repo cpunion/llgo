@@ -50,7 +50,8 @@ static _Atomic uint32_t inherited_taint;
 uint32_t __llgo_coro_native_fleet_owner_v2(uint32_t slot) {
     sigset_t current;
     if (slot == 0 || slot > requester_count + 1 ||
-        pthread_sigmask(SIG_SETMASK, NULL, &current) != 0) {
+        pthread_sigmask(SIG_SETMASK, NULL, &current) != 0 ||
+        __llgo_coro_fleet_owner_ready_v1(slot) != 0) {
         return 0;
     }
     if (sigismember(&current, SIGUSR1) == 1) {

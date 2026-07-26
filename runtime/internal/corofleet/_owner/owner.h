@@ -23,6 +23,9 @@
 uint32_t __llgo_coro_fleet_owner_count_v1(uint32_t maximum);
 int __llgo_coro_fleet_factory_start_v1(void);
 int __llgo_coro_fleet_owner_create_v2(pthread_t *thread, uint32_t slot);
+int __llgo_coro_fleet_owner_ready_v1(uint32_t slot);
+int __llgo_coro_fleet_owner_detach_self_v1(void);
+int __llgo_coro_fleet_owner_yield_v1(void);
 int __llgo_coro_fleet_factory_stop_v1(void);
 
 #endif

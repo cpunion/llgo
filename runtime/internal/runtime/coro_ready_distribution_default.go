@@ -36,3 +36,10 @@ func coroTargetBeforeProgramRunSliceV1(p *coro.P, driver *coro.ExecutorDriver) b
 	_, ok := coroTargetDrainProgramTransfersV1(p, driver)
 	return ok
 }
+
+// Single-thread realms have no distinct reusable physical owner to retire.
+// Native pthread targets override this hook; host profiles acknowledge the
+// logical LockOSThread lease after the core has removed every G/P pointer.
+func coroTargetRetirePhysicalOwnerV1(*coro.P, *coro.ExecutorDriver) bool {
+	return true
+}

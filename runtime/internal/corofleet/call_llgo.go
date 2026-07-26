@@ -56,6 +56,27 @@ func StartFactory() c.Int
 //go:linkname CreateOwner C.__llgo_coro_fleet_owner_create_v2
 func CreateOwner(thread *pthread.Thread, slot uint32) c.Int
 
+// OwnerReady completes CreateOwner only after the new raw owner has claimed
+// its stable scalar directory slot and execution route.
+//
+//llgo:coro schedulerwait
+//go:linkname OwnerReady C.__llgo_coro_fleet_owner_ready_v1
+func OwnerReady(slot uint32) c.Int
+
+// DetachSelf releases a permanently retired joinable owner. The process entry
+// thread is never detached; a clean successor owns its route before this call.
+//
+//llgo:coro noblock
+//go:linkname DetachSelf C.__llgo_coro_fleet_owner_detach_self_v1
+func DetachSelf() c.Int
+
+// Yield lets the close owner wait for an already-admitted succession lease
+// without monopolizing a CPU while the clean successor finishes publication.
+//
+//llgo:coro schedulerwait
+//go:linkname Yield C.__llgo_coro_fleet_owner_yield_v1
+func Yield() c.Int
+
 // StopFactory seals the scalar request rendezvous and strongly joins the clean
 // template after every scheduler owner has returned and been joined.
 //

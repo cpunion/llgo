@@ -211,6 +211,195 @@ func Check() int32 {
 }
 `
 
+const coroNativeFleetLockedGExitRetiresPeerE2ESource = `package main
+
+import _ "unsafe"
+
+var Failed uint32
+var MainThread uintptr
+var RetiredThread uintptr
+
+//go:linkname osThreadLock llgo.coroOSThreadLock
+func osThreadLock()
+
+//llgo:coro noblock
+//go:linkname threadID C.__llgo_coro_native_fleet_e2e_thread_id_v1
+func threadID() uintptr
+
+//llgo:coro sync
+//go:linkname armThreadExit C.__llgo_coro_native_fleet_e2e_arm_thread_exit_v1
+func armThreadExit() uintptr
+
+//llgo:coro noblock
+//go:linkname threadExitCount C.__llgo_coro_native_fleet_e2e_thread_exit_count_v1
+func threadExitCount() uintptr
+
+func Setup() {
+	Failed = 0
+	MainThread = threadID()
+	RetiredThread = 0
+}
+
+func retireLockedPeer() {
+	thread := threadID()
+	if thread == MainThread {
+		go retireLockedPeer()
+		return
+	}
+	RetiredThread = thread
+	osThreadLock()
+	if armThreadExit() != 1 {
+		Failed = 41
+	}
+	// Deliberately do not call UnlockOSThread. Completion must replace this M
+	// before publishing the G as reclaimable.
+}
+
+func main() {
+	go retireLockedPeer()
+	for threadExitCount() == 0 {
+	}
+	if RetiredThread == 0 || RetiredThread == MainThread {
+		Failed = 42
+	}
+}
+
+func Check() int32 {
+	if Failed != 0 {
+		return int32(Failed)
+	}
+	if threadExitCount() != 1 {
+		return 43
+	}
+	return 0
+}
+`
+
+const coroNativeFleetLockedGExitRetiresProgramE2ESource = `package main
+
+import _ "unsafe"
+
+var Started chan uint32
+var MainThread uintptr
+var RetiredThread uintptr
+
+//go:linkname osThreadLock llgo.coroOSThreadLock
+func osThreadLock()
+
+//llgo:coro noblock
+//go:linkname threadID C.__llgo_coro_native_fleet_e2e_thread_id_v1
+func threadID() uintptr
+
+//llgo:coro sync
+//go:linkname armThreadExit C.__llgo_coro_native_fleet_e2e_arm_thread_exit_v1
+func armThreadExit() uintptr
+
+//llgo:coro noblock
+//go:linkname threadExitCount C.__llgo_coro_native_fleet_e2e_thread_exit_count_v1
+func threadExitCount() uintptr
+
+func Setup() {
+	Started = make(chan uint32, 1)
+	MainThread = threadID()
+	RetiredThread = 0
+}
+
+func retireProgramOwner() {
+	thread := threadID()
+	if thread != MainThread {
+		go retireProgramOwner()
+		return
+	}
+	RetiredThread = thread
+	osThreadLock()
+	if armThreadExit() != 1 {
+		for {
+		}
+	}
+	Started <- 1
+	// The buffered send wakes main without parking this locked G. The old
+	// program pthread must exit before the awakened main can continue.
+}
+
+func main() {
+	go retireProgramOwner()
+	<-Started
+	for threadExitCount() == 0 {
+	}
+	if RetiredThread != MainThread || threadID() == MainThread {
+		for {
+		}
+	}
+}
+
+// The original C driver thread is deliberately retired and therefore cannot
+// call Check. Process success comes only from the clean program successor
+// resuming main and completing the runtime close path.
+func Check() int32 {
+	return 51
+}
+`
+
+const coroNativeFleetBlockedLockedGMainReturnE2ESource = `package main
+
+import _ "unsafe"
+
+var MainThread uintptr
+var BlockedThread uintptr
+
+//go:linkname osThreadLock llgo.coroOSThreadLock
+func osThreadLock()
+
+//llgo:coro noblock
+//go:linkname threadID C.__llgo_coro_native_fleet_e2e_thread_id_v1
+func threadID() uintptr
+
+//llgo:coro noblock
+//go:linkname resetState C.__llgo_coro_native_fleet_e2e_block_reset_v1
+func resetState()
+
+//llgo:coro noblock
+//go:linkname isWaiting C.__llgo_coro_native_fleet_e2e_blocked_v1
+func isWaiting() uintptr
+
+//llgo:coro worker
+//go:linkname block C.__llgo_coro_native_fleet_e2e_block_v1
+func block()
+
+func Setup() {
+	MainThread = threadID()
+	BlockedThread = 0
+}
+
+func blockedLockedChild() {
+	thread := threadID()
+	if thread == MainThread {
+		go blockedLockedChild()
+		return
+	}
+	BlockedThread = thread
+	osThreadLock()
+	block()
+}
+
+func main() {
+	resetState()
+	go blockedLockedChild()
+	for isWaiting() == 0 {
+	}
+	if BlockedThread == 0 || BlockedThread == MainThread {
+		for {
+		}
+	}
+	// Go main return must terminate the process; it cannot wait to join an M
+	// which remains inside an uninterruptible foreign call.
+}
+
+func Check() int32 {
+	return 61
+}
+`
+
 const coroNativeFleetChannelSelectE2ESource = `package main
 
 import _ "unsafe"
@@ -780,6 +969,114 @@ func Check() int32 {
 }
 `
 
+const coroNativeFleetReplacementRetirementE2ESource = `package main
+
+import _ "unsafe"
+
+var Failed uint32
+var Ready chan uint32
+var Start chan uint32
+var MainThread uintptr
+var ReplacementThread uintptr
+
+//go:linkname osThreadLock llgo.coroOSThreadLock
+func osThreadLock()
+
+//go:linkname osThreadUnlock llgo.coroOSThreadUnlock
+func osThreadUnlock()
+
+//llgo:coro noblock
+//go:linkname threadID C.__llgo_coro_native_fleet_e2e_thread_id_v1
+func threadID() uintptr
+
+//llgo:coro noblock
+//go:linkname resetState C.__llgo_coro_native_fleet_e2e_block_reset_v1
+func resetState()
+
+//llgo:coro noblock
+//go:linkname isWaiting C.__llgo_coro_native_fleet_e2e_blocked_v1
+func isWaiting() uintptr
+
+//llgo:coro noblock
+//go:linkname unblock C.__llgo_coro_native_fleet_e2e_release_v1
+func unblock()
+
+//llgo:coro worker
+//go:linkname block C.__llgo_coro_native_fleet_e2e_block_v1
+func block()
+
+//llgo:coro sync
+//go:linkname armThreadExit C.__llgo_coro_native_fleet_e2e_arm_thread_exit_v1
+func armThreadExit() uintptr
+
+//llgo:coro noblock
+//go:linkname threadExitCount C.__llgo_coro_native_fleet_e2e_thread_exit_count_v1
+func threadExitCount() uintptr
+
+//llgo:coro worker
+//go:linkname waitExitAndRelease C.__llgo_coro_native_fleet_e2e_wait_exit_and_release_v1
+func waitExitAndRelease()
+
+func retireReplacement() {
+	if threadID() != MainThread {
+		go retireReplacement()
+		return
+	}
+	Ready <- 1
+	<-Start
+	ReplacementThread = threadID()
+	if ReplacementThread == MainThread {
+		Failed = 131
+		unblock()
+		return
+	}
+	osThreadLock()
+	if armThreadExit() != 1 {
+		Failed = 132
+		unblock()
+	}
+	// The replacement G exits with its lock held. Its M must hand the same
+	// parent baton to a clean successor before the TLS destructor can run.
+}
+
+func releaseParent() {
+	for isWaiting() == 0 {
+	}
+	Start <- 1
+	waitExitAndRelease()
+}
+
+func Setup() {
+	Failed = 0
+	Ready = make(chan uint32)
+	Start = make(chan uint32, 1)
+	MainThread = threadID()
+	ReplacementThread = 0
+}
+
+func main() {
+	resetState()
+	go retireReplacement()
+	<-Ready
+	go releaseParent()
+	parentThread := threadID()
+	osThreadLock()
+	block()
+	osThreadUnlock()
+	if threadID() != parentThread || parentThread != MainThread {
+		Failed = 133
+	}
+	if threadExitCount() != 1 || ReplacementThread == 0 ||
+		ReplacementThread == MainThread {
+		Failed = 134
+	}
+}
+
+func Check() int32 {
+	return int32(Failed)
+}
+`
+
 const coroNativeFleetSameRoutePollReplacementE2ESource = `package main
 
 import _ "unsafe"
@@ -948,6 +1245,18 @@ func TestCoroNativeFleetPeerSpawnReturnsToProgramE2E(t *testing.T) {
 	runCoroNativeFleetE2E(t, coroNativeFleetPeerSpawnE2ESource, "peer-spawn-program", true, 4)
 }
 
+func TestCoroNativeFleetLockedGExitRetiresPhysicalPeerE2E(t *testing.T) {
+	runCoroNativeFleetE2E(t, coroNativeFleetLockedGExitRetiresPeerE2ESource, "locked-g-exit-retire-peer", false, 1)
+}
+
+func TestCoroNativeFleetLockedGExitRetiresProgramOwnerE2E(t *testing.T) {
+	runCoroNativeFleetE2E(t, coroNativeFleetLockedGExitRetiresProgramE2ESource, "locked-g-exit-retire-program", true, 1)
+}
+
+func TestCoroNativeFleetMainReturnDoesNotJoinBlockedLockedGE2E(t *testing.T) {
+	runCoroNativeFleetE2E(t, coroNativeFleetBlockedLockedGMainReturnE2ESource, "blocked-locked-g-main-return", false, 2)
+}
+
 func TestCoroNativeFleetChannelSelectCrossRouteE2E(t *testing.T) {
 	runCoroNativeFleetE2E(t, coroNativeFleetChannelSelectE2ESource, "channel-select-cross-route", true, 4)
 }
@@ -1005,6 +1314,10 @@ func TestCoroNativeFleetSameRouteTimerReplacementE2E(t *testing.T) {
 
 func TestCoroNativeFleetNestedSameRouteReplacementE2E(t *testing.T) {
 	runCoroNativeFleetE2E(t, coroNativeFleetNestedSameRouteReplacementE2ESource, "nested-same-route-replacement", true, 1)
+}
+
+func TestCoroNativeFleetReplacementOwnerRetirementE2E(t *testing.T) {
+	runCoroNativeFleetE2E(t, coroNativeFleetReplacementRetirementE2ESource, "replacement-owner-retirement", true, 1)
 }
 
 func TestCoroNativeFleetSameRoutePollReplacementE2E(t *testing.T) {

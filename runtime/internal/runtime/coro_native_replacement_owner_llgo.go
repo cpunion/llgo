@@ -21,6 +21,7 @@ package runtime
 import (
 	c "github.com/goplus/llgo/runtime/internal/clite"
 	"github.com/goplus/llgo/runtime/internal/coro"
+	"github.com/goplus/llgo/runtime/internal/corofleet"
 )
 
 func coroNativeReplacementDrainRouteV1(
@@ -175,7 +176,12 @@ func coroNativeReplacementCommitDestroyV1(
 	}
 	switch next.Kind {
 	case coro.ActionComplete:
-		if !coroReleaseCompletedTask(result.g) {
+		retireOwner := coro.ActionRetiresPhysicalOwner(next)
+		if !coroReleaseCompletedTask(result.g) ||
+			retireOwner && !coroTargetRetirePhysicalOwnerV1(
+				domain.pOwnerV1(),
+				domain.driverOwnerV1(),
+			) {
 			return coroNativeFleetPhysicalOwnerFailV1(
 				"native replacement completed task release failed",
 			)
@@ -259,19 +265,15 @@ func coroNativeReplacementWaitV1(
 	}
 }
 
-// coroNativeMRunReplacementOwnerV1 borrows one existing route without
-// creating a second scheduler or releasing the peer's logical owner epoch.
-// Every pass uses the common reducer; this loop supplies only the physical
-// monotonic clock, exact mailbox transport, quota wait, and raw poll wait.
-func coroNativeMRunReplacementOwnerV1(slot uint32) bool {
-	owner, parent, domain, claimed, ok := coroNativeMClaimReplacementV1(slot)
-	if !ok {
-		return coroNativeFleetPhysicalOwnerFailV1(
-			"native replacement M claim failed",
-		)
-	}
-	if !claimed {
-		return true
+func coroNativeMRunClaimedReplacementOwnerV1(
+	slot uint32,
+	owner, parent *coroNativeMOwnerV1,
+	domain *coroNativeFleetDomainV1,
+) bool {
+	if slot == 0 || owner == nil || parent == nil || domain == nil ||
+		owner.parentSlot == 0 || owner.handle != domain.handle ||
+		!owner.baton.Valid() {
+		return false
 	}
 	for {
 		if returned, returnOK := coroNativeReplacementTryReturnV1(
@@ -374,4 +376,33 @@ func coroNativeMRunReplacementOwnerV1(slot uint32) bool {
 			)
 		}
 	}
+}
+
+// coroNativeMRunReplacementOwnerV1 borrows one existing route without
+// creating a second scheduler or releasing the peer's logical owner epoch.
+// Every pass uses the common reducer; this loop supplies only the physical
+// monotonic clock, exact mailbox transport, quota wait, and raw poll wait.
+func coroNativeMRunReplacementOwnerV1(slot uint32) bool {
+	owner, parent, domain, claimed, ok := coroNativeMClaimReplacementV1(slot)
+	if !ok {
+		return coroNativeFleetPhysicalOwnerFailV1(
+			"native replacement M claim failed",
+		)
+	}
+	if !claimed {
+		return coroNativeFleetPhysicalOwnerFailV1(
+			"native replacement M claim was revoked before startup",
+		)
+	}
+	if corofleet.OwnerReady(slot) != 0 {
+		return coroNativeFleetPhysicalOwnerFailV1(
+			"native replacement M startup acknowledgement failed",
+		)
+	}
+	return coroNativeMRunClaimedReplacementOwnerV1(
+		slot,
+		owner,
+		parent,
+		domain,
+	)
 }
