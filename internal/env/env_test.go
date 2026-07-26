@@ -208,6 +208,40 @@ func TestLLGoROOT(t *testing.T) {
 		// Result depends on executable path, just ensure it doesn't panic
 		LLGoROOT()
 	})
+
+	t.Run("working directory fallback", func(t *testing.T) {
+		origLLGoRoot := os.Getenv("LLGO_ROOT")
+		defer os.Setenv("LLGO_ROOT", origLLGoRoot)
+		origWD, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.Chdir(origWD)
+
+		root := t.TempDir()
+		runtimeDir := filepath.Join(root, LLGoRuntimePkgName)
+		if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(
+			filepath.Join(runtimeDir, "go.mod"),
+			[]byte("module "+LLGoRuntimePkg+"\n"),
+			0644,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chdir(root); err != nil {
+			t.Fatal(err)
+		}
+		resolvedRoot, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		os.Setenv("LLGO_ROOT", "")
+		if got := LLGoROOT(); got != resolvedRoot {
+			t.Fatalf("LLGoROOT() = %q, want working-directory root %q", got, resolvedRoot)
+		}
+	})
 }
 
 func TestIsLLGoRoot(t *testing.T) {

@@ -2946,6 +2946,10 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	if err := conf.LinkOptions.validate(); err != nil {
 		return nil, err
 	}
+	llgoRuntimeDir := env.LLGoRuntimeDir()
+	if llgoRuntimeDir == "" {
+		return nil, fmt.Errorf("cannot locate the LLGo runtime source tree; set LLGO_ROOT to an LLGo checkout or installation root")
+	}
 	conf.OptLevel = effectiveOptLevel(conf)
 	// Handle crosscompile configuration first to set correct GOOS/GOARCH
 	forceEspClang := conf.ForceEspClang || conf.Target != ""
@@ -3042,7 +3046,7 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg.Overlay, err = buildSourcePatchOverlayForGOROOT(cfg.Overlay, env.LLGoRuntimeDir(), sourcePatchGOROOT, sourcePatchBuildContext{
+	cfg.Overlay, err = buildSourcePatchOverlayForGOROOT(cfg.Overlay, llgoRuntimeDir, sourcePatchGOROOT, sourcePatchBuildContext{
 		goos:       conf.Goos,
 		goarch:     conf.Goarch,
 		goversion:  sourcePatchGoVersion,
@@ -3084,7 +3088,7 @@ func Do(args []string, conf *Config) ([]Package, error) {
 
 	altPkgPaths := altPkgs(initial, conf, llssa.PkgRuntime)
 	altCfg := *cfg
-	altCfg.Dir = env.LLGoRuntimeDir()
+	altCfg.Dir = llgoRuntimeDir
 	// Alternate packages are compiler support inputs, not user test roots.
 	// Loading their test variants duplicates runtime packages in ModeTest and
 	// gives shared generic instances no exact emission-package identity. The
@@ -3127,7 +3131,8 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	output := conf.OutFile != ""
 	ctx := &context{env: env, conf: cfg, progSSA: progSSA, prog: prog, dedup: dedup,
 		patches: patches, callerTracking: cl.NewCallerTracking(),
-		built: make(map[string]none), initial: initial, mode: mode,
+		goRoot: sourcePatchGOROOT,
+		built:  make(map[string]none), initial: initial, mode: mode,
 		fingerprinting: make(map[string]bool),
 		pkgs:           map[*packages.Package]Package{},
 		pkgByID:        map[string]Package{},
@@ -5457,6 +5462,7 @@ func prepareCoroEmissionUniverse(ctx *context, packages []*aPackage) error {
 		// deliberately prepare an incomplete package universe.
 		CompleteRuntimeABI:     hasRuntimeABI,
 		CoroTargetCapabilities: ctx.buildConf.coroTargetCapabilities(),
+		GOROOT:                 ctx.goRoot,
 	})
 	if err != nil {
 		return err
@@ -5608,6 +5614,7 @@ type context struct {
 	conf           *packages.Config
 	progSSA        *ssa.Program
 	prog           llssa.Program
+	goRoot         string
 	dedup          packages.Deduper
 	patches        cl.Patches
 	callerTracking *cl.CallerTracking

@@ -25,7 +25,6 @@ import (
 	"go/types"
 	"path"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -106,6 +105,10 @@ type EmissionUniverseOptions struct {
 	// construction instead of being left to the legacy LLVM symbol resolver.
 	CompleteRuntimeABI     bool
 	CoroTargetCapabilities coro.TargetCapabilities
+	// GOROOT is the exact source tree used by go/packages. It is an explicit
+	// frontend input because runtime.GOROOT may be empty in a trimpath compiler
+	// binary. GOROOT-only managed-linkname proofs fail closed when it is empty.
+	GOROOT string
 }
 
 type preparedEmissionPackage struct {
@@ -135,6 +138,7 @@ type preparedEmissionPackage struct {
 type EmissionUniverse struct {
 	prog               llssa.Program
 	goProg             *ssa.Program
+	goroot             string
 	patches            Patches
 	completeRuntimeABI bool
 	coroCapabilities   coro.TargetCapabilities
@@ -585,6 +589,10 @@ func PrepareEmissionUniverse(prog llssa.Program, patches Patches, inputs []Emiss
 // whole-program construction contracts. Production active coroutine builds
 // set CompleteRuntimeABI; unit/report universes deliberately leave it false.
 func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inputs []EmissionPackage, options EmissionUniverseOptions) (*EmissionUniverse, error) {
+	goroot, err := normalizeEmissionGOROOT(options.GOROOT)
+	if err != nil {
+		return nil, fmt.Errorf("prepare emission universe: %w", err)
+	}
 	pathCounts := make(map[string]int, len(inputs))
 	for _, input := range inputs {
 		if input.SSA != nil && input.SSA.Pkg != nil {
@@ -594,6 +602,7 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 	identities := make(map[string]*ssa.Package, len(inputs))
 	u := &EmissionUniverse{
 		prog:                    prog,
+		goroot:                  goroot,
 		patches:                 patches,
 		completeRuntimeABI:      options.CompleteRuntimeABI,
 		coroCapabilities:        options.CoroTargetCapabilities,
@@ -4740,14 +4749,12 @@ func (u *EmissionUniverse) gorootManagedGoLinknameHasNoRawConsumer(
 	definition *ssa.Function,
 	symbol string,
 ) bool {
-	if u == nil || u.goProg == nil || u.goProg.Fset == nil || definition == nil || symbol == "" {
+	if u == nil || u.goProg == nil || u.goProg.Fset == nil || u.goroot == "" ||
+		definition == nil || symbol == "" {
 		return false
 	}
 	filename := u.goProg.Fset.PositionFor(definition.Pos(), false).Filename
-	sourceRoot := filepath.Join(runtime.GOROOT(), "src")
-	relative, err := filepath.Rel(sourceRoot, filename)
-	if err != nil || relative == "." || relative == ".." || filepath.IsAbs(relative) ||
-		strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+	if !emissionGOROOTContainsSourceFile(u.goroot, filename) {
 		return false
 	}
 	owners := u.sortedUseOwners(definition)
@@ -4771,6 +4778,34 @@ func (u *EmissionUniverse) gorootManagedGoLinknameHasNoRawConsumer(
 		}
 	}
 	return true
+}
+
+func normalizeEmissionGOROOT(goroot string) (string, error) {
+	if goroot == "" {
+		return "", nil
+	}
+	if !filepath.IsAbs(goroot) {
+		return "", fmt.Errorf("GOROOT must be absolute, got %q", goroot)
+	}
+	root, err := filepath.EvalSymlinks(filepath.Clean(goroot))
+	if err != nil {
+		return "", fmt.Errorf("resolve GOROOT %q: %w", goroot, err)
+	}
+	return root, nil
+}
+
+func emissionGOROOTContainsSourceFile(goroot, filename string) bool {
+	if goroot == "" || filename == "" {
+		return false
+	}
+	sourceRoot := filepath.Join(goroot, "src")
+	resolvedFile, err := filepath.EvalSymlinks(filename)
+	if err != nil {
+		return false
+	}
+	relative, err := filepath.Rel(sourceRoot, resolvedFile)
+	return err == nil && relative != "." && relative != ".." && !filepath.IsAbs(relative) &&
+		!strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func (u *EmissionUniverse) managedGoLinknameDefinitionHasKey(definition *ssa.Function, key string) bool {

@@ -16,6 +16,8 @@ jobs:
     name: ${{ matrix.check }}
     runs-on: ubuntu-22.04
     timeout-minutes: 20
+    env:
+      LLGO_ROOT: ${{ github.workspace }}
     strategy:
       fail-fast: false
       matrix:
@@ -27,8 +29,12 @@ jobs:
           - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "integration", check: "test integration (19, 1.26.5, llvm19)" }
           - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "native-e2e", check: "test native linked E2E (19, 1.26.5, llvm19)" }
           - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "fleet-e2e", check: "test native fleet E2E (19, 1.26.5, llvm19)" }
-          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "stdlib", check: "test stdlib scheduler progress (19, 1.26.5, llvm19)" }
-          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "targets", check: "test targets (19, 1.26.5, llvm19)" }
+          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "stdlib-time", fixtures: "time timer", check: "test stdlib time and timer (19, 1.26.5, llvm19)" }
+          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "stdlib-file", fixtures: "file syscall-file syscall-pipe", check: "test stdlib file and syscall (19, 1.26.5, llvm19)" }
+          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "stdlib-tcp", fixtures: "tcp", check: "test stdlib TCP (19, 1.26.5, llvm19)" }
+          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "target-core", check: "test target adapters (19, 1.26.5, llvm19)" }
+          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "target-wasm", wasm_target: "wasip2", check: "test WASM host probes (wasip2, llvm19)" }
+          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "target-wasm", wasm_target: "wasm-unknown", check: "test WASM host probes (wasm-unknown, llvm19)" }
     steps:
       - uses: actions/checkout@v7
 
@@ -142,13 +148,13 @@ jobs:
           go test ./internal/corotimer -run '^TestDeadlineAfter$' -count=1
 
       - name: Link named freestanding WebAssembly targets
-        if: matrix.lane == 'targets'
+        if: matrix.lane == 'target-wasm'
         env:
           LLGO_WASM_TARGET_SMOKE: "1"
         run: |
           go test -v ./internal/crosscompile -run '^TestFreestandingWasmTargetToolchainSmoke$' -count=1
           go build -o /tmp/llgo-wasm-target ./cmd/llgo
-          for target in wasip2 wasm-unknown; do
+          for target in '${{ matrix.wasm_target }}'; do
             output="/tmp/llgo-${target}.wasm"
             LLGO_BUILD_CACHE=off LDFLAGS='--export=main' \
               /tmp/llgo-wasm-target build -target="$target" -o "$output" \
@@ -166,7 +172,7 @@ jobs:
             fi
           done
           host_exports='--export=main --export=malloc --export=free --export=__llgo_coro_host_next_action_v1 --export=__llgo_coro_host_profile_v1 --export=__llgo_coro_host_publish_time_v1 --export=__llgo_coro_host_publish_wall_time_v1 --export=__llgo_coro_host_continue_slice_v1 --export=__llgo_coro_host_ack_cancel_v1 --export=__llgo_coro_host_next_operation_v1 --export=__llgo_coro_host_complete_operation_v1'
-          for target in wasip2 wasm-unknown; do
+          for target in '${{ matrix.wasm_target }}'; do
             output="/tmp/llgo-${target}-stdlib-file.wasm"
             LLGO_BUILD_CACHE=off LDFLAGS="$host_exports" \
               /tmp/llgo-wasm-target build -target="$target" -o "$output" \
@@ -176,7 +182,7 @@ jobs:
             grep -F '"status":"complete"' <<<"$result"
             grep -F '"operations":5' <<<"$result"
           done
-          for target in wasip2 wasm-unknown; do
+          for target in '${{ matrix.wasm_target }}'; do
             output="/tmp/llgo-${target}-host-network.wasm"
             LLGO_BUILD_CACHE=off LDFLAGS="$host_exports" \
               /tmp/llgo-wasm-target build -target="$target" -o "$output" \
@@ -187,7 +193,7 @@ jobs:
             grep -F '"operations":16' <<<"$result"
             grep -F '"cancellations":2' <<<"$result"
           done
-          for target in wasip2 wasm-unknown; do
+          for target in '${{ matrix.wasm_target }}'; do
             output="/tmp/llgo-${target}-stdlib-tcp.wasm"
             LLGO_BUILD_CACHE=off LDFLAGS="$host_exports" \
               /tmp/llgo-wasm-target build -target="$target" -o "$output" \
@@ -201,8 +207,21 @@ jobs:
             grep -F '"dnsQueries":[1,28]' <<<"$result"
           done
 
+      - name: Upload failed WebAssembly coroutine probes
+        if: failure() && matrix.lane == 'target-wasm'
+        uses: actions/upload-artifact@v7
+        with:
+          name: coroutine-wasm-failure-${{ github.run_id }}-${{ matrix.wasm_target }}
+          path: |
+            /tmp/llgo-*-stdlib-file.wasm
+            /tmp/llgo-*-host-network.wasm
+            /tmp/llgo-*-stdlib-tcp.wasm
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
       - name: Compile coroutine runtime adapter across targets
-        if: matrix.lane == 'targets'
+        if: matrix.lane == 'target-core'
         run: |
           cd runtime
           GOOS=js GOARCH=wasm CGO_ENABLED=0 go test -c -o /tmp/coro-js-wasm.test ./internal/runtime
@@ -231,12 +250,14 @@ jobs:
         run: go test ./internal/build -run '^TestCoroNativeFleet.*E2E$' -timeout=10m -count=1
 
       - name: Test synchronous stdlib coroutine acceptance
-        if: matrix.lane == 'stdlib'
+        if: startsWith(matrix.lane, 'stdlib-')
+        env:
+          LLGO_CORO_STDLIB_FIXTURES: ${{ matrix.fixtures }}
         run: |
           # Each fixture performs a fresh whole-stdlib LLVM build. Keep them in
           # separate Go processes so LLVM/global build state from an earlier
           # fixture cannot accumulate into the later TCP/DNS gate.
-          for fixture in time timer file syscall-file syscall-pipe tcp; do
+          for fixture in $LLGO_CORO_STDLIB_FIXTURES; do
             LLGO_CORO_STDLIB_ACCEPTANCE="$fixture" \
               go test ./internal/build -run '^TestCoroStdlibSyncAcceptance$' -timeout=15m -count=1
           done
@@ -282,7 +303,7 @@ jobs:
         run: go test -tags=llvm22 ./xtool/env/llvm ./internal/xtool/llvm
 
       - name: Test resolved LLVM target configuration
-        if: matrix.lane == 'targets'
+        if: matrix.lane == 'target-core'
         run: |
           go test ./internal/xtool/llvm -run '^TestGetTarget(Spec|Triple)$' -count=1
           go test ./internal/crosscompile -run '^Test(UseTarget|UseExportsResolvedLLVMConfig|ResolvedLLVMTargetSpecWASIThreads)$' -count=1
