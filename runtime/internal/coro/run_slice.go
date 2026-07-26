@@ -78,6 +78,7 @@ type ExecutorRunStepKind uint8
 const (
 	ExecutorRunStepInvalid ExecutorRunStepKind = iota
 	ExecutorRunStepSource
+	ExecutorRunStepMaterialize
 	ExecutorRunStepDispatch
 	ExecutorRunStepAction
 	ExecutorRunStepDestroyCommit
@@ -87,10 +88,11 @@ const (
 // ExecutorRunStep carries no callback or interface value. Action handles are
 // live only for Dispatch/Action. DestroyCommit is always handle-free.
 type ExecutorRunStep struct {
-	Kind   ExecutorRunStepKind
-	G      *G
-	Action Action
-	Poll   ExecutorPollProgress
+	Kind    ExecutorRunStepKind
+	G       *G
+	Action  Action
+	Poll    ExecutorPollProgress
+	Cleanup ResumeCleanupStep
 }
 
 func executorRunExternalSourceRequested(driver *ExecutorDriver) bool {
@@ -178,6 +180,9 @@ func nextExecutorRunStepAt(driver *ExecutorDriver, now int64, withDeadline bool)
 
 	// Once epoch A starts, acknowledgement and epoch B finish before any G.
 	if driver.poll.phase != executorPollIdle {
+		if cleanup, pending := pendingResumeCleanupStep(driver); pending {
+			return ExecutorRunStep{Kind: ExecutorRunStepMaterialize, Cleanup: cleanup}, true
+		}
 		return serviceExecutorRunSource(driver, now, withDeadline)
 	}
 	if driver.run.readyDebt {

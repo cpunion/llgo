@@ -16,6 +16,8 @@
 
 package coro
 
+import "unsafe"
+
 // waitSetRecordState is owner-P-only. A WaitSetRecord is caller storage which
 // is live only across one direct V2 park; in production the compiler spills it
 // into the direct-parking LLVM coroutine frame. Tests and bootstrap adapters
@@ -59,11 +61,12 @@ type WaitSetRecord struct {
 	activePrev *WaitSetRecord
 	activeNext *WaitSetRecord
 	workNext   *WaitSetRecord
-	resume     *ResumePacket
+	resume     unsafe.Pointer
 	ticket     ParkTicket
 	state      waitSetRecordState
 	work       waitSetWorkState
-	_          [2]byte
+	resumeKind resumeBindingKind
+	_          [1]byte
 }
 
 // PrepareWaitSetRecord binds zero caller storage to one preparing logical
@@ -83,7 +86,8 @@ func PrepareWaitSetRecord(record *WaitSetRecord, g *G, ticket ParkTicket) bool {
 func validPreparingWaitSetRecord(record *WaitSetRecord, state *ParkState, ticket ParkTicket) bool {
 	return record != nil && record.g != nil && &record.g.park == state && record.ticket == ticket &&
 		record.state == waitSetRecordPreparing && record.work == waitSetWorkIdle &&
-		record.activePrev == nil && record.activeNext == nil && record.workNext == nil && record.resume == nil
+		record.activePrev == nil && record.activeNext == nil && record.workNext == nil &&
+		record.resume == nil && record.resumeKind == resumeBindingNone
 }
 
 func validCommittedWaitSetRecord(record *WaitSetRecord, g *G, frame *Frame) bool {
@@ -125,6 +129,8 @@ func validActiveParkStateHeader(state *ParkState, ticket ParkTicket) bool {
 		if state.attached != 0 || state.head != nil {
 			return false
 		}
+	case parkConsumed, parkMaterialized:
+		return validParkState(state)
 	default:
 		return false
 	}
@@ -418,7 +424,8 @@ func appendRunnableUnchecked(p *P, g *G) {
 
 func promoteReadyWaitSet(sources *ExecutorSourceSet, p *P, record *WaitSetRecord) bool {
 	if !validActiveWaitSetRecordFast(p, record) || record.work != waitSetWorkResolving ||
-		record.g.park.phase != parkReady || !validReadyQueueHeader(p) {
+		(record.g.park.phase != parkReady && record.g.park.phase != parkMaterialized) ||
+		!validReadyQueueHeader(p) {
 		return false
 	}
 	g := record.g
@@ -428,7 +435,11 @@ func promoteReadyWaitSet(sources *ExecutorSourceSet, p *P, record *WaitSetRecord
 		(schedule != scheduleIdle && schedule != scheduleRequested) {
 		return false
 	}
-	if record.resume != nil && !materializeSingleResumePacket(sources, p, record) {
+	if record.resumeKind == resumeBindingSingle && !materializeSingleResumePacket(sources, p, record) {
+		return false
+	}
+	if record.resumeKind == resumeBindingCleanup ||
+		record.g.park.phase == parkMaterialized && record.resumeKind != resumeBindingMaterialized {
 		return false
 	}
 	previous, next := record.activePrev, record.activeNext
@@ -507,7 +518,7 @@ func promoteResolvedWaitSets(p *P, batch *WaitSetRecord) (promoted int, ok bool)
 func ReleasePreparedWaitSetRecord(record *WaitSetRecord) bool {
 	if record == nil || record.state != waitSetRecordPreparing || record.work != waitSetWorkIdle ||
 		record.g == nil || record.activePrev != nil || record.activeNext != nil || record.workNext != nil ||
-		record.resume != nil ||
+		record.resume != nil || record.resumeKind != resumeBindingNone ||
 		!validParkState(&record.g.park) || record.g.park.ticket != record.ticket || record.g.park.attached != 0 ||
 		record.g.park.head != nil || (record.g.park.phase != parkReady && record.g.park.phase != parkConsumed) {
 		return false

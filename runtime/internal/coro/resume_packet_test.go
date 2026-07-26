@@ -116,11 +116,11 @@ func TestZeroSourceResumePacketMaterializesDefault(t *testing.T) {
 		t.Fatal("dequeue zero-source packet resume")
 	}
 	action = beginWaitTestResume(t, targetP, task)
-	outcome, caseID, cancel, result, poll, taken := TakeResumePacket(task.g, ticket, packet, nil)
+	outcome, caseID, cancel, result, small, taken := TakeResumePacket(task.g, ticket, packet, nil)
 	if !taken || outcome != ParkOutcomeDefault || caseID != 31 || cancel != TaskCancelNone ||
-		result != ResumeResultNone || poll != PollOperationResultInvalid {
-		t.Fatalf("take zero-source packet = outcome:%d case:%d cancel:%d result:%d poll:%d taken:%t",
-			outcome, caseID, cancel, result, poll, taken)
+		result != ResumeResultNone || small != ResumeSmallInvalid {
+		t.Fatalf("take zero-source packet = outcome:%d case:%d cancel:%d result:%d small:%d taken:%t",
+			outcome, caseID, cancel, result, small, taken)
 	}
 	finishWaitTestTask(t, targetP, task, action)
 	closeTestExecutorDriver(t, driver)
@@ -163,14 +163,14 @@ func TestManualResumePacketRetiresOldRouteBeforePTransfer(t *testing.T) {
 		t.Fatal("dequeue transferred packet task")
 	}
 	action := beginWaitTestResume(t, targetP, task)
-	outcome, caseID, cancel, result, poll, taken := TakeResumePacket(task.g, ticket, packet, nil)
+	outcome, caseID, cancel, result, small, taken := TakeResumePacket(task.g, ticket, packet, nil)
 	current, executor, route, currentOK := CurrentExecutorDriver(task.g)
 	if !taken || outcome != ParkOutcomeCompleted || caseID != 17 || cancel != TaskCancelNone ||
-		result != ResumeResultNone || poll != PollOperationResultInvalid ||
+		result != ResumeResultNone || small != ResumeSmallInvalid ||
 		*packet != (ResumePacket{}) || task.g.park.phase != parkDelivered ||
 		current != nil || executor != (ExecutorHandle{}) || route != 0 || currentOK {
-		t.Fatalf("take transferred packet = outcome:%d case:%d cancel:%d result:%d poll:%d taken:%t packet:%+v phase:%d",
-			outcome, caseID, cancel, result, poll, taken, *packet, task.g.park.phase)
+		t.Fatalf("take transferred packet = outcome:%d case:%d cancel:%d result:%d small:%d taken:%t packet:%+v phase:%d",
+			outcome, caseID, cancel, result, small, taken, *packet, task.g.park.phase)
 	}
 	finishWaitTestTask(t, targetP, task, action)
 	closeTestExecutorDriver(t, driver)
@@ -204,12 +204,12 @@ func TestTaskCancelAfterResumePacketMigrationNeverRevisitsOldSource(t *testing.T
 		t.Fatal("dequeue late-cancel packet task")
 	}
 	action := beginWaitTestResume(t, targetP, task)
-	outcome, caseID, cancel, result, poll, taken := TakeResumePacket(task.g, ticket, packet, nil)
+	outcome, caseID, cancel, result, small, taken := TakeResumePacket(task.g, ticket, packet, nil)
 	if !taken || outcome != ParkOutcomeCanceled || caseID != 0 || cancel != TaskCancelAbort ||
-		result != ResumeResultNone || poll != PollOperationResultInvalid ||
+		result != ResumeResultNone || small != ResumeSmallInvalid ||
 		*packet != (ResumePacket{}) || task.g.park.taskCancelPhase != taskCancelCleanup {
-		t.Fatalf("take late-cancel packet = outcome:%d case:%d cancel:%d result:%d poll:%d taken:%t phase:%d",
-			outcome, caseID, cancel, result, poll, taken, task.g.park.taskCancelPhase)
+		t.Fatalf("take late-cancel packet = outcome:%d case:%d cancel:%d result:%d small:%d taken:%t phase:%d",
+			outcome, caseID, cancel, result, small, taken, task.g.park.taskCancelPhase)
 	}
 	finishWaitTestTask(t, targetP, task, action)
 	if !AcknowledgeTaskCancellation(task.g, TaskCancelAbort) || !TerminalG(targetP, task.g) {
@@ -279,11 +279,11 @@ func TestWorkerResumePacketCopiesScalarBeforePTransfer(t *testing.T) {
 	}
 	action = beginWaitTestResume(t, targetP, task)
 	var got ScalarResultPayloadV1
-	outcome, caseID, cancel, result, poll, taken := TakeResumePacket(task.g, ticket, packet, &got)
+	outcome, caseID, cancel, result, small, taken := TakeResumePacket(task.g, ticket, packet, &got)
 	if !taken || outcome != ParkOutcomeCompleted || caseID != 23 || cancel != TaskCancelNone ||
-		result != ResumeResultScalar || poll != PollOperationResultInvalid || got != payload {
-		t.Fatalf("take packet worker = outcome:%d case:%d cancel:%d result:%d poll:%d taken:%t payload:%+v",
-			outcome, caseID, cancel, result, poll, taken, got)
+		result != ResumeResultScalar || small != ResumeSmallInvalid || got != payload {
+		t.Fatalf("take packet worker = outcome:%d case:%d cancel:%d result:%d small:%d taken:%t payload:%+v",
+			outcome, caseID, cancel, result, small, taken, got)
 	}
 	finishWaitTestTask(t, targetP, task, action)
 	closeTestExecutorDriver(t, driver)

@@ -29,6 +29,10 @@ import (
 	"github.com/goplus/llgo/runtime/internal/coro"
 )
 
+// The source-island fleet test does not compile the typed hchan adapter.
+// Reaching materialization without that adapter is therefore invalid.
+func coroMaterializeResumeCleanupStepV1(coro.ResumeCleanupStep) bool { return false }
+
 type coroNativeFleetTestTask struct {
 	g           *coro.G
 	handle      unsafe.Pointer
@@ -401,11 +405,13 @@ func TestCoroNativeFleetProductionIslandsV1(t *testing.T) {
 		standby.HasDeadline || standby.Deadline != 0 || second.ownerEpoch != 0 {
 		t.Fatalf("empty fleet standby = (%+v, %t), owner=%d", standby, standbyOK, second.ownerEpoch)
 	}
-	wakeEpoch, timers, promoted, wakeOK := coroNativeFleetWakeOwnerAtV1(secondHandle, 12)
-	if !wakeOK || wakeEpoch == 0 || timers != 0 || promoted != 0 ||
+	wakeEpoch, wakeOK := coroNativeFleetWakeOwnerAtV1(secondHandle, 12)
+	if !wakeOK || wakeEpoch == 0 {
+		t.Fatalf("spurious fleet standby wake = (%d, %t)", wakeEpoch, wakeOK)
+	}
+	if wakeRun := coroNativeFleetRunOwnerEpochV1(secondHandle, wakeEpoch, 13, 8); wakeRun.stop != coroRunIdleV1 ||
 		!coroNativeFleetFinishOwnerEpochV1(secondHandle, wakeEpoch) {
-		t.Fatalf("spurious fleet standby wake = (%d, %d, %d, %t)",
-			wakeEpoch, timers, promoted, wakeOK)
+		t.Fatalf("spurious fleet standby reduction = %+v", wakeRun)
 	}
 
 	// Drive one real retained fd wait through the ordinary-domain reducer,
@@ -462,10 +468,9 @@ func TestCoroNativeFleetProductionIslandsV1(t *testing.T) {
 	if pass := coroNativeFleetWaitOwnerPassAtV1(armedPoll, 23); pass != coroNativeFleetWaitPassWakeV1 {
 		t.Fatalf("routed poll physical wait = %d", pass)
 	}
-	pollEpoch, timers, promoted, pollWakeOK := coroNativeFleetWakeOwnerAtV1(secondHandle, 24)
-	if !pollWakeOK || pollEpoch == 0 || timers != 0 || promoted != 1 {
-		t.Fatalf("wake routed poll owner = (%d, %d, %d, %t)",
-			pollEpoch, timers, promoted, pollWakeOK)
+	pollEpoch, pollWakeOK := coroNativeFleetWakeOwnerAtV1(secondHandle, 24)
+	if !pollWakeOK || pollEpoch == 0 {
+		t.Fatalf("wake routed poll owner = (%d, %t)", pollEpoch, pollWakeOK)
 	}
 	pollComplete := false
 	for attempt := 0; attempt < 64; attempt++ {

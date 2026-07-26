@@ -124,7 +124,10 @@ func validPublishedEpochResolveCursor(cursor *publishedEpochResolveCursor, p *P)
 	case publishedEpochResolveFinish, publishedEpochResolvePromote:
 		return cursor.park == (parkResolutionCursor{}) && cursor.link == nil &&
 			validActiveWaitSetRecordFast(p, cursor.wait) &&
-			(cursor.wait.g.park.phase == parkDetaching || cursor.wait.g.park.phase == parkReady)
+			(cursor.wait.g.park.phase == parkDetaching || cursor.wait.g.park.phase == parkReady ||
+				cursor.phase == publishedEpochResolvePromote &&
+					cursor.wait.resumeKind == resumeBindingCleanup &&
+					cursor.wait.g.park.phase == parkConsumed)
 	default:
 		return false
 	}
@@ -529,6 +532,34 @@ func resolvePublishedEpochPromoteStep(sources *ExecutorSourceSet, p *P, cursor *
 	wait := cursor.wait
 	if wait == nil || wait.workNext != cursor.nextWait {
 		return false
+	}
+	if wait.resumeKind == resumeBindingCleanup {
+		plan := (*ResumeCleanupPlan)(wait.resume)
+		if !validResumeCleanupPlan(wait, plan) {
+			return false
+		}
+		switch plan.phase {
+		case resumeCleanupBound:
+			return beginResumeCleanup(wait, plan)
+		case resumeCleanupRuntime:
+			// The unified runner must return ExecutorRunStepMaterialize so the
+			// direct runtime switch can remove exactly one typed queue node.
+			return false
+		default:
+			finalized, ok := advanceResumeCleanupCore(sources, p, wait, plan)
+			if !ok {
+				return false
+			}
+			if !finalized {
+				return true
+			}
+			if !promoteReadyWaitSet(sources, p, wait) {
+				return false
+			}
+			wait.workNext = nil
+			step.promoted = 1
+			return advancePublishedEpochWaitAfterCleared(sources, cursor, p, step)
+		}
 	}
 	wait.workNext = nil
 	if wait.work == waitSetWorkAwaitingExternal {

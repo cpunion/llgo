@@ -894,13 +894,13 @@ func coroNativeFleetPrepareOwnerWaitAtV1(
 func coroNativeFleetWakeOwnerAtV1(
 	handle coro.ExecutorFleetHandle,
 	now int64,
-) (epoch uint32, timers, promoted int, ok bool) {
+) (epoch uint32, ok bool) {
 	if now < 0 {
-		return 0, 0, 0, false
+		return 0, false
 	}
 	epoch, acquired := coroNativeFleetBeginOwnerEpochV1(handle)
 	if !acquired {
-		return 0, 0, 0, false
+		return 0, false
 	}
 	domain, valid := coroNativeFleetDomainForHandleV1(
 		&coroNativeFleetV1State,
@@ -908,17 +908,16 @@ func coroNativeFleetWakeOwnerAtV1(
 		coroNativeFleetDomainActiveV1,
 	)
 	if !valid || domain.ownerEpoch != epoch {
-		return 0, 0, 0, false
+		return 0, false
 	}
 	driver := domain.driverOwnerV1()
 	if driver == nil {
-		return 0, 0, 0, false
+		return 0, false
 	}
-	timers, promoted, ok = coro.WakeExecutorAt(driver, now)
-	if !ok {
-		return 0, 0, 0, false
+	if !coro.WakeExecutorAt(driver, now) {
+		return 0, false
 	}
-	return epoch, timers, promoted, true
+	return epoch, true
 }
 
 func coroNativeFleetFinishOwnerEpochV1(handle coro.ExecutorFleetHandle, epoch uint32) bool {

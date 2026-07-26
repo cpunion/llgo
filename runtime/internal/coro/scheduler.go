@@ -319,6 +319,36 @@ func PollPreempt(g *G) bool {
 	return valid && requested
 }
 
+// acknowledgeSuspendedGPreempt consumes a request which was already satisfied
+// by an actual Yield/Park suspension. Keeping it on a stable runnable/waiting G
+// would spuriously prevent P-neutral transfer even though the scheduler has
+// regained ownership and every executor/source request remains independently
+// sticky. No producer is allowed to retain a dynamic G as an asynchronous
+// handle, so only the scheduler can race this depth-zero transition.
+func acknowledgeSuspendedGPreempt(g *G) bool {
+	if g == nil {
+		return false
+	}
+	gate := preemptAddress(g)
+	for {
+		word := preemptLoad(gate)
+		if preemptWordDepth(word) != 0 {
+			return false
+		}
+		switch preemptWordState(word) {
+		case preemptIdle:
+			return true
+		case preemptRequested:
+			idle := word&^preemptStateMask | preemptIdle
+			if preemptCompareAndSwap(gate, word, idle) {
+				return true
+			}
+		default:
+			return false
+		}
+	}
+}
+
 // RequestSchedule is the legacy/internal P request gate. It coalesces one
 // request without reading scheduler-owned queue or current-G fields, but it has
 // no retained platform doorbell and is therefore rejected after BindExecutor.
@@ -957,6 +987,9 @@ func Resumed(p *P, g *G, action Action) (Action, bool) {
 			(p.readyTail != nil && p.readyTail.nextReady != nil) {
 			return Action{}, false
 		}
+		if !acknowledgeSuspendedGPreempt(g) {
+			return Action{}, false
+		}
 		g.state = GRunnable
 		g.runP = nil
 		p.current = nil
@@ -969,6 +1002,9 @@ func Resumed(p *P, g *G, action Action) (Action, bool) {
 	}
 	if g.park.phase == parkParked {
 		if g.queued || g.nextReady != nil || !validParkWaitQueueHeader(p) || !validAffectedWaitQueueHeader(p) {
+			return Action{}, false
+		}
+		if !acknowledgeSuspendedGPreempt(g) {
 			return Action{}, false
 		}
 		g.state = GWaiting

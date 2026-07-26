@@ -155,7 +155,7 @@ func __llgo_coro_worker_resume_v1(
 
 	task := (*coro.G)(g)
 	var payload coro.ScalarResultPayloadV1
-	outcome, caseID, cancel, result, poll, ok := coro.TakeResumePacket(
+	outcome, caseID, cancel, result, small, ok := coro.TakeResumePacket(
 		task,
 		state.ticket,
 		&state.packet,
@@ -168,13 +168,13 @@ func __llgo_coro_worker_resume_v1(
 	discard := outcome == coro.ParkOutcomeCanceled
 	if outcome == coro.ParkOutcomeCompleted {
 		if caseID != 1 || cancel != coro.TaskCancelNone ||
-			result != coro.ResumeResultScalar || poll != coro.PollOperationResultInvalid {
+			result != coro.ResumeResultScalar || small != coro.ResumeSmallInvalid {
 			coroWorkerAbortV1('D', "invalid completed coroutine worker decision")
 			return 0
 		}
 	} else if !discard || caseID != 0 ||
 		cancel != coro.TaskCancelAbort && cancel != coro.TaskCancelShutdown ||
-		result != coro.ResumeResultNone || poll != coro.PollOperationResultInvalid {
+		result != coro.ResumeResultNone || small != coro.ResumeSmallInvalid {
 		coroWorkerAbortV1('E', "invalid canceled coroutine worker decision")
 		return 0
 	}

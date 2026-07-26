@@ -23,9 +23,11 @@ import (
 	"fmt"
 	goimporter "go/importer"
 	"go/types"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -373,6 +375,11 @@ func runCoroNativeFleetE2E(t *testing.T, source, name string, enableChannel bool
 	}
 
 	executable := filepath.Join(temp, "coro-native-fleet-"+name+"-e2e")
+	// Keep an opt-in stable output path for inspecting a failed native fleet
+	// executable with the platform debugger. Ordinary CI never sets it.
+	if diagnostic := strings.TrimSpace(os.Getenv("LLGO_CORO_NATIVE_FLEET_OUTPUT")); diagnostic != "" {
+		executable = diagnostic
+	}
 	linkArgs := []string{driverObject, entryObject, userObject, runtimeArchive, "-pthread", "-o", executable}
 	if runtime.GOOS == "darwin" {
 		linkArgs = append(linkArgs, "-Wl,-dead_strip")

@@ -257,12 +257,24 @@ func yieldCoroChannelAdapterFrame(t *testing.T, p *coro.P, frame *coroChannelAda
 func pollCoroChannelAdapterExecutor(t *testing.T, driver *coro.ExecutorDriver) {
 	t.Helper()
 	for step := 0; ; step++ {
-		progress, ok := coro.PollExecutorSlice(driver, 1)
+		runStep, ok := coro.NextExecutorRunStep(driver)
 		if !ok {
 			t.Fatalf("poll channel adapter executor at step %d", step)
 		}
-		if progress.Complete {
-			return
+		switch runStep.Kind {
+		case coro.ExecutorRunStepSource:
+			if runStep.Poll.Complete {
+				if !coro.EnterExecutorRunCompatibility(driver) {
+					t.Fatalf("leave bounded channel adapter executor at step %d", step)
+				}
+				return
+			}
+		case coro.ExecutorRunStepMaterialize:
+			if !coroMaterializeResumeCleanupStepV1(runStep.Cleanup) {
+				t.Fatalf("materialize channel adapter executor at step %d", step)
+			}
+		default:
+			t.Fatalf("unexpected channel adapter executor step %d at %d", runStep.Kind, step)
 		}
 		if step == 10000 {
 			t.Fatal("channel adapter executor did not complete")
@@ -647,18 +659,42 @@ func TestCoroChannelAdapterPairCommitAndResume(t *testing.T) {
 	if !deferredCanceledOK || deferredCanceledG == nil || deferredCanceledG == canceledFrame.g {
 		t.Fatalf("dequeue unrelated G before select cancellation = (%p, %t)", deferredCanceledG, deferredCanceledOK)
 	}
-	if !coro.RequestTaskCancellation(p, canceledFrame.g, coro.TaskCancelAbort) {
-		t.Fatal("request channel select task cancellation")
+	lateValue := uint32(0x1a2b3c4d)
+	if !ChanTrySend(
+		canceledChannels[1],
+		unsafe.Pointer(&lateValue),
+		int(unsafe.Sizeof(lateValue)),
+	) {
+		t.Fatal("complete channel selector before P-neutral transfer")
 	}
 	pollCoroChannelAdapterExecutor(t, driver)
-	if next, ok := coro.NextRunnable(p); !ok || next != canceledFrame.g {
-		t.Fatalf("dequeue canceled channel selector = (%p, %t), want %p", next, ok, canceledFrame.g)
+	for index := range canceledCases {
+		if canceledCases[index] != (CoroChanSelectCaseV1{}) {
+			t.Fatalf("materialized channel select case %d retained frame state: %+v",
+				index, canceledCases[index])
+		}
 	}
-	canceledAction, ok = coro.BeginRunG(p, canceledFrame.g)
+	targetP := new(coro.P)
+	var transfer coro.RunnableTransferMailbox
+	if !coro.BindRunnableTransferMailbox(&transfer, targetP) {
+		t.Fatal("bind channel select transfer mailbox")
+	}
+	transferID, transferred := coro.PublishPNeutralRunnable(&transfer, p, canceledFrame.g)
+	if !transferred || !transferID.Valid() ||
+		!coro.ImportPNeutralRunnable(&transfer, targetP, transferID) {
+		t.Fatalf("transfer materialized channel selector = (%+v, %t)", transferID, transferred)
+	}
+	if !coro.RequestTaskCancellation(targetP, canceledFrame.g, coro.TaskCancelAbort) {
+		t.Fatal("request channel select cancellation after migration")
+	}
+	if next, ok := coro.NextRunnable(targetP); !ok || next != canceledFrame.g {
+		t.Fatalf("dequeue transferred channel selector = (%p, %t), want %p", next, ok, canceledFrame.g)
+	}
+	canceledAction, ok = coro.BeginRunG(targetP, canceledFrame.g)
 	if !ok || canceledAction.Kind != coro.ActionCheckResume {
 		t.Fatalf("begin canceled channel selector = (%+v, %t)", canceledAction, ok)
 	}
-	canceledAction, ok = coro.Checked(p, canceledFrame.g, canceledAction, false)
+	canceledAction, ok = coro.Checked(targetP, canceledFrame.g, canceledAction, false)
 	if !ok || canceledAction.Kind != coro.ActionResume {
 		t.Fatalf("activate canceled channel selector = (%+v, %t)", canceledAction, ok)
 	}

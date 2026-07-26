@@ -26,6 +26,10 @@ import (
 	"github.com/goplus/llgo/runtime/internal/coro"
 )
 
+// The source-island program test does not compile the typed hchan adapter.
+// Reaching materialization without that adapter is therefore invalid.
+func coroMaterializeResumeCleanupStepV1(coro.ResumeCleanupStep) bool { return false }
+
 // The named runtime-adapter source island includes coro_panic_payload.go but
 // intentionally does not load the complete LLGo runtime package into the host
 // Go runtime. Supply only the current Go panic(nil) interface contract that

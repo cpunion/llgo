@@ -166,6 +166,12 @@ func coroReduceExecutorRunStepV1(
 		result.used++
 		result.sources++
 		return false, true
+	case coro.ExecutorRunStepMaterialize:
+		if !coroMaterializeResumeCleanupStepV1(step.Cleanup) {
+			return false, false
+		}
+		result.used++
+		return false, true
 	case coro.ExecutorRunStepDispatch:
 		if step.G == nil || step.Action.Handle == nil {
 			return false, false
