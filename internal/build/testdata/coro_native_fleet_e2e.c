@@ -24,6 +24,8 @@ uintptr_t __llgo_coro_native_fleet_e2e_thread_id_v1(void) {
 
 static _Atomic uint32_t llgo_coro_native_fleet_e2e_active_v1;
 static _Atomic uint32_t llgo_coro_native_fleet_e2e_maximum_v1;
+static _Atomic uint32_t llgo_coro_native_fleet_e2e_blocked_state_v1;
+static _Atomic uint32_t llgo_coro_native_fleet_e2e_release_state_v1;
 
 void __llgo_coro_native_fleet_e2e_quota_reset_v1(void) {
     atomic_store_explicit(
@@ -58,4 +60,30 @@ void __llgo_coro_native_fleet_e2e_quota_run_v1(uint32_t spins) {
 uint32_t __llgo_coro_native_fleet_e2e_quota_maximum_v1(void) {
     return atomic_load_explicit(
         &llgo_coro_native_fleet_e2e_maximum_v1, memory_order_seq_cst);
+}
+
+void __llgo_coro_native_fleet_e2e_block_reset_v1(void) {
+    atomic_store_explicit(
+        &llgo_coro_native_fleet_e2e_blocked_state_v1, 0, memory_order_seq_cst);
+    atomic_store_explicit(
+        &llgo_coro_native_fleet_e2e_release_state_v1, 0, memory_order_seq_cst);
+}
+
+uintptr_t __llgo_coro_native_fleet_e2e_blocked_v1(void) {
+    return (uintptr_t)atomic_load_explicit(
+        &llgo_coro_native_fleet_e2e_blocked_state_v1, memory_order_seq_cst);
+}
+
+void __llgo_coro_native_fleet_e2e_release_v1(void) {
+    atomic_store_explicit(
+        &llgo_coro_native_fleet_e2e_release_state_v1, 1, memory_order_seq_cst);
+}
+
+void __llgo_coro_native_fleet_e2e_block_v1(void) {
+    atomic_store_explicit(
+        &llgo_coro_native_fleet_e2e_blocked_state_v1, 1, memory_order_seq_cst);
+    while (atomic_load_explicit(
+               &llgo_coro_native_fleet_e2e_release_state_v1,
+               memory_order_seq_cst) == 0) {
+    }
 }

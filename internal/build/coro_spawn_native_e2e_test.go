@@ -299,9 +299,13 @@ func buildCoroSpawnNativeE2EUserSource(
 ) (object, anchor, setupSymbol, checkSymbol string) {
 	t.Helper()
 	ssaPkg, files := buildCoroPlanTestPackage(t, coroSpawnNativeE2EPackage, source, nil)
+	var targetCapabilities coro.TargetCapabilities
+	if strings.Contains(source, "//llgo:coro worker") {
+		targetCapabilities = cl.CoroNativeTargetCapabilities()
+	}
 	universe, err := cl.PrepareEmissionUniverseWithOptions(prog, nil, []cl.EmissionPackage{{
 		SSA: ssaPkg, Files: files, Identity: coroSpawnNativeE2EPackage,
-	}}, cl.EmissionUniverseOptions{})
+	}}, cl.EmissionUniverseOptions{CoroTargetCapabilities: targetCapabilities})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,12 +317,14 @@ func buildCoroSpawnNativeE2EUserSource(
 	grandchildFn := ssaPkg.Func("grandchild")
 	runPhaseFn := ssaPkg.Func("runPhase")
 	setupFn, checkFn := ssaPkg.Func("Setup"), ssaPkg.Func("Check")
-	threadIDFn := ssaPkg.Func("threadID")
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
 	schedulerABI := coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
 	if enableChannel {
 		schedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	}
+	if targetCapabilities.Worker() {
+		schedulerABI = coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0
 	}
 	functionIDs.SchedulerABI = schedulerABI
 	functionIDs.ArchiveReady = true
@@ -334,29 +340,45 @@ func buildCoroSpawnNativeE2EUserSource(
 			switch fn {
 			case mainFn, childFn, grandchildFn, runPhaseFn:
 				return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
-			case threadIDFn:
+			}
+			if fn.Name() == "gomaxprocs" {
+				return coro.SSAFunctionPolicy{
+					Effect: coro.NoSuspend, IgnoreBody: true,
+					External: coro.ExternalKnown, OverrideExternal: true,
+				}, nil
+			}
+			noblock, certified, err := universe.CoroForeignNoBlockCertificate(fn)
+			if err != nil {
+				return coro.SSAFunctionPolicy{}, err
+			}
+			if certified {
 				return coro.SSAFunctionPolicy{
 					Effect: coro.NoSuspend, Exec: coro.IRQUnsafe,
 					IgnoreBody: true, External: coro.ExternalKnown, OverrideExternal: true,
-					ForeignNoBlockCertificate: "llgo.coro.foreign-noblock.test.v1:thread-id",
+					ForeignNoBlockCertificate: noblock.ID,
 				}, nil
-			default:
-				switch fn.Name() {
-				case "gomaxprocs":
-					return coro.SSAFunctionPolicy{
-						Effect: coro.NoSuspend, IgnoreBody: true,
-						External: coro.ExternalKnown, OverrideExternal: true,
-					}, nil
-				case "quotaReset", "quotaRun", "quotaMaximum":
-					return coro.SSAFunctionPolicy{
-						Effect: coro.NoSuspend, Exec: coro.IRQUnsafe,
-						IgnoreBody: true, External: coro.ExternalKnown, OverrideExternal: true,
-						ForeignNoBlockCertificate: "llgo.coro.foreign-noblock.test.v1:quota-probe",
-					}, nil
-				default:
-					return coro.SSAFunctionPolicy{}, nil
-				}
 			}
+			worker, certified, err := universe.CoroForeignWorkerCertificate(fn)
+			if err != nil {
+				return coro.SSAFunctionPolicy{}, err
+			}
+			if certified {
+				return coro.SSAFunctionPolicy{
+					Effect: coro.NoSuspend, Exec: coro.BlockForeign | coro.IRQUnsafe,
+					IgnoreBody: true, External: coro.ExternalUnknownForeign, OverrideExternal: true,
+					ForeignWorkerCertificate: worker.ID,
+				}, nil
+			}
+			return coro.SSAFunctionPolicy{}, nil
+		},
+		ClassifyElidedCall: func(_ *ssa.Function, call ssa.CallInstruction) (bool, error) {
+			callee := call.Common().StaticCallee()
+			if callee != nil && callee.Pkg != nil &&
+				callee.Pkg.Pkg.Path() == "unsafe" && callee.Name() == "init" {
+				return true, nil
+			}
+			semantics, intrinsic, err := coroIntrinsicCallSiteSemanticsForTest(universe, call)
+			return intrinsic && semantics.ElidesManagedCall(), err
 		},
 	})
 	if err != nil {
@@ -365,11 +387,12 @@ func buildCoroSpawnNativeE2EUserSource(
 	compilation := &cl.Compilation{
 		CoroPlan: plan,
 
-		CoroABI:          coro.PhysicalABIV1,
-		SchedulerABI:     schedulerABI,
-		PanicABI:         coro.PanicExplicitStatusABIV0,
-		FuncRepABI:       coro.FuncRepABIV1,
-		EmissionUniverse: universe}
+		CoroABI:                coro.PhysicalABIV1,
+		SchedulerABI:           schedulerABI,
+		PanicABI:               coro.PanicExplicitStatusABIV0,
+		FuncRepABI:             coro.FuncRepABIV1,
+		CoroTargetCapabilities: targetCapabilities,
+		EmissionUniverse:       universe}
 	pkg, _, err := cl.NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
 		cl.PackageOptions{Compilation: compilation},

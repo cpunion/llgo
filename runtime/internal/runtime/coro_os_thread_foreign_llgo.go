@@ -45,10 +45,17 @@ func __llgo_coro_os_thread_foreign_call_v1(
 		!coro.CurrentOSThreadLocked(task) {
 		coroRuntimeAbort("invalid locked-thread foreign call")
 	}
+	driver, _, _, ownerOK := coro.CurrentExecutorDriver(task)
+	if !ownerOK || !coroTargetLeaveManagedExecutionForSameMBlockV1(driver) {
+		coroRuntimeAbort("locked-thread foreign call cannot release managed execution")
+	}
 	args := [coroworker.MaxArgs]uintptr{a0, a1, a2, a3, a4, a5, a6, a7, a8}
 	var result coroworker.Result
 	if !coroworker.Call(function, argc, &args, &result) {
 		coroRuntimeAbort("locked-thread foreign call failed")
+	}
+	if !coroTargetReenterManagedExecutionAfterSameMBlockV1(driver) {
+		coroRuntimeAbort("locked-thread foreign call cannot reacquire managed execution")
 	}
 	*r1, *r2, *errno = result.R1, result.R2, result.Errno
 }
