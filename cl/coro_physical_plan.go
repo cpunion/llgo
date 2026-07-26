@@ -119,6 +119,7 @@ const (
 	coroPhysicalControlClosedInterfaceAwait
 	coroPhysicalControlManagedInterfaceAwait
 	coroPhysicalControlPlainDispatch
+	coroPhysicalControlNilDispatchFault
 	coroPhysicalControlRawPlainCall
 	coroPhysicalControlDirectSpawn
 	coroPhysicalControlDispatchSpawn
@@ -138,6 +139,8 @@ func (recipe coroPhysicalControlRecipe) String() string {
 		return "managed-interface-await"
 	case coroPhysicalControlPlainDispatch:
 		return "plain-dispatch"
+	case coroPhysicalControlNilDispatchFault:
+		return "nil-dispatch-fault"
 	case coroPhysicalControlRawPlainCall:
 		return "raw-plain-call"
 	case coroPhysicalControlDirectSpawn:
@@ -1166,6 +1169,21 @@ func planCoroPhysicalControlInstruction(
 			result.controlFailureHard = true
 			if !capabilities.managedDispatch {
 				result.controlFailure = "managed descriptor call requires the v1 descriptor dispatch capability"
+				return
+			}
+			// A closed empty target set is an exact nil-only function value, not
+			// a child capability. Keep it in the current physical frame and
+			// route the inevitable nil call through the explicit-status fault
+			// edge. Inventing a child await here would disagree with the effect
+			// graph, which deliberately contributes no AwaitStructured bit for
+			// a nonexistent target.
+			nilOnly := !callPlan.Open && callPlan.MayBeNil && len(callPlan.Targets) == 0
+			if nilOnly {
+				if err := validateCoroPlainDispatchCall(whole, audit.fn, instruction, callPlan, audit.universe); err != nil {
+					result.controlFailure = "invalid nil-only descriptor call: " + err.Error()
+					return
+				}
+				result.control = coroPhysicalControlNilDispatchFault
 				return
 			}
 			if callPlan.SyncDispatch {

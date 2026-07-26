@@ -1717,6 +1717,8 @@ func validateCoroPhysicalABIForOwner(
 				switch instructionPlan.control {
 				case coroPhysicalControlPlainDispatch:
 					continue
+				case coroPhysicalControlNilDispatchFault:
+					continue
 				case coroPhysicalControlRawPlainCall:
 					continue
 				case coroPhysicalControlDispatchAwait:

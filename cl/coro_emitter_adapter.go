@@ -122,6 +122,8 @@ func (p *context) tryCompileCoroPhysicalCall(b llssa.Builder, call *ssa.Call) (l
 		return p.compileCoroManagedInterfaceAwait(b, call, instructionPlan), true
 	case coroPhysicalControlPlainDispatch:
 		return p.compileCoroPhysicalPlainDispatch(b, call, instructionPlan), true
+	case coroPhysicalControlNilDispatchFault:
+		return p.compileCoroPhysicalNilDispatchFault(b, call, instructionPlan), true
 	case coroPhysicalControlRawPlainCall:
 		if instructionPlan.controlTarget == nil || instructionPlan.controlTargetID == "" {
 			panic("physical raw/plain call has no frozen target identity")
