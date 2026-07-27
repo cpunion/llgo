@@ -212,12 +212,12 @@ func TestGenMainModuleWASIAsyncifyEntry(t *testing.T) {
 	}
 	pkg := &packages.Package{PkgPath: "example.com/foo", ExportFile: "foo.a"}
 	mod := genMainModule(ctx, llssa.PkgRuntime, pkg, &genConfig{
-		rtInit:       true,
 		packageInits: []string{"example.com/dependency.init"},
 	})
 	ir := mod.LPkg.String()
 	checks := []string{
 		`define hidden ptr @__llgo_wasm_main(ptr %0)`,
+		`call void @"github.com/goplus/llgo/runtime/internal/runtime.init"()`,
 		`call void @"example.com/dependency.init"()`,
 		`call void @"example.com/foo.init"()`,
 		`call void @"example.com/foo.main"()`,
