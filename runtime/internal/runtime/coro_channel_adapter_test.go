@@ -323,7 +323,79 @@ func driveCoroChannelCleanupCursorTest(
 	return 0
 }
 
-func TestCoroChannelCleanupCursorBoundsPeerWork(t *testing.T) {
+func TestCoroChannelAdapterCleanupSeparatesCommittedCancellationFromDelivery(t *testing.T) {
+	p := new(coro.P)
+	source := new(coro.ChannelOperationSource)
+	if !coro.BindChannelOperationSource(source, p) {
+		t.Fatal("bind channel source for committed cancellation cleanup")
+	}
+	id, ok := coro.MakeOperationIDAtRoute(
+		coro.OperationSourceChannel,
+		coro.RouteID(1),
+		1,
+		1,
+	)
+	if !ok {
+		t.Fatal("make committed cancellation channel operation ID")
+	}
+	ch := &Chan{elemsize: int(unsafe.Sizeof(uint32(0)))}
+	ch.mutex.Init(nil)
+	value := uint32(0x12345678)
+	claim := new(coro.SelectClaim)
+	var operation coroChanOperationV1
+	waiter := chanWaiter{
+		ch: ch, elem: unsafe.Pointer(&value), size: ch.elemsize, send: true, status: waitSendOK,
+	}
+	operation = coroChanOperationV1{
+		id: id, claim: claim, waiter: &waiter, source: source, magic: coroChanOperationMagicV1,
+	}
+	waiter.coro = &operation
+	var cursor coroChanCleanupCursorV1
+
+	if _, _, ordinaryOK := materializeCoroChanOperationV1(
+		&operation,
+		&waiter,
+		&cursor,
+		false,
+		false,
+	); ordinaryOK {
+		t.Fatal("ordinary losing channel cleanup accepted a completed physical waiter")
+	}
+	small, complete, canceledOK := materializeCoroChanOperationV1(
+		&operation,
+		&waiter,
+		&cursor,
+		false,
+		true,
+	)
+	if !canceledOK || complete || small != coro.ResumeSmallInvalid ||
+		cursor.status != waitSendOK || cursor.deliver ||
+		ch.sendq.first != nil || ch.sendq.last != nil {
+		t.Fatalf(
+			"committed cancellation cleanup start = small:%d complete:%t ok:%t cursor:%+v queue:(%p,%p)",
+			small,
+			complete,
+			canceledOK,
+			cursor,
+			ch.sendq.first,
+			ch.sendq.last,
+		)
+	}
+	before := cursor
+	if _, _, continued := materializeCoroChanOperationV1(
+		&operation, &waiter, &cursor, false, false,
+	); continued || cursor != before {
+		t.Fatal("committed cancellation cleanup continued without cancellation permission")
+	}
+	if steps := driveCoroChannelCleanupCursorTest(t, &cursor, coro.ResumeSmallInvalid); steps != 2 {
+		t.Fatalf("committed cancellation cleanup steps = %d, want 2", steps)
+	}
+	if !coro.UnbindChannelOperationSource(source, p) {
+		t.Fatal("unbind channel source after committed cancellation cleanup")
+	}
+}
+
+func TestCoroChannelAdapterCleanupCursorBoundsPeerWork(t *testing.T) {
 	const peers = 64
 	bufferValue := uint32(0x6a7b8c9d)
 	buffered := &Chan{
@@ -351,7 +423,7 @@ func TestCoroChannelCleanupCursorBoundsPeerWork(t *testing.T) {
 		buffered.recvq.enqueue(&recvWaiters[index])
 	}
 	cursor := coroChanCleanupCursorV1{
-		ch: buffered, status: waitRecvOK, phase: coroChanCleanupBufferRecvV1, selected: true,
+		ch: buffered, status: waitRecvOK, phase: coroChanCleanupBufferRecvV1, deliver: true,
 	}
 	steps := driveCoroChannelCleanupCursorTest(t, &cursor, uint8(waitRecvOK))
 	if steps < peers || buffered.qcount != 0 ||
@@ -386,7 +458,7 @@ func TestCoroChannelCleanupCursorBoundsPeerWork(t *testing.T) {
 		}
 	}
 	cursor = coroChanCleanupCursorV1{
-		ch: closed, status: waitSendClosed, phase: coroChanCleanupClosedRecvV1, selected: true,
+		ch: closed, status: waitSendClosed, phase: coroChanCleanupClosedRecvV1, deliver: true,
 	}
 	steps = driveCoroChannelCleanupCursorTest(t, &cursor, uint8(waitSendClosed))
 	if steps < peers ||

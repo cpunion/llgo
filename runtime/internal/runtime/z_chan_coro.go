@@ -52,12 +52,15 @@ const (
 
 // coroChanCleanupCursorV1 is frame-local scheduler work, not hchan state. It
 // releases the hchan mutex after every bounded reduction and never survives
-// the old-P materialization barrier.
+// the old-P materialization barrier. status records the physical hchan effect;
+// deliver separately records whether that effect is the logical Go result. A
+// strong task stop may cancel the continuation after a peer already committed,
+// in which case status is complete while deliver remains false.
 type coroChanCleanupCursorV1 struct {
-	ch       *Chan
-	status   waitStatus
-	phase    coroChanCleanupPhaseV1
-	selected bool
+	ch      *Chan
+	status  waitStatus
+	phase   coroChanCleanupPhaseV1
+	deliver bool
 }
 
 // CoroChanParkV1 is compiler-spilled storage for one direct blocking channel
@@ -147,7 +150,7 @@ func validCoroChanCleanupCursorV1(cursor *coroChanCleanupCursorV1) bool {
 		cursor.phase >= coroChanCleanupBufferRecvV1 &&
 		cursor.phase <= coroChanCleanupClosedSendV1 &&
 		cursor.status <= waitSendClosed &&
-		cursor.selected == cursor.status.done()
+		(!cursor.deliver || cursor.status.done())
 }
 
 func validCoroChanParkV1(state *CoroChanParkV1) bool {
@@ -1209,7 +1212,7 @@ func finishCoroChanCleanupCursorV1(
 		return 0, false, false
 	}
 	small = coro.ResumeSmallInvalid
-	if cursor.selected {
+	if cursor.deliver {
 		small = uint8(cursor.status)
 	}
 	*cursor = coroChanCleanupCursorV1{}
@@ -1307,22 +1310,25 @@ func materializeCoroChanOperationV1(
 	operation *coroChanOperationV1,
 	waiter *chanWaiter,
 	cursor *coroChanCleanupCursorV1,
-	selected bool,
+	deliver bool,
+	allowCommittedCancel bool,
 ) (small uint8, complete bool, ok bool) {
 	if operation == nil || waiter == nil || cursor == nil ||
-		!validCoroChanCleanupCursorV1(cursor) {
+		!validCoroChanCleanupCursorV1(cursor) ||
+		deliver && allowCommittedCancel {
 		return 0, false, false
 	}
 	if cursor.phase != coroChanCleanupIdleV1 {
 		idOnly := coroChanOperationV1{id: operation.id}
 		if !operation.id.Valid() || *operation != idOnly ||
-			*waiter != (chanWaiter{}) || cursor.selected != selected {
+			*waiter != (chanWaiter{}) || cursor.deliver != deliver ||
+			cursor.status.done() && !deliver && !allowCommittedCancel {
 			return 0, false, false
 		}
 		return advanceCoroChanCleanupCursorV1(cursor)
 	}
 	if *operation == (coroChanOperationV1{}) && *waiter == (chanWaiter{}) {
-		if selected {
+		if deliver {
 			return 0, false, false
 		}
 		return coro.ResumeSmallInvalid, true, true
@@ -1331,7 +1337,8 @@ func materializeCoroChanOperationV1(
 		return 0, false, false
 	}
 	status := waiter.status
-	if selected != status.done() {
+	physicalComplete := status.done()
+	if deliver && !physicalComplete || physicalComplete && !deliver && !allowCommittedCancel {
 		return 0, false, false
 	}
 	ch := waiter.ch
@@ -1346,16 +1353,17 @@ func materializeCoroChanOperationV1(
 	*waiter = chanWaiter{}
 	*operation = coroChanOperationV1{id: id}
 	*cursor = coroChanCleanupCursorV1{
-		ch:       ch,
-		status:   status,
-		phase:    coroChanCleanupBufferRecvV1,
-		selected: selected,
+		ch:      ch,
+		status:  status,
+		phase:   coroChanCleanupBufferRecvV1,
+		deliver: deliver,
 	}
 	return coro.ResumeSmallInvalid, false, validCoroChanCleanupCursorV1(cursor)
 }
 
 func coroMaterializeChannelResumeCleanupStepV1(step coro.ResumeCleanupStep) bool {
-	selected := step.Outcome == coro.ParkOutcomeCompleted && step.WinnerCase == step.Index+1
+	deliver := step.Outcome == coro.ParkOutcomeCompleted && step.WinnerCase == step.Index+1
+	allowCommittedCancel := step.Outcome == coro.ParkOutcomeCanceled
 	var (
 		small    uint8
 		complete bool
@@ -1374,7 +1382,8 @@ func coroMaterializeChannelResumeCleanupStepV1(step coro.ResumeCleanupStep) bool
 			&state.operation,
 			&state.waiter,
 			&state.reconcile,
-			selected,
+			deliver,
+			allowCommittedCancel,
 		)
 	case coro.ResumeCleanupChannelSelect:
 		state := (*CoroChanSelectV1)(step.Context)
@@ -1387,7 +1396,8 @@ func coroMaterializeChannelResumeCleanupStepV1(step coro.ResumeCleanupStep) bool
 			&candidate.operation,
 			&candidate.waiter,
 			&state.reconcile,
-			selected,
+			deliver,
+			allowCommittedCancel,
 		)
 		if ok {
 			candidate.order = 0

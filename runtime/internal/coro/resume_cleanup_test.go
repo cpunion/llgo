@@ -96,9 +96,13 @@ func TestTypedResumeCleanupIsBoundedAndPNeutral(t *testing.T) {
 		},
 	)
 	externallyCommitChannelCandidate(t, fixture, 1)
+	winnerSlot, _ := channelOperationSlotFor(fixture.source, fixture.ids[1])
+	if !producerAdmissionAcquire(&winnerSlot.inflight) {
+		t.Fatal("pin admitted producer across typed cleanup ApplyOne")
+	}
 	requestChannelClaimCoreFixture(t, fixture)
 
-	materialized := uint32(0)
+	materialized, retried := uint32(0), false
 	for reduction := 0; reduction < 10000; reduction++ {
 		step, ok := NextExecutorRunStep(fixture.driver)
 		if !ok {
@@ -106,6 +110,26 @@ func TestTypedResumeCleanupIsBoundedAndPNeutral(t *testing.T) {
 		}
 		switch step.Kind {
 		case ExecutorRunStepSource:
+			if step.Poll.Complete && !retried {
+				// ApplyOne closed the source but could not join the admitted
+				// producer. Bound + Detaching + Resolving must finish this
+				// epoch as a bounded retry, not make the runner Invalid.
+				if !step.Poll.More || step.Poll.Blocked ||
+					fixture.task.g.park.phase != parkDetaching ||
+					fixture.wait.work != waitSetWorkQueued ||
+					fixture.p.affectedWaitHead != &fixture.wait ||
+					fixture.p.affectedWaitTail != &fixture.wait ||
+					plan.phase != resumeCleanupBound ||
+					preemptLoad(&winnerSlot.inflight) != producerAdmissionClosed|1 {
+					t.Fatalf("typed cleanup retry boundary = progress:%+v park:%d work:%d affected:(%p,%p) plan:%+v inflight:%#x",
+						step.Poll, fixture.task.g.park.phase, fixture.wait.work,
+						fixture.p.affectedWaitHead, fixture.p.affectedWaitTail,
+						plan, preemptLoad(&winnerSlot.inflight))
+				}
+				producerAdmissionRelease(&winnerSlot.inflight)
+				retried = true
+				continue
+			}
 			if step.Poll.Complete {
 				if materialized != uint32(len(fixture.ids)) {
 					t.Fatalf("typed cleanup runtime reductions = %d, want %d", materialized, len(fixture.ids))
@@ -135,7 +159,7 @@ func TestTypedResumeCleanupIsBoundedAndPNeutral(t *testing.T) {
 	t.Fatal("typed resume cleanup did not complete")
 
 complete:
-	if !EnterExecutorRunCompatibility(fixture.driver) ||
+	if !retried || !EnterExecutorRunCompatibility(fixture.driver) ||
 		packet.state != resumePacketMaterialized ||
 		packet.source != (OperationID{}) ||
 		packet.outcome != ParkOutcomeCompleted ||
