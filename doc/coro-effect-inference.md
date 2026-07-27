@@ -476,33 +476,37 @@ managed target identities remain compiler-derived.
 
 ### 7.4 Library summary v2
 
-The existing `llgo.coro.library-effect-summary.v1` publishes managed functions
-only.  `CallableContractFacts` cannot be embedded unchanged because it also
-contains consumer call-site invocations.  The library format should make a hard
-cutover to a v2 producer schema with three collections:
+`llgo.coro.library-effect-summary.v2` is now the hard-cut producer schema.
+`CallableContractFacts` is not embedded unchanged because it also contains
+consumer call-site invocations.  v2 has three collections:
 
 1. **Managed functions**: the existing FunctionID, ABI hash, inferred effect,
    execution flags, representation, and physically emitted primary entries.
 2. **Foreign callables**: exact declaration identity, physical symbol, typed
    ABI hash, target-neutral behavior contract, proof kind/digest, and any
    trusted refinement.
-3. **Export adapters**: physical C symbol and ABI hash mapped to an exact
-   managed FunctionID, primary kind, and generated adapter ABI.
+3. **Export bindings**: physical C symbol and ABI hash mapped to an exact
+   managed FunctionID and primary.  The current record is declarative and
+   grants no raw-entry or ingress capability; a generated adapter must publish
+   and pass a separate versioned gate before lowering may call it.
 
 The existing target triple, data layout, coroutine/scheduler/panic/function
 representation ABIs, and target capabilities remain part of the enclosing
 metadata.  The records contain no code pointer and no consumer-selected
 worker/same-M/event recipe.
 
-An importer validates schema, target profile, stable identity, typed ABI, and
-digest before admitting a fact.  Duplicate, missing, conflicting, or
-target-mismatched records are rejected.  A missing callable record retains the
-conservative C default; it never becomes executor-safe by omission.
+The emitter and importer validate schema, target profile, stable identity,
+typed ABI, contract identity, managed/export binding, and digest before
+admitting a fact.  Duplicate, missing, conflicting, or target-mismatched
+records are rejected.  A missing callable record retains the conservative C
+default; it never becomes executor-safe by omission.
 
-This format also lets a precompiled library preserve automatic coloring:
-consumer calls to managed functions import their inferred effect, while calls
-to exported or foreign symbols import exact producer behavior without source
-comments.
+Consumer calls to managed functions already import their inferred effect and
+continue coloring through the ordinary SSA fixed point.  Foreign declarations
+and exports are now serialized and indexed without source comments or code
+addresses, but invocation-policy consumption deliberately remains disabled
+until the same-M/ingress adapter gates can enforce those facts.  Metadata
+availability is not an execution capability.
 
 ### 7.5 Unified foreign ingress
 

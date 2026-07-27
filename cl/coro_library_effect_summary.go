@@ -28,7 +28,8 @@ import (
 
 const (
 	coroLibraryFunctionABIDigestDomain = "llgo.coro.library-function-abi.v1"
-	coroLibrarySummarySymbolPrefix     = "__llgo_coro_library_effect_v1."
+	coroLibraryExportABIDigestDomain   = "llgo.coro.library-export-abi.v1"
+	coroLibrarySummarySymbolPrefix     = "__llgo_coro_library_effect_v2."
 )
 
 // CoroLibraryEffectView is the immutable archive-facing projection of a
@@ -83,6 +84,40 @@ func (view CoroLibraryEffectView) FunctionABIHash(
 	}
 	return emissionDigest(framedEmissionKey(
 		coroLibraryFunctionABIDigestDomain,
+		metadata.CoroABI,
+		metadata.SchedulerABI,
+		metadata.PanicABI,
+		metadata.FuncRepABI,
+		metadata.TargetTriple,
+		strconv.Itoa(metadata.PointerBits),
+		metadata.Endianness,
+		metadata.DataLayout,
+		structuralEmissionABITypeKey(signature),
+	)), nil
+}
+
+// ExportABIHash binds one source export's effective raw C signature without
+// granting a raw physical entry. The later ingress-adapter gate consumes the
+// same hash, so neither archiving nor lowering has to reconstruct an ABI from
+// a symbol name or code address.
+func (view CoroLibraryEffectView) ExportABIHash(
+	function *ssa.Function,
+	metadata coro.LibraryEffectMetadata,
+) (string, error) {
+	u := view.index.universe
+	if u == nil || function == nil {
+		return "", fmt.Errorf("coroutine library export ABI requires an exact prepared function")
+	}
+	canonical, ok := u.Resolve(function)
+	if !ok || canonical == nil {
+		return "", fmt.Errorf("function %q is outside the frozen emission universe", function.Name())
+	}
+	signature, err := u.coroPhysicalEntrySourceSignature(canonical)
+	if err != nil {
+		return "", err
+	}
+	return emissionDigest(framedEmissionKey(
+		coroLibraryExportABIDigestDomain,
 		metadata.CoroABI,
 		metadata.SchedulerABI,
 		metadata.PanicABI,
@@ -231,26 +266,27 @@ func (c *Compilation) validateCoroLibraryEffects() error {
 				fact.ID, functionPlan, fact, plan.IgnoresBody(function),
 			)
 		}
-		// RawPlainSymbol is retained in the producer record so a future schema
-		// can bind exact legacy crossings without rediscovering symbols. The v1
-		// consumer lowering does not yet own an external raw-body capability,
+		// RawPlainSymbol is retained in the producer record so a later lowering
+		// can bind exact legacy crossings without rediscovering symbols. The v2
+		// managed-function consumer does not yet own an external raw-body capability,
 		// however: mustRawPlainFunctionSymbol deliberately accepts only a
 		// locally defined variant. Reject every imported raw demand here even
 		// when the producer named a symbol, rather than accepting metadata that
 		// a later emitter cannot honor.
 		if functionPlan.RawPlainDemand {
 			return fmt.Errorf(
-				"coroutine library effect %q has consumer raw-plain demand, which library summary v1 does not lower",
+				"coroutine library effect %q has consumer raw-plain demand, which library summary v2 does not lower",
 				fact.ID,
 			)
 		}
-		// v1 publishes the primary entry only. Descriptor construction is an
+		// The v2 managed-function record publishes the primary entry only.
+		// Descriptor construction is an
 		// independently versioned ABI and cannot be inferred from FuncRep width.
 		// An undemanded declaration emits nothing and therefore needs no
 		// descriptor in this consumer; reject only an active crossing.
 		if fact.FuncRep == coro.Dispatch && functionPlan.Emission != coro.EmitNone {
 			return fmt.Errorf(
-				"coroutine library effect %q requires an external Dispatch producer, which library summary v1 does not publish",
+				"coroutine library effect %q requires an external Dispatch producer, which library summary v2 does not publish",
 				fact.ID,
 			)
 		}
@@ -325,7 +361,12 @@ func (p *context) emitCoroLibraryEffectSummary() error {
 		return err
 	}
 	functions := make([]coro.LibraryEffectFunction, 0, len(p.emissionOwner.selected))
+	foreignCallables := make([]coro.LibraryEffectForeignCallable, 0)
+	exportBindings := make([]coro.LibraryEffectExportBinding, 0)
 	seen := make(map[coro.FunctionID]struct{}, len(p.emissionOwner.selected))
+	seenForeign := make(map[coro.FunctionID]struct{})
+	managedFacts := make(map[coro.FunctionID]coro.LibraryEffectFunction)
+	selectedFunctions := make(map[string]*ssa.Function)
 	for unresolved := range p.emissionOwner.selected {
 		function, ok := universe.Resolve(unresolved)
 		if !ok {
@@ -334,9 +375,36 @@ func (p *context) emitCoroLibraryEffectSummary() error {
 		if universe.ownerOf(function) != p.emissionOwner {
 			continue
 		}
+		if function.Pkg != nil && function.Pkg.Pkg != nil {
+			selectedFunctions[funcName(function.Pkg.Pkg, function, false)] = function
+		}
 		functionPlan, ok := plan.FunctionPlan(function)
 		if !ok {
 			return fmt.Errorf("coroutine library summary: selected function %q has no plan", function.Name())
+		}
+		identity, hasIdentity, err := universe.CoroCallableIdentityCertificate(function)
+		if err != nil {
+			return fmt.Errorf("coroutine library summary: callable identity for %q: %w", functionPlan.ID, err)
+		}
+		if hasIdentity {
+			if _, duplicate := seenForeign[functionPlan.ID]; duplicate {
+				continue
+			}
+			contract, hasContract, err := universe.CoroCallableContractCertificate(function)
+			if err != nil {
+				return fmt.Errorf("coroutine library summary: callable contract for %q: %w", functionPlan.ID, err)
+			}
+			callable := coro.LibraryEffectForeignCallable{
+				Function:    functionPlan.ID,
+				Identity:    identity,
+				Contract:    contract,
+				HasContract: hasContract,
+			}
+			if err := callable.Validate(); err != nil {
+				return fmt.Errorf("coroutine library summary: foreign callable %q: %w", functionPlan.ID, err)
+			}
+			foreignCallables = append(foreignCallables, callable)
+			seenForeign[functionPlan.ID] = struct{}{}
 		}
 		// Raw-only closure variants are private implementation details. Their
 		// effects still contribute to the summarized public callers, but no
@@ -383,12 +451,43 @@ func (p *context) emitCoroLibraryEffectSummary() error {
 		}
 		functions = append(functions, fact)
 		seen[functionPlan.ID] = struct{}{}
+		managedFacts[functionPlan.ID] = fact
+	}
+	for sourceName, symbol := range p.pkg.ExportFuncs() {
+		function := selectedFunctions[sourceName]
+		if function == nil || symbol == "" {
+			continue
+		}
+		functionPlan, planned := plan.FunctionPlan(function)
+		if !planned {
+			return fmt.Errorf("coroutine library summary: export %q target %q has no plan", symbol, sourceName)
+		}
+		fact, managed := managedFacts[functionPlan.ID]
+		if !managed {
+			// A current raw-only export has no producer-owned managed primary.
+			// Do not publish a misleading ingress capability. The export-adapter
+			// cutover removes RawPlainOnly and makes this binding mandatory.
+			continue
+		}
+		abiHash, err := universe.CoroLibraryEffects().ExportABIHash(function, metadata)
+		if err != nil {
+			return fmt.Errorf("coroutine library summary: export ABI for %q: %w", symbol, err)
+		}
+		exportBindings = append(exportBindings, coro.LibraryEffectExportBinding{
+			Symbol:               symbol,
+			ABIHash:              abiHash,
+			Function:             functionPlan.ID,
+			ManagedPrimary:       fact.Primary,
+			ManagedPrimarySymbol: fact.PrimarySymbol,
+		})
 	}
 	summary := coro.LibraryEffectSummary{
-		Schema:    coro.LibraryEffectSummarySchema,
-		Package:   p.emissionOwner.identity,
-		Metadata:  metadata,
-		Functions: functions,
+		Schema:           coro.LibraryEffectSummarySchema,
+		Package:          p.emissionOwner.identity,
+		Metadata:         metadata,
+		Functions:        functions,
+		ForeignCallables: foreignCallables,
+		ExportBindings:   exportBindings,
 	}
 	record, err := summary.MarshalRecord()
 	if err != nil {
