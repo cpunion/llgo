@@ -41,14 +41,11 @@ func (p *context) coroForeignReentryTargetEntry(
 	sourceSignature *types.Signature,
 	abi coroPhysicalABI,
 ) llssa.Function {
-	if p == nil || p.compilation == nil || p.compilation.CoroPlan == nil {
+	if p == nil || p.compilation == nil || target == nil ||
+		!entry.planned || entry.function != target {
 		panic("coroutine foreign reentry callback target requires a frozen compilation plan")
 	}
-	targetPlan, planned := p.compilation.CoroPlan.FunctionPlan(target)
-	if !planned {
-		panic("coroutine foreign reentry callback target has no frozen plan")
-	}
-	if targetPlan.Effect.MaySuspend() {
+	if entry.plan.Effect.MaySuspend() {
 		oldInCFunc := p.inCFunc
 		p.inCFunc = false
 		childEntry, _, kind := p.compileFunctionEntry(entry)
@@ -97,10 +94,17 @@ func (p *context) coroForeignReentryPlainRamp(
 		return ramp
 	}
 
-	rampContext := *p
-	rampContext.fn = ramp
-	rampContext.goFn = target
-	rampContext.coroEmission = nil
+	// The generated ramp is a new physical function, not nested source
+	// lowering. Give it only the immutable compiler capabilities needed by the
+	// generic coroutine prologue/result helpers; copying the caller context
+	// would also copy its active emission session and mutable SSA ledgers.
+	rampContext := context{
+		prog:        p.prog,
+		pkg:         p.pkg,
+		fn:          ramp,
+		goFn:        target,
+		compilation: p.compilation,
+	}
 	b := ramp.MakeBody(1)
 	body := rampContext.beginCoroBody(b, abi, nil)
 	body.completion = ramp.MakeBlock()
@@ -338,8 +342,8 @@ func (p *context) compileCoroForeignReentryCall(
 		b.Store(b.FieldAddr(record, shape.argumentBase+index), argument)
 	}
 	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
-	body := p.coroBody()
-	if body == nil {
+	task := p.coroTask()
+	if task.IsNil() {
 		panic("coroutine foreign reentry call has no active physical body")
 	}
 	invoke := p.pkg.NewFunc(
@@ -349,7 +353,7 @@ func (p *context) compileCoroForeignReentryCall(
 	)
 	b.Call(
 		invoke.Expr,
-		body.task,
+		task,
 		b.Convert(p.prog.Uintptr(), thunk.Expr),
 		b.Convert(p.prog.Uintptr(), record),
 	)

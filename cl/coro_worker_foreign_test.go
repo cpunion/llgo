@@ -901,7 +901,6 @@ func TestCoroWorkerGenericCallableContractRejectsUnsupportedDimensions(t *testin
 		{"owner affinity", "may-block", "owner-thread", "none", "by-value", "callable affinity"},
 		{"host affinity", "may-block", "host-main", "none", "by-value", "callable affinity"},
 		{"unknown reentry", "may-block", "any-thread", "unknown", "by-value", "callable reentry"},
-		{"managed callback", "may-block", "any-thread", "managed-callback", "by-value", "callable reentry"},
 		{"unknown memory", "may-block", "any-thread", "none", "unknown", "callable memory lifetime"},
 		{"retained memory", "may-block", "any-thread", "none", "retained", "callable memory lifetime"},
 	}
@@ -915,7 +914,9 @@ func TestCoroWorkerGenericCallableContractRejectsUnsupportedDimensions(t *testin
 			if !frozen || target == nil {
 				t.Fatal("generic callable target is absent from the frozen universe")
 			}
-			err := validateCoroWorkerForeignAuthorization(fixture.plan, fixture.universe, target)
+			_, err := (coroStaticForeignCallAuthority{
+				plan: fixture.plan, universe: fixture.universe,
+			}).mode(target)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("generic callable worker authorization error = %v; want %q", err, test.want)
 			}
@@ -1055,7 +1056,9 @@ func TestCoroWorkerGenericCallableRejectsPlanUniverseCertificateMismatch(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = validateCoroWorkerForeignAuthorization(forgedPlan, fixture.universe, target)
+	_, err = (coroStaticForeignCallAuthority{
+		plan: forgedPlan, universe: fixture.universe,
+	}).mode(target)
 	if err == nil || !strings.Contains(err.Error(), "certificate differs") {
 		t.Fatalf("forged generic callable authorization error = %v; want complete certificate mismatch", err)
 	}

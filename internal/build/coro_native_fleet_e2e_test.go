@@ -1540,11 +1540,11 @@ func TestCoroNativeFleetLockedForeignReleasesQuotaBeforeReplacementStarts(t *tes
 	source := string(raw)
 	release := strings.Index(
 		source,
-		"if !coroTargetReleaseManagedExecutionV1(driver)",
+		"if releaseManaged && !coroTargetReleaseManagedExecutionV1(boundary.driver)",
 	)
 	create := strings.Index(
 		source,
-		"if !coroNativeMStartPhysicalOwnerV1(child, childSlot)",
+		"if !coroNativeMStartPhysicalOwnerV1(replacement, slot)",
 	)
 	if release < 0 || create < 0 || release >= create {
 		t.Fatalf(

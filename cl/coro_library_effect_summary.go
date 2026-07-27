@@ -31,8 +31,12 @@ const (
 
 func (p *context) emitCoroLibraryEffectSummary() error {
 	if p == nil || p.cacheRegistration || p.compilation == nil ||
-		p.compilation.CoroPlan == nil || p.compilation.EmissionUniverse == nil ||
 		p.emissionOwner == nil || p.compilation.CoroPlanDigest == "" {
+		return nil
+	}
+	plan := p.compilation.immutablePlan()
+	universe := p.immutableEmissionUniverse()
+	if plan == nil || universe == nil {
 		return nil
 	}
 	metadata, emit, err := p.coroLibraryEffectMetadata()
@@ -42,37 +46,39 @@ func (p *context) emitCoroLibraryEffectSummary() error {
 	functions := make([]coro.LibraryEffectFunction, 0, len(p.emissionOwner.selected))
 	seen := make(map[coro.FunctionID]struct{}, len(p.emissionOwner.selected))
 	for unresolved := range p.emissionOwner.selected {
-		function, ok := p.emissionUniverse.Resolve(unresolved)
+		function, ok := universe.Resolve(unresolved)
 		if !ok {
 			return fmt.Errorf("coroutine library summary: selected function %q is outside the frozen emission universe", unresolved.Name())
 		}
-		if p.emissionUniverse.ownerOf(function) != p.emissionOwner {
+		if universe.ownerOf(function) != p.emissionOwner {
 			continue
 		}
-		plan, ok := p.compilation.CoroPlan.FunctionPlan(function)
+		functionPlan, ok := plan.FunctionPlan(function)
 		if !ok {
 			return fmt.Errorf("coroutine library summary: selected function %q has no plan", function.Name())
 		}
 		// Raw-only closure variants are private implementation details. Their
 		// effects still contribute to the summarized public callers, but no
 		// downstream managed call may name this legacy body as a producer entry.
-		if plan.External != coro.Defined || plan.Emission == coro.EmitNone ||
-			plan.Emission == coro.EmitExternal || plan.RawPlainOnly {
+		if functionPlan.External != coro.Defined ||
+			functionPlan.Emission == coro.EmitNone ||
+			functionPlan.Emission == coro.EmitExternal ||
+			functionPlan.RawPlainOnly {
 			continue
 		}
-		if _, duplicate := seen[plan.ID]; duplicate {
+		if _, duplicate := seen[functionPlan.ID]; duplicate {
 			continue
 		}
 		entry, err := p.resolveFunctionSymbol(function)
 		if err != nil {
-			return fmt.Errorf("coroutine library summary: resolve %q: %w", plan.ID, err)
+			return fmt.Errorf("coroutine library summary: resolve %q: %w", functionPlan.ID, err)
 		}
 		if !entry.planned || entry.name == "" {
-			return fmt.Errorf("coroutine library summary: function %q has no planned managed symbol", plan.ID)
+			return fmt.Errorf("coroutine library summary: function %q has no planned managed symbol", functionPlan.ID)
 		}
-		signature, err := p.emissionUniverse.coroPhysicalEntrySourceSignature(function)
+		signature, err := universe.coroPhysicalEntrySourceSignature(function)
 		if err != nil {
-			return fmt.Errorf("coroutine library summary: effective ABI for %q: %w", plan.ID, err)
+			return fmt.Errorf("coroutine library summary: effective ABI for %q: %w", functionPlan.ID, err)
 		}
 		abiHash := emissionDigest(framedEmissionKey(
 			coroLibraryFunctionABIDigestDomain,
@@ -87,23 +93,23 @@ func (p *context) emitCoroLibraryEffectSummary() error {
 			structuralEmissionABITypeKey(signature),
 		))
 		rawPlainSymbol := ""
-		if plan.RawPlainEntry {
+		if functionPlan.RawPlainEntry {
 			if entry.baseName == "" {
-				return fmt.Errorf("coroutine library summary: function %q has no raw-plain base symbol", plan.ID)
+				return fmt.Errorf("coroutine library summary: function %q has no raw-plain base symbol", functionPlan.ID)
 			}
 			rawPlainSymbol = entry.baseName
 		}
 		functions = append(functions, coro.LibraryEffectFunction{
-			ID:             plan.ID,
+			ID:             functionPlan.ID,
 			ABIHash:        abiHash,
-			Effect:         plan.Effect,
-			Exec:           plan.Exec,
-			FuncRep:        plan.FuncRep,
-			Primary:        plan.Primary,
+			Effect:         functionPlan.Effect,
+			Exec:           functionPlan.Exec,
+			FuncRep:        functionPlan.FuncRep,
+			Primary:        functionPlan.Primary,
 			PrimarySymbol:  entry.name,
 			RawPlainSymbol: rawPlainSymbol,
 		})
-		seen[plan.ID] = struct{}{}
+		seen[functionPlan.ID] = struct{}{}
 	}
 	summary := coro.LibraryEffectSummary{
 		Schema:    coro.LibraryEffectSummarySchema,
