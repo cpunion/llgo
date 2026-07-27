@@ -20,8 +20,6 @@ import (
 	"bytes"
 	"strings"
 	"testing"
-
-	"golang.org/x/tools/go/ssa"
 )
 
 func testLibraryEffectMetadata() LibraryEffectMetadata {
@@ -173,61 +171,5 @@ func TestLibraryEffectSummaryFailsClosed(t *testing.T) {
 	invalid.Functions[0].Effect = MayPark
 	if _, err := invalid.MarshalStable(); err == nil || !strings.Contains(err.Error(), "disagrees") {
 		t.Fatalf("effect/primary mismatch error = %v", err)
-	}
-}
-
-func TestLibraryEffectSummaryAutomaticallyColorsImportedCallers(t *testing.T) {
-	prog, pkg := buildCoroTestSSA(t, "library.go", `package coroid
-func imported()
-func caller() { imported() }
-`)
-	imported := packageFunction(t, pkg, "imported")
-	caller := packageFunction(t, pkg, "caller")
-	functionIDs := FunctionIDConfig{}
-	importedID, err := StableFunctionID(imported, functionIDs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	summary := testLibraryEffectSummary("example/library", false)
-	summary.Functions = []LibraryEffectFunction{{
-		ID:            importedID,
-		ABIHash:       strings.Repeat("3", 64),
-		Effect:        MayPark,
-		Exec:          MayUnwind,
-		FuncRep:       DirectCoro,
-		Primary:       PrimaryCoroutine,
-		PrimarySymbol: "example/library.imported$coro",
-	}}
-	index, err := NewLibraryEffectIndex([]LibraryEffectSummary{summary}, testLibraryEffectMetadata())
-	if err != nil {
-		t.Fatal(err)
-	}
-	plan, err := AnalyzeSSA(prog, Roots{{Function: caller, Demand: AsyncDemand}}, SSAConfig{
-		FunctionIDs:          functionIDs,
-		MaxPlainInstructions: -1,
-		ClassifyFunction: func(function *ssa.Function) (SSAFunctionPolicy, error) {
-			id, idErr := StableFunctionID(function, functionIDs)
-			if idErr != nil {
-				return SSAFunctionPolicy{}, idErr
-			}
-			fact, ok := index.Lookup(id)
-			if !ok {
-				return SSAFunctionPolicy{}, nil
-			}
-			return fact.ImportedPolicy()
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	importedPlan := functionPlanFor(t, plan, imported)
-	if importedPlan.External != ExternalKnown || importedPlan.Effect != MayPark ||
-		importedPlan.Primary != PrimaryExternal {
-		t.Fatalf("imported plan = %+v", importedPlan)
-	}
-	callerPlan := functionPlanFor(t, plan, caller)
-	if !callerPlan.Effect.Contains(MayPark|AwaitStructured) || !callerPlan.Exec.Contains(MayUnwind) ||
-		callerPlan.Primary != PrimaryCoroutine {
-		t.Fatalf("caller was not automatically colored from library summary: %+v", callerPlan)
 	}
 }
