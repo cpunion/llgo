@@ -544,13 +544,12 @@ func resolvePublishedEpochPromoteStep(sources *ExecutorSourceSet, p *P, cursor *
 			case parkReady:
 				return beginResumeCleanup(wait, plan)
 			case parkDetaching:
-				// A composite source may have selected a winner while a
-				// submitted loser still owes physical cancellation. Preserve
-				// the ordinary AwaitingExternal gate; ConsumeParkSet is valid
-				// only after that exact loser detaches and parkReady is reached.
-				if wait.work != waitSetWorkAwaitingExternal {
-					return false
-				}
+				// Bound cleanup cannot consume the park until every physical
+				// candidate has detached. Keep both ordinary dispositions:
+				// AwaitingExternal stays off owner work, while RetryBudget (or
+				// a dirty owner publication) falls through to the common
+				// requeue below. A later epoch reaches parkReady and starts
+				// typed materialization exactly once.
 			default:
 				return false
 			}
