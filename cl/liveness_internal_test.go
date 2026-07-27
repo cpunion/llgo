@@ -683,6 +683,86 @@ func derefOnly(p **int) {
 	}
 }
 
+func TestConservativeLivenessMalformedReferrersFailClosed(t *testing.T) {
+	ssapkg := buildSSAPackageWithPath(t, "example.com/live", "live", `package live
+
+var Sink any
+
+func use(p *int) {
+	Sink = p
+}
+`)
+	fn := ssapkg.Func("use")
+	param := fn.Params[0]
+	ctx := &context{}
+
+	check := func(t *testing.T, ref ssa.Instruction) {
+		t.Helper()
+		refs := param.Referrers()
+		original := append([]ssa.Instruction(nil), (*refs)...)
+		*refs = []ssa.Instruction{ref}
+		defer func() {
+			*refs = original
+		}()
+
+		if ctx.collectValueUseBlocks(param, make(map[*ssa.BasicBlock]bool), map[ssa.Value]bool{}, true) {
+			t.Fatal("malformed referrer graph should disable liveness clearing")
+		}
+		if block, ok := ctx.valueLastUseBlock(param); ok || block != nil {
+			t.Fatalf("valueLastUseBlock with malformed referrer = %v, %v; want failure", block, ok)
+		}
+		order := make(map[ssa.Instruction]int, len(fn.Blocks[0].Instrs))
+		for i, instr := range fn.Blocks[0].Instrs {
+			order[instr] = i
+		}
+		if last, ok := ctx.lastUseInBlock(param, fn.Blocks[0], order, map[ssa.Value]bool{}); ok || last != nil {
+			t.Fatalf("lastUseInBlock with malformed referrer = %v, %v; want failure", last, ok)
+		}
+	}
+
+	t.Run("unary", func(t *testing.T) {
+		check(t, &ssa.UnOp{Op: token.SUB, X: param})
+	})
+	t.Run("dereference", func(t *testing.T) {
+		check(t, &ssa.UnOp{Op: token.MUL, X: param})
+	})
+	t.Run("return", func(t *testing.T) {
+		check(t, &ssa.Return{Results: []ssa.Value{param}})
+	})
+	t.Run("derived-value", func(t *testing.T) {
+		var derived ssa.Value
+		for _, ref := range *param.Referrers() {
+			if value, ok := ref.(*ssa.MakeInterface); ok {
+				derived = value
+				break
+			}
+		}
+		if derived == nil {
+			t.Fatal("missing MakeInterface derived from parameter")
+		}
+		refs := derived.Referrers()
+		original := append([]ssa.Instruction(nil), (*refs)...)
+		*refs = []ssa.Instruction{&ssa.Return{Results: []ssa.Value{derived}}}
+		defer func() {
+			*refs = original
+		}()
+
+		if ctx.collectValueUseBlocks(param, make(map[*ssa.BasicBlock]bool), map[ssa.Value]bool{}, true) {
+			t.Fatal("malformed derived referrer graph should disable liveness clearing")
+		}
+		if block, ok := ctx.valueLastUseBlock(param); ok || block != nil {
+			t.Fatalf("valueLastUseBlock with malformed derived referrer = %v, %v; want failure", block, ok)
+		}
+		order := make(map[ssa.Instruction]int, len(fn.Blocks[0].Instrs))
+		for i, instr := range fn.Blocks[0].Instrs {
+			order[instr] = i
+		}
+		if last, ok := ctx.lastUseInBlock(param, fn.Blocks[0], order, map[ssa.Value]bool{}); ok || last != nil {
+			t.Fatalf("lastUseInBlock with malformed derived referrer = %v, %v; want failure", last, ok)
+		}
+	})
+}
+
 func TestConservativeLivenessDebugRefs(t *testing.T) {
 	ssapkg, _ := buildSSAPackageWithPathAndFilesMode(t, "example.com/live", "live", `package live
 
