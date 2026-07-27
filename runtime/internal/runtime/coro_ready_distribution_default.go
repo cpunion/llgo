@@ -37,6 +37,31 @@ func coroTargetBeforeProgramRunSliceV1(p *coro.P, driver *coro.ExecutorDriver) b
 	return ok
 }
 
+// Single-owner and host-return targets do not have a second physical M to
+// claim a detached locked suspension. They retain the existing attached
+// semantics until their target adapter explicitly implements this protocol.
+func coroTargetPrepareOSThreadSuspendV1(
+	*coro.P,
+	*coro.ExecutorDriver,
+	*coro.G,
+	coro.Action,
+) (bool, bool) {
+	return false, true
+}
+
+func coroTargetHandleOSThreadSuspendV1(
+	*coro.P,
+	*coro.ExecutorDriver,
+	*coro.G,
+	coro.Action,
+) bool {
+	return false
+}
+
+func coroTargetStopForOSThreadReturnV1(*coro.ExecutorDriver) (bool, bool) {
+	return false, true
+}
+
 // Single-thread realms have no distinct reusable physical owner to retire.
 // Native pthread targets override this hook; host profiles acknowledge the
 // logical LockOSThread lease after the core has removed every G/P pointer.

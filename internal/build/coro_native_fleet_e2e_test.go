@@ -774,6 +774,152 @@ func Check() int32 {
 }
 `
 
+const coroNativeFleetLockedOrdinarySuspendE2ESource = `package main
+
+import _ "unsafe"
+
+var Failed uint32
+var MainThread uintptr
+var PeerThread uintptr
+var YieldReady chan uint32
+var YieldStart chan uint32
+var YieldDone chan uint32
+var ChannelReady chan uint32
+var ChannelStart chan uint32
+var ChannelValue chan uint32
+var TimerReady chan uint32
+var TimerStart chan uint32
+var TimerDone chan uint32
+
+//go:linkname osThreadLock llgo.coroOSThreadLock
+func osThreadLock()
+
+//go:linkname osThreadUnlock llgo.coroOSThreadUnlock
+func osThreadUnlock()
+
+//go:linkname schedulerYield llgo.coroYield
+func schedulerYield()
+
+//go:linkname timerSleep llgo.coroTimerSleep
+func timerSleep(delay int64)
+
+//llgo:coro noblock
+//go:linkname threadID C.__llgo_coro_native_fleet_e2e_thread_id_v1
+func threadID() uintptr
+
+func Setup() {
+	Failed = 0
+	MainThread = threadID()
+	PeerThread = 0
+	YieldReady = make(chan uint32)
+	YieldStart = make(chan uint32)
+	YieldDone = make(chan uint32)
+	ChannelReady = make(chan uint32)
+	ChannelStart = make(chan uint32)
+	ChannelValue = make(chan uint32)
+	TimerReady = make(chan uint32)
+	TimerStart = make(chan uint32)
+	TimerDone = make(chan uint32)
+}
+
+func yieldPeer() {
+	if threadID() != MainThread {
+		go yieldPeer()
+		return
+	}
+	YieldReady <- 1
+	<-YieldStart
+	PeerThread = threadID()
+	YieldDone <- 1
+}
+
+func channelPeer() {
+	if threadID() != MainThread {
+		go channelPeer()
+		return
+	}
+	ChannelReady <- 1
+	<-ChannelStart
+	PeerThread = threadID()
+	ChannelValue <- 37
+}
+
+func timerPeer() {
+	if threadID() != MainThread {
+		go timerPeer()
+		return
+	}
+	TimerReady <- 1
+	<-TimerStart
+	PeerThread = threadID()
+	TimerDone <- 1
+}
+
+func testLockedYield() {
+	PeerThread = 0
+	go yieldPeer()
+	<-YieldReady
+	before := threadID()
+	osThreadLock()
+	YieldStart <- 1
+	schedulerYield()
+	after := threadID()
+	<-YieldDone
+	osThreadUnlock()
+	if before != MainThread || after != before ||
+		PeerThread == 0 || PeerThread == before {
+		Failed = 141
+	}
+}
+
+func testLockedChannelPark() {
+	PeerThread = 0
+	go channelPeer()
+	<-ChannelReady
+	before := threadID()
+	osThreadLock()
+	ChannelStart <- 1
+	got := <-ChannelValue
+	after := threadID()
+	osThreadUnlock()
+	if got != 37 || before != MainThread || after != before ||
+		PeerThread == 0 || PeerThread == before {
+		Failed = 142
+	}
+}
+
+func testLockedTimerPark() {
+	PeerThread = 0
+	go timerPeer()
+	<-TimerReady
+	before := threadID()
+	osThreadLock()
+	TimerStart <- 1
+	timerSleep(20 * 1000 * 1000)
+	after := threadID()
+	<-TimerDone
+	osThreadUnlock()
+	if before != MainThread || after != before ||
+		PeerThread == 0 || PeerThread == before {
+		Failed = 143
+	}
+}
+
+func main() {
+	testLockedYield()
+	if Failed == 0 {
+		testLockedChannelPark()
+	}
+	if Failed == 0 {
+		testLockedTimerPark()
+	}
+}
+
+func Check() int32 {
+	return int32(Failed)
+}
+`
+
 const coroNativeFleetStandbyMSetMaxThreadsE2ESource = `package main
 
 import _ "unsafe"
@@ -1366,6 +1512,10 @@ func TestCoroNativeFleetLockedForeignCompensationE2E(t *testing.T) {
 
 func TestCoroNativeFleetSameRouteReplacementE2E(t *testing.T) {
 	runCoroNativeFleetE2E(t, coroNativeFleetSameRouteReplacementE2ESource, "same-route-replacement", true, 1)
+}
+
+func TestCoroNativeFleetLockedOrdinarySuspendE2E(t *testing.T) {
+	runCoroNativeFleetE2E(t, coroNativeFleetLockedOrdinarySuspendE2ESource, "locked-ordinary-suspend", true, 1)
 }
 
 func TestCoroNativeFleetStandbyMHonorsSetMaxThreadsE2E(t *testing.T) {

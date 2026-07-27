@@ -320,7 +320,8 @@ func completedExecutorRunAction(p *P, g *G, action Action) bool {
 // immediately after a successful ActionComplete commit.
 func commitExecutorRunAction(driver *ExecutorDriver, g *G, next Action, placement executorRunQueuePlacement) bool {
 	if !validExecutorDriver(driver) || driver.state != executorDriverActive ||
-		driver.run.issued == ActionInvalid || g == nil {
+		driver.run.issued == ActionInvalid || g == nil ||
+		!validOSThreadPeerActionCommit(driver.p, g) {
 		return false
 	}
 	p := driver.p
@@ -348,6 +349,7 @@ func commitExecutorRunAction(driver *ExecutorDriver, g *G, next Action, placemen
 	if driver.run.actionsSinceSource < executorRunSourceQuantum {
 		driver.run.actionsSinceSource++
 	}
+	commitOSThreadPeerAction(p)
 	return true
 }
 

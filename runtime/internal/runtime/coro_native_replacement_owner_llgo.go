@@ -108,19 +108,25 @@ func coroNativeReplacementRunSliceV1(
 	if owner == nil || domain == nil || owner.handle != domain.handle || now < 0 {
 		return coroRunResultV1{}
 	}
+	driver := domain.driverOwnerV1()
+	_, _, statusOK := coro.OSThreadSuspendHandoffStatus(driver)
+	if !statusOK {
+		return coroRunResultV1{}
+	}
+	budget := coroNativeFleetRunBudgetV1
 	if domain.adopted {
 		return coroRunSlice(
 			domain.pOwnerV1(),
 			&coroProgramGV1State,
-			domain.driverOwnerV1(),
-			coroNativeFleetRunBudgetV1,
+			driver,
+			budget,
 		)
 	}
 	return coroNativeFleetRunOwnerEpochV1(
 		owner.handle,
 		owner.ownerEpoch,
 		now,
-		coroNativeFleetRunBudgetV1,
+		budget,
 	)
 }
 
@@ -203,6 +209,16 @@ func coroNativeReplacementTryReturnV1(
 	owner, parent *coroNativeMOwnerV1,
 	domain *coroNativeFleetDomainV1,
 ) (returned, ok bool) {
+	driver := domain.driverOwnerV1()
+	detached, returnable, statusOK := coro.OSThreadSuspendHandoffStatus(driver)
+	if !statusOK {
+		return false, false
+	}
+	if detached && returnable &&
+		!parent.handoff.ReturnRequested(owner.baton) &&
+		!parent.handoff.RequestClaimedReturn(owner.baton) {
+		return false, false
+	}
 	if !coroNativeMReplacementReturnRequestedV1(owner, parent) {
 		return false, true
 	}
@@ -216,8 +232,15 @@ func coroNativeReplacementTryReturnV1(
 	if more {
 		return false, true
 	}
-	driver := domain.driverOwnerV1()
-	if !coro.ExecutorResumeHandoffReturnable(driver) {
+	if detached {
+		_, returnable, statusOK = coro.OSThreadSuspendHandoffStatus(driver)
+		if !statusOK {
+			return false, false
+		}
+	} else {
+		returnable = coro.ExecutorResumeHandoffReturnable(driver)
+	}
+	if !returnable {
 		return false, true
 	}
 	if !coroNativeMFinishReplacementReturnV1(slot, owner, parent) {
@@ -319,6 +342,17 @@ func coroNativeMRunClaimedReplacementOwnerV1(
 			if !coroTargetWaitManagedExecutionV1(domain.driverOwnerV1()) {
 				return coroNativeFleetPhysicalOwnerFailV1(
 					"native replacement execution wait failed",
+				)
+			}
+		case coroRunOSThreadSuspendV1:
+			if !coroTargetHandleOSThreadSuspendV1(
+				domain.pOwnerV1(),
+				domain.driverOwnerV1(),
+				result.g,
+				result.action,
+			) {
+				return coroNativeFleetPhysicalOwnerFailV1(
+					"native replacement locked suspension handoff failed",
 				)
 			}
 		case coroRunDestroyCommitV1:

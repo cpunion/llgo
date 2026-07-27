@@ -82,6 +82,33 @@ func TestExecutionDomainHandoffClaimedReturnLifecycle(t *testing.T) {
 	}
 }
 
+func TestExecutionDomainHandoffClaimantRequestsReturn(t *testing.T) {
+	var handoff ExecutionDomainHandoff
+	handle, ok := handoff.Begin(31)
+	if !ok {
+		t.Fatal("begin claimant-requested return")
+	}
+	wrong := handle
+	wrong.OwnerEpoch++
+	if handoff.RequestClaimedReturn(handle) ||
+		handoff.RequestClaimedReturn(wrong) {
+		t.Fatal("unclaimed or wrong-epoch claimant requested return")
+	}
+	if !handoff.Claim(handle) ||
+		!handoff.RequestClaimedReturn(handle) ||
+		handoff.RequestClaimedReturn(handle) ||
+		!handoff.ReturnRequested(handle) ||
+		!handoff.FinishReturn(handle) ||
+		!handoff.Returned(handle) ||
+		!handoff.Complete(handle) ||
+		!handoff.Idle() {
+		t.Fatal("claimant-requested return lifecycle failed")
+	}
+	if handoff.RequestClaimedReturn(handle) {
+		t.Fatal("stale claimant request mutated completed generation")
+	}
+}
+
 func TestExecutionDomainHandoffRejectsWrongOwnerEpoch(t *testing.T) {
 	var handoff ExecutionDomainHandoff
 	handle, ok := handoff.Begin(41)
@@ -92,6 +119,7 @@ func TestExecutionDomainHandoffRejectsWrongOwnerEpoch(t *testing.T) {
 	wrong.OwnerEpoch++
 	if handoff.Claim(wrong) ||
 		handoff.RequestReturn(wrong) != ExecutionDomainHandoffReturnInvalid ||
+		handoff.RequestClaimedReturn(wrong) ||
 		handoff.ReturnRequested(wrong) || handoff.FinishReturn(wrong) ||
 		handoff.Returned(wrong) || handoff.Complete(wrong) {
 		t.Fatal("wrong owner epoch mutated handoff")

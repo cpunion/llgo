@@ -157,8 +157,9 @@ type P struct {
 	channelSource *ChannelOperationSource
 	// osThreadLockOwner is non-nil only while one running, runnable, or parked
 	// G owns this physical P/M island through runtime.LockOSThread. The island
-	// continues servicing its event sources, but it may execute no other G
-	// until the matching outermost UnlockOSThread or terminal task cleanup.
+	// normally executes only that G. A target which has published an exact
+	// physical-owner handoff may temporarily run unlocked peers while the
+	// owner remains suspended and rooted by this P.
 	osThreadLockOwner *G
 
 	current   *G
@@ -171,7 +172,10 @@ type P struct {
 	affectedWaitHead *WaitSetRecord
 	affectedWaitTail *WaitSetRecord
 	inResume         bool
-	action           Action
+	// osThreadSuspend occupies existing padding before Action. It is
+	// scheduler-owner-only and records no M, pthread, callback, or handle.
+	osThreadSuspend osThreadSuspendPhase
+	action          Action
 	// runDecision is populated immediately before ActionResume and must be
 	// consumed by the compiler-generated resume prologue before control can
 	// publish another scheduler transition. It scales with P, not G.
@@ -532,9 +536,10 @@ func dequeue(p *P) *G {
 	return g
 }
 
-// runnableForOSThreadOwner reports whether this P may execute a queued G. An
-// unlocked P retains ordinary FIFO behavior. A locked P may service sources
-// and queue unrelated completions, but only its exact owner G is executable.
+// runnableForOSThreadOwner reports whether this physical owner may execute a
+// queued G. An attached locked P selects only its exact owner. During a
+// certified ordinary-suspension handoff the replacement selects only unlocked
+// peers and leaves the dormant owner in place.
 func runnableForOSThreadOwner(p *P) bool {
 	return nextOSThreadRunnable(p) != nil
 }
@@ -543,37 +548,44 @@ func nextOSThreadRunnable(p *P) *G {
 	if p == nil {
 		return nil
 	}
-	if p.osThreadLockOwner == nil {
+	owner := p.osThreadLockOwner
+	if owner == nil {
+		if p.osThreadSuspend != osThreadSuspendAttached {
+			return nil
+		}
 		return p.readyHead
 	}
-	owner := p.osThreadLockOwner
-	if owner.osThreadLockDepth == 0 || !owner.queued {
-		return nil
+	switch p.osThreadSuspend {
+	case osThreadSuspendAttached:
+		if owner.osThreadLockDepth == 0 || !owner.queued {
+			return nil
+		}
+		return owner
+	case osThreadSuspendPark,
+		osThreadSuspendYieldNeedsPeer,
+		osThreadSuspendYieldPeerServiced:
+		for candidate := p.readyHead; candidate != nil; candidate = candidate.nextReady {
+			if candidate != owner && candidate.osThreadLockDepth == 0 {
+				return candidate
+			}
+		}
 	}
-	return owner
+	return nil
 }
 
-// dequeueOSThreadRunnable removes the sole G this P/M is currently permitted
-// to execute. The uncommon locked path scans the scheduler-owned FIFO without
-// reordering unrelated tasks; UnlockOSThread restores their original order.
+// dequeueOSThreadRunnable removes the first G this physical owner is permitted
+// to execute without reordering any other ready entry.
 func dequeueOSThreadRunnable(p *P) *G {
 	if p == nil || p.readyHead == nil || p.readyCount == 0 {
 		return nil
 	}
-	owner := p.osThreadLockOwner
-	if owner == nil {
-		g := dequeue(p)
-		if g != nil && g.transferState == runnableTransferGImported {
-			g.transferState = runnableTransferGIdle
-		}
-		return g
-	}
-	if owner.osThreadLockDepth == 0 || !owner.queued {
+	selected := nextOSThreadRunnable(p)
+	if selected == nil {
 		return nil
 	}
 	var previous *G
 	for current := p.readyHead; current != nil; current = current.nextReady {
-		if current != owner {
+		if current != selected {
 			previous = current
 			continue
 		}
@@ -1428,6 +1440,7 @@ func TerminalG(p *P, g *G) bool {
 		emptySchedulerWaitQueues(p) &&
 		preemptLoad(&p.schedule) == scheduleDisabled && preemptLoad(&p.executorMode) == executorModeUnbound &&
 		p.executor == nil && p.channelSource == nil && p.osThreadLockOwner == nil &&
+		p.osThreadSuspend == osThreadSuspendAttached &&
 		!p.inResume && p.action.Kind == ActionInvalid && p.action.Handle == nil && p.runDecision == (RunDecision{}) && !p.runDecisionTaken && p.servicePreemptBudget == 0 &&
 		ValidG(g) && gPreemptStateAtDepthZero(g, preemptDisabled) && g.state == GDead && g.root == nil && g.active == nil && g.frames == nil &&
 		g.taskControlLeases == 0 && g.runAction == ActionInvalid && g.transferState == runnableTransferGIdle &&

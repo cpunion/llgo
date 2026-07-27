@@ -92,8 +92,9 @@ func (*executionDomainHandoffNoCopy) Unlock() {}
 //
 // This object contains no pointer and must remain at a stable address after
 // first use. The original owner alone calls Begin, RequestReturn, Complete, and
-// Retire. At most one compensation owner may successfully Claim and
-// FinishReturn. Waiting and doorbells are target policy, not part of this core.
+// Retire. At most one compensation owner may successfully Claim,
+// RequestClaimedReturn, and FinishReturn. Waiting and doorbells are target
+// policy, not part of this core.
 type ExecutionDomainHandoff struct {
 	noCopy     executionDomainHandoffNoCopy
 	state      uint32
@@ -259,6 +260,20 @@ func (handoff *ExecutionDomainHandoff) RequestReturn(
 			return ExecutionDomainHandoffReturnInvalid
 		}
 	}
+}
+
+// RequestClaimedReturn lets the exact compensation owner autonomously request
+// return after it has satisfied a target-neutral service condition, such as a
+// parked locked G becoming runnable. Unlike RequestReturn, it cannot withdraw
+// an unclaimed publication.
+func (handoff *ExecutionDomainHandoff) RequestClaimedReturn(
+	handle ExecutionDomainHandoffHandle,
+) bool {
+	return handoff.transition(
+		handle,
+		executionDomainHandoffClaimed,
+		executionDomainHandoffReturnRequested,
+	)
 }
 
 // ReturnRequested reports the exact claimed generation's sticky return fact.

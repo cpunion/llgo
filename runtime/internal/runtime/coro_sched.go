@@ -78,6 +78,15 @@ func coroRunSlice(p *coroP, main *coroG, driver *coro.ExecutorDriver, budget uin
 		if terminal {
 			return result
 		}
+		stopForReturn, returnOK := coroStopAfterStableReductionV1(
+			driver, &result,
+		)
+		if !returnOK {
+			return coroRunResultV1{}
+		}
+		if stopForReturn {
+			return result
+		}
 	}
 	result.stop = coroRunSliceBudgetV1
 	return result
@@ -103,6 +112,16 @@ func coroFinishRunSliceCompatibility(
 			return coroRunResultV1{}
 		}
 		result.stop = coroRunAgainV1
+		return result
+	case coroRunOSThreadSuspendV1:
+		if !coroTargetHandleOSThreadSuspendV1(
+			p, driver, result.g, result.action,
+		) {
+			return coroRunResultV1{}
+		}
+		result.stop = coroRunAgainV1
+		result.g = nil
+		result.action = coro.Action{}
 		return result
 	case coroRunMainDoneV1:
 		if !coro.EnterExecutorRunCompatibility(driver) {
