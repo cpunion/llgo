@@ -2317,10 +2317,18 @@ func coroMaterializedGenericInstance(fn *ssa.Function) bool {
 // concrete x/tools generic body (including a function literal materialized
 // inside such a body). Build-level whole-program proofs use this same
 // predicate instead of reconstructing generic-instance identity from Origin
-// and TypeArgs independently.
-func (u *EmissionUniverse) CoroMaterializedGenericInstance(fn *ssa.Function) bool {
-	return u != nil && fn != nil && u.canonicalAlias(fn) == fn &&
-		coroMaterializedGenericInstance(fn)
+// and TypeArgs independently. The caller supplies only the immutable canonical
+// resolver it already owns; this predicate does not acquire direct universe or
+// plan authority.
+func CoroMaterializedGenericInstance(
+	resolve func(*ssa.Function) (*ssa.Function, bool),
+	fn *ssa.Function,
+) bool {
+	if resolve == nil || fn == nil {
+		return false
+	}
+	canonical, ok := resolve(fn)
+	return ok && canonical == fn && coroMaterializedGenericInstance(fn)
 }
 
 // coroMaterializedGenericCallable includes Pkg-nil method-set wrappers that

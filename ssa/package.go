@@ -875,6 +875,7 @@ type aPackage struct {
 	preserveSyms         map[string]struct{} // set of exported symbol names
 	llvmUsedValues       []llvm.Value
 	llvmRetainedValues   []llvm.Value
+	compilerMetadata     []CompilerMetadataBlob
 	coroRootAnchor       string
 	coroProgramManifest  string
 	coroProgramBootstrap string
@@ -885,6 +886,16 @@ type aPackage struct {
 type none struct{}
 
 type Package = *aPackage
+
+// CompilerMetadataBlob is one byte-exact compiler artifact record. Section is
+// its physical object-section name; consumers that also publish an archive
+// index must use Data rather than recovering bytes from LLVM IR or object
+// formats. Returned blobs never alias package-owned storage.
+type CompilerMetadataBlob struct {
+	Name    string
+	Section string
+	Data    []byte
+}
 
 func (p Package) Module() llvm.Module {
 	return p.mod
@@ -956,7 +967,31 @@ func (p Package) AddCompilerMetadataBlob(name, section string, data []byte) erro
 	global.SetAlignment(1)
 	global.SetSection(section)
 	p.markLLVMUsed(global)
+	p.compilerMetadata = append(p.compilerMetadata, CompilerMetadataBlob{
+		Name:    name,
+		Section: section,
+		Data:    append([]byte(nil), data...),
+	})
 	return nil
+}
+
+// CompilerMetadataBlobs returns the immutable compiler artifact records added
+// to this package. It deliberately exposes producer bytes, not LLVM globals,
+// so package archiving remains independent of native object format and LTO
+// mode.
+func (p Package) CompilerMetadataBlobs() []CompilerMetadataBlob {
+	if p == nil || len(p.compilerMetadata) == 0 {
+		return nil
+	}
+	blobs := make([]CompilerMetadataBlob, len(p.compilerMetadata))
+	for index, blob := range p.compilerMetadata {
+		blobs[index] = CompilerMetadataBlob{
+			Name:    blob.Name,
+			Section: blob.Section,
+			Data:    append([]byte(nil), blob.Data...),
+		}
+	}
+	return blobs
 }
 
 func (p Package) MaterializePreserveSyms() {

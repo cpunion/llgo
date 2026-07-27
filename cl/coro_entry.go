@@ -46,7 +46,21 @@ type plannedFunctionSymbol struct {
 	physicalOwner     *preparedEmissionPackage
 	interfacePlain    *coroClosedInterfacePlainPlan
 	managedInterface  *coroManagedInterfaceDispatchPlan
+	libraryEffect     coro.LibraryEffectFunction
+	importedLibrary   bool
 	patchOriginalInit bool
+}
+
+func (e plannedFunctionSymbol) usesCoroPhysicalABI() bool {
+	if !e.planned || !e.physical {
+		return false
+	}
+	if e.plan.Emission == coro.EmitCoroutine {
+		return true
+	}
+	return e.importedLibrary &&
+		e.plan.Emission == coro.EmitExternal &&
+		e.libraryEffect.Primary == coro.PrimaryCoroutine
 }
 
 // resolveFunctionSymbol is shared by function definitions and declarations so
@@ -104,6 +118,7 @@ func (p *context) resolveFunctionSymbol(fn *ssa.Function) (plannedFunctionSymbol
 	}
 	entry.interfacePlain = p.compilation.coroClosedInterfacePlain
 	entry.managedInterface = p.compilation.coroManagedInterface
+	entry.libraryEffect, entry.importedLibrary = p.compilation.importedCoroLibraryEffect(fn)
 	ignored := whole.IgnoresBody(fn)
 	hasEmittedBody := len(fn.Blocks) != 0
 	if universe != nil {
@@ -118,7 +133,17 @@ func (p *context) resolveFunctionSymbol(fn *ssa.Function) (plannedFunctionSymbol
 	if err := validatePlannedFunction(fn, plan, hasEmittedBody); err != nil {
 		return entry, err
 	}
-	if plan.Emission == coro.EmitCoroutine {
+	if entry.importedLibrary {
+		entry.name = entry.libraryEffect.PrimarySymbol
+		if entry.libraryEffect.Primary == coro.PrimaryPlain {
+			// A plain primary is itself the producer's ordinary Go ABI entry.
+			// RawPlainSymbol describes only an additional legacy crossing and
+			// may therefore be absent.
+			entry.baseName = entry.libraryEffect.PrimarySymbol
+		} else {
+			entry.baseName = entry.libraryEffect.RawPlainSymbol
+		}
+	} else if plan.Emission == coro.EmitCoroutine {
 		entry.name += coroPrimarySuffix
 	}
 	return entry, nil
@@ -233,6 +258,7 @@ func (c *Compilation) plannedFunctionEmittedBody(fn *ssa.Function) (bool, error)
 		return false, fmt.Errorf("coroutine entry resolution: assembly-certified function %q has frontend classified=%t kind=%d body=%t", fn.Name(), classified, background, len(fn.Blocks) != 0)
 	}
 	managedBodylessNoBlock := false
+	_, importedLibrary := c.importedCoroLibraryEffect(fn)
 	if classified && background == llssa.InGo && len(fn.Blocks) == 0 {
 		certificate, certified, certificateErr := universe.CoroForeignNoBlockCertificate(fn)
 		if certificateErr != nil {
@@ -240,7 +266,13 @@ func (c *Compilation) plannedFunctionEmittedBody(fn *ssa.Function) (bool, error)
 		}
 		managedBodylessNoBlock = certified && certificate.ID != ""
 	}
-	frozenIgnored := classified && background == llssa.InC || assemblyCertified || managedBodylessNoBlock
+	if importedLibrary && (!classified || background != llssa.InGo || len(fn.Blocks) != 0) {
+		return false, fmt.Errorf(
+			"coroutine entry resolution: imported library function %q is not one bodyless managed-Go declaration",
+			fn.Name(),
+		)
+	}
+	frozenIgnored := classified && background == llssa.InC || assemblyCertified || managedBodylessNoBlock || importedLibrary
 	if ignored != frozenIgnored {
 		return false, fmt.Errorf("coroutine entry resolution: function %q ignored-body=%t conflicts with frozen frontend background classified=%t kind=%d", fn.Name(), ignored, classified, background)
 	}
@@ -357,7 +389,32 @@ func (e plannedFunctionSymbol) checkSupportedWithPhysicalPlan(accept func(*coroP
 		)
 	}
 	if e.plan.Emission == coro.EmitExternal && e.plan.FuncRep == coro.DirectCoro {
-		return fmt.Errorf("external coroutine emission %q requires coroutine physical ABI lowering", e.plan.ID)
+		if !e.importedLibrary || e.libraryEffect.Primary != coro.PrimaryCoroutine {
+			return fmt.Errorf("external coroutine emission %q requires a preflighted library coroutine entry", e.plan.ID)
+		}
+		if e.plan.External != coro.ExternalKnown ||
+			e.plan.Primary != coro.PrimaryExternal ||
+			e.plan.Effect != e.libraryEffect.Effect ||
+			e.plan.Exec != e.libraryEffect.Exec ||
+			e.plan.FuncRep != e.libraryEffect.FuncRep ||
+			e.libraryEffect.PrimarySymbol == "" {
+			return fmt.Errorf(
+				"external coroutine emission %q disagrees with its producer library fact",
+				e.plan.ID,
+			)
+		}
+		sourceSig := coroPhysicalNormalizeSourceSignature(e.function.Signature)
+		if e.emission != nil {
+			var err error
+			sourceSig, err = e.emission.coroPhysicalEntrySourceSignature(e.function)
+			if err != nil {
+				return err
+			}
+		}
+		if err := validateCoroLeafPhysicalSignature(e.plan, sourceSig); err != nil {
+			return err
+		}
+		return validateCoroPhysicalFunctionValueABI(e.plan, sourceSig, true)
 	}
 	return nil
 }
@@ -402,6 +459,10 @@ func (c *Compilation) preflightCoroPlan() error {
 			return
 		}
 		if err := universe.ValidateCoroPlan(plan); err != nil {
+			c.coroPreflightErr = err
+			return
+		}
+		if err := c.validateCoroLibraryEffects(); err != nil {
 			c.coroPreflightErr = err
 			return
 		}
@@ -451,6 +512,7 @@ func (c *Compilation) preflightCoroPlan() error {
 				interfacePlain:    c.coroClosedInterfacePlain,
 				managedInterface:  c.coroManagedInterface,
 			}
+			entry.libraryEffect, entry.importedLibrary = c.importedCoroLibraryEffect(function.Function)
 			if function.Plan.Emission == coro.EmitCoroutine {
 				owners := universe.sortedUseOwners(function.Function)
 				if len(owners) == 0 {

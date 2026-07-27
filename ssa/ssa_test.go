@@ -20,6 +20,7 @@
 package ssa
 
 import (
+	"bytes"
 	"fmt"
 	"go/constant"
 	"go/importer"
@@ -221,6 +222,16 @@ func TestCompilerMetadataBlobUsesCompilerRetentionOnly(t *testing.T) {
 		"__llgo_test_metadata", "llgo_test_metadata", []byte{'a', 0, 'b'},
 	); err != nil {
 		t.Fatal(err)
+	}
+	blobs := pkg.CompilerMetadataBlobs()
+	if len(blobs) != 1 || blobs[0].Name != "__llgo_test_metadata" ||
+		blobs[0].Section != "llgo_test_metadata" ||
+		!bytes.Equal(blobs[0].Data, []byte{'a', 0, 'b'}) {
+		t.Fatalf("compiler metadata blobs = %+v", blobs)
+	}
+	blobs[0].Data[0] = 'x'
+	if got := pkg.CompilerMetadataBlobs(); len(got) != 1 || got[0].Data[0] != 'a' {
+		t.Fatalf("caller mutated package-owned compiler metadata: %+v", got)
 	}
 	pkg.MaterializePreserveSyms()
 

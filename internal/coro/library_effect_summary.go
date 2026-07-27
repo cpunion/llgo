@@ -41,6 +41,13 @@ const (
 	// Mach-O emission uses the same leaf name in an explicit segment.
 	LibraryEffectSummarySection = "llgo_coro_effect"
 
+	// LibraryEffectArchiveMember is the reserved package-archive index member.
+	// Its payload is a minimal native object whose compiler-only section holds
+	// the format-neutral record. Keeping it separate from LTO members lets an
+	// importer read the record without loading LLVM bitcode, while every native
+	// linker still sees a valid object member.
+	LibraryEffectArchiveMember = "__.LLGOCORO"
+
 	maxLibraryEffectSummaryPayload = 32 << 20
 )
 
@@ -50,6 +57,11 @@ var libraryEffectSummaryRecordMagic = [16]byte{
 }
 
 const libraryEffectSummaryRecordHeaderSize = len(libraryEffectSummaryRecordMagic) + 4 + sha256.Size
+
+// LibraryEffectArchiveMemberMaxBytes bounds one metadata object, including
+// object headers and alignment. The framed payload retains its tighter 32 MiB
+// bound when parsed.
+const LibraryEffectArchiveMemberMaxBytes = 64 << 20
 
 // LibraryEffectMetadata freezes every target-wide property needed to decide
 // whether a consumer may import the function facts without reinterpretation.

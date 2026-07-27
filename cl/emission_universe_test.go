@@ -526,6 +526,10 @@ func F() int { return 2 }
 	if err != nil || hiddenInitName != publicInit+"$hasPatch" {
 		t.Fatalf("private patch-original physical name = %q, %v; want %s$hasPatch", hiddenInitName, err, publicInit)
 	}
+	libraryInitName, err := universe.CoroLibraryEffects().FunctionBaseSymbol(original.ssa.Func("init"))
+	if err != nil || libraryInitName != publicInit {
+		t.Fatalf("library-published original init name = %q, %v; want public %s", libraryInitName, err, publicInit)
+	}
 	originalState, frozen, err := universe.frozenFunctionState(original.ssa, original.ssa.Func("init"))
 	if err != nil || !frozen || originalState.state != pkgHasPatch || originalState.fromPatch {
 		t.Fatalf("patch original init frozen state = %+v, %v, %v; want pkgHasPatch original", originalState, frozen, err)

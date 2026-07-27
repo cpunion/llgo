@@ -162,6 +162,7 @@ func runCmd(_ *base.Command, args []string) {
 	conf.GoVersion = opts.lang
 	conf.NoErrorColumn = opts.noColumns.value != 0
 	conf.AllowNoBody = !opts.complete
+	conf.ImportCfg = opts.importCfg
 	var loaderCompilerFlags []string
 	if opts.allErrors.value != 0 {
 		loaderCompilerFlags = append(loaderCompilerFlags, "-e")

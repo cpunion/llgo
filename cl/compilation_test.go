@@ -243,6 +243,13 @@ func F(value int) int { return value + 1 }
 	if strings.Contains(ir, "@llvm.used") {
 		t.Fatalf("library effect summary unexpectedly requires final-link retention:\n%s", ir)
 	}
+	producerRecords, err := CoroLibraryEffectSummaryRecords(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(producerRecords) == 0 {
+		t.Fatal("source package did not expose byte-exact library effect records to the archiver")
+	}
 	object, err := prog.TargetMachine().EmitToMemoryBuffer(pkg.Module(), llvm.ObjectFile)
 	if err != nil {
 		t.Fatalf("emit package object with library effect summary: %v\n%s", err, ir)
@@ -286,6 +293,9 @@ func F(value int) int { return value + 1 }
 	}
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !bytes.Equal(sectionData, producerRecords) {
+		t.Fatal("object section and archiver-facing library effect records disagree")
 	}
 	summaries, err := coro.ParseLibraryEffectSummaryRecords(sectionData)
 	if err != nil {

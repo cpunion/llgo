@@ -78,6 +78,12 @@ type Compilation struct {
 	// coroutine entry resolution requires the universe to have been prepared
 	// before any package enters LLVM codegen.
 	EmissionUniverse *EmissionUniverse
+	// CoroLibraryEffects contains producer-owned facts for exact bodyless
+	// managed-Go declarations. The build driver has already checked archive
+	// compatibility, stable identity, structural ABI, and physical symbols.
+	// Lowering may consume these facts but must never infer one from absence.
+	CoroLibraryEffectMetadata coro.LibraryEffectMetadata
+	CoroLibraryEffects        map[*ssa.Function]coro.LibraryEffectFunction
 
 	coroPreflight            sync.Once
 	coroPreflightErr         error
@@ -103,6 +109,14 @@ func (c *Compilation) immutableEmissionUniverse() *EmissionUniverse {
 		return nil
 	}
 	return c.EmissionUniverse
+}
+
+func (c *Compilation) importedCoroLibraryEffect(fn *ssa.Function) (coro.LibraryEffectFunction, bool) {
+	if c == nil || fn == nil {
+		return coro.LibraryEffectFunction{}, false
+	}
+	fact, ok := c.CoroLibraryEffects[fn]
+	return fact, ok
 }
 
 func (c *Compilation) CoroWorkerSupported() bool {

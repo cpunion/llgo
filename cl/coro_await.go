@@ -305,11 +305,18 @@ func validateCoroAwaitTarget(caller, target coro.FunctionPlan) error {
 	if caller.Emission != coro.EmitCoroutine {
 		return fmt.Errorf("caller emission is %s, want coroutine", caller.Emission)
 	}
-	if target.External != coro.Defined || target.Emission != coro.EmitCoroutine ||
-		(target.FuncRep != coro.DirectCoro && target.FuncRep != coro.Dispatch) || !target.Demand.Contains(coro.AsyncDemand) {
+	defined := target.External == coro.Defined &&
+		target.Emission == coro.EmitCoroutine &&
+		target.Primary == coro.PrimaryCoroutine
+	imported := target.External == coro.ExternalKnown &&
+		target.Emission == coro.EmitExternal &&
+		target.Primary == coro.PrimaryExternal
+	if !defined && !imported ||
+		(target.FuncRep != coro.DirectCoro && target.FuncRep != coro.Dispatch) ||
+		!target.Demand.Contains(coro.AsyncDemand) {
 		return fmt.Errorf(
-			"target %q has no defined coroutine entry with async demand (external=%s emission=%s representation=%s demand=%s)",
-			target.ID, target.External, target.Emission, target.FuncRep, target.Demand,
+			"target %q has no defined or preflighted imported coroutine entry with async demand (external=%s emission=%s primary=%s representation=%s demand=%s)",
+			target.ID, target.External, target.Emission, target.Primary, target.FuncRep, target.Demand,
 		)
 	}
 	return nil

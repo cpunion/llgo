@@ -22,12 +22,293 @@ import (
 	"strings"
 
 	"github.com/goplus/llgo/internal/coro"
+	llssa "github.com/goplus/llgo/ssa"
+	"golang.org/x/tools/go/ssa"
 )
 
 const (
 	coroLibraryFunctionABIDigestDomain = "llgo.coro.library-function-abi.v1"
 	coroLibrarySummarySymbolPrefix     = "__llgo_coro_library_effect_v1."
 )
+
+// CoroLibraryEffectView is the immutable archive-facing projection of a
+// prepared emission universe. It deliberately exposes only stable function
+// ABI and symbol proofs, not plan demand or mutable frontend state.
+type CoroLibraryEffectView struct {
+	index emissionCanonicalIndex
+}
+
+// CoroLibraryEffectSummaryRecords returns the byte-exact producer records
+// emitted into pkg. Package archiving consumes these bytes directly so Full
+// and Thin LTO never need to be reopened merely to recover compiler metadata.
+func CoroLibraryEffectSummaryRecords(pkg llssa.Package) ([]byte, error) {
+	if pkg == nil {
+		return nil, nil
+	}
+	var records []byte
+	for _, blob := range pkg.CompilerMetadataBlobs() {
+		if !strings.HasPrefix(blob.Name, coroLibrarySummarySymbolPrefix) {
+			continue
+		}
+		records = append(records, blob.Data...)
+	}
+	if len(records) == 0 {
+		return nil, nil
+	}
+	if _, err := coro.ParseLibraryEffectSummaryRecords(records); err != nil {
+		return nil, fmt.Errorf("read emitted coroutine library effect records: %w", err)
+	}
+	return records, nil
+}
+
+// FunctionABIHash returns the structural physical-entry ABI hash
+// shared by producer summaries and consumers. It derives the effective
+// receiver/variadic/closure-context signature from the frozen emission
+// universe; callers must never rebuild this hash from a symbol or source name.
+func (view CoroLibraryEffectView) FunctionABIHash(
+	function *ssa.Function,
+	metadata coro.LibraryEffectMetadata,
+) (string, error) {
+	u := view.index.universe
+	if u == nil || function == nil {
+		return "", fmt.Errorf("coroutine library ABI requires an exact prepared function")
+	}
+	canonical, ok := u.Resolve(function)
+	if !ok || canonical == nil {
+		return "", fmt.Errorf("function %q is outside the frozen emission universe", function.Name())
+	}
+	signature, err := u.coroPhysicalEntrySourceSignature(canonical)
+	if err != nil {
+		return "", err
+	}
+	return emissionDigest(framedEmissionKey(
+		coroLibraryFunctionABIDigestDomain,
+		metadata.CoroABI,
+		metadata.SchedulerABI,
+		metadata.PanicABI,
+		metadata.FuncRepABI,
+		metadata.TargetTriple,
+		strconv.Itoa(metadata.PointerBits),
+		metadata.Endianness,
+		metadata.DataLayout,
+		structuralEmissionABITypeKey(signature),
+	)), nil
+}
+
+// ValidateFunction binds one imported producer fact to the
+// exact bodyless declaration selected by this emission universe. FunctionID is
+// checked by the build-owned index before this call; this gate independently
+// proves the structural ABI and every physical symbol spelling that lowering
+// will use.
+func (view CoroLibraryEffectView) ValidateFunction(
+	function *ssa.Function,
+	metadata coro.LibraryEffectMetadata,
+	fact coro.LibraryEffectFunction,
+) error {
+	if _, err := fact.ImportedPolicy(); err != nil {
+		return err
+	}
+	haveABI, err := view.FunctionABIHash(function, metadata)
+	if err != nil {
+		return fmt.Errorf("coroutine library ABI for %q: %w", fact.ID, err)
+	}
+	if haveABI != fact.ABIHash {
+		return fmt.Errorf(
+			"coroutine library ABI hash for %q is %q, producer published %q",
+			fact.ID, haveABI, fact.ABIHash,
+		)
+	}
+	base, err := view.FunctionBaseSymbol(function)
+	if err != nil {
+		return fmt.Errorf("coroutine library symbol for %q: %w", fact.ID, err)
+	}
+	primary := base
+	if fact.Primary == coro.PrimaryCoroutine {
+		primary += coroPrimarySuffix
+	}
+	if fact.PrimarySymbol != primary {
+		return fmt.Errorf(
+			"coroutine library primary symbol for %q is %q, producer published %q",
+			fact.ID, primary, fact.PrimarySymbol,
+		)
+	}
+	if fact.RawPlainSymbol != "" && fact.RawPlainSymbol != base {
+		return fmt.Errorf(
+			"coroutine library raw-plain symbol for %q is %q, producer published %q",
+			fact.ID, base, fact.RawPlainSymbol,
+		)
+	}
+	return nil
+}
+
+// validateCoroLibraryEffects repeats the consumer-side boundary proof at cl's
+// immutable preflight gate. The build driver owns archive discovery, but code
+// generation must still reject a manually assembled Compilation that supplies
+// a stale fact, attaches it to another SSA pointer, or lets consumer analysis
+// change a producer-owned physical capability.
+func (c *Compilation) validateCoroLibraryEffects() error {
+	if c == nil || len(c.CoroLibraryEffects) == 0 {
+		return nil
+	}
+	plan := c.immutablePlan()
+	universe := c.immutableEmissionUniverse()
+	if plan == nil || universe == nil {
+		return fmt.Errorf("coroutine library effects require one frozen plan and emission universe")
+	}
+	consumer := coro.LibraryEffectMetadata{
+		FunctionIDSchema:   coro.FunctionIDSchema,
+		CoroABI:            c.CoroABI,
+		SchedulerABI:       c.SchedulerABI,
+		PanicABI:           c.PanicABI,
+		FuncRepABI:         c.FuncRepABI,
+		TargetTriple:       c.CoroPlanMetadata.TargetTriple,
+		TargetCPU:          c.CoroPlanMetadata.TargetCPU,
+		TargetFeatures:     c.CoroPlanMetadata.TargetFeatures,
+		TargetABI:          c.CoroPlanMetadata.TargetABI,
+		PointerBits:        c.CoroPlanMetadata.PointerBits,
+		Endianness:         c.CoroPlanMetadata.Endianness,
+		DataLayout:         c.CoroPlanMetadata.DataLayout,
+		TargetCapabilities: c.CoroTargetCapabilities,
+	}
+	if err := coro.ValidateLibraryEffectCompatibility(c.CoroLibraryEffectMetadata, consumer); err != nil {
+		return fmt.Errorf("coroutine library effect compilation metadata: %w", err)
+	}
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = consumer.CoroABI
+	functionIDs.SchedulerABI = consumer.SchedulerABI
+	functionIDs.ArchiveReady = true
+	for function, fact := range c.CoroLibraryEffects {
+		if function == nil {
+			return fmt.Errorf("coroutine library effect map contains a nil function")
+		}
+		canonical, found := universe.Resolve(function)
+		if !found || canonical != function {
+			return fmt.Errorf(
+				"coroutine library effect %q is not attached to one exact canonical emission function",
+				fact.ID,
+			)
+		}
+		background, classified, err := universe.FunctionBackground(function)
+		if err != nil {
+			return fmt.Errorf("coroutine library effect %q frontend classification: %w", fact.ID, err)
+		}
+		if !classified || background != llssa.InGo || len(function.Blocks) != 0 {
+			return fmt.Errorf(
+				"coroutine library effect %q requires one bodyless managed-Go declaration",
+				fact.ID,
+			)
+		}
+		id, err := coro.StableFunctionID(function, functionIDs)
+		if err != nil {
+			return fmt.Errorf("coroutine library effect function identity: %w", err)
+		}
+		if id != fact.ID {
+			return fmt.Errorf(
+				"coroutine library effect function identity is %q, producer published %q",
+				id, fact.ID,
+			)
+		}
+		if err := universe.CoroLibraryEffects().ValidateFunction(function, consumer, fact); err != nil {
+			return err
+		}
+		functionPlan, planned := plan.FunctionPlan(function)
+		if !planned {
+			return fmt.Errorf("coroutine library effect %q is absent from the final plan", fact.ID)
+		}
+		if !plan.IgnoresBody(function) ||
+			functionPlan.External != coro.ExternalKnown ||
+			functionPlan.Primary != coro.PrimaryExternal ||
+			functionPlan.DeclaredEffect != fact.Effect ||
+			functionPlan.LocalEffect != fact.Effect ||
+			functionPlan.Effect != fact.Effect ||
+			functionPlan.DeclaredExec != fact.Exec ||
+			functionPlan.LocalExec != fact.Exec ||
+			functionPlan.Exec != fact.Exec ||
+			functionPlan.FuncRep != fact.FuncRep ||
+			functionPlan.Emission != coro.EmitNone && functionPlan.Emission != coro.EmitExternal {
+			return fmt.Errorf(
+				"coroutine library effect %q disagrees with final consumer plan: plan=%+v producer=%+v ignored=%t",
+				fact.ID, functionPlan, fact, plan.IgnoresBody(function),
+			)
+		}
+		// RawPlainSymbol is retained in the producer record so a future schema
+		// can bind exact legacy crossings without rediscovering symbols. The v1
+		// consumer lowering does not yet own an external raw-body capability,
+		// however: mustRawPlainFunctionSymbol deliberately accepts only a
+		// locally defined variant. Reject every imported raw demand here even
+		// when the producer named a symbol, rather than accepting metadata that
+		// a later emitter cannot honor.
+		if functionPlan.RawPlainDemand {
+			return fmt.Errorf(
+				"coroutine library effect %q has consumer raw-plain demand, which library summary v1 does not lower",
+				fact.ID,
+			)
+		}
+		// v1 publishes the primary entry only. Descriptor construction is an
+		// independently versioned ABI and cannot be inferred from FuncRep width.
+		// An undemanded declaration emits nothing and therefore needs no
+		// descriptor in this consumer; reject only an active crossing.
+		if fact.FuncRep == coro.Dispatch && functionPlan.Emission != coro.EmitNone {
+			return fmt.Errorf(
+				"coroutine library effect %q requires an external Dispatch producer, which library summary v1 does not publish",
+				fact.ID,
+			)
+		}
+	}
+	return nil
+}
+
+// FunctionBaseSymbol returns the exact frozen ordinary Go ABI symbol used to
+// derive published plain, coroutine, and optional raw entry capabilities.
+func (view CoroLibraryEffectView) FunctionBaseSymbol(function *ssa.Function) (string, error) {
+	u := view.index.universe
+	if u == nil || function == nil {
+		return "", fmt.Errorf("missing exact prepared function")
+	}
+	function, ok := u.Resolve(function)
+	if !ok || function == nil {
+		return "", fmt.Errorf("function is outside the frozen emission universe")
+	}
+	var base string
+	for _, owner := range u.sortedUseOwners(function) {
+		key := emissionFunctionOwnerKey{function: function, owner: owner}
+		ftype, legacy, _, valid := splitManagedSymbolKey(u.finalKeys[key])
+		if !valid || ftype != goFunc || legacy == "" {
+			continue
+		}
+		// An original initializer in a patched package has a private
+		// init$hasPatch role for the compiler-inserted patch edge, but ordinary
+		// package imports (and therefore a library summary) name its public init
+		// role. That distinction belongs to the frozen owner state; the function
+		// pointer alone cannot select the private role.
+		if function.Name() == "init" && function.Signature != nil &&
+			function.Signature.Recv() == nil {
+			if state, frozen := u.ownerStates[function][owner]; frozen &&
+				state.state == pkgHasPatch && !state.fromPatch &&
+				strings.HasSuffix(legacy, "$hasPatch") {
+				legacy = strings.TrimSuffix(legacy, "$hasPatch")
+			}
+		}
+		candidate, err := u.physicalName(owner.ssa, function, legacy)
+		if err != nil {
+			return "", err
+		}
+		if base == "" {
+			base = candidate
+			continue
+		}
+		if candidate != base {
+			return "", fmt.Errorf(
+				"function %q has owner-dependent physical symbols %q and %q",
+				function.Name(), base, candidate,
+			)
+		}
+	}
+	if base == "" {
+		return "", fmt.Errorf("function %q has no frozen managed physical symbol", function.Name())
+	}
+	return base, nil
+}
 
 func (p *context) emitCoroLibraryEffectSummary() error {
 	if p == nil || p.cacheRegistration || p.compilation == nil ||
@@ -76,22 +357,10 @@ func (p *context) emitCoroLibraryEffectSummary() error {
 		if !entry.planned || entry.name == "" {
 			return fmt.Errorf("coroutine library summary: function %q has no planned managed symbol", functionPlan.ID)
 		}
-		signature, err := universe.coroPhysicalEntrySourceSignature(function)
+		abiHash, err := universe.CoroLibraryEffects().FunctionABIHash(function, metadata)
 		if err != nil {
 			return fmt.Errorf("coroutine library summary: effective ABI for %q: %w", functionPlan.ID, err)
 		}
-		abiHash := emissionDigest(framedEmissionKey(
-			coroLibraryFunctionABIDigestDomain,
-			metadata.CoroABI,
-			metadata.SchedulerABI,
-			metadata.PanicABI,
-			metadata.FuncRepABI,
-			metadata.TargetTriple,
-			strconv.Itoa(metadata.PointerBits),
-			metadata.Endianness,
-			metadata.DataLayout,
-			structuralEmissionABITypeKey(signature),
-		))
 		rawPlainSymbol := ""
 		if functionPlan.RawPlainEntry {
 			if entry.baseName == "" {
@@ -99,7 +368,7 @@ func (p *context) emitCoroLibraryEffectSummary() error {
 			}
 			rawPlainSymbol = entry.baseName
 		}
-		functions = append(functions, coro.LibraryEffectFunction{
+		fact := coro.LibraryEffectFunction{
 			ID:             functionPlan.ID,
 			ABIHash:        abiHash,
 			Effect:         functionPlan.Effect,
@@ -108,7 +377,11 @@ func (p *context) emitCoroLibraryEffectSummary() error {
 			Primary:        functionPlan.Primary,
 			PrimarySymbol:  entry.name,
 			RawPlainSymbol: rawPlainSymbol,
-		})
+		}
+		if err := universe.CoroLibraryEffects().ValidateFunction(function, metadata, fact); err != nil {
+			return fmt.Errorf("coroutine library summary: preflight %q: %w", functionPlan.ID, err)
+		}
+		functions = append(functions, fact)
 		seen[functionPlan.ID] = struct{}{}
 	}
 	summary := coro.LibraryEffectSummary{
