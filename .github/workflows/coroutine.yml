@@ -27,6 +27,7 @@ jobs:
           - { llvm: 21, go: "1.26.5", tags: "llvm21", lane: "compat", check: "test (21, 1.26.5, llvm21)" }
           - { llvm: 22, go: "1.26.5", tags: "llvm22", lane: "compat", check: "test (22, 1.26.5, llvm22)" }
           - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "integration", check: "test integration (19, 1.26.5, llvm19)" }
+          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "integration-build", check: "test production build plan (19, 1.26.5, llvm19)" }
           - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "native-e2e", check: "test native linked E2E (19, 1.26.5, llvm19)" }
           - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "fleet-e2e", check: "test native fleet E2E (19, 1.26.5, llvm19)" }
           - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "stdlib-time", fixtures: "time timer sync", check: "test stdlib time, timer and sync (19, 1.26.5, llvm19)" }
@@ -251,12 +252,29 @@ jobs:
 
       - name: Test coroutine build integration
         if: matrix.lane == 'integration'
-        # Keep one short-lived Go process for the build-side contract. Linked
-        # E2Es create several LLVM Programs and therefore run in isolated lanes
-        # below: keeping all of them in this process retains LLVM allocations
-        # across tests and can exceed the runner memory/timeout without a
-        # functional failure.
-        run: go test ./internal/build -run 'Coro|Coroutine' -skip 'E2E|^TestCoroNativeTimeSleepProductionPlanAndCodegen$|^TestCoroStdlibSyncAcceptance$' -timeout=10m -count=1
+        # Keep the analyzer and source-contract tests in one short-lived
+        # process. Tests that invoke the complete build pipeline own a separate
+        # lane below because each retains a full runtime/stdlib LLVM universe.
+        run: go test ./internal/build -run 'Coro|Coroutine' -skip 'E2E|^TestCoroNativeTimeSleepProductionPlanAndCodegen$|^TestCoroStdlibSyncAcceptance$|^Test(BuildCoroPlanErrors|CoroEmissionCoverageStopsBeforeAnyPackageCodegen|CoroUnsupportedEntryResolutionReturnsErrorBeforeCodegen|CoroEmissionUniverseAcceptsModeTestVariants|RealNativeCoroTargetIsTrustedPlainSchedulerIsland)$' -timeout=10m -count=1
+
+      - name: Test coroutine production build plan
+        if: matrix.lane == 'integration-build'
+        # These tests intentionally run build.Do and therefore materialize a
+        # complete runtime/stdlib SSA and LLVM universe. Keep the coverage, but
+        # isolate both their job and process lifetimes from the smaller analyzer
+        # contract suite and from one another. LLVM allocations otherwise
+        # accumulate across full builds even after Go test cleanup.
+        run: |
+          tests=(
+            TestBuildCoroPlanErrors
+            TestCoroEmissionCoverageStopsBeforeAnyPackageCodegen
+            TestCoroUnsupportedEntryResolutionReturnsErrorBeforeCodegen
+            TestCoroEmissionUniverseAcceptsModeTestVariants
+            TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland
+          )
+          for test in "${tests[@]}"; do
+            go test ./internal/build -run "^${test}$" -timeout=10m -count=1
+          done
 
       - name: Test native linked coroutine islands
         if: matrix.lane == 'native-e2e'
