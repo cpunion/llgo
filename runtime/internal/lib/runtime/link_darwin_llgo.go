@@ -25,20 +25,18 @@ func runtimeDarwinSyscall3Int32(fn, a1, a2, a3 uintptr) (r1, r2, errno uintptr)
 
 // These address-only declarations are the exact producer-side identities for
 // the worker calls below. Their word-call ABI is intentionally independent of
-// the typed clite/os declarations: llgo.funcPCABI0 publishes the frozen
-// callable shadow from this declaration, and llgo.syscall32 consumes the same
-// 3-word/1-word ABI without recovering policy from the emitted address.
+// the typed clite/os declarations: llgo.funcPCABI0 publishes the frozen target
+// identity, and the exact llgo.syscall32 sinks derive their 3-word/1-word ABI
+// without recovering policy from the emitted address.
 // Darwin setenv(const char*, const char*, int) therefore has three worker
 // words, while unsetenv(const char*) has one; both return C int, which is why
 // these sites use the syscall32 result convention.
 // setenv and unsetenv copy/use their C strings before returning, so the frame
 // borrows only need to survive through worker completion.
 
-//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/3
 //go:linkname libc_setenv_trampoline C.setenv
 func libc_setenv_trampoline()
 
-//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/1
 //go:linkname libc_unsetenv_trampoline C.unsetenv
 func libc_unsetenv_trampoline()
 

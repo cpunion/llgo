@@ -181,6 +181,20 @@ func (u *EmissionUniverse) freezeCoroCallableContractCertificates() error {
 			annotatedCanonical[canonical] != nil || legacyCanonical[canonical] != coroForeignCallNone {
 			continue
 		}
+		addressOnly, err := u.coroWorkerAddressOnlyDeclaration(canonical)
+		if err != nil {
+			return fmt.Errorf(
+				"prepare emission universe: classify default callable contract target %q: %w",
+				canonical.Name(), err,
+			)
+		}
+		if addressOnly {
+			// Its typed zero-argument declaration is only a vehicle for
+			// FuncPCABI0. The exact llgo.syscall occurrence derives the real
+			// word-call ABI; freezing a typed default here would create a
+			// competing, fictitious calling convention.
+			continue
+		}
 		shape, ok := shapes[canonical]
 		if !ok || shape.kind != cFunc || shape.physicalSymbol == "" || shape.typedABISignature == "" {
 			continue

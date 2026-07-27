@@ -24,18 +24,14 @@ import _ "unsafe"
 // suffix. Keep these exact producer names out of the common catalog: amd64's
 // FuncPCABI0 operands and physical C symbols are different identities.
 
-//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/3
 //go:linkname libc_fstat_trampoline C.fstat
 func libc_fstat_trampoline()
 
-//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/3
 //go:linkname libc_lstat_trampoline C.lstat
 func libc_lstat_trampoline()
 
-//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/3
 //go:linkname libc_stat_trampoline C.stat
 func libc_stat_trampoline()
 
-//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/6
 //go:linkname libc_fstatat_trampoline C.fstatat
 func libc_fstatat_trampoline()

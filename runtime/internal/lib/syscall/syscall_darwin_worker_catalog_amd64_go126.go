@@ -25,18 +25,14 @@ import _ "unsafe"
 // arm64 spelling as common would create an unused patch-private capability and
 // leave the real amd64 FuncPCABI0 producer uncertified.
 
-//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/3
 //go:linkname libc_fstat64_trampoline C.fstat64
 func libc_fstat64_trampoline()
 
-//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/3
 //go:linkname libc_lstat64_trampoline C.lstat64
 func libc_lstat64_trampoline()
 
-//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/3
 //go:linkname libc_stat64_trampoline C.stat64
 func libc_stat64_trampoline()
 
-//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/6
 //go:linkname libc_fstatat64_trampoline C.fstatat64
 func libc_fstatat64_trampoline()

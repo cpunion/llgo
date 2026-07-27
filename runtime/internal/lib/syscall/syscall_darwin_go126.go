@@ -40,7 +40,6 @@ func llgoDarwinFuncPCABI0(fn any) uintptr
 // thread-affine semantics (fork, exec, pthread operations, and unknown code
 // words) intentionally have no corresponding declaration and remain closed.
 //
-//llgo:coro workeraddr 3
 //go:linkname libc_getrlimit_trampoline C.getrlimit
 func libc_getrlimit_trampoline()
 
@@ -48,14 +47,12 @@ func libc_getrlimit_trampoline()
 // the matching fixed-target capability; fork/exec and other thread-affine
 // trampolines remain deliberately absent.
 //
-//llgo:coro workeraddr 3
 //go:linkname libc_setrlimit_trampoline C.setrlimit
 func libc_setrlimit_trampoline()
 
 // syscall.adjustFileLimit queries kern.maxfilesperproc through the fixed
 // six-word sysctl ABI during package initialization.
 //
-//llgo:coro workeraddr 6
 //go:linkname libc_sysctl_trampoline C.sysctl
 func libc_sysctl_trampoline()
 
@@ -64,7 +61,6 @@ func libc_sysctl_trampoline()
 // the target explicit so the private syscall(fn, ...) carrier can be colored
 // only when every active incoming function word has a worker capability.
 //
-//llgo:coro workeraddr 3
 //go:linkname libc_open_trampoline C.llgo_open
 func libc_open_trampoline()
 
@@ -73,7 +69,6 @@ func libc_open_trampoline()
 // moving it to a worker also prevents a slow device close from blocking the
 // executor owner.
 //
-//llgo:coro workeraddr 3
 //go:linkname libc_close_trampoline C.close
 func libc_close_trampoline()
 
@@ -81,7 +76,6 @@ func libc_close_trampoline()
 // retained by the suspended managed caller's exact uintptr keepalive proof
 // until this fixed worker operation completes.
 //
-//llgo:coro workeraddr 3
 //go:linkname libc_read_trampoline C.read
 func libc_read_trampoline()
 
@@ -89,7 +83,6 @@ func libc_read_trampoline()
 // lseek uses the word-width failure convention but the same three-word worker
 // transport; capability remains attached to this exact physical target.
 //
-//llgo:coro workeraddr 3
 //go:linkname libc_lseek_trampoline C.lseek
 func libc_lseek_trampoline()
 
@@ -105,7 +98,6 @@ func libc_mmap_trampoline()
 // is process-wide rather than thread-affine and may be serialized by the host,
 // so it uses the same worker executor boundary as mmap.
 //
-//llgo:coro workeraddr 3
 //go:linkname libc_munmap_trampoline C.munmap
 func libc_munmap_trampoline()
 
@@ -114,7 +106,6 @@ func libc_munmap_trampoline()
 // an unrooted Go pointer interval; the standard wrapper reconstructs the
 // pointer only after the suspended caller resumes.
 //
-//llgo:coro workeraddr 3
 //go:linkname libc_fdopendir_trampoline C.fdopendir
 func libc_fdopendir_trampoline()
 
@@ -123,21 +114,18 @@ func libc_fdopendir_trampoline()
 // caller's exact keepalive roots under the current conservative/nonmoving (or
 // nogc) coroutine frame profile.
 //
-//llgo:coro workeraddr 3
 //go:linkname libc_writev_trampoline C.writev
 func libc_writev_trampoline()
 
 // fcntl is variadic in libc; the LLGo C shim fixes its third word and is also
 // used by runtime's poll descriptor setup through this single physical target.
 //
-//llgo:coro workeraddr 3
 //go:linkname libc_fcntl_trampoline C.llgo_fcntl
 func libc_fcntl_trampoline()
 
 // fsync may wait for durable storage and therefore belongs on the worker
 // boundary even though only its descriptor word is meaningful.
 //
-//llgo:coro workeraddr 3
 //go:linkname libc_fsync_trampoline C.fsync
 func libc_fsync_trampoline()
 
@@ -146,7 +134,6 @@ func libc_fsync_trampoline()
 // only discards its eventual completion; the fixed descriptor call itself can
 // run on the common worker without blocking the scheduler owner.
 //
-//llgo:coro workeraddr 3
 //go:linkname libc_fchdir_trampoline C.fchdir
 func libc_fchdir_trampoline()
 
@@ -155,18 +142,15 @@ func libc_fchdir_trampoline()
 // Both operations are process-wide, may block on storage, and retain their
 // buffer through the suspended caller's uintptr keepalive proof.
 //
-//llgo:coro workeraddr 6
 //go:linkname libc_pread_trampoline C.pread
 func libc_pread_trampoline()
 
-//llgo:coro workeraddr 6
 //go:linkname libc_pwrite_trampoline C.pwrite
 func libc_pwrite_trampoline()
 
 // openat is variadic in libc. LLGo's fixed C shim supplies the mode argument
 // with the exact word widths expected by the generated six-word wrapper.
 //
-//llgo:coro workeraddr 6
 //go:linkname libc_openat_trampoline C.llgo_openat
 func libc_openat_trampoline()
 
@@ -174,11 +158,9 @@ func libc_openat_trampoline()
 // and length pointers remain owned by the suspended caller, so both file-side
 // descriptor setup and the TCP poll path share the common worker completion.
 //
-//llgo:coro workeraddr 6
 //go:linkname libc_getsockopt_trampoline C.getsockopt
 func libc_getsockopt_trampoline()
 
-//llgo:coro workeraddr 6
 //go:linkname libc_setsockopt_trampoline C.setsockopt
 func libc_setsockopt_trampoline()
 
@@ -186,18 +168,15 @@ func libc_setsockopt_trampoline()
 // operation; the pathname and Timespec array remain live in the coroutine
 // frame while the worker owns the call.
 //
-//llgo:coro workeraddr 6
 //go:linkname libc_utimensat_trampoline C.utimensat
 func libc_utimensat_trampoline()
 
 // Datagram send/receive use the full six-word socket ABI. Buffer and sockaddr
 // storage remain rooted by the suspended caller for the entire worker lease.
 //
-//llgo:coro workeraddr 6
 //go:linkname libc_sendto_trampoline C.sendto
 func libc_sendto_trampoline()
 
-//llgo:coro workeraddr 6
 //go:linkname libc_recvfrom_trampoline C.recvfrom
 func libc_recvfrom_trampoline()
 
@@ -205,7 +184,6 @@ func libc_recvfrom_trampoline()
 // affinity. Cancellation is logical-only: the worker operation is retired
 // after its irreversible host completion, matching the scheduler contract.
 //
-//llgo:coro workeraddr 6
 //go:linkname libc_wait4_trampoline C.wait4
 func libc_wait4_trampoline()
 
@@ -227,7 +205,6 @@ func llgoSyscall6Word(fn, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2, err uintptr)
 //go:linkname llgoSyscall3Pointer llgo.syscallPtr
 func llgoSyscall3Pointer(fn, a1, a2, a3 uintptr) (r1, r2, err uintptr)
 
-//llgo:coro workerresult v1 fn=0 map=r1:r1
 func syscall(fn, a1, a2, a3 uintptr) (r1, r2 uintptr, err stdsyscall.Errno) {
 	r1, r2, errno := llgoSyscall3Int32(fn, a1, a2, a3)
 	return r1, r2, llgoErrno32(r1, errno)
@@ -243,7 +220,6 @@ func syscall6(fn, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2 uintptr, err stdsyscal
 	return r1, r2, llgoErrno32(r1, errno)
 }
 
-//llgo:coro workerresult v1 fn=0 map=r1:r1
 func syscall6X(fn, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2 uintptr, err stdsyscall.Errno) {
 	r1, r2, errno := llgoSyscall6Word(fn, a1, a2, a3, a4, a5, a6)
 	return r1, r2, llgoErrnoWord(r1, errno)

@@ -1628,15 +1628,31 @@ func (a *coroPhysicalPureSSAAudit) provesWorkerForeignPointerValue(
 	value ssa.Value,
 	visiting map[coroWorkerPointerResultVisit]bool,
 ) bool {
-	extract, ok := value.(*ssa.Extract)
-	if !ok || extract.Index < 0 || extract.Index >= 8 {
+	switch value := value.(type) {
+	case *ssa.Extract:
+		if value.Index < 0 || value.Index >= coroWorkerResultProjectionWidthV1 {
+			return false
+		}
+		call, ok := value.Tuple.(*ssa.Call)
+		if !ok || call == nil || call.Parent() != owner {
+			return false
+		}
+		return a.provesWorkerForeignPointerCallResult(owner, call, value.Index, visiting)
+	case *ssa.Call:
+		// SSA represents a single-result call as the call value itself rather
+		// than as Extract(call, 0). Treat both encodings identically so an
+		// exact private wrapper does not need source metadata merely because it
+		// forwards one result instead of a tuple.
+		common := value.Common()
+		if value.Parent() != owner || common == nil || common.Signature() == nil ||
+			common.Signature().Results() == nil ||
+			common.Signature().Results().Len() != 1 {
+			return false
+		}
+		return a.provesWorkerForeignPointerCallResult(owner, value, 0, visiting)
+	default:
 		return false
 	}
-	call, ok := extract.Tuple.(*ssa.Call)
-	if !ok || call == nil || call.Parent() != owner {
-		return false
-	}
-	return a.provesWorkerForeignPointerCallResult(owner, call, extract.Index, visiting)
 }
 
 func (a *coroPhysicalPureSSAAudit) provesWorkerForeignPointerCallResult(

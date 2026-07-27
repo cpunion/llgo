@@ -8,7 +8,6 @@ import (
 	cliteos "github.com/goplus/llgo/runtime/internal/clite/os"
 )
 
-//llgo:coro workeraddr 3
 //go:linkname libc_fstat_trampoline C.fstat
 func libc_fstat_trampoline()
 
