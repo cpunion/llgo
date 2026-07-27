@@ -37,7 +37,7 @@ func caller() { imported() }
 	if err != nil {
 		t.Fatal(err)
 	}
-	summary := testLibraryEffectSummary("example/library", false)
+	summary := testLibraryEffectSummary(t, "example/library", false)
 	summary.Functions = []LibraryEffectFunction{{
 		ID:            importedID,
 		ABIHash:       strings.Repeat("3", 64),
@@ -47,6 +47,8 @@ func caller() { imported() }
 		Primary:       PrimaryCoroutine,
 		PrimarySymbol: "example/library.imported$coro",
 	}}
+	summary.ForeignCallables = nil
+	summary.ExportBindings = nil
 	index, err := NewLibraryEffectIndex([]LibraryEffectSummary{summary}, testLibraryEffectMetadata())
 	if err != nil {
 		t.Fatal(err)

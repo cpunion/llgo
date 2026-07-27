@@ -40,6 +40,7 @@ type coroArchiveTestMember struct {
 
 func coroArchiveTestSummary(t *testing.T, pkg string) coro.LibraryEffectSummary {
 	t.Helper()
+	functionID := coro.FunctionID("llgo.function.v0:" + pkg)
 	return coro.LibraryEffectSummary{
 		Schema:  coro.LibraryEffectSummarySchema,
 		Package: pkg,
@@ -56,13 +57,20 @@ func coroArchiveTestSummary(t *testing.T, pkg string) coro.LibraryEffectSummary 
 			TargetCapabilities: coro.NewTargetCapabilities(true, true, false),
 		},
 		Functions: []coro.LibraryEffectFunction{{
-			ID:            coro.FunctionID("llgo.function.v0:" + pkg),
+			ID:            functionID,
 			ABIHash:       strings.Repeat("a", 64),
 			Effect:        coro.NoSuspend,
 			Exec:          coro.IRQUnsafe,
 			FuncRep:       coro.DirectPlain,
 			Primary:       coro.PrimaryPlain,
 			PrimarySymbol: pkg + ".F",
+		}},
+		ExportBindings: []coro.LibraryEffectExportBinding{{
+			Symbol:               pkg + "_F",
+			ABIHash:              strings.Repeat("b", 64),
+			Function:             functionID,
+			ManagedPrimary:       coro.PrimaryPlain,
+			ManagedPrimarySymbol: pkg + ".F",
 		}},
 	}
 }
@@ -142,7 +150,8 @@ func TestReadCoroLibraryEffectArchive(t *testing.T) {
 	}
 	if !found || len(summaries) != 1 ||
 		summaries[0].Package != "example/library" ||
-		len(summaries[0].Functions) != 1 {
+		len(summaries[0].Functions) != 1 ||
+		len(summaries[0].ExportBindings) != 1 {
 		t.Fatalf("archive summaries = %+v, found=%t", summaries, found)
 	}
 

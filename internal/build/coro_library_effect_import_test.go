@@ -93,6 +93,13 @@ func TestLoadCoroLibraryEffectIndexFromImportCfg(t *testing.T) {
 			Primary:       coro.PrimaryPlain,
 			PrimarySymbol: "example/library.F",
 		}},
+		ExportBindings: []coro.LibraryEffectExportBinding{{
+			Symbol:               "library_F",
+			ABIHash:              strings.Repeat("b", 64),
+			Function:             functionID,
+			ManagedPrimary:       coro.PrimaryPlain,
+			ManagedPrimarySymbol: "example/library.F",
+		}},
 	}
 	record, err := summary.MarshalRecord()
 	if err != nil {
@@ -121,6 +128,10 @@ func TestLoadCoroLibraryEffectIndexFromImportCfg(t *testing.T) {
 	fact, found := index.Lookup(functionID)
 	if !found || fact.PrimarySymbol != "example/library.F" {
 		t.Fatalf("imported fact = %+v, found=%t", fact, found)
+	}
+	export, found := index.LookupExport("library_F")
+	if !found || export.Function != functionID {
+		t.Fatalf("imported export = %+v, found=%t", export, found)
 	}
 
 	plain := filepath.Join(t.TempDir(), "export-data")

@@ -892,15 +892,18 @@ digest/Merkle汇总，避免把所有普通operand/type再次序列化进全局d
 
 不能用仅供诊断的 summary代替独立archive ABI，也不能让linker重新解释未知producer的function-value物理布局。
 
-当前已落地的`llgo.coro.library-effect-summary.v1`是上述producer summary的第一阶段实现。每个package
+当前已硬切到`llgo.coro.library-effect-summary.v2`。每个package
 object保留一份compiler-only section，package archive另外加入保留名`__.LLGOCORO`的最小native/Wasm
 sidecar；因此importer不需要解析Full/Thin LTO bitcode。`importcfg packagefile`导入路径会先精确校验
 target/runtime ABI、稳定FunctionID、结构函数ABI和物理符号，再把命中的bodyless managed-Go declaration
 作为Effect/Exec seed送回同一SSA fixed point，所有普通Go caller由分析自动染色，不要求源码注释。
 
-该summary只发布producer事实和实际存在的entry capability，不发布consumer Demand、root、call-site选择或
-`CoroPlanDigest`。缺失记录保持opaque；损坏、重复或ABI不匹配均fail closed。当前consumer只放行静态
-direct plain/direct coro入口；跨archive Dispatch descriptor和raw-plain crossing仍明确拒绝。真正的独立
+v2另外发布精确C declaration identity/typed ABI/可选contract，以及C export symbol到managed primary的
+声明绑定。它们不包含consumer选择，也不通过代码地址反查；export binding本身不授予ingress adapter或raw
+entry能力。该summary不发布consumer Demand、root、call-site选择或`CoroPlanDigest`。缺失记录保持opaque；
+损坏、重复或ABI不匹配均fail closed。当前consumer只把managed record用于自动染色并放行静态direct
+plain/direct coro入口；foreign record已建立精确索引但尚未选择调用recipe，export record也要等待统一
+ingress adapter gate。跨archive Dispatch descriptor和raw-plain crossing仍明确拒绝。真正的独立
 library模式还必须在producer侧把exported、address-taken、method及其他ABI-reachable函数设为publication
 roots，并为开放function-value边界发布递归FuncRep/layout capability，不能拿一次最终程序恰好产生的
 demand代替library ABI。

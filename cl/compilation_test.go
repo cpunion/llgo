@@ -24,11 +24,15 @@ import (
 	"debug/elf"
 	"debug/macho"
 	"debug/pe"
+	"go/importer"
+	"go/token"
+	"go/types"
 	"strings"
 	"testing"
 
 	"github.com/goplus/llgo/internal/coro"
 	"github.com/goplus/llgo/internal/goembed"
+	llssa "github.com/goplus/llgo/ssa"
 	"github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/ssa"
 )
@@ -166,12 +170,33 @@ func TestCoroSourcePackageEmbedsLibraryEffectSummary(t *testing.T) {
 	ssaPkg, _, files := buildGoSSAPkg(t, `
 package foo
 
-func F(value int) int { return value + 1 }
-`)
+import _ "unsafe"
+
+//go:linkname Foreign C.library_effect_foreign
+func Foreign(value int) int
+
+//export F
+func F(value int) int { return Foreign(value) + 1 }
+	`)
 	prog := newLLSSAProg(t)
 	defer prog.Dispose()
-	universe, err := prepareStacklessEmissionUniverse(
+	prog.SetRuntime(func() *types.Package {
+		runtimePackage, err := importer.For("source", nil).Import(llssa.PkgRuntime)
+		if err != nil {
+			t.Fatal("load runtime failed:", err)
+		}
+		if runtimePackage.Scope().Lookup("CoroWorkerParkV1") == nil {
+			name := types.NewTypeName(token.NoPos, runtimePackage, "CoroWorkerParkV1", nil)
+			types.NewNamed(name, types.NewArray(types.Typ[types.Uintptr], 32), nil)
+			if previous := runtimePackage.Scope().Insert(name); previous != nil {
+				t.Fatalf("install test runtime type: duplicate %v", previous)
+			}
+		}
+		return runtimePackage
+	})
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
 		prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files, Identity: "example.com/foo"}},
+		EmissionUniverseOptions{CoroTargetCapabilities: CoroNativeTargetCapabilities()},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -182,14 +207,42 @@ func F(value int) int { return value + 1 }
 	}
 	functionIDs := universe.FunctionIDConfig()
 	functionIDs.CoroABI = coro.PhysicalABIV1
-	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0
 	functionIDs.ArchiveReady = true
+	exported := ssaPkg.Func("F")
+	foreign := ssaPkg.Func("Foreign")
 	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{
-		{Function: ssaPkg.Func("F"), Demand: coro.SyncDemand},
+		{Function: exported, Demand: coro.AsyncDemand},
+		{Function: exported, Demand: coro.SyncDemand},
 	}, coro.SSAConfig{
 		EmissionUniverse:     ssaUniverse,
 		FunctionIDs:          functionIDs,
 		MaxPlainInstructions: -1,
+		ClassifyFunction: func(function *ssa.Function) (coro.SSAFunctionPolicy, error) {
+			if function == exported {
+				return coro.SSAFunctionPolicy{RawPlainEntry: true}, nil
+			}
+			if function != foreign {
+				return coro.SSAFunctionPolicy{}, nil
+			}
+			identity, ok, err := universe.CoroCallableIdentityCertificate(function)
+			if err != nil || !ok {
+				return coro.SSAFunctionPolicy{}, err
+			}
+			contract, ok, err := universe.CoroCallableContractCertificate(function)
+			if err != nil || !ok {
+				return coro.SSAFunctionPolicy{}, err
+			}
+			return coro.SSAFunctionPolicy{
+				Effect:                      coro.NoSuspend,
+				Exec:                        coro.BlockForeign | coro.IRQUnsafe,
+				CallableIdentityCertificate: identity,
+				CallableContractCertificate: contract,
+				IgnoreBody:                  true,
+				External:                    coro.ExternalUnknownForeign,
+				OverrideExternal:            true,
+			}, nil
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -205,7 +258,7 @@ func F(value int) int { return value + 1 }
 	}
 	metadata := coro.PlanDigestMetadata{
 		CoroABI:        coro.PhysicalABIV1,
-		SchedulerABI:   coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+		SchedulerABI:   coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
 		PanicABI:       coro.PanicExplicitStatusABIV0,
 		FuncRepABI:     coro.FuncRepABIV1,
 		TargetTriple:   prog.TargetSpec().Triple,
@@ -217,14 +270,15 @@ func F(value int) int { return value + 1 }
 		DataLayout:     prog.DataLayout(),
 	}
 	compilation := &Compilation{
-		CoroPlan:         plan,
-		CoroPlanDigest:   strings.Repeat("0", 64),
-		CoroPlanMetadata: metadata,
-		CoroABI:          metadata.CoroABI,
-		SchedulerABI:     metadata.SchedulerABI,
-		PanicABI:         metadata.PanicABI,
-		FuncRepABI:       metadata.FuncRepABI,
-		EmissionUniverse: universe,
+		CoroPlan:               plan,
+		CoroPlanDigest:         strings.Repeat("0", 64),
+		CoroPlanMetadata:       metadata,
+		CoroTargetCapabilities: CoroNativeTargetCapabilities(),
+		CoroABI:                metadata.CoroABI,
+		SchedulerABI:           metadata.SchedulerABI,
+		PanicABI:               metadata.PanicABI,
+		FuncRepABI:             metadata.FuncRepABI,
+		EmissionUniverse:       universe,
 	}
 	pkg, _, err := NewPackageExWithEmbedOptions(
 		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
@@ -240,8 +294,11 @@ func F(value int) int { return value + 1 }
 		!hasSummarySection || !strings.Contains(ir, "@llvm.compiler.used") {
 		t.Fatalf("source package omitted compiler-retained library effect summary:\n%s", ir)
 	}
-	if strings.Contains(ir, "@llvm.used") {
-		t.Fatalf("library effect summary unexpectedly requires final-link retention:\n%s", ir)
+	for _, line := range strings.Split(ir, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "@llvm.used =") &&
+			strings.Contains(line, coroLibrarySummarySymbolPrefix) {
+			t.Fatalf("library effect summary unexpectedly requires final-link retention:\n%s", ir)
+		}
 	}
 	producerRecords, err := CoroLibraryEffectSummaryRecords(pkg)
 	if err != nil {
@@ -250,6 +307,7 @@ func F(value int) int { return value + 1 }
 	if len(producerRecords) == 0 {
 		t.Fatal("source package did not expose byte-exact library effect records to the archiver")
 	}
+	runCoroABITestPipeline(t, prog, pkg.Module())
 	object, err := prog.TargetMachine().EmitToMemoryBuffer(pkg.Module(), llvm.ObjectFile)
 	if err != nil {
 		t.Fatalf("emit package object with library effect summary: %v\n%s", err, ir)
@@ -302,7 +360,12 @@ func F(value int) int { return value + 1 }
 		t.Fatalf("parse object library effect section: %v", err)
 	}
 	if len(summaries) != 1 || len(summaries[0].Functions) != 1 ||
-		summaries[0].Functions[0].PrimarySymbol != "foo.F" {
+		summaries[0].Functions[0].PrimarySymbol != "F$coro" ||
+		len(summaries[0].ForeignCallables) != 1 ||
+		summaries[0].ForeignCallables[0].Identity.PhysicalSymbol != "library_effect_foreign" ||
+		len(summaries[0].ExportBindings) != 1 ||
+		summaries[0].ExportBindings[0].Symbol != "F" ||
+		summaries[0].ExportBindings[0].Function != summaries[0].Functions[0].ID {
 		t.Fatalf("object library effect summaries = %+v", summaries)
 	}
 }

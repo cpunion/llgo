@@ -33,9 +33,9 @@ const (
 	// package objects and archives. It is deliberately independent from the
 	// whole-program Summary and PlanDigest schemas: consumer demand may change,
 	// while these producer effects and physically available entries may not.
-	LibraryEffectSummarySchema = "llgo.coro.library-effect-summary.v1"
+	LibraryEffectSummarySchema = "llgo.coro.library-effect-summary.v2"
 
-	LibraryEffectSummaryDigestDomain = "llgo.coro.library-effect-summary.digest.v1"
+	LibraryEffectSummaryDigestDomain = "llgo.coro.library-effect-summary.digest.v2"
 
 	// LibraryEffectSummarySection is the portable object-section identity.
 	// Mach-O emission uses the same leaf name in an explicit segment.
@@ -53,7 +53,7 @@ const (
 
 var libraryEffectSummaryRecordMagic = [16]byte{
 	'L', 'L', 'G', 'O', 'C', 'O', 'R', 'O',
-	'E', 'F', 'F', 'E', 'C', 'T', 0, 1,
+	'E', 'F', 'F', 'E', 'C', 'T', 0, 2,
 }
 
 const libraryEffectSummaryRecordHeaderSize = len(libraryEffectSummaryRecordMagic) + 4 + sha256.Size
@@ -98,15 +98,103 @@ type LibraryEffectFunction struct {
 	RawPlainSymbol string      `json:"raw_plain_symbol,omitempty"`
 }
 
+// LibraryEffectForeignCallable publishes one exact producer-side C
+// declaration. Identity owns its physical symbol and typed ABI. Contract is
+// optional because an address-publication-only declaration can have an exact
+// identity without authorizing an invocation policy.
+//
+// This record contains producer facts only. It does not select inline, same-M,
+// worker, event, or raw-host lowering for any consumer call site.
+type LibraryEffectForeignCallable struct {
+	Function    FunctionID                  `json:"function"`
+	Identity    CallableIdentityCertificate `json:"identity"`
+	Contract    CallableContractCertificate `json:"contract"`
+	HasContract bool                        `json:"has_contract"`
+}
+
+// Validate checks one pointer-free foreign producer fact.
+func (callable LibraryEffectForeignCallable) Validate() error {
+	return callable.validate()
+}
+
+func (callable LibraryEffectForeignCallable) validate() error {
+	if err := callable.Function.validate(); err != nil {
+		return err
+	}
+	if err := callable.Identity.Validate(); err != nil {
+		return fmt.Errorf("coro: library foreign callable %q identity: %w", callable.Function, err)
+	}
+	if !callable.HasContract {
+		if !callable.Contract.IsZero() {
+			return fmt.Errorf("coro: library foreign callable %q has contract data without presence", callable.Function)
+		}
+		return nil
+	}
+	if err := callable.Contract.Validate(); err != nil {
+		return fmt.Errorf("coro: library foreign callable %q contract: %w", callable.Function, err)
+	}
+	if callable.Contract.Scope != CallableContractScopeDeclaration {
+		return fmt.Errorf("coro: library foreign callable %q has non-declaration contract scope %q", callable.Function, callable.Contract.Scope)
+	}
+	if err := ValidateCallableContractIdentity(callable.Identity, callable.Contract); err != nil {
+		return fmt.Errorf("coro: library foreign callable %q: %w", callable.Function, err)
+	}
+	return nil
+}
+
+// LibraryEffectExportBinding freezes a source export before a physical code
+// address exists. ABIHash binds the effective raw C signature. Function and
+// ManagedPrimarySymbol name the exact managed producer target.
+//
+// The binding alone grants no raw-entry capability. Code generation must
+// separately prove and publish the versioned ingress adapter that owns Symbol.
+type LibraryEffectExportBinding struct {
+	Symbol               string      `json:"symbol"`
+	ABIHash              string      `json:"abi_hash"`
+	Function             FunctionID  `json:"function"`
+	ManagedPrimary       PrimaryKind `json:"managed_primary"`
+	ManagedPrimarySymbol string      `json:"managed_primary_symbol"`
+}
+
+// Validate checks one pointer-free export-to-managed binding.
+func (binding LibraryEffectExportBinding) Validate() error {
+	return binding.validate()
+}
+
+func (binding LibraryEffectExportBinding) validate() error {
+	if err := validateStableIdentityText("library export symbol", binding.Symbol); err != nil {
+		return err
+	}
+	if err := validateSHA256Hex("library export ABI hash", binding.ABIHash); err != nil {
+		return err
+	}
+	if err := binding.Function.validate(); err != nil {
+		return err
+	}
+	if err := binding.ManagedPrimary.validate(); err != nil {
+		return err
+	}
+	if binding.ManagedPrimary == PrimaryExternal {
+		return fmt.Errorf("coro: library export %q has no producer-owned managed primary", binding.Symbol)
+	}
+	if err := validateStableIdentityText("library export managed primary symbol", binding.ManagedPrimarySymbol); err != nil {
+		return err
+	}
+	return nil
+}
+
 // LibraryEffectSummary is one package producer summary. Functions contains
-// only definitions physically present in this artifact. A missing function is
-// therefore not a no-suspend fact: consumers must keep it opaque or reject the
-// crossing.
+// only managed definitions physically present in this artifact.
+// ForeignCallables and ExportBindings contain pointer-free producer facts, not
+// consumer invocation choices. A missing record never proves no-suspend,
+// executor safety, or a callable raw entry.
 type LibraryEffectSummary struct {
-	Schema    string                  `json:"schema"`
-	Package   string                  `json:"package"`
-	Metadata  LibraryEffectMetadata   `json:"metadata"`
-	Functions []LibraryEffectFunction `json:"functions"`
+	Schema           string                         `json:"schema"`
+	Package          string                         `json:"package"`
+	Metadata         LibraryEffectMetadata          `json:"metadata"`
+	Functions        []LibraryEffectFunction        `json:"functions"`
+	ForeignCallables []LibraryEffectForeignCallable `json:"foreign_callables"`
+	ExportBindings   []LibraryEffectExportBinding   `json:"export_bindings"`
 }
 
 func (metadata LibraryEffectMetadata) validate() error {
@@ -205,7 +293,7 @@ func (function LibraryEffectFunction) validate() error {
 	return nil
 }
 
-// Verify checks schema, target metadata, function facts, and unique identities.
+// Verify checks schema, target metadata, producer facts, and unique identities.
 func (summary LibraryEffectSummary) Verify() error {
 	if summary.Schema != LibraryEffectSummarySchema {
 		return fmt.Errorf("coro: library effect summary schema %q, want %q", summary.Schema, LibraryEffectSummarySchema)
@@ -216,15 +304,56 @@ func (summary LibraryEffectSummary) Verify() error {
 	if err := summary.Metadata.validate(); err != nil {
 		return err
 	}
-	seen := make(map[FunctionID]struct{}, len(summary.Functions))
+	managed := make(map[FunctionID]LibraryEffectFunction, len(summary.Functions))
 	for index, function := range summary.Functions {
 		if err := function.validate(); err != nil {
 			return fmt.Errorf("coro: library effect function %d: %w", index, err)
 		}
-		if _, duplicate := seen[function.ID]; duplicate {
+		if _, duplicate := managed[function.ID]; duplicate {
 			return fmt.Errorf("coro: duplicate library effect function ID %q", function.ID)
 		}
-		seen[function.ID] = struct{}{}
+		managed[function.ID] = function
+	}
+	foreignFunctions := make(map[FunctionID]struct{}, len(summary.ForeignCallables))
+	foreignIdentities := make(map[string]struct{}, len(summary.ForeignCallables))
+	for index, callable := range summary.ForeignCallables {
+		if err := callable.validate(); err != nil {
+			return fmt.Errorf("coro: library foreign callable %d: %w", index, err)
+		}
+		if _, duplicate := foreignFunctions[callable.Function]; duplicate {
+			return fmt.Errorf("coro: duplicate library foreign callable function %q", callable.Function)
+		}
+		foreignFunctions[callable.Function] = struct{}{}
+		if _, duplicate := foreignIdentities[callable.Identity.ID]; duplicate {
+			return fmt.Errorf("coro: duplicate library foreign callable identity %q", callable.Identity.ID)
+		}
+		foreignIdentities[callable.Identity.ID] = struct{}{}
+	}
+	exportSymbols := make(map[string]struct{}, len(summary.ExportBindings))
+	exportFunctions := make(map[FunctionID]struct{}, len(summary.ExportBindings))
+	for index, binding := range summary.ExportBindings {
+		if err := binding.validate(); err != nil {
+			return fmt.Errorf("coro: library export binding %d: %w", index, err)
+		}
+		function, ok := managed[binding.Function]
+		if !ok {
+			return fmt.Errorf("coro: library export %q references missing managed function %q", binding.Symbol, binding.Function)
+		}
+		if function.Primary != binding.ManagedPrimary ||
+			function.PrimarySymbol != binding.ManagedPrimarySymbol {
+			return fmt.Errorf(
+				"coro: library export %q managed primary disagrees with function %q",
+				binding.Symbol, binding.Function,
+			)
+		}
+		if _, duplicate := exportSymbols[binding.Symbol]; duplicate {
+			return fmt.Errorf("coro: duplicate library export symbol %q", binding.Symbol)
+		}
+		exportSymbols[binding.Symbol] = struct{}{}
+		if _, duplicate := exportFunctions[binding.Function]; duplicate {
+			return fmt.Errorf("coro: managed function %q has duplicate library exports", binding.Function)
+		}
+		exportFunctions[binding.Function] = struct{}{}
 	}
 	return nil
 }
@@ -235,11 +364,31 @@ func (summary LibraryEffectSummary) canonical() (LibraryEffectSummary, error) {
 	}
 	ret := summary
 	ret.Functions = append([]LibraryEffectFunction(nil), summary.Functions...)
+	ret.ForeignCallables = append([]LibraryEffectForeignCallable(nil), summary.ForeignCallables...)
+	ret.ExportBindings = append([]LibraryEffectExportBinding(nil), summary.ExportBindings...)
 	if ret.Functions == nil {
 		ret.Functions = make([]LibraryEffectFunction, 0)
 	}
+	if ret.ForeignCallables == nil {
+		ret.ForeignCallables = make([]LibraryEffectForeignCallable, 0)
+	}
+	if ret.ExportBindings == nil {
+		ret.ExportBindings = make([]LibraryEffectExportBinding, 0)
+	}
 	sort.Slice(ret.Functions, func(i, j int) bool {
 		return ret.Functions[i].ID < ret.Functions[j].ID
+	})
+	sort.Slice(ret.ForeignCallables, func(i, j int) bool {
+		if ret.ForeignCallables[i].Function != ret.ForeignCallables[j].Function {
+			return ret.ForeignCallables[i].Function < ret.ForeignCallables[j].Function
+		}
+		return ret.ForeignCallables[i].Identity.ID < ret.ForeignCallables[j].Identity.ID
+	})
+	sort.Slice(ret.ExportBindings, func(i, j int) bool {
+		if ret.ExportBindings[i].Symbol != ret.ExportBindings[j].Symbol {
+			return ret.ExportBindings[i].Symbol < ret.ExportBindings[j].Symbol
+		}
+		return ret.ExportBindings[i].Function < ret.ExportBindings[j].Function
 	})
 	return ret, nil
 }
@@ -335,7 +484,7 @@ func (summary LibraryEffectSummary) MarshalRecord() ([]byte, error) {
 
 // ParseLibraryEffectSummaryRecords parses an exact concatenation of framed
 // object-section records. Padding, truncation, digest mismatch, and duplicate
-// package/function facts are errors rather than conservative sync defaults.
+// package/producer facts are errors rather than conservative sync defaults.
 func ParseLibraryEffectSummaryRecords(data []byte) ([]LibraryEffectSummary, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("coro: library effect summary section is empty")
@@ -343,6 +492,9 @@ func ParseLibraryEffectSummaryRecords(data []byte) ([]LibraryEffectSummary, erro
 	summaries := make([]LibraryEffectSummary, 0, 1)
 	packages := make(map[string]struct{})
 	functions := make(map[FunctionID]string)
+	foreignFunctions := make(map[FunctionID]string)
+	foreignIdentities := make(map[string]string)
+	exportSymbols := make(map[string]string)
 	for offset := 0; offset < len(data); {
 		if len(data)-offset < libraryEffectSummaryRecordHeaderSize {
 			return nil, fmt.Errorf("coro: truncated library effect summary record at offset %d", offset)
@@ -387,6 +539,31 @@ func ParseLibraryEffectSummaryRecords(data []byte) ([]LibraryEffectSummary, erro
 			}
 			functions[function.ID] = summary.Package
 		}
+		for _, callable := range summary.ForeignCallables {
+			if previous, duplicate := foreignFunctions[callable.Function]; duplicate {
+				return nil, fmt.Errorf(
+					"coro: library foreign callable function %q appears in packages %q and %q",
+					callable.Function, previous, summary.Package,
+				)
+			}
+			foreignFunctions[callable.Function] = summary.Package
+			if previous, duplicate := foreignIdentities[callable.Identity.ID]; duplicate {
+				return nil, fmt.Errorf(
+					"coro: library foreign callable identity %q appears in packages %q and %q",
+					callable.Identity.ID, previous, summary.Package,
+				)
+			}
+			foreignIdentities[callable.Identity.ID] = summary.Package
+		}
+		for _, binding := range summary.ExportBindings {
+			if previous, duplicate := exportSymbols[binding.Symbol]; duplicate {
+				return nil, fmt.Errorf(
+					"coro: library export symbol %q appears in packages %q and %q",
+					binding.Symbol, previous, summary.Package,
+				)
+			}
+			exportSymbols[binding.Symbol] = summary.Package
+		}
 		summaries = append(summaries, summary)
 		offset = end
 	}
@@ -430,11 +607,19 @@ func (function LibraryEffectFunction) ImportedPolicy() (SSAFunctionPolicy, error
 // LibraryEffectIndex is an immutable lookup table constructed only after
 // metadata compatibility has been checked.
 type LibraryEffectIndex struct {
-	functions map[FunctionID]LibraryEffectFunction
+	functions         map[FunctionID]LibraryEffectFunction
+	foreignFunctions  map[FunctionID]LibraryEffectForeignCallable
+	foreignIdentities map[string]LibraryEffectForeignCallable
+	exportSymbols     map[string]LibraryEffectExportBinding
 }
 
 func NewLibraryEffectIndex(summaries []LibraryEffectSummary, consumer LibraryEffectMetadata) (*LibraryEffectIndex, error) {
-	index := &LibraryEffectIndex{functions: make(map[FunctionID]LibraryEffectFunction)}
+	index := &LibraryEffectIndex{
+		functions:         make(map[FunctionID]LibraryEffectFunction),
+		foreignFunctions:  make(map[FunctionID]LibraryEffectForeignCallable),
+		foreignIdentities: make(map[string]LibraryEffectForeignCallable),
+		exportSymbols:     make(map[string]LibraryEffectExportBinding),
+	}
 	for summaryIndex, summary := range summaries {
 		canonical, err := summary.canonical()
 		if err != nil {
@@ -449,6 +634,22 @@ func NewLibraryEffectIndex(summaries []LibraryEffectSummary, consumer LibraryEff
 			}
 			index.functions[function.ID] = function
 		}
+		for _, callable := range canonical.ForeignCallables {
+			if _, duplicate := index.foreignFunctions[callable.Function]; duplicate {
+				return nil, fmt.Errorf("coro: duplicate imported library foreign callable function %q", callable.Function)
+			}
+			if _, duplicate := index.foreignIdentities[callable.Identity.ID]; duplicate {
+				return nil, fmt.Errorf("coro: duplicate imported library foreign callable identity %q", callable.Identity.ID)
+			}
+			index.foreignFunctions[callable.Function] = callable
+			index.foreignIdentities[callable.Identity.ID] = callable
+		}
+		for _, binding := range canonical.ExportBindings {
+			if _, duplicate := index.exportSymbols[binding.Symbol]; duplicate {
+				return nil, fmt.Errorf("coro: duplicate imported library export symbol %q", binding.Symbol)
+			}
+			index.exportSymbols[binding.Symbol] = binding
+		}
 	}
 	return index, nil
 }
@@ -459,4 +660,35 @@ func (index *LibraryEffectIndex) Lookup(id FunctionID) (LibraryEffectFunction, b
 	}
 	function, ok := index.functions[id]
 	return function, ok
+}
+
+// LookupForeignFunction returns one exact imported C declaration by its stable
+// producer FunctionID.
+func (index *LibraryEffectIndex) LookupForeignFunction(id FunctionID) (LibraryEffectForeignCallable, bool) {
+	if index == nil {
+		return LibraryEffectForeignCallable{}, false
+	}
+	callable, ok := index.foreignFunctions[id]
+	return callable, ok
+}
+
+// LookupForeignIdentity returns one exact imported C declaration by its
+// pointer-free callable identity certificate ID.
+func (index *LibraryEffectIndex) LookupForeignIdentity(id string) (LibraryEffectForeignCallable, bool) {
+	if index == nil {
+		return LibraryEffectForeignCallable{}, false
+	}
+	callable, ok := index.foreignIdentities[id]
+	return callable, ok
+}
+
+// LookupExport returns the exact producer binding for one external C symbol.
+// The record does not itself authorize a raw entry; lowering must validate the
+// versioned ingress adapter separately.
+func (index *LibraryEffectIndex) LookupExport(symbol string) (LibraryEffectExportBinding, bool) {
+	if index == nil {
+		return LibraryEffectExportBinding{}, false
+	}
+	binding, ok := index.exportSymbols[symbol]
+	return binding, ok
 }
