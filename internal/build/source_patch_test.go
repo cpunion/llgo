@@ -245,6 +245,39 @@ func boolToUint8(bool) uint8
 	}
 }
 
+func TestBuildSourcePatchOverlayForGo124HashTrieMap(t *testing.T) {
+	goroot := t.TempDir()
+	syncDir := filepath.Join(goroot, "src", "internal", "sync")
+	hashTrieMap := filepath.Join(syncDir, "hashtriemap.go")
+	mustWriteFile(t, hashTrieMap, `package sync
+
+type HashTrieMap[K comparable, V any] struct{}
+
+func (ht *HashTrieMap[K, V]) CompareAndSwap(key K, old, new V) bool {
+	return false
+}
+`)
+
+	overlay, err := buildSourcePatchOverlayForGOROOT(nil, env.LLGoRuntimeDir(), goroot, sourcePatchBuildContext{
+		goos:      runtime.GOOS,
+		goarch:    runtime.GOARCH,
+		goversion: "go1.24.2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	patch := filepath.Join(syncDir, "z_llgo_patch_hashtriemap.go")
+	if src, ok := overlay[patch]; !ok {
+		t.Fatalf("missing source patch file %s", patch)
+	} else if !strings.Contains(string(src), "type HashTrieMap") {
+		t.Fatalf("source patch file %s does not contain HashTrieMap replacement", patch)
+	}
+	if stdSrc := string(overlay[hashTrieMap]); strings.Contains(stdSrc, "type HashTrieMap") {
+		t.Fatalf("stub overlay for internal/sync still contains HashTrieMap: %s", stdSrc)
+	}
+}
+
 func TestGo126PayloadsUseSourcePatchInsteadOfAltPkg(t *testing.T) {
 	for _, pkgPath := range []string{"internal/sync", "crypto/internal/constanttime"} {
 		if !llruntime.HasSourcePatchPkg(pkgPath) {
