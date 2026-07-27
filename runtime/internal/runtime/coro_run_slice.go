@@ -70,6 +70,11 @@ const (
 	coroRunDestroyCommitV1
 	coroRunAgainV1
 	coroRunExecutionWaitV1
+	// coroRunOSThreadSuspendV1 is a native full-thread target boundary after a
+	// locked Yield/Park has committed and the target-neutral P phase detached.
+	// The reducer has already released its managed-execution permit before the
+	// outer owner handles this stop.
+	coroRunOSThreadSuspendV1
 )
 
 type coroRunResultV1 struct {
@@ -172,6 +177,26 @@ func coroStepMatchesManagedExecutionV1(step coro.ExecutorRunStep, held bool) boo
 	return resume == held
 }
 
+// coroStopAfterStableReductionV1 is the common post-reducer target gate for
+// both the adopted program P and ordinary fleet Ps. It is called only after
+// the complete reduction and its managed-execution permit release. Keeping the
+// gate shared prevents either outer runner from crossing a detached locked
+// owner's exact return boundary.
+func coroStopAfterStableReductionV1(
+	driver *coro.ExecutorDriver,
+	result *coroRunResultV1,
+) (stop, ok bool) {
+	if driver == nil || result == nil {
+		return false, false
+	}
+	stop, ok = coroTargetStopForOSThreadReturnV1(driver)
+	if !ok || !stop {
+		return stop, ok
+	}
+	result.stop = coroRunAgainV1
+	return true, true
+}
+
 // coroReduceExecutorRunStepV1 is the single physical scheduler reducer shared
 // by the process program and every fleet domain. It consumes exactly one step;
 // terminal reports a stable slice boundary, while ok=false invalidates the
@@ -236,12 +261,21 @@ func coroReduceExecutorRunStepV1(
 		if !committed {
 			return false, false
 		}
+		// A locked ordinary suspension must decide whether to detach before
+		// ready distribution can move the peer which justifies a Yield handoff.
+		// Non-native targets compile this observation to a no-op.
+		osThreadSuspend, suspendOK := coroTargetPrepareOSThreadSuspendV1(
+			p, driver, step.G, next,
+		)
+		if !suspendOK {
+			return false, false
+		}
 		// A resume commit is the first stable scheduler-stack boundary after a
 		// managed `go` statement publishes its initial child. Native fleet targets
 		// may opportunistically hand that exact ready head to another P here; all
 		// other targets compile this call to a no-op. Failure after an actual
 		// publication is fatal because the mailbox has become the child's sole root.
-		if !coroTargetAfterStableRunActionV1(p, driver) {
+		if !osThreadSuspend && !coroTargetAfterStableRunActionV1(p, driver) {
 			return false, false
 		}
 		result.used++
@@ -250,6 +284,12 @@ func coroReduceExecutorRunStepV1(
 			result.resumes++
 		case coro.ActionCheckDestroy, coro.ActionPanicDestroy:
 			result.destroys++
+		}
+		if osThreadSuspend {
+			result.stop = coroRunOSThreadSuspendV1
+			result.g = step.G
+			result.action = next
+			return true, true
 		}
 		switch next.Kind {
 		case coro.ActionCheckResume, coro.ActionCheckDestroy, coro.ActionPanicDestroy:
@@ -327,6 +367,15 @@ func coroRunSliceAtV1(p *coro.P, driver *coro.ExecutorDriver, now int64, budget 
 			return coroRunResultV1{}
 		}
 		if terminal {
+			return result
+		}
+		stopForReturn, returnOK := coroStopAfterStableReductionV1(
+			driver, &result,
+		)
+		if !returnOK {
+			return coroRunResultV1{}
+		}
+		if stopForReturn {
 			return result
 		}
 	}

@@ -481,7 +481,8 @@ func (fleet *ExecutorFleet) RequestPNeutralRunnable(
 ) bool {
 	slot, _, ok := executorFleetSlotFor(fleet, handle)
 	if !ok || preemptLoad(&slot.state) != uint32(executorFleetSlotActive) ||
-		slot.p != owner || owner == nil || owner.osThreadLockOwner != nil ||
+		slot.p != owner || owner == nil ||
+		!osThreadRunnableDemandAllowed(owner) ||
 		!stableRunnableTransferP(owner) || !validReadyQueue(owner) ||
 		owner.readyHead != nil {
 		return false

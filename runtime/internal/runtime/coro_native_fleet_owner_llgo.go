@@ -333,6 +333,23 @@ func coroNativeFleetRunPhysicalOwnerPassV1(
 			return coroNativeFleetPhysicalOwnerFailV1("native fleet peer execution wait failed")
 		}
 		return true
+	case coroRunOSThreadSuspendV1:
+		domain, ok := coroNativeFleetDomainForHandleV1(
+			&coroNativeFleetV1State,
+			handle,
+			coroNativeFleetDomainActiveV1,
+		)
+		if !ok || !coroTargetHandleOSThreadSuspendV1(
+			domain.pOwnerV1(),
+			domain.driverOwnerV1(),
+			result.g,
+			result.action,
+		) {
+			return coroNativeFleetPhysicalOwnerFailV1(
+				"native fleet peer locked suspension handoff failed",
+			)
+		}
+		return true
 	case coroRunDestroyCommitV1:
 		completed, committed := coroNativeFleetCommitOwnerDestroyV1(
 			handle,

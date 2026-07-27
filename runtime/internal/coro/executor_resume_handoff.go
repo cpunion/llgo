@@ -106,6 +106,7 @@ func DetachExecutorResume(
 	p := driver.p
 	if p == nil || p.current != task || task.runP != p ||
 		p.osThreadLockOwner != task || task.osThreadLockDepth == 0 ||
+		p.osThreadSuspend != osThreadSuspendAttached ||
 		task.runAction != ActionInvalid || task.queued || task.nextReady != nil ||
 		task.waiting || task.spawnParent != nil || task.spawnP != nil ||
 		task.destroyTarget != nil || task.destroyRoot ||
@@ -188,6 +189,7 @@ func RestoreExecutorResume(handoff *ExecutorResumeHandoff) bool {
 	p.runDecisionTaken = true
 	p.servicePreemptBudget = handoff.budget
 	p.osThreadLockOwner = task
+	p.osThreadSuspend = osThreadSuspendAttached
 	driver.run.issued = ActionCheckResume
 	task.state = GRunning
 	handoff.driver = nil
