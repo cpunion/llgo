@@ -22,7 +22,7 @@ func TestWithModuleCaptureDWARFMode(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			conf := build.NewDefaultConf(build.ModeRun)
 			conf.LinkOptions.DWARF = test.mode
-			got, _ := withModuleCapture(conf, t.TempDir())
+			got, _, _ := withModuleCapture(conf, t.TempDir())
 			if got.LinkOptions.DWARF != test.want {
 				t.Fatalf("DWARF mode = %v, want %v", got.LinkOptions.DWARF, test.want)
 			}
