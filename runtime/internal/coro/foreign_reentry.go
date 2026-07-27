@@ -87,7 +87,7 @@ func completionSnapshot(record *CompletionRecord) (CompletionSnapshot, bool) {
 func validRunningForeignReentryRecord(record *ForeignReentryRecord, p *P, task *G) bool {
 	if record == nil || record.state != foreignReentryRunning ||
 		record.handoff == nil || record.handoff.state != executorResumeHandoffReentering ||
-		record.handoff.mode != ExecutorResumeHandoffManagedReentry ||
+		record.handoff.mode != ExecutorResumeHandoffSameMForeign ||
 		record.handoff.driver == nil || record.handoff.driver.p != p ||
 		record.handoff.task != task || record.p != p || record.task != task ||
 		record.parent == nil || record.child == nil ||
@@ -115,7 +115,7 @@ func BeginForeignReentry(
 ) bool {
 	if !emptyForeignReentryRecord(record) || handoff == nil ||
 		handoff.state != executorResumeHandoffDetached ||
-		handoff.mode != ExecutorResumeHandoffManagedReentry ||
+		handoff.mode != ExecutorResumeHandoffSameMForeign ||
 		handoff.driver == nil || handoff.task == nil || childHandle == nil {
 		return false
 	}
@@ -211,7 +211,7 @@ func validRunningForeignReentryRecordAfterDestroy(
 ) bool {
 	if record == nil || record.state != foreignReentryRunning ||
 		record.handoff == nil || record.handoff.state != executorResumeHandoffReentering ||
-		record.handoff.mode != ExecutorResumeHandoffManagedReentry ||
+		record.handoff.mode != ExecutorResumeHandoffSameMForeign ||
 		record.handoff.driver == nil || record.handoff.driver.p != p ||
 		record.handoff.task != task || record.p != p || record.task != task ||
 		record.parent == nil || record.parent != task.active ||
@@ -293,7 +293,7 @@ func ConsumeForeignReentryCompletion(
 ) (CompletionSnapshot, bool) {
 	if record == nil || record.state != foreignReentryCompleted ||
 		record.handoff == nil || record.handoff.state != executorResumeHandoffDetached ||
-		record.handoff.mode != ExecutorResumeHandoffManagedReentry ||
+		record.handoff.mode != ExecutorResumeHandoffSameMForeign ||
 		record.p == nil || record.task == nil || record.parent == nil ||
 		record.child == nil || !validCompletionSnapshot(record.completion) {
 		return CompletionSnapshot{}, false

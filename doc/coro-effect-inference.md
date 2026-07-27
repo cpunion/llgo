@@ -226,6 +226,98 @@ comments but not architecture debt.  Producer metadata may contain many exact
 callable records, but there should be only a few orthogonal semantic classes
 and no manually maintained Go propagation graph.
 
+### 4.2 Review decision: three semantic scopes
+
+The final model has three scopes.  They must not be represented by one
+declaration annotation which is then copied through the call graph.
+
+1. **Managed Go.**  Body analysis, suspension coloring, function
+   representation, entry demand, and per-call lowering are entirely inferred.
+   This includes ordinary wrappers around `syscall`, cgo, files, sockets, and
+   timers.
+2. **Foreign callable facts.**  The compiler derives identity, symbol, typed
+   ABI, argument/result layout, callback positions, and value provenance.
+   Behavior which cannot be proved from those facts comes from a generator,
+   an embedded library record, or a conservative target default.  It is never
+   repeated on Go callers.
+3. **Runtime adapter roots.**  A small number of executor-critical,
+   scheduler-wait, event-submit, event-complete, and cancellation adapters own
+   explicit bottom semantics.  The compiler verifies each adapter's closed
+   body/call closure and derives all uses below that root.  Individual C leaves
+   inside the verified closure do not each need a caller-coloring directive.
+
+This scope split permits one physical C declaration to have two safe uses.  A
+verified raw-host adapter may call it directly on the scheduler stack, while
+an ordinary managed call to the same declaration uses the conservative
+foreign episode.  The old global `sync` bit cannot express that distinction.
+
+For a general synchronous C call, the source-compatible default is:
+
+- it may block;
+- it runs on the physical caller M;
+- it may reenter through compiler-generated managed callback adapters;
+- pointer arguments are borrowed until return.
+
+On a native threaded target this selects the same-M foreign episode: detach
+the active LLVM resume, release its managed execution permit, let a replacement
+M continue the scheduler, strongly rejoin it, and restore the original resume.
+On WASM, RTOS, and baremetal targets without replacement-M support, a
+potentially blocking call must select a target event/host adapter or fail
+closed.  Silently executing it on the sole executor is not a portable default.
+
+`nocallback`, `noescape`, `any-thread`, executor-safe, no-return, retained
+memory, and signal/IRQ safety are refinements.  They may improve lowering or
+authorize a restricted adapter, but their absence keeps the conservative
+semantics above.  In particular, the absence of a function-typed parameter
+does not prove `nocallback`: C can call an exported Go adapter through global
+state.
+
+### 4.3 Same-M checkpoint and remaining callback work
+
+The native implementation now has one orthogonal same-M foreign episode for:
+
+- caller-thread declarations with no managed callback argument; and
+- declarations with exact compiler-generated managed callback adapters.
+
+Both cases reuse the existing detach/replacement/strong-join state machine.
+There is no second scheduler and no runtime function-address reverse lookup.
+An end-to-end gate verifies that a caller-thread C function stays on its
+original M while a replacement M continues managed work.
+
+This checkpoint is necessary but not yet sufficient to make every unannotated
+C declaration callback-capable.  The remaining compatibility work is:
+
+1. generate reentry-aware C ABI adapters for exported Go callbacks even when
+   the callback is not passed as an argument of the current call;
+2. bind each adapter to its exact managed target at compile time and publish
+   that binding in library metadata;
+3. reconcile panic, `Goexit`, cancellation, and teardown across the C stack
+   instead of using the current fail-closed non-return outcome;
+4. join contracts for closed dynamic C target sets and reject an open target
+   whose ABI cannot be proved;
+5. only then switch the unannotated typed-C default from the temporary
+   any-thread/no-reentry worker policy to the conservative target policy above.
+
+Changing the default before these gates would remove comments but regress cgo
+semantics.
+
+### 4.4 Legacy directive migration
+
+The remaining directives have different removal rules:
+
+| Legacy class | Migration |
+| --- | --- |
+| `sync` (60) | Ordinary declarations use the conservative same-M/event default.  Runtime-only direct calls move under a small verified raw-host or executor adapter root. |
+| `noblock` (66) | Opaque C needs a producer proof; LLGo-owned definitions may use a closed C/LLVM proof.  The fact is embedded/generated and never propagated through Go source. |
+| `schedulerwait` (19) | Replace per-leaf tags with typed scheduler-wait adapter operations and verify their raw-host closure. |
+| `contract` (9) | Keep only irreducible behavior/provenance facts; derive ABI, arity, callback positions, and wrapper flow. |
+
+The desired endpoint is not necessarily zero callable records.  It is zero
+manual Go coloring, zero compiler name allow-lists, and only a small number of
+source-visible adapter-root contracts.  A generated library may contain many
+exact callable records without spreading them through runtime or standard
+library source.
+
 ## 5. Migration gates
 
 The migration is complete only when executable tests enforce all of the
@@ -242,6 +334,12 @@ following:
    removed annotation class cannot grow back;
 7. library export/import preserves the same facts without publishing
    consumer-specific decisions.
+8. no unannotated typed C declaration defaults to any-thread/no-reentry after
+   the general callback-capable same-M route is enabled;
+9. raw-host authorization is attached to a verified adapter closure, not
+   copied onto every foreign leaf in that closure;
+10. every target either implements the selected blocking foreign episode or
+    rejects it before code generation.
 
 Moving annotations into a compiler name allow-list does not satisfy this gate.
 Platform semantics belong in generated binding metadata or exact adapter

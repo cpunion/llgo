@@ -163,7 +163,7 @@ const (
 	coroPhysicalOperationChannelSelectTry
 	coroPhysicalOperationWorkerSyscall
 	coroPhysicalOperationWorkerForeign
-	coroPhysicalOperationForeignReentry
+	coroPhysicalOperationSameMForeign
 	coroPhysicalOperationWorkerCgo
 	coroPhysicalOperationWorkerCgoErrno
 	coroPhysicalOperationHostCall
@@ -187,8 +187,8 @@ func (recipe coroPhysicalOperationRecipe) String() string {
 		return "worker-syscall"
 	case coroPhysicalOperationWorkerForeign:
 		return "worker-foreign"
-	case coroPhysicalOperationForeignReentry:
-		return "foreign-reentry"
+	case coroPhysicalOperationSameMForeign:
+		return "same-m-foreign"
 	case coroPhysicalOperationWorkerCgo:
 		return "worker-cgo"
 	case coroPhysicalOperationWorkerCgoErrno:
@@ -247,7 +247,7 @@ type coroPhysicalLoweringCapabilities struct {
 	explicitPanic    bool
 	channel          bool
 	worker           bool
-	foreignReentry   bool
+	sameMForeign     bool
 	hostOperation    bool
 	interfacePlain   *coroClosedInterfacePlainPlan
 	managedInterface *coroManagedInterfaceDispatchPlan
@@ -1076,12 +1076,12 @@ func planCoroPhysicalOperationInstruction(
 				return
 			}
 			result.operation = coroPhysicalOperationWorkerForeign
-		case coroForeignCallModeManagedReentry:
-			if !capabilities.foreignReentry {
-				result.operationFailure = "managed callback foreign call requires the native reentry capability"
+		case coroForeignCallModeSameM:
+			if !capabilities.sameMForeign {
+				result.operationFailure = "same-M foreign call requires the native foreign-episode capability"
 				return
 			}
-			result.operation = coroPhysicalOperationForeignReentry
+			result.operation = coroPhysicalOperationSameMForeign
 		default:
 			result.operationFailure = "managed foreign call selected an unknown execution mode"
 			return

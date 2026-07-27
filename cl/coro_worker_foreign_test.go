@@ -97,6 +97,19 @@ func Root(value int32) int32 {
 }
 `
 
+const coroSameMForeignTestSource = `package foreignworker
+
+import _ "unsafe"
+
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=caller-thread reentry=none memory=borrow-until-return
+//go:linkname foreign C.foreign_caller_thread_probe
+func foreign(int32) int32
+
+func Root(value int32) int32 {
+	return foreign(value)
+}
+`
+
 const coroManagedReentryPlainForeignTestSource = `package foreignworker
 
 import _ "unsafe"
@@ -458,7 +471,7 @@ func TestCoroManagedReentryForeignCallUsesStaticCoroutineAdapter(t *testing.T) {
 		fixture.plan, fixture.universe, fixture.call, fixture.prog.PointerSize(),
 	)
 	if !recognized || err != nil ||
-		shape.mode != coroForeignCallModeManagedReentry ||
+		shape.mode != coroForeignCallModeSameM ||
 		len(shape.reentryCallbacks) != 1 ||
 		shape.reentryCallbacks[0] == nil ||
 		len(shape.rawCallbacks) != 0 {
@@ -499,7 +512,7 @@ func TestCoroManagedReentryForeignCallUsesStaticCoroutineAdapter(t *testing.T) {
 		t.Fatalf("verify managed-reentry coroutine: %v\n%s", err, module.String())
 	}
 	root := requireCoroPhysicalFunction(t, module, "foreignworker.Root").String()
-	if !strings.Contains(root, "@"+coroReentrantForeignCallHookV1) ||
+	if !strings.Contains(root, "@"+coroSameMForeignCallHookV1) ||
 		strings.Contains(root, "@"+coroWorkerParkHookV1) ||
 		strings.Contains(root, "@foreign_managed_reentry_probe") {
 		t.Fatalf("Root did not select the managed-reentry boundary:\n%s", root)
@@ -544,6 +557,89 @@ func TestCoroManagedReentryForeignCallUsesStaticCoroutineAdapter(t *testing.T) {
 	runCoroABITestPipeline(t, fixture.prog, module)
 }
 
+func TestCoroCallerThreadForeignCallUsesSameMEpisode(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	fixture := prepareCoroWorkerForeignFixture(
+		t, coroSameMForeignTestSource, "Root",
+	)
+	defer fixture.prog.Dispose()
+
+	shape, recognized, err := validateCoroWorkerForeignCall(
+		fixture.plan, fixture.universe, fixture.call, fixture.prog.PointerSize(),
+	)
+	if !recognized || err != nil ||
+		shape.mode != coroForeignCallModeSameM ||
+		len(shape.reentryCallbacks) != 0 ||
+		len(shape.rawCallbacks) != 0 {
+		t.Fatalf(
+			"same-M shape = %+v, recognized=%t, error=%v",
+			shape, recognized, err,
+		)
+	}
+	rootPlan, planned := fixture.plan.FunctionPlan(fixture.root)
+	if !planned {
+		t.Fatal("same-M root has no frozen function plan")
+	}
+	workerOnlyErr := func() error {
+		capabilities := fixture.universe.coroCapabilities
+		defer func() {
+			fixture.universe.coroCapabilities = capabilities
+		}()
+		fixture.universe.coroCapabilities =
+			coro.NewTargetCapabilities(true, false, false)
+		return validateCoroPhysicalABIWithUniverseCapabilities(
+			fixture.root, rootPlan, fixture.plan, fixture.universe,
+			true, true, false, true,
+		)
+	}()
+	if workerOnlyErr == nil || !strings.Contains(
+		workerOnlyErr.Error(), "same-M foreign call requires the native foreign-episode capability",
+	) {
+		t.Fatalf("worker-only same-M validation error = %v", workerOnlyErr)
+	}
+
+	compilation := &Compilation{
+		CoroPlan: fixture.plan, EmissionUniverse: fixture.universe,
+		CoroABI:                coro.PhysicalABIV1,
+		SchedulerABI:           coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
+		PanicABI:               coro.PanicExplicitStatusABIV0,
+		FuncRepABI:             coro.FuncRepABIV1,
+		CoroTargetCapabilities: CoroNativeTargetCapabilities(),
+	}
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		fixture.prog, nil, nil, nil, fixture.ssaPkg, fixture.files,
+		goembed.VarMap{}, PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify same-M foreign coroutine: %v\n%s", err, module.String())
+	}
+	root := requireCoroPhysicalFunction(t, module, "foreignworker.Root").String()
+	if !strings.Contains(root, "@"+coroSameMForeignCallHookV1) ||
+		strings.Contains(root, "@"+coroWorkerParkHookV1) ||
+		strings.Contains(root, "@foreign_caller_thread_probe") {
+		t.Fatalf("Root did not select the same-M foreign episode:\n%s", root)
+	}
+	var thunk llvm.Value
+	for function := module.FirstFunction(); !function.IsNil(); function = llvm.NextFunction(function) {
+		if strings.HasPrefix(function.Name(), coroWorkerForeignThunkPrefixV1) {
+			if !thunk.IsNil() {
+				t.Fatalf("module has multiple same-M foreign thunks")
+			}
+			thunk = function
+		}
+	}
+	if thunk.IsNil() ||
+		!strings.Contains(thunk.String(), "@foreign_caller_thread_probe") {
+		t.Fatalf("same-M foreign thunk does not invoke the exact C declaration:\n%s", module.String())
+	}
+	runCoroABITestPipeline(t, fixture.prog, module)
+}
+
 func TestCoroManagedReentryPlainCallbackUsesThinCoroutineRamp(t *testing.T) {
 	llssa.Initialize(llssa.InitAll)
 	fixture := prepareCoroWorkerForeignFixture(
@@ -554,7 +650,7 @@ func TestCoroManagedReentryPlainCallbackUsesThinCoroutineRamp(t *testing.T) {
 		fixture.plan, fixture.universe, fixture.call, fixture.prog.PointerSize(),
 	)
 	if !recognized || err != nil ||
-		shape.mode != coroForeignCallModeManagedReentry ||
+		shape.mode != coroForeignCallModeSameM ||
 		len(shape.reentryCallbacks) != 1 {
 		t.Fatalf(
 			"plain managed-reentry shape = %+v, recognized=%t, error=%v",
@@ -897,10 +993,10 @@ func TestCoroWorkerGenericCallableContractRejectsUnsupportedDimensions(t *testin
 		{"async completion", "async-completion", "any-thread", "none", "by-value", "callable progress"},
 		{"no return", "no-return", "any-thread", "none", "by-value", "callable progress"},
 		{"unknown affinity", "may-block", "unknown", "none", "by-value", "callable affinity"},
-		{"caller affinity", "may-block", "caller-thread", "none", "by-value", "callable affinity"},
 		{"owner affinity", "may-block", "owner-thread", "none", "by-value", "callable affinity"},
 		{"host affinity", "may-block", "host-main", "none", "by-value", "callable affinity"},
 		{"unknown reentry", "may-block", "any-thread", "unknown", "by-value", "callable reentry"},
+		{"caller unknown reentry", "may-block", "caller-thread", "unknown", "by-value", "callable reentry"},
 		{"unknown memory", "may-block", "any-thread", "none", "unknown", "callable memory lifetime"},
 		{"retained memory", "may-block", "any-thread", "none", "retained", "callable memory lifetime"},
 	}
@@ -916,9 +1012,65 @@ func TestCoroWorkerGenericCallableContractRejectsUnsupportedDimensions(t *testin
 			}
 			_, err := (coroStaticForeignCallAuthority{
 				plan: fixture.plan, universe: fixture.universe,
-			}).mode(target)
+			}).authorize(target)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("generic callable worker authorization error = %v; want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestCoroStaticForeignCallAuthoritySelectsExecutionMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		affinity string
+		reentry  string
+		wantMode coroForeignCallMode
+		want     coro.ReentryClass
+	}{
+		{
+			name: "any thread no reentry", affinity: "any-thread",
+			reentry: "none", wantMode: coroForeignCallModeWorker,
+			want: coro.ReentryNone,
+		},
+		{
+			name: "any thread managed callback", affinity: "any-thread",
+			reentry: "managed-callback", wantMode: coroForeignCallModeSameM,
+			want: coro.ReentryManagedCallback,
+		},
+		{
+			name: "caller thread no reentry", affinity: "caller-thread",
+			reentry: "none", wantMode: coroForeignCallModeSameM,
+			want: coro.ReentryNone,
+		},
+		{
+			name: "caller thread managed callback", affinity: "caller-thread",
+			reentry: "managed-callback", wantMode: coroForeignCallModeSameM,
+			want: coro.ReentryManagedCallback,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := prepareCoroWorkerForeignFixture(t, coroWorkerCallableForeignSource(
+				"may-block", test.affinity, test.reentry, "borrow-until-return",
+			), "Root")
+			defer fixture.prog.Dispose()
+			target, frozen := fixture.universe.Resolve(fixture.call.Common().StaticCallee())
+			if !frozen || target == nil {
+				t.Fatal("generic callable target is absent from the frozen universe")
+			}
+			authorization, err := (coroStaticForeignCallAuthority{
+				plan: fixture.plan, universe: fixture.universe,
+			}).authorize(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if authorization.mode != test.wantMode ||
+				authorization.reentry != test.want {
+				t.Fatalf(
+					"foreign authorization = %+v; want mode=%d reentry=%s",
+					authorization, test.wantMode, test.want,
+				)
 			}
 		})
 	}
@@ -1058,7 +1210,7 @@ func TestCoroWorkerGenericCallableRejectsPlanUniverseCertificateMismatch(t *test
 	}
 	_, err = (coroStaticForeignCallAuthority{
 		plan: forgedPlan, universe: fixture.universe,
-	}).mode(target)
+	}).authorize(target)
 	if err == nil || !strings.Contains(err.Error(), "certificate differs") {
 		t.Fatalf("forged generic callable authorization error = %v; want complete certificate mismatch", err)
 	}

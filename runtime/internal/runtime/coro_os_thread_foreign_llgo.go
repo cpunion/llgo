@@ -29,9 +29,9 @@ import (
 
 // coroNativeForeignBoundaryV1 is native-stack storage for one synchronous
 // foreign call. It centralizes the only detach/replacement/strong-join
-// lifecycle used by both a LockOSThread call and a callback-capable managed
-// reentry call. Each nested call owns a distinct value; no P-local resume slot
-// or function-address registry is involved.
+// lifecycle used by both a LockOSThread call and a compiler-selected same-M
+// call, with or without managed reentry. Each nested call owns a distinct
+// value; no P-local resume slot or function-address registry is involved.
 type coroNativeForeignBoundaryV1 struct {
 	resume coro.ExecutorResumeHandoff
 
@@ -370,40 +370,41 @@ func __llgo_coro_foreign_reentry_failure_v1(
 	coroRuntimeAbort("synchronous foreign callback completed without returning")
 }
 
-// __llgo_coro_reentrant_foreign_call_v1 invokes one compiler-generated typed
+// __llgo_coro_same_m_foreign_call_v1 invokes one compiler-generated typed
 // thunk on the current native M. The thunk owns C ABI argument/result layout
 // in its typed frame-local record; runtime sees only its address and one opaque
 // record word. A clean replacement owns the released P whenever execution is
-// inside C between callbacks.
+// inside C. The same boundary serves caller-thread declarations with no
+// callback and declarations with exact compiler-generated callback adapters.
 //
-//export __llgo_coro_reentrant_foreign_call_v1
-func __llgo_coro_reentrant_foreign_call_v1(
+//export __llgo_coro_same_m_foreign_call_v1
+func __llgo_coro_same_m_foreign_call_v1(
 	g unsafe.Pointer,
 	thunk, record uintptr,
 ) {
 	task := (*coro.G)(g)
 	if thunk == 0 || record == 0 {
-		coroRuntimeAbort("invalid reentrant foreign call")
+		coroRuntimeAbort("invalid same-M foreign call")
 	}
 	var boundary coroNativeForeignBoundaryV1
-	if !boundary.beginV1(task, coro.ExecutorResumeHandoffManagedReentry) {
-		coroRuntimeAbort("reentrant foreign call cannot detach active resume")
+	if !boundary.beginV1(task, coro.ExecutorResumeHandoffSameMForeign) {
+		coroRuntimeAbort("same-M foreign call cannot detach active resume")
 	}
 	previous, installed := coroNativeForeignBoundarySetTLSV1(&boundary)
 	if !installed {
-		coroRuntimeAbort("reentrant foreign call cannot publish callback context")
+		coroRuntimeAbort("same-M foreign call cannot publish callback context")
 	}
 	args := [coroworker.MaxArgs]uintptr{record}
 	var result coroworker.Result
 	callOK := coroworker.Call(thunk, 1, &args, &result)
 	if !coroNativeForeignBoundaryRestoreTLSV1(&boundary, previous) {
-		coroRuntimeAbort("reentrant foreign call cannot restore callback context")
+		coroRuntimeAbort("same-M foreign call cannot restore callback context")
 	}
 	if !boundary.finishV1() {
-		coroRuntimeAbort("reentrant foreign call cannot restore active resume")
+		coroRuntimeAbort("same-M foreign call cannot restore active resume")
 	}
 	if !callOK {
-		coroRuntimeAbort("reentrant foreign call thunk failed")
+		coroRuntimeAbort("same-M foreign call thunk failed")
 	}
 }
 

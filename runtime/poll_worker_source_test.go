@@ -401,8 +401,8 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyGuardedSameMEntrance(t *testing.T) 
 		"coro.ConsumeForeignReentryCompletion(&record)",
 		"//export __llgo_coro_foreign_reentry_run_v1",
 		"//export __llgo_coro_foreign_reentry_failure_v1",
-		"//export __llgo_coro_reentrant_foreign_call_v1",
-		"boundary.beginV1(task, coro.ExecutorResumeHandoffManagedReentry)",
+		"//export __llgo_coro_same_m_foreign_call_v1",
+		"boundary.beginV1(task, coro.ExecutorResumeHandoffSameMForeign)",
 		"callOK := coroworker.Call(thunk, 1, &args, &result)",
 	} {
 		if !strings.Contains(entrance, required) {

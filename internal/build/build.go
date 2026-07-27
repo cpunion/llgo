@@ -4479,7 +4479,7 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 			coroForeignReentryAcquireSymbolV1,
 			coroForeignReentryRunSymbolV1,
 			coroForeignReentryFailureSymbolV1,
-			coroReentrantForeignCallSymbolV1,
+			coroSameMForeignCallSymbolV1,
 		)
 	}
 	if hostCoroPullRuntimeABI(ctx.buildConf) {
@@ -4750,7 +4750,7 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 				)
 			}
 		}
-		if name == coroReentrantForeignCallSymbolV1 {
+		if name == coroSameMForeignCallSymbolV1 {
 			sig := fn.Signature
 			if sig == nil || sig.Recv() != nil || sig.Variadic() ||
 				sig.Params().Len() != 3 || sig.Results().Len() != 0 ||
@@ -4760,7 +4760,7 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 				typeParamLen(sig.TypeParams()) != 0 ||
 				typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
 				return nil, nil, nil, nil, fmt.Errorf(
-					"coroutine reentrant foreign-call ABI %q must have exact func(unsafe.Pointer, uintptr, uintptr) signature",
+					"coroutine same-M foreign-call ABI %q must have exact func(unsafe.Pointer, uintptr, uintptr) signature",
 					name,
 				)
 			}
