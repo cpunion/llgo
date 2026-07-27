@@ -360,3 +360,286 @@ order:
 
 This order keeps later standard-library work on one scheduler/event/cancellation
 model instead of adding per-package coroutine policies.
+
+## 7. Full review: inferred effects, producer facts, and physical operations
+
+The current architecture does not need another manually maintained coloring
+layer.  Managed Go effects, callable identity, typed ABI, value provenance, and
+most physical call shapes are already available before emission.  The
+remaining design gap is narrower:
+
+- exported Go functions are still treated as raw plain roots instead of
+  compiler-generated C ABI ingress adapters;
+- the package archive publishes managed-Go effects but not exact foreign
+  callable facts or export-adapter bindings;
+- the temporary unannotated-C default assumes any-thread/no-reentry;
+- a few non-ordinary operations are still encoded as `sync` or
+  `schedulerwait` declarations.
+
+These gaps should be closed directly.  Replacing the existing directives with
+different caller annotations, a compiler symbol-name table, or a runtime
+address-to-function registry would retain the same architectural debt.
+
+### 7.1 One inferred Go body, adapters only at physical crossings
+
+Every bodyful Go function has one source implementation and one inferred
+primary representation:
+
+- a proven non-suspending function has a plain primary;
+- a suspending function has a coroutine primary;
+- a function value used dynamically in incompatible physical contexts may
+  additionally need a generated ramp or descriptor dispatch.
+
+A C export, retained callback trampoline, reflection bridge, or same-M thunk is
+an ABI adapter around that primary.  It is not a second source body.  A
+function must not acquire both plain and coroutine bodies merely because an
+external symbol names it.
+
+In particular, `//export` must stop creating `RawPlainDemand` for the Go body.
+The compiler instead freezes:
+
+```
+physical C symbol + physical C ABI
+    -> generated ingress adapter
+    -> exact managed FunctionID + managed primary
+```
+
+The binding is established before code addresses exist.  No adapter or runtime
+path may recover a Go target by looking up the incoming program counter.
+
+### 7.2 Complete fact ownership
+
+Facts have one owner and one permitted source:
+
+| Fact | Owner | Derivation |
+| --- | --- | --- |
+| Go suspension/executor effect | compiler | SSA seeds plus fixed point |
+| Go callable representation | compiler | all direct and dynamic use sites |
+| C symbol and typed ABI | frontend/binding generator | declaration and final target ABI |
+| callback parameter/result shape | compiler | typed call occurrence and provenance |
+| export symbol to Go target | compiler | `//export` declaration before lowering |
+| C progress, affinity, callback timing, retention | producer | generated metadata, embedded library fact, closed proof, or conservative default |
+| call-site physical operation | compiler | joined producer facts plus target capabilities |
+| scheduler/event/cancellation state | runtime adapter | typed internal operation, never a C symbol spelling |
+
+For bodyful Go, an imported library summary supplies the same producer effect
+that local SSA analysis would have supplied.  A function value carries its
+compile-time identity/effect descriptor through ordinary SSA provenance.
+Converting a function to `any`, an interface, `uintptr`, or a library boundary
+must not force runtime reverse discovery; the compiler either emits the
+descriptor/summary or treats the value as open and conservative.
+
+### 7.3 Conservative C default and operation selection
+
+An unannotated typed C declaration has the source-compatible default:
+
+- progress may block;
+- affinity is the physical caller M;
+- managed reentry during the call is possible, including through global C
+  state rather than a function-typed argument;
+- arguments are borrowed until the call returns.
+
+The absence of a callback parameter is not `nocallback`.  The absence of a
+visible store is not `noescape`.  Neither fact follows from a C signature.
+
+The compiler selects one physical operation from the frozen facts:
+
+| Operation | Required proof/capability | Meaning |
+| --- | --- | --- |
+| `Inline` | executor-safe | execute while retaining the managed executor |
+| `SameM` | native replacement-M capability | detach the task, run C on the caller M, let a replacement M progress the scheduler, then strongly rejoin |
+| `Worker` | any-thread, no reentry, compatible lifetime and ABI | run on the bounded shared foreign worker pool |
+| `EventHost` | exact async/event adapter | submit, suspend, cancel, and complete through the target event loop |
+| `RawHost` | verified runtime adapter root | execute below the managed scheduler; never selected for an ordinary source call |
+| `Control` | exact compiler/runtime intrinsic | returns-twice, nonlocal transfer, process transition, or terminal operation |
+
+On single-threaded WASM, RTOS, embedded, or baremetal targets, an unclassified
+may-block call cannot silently run inline.  It must use an `EventHost` adapter
+or fail before emission.  A threaded target may implement `SameM`; availability
+of a generic worker alone is insufficient because the default preserves
+caller-M affinity and callback reentry.
+
+`#cgo nocallback` and `#cgo noescape` refine this default.  LLGo's cgo pipeline
+does not currently preserve these directives and must add them as generated
+producer facts.  A future optional executor-safe/noblock contract may be useful
+for opaque external libraries, but it is the only performance refinement that
+cannot generally be recovered from types or Go SSA.  It applies to the exact C
+callable and never propagates as a Go source annotation.
+
+The current single `managed-callback` reentry value is not precise enough for
+lifetime validation.  Producer facts must distinguish no callback, callback
+only before the call returns, and callback retained for later invocation.
+`MemoryRetained` alone cannot identify which function argument is callable or
+when its environment may be released.  The binding generator supplies only
+this bottom timing/lifetime fact; callback positions, ABIs, adapters, and
+managed target identities remain compiler-derived.
+
+### 7.4 Library summary v2
+
+The existing `llgo.coro.library-effect-summary.v1` publishes managed functions
+only.  `CallableContractFacts` cannot be embedded unchanged because it also
+contains consumer call-site invocations.  The library format should make a hard
+cutover to a v2 producer schema with three collections:
+
+1. **Managed functions**: the existing FunctionID, ABI hash, inferred effect,
+   execution flags, representation, and physically emitted primary entries.
+2. **Foreign callables**: exact declaration identity, physical symbol, typed
+   ABI hash, target-neutral behavior contract, proof kind/digest, and any
+   trusted refinement.
+3. **Export adapters**: physical C symbol and ABI hash mapped to an exact
+   managed FunctionID, primary kind, and generated adapter ABI.
+
+The existing target triple, data layout, coroutine/scheduler/panic/function
+representation ABIs, and target capabilities remain part of the enclosing
+metadata.  The records contain no code pointer and no consumer-selected
+worker/same-M/event recipe.
+
+An importer validates schema, target profile, stable identity, typed ABI, and
+digest before admitting a fact.  Duplicate, missing, conflicting, or
+target-mismatched records are rejected.  A missing callable record retains the
+conservative C default; it never becomes executor-safe by omission.
+
+This format also lets a precompiled library preserve automatic coloring:
+consumer calls to managed functions import their inferred effect, while calls
+to exported or foreign symbols import exact producer behavior without source
+comments.
+
+### 7.5 Unified foreign ingress
+
+Every generated C-to-Go adapter probes one runtime ingress mechanism:
+
+1. If the physical M owns an active same-M foreign episode, attach the exact
+   callback child below that episode's suspended parent and reuse the existing
+   replacement-M handoff.
+2. If no episode exists but the thread is runtime-owned, create an ordinary
+   managed callback transaction on that M.
+3. If C calls from a foreign-created thread, acquire a bounded extra-M/foreign
+   ingress record, run the exact managed target with physical-thread affinity,
+   and release the record on return.
+4. A signal/IRQ adapter uses a restricted ingress profile whose entire managed
+   closure is proven non-suspending and safe for that environment.
+
+This handles callbacks passed as arguments, callbacks reached through C global
+state, retained callbacks invoked later, libffi closures, BDWGC finalizers, and
+shared-library exports through one target-binding scheme.  Callback positions
+and closure context are still derived from the typed adapter.  Retained
+callbacks additionally own an explicit lifetime token so unregister/destroy
+can release the function value and environment.
+
+The current reentry adapter accepts only ordinary return.  Completion handling
+must be expanded as follows:
+
+- return and recovered-return reconstruct C results;
+- an unrecovered panic during a nested Go-to-C-to-Go episode performs a
+  runtime-owned nonlocal exit to the outer same-M boundary, restores scheduler
+  state, and resumes managed panic propagation;
+- `Goexit` uses the same nonlocal exit for a callback belonging to an existing
+  managed G, but is fatal for a callback entering from a foreign-created
+  thread, matching the Go runtime constraint;
+- scheduler cancellation is not injected through an active synchronous C
+  stack.  It is recorded and observed after the episode returns.  Explicit Go
+  cancellation through channels or contexts remains ordinary callback code.
+
+The nonlocal exit is an implementation mechanism of the ingress adapter, not a
+contract on each C function.  Native targets may use a boundary-owned unwind
+record; targets without a safe nonlocal transfer reject escaping panic/Goexit
+at that crossing and preserve diagnostics rather than returning silently to C.
+
+### 7.6 The five bottom operation families
+
+All irreducible semantics fit five orthogonal operation families:
+
+1. **Normal foreign episode**: synchronous typed C call with inline, same-M, or
+   worker lowering selected from producer facts.
+2. **Event operation**: typed submit/register/wait/cancel/complete adapter used
+   by files, sockets, timers, WASI/JS hosts, RTOS queues, and baremetal IRQs.
+3. **Foreign ingress**: generated exact C ABI adapter for synchronous, retained,
+   shared-library, signal, and IRQ callbacks.
+4. **Scheduler/raw-host operation**: a verified executor-internal leaf such as
+   the physical scheduler wait, doorbell, queue, clock, or allocator boundary.
+5. **Control operation**: returns-twice/nonlocal transfer, fork/exec process
+   transition, and terminal no-return.
+
+Files, networks, and timers do not introduce new coloring systems.  Their Go
+wrappers are ordinary inferred functions over family 2.  A helper such as
+`ignoringEINTRIO(syscall.Read)` receives an exact typed operation descriptor
+from compilation; it does not receive an untyped address whose semantics must
+be rediscovered.
+
+Special cases found in the current `sync` inventory map cleanly:
+
+- `sigsetjmp`/`siglongjmp` are already compiler intrinsics.  Their four helper
+  declarations become family-5 raw control entries.  A generic same-M thunk is
+  invalid because it adds a frame below the saved context.
+- `fork`/`execve` use a process-control adapter.  `fork` quiesces the scheduler
+  fleet, repairs the child to one physical execution domain, and resumes the
+  parent fleet; it must not start a replacement M while the process image is
+  being forked.
+- BDWGC allocation/root operations execute through a verified GC/runtime
+  adapter.  Finalizer registration carries retained callback/data metadata.
+- `pthread_key_create` retains its destructor despite returning synchronously;
+  it needs retained-callback metadata rather than a global `sync` claim.
+- `ffi_call` is a normal dynamic foreign episode and may reenter through the
+  unified ingress.  closure preparation owns retained callback/context
+  metadata.
+
+### 7.7 Directive elimination budget
+
+The 154 production directives are a migration budget, not an intended API:
+
+| Current class | Target | Removal gate |
+| --- | ---: | --- |
+| `sync` 60 | 0 | conservative same-M/event default plus family-4/5 internal operations |
+| `schedulerwait` 19 | 0 | one typed scheduler/raw-host operation |
+| `noblock` 66 | 0 in handwritten Go | generated/embedded proof, closed LLGo-owned C proof, or conservative fallback |
+| `contract` 9 | 0 in handwritten Go | typed result/lifetime flow, export binding, generated producer facts, or adapter-root metadata |
+
+Eight current declarations name compiler-owned `//export` implementations and
+become inferable immediately from the export binding:
+
+- notify prepare/one/all;
+- semaphore prepare/release;
+- timer request;
+- poll deadline update and closing notification.
+
+The two foreign-pointer-result contracts (`mmap` and `gai_strerror`) move to
+typed generated result-lifetime metadata.  Executor-safe poll/doorbell/queue
+leaves move under verified adapter closures or LLGo-owned C proofs.  Unknown
+external C remains correct but slower through the conservative default and
+therefore needs no annotation merely to compile.
+
+Generated archives may still contain many exact callable records.  The
+architecture target is zero handwritten Go propagation metadata, not zero
+machine-produced facts.
+
+### 7.8 Hard migration gates
+
+The reduction is accepted only in complete, ordered cuts:
+
+1. add and round-trip the v2 producer schema, including foreign callable and
+   export-adapter records;
+2. generate exact export adapters and prove nested, global-state, retained, and
+   foreign-thread ingress without address lookup;
+3. reconcile return, recovered return, panic, `Goexit`, pending cancellation,
+   and teardown across the C stack;
+4. change open and unannotated typed-C calls to the conservative target policy;
+5. replace scheduler waits and control operations with typed internal
+   operations;
+6. remove each directive class and change its inventory gate directly to zero;
+7. reject any later source-visible increase.
+
+Executable coverage must include:
+
+- a C function which calls Go without receiving the callback as an argument;
+- a closed and an open dynamic C function pointer;
+- nested same-M callbacks which suspend on timer, channel, and I/O;
+- a callback retained and invoked later by a foreign-created thread;
+- panic/recover, unrecovered panic, `Goexit`, and pending cancellation;
+- imported library metadata success plus schema/ABI/target/digest mismatch;
+- native same-M/worker selection and single-thread event/fail-closed selection;
+- setjmp/longjmp, fork parent/child repair, GC roots/finalizers, and libffi
+  closure ingress.
+
+Until gates 1 through 3 pass, the temporary any-thread/no-reentry default must
+not be changed.  Until a directive class reaches zero with its replacement
+tests, its exact monotonic snapshot remains in force.
