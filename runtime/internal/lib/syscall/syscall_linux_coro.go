@@ -29,18 +29,16 @@ const (
 )
 
 // The Linux kernel ABI starts with a syscall number rather than a callable
-// function address. These fixed C leaves supply the typed word-call half of a
-// worker capability. The compiler grants the other half only when the trap is
-// an exact constant accepted by the target-owned Linux trap policy on every
-// active managed incoming edge. A dynamic/process-control path therefore
-// remains synchronous only in a proven raw/plain body and fails closed if it
-// reaches a managed coroutine.
+// function address. These fixed C leaves supply the exact callable identity;
+// the llgo.syscall sinks derive their word widths. The compiler grants the
+// remaining worker capability only when the trap is an exact constant accepted
+// by the target-owned Linux trap policy on every active managed incoming edge.
+// A dynamic/process-control path therefore remains synchronous only in a
+// proven raw/plain body and fails closed if it reaches a managed coroutine.
 //
-//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/4
 //go:linkname libc___llgo_linux_syscall3_v1_trampoline C.__llgo_linux_syscall3_v1
 func libc___llgo_linux_syscall3_v1_trampoline()
 
-//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/7
 //go:linkname libc___llgo_linux_syscall6_v1_trampoline C.__llgo_linux_syscall6_v1
 func libc___llgo_linux_syscall6_v1_trampoline()
 

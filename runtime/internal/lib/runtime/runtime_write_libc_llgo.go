@@ -25,7 +25,6 @@ import (
 	c "github.com/goplus/llgo/runtime/internal/clite"
 )
 
-//llgo:coro worker
 //go:linkname c_write C.write
 func c_write(fd c.Int, p unsafe.Pointer, n c.SizeT) c.SsizeT
 

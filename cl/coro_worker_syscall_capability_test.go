@@ -430,7 +430,6 @@ func Fork() uintptr {
 }
 `)
 	alternate := testProg.addPackage(t, alternatePath, `package syscall
-//llgo:coro workeraddr 3
 func libc_getrlimit_trampoline()
 `)
 	testProg.ssa.Build()
@@ -453,7 +452,7 @@ func libc_getrlimit_trampoline()
 	}
 	getrlimitPC := exactIntrinsicOpcodeCall(t, universe, original.ssa.Func("Getrlimit"), llgoFuncPCABI0)
 	if observed, err := universe.CoroStaticCodeAddressCallArgument(getrlimitPC, 0); err != nil || !observed {
-		t.Fatalf("patched workeraddr FuncPCABI0 operand = %t, %v; want exact code-address-only publication", observed, err)
+		t.Fatalf("inferred patch adapter FuncPCABI0 operand = %t, %v; want exact code-address-only publication", observed, err)
 	}
 	forkPC := exactIntrinsicOpcodeCall(t, universe, original.ssa.Func("Fork"), llgoFuncPCABI0)
 	if observed, err := universe.CoroStaticCodeAddressCallArgument(forkPC, 0); err != nil || !observed {
@@ -534,9 +533,7 @@ func Fork() uintptr {
 				"THREE_TARGET", test.threeTarget,
 				"SIX_TARGET", test.sixTarget,
 			).Replace(`package syscall
-//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/3
 func THREE_TARGET()
-//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/6
 func SIX_TARGET()
 `)
 			original := testProg.addPackage(t, originalPath, originalSource)
@@ -630,7 +627,6 @@ func Write(a0, a1, a2 uintptr) uintptr {
 }
 `)
 	alternate := testProg.addPackage(t, alternatePath, `package syscall
-//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/3
 func libc_write_trampoline()
 `)
 	typed := testProg.addPackage(t, runtimePath, `package runtimelib
@@ -671,10 +667,8 @@ func Write(fd int32, pointer uintptr, size uintptr) int {
 
 	addressTarget := alternate.ssa.Func("libc_write_trampoline")
 	addressContract, addressContractOK, err := universe.CoroCallableContractCertificate(addressTarget)
-	if err != nil || !addressContractOK || addressContract.ID == "" ||
-		addressContract.PhysicalSymbol != "write" || addressContract.CallableABI != "word-call.v1/3" ||
-		!addressContract.CallableABIExplicit {
-		t.Fatalf("address-only C.write contract = %+v, %t, %v", addressContract, addressContractOK, err)
+	if err != nil || addressContractOK || addressContract.ID != "" {
+		t.Fatalf("inferred address-only C.write explicit contract = %+v, %t, %v; want absent", addressContract, addressContractOK, err)
 	}
 	addressIdentity, addressIdentityOK, err := universe.CoroCallableIdentityCertificate(addressTarget)
 	if err != nil || !addressIdentityOK || addressIdentity.PhysicalSymbol != "write" {
@@ -694,7 +688,8 @@ func Write(fd int32, pointer uintptr, size uintptr) int {
 	}
 	shadow, shadowOK := analysis.Producer(producer)
 	if !shadowOK || shadow.Target != addressTarget || shadow.PhysicalSymbol != "write" ||
-		shadow.ABI.WordArgs != 3 || shadow.ContractCertificateID != addressContract.ID {
+		shadow.ABI.WordArgs != 3 || shadow.ContractCertificateID == "" ||
+		shadow.LegacyWorkerAddressCompat {
 		t.Fatalf("address-only C.write producer shadow = %+v, %t", shadow, shadowOK)
 	}
 	syscallCall := exactWorkerSyscallCall(t, universe, original.ssa.Func("Write"))
@@ -716,7 +711,6 @@ func Raw(a1 uintptr) uintptr
 func funcPCABI0(any) uintptr
 //llgo:link llgoSyscall1 llgo.syscall
 func llgoSyscall1(fn, a1 uintptr) (uintptr, uintptr, uintptr)
-//llgo:coro workeraddr 1
 func libc___llgo_private_v1_trampoline()
 func Raw(a1 uintptr) uintptr {
 	r1, _, _ := llgoSyscall1(funcPCABI0(libc___llgo_private_v1_trampoline), a1)
@@ -746,6 +740,94 @@ func Raw(a1 uintptr) uintptr {
 	certificate, certified, err := universe.CoroWorkerSyscallCertificate(call)
 	if err != nil || !certified || certificate.StaticTargetCount != 1 {
 		t.Fatalf("patch-private worker certificate = %+v, %t, %v", certificate, certified, err)
+	}
+}
+
+func TestCoroInferredPatchAddressABIRequiresOneExactSink(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	const originalPath = "example.com/emission/inferredaddress"
+	const alternatePath = originalPath + "_alt"
+	original := testProg.addPackage(t, originalPath, `package inferredaddress
+func Conflicting(a1, a2 uintptr)
+func NoSink() uintptr
+`)
+	alternate := testProg.addPackage(t, alternatePath, `package inferredaddress
+//llgo:link funcPCABI0 llgo.funcPCABI0
+func funcPCABI0(any) uintptr
+//llgo:link raw1 llgo.syscall
+func raw1(fn, a1 uintptr) (uintptr, uintptr, uintptr)
+//llgo:link raw2 llgo.syscall
+func raw2(fn, a1, a2 uintptr) (uintptr, uintptr, uintptr)
+func libc_inferred_v1_trampoline()
+func Conflicting(a1, a2 uintptr) {
+	fn := funcPCABI0(libc_inferred_v1_trampoline)
+	_, _, _ = raw1(fn, a1)
+	_, _, _ = raw2(fn, a1, a2)
+}
+func NoSink() uintptr {
+	return funcPCABI0(libc_inferred_v1_trampoline)
+}
+`)
+	testProg.ssa.Build()
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	prog.SetLinkname(alternatePath+".funcPCABI0", "llgo.funcPCABI0")
+	prog.SetLinkname(alternatePath+".raw1", "llgo.syscall")
+	prog.SetLinkname(alternatePath+".raw2", "llgo.syscall")
+	prog.SetLinkname(alternatePath+".libc_inferred_v1_trampoline", "C.inferred_v1")
+	universe, err := prepareStacklessEmissionUniverseWithOptions(
+		prog,
+		Patches{originalPath: {Alt: alternate.ssa, Types: typepatch.Clone(alternate.types)}},
+		[]EmissionPackage{{SSA: original.ssa, Files: []*ast.File{original.file}}},
+		EmissionUniverseOptions{CoroTargetCapabilities: CoroNativeTargetCapabilities()},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	analysis, err := AnalyzeCoroCallableShadows(universe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		function string
+		reason   string
+	}{
+		{function: "Conflicting", reason: "inferred-callable-has-conflicting-sink-abis"},
+		{function: "NoSink", reason: "inferred-callable-has-no-exact-sink"},
+	} {
+		producer := exactIntrinsicOpcodeCall(
+			t, universe, alternate.ssa.Func(test.function), llgoFuncPCABI0,
+		)
+		if shadow, ok := analysis.Producer(producer); ok {
+			t.Errorf("%s producer unexpectedly received bound shadow %+v", test.function, shadow)
+		}
+		if reason, ok := analysis.ProducerRejection(producer); !ok || reason != test.reason {
+			t.Errorf("%s producer rejection = %q, %t; want %q", test.function, reason, ok, test.reason)
+		}
+	}
+	sinks := 0
+	for _, block := range alternate.ssa.Func("Conflicting").Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(*ssa.Call)
+			if !ok || call.Common() == nil {
+				continue
+			}
+			opcode, intrinsic, err := universe.coroIntrinsicOpcode(call.Common().StaticCallee())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !intrinsic || !isLLGoSyscallIntrinsic(opcode) {
+				continue
+			}
+			sinks++
+			if certificate, certified, err := universe.CoroWorkerSyscallCertificate(call); err != nil ||
+				certified || certificate.ID != "" {
+				t.Errorf("conflicting inferred sink certificate = %+v, %t, %v; want absent", certificate, certified, err)
+			}
+		}
+	}
+	if sinks != 2 {
+		t.Fatalf("conflicting inferred fixture sink count = %d, want 2", sinks)
 	}
 }
 

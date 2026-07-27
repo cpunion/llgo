@@ -47,11 +47,12 @@ func TestLinuxSyscallWorkerAuthorityRequiresExactTrapPolicy(t *testing.T) {
 		"func RawSyscall(",
 		"func RawSyscall6(",
 		"if r1 == ^uintptr(0)",
-		"fixed C leaves supply the typed word-call half",
-		"exact constant accepted by the target-owned Linux trap policy",
+		"fixed C leaves supply the exact callable identity",
+		"llgo.syscall sinks derive their word widths",
+		"//go:linkname libc___llgo_linux_syscall3_v1_trampoline C.__llgo_linux_syscall3_v1",
+		"//go:linkname libc___llgo_linux_syscall6_v1_trampoline C.__llgo_linux_syscall6_v1",
+		"target-owned Linux trap policy on every active managed incoming edge",
 		"active managed incoming edge",
-		"abi=word-call.v1/4",
-		"abi=word-call.v1/7",
 		"Dynamic, fork, exec, exit, and other",
 		"process-control trap numbers have no worker certificate",
 	} {
@@ -61,6 +62,7 @@ func TestLinuxSyscallWorkerAuthorityRequiresExactTrapPolicy(t *testing.T) {
 	}
 	for _, forbidden := range []string{
 		"//llgo:coro workeraddr",
+		"abi=word-call.v1/",
 		"becomes a worker park",
 		"uses the same worker handoff",
 		"internal/runtime/syscall/linux",
@@ -116,8 +118,11 @@ func TestRuntimeWriteCarriesExactWorkerSafetyContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(libcSource), "//llgo:coro worker\n//go:linkname c_write C.write") {
-		t.Fatalf("%s does not bind c_write to the exact worker-safe declaration certificate", libcPath)
+	if !strings.Contains(string(libcSource), "//go:linkname c_write C.write") {
+		t.Fatalf("%s does not bind c_write to its exact typed C declaration", libcPath)
+	}
+	if strings.Contains(string(libcSource), "//llgo:coro worker") {
+		t.Fatalf("%s retains a redundant worker directive instead of the typed-C default", libcPath)
 	}
 
 	freestandingPath := "internal/lib/runtime/runtime_write_freestanding_webassembly_llgo.go"
@@ -158,29 +163,29 @@ func TestDarwinSyscallFailureConventionsAreExplicit(t *testing.T) {
 	for _, required := range []string{
 		`const LLGoPackage = true`,
 		"//go:linkname llgoDarwinFuncPCABI0 llgo.funcPCABI0",
-		"//llgo:coro workeraddr 3\n//go:linkname libc_getrlimit_trampoline C.getrlimit",
-		"//llgo:coro workeraddr 3\n//go:linkname libc_setrlimit_trampoline C.setrlimit",
-		"//llgo:coro workeraddr 6\n//go:linkname libc_sysctl_trampoline C.sysctl",
-		"//llgo:coro workeraddr 3\n//go:linkname libc_open_trampoline C.llgo_open",
-		"//llgo:coro workeraddr 3\n//go:linkname libc_close_trampoline C.close",
-		"//llgo:coro workeraddr 3\n//go:linkname libc_read_trampoline C.read",
-		"//llgo:coro workeraddr 3\n//go:linkname libc_lseek_trampoline C.lseek",
+		"//go:linkname libc_getrlimit_trampoline C.getrlimit",
+		"//go:linkname libc_setrlimit_trampoline C.setrlimit",
+		"//go:linkname libc_sysctl_trampoline C.sysctl",
+		"//go:linkname libc_open_trampoline C.llgo_open",
+		"//go:linkname libc_close_trampoline C.close",
+		"//go:linkname libc_read_trampoline C.read",
+		"//go:linkname libc_lseek_trampoline C.lseek",
 		"//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/6+foreign-pointer-result=r1\n//go:linkname libc_mmap_trampoline C.mmap",
-		"//llgo:coro workeraddr 3\n//go:linkname libc_munmap_trampoline C.munmap",
-		"//llgo:coro workeraddr 3\n//go:linkname libc_fdopendir_trampoline C.fdopendir",
-		"//llgo:coro workeraddr 3\n//go:linkname libc_writev_trampoline C.writev",
-		"//llgo:coro workeraddr 3\n//go:linkname libc_fcntl_trampoline C.llgo_fcntl",
-		"//llgo:coro workeraddr 3\n//go:linkname libc_fsync_trampoline C.fsync",
-		"//llgo:coro workeraddr 3\n//go:linkname libc_fchdir_trampoline C.fchdir",
-		"//llgo:coro workeraddr 6\n//go:linkname libc_pread_trampoline C.pread",
-		"//llgo:coro workeraddr 6\n//go:linkname libc_pwrite_trampoline C.pwrite",
-		"//llgo:coro workeraddr 6\n//go:linkname libc_openat_trampoline C.llgo_openat",
-		"//llgo:coro workeraddr 6\n//go:linkname libc_getsockopt_trampoline C.getsockopt",
-		"//llgo:coro workeraddr 6\n//go:linkname libc_setsockopt_trampoline C.setsockopt",
-		"//llgo:coro workeraddr 6\n//go:linkname libc_utimensat_trampoline C.utimensat",
-		"//llgo:coro workeraddr 6\n//go:linkname libc_sendto_trampoline C.sendto",
-		"//llgo:coro workeraddr 6\n//go:linkname libc_recvfrom_trampoline C.recvfrom",
-		"//llgo:coro workeraddr 6\n//go:linkname libc_wait4_trampoline C.wait4",
+		"//go:linkname libc_munmap_trampoline C.munmap",
+		"//go:linkname libc_fdopendir_trampoline C.fdopendir",
+		"//go:linkname libc_writev_trampoline C.writev",
+		"//go:linkname libc_fcntl_trampoline C.llgo_fcntl",
+		"//go:linkname libc_fsync_trampoline C.fsync",
+		"//go:linkname libc_fchdir_trampoline C.fchdir",
+		"//go:linkname libc_pread_trampoline C.pread",
+		"//go:linkname libc_pwrite_trampoline C.pwrite",
+		"//go:linkname libc_openat_trampoline C.llgo_openat",
+		"//go:linkname libc_getsockopt_trampoline C.getsockopt",
+		"//go:linkname libc_setsockopt_trampoline C.setsockopt",
+		"//go:linkname libc_utimensat_trampoline C.utimensat",
+		"//go:linkname libc_sendto_trampoline C.sendto",
+		"//go:linkname libc_recvfrom_trampoline C.recvfrom",
+		"//go:linkname libc_wait4_trampoline C.wait4",
 		"//go:linkname llgoSyscall3Int32 llgo.syscall32",
 		"//go:linkname llgoSyscall6Int32 llgo.syscall32",
 		"//go:linkname llgoSyscall9Int32 llgo.syscall32",
@@ -190,11 +195,17 @@ func TestDarwinSyscallFailureConventionsAreExplicit(t *testing.T) {
 		"llgoSyscall3Int32(fn, a1, a2, a3)",
 		"llgoSyscall3Word(fn, a1, a2, a3)",
 		"llgoSyscall3Pointer(fn, a1, a2, a3)",
-		"//llgo:coro workerresult v1 fn=0 map=r1:r1\nfunc syscall6X(",
+		"func syscall6X(",
 	} {
 		if !strings.Contains(string(source), required) {
 			t.Errorf("%s lacks explicit failure-convention marker %q", path, required)
 		}
+	}
+	if strings.Contains(string(source), "//llgo:coro workerresult") {
+		t.Errorf("%s retains a worker result directive instead of SSA-derived result flow", path)
+	}
+	if strings.Contains(string(source), "//llgo:coro workeraddr") {
+		t.Errorf("%s retains producer arity directives instead of sink-derived ABI", path)
 	}
 
 	publicPath := "internal/lib/syscall/syscall_darwin.go"
@@ -288,60 +299,57 @@ func TestDarwinGeneratedWorkerCatalogCoversFileAndTCPWithoutUnsafeTransitions(t 
 		t.Fatal(err)
 	}
 	source := string(sourceBytes)
-	const contractPrefix = "//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/"
 	commonTargets := []struct {
 		name     string
 		physical string
-		arity    string
 	}{
-		{"libc_accept_trampoline", "accept", "3"},
-		{"libc_bind_trampoline", "bind", "3"},
-		{"libc_chdir_trampoline", "chdir", "3"},
-		{"libc_chmod_trampoline", "chmod", "3"},
-		{"libc_chown_trampoline", "chown", "3"},
-		{"libc_closedir_trampoline", "closedir", "3"},
-		{"libc_connect_trampoline", "connect", "3"},
-		{"libc_dup_trampoline", "dup", "3"},
-		{"libc_fchmod_trampoline", "fchmod", "3"},
-		{"libc_fchown_trampoline", "fchown", "3"},
-		{"libc_ftruncate_trampoline", "ftruncate", "3"},
-		{"libc_getcwd_trampoline", "getcwd", "3"},
-		{"libc_getpid_trampoline", "getpid", "3"},
-		{"libc_getrusage_trampoline", "getrusage", "3"},
-		{"libc_getpeername_trampoline", "getpeername", "3"},
-		{"libc_getsockname_trampoline", "getsockname", "3"},
-		{"libc_kill_trampoline", "kill", "3"},
-		{"libc_lchown_trampoline", "lchown", "3"},
-		{"libc_link_trampoline", "link", "3"},
-		{"libc_listen_trampoline", "listen", "3"},
-		{"libc_mkdir_trampoline", "mkdir", "3"},
-		{"libc_mprotect_trampoline", "mprotect", "3"},
-		{"libc_pipe_trampoline", "pipe", "3"},
-		{"libc_readlink_trampoline", "readlink", "3"},
-		{"libc_recvmsg_trampoline", "recvmsg", "3"},
-		{"libc_rename_trampoline", "rename", "3"},
-		{"libc_rmdir_trampoline", "rmdir", "3"},
-		{"libc_sendmsg_trampoline", "sendmsg", "3"},
-		{"libc_shutdown_trampoline", "shutdown", "3"},
-		{"libc_socket_trampoline", "socket", "3"},
-		{"libc_symlink_trampoline", "symlink", "3"},
-		{"libc_truncate_trampoline", "truncate", "3"},
-		{"libc_unlink_trampoline", "unlink", "3"},
-		{"libc_unlinkat_trampoline", "unlinkat", "3"},
-		{"libc_write_trampoline", "write", "3"},
-		{"libc_sendfile_trampoline", "sendfile", "6"},
-		{"libc_socketpair_trampoline", "socketpair", "6"},
+		{"libc_accept_trampoline", "accept"},
+		{"libc_bind_trampoline", "bind"},
+		{"libc_chdir_trampoline", "chdir"},
+		{"libc_chmod_trampoline", "chmod"},
+		{"libc_chown_trampoline", "chown"},
+		{"libc_closedir_trampoline", "closedir"},
+		{"libc_connect_trampoline", "connect"},
+		{"libc_dup_trampoline", "dup"},
+		{"libc_fchmod_trampoline", "fchmod"},
+		{"libc_fchown_trampoline", "fchown"},
+		{"libc_ftruncate_trampoline", "ftruncate"},
+		{"libc_getcwd_trampoline", "getcwd"},
+		{"libc_getpid_trampoline", "getpid"},
+		{"libc_getrusage_trampoline", "getrusage"},
+		{"libc_getpeername_trampoline", "getpeername"},
+		{"libc_getsockname_trampoline", "getsockname"},
+		{"libc_kill_trampoline", "kill"},
+		{"libc_lchown_trampoline", "lchown"},
+		{"libc_link_trampoline", "link"},
+		{"libc_listen_trampoline", "listen"},
+		{"libc_mkdir_trampoline", "mkdir"},
+		{"libc_mprotect_trampoline", "mprotect"},
+		{"libc_pipe_trampoline", "pipe"},
+		{"libc_readlink_trampoline", "readlink"},
+		{"libc_recvmsg_trampoline", "recvmsg"},
+		{"libc_rename_trampoline", "rename"},
+		{"libc_rmdir_trampoline", "rmdir"},
+		{"libc_sendmsg_trampoline", "sendmsg"},
+		{"libc_shutdown_trampoline", "shutdown"},
+		{"libc_socket_trampoline", "socket"},
+		{"libc_symlink_trampoline", "symlink"},
+		{"libc_truncate_trampoline", "truncate"},
+		{"libc_unlink_trampoline", "unlink"},
+		{"libc_unlinkat_trampoline", "unlinkat"},
+		{"libc_write_trampoline", "write"},
+		{"libc_sendfile_trampoline", "sendfile"},
+		{"libc_socketpair_trampoline", "socketpair"},
 	}
 	for _, target := range commonTargets {
-		marker := contractPrefix + target.arity +
-			"\n//go:linkname " + target.name + " C." + target.physical +
+		marker := "//go:linkname " + target.name + " C." + target.physical +
 			"\nfunc " + target.name + "()"
 		if !strings.Contains(source, marker) {
 			t.Errorf("%s lacks exact producer catalog entry %q", path, marker)
 		}
 	}
-	if got := strings.Count(source, contractPrefix); got != len(commonTargets) {
-		t.Errorf("%s contract entry count = %d, want exact common P0 manifest size %d", path, got, len(commonTargets))
+	if got := strings.Count(source, "//go:linkname "); got != len(commonTargets) {
+		t.Errorf("%s linkname entry count = %d, want exact common P0 manifest size %d", path, got, len(commonTargets))
 	}
 
 	archCatalogs := []struct {
@@ -350,7 +358,6 @@ func TestDarwinGeneratedWorkerCatalogCoversFileAndTCPWithoutUnsafeTransitions(t 
 		targets []struct {
 			name     string
 			physical string
-			arity    string
 		}
 	}{
 		{
@@ -359,12 +366,11 @@ func TestDarwinGeneratedWorkerCatalogCoversFileAndTCPWithoutUnsafeTransitions(t 
 			targets: []struct {
 				name     string
 				physical string
-				arity    string
 			}{
-				{"libc_fstat_trampoline", "fstat", "3"},
-				{"libc_lstat_trampoline", "lstat", "3"},
-				{"libc_stat_trampoline", "stat", "3"},
-				{"libc_fstatat_trampoline", "fstatat", "6"},
+				{"libc_fstat_trampoline", "fstat"},
+				{"libc_lstat_trampoline", "lstat"},
+				{"libc_stat_trampoline", "stat"},
+				{"libc_fstatat_trampoline", "fstatat"},
 			},
 		},
 		{
@@ -373,12 +379,11 @@ func TestDarwinGeneratedWorkerCatalogCoversFileAndTCPWithoutUnsafeTransitions(t 
 			targets: []struct {
 				name     string
 				physical string
-				arity    string
 			}{
-				{"libc_fstat64_trampoline", "fstat64", "3"},
-				{"libc_lstat64_trampoline", "lstat64", "3"},
-				{"libc_stat64_trampoline", "stat64", "3"},
-				{"libc_fstatat64_trampoline", "fstatat64", "6"},
+				{"libc_fstat64_trampoline", "fstat64"},
+				{"libc_lstat64_trampoline", "lstat64"},
+				{"libc_stat64_trampoline", "stat64"},
+				{"libc_fstatat64_trampoline", "fstatat64"},
 			},
 		},
 	}
@@ -392,19 +397,22 @@ func TestDarwinGeneratedWorkerCatalogCoversFileAndTCPWithoutUnsafeTransitions(t 
 			t.Errorf("%s lacks exact architecture build constraint", catalog.path)
 		}
 		for _, target := range catalog.targets {
-			marker := contractPrefix + target.arity +
-				"\n//go:linkname " + target.name + " C." + target.physical +
+			marker := "//go:linkname " + target.name + " C." + target.physical +
 				"\nfunc " + target.name + "()"
 			if !strings.Contains(archSource, marker) {
 				t.Errorf("%s lacks exact architecture producer entry %q", catalog.path, marker)
 			}
 		}
-		if got := strings.Count(archSource, contractPrefix); got != len(catalog.targets) {
-			t.Errorf("%s contract entry count = %d, want %d", catalog.path, got, len(catalog.targets))
+		if got := strings.Count(archSource, "//go:linkname "); got != len(catalog.targets) {
+			t.Errorf("%s linkname entry count = %d, want %d", catalog.path, got, len(catalog.targets))
+		}
+		if strings.Contains(archSource, "//llgo:coro") {
+			t.Errorf("%s retains derivable coroutine directives", catalog.path)
 		}
 	}
 	for _, forbidden := range []string{
 		"//llgo:coro workeraddr",
+		"//llgo:coro contract",
 		"func libc_fstat_trampoline()",
 		"func libc_lstat_trampoline()",
 		"func libc_stat_trampoline()",
@@ -424,11 +432,12 @@ func TestDarwinGeneratedWorkerCatalogCoversFileAndTCPWithoutUnsafeTransitions(t 
 		}
 	}
 	for _, required := range []string{
-		"recover a target or policy from uintptr",
+		"never recovers a target or policy from uintptr",
 		"There are intentionally no entries for fork, execve, exit",
 		"ioctl, kevent, and ptrace",
 		"complete Darwin syscall catalog",
-		"requires an exact physical symbol and one explicit arity",
+		"requires an exact physical symbol",
+		"Every active sink must derive the same",
 	} {
 		if !strings.Contains(source, required) {
 			t.Errorf("%s lacks catalog invariant %q", path, required)
@@ -452,18 +461,21 @@ func TestDarwinInternalSyscallAtWorkerTargetsAreExact(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, required := range []string{
-		"//llgo:coro workeraddr 6\n//go:linkname libc_readlinkat_trampoline C.readlinkat",
-		"//llgo:coro workeraddr 3\n//go:linkname libc_mkdirat_trampoline C.mkdirat",
-		"//llgo:coro workeraddr 6\n//go:linkname libc_fchmodat_trampoline C.fchmodat",
-		"//llgo:coro workeraddr 6\n//go:linkname libc_fchownat_trampoline C.fchownat",
-		"//llgo:coro workeraddr 6\n//go:linkname libc_renameat_trampoline C.renameat",
-		"//llgo:coro workeraddr 6\n//go:linkname libc_linkat_trampoline C.linkat",
-		"//llgo:coro workeraddr 6\n//go:linkname libc_symlinkat_trampoline C.symlinkat",
-		"//llgo:coro workeraddr 6\n//go:linkname libc_faccessat_trampoline C.faccessat",
+		"//go:linkname libc_readlinkat_trampoline C.readlinkat",
+		"//go:linkname libc_mkdirat_trampoline C.mkdirat",
+		"//go:linkname libc_fchmodat_trampoline C.fchmodat",
+		"//go:linkname libc_fchownat_trampoline C.fchownat",
+		"//go:linkname libc_renameat_trampoline C.renameat",
+		"//go:linkname libc_linkat_trampoline C.linkat",
+		"//go:linkname libc_symlinkat_trampoline C.symlinkat",
+		"//go:linkname libc_faccessat_trampoline C.faccessat",
 	} {
 		if !strings.Contains(string(source), required) {
 			t.Errorf("%s lacks fixed at-family worker target %q", path, required)
 		}
+	}
+	if strings.Contains(string(source), "//llgo:coro") {
+		t.Errorf("%s retains derivable address-carrier directives", path)
 	}
 }
 
@@ -492,20 +504,20 @@ func TestDarwinInternalSyscallNetResolverWorkerTargetsAreExact(t *testing.T) {
 		{name: "libresolv_res_9_nsearch_trampoline", physical: "libresolv_res_9_nsearch", arity: 6},
 	}
 	for _, target := range targets {
-		directive := "//llgo:coro workeraddr " + fmt.Sprint(target.arity)
+		directive := ""
 		if target.foreignPointerResult {
 			directive = "//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/" +
-				fmt.Sprint(target.arity) + "+foreign-pointer-result=r1"
+				fmt.Sprint(target.arity) + "+foreign-pointer-result=r1\n"
 		}
 		marker := directive +
-			"\n//go:linkname " + target.name + " C." + target.physical +
+			"//go:linkname " + target.name + " C." + target.physical +
 			"\nfunc " + target.name + "()"
 		if !strings.Contains(source, marker) {
 			t.Errorf("%s lacks exact resolver worker target %q", path, marker)
 		}
 	}
-	if got, want := strings.Count(source, "//llgo:coro workeraddr "), len(targets)-1; got != want {
-		t.Errorf("%s legacy worker target count = %d, want %d", path, got, want)
+	if got := strings.Count(source, "//llgo:coro workeraddr "); got != 0 {
+		t.Errorf("%s legacy worker target count = %d, want zero", path, got)
 	}
 	if got := strings.Count(source, "+foreign-pointer-result=r1"); got != 1 {
 		t.Errorf("%s foreign-pointer result declarations = %d, want exactly gai_strerror", path, got)
@@ -529,9 +541,12 @@ func TestDarwinReaddirWorkerTargetUsesArchitectureSymbol(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		marker := "//llgo:coro workeraddr 3\n//go:linkname libc_readdir_r_trampoline " + symbol
+		marker := "//go:linkname libc_readdir_r_trampoline " + symbol
 		if !strings.Contains(string(source), marker) {
 			t.Errorf("%s lacks architecture-specific readdir worker target %q", path, marker)
+		}
+		if strings.Contains(string(source), "//llgo:coro") {
+			t.Errorf("%s retains a derivable worker-address directive", path)
 		}
 	}
 }
@@ -546,8 +561,8 @@ func TestDarwinRuntimeEnvironmentUsesFixedWorkerABI(t *testing.T) {
 		"//go:linkname runtimeDarwinFuncPCABI0 llgo.funcPCABI0",
 		"//go:linkname runtimeDarwinSyscall1Int32 llgo.syscall32",
 		"//go:linkname runtimeDarwinSyscall3Int32 llgo.syscall32",
-		"//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/3\n//go:linkname libc_setenv_trampoline C.setenv",
-		"//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=none memory=borrow-until-complete abi=word-call.v1/1\n//go:linkname libc_unsetenv_trampoline C.unsetenv",
+		"//go:linkname libc_setenv_trampoline C.setenv",
+		"//go:linkname libc_unsetenv_trampoline C.unsetenv",
 		"runtimeDarwinFuncPCABI0(libc_setenv_trampoline)",
 		"runtimeDarwinFuncPCABI0(libc_unsetenv_trampoline)",
 		"uintptr(unsafe.Pointer(name))",
@@ -564,6 +579,8 @@ func TestDarwinRuntimeEnvironmentUsesFixedWorkerABI(t *testing.T) {
 		"runtimeDarwinFuncPCABI0(cliteos.Setenv)",
 		"runtimeDarwinFuncPCABI0(cliteos.Unsetenv)",
 		"syscall.llgoRuntimeFcntl",
+		"abi=word-call.v1/",
+		"//llgo:coro workeraddr",
 	} {
 		if strings.Contains(string(source), forbidden) {
 			t.Errorf("%s still derives worker authority from typed C declaration %q", path, forbidden)

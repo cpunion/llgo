@@ -133,13 +133,11 @@ func privateCarrier(fn, a0 uintptr) uintptr {
 	return r1
 }
 
-//llgo:coro workerresult v1 fn=0 map=r1:r1
 func projectedCarrier(fn, a0 uintptr) (uintptr, uintptr, uintptr) {
 	r1, r2, err := raw(fn, a0)
 	return r1, r2, err
 }
 
-//llgo:coro workerresult v1 fn=0 map=r1:r1
 func projectedTwoSinks(fn, a0 uintptr) (uintptr, uintptr, uintptr) {
 	r1, r2, err := raw(fn, a0)
 	raw(fn, a0)
@@ -170,6 +168,10 @@ func ThroughPointer(a0 uintptr) uintptr {
 	return privateCarrier(funcPCABI0(libc_pointer_result_v1_trampoline), a0)
 }
 
+func ThroughPrivatePointer(a0 uintptr) unsafe.Pointer {
+	return unsafe.Pointer(privateCarrier(funcPCABI0(libc_pointer_result_v1_trampoline), a0))
+}
+
 func ThroughScalar(a0 uintptr) uintptr {
 	return privateCarrier(funcPCABI0(libc_scalar_result_v1_trampoline), a0)
 }
@@ -185,6 +187,7 @@ func TestCoroWorkerForeignPointerResultProjectsAcrossExactWrapperCall(t *testing
 	}{
 		{function: "ThroughProjectedPointer", want: true},
 		{function: "ThroughProjectedTwoSinksPointer", want: true},
+		{function: "ThroughPrivatePointer", want: true},
 		{function: "ThroughProjectedScalar"},
 		{function: "ThroughProjectedDerived"},
 	} {
@@ -334,7 +337,8 @@ func analyzeCoroWorkerResultProvenancePlan(
 		FunctionIDs:          universe.FunctionIDConfig(),
 		MaxPlainInstructions: -1,
 		ClassifyFunction: func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
-			if fn == root || fn == pkg.Func("projectedCarrier") || fn == pkg.Func("projectedTwoSinks") {
+			if fn == root || fn == pkg.Func("privateCarrier") ||
+				fn == pkg.Func("projectedCarrier") || fn == pkg.Func("projectedTwoSinks") {
 				return coro.SSAFunctionPolicy{Effect: coro.MayPark}, nil
 			}
 			return coro.SSAFunctionPolicy{}, nil

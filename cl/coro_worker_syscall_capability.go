@@ -112,12 +112,14 @@ type coroWorkerSyscallIncomingKey struct {
 	parameter int
 }
 
-// coroSelectPatchedWorkerAddressTrampoline makes an alternate-package
-// workeraddr declaration participate in ordinary managed-symbol selection.
+// coroSelectPatchedWorkerAddressTrampoline makes an exact alternate-package
+// address adapter participate in ordinary managed-symbol selection.
 // Upstream Darwin FuncPCABI0 operands still point at the original SSA
 // declaration; selecting the same-name/same-ABI alternate first lets the
 // existing exact C-symbol winner logic install the canonical alias when that
-// operand is materialized. No unannotated trampoline is selected or inferred.
+// operand is materialized. The alternate declaration itself is the
+// compiler-owned catalog entry; its word width is inferred later from the
+// closed llgo.syscall sink rather than repeated in a comment.
 func coroSelectPatchedWorkerAddressTrampoline(fn *ssa.Function, fromPatch bool) (bool, error) {
 	if !fromPatch || fn == nil {
 		return false, nil
@@ -130,11 +132,14 @@ func coroSelectPatchedWorkerAddressTrampoline(fn *ssa.Function, fromPatch bool) 
 		return true, nil
 	}
 	_, generic, err := coroWorkerCallableDeclarationContractArity(fn)
-	return generic, err
+	if err != nil || generic {
+		return generic, err
+	}
+	return coroWorkerAddressAliasDeclaration(fn), nil
 }
 
-// aliasPatchedWorkerAddressTrampolines validates patch-owned workeraddr
-// declarations and, when an upstream declaration of the same name exists,
+// aliasPatchedWorkerAddressTrampolines validates patch-owned address adapters
+// and, when an upstream declaration of the same name exists,
 // connects that upstream FuncPCABI0 operand to the certified alternate.
 // FuncPCABI0 intentionally synthesizes C addresses without materializing
 // trampoline SSA declarations, so ordinary reachability-driven patch aliasing
@@ -177,7 +182,8 @@ func (u *EmissionUniverse) aliasPatchedWorkerAddressTrampolines() error {
 			if err != nil {
 				return fmt.Errorf("prepare emission universe: patch worker callable target %q: %w", name, err)
 			}
-			if !legacy && !generic {
+			inferred := coroWorkerAddressAliasDeclaration(alternate)
+			if !legacy && !generic && !inferred {
 				continue
 			}
 			if !coroWorkerAddressAliasDeclaration(alternate) {
@@ -843,6 +849,13 @@ func freezeCoroWorkerSyscallShadowCertificate(
 		exact, reason, err := coroWorkerCallableTarget(universe, candidate.SourceTarget, candidate.Target)
 		if err != nil {
 			return CoroWorkerSyscallCertificate{}, nil, nil, err
+		}
+		if exact.workerArity == coroCallableShadowInferredWordArgs {
+			exact.workerArity = candidate.ABI.WordArgs
+			exact.contractCertificateID = bindCoroInferredPatchAddressContractID(
+				exact.contractCertificateID,
+				candidate.ABI.WordArgs,
+			)
 		}
 		if reason != "" || exact != coroWorkerCallableShadowTarget(candidate) {
 			return CoroWorkerSyscallCertificate{}, nil, nil, fmt.Errorf("callable shadow target differs from its exact producer contract")

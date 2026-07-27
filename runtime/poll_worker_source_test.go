@@ -616,8 +616,8 @@ func TestRuntimePollWaitSeparatesLegacyWorkerAndCoroutineOwnerABI(t *testing.T) 
 		}
 	}
 	for path, trampoline := range map[string]string{
-		"internal/lib/runtime/poll_fstat_linux_coro_llgo.go":  "//llgo:coro workeraddr 3\n//go:linkname libc_fstat_trampoline C.fstat",
-		"internal/lib/runtime/poll_fstat_darwin_coro_llgo.go": "//llgo:coro workeraddr 3\n//go:linkname libc_fstat64_trampoline C.fstat64",
+		"internal/lib/runtime/poll_fstat_linux_coro_llgo.go":  "//go:linkname libc_fstat_trampoline C.fstat",
+		"internal/lib/runtime/poll_fstat_darwin_coro_llgo.go": "//go:linkname libc_fstat64_trampoline C.fstat64",
 	} {
 		statSource := readRuntimePollFile(t, path)
 		syscallMarker := "//go:linkname coroPollFstatSyscall3 llgo.syscall32"
@@ -632,6 +632,9 @@ func TestRuntimePollWaitSeparatesLegacyWorkerAndCoroutineOwnerABI(t *testing.T) 
 			if !strings.Contains(statSource, marker) {
 				t.Errorf("%s lacks fixed coroutine Fstat errno transport %q", path, marker)
 			}
+		}
+		if strings.Contains(statSource, "//llgo:coro") {
+			t.Errorf("%s retains a derivable worker-address directive", path)
 		}
 	}
 	for _, forbidden := range []string{

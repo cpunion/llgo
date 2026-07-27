@@ -41,6 +41,17 @@ type CoroCallableShadowABI struct {
 
 const coroCallableShadowWorkerSyscallFamily = "word-call.v1"
 
+const (
+	// A patch-owned address adapter starts without a word arity. The exact
+	// llgo.syscall sink supplies this structural fact after producer-forward
+	// SSA flow has closed.
+	coroCallableShadowInferredWordArgs = -1
+	// Conflicting exact sinks permanently poison a producer. Keeping a distinct
+	// impossible ABI in the internal fact graph preserves useful fail-closed
+	// diagnostics through private parameter carriers.
+	coroCallableShadowInvalidWordArgs = -2
+)
+
 // CoroCallableShadow is the compiler-only fact paired with one exact
 // FuncPCABI0 SSA result. Producer is deliberately part of the identity: two
 // syntactically independent publications of the same text address remain two
@@ -61,6 +72,14 @@ type CoroCallableShadow struct {
 
 func coroWorkerWordCallableABI(arity int) string {
 	return coroCallableShadowWorkerSyscallFamily + "/" + strconv.Itoa(arity)
+}
+
+func bindCoroInferredPatchAddressContractID(id string, wordArgs int) string {
+	return emissionDigest(framedEmissionKey(
+		"llgo-coro-inferred-patch-address-bound-v1",
+		id,
+		coroWorkerWordCallableABI(wordArgs),
+	))
 }
 
 type coroWorkerWordCallableABIShape struct {
@@ -124,9 +143,10 @@ func coroWorkerCallableDeclarationContractArity(fn *ssa.Function) (int, bool, er
 //
 // Keep this classification deliberately narrower than "has a callable
 // contract": only an exact bodyless trampoline plus either a valid explicit
-// word-call ABI or the legacy workeraddr spelling is address-only.  Ordinary
-// typed declarations, malformed aliases, and contracts without a word-call ABI
-// remain in the physical ABI collision inventory.
+// word-call ABI, the legacy workeraddr spelling, or an exact compiler-owned
+// patch adapter is address-only. Ordinary typed declarations, malformed
+// aliases, user declarations without a contract, and contracts without a
+// word-call ABI remain in the physical ABI collision inventory.
 func (u *EmissionUniverse) coroWorkerAddressOnlyDeclaration(fn *ssa.Function) (bool, error) {
 	if u == nil || fn == nil {
 		return false, nil
@@ -159,22 +179,56 @@ func (u *EmissionUniverse) coroWorkerAddressOnlyDeclaration(fn *ssa.Function) (b
 		return true, nil
 	}
 
+	parsed, present, err := coroCallableContractCertificateFor(canonical)
+	if err != nil {
+		return false, err
+	}
+	if present {
+		_, wordABI := parseCoroWorkerWordCallableABI(parsed.ABI)
+		return parsed.Scope == coroCallableContractScopeDeclaration &&
+			coroWorkerCallableContractCompatible(parsed.Contract) && wordABI, nil
+	}
+
 	directive, err := coroForeignCallDirectiveFor(canonical)
 	if err != nil {
 		return false, err
 	}
-	if directive != coroForeignCallWorkerAddress {
-		return false, nil
+	if directive != coroForeignCallNone {
+		if directive != coroForeignCallWorkerAddress {
+			return false, nil
+		}
+		if _, err := coroWorkerAddressDirectiveArity(canonical); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
-	if _, err := coroWorkerAddressDirectiveArity(canonical); err != nil {
-		return false, err
-	}
-	return true, nil
+	return coroInferredPatchWorkerAddressDeclaration(u.ownerOf(canonical), canonical), nil
 }
 
-// coroWorkerCallableTarget freezes the only two accepted producer sources:
-// the target-neutral declaration contract, and the temporary workeraddr
-// migration spelling. It consumes no uintptr and performs no address lookup.
+// coroInferredPatchWorkerAddressDeclaration recognizes the one annotation-free
+// address catalog under compiler control. Merely naming a user C declaration
+// "_trampoline" is not authority: the canonical declaration must be the exact
+// selected alternate of a source patch. The adapter declaration is already a
+// reviewable allow-list entry; its word ABI is derived later from its closed
+// FuncPCABI0-to-llgo.syscall flow.
+func coroInferredPatchWorkerAddressDeclaration(
+	owner *preparedEmissionPackage,
+	fn *ssa.Function,
+) bool {
+	if owner == nil || fn == nil {
+		return false
+	}
+	if !coroWorkerAddressAliasDeclaration(fn) ||
+		extractTrampolineCName(fn.Name()) == "" {
+		return false
+	}
+	return owner.hasPatch && owner.fromPatch[fn]
+}
+
+// coroWorkerCallableTarget freezes the accepted producer sources: an explicit
+// target-neutral declaration contract, the temporary workeraddr migration
+// spelling, or an exact compiler-owned patch adapter whose ABI will be bound
+// from its sink. It consumes no uintptr and performs no address lookup.
 func coroWorkerCallableTarget(
 	universe *EmissionUniverse,
 	sourceTarget, target *ssa.Function,
@@ -279,19 +333,52 @@ func coroWorkerCallableTarget(
 	if err != nil {
 		return coroWorkerAddressTarget{}, "", fmt.Errorf("worker-address target %q: %w", target.Name(), err)
 	}
-	if directive != coroForeignCallWorkerAddress {
+	if directive == coroForeignCallWorkerAddress {
+		arity, err := coroWorkerAddressDirectiveArity(target)
+		if err != nil {
+			return coroWorkerAddressTarget{}, "", err
+		}
+		return coroWorkerAddressTarget{
+			target:                  target,
+			physicalSymbol:          physical,
+			workerArity:             arity,
+			contractCertificateID:   "legacy-workeraddr.v0",
+			legacyWorkerAddressOnly: true,
+		}, "", nil
+	}
+	if directive != coroForeignCallNone ||
+		!coroInferredPatchWorkerAddressDeclaration(universe.ownerOf(target), target) {
 		return coroWorkerAddressTarget{}, "target-lacks-workeraddr", nil
 	}
-	arity, err := coroWorkerAddressDirectiveArity(target)
+
+	// The declaration's presence in the selected patch is the reviewed
+	// semantic allow-list entry. Its use through the exact llgo.syscall adapter
+	// supplies may-block/any-thread/no-reentry/borrow-until-complete behavior;
+	// the word width remains deliberately unknown until producer-forward SSA
+	// reaches a sink.
+	defaultContract := defaultCoroForeignDeclarationContract()
+	behaviorDigest, err := coro.CallableContractBehaviorDigest(
+		defaultContract.Contract.ID, defaultContract.Contract,
+	)
 	if err != nil {
 		return coroWorkerAddressTarget{}, "", err
 	}
+	certificateID := emissionDigest(framedEmissionKey(
+		"llgo-coro-inferred-patch-address-contract-v1",
+		coroWorkerAddressFunctionIdentity(universe, sourceTarget),
+		coroWorkerAddressFunctionIdentity(universe, target),
+		physical,
+		structuralGoLinknameABITypeKey(target.Signature),
+		defaultContract.Canonical,
+		behaviorDigest,
+	))
 	return coroWorkerAddressTarget{
-		target:                  target,
-		physicalSymbol:          physical,
-		workerArity:             arity,
-		contractCertificateID:   "legacy-workeraddr.v0",
-		legacyWorkerAddressOnly: true,
+		target:                   target,
+		physicalSymbol:           physical,
+		workerArity:              coroCallableShadowInferredWordArgs,
+		contractCertificateID:    certificateID,
+		legacyWorkerAddressOnly:  false,
+		foreignPointerResultMask: 0,
 	}, "", nil
 }
 
@@ -419,6 +506,9 @@ func AnalyzeCoroCallableShadows(universe *EmissionUniverse) (*CoroCallableShadow
 	if err := b.propagate(); err != nil {
 		return nil, err
 	}
+	if err := b.bindInferredProducerABIs(); err != nil {
+		return nil, err
+	}
 	if err := b.finishSinks(); err != nil {
 		return nil, err
 	}
@@ -467,7 +557,6 @@ func (b *coroCallableShadowBuilder) indexCallsAndEscapes() {
 }
 
 func (b *coroCallableShadowBuilder) seedProducersAndSinks() error {
-	physicalTargets := make(map[string]CoroCallableShadow)
 	for _, fn := range b.universe.functions {
 		if fn == nil || len(fn.Blocks) == 0 || b.universe.canonicalAlias(fn) != fn {
 			continue
@@ -496,17 +585,6 @@ func (b *coroCallableShadowBuilder) seedProducersAndSinks() error {
 						b.failures[call] = reason
 						continue
 					}
-					if previous, exists := physicalTargets[shadow.PhysicalSymbol]; exists &&
-						(previous.Target != shadow.Target || previous.ABI != shadow.ABI ||
-							previous.ForeignPointerResultMask != shadow.ForeignPointerResultMask ||
-							previous.ContractCertificateID != shadow.ContractCertificateID ||
-							previous.LegacyWorkerAddressCompat != shadow.LegacyWorkerAddressCompat) {
-						return fmt.Errorf(
-							"callable shadow analysis: physical target %q has conflicting producer targets or ABIs",
-							shadow.PhysicalSymbol,
-						)
-					}
-					physicalTargets[shadow.PhysicalSymbol] = shadow
 					b.result.producers[call] = shadow
 					b.addFact(call, shadow)
 				case isLLGoSyscallIntrinsic(opcode):
@@ -521,6 +599,117 @@ func (b *coroCallableShadowBuilder) seedProducersAndSinks() error {
 		}
 	}
 	return nil
+}
+
+// bindInferredProducerABIs solves the structural half of an address adapter
+// contract after forward provenance has reached every exact llgo.syscall sink.
+// One producer must have exactly one sink word width. The bound width and its
+// source certificate enter every copied shadow fact before any sink can issue
+// a worker capability.
+func (b *coroCallableShadowBuilder) bindInferredProducerABIs() error {
+	if b == nil || b.result == nil {
+		return fmt.Errorf("callable shadow analysis: cannot bind inferred ABIs without an exact analysis")
+	}
+
+	constraints := make(map[*ssa.Call]map[int]none)
+	for sink, abi := range b.sinkABI {
+		if invalid, exists := b.result.sinks[sink]; exists && invalid.Reason != "" {
+			continue
+		}
+		if sink == nil || sink.Common() == nil || len(sink.Common().Args) == 0 {
+			continue
+		}
+		for producer, shadow := range b.facts[sink.Common().Args[0]] {
+			if shadow.ABI.Family != coroCallableShadowWorkerSyscallFamily ||
+				shadow.ABI.WordArgs != coroCallableShadowInferredWordArgs {
+				continue
+			}
+			words := constraints[producer]
+			if words == nil {
+				words = make(map[int]none)
+				constraints[producer] = words
+			}
+			words[abi.WordArgs] = none{}
+		}
+	}
+
+	for producer, shadow := range b.result.producers {
+		if shadow.ABI.WordArgs != coroCallableShadowInferredWordArgs {
+			continue
+		}
+		words := constraints[producer]
+		if len(words) != 1 {
+			reason := "inferred-callable-has-no-exact-sink"
+			if len(words) > 1 {
+				reason = "inferred-callable-has-conflicting-sink-abis"
+			}
+			b.poisonInferredProducer(producer, shadow, reason)
+			continue
+		}
+		wordArgs := -1
+		for exact := range words {
+			wordArgs = exact
+		}
+		shadow.ABI.WordArgs = wordArgs
+		shadow.ContractCertificateID = bindCoroInferredPatchAddressContractID(
+			shadow.ContractCertificateID,
+			wordArgs,
+		)
+		b.replaceProducerShadow(producer, shadow)
+	}
+
+	physicalTargets := make(map[string]CoroCallableShadow)
+	for _, shadow := range b.result.producers {
+		if shadow.ABI.WordArgs < 0 {
+			continue
+		}
+		if previous, exists := physicalTargets[shadow.PhysicalSymbol]; exists &&
+			(previous.Target != shadow.Target || previous.ABI != shadow.ABI ||
+				previous.ForeignPointerResultMask != shadow.ForeignPointerResultMask ||
+				previous.ContractCertificateID != shadow.ContractCertificateID ||
+				previous.LegacyWorkerAddressCompat != shadow.LegacyWorkerAddressCompat) {
+			return fmt.Errorf(
+				"callable shadow analysis: physical target %q has conflicting producer targets or ABIs",
+				shadow.PhysicalSymbol,
+			)
+		}
+		physicalTargets[shadow.PhysicalSymbol] = shadow
+	}
+	return nil
+}
+
+func (b *coroCallableShadowBuilder) replaceProducerShadow(
+	producer *ssa.Call,
+	shadow CoroCallableShadow,
+) {
+	if b == nil || producer == nil {
+		return
+	}
+	b.result.producers[producer] = shadow
+	for _, byProducer := range b.facts {
+		if _, exists := byProducer[producer]; exists {
+			byProducer[producer] = shadow
+		}
+	}
+}
+
+func (b *coroCallableShadowBuilder) poisonInferredProducer(
+	producer *ssa.Call,
+	shadow CoroCallableShadow,
+	reason string,
+) {
+	if b == nil || producer == nil {
+		return
+	}
+	delete(b.result.producers, producer)
+	b.result.rejected[producer] = reason
+	b.failures[producer] = reason
+	shadow.ABI.WordArgs = coroCallableShadowInvalidWordArgs
+	for _, byProducer := range b.facts {
+		if _, exists := byProducer[producer]; exists {
+			byProducer[producer] = shadow
+		}
+	}
 }
 
 func nilErrorWithCallableShadowContext(call *ssa.Call, err error) error {

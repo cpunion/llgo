@@ -46,11 +46,16 @@ type coroWorkerResultProjectionCertificate struct {
 	resultToWorker    [coroWorkerResultProjectionWidthV1]int8
 }
 
-func parseCoroWorkerResultProjectionDecl(decl *ast.FuncDecl) (coroWorkerResultProjection, bool, error) {
+func emptyCoroWorkerResultProjection() coroWorkerResultProjection {
 	projection := coroWorkerResultProjection{functionParameter: -1}
 	for index := range projection.resultToWorker {
 		projection.resultToWorker[index] = -1
 	}
+	return projection
+}
+
+func parseCoroWorkerResultProjectionDecl(decl *ast.FuncDecl) (coroWorkerResultProjection, bool, error) {
+	projection := emptyCoroWorkerResultProjection()
 	if decl == nil || decl.Doc == nil {
 		return projection, false, nil
 	}
@@ -144,28 +149,243 @@ func coroWorkerResultProjectionFor(fn *ssa.Function) (coroWorkerResultProjection
 	return parseCoroWorkerResultProjectionDecl(decl)
 }
 
-// freezeCoroWorkerResultProjectionCertificates validates every annotation even
-// when its wrapper is not reached by a currently certified worker sink. This
-// keeps malformed trusted metadata from silently becoming active after an
-// unrelated reachability change.
+type coroWorkerResultOrigin struct {
+	functionParameter int
+	workerResult      int
+}
+
+// inferCoroWorkerResultOrigin follows only representation-preserving SSA
+// operations. It deliberately stops at arithmetic, memory, interfaces and
+// calls: those operations may change either pointer provenance or result
+// identity and therefore require a different proof.
+func inferCoroWorkerResultOrigin(
+	value ssa.Value,
+	sinks map[*ssa.Call]int,
+	visiting map[ssa.Value]bool,
+) (coroWorkerResultOrigin, bool) {
+	if value == nil || visiting[value] {
+		return coroWorkerResultOrigin{}, false
+	}
+	visiting[value] = true
+	defer delete(visiting, value)
+
+	switch value := value.(type) {
+	case *ssa.Extract:
+		call, ok := value.Tuple.(*ssa.Call)
+		if !ok || value.Index < 0 || value.Index >= coroWorkerResultProjectionWidthV1 {
+			return coroWorkerResultOrigin{}, false
+		}
+		parameter, ok := sinks[call]
+		if !ok {
+			return coroWorkerResultOrigin{}, false
+		}
+		return coroWorkerResultOrigin{
+			functionParameter: parameter,
+			workerResult:      value.Index,
+		}, true
+	case *ssa.ChangeType:
+		return inferCoroWorkerResultOrigin(value.X, sinks, visiting)
+	case *ssa.Convert:
+		if !coroWorkerUintptrType(value.Type()) || !coroWorkerUintptrType(value.X.Type()) {
+			return coroWorkerResultOrigin{}, false
+		}
+		return inferCoroWorkerResultOrigin(value.X, sinks, visiting)
+	case *ssa.Phi:
+		var joined coroWorkerResultOrigin
+		have := false
+		for _, edge := range value.Edges {
+			origin, ok := inferCoroWorkerResultOrigin(edge, sinks, visiting)
+			if !ok {
+				return coroWorkerResultOrigin{}, false
+			}
+			if !have {
+				joined = origin
+				have = true
+				continue
+			}
+			// Different physical calls are allowed across control-flow arms, but
+			// the carrier parameter and result position must be identical.
+			if joined.functionParameter != origin.functionParameter ||
+				joined.workerResult != origin.workerResult {
+				return coroWorkerResultOrigin{}, false
+			}
+		}
+		return joined, have
+	default:
+		return coroWorkerResultOrigin{}, false
+	}
+}
+
+func coroWorkerResultProjectionCanonical(projection coroWorkerResultProjection) string {
+	mappings := make([]string, 0, len(projection.resultToWorker))
+	for wrapper, worker := range projection.resultToWorker {
+		if worker >= 0 {
+			mappings = append(mappings, coroWorkerResultWord(wrapper)+":"+coroWorkerResultWord(int(worker)))
+		}
+	}
+	return "ssa-result-flow.v1 fn=" + strconv.Itoa(projection.functionParameter) +
+		" map=" + strings.Join(mappings, ",")
+}
+
+func inferCoroWorkerResultProjection(
+	shadows *CoroCallableShadowAnalysis,
+	fn *ssa.Function,
+) (coroWorkerResultProjection, bool, error) {
+	projection := emptyCoroWorkerResultProjection()
+	if shadows == nil || fn == nil || len(fn.Blocks) == 0 || fn.Signature == nil {
+		return projection, false, nil
+	}
+
+	sinks := make(map[*ssa.Call]int)
+	returns := make([]*ssa.Return, 0)
+	for _, block := range fn.Blocks {
+		for _, instruction := range block.Instrs {
+			switch instruction := instruction.(type) {
+			case *ssa.Return:
+				returns = append(returns, instruction)
+			case *ssa.Call:
+				common := instruction.Common()
+				if common == nil || common.IsInvoke() || len(common.Args) == 0 {
+					continue
+				}
+				sink, recognized := shadows.sinks[instruction]
+				if !recognized || !sink.Certified {
+					continue
+				}
+				parameter, ok := common.Args[0].(*ssa.Parameter)
+				if !ok || parameter.Parent() != fn || !coroWorkerUintptrType(parameter.Type()) {
+					continue
+				}
+				index := -1
+				for candidate, exact := range fn.Params {
+					if exact == parameter {
+						index = candidate
+						break
+					}
+				}
+				if index >= 0 {
+					sinks[instruction] = index
+				}
+			}
+		}
+	}
+	if len(sinks) == 0 || len(returns) == 0 {
+		return projection, false, nil
+	}
+
+	resultCount := fn.Signature.Results().Len()
+	if resultCount > coroWorkerResultProjectionWidthV1 {
+		resultCount = coroWorkerResultProjectionWidthV1
+	}
+	haveMapping := false
+	for result := 0; result < resultCount; result++ {
+		workerResult := -1
+		functionParameter := -1
+		exact := true
+		for _, ret := range returns {
+			if result >= len(ret.Results) {
+				exact = false
+				break
+			}
+			origin, ok := inferCoroWorkerResultOrigin(
+				ret.Results[result], sinks, make(map[ssa.Value]bool),
+			)
+			if !ok {
+				exact = false
+				break
+			}
+			if workerResult < 0 {
+				workerResult = origin.workerResult
+				functionParameter = origin.functionParameter
+				continue
+			}
+			if workerResult != origin.workerResult ||
+				functionParameter != origin.functionParameter {
+				exact = false
+				break
+			}
+		}
+		if !exact || workerResult < 0 {
+			continue
+		}
+		if projection.functionParameter >= 0 &&
+			projection.functionParameter != functionParameter {
+			return emptyCoroWorkerResultProjection(), false, nil
+		}
+		projection.functionParameter = functionParameter
+		projection.resultToWorker[result] = int8(workerResult)
+		haveMapping = true
+	}
+	if !haveMapping {
+		return emptyCoroWorkerResultProjection(), false, nil
+	}
+	projection.canonical = coroWorkerResultProjectionCanonical(projection)
+	return projection, true, nil
+}
+
+func coroWorkerResultProjectionProvesAssertion(
+	inferred, asserted coroWorkerResultProjection,
+) bool {
+	if inferred.functionParameter != asserted.functionParameter {
+		return false
+	}
+	for result, worker := range asserted.resultToWorker {
+		if worker >= 0 && inferred.resultToWorker[result] != worker {
+			return false
+		}
+	}
+	return true
+}
+
+// freezeCoroWorkerResultProjectionCertificates derives wrapper result
+// forwarding from exact SSA. A legacy directive is accepted only as an
+// assertion of the same derived fact; it can never manufacture a mapping that
+// the body does not prove.
 func (u *EmissionUniverse) freezeCoroWorkerResultProjectionCertificates() error {
 	if u == nil || !u.CoroWorkerSupported() {
 		return nil
+	}
+	shadows, err := AnalyzeCoroCallableShadows(u)
+	if err != nil {
+		return fmt.Errorf(
+			"prepare emission universe: infer worker result projections from callable shadows: %w",
+			err,
+		)
 	}
 	for _, fn := range u.functions {
 		if fn == nil || u.canonicalAlias(fn) != fn {
 			continue
 		}
-		projection, present, err := coroWorkerResultProjectionFor(fn)
+		annotated, annotationPresent, err := coroWorkerResultProjectionFor(fn)
 		if err != nil {
 			return fmt.Errorf("prepare emission universe: worker result projection on %q: %w", fn.Name(), err)
 		}
-		if !present {
+		projection, inferred, err := inferCoroWorkerResultProjection(shadows, fn)
+		if err != nil {
+			return fmt.Errorf("prepare emission universe: infer worker result projection on %q: %w", fn.Name(), err)
+		}
+		if annotationPresent {
+			if !inferred || !coroWorkerResultProjectionProvesAssertion(projection, annotated) {
+				return fmt.Errorf(
+					"prepare emission universe: worker result projection %q is not proved by its exact SSA body",
+					fn.Name(),
+				)
+			}
+		}
+		if !inferred {
 			continue
 		}
 		if fn.Parent() != nil || len(fn.FreeVars) != 0 || len(fn.Blocks) == 0 || fn.Signature == nil ||
 			fn.Signature.Recv() != nil || fn.Signature.Variadic() || fn.TypeParams() != nil || len(fn.TypeArgs()) != 0 {
-			return fmt.Errorf("prepare emission universe: worker result projection %q requires an exact static non-generic Go wrapper", fn.Name())
+			if annotationPresent {
+				return fmt.Errorf("prepare emission universe: worker result projection %q requires an exact static non-generic Go wrapper", fn.Name())
+			}
+			// Automatic discovery is intentionally broader than certificate
+			// publication. A standard-library wrapper may locally forward a
+			// result while still being a method, variadic, generic, nested, or
+			// otherwise open. Such a function receives no capability; only a
+			// legacy assertion makes the unsupported shape an error.
+			continue
 		}
 		params, results := fn.Signature.Params(), fn.Signature.Results()
 		if params == nil || projection.functionParameter >= params.Len() ||
