@@ -526,6 +526,10 @@ func __llgo_coro_os_thread_locked_v1(unsafe.Pointer) bool { return false }
 func __llgo_coro_os_thread_foreign_call_v1(unsafe.Pointer, uintptr, uint32, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, *uintptr, *uintptr, *uintptr) {}
 func __llgo_coro_native_worker_complete_v1(uint32, uint32, uintptr, uintptr, uintptr) uint32 { return 0 }
 func __llgo_coro_native_fleet_owner_v2(uint32) uint32 { return 0 }
+func __llgo_coro_foreign_reentry_acquire_v1(*unsafe.Pointer) unsafe.Pointer { return nil }
+func __llgo_coro_foreign_reentry_run_v1(unsafe.Pointer, *unsafe.Pointer, *unsafe.Pointer) uint32 { return 0 }
+func __llgo_coro_foreign_reentry_failure_v1(uint32, unsafe.Pointer, unsafe.Pointer) {}
+func __llgo_coro_reentrant_foreign_call_v1(unsafe.Pointer, uintptr, uintptr) {}
 func __llgo_coro_timer_park_v2(g, handle, header, storage unsafe.Pointer, delay int64) {}
 func __llgo_coro_timer_park_controlled_v2(g, handle, header, storage, controller unsafe.Pointer, control, ownerRoute *uint32, expected uint32, deadline int64) {}
 func __llgo_coro_timer_resume_v2(g, storage unsafe.Pointer) uint32 { return 1 }
@@ -754,6 +758,10 @@ func atomicExchange(*uint32, uint32) uint32
 		coroOSThreadForeignCallSymbolV1,
 		coroNativeWorkerCompleteSymbolV1,
 		coroNativeFleetOwnerSymbolV2,
+		coroForeignReentryAcquireSymbolV1,
+		coroForeignReentryRunSymbolV1,
+		coroForeignReentryFailureSymbolV1,
+		coroReentrantForeignCallSymbolV1,
 		coroTimerParkSymbolV2,
 		coroTimerParkControlledSymbolV2,
 		coroTimerResumeSymbolV2,
@@ -1492,6 +1500,77 @@ func install() {
 	})
 	if err == nil || !strings.Contains(err.Error(), "builder cannot authorize raw direct-plain ABI") {
 		t.Fatalf("unauthorized builder raw direct-plain error = %v", err)
+	}
+}
+
+func TestRequiredCoroDirectPlainArgumentsLeaveManagedReentryForInference(t *testing.T) {
+	fixture := buildRequiredCoroRuntimeFixtureSource(t, `
+var ready chan struct{}
+
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=managed-callback memory=borrow-until-return
+//go:linkname foreign C.foreign_managed_reentry_build_probe
+func foreign(func(uintptr) uintptr, uintptr) uintptr
+
+func callback(value uintptr) uintptr {
+	<-ready
+	return value + 1
+}
+
+func install() { _ = foreign(callback, 1) }
+`, false)
+	direct, plain, err := requiredCoroDirectPlainCallArguments(
+		fixture.ctx, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(direct) != 0 {
+		t.Fatalf("managed reentry produced raw direct-plain uses: %+v", direct)
+	}
+	if _, raw := plain[fixture.pkg.Func("callback")]; raw {
+		t.Fatal("managed callback entered the raw/plain closure")
+	}
+
+	functionIDs := fixture.ctx.coroEmission.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI =
+		coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0
+	functionIDs.ArchiveReady = true
+	input := CoroPlanInput{
+		Program:            fixture.pkg.Prog,
+		EmissionUniverse:   fixture.ctx.coroSSAEmission,
+		resolveFunction:    fixture.ctx.coroEmission.Resolve,
+		functionBackground: fixture.ctx.coroEmission.FunctionBackground,
+		callableIdentity:   fixture.ctx.coroEmission.CoroCallableIdentityCertificate,
+		callableContract:   fixture.ctx.coroEmission.CoroCallableContractCertificate,
+		rawCFunctionType: func(typ types.Type) (bool, error) {
+			if typ == nil {
+				return false, nil
+			}
+			_, signature := types.Unalias(typ).Underlying().(*types.Signature)
+			return signature && fixture.ctx.prog.TypeBackground(typ) == llssa.InC, nil
+		},
+	}
+	plan, err := input.Analyze(coro.Roots{{
+		Function: fixture.pkg.Func("install"),
+		Demand:   coro.AsyncDemand,
+	}}, coro.SSAConfig{
+		MaxPlainInstructions: -1,
+		FunctionIDs:          functionIDs,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	callback := functionPlanForBuildTest(t, plan, fixture.pkg.Func("callback"))
+	if callback.Emission != coro.EmitCoroutine ||
+		callback.Primary != coro.PrimaryCoroutine ||
+		callback.ManagedDemand == coro.NoDemand ||
+		callback.RawPlainDemand || callback.RawPlainEntry ||
+		!callback.Effect.Contains(coro.MayPark) {
+		t.Fatalf(
+			"managed callback plan = %+v; want inference-only coroutine entry",
+			callback,
+		)
 	}
 }
 

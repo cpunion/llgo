@@ -33,6 +33,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/goplus/llgo/cl"
 	llssa "github.com/goplus/llgo/ssa"
 )
 
@@ -90,6 +91,44 @@ func Check() int32 {
 	}
 	if MainThread == 0 || ChildThread == 0 || MainThread == ChildThread {
 		return 18
+	}
+	return 0
+}
+`
+
+const coroNativeFleetForeignReentryE2ESource = `package main
+
+import _ "unsafe"
+
+var Ready chan int32
+var Result int32
+
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=managed-callback memory=borrow-until-return
+//go:linkname foreignReentry C.__llgo_coro_native_fleet_e2e_reentry_v1
+func foreignReentry(func(int32) int32, int32) int32
+
+func Setup() {
+	Ready = make(chan int32)
+	Result = 0
+}
+
+func sender() {
+	Ready <- 10
+	Ready <- 20
+}
+
+func callback(value int32) int32 {
+	return value + <-Ready
+}
+
+func main() {
+	go sender()
+	Result = foreignReentry(callback, 1)
+}
+
+func Check() int32 {
+	if Result != 33 {
+		return 71
 	}
 	return 0
 }
@@ -1443,6 +1482,16 @@ func TestCoroNativeFleetPhysicalPeerRunsDistributedChildE2E(t *testing.T) {
 	runCoroNativeFleetE2E(t, coroNativeFleetE2ESource, "distributed-child", false, 8)
 }
 
+func TestCoroNativeFleetManagedForeignReentryParksCallbackE2E(t *testing.T) {
+	runCoroNativeFleetE2E(
+		t,
+		coroNativeFleetForeignReentryE2ESource,
+		"managed-foreign-reentry",
+		true,
+		1,
+	)
+}
+
 func TestCoroNativeFleetMainReturnCancelsPeerE2E(t *testing.T) {
 	runCoroNativeFleetE2E(t, coroNativeFleetShutdownE2ESource, "main-return-cancel", false, 4)
 }
@@ -1491,11 +1540,11 @@ func TestCoroNativeFleetLockedForeignReleasesQuotaBeforeReplacementStarts(t *tes
 	source := string(raw)
 	release := strings.Index(
 		source,
-		"if !coroTargetReleaseManagedExecutionV1(driver)",
+		"if releaseManaged && !coroTargetReleaseManagedExecutionV1(boundary.driver)",
 	)
 	create := strings.Index(
 		source,
-		"if !coroNativeMStartPhysicalOwnerV1(child, childSlot)",
+		"if !coroNativeMStartPhysicalOwnerV1(replacement, slot)",
 	)
 	if release < 0 || create < 0 || release >= create {
 		t.Fatalf(
@@ -1586,7 +1635,7 @@ func runCoroNativeFleetE2E(t *testing.T, source, name string, enableChannel bool
 	defer prog.Dispose()
 
 	userObject, anchor, setupSymbol, checkSymbol := buildCoroSpawnNativeE2EUserSource(
-		t, prog, temp, source, enableChannel,
+		t, prog, temp, source, enableChannel, cl.CoroNativeTargetCapabilities(),
 	)
 	entryObject := buildCoroSpawnNativeE2EEntry(t, prog, temp, anchor)
 	driverObject := buildCoroSpawnNativeE2EDriver(t, prog, temp, setupSymbol, checkSymbol)
@@ -1719,6 +1768,7 @@ func buildCoroNativeFleetE2ERuntimeIsland(t *testing.T, temp string) []string {
 	configureCoroRuntimeIslandPlan(conf)
 	allowed := map[string]bool{
 		"command-line-arguments":                               true,
+		"github.com/goplus/llgo/runtime/internal/clite/tls":    true,
 		"github.com/goplus/llgo/runtime/internal/coro":         true,
 		"github.com/goplus/llgo/runtime/internal/coroalloc":    true,
 		"github.com/goplus/llgo/runtime/internal/coroclock":    true,

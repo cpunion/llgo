@@ -106,6 +106,7 @@ func coroTargetExecutorStartV1(handle coro.ExecutorHandle) bool {
 		handle != coroProgramExecutorHandleV1State || handle.Slot == 0 || handle.Generation == 0 ||
 		!limitOK || !coroNativeWorkerPoolCanReleaseV1() ||
 		!coroNativeFleetV1State.execution.CanRelease() ||
+		!coroNativeForeignBoundaryTLSStartV1() ||
 		!coroTargetStartPhysicalThreadCapacityV1() ||
 		!coroNativeFleetStartProgramV1(coroNativeFleetDomainCapacityV1) {
 		return false

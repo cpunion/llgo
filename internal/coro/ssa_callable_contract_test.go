@@ -87,7 +87,7 @@ func caller() { foreign() }
 		{"affinity unknown", func() CallableContract { c := base; c.Affinity = AffinityUnknown; return c }(), ThreadAffine},
 		{"owner thread", func() CallableContract { c := base; c.Affinity = AffinityOwnerThread; return c }(), ThreadAffine},
 		{"host main", func() CallableContract { c := base; c.Affinity = AffinityHostMain; return c }(), ThreadAffine},
-		{"managed callback", func() CallableContract { c := base; c.Reentry = ReentryManagedCallback; return c }(), OpaqueExec},
+		{"managed callback", func() CallableContract { c := base; c.Reentry = ReentryManagedCallback; return c }(), 0},
 		{"reentry unknown", func() CallableContract { c := base; c.Reentry = ReentryUnknown; return c }(), OpaqueExec},
 		{"memory retained", func() CallableContract { c := base; c.Memory = MemoryRetained; return c }(), OpaqueExec},
 		{"memory unknown", func() CallableContract { c := base; c.Memory = MemoryUnknown; return c }(), OpaqueExec},

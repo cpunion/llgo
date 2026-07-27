@@ -132,7 +132,8 @@ func (p *context) tryCompileCoroPhysicalCall(b llssa.Builder, call *ssa.Call) (l
 	case coroPhysicalControlNone:
 		if instructionPlan.operation != coroPhysicalOperationWorkerCgo &&
 			instructionPlan.operation != coroPhysicalOperationWorkerCgoErrno &&
-			instructionPlan.operation != coroPhysicalOperationWorkerForeign {
+			instructionPlan.operation != coroPhysicalOperationWorkerForeign &&
+			instructionPlan.operation != coroPhysicalOperationForeignReentry {
 			return llssa.Expr{}, false
 		}
 		p.observeCoroPhysicalOperation(call, instructionPlan.operation)
@@ -159,6 +160,11 @@ func (p *context) tryCompileCoroPhysicalCall(b llssa.Builder, call *ssa.Call) (l
 				panic("physical coroutine worker call has no frozen foreign shape")
 			}
 			return p.compileCoroWorkerForeignCall(b, call, *instructionPlan.operationWorker), true
+		case coroPhysicalOperationForeignReentry:
+			if instructionPlan.operationWorker == nil {
+				panic("physical coroutine managed-reentry call has no frozen foreign shape")
+			}
+			return p.compileCoroForeignReentryCall(b, call, *instructionPlan.operationWorker), true
 		default:
 			panic("physical coroutine worker call selected an unsupported operation")
 		}

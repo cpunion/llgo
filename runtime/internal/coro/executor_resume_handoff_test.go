@@ -56,7 +56,12 @@ func beginExecutorResumeHandoffFixture(
 		task:   task,
 		resume: resume,
 	}
-	if !DetachExecutorResume(&fixture.handoff, driver, task.g) {
+	if !DetachExecutorResume(
+		&fixture.handoff,
+		driver,
+		task.g,
+		ExecutorResumeHandoffLockedForeign,
+	) {
 		current, _, _, ownerOK := CurrentExecutorDriver(task.g)
 		t.Fatalf(
 			"detach executor resume: current=%p ownerOK=%t critical=%t issued=%d currentG=%p runP=%p lock=%p depth=%d action=%+v decision=%+v taken=%t budget=%d",
@@ -137,7 +142,12 @@ func TestExecutorResumeHandoffRunsReplacementAndRestoresExactResume(t *testing.T
 			ExecutorResumeHandoffReturnable(driver),
 		)
 	}
-	if DetachExecutorResume(&fixture.handoff, driver, task.g) {
+	if DetachExecutorResume(
+		&fixture.handoff,
+		driver,
+		task.g,
+		ExecutorResumeHandoffLockedForeign,
+	) {
 		t.Fatal("detached the same active resume twice")
 	}
 
@@ -228,7 +238,12 @@ func TestExecutorResumeHandoffSettlesIssuedReadyDebt(t *testing.T) {
 		t.Fatal("lock ready-debt handoff task")
 	}
 	var handoff ExecutorResumeHandoff
-	if !DetachExecutorResume(&handoff, driver, task.g) {
+	if !DetachExecutorResume(
+		&handoff,
+		driver,
+		task.g,
+		ExecutorResumeHandoffLockedForeign,
+	) {
 		t.Fatal("detach ready-debt handoff task")
 	}
 	route, routeOK := driver.Route()
@@ -387,7 +402,12 @@ func TestExecutorResumeHandoffKeepsRegisteredCancellationSticky(t *testing.T) {
 		task:   task,
 		resume: resume,
 	}
-	if !DetachExecutorResume(&fixture.handoff, driver, task.g) {
+	if !DetachExecutorResume(
+		&fixture.handoff,
+		driver,
+		task.g,
+		ExecutorResumeHandoffLockedForeign,
+	) {
 		t.Fatal("detach task-control executor resume")
 	}
 
@@ -435,12 +455,22 @@ func TestExecutorResumeHandoffRejectsNonLockedAndMalformedRestore(t *testing.T) 
 	task.frame.header.SuspendReason = uint16(SuspendNone)
 	task.frame.header.Lifecycle = uint16(FrameActive)
 	var handoff ExecutorResumeHandoff
-	if DetachExecutorResume(&handoff, driver, task.g) ||
+	if DetachExecutorResume(
+		&handoff,
+		driver,
+		task.g,
+		ExecutorResumeHandoffLockedForeign,
+	) ||
 		handoff.Detached() || task.g.state != GRunning {
 		t.Fatal("detached an unlocked active resume")
 	}
 	if !EnterOSThreadLock(task.g) ||
-		!DetachExecutorResume(&handoff, driver, task.g) {
+		!DetachExecutorResume(
+			&handoff,
+			driver,
+			task.g,
+			ExecutorResumeHandoffLockedForeign,
+		) {
 		current, _, _, ownerOK := CurrentExecutorDriver(task.g)
 		t.Fatalf(
 			"detach exact locked resume: current=%p ownerOK=%t critical=%t issued=%d currentG=%p runP=%p lock=%p depth=%d action=%+v decision=%+v taken=%t budget=%d",

@@ -3008,6 +3008,9 @@ func newPackageEx(prog llssa.Program, ct *CallerTracking, patches Patches, rewri
 		fn()
 	}
 	ctx.emitCoroRootPackageAnchor(ret)
+	if err := ctx.emitCoroLibraryEffectSummary(); err != nil {
+		return nil, nil, err
+	}
 	ret.MaterializePreserveSyms()
 	if opts.MetaCollect {
 		if err := ret.FinishMetaCollection(); err != nil {
