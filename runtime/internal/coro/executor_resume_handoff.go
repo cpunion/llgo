@@ -36,10 +36,11 @@ const (
 	// ExecutorResumeHandoffLockedForeign is the existing LockOSThread-only
 	// blocking call path.
 	ExecutorResumeHandoffLockedForeign
-	// ExecutorResumeHandoffManagedReentry additionally admits an unlocked
-	// synchronous foreign call whose C stack may call back into Go. Callback
-	// children temporarily acquire an internal physical affinity.
-	ExecutorResumeHandoffManagedReentry
+	// ExecutorResumeHandoffSameMForeign admits an unlocked synchronous foreign
+	// call which must execute on its physical caller M. Its C stack may also
+	// call back through an exact managed adapter; callback children temporarily
+	// acquire an internal physical affinity.
+	ExecutorResumeHandoffSameMForeign
 )
 
 type executorResumeHandoffNoCopy struct{}
@@ -117,7 +118,7 @@ func DetachExecutorResume(
 ) bool {
 	if !emptyExecutorResumeHandoff(handoff) || driver == nil || task == nil ||
 		(mode != ExecutorResumeHandoffLockedForeign &&
-			mode != ExecutorResumeHandoffManagedReentry) {
+			mode != ExecutorResumeHandoffSameMForeign) {
 		return false
 	}
 	current, _, _, ownerOK := CurrentExecutorDriver(task)
@@ -188,14 +189,15 @@ func ExecutorResumeHandoffReturnable(driver *ExecutorDriver) bool {
 }
 
 // ExecutorResumeHandoffContext returns the exact logical task and physical
-// parent handle for a detached managed-reentry boundary. It exposes no target
-// function identity and performs no address lookup; a compiler-generated
-// callback adapter uses these values only to construct its child ramp.
+// parent handle for a detached same-M boundary which actually reentered
+// through a managed callback. It exposes no target function identity and
+// performs no address lookup; a compiler-generated callback adapter uses these
+// values only to construct its child ramp.
 func ExecutorResumeHandoffContext(
 	handoff *ExecutorResumeHandoff,
 ) (task *G, parent unsafe.Pointer, ok bool) {
 	if handoff == nil || handoff.state != executorResumeHandoffDetached ||
-		handoff.mode != ExecutorResumeHandoffManagedReentry ||
+		handoff.mode != ExecutorResumeHandoffSameMForeign ||
 		handoff.driver == nil || handoff.task == nil ||
 		handoff.action.Kind != ActionResume || handoff.action.Handle == nil ||
 		!ExecutorResumeHandoffReturnable(handoff.driver) ||
@@ -217,7 +219,7 @@ func RestoreExecutorResume(handoff *ExecutorResumeHandoff) bool {
 		handoff.action.Kind != ActionResume || handoff.action.Handle == nil ||
 		handoff.budget == 0 ||
 		(handoff.mode != ExecutorResumeHandoffLockedForeign &&
-			handoff.mode != ExecutorResumeHandoffManagedReentry) {
+			handoff.mode != ExecutorResumeHandoffSameMForeign) {
 		return false
 	}
 	driver, task := handoff.driver, handoff.task

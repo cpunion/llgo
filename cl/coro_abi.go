@@ -1445,7 +1445,7 @@ func validateCoroPhysicalABIForOwner(
 			explicitPanic:    explicitPanic,
 			channel:          channel,
 			worker:           universe != nil && universe.CoroWorkerSupported(),
-			foreignReentry:   universe != nil && universe.coroCapabilities.NativeFleet(),
+			sameMForeign:     universe != nil && universe.coroCapabilities.NativeFleet(),
 			hostOperation:    universe != nil && universe.coroCapabilities.HostOperation(),
 			interfacePlain:   interfacePlain,
 			managedInterface: managedInterface,
@@ -1731,7 +1731,7 @@ func validateCoroPhysicalABIForOwner(
 					}
 				}
 				if instructionPlan.operation == coroPhysicalOperationWorkerForeign ||
-					instructionPlan.operation == coroPhysicalOperationForeignReentry {
+					instructionPlan.operation == coroPhysicalOperationSameMForeign {
 					if instructionPlan.operationWorker == nil {
 						return coroLeafInstructionError(fn, plan, instr, "managed foreign call has no frozen physical shape")
 					}

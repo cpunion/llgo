@@ -32,7 +32,7 @@ const (
 	coroForeignReentryAcquireHookV1     = "__llgo_coro_foreign_reentry_acquire_v1"
 	coroForeignReentryRunHookV1         = "__llgo_coro_foreign_reentry_run_v1"
 	coroForeignReentryFailureHookV1     = "__llgo_coro_foreign_reentry_failure_v1"
-	coroReentrantForeignCallHookV1      = "__llgo_coro_reentrant_foreign_call_v1"
+	coroSameMForeignCallHookV1          = "__llgo_coro_same_m_foreign_call_v1"
 )
 
 func (p *context) coroForeignReentryTargetEntry(
@@ -180,7 +180,7 @@ func coroForeignReentryFailureSignature() *types.Signature {
 	)
 }
 
-func coroReentrantForeignCallSignature() *types.Signature {
+func coroSameMForeignCallSignature() *types.Signature {
 	params := []*types.Var{
 		types.NewParam(token.NoPos, nil, "task", types.Typ[types.UnsafePointer]),
 		types.NewParam(token.NoPos, nil, "thunk", types.Typ[types.Uintptr]),
@@ -298,28 +298,28 @@ func (p *context) coroForeignReentryAdapter(
 	return adapter
 }
 
-func (p *context) compileCoroForeignReentryCall(
+func (p *context) compileCoroSameMForeignCall(
 	b llssa.Builder,
 	call *ssa.Call,
 	shape coroWorkerForeignCallShape,
 ) llssa.Expr {
 	if p == nil || !p.hasCoroPhysicalBody() || call == nil ||
-		shape.mode != coroForeignCallModeManagedReentry ||
+		shape.mode != coroForeignCallModeSameM ||
 		shape.target == nil || shape.calleeType != nil ||
 		shape.signature == nil || shape.record == nil ||
-		len(shape.reentryCallbacks) == 0 || len(shape.rawCallbacks) != 0 {
-		panic("coroutine foreign reentry lowering escaped its frozen physical operation recipe")
+		len(shape.rawCallbacks) != 0 {
+		panic("coroutine same-M foreign lowering escaped its frozen physical operation recipe")
 	}
 	target, _, kind := p.compileFunction(shape.target)
 	if target == nil || kind != cFunc {
-		panic("coroutine foreign reentry lowering lost its exact C target")
+		panic("coroutine same-M foreign lowering lost its exact C target")
 	}
 	thunk := p.coroWorkerForeignThunk(shape, target)
 
 	oldInCFunc := p.inCFunc
 	p.inCFunc = true
 	if len(shape.arguments) != shape.argc {
-		panic("coroutine foreign reentry lowering disagrees with its frozen arguments")
+		panic("coroutine same-M foreign lowering disagrees with its frozen arguments")
 	}
 	compiled := make([]llssa.Expr, shape.argc)
 	for index, argument := range shape.arguments {
@@ -344,11 +344,11 @@ func (p *context) compileCoroForeignReentryCall(
 	keepaliveSlots := p.compileCoroCallKeepaliveSlots(b, call)
 	task := p.coroTask()
 	if task.IsNil() {
-		panic("coroutine foreign reentry call has no active physical body")
+		panic("coroutine same-M foreign call has no active physical body")
 	}
 	invoke := p.pkg.NewFunc(
-		coroReentrantForeignCallHookV1,
-		coroReentrantForeignCallSignature(),
+		coroSameMForeignCallHookV1,
+		coroSameMForeignCallSignature(),
 		llssa.InC,
 	)
 	b.Call(
@@ -363,7 +363,7 @@ func (p *context) compileCoroForeignReentryCall(
 		return llssa.Expr{}
 	}
 	if shape.resultField < 0 {
-		panic("coroutine foreign reentry lowering lost its result record field")
+		panic("coroutine same-M foreign lowering lost its result record field")
 	}
 	return b.LoadKnownNonNil(b.FieldAddr(record, shape.resultField))
 }

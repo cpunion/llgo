@@ -134,6 +134,70 @@ func Check() int32 {
 }
 `
 
+const coroNativeFleetSameMForeignE2ESource = `package main
+
+import _ "unsafe"
+
+var Start chan int32
+var ParentBefore uintptr
+var ParentAfter uintptr
+var ReplacementThread uintptr
+
+//llgo:coro noblock
+//go:linkname threadID C.__llgo_coro_native_fleet_e2e_thread_id_v1
+func threadID() uintptr
+
+//llgo:coro noblock
+//go:linkname resetState C.__llgo_coro_native_fleet_e2e_block_reset_v1
+func resetState()
+
+//llgo:coro noblock
+//go:linkname isWaiting C.__llgo_coro_native_fleet_e2e_blocked_v1
+func isWaiting() uintptr
+
+//llgo:coro noblock
+//go:linkname unblock C.__llgo_coro_native_fleet_e2e_release_v1
+func unblock()
+
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=caller-thread reentry=none memory=by-value
+//go:linkname sameMBlock C.__llgo_coro_native_fleet_e2e_block_v1
+func sameMBlock()
+
+func Setup() {
+	Start = make(chan int32, 1)
+	ParentBefore = 0
+	ParentAfter = 0
+	ReplacementThread = 0
+}
+
+func sender() {
+	<-Start
+	for isWaiting() == 0 {
+	}
+	ReplacementThread = threadID()
+	unblock()
+}
+
+func main() {
+	resetState()
+	go sender()
+	Start <- 1
+	ParentBefore = threadID()
+	sameMBlock()
+	ParentAfter = threadID()
+}
+
+func Check() int32 {
+	if ParentBefore == 0 || ParentAfter != ParentBefore {
+		return 72
+	}
+	if ReplacementThread == 0 || ReplacementThread == ParentBefore {
+		return 73
+	}
+	return 0
+}
+`
+
 const coroNativeFleetShutdownE2ESource = `package main
 
 import _ "unsafe"
@@ -1487,6 +1551,16 @@ func TestCoroNativeFleetManagedForeignReentryParksCallbackE2E(t *testing.T) {
 		t,
 		coroNativeFleetForeignReentryE2ESource,
 		"managed-foreign-reentry",
+		true,
+		1,
+	)
+}
+
+func TestCoroNativeFleetSameMForeignKeepsSchedulerProgressE2E(t *testing.T) {
+	runCoroNativeFleetE2E(
+		t,
+		coroNativeFleetSameMForeignE2ESource,
+		"same-m-foreign",
 		true,
 		1,
 	)

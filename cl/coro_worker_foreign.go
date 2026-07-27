@@ -34,7 +34,7 @@ type coroForeignCallMode uint8
 
 const (
 	coroForeignCallModeWorker coroForeignCallMode = iota
-	coroForeignCallModeManagedReentry
+	coroForeignCallModeSameM
 )
 
 type coroWorkerForeignCallShape struct {
@@ -413,15 +413,21 @@ type coroStaticForeignCallAuthority struct {
 	universe *EmissionUniverse
 }
 
-// mode accepts exactly one of the legacy worker certificate and the
+type coroStaticForeignCallAuthorization struct {
+	mode    coroForeignCallMode
+	reentry coro.ReentryClass
+}
+
+// authorize accepts exactly one of the legacy worker certificate and the
 // target-neutral callable declaration contract. Plan and frontend
 // certificates are compared as complete values; an ID match alone cannot hide
 // stale behavior or physical-ABI fields.
-func (a coroStaticForeignCallAuthority) mode(
+func (a coroStaticForeignCallAuthority) authorize(
 	target *ssa.Function,
-) (coroForeignCallMode, error) {
+) (coroStaticForeignCallAuthorization, error) {
+	reject := coroStaticForeignCallAuthorization{}
 	if a.plan == nil || a.universe == nil || target == nil {
-		return coroForeignCallModeWorker, fmt.Errorf(
+		return reject, fmt.Errorf(
 			"requires an exact coroutine plan, emission universe, and foreign target",
 		)
 	}
@@ -430,7 +436,7 @@ func (a coroStaticForeignCallAuthority) mode(
 	universeLegacy, universeLegacyCertified, legacyErr :=
 		a.universe.CoroForeignWorkerCertificate(target)
 	if legacyErr != nil {
-		return coroForeignCallModeWorker, fmt.Errorf(
+		return reject, fmt.Errorf(
 			"resolve frozen legacy worker-safe certificate: %w", legacyErr,
 		)
 	}
@@ -439,7 +445,7 @@ func (a coroStaticForeignCallAuthority) mode(
 	universeCallable, universeCallableCertified, callableErr :=
 		a.universe.CoroCallableContractCertificate(target)
 	if callableErr != nil {
-		return coroForeignCallModeWorker, fmt.Errorf(
+		return reject, fmt.Errorf(
 			"resolve frozen callable contract certificate: %w", callableErr,
 		)
 	}
@@ -450,58 +456,60 @@ func (a coroStaticForeignCallAuthority) mode(
 	callablePresent := planCallableCertified || !planCallable.IsZero() ||
 		universeCallableCertified || !universeCallable.IsZero()
 	if legacyPresent && callablePresent {
-		return coroForeignCallModeWorker, fmt.Errorf(
+		return reject, fmt.Errorf(
 			"generic callable contract and legacy worker-safe certificates are mutually exclusive",
 		)
 	}
 	if legacyPresent {
 		if !planLegacyCertified || planLegacy == "" {
-			return coroForeignCallModeWorker, fmt.Errorf(
+			return reject, fmt.Errorf(
 				"target has no exact legacy worker-safe certificate in the coroutine plan",
 			)
 		}
 		if !universeLegacyCertified || universeLegacy.ID == "" ||
 			universeLegacy.PhysicalSymbol == "" ||
 			universeLegacy.ABISignature == "" {
-			return coroForeignCallModeWorker, fmt.Errorf(
+			return reject, fmt.Errorf(
 				"target has no exact legacy worker-safe certificate in the frozen emission universe",
 			)
 		}
 		if planLegacy != universeLegacy.ID {
-			return coroForeignCallModeWorker, fmt.Errorf(
+			return reject, fmt.Errorf(
 				"legacy worker-safe certificate identity differs between the coroutine plan and frozen emission universe",
 			)
 		}
-		return coroForeignCallModeWorker, nil
+		return coroStaticForeignCallAuthorization{
+			mode: coroForeignCallModeWorker, reentry: coro.ReentryNone,
+		}, nil
 	}
 
 	if !callablePresent {
-		return coroForeignCallModeWorker, fmt.Errorf(
+		return reject, fmt.Errorf(
 			"target has no exact worker-safe certificate or compatible callable declaration contract",
 		)
 	}
 	if !planCallableCertified || planCallable.IsZero() {
-		return coroForeignCallModeWorker, fmt.Errorf(
+		return reject, fmt.Errorf(
 			"target has no exact callable contract certificate in the coroutine plan",
 		)
 	}
 	if !universeCallableCertified || universeCallable.IsZero() {
-		return coroForeignCallModeWorker, fmt.Errorf(
+		return reject, fmt.Errorf(
 			"target has no exact callable contract certificate in the frozen emission universe",
 		)
 	}
 	if planCallable != universeCallable {
-		return coroForeignCallModeWorker, fmt.Errorf(
+		return reject, fmt.Errorf(
 			"callable contract certificate differs between the coroutine plan and frozen emission universe",
 		)
 	}
 	if err := universeCallable.Validate(); err != nil {
-		return coroForeignCallModeWorker, fmt.Errorf(
+		return reject, fmt.Errorf(
 			"invalid callable contract certificate: %w", err,
 		)
 	}
 	if universeCallable.Scope != coro.CallableContractScopeDeclaration {
-		return coroForeignCallModeWorker, fmt.Errorf(
+		return reject, fmt.Errorf(
 			"callable contract scope %q does not authorize a typed C declaration",
 			universeCallable.Scope,
 		)
@@ -510,7 +518,7 @@ func (a coroStaticForeignCallAuthority) mode(
 		if _, addressOnly := parseCoroWorkerWordCallableABI(
 			universeCallable.CallableABI,
 		); addressOnly {
-			return coroForeignCallModeWorker, fmt.Errorf(
+			return reject, fmt.Errorf(
 				"callable ABI %q is address-only and may be consumed only by the FuncPCABI0-to-llgo.syscall worker path, not an ordinary typed foreign call",
 				universeCallable.CallableABI,
 			)
@@ -518,37 +526,52 @@ func (a coroStaticForeignCallAuthority) mode(
 	}
 	contract := universeCallable.Contract
 	if contract.Progress != coro.ProgressMayBlock {
-		return coroForeignCallModeWorker, fmt.Errorf(
+		return reject, fmt.Errorf(
 			"callable progress %q does not authorize synchronous blocking foreign lowering; require %q",
 			contract.Progress, coro.ProgressMayBlock,
-		)
-	}
-	if contract.Affinity != coro.AffinityAnyThread {
-		return coroForeignCallModeWorker, fmt.Errorf(
-			"callable affinity %q does not authorize the current foreign route; require %q",
-			contract.Affinity, coro.AffinityAnyThread,
 		)
 	}
 	switch contract.Memory {
 	case coro.MemoryByValue, coro.MemoryBorrowUntilReturn,
 		coro.MemoryBorrowUntilComplete:
 	default:
-		return coroForeignCallModeWorker, fmt.Errorf(
+		return reject, fmt.Errorf(
 			"callable memory lifetime %q does not authorize synchronous foreign transport",
 			contract.Memory,
 		)
 	}
-	switch contract.Reentry {
-	case coro.ReentryNone:
-		return coroForeignCallModeWorker, nil
-	case coro.ReentryManagedCallback:
-		return coroForeignCallModeManagedReentry, nil
+	switch contract.Affinity {
+	case coro.AffinityAnyThread:
+		switch contract.Reentry {
+		case coro.ReentryNone:
+			return coroStaticForeignCallAuthorization{
+				mode: coroForeignCallModeWorker, reentry: contract.Reentry,
+			}, nil
+		case coro.ReentryManagedCallback:
+			// A synchronous managed callback needs the parent M's native
+			// stack and replacement-M handoff even though the C implementation
+			// itself is otherwise thread-independent.
+			return coroStaticForeignCallAuthorization{
+				mode: coroForeignCallModeSameM, reentry: contract.Reentry,
+			}, nil
+		}
+	case coro.AffinityCallerThread:
+		switch contract.Reentry {
+		case coro.ReentryNone, coro.ReentryManagedCallback:
+			return coroStaticForeignCallAuthorization{
+				mode: coroForeignCallModeSameM, reentry: contract.Reentry,
+			}, nil
+		}
 	default:
-		return coroForeignCallModeWorker, fmt.Errorf(
-			"callable reentry %q does not identify a supported synchronous foreign route",
-			contract.Reentry,
+		return reject, fmt.Errorf(
+			"callable affinity %q does not identify a supported synchronous foreign route",
+			contract.Affinity,
 		)
 	}
+	return reject, fmt.Errorf(
+		"callable reentry %q does not identify a supported synchronous foreign route",
+		contract.Reentry,
+	)
 }
 
 // managedCallbackArgument recovers one exact callback from the frozen value
@@ -723,10 +746,11 @@ func validateCoroWorkerForeignCall(
 	authority := coroStaticForeignCallAuthority{
 		plan: plan, universe: universe,
 	}
-	mode, authorizationErr := authority.mode(target)
+	authorization, authorizationErr := authority.authorize(target)
 	if authorizationErr != nil {
 		return shape, true, authorizationErr
 	}
+	mode := authorization.mode
 	if targetPlan.External != coro.ExternalUnknownForeign || targetPlan.Emission != coro.EmitExternal ||
 		targetPlan.Effect != coro.NoSuspend || targetPlan.Exec != coro.BlockForeign|coro.IRQUnsafe {
 		return shape, true, fmt.Errorf(
@@ -781,7 +805,9 @@ func validateCoroWorkerForeignCall(
 			return shape, true, fmt.Errorf("argument %d type does not match the effective C parameter", index)
 		}
 		_, callbackParameter := types.Unalias(parameterType).Underlying().(*types.Signature)
-		if mode == coroForeignCallModeManagedReentry && callbackParameter {
+		if mode == coroForeignCallModeSameM &&
+			authorization.reentry == coro.ReentryManagedCallback &&
+			callbackParameter {
 			callback, valid, callbackErr :=
 				authority.managedCallbackArgument(argument, parameterType)
 			if callbackErr != nil {
@@ -822,7 +848,9 @@ func validateCoroWorkerForeignCall(
 			shape.rawCallbacks[index] = rawCallback
 		}
 	}
-	if mode == coroForeignCallModeManagedReentry && len(shape.reentryCallbacks) == 0 {
+	if mode == coroForeignCallModeSameM &&
+		authorization.reentry == coro.ReentryManagedCallback &&
+		len(shape.reentryCallbacks) == 0 {
 		return shape, true, fmt.Errorf(
 			"managed callback declaration has no exact function-typed callback argument",
 		)

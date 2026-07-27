@@ -62,7 +62,7 @@ func newForeignReentryFixture(t *testing.T, userLocked bool) *foreignReentryFixt
 		&fixture.handoff,
 		driver,
 		task.g,
-		ExecutorResumeHandoffManagedReentry,
+		ExecutorResumeHandoffSameMForeign,
 	) {
 		t.Fatal("detach managed foreign-reentry parent")
 	}
@@ -380,7 +380,7 @@ func TestForeignReentryNestingPreservesExactParentAndPanicOutcome(t *testing.T) 
 		&innerHandoff,
 		outer.driver,
 		outer.task.g,
-		ExecutorResumeHandoffManagedReentry,
+		ExecutorResumeHandoffSameMForeign,
 	) {
 		t.Fatal("detach nested foreign-reentry parent")
 	}
