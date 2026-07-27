@@ -61,21 +61,18 @@ func CreateOwner(thread *pthread.Thread, token *uint32, slot uint32) c.Int
 // reused, one means the bounded cache was empty, and every other value is an
 // invariant failure. No pthread is created by this operation.
 //
-//llgo:coro schedulerwait
 //go:linkname TryReuseOwner C.__llgo_coro_fleet_owner_try_reuse_v1
 func TryReuseOwner(thread *pthread.Thread, token *uint32, slot uint32) c.Int
 
 // OwnerReady completes CreateOwner only after the new raw owner has claimed
 // its stable scalar directory slot and execution route.
 //
-//llgo:coro schedulerwait
 //go:linkname OwnerReady C.__llgo_coro_fleet_owner_ready_v1
 func OwnerReady(slot uint32) c.Int
 
 // JoinOwner strongly joins one permanent owner and retires its exact physical
 // record. The caller releases one SetMaxThreads reservation only after success.
 //
-//llgo:coro schedulerwait
 //go:linkname JoinOwner C.__llgo_coro_fleet_owner_join_v1
 func JoinOwner(thread pthread.Thread, token uint32) c.Int
 
@@ -83,7 +80,6 @@ func JoinOwner(thread pthread.Thread, token uint32) c.Int
 // Go and may be cached. Zero retains the live pthread in standby; one means
 // the bounded cache was full and the adapter strongly joined it.
 //
-//llgo:coro schedulerwait
 //go:linkname ReleaseOwner C.__llgo_coro_fleet_owner_release_v1
 func ReleaseOwner(thread pthread.Thread, token, slot uint32) c.Int
 
@@ -104,7 +100,6 @@ func StopStandby(joined *uint32) c.Int
 // Yield lets the close owner wait for an already-admitted succession lease
 // without monopolizing a CPU while the clean successor finishes publication.
 //
-//llgo:coro schedulerwait
 //go:linkname Yield C.__llgo_coro_fleet_owner_yield_v1
 func Yield() c.Int
 

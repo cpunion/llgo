@@ -31,7 +31,7 @@ import (
 // PlanDigestSchema is the independent canonical schema used for archive cache
 // identity. It is deliberately separate from SummarySchema: summaries remain
 // diagnostic snapshots, while this document covers every lowering plan site.
-const PlanDigestSchema = "llgo.coro.plan-digest.v26"
+const PlanDigestSchema = "llgo.coro.plan-digest.v27"
 
 // Current experimental ABI identities. Keeping these in the analysis package
 // gives build, cache, and lowering code one version source of truth.
@@ -149,33 +149,32 @@ type planDigestRoot struct {
 }
 
 type planDigestFunction struct {
-	ID                              FunctionID                   `json:"id"`
-	IgnoredBody                     bool                         `json:"ignored_body"`
-	CallableIdentityCertificate     *CallableIdentityCertificate `json:"callable_identity_certificate,omitempty"`
-	CallableContractCertificate     *CallableContractCertificate `json:"callable_contract_certificate,omitempty"`
-	ForeignNoBlockCertificate       string                       `json:"foreign_noblock_certificate,omitempty"`
-	ForeignSyncCertificate          string                       `json:"foreign_sync_certificate,omitempty"`
-	ForeignSchedulerWaitCertificate string                       `json:"foreign_schedulerwait_certificate,omitempty"`
-	ForeignWorkerCertificate        string                       `json:"foreign_worker_certificate,omitempty"`
-	AssemblyNoSuspendCertificate    string                       `json:"assembly_nosuspend_certificate,omitempty"`
-	DeclaredEffect                  uint16                       `json:"declared_effect"`
-	LocalEffect                     uint16                       `json:"local_effect"`
-	Effect                          uint16                       `json:"effect"`
-	DeclaredExec                    uint16                       `json:"declared_exec"`
-	LocalExec                       uint16                       `json:"local_exec"`
-	Exec                            uint16                       `json:"exec"`
-	Demand                          uint8                        `json:"demand"`
-	ManagedDemand                   uint8                        `json:"managed_demand"`
-	RawPlainDemand                  bool                         `json:"raw_plain_demand"`
-	Emission                        uint8                        `json:"emission"`
-	FuncRep                         uint8                        `json:"func_rep"`
-	External                        uint8                        `json:"external"`
-	Recursive                       bool                         `json:"recursive"`
-	TrustedBoundedRecursion         bool                         `json:"trusted_bounded_recursion"`
-	Primary                         uint8                        `json:"primary"`
-	RawPlainOnly                    bool                         `json:"raw_plain_only"`
-	RawPlainEntry                   bool                         `json:"raw_plain_entry"`
-	RawPlainVariant                 bool                         `json:"raw_plain_variant"`
+	ID                           FunctionID                   `json:"id"`
+	IgnoredBody                  bool                         `json:"ignored_body"`
+	CallableIdentityCertificate  *CallableIdentityCertificate `json:"callable_identity_certificate,omitempty"`
+	CallableContractCertificate  *CallableContractCertificate `json:"callable_contract_certificate,omitempty"`
+	ForeignNoBlockCertificate    string                       `json:"foreign_noblock_certificate,omitempty"`
+	ForeignSyncCertificate       string                       `json:"foreign_sync_certificate,omitempty"`
+	ForeignWorkerCertificate     string                       `json:"foreign_worker_certificate,omitempty"`
+	AssemblyNoSuspendCertificate string                       `json:"assembly_nosuspend_certificate,omitempty"`
+	DeclaredEffect               uint16                       `json:"declared_effect"`
+	LocalEffect                  uint16                       `json:"local_effect"`
+	Effect                       uint16                       `json:"effect"`
+	DeclaredExec                 uint16                       `json:"declared_exec"`
+	LocalExec                    uint16                       `json:"local_exec"`
+	Exec                         uint16                       `json:"exec"`
+	Demand                       uint8                        `json:"demand"`
+	ManagedDemand                uint8                        `json:"managed_demand"`
+	RawPlainDemand               bool                         `json:"raw_plain_demand"`
+	Emission                     uint8                        `json:"emission"`
+	FuncRep                      uint8                        `json:"func_rep"`
+	External                     uint8                        `json:"external"`
+	Recursive                    bool                         `json:"recursive"`
+	TrustedBoundedRecursion      bool                         `json:"trusted_bounded_recursion"`
+	Primary                      uint8                        `json:"primary"`
+	RawPlainOnly                 bool                         `json:"raw_plain_only"`
+	RawPlainEntry                bool                         `json:"raw_plain_entry"`
+	RawPlainVariant              bool                         `json:"raw_plain_variant"`
 }
 
 type planDigestCall struct {
@@ -759,9 +758,6 @@ func (p *SSAPlan) canonicalDigestFunctions() ([]planDigestFunction, error) {
 		}
 		if certificate, ok := p.ForeignSyncCertificate(function.Function); ok {
 			ret[len(ret)-1].ForeignSyncCertificate = certificate
-		}
-		if certificate, ok := p.ForeignSchedulerWaitCertificate(function.Function); ok {
-			ret[len(ret)-1].ForeignSchedulerWaitCertificate = certificate
 		}
 		if certificate, ok := p.ForeignWorkerCertificate(function.Function); ok {
 			ret[len(ret)-1].ForeignWorkerCertificate = certificate

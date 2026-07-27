@@ -25,8 +25,8 @@ package runtime
 //
 // Keep the method surface so the shared nonblocking hchan implementation stays
 // compact. Every operation fails closed if an obsolete runtime entry reaches
-// this path, and—critically—none of these methods carries a schedulerwait edge
-// into the managed SSA plan.
+// this path, and—critically—none of these methods carries a native blocking
+// edge into the managed SSA plan.
 type channelWaitMutex struct{}
 type channelWaitCond struct{}
 

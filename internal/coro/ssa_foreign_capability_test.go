@@ -61,34 +61,6 @@ func caller() { leaf() }
 		}
 	})
 
-	t.Run("schedulerwait retains managed foreign wait", func(t *testing.T) {
-		config := baseConfig
-		config.ClassifyFunction = func(fn *ssa.Function) (SSAFunctionPolicy, error) {
-			if fn == leaf {
-				return SSAFunctionPolicy{
-					IgnoreBody: true, External: ExternalUnknownForeign, OverrideExternal: true,
-					Exec:                            BlockForeign | IRQUnsafe,
-					ForeignSchedulerWaitCertificate: "llgo.coro.foreign-schedulerwait.test.v1:exact",
-				}, nil
-			}
-			return SSAFunctionPolicy{}, nil
-		}
-		plan, err := AnalyzeSSA(prog, Roots{{Function: caller, Demand: SyncDemand}}, config)
-		if err != nil {
-			t.Fatal(err)
-		}
-		leafPlan, _ := plan.FunctionPlan(leaf)
-		callerPlan, _ := plan.FunctionPlan(caller)
-		if leafPlan.External != ExternalUnknownForeign || leafPlan.Effect != NoSuspend ||
-			leafPlan.Exec != BlockForeign|IRQUnsafe || !callerPlan.Effect.Contains(WaitForeign) ||
-			callerPlan.Emission != EmitCoroutine {
-			t.Fatalf("schedulerwait managed plans = leaf:%+v caller:%+v", leafPlan, callerPlan)
-		}
-		if certificate, ok := plan.ForeignSchedulerWaitCertificate(leaf); !ok || certificate == "" {
-			t.Fatalf("schedulerwait certificate = %q, %t", certificate, ok)
-		}
-	})
-
 	t.Run("worker certificate retains managed foreign wait", func(t *testing.T) {
 		config := baseConfig
 		config.ClassifyFunction = func(fn *ssa.Function) (SSAFunctionPolicy, error) {
@@ -128,10 +100,6 @@ func root() { leaf() }
 		IgnoreBody: true, External: ExternalKnown, OverrideExternal: true,
 		Exec: IRQUnsafe, ForeignSyncCertificate: "sync",
 	}
-	validWait := SSAFunctionPolicy{
-		IgnoreBody: true, External: ExternalUnknownForeign, OverrideExternal: true,
-		Exec: BlockForeign | IRQUnsafe, ForeignSchedulerWaitCertificate: "wait",
-	}
 	validWorker := SSAFunctionPolicy{
 		IgnoreBody: true, External: ExternalUnknownForeign, OverrideExternal: true,
 		Exec: BlockForeign | IRQUnsafe, ForeignWorkerCertificate: "worker",
@@ -141,16 +109,9 @@ func root() { leaf() }
 		policy SSAFunctionPolicy
 		want   string
 	}{
-		{"mutually exclusive", func() SSAFunctionPolicy { p := validSync; p.ForeignSchedulerWaitCertificate = "wait"; return p }(), "mutually exclusive"},
+		{"mutually exclusive", func() SSAFunctionPolicy { p := validSync; p.ForeignWorkerCertificate = "worker"; return p }(), "mutually exclusive"},
 		{"sync unknown foreign", func() SSAFunctionPolicy { p := validSync; p.External = ExternalUnknownForeign; return p }(), "foreign sync certificate requires"},
 		{"sync claims block", func() SSAFunctionPolicy { p := validSync; p.Exec |= BlockForeign; return p }(), "foreign sync certificate requires"},
-		{"schedulerwait known", func() SSAFunctionPolicy { p := validWait; p.External = ExternalKnown; return p }(), "foreign schedulerwait certificate requires"},
-		{"schedulerwait drops block", func() SSAFunctionPolicy { p := validWait; p.Exec = IRQUnsafe; return p }(), "foreign schedulerwait certificate requires"},
-		{"schedulerwait invalid UTF-8", func() SSAFunctionPolicy {
-			p := validWait
-			p.ForeignSchedulerWaitCertificate = string([]byte{0xff})
-			return p
-		}(), "valid UTF-8"},
 		{"worker known", func() SSAFunctionPolicy { p := validWorker; p.External = ExternalKnown; return p }(), "foreign worker certificate requires"},
 		{"worker drops block", func() SSAFunctionPolicy { p := validWorker; p.Exec = IRQUnsafe; return p }(), "foreign worker certificate requires"},
 		{"worker invalid UTF-8", func() SSAFunctionPolicy {
@@ -158,11 +119,6 @@ func root() { leaf() }
 			p.ForeignWorkerCertificate = string([]byte{0xff})
 			return p
 		}(), "valid UTF-8"},
-		{"worker conflicts with schedulerwait", func() SSAFunctionPolicy {
-			p := validWorker
-			p.ForeignSchedulerWaitCertificate = "wait"
-			return p
-		}(), "mutually exclusive"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: AsyncDemand}}, SSAConfig{
@@ -223,59 +179,6 @@ func root() { leaf() }
 	}
 	if len(digests) != 3 {
 		t.Fatalf("foreign sync certificate identities do not independently affect digest: %v", digests)
-	}
-}
-
-func TestCoroPlanDigestIncludesSchedulerWaitWithoutWeakeningManagedPlan(t *testing.T) {
-	prog, pkg := buildCoroTestSSA(t, "foreign_schedulerwait_digest.go", `package coroid
-func leaf() {}
-func root() { leaf() }
-`)
-	leaf := packageFunction(t, pkg, "leaf")
-	root := packageFunction(t, pkg, "root")
-	build := func(certificate string) *SSAPlan {
-		t.Helper()
-		config := planDigestSSAConfig()
-		config.MaxPlainInstructions = -1
-		config.ClassifyFunction = func(fn *ssa.Function) (SSAFunctionPolicy, error) {
-			if fn != leaf {
-				return SSAFunctionPolicy{}, nil
-			}
-			policy := SSAFunctionPolicy{
-				IgnoreBody: true, External: ExternalUnknownForeign, OverrideExternal: true,
-				Exec: BlockForeign | IRQUnsafe,
-			}
-			if certificate != "" {
-				policy.ForeignSchedulerWaitCertificate = certificate
-			}
-			return policy, nil
-		}
-		plan, err := AnalyzeSSA(prog, Roots{{Function: root, Demand: SyncDemand}}, config)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return plan
-	}
-	without := build("")
-	with := build("schedulerwait:exact")
-	withoutLeaf, _ := without.FunctionPlan(leaf)
-	withLeaf, _ := with.FunctionPlan(leaf)
-	withoutRoot, _ := without.FunctionPlan(root)
-	withRoot, _ := with.FunctionPlan(root)
-	if withoutLeaf != withLeaf || withoutRoot != withRoot || !withRoot.Effect.Contains(WaitForeign) {
-		t.Fatalf("schedulerwait certificate changed managed plan: without leaf=%+v root=%+v; with leaf=%+v root=%+v", withoutLeaf, withoutRoot, withLeaf, withRoot)
-	}
-	metadata := validPlanDigestMetadata()
-	withoutDigest, err := without.CoroPlanDigest(metadata)
-	if err != nil {
-		t.Fatal(err)
-	}
-	withDigest, err := with.CoroPlanDigest(metadata)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if withoutDigest == withDigest {
-		t.Fatalf("schedulerwait certificate is absent from plan digest %q", withDigest)
 	}
 }
 

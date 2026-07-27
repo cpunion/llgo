@@ -174,7 +174,7 @@ func (u *EmissionUniverse) freezeCoroCallableContractCertificates() error {
 	//
 	// This is a frozen frontend policy, not a backend inference from a symbol or
 	// code address. Explicit target-neutral contracts and legacy noblock/sync/
-	// schedulerwait/worker policies remain authoritative and mutually
+	// worker policies remain authoritative and mutually
 	// exclusive with the default.
 	for _, canonical := range u.functions {
 		if canonical == nil || u.canonicalAlias(canonical) != canonical ||

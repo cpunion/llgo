@@ -34,13 +34,15 @@ debt, not irreducible foreign semantics.
 
 ### 1.1 Implemented checkpoint
 
-The first inference cut reduces the exact production inventory to 154:
+The first inference cut reduced the exact production inventory to 154.  The
+raw-host operation cut then removed all 19 `schedulerwait` declarations, so the
+current exact production inventory is 135:
 
 | Directive | Count | Status |
 | --- | ---: | --- |
 | `noblock` | 66 | legacy bottom behavior; not structurally inferable |
 | `sync` | 60 | legacy bottom behavior; remove after the general same-M foreign episode or replace with producer metadata |
-| `schedulerwait` | 19 | intentional scheduler adapter behavior |
+| `schedulerwait` | 0 | removed; exact raw-host invocation is inferred from compiler-owned closure provenance |
 | `contract` | 9 | seven executor/thread contracts and two foreign-pointer result facts |
 | `workeraddr` | 0 | removed; target identity is producer-owned and arity is sink-derived |
 | `workerresult` | 0 | removed; wrapper result flow is SSA-derived |
@@ -183,25 +185,29 @@ The final source-level vocabulary should describe only bottom semantics:
 
 - `executor-safe`: the external call cannot wait for future progress and may
   execute while owning the executor;
-- `scheduler-wait`: this exact call is the target adapter's physical sleep/join
-  boundary and is never a managed Go call;
 - optional refinements for `any-thread`, `caller-thread`, managed reentry,
   retained memory, and no-return;
 - explicit async adapter operation identity when it cannot be represented by a
   typed compiler intrinsic.
+
+Scheduler/raw-host execution is not a declaration contract.  It is an
+invocation fact derived from an exact compiler-owned raw-host root and its
+closed static call closure.  A may-block declaration therefore stays
+`ExternalUnknownForeign + BlockForeign` for managed callers while the exact
+raw-host occurrence may execute synchronously on the already-owned host stack.
 
 These may be emitted by a binding generator or embedded in a compiled library.
 They must not be copied onto wrappers or callers.  Backend choices such as
 worker, poll, or host loop are not semantic contract vocabulary; they are
 selected later from target capabilities and the frozen semantic facts.
 
-Legacy `noblock`, `sync`, and `schedulerwait` remain accepted during migration,
-but their production inventory is monotonically bounded.  `workeraddr`,
-`workerresult`, and `worker` have a zero-production target.
+Legacy `noblock` and `sync` remain accepted during migration, but their
+production inventory is monotonically bounded.  `schedulerwait`, `workeraddr`,
+`workerresult`, and `worker` are rejected or have a zero-production target.
 
 ### 4.1 How the remaining source metadata shrinks
 
-The remaining 145 legacy directives are not call-graph coloring facts.  They
+The remaining 126 legacy directives are not call-graph coloring facts.  They
 assert behavior of opaque C implementations, so deleting them merely because a
 signature looks harmless would be unsound.  They are reduced in this order:
 
@@ -218,8 +224,10 @@ signature looks harmless would be unsound.  They are reduced in this order:
    closed C/LLVM call-graph proof.  Unknown external calls, inline assembly,
    blocking primitives, callbacks, or incomplete LTO visibility end the proof.
 5. A scheduler physical wait is selected by one typed scheduler operation
-   recipe.  The recipe carries the bottom wait role, while its ordinary Go
-   callers are still colored automatically.
+   occurrence whose recipe carries the bottom wait role.  The compiler proves
+   membership in the closed raw-host call-closure; no foreign declaration is
+   tagged to authorize it, and ordinary Go callers are still colored
+   automatically.
 
 This distinction matters: moving 145 names into a compiler table would reduce
 comments but not architecture debt.  Producer metadata may contain many exact
@@ -309,7 +317,7 @@ The remaining directives have different removal rules:
 | --- | --- |
 | `sync` (60) | Ordinary declarations use the conservative same-M/event default.  Runtime-only direct calls move under a small verified raw-host or executor adapter root. |
 | `noblock` (66) | Opaque C needs a producer proof; LLGo-owned definitions may use a closed C/LLVM proof.  The fact is embedded/generated and never propagated through Go source. |
-| `schedulerwait` (19) | Replace per-leaf tags with typed scheduler-wait adapter operations and verify their raw-host closure. |
+| `schedulerwait` (0; removal complete) | Per-leaf tags were deleted.  The compiler verifies each may-block occurrence against exact raw-host closure provenance while preserving managed `WaitForeign`. |
 | `contract` (9) | Keep only irreducible behavior/provenance facts; derive ABI, arity, callback positions, and wrapper flow. |
 
 The desired endpoint is not necessarily zero callable records.  It is zero
@@ -323,7 +331,8 @@ library source.
 The migration is complete only when executable tests enforce all of the
 following:
 
-1. no production `workeraddr`, `workerresult`, or `worker` directive;
+1. no production `schedulerwait`, `workeraddr`, `workerresult`, or `worker`
+   directive;
 2. no ordinary bodyful Go function carries a coloring directive;
 3. every function-address worker path has producer-forward identity and a
    sink-derived ABI before lowering;
@@ -370,11 +379,11 @@ remaining design gap is narrower:
 
 - exported Go functions are still treated as raw plain roots instead of
   compiler-generated C ABI ingress adapters;
-- the package archive publishes managed-Go effects but not exact foreign
-  callable facts or export-adapter bindings;
+- the v2 package archive now publishes exact foreign callable facts and
+  declarative export bindings, but consumers intentionally cannot turn those
+  records into invocation capability before the same-M/ingress gates exist;
 - the temporary unannotated-C default assumes any-thread/no-reentry;
-- a few non-ordinary operations are still encoded as `sync` or
-  `schedulerwait` declarations.
+- a few non-ordinary operations are still encoded as `sync` declarations.
 
 These gaps should be closed directly.  Replacing the existing directives with
 different caller annotations, a compiler symbol-name table, or a runtime
@@ -589,12 +598,12 @@ Special cases found in the current `sync` inventory map cleanly:
 
 ### 7.7 Directive elimination budget
 
-The 154 production directives are a migration budget, not an intended API:
+The 135 production directives are a migration budget, not an intended API:
 
 | Current class | Target | Removal gate |
 | --- | ---: | --- |
 | `sync` 60 | 0 | conservative same-M/event default plus family-4/5 internal operations |
-| `schedulerwait` 19 | 0 | one typed scheduler/raw-host operation |
+| `schedulerwait` 0 | 0 | complete: compiler-owned raw-host occurrence and closure proof |
 | `noblock` 66 | 0 in handwritten Go | generated/embedded proof, closed LLGo-owned C proof, or conservative fallback |
 | `contract` 9 | 0 in handwritten Go | typed result/lifetime flow, export binding, generated producer facts, or adapter-root metadata |
 
@@ -620,16 +629,18 @@ machine-produced facts.
 
 The reduction is accepted only in complete, ordered cuts:
 
-1. add and round-trip the v2 producer schema, including foreign callable and
-   export-adapter records;
+1. **Complete:** add and round-trip the v2 producer schema, including foreign
+   callable and declarative export-binding records;
 2. generate exact export adapters and prove nested, global-state, retained, and
    foreign-thread ingress without address lookup;
 3. reconcile return, recovered return, panic, `Goexit`, pending cancellation,
    and teardown across the C stack;
 4. change open and unannotated typed-C calls to the conservative target policy;
-5. replace scheduler waits and control operations with typed internal
+5. **Scheduler-wait complete; control pending:** infer exact raw-host wait
+   occurrences and replace remaining control operations with typed internal
    operations;
-6. remove each directive class and change its inventory gate directly to zero;
+6. remove each remaining directive class and change its inventory gate
+   directly to zero;
 7. reject any later source-visible increase.
 
 Executable coverage must include:

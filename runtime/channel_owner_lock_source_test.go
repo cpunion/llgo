@@ -55,7 +55,7 @@ func TestCoroChannelStateUsesPortableNoSuspendGate(t *testing.T) {
 		}
 	}
 	for _, forbidden := range []string{
-		"runtime/internal/clite/pthread", "schedulerwait", "time.Sleep", "coroSchedulerYield",
+		"runtime/internal/clite/pthread", "BlockForeign", "time.Sleep", "coroSchedulerYield",
 	} {
 		if strings.Contains(ownerText, forbidden) {
 			t.Errorf("%s contains blocking/foreign owner-gate dependency %q", ownerPath, forbidden)

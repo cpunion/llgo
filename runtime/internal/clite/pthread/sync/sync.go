@@ -105,9 +105,8 @@ func c_pthread_mutex_init(m *Mutex, attr *MutexAttr) c.Int
 func c_pthread_mutex_destroy(m *Mutex) c.Int
 
 // Lock may wait for another native thread. It is legal only in an audited raw
-// host-stack closure; managed callers retain BlockForeign/WaitForeign.
+// host-stack invocation; managed callers retain BlockForeign/WaitForeign.
 //
-//llgo:coro schedulerwait
 //go:linkname c_pthread_mutex_lock C.pthread_mutex_lock
 func c_pthread_mutex_lock(m *Mutex) c.Int
 
@@ -182,11 +181,9 @@ func c_pthread_rwlock_init(rw *RWLock, attr *RWLockAttr) c.Int
 //go:linkname c_pthread_rwlock_destroy C.pthread_rwlock_destroy
 func c_pthread_rwlock_destroy(rw *RWLock) c.Int
 
-//llgo:coro schedulerwait
 //go:linkname c_pthread_rwlock_rdlock C.pthread_rwlock_rdlock
 func c_pthread_rwlock_rdlock(rw *RWLock) c.Int
 
-//llgo:coro schedulerwait
 //go:linkname c_pthread_rwlock_wrlock C.pthread_rwlock_wrlock
 func c_pthread_rwlock_wrlock(rw *RWLock) c.Int
 
@@ -283,13 +280,12 @@ func c_pthread_cond_signal(c *Cond) c.Int
 func c_pthread_cond_broadcast(c *Cond) c.Int
 
 // Wait and TimedWait deliberately wait for another thread or a deadline and
-// therefore remain blocking in every managed plan.
+// therefore remain blocking in every managed plan. Direct raw-host execution
+// is inferred at each compiler-owned invocation.
 //
-//llgo:coro schedulerwait
 //go:linkname c_pthread_cond_wait C.pthread_cond_wait
 func c_pthread_cond_wait(c *Cond, m *Mutex) c.Int
 
-//llgo:coro schedulerwait
 //go:linkname c_pthread_cond_timedwait C.pthread_cond_timedwait
 func c_pthread_cond_timedwait(c *Cond, m *Mutex, abstime *time.Timespec) c.Int
 

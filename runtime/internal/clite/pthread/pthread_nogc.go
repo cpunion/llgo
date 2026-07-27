@@ -77,8 +77,8 @@ func Create(pthread *Thread, attr *Attr, routine RoutineFunc, arg c.Pointer) c.I
 //
 // Join waits for another native thread and is therefore legal only in an
 // audited compiler-owned raw host-stack closure. Managed callers keep their
-// foreign-wait effect.
+// foreign-wait effect; direct execution is inferred from the raw-host
+// invocation rather than declared on Join.
 //
-//llgo:coro schedulerwait
 //go:linkname Join C.pthread_join
 func Join(thread Thread, retval *c.Pointer) c.Int

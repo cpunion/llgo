@@ -147,8 +147,8 @@ func TestCoroPlanDigestDeterministicCompleteAndDomainSeparated(t *testing.T) {
 }
 
 func TestCoroPlanDigestRecordsWholeBuildRawPlainVariant(t *testing.T) {
-	if PlanDigestSchema != "llgo.coro.plan-digest.v26" {
-		t.Fatalf("plan digest schema = %q, want lowering-facts-bound schema v26", PlanDigestSchema)
+	if PlanDigestSchema != "llgo.coro.plan-digest.v27" {
+		t.Fatalf("plan digest schema = %q, want invocation-scoped raw-host schema v27", PlanDigestSchema)
 	}
 	prog, pkg := buildCoroTestSSA(t, "raw_variant_digest.go", `package coroid
 func root(seed int) int {

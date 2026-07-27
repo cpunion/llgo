@@ -207,7 +207,6 @@ func (u *EmissionUniverse) aliasPatchedFuncPCABI0Declarations() error {
 		delete(u.excluded, original)
 		delete(u.foreignNoBlock, original)
 		delete(u.foreignSync, original)
-		delete(u.foreignSchedulerWait, original)
 		delete(u.foreignWorker, original)
 		delete(u.linkIdentities, original)
 		delete(u.linkOnceNames, original)

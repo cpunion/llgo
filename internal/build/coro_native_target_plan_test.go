@@ -434,7 +434,7 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 			if err != nil {
 				return nil, err
 			}
-			if _, required := input.requiredPlain[function]; !required {
+			if _, required := input.requiredPlain[function]; !required && !want.external {
 				return nil, fmt.Errorf("native target function %s.%s is outside required plain closure", want.path, want.name)
 			}
 			if want.name == "nativeCPoll" {
@@ -453,11 +453,15 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 				return nil, fmt.Errorf("native target function %s.%s plan = %+v, present=%t", want.path, want.name, functionPlan, ok)
 			}
 			if want.external {
-				if _, schedulerWait := plan.ForeignSchedulerWaitCertificate(function); !schedulerWait ||
+				callable, certified := plan.CallableContractCertificate(function)
+				_, declarationTagged := input.requiredPlain[function]
+				if !certified || callable.Scope != coro.CallableContractScopeDeclaration ||
+					!coroRawPlainDirectForeignContractCompatible(callable.Contract) || declarationTagged ||
 					functionPlan.External != coro.ExternalUnknownForeign || functionPlan.Emission != coro.EmitExternal ||
 					functionPlan.ManagedDemand != coro.NoDemand || !functionPlan.RawPlainDemand ||
 					!functionPlan.Exec.Contains(coro.BlockForeign|coro.IRQUnsafe) {
-					return nil, fmt.Errorf("native poll leaf plan = %+v, want exact raw schedulerwait external", functionPlan)
+					return nil, fmt.Errorf("native poll leaf plan = %+v, callable=%+v certified=%t declaration-tagged=%t; want occurrence-inferred exact raw-host external",
+						functionPlan, callable, certified, declarationTagged)
 				}
 			} else if functionPlan.External != coro.Defined || functionPlan.ManagedDemand != coro.NoDemand ||
 				!functionPlan.RawPlainDemand || !functionPlan.RawPlainOnly || functionPlan.Emission != coro.EmitRawPlain ||

@@ -70,7 +70,7 @@ func TestCoroRuntimeAllocatorUsesPrivateSynchronousBoundary(t *testing.T) {
 		t.Error("ordinary bdwgc.Malloc was globally certified")
 	}
 	if strings.Contains(bdwgcText, "//llgo:coro sync\n"+mallocDeclaration) ||
-		strings.Contains(bdwgcText, "//llgo:coro schedulerwait\n"+mallocDeclaration) {
+		strings.Contains(bdwgcText, "//llgo:coro worker\n"+mallocDeclaration) {
 		t.Error("ordinary bdwgc.Malloc acquired a coroutine capability")
 	}
 	for _, declaration := range []string{
@@ -87,17 +87,11 @@ func TestCoroRuntimeAllocatorUsesPrivateSynchronousBoundary(t *testing.T) {
 	}
 	for _, declaration := range []string{
 		"//llgo:coro noblock\n//go:linkname Init C.GC_init",
-		"//llgo:coro schedulerwait\n//go:linkname Init C.GC_init",
 		"//llgo:coro noblock\n//go:linkname MallocUncollectable C.GC_malloc_uncollectable",
-		"//llgo:coro schedulerwait\n//go:linkname MallocUncollectable C.GC_malloc_uncollectable",
 		"//llgo:coro noblock\n//go:linkname Free C.GC_free",
-		"//llgo:coro schedulerwait\n//go:linkname Free C.GC_free",
 		"//llgo:coro noblock\n//go:linkname AddRoots C.GC_add_roots",
 		"//llgo:coro noblock\n//go:linkname RemoveRoots C.GC_remove_roots",
-		"//llgo:coro schedulerwait\n//go:linkname AddRoots C.GC_add_roots",
-		"//llgo:coro schedulerwait\n//go:linkname RemoveRoots C.GC_remove_roots",
 		"//llgo:coro noblock\n//go:linkname RegisterFinalizer C.GC_register_finalizer",
-		"//llgo:coro schedulerwait\n//go:linkname RegisterFinalizer C.GC_register_finalizer",
 		"//llgo:coro worker\n//go:linkname RegisterFinalizer C.GC_register_finalizer",
 	} {
 		if strings.Contains(bdwgcText, declaration) {
@@ -117,7 +111,7 @@ func TestCoroRuntimeAllocatorUsesPrivateSynchronousBoundary(t *testing.T) {
 		}
 	}
 	if strings.Contains(boundaryText, "//llgo:coro noblock\n//go:linkname coroRuntimeGCMalloc") ||
-		strings.Contains(boundaryText, "//llgo:coro schedulerwait\n//go:linkname coroRuntimeGCMalloc") {
+		strings.Contains(boundaryText, "//llgo:coro worker\n//go:linkname coroRuntimeGCMalloc") {
 		t.Error("private allocator boundary has a stronger or scheduler-only capability")
 	}
 

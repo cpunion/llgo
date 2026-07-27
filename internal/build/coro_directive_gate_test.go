@@ -72,15 +72,14 @@ func TestCoroProductionDirectiveInventory(t *testing.T) {
 	}
 
 	want := map[string]int{
-		"contract":      9,
-		"noblock":       66,
-		"schedulerwait": 19,
-		"sync":          60,
+		"contract": 9,
+		"noblock":  66,
+		"sync":     60,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf(
 			"production //llgo:coro inventory = %v, want exact monotonic snapshot %v; "+
-				"workeraddr, workerresult, worker, and caller-coloring directives must remain absent",
+				"schedulerwait, workeraddr, workerresult, worker, and caller-coloring directives must remain absent",
 			got, want,
 		)
 	}
