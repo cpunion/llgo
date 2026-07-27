@@ -580,15 +580,22 @@ func TestCoroCallerThreadForeignCallUsesSameMEpisode(t *testing.T) {
 	if !planned {
 		t.Fatal("same-M root has no frozen function plan")
 	}
-	workerOnly := *fixture.universe
-	workerOnly.coroCapabilities = coro.NewTargetCapabilities(true, false, false)
-	if err := validateCoroPhysicalABIWithUniverseCapabilities(
-		fixture.root, rootPlan, fixture.plan, &workerOnly,
-		true, true, false, true,
-	); err == nil || !strings.Contains(
-		err.Error(), "same-M foreign call requires the native foreign-episode capability",
+	workerOnlyErr := func() error {
+		capabilities := fixture.universe.coroCapabilities
+		defer func() {
+			fixture.universe.coroCapabilities = capabilities
+		}()
+		fixture.universe.coroCapabilities =
+			coro.NewTargetCapabilities(true, false, false)
+		return validateCoroPhysicalABIWithUniverseCapabilities(
+			fixture.root, rootPlan, fixture.plan, fixture.universe,
+			true, true, false, true,
+		)
+	}()
+	if workerOnlyErr == nil || !strings.Contains(
+		workerOnlyErr.Error(), "same-M foreign call requires the native foreign-episode capability",
 	) {
-		t.Fatalf("worker-only same-M validation error = %v", err)
+		t.Fatalf("worker-only same-M validation error = %v", workerOnlyErr)
 	}
 
 	compilation := &Compilation{
