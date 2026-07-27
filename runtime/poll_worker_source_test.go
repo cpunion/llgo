@@ -44,6 +44,7 @@ const (
 	runtimeCoroWorkerOwnerSource             = "internal/runtime/coro_worker_owner_llgo.go"
 	runtimeCoroNativeDriverSource            = "internal/runtime/coro_executor_driver_timer_llgo.go"
 	runtimeCoroNativeFleetSource             = "internal/runtime/coro_native_fleet.go"
+	runtimeCoroNativeFleetTargetSource       = "internal/runtime/coro_target_native_fleet_llgo.go"
 	runtimeCoroWorkerCallSource              = "internal/coroworker/call_llgo.go"
 	runtimeCoroWorkerCSource                 = "internal/coroworker/_worker/worker.c"
 	runtimeCoroWorkerHeaderSource            = "internal/coroworker/_worker/worker.h"
@@ -376,7 +377,10 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyGuardedSameMEntrance(t *testing.T) 
 		"sole same-M blocking foreign",
 		"!coro.CurrentOSThreadLocked(task)",
 		"type coroNativeForeignBoundaryV1 struct",
-		"coroNativeForeignBoundaryTLSV1 = tls.Alloc[*coroNativeForeignBoundaryV1](nil)",
+		"coroNativeForeignBoundaryTLSV1      tls.Handle[*coroNativeForeignBoundaryV1]",
+		"func coroNativeForeignBoundaryTLSStartV1() bool",
+		"tls.Alloc[*coroNativeForeignBoundaryV1](nil)",
+		"!coroNativeForeignBoundaryTLSReadyV1",
 		"coro.CurrentExecutorDriver(task)",
 		"coro.DetachExecutorResume(",
 		"boundary.parent.handoff.Begin(boundary.ownerEpoch)",
@@ -404,6 +408,13 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyGuardedSameMEntrance(t *testing.T) 
 		if !strings.Contains(entrance, required) {
 			t.Errorf("%s lacks locked-thread call guard %q", runtimeCoroOSThreadForeignSource, required)
 		}
+	}
+	target := readRuntimePollFile(t, runtimeCoroNativeFleetTargetSource)
+	if !strings.Contains(target, "!coroNativeForeignBoundaryTLSStartV1()") {
+		t.Errorf(
+			"%s does not initialize managed foreign-reentry TLS during serialized fleet startup",
+			runtimeCoroNativeFleetTargetSource,
+		)
 	}
 	for _, forbidden := range []string{
 		"map[uintptr]",

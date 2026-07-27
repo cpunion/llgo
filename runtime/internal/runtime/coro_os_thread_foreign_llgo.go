@@ -49,7 +49,29 @@ type coroNativeForeignBoundaryV1 struct {
 	active           bool
 }
 
-var coroNativeForeignBoundaryTLSV1 = tls.Alloc[*coroNativeForeignBoundaryV1](nil)
+var (
+	coroNativeForeignBoundaryTLSV1      tls.Handle[*coroNativeForeignBoundaryV1]
+	coroNativeForeignBoundaryTLSReadyV1 bool
+)
+
+// coroNativeForeignBoundaryTLSStartV1 makes the process-global pthread key an
+// explicit part of native-fleet startup. Runtime-only archives and other
+// section-garbage-collected library links are not required to retain or invoke
+// an otherwise anonymous package initializer merely because managed C
+// callbacks need TLS later.
+//
+// Native-fleet startup is serialized and one-shot. Keep this operation
+// idempotent so a later startup precondition may fail without turning the
+// already-created program-lifetime key into a retry hazard.
+func coroNativeForeignBoundaryTLSStartV1() bool {
+	if coroNativeForeignBoundaryTLSReadyV1 {
+		return true
+	}
+	coroNativeForeignBoundaryTLSV1 =
+		tls.Alloc[*coroNativeForeignBoundaryV1](nil)
+	coroNativeForeignBoundaryTLSReadyV1 = true
+	return true
+}
 
 func (boundary *coroNativeForeignBoundaryV1) startReplacementV1(
 	releaseManaged bool,
@@ -205,7 +227,8 @@ func (boundary *coroNativeForeignBoundaryV1) finishV1() bool {
 func coroNativeForeignBoundarySetTLSV1(
 	boundary *coroNativeForeignBoundaryV1,
 ) (previous *coroNativeForeignBoundaryV1, ok bool) {
-	if boundary == nil || !boundary.active {
+	if boundary == nil || !boundary.active ||
+		!coroNativeForeignBoundaryTLSReadyV1 {
 		return nil, false
 	}
 	previous = coroNativeForeignBoundaryTLSV1.Get()
@@ -216,7 +239,8 @@ func coroNativeForeignBoundarySetTLSV1(
 func coroNativeForeignBoundaryRestoreTLSV1(
 	boundary, previous *coroNativeForeignBoundaryV1,
 ) bool {
-	if boundary == nil || coroNativeForeignBoundaryTLSV1.Get() != boundary {
+	if boundary == nil || !coroNativeForeignBoundaryTLSReadyV1 ||
+		coroNativeForeignBoundaryTLSV1.Get() != boundary {
 		return false
 	}
 	if previous == nil {
@@ -234,6 +258,9 @@ func coroNativeForeignBoundaryRestoreTLSV1(
 //
 //export __llgo_coro_foreign_reentry_acquire_v1
 func __llgo_coro_foreign_reentry_acquire_v1(parentOut *unsafe.Pointer) unsafe.Pointer {
+	if !coroNativeForeignBoundaryTLSReadyV1 {
+		coroRuntimeAbort("synchronous foreign callback TLS is unavailable")
+	}
 	boundary := coroNativeForeignBoundaryTLSV1.Get()
 	if parentOut == nil || boundary == nil || !boundary.active ||
 		boundary.callbackAcquired || !boundary.reclaimReplacementV1() {
@@ -317,7 +344,8 @@ func __llgo_coro_foreign_reentry_run_v1(
 	child unsafe.Pointer,
 	typeOut, dataOut *unsafe.Pointer,
 ) uint32 {
-	if typeOut == nil || dataOut == nil {
+	if typeOut == nil || dataOut == nil ||
+		!coroNativeForeignBoundaryTLSReadyV1 {
 		coroRuntimeAbort("invalid synchronous foreign callback result output")
 	}
 	boundary := coroNativeForeignBoundaryTLSV1.Get()
