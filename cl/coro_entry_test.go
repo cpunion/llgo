@@ -177,6 +177,304 @@ func TestResolveFunctionSymbolUsesPrimaryAndExactPlan(t *testing.T) {
 	}
 }
 
+func TestImportedLibraryEntriesUsePublishedPhysicalDeclarations(t *testing.T) {
+	const source = `package foo
+func Imported(value uint32) uint32
+func Caller(value uint32) uint32 { return Imported(value) + 1 }
+`
+	ssaPkg, _, files := buildGoSSAPkg(t, source)
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := prepareStacklessEmissionUniverse(
+		prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files, Identity: "example.com/foo"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	planMetadata := coro.PlanDigestMetadata{
+		CoroABI:        coro.PhysicalABIV1,
+		SchedulerABI:   coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+		PanicABI:       coro.PanicExplicitStatusABIV0,
+		FuncRepABI:     coro.FuncRepABIV1,
+		TargetTriple:   prog.TargetSpec().Triple,
+		TargetCPU:      prog.TargetSpec().CPU,
+		TargetFeatures: prog.TargetSpec().Features,
+		TargetABI:      prog.TargetSpec().TargetABI,
+		PointerBits:    prog.PointerSize() * 8,
+		DataLayout:     prog.DataLayout(),
+	}
+	switch prog.TargetData().ByteOrder() {
+	case llvm.LittleEndian:
+		planMetadata.Endianness = "little"
+	case llvm.BigEndian:
+		planMetadata.Endianness = "big"
+	default:
+		t.Fatal("unknown target byte order")
+	}
+	libraryMetadata := coro.LibraryEffectMetadata{
+		FunctionIDSchema: coro.FunctionIDSchema,
+		CoroABI:          planMetadata.CoroABI,
+		SchedulerABI:     planMetadata.SchedulerABI,
+		PanicABI:         planMetadata.PanicABI,
+		FuncRepABI:       planMetadata.FuncRepABI,
+		TargetTriple:     planMetadata.TargetTriple,
+		TargetCPU:        planMetadata.TargetCPU,
+		TargetFeatures:   planMetadata.TargetFeatures,
+		TargetABI:        planMetadata.TargetABI,
+		PointerBits:      planMetadata.PointerBits,
+		Endianness:       planMetadata.Endianness,
+		DataLayout:       planMetadata.DataLayout,
+	}
+	imported := ssaPkg.Func("Imported")
+	caller := ssaPkg.Func("Caller")
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = libraryMetadata.CoroABI
+	functionIDs.SchedulerABI = libraryMetadata.SchedulerABI
+	functionIDs.ArchiveReady = true
+	importedID, err := coro.StableFunctionID(imported, functionIDs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	abiHash, err := universe.CoroLibraryEffects().FunctionABIHash(imported, libraryMetadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseSymbol, err := universe.CoroLibraryEffects().FunctionBaseSymbol(imported)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fact := coro.LibraryEffectFunction{
+		ID:            importedID,
+		ABIHash:       abiHash,
+		Effect:        coro.MayPark,
+		FuncRep:       coro.DirectCoro,
+		Primary:       coro.PrimaryCoroutine,
+		PrimarySymbol: baseSymbol + coroPrimarySuffix,
+	}
+	plan, err := coro.AnalyzeSSA(
+		ssaPkg.Prog,
+		coro.Roots{{Function: caller, Demand: coro.AsyncDemand}},
+		coro.SSAConfig{
+			EmissionUniverse:     ssaUniverse,
+			FunctionIDs:          functionIDs,
+			MaxPlainInstructions: -1,
+			ClassifyFunction: func(function *ssa.Function) (coro.SSAFunctionPolicy, error) {
+				if function == imported {
+					return fact.ImportedPolicy()
+				}
+				return coro.SSAFunctionPolicy{}, nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	importedPlan, found := plan.FunctionPlan(imported)
+	if !found || importedPlan.External != coro.ExternalKnown ||
+		importedPlan.Emission != coro.EmitExternal ||
+		importedPlan.FuncRep != coro.DirectCoro ||
+		importedPlan.Effect != fact.Effect {
+		t.Fatalf("imported plan = %+v, present=%t", importedPlan, found)
+	}
+	callerPlan, found := plan.FunctionPlan(caller)
+	if !found || callerPlan.Emission != coro.EmitCoroutine ||
+		!callerPlan.Effect.Contains(coro.MayPark|coro.AwaitStructured) {
+		t.Fatalf("caller was not automatically colored: %+v, present=%t", callerPlan, found)
+	}
+	newCompilation := func(
+		plan *coro.SSAPlan,
+		universe *EmissionUniverse,
+		fact coro.LibraryEffectFunction,
+	) *Compilation {
+		compilation := &Compilation{
+			CoroPlan:                  plan,
+			CoroPlanMetadata:          planMetadata,
+			CoroLibraryEffectMetadata: libraryMetadata,
+			CoroLibraryEffects:        map[*ssa.Function]coro.LibraryEffectFunction{imported: fact},
+			EmissionUniverse:          universe,
+		}
+		enableCoroChildAwaitCompilation(compilation)
+		return compilation
+	}
+	compilation := newCompilation(plan, universe, fact)
+	rawPlan, err := coro.AnalyzeSSA(
+		ssaPkg.Prog,
+		coro.Roots{
+			{Function: caller, Demand: coro.AsyncDemand},
+			{Function: imported, RawPlainDemand: true},
+		},
+		coro.SSAConfig{
+			EmissionUniverse:     ssaUniverse,
+			FunctionIDs:          functionIDs,
+			MaxPlainInstructions: -1,
+			ClassifyFunction: func(function *ssa.Function) (coro.SSAFunctionPolicy, error) {
+				if function == imported {
+					return fact.ImportedPolicy()
+				}
+				return coro.SSAFunctionPolicy{}, nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawFact := fact
+	rawFact.RawPlainSymbol = baseSymbol
+	rawCompilation := newCompilation(rawPlan, universe, rawFact)
+	if err := rawCompilation.validateCoroLibraryEffects(); err == nil ||
+		!strings.Contains(err.Error(), "raw-plain demand") {
+		t.Fatalf("external raw-plain v1 error = %v", err)
+	}
+	// Physical plans are committed once per emission universe. Use an
+	// independent consumer compilation to verify the plain-library path rather
+	// than reusing the coroutine fixture's backend state.
+	plainProg := newLLSSAProg(t)
+	defer plainProg.Dispose()
+	plainUniverse, err := prepareStacklessEmissionUniverse(
+		plainProg, nil, []EmissionPackage{{SSA: ssaPkg, Files: files, Identity: "example.com/foo"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainSSAUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, plainUniverse.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainFunctionIDs := plainUniverse.FunctionIDConfig()
+	plainFunctionIDs.CoroABI = libraryMetadata.CoroABI
+	plainFunctionIDs.SchedulerABI = libraryMetadata.SchedulerABI
+	plainFunctionIDs.ArchiveReady = true
+	plainID, err := coro.StableFunctionID(imported, plainFunctionIDs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainABIHash, err := plainUniverse.CoroLibraryEffects().FunctionABIHash(imported, libraryMetadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainBaseSymbol, err := plainUniverse.CoroLibraryEffects().FunctionBaseSymbol(imported)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainFact := coro.LibraryEffectFunction{
+		ID:            plainID,
+		ABIHash:       plainABIHash,
+		Effect:        coro.NoSuspend,
+		FuncRep:       coro.DirectPlain,
+		Primary:       coro.PrimaryPlain,
+		PrimarySymbol: plainBaseSymbol,
+	}
+	plainPlan, err := coro.AnalyzeSSA(
+		ssaPkg.Prog,
+		coro.Roots{{Function: caller, Demand: coro.SyncDemand}},
+		coro.SSAConfig{
+			EmissionUniverse:     plainSSAUniverse,
+			FunctionIDs:          plainFunctionIDs,
+			MaxPlainInstructions: -1,
+			ClassifyFunction: func(function *ssa.Function) (coro.SSAFunctionPolicy, error) {
+				if function == imported {
+					return plainFact.ImportedPolicy()
+				}
+				return coro.SSAFunctionPolicy{}, nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainImportedPlan, found := plainPlan.FunctionPlan(imported)
+	if !found || plainImportedPlan.External != coro.ExternalKnown ||
+		plainImportedPlan.Emission != coro.EmitExternal ||
+		plainImportedPlan.FuncRep != coro.DirectPlain ||
+		plainImportedPlan.Effect != coro.NoSuspend {
+		t.Fatalf("plain imported plan = %+v, present=%t", plainImportedPlan, found)
+	}
+	plainCallerPlan, found := plainPlan.FunctionPlan(caller)
+	if !found || plainCallerPlan.Emission != coro.EmitPlain ||
+		plainCallerPlan.Effect != coro.NoSuspend {
+		t.Fatalf("plain caller was unnecessarily colored: %+v, present=%t", plainCallerPlan, found)
+	}
+	plainCompilation := newCompilation(plainPlan, plainUniverse, plainFact)
+	plainPkg, _, err := NewPackageExWithEmbedOptions(
+		plainProg, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: plainCompilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainModule := plainPkg.Module()
+	if err := llvm.VerifyModule(plainModule, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify imported plain consumer: %v\n%s", err, plainModule.String())
+	}
+	plainDeclaration := plainModule.NamedFunction(plainFact.PrimarySymbol)
+	if plainDeclaration.IsNil() || !plainDeclaration.FirstBasicBlock().IsNil() {
+		t.Fatalf("published plain library entry is not one external declaration:\n%s", plainModule.String())
+	}
+	if !plainModule.NamedFunction(plainBaseSymbol + coroPrimarySuffix).IsNil() {
+		t.Fatalf("consumer manufactured a coroutine declaration for plain import:\n%s", plainModule.String())
+	}
+	plainCaller := plainModule.NamedFunction("foo.Caller")
+	if plainCaller.IsNil() || !strings.Contains(plainCaller.String(), plainFact.PrimarySymbol) {
+		t.Fatalf("plain caller does not use producer-published entry:\n%s", plainModule.String())
+	}
+	for _, test := range []struct {
+		name string
+		edit func(*coro.LibraryEffectFunction)
+		want string
+	}{
+		{
+			name: "ABI hash",
+			edit: func(fact *coro.LibraryEffectFunction) {
+				fact.ABIHash = strings.Repeat("f", 64)
+			},
+			want: "ABI hash",
+		},
+		{
+			name: "primary symbol",
+			edit: func(fact *coro.LibraryEffectFunction) {
+				fact.PrimarySymbol += ".wrong"
+			},
+			want: "primary symbol",
+		},
+	} {
+		t.Run("reject "+test.name+" mismatch", func(t *testing.T) {
+			badFact := fact
+			test.edit(&badFact)
+			bad := newCompilation(plan, universe, badFact)
+			if err := bad.validateCoroLibraryEffects(); err == nil ||
+				!strings.Contains(err.Error(), test.want) {
+				t.Fatalf("%s mismatch error = %v", test.name, err)
+			}
+		})
+	}
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := pkg.Module()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify imported coroutine consumer: %v\n%s", err, module.String())
+	}
+	declaration := module.NamedFunction(fact.PrimarySymbol)
+	if declaration.IsNil() || !declaration.FirstBasicBlock().IsNil() {
+		t.Fatalf("published library entry is not one external declaration:\n%s", module.String())
+	}
+	if !module.NamedFunction(baseSymbol).IsNil() {
+		t.Fatalf("consumer manufactured a legacy plain declaration for imported coroutine:\n%s", module.String())
+	}
+	body := requireCoroPhysicalFunction(t, module, "foo.Caller").String()
+	if !strings.Contains(body, fact.PrimarySymbol) {
+		t.Fatalf("caller does not await the producer-published physical symbol:\n%s", body)
+	}
+}
+
 func TestCoroEntryOmitsUndemandedEffectfulComplexFunction(t *testing.T) {
 	const source = `package foo
 func Complex(ch chan int) int {

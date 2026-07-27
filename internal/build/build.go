@@ -167,7 +167,13 @@ type CoroPlanInput struct {
 	requiredDirectPlain            []requiredCoroDirectPlainCallArgument
 	requiredClosedDynamic          map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate
 	requiredGlobalFunctionSlots    map[ssa.CallInstruction]coroGlobalFunctionSlotProof
-	recordAnalysis                 func(*coro.SSAPlan)
+	// importedLibraryEffects contains only exact bodyless managed-Go
+	// declarations whose producer metadata, FunctionID, structural ABI, target
+	// ABI, and physical symbol were preflighted by the build driver. Go callers
+	// inherit these facts through the ordinary SSA fixed point; no source
+	// annotation is propagated.
+	importedLibraryEffects map[*ssa.Function]coro.LibraryEffectFunction
+	recordAnalysis         func(*coro.SSAPlan)
 }
 
 type coroCallArgumentKey struct {
@@ -468,7 +474,8 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 	// otherwise use the conservative unknown-foreign boundary.
 	if in.functionBackground != nil || in.foreignNoBlock != nil || in.foreignSync != nil ||
 		in.foreignSchedulerWait != nil || in.foreignWorker != nil || in.callableIdentity != nil || in.callableContract != nil ||
-		in.noPreempt != nil || in.noUnwind != nil || in.assemblyNoSuspend != nil || config.ClassifyFunction != nil {
+		in.noPreempt != nil || in.noUnwind != nil || in.assemblyNoSuspend != nil ||
+		len(in.importedLibraryEffects) != 0 || config.ClassifyFunction != nil {
 		classify := config.ClassifyFunction
 		config.ClassifyFunction = func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
 			var policy coro.SSAFunctionPolicy
@@ -488,6 +495,27 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 				}
 				frontendC = classified && background == llssa.InC
 				frontendManagedBodyless = classified && background == llssa.InGo && len(fn.Blocks) == 0
+			}
+			importedFact, imported := in.importedLibraryEffects[fn]
+			if imported {
+				if !frontendManagedBodyless || frontendC {
+					return coro.SSAFunctionPolicy{}, fmt.Errorf(
+						"imported library effect for %q does not name one exact bodyless managed-Go declaration",
+						fn.Name(),
+					)
+				}
+				if policy != (coro.SSAFunctionPolicy{}) {
+					return coro.SSAFunctionPolicy{}, fmt.Errorf(
+						"builder policy for imported library function %q conflicts with producer-owned metadata",
+						fn.Name(),
+					)
+				}
+				policy, err = importedFact.ImportedPolicy()
+				if err != nil {
+					return coro.SSAFunctionPolicy{}, fmt.Errorf(
+						"apply imported library effect for %q: %w", fn.Name(), err,
+					)
+				}
 			}
 			noPreemptCertificate := ""
 			noPreemptCertified := false
@@ -777,7 +805,8 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 				policy.Exec = coro.IRQUnsafe
 				policy.AssemblyNoSuspendCertificate = assemblyCertificate
 			}
-			if policy.IgnoreBody && !frontendC && !assemblyCertified && !(frontendManagedBodyless && certified) {
+			if policy.IgnoreBody && !frontendC && !assemblyCertified &&
+				!(frontendManagedBodyless && (certified || imported)) {
 				return coro.SSAFunctionPolicy{}, fmt.Errorf("builder cannot ignore the SSA body of non-C function %q", fn.Name())
 			}
 			if !frontendC {
@@ -2746,6 +2775,7 @@ type Config struct {
 	Goos               string
 	Goarch             string
 	Target             string // target name (e.g., "rp2040", "wasi") - takes precedence over Goos/Goarch
+	ImportCfg          string // go tool compile importcfg; packagefile archives may carry LLGo producer metadata
 	OptLevel           optlevel.Level
 	LTO                lto.Mode
 	LTOPlugin          lto.PassPlugin
@@ -3411,6 +3441,19 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	if len(packages) != 0 && ctx.coroEmission == nil {
 		return fmt.Errorf("enable coroutine entry resolution: prepared emission universe is required")
 	}
+	var importedLibraryEffects map[*ssa.Function]coro.LibraryEffectFunction
+	var importedLibraryMetadata coro.LibraryEffectMetadata
+	if ctx.coroEmission != nil && ctx.buildConf.ImportCfg != "" {
+		index, metadata, err := loadCoroLibraryEffectIndex(ctx)
+		if err != nil {
+			return fmt.Errorf("load coroutine library effects: %w", err)
+		}
+		importedLibraryMetadata = metadata
+		importedLibraryEffects, err = prepareCoroImportedLibraryEffects(ctx, index, metadata)
+		if err != nil {
+			return fmt.Errorf("prepare coroutine library effects: %w", err)
+		}
+	}
 	analyzedPlans := make(map[*coro.SSAPlan]struct{})
 	var analyzedPlansMu sync.Mutex
 	var requiredRoots coro.Roots
@@ -3482,6 +3525,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		requiredDirectPlain:         requiredDirectPlain,
 		requiredClosedDynamic:       requiredClosedDynamic,
 		requiredGlobalFunctionSlots: requiredGlobalFunctionSlots,
+		importedLibraryEffects:      importedLibraryEffects,
 		recordAnalysis: func(plan *coro.SSAPlan) {
 			if plan != nil {
 				analyzedPlansMu.Lock()
@@ -3588,19 +3632,21 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	ctx.coroLoweringFacts = loweringFacts
 	ctx.coroLoweringFactsDigest = loweringFactsDigest
 	ctx.clCompilation = &cl.Compilation{
-		CoroPlan:                plan,
-		CoroPlanObserver:        ctx.buildConf.CoroPlanObserver,
-		CoroTargetCapabilities:  ctx.buildConf.coroTargetCapabilities(),
-		CoroFrameRetentionABI:   frameRetentionABI,
-		CoroPlanDigest:          digest,
-		CoroPlanMetadata:        metadata,
-		CoroLoweringFacts:       loweringFacts,
-		CoroLoweringFactsDigest: loweringFactsDigest,
-		CoroABI:                 metadata.CoroABI,
-		SchedulerABI:            metadata.SchedulerABI,
-		PanicABI:                metadata.PanicABI,
-		FuncRepABI:              metadata.FuncRepABI,
-		EmissionUniverse:        ctx.coroEmission,
+		CoroPlan:                  plan,
+		CoroPlanObserver:          ctx.buildConf.CoroPlanObserver,
+		CoroTargetCapabilities:    ctx.buildConf.coroTargetCapabilities(),
+		CoroFrameRetentionABI:     frameRetentionABI,
+		CoroPlanDigest:            digest,
+		CoroPlanMetadata:          metadata,
+		CoroLoweringFacts:         loweringFacts,
+		CoroLoweringFactsDigest:   loweringFactsDigest,
+		CoroABI:                   metadata.CoroABI,
+		SchedulerABI:              metadata.SchedulerABI,
+		PanicABI:                  metadata.PanicABI,
+		FuncRepABI:                metadata.FuncRepABI,
+		EmissionUniverse:          ctx.coroEmission,
+		CoroLibraryEffectMetadata: importedLibraryMetadata,
+		CoroLibraryEffects:        maps.Clone(importedLibraryEffects),
 	}
 	if ctx.coroEmission != nil {
 		bootstraps, err := prepareCoroProgramBootstrapsV1(ctx)
@@ -5848,7 +5894,9 @@ func normalizeToArchive(ctx *context, aPkg *aPackage, verbose bool) error {
 	archiveFile.Close()
 	archivePath := archiveFile.Name()
 
-	if err := ctx.createArchiveFile(archivePath, aPkg.ObjFiles, verbose); err != nil {
+	if err := ctx.createPackageArchiveFile(
+		archivePath, aPkg.ObjFiles, aPkg.CoroLibraryEffectRecords, verbose,
+	); err != nil {
 		os.Remove(archivePath)
 		return fmt.Errorf("create archive for %s: %w", aPkg.PkgPath, err)
 	}
@@ -6624,6 +6672,51 @@ func (c *context) createMergedArchiveFile(archivePath string, inputs []string, v
 	return nil
 }
 
+// createPackageArchiveFile adds the coroutine producer record to one package
+// archive in a reserved metadata-only native object. The object has no exported
+// symbols, so an ordinary static link never extracts it; unlike a raw ar member
+// it is nevertheless accepted by linkers which validate every member. Keeping
+// it separate also makes Full/Thin LTO archives readable without loading LLVM
+// bitcode.
+func (c *context) createPackageArchiveFile(
+	archivePath string,
+	objFiles []string,
+	coroLibraryEffectRecords []byte,
+	verbose ...bool,
+) error {
+	if len(coroLibraryEffectRecords) == 0 {
+		return c.createArchiveFile(archivePath, objFiles, verbose...)
+	}
+	summaries, err := coro.ParseLibraryEffectSummaryRecords(coroLibraryEffectRecords)
+	if err != nil {
+		return fmt.Errorf("validate package coroutine library metadata: %w", err)
+	}
+	if len(summaries) != 1 {
+		return fmt.Errorf("package coroutine library metadata contains %d summaries, want 1", len(summaries))
+	}
+	for _, object := range objFiles {
+		if filepath.Base(object) == coro.LibraryEffectArchiveMember {
+			return fmt.Errorf(
+				"package object %q collides with reserved coroutine metadata member %q",
+				object, coro.LibraryEffectArchiveMember,
+			)
+		}
+	}
+	tempDir, err := os.MkdirTemp("", "llgo-coro-archive-*")
+	if err != nil {
+		return fmt.Errorf("create package coroutine metadata directory: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+	metadataPath := filepath.Join(tempDir, coro.LibraryEffectArchiveMember)
+	if err := c.writeCoroLibraryEffectObject(metadataPath, coroLibraryEffectRecords); err != nil {
+		return fmt.Errorf("write package coroutine metadata object: %w", err)
+	}
+	inputs := make([]string, 0, len(objFiles)+1)
+	inputs = append(inputs, objFiles...)
+	inputs = append(inputs, metadataPath)
+	return c.createArchiveFile(archivePath, inputs, verbose...)
+}
+
 // createArchiveFile builds an archive at archivePath atomically to avoid races when
 // multiple builds target the same output concurrently.
 func (c *context) createArchiveFile(archivePath string, objFiles []string, verbose ...bool) error {
@@ -6726,6 +6819,11 @@ func buildPkg(ctx *context, aPkg *aPackage, verbose bool) error {
 	}
 
 	aPkg.LPkg = ret
+	coroLibraryEffectRecords, err := cl.CoroLibraryEffectSummaryRecords(ret)
+	if err != nil {
+		return fmt.Errorf("collect coroutine library effect records for %s: %w", pkgPath, err)
+	}
+	aPkg.CoroLibraryEffectRecords = coroLibraryEffectRecords
 	emittedCoroRootAnchor := ret.CoroRootPackageAnchor()
 	if aPkg.CacheHit {
 		if aPkg.CoroRootAnchorV1 != emittedCoroRootAnchor {
@@ -7187,6 +7285,11 @@ type aPackage struct {
 	ArchiveFile string   // archive file: .a (output of archiver, used for linking)
 	Meta        *meta.PackageMeta
 	rewriteVars map[string]string
+
+	// CoroLibraryEffectRecords is producer-owned package metadata copied from
+	// cl before object emission. The package archiver publishes it through a
+	// metadata-only native member even when ObjFiles contain LTO bitcode.
+	CoroLibraryEffectRecords []byte
 
 	// Cache related fields
 	Fingerprint      string // fingerprint digest

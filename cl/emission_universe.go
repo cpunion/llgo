@@ -150,6 +150,12 @@ type EmissionUniverse struct {
 	byPath             map[string]*preparedEmissionPackage
 	pathDup            map[string]bool
 
+	// libraryEffects is the narrow immutable producer/consumer view for
+	// cross-archive coroutine facts. Keeping physical ABI and symbol proofs
+	// behind this view prevents archive plumbing from becoming another direct
+	// EmissionUniverse/plan authority.
+	libraryEffects CoroLibraryEffectView
+
 	functions             []*ssa.Function
 	required              map[*ssa.Function]none
 	aliases               map[*ssa.Function]*ssa.Function
@@ -664,6 +670,7 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		localGenericOwners:      make(map[*types.Named]*ssa.Function),
 		genericNamedTypes:       make(map[*types.Named]*types.Named),
 	}
+	u.libraryEffects.index.universe = u
 	for i, input := range inputs {
 		if input.SSA == nil || input.SSA.Prog == nil || input.SSA.Pkg == nil {
 			return nil, fmt.Errorf("prepare emission universe: package %d is incomplete", i)
@@ -929,6 +936,16 @@ func (u *EmissionUniverse) Functions() []*ssa.Function {
 		return nil
 	}
 	return append([]*ssa.Function(nil), u.functions...)
+}
+
+// CoroLibraryEffects returns the immutable archive-facing projection. Archive
+// code must use this view instead of growing another direct plan/universe
+// authority surface.
+func (u *EmissionUniverse) CoroLibraryEffects() CoroLibraryEffectView {
+	if u == nil {
+		return CoroLibraryEffectView{}
+	}
+	return u.libraryEffects
 }
 
 // CoroRawABIDirective returns the exact source directive that publishes fn

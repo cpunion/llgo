@@ -662,7 +662,7 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 		dbgInstrln("==> NewFunc", name, "type:", sig.Recv(), sig, "ftype:", ftype)
 	}
 	var physicalABI *coroPhysicalABI
-	if entry.physical && entry.plan.Emission == coro.EmitCoroutine {
+	if entry.usesCoroPhysicalABI() {
 		// x/tools exposes a declared method receiver as fn.Params[0]. Normalize
 		// the callable source ABI before adding the two coroutine-owned hidden
 		// parameters so compileValue's sourceParamBase maps every SSA parameter
@@ -692,7 +692,7 @@ func (p *context) compileFuncDeclVariantEntry(pkg llssa.Package, entry plannedFu
 	} else {
 		p.funcs[f] = fn
 	}
-	if physicalABI != nil {
+	if physicalABI != nil && entry.plan.Emission == coro.EmitCoroutine {
 		p.emitCoroRootFactory(pkg, entry, *physicalABI, sourceSig, fn)
 	}
 	isCgo := isCgoExternSymbol(f)

@@ -590,7 +590,9 @@ func (c *context) saveToCache(pkg *aPackage) error {
 		}
 	} else if len(pkg.ObjFiles) > 0 {
 		// Otherwise, create archive from object files
-		if err := c.createArchiveFile(paths.Archive, pkg.ObjFiles); err != nil {
+		if err := c.createPackageArchiveFile(
+			paths.Archive, pkg.ObjFiles, pkg.CoroLibraryEffectRecords,
+		); err != nil {
 			return err
 		}
 	} else {

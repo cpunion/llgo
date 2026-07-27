@@ -496,22 +496,24 @@ producer 摘要与 whole-program `CoroPlanDigest` 是两套正交数据：
 - metadata 精确绑定 Coro/Scheduler/Panic/FuncRep ABI、target triple/CPU/features/ABI、pointer width、endianness、LLVM data layout和 target capabilities；
 - object section 使用 magic、长度和域分离 SHA-256 framing。ELF/COFF/Wasm 使用 `llgo_coro_effect`，Mach-O 使用 `__LLVM,__llgo_coro`；
 - section global 进入 `llvm.compiler.used`，保证生成 object/archive 前不被 LLVM 删除，但不进入 `llvm.used`，所以 final linker 可在形成可执行文件时丢弃；
+- package archive另带保留名`__.LLGOCORO` sidecar member，避免为了读摘要而解析Full/Thin LTO bitcode。ELF、Mach-O和COFF使用无导出符号的最小native object；Wasm使用custom section，不占linear memory。真实Darwin `ar + ld + run`以及ELF/COFF/Wasm object读取均已验证；
 - parser只接受 canonical、无重复 key、无未知 field、版本精确匹配的数据；多个 record 中 package 或 FunctionID 重复也失败；
-- importer index 在任何 fact 生效前精确校验 producer/consumer metadata，并把命中的函数投影成 `ExternalKnown` effect/exec seed。缺失、损坏、ABI错配或无 entry 都不能解释成 `NoSuspend`。
+- importer从`importcfg`的`packagefile` archive只扫描该保留member；index 在任何 fact 生效前精确校验 producer/consumer metadata、FunctionID、bodyless managed-Go身份、结构ABI和物理符号，再把命中的函数投影成 `ExternalKnown` effect/exec seed；
+- 命中seed后，其所有Go caller仍通过原有SSA固定点自动染色；direct coroutine caller已验证会生成对producer发布的`$coro` declaration的structured await，不生成同步副本；
+- 缺失metadata继续保持opaque，损坏、ABI错配、重复ID或有fact但物理能力不匹配均fail closed，绝不能解释成`NoSuspend`。
 
-v1 刻意不把 C contract 注释传播到普通 Go 调用链。C/assembly/host 的少数不可推导边界事实先由 frontend/cgo 生成冻结 certificate；Go wrapper 的最终 effect/exec 随普通调用图自动传播，library 只发布传播结果。后续 importer 从 archive/importcfg 抽取 section 后直接喂给同一分析固定点，不建立另一套按符号名或地址反查的分类器。
+v1 刻意不把 C contract 注释传播到普通 Go 调用链。C/assembly/host 的少数不可推导边界事实先由 frontend/cgo 生成冻结 certificate；Go wrapper 的最终 effect/exec 随普通调用图自动传播，library 只发布传播结果。普通Go源码不需要`//llgo:coro`标注，importer也不建立另一套按符号名或地址反查的分类器。
 
-完整摘要最终还应包含：
+后续schema仍需补充producer capability，而不是consumer最终计划：
 
-- Coro ABI、scheduler ABI和target-wide `PanicABI`版本。
-- target triple、pointer size、endianness。
-- FunctionID。
-- SuspendEffect、ExecFlags、Demand capability、可用entry及syscall/host-import effect metadata digest。
+- exported/address-taken/method等ABI-reachable入口的明确publication规则；
+- 可用plain/coro/descriptor/raw entry capability及syscall/host-import effect metadata digest；
 - function参数、返回值以及嵌套aggregate func叶子的FuncRep map/layout hash。
 - hard sync/export 边界。
 - method dispatch descriptor。
 - 高阶参数 effect constraint，例如 `effect(Apply) = localEffect ∪ effect(param0)`。
-- plan digest。
+
+`Demand`、root集合、call-site选择和`CoroPlanDigest`永远不进入producer摘要；它们属于最终consumer。当前v1只放行已精确预检的direct plain/direct coro静态调用；外部`Dispatch` producer和raw-plain consumer均明确拒绝，直到descriptor capability、递归function-value layout及外部raw entry lowering成为版本化archive ABI。独立library构建还必须把所有ABI-reachable API作为publication roots；不能仅发布本次构建中恰好被内部caller demand的函数。
 
 未知摘要或 ABI 版本不匹配时：
 

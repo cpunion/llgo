@@ -29,7 +29,6 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
-	"github.com/goplus/llgo/internal/coro"
 	llssa "github.com/goplus/llgo/ssa"
 )
 
@@ -832,7 +831,7 @@ func (p *context) funcOfEntry(entry plannedFunctionSymbol) (aFn llssa.Function, 
 				return nil, nil, ignoredFunc
 			}
 			sig := p.patchType(fn.Signature).(*types.Signature)
-			if entry.physical && entry.plan.Emission == coro.EmitCoroutine {
+			if entry.usesCoroPhysicalABI() {
 				abi := newCoroPhysicalABI(p, entry, sig)
 				sig = abi.physicalSig
 			}

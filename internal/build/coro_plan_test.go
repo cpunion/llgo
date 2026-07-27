@@ -1819,6 +1819,66 @@ func callGo() { goDeclaration() }
 	}
 }
 
+func TestCoroPlanInputAutomaticallyColorsPreflightedLibraryDeclaration(t *testing.T) {
+	fixture := buildRequiredCoroRuntimeFixture(t, `
+func imported()
+func caller() { imported() }
+func install() {}
+`)
+	imported := fixture.pkg.Func("imported")
+	caller := fixture.pkg.Func("caller")
+	importedID, err := coro.StableFunctionID(imported, fixture.functionIDs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.input.importedLibraryEffects = map[*ssa.Function]coro.LibraryEffectFunction{
+		imported: {
+			ID:            importedID,
+			ABIHash:       strings.Repeat("a", 64),
+			Effect:        coro.MayPark,
+			Exec:          coro.MayUnwind,
+			FuncRep:       coro.DirectCoro,
+			Primary:       coro.PrimaryCoroutine,
+			PrimarySymbol: "example.com/library.imported$coro",
+		},
+	}
+	plan, err := fixture.input.Analyze(
+		coro.Roots{{Function: caller, Demand: coro.AsyncDemand}},
+		coro.SSAConfig{MaxPlainInstructions: -1, FunctionIDs: fixture.functionIDs},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	importedPlan := functionPlanForBuildTest(t, plan, imported)
+	if importedPlan.External != coro.ExternalKnown || importedPlan.Effect != coro.MayPark ||
+		importedPlan.FuncRep != coro.DirectCoro || importedPlan.Emission != coro.EmitExternal {
+		t.Fatalf("imported library declaration = %+v", importedPlan)
+	}
+	callerPlan := functionPlanForBuildTest(t, plan, caller)
+	if !callerPlan.Effect.Contains(coro.MayPark|coro.AwaitStructured) ||
+		!callerPlan.Exec.Contains(coro.MayUnwind) ||
+		callerPlan.Primary != coro.PrimaryCoroutine {
+		t.Fatalf("library effect did not automatically color caller: %+v", callerPlan)
+	}
+
+	_, err = fixture.input.Analyze(
+		coro.Roots{{Function: caller, Demand: coro.AsyncDemand}},
+		coro.SSAConfig{
+			MaxPlainInstructions: -1,
+			FunctionIDs:          fixture.functionIDs,
+			ClassifyFunction: func(function *ssa.Function) (coro.SSAFunctionPolicy, error) {
+				if function == imported {
+					return coro.SSAFunctionPolicy{Effect: coro.YieldOnly}, nil
+				}
+				return coro.SSAFunctionPolicy{}, nil
+			},
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "conflicts with producer-owned metadata") {
+		t.Fatalf("builder override error = %v", err)
+	}
+}
+
 func TestCoroPlanInputRejectsUnprovenBodylessRequiredDeclarations(t *testing.T) {
 	for _, test := range []struct {
 		name      string

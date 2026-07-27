@@ -737,7 +737,7 @@ func coroExactGlobalFunctionSlotClosureTarget(
 
 func coroExactGlobalFunctionSlotTargetShape(ctx *context, target *ssa.Function, signature *types.Signature) bool {
 	genericInstance := ctx != nil && ctx.coroEmission != nil &&
-		ctx.coroEmission.CoroMaterializedGenericInstance(target)
+		cl.CoroMaterializedGenericInstance(ctx.coroEmission.Resolve, target)
 	if ctx == nil || target == nil || signature == nil || target.Signature == nil ||
 		target.Signature.Recv() != nil || !types.Identical(target.Signature, signature) ||
 		typeParamLen(target.Signature.TypeParams()) != 0 || typeParamLen(target.Signature.RecvTypeParams()) != 0 ||
@@ -758,7 +758,7 @@ func coroExactGlobalFunctionSlotFactory(ctx *context, call *ssa.Call) (*ssa.Func
 		return nil, false
 	}
 	target, resolved := ctx.coroEmission.Resolve(raw)
-	genericInstance := ctx.coroEmission.CoroMaterializedGenericInstance(target)
+	genericInstance := cl.CoroMaterializedGenericInstance(ctx.coroEmission.Resolve, target)
 	if !resolved || target == nil || target != raw || target.Signature == nil ||
 		target.Parent() != nil || len(target.FreeVars) != 0 || target.Signature.Recv() != nil || target.Signature.Variadic() ||
 		typeParamLen(target.Signature.TypeParams()) != 0 || typeParamLen(target.Signature.RecvTypeParams()) != 0 ||
