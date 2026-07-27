@@ -162,7 +162,7 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 		t.Fatal("native worker source lacks exact reservation functions")
 	}
 	reserve := native[reserveStart : reserveStart+reserveEnd]
-	for _, forbidden := range []string{"mutex", "Mutex", "TryLock", "schedulerwait"} {
+	for _, forbidden := range []string{"mutex", "Mutex", "TryLock"} {
 		if strings.Contains(reserve, forbidden) {
 			t.Fatalf("native worker reservation contains managed blocking edge %q:\n%s", forbidden, reserve)
 		}
@@ -229,7 +229,7 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 		}
 	}
 	for _, name := range []string{"QueueReserve", "QueueCancelReservation", "QueueSubmitReserved"} {
-		for _, capability := range []string{"sync", "schedulerwait"} {
+		for _, capability := range []string{"sync", "worker"} {
 			if strings.Contains(declaration, "//llgo:coro "+capability+"\n//go:linkname "+name+" ") {
 				t.Errorf("managed worker ingress %s acquired incorrect %s capability", name, capability)
 			}
@@ -335,23 +335,21 @@ func TestRuntimeCoroWorkerKeepsPthreadCreationCertificateOwnerScoped(t *testing.
 		if strings.Contains(text, "//llgo:coro noblock\n//go:linkname Create ") {
 			t.Fatalf("general pthread.Create in %s acquired a coroutine noblock certificate", path)
 		}
-		if !strings.Contains(text, "//llgo:coro schedulerwait\n//go:linkname Join ") {
-			t.Fatalf("blocking pthread.Join in %s lacks its raw-host schedulerwait capability", path)
+		if !strings.Contains(text, "//go:linkname Join ") ||
+			!strings.Contains(text, "direct execution is inferred from the raw-host") {
+			t.Fatalf("blocking pthread.Join in %s lacks its inferred raw-host operation contract", path)
 		}
-		for _, capability := range []string{"sync", "noblock"} {
+		for _, capability := range []string{"sync", "noblock", "worker", "schedulerwait"} {
 			if strings.Contains(text, "//llgo:coro "+capability+"\n//go:linkname Create ") {
 				t.Fatalf("general pthread.Create in %s acquired a coroutine %s capability", path, capability)
 			}
 			if strings.Contains(text, "//llgo:coro "+capability+"\n//go:linkname Join ") {
-				t.Fatalf("blocking pthread.Join in %s acquired incorrect %s capability", path, capability)
+				t.Fatalf("blocking pthread.Join in %s acquired obsolete or incorrect %s declaration capability", path, capability)
 			}
-		}
-		if strings.Contains(text, "//llgo:coro schedulerwait\n//go:linkname Create ") {
-			t.Fatalf("general pthread.Create in %s acquired a raw-host wait capability", path)
 		}
 	}
 	if strings.Contains(declaration, "//llgo:coro noblock\n//go:linkname Create ") ||
-		strings.Contains(declaration, "//llgo:coro schedulerwait\n//go:linkname Create ") {
+		strings.Contains(declaration, "//llgo:coro worker\n//go:linkname Create ") {
 		t.Fatal("scheduler-owned worker creation has a stronger or scheduler-only capability")
 	}
 }
@@ -478,14 +476,24 @@ func TestRuntimePthreadPrimitivesKeepPhysicalWaitSemantics(t *testing.T) {
 		"c_pthread_cond_wait",
 		"c_pthread_cond_timedwait",
 	} {
-		if !strings.Contains(text, "//llgo:coro schedulerwait\n//go:linkname "+symbol+" ") {
-			t.Errorf("blocking pthread primitive %s lacks schedulerwait", symbol)
+		if !strings.Contains(text, "//go:linkname "+symbol+" ") {
+			t.Errorf("blocking pthread primitive %s lacks its exact declaration", symbol)
 		}
-		for _, capability := range []string{"noblock", "sync"} {
+		for _, capability := range []string{"noblock", "sync", "worker", "schedulerwait"} {
 			marker := "//llgo:coro " + capability + "\n//go:linkname " + symbol + " "
 			if strings.Contains(text, marker) {
-				t.Errorf("blocking pthread primitive %s acquired incorrect %s capability", symbol, capability)
+				t.Errorf("blocking pthread primitive %s acquired obsolete or incorrect %s declaration capability", symbol, capability)
 			}
+		}
+	}
+	for _, required := range []string{
+		"legal only in an audited raw",
+		"managed callers retain BlockForeign/WaitForeign",
+		"Direct raw-host execution",
+		"is inferred at each compiler-owned invocation",
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("pthread wait declarations lack inferred raw-host audit marker %q", required)
 		}
 	}
 	for _, symbol := range []string{
@@ -500,7 +508,7 @@ func TestRuntimePthreadPrimitivesKeepPhysicalWaitSemantics(t *testing.T) {
 		if !strings.Contains(text, "//llgo:coro sync\n//go:linkname "+symbol+" ") {
 			t.Errorf("synchronous pthread primitive %s lacks sync", symbol)
 		}
-		for _, capability := range []string{"noblock", "schedulerwait"} {
+		for _, capability := range []string{"noblock", "worker"} {
 			if strings.Contains(text, "//llgo:coro "+capability+"\n//go:linkname "+symbol+" ") {
 				t.Errorf("synchronous pthread primitive %s acquired incorrect %s capability", symbol, capability)
 			}
@@ -541,7 +549,7 @@ func TestRuntimeCoroWorkerDestroyCapabilityIsAfterJoinScoped(t *testing.T) {
 			t.Errorf("%s lacks after-join destroy contract %q", runtimeCoroWorkerCallSource, required)
 		}
 	}
-	for _, capability := range []string{"noblock", "schedulerwait"} {
+	for _, capability := range []string{"noblock", "worker"} {
 		if strings.Contains(declaration, "//llgo:coro "+capability+"\n//go:linkname QueueDestroyAfterJoin ") {
 			t.Errorf("after-join worker destroy acquired incorrect %s capability", capability)
 		}

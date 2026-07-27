@@ -192,7 +192,6 @@ type EmissionUniverse struct {
 	unsafeLayoutUnevaluated map[*ssa.Function]map[ssa.Instruction]none
 	foreignNoBlock          map[*ssa.Function]CoroForeignNoBlockCertificate
 	foreignSync             map[*ssa.Function]CoroForeignSyncCertificate
-	foreignSchedulerWait    map[*ssa.Function]CoroForeignSchedulerWaitCertificate
 	foreignWorker           map[*ssa.Function]CoroForeignWorkerCertificate
 	callableIdentities      map[*ssa.Function]CoroCallableIdentityCertificate
 	callableContracts       map[*ssa.Function]CoroCallableContractCertificate
@@ -281,17 +280,6 @@ type CoroForeignNoBlockCertificate struct {
 // pause, so this certificate deliberately makes no lock-free or bounded-latency
 // claim. It excludes waits for application I/O and external events.
 type CoroForeignSyncCertificate struct {
-	ID             string
-	PhysicalSymbol string
-	ABISignature   string
-}
-
-// CoroForeignSchedulerWaitCertificate is the immutable frontend proof attached
-// to one exact C declaration by //llgo:coro schedulerwait. It permits a physical
-// external-event wait only from a compiler-owned raw host/scheduler-stack
-// closure.
-// Managed analysis remains conservatively unknown-foreign/blocking.
-type CoroForeignSchedulerWaitCertificate struct {
 	ID             string
 	PhysicalSymbol string
 	ABISignature   string
@@ -642,7 +630,6 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		unsafeLayoutUnevaluated: make(map[*ssa.Function]map[ssa.Instruction]none),
 		foreignNoBlock:          make(map[*ssa.Function]CoroForeignNoBlockCertificate),
 		foreignSync:             make(map[*ssa.Function]CoroForeignSyncCertificate),
-		foreignSchedulerWait:    make(map[*ssa.Function]CoroForeignSchedulerWaitCertificate),
 		foreignWorker:           make(map[*ssa.Function]CoroForeignWorkerCertificate),
 		callableIdentities:      make(map[*ssa.Function]CoroCallableIdentityCertificate),
 		callableContracts:       make(map[*ssa.Function]CoroCallableContractCertificate),
@@ -1690,28 +1677,6 @@ func (u *EmissionUniverse) CoroForeignSyncCertificate(fn *ssa.Function) (certifi
 		return CoroForeignSyncCertificate{}, false, fmt.Errorf("coroutine foreign sync certificate: function %q is absent from the frozen emission universe", canonical.Name())
 	}
 	certificate, certified = u.foreignSync[canonical]
-	return certificate, certified, nil
-}
-
-// CoroForeignSchedulerWaitCertificate returns the frozen
-// //llgo:coro schedulerwait certificate for one exact emitted C declaration.
-// Possession of the certificate does not reclassify managed callers; only the
-// raw host/scheduler-stack validator may consume it.
-func (u *EmissionUniverse) CoroForeignSchedulerWaitCertificate(fn *ssa.Function) (certificate CoroForeignSchedulerWaitCertificate, certified bool, err error) {
-	if u == nil {
-		return CoroForeignSchedulerWaitCertificate{}, false, fmt.Errorf("coroutine foreign scheduler-wait certificate: nil emission universe")
-	}
-	if fn == nil {
-		return CoroForeignSchedulerWaitCertificate{}, false, fmt.Errorf("coroutine foreign scheduler-wait certificate: nil function")
-	}
-	canonical := u.canonicalAlias(fn)
-	if canonical == nil {
-		return CoroForeignSchedulerWaitCertificate{}, false, fmt.Errorf("coroutine foreign scheduler-wait certificate: function has cyclic canonical aliases")
-	}
-	if _, required := u.required[canonical]; !required {
-		return CoroForeignSchedulerWaitCertificate{}, false, fmt.Errorf("coroutine foreign scheduler-wait certificate: function %q is absent from the frozen emission universe", canonical.Name())
-	}
-	certificate, certified = u.foreignSchedulerWait[canonical]
 	return certificate, certified, nil
 }
 
@@ -5243,7 +5208,6 @@ func (u *EmissionUniverse) activateBodylessGoLinknameAlias(declaration *ssa.Func
 	delete(u.excluded, declaration)
 	delete(u.foreignNoBlock, declaration)
 	delete(u.foreignSync, declaration)
-	delete(u.foreignSchedulerWait, declaration)
 	delete(u.foreignWorker, declaration)
 	delete(u.linkIdentities, declaration)
 	delete(u.linkOnceNames, declaration)
@@ -7633,10 +7597,6 @@ func (u *EmissionUniverse) freezeCoroForeignCallCertificates() error {
 			u.foreignSync[canonical] = CoroForeignSyncCertificate{
 				ID: certificateID, PhysicalSymbol: abi.symbol, ABISignature: abi.signature,
 			}
-		case coroForeignCallSchedulerWait:
-			u.foreignSchedulerWait[canonical] = CoroForeignSchedulerWaitCertificate{
-				ID: certificateID, PhysicalSymbol: abi.symbol, ABISignature: abi.signature,
-			}
 		case coroForeignCallWorker:
 			u.foreignWorker[canonical] = CoroForeignWorkerCertificate{
 				ID: certificateID, PhysicalSymbol: abi.symbol, ABISignature: abi.signature,
@@ -7654,7 +7614,6 @@ const (
 	coroForeignCallNone coroForeignCallDirective = iota
 	coroForeignCallNoBlock
 	coroForeignCallSync
-	coroForeignCallSchedulerWait
 	coroForeignCallWorker
 	coroForeignCallWorkerAddress
 )
@@ -7665,8 +7624,6 @@ func (directive coroForeignCallDirective) String() string {
 		return "//llgo:coro noblock"
 	case coroForeignCallSync:
 		return "//llgo:coro sync"
-	case coroForeignCallSchedulerWait:
-		return "//llgo:coro schedulerwait"
 	case coroForeignCallWorker:
 		return "//llgo:coro worker"
 	case coroForeignCallWorkerAddress:
@@ -7682,8 +7639,6 @@ func (directive coroForeignCallDirective) identityDomain() string {
 		return "llgo-coro-foreign-noblock-v0"
 	case coroForeignCallSync:
 		return "llgo-coro-foreign-sync-v0"
-	case coroForeignCallSchedulerWait:
-		return "llgo-coro-foreign-schedulerwait-v0"
 	case coroForeignCallWorker:
 		return "llgo-coro-foreign-worker-v0"
 	case coroForeignCallWorkerAddress:
@@ -7724,8 +7679,6 @@ func coroForeignCallDirectiveFor(fn *ssa.Function) (coroForeignCallDirective, er
 			directive = coroForeignCallNoBlock
 		case len(fields) == 2 && fields[1] == "sync":
 			directive = coroForeignCallSync
-		case len(fields) == 2 && fields[1] == "schedulerwait":
-			directive = coroForeignCallSchedulerWait
 		case len(fields) == 2 && fields[1] == "worker":
 			directive = coroForeignCallWorker
 		case len(fields) == 3 && fields[1] == "workeraddr":

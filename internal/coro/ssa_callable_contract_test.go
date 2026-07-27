@@ -279,11 +279,6 @@ func root() { leaf() }
 		{"malformed nonzero certificate", SSAFunctionPolicy{CallableContractCertificate: CallableContractCertificate{Scope: CallableContractScopeWrapper}}, "SHA-256"},
 		{"legacy noblock conflict", func() SSAFunctionPolicy { p := validDeclaration; p.ForeignNoBlockCertificate = "legacy"; return p }(), "mutually exclusive"},
 		{"legacy sync conflict", func() SSAFunctionPolicy { p := validDeclaration; p.ForeignSyncCertificate = "legacy"; return p }(), "mutually exclusive"},
-		{"legacy schedulerwait conflict", func() SSAFunctionPolicy {
-			p := validDeclaration
-			p.ForeignSchedulerWaitCertificate = "legacy"
-			return p
-		}(), "mutually exclusive"},
 		{"legacy worker conflict", func() SSAFunctionPolicy { p := validDeclaration; p.ForeignWorkerCertificate = "legacy"; return p }(), "mutually exclusive"},
 		{"assembly conflict", func() SSAFunctionPolicy { p := validDeclaration; p.AssemblyNoSuspendCertificate = "legacy"; return p }(), "mutually exclusive"},
 	} {

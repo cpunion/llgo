@@ -30,10 +30,9 @@ import (
 // The link target is the doorbell-only wrapper, not generic poll(2). It accepts
 // exactly one descriptor and a timeout in [0, physicalPollMaxMS]. Even though
 // the wait is bounded, it is legal only in the scheduler-owner case of the
-// compiler-owned raw host-stack island; schedulerwait records that ownership
-// without claiming that poll is noblock.
+// compiler-owned raw host-stack island. The compiler derives that
+// invocation-scoped ownership without claiming that poll is noblock.
 //
-//llgo:coro schedulerwait
 //go:linkname nativeCPoll C.__llgo_coro_doorbell_poll_one_v1
 func nativeCPoll(fds *nativePollFD, nfds c.Uint, timeout c.Int) uint64
 

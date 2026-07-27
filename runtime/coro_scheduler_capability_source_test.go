@@ -32,25 +32,25 @@ func TestCoroLLVMHandleControlIsSchedulerOwnerRawHostStackOnly(t *testing.T) {
 	}
 	text := string(source)
 	for _, symbol := range []string{"coroHandleDone", "coroHandleResume", "coroHandleDestroy"} {
-		marker := "//llgo:coro schedulerwait\n//go:linkname " + symbol + " "
-		if !strings.Contains(text, marker) {
-			t.Errorf("%s lacks scheduler-stack capability for %s", path, symbol)
+		if !strings.Contains(text, "//go:linkname "+symbol+" ") {
+			t.Errorf("%s lacks exact compiler-owned handle declaration for %s", path, symbol)
 		}
-		for _, capability := range []string{"noblock", "sync"} {
+		for _, capability := range []string{"noblock", "sync", "schedulerwait", "worker"} {
 			wrong := "//llgo:coro " + capability + "\n//go:linkname " + symbol + " "
 			if strings.Contains(text, wrong) {
-				t.Errorf("%s gives %s the incorrect %s capability", path, symbol, capability)
+				t.Errorf("%s gives inferred raw-host operation %s the obsolete or incorrect %s declaration capability", path, symbol, capability)
 			}
 		}
 	}
 	for _, required := range []string{
-		"compiler-owned raw host-stack island",
+		"direct execution is inferred only for the compiler-owned raw",
+		"host-stack island",
 		"the scheduler owner",
-		"Resume may execute the coroutine until its",
-		"neither a bounded foreign leaf nor an ordinary",
-		"synchronous runtime call",
-		"worker callback",
-		"managed coroutine plans retain WaitForeign",
+		"Resume may execute the",
+		"coroutine until its next suspend and therefore is neither a bounded foreign",
+		"leaf nor an ordinary synchronous runtime call",
+		"Managed coroutine plans",
+		"retain WaitForeign",
 	} {
 		if !strings.Contains(text, required) {
 			t.Errorf("%s lacks scheduler-stack audit marker %q", path, required)

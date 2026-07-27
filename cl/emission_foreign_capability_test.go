@@ -38,10 +38,6 @@ func NoBlock(int) int
 //go:linkname Sync C.cap_sync
 func Sync(int) int
 
-//llgo:coro schedulerwait
-//go:linkname SchedulerWait C.cap_schedulerwait
-func SchedulerWait(int) int
-
 //llgo:coro worker
 //go:linkname Worker C.cap_worker
 func Worker(int) int
@@ -49,7 +45,7 @@ func Worker(int) int
 //go:linkname Ordinary C.cap_ordinary
 func Ordinary(int) int
 
-func root(v int) int { return NoBlock(v) + Sync(v) + SchedulerWait(v) + Worker(v) + Ordinary(v) }
+func root(v int) int { return NoBlock(v) + Sync(v) + Worker(v) + Ordinary(v) }
 `)
 	testProg.ssa.Build()
 	prog := llssa.NewProgram(nil)
@@ -69,19 +65,15 @@ func root(v int) int { return NoBlock(v) + Sync(v) + SchedulerWait(v) + Worker(v
 	if err != nil || !syncOK || syncCertificate.ID == "" || syncCertificate.PhysicalSymbol == "" || syncCertificate.ABISignature == "" {
 		t.Fatalf("sync certificate = %+v, %t, %v", syncCertificate, syncOK, err)
 	}
-	waitCertificate, waitOK, err := universe.CoroForeignSchedulerWaitCertificate(pkg.ssa.Func("SchedulerWait"))
-	if err != nil || !waitOK || waitCertificate.ID == "" || waitCertificate.PhysicalSymbol == "" || waitCertificate.ABISignature == "" {
-		t.Fatalf("schedulerwait certificate = %+v, %t, %v", waitCertificate, waitOK, err)
-	}
 	workerCertificate, workerOK, err := universe.CoroForeignWorkerCertificate(pkg.ssa.Func("Worker"))
 	if err != nil || !workerOK || workerCertificate.ID == "" || workerCertificate.PhysicalSymbol == "" || workerCertificate.ABISignature == "" {
 		t.Fatalf("worker certificate = %+v, %t, %v", workerCertificate, workerOK, err)
 	}
 	identities := map[string]struct{}{
-		noBlock.ID: {}, syncCertificate.ID: {}, waitCertificate.ID: {}, workerCertificate.ID: {},
+		noBlock.ID: {}, syncCertificate.ID: {}, workerCertificate.ID: {},
 	}
-	if len(identities) != 4 {
-		t.Fatalf("foreign capability identities are not domain-separated: noblock=%q sync=%q schedulerwait=%q worker=%q", noBlock.ID, syncCertificate.ID, waitCertificate.ID, workerCertificate.ID)
+	if len(identities) != 3 {
+		t.Fatalf("foreign capability identities are not domain-separated: noblock=%q sync=%q worker=%q", noBlock.ID, syncCertificate.ID, workerCertificate.ID)
 	}
 	for _, test := range []struct {
 		name string
@@ -91,12 +83,8 @@ func root(v int) int { return NoBlock(v) + Sync(v) + SchedulerWait(v) + Worker(v
 			_, ok, err := universe.CoroForeignNoBlockCertificate(pkg.ssa.Func("Sync"))
 			return ok, err
 		}},
-		{"sync on SchedulerWait", func() (bool, error) {
-			_, ok, err := universe.CoroForeignSyncCertificate(pkg.ssa.Func("SchedulerWait"))
-			return ok, err
-		}},
-		{"schedulerwait on Ordinary", func() (bool, error) {
-			_, ok, err := universe.CoroForeignSchedulerWaitCertificate(pkg.ssa.Func("Ordinary"))
+		{"sync on Worker", func() (bool, error) {
+			_, ok, err := universe.CoroForeignSyncCertificate(pkg.ssa.Func("Worker"))
 			return ok, err
 		}},
 		{"worker on Ordinary", func() (bool, error) {
@@ -113,7 +101,7 @@ func root(v int) int { return NoBlock(v) + Sync(v) + SchedulerWait(v) + Worker(v
 	declaration := pkg.ssa.Func("Sync").Syntax().(*ast.FuncDecl)
 	for _, comment := range declaration.Doc.List {
 		if strings.Contains(comment.Text, "llgo:coro") {
-			comment.Text = "//llgo:coro schedulerwait"
+			comment.Text = "//llgo:coro worker"
 		}
 	}
 	again, ok, err := universe.CoroForeignSyncCertificate(pkg.ssa.Func("Sync"))
@@ -175,12 +163,13 @@ func Fake() {}
 			wantErr: "requires an exact frozen C declaration",
 		},
 		{
-			name: "schedulerwait Go body",
+			name: "removed schedulerwait directive",
 			source: `package bad
 //llgo:coro schedulerwait
-func Fake() {}
+//go:linkname Fake C.fake
+func Fake()
 `,
-			wantErr: "requires an exact frozen C declaration",
+			wantErr: "unsupported directive",
 		},
 		{
 			name: "worker Go body",
@@ -189,28 +178,6 @@ func Fake() {}
 func Fake() {}
 `,
 			wantErr: "requires an exact frozen C declaration",
-		},
-		{
-			name: "mixed directives",
-			source: `package bad
-//llgo:coro sync
-//llgo:coro schedulerwait
-//go:linkname Fake C.fake
-func Fake()
-`,
-			wantErr: "mutually exclusive",
-		},
-		{
-			name: "schedulerwait ABI collision",
-			source: `package bad
-//llgo:coro schedulerwait
-//go:linkname Wait C.same_wait
-func Wait(int) int
-//go:linkname Conflict C.same_wait
-func Conflict(string) string
-func root() { _ = Wait(1); _ = Conflict("") }
-`,
-			wantErr: "conflicting frozen ABI signatures",
 		},
 		{
 			name: "worker ABI collision",
@@ -236,19 +203,6 @@ func libc_same_malformed_word_trampoline()
 func root() { _ = Typed(1); libc_same_malformed_word_trampoline() }
 `,
 			wantErr: "conflicting frozen ABI signatures",
-		},
-		{
-			name: "same symbol mutually exclusive capabilities",
-			source: `package bad
-//llgo:coro sync
-//go:linkname Sync C.same_capability
-func Sync(int) int
-//llgo:coro schedulerwait
-//go:linkname Wait C.same_capability
-func Wait(int) int
-func root() { _ = Sync(1); _ = Wait(2) }
-`,
-			wantErr: "mutually exclusive",
 		},
 		{
 			name: "same symbol worker and sync are mutually exclusive",

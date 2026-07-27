@@ -353,11 +353,6 @@ func TestCoroPlanInputRejectsGenericAndLegacyCallableCertificates(t *testing.T) 
 				return cl.CoroForeignSyncCertificate{ID: "legacy"}, fn == safe, nil
 			}
 		}},
-		{"schedulerwait", func(input *CoroPlanInput) {
-			input.foreignSchedulerWait = func(fn *ssa.Function) (cl.CoroForeignSchedulerWaitCertificate, bool, error) {
-				return cl.CoroForeignSchedulerWaitCertificate{ID: "legacy"}, fn == safe, nil
-			}
-		}},
 		{"worker", func(input *CoroPlanInput) {
 			input.foreignWorker = func(fn *ssa.Function) (cl.CoroForeignWorkerCertificate, bool, error) {
 				return cl.CoroForeignWorkerCertificate{ID: "legacy"}, fn == safe, nil

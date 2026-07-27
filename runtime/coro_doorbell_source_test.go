@@ -72,12 +72,14 @@ func TestCoroDoorbellUsesExactBoundedForeignLeaves(t *testing.T) {
 			t.Fatal(readErr)
 		}
 		text := string(source)
-		if !strings.Contains(text, "//llgo:coro schedulerwait\n//go:linkname nativeCPoll C.__llgo_coro_doorbell_poll_one_v1") {
-			t.Errorf("%s does not restrict the exact one-fd poll leaf to the scheduler stack", path)
+		if !strings.Contains(text, "//go:linkname nativeCPoll C.__llgo_coro_doorbell_poll_one_v1") ||
+			!strings.Contains(text, "compiler derives that") {
+			t.Errorf("%s does not expose the exact inferred raw-host one-fd poll operation", path)
 		}
-		if strings.Contains(text, "//llgo:coro noblock\n//go:linkname nativeCPoll ") ||
-			strings.Contains(text, "//llgo:coro sync\n//go:linkname nativeCPoll ") {
-			t.Errorf("%s overstates the blocking one-fd poll capability", path)
+		for _, capability := range []string{"noblock", "sync", "schedulerwait", "worker"} {
+			if strings.Contains(text, "//llgo:coro "+capability+"\n//go:linkname nativeCPoll ") {
+				t.Errorf("%s gives inferred blocking one-fd poll the obsolete or incorrect %s declaration capability", path, capability)
+			}
 		}
 		if strings.Contains(text, "C.poll") || strings.Contains(text, "nativeErrno()") {
 			t.Errorf("%s still reaches generic poll/errno directly", path)
@@ -92,12 +94,14 @@ func TestCoroDoorbellUsesExactBoundedForeignLeaves(t *testing.T) {
 			t.Fatal(readErr)
 		}
 		text := string(source)
-		if !strings.Contains(text, "//llgo:coro schedulerwait\n//go:linkname nativeCPollSet C.__llgo_coro_doorbell_poll_set_v1") {
-			t.Errorf("%s does not restrict the bounded owner poll leaf to the scheduler stack", path)
+		if !strings.Contains(text, "//go:linkname nativeCPollSet C.__llgo_coro_doorbell_poll_set_v1") ||
+			!strings.Contains(text, "compiler admits it only for the scheduler-owner") {
+			t.Errorf("%s does not expose the exact inferred bounded owner poll operation", path)
 		}
-		if strings.Contains(text, "//llgo:coro noblock\n//go:linkname nativeCPollSet ") ||
-			strings.Contains(text, "//llgo:coro sync\n//go:linkname nativeCPollSet ") {
-			t.Errorf("%s overstates the blocking poll-set capability", path)
+		for _, capability := range []string{"noblock", "sync", "schedulerwait", "worker"} {
+			if strings.Contains(text, "//llgo:coro "+capability+"\n//go:linkname nativeCPollSet ") {
+				t.Errorf("%s gives inferred blocking poll-set the obsolete or incorrect %s declaration capability", path, capability)
+			}
 		}
 		if strings.Contains(text, "C.poll") || strings.Contains(text, "nativeErrno()") {
 			t.Errorf("%s still reaches generic poll/errno directly", path)

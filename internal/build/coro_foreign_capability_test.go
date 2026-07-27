@@ -43,19 +43,18 @@ func newForeignCapabilityBuildFixture(t *testing.T) *foreignCapabilityBuildFixtu
 //go:linkname Sync C.foreign_sync_exact
 func Sync(int) int
 
-//llgo:coro schedulerwait
-//go:linkname SchedulerWait C.foreign_schedulerwait_exact
-func SchedulerWait(int) int
+//go:linkname MayBlock C.foreign_may_block_exact
+func MayBlock(int) int
 
 //llgo:coro worker
 //go:linkname Worker C.foreign_worker_exact
 func Worker(int) int
 
-func Managed(v int) int { return SchedulerWait(v) }
+func Managed(v int) int { return MayBlock(v) }
 func ManagedWorker(v int) int { return Worker(v) }
-func hostHelper(v int) int { return Sync(v) + SchedulerWait(v) }
+func hostHelper(v int) int { return Sync(v) + MayBlock(v) }
 func Host(v int) int { return hostHelper(v) }
-func SourceRaw(v int) int { return SchedulerWait(v) }
+func SourceRaw(v int) int { return MayBlock(v) }
 `, nil)
 	program := llssa.NewProgram(nil)
 	emission, err := cl.PrepareEmissionUniverse(program, nil, []cl.EmissionPackage{{
@@ -78,14 +77,15 @@ func SourceRaw(v int) int { return SchedulerWait(v) }
 		program: program,
 		pkg:     ssaPkg,
 		input: CoroPlanInput{
-			Program:              ssaPkg.Prog,
-			EmissionUniverse:     ssaEmission,
-			resolveFunction:      emission.Resolve,
-			functionBackground:   emission.FunctionBackground,
-			foreignNoBlock:       emission.CoroForeignNoBlockCertificate,
-			foreignSync:          emission.CoroForeignSyncCertificate,
-			foreignSchedulerWait: emission.CoroForeignSchedulerWaitCertificate,
-			foreignWorker:        emission.CoroForeignWorkerCertificate,
+			Program:            ssaPkg.Prog,
+			EmissionUniverse:   ssaEmission,
+			resolveFunction:    emission.Resolve,
+			functionBackground: emission.FunctionBackground,
+			foreignNoBlock:     emission.CoroForeignNoBlockCertificate,
+			foreignSync:        emission.CoroForeignSyncCertificate,
+			foreignWorker:      emission.CoroForeignWorkerCertificate,
+			callableIdentity:   emission.CoroCallableIdentityCertificate,
+			callableContract:   emission.CoroCallableContractCertificate,
 		},
 		functionIDs: functionIDs,
 	}
@@ -128,10 +128,10 @@ func (fixture *foreignCapabilityBuildFixture) analyze(input CoroPlanInput, roots
 	})
 }
 
-func TestCoroForeignCapabilitiesPreserveManagedWaitAndAuthorizeExactHostIsland(t *testing.T) {
+func TestCoroMayBlockContractPreservesManagedWaitAndAuthorizesExactHostOperation(t *testing.T) {
 	fixture := newForeignCapabilityBuildFixture(t)
 	defer fixture.close()
-	wait := fixture.pkg.Func("SchedulerWait")
+	mayBlock := fixture.pkg.Func("MayBlock")
 	syncLeaf := fixture.pkg.Func("Sync")
 	managed := fixture.pkg.Func("Managed")
 	host := fixture.pkg.Func("Host")
@@ -141,12 +141,12 @@ func TestCoroForeignCapabilitiesPreserveManagedWaitAndAuthorizeExactHostIsland(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitPlan, _ := managedPlan.FunctionPlan(wait)
+	waitPlan, _ := managedPlan.FunctionPlan(mayBlock)
 	callerPlan, _ := managedPlan.FunctionPlan(managed)
 	if waitPlan.External != coro.ExternalUnknownForeign || waitPlan.Effect != coro.NoSuspend ||
 		waitPlan.Exec != coro.BlockForeign|coro.IRQUnsafe || !callerPlan.Effect.Contains(coro.WaitForeign) ||
 		callerPlan.Emission != coro.EmitCoroutine {
-		t.Fatalf("managed schedulerwait plans = leaf:%+v caller:%+v", waitPlan, callerPlan)
+		t.Fatalf("managed may-block plans = leaf:%+v caller:%+v", waitPlan, callerPlan)
 	}
 
 	hostInput := fixture.input
@@ -167,25 +167,34 @@ func TestCoroForeignCapabilitiesPreserveManagedWaitAndAuthorizeExactHostIsland(t
 		!hostHelperPlan.RawPlainOnly || hostHelperPlan.RawPlainEntry || hostHelperPlan.Emission != coro.EmitRawPlain {
 		t.Fatalf("host helper plan = %+v, raw=%t; want internal compiler-owned raw-only host closure member", hostHelperPlan, hostPlan.HasRawPlainVariant(hostHelper))
 	}
-	if got, _ := hostPlan.FunctionPlan(wait); got.External != coro.ExternalUnknownForeign ||
+	if got, _ := hostPlan.FunctionPlan(mayBlock); got.External != coro.ExternalUnknownForeign ||
 		got.Exec != coro.BlockForeign|coro.IRQUnsafe {
-		t.Fatalf("host analysis weakened schedulerwait managed target = %+v", got)
+		t.Fatalf("host analysis weakened may-block managed target = %+v", got)
 	}
 	if got, _ := hostPlan.FunctionPlan(syncLeaf); got.External != coro.ExternalKnown || got.Exec != coro.IRQUnsafe {
 		t.Fatalf("host analysis sync target = %+v", got)
 	}
 }
 
-func TestCoroSchedulerWaitRejectsNonCompilerRawIsland(t *testing.T) {
+func TestCoroMayBlockForeignCallerRawInvocationRemainsOrdinarySynchronousC(t *testing.T) {
 	fixture := newForeignCapabilityBuildFixture(t)
 	defer fixture.close()
 	sourceRaw := fixture.pkg.Func("SourceRaw")
+	mayBlock := fixture.pkg.Func("MayBlock")
 	input := fixture.input
 	input.requiredRoots = coro.Roots{{Function: sourceRaw, Demand: coro.SyncDemand}}
 	input.requiredPlain = map[*ssa.Function]struct{}{sourceRaw: {}}
-	_, err := fixture.analyze(input, nil)
-	if err == nil || !strings.Contains(err.Error(), "outside a compiler-owned raw host/scheduler-stack island") {
-		t.Fatalf("non-host schedulerwait raw error = %v", err)
+	plan, err := fixture.analyze(input, nil)
+	if err != nil {
+		t.Fatalf("foreign-caller raw invocation: %v", err)
+	}
+	sourcePlan, sourceOK := plan.FunctionPlan(sourceRaw)
+	targetPlan, targetOK := plan.FunctionPlan(mayBlock)
+	if !sourceOK || !targetOK || !plan.HasRawPlainVariant(sourceRaw) ||
+		sourcePlan.Emission != coro.EmitRawPlain || !sourcePlan.RawPlainOnly ||
+		targetPlan.External != coro.ExternalUnknownForeign ||
+		targetPlan.Exec != coro.BlockForeign|coro.IRQUnsafe {
+		t.Fatalf("foreign-caller raw plans = source:%+v target:%+v", sourcePlan, targetPlan)
 	}
 }
 
@@ -193,7 +202,6 @@ func TestCoroForeignCapabilitiesRejectForgedBuilderCertificates(t *testing.T) {
 	fixture := newForeignCapabilityBuildFixture(t)
 	defer fixture.close()
 	syncLeaf := fixture.pkg.Func("Sync")
-	wait := fixture.pkg.Func("SchedulerWait")
 	worker := fixture.pkg.Func("Worker")
 	managed := fixture.pkg.Func("Managed")
 
@@ -209,12 +217,6 @@ func TestCoroForeignCapabilitiesRejectForgedBuilderCertificates(t *testing.T) {
 			mutate: func(input *CoroPlanInput) { input.foreignSync = nil },
 			policy: coro.SSAFunctionPolicy{ForeignSyncCertificate: "forged"},
 			want:   "without exact frozen frontend sync metadata",
-		},
-		{
-			name: "schedulerwait mismatch", target: wait,
-			mutate: func(input *CoroPlanInput) {},
-			policy: coro.SSAFunctionPolicy{ForeignSchedulerWaitCertificate: "forged"},
-			want:   "conflicts with the frozen frontend proof",
 		},
 		{
 			name: "worker callback absent", target: worker,

@@ -2604,44 +2604,6 @@ func root() {}
 	}
 }
 
-func TestAnalyzeSSARawPlainRootPropagatesThroughHelperToSchedulerWait(t *testing.T) {
-	prog, pkg := buildCoroTestSSA(t, "raw_plain_schedulerwait.go", `package coroid
-func schedulerwait() {}
-func helper() { schedulerwait() }
-func root() { helper() }
-`)
-	root := packageFunction(t, pkg, "root")
-	helper := packageFunction(t, pkg, "helper")
-	wait := packageFunction(t, pkg, "schedulerwait")
-	plan, err := AnalyzeSSA(prog, Roots{{Function: root, RawPlainDemand: true}}, SSAConfig{
-		MaxPlainInstructions: -1,
-		ClassifyFunction: func(fn *ssa.Function) (SSAFunctionPolicy, error) {
-			if fn == wait {
-				return SSAFunctionPolicy{
-					Exec: BlockForeign | IRQUnsafe, External: ExternalUnknownForeign, OverrideExternal: true, IgnoreBody: true,
-					ForeignSchedulerWaitCertificate: "test.schedulerwait.v1",
-				}, nil
-			}
-			return SSAFunctionPolicy{}, nil
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, fn := range []*ssa.Function{root, helper} {
-		got := functionPlanFor(t, plan, fn)
-		if got.ManagedDemand != NoDemand || !got.RawPlainDemand || !got.RawPlainOnly || got.Emission != EmitRawPlain ||
-			got.Primary != PrimaryPlain || got.FuncRep != DirectPlain || !plan.HasRawPlainVariant(fn) {
-			t.Fatalf("raw SSA function %s = %+v, variant=%t", fn.Name(), got, plan.HasRawPlainVariant(fn))
-		}
-	}
-	waitPlan := functionPlanFor(t, plan, wait)
-	if waitPlan.ManagedDemand != NoDemand || !waitPlan.RawPlainDemand || waitPlan.Emission != EmitExternal ||
-		waitPlan.External != ExternalUnknownForeign || !waitPlan.Exec.Contains(BlockForeign|IRQUnsafe) {
-		t.Fatalf("schedulerwait SSA plan = %+v", waitPlan)
-	}
-}
-
 func TestAnalyzeSSAInterfaceEscapeFromRawOwnerRemainsManaged(t *testing.T) {
 	prog, pkg := buildCoroTestSSA(t, "raw_plain_interface_escape.go", `package coroid
 func target() {}

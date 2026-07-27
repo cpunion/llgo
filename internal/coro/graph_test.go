@@ -577,12 +577,12 @@ func TestAnalyzeRawPlainOnlyClosurePreservesManagedFacts(t *testing.T) {
 	for _, spec := range []FunctionSpec{
 		{ID: "raw-root", RawPlainDemand: true, RawPlainEntry: true},
 		{ID: "panic-helper", Seed: WaitForeign, Exec: BlockForeign},
-		{ID: "schedulerwait", External: ExternalUnknownForeign},
+		{ID: "foreignwait", External: ExternalUnknownForeign},
 	} {
 		mustAddFunction(t, g, spec)
 	}
 	mustAddCall(t, g, CallEdge{Caller: "raw-root", Callee: "panic-helper", Kind: CallDirect})
-	mustAddCall(t, g, CallEdge{Caller: "panic-helper", Callee: "schedulerwait", Kind: CallForeign})
+	mustAddCall(t, g, CallEdge{Caller: "panic-helper", Callee: "foreignwait", Kind: CallForeign})
 
 	plan, err := g.Analyze()
 	if err != nil {
@@ -599,10 +599,10 @@ func TestAnalyzeRawPlainOnlyClosurePreservesManagedFacts(t *testing.T) {
 	if !helper.Exec.Contains(BlockForeign) || helper.Effect != WaitForeign || helper.RawPlainEntry {
 		t.Fatalf("raw-only helper lost exact facts or gained address capability: %+v", helper)
 	}
-	wait := mustLookup(t, plan, "schedulerwait")
+	wait := mustLookup(t, plan, "foreignwait")
 	if wait.ManagedDemand != NoDemand || !wait.RawPlainDemand || wait.RawPlainOnly || wait.Emission != EmitExternal ||
 		wait.External != ExternalUnknownForeign || !wait.Exec.Contains(BlockForeign|IRQUnsafe) {
-		t.Fatalf("raw schedulerwait plan = %+v", wait)
+		t.Fatalf("raw foreign-wait plan = %+v", wait)
 	}
 }
 

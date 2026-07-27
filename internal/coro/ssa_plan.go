@@ -101,12 +101,6 @@ type SSAFunctionPolicy struct {
 	// ExternalKnown/NoSuspend/IRQUnsafe plan, but its distinct identity records
 	// the weaker latency contract: internal locks and GC pauses are permitted.
 	ForeignSyncCertificate string
-	// ForeignSchedulerWaitCertificate freezes one exact //llgo:coro
-	// schedulerwait C symbol+ABI. It deliberately retains the ordinary managed
-	// ExternalUnknownForeign/BlockForeign/WaitForeign model. Only a separate
-	// compiler-owned raw host/scheduler-stack closure validator may consume this
-	// physical capability.
-	ForeignSchedulerWaitCertificate string
 	// ForeignWorkerCertificate freezes one exact //llgo:coro worker C
 	// symbol+structural-ABI+link identity. It retains the managed
 	// ExternalUnknownForeign/BlockForeign/WaitForeign model and authorizes only
@@ -619,7 +613,6 @@ type SSAPlan struct {
 	loweredCalls           map[*ssa.Function][]SSALoweredCall
 	foreignNoBlock         map[*ssa.Function]string
 	foreignSync            map[*ssa.Function]string
-	foreignSchedulerWait   map[*ssa.Function]string
 	foreignWorker          map[*ssa.Function]string
 	callableIdentities     map[*ssa.Function]CallableIdentityCertificate
 	callableContracts      map[*ssa.Function]CallableContractCertificate
@@ -796,16 +789,6 @@ func (p *SSAPlan) ForeignSyncCertificate(fn *ssa.Function) (string, bool) {
 		return "", false
 	}
 	certificate, ok := p.foreignSync[fn]
-	return certificate, ok
-}
-
-// ForeignSchedulerWaitCertificate returns the opaque exact physical wait
-// certificate attached to fn. It does not weaken fn's managed plan.
-func (p *SSAPlan) ForeignSchedulerWaitCertificate(fn *ssa.Function) (string, bool) {
-	if p == nil || fn == nil {
-		return "", false
-	}
-	certificate, ok := p.foreignSchedulerWait[fn]
 	return certificate, ok
 }
 
@@ -1156,7 +1139,6 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		for _, certificate := range []string{
 			trusted.ForeignNoBlockCertificate,
 			trusted.ForeignSyncCertificate,
-			trusted.ForeignSchedulerWaitCertificate,
 			trusted.ForeignWorkerCertificate,
 		} {
 			if certificate != "" {
@@ -1164,7 +1146,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 			}
 		}
 		if foreignCertificates > 1 {
-			return nil, fmt.Errorf("coro: classify SSA function %q: foreign noblock, sync, schedulerwait, and worker certificates are mutually exclusive", fn.Name())
+			return nil, fmt.Errorf("coro: classify SSA function %q: foreign noblock, sync, and worker certificates are mutually exclusive", fn.Name())
 		}
 		if !trusted.CallableIdentityCertificate.IsZero() {
 			if err := trusted.CallableIdentityCertificate.Validate(); err != nil {
@@ -1212,15 +1194,6 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 			if !trusted.IgnoreBody || !trusted.OverrideExternal || trusted.External != ExternalKnown ||
 				trusted.Effect != NoSuspend || trusted.Exec != IRQUnsafe || trusted.NeedsDispatch {
 				return nil, fmt.Errorf("coro: classify SSA function %q: foreign sync certificate requires an ignored external-known declaration with no suspend effect, exactly irq-unsafe execution, and no dispatch", fn.Name())
-			}
-		}
-		if certificate := trusted.ForeignSchedulerWaitCertificate; certificate != "" {
-			if !utf8.ValidString(certificate) {
-				return nil, fmt.Errorf("coro: classify SSA function %q: foreign schedulerwait certificate is not a valid UTF-8 identity", fn.Name())
-			}
-			if !trusted.IgnoreBody || !trusted.OverrideExternal || trusted.External != ExternalUnknownForeign ||
-				trusted.Effect != NoSuspend || trusted.Exec != BlockForeign|IRQUnsafe || trusted.NeedsDispatch {
-				return nil, fmt.Errorf("coro: classify SSA function %q: foreign schedulerwait certificate requires an ignored unknown-foreign declaration with no suspend effect, exactly block-foreign/irq-unsafe execution, and no dispatch", fn.Name())
 			}
 		}
 		if certificate := trusted.ForeignWorkerCertificate; certificate != "" {
@@ -1460,7 +1433,6 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 			policy.CallableContractCertificate = trusted.CallableContractCertificate
 			policy.ForeignNoBlockCertificate = trusted.ForeignNoBlockCertificate
 			policy.ForeignSyncCertificate = trusted.ForeignSyncCertificate
-			policy.ForeignSchedulerWaitCertificate = trusted.ForeignSchedulerWaitCertificate
 			policy.ForeignWorkerCertificate = trusted.ForeignWorkerCertificate
 			policy.AssemblyNoSuspendCertificate = trusted.AssemblyNoSuspendCertificate
 			if trusted.OverrideExternal {
@@ -1821,7 +1793,6 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		loweredCalls:           loweredCalls,
 		foreignNoBlock:         make(map[*ssa.Function]string),
 		foreignSync:            make(map[*ssa.Function]string),
-		foreignSchedulerWait:   make(map[*ssa.Function]string),
 		foreignWorker:          make(map[*ssa.Function]string),
 		callableIdentities:     make(map[*ssa.Function]CallableIdentityCertificate),
 		callableContracts:      make(map[*ssa.Function]CallableContractCertificate),
@@ -1838,9 +1809,6 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 		}
 		if policy.ForeignSyncCertificate != "" {
 			result.foreignSync[fn] = policy.ForeignSyncCertificate
-		}
-		if policy.ForeignSchedulerWaitCertificate != "" {
-			result.foreignSchedulerWait[fn] = policy.ForeignSchedulerWaitCertificate
 		}
 		if policy.ForeignWorkerCertificate != "" {
 			result.foreignWorker[fn] = policy.ForeignWorkerCertificate

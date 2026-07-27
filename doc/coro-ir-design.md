@@ -876,7 +876,9 @@ identity inventory与execution policy保持正交：未标注/legacy declaration
 behavior只进入facts/catalog，不额外改变其调度策略。本轮把当前已覆盖的canonical LoweringFacts
 schema与digest接入production plan、Compilation、package fingerprint和manifest后，schema升级为
 `llgo.coro.plan-digest.v26`。v26仍不表示集中EmissionLedger observer、PrimitiveCatalog、CoroOverlay或
-VirtualStoragePlan已经实现。
+VirtualStoragePlan已经实现。随后声明级`schedulerwait`证书被完整删除，raw-host可阻塞调用改为
+exact host root及closed call closure上的调用场景事实；对应字段从plan/digest移除，当前schema为
+`llgo.coro.plan-digest.v27`。
 
 后续不预留空v22/v23字段，也不沿用历史v9/v10标号。只在某一层的canonical事实真正进入
 production plan/cache identity时，从届时当前schema递增一次。每次升级都验证：任一相关fact
@@ -1457,7 +1459,7 @@ Phase A先报告多次运行中位数和离散度；取得稳定噪声后，再�
 
 Phase A 与 Phase B 的十一个replacement cohort已经完成：`internal/coro/lowering_facts.go`提供pointer-free site/instance
 identity、稀疏LoweringFacts、canonical dump/digest与verifier；`cl`从冻结的EmissionUniverse和SSAPlan
-生成owner-scoped snapshot；build在任何package codegen前把该snapshot装入`CoroPlanDigest v26`、
+生成owner-scoped snapshot；build在任何package codegen前把该snapshot装入`CoroPlanDigest v27`、
 `cl.Compilation`、package fingerprint与manifest，source/cache registration都会验证内容和digest一致。
 
 2026-07-22复审最初把LoweringFacts定义为“已建立观测点”，而不是已完成架构层。随后hidden runtime

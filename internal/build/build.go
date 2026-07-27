@@ -146,7 +146,6 @@ type CoroPlanInput struct {
 	rawCFunctionType               func(types.Type) (bool, error)
 	foreignNoBlock                 func(*ssa.Function) (cl.CoroForeignNoBlockCertificate, bool, error)
 	foreignSync                    func(*ssa.Function) (cl.CoroForeignSyncCertificate, bool, error)
-	foreignSchedulerWait           func(*ssa.Function) (cl.CoroForeignSchedulerWaitCertificate, bool, error)
 	foreignWorker                  func(*ssa.Function) (cl.CoroForeignWorkerCertificate, bool, error)
 	callableIdentity               func(*ssa.Function) (cl.CoroCallableIdentityCertificate, bool, error)
 	callableContract               func(*ssa.Function) (cl.CoroCallableContractCertificate, bool, error)
@@ -473,7 +472,7 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 	// nonblocking. Preserve an explicit known/unknown-foreign effect summary;
 	// otherwise use the conservative unknown-foreign boundary.
 	if in.functionBackground != nil || in.foreignNoBlock != nil || in.foreignSync != nil ||
-		in.foreignSchedulerWait != nil || in.foreignWorker != nil || in.callableIdentity != nil || in.callableContract != nil ||
+		in.foreignWorker != nil || in.callableIdentity != nil || in.callableContract != nil ||
 		in.noPreempt != nil || in.noUnwind != nil || in.assemblyNoSuspend != nil ||
 		len(in.importedLibraryEffects) != 0 || config.ClassifyFunction != nil {
 		classify := config.ClassifyFunction
@@ -611,14 +610,6 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 					return coro.SSAFunctionPolicy{}, fmt.Errorf("classify frozen frontend foreign sync certificate for %q: %w", fn.Name(), err)
 				}
 			}
-			var schedulerWaitCertificate cl.CoroForeignSchedulerWaitCertificate
-			schedulerWaitCertified := false
-			if in.foreignSchedulerWait != nil {
-				schedulerWaitCertificate, schedulerWaitCertified, err = in.foreignSchedulerWait(fn)
-				if err != nil {
-					return coro.SSAFunctionPolicy{}, fmt.Errorf("classify frozen frontend foreign schedulerwait certificate for %q: %w", fn.Name(), err)
-				}
-			}
 			var workerCertificate cl.CoroForeignWorkerCertificate
 			workerCertified := false
 			if in.foreignWorker != nil {
@@ -639,7 +630,7 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 				}
 			}
 			certificateKinds := 0
-			for _, present := range []bool{certified, syncCertified, schedulerWaitCertified, workerCertified} {
+			for _, present := range []bool{certified, syncCertified, workerCertified} {
 				if present {
 					certificateKinds++
 				}
@@ -688,14 +679,6 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 					return coro.SSAFunctionPolicy{}, fmt.Errorf("builder foreign sync certificate for %q conflicts with the frozen frontend proof", fn.Name())
 				}
 			}
-			if requested := policy.ForeignSchedulerWaitCertificate; requested != "" {
-				if !schedulerWaitCertified {
-					return coro.SSAFunctionPolicy{}, fmt.Errorf("builder cannot certify foreign function %q without exact frozen frontend schedulerwait metadata", fn.Name())
-				}
-				if requested != schedulerWaitCertificate.ID {
-					return coro.SSAFunctionPolicy{}, fmt.Errorf("builder foreign schedulerwait certificate for %q conflicts with the frozen frontend proof", fn.Name())
-				}
-			}
 			if requested := policy.ForeignWorkerCertificate; requested != "" {
 				if !workerCertified {
 					return coro.SSAFunctionPolicy{}, fmt.Errorf("builder cannot certify foreign function %q without exact frozen frontend worker metadata", fn.Name())
@@ -736,23 +719,6 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 				// bounded-latency, or async-signal-safety proof.
 				policy.Exec = coro.IRQUnsafe
 				policy.ForeignSyncCertificate = syncCertificate.ID
-			}
-			if schedulerWaitCertified {
-				if !frontendC {
-					return coro.SSAFunctionPolicy{}, fmt.Errorf("frozen foreign schedulerwait certificate for %q does not name a frontend C declaration", fn.Name())
-				}
-				if policy.Effect != coro.NoSuspend || policy.Exec != 0 || policy.NeedsDispatch ||
-					policy.OverrideExternal && policy.External != coro.ExternalUnknownForeign {
-					return coro.SSAFunctionPolicy{}, fmt.Errorf("frontend C declaration %q conflicts with its frozen foreign schedulerwait certificate", fn.Name())
-				}
-				// Keep the managed boundary fully conservative. The exact certificate
-				// is consumed only by the compiler-owned raw host/scheduler-stack
-				// closure validator below.
-				policy.IgnoreBody = true
-				policy.External = coro.ExternalUnknownForeign
-				policy.OverrideExternal = true
-				policy.Exec = coro.BlockForeign | coro.IRQUnsafe
-				policy.ForeignSchedulerWaitCertificate = schedulerWaitCertificate.ID
 			}
 			if workerCertified {
 				if !frontendC {
@@ -966,9 +932,9 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 			// second physical body. Compiler/runtime ABI helpers execute on the
 			// ordinary scheduler/executor stack, never as an IRQ root, so retain
 			// the bit in the frozen plan while keeping the exact required-plain
-			// implementation. A frozen schedulerwait leaf is the sole blocking
-			// exception, and only when this exact member belongs to the
-			// compiler-owned raw host/scheduler-stack island.
+			// implementation. A may-block callable is admitted only when this
+			// exact member belongs to the compiler-owned raw host/scheduler-stack
+			// island.
 			const supportedExec = coro.MayUnwind | coro.NeedsCleanupFrame | coro.IRQUnsafe
 			allowedExec := coro.ExecFlags(supportedExec)
 			callableWaitsForeign := false
@@ -982,7 +948,7 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 					callableNoReturn = true
 				}
 			}
-			if policy.ForeignSchedulerWaitCertificate != "" || callableWaitsForeign {
+			if callableWaitsForeign {
 				if _, hostStack := in.requiredHostPlain[fn]; !hostStack {
 					return coro.SSAFunctionPolicy{}, fmt.Errorf("blocking C declaration %q is outside the compiler-owned raw host/scheduler-stack island", fn.Name())
 				}
@@ -1016,11 +982,11 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 				if !policy.IgnoreBody || !policy.OverrideExternal || (policy.External != coro.ExternalUnknownForeign && policy.External != coro.ExternalKnown) {
 					return coro.SSAFunctionPolicy{}, fmt.Errorf("compiler runtime ABI C declaration %q conflicts with frozen foreign classification: %s", fn.Name(), policy.External)
 				}
-				if policy.ForeignSchedulerWaitCertificate == "" && !callableWaitsForeign {
+				if !callableWaitsForeign {
 					policy.External = coro.ExternalKnown
 					policy.OverrideExternal = true
 				} else if policy.External != coro.ExternalUnknownForeign || policy.Exec != coro.BlockForeign|coro.IRQUnsafe {
-					return coro.SSAFunctionPolicy{}, fmt.Errorf("schedulerwait C declaration %q lost its managed unknown-foreign/blocking boundary", fn.Name())
+					return coro.SSAFunctionPolicy{}, fmt.Errorf("raw-host C declaration %q lost its managed unknown-foreign/blocking boundary", fn.Name())
 				}
 			} else if classified && background == llssa.InGo && len(fn.Blocks) != 0 {
 				if policy.OverrideExternal && policy.External != coro.Defined {
@@ -1940,9 +1906,29 @@ func (in CoroPlanInput) liveCoroRawABIPlainClosure(
 					// their replacement helpers, if any, are covered above.
 					continue
 				}
+				if callPlan.Kind == coro.CallForeign {
+					// A required compiler/runtime C leaf is not part of the Go
+					// body closure, but its exact occurrence still belongs to
+					// this raw-host proof. Record that operation identity without
+					// granting the declaration Go trust or weakening its managed
+					// unknown/blocking policy.
+					if callPlan.Open || len(callPlan.Targets) != 1 {
+						if _, required := in.requiredPlain[call.Common().StaticCallee()]; required {
+							return nil, fmt.Errorf("live raw ABI function %q reaches compiler-required foreign operation through an open call %q", fn.Name(), call.String())
+						}
+						continue
+					}
+					target, found := preliminary.Function(callPlan.Targets[0])
+					if !found || target == nil {
+						return nil, fmt.Errorf("live raw ABI foreign call in %q has an unresolved preliminary target", fn.Name())
+					}
+					if _, required := in.requiredPlain[target]; required {
+						closure.externalPlain[target] = struct{}{}
+					}
+					continue
+				}
 				if callPlan.Kind != coro.CallDirect && callPlan.Kind != coro.CallDefer {
-					// A spawned target has its own managed entry. Foreign calls
-					// retain their independent policy and never receive Go trust.
+					// A spawned target has its own managed entry.
 					continue
 				}
 				if callPlan.Open || len(callPlan.Targets) != 1 {
@@ -2017,25 +2003,38 @@ func validateLiveCoroRawABIPlainClosure(plan *coro.SSAPlan, raw *coroRawABIPlain
 			}
 			return nil
 		}
-		if _, schedulerWait := plan.ForeignSchedulerWaitCertificate(target); schedulerWait {
-			if _, compilerOwned := raw.hostStack[owner]; !compilerOwned {
-				return fmt.Errorf("live raw ABI plain closure %q reaches schedulerwait target %q (%s) at %s outside a compiler-owned raw host/scheduler-stack island",
-					owner.Name(), targetPlan.ID, target.String(), site)
-			}
-			if targetPlan.External != coro.ExternalUnknownForeign || targetPlan.Emission != coro.EmitExternal ||
-				targetPlan.Effect != coro.NoSuspend || targetPlan.Exec != coro.BlockForeign|coro.IRQUnsafe {
-				return fmt.Errorf("live raw ABI plain closure %q reaches malformed schedulerwait target %q (%s) at %s (external=%s effect=%s exec=%s)",
-					owner.Name(), targetPlan.ID, target.String(), site, targetPlan.External, targetPlan.Effect, targetPlan.Exec)
-			}
-			return nil
-		}
 		if _, compilerPlain := raw.externalPlain[target]; compilerPlain {
+			if callable, certified := plan.CallableContractCertificate(target); certified &&
+				callable.Scope == coro.CallableContractScopeDeclaration &&
+				coroRawPlainDirectForeignContractCompatible(callable.Contract) {
+				// Whether a may-block C declaration is safe to execute directly
+				// is a property of this exact invocation, not of the declaration.
+				// The compiler-owned raw host closure executes on its scheduler
+				// stack and deliberately owns this physical wait. The same
+				// declaration remains unknown/blocking in the managed plan, where
+				// ordinary callers are colored WaitForeign and use a worker.
+				if _, compilerOwned := raw.hostStack[owner]; !compilerOwned {
+					return fmt.Errorf("live raw ABI plain closure %q reaches blocking raw-host target %q (%s) at %s outside a compiler-owned raw host/scheduler-stack island",
+						owner.Name(), targetPlan.ID, target.String(), site)
+				}
+				expectedExec := coro.BlockForeign | coro.IRQUnsafe |
+					coro.CallableContractExecConstraints(callable.Contract)
+				if targetPlan.External != coro.ExternalUnknownForeign ||
+					targetPlan.Emission != coro.EmitExternal ||
+					targetPlan.Effect != coro.NoSuspend ||
+					targetPlan.Exec != expectedExec {
+					return fmt.Errorf("live raw ABI plain closure %q reaches malformed blocking raw-host target %q (%s) at %s (external=%s effect=%s exec=%s expected-exec=%s)",
+						owner.Name(), targetPlan.ID, target.String(), site,
+						targetPlan.External, targetPlan.Effect, targetPlan.Exec, expectedExec)
+				}
+				return nil
+			}
 			// requiredPlain is itself a frozen build-owned physical ABI proof for
 			// an exact C declaration reached by this closed raw island. It does not
 			// erase the declaration's plan facts: only the precise external-known,
-			// no-suspend, nonblocking shape is admissible here. schedulerwait was
-			// handled above because its intentionally blocking shape has the
-			// stronger host-stack ownership requirement.
+			// no-suspend, nonblocking shape is admissible here. A compatible
+			// may-block declaration was handled above under the stronger
+			// invocation-scoped host-stack ownership proof.
 			if targetPlan.External != coro.ExternalKnown || targetPlan.Emission != coro.EmitExternal ||
 				targetPlan.Effect != coro.NoSuspend || targetPlan.Exec&(coro.BlockForeign|coro.ThreadAffine|coro.OpaqueExec) != 0 {
 				return fmt.Errorf("live raw ABI plain closure %q reaches malformed compiler-required external target %q (%s) at %s (external=%s effect=%s exec=%s)",
@@ -2046,13 +2045,13 @@ func validateLiveCoroRawABIPlainClosure(plan *coro.SSAPlan, raw *coroRawABIPlain
 		if callable, certified := plan.CallableContractCertificate(target); certified &&
 			callable.Scope == coro.CallableContractScopeDeclaration &&
 			coroRawPlainDirectForeignContractCompatible(callable.Contract) {
-			// A raw ABI body executes on its native caller's stack. The same
-			// default may-block declaration that becomes a worker await in the
-			// managed twin is therefore an ordinary synchronous call here: it
-			// may block the foreign caller, but it cannot occupy a scheduler
-			// executor. Compiler-owned scheduler-stack leaves were placed in
-			// externalPlain above and retain their stricter explicit-policy
-			// gate.
+			// This is one of two exact raw-stack contexts. A compiler-owned host
+			// closure deliberately performs the physical wait on its scheduler
+			// stack; any other member is reachable from a proven synchronous C
+			// ABI entry and may block only that foreign caller's stack. Neither
+			// interpretation reclassifies the declaration: the managed twin
+			// retains WaitForeign and uses its selected foreign episode.
+			_, compilerHostOperation := raw.hostStack[owner]
 			expectedExec := coro.BlockForeign | coro.IRQUnsafe |
 				coro.CallableContractExecConstraints(callable.Contract)
 			if targetPlan.External == coro.ExternalUnknownForeign &&
@@ -2061,9 +2060,9 @@ func validateLiveCoroRawABIPlainClosure(plan *coro.SSAPlan, raw *coroRawABIPlain
 				targetPlan.Exec == expectedExec {
 				return nil
 			}
-			return fmt.Errorf("live raw ABI plain closure %q reaches malformed direct foreign callable target %q (%s) at %s (external=%s effect=%s exec=%s expected-exec=%s)",
+			return fmt.Errorf("live raw ABI plain closure %q reaches malformed direct foreign callable target %q (%s) at %s (compiler-host-operation=%t external=%s effect=%s exec=%s expected-exec=%s)",
 				owner.Name(), targetPlan.ID, target.String(), site,
-				targetPlan.External, targetPlan.Effect, targetPlan.Exec, expectedExec)
+				compilerHostOperation, targetPlan.External, targetPlan.Effect, targetPlan.Exec, expectedExec)
 		}
 		if terminalOnly {
 			// A terminal-only raw path has already committed to never returning
@@ -3550,7 +3549,6 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		}
 		input.foreignNoBlock = ctx.coroEmission.CoroForeignNoBlockCertificate
 		input.foreignSync = ctx.coroEmission.CoroForeignSyncCertificate
-		input.foreignSchedulerWait = ctx.coroEmission.CoroForeignSchedulerWaitCertificate
 		input.foreignWorker = ctx.coroEmission.CoroForeignWorkerCertificate
 		input.callableIdentity = ctx.coroEmission.CoroCallableIdentityCertificate
 		input.callableContract = ctx.coroEmission.CoroCallableContractCertificate
@@ -4401,8 +4399,9 @@ func validateCoroHostPullRuntimeFunctionV1(name string, fn *ssa.Function) (bool,
 // They are not visible from the application's source roots. The closure is a
 // trusted raw host/scheduler-stack island: CFG loops do not turn its fixed C
 // ABI into a coroutine. Exact ordinary C leaves receive a temporary
-// compatible-known summary; schedulerwait leaves retain their managed
-// unknown-foreign/blocking summary and are admitted only by raw validation.
+// compatible-known summary. Compatible may-block leaves retain their managed
+// unknown-foreign/blocking summary and are admitted only for an invocation
+// proven to belong to this raw-host closure.
 // Fallback SSA stubs remain ignored, and ordinary C declarations outside this
 // compiler-owned closure stay unknown foreign.
 func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function]struct{}, []requiredCoroDirectPlainCallArgument, map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate, error) {
