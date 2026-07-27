@@ -165,8 +165,7 @@ func CommitSpawn(parent, child *G, handle unsafe.Pointer) bool {
 		return false
 	}
 	root, ok := validDiscardResultSpawnRoot(child, handle)
-	if !ok || (p.readyHead == nil) != (p.readyTail == nil) ||
-		(p.readyTail != nil && p.readyTail.nextReady != nil) {
+	if !ok || !validReadyQueueHeader(p) || p.readyCount == ^uint32(0) {
 		return false
 	}
 	// This cannot fail after the complete parent/child/P validation above. It is
@@ -181,13 +180,7 @@ func CommitSpawn(parent, child *G, handle unsafe.Pointer) bool {
 	child.state = GRunnable
 	child.spawnParent = nil
 	child.spawnP = nil
-	child.queued = true
-	if p.readyTail == nil {
-		p.readyHead = child
-	} else {
-		p.readyTail.nextReady = child
-	}
-	p.readyTail = child
+	appendReadyUnchecked(p, child)
 	// Clear the temporary root only after P's queue reaches the child.
 	parent.spawnChild = nil
 	return true

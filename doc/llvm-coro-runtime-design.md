@@ -225,7 +225,8 @@ Stackless 不等于零内存。每个 suspended call 仍需要一个显式 frame
 - ready queue、普通 await、timer Sleep 不因每次切换分配节点。
 - coroutine frame 大小只包含跨 suspend 点仍存活的值及必要头部。
 - 高并发内存按 `O(G header + live coroutine frames + wait nodes)` 增长，不含 `O(G × reserved native stack)`。
-- 单 P 基础正确后，再以本地 deque、批量 stealing、缓存 frame 等方式优化。
+- 多 P 优先使用owner-assisted有界批量sharing；只有profiling证明必要时才引入并发
+  lock-free deque。缓存frame等优化不得改变continuation所有权协议。
 
 ## 4. 非目标与明确限制
 
@@ -995,14 +996,21 @@ ForeignReentry/HostReentry child若park，使用普通Parking/Waiting协议但pi
 
 ### 11.3 Ready queue
 
-第一阶段使用锁保护队列验证正确性。Native 多 P 阶段：
+当前Native多P使用更轻的owner-assisted模型：
 
-- 每个 P 有 owner-fast local deque。
-- 本地 enqueue/dequeue 优先。
-- 外部线程、timer poller 和跨 P wake 写 global injection queue。
-- 本地溢出时批量转移到 global。
-- 空闲 P 随机选择 victim，偷取约一半 runnable G。
-- 每执行固定数量本地任务检查 global queue，防止全局饥饿。
+- 每个P拥有无分配的intrusive FIFO，本地enqueue/dequeue均为O(1)，精确
+  `readyCount`用于批量决策；queue link永远不由其他P并发读取。
+- 空闲P只向fleet发布无指针、可合并的需求。源P在一个stable physical action后认领需求，
+  把约一半、最多一个固定mailbox容量的P-neutral runnable批量转移，并至少保留一个本地
+  runnable；目的P只需一次request/doorbell。
+- 多个源P可以竞争同一需求，但CAS只允许一个winner；目的mailbox的Try gate允许普通竞争
+  立即退回，不让scheduler owner自旋。
+- 外部线程、timer、poller和host callback仍只向exact source发布POD fact并请求其owner；
+  source-affine cleanup完成、`ResumePacket`物化后，G才进入上述sharing。
+- 不引入concurrent victim deque、随机读取其他P的queue或第二套global runnable owner。
+  如果profiling证明owner-assisted路径不足，未来lock-free deque只能替换本地queue/ingress
+  实现，不能改变demand、P-neutral proof、mailbox root和Imported门。
+- 每执行固定数量本地任务仍检查source/request debt，防止外部事件和全局需求饥饿。
 - Preempted G 放队尾。
 - `runnext` 只能有限使用，避免 ping-pong 饿死其他任务。
 
@@ -2025,14 +2033,14 @@ Pure sync library/archive不需要链接scheduler。Executable一旦选择 `-sch
   `594/17/18/651`纵向账本。
 - Phase 36之后的主要缺口仍是工程闭环而非新的coroutine可行性障碍：零/单source
   `ResumePacket`、Channel/select typed multi-source materialization、单Worker HostOp、Worker+Timer
-  deadline和keyed/private-registry park的P-neutral composite cleanup已经完成；基于无指针需求claim、exact mailbox和Imported首次执行门的global injection/work sharing也已完成。native现在于首个managed resume前创建固定8-route物理topology，route/source/event identity保持到进程关闭；启动环境或online CPU只初始化逻辑execution quota，标准`runtime.GOMAXPROCS(n)`可在运行期查询、增大或缩小该quota，而不销毁P、迁移source或撤销已经开始的resume。single-executor target固定返回1。locked-M阻塞已接通同P replacement owner、嵌套handoff和route-local channel/timer/poll驱动；未解锁退出又以clean successor覆盖program、peer和temporary replacement M，command main-return不会等待不可取消的blocked M。有界pthread standby缓存和覆盖所有runtime M的`SetMaxThreads`账本也已完成。下一步是批量/local-deque steal、普通locked park/preempt、完整affinity、callback/reentry与非command shutdown矩阵，以及Linux自动cgroup/affinity默认值刷新；paged/dynamic channel、timer与
+  deadline和keyed/private-registry park的P-neutral composite cleanup已经完成；基于无指针需求claim、exact mailbox和Imported首次执行门的global injection/work sharing也已完成。owner P现以精确ready计数一次转移约一半、最多8个P-neutral runnable，只发一个target request；其他P从不并发读取victim queue，因此当前不需要第二套lock-free deque。native现在于首个managed resume前创建固定8-route物理topology，route/source/event identity保持到进程关闭；启动环境或online CPU只初始化逻辑execution quota，标准`runtime.GOMAXPROCS(n)`可在运行期查询、增大或缩小该quota，而不销毁P、迁移source或撤销已经开始的resume。single-executor target固定返回1。locked-M阻塞已接通同P replacement owner、嵌套handoff和route-local channel/timer/poll驱动；未解锁退出又以clean successor覆盖program、peer和temporary replacement M，command main-return不会等待不可取消的blocked M。有界pthread standby缓存和覆盖所有runtime M的`SetMaxThreads`账本也已完成。下一步是普通locked park/preempt、完整affinity、callback/reentry与非command shutdown矩阵，以及Linux自动cgroup/affinity默认值刷新；paged/dynamic channel、timer与
   worker capacity；完整defer/recover/Goexit和precise suspended-frame GC；外部DNS
   server/cgo resolver、Unix/raw socket与ancillary OOB、process/signal；logical stack/tooling；以及
   WASM/WASI/RTOS/baremetal各自内建
   event/host/HAL adapter。native退出实验模式仍必须满足35.1与35.2，尤其仓库
   `test/*`和GOROOT不得存在unexpected failure。
 - compiler的所有现有initial、child-await、yield和legacy-park resume边已接入terminating dispatch gate。zero-ticket路径调用scalar `__llgo_coro_run_decision_take_zero_v1(g) uint32`，正常值进入唯一normal continuation，Abort/Shutdown在cleanup lowering完成前进入共享trap而不会误执行用户continuation；full ticket/lease ABI继续供bootstrap与未来park-site reconciliation使用。同一LLVM/target的gate开关对照证明scalar gate不会增加stackless coroutine frame，CoroSplit ramp/destroy也没有可达gate。
-- 两字Operation identity已冻结为`source:8/route:9/local:15 + generation:32`，保持size 8、align 4。route按runtime instance单调分配且永不复用，关闭后保留永久tombstone；Manual/TaskControl ingress的producer lease覆盖`source.Post -> executor.Request`完整tail，strong join后才允许清除source/executor pointer；Timer V2 reserve、publish、Apply和result lease也验证exact route/local/generation。52-byte pointer-free `ResumePacket`已覆盖零/单Timer、Manual、Poll、Worker以及经typed plan物化的direct Channel/multi-case select，HostOp deadline与keyed/private-registry cleanup也复用同一POD plan。P-neutral global injection/work sharing已在1/4/8 route core生命周期以及1/8 P真实linked E2E验证。Command root用G尾部padding中的一字节`AnyOwner/CurrentOwner` mobility保持program-P边界；这不增加G大小、P指针或registry，也不等于完整thread/realm affinity。运行期逻辑execution quota和locked-M同P replacement handoff均已完成：active resume先变为私有rooted的`GForeignWaiting`，10,000槽BSS M目录以generation/owner-epoch baton把active route从parent scalar slot切到replacement，replacement复用原driver/source/common reducer并服务channel、timer和poll；原C返回后request/ring、确认exact Returned owner并将raw M放入8项standby cache，随后重获permit并恢复exact resume。未解锁G退出通过Action padding retire bit和clean-factory succession覆盖program、peer及temporary replacement lineage；TLS destructor E2E证明旧pthread退出，main-return遇不可取消locked C按进程终止语义退出而不join。统一physical-thread ledger覆盖program/factory/worker/peer/replacement/successor/standby，标准`runtime/debug.SetMaxThreads`已通过C lifecycle、14线程上限replacement和普通stdlib同步调用。`GOMAXPROCS=1`下同route channel、timer、真实socket poll及nested M0→M1→M2 linked E2E均已通过。尚未完成的是批量/local-deque steal、完整affinity以及标准库/GOROOT的locked syscall/callback/reentry矩阵。
+- 两字Operation identity已冻结为`source:8/route:9/local:15 + generation:32`，保持size 8、align 4。route按runtime instance单调分配且永不复用，关闭后保留永久tombstone；Manual/TaskControl ingress的producer lease覆盖`source.Post -> executor.Request`完整tail，strong join后才允许清除source/executor pointer；Timer V2 reserve、publish、Apply和result lease也验证exact route/local/generation。52-byte pointer-free `ResumePacket`已覆盖零/单Timer、Manual、Poll、Worker以及经typed plan物化的direct Channel/multi-case select，HostOp deadline与keyed/private-registry cleanup也复用同一POD plan。P-neutral global injection/work sharing已在1/4/8 route core生命周期以及1/8 P真实linked E2E验证；bounded half-batch又覆盖非neutral前缀、mailbox余量、并发claim、close join和零分配prepared storage。Command root用G尾部padding中的一字节`AnyOwner/CurrentOwner` mobility保持program-P边界；这不增加G大小、P指针或registry，也不等于完整thread/realm affinity。运行期逻辑execution quota和locked-M同P replacement handoff均已完成：active resume先变为私有rooted的`GForeignWaiting`，10,000槽BSS M目录以generation/owner-epoch baton把active route从parent scalar slot切到replacement，replacement复用原driver/source/common reducer并服务channel、timer和poll；原C返回后request/ring、确认exact Returned owner并将raw M放入8项standby cache，随后重获permit并恢复exact resume。未解锁G退出通过Action padding retire bit和clean-factory succession覆盖program、peer及temporary replacement lineage；TLS destructor E2E证明旧pthread退出，main-return遇不可取消locked C按进程终止语义退出而不join。统一physical-thread ledger覆盖program/factory/worker/peer/replacement/successor/standby，标准`runtime/debug.SetMaxThreads`已通过C lifecycle、14线程上限replacement和普通stdlib同步调用。`GOMAXPROCS=1`下同route channel、timer、真实socket poll及nested M0→M1→M2 linked E2E均已通过。尚未完成的是完整affinity以及标准库/GOROOT的locked syscall/callback/reentry矩阵；并发local deque保留为profiling驱动的可选优化，不再是正确性gate。
 - 第一个标准库同步风格原型已以GOROOT source patch实现`time.Sleep`：普通`time.Sleep(d)`被Effect分析自动传播为`DirectCoro/AwaitStructured`，不修改public signature，不依赖libuv、BDWGC、pthread producer或用户goroutine。真实linked native+nogc E2E已编译production runtime island，实际等待30ms并恢复原frame；timer/wake路径由monotonic clock与pipe/poll/fcntl实现，符号审计确认不依赖libuv、BDWGC或pthread producer。另一focused production-overlay测试直接读取真实注入的`time.Sleep`源，不用测试effect seed，验证跨包同步caller染色、frame证书和CoroSplit，但不声称链接执行标准库`time.Sleep`。LLVM 19–22都跑该契约，Go 1.24跑真实linked E2E，Go 1.26也跑production overlay分析/codegen。
 - Phase 22 仍是有界prototype，不是完整`time`runtime：第65个同时live timer会按fail-stop ABI终止，尚需dynamic/sharded table和heap；`Timer`/`Ticker`/`AfterFunc`仍使用legacy libuv路径；`f := time.Sleep`、interface/reflect和dynamic dispatch还没有end-to-end callable coroutine descriptor；`Sleep(0)`/负值在Sleep体内不注册timer，但value-insensitive caller仍会创建并await child frame，尚需conditional effect或call-site fast path才能避免可观测的多余handoff。完整`Do`标准库构建现在先被`sync.Pool` TLS destructor的捕获闭包挡住：exact同步C callback ABI没有closure context slot，不能直接放宽。后续需改成显式`owner/local` TLS state，并同时为`tls.Handle[T]`经`Pool.local`的unsafe transport建立字段级whole-program证书。WASM、WASI、RTOS和baremetal也尚未有对应timer source。
 - wait/preempt core 要求目标提供可靠的 32-bit atomic load/store/CAS。WASM 可直接满足；带 A 扩展的 RISC-V 可满足；ESP32-C3 RV32IMC 当前会在链接时缺少 `__atomic_*_4`，直到平台用 IRQ critical section 提供单核适配。这里故意不使用非原子 fallback。
@@ -2106,7 +2114,7 @@ Pure sync library/archive不需要链接scheduler。Executable一旦选择 `-sch
 
 ### Phase 5：Native 多 P
 
-- P-neutral `ResumePacket/ResultCell`物化和source-affine ready边界完成后，使用无指针demand + exact mailbox启用按需global injection/work sharing；该层已完成。Native固定创建8个有界route，C线程叶只传递`uint32` M slot，不传函数地址、G、P或coroutine handle；启动环境/CPU初始化逻辑execution quota，`runtime.GOMAXPROCS`在固定identity上动态调整managed resume并行上限。locked-M阻塞已用`ExecutionDomainHandoff + ExecutorResumeHandoff + active M slot`完成同P ready/source handoff；replacement复用公共reducer，支持嵌套并受同一execution quota约束。有界pthread standby cache和`runtime/debug.SetMaxThreads` physical ledger已完成，不改变transfer ownership协议。下一步增加本地deque/批量steal和完整affinity。
+- P-neutral `ResumePacket/ResultCell`物化和source-affine ready边界完成后，使用无指针demand + exact mailbox启用按需global injection/work sharing；该层及owner-assisted bounded half-batch已完成。Native固定创建8个有界route，C线程叶只传递`uint32` M slot，不传函数地址、G、P或coroutine handle；启动环境/CPU初始化逻辑execution quota，`runtime.GOMAXPROCS`在固定identity上动态调整managed resume并行上限。locked-M阻塞已用`ExecutionDomainHandoff + ExecutorResumeHandoff + active M slot`完成同P ready/source handoff；replacement复用公共reducer，支持嵌套并受同一execution quota约束。有界pthread standby cache和`runtime/debug.SetMaxThreads` physical ledger已完成，不改变transfer ownership协议。下一步完成普通locked park/preempt和完整affinity；并发local deque仅在profiling证明owner-assisted queue不足时引入。
 - Worker pool及其他有限source使用generation capacity permit/backpressure，不按operation增生线程或对象。
 - ForeignOp worker/locked-M clean-stack execution、P release/reacquire和ForeignReentry。
 - `Syscall*`/`RawSyscall*`的single-call ForeignOp、PollWait wrapper event lowering、pointer provenance/pin和thread-affine thunk。
@@ -2143,7 +2151,7 @@ Pure sync library/archive不需要链接scheduler。Executable一旦选择 `-sch
 
 ### Phase 8：优化与扩展
 
-- Lock-free/local deque。
+- 可选的profile-driven lock-free/local deque；不得复制demand/mailbox所有权状态机。
 - Frame pooling和内存上限。
 - Precise frame maps。
 - WASM threads、MCU SMP。

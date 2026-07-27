@@ -585,12 +585,14 @@ func TestExecutorFleetDemandDistributesSurplusWithoutBouncingLastRunnable(t *tes
 	}
 	firstDistribution, ok := fleet.DistributePNeutralRunnable(source.handle, source.p)
 	if !ok || !firstDistribution.Valid() || firstDistribution.Target != first.handle ||
+		firstDistribution.Count != 1 ||
 		source.p.readyHead != tasks[1].g {
 		t.Fatalf("first demand distribution = %+v, ok=%t head=%p",
 			firstDistribution, ok, source.p.readyHead)
 	}
 	secondDistribution, ok := fleet.DistributePNeutralRunnable(source.handle, source.p)
 	if !ok || !secondDistribution.Valid() || secondDistribution.Target != second.handle ||
+		secondDistribution.Count != 1 ||
 		source.p.readyHead != tasks[2].g || source.p.readyTail != tasks[2].g {
 		t.Fatalf("second demand distribution = %+v, ok=%t source=(%p,%p)",
 			secondDistribution, ok, source.p.readyHead, source.p.readyTail)
@@ -638,6 +640,7 @@ func TestExecutorFleetDemandSharesSingleInitialButNotSingleYielded(t *testing.T)
 		}
 		distribution, ok := fleet.DistributePNeutralRunnable(source.handle, source.p)
 		if !ok || !distribution.Valid() || distribution.Target != target.handle ||
+			distribution.Count != 1 ||
 			source.p.readyHead != nil || source.p.readyTail != nil {
 			t.Fatalf("single initial distribution = %+v/%t source=(%p,%p)",
 				distribution, ok, source.p.readyHead, source.p.readyTail)
@@ -662,6 +665,71 @@ func TestExecutorFleetDemandSharesSingleInitialButNotSingleYielded(t *testing.T)
 			t.Fatalf("cancel yielded demand = (%t,%t)", inflight, cancelOK)
 		}
 	})
+}
+
+func TestExecutorFleetDemandDistributesBoundedHalfBatch(t *testing.T) {
+	fleet := new(ExecutorFleet)
+	source := bindExecutorFleetManualFixture(t, fleet)
+	target := bindExecutorFleetManualFixture(t, fleet)
+	tasks := make([]*yieldingTestG, 8)
+	for index := range tasks {
+		tasks[index] = newYieldingTestG(t, "fleet-demand-batch")
+		scratch := new(P)
+		yieldRunnableForTransfer(t, scratch, tasks[index])
+		runnable, ok := NextRunnable(scratch)
+		if !ok || runnable != tasks[index].g {
+			t.Fatalf("detach fleet batch task %d", index)
+		}
+		if !Enqueue(source.p, tasks[index].g) {
+			t.Fatalf("enqueue fleet batch task %d", index)
+		}
+	}
+	if !fleet.RequestPNeutralRunnable(target.handle, target.p) {
+		t.Fatal("request fleet batch")
+	}
+	distribution, ok := fleet.DistributePNeutralRunnable(source.handle, source.p)
+	if !ok || !distribution.Valid() || distribution.Target != target.handle ||
+		distribution.Count != 4 || source.p.readyCount != 4 ||
+		source.p.readyHead != tasks[4].g || source.p.readyTail != tasks[7].g {
+		t.Fatalf("fleet batch distribution = %+v/%t source:%d (%p,%p)",
+			distribution, ok, source.p.readyCount, source.p.readyHead, source.p.readyTail)
+	}
+	moved, more, status := fleet.TryDrainPNeutralRunnables(
+		target.handle,
+		target.p,
+		RunnableTransferMailboxCapacity,
+	)
+	if status != RunnableTransferDrainComplete || more || moved != distribution.Count ||
+		target.p.readyCount != distribution.Count ||
+		target.p.readyHead != tasks[0].g || target.p.readyTail != tasks[3].g {
+		t.Fatalf("fleet batch import = (%d,%t,%d), target:%d (%p,%p)",
+			moved, more, status, target.p.readyCount, target.p.readyHead, target.p.readyTail)
+	}
+}
+
+func TestExecutorFleetBatchPreparationDoesNotAllocate(t *testing.T) {
+	fleet := new(ExecutorFleet)
+	source := bindExecutorFleetManualFixture(t, fleet)
+	for index := 0; index < int(RunnableTransferMailboxCapacity); index++ {
+		task := newYieldingTestG(t, "fleet-batch-allocation")
+		scratch := new(P)
+		yieldRunnableForTransfer(t, scratch, task)
+		runnable, ok := NextRunnable(scratch)
+		if !ok || runnable != task.g || !Enqueue(source.p, task.g) {
+			t.Fatalf("prepare allocation task %d", index)
+		}
+	}
+	failed := false
+	allocations := testing.AllocsPerRun(100, func() {
+		distribution, ok := fleet.DistributePNeutralRunnable(source.handle, source.p)
+		if !ok || distribution != (RunnableDistribution{}) {
+			failed = true
+		}
+	})
+	if failed || allocations != 0 || source.p.readyCount != RunnableTransferMailboxCapacity {
+		t.Fatalf("batch preparation = failed:%t allocations:%f count:%d",
+			failed, allocations, source.p.readyCount)
+	}
 }
 
 func TestExecutorFleetConcurrentSourcesClaimOneRunnableDemand(t *testing.T) {

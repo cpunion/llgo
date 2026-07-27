@@ -413,19 +413,13 @@ func resolveAffectedWaitSets(p *P, sources *ExecutorSourceSet) (batchHead, batch
 }
 
 func appendRunnableUnchecked(p *P, g *G) {
-	g.queued = true
-	if p.readyTail == nil {
-		p.readyHead = g
-	} else {
-		p.readyTail.nextReady = g
-	}
-	p.readyTail = g
+	appendReadyUnchecked(p, g)
 }
 
 func promoteReadyWaitSet(sources *ExecutorSourceSet, p *P, record *WaitSetRecord) bool {
 	if !validActiveWaitSetRecordFast(p, record) || record.work != waitSetWorkResolving ||
 		(record.g.park.phase != parkReady && record.g.park.phase != parkMaterialized) ||
-		!validReadyQueueHeader(p) {
+		!validReadyQueueHeader(p) || p.readyCount == ^uint32(0) {
 		return false
 	}
 	g := record.g

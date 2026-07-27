@@ -31,7 +31,9 @@ func TestCoroRunnableDistributionUsesDemandAndExactMailbox(t *testing.T) {
 		"func (fleet *ExecutorFleet) RequestPNeutralRunnable(",
 		"func (fleet *ExecutorFleet) CancelPNeutralRunnableRequest(",
 		"func (fleet *ExecutorFleet) DistributePNeutralRunnable(",
-		"fleet.PublishPNeutralRunnableAndRequest(",
+		"fleet.publishPreparedPNeutralRunnableBatchAndRequest(",
+		"func (fleet *ExecutorFleet) PublishPNeutralRunnableAndRequest(",
+		"Count    uint32",
 		"preemptLoad(&slot.runnableDemand) != uint32(runnableDemandIdle)",
 	} {
 		if !strings.Contains(core, required) {
@@ -43,6 +45,8 @@ func TestCoroRunnableDistributionUsesDemandAndExactMailbox(t *testing.T) {
 	for _, required := range []string{
 		"runnableTransferGImported",
 		"g.transferState = runnableTransferGImported",
+		"func PublishPNeutralRunnableBatch(",
+		"source.readyCount / 2",
 	} {
 		if !strings.Contains(transfer, required) {
 			t.Errorf("runnable transfer lacks imported ownership marker %q", required)

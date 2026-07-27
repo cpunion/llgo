@@ -184,6 +184,10 @@ type P struct {
 	// event source. Every successful BeginRunG loads one full quantum; an idle
 	// P keeps the exact zero value.
 	servicePreemptBudget uint32
+	// readyCount is owner-only metadata for the intrusive ready queue. It makes
+	// bounded work sharing independent of a whole-queue length scan while the
+	// head/tail/link audit remains available at lifecycle and debug gates.
+	readyCount uint32
 }
 
 // servicePreemptPollBudget bounds how many legal compiler safepoints one G may
@@ -480,7 +484,8 @@ func Enqueue(p *P, g *G) bool {
 		!validRunnableParkState(&g.park) ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
 		g.transferState != runnableTransferGIdle || !validOSThreadEnqueue(p, g) ||
-		!validRunnableRunAction(g) {
+		!validRunnableRunAction(g) || !validReadyQueueHeader(p) ||
+		p.readyCount == ^uint32(0) {
 		return false
 	}
 	schedule := preemptLoad(&p.schedule)
@@ -499,6 +504,7 @@ func appendReadyUnchecked(p *P, g *G) {
 		p.readyTail.nextReady = g
 	}
 	p.readyTail = g
+	p.readyCount++
 }
 
 func prependReadyUnchecked(p *P, g *G) {
@@ -508,10 +514,11 @@ func prependReadyUnchecked(p *P, g *G) {
 	if p.readyTail == nil {
 		p.readyTail = g
 	}
+	p.readyCount++
 }
 
 func dequeue(p *P) *G {
-	if p == nil || p.readyHead == nil {
+	if p == nil || p.readyHead == nil || p.readyCount == 0 {
 		return nil
 	}
 	g := p.readyHead
@@ -521,6 +528,7 @@ func dequeue(p *P) *G {
 	}
 	g.nextReady = nil
 	g.queued = false
+	p.readyCount--
 	return g
 }
 
@@ -549,7 +557,7 @@ func nextOSThreadRunnable(p *P) *G {
 // to execute. The uncommon locked path scans the scheduler-owned FIFO without
 // reordering unrelated tasks; UnlockOSThread restores their original order.
 func dequeueOSThreadRunnable(p *P) *G {
-	if p == nil || p.readyHead == nil {
+	if p == nil || p.readyHead == nil || p.readyCount == 0 {
 		return nil
 	}
 	owner := p.osThreadLockOwner
@@ -582,6 +590,7 @@ func dequeueOSThreadRunnable(p *P) *G {
 		}
 		current.nextReady = nil
 		current.queued = false
+		p.readyCount--
 		if current.transferState == runnableTransferGImported {
 			current.transferState = runnableTransferGIdle
 		}
@@ -646,6 +655,7 @@ func validParkSetWaitingG(g *G) bool {
 
 func validReadyQueueHeader(p *P) bool {
 	return p != nil && (p.readyHead == nil) == (p.readyTail == nil) &&
+		(p.readyHead == nil) == (p.readyCount == 0) &&
 		(p.readyTail == nil || p.readyTail.nextReady == nil)
 }
 
@@ -666,8 +676,13 @@ func validReadyQueue(p *P) bool {
 		}
 	}
 	var tail *G
+	var count uint32
 	ownerSeen := false
 	for g := p.readyHead; g != nil; g = g.nextReady {
+		if count == ^uint32(0) {
+			return false
+		}
+		count++
 		if !ValidG(g) || g.state != GRunnable || !g.queued || g.waiting ||
 			!gPreemptEnabledAtDepthZero(g) ||
 			g.runP != nil ||
@@ -685,7 +700,7 @@ func validReadyQueue(p *P) bool {
 		}
 		tail = g
 	}
-	return tail == p.readyTail &&
+	return tail == p.readyTail && count == p.readyCount &&
 		(p.osThreadLockOwner == nil || !p.osThreadLockOwner.queued || ownerSeen)
 }
 
@@ -966,7 +981,8 @@ func pauseExecutorRunAction(p *P, g *G, action Action, placement executorRunQueu
 		g.queued || g.nextReady != nil || g.waiting || !validRunnableParkState(&g.park) ||
 		g.spawnChild != nil || g.spawnParent != nil || g.spawnP != nil ||
 		g.transferState != runnableTransferGIdle || !gPreemptEnabledAtDepthZero(g) ||
-		!validReadyQueueHeader(p) || placement > executorRunQueueCommandRootDestroy {
+		!validReadyQueueHeader(p) || p.readyCount == ^uint32(0) ||
+		placement > executorRunQueueCommandRootDestroy {
 		return false
 	}
 	schedule := preemptLoad(&p.schedule)
@@ -1071,8 +1087,7 @@ func Resumed(p *P, g *G, action Action) (Action, bool) {
 		// BeginRunG guarantees that a running G has no ready-queue link. Check
 		// the remaining queue invariants before committing any state so a
 		// corrupted queue cannot leave a half-requeued G behind.
-		if g.queued || g.nextReady != nil || (p.readyHead == nil) != (p.readyTail == nil) ||
-			(p.readyTail != nil && p.readyTail.nextReady != nil) {
+		if g.queued || g.nextReady != nil || !validReadyQueueHeader(p) {
 			return Action{}, false
 		}
 		if !acknowledgeSuspendedGPreempt(g) {
@@ -1409,6 +1424,7 @@ func AcknowledgeTerminalSchedule(p *P, g *G, action Action) bool {
 // ready-queue link, destruction bookkeeping, or P operation survived.
 func TerminalG(p *P, g *G) bool {
 	return p != nil && p.current == nil && p.readyHead == nil && p.readyTail == nil &&
+		p.readyCount == 0 &&
 		emptySchedulerWaitQueues(p) &&
 		preemptLoad(&p.schedule) == scheduleDisabled && preemptLoad(&p.executorMode) == executorModeUnbound &&
 		p.executor == nil && p.channelSource == nil && p.osThreadLockOwner == nil &&

@@ -252,6 +252,134 @@ func TestRunnableTransferOwnerAndBoundedFIFO(t *testing.T) {
 	}
 }
 
+func TestRunnableTransferBatchSharesHalfAndLeavesLocalWork(t *testing.T) {
+	source, target := new(P), new(P)
+	tasks := make([]*yieldingTestG, 7)
+	for index := range tasks {
+		tasks[index] = newYieldingTestG(t, "batch-half")
+		scratch := new(P)
+		yieldRunnableForTransfer(t, scratch, tasks[index])
+		runnable, ok := NextRunnable(scratch)
+		if !ok || runnable != tasks[index].g || scratch.readyCount != 0 {
+			t.Fatalf("detach batch task %d = (%p,%t), count=%d",
+				index, runnable, ok, scratch.readyCount)
+		}
+		if !Enqueue(source, tasks[index].g) {
+			t.Fatalf("enqueue batch task %d", index)
+		}
+	}
+	if source.readyCount != uint32(len(tasks)) || !validReadyQueue(source) {
+		t.Fatalf("batch source count/invariant = %d/%t", source.readyCount, validReadyQueue(source))
+	}
+
+	var mailbox RunnableTransferMailbox
+	if !BindRunnableTransferMailbox(&mailbox, target) {
+		t.Fatal("bind batch transfer mailbox")
+	}
+	first, count := PublishPNeutralRunnableBatch(
+		&mailbox,
+		source,
+		RunnableTransferMailboxCapacity,
+	)
+	if !first.Valid() || count != 3 || mailbox.count != 3 ||
+		source.readyCount != 4 || source.readyHead != tasks[3].g ||
+		source.readyTail != tasks[6].g || !validReadyQueue(source) {
+		t.Fatalf("batch publication = first:%+v count:%d mailbox:%d source:%d (%p,%p)",
+			first, count, mailbox.count, source.readyCount, source.readyHead, source.readyTail)
+	}
+	for index := uint32(0); index < count; index++ {
+		task := tasks[index].g
+		slot := &mailbox.slots[index]
+		if task.transferState != runnableTransferGPublished || task.queued ||
+			slot.g != task || slot.source != source ||
+			slot.state != runnableTransferSlotPublished {
+			t.Fatalf("batch slot %d = task:%d queued:%t slot:%+v",
+				index, task.transferState, task.queued, *slot)
+		}
+	}
+
+	moved, more, ok := DrainPNeutralRunnables(
+		&mailbox,
+		target,
+		RunnableTransferMailboxCapacity,
+	)
+	if !ok || more || moved != count || target.readyCount != count ||
+		target.readyHead != tasks[0].g || target.readyTail != tasks[2].g ||
+		!validReadyQueue(target) {
+		t.Fatalf("batch import = (%d,%t,%t), target:%d (%p,%p)",
+			moved, more, ok, target.readyCount, target.readyHead, target.readyTail)
+	}
+}
+
+func TestRunnableTransferBatchStopsAtFirstNonNeutralAndMailboxCapacity(t *testing.T) {
+	t.Run("non-neutral prefix", func(t *testing.T) {
+		source, target := new(P), new(P)
+		tasks := make([]*yieldingTestG, 4)
+		for index := range tasks {
+			tasks[index] = newYieldingTestG(t, "batch-prefix")
+			if index == 1 {
+				tasks[index].g.runnableAffinity = runnableCurrentOwner
+			}
+			if !Enqueue(source, tasks[index].g) {
+				t.Fatalf("enqueue prefix task %d", index)
+			}
+		}
+		var mailbox RunnableTransferMailbox
+		if !BindRunnableTransferMailbox(&mailbox, target) {
+			t.Fatal("bind prefix mailbox")
+		}
+		first, count := PublishPNeutralRunnableBatch(
+			&mailbox,
+			source,
+			RunnableTransferMailboxCapacity,
+		)
+		if !first.Valid() || count != 1 || mailbox.count != 1 ||
+			source.readyCount != 3 || source.readyHead != tasks[1].g ||
+			!validReadyQueue(source) {
+			t.Fatalf("prefix publication = first:%+v count:%d mailbox:%d source:%d/%p",
+				first, count, mailbox.count, source.readyCount, source.readyHead)
+		}
+	})
+
+	t.Run("remaining capacity", func(t *testing.T) {
+		target := new(P)
+		var mailbox RunnableTransferMailbox
+		if !BindRunnableTransferMailbox(&mailbox, target) {
+			t.Fatal("bind capacity mailbox")
+		}
+		for index := uint32(0); index < RunnableTransferMailboxCapacity-1; index++ {
+			source := new(P)
+			task := newYieldingTestG(t, "batch-capacity-fill")
+			if !Enqueue(source, task.g) {
+				t.Fatalf("enqueue capacity filler %d", index)
+			}
+			if _, ok := PublishPNeutralRunnable(&mailbox, source, task.g); !ok {
+				t.Fatalf("publish capacity filler %d", index)
+			}
+		}
+		source := new(P)
+		tasks := make([]*yieldingTestG, 4)
+		for index := range tasks {
+			tasks[index] = newYieldingTestG(t, "batch-capacity-source")
+			if !Enqueue(source, tasks[index].g) {
+				t.Fatalf("enqueue capacity source %d", index)
+			}
+		}
+		first, count := PublishPNeutralRunnableBatch(
+			&mailbox,
+			source,
+			RunnableTransferMailboxCapacity,
+		)
+		if !first.Valid() || count != 1 ||
+			mailbox.count != RunnableTransferMailboxCapacity ||
+			source.readyCount != 3 || source.readyHead != tasks[1].g ||
+			!validReadyQueue(source) {
+			t.Fatalf("capacity-limited batch = first:%+v count:%d mailbox:%d source:%d/%p",
+				first, count, mailbox.count, source.readyCount, source.readyHead)
+		}
+	})
+}
+
 func TestRunnableTransferFullDoesNotLoseSourceRoot(t *testing.T) {
 	target := new(P)
 	var mailbox RunnableTransferMailbox
