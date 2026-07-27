@@ -81,6 +81,10 @@ const (
 	coroOSThreadUnlockSymbolV1                                  = "__llgo_coro_os_thread_unlock_v1"
 	coroOSThreadLockedSymbolV1                                  = "__llgo_coro_os_thread_locked_v1"
 	coroOSThreadForeignCallSymbolV1                             = "__llgo_coro_os_thread_foreign_call_v1"
+	coroForeignReentryAcquireSymbolV1                           = "__llgo_coro_foreign_reentry_acquire_v1"
+	coroForeignReentryRunSymbolV1                               = "__llgo_coro_foreign_reentry_run_v1"
+	coroForeignReentryFailureSymbolV1                           = "__llgo_coro_foreign_reentry_failure_v1"
+	coroReentrantForeignCallSymbolV1                            = "__llgo_coro_reentrant_foreign_call_v1"
 
 	// Step kinds and semantic roles are part of the cross-target bootstrap ABI.
 	// Keep these numeric values synchronized with ssa and runtime/internal/coro.

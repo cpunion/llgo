@@ -20,11 +20,16 @@
 package cl
 
 import (
+	"bytes"
+	"debug/elf"
+	"debug/macho"
+	"debug/pe"
 	"strings"
 	"testing"
 
 	"github.com/goplus/llgo/internal/coro"
 	"github.com/goplus/llgo/internal/goembed"
+	"github.com/xgo-dev/llvm"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -154,6 +159,141 @@ func F() int { return 42 }
 	}
 	if observerCalls != 0 {
 		t.Fatalf("cache registration observer calls = %d, want 0", observerCalls)
+	}
+}
+
+func TestCoroSourcePackageEmbedsLibraryEffectSummary(t *testing.T) {
+	ssaPkg, _, files := buildGoSSAPkg(t, `
+package foo
+
+func F(value int) int { return value + 1 }
+`)
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	universe, err := prepareStacklessEmissionUniverse(
+		prog, nil, []EmissionPackage{{SSA: ssaPkg, Files: files, Identity: "example.com/foo"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, universe.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	functionIDs := universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI = coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0
+	functionIDs.ArchiveReady = true
+	plan, err := coro.AnalyzeSSA(ssaPkg.Prog, coro.Roots{
+		{Function: ssaPkg.Func("F"), Demand: coro.SyncDemand},
+	}, coro.SSAConfig{
+		EmissionUniverse:     ssaUniverse,
+		FunctionIDs:          functionIDs,
+		MaxPlainInstructions: -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	endianness := ""
+	switch prog.TargetData().ByteOrder() {
+	case llvm.LittleEndian:
+		endianness = "little"
+	case llvm.BigEndian:
+		endianness = "big"
+	default:
+		t.Fatal("unknown target byte order")
+	}
+	metadata := coro.PlanDigestMetadata{
+		CoroABI:        coro.PhysicalABIV1,
+		SchedulerABI:   coro.SchedulerProgramBootstrapChannelClosedStaticSpawnABIV0,
+		PanicABI:       coro.PanicExplicitStatusABIV0,
+		FuncRepABI:     coro.FuncRepABIV1,
+		TargetTriple:   prog.TargetSpec().Triple,
+		TargetCPU:      prog.TargetSpec().CPU,
+		TargetFeatures: prog.TargetSpec().Features,
+		TargetABI:      prog.TargetSpec().TargetABI,
+		PointerBits:    prog.PointerSize() * 8,
+		Endianness:     endianness,
+		DataLayout:     prog.DataLayout(),
+	}
+	compilation := &Compilation{
+		CoroPlan:         plan,
+		CoroPlanDigest:   strings.Repeat("0", 64),
+		CoroPlanMetadata: metadata,
+		CoroABI:          metadata.CoroABI,
+		SchedulerABI:     metadata.SchedulerABI,
+		PanicABI:         metadata.PanicABI,
+		FuncRepABI:       metadata.FuncRepABI,
+		EmissionUniverse: universe,
+	}
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		prog, nil, nil, nil, ssaPkg, files, goembed.VarMap{},
+		PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ir := pkg.String()
+	hasSummarySection := strings.Contains(ir, coro.LibraryEffectSummarySection) ||
+		strings.Contains(ir, "__LLVM,__llgo_coro")
+	if !strings.Contains(ir, coroLibrarySummarySymbolPrefix) ||
+		!hasSummarySection || !strings.Contains(ir, "@llvm.compiler.used") {
+		t.Fatalf("source package omitted compiler-retained library effect summary:\n%s", ir)
+	}
+	if strings.Contains(ir, "@llvm.used") {
+		t.Fatalf("library effect summary unexpectedly requires final-link retention:\n%s", ir)
+	}
+	object, err := prog.TargetMachine().EmitToMemoryBuffer(pkg.Module(), llvm.ObjectFile)
+	if err != nil {
+		t.Fatalf("emit package object with library effect summary: %v\n%s", err, ir)
+	}
+	defer object.Dispose()
+	var sectionData []byte
+	switch triple := strings.ToLower(prog.TargetSpec().Triple); {
+	case strings.Contains(triple, "darwin") || strings.Contains(triple, "apple"):
+		file, openErr := macho.NewFile(bytes.NewReader(object.Bytes()))
+		if openErr != nil {
+			t.Fatal(openErr)
+		}
+		defer file.Close()
+		section := file.Section("__llgo_coro")
+		if section == nil {
+			t.Fatal("Mach-O object omitted __llgo_coro")
+		}
+		sectionData, err = section.Data()
+	case strings.Contains(triple, "windows"):
+		file, openErr := pe.NewFile(bytes.NewReader(object.Bytes()))
+		if openErr != nil {
+			t.Fatal(openErr)
+		}
+		defer file.Close()
+		section := file.Section(coro.LibraryEffectSummarySection)
+		if section == nil {
+			t.Fatalf("COFF object omitted %s", coro.LibraryEffectSummarySection)
+		}
+		sectionData, err = section.Data()
+	default:
+		file, openErr := elf.NewFile(bytes.NewReader(object.Bytes()))
+		if openErr != nil {
+			t.Fatal(openErr)
+		}
+		defer file.Close()
+		section := file.Section(coro.LibraryEffectSummarySection)
+		if section == nil {
+			t.Fatalf("ELF object omitted %s", coro.LibraryEffectSummarySection)
+		}
+		sectionData, err = section.Data()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	summaries, err := coro.ParseLibraryEffectSummaryRecords(sectionData)
+	if err != nil {
+		t.Fatalf("parse object library effect section: %v", err)
+	}
+	if len(summaries) != 1 || len(summaries[0].Functions) != 1 ||
+		summaries[0].Functions[0].PrimarySymbol != "foo.F" {
+		t.Fatalf("object library effect summaries = %+v", summaries)
 	}
 }
 

@@ -75,6 +75,10 @@ const (
 	// The reducer has already released its managed-execution permit before the
 	// outer owner handles this stop.
 	coroRunOSThreadSuspendV1
+	// coroRunForeignReentryCompleteV1 returns one fully destroyed synchronous
+	// callback child to the native boundary adapter. The parent LLVM resume is
+	// already active below C and must not be resumed by the scheduler.
+	coroRunForeignReentryCompleteV1
 )
 
 type coroRunResultV1 struct {
@@ -260,6 +264,14 @@ func coroReduceExecutorRunStepV1(
 		}
 		if !committed {
 			return false, false
+		}
+		if next.Kind == coro.ActionForeignReentryComplete {
+			result.used++
+			result.destroys++
+			result.stop = coroRunForeignReentryCompleteV1
+			result.g = step.G
+			result.action = next
+			return true, true
 		}
 		// A locked ordinary suspension must decide whether to detach before
 		// ready distribution can move the peer which justifies a Yield handoff.

@@ -485,7 +485,23 @@ LLGo 当前会实例化泛型。分析必须按每个 instantiated `*ssa.Functio
 
 当前全源构建可在所有 `buildSSAPkgs` 完成后、各包 codegen 前做一次全程序分析。`llgo tool compile`、预编译标准库和 archive 模式还需要跨包摘要。
 
-摘要至少包含：
+producer 摘要与 whole-program `CoroPlanDigest` 是两套正交数据：
+
+- `CoroPlanDigest` 绑定某次最终程序分析、consumer demand、精确 call/value site 和私有 lowering facts，只用于本次 codegen/cache；
+- `LibraryEffectSummary` 嵌入每个实际产出 package object/archive，发布下游继续染色所需、且该产物确实提供的事实。它不能携带或复用最终程序 demand，也不能把未发射的 entry 声称为可用。
+
+当前 `llgo.coro.library-effect-summary.v1` 已实现以下最小闭环：
+
+- canonical JSON 记录 package identity、FunctionID、最终 SuspendEffect/ExecFlags、FuncRep、primary kind/physical symbol、可选 raw-plain symbol及结构 ABI hash；
+- metadata 精确绑定 Coro/Scheduler/Panic/FuncRep ABI、target triple/CPU/features/ABI、pointer width、endianness、LLVM data layout和 target capabilities；
+- object section 使用 magic、长度和域分离 SHA-256 framing。ELF/COFF/Wasm 使用 `llgo_coro_effect`，Mach-O 使用 `__LLVM,__llgo_coro`；
+- section global 进入 `llvm.compiler.used`，保证生成 object/archive 前不被 LLVM 删除，但不进入 `llvm.used`，所以 final linker 可在形成可执行文件时丢弃；
+- parser只接受 canonical、无重复 key、无未知 field、版本精确匹配的数据；多个 record 中 package 或 FunctionID 重复也失败；
+- importer index 在任何 fact 生效前精确校验 producer/consumer metadata，并把命中的函数投影成 `ExternalKnown` effect/exec seed。缺失、损坏、ABI错配或无 entry 都不能解释成 `NoSuspend`。
+
+v1 刻意不把 C contract 注释传播到普通 Go 调用链。C/assembly/host 的少数不可推导边界事实先由 frontend/cgo 生成冻结 certificate；Go wrapper 的最终 effect/exec 随普通调用图自动传播，library 只发布传播结果。后续 importer 从 archive/importcfg 抽取 section 后直接喂给同一分析固定点，不建立另一套按符号名或地址反查的分类器。
+
+完整摘要最终还应包含：
 
 - Coro ABI、scheduler ABI和target-wide `PanicABI`版本。
 - target triple、pointer size、endianness。
@@ -502,6 +518,8 @@ LLGo 当前会实例化泛型。分析必须按每个 instantiated `*ssa.Functio
 - 可证明不涉及 coroutine 的 C/同步声明按 Sync 处理。
 - Go动态调用按OpaqueSuspend + unknown ExecFlags + Dispatch保守处理。
 - 无法安全生成 bridge 时在编译期报错，不能静默调用错误 ABI。
+
+其中“可证明不涉及 coroutine 的同步声明”必须来自语言/ABI本身可验证的声明（例如 compiler intrinsic），不能仅因某个 Go library summary 缺失而成立。普通 bodyless Go 函数没有兼容摘要时仍是 `OpaqueSuspend + OpaqueExec`。
 
 分析结果受反向 caller 和最终程序影响，因此每包 cache fingerprint 必须加入稳定 `CoroPlanDigest`。否则同一包在两个应用中得到不同 Sync/Async/Dispatch 计划时可能错误复用 archive。
 
@@ -1290,6 +1308,16 @@ ForeignReentry completion固定为：
 - `Goexit/Abort/Shutdown`：同样先运行defer；默认process-fatal。不能在C仍执行时先唤醒owner G、释放record/permit或伪造正常callback返回。
 
 若boundaryPolicy支持cooperative nonReturn，整个ForeignOp只能在C确认退出后提交一次terminal completion；默认process-fatal路径绝不恢复owner G。专项测试覆盖nested callback panic/Goexit、LockOSThread和permit回收。
+
+2026-07-27已完成第一个native窄闭环，作为上述完整协议的可运行子集：
+
+- compiler只接受call site可证明为唯一、非捕获Go target的同步函数参数，直接生成精确typed C adapter；不建立`PC → Go function`反查表，也不要求普通Go caller/wrapper维护`workeraddr`一类传播注释；
+- outbound C调用留在当前M。进入C前active resume变成私有`GForeignWaiting` root，route交给clean replacement M；C在同一owner thread同步回调时先strong-reclaim replacement，再把compiler生成的callback child接到仍在native栈下的逻辑parent；
+- callback child使用普通scheduler reducer，因此channel、timer、poll、worker、cancel和preempt不需要第二套执行器。child park时沿既有locked-owner handoff让replacement继续服务route；child return后销毁exact handle但不重复resume物理parent，随后重启replacement并返回C；
+- 同一次C调用可顺序回调多次，callback内再次进入同类C边界会压入独立的owner-M stack record；普通nested Go child仍走常规`AwaitCompletion → parent resume`，不会被callback receipt误分类；
+- C最终返回后才reclaim replacement、重获managed-execution permit并恢复原outbound resume。`GOMAXPROCS=1`真实linked E2E已让同一C函数回调两次，每次callback都在unbuffered channel上park，最终得到预期结果。
+
+这个MVP的certificate表达的是“参数只借用到return、callback同步发生在发起C调用的owner thread”。C signature本身无法证明是否retained、异步或换线程回调，因此这部分仍是少量不可推导的foreign boundary事实；从该边界向上的Go effect/exec、callback target染色及跨库摘要均由compiler自动传播。captured/open funcval、retained/asynchronous callback、外部thread首次attach以及跨C的panic/Goexit/cancel transport仍fail closed；当前后三者进入确定性fatal，不能表述为完整cgo callback兼容。
 
 Foreign thunk可能永久占用一个M stack，但它下面没有active Go resume frame，owner G也不依赖该stack恢复。并发数量由permit严格限制，额外caller仍以LLVM frame park，因此不会退化为per-G native stack。
 

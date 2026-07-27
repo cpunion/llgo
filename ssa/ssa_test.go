@@ -214,6 +214,40 @@ func TestNewFuncExLLVMUsed(t *testing.T) {
 	}
 }
 
+func TestCompilerMetadataBlobUsesCompilerRetentionOnly(t *testing.T) {
+	prog := NewProgram(nil)
+	pkg := prog.NewPackage("main", "main")
+	if err := pkg.AddCompilerMetadataBlob(
+		"__llgo_test_metadata", "llgo_test_metadata", []byte{'a', 0, 'b'},
+	); err != nil {
+		t.Fatal(err)
+	}
+	pkg.MaterializePreserveSyms()
+
+	global := pkg.Module().NamedGlobal("__llgo_test_metadata")
+	if global.IsNil() {
+		t.Fatal("missing compiler metadata global")
+	}
+	if got := global.Section(); got != "llgo_test_metadata" {
+		t.Fatalf("compiler metadata section = %q", got)
+	}
+	if got := global.Alignment(); got != 1 {
+		t.Fatalf("compiler metadata alignment = %d, want 1", got)
+	}
+	ir := pkg.String()
+	if !strings.Contains(ir, `@llvm.compiler.used = appending global [1 x ptr] [ptr @__llgo_test_metadata], section "llvm.metadata"`) {
+		t.Fatalf("compiler metadata is not protected through optimization:\n%s", ir)
+	}
+	if !pkg.Module().NamedGlobal("llvm.used").IsNil() {
+		t.Fatalf("compiler-only metadata unexpectedly acquired final-link retention:\n%s", ir)
+	}
+	if err := pkg.AddCompilerMetadataBlob(
+		"__llgo_test_metadata", "llgo_test_metadata", []byte("duplicate"),
+	); err == nil {
+		t.Fatal("duplicate compiler metadata symbol unexpectedly accepted")
+	}
+}
+
 func TestFuncInfoMetadataDoesNotPreserveFunctions(t *testing.T) {
 	testFuncInfoMetadataDoesNotPreserveFunctions(t)
 }

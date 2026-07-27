@@ -27,6 +27,17 @@ uintptr_t __llgo_coro_native_fleet_e2e_thread_id_v1(void) {
     return (uintptr_t)pthread_self();
 }
 
+typedef int32_t (*llgo_coro_native_fleet_e2e_callback_v1)(int32_t);
+
+int32_t __llgo_coro_native_fleet_e2e_reentry_v1(
+    llgo_coro_native_fleet_e2e_callback_v1 callback,
+    int32_t value) {
+    if (callback == NULL) {
+        return INT32_MIN;
+    }
+    return callback(value) + callback(value + 1);
+}
+
 static _Atomic uint32_t llgo_coro_native_fleet_e2e_active_v1;
 static _Atomic uint32_t llgo_coro_native_fleet_e2e_maximum_v1;
 static _Atomic uint32_t llgo_coro_native_fleet_e2e_blocked_state_v1;

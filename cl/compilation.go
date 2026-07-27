@@ -54,7 +54,12 @@ type Compilation struct {
 	// after whole-program analysis and participate in every package archive
 	// fingerprint. They are required before an active compilation may register
 	// a cache hit.
-	CoroPlanDigest          string
+	CoroPlanDigest string
+	// CoroPlanMetadata is the frozen target/ABI input used to construct the
+	// whole-program digest. Package codegen projects only its reusable
+	// target-wide fields into the separate library effect summary; private
+	// lowering facts and final-program demand never cross that boundary.
+	CoroPlanMetadata        coro.PlanDigestMetadata
 	CoroLoweringFacts       coro.LoweringFacts
 	CoroLoweringFactsDigest string
 	CoroABI                 string

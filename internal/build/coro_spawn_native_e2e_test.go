@@ -288,7 +288,9 @@ func TestCoroChannelAndClosedStaticSpawnNativeNoStdlibRuntimeE2E(t *testing.T) {
 }
 
 func buildCoroSpawnNativeE2EUser(t *testing.T, prog llssa.Program, temp string) (object, anchor, setupSymbol, checkSymbol string) {
-	return buildCoroSpawnNativeE2EUserSource(t, prog, temp, coroSpawnNativeE2ESource, true)
+	return buildCoroSpawnNativeE2EUserSource(
+		t, prog, temp, coroSpawnNativeE2ESource, true, coro.TargetCapabilities(0),
+	)
 }
 
 func buildCoroSpawnNativeE2EUserSource(
@@ -296,13 +298,10 @@ func buildCoroSpawnNativeE2EUserSource(
 	prog llssa.Program,
 	temp, source string,
 	enableChannel bool,
+	targetCapabilities coro.TargetCapabilities,
 ) (object, anchor, setupSymbol, checkSymbol string) {
 	t.Helper()
 	ssaPkg, files := buildCoroPlanTestPackage(t, coroSpawnNativeE2EPackage, source, nil)
-	var targetCapabilities coro.TargetCapabilities
-	if strings.Contains(source, "//llgo:coro worker") {
-		targetCapabilities = cl.CoroNativeTargetCapabilities()
-	}
 	universe, err := cl.PrepareEmissionUniverseWithOptions(prog, nil, []cl.EmissionPackage{{
 		SSA: ssaPkg, Files: files, Identity: coroSpawnNativeE2EPackage,
 	}}, cl.EmissionUniverseOptions{CoroTargetCapabilities: targetCapabilities})
@@ -391,6 +390,22 @@ func buildCoroSpawnNativeE2EUserSource(
 					Effect: coro.NoSuspend, IgnoreBody: true,
 					External: coro.ExternalKnown, OverrideExternal: true,
 				}, nil
+			}
+			callable, certified, err := universe.CoroCallableContractCertificate(fn)
+			if err != nil {
+				return coro.SSAFunctionPolicy{}, err
+			}
+			if certified {
+				background, classified, err := universe.FunctionBackground(fn)
+				if err != nil {
+					return coro.SSAFunctionPolicy{}, err
+				}
+				return applyFrozenCallableContractPolicy(
+					fn,
+					classified && background == llssa.InC,
+					coro.SSAFunctionPolicy{},
+					callable,
+				)
 			}
 			noblock, certified, err := universe.CoroForeignNoBlockCertificate(fn)
 			if err != nil {

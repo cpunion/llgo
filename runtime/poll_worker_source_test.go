@@ -375,33 +375,63 @@ func TestRuntimeCoroWorkerBlockingCallHasOnlyGuardedSameMEntrance(t *testing.T) 
 	for _, required := range []string{
 		"sole same-M blocking foreign",
 		"!coro.CurrentOSThreadLocked(task)",
+		"type coroNativeForeignBoundaryV1 struct",
+		"coroNativeForeignBoundaryTLSV1 = tls.Alloc[*coroNativeForeignBoundaryV1](nil)",
 		"coro.CurrentExecutorDriver(task)",
-		"coro.DetachExecutorResume(&parent.resume, driver, task)",
-		"parent.handoff.Begin(ownerEpoch)",
+		"coro.DetachExecutorResume(",
+		"boundary.parent.handoff.Begin(boundary.ownerEpoch)",
 		"coroNativeMAllocateReplacementV1(",
-		"coroTargetReleaseManagedExecutionV1(driver)",
-		"coroNativeMStartPhysicalOwnerV1(child, childSlot)",
+		"coroTargetReleaseManagedExecutionV1(boundary.driver)",
+		"coroNativeMStartPhysicalOwnerV1(replacement, slot)",
+		"boundary.beginV1(task, coro.ExecutorResumeHandoffLockedForeign)",
 		"callOK := coroworker.Call(function, argc, &args, &result)",
-		"parent.handoff.RequestReturn(baton)",
+		"boundary.parent.handoff.RequestReturn(boundary.baton)",
 		"coroNativeMReplacementLineageOwnerV1(",
 		"coroNativeMRecycleReplacementV1(returnedSlot)",
-		"coroTargetReenterManagedExecutionV1(driver)",
-		"coro.RestoreExecutorResume(&parent.resume)",
+		"coroTargetReenterManagedExecutionV1(boundary.driver)",
+		"coro.RestoreExecutorResume(&boundary.resume)",
+		"boundary.finishV1()",
+		"//export __llgo_coro_foreign_reentry_acquire_v1",
+		"coro.ExecutorResumeHandoffContext(&boundary.resume)",
+		"coro.BeginForeignReentry(&record, &boundary.resume, child)",
+		"coro.ConsumeForeignReentryCompletion(&record)",
+		"//export __llgo_coro_foreign_reentry_run_v1",
+		"//export __llgo_coro_foreign_reentry_failure_v1",
+		"//export __llgo_coro_reentrant_foreign_call_v1",
+		"boundary.beginV1(task, coro.ExecutorResumeHandoffManagedReentry)",
+		"callOK := coroworker.Call(thunk, 1, &args, &result)",
 	} {
 		if !strings.Contains(entrance, required) {
 			t.Errorf("%s lacks locked-thread call guard %q", runtimeCoroOSThreadForeignSource, required)
 		}
 	}
-	detach := strings.Index(entrance, "coro.DetachExecutorResume(&parent.resume, driver, task)")
-	leave := strings.Index(entrance, "coroTargetReleaseManagedExecutionV1(driver)")
-	create := strings.Index(entrance, "coroNativeMStartPhysicalOwnerV1(child, childSlot)")
+	for _, forbidden := range []string{
+		"map[uintptr]",
+		"reflect.ValueOf",
+		"runtime.FuncForPC",
+		"workeraddr",
+	} {
+		if strings.Contains(entrance, forbidden) {
+			t.Errorf(
+				"%s retained callback address recovery marker %q",
+				runtimeCoroOSThreadForeignSource, forbidden,
+			)
+		}
+	}
+	detach := strings.Index(entrance, "coro.DetachExecutorResume(")
+	start := strings.Index(entrance, "if boundary.startReplacementV1(true)")
+	leave := strings.Index(entrance, "coroTargetReleaseManagedExecutionV1(boundary.driver)")
+	create := strings.Index(entrance, "coroNativeMStartPhysicalOwnerV1(replacement, slot)")
+	begin := strings.LastIndex(entrance, "boundary.beginV1(task, coro.ExecutorResumeHandoffLockedForeign)")
 	call := strings.Index(entrance, "callOK := coroworker.Call(function, argc, &args, &result)")
-	request := strings.LastIndex(entrance, "parent.handoff.RequestReturn(baton)")
+	finish := strings.LastIndex(entrance, "boundary.finishV1()")
+	request := strings.LastIndex(entrance, "boundary.parent.handoff.RequestReturn(boundary.baton)")
 	recycle := strings.Index(entrance, "coroNativeMRecycleReplacementV1(returnedSlot)")
-	reenter := strings.LastIndex(entrance, "coroTargetReenterManagedExecutionV1(driver)")
-	restore := strings.LastIndex(entrance, "coro.RestoreExecutorResume(&parent.resume)")
-	if detach < 0 || leave <= detach || create <= leave || call <= create ||
-		request <= call || recycle <= request || reenter <= recycle || restore <= reenter {
+	reenter := strings.LastIndex(entrance, "coroTargetReenterManagedExecutionV1(boundary.driver)")
+	restore := strings.LastIndex(entrance, "coro.RestoreExecutorResume(&boundary.resume)")
+	if detach < 0 || start <= detach || create <= leave ||
+		request < 0 || recycle <= request || reenter <= recycle || restore <= reenter ||
+		begin < 0 || call <= begin || finish <= call {
 		t.Errorf("%s does not bracket same-M C with detach/release/create/return/recycle/restore", runtimeCoroOSThreadForeignSource)
 	}
 	quota := readRuntimePollFile(t, "internal/runtime/coro_execution_quota_native_llgo.go")

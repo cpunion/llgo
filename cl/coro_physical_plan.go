@@ -163,6 +163,7 @@ const (
 	coroPhysicalOperationChannelSelectTry
 	coroPhysicalOperationWorkerSyscall
 	coroPhysicalOperationWorkerForeign
+	coroPhysicalOperationForeignReentry
 	coroPhysicalOperationWorkerCgo
 	coroPhysicalOperationWorkerCgoErrno
 	coroPhysicalOperationHostCall
@@ -186,6 +187,8 @@ func (recipe coroPhysicalOperationRecipe) String() string {
 		return "worker-syscall"
 	case coroPhysicalOperationWorkerForeign:
 		return "worker-foreign"
+	case coroPhysicalOperationForeignReentry:
+		return "foreign-reentry"
 	case coroPhysicalOperationWorkerCgo:
 		return "worker-cgo"
 	case coroPhysicalOperationWorkerCgoErrno:
@@ -244,6 +247,7 @@ type coroPhysicalLoweringCapabilities struct {
 	explicitPanic    bool
 	channel          bool
 	worker           bool
+	foreignReentry   bool
 	hostOperation    bool
 	interfacePlain   *coroClosedInterfacePlainPlan
 	managedInterface *coroManagedInterfaceDispatchPlan
@@ -1057,19 +1061,31 @@ func planCoroPhysicalOperationInstruction(
 		if !recognized {
 			return
 		}
-		if !capabilities.worker {
-			result.operationFailure = "blocking foreign call requires the bounded worker capability"
-			return
-		}
 		if err != nil {
-			result.operationFailure = "invalid bounded worker foreign call: " + err.Error()
+			result.operationFailure = "invalid managed foreign call: " + err.Error()
 			return
 		}
 		if shape.nilGuard && !capabilities.explicitPanic {
 			result.operationFailure = "nullable dynamic raw C worker call requires the explicit-status panic ABI"
 			return
 		}
-		result.operation = coroPhysicalOperationWorkerForeign
+		switch shape.mode {
+		case coroForeignCallModeWorker:
+			if !capabilities.worker {
+				result.operationFailure = "blocking foreign call requires the bounded worker capability"
+				return
+			}
+			result.operation = coroPhysicalOperationWorkerForeign
+		case coroForeignCallModeManagedReentry:
+			if !capabilities.foreignReentry {
+				result.operationFailure = "managed callback foreign call requires the native reentry capability"
+				return
+			}
+			result.operation = coroPhysicalOperationForeignReentry
+		default:
+			result.operationFailure = "managed foreign call selected an unknown execution mode"
+			return
+		}
 		result.operationWorker = &shape
 	}
 }

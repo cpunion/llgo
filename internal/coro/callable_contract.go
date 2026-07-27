@@ -305,8 +305,10 @@ func validateSHA256Hex(name, value string) error {
 
 // CallableContractExecConstraints projects dimensions that the current
 // physical lowering cannot otherwise enforce. Thread-affine affinities remain
-// explicit. Unknown/callback reentry and unknown/retained memory require a
-// future adapter/lifetime recipe, so OpaqueExec keeps lowering fail-closed.
+// explicit. Unknown reentry and unknown/retained memory require a future
+// adapter/lifetime recipe, so OpaqueExec keeps lowering fail-closed. Exact
+// managed-callback declarations are instead consumed by the compiler-owned
+// ForeignReentry recipe; the contract does not itself grant that recipe.
 // This grants no worker, raw-plain, or trusted-inline capability.
 func CallableContractExecConstraints(contract CallableContract) ExecFlags {
 	var flags ExecFlags
@@ -315,7 +317,7 @@ func CallableContractExecConstraints(contract CallableContract) ExecFlags {
 		flags |= ThreadAffine
 	}
 	switch contract.Reentry {
-	case ReentryUnknown, ReentryManagedCallback:
+	case ReentryUnknown:
 		flags |= OpaqueExec
 	}
 	switch contract.Memory {

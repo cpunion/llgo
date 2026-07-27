@@ -16,6 +16,46 @@
 
 package coro
 
+const (
+	// Keep the exceptional user-visible LockOSThread nesting and the
+	// scheduler's temporary synchronous-foreign-reentry affinity in one byte.
+	// The latter is deliberately not a user lock: unmatched UnlockOSThread
+	// calls must not release it, while every physical-owner invariant may treat
+	// either portion as an exact G-to-M affinity.
+	osThreadUserLockMask      uint8 = 1<<7 - 1
+	osThreadForeignReentryBit uint8 = 1 << 7
+)
+
+func osThreadUserLockDepth(g *G) uint8 {
+	if g == nil {
+		return 0
+	}
+	return g.osThreadLockDepth & osThreadUserLockMask
+}
+
+func osThreadForeignReentryAffined(g *G) bool {
+	return g != nil && g.osThreadLockDepth&osThreadForeignReentryBit != 0
+}
+
+func enterOSThreadForeignReentryAffinity(p *P, g *G) bool {
+	if p == nil || !ValidG(g) || p.osThreadSuspend != osThreadSuspendAttached ||
+		p.osThreadLockOwner != nil || osThreadForeignReentryAffined(g) {
+		return false
+	}
+	g.osThreadLockDepth |= osThreadForeignReentryBit
+	p.osThreadLockOwner = g
+	return true
+}
+
+func exitOSThreadForeignReentryAffinity(p *P, g *G) bool {
+	if p == nil || !ValidG(g) || p.osThreadSuspend != osThreadSuspendAttached ||
+		p.osThreadLockOwner != nil || !osThreadForeignReentryAffined(g) {
+		return false
+	}
+	g.osThreadLockDepth &^= osThreadForeignReentryBit
+	return true
+}
+
 type osThreadSuspendPhase uint8
 
 const (
@@ -103,7 +143,7 @@ func validOSThreadOwnerHeader(p *P) bool {
 // the exact compiler resume window; no TLS or process-global current-G lookup
 // participates in the proof.
 func EnterOSThreadLock(g *G) bool {
-	if !enterCriticalContext(g) || g.osThreadLockDepth == ^uint8(0) {
+	if !enterCriticalContext(g) || osThreadUserLockDepth(g) == osThreadUserLockMask {
 		return false
 	}
 	p := g.runP
@@ -119,7 +159,8 @@ func EnterOSThreadLock(g *G) bool {
 	} else if p.osThreadLockOwner != g {
 		return false
 	}
-	g.osThreadLockDepth++
+	g.osThreadLockDepth = g.osThreadLockDepth&osThreadForeignReentryBit |
+		(osThreadUserLockDepth(g) + 1)
 	return true
 }
 
@@ -135,13 +176,17 @@ func ExitOSThreadLock(g *G) bool {
 		p.osThreadSuspend != osThreadSuspendAttached {
 		return false
 	}
-	if g.osThreadLockDepth == 0 {
+	if osThreadUserLockDepth(g) == 0 {
+		if osThreadForeignReentryAffined(g) {
+			return p.osThreadLockOwner == g
+		}
 		return p.osThreadLockOwner != g
 	}
 	if p.osThreadLockOwner != g {
 		return false
 	}
-	g.osThreadLockDepth--
+	g.osThreadLockDepth = g.osThreadLockDepth&osThreadForeignReentryBit |
+		(osThreadUserLockDepth(g) - 1)
 	if g.osThreadLockDepth == 0 {
 		p.osThreadLockOwner = nil
 	}
@@ -166,7 +211,8 @@ func CurrentOSThreadLocked(g *G) bool {
 // in either case, while the target must terminate the latter physical owner.
 func releaseOSThreadLockForExit(p *P, g *G) (retireOwner, ok bool) {
 	if p == nil || g == nil || p.current != g || g.runP != p ||
-		p.osThreadSuspend != osThreadSuspendAttached {
+		p.osThreadSuspend != osThreadSuspendAttached ||
+		osThreadForeignReentryAffined(g) {
 		return false, false
 	}
 	if g.osThreadLockDepth == 0 {

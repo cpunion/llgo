@@ -3593,6 +3593,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		CoroTargetCapabilities:  ctx.buildConf.coroTargetCapabilities(),
 		CoroFrameRetentionABI:   frameRetentionABI,
 		CoroPlanDigest:          digest,
+		CoroPlanMetadata:        metadata,
 		CoroLoweringFacts:       loweringFacts,
 		CoroLoweringFactsDigest: loweringFactsDigest,
 		CoroABI:                 metadata.CoroABI,
@@ -4427,7 +4428,13 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 		// stack. Its static closure owns the ordinary-domain reducer, bounded
 		// reactor wait, and LLVM resume/destroy wrappers; it must never acquire a
 		// managed entry or an independently suspended coroutine twin.
-		names = append(names, coroNativeFleetOwnerSymbolV2)
+		names = append(names,
+			coroNativeFleetOwnerSymbolV2,
+			coroForeignReentryAcquireSymbolV1,
+			coroForeignReentryRunSymbolV1,
+			coroForeignReentryFailureSymbolV1,
+			coroReentrantForeignCallSymbolV1,
+		)
 	}
 	if hostCoroPullRuntimeABI(ctx.buildConf) {
 		names = append(names,
@@ -4646,6 +4653,68 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 				typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
 				return nil, nil, nil, nil, fmt.Errorf(
 					"coroutine locked-thread foreign ABI %q must have exact func(unsafe.Pointer, uintptr, uint32, [9]uintptr, *uintptr, *uintptr, *uintptr) signature",
+					name,
+				)
+			}
+		}
+		if name == coroForeignReentryAcquireSymbolV1 {
+			sig := fn.Signature
+			pointerPointer := types.NewPointer(types.Typ[types.UnsafePointer])
+			if sig == nil || sig.Recv() != nil || sig.Variadic() ||
+				sig.Params().Len() != 1 || sig.Results().Len() != 1 ||
+				!types.Identical(sig.Params().At(0).Type(), pointerPointer) ||
+				!types.Identical(sig.Results().At(0).Type(), types.Typ[types.UnsafePointer]) ||
+				typeParamLen(sig.TypeParams()) != 0 ||
+				typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf(
+					"coroutine foreign-reentry acquire ABI %q must have exact func(*unsafe.Pointer) unsafe.Pointer signature",
+					name,
+				)
+			}
+		}
+		if name == coroForeignReentryRunSymbolV1 {
+			sig := fn.Signature
+			pointerPointer := types.NewPointer(types.Typ[types.UnsafePointer])
+			if sig == nil || sig.Recv() != nil || sig.Variadic() ||
+				sig.Params().Len() != 3 || sig.Results().Len() != 1 ||
+				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Params().At(1).Type(), pointerPointer) ||
+				!types.Identical(sig.Params().At(2).Type(), pointerPointer) ||
+				!types.Identical(sig.Results().At(0).Type(), types.Typ[types.Uint32]) ||
+				typeParamLen(sig.TypeParams()) != 0 ||
+				typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf(
+					"coroutine foreign-reentry run ABI %q must have exact func(unsafe.Pointer, *unsafe.Pointer, *unsafe.Pointer) uint32 signature",
+					name,
+				)
+			}
+		}
+		if name == coroForeignReentryFailureSymbolV1 {
+			sig := fn.Signature
+			if sig == nil || sig.Recv() != nil || sig.Variadic() ||
+				sig.Params().Len() != 3 || sig.Results().Len() != 0 ||
+				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.Uint32]) ||
+				!types.Identical(sig.Params().At(1).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Params().At(2).Type(), types.Typ[types.UnsafePointer]) ||
+				typeParamLen(sig.TypeParams()) != 0 ||
+				typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf(
+					"coroutine foreign-reentry failure ABI %q must have exact func(uint32, unsafe.Pointer, unsafe.Pointer) signature",
+					name,
+				)
+			}
+		}
+		if name == coroReentrantForeignCallSymbolV1 {
+			sig := fn.Signature
+			if sig == nil || sig.Recv() != nil || sig.Variadic() ||
+				sig.Params().Len() != 3 || sig.Results().Len() != 0 ||
+				!types.Identical(sig.Params().At(0).Type(), types.Typ[types.UnsafePointer]) ||
+				!types.Identical(sig.Params().At(1).Type(), types.Typ[types.Uintptr]) ||
+				!types.Identical(sig.Params().At(2).Type(), types.Typ[types.Uintptr]) ||
+				typeParamLen(sig.TypeParams()) != 0 ||
+				typeParamLen(sig.RecvTypeParams()) != 0 || len(fn.FreeVars) != 0 {
+				return nil, nil, nil, nil, fmt.Errorf(
+					"coroutine reentrant foreign-call ABI %q must have exact func(unsafe.Pointer, uintptr, uintptr) signature",
 					name,
 				)
 			}
@@ -5106,10 +5175,13 @@ func staticCallArgumentParameterType(call ssa.CallInstruction, argument int) (ty
 
 // requiredCoroDirectPlainCallArguments freezes source-level C callback ABI
 // boundaries across the whole emission universe. A callback passed to a
-// function parameter of an exact C declaration—or to an independently
-// //llgo:type C parameter—is a raw synchronous entry, never a Go descriptor.
-// The exact closed target closure is independently revalidated after
-// fixed-point planning as NoSuspend/DirectPlain.
+// callback-free exact C declaration—or to an independently //llgo:type C
+// parameter—is a raw synchronous entry, never a Go descriptor. An exact
+// managed-callback declaration is deliberately excluded: ordinary Go
+// reference/value-flow analysis must retain and color that target, and the
+// physical ForeignReentry recipe later freezes its typed C adapter. The exact
+// raw target closure is independently revalidated after fixed-point planning
+// as NoSuspend/DirectPlain.
 func requiredCoroDirectPlainCallArguments(
 	ctx *context,
 	closedDynamic map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate,
@@ -5130,6 +5202,7 @@ func requiredCoroDirectPlainCallArguments(
 					continue
 				}
 				rawCDeclaration := false
+				managedReentryDeclaration := false
 				if callee, resolved := ctx.coroEmission.Resolve(call.Common().StaticCallee()); resolved && callee != nil {
 					background, classified, backgroundErr := ctx.coroEmission.FunctionBackground(callee)
 					if backgroundErr != nil {
@@ -5139,6 +5212,19 @@ func requiredCoroDirectPlainCallArguments(
 						)
 					}
 					rawCDeclaration = classified && background == llssa.InC
+					if rawCDeclaration {
+						callable, certified, certificateErr :=
+							ctx.coroEmission.CoroCallableContractCertificate(callee)
+						if certificateErr != nil {
+							return nil, nil, fmt.Errorf(
+								"classify static callback contract %q in %q: %w",
+								callee.Name(), function.Name(), certificateErr,
+							)
+						}
+						managedReentryDeclaration = certified &&
+							callable.Scope == coro.CallableContractScopeDeclaration &&
+							callable.Contract.Reentry == coro.ReentryManagedCallback
+					}
 				}
 				for argument, value := range call.Common().Args {
 					parameter, ok := staticCallArgumentParameterType(call, argument)
@@ -5146,6 +5232,9 @@ func requiredCoroDirectPlainCallArguments(
 						continue
 					}
 					if _, signature := types.Unalias(parameter).Underlying().(*types.Signature); !signature {
+						continue
+					}
+					if managedReentryDeclaration {
 						continue
 					}
 					target, ok := exactCoroStaticFunctionValue(ctx, value)

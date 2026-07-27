@@ -77,6 +77,43 @@ func Root(callback Callback, value int32) int32 {
 }
 `
 
+const coroManagedReentryForeignTestSource = `package foreignworker
+
+import _ "unsafe"
+
+var ready chan struct{}
+
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=managed-callback memory=borrow-until-return
+//go:linkname foreign C.foreign_managed_reentry_probe
+func foreign(func(int32) int32, int32) int32
+
+func callback(value int32) int32 {
+	<-ready
+	return value + 1
+}
+
+func Root(value int32) int32 {
+	return foreign(callback, value)
+}
+`
+
+const coroManagedReentryPlainForeignTestSource = `package foreignworker
+
+import _ "unsafe"
+
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=managed-callback memory=borrow-until-return
+//go:linkname foreign C.foreign_managed_plain_reentry_probe
+func foreign(func(int32) int32, int32) int32
+
+func callback(value int32) int32 {
+	return value + 1
+}
+
+func Root(value int32) int32 {
+	return foreign(callback, value)
+}
+`
+
 type preparedCoroWorkerForeignFixture struct {
 	prog     llssa.Program
 	ssaPkg   *ssa.Package
@@ -407,6 +444,228 @@ func TestCoroWorkerClosedForeignCallUsesTypedThunk(t *testing.T) {
 	if resume.IsNil() || !strings.Contains(resume.String(), "call i32 @"+coroWorkerResumeHookV1) ||
 		!strings.Contains(resume.String(), "call void (...) @llvm.fake.use(ptr") {
 		t.Fatalf("CoroSplit lost foreign worker resume:\n%s", module.String())
+	}
+}
+
+func TestCoroManagedReentryForeignCallUsesStaticCoroutineAdapter(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	fixture := prepareCoroWorkerForeignFixture(
+		t, coroManagedReentryForeignTestSource, "Root",
+	)
+	defer fixture.prog.Dispose()
+
+	shape, recognized, err := validateCoroWorkerForeignCall(
+		fixture.plan, fixture.universe, fixture.call, fixture.prog.PointerSize(),
+	)
+	if !recognized || err != nil ||
+		shape.mode != coroForeignCallModeManagedReentry ||
+		len(shape.reentryCallbacks) != 1 ||
+		shape.reentryCallbacks[0] == nil ||
+		len(shape.rawCallbacks) != 0 {
+		t.Fatalf(
+			"managed-reentry shape = %+v, recognized=%t, error=%v",
+			shape, recognized, err,
+		)
+	}
+	callbackPlan, planned := fixture.plan.FunctionPlan(shape.reentryCallbacks[0])
+	if !planned || callbackPlan.Emission != coro.EmitCoroutine ||
+		callbackPlan.Primary != coro.PrimaryCoroutine ||
+		!callbackPlan.Effect.Contains(coro.MayPark) ||
+		callbackPlan.RawPlainDemand || callbackPlan.RawPlainEntry {
+		t.Fatalf(
+			"managed callback plan = %+v, present=%t; want one inferred coroutine-only target",
+			callbackPlan, planned,
+		)
+	}
+
+	compilation := &Compilation{
+		CoroPlan: fixture.plan, EmissionUniverse: fixture.universe,
+		CoroABI:                coro.PhysicalABIV1,
+		SchedulerABI:           coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
+		PanicABI:               coro.PanicExplicitStatusABIV0,
+		FuncRepABI:             coro.FuncRepABIV1,
+		CoroTargetCapabilities: CoroNativeTargetCapabilities(),
+	}
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		fixture.prog, nil, nil, nil, fixture.ssaPkg, fixture.files,
+		goembed.VarMap{}, PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify managed-reentry coroutine: %v\n%s", err, module.String())
+	}
+	root := requireCoroPhysicalFunction(t, module, "foreignworker.Root").String()
+	if !strings.Contains(root, "@"+coroReentrantForeignCallHookV1) ||
+		strings.Contains(root, "@"+coroWorkerParkHookV1) ||
+		strings.Contains(root, "@foreign_managed_reentry_probe") {
+		t.Fatalf("Root did not select the managed-reentry boundary:\n%s", root)
+	}
+
+	var adapter llvm.Value
+	var thunk llvm.Value
+	for function := module.FirstFunction(); !function.IsNil(); function = llvm.NextFunction(function) {
+		switch {
+		case strings.HasPrefix(function.Name(), coroForeignReentryAdapterPrefixV1):
+			if !adapter.IsNil() {
+				t.Fatalf("module has multiple managed callback adapters")
+			}
+			adapter = function
+		case strings.HasPrefix(function.Name(), coroWorkerForeignThunkPrefixV1):
+			if !thunk.IsNil() {
+				t.Fatalf("module has multiple managed foreign thunks")
+			}
+			thunk = function
+		}
+	}
+	if adapter.IsNil() {
+		t.Fatalf("module has no static managed callback adapter:\n%s", module.String())
+	}
+	adapterText := adapter.String()
+	for _, symbol := range []string{
+		coroForeignReentryAcquireHookV1,
+		coroForeignReentryRunHookV1,
+		coroForeignReentryFailureHookV1,
+	} {
+		if !strings.Contains(adapterText, "@"+symbol) {
+			t.Errorf("managed callback adapter lacks %q:\n%s", symbol, adapterText)
+		}
+	}
+	if !strings.Contains(adapterText, "foreignworker.callback$coro") {
+		t.Errorf("managed callback adapter lacks the exact coroutine target:\n%s", adapterText)
+	}
+	if thunk.IsNil() ||
+		!strings.Contains(thunk.String(), "@foreign_managed_reentry_probe") {
+		t.Fatalf("managed foreign thunk does not invoke the exact C declaration:\n%s", module.String())
+	}
+	runCoroABITestPipeline(t, fixture.prog, module)
+}
+
+func TestCoroManagedReentryPlainCallbackUsesThinCoroutineRamp(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	fixture := prepareCoroWorkerForeignFixture(
+		t, coroManagedReentryPlainForeignTestSource, "Root",
+	)
+	defer fixture.prog.Dispose()
+	shape, recognized, err := validateCoroWorkerForeignCall(
+		fixture.plan, fixture.universe, fixture.call, fixture.prog.PointerSize(),
+	)
+	if !recognized || err != nil ||
+		shape.mode != coroForeignCallModeManagedReentry ||
+		len(shape.reentryCallbacks) != 1 {
+		t.Fatalf(
+			"plain managed-reentry shape = %+v, recognized=%t, error=%v",
+			shape, recognized, err,
+		)
+	}
+	callback := shape.reentryCallbacks[0]
+	callbackPlan, planned := fixture.plan.FunctionPlan(callback)
+	if !planned || callbackPlan.Emission != coro.EmitPlain ||
+		callbackPlan.Primary != coro.PrimaryPlain ||
+		callbackPlan.Effect != coro.NoSuspend ||
+		callbackPlan.RawPlainDemand || callbackPlan.RawPlainEntry {
+		t.Fatalf(
+			"plain callback plan = %+v, present=%t; want one unchanged plain primary",
+			callbackPlan, planned,
+		)
+	}
+
+	compilation := &Compilation{
+		CoroPlan: fixture.plan, EmissionUniverse: fixture.universe,
+		CoroABI:                coro.PhysicalABIV1,
+		SchedulerABI:           coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0,
+		PanicABI:               coro.PanicExplicitStatusABIV0,
+		FuncRepABI:             coro.FuncRepABIV1,
+		CoroTargetCapabilities: CoroNativeTargetCapabilities(),
+	}
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		fixture.prog, nil, nil, nil, fixture.ssaPkg, fixture.files,
+		goembed.VarMap{}, PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify plain managed-reentry coroutine: %v\n%s", err, module.String())
+	}
+	if !module.NamedFunction("foreignworker.callback$coro").IsNil() {
+		t.Fatal("plain callback unexpectedly acquired a cloned coroutine primary")
+	}
+	var ramp llvm.Value
+	var adapter llvm.Value
+	for function := module.FirstFunction(); !function.IsNil(); function = llvm.NextFunction(function) {
+		switch {
+		case strings.HasPrefix(function.Name(), coroForeignReentryPlainRampPrefixV1):
+			ramp = function
+		case strings.HasPrefix(function.Name(), coroForeignReentryAdapterPrefixV1):
+			adapter = function
+		}
+	}
+	if ramp.IsNil() || adapter.IsNil() {
+		t.Fatalf("plain callback lacks a thin ramp or C adapter:\n%s", module.String())
+	}
+	if !strings.Contains(ramp.String(), "@foreignworker.callback") ||
+		!strings.Contains(ramp.String(), "llvm.coro.") {
+		t.Fatalf("thin ramp does not call the sole plain primary:\n%s", ramp.String())
+	}
+	if !strings.Contains(adapter.String(), "@"+ramp.Name()) {
+		t.Fatalf("C adapter does not create the thin coroutine ramp:\n%s", adapter.String())
+	}
+	runCoroABITestPipeline(t, fixture.prog, module)
+}
+
+func TestCoroManagedReentryRejectsOpenOrCapturedCallbackTargets(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "captured closure",
+			body: `
+func Root(value int32) int32 {
+	delta := int32(1)
+	return foreign(func(input int32) int32 { return input + delta }, value)
+}
+`,
+		},
+		{
+			name: "open function value",
+			body: `
+var callbackValue func(int32) int32
+func Root(value int32) int32 { return foreign(callbackValue, value) }
+`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source := `package foreignworker
+import _ "unsafe"
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=any-thread reentry=managed-callback memory=borrow-until-return
+//go:linkname foreign C.foreign_managed_reentry_reject_probe
+func foreign(func(int32) int32, int32) int32
+` + test.body
+			fixture := prepareCoroWorkerForeignFixture(t, source, "Root")
+			defer fixture.prog.Dispose()
+			_, recognized, err := validateCoroWorkerForeignCall(
+				fixture.plan, fixture.universe, fixture.call,
+				fixture.prog.PointerSize(),
+			)
+			if !recognized || err == nil ||
+				!strings.Contains(
+					err.Error(),
+					"requires one exact non-capturing managed callback target",
+				) {
+				t.Fatalf(
+					"managed callback rejection = recognized:%t err:%v",
+					recognized, err,
+				)
+			}
+		})
 	}
 }
 

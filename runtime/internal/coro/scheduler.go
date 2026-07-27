@@ -161,6 +161,10 @@ type P struct {
 	// physical-owner handoff may temporarily run unlocked peers while the
 	// owner remains suspended and rooted by this P.
 	osThreadLockOwner *G
+	// foreignReentry is the top of a scheduler-owned, owner-M-stack-backed
+	// synchronous callback chain. Ordinary tasks pay no per-G pointer, and no
+	// callback target is recovered from a code address.
+	foreignReentry *ForeignReentryRecord
 
 	current   *G
 	readyHead *G
@@ -251,6 +255,11 @@ const (
 	// the legacy schedule-disable race are separate, explicitly unbounded
 	// compatibility boundaries.
 	ActionCommitDestroy
+	// ActionForeignReentryComplete is a handle-free post-destroy receipt for a
+	// synchronous C-to-Go callback child. The physical parent LLVM resume is
+	// already active below the native C stack, so the runner reconciles the
+	// child outcome without issuing a second resume of that parent.
+	ActionForeignReentryComplete
 )
 
 // ActionFlags carries target-neutral physical-owner obligations across a
@@ -1355,6 +1364,10 @@ func DestroyedBounded(p *P, g *G, action Action) (Action, bool) {
 		return finishBoundedRootDestroy(p, g, true, false)
 	}
 	g.destroyRoot = false
+	if record := p.foreignReentry; record != nil &&
+		record.task == g && record.child == action.Handle {
+		return foreignReentryDestroyedBounded(p, g)
+	}
 	g.state = GRunning
 	if g.active == nil {
 		return Action{}, false

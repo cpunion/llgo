@@ -929,6 +929,36 @@ func (p Package) markLLVMRetained(v llvm.Value) {
 	p.llvmRetainedValues = append(p.llvmRetainedValues, llvm.ConstBitCast(v, elemTyp))
 }
 
+// AddCompilerMetadataBlob adds an immutable, byte-exact object-section record
+// which survives LLVM optimization but may be discarded by the final native
+// linker. This is intended for compiler/importer metadata consumed from
+// package objects or archives before linking; it must not be used for runtime
+// registration records, which require markLLVMRetained instead.
+func (p Package) AddCompilerMetadataBlob(name, section string, data []byte) error {
+	if name == "" {
+		return fmt.Errorf("ssa: compiler metadata blob requires a symbol name")
+	}
+	if section == "" {
+		return fmt.Errorf("ssa: compiler metadata blob %q requires a section", name)
+	}
+	if len(data) == 0 {
+		return fmt.Errorf("ssa: compiler metadata blob %q is empty", name)
+	}
+	if existing := p.mod.NamedGlobal(name); !existing.IsNil() {
+		return fmt.Errorf("ssa: compiler metadata blob symbol %q already exists", name)
+	}
+	initial := p.mod.Context().ConstString(string(data), false)
+	global := llvm.AddGlobal(p.mod, initial.Type(), name)
+	global.SetInitializer(initial)
+	global.SetGlobalConstant(true)
+	global.SetLinkage(llvm.InternalLinkage)
+	global.SetUnnamedAddr(true)
+	global.SetAlignment(1)
+	global.SetSection(section)
+	p.markLLVMUsed(global)
+	return nil
+}
+
 func (p Package) MaterializePreserveSyms() {
 	p.materializeLLVMUsed("llvm.compiler.used", p.llvmUsedValues)
 	p.materializeLLVMUsed("llvm.used", p.llvmRetainedValues)

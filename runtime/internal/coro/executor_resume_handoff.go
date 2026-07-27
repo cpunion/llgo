@@ -23,6 +23,23 @@ type executorResumeHandoffState uint8
 const (
 	executorResumeHandoffIdle executorResumeHandoffState = iota
 	executorResumeHandoffDetached
+	executorResumeHandoffReentering
+)
+
+// ExecutorResumeHandoffMode selects the exact reason why one active physical
+// LLVM resume may release its execution domain. The mode is scheduler policy,
+// not a target/thread implementation detail.
+type ExecutorResumeHandoffMode uint8
+
+const (
+	ExecutorResumeHandoffInvalid ExecutorResumeHandoffMode = iota
+	// ExecutorResumeHandoffLockedForeign is the existing LockOSThread-only
+	// blocking call path.
+	ExecutorResumeHandoffLockedForeign
+	// ExecutorResumeHandoffManagedReentry additionally admits an unlocked
+	// synchronous foreign call whose C stack may call back into Go. Callback
+	// children temporarily acquire an internal physical affinity.
+	ExecutorResumeHandoffManagedReentry
 )
 
 type executorResumeHandoffNoCopy struct{}
@@ -45,6 +62,7 @@ type ExecutorResumeHandoff struct {
 	task   *G
 	action Action
 	budget uint32
+	mode   ExecutorResumeHandoffMode
 	state  executorResumeHandoffState
 }
 
@@ -58,6 +76,7 @@ func emptyExecutorResumeHandoff(handoff *ExecutorResumeHandoff) bool {
 	return handoff != nil &&
 		handoff.driver == nil && handoff.task == nil &&
 		handoff.action == (Action{}) && handoff.budget == 0 &&
+		handoff.mode == ExecutorResumeHandoffInvalid &&
 		handoff.state == executorResumeHandoffIdle
 }
 
@@ -65,7 +84,7 @@ func validForeignWaitingExecutorTask(p *P, task *G) bool {
 	if p == nil || !ValidG(task) || task.state != GForeignWaiting ||
 		task.runP != p || task.runAction != ActionInvalid ||
 		task.transferState != runnableTransferGIdle ||
-		task.osThreadLockDepth == 0 || task.queued || task.nextReady != nil ||
+		task.queued || task.nextReady != nil ||
 		task.waiting || task.spawnChild != nil || task.spawnParent != nil ||
 		task.spawnP != nil || task.destroyTarget != nil || task.destroyRoot ||
 		task.pending.kind != pendingNone || task.pending.from != nil ||
@@ -94,8 +113,11 @@ func DetachExecutorResume(
 	handoff *ExecutorResumeHandoff,
 	driver *ExecutorDriver,
 	task *G,
+	mode ExecutorResumeHandoffMode,
 ) bool {
-	if !emptyExecutorResumeHandoff(handoff) || driver == nil || task == nil {
+	if !emptyExecutorResumeHandoff(handoff) || driver == nil || task == nil ||
+		(mode != ExecutorResumeHandoffLockedForeign &&
+			mode != ExecutorResumeHandoffManagedReentry) {
 		return false
 	}
 	current, _, _, ownerOK := CurrentExecutorDriver(task)
@@ -104,8 +126,11 @@ func DetachExecutorResume(
 		return false
 	}
 	p := driver.p
+	locked := task.osThreadLockDepth != 0
 	if p == nil || p.current != task || task.runP != p ||
-		p.osThreadLockOwner != task || task.osThreadLockDepth == 0 ||
+		(locked && p.osThreadLockOwner != task) ||
+		(!locked && p.osThreadLockOwner != nil) ||
+		(mode == ExecutorResumeHandoffLockedForeign && !locked) ||
 		p.osThreadSuspend != osThreadSuspendAttached ||
 		task.runAction != ActionInvalid || task.queued || task.nextReady != nil ||
 		task.waiting || task.spawnParent != nil || task.spawnP != nil ||
@@ -121,6 +146,7 @@ func DetachExecutorResume(
 	handoff.task = task
 	handoff.action = p.action
 	handoff.budget = p.servicePreemptBudget
+	handoff.mode = mode
 
 	// The issued resume has already started the ready action which satisfied
 	// any source-to-ready ordering debt. Ordinary actions clear these advisory
@@ -161,6 +187,25 @@ func ExecutorResumeHandoffReturnable(driver *ExecutorDriver) bool {
 	return schedule == scheduleIdle || schedule == scheduleRequested
 }
 
+// ExecutorResumeHandoffContext returns the exact logical task and physical
+// parent handle for a detached managed-reentry boundary. It exposes no target
+// function identity and performs no address lookup; a compiler-generated
+// callback adapter uses these values only to construct its child ramp.
+func ExecutorResumeHandoffContext(
+	handoff *ExecutorResumeHandoff,
+) (task *G, parent unsafe.Pointer, ok bool) {
+	if handoff == nil || handoff.state != executorResumeHandoffDetached ||
+		handoff.mode != ExecutorResumeHandoffManagedReentry ||
+		handoff.driver == nil || handoff.task == nil ||
+		handoff.action.Kind != ActionResume || handoff.action.Handle == nil ||
+		!ExecutorResumeHandoffReturnable(handoff.driver) ||
+		!validForeignWaitingExecutorTask(handoff.driver.p, handoff.task) ||
+		handoff.task.active.handle != handoff.action.Handle {
+		return nil, nil, false
+	}
+	return handoff.task, handoff.action.Handle, true
+}
+
 // RestoreExecutorResume reattaches the exact active LLVM resume after the
 // replacement owner has finished and the target has strongly joined it. The
 // caller must reacquire its managed-execution permit before calling Restore.
@@ -170,13 +215,18 @@ func RestoreExecutorResume(handoff *ExecutorResumeHandoff) bool {
 	if handoff == nil || handoff.state != executorResumeHandoffDetached ||
 		handoff.driver == nil || handoff.task == nil ||
 		handoff.action.Kind != ActionResume || handoff.action.Handle == nil ||
-		handoff.budget == 0 {
+		handoff.budget == 0 ||
+		(handoff.mode != ExecutorResumeHandoffLockedForeign &&
+			handoff.mode != ExecutorResumeHandoffManagedReentry) {
 		return false
 	}
 	driver, task := handoff.driver, handoff.task
 	p := driver.p
 	if !ExecutorResumeHandoffReturnable(driver) ||
 		!validForeignWaitingExecutorTask(p, task) ||
+		(handoff.mode == ExecutorResumeHandoffLockedForeign &&
+			task.osThreadLockDepth == 0) ||
+		(p.foreignReentry != nil && p.foreignReentry.handoff == handoff) ||
 		task.active.handle != handoff.action.Handle ||
 		task.runP != p || driver.run.issued != ActionInvalid {
 		return false
@@ -188,7 +238,11 @@ func RestoreExecutorResume(handoff *ExecutorResumeHandoff) bool {
 	p.runDecision = RunDecision{}
 	p.runDecisionTaken = true
 	p.servicePreemptBudget = handoff.budget
-	p.osThreadLockOwner = task
+	if task.osThreadLockDepth != 0 {
+		p.osThreadLockOwner = task
+	} else {
+		p.osThreadLockOwner = nil
+	}
 	p.osThreadSuspend = osThreadSuspendAttached
 	driver.run.issued = ActionCheckResume
 	task.state = GRunning
@@ -196,6 +250,7 @@ func RestoreExecutorResume(handoff *ExecutorResumeHandoff) bool {
 	handoff.task = nil
 	handoff.action = Action{}
 	handoff.budget = 0
+	handoff.mode = ExecutorResumeHandoffInvalid
 	handoff.state = executorResumeHandoffIdle
 	return true
 }

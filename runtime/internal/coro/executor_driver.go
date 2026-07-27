@@ -308,7 +308,7 @@ func bindExecutorAtRoute(driver *ExecutorDriver, p *P, registry *ExecutorRegistr
 		driver.prepareNow != 0 || driver.hasPrepareNow ||
 		driver.terminalKind != ActionInvalid ||
 		p == nil || p.executor != nil || preemptLoad(&p.executorMode) != executorModeUnbound ||
-		p.osThreadLockOwner != nil ||
+		p.osThreadLockOwner != nil || p.foreignReentry != nil ||
 		preemptLoad(&p.schedule) != scheduleIdle || !idleExecutorScheduler(p) ||
 		p.readyHead != nil || p.readyTail != nil || !emptySchedulerWaitQueues(p) ||
 		!route.Valid() || !activeExecutorHandle(registry, handle) || !bindExecutorSourceSetAtRoute(&driver.sources, p, route, catalog) {

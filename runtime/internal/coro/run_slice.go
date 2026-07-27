@@ -339,6 +339,11 @@ func commitExecutorRunAction(driver *ExecutorDriver, g *G, next Action, placemen
 			return false
 		}
 		committed = validDestroyCommitReceipt(p, g, next)
+	case ActionForeignReentryComplete:
+		if placement != executorRunQueueTail {
+			return false
+		}
+		committed = commitForeignReentryCompletion(driver, g, next)
 	}
 	if !committed {
 		return false
