@@ -192,7 +192,11 @@ func pNeutralRunnableParkState(state *ParkState) bool {
 // bounced from another P; after its first physical action it becomes yielded,
 // parked, or terminal and must satisfy the ordinary surplus rule.
 func initialPNeutralRunnable(g *G, queued bool) bool {
-	return pNeutralRunnable(g, queued) && g.active == g.root &&
+	return pNeutralRunnable(g, queued) && initialPNeutralRunnableState(g)
+}
+
+func initialPNeutralRunnableState(g *G) bool {
+	return g != nil && g.active != nil && g.active == g.root &&
 		g.active.state == FrameInitialSuspended &&
 		g.active.header.SuspendReason == uint16(SuspendNone) &&
 		g.active.header.Lifecycle == uint16(FrameInitialSuspended)
@@ -345,10 +349,107 @@ func PublishPNeutralRunnable(mailbox *RunnableTransferMailbox, source *P, g *G) 
 	return id, ok
 }
 
+// collectPNeutralRunnableBatch records one already owner-validated queue prefix.
+// Frame-chain validation remains outside the destination Try section.
+func collectPNeutralRunnableBatch(
+	source *P,
+	limit uint32,
+	candidates *[RunnableTransferMailboxCapacity]*G,
+) uint32 {
+	var count uint32
+	for candidate := source.readyHead; count < limit && candidate != nil; candidate = candidate.nextReady {
+		if !pNeutralRunnable(candidate, true) {
+			break
+		}
+		candidates[count] = candidate
+		count++
+	}
+	return count
+}
+
+// preflightPNeutralRunnableBatch performs every potentially linear queue/frame
+// check before the destination Try section. The public batch operation always
+// leaves at least one runnable local.
+func preflightPNeutralRunnableBatch(
+	mailbox *RunnableTransferMailbox,
+	source *P,
+	limit uint32,
+	candidates *[RunnableTransferMailboxCapacity]*G,
+) uint32 {
+	if mailbox == nil || mailbox.magic != runnableTransferMailboxMagic || mailbox.owner == nil ||
+		source == nil || source == mailbox.owner || candidates == nil ||
+		limit == 0 || limit > RunnableTransferMailboxCapacity ||
+		!stableRunnableTransferP(source) || !validReadyQueue(source) ||
+		source.readyCount < 2 {
+		return 0
+	}
+	if localLimit := source.readyCount / 2; limit > localLimit {
+		limit = localLimit
+	}
+	return collectPNeutralRunnableBatch(source, limit, candidates)
+}
+
+// publishPreparedPNeutralRunnableBatch performs only bounded O(1)-per-element
+// revalidation while holding the destination Try gate. The source owner has
+// already audited every candidate's frame chain. A later asynchronous preempt
+// request may shorten the batch, but it cannot invalidate an earlier durable
+// publication.
+func publishPreparedPNeutralRunnableBatch(
+	mailbox *RunnableTransferMailbox,
+	source *P,
+	candidates *[RunnableTransferMailboxCapacity]*G,
+	prepared uint32,
+) (first RunnableTransferID, count uint32) {
+	if mailbox == nil || mailbox.magic != runnableTransferMailboxMagic || mailbox.owner == nil ||
+		source == nil || source == mailbox.owner || candidates == nil ||
+		prepared == 0 || prepared > RunnableTransferMailboxCapacity ||
+		!tryRunnableTransferGate(mailbox) {
+		return RunnableTransferID{}, 0
+	}
+	for count < prepared {
+		candidate := candidates[count]
+		if source.readyHead != candidate {
+			break
+		}
+		id, published := publishPNeutralRunnableLocked(mailbox, source, candidate)
+		if !published {
+			break
+		}
+		if count == 0 {
+			first = id
+		}
+		count++
+	}
+	releaseRunnableTransferGate(mailbox)
+	if count == 0 {
+		return RunnableTransferID{}, 0
+	}
+	return first, count
+}
+
+// PublishPNeutralRunnableBatch transfers a prepared P-neutral queue prefix
+// under one bounded destination transaction. It publishes no more than half
+// of the source's current runnables (and no more than mailbox capacity), so an
+// ordinary yielded task cannot make its owner empty and bounce between idle
+// routes. first identifies the first generation appended by this transaction;
+// count is the number of durable consecutive mailbox entries rooted by it.
+func PublishPNeutralRunnableBatch(
+	mailbox *RunnableTransferMailbox,
+	source *P,
+	limit uint32,
+) (first RunnableTransferID, count uint32) {
+	var candidates [RunnableTransferMailboxCapacity]*G
+	prepared := preflightPNeutralRunnableBatch(mailbox, source, limit, &candidates)
+	if prepared == 0 {
+		return RunnableTransferID{}, 0
+	}
+	return publishPreparedPNeutralRunnableBatch(mailbox, source, &candidates, prepared)
+}
+
 func importPNeutralRunnableLocked(mailbox *RunnableTransferMailbox, owner *P, id RunnableTransferID) bool {
 	if !validRunnableTransferHeaderLocked(mailbox) || owner == nil || owner != mailbox.owner ||
 		!stableRunnableTransferP(owner) || !id.Valid() || mailbox.count == 0 ||
-		id.Slot-1 != mailbox.head {
+		id.Slot-1 != mailbox.head || owner.readyCount == ^uint32(0) {
 		return false
 	}
 	slot := &mailbox.slots[mailbox.head]

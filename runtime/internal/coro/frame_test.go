@@ -300,6 +300,7 @@ func TestTerminalGRejectsResidualSchedulerState(t *testing.T) {
 		{"action kind", func(p *P) { p.action.Kind = ActionResume }},
 		{"action handle", func(p *P) { p.action.Handle = dummyActionHandle }},
 		{"service preempt budget", func(p *P) { p.servicePreemptBudget = 1 }},
+		{"ready count", func(p *P) { p.readyCount = 1 }},
 	}
 	for _, test := range pTests {
 		t.Run("P "+test.name, func(t *testing.T) {
