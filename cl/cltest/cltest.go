@@ -485,6 +485,9 @@ func withMetaCaptures(conf *build.Config, pkgDirs []string) (*build.Config, map[
 		conf = build.NewDefaultConf(build.ModeRun)
 	}
 	localConf := *conf
+	if localConf.LinkOptions.DWARF == build.DWARFDefault {
+		localConf.LinkOptions.DWARF = build.DWARFOmit
+	}
 	localConf.ForceRebuild = true
 	metas := make(map[string]*string, len(pkgDirs))
 	for _, pkgDir := range pkgDirs {
