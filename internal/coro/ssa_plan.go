@@ -409,6 +409,16 @@ type SSAConfig struct {
 	// additional capability.
 	ClassifyElidedCallCertificate func(caller *ssa.Function, call ssa.CallInstruction) (string, error)
 
+	// ClassifyStaticCallTarget identifies one exact compiler-owned managed
+	// target for a direct static call, defer, or spawn occurrence. The source
+	// declaration remains in the emission universe and retains its raw/foreign
+	// identity; only this managed invocation edge is redirected. AnalyzeSSA
+	// requires a distinct, bodyful, context-free same-program Go target with
+	// the exact source signature and argument types. This occurrence-level fact
+	// lets a frontend fold a local C declaration -> Go //export round trip into
+	// the ordinary Go fixed point without globally aliasing either symbol.
+	ClassifyStaticCallTarget func(caller *ssa.Function, call ssa.CallInstruction) (target *ssa.Function, redirected bool, err error)
+
 	// ClassifyStaticSpawnTarget identifies the exact compiler-owned Go wrapper
 	// that carries a direct source `go intrinsic(args...)` operation. The
 	// wrapper is a bodyful, context-free function with the exact source call
@@ -722,6 +732,30 @@ func (p *SSAPlan) Roots() []SSARootPlan {
 		return nil
 	}
 	return append([]SSARootPlan(nil), p.roots...)
+}
+
+// RootFactoryRoots returns the exact explicit roots which own a managed
+// coroutine factory descriptor. A raw-only root can share a function whose
+// aggregate plan also has an independently demanded coroutine primary; that
+// does not make the raw entry itself a scheduler root. Keeping this projection
+// beside SSAPlan gives bootstrap indexing and physical descriptor emission one
+// canonical selection rule.
+func (p *SSAPlan) RootFactoryRoots() []SSARootPlan {
+	if p == nil {
+		return nil
+	}
+	roots := make([]SSARootPlan, 0, len(p.roots))
+	for _, root := range p.roots {
+		if !root.ManagedDemand.Contains(AsyncDemand) {
+			continue
+		}
+		function, ok := p.FunctionPlan(root.Function)
+		if !ok || function.Emission != EmitCoroutine {
+			continue
+		}
+		roots = append(roots, root)
+	}
+	return roots
 }
 
 // FunctionID returns the stable identity assigned to fn.
@@ -1369,15 +1403,30 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if err != nil {
 		return nil, err
 	}
+	staticCallTargets, err := classifySSAStaticCallTargets(
+		bodyFunctions, includedSet, canonicalizer, config,
+	)
+	if err != nil {
+		return nil, err
+	}
 	staticSpawnTargets, err := classifySSAStaticSpawnTargets(
 		bodyFunctions, includedSet, canonicalizer, config,
 	)
 	if err != nil {
 		return nil, err
 	}
+	for call, target := range staticSpawnTargets {
+		if previous := staticCallTargets[call]; previous != nil {
+			return nil, fmt.Errorf(
+				"coro: static call %q in %q has both managed-call and spawn-wrapper redirects",
+				call.String(), call.Parent().Name(),
+			)
+		}
+		staticCallTargets[call] = target
+	}
 	safeFixedArrayIndexes := analyzeSSAExactSafeFixedArrayIndexes(bodyFunctions)
 	unknownTargets, err := classifySSAUnknownCalls(
-		bodyFunctions, includedSet, flow, elidedCalls, staticSpawnTargets, config,
+		bodyFunctions, includedSet, flow, elidedCalls, staticCallTargets, config,
 	)
 	if err != nil {
 		return nil, err
@@ -1525,7 +1574,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 				kind := ssaCallKind(call)
 				if rawCallee := common.StaticCallee(); rawCallee != nil {
 					callee, resolved, resolveErr := resolveSSAStaticCallTarget(
-						flow, call, rawCallee, staticSpawnTargets,
+						flow, call, rawCallee, staticCallTargets,
 					)
 					if resolveErr != nil {
 						return nil, fmt.Errorf("coro: resolve static callee %q in %q while building graph: %w", rawCallee.Name(), caller.Name(), resolveErr)
@@ -1755,7 +1804,7 @@ func AnalyzeSSA(prog *ssa.Program, roots Roots, config SSAConfig) (*SSAPlan, err
 	if err := validateSSACallableContractPlans(base, policies, ids); err != nil {
 		return nil, err
 	}
-	valuePlans, callPlans, err := flow.finalize(base, callKinds, unknownTargets, staticSpawnTargets)
+	valuePlans, callPlans, err := flow.finalize(base, callKinds, unknownTargets, staticCallTargets)
 	if err != nil {
 		return nil, fmt.Errorf("coro: finalize SSA value and call plans: %w", err)
 	}
@@ -2863,16 +2912,88 @@ func classifySSAStaticSpawnTargets(
 	return result, nil
 }
 
+func classifySSAStaticCallTargets(
+	functions []*ssa.Function,
+	included map[*ssa.Function]bool,
+	canonicalizer *ssaFunctionCanonicalizer,
+	config SSAConfig,
+) (map[ssa.CallInstruction]*ssa.Function, error) {
+	result := make(map[ssa.CallInstruction]*ssa.Function)
+	if config.ClassifyStaticCallTarget == nil {
+		return result, nil
+	}
+	for _, caller := range functions {
+		for _, block := range caller.Blocks {
+			for _, instruction := range block.Instrs {
+				call, invocation := instruction.(ssa.CallInstruction)
+				if !invocation {
+					continue
+				}
+				target, redirected, err := config.ClassifyStaticCallTarget(caller, call)
+				if err != nil {
+					return nil, fmt.Errorf("coro: classify static call target in %q: %w", caller.Name(), err)
+				}
+				if !redirected {
+					if target != nil {
+						return nil, fmt.Errorf("coro: unclassified static call in %q returned a target", caller.Name())
+					}
+					continue
+				}
+				switch call.(type) {
+				case *ssa.Call, *ssa.Defer, *ssa.Go:
+				default:
+					return nil, fmt.Errorf("coro: redirected invocation in %q has unsupported SSA kind %T", caller.Name(), call)
+				}
+				common := call.Common()
+				raw, direct := common.Value.(*ssa.Function)
+				if call.Parent() != caller || !direct || raw == nil ||
+					common.StaticCallee() != raw || common.IsInvoke() || common.Method != nil {
+					return nil, fmt.Errorf("coro: redirected invocation in %q is not one exact direct static call", caller.Name())
+				}
+				if target == nil || target == raw || target.Prog != caller.Prog {
+					return nil, fmt.Errorf("coro: redirected call in %q has no distinct same-program target", caller.Name())
+				}
+				canonical, resolved, resolveErr := canonicalizer.resolve(target)
+				if resolveErr != nil {
+					return nil, fmt.Errorf("coro: resolve redirected call target %q in %q: %w", target.Name(), caller.Name(), resolveErr)
+				}
+				if !resolved || canonical != target || !included[target] {
+					return nil, fmt.Errorf("coro: redirected call target %q in %q is not one exact emission-universe function", target.Name(), caller.Name())
+				}
+				if len(target.Blocks) == 0 || len(target.FreeVars) != 0 ||
+					target.Origin() != nil || len(target.TypeArgs()) != 0 {
+					return nil, fmt.Errorf("coro: redirected call target %q in %q is not one bodyful context-free Go function", target.Name(), caller.Name())
+				}
+				signature := target.Signature
+				if signature == nil || signature.Recv() != nil || signature.Variadic() ||
+					typeParamListLen(signature.TypeParams()) != 0 ||
+					typeParamListLen(signature.RecvTypeParams()) != 0 ||
+					!types.Identical(common.Signature(), signature) {
+					return nil, fmt.Errorf("coro: redirected call target %q in %q does not preserve the exact source signature", target.Name(), caller.Name())
+				}
+				if len(common.Args) != signature.Params().Len() {
+					return nil, fmt.Errorf("coro: redirected call target %q in %q has %d arguments, want %d", target.Name(), caller.Name(), len(common.Args), signature.Params().Len())
+				}
+				for index, argument := range common.Args {
+					if argument == nil || !types.Identical(argument.Type(), signature.Params().At(index).Type()) {
+						return nil, fmt.Errorf("coro: redirected call target %q in %q has an incompatible argument %d", target.Name(), caller.Name(), index)
+					}
+				}
+				result[call] = target
+			}
+		}
+	}
+	return result, nil
+}
+
 func resolveSSAStaticCallTarget(
 	flow *ssaFuncFlow,
 	call ssa.CallInstruction,
 	raw *ssa.Function,
-	staticSpawnTargets map[*ssa.Go]*ssa.Function,
+	staticCallTargets map[ssa.CallInstruction]*ssa.Function,
 ) (*ssa.Function, bool, error) {
-	if spawn, ok := call.(*ssa.Go); ok {
-		if target := staticSpawnTargets[spawn]; target != nil {
-			return target, true, nil
-		}
+	if target := staticCallTargets[call]; target != nil {
+		return target, true, nil
 	}
 	return flow.resolveTarget(raw)
 }
@@ -2882,7 +3003,7 @@ func classifySSAUnknownCalls(
 	included map[*ssa.Function]bool,
 	flow *ssaFuncFlow,
 	elided map[ssa.CallInstruction]bool,
-	staticSpawnTargets map[*ssa.Go]*ssa.Function,
+	staticCallTargets map[ssa.CallInstruction]*ssa.Function,
 	config SSAConfig,
 ) (map[ssa.CallInstruction]UnknownTarget, error) {
 	result := make(map[ssa.CallInstruction]UnknownTarget)
@@ -2902,7 +3023,7 @@ func classifySSAUnknownCalls(
 				}
 				if callee := common.StaticCallee(); callee != nil {
 					canonical, ok, err := resolveSSAStaticCallTarget(
-						flow, call, callee, staticSpawnTargets,
+						flow, call, callee, staticCallTargets,
 					)
 					if err != nil {
 						return nil, fmt.Errorf("coro: resolve static callee %q in %q while classifying unknown calls: %w", callee.Name(), caller.Name(), err)

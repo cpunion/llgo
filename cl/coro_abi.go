@@ -3259,6 +3259,7 @@ func validateCoroPhysicalConsumersCapabilities(
 		unevaluated, _ := universe.frozenUnsafeLayoutUnevaluatedSSA(fn)
 		for _, block := range fn.Blocks {
 			for _, instr := range block.Instrs {
+				var managedStaticCalleeOperand *ssa.Value
 				if _, omitted := unevaluated[instr]; omitted {
 					continue
 				}
@@ -3362,6 +3363,30 @@ func validateCoroPhysicalConsumersCapabilities(
 					callPlan, found := plan.CallPlan(call)
 					if !found {
 						return coroLeafInstructionError(fn, function.Plan, instr, "call has no compilation CallPlan")
+					}
+					if universe != nil {
+						site, frozen, err := universe.CoroCallSitePlan(call)
+						if err != nil {
+							return coroLeafInstructionError(fn, function.Plan, instr,
+								"managed static-call SitePlan: "+err.Error())
+						}
+						if !frozen {
+							return coroLeafInstructionError(fn, function.Plan, instr,
+								"managed static-call source is absent from the frozen ProgramIR")
+						}
+						if target := site.ManagedStaticTarget; target != nil {
+							common := call.Common()
+							targetPlan, planned := plan.FunctionPlan(target)
+							raw, exact := common.Value.(*ssa.Function)
+							if site.ManagedStaticTargetCertificate == "" || !exact || raw == nil ||
+								common.StaticCallee() != raw || common.IsInvoke() || common.Method != nil ||
+								!planned || len(callPlan.Targets) != 1 ||
+								callPlan.Targets[0] != targetPlan.ID {
+								return coroLeafInstructionError(fn, function.Plan, instr,
+									"managed static-call redirect disagrees with its frozen CallPlan")
+							}
+							managedStaticCalleeOperand = &common.Value
+						}
 					}
 					if callPlan.RawPlain {
 						direct, ordinary := call.(*ssa.Call)
@@ -3504,6 +3529,13 @@ func validateCoroPhysicalConsumersCapabilities(
 				}
 				for _, operand := range instr.Operands(nil) {
 					if operand == nil || *operand == nil {
+						continue
+					}
+					if operand == managedStaticCalleeOperand {
+						// This exact source C declaration is identity-only for
+						// the managed occurrence. Analysis and lowering consume
+						// the frozen Go target; raw/plain bodies keep the source
+						// declaration and never take this branch.
 						continue
 					}
 					target, ok := (*operand).(*ssa.Function)

@@ -145,11 +145,9 @@ func pollFDReadinessCapable(fd int32) (readiness bool, inlineAttempt bool, errno
 //go:linkname llgoCoroPollWaitV2 llgo.coroPollWait
 func llgoCoroPollWaitV2(ctx uintptr, fd int32, interest uint32, deadline int64) uint32
 
-//llgo:coro noblock
 //go:linkname llgoCoroPollUpdateDeadlineOrAbortV1 C.__llgo_coro_poll_update_deadline_or_abort_v1
 func llgoCoroPollUpdateDeadlineOrAbortV1(ctx uintptr, interest uint32, deadline int64)
 
-//llgo:coro noblock
 //go:linkname llgoCoroPollPostClosingOrAbortV1 C.__llgo_coro_poll_post_closing_or_abort_v1
 func llgoCoroPollPostClosingOrAbortV1(ctx uintptr, interest uint32)
 

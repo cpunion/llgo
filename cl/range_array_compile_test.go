@@ -360,7 +360,7 @@ func copyArray(p *[5]int) [5]int {
 		ret := ctx.callEx(b, llssa.Call, &ssa.CallCommon{
 			Value: builtin,
 			Args:  []ssa.Value{tc.arg},
-		}, nil)
+		}, nil, nil)
 		if ret.IsNil() {
 			t.Fatalf("%s did not return a length expression", tc.name)
 		}

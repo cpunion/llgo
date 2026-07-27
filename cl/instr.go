@@ -1935,14 +1935,28 @@ type explicitDeferStack struct {
 }
 
 func (p *context) call(b llssa.Builder, act llssa.DoAction, call *ssa.CallCommon) (ret llssa.Expr) {
-	return p.callEx(b, act, call, nil)
+	return p.callEx(b, act, call, nil, nil)
 }
 
-func (p *context) callDeferStack(b llssa.Builder, act llssa.DoAction, call *ssa.CallCommon, stack ssa.Value, fn *ssa.Function) (ret llssa.Expr) {
-	return p.callEx(b, act, call, &explicitDeferStack{
+func (p *context) callInstruction(
+	b llssa.Builder,
+	act llssa.DoAction,
+	source ssa.CallInstruction,
+) (ret llssa.Expr) {
+	if source == nil || source.Common() == nil {
+		panic("call lowering requires one exact source instruction")
+	}
+	return p.callEx(b, act, source.Common(), nil, source)
+}
+
+func (p *context) callDeferStack(b llssa.Builder, act llssa.DoAction, source *ssa.Defer, stack ssa.Value, fn *ssa.Function) (ret llssa.Expr) {
+	if source == nil || source.Common() == nil {
+		panic("defer-stack call lowering requires one exact source instruction")
+	}
+	return p.callEx(b, act, source.Common(), &explicitDeferStack{
 		stack: p.compileValue(b, stack),
 		owner: p.deferStackOwner(fn),
-	})
+	}, source)
 }
 
 // Range-over-func yield closures defer into their enclosing non-synthetic
@@ -2182,7 +2196,13 @@ func (p *context) selectCoroPhysicalOutcome(
 	return true
 }
 
-func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallCommon, ds *explicitDeferStack) (ret llssa.Expr) {
+func (p *context) callEx(
+	b llssa.Builder,
+	act llssa.DoAction,
+	call *ssa.CallCommon,
+	ds *explicitDeferStack,
+	source ssa.CallInstruction,
+) (ret llssa.Expr) {
 	p.recordCallerLocationForCall(b, call)
 	p.emitPCLineLabel(b, call.Pos())
 	cv := call.Value
@@ -2206,6 +2226,29 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 		p.observeCoroCallElision(CoroCallElidedNoInit)
 		return
 	}
+	if source != nil && p.compilation != nil && p.compilation.immutablePlan() != nil &&
+		p.emissionUniverse != nil && !p.rawPlainBody {
+		site, frozen, err := p.emissionUniverse.CoroCallSitePlan(source)
+		if err != nil {
+			panic(fmt.Errorf("managed static-call lowering: %w", err))
+		}
+		if !frozen {
+			panic("managed static-call lowering: source call is absent from the frozen ProgramIR")
+		}
+		if target := site.ManagedStaticTarget; target != nil {
+			common := source.Common()
+			raw, exact := common.Value.(*ssa.Function)
+			if site.ManagedStaticTargetCertificate == "" || !exact || raw == nil ||
+				raw != cv || common.StaticCallee() != raw ||
+				common.IsInvoke() || common.Method != nil {
+				panic("managed static-call lowering: frozen redirect disagrees with the exact source operand")
+			}
+			// The source C declaration remains available to raw/plain ingress,
+			// but this managed occurrence uses the same exact Go target already
+			// consumed by effect analysis and its immutable CallPlan.
+			cv = target
+		}
+	}
 	kind := p.funcKind(cv)
 	if kind == fnIgnore {
 		p.observeCoroCallElision(CoroCallElidedNoInit)
@@ -2213,7 +2256,7 @@ func (p *context) callEx(b llssa.Builder, act llssa.DoAction, call *ssa.CallComm
 	}
 	args := call.Args
 	dbgGoSSAln(">>> Do", act, cv, args)
-	sourceCall := p.coroCurrentSourceCall()
+	sourceCall, _ := source.(*ssa.Call)
 	physicalInstruction, physicalPlanned := p.plannedCoroPhysicalInstruction(sourceCall)
 	observePhysicalInstruction := func(actual coroPhysicalInstructionRecipe) {
 		p.observeCoroPhysicalInstruction(sourceCall, actual)

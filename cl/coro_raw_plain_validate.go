@@ -158,10 +158,31 @@ func validateCoroRawPlainConsumers(plan *coro.SSAPlan, universe *EmissionUnivers
 					return coroLeafInstructionError(fn, functionPlan, instruction, "raw plain static call does not have one exact closed target")
 				}
 				target, found := plan.Function(callPlan.Targets[0])
-				if !found || target == nil || target != canonical {
+				if !found || target == nil {
 					return coroLeafInstructionError(fn, functionPlan, instruction, fmt.Sprintf(
-						"raw plain static call target disagrees with its frozen CallPlan target %q", callPlan.Targets[0],
+						"raw plain static call target %q is absent from the compilation plan", callPlan.Targets[0],
 					))
+				}
+				if target != canonical {
+					// A local C declaration -> Go //export binding has two exact
+					// physical views of the same symbol. Managed analysis and
+					// lowering select the Go body directly; a raw/plain variant
+					// deliberately preserves the source C call so it enters the
+					// separately demanded legacy-stack export. Accept that split
+					// only when the occurrence and declaration both replay the
+					// same frozen compiler certificate. The CallSitePlan is the
+					// immutable authority here; re-reading the builder's private
+					// binding table would create a second plan authority.
+					site, frozen, siteErr := universe.CoroCallSitePlan(call)
+					if siteErr != nil || !frozen ||
+						site.ManagedStaticTarget != target ||
+						site.ManagedStaticTargetCertificate == "" ||
+						common.StaticCallee() != canonical {
+						return coroLeafInstructionError(fn, functionPlan, instruction, fmt.Sprintf(
+							"raw plain static call target disagrees with its frozen CallPlan target %q",
+							callPlan.Targets[0],
+						))
+					}
 				}
 				if err := validateCoroRawPlainCallTarget(plan, target); err != nil {
 					return coroLeafInstructionError(fn, functionPlan, instruction, err.Error())

@@ -70,7 +70,6 @@ func llgoCoroControlledTimerWaitV2(
 	deadline int64,
 ) uint32
 
-//llgo:coro noblock
 //go:linkname llgoCoroTimerRequestControlledV2 C.__llgo_coro_timer_request_controlled_v2
 func llgoCoroTimerRequestControlledV2(route uint32) uint32
 

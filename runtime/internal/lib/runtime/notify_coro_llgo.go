@@ -31,15 +31,12 @@ type llgoCoroNotifyParkV2 struct {
 	storage [256 - unsafe.Sizeof(uintptr(0))]byte
 }
 
-//llgo:coro contract foreign.v1 scope=declaration progress=executor-safe affinity=caller-thread reentry=none memory=borrow-until-return
 //go:linkname llgoCoroNotifyPrepareOrAbortV2 C.__llgo_coro_notify_prepare_or_abort_v2
 func llgoCoroNotifyPrepareOrAbortV2(state, notifyAddr unsafe.Pointer, target uint32)
 
-//llgo:coro noblock
 //go:linkname llgoCoroNotifyOneOrAbortV2 C.__llgo_coro_notify_one_or_abort_v2
 func llgoCoroNotifyOneOrAbortV2(notifyAddr unsafe.Pointer, waitSnapshot uint32)
 
-//llgo:coro noblock
 //go:linkname llgoCoroNotifyAllOrAbortV2 C.__llgo_coro_notify_all_or_abort_v2
 func llgoCoroNotifyAllOrAbortV2(notifyAddr unsafe.Pointer, waitSnapshot uint32)
 

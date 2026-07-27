@@ -521,9 +521,8 @@ func coroProgramRootDescriptorIndexV2(plan *coro.SSAPlan, target *ssa.Function) 
 		fn *ssa.Function
 	}
 	var entries []rootEntry
-	for _, root := range plan.Roots() {
-		fnPlan, ok := plan.FunctionPlan(root.Function)
-		if !ok || root.Function == nil || root.Function.Pkg != target.Pkg || fnPlan.Emission != coro.EmitCoroutine {
+	for _, root := range plan.RootFactoryRoots() {
+		if root.Function == nil || root.Function.Pkg != target.Pkg {
 			continue
 		}
 		entries = append(entries, rootEntry{id: root.ID, fn: root.Function})

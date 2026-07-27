@@ -195,6 +195,7 @@ type EmissionUniverse struct {
 	foreignWorker           map[*ssa.Function]CoroForeignWorkerCertificate
 	callableIdentities      map[*ssa.Function]CoroCallableIdentityCertificate
 	callableContracts       map[*ssa.Function]CoroCallableContractCertificate
+	localExportBindings     map[*ssa.Function]coroLocalExportBinding
 	noPreempt               map[*ssa.Function]string
 	noUnwind                map[*ssa.Function]string
 	rawCritical             map[*ssa.Function]string
@@ -499,6 +500,13 @@ type CoroCallSitePlan struct {
 	// only raw/plain target demand and no managed child/wait edge.
 	RawPlain            bool
 	RawPlainCertificate string
+	// ManagedStaticTarget is the exact bodyful Go implementation selected for
+	// this ordinary managed call occurrence. The source C declaration remains
+	// independently emitted for raw ingress and raw/plain variants; analysis
+	// and physical managed lowering consume this target directly so ordinary
+	// Go effect propagation owns suspension, preemption, panic, and defer.
+	ManagedStaticTarget            *ssa.Function
+	ManagedStaticTargetCertificate string
 	// StaticSpawnTarget is the compiler-owned Go wrapper that carries an
 	// otherwise inline-only operation into an independent coroutine. It is nil
 	// for ordinary calls, defers, dynamic spawns, and directly callable Go
@@ -633,6 +641,7 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		foreignWorker:           make(map[*ssa.Function]CoroForeignWorkerCertificate),
 		callableIdentities:      make(map[*ssa.Function]CoroCallableIdentityCertificate),
 		callableContracts:       make(map[*ssa.Function]CoroCallableContractCertificate),
+		localExportBindings:     make(map[*ssa.Function]coroLocalExportBinding),
 		noPreempt:               make(map[*ssa.Function]string),
 		noUnwind:                make(map[*ssa.Function]string),
 		rawCritical:             make(map[*ssa.Function]string),

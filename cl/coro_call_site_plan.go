@@ -204,15 +204,39 @@ func (ir *coroProgramIR) freezeCallSites(u *EmissionUniverse) error {
 							rawPlainSynchronousIntrinsic = true
 						}
 					}
+					var managedStaticTarget *ssa.Function
+					var managedStaticCertificate coroLocalExportBindingCertificate
+					managedStaticTarget, managedStaticCertificate, managedStatic, managedStaticErr :=
+						coroLocalExportManagedCallTarget(
+							u.localExportBindings,
+							u.required,
+							u.canonicalAlias,
+							call,
+						)
+					if classifyErr == nil && managedStaticErr != nil {
+						classifyErr = managedStaticErr
+					}
+					if managedStatic && classifyErr == nil &&
+						(frontendUnevaluated || noInit || patchRedirect ||
+							cgoWorkerCertified || intrinsic) {
+						classifyErr = fmt.Errorf(
+							"local-export managed call redirect overlaps an elided, patched, worker, or intrinsic recipe",
+						)
+					}
 					plan := CoroCallSitePlan{
 						IntrinsicSemantics:           semantics,
 						Intrinsic:                    intrinsic,
 						RawPlainSynchronousIntrinsic: rawPlainSynchronousIntrinsic,
 					}
+					if managedStatic && classifyErr == nil {
+						plan.ManagedStaticTarget = managedStaticTarget
+						plan.ManagedStaticTargetCertificate = managedStaticCertificate.ID
+					}
 					if rawCertificate := u.rawCriticalCalls[call]; rawCertificate != "" {
-						if frontendUnevaluated || noInit || patchRedirect || cgoWorkerCertified || intrinsic {
+						if frontendUnevaluated || noInit || patchRedirect || cgoWorkerCertified ||
+							intrinsic || managedStatic {
 							classifyErr = fmt.Errorf(
-								"raw-critical call overlaps an elided, generated-worker, or intrinsic recipe",
+								"raw-critical call overlaps an elided, redirected, generated-worker, or intrinsic recipe",
 							)
 						} else {
 							plan.RawPlain = true
