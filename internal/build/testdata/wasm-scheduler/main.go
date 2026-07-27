@@ -2,6 +2,8 @@ package main
 
 import (
 	"runtime"
+	"sync"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -136,7 +138,250 @@ func main() {
 		panic("not all goroutines ran")
 	}
 	testGoroutineLifecycle()
+	testBlockingPrimitives()
 	println("wasm scheduler ok")
+}
+
+func testBlockingPrimitives() {
+	testChannelsAndSelect()
+	testWaitGroup()
+	testMutexes()
+	testCond()
+	testSyncHelpers()
+	testSyncMap()
+}
+
+func testChannelsAndSelect() {
+	values := make(chan int)
+	ack := make(chan struct{})
+	go func() {
+		values <- 41
+		close(ack)
+	}()
+	if value := <-values; value != 41 {
+		panic("unexpected channel value")
+	}
+	<-ack
+
+	buffered := make(chan int, 2)
+	buffered <- 1
+	buffered <- 2
+	if len(buffered) != 2 || cap(buffered) != 2 {
+		panic("buffered channel size mismatch")
+	}
+	if <-buffered != 1 || <-buffered != 2 {
+		panic("buffered channel order mismatch")
+	}
+
+	left := make(chan int)
+	right := make(chan int)
+	go func() {
+		right <- 42
+	}()
+	select {
+	case <-left:
+		panic("select chose a blocked channel")
+	case value := <-right:
+		if value != 42 {
+			panic("unexpected select value")
+		}
+	}
+
+	selected := make(chan int)
+	go func() {
+		select {
+		case value := <-left:
+			selected <- value
+		case value := <-right:
+			selected <- value
+		}
+	}()
+	runtime.Gosched()
+	left <- 43
+	if value := <-selected; value != 43 {
+		panic("blocked select chose the wrong channel")
+	}
+
+	select {
+	case <-right:
+		panic("non-blocking select chose a blocked channel")
+	default:
+	}
+
+	close(right)
+	if value, ok := <-right; value != 0 || ok {
+		panic("closed channel receive mismatch")
+	}
+}
+
+func testWaitGroup() {
+	var wg sync.WaitGroup
+	count := 0
+	wg.Add(2)
+	go func() {
+		count++
+		wg.Done()
+	}()
+	go func() {
+		runtime.Gosched()
+		count++
+		wg.Done()
+	}()
+	wg.Wait()
+	if count != 2 {
+		panic("WaitGroup returned too early")
+	}
+
+	wg.Add(1)
+	go wg.Done()
+	wg.Wait()
+}
+
+func testMutexes() {
+	var mu sync.Mutex
+	started := make(chan struct{})
+	finished := make(chan struct{})
+	value := 0
+	mu.Lock()
+	go func() {
+		close(started)
+		mu.Lock()
+		value = 1
+		mu.Unlock()
+		close(finished)
+	}()
+	<-started
+	mu.Unlock()
+	<-finished
+	if value != 1 {
+		panic("Mutex waiter did not run")
+	}
+	if !mu.TryLock() {
+		panic("Mutex.TryLock failed")
+	}
+	mu.Unlock()
+
+	var rw sync.RWMutex
+	rw.RLock()
+	finished = make(chan struct{})
+	go func() {
+		rw.Lock()
+		value = 2
+		rw.Unlock()
+		close(finished)
+	}()
+	runtime.Gosched()
+	rw.RUnlock()
+	<-finished
+	if value != 2 {
+		panic("RWMutex waiter did not run")
+	}
+}
+
+func testCond() {
+	var mu sync.Mutex
+	cond := sync.NewCond(&mu)
+	arrived := make(chan struct{}, 2)
+	done := make(chan struct{}, 2)
+	ready := false
+	for i := 0; i < 2; i++ {
+		go func() {
+			mu.Lock()
+			arrived <- struct{}{}
+			for !ready {
+				cond.Wait()
+			}
+			mu.Unlock()
+			done <- struct{}{}
+		}()
+	}
+	<-arrived
+	<-arrived
+
+	mu.Lock()
+	ready = true
+	cond.Signal()
+	mu.Unlock()
+	<-done
+	select {
+	case <-done:
+		panic("Cond.Signal woke more than one waiter")
+	default:
+	}
+
+	mu.Lock()
+	cond.Broadcast()
+	mu.Unlock()
+	<-done
+}
+
+func testSyncHelpers() {
+	var once sync.Once
+	var wg sync.WaitGroup
+	count := 0
+	wg.Add(2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			once.Do(func() {
+				count++
+			})
+			wg.Done()
+		}()
+	}
+	wg.Wait()
+	if count != 1 {
+		panic("sync.Once ran more than once")
+	}
+
+	var pool sync.Pool
+	pool.Put("pooled")
+	if value := pool.Get(); value != "pooled" {
+		panic("sync.Pool value mismatch")
+	}
+
+	var value atomic.Value
+	value.Store("before")
+	if old := value.Swap("after"); old != "before" || value.Load() != "after" {
+		panic("atomic.Value swap mismatch")
+	}
+}
+
+func testSyncMap() {
+	var m sync.Map
+	if _, loaded := m.LoadOrStore("key", 1); loaded {
+		panic("sync.Map unexpectedly loaded a missing key")
+	}
+	if value, loaded := m.Load("key"); !loaded || value != 1 {
+		panic("sync.Map load mismatch")
+	}
+	if !m.CompareAndSwap("key", 1, 2) {
+		panic("sync.Map compare-and-swap failed")
+	}
+	if previous, loaded := m.Swap("key", 3); !loaded || previous != 2 {
+		panic("sync.Map swap mismatch")
+	}
+	count := 0
+	m.Range(func(key, value any) bool {
+		if key != "key" || value != 3 {
+			panic("sync.Map range mismatch")
+		}
+		count++
+		return true
+	})
+	if count != 1 {
+		panic("sync.Map range count mismatch")
+	}
+	if !m.CompareAndDelete("key", 3) {
+		panic("sync.Map compare-and-delete failed")
+	}
+	if _, loaded := m.LoadAndDelete("key"); loaded {
+		panic("sync.Map retained a deleted key")
+	}
+	m.Store("clear", 4)
+	m.Clear()
+	if _, loaded := m.Load("clear"); loaded {
+		panic("sync.Map clear failed")
+	}
 }
 
 func testGoroutineLifecycle() {
