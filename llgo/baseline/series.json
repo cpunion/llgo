@@ -12,6 +12,15 @@
     },
     {
       "kind": "pull",
+      "id": "82",
+      "label": "PR #82",
+      "path": "pulls/82/",
+      "sha": "68973b962c086541f2c0153a718ba20f10e55822",
+      "sourceUrl": "https://github.com/cpunion/llgo/commit/68973b962c086541f2c0153a718ba20f10e55822",
+      "updatedAt": "2026-07-28T09:32:12Z"
+    },
+    {
+      "kind": "pull",
       "id": "78",
       "label": "PR #78",
       "path": "pulls/78/",
