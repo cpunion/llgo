@@ -394,7 +394,8 @@ func valueDependsOn(v, target ssa.Value, seen map[ssa.Value]struct{}) bool {
 }
 
 // moveInstrsAfter reinserts selected instructions as an ordered group directly
-// after anchor, preserving the relative order of all other instructions.
+// after anchor, preserving the relative order of all other instructions. It
+// returns instrs unchanged when moving is empty or anchor is nil or absent.
 func moveInstrsAfter(instrs []ssa.Instruction, moving map[ssa.Instruction]struct{}, anchor ssa.Instruction) []ssa.Instruction {
 	if len(moving) == 0 || anchor == nil {
 		return instrs
