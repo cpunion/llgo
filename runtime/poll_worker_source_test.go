@@ -54,6 +54,50 @@ const (
 	runtimePthreadNoGCSource                 = "internal/clite/pthread/pthread_nogc.go"
 )
 
+func requireRuntimeAnnotationFreeCDeclarations(t *testing.T, path string, names ...string) {
+	t.Helper()
+	source := readRuntimePollFile(t, path)
+	file, err := parser.ParseFile(token.NewFileSet(), path, source, parser.ParseComments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := make(map[string]bool, len(names))
+	for _, name := range names {
+		found[name] = false
+	}
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		if _, wanted := found[function.Name.Name]; !wanted {
+			continue
+		}
+		found[function.Name.Name] = true
+		if function.Body != nil || function.Doc == nil {
+			t.Errorf("%s declaration %s is not an external declaration", path, function.Name.Name)
+			continue
+		}
+		link := false
+		for _, comment := range function.Doc.List {
+			if strings.HasPrefix(comment.Text, "//llgo:coro") {
+				t.Errorf("%s declaration %s acquired explicit coroutine policy %q", path, function.Name.Name, comment.Text)
+			}
+			if strings.HasPrefix(comment.Text, "//go:linkname "+function.Name.Name+" C.") {
+				link = true
+			}
+		}
+		if !link {
+			t.Errorf("%s declaration %s lacks an exact C link", path, function.Name.Name)
+		}
+	}
+	for name, present := range found {
+		if !present {
+			t.Errorf("%s lacks annotation-free C declaration %s", path, name)
+		}
+	}
+}
+
 func TestRuntimeCoroChannelCapacityUsesPagedLogicalSource(t *testing.T) {
 	core := readRuntimePollFile(t, runtimeCoroChannelSource)
 	for _, required := range []string{
@@ -213,13 +257,16 @@ func TestRuntimeCoroWorkerCapacityUsesPagedLogicalSourceAndBoundedNativePool(t *
 	}
 
 	declaration := readRuntimePollFile(t, runtimeCoroWorkerCallSource)
+	requireRuntimeAnnotationFreeCDeclarations(
+		t, runtimeCoroWorkerCallSource, "QueueInit", "QueueCanRelease", "QueueStop",
+	)
 	for _, required := range []string{
-		"//llgo:coro sync\n//go:linkname QueueInit C.__llgo_coro_worker_queue_init_v1",
-		"//llgo:coro sync\n//go:linkname QueueCanRelease C.__llgo_coro_worker_queue_can_release_v1",
+		"//go:linkname QueueInit C.__llgo_coro_worker_queue_init_v1",
+		"//go:linkname QueueCanRelease C.__llgo_coro_worker_queue_can_release_v1",
 		"//llgo:coro noblock\n//go:linkname QueueReserve C.__llgo_coro_worker_queue_reserve_v1",
 		"//llgo:coro noblock\n//go:linkname QueueCancelReservation C.__llgo_coro_worker_queue_cancel_reservation_v1",
 		"//llgo:coro noblock\n//go:linkname QueueSubmitReserved C.__llgo_coro_worker_queue_submit_reserved_v1",
-		"//llgo:coro sync\n//go:linkname QueueStop C.__llgo_coro_worker_queue_stop_v1",
+		"//go:linkname QueueStop C.__llgo_coro_worker_queue_stop_v1",
 		"lock-free by QueueInit",
 		"semaphore_signal never wait for worker",
 		"C adapter owns the fixed routine",
@@ -305,11 +352,14 @@ func TestRuntimeCoroWorkerKeepsPthreadCreationCertificateOwnerScoped(t *testing.
 	}
 
 	declaration := readRuntimePollFile(t, runtimeCoroWorkerCallSource)
+	requireRuntimeAnnotationFreeCDeclarations(t, runtimeCoroWorkerCallSource, "Create")
 	for _, required := range []string{
-		"//llgo:coro sync\n//go:linkname Create C.__llgo_coro_worker_create_v1",
+		"//go:linkname Create C.__llgo_coro_worker_create_v1",
 		"func Create(thread *pthread.Thread) c.Int",
 		"No arbitrary Go callback address is accepted",
-		"records same-thread return without promising lock-free or bounded",
+		"compiler-owned raw-host occurrence executes that conservative may-block",
+		"ordinary managed occurrence would",
+		"retain its foreign-wait policy",
 	} {
 		if !strings.Contains(declaration, required) {
 			t.Errorf("%s lacks exact worker creation contract %q", runtimeCoroWorkerCallSource, required)
@@ -356,13 +406,14 @@ func TestRuntimeCoroWorkerKeepsPthreadCreationCertificateOwnerScoped(t *testing.
 
 func TestRuntimeCoroWorkerBlockingCallHasOnlyGuardedSameMEntrance(t *testing.T) {
 	declaration := readRuntimePollFile(t, runtimeCoroWorkerCallSource)
+	requireRuntimeAnnotationFreeCDeclarations(t, runtimeCoroWorkerCallSource, "Call")
 	if strings.Contains(declaration, "func QueueWaitTake(") {
 		t.Errorf("%s exposes the blocking worker consumer loop to managed Go", runtimeCoroWorkerCallSource)
 	}
 	for _, required := range []string{
 		"reserved for the runtime's dynamically proved",
 		"LockOSThread path",
-		"//llgo:coro sync\n//go:linkname Call C.__llgo_coro_worker_call_v1",
+		"//go:linkname Call C.__llgo_coro_worker_call_v1",
 		"func Call(function uintptr, argc uint32, args *[MaxArgs]uintptr, result *Result) bool",
 	} {
 		if !strings.Contains(declaration, required) {
@@ -496,7 +547,7 @@ func TestRuntimePthreadPrimitivesKeepPhysicalWaitSemantics(t *testing.T) {
 			t.Errorf("pthread wait declarations lack inferred raw-host audit marker %q", required)
 		}
 	}
-	for _, symbol := range []string{
+	defaultSymbols := []string{
 		"c_pthread_mutex_destroy",
 		"c_pthread_rwlock_init",
 		"c_pthread_rwlock_destroy",
@@ -504,14 +555,21 @@ func TestRuntimePthreadPrimitivesKeepPhysicalWaitSemantics(t *testing.T) {
 		"c_pthread_cond_destroy",
 		"c_pthread_cond_signal",
 		"c_pthread_cond_broadcast",
-	} {
-		if !strings.Contains(text, "//llgo:coro sync\n//go:linkname "+symbol+" ") {
-			t.Errorf("synchronous pthread primitive %s lacks sync", symbol)
+	}
+	requireRuntimeAnnotationFreeCDeclarations(t, runtimePthreadSyncSource, defaultSymbols...)
+	for _, symbol := range defaultSymbols {
+		if !strings.Contains(text, "//go:linkname "+symbol+" ") {
+			t.Errorf("pthread lifecycle/notification primitive %s lacks its exact declaration", symbol)
 		}
-		for _, capability := range []string{"noblock", "worker"} {
-			if strings.Contains(text, "//llgo:coro "+capability+"\n//go:linkname "+symbol+" ") {
-				t.Errorf("synchronous pthread primitive %s acquired incorrect %s capability", symbol, capability)
-			}
+	}
+	for _, required := range []string{
+		"ordinary foreign default",
+		"invoke a callback, or retain either argument",
+		"Condition lifecycle and notification operations",
+		"rather than a declaration-wide sync capability",
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("pthread default-contract migration lacks producer-semantics marker %q", required)
 		}
 	}
 }
@@ -538,8 +596,9 @@ func TestRuntimeCoroWorkerDestroyCapabilityIsAfterJoinScoped(t *testing.T) {
 	}
 
 	declaration := readRuntimePollFile(t, runtimeCoroWorkerCallSource)
+	requireRuntimeAnnotationFreeCDeclarations(t, runtimeCoroWorkerCallSource, "QueueDestroyAfterJoin")
 	for _, required := range []string{
-		"//llgo:coro sync\n//go:linkname QueueDestroyAfterJoin C.__llgo_coro_worker_queue_destroy_after_join_v1",
+		"//go:linkname QueueDestroyAfterJoin C.__llgo_coro_worker_queue_destroy_after_join_v1",
 		"func QueueDestroyAfterJoin() bool",
 		"The caller must have joined every worker",
 		"verifies that every published position was consumed",
@@ -549,12 +608,6 @@ func TestRuntimeCoroWorkerDestroyCapabilityIsAfterJoinScoped(t *testing.T) {
 			t.Errorf("%s lacks after-join destroy contract %q", runtimeCoroWorkerCallSource, required)
 		}
 	}
-	for _, capability := range []string{"noblock", "worker"} {
-		if strings.Contains(declaration, "//llgo:coro "+capability+"\n//go:linkname QueueDestroyAfterJoin ") {
-			t.Errorf("after-join worker destroy acquired incorrect %s capability", capability)
-		}
-	}
-
 	wrapper := readRuntimePollFile(t, runtimeCoroWorkerCSource)
 	for _, required := range []string{
 		"bool __llgo_coro_worker_queue_destroy_after_join_v1(void)",

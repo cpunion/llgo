@@ -362,15 +362,16 @@ func TestCoroWorkerDynamicRawCCodePointerUsesTypedThunk(t *testing.T) {
 	runCoroABITestPipeline(t, fixture.prog, module)
 }
 
-func TestCoroWorkerClosedForeignCallUsesTypedThunk(t *testing.T) {
+func TestCoroWorkerClosedDefaultForeignCallUsesTypedThunk(t *testing.T) {
 	llssa.Initialize(llssa.InitAll)
-	fixture := prepareCoroWorkerForeignFixture(t, coroWorkerGenericForeignTestSource, "Root")
+	source := strings.Replace(coroWorkerForeignTestSource, "//llgo:coro worker\n", "", 1)
+	fixture := prepareCoroWorkerForeignFixture(t, source, "Root")
 	defer fixture.prog.Dispose()
 	target := fixture.call.Common().StaticCallee()
 	planCertificate, planCertified := fixture.plan.CallableContractCertificate(target)
 	universeCertificate, universeCertified, certificateErr := fixture.universe.CoroCallableContractCertificate(target)
 	if certificateErr != nil || !planCertified || !universeCertified || planCertificate != universeCertificate {
-		t.Fatalf("generic worker callable certificates = plan:%+v/%t universe:%+v/%t err:%v", planCertificate, planCertified, universeCertificate, universeCertified, certificateErr)
+		t.Fatalf("default worker callable certificates = plan:%+v/%t universe:%+v/%t err:%v", planCertificate, planCertified, universeCertificate, universeCertified, certificateErr)
 	}
 	if _, legacy := fixture.plan.ForeignWorkerCertificate(target); legacy {
 		t.Fatal("generic worker lowering unexpectedly retained a legacy worker certificate")

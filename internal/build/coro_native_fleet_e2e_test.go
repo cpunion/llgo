@@ -1407,11 +1407,9 @@ func osThreadUnlock()
 //go:linkname pollWait llgo.coroPollWait
 func pollWait(context uintptr, fd int32, interest uint32, deadline int64) uint32
 
-//llgo:coro sync
 //go:linkname pollAlloc C.__llgo_runtime_poll_desc_alloc_v1
 func pollAlloc(fd int32, inlineStream uint32) uintptr
 
-//llgo:coro sync
 //go:linkname pollFree C.__llgo_runtime_poll_desc_free_v1
 func pollFree(context uintptr)
 
@@ -1499,16 +1497,12 @@ func Setup() {
 		return
 	}
 	ReadFD = streamReadFD()
-	PollContext = pollAlloc(ReadFD, 1)
-	if ReadFD < 0 || PollContext == 0 {
+	if ReadFD < 0 {
 		Failed = 125
 	}
 }
 
-func main() {
-	if Failed != 0 {
-		return
-	}
+func runPoll() {
 	resetState()
 	go pollWaiter()
 	<-Ready
@@ -1531,12 +1525,24 @@ func main() {
 	}
 }
 
-func Check() int32 {
-	result := Failed
+func main() {
+	if Failed != 0 {
+		return
+	}
+	PollContext = pollAlloc(ReadFD, 1)
+	if PollContext == 0 {
+		Failed = 125
+		return
+	}
+	runPoll()
 	if PollContext != 0 {
 		pollFree(PollContext)
 		PollContext = 0
 	}
+}
+
+func Check() int32 {
+	result := Failed
 	streamClose()
 	return int32(result)
 }

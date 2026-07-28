@@ -36,12 +36,13 @@ const (
 // state only. Go sees one opaque uintptr handle and never converts it to a Go
 // pointer, so unrelated descriptors need neither a shared map nor a lock. The
 // internal/poll FD reference count delays Free until every operation returns.
+// Alloc and Free are native-only, thread-independent typed calls with no
+// callback or retained argument, so managed callers use the ordinary foreign
+// episode and audited raw-host callers remain direct.
 
-//llgo:coro sync
 //go:linkname llgoCoroPollDescAllocV1 C.__llgo_runtime_poll_desc_alloc_v1
 func llgoCoroPollDescAllocV1(fd int32, inlineStream uint32) uintptr
 
-//llgo:coro sync
 //go:linkname llgoCoroPollDescFreeV1 C.__llgo_runtime_poll_desc_free_v1
 func llgoCoroPollDescFreeV1(ctx uintptr)
 
