@@ -6,6 +6,13 @@ import "unsafe"
 
 var pprofLabel unsafe.Pointer
 
+// pprofStackRecord mirrors internal/profilerecord.StackRecord. Keep this
+// private structural mirror instead of importing the standard library's
+// internal package from LLGo's runtime source module.
+type pprofStackRecord struct {
+	Stack []uintptr
+}
+
 //go:linkname runtime_setProfLabel runtime/pprof.runtime_setProfLabel
 func runtime_setProfLabel(labels unsafe.Pointer) {
 	pprofLabel = labels
@@ -57,7 +64,7 @@ func runtime_pprof_readProfile() (data []uint64, tags []unsafe.Pointer, eof bool
 }
 
 //go:linkname pprof_goroutineProfileWithLabels runtime.pprof_goroutineProfileWithLabels
-func pprof_goroutineProfileWithLabels(p []StackRecord, labels []unsafe.Pointer) (n int, ok bool) {
+func pprof_goroutineProfileWithLabels(p []pprofStackRecord, labels []unsafe.Pointer) (n int, ok bool) {
 	return 0, true
 }
 
@@ -70,7 +77,7 @@ func runtime_goroutineleakcount() int {
 }
 
 //go:linkname pprof_goroutineLeakProfileWithLabels runtime.pprof_goroutineLeakProfileWithLabels
-func pprof_goroutineLeakProfileWithLabels(p []StackRecord, labels []unsafe.Pointer) (n int, ok bool) {
+func pprof_goroutineLeakProfileWithLabels(p []pprofStackRecord, labels []unsafe.Pointer) (n int, ok bool) {
 	return 0, true
 }
 
@@ -85,7 +92,7 @@ func pprof_mutexProfileInternal(p []BlockProfileRecord) (n int, ok bool) {
 }
 
 //go:linkname pprof_threadCreateInternal runtime.pprof_threadCreateInternal
-func pprof_threadCreateInternal(p []StackRecord) (n int, ok bool) {
+func pprof_threadCreateInternal(p []pprofStackRecord) (n int, ok bool) {
 	return 0, true
 }
 

@@ -754,6 +754,16 @@ func (a *coroPhysicalPureSSAAudit) validateSlice(slice *ssa.Slice) string {
 			return "slice has unsupported physical value type: " + err.Error()
 		}
 	}
+	if emissionBoundsChecksDisabled(a.ctx) {
+		// -B removes only the range predicates. Slicing a nullable *[N]T
+		// still performs an implicit dereference, which the frozen physical
+		// Slice recipe replaces with its structured nil-fault branch.
+		if _, pointer := types.Unalias(baseType).Underlying().(*types.Pointer); pointer &&
+			emissionArrayPointerNeedsNilCheck(slice.X, slice) {
+			return a.requireOnlyCompilerElidedRuntimeHelpers(slice, "AssertNilDeref")
+		}
+		return a.requireOnlyCompilerElidedRuntimeHelpers(slice)
+	}
 	if !a.allowImplicitNilFault {
 		if slice.Low != nil || slice.High != nil || slice.Max != nil {
 			return "slice bounds require the explicit-status panic ABI"

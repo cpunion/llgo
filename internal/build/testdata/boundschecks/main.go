@@ -71,4 +71,6 @@ func main() {
 	arrayFromPointer := shortSliceToArrayPointer(slice)
 	arrayValue := shortSliceToArrayValue(slice)
 	println(arrayFromPointer[0], arrayFromPointer[3], arrayValue[1], arrayValue[2])
+	_ = makeUnsafeString(&slice[0], len(slice))
+	_ = makeUnsafeSlice(&slice[0], len(slice))
 }

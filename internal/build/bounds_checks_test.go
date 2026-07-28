@@ -8,64 +8,70 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/goplus/llgo/internal/coro"
+	"golang.org/x/tools/go/ssa"
 )
 
 const boundsChecksFixture = "./testdata/boundschecks"
+const boundsChecksFixturePackage = "github.com/goplus/llgo/internal/build/testdata/boundschecks"
 
 func TestDisableBoundsChecksIR(t *testing.T) {
 	checked := boundsChecksModuleIR(t, false)
 	unchecked := boundsChecksModuleIR(t, true)
 
 	for _, helper := range []string{"CheckIndexRange", "StringSlice2", "NewSlice2", "NewSlice3Bounds", "PanicSliceConvert"} {
-		if !strings.Contains(checked, helper) {
-			t.Errorf("default IR does not contain bounds helper %q", helper)
-		}
-		if strings.Contains(unchecked, helper) {
+		if strings.Contains(unchecked.module, helper) {
 			t.Errorf("-B IR unexpectedly contains bounds helper %q", helper)
 		}
 	}
 
-	for _, function := range []string{"indexString", "indexSlice", "indexArray", "indexArrayPointer"} {
-		body := llvmFunctionBody(t, unchecked, function)
-		if strings.Contains(body, "CheckIndexRange") {
-			t.Errorf("-B %s contains an index bounds check:\n%s", function, body)
+	for _, function := range []string{
+		"indexString", "indexSlice", "indexArray", "indexArrayPointer",
+		"sliceString", "sliceSlice", "sliceArray", "sliceArrayPointer", "sliceThree",
+	} {
+		checkedBody := boundsChecksFunctionBody(t, checked, function)
+		uncheckedBody := boundsChecksFunctionBody(t, unchecked, function)
+		if checkedBody == uncheckedBody {
+			t.Errorf("-B did not change the structured bounds lowering for %s", function)
 		}
-	}
-	for _, function := range []string{"sliceString", "sliceSlice", "sliceArray", "sliceArrayPointer", "sliceThree"} {
-		body := llvmFunctionBody(t, unchecked, function)
-		if strings.Contains(body, "StringSlice2") || strings.Contains(body, "NewSlice2") || strings.Contains(body, "NewSlice3Bounds") {
-			t.Errorf("-B %s contains a slice bounds helper:\n%s", function, body)
+		for _, helper := range []string{"CheckIndexRange", "StringSlice2", "NewSlice2", "NewSlice3Bounds"} {
+			if strings.Contains(uncheckedBody, helper) {
+				t.Errorf("-B %s contains bounds helper %q:\n%s", function, helper, uncheckedBody)
+			}
 		}
 	}
 	for _, function := range []string{"shortSliceToArrayPointer", "shortSliceToArrayValue"} {
-		checkedBody := llvmFunctionBody(t, checked, function)
-		if !strings.Contains(checkedBody, "PanicSliceConvert") {
-			t.Errorf("default %s does not contain its conversion bounds check:\n%s", function, checkedBody)
+		checkedBody := boundsChecksFunctionBody(t, checked, function)
+		uncheckedBody := boundsChecksFunctionBody(t, unchecked, function)
+		if checkedBody == uncheckedBody {
+			t.Errorf("-B did not change the structured conversion bounds lowering for %s", function)
 		}
-		uncheckedBody := llvmFunctionBody(t, unchecked, function)
 		if strings.Contains(uncheckedBody, "PanicSliceConvert") {
 			t.Errorf("-B %s contains a conversion bounds check:\n%s", function, uncheckedBody)
 		}
 	}
-	if body := llvmFunctionBody(t, unchecked, "shortSliceToArrayValue"); !strings.Contains(body, "load [4 x i8]") {
+	if body := boundsChecksFunctionBody(t, unchecked, "shortSliceToArrayValue"); !strings.Contains(body, "load [4 x i8]") {
 		t.Errorf("slice-to-array value conversion does not dereference its converted pointer:\n%s", body)
 	}
 
 	for _, function := range []string{"indexArrayPointer", "sliceArrayPointer"} {
-		body := llvmFunctionBody(t, unchecked, function)
-		if !strings.Contains(body, "AssertNilDeref") {
-			t.Errorf("-B %s lost its *array nil check:\n%s", function, body)
+		body := boundsChecksFunctionBody(t, unchecked, function)
+		if !strings.Contains(body, "icmp eq ptr") {
+			t.Errorf("-B %s lost its structured *array nil check:\n%s", function, body)
 		}
 	}
 	for _, width := range []string{"zext i8", "zext i16", "zext i32"} {
-		if !strings.Contains(unchecked, width) {
+		if !strings.Contains(unchecked.module, width) {
 			t.Errorf("-B IR does not retain integer-width conversion %q", width)
 		}
 	}
 	for _, function := range []string{"makeUnsafeString", "makeUnsafeSlice"} {
-		body := llvmFunctionBody(t, unchecked, function)
-		if !strings.Contains(body, "AssertRuntimeError") {
-			t.Errorf("-B %s lost mandatory unsafe builtin checks:\n%s", function, body)
+		checkedBody := boundsChecksFunctionBody(t, checked, function)
+		uncheckedBody := boundsChecksFunctionBody(t, unchecked, function)
+		if strings.Count(checkedBody, "br i1") != strings.Count(uncheckedBody, "br i1") {
+			t.Errorf("-B changed mandatory unsafe builtin checks in %s:\ndefault:\n%s\n-B:\n%s",
+				function, checkedBody, uncheckedBody)
 		}
 	}
 }
@@ -107,15 +113,39 @@ func TestDisableBoundsChecksRetainsRequiredPanics(t *testing.T) {
 	}
 }
 
-func boundsChecksModuleIR(t *testing.T, disable bool) string {
+type boundsChecksIRSnapshot struct {
+	module  string
+	symbols map[string]string
+}
+
+var boundsChecksFunctions = []string{
+	"indexString", "indexSlice", "indexArray", "indexArrayPointer",
+	"sliceString", "sliceSlice", "sliceArray", "sliceArrayPointer", "sliceThree",
+	"shortSliceToArrayPointer", "shortSliceToArrayValue",
+	"makeUnsafeString", "makeUnsafeSlice",
+}
+
+func boundsChecksModuleIR(t *testing.T, disable bool) boundsChecksIRSnapshot {
 	t.Helper()
 	conf := NewDefaultConf(ModeGen)
 	conf.DisableBoundsChecks = disable
 	var ir string
+	functionIDs := make(map[string]coro.FunctionID, len(boundsChecksFunctions))
+	conf.CoroPlanObserver = func(pkg *ssa.Package, plan *coro.SSAPlan) {
+		if pkg == nil || pkg.Pkg == nil || pkg.Pkg.Path() != boundsChecksFixturePackage {
+			return
+		}
+		for _, name := range boundsChecksFunctions {
+			if function := pkg.Func(name); function != nil {
+				if id, ok := plan.FunctionID(function); ok {
+					functionIDs[name] = id
+				}
+			}
+		}
+	}
 	conf.ModuleHook = func(pkg Package) {
-		module := pkg.LPkg.String()
-		if strings.Contains(module, ".indexString\"") {
-			ir = module
+		if pkg.PkgPath == boundsChecksFixturePackage {
+			ir = pkg.LPkg.String()
 		}
 	}
 	pkgs, err := Do([]string{boundsChecksFixture}, conf)
@@ -129,7 +159,29 @@ func boundsChecksModuleIR(t *testing.T, disable bool) string {
 	if ir == "" {
 		t.Fatalf("generate bounds-check IR (disabled=%v): fixture module was not observed", disable)
 	}
-	return ir
+	summaries, err := coro.ParseLibraryEffectSummaryRecords(pkgs[0].CoroLibraryEffectRecords)
+	if err != nil {
+		t.Fatalf("parse bounds-check coroutine symbols (disabled=%v): %v", disable, err)
+	}
+	physical := make(map[coro.FunctionID]string)
+	for _, summary := range summaries {
+		for _, function := range summary.Functions {
+			physical[function.ID] = function.PrimarySymbol
+		}
+	}
+	symbols := make(map[string]string, len(boundsChecksFunctions))
+	for _, name := range boundsChecksFunctions {
+		id, ok := functionIDs[name]
+		if !ok {
+			t.Fatalf("bounds-check function %s has no FunctionID (disabled=%v)", name, disable)
+		}
+		symbol := physical[id]
+		if symbol == "" {
+			t.Fatalf("bounds-check function %s (%s) has no published primary symbol (disabled=%v)", name, id, disable)
+		}
+		symbols[name] = symbol
+	}
+	return boundsChecksIRSnapshot{module: ir, symbols: symbols}
 }
 
 func buildBoundsChecksBinary(t *testing.T, disable bool) string {
@@ -156,9 +208,18 @@ func buildBoundsChecksBinaryFrom(t *testing.T, fixture string, disable bool) str
 	return path
 }
 
+func boundsChecksFunctionBody(t *testing.T, snapshot boundsChecksIRSnapshot, name string) string {
+	t.Helper()
+	symbol := snapshot.symbols[name]
+	if symbol == "" {
+		t.Fatalf("no physical symbol recorded for %q", name)
+	}
+	return llvmFunctionBody(t, snapshot.module, symbol)
+}
+
 func llvmFunctionBody(t *testing.T, module, name string) string {
 	t.Helper()
-	marker := "." + name + "\"("
+	marker := "@\"" + name + "\"("
 	markerAt := 0
 	start := -1
 	for {
