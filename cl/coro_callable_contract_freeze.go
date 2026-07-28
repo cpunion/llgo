@@ -89,6 +89,9 @@ func (u *EmissionUniverse) freezeCoroCallableContractCertificates() error {
 	if u.callableContracts == nil {
 		u.callableContracts = make(map[*ssa.Function]CoroCallableContractCertificate)
 	}
+	if u.callableDefaults == nil {
+		u.callableDefaults = make(map[*ssa.Function]none)
+	}
 	shapes := make(map[*ssa.Function]coroCallableFrozenShape, len(u.functions))
 	shapeErrors := make(map[*ssa.Function]error)
 	for _, function := range u.functions {
@@ -200,6 +203,7 @@ func (u *EmissionUniverse) freezeCoroCallableContractCertificates() error {
 			continue
 		}
 		parsed := defaultCoroForeignDeclarationContract()
+		u.callableDefaults[canonical] = none{}
 		annotatedCanonical[canonical] = canonical
 		annotations = append(annotations, exactAnnotation{
 			declaration: canonical,

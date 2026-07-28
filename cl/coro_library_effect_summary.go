@@ -39,6 +39,35 @@ type CoroLibraryEffectView struct {
 	index emissionCanonicalIndex
 }
 
+// CallableContractDefault reports whether fn's frozen callable contract came
+// from the conservative frontend default rather than an explicit source
+// declaration. Cross-archive producer metadata may replace only this default;
+// an explicit local contract remains authoritative and a disagreement must
+// fail closed.
+func (view CoroLibraryEffectView) CallableContractDefault(
+	fn *ssa.Function,
+) (defaulted bool, err error) {
+	u := view.index.universe
+	if u == nil {
+		return false, fmt.Errorf("coroutine callable contract provenance: nil emission universe")
+	}
+	if fn == nil {
+		return false, fmt.Errorf("coroutine callable contract provenance: nil function")
+	}
+	canonical := u.canonicalAlias(fn)
+	if canonical == nil {
+		return false, fmt.Errorf("coroutine callable contract provenance: function has cyclic canonical aliases")
+	}
+	if _, required := u.required[canonical]; !required {
+		return false, fmt.Errorf(
+			"coroutine callable contract provenance: function %q is absent from the frozen emission universe",
+			canonical.Name(),
+		)
+	}
+	_, defaulted = u.callableDefaults[canonical]
+	return defaulted, nil
+}
+
 // CoroLibraryEffectSummaryRecords returns the byte-exact producer records
 // emitted into pkg. Package archiving consumes these bytes directly so Full
 // and Thin LTO never need to be reopened merely to recover compiler metadata.
@@ -176,13 +205,98 @@ func (view CoroLibraryEffectView) ValidateFunction(
 	return nil
 }
 
+// ValidateForeignCallable binds one archive producer record to the exact
+// frontend C declaration selected by this emission universe. The consumer
+// derives the declaration identity independently from its frozen symbol and
+// typed ABI; producer metadata may refine only the abstract CallableABI.
+// Nothing here chooses a worker, same-M, event, or raw-host operation.
+func (view CoroLibraryEffectView) ValidateForeignCallable(
+	function *ssa.Function,
+	metadata coro.LibraryEffectMetadata,
+	fact coro.LibraryEffectForeignCallable,
+) error {
+	u := view.index.universe
+	if u == nil || function == nil {
+		return fmt.Errorf("coroutine library foreign callable requires an exact prepared function")
+	}
+	canonical, ok := u.Resolve(function)
+	if !ok || canonical == nil || canonical != function {
+		return fmt.Errorf("foreign callable function %q is not one exact canonical emission function", function.Name())
+	}
+	background, classified, err := u.FunctionBackground(function)
+	if err != nil {
+		return fmt.Errorf("coroutine library foreign callable %q frontend classification: %w", fact.Function, err)
+	}
+	if !classified || background != llssa.InC {
+		return fmt.Errorf("coroutine library foreign callable %q does not name one frontend C declaration", fact.Function)
+	}
+	if err := fact.Validate(); err != nil {
+		return fmt.Errorf("coroutine library foreign callable %q: %w", fact.Function, err)
+	}
+	functionIDs := u.FunctionIDConfig()
+	functionIDs.CoroABI = metadata.CoroABI
+	functionIDs.SchedulerABI = metadata.SchedulerABI
+	functionIDs.ArchiveReady = true
+	id, err := coro.StableFunctionID(function, functionIDs)
+	if err != nil {
+		return fmt.Errorf("coroutine library foreign callable identity: %w", err)
+	}
+	if id != fact.Function {
+		return fmt.Errorf(
+			"coroutine library foreign callable function identity is %q, producer published %q",
+			id, fact.Function,
+		)
+	}
+	local, certified, err := u.CoroCallableIdentityCertificate(function)
+	if err != nil {
+		return fmt.Errorf("coroutine library foreign callable %q local identity: %w", fact.Function, err)
+	}
+	if !certified || local.IsZero() {
+		return fmt.Errorf("coroutine library foreign callable %q has no local C declaration identity", fact.Function)
+	}
+	if local.CanonicalFunctionIdentity != fact.Identity.CanonicalFunctionIdentity ||
+		local.LinkIdentity != fact.Identity.LinkIdentity ||
+		local.TypedABISignature != fact.Identity.TypedABISignature ||
+		local.PhysicalSymbol != fact.Identity.PhysicalSymbol ||
+		local.PhysicalABISignature != fact.Identity.PhysicalABISignature ||
+		local.Origin != fact.Identity.Origin ||
+		local.Evidence != fact.Identity.Evidence {
+		return fmt.Errorf(
+			"coroutine library foreign callable %q producer identity does not match the exact local declaration shape",
+			fact.Function,
+		)
+	}
+	// An explicit local CallableABI is source authority and cannot be replaced
+	// by an archive. Without one, the producer may publish an exact abstract ABI
+	// which the consumer could not reconstruct from the C signature alone.
+	if local.CallableABIExplicit {
+		if local.CallableABI != fact.Identity.CallableABI ||
+			!fact.Identity.CallableABIExplicit ||
+			local.ID != fact.Identity.ID {
+			return fmt.Errorf(
+				"coroutine library foreign callable %q conflicts with the explicit local callable ABI",
+				fact.Function,
+			)
+		}
+	} else if !fact.Identity.CallableABIExplicit &&
+		local.CallableABI != fact.Identity.CallableABI {
+		return fmt.Errorf(
+			"coroutine library foreign callable %q derived callable ABI differs from the local declaration",
+			fact.Function,
+		)
+	}
+	return nil
+}
+
 // validateCoroLibraryEffects repeats the consumer-side boundary proof at cl's
 // immutable preflight gate. The build driver owns archive discovery, but code
 // generation must still reject a manually assembled Compilation that supplies
 // a stale fact, attaches it to another SSA pointer, or lets consumer analysis
 // change a producer-owned physical capability.
 func (c *Compilation) validateCoroLibraryEffects() error {
-	if c == nil || len(c.CoroLibraryEffects) == 0 {
+	if c == nil ||
+		len(c.CoroLibraryEffects) == 0 &&
+			len(c.CoroLibraryForeignCallables) == 0 {
 		return nil
 	}
 	plan := c.immutablePlan()
@@ -291,6 +405,93 @@ func (c *Compilation) validateCoroLibraryEffects() error {
 			)
 		}
 	}
+	for function, fact := range c.CoroLibraryForeignCallables {
+		if function == nil {
+			return fmt.Errorf("coroutine library foreign callable map contains a nil function")
+		}
+		canonical, found := universe.Resolve(function)
+		if !found || canonical != function {
+			return fmt.Errorf(
+				"coroutine library foreign callable %q is not attached to one exact canonical emission function",
+				fact.Function,
+			)
+		}
+		if err := universe.CoroLibraryEffects().ValidateForeignCallable(
+			function, consumer, fact,
+		); err != nil {
+			return err
+		}
+		planIdentity, identityPlanned := plan.CallableIdentityCertificate(function)
+		if !identityPlanned || planIdentity != fact.Identity {
+			return fmt.Errorf(
+				"coroutine library foreign callable %q identity disagrees with the final consumer plan",
+				fact.Function,
+			)
+		}
+		planContract, contractPlanned := plan.CallableContractCertificate(function)
+		if fact.HasContract {
+			if !contractPlanned || planContract != fact.Contract {
+				return fmt.Errorf(
+					"coroutine library foreign callable %q contract disagrees with the final consumer plan",
+					fact.Function,
+				)
+			}
+		} else if contractPlanned || !planContract.IsZero() {
+			return fmt.Errorf(
+				"coroutine library identity-only foreign callable %q gained a consumer contract",
+				fact.Function,
+			)
+		}
+		noBlock, noBlockOK := plan.ForeignNoBlockCertificate(function)
+		synchronous, syncOK := plan.ForeignSyncCertificate(function)
+		worker, workerOK := plan.ForeignWorkerCertificate(function)
+		for _, certificate := range []struct {
+			kind  string
+			value string
+			ok    bool
+		}{
+			{kind: "noblock", value: noBlock, ok: noBlockOK},
+			{kind: "sync", value: synchronous, ok: syncOK},
+			{kind: "worker", value: worker, ok: workerOK},
+		} {
+			if certificate.ok || certificate.value != "" {
+				return fmt.Errorf(
+					"coroutine library foreign callable %q gained a legacy %s certificate",
+					fact.Function, certificate.kind,
+				)
+			}
+		}
+		functionPlan, planned := plan.FunctionPlan(function)
+		if !planned {
+			return fmt.Errorf(
+				"coroutine library foreign callable %q is absent from the final plan",
+				fact.Function,
+			)
+		}
+		expected, err := fact.ImportedPolicy()
+		if err != nil {
+			return fmt.Errorf(
+				"coroutine library foreign callable %q policy: %w",
+				fact.Function, err,
+			)
+		}
+		if !plan.IgnoresBody(function) ||
+			functionPlan.External != expected.External ||
+			functionPlan.DeclaredEffect != expected.Effect ||
+			functionPlan.LocalEffect != expected.Effect ||
+			functionPlan.Effect != expected.Effect ||
+			functionPlan.DeclaredExec != expected.Exec ||
+			functionPlan.LocalExec != expected.Exec ||
+			functionPlan.Exec != expected.Exec ||
+			functionPlan.FuncRep != coro.DirectPlain ||
+			functionPlan.Emission != coro.EmitNone &&
+				functionPlan.Emission != coro.EmitExternal {
+			return fmt.Errorf(
+				"coroutine library foreign callable %q disagrees with final consumer plan: plan=%+v expected=%+v ignored=%t",
+				fact.Function, functionPlan, expected, plan.IgnoresBody(function),
+			)
+		}
+	}
 	return nil
 }
 
@@ -386,13 +587,27 @@ func (p *context) emitCoroLibraryEffectSummary() error {
 		if err != nil {
 			return fmt.Errorf("coroutine library summary: callable identity for %q: %w", functionPlan.ID, err)
 		}
+		contract, hasContract, err := universe.CoroCallableContractCertificate(function)
+		if err != nil {
+			return fmt.Errorf("coroutine library summary: callable contract for %q: %w", functionPlan.ID, err)
+		}
+		if imported, ok := p.compilation.importedCoroLibraryForeignCallable(function); ok {
+			if imported.Function != functionPlan.ID {
+				return fmt.Errorf(
+					"coroutine library summary: imported foreign callable function is %q, plan uses %q",
+					imported.Function, functionPlan.ID,
+				)
+			}
+			// Re-publish the exact producer fact. The source universe may carry
+			// only the consumer's reconstructed conservative default, which is
+			// deliberately replaceable and must not leak into a transitive
+			// archive.
+			identity, hasIdentity = imported.Identity, true
+			contract, hasContract = imported.Contract, imported.HasContract
+		}
 		if hasIdentity {
 			if _, duplicate := seenForeign[functionPlan.ID]; duplicate {
 				continue
-			}
-			contract, hasContract, err := universe.CoroCallableContractCertificate(function)
-			if err != nil {
-				return fmt.Errorf("coroutine library summary: callable contract for %q: %w", functionPlan.ID, err)
 			}
 			callable := coro.LibraryEffectForeignCallable{
 				Function:    functionPlan.ID,

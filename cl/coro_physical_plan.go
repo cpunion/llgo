@@ -1055,8 +1055,9 @@ func planCoroPhysicalOperationInstruction(
 		if audit.universe != nil && audit.universe.prog != nil {
 			pointerSize = audit.universe.prog.PointerSize()
 		}
-		shape, recognized, err := validateCoroWorkerForeignCall(
-			whole, audit.universe, instruction, pointerSize,
+		shape, recognized, err := validateCoroWorkerForeignCallWithAuthority(
+			audit.foreignCallAuthority(),
+			instruction, pointerSize,
 		)
 		if !recognized {
 			return

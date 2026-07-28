@@ -1116,7 +1116,8 @@ func validateCoroPhysicalABIWithUniverseCapabilitiesAndFrameRetention(fn *ssa.Fu
 func validateCoroPhysicalABIWithUniverseCapabilitiesFrameRetentionAndChannel(fn *ssa.Function, plan coro.FunctionPlan, whole *coro.SSAPlan, universe *EmissionUniverse, childAwait, programRun, staticSpawn, explicitPanic bool, frameRetentionABI string, channel, managedDispatch, rawMethodToken bool) error {
 	return validateCoroPhysicalABIForOwner(
 		fn, plan, whole, universe, nil, childAwait, programRun, staticSpawn, explicitPanic,
-		frameRetentionABI, channel, managedDispatch, rawMethodToken, nil, nil, nil,
+		frameRetentionABI, channel, managedDispatch, rawMethodToken,
+		nil, nil, nil, nil,
 	)
 }
 
@@ -1131,6 +1132,7 @@ func validateCoroPhysicalABIForOwner(
 	channel, managedDispatch, rawMethodToken bool,
 	interfacePlain *coroClosedInterfacePlainPlan,
 	managedInterface *coroManagedInterfaceDispatchPlan,
+	libraryForeign map[*ssa.Function]coro.LibraryEffectForeignCallable,
 	accept func(*coroPhysicalFunctionPlan) error,
 ) error {
 	if !childAwait {
@@ -1147,6 +1149,7 @@ func validateCoroPhysicalABIForOwner(
 		if err != nil {
 			return fmt.Errorf("coroutine physical ABI: function %q: cannot freeze leaf physical proof: %w", plan.ID, err)
 		}
+		audit.libraryForeign = libraryForeign
 		critical, err := proveCoroCriticalRegions(universe, whole, audit)
 		if err != nil {
 			return fmt.Errorf("coroutine physical ABI: function %q: leaf critical region: %w", plan.ID, err)
@@ -1412,6 +1415,7 @@ func validateCoroPhysicalABIForOwner(
 	if err != nil {
 		return fail("cannot audit pure SSA lowering: %v", err)
 	}
+	pureSSA.libraryForeign = libraryForeign
 	if cgoErrnoWorker {
 		if err := validateCoroCgoErrnoWorkerOwner(whole, pureSSA.ctx, fn); err != nil {
 			return fail("generated C2 worker adapter: %v", err)

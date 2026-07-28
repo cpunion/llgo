@@ -174,21 +174,10 @@ func validateSSACallableContractPolicy(fn *ssa.Function, policy SSAFunctionPolic
 		if !policy.IgnoreBody || !policy.OverrideExternal || policy.NeedsDispatch || policy.Effect != NoSuspend {
 			return fmt.Errorf("callable declaration contract requires one ignored, direct external declaration")
 		}
-		expectedExternal := ExternalUnknownForeign
-		expectedExec := BlockForeign | IRQUnsafe | CallableContractExecConstraints(certificate.Contract)
-		switch certificate.Contract.Progress {
-		case ProgressExecutorSafe:
-			expectedExternal = ExternalKnown
-			expectedExec &^= BlockForeign
-		case ProgressMayBlock, ProgressUnknown, ProgressAsyncCompletion:
-			// Auto remains a foreign stack cut. The caller receives WaitForeign
-			// from CallForeign; the declaration itself retains BlockForeign.
-		case ProgressNoReturn:
-			// NoReturn alone does not prove executor safety. Preserve the
-			// foreign stack cut while retaining the terminal control-flow fact.
-			expectedExec |= NoReturn
-		default:
-			return fmt.Errorf("callable declaration has unsupported progress %q", certificate.Contract.Progress)
+		expectedExternal, expectedExec, err :=
+			CallableDeclarationPolicy(certificate.Contract)
+		if err != nil {
+			return err
 		}
 		if policy.External != expectedExternal || policy.Exec != expectedExec {
 			return fmt.Errorf(

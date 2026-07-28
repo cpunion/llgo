@@ -54,6 +54,7 @@ type coroPhysicalPureSSAAudit struct {
 	frameRetentionABI        string
 	frameRetentionBuilt      bool
 	frameRetentionProofCache *coroFrameRetentionProof
+	libraryForeign           map[*ssa.Function]coro.LibraryEffectForeignCallable
 	// allowImplicitNilFault is enabled only by PhysicalABIV1 preflight after
 	// the target-wide explicit-status panic identity has been selected. It
 	// never weakens transport/root validation; it lets implicit nil and bounds
@@ -62,6 +63,15 @@ type coroPhysicalPureSSAAudit struct {
 	// Recover is an independent structured capability even though the first
 	// explicit-status identity enables both gates together.
 	allowExplicitRecover bool
+}
+
+func (a *coroPhysicalPureSSAAudit) foreignCallAuthority() coroStaticForeignCallAuthority {
+	if a == nil {
+		return coroStaticForeignCallAuthority{}
+	}
+	return coroStaticForeignCallAuthority{
+		plan: a.plan, universe: a.universe, libraryForeign: a.libraryForeign,
+	}
 }
 
 // coroInterfaceDerefConsumer projects the active source type exactly once at

@@ -84,6 +84,11 @@ type Compilation struct {
 	// Lowering may consume these facts but must never infer one from absence.
 	CoroLibraryEffectMetadata coro.LibraryEffectMetadata
 	CoroLibraryEffects        map[*ssa.Function]coro.LibraryEffectFunction
+	// CoroLibraryForeignCallables contains exact producer-owned C declaration
+	// identities and optional contracts. It is an immutable compilation
+	// overlay: the prepared source universe remains unchanged, while analysis
+	// and lowering must agree with these preflighted archive facts.
+	CoroLibraryForeignCallables map[*ssa.Function]coro.LibraryEffectForeignCallable
 
 	coroPreflight            sync.Once
 	coroPreflightErr         error
@@ -116,6 +121,16 @@ func (c *Compilation) importedCoroLibraryEffect(fn *ssa.Function) (coro.LibraryE
 		return coro.LibraryEffectFunction{}, false
 	}
 	fact, ok := c.CoroLibraryEffects[fn]
+	return fact, ok
+}
+
+func (c *Compilation) importedCoroLibraryForeignCallable(
+	fn *ssa.Function,
+) (coro.LibraryEffectForeignCallable, bool) {
+	if c == nil || fn == nil {
+		return coro.LibraryEffectForeignCallable{}, false
+	}
+	fact, ok := c.CoroLibraryForeignCallables[fn]
 	return fact, ok
 }
 

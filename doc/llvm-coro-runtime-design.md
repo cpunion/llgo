@@ -500,11 +500,13 @@ producer 摘要与 whole-program `CoroPlanDigest` 是两套正交数据：
 - section global 进入 `llvm.compiler.used`，保证生成 object/archive 前不被 LLVM 删除，但不进入 `llvm.used`，所以 final linker 可在形成可执行文件时丢弃；
 - package archive另带保留名`__.LLGOCORO` sidecar member，避免为了读摘要而解析Full/Thin LTO bitcode。ELF、Mach-O和COFF使用无导出符号的最小native object；Wasm使用custom section，不占linear memory。真实Darwin `ar + ld + run`以及ELF/COFF/Wasm object读取均已验证；
 - parser只接受 canonical、无重复 key、无未知 field、版本精确匹配的数据；多个 record 中 package、managed FunctionID、foreign identity/function或export symbol冲突也失败；
-- importer从`importcfg`的`packagefile` archive只扫描该保留member；index 在任何 fact 生效前精确校验 producer/consumer metadata、FunctionID、bodyless managed-Go身份、结构ABI和物理符号，再把命中的函数投影成 `ExternalKnown` effect/exec seed；
-- 命中seed后，其所有Go caller仍通过原有SSA固定点自动染色；direct coroutine caller已验证会生成对producer发布的`$coro` declaration的structured await，不生成同步副本；
+- importer从`importcfg`的`packagefile` archive只扫描该保留member；index 在任何 fact 生效前精确校验 producer/consumer metadata、FunctionID、bodyless managed-Go身份或typed C declaration身份、结构ABI和物理符号；
+- managed命中项投影成`ExternalKnown` effect/exec seed；foreign命中项把producer identity和可选target-neutral contract附着到exact C declaration，只允许替换consumer自动生成的保守default，显式本地generic/legacy契约不一致则失败，identity-only记录不授予任何operation；
+- 命中后，其所有Go caller仍通过原有SSA固定点自动染色；direct coroutine caller已验证会生成对producer发布的`$coro` declaration的structured await，不生成同步副本；typed foreign caller已验证继续得到`WaitForeign`，并在完整physical ABI/callback/frame-retention gate后由consumer选择worker或same-M；
+- consumer再次产出archive时会逐字段重发producer foreign fact，不会把本地临时default写回摘要；
 - 缺失metadata继续保持opaque，损坏、ABI错配、重复ID或有fact但物理能力不匹配均fail closed，绝不能解释成`NoSuspend`。
 
-v2 刻意不把 C contract 注释传播到普通 Go 调用链。C/assembly/host 的少数不可推导边界事实先由 frontend/cgo 生成冻结 certificate；Go wrapper 的最终 effect/exec 随普通调用图自动传播，library 同时发布传播结果和producer-owned C边界事实。普通Go源码不需要`//llgo:coro`标注，也不建立按代码地址反查的分类器。当前importer已索引foreign/export记录，但只有managed effect seed进入调用分析；foreign invocation和export ingress必须等精确adapter gate落地后才能消费，不能提前把记录当作执行能力。
+v2 刻意不把 C contract 注释传播到普通 Go 调用链。C/assembly/host 的少数不可推导边界事实先由 frontend/cgo 生成冻结 certificate；Go wrapper 的最终 effect/exec 随普通调用图自动传播，library 同时发布传播结果和producer-owned C边界事实。普通Go源码不需要`//llgo:coro`标注，也不建立按代码地址反查的分类器。当前importer会消费exact typed foreign declaration记录，但该记录本身仍不选择backend；worker/same-M由consumer现有physical gate决定。export binding依然只建立索引，必须等待精确ingress adapter gate，不能提前把记录当作raw entry能力。
 
 后续版本仍需补充producer capability，而不是consumer最终计划：
 

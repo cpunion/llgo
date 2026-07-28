@@ -641,6 +641,212 @@ func TestCoroCallerThreadForeignCallUsesSameMEpisode(t *testing.T) {
 	runCoroABITestPipeline(t, fixture.prog, module)
 }
 
+func TestImportedLibraryForeignCallableDrivesPhysicalSameMEpisode(t *testing.T) {
+	llssa.Initialize(llssa.InitAll)
+	producer := prepareCoroWorkerForeignFixture(
+		t, coroSameMForeignTestSource, "Root",
+	)
+	defer producer.prog.Dispose()
+	producerTarget := producer.call.Common().StaticCallee()
+	functionID, identified := producer.plan.FunctionID(producerTarget)
+	identity, identityOK, identityErr :=
+		producer.universe.CoroCallableIdentityCertificate(producerTarget)
+	contract, contractOK, contractErr :=
+		producer.universe.CoroCallableContractCertificate(producerTarget)
+	if !identified || identityErr != nil || !identityOK ||
+		contractErr != nil || !contractOK {
+		t.Fatalf(
+			"producer callable facts = id:%q/%t identity:%+v/%t/%v contract:%+v/%t/%v",
+			functionID, identified, identity, identityOK, identityErr,
+			contract, contractOK, contractErr,
+		)
+	}
+	fact := coro.LibraryEffectForeignCallable{
+		Function:    functionID,
+		Identity:    identity,
+		Contract:    contract,
+		HasContract: true,
+	}
+	if err := fact.Validate(); err != nil {
+		t.Fatal(err)
+	}
+
+	consumerSource := strings.Replace(
+		coroSameMForeignTestSource,
+		"//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=caller-thread reentry=none memory=borrow-until-return",
+		"// producer archive owns the exact callable contract",
+		1,
+	)
+	consumer := prepareCoroWorkerForeignFixture(t, consumerSource, "Root")
+	defer consumer.prog.Dispose()
+	consumerTarget := consumer.call.Common().StaticCallee()
+	defaulted, err := consumer.universe.CoroLibraryEffects().
+		CallableContractDefault(consumerTarget)
+	if err != nil || !defaulted {
+		t.Fatalf("consumer callable contract defaulted = %t, %v", defaulted, err)
+	}
+	functionIDs := consumer.universe.FunctionIDConfig()
+	functionIDs.CoroABI = coro.PhysicalABIV1
+	functionIDs.SchedulerABI =
+		coro.SchedulerProgramBootstrapChannelWorkerClosedStaticSpawnABIV0
+	functionIDs.ArchiveReady = true
+	consumerID, err := coro.StableFunctionID(consumerTarget, functionIDs)
+	if err != nil || consumerID != fact.Function {
+		t.Fatalf("consumer function ID = %q, %v; producer=%q", consumerID, err, fact.Function)
+	}
+
+	ssaUniverse, err := coro.NewSSAEmissionUniverse(
+		consumer.ssaPkg.Prog, consumer.universe.Functions(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	importedPlan, err := coro.AnalyzeSSA(
+		consumer.ssaPkg.Prog,
+		coro.Roots{{Function: consumer.root, Demand: coro.AsyncDemand}},
+		coro.SSAConfig{
+			EmissionUniverse:     ssaUniverse,
+			FunctionIDs:          functionIDs,
+			MaxPlainInstructions: -1,
+			ClassifyFunction: func(function *ssa.Function) (coro.SSAFunctionPolicy, error) {
+				if function != consumerTarget {
+					return coro.SSAFunctionPolicy{}, nil
+				}
+				return coro.SSAFunctionPolicy{
+					Exec: coro.BlockForeign | coro.IRQUnsafe |
+						coro.CallableContractExecConstraints(fact.Contract.Contract),
+					CallableIdentityCertificate: fact.Identity,
+					CallableContractCertificate: fact.Contract,
+					IgnoreBody:                  true,
+					External:                    coro.ExternalUnknownForeign,
+					OverrideExternal:            true,
+				}, nil
+			},
+			ClassifyElidedCall: func(
+				_ *ssa.Function, call ssa.CallInstruction,
+			) (bool, error) {
+				callee := call.Common().StaticCallee()
+				return callee != nil && callee.Pkg != nil &&
+					callee.Pkg.Pkg.Path() == "unsafe" &&
+					callee.Name() == "init", nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	library := map[*ssa.Function]coro.LibraryEffectForeignCallable{
+		consumerTarget: fact,
+	}
+	shape, recognized, err := validateCoroWorkerForeignCallWithAuthority(
+		coroStaticForeignCallAuthority{
+			plan: importedPlan, universe: consumer.universe,
+			libraryForeign: library,
+		},
+		consumer.call,
+		consumer.prog.PointerSize(),
+	)
+	if !recognized || err != nil || shape.mode != coroForeignCallModeSameM {
+		t.Fatalf(
+			"imported same-M shape = %+v, recognized=%t, error=%v",
+			shape, recognized, err,
+		)
+	}
+
+	endianness := ""
+	switch consumer.prog.TargetData().ByteOrder() {
+	case llvm.LittleEndian:
+		endianness = "little"
+	case llvm.BigEndian:
+		endianness = "big"
+	default:
+		t.Fatal("unknown target byte order")
+	}
+	capabilities := CoroNativeTargetCapabilities()
+	planMetadata := coro.PlanDigestMetadata{
+		CoroABI:        coro.PhysicalABIV1,
+		SchedulerABI:   functionIDs.SchedulerABI,
+		PanicABI:       coro.PanicExplicitStatusABIV0,
+		FuncRepABI:     coro.FuncRepABIV1,
+		TargetTriple:   consumer.prog.TargetSpec().Triple,
+		TargetCPU:      consumer.prog.TargetSpec().CPU,
+		TargetFeatures: consumer.prog.TargetSpec().Features,
+		TargetABI:      consumer.prog.TargetSpec().TargetABI,
+		PointerBits:    consumer.prog.PointerSize() * 8,
+		Endianness:     endianness,
+		DataLayout:     consumer.prog.DataLayout(),
+	}
+	libraryMetadata := coro.LibraryEffectMetadata{
+		FunctionIDSchema:   coro.FunctionIDSchema,
+		CoroABI:            planMetadata.CoroABI,
+		SchedulerABI:       planMetadata.SchedulerABI,
+		PanicABI:           planMetadata.PanicABI,
+		FuncRepABI:         planMetadata.FuncRepABI,
+		TargetTriple:       planMetadata.TargetTriple,
+		TargetCPU:          planMetadata.TargetCPU,
+		TargetFeatures:     planMetadata.TargetFeatures,
+		TargetABI:          planMetadata.TargetABI,
+		PointerBits:        planMetadata.PointerBits,
+		Endianness:         planMetadata.Endianness,
+		DataLayout:         planMetadata.DataLayout,
+		TargetCapabilities: capabilities,
+	}
+	if err := consumer.universe.CoroLibraryEffects().ValidateForeignCallable(
+		consumerTarget, libraryMetadata, fact,
+	); err != nil {
+		t.Fatal(err)
+	}
+	compilation := &Compilation{
+		CoroPlan:                    importedPlan,
+		CoroPlanDigest:              strings.Repeat("0", 64),
+		CoroPlanMetadata:            planMetadata,
+		CoroLibraryEffectMetadata:   libraryMetadata,
+		CoroLibraryForeignCallables: library,
+		EmissionUniverse:            consumer.universe,
+		CoroABI:                     planMetadata.CoroABI,
+		SchedulerABI:                planMetadata.SchedulerABI,
+		PanicABI:                    planMetadata.PanicABI,
+		FuncRepABI:                  planMetadata.FuncRepABI,
+		CoroTargetCapabilities:      capabilities,
+	}
+	if err := compilation.validateCoroLibraryEffects(); err != nil {
+		t.Fatal(err)
+	}
+	pkg, _, err := NewPackageExWithEmbedOptions(
+		consumer.prog, nil, nil, nil, consumer.ssaPkg, consumer.files,
+		goembed.VarMap{}, PackageOptions{Compilation: compilation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := pkg.Module()
+	defer module.Dispose()
+	if err := llvm.VerifyModule(module, llvm.ReturnStatusAction); err != nil {
+		t.Fatalf("verify imported same-M coroutine: %v\n%s", err, module.String())
+	}
+	root := requireCoroPhysicalFunction(
+		t, module, "foreignworker.Root",
+	).String()
+	if !strings.Contains(root, "@"+coroSameMForeignCallHookV1) ||
+		strings.Contains(root, "@"+coroWorkerParkHookV1) ||
+		strings.Contains(root, "@foreign_caller_thread_probe") {
+		t.Fatalf("imported metadata did not select the same-M episode:\n%s", root)
+	}
+	records, err := CoroLibraryEffectSummaryRecords(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summaries, err := coro.ParseLibraryEffectSummaryRecords(records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summaries) != 1 ||
+		len(summaries[0].ForeignCallables) != 1 ||
+		summaries[0].ForeignCallables[0] != fact {
+		t.Fatalf("transitively published foreign callable = %+v", summaries)
+	}
+}
+
 func TestCoroManagedReentryPlainCallbackUsesThinCoroutineRamp(t *testing.T) {
 	llssa.Initialize(llssa.InitAll)
 	fixture := prepareCoroWorkerForeignFixture(

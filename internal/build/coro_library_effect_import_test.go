@@ -28,6 +28,7 @@ import (
 	"github.com/goplus/llgo/cl"
 	"github.com/goplus/llgo/internal/coro"
 	llssa "github.com/goplus/llgo/ssa"
+	"golang.org/x/tools/go/ssa"
 )
 
 func TestReadImportCfgPackageFiles(t *testing.T) {
@@ -286,4 +287,299 @@ func Caller(value uint32) uint32 { return Imported(value) + 1 }
 		!callerPlan.Exec.Contains(coro.MayUnwind) {
 		t.Fatalf("archive metadata did not automatically color caller: %+v", callerPlan)
 	}
+}
+
+type coroLibraryForeignImportFixture struct {
+	pkg         *ssa.Package
+	emission    *cl.EmissionUniverse
+	ssaEmission *coro.SSAEmissionUniverse
+	ctx         *context
+	metadata    coro.LibraryEffectMetadata
+	functionIDs coro.FunctionIDConfig
+}
+
+func newCoroLibraryForeignImportFixture(
+	t *testing.T,
+	source string,
+) coroLibraryForeignImportFixture {
+	t.Helper()
+	const packagePath = "example/foreignlibrary"
+	ssaPkg, files := buildCoroPlanTestPackage(t, packagePath, source, nil)
+	prog := llssa.NewProgram(nil)
+	t.Cleanup(prog.Dispose)
+	cl.ParsePkgSyntax(prog, ssaPkg.Pkg, files)
+	emission, err := cl.PrepareEmissionUniverse(prog, nil, []cl.EmissionPackage{{
+		SSA:      ssaPkg,
+		Files:    files,
+		Identity: packagePath,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssaEmission, err := coro.NewSSAEmissionUniverse(ssaPkg.Prog, emission.Functions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &context{
+		buildConf:       &Config{Goos: runtime.GOOS, Goarch: runtime.GOARCH},
+		prog:            prog,
+		coroEmission:    emission,
+		coroSSAEmission: ssaEmission,
+	}
+	metadata, err := buildCoroLibraryEffectMetadata(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	functionIDs := emission.FunctionIDConfig()
+	functionIDs.CoroABI = metadata.CoroABI
+	functionIDs.SchedulerABI = metadata.SchedulerABI
+	functionIDs.ArchiveReady = true
+	return coroLibraryForeignImportFixture{
+		pkg:         ssaPkg,
+		emission:    emission,
+		ssaEmission: ssaEmission,
+		ctx:         ctx,
+		metadata:    metadata,
+		functionIDs: functionIDs,
+	}
+}
+
+func (fixture coroLibraryForeignImportFixture) analyzeForeign(
+	t *testing.T,
+	imported map[*ssa.Function]coro.LibraryEffectForeignCallable,
+) *coro.SSAPlan {
+	t.Helper()
+	plan, err := (CoroPlanInput{
+		Program:            fixture.pkg.Prog,
+		EmissionUniverse:   fixture.ssaEmission,
+		resolveFunction:    fixture.emission.Resolve,
+		functionBackground: fixture.emission.FunctionBackground,
+		callableIdentity:   fixture.emission.CoroCallableIdentityCertificate,
+		callableContract:   fixture.emission.CoroCallableContractCertificate,
+		libraryForeign:     imported,
+	}).Analyze(
+		coro.Roots{{Function: fixture.pkg.Func("Caller"), Demand: coro.AsyncDemand}},
+		coro.SSAConfig{
+			FunctionIDs:          fixture.functionIDs,
+			MaxPlainInstructions: -1,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return plan
+}
+
+func TestImportCfgLibraryForeignCallableReplacesOnlyConsumerDefault(t *testing.T) {
+	const producerSource = `package foreignlibrary
+//llgo:coro contract foreign.v1 scope=declaration progress=may-block affinity=caller-thread reentry=none memory=borrow-until-complete
+//go:linkname Foreign C.foreign_library_probe
+func Foreign(value uintptr) uintptr
+
+func Caller(value uintptr) uintptr { return Foreign(value) + 1 }
+`
+	const consumerSource = `package foreignlibrary
+// producer archive owns the exact callable contract
+//go:linkname Foreign C.foreign_library_probe
+func Foreign(value uintptr) uintptr
+
+func Caller(value uintptr) uintptr { return Foreign(value) + 1 }
+`
+	producer := newCoroLibraryForeignImportFixture(t, producerSource)
+	producerForeign := producer.pkg.Func("Foreign")
+	functionID, err := coro.StableFunctionID(producerForeign, producer.functionIDs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, identityOK, err := producer.emission.CoroCallableIdentityCertificate(producerForeign)
+	if err != nil || !identityOK {
+		t.Fatalf("producer identity = %+v, %t, %v", identity, identityOK, err)
+	}
+	contract, contractOK, err := producer.emission.CoroCallableContractCertificate(producerForeign)
+	if err != nil || !contractOK {
+		t.Fatalf("producer contract = %+v, %t, %v", contract, contractOK, err)
+	}
+	if defaulted, err := producer.emission.CoroLibraryEffects().
+		CallableContractDefault(producerForeign); err != nil || defaulted {
+		t.Fatalf("producer contract defaulted = %t, %v", defaulted, err)
+	}
+	fact := coro.LibraryEffectForeignCallable{
+		Function:    functionID,
+		Identity:    identity,
+		Contract:    contract,
+		HasContract: true,
+	}
+	summary := coro.LibraryEffectSummary{
+		Schema:           coro.LibraryEffectSummarySchema,
+		Package:          "example/foreignlibrary",
+		Metadata:         producer.metadata,
+		ForeignCallables: []coro.LibraryEffectForeignCallable{fact},
+	}
+	record, err := summary.MarshalRecord()
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := writeCoroArchiveTestFile(t, coroArchiveTestMember{
+		name: coro.LibraryEffectArchiveMember,
+		data: coroArchiveTestObject(t, record),
+	})
+
+	consumer := newCoroLibraryForeignImportFixture(t, consumerSource)
+	consumerForeign := consumer.pkg.Func("Foreign")
+	localContract, localOK, err := consumer.emission.CoroCallableContractCertificate(consumerForeign)
+	if err != nil || !localOK {
+		t.Fatalf("consumer default contract = %+v, %t, %v", localContract, localOK, err)
+	}
+	if defaulted, err := consumer.emission.CoroLibraryEffects().
+		CallableContractDefault(consumerForeign); err != nil || !defaulted {
+		t.Fatalf("consumer contract defaulted = %t, %v", defaulted, err)
+	}
+	if localContract == contract {
+		t.Fatal("consumer conservative default unexpectedly equals producer contract")
+	}
+	importCfg := filepath.Join(t.TempDir(), "importcfg")
+	if err := os.WriteFile(
+		importCfg,
+		[]byte("packagefile example/foreignlibrary="+archive+"\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	consumer.ctx.buildConf.ImportCfg = importCfg
+	index, metadata, err := loadCoroLibraryEffectIndex(consumer.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if indexed, ok := index.LookupForeignFunction(functionID); !ok || indexed != fact {
+		t.Fatalf("indexed foreign callable = %+v, %t", indexed, ok)
+	}
+	imported, err := prepareCoroImportedLibraryForeignCallables(
+		consumer.ctx, index, metadata,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := imported[consumerForeign]; !ok || got != fact || len(imported) != 1 {
+		t.Fatalf("prepared foreign callables = %+v", imported)
+	}
+
+	plan := consumer.analyzeForeign(t, imported)
+	plannedIdentity, identityPlanned := plan.CallableIdentityCertificate(consumerForeign)
+	plannedContract, contractPlanned := plan.CallableContractCertificate(consumerForeign)
+	if !identityPlanned || plannedIdentity != fact.Identity ||
+		!contractPlanned || plannedContract != fact.Contract {
+		t.Fatalf(
+			"planned producer facts = identity:%+v/%t contract:%+v/%t",
+			plannedIdentity, identityPlanned, plannedContract, contractPlanned,
+		)
+	}
+	foreignPlan := functionPlanForBuildTest(t, plan, consumerForeign)
+	expectedExec := coro.BlockForeign | coro.IRQUnsafe |
+		coro.CallableContractExecConstraints(contract.Contract)
+	if foreignPlan.External != coro.ExternalUnknownForeign ||
+		foreignPlan.Exec != expectedExec ||
+		!plan.IgnoresBody(consumerForeign) {
+		t.Fatalf("imported foreign plan = %+v, ignored=%t", foreignPlan, plan.IgnoresBody(consumerForeign))
+	}
+	callerPlan := functionPlanForBuildTest(t, plan, consumer.pkg.Func("Caller"))
+	if callerPlan.Emission != coro.EmitCoroutine ||
+		!callerPlan.Effect.Contains(coro.WaitForeign) {
+		t.Fatalf("producer callable contract did not color consumer caller: %+v", callerPlan)
+	}
+
+	t.Run("identity-only grants no operation", func(t *testing.T) {
+		identityOnly := fact
+		identityOnly.Contract = coro.CallableContractCertificate{}
+		identityOnly.HasContract = false
+		identitySummary := summary
+		identitySummary.ForeignCallables = []coro.LibraryEffectForeignCallable{identityOnly}
+		identityIndex, err := coro.NewLibraryEffectIndex(
+			[]coro.LibraryEffectSummary{identitySummary}, consumer.metadata,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		imported, err := prepareCoroImportedLibraryForeignCallables(
+			consumer.ctx, identityIndex, consumer.metadata,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan := consumer.analyzeForeign(t, imported)
+		if certificate, ok := plan.CallableContractCertificate(consumerForeign); ok ||
+			!certificate.IsZero() {
+			t.Fatalf("identity-only record gained contract %+v, %t", certificate, ok)
+		}
+		foreignPlan := functionPlanForBuildTest(t, plan, consumerForeign)
+		if foreignPlan.External != coro.ExternalUnknownForeign ||
+			foreignPlan.Exec != coro.BlockForeign|coro.IRQUnsafe ||
+			!plan.IgnoresBody(consumerForeign) {
+			t.Fatalf("identity-only foreign plan = %+v", foreignPlan)
+		}
+	})
+
+	t.Run("explicit local conflict fails closed", func(t *testing.T) {
+		const conflictingSource = `package foreignlibrary
+//llgo:coro contract foreign.v1 scope=declaration progress=executor-safe affinity=any-thread reentry=none memory=borrow-until-return
+//go:linkname Foreign C.foreign_library_probe
+func Foreign(value uintptr) uintptr
+
+func Caller(value uintptr) uintptr { return Foreign(value) + 1 }
+`
+		conflicting := newCoroLibraryForeignImportFixture(t, conflictingSource)
+		index, err := coro.NewLibraryEffectIndex(
+			[]coro.LibraryEffectSummary{summary}, conflicting.metadata,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = prepareCoroImportedLibraryForeignCallables(
+			conflicting.ctx, index, conflicting.metadata,
+		)
+		if err == nil || !strings.Contains(err.Error(), "conflicts with the explicit local callable contract") {
+			t.Fatalf("explicit local conflict error = %v", err)
+		}
+	})
+
+	t.Run("legacy local conflict fails closed", func(t *testing.T) {
+		const legacySource = `package foreignlibrary
+//llgo:coro worker
+//go:linkname Foreign C.foreign_library_probe
+func Foreign(value uintptr) uintptr
+
+func Caller(value uintptr) uintptr { return Foreign(value) + 1 }
+`
+		legacy := newCoroLibraryForeignImportFixture(t, legacySource)
+		index, err := coro.NewLibraryEffectIndex(
+			[]coro.LibraryEffectSummary{summary}, legacy.metadata,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = prepareCoroImportedLibraryForeignCallables(
+			legacy.ctx, index, legacy.metadata,
+		)
+		if err == nil || !strings.Contains(err.Error(), "conflicts with explicit local legacy metadata") {
+			t.Fatalf("explicit local legacy conflict error = %v", err)
+		}
+	})
+
+	t.Run("declaration shape mismatch fails validation", func(t *testing.T) {
+		const mismatchedSource = `package foreignlibrary
+// producer archive owns the exact callable contract
+//go:linkname Foreign C.foreign_library_probe
+func Foreign(value uint32) uint32
+
+func Caller(value uint32) uint32 { return Foreign(value) + 1 }
+`
+		mismatched := newCoroLibraryForeignImportFixture(t, mismatchedSource)
+		err := mismatched.emission.CoroLibraryEffects().ValidateForeignCallable(
+			mismatched.pkg.Func("Foreign"), mismatched.metadata, fact,
+		)
+		if err == nil ||
+			!strings.Contains(err.Error(), "function identity") &&
+				!strings.Contains(err.Error(), "declaration shape") {
+			t.Fatalf("declaration shape mismatch error = %v", err)
+		}
+	})
 }
