@@ -1617,7 +1617,7 @@ func (b Builder) SelectValue(cond Expr, a Expr, bExpr Expr) Expr {
 //	t1 = slice to array pointer *[4]byte <- []byte (t0)
 func (b Builder) SliceToArrayPointer(x Expr, typ Type) (ret Expr) {
 	length := typ.RawType().Underlying().(*types.Pointer).Elem().Underlying().(*types.Array).Len()
-	if length == 0 {
+	if length == 0 || b.Prog.disableBoundsChecks {
 		return b.SliceToArrayPointerUnchecked(x, typ)
 	}
 	max := b.Prog.IntVal(uint64(length), b.Prog.Int())

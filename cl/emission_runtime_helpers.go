@@ -462,7 +462,8 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(ctx *context, shape coroEm
 			add("AssertNilDeref")
 		}
 	case *ssa.Index:
-		if emissionIndexNeedsRangeCheck(ctx, v.X, v.Index, v) {
+		if !emissionBoundsChecksDisabled(ctx) &&
+			emissionIndexNeedsRangeCheck(ctx, v.X, v.Index, v) {
 			add("CheckIndexRange")
 		}
 	case *ssa.IndexAddr:
@@ -471,12 +472,21 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(ctx *context, shape coroEm
 		if emissionIsVargsAlloc(ctx, v.X) {
 			break
 		}
-		safeBounds := !emissionIndexNeedsRangeCheck(ctx, v.X, v.Index, v)
-		if !safeBounds {
+		boundsDisabled := emissionBoundsChecksDisabled(ctx)
+		safeBounds := boundsDisabled || !emissionIndexNeedsRangeCheck(ctx, v.X, v.Index, v)
+		if !boundsDisabled && !safeBounds {
 			add("CheckIndexRange")
 		}
-		if _, pointer := types.Unalias(ctx.patchType(v.X.Type())).Underlying().(*types.Pointer); pointer &&
-			!emissionKnownNonNilArrayBase(v.X) && !(safeBounds && ssaValueProvenNonNilAt(v.X, v)) {
+		needsNil := false
+		if _, pointer := types.Unalias(ctx.patchType(v.X.Type())).Underlying().(*types.Pointer); pointer {
+			if boundsDisabled {
+				needsNil = emissionArrayPointerNeedsNilCheck(v.X, v)
+			} else {
+				needsNil = !emissionKnownNonNilArrayBase(v.X) &&
+					!(safeBounds && ssaValueProvenNonNilAt(v.X, v))
+			}
+		}
+		if needsNil {
 			add("AssertNilDeref")
 		}
 	case *ssa.Slice:
@@ -485,6 +495,13 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(ctx *context, shape coroEm
 			break
 		}
 		if emissionIsVargsAlloc(ctx, v.X) {
+			break
+		}
+		if emissionBoundsChecksDisabled(ctx) {
+			if _, pointer := types.Unalias(ctx.patchType(v.X.Type())).Underlying().(*types.Pointer); pointer &&
+				emissionArrayPointerNeedsNilCheck(v.X, v) {
+				add("AssertNilDeref")
+			}
 			break
 		}
 		switch types.Unalias(ctx.patchType(v.X.Type())).Underlying().(type) {
@@ -561,8 +578,10 @@ func (u *EmissionUniverse) classifyCoroRuntimeHelpers(ctx *context, shape coroEm
 			add("CoroChanSelectPark", "CoroChanSelectResume")
 		}
 	case *ssa.SliceToArrayPointer:
-		if length, exact := coroSliceToArrayPointerLen(v, ctx.patchType); !exact || length != 0 {
-			add("PanicSliceConvert")
+		if !emissionBoundsChecksDisabled(ctx) {
+			if length, exact := coroSliceToArrayPointerLen(v, ctx.patchType); !exact || length != 0 {
+				add("PanicSliceConvert")
+			}
 		}
 	case *ssa.MapUpdate:
 		// Builder.MapUpdate uses the same mapKeyPtr lowering as Lookup.
@@ -868,6 +887,10 @@ func emissionIndexNeedsRangeCheck(ctx *context, collection, index ssa.Value, use
 	return !coro.ProveSSAExactSafeFixedArrayIndex(use.Parent(), index, bound, use)
 }
 
+func emissionBoundsChecksDisabled(ctx *context) bool {
+	return ctx != nil && ctx.prog != nil && ctx.prog.BoundsChecksDisabled()
+}
+
 func emissionFixedArrayBound(ctx *context, collection ssa.Value) (int64, bool) {
 	if ctx == nil || collection == nil || collection.Type() == nil {
 		return 0, false
@@ -894,6 +917,17 @@ func emissionKnownNonNilArrayBase(value ssa.Value) bool {
 	default:
 		return false
 	}
+}
+
+// emissionArrayPointerNeedsNilCheck is the shared source-level rule for the
+// implicit dereference performed by indexing or slicing a *[N]T. It deliberately
+// remains active under -B: that flag removes bounds checks, not nil-pointer
+// semantics. Recursive SSA address proof lets generated field/index addresses
+// consume a dominating proof on their base without rediscovering pointer facts
+// from the lowered LLVM value.
+func emissionArrayPointerNeedsNilCheck(value ssa.Value, use ssa.Instruction) bool {
+	return !emissionKnownNonNilArrayBase(value) &&
+		!ssaAddressValueProvenNonNilAt(value, use)
 }
 
 func isEmissionVargsAlloc(ctx *context, alloc *ssa.Alloc) bool {

@@ -241,6 +241,7 @@ type aProgram struct {
 
 	enableGoGlobalDCE     bool
 	enableDeadcodeDrop    bool
+	disableBoundsChecks   bool
 	pthreadStackSize      uint64
 	enableLTOPluginMarker bool
 
@@ -398,6 +399,20 @@ func (p Program) EnableDeadcodeDrop(enable bool) {
 
 func (p Program) DeadcodeDropEnabled() bool {
 	return p.enableDeadcodeDrop
+}
+
+// DisableBoundsChecks controls index, slice, and slice-to-array conversion
+// bounds checks. Other dynamic validity checks, including nil pointer and
+// unsafe builtin checks, are not affected.
+func (p Program) DisableBoundsChecks(disable bool) {
+	p.disableBoundsChecks = disable
+}
+
+// BoundsChecksDisabled reports the frozen bounds-check mode used by lowering.
+// Coroutine physical planning consumes this bit before emission so its
+// structured fault plan cannot disagree with ordinary LLSSA lowering.
+func (p Program) BoundsChecksDisabled() bool {
+	return p.disableBoundsChecks
 }
 
 func (p Program) SetPthreadStackSize(size uint64) {

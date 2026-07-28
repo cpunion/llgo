@@ -28,7 +28,7 @@ import (
 	"testing"
 )
 
-const coroSysctlBridgeSource = "internal/runtime/cpu_sysctl_darwin_llgo.go"
+const coroSysctlBridgeSource = "internal/lib/runtime/os_darwin.go"
 
 func TestCoroSysctlBridgeSourceSelection(t *testing.T) {
 	for _, test := range []struct {
@@ -38,16 +38,16 @@ func TestCoroSysctlBridgeSourceSelection(t *testing.T) {
 		want      bool
 	}{
 		{name: "darwin llgo", goos: "darwin", buildTags: []string{"llgo"}, want: true},
-		{name: "ordinary darwin", goos: "darwin"},
+		{name: "ordinary darwin", goos: "darwin", want: true},
 		{name: "linux llgo", goos: "linux", buildTags: []string{"llgo"}},
-		{name: "baremetal", goos: "darwin", buildTags: []string{"llgo", "baremetal"}},
+		{name: "baremetal", goos: "darwin", buildTags: []string{"llgo", "baremetal"}, want: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := build.Default
 			ctx.GOOS = test.goos
 			ctx.GOARCH = "arm64"
 			ctx.BuildTags = append([]string(nil), test.buildTags...)
-			selected, err := ctx.MatchFile("internal/runtime", "cpu_sysctl_darwin_llgo.go")
+			selected, err := ctx.MatchFile("internal/lib/runtime", "os_darwin.go")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -68,15 +68,17 @@ func TestCoroSysctlBridgePreservesGo126PhysicalShape(t *testing.T) {
 		linkname string
 		params   int
 		results  int
-		indices  map[string]bool
+		delegate string
 	}{
-		"internalCPUSysctlbynameInt32": {
-			linkname: "//go:linkname internalCPUSysctlbynameInt32 internal/cpu.sysctlbynameInt32",
-			params:   1, results: 2, indices: map[string]bool{"name": true},
+		"internal_cpu_sysctlbynameInt32": {
+			linkname: "//go:linkname internal_cpu_sysctlbynameInt32 internal/cpu.sysctlbynameInt32",
+			params:   1, results: 2,
+			delegate: "sysctlbynameInt32",
 		},
-		"internalCPUSysctlbynameBytes": {
-			linkname: "//go:linkname internalCPUSysctlbynameBytes internal/cpu.sysctlbynameBytes",
-			params:   2, results: 1, indices: map[string]bool{"name": true, "out": true},
+		"internal_cpu_sysctlbynameBytes": {
+			linkname: "//go:linkname internal_cpu_sysctlbynameBytes internal/cpu.sysctlbynameBytes",
+			params:   2, results: 1,
+			delegate: "sysctlbynameBytes",
 		},
 	}
 	for _, declaration := range file.Decls {
@@ -105,32 +107,19 @@ func TestCoroSysctlBridgePreservesGo126PhysicalShape(t *testing.T) {
 		if doc != expect.linkname {
 			t.Errorf("%s lacks exact physical linkname %q", function.Name.Name, expect.linkname)
 		}
-		indices := make(map[string]bool)
-		callsSysctl := false
+		callsDelegate := false
 		ast.Inspect(function.Body, func(node ast.Node) bool {
-			switch node := node.(type) {
-			case *ast.IndexExpr:
-				owner, ownerOK := node.X.(*ast.Ident)
-				index, indexOK := node.Index.(*ast.BasicLit)
-				if ownerOK && indexOK && index.Kind == token.INT && index.Value == "0" {
-					indices[owner.Name] = true
-				}
-			case *ast.CallExpr:
-				selector, selectorOK := node.Fun.(*ast.SelectorExpr)
-				if selectorOK {
-					owner, ownerOK := selector.X.(*ast.Ident)
-					callsSysctl = callsSysctl || ownerOK && owner.Name == "cos" && selector.Sel.Name == "Sysctlbyname"
-				}
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if callee, ok := call.Fun.(*ast.Ident); ok && callee.Name == expect.delegate {
+				callsDelegate = true
 			}
 			return true
 		})
-		for name := range expect.indices {
-			if !indices[name] {
-				t.Errorf("%s lacks direct %s[0] empty-slice precondition", function.Name.Name, name)
-			}
-		}
-		if !callsSysctl {
-			t.Errorf("%s does not call clite/os.Sysctlbyname", function.Name.Name)
+		if !callsDelegate {
+			t.Errorf("%s does not delegate to %s", function.Name.Name, expect.delegate)
 		}
 	}
 	if len(want) != 0 {

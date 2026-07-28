@@ -286,6 +286,7 @@ type coroPhysicalInstructionPlan struct {
 	bound              int64
 	nilGuard           bool
 	boundsGuard        bool
+	boundsDisabled     bool
 }
 
 func (plan coroPhysicalInstructionPlan) mayFault() bool {
@@ -569,6 +570,8 @@ func planCoroPhysicalInstruction(
 	if audit == nil || instruction == nil || instruction.Parent() != audit.fn {
 		return result, fmt.Errorf("physical instruction planning requires one exact audit and source instruction")
 	}
+	boundsDisabled := audit.ctx != nil && audit.ctx.prog != nil &&
+		audit.ctx.prog.BoundsChecksDisabled()
 	semantic, err := planCoroSemanticInstruction(instruction)
 	if audit.universe != nil && audit.universe.coroProgramIR != nil && owner != nil {
 		semantic, err = audit.universe.coroProgramIR.semanticInstructionPlan(audit.fn, owner, instruction)
@@ -646,7 +649,11 @@ func planCoroPhysicalInstruction(
 		if audit.ctx != nil && emissionIsVargsAlloc(audit.ctx, instruction.X) {
 			break
 		}
-		if !explicitPanic {
+		// -B still needs a frozen unchecked aggregate recipe even when this
+		// exact function had no panic edge before lowering. Otherwise ordinary
+		// LLSSA would rediscover a pointer-to-array nil helper after the
+		// emission universe was frozen.
+		if !explicitPanic && !boundsDisabled {
 			break
 		}
 		result.recipe = coroPhysicalInstructionIndexAddr
@@ -658,15 +665,19 @@ func planCoroPhysicalInstruction(
 			return result, fmt.Errorf("IndexAddr has unsupported physical container %d", container)
 		}
 		result.container, result.bound = container, bound
+		result.boundsDisabled = boundsDisabled
 		result.nilGuard = container == coroPhysicalContainerArrayPointer &&
-			!emissionKnownNonNilArrayBase(instruction.X) && !ssaValueProvenNonNilAt(instruction.X, instruction)
+			emissionArrayPointerNeedsNilCheck(instruction.X, instruction)
 		safe, err := coroPhysicalSafeFixedArrayIndex(audit, whole, instruction, instruction.X, instruction.Index)
 		if err != nil {
 			return result, err
 		}
-		result.boundsGuard = !safe
+		result.boundsGuard = !safe && !boundsDisabled
+		if result.nilGuard && !explicitPanic {
+			return result, fmt.Errorf("unchecked IndexAddr requires a nil guard but the physical ABI has no explicit panic outcome")
+		}
 	case *ssa.Index:
-		if !explicitPanic {
+		if !explicitPanic && !boundsDisabled {
 			break
 		}
 		result.recipe = coroPhysicalInstructionIndex
@@ -675,13 +686,17 @@ func planCoroPhysicalInstruction(
 			return result, err
 		}
 		result.container, result.bound = container, bound
+		result.boundsDisabled = boundsDisabled
 		result.nilGuard = container == coroPhysicalContainerArrayPointer &&
-			!emissionKnownNonNilArrayBase(instruction.X) && !ssaValueProvenNonNilAt(instruction.X, instruction)
+			emissionArrayPointerNeedsNilCheck(instruction.X, instruction)
 		safe, err := coroPhysicalSafeFixedArrayIndex(audit, whole, instruction, instruction.X, instruction.Index)
 		if err != nil {
 			return result, err
 		}
-		result.boundsGuard = !safe
+		result.boundsGuard = !safe && !boundsDisabled
+		if result.nilGuard && !explicitPanic {
+			return result, fmt.Errorf("unchecked Index requires a nil guard but the physical ABI has no explicit panic outcome")
+		}
 	case *ssa.Slice:
 		if audit.ctx != nil && emissionIsVargsAlloc(audit.ctx, instruction.X) {
 			break
@@ -695,7 +710,7 @@ func planCoroPhysicalInstruction(
 				break
 			}
 		}
-		if !explicitPanic {
+		if !explicitPanic && !boundsDisabled {
 			break
 		}
 		result.recipe = coroPhysicalInstructionSlice
@@ -708,9 +723,13 @@ func planCoroPhysicalInstruction(
 			return result, fmt.Errorf("Slice has unsupported physical container %d", container)
 		}
 		result.container, result.bound = container, bound
+		result.boundsDisabled = boundsDisabled
 		result.nilGuard = container == coroPhysicalContainerArrayPointer &&
-			!isKnownNonNilAddr(instruction.X) && !ssaValueProvenNonNilAt(instruction.X, instruction)
-		result.boundsGuard = true
+			emissionArrayPointerNeedsNilCheck(instruction.X, instruction)
+		result.boundsGuard = !boundsDisabled
+		if result.nilGuard && !explicitPanic {
+			return result, fmt.Errorf("unchecked Slice requires a nil guard but the physical ABI has no explicit panic outcome")
+		}
 	case *ssa.SliceToArrayPointer:
 		length, exact := coroSliceToArrayPointerLen(instruction, audit.typeOf)
 		if !exact || length < 0 {
@@ -718,7 +737,8 @@ func planCoroPhysicalInstruction(
 		}
 		result.recipe = coroPhysicalInstructionSliceToArrayPointer
 		result.bound = length
-		result.boundsGuard = length != 0
+		result.boundsDisabled = boundsDisabled
+		result.boundsGuard = length != 0 && !boundsDisabled
 	case *ssa.Call:
 		if explicitPanic && isWrapNilCheckCall(instruction) {
 			result.recipe = coroPhysicalInstructionBuiltinNilGuard

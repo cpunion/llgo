@@ -187,6 +187,11 @@ func TestConstructDebugAddrDoesNotAddNilDerefRuntimeCall(t *testing.T) {
 	}
 }
 
+func TestDIGlobalIgnoresStorageLessFrontendVariable(t *testing.T) {
+	var builder Builder
+	builder.DIGlobal(pyVarExpr(Nil, "attribute"), "module.attribute", token.Position{})
+}
+
 func newDebugRuntimePackage() *types.Package {
 	pkg := types.NewPackage(PkgRuntime, "runtime")
 	unsafePointer := types.Typ[types.UnsafePointer]

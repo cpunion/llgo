@@ -104,7 +104,8 @@ func (p *context) compileCoroSliceToArrayPointer(
 		panic("slice-to-array-pointer fault requires the PhysicalABIV1 explicit-status panic ABI")
 	}
 	if plan.recipe != coroPhysicalInstructionSliceToArrayPointer || plan.bound < 0 ||
-		plan.boundsGuard != (plan.bound != 0) {
+		plan.boundsDisabled != b.Prog.BoundsChecksDisabled() ||
+		plan.boundsGuard != (plan.bound != 0 && !plan.boundsDisabled) {
 		panic(fmt.Sprintf("invalid frozen slice-to-array-pointer recipe for %s", conversion))
 	}
 	if plan.boundsGuard {

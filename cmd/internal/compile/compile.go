@@ -163,6 +163,7 @@ func runCmd(_ *base.Command, args []string) {
 	conf.NoErrorColumn = opts.noColumns.value != 0
 	conf.AllowNoBody = !opts.complete
 	conf.ImportCfg = opts.importCfg
+	conf.DisableBoundsChecks = opts.noBounds.value != 0
 	var loaderCompilerFlags []string
 	if opts.allErrors.value != 0 {
 		loaderCompilerFlags = append(loaderCompilerFlags, "-e")
@@ -199,7 +200,6 @@ func (opts *options) unsupported() []string {
 			out = append(out, name)
 		}
 	}
-	appendFlag(opts.noBounds.value != 0, "-B")
 	appendFlag(opts.dynlink, "-dynlink")
 	appendFlag(opts.showOpt.value != 0, "-m")
 	appendFlag(opts.live, "-live")

@@ -2925,7 +2925,10 @@ type Config struct {
 	// go/packages. Callers use internal/goflags to parse supported compiler and
 	// linker semantics into typed Config fields before calling Do.
 	GoBuildFlags []string
-	LinkOptions  LinkOptions
+	// BuildParallelism is the package-level concurrency requested by Go's -p
+	// build flag for llgo test. Zero uses the Go default, GOMAXPROCS.
+	BuildParallelism int
+	LinkOptions      LinkOptions
 	// OmitDWARFByDefault controls linked builds only when -w was not
 	// explicitly specified. Explicit -w and -w=false always win.
 	OmitDWARFByDefault bool
@@ -2935,6 +2938,9 @@ type Config struct {
 	// default.
 	PCLNModeSet bool
 	AllowNoBody bool // allow declarations without bodies, as go tool compile does
+	// DisableBoundsChecks disables index, slice, and slice-to-array conversion
+	// bounds checks while retaining required integer conversions and nil checks.
+	DisableBoundsChecks bool
 
 	// PthreadStackSize sets a custom stack size, in bytes, for pthread-backed
 	// goroutines. A zero value keeps the platform pthread default.
@@ -3162,6 +3168,7 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	target := newLLSSATarget(conf, export)
 
 	prog := llssa.NewProgram(target)
+	prog.DisableBoundsChecks(conf.DisableBoundsChecks)
 	programOwnershipTransferred := false
 	defer func() {
 		if !programOwnershipTransferred {
@@ -5902,6 +5909,23 @@ func applyBuildModeCompileFlags(mode BuildMode, export *crosscompile.Export) {
 	}
 }
 
+// DefaultBuildTags returns the build tags LLGo always enables for a target.
+func DefaultBuildTags(goarch, target string) string {
+	return defaultBuildTags(goarch, target)
+}
+
+func defaultBuildTags(goarch, target string) string {
+	tags := "llgo,math_big_pure_go,purego"
+	// Raw GOOS/GOARCH wasm builds do not have a target configuration that
+	// selects a collector. BDWGC is not available in either wasm host, so use
+	// the supported collector-free runtime unless a named target supplies its
+	// own runtime configuration.
+	if goarch == "wasm" && target == "" {
+		tags += ",nogc"
+	}
+	return tags
+}
+
 func allowMissingFunctionBodies(initial []*packages.Package) {
 	for _, pkg := range initial {
 		hasMissingBody := false
@@ -6710,9 +6734,9 @@ func linkObjFiles(ctx *context, app string, objFiles, linkArgs []string, verbose
 	return cmd.Link(buildArgs...)
 }
 
-// cSharedExportArgs keeps //export functions as shared-library link roots. The
-// functions live in package archives and otherwise remain unreferenced, so the
-// linker can omit both their object files and dynamic symbols.
+// cSharedExportArgs keeps //export functions and synthetic test entry points as
+// shared-library link roots. They live in package archives and otherwise remain
+// unreferenced, so the linker can omit both their object files and symbols.
 func cSharedExportArgs(ctx *context, pkgs []*aPackage) []string {
 	if ctx == nil || ctx.buildConf == nil || ctx.buildConf.BuildMode != BuildModeCShared {
 		return nil
@@ -6726,6 +6750,10 @@ func cSharedExportArgs(ctx *context, pkgs []*aPackage) []string {
 			if name != "" {
 				exports[name] = none{}
 			}
+		}
+		if ctx.mode == ModeTest && pkg.Package != nil && pkg.Name == "main" && strings.HasSuffix(pkg.PkgPath, ".test") {
+			exports[pkg.PkgPath+".init"] = none{}
+			exports[pkg.PkgPath+".main"] = none{}
 		}
 	}
 	names := make([]string, 0, len(exports))
@@ -7100,7 +7128,7 @@ func buildPkg(ctx *context, aPkg *aPackage, verbose bool) error {
 			return fmt.Errorf("verify LLVM module for package %s (invalid functions %v): %w", pkgPath, broken, err)
 		}
 		if err := mod.RunPasses(llvmPassPipeline(ctx.buildConf.OptLevel, ctx.buildConf.ltoMode()), ctx.prog.TargetMachine(), pbo); err != nil {
-			return fmt.Errorf("run LLVM passes failed for %v: %v", pkgPath, err)
+			return fmt.Errorf("run LLVM passes failed for %v: %w", pkgPath, err)
 		}
 	}
 	emitFuncInfoEntrySites(ctx, ret)

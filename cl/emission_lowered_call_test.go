@@ -372,6 +372,75 @@ func Dynamic(value []int) []int { return value[:] }
 	}
 }
 
+func TestLoweredRuntimeHelpersMatchBoundsDisabledAggregateLowering(t *testing.T) {
+	testProg := newEmissionTestProgram()
+	pkg := testProg.addPackage(t, "example.com/emission/loweredboundsdisabled", `package loweredboundsdisabled
+type Domain struct { Values [4]int }
+func IndexString(value string, index int) byte { return value[index] }
+func IndexSlice(value []int, index int) int { return value[index] }
+func IndexPointer(value *[4]int, index int) int { return value[index] }
+func SliceString(value string, low int) string { return value[low:] }
+func SliceSlice(value []int, low int) []int { return value[low:] }
+func SlicePointer(value *[4]int, low int) []int { return value[low:] }
+func GuardedField(domain *Domain) []int {
+	if domain == nil { return nil }
+	return domain.Values[:]
+}
+func NullableField(domain *Domain) []int { return domain.Values[:] }
+func Convert(value []int) *[4]int { return (*[4]int)(value) }
+`)
+	testProg.ssa.Build()
+	prog := newLLSSAProg(t)
+	defer prog.Dispose()
+	prog.DisableBoundsChecks(true)
+	universe, owner := newEmissionABIDemandTestUniverse(testProg, pkg)
+	universe.prog = prog
+
+	noBoundsHelpers := map[string]struct{}{
+		"CheckIndexRange":   {},
+		"StringSlice2":      {},
+		"NewSlice2":         {},
+		"NewSlice3Bounds":   {},
+		"PanicSliceConvert": {},
+	}
+	for _, test := range []struct {
+		name    string
+		wantNil bool
+	}{
+		{name: "IndexString"},
+		{name: "IndexSlice"},
+		{name: "IndexPointer", wantNil: true},
+		{name: "SliceString"},
+		{name: "SliceSlice"},
+		{name: "SlicePointer", wantNil: true},
+		{name: "GuardedField"},
+		{name: "NullableField", wantNil: true},
+		{name: "Convert"},
+	} {
+		fn := pkg.ssa.Func(test.name)
+		ctx, err := universe.functionABIContext(fn, owner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hasNil := false
+		for _, block := range fn.Blocks {
+			for _, instruction := range block.Instrs {
+				for _, helper := range universe.loweredRuntimeHelpers(ctx, instruction) {
+					if _, bounds := noBoundsHelpers[helper]; bounds {
+						t.Errorf("-B %s retained bounds helper %q", test.name, helper)
+					}
+					if helper == "AssertNilDeref" {
+						hasNil = true
+					}
+				}
+			}
+		}
+		if hasNil != test.wantNil {
+			t.Errorf("-B %s nil helper = %t, want %t", test.name, hasNil, test.wantNil)
+		}
+	}
+}
+
 func TestLoweredRuntimeHelpersIncludeValueReceiverNilCheck(t *testing.T) {
 	testProg := newEmissionTestProgram()
 	pkg := testProg.addPackage(t, "example.com/emission/loweredreceiver", `package loweredreceiver
