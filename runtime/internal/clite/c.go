@@ -140,10 +140,12 @@ func Memcmp(s1, s2 Pointer, n uintptr) Int
 
 // -----------------------------------------------------------------------------
 
-// Strlen is currently consumed only by the compiler-verified raw-host closure.
-// Its declaration retains the conservative foreign default so any future
-// managed use must pass through the ordinary foreign episode.
+// Strlen is used by managed GoString/StringFromCStr paths, including targets
+// without a bounded worker. Its opaque libc declaration cannot expose the
+// implementation fact that it only scans caller-provided memory, so retain
+// that irreducible bottom contract here.
 //
+//llgo:coro noblock
 //go:linkname Strlen C.strlen
 func Strlen(s *Char) uintptr
 

@@ -383,7 +383,7 @@ production inventory is monotonically bounded.  `schedulerwait`, `workeraddr`,
 
 ### 4.1 How the remaining source metadata shrinks
 
-The remaining 64 legacy `noblock`/`sync` directives are not call-graph
+The remaining 65 legacy `noblock`/`sync` directives are not call-graph
 coloring facts.  They assert behavior of opaque C implementations, so deleting
 them merely because a signature looks harmless would be unsound.  They are
 reduced in this order:
@@ -416,13 +416,13 @@ been audited by semantic family:
 
 | Residual family | Directives | Why the compiler cannot derive it |
 | --- | ---: | --- |
-| libc memory/string, clocks, TLS, terminal/debug and signal leaves | 26 `noblock` | implementation is opaque or the contract includes platform progress/control semantics absent from the typed ABI |
+| libc memory/string, clocks, TLS, terminal/debug and signal leaves | 27 `noblock` | implementation is opaque or the contract includes platform progress/control semantics absent from the typed ABI |
 | pthread unlock/try/TLS leaves | 8 `noblock` | POSIX operation semantics, not Go SSA or C type structure, establish bounded progress and affinity |
 | process, nonlocal control, allocator/GC, loader/unwind and libc/FFI state | 30 `sync` | same-thread, returns-twice, retained-callback, stack identity, or internal-lock behavior is deliberately opaque |
 | poll/I/O adapters and foreign pointer-result word calls | 6 `contract` | event readiness, result provenance, and completion lifetime are API semantics |
 | baremetal stdio wrapper refinement | 1 `contract` | only the exact startup edge has the target-specific bounded-device guarantee |
 
-These totals are the 71-directive gate.  None is attached to an ordinary
+These totals are the 72-directive gate.  None is attached to an ordinary
 bodyful Go caller for effect propagation.  The only bodyful exception is the
 single `scope=wrapper` baremetal adapter, whose occurrence-local refinement
 cannot grant a declaration-wide capability.  Removing any remaining entry
@@ -512,7 +512,7 @@ The remaining directives have different removal rules:
 | Legacy class | Migration |
 | --- | --- |
 | `sync` (30) | Ordinary declarations ultimately use the conservative same-M/event default. Runtime-only direct calls move under a verified raw-host or executor adapter root. Opaque allocator/GC, FFI, retained callback, and control behavior remains an exact bottom contract until its operation adapter or producer metadata exists. |
-| `noblock` (34) | LLGo-owned definitions use the implemented closed C/LLVM proof. Opaque libc/pthread/TLS/clock/signal/terminal behavior still needs a producer contract; the fact is never propagated through Go source. |
+| `noblock` (35) | LLGo-owned definitions use the implemented closed C/LLVM proof. Opaque libc/pthread/TLS/clock/signal/terminal behavior still needs a producer contract; the fact is never propagated through Go source. |
 | `schedulerwait` (0; removal complete) | Per-leaf tags were deleted.  The compiler verifies each may-block occurrence against exact raw-host closure provenance while preserving managed `WaitForeign`. |
 | `contract` (7) | Keep only irreducible behavior/provenance facts; derive ABI, arity, callback positions, wrapper flow, and exact local-export behavior. |
 
