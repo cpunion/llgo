@@ -36,13 +36,14 @@ debt, not irreducible foreign semantics.
 
 The first inference cut reduced the exact production inventory to 154.  The
 raw-host operation cut then removed all 19 `schedulerwait` declarations.  The
-exact local-export cut removed another eight declaration-level annotations, so
-the current exact production inventory is 127:
+exact local-export cut removed another eight declaration-level annotations.
+The closed raw-host use-domain cut removed 11 declaration-wide `sync`
+annotations, so the current exact production inventory is 116:
 
 | Directive | Count | Status |
 | --- | ---: | --- |
 | `noblock` | 60 | legacy bottom behavior; not structurally inferable |
-| `sync` | 60 | legacy bottom behavior; remove after the general same-M foreign episode or replace with producer metadata |
+| `sync` | 49 | legacy bottom behavior; remove after the general same-M foreign episode or replace with producer metadata |
 | `schedulerwait` | 0 | removed; exact raw-host invocation is inferred from compiler-owned closure provenance |
 | `contract` | 7 | executor/thread and foreign-pointer result facts |
 | `workeraddr` | 0 | removed; target identity is producer-owned and arity is sink-derived |
@@ -65,6 +66,17 @@ digest in the immutable call-site plan; it does not add another plan authority.
 Analysis, physical validation, and lowering consume that same target from the
 exact source call/defer/go instruction.  Raw code-address and raw/plain ingress
 continue to use the original C declaration.
+
+The raw-host use-domain inference is likewise occurrence-scoped.  It does not
+turn an external declaration into a globally synchronous capability.  The
+ordinary frozen C default remains may-block and therefore still selects a
+managed foreign wait from managed code.  An exact occurrence may execute
+directly only when the existing immutable plan proves that its emitted owner is
+inside the compiler-owned scheduler-stack closure.  A diagnostic audit then
+allows the now-redundant source annotation to be removed only when the emission
+universe is closed and every live use of the exact declaration has that form.
+Managed calls, non-host raw calls, dynamic calls, address escape, ABI
+ambiguity, and incomplete archive views all fail closed.
 
 ## 2. Frozen principles
 
@@ -379,7 +391,7 @@ The remaining directives have different removal rules:
 
 | Legacy class | Migration |
 | --- | --- |
-| `sync` (60) | Ordinary declarations use the conservative same-M/event default.  Runtime-only direct calls move under a small verified raw-host or executor adapter root. |
+| `sync` (49) | Ordinary declarations use the conservative same-M/event default.  Runtime-only direct calls move under a small verified raw-host or executor adapter root.  Eleven fleet/worker lifecycle declarations have completed this cut. |
 | `noblock` (60) | Opaque C needs a producer proof; LLGo-owned definitions may use a closed C/LLVM proof.  The fact is embedded/generated and never propagated through Go source. |
 | `schedulerwait` (0; removal complete) | Per-leaf tags were deleted.  The compiler verifies each may-block occurrence against exact raw-host closure provenance while preserving managed `WaitForeign`. |
 | `contract` (7) | Keep only irreducible behavior/provenance facts; derive ABI, arity, callback positions, wrapper flow, and exact local-export behavior. |
@@ -662,11 +674,11 @@ Special cases found in the current `sync` inventory map cleanly:
 
 ### 7.7 Directive elimination budget
 
-The 127 production directives are a migration budget, not an intended API:
+The 116 production directives are a migration budget, not an intended API:
 
 | Current class | Target | Removal gate |
 | --- | ---: | --- |
-| `sync` 60 | 0 | conservative same-M/event default plus family-4/5 internal operations |
+| `sync` 49 | 0 | conservative same-M/event default plus family-4/5 internal operations |
 | `schedulerwait` 0 | 0 | complete: compiler-owned raw-host occurrence and closure proof |
 | `noblock` 60 | 0 in handwritten Go | generated/embedded proof, closed LLGo-owned C proof, or conservative fallback |
 | `contract` 7 | 0 in handwritten Go | typed result/lifetime flow, export binding, generated producer facts, or adapter-root metadata |
@@ -678,6 +690,20 @@ inferred from the exact export binding:
 - semaphore prepare/release;
 - timer request;
 - poll deadline update and closing notification.
+
+Eleven declarations used only by compiler-owned scheduler-stack closures now
+retain the conservative external default without a declaration-wide `sync`
+claim:
+
+- fleet owner count, factory start/stop, owner create, and standby stop;
+- worker create, queue initialize/query/stop/destroy, and exact raw-host call.
+
+The closed-use audit is a migration gate, not a new lowering input.  It reads
+the already-frozen function and call plans after raw-host validation and
+requires all live exact uses to be scheduler-stack occurrences.  A separate
+regression keeps each migrated symbol annotation-free while proving that its
+managed demand remains empty, its raw demand remains present, and its external
+contract remains may-block.
 
 The cut is guarded by exact/ABI-mismatch/explicit-policy/ambiguity tests,
 static call/defer/spawn propagation tests, raw-address and raw/plain-ingress

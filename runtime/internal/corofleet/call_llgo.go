@@ -35,14 +35,12 @@ import (
 // and otherwise uses the online CPU count. It does not size the fixed physical
 // route topology.
 //
-//llgo:coro sync
 //go:linkname OwnerCount C.__llgo_coro_fleet_owner_count_v1
 func OwnerCount(maximum uint32) uint32
 
 // StartFactory creates the process-lifetime clean template pthread before any
 // managed Go code can alter inherited per-thread process state.
 //
-//llgo:coro sync
 //go:linkname StartFactory C.__llgo_coro_fleet_factory_start_v1
 func StartFactory() c.Int
 
@@ -53,7 +51,6 @@ func StartFactory() c.Int
 // never creates its own replacement and cannot propagate a modified signal
 // mask, namespace, cwd/fs view, credentials, or similar inherited state.
 //
-//llgo:coro sync
 //go:linkname CreateOwner C.__llgo_coro_fleet_owner_create_v3
 func CreateOwner(thread *pthread.Thread, token *uint32, slot uint32) c.Int
 
@@ -93,7 +90,6 @@ func RetireSelf(slot uint32) c.Int
 // StopStandby terminates and strongly joins every cached raw M. joined is the
 // exact number of physical thread reservations the target must release.
 //
-//llgo:coro sync
 //go:linkname StopStandby C.__llgo_coro_fleet_owner_stop_standby_v1
 func StopStandby(joined *uint32) c.Int
 
@@ -109,6 +105,5 @@ func Yield() c.Int
 // successor passes its exact token because its wrapper remains live only until
 // the immediately following process exit.
 //
-//llgo:coro sync
 //go:linkname StopFactory C.__llgo_coro_fleet_factory_stop_v2
 func StopFactory(terminalOwnerToken uint32) c.Int

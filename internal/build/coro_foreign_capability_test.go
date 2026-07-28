@@ -46,6 +46,10 @@ func Sync(int) int
 //go:linkname MayBlock C.foreign_may_block_exact
 func MayBlock(int) int
 
+//llgo:coro sync
+//go:linkname EscapedSync C.foreign_escaped_sync_exact
+func EscapedSync(int) int
+
 //llgo:coro worker
 //go:linkname Worker C.foreign_worker_exact
 func Worker(int) int
@@ -55,6 +59,7 @@ func ManagedWorker(v int) int { return Worker(v) }
 func hostHelper(v int) int { return Sync(v) + MayBlock(v) }
 func Host(v int) int { return hostHelper(v) }
 func SourceRaw(v int) int { return MayBlock(v) }
+func EscapeSync() any { return EscapedSync }
 `, nil)
 	program := llssa.NewProgram(nil)
 	emission, err := cl.PrepareEmissionUniverse(program, nil, []cl.EmissionPackage{{

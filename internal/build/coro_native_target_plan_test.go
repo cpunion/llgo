@@ -385,6 +385,77 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 		if err != nil {
 			return nil, err
 		}
+		raw, err := input.liveCoroRawABIPlainClosure(plan, nil)
+		if err != nil {
+			return nil, err
+		}
+		useDomains, err := inspectCoroForeignUseDomains(input, plan, raw, true)
+		if err != nil {
+			return nil, err
+		}
+		if !useDomains.Closed {
+			return nil, fmt.Errorf("native target foreign use-domain report is not closed")
+		}
+		for _, record := range useDomains.legacySyncRecords() {
+			t.Log(record.diagnostic())
+		}
+		migratedRawHostSymbols := map[string]bool{
+			"__llgo_coro_fleet_owner_count_v1":               false,
+			"__llgo_coro_fleet_factory_start_v1":             false,
+			"__llgo_coro_fleet_owner_create_v3":              false,
+			"__llgo_coro_fleet_owner_stop_standby_v1":        false,
+			"__llgo_coro_fleet_factory_stop_v2":              false,
+			"__llgo_coro_worker_create_v1":                   false,
+			"__llgo_coro_worker_queue_init_v1":               false,
+			"__llgo_coro_worker_queue_can_release_v1":        false,
+			"__llgo_coro_worker_queue_stop_v1":               false,
+			"__llgo_coro_worker_queue_destroy_after_join_v1": false,
+			"__llgo_coro_worker_call_v1":                     false,
+		}
+		for _, record := range useDomains.Records {
+			if _, migrated := migratedRawHostSymbols[record.PhysicalSymbol]; !migrated {
+				continue
+			}
+			if migratedRawHostSymbols[record.PhysicalSymbol] {
+				return nil, fmt.Errorf("native target raw-host declaration %q is ambiguous", record.PhysicalSymbol)
+			}
+			migratedRawHostSymbols[record.PhysicalSymbol] = true
+			if record.LegacySync || !record.rawHostOnly() {
+				return nil, fmt.Errorf(
+					"native target migrated raw-host declaration = %s",
+					record.diagnostic(),
+				)
+			}
+			if _, legacy := plan.ForeignSyncCertificate(record.Function); legacy {
+				return nil, fmt.Errorf(
+					"native target raw-host declaration %q retained a foreign-sync certificate",
+					record.PhysicalSymbol,
+				)
+			}
+			callable, certified := plan.CallableContractCertificate(record.Function)
+			function, planned := plan.FunctionPlan(record.Function)
+			if !certified ||
+				callable.Scope != coro.CallableContractScopeDeclaration ||
+				!coroRawPlainDirectForeignContractCompatible(callable.Contract) ||
+				!planned ||
+				function.External != coro.ExternalUnknownForeign ||
+				function.ManagedDemand != coro.NoDemand ||
+				!function.RawPlainDemand ||
+				function.Emission != coro.EmitExternal ||
+				!function.Exec.Contains(coro.BlockForeign|coro.IRQUnsafe) {
+				return nil, fmt.Errorf(
+					"native target raw-host declaration %q lost its conservative default: "+
+						"callable=%+v certified=%t function=%+v planned=%t",
+					record.PhysicalSymbol, callable, certified, function, planned,
+				)
+			}
+			t.Log("migrated " + record.diagnostic())
+		}
+		for symbol, found := range migratedRawHostSymbols {
+			if !found {
+				return nil, fmt.Errorf("native target raw-host declaration %q is absent from the closed report", symbol)
+			}
+		}
 		find := func(path, name string) (*ssa.Function, error) {
 			var found *ssa.Function
 			for _, pkg := range input.Program.AllPackages() {
