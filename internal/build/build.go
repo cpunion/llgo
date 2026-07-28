@@ -330,7 +330,9 @@ func Do(args []string, conf *Config) ([]Package, error) {
 	if conf.Target != "" && export.GOARCH != "" {
 		conf.Goarch = export.GOARCH
 	}
-	applyWasmGCLinkFlags(conf, &export)
+	if err := configureWasmGC(conf, &export); err != nil {
+		return nil, err
+	}
 	if conf.AppExt == "" {
 		conf.AppExt = defaultAppExt(conf)
 	}
@@ -690,13 +692,23 @@ func defaultBuildTags(goarch, target string) string {
 	return tags
 }
 
-func applyWasmGCLinkFlags(conf *Config, export *crosscompile.Export) {
-	if conf.Goos != "js" || conf.Goarch != "wasm" || !hasBuildTag(conf.Tags, "llgo_wasm_gc") {
-		return
+func configureWasmGC(conf *Config, export *crosscompile.Export) error {
+	if conf.Goarch != "wasm" || !hasBuildTag(conf.Tags, "llgo_wasm_gc") {
+		return nil
 	}
-	if !slices.Contains(export.LDFLAGS, "-sMALLOC=none") {
-		export.LDFLAGS = append(export.LDFLAGS, "-sMALLOC=none")
+	switch conf.Goos {
+	case "js":
+		if !slices.Contains(export.LDFLAGS, "-sMALLOC=none") {
+			export.LDFLAGS = append(export.LDFLAGS, "-sMALLOC=none")
+		}
+	case "wasip1":
+		if IsWasiThreadsEnabled() {
+			return errors.New("llgo_wasm_gc requires single-worker WASI (set LLGO_WASI_THREADS=0)")
+		}
+	default:
+		return fmt.Errorf("llgo_wasm_gc does not support GOOS=%s", conf.Goos)
 	}
+	return nil
 }
 
 func hasBuildTag(tags, want string) bool {
