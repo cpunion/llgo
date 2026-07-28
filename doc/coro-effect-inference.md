@@ -39,13 +39,14 @@ raw-host operation cut then removed all 19 `schedulerwait` declarations.  The
 exact local-export cut removed another eight declaration-level annotations.
 The closed raw-host use-domain cut removed 11 declaration-wide `sync`
 annotations.  The first conservative-default cut removed another nine
-thread-independent lifecycle/notification declarations, so the current exact
-production inventory is 107:
+thread-independent lifecycle/notification declarations.  The terminal
+raw-host cut removed two private stdio declarations, so the current exact
+production inventory is 105:
 
 | Directive | Count | Status |
 | --- | ---: | --- |
 | `noblock` | 60 | legacy bottom behavior; not structurally inferable |
-| `sync` | 40 | legacy bottom behavior; remove after the general same-M foreign episode or replace with producer metadata |
+| `sync` | 38 | legacy bottom behavior; remove after the general same-M foreign episode or replace with producer metadata |
 | `schedulerwait` | 0 | removed; exact raw-host invocation is inferred from compiler-owned closure provenance |
 | `contract` | 7 | executor/thread and foreign-pointer result facts |
 | `workeraddr` | 0 | removed; target identity is producer-owned and arity is sink-derived |
@@ -296,7 +297,7 @@ production inventory is monotonically bounded.  `schedulerwait`, `workeraddr`,
 
 ### 4.1 How the remaining source metadata shrinks
 
-The remaining 100 legacy `noblock`/`sync` directives are not call-graph
+The remaining 98 legacy `noblock`/`sync` directives are not call-graph
 coloring facts.  They
 assert behavior of opaque C implementations, so deleting them merely because a
 signature looks harmless would be unsound.  They are reduced in this order:
@@ -405,7 +406,7 @@ The remaining directives have different removal rules:
 
 | Legacy class | Migration |
 | --- | --- |
-| `sync` (40) | Ordinary declarations ultimately use the conservative same-M/event default.  Runtime-only direct calls move under a verified raw-host or executor adapter root.  Eleven fleet/worker declarations completed the raw-host cut; nine thread-independent pthread/poll declarations completed the temporary any-thread/no-reentry default cut. |
+| `sync` (38) | Ordinary declarations ultimately use the conservative same-M/event default.  Runtime-only direct calls move under a verified raw-host or executor adapter root.  Eleven fleet/worker and two private terminal-stdio declarations completed raw-host cuts; nine thread-independent pthread/poll declarations completed the temporary any-thread/no-reentry default cut. |
 | `noblock` (60) | Opaque C needs a producer proof; LLGo-owned definitions may use a closed C/LLVM proof.  The fact is embedded/generated and never propagated through Go source. |
 | `schedulerwait` (0; removal complete) | Per-leaf tags were deleted.  The compiler verifies each may-block occurrence against exact raw-host closure provenance while preserving managed `WaitForeign`. |
 | `contract` (7) | Keep only irreducible behavior/provenance facts; derive ABI, arity, callback positions, wrapper flow, and exact local-export behavior. |
@@ -685,14 +686,17 @@ Special cases found in the current `sync` inventory map cleanly:
 - `ffi_call` is a normal dynamic foreign episode and may reenter through the
   unified ingress.  closure preparation owns retained callback/context
   metadata.
+- private terminal `fputs`/`fputc` declarations execute only at exact
+  scheduler-stack abort occurrences.  Ordinary `clite.Fputc` remains a managed
+  foreign call even though it shares the same physical C symbol.
 
 ### 7.7 Directive elimination budget
 
-The 107 production directives are a migration budget, not an intended API:
+The 105 production directives are a migration budget, not an intended API:
 
 | Current class | Target | Removal gate |
 | --- | ---: | --- |
-| `sync` 40 | 0 | conservative same-M/event default plus family-4/5 internal operations |
+| `sync` 38 | 0 | conservative same-M/event default plus family-4/5 internal operations |
 | `schedulerwait` 0 | 0 | complete: compiler-owned raw-host occurrence and closure proof |
 | `noblock` 60 | 0 in handwritten Go | generated/embedded proof, closed LLGo-owned C proof, or conservative fallback |
 | `contract` 7 | 0 in handwritten Go | typed result/lifetime flow, export binding, generated producer facts, or adapter-root metadata |
@@ -711,6 +715,15 @@ claim:
 
 - fleet owner count, factory start/stop, owner create, and standby stop;
 - worker create, queue initialize/query/stop/destroy, and exact raw-host call.
+
+Two private terminal stdio declarations now use the same occurrence-scoped
+proof:
+
+- `coroTerminalFputs` and `coroTerminalFputc` are live only under the closed
+  fail-stop scheduler-stack adapters;
+- the gate keys the exact Go declaration identity rather than `fputs`/`fputc`,
+  and separately proves that ordinary `clite.Fputc` retains managed
+  `WaitForeign` demand.
 
 Nine declarations whose producers are thread-independent and have neither
 managed reentry nor retained arguments now use the ordinary temporary
