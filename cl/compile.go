@@ -58,6 +58,8 @@ var (
 	enableDbg         bool
 	enableDbgSyms     bool
 	disableInline     bool
+	debugTypeAssert   bool
+	typeAssertNoCols  bool
 
 	// enableExportRename enables //export to use different C symbol names than Go function names.
 	// This is for TinyGo compatibility when using -target flag for embedded targets.
@@ -155,6 +157,11 @@ func EnableDbgSyms(b bool) {
 // Deprecated: pass Options to NewPackageExWithEmbedMetaOptions.
 func EnableTrace(b bool) {
 	enableCallTracing = b
+}
+
+func SetTypeAssertDebug(enabled, noColumns bool) {
+	debugTypeAssert = enabled
+	typeAssertNoCols = noColumns
 }
 
 // EnableExportRename enables or disables //export with different C symbol names.
@@ -2071,6 +2078,17 @@ func (p *context) compileInstrOrValue(b llssa.Builder, iv instrOrValue, asValue 
 		}
 		ret = b.MakeClosure(fn, bindings)
 	case *ssa.TypeAssert:
+		if debugTypeAssert {
+			kind := "inlined"
+			if intf, ok := v.AssertedType.Underlying().(*types.Interface); ok && intf.NumMethods() != 0 {
+				kind = "not inlined"
+			}
+			pos := p.fset.Position(v.Pos())
+			if typeAssertNoCols {
+				pos.Column = 0
+			}
+			fmt.Fprintf(os.Stderr, "%s: type assertion %s\n", pos, kind)
+		}
 		x := p.compileValue(b, v.X)
 		t := p.type_(v.AssertedType, llssa.InGo)
 		p.recordPanicLocation(b, v.Pos())

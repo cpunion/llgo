@@ -336,6 +336,7 @@ func (b Builder) TypeAssert(x Expr, assertedTyp Type, commaOk bool) Expr {
 			eq = b.InlineCall(b.Pkg.rtFunc("Implements"), tabi, tx)
 			val = func() Expr { return Expr{b.unsafeInterface(rawIntf, tx, b.faceData(x.impl)), assertedTyp} }
 		} else if assertedTyp.kind == vkClosure {
+			// TODO: Inline the closure signature check used by concrete function assertions.
 			eq = b.InlineCall(b.Pkg.rtFunc("MatchesClosure"), tabi, tx)
 			val = func() Expr { return b.valFromData(assertedTyp, b.faceData(x.impl)) }
 		} else {

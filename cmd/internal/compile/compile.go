@@ -163,6 +163,13 @@ func runCmd(_ *base.Command, args []string) {
 	conf.NoErrorColumn = opts.noColumns.value != 0
 	conf.AllowNoBody = !opts.complete
 	conf.DisableBoundsChecks = opts.noBounds.value != 0
+	for _, setting := range opts.debug {
+		for _, item := range strings.Split(setting, ",") {
+			if item == "typeassert" {
+				conf.DebugTypeAssert = true
+			}
+		}
+	}
 	var loaderCompilerFlags []string
 	if opts.allErrors.value != 0 {
 		loaderCompilerFlags = append(loaderCompilerFlags, "-e")
@@ -218,7 +225,7 @@ func (opts *options) unsupported() []string {
 }
 
 func compatibleDebugSetting(setting string) bool {
-	if setting == "panic" || setting == "ssa/check/on" || setting == "ssa/check/seed" {
+	if setting == "panic" || setting == "typeassert" || setting == "ssa/check/on" || setting == "ssa/check/seed" {
 		return true
 	}
 	// LLGo's x/tools SSA sanity checking is always enabled. gc uses this seed
