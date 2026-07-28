@@ -27,6 +27,7 @@ import (
 
 type runtimeContextPlatform struct {
 	context    wasmcontext.Context
+	gcRoot     wasmGCRootContext
 	runqNext   *g
 	runqQueued bool
 	// Keep runqQueued inside unsafe.Sizeof(runtimeContext{}) on wasm32. LLVM
@@ -43,6 +44,8 @@ var wasmSched struct {
 	started bool
 }
 
+var wasmSystemGCRoot wasmGCRootContext
+
 func runtimeContextAllocSize() uintptr {
 	// LLVM rounds contexts containing 64-bit IDs to this boundary on wasm.
 	const alignment = uintptr(unsafe.Sizeof(uint64(0)))
@@ -51,6 +54,9 @@ func runtimeContextAllocSize() uintptr {
 
 func initRuntimeContext(ctx *runtimeContext, callergp *g, status uint32) *g {
 	gp := initG(ctx, callergp, status)
+	if wasmGCRootEnabled {
+		registerWasmGCRoot(&ctx.platform.gcRoot, false)
+	}
 	if status == _Grunning {
 		initWasmScheduler(gp)
 	}
@@ -63,6 +69,9 @@ func initWasmScheduler(gp *g) {
 		return
 	}
 	wasmSched.started = true
+	if wasmGCRootEnabled {
+		registerWasmGCRoot(&wasmSystemGCRoot, true)
+	}
 	mp := &wasmSched.m
 	pp := &wasmSched.p
 	mp.curg = gp
@@ -133,7 +142,10 @@ func wasmMainStart(unsafe.Pointer) {
 	wasmMainTask(nil)
 	casgstatus(gp, _Grunning, _Gdead)
 	releaseG()
-	gp.context.platform.context.Swap(&wasmSched.system)
+	gp.context.platform.context.Swap(
+		&wasmSched.system,
+		wasmGCRootPointer(&wasmSystemGCRoot),
+	)
 	fatal("runtime: resumed completed WebAssembly main goroutine")
 }
 
@@ -147,7 +159,10 @@ func runWasmContext(gp *g) {
 	pp.m = mp
 	gp.m = mp
 	setg(gp)
-	wasmSched.system.Swap(&gp.context.platform.context)
+	wasmSched.system.Swap(
+		&gp.context.platform.context,
+		wasmGCRootPointer(&gp.context.platform.gcRoot),
+	)
 }
 
 func releaseWasmOwnership(gp *g) {
@@ -186,6 +201,9 @@ func releaseWasmContext(gp *g) {
 	}
 	ctx := gp.context
 	ctx.platform.context.Close(FreeRoot)
+	if wasmGCRootEnabled {
+		unregisterWasmGCRoot(&ctx.platform.gcRoot)
+	}
 	freeRuntimeContext(ctx)
 }
 
@@ -202,7 +220,10 @@ func wasmGStart(arg unsafe.Pointer) {
 }
 
 func suspendWasmG(gp *g) {
-	gp.context.platform.context.Swap(&wasmSched.system)
+	gp.context.platform.context.Swap(
+		&wasmSched.system,
+		wasmGCRootPointer(&wasmSystemGCRoot),
+	)
 }
 
 func goschedBackend() {
