@@ -164,6 +164,14 @@ automatically colored when the declaration is not executor-safe.  Supported
 arguments, results, callback positions, and frame-retention roots are derived
 from the typed call occurrence.
 
+For an exact declaration imported through a package archive, the consumer
+matches the producer record by stable FunctionID, complete target/runtime
+metadata, physical symbol, and typed ABI.  A producer contract may replace only
+the conservative unannotated-C default reconstructed by the consumer.  An
+explicit local generic or legacy contract must agree exactly or compilation
+fails.  An identity-only record suppresses the reconstructed default and grants
+no worker, same-M, event, or raw-host operation.
+
 The compatibility default for a general C call must eventually match Go's cgo
 execution model:
 
@@ -470,9 +478,9 @@ remaining design gap is narrower:
 
 - exported Go functions are still treated as raw plain roots instead of
   compiler-generated C ABI ingress adapters;
-- the v2 package archive now publishes exact foreign callable facts and
-  declarative export bindings, but consumers intentionally cannot turn those
-  records into invocation capability before the same-M/ingress gates exist;
+- the v2 package archive now publishes and consumes exact foreign callable
+  facts for typed static calls, while declarative export bindings intentionally
+  remain non-authorizing until the ingress gate exists;
 - the temporary unannotated-C default assumes any-thread/no-reentry;
 - a few non-ordinary operations are still encoded as `sync` declarations.
 
@@ -601,12 +609,20 @@ admitting a fact.  Duplicate, missing, conflicting, or target-mismatched
 records are rejected.  A missing callable record retains the conservative C
 default; it never becomes executor-safe by omission.
 
-Consumer calls to managed functions already import their inferred effect and
-continue coloring through the ordinary SSA fixed point.  Foreign declarations
-and exports are now serialized and indexed without source comments or code
-addresses, but invocation-policy consumption deliberately remains disabled
-until the same-M/ingress adapter gates can enforce those facts.  Metadata
-availability is not an execution capability.
+Consumer calls to managed functions import their inferred effect and continue
+coloring through the ordinary SSA fixed point.  Exact typed foreign
+declarations also consume their producer identity and optional target-neutral
+contract.  The final consumer selects worker or same-M only after the ordinary
+typed call, plan certificate, target capabilities, frame retention, callback
+shape, and physical ABI all pass their existing gates.  The imported overlay is
+re-published unchanged if that consumer produces another archive; it is never
+reconstructed from a code address or silently replaced by the consumer's
+default.
+
+Export bindings remain serialized and indexed but non-authorizing.  They do
+not permit a raw entry, global alias, or C-to-Go ingress adapter until the
+separate versioned ingress capability is generated and verified.  Metadata
+availability by itself is not an execution capability.
 
 ### 7.5 Unified foreign ingress
 
@@ -767,8 +783,9 @@ machine-produced facts.
 
 The reduction is accepted only in complete, ordered cuts:
 
-1. **Complete:** add and round-trip the v2 producer schema, including foreign
-   callable and declarative export-binding records;
+1. **Complete:** add, consume, and transitively round-trip the v2 producer
+   schema for managed functions and exact foreign callables, while retaining
+   declarative export bindings as non-authorizing records;
 2. generate exact export adapters and prove nested, global-state, retained, and
    foreign-thread ingress without address lookup;
 3. reconcile return, recovered return, panic, `Goexit`, pending cancellation,

@@ -1084,8 +1084,10 @@ report-only原型。截至2026-07-22，迁移顺序和状态如下：
    invocation不再identity-less。这个unknown仅是facts/catalog语义，不调用generic policy投影，也不
    增加 `ThreadAffine`/`OpaqueExec` 或与legacy冲突。Default/TrustedInline、closed/open Auto join和
    exact invocation site均可canonical化并计算digest；partial candidate、错identity/contract/ABI仍
-   失败关闭。v1的InvocationFact尚无独立ContextProof字段，精确proof仍由CoroPlanDigest绑定；跨archive
-   schema v2待补。
+   失败关闭。v1的InvocationFact尚无独立ContextProof字段，精确proof仍由CoroPlanDigest绑定。archive
+   schema v2已经发布并消费exact typed declaration的producer identity与可选contract：它只替换
+   consumer自动生成的保守default，显式本地冲突失败，identity-only不授权operation，并在再次归档时
+   原样重发。该闭环尚未让`CallableContractFacts`成为唯一archive输入，也不覆盖open/dynamic descriptor。
 8. **nonblocking lease与stdlib wrapper（待完成）**：与 `SetBlocking`、close/reuse、
    generation/epoch同步，再以 `internal/poll` read/write/accept/connect作为首批调用点；
    `ignoringEINTRIO(extraInfo, fn)` 之类helper应归一为通用contextual recipe。
@@ -1112,6 +1114,8 @@ report-only原型。截至2026-07-22，迁移顺序和状态如下：
 - TrustedInline的closed static call、foreign target和physical resolver正/负例；
 - producer-forward shadow的direct/private-carrier、条件incoming inventory及
   arithmetic/open/escape/unannotated拒绝用例。
+- library-effect-summary v2的exact foreign producer→archive→consumer fixed point、显式本地
+  冲突拒绝、identity-only保守路径、same-M physical lowering与transitive re-publication。
 
 尚未有自动化生产证据的主要区域是resource/context lease、复杂wrapper region proof、
 dynamic descriptor、通用backend-recipe catalog、facts archive唯一消费链及非native跨平台E2E。
@@ -1220,7 +1224,8 @@ contract，compile-only不能替代production platform E2E。
   producer兼容输入，不再对应独立consumer provenance；
 - 把address-only、尚未进入managed-required集合但已由producer-forward shadow证明的target纳入
   统一identity/facts/archive边界；当前不扩大required inventory，也不做地址反查；
-- foreign Callable descriptor、开放dynamic ABI、cross-archive summary与runtime registration/catalog；
+- foreign Callable descriptor、开放dynamic ABI与runtime registration/catalog；exact static typed
+  declaration的cross-archive summary已闭合，但不代表开放function value或未知签名已完成；
 - target-owned OperationRecipe/adapter选择，包括worker/readiness/Promise/WASI/HAL/IRQ，以及
   reentry、retained memory/pin的物理处理；
 - 将当前`internal/poll` socket attempt/Poll V2/opaque descriptor vertical slice推广到完整FD族；
@@ -1228,9 +1233,10 @@ contract，compile-only不能替代production platform E2E。
   RTOS/embedded、baremetal production adapter。
 
 因此当前结论是“managed-required C declaration的total callable identity/facts、generic contract、
-target-owned TrustedInline exact-edge闭环与producer-forward shadow授权gate已落地”，不是“文件、
-网络、标准库或所有平台已完成”。后续应闭合address-only inventory、NonblockingLease/复杂context
-proof、descriptor、backend recipe和archive唯一事实流，不再引入地址反查或按API名称分裂的平行机制。
+exact static typed declaration的archive消费/再发布、target-owned TrustedInline exact-edge闭环与
+producer-forward shadow授权gate已落地”，不是“文件、网络、标准库或所有平台已完成”。后续应闭合
+address-only inventory、NonblockingLease/复杂context proof、descriptor、backend recipe和archive
+唯一事实流，不再引入地址反查或按API名称分裂的平行机制。
 
 ## 21. Review checklist
 

@@ -327,6 +327,35 @@ func CallableContractExecConstraints(contract CallableContract) ExecFlags {
 	return flags
 }
 
+// CallableDeclarationPolicy is the single target-neutral projection from a
+// typed C declaration contract into SSA external/exec policy. It grants no
+// worker, same-M, event, raw-host, or trusted-inline recipe; those remain
+// call-site and target capability decisions.
+func CallableDeclarationPolicy(contract CallableContract) (ExternalKind, ExecFlags, error) {
+	if err := contract.Validate(); err != nil {
+		return ExternalUnknownForeign, 0, err
+	}
+	external := ExternalUnknownForeign
+	exec := BlockForeign | IRQUnsafe | CallableContractExecConstraints(contract)
+	switch contract.Progress {
+	case ProgressExecutorSafe:
+		external = ExternalKnown
+		exec &^= BlockForeign
+	case ProgressMayBlock, ProgressUnknown, ProgressAsyncCompletion:
+		// Auto remains a foreign stack cut. Its ordinary managed callers
+		// receive WaitForeign from CallForeign.
+	case ProgressNoReturn:
+		// NoReturn is a control-flow fact, not an executor-safety proof.
+		exec |= NoReturn
+	default:
+		return ExternalUnknownForeign, 0, fmt.Errorf(
+			"coro: callable declaration has unsupported progress %q",
+			contract.Progress,
+		)
+	}
+	return external, exec, nil
+}
+
 type CallableFact struct {
 	Ref                   CallableRefID `json:"ref"`
 	Function              FunctionID    `json:"function"`

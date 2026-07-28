@@ -172,7 +172,12 @@ type CoroPlanInput struct {
 	// inherit these facts through the ordinary SSA fixed point; no source
 	// annotation is propagated.
 	importedLibraryEffects map[*ssa.Function]coro.LibraryEffectFunction
-	recordAnalysis         func(*coro.SSAPlan)
+	// libraryForeign contains exact producer-owned C
+	// declaration identities and optional target-neutral contracts. The build
+	// driver has already matched FunctionID, physical symbol, typed ABI, target
+	// profile, and explicit-local conflict policy.
+	libraryForeign map[*ssa.Function]coro.LibraryEffectForeignCallable
+	recordAnalysis func(*coro.SSAPlan)
 }
 
 type coroCallArgumentKey struct {
@@ -236,22 +241,11 @@ func applyFrozenCallableContractPolicy(
 		if !frontendC {
 			return coro.SSAFunctionPolicy{}, fmt.Errorf("callable declaration contract for %q does not name one frontend C declaration", fn.Name())
 		}
-		external := coro.ExternalUnknownForeign
-		exec := coro.BlockForeign | coro.IRQUnsafe | coro.CallableContractExecConstraints(certificate.Contract)
-		switch certificate.Contract.Progress {
-		case coro.ProgressExecutorSafe:
-			external = coro.ExternalKnown
-			exec &^= coro.BlockForeign
-		case coro.ProgressMayBlock, coro.ProgressUnknown, coro.ProgressAsyncCompletion:
-			// Auto keeps the exact foreign stack cut. Its ordinary managed
-			// callers therefore inherit WaitForeign from CallForeign.
-		case coro.ProgressNoReturn:
-			// NoReturn is a control-flow fact, not proof that the operation is
-			// safe to execute while owning an executor. Keep the foreign stack
-			// cut until a separate terminal/owner recipe proves otherwise.
-			exec |= coro.NoReturn
-		default:
-			return coro.SSAFunctionPolicy{}, fmt.Errorf("callable declaration %q has unsupported progress %q", fn.Name(), certificate.Contract.Progress)
+		external, exec, err := coro.CallableDeclarationPolicy(certificate.Contract)
+		if err != nil {
+			return coro.SSAFunctionPolicy{}, fmt.Errorf(
+				"callable declaration %q: %w", fn.Name(), err,
+			)
 		}
 		if policy.Effect != coro.NoSuspend || policy.Exec != 0 || policy.NeedsDispatch ||
 			policy.OverrideExternal && policy.External != external {
@@ -474,7 +468,9 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 	if in.functionBackground != nil || in.foreignNoBlock != nil || in.foreignSync != nil ||
 		in.foreignWorker != nil || in.callableIdentity != nil || in.callableContract != nil ||
 		in.noPreempt != nil || in.noUnwind != nil || in.assemblyNoSuspend != nil ||
-		len(in.importedLibraryEffects) != 0 || config.ClassifyFunction != nil {
+		len(in.importedLibraryEffects) != 0 ||
+		len(in.libraryForeign) != 0 ||
+		config.ClassifyFunction != nil {
 		classify := config.ClassifyFunction
 		config.ClassifyFunction = func(fn *ssa.Function) (coro.SSAFunctionPolicy, error) {
 			var policy coro.SSAFunctionPolicy
@@ -513,6 +509,17 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 				if err != nil {
 					return coro.SSAFunctionPolicy{}, fmt.Errorf(
 						"apply imported library effect for %q: %w", fn.Name(), err,
+					)
+				}
+			}
+			importedForeign, importedForeignOK := in.libraryForeign[fn]
+			var importedForeignPolicy coro.SSAFunctionPolicy
+			if importedForeignOK {
+				importedForeignPolicy, err = importedForeign.ImportedPolicy()
+				if err != nil {
+					return coro.SSAFunctionPolicy{}, fmt.Errorf(
+						"apply imported library foreign callable for %q: %w",
+						fn.Name(), err,
 					)
 				}
 			}
@@ -575,6 +582,22 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 					return coro.SSAFunctionPolicy{}, fmt.Errorf("frozen frontend returned callable identity data for %q without certifying it", fn.Name())
 				}
 			}
+			if importedForeignOK {
+				if !frontendC {
+					return coro.SSAFunctionPolicy{}, fmt.Errorf(
+						"imported library foreign callable for %q does not name one exact frontend C declaration",
+						fn.Name(),
+					)
+				}
+				if !identityCertified || identityCertificate.IsZero() {
+					return coro.SSAFunctionPolicy{}, fmt.Errorf(
+						"imported library foreign callable for %q has no independently frozen local identity",
+						fn.Name(),
+					)
+				}
+				identityCertificate = importedForeign.Identity
+				identityCertified = true
+			}
 			if requested := policy.CallableIdentityCertificate; !requested.IsZero() {
 				if !identityCertified {
 					return coro.SSAFunctionPolicy{}, fmt.Errorf("builder cannot certify callable identity for %q without an exact frozen frontend identity", fn.Name())
@@ -629,11 +652,29 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 					return coro.SSAFunctionPolicy{}, fmt.Errorf("frozen frontend returned callable contract data for %q without certifying it", fn.Name())
 				}
 			}
+			if importedForeignOK {
+				if importedForeign.HasContract {
+					callableCertificate = importedForeign.Contract
+					callableCertified = true
+				} else {
+					// Identity-only producer metadata deliberately suppresses
+					// the consumer's reconstructed default contract. It grants
+					// no worker/same-M/event operation.
+					callableCertificate = cl.CoroCallableContractCertificate{}
+					callableCertified = false
+				}
+			}
 			certificateKinds := 0
 			for _, present := range []bool{certified, syncCertified, workerCertified} {
 				if present {
 					certificateKinds++
 				}
+			}
+			if importedForeignOK && certificateKinds != 0 {
+				return coro.SSAFunctionPolicy{}, fmt.Errorf(
+					"frontend C declaration %q has imported callable metadata and a legacy foreign-call certificate",
+					fn.Name(),
+				)
 			}
 			if certificateKinds > 1 {
 				return coro.SSAFunctionPolicy{}, fmt.Errorf("frontend C declaration %q has mutually exclusive frozen foreign-call certificates", fn.Name())
@@ -662,6 +703,23 @@ func (in CoroPlanInput) Analyze(roots coro.Roots, config coro.SSAConfig) (*coro.
 				if err != nil {
 					return coro.SSAFunctionPolicy{}, err
 				}
+				if importedForeignOK && policy != importedForeignPolicy {
+					return coro.SSAFunctionPolicy{}, fmt.Errorf(
+						"frontend C declaration %q does not match its imported callable policy",
+						fn.Name(),
+					)
+				}
+			} else if importedForeignOK {
+				identityOnly := coro.SSAFunctionPolicy{
+					CallableIdentityCertificate: importedForeign.Identity,
+				}
+				if policy != identityOnly {
+					return coro.SSAFunctionPolicy{}, fmt.Errorf(
+						"frontend C declaration %q conflicts with its imported identity-only callable metadata",
+						fn.Name(),
+					)
+				}
+				policy = importedForeignPolicy
 			}
 			if requested := policy.ForeignNoBlockCertificate; requested != "" {
 				if !certified {
@@ -3486,6 +3544,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		return fmt.Errorf("enable coroutine entry resolution: prepared emission universe is required")
 	}
 	var importedLibraryEffects map[*ssa.Function]coro.LibraryEffectFunction
+	var libraryForeign map[*ssa.Function]coro.LibraryEffectForeignCallable
 	var importedLibraryMetadata coro.LibraryEffectMetadata
 	if ctx.coroEmission != nil && ctx.buildConf.ImportCfg != "" {
 		index, metadata, err := loadCoroLibraryEffectIndex(ctx)
@@ -3496,6 +3555,11 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		importedLibraryEffects, err = prepareCoroImportedLibraryEffects(ctx, index, metadata)
 		if err != nil {
 			return fmt.Errorf("prepare coroutine library effects: %w", err)
+		}
+		libraryForeign, err =
+			prepareCoroImportedLibraryForeignCallables(ctx, index, metadata)
+		if err != nil {
+			return fmt.Errorf("prepare coroutine library foreign callables: %w", err)
 		}
 	}
 	analyzedPlans := make(map[*coro.SSAPlan]struct{})
@@ -3515,7 +3579,8 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		// declared emission universe. Real Do builds pass all packages above and
 		// therefore retain the fail-closed complete-runtime path.
 		var err error
-		requiredRoots, requiredPlain, requiredDirectPlain, requiredClosedDynamic, err = requiredCoroProgramRuntimePlan(ctx)
+		requiredRoots, requiredPlain, requiredDirectPlain, requiredClosedDynamic, err =
+			requiredCoroProgramRuntimePlanWithLibrary(ctx, libraryForeign)
 		if err != nil {
 			return err
 		}
@@ -3540,7 +3605,9 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		for function := range rawABIPlain {
 			requiredPlain[function] = struct{}{}
 		}
-		directPlain, plainClosure, err := requiredCoroDirectPlainCallArguments(ctx, requiredClosedDynamic)
+		directPlain, plainClosure, err := requiredCoroDirectPlainCallArgumentsWithLibrary(
+			ctx, requiredClosedDynamic, libraryForeign,
+		)
 		if err != nil {
 			return err
 		}
@@ -3570,6 +3637,7 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 		requiredClosedDynamic:       requiredClosedDynamic,
 		requiredGlobalFunctionSlots: requiredGlobalFunctionSlots,
 		importedLibraryEffects:      importedLibraryEffects,
+		libraryForeign:              libraryForeign,
 		recordAnalysis: func(plan *coro.SSAPlan) {
 			if plan != nil {
 				analyzedPlansMu.Lock()
@@ -3675,21 +3743,22 @@ func buildCoroPlan(ctx *context, packages ...*aPackage) error {
 	ctx.coroLoweringFacts = loweringFacts
 	ctx.coroLoweringFactsDigest = loweringFactsDigest
 	ctx.clCompilation = &cl.Compilation{
-		CoroPlan:                  plan,
-		CoroPlanObserver:          ctx.buildConf.CoroPlanObserver,
-		CoroTargetCapabilities:    ctx.buildConf.coroTargetCapabilities(),
-		CoroFrameRetentionABI:     frameRetentionABI,
-		CoroPlanDigest:            digest,
-		CoroPlanMetadata:          metadata,
-		CoroLoweringFacts:         loweringFacts,
-		CoroLoweringFactsDigest:   loweringFactsDigest,
-		CoroABI:                   metadata.CoroABI,
-		SchedulerABI:              metadata.SchedulerABI,
-		PanicABI:                  metadata.PanicABI,
-		FuncRepABI:                metadata.FuncRepABI,
-		EmissionUniverse:          ctx.coroEmission,
-		CoroLibraryEffectMetadata: importedLibraryMetadata,
-		CoroLibraryEffects:        maps.Clone(importedLibraryEffects),
+		CoroPlan:                    plan,
+		CoroPlanObserver:            ctx.buildConf.CoroPlanObserver,
+		CoroTargetCapabilities:      ctx.buildConf.coroTargetCapabilities(),
+		CoroFrameRetentionABI:       frameRetentionABI,
+		CoroPlanDigest:              digest,
+		CoroPlanMetadata:            metadata,
+		CoroLoweringFacts:           loweringFacts,
+		CoroLoweringFactsDigest:     loweringFactsDigest,
+		CoroABI:                     metadata.CoroABI,
+		SchedulerABI:                metadata.SchedulerABI,
+		PanicABI:                    metadata.PanicABI,
+		FuncRepABI:                  metadata.FuncRepABI,
+		EmissionUniverse:            ctx.coroEmission,
+		CoroLibraryEffectMetadata:   importedLibraryMetadata,
+		CoroLibraryEffects:          maps.Clone(importedLibraryEffects),
+		CoroLibraryForeignCallables: maps.Clone(libraryForeign),
 	}
 	if ctx.coroEmission != nil {
 		bootstraps, err := prepareCoroProgramBootstrapsV1(ctx)
@@ -4449,7 +4518,16 @@ func validateCoroHostPullRuntimeFunctionV1(name string, fn *ssa.Function) (bool,
 // proven to belong to this raw-host closure.
 // Fallback SSA stubs remain ignored, and ordinary C declarations outside this
 // compiler-owned closure stay unknown foreign.
-func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function]struct{}, []requiredCoroDirectPlainCallArgument, map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate, error) {
+func requiredCoroProgramRuntimePlan(
+	ctx *context,
+) (coro.Roots, map[*ssa.Function]struct{}, []requiredCoroDirectPlainCallArgument, map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate, error) {
+	return requiredCoroProgramRuntimePlanWithLibrary(ctx, nil)
+}
+
+func requiredCoroProgramRuntimePlanWithLibrary(
+	ctx *context,
+	importedForeign map[*ssa.Function]coro.LibraryEffectForeignCallable,
+) (coro.Roots, map[*ssa.Function]struct{}, []requiredCoroDirectPlainCallArgument, map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate, error) {
 	if ctx == nil || ctx.buildConf == nil {
 		return nil, nil, nil, nil, nil
 	}
@@ -5157,7 +5235,11 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 					)
 				}
 				if !calleeGoBody && !provenCoroTLSDirectPlainClosureRoot(ctx, fn, closedDynamic) {
-					callable, certified, certificateErr := ctx.coroEmission.CoroCallableContractCertificate(callee)
+					callable, certified, certificateErr :=
+						coroCallableContractWithLibrary(
+							ctx.coroEmission.CoroCallableContractCertificate,
+							importedForeign, callee,
+						)
 					if certificateErr != nil {
 						return nil, nil, nil, nil, fmt.Errorf(
 							"classify raw compiler-runtime foreign call %q in %q: %w",
@@ -5192,7 +5274,9 @@ func requiredCoroProgramRuntimePlan(ctx *context) (coro.Roots, map[*ssa.Function
 					if !ok {
 						continue
 					}
-					closure, ok, err := provenCoroDirectPlainStaticClosure(ctx, target, closedDynamic)
+					closure, ok, err := provenCoroDirectPlainStaticClosureWithLibrary(
+						ctx, target, closedDynamic, importedForeign,
+					)
 					if err != nil {
 						return nil, nil, nil, nil, fmt.Errorf("prove direct-plain callback target %q in %q: %w", target.Name(), fn.Name(), err)
 					}
@@ -5276,6 +5360,14 @@ func requiredCoroDirectPlainCallArguments(
 	ctx *context,
 	closedDynamic map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate,
 ) ([]requiredCoroDirectPlainCallArgument, map[*ssa.Function]struct{}, error) {
+	return requiredCoroDirectPlainCallArgumentsWithLibrary(ctx, closedDynamic, nil)
+}
+
+func requiredCoroDirectPlainCallArgumentsWithLibrary(
+	ctx *context,
+	closedDynamic map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate,
+	importedForeign map[*ssa.Function]coro.LibraryEffectForeignCallable,
+) ([]requiredCoroDirectPlainCallArgument, map[*ssa.Function]struct{}, error) {
 	if ctx == nil || ctx.coroEmission == nil || ctx.coroSSAEmission == nil {
 		return nil, nil, nil
 	}
@@ -5304,7 +5396,10 @@ func requiredCoroDirectPlainCallArguments(
 					rawCDeclaration = classified && background == llssa.InC
 					if rawCDeclaration {
 						callable, certified, certificateErr :=
-							ctx.coroEmission.CoroCallableContractCertificate(callee)
+							coroCallableContractWithLibrary(
+								ctx.coroEmission.CoroCallableContractCertificate,
+								importedForeign, callee,
+							)
 						if certificateErr != nil {
 							return nil, nil, fmt.Errorf(
 								"classify static callback contract %q in %q: %w",
@@ -5331,7 +5426,9 @@ func requiredCoroDirectPlainCallArguments(
 					if !ok {
 						continue
 					}
-					closure, proved, err := provenCoroDirectPlainStaticClosure(ctx, target, closedDynamic)
+					closure, proved, err := provenCoroDirectPlainStaticClosureWithLibrary(
+						ctx, target, closedDynamic, importedForeign,
+					)
 					if err != nil {
 						return nil, nil, fmt.Errorf("prove direct-plain callback target %q in %q: %w", target.Name(), function.Name(), err)
 					}
@@ -5412,7 +5509,22 @@ func exactCoroStaticFunctionValue(ctx *context, value ssa.Value) (*ssa.Function,
 // representation are independently checked after fixed-point analysis; this
 // prefilter only establishes that it is sound to seed the candidate's exact raw
 // host/scheduler-stack island.
-func provenCoroDirectPlainStaticClosure(ctx *context, target *ssa.Function, closedDynamic map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate) ([]*ssa.Function, bool, error) {
+func provenCoroDirectPlainStaticClosure(
+	ctx *context,
+	target *ssa.Function,
+	closedDynamic map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate,
+) ([]*ssa.Function, bool, error) {
+	return provenCoroDirectPlainStaticClosureWithLibrary(
+		ctx, target, closedDynamic, nil,
+	)
+}
+
+func provenCoroDirectPlainStaticClosureWithLibrary(
+	ctx *context,
+	target *ssa.Function,
+	closedDynamic map[ssa.CallInstruction]coro.SSAClosedDynamicCallCertificate,
+	importedForeign map[*ssa.Function]coro.LibraryEffectForeignCallable,
+) ([]*ssa.Function, bool, error) {
 	if ctx == nil || ctx.coroEmission == nil || target == nil || len(target.FreeVars) != 0 {
 		return nil, false, nil
 	}
@@ -5508,7 +5620,11 @@ func provenCoroDirectPlainStaticClosure(ctx *context, target *ssa.Function, clos
 					if err != nil {
 						return nil, false, err
 					}
-					callable, callableCertified, err := ctx.coroEmission.CoroCallableContractCertificate(callee)
+					callable, callableCertified, err :=
+						coroCallableContractWithLibrary(
+							ctx.coroEmission.CoroCallableContractCertificate,
+							importedForeign, callee,
+						)
 					if err != nil {
 						return nil, false, err
 					}
@@ -5534,6 +5650,25 @@ func provenCoroDirectPlainStaticClosure(ctx *context, target *ssa.Function, clos
 		}
 	}
 	return closure, true, nil
+}
+
+func coroCallableContractWithLibrary(
+	local func(*ssa.Function) (cl.CoroCallableContractCertificate, bool, error),
+	imported map[*ssa.Function]coro.LibraryEffectForeignCallable,
+	function *ssa.Function,
+) (cl.CoroCallableContractCertificate, bool, error) {
+	if fact, ok := imported[function]; ok {
+		if !fact.HasContract {
+			return cl.CoroCallableContractCertificate{}, false, nil
+		}
+		return fact.Contract, true, nil
+	}
+	if local == nil {
+		return cl.CoroCallableContractCertificate{}, false, fmt.Errorf(
+			"missing local callable contract lookup",
+		)
+	}
+	return local(function)
 }
 
 // provenCoroTLSDirectPlainClosureRoot binds the frozen-C-leaf exception to the

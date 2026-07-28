@@ -117,6 +117,33 @@ func (callable LibraryEffectForeignCallable) Validate() error {
 	return callable.validate()
 }
 
+// ImportedPolicy projects one compatibility-checked producer record into the
+// exact target-neutral SSA declaration policy. It does not choose a worker,
+// same-M, event, raw-host, or trusted-inline operation.
+func (callable LibraryEffectForeignCallable) ImportedPolicy() (SSAFunctionPolicy, error) {
+	if err := callable.validate(); err != nil {
+		return SSAFunctionPolicy{}, err
+	}
+	policy := SSAFunctionPolicy{
+		CallableIdentityCertificate: callable.Identity,
+		IgnoreBody:                  true,
+		External:                    ExternalUnknownForeign,
+		OverrideExternal:            true,
+		Exec:                        BlockForeign | IRQUnsafe,
+	}
+	if !callable.HasContract {
+		return policy, nil
+	}
+	external, exec, err := CallableDeclarationPolicy(callable.Contract.Contract)
+	if err != nil {
+		return SSAFunctionPolicy{}, err
+	}
+	policy.External = external
+	policy.Exec = exec
+	policy.CallableContractCertificate = callable.Contract
+	return policy, nil
+}
+
 func (callable LibraryEffectForeignCallable) validate() error {
 	if err := callable.Function.validate(); err != nil {
 		return err

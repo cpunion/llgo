@@ -618,8 +618,9 @@ func (b *coroFrameRetentionRootBuilder) prove() {
 			specializedWorkerVarargs := false
 			if kind == coroFrameRetentionCallWorkerV1 {
 				if direct, ok := call.(*ssa.Call); ok {
-					shape, recognized, err := validateCoroWorkerForeignCall(
-						b.audit.plan, b.audit.universe, direct, b.audit.universe.prog.PointerSize(),
+					shape, recognized, err := validateCoroWorkerForeignCallWithAuthority(
+						b.audit.foreignCallAuthority(),
+						direct, b.audit.universe.prog.PointerSize(),
 					)
 					if recognized && err == nil && shape.variadic {
 						// The ordinary frontend deliberately erases the synthetic
@@ -1526,8 +1527,9 @@ func (b *coroFrameRetentionRootBuilder) boundedCallKind(call *ssa.Call) (coroFra
 		); recognized && cgoErr == nil {
 			return coroFrameRetentionCallWorkerV1, true
 		}
-		if _, recognized, foreignErr := validateCoroWorkerForeignCall(
-			b.audit.plan, b.audit.universe, call, b.audit.universe.prog.PointerSize(),
+		if _, recognized, foreignErr := validateCoroWorkerForeignCallWithAuthority(
+			b.audit.foreignCallAuthority(),
+			call, b.audit.universe.prog.PointerSize(),
 		); recognized && foreignErr == nil {
 			return coroFrameRetentionCallWorkerV1, true
 		}

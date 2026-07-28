@@ -228,3 +228,93 @@ func prepareCoroImportedLibraryEffects(
 	}
 	return imported, nil
 }
+
+// prepareCoroImportedLibraryForeignCallables joins producer-owned C callable
+// facts to exact frontend declarations. A locally generated conservative
+// default is replaceable; an explicit local generic/legacy contract is source
+// authority and may only agree exactly with the archive.
+func prepareCoroImportedLibraryForeignCallables(
+	ctx *context,
+	index *coro.LibraryEffectIndex,
+	metadata coro.LibraryEffectMetadata,
+) (map[*ssa.Function]coro.LibraryEffectForeignCallable, error) {
+	if index == nil {
+		return nil, nil
+	}
+	if ctx == nil || ctx.coroEmission == nil {
+		return nil, fmt.Errorf("imported coroutine library foreign metadata requires a prepared emission universe")
+	}
+	functionIDs := ctx.coroEmission.FunctionIDConfig()
+	functionIDs.CoroABI = metadata.CoroABI
+	functionIDs.SchedulerABI = metadata.SchedulerABI
+	functionIDs.ArchiveReady = true
+	imported := make(map[*ssa.Function]coro.LibraryEffectForeignCallable)
+	for _, unresolved := range ctx.coroEmission.Functions() {
+		function, ok := ctx.coroEmission.Resolve(unresolved)
+		if !ok || function == nil || function != unresolved {
+			continue
+		}
+		id, err := coro.StableFunctionID(function, functionIDs)
+		if err != nil {
+			return nil, fmt.Errorf("identify possible imported library foreign callable %q: %w", function.Name(), err)
+		}
+		fact, found := index.LookupForeignFunction(id)
+		if !found {
+			continue
+		}
+		if err := ctx.coroEmission.CoroLibraryEffects().ValidateForeignCallable(
+			function, metadata, fact,
+		); err != nil {
+			return nil, err
+		}
+
+		noBlock, noBlockOK, err := ctx.coroEmission.CoroForeignNoBlockCertificate(function)
+		if err != nil {
+			return nil, fmt.Errorf("classify local foreign noblock metadata for %q: %w", id, err)
+		}
+		synchronous, syncOK, err := ctx.coroEmission.CoroForeignSyncCertificate(function)
+		if err != nil {
+			return nil, fmt.Errorf("classify local foreign sync metadata for %q: %w", id, err)
+		}
+		worker, workerOK, err := ctx.coroEmission.CoroForeignWorkerCertificate(function)
+		if err != nil {
+			return nil, fmt.Errorf("classify local foreign worker metadata for %q: %w", id, err)
+		}
+		legacy := noBlockOK || syncOK || workerOK ||
+			noBlock.ID != "" || synchronous.ID != "" || worker.ID != ""
+		if legacy {
+			if fact.HasContract {
+				return nil, fmt.Errorf(
+					"imported library foreign callable %q conflicts with explicit local legacy metadata",
+					id,
+				)
+			}
+			// A v2 identity-only record cannot reproduce a legacy execution
+			// certificate. Keep the exact source-loaded legacy fact authoritative.
+			continue
+		}
+
+		local, localOK, err := ctx.coroEmission.CoroCallableContractCertificate(function)
+		if err != nil {
+			return nil, fmt.Errorf("classify local callable contract for %q: %w", id, err)
+		}
+		defaulted, err := ctx.coroEmission.CoroLibraryEffects().
+			CallableContractDefault(function)
+		if err != nil {
+			return nil, fmt.Errorf("classify local callable contract provenance for %q: %w", id, err)
+		}
+		if localOK && !defaulted {
+			if !fact.HasContract || local != fact.Contract {
+				return nil, fmt.Errorf(
+					"imported library foreign callable %q conflicts with the explicit local callable contract",
+					id,
+				)
+			}
+		}
+		imported[function] = fact
+	}
+	if len(imported) == 0 {
+		return nil, nil
+	}
+	return imported, nil
+}

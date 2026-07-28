@@ -195,6 +195,7 @@ type EmissionUniverse struct {
 	foreignWorker           map[*ssa.Function]CoroForeignWorkerCertificate
 	callableIdentities      map[*ssa.Function]CoroCallableIdentityCertificate
 	callableContracts       map[*ssa.Function]CoroCallableContractCertificate
+	callableDefaults        map[*ssa.Function]none
 	localExportBindings     map[*ssa.Function]coroLocalExportBinding
 	noPreempt               map[*ssa.Function]string
 	noUnwind                map[*ssa.Function]string
@@ -641,6 +642,7 @@ func PrepareEmissionUniverseWithOptions(prog llssa.Program, patches Patches, inp
 		foreignWorker:           make(map[*ssa.Function]CoroForeignWorkerCertificate),
 		callableIdentities:      make(map[*ssa.Function]CoroCallableIdentityCertificate),
 		callableContracts:       make(map[*ssa.Function]CoroCallableContractCertificate),
+		callableDefaults:        make(map[*ssa.Function]none),
 		localExportBindings:     make(map[*ssa.Function]coroLocalExportBinding),
 		noPreempt:               make(map[*ssa.Function]string),
 		noUnwind:                make(map[*ssa.Function]string),

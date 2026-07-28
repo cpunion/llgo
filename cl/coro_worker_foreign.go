@@ -409,8 +409,9 @@ func coroWorkerForeignSpecializedSignature(
 // target recovery must agree here instead of independently re-reading compiler
 // state.
 type coroStaticForeignCallAuthority struct {
-	plan     *coro.SSAPlan
-	universe *EmissionUniverse
+	plan           *coro.SSAPlan
+	universe       *EmissionUniverse
+	libraryForeign map[*ssa.Function]coro.LibraryEffectForeignCallable
 }
 
 type coroStaticForeignCallAuthorization struct {
@@ -448,6 +449,26 @@ func (a coroStaticForeignCallAuthority) authorize(
 		return reject, fmt.Errorf(
 			"resolve frozen callable contract certificate: %w", callableErr,
 		)
+	}
+	if imported, ok := a.libraryForeign[target]; ok {
+		if err := imported.Validate(); err != nil {
+			return reject, fmt.Errorf(
+				"resolve imported library foreign callable: %w", err,
+			)
+		}
+		planIdentity, identityPlanned := a.plan.CallableIdentityCertificate(target)
+		if !identityPlanned || planIdentity != imported.Identity {
+			return reject, fmt.Errorf(
+				"imported library foreign callable identity differs from the coroutine plan",
+			)
+		}
+		if imported.HasContract {
+			universeCallable = imported.Contract
+			universeCallableCertified = true
+		} else {
+			universeCallable = CoroCallableContractCertificate{}
+			universeCallableCertified = false
+		}
 	}
 
 	legacyPresent := planLegacyCertified || planLegacy != "" ||
@@ -695,6 +716,18 @@ func validateCoroWorkerForeignCall(
 	call *ssa.Call,
 	pointerSize int,
 ) (shape coroWorkerForeignCallShape, recognized bool, err error) {
+	return validateCoroWorkerForeignCallWithAuthority(
+		coroStaticForeignCallAuthority{plan: plan, universe: universe},
+		call, pointerSize,
+	)
+}
+
+func validateCoroWorkerForeignCallWithAuthority(
+	authority coroStaticForeignCallAuthority,
+	call *ssa.Call,
+	pointerSize int,
+) (shape coroWorkerForeignCallShape, recognized bool, err error) {
+	plan, universe := authority.plan, authority.universe
 	shape.resultField = -1
 	if plan == nil || universe == nil || call == nil || call.Common() == nil {
 		return shape, false, nil
@@ -742,9 +775,6 @@ func validateCoroWorkerForeignCall(
 	}
 	if !classified || background != llssa.InC {
 		return shape, true, fmt.Errorf("target is not one exact frontend C declaration")
-	}
-	authority := coroStaticForeignCallAuthority{
-		plan: plan, universe: universe,
 	}
 	authorization, authorizationErr := authority.authorize(target)
 	if authorizationErr != nil {

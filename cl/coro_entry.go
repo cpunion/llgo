@@ -48,6 +48,7 @@ type plannedFunctionSymbol struct {
 	managedInterface  *coroManagedInterfaceDispatchPlan
 	libraryEffect     coro.LibraryEffectFunction
 	importedLibrary   bool
+	libraryForeign    map[*ssa.Function]coro.LibraryEffectForeignCallable
 	patchOriginalInit bool
 }
 
@@ -119,6 +120,7 @@ func (p *context) resolveFunctionSymbol(fn *ssa.Function) (plannedFunctionSymbol
 	entry.interfacePlain = p.compilation.coroClosedInterfacePlain
 	entry.managedInterface = p.compilation.coroManagedInterface
 	entry.libraryEffect, entry.importedLibrary = p.compilation.importedCoroLibraryEffect(fn)
+	entry.libraryForeign = p.compilation.CoroLibraryForeignCallables
 	ignored := whole.IgnoresBody(fn)
 	hasEmittedBody := len(fn.Blocks) != 0
 	if universe != nil {
@@ -385,7 +387,8 @@ func (e plannedFunctionSymbol) checkSupportedWithPhysicalPlan(accept func(*coroP
 		return validateCoroPhysicalABIForOwner(
 			e.function, e.plan, e.coroPlan, e.emission, e.physicalOwner, true, true,
 			true, true, e.frameRetentionABI, true, true, rawMethodToken,
-			e.interfacePlain, e.managedInterface, accept,
+			e.interfacePlain, e.managedInterface,
+			e.libraryForeign, accept,
 		)
 	}
 	if e.plan.Emission == coro.EmitExternal && e.plan.FuncRep == coro.DirectCoro {
@@ -511,6 +514,7 @@ func (c *Compilation) preflightCoroPlan() error {
 				emission:          universe,
 				interfacePlain:    c.coroClosedInterfacePlain,
 				managedInterface:  c.coroManagedInterface,
+				libraryForeign:    c.CoroLibraryForeignCallables,
 			}
 			entry.libraryEffect, entry.importedLibrary = c.importedCoroLibraryEffect(function.Function)
 			if function.Plan.Emission == coro.EmitCoroutine {

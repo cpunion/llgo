@@ -903,9 +903,11 @@ target/runtime ABI、稳定FunctionID、结构函数ABI和物理符号，再把�
 v2另外发布精确C declaration identity/typed ABI/可选contract，以及C export symbol到managed primary的
 声明绑定。它们不包含consumer选择，也不通过代码地址反查；export binding本身不授予ingress adapter或raw
 entry能力。该summary不发布consumer Demand、root、call-site选择或`CoroPlanDigest`。缺失记录保持opaque；
-损坏、重复或ABI不匹配均fail closed。当前consumer只把managed record用于自动染色并放行静态direct
-plain/direct coro入口；foreign record已建立精确索引但尚未选择调用recipe，export record也要等待统一
-ingress adapter gate。跨archive Dispatch descriptor和raw-plain crossing仍明确拒绝。真正的独立
+损坏、重复或ABI不匹配均fail closed。当前consumer把managed record用于自动染色并放行静态direct
+plain/direct coro入口，也把exact foreign record的producer identity/contract附着到typed C declaration；
+它只替换自动生成的保守default，显式本地冲突失败，identity-only不授权operation。所有Go caller仍由同一
+fixed point染色，worker/same-M调用recipe仍由consumer的typed-call/physical gate选择；再次归档会原样重发
+producer fact。export record继续等待统一ingress adapter gate。跨archive Dispatch descriptor和raw-plain crossing仍明确拒绝。真正的独立
 library模式还必须在producer侧把exported、address-taken、method及其他ABI-reachable函数设为publication
 roots，并为开放function-value边界发布递归FuncRep/layout capability，不能拿一次最终程序恰好产生的
 demand代替library ABI。
