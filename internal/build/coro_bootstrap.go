@@ -49,6 +49,7 @@ const (
 	coroHostProfileSymbolV1                                     = "__llgo_coro_host_profile_v1"
 	coroHostNextDeadlineSymbolV1                                = "__llgo_coro_host_next_deadline_v1"
 	coroHostPublishTimeSymbolV1                                 = "__llgo_coro_host_publish_time_v1"
+	coroHostPublishWallTimeSymbolV1                             = "__llgo_coro_host_publish_wall_time_v1"
 	coroHostAckCancelSymbolV1                                   = "__llgo_coro_host_ack_cancel_v1"
 	coroHostContinueSliceSymbolV1                               = "__llgo_coro_host_continue_slice_v1"
 	coroHostNextOperationSymbolV1                               = "__llgo_coro_host_next_operation_v1"
@@ -647,6 +648,7 @@ func coroProgramBootstrapHash(ctx *context, version uint32, steps []coroProgramB
 			"blocked-flags=" + strconv.FormatUint(uint64(coroProgramRunBlockedV2|coroProgramRunHasDeadlineV2), 10) + ":" +
 			"pull=" + coroHostNextActionSymbolV1 + ":" + coroHostProfileSymbolV1 + ":" +
 			coroHostNextDeadlineSymbolV1 + ":" + coroHostPublishTimeSymbolV1 + ":" +
+			coroHostPublishWallTimeSymbolV1 + ":" +
 			coroHostAckCancelSymbolV1 + ":" + coroHostContinueSliceSymbolV1 + ":" +
 			coroHostNextOperationSymbolV1 + ":" + coroHostCompleteOperationSymbolV1)
 	} else {

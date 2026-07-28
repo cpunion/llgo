@@ -22,6 +22,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
 	"strings"
 	"testing"
 )
@@ -31,6 +32,15 @@ func TestSynctestCallbacksStayOnManagedEntries(t *testing.T) {
 	file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ParseComments)
 	if err != nil {
 		t.Fatal(err)
+	}
+	source, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(source), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "//go:build") {
+			t.Fatalf("%s unexpectedly limits platform coverage with %q", path, line)
+		}
 	}
 	want := map[string]string{
 		"synctest_run":      "internal/synctest.Run",

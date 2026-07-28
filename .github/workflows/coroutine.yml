@@ -34,6 +34,7 @@ jobs:
           - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "stdlib-file", fixtures: "file syscall-file syscall-pipe", check: "test stdlib file and syscall (19, 1.26.5, llvm19)" }
           - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "stdlib-tcp", fixtures: "tcp", check: "test stdlib TCP (19, 1.26.5, llvm19)" }
           - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "target-core", check: "test target adapters (19, 1.26.5, llvm19)" }
+          - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "target-js-wasm", check: "test JS/WASM command reactor (llvm19)" }
           - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "target-wasm", wasm_target: "wasip2", check: "test WASM host probes (wasip2, llvm19)" }
           - { llvm: 19, go: "1.26.5", tags: "llvm19", lane: "target-wasm", wasm_target: "wasm-unknown", check: "test WASM host probes (wasm-unknown, llvm19)" }
     steps:
@@ -189,6 +190,7 @@ jobs:
               test "$result" = '0'
             fi
           done
+
           host_exports='--export=main --export=malloc --export=free --export=__llgo_coro_host_next_action_v1 --export=__llgo_coro_host_profile_v1 --export=__llgo_coro_host_publish_time_v1 --export=__llgo_coro_host_publish_wall_time_v1 --export=__llgo_coro_host_continue_slice_v1 --export=__llgo_coro_host_ack_cancel_v1 --export=__llgo_coro_host_next_operation_v1 --export=__llgo_coro_host_complete_operation_v1'
           for target in '${{ matrix.wasm_target }}'; do
             output="/tmp/llgo-${target}-stdlib-file.wasm"
@@ -225,15 +227,31 @@ jobs:
             grep -F '"dnsQueries":[1,28]' <<<"$result"
           done
 
+      - name: Run the built-in JS/WebAssembly command reactor
+        if: matrix.lane == 'target-js-wasm'
+        run: |
+          go test ./internal/crosscompile -run '^TestJSWasmCommandUsesOnlyHostPullCoroutineReactor$' -count=1
+          go build -o /tmp/llgo-js-wasm ./cmd/llgo
+          output=/tmp/llgo-js-wasm-time.wasm
+          GOMAXPROCS=2 GOMEMLIMIT=2GiB LLGO_BUILD_CACHE=off \
+            /tmp/llgo-js-wasm build -p=1 -target=wasm -o "$output" \
+            ./internal/build/_testgo/coro_stdlib_time_sleep
+          test "$(od -An -t x1 -N4 "$output" | tr -d ' \n')" = '0061736d'
+          diff -u \
+            <(sort targets/wasm-undefined.txt) \
+            <(llvm-nm --undefined-only --format=just-symbols "$output" | sort)
+          node targets/wasm_exec.js "$output"
+
       - name: Upload failed WebAssembly coroutine probes
-        if: failure() && matrix.lane == 'target-wasm'
+        if: failure() && (matrix.lane == 'target-wasm' || matrix.lane == 'target-js-wasm')
         uses: actions/upload-artifact@v7
         with:
-          name: coroutine-wasm-failure-${{ github.run_id }}-${{ matrix.wasm_target }}
+          name: coroutine-wasm-failure-${{ github.run_id }}-${{ matrix.wasm_target || matrix.lane }}
           path: |
             /tmp/llgo-*-stdlib-file.wasm
             /tmp/llgo-*-host-network.wasm
             /tmp/llgo-*-stdlib-tcp.wasm
+            /tmp/llgo-js-wasm-time.wasm
           if-no-files-found: error
           retention-days: 1
           compression-level: 0

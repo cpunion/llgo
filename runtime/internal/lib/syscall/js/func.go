@@ -2,19 +2,21 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:build js && wasm
-// +build js,wasm
+//go:build js && wasm && (!llgo || !llgo_coro)
 
 package js
 
 import (
 	"sync"
+
+	c "github.com/goplus/llgo/runtime/internal/clite"
 )
 
 var (
-	funcsMu    sync.Mutex
-	funcs             = make(map[uint32]func(Value, []Value) any)
-	nextFuncID uint32 = 1
+	funcsMu             sync.Mutex
+	funcs                      = make(map[uint32]func(Value, []Value) any)
+	nextFuncID          uint32 = 1
+	functionConstructor        = emval_get_global(c.Str("Function"))
 )
 
 // Func is a wrapped Go function to be called by JavaScript.
