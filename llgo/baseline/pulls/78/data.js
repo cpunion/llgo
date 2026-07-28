@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785210467557,
+  "lastUpdate": 1785210469551,
   "repoUrl": "https://github.com/cpunion/llgo",
   "entries": {
     "Linux program binary size": [
@@ -418,6 +418,126 @@ window.BENCHMARK_DATA = {
             "range": "20504208..24523375",
             "unit": "ns",
             "extra": "median of 7 consecutive runs"
+          }
+        ]
+      }
+    ],
+    "macOS compiler and core language": [
+      {
+        "commit": {
+          "author": {
+            "name": "Li Jie",
+            "username": "cpunion",
+            "email": "cpunion@gmail.com"
+          },
+          "committer": {
+            "name": "Li Jie",
+            "username": "cpunion",
+            "email": "cpunion@gmail.com"
+          },
+          "id": "89bcac57cfd9b15ede58f96c9f9a62e3cf4c6b2b",
+          "message": "ci: exercise benchmark publishing",
+          "timestamp": "2026-07-28T03:33:07Z",
+          "url": "https://github.com/cpunion/llgo/commit/89bcac57cfd9b15ede58f96c9f9a62e3cf4c6b2b"
+        },
+        "date": 1785210469180,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkMergeCompilerFlags (github.com/goplus/llgo/internal/clang)",
+            "value": 140.9,
+            "unit": "ns/op",
+            "extra": "2071826 times"
+          },
+          {
+            "name": "BenchmarkMergeLinkerFlags (github.com/goplus/llgo/internal/clang)",
+            "value": 100.4,
+            "unit": "ns/op",
+            "extra": "3081224 times"
+          },
+          {
+            "name": "BenchmarkLookupPCRandom (github.com/goplus/llgo/internal/build/funcinfo)",
+            "value": 13.26,
+            "unit": "ns/op",
+            "extra": "22663316 times"
+          },
+          {
+            "name": "BenchmarkGlobalRead (github.com/goplus/llgo/test/llgoext)",
+            "value": 1.027,
+            "unit": "ns/op",
+            "extra": "301477868 times\n3 procs"
+          },
+          {
+            "name": "BenchmarkTLSRead (github.com/goplus/llgo/test/llgoext)",
+            "value": 1.003,
+            "unit": "ns/op",
+            "extra": "293281650 times\n3 procs"
+          },
+          {
+            "name": "BenchmarkGLSRead (github.com/goplus/llgo/test/llgoext)",
+            "value": 1.001,
+            "unit": "ns/op",
+            "extra": "301616161 times\n3 procs"
+          },
+          {
+            "name": "BenchmarkGlobalWrite (github.com/goplus/llgo/test/llgoext)",
+            "value": 0.9927,
+            "unit": "ns/op",
+            "extra": "297537505 times\n3 procs"
+          },
+          {
+            "name": "BenchmarkTLSWrite (github.com/goplus/llgo/test/llgoext)",
+            "value": 0.9969,
+            "unit": "ns/op",
+            "extra": "301479130 times\n3 procs"
+          },
+          {
+            "name": "BenchmarkGLSWrite (github.com/goplus/llgo/test/llgoext)",
+            "value": 1.011,
+            "unit": "ns/op",
+            "extra": "295424611 times\n3 procs"
+          },
+          {
+            "name": "BenchmarkDirectCall (github.com/goplus/llgo/test/llgoext)",
+            "value": 0.9765,
+            "unit": "ns/op",
+            "extra": "301719298 times\n3 procs"
+          },
+          {
+            "name": "BenchmarkInterfaceCall (github.com/goplus/llgo/test/llgoext)",
+            "value": 4.298,
+            "unit": "ns/op",
+            "extra": "68491851 times\n3 procs"
+          },
+          {
+            "name": "BenchmarkDefer (github.com/goplus/llgo/test/llgoext)",
+            "value": 28.43,
+            "unit": "ns/op",
+            "extra": "10037402 times\n3 procs"
+          },
+          {
+            "name": "BenchmarkChannelBuffered (github.com/goplus/llgo/test/llgoext)",
+            "value": 22.33,
+            "unit": "ns/op",
+            "extra": "13974639 times\n3 procs"
+          },
+          {
+            "name": "BenchmarkChannelHandoff (github.com/goplus/llgo/test/llgoext)",
+            "value": 6725,
+            "unit": "ns/op",
+            "extra": "45037 times\n3 procs"
+          },
+          {
+            "name": "BenchmarkRuntimeGetG (github.com/goplus/llgo/test/llgoext)",
+            "value": 2.228,
+            "unit": "ns/op",
+            "extra": "125039247 times\n3 procs"
+          },
+          {
+            "name": "BenchmarkGoroutine (github.com/goplus/llgo/test/llgoext)",
+            "value": 22594,
+            "unit": "ns/op",
+            "extra": "100 times\n3 procs"
           }
         ]
       }
