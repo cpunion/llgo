@@ -322,25 +322,39 @@ func TestEffectiveWasmTypeSizes(t *testing.T) {
 	}
 }
 
-func TestApplyWasmGCLinkFlags(t *testing.T) {
+func TestConfigureWasmGC(t *testing.T) {
+	t.Setenv("LLGO_WASI_THREADS", "0")
 	tests := []struct {
 		name string
 		conf Config
 		want bool
+		err  bool
 	}{
 		{name: "wasm32", conf: Config{Goos: "js", Goarch: "wasm", Tags: "llgo_wasm_gc"}, want: true},
 		{name: "comma separated tags", conf: Config{Goos: "js", Goarch: "wasm", Tags: "other,llgo_wasm_gc"}, want: true},
 		{name: "default wasm", conf: Config{Goos: "js", Goarch: "wasm"}},
 		{name: "WASI", conf: Config{Goos: "wasip1", Goarch: "wasm", Tags: "llgo_wasm_gc"}},
+		{name: "unsupported host", conf: Config{Goos: "linux", Goarch: "wasm", Tags: "llgo_wasm_gc"}, err: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			export := crosscompile.Export{}
-			applyWasmGCLinkFlags(&test.conf, &export)
+			err := configureWasmGC(&test.conf, &export)
+			if (err != nil) != test.err {
+				t.Fatalf("configureWasmGC error = %v, want error %v", err, test.err)
+			}
 			if got := slices.Contains(export.LDFLAGS, "-sMALLOC=none"); got != test.want {
 				t.Fatalf("MALLOC=none present = %v, want %v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestConfigureWasmGCRejectsWASIThreads(t *testing.T) {
+	t.Setenv("LLGO_WASI_THREADS", "1")
+	conf := Config{Goos: "wasip1", Goarch: "wasm", Tags: "llgo_wasm_gc"}
+	if err := configureWasmGC(&conf, &crosscompile.Export{}); err == nil {
+		t.Fatal("expected llgo_wasm_gc with WASI threads to fail")
 	}
 }
 
