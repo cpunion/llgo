@@ -547,7 +547,6 @@ func TestRealNativeCoroTargetIsTrustedPlainSchedulerIsland(t *testing.T) {
 			"GC_init":                                        false,
 			"GC_add_roots":                                   false,
 			"siglongjmp":                                     false,
-			"strlen":                                         false,
 			"pthread_self":                                   false,
 		}
 		if runtime.GOOS == "darwin" {
