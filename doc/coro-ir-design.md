@@ -1251,7 +1251,8 @@ runtime旧logical wait/fleet分支随后已由Phase R删除；compiler下一阶�
 
 - `//go:wasmimport module name`只在WASM target的ProgramIR构建窗口读取一次，并以exact canonical
   `*ssa.Function`冻结；bodyful、method、generic、重复、格式错误或与其他physical ABI directive冲突的声明
-  都在任何LLVM emission之前fail closed。
+  都在任何LLVM emission之前fail closed。参数、结果数量及pointer element layout按Go 1.26
+  `go:wasmimport`直接ABI验证；需要Go私有stack-pointer ABI的`gojs` module在实现专用wrapper前明确拒绝。
 - lowering只消费冻结的module/name并附加LLVM `wasm-import-module`/`wasm-import-name`属性，不再从AST
   注释或函数地址反查host contract。无完整EmissionUniverse的legacy helper仅保留源码兼容路径，production
   coroutine compilation不经过该路径。

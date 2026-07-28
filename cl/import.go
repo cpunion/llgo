@@ -417,10 +417,107 @@ func attachedWasmImportSource(fn *ssa.Function) (wasmImportSpec, bool, error) {
 	if params := fn.Signature.TypeParams(); params != nil && params.Len() != 0 {
 		return spec, false, fmt.Errorf("%s does not support generic declarations", prefix)
 	}
+	if err := validateWasmImportSignature(fn.Signature); err != nil {
+		return spec, false, fmt.Errorf("%s: %w", prefix, err)
+	}
+	// The Go toolchain's gojs module uses a private stack-pointer ABI rather
+	// than the direct WebAssembly signature described by this frontend fact.
+	// Do not silently emit a direct import with the same module/name.
+	if spec.module == "gojs" {
+		return spec, false, fmt.Errorf("%s module %q requires the unsupported Go stack-pointer ABI", prefix, spec.module)
+	}
 	if strings.IndexByte(spec.module, 0) >= 0 || strings.IndexByte(spec.name, 0) >= 0 {
 		return spec, false, fmt.Errorf("%s module and import name must not contain NUL", prefix)
 	}
 	return spec, true, nil
+}
+
+func validateWasmImportSignature(signature *types.Signature) error {
+	if signature == nil {
+		return fmt.Errorf("requires one exact function signature")
+	}
+	for index := 0; index < signature.Params().Len(); index++ {
+		typ := signature.Params().At(index).Type()
+		if !wasmImportValueTypeAllowed(typ, true) {
+			return fmt.Errorf("unsupported parameter %d type %s", index, typ)
+		}
+	}
+	if signature.Results().Len() > 1 {
+		return fmt.Errorf("too many return values")
+	}
+	if signature.Results().Len() == 1 {
+		typ := signature.Results().At(0).Type()
+		if !wasmImportValueTypeAllowed(typ, false) {
+			return fmt.Errorf("unsupported result type %s", typ)
+		}
+	}
+	return nil
+}
+
+func wasmImportValueTypeAllowed(typ types.Type, parameter bool) bool {
+	switch typ := wasmImportUnderlying(typ).(type) {
+	case *types.Basic:
+		switch typ.Kind() {
+		case types.Bool, types.Int32, types.Uint32, types.Int64, types.Uint64,
+			types.Float32, types.Float64, types.Uintptr, types.UnsafePointer:
+			return true
+		case types.String:
+			return parameter
+		}
+	case *types.Pointer:
+		return wasmImportPointerElementAllowed(typ.Elem())
+	}
+	return false
+}
+
+func wasmImportPointerElementAllowed(typ types.Type) bool {
+	switch underlying := wasmImportUnderlying(typ).(type) {
+	case *types.Basic:
+		switch underlying.Kind() {
+		case types.Bool, types.Int8, types.Uint8, types.Int16, types.Uint16,
+			types.Int32, types.Uint32, types.Int64, types.Uint64,
+			types.Float32, types.Float64:
+			return true
+		}
+	case *types.Array:
+		return wasmImportPointerElementAllowed(underlying.Elem())
+	case *types.Struct:
+		if underlying.NumFields() == 0 {
+			return true
+		}
+		hostLayout := false
+		for index := 0; index < underlying.NumFields(); index++ {
+			fieldType := underlying.Field(index).Type()
+			if wasmImportHostLayout(fieldType) {
+				hostLayout = true
+				continue
+			}
+			if !wasmImportPointerElementAllowed(fieldType) {
+				return false
+			}
+		}
+		return hostLayout
+	}
+	return false
+}
+
+func wasmImportUnderlying(typ types.Type) types.Type {
+	typ = types.Unalias(typ)
+	for {
+		named, ok := typ.(*types.Named)
+		if !ok {
+			return typ
+		}
+		typ = types.Unalias(named.Underlying())
+	}
+}
+
+func wasmImportHostLayout(typ types.Type) bool {
+	named, ok := types.Unalias(typ).(*types.Named)
+	if !ok || named.Obj() == nil || named.Obj().Pkg() == nil {
+		return false
+	}
+	return named.Obj().Name() == "HostLayout" && named.Obj().Pkg().Path() == "structs"
 }
 
 const (

@@ -20,10 +20,17 @@ func TestAttachedWasmImportSource(t *testing.T) {
 		{
 			name: "valid",
 			source: `package p
+import (
+	"structs"
+	"unsafe"
+)
+type record struct {
+	_ structs.HostLayout
+	value [2]uint16
+}
 //go:noescape
 //go:wasmimport wasi_snapshot_preview1 fd_read
-func host(uint32) uint32
-func use() uint32 { return host(1) }`,
+func host(bool, uint32, uint64, float32, float64, uintptr, unsafe.Pointer, *record, string) uintptr`,
 			present: true,
 		},
 		{
@@ -55,6 +62,41 @@ func host() {}`,
 //go:wasmimport env host
 func host()`,
 			wantErr: "conflicts with physical ABI directive",
+		},
+		{
+			name: "unsupported parameter",
+			source: `package p
+//go:wasmimport env host
+func host(int)`,
+			wantErr: "unsupported parameter 0 type int",
+		},
+		{
+			name: "pointer layout without marker",
+			source: `package p
+//go:wasmimport env host
+func host(*struct{ value uint32 })`,
+			wantErr: "unsupported parameter 0 type",
+		},
+		{
+			name: "string result",
+			source: `package p
+//go:wasmimport env host
+func host() string`,
+			wantErr: "unsupported result type string",
+		},
+		{
+			name: "multiple results",
+			source: `package p
+//go:wasmimport env host
+func host() (uint32, uint32)`,
+			wantErr: "too many return values",
+		},
+		{
+			name: "gojs private ABI",
+			source: `package p
+//go:wasmimport gojs host
+func host(uint32) uint32`,
+			wantErr: "unsupported Go stack-pointer ABI",
 		},
 		{
 			name:   "absent",
